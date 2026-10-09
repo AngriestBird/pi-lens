@@ -156,7 +156,7 @@ carries the named admission until then.
 | yaml | yaml-language-server | push-only | publishes-unversioned | direct | 2* | dev+ci |
 | shell | bash-language-server | push-only | publishes-versioned | direct | 2 | dev+ci |
 | dockerfile | docker-langserver | push-only | publishes-unversioned | direct | 2* | dev+ci |
-| dockerfile-official | docker-language-server (official) | push-only | BuildKit checks (`JSONArgsRecommended`) | BuildKit fixture; requires `docker buildx` | 2 | dev+ci |
+| dockerfile-official | docker-language-server (official) | push-only | BuildKit checks (`JSONArgsRecommended`) | unknown | 2 | dev+ci |
 | toml | taplo | push-only | publishes-unversioned | direct | 2* | dev+ci |
 | terraform | terraform-ls | push-only | publishes-unversioned | empty-first | 2* | dev+ci |
 | prisma | @prisma/language-server | push-only | publishes-unversioned | direct | 2* | dev+ci |
@@ -211,6 +211,9 @@ and were characterized `push-only` in the run above).
   `first-publish` measurements on the dev box, 2026-09-23: php `empty-first`,
   typescript / opengrep / ast-grep / marksman `direct` (so the class does not
   extend to them on the measurement, whatever their comments suggest).
+- The official Docker row's clean-gate witness requires the BuildKit-backed
+  `JSONArgsRecommended` rule and skips when `docker buildx` is unavailable;
+  its first-publish class remains `unknown` until that axis is measured.
 - **#458's learned-deadline target set = the tier-3 rows only.** 2\* rows resolve
   the wait at runtime and must NOT be given learned deadlines.
 - **Tier 3 is budget-bound by necessity**, not laziness: a silent server's silence is

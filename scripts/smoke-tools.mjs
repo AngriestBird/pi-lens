@@ -157,14 +157,23 @@ export function classifyLspGateResult(result, fx, unavailable = false) {
  * An empty result is only an honest skip when the runner cannot provide the
  * BuildKit check command; otherwise it is a regression in the rule witness.
  */
-export function classifyOfficialDockerGateResult(result, buildxAvailable) {
+export function classifyOfficialDockerGateResult(
+	result,
+	buildxAvailable,
+	expectedCode = "JSONArgsRecommended",
+) {
 	const diagnostics = result?.details?.diagnostics ?? [];
-	if (
-		diagnostics.some((diagnostic) => diagnostic?.code === "JSONArgsRecommended")
-	) {
+	if (result?.details?.unavailable) {
+		return {
+			state: "skip",
+			detail: result.details.unavailable,
+			diags: diagnostics.length,
+		};
+	}
+	if (diagnostics.some((diagnostic) => diagnostic?.code === expectedCode)) {
 		return {
 			state: "pass",
-			detail: "official Docker server returned JSONArgsRecommended",
+			detail: `official Docker server returned ${expectedCode}`,
 			diags: diagnostics.length,
 		};
 	}
@@ -177,7 +186,7 @@ export function classifyOfficialDockerGateResult(result, buildxAvailable) {
 	}
 	return {
 		state: "fail",
-		detail: "official Docker server did not return JSONArgsRecommended",
+		detail: `official Docker server did not return ${expectedCode}`,
 		diags: diagnostics.length,
 	};
 }
@@ -2485,10 +2494,13 @@ export async function runLspGate({ langs = [], install, verbose, deps } = {}) {
 				null,
 				{ cwd: workspace },
 			);
-			const verdict =
-				fx.expectDiagnosticCode === "JSONArgsRecommended"
-					? classifyOfficialDockerGateResult(result, hasDockerBuildx())
-					: classifyLspGateResult(result, fx);
+			const verdict = fx.expectDiagnosticCode
+				? classifyOfficialDockerGateResult(
+						result,
+						deps?.hasDockerBuildx?.() ?? hasDockerBuildx(),
+						fx.expectDiagnosticCode,
+					)
+				: classifyLspGateResult(result, fx);
 			rows.push({ lang: fx.lang, runner: fx.serverHint, ...verdict });
 			if (verbose) console.error(`[${fx.lang}] ${verdict.detail}`);
 		} catch (err) {

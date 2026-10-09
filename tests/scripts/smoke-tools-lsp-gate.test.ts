@@ -35,9 +35,18 @@ afterEach(() => {
 	else process.env.PI_LENS_HOME = originalHome;
 });
 
-function gateDeps(execute: () => Promise<unknown>) {
+function gateDeps(
+	execute: () => Promise<unknown>,
+	fixtureOverrides: Record<string, unknown> = {},
+	hasDockerBuildx = true,
+) {
+	const selectedFixture = { ...gateFixture, ...fixtureOverrides };
 	return {
-		population: { eligible: [gateFixture], gated: [gateFixture], exempt: [] },
+		population: {
+			eligible: [selectedFixture],
+			gated: [selectedFixture],
+			exempt: [],
+		},
 		ensureTool: vi.fn(async () => "/mock/tool"),
 		getInstallAttempt: vi.fn(),
 		initLSPConfig: vi.fn(async () => undefined),
@@ -47,12 +56,15 @@ function gateDeps(execute: () => Promise<unknown>) {
 			cleanup: vi.fn(),
 		})),
 		createLspDiagnosticsTool: () => ({ execute }),
+		hasDockerBuildx: vi.fn(() => hasDockerBuildx),
 	};
 }
 
 async function runGateWithCensus(
 	state: string,
 	execute: () => Promise<unknown>,
+	fixtureOverrides?: Record<string, unknown>,
+	hasDockerBuildx = true,
 ) {
 	const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-gate-census-"));
 	tempHomes.push(home);
@@ -69,7 +81,7 @@ async function runGateWithCensus(
 		langs: ["typescript"],
 		install: false,
 		verbose: false,
-		deps: gateDeps(execute),
+		deps: gateDeps(execute, fixtureOverrides, hasDockerBuildx),
 	});
 	return output.join("\n");
 }
@@ -100,6 +112,12 @@ describe("LSP diagnostics clean-gate classification (#2780/#2776)", () => {
 				false,
 			),
 		).toMatchObject({ state: "skip", detail: "buildx unavailable" });
+		expect(
+			classifyOfficialDockerGateResult(
+				{ details: { unavailable: "official server unavailable" } },
+				true,
+			),
+		).toMatchObject({ state: "skip", detail: "official server unavailable" });
 	});
 
 	it("passes only when the real handler reports a primary finding", () => {
@@ -178,7 +196,12 @@ describe("smoke-tools --lsp-gate census admission (#3309)", () => {
 			await safeSpawnAsync("probe-language-server", []);
 			return { details: { unavailable: "probe server unavailable" } };
 		});
-		const output = await runGateWithCensus("pass", execute);
+		const output = await runGateWithCensus(
+			"pass",
+			execute,
+			{ expectDiagnosticCode: "AnyDeclaredRule" },
+			true,
+		);
 
 		expect(output).toContain("⚠  typescript");
 		expect(output).toContain(
@@ -186,5 +209,28 @@ describe("smoke-tools --lsp-gate census admission (#3309)", () => {
 		);
 		expect(execute).toHaveBeenCalledOnce();
 		expect(safeSpawnAsync).toHaveBeenCalledOnce();
+	});
+
+	it("routes a declared diagnostic code through the gated classifier", async () => {
+		const execute = vi.fn(async () => ({
+			details: {
+				totalDiagnostics: 1,
+				primaryDiagnosticsCount: 1,
+				diagnostics: [{ code: "DifferentRule" }],
+			},
+		}));
+		const output = await runGateWithCensus(
+			"pass",
+			execute,
+			{ expectDiagnosticCode: "AnyDeclaredRule" },
+			true,
+		);
+
+		// #3939 recurrence: removing the declared-code routing would let the
+		// generic primary-finding classifier accept the wrong rule.
+		expect(output).toContain("✗  typescript");
+		expect(output).toContain(
+			"official Docker server did not return AnyDeclaredRule",
+		);
 	});
 });

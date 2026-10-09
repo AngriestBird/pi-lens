@@ -158,6 +158,7 @@ export function classifyLspGateResult(
 export function classifyOfficialDockerGateResult(
 	result: unknown,
 	buildxAvailable: boolean,
+	expectedCode?: string,
 ): { state: "pass" | "skip" | "fail"; detail: string; diags: number };
 /** Run the production LSP clean-gate layer, optionally with test seams. */
 export function runLspGate(options?: {
