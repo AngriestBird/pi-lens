@@ -262,6 +262,9 @@ the surface they bite; each block loads only when its trigger applies.
     path discloses its truncation on the rendered surface; a count recorded
     only in `latency.log` is not disclosure (#3166 r2: an 80-finding input
     bound zeroed a neighbour's genuine errors, counted only in the log).
+    An out-of-session-root project edit records one bounded degradation and
+    uses the existing advisory notice seam; intended vendor skips stay silent
+    (`clients/runtime-tool-result.ts`).
 
 26. **Old-role filter on a substitute:** compare fallback output with the
     substituted surface's contract, including non-blocking findings.

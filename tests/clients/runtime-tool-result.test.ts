@@ -6,6 +6,10 @@ import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../../clients/cache-manager.js";
+import {
+	_resetAgentNudgeForTests,
+	consumeAgentNudge,
+} from "../../clients/agent-nudge.js";
 import { readChangesSince } from "../../clients/project-changes.js";
 import {
 	MAX_PENDING_CASCADE_RUNS,
@@ -91,6 +95,89 @@ beforeEach(() => {
 	requestBootstrapClients.mockClear();
 	readdirMock.mockImplementation(realReaddir);
 	readdirMock.mockClear();
+	_resetAgentNudgeForTests();
+});
+
+it("notices once when an edit is outside the session root (#4218)", async () => {
+	resetDegradationLedger();
+	const env = setupTestEnvironment("pi-lens-4218-outside-root-");
+	try {
+		const runtime = new RuntimeCoordinator();
+		runtime.projectRoot = env.tmpDir;
+		const outsidePath = path.join(env.tmpDir, "..", "capture", "outside.ts");
+		fs.mkdirSync(path.dirname(outsidePath), { recursive: true });
+		fs.writeFileSync(outsidePath, "export const value = 1;\n");
+
+		for (let i = 0; i < 10; i++)
+			await handleToolResult({
+				event: {
+					toolName: "edit",
+					input: { path: outsidePath },
+					content: [{ type: "text", text: "ok" }],
+				},
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				resetLSPService: () => {},
+				readGuard: runtime.readGuard,
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+			} as never);
+
+		expect(
+			getDegradationSummary().filter(
+				(entry) => entry.kind === "tool-result-outside-project-root",
+			),
+		).toHaveLength(1);
+		expect(
+			consumeAgentNudge(undefined, runtime.sessionScope)?.messages,
+		).toEqual([
+			expect.objectContaining({
+				content: expect.stringContaining(outsidePath),
+			}),
+		]);
+		expect(consumeAgentNudge(undefined, runtime.sessionScope)).toBeUndefined();
+	} finally {
+		env.cleanup();
+	}
+});
+
+it("keeps intended vendor skips silent (#4218)", async () => {
+	resetDegradationLedger();
+	const env = setupTestEnvironment("pi-lens-4218-vendor-silent-");
+	try {
+		const runtime = new RuntimeCoordinator();
+		runtime.projectRoot = env.tmpDir;
+		const vendorPath = path.join(env.tmpDir, "node_modules", "pkg", "index.ts");
+		fs.mkdirSync(path.dirname(vendorPath), { recursive: true });
+		fs.writeFileSync(vendorPath, "export const value = 1;\n");
+
+		await handleToolResult({
+			event: {
+				toolName: "edit",
+				input: { path: vendorPath },
+				content: [{ type: "text", text: "ok" }],
+			},
+			getFlag: () => false,
+			dbg: () => {},
+			runtime,
+			cacheManager: new CacheManager(false),
+			resetLSPService: () => {},
+			readGuard: runtime.readGuard,
+			agentBehaviorRecord: () => [],
+			formatBehaviorWarnings: () => "",
+		} as never);
+
+		expect(
+			getDegradationSummary().some(
+				(entry) => entry.kind === "tool-result-outside-project-root",
+			),
+		).toBe(false);
+		expect(consumeAgentNudge(undefined, runtime.sessionScope)).toBeUndefined();
+	} finally {
+		env.cleanup();
+	}
 });
 
 it("does not dispatch an edit when analyzer bootstrap is unavailable (#2939 M9)", async () => {

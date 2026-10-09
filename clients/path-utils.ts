@@ -891,6 +891,14 @@ export function isUnderDir(child: string, parent: string): boolean {
 	return normChild === normParent || normChild.startsWith(parentPrefix);
 }
 
+/** True when a path is outside the session's project root. */
+export function isOutsideProjectRoot(
+	filePath: string,
+	projectRoot: string,
+): boolean {
+	return !isUnderDir(filePath, projectRoot);
+}
+
 const VENDOR_DIR_NAMES = new Set([
 	"node_modules",
 	"vendor",
@@ -911,7 +919,7 @@ export function isExternalOrVendorFile(
 	filePath: string,
 	projectRoot: string,
 ): boolean {
-	if (!isUnderDir(filePath, projectRoot)) return true;
+	if (isOutsideProjectRoot(filePath, projectRoot)) return true;
 	const normalized = normalizeFilePath(filePath);
 	const rootNorm = normalizeFilePath(projectRoot);
 	const rel = normalized.startsWith(rootNorm + "/")
