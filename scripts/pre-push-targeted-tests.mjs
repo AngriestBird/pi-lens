@@ -163,6 +163,18 @@ export const TREE_SCANNING_GOVERNANCE_TESTS = [
 // tests. Measured locally at ~17-23 s alone, inside the 120 s budget.
 export const TEST_TREE_GOVERNANCE_TESTS = [
 	"tests/clients/flake-shape-ratchet.test.ts",
+	// #2891: real-pi harness suites own their child-process and timeout census;
+	// keep every admitted real-harness file armed when the tests tree changes.
+	"tests/real-harness/bridge-reload.test.ts",
+	"tests/real-harness/child-exit.test.ts",
+	"tests/real-harness/diagnostic-provenance.test.ts",
+	"tests/real-harness/lifecycle.test.ts",
+	"tests/real-harness/negative.test.ts",
+	"tests/real-harness/provider-compatibility.test.ts",
+	"tests/real-harness/read-guard-moves.test.ts",
+	"tests/real-harness/scenario-1.test.ts",
+	"tests/real-harness/scenario-3.test.ts",
+	"tests/real-harness/tools-enabled.test.ts",
 	// #3518: walks tests/ for unchecked `handleToolCall` calls (recurrence #4182).
 	"tests/config/handler-verdict-sweep.test.ts",
 	// #3472: the tests-tree scanners the census finds through tests/support.

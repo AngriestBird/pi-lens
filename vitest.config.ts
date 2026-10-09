@@ -394,6 +394,7 @@ export const realHarnessInclude = [
 	"tests/real-harness/diagnostic-provenance.test.ts",
 	"tests/real-harness/provider-compatibility.test.ts",
 	"tests/real-harness/read-guard-moves.test.ts",
+	"tests/real-harness/lifecycle.test.ts",
 ];
 
 // #1920: files that assert REAL wall-clock elapsed-time budgets (Date.now()

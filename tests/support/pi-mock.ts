@@ -220,8 +220,10 @@ export interface PiMock {
 	 * each construct a FRESH session that way before the event is emitted. The
 	 * active tool set is never persisted per session, so every registered tool
 	 * is active again by the time pi-lens's handler runs. The mock preserves the
-	 * extension closure for every rebuild and does not re-run the factory. Real
-	 * pi re-runs the factory on reload, resume, fork, and new; the real-pi
+	 * extension closure for every rebuild and does not re-run the factory. Bound:
+	 * this mock does not re-run the extension factory and does not reproduce pi's
+	 * lifecycle ordering. Real pi re-runs the factory on reload, resume, fork,
+	 * and new; the real-pi
 	 * integration tests cover that boundary.
 	 * Call this to reproduce pi's `session_shutdown` then `session_start` order.
 	 */

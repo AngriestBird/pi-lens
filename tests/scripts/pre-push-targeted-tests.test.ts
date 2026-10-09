@@ -429,6 +429,16 @@ describe("selectTargetedTests — path-mirror pass", () => {
 		];
 		const testScanners = [
 			"tests/clients/flake-shape-ratchet.test.ts",
+			"tests/real-harness/bridge-reload.test.ts",
+			"tests/real-harness/child-exit.test.ts",
+			"tests/real-harness/diagnostic-provenance.test.ts",
+			"tests/real-harness/lifecycle.test.ts",
+			"tests/real-harness/negative.test.ts",
+			"tests/real-harness/provider-compatibility.test.ts",
+			"tests/real-harness/read-guard-moves.test.ts",
+			"tests/real-harness/scenario-1.test.ts",
+			"tests/real-harness/scenario-3.test.ts",
+			"tests/real-harness/tools-enabled.test.ts",
 			"tests/config/handler-verdict-sweep.test.ts",
 			"tests/config/module-instance-coverage.test.ts",
 			"tests/config/tmp-fixture-hygiene.test.ts",
