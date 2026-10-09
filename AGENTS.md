@@ -207,6 +207,13 @@ the surface they bite; each block loads only when its trigger applies.
     settled-sweep drift never creates authorship (#4210); screen the next
     positional edit both inside and outside the reported range.
 
+65. **Unknown authorship range:** a producer that cannot recover a truthful
+    range must carry UNKNOWN to `ReadGuard.creditAuthorship`; UNKNOWN retires
+    the existing scoped license and creates none. Only an explicit
+    `whole-file` signal may widen authorship. Enforced at
+    `clients/mutation-bridge.ts` and `clients/read-guard.ts`, with the
+    F-4210-2 production bridge witness.
+
 </important>
 
 <important if="adding or reading a cache, durable record, or project-intelligence state">

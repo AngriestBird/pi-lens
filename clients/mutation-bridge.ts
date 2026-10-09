@@ -104,6 +104,7 @@ export interface MutationBridgeDeps {
 					advanceAuthorship?: boolean;
 					toolCallId?: string;
 					authoredRanges?: Array<[number, number]>;
+					authorship?: "partial" | "whole-file" | "unknown";
 					allowFirstAuthorship?: boolean;
 				},
 			) => void;
@@ -326,6 +327,21 @@ function resolveChangedRange(
 	return { start: 1, end: Math.max(1, deps.countFileLines(filePath)) };
 }
 
+function resolveAuthorshipRange(
+	classification: MutatingToolClassification,
+): { start: number; end: number } | undefined {
+	if (classification.touchedLines) {
+		const [start, end] = classification.touchedLines;
+		return { start, end };
+	}
+	if (classification.editRanges && classification.editRanges.length > 0) {
+		const starts = classification.editRanges.map(([start]) => start);
+		const ends = classification.editRanges.map(([, end]) => end);
+		return { start: Math.min(...starts), end: Math.max(...ends) };
+	}
+	return undefined;
+}
+
 /** Why a mutation record was not credited to live session state (#3654). */
 export type MutationRecordReason =
 	| "malformed"
@@ -410,11 +426,7 @@ function stampLiveMutation(
 	// 1. Staleness stamp: the file changed under pi-lens, so a later edit is
 	//    judged by read coverage rather than by this write.
 	if (sessionLive && stampReadGuard) {
-		const changedRange = resolveChangedRange(
-			classification,
-			ctx.deps,
-			filePath,
-		);
+		const changedRange = resolveAuthorshipRange(classification);
 		runtime.readGuard.recordWritten?.(filePath, {
 			...(stamp !== undefined && { branchEpoch: stamp }),
 			// A process bridge reports a mutation, not the bytes delivered to the
@@ -429,7 +441,17 @@ function stampLiveMutation(
 			advanceAuthorship: entry.provenance === "observed",
 			// A first bridge credit is limited to the producer's reported range;
 			// settled-sweep drift has no producer evidence and may not create one.
-			authoredRanges: [[changedRange.start, changedRange.end]],
+			...(changedRange !== undefined && {
+				authoredRanges: [
+					[changedRange.start, changedRange.end] as [number, number],
+				],
+			}),
+			authorship:
+				changedRange !== undefined
+					? "partial"
+					: entry.kind === "write"
+						? "whole-file"
+						: "unknown",
 			allowFirstAuthorship: entry.provenance !== "settled-sweep",
 			// #4187 R4-1: and an observed replay advances only a path its OWN
 			// call licensed at tool_call (`ReadGuard.noteCheckedPaths`), since a

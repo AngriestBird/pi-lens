@@ -365,10 +365,12 @@ function bookkeepLspMutation(
 					stampFileTime: false,
 					advanceAuthorship: true,
 					...(detail.range !== undefined && {
+						authorship: "partial",
 						authoredRanges: [
 							[detail.range.start, detail.range.end] as [number, number],
 						],
 					}),
+					...(detail.range === undefined && { authorship: "unknown" }),
 					...(context.toolCallId !== undefined && {
 						toolCallId: context.toolCallId,
 					}),

@@ -1210,6 +1210,7 @@ async function dispatchPipelineAnalysis(args: {
 		for (const changedFile of changedForReadGuard) {
 			if (nodeFs.existsSync(changedFile)) {
 				deps.readGuard?.recordWritten(changedFile, {
+					authorship: "whole-file",
 					stampFileTime: ownFileTimeStamp || changedFile !== ownPath,
 					// The identity of the bytes this pipeline analysed or wrote
 					// (#2499), when it knows them: no re-read.
@@ -1727,6 +1728,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			// are not: authorship, not FileTime.
 			if (!getFlag("no-read-guard") && recognizedAuthoredSet.has(wp))
 				deps.readGuard?.recordWritten(wp, {
+					authorship: "unknown",
 					stampFileTime: false,
 					...(toolCallId !== undefined && { toolCallId }),
 				});
@@ -2659,6 +2661,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// doesn't trigger a spurious "file_modified" block on the next edit.
 	if (bashAuthorshipConfirmed)
 		deps.readGuard?.recordWritten(filePath, {
+			authorship: "whole-file",
 			...ownWriteStamp,
 			contentHash: postWriteStateHash,
 		});

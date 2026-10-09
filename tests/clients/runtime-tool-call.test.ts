@@ -1793,6 +1793,7 @@ describe("#4187 R4-1 — a bytes-less write advances only what its own call name
 				consumer: "symlink-writer",
 				provenance: "observed",
 				toolCallId: "call-symlink",
+				touchedLines: [3, 3],
 			});
 			// R5-2 recurrence: independently derived link/real spellings name one
 			// file, so the own write must not cost a needless re-read.

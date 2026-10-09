@@ -581,6 +581,7 @@ export async function handleAgentEnd({
 					// #3525: bytes the agent never saw; authorship, not FileTime.
 					if (!getFlag("no-read-guard"))
 						runtime.readGuard.recordWritten(changedPath, {
+							authorship: "whole-file",
 							branchEpoch: queuedBranchEpoch,
 							stampFileTime: false,
 						});
@@ -1007,6 +1008,7 @@ export async function handleAgentEnd({
 					// #3525: bytes the agent never saw; authorship, not FileTime.
 					if (!getFlag("no-read-guard")) {
 						runtime.readGuard.recordWritten(filePath, {
+							authorship: "whole-file",
 							branchEpoch: queuedBranchEpoch,
 							stampFileTime: false,
 						});
@@ -1301,6 +1303,7 @@ export async function handleAgentEnd({
 									// unlicensed advance over a byte nothing checked.
 									recordWritten: (filePath: string) =>
 										runtime.readGuard.recordWritten(filePath, {
+											authorship: "whole-file",
 											branchEpoch: credit,
 											stampFileTime: false,
 										}),

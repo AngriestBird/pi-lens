@@ -183,6 +183,71 @@ describe("mutation bridge bookkeeping", () => {
 		}
 	});
 
+	it("does not widen authorship when observed bridge range is unavailable (F-4210-2)", () => {
+		// F-4210-2 recurrence: an observed replay with no recoverable baseline
+		// range must not become a whole-file license for an untouched line.
+		const env = setupTestEnvironment("pi-lens-4210-observed-unknown-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const filePath = path.join(env.tmpDir, "observed.ts");
+			fs.writeFileSync(filePath, "one\ntwo\nthree\nfour\nfive\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setTelemetryIdentity({ sessionId: "s-4210-observed-unknown" });
+			runtime.beginTurn();
+			const cacheManager = new CacheManager(false);
+			const deps = makeDeps({ tmpDir: env.tmpDir, runtime, cacheManager });
+
+			fs.writeFileSync(filePath, "one\ntwo\nbridge\nfour\nfive\n");
+			expect(
+				recordMutationThroughSeam(
+					{
+						filePath,
+						kind: "edit",
+						touchedLines: [3, 3],
+						consumer: "bridge-v1",
+					},
+					deps,
+				),
+			).toBe(true);
+
+			// The observed writer checked this path, but its bounded evidence cannot
+			// recover a range; the bridge therefore reaches ReadGuard without one.
+			runtime.readGuard.noteCheckedPaths("call-4210-observed", [filePath]);
+			fs.writeFileSync(filePath, "one\nobserved\nbridge\nfour\nfive\n");
+			expect(
+				recordMutationThroughSeam(
+					{
+						filePath,
+						kind: "edit",
+						consumer: "observed-replay",
+						provenance: "observed",
+						toolCallId: "call-4210-observed",
+					},
+					deps,
+				),
+			).toBe(true);
+
+			expect(runtime.readGuard.checkEdit(filePath, [2, 2]).action).toBe(
+				"block",
+			);
+			// UNKNOWN retires the prior range too; no guessed replacement survives.
+			expect(runtime.readGuard.checkEdit(filePath, [3, 3]).action).toBe(
+				"block",
+			);
+			expect(
+				getDegradationSummary()
+					.find((group) => group.kind === "read-guard-authorship-retired")
+					?.latestReasons.some((row) => row.subject === filePath),
+			).toBe(true);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
 	it("#2465: under no-read-guard, a recordable write still gets turn-state + receipt + the observed-handled mark, but skips only the read-guard stamp", () => {
 		const env = setupTestEnvironment("pi-lens-2465-no-read-guard-");
 		const previousDataDir = process.env.PILENS_DATA_DIR;
