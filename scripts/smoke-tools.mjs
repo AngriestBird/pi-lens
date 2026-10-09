@@ -693,8 +693,24 @@ const LSP_FIXTURES = [
 		file: "Dockerfile",
 		serverHint: "docker-langserver",
 		tools: ["dockerfile-language-server-nodejs"],
-		disableServers: ["docker-official"],
 		expectServerId: "docker",
+	},
+	{
+		// #3939: the official binary is provisioned by the nightly workflow, not
+		// the installer registry. Disabling the preferred member makes this row
+		// exercise the real fallback acquisition and keeps its handshake,
+		// capabilities and idle cost separate from docker-langserver's evidence.
+		lang: "dockerfile-official",
+		serverId: "docker-official",
+		lspGateExempt:
+			"official Docker Language Server publishes a confirmed empty diagnostic set on the known fixture; its protocol and idle measurement are still valuable, but it cannot prove the diagnostic gate's finding contract",
+		dir: "tests/fixtures/tool-smoke/dockerfile",
+		file: "Dockerfile",
+		serverHint: "docker-language-server (official)",
+		tools: [],
+		disableServers: ["docker"],
+		expectServerId: "docker-official",
+		allowEmptyBaseline: true,
 	},
 	{
 		lang: "toml",

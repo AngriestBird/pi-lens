@@ -156,6 +156,7 @@ carries the named admission until then.
 | yaml | yaml-language-server | push-only | publishes-unversioned | direct | 2* | dev+ci |
 | shell | bash-language-server | push-only | publishes-versioned | direct | 2 | dev+ci |
 | dockerfile | docker-langserver | push-only | publishes-unversioned | direct | 2* | dev+ci |
+| dockerfile-official | docker-language-server (official) | push-only | unknown | empty-only | ? | dev+ci |
 | toml | taplo | push-only | publishes-unversioned | direct | 2* | dev+ci |
 | terraform | terraform-ls | push-only | publishes-unversioned | empty-first | 2* | dev+ci |
 | prisma | @prisma/language-server | push-only | publishes-unversioned | direct | 2* | dev+ci |
@@ -260,5 +261,5 @@ two-run `clean-behavior` hysteresis and the consecutive-night `idle-eviction`
 counts (#3989). Regenerated every run; never a measurement.
 
 ```json
-{"idle-eviction":{"docker":{"nights":[{"day":"2026-10-07","rssMb":64,"coldMs":566}]},"json":{"nights":[{"day":"2026-10-07","rssMb":67,"coldMs":1116}]},"powershell":{"nights":[{"day":"2026-10-07","rssMb":155,"coldMs":2601}]},"python-jedi":{"nights":[{"day":"2026-10-07","rssMb":51,"coldMs":1796}]},"zizmor":{"nights":[{"day":"2026-10-07","rssMb":58,"coldMs":608}]}}}
+{"clean-behavior":{"dockerfile-official":{"pendingBehavior":"publishes-versioned","pendingTier":"2","runs":1}},"idle-eviction":{"docker":{"nights":[{"day":"2026-10-07","rssMb":64,"coldMs":566}]},"json":{"nights":[{"day":"2026-10-07","rssMb":67,"coldMs":1116}]},"powershell":{"nights":[{"day":"2026-10-07","rssMb":155,"coldMs":2601}]},"python-jedi":{"nights":[{"day":"2026-10-07","rssMb":51,"coldMs":1796}]},"zizmor":{"nights":[{"day":"2026-10-07","rssMb":58,"coldMs":608}]}}}
 ```
