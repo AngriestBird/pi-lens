@@ -555,6 +555,13 @@ the surface they bite; each block loads only when its trigger applies.
     carry it through asynchronous stages instead of re-deriving it downstream
     (#3643 F3).
 
+**Expired successor hand-off:** an expired successor marker may authorize
+    its named interrupted successor only for the fixed retention window in
+    `clients/session-lifecycle.ts`; the shared slot retires at that boundary
+    and records its dropped activation count before releasing the payload.
+    The window and supersession paths are pinned by the session lifecycle and
+    session-scope tests.
+
 </important>
 
 <important if="availability policy or installer">

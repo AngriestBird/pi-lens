@@ -101,6 +101,14 @@ function state(): SessionLifecycleState {
 export const SUCCESSOR_PENDING_TTL_MS = 60_000;
 
 /**
+ * How long an expired successor may still authorize forwarding its interrupted
+ * hand-off. A user can plausibly return to a fork/reload successor within a
+ * day; after that, retaining the marker and its slot would make ancient state
+ * look current forever.
+ */
+export const SUCCESSOR_HANDOFF_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
  * The real-pi lifecycle lane cannot install Vitest's clock in its child
  * process. Keep the production default fixed, while allowing that hermetic
  * lane to shrink the wait through its explicitly test-only environment knob.
@@ -818,9 +826,16 @@ export function expiredSuccessorReason(): string | undefined {
 	if (s.activeCtx !== undefined || s.activeSessionId !== undefined)
 		return undefined;
 	const named = namedSuccessorOf(s);
-	return named !== undefined && !successorStillPending(s)
-		? named.reason
-		: undefined;
+	if (named === undefined || successorStillPending(s)) return undefined;
+	if (
+		s.successorPendingSince !== undefined &&
+		Date.now() - s.successorPendingSince >= SUCCESSOR_HANDOFF_TTL_MS
+	) {
+		s.successorPendingSince = undefined;
+		s.successorNamed = undefined;
+		return undefined;
+	}
+	return named.reason;
 }
 
 /** #3855: the successor the pending replacement named, when this build's

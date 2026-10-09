@@ -33,6 +33,8 @@ import {
 	namedSuccessorReason,
 	noteSessionShutdown,
 	releasePrimarySession,
+	expiredSuccessorReason,
+	SUCCESSOR_HANDOFF_TTL_MS,
 	SUCCESSOR_PENDING_TTL_MS,
 } from "../../clients/session-lifecycle.js";
 
@@ -446,6 +448,21 @@ describe("the start a pending gap names (#4113)", () => {
 		decideSessionStart(liveCtx(), "host-session", REPO, "startup");
 		releasePrimarySession("fork", "/s/fork.jsonl");
 		expect(namedSuccessorReason()).toBe("fork");
+	});
+
+	it("retires an expired marker at the fixed hand-off window", () => {
+		// #4253 recurrence: an old marker must not authorize a same-file slot
+		// forever after its normal successor-pending window has elapsed.
+		vi.useFakeTimers();
+		decideSessionStart(liveCtx(), "host-session", REPO, "startup");
+		releasePrimarySession("fork", "/s/fork.jsonl");
+
+		vi.advanceTimersByTime(SUCCESSOR_HANDOFF_TTL_MS - 1);
+		expect(expiredSuccessorReason()).toBe("fork");
+
+		vi.advanceTimersByTime(1);
+		expect(expiredSuccessorReason()).toBeUndefined();
+		expect(expiredSuccessorReason()).toBeUndefined();
 	});
 
 	it("is none once the named successor registered", () => {
