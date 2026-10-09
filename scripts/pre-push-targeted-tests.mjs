@@ -150,6 +150,9 @@ export const TREE_SCANNING_GOVERNANCE_TESTS = [
 	"tests/clients/bounded-telemetry-sweep.test.ts",
 	"tests/clients/single-flight-ratchet.test.ts",
 	"tests/config/bounded-container-guard.test.ts",
+	// #4239: walks scripts/lib for static dist/ imports and checks each is in
+	// DIST_IMPORTS, so a new governance import of dist/ cannot dodge the rebuild.
+	"tests/scripts/dist-freshness.test.ts",
 ];
 
 // Suites that scan the TESTS tree for a test shape (a real spawn, a raw timer
