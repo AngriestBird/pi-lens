@@ -257,19 +257,17 @@ function rulePolicyEntryNode(): ConfigSchemaNode {
 		additionalProperties: true,
 		properties: {
 			threshold: { type: "number", [STABILITY_TIER_KEY]: "experimental" },
-			disable: {
-				type: "array",
-				items: { type: "string", [STABILITY_TIER_KEY]: "experimental" },
-				[STABILITY_TIER_KEY]: "experimental",
-			},
-			select: {
-				type: "array",
-				items: { type: "string", [STABILITY_TIER_KEY]: "experimental" },
-				[STABILITY_TIER_KEY]: "experimental",
-			},
+			// These two legacy fields remain opaque so the project compatibility
+			// parser can preserve its established field-specific diagnostics.
+			disable: opaque("experimental"),
+			select: opaque("experimental"),
 			ignorePaths: {
 				type: "array",
-				items: { type: "string", [STABILITY_TIER_KEY]: "experimental" },
+				items: {
+					type: "string",
+					minLength: 1,
+					[STABILITY_TIER_KEY]: "experimental",
+				},
 				[MERGE_STRATEGY_KEY]: "append",
 				[DENY_KEY]: "array-union",
 				[STABILITY_TIER_KEY]: "experimental",

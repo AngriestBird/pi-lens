@@ -845,7 +845,15 @@ function parseConfigFile(configPath: string): ParsedConfigFile {
 	// after the first silently lost the `config-deprecated` ledger row despite
 	// the file still being the exact deprecated one on disk.
 	const raw: unknown = resolved.value;
-	const obj = resolved.value;
+	// The legacy project projection owns the field-specific `rules.*` parser
+	// contract. Keep the shared validation for every other section, but let this
+	// parser see malformed rule entries so it can retain its established notices
+	// instead of replacing them with a generic config-core record.
+	const rawProject = outcome.value as Record<string, unknown>;
+	const obj: Record<string, unknown> = {
+		...resolved.value,
+		...(rawProject.rules !== undefined ? { rules: rawProject.rules } : {}),
+	};
 
 	const ignore = Array.isArray(obj.ignore)
 		? obj.ignore.filter((p): p is string => typeof p === "string")
@@ -865,7 +873,7 @@ function parseConfigFile(configPath: string): ParsedConfigFile {
 			// dropped without a word — the one shape a user is most likely to try.
 			if (!ruleCfg || typeof ruleCfg !== "object" || Array.isArray(ruleCfg)) {
 				note(
-					`rules.${ruleId} must be an object with threshold, disable, select, or ignorePaths; ignored`,
+					`rules.${ruleId} must be an object with threshold, disable, or select; ignored`,
 				);
 				continue;
 			}
@@ -1143,7 +1151,9 @@ function parseConfigFile(configPath: string): ParsedConfigFile {
 			raw,
 			configPath,
 		},
-		records: resolved.records,
+		records: resolved.records.filter(
+			(record) => !record.key.startsWith("/rules/"),
+		),
 		ignored: ignoredRecords(),
 	};
 }

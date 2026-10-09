@@ -1420,6 +1420,7 @@ export async function dispatchForFile(
 		);
 		return applyRulePolicy(disposition, rulePolicy, {
 			root: ctx.projectRoot ?? ctx.cwd,
+			filePath: ctx.filePath,
 		});
 	};
 	let visibleDiagnostics = applyOutputFilters(dedupedDiagnostics);

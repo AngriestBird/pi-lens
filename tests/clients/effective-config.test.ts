@@ -196,6 +196,25 @@ describe("effectiveConfig — provenance of the resolution", () => {
 		expect(entry?.file).toContain(".pi-lens/config.json");
 	});
 
+	it("records one stable schema diagnostic for each invalid ignorePaths shape", async () => {
+		const cases: Array<[string, unknown]> = [
+			["empty member", [""]],
+			["non-string member", [42, null]],
+			["non-array field", "vendor/**"],
+		];
+		for (const [label, value] of cases) {
+			const { view } = await viewFor({
+				files: {
+					"proj/.pi-lens.json": {
+						rules: { "no-eval": { ignorePaths: value } },
+					},
+				},
+				startDir: "proj",
+			});
+			expect(view.recordCounts.PILENS_CFG_0005, label).toBeGreaterThan(0);
+		}
+	});
+
 	it("names the file and tier every resolved leaf came from, without carrying values", async () => {
 		const { view } = await viewFor({
 			files: {

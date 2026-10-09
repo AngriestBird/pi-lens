@@ -506,19 +506,11 @@
         "additionalProperties": true,
         "properties": {
           "threshold": { "type": "number", "x-stability": "experimental" },
-          "disable": {
-            "type": "array",
-            "items": { "type": "string", "x-stability": "experimental" },
-            "x-stability": "experimental"
-          },
-          "select": {
-            "type": "array",
-            "items": { "type": "string", "x-stability": "experimental" },
-            "x-stability": "experimental"
-          },
+          "disable": { "x-stability": "experimental" },
+          "select": { "x-stability": "experimental" },
           "ignorePaths": {
             "type": "array",
-            "items": { "type": "string", "x-stability": "experimental" },
+            "items": { "type": "string", "minLength": 1, "x-stability": "experimental" },
             "x-merge-strategy": "append",
             "x-deny": "array-union",
             "x-stability": "experimental"

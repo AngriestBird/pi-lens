@@ -94,7 +94,10 @@ export function applyFindingPolicy<
 	const inlineKept = applyInlineSuppressions(diagnostics, options.content);
 	const disposed = filterDisposed(inlineKept, options);
 	return {
-		kept: applyRulePolicy(disposed, options.policyMap, { root: options.cwd }),
+		kept: applyRulePolicy(disposed, options.policyMap, {
+			root: options.cwd,
+			filePath: options.filePath,
+		}),
 		inlineKept,
 	};
 }

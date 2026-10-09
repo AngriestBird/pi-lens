@@ -142,7 +142,7 @@ function matchesRule(entry: string, raw: string, normalized: string): boolean {
 export function applyRulePolicy<T extends { rule?: string; code?: string }>(
 	diagnostics: T[],
 	policyMap: Record<string, unknown> | undefined,
-	options: { root?: string } = {},
+	options: { root: string; filePath: string },
 ): T[] {
 	if (!policyMap) return diagnostics;
 	// Fast-path: if every entry has neither disable nor select, there is no
@@ -172,13 +172,14 @@ export function applyRulePolicy<T extends { rule?: string; code?: string }>(
 	return diagnostics.filter((d) => {
 		const ruleId = d.rule ?? d.code;
 		if (!ruleId) return true;
-		const filePath = (d as T & { filePath?: string }).filePath;
+		const filePath =
+			(d as T & { filePath?: string }).filePath ?? options.filePath;
 		if (
 			filePath &&
 			ruleIgnoredForPath(
 				ruleId,
 				filePath,
-				options.root ?? "",
+				options.root,
 				policyMap as RulePolicyMap,
 			)
 		)
