@@ -500,7 +500,25 @@
       "x-stability": "stable"
     },
     "rules": {
-      "x-stability": "stable"
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "threshold": { "type": "number", "x-stability": "experimental" },
+          "disable": { "x-stability": "experimental" },
+          "select": { "x-stability": "experimental" },
+          "ignorePaths": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1, "x-stability": "experimental" },
+            "x-merge-strategy": "append",
+            "x-deny": "array-union",
+            "x-stability": "experimental"
+          }
+        },
+        "x-stability": "experimental"
+      },
+      "x-stability": "experimental"
     },
     "maxProjectFiles": {
       "x-stability": "stable"
