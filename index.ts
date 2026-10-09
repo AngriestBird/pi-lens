@@ -1138,24 +1138,27 @@ function activateExtension(hostPi: ExtensionAPI) {
 
 	if (!_readBridgeRegistered) {
 		_readBridgeRegistered = true;
-		registerReadBridge({
-			isRecordable(filePath: string): boolean {
-				// Unknown during a replacement/reload records the read. The guard is
-				// the obstruction here, so failure must fall toward not blocking the
-				// user's later edit; recording while disabled is harmless.
-				if (getBridgeFlag(_bridgeGetFlag, "read")) return false;
-				return isRecordableProjectPath(filePath, runtime.projectRoot);
+		registerReadBridge(
+			{
+				isRecordable(filePath: string): boolean {
+					// Unknown during a replacement/reload records the read. The guard is
+					// the obstruction here, so failure must fall toward not blocking the
+					// user's later edit; recording while disabled is harmless.
+					if (getBridgeFlag(_bridgeGetFlag, "read")) return false;
+					return isRecordableProjectPath(filePath, runtime.projectRoot);
+				},
+				forward: (entry) => recordIOEntry(entry, ioBridgeDeps),
 			},
-			forward: (entry) => recordIOEntry(entry, ioBridgeDeps),
-		});
+			runtime,
+		);
 	}
 	if (!_mutationBridgeRegistered) {
 		_mutationBridgeRegistered = true;
-		registerMutationBridge(mutationBridgeDeps);
+		registerMutationBridge(mutationBridgeDeps, runtime);
 	}
 	if (!_ioBridgeRegistered) {
 		_ioBridgeRegistered = true;
-		registerIOBridge(ioBridgeDeps);
+		registerIOBridge(ioBridgeDeps, runtime);
 	}
 	// Automatic context injection (the `context` hook). Independent of lensEnabled
 	// so tools/LSP/read-guard/formatting keep running when it is off. Precedence:

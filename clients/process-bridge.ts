@@ -22,10 +22,12 @@
  * container would change that documented external contract, so this stays a
  * separate, deliberately smaller leaf built for the bridge shape only.
  *
- * STATIC IMPORTS: none, deliberately. Both `read-bridge.ts` and
- * `mutation-bridge.ts` import this module; it must stay a dependency leaf so
- * neither gains an edge onto anything else in `clients/` (`no-client-cycles`).
+ * STATIC IMPORTS: `process-singletons.ts` only, deliberately. That module is
+ * itself a dependency leaf (no imports), so this one stays cycle-free while
+ * gaining the versioned cell `rebindableProcessBridgeDeps` needs (#4169).
  */
+
+import { getProcessSingleton } from "./process-singletons.js";
 
 /** A bridge object mountable through {@link registerProcessBridge}. */
 export interface ProcessBridge {
@@ -75,4 +77,45 @@ export function getProcessBridge<T extends ProcessBridge>(
 	const candidate = bridge as Partial<T>;
 	if (candidate.version !== version) return undefined;
 	return candidate as T;
+}
+
+/**
+ * An opaque identity token: a `RuntimeCoordinator` for a real activation, or a
+ * module-scope `Symbol` for a direct (unit-test) registration.
+ */
+export type BridgeActivation = symbol | object;
+
+/**
+ * A rebindable view of a first-wins bridge's dependencies (#4169).
+ *
+ * `/reload` can re-evaluate the pi-lens module graph: a TypeScript-source entry
+ * is transpiled by the host's jiti loader rather than native-imported, so every
+ * reload is a fresh module instance. `globalThis` keeps the first mount,
+ * though, so a bridge whose build closure captured the first activation's deps
+ * would answer into an orphaned runtime while the live session edits through a
+ * fresh one — a bridge read then records nowhere the live guard can see, and
+ * the edit is blocked "Edit without read".
+ *
+ * The deps therefore live in a versioned process singleton that every
+ * activation rebinds. `activation` is the identity the deps were built for (the
+ * activation's live runtime); a call carrying a different one replaces the
+ * cell, while a repeat call from the same activation is a no-op, preserving
+ * the bridge modules' own "second registration wins nothing" contract. The
+ * mounted bridge calls the returned getter per invocation.
+ */
+export function rebindableProcessBridgeDeps<T extends object>(
+	family: string,
+	version: number,
+	activation: BridgeActivation,
+	deps: T,
+): () => T {
+	const cell = getProcessSingleton(family, version, () => ({
+		activation,
+		deps,
+	}));
+	if (cell.activation !== activation) {
+		cell.activation = activation;
+		cell.deps = deps;
+	}
+	return () => cell.deps;
 }

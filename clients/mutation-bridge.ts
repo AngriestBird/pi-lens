@@ -60,7 +60,12 @@ import {
 import { noteAgentMutation } from "./fix-run-restore.js";
 import { noteMutationHandled } from "./observed-mutation.js";
 import type { ProjectChangeSource } from "./project-changes.js";
-import { getProcessBridge, registerProcessBridge } from "./process-bridge.js";
+import {
+	type BridgeActivation,
+	getProcessBridge,
+	rebindableProcessBridgeDeps,
+	registerProcessBridge,
+} from "./process-bridge.js";
 import { recordDroppedRead } from "./session-scope.js";
 import { publishFormatQueued } from "./format-events-publish.js";
 
@@ -657,12 +662,33 @@ export function recordMutationThroughSeam(
 }
 
 /**
+ * Identity for a direct registration that does not name the activation its
+ * deps were built for (unit tests). A real activation passes the live
+ * `RuntimeCoordinator` (`deps.getRuntime()`), so a fresh module graph rebinds
+ * the shared deps cell (`rebindableProcessBridgeDeps`, #4169).
+ */
+const DEFAULT_ACTIVATION = Symbol("pi-lens:mutation-bridge-activation");
+
+/**
  * Mount the bridge singleton. Call once from inside the extension factory,
  * protected by the caller's module-level flag. Subsequent calls are no-ops
  * (first-wins, `clients/process-bridge.ts` owns the mount body — see that
  * module's header, #2437).
+ *
+ * `activation` is the identity the `deps` were built for. A call carrying a
+ * new one rebinds the shared deps cell, so a `/reload` that re-evaluates the
+ * module graph keeps the mounted bridge pointed at the live runtime (#4169).
  */
-export function registerMutationBridge(deps: MutationBridgeDeps): void {
+export function registerMutationBridge(
+	deps: MutationBridgeDeps,
+	activation: BridgeActivation = DEFAULT_ACTIVATION,
+): void {
+	const currentDeps = rebindableProcessBridgeDeps(
+		"mutation-bridge-deps",
+		1,
+		activation,
+		deps,
+	);
 	registerProcessBridge(MUTATION_BRIDGE_KEY, (): MutationBridge => ({
 		version: 1 as const,
 		recordMutation(entry: MutationBridgeEntry): boolean {
@@ -670,7 +696,7 @@ export function registerMutationBridge(deps: MutationBridgeDeps): void {
 			// also calls, so it gains the `pilens:format:queued` publish with no
 			// translation through v2. A retired lineage keeps the v1 answer
 			// (`true`: the receipt was taken).
-			return recordMutationThroughSeam(entry, deps);
+			return recordMutationThroughSeam(entry, currentDeps());
 		},
 	}));
 }
