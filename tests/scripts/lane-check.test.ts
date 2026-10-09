@@ -49,6 +49,8 @@ const packageJson = (buildExit = 0) =>
 		scripts: {
 			// BUILD_LOG counts builds: lane-check builds once, not once more in the selector.
 			build: `node -e "process.env.BUILD_LOG && require('fs').appendFileSync(process.env.BUILD_LOG, 'b\\n'); process.exit(${buildExit})"`,
+			"build:dist":
+				"node -e \"process.env.BUILD_LOG && require('fs').appendFileSync(process.env.BUILD_LOG, 'd\\n'); require('fs').mkdirSync('dist/clients/lsp', {recursive:true}); require('fs').writeFileSync('dist/clients/lsp/server-traits.js', '')\"",
 			"test:targeted": "node scripts/with-test-lock.mjs --shared -- vitest run",
 			"astgrep:self-scan": 'node -e ""',
 		},
@@ -202,6 +204,35 @@ const occurrences = (text: string, needle: string) =>
 const TIMEOUT = 170_000;
 
 describe("lane-check verdict table (#4047 round 2)", () => {
+	it(
+		"rebuilds a missing dist dependency before governance suites (#4239)",
+		() => {
+			const lane = makeLane({
+				base: {
+					...BASE_FILES,
+					"clients/lsp/server-traits.ts":
+						"export const isAuxiliary = () => false;\\n",
+				},
+				head: { "tests/config/added.test.ts": GREEN },
+			});
+			const run = runLane(lane);
+			expect(run.status).toBe(0);
+			expect(run.record.verdict).toBe("clean");
+			expect(run.out).toContain(
+				"[lane-check] dist/ missing or stale (dist/clients/lsp/server-traits.js); running npm run build:dist...",
+			);
+			expect(
+				fs.existsSync(
+					path.join(lane.root, "dist/clients/lsp/server-traits.js"),
+				),
+			).toBe(true);
+			expect(fs.readFileSync(path.join(lane.home, "builds.log"), "utf8")).toBe(
+				"b\nd\n",
+			);
+		},
+		TIMEOUT,
+	);
+
 	it(
 		"all green: clean, exit 0, the summary names the real branch",
 		() => {

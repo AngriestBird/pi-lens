@@ -61,6 +61,32 @@ import { loadHistorySelection } from "./lib/test-history-selection.mjs";
 import { isEntryPoint, quoteForWindowsCmd } from "./with-test-lock.mjs";
 
 export const MAX_SELECTED_TESTS = 25;
+// The only scripts/ import of dist/ used by governance currently resolves to
+// this bundled client module (clean-signal and idle-eviction probe).
+export const DIST_IMPORTS = [
+	{
+		source: "clients/lsp/server-traits.ts",
+		output: "dist/clients/lsp/server-traits.js",
+	},
+];
+
+/** Return bundled files that are missing or older than their source. */
+export function findStaleDistFiles(root) {
+	return DIST_IMPORTS.flatMap(({ source, output }) => {
+		const sourcePath = path.join(root, source);
+		const outputPath = path.join(root, output);
+		// Minimal selector fixtures do not carry this production source.
+		if (!existsSync(sourcePath)) return [];
+		if (!existsSync(outputPath)) return [{ source, output, reason: "missing" }];
+		try {
+			return statSync(sourcePath).mtimeMs > statSync(outputPath).mtimeMs
+				? [{ source, output, reason: "stale" }]
+				: [];
+		} catch {
+			return [{ source, output, reason: "unreadable" }];
+		}
+	});
+}
 const PREPUSH_RECORD_DIR = "pi-lens-prepush";
 const PREPUSH_RECORD_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
 let recordWriteWarningEmitted = false;
@@ -741,6 +767,24 @@ export async function main() {
 			runInherit("npm", ["run", "build"], { needsShimShell: true });
 		} catch (error) {
 			preparationFailure = { outcome: "build-failed", error };
+		}
+		if (!preparationFailure) {
+			const staleDist = findStaleDistFiles(process.cwd());
+			if (staleDist.length > 0) {
+				try {
+					console.log(
+						`[pre-push] dist/ missing or stale (${staleDist.map(({ output }) => output).join(", ")}); running npm run build:dist...`,
+					);
+					runInherit("npm", ["run", "build:dist"], {
+						needsShimShell: true,
+					});
+				} catch (error) {
+					console.error(
+						"[pre-push] dist build failed; run `npm run build:dist` to rebuild dist/.",
+					);
+					preparationFailure = { outcome: "build-failed", error };
+				}
+			}
 		}
 		if (!preparationFailure) {
 			try {
