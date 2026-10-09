@@ -104,6 +104,7 @@ import {
 	type LSPServerInfo,
 	type LspRootFallback,
 } from "./server.js";
+import { DEFAULT_LSP_SERVER_ROLE, isAuxiliary } from "./server-traits.js";
 
 // --- Types ---
 
@@ -760,6 +761,14 @@ export function createCustomServer(
 		command: config.command,
 		extensions: config.extensions,
 		idleEviction: "unmeasured",
+		// A config-declared server is a language server. The public
+		// `lsp.servers.<id>.role` field is validated and projected by
+		// `ResolvedLspConfig` (clients/lsp/resolved-config.ts) but stays
+		// RESERVED and inert here: honouring it would change which servers a
+		// file selects as primary, and that is the catalog slice's call, not
+		// this loader's (#2416 slice 1). The stated default is applied rather
+		// than left absent (#1488).
+		role: DEFAULT_LSP_SERVER_ROLE,
 		// The config-declared covers channel (#3968): the claim the loader
 		// validated (`lspConfigOf`'s projection drops unknown runner ids) rides
 		// the server entry into the runner-coverage seam.
@@ -1087,23 +1096,26 @@ export function getServersForFileWithConfig(filePath: string): LSPServerInfo[] {
  * The primary language server ENTRY for a file — the one "first non-auxiliary
  * server" predicate, shared by {@link primaryServerId} and
  * {@link resolveLspCwdForFile} so the id-level and entry-level consumers
- * cannot drift. `role` is only ever set to "auxiliary" on cross-cutting
- * scanner entries (ast-grep, opengrep, zizmor, typos, marksman, ...) — see
- * clients/lsp/server.ts; undefined here means a real language server.
+ * cannot drift. Auxiliary-ness is {@link isAuxiliary}'s answer, never a
+ * comparison against the role literal (#1488).
  */
 function primaryServerEntry(filePath: string): LSPServerInfo | undefined {
-	return getServersForFileWithConfig(filePath).find(
-		(s) => s.role !== "auxiliary",
-	);
+	return getServersForFileWithConfig(filePath).find((s) => !isAuxiliary(s));
 }
 
 /**
  * The primary language server for a file (e.g. "typescript"), as opposed to a
  * cross-cutting auxiliary scanner attached via clientScope "all"/
- * "with-auxiliary" (ast-grep, opengrep, zizmor, typos, marksman, ...). Used to
- * split a file's diagnostics into "primary confirmation" vs "auxiliary
- * findings" so a page of ast-grep/opengrep/marksman noise never buries
- * whether the actual type checker/compiler confirmed the file clean.
+ * "with-auxiliary". Used to split a file's diagnostics into "primary
+ * confirmation" vs "auxiliary findings" so a page of scanner noise never
+ * buries whether the actual type checker/compiler confirmed the file clean.
+ *
+ * The auxiliary population is NOT listed here: it is whatever declares
+ * `role: "auxiliary"` in clients/lsp/server.ts, derived by
+ * `tests/config/lsp-server-trait-table.test.ts` and matched there against the
+ * diagnostic profiles in clients/dispatch/auxiliary-lsp.ts. This comment used
+ * to hand-list it and named marksman, which declares `role: "language"` —
+ * the drift #1488's registry-derived coverage test exists to stop.
  *
  * #646: extracted from `tools/lsp-diagnostics.ts` (where it originated) so
  * `tools/lens-diagnostics.ts`'s `mode=full` sweep can share the exact same

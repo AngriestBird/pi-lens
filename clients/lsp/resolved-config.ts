@@ -16,12 +16,13 @@ import {
 } from "../config-core/records.js";
 import type { Provenance } from "../config-core/provenance.js";
 import { customServerSpecsOf } from "./config.js";
+import { isAuxiliary, type LspServerRole } from "./server-traits.js";
 
 export interface ResolvedLspServer {
 	readonly kind: "custom" | "override";
 	readonly name: string;
 	readonly enabled: boolean;
-	readonly role: "language" | "auxiliary";
+	readonly role: LspServerRole;
 	readonly command?: readonly [string, ...string[]];
 	readonly args?: readonly string[];
 	readonly extensions?: readonly string[];
@@ -235,7 +236,11 @@ function normalizeServer(
 		name:
 			typeof entry.name === "string" && entry.name.length > 0 ? entry.name : id,
 		enabled: entry.enabled !== false,
-		role: entry.role === "auxiliary" ? "auxiliary" : "language",
+		// The ONE place the public model's role value is produced. `entry` is an
+		// unvalidated config record, so the decision goes through `isAuxiliary`,
+		// whose exhaustive switch over `LspServerRole` is the compile gate a third
+		// role trips (#1488) — not a comparison against the literal here.
+		role: isAuxiliary(entry) ? "auxiliary" : "language",
 		...(argv ? { command: argv } : {}),
 		...(Array.isArray(entry.args) ? { args: entry.args as string[] } : {}),
 		...(extensions ? { extensions: extensions as string[] } : {}),
