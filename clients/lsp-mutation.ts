@@ -427,14 +427,17 @@ function bookkeepLspMutation(
 				}
 			} else {
 				try {
+					const editRanges = detail.ranges
+						? detail.ranges.map(
+								({ start, end }) => [start, end] as [number, number],
+							)
+						: detail.range
+							? [[detail.range.start, detail.range.end] as [number, number]]
+							: undefined;
 					const recorded = bridge.recordMutation({
 						filePath,
 						kind: "edit",
-						editRanges: detail.ranges
-							? detail.ranges.map(({ start, end }) => [start, end])
-							: detail.range
-								? [[detail.range.start, detail.range.end]]
-								: undefined,
+						...(editRanges !== undefined ? { editRanges } : {}),
 						consumer: context.tool,
 						provenance: "observed",
 						// Real value threaded through, not the bridge's own
