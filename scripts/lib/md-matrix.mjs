@@ -583,7 +583,7 @@ const REFRESH_STATE_FENCE_END = "```";
  * to "no memory this run", never a crash.
  *
  * @param {string} text
- * @returns {{ "first-publish"?: Record<string, { firstMissed: string }>, "clean-behavior"?: Record<string, { pendingBehavior: string, pendingTier: string, runs: number }> }}
+ * @returns {{ "first-publish"?: Record<string, { firstMissed?: string, pendingFirstPublish?: string, runs?: number }>, "clean-behavior"?: Record<string, { pendingBehavior: string, pendingTier: string, runs: number }> }}
  */
 export function parseRefreshState(text) {
 	const lines = String(text ?? "").split("\n");
@@ -659,8 +659,21 @@ function renderRefreshStateSection(state) {
 	for (const lang of Object.keys(state?.["first-publish"] ?? {}).sort(
 		compareStableStrings,
 	)) {
-		const firstMissed = state["first-publish"][lang]?.firstMissed;
+		const entry = state["first-publish"][lang];
+		const firstMissed = entry?.firstMissed;
+		const pendingFirstPublish = entry?.pendingFirstPublish;
+		const runs = Number(entry?.runs ?? 1);
 		if (isUtcDay(firstMissed)) firstPublish[lang] = { firstMissed };
+		if (
+			pendingFirstPublish === "direct" ||
+			pendingFirstPublish === "empty-first"
+		) {
+			firstPublish[lang] = {
+				...firstPublish[lang],
+				pendingFirstPublish,
+				runs: Number.isFinite(runs) && runs > 0 ? runs : 1,
+			};
+		}
 	}
 	const cleanBehavior = {};
 	for (const lang of Object.keys(state?.["clean-behavior"] ?? {}).sort(
@@ -686,8 +699,8 @@ function renderRefreshStateSection(state) {
 	return [
 		REFRESH_STATE_HEADING,
 		"",
-		"Bookkeeping for the date-based `direct` `first-publish` expiry (#3401), the",
-		"two-run `clean-behavior` hysteresis and the consecutive-night `idle-eviction`",
+		"Bookkeeping for the two-run `first-publish`/`clean-behavior` hysteresis, the",
+		"date-based `direct` expiry (#3401) and consecutive-night `idle-eviction`",
 		"counts (#3989). Regenerated every run; never a measurement.",
 		"",
 		REFRESH_STATE_FENCE,
@@ -800,13 +813,28 @@ export function refreshCapabilityMatrix(text, observations, opts = {}) {
 		}
 		if (observed)
 			cell.src = mergeSrc(srcIdx >= 0 ? (cells[srcIdx] ?? "") : "", src);
-		// first-publish: an observation writes immediately; a `direct` cell the
-		// probe no longer observes is stamped with its first miss and, once
-		// `expireDays` have elapsed, expired.
+		// first-publish: hold a changed comparable class until two consecutive
+		// observations agree, just like clean-behavior. A `direct` cell the probe
+		// no longer observes is stamped with its first miss and, once `expireDays`
+		// have elapsed, expired.
 		const observedFp = observed?.firstPublish ?? null;
 		const currentFp = fpIdx >= 0 ? cells[fpIdx] : "";
-		if (observedFp) {
-			cell["first-publish"] = observedFp;
+		if (observedFp === "direct" || observedFp === "empty-first") {
+			if (observedFp !== currentFp) {
+				const held = priorFp[lang];
+				const sameHeld = held?.pendingFirstPublish === observedFp;
+				const runs = sameHeld ? Number(held.runs ?? 1) + 1 : 1;
+				if (sameHeld && runs >= agreeRuns) {
+					cell["first-publish"] = observedFp;
+					committedLangs.push(lang);
+				} else {
+					nextState["first-publish"][lang] = {
+						pendingFirstPublish: observedFp,
+						runs,
+					};
+					pendingLangs.push(lang);
+				}
+			}
 		} else if (currentFp === EXPIRABLE_FIRST_PUBLISH) {
 			// A missing, garbage or future stamp restarts the clock today.
 			const elapsed = elapsedDays(priorFp[lang]?.firstMissed, today);

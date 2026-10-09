@@ -100,7 +100,14 @@ export interface MatrixObservation {
 }
 
 export interface RefreshState {
-	"first-publish"?: Record<string, { firstMissed: string }>;
+	"first-publish"?: Record<
+		string,
+		{
+			firstMissed?: string;
+			pendingFirstPublish?: "direct" | "empty-first";
+			runs?: number;
+		}
+	>;
 	"clean-behavior"?: Record<
 		string,
 		{ pendingBehavior: string; pendingTier: string; runs: number }

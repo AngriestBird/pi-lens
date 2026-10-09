@@ -68,8 +68,10 @@ discriminator either.
 
 `tests/config/lsp-first-publish-census.test.ts` compares this column against the
 `emptyFirstPublish` markers and reds in BOTH directions, which is the expiry
-check: when the nightly re-measures a server into a different class, the docs
-refresh cannot merge until the marker is updated with it.
+check: when two consecutive nights re-measure a server into a different class,
+the docs refresh commits the confirmed class and the marker must move with it.
+A single-night flip remains in the refresh-state JSON below and does not change
+the census's confirmed population.
 
 ## The strategies
 
@@ -148,7 +150,7 @@ carries the named admission until then.
 | deno | deno (alt of typescript) | pull | — | n/a (pull) | 1 | dev+ci |
 | ruby | ruby-lsp | pull | — | n/a (pull) | 1 | ci |
 | csharp | csharp-ls | pull | — | n/a (pull) | 1 | ci |
-| typescript | typescript-language-server | push-only | silent | empty-first | 3 | dev+ci |
+| typescript | typescript-language-server | push-only | silent | direct | 3 | dev+ci |
 | markdown | marksman | push-only | silent | direct | 3 | ci |
 | lua | lua-language-server | push-only | silent | direct | 3 | dev+ci |
 | python | pyright | push-only | publishes-versioned | direct | 2 | dev+ci |
@@ -256,10 +258,10 @@ observations are never compared (a slow/absent server is not evidence either way
 
 ## Capability matrix refresh state (nightly-generated)
 
-Bookkeeping for the date-based `direct` `first-publish` expiry (#3401), the
-two-run `clean-behavior` hysteresis and the consecutive-night `idle-eviction`
+Bookkeeping for the two-run `first-publish`/`clean-behavior` hysteresis, the
+date-based `direct` expiry (#3401) and consecutive-night `idle-eviction`
 counts (#3989). Regenerated every run; never a measurement.
 
 ```json
-{"idle-eviction":{"docker-official":{"nights":[{"day":"2026-10-09","rssMb":62,"coldMs":652}]},"kotlin":{"nights":[{"day":"2026-10-09","rssMb":278,"coldMs":2010}]},"powershell":{"nights":[{"day":"2026-10-09","rssMb":161,"coldMs":1883}]},"rust":{"nights":[{"day":"2026-10-09","rssMb":661,"coldMs":2269}]},"svelte":{"nights":[{"day":"2026-10-09","rssMb":221,"coldMs":2311}]},"zizmor":{"nights":[{"day":"2026-10-09","rssMb":56,"coldMs":581}]}}}
+{"first-publish":{"typescript":{"pendingFirstPublish":"empty-first","runs":1}},"idle-eviction":{"docker-official":{"nights":[{"day":"2026-10-09","rssMb":62,"coldMs":652}]},"kotlin":{"nights":[{"day":"2026-10-09","rssMb":278,"coldMs":2010}]},"powershell":{"nights":[{"day":"2026-10-09","rssMb":161,"coldMs":1883}]},"rust":{"nights":[{"day":"2026-10-09","rssMb":661,"coldMs":2269}]},"svelte":{"nights":[{"day":"2026-10-09","rssMb":221,"coldMs":2311}]},"zizmor":{"nights":[{"day":"2026-10-09","rssMb":56,"coldMs":581}]}}}
 ```

@@ -1724,9 +1724,8 @@ describe("publishDiagnostics handler — superseded push guard (cache-poisoning 
 		expect(state.pushDiagnostics.get(TEST_KEY)).toEqual([]);
 	});
 
-	it("holds classic TypeScript's first publication until the settled push", async () => {
+	it("keeps classic TypeScript's first publication authoritative", () => {
 		const { state, emitPublishDiagnostics } = createCapturingState();
-		vi.useFakeTimers();
 		Object.defineProperty(state, "serverId", { value: "typescript" });
 		Object.defineProperty(state, "launchVariant", { value: "classic" });
 
@@ -1734,8 +1733,6 @@ describe("publishDiagnostics handler — superseded push guard (cache-poisoning 
 			uri: pathToFileURL(TEST_FILE).href,
 			diagnostics: [diagnostic("classic result", "2322")],
 		});
-		vi.advanceTimersByTime(DEBOUNCE_WAIT_MS);
-		vi.useRealTimers();
 
 		expect(state.pushDiagnostics.get(TEST_KEY)?.[0]?.message).toBe(
 			"classic result",
@@ -2150,13 +2147,11 @@ describe("publishDiagnostics handler — superseded push guard (cache-poisoning 
 			});
 		});
 
-		it("a classic TypeScript settle measures debounce, not document age", async () => {
+		it("a first-push settle's durationMs is 0 (no debounce wait), not document age", async () => {
 			const { state, emitPublishDiagnostics } = createCapturingState();
-			vi.useFakeTimers();
-			// Classic TypeScript now holds its measured empty first publish (#3310),
-			// so a real first result uses the bounded debounce path.
+			// serverId "typescript" alone (no native-ts7 launchVariant) →
+			// seedFirstPush true — the very first publish settles immediately.
 			Object.defineProperty(state, "serverId", { value: "typescript" });
-			Object.defineProperty(state, "launchVariant", { value: "classic" });
 			state.documentOpenedAt.set(TEST_KEY, Date.now() - 90_000);
 
 			pullSequenceEvents.length = 0;
@@ -2165,17 +2160,13 @@ describe("publishDiagnostics handler — superseded push guard (cache-poisoning 
 				diagnostics: [diagnostic("first push", "2322")],
 			});
 
-			vi.advanceTimersByTime(DEBOUNCE_WAIT_MS);
-			vi.useRealTimers();
-			const settled = pullSequenceEvents.find(
-				(event) =>
-					event.metadata &&
-					(event.metadata as Record<string, unknown>).settledReturn === true,
-			);
-			expect(settled).toBeDefined();
-			expect(settled!.durationMs).toBeLessThan(1000);
-			const metadata = settled!.metadata as Record<string, unknown>;
-			expect(metadata.settleSource).toBe("quiet-window");
+			expect(pullSequenceEvents).toHaveLength(1);
+			expect(pullSequenceEvents[0].durationMs).toBe(0);
+			const metadata = pullSequenceEvents[0].metadata as Record<
+				string,
+				unknown
+			>;
+			expect(metadata.settleSource).toBe("first-push");
 			expect(metadata.elapsedSinceDidOpenMs as number).toBeGreaterThanOrEqual(
 				89_000,
 			);
