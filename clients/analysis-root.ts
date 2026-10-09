@@ -56,32 +56,46 @@ function nearestProjectRoot(filePath: string): string | undefined {
 	return hasProjectMarker(filesystemRoot) ? filesystemRoot : undefined;
 }
 
+function realPathOrResolved(filePath: string): string {
+	try {
+		return fs.realpathSync.native(filePath);
+	} catch {
+		return nodePath.resolve(filePath);
+	}
+}
+
 /** The selected filesystem root, or undefined for a refused path. */
 export function resolveAnalysisRootPath(
 	filePath: string,
 	sessionRoot: string,
 ): string | undefined {
-	const resolved = nodePath.resolve(filePath);
-	const session = nodePath.resolve(sessionRoot);
+	const resolved = realPathOrResolved(filePath);
+	const session = realPathOrResolved(sessionRoot);
+	const tmp = realPathOrResolved(os.tmpdir());
+	const data = process.env.PI_LENS_HOME
+		? realPathOrResolved(process.env.PI_LENS_HOME)
+		: undefined;
 	if (isVendorPath(resolved)) return undefined;
 	if (
-		resolved === os.tmpdir() ||
+		resolved === tmp ||
 		resolved === session ||
 		isUnderDir(session, resolved) ||
-		(!isUnderDir(resolved, session) && isPiLensInternalPath(resolved, session))
+		(!isUnderDir(resolved, session) &&
+			(isPiLensInternalPath(resolved, session) ||
+				(data !== undefined &&
+					(resolved === data || isUnderDir(resolved, data)))))
 	)
 		return undefined;
 	if (isUnderDir(resolved, session)) return session;
 	const checkout = resolveGitCheckout(session);
 	const linked = checkout && resolveLinkedWorktreeOwner(checkout, resolved);
-	if (linked) return linked.root;
+	if (linked && !isVendorPath(resolved)) return linked.root;
 	const candidate = nearestProjectRoot(resolved);
 	if (!candidate || candidate === nodePath.parse(candidate).root)
 		return undefined;
 	const home = nodePath.resolve(os.homedir());
 	if (candidate === home || isUnderDir(candidate, home)) return undefined;
-	if (candidate === os.tmpdir() || isUnderDir(session, candidate))
-		return undefined;
+	if (candidate === tmp || isUnderDir(session, candidate)) return undefined;
 	if (isVendorPath(candidate)) return undefined;
 	return candidate;
 }

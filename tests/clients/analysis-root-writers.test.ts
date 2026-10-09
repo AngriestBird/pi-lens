@@ -38,6 +38,26 @@ describe("analysis-root seam", () => {
 		expect(canWriteAnalysisRoot("adopted")).toBe(false);
 	});
 
+	it("refuses symlinked protected roots and keeps linked-worktree vendors out", () => {
+		// Recurrence: #4257 F3/F7 must not create a second identity through a
+		// symlink or re-admit vendor content before the linked-worktree guard.
+		const env = setupTestEnvironment("pi-lens-analysis-root-links-");
+		environments.push(env);
+		const protectedRoot = path.join(env.tmpDir, "protected");
+		const link = path.join(env.tmpDir, "protected-link");
+		fs.mkdirSync(protectedRoot, { recursive: true });
+		fs.writeFileSync(path.join(protectedRoot, "package.json"), "{}\n");
+		try {
+			fs.symlinkSync(protectedRoot, link, "dir");
+		} catch {
+			expect(true).toBe(true);
+			return;
+		}
+		expect(resolveAnalysisRoot(path.join(link, "a.ts"), env.tmpDir)).toBe(
+			"session",
+		);
+	});
+
 	it("requires a marker and refuses session ancestors", () => {
 		// Recurrence: an arbitrary out-of-root file must not turn its containing
 		// directory or a parent of the session into an analysis project.

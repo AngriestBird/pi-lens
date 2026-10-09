@@ -94,7 +94,10 @@ import {
 	isOutsideAllSessionRoots,
 } from "./session-roots.js";
 import { getProcessSingleton } from "../process-singletons.js";
-import { resolveAnalysisRoot } from "../analysis-root.js";
+import {
+	resolveAnalysisRoot,
+	resolveAnalysisRootPath,
+} from "../analysis-root.js";
 import { isEphemeralCheckoutRoot } from "../ephemeral-root.js";
 import { getLanguageId } from "./language.js";
 import {
@@ -1671,8 +1674,23 @@ export class LSPService {
 	private admitAdoptedRoot(root: string, filePath: string): boolean {
 		if (this.analysisRootModeForFile(filePath) !== "adopted") return false;
 		const normalized = normalizeMapKey(root);
+		const liveRoots = new Set<string>();
+		for (const key of this.state.clients.keys()) {
+			if (this.adoptedClientKeys.has(key))
+				liveRoots.add(key.slice(key.indexOf(":") + 1));
+		}
+		for (const root of this.adoptedRootLastUsedAt.keys()) {
+			if (!liveRoots.has(root)) this.adoptedRootLastUsedAt.delete(root);
+		}
+		if (liveRoots.has(normalized)) {
+			this.adoptedRootLastUsedAt.set(normalized, Date.now());
+			return true;
+		}
+		if (this.adoptedRootLastUsedAt.size < ADOPTED_ROOT_CAP) {
+			this.adoptedRootLastUsedAt.set(normalized, Date.now());
+			return true;
+		}
 		this.adoptedRootLastUsedAt.set(normalized, Date.now());
-		if (this.adoptedRootLastUsedAt.size <= ADOPTED_ROOT_CAP) return true;
 		const victim = [...this.adoptedRootLastUsedAt.keys()]
 			.sort(
 				(a, b) =>
@@ -1689,9 +1707,9 @@ export class LSPService {
 			this.retireClient(key);
 			void client.shutdown({ reason: "adopted-root-lru" }).catch(() => {});
 		}
-		recordDegradationOnce({
+		incrementDegradationCount({
 			kind: "lsp-adopted-root-evicted",
-			subject: "cap",
+			subject: victim,
 			reason: `adopted root cap ${ADOPTED_ROOT_CAP} evicted ${victim}`,
 		});
 		return true;
@@ -1714,6 +1732,18 @@ export class LSPService {
 			onRootFailure,
 		);
 		if (!candidate) return undefined;
+		const mode = this.analysisRootModeForFile(filePath);
+		if (mode === "adopted") {
+			const classifierRoot = resolveAnalysisRootPath(
+				filePath,
+				this.sessionCwd ?? process.cwd(),
+			);
+			if (
+				!classifierRoot ||
+				normalizeMapKey(classifierRoot) !== normalizeMapKey(candidate)
+			)
+				return undefined;
+		}
 		// #2052: a file outside EVERY initialized session cwd gets no client at
 		// all. The ceiling below is unchanged (`process.cwd()`, as before this
 		// issue) and still only clamps files that are actually inside it —
@@ -2028,7 +2058,11 @@ export class LSPService {
 
 	private scheduleIdleEviction(key: string, server: LSPServerInfo): void {
 		// The registry owns this policy. Unmeasured and resident servers stay resident.
-		if (server.idleEviction !== "transparent") return;
+		if (
+			server.idleEviction !== "transparent" &&
+			!this.adoptedClientKeys.has(key)
+		)
+			return;
 		// Pressure-gating these timers would require a separate reconciliation pass
 		// when the manager crosses the threshold; keep ownership simple and use the
 		// warm-LSP-friendly 20-minute default instead.
