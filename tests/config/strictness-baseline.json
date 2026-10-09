@@ -1,6 +1,6 @@
 {
 	"tsconfig.strict-indexed.json": {
-		"clients": 430,
+		"clients": 438,
 		"clients/config-core": 18,
 		"clients/dispatch": 27,
 		"clients/dispatch/rules": 12,
@@ -18,7 +18,7 @@
 	"tsconfig.strict-optional.json": {
 		"clients": 344,
 		"clients/config-core": 1,
-		"clients/dispatch": 18,
+		"clients/dispatch": 20,
 		"clients/dispatch/facts": 1,
 		"clients/dispatch/runners": 30,
 		"clients/dispatch/runners/utils": 9,

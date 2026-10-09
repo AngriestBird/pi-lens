@@ -96,6 +96,8 @@ interface LspMutationCacheManager {
 
 export interface LspMutationContext {
 	cwd: string;
+	/** Stable session id for the activation issuing the edit. */
+	sessionId?: string;
 	correlationId: string;
 	/**
 	 * #4187 R4-1: the pi tool call this mutation belongs to, when one issued
@@ -448,6 +450,9 @@ function bookkeepLspMutation(
 							authorshipUnknown: true,
 						}),
 						...(editRanges !== undefined ? { editRanges } : {}),
+						...(context.sessionId !== undefined && {
+							sessionId: context.sessionId,
+						}),
 						consumer: context.tool,
 						provenance: "observed",
 						// Real value threaded through, not the bridge's own
@@ -501,7 +506,7 @@ function bookkeepLspMutation(
 						detail.range ?? { start: 1, end: 1 },
 						detail.importsChanged ?? true,
 						context.cwd,
-						runtime?.telemetrySessionId,
+						context.sessionId ?? runtime?.telemetrySessionId,
 						undefined,
 						// #2504 review round 2 (F1). #2504 added a containment
 						// filter to `addModifiedRange` and gave it `cwd` as the

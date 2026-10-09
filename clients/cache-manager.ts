@@ -80,7 +80,11 @@ export interface TurnState {
 	sessionId?: string;
 	/** Explicit writer identity; unlike sessionId this distinguishes pi/MCP. */
 	owner?: TurnStateOwner;
+	/** #3613 R2: durable worklists for concurrent same-process sessions. */
+	sessions?: Record<string, TurnStatePartition>;
 }
+
+export type TurnStatePartition = Omit<TurnState, "sessions">;
 
 // --- Defaults ---
 
@@ -94,6 +98,8 @@ const DEFAULT_TURN_STATE: TurnState = {
 
 export const MCP_TURN_STATE_OWNER_ID = `mcp-${process.pid}`;
 const TURN_OWNER_STALE_MS = 30 * 60 * 1000;
+const TURN_SESSION_PARTITION_TTL_MS = 30 * 60 * 1000;
+const MAX_TURN_SESSION_PARTITIONS = 16;
 
 // --- Helpers ---
 
@@ -404,7 +410,37 @@ export class CacheManager {
 	/**
 	 * Read turn state. Returns default if not found.
 	 */
-	readTurnState(cwd: string): TurnState {
+	readTurnState(
+		cwd: string,
+		sessionId?: string,
+		sessionRole?: "primary" | "secondary",
+	): TurnState {
+		const state = this.readTurnStateEnvelope(cwd);
+		if (sessionId === undefined) return state;
+		// The legacy envelope is always the primary partition. Prefer it when
+		// its owner is the requested primary, even if an old writer left a
+		// same-id entry under `sessions`.
+		if (state.owner?.kind === "pi" && state.owner.id === sessionId)
+			return state;
+		const partition = state.sessions?.[sessionId];
+		if (partition) return partition;
+		if (sessionRole === "secondary")
+			return {
+				...DEFAULT_TURN_STATE,
+				files: {},
+				lastUpdated: new Date().toISOString(),
+			};
+		// Legacy records are the primary partition. A secondary must not adopt
+		// them merely because it shares the project root.
+		if (!state.owner || state.owner.id === sessionId) return state;
+		return {
+			...DEFAULT_TURN_STATE,
+			files: {},
+			lastUpdated: new Date().toISOString(),
+		};
+	}
+
+	private readTurnStateEnvelope(cwd: string): TurnState {
 		const statePath = getTurnStatePath(cwd);
 		if (!fs.existsSync(statePath)) {
 			return {
@@ -418,13 +454,37 @@ export class CacheManager {
 			statePath,
 			(parsed) => parsed as TurnState,
 		);
-		return (
-			state ?? {
-				...DEFAULT_TURN_STATE,
-				files: {},
-				lastUpdated: new Date().toISOString(),
-			}
+		const envelope = state ?? {
+			...DEFAULT_TURN_STATE,
+			files: {},
+			lastUpdated: new Date().toISOString(),
+		};
+		if (!envelope.sessions) return envelope;
+		const now = Date.now();
+		const liveEntries = Object.entries(envelope.sessions).filter(
+			([, partition]) => {
+				const updated = Date.parse(partition.lastUpdated ?? "");
+				return (
+					Number.isFinite(updated) &&
+					now - updated <= TURN_SESSION_PARTITION_TTL_MS
+				);
+			},
 		);
+		liveEntries.sort(
+			([, left], [, right]) =>
+				Date.parse(right.lastUpdated) - Date.parse(left.lastUpdated),
+		);
+		const sessions = Object.fromEntries(
+			liveEntries.slice(0, MAX_TURN_SESSION_PARTITIONS),
+		);
+		if (
+			Object.keys(sessions).length !== Object.keys(envelope.sessions).length
+		) {
+			const pruned = { ...envelope, sessions };
+			writeFileAtomic(statePath, JSON.stringify(pruned, null, 2));
+			return pruned;
+		}
+		return envelope;
 	}
 
 	/**
@@ -528,6 +588,7 @@ export class CacheManager {
 		sessionId?: string | null,
 		ownerKind: TurnStateOwnerKind = "pi",
 		projectRoot?: string,
+		sessionRole?: "primary" | "secondary",
 	): TurnState {
 		// #2504: the worklist is a PROJECT worklist. A path outside the project
 		// was accepted and keyed by its absolute path, so a prior session's
@@ -548,7 +609,27 @@ export class CacheManager {
 			);
 			return this.readTurnState(cwd);
 		}
-		const state = this.readTurnState(cwd);
+		const envelope = this.readTurnStateEnvelope(cwd);
+		// Derive ownership at the shared seam. A caller must not be able to
+		// forget a role flag and accidentally write a secondary into primary's
+		// worklist (#4250 F1). A different live same-process pi owner identifies
+		// a concurrent secondary; MCP keeps its independent top-level route.
+		const useSessionPartition =
+			sessionId !== undefined &&
+			sessionId !== null &&
+			ownerKind === "pi" &&
+			(sessionRole === "secondary" ||
+				(sessionRole === undefined &&
+					envelope.owner?.kind === "pi" &&
+					envelope.owner.id !== sessionId &&
+					envelope.owner.pid === process.pid));
+		const state = useSessionPartition
+			? (envelope.sessions?.[sessionId!] ?? {
+					...DEFAULT_TURN_STATE,
+					files: {},
+					lastUpdated: new Date().toISOString(),
+				})
+			: envelope;
 		if (sessionId) {
 			const owner: TurnStateOwner = {
 				kind: ownerKind,
@@ -556,7 +637,11 @@ export class CacheManager {
 				pid: process.pid,
 				lastSeen: new Date().toISOString(),
 			};
-			if (this.getTurnStateAccess(cwd, owner) === "foreign-live") return state;
+			if (
+				!useSessionPartition &&
+				this.getTurnStateAccess(cwd, owner) === "foreign-live"
+			)
+				return state;
 			state.sessionId = sessionId;
 			state.owner = owner;
 		}
@@ -579,7 +664,15 @@ export class CacheManager {
 			};
 		}
 
-		this.writeTurnState(state, cwd);
+		if (useSessionPartition) {
+			envelope.sessions = {
+				...envelope.sessions,
+				[sessionId!]: state,
+			};
+			this.writeTurnState(envelope, cwd);
+		} else {
+			this.writeTurnState(state, cwd);
+		}
 		return state;
 	}
 
@@ -589,8 +682,17 @@ export class CacheManager {
 	clearTurnState(
 		cwd: string,
 		owner: Pick<TurnStateOwner, "kind" | "id"> & { sessionStartedAt?: number },
+		sessionRole?: "primary" | "secondary",
 	): boolean {
-		const currentState = this.readTurnState(cwd);
+		const envelope = this.readTurnStateEnvelope(cwd);
+		if (sessionRole === "secondary") {
+			if (!envelope.sessions?.[owner.id]) return true;
+			const { [owner.id]: _retired, ...remaining } = envelope.sessions;
+			envelope.sessions = remaining;
+			this.writeTurnState(envelope, cwd);
+			return true;
+		}
+		const currentState = envelope;
 		const isCurrentOwner =
 			this.getTurnStateAccess(cwd, owner) !== "foreign-live";
 		if (!isCurrentOwner && process.pid !== currentState.owner?.pid)
@@ -625,21 +727,34 @@ export class CacheManager {
 	incrementTurnCycle(
 		cwd: string,
 		owner: Pick<TurnStateOwner, "kind" | "id">,
+		sessionId?: string,
+		sessionRole?: "primary" | "secondary",
 	): TurnState {
-		const state = this.readTurnState(cwd);
+		const envelope = this.readTurnStateEnvelope(cwd);
+		const useSessionPartition =
+			sessionId !== undefined &&
+			sessionRole === "secondary" &&
+			envelope.sessions?.[sessionId] !== undefined;
+		const state = useSessionPartition
+			? envelope.sessions![sessionId!]
+			: this.readTurnState(cwd, sessionId);
+		if (sessionId !== undefined && state.owner?.id !== sessionId) return state;
 		const isCurrentOwner =
 			this.getTurnStateAccess(cwd, owner) !== "foreign-live";
 		if (!isCurrentOwner && process.pid !== state.owner?.pid) return state;
 		state.turnCycles++;
-		this.writeTurnState(state, cwd);
+		if (useSessionPartition) {
+			envelope.sessions = { ...envelope.sessions, [sessionId!]: state };
+			this.writeTurnState(envelope, cwd);
+		} else this.writeTurnState(state, cwd);
 		return state;
 	}
 
 	/**
 	 * Check if max cycles exceeded.
 	 */
-	isMaxCyclesExceeded(cwd: string): boolean {
-		const state = this.readTurnState(cwd);
+	isMaxCyclesExceeded(cwd: string, sessionId?: string): boolean {
+		const state = this.readTurnState(cwd, sessionId);
 		return state.turnCycles >= state.maxCycles;
 	}
 
@@ -647,8 +762,8 @@ export class CacheManager {
 	 * Get files that need jscpd re-scan (any edit).
 	 * Only returns source code files jscpd can meaningfully analyse.
 	 */
-	getFilesForJscpd(cwd: string): string[] {
-		const state = this.readTurnState(cwd);
+	getFilesForJscpd(cwd: string, sessionId?: string): string[] {
+		const state = this.readTurnState(cwd, sessionId);
 		return Object.keys(state.files).filter((f) =>
 			/\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs|rb|java|cs|php|cpp|c|h|hpp|swift|kt)$/.test(
 				f,
@@ -659,8 +774,8 @@ export class CacheManager {
 	/**
 	 * Get files that need madge re-scan (imports changed).
 	 */
-	getFilesForMadge(cwd: string): string[] {
-		const state = this.readTurnState(cwd);
+	getFilesForMadge(cwd: string, sessionId?: string): string[] {
+		const state = this.readTurnState(cwd, sessionId);
 		return Object.entries(state.files)
 			.filter(([, f]) => f.importsChanged)
 			.map(([p]) => p);

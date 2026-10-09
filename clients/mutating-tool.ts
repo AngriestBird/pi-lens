@@ -893,6 +893,8 @@ export function classifyMutatingTool(
 export interface BridgeMutationEntry {
 	filePath: string;
 	kind: MutationKind;
+	/** Stable activation identity for durable turn-state attribution. */
+	sessionId?: string;
 	touchedLines?: [number, number];
 	editRanges?: [number, number][];
 	authorshipUnknown?: boolean;

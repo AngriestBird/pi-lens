@@ -469,7 +469,7 @@ function applyTurnAndChangeLog(
 				changedRange,
 				entry.importsChanged ?? false,
 				projectRoot,
-				runtime.telemetrySessionId,
+				entry.sessionId ?? runtime.telemetrySessionId,
 			);
 	}
 	runtime.recordProjectMutation?.({

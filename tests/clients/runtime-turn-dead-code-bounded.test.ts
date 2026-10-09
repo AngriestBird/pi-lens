@@ -190,7 +190,20 @@ async function slowTurn(signal?: AbortSignal, actor: TurnActor = {}) {
 	});
 	vultureProcess.onScan = scan;
 	vi.useFakeTimers();
-	edit();
+	if (actor.sessionId !== undefined) {
+		const file = path.join(root, "mod.py");
+		fs.writeFileSync(file, "x = 1\n");
+		(actor.cacheManager ?? cacheManager).addModifiedRange(
+			file,
+			{ start: 1, end: 1 },
+			false,
+			root,
+			actor.sessionId,
+			"pi",
+			undefined,
+			actor.sessionScope?.role,
+		);
+	} else edit();
 	const started = startTurn(signal, [client], actor);
 	await scanning;
 	await vi.advanceTimersByTimeAsync(3_100);

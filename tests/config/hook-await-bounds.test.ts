@@ -1440,15 +1440,6 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"(runtime-turn.ts:2882).",
 		owner: "#2523 slice 2",
 	},
-	"clients/runtime-turn.ts#handleTurnEnd:82bbe401~723cb9f3": {
-		family: "hook-await",
-		site: "turn_end",
-		reason:
-			"`drainPendingRunnerFindings(0)` — a zero-WAIT drain, which " +
-			"bounds how long it waits for new findings but not how long the " +
-			"drain itself takes.",
-		owner: "#2523 slice 2",
-	},
 	"clients/runtime-turn.ts#handleTurnEnd:9167ea7d~7f6889da": {
 		family: "hook-await",
 		site: "turn_end",
@@ -1494,15 +1485,6 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"would bound a promise that has already settled.",
 		owner: "#3274",
 	},
-	"clients/runtime-turn.ts#handleTurnEnd:dfbc3b71~d09e69a7": {
-		family: "hook-await",
-		site: "turn_end",
-		reason:
-			"madge dependency-check on turn_end behind a flag: " +
-			"`ensureAvailable` and the batch check are both unbounded above " +
-			"their spawns.",
-		owner: "#2523 slice 2",
-	},
 	"clients/runtime-turn.ts#handleTurnEnd:ebaaaabd~de3a52db": {
 		family: "hook-await",
 		site: "turn_end",
@@ -1510,15 +1492,6 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"madge dependency-check on turn_end behind a flag: " +
 			"`ensureAvailable` and the batch check are both unbounded above " +
 			"their spawns.",
-		owner: "#2523 slice 2",
-	},
-	"clients/runtime-turn.ts#handleTurnEnd:f02aaccc~a59ea951": {
-		family: "hook-await",
-		site: "turn_end",
-		reason:
-			"`runtime.settleCascadeRuns` owns its internal 5000ms settle cap; " +
-			"the outer turn_end handler remains bounded by its existing admission " +
-			"seam (#2523 slice 2).",
 		owner: "#2523 slice 2",
 	},
 	"clients/runtime-turn.ts#handleTurnEnd:fde4167d~c3e1d7c1": {
@@ -2689,6 +2662,19 @@ const BOUNDED_CALL_SITES: Readonly<Record<string, string>> = {
 		"wall-clock only. Either way the wall budget is live: the hook's " +
 		"HOOK_WALL_BUDGET_MS.turn_end caps the whole pass and composes with the " +
 		"pass's own internal deadline (3s) and the per-touch floor.",
+	"call:clients/runtime-turn.ts#handleTurnEnd:9256e1fe~67c7ff0d":
+		"`cascadeSettleSignal` is the live turn_end abort signal from " +
+		"`TurnEndDeps.signal`; direct harnesses may omit it, leaving the " +
+		"explicit turn_end wall cap as the remaining bound for parked computes.",
+	"call:clients/runtime-turn.ts#handleTurnEnd:c900b7a9~67c7ff0d":
+		"`runnerDrainSignal` is the live turn_end abort signal from " +
+		"`TurnEndDeps.signal`; it is optional only in direct unit harnesses, " +
+		"where the wall-clock half still bounds the drain. The drain is the " +
+		"session-partitioned runner delivery seam and must not wait indefinitely.",
+	"call:clients/runtime-turn.ts#handleTurnEnd:e5344cbe~67c7ff0d":
+		"`madgeAvailabilitySignal` is the live turn_end abort signal from " +
+		"`TurnEndDeps.signal`; it may be absent only in direct harnesses, while " +
+		"the madge availability probe remains wall-bounded and best effort.",
 	"call:clients/runtime-turn.ts#handleTurnEnd:e953bca9~404f0b0f":
 		"The late auxiliary re-promotion observer receives the live `turn_end` " +
 		"ctx.signal from `deps.signal` when pi supplies one, but that signal is " +

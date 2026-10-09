@@ -2894,6 +2894,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// later agent_end can tell its own queued work apart from a
 					// concurrent in-process secondary session's.
 					sessionId: getStableSessionId(ctx),
+					sessionRole:
+						ownedSessionRole === "concurrent-secondary"
+							? "secondary"
+							: "primary",
 				}),
 				{
 					ms: editClass
@@ -3865,6 +3869,13 @@ function activateExtension(hostPi: ExtensionAPI) {
 			shutdownCwd,
 		);
 		if (shutdownClassification === "secondary") {
+			if (stableSessionId !== undefined && shutdownCwd !== undefined) {
+				cacheManager.clearTurnState(
+					shutdownCwd,
+					{ kind: "pi", id: stableSessionId },
+					"secondary",
+				);
+			}
 			emitCacheUsageSummaryAtSessionEnd(
 				stableSessionId,
 				"concurrent-secondary",

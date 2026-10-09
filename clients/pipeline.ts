@@ -2085,6 +2085,7 @@ async function analysePipeline(
 			writeIndex: widgetOrder(),
 			// #3568: a collect-later runner defers its result to a turn end.
 			sessionGeneration: ctx.sessionGeneration,
+			sessionId: ctx.telemetry?.sessionId,
 			telemetryModel: ctx.telemetry?.modelId,
 			telemetryProvider: ctx.telemetry?.provider,
 		},
