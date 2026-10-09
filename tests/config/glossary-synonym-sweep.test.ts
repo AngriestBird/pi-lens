@@ -961,7 +961,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/opaque-mutation-scan.ts": 6,
 		"clients/opengrep-client.ts": 8,
 		"clients/opengrep-config.ts": 3,
-		"clients/package-manager.ts": 20,
+		"clients/package-manager.ts": 21,
 		"clients/package-root.ts": 5,
 		"clients/path-keyed-map.ts": 11,
 		// 30 -> 34: findNearestMarkerRootDetailed (#3691) adds its own marker/root

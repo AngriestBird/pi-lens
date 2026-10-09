@@ -19,8 +19,8 @@ import path from "node:path";
 import { isTestMode } from "../env-utils.js";
 import { getGlobalPiLensDir } from "../file-utils.js";
 import { getGlobalPiLensLogDir } from "../probe-home-state.js";
-import { isFullyQualified, isUnderDir, isVendorPath } from "../path-utils.js";
-import { findGlobalBinary } from "../package-manager.js";
+import { isFullyQualified } from "../path-utils.js";
+import { findGlobalBinary, isProjectLocalBinPath } from "../package-manager.js";
 import {
 	getDegradationLedgerGeneration,
 	recordDegradationOnce,
@@ -382,7 +382,7 @@ export function isProjectLocalLspBinary(
 	resolvedCommand: string,
 	cwd: string,
 ): boolean {
-	return isUnderDir(resolvedCommand, cwd) && isVendorPath(resolvedCommand);
+	return isProjectLocalBinPath(resolvedCommand, cwd);
 }
 
 function refuseUnknownProjectLocalBinary(
