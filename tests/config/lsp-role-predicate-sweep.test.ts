@@ -74,39 +74,6 @@ const POPULATION_FLOOR = 400;
  */
 const OWNER = "clients/lsp/server-traits.ts";
 
-/**
- * Registered admissions, shrink-only, each with the reason it is an admission
- * rather than a fold. A new row needs a reason; a row whose file stops holding
- * a site must be deleted here or this sweep reds.
- *
- * All three are measurement drivers.
- * `scripts/lib/lsp-idle-eviction-probe.mjs` projects the role into its own
- * measurement row and `scripts/bench-lsp.mjs` reads that row back, so most of
- * their sites classify a RECORD field whose published spelling is the eviction
- * matrix's `role` column rather than a live server. Re-spelling that column is
- * a durable-record change belonging to #1756's record-policy stage, not to a
- * behaviour-preserving vocabulary fold. `scripts/lib/clean-signal.mjs` imports
- * no `clients/` module at all — `scripts/probe-clean-signal.mjs` loads it
- * through a dynamic-import wrapper — so wiring it to the predicate would give a
- * probe driver a build-order dependency it does not otherwise have.
- *
- * The per-file reason lives here; the shrink-only SITE census over the same
- * three files is the next test, so a driver that folds lowers the count and a
- * new inlined site raises it into a red.
- */
-const ADMITTED: Readonly<Record<string, string>> = {
-	"scripts/bench-lsp.mjs":
-		"Reads the eviction probe's own measurement row back, whose published `role` column spells the non-auxiliary value `primary`; re-spelling a durable record column is #1756's record-policy stage, not this fold.",
-	"scripts/lib/clean-signal.mjs":
-		"Imports no clients/ module — probe-clean-signal.mjs loads it through a dynamic-import wrapper — so the predicate would give a probe driver a build-order dependency it does not otherwise have.",
-	"scripts/lib/lsp-idle-eviction-probe.mjs":
-		"Produces the eviction matrix's `role` record column (`auxiliary` / `primary`); a durable-record spelling change, not a server classification.",
-};
-
-/** The same three files, as the shrink-only site census below scans them. */
-const SCRIPT_DRIVERS = Object.keys(ADMITTED).sort() as readonly string[];
-const SCRIPT_DRIVER_SITE_CEILING = 8;
-
 const COMPARISON = "(?:===|!==|==|!=)";
 /** Any receiver spelling: dotted, optional-chained, indexed, or none. */
 const RECEIVER = String.raw`[A-Za-z_$][\w$]*(?:\s*\??\.\s*[A-Za-z_$][\w$]*|\s*\[[^\]\n]+\])*`;
@@ -203,7 +170,7 @@ const PREDICATE_NEEDLES = [
 ] as const;
 
 describe("#1488 — one auxiliary-role predicate, one vocabulary", () => {
-	it("finds no inlined role predicate outside the seam and its admissions", () => {
+	it("finds no inlined role predicate outside the seam", () => {
 		const files = population();
 		assertNonEmptyScan(
 			"role-predicate population",
@@ -215,43 +182,14 @@ describe("#1488 — one auxiliary-role predicate, one vocabulary", () => {
 			const relative = relativePosix(REPO_ROOT, absolute);
 			return { relative, findings: scanFile(absolute) };
 		});
-		const governed = scanned.filter(
-			(entry) =>
-				entry.relative !== OWNER && ADMITTED[entry.relative] === undefined,
-		);
+		const governed = scanned.filter((entry) => entry.relative !== OWNER);
 
 		expect(
 			governed.flatMap((entry) => entry.findings),
 			"An inlined auxiliary-role predicate, a second role vocabulary, or a " +
 				"second exhaustive classification reappeared. Ask isAuxiliary() from " +
-				"clients/lsp/server-traits.ts, declare the union there, or register " +
-				"the file in ADMITTED with a reason (#1488).",
+				"clients/lsp/server-traits.ts or declare the union there (#1488).",
 		).toEqual([]);
-
-		// Every admission is still load-bearing: a driver that folds onto the
-		// predicate deletes its row rather than leaving a stale reason behind.
-		expect(
-			Object.keys(ADMITTED).filter(
-				(file) =>
-					scanned.find((entry) => entry.relative === file)?.findings.length ===
-					0,
-			),
-			"An ADMITTED file no longer holds a site; delete its row.",
-		).toEqual([]);
-	});
-
-	it("admits the measurement drivers as a shrink-only site count", () => {
-		const sites = SCRIPT_DRIVERS.flatMap((relative) =>
-			scanSource(
-				relative,
-				readFileSync(path.resolve(REPO_ROOT, relative), "utf8"),
-			),
-		).filter((finding) =>
-			(PREDICATE_NEEDLES as readonly string[]).includes(finding.needle),
-		);
-
-		assertNonEmptyScan("script-driver role sites", sites.length, 1);
-		expect(sites.length).toBeLessThanOrEqual(SCRIPT_DRIVER_SITE_CEILING);
 	});
 
 	it("detects every spelling of an inlined predicate, including unlisted ones", () => {

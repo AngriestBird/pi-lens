@@ -652,8 +652,8 @@ the surface they bite; each block loads only when its trigger applies.
   tables stay disjoint. The auxiliary lifecycle and wait policy lives in
   `clients/lsp/auxiliary-lifecycle.ts`, the diagnostic policy in
   `clients/dispatch/auxiliary-lsp.ts`. Enforced by
-  `tests/config/lsp-role-predicate-sweep.test.ts` (production tree at zero
-  inlined predicates; `scripts/` drivers admitted shrink-only) and
+  `tests/config/lsp-role-predicate-sweep.test.ts` (production and `scripts/`
+  trees at zero inlined predicates) and
   `tests/config/lsp-server-trait-table.test.ts` (registered-or-fail).
 - LSP roots never exceed the session-cwd ceiling. Root/config discovery uses
   shared marker seams. Child cwd resolution uses `resolveToolCwd` and its
