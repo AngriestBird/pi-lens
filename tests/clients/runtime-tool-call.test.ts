@@ -1728,26 +1728,31 @@ describe("#4187 R4-1 — a bytes-less write advances only what its own call name
 				input: { apply: true, paths: ["reuse.ts"] },
 			});
 			toolRewriteLine3(filePath);
-			runtime.readGuard.recordWritten(filePath, {
-				stampFileTime: false,
-				advanceAuthorship: true,
-				toolCallId: "call-reuse",
-			});
-			// The first observed write may advance the existing authorship.
-			expect(runtime.readGuard.checkEdit(filePath, [3, 3]).action).toBe(
-				"allow",
-			);
+			const bridge = getMutationBridge();
+			expect(
+				bridge?.recordMutation({
+					filePath,
+					kind: "edit",
+					consumer: "observed-license-spend",
+					provenance: "observed",
+					toolCallId: "call-reuse",
+				}),
+			).toBe(true);
 
 			const lines = fs.readFileSync(filePath, "utf-8").split("\n");
 			lines[1] = "const external_again = 2;";
 			fs.writeFileSync(filePath, lines.join("\n"));
 			// R5-1 recurrence: a settled call id must not spend its license again
 			// to re-baseline over the second writer's bytes.
-			runtime.readGuard.recordWritten(filePath, {
-				stampFileTime: false,
-				advanceAuthorship: true,
-				toolCallId: "call-reuse",
-			});
+			expect(
+				bridge?.recordMutation({
+					filePath,
+					kind: "edit",
+					consumer: "observed-license-spend",
+					provenance: "observed",
+					toolCallId: "call-reuse",
+				}),
+			).toBe(true);
 			expect(runtime.readGuard.checkEdit(filePath, [2, 2]).action).toBe(
 				"block",
 			);
