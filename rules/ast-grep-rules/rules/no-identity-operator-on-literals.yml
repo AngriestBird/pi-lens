@@ -18,7 +18,8 @@ note: |
   correct singleton checks in Python, including tri-state and mock-
   robustness checks. The remaining variants use
   `has: kind: <literal>` as direct children of the
-  comparison_operator.
+  comparison_operator. Negative numeric literals are unary_operator
+  children, so their nested integer/float kinds are covered explicitly.
 
   Direct children only — no `stopBy: end` — so string subscripts
   like `summary["verified"] is True` don't fire (the string is
@@ -44,7 +45,21 @@ rule:
         - kind: comparison_operator
           regex: '\bis\b'
         - has:
+            kind: unary_operator
+            has:
+              kind: float
+    - all:
+        - kind: comparison_operator
+          regex: '\bis\b'
+        - has:
             kind: float
+    - all:
+        - kind: comparison_operator
+          regex: '\bis\b'
+        - has:
+            kind: unary_operator
+            has:
+              kind: integer
     - all:
         - kind: comparison_operator
           regex: '\bis\b'
