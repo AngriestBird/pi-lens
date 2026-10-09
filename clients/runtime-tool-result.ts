@@ -1588,6 +1588,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		// them) — a deliberate divergence from the isError filter above, which
 		// exists for restore semantics where attribution would lie.
 		let opaquePaths: string[] = [];
+		let hadOpaqueRecovery = false;
 		let observedChangedKeys: Set<string> | undefined;
 		let recognizedAuthored: string[] = [];
 		// Recovery runs for EVERY bash command with a pending baseline - not
@@ -1685,6 +1686,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				);
 				opaquePaths = opaquePaths.filter((p) => !survivingKeys.has(p));
 			}
+			hadOpaqueRecovery = opaquePaths.length > 0;
 			if (observedChangedKeys) {
 				recognizedAuthored = recognizedWritten.filter((file) =>
 					observedChangedKeys!.has(normalizeMapKey(path.resolve(file))),
@@ -1724,11 +1726,14 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		const recognizedAuthoredSet = new Set(recognizedAuthored);
 		bashAuthorshipConfirmed = recognizedAuthored.length > 0;
 		for (const wp of written) {
-			// #3525: the command is in the conversation, the bytes it wrote
-			// are not: authorship, not FileTime.
+			// #3525: a parser-recognized bash write is whole-file authorship only
+			// after the tool_call preflight proved no foreign writer intervened.
+			// Opaque recovery is observed bridge evidence, not bytes the parser
+			// accounted for, so it remains UNKNOWN for F-4210-2.
 			if (!getFlag("no-read-guard") && recognizedAuthoredSet.has(wp))
 				deps.readGuard?.recordWritten(wp, {
-					authorship: "unknown",
+					authorship:
+						hadOpaqueRecovery || opaqueSet.has(wp) ? "unknown" : "whole-file",
 					stampFileTime: false,
 					...(toolCallId !== undefined && { toolCallId }),
 				});
