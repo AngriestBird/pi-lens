@@ -36,8 +36,8 @@
  * formatting via these events) — that remains a separate, explicitly
  * out-of-scope future feature. `pilens:format:done` closes the pre/post pair
  * and carries an empty `paths` array when formatting ran but changed no bytes.
- * It is emitted only after formatter-owned late writes and their resync have
- * settled; a formatter that never settles has no false terminal event.
+ * It is emitted after formatter-owned work settles, or as an explicit
+ * `settled: false` terminal when the bounded formatter drain gives up.
  *
  * ## `pilens:autofix:start` (#684)
  *
@@ -133,6 +133,7 @@ interface FormatDonePayload {
 	ownerSessionId?: string;
 	turnIndex?: number;
 	batchId?: string;
+	settled?: boolean;
 }
 
 interface AutofixStartPayload {
@@ -384,6 +385,7 @@ export interface PublishFormatDoneArgs {
 	ownerSessionId?: string;
 	turnIndex?: number;
 	batchId?: string;
+	settled?: boolean;
 }
 
 /**
@@ -434,6 +436,7 @@ export function publishFormatDone(args: PublishFormatDoneArgs): void {
 				: { ownerSessionId: args.ownerSessionId }),
 			...(args.turnIndex === undefined ? {} : { turnIndex: args.turnIndex }),
 			...(args.batchId === undefined ? {} : { batchId: args.batchId }),
+			...(args.settled === undefined ? {} : { settled: args.settled }),
 		};
 		resolution.emit(BUS_FORMAT_DONE_EVENT, payload);
 		hasLoggedDoneFailure = false;

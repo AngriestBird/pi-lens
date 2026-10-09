@@ -687,6 +687,32 @@ export async function handleAgentEnd({
 		const work: (FormatWork | undefined)[] = [];
 		work.length = formatRecords.length;
 		const started = new Set<number>();
+		const unsettledFormatPaths = new Set<string>();
+		let terminalFormatEventPublished = false;
+		const batchIdentity = records[0]!;
+		const publishUnsettled = () => {
+			if (terminalFormatEventPublished || unsettledFormatPaths.size === 0)
+				return;
+			terminalFormatEventPublished = true;
+			recordDegradationOnce({
+				kind: "deferred-format-unsettled",
+				subject: batchIdentity.queuedTurnId,
+				reason:
+					"a deferred formatter remained unsettled after the bounded drain; the done event names the pending files and settled=false",
+			});
+			publishFormatDone({
+				cwd: ctxCwd ?? runtime.projectRoot,
+				paths: [...unsettledFormatPaths],
+				kinds: ["format"],
+				...(batchIdentity.ownerSessionId === undefined
+					? {}
+					: { ownerSessionId: batchIdentity.ownerSessionId }),
+				turnIndex: batchIdentity.queuedTurnIndex,
+				batchId: batchIdentity.queuedTurnId,
+				settled: false,
+				dbg,
+			});
+		};
 		let nextIndex = 0;
 		const worker = async (): Promise<void> => {
 			while (nextIndex < formatRecords.length) {
@@ -752,7 +778,11 @@ export async function handleAgentEnd({
 					// child, which writes F later. Once the phase and every formatter
 					// it gave up on have settled, sync a fresh stamped read of F, or
 					// the LSP keeps the bytes from before the format.
-					if (!work[index]?.result)
+					if (!work[index]?.result) {
+						if (!ambientSignal?.aborted) {
+							unsettledFormatPaths.add(filePath);
+							publishUnsettled();
+						}
 						void (async () => {
 							let outcome: LspResyncOutcome | "stale-session" | "read-failed" =
 								"stale-session";
@@ -817,6 +847,7 @@ export async function handleAgentEnd({
 								metadata: { outcome },
 							});
 						})();
+					}
 				} catch (err) {
 					work[index] = {
 						record,
@@ -1037,10 +1068,16 @@ export async function handleAgentEnd({
 					: { ownerSessionId: records[0]!.ownerSessionId }),
 				turnIndex: records[0]!.queuedTurnIndex,
 				batchId: records[0]!.queuedTurnId,
+				settled: true,
 				dbg,
 			});
-		if (lateFormatCompletions.length === 0) publishDone();
-		else void Promise.all(lateFormatCompletions).then(publishDone);
+		if (!terminalFormatEventPublished) {
+			if (lateFormatCompletions.length === 0) publishDone();
+			else
+				void Promise.all(lateFormatCompletions).then(() => {
+					if (!terminalFormatEventPublished) publishDone();
+				});
+		}
 	}
 
 	// LSP sees only authoritative content after both mutation phases. In

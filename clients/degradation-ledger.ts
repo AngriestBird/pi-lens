@@ -252,6 +252,8 @@ export type DegradationKind =
 	 * commit.
 	 */
 	| "deferred-blocker-gate-error"
+	/** A deferred formatter outlived its bounded drain and has no clean result. */
+	| "deferred-format-unsettled"
 	| "demoted-finding-retired"
 	| "diagnostic-retained-unreconciled"
 	| "dispatch-non-absolute-baseline-path"

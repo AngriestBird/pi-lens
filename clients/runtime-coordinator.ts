@@ -35,6 +35,7 @@ import {
 	recordDegradationOnce,
 } from "./degradation-ledger.js";
 import { WriteOrderingGuard, writeOrderToken } from "./write-ordering-guard.js";
+import { getProcessSingleton } from "./process-singletons.js";
 import type { GenerationHandle } from "./generation-guard.js";
 import {
 	beginScope,
@@ -46,6 +47,14 @@ import {
 
 /** Keep deferred cascade admission bounded without dropping late findings. */
 export const MAX_PENDING_CASCADE_RUNS = 32;
+
+function nextTelemetrySessionId(): string {
+	const state = getProcessSingleton("runtime-coordinator-telemetry", 1, () => ({
+		processId: randomBytes(6).toString("hex"),
+		nextGeneration: 0,
+	}));
+	return `lens-${state.processId}-${++state.nextGeneration}`;
+}
 
 /**
  * Lanes whose cut advisory items may be parked at once (#3813/#3901): the
@@ -526,7 +535,8 @@ export class RuntimeCoordinator {
 		rules: [],
 		hasCustomRules: false,
 	};
-	private _telemetrySessionId = `lens-${Date.now().toString(36)}`;
+	/** Process-unique and monotonic across coordinator reloads (#4213). */
+	private _telemetrySessionId = nextTelemetrySessionId();
 	private _lifecycleReason: string | undefined;
 	private _hasStableSessionId = false;
 	private _telemetryModel = "unknown";
@@ -686,7 +696,7 @@ export class RuntimeCoordinator {
 		// partition is its own and survives the primary's replacement.
 		this._actionableWarningsThisTurn.clear(this._telemetrySessionId);
 		this._codeQualityWarningsThisTurn.clear(this._telemetrySessionId);
-		this._telemetrySessionId = `lens-${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`;
+		this._telemetrySessionId = nextTelemetrySessionId();
 		this._hasStableSessionId = false;
 		this._telemetryModel = "unknown";
 		this._telemetryModelId = "";
