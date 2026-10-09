@@ -509,7 +509,8 @@ export function makeCtx(
 	};
 
 	// Only present when the test asked for it — an absent accessor is the
-	// "older host, no trust surface" case pi-lens must fail open on (#1334 S5).
+	// "older host, no trust surface" case; repository-owned LSP executables
+	// must fail closed without an explicit host grant (#1334 S5).
 	if (overrides.isProjectTrusted !== undefined) {
 		(ctx as Record<string, unknown>).isProjectTrusted = () =>
 			overrides.isProjectTrusted;

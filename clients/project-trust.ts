@@ -182,8 +182,9 @@ export function assertInstallAllowed(context: string): boolean {
 }
 
 /**
- * False only when the host actively denied trust. Gates LSP server child
- * process spawns.
+ * False only when the host actively denied trust. The registry compiler gates
+ * repository-owned LSP fields when the host signal is absent; this downstream
+ * helper preserves the legacy raw-server behavior for older hosts.
  */
 export function isLspSpawnAllowedByTrust(): boolean {
 	return trustState !== "untrusted";

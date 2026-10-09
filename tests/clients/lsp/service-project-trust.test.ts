@@ -40,7 +40,7 @@ describe("LSPService project-trust gate (#1334 S5)", () => {
 		vi.restoreAllMocks();
 	});
 
-	async function setup() {
+	async function setup(admitted = false) {
 		const trust = await import("../../../clients/project-trust.js");
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const spawn = vi.fn(async () => ({
@@ -60,7 +60,7 @@ describe("LSPService project-trust gate (#1334 S5)", () => {
 				id: "python",
 				name: "Python",
 				extensions: [".py"],
-				trustAllowed: true,
+				...(admitted ? { trustAllowed: true } : {}),
 				root: async () => FIXTURE_ROOT,
 				spawn,
 			},
@@ -68,15 +68,15 @@ describe("LSPService project-trust gate (#1334 S5)", () => {
 		return { trust, service: new LSPService(), spawn };
 	}
 
-	it("does not blanket-block a compiled/built-in server when trust is denied", async () => {
+	it("keeps the service backstop for a raw built-in server when trust is denied", async () => {
 		const { trust, service, spawn } = await setup();
 		trust.setProjectTrustState("untrusted");
 
 		const client = await service.getClientForFile(FIXTURE_FILE);
 
-		expect(spawn).toHaveBeenCalledTimes(1);
-		expect(createLSPClient).toHaveBeenCalledTimes(1);
-		expect(client?.client).toBeTruthy();
+		expect(spawn).not.toHaveBeenCalled();
+		expect(createLSPClient).not.toHaveBeenCalled();
+		expect(client).toBeUndefined();
 		trust.resetProjectTrust();
 	});
 

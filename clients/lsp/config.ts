@@ -73,7 +73,10 @@ import {
 	resolvePiLensConfig,
 	summarizeConfigResolution,
 } from "../config-resolve.js";
-import { recordDegradationOnce } from "../degradation-ledger.js";
+import {
+	getDegradationLedgerGeneration,
+	recordDegradationOnce,
+} from "../degradation-ledger.js";
 import {
 	isKnownRunnerId,
 	runnerIdentityPopulated,
@@ -743,6 +746,7 @@ export function customServerSpecsOf(
 export function lspConfigOf(
 	value: Record<string, unknown>,
 	problems?: CoversClaimProblems,
+	provenance?: ProvenanceMap,
 ): LSPConfig {
 	const section = lspSectionOf(value);
 	const config: LSPConfig = {};
@@ -760,6 +764,12 @@ export function lspConfigOf(
 	}
 	if (Array.isArray(section.warmFiles)) {
 		config.warmFiles = section.warmFiles as string[];
+	}
+	if (provenance) {
+		Object.defineProperty(config, "__provenance", {
+			value: provenance,
+			enumerable: false,
+		});
 	}
 	return config;
 }
@@ -838,6 +848,7 @@ function normalizeWorkspacePath(cwd: string): string {
 }
 
 type ProvenanceMap = ReadonlyMap<string, Provenance>;
+let unknownTrustNoticeGeneration = -1;
 
 function sourceFor(
 	provenance: ProvenanceMap,
@@ -880,13 +891,17 @@ function registryDecision(
 		metadata: { serverId: id, field, tier: provenance.tier, trust },
 	});
 	if (trust === "unknown") {
-		logExtension({
-			subsystem: "lsp-registry",
-			level: "warn",
-			message:
-				"project LSP executables refused: mark the project trusted in pi or upgrade pi",
-			metadata: { serverId: id, field },
-		});
+		const generation = getDegradationLedgerGeneration();
+		if (unknownTrustNoticeGeneration !== generation) {
+			unknownTrustNoticeGeneration = generation;
+			logExtension({
+				subsystem: "lsp-registry",
+				level: "warn",
+				message:
+					"project LSP executables refused: mark the project trusted in pi or upgrade pi",
+				metadata: { serverId: id, field },
+			});
+		}
 	}
 }
 
@@ -1048,7 +1063,7 @@ export function compileLspRegistry(
 
 	const overriddenBuiltins = LSP_SERVERS.map((server) => {
 		const override = serverOverrides.get(server.id);
-		if (!override?.command) return { ...server, trustAllowed: true };
+		if (!override?.command) return { ...server };
 		const argv = Array.isArray(override.command)
 			? override.command
 			: [override.command, "--stdio"];
