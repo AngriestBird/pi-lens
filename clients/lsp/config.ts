@@ -104,7 +104,11 @@ import {
 	type LSPServerInfo,
 	type LspRootFallback,
 } from "./server.js";
-import { DEFAULT_LSP_SERVER_ROLE, isAuxiliary } from "./server-traits.js";
+import {
+	DEFAULT_LSP_SERVER_ROLE,
+	isAuxiliary,
+	type LspServerRole,
+} from "./server-traits.js";
 
 // --- Types ---
 
@@ -113,7 +117,7 @@ export interface CustomServerConfig {
 	extensions: string[];
 	command: string;
 	/** Cross-cutting scanner role; language is the default. */
-	role?: "language" | "auxiliary";
+	role?: LspServerRole;
 	args?: string[];
 	rootMarkers?: string[];
 	env?: Record<string, string>;
@@ -762,16 +766,11 @@ export function createCustomServer(
 		// be probeable before the claim can defer a CLI runner.
 		command: config.command,
 		extensions: config.extensions,
-		...(config.role ? { role: config.role } : {}),
 		idleEviction: "unmeasured",
-		// A config-declared server is a language server. The public
-		// `lsp.servers.<id>.role` field is validated and projected by
-		// `ResolvedLspConfig` (clients/lsp/resolved-config.ts) but stays
-		// RESERVED and inert here: honouring it would change which servers a
-		// file selects as primary, and that is the catalog slice's call, not
-		// this loader's (#2416 slice 1). The stated default is applied rather
-		// than left absent (#1488).
-		role: DEFAULT_LSP_SERVER_ROLE,
+		// Preserve the validated config role; custom servers without one use the
+		// language default. Overwriting the declared role here makes configured
+		// auxiliaries look like primaries to every downstream consumer (#4231).
+		role: config.role ?? DEFAULT_LSP_SERVER_ROLE,
 		// The config-declared covers channel (#3968): the claim the loader
 		// validated (`lspConfigOf`'s projection drops unknown runner ids) rides
 		// the server entry into the runner-coverage seam.
