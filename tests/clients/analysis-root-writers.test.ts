@@ -92,7 +92,29 @@ describe("analysis-root seam", () => {
 		environments.push(env);
 		const cache = new CacheManager();
 		const runtime = new RuntimeCoordinator();
+		runtime.recordInlineBlockers(
+			path.join(env.tmpDir, "outside.ts"),
+			"🔴 STOP\n  blocker",
+		);
 
+		cache.writeCache(
+			"turn-end-findings",
+			{
+				content: "test failure",
+				hasBlockers: true,
+				affectedFiles: [],
+				sessionId: runtime.telemetrySessionId,
+				projectSeqStart: 0,
+				projectSeqEnd: 0,
+				fileSeqByPath: {},
+				fileContentHashes: {},
+				testFailures: true,
+				testFailureContent: "test failure",
+				testFailureFiles: [],
+			},
+			env.tmpDir,
+		);
+		const before = cache.readCache("turn-end-findings", env.tmpDir)?.data;
 		syncGitGuardRecord(
 			runtime,
 			cache,
@@ -100,7 +122,18 @@ describe("analysis-root seam", () => {
 			path.join(env.tmpDir, "outside.ts"),
 			"adopted",
 		);
-
-		expect(cache.inspectCache("turn-end-findings", env.tmpDir)).toBe("missing");
+		expect(cache.readCache("turn-end-findings", env.tmpDir)?.data).toEqual(
+			before,
+		);
+		syncGitGuardRecord(
+			runtime,
+			cache,
+			env.tmpDir,
+			path.join(env.tmpDir, "outside.ts"),
+			"session",
+		);
+		expect(cache.inspectCache("turn-end-findings", env.tmpDir)).not.toBe(
+			"missing",
+		);
 	});
 });
