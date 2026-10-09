@@ -16,6 +16,7 @@ import {
 	AstGrepRuleManager,
 	checkAstGrepRulesHealth,
 } from "./ast-grep-rule-manager.js";
+import { getUserRuleRoot } from "./custom-rule-locations.js";
 import type {
 	AstGrepDiagnostic,
 	AstGrepMatch,
@@ -29,6 +30,7 @@ import { getMutationBridge } from "./mutation-bridge.js";
 import type { LineageHandle } from "./session-scope.js";
 import { normalizeFilePath } from "./path-utils.js";
 import { resolvePackagePath } from "./package-root.js";
+import { getAstGrepRuleFingerprint } from "./sgconfig.js";
 import { truncatedByOutputCap } from "./spawn-output-cap.js";
 import {
 	SgRunner,
@@ -288,7 +290,13 @@ export class AstGrepClient {
 				: resolvePackagePath(import.meta.url, "rules"));
 		this.log = verbose ? createSubsystemLogger("ast-grep") : () => {};
 		this.ensureRulesHealthReported();
-		this.ruleManager = new AstGrepRuleManager(this.ruleDir, this.log);
+		this.ruleManager = new AstGrepRuleManager(
+			ruleDir
+				? this.ruleDir
+				: [projectRuleDir, getUserRuleRoot(), this.ruleDir],
+			this.log,
+			() => getAstGrepRuleFingerprint(process.cwd()),
+		);
 		this.runner = new SgRunner(verbose);
 	}
 

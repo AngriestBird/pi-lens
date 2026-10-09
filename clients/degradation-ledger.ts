@@ -98,6 +98,7 @@ export type DegradationKind =
 	| "ast-grep-napi-language-unavailable"
 	/** A managed-tool verification probe exceeded its retained output bound. */
 	| "ast-grep-napi-unavailable"
+	| "ast-grep-rule-invalid"
 	/**
 	 * #2722: a managed-tool verification probe returned a NON-VERDICT — the
 	 * #208 transport-required matcher was armed, never matched, and the kept

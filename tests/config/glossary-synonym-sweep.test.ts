@@ -782,6 +782,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"mcp/server.ts": 3,
 	},
 	path: {
+		"clients/custom-rule-locations.ts": 2,
 		"clients/actionable-warnings-logger.ts": 3,
 		"clients/actionable-warnings.ts": 13,
 		"clients/advisory-provenance.ts": 12,
@@ -803,7 +804,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// synchronous sibling does (`cachePath`, `metaPath`). Same sense, one more
 		// reader of the same two files.
 		"clients/cache-manager.ts": 19,
-		"clients/cache/rule-cache.ts": 7,
+		// 7 -> 5 (#3930 r2): the shared fingerprint replaces the cache's
+		// duplicated path operations with one owner.
+		"clients/cache/rule-cache.ts": 5,
 		"clients/call-graph.ts": 4,
 		"clients/cargo-manifest.ts": 7,
 		"clients/cascade-logger.ts": 2,
@@ -1025,7 +1028,12 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/session-state-store.ts": 3,
 		"clients/sessionstart-logger.ts": 2,
 		"clients/sg-runner.ts": 12,
-		"clients/sgconfig.ts": 23,
+		// 26 -> 25 (#3930 r2): the shared user rule-root seam removes one
+		// duplicated path construction.
+		// 25 -> 26 (#3930 r4): the cycle-memo key is derived with
+		// `path.resolve(projectRoot)`, the normalization every sibling map key
+		// in this file already uses (`cachedBaselines`, `rootArtifactKey`).
+		"clients/sgconfig.ts": 26,
 		"clients/skills-resolver.ts": 3,
 		"clients/slow-fs.ts": 4,
 		"clients/smells-rollup.ts": 3,
@@ -1049,7 +1057,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/tool-policy.ts": 64,
 		"clients/tree-sitter-client.ts": 19,
 		"clients/tree-sitter-logger.ts": 2,
-		"clients/tree-sitter-query-loader.ts": 9,
+		// 11 -> 18 (#3930 r2): the loader's complete rule fingerprint walks
+		// language rule directories and normalizes their paths.
+		"clients/tree-sitter-query-loader.ts": 18,
 		"clients/tree-sitter-shared.ts": 2,
 		"clients/tree-sitter-symbol-extractor.ts": 3,
 		"clients/trivy-client.ts": 6,

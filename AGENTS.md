@@ -1160,11 +1160,28 @@ and durable fields must update their registered-or-fail coverage tests.
 ## Rule and analyzer contracts
 
 Ast-grep rules live under `rules/ast-grep-rules/` and tree-sitter rules under
-`rules/tree-sitter-queries/`. Use AST patterns over regex where possible. A
-rule with an unknown post-filter fails closed. Every shipped rule has a real
-behavioral fixture; Java/Kotlin rules use the real CLI path because NAPI lacks
-their grammars. The bundled ast-grep source census is recursive and respects
-project-over-bundled precedence.
+`rules/tree-sitter-queries/`; shared user rules use the same layout under
+`<PI_LENS_HOME>/rules/`. Precedence is project > user > bundled, and a
+shadowed rule is excluded from execution. Use AST patterns over regex where
+possible. A rule with an unknown post-filter fails closed. Every shipped rule
+has a real behavioral fixture; Java/Kotlin rules use the real CLI path because
+NAPI lacks their grammars. The bundled ast-grep source census is recursive and
+respects the same precedence.
+
+The mutable rule corpus (project + user roots; bundled stays immutable per
+process) has ONE identity seam, `ruleCorpusFingerprintForCycle` in
+`clients/custom-rule-locations.ts`: a content fingerprint computed at most once
+per dispatch cycle, keyed on `getTurnId()`, and shared by the tree-sitter
+loader memo and the ast-grep source fingerprint, so both families refresh on
+the same boundary. A per-call walk of that corpus is a measured regression
+(#4212, 1000 warm loader calls over 170 rule files: ~1000x master for a
+per-call content hash, ~220x for a per-call stat signature, ~1.1x for the
+per-cycle memo), and a per-cycle memo that omits the turn identity never
+invalidates. A path that must see an edit inside its own
+cycle passes `force`, which recomputes and republishes into the cycle; the
+dispatch runner does, and its RuleCache key is the content fingerprint
+recomputed per dispatched file. `resolveBaselineSgconfig` forces because #497
+point 7 pins mid-session freshness for a spawned ast-grep LSP.
 
 Tree-sitter queries compile against the grammar of the file, not the rule's
 language label. Alternative capture groups share capture names. An unsupported or
