@@ -38,6 +38,10 @@ import { WriteOrderingGuard, writeOrderToken } from "./write-ordering-guard.js";
 import { getProcessSingleton } from "./process-singletons.js";
 import type { GenerationHandle } from "./generation-guard.js";
 import {
+	canWriteAnalysisRoot,
+	type AnalysisRootMode,
+} from "./analysis-root.js";
+import {
 	beginScope,
 	type LineageHandle,
 	nextOrderTurn,
@@ -1353,7 +1357,9 @@ export class RuntimeCoordinator {
 		p: Promise<CascadeRun>,
 		generation: GenerationHandle,
 		filePath: string,
+		analysisRootMode: AnalysisRootMode = "session",
 	): void {
+		if (!canWriteAnalysisRoot(analysisRootMode)) return;
 		// A stale admission is dropped on both branches below.
 		if (generation.guardedWrite(filePath, () => true) === undefined) return;
 		if (this._pendingCascadeRuns.length < MAX_PENDING_CASCADE_RUNS) {
@@ -2334,7 +2340,9 @@ export class RuntimeCoordinator {
 		originCwd?: string,
 		/** #3521: a producer that awaited since it captured the epoch passes it. */
 		readGuardBranchEpoch = this.readGuard.currentBranchEpoch,
+		analysisRootMode: AnalysisRootMode = "session",
 	): boolean {
+		if (!canWriteAnalysisRoot(analysisRootMode)) return false;
 		const key = path.resolve(filePath);
 		const now = Date.now();
 		const resolvedOriginCwd = originCwd ?? turnStateCwd;
@@ -2381,6 +2389,7 @@ export class RuntimeCoordinator {
 		turnStateCwd: string,
 		ownerSessionId?: string,
 		originCwd?: string,
+		analysisRootMode: AnalysisRootMode = "session",
 	): boolean {
 		return this.deferMutation(
 			filePath,
@@ -2390,6 +2399,8 @@ export class RuntimeCoordinator {
 			"format",
 			ownerSessionId,
 			originCwd,
+			undefined,
+			analysisRootMode,
 		);
 	}
 
