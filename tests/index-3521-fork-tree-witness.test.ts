@@ -2624,6 +2624,7 @@ describe("#3758 pending runner findings and session scope", () => {
 	function deferFailedRunner(
 		session: ReturnType<RuntimeCoordinator["captureSessionGeneration"]>,
 		runnerId: string,
+		sessionId?: string,
 	): void {
 		deferRunnerFindings({
 			filePath: path.join(cwd, "a.ts"),
@@ -2639,6 +2640,7 @@ describe("#3758 pending runner findings and session scope", () => {
 				failureMessage: `${runnerId} crashed`,
 			}),
 			session,
+			sessionId,
 		});
 	}
 
@@ -2711,29 +2713,44 @@ describe("#3758 pending runner findings and session scope", () => {
 		});
 	});
 
-	it("lets a secondary that ends its turn first take a live primary's result (accepted residual until S4, #3758)", async () => {
-		// Pinned so S4 (#3613) flips it deliberately. A secondary's own tool
-		// results capture the coordinator's scope, which is the primary's
-		// (S1, #3611), so the store cannot tell the primary's result from the
-		// secondary's own. Draining by the activation's scope would move every
-		// secondary result to the primary instead.
+	it("keeps live primary and secondary runner results on their own turn ends", async () => {
 		const seen = coordinators();
 		const primary = await startRuntime(SessionManager.inMemory(cwd));
+		const primaryScope = seen[0]!.captureSessionGeneration();
 		const subagent = await startSubagent();
-		deferFailedRunner(seen[0]!.captureSessionGeneration(), "probe-3758-live");
+		const secondaryScope = seen[0]!.captureSessionGeneration();
+		deferFailedRunner(
+			primaryScope,
+			"probe-3758-primary",
+			primary.session.sessionManager.getSessionId(),
+		);
 
 		await endTurn(subagent);
-		const subagentSees = (await contextText(subagent)).includes(
-			"probe-3758-live crashed",
+		const secondaryBeforeOwn = (await contextText(subagent)).includes(
+			"probe-3758-primary crashed",
+		);
+		deferFailedRunner(
+			secondaryScope,
+			"probe-3758-secondary",
+			subagent.session.sessionManager.getSessionId(),
+		);
+		await endTurn(subagent);
+		const secondarySeesOwn = (await contextText(subagent)).includes(
+			"probe-3758-secondary crashed",
 		);
 		await endTurn(primary);
 
 		expect({
-			subagentSees,
+			secondaryBeforeOwn,
+			secondarySeesOwn,
 			primarySees: (await contextText(primary)).includes(
-				"probe-3758-live crashed",
+				"probe-3758-primary crashed",
 			),
-		}).toEqual({ subagentSees: true, primarySees: false });
+		}).toEqual({
+			secondaryBeforeOwn: false,
+			secondarySeesOwn: true,
+			primarySees: true,
+		});
 	});
 });
 
@@ -3630,6 +3647,9 @@ describe("#3613 a concurrent secondary's turn leaves the primary's turn state al
 		expect({
 			subagent: shown(subagentSees),
 			primary: shown(primarySees),
+			// The old expectation encoded the bug: it expected the primary to lose its
+			// own warnings merely because a secondary turn ended first. The primary's
+			// delivery is legitimate and must remain session-local.
 		}).toEqual({ subagent: SUBAGENT, primary: PRIMARY });
 	});
 
@@ -3672,7 +3692,39 @@ describe("#3613 a concurrent secondary's turn leaves the primary's turn state al
 		}).toEqual({ subagentSees: [], primaryKeeps: PRIMARY });
 	});
 
-	it("enriches only the primary's secret report with the primary's ast-grep match", async () => {
+	it("scopes the durable turn-state worklist to the session that wrote it", async () => {
+		// #3613 R2: the recurrence is a secondary turn_end reading and clearing
+		// the primary's project worklist, so its cascade sees the primary's file
+		// while the primary later sees an empty worklist. The real two-session
+		// runtime must retain each partition and analyze the secondary's own edit.
+		const primary = await startRuntime(SessionManager.inMemory(cwd));
+		const subagent = await startSubagent();
+		const primaryFile = path.join(cwd, "primary.ts");
+		const secondaryFile = path.join(cwd, "secondary.ts");
+		await startTurn(primary);
+		await edit(primary, primaryFile);
+		await startTurn(subagent);
+		await edit(subagent, secondaryFile);
+		const cache = new CacheManager(false);
+
+		const primaryId = sessionIdOf(primary);
+		const secondaryId = sessionIdOf(subagent);
+		expect(Object.keys(cache.readTurnState(cwd, primaryId).files)).toEqual([
+			"primary.ts",
+		]);
+		expect(Object.keys(cache.readTurnState(cwd, secondaryId).files)).toEqual([
+			"secondary.ts",
+		]);
+
+		await endTurn(subagent);
+		expect(Object.keys(cache.readTurnState(cwd, primaryId).files)).toEqual([
+			"primary.ts",
+		]);
+		await endTurn(primary);
+		expect(cache.readTurnState(cwd, primaryId).files).toEqual({});
+	});
+
+	it("keeps primary turn findings out of a secondary's delivery", async () => {
 		const primary = await startRuntime(SessionManager.inMemory(cwd));
 		const subagent = await startSubagent();
 		const key = path.join(cwd, "key.ts");
@@ -3701,7 +3753,7 @@ describe("#3613 a concurrent secondary's turn leaves the primary's turn state al
 		expect({
 			subagent: provenance(subagentSees),
 			primary: provenance(primarySees),
-		}).toEqual({ subagent: "gitleaks", primary: "gitleaks + ast-grep" });
+		}).toEqual({ subagent: undefined, primary: "gitleaks + ast-grep" });
 	});
 
 	it("starts a subagent's turn without the warnings its previous turn left undelivered", async () => {

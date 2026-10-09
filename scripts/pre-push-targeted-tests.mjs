@@ -153,6 +153,9 @@ export const TREE_SCANNING_GOVERNANCE_TESTS = [
 	// #4239: walks scripts/lib for static dist/ imports and checks each is in
 	// DIST_IMPORTS, so a new governance import of dist/ cannot dodge the rebuild.
 	"tests/scripts/dist-freshness.test.ts",
+	// #3613 R2: walks clients/ for direct turn-state `sessions[` access outside
+	// CacheManager, so a production change must arm it.
+	"tests/config/turn-state-partition-owner-sweep.test.ts",
 ];
 
 // Suites that scan the TESTS tree for a test shape (a real spawn, a raw timer

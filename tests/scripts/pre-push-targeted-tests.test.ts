@@ -426,6 +426,7 @@ describe("selectTargetedTests — path-mirror pass", () => {
 			"tests/clients/single-flight-ratchet.test.ts",
 			"tests/config/bounded-container-guard.test.ts",
 			"tests/scripts/dist-freshness.test.ts",
+			"tests/config/turn-state-partition-owner-sweep.test.ts",
 		];
 		const testScanners = [
 			"tests/clients/flake-shape-ratchet.test.ts",

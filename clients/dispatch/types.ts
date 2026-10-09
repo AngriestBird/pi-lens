@@ -360,6 +360,8 @@ export interface DispatchContext {
 	 * next session's turn end.
 	 */
 	readonly sessionGeneration?: GenerationHandle;
+	/** Stable session identity for per-session turn-end runner delivery. */
+	readonly sessionId?: string;
 	/** Model/provider active for this dispatch, when the runtime knows it
 	 * (#1448) — threaded to the worklog append so repair history can be
 	 * attributed. Blank/absent outside a live agent turn (e.g. project scans). */

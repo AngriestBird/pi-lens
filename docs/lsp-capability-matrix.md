@@ -213,6 +213,9 @@ and were characterized `push-only` in the run above).
   `first-publish` measurements on the dev box, 2026-09-23: php `empty-first`,
   typescript / opengrep / ast-grep / marksman `direct` (so the class does not
   extend to them on the measurement, whatever their comments suggest).
+- The official Docker row's clean-gate witness requires the BuildKit-backed
+  `JSONArgsRecommended` rule and skips when `docker buildx` is unavailable;
+  its first-publish class is the nightly's measured `direct`.
 - **#458's learned-deadline target set = the tier-3 rows only.** 2\* rows resolve
   the wait at runtime and must NOT be given learned deadlines.
 - **Tier 3 is budget-bound by necessity**, not laziness: a silent server's silence is

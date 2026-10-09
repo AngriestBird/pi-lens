@@ -153,6 +153,57 @@ export function classifyLspGateResult(result, fx, unavailable = false) {
 }
 
 /**
+ * Classify the official Docker server's BuildKit-backed smoke row (#3939).
+ * An empty result is only an honest skip when the runner cannot provide the
+ * BuildKit check command; otherwise it is a regression in the rule witness.
+ */
+export function classifyOfficialDockerGateResult(
+	result,
+	buildxAvailable,
+	expectedCode = "JSONArgsRecommended",
+) {
+	const diagnostics = result?.details?.diagnostics ?? [];
+	if (result?.details?.unavailable) {
+		return {
+			state: "skip",
+			detail: result.details.unavailable,
+			diags: diagnostics.length,
+		};
+	}
+	if (diagnostics.some((diagnostic) => diagnostic?.code === expectedCode)) {
+		return {
+			state: "pass",
+			detail: `official Docker server returned ${expectedCode}`,
+			diags: diagnostics.length,
+		};
+	}
+	if (!buildxAvailable) {
+		return {
+			state: "skip",
+			detail: "buildx unavailable",
+			diags: diagnostics.length,
+		};
+	}
+	return {
+		state: "fail",
+		detail: `official Docker server did not return ${expectedCode}`,
+		diags: diagnostics.length,
+	};
+}
+
+function hasDockerBuildx() {
+	try {
+		execFileSync("docker", ["buildx", "version"], {
+			stdio: "ignore",
+			timeout: 5000,
+		});
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
  * The nightly `lens_diagnostics mode=full` row's fixture population (#2780).
  * `lens_diagnostics` is the tool agents call by default and its verdict
  * shaping mirrors `lsp_diagnostics`', so ONE cheap seeded fixture is enough to
@@ -696,21 +747,19 @@ const LSP_FIXTURES = [
 		expectServerId: "docker",
 	},
 	{
-		// #3939: the official binary is provisioned by the nightly workflow, not
-		// the installer registry. Disabling the preferred member makes this row
-		// exercise the real fallback acquisition and keeps its handshake,
-		// capabilities and idle cost separate from docker-langserver's evidence.
+		// #3939: BuildKit owns this official server's Dockerfile diagnostics. The
+		// binary is provisioned by the nightly workflow, not the installer registry.
 		lang: "dockerfile-official",
 		serverId: "docker-official",
-		lspGateExempt:
-			"official Docker Language Server publishes a confirmed empty diagnostic set on the known fixture; its protocol and idle measurement are still valuable, but it cannot prove the diagnostic gate's finding contract",
-		dir: "tests/fixtures/tool-smoke/dockerfile",
+		lspGate: true,
+		lspGateMarker: "CMD ls",
+		dir: "tests/fixtures/tool-smoke/dockerfile-official",
 		file: "Dockerfile",
 		serverHint: "docker-language-server (official)",
 		tools: [],
 		disableServers: ["docker"],
 		expectServerId: "docker-official",
-		allowEmptyBaseline: true,
+		expectDiagnosticCode: "JSONArgsRecommended",
 	},
 	{
 		lang: "toml",
@@ -2445,7 +2494,13 @@ export async function runLspGate({ langs = [], install, verbose, deps } = {}) {
 				null,
 				{ cwd: workspace },
 			);
-			const verdict = classifyLspGateResult(result, fx);
+			const verdict = fx.expectDiagnosticCode
+				? classifyOfficialDockerGateResult(
+						result,
+						deps?.hasDockerBuildx?.() ?? hasDockerBuildx(),
+						fx.expectDiagnosticCode,
+					)
+				: classifyLspGateResult(result, fx);
 			rows.push({ lang: fx.lang, runner: fx.serverHint, ...verdict });
 			if (verbose) console.error(`[${fx.lang}] ${verdict.detail}`);
 		} catch (err) {

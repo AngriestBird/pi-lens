@@ -256,6 +256,8 @@ interface ToolResultDeps {
 	 * file" apart from a concurrent in-process secondary session's firing.
 	 */
 	sessionId?: string;
+	/** Role of the activation that owns this write. */
+	sessionRole?: "primary" | "secondary";
 	/**
 	 * Internal: set when the debounce timer fires to skip re-scheduling.
 	 * Do not pass from external callers.
@@ -2882,7 +2884,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				range,
 				importsChanged,
 				turnStateCwd,
-				runtime.telemetrySessionId,
+				deps.sessionId ?? runtime.telemetrySessionId,
 				"pi",
 				undefined,
 				analysisRootMode,
@@ -3173,6 +3175,9 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				{ start: 1, end: lineCount },
 				hasImports,
 				turnStateCwd,
+				deps.sessionId ?? runtime.telemetrySessionId,
+				"pi",
+				undefined,
 				analysisRootMode,
 			);
 			dbg(

@@ -18,6 +18,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beginScope } from "../../clients/session-scope.js";
 import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 
 vi.mock("../../clients/lsp/index.js", async (importOriginal) => ({
@@ -117,7 +118,10 @@ function makeRig(prefix: string): Rig {
 function makeDeps(rig: Rig, sessionId?: string) {
 	return {
 		ctxCwd: rig.cwd,
-		...(sessionId === undefined ? {} : { sessionId }),
+		sessionId: sessionId ?? SESSION,
+		...(sessionId === undefined
+			? {}
+			: { sessionScope: beginScope({ role: "secondary" }) }),
 		getFlag: (name: string) => rig.scan.flags?.has(name) ?? false,
 		dbg: () => {},
 		runtime: rig.runtime,

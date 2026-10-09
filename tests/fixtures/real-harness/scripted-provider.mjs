@@ -71,6 +71,21 @@ function recordContextShapeDiagnostic() {
 	);
 }
 
+function expandScriptTokens(value) {
+	if (typeof value === "string") {
+		return value.replace(/\$\{([A-Z0-9_]+)\}/g, (match, name) =>
+			process.env[name] ?? match,
+		);
+	}
+	if (Array.isArray(value)) return value.map(expandScriptTokens);
+	if (value && typeof value === "object") {
+		return Object.fromEntries(
+			Object.entries(value).map(([key, child]) => [key, expandScriptTokens(child)]),
+		);
+	}
+	return value;
+}
+
 // The turn counter lives on the process, keyed by the script file: pi re-runs
 // the extension factory on an RPC `clone`/`fork`, `new_session` and `/reload`,
 // and a counter in the factory's closure restarted the script at turn 0 after
@@ -106,7 +121,7 @@ export default function scriptedProvider(pi) {
 			const stream = createAssistantMessageEventStream();
 			const turnIndex = nextTurn();
 			const turn = turnIndex + 1;
-			const action = script[turnIndex];
+			const action = expandScriptTokens(script[turnIndex]);
 			if (observationPath) {
 				const providerContextTools = providerTools(context);
 				if (providerContextTools === undefined) recordContextShapeDiagnostic();

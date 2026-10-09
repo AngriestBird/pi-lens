@@ -277,6 +277,15 @@ the surface they bite; each block loads only when its trigger applies.
 
 ### a delivery surface or lane
 
+Project-wide scanner delivery has one owner per live worklist. The primary
+session owns turn-end delivery; a concurrent secondary owns only its own
+file-scoped worklist and receives no project-wide scanner output.
+
+| Producer population | Primary turn_end | Secondary turn_end |
+|---|---|---|
+| Project-wide scanners (gitleaks, knip, jscpd, and equivalent shared stores) | admit and deliver | suppress at the delivery gate |
+| Session-owned file or runner findings | admit its own session | admit its own session |
+
 5. **Dropped side channel:** trace flags, bindings, and provenance through
    spreads, maps, filters, and JSON serialization.
 

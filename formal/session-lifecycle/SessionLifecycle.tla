@@ -158,8 +158,8 @@
 (*   "parkResetClear"    resetForSession clears the park map               *)
 (*   "parkFence"         the park settles only while the coordinator's     *)
 (*                       scope is the one the turn captured at entry       *)
-(*   "turnEndScoped"     a proposed shape that is NOT on master: a turn_end*)
-(*                       composer drains only its own scope's work         *)
+(*   "turnEndScoped"     #3613 R2: a shipped shape in which turn_end drains *)
+(*                       only its own scope's work                         *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -1739,10 +1739,9 @@ TurnWork ==
 \* activation, primary or concurrent subagent) runs the whole composer on the
 \* process's runtime: it reads and clears the turn-state worklist the
 \* coordinator's session id owns, consumes the cascade runs and drains the
-\* pending runner findings. On master it takes every scope's work (the open
-\* half of #3613, #3758's pinned residual). "turnEndScoped" is the proposed
-\* shape, not shipped: each record carries its producing activation and a
-\* turn_end drains its own.
+\* pending runner findings. The shipped "turnEndScoped" rule keys each
+\* durable work record by its producing activation; shared cascade lifecycle
+\* remains settled through the coordinator scope.
 TurnEnd ==
     /\ primary # 0 /\ pend.k = "none"
     /\ \E s \in Tickets :
