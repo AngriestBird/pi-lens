@@ -207,8 +207,9 @@ and write are separate steps with pi's queue for S not held (the code before
 
 | Invariant | Promise |
 |---|---|
-| `NoSilentLoss` | at the end every agent edit of S is on disk, or the report names the file as lost or possibly lost (`NoLostEdit`'s analogue: the eraser is the tool) |
-| `EveryEditSurvives` | stronger: at the end every agent edit of S is on disk |
+| `NoSilentLoss` | at the end every agent edit of S the report OWES is on disk, or the report names the file as lost or possibly lost (`NoLostEdit`'s analogue: the eraser is the tool). Owed excludes `Superseded`: an edit a later applied edit of the agent's own replaced, whose text is legitimately gone (#4205) |
+| `NoFalseAlarmUntouched` | ... and when the tool never wrote S (`tpc # "wrote"`) and every owed edit is there, nothing is named: the round-4 false alarm, an edit the agent's own later write superseded (#4205, verify r3 R3-2) |
+| `EveryEditSurvives` | stronger: at the end every agent edit of S is on disk. Literal, so it is false for any config with a real `SReplacer` |
 | `NoRestoreOverNewer` | the restore never writes over an agent edit newer than its capture; it is the union of the three below |
 | `NoRestoreOverReadEdit` | ... already on disk when the restore read S but not in the capture |
 | `NoRestoreOverPreCheckEdit` | ... that landed between the restore's read and its re-check |
@@ -230,6 +231,18 @@ call in flight alone) and `RestoreRecheck` (the re-check before the write; both
 pi's queue entry for S). `RestoreNoCapInFlight` is a candidate for finding B (a
 file with no capture and a call in flight is named possibly lost), there so the
 `overwritten` verdict can be observed.
+
+Round-4 constants (#4205, the overlapping-own-edit family): `SReplacer` and
+`SReplaced` name one pair of agent edits whose regions overlap, so
+`SAWrite(SReplacer)` removes `SReplaced` from the disk; `SReplacer = 0` is the
+pre-#4205 model, where an edit only ever adds, and every older config sets it.
+One pair per config: the code's rule is per region and holds for any number of
+them, and a whole-file `write` (which the code lets cover every contradiction,
+and which never keeps a capture) has no model side, because a model edit always
+names exactly the regions it replaces. `SInOrderNotes` says whether pi-lens sees
+a batch's `tool_result`s in call order (`TRUE`, what a batch produces) or whether
+a handler abandoned at its 10 s bound delivers one late and out of order
+(`FALSE`).
 
 Lock order (#3830): the model has the target F's entry (`fq`, `TargetHold`: the
 pipeline takes it at `Begin` and keeps it, #3506) and an LSP multi-path edit

@@ -82,23 +82,43 @@
  *
  * ## What the report names (#3830, windows B and C)
  *
- * Three rules, mirrored by `formal/dispatch-pipeline/SiblingRestore.tla`
- * (`SACall`, `SANote`, `RRead`):
+ * Three rules, implemented one for one by
+ * `formal/dispatch-pipeline/SiblingRestore.tla` (`SACall`, `SANote`, `RRead`).
+ * The supersede rule's identical-bytes arm is pinned by a code test alone
+ * (`reports an overwritten capture a later capture of identical bytes
+ * replaces`): no TLC config needs it, because the model's loss invariants
+ * exclude an edit the agent's own later write replaced (`Superseded`).
  *
  * - **Displaced** ({@link noteAgentCallStart}): a call begins on a file whose
- *   latest capture is `verified`, and the bytes on disk no longer verify that
- *   capture's own stated write. The fixer erased it. Byte inequality alone is
- *   not enough: a fixer that rewrote the file AROUND the edit kept it.
+ *   latest capture the bytes on disk no longer verify against its own stated
+ *   write. The fixer erased it. Byte inequality alone is not enough: a fixer
+ *   that rewrote the file AROUND the edit kept it. Neither is a contradiction
+ *   the agent caused itself: an own call still in flight whose stated write is
+ *   already on disk and covers the contradicted text ({@link
+ *   accountedByOwnCall}) superseded that region (#4205 round 4, verify r3
+ *   R3-2). The mark is load-bearing for a `verified` capture only; the
+ *   supersede rule names the other verdicts whatever it says.
  * - **Supersede** ({@link noteAgentMutation}): a capture replaced by a newer one
  *   is named when it was `overwritten` (lost, even when the new bytes are
  *   identical: the edit it stated is not in them), or `unverifiable` or
  *   displaced and the bytes differ (possibly lost). A `verified`, undisplaced
- *   capture replaced by an edit that built on it is quiet.
+ *   capture replaced by an edit that built on it is quiet, and so is an
+ *   `accounted` one: an own write already in flight when its result arrived
+ *   covers its contradiction ({@link captureVerdict}), or the capture in hand is
+ *   the newer own write and stays ({@link keepsNewerCapture}).
  * - **In flight** (the restore): a file with a call still in flight is named
  *   possibly lost unless it has no capture, or a `verified` capture equal to
  *   disk, AND EVERY in-flight call's stated write is on disk. One verified call
  *   does not vouch for another's edit. A call with no stated write cannot be
  *   verified.
+ *
+ * The three rules read one another's vocabulary: `verified` and `accounted`
+ * name nothing on their own, `overwritten` names the file lost, `unverifiable`
+ * and the displaced mark name it possibly lost. What ties the round-4 arms
+ * together is one question -- did the fixer write these bytes, or did the agent
+ * -- and one answer: an own stated write that is on disk and names the region is
+ * the agent's, and a report must not depend on the order the host delivers a
+ * parallel batch in.
  *
  * ## The set is bounded to what the tool can rewrite
  *
@@ -128,6 +148,22 @@
  *   leaves edit 1 unnamed: nothing at the tool_result separates it from two
  *   sequential edits without re-deriving the edit's base bytes
  *   (`SiblingRestoreQueuedSilentLate`, expected to violate `NoSilentLoss`).
+ *   ACCEPTED as a named residual (maintainer decision on #3830, 2026-10-09).
+ * - An edit the agent's own later write replaced stays quiet: the disk cannot
+ *   say whether that write superseded the region deliberately or from a stale
+ *   base, and the sequential spelling of the same two edits was always quiet
+ *   (#4205 round 4).
+ * - The accounting is one write deep, so a CHAIN of them still false-alarms
+ *   (#4205 round 4, row 29): edit 2 replaces edit 1's region and is captured,
+ *   edit 3 replaces edit 2's, and only then does edit 1's result arrive out of
+ *   order. Its text is gone and no single own write on disk names it, so the
+ *   capture reads `overwritten` and the next note names the file lost, although
+ *   the tool never wrote. Attribution needs the chain of own writes since the
+ *   capture, and this module keeps one capture per file and no write history.
+ *   `SiblingRestoreOverlapReordered` (expected to violate
+ *   `NoFalseAlarmUntouched`) pins it; the report direction is the safe one, and
+ *   in-order delivery -- what pi's batch produces -- is quiet
+ *   (`SiblingRestoreOverlap`).
  */
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
@@ -159,8 +195,19 @@ export interface AgentWriteExpectation {
 	edits?: ReadonlyArray<{ oldText?: string; newText: string }>;
 }
 
-/** `verified`: bytes match the agent's stated write. `overwritten`: they do not. */
-type CaptureVerdict = "verified" | "overwritten" | "unverifiable";
+/**
+ * What the bytes on disk say about the agent's stated write:
+ *
+ * - `verified`: they hold it.
+ * - `overwritten`: they do not, and nothing the agent itself did explains it, so
+ *   a writer outside pi's queue (the fixer) is the explanation.
+ * - `accounted`: they do not, and an own call still in flight states a write
+ *   that covers the difference, so the agent itself replaced that region
+ *   (#4205 round 4). It names nothing: the report is about the fixer's writes.
+ * - `unverifiable`: nothing states what the write was, so the bytes prove
+ *   nothing either way.
+ */
+type CaptureVerdict = "verified" | "overwritten" | "accounted" | "unverifiable";
 
 interface Capture {
 	bytes: Buffer;
@@ -361,10 +408,18 @@ export async function beginFixRun(args: {
 	};
 }
 
-/** The calls in flight on `key` for this run. */
-function callsOn(run: ActiveRun, key: string): PendingCall[] {
+/**
+ * The calls in flight on `key` for this run, minus `exceptId`: the caller's own
+ * call, which has not run yet and so cannot have written anything.
+ */
+function callsOn(
+	run: ActiveRun,
+	key: string,
+	exceptId?: string,
+): PendingCall[] {
 	const calls: PendingCall[] = [];
-	for (const call of run.calls.values()) if (call.key === key) calls.push(call);
+	for (const [id, call] of run.calls)
+		if (id !== exceptId && call.key === key) calls.push(call);
 	return calls;
 }
 
@@ -372,7 +427,9 @@ function callsOn(run: ActiveRun, key: string): PendingCall[] {
  * The in-flight rule of the module header: some call still in flight on `key`
  * has no stated write, or its stated write is not on disk. EVERY call must
  * verify before the file is quiet: one verified call does not vouch for
- * another's edit (#3830, verify r2 R2-2).
+ * another's edit (#3830, verify r2 R2-2). The run's insertion order decides
+ * nothing here, so an erased call registered after a verifying one is still
+ * seen (#4205 round 4, verify r3 R3-3 K5).
  */
 function unverifiedInFlight(
 	run: ActiveRun,
@@ -381,6 +438,156 @@ function unverifiedInFlight(
 ): boolean {
 	return callsOn(run, key).some(
 		(call) => verdictFor(current, call.expected) !== "verified",
+	);
+}
+
+/**
+ * Every point where `disk` contradicts the capture's stated edits is a point the
+ * agent's own later call names as its own: a capture text missing from the disk
+ * appears in one of that call's `oldText`s, and a capture text the disk holds
+ * again appears in one of its `newText`s. A contradiction it does not name is
+ * somebody else's doing.
+ */
+function coversContradiction(
+	captured: ReadonlyArray<{ oldText?: string; newText: string }>,
+	own: ReadonlyArray<{ oldText?: string; newText: string }>,
+	text: string,
+): boolean {
+	for (const edit of captured) {
+		const added = normalized(edit.newText);
+		const removed = normalized(edit.oldText ?? "");
+		if (
+			added.length > 0 &&
+			!text.includes(added) &&
+			!own.some((stated) => normalized(stated.oldText ?? "").includes(added))
+		)
+			return false;
+		if (
+			removed.length > 0 &&
+			!added.includes(removed) &&
+			text.includes(removed) &&
+			!own.some((stated) => normalized(stated.newText).includes(removed))
+		)
+			return false;
+	}
+	return true;
+}
+
+/**
+ * Does ONE own stated write cover every point where `disk` contradicts `stated`?
+ * It has to be on the disk already (`verified`): a call whose own write has not
+ * landed explains no byte. What it covers follows from what it states: a
+ * whole-file `write` that verifies IS the disk, so it covers everything; an
+ * `edit` covers only the texts its own `oldText`/`newText` name, so a stated
+ * edit it never mentions is still somebody else's doing (a fixer that erased one
+ * region while the agent's own edit landed in another is still reported). A
+ * whole-file statement has no region to match against an `edit`, so only another
+ * whole-file write covers it.
+ */
+function covers(
+	stated: AgentWriteExpectation,
+	own: AgentWriteExpectation | undefined,
+	disk: Buffer,
+	text: string,
+): boolean {
+	if (!own || verdictFor(disk, own) !== "verified") return false;
+	if (own.content !== undefined) return true;
+	if (stated.content !== undefined) return false;
+	return coversContradiction(stated.edits ?? [], own.edits ?? [], text);
+}
+
+/**
+ * Does an own write account for `disk` contradicting a stated write, so that the
+ * fixer is not the explanation (#4205 round 4, verify r3 R3-2, probe Q4)? The
+ * candidates are the calls still in flight on the key.
+ *
+ * `exceptId` is the call asking, at a `tool_call`: it has not run yet, so its own
+ * stated write is no evidence about the disk (state table row 25). A delivered
+ * call needs no exclusion, because a write that fails to verify cannot vouch for
+ * itself.
+ *
+ * Without this the report depends on the order the host delivers a parallel
+ * batch in: the same edits, delivered one result at a time, were always quiet.
+ */
+function accountedByOwnCall(
+	run: ActiveRun,
+	key: string,
+	stated: AgentWriteExpectation | undefined,
+	disk: Buffer,
+	exceptId?: string,
+): boolean {
+	// Nothing stated: no contradiction to account for.
+	if (!stated) return false;
+	const text = normalized(disk.toString("utf8"));
+	for (const call of callsOn(run, key, exceptId))
+		if (covers(stated, call.expected, disk, text)) return true;
+	return false;
+}
+
+/**
+ * The verdict for a capture taken from `bytes`. `overwritten` becomes
+ * `accounted` when an own call still in flight covers the contradiction: pi
+ * delivers a batch's writes before their results, so a later own edit can
+ * replace this one's region before this one's result arrives (state table
+ * row 27). The delivered call is out of the in-flight set by then
+ * (`noteAgentCallEnd` precedes `noteAgentMutation` in the tool_result handler).
+ */
+function captureVerdict(
+	run: ActiveRun,
+	key: string,
+	bytes: Buffer,
+	expected: AgentWriteExpectation | undefined,
+): CaptureVerdict {
+	const verdict = verdictFor(bytes, expected);
+	return verdict === "overwritten" &&
+		accountedByOwnCall(run, key, expected, bytes)
+		? "accounted"
+		: verdict;
+}
+
+/**
+ * A late result for an OLDER write must not downgrade the evidence. All three
+ * of these have to hold (state table row 28, which `SiblingRestoreOverlap.cfg`
+ * found: pi delivers a batch's results in any order, so the write that replaced
+ * this one's region can be captured already):
+ *
+ * - the bytes are still, to the byte, the previous capture's, so nothing at all
+ *   wrote since it was taken;
+ * - that capture is `verified`, so its own write is the newest fact about the
+ *   file;
+ * - its stated write names this result's missing text as one it replaced. An
+ *   `edit` states the region it took over, and pi applied it, so the older text
+ *   was there until that write removed it: the fixer cannot have taken it
+ *   earlier. A whole-file `write` states no region, so it proves nothing here
+ *   and the older capture's verdict stands.
+ *
+ * Keeping the newer capture is what lets a LATER fixer write still be
+ * attributed: the displaced rule reads the capture's own stated write. An
+ * `unverifiable` note always replaces the capture, because nothing states which
+ * write is newer and the bytes in hand are the disk's.
+ */
+function keepsNewerCapture(
+	stated: AgentWriteExpectation | undefined,
+	verdict: CaptureVerdict,
+	bytes: Buffer,
+	old: Capture | undefined,
+): boolean {
+	if (verdict !== "overwritten") return false;
+	if (old?.verdict !== "verified" || !old.bytes.equals(bytes)) return false;
+	const own = old.expected;
+	// A whole-file capture states no region, so it cannot show that it, and not
+	// the fixer, removed the older text.
+	if (
+		!stated ||
+		!own ||
+		own.content !== undefined ||
+		stated.content !== undefined
+	)
+		return false;
+	return coversContradiction(
+		stated.edits ?? [],
+		own.edits ?? [],
+		normalized(bytes.toString("utf8")),
 	);
 }
 
@@ -569,10 +776,12 @@ export function noteAgentMutation(
 				continue;
 			}
 			const old = file.capture;
+			const verdict = captureVerdict(run, key, bytes, expected);
 			// The supersede rule of the module header: a replaced capture is named
 			// when it is `overwritten` (even if the new bytes are identical: the
 			// edit it stated is not in them), or unverifiable or displaced and
-			// replaced by different bytes.
+			// replaced by different bytes. An `accounted` capture names nothing:
+			// the agent's own later write is what replaced its region.
 			if (
 				old &&
 				(old.verdict === "overwritten" ||
@@ -583,7 +792,8 @@ export function noteAgentMutation(
 					file.superseded === "overwritten" || old.verdict === "overwritten"
 						? "overwritten"
 						: "unverifiable";
-			file.capture = { bytes, verdict: verdictFor(bytes, expected), expected };
+			if (!keepsNewerCapture(expected, verdict, bytes, old))
+				file.capture = { bytes, verdict, expected };
 		} catch {
 			// Unreadable or gone: the agent deleted or renamed it, so an older
 			// capture must not bring it back.
@@ -623,11 +833,18 @@ export function noteAgentCallStart(
 		// The displaced rule of the module header. A tool write between two
 		// agent edits shows here: the newer call begins on bytes that no longer
 		// hold the capture's edit. An unreadable file is the agent's own removal.
+		// There is no verdict to guard on: the mark is load-bearing for a
+		// `verified` capture only, because the supersede rule names an
+		// `overwritten` or `unverifiable` one whatever this sets (verify r3 K11
+		// measured the guard as an equivalent mutant, so it is gone).
 		const capture = file.capture;
-		if (capture?.verdict !== "verified") continue;
+		if (!capture) continue;
 		try {
 			const disk = fs.readFileSync(file.filePath);
-			if (verdictFor(disk, capture.expected) !== "verified")
+			if (
+				verdictFor(disk, capture.expected) !== "verified" &&
+				!accountedByOwnCall(run, key, capture.expected, disk, toolCallId)
+			)
 				capture.displaced = true;
 		} catch {
 			// Gone: nothing for the fixer to have erased.
