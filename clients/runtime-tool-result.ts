@@ -31,6 +31,7 @@ import type { CacheManager } from "./cache-manager.js";
 import { publishFormatQueued } from "./format-events-publish.js";
 import {
 	invalidateProjectIgnoreMatcherForPath,
+	isPiLensInternalPath,
 	isPathIgnoredByProject,
 } from "./file-utils.js";
 import { invalidateFormatterCacheForPath } from "./formatters.js";
@@ -44,6 +45,7 @@ import {
 import { getFormatService } from "./format-service.js";
 import {
 	isExternalOrVendorFile,
+	isVendorPath,
 	isOutsideProjectRoot,
 	normalizeEphemeralMapKey,
 	pathsEqual,
@@ -2455,7 +2457,11 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		return;
 	}
 	if (isExternalOrVendorFile(filePath, workspaceRoot)) {
-		if (isOutsideProjectRoot(filePath, workspaceRoot)) {
+		if (
+			isOutsideProjectRoot(filePath, workspaceRoot) &&
+			!isVendorPath(filePath) &&
+			!isPiLensInternalPath(filePath, workspaceRoot)
+		) {
 			const firstOutsideRootEdit = recordDegradationOnce({
 				kind: "tool-result-outside-project-root",
 				subject: workspaceRoot,

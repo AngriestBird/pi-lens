@@ -3,6 +3,7 @@
 // production handleToolResult path and pipeline boundary are in-process.
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../../clients/cache-manager.js";
@@ -34,7 +35,11 @@ import {
 	clearFormatterRuntimeState,
 	getFormattersForFile,
 } from "../../clients/formatters.js";
-import { getProjectIgnoreMatcher } from "../../clients/file-utils.js";
+import {
+	getGlobalPiLensDir,
+	getProjectDataDir,
+	getProjectIgnoreMatcher,
+} from "../../clients/file-utils.js";
 import { normalizeFilePath } from "../../clients/path-utils.js";
 import {
 	getVerifiedPathAttributionGuessCount,
@@ -176,6 +181,102 @@ it("keeps intended vendor skips silent (#4218)", async () => {
 		).toBe(false);
 		expect(consumeAgentNudge(undefined, runtime.sessionScope)).toBeUndefined();
 	} finally {
+		env.cleanup();
+	}
+});
+
+it("classifies outside-root path families through the real tool-result seam (#4230)", async () => {
+	resetDegradationLedger();
+	const env = setupTestEnvironment("pi-lens-4230-path-families-");
+	const previousDataDir = process.env.PILENS_DATA_DIR;
+	process.env.PILENS_DATA_DIR = path.join(
+		path.dirname(env.tmpDir),
+		`pi-lens-4230-data-${process.pid}`,
+	);
+	try {
+		const projectDataPath = path.join(
+			getProjectDataDir(env.tmpDir),
+			"cache.json",
+		);
+		const cases = [
+			[
+				"external node_modules",
+				path.join(env.tmpDir, "..", "node_modules", "pkg", "index.ts"),
+				false,
+			],
+			[
+				"external vendor",
+				path.join(env.tmpDir, "..", "vendor", "pkg", "index.ts"),
+				false,
+			],
+			[
+				"external venv",
+				path.join(env.tmpDir, "..", ".venv", "lib", "index.py"),
+				false,
+			],
+			[
+				"external site-packages",
+				path.join(env.tmpDir, "..", "site-packages", "pkg.py"),
+				false,
+			],
+			[
+				"external bower components",
+				path.join(env.tmpDir, "..", "bower_components", "pkg", "index.js"),
+				false,
+			],
+			["pi-lens project cache", projectDataPath, false],
+			[
+				"pi-lens global home",
+				path.join(getGlobalPiLensDir(), "cache.json"),
+				false,
+			],
+			[
+				"pi home",
+				path.join(os.homedir(), ".pi", "agent", "sessions.jsonl"),
+				false,
+			],
+			[
+				"pi-agent scratch",
+				path.join(os.tmpdir(), "pi-agent-4230", "tool.tmp"),
+				false,
+			],
+			[
+				"ordinary tmp project file",
+				path.join(os.tmpdir(), "capture", "lib", "x.ts"),
+				true,
+			],
+		] as const;
+
+		for (const [label, filePath, shouldNotify] of cases) {
+			resetDegradationLedger();
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			await handleToolResult({
+				event: {
+					toolName: "edit",
+					input: { path: filePath },
+					content: [{ type: "text", text: "ok" }],
+				},
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				resetLSPService: () => {},
+				readGuard: runtime.readGuard,
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+			} as never);
+			const notified = getDegradationSummary().some(
+				(entry) => entry.kind === "tool-result-outside-project-root",
+			);
+			expect(notified, label).toBe(shouldNotify);
+			const advisory = consumeAgentNudge(undefined, runtime.sessionScope);
+			if (shouldNotify) expect(advisory).toBeDefined();
+			else expect(advisory).toBeUndefined();
+		}
+	} finally {
+		if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+		else process.env.PILENS_DATA_DIR = previousDataDir;
 		env.cleanup();
 	}
 });

@@ -36,7 +36,10 @@ import {
 	loadPiLensProjectConfig,
 } from "./project-lens-config.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
-import { isEphemeralCheckoutRoot } from "./ephemeral-root.js";
+import {
+	ephemeralStagingRoot,
+	isEphemeralCheckoutRoot,
+} from "./ephemeral-root.js";
 import { getProcessSingleton } from "./process-singletons.js";
 
 /**
@@ -453,6 +456,28 @@ export function getGlobalPiLensDir(): string {
 	const override = process.env.PI_LENS_HOME?.trim();
 	if (override) return path.resolve(override);
 	return path.join(os.homedir(), ".pi-lens");
+}
+
+/**
+ * True for pi/pi-lens-owned files that can arrive at the tool-result seam
+ * from outside the session root. These are housekeeping writes, not project
+ * edits for which the actionable outside-root notice is useful.
+ */
+export function isPiLensInternalPath(
+	filePath: string,
+	projectRoot: string,
+): boolean {
+	const absolute = path.resolve(filePath);
+	const home = path.resolve(os.homedir());
+	const candidates = [
+		getGlobalPiLensDir(),
+		getProjectDataDir(projectRoot),
+		path.join(home, ".pi"),
+		path.join(home, ".pi-lens"),
+	];
+	if (candidates.some((dir) => isUnderDir(absolute, dir))) return true;
+	if (ephemeralStagingRoot(absolute) !== undefined) return true;
+	return false;
 }
 
 /**
