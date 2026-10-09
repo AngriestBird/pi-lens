@@ -1297,6 +1297,8 @@ export type DegradationKind =
 	 * session cannot take it stale later. Once per start reason.
 	 */
 	| "session-scope-handoff-discarded"
+	/** An unclaimed successor hand-off exceeded its fixed retention window. */
+	| "session-scope-handoff-expired"
 	/**
 	 * #3881: a primary shutdown landed while its own `session_start` was still
 	 * in flight, before it adopted; it forwarded the slot left for that start

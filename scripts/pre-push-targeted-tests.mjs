@@ -176,6 +176,7 @@ export const TEST_TREE_GOVERNANCE_TESTS = [
 	"tests/real-harness/provider-compatibility.test.ts",
 	"tests/real-harness/read-guard-moves.test.ts",
 	"tests/real-harness/scenario-1.test.ts",
+	"tests/real-harness/scenario-2.test.ts",
 	"tests/real-harness/scenario-3.test.ts",
 	"tests/real-harness/tools-enabled.test.ts",
 	// #3518: walks tests/ for unchecked `handleToolCall` calls (recurrence #4182).

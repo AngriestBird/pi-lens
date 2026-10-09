@@ -235,6 +235,7 @@ import {
 	decrementSecondarySessionCount,
 	getActivePrimaryRoot,
 	namedSuccessorReason,
+	expiredSuccessorReason,
 	noteSessionShutdown,
 	releasePrimarySession,
 	probeCtxActive,
@@ -3950,7 +3951,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 			const unstartedReason =
 				startInFlight || scope !== undefined
 					? undefined
-					: namedSuccessorReason();
+					: (namedSuccessorReason() ?? expiredSuccessorReason());
 			if (startInFlight || unstartedReason !== undefined) {
 				if (startInFlight) startInFlight.shutDown = true;
 				forwardHandoff({

@@ -64,6 +64,7 @@
 		"real-harness/provider-compatibility.test.ts": 5,
 		"real-harness/read-guard-moves.test.ts": 11,
 		"real-harness/scenario-1.test.ts": 1,
+		"real-harness/scenario-2.test.ts": 3,
 		"real-harness/scenario-3.test.ts": 1,
 		"real-harness/tools-enabled.test.ts": 6,
 		"scripts/analyze-config-resolution-smell.test.ts": 2,

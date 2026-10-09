@@ -441,6 +441,11 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the real pi RPC host and extension lifecycle cannot be certified by an in-process double",
 	},
+	"real-process-spawn:real-harness/scenario-2.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the expired successor hand-off and activation roster must cross the real pi process boundary",
+	},
 	"real-process-spawn:real-harness/scenario-3.test.ts": {
 		detector: "real-process-spawn",
 		reason:
