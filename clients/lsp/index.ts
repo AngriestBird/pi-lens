@@ -102,14 +102,20 @@ import {
 } from "../reverse-deps.js";
 import type { LSPServerInfo } from "./server.js";
 import {
-	LSP_SERVERS,
 	enforceLspRootCeiling,
+	getServerById,
 	hasProjectBoundaryMarker,
 	isDirectLspCommandTemporarilyUnavailable,
 	resetClassicTsRepairGuard,
 	resetLspLaunchAvailabilityGeneration,
 	resolveLspServerCwd,
 } from "./server.js";
+import { isAuxiliary, serverTraits } from "./server-traits.js";
+import {
+	auxWaitBudgetMs,
+	readEnvAuxGraceMs,
+	DEFAULT_AUX_GRACE_CEILING_MS,
+} from "./auxiliary-lifecycle.js";
 import {
 	classifyCascadeWaitTier,
 	classifyServerWaitTier,
@@ -552,52 +558,8 @@ function readTsserverSyncGraceMs(): number {
 	if (!Number.isFinite(parsed) || parsed < 0) return 300;
 	return parsed;
 }
-/**
- * Read the `PI_LENS_AUX_GRACE_MS` env override at call time (not module
- * load time) so tests can set it per-case. Controls the CEILING on how long
- * auxiliary-role promises (opengrep, ast-grep, zizmor, …) are waited after
- * all primary-role promises have settled, in both getDiagnostics
- * (raceToCompletion) and the touchFile push wait (#1458 S2 — the two lanes
- * share the same declared-budget-capped-by-ceiling shape). Each auxiliary
- * still gets only its OWN declared `aggregateWaitMs` up to this ceiling —
- * this is not a flat per-touch wait. Returns undefined when the var is
- * absent; each call site then supplies its own default ceiling (touchFile:
- * 2000ms; getDiagnostics: 2000ms — see the `?? 2000` at each call site).
- */
-function readEnvAuxGraceMs(): number | undefined {
-	const raw = process.env.PI_LENS_AUX_GRACE_MS;
-	if (raw === undefined) return undefined;
-	const parsed = Number.parseInt(raw, 10);
-	if (!Number.isFinite(parsed) || parsed < 0) return undefined;
-	return parsed;
-}
-const DEFAULT_AUX_GRACE_CEILING_MS = 2000;
-const MAX_ADAPTIVE_AUX_GRACE_CEILING_MS = 8000;
 /** Servers named in one no-client `lsp_touch_file` row (#3873 O9). */
 const MAX_TOUCH_CANDIDATES = 8;
-const ADAPTIVE_AUX_GRACE_MARGIN_MS = 500;
-
-export function auxWaitBudgetMs(
-	serverId: string,
-	isCold: boolean,
-	configuredCeilingMs: number | undefined,
-	declaredWaitMs: number,
-): number {
-	if (configuredCeilingMs !== undefined || !isCold) {
-		return Math.min(
-			declaredWaitMs,
-			configuredCeilingMs ?? DEFAULT_AUX_GRACE_CEILING_MS,
-		);
-	}
-	const observedSpawnMs = getSuccessfulLspSpawnDurationMs(serverId);
-	if (observedSpawnMs === undefined || observedSpawnMs <= 0) {
-		return Math.min(declaredWaitMs, DEFAULT_AUX_GRACE_CEILING_MS);
-	}
-	return Math.min(
-		MAX_ADAPTIVE_AUX_GRACE_CEILING_MS,
-		Math.max(declaredWaitMs, observedSpawnMs + ADAPTIVE_AUX_GRACE_MARGIN_MS),
-	);
-}
 const DIAGNOSTICS_SEMANTIC_SETTLE_THRESHOLD_MS = Math.max(
 	0,
 	Number.parseInt(
@@ -1170,7 +1132,7 @@ function primaryServerWaitFloorMs(
 	maxWaitMs?: number,
 ): number {
 	const serverWaitOverrideMs = getServersForFileWithConfig(filePath)
-		.filter((s) => s.role !== "auxiliary")
+		.filter((s) => !isAuxiliary(s))
 		.reduce((max, server) => Math.max(max, server.clientWaitTimeoutMs ?? 0), 0);
 	return Math.max(maxWaitMs ?? 0, serverWaitOverrideMs);
 }
@@ -1240,35 +1202,6 @@ export type NotifyStallDemotionReason =
 			cpuVerdict?: "flat" | "busy" | "unmeasured";
 			cpuPercent?: number | null;
 	  };
-
-// #1714: how many document notifies one auxiliary may hold UNACKNOWLEDGED
-// before the next notify has to prove the server drained its input.
-//
-// #1459's gate bounds CONCURRENT writes to one per auxiliary. That stops a
-// simultaneous fan-out, but a `lens_diagnostics mode=full` sweep is mostly
-// SEQUENTIAL — one file after another inside a server group (#387) — so every
-// write is alone in flight and the gate never engages. Each write still resolves
-// as soon as the pipe accepts the bytes, not when the scanner has read them, so
-// the sweep can hand a single-threaded scanner hundreds of full re-parses faster
-// than it consumes them. ast-grep stalled and had to be force-killed twice in
-// two full-scan exposures. Counting unacknowledged notifies bounds the BACKLOG
-// the sweep is allowed to build, which pipe-level backpressure alone does not.
-const AUX_NOTIFY_INFLIGHT_DEFAULT = 8;
-
-function auxNotifyInflightLimit(info: LSPServerInfo): number {
-	const perServer = info.notifyInflightLimit;
-	if (
-		typeof perServer === "number" &&
-		Number.isFinite(perServer) &&
-		perServer > 0
-	) {
-		return Math.floor(perServer);
-	}
-	const raw = Number(process.env.PI_LENS_LSP_AUX_NOTIFY_INFLIGHT);
-	return Number.isFinite(raw) && raw > 0
-		? Math.floor(raw)
-		: AUX_NOTIFY_INFLIGHT_DEFAULT;
-}
 
 // Budget for one project-wide `workspace/diagnostic` pull (#387 Item 2). Larger
 // than a per-file wait — it's a single request but scans the whole program —
@@ -2584,7 +2517,7 @@ export class LSPService {
 		// Latched open: this scanner is a stall, not a pacing problem, and the
 		// breaker owns it. Step aside here too rather than half-throttling it.
 		if (record.gateOpen) return false;
-		return record.unacked >= auxNotifyInflightLimit(entry.info);
+		return record.unacked >= serverTraits(entry.info).notifyInflightLimit;
 	}
 
 	/**
@@ -2596,10 +2529,12 @@ export class LSPService {
 	 * sends ONE request round-trip (`pingLiveness`, #1277,
 	 * clients/lsp/client.ts:2577).
 	 *
-	 * WHY A REPLY PROVES PROCESSING, measured rather than assumed. ast-grep-lsp is
-	 * tower-lsp-server and drains its message stream in order on one task, so a
-	 * request written after N `didOpen`s is answered after those N are scanned.
-	 * Live probe against the real binary, 30 real repository files:
+	 * WHY A REPLY PROVES PROCESSING, measured rather than assumed, and declared
+	 * as the `replyOrdering: "single-task-ordered"` trait on the row that was
+	 * measured (#1722, #1756 stage 1). ast-grep-lsp is tower-lsp-server and
+	 * drains its message stream in order on one task, so a request written after
+	 * N `didOpen`s is answered after those N are scanned. Live probe against the
+	 * real binary, 30 real repository files:
 	 *
 	 *   idle `workspace/symbol` reply        0 ms
 	 *   after 30 didOpens                 2263 ms, 29 of 30 publishes already in
@@ -2613,13 +2548,19 @@ export class LSPService {
 	 * immaterial against a ceiling of 4 to 8.
 	 *
 	 * A server that answered requests off a SEPARATE task would not give this
-	 * proof. What keeps that server safe is NOT the fail-open latch below: the
-	 * latch never arms for it. Such a server answers the barrier instantly,
-	 * `unacked` resets, and the gate stays inert for the whole sweep. Safety comes
-	 * from the outcome that inertness produces — the notify sequence is exactly
-	 * the pre-#1714 one, and #743's write deadline, backpressure streak and wedge
-	 * timer own the stall the same way they did before this change. The throttle
-	 * buys such a server nothing; it also costs it nothing.
+	 * proof, and one that declares `replyOrdering: "threaded"` is therefore
+	 * stepped over below rather than round-tripped. What kept such a server safe
+	 * BEFORE the trait existed is NOT the fail-open latch: the latch never arms
+	 * for it. It answered the barrier instantly, `unacked` reset, and the gate
+	 * stayed inert for the whole sweep. Safety comes from the outcome that
+	 * inertness produces — the notify sequence is exactly the pre-#1714 one, and
+	 * #743's write deadline, backpressure streak and wedge timer own the stall
+	 * the same way they did before this change. The throttle buys such a server
+	 * nothing; it also costs it nothing. Declaring the trait reaches that same
+	 * end state without spending the round-trip, and `unmeasured` — the default,
+	 * and every server that has not been probed — keeps the barrier armed
+	 * exactly as before, so an unmeasured server is never granted a pacing
+	 * change by omission.
 	 *
 	 * The wait is bounded by the CALLER's remaining budget, never by a schedule of
 	 * its own: every waiter gives the shared round-trip only `waitMs`, so a caller
@@ -2656,9 +2597,19 @@ export class LSPService {
 		// file. This is what stops a stalled scanner turning every remaining file
 		// into a fresh full-budget wait.
 		if (record.gateOpen) return;
-		const limit = auxNotifyInflightLimit(entry.info);
+		const traits = serverTraits(entry.info);
+		const limit = traits.notifyInflightLimit;
 		if (record.unacked < limit) return;
-		const ping = entry.client.pingLiveness;
+		// #1756 stage 1: a server that declares `"threaded"` answers requests off
+		// a separate task, so its reply is NOT evidence that the backlog was
+		// processed. It therefore has no usable liveness proof, and takes the same
+		// fail-open path as a client with no round-trip at all — reaching by
+		// declaration the inert state such a server used to reach only by
+		// measurement, without spending the round-trip.
+		const ping =
+			traits.replyOrdering === "threaded"
+				? undefined
+				: entry.client.pingLiveness;
 		if (!ping) {
 			record.unacked = 0;
 			return;
@@ -3039,7 +2990,7 @@ export class LSPService {
 		const attached = new Set(spawned.map((entry) => entry.info.id));
 		const skipped: string[] = [];
 		for (const server of getServersForFileWithConfig(filePath)) {
-			if (server.role !== "auxiliary") continue;
+			if (!isAuxiliary(server)) continue;
 			if (attached.has(server.id)) continue;
 			// An explicitly excluded server (the #584 workspace-sweep exclusion) was
 			// never asked, and its findings come from its own CLI extractor — that is
@@ -3154,7 +3105,7 @@ export class LSPService {
 		// Primary selection considers language servers only — auxiliary servers
 		// (opengrep, …) attach alongside the primary and are never chosen as it.
 		const servers = getServersForFileWithConfig(filePath).filter(
-			(s) => s.role !== "auxiliary",
+			(s) => !isAuxiliary(s),
 		);
 		// #2525: candidate roots are resolved LAZILY, and at most once per call.
 		// They are deliberately NOT hoisted: `NearestRoot` (clients/lsp/server.ts)
@@ -3577,7 +3528,7 @@ export class LSPService {
 		);
 
 		for (const { server, root } of rootedServers)
-			if (server.role === "auxiliary")
+			if (isAuxiliary(server))
 				auxiliaryRoots?.set(server.id, normalizeMapKey(root));
 
 		let serverCountAttempted = 0;
@@ -3627,7 +3578,7 @@ export class LSPService {
 	): Promise<SpawnedServer[]> {
 		if (this.checkDestroyed() || enabledIds.size === 0) return [];
 		const servers = getServersForFileWithConfig(filePath).filter(
-			(s) => s.role === "auxiliary" && enabledIds.has(s.id),
+			(s) => isAuxiliary(s) && enabledIds.has(s.id),
 		);
 		if (servers.length === 0) return [];
 		const rootMemo = new Map<string, Promise<string | undefined>>();
@@ -4172,7 +4123,7 @@ export class LSPService {
 
 		const root = await this.resolveServerRootOnce(server, filePath, rootMemo);
 		if (!root || this.checkDestroyed()) return undefined;
-		if (server.role !== "auxiliary") {
+		if (!isAuxiliary(server)) {
 			resolvedRoots?.set(server.id, normalizeMapKey(root));
 		}
 		const allowInstall = this.shouldAllowInstall(server.id);
@@ -5079,7 +5030,7 @@ export class LSPService {
 			// now-current client set and replay; no notification targets the retiree.
 			if (this.checkDestroyed()) {
 				const primaryServerIds = spawned
-					.filter((entry) => entry.info.role !== "auxiliary")
+					.filter((entry) => !isAuxiliary(entry.info))
 					.map((entry) => entry.info.id);
 				return {
 					diags: [],
@@ -5192,7 +5143,7 @@ export class LSPService {
 			): boolean => binding?.contentHash === touchContentHash;
 			const carriedAuxiliary = options.collectDiagnostics
 				? spawned.flatMap((entry) => {
-						if (entry.info.role !== "auxiliary") return [];
+						if (!isAuxiliary(entry.info)) return [];
 						const binding = entry.client.getDiagnosticBinding?.(filePath);
 						if (!bindingMatchesTouchContent(binding)) return [];
 						const diags = entry.client.getDiagnostics(filePath);
@@ -5210,7 +5161,7 @@ export class LSPService {
 			// publication carried in from the previous touch).
 			const auxPublishedThisContent = new Set(
 				spawned.flatMap((entry) =>
-					entry.info.role === "auxiliary" &&
+					isAuxiliary(entry.info) &&
 					bindingMatchesTouchContent(
 						entry.client.getDiagnosticBinding?.(filePath),
 					)
@@ -5257,7 +5208,7 @@ export class LSPService {
 			// timeout-preserves-last-known semantics rather than by this exemption.
 			const auxCoversThisContent = (serverId: string): boolean => {
 				const entry = spawnedByServerId.get(serverId);
-				if (entry?.info.role !== "auxiliary") return false;
+				if (!entry || !isAuxiliary(entry.info)) return false;
 				return (
 					auxPublishedThisContent.has(serverId) ||
 					bindingMatchesTouchContent(
@@ -5335,8 +5286,7 @@ export class LSPService {
 						// #1459: one outstanding resync per auxiliary. Primaries are
 						// untouched — they serve one file per touch and are not the fan-out
 						// target a `clientScope: "all"` sweep floods.
-						const gated =
-							entry.info.role === "auxiliary" && clientKey !== undefined;
+						const gated = isAuxiliary(entry.info) && clientKey !== undefined;
 						let slot: { release: () => void } | undefined;
 						if (gated && clientKey) {
 							// #1714: before taking the slot, make the server prove it
@@ -5547,7 +5497,7 @@ export class LSPService {
 			// An auxiliary that missed a deadline is a named coverage gap, never an
 			// inconclusive touch — see `resolveTouchVerdict` (diagnostic-binding.ts).
 			const primaryEntries = spawned.filter(
-				(entry) => entry.info.role !== "auxiliary",
+				(entry) => !isAuxiliary(entry.info),
 			);
 			const primaryServerIds = new Set(primaryEntries.map((e) => e.info.id));
 			const primaryNotifyWriteTimedOutServerIds =
@@ -5875,7 +5825,7 @@ export class LSPService {
 				const hasTouchAuxiliaries =
 					clientScope === "with-auxiliary" &&
 					options.collectDiagnostics === true &&
-					spawned.some((e) => e.info.role === "auxiliary");
+					spawned.some((e) => isAuxiliary(e.info));
 				if (spawned.some((entry) => entry.info.custom === true)) {
 					try {
 						const snapshotHook = options.hook ?? "tool_result_edit";
@@ -5929,7 +5879,7 @@ export class LSPService {
 						entry.client.serverId,
 					);
 					return hasTouchAuxiliaries &&
-						entry.info.role === "auxiliary" &&
+						isAuxiliary(entry.info) &&
 						coldAuxiliaryServerIds.has(entry.client.serverId) &&
 						(configuredAuxCeilingMs !== undefined ||
 							(observedSpawnMs !== undefined && observedSpawnMs > 0))
@@ -5966,7 +5916,7 @@ export class LSPService {
 					}
 				};
 				const perServerRaceBudgets = spawned.map((entry, entryIndex) => {
-					return hasTouchAuxiliaries && entry.info.role === "auxiliary"
+					return hasTouchAuxiliaries && isAuxiliary(entry.info)
 						? auxWaitBudgetMs(
 								entry.client.serverId,
 								coldAuxiliaryServerIds.has(entry.client.serverId),
@@ -5978,7 +5928,7 @@ export class LSPService {
 				const perServerWaits = spawned.map((entry, entryIndex) => {
 					if (
 						hasTouchAuxiliaries &&
-						entry.info.role === "auxiliary" &&
+						isAuxiliary(entry.info) &&
 						this.isAuxiliaryWaitDemoted(
 							entry.info.id,
 							entry.client.root ?? filePath,
@@ -6133,7 +6083,7 @@ export class LSPService {
 					? (() => {
 							// Primary waits: all non-auxiliary servers.
 							const primaryWaits = perServerWaits.filter(
-								(_, i) => spawned[i].info.role !== "auxiliary",
+								(_, i) => !isAuxiliary(spawned[i].info),
 							);
 							// Aux waits: auxiliary servers (advisory). `client` and the
 							// pre-notify `diagnosticsVersion` baseline travel alongside the
@@ -6142,7 +6092,7 @@ export class LSPService {
 							// below).
 							const auxWaits = perServerWaits
 								.map((p, i) =>
-									spawned[i].info.role === "auxiliary"
+									isAuxiliary(spawned[i].info)
 										? {
 												promise: p,
 												serverId: spawned[i].info.id,
@@ -6569,9 +6519,7 @@ export class LSPService {
 				// captured on, and `undefined` from a double that predates the accessor fails
 				// CLOSED rather than silently reverting to the global counter.
 				if (!hasTouchAuxiliaries && options.collectDiagnostics === true) {
-					const auxEntries = spawned.filter(
-						(entry) => entry.info.role === "auxiliary",
-					);
+					const auxEntries = spawned.filter((entry) => isAuxiliary(entry.info));
 					if (auxEntries.length > 0) {
 						const outcomes = auxEntries.map((entry) => {
 							const baseline = diagnosticBaselines.get(entry.client);
@@ -6667,19 +6615,19 @@ export class LSPService {
 					);
 					diagnosticsUnansweredServerIds = unanswered.map((e) => e.info.id);
 					diagnosticsUnansweredPrimaryServerIds = unanswered
-						.filter((entry) => entry.info.role !== "auxiliary")
+						.filter((entry) => !isAuxiliary(entry.info))
 						.map((e) => e.info.id);
 					// Fail-safe: a touch with no waited-on primary has no primary answer to
 					// preserve, so it keeps the pre-#1549 touch-wide verdict rather than
 					// absolving itself on an auxiliary's evidence.
 					const hasWaitedPrimary = waited.some(
-						(entry) => entry.info.role !== "auxiliary",
+						(entry) => !isAuxiliary(entry.info),
 					);
 					const hasUnsupportedPrimary = diagnosticsUnsupportedServerIds.some(
 						(serverId) =>
 							spawned.some(
 								(entry) =>
-									entry.info.id === serverId && entry.info.role !== "auxiliary",
+									entry.info.id === serverId && !isAuxiliary(entry.info),
 							),
 					);
 					diagnosticsTimedOut =
@@ -6873,7 +6821,7 @@ export class LSPService {
 			const staleWriteAuxiliaryServerIds = spawned
 				.filter(
 					(entry) =>
-						entry.info.role === "auxiliary" &&
+						isAuxiliary(entry.info) &&
 						notifyWriteTimedOutServerIds.includes(entry.info.id) &&
 						!auxCoveredAtMerge.has(entry.info.id),
 				)
@@ -7168,7 +7116,7 @@ export class LSPService {
 			const auxNoAnswerServerIds = spawned
 				.filter(
 					(entry) =>
-						entry.info.role === "auxiliary" &&
+						isAuxiliary(entry.info) &&
 						(diagnosticsUnansweredServerIds.includes(entry.info.id) ||
 							notifyWriteTimedOutServerIds.includes(entry.info.id)) &&
 						!auxCoveredAtMerge.has(entry.info.id),
@@ -7254,8 +7202,9 @@ export class LSPService {
 			// through its own budget, demonstrably did not.
 			//
 			// NO TEST PINS THIS LINE, and that is a property of today's readers rather
-			// than a coverage gap: `ensureWarmForSweep` filters `role === "auxiliary"`
-			// out of its server list entirely, so no reader consumes an auxiliary's
+			// than a coverage gap: `ensureWarmForSweep` filters auxiliaries out
+			// of its server list entirely (`!isAuxiliary`), so no reader consumes
+			// an auxiliary's
 			// `demonstratedReady` mark and deleting this `continue` changes no observable
 			// behavior (verified by mutation — the LSP suite stays green). It stays
 			// because the mark's meaning is "this server answered", and the moment any
@@ -7329,8 +7278,7 @@ export class LSPService {
 			const primaryDiagnosticsUnsupported =
 				diagnosticsUnsupportedServerIds.some((serverId) =>
 					spawned.some(
-						(entry) =>
-							entry.info.id === serverId && entry.info.role !== "auxiliary",
+						(entry) => entry.info.id === serverId && !isAuxiliary(entry.info),
 					),
 				);
 			if (diagnosticsUnsupportedServerIds.length > 0) {
@@ -7743,20 +7691,24 @@ export class LSPService {
 		const graceMs = diagnosticsMode === "document" ? 0 : EARLY_UNBLOCK_GRACE_MS;
 
 		// R8 (#714) / #1458 S2: per-promise role descriptors so raceToCompletion
-		// can apply a bounded aux grace once all primary-role promises have
+		// can apply a bounded aux grace once every language-role promise has
 		// settled. Servers with role:"auxiliary" (opengrep, ast-grep, zizmor, …)
-		// get their OWN declared `aggregateWaitMs` budget after the primary
-		// settles, capped by the PI_LENS_AUX_GRACE_MS global ceiling (default
-		// 2000ms) — the same "declared budget, capped by a ceiling" shape
-		// `touchFile`'s with-auxiliary push wait uses, so this lane can no longer
-		// starve a scanner whose measured warm run (e.g. opengrep ~1.3s) is
-		// shorter than the ceiling but longer than a flat short grace. Late
-		// arrivals are still dropped (advisory only — they land in the client
-		// cache and surface on the next edit). Primary-only callers have no
+		// get their OWN declared `aggregateWaitMs` budget after the language
+		// server settles, capped by the PI_LENS_AUX_GRACE_MS global ceiling
+		// (DEFAULT_AUX_GRACE_CEILING_MS) — the same "declared budget, capped by a
+		// ceiling" shape `touchFile`'s with-auxiliary push wait uses, so this lane
+		// can no longer starve a scanner whose measured warm run (e.g. opengrep
+		// ~1.3s) is shorter than the ceiling but longer than a flat short grace.
+		// Late arrivals are still dropped (advisory only — they land in the client
+		// cache and surface on the next edit). Language-only callers have no
 		// auxiliary descriptors, so this path is never entered and there is
 		// zero behavior change for the single-server hot path.
+		//
+		// The role rides through as the server's OWN `entry.info.role`: one
+		// vocabulary, so this build is no longer the translation point between
+		// `"language"` and a descriptor-shaped `"primary"` (#1488).
 		const diagDescriptors: PromiseDescriptor[] = spawned.map((entry) => {
-			if (entry.info.role !== "auxiliary") return { role: "primary" };
+			if (!isAuxiliary(entry.info)) return { role: entry.info.role };
 			const strategy = getStrategy(
 				entry.info.id,
 				entry.client.getLaunchVariant?.(),
@@ -7771,7 +7723,7 @@ export class LSPService {
 			// promise here stops self-bounding. The narrowing itself is pinned in
 			// tests/clients/lsp/aggregation.test.ts, which can build the
 			// non-self-bounded promises this path cannot.
-			return { role: "auxiliary", budgetMs: strategy.aggregateWaitMs };
+			return { role: entry.info.role, budgetMs: strategy.aggregateWaitMs };
 		});
 
 		// Result-aware racing: trigger early-unblock when any client has results,
@@ -7797,8 +7749,9 @@ export class LSPService {
 				descriptors: diagDescriptors,
 				// #1458 S2: ceiling, not a flat wait — each auxiliary's own
 				// budgetMs (above) determines the actual per-touch grace up to
-				// this cap. Matches touchFile's `readEnvAuxGraceMs() ?? 2000`.
-				auxGraceMs: readEnvAuxGraceMs() ?? 2000,
+				// this cap. Matches touchFile's ceiling, and names the shared
+				// constant instead of repeating its value (#1488).
+				auxGraceMs: readEnvAuxGraceMs() ?? DEFAULT_AUX_GRACE_CEILING_MS,
 			},
 		);
 
@@ -8082,21 +8035,22 @@ export class LSPService {
 	 * a polyglot workspace used to win every no-filePath query outright (#1812
 	 * — a supporting primary server spawned later never got a look-in). Scans
 	 * for the first LIVE client matching `predicate` (when given), preferring
-	 * any primary (non-`"auxiliary"` role) match over an auxiliary one — the
-	 * same primary-over-auxiliary preference `getClientForFile` encodes via
-	 * its `role !== "auxiliary"` filter (this file, `getClientForFile`) and
+	 * any primary (non-auxiliary) match over an auxiliary one — the same
+	 * primary-over-auxiliary preference `getClientForFile` encodes via its
+	 * `!isAuxiliary` filter (this file, `getClientForFile`) and
 	 * `getAliveServerIds` groups by. `isAlive()` is required for BOTH the
 	 * preferred and fallback candidate — mirrors `getCapabilitySnapshots`'s
 	 * own no-filePath branch (this file, ~line 5868), whose liveness filter
 	 * this helper otherwise duplicates; without it a dead primary would win
 	 * over a live, answering auxiliary. Role is read from the map key's
-	 * `serverId` prefix against `LSP_SERVERS`, the same single source of
-	 * truth `getCapabilitySnapshots` already parses that key from — never a
-	 * second, hand-rolled role table. A `serverId` prefix absent from
-	 * `LSP_SERVERS` (should not happen in practice — every spawned client's
-	 * key is built from a known server's `id`) resolves to `role === undefined`,
-	 * which falls through to the primary branch: unknown treated as primary,
-	 * never silently dropped. Returns undefined only when NO live client
+	 * `serverId` prefix through `getServerById` against `LSP_SERVERS`, the
+	 * same single source of truth `getCapabilitySnapshots` already parses that
+	 * key from — never a second, hand-rolled role table. A `serverId` prefix
+	 * absent from `LSP_SERVERS` (should not happen in practice — every spawned
+	 * client's key is built from a known server's `id`) resolves to no server,
+	 * which `isAuxiliary` reads as `DEFAULT_LSP_SERVER_ROLE` and so falls
+	 * through to the primary branch: unknown treated as primary, never
+	 * silently dropped. Returns undefined only when NO live client
 	 * (primary or auxiliary) matches.
 	 */
 	private selectWorkspaceScopeClient(
@@ -8108,8 +8062,7 @@ export class LSPService {
 			if (predicate && !predicate(client)) continue;
 			const separator = key.indexOf(":");
 			const serverId = separator >= 0 ? key.slice(0, separator) : key;
-			const role = LSP_SERVERS.find((s) => s.id === serverId)?.role;
-			if (role === "auxiliary") {
+			if (isAuxiliary(getServerById(serverId))) {
 				if (!auxFallback) auxFallback = { client, serverId };
 				continue;
 			}
@@ -8984,7 +8937,7 @@ export class LSPService {
 			return { performedWarmup: false, failedServerIds: [] };
 		}
 		const servers = getServersForFileWithConfig(representativeFile).filter(
-			(s) => s.role !== "auxiliary",
+			(s) => !isAuxiliary(s),
 		);
 		if (servers.length === 0) {
 			return { performedWarmup: false, failedServerIds: [] };
@@ -9605,7 +9558,7 @@ export class LSPService {
 							// barrier. Charge it to the same backlog ledger, and leave a
 							// scanner that is already at its ceiling out of the burst.
 							let auxKey: string | undefined;
-							if (entry.info.role === "auxiliary") {
+							if (isAuxiliary(entry.info)) {
 								auxKey = await this.demonstratedReadyKeyFor(
 									entry.info,
 									filePath,
@@ -10448,7 +10401,7 @@ export class LSPService {
 	 * but slow/wedged" (#1766) — a cold spawn still in flight is not a verdict
 	 * on a server that doesn't exist yet.
 	 *
-	 * Mirrors the `role !== "auxiliary"` filter getClientForFile applies at
+	 * Mirrors the `!isAuxiliary` filter getClientForFile applies at
 	 * :2146-2148 (kept coupled to that line intentionally): auxiliary servers
 	 * (opengrep, typos, …) spawn routinely and concurrently with an ALREADY
 	 * ALIVE primary (dispatch/runners/lsp.ts's with-auxiliary path fires one
@@ -10510,7 +10463,7 @@ export class LSPService {
 		for (const server of getServersForFileWithConfig(filePath)) {
 			// Only `clientScope: "all"` attempts auxiliary servers in this touch; an
 			// auxiliary it did not attempt was never considered.
-			const auxiliary = server.role === "auxiliary";
+			const auxiliary = isAuxiliary(server);
 			if (auxiliary && !auxiliaryRoots.has(server.id)) continue;
 			if (candidates.length >= MAX_TOUCH_CANDIDATES) break;
 			const root = (auxiliary ? auxiliaryRoots : resolvedRoots).get(server.id);
@@ -10788,8 +10741,7 @@ export class LSPService {
 			const id = client.serverId;
 			if (seen.has(id)) continue;
 			seen.add(id);
-			const role = LSP_SERVERS.find((s) => s.id === id)?.role;
-			(role === "auxiliary" ? aux : primary).push(id);
+			(isAuxiliary(getServerById(id)) ? aux : primary).push(id);
 		}
 		return [...primary, ...aux];
 	}
