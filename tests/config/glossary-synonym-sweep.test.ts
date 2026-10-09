@@ -639,7 +639,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/project-diagnostics/fresh-fetch.ts": 2,
 		"clients/project-diagnostics/runner-adapters/runner-findings.ts": 2,
 		"clients/project-diagnostics/scanner.ts": 1,
-		"clients/project-lens-config.ts": 5,
+		// 5 -> 6 (#4226): the shared `rules.<id>.ignorePaths` field is parsed by
+		// this loader during the compatibility projection; the identifier is the
+		// public setting name, not a second ignore policy.
+		"clients/project-lens-config.ts": 6,
 		"clients/project-report.ts": 10,
 		"clients/project-snapshot.ts": 3,
 		"clients/python-provenance.ts": 4,
@@ -1243,7 +1246,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/taplo.ts": 5,
 		"clients/dispatch/runners/terragrunt.ts": 2,
 		"clients/dispatch/runners/tflint.ts": 3,
-		"clients/dispatch/runners/tree-sitter.ts": 14,
+		// 14 -> 15 (#4226): the early-return runner result preserves the existing
+		// status field while disclosing a fully path-excluded query set.
+		"clients/dispatch/runners/tree-sitter.ts": 15,
 		"clients/dispatch/runners/trivy-config.ts": 10,
 		"clients/dispatch/runners/utils/availability-policy.ts": 5,
 		"clients/dispatch/runners/utils/candidate-probe.ts": 1,

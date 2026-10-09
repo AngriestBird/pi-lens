@@ -250,6 +250,35 @@ function lspNamespace(): ConfigSchemaNode {
 	};
 }
 
+/** The shared public rule policy shape (#4226). */
+function rulePolicyEntryNode(): ConfigSchemaNode {
+	return {
+		type: "object",
+		additionalProperties: true,
+		properties: {
+			threshold: { type: "number", [STABILITY_TIER_KEY]: "experimental" },
+			disable: {
+				type: "array",
+				items: { type: "string", [STABILITY_TIER_KEY]: "experimental" },
+				[STABILITY_TIER_KEY]: "experimental",
+			},
+			select: {
+				type: "array",
+				items: { type: "string", [STABILITY_TIER_KEY]: "experimental" },
+				[STABILITY_TIER_KEY]: "experimental",
+			},
+			ignorePaths: {
+				type: "array",
+				items: { type: "string", [STABILITY_TIER_KEY]: "experimental" },
+				[MERGE_STRATEGY_KEY]: "append",
+				[DENY_KEY]: "array-union",
+				[STABILITY_TIER_KEY]: "experimental",
+			},
+		},
+		[STABILITY_TIER_KEY]: "experimental",
+	};
+}
+
 function buildConfigSchema(): ConfigSchemaNode {
 	const properties: Record<string, ConfigSchemaNode> = {};
 
@@ -281,6 +310,13 @@ function buildConfigSchema(): ConfigSchemaNode {
 			]),
 		),
 		[STABILITY_TIER_KEY]: "stable",
+	};
+	// Rule ids are an open keyed map, but their policy fields are shared config
+	// leaves so global and project policy merge field-wise with provenance.
+	properties.rules = {
+		type: "object",
+		additionalProperties: rulePolicyEntryNode(),
+		[STABILITY_TIER_KEY]: "experimental",
 	};
 
 	// Namespaces owned by another tool that ride in the same file (`trivy`,

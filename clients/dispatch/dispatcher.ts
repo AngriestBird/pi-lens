@@ -68,7 +68,11 @@ import {
 } from "./collect-later-tier.js";
 import { deferRunnerFindings } from "./pending-runner-findings.js";
 
-import { applyRulePolicy, rulePolicyMapFromConfig } from "./rule-policy.js";
+import {
+	applyRulePolicy,
+	resolvedRulePolicyMap,
+	rulePolicyMapFromConfig,
+} from "./rule-policy.js";
 import { getToolProfile } from "./tool-profile.js";
 import {
 	hasUsableResult,
@@ -373,6 +377,7 @@ export function createDispatchContext(
 				})
 			: undefined;
 	const projectConfig = loadPiLensProjectConfig(normalizedCwd);
+	const rulePolicy = resolvedRulePolicyMap(normalizedProjectRoot);
 
 	return {
 		filePath: normalizedFilePath,
@@ -387,6 +392,7 @@ export function createDispatchContext(
 		deltaMode: !pi.getFlag("no-delta"),
 		facts,
 		projectConfig,
+		rulePolicy,
 		blockingOnly,
 		modifiedRanges,
 		writeIndex,
@@ -1377,9 +1383,11 @@ export async function dispatchForFile(
 	// the same root here keeps the two surfaces in agreement. `ctx.projectConfig`
 	// itself is untouched — thresholds and mutation flags keep their existing
 	// language-root resolution.
-	const rulePolicy = rulePolicyMapFromConfig(
-		loadPiLensProjectConfig(ctx.projectRoot ?? ctx.cwd).rules,
-	);
+	const rulePolicy =
+		ctx.rulePolicy ??
+		rulePolicyMapFromConfig(
+			loadPiLensProjectConfig(ctx.projectRoot ?? ctx.cwd).rules,
+		);
 	// The output-only filter pipeline: LSP/docker overlap suppression + inline
 	// `pi-lens-ignore` + agent/user dispositions + project rule policy. Applied
 	// AFTER dedupe so the pi renderer, widget, and delta all see one filtered
@@ -1410,7 +1418,9 @@ export async function dispatchForFile(
 			ctx.filePath,
 			fileContent,
 		);
-		return applyRulePolicy(disposition, rulePolicy);
+		return applyRulePolicy(disposition, rulePolicy, {
+			root: ctx.projectRoot ?? ctx.cwd,
+		});
 	};
 	let visibleDiagnostics = applyOutputFilters(dedupedDiagnostics);
 	let resolvedCount = 0;

@@ -179,6 +179,23 @@ function denyDoc(...ids: string[]): Record<string, unknown> {
 }
 
 describe("effectiveConfig — provenance of the resolution", () => {
+	it("shows a rule ignorePaths leaf and its global provenance", async () => {
+		const { view } = await viewFor({
+			files: {
+				".pi-lens/config.json": {
+					rules: { "no-eval": { ignorePaths: ["vendorish/**"] } },
+				},
+				"proj/.pi-lens.json": { rules: { "no-eval": { ignorePaths: [] } } },
+			},
+			startDir: "proj",
+		});
+		const entry = view.provenance.find(
+			(item) => item.key === "/rules/no-eval/ignorePaths/0",
+		);
+		expect(entry?.tier).toBe("global");
+		expect(entry?.file).toContain(".pi-lens/config.json");
+	});
+
 	it("names the file and tier every resolved leaf came from, without carrying values", async () => {
 		const { view } = await viewFor({
 			files: {
