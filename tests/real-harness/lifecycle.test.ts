@@ -47,6 +47,11 @@ function deadWeightTools(pi: RealPi, index: number): string[] | undefined {
 	return tools ? [...tools].sort() : undefined;
 }
 
+async function sessionFile(pi: RealPi): Promise<string> {
+	await expect.poll(() => pi.sessionFiles().length).toBeGreaterThan(0);
+	return pi.sessionFiles().at(-1) as string;
+}
+
 async function turn(pi: RealPi, text: string, expected: string[]) {
 	await pi.prompt(text);
 	await pi.awaitAssistantTurn();
@@ -83,6 +88,7 @@ describe.skipIf(!realPiAvailable)("real pi lifecycle witness", () => {
 				const freshRoster = activatedRoster.filter(
 					(name) => name !== "ast_grep_search",
 				);
+				const initialSessionFile = await sessionFile(pi);
 
 				await pi.prompt("/real-harness-reload");
 				await turn(pi, "after reload", activatedRoster);
@@ -90,13 +96,18 @@ describe.skipIf(!realPiAvailable)("real pi lifecycle witness", () => {
 
 				await pi.newSession();
 				await turn(pi, "after new", freshRoster);
+				const freshSessionFile = await sessionFile(pi);
+				expect(freshSessionFile).not.toBe(initialSessionFile);
 				await expect.poll(() => deadWeightRows(pi)).toHaveLength(1);
 				expect(deadWeightTools(pi, 0)).toEqual(
 					situationalTools.filter((name) => name !== "ast_grep_search"),
 				);
 
+				const beforeResumeSessionFile = freshSessionFile;
 				await pi.resume();
 				await turn(pi, "after resume", freshRoster);
+				const resumedSessionFile = await sessionFile(pi);
+				expect(resumedSessionFile).toBe(beforeResumeSessionFile);
 				await expect.poll(() => deadWeightRows(pi)).toHaveLength(2);
 				expect(deadWeightTools(pi, 1)).toEqual(situationalTools);
 
@@ -110,7 +121,10 @@ describe.skipIf(!realPiAvailable)("real pi lifecycle witness", () => {
 				await pi.quit();
 				await expect.poll(() => deadWeightRows(pi)).toHaveLength(4);
 				expect(deadWeightTools(pi, 3)).toEqual(situationalTools);
-				expect(lifecycleRows(pi)).toEqual([
+				const rows = pi.lens
+					.latencyRows()
+					.filter((row) => row.phase === "session_scope_transition");
+				const expectedTransitions = [
 					"end:superseded",
 					"start:startup",
 					"shutdown:reload",
@@ -123,7 +137,13 @@ describe.skipIf(!realPiAvailable)("real pi lifecycle witness", () => {
 					"shutdown:fork",
 					"start:fork",
 					"shutdown:quit",
-				]);
+				];
+				expect(
+					lifecycleRows(pi),
+					JSON.stringify({
+						rows,
+					}),
+				).toEqual(expectedTransitions);
 			},
 		);
 	}, 60_000);

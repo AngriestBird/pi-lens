@@ -7,6 +7,7 @@ import {
 	cpSync,
 	existsSync,
 	mkdirSync,
+	readdirSync,
 	readFileSync,
 	writeFileSync,
 } from "node:fs";
@@ -64,6 +65,7 @@ export type RealPi = {
 	awaitToolResult(name: string): Promise<HarnessEvent>;
 	killChildForTest(): void;
 	providerObservations(): ReadonlyArray<JsonObject>;
+	sessionFiles(): ReadonlyArray<string>;
 	projectPath(): string;
 	homePath(): string;
 	childTempDir(): string;
@@ -518,6 +520,12 @@ export async function withRealPi<T>(
 						event.type === "tool_execution_end",
 				),
 			providerObservations: () => harness.providerObservations(),
+			sessionFiles: () =>
+				options.persistedSession
+					? readdirSync(path.join(harness.home, "sessions"))
+							.filter((name) => name.endsWith(".jsonl"))
+							.sort()
+					: [],
 			projectPath: () => harness.project,
 			homePath: () => harness.home,
 			childTempDir: () => path.join(harness.home, "tmp"),
