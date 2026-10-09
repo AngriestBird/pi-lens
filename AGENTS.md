@@ -673,6 +673,11 @@ the surface they bite; each block loads only when its trigger applies.
 - Every new LSP server has a smoke fixture or a documented alternate/toolchain
   exemption. Real LSP-spawn tests belong in the serialized `lsp-spawn-heavy`
   lane.
+- A `fallbackFor` family is one primary for workspace grouping: a selected
+  preferred server and its sequential alternate do not disable the workspace-
+  pull fast path merely because both registry members match the file. Measure
+  the alternate independently; do not attribute the preferred server's
+  capabilities or diagnostics to it (#3939).
 
 </important>
 <important if="touching dispatch, runners, formatters, and installers rules">
