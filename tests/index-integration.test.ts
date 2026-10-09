@@ -632,6 +632,7 @@ describe("index.ts integration", () => {
 				undefined,
 				ctx,
 			);
+			// pi-mock bound: this lifecycle assertion does not re-run the factory or reproduce host ordering.
 			await mock.simulateSessionShutdownAndRebuild(
 				reason as "reload" | "resume" | "fork",
 				ctx,
@@ -866,6 +867,7 @@ describe("index.ts integration", () => {
 				{ toolName: "ast_grep_search", input: { pattern: "const $A = $B" } },
 				ctx,
 			);
+			// pi-mock bound: this lifecycle assertion does not re-run the factory or reproduce host ordering.
 			await mock.simulateSessionShutdownAndRebuild("new", ctx);
 
 			const rowsAt = () =>

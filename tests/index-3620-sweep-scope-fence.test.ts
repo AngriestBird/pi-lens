@@ -150,6 +150,7 @@ describe("#3620 the settled sweep's replay is fenced by the settle's scope", () 
 				fs.utimesSync(filePath, longAgo, longAgo);
 
 				await pi.emit("agent_settled", {}, ctx);
+				// pi-mock bound: this lifecycle assertion does not re-run the factory or reproduce host ordering.
 				if (replaced) await pi.simulateSessionShutdownAndRebuild("new", ctx);
 				// The replay the sweep makes for a drifted file (observed-mutation.ts
 				// runObservedSettledSweep), through index.ts' closure.

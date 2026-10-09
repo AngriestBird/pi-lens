@@ -1117,6 +1117,13 @@ processes. Real elapsed-time assertions belong in the serialized
 `lsp-spawn-heavy`. Any admitted real spawn or timer carries the flake-shape
 header, baseline row, and lane membership.
 
+The real-pi harness defaults to `--no-session`; a persisted-session witness
+opts into `withRealPi({ persistedSession: true })`, which pins `--session-dir`
+under the probe home and uses pi's documented `--continue` flag for a second
+process. Read lifecycle order from the real `session_scope_transition` rows
+and dead-weight rows, not from the pi mock; the mock does not re-run the
+extension factory or reproduce pi lifecycle ordering.
+
 When the defect is an ordering of awaits on one seam (a coalescing queue, a
 per-key serializer), or the seam has regressed before, write a scheduler
 property with `fc.scheduler()` instead of one more replay:
