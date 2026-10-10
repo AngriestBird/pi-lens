@@ -414,7 +414,7 @@ const NO_CWD_EXEMPTION_ROWS: ReadonlyArray<readonly [string, string]> = [
 ];
 const ORIGIN_ADMISSION_ROWS: ReadonlyArray<readonly [string, string]> = [
 	[
-		"clients/safe-spawn.ts#safeSpawn:ad6fe3ed~0cd6d898",
+		"clients/safe-spawn.ts#safeSpawn:ad6fe3ed~119c1ce6",
 		"the synchronous safe-spawn path derives its cwd from its own compatibility options, not the dispatch resolveToolCwd seam",
 	],
 	[
@@ -670,7 +670,7 @@ const ORIGIN_ADMISSION_ROWS: ReadonlyArray<readonly [string, string]> = [
 		"analysePipeline (runPipeline's body since #3506) forwards its own `cwd` parameter into runAutofix",
 	],
 	[
-		"clients/safe-spawn.ts#safeSpawnAsync:f7eca8ca~446d128f",
+		"clients/safe-spawn.ts#safeSpawnAsync:f7eca8ca~b4dc9aa5",
 		"this IS the spawn seam: `spawnCwd` is the cwd its own caller passed in options, so the origin rule applies to the callers, not here",
 	],
 	[
