@@ -573,6 +573,8 @@ export interface LSPServerInfo {
 	requiresProjectRoot?: boolean;
 	/** Simple command name whose absence disables spawn attempts briefly across roots. */
 	availabilityKey?: string;
+	/** Simple binary name whose project-local install must be refused for adopted roots. */
+	projectLocalCommand?: string;
 	/**
 	 * Optional extra candidacy gate beyond `extensions`. When present, a file
 	 * must ALSO satisfy this predicate to be a candidate server for it — for a
@@ -2547,6 +2549,7 @@ export const TypeScriptServer: LSPServerInfo = {
 	idleEviction: "transparent",
 	role: "language",
 	name: "TypeScript Language Server",
+	projectLocalCommand: "typescript-language-server",
 	extensions: JS_TS_LSP_EXTENSIONS,
 	autoPropagateDiagnostics: true,
 	root: TypeScriptRoot,
