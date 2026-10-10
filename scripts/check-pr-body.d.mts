@@ -35,6 +35,10 @@ export declare function lintPrBody(
 	valid: boolean;
 	errors: string[];
 };
+export declare function lintClassSweep(
+	body?: string,
+	options?: { diff?: string },
+): string[];
 export declare function testCorpus(options?: {
 	cwd?: string;
 	workingTree?: boolean;

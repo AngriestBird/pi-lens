@@ -73,6 +73,8 @@ a brief supplies only `lane=<name>`, scope, and the grant.
   a review input.
 - Repeat the pattern and population sweeps. Check blast radius, bounded
   observability, changelog, commit, and PR-body requirements.
+- Re-run the PR's `## Class sweep` search yourself and widen it when the
+  named shape is broader than the touched seam (#4273, #4268).
 - For LSP, dispatch, cache, runner, or tool changes, test one non-TypeScript
   registry entry through the same seam.
 - On a net-count fold, mutate every predicate the deleted sibling used to
