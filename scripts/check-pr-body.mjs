@@ -16,6 +16,7 @@ import {
 	lintCloseKeywordPlacement,
 	lintCloseKeywords,
 } from "./lib/close-keywords.mjs";
+import { checkProse, proseSections } from "./check-prose.mjs";
 
 const TEMPLATE_PATH = ".github/PULL_REQUEST_TEMPLATE.md";
 const TEMPLATE_FILE = resolve(
@@ -1770,6 +1771,14 @@ export function lintPrBody(body = "", options = {}) {
 	errors.push(...lintTestReferences(body, options));
 	errors.push(...lintMasterClaims(body));
 	errors.push(...lintShellExpansionGarble(body));
+	const prose = checkProse(proseSections(body), {
+		// Historical structural fixtures call lintPrBody without workingTree.
+		// Keep those calls advisory; local and event gates set workingTree and block.
+		mode: options.proseMode ?? (options.workingTree ? "block" : "warn"),
+	});
+	errors.push(...prose.errors.map((error) => `PR body prose ${error}`));
+	for (const warning of prose.warnings)
+		console.warn(`PR body prose warning: ${warning}`);
 	return { valid: errors.length === 0, errors };
 }
 
@@ -1933,6 +1942,9 @@ export async function lintPullRequestEvent(
 		requireTestAssessment,
 		diff,
 		workingTree: true,
+		// Existing open bodies were authored before #4280. Set PI_LENS_PROSE_GRACE=1
+		// for the transition job; local preflight remains blocking by default.
+		proseMode: process.env.PI_LENS_PROSE_GRACE === "1" ? "warn" : "block",
 	});
 	const coverage = lintTlaCoverage(body, { diff });
 	result.errors.push(...coverage.errors);
@@ -2135,6 +2147,7 @@ export function lintLocalPrBody(
 		workingTree: true,
 		ref: options.ref,
 		headFiles: options.headFiles,
+		proseMode: options.proseMode,
 	});
 	const coverage = lintTlaCoverage(body, {
 		diff,
@@ -2174,6 +2187,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
 	const refIndex = process.argv.indexOf("--ref");
 	const title = titleIndex === -1 ? "" : process.argv[titleIndex + 1];
 	const ref = refIndex === -1 ? undefined : process.argv[refIndex + 1];
+	const proseMode = process.argv.includes("--prose-grace") ? "warn" : "block";
 	if (titleIndex !== -1 && !title) throw new Error("--title requires text");
 	if (refIndex !== -1 && !ref) throw new Error("--ref requires a revision");
 	if (bodyIndex !== -1) {
@@ -2185,7 +2199,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
 			readFileSync(bodyPath, "utf8"),
 			process.cwd(),
 			gitExecFileSync,
-			{ title, ref },
+			{ title, ref, proseMode },
 		);
 		for (const error of result.errors) console.error(error);
 		process.exitCode = result.valid ? 0 : 1;
@@ -2196,7 +2210,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
 			readFileSync(bodyPath, "utf8"),
 			process.cwd(),
 			gitExecFileSync,
-			{ title, ref },
+			{ title, ref, proseMode },
 		);
 		for (const error of result.errors) console.error(error);
 		process.exitCode = result.valid ? 0 : 1;
