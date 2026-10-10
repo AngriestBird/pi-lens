@@ -2399,6 +2399,15 @@ export async function runLspGate({ langs = [], install, verbose, deps } = {}) {
 		));
 		({ initLSPConfig } = await import(pathToFileURL(configEntry).href));
 	}
+	const trustEntry = path.join(repoRoot, "dist", "clients", "project-trust.js");
+	const { adoptProjectTrustFromContext } = deps?.adoptProjectTrustFromContext
+		? deps
+		: await import(pathToFileURL(trustEntry).href);
+	// The nightly harness is a standalone host, not pi itself. Its copied
+	// fixtures intentionally represent a trusted project, so the real
+	// lsp_diagnostics path must consume the same host trust seam as the
+	// handshake layer before resolving project-local server configuration.
+	adoptProjectTrustFromContext({ isProjectTrusted: () => true });
 	let ensureTool;
 	let getInstallAttempt;
 	if (deps) {
@@ -2734,6 +2743,16 @@ async function runLspHandshake({ langs, install, verbose }) {
 		process.exit(2);
 	}
 	const { getLSPService } = await import(pathToFileURL(lspEntry).href);
+	const trustEntry = path.join(repoRoot, "dist", "clients", "project-trust.js");
+	const { adoptProjectTrustFromContext } = await import(
+		pathToFileURL(trustEntry).href
+	);
+	// The nightly harness is a standalone host, not pi itself. Its copied
+	// fixtures intentionally represent a trusted project so rows that exercise
+	// project-local executables (custom servers and TS7's local `tsc`) measure
+	// their production behavior. This goes through the same host accessor seam
+	// pi uses; it does not add a pi-lens trust policy or bypass the LSP gate.
+	adoptProjectTrustFromContext({ isProjectTrusted: () => true });
 	const configEntry = path.join(
 		repoRoot,
 		"dist",

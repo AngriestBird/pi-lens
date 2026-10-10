@@ -1013,6 +1013,8 @@ export type DegradationKind =
 	 * itself already landed; only the hash is missing. Subject is the file path.
 	 */
 	| "pipeline-post-write-hash-unavailable"
+	/** A mounted process bridge refused calls during a primary-session gap. */
+	| "process-bridge-unavailable"
 	/**
 	 * #2146, #3140: an incompatible process-singleton cell was discarded and
 	 * replaced with a fresh value (`clients/process-singletons.ts`,
@@ -1298,6 +1300,8 @@ export type DegradationKind =
 	 * session cannot take it stale later. Once per start reason.
 	 */
 	| "session-scope-handoff-discarded"
+	/** An unclaimed successor hand-off exceeded its fixed retention window. */
+	| "session-scope-handoff-expired"
 	/**
 	 * #3881: a primary shutdown landed while its own `session_start` was still
 	 * in flight, before it adopted; it forwarded the slot left for that start

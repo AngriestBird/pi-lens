@@ -376,6 +376,15 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"observes the real npm pack lifecycle (prepack/postpack), and unpacks that real tarball to check what ships (#3219); no in-process double is faithful",
 	},
+	// #4169: the TypeScript-source entry (`pi -e index.ts`) is transpiled by the
+	// real host's jiti loader rather than native-imported, so /reload re-evaluates
+	// the pi-lens graph and only a real child reaches the orphaned module-scope
+	// runtime; no in-process double produces a fresh module instance.
+	"real-process-spawn:real-harness/bridge-reload-ts.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the real pi host must transpile the TypeScript-source pi-lens entry, re-evaluate its module graph on /reload, and keep a third-party v1 bridge read connected to the live runtime (#4169)",
+	},
 	"real-process-spawn:real-harness/bridge-reload.test.ts": {
 		detector: "real-process-spawn",
 		reason:
@@ -440,6 +449,11 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		detector: "real-process-spawn",
 		reason:
 			"the real pi RPC host and extension lifecycle cannot be certified by an in-process double",
+	},
+	"real-process-spawn:real-harness/scenario-2.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the expired successor hand-off and activation roster must cross the real pi process boundary",
 	},
 	"real-process-spawn:real-harness/scenario-3.test.ts": {
 		detector: "real-process-spawn",

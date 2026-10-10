@@ -570,6 +570,15 @@ file-scoped worklist and receives no project-wide scanner output.
     carry it through asynchronous stages instead of re-deriving it downstream
     (#3643 F3).
 
+**Expired successor hand-off:** an expired successor marker may authorize
+    its named interrupted successor only for the fixed retention window in
+    `clients/session-lifecycle.ts`; the shared slot retires at that boundary
+    and records its dropped activation count before releasing the payload.
+    Its test-only pending-window override is accepted only in a Vitest process;
+    production keeps the fixed 60-second pending window.
+    The window and supersession paths are pinned by the session lifecycle and
+    session-scope tests.
+
 </important>
 
 <important if="availability policy or installer">
@@ -681,6 +690,10 @@ file-scoped worklist and receives no project-wide scanner output.
   versioned process singletons. Reset tears down the old generation before a
   replacement can spawn. Idle eviction is lease-guarded and clears ownership
   timers on every removal path.
+- Production callers use the grouped experimental `LspCapabilities` adapter in
+  `clients/lsp/capabilities.ts`; direct `LSPService` module imports are limited
+  to that adapter and are enforced by
+  `tests/config/lsp-capabilities-import-sweep.test.ts` (#2372/#277).
 - Idle-eviction policy is the registry's `idleEviction` field, declared per
   server. The nightly (`scripts/measure-lsp-idle-eviction.mjs`) measures every
   registry server's eviction cost and respawn safety into
@@ -778,6 +791,10 @@ file-scoped worklist and receives no project-wide scanner output.
 - Managed tools resolve through the registry and sanctioned availability seams.
   Do not hand-roll install, PATH, or package-manager discovery. Use typed
   `SpawnFailure.kind`; repair only `tool-not-found`.
+- Windows LSP startup exit-code-1 failures are repairable only when the shared
+  command resolver finds no command or an npm shim target is absent; present
+  binaries that exit 1 remain runtime failures (#4263, #1199). The launch and
+  repair gate are pinned by `tests/clients/lsp/windows-startup-repair.test.ts`.
 - Expected skips remain distinct from clean success and failure. Extend the
   closed `RUNNER_SKIP_REASONS` taxonomy when policy intentionally defers work.
   Preserve the skip reason through runner latency and model-facing delivery.
@@ -860,6 +877,10 @@ file-scoped worklist and receives no project-wide scanner output.
 - Session state is owned by the stable session identity and activation owner.
   Detached callbacks resolve live emitters at delivery time and pair them with
   their own activation context. Never use a process-global latest session.
+- Process-global bridge dependencies and the quiet-window turn-summary holder
+  bind only from a live primary `SessionScope`; `clients/process-bridge.ts`
+  accepts only a strictly newer scope ticket, so a concurrent secondary or
+  stale activation cannot rebind a held bridge/task to its runtime (#4258).
 - Session degradation uses the ledger's bounded once/count APIs and resets at
   the correct primary session boundary. `SessionStartClassification`
   (`clients/session-lifecycle.ts`): `primary` and `sequential-replacement`

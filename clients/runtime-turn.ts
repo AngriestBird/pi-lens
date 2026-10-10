@@ -28,7 +28,14 @@ import {
 import { cascadeSettleWaitMs } from "./cascade-budget.js";
 import { logCascade } from "./cascade-logger.js";
 import { normalizeMapKey } from "./path-utils.js";
+import {
+	boundDeferredTargets,
+	mergeDeferredTargets,
+	TEST_RUNNER_MAX_PERSISTED_TARGETS,
+} from "./deferred-test-targets.js";
 import { compareOrdinal } from "./string-utils.js";
+
+export { TEST_RUNNER_MAX_PERSISTED_TARGETS };
 import type {
 	DependencyChecker,
 	MadgeBatchStats,
@@ -124,7 +131,7 @@ import {
 } from "./blocker-freshness.js";
 import { sweepInlineBlockerPastEof } from "./blocker-past-eof.js";
 // #2001/#2002: collect-later delivery for slow auxiliary LSP servers.
-import { getLSPService } from "./lsp/index.js";
+import { getLSPService } from "./lsp/capabilities.js";
 import {
 	drainPendingAuxCapEvictedCount,
 	drainPendingAuxiliaryCoverage,
@@ -262,51 +269,6 @@ export const TEST_RUNNER_BATCH_BUDGET_MS = 20_000;
  * occurrence and dropped, so the turn stops paying 20 s for it.
  */
 export const TEST_RUNNER_MAX_DEFERRALS = 2;
-
-/**
- * Ceiling on how many entries either persisted target list may carry.
- *
- * #2522 review round 4, I1: a write may no longer destroy another session's
- * entries, so nothing in the write path prunes them any more — each session
- * that ever cut or retired a target in this project leaves its rows behind, on
- * a record read at every single turn_end. The bound is applied at the one
- * writer, on the whole list, and sheds FOREIGN rows first (the writer orders
- * this session's entries last), so it can never evict the entries this turn
- * depends on. Generous on purpose: it is a backstop against unbounded growth,
- * not a scheduling policy.
- */
-export const TEST_RUNNER_MAX_PERSISTED_TARGETS = 64;
-
-/**
- * Union two deferral sets by target identity, keeping the HIGHER attempt count
- * (#2522 review round 3, F3). Two overlapping batches can both be cut on the
- * same target; taking the lower count would let a target trade an attempt for
- * every overlap and never converge on `TEST_RUNNER_MAX_DEFERRALS`.
- *
- * Identity is (session, path), not path alone (#2522 review round 4, I1): two
- * sessions can each owe a run of the same file, and collapsing those into one
- * row makes the surviving row's `sessionId` decide whose deferral is honoured
- * and whose is silently dropped. The path half is keyed through
- * `normalizeMapKey` so `/`- and `\`-separated spellings are one entry
- * (AGENTS.md cross-form-path screen).
- */
-function deferralEntryKey(entry: DeferredTestTarget): string {
-	return `${entry.sessionId ?? ""}\u0000${normalizeMapKey(path.resolve(entry.testFile))}`;
-}
-
-function mergeDeferredTargets(
-	existing: readonly DeferredTestTarget[],
-	incoming: readonly DeferredTestTarget[],
-): DeferredTestTarget[] {
-	const byKey = new Map<string, DeferredTestTarget>();
-	for (const entry of [...existing, ...incoming]) {
-		const key = deferralEntryKey(entry);
-		const prior = byKey.get(key);
-		if (prior && (prior.attempts ?? 0) >= (entry.attempts ?? 0)) continue;
-		byKey.set(key, entry);
-	}
-	return [...byKey.values()];
-}
 
 export interface BoundedTestBatchOutcome<R, T> {
 	/** One entry per target that was dispatched AND settled before the close. */
@@ -3468,15 +3430,17 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			entries: DeferredTestTarget[],
 			label: string,
 		): DeferredTestTarget[] => {
-			const ordered = [
-				...entries.filter((entry) => !isThisSession(entry)),
-				...entries.filter(isThisSession),
-			];
-			if (ordered.length <= TEST_RUNNER_MAX_PERSISTED_TARGETS) return ordered;
-			dbg(
-				`turn_end: ${label} test target list held ${ordered.length} entries, bounded to the newest ${TEST_RUNNER_MAX_PERSISTED_TARGETS} (oldest foreign-session rows dropped)`,
+			const bounded = boundDeferredTargets(
+				entries,
+				TEST_RUNNER_MAX_PERSISTED_TARGETS,
+				isThisSession,
 			);
-			return ordered.slice(-TEST_RUNNER_MAX_PERSISTED_TARGETS);
+			if (bounded.length !== entries.length) {
+				dbg(
+					`turn_end: ${label} test target list held ${entries.length} entries, bounded to the newest ${TEST_RUNNER_MAX_PERSISTED_TARGETS} (oldest foreign-session rows dropped)`,
+				);
+			}
+			return bounded;
 		};
 		const writeTestFindings = (
 			record: TestRunnerFindingsCache,
@@ -3883,6 +3847,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 									{
 										file: result.value.file,
 										sourceFile: target.sourceFile,
+										runner: target.runner,
 										fileSeq:
 											target.fileSeqAtRun === undefined
 												? ({

@@ -56,6 +56,7 @@ function gateDeps(
 			cleanup: vi.fn(),
 		})),
 		createLspDiagnosticsTool: () => ({ execute }),
+		adoptProjectTrustFromContext: vi.fn(),
 		hasDockerBuildx: vi.fn(() => hasDockerBuildx),
 	};
 }
@@ -77,13 +78,14 @@ async function runGateWithCensus(
 	vi.spyOn(console, "log").mockImplementation((...args) =>
 		output.push(args.join(" ")),
 	);
+	const deps = gateDeps(execute, fixtureOverrides, hasDockerBuildx);
 	await runLspGate({
 		langs: ["typescript"],
 		install: false,
 		verbose: false,
-		deps: gateDeps(execute, fixtureOverrides, hasDockerBuildx),
+		deps,
 	});
-	return output.join("\n");
+	return { output: output.join("\n"), deps };
 }
 
 describe("LSP diagnostics clean-gate classification (#2780/#2776)", () => {
@@ -179,7 +181,7 @@ describe("smoke-tools --lsp-gate census admission (#3309)", () => {
 		const execute = vi.fn(async () => ({
 			details: { totalDiagnostics: 1, primaryDiagnosticsCount: 1 },
 		}));
-		const output = await runGateWithCensus("skip", execute);
+		const { output } = await runGateWithCensus("skip", execute);
 
 		expect(output).toContain("⚠  typescript");
 		expect(output).toContain(
@@ -196,7 +198,7 @@ describe("smoke-tools --lsp-gate census admission (#3309)", () => {
 			await safeSpawnAsync("probe-language-server", []);
 			return { details: { unavailable: "probe server unavailable" } };
 		});
-		const output = await runGateWithCensus(
+		const { output } = await runGateWithCensus(
 			"pass",
 			execute,
 			{ expectDiagnosticCode: "AnyDeclaredRule" },
@@ -219,7 +221,7 @@ describe("smoke-tools --lsp-gate census admission (#3309)", () => {
 				diagnostics: [{ code: "DifferentRule" }],
 			},
 		}));
-		const output = await runGateWithCensus(
+		const { output } = await runGateWithCensus(
 			"pass",
 			execute,
 			{ expectDiagnosticCode: "AnyDeclaredRule" },
@@ -232,5 +234,17 @@ describe("smoke-tools --lsp-gate census admission (#3309)", () => {
 		expect(output).toContain(
 			"official Docker server did not return AnyDeclaredRule",
 		);
+	});
+
+	it("adopts the host trust result before driving diagnostics", async () => {
+		const execute = vi.fn(async () => ({
+			details: { totalDiagnostics: 1, primaryDiagnosticsCount: 1 },
+		}));
+		const { deps } = await runGateWithCensus("pass", execute);
+
+		expect(deps.adoptProjectTrustFromContext).toHaveBeenCalledOnce();
+		const context = deps.adoptProjectTrustFromContext.mock.calls[0][0];
+		expect(context).toEqual({ isProjectTrusted: expect.any(Function) });
+		expect(context.isProjectTrusted()).toBe(true);
 	});
 });

@@ -184,6 +184,8 @@ CONSTANTS
     LateHandlers,   \* TRUE: a read-guard writer may hold any entry of its
                     \*   branch, so its handler outlived a later entry;
                     \*   FALSE: it holds the branch's newest entry
+    ForwardExpiredUnstarted, \* TRUE: fixed forwarding for an expired W0 gap;
+                              \* FALSE: pre-fix behavior for the witness
     Policy(_, _),   \* [store, reason] -> action
     Fence(_),       \* store -> "branch" | "session" | "service" | "none"
     SecPolicy(_)    \* store -> "own" | "shared"
@@ -869,10 +871,11 @@ InterruptAt(w) ==
            \* gap's name (pend.k either way).
            fwdOn == Has("forwardUnadopted")
                     /\ (w # "unstarted" \/ Has("forwardUnstarted"))
-                    \* A W0 shutdown reads the gap's name from the marker
-                    \* (namedSuccessorReason), which an expired marker no
-                    \* longer gives (#3668).
-                    /\ ~(w = "unstarted" /\ Honored)
+                    \* A W0 shutdown reads the gap's name from either
+           \* namedSuccessorReason or expiredSuccessorReason. The
+           \* expired marker still authorizes forwarding; it only
+           \* stops declining unrelated starts (#4236).
+                    /\ (ForwardExpiredUnstarted \/ ~(w = "unstarted" /\ Honored))
            left == SR(k) \in SlotReasons /\ SlotMatch(SR(k), f, Via(k, pend.from))
            \* SameMgr for t: its start kept pend.from's manager.
            keeps == k \in {"reload", "fork", "clone"} /\ (k = "reload" \/ f \in FileLess)

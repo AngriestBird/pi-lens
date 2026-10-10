@@ -60,7 +60,7 @@ vi.mock("../../clients/pipeline.js", () => ({
 	})),
 }));
 
-vi.mock("../../clients/lsp/index.js", () => ({
+vi.mock("../../clients/lsp/capabilities.js", () => ({
 	getLSPService: () => makeLspServiceDouble(),
 	resetLSPService: () => {},
 	notifyExternalFileChange: vi.fn(async () => undefined),

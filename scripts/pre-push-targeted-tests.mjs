@@ -168,6 +168,7 @@ export const TEST_TREE_GOVERNANCE_TESTS = [
 	"tests/clients/flake-shape-ratchet.test.ts",
 	// #2891: real-pi harness suites own their child-process and timeout census;
 	// keep every admitted real-harness file armed when the tests tree changes.
+	"tests/real-harness/bridge-reload-ts.test.ts",
 	"tests/real-harness/bridge-reload.test.ts",
 	"tests/real-harness/child-exit.test.ts",
 	"tests/real-harness/diagnostic-provenance.test.ts",
@@ -176,6 +177,7 @@ export const TEST_TREE_GOVERNANCE_TESTS = [
 	"tests/real-harness/provider-compatibility.test.ts",
 	"tests/real-harness/read-guard-moves.test.ts",
 	"tests/real-harness/scenario-1.test.ts",
+	"tests/real-harness/scenario-2.test.ts",
 	"tests/real-harness/scenario-3.test.ts",
 	"tests/real-harness/tools-enabled.test.ts",
 	// #3518: walks tests/ for unchecked `handleToolCall` calls (recurrence #4182).

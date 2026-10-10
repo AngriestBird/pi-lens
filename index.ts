@@ -111,6 +111,10 @@ import {
 	recordIOEntry,
 	registerIOBridge,
 } from "./clients/io-bridge.js";
+import {
+	rebindableProcessBridgeDeps,
+	type BridgeActivation,
+} from "./clients/process-bridge.js";
 import { isExternalOrVendorFile } from "./clients/path-utils.js";
 import {
 	isPathIgnoredByProject,
@@ -171,7 +175,7 @@ import {
 import { registerCascadeTierReconcileTask } from "./clients/lsp/cascade-tier.js";
 import { buildResolvedFoundCascadeRun } from "./clients/cascade-format.js";
 import { initLSPConfig } from "./clients/lsp/config.js";
-import { getLSPService, resetLSPService } from "./clients/lsp/index.js";
+import { getLSPService, resetLSPService } from "./clients/lsp/capabilities.js";
 import { shouldInitializeSessionRoot } from "./clients/lsp/session-roots.js";
 import { warmLspService } from "./clients/lsp-lazy.js";
 import {
@@ -235,6 +239,7 @@ import {
 	decrementSecondarySessionCount,
 	getActivePrimaryRoot,
 	namedSuccessorReason,
+	expiredSuccessorReason,
 	noteSessionShutdown,
 	releasePrimarySession,
 	probeCtxActive,
@@ -613,18 +618,15 @@ const cacheManager = new CacheManager();
 // ONCE (flag below, same pattern as registerCascadeTierReconcileTask) and
 // have it read the CURRENT activation's pi/flag closures through this
 // holder, refreshed on every activation — never a stale captured `pi`.
-let _readBridgeRegistered = false;
 let _bridgeGetFlag:
 	| ((name: string) => boolean | string | undefined)
 	| undefined;
 // #2423: the mutation bridge is the write-side sibling of the read bridge and
 // follows its registration discipline exactly — mount once per process, refresh
 // the flag getter on every activation.
-let _mutationBridgeRegistered = false;
 // #3654: the unified I/O bridge composes the read-guard and the mutation
 // seam; it follows the same once-per-process discipline and is mounted in the
 // same first-wins pass as the two v1 shims it supersedes.
-let _ioBridgeRegistered = false;
 
 /**
  * Read a bridge flag without letting a session replacement obstruct the
@@ -652,12 +654,14 @@ function getBridgeFlag(
 	}
 }
 let _turnSummaryEmitRegistered = false;
-let _turnSummaryEmitCtx:
-	| {
-			pi: ExtensionAPI;
-			getLensFlag: (name: string) => boolean | string | undefined;
-			isLensEnabled: () => boolean;
-	  }
+type TurnSummaryEmitCtx = {
+	runtime: RuntimeCoordinator;
+	pi: ExtensionAPI;
+	getLensFlag: (name: string) => boolean | string | undefined;
+	isLensEnabled: () => boolean;
+};
+let _turnSummaryEmitCtxGetter:
+	| (() => TurnSummaryEmitCtx | undefined)
 	| undefined;
 let _testRunnerDeliveryRegistered = false;
 let _nextTestRunnerDeliveryOwnerId = 0;
@@ -1126,7 +1130,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 		isPathIgnoredByProject: (filePath: string) =>
 			isPathIgnoredByProject(filePath, runtime.projectRoot, false),
 		// #3654: resolved lazily through the live LSP client seam, so a test mock
-		// of `clients/lsp/index.js` that predates this bridge (and so omits the
+		// of `clients/lsp/capabilities.js` that predates this bridge (and so omits the
 		// named export) cannot break the delete path. This is exactly what the
 		// module-level `notifyExternalFileChange` does
 		// (`getLSPService().notifyExternalFileChange(...)`), so the real path is
@@ -1136,27 +1140,54 @@ function activateExtension(hostPi: ExtensionAPI) {
 		nodeFs: { existsSync: nodeFs.existsSync, statSync: nodeFs.statSync },
 	};
 
-	if (!_readBridgeRegistered) {
-		_readBridgeRegistered = true;
-		registerReadBridge({
-			isRecordable(filePath: string): boolean {
-				// Unknown during a replacement/reload records the read. The guard is
-				// the obstruction here, so failure must fall toward not blocking the
-				// user's later edit; recording while disabled is harmless.
-				if (getBridgeFlag(_bridgeGetFlag, "read")) return false;
-				return isRecordableProjectPath(filePath, runtime.projectRoot);
-			},
-			forward: (entry) => recordIOEntry(entry, ioBridgeDeps),
+	const recordBridgeUnavailable = (): void => {
+		recordDegradationOnce({
+			kind: "process-bridge-unavailable",
+			subject: "primary-session-gap",
+			reason:
+				"bridge call refused while no live primary session owns its dependencies",
 		});
-	}
-	if (!_mutationBridgeRegistered) {
-		_mutationBridgeRegistered = true;
-		registerMutationBridge(mutationBridgeDeps);
-	}
-	if (!_ioBridgeRegistered) {
-		_ioBridgeRegistered = true;
-		registerIOBridge(ioBridgeDeps);
-	}
+	};
+	const preSessionActivation = { role: "pre-session" as const };
+	const registerPrimaryBridges = (activation?: BridgeActivation): void => {
+		const scopedActivation =
+			activation &&
+			typeof activation === "object" &&
+			"role" in activation &&
+			(activation.role === "primary" || activation.role === "secondary")
+				? (activation as SessionScope)
+				: undefined;
+		if (
+			scopedActivation &&
+			(scopedActivation.role !== "primary" || !scopedActivation.isLive())
+		)
+			return;
+		registerReadBridge(
+			{
+				onUnavailable: recordBridgeUnavailable,
+				isRecordable(filePath: string): boolean {
+					// Unknown during a replacement/reload records the read. The guard is
+					// the obstruction here, so failure must fall toward not blocking the
+					// user's later edit; recording while disabled is harmless.
+					if (getBridgeFlag(_bridgeGetFlag, "read")) return false;
+					return isRecordableProjectPath(filePath, runtime.projectRoot);
+				},
+				forward: (entry) => recordIOEntry(entry, ioBridgeDeps),
+			},
+			activation,
+		);
+		registerMutationBridge(
+			{ ...mutationBridgeDeps, onUnavailable: recordBridgeUnavailable },
+			activation,
+		);
+		registerIOBridge(
+			{ ...ioBridgeDeps, onUnavailable: recordBridgeUnavailable },
+			activation,
+		);
+	};
+	// Mount at factory activation so third-party producers can call the bridge
+	// before the first session_start. A primary scope rebinds the cell later.
+	registerPrimaryBridges(preSessionActivation);
 	// Automatic context injection (the `context` hook). Independent of lensEnabled
 	// so tools/LSP/read-guard/formatting keep running when it is off. Precedence:
 	// env override → CLI flag → global config, all resolved inside getLensFlag
@@ -2607,6 +2638,18 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// scope before its first await. Take it now (#3612): a throw later
 					// in the handler must not leave this activation without its scope.
 					scope = runtime.sessionScope;
+					registerPrimaryBridges(scope);
+					_turnSummaryEmitCtxGetter = rebindableProcessBridgeDeps(
+						"turn-summary-emit-context",
+						1,
+						scope,
+						{
+							runtime,
+							pi,
+							getLensFlag: (name: string) => getLensFlag(name),
+							isLensEnabled: () => lensEnabled,
+						},
+					);
 					// Pin the stable identity + reason over the fresh random id that
 					// reset drew (#190). #3613 F1: before the await, for the same
 					// reason as the scope: a throw later in the handler must not leave
@@ -3584,15 +3627,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// feature-detected + guarded so an older host degrades to a dbg line).
 	// Registration is once-per-process (the quiet-window registry outlives
 	// factory re-activation); the ctx holder keeps the closure current.
-	_turnSummaryEmitCtx = {
-		pi,
-		getLensFlag: (name: string) => getLensFlag(name),
-		isLensEnabled: () => lensEnabled,
-	};
 	if (!_turnSummaryEmitRegistered) {
 		_turnSummaryEmitRegistered = true;
 		registerQuietWindowTask("turn_summary_emit", () => {
-			const emitCtx = _turnSummaryEmitCtx;
+			const emitCtx = _turnSummaryEmitCtxGetter?.();
 			if (!emitCtx || !emitCtx.isLensEnabled()) return;
 			// The captured `pi` can go STALE between the activation that set this
 			// holder and this fire-and-forget quiet-window run: an interim
@@ -3619,11 +3657,12 @@ function activateExtension(hostPi: ExtensionAPI) {
 				throw err;
 			}
 			if (!turnSummaryEnabled) return;
-			if (runtime.turnSummary.isEmpty()) return;
+			if (emitCtx.runtime.turnSummary.isEmpty()) return;
 			const summaryStart = Date.now();
-			const cwd = runtime.projectRoot || process.cwd();
-			const details = runtime.turnSummary.consume(runtime.turnIndex, (fp) =>
-				toRunnerDisplayPath(cwd, fp),
+			const cwd = emitCtx.runtime.projectRoot || process.cwd();
+			const details = emitCtx.runtime.turnSummary.consume(
+				emitCtx.runtime.turnIndex,
+				(fp) => toRunnerDisplayPath(cwd, fp),
 			);
 			const line = formatTurnSummaryLine(details);
 			const sendMessage = (
@@ -3638,7 +3677,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 						details,
 					});
 					recordTurnEndAdvisoryBytes(
-						runtime.telemetrySessionId,
+						emitCtx.runtime.telemetrySessionId,
 						Buffer.byteLength(line, "utf8"),
 					);
 				} catch (sendErr) {
@@ -3950,7 +3989,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 			const unstartedReason =
 				startInFlight || scope !== undefined
 					? undefined
-					: namedSuccessorReason();
+					: (namedSuccessorReason() ?? expiredSuccessorReason());
 			if (startInFlight || unstartedReason !== undefined) {
 				if (startInFlight) startInFlight.shutDown = true;
 				forwardHandoff({

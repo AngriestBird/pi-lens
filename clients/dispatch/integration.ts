@@ -77,7 +77,7 @@ import {
 	touchCoverageGap,
 } from "../lsp/diagnostic-binding.js";
 import { getServersForFileWithConfig } from "../lsp/config.js";
-import { getLSPService } from "../lsp/index.js";
+import { getLSPService } from "../lsp/capabilities.js";
 import { isExternalOrVendorFile, normalizeMapKey } from "../path-utils.js";
 import { getProjectIgnoreMatcher } from "../file-utils.js";
 import {
