@@ -117,7 +117,7 @@ describe("analysis-root seam", () => {
 		gitExecFileSync("git", ["config", "user.email", "test@example.com"], {
 			cwd: repo,
 		});
-		gitExecFileSync("git", ["config", "user.name", "test"], { cwd: repo });
+		gitExecFileSync("git", ["config", "user.name", "Test"], { cwd: repo });
 		gitExecFileSync("git", ["add", "-A"], { cwd: repo });
 		gitExecFileSync("git", ["commit", "-qm", "fixture"], { cwd: repo });
 		gitExecFileSync(
