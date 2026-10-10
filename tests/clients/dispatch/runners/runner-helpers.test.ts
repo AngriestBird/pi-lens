@@ -737,12 +737,17 @@ describe("runner-helpers availability checker", () => {
 	// #4193: the executable name alone selects the unrelated npm ast-grep package.
 	it("selects the scoped CLI package for the shared cache-only fallback (#4193)", async () => {
 		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+		const scopedProbeOptions: Array<{
+			cwd?: string;
+			stripNpmConfig?: boolean;
+		}> = [];
 		vi.mocked(safeSpawnMod.safeSpawnAsync).mockImplementation(
-			async (cmd, args) => {
+			async (cmd, args, options) => {
 				const scoped =
 					cmd === "npx" &&
 					args?.includes("--no") &&
 					args[args.indexOf("--package") + 1] === "@ast-grep/cli";
+				if (scoped) scopedProbeOptions.push(options ?? {});
 				return scoped
 					? { stdout: "ast-grep 0.45.3", stderr: "", status: 0 }
 					: { stdout: "", stderr: "missing", status: 1 };
@@ -753,6 +758,11 @@ describe("runner-helpers availability checker", () => {
 			cmd: "npx",
 			args: ["--no", "--package", "@ast-grep/cli", "--", "ast-grep"],
 		});
+		// The one shared seam isolates the cache-only probe from the project's
+		// `.npmrc`, matching `SgRunner` (#4193, #4268).
+		expect(scopedProbeOptions).not.toHaveLength(0);
+		for (const options of scopedProbeOptions)
+			expect(options.stripNpmConfig).toBe(true);
 	});
 
 	it("keeps structural replaceWithRule on the scoped fallback before probing (#4193)", async () => {
