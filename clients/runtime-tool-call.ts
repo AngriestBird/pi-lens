@@ -34,7 +34,7 @@ import { isProvisionalLearnedAttribution } from "./mutation-attribution.js";
 import { armObservedMutation } from "./observed-mutation.js";
 import { extractWrittenPathsFromCommand } from "./bash-file-access.js";
 import type { LSPShutdownOptions } from "./lsp/client.js";
-import { getLSPService } from "./lsp/index.js";
+import { getLSPService } from "./lsp/capabilities.js";
 import {
 	findDocumentSymbolAtLine,
 	getOpenDocumentSymbols,

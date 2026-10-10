@@ -15,7 +15,7 @@ import {
 	getLSPService,
 	groupFilesByPrimaryServer,
 	runPerServerGroups,
-} from "../clients/lsp/index.js";
+} from "../clients/lsp/capabilities.js";
 import {
 	buildScopeKey,
 	createWorkspaceDiagnosticsCacheContext,

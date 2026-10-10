@@ -3112,10 +3112,10 @@ describe("#2523 AC1 every hook-path await is bounded, and no new hand-rolled rac
 		// `strings: "blank"` erases every specifier, which it did on the first
 		// cut) would make every count below vacuously correct.
 		expect(helpers.length).toBeGreaterThanOrEqual(100);
-		// The three modules the hand-written list missed, each reached in one hop
-		// and each carrying real unbounded awaits.
+		// The facade is now the one-hop LSP boundary; its implementation module
+		// remains behind that adapter and is covered by the LSP population.
 		expect(helpers).toContain("clients/observed-mutation.ts");
-		expect(helpers).toContain("clients/lsp/index.ts");
+		expect(helpers).toContain("clients/lsp/capabilities.ts");
 		expect(helpers).toContain("clients/formatters.ts");
 		// ...and one it WRONGLY included: `clients/dispatch/dispatcher.ts` is
 		// two hops out, through `clients/dispatch/integration.ts`.

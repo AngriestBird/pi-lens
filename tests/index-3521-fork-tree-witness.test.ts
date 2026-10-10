@@ -93,9 +93,9 @@ import {
  * this file sees the real service.
  */
 const lspDouble = vi.hoisted(() => ({ service: undefined as unknown }));
-vi.mock("../clients/lsp/index.js", async (importOriginal) => {
+vi.mock("../clients/lsp/capabilities.js", async (importOriginal) => {
 	const original =
-		await importOriginal<typeof import("../clients/lsp/index.js")>();
+		await importOriginal<typeof import("../clients/lsp/capabilities.js")>();
 	return {
 		...original,
 		getLSPService: () =>

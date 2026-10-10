@@ -42,7 +42,7 @@ async function setupLspStatusRepaint(
 	options: { flags?: Record<string, boolean> } = {},
 ) {
 	const { resetLSPService, service } = aliveServerHolder();
-	vi.doMock("../clients/lsp/index.js", () => ({
+	vi.doMock("../clients/lsp/capabilities.js", () => ({
 		getLSPService: service,
 		resetLSPService,
 	}));
@@ -119,7 +119,7 @@ describe("index.ts LSP idle reset", () => {
 		vi.unstubAllEnvs();
 		vi.restoreAllMocks();
 		// resetModules does not clear the mock registry (#2883).
-		vi.doUnmock("../clients/lsp/index.js");
+		vi.doUnmock("../clients/lsp/capabilities.js");
 		vi.doUnmock("../clients/bootstrap.js");
 	});
 

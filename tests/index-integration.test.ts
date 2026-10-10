@@ -1101,7 +1101,7 @@ describe("index.ts integration", () => {
 		"session_shutdown uses fast LSP reset so teardown does not wait on graceful shutdown",
 		async () => {
 			const resetLSPService = vi.fn();
-			vi.doMock("../clients/lsp/index.js", () => ({
+			vi.doMock("../clients/lsp/capabilities.js", () => ({
 				getLSPService: () => makeLspServiceDouble(),
 				resetLSPService,
 			}));
@@ -1135,7 +1135,7 @@ describe("index.ts integration", () => {
 			const resetLSPService = vi.fn(() => {
 				order.push("reset_lsp_service");
 			});
-			vi.doMock("../clients/lsp/index.js", () => ({
+			vi.doMock("../clients/lsp/capabilities.js", () => ({
 				getLSPService: () => makeLspServiceDouble(),
 				resetLSPService,
 			}));
@@ -1164,7 +1164,7 @@ describe("index.ts integration", () => {
 			// The recurrence: the retire ran last and unguarded, so a throw from
 			// any teardown step above it left the scope live. After a /reload that
 			// re-evaluated the entry, nothing else ever ends the old scope.
-			vi.doMock("../clients/lsp/index.js", () => ({
+			vi.doMock("../clients/lsp/capabilities.js", () => ({
 				getLSPService: () => makeLspServiceDouble(),
 				resetLSPService: vi.fn(),
 			}));
@@ -1208,7 +1208,7 @@ describe("index.ts integration", () => {
 	it(
 		"session_shutdown emits the bus-event session-end rollup (S2d gap 5, #1432 review)",
 		async () => {
-			vi.doMock("../clients/lsp/index.js", () => ({
+			vi.doMock("../clients/lsp/capabilities.js", () => ({
 				getLSPService: () => makeLspServiceDouble(),
 				resetLSPService: vi.fn(),
 			}));
@@ -1628,7 +1628,7 @@ describe("index.ts integration", () => {
 			// agent_settled itself queues is already in flight, so the dump must
 			// fire after runQuietWindow is invoked, not before.
 			const order: string[] = [];
-			vi.doMock("../clients/lsp/index.js", () => ({
+			vi.doMock("../clients/lsp/capabilities.js", () => ({
 				getLSPService: () => makeLspServiceDouble(),
 				resetLSPService: vi.fn(),
 			}));
@@ -1663,7 +1663,7 @@ describe("index.ts integration", () => {
 
 	describe("#1654 deferred-mutation drain runs at agent_settled, not agent_end", () => {
 		function mockDrainDeps(handleAgentEndMock: ReturnType<typeof vi.fn>) {
-			vi.doMock("../clients/lsp/index.js", () => ({
+			vi.doMock("../clients/lsp/capabilities.js", () => ({
 				getLSPService: () => makeLspServiceDouble(),
 				resetLSPService: vi.fn(),
 			}));
@@ -1852,7 +1852,7 @@ describe("index.ts integration", () => {
 			// event in flight; without the wrapped reset the footer would keep showing a
 			// stale "LSP Active" until the next turn. Assert the timer firing repaints it.
 			const { resetLSPService, service } = aliveServerHolder();
-			vi.doMock("../clients/lsp/index.js", () => ({
+			vi.doMock("../clients/lsp/capabilities.js", () => ({
 				getLSPService: service,
 				resetLSPService,
 			}));
@@ -2532,7 +2532,7 @@ describe("index.ts integration", () => {
 					},
 				}));
 			});
-			vi.doMock("../clients/lsp/index.js", async () => ({
+			vi.doMock("../clients/lsp/capabilities.js", async () => ({
 				getLSPService: () => makeLspServiceDouble({ touchFile: touchFileMock }),
 				resetLSPService: () => {},
 			}));
@@ -2639,7 +2639,7 @@ describe("index.ts integration", () => {
 					},
 				}));
 			});
-			vi.doMock("../clients/lsp/index.js", async () => ({
+			vi.doMock("../clients/lsp/capabilities.js", async () => ({
 				getLSPService: () => makeLspServiceDouble({ touchFile: touchFileMock }),
 				resetLSPService: () => {},
 			}));
@@ -2741,7 +2741,7 @@ describe("index.ts integration", () => {
 					},
 				}));
 			});
-			vi.doMock("../clients/lsp/index.js", async () => ({
+			vi.doMock("../clients/lsp/capabilities.js", async () => ({
 				getLSPService: () => makeLspServiceDouble({ touchFile: touchFileMock }),
 				resetLSPService: () => {},
 			}));
@@ -2798,7 +2798,7 @@ describe("index.ts integration", () => {
 					};
 				},
 			}));
-			vi.doMock("../clients/lsp/index.js", () => ({
+			vi.doMock("../clients/lsp/capabilities.js", () => ({
 				getLSPService: () =>
 					makeLspServiceDouble({
 						getAliveClientCount: () => 1,
@@ -3011,7 +3011,7 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 		vi.doUnmock("../clients/runtime-coordinator.js");
 		vi.doUnmock("../clients/installer/index.js");
 		vi.doUnmock("../clients/runtime-session.js");
-		vi.doUnmock("../clients/lsp/index.js");
+		vi.doUnmock("../clients/lsp/capabilities.js");
 		quietTasks = [];
 		handleTurnEndHook = undefined;
 		_resetProcessSingletonsForTests();
@@ -3815,7 +3815,7 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 				clearCachePrefixSession,
 			}));
 			const resetLSPService = vi.fn();
-			vi.doMock("../clients/lsp/index.js", () => ({
+			vi.doMock("../clients/lsp/capabilities.js", () => ({
 				getLSPService: () => makeLspServiceDouble(),
 				resetLSPService,
 			}));
@@ -3891,7 +3891,7 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 				logCacheUsage,
 			}));
 			const resetLSPService = vi.fn();
-			vi.doMock("../clients/lsp/index.js", () => ({
+			vi.doMock("../clients/lsp/capabilities.js", () => ({
 				getLSPService: () => makeLspServiceDouble(),
 				resetLSPService,
 			}));
@@ -4059,7 +4059,7 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 				>()),
 				incrementDegradationCount: r6Mocks.incrementDegradationCount,
 			}));
-			vi.doMock("../clients/lsp/index.js", () => ({
+			vi.doMock("../clients/lsp/capabilities.js", () => ({
 				getLSPService: () => makeLspServiceDouble(),
 				resetLSPService: vi.fn(),
 			}));

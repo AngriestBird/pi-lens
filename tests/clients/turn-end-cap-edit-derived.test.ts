@@ -21,8 +21,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { beginScope } from "../../clients/session-scope.js";
 import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 
-vi.mock("../../clients/lsp/index.js", async (importOriginal) => ({
-	...(await importOriginal<typeof import("../../clients/lsp/index.js")>()),
+vi.mock("../../clients/lsp/capabilities.js", async (importOriginal) => ({
+	...(await importOriginal<
+		typeof import("../../clients/lsp/capabilities.js")
+	>()),
 	getLSPService: () => makeLspServiceDouble({}),
 }));
 

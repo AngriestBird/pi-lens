@@ -175,7 +175,7 @@ import {
 import { registerCascadeTierReconcileTask } from "./clients/lsp/cascade-tier.js";
 import { buildResolvedFoundCascadeRun } from "./clients/cascade-format.js";
 import { initLSPConfig } from "./clients/lsp/config.js";
-import { getLSPService, resetLSPService } from "./clients/lsp/index.js";
+import { getLSPService, resetLSPService } from "./clients/lsp/capabilities.js";
 import { shouldInitializeSessionRoot } from "./clients/lsp/session-roots.js";
 import { warmLspService } from "./clients/lsp-lazy.js";
 import {
@@ -1130,7 +1130,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 		isPathIgnoredByProject: (filePath: string) =>
 			isPathIgnoredByProject(filePath, runtime.projectRoot, false),
 		// #3654: resolved lazily through the live LSP client seam, so a test mock
-		// of `clients/lsp/index.js` that predates this bridge (and so omits the
+		// of `clients/lsp/capabilities.js` that predates this bridge (and so omits the
 		// named export) cannot break the delete path. This is exactly what the
 		// module-level `notifyExternalFileChange` does
 		// (`getLSPService().notifyExternalFileChange(...)`), so the real path is

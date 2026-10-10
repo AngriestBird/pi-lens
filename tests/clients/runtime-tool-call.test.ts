@@ -30,7 +30,7 @@ import { runHandlerExpectingNoThrow } from "../support/handler-verdict.js";
 // touchFile that resolves immediately is enough to observe its call args.
 const touchFileMock = vi.fn().mockResolvedValue(undefined);
 const getWarmClientForFileMock = vi.fn().mockResolvedValue(undefined);
-vi.mock("../../clients/lsp/index.js", () => ({
+vi.mock("../../clients/lsp/capabilities.js", () => ({
 	getLSPService: () =>
 		makeLspServiceDouble({
 			touchFile: touchFileMock,

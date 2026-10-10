@@ -24,7 +24,7 @@ import { buildEffectiveAstGrepCatalog } from "../ast-grep-catalog.js";
 import { isRuleIgnoredForPath } from "../rule-ignores.js";
 import { ruleIgnoredForPath, type RulePolicyMap } from "../rule-policy.js";
 import { logLatency } from "../../latency-logger.js";
-import { hasAuxiliaryLspPublishedForRoot } from "../../lsp/index.js";
+import { hasAuxiliaryLspPublishedForRoot } from "../../lsp/capabilities.js";
 import {
 	clearPendingAuxiliaryCoverage,
 	hasPendingAuxiliaryCoverage,

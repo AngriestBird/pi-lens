@@ -61,6 +61,8 @@ import {
  * Removing one is what a migration does. Both directions are enforced below.
  */
 const HAND_ROLLED_GENERATION_GUARDS: Readonly<Record<string, string>> = {
+	"lsp/service-singleton.ts":
+		"the generation handoff compares PROMISE IDENTITY to decide whether the singleton owner is clearing its own pending teardown; this is an ownership identity, not a stale guarded write, so a GenerationSource would add a second identity without changing the lifecycle contract",
 	// --- Migration backlog: these ARE the capture-before-await/check-before-
 	// write shape the primitive models. Each is a real candidate, deferred for
 	// a stated reason, not exempted on principle. ---

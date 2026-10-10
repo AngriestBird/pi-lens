@@ -42,7 +42,7 @@ const warmClient = {
 	},
 };
 const getWarmClientForFileMock = vi.fn();
-vi.mock("../../clients/lsp/index.js", () => ({
+vi.mock("../../clients/lsp/capabilities.js", () => ({
 	getLSPService: () =>
 		makeLspServiceDouble({ getWarmClientForFile: getWarmClientForFileMock }),
 	resetLSPService: () => {},

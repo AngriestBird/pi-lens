@@ -1414,6 +1414,8 @@ export const EXEMPT_SESSION_STATE_FILES: Readonly<Record<string, string>> = {
 	// the session. Re-deriving per session would just re-pay a spawn. ---
 	"lsp/jvm-runtime.ts":
 		"resolved JVM location; a session boundary cannot move it",
+	"lsp/service-singleton.ts":
+		"the owner stores the process-wide singleton identity and pending teardown handoff; session-scoped resets are delegated to the registered implementation hooks, while the owner itself has no independent session verdict to re-arm",
 	"lsp/spawn-history.ts":
 		"successful spawn duration history intentionally spans session boundaries within the host process so later sessions can avoid waits that prior evidence proves cannot succeed",
 	"lsp/workspace-diagnostics-cache.ts":
@@ -1657,6 +1659,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// `resetPendingAuxiliaryCoverage`.
 	"lsp/pending-aux-coverage.ts": 2,
 	"lsp/server.ts": 6,
+	"lsp/service-singleton.ts": 0,
 	"lsp/session-roots.ts": 1,
 	"lsp/spawn-history.ts": 1,
 	"lsp/workspace-diagnostics-cache.ts": 1,
