@@ -4,6 +4,10 @@ import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { capKilledSpawnResult } from "../support/spawn-shapes.js";
 import { removeTempDirSync } from "./test-utils.js";
+import {
+	resetProjectTrust,
+	setProjectTrustState,
+} from "../../clients/project-trust.js";
 
 // All hoisted: importing `spawn-shapes.js` below reaches the mocked safe-spawn
 // module, so every mock factory here runs during the import phase — a plain
@@ -74,6 +78,7 @@ vi.mock(
 describe("SgRunner", () => {
 	beforeEach(() => {
 		vi.resetAllMocks();
+		setProjectTrustState("trusted");
 		safeSpawnAsync.mockResolvedValue({
 			status: 1,
 			error: new Error("not found"),
@@ -148,6 +153,58 @@ describe("SgRunner", () => {
 				],
 			]);
 			expect(ensureTool).not.toHaveBeenCalled();
+		});
+
+		it("isolates the fallback from an untrusted project npmrc (#4193)", async () => {
+			const env = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-trust-"));
+			const project = path.join(env, "project");
+			const piLensHome = path.join(env, "pi-lens-home");
+			fs.mkdirSync(project, { recursive: true });
+			fs.writeFileSync(
+				path.join(project, ".npmrc"),
+				"registry=http://127.0.0.1:9/poison\n",
+			);
+			const previousCwd = process.cwd();
+			setProjectTrustState("untrusted");
+			vi.stubEnv("PI_LENS_HOME", piLensHome);
+			vi.stubEnv("NPM_CONFIG_USERCONFIG", path.join(project, ".npmrc"));
+			try {
+				process.chdir(project);
+				safeSpawnAsync.mockImplementation(
+					async (
+						cmd: string,
+						args: string[],
+						options?: { cwd?: string; env?: NodeJS.ProcessEnv },
+					) => {
+						if (cmd !== "npx")
+							return { status: 1, stdout: "", stderr: "missing" };
+						for (const [key] of Object.entries(options?.env ?? {})) {
+							expect(key).not.toMatch(/^npm_config_/i);
+						}
+						expect(options?.cwd).toBe(path.join(piLensHome, "tools"));
+						expect(options?.cwd).not.toBe(project);
+						expect(
+							fs.readFileSync(path.join(project, ".npmrc"), "utf8"),
+						).toContain("127.0.0.1:9");
+						return {
+							status: 0,
+							stdout: args.includes("--version") ? "ast-grep 0.45.3" : "[]",
+							stderr: "",
+						};
+					},
+				);
+				const { SgRunner } = await import("../../clients/sg-runner.js");
+				const runner = new SgRunner();
+				expect(await runner.ensureAvailable()).toBe(true);
+				expect(
+					(await runner.execRaw(["run", "--pattern", "x"])).failure,
+				).toBeUndefined();
+			} finally {
+				process.chdir(previousCwd);
+				resetProjectTrust();
+				vi.unstubAllEnvs();
+				removeTempDirSync(env);
+			}
 		});
 
 		it("returns true when ast-grep is in PATH", async () => {

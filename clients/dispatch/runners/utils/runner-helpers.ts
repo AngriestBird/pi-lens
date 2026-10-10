@@ -50,7 +50,10 @@ import {
 } from "../../../package-manager.js";
 import { logLatency } from "../../../latency-logger.js";
 import { safeSpawnAsync } from "../../../safe-spawn.js";
-import { probeToolAsync } from "../../../tool-probe.js";
+import {
+	getIsolatedNpxSpawnOptions,
+	probeToolAsync,
+} from "../../../tool-probe.js";
 import { compareOrdinal } from "../../../string-utils.js";
 import {
 	getToolCommandSpec,
@@ -1914,9 +1917,15 @@ async function probeAstGrepCommandAsync(
 	let check: Awaited<ReturnType<typeof safeSpawnAsync>>;
 	let hostStallMs: number;
 	try {
-		check = await probeToolAsync(cmd, [...argsPrefix, "--version"], {
-			timeout: 5000,
-		});
+		check =
+			cmd === "npx"
+				? await safeSpawnAsync(cmd, [...argsPrefix, "--version"], {
+						...getIsolatedNpxSpawnOptions(),
+						timeout: 5000,
+					})
+				: await probeToolAsync(cmd, [...argsPrefix, "--version"], {
+						timeout: 5000,
+					});
 	} finally {
 		hostStallMs = sampler.stop();
 		sgSweepHostStallMs += hostStallMs;

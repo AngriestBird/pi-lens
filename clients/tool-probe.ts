@@ -13,6 +13,9 @@
  * module hop keeps every existing double production-faithful.
  */
 
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { getGlobalPiLensDir } from "./file-utils.js";
 import type { SafeSpawnOptions, SpawnResult } from "./safe-spawn.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
 
@@ -21,6 +24,19 @@ import { safeSpawnAsync } from "./safe-spawn.js";
  * {@link probeToolAsync}.
  */
 export type ProbeSpawnOptions = Omit<SafeSpawnOptions, "cwd">;
+
+/** Keep cache-only npx out of project configuration and project cwd (#4193). */
+export function getIsolatedNpxSpawnOptions(): Pick<
+	SafeSpawnOptions,
+	"cwd" | "env"
+> {
+	const cwd = path.join(getGlobalPiLensDir(), "tools");
+	fs.mkdirSync(cwd, { recursive: true });
+	const env = Object.fromEntries(
+		Object.entries(process.env).filter(([key]) => !/^npm_config_/i.test(key)),
+	);
+	return { cwd, env };
+}
 
 /**
  * Run a tool's own presence/version invocation — `<tool> --version`, `cl`,
