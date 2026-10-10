@@ -1,3 +1,5 @@
+// flake-shape: real-process-spawn — real `git worktree add` writes linked-worktree metadata that resolveAnalysisRoot must read
+
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -15,12 +17,33 @@ import {
 } from "../../clients/runtime-tool-result.js";
 import { readChangesSince } from "../../clients/project-changes.js";
 import { setupTestEnvironment } from "./test-utils.js";
+import { gitExecFileSync } from "../support/git-fixture-env.js";
 import {
-	registerTmpRoot,
 	getTmpRootRegistry,
+	registerTmpRoot,
 } from "../support/tmp-root-registry.js";
 
 const environments: Array<{ cleanup: () => void }> = [];
+
+function registeredProjectRoot(prefix: string): string {
+	const root = fs.mkdtempSync(path.join(process.cwd(), prefix));
+	registerTmpRoot(getTmpRootRegistry(), root, "registered");
+	environments.push({
+		cleanup: () => fs.rmSync(root, { recursive: true, force: true }),
+	});
+	return root;
+}
+
+function registeredUnmarkedRoot(): string {
+	const root = fs.mkdtempSync(
+		path.join(path.dirname(process.cwd()), ".analysis-root-unmarked-"),
+	);
+	registerTmpRoot(getTmpRootRegistry(), root, "registered");
+	environments.push({
+		cleanup: () => fs.rmSync(root, { recursive: true, force: true }),
+	});
+	return root;
+}
 
 afterEach(() => {
 	for (const environment of environments.splice(0)) environment.cleanup();
@@ -31,8 +54,7 @@ describe("analysis-root seam", () => {
 		const env = setupTestEnvironment("pi-lens-analysis-root-");
 		environments.push(env);
 		const sessionFile = path.join(env.tmpDir, "src", "file.ts");
-		const adoptedRoot = path.join(env.tmpDir, "..", "other-project");
-		registerTmpRoot(getTmpRootRegistry(), adoptedRoot, "registered");
+		const adoptedRoot = registeredProjectRoot(".analysis-root-adopted-");
 		fs.mkdirSync(adoptedRoot, { recursive: true });
 		fs.writeFileSync(path.join(adoptedRoot, "package.json"), "{}\n");
 		const adoptedFile = path.join(adoptedRoot, "file.ts");
@@ -68,9 +90,9 @@ describe("analysis-root seam", () => {
 		// directory or a parent of the session into an analysis project.
 		const env = setupTestEnvironment("pi-lens-analysis-root-marker-");
 		environments.push(env);
-		const unmarked = path.join(env.tmpDir, "..", "unmarked", "file.ts");
-		const markedRoot = path.join(env.tmpDir, "..", "marked");
-		registerTmpRoot(getTmpRootRegistry(), markedRoot, "registered");
+		const unmarkedRoot = registeredUnmarkedRoot();
+		const markedRoot = registeredProjectRoot(".analysis-root-marked-");
+		const unmarked = path.join(unmarkedRoot, "file.ts");
 		fs.mkdirSync(markedRoot, { recursive: true });
 		fs.writeFileSync(path.join(markedRoot, "pyproject.toml"), "[project]\n");
 		const marked = path.join(markedRoot, "src", "file.py");
@@ -80,6 +102,50 @@ describe("analysis-root seam", () => {
 		expect(resolveAnalysisRoot(path.dirname(env.tmpDir), env.tmpDir)).toBe(
 			"none",
 		);
+	});
+
+	it("refuses vendor paths inside a real linked worktree", () => {
+		// Recurrence: #4257 F7 must classify vendor content in a real linked
+		// worktree as refused, while ordinary source remains writable.
+		const env = setupTestEnvironment("pi-lens-analysis-root-worktree-");
+		environments.push(env);
+		const repo = path.join(env.tmpDir, "repo");
+		const worktree = path.join(env.tmpDir, "worktree");
+		fs.mkdirSync(path.join(repo, "src"), { recursive: true });
+		fs.writeFileSync(path.join(repo, "src", "a.ts"), "export {}\n");
+		gitExecFileSync("git", ["init", "-q", "-b", "main"], { cwd: repo });
+		gitExecFileSync("git", ["config", "user.email", "test@example.com"], {
+			cwd: repo,
+		});
+		gitExecFileSync("git", ["config", "user.name", "test"], { cwd: repo });
+		gitExecFileSync("git", ["add", "-A"], { cwd: repo });
+		gitExecFileSync("git", ["commit", "-qm", "fixture"], { cwd: repo });
+		gitExecFileSync(
+			"git",
+			["worktree", "add", "-q", "-b", "fixture-wt", worktree],
+			{
+				cwd: repo,
+			},
+		);
+
+		try {
+			expect(
+				resolveAnalysisRoot(
+					path.join(worktree, "node_modules", "x", "a.ts"),
+					repo,
+				),
+			).toBe("none");
+			expect(
+				resolveAnalysisRoot(path.join(worktree, "vendor", "x", "a.ts"), repo),
+			).toBe("none");
+			expect(
+				resolveAnalysisRoot(path.join(worktree, "src", "a.ts"), repo),
+			).toBe("linked-worktree");
+		} finally {
+			gitExecFileSync("git", ["worktree", "remove", "--force", worktree], {
+				cwd: repo,
+			});
+		}
 	});
 
 	it("refuses a marked project rooted at HOME when the session is elsewhere", () => {
