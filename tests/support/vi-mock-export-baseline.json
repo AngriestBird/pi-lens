@@ -254,7 +254,6 @@
 	"tests/clients/sg-runner.test.ts:../../clients/installer/index.js:[\"ensureTool\",\"getInstallAttempt\"]": 51,
 	"tests/clients/shared-checkout-guard-wiring.test.ts:../../clients/lsp/capabilities.js:[\"getLSPService\",\"resetLSPService\"]": 11,
 	"tests/clients/tool-tier-degraded-selection.test.ts:../../clients/installer/index.js:[\"ensureTool\",\"getInstallAttempt\",\"getToolEnvironment\",\"isSpawnableCommand\",\"resetPathWalkMemo\"]": 48,
-	"tests/clients/tool-tier-degraded-selection.test.ts:../../clients/project-trust.js:[\"assertInstallAllowed\"]": 1,
 	"tests/clients/tool-tier-degraded-selection.test.ts:../../clients/safe-spawn.js:[\"isCommandAvailableAsync\",\"safeSpawn\",\"safeSpawnAsync\"]": 6,
 	"tests/clients/warm-attach-confirmation.test.ts:../../clients/lsp/capabilities.js:[\"getLSPService\"]": 12,
 	"tests/clients/word-index-logger.test.ts:../../clients/ndjson-logger.js:[\"createNdjsonLogger\"]": 1,

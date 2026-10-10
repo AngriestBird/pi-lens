@@ -12,7 +12,6 @@ vi.mock("../../../../clients/safe-spawn.js", async (importOriginal) => ({
 	...(await importOriginal<Record<string, unknown>>()),
 	safeSpawnAsync,
 }));
-
 vi.mock("../../../../clients/tool-probe.js", async (importOriginal) => ({
 	...(await importOriginal<Record<string, unknown>>()),
 	probeToolAsync: vi.fn(async () => ({
