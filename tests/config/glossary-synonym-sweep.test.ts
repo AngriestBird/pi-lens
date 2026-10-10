@@ -687,6 +687,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/test-runner-client.ts": 8,
 		"clients/tool-cwd.ts": 1,
 		"clients/tool-policy.ts": 2,
+		// 0 -> 1 (#4193): the isolated npx helper filters inherited npm_config_*
+		// variables so project npm configuration cannot affect the cache-only
+		// fallback.
+		"clients/tool-probe.ts": 1,
 		"clients/tool-render.ts": 1,
 		"clients/tool-set-policy.ts": 3,
 		"clients/tree-sitter-client.ts": 13,
@@ -1070,6 +1074,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// (a path operation).
 		"clients/tool-agreement.ts": 10,
 		"clients/tool-cwd.ts": 13,
+		"clients/tool-probe.ts": 2,
 		"clients/tool-policy.ts": 64,
 		"clients/tree-sitter-client.ts": 19,
 		"clients/tree-sitter-logger.ts": 2,
