@@ -2020,6 +2020,21 @@ export class ReadGuard {
 	}
 
 	/**
+	 * Whether the current bytes still match the newest full-content read binding.
+	 * Undefined means this file has no full-content binding to compare; callers
+	 * must preserve their existing uncertainty wording in that case.
+	 */
+	contentMatchesLastRead(filePath: string): boolean | undefined {
+		const reads = this.getReadHistory(filePath);
+		const binding = [...reads]
+			.reverse()
+			.find((read) => read.contentBinding?.fullFile)?.contentBinding;
+		return binding === undefined
+			? undefined
+			: currentContentMatchesBinding(filePath, binding);
+	}
+
+	/**
 	 * Session-lifetime record-cap trim totals for a file (#1913 review F1).
 	 * `recordRead` only writes ONE `read_cap_trimmed` read-guard.log line per
 	 * file per session (on the first trim), so this is the running-totals

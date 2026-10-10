@@ -1572,6 +1572,7 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 				runtime.telemetrySessionId,
 				readGuardCorrelationId,
 				runtime.partialApplyRecords,
+				readGuard.contentMatchesLastRead(filePath),
 			);
 			if (preflightError) {
 				if (partiallyApplicable && partiallyApplicable.length > 0) {
