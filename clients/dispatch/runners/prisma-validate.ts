@@ -9,6 +9,7 @@ import type {
 	RunnerResult,
 } from "../types.js";
 import { resolveLocalFirstAsync } from "./utils/runner-helpers.js";
+import { getManagedToolsDir } from "../../installer/index.js";
 import { finishParsedRun } from "./utils/tool-failure.js";
 
 /**
@@ -67,7 +68,10 @@ const prismaValidateRunner: RunnerDefinition = {
 		const result = await safeSpawnAsync(
 			resolved.cmd,
 			[...resolved.args, "validate", "--schema", absPath],
-			{ timeout: 20000, cwd },
+			{
+				timeout: 20000,
+				cwd: resolved.cmd === "npx" ? getManagedToolsDir() : cwd,
+			},
 		);
 
 		if (result.error && !result.stdout && !result.stderr) {

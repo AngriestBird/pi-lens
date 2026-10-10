@@ -39,6 +39,7 @@ import {
 import {
 	findGlobalBinary,
 	findLocalBinUpwards,
+	localBinPath,
 	VENDOR_BIN_DIRS,
 	VENV_BIN_DIRS,
 } from "./package-manager.js";
@@ -48,7 +49,7 @@ import { recordDegradationOnce } from "./degradation-ledger.js";
 import { probeToolAsync } from "./tool-probe.js";
 import { assertInstallAllowed } from "./project-trust.js";
 import { tryLazyInstallForFormatter } from "./dispatch/runners/utils/lazy-installer.js";
-import { getToolPath } from "./installer/index.js";
+import { getManagedToolsDir, getToolPath } from "./installer/index.js";
 import {
 	findPSScriptAnalyzerConfigPath,
 	getAutoInstallToolIdForFormatter,
@@ -627,10 +628,12 @@ async function resolveGoFmtBinary(): Promise<string | null> {
  */
 async function findInVenv(binary: string, cwd: string): Promise<string | null> {
 	return (
-		findLocalBinUpwards(binary, cwd, {
-			windowsExt: ".exe",
-			binDirs: VENV_BIN_DIRS,
-		}) ?? null
+		localBinPath(
+			findLocalBinUpwards(binary, cwd, {
+				windowsExt: ".exe",
+				binDirs: VENV_BIN_DIRS,
+			}),
+		) ?? null
 	);
 }
 
@@ -649,10 +652,12 @@ async function findInVendorBin(
 	cwd: string,
 ): Promise<string | null> {
 	return (
-		findLocalBinUpwards(binary, cwd, {
-			windowsExt: ".bat",
-			binDirs: VENDOR_BIN_DIRS,
-		}) ?? null
+		localBinPath(
+			findLocalBinUpwards(binary, cwd, {
+				windowsExt: ".bat",
+				binDirs: VENDOR_BIN_DIRS,
+			}),
+		) ?? null
 	);
 }
 
@@ -676,7 +681,7 @@ async function findInNodeModules(
 	binary: string,
 	cwd: string,
 ): Promise<string | null> {
-	return findLocalBinUpwards(binary, cwd) ?? null;
+	return localBinPath(findLocalBinUpwards(binary, cwd)) ?? null;
 }
 
 /**
@@ -1591,13 +1596,18 @@ export const styluaFormatter: FormatterInfo = {
 	name: "stylua",
 	command: ["stylua", "$FILE"],
 	extensions: [".lua"],
-	resolveCommand: managedFormatterResolver("stylua", [], findLocalBinUpwards),
+	resolveCommand: managedFormatterResolver("stylua", [], (binary, cwd) =>
+		localBinPath(findLocalBinUpwards(binary, cwd)),
+	),
 	detect: managedToolDetect(
 		"stylua",
 		async (cwd) =>
 			(await findUp(["stylua.toml", ".stylua.toml"], cwd)).length > 0,
 		async (cwd) =>
-			Boolean(findLocalBinUpwards("stylua", cwd) || (await which("stylua"))),
+			Boolean(
+				localBinPath(findLocalBinUpwards("stylua", cwd)) ||
+				(await which("stylua")),
+			),
 	),
 };
 
@@ -2429,7 +2439,10 @@ export async function formatFile(
 		// Run formatter without blocking the event loop.
 		const result = await safeSpawnAsync(cmd[0], cmd.slice(1), {
 			timeout: 15000,
-			cwd: formatterCwd,
+			cwd:
+				cmd[0] === "npx" || cmd[0] === "bunx"
+					? getManagedToolsDir()
+					: formatterCwd,
 		});
 
 		// A resolver that could NOT prove absence (it never probed PATH — e.g.

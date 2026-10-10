@@ -15,6 +15,7 @@ import { isFileKind } from "./file-kinds.js";
 import { getGlobalPiLensDir } from "./file-utils.js";
 import { findGlobalBinary } from "./package-manager.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
+import { getManagedToolsDir } from "./installer/index.js";
 import { probeToolAsync } from "./tool-probe.js";
 import { createSingleFlight } from "./single-flight.js";
 import { biomeConfigArgs } from "./tool-policy.js";
@@ -174,7 +175,10 @@ export class BiomeClient {
 
 	private async spawnBiomeAsync(args: string[], timeout = 15000, cwd?: string) {
 		const { cmd, args: prefix } = await this.getBiomeBinary(cwd);
-		return safeSpawnAsync(cmd, [...prefix, ...args], { timeout, cwd });
+		return safeSpawnAsync(cmd, [...prefix, ...args], {
+			timeout,
+			cwd: cmd === "npx" || cmd === "bunx" ? getManagedToolsDir() : cwd,
+		});
 	}
 
 	/**

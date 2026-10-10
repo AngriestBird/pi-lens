@@ -45,6 +45,7 @@ import {
 	findLocalBinAt,
 	findLocalBinsUpwards,
 	findLocalBinUpwards,
+	localBinPath,
 	VENDOR_BIN_DIRS,
 	VENV_BIN_DIRS,
 } from "../../../package-manager.js";
@@ -492,10 +493,12 @@ export function createVenvFinder(
 	verificationArgs: string[] = ["--version"],
 ): (cwd: string) => Promise<VenvResolution> {
 	return async (cwd: string): Promise<VenvResolution> => {
-		const venvBin = findLocalBinAt(command, cwd, {
-			windowsExt,
-			binDirs: VENV_BIN_DIRS,
-		});
+		const venvBin = localBinPath(
+			findLocalBinAt(command, cwd, {
+				windowsExt,
+				binDirs: VENV_BIN_DIRS,
+			}),
+		);
 		if (venvBin) return { path: venvBin, rung: "venv" };
 
 		// Managed-dir install (~/.pi-lens/tools/node_modules/.bin/<command>) — the
@@ -1640,10 +1643,12 @@ export function resolveVendorToolCommand(
 	windowsExt = ".bat",
 ): string | null {
 	return (
-		findLocalBinUpwards(toolName, cwd, {
-			windowsExt,
-			binDirs: VENDOR_BIN_DIRS,
-		}) ?? null
+		localBinPath(
+			findLocalBinUpwards(toolName, cwd, {
+				windowsExt,
+				binDirs: VENDOR_BIN_DIRS,
+			}),
+		) ?? null
 	);
 }
 
@@ -1991,16 +1996,12 @@ function buildSgLocalBins(): SgLocalBinCandidate[] {
 	const projectWalkOptions = { windowsExt: "" } as const;
 	const ownInstallWalkOptions = { windowsExt: "", ceiling: false } as const;
 	const bins: SgLocalBinCandidate[] = [
-		...findLocalBinsUpwards(
-			binaryCandidates,
-			_thisDir,
-			ownInstallWalkOptions,
-		).map((binPath) => ({ path: binPath, source: "own-install" as const })),
-		...findLocalBinsUpwards(
-			binaryCandidates,
-			process.cwd(),
-			projectWalkOptions,
-		).map((binPath) => ({ path: binPath, source: "project" as const })),
+		...findLocalBinsUpwards(binaryCandidates, _thisDir, ownInstallWalkOptions)
+			.filter((binPath): binPath is string => typeof binPath === "string")
+			.map((binPath) => ({ path: binPath, source: "own-install" as const })),
+		...findLocalBinsUpwards(binaryCandidates, process.cwd(), projectWalkOptions)
+			.filter((binPath): binPath is string => typeof binPath === "string")
+			.map((binPath) => ({ path: binPath, source: "project" as const })),
 	];
 	for (const candidate of binaryCandidates) {
 		const managedBin = path.join(

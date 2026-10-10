@@ -324,7 +324,9 @@ export class PythonDeadCodeClient implements DeadCodeClient {
 		return findLocalBinsAt(["vulture"], root, {
 			windowsExt: ".exe",
 			binDirs: VENV_BIN_DIRS,
-		}).map((full) => ({ cmd: full, prefix: [] }));
+		})
+			.filter((full): full is string => typeof full === "string")
+			.map((full) => ({ cmd: full, prefix: [] }));
 	}
 
 	private async doEnsureAvailable(root?: string): Promise<boolean> {
