@@ -489,21 +489,6 @@ function trySpawn(
 		throw new Error(`Failed to spawn LSP server: ${command}`);
 	}
 
-	// Check if process exited immediately (spawn failure - synchronous check)
-	if (proc.exitCode !== null || proc.killed) {
-		const message =
-			`LSP server ${command} exited immediately (code: ${proc.exitCode}). ` +
-			`The binary may be missing or corrupted.`;
-		const failure = new Error(message);
-		if (
-			proc.exitCode === 1 &&
-			isMissingWindowsStartupCommand(command, command, cwd, env)
-		) {
-			throw new SpawnFailureError("tool-not-found", message, failure);
-		}
-		throw failure;
-	}
-
 	// #3091 F1-r2: take ownership HERE, while the child is provably alive. LSP
 	// servers are the one long-lived child pi-lens spawns outside
 	// `safeSpawnAsync`, so without this their first offer of verification is
@@ -702,8 +687,24 @@ export async function launchLSP(
 		}
 	}
 
-	// Pre-validate .cmd shims: if the underlying script is missing the shim will
-	// exit with code 1 after a 500ms wait. Catching this early avoids the delay.
+	// Built-in server commands have no config provenance to carry into the
+	// registry. Once PATH resolution selects a project-local installed binary,
+	// unknown host trust must still fail closed (#4248 R2-1). Global and managed
+	// fallbacks remain compatible because they resolve outside the project root.
+	if (
+		getProjectTrustState() === "unknown" &&
+		isProjectLocalLspBinary(spawnCommand, cwd)
+	) {
+		refuseUnknownProjectLocalBinary(command, spawnCommand, cwd);
+		const message =
+			"LSP project-local binary refused: project trust is unknown";
+		throw new SpawnFailureError("spawn-failed", message, new Error(message));
+	}
+
+	// Pre-validate .cmd shims only after trust has admitted the candidate: if the
+	// underlying script is missing the shim will exit with code 1 after a 500ms
+	// wait. Catching this early avoids the delay without probing an untrusted
+	// project-local executable.
 	if (
 		isWindows &&
 		/\.(cmd|bat)$/i.test(spawnCommand) &&
@@ -735,20 +736,6 @@ export async function launchLSP(
 				`lsp ps1-bypass: no .cmd or JS entry found for ${spawnCommand}, spawn may hang`,
 			);
 		}
-	}
-
-	// Built-in server commands have no config provenance to carry into the
-	// registry. Once PATH resolution selects a project-local installed binary,
-	// unknown host trust must still fail closed (#4248 R2-1). Global and managed
-	// fallbacks remain compatible because they resolve outside the project root.
-	if (
-		getProjectTrustState() === "unknown" &&
-		isProjectLocalLspBinary(spawnCommand, cwd)
-	) {
-		refuseUnknownProjectLocalBinary(command, spawnCommand, cwd);
-		throw new Error(
-			"LSP project-local binary refused: project trust is unknown",
-		);
 	}
 
 	let proc: ChildProcess;
