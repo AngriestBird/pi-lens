@@ -715,7 +715,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"mcp/analyze-cli.ts": 1,
 		"mcp/server.ts": 9,
 		"mcp/tool-arguments.ts": 4,
-		"index.ts": 21,
+		// #1416: /lens-health's effective tool projection adds two semantic
+		// filters; keep the existing census entry pinned to the live population.
+		"index.ts": 23,
 	},
 	ignore: {
 		"clients/file-utils.ts": 2,

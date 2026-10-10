@@ -1691,6 +1691,13 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"through the settle's session guard.",
 		owner: "#2523 slice 2",
 	},
+	"index.ts#activateExtension:7cf4ec4b~9348febb": {
+		family: "hook-await",
+		site: "off-hook",
+		reason:
+			"/lens-health reads the existing effective-config view through a signal-less deadline; the command is not a lifecycle hook and has no host hook signal to thread",
+		owner: "#1416",
+	},
 	"index.ts#activateExtension:889073a2~ebe0e096": {
 		family: "hook-await",
 		site: "session_start",

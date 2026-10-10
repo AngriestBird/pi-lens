@@ -1,6 +1,6 @@
 import "./clients/console-guard-install.js";
 import { BoundedSet } from "./clients/bounded-cache.js";
-import { bounded } from "./clients/deadline-utils.js";
+import { bounded, withDeadline } from "./clients/deadline-utils.js";
 import { HOOK_WALL_BUDGET_MS } from "./clients/hook-budgets.js";
 import {
 	closeModuleLoadConsoleWindow,
@@ -1502,10 +1502,13 @@ function activateExtension(hostPi: ExtensionAPI) {
 			];
 
 			const effectiveTools = (
-				await effectiveConfig({
-					cwd: runtime.projectRoot,
-					noTools: noToolFlag(),
-				})
+				await withDeadline(
+					effectiveConfig({
+						cwd: runtime.projectRoot,
+						noTools: noToolFlag(),
+					}),
+					{ ms: 5_000 },
+				)
 			).tools;
 			const enabledTools = effectiveTools
 				.filter((tool) => tool.enabled)
