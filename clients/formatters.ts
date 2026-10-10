@@ -49,7 +49,8 @@ import { recordDegradationOnce } from "./degradation-ledger.js";
 import { probeToolAsync } from "./tool-probe.js";
 import { assertInstallAllowed } from "./project-trust.js";
 import { tryLazyInstallForFormatter } from "./dispatch/runners/utils/lazy-installer.js";
-import { getManagedToolsDir, getToolPath } from "./installer/index.js";
+import { getToolPath } from "./installer/index.js";
+import { getIsolatedNpxSpawnOptions } from "./tool-probe.js";
 import {
 	findPSScriptAnalyzerConfigPath,
 	getAutoInstallToolIdForFormatter,
@@ -2333,6 +2334,27 @@ export function diagnosticTail(
 }
 
 /**
+ * Resolve a static npx fallback to a pi-lens-managed binary so the tool runs
+ * with the PROJECT cwd and still honours cwd-relative config/ignore files
+ * (#4268 HIGH-2). The managed install itself runs from the pi-lens-owned env
+ * (see `getIsolatedNpxSpawnOptions`), so the project's `.npmrc` is never read.
+ * Returns the fallback unchanged when no managed tool id exists or the install
+ * fails; `formatFile` then runs npx from the neutral pi-lens-owned cwd.
+ */
+async function resolveNpxFallback(
+	formatterName: string,
+	fallback: string[],
+): Promise<string[]> {
+	const toolId = getAutoInstallToolIdForFormatter(formatterName);
+	if (!toolId) return fallback;
+	const { ensureTool } = await import("./installer/index.js");
+	const installed = await ensureTool(toolId);
+	if (!installed) return fallback;
+	// Drop the leading `npx <package>` pair; keep the tool's own argv.
+	return [installed, ...fallback.slice(2)];
+}
+
+/**
  * Resolve a formatter command without allowing the static command fallback to
  * bypass a resolver's style-preservation refusal (#1345). `null` means the
  * primary command is unavailable; the explicit sentinel means formatting is
@@ -2374,14 +2396,17 @@ async function resolveFormatterCommand(
 	// Trust gate on the install-capable static fallback (#1334 S5): npx can
 	// DOWNLOAD packages, so an untrusted project treats the fallback as
 	// unavailable -- a skip, not a formatter failure; may converge next turn.
-	if (
-		fallback[0] === "npx" &&
-		!assertInstallAllowed(`formatter npx fallback: ${formatter.name}`)
-	) {
-		// No second ledger entry here (#1366 review): assertInstallAllowed just
-		// recorded the trust-refusal with this formatter's context — recording
-		// formatter-skip too would count one user-visible degradation twice.
-		return SKIP_FORMATTING;
+	if (fallback[0] === "npx") {
+		if (!assertInstallAllowed(`formatter npx fallback: ${formatter.name}`)) {
+			// No second ledger entry here (#1366 review): assertInstallAllowed just
+			// recorded the trust-refusal with this formatter's context — recording
+			// formatter-skip too would count one user-visible degradation twice.
+			return SKIP_FORMATTING;
+		}
+		// Install/resolve from the pi-lens-owned env, then run the resolved
+		// binary with the project cwd so `.prettierignore`/`biome.json` still win
+		// (#4268 HIGH-2).
+		return resolveNpxFallback(formatter.name, fallback);
 	}
 	return fallback;
 }
@@ -2436,13 +2461,15 @@ export async function formatFile(
 		}
 		await enter?.();
 		const contentBefore = await fs.readFile(absolutePath, "utf-8");
-		// Run formatter without blocking the event loop.
+		// Run formatter without blocking the event loop. An unresolved npx/bunx
+		// fallback is the ONLY case that gets the neutral pi-lens-owned cwd
+		// (#4268 acceptance 3); a resolved binary keeps the project cwd.
 		const result = await safeSpawnAsync(cmd[0], cmd.slice(1), {
 			timeout: 15000,
-			cwd:
-				cmd[0] === "npx" || cmd[0] === "bunx"
-					? getManagedToolsDir()
-					: formatterCwd,
+			cwd: formatterCwd,
+			...(cmd[0] === "npx" || cmd[0] === "bunx"
+				? getIsolatedNpxSpawnOptions()
+				: {}),
 		});
 
 		// A resolver that could NOT prove absence (it never probed PATH — e.g.

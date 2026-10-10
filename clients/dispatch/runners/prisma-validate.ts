@@ -9,7 +9,7 @@ import type {
 	RunnerResult,
 } from "../types.js";
 import { resolveLocalFirstAsync } from "./utils/runner-helpers.js";
-import { getManagedToolsDir } from "../../installer/index.js";
+import { getIsolatedNpxSpawnOptions } from "../../tool-probe.js";
 import { finishParsedRun } from "./utils/tool-failure.js";
 
 /**
@@ -70,7 +70,10 @@ const prismaValidateRunner: RunnerDefinition = {
 			[...resolved.args, "validate", "--schema", absPath],
 			{
 				timeout: 20000,
-				cwd: resolved.cmd === "npx" ? getManagedToolsDir() : cwd,
+				// ONE neutral-cwd seam for npx fallbacks (#4193, #4268 acceptance 3),
+				// an override of the resolver's project cwd that the scan can still see.
+				cwd,
+				...(resolved.cmd === "npx" ? getIsolatedNpxSpawnOptions() : {}),
 			},
 		);
 

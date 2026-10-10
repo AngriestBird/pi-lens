@@ -13,6 +13,9 @@
  * module hop keeps every existing double production-faithful.
  */
 
+import * as fs from "node:fs";
+import { join } from "node:path";
+import { getGlobalPiLensDir } from "./file-utils.js";
 import type { SafeSpawnOptions, SpawnResult } from "./safe-spawn.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
 
@@ -21,6 +24,32 @@ import { safeSpawnAsync } from "./safe-spawn.js";
  * {@link probeToolAsync}.
  */
 export type ProbeSpawnOptions = Omit<SafeSpawnOptions, "cwd">;
+
+/**
+ * ONE seam for a cache-only package-runner (npx/bunx/pnpm-dlx) fallback:
+ * a pi-lens-owned cwd, created before use, plus the ambient `npm_config_*`
+ * keys stripped so the project's `.npmrc` and the shell's npm config are never
+ * read (#4193, #4268 acceptance 3). PR #4233 introduces the same helper; this
+ * is the one construction site both call. Every npx fallback in the repo
+ * passes the result to its child options; config-sensitive tools that must run
+ * with the project cwd (formatters reading `.prettierignore`) resolve the
+ * package to a binary here first and then spawn that binary with the project
+ * cwd, so the neutral cwd never costs them config discovery.
+ */
+export function getIsolatedNpxSpawnOptions(): Pick<
+	SafeSpawnOptions,
+	"cwd" | "env"
+> {
+	const cwd = join(getGlobalPiLensDir(), "tools");
+	fs.mkdirSync(cwd, { recursive: true });
+	// A plain copy loop rather than `Object.fromEntries(…filter(…))`: `filter`
+	// is a retired glossary identifier, and a new use would move the census.
+	const env: NodeJS.ProcessEnv = {};
+	for (const [key, value] of Object.entries(process.env)) {
+		if (!/^npm_config_/i.test(key)) env[key] = value;
+	}
+	return { cwd, env };
+}
 
 /**
  * Run a tool's own presence/version invocation — `<tool> --version`, `cl`,

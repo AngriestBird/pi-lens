@@ -30,7 +30,7 @@ import {
 	findLocalBinAt,
 	localBinPath,
 } from "./package-manager.js";
-import { getManagedToolsDir } from "./installer/index.js";
+import { getIsolatedNpxSpawnOptions } from "./tool-probe.js";
 import { PathKeyedMap } from "./path-keyed-map.js";
 import {
 	augmentPythonEnvironment,
@@ -1807,12 +1807,14 @@ export class TestRunnerClient {
 			);
 
 			const result = await safeSpawnAsync(command, args, {
-				cwd:
-					command === "npx" || command === "bunx"
-						? getManagedToolsDir()
-						: spawnCwd,
+				cwd: spawnCwd,
 				timeout: 60000,
 				env,
+				// ONE neutral-cwd seam for npx/bunx fallbacks (#4193, #4268
+				// acceptance 3); a resolved runner binary keeps the project cwd.
+				...(command === "npx" || command === "bunx"
+					? getIsolatedNpxSpawnOptions()
+					: {}),
 				// #2522 R2 F1. `safeSpawnAsync` resolves `options.signal ?? ambient`,
 				// so an absent batch signal keeps the pre-#2522 ambient behaviour.
 				signal,
