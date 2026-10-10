@@ -1075,6 +1075,12 @@ function activateExtension(hostPi: ExtensionAPI) {
 	const disabledToolNames = LENS_TOOL_NAMES.filter(
 		(name) => !isToolEnabled(name),
 	);
+	const formatDisabledToolNames = (names: readonly string[]): string => {
+		const shown = names.slice(0, 8);
+		const omitted = names.length - shown.length;
+		const suffix = omitted > 0 ? ` and ${omitted} more` : "";
+		return `${shown.join(", ")}${suffix} (${names.length} total)`;
+	};
 
 	let lensEnabled = !getLensFlag("no-lens");
 
@@ -1518,7 +1524,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 				.map((tool) => tool.name);
 			lines.push("", `Tools enabled: ${enabledTools.join(", ") || "none"}`);
 			if (disabledTools.length > 0) {
-				lines.push(`Tools disabled: ${disabledTools.join(", ")}`);
+				lines.push(`Tools disabled: ${formatDisabledToolNames(disabledTools)}`);
 			}
 			lines.push("Skills: managed by pi package filters");
 			const slopScoreLine = dispatchIntegration.getDispatchSlopScoreLine();
@@ -2315,7 +2321,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 					const sessionReason = sessionStartReason;
 					if (disabledToolNames.length > 0) {
 						dbg(
-							`session_start: disabled tools = ${disabledToolNames.join(",")}`,
+							`session_start: disabled tools = ${formatDisabledToolNames(disabledToolNames)}`,
 						);
 					}
 

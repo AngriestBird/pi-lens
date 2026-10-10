@@ -746,7 +746,12 @@ describe("index.ts extension wiring", () => {
 				await pi.runCommand("lens-health", "", ctx);
 				const health = ctx.notifications.map((n) => n.message).join("\n");
 				expect(health).toContain("Tools enabled:");
-				expect(health).toContain("Tools disabled: ast_grep_replace, health");
+				expect(health).toContain(
+					"Tools disabled: ast_grep_replace, health (2 total)",
+				);
+				expect(health).not.toContain(
+					"Tools disabled: ast_grep_replace, health and",
+				);
 				expect(health).toContain("Skills: managed by pi package filters");
 
 				const activation = pi.getTool("pi_lens_activate_tools") as
@@ -773,6 +778,57 @@ describe("index.ts extension wiring", () => {
 				);
 				expect(result?.isError).toBe(true);
 				expect(result?.content?.[0]?.text).toContain("No valid tool names");
+			} finally {
+				if (prior === undefined) delete process.env.PI_LENS_CONFIG_PATH;
+				else process.env.PI_LENS_CONFIG_PATH = prior;
+				removeTempDirSync(tempDir);
+			}
+		});
+
+		it("bounds a long disabled-tool list on the health surface", async () => {
+			const tempDir = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-health-tool-cap-"),
+			);
+			const configPath = path.join(tempDir, "config.json");
+			const disabledTools = [
+				"ast_grep_search",
+				"ast_grep_replace",
+				"ast_grep_outline",
+				"lsp_navigation",
+				"lens_diagnostics",
+				"lens_diagnostic_mark",
+				"symbol_search",
+				"module_report",
+				"project_report",
+				"read_symbol",
+				"read_enclosing",
+				"effective_config",
+				"analyze",
+				"health",
+				"latency",
+				"project_scan",
+				"rebuild",
+			] as const;
+			fs.writeFileSync(
+				configPath,
+				JSON.stringify({
+					tools: Object.fromEntries(
+						disabledTools.map((name) => [name, { enabled: false }]),
+					),
+				}),
+			);
+			const prior = process.env.PI_LENS_CONFIG_PATH;
+			process.env.PI_LENS_CONFIG_PATH = configPath;
+			try {
+				const pi = createPiMock();
+				extension(pi.asExtensionAPI());
+				const ctx = makeCtx();
+				await pi.runCommand("lens-health", "", ctx);
+				const health = ctx.notifications.map((n) => n.message).join("\n");
+				expect(health).toContain(
+					"Tools disabled: ast_grep_search, ast_grep_replace, ast_grep_outline, lsp_navigation, lens_diagnostics, lens_diagnostic_mark, symbol_search, module_report and 9 more (17 total)",
+				);
+				expect(health).not.toContain("project_report");
 			} finally {
 				if (prior === undefined) delete process.env.PI_LENS_CONFIG_PATH;
 				else process.env.PI_LENS_CONFIG_PATH = prior;
