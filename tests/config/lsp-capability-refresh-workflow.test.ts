@@ -91,6 +91,36 @@ describe("nightly LSP capability refresh contract (#4277)", () => {
 		expect(body).toContain("emptyFirstPublish marker");
 	});
 
+	it("keeps every coloured failure block, including non-census failures", () => {
+		const coloured = [
+			"\u001b[41m\u001b[1m FAIL \u001b[22m\u001b[49m default tests/config/lsp-first-publish-census.test.ts > first",
+			"first census detail",
+			" Test Files  1 failed (1)",
+			"\u001b[41m\u001b[1m FAIL \u001b[22m\u001b[49m default tests/config/lsp-clean-behavior-census.test.ts > second",
+			"second census detail",
+			" Test Files  2 failed (2)",
+			"\u001b[41m\u001b[1m FAIL \u001b[22m\u001b[49m default tests/clients/unrelated.test.ts > third",
+			"third unrelated detail",
+			" Test Files  3 failed (3)",
+		].join("\n");
+		const body = extractVitestFailureBlock(coloured);
+		expect(body).toContain("tests/config/lsp-first-publish-census.test.ts");
+		expect(body).toContain("tests/config/lsp-clean-behavior-census.test.ts");
+		expect(body).toContain("tests/clients/unrelated.test.ts");
+	});
+
+	it("bounds failure details with an explicit omitted-block count", () => {
+		const output = Array.from({ length: 20 }, (_, index) =>
+			[
+				` FAIL default tests/config/failure-${index}.test.ts > case`,
+				"x".repeat(1_000),
+			].join("\n"),
+		).join("\n");
+		const body = extractVitestFailureBlock(output);
+		expect(body.length).toBeLessThanOrEqual(12_000);
+		expect(body).toMatch(/\(\d+ more failures truncated\)$/);
+	});
+
 	it("gates only the refresh PR, while preserving the independent promotion PR", () => {
 		const workflow = loadWorkflow();
 		const prs = workflow.jobs["tool-smoke-prs"].steps.filter((step: any) =>
