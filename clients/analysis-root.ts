@@ -9,7 +9,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as nodePath from "node:path";
-import { isUnderDir, isVendorPath } from "./path-utils.js";
+import { isAtOrAboveHomeDir, isUnderDir, isVendorPath } from "./path-utils.js";
 import { isPiLensInternalPath } from "./file-utils.js";
 import {
 	resolveGitCheckout,
@@ -57,10 +57,19 @@ function nearestProjectRoot(filePath: string): string | undefined {
 }
 
 function realPathOrResolved(filePath: string): string {
-	try {
-		return fs.realpathSync.native(filePath);
-	} catch {
-		return nodePath.resolve(filePath);
+	const resolved = nodePath.resolve(filePath);
+	let current = resolved;
+	const missing: string[] = [];
+	while (true) {
+		try {
+			const real = fs.realpathSync.native(current);
+			return nodePath.join(real, ...missing.reverse());
+		} catch {
+			const parent = nodePath.dirname(current);
+			if (parent === current) return resolved;
+			missing.push(nodePath.basename(current));
+			current = parent;
+		}
 	}
 }
 
@@ -93,8 +102,10 @@ export function resolveAnalysisRootPath(
 	const candidate = nearestProjectRoot(resolved);
 	if (!candidate || candidate === nodePath.parse(candidate).root)
 		return undefined;
-	const home = nodePath.resolve(os.homedir());
-	if (candidate === home || isUnderDir(candidate, home)) return undefined;
+	const home = realPathOrResolved(os.homedir());
+	// D1: sibling projects below $HOME are eligible; only $HOME itself and
+	// ancestors are refused. Keep the shared ceiling in isAtOrAboveHomeDir.
+	if (isAtOrAboveHomeDir(candidate, home)) return undefined;
 	if (candidate === tmp || isUnderDir(session, candidate)) return undefined;
 	if (isVendorPath(candidate)) return undefined;
 	return candidate;
