@@ -781,6 +781,10 @@ file-scoped worklist and receives no project-wide scanner output.
 - Managed tools resolve through the registry and sanctioned availability seams.
   Do not hand-roll install, PATH, or package-manager discovery. Use typed
   `SpawnFailure.kind`; repair only `tool-not-found`.
+- Windows LSP startup exit-code-1 failures are repairable only when the shared
+  command resolver finds no command or an npm shim target is absent; present
+  binaries that exit 1 remain runtime failures (#4263, #1199). The launch and
+  repair gate are pinned by `tests/clients/lsp/windows-startup-repair.test.ts`.
 - Expected skips remain distinct from clean success and failure. Extend the
   closed `RUNNER_SKIP_REASONS` taxonomy when policy intentionally defers work.
   Preserve the skip reason through runner latency and model-facing delivery.
