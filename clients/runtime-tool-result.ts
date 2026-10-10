@@ -1,6 +1,5 @@
 import * as nodeCrypto from "node:crypto";
 import * as nodeFs from "node:fs";
-import * as nodeOs from "node:os";
 import * as path from "node:path";
 import {
 	noteAuthoritativeContentAttachment,
@@ -2590,7 +2589,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			});
 			if (firstAdoptedRoot) {
 				queueAgentAdvisory(
-					`pi-lens is analysing ${adoptedRoot} as a separate project (global tools only; project-local and project-wide runners are disabled).`,
+					`pi-lens is analysing ${adoptedRoot} as a separate project (LSP diagnostics from global servers only; no project tools run).`,
 					writeSession,
 				);
 			}
@@ -2863,10 +2862,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		return;
 	}
 
-	const dispatchCwd =
-		analysisRootMode === "adopted"
-			? nodeOs.tmpdir()
-			: resolveLanguageRootForFile(filePath, workspaceRoot);
+	const dispatchCwd = resolveLanguageRootForFile(filePath, workspaceRoot);
 	const turnStateCwd = path.resolve(workspaceRoot);
 	dbg(
 		`tool_result: resolved dispatch cwd ${dispatchCwd} for ${filePath} (turnState cwd ${turnStateCwd})`,

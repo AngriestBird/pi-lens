@@ -93,6 +93,10 @@ import {
 	getSessionRootsForTelemetry,
 	isOutsideAllSessionRoots,
 } from "./session-roots.js";
+import {
+	findLocalBinUpwards,
+	isProjectLocalBinPath,
+} from "../package-manager.js";
 import { getProcessSingleton } from "../process-singletons.js";
 import {
 	resolveAnalysisRoot,
@@ -4235,6 +4239,23 @@ export class LSPService {
 		const key = `${server.id}:${normalizedRoot}`;
 		const adopted = this.analysisRootModeForFile(filePath) === "adopted";
 		if (adopted) {
+			const localCommand =
+				server.command ?? server.projectLocalCommand ?? server.availabilityKey;
+			const localBinary = localCommand
+				? path.isAbsolute(localCommand)
+					? isProjectLocalBinPath(localCommand, root)
+						? localCommand
+						: undefined
+					: findLocalBinUpwards(localCommand, root)
+				: undefined;
+			if (localBinary) {
+				recordDegradationOnce({
+					kind: "lsp-registry-decision",
+					subject: `${server.id}:${normalizeMapKey(root)}`,
+					reason: "project-local LSP binary refused for adopted root",
+				});
+				return undefined;
+			}
 			this.adoptedClientKeys.add(key);
 			if (!this.admitAdoptedRoot(root, filePath)) return undefined;
 		}

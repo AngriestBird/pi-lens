@@ -15,6 +15,10 @@ import {
 } from "../../clients/runtime-tool-result.js";
 import { readChangesSince } from "../../clients/project-changes.js";
 import { setupTestEnvironment } from "./test-utils.js";
+import {
+	registerTmpRoot,
+	getTmpRootRegistry,
+} from "../support/tmp-root-registry.js";
 
 const environments: Array<{ cleanup: () => void }> = [];
 
@@ -28,6 +32,7 @@ describe("analysis-root seam", () => {
 		environments.push(env);
 		const sessionFile = path.join(env.tmpDir, "src", "file.ts");
 		const adoptedRoot = path.join(env.tmpDir, "..", "other-project");
+		registerTmpRoot(getTmpRootRegistry(), adoptedRoot, "registered");
 		fs.mkdirSync(adoptedRoot, { recursive: true });
 		fs.writeFileSync(path.join(adoptedRoot, "package.json"), "{}\n");
 		const adoptedFile = path.join(adoptedRoot, "file.ts");
@@ -65,6 +70,7 @@ describe("analysis-root seam", () => {
 		environments.push(env);
 		const unmarked = path.join(env.tmpDir, "..", "unmarked", "file.ts");
 		const markedRoot = path.join(env.tmpDir, "..", "marked");
+		registerTmpRoot(getTmpRootRegistry(), markedRoot, "registered");
 		fs.mkdirSync(markedRoot, { recursive: true });
 		fs.writeFileSync(path.join(markedRoot, "pyproject.toml"), "[project]\n");
 		const marked = path.join(markedRoot, "src", "file.py");
@@ -74,6 +80,24 @@ describe("analysis-root seam", () => {
 		expect(resolveAnalysisRoot(path.dirname(env.tmpDir), env.tmpDir)).toBe(
 			"none",
 		);
+	});
+
+	it("refuses a marked project rooted at HOME when the session is elsewhere", () => {
+		// Recurrence: #4257 F4's home ceiling was masked by a session-under-HOME
+		// fixture, allowing a session outside HOME to adopt HOME itself.
+		const env = setupTestEnvironment("pi-lens-analysis-root-home-");
+		environments.push(env);
+		const home = fs.mkdtempSync(path.join(process.cwd(), ".probe-home-test-"));
+		fs.mkdirSync(home, { recursive: true });
+		fs.writeFileSync(path.join(home, "package.json"), "{}\n");
+		expect(
+			resolveAnalysisRoot(
+				path.join(home, "file.ts"),
+				"/var/pi-lens-session",
+				home,
+			),
+		).toBe("none");
+		fs.rmSync(home, { recursive: true, force: true });
 	});
 
 	it("does not write turn-state for an adopted root", () => {

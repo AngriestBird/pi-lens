@@ -77,6 +77,7 @@ function realPathOrResolved(filePath: string): string {
 export function resolveAnalysisRootPath(
 	filePath: string,
 	sessionRoot: string,
+	homeDirOverride?: string,
 ): string | undefined {
 	const resolved = realPathOrResolved(filePath);
 	const session = realPathOrResolved(sessionRoot);
@@ -102,7 +103,7 @@ export function resolveAnalysisRootPath(
 	const candidate = nearestProjectRoot(resolved);
 	if (!candidate || candidate === nodePath.parse(candidate).root)
 		return undefined;
-	const home = realPathOrResolved(os.homedir());
+	const home = realPathOrResolved(homeDirOverride ?? os.homedir());
 	// D1: sibling projects below $HOME are eligible; only $HOME itself and
 	// ancestors are refused. Keep the shared ceiling in isAtOrAboveHomeDir.
 	if (isAtOrAboveHomeDir(candidate, home)) return undefined;
@@ -114,12 +115,15 @@ export function resolveAnalysisRootPath(
 export function resolveAnalysisRoot(
 	filePath: string,
 	sessionRoot: string,
+	homeDirOverride?: string,
 ): AnalysisRootMode {
+	const resolved = realPathOrResolved(filePath);
+	if (isVendorPath(resolved)) return "none";
 	const checkout = resolveGitCheckout(sessionRoot);
-	if (checkout && resolveLinkedWorktreeOwner(checkout, filePath)) {
+	if (checkout && resolveLinkedWorktreeOwner(checkout, resolved)) {
 		return "linked-worktree";
 	}
-	const root = resolveAnalysisRootPath(filePath, sessionRoot);
+	const root = resolveAnalysisRootPath(filePath, sessionRoot, homeDirOverride);
 	if (!root) return "none";
 	if (root === nodePath.resolve(sessionRoot)) return "session";
 	return "adopted";
