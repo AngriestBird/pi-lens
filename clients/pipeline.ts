@@ -78,6 +78,7 @@ import {
 	type PilensDiagnosticEntry,
 } from "./diagnostics-publish.js";
 import { loadLspService } from "./lsp-lazy.js";
+import { peekLSPService } from "./lsp/index.js";
 import type { MetricsClient } from "./metrics-client.js";
 import { clearGraphCache } from "./review-graph/builder.js";
 import { classifyTreeSitterWasmError } from "./tree-sitter-client.js";
@@ -1309,7 +1310,7 @@ export type LspResyncOutcome =
 export async function resyncHeldLspDocument(
 	filePath: string,
 ): Promise<DriftDisposition | "no-service"> {
-	const service = (await loadLspService()).peekLSPService();
+	const service = peekLSPService();
 	if (!service) return "no-service";
 	const dispositions = await service.resyncGitChangedFiles([filePath], {
 		saved: true,

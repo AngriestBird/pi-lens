@@ -15,13 +15,11 @@ import type {
 } from "./index.js";
 import {
 	getOwnedLspService,
-	peekOwnedLspService,
 	resetOwnedLspService,
 } from "./service-singleton.js";
 import { groupFilesByPrimaryServer, runPerServerGroups } from "./grouping.js";
 import type { LSPShutdownOptions } from "./client.js";
 import type { DriftDisposition } from "./document-drift.js";
-import type { LSPCapabilitySnapshot } from "./wait-policy/index.js";
 
 type CapabilityMethods<K extends keyof LSPService> = Pick<LSPService, K>;
 
@@ -164,12 +162,6 @@ export function getLSPService(): LspCapabilities {
 	return adaptLspService(getOwnedLspService<LSPService>());
 }
 
-/** Read-only lifecycle access; this never creates a service. */
-export function peekLSPService(): LspCapabilities | undefined {
-	const service = peekOwnedLspService<LSPService>();
-	return service ? adaptLspService(service) : undefined;
-}
-
 /** Compatibility lifecycle exports remain named so host hooks keep their ABI. */
 export const resetLSPService = (options: LSPShutdownOptions = {}): void =>
 	resetOwnedLspService<LSPService>(options);
@@ -195,7 +187,6 @@ export async function hasAuxiliaryLspPublishedForRoot(
 }
 
 export type {
-	LSPCapabilitySnapshot,
 	LSPService,
 	LSPWorkspaceScopeAttribution,
 	LSPWorkspaceUnconfirmedReason,
