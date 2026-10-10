@@ -216,6 +216,30 @@ function lspServerEntryNode(): ConfigSchemaNode {
 	};
 }
 
+function lspServerOverrideNode(): ConfigSchemaNode {
+	return {
+		type: "object",
+		additionalProperties: true,
+		[STABILITY_TIER_KEY]: "experimental",
+		properties: {
+			command: { [STABILITY_TIER_KEY]: "experimental" },
+			env: {
+				type: "object",
+				additionalProperties: {
+					type: "string",
+					[STABILITY_TIER_KEY]: "experimental",
+				},
+				[STABILITY_TIER_KEY]: "experimental",
+			},
+			initializationOptions: {
+				type: "object",
+				additionalProperties: true,
+				[STABILITY_TIER_KEY]: "experimental",
+			},
+		},
+	};
+}
+
 function lspNamespace(): ConfigSchemaNode {
 	const properties: Record<string, ConfigSchemaNode> = {
 		// Reserved but deliberately UNTYPED. `lens-config.ts` already rejects a
@@ -237,7 +261,9 @@ function lspNamespace(): ConfigSchemaNode {
 					? // #3968: server entries are TYPED — each carries the covers
 						// claim node — while staying open on every other field.
 						{ additionalProperties: lspServerEntryNode() }
-					: { additionalProperties: true }
+					: key === "serverOverrides"
+						? { additionalProperties: lspServerOverrideNode() }
+						: { additionalProperties: true }
 				: {}),
 			...denyAnnotation(key),
 		};
@@ -247,6 +273,33 @@ function lspNamespace(): ConfigSchemaNode {
 		additionalProperties: true,
 		[STABILITY_TIER_KEY]: "stable",
 		properties,
+	};
+}
+
+/** The shared public rule policy shape (#4226). */
+function rulePolicyEntryNode(): ConfigSchemaNode {
+	return {
+		type: "object",
+		additionalProperties: true,
+		properties: {
+			threshold: { type: "number", [STABILITY_TIER_KEY]: "experimental" },
+			// These two legacy fields remain opaque so the project compatibility
+			// parser can preserve its established field-specific diagnostics.
+			disable: opaque("experimental"),
+			select: opaque("experimental"),
+			ignorePaths: {
+				type: "array",
+				items: {
+					type: "string",
+					minLength: 1,
+					[STABILITY_TIER_KEY]: "experimental",
+				},
+				[MERGE_STRATEGY_KEY]: "append",
+				[DENY_KEY]: "array-union",
+				[STABILITY_TIER_KEY]: "experimental",
+			},
+		},
+		[STABILITY_TIER_KEY]: "experimental",
 	};
 }
 
@@ -281,6 +334,13 @@ function buildConfigSchema(): ConfigSchemaNode {
 			]),
 		),
 		[STABILITY_TIER_KEY]: "stable",
+	};
+	// Rule ids are an open keyed map, but their policy fields are shared config
+	// leaves so global and project policy merge field-wise with provenance.
+	properties.rules = {
+		type: "object",
+		additionalProperties: rulePolicyEntryNode(),
+		[STABILITY_TIER_KEY]: "experimental",
 	};
 
 	// Namespaces owned by another tool that ride in the same file (`trivy`,

@@ -55,9 +55,9 @@ const LOADED_CLIENTS = {
 // Partial mock (#2281 sweep): every real export stays, only the two accessors
 // `handleToolCall` reaches for are replaced, so nothing here spins up a real
 // LSP client for an auto-touch this case does not measure.
-vi.mock("../../clients/lsp/index.js", async (importOriginal) => {
+vi.mock("../../clients/lsp/capabilities.js", async (importOriginal) => {
 	const actual =
-		await importOriginal<typeof import("../../clients/lsp/index.js")>();
+		await importOriginal<typeof import("../../clients/lsp/capabilities.js")>();
 	const { makeLspServiceDouble } =
 		await import("../support/lsp-service-double.js");
 	return {

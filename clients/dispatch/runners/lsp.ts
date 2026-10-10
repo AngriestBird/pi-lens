@@ -16,7 +16,7 @@ import { logExtension } from "../../extension-log.js";
 import { getLspCapableKinds } from "../../language-policy.js";
 import { exceedsLspSyncLimits } from "../../lsp/content-limits.js";
 import { touchCoverageGap } from "../../lsp/diagnostic-binding.js";
-import { getLSPService } from "../../lsp/index.js";
+import { getLSPService } from "../../lsp/capabilities.js";
 import { LSP_SERVERS } from "../../lsp/server.js";
 import { RUNTIME_CONFIG } from "../../runtime-config.js";
 import { PRIORITY } from "../priorities.js";

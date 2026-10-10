@@ -98,6 +98,7 @@ export type DegradationKind =
 	| "ast-grep-napi-language-unavailable"
 	/** A managed-tool verification probe exceeded its retained output bound. */
 	| "ast-grep-napi-unavailable"
+	| "ast-grep-rule-invalid"
 	/**
 	 * #2722: a managed-tool verification probe returned a NON-VERDICT — the
 	 * #208 transport-required matcher was armed, never matched, and the kept
@@ -293,6 +294,8 @@ export type DegradationKind =
 	 * Subject is the tool.
 	 */
 	| "fix-run-agent-edit-overwritten"
+	/** A bounded pre-run call was not carried into a fixer run (#3830). */
+	| "fix-run-pending-call-cap"
 	/**
 	 * #3830: a whole-package fixer's restore left a file alone, and named it
 	 * possibly lost, because a newer agent edit may have won (a call in flight,
@@ -762,6 +765,8 @@ export type DegradationKind =
 	 * "hung" server is truly hung or just answering late.
 	 */
 	| "lsp-pull-unconfirmed"
+	/** A config registry decision dropped or admitted executable project data. */
+	| "lsp-registry-decision"
 	/** A host-created pi-agent staging root was declined as an LSP root. */
 	| "lsp-root-declined"
 	/**
@@ -1007,6 +1012,8 @@ export type DegradationKind =
 	 * itself already landed; only the hash is missing. Subject is the file path.
 	 */
 	| "pipeline-post-write-hash-unavailable"
+	/** A mounted process bridge refused calls during a primary-session gap. */
+	| "process-bridge-unavailable"
 	/**
 	 * #2146, #3140: an incompatible process-singleton cell was discarded and
 	 * replaced with a fresh value (`clients/process-singletons.ts`,
@@ -1046,6 +1053,17 @@ export type DegradationKind =
 	 * leaking an orphan — is visible rather than silent.
 	 */
 	| "query-predicates-invalid"
+	/**
+	 * #4131: another writer changed a file the agent authored without a read
+	 * (a bash write, a created file), or a mutation-bridge write landed on it
+	 * with no pre-write check (#4187 R2-4, the row's `writer: "bridge"`), so
+	 * its authorship ended (`ReadGuard.retireChangedAuthorship`) and its next
+	 * edit needs a read. Subject is the file; counted, the read-guard.log row
+	 * on the rising edge.
+	 */
+	/** Counted authorship-cap evictions; read-guard.log is rising-edge only. */
+	| "read-guard-authorship-cap"
+	| "read-guard-authorship-retired"
 	/**
 	 * #2524: the resource sampler's OWN process-table scanner (heartbeat CPU/RSS
 	 * sampling, `RESOURCE_SAMPLE_QUERY_TIMEOUT_MS` 2000ms — a much tighter and
@@ -1281,6 +1299,8 @@ export type DegradationKind =
 	 * session cannot take it stale later. Once per start reason.
 	 */
 	| "session-scope-handoff-discarded"
+	/** An unclaimed successor hand-off exceeded its fixed retention window. */
+	| "session-scope-handoff-expired"
 	/**
 	 * #3881: a primary shutdown landed while its own `session_start` was still
 	 * in flight, before it adopted; it forwarded the slot left for that start

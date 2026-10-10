@@ -254,7 +254,7 @@ export function createAstGrepReplaceTool(
 					ruleYaml,
 					searchPaths,
 					applyFlag,
-					{ lineage },
+					{ lineage, toolCallId: _toolCallId },
 				);
 				if (ruleResult.stalePreview) {
 					logOutcome("error", { errorRaw: "stale_preview" });
@@ -306,7 +306,7 @@ export function createAstGrepReplaceTool(
 				lang,
 				searchPaths,
 				applyFlag,
-				{ strictness, lineage },
+				{ strictness, lineage, toolCallId: _toolCallId },
 			);
 
 			if (result.stalePreview) {

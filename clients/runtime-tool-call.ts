@@ -19,7 +19,11 @@ import {
 } from "./opaque-mutation-scan.js";
 import { normalizeForGuardMatch } from "./host-edit-normalize.js";
 import { retargetReplacementIndentation } from "./indent-retarget.js";
-import { noteAgentCallEnd, noteAgentCallStart } from "./fix-run-restore.js";
+import {
+	expectationFromToolInput,
+	noteAgentCallEnd,
+	noteAgentCallStart,
+} from "./fix-run-restore.js";
 import { LANGUAGE_POLICY } from "./language-policy.js";
 import { isComplexitySupportedFile } from "./tree-sitter-shared.js";
 import {
@@ -28,8 +32,9 @@ import {
 } from "./mutating-tool.js";
 import { isProvisionalLearnedAttribution } from "./mutation-attribution.js";
 import { armObservedMutation } from "./observed-mutation.js";
+import { extractWrittenPathsFromCommand } from "./bash-file-access.js";
 import type { LSPShutdownOptions } from "./lsp/client.js";
-import { getLSPService } from "./lsp/index.js";
+import { getLSPService } from "./lsp/capabilities.js";
 import {
 	findDocumentSymbolAtLine,
 	getOpenDocumentSymbols,
@@ -145,6 +150,55 @@ function getToolCallRawFilePath(
 	}
 
 	return undefined;
+}
+
+/**
+ * #4187 R4, folded in R5: `ast_grep_replace` is the one pi-lens-owned
+ * in-process writer the generic `tool_call` site below cannot see. It names its
+ * targets in a `paths` ARRAY, which `readMutationPathField` (a single-string
+ * reader) does not return, so the observational net's arm never runs for it and
+ * nothing else retires or licenses what it is about to rewrite. Every other
+ * owned writer (`lsp_navigation` rename/rename_file/executeCommand,
+ * `lens_diagnostic_mark`) names one `path`/`filePath`, which that arm already
+ * retires and licenses; a second site for them was a guard no mutation could
+ * red (R4-3, T3 and T4).
+ *
+ * The license is what makes the write's later advance sound (#4187 R4-1, the
+ * third recurrence of "named path vs written set" on this seam): an apply
+ * rewrites every matched file, which is a WIDER set than the one the call
+ * named when `paths` is a folder or is omitted for the project default. Only a
+ * path this call checked may be re-baselined; every other path the apply
+ * changed ends its authorship, which costs one read and never vouches for a
+ * byte the conversation did not see.
+ */
+function retireAstGrepApplyTargets(
+	toolName: string,
+	event: { input?: unknown },
+	runtime: ToolCallDeps["runtime"],
+	ctx: { cwd?: string },
+): void {
+	const input = (event.input ?? {}) as Record<string, unknown>;
+	if (toolName !== "ast_grep_replace" || input.apply !== true) return;
+	if (!Array.isArray(input.paths)) return;
+	const checked: string[] = [];
+	for (const rawPath of input.paths) {
+		if (typeof rawPath !== "string") continue;
+		const resolved = resolveToolCallFilePath(
+			rawPath,
+			ctx.cwd,
+			runtime.projectRoot,
+		)?.path;
+		if (!resolved) continue;
+		runtime.readGuard?.retireChangedAuthorship?.(resolved);
+		checked.push(resolved);
+	}
+	// A folder target resolves but authors nothing, so it licenses no file: the
+	// files the apply rewrites inside it are unlicensed and end their
+	// authorship. Omitted `paths` (the project default) returns above.
+	runtime.readGuard?.noteCheckedPaths?.(
+		resolveToolCallCorrelationId(event),
+		checked,
+	);
 }
 
 /**
@@ -578,6 +632,16 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 	// an already-second-scale bash path.
 	if (toolName === "bash") {
 		const commandInput = (event as { input?: { command?: unknown } }).input;
+		// #4131: a recognized bash write credits authorship without the bytes
+		// it wrote, so it may only advance an authorship whose bytes still
+		// hold. One another writer broke ends here, before the command rewrites
+		// around the other writer's bytes (the tool_result path's root).
+		if (typeof commandInput?.command === "string" && !getFlag("no-read-guard"))
+			for (const target of extractWrittenPathsFromCommand(
+				commandInput.command,
+				runtime.projectRoot || process.cwd(),
+			))
+				runtime.readGuard?.retireChangedAuthorship?.(target);
 		if (typeof commandInput?.command === "string" && commandInput.command) {
 			const scanRoot = ctx.cwd ?? runtime.projectRoot;
 			if (scanRoot) {
@@ -666,8 +730,22 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 					?.path
 			: undefined;
 		if (observedPath) {
+			// #4131: as for a bash write (above), the replay of what this tool
+			// wrote credits authorship without the bytes, so a broken one ends
+			// before the tool rewrites around another writer's bytes: for the
+			// path it named and, for a directory, every file it may replay.
+			// #4187 R4-1: those same paths are this call's licensed set, so the
+			// settle's replay may advance exactly them — the universe IS the
+			// population the replay can report, and every path in it was checked
+			// here.
+			const observedCallId = resolveToolCallCorrelationId(event);
+			const retire = (target: string) => {
+				runtime.readGuard?.retireChangedAuthorship?.(target);
+			};
+			retire(observedPath);
+			runtime.readGuard?.noteCheckedPaths?.(observedCallId, [observedPath]);
 			await armObservedMutation({
-				toolCallId: resolveToolCallCorrelationId(event),
+				toolCallId: observedCallId,
 				toolName,
 				targetPath: observedPath,
 				cwd: ctx.cwd ?? runtime.projectRoot,
@@ -675,11 +753,16 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 				// #3613 F2: the budget of this session's own turn.
 				turnIndex: runtime.turnKey(deps.sessionId),
 				isLiveTurn: (key) => runtime.isLiveTurnKey(key),
+				onUniverse: (paths) => {
+					paths.forEach(retire);
+					runtime.readGuard?.noteCheckedPaths?.(observedCallId, paths);
+				},
 				signal: ctx.signal,
 				dbg,
 			});
 		}
 	}
+	retireAstGrepApplyTargets(toolName, event, runtime, ctx);
 
 	if (
 		getFlag("lens-guard") &&
@@ -783,7 +866,12 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 		// below when the call is blocked. A read changes no bytes, so it is never
 		// in flight here: an in-flight read would stop the restore of an agent
 		// edit the fixer overwrote (#4185 round 1, F2).
-		if (mutation !== undefined) noteAgentCallStart(toolCallId, filePath);
+		if (mutation !== undefined)
+			noteAgentCallStart(
+				toolCallId,
+				filePath,
+				expectationFromToolInput(event.input, mutation.kind),
+			);
 	}
 	if (targetMissing) {
 		// #1655 item 5: this early return used to be the whole story — pi-lens
@@ -1484,6 +1572,7 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 				runtime.telemetrySessionId,
 				readGuardCorrelationId,
 				runtime.partialApplyRecords,
+				readGuard.contentMatchesLastRead(filePath),
 			);
 			if (preflightError) {
 				if (partiallyApplicable && partiallyApplicable.length > 0) {

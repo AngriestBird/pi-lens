@@ -18,7 +18,7 @@ vi.mock("../../clients/shared-checkout-guard.js", () => ({
 	evaluateSharedCheckoutGuard: (...args: unknown[]) => evaluate(...args),
 }));
 
-vi.mock("../../clients/lsp/index.js", () => ({
+vi.mock("../../clients/lsp/capabilities.js", () => ({
 	getLSPService: () => makeLspServiceDouble(),
 	resetLSPService: () => {},
 }));

@@ -42,8 +42,10 @@ import { runHandlerExpectingNoThrow } from "../support/handler-verdict.js";
 import { createPiMock, makeCtx } from "../support/pi-mock.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
-vi.mock("../../clients/lsp/index.js", async (importOriginal) => ({
-	...(await importOriginal<typeof import("../../clients/lsp/index.js")>()),
+vi.mock("../../clients/lsp/capabilities.js", async (importOriginal) => ({
+	...(await importOriginal<
+		typeof import("../../clients/lsp/capabilities.js")
+	>()),
 	getLSPService: () => makeLspServiceDouble(),
 	resetLSPService: () => {},
 	notifyExternalFileChange: vi.fn(async () => undefined),

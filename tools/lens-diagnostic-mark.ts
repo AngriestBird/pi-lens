@@ -425,7 +425,13 @@ export function createLensDiagnosticMarkTool(
 					kind: "edit",
 					editRanges: [[Math.max(1, verifiedLine - 1), verifiedLine]],
 					consumer: "lens_diagnostic_mark",
+					provenance: "observed",
 					...(lineage && { lineage }),
+					// #4187 R4-1: this suppress wrote the file its own `tool_call`
+					// checked, so it may advance that file's authorship. Without
+					// the id the guard cannot tell it from a write no call
+					// produced, and ends the authorship instead.
+					toolCallId: _toolCallId,
 				});
 			}
 

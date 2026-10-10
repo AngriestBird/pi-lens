@@ -33,7 +33,7 @@ import { matchingCloseIndex } from "../support/sweep-kit.js";
 import { runHandlerExpectingNoThrow } from "../support/handler-verdict.js";
 
 const touchFileMock = vi.fn().mockResolvedValue(undefined);
-vi.mock("../../clients/lsp/index.js", () => ({
+vi.mock("../../clients/lsp/capabilities.js", () => ({
 	getLSPService: () =>
 		makeLspServiceDouble({
 			touchFile: touchFileMock,

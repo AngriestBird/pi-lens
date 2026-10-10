@@ -24,6 +24,8 @@ type Recorded = {
 	kind: string;
 	editRanges?: [number, number][];
 	consumer?: string;
+	provenance?: string;
+	toolCallId?: string;
 	lineage?: LineageHandle;
 };
 
@@ -234,5 +236,48 @@ describe("#3763 ast_grep_replace records under the session it was called in", ()
 			{ scopeId: entered.scopeId, current: false },
 			{ scopeId: entered.scopeId, current: false },
 		]);
+	});
+});
+
+// #4187 R4-1, R4-3 (T5): `--update-all` rewrites files no `tool_result`
+// describes, so this record is the write's only evidence. The read guard
+// advances the authorship of a file the call NAMED only when the entry says it
+// was observed and names that call: without `provenance` the record can only
+// end an authorship (the file the agent wrote costs a re-read), and without
+// `toolCallId` it cannot be licensed at all. The guard half of the rule, and
+// the folder/project-wide applies that must advance nothing, are pinned by
+// tests/clients/runtime-tool-call.test.ts.
+describe("#4187 R4-1 ast_grep_replace's apply record names its call", () => {
+	it("sends provenance observed and the tool call id it ran under", async () => {
+		recorded.length = 0;
+		const runtime = new RuntimeCoordinator();
+		const client = clientWithExec(execFor(MATCHES));
+		vi.spyOn(client, "ensureAvailable").mockResolvedValue(true);
+		vi.spyOn(client, "formatMatches").mockReturnValue("");
+		const tool = createAstGrepReplaceTool(client, () =>
+			runtime.captureSessionGeneration(),
+		);
+
+		await tool.execute(
+			"call-4187-ast-grep",
+			{
+				pattern: "var $X",
+				rewrite: "let $X",
+				lang: "typescript",
+				paths: ["src"],
+				apply: true,
+			},
+			new AbortController().signal,
+			undefined,
+			{ cwd: "." },
+		);
+
+		expect(recorded.length).toBeGreaterThan(0);
+		for (const entry of recorded)
+			expect(entry).toMatchObject({
+				consumer: "ast_grep_replace",
+				provenance: "observed",
+				toolCallId: "call-4187-ast-grep",
+			});
 	});
 });

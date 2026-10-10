@@ -88,8 +88,10 @@ vi.mock("../../clients/pipeline.js", () => ({
 }));
 
 const notifyExternalFileChange = vi.hoisted(() => vi.fn(async () => undefined));
-vi.mock("../../clients/lsp/index.js", async (importOriginal) => ({
-	...(await importOriginal<typeof import("../../clients/lsp/index.js")>()),
+vi.mock("../../clients/lsp/capabilities.js", async (importOriginal) => ({
+	...(await importOriginal<
+		typeof import("../../clients/lsp/capabilities.js")
+	>()),
 	notifyExternalFileChange,
 }));
 
@@ -3261,6 +3263,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 				// tool-call id on this event, so it falls back to the project
 				// root, same as the pre-#1642 basis.
 				env.tmpDir,
+				"session",
 			);
 			expect(deferMutation).toHaveBeenCalledWith(
 				filePath,
@@ -3270,6 +3273,8 @@ describe("runtime-tool-result inline behavior warnings", () => {
 				"autofix",
 				undefined,
 				env.tmpDir,
+				undefined,
+				"session",
 			);
 		} finally {
 			env.cleanup();
@@ -3515,9 +3520,17 @@ describe("runtime-tool-result inline behavior warnings", () => {
 			).toHaveLength(2);
 			expect(runtime.pendingDeferredMutationCount).toBe(1);
 			// Authorship for the recognized write, never a FileTime stamp (#3525).
-			expect(recordWritten).toHaveBeenCalled();
-			for (const call of recordWritten.mock.calls)
-				expect(call).toEqual([directPath, { stampFileTime: false }]);
+			// The bash write names its transcript entry (#3603); the pipeline's
+			// refresh names none and keeps it, handing over the bytes it hashed.
+			expect(recordWritten).toHaveBeenCalledWith(directPath, {
+				authorship: "unknown",
+				stampFileTime: false,
+				toolCallId: "3226-opaque",
+			});
+			for (const [filePath, opts] of recordWritten.mock.calls) {
+				expect(filePath).toBe(directPath);
+				expect(opts).toMatchObject({ stampFileTime: false });
+			}
 			for (const [filePath, bytes] of opaqueBytesBeforePipeline) {
 				expect(fs.readFileSync(filePath)).toEqual(bytes);
 			}

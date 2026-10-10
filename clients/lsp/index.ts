@@ -26,9 +26,9 @@ import {
 	recordDegradation,
 	recordDegradationOnce,
 } from "../degradation-ledger.js";
+import { assertInstallAllowed } from "../project-trust.js";
 import {
 	isLspSpawnAllowedByTrust,
-	assertInstallAllowed,
 	projectTrustDenialReason,
 } from "../project-trust.js";
 import { shouldPreferPullOnlyDiagnostics } from "../lsp-budget.js";
@@ -93,7 +93,14 @@ import {
 	getSessionRootsForTelemetry,
 	isOutsideAllSessionRoots,
 } from "./session-roots.js";
-import { getProcessSingleton } from "../process-singletons.js";
+import {
+	configureLspServiceLifecycle,
+	getOwnedLspService,
+	peekOwnedLspService,
+	resetOwnedLspService,
+} from "./service-singleton.js";
+import { groupFilesByPrimaryServer, runPerServerGroups } from "./grouping.js";
+export { groupFilesByPrimaryServer, runPerServerGroups } from "./grouping.js";
 import { isEphemeralCheckoutRoot } from "../ephemeral-root.js";
 import { getLanguageId } from "./language.js";
 import {
@@ -956,36 +963,6 @@ export interface LSPWorkspaceDiagnosticResult {
  * distinction (the workspace-pull fast path below) can act on it; callers
  * that don't (a plain per-file touch) can ignore it.
  */
-export function groupFilesByPrimaryServer(
-	files: readonly string[],
-): Array<{ files: string[]; multiServer: boolean }> {
-	const byServer = new Map<string, { files: string[]; multiServer: boolean }>();
-	for (const filePath of files) {
-		const servers = getServersForFileWithConfig(filePath);
-		const primary = servers[0]?.id ?? "none";
-		const group = byServer.get(primary);
-		const fallbackFamilyHeads = new Map<string, string>();
-		const familyHeads = servers.map((server) => {
-			const head = server.fallbackFor
-				? (fallbackFamilyHeads.get(server.fallbackFor) ?? server.fallbackFor)
-				: server.id;
-			fallbackFamilyHeads.set(server.id, head);
-			return head;
-		});
-		const multiServer = new Set(familyHeads).size > 1;
-		if (group) {
-			group.files.push(filePath);
-			if (multiServer) group.multiServer = true;
-		} else {
-			byServer.set(primary, {
-				files: [filePath],
-				multiServer,
-			});
-		}
-	}
-	return [...byServer.values()];
-}
-
 /**
  * #645: tracks, for ONE `runWorkspaceDiagnostics` sweep, which server ids
  * have already had at least one file pay the full `aggregateWaitMs` wait
@@ -1045,29 +1022,6 @@ export function createSweepIndexGate(): SweepIndexGate {
  * which only applies to a single-server group) can still act on it; a
  * caller that doesn't can just destructure `.files`.
  */
-export async function runPerServerGroups<
-	G extends { files: readonly string[]; multiServer?: boolean },
->(
-	groups: readonly G[],
-	concurrency: number,
-	processGroup: (group: G) => Promise<void>,
-	signal?: AbortSignal,
-): Promise<void> {
-	let nextGroup = 0;
-	const workers = Math.min(Math.max(1, concurrency), groups.length);
-	await Promise.all(
-		Array.from({ length: workers }, async () => {
-			while (!signal?.aborted) {
-				const gi = nextGroup;
-				nextGroup += 1;
-				if (gi >= groups.length) break;
-				await processGroup(groups[gi]!);
-			}
-			return true;
-		}),
-	);
-}
-
 const WORKSPACE_DIAGNOSTICS_CONCURRENCY = 8;
 
 // #621: a single-server group (the common case — one language, one server)
@@ -4530,12 +4484,10 @@ export class LSPService {
 		filePath: string,
 		allowInstall: boolean,
 	): Promise<SpawnedServer | undefined> {
-		// #1334 S5: honor the host project-trust decision before executing any
-		// project-resolved binary. Only an explicit host "not trusted" blocks —
-		// a host with no trust surface (`"unknown"`) spawns exactly as before.
-		// Deliberately NOT marked broken: trust is a policy outcome, not a server
-		// failure, and the user may grant trust later in the same session.
-		if (!isLspSpawnAllowedByTrust()) {
+		// Admission is normally performed by compileLspRegistry. Keep this
+		// service-side backstop for uncompiled test/host entries so a raw server
+		// object cannot bypass the registry's trust decision.
+		if (server.trustAllowed !== true && !isLspSpawnAllowedByTrust()) {
 			logSessionStart(
 				`lsp spawn ${server.id}: refused — ${projectTrustDenialReason()}`,
 			);
@@ -10749,60 +10701,27 @@ export class LSPService {
 
 // --- Singleton Instance ---
 
-interface LSPProcessState {
-	service: LSPService | null;
-	generationHandoff: Promise<void> | undefined;
-}
-
-const LSP_PROCESS_FAMILY = "lsp.service";
-const LSP_PROCESS_VERSION = 1;
-
-function lspProcessState(): LSPProcessState {
-	let incompatibleHandoff: Promise<void> | undefined;
-	return getProcessSingleton(
-		LSP_PROCESS_FAMILY,
-		LSP_PROCESS_VERSION,
-		() => ({ service: null, generationHandoff: incompatibleHandoff }),
-		(value) => {
-			// Shut down a live incompatible service before replacing its cell.
-			if (!value || typeof value !== "object") return;
-			const candidate = value as {
-				service?: {
-					shutdown?: (options: LSPShutdownOptions) => Promise<void>;
-				} | null;
-				generationHandoff?: Promise<void>;
-			};
-			const previousHandoff = candidate.generationHandoff;
-			const teardown = candidate.service?.shutdown
-				? candidate.service
-						.shutdown({ fast: true, reason: "process_singleton_reset" })
-						.catch(() => undefined)
-				: undefined;
-			if (previousHandoff && teardown) {
-				incompatibleHandoff = Promise.allSettled([
-					previousHandoff,
-					teardown,
-				]).then(() => undefined);
-			} else {
-				incompatibleHandoff = previousHandoff ?? teardown;
-			}
-		},
-	);
-}
-
-function processService(): LSPService {
-	const state = lspProcessState();
-	if (!state.service)
-		state.service = new LSPService(state.generationHandoff, process.cwd());
-	return state.service;
-}
+configureLspServiceLifecycle<LSPService>({
+	create: (generationHandoff) =>
+		new LSPService(generationHandoff, process.cwd()),
+	beforeReset: (options) => {
+		abortDeferredLspWork(
+			`lsp service reset: ${options.reason ?? "unspecified"}`,
+		);
+		resetLspLaunchAvailabilityGeneration();
+		if (options.reason === "session_start") {
+			resetClassicTsRepairGuard();
+		}
+	},
+	destroy: (service, options) => service.shutdown(options),
+});
 /**
  * #850: all singleton generations whose teardown is still pending. A new
  * generation may be allocated synchronously, but its first spawn waits on this
  * handoff so two generations can never own the same server/root concurrently.
  */
 export function getLSPService(): LSPService {
-	return processService();
+	return getOwnedLspService<LSPService>();
 }
 
 /**
@@ -10812,7 +10731,7 @@ export function getLSPService(): LSPService {
  * would spawn its server) after `resetLSPService`.
  */
 export function peekLSPService(): LSPService | undefined {
-	return lspProcessState().service ?? undefined;
+	return peekOwnedLspService<LSPService>();
 }
 
 /**
@@ -10846,52 +10765,14 @@ export async function resyncGitChangedFiles(
 }
 
 export function resetLSPService(options: LSPShutdownOptions = {}): void {
-	// #2504 review round 2 (F3): whatever the retiring service was still being
-	// asked for off-hook must stop HERE, before any teardown and before the
-	// `!retiringService` early return below (a `session_start` reset with no
-	// live service must still retire a loop the previous session armed). This
-	// is the one choke point every lifecycle path goes through —
-	// `session_shutdown`, `session_start`, and the idle reset — so the
-	// deferred actionable-warnings pull cannot open another file against a
-	// dying service, cannot re-spawn one after the idle reset, and cannot be
-	// mid-`openFile` when the loop closes (#234). Aborting spawns nothing.
-	abortDeferredLspWork(`lsp service reset: ${options.reason ?? "unspecified"}`);
-	// Invalidate availability publication started by the retiring service before
-	// any asynchronous teardown. The launch seam checks this generation after
-	// every managed lookup, install, and process launch (#2351).
-	resetLspLaunchAvailabilityGeneration();
-	// A new session must get its own classic-tsserver-repair attempt: the
-	// guard is a process-lifetime flag (see resetClassicTsRepairGuard), so a
-	// repair that failed transiently in an earlier session must not stay
-	// latched for the rest of the extension-host process (#1570).
+	// Keep the session-start reset names visible at this public seam for the
+	// session-state reachability ratchet; the owner hook performs the same
+	// transition for facade-only callers.
 	if (options.reason === "session_start") {
 		resetClassicTsRepairGuard();
-		// #1618 (R3): a hold from a PRIOR generation's sweep must never survive
-		// a session boundary — state that must re-arm at session_start cannot
-		// hide behind a leaked/stuck guard from the generation before it.
 		clearWorkspaceSweepHoldForSessionStart();
 	}
-	const state = lspProcessState();
-	const retiringService = state.service;
-	state.service = null;
-	if (!retiringService) return;
-
-	// shutdown() marks the service destroyed synchronously before its first
-	// await. Include both that teardown and every earlier pending generation:
-	// repeated resets may retire a replacement that is itself still waiting on
-	// its predecessor. allSettled keeps teardown best-effort without ever
-	// rejecting (and therefore permanently poisoning) the next generation.
-	const teardown = retiringService.shutdown(options);
-	const pending = state.generationHandoff
-		? [state.generationHandoff, teardown]
-		: [teardown];
-	const handoff = Promise.allSettled(pending).then(() => undefined);
-	state.generationHandoff = handoff;
-	void handoff.then(() => {
-		if (state.generationHandoff === handoff) {
-			state.generationHandoff = undefined;
-		}
-	});
+	resetOwnedLspService<LSPService>(options);
 }
 
 /**

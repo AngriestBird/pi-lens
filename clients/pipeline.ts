@@ -67,6 +67,7 @@ import {
 } from "./file-utils.js";
 import type { FormatService } from "./format-service.js";
 import type { GenerationHandle } from "./generation-guard.js";
+import type { AnalysisRootMode } from "./analysis-root.js";
 import { logLatency } from "./latency-logger.js";
 import type { PostAutofixNotice } from "./post-autofix-notice.js";
 import { emitLensAnalysisComplete } from "./lens-events.js";
@@ -245,6 +246,8 @@ async function diffProjectSnapshot(
 // --- Types ---
 
 export interface PipelineContext {
+	/** Root classification is carried from the single analysis-root seam. */
+	analysisRootMode?: AnalysisRootMode;
 	/** Live tool_result signal for aggregate formatter and dispatch bounds. */
 	signal?: AbortSignal;
 	filePath: string;
@@ -1869,7 +1872,8 @@ async function analysePipeline(
 		// #3858: a formatter the budget (or Escape) gave up on writes F later,
 		// after the sync below pushed the bytes from before. Sync that write too.
 		if (formatResult.abandoned)
-			chainLateFormatResync(
+			// The chain owns rejection handling; this continuation is intentionally detached.
+			void chainLateFormatResync(
 				formatResult.abandoned,
 				"inband",
 				{ toolName, filePath, startedAt: pipelineStart },
@@ -2085,6 +2089,7 @@ async function analysePipeline(
 			writeIndex: widgetOrder(),
 			// #3568: a collect-later runner defers its result to a turn end.
 			sessionGeneration: ctx.sessionGeneration,
+			sessionId: ctx.telemetry?.sessionId,
 			telemetryModel: ctx.telemetry?.modelId,
 			telemetryProvider: ctx.telemetry?.provider,
 		},

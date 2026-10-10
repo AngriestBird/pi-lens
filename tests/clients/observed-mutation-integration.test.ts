@@ -60,7 +60,7 @@ vi.mock("../../clients/pipeline.js", () => ({
 	})),
 }));
 
-vi.mock("../../clients/lsp/index.js", () => ({
+vi.mock("../../clients/lsp/capabilities.js", () => ({
 	getLSPService: () => makeLspServiceDouble(),
 	resetLSPService: () => {},
 	notifyExternalFileChange: vi.fn(async () => undefined),
@@ -1137,6 +1137,7 @@ describe("#2464 — the observed-settle path also dispatches pipeline analysis",
 			const readGuard = {
 				recordWritten,
 				getReadHistory: () => [],
+				contentMatchesLastRead: () => undefined,
 			} as unknown as NonNullable<
 				Parameters<typeof handleToolResult>[0]["readGuard"]
 			>;
@@ -1177,8 +1178,13 @@ describe("#2464 — the observed-settle path also dispatches pipeline analysis",
 			).toEqual(["agent-tool:patch_retry", "agent-tool:patch_retry"]);
 			// 1. The staleness stamp is re-taken over the file the pipeline itself
 			//    rewrote, so the agent's next edit is judged by read coverage.
+			//    #3865: authorship only. pi-lens does not know the bytes an
+			//    unclassified tool wrote, so FileTime stays at its last
+			//    conversation-backed stamp and line hashes judge the next edit.
 			expect(recordWritten).toHaveBeenCalledWith(path.resolve(filePath), {
-				stampFileTime: true,
+				authorship: "whole-file",
+				stampFileTime: false,
+				contentHash: expect.stringMatching(/^[0-9a-f]{64}$/),
 			});
 			// 2. The #2402 record is re-stamped with the POST-pipeline hash, so an
 			//    identical retry against the formatted bytes is still recognized as
@@ -1209,6 +1215,218 @@ describe("#2464 — the observed-settle path also dispatches pipeline analysis",
 				_bypassDebounce: true,
 			});
 			expect(vi.mocked(runPipeline)).toHaveBeenCalledTimes(dispatchesSoFar);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	// #3865 member 1 (#4187 F3, P8): an unclassified tool's write is credited
+	// as authorship, never as FileTime. Recurrence: the mutation bridge's
+	// observed replay and the observed dispatch's post-pipeline refresh both
+	// re-stamped FileTime, so an edit of a line another writer changed, whose
+	// newest view carries no hash (past READ_HASH_MAX_LINES), passed.
+	it("credits an observed tool's write as authorship without re-stamping FileTime (#3865)", async () => {
+		const env = setupTestEnvironment("pi-lens-3865-observed-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const filePath = path.join(env.tmpDir, "big.ts");
+			const big = Array.from({ length: 3100 }, (_, i) => `line${i + 1}`);
+			fs.writeFileSync(filePath, big.join("\n"));
+			const longAgo = new Date("2000-01-01T00:00:00Z");
+			fs.utimesSync(filePath, longAgo, longAgo);
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+			const { runPipeline } = await import("../../clients/pipeline.js");
+			ungatePipeline(vi.mocked(runPipeline) as never);
+			// The agent's whole-file read, past READ_HASH_MAX_LINES: no hashes.
+			runtime.readGuard.recordRead({
+				filePath,
+				requestedOffset: 1,
+				requestedLimit: big.length,
+				effectiveOffset: 1,
+				effectiveLimit: big.length,
+				expandedByLsp: false,
+				turnIndex: 0,
+				writeIndex: 0,
+				timestamp: Date.now(),
+			});
+			big[10] = "EXTERNAL11";
+			fs.writeFileSync(filePath, big.join("\n"));
+			const event = patchEvent(filePath, "call-3865-observed");
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				),
+			);
+			big[1] = "patched2";
+			fs.writeFileSync(filePath, big.join("\n"));
+			await handleToolResult({
+				...toolResultDeps({ event, runtime, cacheManager }),
+				readGuard: runtime.readGuard,
+			});
+			expect(readChangesSince(env.tmpDir, 0)).toMatchObject([
+				{ source: "agent-tool:patch_file" },
+			]);
+			expect(runtime.readGuard.exportAuthorship().written).toHaveLength(1);
+			const verdict = runtime.readGuard.checkEdit(filePath, [11, 11]);
+			expect(verdict.action).toBe("block");
+			expect(verdict.reason).toContain("File modified since read");
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	// #4131 (#4187 F6): an observed tool's replay credits authorship without
+	// the bytes, so it must not re-author bytes another writer changed after
+	// the agent's own write. Recurrence: the replay's recordWritten
+	// re-baselined the authorship over the other writer's change.
+	it("does not let an observed tool's write re-author bytes another writer changed (#4131)", async () => {
+		const env = setupTestEnvironment("pi-lens-4131-observed-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const filePath = path.join(env.tmpDir, "authored.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+			const { runPipeline } = await import("../../clients/pipeline.js");
+			ungatePipeline(vi.mocked(runPipeline) as never);
+			// The agent's bash write authored the file, without a read.
+			runtime.readGuard.recordWritten(filePath, {
+				stampFileTime: false,
+				toolCallId: "call-4131-bash",
+			});
+			// Another writer changes line 3.
+			fs.writeFileSync(
+				filePath,
+				["const a = 1;", "const b = 2;", "const c = 333;", ""].join("\n"),
+			);
+			const event = patchEvent(filePath, "call-4131-observed");
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				),
+			);
+			fs.writeFileSync(
+				filePath,
+				["const a = 1;", "const b = 222;", "const c = 333;", ""].join("\n"),
+			);
+			await handleToolResult({
+				...toolResultDeps({ event, runtime, cacheManager }),
+				readGuard: runtime.readGuard,
+			});
+			const verdict = runtime.readGuard.checkEdit(filePath, [3, 3]);
+			expect(verdict.action).toBe("block");
+			expect(verdict.reason).toContain("File modified since your write");
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	// #4187 R2-4, the no-drop side: the observed replay is the one bridge
+	// producer whose tool_call checked the authorship before the write, so it
+	// still advances an intact one. Recurrence: ending every bridge write's
+	// authorship (the rule for writes nothing checked first) would make an
+	// unknown tool's edit of a file the agent wrote cost a re-read.
+	it("keeps the authorship an observed tool's write lands on when no other writer moved it (#4131)", async () => {
+		const env = setupTestEnvironment("pi-lens-4131-observed-keep-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const filePath = path.join(env.tmpDir, "authored.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+			const { runPipeline } = await import("../../clients/pipeline.js");
+			ungatePipeline(vi.mocked(runPipeline) as never);
+			runtime.readGuard.recordWritten(filePath, {
+				stampFileTime: false,
+				toolCallId: "call-4131-bash-keep",
+			});
+			const event = patchEvent(filePath, "call-4131-observed-keep");
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				),
+			);
+			fs.writeFileSync(
+				filePath,
+				["const a = 1;", "const b = 222;", "const c = 3;", ""].join("\n"),
+			);
+			await handleToolResult({
+				...toolResultDeps({ event, runtime, cacheManager }),
+				readGuard: runtime.readGuard,
+			});
+			expect(readChangesSince(env.tmpDir, 0)).toMatchObject([
+				{ source: "agent-tool:patch_file" },
+			]);
+			expect(runtime.readGuard.checkEdit(filePath, [3, 3]).action).toBe(
+				"allow",
+			);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	// #4131 (#4187 R2-3, probe A2): a tool that names a DIRECTORY replays every
+	// file of that directory it changed, so each of them must end a broken
+	// authorship at the tool_call, not only the path the input named.
+	// Recurrence: the retire covered `input.path` alone, and the replay of a
+	// file inside the named directory re-baselined authorship over another
+	// writer's line 3 (allow).
+	it("does not let a directory-target observed tool re-author bytes another writer changed (#4131)", async () => {
+		const env = setupTestEnvironment("pi-lens-4131-observed-dir-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const dir = path.join(env.tmpDir, "src");
+			fs.mkdirSync(dir);
+			const filePath = path.join(dir, "touched.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+			const { runPipeline } = await import("../../clients/pipeline.js");
+			ungatePipeline(vi.mocked(runPipeline) as never);
+			// The agent's bash write authored the file, without a read.
+			runtime.readGuard.recordWritten(filePath, {
+				stampFileTime: false,
+				toolCallId: "call-4131-bash-dir",
+			});
+			// Another writer changes line 3.
+			fs.writeFileSync(
+				filePath,
+				["const a = 1;", "const b = 2;", "const c = 333;", ""].join("\n"),
+			);
+			const event = {
+				toolName: "dir_codemod",
+				toolCallId: "call-4131-observed-dir",
+				input: { path: dir, transform: "rename" },
+				content: [{ type: "text", text: "rewrote" }],
+			};
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				),
+			);
+			fs.writeFileSync(
+				filePath,
+				["const a = 1;", "const b = 222;", "const c = 333;", ""].join("\n"),
+			);
+			await handleToolResult({
+				...toolResultDeps({ event, runtime, cacheManager }),
+				readGuard: runtime.readGuard,
+			});
+			expect(readChangesSince(env.tmpDir, 0)).toMatchObject([
+				{ source: "agent-tool:dir_codemod" },
+			]);
+			const verdict = runtime.readGuard.checkEdit(filePath, [3, 3]);
+			expect(verdict.action).toBe("block");
+			expect(verdict.reason).toContain("File modified since your write");
 		} finally {
 			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 			else process.env.PILENS_DATA_DIR = previousDataDir;
