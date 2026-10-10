@@ -93,11 +93,6 @@ function sentenceEnd(text, index) {
 	const before = text.slice(Math.max(0, index - 8), index + 1);
 	if (char === "." && (ABBREVIATIONS.test(before) || /\b\d+$/.test(before)))
 		return false;
-	if (
-		char === "." &&
-		/[A-Za-z0-9_./-]+\.$/.test(text.slice(Math.max(0, index - 40), index + 1))
-	)
-		return false;
 	return true;
 }
 
@@ -149,8 +144,9 @@ export function checkProse(text = "", options = {}) {
 		}
 		const source = raw.trim();
 		if (!source) continue;
-		const units = /^\s*[-*+]\s+/.test(source)
-			? [source.replace(/^\s*[-*+]\s+/, "")]
+		const listMarker = source.match(/^\s*(?:[-*+]|\d+[.)])\s+/);
+		const units = listMarker
+			? splitSentences(source.slice(listMarker[0].length))
 			: splitSentences(source);
 		for (const unit of units) {
 			if (wordCount(unit) > MAX_WORDS)

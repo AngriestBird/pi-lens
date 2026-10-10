@@ -970,15 +970,19 @@ function codeSpanMasked(text) {
 	);
 }
 
-function endsSentence(text, index) {
+function endsSentence(text, index, original = text) {
 	const char = text[index];
 	if (!".!?".includes(char)) return false;
 	if (char === "." && (text[index - 1] === "." || text[index + 1] === "."))
 		return false;
 	const next = text[index + 1] ?? "";
 	if (next && !/\s/.test(next)) return false;
-	const following = text.slice(index + 1).match(/\S/)?.[0];
-	return following === undefined || /[A-Z]/.test(following);
+	const remainder = original.slice(index + 1);
+	const following = remainder.match(/\S/)?.[0];
+	if (following === undefined || /[A-Z]/.test(following)) return true;
+	const afterWhitespace = remainder.replace(/^\s+/, "");
+	if (afterWhitespace.startsWith("`")) return true;
+	return /^\d/.test(afterWhitespace);
 }
 
 function splitMarkdownSentences(text) {
@@ -986,7 +990,7 @@ function splitMarkdownSentences(text) {
 	let start = 0;
 	const masked = codeSpanMasked(text);
 	for (let index = 0; index < text.length; index += 1) {
-		if (endsSentence(masked, index)) {
+		if (endsSentence(masked, index, text)) {
 			sentences.push({ text: text.slice(start, index + 1), start });
 			start = index + 1;
 		}
@@ -1000,7 +1004,7 @@ function countSentenceTerminators(lines) {
 	let count = 0;
 	const masked = codeSpanMasked(lines.join("\n").trim());
 	for (let index = 0; index < masked.length; index += 1) {
-		if (endsSentence(masked, index)) count += 1;
+		if (endsSentence(masked, index, lines.join("\n").trim())) count += 1;
 	}
 	return count;
 }

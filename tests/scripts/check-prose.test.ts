@@ -67,6 +67,17 @@ describe("checkProse", () => {
 		expect(result.valid).toBe(true);
 	});
 
+	it("splits ordered and unordered list items into sentences", () => {
+		const item =
+			"3. **Warn:** a retired glossary term in prose. Read the retired terms from the AGENTS.md glossary at run time, so the list never drifts. The glossary sweep test already parses that source. Warn only, because several retirements depend on context.";
+		expect(checkProse(item)).toEqual({ valid: true, errors: [], warnings: [] });
+		expect(
+			checkProse(
+				"- This deliberately has enough ordinary words to exceed the prose limit because it never reaches a terminal sentence boundary and must remain one sentence while the checker preserves this unbroken paragraph for its length guard.",
+			).errors.join(" "),
+		).toContain("sentence-length");
+	});
+
 	it("can downgrade blocking findings in warn mode", () => {
 		const result = checkProse("Please simply do this.", { mode: "warn" });
 		expect(result).toMatchObject({ valid: true, errors: [] });
