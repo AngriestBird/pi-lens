@@ -342,8 +342,13 @@ it("classifies outside-root path families through the real tool-result seam (#42
 it("adopts a home sibling but refuses home, ancestors, and a home symlink (#4230 D1)", () => {
 	const env = setupTestEnvironment("pi-lens-4230-home-boundary-");
 	const previousHome = process.env.HOME;
+	const previousUserProfile = process.env.USERPROFILE;
 	const previousTmpDir = process.env.TMPDIR;
-	const home = path.join(env.tmpDir, "home");
+	// Windows' os.tmpdir() is normally below USERPROFILE, and Windows
+	// os.homedir() reads USERPROFILE rather than HOME. Keep this fake home
+	// outside the OS temp tree and pin both environment spellings so the D1
+	// boundary is testing home ownership, not the temp-root refusal (#4230).
+	const home = fs.mkdtempSync(path.join(process.cwd(), ".analysis-root-home-"));
 	const sessionRoot = path.join(home, "code", "a");
 	const siblingRoot = path.join(home, "code", "b");
 	const homeLink = path.join(env.tmpDir, "home-link");
@@ -361,10 +366,12 @@ it("adopts a home sibling but refuses home, ancestors, and a home symlink (#4230
 		expect(true).toBe(true);
 		if (previousTmpDir === undefined) delete process.env.TMPDIR;
 		else process.env.TMPDIR = previousTmpDir;
+		fs.rmSync(home, { recursive: true, force: true });
 		env.cleanup();
 		return;
 	}
 	process.env.HOME = home;
+	process.env.USERPROFILE = home;
 	try {
 		expect(
 			resolveAnalysisRoot(path.join(siblingRoot, "src", "b.ts"), sessionRoot),
@@ -379,8 +386,11 @@ it("adopts a home sibling but refuses home, ancestors, and a home symlink (#4230
 	} finally {
 		if (previousHome === undefined) delete process.env.HOME;
 		else process.env.HOME = previousHome;
+		if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+		else process.env.USERPROFILE = previousUserProfile;
 		if (previousTmpDir === undefined) delete process.env.TMPDIR;
 		else process.env.TMPDIR = previousTmpDir;
+		fs.rmSync(home, { recursive: true, force: true });
 		env.cleanup();
 	}
 });
