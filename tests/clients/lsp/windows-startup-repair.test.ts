@@ -8,7 +8,12 @@ import { setPlatform } from "../../support/platform-stub.js";
 const ensureTool = vi.hoisted(() => vi.fn(async () => undefined));
 const logExtension = vi.hoisted(() => vi.fn());
 
-vi.mock("../../../clients/extension-log.js", () => ({ logExtension }));
+vi.mock("../../../clients/extension-log.js", async (importOriginal) => ({
+	...(await importOriginal<
+		typeof import("../../../clients/extension-log.js")
+	>()),
+	logExtension,
+}));
 
 class MockChildProcess extends EventEmitter {
 	stdin = new EventEmitter();
