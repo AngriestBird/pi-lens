@@ -396,6 +396,47 @@ function findBinaryOnPath(
 
 let unknownProjectLocalNoticeGeneration = -1;
 
+/** Refuse project-code servers before command resolution or installation. */
+export function refuseProjectCodeServerUnlessTrusted(
+	serverId: string,
+	root: string,
+	executesProjectCode: boolean,
+): void {
+	if (!executesProjectCode || getProjectTrustState() === "trusted") return;
+
+	const trust = getProjectTrustState();
+	const generation = getDegradationLedgerGeneration();
+	recordDegradationOnce({
+		kind: "lsp-registry-decision",
+		subject: `project-code-server:g${generation}:${serverId}:${root}`,
+		reason: `project-code LSP server refused: pi project trust is ${trust}`,
+		metadata: {
+			field: "executes-project-code",
+			serverId,
+			root,
+			trust,
+		},
+	});
+	if (
+		trust === "unknown" &&
+		unknownProjectLocalNoticeGeneration !== generation
+	) {
+		unknownProjectLocalNoticeGeneration = generation;
+		logExtension({
+			subsystem: "lsp-registry",
+			level: "warn",
+			message:
+				"project-code LSP server refused: mark the project trusted in pi or upgrade pi",
+			metadata: { field: "executes-project-code", serverId },
+		});
+	}
+	throw new SpawnFailureError(
+		"spawn-failed",
+		`LSP project-code server refused: project trust is ${trust}`,
+		new Error(`project trust is ${trust}`),
+	);
+}
+
 /**
  * Whether the resolved executable is a project-local installed binary.
  * `launchLSP` is the one seam that has both the final resolved command and its

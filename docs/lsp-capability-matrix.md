@@ -1,5 +1,19 @@
 # LSP capability matrix — affirmative-clean-signal strategy
 
+## Project-code trust class (#4269)
+
+Some global language-server binaries execute repository-owned build, plugin, or
+macro code while starting or indexing. The built-in registry marks these with
+`executesProjectCode`; the launch gate refuses them unless pi reports the
+project as trusted. Unknown trust is a `spawn-failed` refusal, not
+`tool-not-found`, and does not install or retry the server. The class currently
+includes rust-analyzer (Cargo `build.rs` and proc macros), C# / F# servers
+(MSBuild targets), JDT LS and Kotlin (Gradle/Maven), SourceKit-LSP (SwiftPM
+plugins), Haskell Language Server (Cabal/Stack and Template Haskell), and
+ElixirLS / Expert (`mix compile`). Lean is tracked by #4122 and will declare
+itself when that change lands. gopls is excluded: its startup/index discovery
+uses `go list`; cgo is not compiled by gopls startup.
+
 How pi-lens knows a just-edited file is **clean** (no diagnostics) vs the server
 simply **hasn't answered yet** (cold/crashed/silent). pi-lens waits *synchronously*
 for a verdict, so — unlike an editor, which renders asynchronously and never needs

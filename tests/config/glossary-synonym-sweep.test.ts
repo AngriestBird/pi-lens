@@ -447,7 +447,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/live-bus-emitter.ts": 2,
 		"clients/lsp/cascade-tier.ts": 1,
 		"clients/lsp/client.ts": 13,
-		"clients/lsp/index.ts": 24,
+		"clients/lsp/index.ts": 28,
 		"clients/lsp/jvm-runtime.ts": 1,
 		"clients/lsp/server.ts": 13,
 		"clients/mcp/ipc.ts": 8,

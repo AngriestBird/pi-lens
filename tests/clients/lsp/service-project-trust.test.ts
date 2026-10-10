@@ -42,7 +42,11 @@ describe("LSPService project-trust gate (#1334 S5)", () => {
 		vi.restoreAllMocks();
 	});
 
-	async function setup(admitted = false) {
+	async function setup(
+		admitted = false,
+		serverId = "python",
+		executesProjectCode = false,
+	) {
 		const trust = await import("../../../clients/project-trust.js");
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const spawn = vi.fn(async () => ({
@@ -59,9 +63,10 @@ describe("LSPService project-trust gate (#1334 S5)", () => {
 		}));
 		getServersForFileWithConfig.mockReturnValue([
 			{
-				id: "python",
+				id: serverId,
 				name: "Python",
 				extensions: [".py"],
+				executesProjectCode,
 				...(admitted ? { trustAllowed: true } : {}),
 				root: async () => FIXTURE_ROOT,
 				spawn,
@@ -103,6 +108,33 @@ describe("LSPService project-trust gate (#1334 S5)", () => {
 
 		expect(spawn).toHaveBeenCalledTimes(1);
 		expect(client?.client).toBeTruthy();
+	});
+
+	it("refuses an unknown-trust project-code server before spawning", async () => {
+		const { service, spawn } = await setup(false, "rust", true);
+
+		const client = await service.getClientForFile(FIXTURE_FILE);
+
+		expect(spawn).not.toHaveBeenCalled();
+		expect(createLSPClient).not.toHaveBeenCalled();
+		expect(client).toBeUndefined();
+		expect(logExtension).toHaveBeenCalledWith(
+			expect.objectContaining({
+				message:
+					"project-code LSP server refused: mark the project trusted in pi or upgrade pi",
+			}),
+		);
+	});
+
+	it("allows a trusted project-code server", async () => {
+		const { trust, service, spawn } = await setup(false, "rust", true);
+		trust.setProjectTrustState("trusted");
+
+		const client = await service.getClientForFile(FIXTURE_FILE);
+
+		expect(spawn).toHaveBeenCalledTimes(1);
+		expect(client?.client).toBeTruthy();
+		trust.resetProjectTrust();
 	});
 
 	it("refuses an unknown-trust project-local built-in binary through launchLSP", async () => {
