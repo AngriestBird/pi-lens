@@ -496,7 +496,7 @@ describe("formatFile honors SKIP_FORMATTING (#1144)", () => {
 		}
 	});
 
-	it("runs an unresolved npx fallback from the neutral pi-lens-owned cwd with npm_config_* stripped", async () => {
+	it("runs an unresolved npx fallback from the neutral pi-lens-owned cwd", async () => {
 		const env = setupTestEnvironment("pi-lens-format-npx-neutral-");
 		try {
 			writeNodeAgreementEvidence(env, "prettier");
@@ -515,17 +515,14 @@ describe("formatFile honors SKIP_FORMATTING (#1144)", () => {
 			expect(result.outcome).toBe("unchanged");
 			const npxCall = safeSpawnAsync.mock.calls.find(
 				(call: unknown[]) => call[0] === "npx",
-			) as [string, string[], { cwd?: string; env?: NodeJS.ProcessEnv }];
+			) as [string, string[], { cwd?: string }];
 			expect(npxCall).toBeDefined();
 			// The cache-only fallback never reads the project's `.npmrc`: it runs
-			// from the pi-lens-owned cwd with the ambient npm config stripped.
+			// from the pi-lens-owned cwd. The child environment's `npm_config_*`
+			// removal is witnessed at the process boundary in
+			// `npx-child-env-isolation.test.ts`; an assertion on the options object
+			// here cannot see the spawn merge (`getSpawnEnvironment`).
 			expect(npxCall[2].cwd).not.toBe(env.tmpDir);
-			expect(npxCall[2].env).toBeDefined();
-			expect(
-				Object.keys(npxCall[2].env ?? {}).some((key) =>
-					/^npm_config_/i.test(key),
-				),
-			).toBe(false);
 		} finally {
 			env.cleanup();
 		}

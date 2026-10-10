@@ -9,8 +9,12 @@
  *     `resolveToolCommand` and the real availability probe;
  *   - `resolveToolCommand`/`resolveLocalFirstAsync` for oxlint and prisma;
  *   - `prettierFormatter.resolveCommand` for the formatter family;
- *   - `detectPythonEnvironment` for the project `.venv` interpreter;
- *   - `getIsolatedNpxSpawnOptions` for the hostile-`.npmrc` vector.
+ *   - `detectPythonEnvironment` for the project `.venv` interpreter.
+ *
+ * The cache-only npx fallback's CHILD environment (the hostile-`.npmrc`
+ * vector) is witnessed at the process boundary in
+ * `npx-child-env-isolation.test.ts`; an assertion on
+ * `getIsolatedNpxSpawnOptions()`'s own return cannot see the spawn merge.
  *
  * Global and managed binaries stay eligible, so under refusal the runner falls
  * back to a global/PATH command rather than executing the project's shim.
@@ -41,7 +45,6 @@ import {
 	resetProjectTrust,
 	setProjectTrustState,
 } from "../../clients/project-trust.js";
-import { getIsolatedNpxSpawnOptions } from "../../clients/tool-probe.js";
 
 /** Plant an executable-looking shim at `<dir>/node_modules/.bin/<name>`. */
 function plantNodeBin(dir: string, name: string): string {
@@ -170,28 +173,6 @@ describe("#4268 project-local binary trust gate", () => {
 			).toBe(pythonPath);
 		} finally {
 			env.cleanup();
-		}
-	});
-
-	it("the isolated npx seam runs outside the project and strips npm_config_*", () => {
-		vi.stubEnv("npm_config_registry", "http://hostile.invalid/");
-		const options = getIsolatedNpxSpawnOptions();
-		expect(options.cwd).toBeDefined();
-		expect(fs.existsSync(options.cwd as string)).toBe(true);
-		// A cache-only fallback reads no project `.npmrc`: the cwd is not inside
-		// the project and the ambient npm config is gone from the child env.
-		const project = fs.mkdtempSync(
-			path.join(os.tmpdir(), "pi-lens-trust-npmrc-"),
-		);
-		try {
-			expect(path.relative(project, options.cwd as string)).toMatch(/^\.\./);
-			expect(
-				Object.keys(options.env ?? {}).filter((key) =>
-					/^npm_config_/i.test(key),
-				),
-			).toEqual([]);
-		} finally {
-			fs.rmSync(project, { recursive: true, force: true });
 		}
 	});
 });

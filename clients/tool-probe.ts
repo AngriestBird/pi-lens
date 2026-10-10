@@ -27,28 +27,27 @@ export type ProbeSpawnOptions = Omit<SafeSpawnOptions, "cwd">;
 
 /**
  * ONE seam for a cache-only package-runner (npx/bunx/pnpm-dlx) fallback:
- * a pi-lens-owned cwd, created before use, plus the ambient `npm_config_*`
- * keys stripped so the project's `.npmrc` and the shell's npm config are never
- * read (#4193, #4268 acceptance 3). PR #4233 introduces the same helper; this
- * is the one construction site both call. Every npx fallback in the repo
- * passes the result to its child options; config-sensitive tools that must run
- * with the project cwd (formatters reading `.prettierignore`) resolve the
- * package to a binary here first and then spawn that binary with the project
- * cwd, so the neutral cwd never costs them config discovery.
+ * a pi-lens-owned cwd, created before use, plus `stripNpmConfig` so the
+ * project's `.npmrc` and the shell's npm config are never read (#4193, #4268
+ * acceptance 3). PR #4233 introduces the same helper; this is the one
+ * construction site both call. Every npx fallback in the repo passes the
+ * result to its child options; config-sensitive tools that must run with the
+ * project cwd (formatters reading `.prettierignore`) resolve the package to a
+ * binary here first and then spawn that binary with the project cwd, so the
+ * neutral cwd never costs them config discovery.
+ *
+ * `stripNpmConfig` rather than an `env` copy is deliberate: the spawn seam
+ * merges `process.env` underneath any `env` override, so removing a key from
+ * the override cannot remove it from the child (`getSpawnEnvironment`; MED-8).
+ * The flag makes the seam delete the `npm_config_*` keys after the merge.
  */
 export function getIsolatedNpxSpawnOptions(): Pick<
 	SafeSpawnOptions,
-	"cwd" | "env"
+	"cwd" | "stripNpmConfig"
 > {
 	const cwd = join(getGlobalPiLensDir(), "tools");
 	fs.mkdirSync(cwd, { recursive: true });
-	// A plain copy loop rather than `Object.fromEntries(…filter(…))`: `filter`
-	// is a retired glossary identifier, and a new use would move the census.
-	const env: NodeJS.ProcessEnv = {};
-	for (const [key, value] of Object.entries(process.env)) {
-		if (!/^npm_config_/i.test(key)) env[key] = value;
-	}
-	return { cwd, env };
+	return { cwd, stripNpmConfig: true };
 }
 
 /**
