@@ -32,6 +32,34 @@ describe("checkProse", () => {
 		expect(checkProse(text)).toEqual({ valid: true, errors: [], warnings: [] });
 	});
 
+	it("blocks please and downgrades it in warn mode", () => {
+		const result = checkProse("Please do the requested check.");
+		expect(result.valid).toBe(false);
+		expect(result.errors.join(" ")).toContain('remove "please"');
+		const warning = checkProse("Please do the requested check.", {
+			mode: "warn",
+		});
+		expect(warning).toMatchObject({ valid: true, errors: [] });
+		expect(warning.warnings.join(" ")).toContain('remove "please"');
+	});
+
+	it("ignores comments, generated footers, and trailing metadata", () => {
+		const long =
+			"This generated metadata contains enough ordinary words to exceed the prose limit and must remain ignored when the checker reads a body supplied by a hosting service.";
+		const text = [
+			"<!--",
+			long,
+			"-->",
+			long.replace("generated metadata", "footer metadata"),
+			"🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+			"Co-Authored-By: Example <example@example.com>",
+			"Signed-off-by: Example <example@example.com>",
+			"Refs: #4280",
+			"Closes: #4280",
+		].join("\n");
+		expect(checkProse(text)).toEqual({ valid: true, errors: [], warnings: [] });
+	});
+
 	it("keeps abbreviations, paths, versions, and list items stable", () => {
 		const result = checkProse(
 			"- Handle e.g. scripts/check-prose.mjs and version 1.2.3.\n- Run the clean test.",

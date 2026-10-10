@@ -9,6 +9,7 @@ const FILLER_PATTERNS = [
 	"in order to",
 	"very",
 	"really",
+	"please",
 ];
 const PASSIVE_RE =
 	/\b(?:is|are|was|were|been|being)\s+(?:\w+ly\s+)?\w+(?:ed|en)\b/gi;
@@ -16,9 +17,26 @@ const ABBREVIATIONS = /\b(?:e\.g|i\.e|etc|vs|cf|mr|mrs|dr|no)\./i;
 
 function blankMarkdown(text) {
 	const lines = String(text ?? "").split(/\r?\n/);
+	const trailerPattern =
+		/^\s*(?:Co-Authored-By|Signed-off-by|Refs|Closes):\s+/i;
+	let lastContent = lines.length - 1;
+	while (lastContent >= 0 && !lines[lastContent].trim()) lastContent -= 1;
+	const trailerLines = new Set();
+	for (let index = lastContent; index >= 0; index -= 1) {
+		if (!lines[index].trim()) {
+			trailerLines.add(index);
+			continue;
+		}
+		if (!trailerPattern.test(lines[index])) break;
+		trailerLines.add(index);
+	}
 	let fence = null;
+	let inComment = false;
 	return lines
-		.map((line) => {
+		.map((line, lineIndex) => {
+			if (trailerLines.has(lineIndex)) return "";
+			if (/^\s*🤖 Generated with \[Claude Code\]\([^)]*\)\s*$/u.test(line))
+				return "";
 			const marker = line.match(/^\s*(`{3,}|~{3,})/)?.[1];
 			if (marker) {
 				if (!fence) fence = marker;
@@ -33,7 +51,28 @@ function blankMarkdown(text) {
 				)
 			)
 				return "";
-			return line
+			let masked = "";
+			for (let index = 0; index < line.length;) {
+				if (inComment) {
+					const end = line.indexOf("-->", index);
+					if (end === -1) {
+						inComment = true;
+						break;
+					}
+					inComment = false;
+					index = end + 3;
+					continue;
+				}
+				const start = line.indexOf("<!--", index);
+				if (start === -1) {
+					masked += line.slice(index);
+					break;
+				}
+				masked += line.slice(index, start);
+				inComment = true;
+				index = start + 4;
+			}
+			return masked
 				.replace(/https?:\/\/\S+/gi, " ")
 				.replace(/(`+)[\s\S]*?\1/g, " ")
 				.replace(/(^|\s)(?:["'])([^"']+)(?:["'])(?=\s|$)/g, "$1 ");
