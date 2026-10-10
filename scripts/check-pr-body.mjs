@@ -1669,6 +1669,103 @@ export function repairFlattenedBody(body = "") {
 		: `${REVIEW_HEADER_REPAIR_PREFIX}\n${repaired}`;
 }
 
+const CLASS_SWEEP_MESSAGE =
+	'PR body "## Class sweep" must name the defect shape (Shape: or Defect shape:), ' +
+	"quote the search command that defines its population (rg, grep, or git grep), " +
+	'and give a per-member or fold/stay verdict, or say "none: <reason>". ' +
+	`See ${TEMPLATE_PATH}.`;
+
+// #4273: the `Shape:`/`Defect shape:` label, with optional bold or code
+// emphasis. A sweep written as prose that never names its shape is refused.
+const CLASS_SWEEP_SHAPE =
+	/(?:\*\*|__|`)?\b(?:defect\s+shape|shape)\b(?:\*\*|__|`)?\s*:/i;
+
+// A search command counts when it is quoted in a code span or a fenced block,
+// or when it is written as an invocation (a flag or a path-like operand).
+// `git grep` is matched before bare `grep` so the alternation reads whole.
+function classSweepSearchCommand(text) {
+	const source = String(text ?? "");
+	const quoted = [
+		...source.matchAll(/`+[^`]*`+/g),
+		...source.matchAll(
+			/^[ \t]*(?:```|~~~)[^\n]*\n([\s\S]*?)^[ \t]*(?:```|~~~)[ \t]*$/gm,
+		),
+	].map((match) => match[1] ?? match[0]);
+	const search = /(?:^|\W)(?:git\s+grep|rg|grep)(?:\W|$)/i;
+	if (quoted.some((value) => search.test(value))) return true;
+	return source
+		.split(/\r?\n/)
+		.some((line) =>
+			/(?:git\s+grep|rg|grep)\s+(?:--?[a-z]|['"`]|\S*[./*])/i.test(line),
+		);
+}
+
+// A verdict is a fold/stay statement, or a per-member line whose outcome is
+// observable (an arrow target or a coverage note). The bare word "admitted"
+// is deliberately not one: PR #4248 used it while enumerating changed files.
+function classSweepVerdict(text) {
+	const source = String(text ?? "");
+	if (
+		/\b(?:fold|folds|folded|folding|consolidat\w*|unaffected|verdict|widen\w*)\b/i.test(
+			source,
+		) ||
+		/\b(?:stays?|stayed|staying)\b/i.test(source)
+	)
+		return true;
+	const outcome =
+		/(?:→|->|=>|\bcovered\b|\buncovered\b|\bnot a member\b|\bnot a runtime\b|\bno member\b|\bexcluded\b|\bout of scope\b|\bin scope\b|\bclean\b|\bsame target\b|\bnot found\b)/i;
+	return source
+		.split(/\r?\n/)
+		.some(
+			(line) => /^\s*(?:[-*+]|\d+\.)\s+\S/.test(line) && outcome.test(line),
+		);
+}
+
+/**
+ * #4273: a `## Class sweep` must take one of two forms. It names the defect
+ * shape, quotes the search that defines its population, and gives a verdict
+ * per member or a fold/stay verdict; or it says `none: <reason>` for a diff
+ * with no shape. A section that only enumerates the files this PR changed is
+ * a change list, not a tree-wide sweep, and is refused (PR #4248: its shape
+ * population went unfound until #4268). The missing-section and empty-section
+ * cases stay owned by `lintPrBody`, so this returns nothing for them.
+ */
+export function lintClassSweep(body = "") {
+	const rawLines = String(body ?? "").split(/\r?\n/);
+	const lines = sourceWithoutFencedBlocks(body).split(/\r?\n/);
+	const headings = [];
+	for (let index = 0; index < lines.length; index += 1) {
+		const match = HEADING.exec(lines[index]);
+		if (match)
+			headings.push({
+				index,
+				level: match[0].match(/^#+/)[0].length,
+				section: SECTION_SYNONYMS.get(match[1].trim().toLowerCase()),
+			});
+	}
+	const heading = headings.find((candidate) =>
+		hasSection(candidate, "class sweep"),
+	);
+	if (!heading) return [];
+	const nextHeading = headings.find(
+		(candidate) =>
+			candidate.index > heading.index && candidate.level <= heading.level,
+	);
+	const content = rawLines
+		.slice(heading.index + 1, nextHeading?.index ?? lines.length)
+		.join("\n")
+		.trim();
+	if (!content) return [];
+	if (/^none\s*:\s*\S/i.test(content)) return [];
+	if (
+		CLASS_SWEEP_SHAPE.test(content) &&
+		classSweepSearchCommand(content) &&
+		classSweepVerdict(content)
+	)
+		return [];
+	return [CLASS_SWEEP_MESSAGE];
+}
+
 /** Check the structural PR-body contract, including answered sections. */
 export function lintPrBody(body = "", options = {}) {
 	const rawLines = String(body ?? "").split(/\r?\n/);
@@ -1934,6 +2031,11 @@ export async function lintPullRequestEvent(
 		diff,
 		workingTree: true,
 	});
+	const classSweep = lintClassSweep(body);
+	if (classSweep.length) {
+		result.valid = false;
+		result.errors.push(...classSweep);
+	}
 	const coverage = lintTlaCoverage(body, { diff });
 	result.errors.push(...coverage.errors);
 	if (coverage.errors.length) result.valid = false;
@@ -2136,6 +2238,11 @@ export function lintLocalPrBody(
 		ref: options.ref,
 		headFiles: options.headFiles,
 	});
+	const classSweep = lintClassSweep(body);
+	if (classSweep.length) {
+		result.valid = false;
+		result.errors.push(...classSweep);
+	}
 	const coverage = lintTlaCoverage(body, {
 		diff,
 		sourceCwd: cwd,

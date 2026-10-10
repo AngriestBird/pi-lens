@@ -33,7 +33,7 @@ import {
 } from "../../scripts/check-pr-body.mjs";
 import { blankCommentsAndStrings } from "../../scripts/check-pr-body.mjs";
 
-const body = `## Why\nThe body gate makes review intent explicit.\n\n## Notes for the reviewer\nNone.\n\n## Change outline\n- caller\n  + changed symbol\n    + callee\n\n## Summary\nOpening context.\n\n## Tests\nTargeted tests pass.\n\n## Blast radius\nNo runtime module touched.\n\n## Class sweep\nWhole-tree grep completed.\n\n## Observability\nThe advisory check run is the record.`;
+const body = `## Why\nThe body gate makes review intent explicit.\n\n## Notes for the reviewer\nNone.\n\n## Change outline\n- caller\n  + changed symbol\n    + callee\n\n## Summary\nOpening context.\n\n## Tests\nTargeted tests pass.\n\n## Blast radius\nNo runtime module touched.\n\n## Class sweep\nDefect shape: a body section answered with generic text. Search: \`rg -n "whole-tree grep" scripts\`. Verdict: none outside this fixture.\n\n## Observability\nThe advisory check run is the record.`;
 // A synthetic runtime file: `rows` is the whole post-image and `added` lists
 // the 1-based post-image lines the diff adds. The harvest reads `rows`, so a
 // test that needs the block-comment opener passes real rows — a bare hunk
@@ -184,7 +184,7 @@ function fetchForEvent(bodyText: string, files: unknown) {
 	});
 }
 const flattenedBody =
-	"## Summary Await the first lifecycle run's asynchronous word-index snapshot promotion before reseeding the current-format snapshot for the fallback run. ## Tests - Native master flake justification for the count barrier: 2/10 forced runs reproduced the promotion race. - Fixed lifecycle test: 5/5 tests passed. ### Test assessment - tests/clients/word-index-lifecycle.test.ts uniquely pins the ordering guard. ## Blast radius This change is test-only. ## Class sweep The async-persist lifecycle race is fully covered. ## Observability The test observes existing project snapshot records.";
+	"## Summary Await the first lifecycle run's asynchronous word-index snapshot promotion before reseeding the current-format snapshot for the fallback run. ## Tests - Native master flake justification for the count barrier: 2/10 forced runs reproduced the promotion race. - Fixed lifecycle test: 5/5 tests passed. ### Test assessment - tests/clients/word-index-lifecycle.test.ts uniquely pins the ordering guard. ## Blast radius This change is test-only. ## Class sweep Defect shape: async-persist lifecycle race. Search `rg -n async-persist clients`. Verdict: none outside this fixture. ## Observability The test observes existing project snapshot records.";
 const multiRoundFlattenedBody =
 	"## Summary Preserve the repair context across multiple review rounds. ## Tests - The repair fixture exercises distinct numbered fix rounds. ### Test assessment - tests/scripts/check-pr-body.test.ts uniquely pins numbered fix-round repair. ## Fix round 1 The first review round records the initial correction. ## Fix round 2 The second review round records the follow-up correction. ## Blast radius This change is test-only. ## Class sweep Numbered fix rounds remain distinct during repair. ## Observability The repaired body is validated by the existing body lint.";
 const motivatingFlattenedBodies = [
@@ -969,7 +969,7 @@ describe("test-reference positive recognition (#3013)", () => {
 });
 
 const escapedNewlineFlattenedBody =
-	"## Summary\\nRestore real newlines for the escaped-newline flattening class (#2145).\\n\\n## Tests\\nAdds fixtures pinning literal backslash-n repair outside fences.\\n\\n## Blast radius\\nLimited to the body-lint script.\\n\\n## Class sweep\\nEscaped-newline flattening is the sibling of the space-flattening class already handled.\\n\\n## Observability\\nA notice logs the repaired PR number.";
+	"## Summary\\nRestore real newlines for the escaped-newline flattening class (#2145).\\n\\n## Tests\\nAdds fixtures pinning literal backslash-n repair outside fences.\\n\\n## Blast radius\\nLimited to the body-lint script.\\n\\n## Class sweep\\nDefect shape: escaped-newline flattening. Search `rg -n backslash-n scripts`. Verdict: sibling of the space-flattening class.\\n\\n## Observability\\nA notice logs the repaired PR number.";
 
 const escapedNewlineWithFence =
 	'## Summary\\nRestore real newlines outside fences only (#2145).\\n\\n## Tests\\n```json\\n{"note": "line1\\nline2"}\\n```\\nThe JSON example above documents a genuine escaped newline.\\n\\n## Blast radius\\nLimited to the body-lint script.\\n\\n## Class sweep\\nFence content must never be rewritten during escaped-newline repair.\\n\\n## Observability\\nA notice logs the repaired PR number.';
