@@ -129,18 +129,24 @@ describe("analysis-root seam", () => {
 		);
 
 		try {
-			expect(
-				resolveAnalysisRoot(
-					path.join(worktree, "node_modules", "x", "a.ts"),
-					repo,
-				),
-			).toBe("none");
-			expect(
-				resolveAnalysisRoot(path.join(worktree, "vendor", "x", "a.ts"), repo),
-			).toBe("none");
-			expect(
-				resolveAnalysisRoot(path.join(worktree, "src", "a.ts"), repo),
-			).toBe("linked-worktree");
+			const nodeModulesMode = resolveAnalysisRoot(
+				path.join(worktree, "node_modules", "x", "a.ts"),
+				repo,
+			);
+			const vendorMode = resolveAnalysisRoot(
+				path.join(worktree, "vendor", "x", "a.ts"),
+				repo,
+			);
+			const sourceMode = resolveAnalysisRoot(
+				path.join(worktree, "src", "a.ts"),
+				repo,
+			);
+			expect(nodeModulesMode).toBe("none");
+			expect(canWriteAnalysisRoot(nodeModulesMode)).toBe(false);
+			expect(vendorMode).toBe("none");
+			expect(canWriteAnalysisRoot(vendorMode)).toBe(false);
+			expect(sourceMode).toBe("linked-worktree");
+			expect(canWriteAnalysisRoot(sourceMode)).toBe(true);
 		} finally {
 			gitExecFileSync("git", ["worktree", "remove", "--force", worktree], {
 				cwd: repo,
