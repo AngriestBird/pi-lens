@@ -3141,6 +3141,7 @@ export const RubyServer: LSPServerInfo = {
 	idleEviction: "unmeasured",
 	role: "language",
 	name: "Ruby LSP",
+	executesProjectCode: true,
 	extensions: KIND_EXTENSIONS["ruby"],
 	root: RootWithFallback(
 		PriorityRoot([["Gemfile", ".ruby-version"], [".git"]]),
@@ -3287,6 +3288,7 @@ export const PowerShellServer: LSPServerInfo = {
 	idleEviction: "unmeasured",
 	role: "language",
 	name: "PowerShell Editor Services",
+	executesProjectCode: true,
 	extensions: KIND_EXTENSIONS["powershell"],
 	// Index at the workspace (script modules reference siblings); fall back to the
 	// file dir.
@@ -3440,6 +3442,7 @@ export const SwiftServer = createInteractiveServer({
 
 export const DartServer = createInteractiveServer({
 	id: "dart",
+	executesProjectCode: true,
 	name: "Dart Analysis Server",
 	extensions: KIND_EXTENSIONS["dart"],
 	root: RootWithFallback(createRootDetector(["pubspec.yaml"])),
@@ -3536,6 +3539,7 @@ export const CppServer: LSPServerInfo = createTreeBinaryServer({
 
 export const ZigServer: LSPServerInfo = {
 	id: "zig",
+	executesProjectCode: true,
 	idleEviction: "unmeasured",
 	role: "language",
 	name: "ZLS",
@@ -3669,6 +3673,7 @@ export const MarksmanServer: LSPServerInfo = {
 
 export const OCamlServer = createInteractiveServer({
 	id: "ocaml",
+	executesProjectCode: true,
 	name: "ocamllsp",
 	extensions: KIND_EXTENSIONS["ocaml"],
 	root: createRootDetector(["dune-project", "opam"]),
@@ -3678,6 +3683,7 @@ export const OCamlServer = createInteractiveServer({
 
 export const ClojureServer: LSPServerInfo = {
 	id: "clojure",
+	executesProjectCode: true,
 	idleEviction: "transparent",
 	role: "language",
 	name: "Clojure LSP",
@@ -3720,6 +3726,7 @@ export const CueServer: LSPServerInfo = {
 
 export const TerraformServer: LSPServerInfo = {
 	id: "terraform",
+	executesProjectCode: true,
 	idleEviction: "unmeasured",
 	role: "language",
 	name: "Terraform LSP",
@@ -3742,6 +3749,7 @@ export const TerraformServer: LSPServerInfo = {
 
 export const NixServer = createInteractiveServer({
 	id: "nix",
+	executesProjectCode: true,
 	name: "nixd",
 	extensions: KIND_EXTENSIONS["nix"],
 	root: createRootDetector(["flake.nix"]),
@@ -3855,6 +3863,7 @@ export const FishServer: LSPServerInfo = {
 
 export const CMakeServer: LSPServerInfo = {
 	id: "cmake",
+	executesProjectCode: true,
 	idleEviction: "unmeasured",
 	role: "language",
 	name: "CMake Language Server",
@@ -4093,6 +4102,7 @@ export const PrismaServer: LSPServerInfo = {
 
 export const VueServer: LSPServerInfo = {
 	id: "vue",
+	executesProjectCode: true,
 	idleEviction: "unmeasured",
 	role: "language",
 	name: "Vue Language Server",
@@ -4154,6 +4164,7 @@ export const VueServer: LSPServerInfo = {
 
 export const SvelteServer: LSPServerInfo = {
 	id: "svelte",
+	executesProjectCode: true,
 	idleEviction: "unmeasured",
 	role: "language",
 	name: "Svelte Language Server",

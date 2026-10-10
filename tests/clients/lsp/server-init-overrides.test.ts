@@ -16,7 +16,7 @@ process.env.PI_LENS_TEST_MODE = "1";
 
 vi.mock("../../../clients/lsp/launch.js", () => ({
 	launchLSP: vi.fn(),
-	refuseProjectCodeServerUnlessTrusted: vi.fn(),
+	refuseUntrustedLspExecution: vi.fn(),
 }));
 
 vi.mock("../../../clients/latency-logger.js", async (importActual) => ({

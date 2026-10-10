@@ -9,6 +9,8 @@ describe("LSP project-code trust census", () => {
 	it("declares every known project-code server and no others", () => {
 		const expected = new Set([
 			"rust",
+			"ruby",
+			"powershell",
 			"csharp",
 			"omnisharp",
 			"fsharp",
@@ -18,6 +20,15 @@ describe("LSP project-code trust census", () => {
 			"haskell",
 			"elixir",
 			"expert",
+			"dart",
+			"zig",
+			"ocaml",
+			"clojure",
+			"terraform",
+			"nix",
+			"cmake",
+			"vue",
+			"svelte",
 		]);
 		const actual = new Set(
 			LSP_SERVERS.filter((server) => server.executesProjectCode).map(

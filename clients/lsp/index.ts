@@ -117,7 +117,7 @@ import {
 	loadReverseDependencyIndexFromSnapshot,
 } from "../reverse-deps.js";
 import { isSameOrWithin, type LSPServerInfo } from "./server.js";
-import { refuseProjectCodeServerUnlessTrusted } from "./launch.js";
+import { refuseUntrustedLspExecution } from "./launch.js";
 import {
 	enforceLspRootCeiling,
 	getServerById,
@@ -4616,11 +4616,13 @@ export class LSPService {
 		allowInstall: boolean,
 	): Promise<SpawnedServer | undefined> {
 		try {
-			refuseProjectCodeServerUnlessTrusted(
-				server.id,
-				root,
-				server.executesProjectCode === true,
-			);
+			if (server.executesProjectCode === true) {
+				refuseUntrustedLspExecution({
+					kind: "project-code-server",
+					serverId: server.id,
+					root,
+				});
+			}
 		} catch (error) {
 			logSessionStart(
 				`lsp spawn ${server.id}: refused — ${error instanceof Error ? error.message : String(error)}`,
