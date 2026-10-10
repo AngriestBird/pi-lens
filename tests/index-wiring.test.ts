@@ -723,6 +723,63 @@ describe("index.ts extension wiring", () => {
 			}
 		});
 
+		it("reports the effective tool surface and rejects disabled activation", async () => {
+			const tempDir = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-health-tool-config-"),
+			);
+			const configPath = path.join(tempDir, "config.json");
+			fs.writeFileSync(
+				configPath,
+				JSON.stringify({
+					tools: {
+						ast_grep_replace: { enabled: false },
+						health: { enabled: false },
+					},
+				}),
+			);
+			const prior = process.env.PI_LENS_CONFIG_PATH;
+			process.env.PI_LENS_CONFIG_PATH = configPath;
+			try {
+				const pi = createPiMock();
+				extension(pi.asExtensionAPI());
+				const ctx = makeCtx();
+				await pi.runCommand("lens-health", "", ctx);
+				const health = ctx.notifications.map((n) => n.message).join("\n");
+				expect(health).toContain("Tools enabled:");
+				expect(health).toContain("Tools disabled: ast_grep_replace, health");
+				expect(health).toContain("Skills: managed by pi package filters");
+
+				const activation = pi.getTool("pi_lens_activate_tools") as
+					| {
+							execute: (
+								toolCallId: string,
+								params: Record<string, unknown>,
+								signal: AbortSignal | undefined,
+								onUpdate: unknown,
+								ctx: unknown,
+							) => Promise<{
+								isError?: boolean;
+								content?: Array<{ text?: string }>;
+							}>;
+					  }
+					| undefined;
+				expect(activation).toBeDefined();
+				const result = await activation?.execute(
+					"disabled-tool",
+					{ tools: ["ast_grep_replace"] },
+					undefined,
+					undefined,
+					ctx,
+				);
+				expect(result?.isError).toBe(true);
+				expect(result?.content?.[0]?.text).toContain("No valid tool names");
+			} finally {
+				if (prior === undefined) delete process.env.PI_LENS_CONFIG_PATH;
+				else process.env.PI_LENS_CONFIG_PATH = prior;
+				removeTempDirSync(tempDir);
+			}
+		});
+
 		it("does not register a tool disabled by --no-tool through the real path", () => {
 			const pi = createPiMock({ "no-tool": "ast_grep_replace" });
 			extension(pi.asExtensionAPI());

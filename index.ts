@@ -129,6 +129,7 @@ import {
 	warmDispatchIntegration,
 	loadDispatchIntegration,
 } from "./clients/dispatch/lazy.js";
+import { effectiveConfig } from "./clients/lens-engine.js";
 import {
 	getFormatService,
 	resetFormatService,
@@ -1499,6 +1500,29 @@ function activateExtension(hostPi: ExtensionAPI) {
 					count: crashEntries.length,
 				}),
 			];
+
+			try {
+				const effectiveTools = (
+					await effectiveConfig({
+						cwd: runtime.projectRoot,
+						noTools: noToolFlag(),
+					})
+				).tools;
+				const enabledTools = effectiveTools
+					.filter((tool) => tool.enabled)
+					.map((tool) => tool.name);
+				const disabledTools = effectiveTools
+					.filter((tool) => !tool.enabled)
+					.map((tool) => tool.name);
+				lines.push("", `Tools enabled: ${enabledTools.join(", ") || "none"}`);
+				if (disabledTools.length > 0) {
+					lines.push(`Tools disabled: ${disabledTools.join(", ")}`);
+				}
+			} catch {
+				// Health is best-effort; an unreadable config must not hide the
+				// rest of the operator report.
+			}
+			lines.push("Skills: managed by pi package filters");
 			const slopScoreLine = dispatchIntegration.getDispatchSlopScoreLine();
 
 			if (crashEntries.length > 0) {
@@ -2162,7 +2186,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 				typeof piWithActiveTools.setActiveTools !== "function"
 			)
 				return;
-			const lazyNames = new Set(LAZY_TOOL_CATALOG.map((t) => t.name));
+			const lazyNames = new Set(enabledLazyTools);
 			const plan = planToolSet(
 				piWithActiveTools.getActiveTools(),
 				lazyNames,
@@ -2291,9 +2315,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 					const buildIdentity = getBuildIdentity(import.meta.url);
 					if (buildIdentity) dbg(formatBuildIdentity(buildIdentity));
 					const sessionReason = sessionStartReason;
-					dbg(
-						`session_start: disabled tools = ${disabledToolNames.join(",") || "none"}`,
-					);
+					if (disabledToolNames.length > 0) {
+						dbg(
+							`session_start: disabled tools = ${disabledToolNames.join(",")}`,
+						);
+					}
 
 					// #1334 S5: adopt the HOST's project-trust decision before anything
 					// below can auto-install a tool or spawn an LSP server. pi-lens is a
