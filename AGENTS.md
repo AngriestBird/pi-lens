@@ -105,6 +105,12 @@ The principles' delegation contract applies. pi-lens adds:
 - After every completion, push, verdict, merge, or status request, trigger the
   next named owner in the same pass, and keep the handoff (exact head, verdict,
   dispositions, next owner) on the PR or the ledger.
+- Review intake generalizes before it routes. For every HIGH, MEDIUM or
+  CRITICAL finding, name the defect shape, grep the tree for other members, and
+  record a verdict before the fix round dispatches: contained in this PR (with
+  the sweep), sibling issue filed with the member list, or none (with the
+  grep). The fix brief carries it as a `Shape:` line. History: `HISTORY.md`,
+  2026-10-10.
 - Plegma reads are token-budgeted (#417): settlements via `watch --next --mine`,
   `result` only when the transcript or handoff artifact is needed.
 - Human decision, never an agent verdict alone: workflow permission grants,
