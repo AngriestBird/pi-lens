@@ -144,7 +144,7 @@ const POPULATION_FILES = [
  * `probeToolAsync`, where this file admits it by name.
  */
 const EXPECTED_FILES = 79;
-const EXPECTED_DIRECT_SITES = 130;
+const EXPECTED_DIRECT_SITES = 132;
 /**
  * Every same-file spawn-routing wrapper call site the scan discovers. Pinned
  * as a LIST, not a count, because the list is the part round 2 got wrong: it
@@ -376,12 +376,20 @@ const NO_CWD_EXEMPTION_ROWS: ReadonlyArray<readonly [string, string]> = [
 		"`brew --prefix ast-grep` — asks Homebrew where it installed the binary",
 	],
 	[
-		"clients/sg-runner.ts#SgRunner.execRaw:05d2e3a2",
-		"execRaw is the shared raw ast-grep invocation: the rule comes from the caller's `-p`/`--config` argument and every target is an explicit path in `args`, so nothing is discovered from the child's directory",
+		"clients/sg-runner.ts#SgRunner.execRaw:bf0b9885",
+		"execRaw is the shared raw ast-grep invocation: the rule comes from the caller's `-p`/`--config` argument and every target is an explicit path in `args`, so nothing is discovered from the child's directory. When the npx fallback won, `...this.sgSpawnOptions` adds the pi-lens-owned neutral cwd (#4193) the scan cannot follow through a class-field spread; without it the spread is empty and the child inherits the host cwd",
 	],
 	[
-		"clients/sg-runner.ts#SgRunner.exec:84a4a8a1",
-		"exec is the shared ast-grep invocation (optionally through bash on Windows): same explicit-argument contract as execRaw",
+		"clients/sg-runner.ts#SgRunner.exec:577cdec8",
+		"exec is the shared ast-grep invocation (optionally through bash on Windows): same explicit-argument contract as execRaw, and the same conditional pi-lens-owned neutral cwd when the npx fallback won",
+	],
+	[
+		"clients/dispatch/runners/utils/runner-helpers.ts#probeAstGrepCommandAsync:5eda2591",
+		"the scoped cache-only `npx --package @ast-grep/cli` availability probe: `...getIsolatedNpxSpawnOptions()` runs it in the pi-lens-owned neutral tools dir so a hostile project `.npmrc` is never read, and the scan cannot follow a call spread",
+	],
+	[
+		"clients/sg-runner.ts#SgRunner.probeCommand:4b5ea917",
+		"the scoped cache-only `npx --package @ast-grep/cli -- ast-grep --version` candidate probe: same pi-lens-owned neutral cwd supplied by `...getIsolatedNpxSpawnOptions()`, which the scan cannot follow through a call spread",
 	],
 	[
 		"clients/sg-runner.ts#SgRunner.tempScanDetailedAsync:ee763d40",

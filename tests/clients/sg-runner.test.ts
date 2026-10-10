@@ -174,13 +174,13 @@ describe("SgRunner", () => {
 					async (
 						cmd: string,
 						args: string[],
-						options?: { cwd?: string; env?: NodeJS.ProcessEnv },
+						options?: { cwd?: string; stripNpmConfig?: boolean },
 					) => {
 						if (cmd !== "npx")
 							return { status: 1, stdout: "", stderr: "missing" };
-						for (const [key] of Object.entries(options?.env ?? {})) {
-							expect(key).not.toMatch(/^npm_config_/i);
-						}
+						// The shared seam strips npm_config_* at the child boundary inside
+						// `getSpawnEnvironment`; the caller's half is the flag.
+						expect(options?.stripNpmConfig).toBe(true);
 						expect(options?.cwd).toBe(path.join(piLensHome, "tools"));
 						expect(options?.cwd).not.toBe(project);
 						expect(
