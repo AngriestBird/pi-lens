@@ -1670,19 +1670,29 @@ export function repairFlattenedBody(body = "") {
 }
 
 const CLASS_SWEEP_MESSAGE =
-	'PR body "## Class sweep" must name the defect shape (Shape: or Defect shape:), ' +
-	"quote the search command that defines its population (rg, grep, or git grep), " +
-	'and give a per-member or fold/stay verdict, or say "none: <reason>". ' +
+	'PR body "## Class sweep" must name the defect shape (Shape:, Defect shape:, ' +
+	"Defect class:, or Class:), quote the search command that defines its " +
+	"population (rg, grep, git grep, ugrep, ast-grep run, or sg run), and give " +
+	'a per-member or fold/stay verdict, or say "none: <reason>" (three words ' +
+	"minimum; refused when the diff changes runtime code). " +
 	`See ${TEMPLATE_PATH}.`;
 
-// #4273: the `Shape:`/`Defect shape:` label, with optional bold or code
-// emphasis. A sweep written as prose that never names its shape is refused.
-const CLASS_SWEEP_SHAPE =
-	/(?:\*\*|__|`)?\b(?:defect\s+shape|shape)\b(?:\*\*|__|`)?\s*:/i;
+// #4273: the shape label, with optional bold or code emphasis. AGENTS.md
+// numbers its defect shapes and PR prose cites them as `Defect shape 25` (no
+// colon); the repository also writes `Defect class:` and `Class:` for the same
+// concept, so the label is a synonym set rather than one literal (#4273 F2).
+const CLASS_SWEEP_SHAPE_LABEL =
+	/(?:\*\*|__|`)?\b(?:defect\s+shape|defect\s+class|shape|class)\b(?:\s*\d+)?(?:\*\*|__|`)*\s*:/i;
+const CLASS_SWEEP_SHAPE_CITATION =
+	/(?:\*\*|__|`)?\b(?:defect\s+shape|defect\s+class)\b\s*\d+\b/i;
+
+// The accepted search commands, longest first so `ugrep` beats `grep` and
+// `git grep` beats a bare `grep` (#4273 F2/D).
+const CLASS_SWEEP_SEARCH_TOOL =
+	"git\\s+grep|ast-grep\\s+run|sg\\s+run|ugrep|grep|rg";
 
 // A search command counts when it is quoted in a code span or a fenced block,
 // or when it is written as an invocation (a flag or a path-like operand).
-// `git grep` is matched before bare `grep` so the alternation reads whole.
 function classSweepSearchCommand(text) {
 	const source = String(text ?? "");
 	const quoted = [
@@ -1691,22 +1701,32 @@ function classSweepSearchCommand(text) {
 			/^[ \t]*(?:```|~~~)[^\n]*\n([\s\S]*?)^[ \t]*(?:```|~~~)[ \t]*$/gm,
 		),
 	].map((match) => match[1] ?? match[0]);
-	const search = /(?:^|\W)(?:git\s+grep|rg|grep)(?:\W|$)/i;
+	const search = new RegExp(
+		`(?:^|\\W)(?:${CLASS_SWEEP_SEARCH_TOOL})(?:\\W|$)`,
+		"i",
+	);
 	if (quoted.some((value) => search.test(value))) return true;
-	return source
-		.split(/\r?\n/)
-		.some((line) =>
-			/(?:git\s+grep|rg|grep)\s+(?:--?[a-z]|['"`]|\S*[./*])/i.test(line),
-		);
+	const invocation = new RegExp(
+		`(?:${CLASS_SWEEP_SEARCH_TOOL})\\s+(?:--?[a-z]|['"\`]|\\S*[./*])`,
+		"i",
+	);
+	return source.split(/\r?\n/).some((line) => invocation.test(line));
 }
+
+// The per-member line prefixes the template sanctions: a bullet, a numbered
+// item, or a markdown table row (#4273 F1).
+const CLASS_SWEEP_MEMBER_LINE = /^\s*(?:[-*+]|\d+\.)\s+\S/;
+const CLASS_SWEEP_TABLE_ROW = /^\s*\|.*\|\s*$/;
 
 // A verdict is a fold/stay statement, or a per-member line whose outcome is
 // observable (an arrow target or a coverage note). The bare word "admitted"
-// is deliberately not one: PR #4248 used it while enumerating changed files.
+// is deliberately not a verdict: PR #4248 used it while enumerating changed
+// files. `unaffected` is excluded because `TLA+ unaffected: <family>` is a
+// different governance statement (#4273 F3).
 function classSweepVerdict(text) {
 	const source = String(text ?? "");
 	if (
-		/\b(?:fold|folds|folded|folding|consolidat\w*|unaffected|verdict|widen\w*)\b/i.test(
+		/\b(?:fold|folds|folded|folding|consolidat\w*|verdict|widen\w*)\b/i.test(
 			source,
 		) ||
 		/\b(?:stays?|stayed|staying)\b/i.test(source)
@@ -1714,11 +1734,59 @@ function classSweepVerdict(text) {
 		return true;
 	const outcome =
 		/(?:→|->|=>|\bcovered\b|\buncovered\b|\bnot a member\b|\bnot a runtime\b|\bno member\b|\bexcluded\b|\bout of scope\b|\bin scope\b|\bclean\b|\bsame target\b|\bnot found\b)/i;
-	return source
-		.split(/\r?\n/)
-		.some(
-			(line) => /^\s*(?:[-*+]|\d+\.)\s+\S/.test(line) && outcome.test(line),
+	return source.split(/\r?\n/).some((line) => {
+		const perMember =
+			CLASS_SWEEP_MEMBER_LINE.test(line) || CLASS_SWEEP_TABLE_ROW.test(line);
+		return perMember && outcome.test(line);
+	});
+}
+
+function classSweepShape(text) {
+	const source = String(text ?? "");
+	return (
+		CLASS_SWEEP_SHAPE_LABEL.test(source) ||
+		CLASS_SWEEP_SHAPE_CITATION.test(source)
+	);
+}
+
+// package.json's `files` is the shipped surface (AGENTS.md, "Build, packaging,
+// and release"); only its `scripts/**/*.mjs` entries are runtime for the
+// `none:` escape. Governance scripts such as this one are not shipped, so a
+// diff that edits only them may still say `none:` (#4273 F3). Derived from
+// package.json so the list cannot drift, cached because it is per-process
+// constant.
+let shippedRuntimeScriptsCache;
+function shippedRuntimeScripts() {
+	if (shippedRuntimeScriptsCache) return shippedRuntimeScriptsCache;
+	const paths = new Set();
+	try {
+		const pkg = JSON.parse(
+			readFileSync(resolve(REPO_ROOT, "package.json"), "utf8"),
 		);
+		for (const entry of pkg.files ?? [])
+			if (/^scripts\/.*\.mjs$/.test(entry)) paths.add(entry);
+	} catch {
+		// An unreadable package.json cannot widen the runtime scope; the
+		// `none:` reason check still applies.
+	}
+	shippedRuntimeScriptsCache = paths;
+	return paths;
+}
+
+// #4273 F3: a `none:` escape is refused when the diff changes runtime code,
+// because a runtime diff with no named shape is almost always an unfound
+// population. Runtime scope is `clients/**`, `index.ts`, and the `scripts/`
+// modules package.json ships.
+function classSweepRuntimeTouched(diff) {
+	const shipped = shippedRuntimeScripts();
+	return parseChangedFiles(diff).some(
+		(file) =>
+			file === "index.ts" || file.startsWith("clients/") || shipped.has(file),
+	);
+}
+
+function wordCount(text) {
+	return text.trim().split(/\s+/).filter(Boolean).length;
 }
 
 /**
@@ -1729,8 +1797,12 @@ function classSweepVerdict(text) {
  * a change list, not a tree-wide sweep, and is refused (PR #4248: its shape
  * population went unfound until #4268). The missing-section and empty-section
  * cases stay owned by `lintPrBody`, so this returns nothing for them.
+ *
+ * `none:` is bounded (#4273 F3): it needs a reason of at least three words,
+ * and it is refused when the diff changes runtime code. Without a diff (a
+ * local caller with no upstream ref) only the reason check applies.
  */
-export function lintClassSweep(body = "") {
+export function lintClassSweep(body = "", { diff } = {}) {
 	const rawLines = String(body ?? "").split(/\r?\n/);
 	const lines = sourceWithoutFencedBlocks(body).split(/\r?\n/);
 	const headings = [];
@@ -1756,9 +1828,14 @@ export function lintClassSweep(body = "") {
 		.join("\n")
 		.trim();
 	if (!content) return [];
-	if (/^none\s*:\s*\S/i.test(content)) return [];
+	const none = /^\s*none\s*:\s*(.+?)\s*$/im.exec(content);
+	if (none) {
+		if (wordCount(none[1]) < 3) return [CLASS_SWEEP_MESSAGE];
+		if (diff && classSweepRuntimeTouched(diff)) return [CLASS_SWEEP_MESSAGE];
+		return [];
+	}
 	if (
-		CLASS_SWEEP_SHAPE.test(content) &&
+		classSweepShape(content) &&
 		classSweepSearchCommand(content) &&
 		classSweepVerdict(content)
 	)
@@ -2031,7 +2108,7 @@ export async function lintPullRequestEvent(
 		diff,
 		workingTree: true,
 	});
-	const classSweep = lintClassSweep(body);
+	const classSweep = lintClassSweep(body, { diff });
 	if (classSweep.length) {
 		result.valid = false;
 		result.errors.push(...classSweep);
@@ -2238,7 +2315,7 @@ export function lintLocalPrBody(
 		ref: options.ref,
 		headFiles: options.headFiles,
 	});
-	const classSweep = lintClassSweep(body);
+	const classSweep = lintClassSweep(body, { diff });
 	if (classSweep.length) {
 		result.valid = false;
 		result.errors.push(...classSweep);

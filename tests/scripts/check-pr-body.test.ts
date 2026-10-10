@@ -5094,3 +5094,57 @@ describe("Workflow run unaffected declaration is verified (#3085 round 2)", () =
 		expect(errorsFor(declared)).not.toContain("Changed workflow");
 	});
 });
+
+// #4273 F6: the class-sweep rule is composed into `lintPullRequestEvent`, the
+// CI entry point, not only `lintLocalPrBody`/`lintClassSweep`. Without a case
+// through the event seam, deleting that wire leaves the suite green.
+describe("class sweep reaches the CI event entry (#4273 F6)", () => {
+	let previousCwd: string;
+	let fixtureCwd: string;
+	const classSweepBody = (name: string) =>
+		readFileSync(
+			join(repositoryRoot, "tests", "fixtures", "ci-pr-bodies", name),
+			"utf8",
+		);
+	beforeEach(() => {
+		previousCwd = process.cwd();
+		fixtureCwd = createOriginMasterFixture();
+		process.chdir(fixtureCwd);
+		vi.stubEnv("GITHUB_TOKEN", "t");
+		vi.stubEnv("GITHUB_API_URL", "https://api.example");
+		vi.stubEnv("GITHUB_REPOSITORY", "o/r");
+	});
+	afterEach(() => {
+		vi.unstubAllEnvs();
+		process.chdir(previousCwd);
+		rmSync(fixtureCwd, { recursive: true, force: true });
+	});
+
+	it("refuses the #4248 changed-file sweep on the live body", async () => {
+		const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			const live = classSweepBody("pr-4248-body.md");
+			await lintPullRequestEvent(fetchForEvent(live, []), {
+				pull_request: { number: 4248, body: live },
+			});
+			expect(errors.mock.calls.flat().join("\n")).toContain('"## Class sweep"');
+		} finally {
+			errors.mockRestore();
+		}
+	});
+
+	it("does not class-sweep-refuse the #4245 named shape, search, and verdict", async () => {
+		const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			const live = classSweepBody("pr-4245-body.md");
+			await lintPullRequestEvent(fetchForEvent(live, []), {
+				pull_request: { number: 4245, body: live },
+			});
+			expect(errors.mock.calls.flat().join("\n")).not.toContain(
+				'"## Class sweep"',
+			);
+		} finally {
+			errors.mockRestore();
+		}
+	});
+});
