@@ -15,6 +15,7 @@ import type {
 } from "./index.js";
 import {
 	getOwnedLspService,
+	peekOwnedLspService,
 	resetOwnedLspService,
 } from "./service-singleton.js";
 import { groupFilesByPrimaryServer, runPerServerGroups } from "./grouping.js";
@@ -160,6 +161,12 @@ export function adaptLspService(service: LSPService): LspCapabilities {
 /** The grouped facade over the process singleton. */
 export function getLSPService(): LspCapabilities {
 	return adaptLspService(getOwnedLspService<LSPService>());
+}
+
+/** @public — reached by clients/pipeline.ts through the clients/lsp-lazy.ts dynamic import, which knip cannot see. Read-only lifecycle access; this never creates a service. */
+export function peekLSPService(): LspCapabilities | undefined {
+	const service = peekOwnedLspService<LSPService>();
+	return service ? adaptLspService(service) : undefined;
 }
 
 /** Compatibility lifecycle exports remain named so host hooks keep their ABI. */
