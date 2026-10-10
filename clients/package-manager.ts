@@ -17,6 +17,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { resolve as resolvePath } from "node:path";
 import {
 	type AvailabilityLatch,
 	classifyProbeFailure,
@@ -588,7 +589,8 @@ export function localBinPath(
 
 function refuseLocalBin(tool: string, root: string): LocalBinTrustRefusal {
 	const trust = getProjectTrustState() as "untrusted" | "unknown";
-	const subject = `project-local-binary:${path.resolve(root)}:${tool}`;
+	const resolvedRoot = resolvePath(root);
+	const subject = `project-local-binary:${resolvedRoot}:${tool}`;
 	if (
 		recordDegradationOnce({
 			kind: "trust-refusal",
@@ -601,10 +603,10 @@ function refuseLocalBin(tool: string, root: string): LocalBinTrustRefusal {
 			level: "warn",
 			message:
 				"project-local binary refused: mark the project trusted in pi or upgrade pi",
-			metadata: { tool, root: path.resolve(root), trust },
+			metadata: { tool, root: resolvedRoot, trust },
 		});
 	}
-	return { kind: "refused-by-trust", tool, root: path.resolve(root), trust };
+	return { kind: "refused-by-trust", tool, root: resolvedRoot, trust };
 }
 
 /** Keep trust classification beside the resolver's canonical directory set. */

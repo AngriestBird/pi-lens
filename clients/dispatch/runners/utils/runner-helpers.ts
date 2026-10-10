@@ -1996,12 +1996,24 @@ function buildSgLocalBins(): SgLocalBinCandidate[] {
 	const projectWalkOptions = { windowsExt: "" } as const;
 	const ownInstallWalkOptions = { windowsExt: "", ceiling: false } as const;
 	const bins: SgLocalBinCandidate[] = [
-		...findLocalBinsUpwards(binaryCandidates, _thisDir, ownInstallWalkOptions)
-			.filter((binPath): binPath is string => typeof binPath === "string")
-			.map((binPath) => ({ path: binPath, source: "own-install" as const })),
-		...findLocalBinsUpwards(binaryCandidates, process.cwd(), projectWalkOptions)
-			.filter((binPath): binPath is string => typeof binPath === "string")
-			.map((binPath) => ({ path: binPath, source: "project" as const })),
+		...findLocalBinsUpwards(
+			binaryCandidates,
+			_thisDir,
+			ownInstallWalkOptions,
+		).flatMap((binPath): SgLocalBinCandidate[] =>
+			typeof binPath === "string"
+				? [{ path: binPath, source: "own-install" as const }]
+				: [],
+		),
+		...findLocalBinsUpwards(
+			binaryCandidates,
+			process.cwd(),
+			projectWalkOptions,
+		).flatMap((binPath): SgLocalBinCandidate[] =>
+			typeof binPath === "string"
+				? [{ path: binPath, source: "project" as const }]
+				: [],
+		),
 	];
 	for (const candidate of binaryCandidates) {
 		const managedBin = path.join(
