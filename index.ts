@@ -129,7 +129,6 @@ import {
 	warmDispatchIntegration,
 	loadDispatchIntegration,
 } from "./clients/dispatch/lazy.js";
-import { effectiveConfig } from "./clients/lens-engine.js";
 import {
 	getFormatService,
 	resetFormatService,
@@ -1507,12 +1506,16 @@ function activateExtension(hostPi: ExtensionAPI) {
 				}),
 			];
 
+			// Lazy and bounded: lens-engine is not on the session-start eager
+			// allowlist, and only the health command needs the effective config.
 			const effectiveTools = (
 				await withDeadline(
-					effectiveConfig({
-						cwd: runtime.projectRoot,
-						noTools: noToolFlag(),
-					}),
+					import("./clients/lens-engine.js").then(({ effectiveConfig }) =>
+						effectiveConfig({
+							cwd: runtime.projectRoot,
+							noTools: noToolFlag(),
+						}),
+					),
 					{ ms: 5_000 },
 				)
 			).tools;
