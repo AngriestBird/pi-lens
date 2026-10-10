@@ -84,8 +84,12 @@ vi.mock("../../clients/package-manager.js", async (importOriginal) => ({
 	findNodeToolBinary: vi.fn(async () => undefined),
 }));
 
-vi.mock("../../clients/project-trust.js", () => ({
+vi.mock("../../clients/project-trust.js", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../../clients/project-trust.js")>()),
 	assertInstallAllowed: vi.fn(() => true),
+	// SgRunner reads project trust since #4233; these cases pin availability
+	// latching, so they run as a trusted project.
+	getProjectTrustState: vi.fn(() => "trusted"),
 }));
 
 /** A probe the host killed at its budget: says nothing about the tool. */
