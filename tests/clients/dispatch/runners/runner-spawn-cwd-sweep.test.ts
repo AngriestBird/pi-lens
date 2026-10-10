@@ -392,8 +392,8 @@ const NO_CWD_EXEMPTION_ROWS: ReadonlyArray<readonly [string, string]> = [
 		"the scoped cache-only `npx --package @ast-grep/cli -- ast-grep --version` candidate probe: same pi-lens-owned neutral cwd supplied by `...getIsolatedNpxSpawnOptions()`, which the scan cannot follow through a call spread",
 	],
 	[
-		"clients/sg-runner.ts#SgRunner.tempScanDetailedAsync:ee763d40",
-		"`ast-grep scan --config <temp rule file> --json … <dir>`: both the rule file and the scan root are absolute arguments prepared by prepareTempScan",
+		"clients/sg-runner.ts#SgRunner.tempScanDetailedAsync:e70984d6",
+		"`ast-grep scan --config <temp rule file> --json … <dir>`: both the rule file and the scan root are absolute arguments on dispatch (#4233 V3-HIGH-01), and when the module-level command is npx the options spread supplies the pi-lens-owned neutral cwd (#4233 V3-HIGH-02) the scan cannot follow through a call spread",
 	],
 	[
 		"clients/sg-runner.ts#SgRunner.tempScanWithFixAsync:23665a2b",

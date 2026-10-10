@@ -775,9 +775,11 @@ describe("runner-helpers availability checker", () => {
 				text: "var x = 1;",
 				range: { start: { line: 0, column: 0 }, end: { line: 0, column: 10 } },
 			};
+			vi.stubEnv("PI_LENS_HOME", path.join(env.tmpDir, "pi-lens-home"));
+			const scanOptions: Array<{ cwd?: string; stripNpmConfig?: boolean }> = [];
 			const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
 			vi.mocked(safeSpawnMod.safeSpawnAsync).mockImplementation(
-				async (cmd, args) => {
+				async (cmd, args, options) => {
 					if (
 						cmd !== "npx" ||
 						!args?.includes("--no") ||
@@ -789,6 +791,7 @@ describe("runner-helpers availability checker", () => {
 							status: 1,
 						};
 					}
+					scanOptions.push(options ?? {});
 					return { stdout: JSON.stringify([match]), stderr: "", status: 0 };
 				},
 			);
@@ -802,7 +805,18 @@ describe("runner-helpers availability checker", () => {
 			expect(result.error).toBeUndefined();
 			expect(result.totalMatches).toBe(1);
 			expect(result.matches).toEqual([match]);
+			// #4233 V3-HIGH-02: the temp-scan npx child uses the same isolated seam
+			// as the exec path, so a hostile project `.npmrc` is never read.
+			expect(scanOptions.length).toBeGreaterThan(0);
+			for (const options of scanOptions) {
+				expect(options.cwd).toBe(
+					path.join(env.tmpDir, "pi-lens-home", "tools"),
+				);
+				expect(options.cwd).not.toBe(env.tmpDir);
+				expect(options.stripNpmConfig).toBe(true);
+			}
 		} finally {
+			vi.unstubAllEnvs();
 			env.cleanup();
 		}
 	});

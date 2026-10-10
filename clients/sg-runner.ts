@@ -998,6 +998,7 @@ export class SgRunner {
 					dir,
 				],
 				{
+					...(sgCmd === "npx" ? getIsolatedNpxSpawnOptions() : {}),
 					timeout,
 					deadlineAt: options.deadlineAt,
 					signal: options.signal,
@@ -1056,6 +1057,7 @@ export class SgRunner {
 				dir,
 			];
 			const spawnOptions = {
+				...(sgCmd === "npx" ? getIsolatedNpxSpawnOptions() : {}),
 				timeout,
 				deadlineAt: options.deadlineAt,
 				signal: options.signal,

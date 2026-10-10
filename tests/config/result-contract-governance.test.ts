@@ -128,15 +128,13 @@ describe("result contract across registered tool surfaces", () => {
 				ast_grep_search: {
 					pattern: "$A.sort()",
 					lang: "typescript",
-					// The npx fallback runs from its isolated tools cwd (#4193), so
-					// parity must use the explicit absolute fixture path.
-					paths: [path.join(cwd, "bad.ts")],
+					paths: ["bad.ts"],
 				},
 				ast_grep_replace: {
 					pattern: "$A.sort()",
 					rewrite: "$A.sort((a, b) => a - b)",
 					lang: "typescript",
-					paths: [path.join(cwd, "bad.ts")],
+					paths: ["bad.ts"],
 					apply: false,
 				},
 				lsp_navigation: { operation: "documentSymbol", path: "fixture.ts" },
