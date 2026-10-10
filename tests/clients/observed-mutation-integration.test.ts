@@ -1137,6 +1137,7 @@ describe("#2464 — the observed-settle path also dispatches pipeline analysis",
 			const readGuard = {
 				recordWritten,
 				getReadHistory: () => [],
+				contentMatchesLastRead: () => undefined,
 			} as unknown as NonNullable<
 				Parameters<typeof handleToolResult>[0]["readGuard"]
 			>;

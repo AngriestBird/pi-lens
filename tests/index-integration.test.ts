@@ -112,6 +112,7 @@ vi.mock("../clients/read-guard.js", async (importOriginal) => {
 	class MockReadGuard {
 		isNewFile = () => false;
 		checkEdit = () => ({ action: "allow" });
+		contentMatchesLastRead = () => undefined;
 		recordRead = () => {};
 		recordWritten = () => {};
 		noteCreatedFile = () => {};
@@ -2244,6 +2245,7 @@ describe("index.ts integration", () => {
 						noteCreatedFile: () => {},
 						recordWritten: () => {},
 						checkEdit,
+						contentMatchesLastRead: () => undefined,
 					};
 					shouldWarmLspOnRead() {
 						return false;
@@ -2355,6 +2357,7 @@ describe("index.ts integration", () => {
 						noteCreatedFile: () => {},
 						recordWritten: () => {},
 						checkEdit,
+						contentMatchesLastRead: () => undefined,
 					};
 					shouldWarmLspOnRead() {
 						return false;
@@ -2481,6 +2484,7 @@ describe("index.ts integration", () => {
 						noteCreatedFile: () => {},
 						recordWritten: () => {},
 						checkEdit: () => ({ action: "allow" as const }),
+						contentMatchesLastRead: () => undefined,
 					};
 					shouldWarmLspOnRead = shouldWarmLspOnRead;
 					markLspReadWarmStarted = markLspReadWarmStarted;
@@ -2588,6 +2592,7 @@ describe("index.ts integration", () => {
 						noteCreatedFile: () => {},
 						recordWritten: () => {},
 						checkEdit: () => ({ action: "allow" as const }),
+						contentMatchesLastRead: () => undefined,
 					};
 					shouldWarmLspOnRead = shouldWarmLspOnRead;
 					markLspReadWarmStarted() {}
@@ -2690,6 +2695,7 @@ describe("index.ts integration", () => {
 						noteCreatedFile: () => {},
 						recordWritten: () => {},
 						checkEdit: () => ({ action: "allow" as const }),
+						contentMatchesLastRead: () => undefined,
 					};
 					shouldWarmLspOnRead = shouldWarmLspOnRead;
 					markLspReadWarmStarted() {}
@@ -2794,6 +2800,7 @@ describe("index.ts integration", () => {
 						noteCreatedFile: () => {},
 						recordWritten: () => {},
 						checkEdit: () => ({ action: "allow" }),
+						contentMatchesLastRead: () => undefined,
 						recordRead: () => {},
 					};
 				},

@@ -80,6 +80,9 @@ vi.mock("../clients/read-guard.js", () => {
 		}
 		recordRead() {}
 		recordWritten() {}
+		contentMatchesLastRead() {
+			return undefined;
+		}
 		noteCreatedFile() {}
 		getReadHistory() {
 			return [];
