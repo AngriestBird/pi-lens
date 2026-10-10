@@ -168,6 +168,7 @@ export const TEST_TREE_GOVERNANCE_TESTS = [
 	"tests/clients/flake-shape-ratchet.test.ts",
 	// #2891: real-pi harness suites own their child-process and timeout census;
 	// keep every admitted real-harness file armed when the tests tree changes.
+	"tests/real-harness/bridge-reload-ts.test.ts",
 	"tests/real-harness/bridge-reload.test.ts",
 	"tests/real-harness/child-exit.test.ts",
 	"tests/real-harness/diagnostic-provenance.test.ts",

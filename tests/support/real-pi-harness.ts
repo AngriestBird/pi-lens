@@ -183,6 +183,7 @@ function startRealPi(
 	extensions: readonly string[] = [],
 	agentSettings?: JsonObject,
 	persistedSession = false,
+	entryFile = "index.js",
 ) {
 	const scratchRoot = homeOverride ?? SCRATCH_DIR_ROOT;
 	sweepScratchDirs(scratchRoot, "real-pi-", { maxAgeMs: SWEEP_ANY_AGE });
@@ -244,7 +245,7 @@ function startRealPi(
 		"--model",
 		"harness",
 		"-e",
-		path.join(repoRoot, "index.js"),
+		path.join(repoRoot, entryFile),
 		"-e",
 		path.join(fixtureRoot, "scripted-provider.mjs"),
 		...extensions.flatMap((extension) => ["-e", extension]),
@@ -433,6 +434,13 @@ export async function withRealPi<T>(
 		agentSettings?: JsonObject;
 		/** Use a persisted session directory so {@link RealPi.resume} can restart pi. */
 		persistedSession?: boolean;
+		/**
+		 * Extension entrypoint to load, relative to the repo root. The default
+		 * `"index.js"` is the built twin real pi loads; `"index.ts"` drives the
+		 * TypeScript-source load, where jiti transpiles the entry fresh on every
+		 * `/reload` (#4169).
+		 */
+		entry?: "index.js" | "index.ts";
 	},
 	callback: (pi: RealPi) => Promise<T>,
 ): Promise<T> {
@@ -451,6 +459,7 @@ export async function withRealPi<T>(
 		options.extensions,
 		options.agentSettings,
 		options.persistedSession,
+		options.entry ?? "index.js",
 	);
 	try {
 		let cursor = harness.events.length;

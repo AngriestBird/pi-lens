@@ -50,7 +50,11 @@ import {
 	type ReadContentBinding,
 	type ReadRecord,
 } from "./read-guard.js";
-import { registerProcessBridge } from "./process-bridge.js";
+import {
+	type BridgeActivation,
+	rebindableProcessBridgeDeps,
+	registerProcessBridge,
+} from "./process-bridge.js";
 
 export {
 	IO_BRIDGE_SYMBOL,
@@ -109,12 +113,37 @@ export interface IOBridgeDeps extends MutationBridgeDeps {
 	};
 }
 
+/**
+ * Identity for a direct registration that does not name the activation its
+ * deps were built for (unit tests). A real activation passes the live
+ * `RuntimeCoordinator` (`deps.getRuntime()`), so a fresh module graph rebinds
+ * the shared deps cell (`rebindableProcessBridgeDeps`, #4169).
+ */
+const DEFAULT_ACTIVATION = Symbol("pi-lens:io-bridge-activation");
+
 /** Mount the bridge singleton. First-wins, `clients/process-bridge.ts` owns the body. */
-export function registerIOBridge(deps: IOBridgeDeps): void {
+export function registerIOBridge(
+	deps: IOBridgeDeps,
+	activation: BridgeActivation = DEFAULT_ACTIVATION,
+): void {
+	const currentDeps = rebindableProcessBridgeDeps(
+		"io-bridge-deps",
+		1,
+		activation,
+		deps,
+	);
 	registerProcessBridge(IO_BRIDGE_SYMBOL, (): PiLensIOBridge => ({
 		version: IO_BRIDGE_VERSION,
 		record(entry: BridgeEntry): RecordResult {
-			return recordIOEntry(entry, deps);
+			const liveDeps = currentDeps();
+			if (!liveDeps) {
+				deps.onUnavailable?.();
+				return {
+					read: { accepted: false, reason: "unavailable" },
+					mutate: { accepted: false, reason: "unavailable" },
+				};
+			}
+			return recordIOEntry(entry, liveDeps);
 		},
 	}));
 }

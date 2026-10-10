@@ -1374,7 +1374,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/mutation-attribution.ts": 5,
 		"clients/mutation-bridge.ts": 2,
 		"clients/ndjson-logger.ts": 7,
-		"clients/process-bridge.ts": 4,
+		// #4169: 4 -> 6. The rebind helper adds a `version` parameter and its
+		// `getProcessSingleton(family, version, …)` argument — the singleton
+		// family's shape version, not a monotonic generation.
+		"clients/process-bridge.ts": 6,
 		"clients/process-singletons.ts": 10,
 		"clients/project-diagnostics/cache.ts": 2,
 		"clients/project-diagnostics/runner-adapters/trivy.ts": 2,
