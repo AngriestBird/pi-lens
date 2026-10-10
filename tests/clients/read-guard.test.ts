@@ -143,6 +143,25 @@ describe("ReadGuard", () => {
 		expect(guard.checkEdit(filePath, [2500, 2500]).action).toBe("block");
 	});
 	describe("content-binding supersession (#3962)", () => {
+		it("reports whether the newest full-file read still matches the file", () => {
+			const env = setupTestEnvironment("read-guard-last-content-");
+			try {
+				const filePath = path.join(env.tmpDir, "file.ts");
+				fs.writeFileSync(filePath, "const value = 1;\n");
+				const guard = createReadGuard("last-content-session");
+				const binding = captureReadContentBinding(filePath, 1, 100);
+				expect(binding?.fullFile).toBe(true);
+				guard.recordRead(
+					createReadRecord(filePath, { contentBinding: binding }),
+				);
+				expect(guard.contentMatchesLastRead(filePath)).toBe(true);
+				fs.writeFileSync(filePath, "const value = 2;\n");
+				expect(guard.contentMatchesLastRead(filePath)).toBe(false);
+			} finally {
+				env.cleanup();
+			}
+		});
+
 		const before = "const a = 1;\nconst b = 2;\nconst c = 3;\n";
 		const after = "const a = 99;\nconst b = 2;\nconst c = 3;\n";
 		const span20 = `${Array.from({ length: 20 }, (_, i) => `line${i + 1}`).join("\n")}\n`;

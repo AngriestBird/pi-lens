@@ -1025,7 +1025,11 @@ third-party names on pi and retain the bounded observation path.
 The read guard keys all path state through its normalizer. It accepts Read,
 search, LSP, bridge, bash-view, and authored-write evidence, but name-only
 `ls`/`find` output is not file content. Partial edits consume preflight-approved
-spans and never re-search stale bytes. Authorship (`writtenThisSession`)
+spans and never re-search stale bytes. Normalized oldText matches map back to
+one raw span only when the normalized span has no length-expanding fold (for
+example `ﬁ`→`fi`); the existing end validation remains the final guard. When
+oldText is absent, the preflight wording distinguishes an unchanged full-file
+read binding from actual content drift (#4265). Authorship (`writtenThisSession`)
 follows content identity (#4131): it holds the bytes the conversation last
 wrote, `stat` only pre-filters the hash, and another writer's byte change ends
 it at the next zero-read edit, bash write or drain on the file
