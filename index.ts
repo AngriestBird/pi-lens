@@ -1501,26 +1501,21 @@ function activateExtension(hostPi: ExtensionAPI) {
 				}),
 			];
 
-			try {
-				const effectiveTools = (
-					await effectiveConfig({
-						cwd: runtime.projectRoot,
-						noTools: noToolFlag(),
-					})
-				).tools;
-				const enabledTools = effectiveTools
-					.filter((tool) => tool.enabled)
-					.map((tool) => tool.name);
-				const disabledTools = effectiveTools
-					.filter((tool) => !tool.enabled)
-					.map((tool) => tool.name);
-				lines.push("", `Tools enabled: ${enabledTools.join(", ") || "none"}`);
-				if (disabledTools.length > 0) {
-					lines.push(`Tools disabled: ${disabledTools.join(", ")}`);
-				}
-			} catch {
-				// Health is best-effort; an unreadable config must not hide the
-				// rest of the operator report.
+			const effectiveTools = (
+				await effectiveConfig({
+					cwd: runtime.projectRoot,
+					noTools: noToolFlag(),
+				})
+			).tools;
+			const enabledTools = effectiveTools
+				.filter((tool) => tool.enabled)
+				.map((tool) => tool.name);
+			const disabledTools = effectiveTools
+				.filter((tool) => !tool.enabled)
+				.map((tool) => tool.name);
+			lines.push("", `Tools enabled: ${enabledTools.join(", ") || "none"}`);
+			if (disabledTools.length > 0) {
+				lines.push(`Tools disabled: ${disabledTools.join(", ")}`);
 			}
 			lines.push("Skills: managed by pi package filters");
 			const slopScoreLine = dispatchIntegration.getDispatchSlopScoreLine();
