@@ -74,5 +74,7 @@ describe("AGENTS.md trigger-block governance (#3259)", () => {
 });
 
 function issueRefs(text: string): number {
-	return [...blankMarkdown(text).matchAll(/#\d{3,5}\b/g)].length;
+	// `#N` of any length, and issue/PR URLs, which carry no `#` (review F-4272-1).
+	return [...blankMarkdown(text).matchAll(/#\d+\b|\/(?:issues|pull)\/\d+\b/g)]
+		.length;
 }
