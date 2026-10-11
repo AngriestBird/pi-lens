@@ -283,5 +283,5 @@ date-based `direct` expiry (#3401) and consecutive-night `idle-eviction`
 counts (#3989). Regenerated every run; never a measurement.
 
 ```json
-{"first-publish":{"dockerfile":{"firstMissed":"2026-10-10"},"prisma":{"firstMissed":"2026-10-10"},"python":{"firstMissed":"2026-10-10"},"shell":{"firstMissed":"2026-10-10"},"terraform":{"pendingFirstPublish":"direct","runs":1},"yaml":{"firstMissed":"2026-10-10"}}}
+{"first-publish":{"clojure":{"firstMissed":"2026-10-11"},"dart":{"firstMissed":"2026-10-11"},"dockerfile":{"firstMissed":"2026-10-10"},"prisma":{"firstMissed":"2026-10-10"},"python":{"firstMissed":"2026-10-10"},"shell":{"firstMissed":"2026-10-10"},"yaml":{"firstMissed":"2026-10-10"},"zig":{"firstMissed":"2026-10-11"}}}
 ```
