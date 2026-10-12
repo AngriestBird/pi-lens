@@ -274,7 +274,7 @@ Telemetry only — never a CI gate. Compares each probed server's observed
 marker; a mismatch means the marker may need a human update (#529). `unknown`
 observations are never compared (a slow/absent server is not evidence either way).
 
-_None observed as of the last probe run._
+- **[marked-not-silent]** wait-policy/strategies.ts marks "typescript" silentOnClean:true but this run observed publishes-unversioned — the marker may be stale (too pessimistic; cascade is skipping a wait the server would have resolved with a real publish)
 
 ## Capability matrix refresh state (nightly-generated)
 
@@ -283,5 +283,5 @@ date-based `direct` expiry (#3401) and consecutive-night `idle-eviction`
 counts (#3989). Regenerated every run; never a measurement.
 
 ```json
-{"first-publish":{"clojure":{"firstMissed":"2026-10-11"},"dart":{"firstMissed":"2026-10-11"},"dockerfile":{"firstMissed":"2026-10-10"},"prisma":{"firstMissed":"2026-10-10"},"python":{"firstMissed":"2026-10-10"},"shell":{"firstMissed":"2026-10-10"},"yaml":{"firstMissed":"2026-10-10"},"zig":{"firstMissed":"2026-10-11"}}}
+{"clean-behavior":{"typescript":{"pendingBehavior":"publishes-unversioned","pendingTier":"2*","runs":1}},"first-publish":{"clojure":{"firstMissed":"2026-10-11"},"dart":{"firstMissed":"2026-10-11"},"dockerfile":{"firstMissed":"2026-10-10"},"prisma":{"firstMissed":"2026-10-10"},"python":{"firstMissed":"2026-10-10"},"shell":{"firstMissed":"2026-10-10"},"yaml":{"firstMissed":"2026-10-10"},"zig":{"firstMissed":"2026-10-11"}}}
 ```
