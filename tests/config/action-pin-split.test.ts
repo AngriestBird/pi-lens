@@ -45,16 +45,77 @@ function pinSplits(pins: ActionPin[]): string[] {
 		);
 }
 
-async function treePins(): Promise<ActionPin[]> {
-	const files = await workflowFiles(ROOT);
-	return files.flatMap((file) =>
-		parseActionPins(readFileSync(file, "utf8"), relative(ROOT, file)),
-	);
+// A `uses:` key in block, flow-map or quoted form. Comment lines are skipped.
+const USES_KEY = /(?:^|[\s{,-])["']?uses["']?\s*:\s*["']?([^\s"'},#]+)/;
+// Local actions and container uses are not pinned by design.
+const LOCAL_OR_DOCKER = /^(?:\.\/|docker:\/\/)/;
+
+interface RemoteUses {
+	line: number;
+	text: string;
 }
+
+function remoteUsesLines(text: string): RemoteUses[] {
+	const found: RemoteUses[] = [];
+	for (const [index, raw] of text.split(/\r?\n/).entries()) {
+		if (raw.trimStart().startsWith("#")) continue;
+		const match = raw.match(USES_KEY);
+		if (!match || LOCAL_OR_DOCKER.test(match[1])) continue;
+		found.push({ line: index + 1, text: raw.trim() });
+	}
+	return found;
+}
+
+// Every remote uses: line that parseActionPins does not turn into a pin.
+function unparsedUses(text: string, file: string): string[] {
+	const pinned = new Set(parseActionPins(text, file).map((pin) => pin.line));
+	return remoteUsesLines(text)
+		.filter((use) => !pinned.has(use.line))
+		.map((use) => `${file}:${use.line}: ${use.text}`);
+}
+
+async function treeScan(): Promise<{
+	pins: ActionPin[];
+	uses: number;
+	unparsed: string[];
+}> {
+	const pins: ActionPin[] = [];
+	let uses = 0;
+	const unparsed: string[] = [];
+	for (const file of await workflowFiles(ROOT)) {
+		const text = readFileSync(file, "utf8");
+		const rel = relative(ROOT, file);
+		pins.push(...parseActionPins(text, rel));
+		uses += remoteUsesLines(text).length;
+		unparsed.push(...unparsedUses(text, rel));
+	}
+	return { pins, uses, unparsed };
+}
+
+const FIXTURE_UNPARSED = `jobs:
+  build:
+    steps:
+      - uses: actions/checkout@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v7
+      - uses: github/codeql-action/init@v4
+      - uses: "actions/cache@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2" # v5
+      - {uses: actions/setup-node@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2}
+      - uses: ./local-action
+      - uses: docker://alpine:3.19
+`;
 
 describe("#4350 one SHA per action repository across the workflow tree", () => {
 	it("pins every action repository, codeql-action included, to one SHA", async () => {
-		const pins = await treePins();
+		const { pins, uses, unparsed } = await treeScan();
+		// Every remote uses: line must be parsed into a pin, or the SHA rule
+		// below is checking a subset of the tree. Recurrence #4350 review F1.
+		expect(
+			unparsed,
+			`uses: lines parseActionPins does not pin (tag, quoted or flow form): ${unparsed.join("; ")}`,
+		).toEqual([]);
+		expect(
+			uses,
+			`${uses} remote uses: lines but ${pins.length} parsed pins`,
+		).toBe(pins.length);
 		// Floor: the tree still holds the three codeql-action steps in both
 		// workflows, so an empty walk or a parser change cannot pass vacuously.
 		const codeql = pins.filter(
@@ -95,6 +156,18 @@ describe("#4350 one SHA per action repository across the workflow tree", () => {
 		];
 		expect(pinSplits(pins)).toEqual([
 			`github/codeql-action has 2 SHAs: ${a} at ci.yml:2; ${b} at ci.yml:3, codeql.yml:2`,
+		]);
+	});
+
+	it("names every uses: line parseActionPins cannot pin, and only those", () => {
+		// Recurrence #4350 review F1: a tag pin (@v4), a quoted uses value and a
+		// flow-map step were silently skipped, so a tag-pinned CodeQL step next to
+		// SHA-pinned ones passed both checkers. Local ./ and docker:// uses are
+		// exempt by design and must not be reported.
+		expect(unparsedUses(FIXTURE_UNPARSED, "ci.yml")).toEqual([
+			"ci.yml:5: - uses: github/codeql-action/init@v4",
+			`ci.yml:6: - uses: "actions/cache@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2" # v5`,
+			"ci.yml:7: - {uses: actions/setup-node@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2}",
 		]);
 	});
 });
