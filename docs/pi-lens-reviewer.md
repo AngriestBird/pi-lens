@@ -151,6 +151,13 @@ Run every probe the diff can trip and say which ran and what each returned.
   `// flake-shape: <detector> — <reason>` header and `wallClockBudgetInclude`
   membership (#2547). A pinned file whose count falls below its pin needs its
   baseline tightened; a stale ceiling re-admits regrowth.
+- **Hot-path timing.** When the diff touches dispatch, `session_start`, LSP
+  diagnostics, a cache lookup or turn-end, re-run the body's before/after
+  timing on the real path. A regression the body does not name and justify is
+  a finding (#4344 r1: replay went from 6 ms to 321 ms).
+- **Windows path shapes.** A new test or runtime comparison of paths goes
+  through `toPosix` or `path.win32` (`AGENTS.md`). A host-default separator is
+  a finding even when Linux CI is green (#4356: Windows advisory red).
 - **Platform skips and session-start resets.** Apply the `AGENTS.md` test
   screens and the `SessionStartClassification` invariant.
 
