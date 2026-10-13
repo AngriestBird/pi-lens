@@ -213,6 +213,41 @@ describe("resolveCommand — node_modules/.bin", () => {
 		expect(cmd).toContain("2");
 	});
 
+	// Recurrence this pins (#4321): tab evidence proves the style, not a display
+	// width, and the invented `--indent-width 1` made Biome re-wrap lines near 80
+	// columns that its own default had already formatted. Exact argv, so a
+	// reintroduced width flag on any style-pinning formatter reds here.
+	it("biome: pins tab style without inventing an indent width (#4321)", async () => {
+		const binPath = nodeModulesBin(tmpDir, "biome");
+		makeFakeExe(binPath);
+		const filePath = fileIn(tmpDir, "index.ts");
+		fs.writeFileSync(filePath, "function f() {\n\treturn 1;\n}\n");
+
+		expect(await biomeFormatter.resolveCommand!(filePath, tmpDir)).toEqual([
+			binPath,
+			"format",
+			"--write",
+			"--no-errors-on-unmatched",
+			"--indent-style",
+			"tab",
+			filePath,
+		]);
+	});
+
+	it("prettier: pins tab style without inventing a tab width (#4321)", async () => {
+		const binPath = nodeModulesBin(tmpDir, "prettier");
+		makeFakeExe(binPath);
+		const filePath = fileIn(tmpDir, "app.ts");
+		fs.writeFileSync(filePath, "function f() {\n\treturn 1;\n}\n");
+
+		expect(await prettierFormatter.resolveCommand!(filePath, tmpDir)).toEqual([
+			binPath,
+			"--write",
+			"--use-tabs",
+			filePath,
+		]);
+	});
+
 	it("biome: ancestor editorconfig disables inferred style flags", async () => {
 		const binPath = nodeModulesBin(tmpDir, "biome");
 		makeFakeExe(binPath);
@@ -532,8 +567,6 @@ describe("resolveCommand — .venv", () => {
 		expect(cmd).toEqual([
 			binPath,
 			"format",
-			"--config",
-			"indent-width=1",
 			"--config",
 			"format.indent-style='tab'",
 			filePath,
