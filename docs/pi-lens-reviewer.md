@@ -158,6 +158,13 @@ instead of rebuilding the probe.
   diagnostics, a cache lookup or turn-end, re-run the body's before/after
   timing on the real path. A regression the body does not name and justify is
   a finding (#4344 r1: replay went from 6 ms to 321 ms).
+- **Shutdown-path parity.** When the diff moves or rewraps code that stops a
+  child (a server, a client, a spawned tool), compare the stop path before and
+  after: does the child still get its graceful signal (stdin end, shutdown
+  request) before any kill, and do its exit-time records and files still
+  appear? Count them over a few runs on both heads. A green suite proves
+  nothing here (#4366 r2: a shared-client fold swapped stdin end for SIGTERM;
+  the shutdown record went from 3/3 to 0/12 and 11 sockets leaked).
 - **Windows path shapes.** A new test or runtime comparison of paths goes
   through `toPosix` or `path.win32` (`AGENTS.md`). A host-default separator is
   a finding even when Linux CI is green (#4356: Windows advisory red).
