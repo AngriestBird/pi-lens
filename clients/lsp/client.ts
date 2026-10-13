@@ -74,10 +74,14 @@ import { exceedsLspSyncLimits } from "./content-limits.js";
 import { probeTsserverProjectIdentity } from "./tsserver-sync.js";
 import { getStrategy } from "./wait-policy/index.js";
 import {
+	FILE_CHANGED,
 	FILE_CREATED,
+	FILE_DELETED,
 	WatchedFilesQueue,
 	watchedTypeForOpen,
 } from "./watch-queue.js";
+import { type BirthStat, pathBirthtimeMs } from "../path-birth.js";
+import { BoundedSet } from "../bounded-cache.js";
 import {
 	clearAllWorkspaceDiagnosticsCaches,
 	clearWorkspaceDiagnosticsCacheAtAndAbove,
@@ -366,6 +370,16 @@ export interface LSPClientInfo {
 		 * a burst of external changes still flushes as one notification.
 		 */
 		watchedFileChange(filePath: string, type: number): void;
+		/**
+		 * #4320: queue Created for each existing path that is new to this server
+		 * and not yet announced to it, then send any waiting Created now. A read
+		 * that follows is then answered by a server that has heard of the path.
+		 * Optional so client doubles that predate it need no update; a caller
+		 * treats a missing implementation as "nothing to announce".
+		 */
+		announceCreated?(
+			entries: ReadonlyArray<{ filePath: string; stat: BirthStat }>,
+		): void;
 	};
 	getDiagnostics(filePath: string): LSPDiagnostic[];
 	/**
@@ -1281,6 +1295,14 @@ export interface LSPClientState {
 	 * the state literal, like `workspaceDiagnosticsSupport`.
 	 */
 	watchQueue: WatchedFilesQueue;
+	/**
+	 * #4320: paths this client has sent Created for while they existed on disk.
+	 * The server has heard of them, so a later announcement is Changed. A
+	 * Deleted removes the path. Bounded: an evicted path may be announced as
+	 * Created once more, which a server treats as a refresh. Optional for mock
+	 * states; absent means every new path is announced as Created.
+	 */
+	readonly createdAnnounced?: BoundedSet<string>;
 }
 
 /** #2065: bound both the path count and UTF-16 heap represented by retained
@@ -4252,7 +4274,67 @@ export function handleNotifyExternalChange(
 	const normalizedPath = normalizeMapKey(filePath);
 	const uri =
 		state.openDocumentUris?.get(normalizedPath) ?? pathToFileURL(filePath).href;
+	enqueueWatchedChange(state, normalizedPath, uri, type);
+}
+
+/**
+ * #4320: queue a watched-files change and keep the client's Created memory in
+ * step: an on-disk Created is remembered, a Deleted forgets the path.
+ */
+function enqueueWatchedChange(
+	state: LSPClientState,
+	normalizedPath: string,
+	uri: string,
+	type: number,
+	onDisk = true,
+): void {
+	if (type === FILE_CREATED && onDisk)
+		state.createdAnnounced?.add(normalizedPath);
+	else if (type === FILE_DELETED)
+		state.createdAnnounced?.delete(normalizedPath);
 	state.watchQueue.enqueue(uri, type);
+}
+
+/**
+ * #4320: the change type for a path that exists on disk. Created only when
+ * the path is newer than this client (`watchedTypeForOpen` over its path
+ * birth) and this client has not announced it before; Changed otherwise,
+ * including when the path's birth is unknown.
+ */
+function watchedTypeForExisting(
+	state: LSPClientState,
+	normalizedPath: string,
+	info: BirthStat,
+): number {
+	const birth = pathBirthtimeMs(info);
+	if (birth === undefined) return FILE_CHANGED;
+	if (watchedTypeForOpen(birth, state.startedAtMs) !== FILE_CREATED) {
+		return FILE_CHANGED;
+	}
+	return state.createdAnnounced?.has(normalizedPath)
+		? FILE_CHANGED
+		: FILE_CREATED;
+}
+
+function handleAnnounceCreated(
+	state: LSPClientState,
+	entries: ReadonlyArray<{ filePath: string; stat: BirthStat }>,
+): void {
+	if (!isClientAlive(state)) return;
+	for (const { filePath, stat: info } of entries) {
+		const normalizedPath = normalizeMapKey(filePath);
+		if (watchedTypeForExisting(state, normalizedPath, info) !== FILE_CREATED) {
+			continue;
+		}
+		enqueueWatchedChange(
+			state,
+			normalizedPath,
+			state.openDocumentUris?.get(normalizedPath) ??
+				pathToFileURL(filePath).href,
+			FILE_CREATED,
+		);
+	}
+	state.watchQueue.flushIfCreated();
 }
 
 /** #3482: a didSave to a `rescansOnSave` server (opengrep) brings one more
@@ -4474,15 +4556,17 @@ async function handleNotifyOpenOnce(
 	if (!silent) {
 		// Async stat (was a synchronous existsSync on the document-open path — a
 		// stat that blocks the loop during first-read/warm). Absent → 1 (Created).
-		// #4320: a file that exists is Created when it was born after this client
-		// started (see `watchedTypeForOpen`), Changed otherwise. The old
-		// existence-only rule reported every file pi had just written as Changed,
-		// and Pyrefly keeps a failed `import new_module` lookup until it hears
-		// Created.
+		// #4320: a file that exists is Created when it is new to this server and
+		// not yet announced to it (`watchedTypeForExisting`), Changed otherwise.
+		// The old existence-only rule reported every file pi had just written as
+		// Changed, and Pyrefly keeps a failed `import new_module` lookup until it
+		// hears Created.
 		let watchedType = FILE_CREATED;
+		let onDisk = false;
 		try {
 			const info = await stat(filePath);
-			watchedType = watchedTypeForOpen(info.birthtimeMs, state.startedAtMs);
+			onDisk = true;
+			watchedType = watchedTypeForExisting(state, normalizedPath, info);
 		} catch {
 			// absent: Created
 		}
@@ -4491,7 +4575,7 @@ async function handleNotifyOpenOnce(
 		// re-analyze the project once per burst rather than once per file. didOpen
 		// (below) still carries this file's content immediately, so the open
 		// document is analyzed without waiting on the batched watcher notify.
-		state.watchQueue.enqueue(uri, watchedType);
+		enqueueWatchedChange(state, normalizedPath, uri, watchedType, onDisk);
 	}
 
 	if (!isClientAlive(state)) return false;
@@ -5980,6 +6064,7 @@ export async function createLSPClient(options: {
 		isConnected: true,
 		isDestroyed: false,
 		startedAtMs: Date.now(),
+		createdAnnounced: new BoundedSet<string>(4096),
 		shutdownRequested: false,
 		shutdownPromise: undefined,
 		shutdownOptions: undefined,
@@ -6058,7 +6143,7 @@ export async function createLSPClient(options: {
 		},
 		undefined,
 		// #4320: a creation can answer an import a cached finding reported missing.
-		() => noteWorkspaceFileCreated(),
+		() => noteWorkspaceFileCreated(state.serverId, state.root),
 	);
 
 	setupIncomingHandlers(state, initialization, onDiagnosticsPublished);
@@ -6281,6 +6366,9 @@ export async function createLSPClient(options: {
 			},
 			watchedFileChange(filePath, type) {
 				handleNotifyExternalChange(state, filePath, type);
+			},
+			announceCreated(entries) {
+				handleAnnounceCreated(state, entries);
 			},
 		},
 

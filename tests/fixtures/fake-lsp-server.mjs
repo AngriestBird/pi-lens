@@ -241,7 +241,8 @@ const PUBLISH_SEQUENCE_FIRST_MS = Number(
 // (measured: `import new_module` keeps its missing-import after the module is
 // created, until the server hears a `Created` watched-files event; `Changed`
 // does not clear it). `FAKE_LSP_STALE_MODULE_LOOKUP=1` makes every open
-// document's `import "./name"` line resolve to `<dir>/name.lua`, remember a
+// document's `import "./name"` (or `"../dir/name"`) line resolve to
+// `<dir>/name.lua` relative to the document, remember a
 // lookup that failed, and re-evaluate every open document when a `Created`
 // event for the missing file arrives. Push diagnostics, version-matched.
 // Off by default.
@@ -252,7 +253,7 @@ function publishModuleLookups(uri) {
 	const text = openDocuments.get(uri) ?? "";
 	const dir = path.dirname(fileURLToPath(uri));
 	const diagnostics = [];
-	for (const match of text.matchAll(/import\s+"\.\/([\w-]+)"/g)) {
+	for (const match of text.matchAll(/import\s+"(\.\.?\/[\w/-]+)"/g)) {
 		const target = path.join(dir, `${match[1]}.lua`);
 		if (!failedModuleLookups.has(target) && !fs.existsSync(target)) {
 			failedModuleLookups.add(target);
@@ -262,7 +263,7 @@ function publishModuleLookups(uri) {
 				severity: 1,
 				source: "fake-stale-lookup",
 				code: "missing-import",
-				message: `Cannot find module ${match[1]}`,
+				message: `Cannot find module ${path.basename(match[1])}`,
 				range: {
 					start: { line: 0, character: 0 },
 					end: { line: 0, character: 1 },

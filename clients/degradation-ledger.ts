@@ -683,6 +683,13 @@ export type DegradationKind =
 	 */
 	| "lsp-edit-stale-content"
 	/**
+	 * #4320: this process cannot tell when a path was born (the filesystem
+	 * reports no birth time, or Node reports ctime as it without statx), so a
+	 * file created while a language server runs is announced as Changed.
+	 * Subject is the cause: `no-birth-time` or `ctime-alias`. Once per cause.
+	 */
+	| "lsp-file-birth-unknown"
+	/**
 	 * An idle LSP client was released by the shared idle-eviction timer (a
 	 * server whose registry `idleEviction` is `transparent`); it respawns on the
 	 * next request. Subject is the client key.

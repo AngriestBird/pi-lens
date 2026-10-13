@@ -80,11 +80,10 @@ describe("WatchedFilesQueue (#271)", () => {
 		expect(flushes).toEqual([[{ uri: "file:///gone", type: 3 }]]);
 	});
 
-	// #4320: the cached-finding invalidation must fire when a creation is queued
-	// (a read that follows must not replay a stale finding before the debounce)
-	// and again when the batch leaves (a result scanned in between was computed
-	// before the server heard of the file).
-	it("signals onCreated at queue time and at flush time, only for Created (#4320)", () => {
+	// #4320 r2: the creation marker is the moment the server is TOLD (a batch
+	// carrying a Created is sent). Round 1 also marked at queue time, before the
+	// server knew, which a batch that sends Created up front no longer needs.
+	it("signals onCreated after a batch carrying a Created is sent, only then (#4320)", () => {
 		const calls: string[] = [];
 		const q = new WatchedFilesQueue(
 			() => calls.push("flush"),
@@ -92,16 +91,35 @@ describe("WatchedFilesQueue (#271)", () => {
 			() => calls.push("created"),
 		);
 		q.enqueue("file:///existing", 2);
-		expect(calls).toEqual([]);
 		q.enqueue("file:///new", 1);
-		expect(calls).toEqual(["created"]);
+		expect(calls).toEqual([]);
 		vi.advanceTimersByTime(WATCH_DEBOUNCE_MS);
-		expect(calls).toEqual(["created", "flush", "created"]);
+		expect(calls).toEqual(["flush", "created"]);
 
 		calls.length = 0;
 		q.enqueue("file:///only-changed", 2);
 		vi.advanceTimersByTime(WATCH_DEBOUNCE_MS);
 		expect(calls).toEqual(["flush"]);
+	});
+
+	// #4320 r2 (F1): an importer read before the 100 ms window closed was
+	// answered by a server that had not yet heard Created for its module.
+	it("sends at once when a Created is waiting, and leaves edits to coalesce (#4320)", () => {
+		const flushes: WatchedFileChange[][] = [];
+		const q = new WatchedFilesQueue((c) => flushes.push(c));
+		q.enqueue("file:///edited", 2);
+		q.flushIfCreated();
+		expect(flushes).toEqual([]);
+		q.enqueue("file:///new", 1);
+		q.flushIfCreated();
+		expect(flushes).toEqual([
+			[
+				{ uri: "file:///edited", type: 2 },
+				{ uri: "file:///new", type: 1 },
+			],
+		]);
+		vi.advanceTimersByTime(WATCH_DEBOUNCE_MS);
+		expect(flushes).toHaveLength(1);
 	});
 
 	it("flushes once after the window with no further enqueues", () => {
@@ -164,10 +182,12 @@ describe("WatchedFilesQueue (#271)", () => {
 });
 
 /**
- * #4320: Created vs Changed for a document that exists on disk when this client
- * opens it. Created only for a file born after the client started (the server's
+ * #4320: Created vs Changed for a path that exists on disk, from its path
+ * birth. Created only for a path born after the client started (the server's
  * startup scan could not have read it); a long-existing file stays Changed so a
  * first open of a project's existing files does not announce a creation each.
+ * An unknown birth (0, or ctime without statx) never reaches this function:
+ * `pathBirthtimeMs` answers `undefined` and the client sends Changed.
  */
 describe("watchedTypeForOpen (#4320)", () => {
 	const started = 1_000_000;
@@ -189,8 +209,7 @@ describe("watchedTypeForOpen (#4320)", () => {
 		).toBe(2);
 	});
 
-	it("stays Changed when the filesystem reports no birth time or the client has no start time", () => {
-		expect(watchedTypeForOpen(0, started)).toBe(2);
+	it("stays Changed when the client has no start time", () => {
 		expect(watchedTypeForOpen(started + 5_000, undefined)).toBe(2);
 	});
 });

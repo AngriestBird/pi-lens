@@ -25,6 +25,7 @@ export const WATCH_DEBOUNCE_MS = 100;
 /** LSP `FileChangeType` values. */
 export const FILE_CREATED = 1;
 export const FILE_CHANGED = 2;
+export const FILE_DELETED = 3;
 
 /**
  * #4320: a file born this close to (or after) the client's start is one the
@@ -37,23 +38,22 @@ export const FILE_CHANGED = 2;
 export const WATCH_BIRTH_MARGIN_MS = 100;
 
 /**
- * #4320: the `FileChangeType` for a document this client is opening and that
- * exists on disk. `Changed` says "the bytes differ"; only `Created` makes a
- * server drop a cached "module not found" for the path (measured with Pyrefly
- * 1.3.2: an importer's missing-import survives Changed for the life of the
- * server and clears on Created). A file born after the client started is one
- * the server's startup scan could not have read, so it is Created; an older
- * file is one the server already knew, so it is Changed.
+ * #4320: the `FileChangeType` for a path that exists on disk, given its path
+ * birth (`pathBirthtimeMs` in `clients/path-birth.ts`). `Changed` says "the
+ * bytes differ"; only `Created` makes a server drop a cached "module not
+ * found" for the path (measured with Pyrefly 1.3.2: an importer's
+ * missing-import survives Changed for the life of the server and clears on
+ * Created). A path born after the client started is one the server's startup
+ * scan could not have read, so it is Created; an older one is one the server
+ * already knew, so it is Changed.
  *
- * - A reopen of a young file repeats Created. That is a refresh for a server
- *   that already has the file, and it spares per-client "already announced"
- *   state that a silent (no-watch) open would leave wrong.
- * - A birth time of 0 (the filesystem reports none) and an unknown client
- *   start (`Infinity`) both compare below the cutoff, so they fall back to the
- *   pre-#4320 answer, Changed, rather than guessing.
+ * - The caller announces Created to one client at most once per path (the
+ *   client's `createdAnnounced` memory), so this answers only "is the path
+ *   newer than the client".
+ * - An unknown client start (`Infinity`) compares below the cutoff and falls
+ *   back to the pre-#4320 answer, Changed.
  * - A file moved in from elsewhere keeps its old birth time and is not
- *   recognised here; an external move is reported by
- *   `handleNotifyExternalChange` with an explicit type.
+ *   recognised here; `rename_file` announces its destination explicitly.
  */
 export function watchedTypeForOpen(
 	birthtimeMs: number,
@@ -75,10 +75,9 @@ export class WatchedFilesQueue {
 		private readonly flushFn: (changes: WatchedFileChange[]) => void,
 		private readonly debounceMs: number = WATCH_DEBOUNCE_MS,
 		/**
-		 * #4320: called when a Created is queued and again as a batch carrying one
-		 * leaves. Queue time lets a read that follows see the creation before the
-		 * debounce elapses; flush time covers a result scanned between the two,
-		 * which the server had not yet been told about.
+		 * #4320: called right after a batch carrying a Created is sent: from then
+		 * on the server answers with the new path in view, and any answer it gave
+		 * before may be a stale "module not found".
 		 */
 		private readonly onCreated?: () => void,
 	) {}
@@ -93,7 +92,6 @@ export class WatchedFilesQueue {
 			uri,
 			held === FILE_CREATED && type === FILE_CHANGED ? FILE_CREATED : type,
 		);
-		if (type === FILE_CREATED) this.onCreated?.();
 		if (this.timer) return;
 		this.timer = setTimeout(() => this.flush(), this.debounceMs);
 		// Never hold the event loop open for a pending watched-files flush.
@@ -114,6 +112,20 @@ export class WatchedFilesQueue {
 		this.flushFn(changes);
 		if (changes.some((change) => change.type === FILE_CREATED)) {
 			this.onCreated?.();
+		}
+	}
+
+	/**
+	 * #4320: send now when a Created is waiting, so a read that follows is
+	 * answered by a server that has heard of the new path. Leaves a queue of
+	 * edits alone to coalesce as usual.
+	 */
+	flushIfCreated(): void {
+		for (const type of this.pending.values()) {
+			if (type === FILE_CREATED) {
+				this.flush();
+				return;
+			}
 		}
 	}
 

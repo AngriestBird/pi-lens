@@ -18,7 +18,10 @@
  * session-signal-vs-latch screen). Registered in
  * `tests/support/session-state-registry.ts`, whose conformance suite proves the
  * reset is reachable from `handleSessionStart`.
+ *
+ * The one import, `bounded-cache.ts`, imports nothing itself.
  */
+import { BoundedFifoMap } from "../bounded-cache.js";
 
 let _sessionStartedAt = Date.now();
 
@@ -27,7 +30,8 @@ export function resetWorkspaceDiagnosticsCacheSession(
 	startedAt: number = Date.now(),
 ): void {
 	_sessionStartedAt = startedAt;
-	_fileCreatedAt = 0;
+	_fileCreations.clear();
+	_evictedCreatedAt = 0;
 }
 
 /** When the current session started, for entry-age comparisons. */
@@ -40,19 +44,63 @@ export function workspaceDiagnosticsCacheSessionStart(): number {
  * entry reported missing, with no edit to the importer and no edit to anything
  * the importer was known to import (an unresolved import has no edge in the
  * reverse-dependency index), so neither freshness check in `isEntryFresh` can
- * see it. This is the time of the latest `Created` watched-files notification
- * delivered to any language server this process runs; a finding-bearing entry
- * scanned at or before it is not served. Re-armed with the session clock above
- * (same reset), so it never outlives a session.
+ * see it.
+ *
+ * One record per language-server client: the last time that client SENT a
+ * `Created` watched-files notification, keyed by its server id and root. Only
+ * that server can answer differently because of it, and only for files under
+ * that root, so a finding entry is refused when one of the servers behind its
+ * findings has a record at a root holding the file, at or after the entry's
+ * scan (`workspaceFileCreatedAtFor`). A creation reported to another server,
+ * or under another root, leaves the entry serving.
+ *
+ * Bounded by the live client population; an evicted record folds into
+ * `_evictedCreatedAt`, which every entry honours, so eviction can only refuse
+ * more, never serve a stale finding. Re-armed with the session clock above.
  */
-let _fileCreatedAt = 0;
+interface FileCreation {
+	serverId: string;
+	root: string;
+	at: number;
+}
+const _fileCreations = new BoundedFifoMap<string, FileCreation>(128);
+let _evictedCreatedAt = 0;
 
-/** Record that a file-created notification just reached a language server. */
-export function noteWorkspaceFileCreated(at: number = Date.now()): void {
-	_fileCreatedAt = Math.max(_fileCreatedAt, at);
+/** Record that the client for `serverId` at `root` just sent a Created. */
+export function noteWorkspaceFileCreated(
+	serverId: string,
+	root: string,
+	at: number = Date.now(),
+): void {
+	const key = `${serverId}\0${root}`;
+	const latest = Math.max(_fileCreations.get(key)?.at ?? 0, at);
+	for (const [, evicted] of _fileCreations.set(key, {
+		serverId,
+		root,
+		at: latest,
+	})) {
+		_evictedCreatedAt = Math.max(_evictedCreatedAt, evicted.at);
+	}
 }
 
-/** Latest file-created notification time (0 when none this session). */
-export function workspaceFileCreatedAt(): number {
-	return _fileCreatedAt;
+/**
+ * The latest Created a server `fromServer` accepts was sent at a root `holds`
+ * accepts
+ * (0 when none this session).
+ */
+export function workspaceFileCreatedAtFor(
+	fromServer: (serverId: string) => boolean,
+	holds: (root: string) => boolean,
+): number {
+	let latest = _evictedCreatedAt;
+	for (const creation of _fileCreations.values()) {
+		if (
+			creation.at > latest &&
+			fromServer(creation.serverId) &&
+			holds(creation.root)
+		) {
+			latest = creation.at;
+		}
+	}
+	return latest;
 }

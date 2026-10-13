@@ -357,7 +357,7 @@ describe("expiry observability (#1782 AC4)", () => {
 				},
 			},
 		});
-		sessionModule.noteWorkspaceFileCreated(start + 10);
+		sessionModule.noteWorkspaceFileCreated("typescript", tmp, start + 10);
 
 		const ctx = cacheModule.createWorkspaceDiagnosticsCacheContext(tmp);
 		expect(ctx.lookup(file, SCOPE)).toBeUndefined();
@@ -404,7 +404,7 @@ describe("lookup() after a file creation (#4320)", () => {
 
 	it("drops a finding-bearing entry scanned before the creation and keeps a clean one", () => {
 		const { importer, clean } = seedTwo();
-		noteWorkspaceFileCreated(sessionStart + 10);
+		noteWorkspaceFileCreated("typescript", tmp, sessionStart + 10);
 		const ctx = createWorkspaceDiagnosticsCacheContext(tmp);
 		expect(ctx.lookup(importer, SCOPE)).toBeUndefined();
 		expect(ctx.lookup(clean, SCOPE)).toBeDefined();
@@ -417,11 +417,51 @@ describe("lookup() after a file creation (#4320)", () => {
 		).toBeDefined();
 	});
 
+	// #4320 r2 (F3): round 1 dropped every finding entry in the process on any
+	// Created, from any server, language or root (321 ms instead of 6 ms for a
+	// two-file replay after an unrelated write). Only the server that heard of
+	// the new file can answer differently, and only under the root it serves.
+	it("keeps serving a finding entry when the creation reached another server", () => {
+		const { importer } = seedTwo();
+		noteWorkspaceFileCreated("pyrefly", tmp, sessionStart + 10);
+		expect(
+			createWorkspaceDiagnosticsCacheContext(tmp).lookup(importer, SCOPE),
+		).toBeDefined();
+	});
+
+	it("keeps serving a finding entry when its server heard of a creation under another root", () => {
+		const { importer } = seedTwo();
+		const elsewhere = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-cache-expiry-other-"),
+		);
+		try {
+			noteWorkspaceFileCreated("typescript", elsewhere, sessionStart + 10);
+			expect(
+				createWorkspaceDiagnosticsCacheContext(tmp).lookup(importer, SCOPE),
+			).toBeDefined();
+		} finally {
+			fs.rmSync(elsewhere, { recursive: true, force: true });
+		}
+	});
+
+	// #4320 r2: the creation records are bounded; dropping the oldest must refuse
+	// more entries, never serve one a dropped record covered.
+	it("still refuses the entry after its creation record is evicted", () => {
+		const { importer } = seedTwo();
+		noteWorkspaceFileCreated("typescript", tmp, sessionStart + 10);
+		for (let index = 0; index < 200; index += 1) {
+			noteWorkspaceFileCreated(`other-${index}`, tmp, sessionStart + 2);
+		}
+		expect(
+			createWorkspaceDiagnosticsCacheContext(tmp).lookup(importer, SCOPE),
+		).toBeUndefined();
+	});
+
 	// #4320: a marker that outlived its session would drop every finding entry of
 	// every later session in a long-lived extension host.
 	it("does not outlive the session: re-arming the clock clears it", () => {
 		const { importer } = seedTwo();
-		noteWorkspaceFileCreated(sessionStart + 10);
+		noteWorkspaceFileCreated("typescript", tmp, sessionStart + 10);
 		resetWorkspaceDiagnosticsCacheSession(sessionStart);
 		expect(
 			createWorkspaceDiagnosticsCacheContext(tmp).lookup(importer, SCOPE),

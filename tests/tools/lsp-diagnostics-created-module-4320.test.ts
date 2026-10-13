@@ -79,6 +79,9 @@ describe("a module created after the server started (#4320)", () => {
 			].join("\n"),
 		);
 		fs.writeFileSync(path.join(workspace, ".luarc.json"), "{}\n");
+		// The rename case's module, born before any server starts: the rename
+		// moves only its name, so its inode keeps a birth older than the server.
+		fs.writeFileSync(path.join(workspace, "old_module.lua"), "return {}\n");
 		fs.mkdirSync(path.join(workspace, ".pi-lens"), { recursive: true });
 		fs.writeFileSync(
 			path.join(workspace, ".pi-lens", "lsp.json"),
@@ -92,7 +95,10 @@ describe("a module created after the server started (#4320)", () => {
 						rootMarkers: [".luarc.json"],
 					},
 				},
-				disabledServers: ["lua"],
+				// ast-grep and typos never confirm here, and a sweep persists no
+				// entry with an unconfirmed server, so the sweep case would never
+				// reach the cache it pins.
+				disabledServers: ["lua", "ast-grep", "typos"],
 			}),
 		);
 		const config = await import("../../clients/lsp/config.js");
@@ -131,5 +137,119 @@ describe("a module created after the server started (#4320)", () => {
 		expect(after.text).not.toContain("Cannot find module new_module");
 		// Exactly the module that never appears is still reported.
 		expect(after.details.primaryDiagnosticsCount).toBe(1);
+	}, 30_000);
+
+	// #4320 r2 (F1): with the importer listed before the module, round 1 served
+	// the importer from cache (and the server had not yet heard Created) and
+	// cleared it only on the next call.
+	it("clears the importer in the same call when it is listed before the new module", async () => {
+		const importer = path.join(workspace, "first.lua");
+		fs.writeFileSync(importer, 'import "./first_module"\nlocal value = 3\n');
+		expect((await diagnose([importer])).details.primaryDiagnosticsCount).toBe(
+			1,
+		);
+
+		const created = path.join(workspace, "first_module.lua");
+		fs.writeFileSync(created, "return {}\n");
+		const after = await diagnose([importer, created]);
+
+		expect(after.text).not.toContain("Cannot find module first_module");
+		expect(after.details.primaryDiagnosticsCount).toBe(0);
+	}, 30_000);
+
+	// #4320 r2 (F1): a workspace sweep looks every file up before it touches
+	// any, so round 1 always served the importer's cached finding for one sweep.
+	it("clears the importer in the same workspace sweep that first sees the new module", async () => {
+		const importer = path.join(workspace, "swept.lua");
+		fs.writeFileSync(importer, 'import "./swept_module"\nlocal value = 4\n');
+		const sweep = async () =>
+			(
+				await (
+					service as unknown as {
+						runWorkspaceDiagnostics: (
+							cwd: string,
+						) => Promise<Array<{ filePath: string; diagnostics: unknown[] }>>;
+					}
+				).runWorkspaceDiagnostics(workspace)
+			).find((result) => result.filePath === importer)?.diagnostics.length;
+		expect(await sweep()).toBe(1);
+		// The importer is itself new: its first open sent Created, which drops
+		// the entry the first sweep recorded. The second sweep records the
+		// entry the module's creation must not be answered from.
+		expect(await sweep()).toBe(1);
+
+		fs.writeFileSync(path.join(workspace, "swept_module.lua"), "return {}\n");
+
+		expect(await sweep()).toBe(0);
+	}, 60_000);
+
+	// #4320 r2 (class sweep): pi-lens writes a new module in one package while
+	// another package's client holds the failed lookup for it. The write's
+	// open sent Created only to the owning client; its siblings heard Changed
+	// (`announceToSiblings`), which Pyrefly ignores for a failed lookup.
+	it("clears an importer in a sibling package after pi-lens writes the module there", async () => {
+		for (const pkg of ["pkg_a", "pkg_b"]) {
+			fs.mkdirSync(path.join(workspace, pkg), { recursive: true });
+			fs.writeFileSync(path.join(workspace, pkg, ".luarc.json"), "{}\n");
+			// a project boundary, so each package gets its own client
+			fs.writeFileSync(path.join(workspace, pkg, "package.json"), "{}\n");
+		}
+		const importer = path.join(workspace, "pkg_a", "cross.lua");
+		fs.writeFileSync(
+			importer,
+			'import "../pkg_b/sibling_module"\nlocal value = 6\n',
+		);
+		const seed = path.join(workspace, "pkg_b", "seed.lua");
+		fs.writeFileSync(seed, "return {}\n");
+		expect(
+			(await diagnose([importer, seed])).details.primaryDiagnosticsCount,
+		).toBe(1);
+
+		const created = path.join(workspace, "pkg_b", "sibling_module.lua");
+		fs.writeFileSync(created, "return {}\n");
+		// the pi write path: the service syncs the written file
+		await (
+			service as unknown as {
+				touchFile: (
+					filePath: string,
+					content: string,
+					options: { diagnostics: "none"; source: string },
+				) => Promise<unknown>;
+			}
+		).touchFile(created, "return {}\n", {
+			diagnostics: "none",
+			source: "probe-4320",
+		});
+		const after = await diagnose([importer]);
+
+		expect(after.text).not.toContain("Cannot find module sibling_module");
+		expect(after.details.primaryDiagnosticsCount).toBe(0);
+	}, 30_000);
+
+	// #4320 r2 (F2): `rename_file` moves a module into the missing path. The
+	// moved inode keeps its old birth, so its first open read as Changed, and
+	// a server without didRenameFiles (Pyrefly) kept the failed lookup.
+	it("clears the importer after rename_file moves a module into the missing path", async () => {
+		const importer = path.join(workspace, "renamed_user.lua");
+		const source = path.join(workspace, "old_module.lua");
+		const target = path.join(workspace, "renamed_module.lua");
+		fs.writeFileSync(importer, 'import "./renamed_module"\nlocal value = 5\n');
+		expect(
+			(await diagnose([importer, source])).details.primaryDiagnosticsCount,
+		).toBe(1);
+
+		await (
+			service as unknown as {
+				renameFile: (
+					from: string,
+					to: string,
+					options: { cwd: string; apply: boolean },
+				) => Promise<unknown>;
+			}
+		).renameFile(source, target, { cwd: workspace, apply: true });
+		const after = await diagnose([target, importer]);
+
+		expect(after.text).not.toContain("Cannot find module renamed_module");
+		expect(after.details.primaryDiagnosticsCount).toBe(0);
 	}, 30_000);
 });

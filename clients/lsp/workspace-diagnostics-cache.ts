@@ -4,7 +4,7 @@ import { getProjectDataDir } from "../file-utils.js";
 import { writeFileAtomic } from "../atomic-write.js";
 import { readJsonCache } from "../json-cache-read.js";
 import { createGenerationMap } from "../generation-guard.js";
-import { normalizeMapKey } from "../path-utils.js";
+import { isUnderDir, normalizeMapKey } from "../path-utils.js";
 import { loadReverseDependencyIndexFromSnapshot } from "../reverse-deps.js";
 import { freshnessFromMtime } from "../freshness.js";
 import { logLatency } from "../latency-logger.js";
@@ -12,7 +12,7 @@ import { recordDegradationOnce } from "../degradation-ledger.js";
 import { compareOrdinal } from "../string-utils.js";
 import {
 	workspaceDiagnosticsCacheSessionStart,
-	workspaceFileCreatedAt,
+	workspaceFileCreatedAtFor,
 } from "./workspace-diagnostics-session.js";
 import type { LSPDiagnostic } from "./client.js";
 import {
@@ -424,11 +424,13 @@ export function classifyWorkspaceDiagnosticsCacheExpiry(
 		: 0;
 	if (findings === 0) return undefined;
 	if (entry.scannedAt < sessionStartedAt) return "pre-session";
-	// #4320: a findings entry scanned no later than the latest file-created
-	// notification may be a "cannot find module" the new file now answers. Clean
-	// entries keep serving: a creation cannot turn them into a stale clean the
-	// dependency check misses, and re-touching every clean file per new file is
-	// the cost this cache exists to avoid.
+	// #4320: a findings entry scanned no later than the latest Created its own
+	// servers were sent under its root (`workspaceFileCreatedAtFor`) may be a
+	// "cannot find module" the new file now answers. Clean entries keep
+	// serving, and re-touching every clean file per new file is the cost this
+	// cache exists to avoid. Known gap (#4346): a clean importer whose module
+	// is later broken is judged by the dependency check, which has no edge to a
+	// module created after the review graph was built.
 	if (entry.scannedAt <= fileCreatedAt) return "file-created";
 	if (now - entry.scannedAt > WORKSPACE_DIAGNOSTICS_FINDING_MAX_AGE_MS) {
 		return "max-age";
@@ -644,6 +646,24 @@ export interface WorkspaceDiagnosticsCacheContext {
 	persist(): void;
 }
 
+/**
+ * #4320: the latest Created sent to a server behind `entry`'s findings, at a
+ * client root holding `filePath`. The expiry policy keeps a clean entry
+ * serving whatever this answers.
+ */
+function fileCreatedAtFor(
+	filePath: string,
+	entry: WorkspaceDiagnosticsCacheEntry,
+): number {
+	// v3 entries carry each finding's `serverId` (#2776); the loader drops any
+	// that do not.
+	const serverIds = new Set(entry.diagnostics.map((d) => d.serverId));
+	return workspaceFileCreatedAtFor(
+		(serverId) => serverIds.has(serverId),
+		(root) => isUnderDir(filePath, root),
+	);
+}
+
 export function createWorkspaceDiagnosticsCacheContext(
 	cwd: string,
 ): WorkspaceDiagnosticsCacheContext {
@@ -768,7 +788,7 @@ export function createWorkspaceDiagnosticsCacheContext(
 				entry,
 				now,
 				workspaceDiagnosticsCacheSessionStart(),
-				workspaceFileCreatedAt(),
+				fileCreatedAtFor(filePath, entry),
 			);
 			if (expiry) {
 				delete entries[key];

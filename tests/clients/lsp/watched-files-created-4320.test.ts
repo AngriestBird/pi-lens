@@ -12,15 +12,20 @@
  *   file written after the client started, first open  -> Created (1)
  *   file that existed before the client started        -> Changed (2)
  *   Created, then Changed for the same URI in a window -> Created (1)
- *   reopen of a young file after close                 -> Created (1) again
+ *   reopen of a file already announced Created         -> Changed (2)
+ *   ... unless a Deleted for it came in between         -> Created (1)
+ *   existing file pi-lens replaced atomically          -> Changed (2)
+ *   batch announcement of a new file, then its open    -> Created (1), Changed (2)
  *   document with no file on disk (unsaved buffer)     -> Created (1)
  *   silent (cascade) open                              -> nothing
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createLSPClient } from "../../../clients/lsp/client.js";
+import { applyPartiallyApplicableEdits } from "../../../clients/partial-edit-apply.js";
 import type { launchLSP } from "../../../clients/lsp/launch.js";
 import { stopLSP } from "../../../clients/lsp/launch.js";
 import { spawnFakeLspServer } from "../../support/fake-lsp-server.js";
@@ -172,19 +177,114 @@ describe("didChangeWatchedFiles type for an opened file (#4320)", () => {
 		expect(received).toHaveLength(2);
 	});
 
-	it("sends Created again when a young file is reopened after close", async (ctx) => {
+	// #4320 r2: round 1 repeated Created on every reopen of a file born after
+	// the client started, and each one moved the cache's creation marker, so a
+	// file created once kept refusing that server's cached findings for good.
+	it("sends Changed when a file already announced Created is reopened", async (ctx) => {
 		requireBirthtime(ctx);
 		await startClient();
 		const file = path.join(dir, "reopened.ts");
 		fs.writeFileSync(file, "export const r = 1;\n");
 		await client!.notify.open(file, "export const r = 1;\n", "typescript");
-		await framesReceived(1);
+		expect((await framesReceived(1))[0]).toEqual([
+			{ uri: pathToFileURL(file).href, type: 1 },
+		]);
 
 		await client!.closeDocument(file);
 		await client!.notify.open(file, "export const r = 1;\n", "typescript");
 
 		expect((await framesReceived(2))[1]).toEqual([
+			{ uri: pathToFileURL(file).href, type: 2 },
+		]);
+	});
+
+	// #4320 r2: a Deleted makes the server forget the path, so the next
+	// creation must be announced again.
+	it("announces Created again after a Deleted for the path", async (ctx) => {
+		requireBirthtime(ctx);
+		await startClient();
+		const file = path.join(dir, "recreated.ts");
+		fs.writeFileSync(file, "export const r = 1;\n");
+		await client!.notify.open(file, "export const r = 1;\n", "typescript");
+		await framesReceived(1);
+		await client!.closeDocument(file);
+		client!.notify.watchedFileChange(file, 3);
+		await framesReceived(2);
+
+		await client!.notify.open(file, "export const r = 1;\n", "typescript");
+
+		expect((await framesReceived(3))[2]).toEqual([
 			{ uri: pathToFileURL(file).href, type: 1 },
+		]);
+	});
+
+	// #4320 r2 (F3): pi-lens's partial edit replaces the file through a temp
+	// file and a rename, so the edited file has a new inode born now. Round 1
+	// announced it as Created.
+	it("sends Changed for an existing file pi-lens replaced atomically", async (ctx) => {
+		const file = path.join(dir, "existing.ts");
+		try {
+			// shares OLD_FILE's inode, born long before this client
+			fs.linkSync(OLD_FILE, file);
+		} catch {
+			ctx.skip("cannot hard-link across filesystems here");
+		}
+		await startClient();
+		const raw = fs.readFileSync(file, "utf8");
+		const oldText = raw.split("\n")[0]!;
+		const start = raw.indexOf(oldText);
+		const result = await applyPartiallyApplicableEdits({
+			filePath: file,
+			edits: [
+				{
+					oldText,
+					appliedSpanText: oldText,
+					newText: "// edited",
+					originalIndex: 0,
+					snapshot: {
+						hash: createHash("sha256").update(raw, "utf8").digest("hex"),
+					},
+					spanStart: start,
+					spanEnd: start + oldText.length,
+				},
+			],
+		});
+		expect(result.appliedCount).toBe(1);
+		if (fs.statSync(file).birthtimeMs === fs.statSync(OLD_FILE).birthtimeMs) {
+			ctx.skip("the rename kept the birth time; nothing to distinguish");
+		}
+
+		await client!.notify.open(
+			file,
+			fs.readFileSync(file, "utf8"),
+			"typescript",
+		);
+
+		expect((await framesReceived(1))[0]).toEqual([
+			{ uri: pathToFileURL(file).href, type: 2 },
+		]);
+	});
+
+	// #4320 r2 (F1): a batch announces a new file before it serves any cached
+	// answer. The Created leaves once; the file's own open later in the batch is
+	// then Changed rather than a second Created, which would move the cache's
+	// creation marker past answers the batch just recorded.
+	it("announces a new file once, and its later open is Changed", async (ctx) => {
+		requireBirthtime(ctx);
+		await startClient();
+		const file = path.join(dir, "announced.ts");
+		fs.writeFileSync(file, "export const a = 1;\n");
+		const entry = { filePath: file, stat: fs.statSync(file) };
+
+		client!.notify.announceCreated!([entry]);
+		expect((await framesReceived(1))[0]).toEqual([
+			{ uri: pathToFileURL(file).href, type: 1 },
+		]);
+		client!.notify.announceCreated!([entry]);
+		await client!.notify.open(file, "export const a = 1;\n", "typescript");
+
+		expect((await framesReceived(2))[1]).toEqual([
+			{ uri: pathToFileURL(file).href, type: 2 },
 		]);
 	});
 

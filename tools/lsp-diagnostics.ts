@@ -1975,6 +1975,11 @@ async function collectBatchDiagnostics(
 		if (queue) queue.push(index);
 		else pendingIndices.set(file, [index]);
 	});
+	// #4320: a module created since a file was cached must reach its servers
+	// before any lookup below, whatever the order of `files`.
+	if (typeof lspService.announceCreatedFiles === "function") {
+		lspService.announceCreatedFiles(files);
+	}
 	const groups = groupFilesByPrimaryServer(files);
 	await runPerServerGroups(
 		groups,
