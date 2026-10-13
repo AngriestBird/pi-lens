@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -39,6 +40,9 @@ const REQUIRED_SECTIONS = [
 	"Observability",
 ];
 const HEADING = /^#{2,4}\s+(.+?)\s*$/;
+// The PR footer the template requires (.github/PULL_REQUEST_TEMPLATE.md).
+const GENERATED_FOOTER =
+	/^🤖 Generated with \[Claude Code\]\(https:\/\/claude\.com\/claude-code\)$/;
 const FLATTENED_BODY_MAX_NEWLINES = 2;
 // One post-image read bound, shared by the git and working-tree branches of
 // `headFileSource`: a file-count bound alone is not a byte bound.
@@ -1803,11 +1807,13 @@ function validDetectionGap(value) {
 /**
  * #4288: the `## Detection` contract. Returns [] when the section is absent
  * (the missing-section error stays owned by `lintPrBody`), otherwise one
- * message when any of the three lines is missing or invalid. Parsing runs over
+ * message when any of the three lines is missing or invalid. `ignoreUnfilled`
+ * (the local preflight, where the label does not require the section) also
+ * returns [] for a section holding only the template's own hint. Parsing runs over
  * the fenced-block-free body, so a quoted example inside a code fence never
  * satisfies the requirement (issue #4288, "Red first").
  */
-export function lintDetectionSection(body = "") {
+export function lintDetectionSection(body = "", options = {}) {
 	const lines = sourceWithoutFencedBlocks(body).split(/\r?\n/);
 	const headings = [];
 	for (let index = 0; index < lines.length; index += 1) {
@@ -1830,6 +1836,19 @@ export function lintDetectionSection(body = "") {
 	const content = lines
 		.slice(heading.index + 1, nextHeading?.index ?? lines.length)
 		.join("\n");
+	// A non-bug PR may leave the template's optional hint in place; that is an
+	// unanswered section, not a malformed answer.
+	// The mandatory footer is the last line of the body, so it lands inside
+	// this section when Detection is last; it is not the author's content.
+	if (
+		options.ignoreUnfilled &&
+		!hasRealContent(
+			content.split("\n").filter((line) => !GENERATED_FOOTER.test(line.trim())),
+			"detection",
+			templatePlaceholderLines(),
+		)
+	)
+		return [];
 	const caughtBy = detectionFieldValue(content, "caught by");
 	const shouldBy = detectionFieldValue(content, "should have been caught by");
 	const gap = detectionFieldValue(content, "gap");
@@ -2252,25 +2271,57 @@ export async function resolveBugClosing(body, fetchImpl = globalThis.fetch) {
 	const apiUrl = process.env.GITHUB_API_URL;
 	const repository = process.env.GITHUB_REPOSITORY;
 	if (!token || !apiUrl || !repository) return null;
+	return anyIssueLabelledBug(issues, async (number) => {
+		const response = await fetchImpl(
+			`${apiUrl}/repos/${repository}/issues/${number}`,
+			{
+				signal: AbortSignal.timeout(10_000),
+				headers: {
+					Accept: "application/vnd.github+json",
+					Authorization: `Bearer ${token}`,
+					"X-GitHub-Api-Version": "2022-11-28",
+				},
+			},
+		);
+		return response.ok ? await response.json() : null;
+	});
+}
+
+/**
+ * #4288 remainder: the local preflight reads the same labels through
+ * `gh api` (the repository placeholders resolve from `cwd`'s remote), so it
+ * agrees with CI instead of skipping the Detection rule offline. `null` when
+ * gh is missing, unauthenticated, or fails, exactly as for the CI reader.
+ */
+export async function resolveBugClosingViaGh(
+	body,
+	cwd = process.cwd(),
+	exec = execFileSync,
+) {
+	return anyIssueLabelledBug(parseCloseKeywords(body).issues, (number) =>
+		JSON.parse(
+			exec("gh", ["api", `repos/{owner}/{repo}/issues/${number}`], {
+				cwd,
+				encoding: "utf8",
+				timeout: 10_000,
+				killSignal: "SIGKILL",
+				stdio: ["ignore", "pipe", "pipe"],
+			}),
+		),
+	);
+}
+
+// The one label reader both transports share: `readIssue(number)` returns the
+// issue JSON, or null / throws when it cannot be read.
+async function anyIssueLabelledBug(issues, readIssue) {
 	for (const number of issues) {
 		let data;
 		try {
-			const response = await fetchImpl(
-				`${apiUrl}/repos/${repository}/issues/${number}`,
-				{
-					signal: AbortSignal.timeout(10_000),
-					headers: {
-						Accept: "application/vnd.github+json",
-						Authorization: `Bearer ${token}`,
-						"X-GitHub-Api-Version": "2022-11-28",
-					},
-				},
-			);
-			if (!response.ok) return null;
-			data = await response.json();
+			data = await readIssue(number);
 		} catch {
 			return null;
 		}
+		if (data === null) return null;
 		const labels = Array.isArray(data?.labels) ? data.labels : [];
 		if (
 			labels.some(
@@ -2551,10 +2602,9 @@ export function lintLocalPrBody(
 		// upstream ref, retain structural lint rather than inventing scope.
 		diff = "";
 	}
-	// #4288: the local preflight is offline. An injected resolver (tests) or an
-	// explicit tri-state wins; otherwise the label is unknown and a body that
-	// closes an issue warns instead of demanding a Detection section it cannot
-	// justify.
+	// #4288: an explicit tri-state (the CLI resolves it through gh before this
+	// call) or an injected resolver (tests) wins; otherwise the label is unknown
+	// and a body that closes an issue warns that the check was skipped.
 	let bugClosing = options.bugClosing;
 	if (bugClosing === undefined)
 		bugClosing =
@@ -2563,7 +2613,7 @@ export function lintLocalPrBody(
 				: null;
 	if (bugClosing === null && parseCloseKeywords(body).issues.length > 0)
 		console.warn(
-			'::warning::PR body check could not read the closed issue label offline, so the "## Detection" section is not required (#4288).',
+			'::warning::PR body check could not read the closed issue label (gh missing, unauthenticated, or failed), so the "## Detection" requirement check was skipped (#4288).',
 		);
 	const result = lintPrBody(body, {
 		requireTestAssessment: localTouchesTests(cwd, git),
@@ -2575,6 +2625,14 @@ export function lintLocalPrBody(
 		headFiles: options.headFiles,
 		proseMode: options.proseMode,
 	});
+	// #4288: a present section is validated whatever the label, so a prose-form
+	// answer reds here instead of at CI. `lintPrBody` already did it for a
+	// resolved bug.
+	if (bugClosing !== true) {
+		const detection = lintDetectionSection(body, { ignoreUnfilled: true });
+		result.errors.push(...detection);
+		if (detection.length) result.valid = false;
+	}
 	const classSweep = lintClassSweep(body, { diff });
 	if (classSweep.length) {
 		result.valid = false;
@@ -2621,28 +2679,26 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
 	const proseMode = process.argv.includes("--prose-grace") ? "warn" : "block";
 	if (titleIndex !== -1 && !title) throw new Error("--title requires text");
 	if (refIndex !== -1 && !ref) throw new Error("--ref requires a revision");
-	if (bodyIndex !== -1) {
-		const bodyPath = process.argv[bodyIndex + 1];
-		if (!bodyPath) throw new Error("--body requires a file path");
+	const localBodyPath =
+		bodyIndex !== -1
+			? process.argv[bodyIndex + 1]
+			: process.argv[2] === "--lint-local"
+				? process.argv[3]
+				: undefined;
+	if (bodyIndex !== -1 && !localBodyPath)
+		throw new Error("--body requires a file path");
+	if (bodyIndex === -1 && process.argv[2] === "--lint-local" && !localBodyPath)
+		throw new Error("--lint-local requires a file path");
+	if (localBodyPath) {
 		// --title is accepted for preflight parity. Title validation belongs to
 		// check-pr-title.mjs, but preflight passes both local input files.
-		const result = lintLocalPrBody(
-			readFileSync(bodyPath, "utf8"),
-			process.cwd(),
-			gitExecFileSync,
-			{ title, ref, proseMode },
-		);
-		for (const error of result.errors) console.error(error);
-		process.exitCode = result.valid ? 0 : 1;
-	} else if (process.argv[2] === "--lint-local") {
-		const bodyPath = process.argv[3];
-		if (!bodyPath) throw new Error("--lint-local requires a file path");
-		const result = lintLocalPrBody(
-			readFileSync(bodyPath, "utf8"),
-			process.cwd(),
-			gitExecFileSync,
-			{ title, ref, proseMode },
-		);
+		const localBody = readFileSync(localBodyPath, "utf8");
+		const result = lintLocalPrBody(localBody, process.cwd(), gitExecFileSync, {
+			title,
+			ref,
+			proseMode,
+			bugClosing: await resolveBugClosingViaGh(localBody),
+		});
 		for (const error of result.errors) console.error(error);
 		process.exitCode = result.valid ? 0 : 1;
 	} else
