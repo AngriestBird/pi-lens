@@ -134,33 +134,47 @@ function scanMkdtempSites(): { file: string; line: number; text: string }[] {
 	return sites;
 }
 
-/** Whether the mkdtemp call on 1-based `line` of `raw` escapes every contained
- *  root: a hard-coded `/tmp/` parent, or a parent derived from none of the real
- *  tmpdir, the repo root, the scratch seam, or a one-hop tmpdir `const`. */
-function mkdtempSiteEscapes(file: string, line: number, raw: string): boolean {
-	const rawLines = raw.split("\n");
-	// Multi-line calls carry path.join(os.tmpdir(), ...) on the
-	// following lines; read the call window, not the call line.
-	const window = rawLines.slice(line - 1, line + 2).join("\n");
-	if (HARDCODED_TMP.test(window)) return true;
-	if (TMPDIR_SOURCE.test(window)) return false;
-	if (TMPDIR_ENV_SOURCE.test(window)) return false;
-	if (REPO_ROOTED_SOURCE.test(window)) return false;
-	if (SCRATCH_SEAM_SOURCE.test(window)) return false;
-	// claimScratchDir IS the seam: it takes the caller's root.
-	if (file === "scripts/lib/scratch-dir.mjs") return false;
-	// One-hop const: a child of a tmpdir-derived `const root`.
-	const parentId = window.match(
-		/mkdtempSync\(\s*path\.join\(\s*([A-Za-z_$][\w$]*)\s*,/,
-	)?.[1];
-	if (parentId) {
-		const decl = new RegExp(
-			`const ${parentId} = [^;]*mkdtemp[^;]*tmpdir\\s*\\(`,
-			"s",
-		);
-		if (decl.test(raw)) return false;
-	}
-	return true;
+/** For one source file, whether the mkdtemp call on a 1-based line escapes
+ *  every contained root: a hard-coded `/tmp/` parent, or a parent derived from
+ *  none of the real tmpdir, the repo root, the scratch seam, or a one-hop
+ *  tmpdir `const`. The file is blanked once; the returned check reads it. */
+function mkdtempSiteEscapes(
+	file: string,
+	raw: string,
+): (line: number) => boolean {
+	// #4347: the needles read code, so a comment or a string that names a
+	// contained root cannot excuse a stray parent. HARDCODED_TMP is the one
+	// needle whose evidence is a string literal: it reads text with only the
+	// comments blanked. `stripSource` keeps lines, so the windows align.
+	const code = stripSource(raw);
+	const codeLines = code.split("\n");
+	const literalLines = stripSource(raw, { strings: "keep" }).split("\n");
+	return (line) => {
+		// Multi-line calls carry path.join(os.tmpdir(), ...) on the
+		// following lines; read the call window, not the call line.
+		const windowOf = (lines: string[]): string =>
+			lines.slice(line - 1, line + 2).join("\n");
+		const window = windowOf(codeLines);
+		if (HARDCODED_TMP.test(windowOf(literalLines))) return true;
+		if (TMPDIR_SOURCE.test(window)) return false;
+		if (TMPDIR_ENV_SOURCE.test(window)) return false;
+		if (REPO_ROOTED_SOURCE.test(window)) return false;
+		if (SCRATCH_SEAM_SOURCE.test(window)) return false;
+		// claimScratchDir IS the seam: it takes the caller's root.
+		if (file === "scripts/lib/scratch-dir.mjs") return false;
+		// One-hop const: a child of a tmpdir-derived `const root`.
+		const parentId = window.match(
+			/mkdtempSync\(\s*path\.join\(\s*([A-Za-z_$][\w$]*)\s*,/,
+		)?.[1];
+		if (parentId) {
+			const decl = new RegExp(
+				`const ${parentId} = [^;]*mkdtemp[^;]*tmpdir\\s*\\(`,
+				"s",
+			);
+			if (decl.test(code)) return false;
+		}
+		return true;
+	};
 }
 
 /** The tmp-fixture prefixes each `tests/` file declares (#3306).
@@ -491,15 +505,62 @@ describe("tmp-fixture-hygiene", () => {
 	});
 
 	it("routes every tests/ and scripts/ mkdtemp parent through a contained root", () => {
+		const checks = new Map<string, ((line: number) => boolean) | undefined>();
 		const escapees = scanMkdtempSites().filter((site) => {
 			if (site.file === "tests/support/vitest-setup.ts") return false;
-			const raw = readWalkedFile(path.join(REPO_ROOT, site.file));
-			if (raw === undefined) return false;
-			return mkdtempSiteEscapes(site.file, site.line, raw);
+			if (!checks.has(site.file)) {
+				const raw = readWalkedFile(path.join(REPO_ROOT, site.file));
+				checks.set(
+					site.file,
+					raw === undefined ? undefined : mkdtempSiteEscapes(site.file, raw),
+				);
+			}
+			return checks.get(site.file)?.(site.line) ?? false;
 		});
 		expect(
 			escapees.map((site) => `${site.file}:${site.line}: ${site.text}`),
 		).toEqual([]);
+	});
+
+	it("exempts a mkdtemp site only for code, never for a comment or a string", () => {
+		// #4347: the exemption regexes read the raw call window, so a comment or
+		// a string naming os.tmpdir() or REPO_ROOT beside a stray parent excused
+		// it. Each case is the call line plus its window; the call is assembled
+		// so this file's own source holds no extra site.
+		const call = ["fs.mkdtemp", "Sync(path.join(base, 'fixture-'));"].join("");
+		const escapes = (...lines: string[]) =>
+			mkdtempSiteEscapes("fixture.ts", lines.join("\n"))(1);
+		const tmpLiteral = ["'", "/tmp/", "fixture-'"].join("");
+		expect({
+			commentTmpdir: escapes(call, "// lives under os.tmpdir()"),
+			commentRepoRoot: escapes(`${call} // REPO_ROOT child`),
+			stringRepoRoot: escapes(call, "const note = 'REPO_ROOT';"),
+			// Outside the call window, so only the one-hop `const` read sees it.
+			commentOneHop: escapes(
+				call,
+				"",
+				"",
+				"// const base = fs.mkdtempSync(path.join(os.tmpdir(), 'x'));",
+			),
+			codeTmpdir: escapes(
+				["fs.mkdtemp", "Sync(path.join(os.tmpdir(), 'fixture-'));"].join(""),
+			),
+			commentHardcodedTmp: escapes(
+				["fs.mkdtemp", "Sync(path.join(os.tmpdir(), 'fixture-'));"].join(""),
+				`// never ${tmpLiteral}`,
+			),
+			stringHardcodedTmp: escapes(
+				["fs.mkdtemp", `Sync(${tmpLiteral});`].join(""),
+			),
+		}).toEqual({
+			commentTmpdir: true,
+			commentRepoRoot: true,
+			stringRepoRoot: true,
+			commentOneHop: true,
+			codeTmpdir: false,
+			commentHardcodedTmp: false,
+			stringHardcodedTmp: true,
+		});
 	});
 
 	it("keeps every real-tmp mkdtemp prefix in the pi-lens namespace", () => {
