@@ -624,6 +624,7 @@ export function clearReviewGraphWorkspaceCache(cwd?: string): void {
 			clearWorkspaceGraphTimer(entry);
 		_workspaceGraphCache.clear();
 		_sourcePathMemos.clear();
+		_importTargetMemos.clear();
 		_workspaceCacheEpoch++;
 		_sizeSkipVerdicts.clear();
 		// #2255 review V2: the non-cache retention registry is memory-attribution
@@ -651,6 +652,9 @@ export function clearReviewGraphWorkspaceCache(cwd?: string): void {
 		_workspaceGraphCache.delete(normalized);
 		_sourcePathMemos.delete(normalized);
 		_sizeSkipVerdicts.delete(normalized);
+		for (const key of _importTargetMemos.keys()) {
+			if (key.startsWith(`${normalized}\0`)) _importTargetMemos.delete(key);
+		}
 	}
 	_lastGraphBuildInfo = { reused: false, mode: "full", graphChanged: true };
 	// #1179: the global slot is back to the pristine default, so a subsequent
@@ -4836,6 +4840,8 @@ async function addFileToGraph(
  * #4346: `createdImportResolutions` counts the imports `importersResolvingTo`
  * resolves after a creation; its name filter keeps that to the imports that
  * name a created file's stem or directory, not every import in the graph.
+ * `importTargetExtractions` counts `resolveImportTargets` extractions, which
+ * its per-file memo keeps to one per unchanged file.
  */
 const _rebuildCounters = {
 	restoreComparisons: 0,
@@ -4843,6 +4849,7 @@ const _rebuildCounters = {
 	removeOwnedEdgeVisits: 0,
 	removeOwnedEdgePositions: 0,
 	createdImportResolutions: 0,
+	importTargetExtractions: 0,
 };
 
 export function _getReviewGraphRebuildCountersForTests(): {
@@ -4851,6 +4858,7 @@ export function _getReviewGraphRebuildCountersForTests(): {
 	removeOwnedEdgeVisits: number;
 	removeOwnedEdgePositions: number;
 	createdImportResolutions: number;
+	importTargetExtractions: number;
 } {
 	return { ..._rebuildCounters };
 }
@@ -4861,6 +4869,7 @@ export function _resetReviewGraphRebuildCountersForTests(): void {
 	_rebuildCounters.removeOwnedEdgeVisits = 0;
 	_rebuildCounters.removeOwnedEdgePositions = 0;
 	_rebuildCounters.createdImportResolutions = 0;
+	_rebuildCounters.importTargetExtractions = 0;
 }
 
 /**
@@ -5018,15 +5027,13 @@ function importersResolvingTo(
 			const importerPath = importer?.filePath;
 			if (!importer || !importerPath || importers.has(importerPath)) continue;
 			_rebuildCounters.createdImportResolutions++;
-			const targets =
-				importer.language === "jsts"
-					? [localImportToFile(cwd, importerPath, source, ignoredIds)]
-					: resolveImportToFiles(
-							cwd,
-							importerPath,
-							importer.language ?? "",
-							source,
-						);
+			const targets = resolvePlaceholderSource(
+				cwd,
+				importerPath,
+				importer.language ?? "",
+				source,
+				ignoredIds,
+			);
 			if (
 				targets.some(
 					(target) =>
@@ -5043,20 +5050,100 @@ function importersResolvingTo(
 }
 
 /**
+ * #4346: an import source a build left as a `module:`/`external:` placeholder,
+ * resolved by the resolver a full build uses for the importer's language.
+ */
+function resolvePlaceholderSource(
+	cwd: string,
+	importerPath: string,
+	language: string,
+	source: string,
+	ignoredIds?: ReadonlySet<string>,
+): Array<string | undefined> {
+	return language === "jsts"
+		? [localImportToFile(cwd, importerPath, source, ignoredIds)]
+		: resolveImportToFiles(cwd, importerPath, language, source);
+}
+
+/** #4346: one importer's extraction, kept while its bytes are unchanged. */
+interface ImportTargetMemo {
+	mtimeMs: number;
+	size: number;
+	language: string;
+	/** Files its imports resolved to when it was extracted. */
+	resolved: string[];
+	/** Sources that resolved to no file then; a created module may answer one. */
+	unresolved: string[];
+}
+const IMPORT_TARGET_MEMO_ENTRIES = 1024;
+const _importTargetMemos = new BoundedLruCache<string, ImportTargetMemo>(
+	IMPORT_TARGET_MEMO_ENTRIES,
+);
+
+/**
  * #4346: the files `filePath` imports now, as a full build resolves them: the
  * same per-file extraction and resolvers, into a throwaway graph. The LSP
  * diagnostics paths announce these to their servers, so a module created
  * outside pi-lens reaches a server that only ever sees its importer.
+ *
+ * The diagnostics paths call this on every batch that replays a finding, so
+ * the extraction is kept per file while its mtime and size are unchanged
+ * (the cache's own freshness test), and only the unresolved sources are
+ * resolved again: a module created since is the one thing that can change
+ * the answer without changing the importer (a warm 32-file replay went from
+ * 7 ms to 118-215 ms without this; the #4346 PR measures it).
  */
 export async function resolveImportTargets(
 	cwd: string,
 	filePath: string,
 ): Promise<string[]> {
-	const graph = createEmptyGraph();
-	await addFileToGraph(graph, cwd, filePath, undefined, undefined, "imports");
-	rebuildIndexes(graph);
+	let stat: fs.Stats;
+	try {
+		stat = fs.statSync(filePath);
+	} catch {
+		return [];
+	}
 	const own = normalizeMapKey(filePath);
-	return importTargetsForFile(graph, filePath).filter((file) => file !== own);
+	const key = `${normalizeMapKey(cwd)}\0${own}`;
+	let memo = _importTargetMemos.get(key);
+	if (memo?.mtimeMs !== stat.mtimeMs || memo.size !== stat.size) {
+		_rebuildCounters.importTargetExtractions++;
+		const graph = createEmptyGraph();
+		await addFileToGraph(graph, cwd, filePath, undefined, undefined, "imports");
+		rebuildIndexes(graph);
+		const unresolved = new Set<string>();
+		let language = "";
+		for (const edge of graph.edges) {
+			if (edge.kind !== "imports") continue;
+			const target = graph.nodes.get(edge.to);
+			const source = target?.metadata?.source;
+			if (target?.kind !== "module" && target?.kind !== "external") continue;
+			if (typeof source !== "string") continue;
+			unresolved.add(source);
+			language ||= graph.nodes.get(edge.from)?.language ?? "";
+		}
+		memo = {
+			mtimeMs: stat.mtimeMs,
+			size: stat.size,
+			language,
+			resolved: importTargetsForFile(graph, filePath),
+			unresolved: [...unresolved],
+		};
+		_importTargetMemos.set(key, memo);
+	}
+	const targets = new Set(memo.resolved);
+	for (const source of memo.unresolved) {
+		for (const target of resolvePlaceholderSource(
+			cwd,
+			filePath,
+			memo.language,
+			source,
+		)) {
+			if (target !== undefined) targets.add(normalizeMapKey(target));
+		}
+	}
+	targets.delete(own);
+	return [...targets];
 }
 
 async function updateGraphFiles(
