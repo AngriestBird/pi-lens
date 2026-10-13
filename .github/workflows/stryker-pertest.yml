@@ -10,6 +10,8 @@ name: Stryker per-test campaign (clients/)
 # here and the stryker-nightly tracking issue is never touched.
 
 on:
+  push:
+    branches: [fix/4365-stryker-pertest] # PILOT ONLY: removed before merge
   workflow_dispatch:
     inputs:
       module:
@@ -31,7 +33,7 @@ jobs:
     permissions:
       contents: read
     env:
-      MODULE: ${{ inputs.module }}
+      MODULE: ${{ inputs.module || 'clients/run-duration.ts' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
