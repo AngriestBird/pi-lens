@@ -97,6 +97,7 @@ function makeClient(
 		diagnosticsVersion: 0,
 		getDiagnostics: vi.fn(() => []),
 		notify: {
+			announceCreated: () => undefined,
 			open: vi.fn(async (filePath: string, content: string) => {
 				await behaviour.onOpen?.(filePath, content);
 				openDocuments.add(path.resolve(filePath));

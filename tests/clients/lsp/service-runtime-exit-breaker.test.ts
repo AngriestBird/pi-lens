@@ -70,6 +70,7 @@ function makeFakeClient(serverId: string) {
 			fake.intentional = true; // mirrors clientShutdown() setting shutdownRequested
 		}),
 		notify: {
+			announceCreated: () => undefined,
 			open: vi.fn().mockResolvedValue(undefined),
 			change: vi.fn().mockResolvedValue(undefined),
 		},

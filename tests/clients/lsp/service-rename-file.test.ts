@@ -20,7 +20,10 @@ type MockRenameClient = {
 	isDocumentOpen: ReturnType<typeof vi.fn>;
 	getDocumentUri: ReturnType<typeof vi.fn>;
 	closeDocument: ReturnType<typeof vi.fn>;
-	notify: { open: ReturnType<typeof vi.fn> };
+	notify: {
+		open: ReturnType<typeof vi.fn>;
+		watchedFileChange: ReturnType<typeof vi.fn>;
+	};
 	willRenameFiles: ReturnType<typeof vi.fn>;
 	getOperationSupport: ReturnType<typeof vi.fn>;
 	getMalformedFileOperationRegistrations: ReturnType<typeof vi.fn>;
@@ -34,7 +37,7 @@ function makeClient(root: string, edit: unknown): MockRenameClient {
 		isDocumentOpen: vi.fn(() => false),
 		getDocumentUri: vi.fn(() => undefined),
 		closeDocument: vi.fn(async () => undefined),
-		notify: { open: vi.fn(async () => undefined) },
+		notify: { open: vi.fn(async () => undefined), watchedFileChange: vi.fn() },
 		willRenameFiles: vi.fn(async () => edit),
 		getOperationSupport: vi.fn(() => ({
 			willRenameFiles: true,
@@ -319,6 +322,12 @@ describe("LSPService.renameFile", () => {
 			expect(second.willRenameFiles).not.toHaveBeenCalled();
 			expect(first.didRenameFiles).toHaveBeenCalledWith(oldPath, newPath);
 			expect(second.didRenameFiles).toHaveBeenCalledWith(oldPath, newPath);
+			// #4320 r2 (F2): what a file watcher reports for the move, so a server
+			// without didRenameFiles drops a failed lookup for the destination.
+			expect(first.notify.watchedFileChange.mock.calls).toEqual([
+				[oldPath, 3],
+				[newPath, 1],
+			]);
 			expect(fs.existsSync(oldPath)).toBe(false);
 			expect(fs.readFileSync(newPath, "utf-8")).toBe(
 				"export const value = 1;\n",

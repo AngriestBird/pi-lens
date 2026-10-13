@@ -62,6 +62,7 @@ export function makeLspServiceDouble(
 		getOperationSupport: vi.fn(() => undefined),
 		isDocumentOpen: vi.fn(() => false),
 		notifyExternalFileChange: vi.fn(async () => undefined),
+		announceCreatedFiles: vi.fn(() => undefined),
 		getBrokenStatus: vi.fn(() => undefined),
 	};
 

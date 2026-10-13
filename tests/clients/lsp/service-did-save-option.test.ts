@@ -80,6 +80,7 @@ function makeClient(serverId: string, open: ReturnType<typeof vi.fn>) {
 		getAllDiagnostics: vi.fn(() => new Map()),
 		getDiagnosticBinding: vi.fn(() => undefined),
 		notify: {
+			announceCreated: () => undefined,
 			open,
 			change: vi.fn(async () => {}),
 			close: vi.fn(async () => {}),

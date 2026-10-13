@@ -14,6 +14,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL, URL } from "node:url";
 import { BoundedFifoMap } from "../bounded-cache.js";
+import { workspaceFileCreatedAtFor } from "./workspace-diagnostics-session.js";
+import { FILE_CREATED, FILE_DELETED } from "./watch-queue.js";
 import { getProjectIgnoreMatcher, isExcludedDirName } from "../file-utils.js";
 import { recordLsp } from "../widget-state.js";
 import { applyAuxiliarySuppressions } from "../dispatch/auxiliary-lsp.js";
@@ -1780,6 +1782,9 @@ export class LSPService {
 		if (this.siblingAnnouncementHashes.get(normalizedPath) === contentHash) {
 			return Promise.resolve();
 		}
+		// #4320: a file new to a sibling's server must reach it as Created, as
+		// it does its owner; Pyrefly keeps a failed lookup through Changed.
+		this.announceCreatedFiles([filePath]);
 		return Promise.all(
 			getServersForFileWithConfig(filePath).map((server) =>
 				this.resolveServerRoot(server, filePath).then((root) => {
@@ -2133,6 +2138,17 @@ export class LSPService {
 		// #3501: another client instance (a respawn, a replacement after an
 		// eviction) was never sent this content, whatever its predecessor held.
 		if (previous.client.deref() !== client) return false;
+		// #4320: a Created this client sent since that push can change the answer
+		// for the same bytes (an import that failed now resolves), and the stored
+		// diagnostics predate it. Push again so the server re-checks the file.
+		if (
+			workspaceFileCreatedAtFor(
+				(id) => id === client.serverId,
+				(root) => root === client.root,
+			) >= previous.touchedAt
+		) {
+			return false;
+		}
 		return previous.fingerprint === contentFingerprint();
 	}
 
@@ -3868,6 +3884,44 @@ export class LSPService {
 				`${server.id}:${normalizeMapKey(root)}`,
 				true,
 			);
+		}
+	}
+
+	/**
+	 * #4320: before a batch serves any cached answer, tell every live client the
+	 * batch's files that are new to its server and not yet announced to it, and
+	 * send each client's waiting Created now (`notify.announceCreated`). Without
+	 * this, an importer listed before its new module, or any file of a
+	 * workspace sweep (which looks every file up before it touches any), is
+	 * answered from cache, or by a server that has not heard of the module yet.
+	 * Each client decides which entries are new to it (`watchedTypeForExisting`).
+	 */
+	announceCreatedFiles(filePaths: readonly string[]): void {
+		if (this.checkDestroyed() || this.state.clients.size === 0) return;
+		const byServer = new Map<
+			string,
+			Array<{ filePath: string; stat: nodeFs.Stats }>
+		>();
+		for (const filePath of filePaths) {
+			let stat: nodeFs.Stats;
+			try {
+				stat = nodeFs.statSync(filePath);
+			} catch {
+				continue; // absent: its open announces Created
+			}
+			for (const server of getServersForFileWithConfig(filePath)) {
+				const entries = byServer.get(server.id) ?? [];
+				entries.push({ filePath, stat });
+				byServer.set(server.id, entries);
+			}
+		}
+		for (const [key, client] of this.state.clients) {
+			if (!client.isAlive()) continue;
+			const entries = [...byServer].flatMap(([serverId, list]) =>
+				key.startsWith(`${serverId}:`) ? list : [],
+			);
+			// Called with no entries too: the client still sends a waiting Created.
+			client.notify.announceCreated(entries);
 		}
 	}
 
@@ -8848,6 +8902,14 @@ export class LSPService {
 			}),
 		);
 
+		// #4320: a rename is a delete and a create on disk, which is what a file
+		// watcher reports beside didRenameFiles. A server without didRename
+		// (Pyrefly registers only willRename) otherwise hears Changed for the
+		// destination on its first open, because the moved inode keeps its old
+		// birth, and keeps a failed lookup for that path.
+		await this.notifyExternalFileChange(oldFilePath, FILE_DELETED);
+		await this.notifyExternalFileChange(newFilePath, FILE_CREATED);
+
 		const files = [...new Set([...applied.files, oldFilePath, newFilePath])];
 		if (options.mutationContext) {
 			recordLspMutation(options.mutationContext, {
@@ -9467,6 +9529,9 @@ export class LSPService {
 			);
 			return !capped;
 		};
+		// #4320: lookups below run before any touch, so a module created since
+		// the last sweep must reach its servers first.
+		this.announceCreatedFiles(files);
 		const cachedResults: LSPWorkspaceDiagnosticResult[] = [];
 		const filesToTouch: string[] = [];
 		const writeIndexByPath = new Map<string, number | undefined>();

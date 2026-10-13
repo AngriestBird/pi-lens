@@ -94,6 +94,7 @@ function makeClient(
 		diagnosticsVersion: 0,
 		getDiagnostics: vi.fn(() => diags),
 		notify: {
+			announceCreated: () => undefined,
 			open: vi.fn(() =>
 				stallWrite ? new Promise<void>(() => {}) : Promise.resolve(),
 			),
@@ -245,6 +246,7 @@ describe("#743 — per-server notify-write deadlines", () => {
 			diagnosticsVersion: 0,
 			getDiagnostics: vi.fn(() => []),
 			notify: {
+				announceCreated: () => undefined,
 				open: vi.fn(() =>
 					stall ? new Promise<void>(() => {}) : Promise.resolve(),
 				),

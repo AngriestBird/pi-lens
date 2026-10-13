@@ -123,9 +123,16 @@ import {
 	resetTreeSitterClientLoadState,
 } from "../../clients/tree-sitter-shared.js";
 import {
+	noteWorkspaceFileCreated,
 	resetWorkspaceDiagnosticsCacheSession,
 	workspaceDiagnosticsCacheSessionStart,
+	workspaceFileCreatedAtFor,
 } from "../../clients/lsp/workspace-diagnostics-session.js";
+import {
+	noteAtomicReplace,
+	pathBirthtimeMs,
+	resetPathBirthForTests,
+} from "../../clients/path-birth.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
 import { clearFormatterCache } from "../../clients/formatters.js";
 import * as formattersModule from "../../clients/formatters.js";
@@ -842,6 +849,24 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 		},
 	},
 	{
+		id: "lsp-workspace-diagnostics-cache:fileCreatedAt",
+		module: "lsp/workspace-diagnostics-session.ts",
+		state: "_fileCreations; _evictedCreatedAt",
+		policy: "session_start",
+		resetName: "resetWorkspaceDiagnosticsCacheSession",
+		reason:
+			"#4320: each client's latest Created send drops older cached findings of that server under that root, and `_evictedCreatedAt` holds what the bound evicted; kept across sessions they would drop every later session's findings entries.",
+		probe: {
+			arm: () => noteWorkspaceFileCreated("probe-server", "/", 1),
+			isArmed: () =>
+				workspaceFileCreatedAtFor(
+					() => true,
+					() => true,
+				) === 0,
+			reset: () => resetWorkspaceDiagnosticsCacheSession(),
+		},
+	},
+	{
 		id: "lsp-workspace-diagnostics-cache:sessionClock",
 		module: "lsp/workspace-diagnostics-session.ts",
 		state: "_sessionStartedAt",
@@ -990,6 +1015,31 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 		sessionStartClosureReset: true,
 		reason:
 			"#2319: the verified path-attribution guess tally is a per-session counter that emits one path_attribution_verified_rollup row at session end; PR #2312's class sweep flagged the module-scope `let` as the same latent shape as the bind rollup, so it now rides getProcessSingleton (shape 25). Its reset runs in index.ts's session_start closure after the #473 decision and only on the primary path, so a secondary cannot erase the primary's tally; the count is memory-only best-effort observability, so a lost tally is noise, not data.",
+	},
+	{
+		id: "path-birth:replacedPathBirths",
+		module: "path-birth.ts",
+		state: "replacedPathBirths; birthIsCtimeAlias",
+		policy: "process_lifetime",
+		resetName: "resetPathBirthForTests",
+		reason:
+			"#4320 r2: `replacedPathBirths` records that an inode pi-lens installed by an atomic partial edit stands for a path born earlier. That is a fact about files on disk, not about a session: a session_start clear would make the next first open of every file this process edited read as a creation and send the server a Created. Bounded (1024), keyed by the installed inode's own birth so a reused inode number never inherits it. `birthIsCtimeAlias` memoises whether libuv fell back from statx, a property of the process that cannot change.",
+		probe: {
+			arm: () =>
+				noteAtomicReplace(
+					{ dev: 1, ino: 7, birthtimeMs: 1_000, ctimeMs: 1_001 },
+					{ dev: 1, ino: 8, birthtimeMs: 9_000, ctimeMs: 9_001 },
+				),
+			// Unarmed, the installed inode answers anything but the carried birth.
+			isArmed: () =>
+				pathBirthtimeMs({
+					dev: 1,
+					ino: 8,
+					birthtimeMs: 9_000,
+					ctimeMs: 9_001,
+				}) !== 1_000,
+			reset: () => resetPathBirthForTests(),
+		},
 	},
 	{
 		id: "pending-runner-findings:pending",
@@ -1663,6 +1713,9 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"lsp/session-roots.ts": 1,
 	"lsp/spawn-history.ts": 1,
 	"lsp/workspace-diagnostics-cache.ts": 1,
+	// #4320 r2: `_fileCreations`, the bounded per-(server, root) Created
+	// markers, registered above with `_evictedCreatedAt`.
+	"lsp/workspace-diagnostics-session.ts": 1,
 	"lsp/workspace-sweep-hold.ts": 0,
 	// #2455 fix round 2: `warmGraphFacts` (`new FactStore("mcp-analyze")`) is now
 	// counted (1 → 2) under the widened "declared in clients/" predicate. See
@@ -1696,6 +1749,8 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// module-scope scan sees no container here; the getProcessSingleton SIGNAL
 	// is what flags this file now.
 	"path-attribution-telemetry.ts": 0,
+	// #4320 r2: `replacedPathBirths`, registered above (process_lifetime).
+	"path-birth.ts": 1,
 	// #2506: the container key is a Symbol.for constant, so the scan sees no
 	// mutable module-scope container here — the same shape as
 	// process-singletons.ts just below.
