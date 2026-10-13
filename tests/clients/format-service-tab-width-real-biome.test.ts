@@ -165,3 +165,5 @@ describe.skipIf(!BIOME_PRESENT)(
 		});
 	},
 );
+
+// flake-shape: real-process-spawn — the real Biome binary's wrapping at the 80-column boundary is the subject; a mocked spawn can only restate the argv the fix chose

@@ -243,6 +243,11 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"a real ast-grep child applies ignore rules through its own file matcher",
 	},
+	"real-process-spawn:clients/format-service-tab-width-real-biome.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the real Biome binary's wrapping at the 80-column boundary is the subject; a mocked spawn can only restate the argv the fix chose",
+	},
 	"real-process-spawn:clients/git-tracked-ignore.test.ts": {
 		detector: "real-process-spawn",
 		reason:
