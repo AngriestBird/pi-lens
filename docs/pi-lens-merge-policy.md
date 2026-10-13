@@ -202,6 +202,13 @@ re-verification; small code folds carry a red-first test and return to the same
 reviewer. File only different-seam, blocked, decision-dependent, untouched
 pre-existing, or risk-class-changing items, as one consolidated issue per PR.
 
+A brief carries the lane's facts and the task, and points at the role
+contract for everything else. Lane facts are the worktree, branch, base,
+TMPDIR, test-worker cap, Git grant, and deliverable path. It never restates
+contract rules such as hooks, trailers, stash, PR-body lint or summary
+shape, because the role wrapper loads them. `bin/claude-lane.sh` prints
+exactly the lane facts.
+
 ## Round-count rail (orchestrator)
 
 When a verify round reports that a fix round introduced a NEW defect on the
@@ -335,6 +342,13 @@ operator's private notes, so a different orchestrator can run the same train.
   smaller model loses: #2693 took two Sonnet rounds (~720k tokens) on a text
   scanner before the rail sent round 3 to Opus, which rewrote it on the AST
   and closed in two rounds.
+- **Haiku 5.5 is the orchestrator's cheap lane.** The orchestrator uses it
+  without asking for read-only locate and premise-pointer passes, CI-red and
+  nightly investigations (`pi-lens-investigator`), and mechanical lanes
+  through `pi-lens-fixer-light`. Mechanical lanes include trailing folds,
+  dependabot pin and allowlist moves, and reviewer-prescribed test rows. It
+  never authors detectors or governance sweeps (the Opus rule above), and
+  never takes lifecycle or identity seams or reviews of runtime diffs.
 - **Brief shape for a fixer.** Issue/PR number and head; the checked-out
   branch; the exact findings with file:line, the reviewer's probe to reproduce
   FIRST, and the remedy shape the maintainer chose; what to fold (net-count)
@@ -747,3 +761,5 @@ Each row cost a lane at least once; the prose above carries the record.
 | Adapting repository fixtures to a Plegma guard failure | Verify caught the harness-specific workaround; the fixture lane should have reported the environment block without changing repository tests. Plegma-guard fixture failures are now reported as environmental. |
 | Reading a piped command's exit status instead of its outcome record | A pending chain was reported as successful because `tail` returned zero; the landing check should have read the chain's own result. `land.sh` now prints `LAND-RESULT #N: <state> (rc=N)`, which callers must read. |
 | Routing a same-seam new defect to a weaker fixer after a prior round | The next verify found the same-seam defect after a Luna-high assignment; round routing should have selected Opus from the seam and round count. Rule: a new same-seam defect after two rounds goes to Opus (cloud fixer when the subscription is short) with the state table and model step first. |
+| Asking the maintainer whether to build or file a missing detection layer | The orchestrator owns the detection retrospective: it files the layer issue, or folds it into the same-seam PR, the same day, and tells the maintainer (maintainer, 2026-10-13). |
+| Sending a detector or governance-test round to a cheap model | The #4341 npx-pin scanner went to a Haiku round before the Opus-from-round-1 rule was re-read; check the routing bullets before every detector brief. |
