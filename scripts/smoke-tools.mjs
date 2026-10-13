@@ -634,6 +634,15 @@ const LSP_FIXTURES = [
 		tools: ["pyright"],
 		disableServers: ["python-jedi"],
 		expectServerId: "python",
+		// #4320/#4346: `runCreatedModuleWitness` (pyright caches a failed import
+		// lookup, measured on #4320 and #4346).
+		createdModuleWitness: {
+			ext: ".py",
+			importerText: (name) => `import ${name}\n\nprint(${name}.VALUE)\n`,
+			moduleText: "VALUE = 1\n",
+			reportsMissing: (text, name) =>
+				text.includes(`Import "${name}" could not be resolved`),
+		},
 	},
 	// Clean (no-diagnostic) counterpart — bench-only signal for the clean-file edit
 	// path (#240). Every other fixture is intentionally broken, which masks how long
@@ -2383,6 +2392,99 @@ export function report(rows, title, { failOnSkipOnly = false } = {}) {
 }
 
 /**
+ * Created-module witness (recurrence: #4320, where a module created after the
+ * language server started stayed unresolved in its importer for the server's
+ * life; #4346 found the same for a module created outside pi-lens). Once the
+ * fixture's server is up, a new module is created twice: through pi-lens's
+ * write path (written, then synced by the LSP service as the post-write
+ * pipeline does) and from outside pi-lens (copied in, no tool call). Each
+ * importer is diagnosed alone before and after; the missing import must be
+ * reported first (else the row proves nothing) and must clear on the next
+ * call. One row per case, reported apart from the clean gate's census.
+ */
+export async function runCreatedModuleWitness(
+	fx,
+	{ workspace, execute, getLSPService },
+) {
+	const witness = fx.createdModuleWitness;
+	const tag = `${process.pid}_${Date.now().toString(36)}`;
+	const diagnose = async (file) => {
+		const result = await execute(
+			`smoke-lsp-created-${fx.lang}`,
+			{ path: file, waitMs: LSP_DIAGNOSTICS_WAIT_MS, serverScope: "primary" },
+			undefined,
+			null,
+			{ cwd: workspace },
+		);
+		return String(result?.content?.[0]?.text ?? "");
+	};
+	const cases = [
+		{
+			label: "pi write",
+			create: async (modulePath) => {
+				fs.writeFileSync(modulePath, witness.moduleText);
+				await getLSPService().touchFile(modulePath, witness.moduleText, {
+					diagnostics: "none",
+					source: "smoke-created-module-witness",
+				});
+			},
+		},
+		{
+			label: "outside pi-lens",
+			create: async (modulePath) => {
+				const staged = `${modulePath}.staged`;
+				fs.writeFileSync(staged, witness.moduleText);
+				fs.copyFileSync(staged, modulePath);
+				fs.rmSync(staged, { force: true });
+			},
+		},
+	];
+	const rows = [];
+	for (const [index, created] of cases.entries()) {
+		const name = `witness_mod_${index}_${tag}`;
+		const importer = path.join(
+			workspace,
+			`witness_user_${index}${witness.ext}`,
+		);
+		const modulePath = path.join(workspace, `${name}${witness.ext}`);
+		const runner = `${fx.serverHint} created (${created.label})`;
+		try {
+			fs.writeFileSync(importer, witness.importerText(name));
+			if (!witness.reportsMissing(await diagnose(importer), name)) {
+				rows.push({
+					lang: fx.lang,
+					runner,
+					state: "fail",
+					detail: `precondition: the missing import of ${name} was not reported before it was created`,
+					diags: 0,
+				});
+				continue;
+			}
+			await created.create(modulePath);
+			const stale = witness.reportsMissing(await diagnose(importer), name);
+			rows.push({
+				lang: fx.lang,
+				runner,
+				state: stale ? "fail" : "pass",
+				detail: stale
+					? `the importer still reports ${name} missing after it was created (#4320/#4346)`
+					: "the importer's missing import cleared on the next call",
+				diags: stale ? 1 : 0,
+			});
+		} catch (err) {
+			rows.push({
+				lang: fx.lang,
+				runner,
+				state: "fail",
+				detail: `witness error: ${err?.message ?? err}`,
+				diags: 0,
+			});
+		}
+	}
+	return rows;
+}
+
+/**
  * Gating LSP layer (#2780): run the real lsp_diagnostics handler against each
  * installed primary fixture and require at least one primary finding. This is
  * intentionally separate from the handshake layer, whose contract is only
@@ -2452,6 +2554,7 @@ export async function runLspGate({ langs = [], install, verbose, deps } = {}) {
 		return 0;
 	}
 	const rows = [];
+	const witnessRows = [];
 	let handshakeCensus = {};
 	const censusPath = process.env.PI_LENS_HOME
 		? path.join(process.env.PI_LENS_HOME, "lsp-handshake-census.json")
@@ -2531,6 +2634,24 @@ export async function runLspGate({ langs = [], install, verbose, deps } = {}) {
 				: classifyLspGateResult(result, fx);
 			rows.push({ lang: fx.lang, runner: fx.serverHint, ...verdict });
 			if (verbose) console.error(`[${fx.lang}] ${verdict.detail}`);
+			if (fx.createdModuleWitness && verdict.state === "pass") {
+				const getLSPService =
+					deps?.getLSPService ??
+					(
+						await import(
+							pathToFileURL(
+								path.join(repoRoot, "dist", "clients", "lsp", "index.js"),
+							).href
+						)
+					).getLSPService;
+				witnessRows.push(
+					...(await runCreatedModuleWitness(fx, {
+						workspace,
+						execute: (...args) => createLspDiagnosticsTool().execute(...args),
+						getLSPService,
+					})),
+				);
+			}
 		} catch (err) {
 			rows.push({
 				lang: fx.lang,
@@ -2549,7 +2670,10 @@ export async function runLspGate({ langs = [], install, verbose, deps } = {}) {
 		{ failOnSkipOnly: true },
 	);
 	console.log(formatGateCensus(population, rows, langs));
-	return failures;
+	if (witnessRows.length === 0) return failures;
+	return (
+		failures + report(witnessRows, "LSP created-module witness (#4320/#4346)")
+	);
 }
 
 /**
