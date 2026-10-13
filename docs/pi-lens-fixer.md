@@ -117,7 +117,8 @@ exports change.
   `node_modules`.
 - Run release-QA end to end when a release-QA row changes.
 - Run the reviewer's standing probes (`docs/pi-lens-reviewer.md`) that the diff
-  can trip, and quote their output in the PR body.
+  can trip, and quote their output in the PR body. The `verify-pi-lens` skill
+  (`.claude/skills/verify-pi-lens/SKILL.md`) holds the real-path recipes.
 
 ## Fix rounds
 

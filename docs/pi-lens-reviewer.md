@@ -95,6 +95,9 @@ real seam. Check that every gate the diff adds is exercised through that path.
 ## Standing probes
 
 Run every probe the diff can trip and say which ran and what each returned.
+For LSP diagnostics, the formatter, the review graph and `rename_file`, start
+from the `verify-pi-lens` skill (`.claude/skills/verify-pi-lens/SKILL.md`)
+instead of rebuilding the probe.
 
 - **Ladder and deletion sweep.** Every ask names the ladder rung it serves. An
   ask that adds a guard names its recurrence; an ask that deletes a defensive
