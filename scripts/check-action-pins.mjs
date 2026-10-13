@@ -72,7 +72,7 @@ export function validatePins(pins, resolveTag, exemptions = {}) {
 	).then((results) => results.filter(Boolean));
 }
 
-async function workflowFiles(root = ROOT) {
+export async function workflowFiles(root = ROOT) {
 	const found = [];
 	async function walk(directory) {
 		let entries;
