@@ -133,10 +133,11 @@
  */
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
+import { BoundedLruCache } from "./bounded-cache.js";
 import { bounded } from "./deadline-utils.js";
 import { recordDegradationOnce } from "./degradation-ledger.js";
 import { HOOK_WALL_BUDGET_MS } from "./hook-budgets.js";
-import { normalizeEphemeralMapKey } from "./path-utils.js";
+import { normalizeEphemeralMapKey, normalizeMapKey } from "./path-utils.js";
 import { toRunnerDisplayPath } from "./dispatch/runner-context.js";
 import { resolveImportToFiles } from "./review-graph/import-resolvers.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
@@ -367,17 +368,41 @@ async function resolveForwardImportsMemoized(
 }
 
 /**
- * Production forward-import resolver. Parses `filePath` with its tree-sitter grammar
- * and resolves every extracted import source to in-project files. Degrades to an
- * empty list (never throws) when the grammar, client, or file is unavailable — the
- * sweep then falls back to checking only the blocker file's own drift.
+ * #4346: one file's parsed import sources, kept while its mtime and size are
+ * unchanged, so a caller that asks on every diagnostics call (the LSP
+ * created-module producer, `clients/lsp/created-import-targets.ts`) parses
+ * each file version once. Only the parse is kept: `extractForwardImportPaths`
+ * resolves the sources on every call, because a module created since can
+ * answer one without the importer changing. The stat is taken before the read,
+ * so a write racing the parse leaves a key that no longer matches the disk.
  */
-export async function extractForwardImportPaths(
-	cwd: string,
+const FORWARD_IMPORT_SOURCE_MEMO_ENTRIES = 1024;
+const forwardImportSourceMemo = new BoundedLruCache<
+	string,
+	{ mtimeMs: number; size: number; sources: string[] }
+>(FORWARD_IMPORT_SOURCE_MEMO_ENTRIES);
+let forwardImportParses = 0;
+
+/** #4346: parses `forwardImportSources` has run (memo misses), for tests. */
+export function _getForwardImportParsesForTests(): number {
+	return forwardImportParses;
+}
+
+async function forwardImportSources(
 	filePath: string,
+	languageId: string,
 ): Promise<string[]> {
-	const languageId = resolveTreeSitterLanguage(filePath);
-	if (!languageId) return [];
+	let stat: fs.Stats;
+	try {
+		stat = fs.statSync(filePath);
+	} catch {
+		return [];
+	}
+	const key = normalizeMapKey(filePath);
+	const memo = forwardImportSourceMemo.get(key);
+	if (memo?.mtimeMs === stat.mtimeMs && memo.size === stat.size) {
+		return memo.sources;
+	}
 	const client = getSharedTreeSitterClient();
 	if (!client) return [];
 	const extractor = await getExtractor(languageId);
@@ -398,14 +423,35 @@ export async function extractForwardImportPaths(
 		"blocker-freshness",
 	);
 	if (!outcome.parsed) return [];
+	forwardImportParses++;
+	const sources = [...new Set(outcome.value.map((ref) => ref.source))];
+	forwardImportSourceMemo.set(key, {
+		mtimeMs: stat.mtimeMs,
+		size: stat.size,
+		sources,
+	});
+	return sources;
+}
 
+/**
+ * Production forward-import resolver. Parses `filePath` with its tree-sitter grammar
+ * and resolves every extracted import source to in-project files. Degrades to an
+ * empty list (never throws) when the grammar, client, or file is unavailable — the
+ * sweep then falls back to checking only the blocker file's own drift.
+ */
+export async function extractForwardImportPaths(
+	cwd: string,
+	filePath: string,
+): Promise<string[]> {
+	const languageId = resolveTreeSitterLanguage(filePath);
+	if (!languageId) return [];
 	const resolved = new Set<string>();
-	for (const ref of outcome.value) {
+	for (const source of await forwardImportSources(filePath, languageId)) {
 		for (const target of resolveImportToFiles(
 			cwd,
 			filePath,
 			languageId,
-			ref.source,
+			source,
 		)) {
 			resolved.add(target);
 		}

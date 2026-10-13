@@ -7,8 +7,9 @@
  *
  * The importer is the one input that names the module, and it is in hand when
  * a diagnostics call is about to answer for it. So before a batch answers, the
- * files its importers resolve to now (`resolveImportTargets`, the review
- * graph's own per-file extraction and resolvers) join the files announced
+ * files its importers resolve to now (`extractForwardImportPaths`, the
+ * tree-sitter import extraction and the review graph's resolvers, which the
+ * inline-blocker sweep also uses) join the files announced
  * through `LSPService.announceCreatedFiles`. Each client still decides what is
  * new to it (#4344's path-birth rule and announced memory), so an old module,
  * or one already announced, sends nothing.
@@ -36,14 +37,14 @@ export async function importTargetsToAnnounce(
 			reason: `resolved the imports of ${CREATED_IMPORT_SCAN_MAX_FILES} of ${importers.length} files in one diagnostics call`,
 		});
 	}
-	// Lazy: the review graph's extraction stack stays off the LSP module graph
-	// until a call has an importer to resolve.
-	const { resolveImportTargets } = await import("../review-graph/builder.js");
+	// Lazy: the import extraction stack stays off the LSP module graph until a
+	// call has an importer to resolve.
+	const { extractForwardImportPaths } = await import("../blocker-freshness.js");
 	const targets = new Set<string>();
-	// Extraction answers [] for a missing, unreadable or non-source file (the
-	// graph build relies on the same); it does not throw.
+	// Extraction answers [] for a missing, unreadable or non-source file; it
+	// does not throw (its own contract, which the blocker sweep relies on too).
 	for (const importer of importers.slice(0, CREATED_IMPORT_SCAN_MAX_FILES)) {
-		for (const target of await resolveImportTargets(cwd, importer)) {
+		for (const target of await extractForwardImportPaths(cwd, importer)) {
 			targets.add(target);
 		}
 	}

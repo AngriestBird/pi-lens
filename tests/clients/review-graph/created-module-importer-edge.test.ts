@@ -31,7 +31,6 @@ import {
 	clearGraphCache,
 	clearReviewGraphWorkspaceCache,
 	getGraphImportChanges,
-	resolveImportTargets,
 } from "../../../clients/review-graph/builder.js";
 import type { ReviewGraph } from "../../../clients/review-graph/types.js";
 import { removeTempDirSync } from "../test-utils.js";
@@ -258,68 +257,5 @@ describe("the workspace-diagnostics cache on the new edge (#4346)", () => {
 		const later = new Date(scannedAt + 60_000);
 		fs.utimesSync(module, later, later);
 		expect(isEntryFresh(importer, cleanEntry, getImports)).toBe(false);
-	});
-});
-
-describe("resolveImportTargets (#4346)", () => {
-	it("answers the files an importer resolves now, as a full build does", async () => {
-		const root = fs.mkdtempSync(
-			path.join(os.tmpdir(), "pi-lens-4346-targets-"),
-		);
-		roots.push(root);
-		writeTree(root, {
-			"pyproject.toml": '[project]\nname="x"\nversion="0.0.0"\n',
-			"src/fixturepkg/__init__.py": "",
-			"tools/probe.py":
-				"from fixturepkg.new_module import describe\nimport os\n\nvalue = describe()\n",
-		});
-		const importer = path.join(root, "tools/probe.py");
-		expect(await resolveImportTargets(root, importer)).toEqual([]);
-
-		writeTree(root, {
-			"src/fixturepkg/new_module.py": "def describe():\n    return 1\n",
-		});
-		const targets = await resolveImportTargets(root, importer);
-		expect(targets.map((file) => relative(root, file))).toEqual([
-			"src/fixturepkg/new_module.py",
-		]);
-	});
-
-	// Recurrence: #4344 r1's replay regression class. The diagnostics paths
-	// call this on every batch that replays a finding; re-extracting each file
-	// took a warm 32-file replay from 7 ms to 118-215 ms (#4346 measurement).
-	it("extracts an unchanged file once and still sees a module created since", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-4346-memo-"));
-		roots.push(root);
-		writeTree(root, {
-			"package.json": '{"name":"g","version":"0.0.0"}\n',
-			"src/a.ts": 'import { b } from "./b";\nexport const x = b;\n',
-		});
-		const importer = path.join(root, "src/a.ts");
-		_resetReviewGraphRebuildCountersForTests();
-		expect(await resolveImportTargets(root, importer)).toEqual([]);
-
-		writeTree(root, { "src/b.ts": "export const b = 1;\n" });
-		const afterCreate = await resolveImportTargets(root, importer);
-
-		expect(afterCreate.map((file) => relative(root, file))).toEqual([
-			"src/b.ts",
-		]);
-		expect(
-			_getReviewGraphRebuildCountersForTests().importTargetExtractions,
-		).toBe(1);
-
-		// The importer's own change is a new extraction.
-		writeTree(root, {
-			"src/a.ts": 'import { c } from "./c";\nexport const x = c;\n',
-			"src/c.ts": "export const c = 1;\n",
-		});
-		const later = new Date(Date.now() + 60_000);
-		fs.utimesSync(importer, later, later);
-		const afterEdit = await resolveImportTargets(root, importer);
-		expect(afterEdit.map((file) => relative(root, file))).toEqual(["src/c.ts"]);
-		expect(
-			_getReviewGraphRebuildCountersForTests().importTargetExtractions,
-		).toBe(2);
 	});
 });
