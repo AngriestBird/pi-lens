@@ -25,6 +25,8 @@ import {
 	patchReverseDependencyIndex,
 } from "../../../clients/reverse-deps.js";
 import {
+	_getReviewGraphRebuildCountersForTests,
+	_resetReviewGraphRebuildCountersForTests,
 	buildOrUpdateGraph,
 	clearGraphCache,
 	clearReviewGraphWorkspaceCache,
@@ -179,6 +181,37 @@ for (const seqPath of [false, true]) {
 		}
 	});
 }
+
+describe("the importer pass's name filter (#4346)", () => {
+	// Recurrence: without the filter, every creation resolves every unresolved
+	// import in the graph (each an existsSync walk), which grows with the
+	// project on the post-write cascade.
+	it("resolves only the imports that name the created file", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-4346-names-"));
+		roots.push(root);
+		writeTree(root, {
+			"pyproject.toml": '[project]\nname="x"\nversion="0.0.0"\n',
+			"src/fixturepkg/__init__.py": "",
+			"tools/probe.py":
+				"from fixturepkg.new_module import describe\n\nvalue = describe()\n",
+			"tools/other.py": "import os\nimport json\nimport sys\n\nx = 1\n",
+			"tools/more.py": "import collections\nimport typing\n\ny = 2\n",
+		});
+		clearGraphCache();
+		await buildOrUpdateGraph(root, [], new FactStore());
+		const created = path.join(root, "src/fixturepkg/new_module.py");
+		writeTree(root, {
+			"src/fixturepkg/new_module.py": "def describe():\n    return 1\n",
+		});
+		_resetReviewGraphRebuildCountersForTests();
+		clearGraphCache();
+		await buildOrUpdateGraph(root, [created], new FactStore());
+
+		expect(
+			_getReviewGraphRebuildCountersForTests().createdImportResolutions,
+		).toBe(1);
+	});
+});
 
 describe("the workspace-diagnostics cache on the new edge (#4346)", () => {
 	it("refuses a clean importer entry once the module it now imports changes", async () => {

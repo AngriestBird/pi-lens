@@ -159,6 +159,36 @@ describe("a module created outside pi-lens (#4346)", () => {
 		expect(after.text).not.toContain("Cannot find module scalar_module");
 	}, 30_000);
 
+	// Row 3b: codegen writes a gitignored module the sweep never lists, so
+	// only the importer names it.
+	it("clears the importer in a workspace sweep when the module is gitignored", async () => {
+		fs.writeFileSync(path.join(workspace, ".gitignore"), "gen/\n");
+		const importer = path.join(workspace, "swept_user.ts");
+		fs.writeFileSync(importer, 'import "./gen/swept_gen";\nexport {};\n');
+		const sweep = async () =>
+			(
+				await (
+					service as unknown as {
+						runWorkspaceDiagnostics: (
+							cwd: string,
+						) => Promise<Array<{ filePath: string; diagnostics: unknown[] }>>;
+					}
+				).runWorkspaceDiagnostics(workspace)
+			).find((result) => result.filePath === importer)?.diagnostics.length;
+		expect(await sweep()).toBe(1);
+		// The importer is itself new: its first open sent Created, which drops
+		// the first sweep's entry. The second records the entry under test.
+		expect(await sweep()).toBe(1);
+
+		fs.mkdirSync(path.join(workspace, "gen"));
+		fs.writeFileSync(
+			path.join(workspace, "gen", "swept_gen.ts"),
+			"export {};\n",
+		);
+
+		expect(await sweep()).toBe(0);
+	}, 60_000);
+
 	it("announces no module born before the server started", async () => {
 		const importer = path.join(workspace, "old_user.ts");
 		fs.writeFileSync(
@@ -220,6 +250,79 @@ describe("a workspace edit's resource operations (#4346)", () => {
 		);
 		expect(await untilWatched(`watched ${pathToFileURL(moved).href} 3`)).toBe(
 			true,
+		);
+	}, 30_000);
+
+	// Recurrence: an edit that fails mid-application has already written its
+	// earlier operations ("no rollback performed"); a server must still hear
+	// about the file that now exists.
+	it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+		"announces an applied create when a later operation fails",
+		async () => {
+			const { applyWorkspaceEdit } = await import("../../clients/lsp/edits.js");
+			const locked = path.join(workspace, "locked");
+			fs.mkdirSync(locked);
+			const target = path.join(locked, "target.ts");
+			fs.writeFileSync(target, "export const a = 1;\n");
+			fs.chmodSync(target, 0o444);
+			fs.chmodSync(locked, 0o555);
+			const created = path.join(workspace, "edit_partial.ts");
+			try {
+				await expect(
+					applyWorkspaceEdit(
+						{
+							documentChanges: [
+								{ kind: "create", uri: pathToFileURL(created).href },
+								{
+									textDocument: {
+										uri: pathToFileURL(target).href,
+										version: null,
+									},
+									edits: [
+										{
+											range: {
+												start: { line: 0, character: 13 },
+												end: { line: 0, character: 14 },
+											},
+											newText: "b",
+										},
+									],
+								},
+							],
+						},
+						workspace,
+					),
+				).rejects.toThrow(/failed mid-application/);
+			} finally {
+				fs.chmodSync(locked, 0o755);
+			}
+			expect(
+				await untilWatched(`watched ${pathToFileURL(created).href} 1`),
+			).toBe(true);
+		},
+		30_000,
+	);
+});
+
+describe("the producer's cost gate (#4346)", () => {
+	// Recurrence: #4344 r1, where a per-call extra pass took the cached replay
+	// from 6 ms to 321 ms. A batch resolves the imports of finding-bearing
+	// files only; a clean file's imports already resolved.
+	it("resolves no clean file's imports in a batch", async () => {
+		// Created after the client started, then imported: the server finds it
+		// on its first lookup, so the importer is clean from the start.
+		const module = path.join(workspace, "gate_module.ts");
+		fs.writeFileSync(module, "export {};\n");
+		const importer = path.join(workspace, "gate_user.ts");
+		fs.writeFileSync(importer, 'import "./gate_module";\nexport {};\n');
+		expect(
+			(await diagnose({ paths: [importer] })).details.primaryDiagnosticsCount,
+		).toBe(0);
+		await diagnose({ paths: [importer] });
+
+		await new Promise((resolve) => setTimeout(resolve, 200));
+		expect(watchedLines()).not.toContain(
+			`watched ${pathToFileURL(module).href} 1`,
 		);
 	}, 30_000);
 });

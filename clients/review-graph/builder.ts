@@ -4833,12 +4833,16 @@ async function addFileToGraph(
  * removing edges; batching keeps a high-fan-in bucket linear instead of
  * rescanning its prefix for every edge. They are the count-based signal the
  * issue asks for, because wall time on this hardware is IO-noisy (#1920).
+ * #4346: `createdImportResolutions` counts the imports `importersResolvingTo`
+ * resolves after a creation; its name filter keeps that to the imports that
+ * name a created file's stem or directory, not every import in the graph.
  */
 const _rebuildCounters = {
 	restoreComparisons: 0,
 	importTargetEdgeScans: 0,
 	removeOwnedEdgeVisits: 0,
 	removeOwnedEdgePositions: 0,
+	createdImportResolutions: 0,
 };
 
 export function _getReviewGraphRebuildCountersForTests(): {
@@ -4846,6 +4850,7 @@ export function _getReviewGraphRebuildCountersForTests(): {
 	importTargetEdgeScans: number;
 	removeOwnedEdgeVisits: number;
 	removeOwnedEdgePositions: number;
+	createdImportResolutions: number;
 } {
 	return { ..._rebuildCounters };
 }
@@ -4855,6 +4860,7 @@ export function _resetReviewGraphRebuildCountersForTests(): void {
 	_rebuildCounters.importTargetEdgeScans = 0;
 	_rebuildCounters.removeOwnedEdgeVisits = 0;
 	_rebuildCounters.removeOwnedEdgePositions = 0;
+	_rebuildCounters.createdImportResolutions = 0;
 }
 
 /**
@@ -5011,6 +5017,7 @@ function importersResolvingTo(
 			const importer = graph.nodes.get(edge.from);
 			const importerPath = importer?.filePath;
 			if (!importer || !importerPath || importers.has(importerPath)) continue;
+			_rebuildCounters.createdImportResolutions++;
 			const targets =
 				importer.language === "jsts"
 					? [localImportToFile(cwd, importerPath, source, ignoredIds)]

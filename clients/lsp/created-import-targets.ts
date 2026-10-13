@@ -14,9 +14,8 @@
  * or one already announced, sends nothing.
  *
  * Bounded: at most {@link CREATED_IMPORT_SCAN_MAX_FILES} importers per call.
- * What this cannot see is recorded once per cause per session
- * (`lsp-created-import-scan-incomplete`): importers past the cap, and an
- * importer whose extraction failed. A dependency no import names (a
+ * Importers past the cap are recorded once per session
+ * (`lsp-created-import-scan-incomplete`). A dependency no import names (a
  * TypeScript ambient declaration, a Go same-package file) is outside it.
  */
 import { recordDegradationOnce } from "../degradation-ledger.js";
@@ -41,17 +40,11 @@ export async function importTargetsToAnnounce(
 	// until a call has an importer to resolve.
 	const { resolveImportTargets } = await import("../review-graph/builder.js");
 	const targets = new Set<string>();
+	// Extraction answers [] for a missing, unreadable or non-source file (the
+	// graph build relies on the same); it does not throw.
 	for (const importer of importers.slice(0, CREATED_IMPORT_SCAN_MAX_FILES)) {
-		try {
-			for (const target of await resolveImportTargets(cwd, importer)) {
-				targets.add(target);
-			}
-		} catch (err) {
-			recordDegradationOnce({
-				kind: "lsp-created-import-scan-incomplete",
-				subject: "extraction-failed",
-				reason: err instanceof Error ? err.message : String(err),
-			});
+		for (const target of await resolveImportTargets(cwd, importer)) {
+			targets.add(target);
 		}
 	}
 	return [...targets];
