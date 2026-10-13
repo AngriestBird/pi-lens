@@ -248,6 +248,25 @@ describe("resolveCommand — node_modules/.bin", () => {
 		]);
 	});
 
+	// Recurrence this pins (#4321 F1): the Prettier space arm must carry its
+	// detected width. Dropping `--tab-width` leaves Prettier on its own default
+	// width, so this exact-argv row reds on that mutation.
+	it("prettier: pins space style and detected tab width (#4321)", async () => {
+		const binPath = nodeModulesBin(tmpDir, "prettier");
+		makeFakeExe(binPath);
+		const filePath = fileIn(tmpDir, "app.ts");
+		fs.writeFileSync(filePath, "function f() {\n  return 1;\n}\n");
+
+		expect(await prettierFormatter.resolveCommand!(filePath, tmpDir)).toEqual([
+			binPath,
+			"--write",
+			"--no-use-tabs",
+			"--tab-width",
+			"2",
+			filePath,
+		]);
+	});
+
 	it("biome: ancestor editorconfig disables inferred style flags", async () => {
 		const binPath = nodeModulesBin(tmpDir, "biome");
 		makeFakeExe(binPath);
