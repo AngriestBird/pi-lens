@@ -341,7 +341,9 @@ operator's private notes, so a different orchestrator can run the same train.
   round 1.** Their correctness lives in parsing edge cases, exactly where the
   smaller model loses: #2693 took two Sonnet rounds (~720k tokens) on a text
   scanner before the rail sent round 3 to Opus, which rewrote it on the AST
-  and closed in two rounds.
+  and closed in two rounds. The rule covers checks that scan source text or
+  its AST. A plain assertion over config or workflow data (two pins match, a
+  key exists) goes to Sonnet, or to Haiku when mechanical (#4350).
 - **Haiku 5.5 is the orchestrator's cheap lane.** The orchestrator uses it
   without asking for read-only locate and premise-pointer passes, CI-red and
   nightly investigations (`pi-lens-investigator`), and mechanical lanes
@@ -763,3 +765,4 @@ Each row cost a lane at least once; the prose above carries the record.
 | Routing a same-seam new defect to a weaker fixer after a prior round | The next verify found the same-seam defect after a Luna-high assignment; round routing should have selected Opus from the seam and round count. Rule: a new same-seam defect after two rounds goes to Opus (cloud fixer when the subscription is short) with the state table and model step first. |
 | Asking the maintainer whether to build or file a missing detection layer | The orchestrator owns the detection retrospective: it files the layer issue, or folds it into the same-seam PR, the same day, and tells the maintainer (maintainer, 2026-10-13). |
 | Sending a detector or governance-test round to a cheap model | The #4341 npx-pin scanner went to a Haiku round before the Opus-from-round-1 rule was re-read; check the routing bullets before every detector brief. |
+| Routing on the word "governance" instead of the risk | #4350 (a CodeQL pin-equality test) went to Opus as "governance authoring"; the Opus rule is for source-scanning detectors only. |
