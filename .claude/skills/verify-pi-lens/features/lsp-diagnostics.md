@@ -53,7 +53,7 @@ asserts them.
   - Wire: the edited file is announced `"type":2`, never `1`.
   - Diagnostics: the finding lines are identical before and after.
 
-Evidence in `$EVIDENCE/lsp-created-module-<variant>/`: `mcp-wire.jsonl` (every
+Evidence in `$EVIDENCE/lsp-created-module-<variant>-<stamp>-<pid>/`: `mcp-wire.jsonl` (every
 JSON-RPC frame, timestamped), `lsp-wire.in` / `lsp-wire.out` (both LSP
 directions through `pyrefly-tee.sh`), `steps.json` (each call with its args,
 elapsed ms, full result), `summary.json`, and a copy of the pi-lens home with

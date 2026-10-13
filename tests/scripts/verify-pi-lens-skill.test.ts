@@ -66,13 +66,11 @@ describe("verify-pi-lens skill (#4359)", () => {
 		}
 	});
 
-	it("documents every scenario and variant in a feature file and the map", async () => {
-		const docs = features
-			.map((f) => read(path.join(skill, "features", f)))
-			.join("\n");
+	it("keeps each feature recipe and its scenario's variants in step, both ways", async () => {
 		const body = read(path.join(skill, "SKILL.md"));
-		for (const file of scenarios) {
-			const name = file.replace(/\.mjs$/, "");
+		for (const [, feature, name] of rows) {
+			const docs = read(path.join(skill, "features", feature));
+			const file = `${name}.mjs`;
 			const mod = (await import(
 				pathToFileURL(path.join(skill, "scripts/scenarios", file)).href
 			)) as { variants: string[]; setup: unknown; run: unknown };
@@ -82,6 +80,15 @@ describe("verify-pi-lens skill (#4359)", () => {
 			for (const variant of mod.variants) {
 				expect(docs, `${name}/${variant}`).toContain(`\`${variant}\``);
 				expect(body, `${name}/${variant}`).toContain(`\`${variant}\``);
+			}
+			// The reverse direction: a recipe ("**Goal, `variant`:**") for a variant
+			// the module no longer exports is a dangling recipe (#4366 F3).
+			const recipes = [...docs.matchAll(/\*\*Goal, `([\w-]+)`/g)].map(
+				(m) => m[1],
+			);
+			expect(recipes.length, `${name} recipes`).toBeGreaterThan(0);
+			for (const variant of recipes) {
+				expect(mod.variants, `${feature} recipe ${variant}`).toContain(variant);
 			}
 		}
 	});

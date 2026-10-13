@@ -33,7 +33,7 @@ checks the importer and asks where `describe_source` is defined.
     `new_module.py` `"type":1`.
   - File state: `new_module.py` exists and `old.py` does not.
 
-Evidence in `$EVIDENCE/rename-file-into-missing-path/`, same layout as
+Evidence in `$EVIDENCE/rename-file-into-missing-path-<stamp>-<pid>/`, same layout as
 `lsp-diagnostics.md`.
 
 ## Gotchas

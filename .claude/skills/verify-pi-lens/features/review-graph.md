@@ -33,7 +33,7 @@ was created in the session.
   - The incremental update must list the same. It does not before #4346: the
     scenario prints `KNOWN` while it is empty and `XPASS` when #4346 lands.
 
-Evidence in `$EVIDENCE/review-graph-<variant>/`: `steps.json` (importer lists
+Evidence in `$EVIDENCE/review-graph-<variant>-<stamp>-<pid>/`: `steps.json` (importer lists
 per build), `mcp-wire.jsonl` for the MCP variant, `summary.json`.
 
 ## Gotchas

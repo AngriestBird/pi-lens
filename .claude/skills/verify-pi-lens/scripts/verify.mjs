@@ -1,21 +1,27 @@
 #!/usr/bin/env node
-// Driver for the verify-pi-lens skill (see ../SKILL.md). Linux/macOS only: the
-// pid tracking reads /proc.
+// Driver for the verify-pi-lens skill (see ../SKILL.md). Linux only: the pid
+// tracking reads /proc, which macOS and Windows lack.
 //
 //   verify.mjs doctor  [--tree <dir>]
 //   verify.mjs drive   <scenario> [variant] [--tree <dir>]
 //   verify.mjs cleanup [--run <dir>] [--trees]
+//     (no --run: sweep every run dir under $VERIFY_ROOT/runs)
 //
 // Run it with env.sh sourced: every path it writes comes from RUN and EVIDENCE.
-import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { McpStdioClient } from "../../../../scripts/lib/mcp-stdio-client.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
 function die(message) {
 	console.error(`verify-pi-lens: ${message}`);
+	process.exit(2);
+}
+
+if (!fs.existsSync("/proc/self/stat")) {
+	console.error("verify-pi-lens: Linux only (pid tracking reads /proc)");
 	process.exit(2);
 }
 
@@ -105,15 +111,26 @@ async function killRecorded(runDir) {
 // ---- cleanup --------------------------------------------------------------
 
 async function cleanup(runDir) {
-	const { RUN, EVIDENCE } = pinnedEnv();
-	const target = runDir ?? RUN;
-	if (!target.startsWith(process.env.VERIFY_ROOT))
-		die(`${target} is outside VERIFY_ROOT`);
-	const killed = await killRecorded(target);
-	// Evidence is a sibling tree, never under the run dir, so this cannot reach it.
-	fs.rmSync(target, { recursive: true, force: true });
+	const { EVIDENCE, VERIFY_ROOT } = pinnedEnv();
+	const runs = path.join(VERIFY_ROOT, "runs");
+	// A fresh `. env.sh` mints a new RUN id, so the default sweeps every run dir:
+	// a dead earlier run's recorded pids are found there, not under this shell's RUN.
+	const targets = runDir
+		? [path.resolve(runDir)]
+		: fs.existsSync(runs)
+			? fs.readdirSync(runs).map((name) => path.join(runs, name))
+			: [];
+	for (const target of targets) {
+		if (path.dirname(target) !== runs)
+			die(`${target} is not a run dir under ${runs}`);
+		const killed = await killRecorded(target);
+		// Evidence is a sibling tree, never under the run dir, so this cannot reach it.
+		fs.rmSync(target, { recursive: true, force: true });
+		if (killed.length)
+			console.log(`cleanup: killed [${killed.join(", ")}] from ${target}`);
+	}
 	console.log(
-		`cleanup: killed [${killed.join(", ")}], removed ${target}, kept ${EVIDENCE}`,
+		`cleanup: removed ${targets.length} run dir(s), kept ${path.dirname(EVIDENCE)}`,
 	);
 }
 
@@ -136,71 +153,43 @@ function removeTrees() {
 // ---- MCP client -----------------------------------------------------------
 
 function launchServer({ tree, ws, runDir, wirePath }) {
-	const child = spawn(
-		process.execPath,
-		[path.join(tree, "mcp/server.js"), `--cwd=${ws}`],
+	const wire = fs.createWriteStream(wirePath, { flags: "a" });
+	const client = new McpStdioClient(
+		path.join(tree, "mcp/server.js"),
+		// A host launches the server inside the project; so do we.
+		ws,
+		{ ...process.env },
 		{
-			// A host launches the server inside the project; so do we.
-			cwd: ws,
-			stdio: ["pipe", "pipe", "pipe"],
-			env: { ...process.env },
+			args: [`--cwd=${ws}`],
+			onFrame: (dir, msg) =>
+				wire.write(`${JSON.stringify({ t: Date.now(), dir, msg })}\n`),
 		},
 	);
-	const wire = fs.createWriteStream(wirePath, { flags: "a" });
-	const log = (dir, text) =>
-		wire.write(`${JSON.stringify({ t: Date.now(), dir, msg: text })}\n`);
-	const pending = new Map();
-	let buffer = "";
-	child.stdout.setEncoding("utf8");
-	child.stdout.on("data", (chunk) => {
-		buffer += chunk;
-		for (let nl = buffer.indexOf("\n"); nl !== -1; nl = buffer.indexOf("\n")) {
-			const line = buffer.slice(0, nl).trim();
-			buffer = buffer.slice(nl + 1);
-			if (!line) continue;
-			log("recv", line);
-			const msg = JSON.parse(line);
-			pending.get(msg.id)?.(msg);
-			pending.delete(msg.id);
-		}
-	});
-	child.stderr.on("data", (d) => log("stderr", String(d)));
-	let nextId = 0;
-	const send = (obj) => {
-		const line = JSON.stringify(obj);
-		log("send", line);
-		child.stdin.write(`${line}\n`);
-	};
-	const request = (method, params, timeoutMs = 60_000) =>
-		new Promise((resolve, reject) => {
-			const id = ++nextId;
-			const timer = setTimeout(
-				() => reject(new Error(`timeout (${timeoutMs} ms): ${method}`)),
-				timeoutMs,
-			);
-			pending.set(id, (msg) => {
-				clearTimeout(timer);
-				resolve(msg);
-			});
-			send({ jsonrpc: "2.0", id, method, params });
-		});
 	return {
-		child,
-		request,
+		child: client.child,
+		request: (method, params) => client.request(method, params, 60_000),
 		async initialize() {
-			await request("initialize", {
-				protocolVersion: "2025-06-18",
-				capabilities: {},
-				clientInfo: { name: "verify-pi-lens", version: "1" },
-			});
-			send({ jsonrpc: "2.0", method: "notifications/initialized" });
-			recordPids(runDir, child.pid);
+			const init = await client.request(
+				"initialize",
+				{
+					protocolVersion: "2025-06-18",
+					capabilities: {},
+					clientInfo: { name: "verify-pi-lens", version: "1" },
+				},
+				60_000,
+			);
+			if (init.error) throw new Error(`initialize: ${init.error.message}`);
+			client.notify("notifications/initialized");
+			recordPids(runDir, client.child.pid);
 		},
 		async call(name, args) {
 			const started = performance.now();
-			const res = await request("tools/call", { name, arguments: args });
+			const res = await client.request("tools/call", {
+				name,
+				arguments: args,
+			});
 			const ms = Math.round(performance.now() - started);
-			recordPids(runDir, child.pid);
+			recordPids(runDir, client.child.pid);
 			return {
 				ms,
 				error: res.error,
@@ -210,8 +199,7 @@ function launchServer({ tree, ws, runDir, wirePath }) {
 			};
 		},
 		async stop() {
-			child.stdin.end();
-			await new Promise((r) => setTimeout(r, 500));
+			await client.close();
 			wire.end();
 		},
 	};
@@ -332,14 +320,20 @@ async function drive(scenarioName, variant, tree) {
 		die(`${scenarioName} variants: ${mod.variants.join(", ")}`);
 	}
 	variant ??= mod.variants[0];
-	const ws = path.join(RUN, `ws-${scenarioName}-${variant}`);
-	fs.rmSync(ws, { recursive: true, force: true });
+	// Everything a drive writes is keyed by its own id, never by the shell's RUN
+	// id: a re-sourced env.sh reuses RUN, and an append-only wire log shared by
+	// two drives let the unfixed tree pass on the fixed tree's events (#4366 F1).
+	const driveId = `${scenarioName}-${variant}-${new Date()
+		.toISOString()
+		.replace(/\D/g, "")
+		.slice(0, 14)}-${process.pid}`;
+	const ws = path.join(RUN, `ws-${driveId}`);
 	fs.mkdirSync(ws, { recursive: true });
-	const evidenceDir = path.join(EVIDENCE, `${scenarioName}-${variant}`);
+	const evidenceDir = path.join(EVIDENCE, driveId);
 	fs.mkdirSync(evidenceDir, { recursive: true });
-	// A fresh pi-lens home per drive: a persisted cache from an earlier variant
+	// A fresh pi-lens home per drive: a persisted cache from an earlier drive
 	// must not answer this one.
-	const piHome = path.join(RUN, `pi-home-${scenarioName}-${variant}`);
+	const piHome = path.join(RUN, `pi-home-${driveId}`);
 	fs.rmSync(piHome, { recursive: true, force: true });
 	process.env.PI_LENS_HOME = piHome;
 	process.env.PILENS_DATA_DIR = path.join(piHome, "data");
@@ -448,6 +442,8 @@ async function drive(scenarioName, variant, tree) {
 				recursive: true,
 			});
 		const failed = expectations.filter((e) => !e.ok);
+		const known = expectations.filter((e) => e.known).length;
+		const passed = expectations.length - failed.length - known;
 		fs.writeFileSync(
 			path.join(evidenceDir, "steps.json"),
 			JSON.stringify(steps, null, 2),
@@ -459,8 +455,9 @@ async function drive(scenarioName, variant, tree) {
 					scenario: scenarioName,
 					variant,
 					tree,
-					passed: expectations.length - failed.length,
+					passed,
 					failed: failed.length,
+					known,
 					expectations,
 				},
 				null,
@@ -472,7 +469,7 @@ async function drive(scenarioName, variant, tree) {
 		fs.rmSync(ws, { recursive: true, force: true });
 		fs.rmSync(piHome, { recursive: true, force: true });
 		console.log(
-			`verdict: ${scenarioName}/${variant} ${failed.length ? "FAIL" : "PASS"} (${expectations.length - failed.length}/${expectations.length}); evidence ${evidenceDir}`,
+			`verdict: ${scenarioName}/${variant} ${failed.length ? "FAIL" : "PASS"} (${passed}/${expectations.length - known}${known ? `, ${known} KNOWN` : ""}); evidence ${evidenceDir}`,
 		);
 		process.exitCode = failed.length || crashed ? 1 : 0;
 	}

@@ -15,19 +15,21 @@ Evidence, Cleanup, Helpers, and a features map.
 
 ## Launch
 
-Linux or macOS with `node`, `git` and `uv`. Everything a run writes lands under
+Linux only (pid tracking reads `/proc`; `verify.mjs` exits 2 elsewhere), with
+`node`, `git` and `uv`. Everything a run writes lands under
 the lane `TMPDIR`; `env.sh` refuses `/tmp`.
 
 ```sh
 export TMPDIR=~/.local/share/pi-lens-orchestrator/tmp/<lane>-tmp
-S=.claude/skills/verify-pi-lens/scripts
+S="$(git rev-parse --show-toplevel)/.claude/skills/verify-pi-lens/scripts"   # absolute
 npm run build                      # the tree under test must be built
 $S/setup.sh pyrefly                # once: Pyrefly 1.3.2 + ruff venv (py-venv)
 . $S/env.sh                        # pins HOME, PI_LENS_HOME, PILENS_DATA_DIR, XDG, uv cache
 ```
 
-`env.sh` sets `RUN` (disposable) and `EVIDENCE` (kept). Source it in every
-shell call: agent shells reset their environment between calls.
+`env.sh` sets `RUN` (disposable) and `EVIDENCE` (kept). Repeat the `S=` and
+`. $S/env.sh` lines in every shell call: agent shells reset their environment
+between calls.
 
 The server under test is the real stdio MCP server, `mcp/server.js`, launched
 inside the scenario workspace as a host would. To verify a commit other than the
@@ -56,7 +58,9 @@ and no degradations or broken servers. Alive is not usable: do not drive past a
 node $S/verify.mjs drive <scenario> [variant] --tree "$PWD"
 ```
 
-Exit 0 when every expectation holds. Output lines are `PASS`, `FAIL`, `KNOWN`
+Exit 0 when every expectation holds. The verdict line counts only real
+expectations: `PASS (3/3, 1 KNOWN)` means three passed and one residual stayed
+KNOWN. Output lines are `PASS`, `FAIL`, `KNOWN`
 (a residual an open issue owns: not a failed verdict) and `XPASS` (the residual
 no longer reproduces: say so, the issue's acceptance may hold). Each feature file
 below lists its scenario, variants, the user goal and the exact checks. Write
@@ -67,7 +71,9 @@ To prove a fix, run the scenario on the commit before it and on the fix:
 
 ## Evidence
 
-`$EVIDENCE/<scenario>-<variant>/` (a sibling of `$RUN`, so cleanup keeps it):
+`$EVIDENCE/<scenario>-<variant>-<stamp>-<pid>/`, one directory per drive, so a
+head drive and an old-tree drive in one shell never share a wire log (a sibling
+of `$RUN`, so cleanup keeps it). The verdict line prints the path:
 
 - `mcp-wire.jsonl`: every JSON-RPC frame, timestamped, plus the server's stderr.
 - `lsp-wire.in`, `lsp-wire.out`: both directions of the LSP stream, for the
@@ -86,9 +92,13 @@ keep to the lane's report directory, since `$TMPDIR` is the lane's, not the PR's
 signalled). When a run died half way:
 
 ```sh
-node $S/verify.mjs cleanup            # kills this run's recorded pids, removes $RUN, keeps $EVIDENCE
+node $S/verify.mjs cleanup            # sweeps every runs/*/pids.json under $VERIFY_ROOT, removes those run dirs, keeps evidence
+node $S/verify.mjs cleanup --run "$VERIFY_ROOT/runs/<id>"   # one run dir only
 node $S/verify.mjs cleanup --trees    # also drops trees built by setup.sh tree (unlinks node_modules first)
 ```
+
+A re-sourced `env.sh` mints a new `RUN` id, so the default sweeps every run dir
+under this `TMPDIR`; do not run it while another drive of the same lane is live.
 
 Then `pgrep -fa 'pyrefly|mcp/server'` must show none of your servers.
 
@@ -101,7 +111,7 @@ Executable, under `scripts/`; invoke them from this body, never copy them.
 | `env.sh` | Sourced. Pins HOME, pi-lens, XDG and uv dirs under `RUN`; rejects `/tmp`. |
 | `setup.sh pyrefly` / `tree <rev>` | The Pyrefly + ruff venv; a built copy of a commit. |
 | `pyrefly-tee.sh` | Registered as the Pyrefly command in the scenario's `.pi-lens/lsp.json`; copies the LSP wire. |
-| `verify.mjs doctor` / `drive` / `cleanup` | The driver: MCP client, wire log, pid tracking, expectations. |
+| `verify.mjs doctor` / `drive` / `cleanup` | The driver: wire log, pid tracking, expectations. Its MCP client is `scripts/lib/mcp-stdio-client.mjs`, shared with `scripts/release-qa.mjs`. |
 | `scenarios/*.mjs` | One module per feature: `variants`, `setup`, `run`. Add a variant here, not a new script. |
 
 Reuse, not duplicated: the shared fake server `tests/fixtures/fake-lsp-server.mjs`
