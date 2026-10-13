@@ -61,13 +61,17 @@ function watchedLines(): string[] {
 		.filter((line) => line.startsWith("watched "));
 }
 
-/** The watch queue flushes after its 100 ms window; wait past it. */
-async function untilWatched(line: string): Promise<boolean> {
-	for (let attempt = 0; attempt < 40; attempt++) {
-		if (watchedLines().includes(line)) return true;
-		await new Promise((resolve) => setTimeout(resolve, 25));
-	}
-	return false;
+/**
+ * Diagnose a file no call has seen: the batch first sends any waiting Created
+ * (`announceCreatedFiles` flushes the watch queue), and the touch is a round
+ * trip to the server, which writes its trace line before it answers (stdio
+ * keeps the order). So the trace is complete for every event sent before.
+ */
+let roundTrips = 0;
+async function roundTrip(): Promise<void> {
+	const probe = path.join(workspace, `round_trip_${roundTrips++}.ts`);
+	fs.writeFileSync(probe, "export {};\n");
+	await diagnose({ paths: [probe] });
 }
 
 let service: { shutdown: () => Promise<void> } | undefined;
@@ -109,8 +113,7 @@ beforeAll(async () => {
 			disabledServers: ["typescript", "deno", "opengrep", "ast-grep", "typos"],
 		}),
 	);
-	// Older than the client: the server's start is the birth gate.
-	await new Promise((resolve) => setTimeout(resolve, 150));
+	// Older than the client, which starts at the first diagnostics call.
 	const config = await import("../../clients/lsp/config.js");
 	await config.initLSPConfig(workspace);
 	const lsp = await import("../../clients/lsp/index.js");
@@ -209,9 +212,7 @@ describe("a workspace edit's resource operations (#4346)", () => {
 	it("sends Created, Deleted, and the rename pair the moment they reach disk", async () => {
 		const { applyWorkspaceEdit } = await import("../../clients/lsp/edits.js");
 		// A live client must exist for the events to reach a server.
-		const seed = path.join(workspace, "edit_seed.ts");
-		fs.writeFileSync(seed, "export {};\n");
-		await diagnose({ paths: [seed] });
+		await roundTrip();
 
 		const created = path.join(workspace, "edit_created.ts");
 		await applyWorkspaceEdit(
@@ -220,8 +221,9 @@ describe("a workspace edit's resource operations (#4346)", () => {
 			},
 			workspace,
 		);
-		expect(await untilWatched(`watched ${pathToFileURL(created).href} 1`)).toBe(
-			true,
+		await roundTrip();
+		expect(watchedLines()).toContain(
+			`watched ${pathToFileURL(created).href} 1`,
 		);
 
 		const moved = path.join(workspace, "edit_moved.ts");
@@ -237,9 +239,8 @@ describe("a workspace edit's resource operations (#4346)", () => {
 			},
 			workspace,
 		);
-		expect(await untilWatched(`watched ${pathToFileURL(moved).href} 1`)).toBe(
-			true,
-		);
+		await roundTrip();
+		expect(watchedLines()).toContain(`watched ${pathToFileURL(moved).href} 1`);
 		expect(watchedLines()).toContain(
 			`watched ${pathToFileURL(created).href} 3`,
 		);
@@ -248,9 +249,8 @@ describe("a workspace edit's resource operations (#4346)", () => {
 			{ documentChanges: [{ kind: "delete", uri: pathToFileURL(moved).href }] },
 			workspace,
 		);
-		expect(await untilWatched(`watched ${pathToFileURL(moved).href} 3`)).toBe(
-			true,
-		);
+		await roundTrip();
+		expect(watchedLines()).toContain(`watched ${pathToFileURL(moved).href} 3`);
 	}, 30_000);
 
 	// Recurrence: an edit that fails mid-application has already written its
@@ -296,9 +296,10 @@ describe("a workspace edit's resource operations (#4346)", () => {
 			} finally {
 				fs.chmodSync(locked, 0o755);
 			}
-			expect(
-				await untilWatched(`watched ${pathToFileURL(created).href} 1`),
-			).toBe(true);
+			await roundTrip();
+			expect(watchedLines()).toContain(
+				`watched ${pathToFileURL(created).href} 1`,
+			);
 		},
 		30_000,
 	);
@@ -320,7 +321,7 @@ describe("the producer's cost gate (#4346)", () => {
 		).toBe(0);
 		await diagnose({ paths: [importer] });
 
-		await new Promise((resolve) => setTimeout(resolve, 200));
+		await roundTrip();
 		expect(watchedLines()).not.toContain(
 			`watched ${pathToFileURL(module).href} 1`,
 		);

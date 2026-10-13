@@ -613,7 +613,8 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/edits.ts": 1,
 		// 48 → 50 (#3828 r3): `resyncGitChangedFiles` splits its held targets
 		// into the changed paths (queued as a save) and their importers (not).
-		"clients/lsp/index.ts": 50,
+		// 50 -> 51 (#4346): the sweep selects its finding-bearing files to resolve.
+		"clients/lsp/index.ts": 51,
 		"clients/lsp/inferred-project.ts": 2,
 		"clients/lsp/jvm-runtime.ts": 3,
 		"clients/lsp/language.ts": 1,
@@ -654,7 +655,8 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/recent-touches.ts": 2,
 		"clients/resource-sampler.ts": 2,
 		"clients/reverse-deps.ts": 1,
-		"clients/review-graph/builder.ts": 10,
+		// 10 -> 12 (#4346): the update selects the files new to the graph.
+		"clients/review-graph/builder.ts": 12,
 		"clients/review-graph/import-resolvers.ts": 3,
 		"clients/review-graph/query.ts": 5,
 		"clients/review-graph/service.ts": 1,
@@ -709,7 +711,8 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"tools/effective-config.ts": 4,
 		"tools/lens-diagnostic-mark.ts": 1,
 		"tools/lens-diagnostics.ts": 37,
-		"tools/lsp-diagnostics.ts": 12,
+		// 12 -> 13 (#4346): the batch selects its finding-bearing files to resolve.
+		"tools/lsp-diagnostics.ts": 13,
 		"tools/lsp-navigation.ts": 6,
 		"tools/render-compact.ts": 3,
 		"mcp/analyze-cli.ts": 1,
@@ -1013,7 +1016,8 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/recent-touches.ts": 5,
 		"clients/reverse-deps.ts": 8,
 		"clients/review-graph-logger.ts": 2,
-		"clients/review-graph/builder.ts": 33,
+		// 33 -> 36 (#4346): the importer pass names a created file by its stem and directory.
+		"clients/review-graph/builder.ts": 36,
 		"clients/review-graph/format.ts": 4,
 		"clients/review-graph/git-identity.ts": 10,
 		"clients/review-graph/import-resolvers.ts": 61,

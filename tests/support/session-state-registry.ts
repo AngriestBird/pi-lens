@@ -1082,11 +1082,11 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 		id: "review-graph-builder:workspaceGraphCache",
 		module: "review-graph/builder.ts",
 		state:
-			"_workspaceGraphCache, _workspaceCacheEpochs, _sourcePathMemos, _sourcePathNormalizeCalls, _retainedGraphSites",
+			"_workspaceGraphCache, _workspaceCacheEpochs, _sourcePathMemos, _sourcePathNormalizeCalls, _retainedGraphSites, _importTargetMemos",
 		policy: "session_start",
 		resetName: "clearReviewGraphWorkspaceCache",
 		reason:
-			"Same reason as the module graph: a cached workspace graph describes one revision of one tree. #2255 adds one memory-attribution companion on the same seam: _retainedGraphSites (WeakRefs to graphs retained outside the cache, cleared with it so a new session never samples the previous one's graphs).",
+			"Same reason as the module graph: a cached workspace graph describes one revision of one tree. #2255 adds one memory-attribution companion on the same seam: _retainedGraphSites (WeakRefs to graphs retained outside the cache, cleared with it so a new session never samples the previous one's graphs). #4346 adds _importTargetMemos (one importer's extraction per file, validated by mtime and size on every read, cleared with the workspace cache).",
 	},
 	{
 		id: "runner-helpers:availabilityGeneration",
@@ -1775,7 +1775,9 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// tree-sitter client's trap map it follows: a session boundary resets
 	// neither the wasm heap nor the client's charges, and each extraction
 	// rewrites its file's entry, so a session_start clear would re-arm nothing.
-	"review-graph/builder.ts": 20,
+	// #4346: 20 -> 21 for _importTargetMemos, registered on the workspace-cache
+	// row above (cleared by clearReviewGraphWorkspaceCache).
+	"review-graph/builder.ts": 21,
 	// #3417: the module-level git-dir memo is gone; the count is pinned at 0 so a
 	// re-hoisted memo (the stale-negative shape) fails this sweep, not just the
 	// lifecycle test.

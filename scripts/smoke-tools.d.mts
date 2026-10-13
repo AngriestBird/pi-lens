@@ -177,9 +177,8 @@ export function runCreatedModuleWitness(
 	options: {
 		workspace: string;
 		execute: (...args: never[]) => Promise<unknown>;
-		getLSPService: () => {
-			touchFile: (...args: never[]) => Promise<unknown>;
-		};
+		/** The LSP service whose `touchFile` syncs the pi-written module. */
+		getLSPService: () => unknown;
 	},
 ): Promise<SmokeRow[]>;
 /** Run the production LSP clean-gate layer, optionally with test seams. */

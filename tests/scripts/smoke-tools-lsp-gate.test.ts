@@ -9,6 +9,7 @@ import {
 	runCreatedModuleWitness,
 	runLspGate,
 } from "../../scripts/smoke-tools.mjs";
+import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 
 const { safeSpawnAsync } = vi.hoisted(() => ({ safeSpawnAsync: vi.fn() }));
 vi.mock("../../clients/safe-spawn.js", async (importOriginal) => ({
@@ -286,7 +287,7 @@ describe("smoke-tools created-module witness (#4320/#4346)", () => {
 		const rows = await runCreatedModuleWitness(python, {
 			workspace,
 			execute,
-			getLSPService: () => ({ touchFile }),
+			getLSPService: () => makeLspServiceDouble({ touchFile }),
 		});
 		return { rows, touchFile, workspace };
 	}
@@ -348,7 +349,7 @@ describe("smoke-tools created-module witness (#4320/#4346)", () => {
 				})),
 				createLspDiagnosticsTool: () => ({ execute }),
 				adoptProjectTrustFromContext: vi.fn(),
-				getLSPService: () => ({ touchFile: vi.fn(async () => undefined) }),
+				getLSPService: () => makeLspServiceDouble(),
 			},
 		});
 

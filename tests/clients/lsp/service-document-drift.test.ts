@@ -31,7 +31,10 @@ vi.mock("../../../clients/lsp/client.js", async (importOriginal) => ({
 	...(await importOriginal<typeof import("../../../clients/lsp/client.js")>()),
 	createLSPClient,
 }));
-vi.mock("../../../clients/reverse-deps.js", () => ({
+vi.mock("../../../clients/reverse-deps.js", async (importOriginal) => ({
+	...(await importOriginal<
+		typeof import("../../../clients/reverse-deps.js")
+	>()),
 	loadReverseDependencyIndexFromSnapshot,
 	getReverseDepsFromIndex,
 }));
