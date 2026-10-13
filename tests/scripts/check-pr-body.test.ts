@@ -1,5 +1,6 @@
-// flake-shape: real-process-spawn — the exact local CLI and shallow checkout are the subject; an in-process call cannot prove either command boundary.
+// flake-shape: real-process-spawn — the exact local CLI, shallow checkout and gh label read are the subject; an in-process call cannot prove any of those command boundaries.
 import {
+	existsSync,
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
@@ -8,8 +9,8 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { execFileSync } from "node:child_process";
+import { delimiter, dirname, join, resolve } from "node:path";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { Worker } from "node:worker_threads";
 import { beforeEach, describe, expect, it, afterEach, vi } from "vitest";
@@ -5511,5 +5512,161 @@ describe("detection on the local preflight (#4288)", () => {
 		} finally {
 			warning.mockRestore();
 		}
+	});
+});
+
+// Recurrence: #4340 and #4341 (2026-10-13) linted green with
+// `check-pr-body.mjs --lint-local` and then failed CI's "PR body (advisory)"
+// on the `## Detection` rule, because the offline preflight could not read the
+// closed issue's labels, warned, and skipped the section (#4288 remainder).
+// The CLI is spawned for real; `gh` is stubbed only at the process boundary
+// (PATH), so the transport, the label read and the exit code are the real ones.
+describe("--lint-local resolves the closed issue label through gh (#4288)", () => {
+	const closing = `${body}\n\nCloses #4321.`;
+	const detection = (caught: string) =>
+		`\n\n## Detection\n\nCaught by: ${caught}\nShould have been caught by: CI unit\nGap: none: no layer would have seen it\n`;
+	const proseDetection = detection(
+		"external report (issue #4321 filed after a user saw wrapped tabs)",
+	);
+	const templateHint =
+		"\n\n## Detection\n\nOptional unless this PR closes a bug-labelled issue: name `Caught by:` (one layer), `Should have been caught by:` (a layer or `this layer`), and `Gap:` (`#NNN`, `exists: <test path>`, or `none: <reason>`).\n";
+	const roots: string[] = [];
+	const fixtures: string[] = [];
+	afterEach(() => {
+		for (const root of roots.splice(0))
+			rmSync(root, { recursive: true, force: true });
+		for (const fixture of fixtures.splice(0))
+			rmSync(fixture, { recursive: true, force: true });
+	});
+
+	function runLint(text: string, gh: "bug" | "feature" | "fail") {
+		const root = mkdtempSync(join(tmpdir(), "pi-lens-lint-local-gh-"));
+		roots.push(root);
+		const fixture = createOriginMasterFixture();
+		fixtures.push(fixture);
+		const binDir = join(root, "bin");
+		const log = join(root, "gh-calls.log");
+		mkdirSync(binDir);
+		writeFileSync(
+			join(binDir, "gh"),
+			[
+				"#!/usr/bin/env node",
+				`require("fs").appendFileSync(${JSON.stringify(log)}, process.argv.slice(2).join(" ") + "\\n");`,
+				gh === "fail"
+					? `console.error("gh: To get started with GitHub CLI, please run: gh auth login"); process.exit(4);`
+					: `console.log(JSON.stringify({ labels: ${gh === "bug" ? `[{ name: "area:format" }, { name: "bug" }]` : `[{ name: "enhancement" }]`} }));`,
+				"",
+			].join("\n"),
+			{ mode: 0o755 },
+		);
+		const bodyPath = join(root, "PR_BODY.md");
+		writeFileSync(bodyPath, text);
+		const result = spawnSync(
+			process.execPath,
+			[
+				resolve(repositoryRoot, "scripts/check-pr-body.mjs"),
+				"--lint-local",
+				bodyPath,
+			],
+			{
+				cwd: fixture,
+				encoding: "utf8",
+				env: {
+					...process.env,
+					PATH: `${binDir}${delimiter}${process.env.PATH ?? ""}`,
+				},
+			},
+		);
+		return {
+			status: result.status,
+			output: `${result.stdout}${result.stderr}`,
+			calls: existsSync(log) ? readFileSync(log, "utf8").trim() : "",
+		};
+	}
+
+	// Skipped on Windows: the stub is a shebang script, which CreateProcess
+	// does not execute.
+	const posix = it.skipIf(process.platform === "win32");
+
+	posix("reds a prose-form Detection section for a bug-labelled issue", () => {
+		const run = runLint(closing + proseDetection, "bug");
+		expect(run.calls).toBe("api repos/{owner}/{repo}/issues/4321");
+		expect(run.output).toContain('"## Detection"');
+		// One report, not one from the CI rule and another from the any-label rule.
+		expect(run.output.split('"## Detection" must state').length).toBe(2);
+		expect(run.status).toBe(1);
+	});
+
+	posix("requires the section when the resolved label is bug", () => {
+		const run = runLint(closing, "bug");
+		expect(run.output).toContain('missing "## Detection"');
+		expect(run.status).toBe(1);
+	});
+
+	posix("passes a three-line section for a bug-labelled issue", () => {
+		const run = runLint(closing + detection("external user"), "bug");
+		expect(run.output).not.toContain("Detection");
+		expect(run.status).toBe(0);
+	});
+
+	posix("does not require the section for a non-bug issue", () => {
+		const run = runLint(closing, "feature");
+		expect(run.calls).toBe("api repos/{owner}/{repo}/issues/4321");
+		expect(run.output).not.toContain("Detection");
+		expect(run.status).toBe(0);
+	});
+
+	posix("validates a present section whatever the label", () => {
+		const run = runLint(closing + proseDetection, "feature");
+		expect(run.output).toContain('"## Detection"');
+		expect(run.status).toBe(1);
+	});
+
+	posix(
+		"treats the unedited template hint as absent for a non-bug issue",
+		() => {
+			const run = runLint(closing + templateHint, "feature");
+			expect(run.output).not.toContain("Detection");
+			expect(run.status).toBe(0);
+		},
+	);
+
+	// Recurrence: #4345 review F1 (2026-10-13). With Detection as the last
+	// section, the mandatory "Generated with" footer sits inside it; counting
+	// that footer as content revoked the unedited hint's exemption and reds a
+	// non-bug PR that the template explicitly makes optional.
+	posix(
+		"treats the unedited hint as absent when the footer follows it as the last section",
+		() => {
+			const footer =
+				"🤖 Generated with [Claude Code](https://claude.com/claude-code)";
+			const run = runLint(`${closing}${templateHint}\n${footer}\n`, "feature");
+			expect(run.output).not.toContain("Detection");
+			expect(run.status).toBe(0);
+		},
+	);
+
+	posix(
+		"warns that the check was skipped when gh cannot read the label",
+		() => {
+			const run = runLint(closing, "fail");
+			expect(run.output).toMatch(/::warning::.*Detection.*skipped.*#4288/s);
+			expect(run.status).toBe(0);
+		},
+	);
+
+	posix(
+		"still validates a present section when gh cannot read the label",
+		() => {
+			const run = runLint(closing + proseDetection, "fail");
+			expect(run.output).toContain('"## Detection"');
+			expect(run.status).toBe(1);
+		},
+	);
+
+	posix("never calls gh for a body that closes nothing", () => {
+		const run = runLint(`${body}\n\nRefs #4321.`, "bug");
+		expect(run.calls).toBe("");
+		expect(run.status).toBe(0);
 	});
 });

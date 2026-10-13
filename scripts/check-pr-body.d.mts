@@ -43,10 +43,22 @@ export declare function lintClassSweep(
 ): string[];
 export declare const DETECTION_LAYERS: readonly string[];
 export declare const DETECTION_MESSAGE: string;
-export declare function lintDetectionSection(body?: string): string[];
+export declare function lintDetectionSection(
+	body?: string,
+	options?: { ignoreUnfilled?: boolean },
+): string[];
 export declare function resolveBugClosing(
 	body: string,
 	fetchImpl?: typeof fetch,
+): Promise<boolean | null>;
+export declare function resolveBugClosingViaGh(
+	body: string,
+	cwd?: string,
+	exec?: (
+		file: string,
+		args: string[],
+		options: Record<string, unknown>,
+	) => string,
 ): Promise<boolean | null>;
 export declare function testCorpus(options?: {
 	cwd?: string;
