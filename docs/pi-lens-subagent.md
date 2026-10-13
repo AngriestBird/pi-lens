@@ -130,8 +130,11 @@ the brief gives.
     ("Worktree and Git"). A reviewer is always `none` and read-only.
   GitHub comments and issue edits are separate: only a brief that grants them
   allows them.
-- **Deliverable.** The report opens with an `ORCHESTRATOR SUMMARY` of at most
-  30 lines: the PR (or branch), the head SHA, the change or verdict in a few
+- **Deliverable.** The report opens with an `ORCHESTRATOR SUMMARY`. Its cap
+  follows the lane kind: at most 6 lines for a mechanical lane (trailing fold,
+  pin or allowlist move, merge-and-resolve), 20 for a locate or investigation
+  pass, and 30 for a fix or review round. The summary carries the PR (or
+  branch), the head SHA, the change or verdict in a few
   lines, red and green evidence as counts with the quoted transcript below it,
   every skipped check or environment block, and what the orchestrator must
   decide. The RETURNED message (the agent's final reply, or the plegma answer)

@@ -444,6 +444,8 @@ export const wallClockBudgetInclude = [
 	"tests/clients/config-diagnostic-codes.test.ts",
 	"tests/clients/dispatch/runners/ast-grep-playground-verify.test.ts",
 	"tests/clients/dispatch/runners/ast-grep-rule-ignores.test.ts",
+	// #4321: the real Biome binary's 80-column wrapping is the subject (flake-shape admission).
+	"tests/clients/format-service-tab-width-real-biome.test.ts",
 	"tests/clients/git-tracked-ignore.test.ts",
 	// #2557 review round 3: a real 30s deadline margin is the subject of an abort-vs-deadline precedence assertion (flake-shape admission).
 	"tests/clients/hook-await-fold-bounds.test.ts",

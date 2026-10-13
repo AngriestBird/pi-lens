@@ -83,7 +83,7 @@ jobs:
           else
             echo "run=true" >> "$GITHUB_OUTPUT"
           fi
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: steps.window.outputs.run == 'true'
         with:
           name: nightly-window
@@ -120,7 +120,7 @@ jobs:
       # An action input is not a shell string: `$RUNNER_TEMP` there is a literal
       # directory under the workspace (run 37599048379), so the path is the
       # `runner.temp` expression the upload uses.
-      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: nightly-window
           path: ${{ runner.temp }}
@@ -161,7 +161,7 @@ jobs:
           exit "$rc"
       # overwrite: a re-run attempt replaces this shard's artifact instead of
       # failing on the name an earlier attempt took.
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: mutation-shard-${{ matrix.shard }}
@@ -194,12 +194,12 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: mutation-shard-*
           path: ${{ runner.temp }}/mutation-shards
           merge-multiple: false
-      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: nightly-window
           path: ${{ runner.temp }}
@@ -216,7 +216,7 @@ jobs:
           node scripts/stryker-nightly.mjs combine --shards-dir "$RUNNER_TEMP/mutation-shards" --expected-shards 0,1 --window "$WINDOW" --out "$RUNNER_TEMP/combined-report.json" --outcomes "$RUNNER_TEMP/combined-outcomes.json"
           STATUS=$(node -e 'const x=require(process.env.RUNNER_TEMP+"/combined-outcomes.json"); process.stdout.write(x.status)')
           node scripts/stryker-nightly.mjs body --issues "$RUNNER_TEMP/stryker-nightly-issues.json" --title "$TRACKING_TITLE" --base "$BASE" --head "$HEAD_SHA" --source "$SOURCE" --status "$STATUS" --report "$RUNNER_TEMP/combined-report.json" --outcomes "$RUNNER_TEMP/combined-outcomes.json" --run-url "$RUN_URL" --out "$RUNNER_TEMP/stryker-nightly-body.md"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nightly-body
           path: ${{ runner.temp }}/stryker-nightly-body.md
@@ -247,7 +247,7 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: "22"
-      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: nightly-body
           path: ${{ runner.temp }}
