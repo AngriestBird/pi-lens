@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
-import { relative, resolve } from "node:path";
+import { relative, resolve, win32 } from "node:path";
 import { describe, expect, it } from "vitest";
+import { toPosix } from "../../clients/path-utils.js";
 import {
 	type ActionPin,
 	parseActionPins,
@@ -22,6 +23,16 @@ import {
 // as actions/cache/restore + actions/cache/save splits the same way.
 
 const ROOT = resolve(import.meta.dirname, "../..");
+
+// Repository-relative path with forward slashes on every platform. The walker
+// emits platform separators, and every expectation in this file uses `/`.
+function repoRelative(
+	file: string,
+	root = ROOT,
+	api: { relative: (from: string, to: string) => string } = { relative },
+): string {
+	return toPosix(api.relative(root, file));
+}
 
 const repoOf = (action: string) => action.split("/").slice(0, 2).join("/");
 
@@ -84,7 +95,7 @@ async function treeScan(): Promise<{
 	const unparsed: string[] = [];
 	for (const file of await workflowFiles(ROOT)) {
 		const text = readFileSync(file, "utf8");
-		const rel = relative(ROOT, file);
+		const rel = repoRelative(file);
 		pins.push(...parseActionPins(text, rel));
 		uses += remoteUsesLines(text).length;
 		unparsed.push(...unparsedUses(text, rel));
@@ -157,6 +168,15 @@ describe("#4350 one SHA per action repository across the workflow tree", () => {
 		expect(pinSplits(pins)).toEqual([
 			`github/codeql-action has 2 SHAs: ${a} at ci.yml:2; ${b} at ci.yml:3, codeql.yml:2`,
 		]);
+	});
+
+	it("normalizes a Windows-shaped workflow path to forward slashes", () => {
+		// Recurrence #4350 round 3: Unit tests Windows (advisory) reded on
+		// Set{'.github\\workflows\\ci.yml'} because the tree path kept the
+		// platform separator. Fed through win32 here so Linux reproduces it.
+		expect(
+			repoRelative("C:\\repo\\.github\\workflows\\ci.yml", "C:\\repo", win32),
+		).toBe(".github/workflows/ci.yml");
 	});
 
 	it("names every uses: line parseActionPins cannot pin, and only those", () => {
