@@ -4,10 +4,10 @@
 // No PR-time check looked at workflow `npx` calls before this test.
 //
 // Allowed forms, and nothing else:
-//   - `npx -y "<pkg>@${<var>}"`, where <var> is assigned in the same workflow
-//     file from package.json's `packageManager` (the exact npm pin that
-//     tests/config/release-npm-pin-gate.test.ts and ci.yml read), and that
-//     field is itself checked to be an exact `npm@x.y.z` below;
+//   - `npx -y "<pkg>@${<var>}"`, where <var> is bound in the same `run:`
+//     script to package.json's `packageManager` (`npmPinBoundAt`, shared with
+//     tests/config/release-npm-pin-gate.test.ts), and that field is itself
+//     checked to be an exact `npm@x.y.z` below;
 //   - `npx -y <pkg>@<x.y.z>`, a literal exact semver.
 // Violations: bare `npx <bin>`, `--yes <pkg>` without a version, a range, a
 // tag such as `@latest`, and `npx --no-install`. `--no-install` is refused:
@@ -15,29 +15,31 @@
 // and the repo's answer for a bin is `node_modules/.bin/<bin>` (#4339).
 //
 // Detector discipline (principles §2, "Detectors match code, not prose"):
-// every `run:` script is read through `lexShell`, the shell lexer the
-// pinned-npm gate shares. It blanks comments and string bodies, so a comment
-// quoting `npx vitest`, or a commented-out `npm_pin=` assignment, neither
-// trips the rule nor satisfies it, and `echo "... npx resolved ..."` is not a
-// call. js-yaml drops YAML comments before the scripts are read, so no second
-// comment blanker is needed (one was tried and found inert, #4339 round 2).
-// Argument shape is read from the raw script, because lexShell blanks the body
-// of the quoted pin; the two texts keep the same offsets once line
-// continuations are joined.
+// every `run:` script is read through `lexShellAligned`, the shell lexer the
+// pinned-npm gate shares, with offsets equal to the script's. It blanks
+// comments and string bodies, so a comment quoting `npx vitest` neither trips
+// the rule nor binds a pin, and `echo "... npx resolved ..."` is not a call.
+// js-yaml drops YAML comments before the scripts are read. Argument shape is
+// read from the raw script at the lexed call's offset, because the lexer
+// blanks the body of the quoted pin.
+// Not covered: `npx` inside `bash -c`, `sh -c` or `eval` strings, a quoted or
+// path-qualified `npx` (`"npx"`, `/usr/bin/npx`), `npm exec`, `npm x`,
+// `pnpm dlx`, `yarn dlx`, `bunx`, and `actions/github-script` or other `with:`
+// strings; none occurs in a workflow today. Every `npx` word the lexer leaves
+// is a call, so `echo npx` unquoted is a loud false positive.
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import yaml from "../../clients/deps/js-yaml.js";
 import { assertNonEmptyScan } from "../support/sweep-kit.js";
-import { lexShell } from "../support/workflow-shell-portability.js";
+import {
+	lexShellAligned,
+	npmPinBoundAt,
+} from "../support/workflow-shell-portability.js";
 
 const ROOT = resolve(import.meta.dirname, "../..");
 
 const NPX_CALL = /(?<![\w./-])npx(?=[\s)]|$)/g;
-// A pin assignment as lexShell shows it: `name= $(node -p ...)` at line start.
-// Its string body is blanked, so the packageManager read is checked on the raw line.
-const PIN_ASSIGNMENT = /^[ \t]*(\w+)=\s*\$\(node -p\b/gm;
-const PACKAGE_MANAGER_READ = "require('./package.json').packageManager";
 // `-y`/`--yes`, then the pinned form, then a word boundary (space, `)`, `;`...).
 const PINNED_VAR =
 	/^\s+(?:-y|--yes)\s+(["']?)[\w@./-]+@\$\{(\w+)\}\1(?=[\s);&|]|$)/;
@@ -60,34 +62,21 @@ function collectRuns(node: unknown, out: string[]): string[] {
 }
 
 export function scanWorkflowSource(source: string): NpxFinding {
-	const runs = collectRuns(yaml.load(source), []).map((run) => {
-		// The same continuation join lexShell applies, done first so the lexed
-		// and raw texts stay index-aligned.
-		const raw = run.replace(/\\\r?\n[ \t]*/g, "");
-		return { raw, lexed: lexShell(raw) };
-	});
-
-	// Pin variables bound from packageManager, per file.
-	const bound = new Set<string>();
-	for (const { raw, lexed } of runs) {
-		const rawLines = raw.split("\n");
-		for (const match of lexed.matchAll(PIN_ASSIGNMENT)) {
-			const line = lexed.slice(0, match.index ?? 0).split("\n").length - 1;
-			if (rawLines[line]?.includes(PACKAGE_MANAGER_READ)) bound.add(match[1]);
-		}
-	}
-
 	const finding: NpxFinding = { calls: 0, violations: [] };
-	for (const { raw, lexed } of runs) {
-		for (const match of lexed.matchAll(NPX_CALL)) {
+	for (const run of collectRuns(yaml.load(source), [])) {
+		for (const match of lexShellAligned(run).matchAll(NPX_CALL)) {
 			finding.calls++;
-			const rest = raw.slice((match.index ?? 0) + "npx".length).split("\n")[0];
+			const at = match.index ?? 0;
+			const rest = run
+				.slice(at + "npx".length)
+				.replace(/\\\r?\n[ \t]*/g, "")
+				.split("\n")[0];
 			const offending = `npx${rest}`.trim();
 			const pinned = PINNED_VAR.exec(rest);
 			if (pinned) {
-				if (!bound.has(pinned[2]))
+				if (!npmPinBoundAt(run, pinned[2], at))
 					finding.violations.push(
-						`pin variable \${${pinned[2]}} is not assigned from packageManager: ${offending}`,
+						`pin variable \${${pinned[2]}} is not bound to packageManager in this step: ${offending}`,
 					);
 				continue;
 			}
@@ -123,6 +112,8 @@ const workflow = (body: string) =>
 		.split("\n")
 		.map((line) => `          ${line}`)
 		.join("\n")}\n`;
+// The literal every pinned workflow step writes, kept independent of
+// NPM_PIN_SOURCE so the fixture cannot agree with the helper by construction.
 const PIN_LINE = `npm_pin="$(node -p "require('./package.json').packageManager.replace(/^npm@/, '')")"`;
 
 describe("workflow npx calls are pinned (#4339)", () => {
@@ -139,7 +130,7 @@ describe("workflow npx calls are pinned (#4339)", () => {
 			...scanWorkflowSource(readFileSync(join(ROOT, file), "utf8")),
 		}));
 		assertNonEmptyScan(
-			"npx pin scan: command-position npx calls",
+			"npx pin scan: npx words in lexed run scripts",
 			findings.reduce((sum, f) => sum + f.calls, 0),
 			10,
 		);
@@ -182,9 +173,66 @@ describe("workflow npx calls are pinned (#4339)", () => {
 			0,
 		],
 		["catches a call continued onto the next line", "npx vitest \\\n  run", 1],
+		// #4339 review F2: the bind is read from the assignment itself.
+		[
+			"rejects a bind whose packageManager read is only in a trailing comment",
+			`npm_pin="$(node -p "require('./package.json').version")" # require('./package.json').packageManager\nnpx -y "npm@\${npm_pin}" --version`,
+			1,
+		],
+		[
+			"rejects a pin variable reassigned after its bind",
+			`${PIN_LINE}\nnpm_pin=latest\nnpx -y "npm@\${npm_pin}" --version`,
+			1,
+		],
+		[
+			"rejects a bind that is only an echo argument",
+			`echo ${PIN_LINE}\nnpx -y "npm@\${npm_pin}" --version`,
+			1,
+		],
+		[
+			"rejects a bind that only prefixes one command",
+			`${PIN_LINE} true\nnpx -y "npm@\${npm_pin}" --version`,
+			1,
+		],
+		// #4339 review F3: a comment does not continue, and escaped quotes do
+		// not open or close a string.
+		[
+			"catches a call after a comment that ends in a backslash",
+			"# note \\\nnpx foo",
+			1,
+		],
+		[
+			"catches a call after an escaped double quote",
+			'echo "a \\" b" && npx foo',
+			1,
+		],
+		[
+			"catches a call after an escaped single quote",
+			"echo it\\'s && npx foo",
+			1,
+		],
+		["catches a call after an ANSI-C string", "echo $'a\\'b' && npx foo", 1],
 	])("fixture: %s", (_name, body, expected) => {
 		expect(scanWorkflowSource(workflow(body)).violations).toHaveLength(
 			expected,
 		);
+	});
+
+	// #4339 review F1: each step is its own shell, so a bind in job a does not
+	// reach job b.
+	it("rejects a pin variable bound only in another job's step", () => {
+		const source = `jobs:
+  a:
+    steps:
+      - run: |
+          ${PIN_LINE}
+          npx -y "npm@\${npm_pin}" --version
+  b:
+    steps:
+      - run: npx -y "npm@\${npm_pin}" publish
+`;
+		expect(scanWorkflowSource(source).violations).toEqual([
+			'pin variable ${npm_pin} is not bound to packageManager in this step: npx -y "npm@${npm_pin}" publish',
+		]);
 	});
 });
