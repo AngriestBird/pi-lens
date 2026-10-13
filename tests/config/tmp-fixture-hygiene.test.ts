@@ -525,9 +525,13 @@ describe("tmp-fixture-hygiene", () => {
 	it("exempts a mkdtemp site only for code, never for a comment or a string", () => {
 		// #4347: the exemption regexes read the raw call window, so a comment or
 		// a string naming os.tmpdir() or REPO_ROOT beside a stray parent excused
-		// it. Each case is the call line plus its window; the call is assembled
+		// it. Each case is the call line plus its window; the calls are assembled
 		// so this file's own source holds no extra site.
 		const call = ["fs.mkdtemp", "Sync(path.join(base, 'fixture-'));"].join("");
+		const tmpdirCall = [
+			"fs.mkdtemp",
+			"Sync(path.join(os.tmpdir(), 'fixture-'));",
+		].join("");
 		const escapes = (...lines: string[]) =>
 			mkdtempSiteEscapes("fixture.ts", lines.join("\n"))(1);
 		const tmpLiteral = ["'", "/tmp/", "fixture-'"].join("");
@@ -542,16 +546,10 @@ describe("tmp-fixture-hygiene", () => {
 				"",
 				"// const base = fs.mkdtempSync(path.join(os.tmpdir(), 'x'));",
 			),
-			codeTmpdir: escapes(
-				["fs.mkdtemp", "Sync(path.join(os.tmpdir(), 'fixture-'));"].join(""),
-			),
-			commentHardcodedTmp: escapes(
-				["fs.mkdtemp", "Sync(path.join(os.tmpdir(), 'fixture-'));"].join(""),
-				`// never ${tmpLiteral}`,
-			),
-			stringHardcodedTmp: escapes(
-				["fs.mkdtemp", `Sync(${tmpLiteral});`].join(""),
-			),
+			codeTmpdir: escapes(tmpdirCall),
+			commentHardcodedTmp: escapes(tmpdirCall, `// never ${tmpLiteral}`),
+			// The tmpdir parent would exempt it; only the literal reds it.
+			stringHardcodedTmp: escapes(tmpdirCall, `const legacy = ${tmpLiteral};`),
 		}).toEqual({
 			commentTmpdir: true,
 			commentRepoRoot: true,
