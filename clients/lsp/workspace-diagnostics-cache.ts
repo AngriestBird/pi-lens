@@ -10,7 +10,10 @@ import { freshnessFromMtime } from "../freshness.js";
 import { logLatency } from "../latency-logger.js";
 import { recordDegradationOnce } from "../degradation-ledger.js";
 import { compareOrdinal } from "../string-utils.js";
-import { workspaceDiagnosticsCacheSessionStart } from "./workspace-diagnostics-session.js";
+import {
+	workspaceDiagnosticsCacheSessionStart,
+	workspaceFileCreatedAt,
+} from "./workspace-diagnostics-session.js";
 import type { LSPDiagnostic } from "./client.js";
 import {
 	createDiskBindingCache,
@@ -360,7 +363,10 @@ export function clearWorkspaceDiagnosticsCache(cwd: string): void {
 export const WORKSPACE_DIAGNOSTICS_FINDING_MAX_AGE_MS = 4 * 60 * 60_000;
 
 /** Why a cached entry was refused at serve time. */
-export type WorkspaceDiagnosticsCacheExpiryReason = "pre-session" | "max-age";
+export type WorkspaceDiagnosticsCacheExpiryReason =
+	| "pre-session"
+	| "max-age"
+	| "file-created";
 
 /**
  * #1782: decide whether an entry has aged out of its right to be SERVED.
@@ -411,12 +417,19 @@ export function classifyWorkspaceDiagnosticsCacheExpiry(
 	entry: WorkspaceDiagnosticsCacheEntry,
 	now: number,
 	sessionStartedAt: number,
+	fileCreatedAt = 0,
 ): WorkspaceDiagnosticsCacheExpiryReason | undefined {
 	const findings = Array.isArray(entry.diagnostics)
 		? entry.diagnostics.length
 		: 0;
 	if (findings === 0) return undefined;
 	if (entry.scannedAt < sessionStartedAt) return "pre-session";
+	// #4320: a findings entry scanned no later than the latest file-created
+	// notification may be a "cannot find module" the new file now answers. Clean
+	// entries keep serving: a creation cannot turn them into a stale clean the
+	// dependency check misses, and re-touching every clean file per new file is
+	// the cost this cache exists to avoid.
+	if (entry.scannedAt <= fileCreatedAt) return "file-created";
 	if (now - entry.scannedAt > WORKSPACE_DIAGNOSTICS_FINDING_MAX_AGE_MS) {
 		return "max-age";
 	}
@@ -685,7 +698,7 @@ export function createWorkspaceDiagnosticsCacheContext(
 	let expiredCount = 0;
 	let oldestExpiredAgeMs = 0;
 	const expiredByReason: Record<WorkspaceDiagnosticsCacheExpiryReason, number> =
-		{ "pre-session": 0, "max-age": 0 };
+		{ "pre-session": 0, "max-age": 0, "file-created": 0 };
 	// #1793: a bounded counter for the NEW refusal path — an entry recorded
 	// with dependency knowledge that this (cold) session can't revalidate.
 	// Folded into the same expiry-telemetry record/flush shape rather than a
@@ -705,6 +718,7 @@ export function createWorkspaceDiagnosticsCacheContext(
 				oldestExpiredAgeMs,
 				preSession: expiredByReason["pre-session"],
 				maxAge: expiredByReason["max-age"],
+				fileCreated: expiredByReason["file-created"],
 				depIndexColdRefusals: depIndexColdRefusalCount,
 				sessionStartedAt: workspaceDiagnosticsCacheSessionStart(),
 				maxAgeMs: WORKSPACE_DIAGNOSTICS_FINDING_MAX_AGE_MS,
@@ -714,6 +728,7 @@ export function createWorkspaceDiagnosticsCacheContext(
 		oldestExpiredAgeMs = 0;
 		expiredByReason["pre-session"] = 0;
 		expiredByReason["max-age"] = 0;
+		expiredByReason["file-created"] = 0;
 		depIndexColdRefusalCount = 0;
 	};
 
@@ -753,6 +768,7 @@ export function createWorkspaceDiagnosticsCacheContext(
 				entry,
 				now,
 				workspaceDiagnosticsCacheSessionStart(),
+				workspaceFileCreatedAt(),
 			);
 			if (expiry) {
 				delete entries[key];

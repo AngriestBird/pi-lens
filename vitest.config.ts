@@ -334,6 +334,10 @@ const lspSpawnHeavyInclude = [
 	"tests/clients/lsp/service-project-trust.test.ts",
 	// #4299: real wrapper compiler-resolution security witness.
 	"tests/clients/lsp/tsserver-project-trust-wire.test.ts",
+	// #4320: the watched-files wire frames only exist on a real stdio connection
+	// to a real fake-server child; the handshake is the same #1022/#2332 shape as
+	// its lane siblings.
+	"tests/clients/lsp/watched-files-created-4320.test.ts",
 	"tests/clients/lsp/workspace-diagnostics-language-neutral.test.ts",
 	// #2776: the real fake-server wire is the only way to reproduce the
 	// custom-primary handler verdict after pull diagnostics are ignored and a
@@ -367,6 +371,10 @@ const lspSpawnHeavyInclude = [
 	// kill — same process-death-timing budget and contention class as the
 	// watchdog test above.
 	"tests/tools/lsp-diagnostics-2776.test.ts",
+	// #4320: the production LSPService and the workspace-diagnostics cache over a
+	// real stdio fake-server child configured as a project custom server; waits on
+	// a real handshake and two diagnostics rounds like its lane siblings.
+	"tests/tools/lsp-diagnostics-created-module-4320.test.ts",
 	// #3310: launches the fake server THROUGH the production `PHPServer` entry
 	// (an executable node_modules/.bin/intelephense shim) and waits on a real
 	// initialize handshake plus a two-publish diagnostics sequence per case —

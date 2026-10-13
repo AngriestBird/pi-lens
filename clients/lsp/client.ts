@@ -10,7 +10,7 @@
 
 import { spawn as nodeSpawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { access, lstat, readFile } from "node:fs/promises";
+import { access, lstat, readFile, stat } from "node:fs/promises";
 import * as os from "node:os";
 import { pathToFileURL } from "node:url";
 import { emitBounded } from "../bounded-telemetry.js";
@@ -32,7 +32,10 @@ import {
 } from "../deps/vscode-jsonrpc.js";
 import { logExtension } from "../extension-log.js";
 import { recordLspChild, removeLspChild } from "../instance-registry.js";
-import { workspaceDiagnosticsCacheSessionStart } from "./workspace-diagnostics-session.js";
+import {
+	noteWorkspaceFileCreated,
+	workspaceDiagnosticsCacheSessionStart,
+} from "./workspace-diagnostics-session.js";
 import { logLatency } from "../latency-logger.js";
 import {
 	type LspMutationContext,
@@ -70,7 +73,11 @@ import {
 import { exceedsLspSyncLimits } from "./content-limits.js";
 import { probeTsserverProjectIdentity } from "./tsserver-sync.js";
 import { getStrategy } from "./wait-policy/index.js";
-import { WatchedFilesQueue } from "./watch-queue.js";
+import {
+	FILE_CREATED,
+	WatchedFilesQueue,
+	watchedTypeForOpen,
+} from "./watch-queue.js";
 import {
 	clearAllWorkspaceDiagnosticsCaches,
 	clearWorkspaceDiagnosticsCacheAtAndAbove,
@@ -4465,22 +4472,26 @@ async function handleNotifyOpenOnce(
 	// not reporting a real filesystem change. Avoids N project-wide
 	// rechecks on push-diagnostics LSPs (TypeScript, Python) per CR-1.
 	if (!silent) {
-		// Async existence probe (was a synchronous existsSync on the document-open
-		// path — a stat that blocks the loop during first-read/warm). The notify
-		// type is unchanged: 2 (Changed) when the file exists on disk, else 1
-		// (Created). access() rejects when absent.
-		let fileExists = true;
+		// Async stat (was a synchronous existsSync on the document-open path — a
+		// stat that blocks the loop during first-read/warm). Absent → 1 (Created).
+		// #4320: a file that exists is Created when it was born after this client
+		// started (see `watchedTypeForOpen`), Changed otherwise. The old
+		// existence-only rule reported every file pi had just written as Changed,
+		// and Pyrefly keeps a failed `import new_module` lookup until it hears
+		// Created.
+		let watchedType = FILE_CREATED;
 		try {
-			await access(filePath);
+			const info = await stat(filePath);
+			watchedType = watchedTypeForOpen(info.birthtimeMs, state.startedAtMs);
 		} catch {
-			fileExists = false;
+			// absent: Created
 		}
 		// #271: enqueue instead of sending now — the per-client queue coalesces a
 		// turn's file opens into a single notification, so push-diagnostics servers
 		// re-analyze the project once per burst rather than once per file. didOpen
 		// (below) still carries this file's content immediately, so the open
 		// document is analyzed without waiting on the batched watcher notify.
-		state.watchQueue.enqueue(uri, fileExists ? 2 : 1);
+		state.watchQueue.enqueue(uri, watchedType);
 	}
 
 	if (!isClientAlive(state)) return false;
@@ -6036,14 +6047,19 @@ export async function createLSPClient(options: {
 
 	// #271: batch per-file workspace/didChangeWatchedFiles into one notification
 	// per debounce window, so an N-file turn re-indexes the server once, not N×.
-	state.watchQueue = new WatchedFilesQueue((changes) => {
-		if (!isClientAlive(state)) return;
-		void safeSendNotification(
-			state.connection,
-			"workspace/didChangeWatchedFiles",
-			{ changes },
-		);
-	});
+	state.watchQueue = new WatchedFilesQueue(
+		(changes) => {
+			if (!isClientAlive(state)) return;
+			void safeSendNotification(
+				state.connection,
+				"workspace/didChangeWatchedFiles",
+				{ changes },
+			);
+		},
+		undefined,
+		// #4320: a creation can answer an import a cached finding reported missing.
+		() => noteWorkspaceFileCreated(),
+	);
 
 	setupIncomingHandlers(state, initialization, onDiagnosticsPublished);
 	connection.listen();

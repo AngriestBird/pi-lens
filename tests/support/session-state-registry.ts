@@ -123,8 +123,10 @@ import {
 	resetTreeSitterClientLoadState,
 } from "../../clients/tree-sitter-shared.js";
 import {
+	noteWorkspaceFileCreated,
 	resetWorkspaceDiagnosticsCacheSession,
 	workspaceDiagnosticsCacheSessionStart,
+	workspaceFileCreatedAt,
 } from "../../clients/lsp/workspace-diagnostics-session.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
 import { clearFormatterCache } from "../../clients/formatters.js";
@@ -839,6 +841,20 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 			isArmed: () =>
 				!isOutsideAllSessionRoots("/pi-lens-probe/elsewhere/file.ts"),
 			reset: () => resetSessionRootsForTests(),
+		},
+	},
+	{
+		id: "lsp-workspace-diagnostics-cache:fileCreatedAt",
+		module: "lsp/workspace-diagnostics-session.ts",
+		state: "_fileCreatedAt",
+		policy: "session_start",
+		resetName: "resetWorkspaceDiagnosticsCacheSession",
+		reason:
+			"#4320: the time of the latest file-created notification drops older cached findings; kept across sessions it would drop every later session's findings entries.",
+		probe: {
+			arm: () => noteWorkspaceFileCreated(1),
+			isArmed: () => workspaceFileCreatedAt() === 0,
+			reset: () => resetWorkspaceDiagnosticsCacheSession(),
 		},
 	},
 	{

@@ -2,6 +2,8 @@
 // Used for integration tests — speaks real LSP protocol without actual language smarts
 
 import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 // #2436: parent-death watchdog. A test that spawns this fixture and then
 // dies without running its own cleanup (a SIGKILLed vitest worker fork, a
@@ -234,6 +236,46 @@ const PUBLISH_SEQUENCE_GAP_MS = Number(
 const PUBLISH_SEQUENCE_FIRST_MS = Number(
 	process.env.FAKE_LSP_PUBLISH_SEQUENCE_FIRST_MS ?? "0",
 );
+
+// #4320: a server that caches a failed module lookup, as Pyrefly 1.3.2 does
+// (measured: `import new_module` keeps its missing-import after the module is
+// created, until the server hears a `Created` watched-files event; `Changed`
+// does not clear it). `FAKE_LSP_STALE_MODULE_LOOKUP=1` makes every open
+// document's `import "./name"` line resolve to `<dir>/name.lua`, remember a
+// lookup that failed, and re-evaluate every open document when a `Created`
+// event for the missing file arrives. Push diagnostics, version-matched.
+// Off by default.
+const STALE_MODULE_LOOKUP = process.env.FAKE_LSP_STALE_MODULE_LOOKUP === "1";
+const failedModuleLookups = new Set();
+
+function publishModuleLookups(uri) {
+	const text = openDocuments.get(uri) ?? "";
+	const dir = path.dirname(fileURLToPath(uri));
+	const diagnostics = [];
+	for (const match of text.matchAll(/import\s+"\.\/([\w-]+)"/g)) {
+		const target = path.join(dir, `${match[1]}.lua`);
+		if (!failedModuleLookups.has(target) && !fs.existsSync(target)) {
+			failedModuleLookups.add(target);
+		}
+		if (failedModuleLookups.has(target)) {
+			diagnostics.push({
+				severity: 1,
+				source: "fake-stale-lookup",
+				code: "missing-import",
+				message: `Cannot find module ${match[1]}`,
+				range: {
+					start: { line: 0, character: 0 },
+					end: { line: 0, character: 1 },
+				},
+			});
+		}
+	}
+	send({
+		jsonrpc: "2.0",
+		method: "textDocument/publishDiagnostics",
+		params: { uri, diagnostics },
+	});
+}
 
 function publishSequenceFor(uri) {
 	if (PUBLISH_SEQUENCE.length === 0) return false;
@@ -636,6 +678,7 @@ function handle(raw) {
 			data.params?.textDocument?.text ?? "",
 		);
 		publishSequenceFor(data.params?.textDocument?.uri);
+		if (STALE_MODULE_LOOKUP) publishModuleLookups(data.params?.textDocument?.uri);
 		if (process.env.FAKE_LSP_PUSH_DIAGNOSTIC === "1") {
 			send({
 				jsonrpc: "2.0",
@@ -677,6 +720,7 @@ function handle(raw) {
 			openDocuments.set(data.params?.textDocument?.uri, text);
 		}
 		publishSequenceFor(data.params?.textDocument?.uri);
+		if (STALE_MODULE_LOOKUP) publishModuleLookups(data.params?.textDocument?.uri);
 		// #1669 review F5: echo the received contentChanges back so a real-init
 		// integration test can assert the ON-THE-WIRE shape (ranged vs
 		// whole-document) that the client actually sent, proving
@@ -740,6 +784,14 @@ function handle(raw) {
 		// #271 smoke: echo each received batch back so an integration test can
 		// assert the client coalesced N file opens into ONE wire frame. Off by
 		// default (the bulk of tests neither send nor care about watched-files).
+		if (STALE_MODULE_LOOKUP) {
+			let created = false;
+			for (const change of data.params?.changes ?? []) {
+				if (change.type !== 1) continue;
+				created = failedModuleLookups.delete(fileURLToPath(change.uri)) || created;
+			}
+			if (created) for (const uri of openDocuments.keys()) publishModuleLookups(uri);
+		}
 		if (process.env.FAKE_LSP_ECHO_WATCHED_FILES) {
 			send({
 				jsonrpc: "2.0",

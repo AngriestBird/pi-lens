@@ -15,8 +15,8 @@
  * Production chain: the REAL `handleNotifyOpen` / `handleNotifyChange` /
  * `closeDocument` over `createMockState`. Two awaits are handed to the
  * scheduler: the JSON-RPC `sendNotification` (the process boundary) and the
- * `access` existence probe (the file system; `closedAndGone` and the
- * first-open watcher notify). Both answer from the test's model at call time
+ * `access` / `stat` existence probes (the file system; `closedAndGone` and the
+ * first-open watcher notify, which stats for the birth time, #4320). Both answer from the test's model at call time
  * and resolve when the scheduler releases them, so the scheduler, not I/O
  * timing, decides every interleaving and a seed replays exactly.
  *
@@ -34,6 +34,7 @@ import { afterEach, beforeEach, describe, it, vi } from "vitest";
 
 const fsProbe = vi.hoisted(() => ({
 	access: undefined as undefined | ((file: string) => Promise<void>),
+	stat: undefined as undefined | ((file: string) => Promise<unknown>),
 }));
 
 // ESM builtins cannot be spied at runtime, so `access` is replaced at load
@@ -42,7 +43,9 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("node:fs/promises")>();
 	const access = (...args: Parameters<typeof actual.access>) =>
 		fsProbe.access ? fsProbe.access(String(args[0])) : actual.access(...args);
-	const mocked = { ...actual, access };
+	const stat = (...args: Parameters<typeof actual.stat>) =>
+		fsProbe.stat ? fsProbe.stat(String(args[0])) : actual.stat(...args);
+	const mocked = { ...actual, access, stat };
 	return { ...mocked, default: mocked };
 });
 
@@ -186,6 +189,16 @@ async function execute(
 		note(`access ${exists ? "found" : "ENOENT"}`);
 		return s.schedule(Promise.resolve(), `access:${exists}`).then(() => {
 			if (exists) return;
+			throw Object.assign(new Error(`ENOENT: ${file}`), { code: "ENOENT" });
+		});
+	};
+	// #4320: the first-open watcher notify stats the file for its birth time.
+	// Same model, same scheduler turn; a zero birth time is "unknown" (Changed).
+	fsProbe.stat = (file) => {
+		const exists = fileExists;
+		note(`stat ${exists ? "found" : "ENOENT"}`);
+		return s.schedule(Promise.resolve(), `stat:${exists}`).then(() => {
+			if (exists) return { birthtimeMs: 0 };
 			throw Object.assign(new Error(`ENOENT: ${file}`), { code: "ENOENT" });
 		});
 	};
@@ -577,6 +590,7 @@ describe("#3530 — notify queue properties over scheduled interleavings", () =>
 	});
 	afterEach(() => {
 		fsProbe.access = undefined;
+		fsProbe.stat = undefined;
 		vi.useRealTimers();
 		vi.restoreAllMocks();
 	});

@@ -27,9 +27,32 @@ export function resetWorkspaceDiagnosticsCacheSession(
 	startedAt: number = Date.now(),
 ): void {
 	_sessionStartedAt = startedAt;
+	_fileCreatedAt = 0;
 }
 
 /** When the current session started, for entry-age comparisons. */
 export function workspaceDiagnosticsCacheSessionStart(): number {
 	return _sessionStartedAt;
+}
+
+/**
+ * #4320: a file created after an entry was scanned can resolve an import that
+ * entry reported missing, with no edit to the importer and no edit to anything
+ * the importer was known to import (an unresolved import has no edge in the
+ * reverse-dependency index), so neither freshness check in `isEntryFresh` can
+ * see it. This is the time of the latest `Created` watched-files notification
+ * delivered to any language server this process runs; a finding-bearing entry
+ * scanned at or before it is not served. Re-armed with the session clock above
+ * (same reset), so it never outlives a session.
+ */
+let _fileCreatedAt = 0;
+
+/** Record that a file-created notification just reached a language server. */
+export function noteWorkspaceFileCreated(at: number = Date.now()): void {
+	_fileCreatedAt = Math.max(_fileCreatedAt, at);
+}
+
+/** Latest file-created notification time (0 when none this session). */
+export function workspaceFileCreatedAt(): number {
+	return _fileCreatedAt;
 }
