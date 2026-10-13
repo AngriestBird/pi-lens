@@ -160,8 +160,11 @@ rigor (#2599).
   GitHub ignores it in a title.
 - Run `node scripts/check-pr-body.mjs --lint-local PR_BODY.md` and
   `node scripts/check-changelog-fragments.mjs` before the hand-back; both
-  must pass, and the hand-back quotes them. A red `PR body (advisory)` check is
-  a fix-before-review item. A changelog fragment is `---` /
+  must pass, and the hand-back quotes them. The body lint reads the closed
+  issue's labels through `gh api`; a `::warning::` that the Detection check
+  was skipped means gh failed, so the section was not required, not that it
+  passed (#4288). A red `PR body (advisory)` check is a fix-before-review item.
+  A changelog fragment is `---` /
   `section: <Added|Changed|Deprecated|Removed|Fixed|Security>` /
   `audience: <user|internal>` / `---` / blank / one `- ` bullet. New
   `audience: user` fragments must begin with a bold lead of at most 100
