@@ -5631,6 +5631,21 @@ describe("--lint-local resolves the closed issue label through gh (#4288)", () =
 		},
 	);
 
+	// Recurrence: #4345 review F1 (2026-10-13). With Detection as the last
+	// section, the mandatory "Generated with" footer sits inside it; counting
+	// that footer as content revoked the unedited hint's exemption and reds a
+	// non-bug PR that the template explicitly makes optional.
+	posix(
+		"treats the unedited hint as absent when the footer follows it as the last section",
+		() => {
+			const footer =
+				"🤖 Generated with [Claude Code](https://claude.com/claude-code)";
+			const run = runLint(`${closing}${templateHint}\n${footer}\n`, "feature");
+			expect(run.output).not.toContain("Detection");
+			expect(run.status).toBe(0);
+		},
+	);
+
 	posix(
 		"warns that the check was skipped when gh cannot read the label",
 		() => {

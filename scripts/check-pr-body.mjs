@@ -40,6 +40,9 @@ const REQUIRED_SECTIONS = [
 	"Observability",
 ];
 const HEADING = /^#{2,4}\s+(.+?)\s*$/;
+// The PR footer the template requires (.github/PULL_REQUEST_TEMPLATE.md).
+const GENERATED_FOOTER =
+	/^🤖 Generated with \[Claude Code\]\(https:\/\/claude\.com\/claude-code\)$/;
 const FLATTENED_BODY_MAX_NEWLINES = 2;
 // One post-image read bound, shared by the git and working-tree branches of
 // `headFileSource`: a file-count bound alone is not a byte bound.
@@ -1835,10 +1838,12 @@ export function lintDetectionSection(body = "", options = {}) {
 		.join("\n");
 	// A non-bug PR may leave the template's optional hint in place; that is an
 	// unanswered section, not a malformed answer.
+	// The mandatory footer is the last line of the body, so it lands inside
+	// this section when Detection is last; it is not the author's content.
 	if (
 		options.ignoreUnfilled &&
 		!hasRealContent(
-			content.split("\n"),
+			content.split("\n").filter((line) => !GENERATED_FOOTER.test(line.trim())),
 			"detection",
 			templatePlaceholderLines(),
 		)
@@ -2299,6 +2304,7 @@ export async function resolveBugClosingViaGh(
 				cwd,
 				encoding: "utf8",
 				timeout: 10_000,
+				killSignal: "SIGKILL",
 				stdio: ["ignore", "pipe", "pipe"],
 			}),
 		),
