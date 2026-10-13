@@ -194,6 +194,11 @@ describe("workflow npx calls are pinned (#4339)", () => {
 			`${PIN_LINE} true\nnpx -y "npm@\${npm_pin}" --version`,
 			1,
 		],
+		[
+			"rejects a pin variable used before its bind",
+			`npx -y "npm@\${npm_pin}" --version\n${PIN_LINE}`,
+			1,
+		],
 		// #4339 review F3: a comment does not continue, and escaped quotes do
 		// not open or close a string.
 		[
