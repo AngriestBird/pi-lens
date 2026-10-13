@@ -270,6 +270,7 @@ describe("removeTempDirSync under a live writer", () => {
 	// and the one-diagnostic assertion failed on CI (master run 38144066641,
 	// PR #4341 run 115473062346). The directory's removal is made to fail the
 	// way a busy directory does, so the path is reached on every run.
+	const RUNAWAY_PASSES = 150;
 	const restoreFs: Array<() => void> = [];
 	afterEach(() => {
 		for (const restore of restoreFs.splice(0)) restore();
@@ -284,7 +285,15 @@ describe("removeTempDirSync under a live writer", () => {
 		let passes = 0;
 		nodeFs.rmSync = ((target, options) => {
 			if (target !== dir) return real(target, options);
-			if (++passes <= failures)
+			// A removal loop that lost its deadline retries for ever and hangs the
+			// worker (exit 124). A pass far past the expected ~40 throws an error
+			// with no retryable code, so the loop ends and the pass-count
+			// assertion below fails by name instead.
+			if (++passes > RUNAWAY_PASSES)
+				throw new Error(
+					`runaway removal loop: pass ${passes} past the 2 s budget`,
+				);
+			if (passes <= failures)
 				throw Object.assign(new Error(`${code}: directory busy`), { code });
 			return real(target, options);
 		}) as typeof nodeFs.rmSync;
@@ -311,7 +320,10 @@ describe("removeTempDirSync under a live writer", () => {
 		// Retried (not one-shot) and bounded: a 2 s budget at a 50 ms retry is
 		// about 40 passes, and 100 leaves room for a run that is not slow.
 		expect(passes()).toBeGreaterThan(1);
-		expect(passes()).toBeLessThan(100);
+		expect(
+			passes(),
+			"removeTempDirSync kept retrying past its 2 s budget (deadline guard regressed)",
+		).toBeLessThan(100);
 		expect(existsSync(tmpDir)).toBe(true);
 		expect(write).toHaveBeenCalledTimes(1);
 		expect(String(write.mock.calls[0]?.[0])).toContain(
