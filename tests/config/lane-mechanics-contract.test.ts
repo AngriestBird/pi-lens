@@ -80,7 +80,11 @@ describe("orchestrator lane mechanics contract (#4007)", () => {
 		);
 		expect(body).toContain("#3173");
 		expect(body).toContain("Never force");
-		expect(body).toContain("ORCHESTRATOR SUMMARY` of at most 30 lines");
+		expect(body).toContain("ORCHESTRATOR SUMMARY`. Its cap");
+		expect(body).toContain("at most 6 lines for a mechanical lane");
+		expect(body).toMatch(
+			/20 for a locate or investigation\s+pass, and 30 for a fix or review round/,
+		);
 	});
 
 	// Recurrence: #4044 (2026-10-07: a verify worker's `npm ci --ignore-scripts
