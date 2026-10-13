@@ -4728,6 +4728,9 @@ async function addFileToGraph(
 	file: string,
 	ignoredIds?: ReadonlySet<string>,
 	contentOverride?: string | null,
+	/** #4346: `imports` extracts for a throwaway graph (`resolveImportTargets`):
+	 * it leaves the wasm-trap retry memo alone and asks no language server. */
+	purpose: "graph" | "imports" = "graph",
 ): Promise<void> {
 	const kind = detectFileKind(file);
 	if (!kind || !MAIN_KINDS.has(kind)) return;
@@ -4780,10 +4783,16 @@ async function addFileToGraph(
 	const extracted: ExtractedSymbols & { wasmTrap?: WasmTrapState | undefined } =
 		irExtracted ??
 		(await extractTreeSitterSymbols(file, languageId, contentOverride));
+	addTreeSitterFile(graph, cwd, file, languageId, extracted, ignoredIds);
+	if (purpose === "imports") {
+		if (kind === "cxx") {
+			addCxxIncludeEdges(graph, cwd, file, ignoredIds, contentOverride);
+		}
+		return;
+	}
 	// #3605: remember a file a wasm trap cost, so a later build retries it.
 	if (extracted.wasmTrap) _wasmTrappedFiles.set(file, extracted.wasmTrap);
 	else _wasmTrappedFiles.delete(file);
-	addTreeSitterFile(graph, cwd, file, languageId, extracted, ignoredIds);
 	// Zero symbols consults the warm/open LSP fallback REGARDLESS of whether
 	// the symbols came from shared IR or direct extraction (#955 review): a
 	// degraded extractor (defs query failed to compile — init() deliberately
@@ -4970,6 +4979,79 @@ function importTargetsForFile(graph: ReviewGraph, filePath: string): string[] {
 	return [...targets].sort((a, b) => compareOrdinal(a, b));
 }
 
+/**
+ * #4346: the graph's importers whose unresolved import (an `imports` edge to a
+ * `module:` or `external:` placeholder) now resolves to a file in `created`,
+ * through the resolver a full build uses for the importer's language. A cheap
+ * name test runs first: a placeholder is resolved only when a part of its
+ * source equals a created file's stem or its directory's name, so a new
+ * `os.py` resolves the placeholders that name `os`, never every external.
+ * C and C++ includes leave no placeholder, so they are not found here.
+ */
+function importersResolvingTo(
+	graph: ReviewGraph,
+	cwd: string,
+	created: ReadonlySet<string>,
+	ignoredIds?: ReadonlySet<string>,
+): string[] {
+	const names = new Set<string>();
+	for (const file of created) {
+		names.add(path.basename(file).split(".")[0] ?? "");
+		names.add(path.basename(path.dirname(file)));
+	}
+	names.delete("");
+	const importers = new Set<string>();
+	for (const node of graph.nodes.values()) {
+		if (node.kind !== "module" && node.kind !== "external") continue;
+		const source = node.metadata?.source;
+		if (typeof source !== "string") continue;
+		if (!source.split(/[^\w$-]+/).some((part) => names.has(part))) continue;
+		for (const edge of graph.edgesByTo.get(node.id) ?? []) {
+			if (edge.kind !== "imports") continue;
+			const importer = graph.nodes.get(edge.from);
+			const importerPath = importer?.filePath;
+			if (!importer || !importerPath || importers.has(importerPath)) continue;
+			const targets =
+				importer.language === "jsts"
+					? [localImportToFile(cwd, importerPath, source, ignoredIds)]
+					: resolveImportToFiles(
+							cwd,
+							importerPath,
+							importer.language ?? "",
+							source,
+						);
+			if (
+				targets.some(
+					(target) =>
+						target !== undefined &&
+						!ignoredIds?.has(target) &&
+						created.has(normalizeMapKey(target)),
+				)
+			) {
+				importers.add(importerPath);
+			}
+		}
+	}
+	return [...importers];
+}
+
+/**
+ * #4346: the files `filePath` imports now, as a full build resolves them: the
+ * same per-file extraction and resolvers, into a throwaway graph. The LSP
+ * diagnostics paths announce these to their servers, so a module created
+ * outside pi-lens reaches a server that only ever sees its importer.
+ */
+export async function resolveImportTargets(
+	cwd: string,
+	filePath: string,
+): Promise<string[]> {
+	const graph = createEmptyGraph();
+	await addFileToGraph(graph, cwd, filePath, undefined, undefined, "imports");
+	rebuildIndexes(graph);
+	const own = normalizeMapKey(filePath);
+	return importTargetsForFile(graph, filePath).filter((file) => file !== own);
+}
+
 async function updateGraphFiles(
 	graph: ReviewGraph,
 	cwd: string,
@@ -5003,6 +5085,37 @@ async function updateGraphFiles(
 			...removeFileOwnedGraphData(graph, file, removedEdges),
 		);
 		await addFileToGraph(graph, cwd, file, ignoredIds);
+	}
+	// #4346: a file new to the graph can resolve an import another file left
+	// unresolved, and only that importer's own parse adds the edge a full build
+	// has. Reparse each such importer in this same pass, so the returned delta
+	// (and the reverse-dependency index patched from it) carries the edge.
+	const created = new Set(
+		prior
+			.filter((entry) => !entry.existedBefore)
+			.map((entry) => entry.filePath)
+			.filter((file) => graph.fileNodes.has(file)),
+	);
+	if (created.size > 0) {
+		const batch = new Set(prior.map((entry) => entry.filePath));
+		for (const importer of importersResolvingTo(
+			graph,
+			cwd,
+			created,
+			ignoredIds,
+		)) {
+			if (batch.has(importer)) continue;
+			batch.add(importer);
+			prior.push({
+				filePath: importer,
+				existedBefore: true,
+				priorTargets: importTargetsForFile(graph, importer),
+			});
+			preservedIncoming.push(
+				...removeFileOwnedGraphData(graph, importer, removedEdges),
+			);
+			await addFileToGraph(graph, cwd, importer, ignoredIds);
+		}
 	}
 	if (removedEdges.size > 0) {
 		unindexEdges(graph, removedEdges);
