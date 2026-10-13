@@ -547,7 +547,7 @@ jobs:
         continue-on-error: true
         run: |
           set -o pipefail
-          npx vitest run \
+          node_modules/.bin/vitest run \
             tests/config/lsp-first-publish-census.test.ts \
             tests/config/lsp-clean-behavior-census.test.ts \
             tests/config/lsp-idle-eviction-measurement.test.ts \

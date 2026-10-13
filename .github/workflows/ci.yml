@@ -444,7 +444,7 @@ jobs:
         run: npm install --no-audit --no-fund
 
       - name: Verify ast-grep CLI is on PATH
-        run: npx ast-grep --version
+        run: node_modules/.bin/ast-grep --version
 
       - name: Build
         run: npm run build
