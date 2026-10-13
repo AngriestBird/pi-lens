@@ -36,8 +36,11 @@ export class McpStdioClient {
 			this.stderr.push(chunk.toString());
 			this.onFrame?.("stderr", chunk.toString());
 		});
+		// A string decoder, not chunk.toString(): a multi-byte character split
+		// across two chunks must not decode to U+FFFD.
+		this.child.stdout.setEncoding("utf8");
 		this.child.stdout.on("data", (chunk) => {
-			this.buf += chunk.toString();
+			this.buf += chunk;
 			let i = this.buf.indexOf("\n");
 			while (i >= 0) {
 				const line = this.buf.slice(0, i).trim();

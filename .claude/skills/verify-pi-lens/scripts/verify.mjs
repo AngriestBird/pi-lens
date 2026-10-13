@@ -199,6 +199,14 @@ function launchServer({ tree, ws, runDir, wirePath }) {
 			};
 		},
 		async stop() {
+			// Graceful first: ending stdin runs the server's shutdown handler (its
+			// telemetry record, the log flush, the IPC socket unlink). SIGTERM, the
+			// shared client's close(), bypasses all three; it is only the fallback.
+			client.child.stdin.end();
+			await Promise.race([
+				client.exited,
+				new Promise((resolve) => setTimeout(resolve, 5000)),
+			]);
 			await client.close();
 			wire.end();
 		},
