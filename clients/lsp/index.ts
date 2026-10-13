@@ -15,7 +15,7 @@ import path from "node:path";
 import { pathToFileURL, URL } from "node:url";
 import { BoundedFifoMap } from "../bounded-cache.js";
 import { workspaceFileCreatedAtFor } from "./workspace-diagnostics-session.js";
-import { FILE_CREATED, FILE_DELETED } from "./watch-queue.js";
+import { importTargetsToAnnounce } from "./created-import-targets.js";
 import { getProjectIgnoreMatcher, isExcludedDirName } from "../file-utils.js";
 import { recordLsp } from "../widget-state.js";
 import { applyAuxiliarySuppressions } from "../dispatch/auxiliary-lsp.js";
@@ -8686,6 +8686,7 @@ export class LSPService {
 			applied = await applyWorkspaceEdit(merged.edit, cwd, {
 				mutationContext: options.mutationContext,
 				observe: false,
+				watchedFileSink: this,
 			});
 		} catch (err) {
 			if (options.mutationContext) {
@@ -8833,7 +8834,11 @@ export class LSPService {
 					],
 				},
 				cwd,
-				{ observe: false },
+				// #4320, #4346: the applier sends Deleted (old) and Created (new),
+				// what a file watcher reports beside didRenameFiles. A server
+				// without didRename (Pyrefly registers only willRename) otherwise
+				// hears Changed for the destination, whose inode keeps its birth.
+				{ observe: false, watchedFileSink: this },
 			);
 		} catch (err) {
 			if (options.mutationContext) {
@@ -8901,14 +8906,6 @@ export class LSPService {
 				}
 			}),
 		);
-
-		// #4320: a rename is a delete and a create on disk, which is what a file
-		// watcher reports beside didRenameFiles. A server without didRename
-		// (Pyrefly registers only willRename) otherwise hears Changed for the
-		// destination on its first open, because the moved inode keeps its old
-		// birth, and keeps a failed lookup for that path.
-		await this.notifyExternalFileChange(oldFilePath, FILE_DELETED);
-		await this.notifyExternalFileChange(newFilePath, FILE_CREATED);
 
 		const files = [...new Set([...applied.files, oldFilePath, newFilePath])];
 		if (options.mutationContext) {
@@ -9530,8 +9527,17 @@ export class LSPService {
 			return !capped;
 		};
 		// #4320: lookups below run before any touch, so a module created since
-		// the last sweep must reach its servers first.
-		this.announceCreatedFiles(files);
+		// the last sweep must reach its servers first. #4346: so must one only
+		// a finding-bearing file's imports name (created outside pi-lens).
+		this.announceCreatedFiles([
+			...files,
+			...(await importTargetsToAnnounce(
+				root,
+				files.filter((filePath) =>
+					workspaceDiagnosticsCacheCtx.hasFindings(filePath),
+				),
+			)),
+		]);
 		const cachedResults: LSPWorkspaceDiagnosticResult[] = [];
 		const filesToTouch: string[] = [];
 		const writeIndexByPath = new Map<string, number | undefined>();

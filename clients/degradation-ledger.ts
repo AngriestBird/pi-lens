@@ -643,6 +643,13 @@ export type DegradationKind =
 	 * latches this permanently instead of retrying on every parse call.
 	 */
 	/** A retired LSP diagnostics call was redirected to lens_diagnostics. */
+	/**
+	 * #4346: a diagnostics call could not resolve every importer's imports,
+	 * so a module created outside pi-lens may not reach a server that caches
+	 * a failed lookup. Subject is the cause: `capped` (more importers than one
+	 * call resolves) or `extraction-failed`. Once per cause per session.
+	 */
+	| "lsp-created-import-scan-incomplete"
 	| "lsp-diagnostics-compatibility"
 	| "lsp-diagnostics-file-too-large"
 	/**
@@ -695,6 +702,13 @@ export type DegradationKind =
 	 * next request. Subject is the client key.
 	 */
 	| "lsp-idle-eviction"
+	/**
+	 * #4346: a workspace edit's resource operation reached disk but its
+	 * watched-files event could not be handed to the language servers, so a
+	 * server may keep a failed lookup for that path. Subject is the operation
+	 * (`create`, `rename`, `delete`). Once per operation per session.
+	 */
+	| "lsp-resource-op-unannounced"
 	| "lsp-liveness-probe-unsupported"
 	/**
 	 * A pi-lens `tool_call` handler threw. pi's `emitToolCall` has no

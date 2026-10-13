@@ -76,6 +76,7 @@ import {
 	SCAN_LANGUAGE_PRIORITY,
 } from "../clients/language-registry.js";
 import { exceedsLspSyncLimits } from "../clients/lsp/content-limits.js";
+import { importTargetsToAnnounce } from "../clients/lsp/created-import-targets.js";
 
 const MAX_FILES = 100;
 export const MAX_BATCH_FILES = 100;
@@ -1524,6 +1525,12 @@ async function runFileDiagnostics(
 	// Reserve the token before awaiting this file's LSP result. The direct-file
 	// path performs its own confirmation/reconciliation below (#1198).
 	const writeIndex = nextWriteIndex?.();
+	// #4346: a module this file imports, created outside pi-lens, reaches its
+	// servers before the touch (the batch path gates this on cached findings;
+	// one file needs no gate).
+	lspService.announceCreatedFiles(
+		await importTargetsToAnnounce(cwd, [absPath]),
+	);
 	// #3505 r2: the widget row is observed at the read, not after the touch.
 	const observedAt = Date.now();
 	const {
@@ -1976,8 +1983,16 @@ async function collectBatchDiagnostics(
 		else pendingIndices.set(file, [index]);
 	});
 	// #4320: a module created since a file was cached must reach its servers
-	// before any lookup below, whatever the order of `files`.
-	lspService.announceCreatedFiles(files);
+	// before any lookup below, whatever the order of `files`. #4346: so must a
+	// module named only by a finding-bearing file's imports, which nothing
+	// reports when it was created outside pi-lens.
+	lspService.announceCreatedFiles([
+		...files,
+		...(await importTargetsToAnnounce(
+			resolvedCwd,
+			files.filter((file) => cacheCtx.hasFindings(file)),
+		)),
+	]);
 	const groups = groupFilesByPrimaryServer(files);
 	await runPerServerGroups(
 		groups,

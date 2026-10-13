@@ -245,8 +245,11 @@ const PUBLISH_SEQUENCE_FIRST_MS = Number(
 // `<dir>/name.lua` relative to the document, remember a
 // lookup that failed, and re-evaluate every open document when a `Created`
 // event for the missing file arrives. Push diagnostics, version-matched.
-// Off by default.
+// Off by default. #4346: `FAKE_LSP_STALE_MODULE_EXT` (default `.lua`) names
+// the module's extension, so a TypeScript side-effect import
+// (`import "./name"`), which the review graph extracts, can model it too.
 const STALE_MODULE_LOOKUP = process.env.FAKE_LSP_STALE_MODULE_LOOKUP === "1";
+const STALE_MODULE_EXT = process.env.FAKE_LSP_STALE_MODULE_EXT ?? ".lua";
 const failedModuleLookups = new Set();
 
 function publishModuleLookups(uri) {
@@ -254,7 +257,7 @@ function publishModuleLookups(uri) {
 	const dir = path.dirname(fileURLToPath(uri));
 	const diagnostics = [];
 	for (const match of text.matchAll(/import\s+"(\.\.?\/[\w/-]+)"/g)) {
-		const target = path.join(dir, `${match[1]}.lua`);
+		const target = path.join(dir, `${match[1]}${STALE_MODULE_EXT}`);
 		if (!failedModuleLookups.has(target) && !fs.existsSync(target)) {
 			failedModuleLookups.add(target);
 		}

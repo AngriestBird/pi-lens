@@ -2447,7 +2447,11 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// to the session-scope hand-off (`adoptHandoff`, below).
 	"clients/read-guard-branch.ts": 3,
 	"clients/recent-touches.ts": 8,
-	"clients/review-graph/builder.ts": 41,
+	// #4346: 41 -> 43. `updateGraphFiles` re-extracts each importer a newly
+	// created file resolves (1), and `resolveImportTargets` extracts one file
+	// into a throwaway graph for the LSP diagnostics paths (1). Both are the
+	// same per-file extraction await the update loop already pins.
+	"clients/review-graph/builder.ts": 43,
 	"clients/safe-spawn.ts": 9,
 	// #3612: `adoptHandoff` awaits the own and parent sidecar loads and each
 	// store's restore: the session_start sidecar I/O that read-guard-branch.ts

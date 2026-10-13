@@ -428,9 +428,11 @@ export function classifyWorkspaceDiagnosticsCacheExpiry(
 	// servers were sent under its root (`workspaceFileCreatedAtFor`) may be a
 	// "cannot find module" the new file now answers. Clean entries keep
 	// serving, and re-touching every clean file per new file is the cost this
-	// cache exists to avoid. Known gap (#4346): a clean importer whose module
-	// is later broken is judged by the dependency check, which has no edge to a
-	// module created after the review graph was built.
+	// cache exists to avoid. A clean importer whose module is later broken is
+	// judged by the dependency check: the incremental graph update gives it the
+	// edge to a created module (#4346). The edge does not replace this drop:
+	// a file no import names (a TypeScript ambient `.d.ts`, a Go same-package
+	// file) answers a finding with no edge in any build (#4346 probe).
 	if (entry.scannedAt <= fileCreatedAt) return "file-created";
 	if (now - entry.scannedAt > WORKSPACE_DIAGNOSTICS_FINDING_MAX_AGE_MS) {
 		return "max-age";
@@ -602,6 +604,12 @@ export interface WorkspaceDiagnosticsCacheLookup {
 export interface WorkspaceDiagnosticsCacheContext {
 	/** Cached complete imports for a file, when the reverse-dependency index covers it. */
 	importsFor(filePath: string): string[] | undefined;
+	/**
+	 * #4346: whether `filePath`'s entry, under any scope, holds findings. Read
+	 * only: no expiry, no freshness check. A file whose last answer was clean
+	 * cannot be replaying a missing import.
+	 */
+	hasFindings(filePath: string): boolean;
 	/** Fresh cached result for `filePath` under `scopeKey`, or `undefined`
 	 * when there's no entry, the entry's scope doesn't match, or it fails the
 	 * mtime/dependency freshness check. */
@@ -755,6 +763,9 @@ export function createWorkspaceDiagnosticsCacheContext(
 	return {
 		importsFor(filePath) {
 			return getImports(filePath);
+		},
+		hasFindings(filePath) {
+			return (entries[cacheKeyFor(filePath)]?.diagnostics.length ?? 0) > 0;
 		},
 		lookup(filePath, scopeKey) {
 			// #1669 review N4: the epoch guarded `persist()` but not `lookup()` —
