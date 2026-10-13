@@ -299,6 +299,25 @@ describe("didChangeWatchedFiles type for an opened file (#4320)", () => {
 		]);
 	});
 
+	// #4320 r3 (G3): a Created for an unsaved document tells the server of a
+	// buffer, not a file. Remembering it would turn the file's real creation
+	// on disk into Changed, and Pyrefly would keep the failed lookup.
+	it("announces Created when an unsaved document's file is later written", async (ctx) => {
+		requireBirthtime(ctx);
+		await startClient();
+		const file = path.join(dir, "saved-later.ts");
+		await client!.notify.open(file, "export const s = 1;\n", "typescript");
+		await framesReceived(1);
+		await client!.closeDocument(file);
+
+		fs.writeFileSync(file, "export const s = 1;\n");
+		await client!.notify.open(file, "export const s = 1;\n", "typescript");
+
+		expect((await framesReceived(2))[1]).toEqual([
+			{ uri: pathToFileURL(file).href, type: 1 },
+		]);
+	});
+
 	it("sends nothing for a silent open of a new file", async (ctx) => {
 		requireBirthtime(ctx);
 		await startClient();

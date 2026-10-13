@@ -219,6 +219,7 @@ describe("lens_diagnostics compact filename", () => {
 		const file = path.join(cwd, "app.ts");
 		fs.writeFileSync(file, "const app = 1;\n");
 		const service = {
+			announceCreatedFiles: vi.fn(),
 			touchFile: vi.fn(async () => undefined),
 			getDiagnostics: vi.fn(async () => []),
 			getCapabilitySnapshots: vi.fn(async () => []),
@@ -247,6 +248,7 @@ describe("lens_diagnostics compact filename", () => {
 		fs.writeFileSync(diagnosed, "const diagnosed = 1;\n");
 		fs.writeFileSync(unrelated, "const unrelated = 1;\n");
 		const service = {
+			announceCreatedFiles: vi.fn(),
 			touchFile: vi.fn(async () => undefined),
 			getDiagnostics: vi.fn(async () => []),
 			getCapabilitySnapshots: vi.fn(async () => []),
@@ -319,6 +321,7 @@ describe("lens_diagnostics source and scope routing", () => {
 			),
 		);
 		const service = {
+			announceCreatedFiles: vi.fn(),
 			touchFile: vi.fn(async () => undefined),
 			getDiagnostics: vi.fn(async () =>
 				tiers.map(([_, message, severity]) => ({
@@ -398,6 +401,7 @@ describe("lens_diagnostics source and scope routing", () => {
 			),
 		);
 		const service = {
+			announceCreatedFiles: vi.fn(),
 			touchFile: vi.fn(async () => undefined),
 			getDiagnostics: vi.fn(async () => [
 				{
@@ -443,6 +447,7 @@ describe("lens_diagnostics source and scope routing", () => {
 		const file = path.join(cwd, "bad.ts");
 		fs.writeFileSync(file, "const value: number = 'bad';\n");
 		const service = {
+			announceCreatedFiles: vi.fn(),
 			touchFile: vi.fn(async () => undefined),
 			getDiagnostics: vi.fn(async () => [
 				{
@@ -479,6 +484,7 @@ describe("lens_diagnostics source and scope routing", () => {
 		fs.writeFileSync(path.join(cwd, "one.ts"), "const one = 1;\n");
 		const service = {
 			runWorkspaceDiagnostics: vi.fn(async () => []),
+			announceCreatedFiles: vi.fn(),
 			touchFile: vi.fn(async () => undefined),
 			getDiagnostics: vi.fn(async () => []),
 			getCapabilitySnapshots: vi.fn(async () => []),
@@ -509,6 +515,7 @@ describe("lens_diagnostics source and scope routing", () => {
 		fs.writeFileSync(path.join(cwd, "outside.ts"), "const b = 1;\n");
 		const touched: string[] = [];
 		const service = {
+			announceCreatedFiles: vi.fn(),
 			touchFile: vi.fn(async (file: string) => {
 				touched.push(file);
 				return undefined;
@@ -542,6 +549,7 @@ describe("lens_diagnostics source and scope routing", () => {
 		const touchedByScope = new Map<string, string[]>();
 		function makeService(key: string) {
 			return {
+				announceCreatedFiles: vi.fn(),
 				touchFile: vi.fn(async (f: string) => {
 					touchedByScope.set(key, [...(touchedByScope.get(key) ?? []), f]);
 					return undefined;

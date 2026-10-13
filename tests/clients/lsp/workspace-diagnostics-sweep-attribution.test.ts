@@ -114,7 +114,10 @@ describe(
 				root: sessionDir,
 				getWorkspaceDiagnosticsSupport: () => ({ advertised: false }),
 				getOperationSupport: () => ({}),
-				notify: { open: vi.fn(async () => {}) },
+				notify: {
+					announceCreated: () => undefined,
+					open: vi.fn(async () => {}),
+				},
 				waitForDiagnostics: vi.fn(async () => {
 					touchedCount += 1;
 					duringTouch?.(touchedCount);

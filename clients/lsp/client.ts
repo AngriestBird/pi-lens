@@ -374,10 +374,8 @@ export interface LSPClientInfo {
 		 * #4320: queue Created for each existing path that is new to this server
 		 * and not yet announced to it, then send any waiting Created now. A read
 		 * that follows is then answered by a server that has heard of the path.
-		 * Optional so client doubles that predate it need no update; a caller
-		 * treats a missing implementation as "nothing to announce".
 		 */
-		announceCreated?(
+		announceCreated(
 			entries: ReadonlyArray<{ filePath: string; stat: BirthStat }>,
 		): void;
 	};

@@ -36,6 +36,8 @@ const fakeServer = fileURLToPath(
 const env = setupTestEnvironment("pi-lens-4320-svc-");
 const workspace = env.tmpDir;
 
+// The stale-lookup server's record of every watched-files change it heard.
+const luaTrace = path.join(workspace, "lua-server.trace");
 const IMPORTER = 'import "./new_module"\nlocal value = 1\n';
 
 async function diagnose(paths: string[]): Promise<{
@@ -74,6 +76,17 @@ describe("a module created after the server started (#4320)", () => {
 				// A push-only server, Pyrefly's measured shape here.
 				'process.env.FAKE_LSP_NO_DIAGNOSTIC_PROVIDER = "1";',
 				'process.env.FAKE_LSP_STALE_MODULE_LOOKUP = "1";',
+				`process.env.FAKE_LSP_TRACE_FILE = ${JSON.stringify(luaTrace)};`,
+				`import(${JSON.stringify(pathToFileURL(fakeServer).href)});`,
+				"",
+			].join("\n"),
+		);
+		// A second server, for `.tl` files only.
+		const otherShim = path.join(workspace, "other-server.mjs");
+		fs.writeFileSync(
+			otherShim,
+			[
+				'process.env.FAKE_LSP_NO_DIAGNOSTIC_PROVIDER = "1";',
 				`import(${JSON.stringify(pathToFileURL(fakeServer).href)});`,
 				"",
 			].join("\n"),
@@ -92,6 +105,13 @@ describe("a module created after the server started (#4320)", () => {
 						extensions: [".lua"],
 						command: process.execPath,
 						args: [shim],
+						rootMarkers: [".luarc.json"],
+					},
+					"other-fake": {
+						name: "other server",
+						extensions: [".tl"],
+						command: process.execPath,
+						args: [otherShim],
 						rootMarkers: [".luarc.json"],
 					},
 				},
@@ -224,6 +244,36 @@ describe("a module created after the server started (#4320)", () => {
 
 		expect(after.text).not.toContain("Cannot find module sibling_module");
 		expect(after.details.primaryDiagnosticsCount).toBe(0);
+	}, 30_000);
+
+	// #4320 r3 (G2): a batch tells each client only the files of its own
+	// server. Without the per-server filter in `announceCreatedFiles` the
+	// stale-lookup (`.lua`) server heard Created for a `.tl` file, and every
+	// cached finding of that server was dropped and re-checked (probe4 with
+	// Pyrefly: replay 8 ms -> 629 ms).
+	it("announces a new file only to its own server's clients", async () => {
+		const luaFile = path.join(workspace, "own_server.lua");
+		fs.writeFileSync(luaFile, "return {}\n");
+		const seed = path.join(workspace, "seed.tl");
+		fs.writeFileSync(seed, "local s = 1\n");
+		await diagnose([luaFile, seed]);
+
+		const fresh = path.join(workspace, "fresh_other.tl");
+		fs.writeFileSync(fresh, "local f = 1\n");
+		await diagnose([fresh, luaFile]);
+		// a sentinel the stale-lookup server must hear, so its trace is current
+		const sentinel = path.join(workspace, "sentinel_module.lua");
+		fs.writeFileSync(sentinel, "return {}\n");
+		await diagnose([sentinel]);
+
+		const watched = fs
+			.readFileSync(luaTrace, "utf8")
+			.split("\n")
+			.filter((line) => line.startsWith("watched "));
+		expect(watched).toContain(`watched ${pathToFileURL(sentinel).href} 1`);
+		expect(watched.filter((line) => line.includes("fresh_other.tl"))).toEqual(
+			[],
+		);
 	}, 30_000);
 
 	// #4320 r2 (F2): `rename_file` moves a module into the missing path. The

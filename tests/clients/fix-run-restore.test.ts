@@ -54,6 +54,7 @@ import {
 	setHostFileMutationQueueLoader,
 	withHostFileMutationQueues,
 } from "../../clients/file-mutation-queue.js";
+import { pathBirthtimeMs } from "../../clients/path-birth.js";
 import { getProcessSingleton } from "../../clients/process-singletons.js";
 import { beginScope } from "../../clients/session-scope.js";
 import {
@@ -379,6 +380,37 @@ describe("whole-package fixer restores agent edits (#3598)", () => {
 		expect(fs.readFileSync(aRs, "utf-8")).toBe("let AGENT = 1;\n");
 		expect(result.changedFiles ?? []).not.toContain(aRs);
 		expect(overwrittenCount()).toBe(1);
+	}, 10000);
+
+	// #4320 r3 (G4): the restore rewrites the agent's file through a temp file
+	// and a rename, so the file gets a new inode born now. Without the carried
+	// birth its next first open told the language server Created, and every
+	// cached finding of that server under the root was dropped and re-checked.
+	it("keeps the restored file's path birth across its atomic rewrite", async (ctx) => {
+		const aRs = path.join(srcDir, "a.rs");
+		const born = fs.statSync(aRs);
+		if (!(born.birthtimeMs > 0)) ctx.skip("filesystem reports no birth time");
+		const started = gate();
+		const proceed = gate();
+		fake.clippy = async () => {
+			started.open();
+			await proceed.p;
+			fs.writeFileSync(aRs, TOOL_FIXED);
+			return 0;
+		};
+
+		const run = runPipelineSettled(pipelineContext(mainRs), pipelineDeps());
+		await started.p;
+		const edit = agentEdit(aRs, "let AGENT = 1;");
+		edit.write();
+		await edit.deliver();
+		proceed.open();
+		await run;
+
+		const restored = fs.statSync(aRs);
+		expect(fs.readFileSync(aRs, "utf-8")).toBe("let AGENT = 1;\n");
+		expect(restored.ino).not.toBe(born.ino);
+		expect(pathBirthtimeMs(restored)).toBe(born.birthtimeMs);
 	}, 10000);
 
 	it("leaves the tool's fix on a sibling the agent did not edit", async () => {

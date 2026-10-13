@@ -128,6 +128,7 @@ function makeClient(serverId: string, root: string) {
 		recentStderr: () => "",
 		checkAlive: () => undefined,
 		notify: {
+			announceCreated: () => undefined,
 			open: vi.fn(async () => undefined),
 			change: vi.fn(async () => undefined),
 		},

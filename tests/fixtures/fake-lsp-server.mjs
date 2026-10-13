@@ -418,6 +418,12 @@ function handle(raw) {
 		trace(
 			`recv ${data.method ?? "<response>"} ${data.params?.textDocument?.uri ?? ""}`.trim(),
 		);
+		// #4320 r3: which watched-files changes reached this server.
+		if (data.method === "workspace/didChangeWatchedFiles") {
+			for (const change of data.params?.changes ?? []) {
+				trace(`watched ${change.uri} ${change.type}`);
+			}
+		}
 		if (
 			process.env.FAKE_LSP_ECHO_NOTIFY_METHODS === "1" &&
 			data.id === undefined

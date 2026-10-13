@@ -3921,7 +3921,7 @@ export class LSPService {
 				key.startsWith(`${serverId}:`) ? list : [],
 			);
 			// Called with no entries too: the client still sends a waiting Created.
-			client.notify.announceCreated?.(entries);
+			client.notify.announceCreated(entries);
 		}
 	}
 

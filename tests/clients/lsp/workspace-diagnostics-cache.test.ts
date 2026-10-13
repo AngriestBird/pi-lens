@@ -1038,7 +1038,10 @@ function makeFakeClient(
 			getOperationSupport: () => ({}),
 			serverId,
 			root,
-			notify: { open: vi.fn(async () => {}) },
+			notify: {
+				announceCreated: () => undefined,
+				open: vi.fn(async () => {}),
+			},
 			waitForDiagnostics: vi.fn(async (filePath: string, ms: number) => {
 				waitCalls.push({ filePath, ms });
 				return undefined;

@@ -42,7 +42,7 @@ type LaneSpec = {
 	detach?: boolean;
 };
 
-const packageJson = (buildExit = 0, distBuildExit = 0) =>
+const packageJson = (buildExit = 0, distBuildExit = 0, depcruiseExit = 0) =>
 	JSON.stringify({
 		name: "lane-fixture",
 		private: true,
@@ -52,6 +52,7 @@ const packageJson = (buildExit = 0, distBuildExit = 0) =>
 			"build:dist": `node -e "process.env.BUILD_LOG && require('fs').appendFileSync(process.env.BUILD_LOG, 'd\\n'); if (${distBuildExit}) process.exit(${distBuildExit}); require('fs').mkdirSync('dist/clients/lsp', {recursive:true}); require('fs').writeFileSync('dist/clients/lsp/server-traits.js', '')"`,
 			"test:targeted": "node scripts/with-test-lock.mjs --shared -- vitest run",
 			"astgrep:self-scan": 'node -e ""',
+			"depcruise:check": `node -e "process.exit(${depcruiseExit})"`,
 		},
 	});
 const GREEN = 'import { it } from "vitest";\nit("green", () => {});\n';
@@ -577,6 +578,26 @@ describe("lane-check verdict table (#4047 round 2)", () => {
 					reason: expect.stringMatching(/^check format failed \(exit \d+\)$/),
 				},
 			]);
+		},
+		TIMEOUT,
+	);
+
+	// #4344 r2: a declared-client-leaf violation redded CI's Dependency
+	// boundaries job after a lane:check that never ran the cruise.
+	it(
+		"a failed dependency-boundary check is unproven, exit 3, with every test green",
+		() => {
+			const lane = makeLane({
+				base: BASE_FILES,
+				head: { "package.json": packageJson(0, 0, 1) },
+			});
+			const run = runLane(lane);
+			expect(run.status).toBe(3);
+			expect(run.record.checks.depcruise).toBe(1);
+			expect(run.record.findings).toContainEqual({
+				kind: "unproven",
+				reason: "check depcruise failed (exit 1)",
+			});
 		},
 		TIMEOUT,
 	);

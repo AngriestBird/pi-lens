@@ -148,7 +148,10 @@ describe("LSPService race hardening", () => {
 			}),
 			getAdvertisedCommands: () => [],
 			getRawCapabilityKeys: () => [],
-			notify: { open: vi.fn().mockResolvedValue(undefined) },
+			notify: {
+				announceCreated: () => undefined,
+				open: vi.fn().mockResolvedValue(undefined),
+			},
 		};
 		const initialize = suspendAt(createLSPClient, async () => client);
 		const spawn = vi.fn(async () => ({
@@ -243,7 +246,10 @@ describe("LSPService race hardening", () => {
 			}),
 			getAdvertisedCommands: () => [],
 			getRawCapabilityKeys: () => [],
-			notify: { open: vi.fn().mockResolvedValue(undefined) },
+			notify: {
+				announceCreated: () => undefined,
+				open: vi.fn().mockResolvedValue(undefined),
+			},
 		};
 		const initialize = suspendAt(createLSPClient, async () => client);
 		getServersForFileWithConfig.mockReturnValue([
@@ -309,7 +315,10 @@ describe("LSPService race hardening", () => {
 			}),
 			getAdvertisedCommands: () => [],
 			getRawCapabilityKeys: () => [],
-			notify: { open: vi.fn().mockResolvedValue(undefined) },
+			notify: {
+				announceCreated: () => undefined,
+				open: vi.fn().mockResolvedValue(undefined),
+			},
 		};
 		const initialize = suspendAt(createLSPClient, async () => client);
 		const internal = service as unknown as {
