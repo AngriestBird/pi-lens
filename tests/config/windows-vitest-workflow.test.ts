@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import yaml from "../../clients/deps/js-yaml.js";
+import { siblingPin } from "../support/sibling-pin.js";
 
 const ROOT = resolve(import.meta.dirname, "../..");
 const WORKFLOW_PATH = resolve(ROOT, ".github/workflows/ci.yml");
@@ -143,8 +144,12 @@ describe("Windows Vitest workflow contract (#2536)", () => {
 		const job = readWorkflow().jobs["unit-tests-windows"];
 		const steps = job?.steps ?? [];
 		expect(steps.filter((step) => step.uses).map((step) => step.uses)).toEqual([
-			"actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
-			"actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
+			siblingPin(readWorkflow().jobs, "actions/checkout", "unit-tests-windows"),
+			siblingPin(
+				readWorkflow().jobs,
+				"actions/setup-node",
+				"unit-tests-windows",
+			),
 		]);
 		const raw = readFileSync(WORKFLOW_PATH, "utf8");
 		expect(raw).toContain(

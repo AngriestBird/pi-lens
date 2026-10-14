@@ -19,6 +19,7 @@ import {
 	relativePosix,
 	stripSource,
 } from "../support/sweep-kit.js";
+import { siblingPin } from "../support/sibling-pin.js";
 
 const ROOT = resolve(import.meta.dirname, "../..");
 const TESTS_ROOT = resolve(ROOT, "tests");
@@ -699,14 +700,22 @@ describe("targeted advisory workflow contract (#3215)", () => {
 			step.uses?.startsWith("actions/checkout@"),
 		);
 		expect(checkout?.uses).toBe(
-			"actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+			siblingPin(
+				readWorkflow().jobs,
+				"actions/checkout",
+				"targeted-tests-advisory",
+			),
 		);
 		expect(checkout?.with?.["fetch-depth"]).toBe(0);
 		const setupNode = job?.steps?.find((step) =>
 			step.uses?.startsWith("actions/setup-node@"),
 		);
 		expect(setupNode?.uses).toBe(
-			"actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
+			siblingPin(
+				readWorkflow().jobs,
+				"actions/setup-node",
+				"targeted-tests-advisory",
+			),
 		);
 	});
 
