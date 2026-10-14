@@ -68,7 +68,7 @@ import { vitestCollects } from "../support/vitest-collection.js";
 const REPO_ROOT = path.resolve(import.meta.dirname, "../..");
 const REGISTRY_PATH = "formal/switch-pins.json";
 /** Families whose every code-choice constant has a pin (#4393 acceptance). */
-const FULLY_PINNED = ["read-guard"];
+const FULLY_PINNED = ["read-guard", "format-drain", "dispatch-pipeline"];
 /**
  * The deferred and notCodeChoice members across all families, pinned exactly
  * (#4399 verify r2 F4). A ceiling let a freed slot be reused, and let a member
@@ -76,7 +76,7 @@ const FULLY_PINNED = ["read-guard"];
  * place. Every change to either count is now a visible edit here: lower
  * `DEFERRED_COUNT` as pins land, and a reviewer judges every rise of either.
  */
-const DEFERRED_COUNT = 173;
+const DEFERRED_COUNT = 136;
 const NOT_CODE_CHOICE_COUNT = 205;
 
 interface PinTest {
@@ -244,11 +244,13 @@ interface FamilyModels {
 	/** Every name a config of the family assigns, `=` or `<-`, and every
 	 *  module boolean definition that is not a `<-` target. */
 	population: Set<string>;
-	/** Each `\* expect: pass` config with its module's literal definitions. */
+	/** Each `\* expect: pass` config with its module's literal definitions and
+	 *  its comment-blanked text (undefined when the module file is absent). */
 	asBuilt: Array<{
 		file: string;
 		constants: Map<string, CfgAssignment>;
 		defs: Map<string, string>;
+		moduleText: string | undefined;
 	}>;
 }
 
@@ -257,6 +259,7 @@ function readFamily(root: string, family: string): FamilyModels {
 	const population = new Set<string>();
 	const asBuilt: FamilyModels["asBuilt"] = [];
 	const defsByModule = new Map<string, Map<string, string>>();
+	const textByModule = new Map<string, string | undefined>();
 	const targets = new Set<string>();
 	for (const name of fs.readdirSync(dir).sort()) {
 		if (!name.endsWith(".cfg")) continue;
@@ -271,12 +274,22 @@ function readFamily(root: string, family: string): FamilyModels {
 		let defs = defsByModule.get(header.module);
 		if (!defs) {
 			const tla = path.join(dir, `${header.module}.tla`);
-			defs = fs.existsSync(tla)
-				? parseLiteralDefinitions(fs.readFileSync(tla, "utf8"))
-				: new Map();
+			const moduleText = fs.existsSync(tla)
+				? stripTlaComments(fs.readFileSync(tla, "utf8"))
+				: undefined;
+			defs =
+				moduleText === undefined
+					? new Map()
+					: parseLiteralDefinitions(moduleText);
 			defsByModule.set(header.module, defs);
+			textByModule.set(header.module, moduleText);
 		}
-		asBuilt.push({ file: `formal/${family}/${name}`, constants, defs });
+		asBuilt.push({
+			file: `formal/${family}/${name}`,
+			constants,
+			defs,
+			moduleText: textByModule.get(header.module),
+		});
 	}
 	// A module's own boolean switch (`Name == TRUE`) that no config assigns is
 	// a code choice too (#4399 review F4); a `<-` target such as
@@ -367,6 +380,14 @@ export function auditSwitchPins(root: string, registry: Registry): string[] {
 			for (const config of models.asBuilt) {
 				const value = resolveValue(config, constant);
 				if (value === undefined) {
+					// A config of another module of the family (SiblingRestore.tla
+					// beside DispatchPipeline.tla): a module whose code never names
+					// the constant has no value for it, and nothing to compare.
+					if (
+						config.moduleText !== undefined &&
+						!new RegExp(`\\b${constant}\\b`).test(config.moduleText)
+					)
+						continue;
 					errors.push(
 						`${label}: ${config.file} gives no literal value to compare`,
 					);
@@ -768,6 +789,41 @@ describe("TLA+ switch pins (#4393, recurrence #4387)", () => {
 				},
 			};
 			expect(auditSwitchPins(fixture, registry(narrowed))).toEqual([]);
+		});
+
+		it("compares a constant only against the as-built configs of modules that name it", () => {
+			// Recurrence: formal/dispatch-pipeline holds two modules
+			// (DispatchPipeline.tla and SiblingRestore.tla). The pass configs of one
+			// assign none of the other's constants, and the gate read that absence
+			// as a config with no value, so neither module's constants could be
+			// pinned (#4393).
+			const fixture = tree({ "Pass.cfg": PASS });
+			fs.writeFileSync(
+				path.join(fixture, "formal", "fam", "N.tla"),
+				["---- MODULE N ----", "CONSTANTS Other", "===="].join("\n"),
+			);
+			fs.writeFileSync(
+				path.join(fixture, "formal", "fam", "Other.cfg"),
+				[
+					"\\* expect: pass",
+					"\\* module: N",
+					"CONSTANTS",
+					"    Other = 1",
+					"SPECIFICATION Spec",
+				].join("\n"),
+			);
+			const both = {
+				notCodeChoice: [{ reason: "bounds", constants: ["Size", "Other"] }],
+			};
+			expect(auditSwitchPins(fixture, registry(GOOD, both))).toEqual([]);
+			// A config of the module that does name the constant still needs a value.
+			fs.writeFileSync(
+				path.join(fixture, "formal", "fam", "NoMode.cfg"),
+				cfg("pass", "    Size = 2"),
+			);
+			expect(auditSwitchPins(fixture, registry(GOOD, both))).toEqual([
+				"fam.Mode: formal/fam/NoMode.cfg gives no literal value to compare",
+			]);
 		});
 	});
 });

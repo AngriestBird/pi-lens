@@ -2099,6 +2099,34 @@ describe("whole-package fixer restores agent edits (#3598)", () => {
 			expect(fs.readFileSync(aRs, "utf-8")).toBe("let ONE = 1;\n");
 		});
 
+		// Recurrence: `TargetHold` of formal/dispatch-pipeline/SiblingRestore.tla
+		// (#4393). The pipeline takes the target F's queue entry before the
+		// whole-package fixer starts (#3506) and keeps it while the fixer runs;
+		// the lock-order cycle of the two tests above exists only because of that
+		// hold. Removing the acquire before `beginFixRun` left every other test
+		// green: the deadlock tests pass trivially with no hold, and no test
+		// asserted that F's own edits wait for the fixer.
+		it("TargetHold (#3506): an agent edit of the target made while a whole-package fixer runs waits for the pipeline", async () => {
+			const started = gate();
+			const proceed = gate();
+			fake.clippy = async () => {
+				started.open();
+				await proceed.p;
+				return 0;
+			};
+			const run = runPipelineSettled(pipelineContext(mainRs), pipelineDeps());
+			await started.p;
+			const edit = agentAppend(mainRs, "// AGENT_EDIT\n");
+			await afterQueueRegistration();
+			expect(edit.wrote()).toBe(false);
+			proceed.open();
+			await run;
+			await edit.done;
+			// No-drop: once the pipeline releases F, the edit lands.
+			expect(edit.wrote()).toBe(true);
+			expect(fs.readFileSync(mainRs, "utf-8")).toContain("// AGENT_EDIT");
+		});
+
 		// Recurrence: #3914 r1, F2. The handler awaited the restore at its end, so
 		// F's own diagnostics and blockers waited for whoever held a sibling's
 		// queue entry (another pipeline's hold, an LSP edit): on master the restore

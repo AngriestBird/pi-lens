@@ -2,6 +2,210 @@
 	"$comment": "#4393: every constant a formal/<family>/*.cfg assigns (`=` or `<-`), and every module `Name == TRUE|FALSE` that is not a `<-` target, is classified here, per family. `pins`: the constant mirrors a code choice; `value` is what every `\\* expect: pass` config resolves it to (its `=` value, the definition its `<-` names, or the module's `Name == <literal>`), and `test`/`title` name a test a run reaches, in a file vitest collects, that drives the real code and asserts that behaviour, so flipping the code reds the test and flipping the model alone reds tests/config/tla-switch-pins.test.ts. `also` names further tests when one value encodes several behaviours. `narrowedBy` admits a value an as-built config uses only to cut the explored schedules, with its reason. `notCodeChoice` and `deferred` groups carry a reason for each member, and tests/config/tla-switch-pins.test.ts pins the counts of deferred and notCodeChoice members exactly, so every move between them is a visible edit. Flipping a model value and this value together, without the code, reds neither the gate nor the pin, so a change to a value here is a reviewer's call. A PR that changes a pinned behaviour flips the constant, its configs and this value together (AGENTS.md shape 68).",
 	"families": {
 		"dispatch-pipeline": {
+			"pins": {
+				"CarryPreRunCalls": {
+					"value": "TRUE",
+					"test": "tests/clients/fix-run-restore.test.ts",
+					"title": "reports an uncaptured edit whose tool_call began before the fixer run",
+					"narrowedBy": {
+						"FALSE": "No call is in flight at beginFixRun in these configs: every agent call reaches pi-lens inside the run (SCallInRun = TRUE), or Begin waits for an idle agent (SAtomic = TRUE, or SConcurrent = FALSE)."
+					}
+				},
+				"ClaimGap": {
+					"value": "FALSE",
+					"test": "tests/clients/dispatch-pipeline-formal.test.ts",
+					"title": "ClaimGap (#3508): with the bootstrap clients not resident, two handlers for one post-write state dispatch once",
+					"narrowedBy": {
+						"TRUE": "WidgetParallel keeps the claim gap of the code before #3508 as the harder case for the widget's own WriteOrderingGuard (its header); it checks WidgetNewest only."
+					}
+				},
+				"FixClear": {
+					"value": "TRUE",
+					"test": "tests/clients/dispatch-pipeline-formal.test.ts",
+					"title": "InlineParallel (#3507): an older clean pipeline that settles last does not erase the newer edit's blocker",
+					"narrowedBy": {
+						"FALSE": "Pass configs that check no InlineNewest or InlineExact (ClaimAtomic, ClaimGap, FixerAttribution, FixerOrphan, FixerParallel, FixerQueue, FixerSequential, WidgetParallel), and InlineSequential, where pi awaits each handler (Parallel = FALSE, Orphan = FALSE), so no older verdict settles after a newer one."
+					}
+				},
+				"FixHoldWriter": {
+					"value": "TRUE",
+					"test": "tests/clients/dispatch-pipeline-formal.test.ts",
+					"title": "FixerOrphan (#3506 r1): the --immediate-format child the budget gave up on keeps pi's queue until it writes",
+					"also": [
+						{
+							"test": "tests/clients/dispatch-pipeline-formal.test.ts",
+							"title": "deferred drain (#3506 r1): the drain formatter its 30 s aggregate gave up on keeps pi's queue until it writes"
+						}
+					],
+					"narrowedBy": {
+						"FALSE": "No overlapping fixer run: ClaimGap, InlineFix, InlineParallel and InlineSequential set ImmediateEdits = {}, so no pipeline runs the autofix; ClaimAtomic checks NoDoubleDispatch only; FixerSequential runs pi's sequential tools (Parallel = FALSE, Orphan = FALSE), where pi awaits each handler and no agent edit overlaps the fixer (the baseline before #3506)."
+					}
+				},
+				"FixQueue": {
+					"value": "TRUE",
+					"test": "tests/clients/dispatch-pipeline-formal.test.ts",
+					"title": "FixerParallel (#3506): the immediate autofix does not write over an agent edit made through pi's queue",
+					"narrowedBy": {
+						"FALSE": "No overlapping fixer run: ClaimGap, InlineFix, InlineParallel and InlineSequential set ImmediateEdits = {}, so no pipeline runs the autofix; ClaimAtomic checks NoDoubleDispatch only; FixerSequential runs pi's sequential tools (Parallel = FALSE, Orphan = FALSE), where pi awaits each handler and no agent edit overlaps the fixer (the baseline before #3506)."
+					}
+				},
+				"FixQueueRefresh": {
+					"value": "TRUE",
+					"test": "tests/clients/dispatch-pipeline-formal.test.ts",
+					"title": "FixerAttribution (#3506): an agent edit is never reported as pi-lens' autofix, and its own analysis runs",
+					"narrowedBy": {
+						"FALSE": "No overlapping fixer run: ClaimGap, InlineFix, InlineParallel and InlineSequential set ImmediateEdits = {}, so no pipeline runs the autofix; ClaimAtomic checks NoDoubleDispatch only; FixerSequential runs pi's sequential tools (Parallel = FALSE, Orphan = FALSE), where pi awaits each handler and no agent edit overlaps the fixer (the baseline before #3506)."
+					}
+				},
+				"FixReToken": {
+					"value": "TRUE",
+					"test": "tests/clients/dispatch-pipeline-formal.test.ts",
+					"title": "FixerQueueNoReToken (#3506): a pipeline whose autofix fixed a newer revision records it under a fresh write index",
+					"narrowedBy": {
+						"FALSE": "No overlapping fixer run: ClaimGap, InlineFix, InlineParallel and InlineSequential set ImmediateEdits = {}, so no pipeline runs the autofix; ClaimAtomic checks NoDoubleDispatch only; FixerSequential runs pi's sequential tools (Parallel = FALSE, Orphan = FALSE), where pi awaits each handler and no agent edit overlaps the fixer (the baseline before #3506)."
+					}
+				},
+				"FixRecord": {
+					"value": "TRUE",
+					"test": "tests/clients/dispatch-pipeline-formal.test.ts",
+					"title": "InlineParallel (#3507): an older blocker that settles last does not replace the newer edit's verdict",
+					"narrowedBy": {
+						"FALSE": "Pass configs that check no InlineNewest or InlineExact (ClaimAtomic, ClaimGap, FixerAttribution, FixerOrphan, FixerParallel, FixerQueue, FixerSequential, WidgetParallel), and InlineSequential, where pi awaits each handler (Parallel = FALSE, Orphan = FALSE), so no older verdict settles after a newer one."
+					}
+				},
+				"FixTomb": {
+					"value": "TRUE",
+					"test": "tests/clients/dispatch-pipeline-formal.test.ts",
+					"title": "InlineParallel (#3507): an older blocker that settles after the newer edit cleared the record neither restores it nor latches the commit gate",
+					"narrowedBy": {
+						"FALSE": "Pass configs that check no InlineNewest or InlineExact (ClaimAtomic, ClaimGap, FixerAttribution, FixerOrphan, FixerParallel, FixerQueue, FixerSequential, WidgetParallel), and InlineSequential, where pi awaits each handler (Parallel = FALSE, Orphan = FALSE), so no older verdict settles after a newer one."
+					}
+				},
+				"InFlightDedupe": {
+					"value": "TRUE",
+					"test": "tests/clients/runtime-tool-result-debounce.test.ts",
+					"title": "inFlightPipelines dedupes concurrent same-state calls for divergently-spelled paths into one pipeline run",
+					"also": [
+						{
+							"test": "tests/clients/dispatch-pipeline-formal.test.ts",
+							"title": "ClaimGap (#3508): with the bootstrap clients not resident, two handlers for one post-write state dispatch once"
+						}
+					]
+				},
+				"KeepCaptureHistory": {
+					"value": "TRUE",
+					"test": "tests/clients/fix-run-restore.test.ts",
+					"title": "reports an earlier capture when a later agent capture replaces it",
+					"also": [
+						{
+							"test": "tests/clients/fix-run-restore.test.ts",
+							"title": "reports a verified earlier edit the fixer erased before a later edit started"
+						}
+					],
+					"narrowedBy": {
+						"FALSE": "These configs check NoRestoreOverNewer, NoNoopRestore, NoRestoreOverPreCheckEdit or NoSilentLossUncaptured (checked without window C in the way, SiblingRestore.tla), which read no report a replaced capture adds, or run one agent edit or no concurrent edit, which replace no capture."
+					}
+				},
+				"LspMulti": {
+					"value": "TRUE",
+					"test": "tests/clients/lsp-writers-mutation-queue.test.ts",
+					"title": "two edits that name the same two files in opposite orders both apply",
+					"also": [
+						{
+							"test": "tests/clients/fix-run-restore.test.ts",
+							"title": "does not deadlock with an LSP multi-path edit that holds the sibling and waits for the target"
+						}
+					],
+					"narrowedBy": {
+						"FALSE": "The restore is explored without the LSP actor; the actor matters only beside TargetHold, in SiblingRestoreQueued."
+					}
+				},
+				"LspQueue": {
+					"value": "TRUE",
+					"test": "tests/clients/lsp-writers-mutation-queue.test.ts",
+					"title": "a server-initiated workspace/applyEdit does not erase an agent edit made while it applies"
+				},
+				"RestoreGatesHold": {
+					"value": "FALSE",
+					"test": "tests/clients/fix-run-restore.test.ts",
+					"title": "settles F's result while a third party holds the sibling's queue entry",
+					"narrowedBy": {
+						"TRUE": "SiblingRestoreQueuedInHoldNoLsp keeps the rejected shape without the LSP edit, to show that edit is the cycle's third edge (its header)."
+					}
+				},
+				"RestoreInFlight": {
+					"value": "TRUE",
+					"test": "tests/clients/fix-run-restore.test.ts",
+					"title": "does not restore an older capture over a newer edit whose tool_result is late"
+				},
+				"RestoreNoCapInFlight": {
+					"value": "TRUE",
+					"test": "tests/clients/fix-run-restore.test.ts",
+					"title": "reports an uncaptured edit whose tool_call began before the fixer run",
+					"also": [
+						{
+							"test": "tests/clients/fix-run-restore.test.ts",
+							"title": "names an uncaptured in-flight file that is unreadable at the restore"
+						}
+					],
+					"narrowedBy": {
+						"FALSE": "The report is not read: these configs check NoRestoreOverNewer, NoNoopRestore or NoRestoreOverPreCheckEdit, which depend on no report, or their schedules leave no call in flight at the restore's read (SAtomic = TRUE, or SConcurrent = FALSE). The code reports a file with no capture and a call in flight (fix-run-restore.ts restoreRun, unverifiedInFlight)."
+					}
+				},
+				"RestoreQueue": {
+					"value": "TRUE",
+					"test": "tests/clients/fix-run-restore.test.ts",
+					"title": "an agent edit made while the restore writes survives it",
+					"narrowedBy": {
+						"FALSE": "Merged-restore configs from before #3830 (#3598, #3741): one agent edit (SiblingRestoreInFlight, SiblingRestoreOneEdit), no concurrent edit (SiblingSequential: SConcurrent = FALSE), or a check of NoRestoreOverPreCheckEdit only (SiblingRestoreRecheck). MutSiblingNoSettleCapture and MutSiblingNoRestoreQueue are the violated witnesses that the two-edit schedules need the part."
+					}
+				},
+				"RestoreRecheck": {
+					"value": "TRUE",
+					"test": "tests/clients/fix-run-restore.test.ts",
+					"title": "does not write over a newer edit that lands while the restore is reading"
+				},
+				"SRestore": {
+					"value": "TRUE",
+					"test": "tests/clients/fix-run-restore.test.ts",
+					"title": "keeps an agent edit to a sibling file that landed during the run"
+				},
+				"SettleCapture": {
+					"value": "TRUE",
+					"test": "tests/clients/fix-run-restore.test.ts",
+					"title": "an edit whose tool_call comes after the tool exited is not overwritten",
+					"also": [
+						{
+							"test": "tests/clients/fix-run-restore.test.ts",
+							"title": "stays registered until the restore has written, and then restores"
+						}
+					],
+					"narrowedBy": {
+						"FALSE": "Merged-restore configs from before #3830 (#3598, #3741): one agent edit (SiblingRestoreInFlight, SiblingRestoreOneEdit), no concurrent edit (SiblingSequential: SConcurrent = FALSE), or a check of NoRestoreOverPreCheckEdit only (SiblingRestoreRecheck). MutSiblingNoSettleCapture and MutSiblingNoRestoreQueue are the violated witnesses that the two-edit schedules need the part."
+					}
+				},
+				"TargetHold": {
+					"value": "TRUE",
+					"test": "tests/clients/fix-run-restore.test.ts",
+					"title": "TargetHold (#3506): an agent edit of the target made while a whole-package fixer runs waits for the pipeline",
+					"narrowedBy": {
+						"FALSE": "No LSP multi-path edit competes for F's entry (LspMulti = FALSE in these configs), so F's hold waits on nothing and changes no schedule."
+					}
+				},
+				"WidgetGuard": {
+					"value": "TRUE",
+					"test": "tests/clients/dispatch-pipeline-formal.test.ts",
+					"title": "widget order (#3540): an older same-turn pipeline that settles last still does not replace the newer edit's widget verdict"
+				},
+				"WriterBound": {
+					"value": "TRUE",
+					"test": "tests/clients/dispatch-pipeline-formal.test.ts",
+					"title": "FixerOrphan (#3506 r1): the --immediate-format child the budget gave up on keeps pi's queue until it writes",
+					"narrowedBy": {
+						"FALSE": "The config leaves out the writer's give-up (WriterAbandon, OrphanWrite) to keep its schedules small; the as-built configs with the bound on are FixerOrphan, FixerParallel and LspEditQueue."
+					}
+				}
+			},
 			"notCodeChoice": [
 				{
 					"reason": "Scenario bound or actor set: it sizes the state space or picks which actors, inputs and steps TLC explores; no code branch reads it.",
@@ -23,41 +227,6 @@
 						"SInOrderNotes",
 						"SAtomic",
 						"SCallInRun"
-					]
-				}
-			],
-			"deferred": [
-				{
-					"reason": "Deferred: no single as-built value yet. This family's `expect: pass` configs set it both ways (a pass config here is not an as-built claim), so the family must first name its as-built value before a pin can agree with it.",
-					"constants": [
-						"ClaimGap",
-						"FixRecord",
-						"FixClear",
-						"FixTomb",
-						"FixQueue",
-						"FixQueueRefresh",
-						"FixReToken",
-						"WriterBound",
-						"FixHoldWriter",
-						"SettleCapture",
-						"RestoreQueue",
-						"KeepCaptureHistory",
-						"CarryPreRunCalls",
-						"RestoreNoCapInFlight",
-						"TargetHold",
-						"RestoreGatesHold",
-						"LspMulti"
-					]
-				},
-				{
-					"reason": "Deferred: every `expect: pass` config agrees on one value, but no existing dispatcher or entry-point test was matched to it in #4393, which pinned read-guard first.",
-					"constants": [
-						"InFlightDedupe",
-						"WidgetGuard",
-						"LspQueue",
-						"SRestore",
-						"RestoreRecheck",
-						"RestoreInFlight"
 					]
 				}
 			]
@@ -110,6 +279,135 @@
 			]
 		},
 		"format-drain": {
+			"pins": {
+				"EnterAfterResolve": {
+					"value": "TRUE",
+					"test": "tests/clients/format-drain-formal.test.ts",
+					"title": "InstallHold (#3558): a next-run edit made while the formatter resolves its command lands at once, and is formatted with the file"
+				},
+				"FixGen": {
+					"value": "TRUE",
+					"test": "tests/clients/format-drain-formal.test.ts",
+					"title": "Straddle (#3528): a session-1 drain's recordWritten does not admit a never-read session-2 edit",
+					"also": [
+						{
+							"test": "tests/clients/format-drain-formal.test.ts",
+							"title": "StraddleState (#3528): an abandoned session-1 format is not requeued into session 2's cleared queue"
+						}
+					],
+					"narrowedBy": {
+						"FALSE": "Sequential and SequentialWide model the interactive host before the fixes: Overlap = FALSE, Orphan = FALSE and MaxSessions = 1, so no next-run edit, abandoned formatter or /new reaches a step this fix part guards."
+					}
+				},
+				"FixOrphanSync": {
+					"value": "TRUE",
+					"test": "tests/clients/format-drain-formal.test.ts",
+					"title": "OrphanLsp (#3529): the child the hook's 10 s bound gave up on is synced after it writes",
+					"narrowedBy": {
+						"FALSE": "Sequential and SequentialWide model the interactive host before the fixes: Overlap = FALSE, Orphan = FALSE and MaxSessions = 1, so no next-run edit, abandoned formatter or /new reaches a step this fix part guards."
+					}
+				},
+				"FixQueue": {
+					"value": "TRUE",
+					"test": "tests/clients/format-drain-formal.test.ts",
+					"title": "OverlapLostEdit (#3527): a next-run edit made after the child read F waits for the child, so the format does not erase it",
+					"narrowedBy": {
+						"FALSE": "Sequential and SequentialWide model the interactive host before the fixes: Overlap = FALSE, Orphan = FALSE and MaxSessions = 1, so no next-run edit, abandoned formatter or /new reaches a step this fix part guards."
+					}
+				},
+				"FixQueueHold": {
+					"value": "TRUE",
+					"test": "tests/clients/dispatch-pipeline-formal.test.ts",
+					"title": "deferred drain (#3506 r1): the drain formatter its 30 s aggregate gave up on keeps pi's queue until it writes",
+					"narrowedBy": {
+						"FALSE": "Sequential and SequentialWide model the interactive host before the fixes: Overlap = FALSE, Orphan = FALSE and MaxSessions = 1, so no next-run edit, abandoned formatter or /new reaches a step this fix part guards."
+					}
+				},
+				"FixStamp": {
+					"value": "TRUE",
+					"test": "tests/clients/format-drain-formal.test.ts",
+					"title": "OverlapLsp (#3529): the drain's resync of bytes read before a next-run edit does not replace that edit's newer sync",
+					"also": [
+						{
+							"test": "tests/clients/format-drain-formal.test.ts",
+							"title": "OrphanLsp (#3529): the post-exit resync of a read taken before a next-run edit does not replace that edit's newer sync"
+						}
+					],
+					"narrowedBy": {
+						"FALSE": "Sequential and SequentialWide model the interactive host before the fixes: Overlap = FALSE, Orphan = FALSE and MaxSessions = 1, so no next-run edit, abandoned formatter or /new reaches a step this fix part guards."
+					}
+				},
+				"HeldResync": {
+					"value": "TRUE",
+					"test": "tests/clients/format-drain-formal.test.ts",
+					"title": "R1: a replaced session's format resyncs the next session's open document to the bytes on disk, without a spawn",
+					"narrowedBy": {
+						"FALSE": "Sequential and SequentialWide model the interactive host before the fixes: Overlap = FALSE, Orphan = FALSE and MaxSessions = 1, so no next-run edit, abandoned formatter or /new reaches a step this fix part guards."
+					}
+				},
+				"LspGen": {
+					"value": "TRUE",
+					"test": "tests/clients/format-drain-formal.test.ts",
+					"title": "the post-exit resync is skipped and recorded as stale-session",
+					"narrowedBy": {
+						"FALSE": "Sequential and SequentialWide model the interactive host before the fixes: Overlap = FALSE, Orphan = FALSE and MaxSessions = 1, so no next-run edit, abandoned formatter or /new reaches a step this fix part guards."
+					}
+				},
+				"MtimeAuthored": {
+					"value": "FALSE",
+					"test": "tests/clients/read-guard.test.ts",
+					"title": "blocks zero-read edit on a file another writer touched after the guard started (#3520)"
+				},
+				"OrphanLateSync": {
+					"value": "TRUE",
+					"test": "tests/clients/format-drain-formal.test.ts",
+					"title": "OrphanGiveUp (#3828): the LSP document equals the disk once the child settles",
+					"also": [
+						{
+							"test": "tests/clients/format-drain-formal.test.ts",
+							"title": "OrphanGiveUp (#3858): the LSP document equals the disk once the formatter the budget gave up on writes"
+						}
+					],
+					"narrowedBy": {
+						"FALSE": "No give-up exists to chain a resync onto: these configs (Straddle, OverlapClaim, OverlapLostEdit, OverlapLsp, Sequential, SequentialWide) have Orphan = FALSE and InBand = FALSE, so no run is abandoned."
+					}
+				},
+				"OrphanSyncBound": {
+					"value": "TRUE",
+					"test": "tests/clients/format-drain-formal.test.ts",
+					"title": "AbandonedInstall (#3599): a formatter whose install never finishes no longer parks the post-exit resync",
+					"narrowedBy": {
+						"FALSE": "The post-exit wait the bound limits never starts: Orphan = FALSE configs (Straddle, OverlapClaim, OverlapLostEdit, OverlapLsp, Sequential, SequentialWide) abandon no run, and InBand = TRUE configs (FixInBand, InBandLsp) wait for nothing after the bound, since Abandon sets gaveUp itself (FormatDrain.tla Abandon, OrphanGiveUp)."
+					}
+				},
+				"ResetClearsGuard": {
+					"value": "TRUE",
+					"test": "tests/index-3521-fork-tree-witness.test.ts",
+					"title": "blocks the same zero-read edit after a ${move} when no fix was applied"
+				},
+				"ServiceGen": {
+					"value": "TRUE",
+					"test": "tests/clients/format-drain-formal.test.ts",
+					"title": "the post-exit resync spawns no server after the idle reset retired the service",
+					"narrowedBy": {
+						"FALSE": "Sequential and SequentialWide model the interactive host before the fixes: Overlap = FALSE, Orphan = FALSE and MaxSessions = 1, so no next-run edit, abandoned formatter or /new reaches a step this fix part guards."
+					}
+				},
+				"StartGen": {
+					"value": "TRUE",
+					"test": "tests/clients/format-drain-formal.test.ts",
+					"title": "the format phase does not start after /new during the autofix phase",
+					"also": [
+						{
+							"test": "tests/clients/format-drain-formal.test.ts",
+							"title": "the autofix loop does not start the next file after /new"
+						}
+					],
+					"narrowedBy": {
+						"FALSE": "Sequential and SequentialWide model the interactive host before the fixes: Overlap = FALSE, Orphan = FALSE and MaxSessions = 1, so no next-run edit, abandoned formatter or /new reaches a step this fix part guards."
+					}
+				}
+			},
 			"notCodeChoice": [
 				{
 					"reason": "Scenario bound or actor set: it sizes the state space or picks which actors, inputs and steps TLC explores; no code branch reads it.",
@@ -134,32 +432,6 @@
 					"reason": "Mutant-only design: every as-built config sets the off value, and it breaks a guard to show a violation; no code ever had it.",
 					"constants": [
 						"GenDropsAll"
-					]
-				}
-			],
-			"deferred": [
-				{
-					"reason": "Deferred: no single as-built value yet. This family's `expect: pass` configs set it both ways (a pass config here is not an as-built claim), so the family must first name its as-built value before a pin can agree with it.",
-					"constants": [
-						"FixQueue",
-						"FixQueueHold",
-						"FixGen",
-						"FixStamp",
-						"LspGen",
-						"StartGen",
-						"FixOrphanSync",
-						"ServiceGen",
-						"HeldResync",
-						"OrphanSyncBound",
-						"OrphanLateSync"
-					]
-				},
-				{
-					"reason": "Deferred: every `expect: pass` config agrees on one value, but no existing dispatcher or entry-point test was matched to it in #4393, which pinned read-guard first.",
-					"constants": [
-						"MtimeAuthored",
-						"ResetClearsGuard",
-						"EnterAfterResolve"
 					]
 				}
 			]
