@@ -3,10 +3,12 @@
  * scripts/ci-shuffle-census.mjs (#4405)
  *
  *   node scripts/ci-shuffle-census.mjs --out <dir> [--part k/n] [--chunk 25]
- *       [--budget-ms N] [--seeds 202,424,606] [--files a.test.ts,b.test.ts]
+ *       [--budget-ms N] [--seeds 202,424,606] [--files a.test.ts,b.test.ts] [--no-alone]
  *   node scripts/ci-shuffle-census.mjs --out <dir> --confirm [--part k/n] [--budget-ms N]
  *   node scripts/ci-shuffle-census.mjs --out <dir> --redo-unproven [--part k/n] [--budget-ms N]
  *   node scripts/ci-shuffle-census.mjs --out <dir> --report [--ratchet <file>]
+ *       [--previous-issues <gh issue list json> --title <t>] [--stale-out <file>]
+ *       [--body-out <file>] [--run-url <url>]
  *
  * The whole-tree twin of `ci-shuffle-changed-tests.mjs` (#4397). That job runs
  * a PR's changed test files alone and shuffled; an order-dependent test in a
@@ -38,11 +40,30 @@
  * starts, #4405). That start is `uncollected`, never green; `--redo-unproven`
  * runs the starts whose record proved nothing again, and the later record wins.
  *
- * `--report` reads the records and diffs the confirmed members against the
- * ratchet (`scripts/shuffle-census-ratchet.json`): a member the ratchet does
- * not list is a new order-dependent test (exit 1), a ratchet entry the census
- * no longer finds is a fixed one the list must drop (exit 1, so the list only
- * shrinks), a start that did not finish leaves the verdict unproven (exit 3).
+ * Requires a built tree: `npm run build` and `npm run build:dist` first. The
+ * LSP fixture tests import `dist/`, and without it they red inside whichever
+ * chunk holds them; the census refuses to start (exit 2) when
+ * `dist/index.js` is missing.
+ *
+ * The ratchet (`scripts/shuffle-census-ratchet.json`) is keyed by FILE: a
+ * file stays listed until it is clean under every seed. Which cases of a file
+ * fail under a seed moves with its case count (one added passing test took a
+ * file from 5 failing rows to 2), so a (seed, test) row would go stale with
+ * nothing fixed. `--report` reads the records and exits
+ *
+ *   1  a confirmed member the ratchet does not list (`order-dependent`,
+ *      `cross-file`, or `fails alone`), or a stale entry that was stale last
+ *      night too (`--previous-issues`),
+ *   3  a start that did not finish, or a member not yet confirmed or rerun,
+ *   4  only stale entries: a listed file the census found clean under every
+ *      seed this run (warn; the nightly job reds on a second night),
+ *   0  clean.
+ *
+ * A chunk member that is green alone is rerun once (`--confirm` plans the
+ * rerun): a repeat is a `cross-file` member, state one file leaves for another
+ * that a single-file run cannot see; a one-off is reported as a load flake and
+ * counted nowhere. `--no-alone` leaves out the alone starts (the nightly runs
+ * them weekly: they found no order-dependent file in the first pass).
  */
 
 import {
@@ -51,6 +72,7 @@ import {
 	mkdirSync,
 	readFileSync,
 	readdirSync,
+	writeFileSync,
 } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -103,11 +125,11 @@ export function seedOf(run) {
  * confirm start never reads as a census start.
  *
  * @param {string[]} files
- * @param {{ seeds?: readonly number[], chunk?: number }} [options]
+ * @param {{ seeds?: readonly number[], chunk?: number, alone?: boolean }} [options]
  */
 export function planCensus(
 	files,
-	{ seeds = CENSUS_SEEDS, chunk = CHUNK_FILES } = {},
+	{ seeds = CENSUS_SEEDS, chunk = CHUNK_FILES, alone: withAlone = true } = {},
 ) {
 	const chunks = [];
 	for (let at = 0; at < files.length; at += chunk)
@@ -121,7 +143,7 @@ export function planCensus(
 			})),
 		),
 	);
-	const alone = planRuns(files, [], { alone: true }).map((entry) => ({
+	const alone = planRuns(files, [], { alone: withAlone }).map((entry) => ({
 		...entry,
 		kind: "census",
 	}));
@@ -224,7 +246,7 @@ export function runCensus(plan, options) {
 	let ran = 0;
 	let pending = 0;
 	for (const entry of plan) {
-		const key = reproCommand(entry);
+		const key = entry.key ?? reproCommand(entry);
 		if (done.has(key)) continue;
 		const remaining = budgetMs - (now() - started);
 		if (remaining < MIN_START_MS) {
@@ -271,42 +293,98 @@ export function runCensus(plan, options) {
 	return { ran, pending };
 }
 
-/** The `--confirm` starts: each shuffled member's file, alone, under its seed. */
+/**
+ * The `--confirm` starts. First each shuffled member's file, alone, under its
+ * seed. Then, once that confirm is on record and the member did not reproduce,
+ * the chunk start again (`rerun`): a repeat is a cross-file dependence, a
+ * one-off a load flake.
+ */
 export function planConfirms(records) {
 	const wanted = new Map();
+	const reruns = new Map();
+	const confirmed = new Map();
+	for (const record of records)
+		if (record.kind === "confirm")
+			confirmed.set(`${record.seed}\0${record.files[0]}`, record);
 	for (const record of records) {
 		if (record.kind !== "census" || record.seed === "alone") continue;
-		for (const member of record.members)
+		for (const member of record.members) {
 			wanted.set(`${record.seed}\0${member.file}`, [member.file, record.seed]);
+			const confirm = confirmed.get(`${record.seed}\0${member.file}`);
+			if (
+				confirm !== undefined &&
+				!confirm.members.some((other) => other.test === member.test)
+			)
+				reruns.set(record.key, record);
+		}
 	}
-	return [...wanted.values()]
+	const confirms = [...wanted.values()]
 		.sort((a, b) => (`${a[1]}${a[0]}` < `${b[1]}${b[0]}` ? -1 : 1))
 		.flatMap(([file, seed]) =>
 			planRuns([file], [seed], { alone: false }).map((entry) => ({
 				...entry,
 				label: `confirm ${entry.label} ${file}`,
 				kind: "confirm",
+				key: `confirm:${reproCommand(entry)}`,
 			})),
 		);
+	const again = [...reruns.values()].map((record) => ({
+		...planRuns(record.files, [record.seed], { alone: false })[0],
+		label: `rerun ${record.label}`,
+		kind: "rerun",
+		key: rerunKey(record),
+	}));
+	return [...confirms, ...again];
 }
 
-const memberKey = (member) => `${member.seed}|${member.file}|${member.test}`;
+const rerunKey = (record) => `rerun:${record.key}`;
+
+const MEMBER_LABEL = {
+	"order-dependent": "new order-dependent member",
+	"cross-file": "new cross-file member",
+	"fails alone": "fails alone",
+};
+
+/** The first failing row of a file, for the one-line report. */
+function firstRow(rows) {
+	const first = rows[0];
+	return `${first.seed}: ${first.test} (${first.firstError})`;
+}
 
 /**
- * @param {{ records: any[], ratchet: Array<{ file: string, seed: number | "alone", test: string }> }} state
- * @returns {{ code: 0 | 1 | 3, kind: "clean" | "red" | "unproven", members: any[], lines: string[] }}
+ * @param {{
+ *   records: any[],
+ *   ratchet: Array<{ file: string }>,
+ *   previousStale?: Iterable<string>,
+ * }} state
+ * @returns {{
+ *   code: 0 | 1 | 3 | 4,
+ *   kind: "clean" | "red" | "unproven" | "stale",
+ *   members: Array<{ file: string, kind: string, seed: number | "alone", test: string, firstError: string }>,
+ *   stale: string[],
+ *   lines: string[],
+ * }}
  */
-export function judgeCensus({ records, ratchet }) {
+export function judgeCensus({ records, ratchet, previousStale = [] }) {
 	const census = records.filter((record) => record.kind === "census");
 	const confirms = new Map();
 	for (const record of records.filter((entry) => entry.kind === "confirm"))
 		confirms.set(`${record.seed}\0${record.files[0]}`, record);
-	/** @type {Map<string, any>} */
-	const members = new Map();
+	const reruns = new Map(
+		records
+			.filter((entry) => entry.kind === "rerun")
+			.map((record) => [record.key, record]),
+	);
+	/** file -> rows of confirmed members */
+	const found = new Map();
+	const add = (kind, file, seed, member) => {
+		if (!found.has(file)) found.set(file, []);
+		found.get(file).push({ kind, file, seed, ...member });
+	};
 	const lines = [];
-	// Members seen in a chunk and not yet re-run alone: neither a member nor a
-	// fixed one, so their ratchet entry is not judged stale.
-	const unconfirmed = new Set();
+	// Files with a member seen and not yet confirmed or rerun: neither a member
+	// nor a fixed one, so their ratchet entry is not judged stale.
+	const pending = new Set();
 	let unproven = false;
 	for (const record of census) {
 		if (record.verdict === "timeout" || record.verdict === "uncollected") {
@@ -317,65 +395,137 @@ export function judgeCensus({ records, ratchet }) {
 			unproven = true;
 		}
 		for (const member of record.members) {
-			const entry = { ...member, seed: record.seed };
-			if (record.seed !== "alone") {
-				const confirm = confirms.get(`${record.seed}\0${member.file}`);
-				if (confirm === undefined) {
-					lines.push(`not confirmed yet: ${memberKey(entry)}`);
-					unconfirmed.add(memberKey(entry));
+			if (record.seed === "alone") {
+				add("fails alone", member.file, "alone", member);
+				continue;
+			}
+			const confirm = confirms.get(`${record.seed}\0${member.file}`);
+			if (confirm === undefined) {
+				lines.push(
+					`not confirmed yet: ${record.seed}|${member.file}|${member.test}`,
+				);
+				pending.add(member.file);
+				unproven = true;
+			} else if (confirm.members.some((other) => other.test === member.test)) {
+				add("order-dependent", member.file, record.seed, member);
+			} else {
+				const rerun = reruns.get(rerunKey(record));
+				const label = `${record.seed}|${member.file}|${member.test}`;
+				if (rerun === undefined) {
+					lines.push(`green alone, chunk not rerun yet: ${label}`);
+					pending.add(member.file);
 					unproven = true;
-					continue;
-				}
-				if (!confirm.members.some((other) => other.test === member.test)) {
+				} else if (
+					rerun.members.some(
+						(other) => other.file === member.file && other.test === member.test,
+					)
+				) {
+					add("cross-file", member.file, record.seed, member);
+				} else {
 					lines.push(
-						`not reproducible alone (chunk load?): ${memberKey(entry)}`,
+						`warning: load flake, green alone and on a rerun of the chunk: ${label}`,
 					);
-					continue;
 				}
 			}
-			members.set(memberKey(entry), entry);
 		}
 	}
-	// A test that fails alone fails under every seed: one member, the alone one.
-	for (const [key, entry] of members)
-		if (
-			entry.seed !== "alone" &&
-			members.has(memberKey({ ...entry, seed: "alone" }))
-		)
-			members.delete(key);
-	const listed = new Map(ratchet.map((entry) => [memberKey(entry), entry]));
-	// A ratchet entry is stale only when its (file, seed) start finished.
-	const covered = new Set();
+	// A file that fails alone fails under every seed: report the alone rows.
+	for (const [file, rows] of found)
+		if (rows.some((row) => row.kind === "fails alone"))
+			found.set(
+				file,
+				rows.filter((row) => row.kind === "fails alone"),
+			);
+	const listed = new Set(ratchet.map((entry) => entry.file));
+	// A ratchet entry is stale only when its file finished under EVERY seed
+	// this run planned (alone starts are not required: the nightly skips them).
+	const seedsPlanned = new Set(
+		census
+			.filter((record) => record.seed !== "alone")
+			.map((record) => record.seed),
+	);
+	const finished = new Map();
 	for (const record of census)
 		if (record.verdict === "ok" || record.verdict === "red")
-			for (const file of record.files) covered.add(`${record.seed}|${file}`);
+			for (const file of record.files) {
+				if (!finished.has(file)) finished.set(file, new Set());
+				finished.get(file).add(record.seed);
+			}
+	const covered = (file) =>
+		seedsPlanned.size > 0 &&
+		[...seedsPlanned].every((seed) => finished.get(file)?.has(seed));
 	let red = false;
-	for (const [key, entry] of members)
-		if (!listed.has(key)) {
-			// An alone start has no order to depend on: the test simply fails.
-			const kind =
-				entry.seed === "alone" ? "fails alone" : "new order-dependent member";
-			lines.push(`${kind}: ${key} (${entry.firstError})`);
+	for (const [file, rows] of found)
+		if (!listed.has(file)) {
+			lines.push(`${MEMBER_LABEL[rows[0].kind]}: ${file} (${firstRow(rows)})`);
 			red = true;
 		}
-	for (const [key, entry] of listed)
-		if (
-			!members.has(key) &&
-			!unconfirmed.has(key) &&
-			covered.has(`${entry.seed}|${entry.file}`)
-		) {
-			lines.push(`ratchet entry no longer reproduces, delete it: ${key}`);
-			red = true;
+	const previous = new Set(previousStale);
+	const stale = [];
+	for (const file of listed)
+		if (!found.has(file) && !pending.has(file) && covered(file)) {
+			stale.push(file);
+			if (previous.has(file)) {
+				lines.push(
+					`ratchet entry clean two nights running, delete it: ${file}`,
+				);
+				red = true;
+			} else {
+				lines.push(
+					`warning: ratchet entry clean under every seed tonight (delete it if it stays clean): ${file}`,
+				);
+			}
 		}
+	const members = [...found.values()].flat();
+	const base = { members, stale: stale.sort() };
+	if (red) return { code: 1, kind: "red", ...base, lines };
+	if (unproven) return { code: 3, kind: "unproven", ...base, lines };
 	const total = new Set(census.flatMap((record) => record.files)).size;
-	if (red)
-		return { code: 1, kind: "red", members: [...members.values()], lines };
-	if (unproven)
-		return { code: 3, kind: "unproven", members: [...members.values()], lines };
 	lines.push(
-		`${total} file(s), ${census.length} start(s), ${members.size} member(s), all in the ratchet`,
+		`${total} file(s), ${census.length} start(s), ${found.size} member file(s), all in the ratchet`,
 	);
-	return { code: 0, kind: "clean", members: [...members.values()], lines };
+	if (stale.length > 0) return { code: 4, kind: "stale", ...base, lines };
+	return { code: 0, kind: "clean", ...base, lines };
+}
+
+const STALE_MARKER = /^<!-- shuffle-census-stale: (.*) -->$/m;
+
+/** The stale files last night's tracking issue recorded in its body. */
+export function previousStaleFrom(issuesJson, title) {
+	/** @type {Array<{ title?: string, body?: string }>} */
+	const issues = JSON.parse(issuesJson);
+	const issue = issues.find((entry) => entry.title === title);
+	const match = STALE_MARKER.exec(issue?.body ?? "");
+	return match?.[1] ? match[1].split(",").filter(Boolean) : [];
+}
+
+/** The tracking issue body: the verdict, the member rows, the reproduce line. */
+export function issueBody(verdict, { runUrl = "" } = {}) {
+	const out = [
+		`Last run: ${runUrl || "(local)"}`,
+		"",
+		`Verdict: exit ${verdict.code} (${verdict.kind})`,
+		"",
+	];
+	for (const line of verdict.lines) out.push(`- ${line}`);
+	if (verdict.members.length > 0) {
+		out.push(
+			"",
+			"| file | kind | seed | first failing test | first error |",
+			"|---|---|---|---|---|",
+		);
+		for (const row of verdict.members)
+			out.push(
+				`| \`${row.file}\` | ${row.kind} | ${row.seed} | ${row.test.replace(/\|/g, "\\|")} | ${row.firstError.replace(/\|/g, "\\|")} |`,
+			);
+		out.push(
+			"",
+			"Reproduce: `npx vitest run <file> --sequence.shuffle --sequence.seed=<seed>`",
+		);
+	}
+	if (verdict.stale.length > 0)
+		out.push("", `<!-- shuffle-census-stale: ${verdict.stale.join(",")} -->`);
+	return `${out.join("\n")}\n`;
 }
 
 /** @param {string[]} argv */
@@ -390,11 +540,21 @@ export function parseArgs(argv) {
 		confirm: false,
 		report: false,
 		redoUnproven: false,
+		alone: true,
+		previousIssues: null,
+		title: null,
+		staleOut: null,
+		bodyOut: null,
+		runUrl: "",
 		ratchet: RATCHET_PATH,
 		cwd: process.cwd(),
 	};
 	for (let index = 0; index < argv.length; index += 1) {
 		const flag = argv[index];
+		if (flag === "--no-alone") {
+			options.alone = false;
+			continue;
+		}
 		if (
 			flag === "--confirm" ||
 			flag === "--report" ||
@@ -418,10 +578,17 @@ export function parseArgs(argv) {
 		else if (flag === "--files")
 			options.files = value.split(",").filter(Boolean);
 		else if (flag === "--ratchet") options.ratchet = value;
+		else if (flag === "--previous-issues") options.previousIssues = value;
+		else if (flag === "--title") options.title = value;
+		else if (flag === "--stale-out") options.staleOut = value;
+		else if (flag === "--body-out") options.bodyOut = value;
+		else if (flag === "--run-url") options.runUrl = value;
 		else if (flag === "--cwd") options.cwd = path.resolve(value);
 		else throw new Error(`unknown argument ${flag}`);
 	}
 	if (options.out === null) throw new Error("--out is required");
+	if (options.previousIssues !== null && options.title === null)
+		throw new Error("--previous-issues needs --title");
 	if (
 		!(options.chunk >= 1) ||
 		!(options.budgetMs > 0) ||
@@ -435,11 +602,16 @@ export function parseArgs(argv) {
 
 /**
  * @param {string[]} argv
- * @param {{ exec?: typeof execVitest, now?: () => number, log?: (line: string) => void }} [io]
+ * @param {{
+ *   exec?: typeof execVitest,
+ *   now?: () => number,
+ *   log?: (line: string) => void,
+ *   distExists?: (file: string) => boolean,
+ * }} [io]
  * @returns {number} exit code
  */
 export function run(argv, io = {}) {
-	const { exec, now, log = console.log } = io;
+	const { exec, now, log = console.log, distExists = existsSync } = io;
 	let options;
 	try {
 		options = parseArgs(argv);
@@ -453,14 +625,38 @@ export function run(argv, io = {}) {
 		const ratchet = existsSync(ratchetFile)
 			? JSON.parse(readFileSync(ratchetFile, "utf8")).members
 			: [];
-		const verdict = judgeCensus({ records: loadRecords(options.out), ratchet });
+		const previousStale =
+			options.previousIssues !== null && existsSync(options.previousIssues)
+				? previousStaleFrom(
+						readFileSync(options.previousIssues, "utf8"),
+						options.title,
+					)
+				: [];
+		const verdict = judgeCensus({
+			records: loadRecords(options.out),
+			ratchet,
+			previousStale,
+		});
 		for (const member of verdict.members)
 			log(
-				`[census] member | ${member.file} | seed ${member.seed} | ${member.test} | ${member.firstError}`,
+				`[census] member | ${member.file} | ${member.kind} | seed ${member.seed} | ${member.test} | ${member.firstError}`,
 			);
 		for (const line of verdict.lines) log(`[census] ${line}`);
+		if (options.staleOut !== null)
+			writeFileSync(options.staleOut, `${verdict.stale.join("\n")}\n`);
+		if (options.bodyOut !== null)
+			writeFileSync(
+				options.bodyOut,
+				issueBody(verdict, { runUrl: options.runUrl }),
+			);
 		log(`shuffle-census: exit ${verdict.code} (${verdict.kind})`);
 		return verdict.code;
+	}
+	if (!distExists(path.join(options.cwd, "dist", "index.js"))) {
+		console.error(
+			"dist/ is not built: run `npm run build` and `npm run build:dist` first (the LSP fixture tests import dist/)",
+		);
+		return 2;
 	}
 	const [part, parts] = options.part;
 	const mine = (plan) => plan.filter((_, index) => index % parts === part);
@@ -470,6 +666,7 @@ export function run(argv, io = {}) {
 		: planCensus(options.files ?? listTestFiles(options.cwd), {
 				seeds: options.seeds,
 				chunk: options.chunk,
+				alone: options.alone,
 			});
 	const done = new Set(
 		records

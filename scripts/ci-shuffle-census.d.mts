@@ -7,7 +7,8 @@ export declare const MIN_START_MS: number;
 export declare const RATCHET_PATH: string;
 export type Seed = number | "alone";
 export interface CensusRun extends ShuffleRun {
-	kind: "census" | "confirm";
+	kind: "census" | "confirm" | "rerun";
+	key?: string;
 }
 export interface Member {
 	file: string;
@@ -16,7 +17,7 @@ export interface Member {
 }
 export interface CensusRecord {
 	key: string;
-	kind: "census" | "confirm";
+	kind: "census" | "confirm" | "rerun";
 	label: string;
 	files: string[];
 	seed: Seed;
@@ -28,15 +29,27 @@ export interface CensusRecord {
 }
 export interface RatchetEntry {
 	file: string;
-	seed: number;
+	seed: number | "alone";
 	test: string;
 	seam: string;
+}
+export type MemberKind = "order-dependent" | "cross-file" | "fails alone";
+export interface MemberRow extends Member {
+	kind: MemberKind;
+	seed: Seed;
+}
+export interface Verdict {
+	code: 0 | 1 | 3 | 4;
+	kind: "clean" | "red" | "unproven" | "stale";
+	members: MemberRow[];
+	stale: string[];
+	lines: string[];
 }
 export declare function listTestFiles(cwd: string): string[];
 export declare function seedOf(run: { flags: string[] }): Seed;
 export declare function planCensus(
 	files: string[],
-	options?: { seeds?: readonly number[]; chunk?: number },
+	options?: { seeds?: readonly number[]; chunk?: number; alone?: boolean },
 ): CensusRun[];
 export declare function extractMembers(output: string): Member[];
 export declare function loadRecords(dir: string): CensusRecord[];
@@ -56,13 +69,17 @@ export declare function runCensus(
 export declare function planConfirms(records: CensusRecord[]): CensusRun[];
 export declare function judgeCensus(state: {
 	records: CensusRecord[];
-	ratchet: Array<{ file: string; seed: Seed; test: string }>;
-}): {
-	code: 0 | 1 | 3;
-	kind: "clean" | "red" | "unproven";
-	members: Array<Member & { seed: Seed }>;
-	lines: string[];
-};
+	ratchet: Array<{ file: string }>;
+	previousStale?: Iterable<string>;
+}): Verdict;
+export declare function previousStaleFrom(
+	issuesJson: string,
+	title: string,
+): string[];
+export declare function issueBody(
+	verdict: Verdict,
+	options?: { runUrl?: string },
+): string;
 export declare function parseArgs(argv: string[]): {
 	out: string;
 	part: [number, number];
@@ -73,6 +90,12 @@ export declare function parseArgs(argv: string[]): {
 	confirm: boolean;
 	report: boolean;
 	redoUnproven: boolean;
+	alone: boolean;
+	previousIssues: string | null;
+	title: string | null;
+	staleOut: string | null;
+	bodyOut: string | null;
+	runUrl: string;
 	ratchet: string;
 	cwd: string;
 };
@@ -82,5 +105,6 @@ export declare function run(
 		exec?: ExecVitest;
 		now?: () => number;
 		log?: (line: string) => void;
+		distExists?: (file: string) => boolean;
 	},
 ): number;

@@ -12,18 +12,19 @@ import {
 	CENSUS_SEEDS,
 	CHUNK_FILES,
 	extractMembers,
+	issueBody,
 	judgeCensus,
 	loadRecords,
 	MIN_START_MS,
 	parseArgs,
 	planCensus,
 	planConfirms,
+	previousStaleFrom,
 	run,
 	runCensus,
 	START_CAP_MS,
 	type CensusRecord,
 	type Member,
-	type RatchetEntry,
 	type Seed,
 } from "../../scripts/ci-shuffle-census.mjs";
 import { type ExecVitest } from "../../scripts/ci-shuffle-changed-tests.mjs";
@@ -78,12 +79,13 @@ function confirm(seed: number, file: string, members: Member[]): CensusRecord {
 		key: `confirm ${seed} ${file}`,
 	});
 }
-const entry = (file: string, seed: number, test: string): RatchetEntry => ({
-	file,
-	seed,
-	test,
-	seam: "x",
-});
+/** A chunk start's rerun, keyed the way planConfirms keys it. */
+const rerunOf = (chunk: CensusRecord, members: Member[]): CensusRecord =>
+	record(chunk.seed, chunk.files, members, {
+		kind: "rerun",
+		key: `rerun:${chunk.key}`,
+	});
+const listed = (...files: string[]) => files.map((file) => ({ file }));
 
 describe("extractMembers", () => {
 	// Recurrence: a census that reads colour-split FAIL banners as "no failing
@@ -194,6 +196,51 @@ describe("planCensus", () => {
 				"confirm",
 			],
 		]);
+		expect(confirms[0]?.key).toMatch(/^confirm:/);
+	});
+
+	// Recurrence (F3): a chunk-only failure that its confirm start cannot
+	// reproduce was dropped as "chunk load?" and the report exited 0. It is
+	// rerun once, under its own key (the chunk's key is taken: the rerun would
+	// be skipped as done).
+	it("plans one rerun of the chunk when its member is green alone", () => {
+		const chunk = record(
+			202,
+			["tests/a.test.ts", "tests/b.test.ts"],
+			[member("tests/a.test.ts", "t1")],
+		);
+		expect(planConfirms([chunk]).map((start) => start.kind)).toEqual([
+			"confirm",
+		]);
+		const plan = planConfirms([chunk, confirm(202, "tests/a.test.ts", [])]);
+		expect(plan.map((start) => start.kind)).toEqual(["confirm", "rerun"]);
+		const again = plan[1];
+		expect(again?.files).toEqual(["tests/a.test.ts", "tests/b.test.ts"]);
+		expect(again?.flags).toEqual(["--sequence.shuffle", "--sequence.seed=202"]);
+		expect(again?.key).toBe(`rerun:${chunk.key}`);
+		// A member that reproduces alone needs no rerun.
+		expect(
+			planConfirms([
+				chunk,
+				confirm(202, "tests/a.test.ts", [member("tests/a.test.ts", "t1")]),
+			]).map((start) => start.kind),
+		).toEqual(["confirm"]);
+	});
+
+	// Recurrence: the nightly runs the alone pass weekly. A flag that still
+	// planned alone starts would spend 37% of the nightly on a pass that found
+	// no order-dependent file.
+	it("leaves out the alone starts when asked", () => {
+		const two = ["tests/a.test.ts", "tests/b.test.ts"];
+		const without = planCensus(two, { seeds: [202], chunk: 2, alone: false });
+		expect(without.map((start) => start.flags.length > 0)).toEqual([true]);
+		expect(
+			planCensus(two, { seeds: [202], chunk: 2 }).filter(
+				(start) => start.flags.length === 0,
+			),
+		).toHaveLength(2);
+		expect(parseArgs(["--out", ".", "--no-alone"]).alone).toBe(false);
+		expect(parseArgs(["--out", "."]).alone).toBe(true);
 	});
 });
 
@@ -343,11 +390,21 @@ describe("redo-unproven", () => {
 		};
 		const args = ["--out", out, "--cwd", dir, "--files", files.join(",")];
 		// Without the flag only the never-run shuffled chunk starts.
-		expect(run([...args, "--seeds", "202"], { exec, log: quiet })).toBe(0);
+		expect(
+			run([...args, "--seeds", "202"], {
+				exec,
+				log: quiet,
+				distExists: () => true,
+			}),
+		).toBe(0);
 		expect(starts).toEqual([files.join(",")]);
 		starts.length = 0;
 		expect(
-			run([...args, "--seeds", "202", "--redo-unproven"], { exec, log: quiet }),
+			run([...args, "--seeds", "202", "--redo-unproven"], {
+				exec,
+				log: quiet,
+				distExists: () => true,
+			}),
 		).toBe(0);
 		expect(starts).toEqual([A]);
 	});
@@ -373,115 +430,193 @@ describe("redo-unproven", () => {
 describe("judgeCensus", () => {
 	const A = "tests/a.test.ts";
 	const B = "tests/b.test.ts";
-	const listed = [entry(A, 202, "t1")];
-	const fullRecords = (extra: CensusRecord[] = []) => [
-		record(202, [A, B], [member(A, "t1")]),
-		confirm(202, A, [member(A, "t1")]),
-		...extra,
-	];
+	const chunk202 = record(202, [A, B], [member(A, "t1")]);
+	const chunk424 = record(424, [A, B], []);
+	const withChunks = (...rows: CensusRecord[]) => [chunk202, chunk424, ...rows];
 
-	it("is clean when every confirmed member is in the ratchet", () => {
-		const verdict = judgeCensus({ records: fullRecords(), ratchet: listed });
+	it("is clean when every confirmed member file is in the ratchet", () => {
+		const verdict = judgeCensus({
+			records: withChunks(confirm(202, A, [member(A, "t1")])),
+			ratchet: listed(A),
+		});
 		expect(verdict.code).toBe(0);
 		expect(verdict.lines.join("\n")).toContain(
-			"1 member(s), all in the ratchet",
+			"1 member file(s), all in the ratchet",
 		);
 	});
 
 	// Recurrence (the acceptance row "a new member reds"): a test that turns
 	// order-dependent after this PR lands must red the census, not slip in
 	// beside the listed ones.
-	it("reds a confirmed member the ratchet does not list", () => {
+	it("reds a confirmed member file the ratchet does not list", () => {
 		const verdict = judgeCensus({
-			records: fullRecords([
-				record(424, [B], [member(B, "t9", "Error: late")]),
-				confirm(424, B, [member(B, "t9")]),
-			]),
-			ratchet: listed,
+			records: withChunks(confirm(202, A, [member(A, "t1")])),
+			ratchet: listed(B),
 		});
 		expect(verdict.code).toBe(1);
 		expect(verdict.lines).toContain(
-			"new order-dependent member: 424|tests/b.test.ts|t9 (Error: late)",
+			"new order-dependent member: tests/a.test.ts (202: t1 (Error: boom))",
 		);
+	});
+
+	// Recurrence (F2, #4423 review r1): the ratchet keyed by (seed, test) went
+	// stale with nothing fixed. One added passing test took
+	// ast-grep-rule-manager.test.ts from 5 failing rows to 2 under seed 424.
+	// A listed file stays listed while ANY row of it fails, whichever rows.
+	it("keeps a listed file when a different set of its cases fails", () => {
+		const verdict = judgeCensus({
+			records: [
+				record(202, [A], [member(A, "a different case")]),
+				confirm(202, A, [member(A, "a different case")]),
+				record(424, [A], []),
+			],
+			ratchet: listed(A),
+		});
+		expect(verdict.code).toBe(0);
+		expect(verdict.stale).toEqual([]);
 	});
 
 	// Recurrence (the acceptance row "a removed member must leave the list"):
-	// a fixed member left in the list lets it come back unseen, so the list
-	// would stop shrinking.
-	it("reds a ratchet entry whose file ran and no longer reproduces", () => {
+	// a fixed file left in the list lets it come back unseen, so the list
+	// would stop shrinking. Tonight it only warns (exit 4).
+	it("warns, exit 4, on a listed file clean under every seed", () => {
 		const verdict = judgeCensus({
-			records: [record(202, [A, B], []), confirm(202, A, [])],
-			ratchet: listed,
+			records: [record(202, [A], []), record(424, [A], [])],
+			ratchet: listed(A),
 		});
-		expect(verdict.code).toBe(1);
+		expect(verdict.code).toBe(4);
+		expect(verdict.stale).toEqual([A]);
 		expect(verdict.lines).toContain(
-			"ratchet entry no longer reproduces, delete it: 202|tests/a.test.ts|t1",
+			"warning: ratchet entry clean under every seed tonight (delete it if it stays clean): tests/a.test.ts",
 		);
 	});
 
-	// Recurrence: judging a half-finished pass as if it were complete reds
-	// every entry whose start simply has not run yet.
-	it("does not call a ratchet entry stale while its start has not run", () => {
+	// Recurrence: a timing-seam row (a 5 s timeout) can pass on one night. The
+	// second consecutive clean night is the one that reds.
+	it("reds a stale file that was stale last night too", () => {
 		const verdict = judgeCensus({
-			records: [record(424, [B], [])],
-			ratchet: listed,
+			records: [record(202, [A], []), record(424, [A], [])],
+			ratchet: listed(A),
+			previousStale: [A],
 		});
-		expect(verdict.lines.join("\n")).not.toContain("no longer reproduces");
+		expect(verdict.code).toBe(1);
+		expect(verdict.lines).toContain(
+			"ratchet entry clean two nights running, delete it: tests/a.test.ts",
+		);
+	});
+
+	// Recurrence: judging a half-finished pass as if it were complete warns
+	// every entry whose seeds simply have not all run yet.
+	it("does not call a ratchet file stale while one of its seeds has not run", () => {
+		const verdict = judgeCensus({
+			records: [record(202, [A], []), record(424, [B], [])],
+			ratchet: listed(A),
+		});
+		expect(verdict.stale).toEqual([]);
 		expect(verdict.code).toBe(0);
 	});
 
-	// Recurrence: a chunk start can red from the load of its 24 neighbours;
-	// counting it without the alone re-run put load flakes in the ratchet.
-	it("leaves a member out when its file alone under the seed is green", () => {
+	// Recurrence: a start that hung proves nothing about the file; calling its
+	// entry stale would delete a real member.
+	it("does not call a ratchet file stale when one of its starts did not finish", () => {
 		const verdict = judgeCensus({
-			records: [record(202, [A, B], [member(A, "t1")]), confirm(202, A, [])],
+			records: [
+				record(202, [A], []),
+				record(424, [A], [], { verdict: "timeout" }),
+			],
+			ratchet: listed(A),
+		});
+		expect(verdict.stale).toEqual([]);
+		expect(verdict.code).toBe(3);
+	});
+
+	// Recurrence: a chunk start can red from the load of its 24 neighbours;
+	// counting it without the rerun put load flakes in the ratchet.
+	it("leaves a one-off chunk failure as a warning when the rerun is green", () => {
+		const verdict = judgeCensus({
+			records: withChunks(confirm(202, A, []), rerunOf(chunk202, [])),
 			ratchet: [],
 		});
 		expect(verdict.members).toEqual([]);
 		expect(verdict.code).toBe(0);
-		expect(verdict.lines.join("\n")).toContain("not reproducible alone");
+		expect(verdict.lines).toContain(
+			"warning: load flake, green alone and on a rerun of the chunk: 202|tests/a.test.ts|t1",
+		);
+	});
+
+	// Recurrence (F3, #4423 review r1): cross-file state (B leaves something A
+	// reads) is invisible to a single-file run, and "not reproducible alone"
+	// exited 0. A chunk failure that repeats on a rerun is a member.
+	it("reds a chunk failure that repeats on a rerun and is green alone, as cross-file", () => {
+		const verdict = judgeCensus({
+			records: withChunks(
+				confirm(202, A, []),
+				rerunOf(chunk202, [member(A, "t1")]),
+			),
+			ratchet: [],
+		});
+		expect(verdict.code).toBe(1);
+		expect(verdict.members.map((row) => row.kind)).toEqual(["cross-file"]);
+		expect(verdict.lines).toContain(
+			"new cross-file member: tests/a.test.ts (202: t1 (Error: boom))",
+		);
+		// Listed, the same file is quiet.
+		expect(
+			judgeCensus({
+				records: withChunks(
+					confirm(202, A, []),
+					rerunOf(chunk202, [member(A, "t1")]),
+				),
+				ratchet: listed(A),
+			}).code,
+		).toBe(0);
+	});
+
+	// Recurrence: judging before the rerun ran would call a cross-file failure
+	// clean or a flake a member; it is unproven until the rerun is on record.
+	it("is unproven (3) while a green-alone chunk member has not been rerun", () => {
+		const verdict = judgeCensus({
+			records: withChunks(confirm(202, A, [])),
+			ratchet: listed(A),
+		});
+		expect(verdict.code).toBe(3);
+		expect(verdict.stale).toEqual([]);
+		expect(verdict.lines).toContain(
+			"green alone, chunk not rerun yet: 202|tests/a.test.ts|t1",
+		);
 	});
 
 	// Recurrence: judging before the confirm pass ran would pass a load flake
 	// or red a real member as "new"; it is unproven until confirmed.
 	it("is unproven (3), not clean, while a shuffled member is unconfirmed", () => {
 		const verdict = judgeCensus({
-			records: [record(202, [A, B], [member(A, "t1")])],
-			ratchet: listed,
+			records: withChunks(),
+			ratchet: listed(A),
 		});
 		expect(verdict.code).toBe(3);
+		expect(verdict.stale).toEqual([]);
 		expect(verdict.lines).toContain(
 			"not confirmed yet: 202|tests/a.test.ts|t1",
 		);
 	});
 
 	// Recurrence: a file that fails alone fails under every seed; listing it
-	// four times (alone plus 3 seeds) is noise the fixer must clear four times.
-	it("counts a test that fails alone once, as the alone member", () => {
+	// four times (alone plus 3 seeds) is noise the fixer clears four times.
+	it("reports a file that fails alone once, with the alone rows", () => {
 		const verdict = judgeCensus({
 			records: [
-				record("alone", [A], [member(A, "t1")]),
-				record(202, [A, B], [member(A, "t1")]),
+				record("alone", [A], [member(A, "t1", "Error: no oxfmt")]),
+				chunk202,
 				confirm(202, A, [member(A, "t1")]),
 			],
 			ratchet: [],
 		});
-		expect(verdict.members.map((m) => `${m.seed}|${m.test}`)).toEqual([
-			"alone|t1",
+		expect(verdict.members.map((row) => `${row.seed}|${row.kind}`)).toEqual([
+			"alone|fails alone",
 		]);
-	});
-
-	// Recurrence: an alone start has no order; labelling a host-environment red
-	// (the formatter tests on a host without the formatters) "order-dependent"
-	// sends the fixer to hunt a sibling that does not exist.
-	it("labels a member that fails alone as failing alone", () => {
-		const verdict = judgeCensus({
-			records: [record("alone", [A], [member(A, "t1", "Error: no oxfmt")])],
-			ratchet: [],
-		});
 		expect(verdict.code).toBe(1);
 		expect(verdict.lines).toEqual([
-			"fails alone: alone|tests/a.test.ts|t1 (Error: no oxfmt)",
+			"fails alone: tests/a.test.ts (alone: t1 (Error: no oxfmt))",
 		]);
 	});
 
@@ -507,43 +642,130 @@ describe("judgeCensus", () => {
 	});
 });
 
+describe("the tracking issue", () => {
+	const A = "tests/a.test.ts";
+	const TITLE = "nightly: shuffle census (order-dependent test files)";
+
+	// Recurrence: the two-night rule needs last night's stale files; they ride
+	// in the rolling issue's body, and an unrelated issue must not supply them.
+	it("reads last night's stale files from the issue with the exact title", () => {
+		const issues = JSON.stringify([
+			{
+				title: "other",
+				body: "<!-- shuffle-census-stale: tests/x.test.ts -->",
+			},
+			{
+				title: TITLE,
+				body: "text\n<!-- shuffle-census-stale: tests/a.test.ts,tests/b.test.ts -->\n",
+			},
+		]);
+		expect(previousStaleFrom(issues, TITLE)).toEqual([
+			"tests/a.test.ts",
+			"tests/b.test.ts",
+		]);
+		expect(previousStaleFrom("[]", TITLE)).toEqual([]);
+		expect(
+			previousStaleFrom(
+				JSON.stringify([{ title: TITLE, body: "no marker" }]),
+				TITLE,
+			),
+		).toEqual([]);
+	});
+
+	// Recurrence: the body is what the next night reads back; a stale file
+	// missing from the marker would never reach the second night.
+	it("writes a stale marker the next night reads back", () => {
+		const verdict = judgeCensus({
+			records: [record(202, [A], []), record(424, [A], [])],
+			ratchet: listed(A),
+		});
+		const body = issueBody(verdict, { runUrl: "https://example.test/run/1" });
+		expect(body).toContain(`<!-- shuffle-census-stale: ${A} -->`);
+		expect(body).toContain("https://example.test/run/1");
+		expect(
+			previousStaleFrom(JSON.stringify([{ title: TITLE, body }]), TITLE),
+		).toEqual([A]);
+	});
+});
+
 describe("run (report and arguments)", () => {
-	// Recurrence: the exit code is what a nightly job reads; a report that
-	// prints the members but exits 0 turns the ratchet into a log line.
-	it("--report exits 1 for a member beyond the ratchet and 0 once it is listed", () => {
-		const dir = scratchDir("report");
+	const A = "tests/a.test.ts";
+	const TITLE = "nightly: x";
+	function reportDir(name: string, records: CensusRecord[], members: unknown) {
+		const dir = scratchDir(name);
 		const out = path.join(dir, "out");
 		fs.mkdirSync(out);
-		const A = "tests/a.test.ts";
 		fs.writeFileSync(
 			path.join(out, "census.0-of-1.jsonl"),
-			`${[
-				record(202, [A], [member(A, "t1")]),
-				confirm(202, A, [member(A, "t1")]),
-			]
-				.map((r) => JSON.stringify(r))
-				.join("\n")}\n`,
-		);
-		fs.writeFileSync(path.join(dir, "ratchet.json"), '{"members":[]}');
-		const lines: string[] = [];
-		const args = [
-			"--out",
-			out,
-			"--report",
-			"--cwd",
-			dir,
-			"--ratchet",
-			"ratchet.json",
-		];
-		expect(run(args, { log: (line) => lines.push(line) })).toBe(1);
-		expect(lines.join("\n")).toContain(
-			"new order-dependent member: 202|tests/a.test.ts|t1",
+			`${records.map((r) => JSON.stringify(r)).join("\n")}\n`,
 		);
 		fs.writeFileSync(
 			path.join(dir, "ratchet.json"),
-			JSON.stringify({ members: [entry(A, 202, "t1")] }),
+			JSON.stringify({ members }),
+		);
+		return {
+			dir,
+			args: [
+				"--out",
+				out,
+				"--report",
+				"--cwd",
+				dir,
+				"--ratchet",
+				"ratchet.json",
+			],
+		};
+	}
+
+	// Recurrence: the exit code is what the nightly job reads; a report that
+	// prints the members but exits 0 turns the ratchet into a log line.
+	it("--report exits 1 for a member file beyond the ratchet and 0 once it is listed", () => {
+		const records = [
+			record(202, [A], [member(A, "t1")]),
+			record(424, [A], []),
+			confirm(202, A, [member(A, "t1")]),
+		];
+		const { dir, args } = reportDir("report", records, []);
+		const lines: string[] = [];
+		expect(run(args, { log: (line) => lines.push(line) })).toBe(1);
+		expect(lines.join("\n")).toContain(
+			"new order-dependent member: tests/a.test.ts",
+		);
+		fs.writeFileSync(
+			path.join(dir, "ratchet.json"),
+			JSON.stringify({ members: listed(A) }),
 		);
 		expect(run(args, { log: quiet })).toBe(0);
+	});
+
+	// Recurrence: a stale file must reach tomorrow's report. --stale-out and
+	// --body-out are the only channel; --previous-issues feeds it back.
+	it("--report carries a stale file through the body to the second night's red", () => {
+		const { dir, args } = reportDir(
+			"stale",
+			[record(202, [A], []), record(424, [A], [])],
+			listed(A),
+		);
+		const staleOut = path.join(dir, "stale.txt");
+		const bodyOut = path.join(dir, "body.md");
+		expect(
+			run([...args, "--stale-out", staleOut, "--body-out", bodyOut], {
+				log: quiet,
+			}),
+		).toBe(4);
+		expect(fs.readFileSync(staleOut, "utf8").trim()).toBe(A);
+		const issues = path.join(dir, "issues.json");
+		fs.writeFileSync(
+			issues,
+			JSON.stringify([
+				{ title: TITLE, body: fs.readFileSync(bodyOut, "utf8") },
+			]),
+		);
+		expect(
+			run([...args, "--previous-issues", issues, "--title", TITLE], {
+				log: quiet,
+			}),
+		).toBe(1);
 	});
 
 	// Recurrence: `--part 3/3` would select no start and report a clean census.
@@ -551,6 +773,73 @@ describe("run (report and arguments)", () => {
 		expect(() => parseArgs(["--out", ".", "--part", "3/3"])).toThrow(/k < n/);
 		expect(() => parseArgs(["--part", "0/3"])).toThrow(/--out is required/);
 		expect(parseArgs(["--out", ".", "--part", "2/3"]).part).toEqual([2, 3]);
+		expect(() => parseArgs(["--out", ".", "--previous-issues", "x"])).toThrow(
+			/--title/,
+		);
+	});
+
+	// Recurrence: the nightly passes --no-alone; if run() dropped the option
+	// on the way to the planner the daily pass would spend 37% of its runner
+	// minutes on alone starts that find nothing.
+	it("--no-alone reaches the plan: only shuffled starts run", () => {
+		const dir = scratchDir("noalone");
+		const flags: string[][] = [];
+		const exec: ExecVitest = (start) => {
+			flags.push([...start.flags]);
+			return { status: 0, output: "", timedOut: false };
+		};
+		const base = [
+			"--cwd",
+			dir,
+			"--files",
+			`${A},tests/b.test.ts`,
+			"--seeds",
+			"202",
+		];
+		expect(
+			run(["--out", path.join(dir, "o1"), ...base, "--no-alone"], {
+				exec,
+				log: quiet,
+				distExists: () => true,
+			}),
+		).toBe(0);
+		expect(flags.map((entry) => entry.length > 0)).toEqual([true]);
+		flags.length = 0;
+		run(["--out", path.join(dir, "o2"), ...base], {
+			exec,
+			log: quiet,
+			distExists: () => true,
+		});
+		expect(flags.filter((entry) => entry.length === 0)).toHaveLength(2);
+	});
+
+	// Recurrence (F5): a census on a tree without dist/ reds the LSP fixture
+	// tests inside whichever chunk holds them, and the members it prints are
+	// the missing build, not order dependence. It refuses to start instead.
+	it("refuses to start without dist/, with a message that names the build", () => {
+		const dir = scratchDir("nodist");
+		const started: string[] = [];
+		const errors: string[] = [];
+		const original = console.error;
+		console.error = (line: string) => errors.push(String(line));
+		try {
+			const code = run(
+				["--out", path.join(dir, "out"), "--cwd", dir, "--files", A],
+				{
+					exec: (start) => {
+						started.push(start.files.join(","));
+						return { status: 0, output: "", timedOut: false };
+					},
+					log: quiet,
+					distExists: () => false,
+				},
+			);
+			expect(code).toBe(2);
+		} finally {
+			console.error = original;
+		}
+		expect(started).toEqual([]);
+		expect(errors.join("\n")).toContain("npm run build:dist");
 	});
 });
 
@@ -561,7 +850,9 @@ describe("the ratchet file", () => {
 			path.join(ROOT, "scripts/shuffle-census-ratchet.json"),
 			"utf8",
 		),
-	) as { members: RatchetEntry[] };
+	) as {
+		members: Array<{ file: string; seam: string; seed: number; test: string }>;
+	};
 	const SEAMS = new Set([
 		"declaration-order",
 		"index-activation-state",
@@ -571,30 +862,37 @@ describe("the ratchet file", () => {
 		"persisted-graph-store",
 		"tree-sitter-wasm-state",
 	]);
-	// The ratchet's size, pinned both ways: adding a member raises it (a
-	// reviewer sees a new order-dependent test admitted), fixing one lowers it.
-	// Lower this number in the PR that fixes a member; never raise it to admit
-	// a new one without a named seam and an issue.
-	const PINNED_MEMBERS = 62;
+	// The ratchet's size, pinned both ways: adding a file raises it (a reviewer
+	// sees a new order-dependent file admitted), fixing one lowers it. Lower
+	// this number in the PR that fixes a file; never raise it to admit a new
+	// one without a named seam and an issue.
+	const PINNED_FILES = 31;
 
 	// Recurrence: a ratchet that grows silently (the point of #4405 is that it
 	// can only shrink).
-	it("holds exactly the pinned number of members", () => {
-		expect(parsed.members).toHaveLength(PINNED_MEMBERS);
+	it("holds exactly the pinned number of files", () => {
+		expect(parsed.members).toHaveLength(PINNED_FILES);
 	});
 
-	// Recurrence: an entry for a deleted or renamed file can never reproduce, so
-	// the census would red "delete it" on every pass.
-	it("names only existing test files, known seeds and a seam, once each", () => {
+	// Recurrence: an entry for a deleted or renamed file can never reproduce,
+	// so the census would warn "delete it" every night; one whose example case
+	// was renamed sends the fixer to a test that is gone (F4, review r1).
+	it("names existing files, a known seam and an example case still in the file, once each", () => {
 		const seen = new Set<string>();
 		for (const item of parsed.members) {
-			expect(fs.existsSync(path.join(ROOT, item.file)), item.file).toBe(true);
-			expect(CENSUS_SEEDS, `${item.file} seed`).toContain(item.seed);
-			expect(item.test.length, `${item.file} test`).toBeGreaterThan(0);
+			const file = path.join(ROOT, item.file);
+			expect(fs.existsSync(file), item.file).toBe(true);
+			expect([...CENSUS_SEEDS], `${item.file} seed`).toContain(item.seed);
 			expect(SEAMS.has(item.seam), `${item.file} seam ${item.seam}`).toBe(true);
-			const key = `${item.seed}|${item.file}|${item.test}`;
-			expect(seen.has(key), `duplicate ${key}`).toBe(false);
-			seen.add(key);
+			expect(seen.has(item.file), `duplicate ${item.file}`).toBe(false);
+			seen.add(item.file);
+			if (item.test === "(file)") continue;
+			const name = item.test.split(" > ").at(-1) ?? "";
+			expect(name.length, `${item.file} test`).toBeGreaterThan(0);
+			expect(
+				fs.readFileSync(file, "utf8").includes(name),
+				`${item.file}: example case not found: ${name}`,
+			).toBe(true);
 		}
 	});
 
