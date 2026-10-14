@@ -1074,6 +1074,14 @@ export type DegradationKind =
 	 */
 	| "project-snapshot-stage-reap-failed"
 	/**
+	 * #4402: a persist host's worker `message` listener contained a message.
+	 * Subject is `<host> persist worker: rejected` (no routable `id` and
+	 * `generation`; dropped) or `<host> persist worker: threw` (handling it
+	 * threw; caught so the host survives). Reason carries the shape verdict or
+	 * the error message.
+	 */
+	| "persist-worker-message-contained"
+	/**
 	 * The orphan backstop's OWN process-table scanner blew the scan timeout and
 	 * had to be tree-killed (#1864 review F3). Reason carries the kill verdict,
 	 * so a scanner that survived its own sweep's escalation — an orphan sweep
