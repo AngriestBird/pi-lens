@@ -522,7 +522,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/cache-manager.ts": 3,
 		"clients/cache-observability.ts": 2,
 		"clients/call-graph.ts": 4,
-		"clients/cascade-format.ts": 4,
+		// 4 -> 7 (#4403 round 5): `renderCascadeResult` keeps the notes whose
+		// servers are undelivered and drops the others' lines from the text,
+		// three `Array.prototype.filter` calls, not a delivery filter.
+		"clients/cascade-format.ts": 7,
 		"clients/code-quality-warnings.ts": 5,
 		"clients/codebase-model.ts": 4,
 		"clients/complexity-client.ts": 3,
@@ -632,7 +635,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 1 (#4403): `disabledPrimaryServerIds` is an `Array.prototype.filter`
 		// over registered servers, not a delivery filter.
 		// 1 -> 3 (#4403 round 4): `disabledPrimaries` selects the file's
-		// primaries once, then splits them into disabled ones and the enabled
+		// primaries once, then splits them into disabled ones and the
 		// `fallbackFor` alternates standing in for a disabled owner.
 		"clients/lsp/session-roots.ts": 3,
 		"clients/lsp/tsserver-sync.ts": 1,
@@ -1131,7 +1134,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"tools/lens-diagnostic-mark.ts": 6,
 		"tools/lens-diagnostics.ts": 30,
 		"tools/lsp-diagnostics.ts": 10,
-		"tools/lsp-navigation.ts": 14,
+		// 14 -> 15 (#4403 round 5): `noServerAnsweredText` names the file by
+		// its `path.basename`, beside the install hint's own.
+		"tools/lsp-navigation.ts": 15,
 		"tools/module-report.ts": 29,
 		"tools/render-compact.ts": 3,
 		"tools/symbol-search.ts": 5,

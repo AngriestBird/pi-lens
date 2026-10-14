@@ -26,7 +26,11 @@ import {
 	workspaceEditTextPaths,
 } from "../clients/lsp/edits.js";
 import { configDisabledAuxiliaryLspServerIds } from "../clients/dispatch/auxiliary-lsp.js";
-import { hashDiagnosticContent } from "../clients/lsp/diagnostic-binding.js";
+import {
+	hashDiagnosticContent,
+	PRIMARY_UNAVAILABLE_CAUSE,
+	primaryUnavailableCause,
+} from "../clients/lsp/diagnostic-binding.js";
 import {
 	getLSPService,
 	type LSPWorkspaceScopeAttribution,
@@ -105,6 +109,26 @@ function operationSupportStatus(
 	)
 		return support.callHierarchy;
 	return null;
+}
+
+/**
+ * #4403: why no language server answered a file operation on a file the
+ * service has no client for, from the operator's `lsp.disabledServers`. A
+ * primary turned off is not a missing install, and a disabled owner whose
+ * fallback did not answer is still the denial (round 4, N1).
+ */
+function noServerAnsweredText(filePath: string): string {
+	const { disabledServerIds, fallbackServerIds } = disabledPrimaries(filePath);
+	const cause = primaryUnavailableCause(
+		[...fallbackServerIds, ...disabledServerIds],
+		disabledServerIds,
+		fallbackServerIds,
+	);
+	const who =
+		disabledServerIds.length > 0
+			? `Primary LSP (${disabledServerIds.join(", ")}) did not answer`
+			: "no language server answered";
+	return `No LSP server available for ${path.basename(filePath)}: ${who} (${PRIMARY_UNAVAILABLE_CAUSE[cause]}).`;
 }
 
 function emptyReasonForOperation(operation: LspNavigationOperation): string {
@@ -1032,6 +1056,9 @@ export function createLspNavigationTool(
 			const session = mutationDeps?.runtime?.captureSessionGeneration?.();
 			const startedAt = Date.now();
 			let supported: boolean | null = null;
+			// #4403 round 5 (V5): `getOperationSupport` found no client for the
+			// file, after trying to start one.
+			let noFileClient = false;
 			let diagnosticsMode: "pull" | "push-only" | "unknown" = "unknown";
 			let columnResolution: SymbolColumnResolution | undefined;
 			// #3601: the content the rename's pre-flight `openFileBestEffort` read,
@@ -1501,17 +1528,15 @@ export function createLspNavigationTool(
 				// #4403 round 4 (N4): the same check as the workspaceDiagnostics
 				// gate above. A primary the operator turned off is not a missing
 				// install, so the advice would send the reader the wrong way.
-				const disabledServerIds = disabledPrimaries(filePath).disabledServerIds;
-				const fileName = path.basename(filePath);
 				return finalize(
 					{
 						content: [
 							{
 								type: "text" as const,
 								text:
-									disabledServerIds.length > 0
-										? `No LSP server available for ${fileName}: Primary LSP (${disabledServerIds.join(", ")}) is disabled in config by lsp.disabledServers.`
-										: `No LSP server available for ${fileName}. Check that the language server is installed.`,
+									disabledPrimaries(filePath).disabledServerIds.length > 0
+										? noServerAnsweredText(filePath)
+										: `No LSP server available for ${path.basename(filePath)}. Check that the language server is installed.`,
 							},
 						],
 						isError: true,
@@ -1527,6 +1552,7 @@ export function createLspNavigationTool(
 
 			if (needsFilePath) {
 				const support = await lspService.getOperationSupport(filePath);
+				noFileClient = support === null;
 				supported = operationSupportStatus(operation, support);
 				if (supported === false) {
 					return finalize(
@@ -1993,6 +2019,22 @@ export function createLspNavigationTool(
 			}
 
 			const isEmpty = !result || (Array.isArray(result) && result.length === 0);
+			// #4403 round 5 (V5): with no client for the file (a missing binary,
+			// a disabled primary while an auxiliary serves the file, a disabled
+			// owner whose fallback is missing), an empty answer came from no
+			// language server. `hover` returns null for both cases, so the
+			// empty answer here is no_server, not "No results".
+			if (isEmpty && noFileClient) {
+				return finalize(
+					{
+						content: [
+							{ type: "text" as const, text: noServerAnsweredText(filePath) },
+						],
+						isError: true,
+					},
+					{ operation, filePath, failureKind: "no_server", resultCount: 0 },
+				);
+			}
 			const fileCtx = filePath ? " at " + path.basename(filePath) : "";
 			const lineCtx = line ? ":" + line + ":" + character : "";
 			let output = isEmpty

@@ -997,8 +997,12 @@ const NON_ENTRY_MEMBERS: Record<string, string> = {
 
 /**
  * The public methods of `LSPService`, read from its class body with comments
- * and strings blanked: a one-tab-indented method head that is not `private`
- * or `protected`.
+ * and strings blanked: a one-tab-indented method head or function-valued
+ * field that is not `private` or `protected` (neither word can be the name
+ * the head pattern captures). Round 5 (V4): `public m()`, `async *m()`,
+ * `m = async () => …` and `m = (x) => …` are methods the pin must see. The
+ * napi TypeScript grammar is no help here: it fails on this file's
+ * `import("…")` types and folds later members into error nodes.
  */
 function lspServicePublicMethods(): string[] {
 	const source = stripSource(
@@ -1006,15 +1010,15 @@ function lspServicePublicMethods(): string[] {
 	);
 	const start = source.search(/^export class LSPService\b/m);
 	const end = source.indexOf("\n}", start);
+	const head =
+		/^\t(?:public\s+)?(?:static\s+)?(?:readonly\s+)?(?:async\s+)?(?:\*\s*)?(?:get\s+|set\s+)?([A-Za-z_$][\w$]*)\s*(?:[<(]|=\s*(?:async\s+)?(?:[<(]|function\b|[A-Za-z_$][\w$]*\s*=>))/gm;
 	return [
-		...source
-			.slice(start, end)
-			.matchAll(
-				/^\t(?:async\s+)?(?:static\s+)?(?:get\s+|set\s+)?([A-Za-z_$][\w$]*)\s*[<(]/gm,
+		...new Set(
+			[...source.slice(start, end).matchAll(head)].map(
+				(match) => match[1] as string,
 			),
-	]
-		.map((match) => match[1] as string)
-		.sort();
+		),
+	].sort();
 }
 
 type SiteEntry = { routes: readonly RouteId[] } | { exempt: string };
@@ -1604,12 +1608,27 @@ describe("the navigation reader (#4403)", () => {
 // which a disabled primary fails, so they told the reader to install a server
 // the operator had turned off. They now give the cause the workspaceDiagnostics
 // gate gives.
-describe("navigation operations on a file whose primary is off (#4403 N4)", () => {
-	// The "disabled, no aux" column: JSON's primary is off, and a file no
-	// server serves sits beside it.
-	const navOps = async (): Promise<string[]> => {
-		const column = COLUMNS.find((entry) => entry.id === "disabled, no aux");
-		if (!column) throw new Error("no disabled, no aux column");
+// Round 5 (V5): where `supportsLSP` holds but no client answers (a missing
+// binary, an auxiliary serving the file, a disabled owner whose fallback is
+// missing), they answered "No results", ok, as if the file had been read.
+describe("navigation operations on a file no primary answers for (#4403 N4, V5)", () => {
+	const NAV_DISABLED =
+		"No LSP server available for a.json: Primary LSP (json) did not answer (it is disabled in config by lsp.disabledServers).";
+	const NAV_UNSTARTED =
+		"No LSP server available for a.json: no language server answered (it could not be started, or was still starting).";
+	const NAV_FALLBACK =
+		"No LSP server available for a.ts: Primary LSP (typescript) did not answer (it is disabled in config by lsp.disabledServers, and its fallback could not be started, or was still starting).";
+	const noServer = (text: string): string[] =>
+		["hover", "documentSymbol"].map(
+			(operation) => `${operation} ok=false status=no_server: ${text}`,
+		);
+
+	const navOps = async (
+		columnId: ColumnId,
+		extra: "unserved" | "findSymbol" | undefined = undefined,
+	): Promise<string[]> => {
+		const column = COLUMNS.find((entry) => entry.id === columnId);
+		if (!column) throw new Error(`no ${columnId} column`);
 		const fx = makeFixture(column);
 		const savedConfigPath = process.env.PI_LENS_CONFIG_PATH;
 		const savedInstall = process.env.PI_LENS_DISABLE_LSP_INSTALL;
@@ -1620,7 +1639,7 @@ describe("navigation operations on a file whose primary is off (#4403 N4)", () =
 		const pi = createPiMock({});
 		const ctx = makeCtx({
 			cwd: fx.workspace,
-			sessionId: "matrix-4403-nav-ops",
+			sessionId: `matrix-4403-nav-ops-${columnId}`,
 			isProjectTrusted: true,
 		});
 		let started = false;
@@ -1632,17 +1651,24 @@ describe("navigation operations on a file whose primary is off (#4403 N4)", () =
 			await pi.emit("session_start", makeSessionStartEvent(), ctx);
 			started = true;
 			const nav = pi.tools.get("lsp_navigation") as ToolLike;
-			const unserved = path.join(fx.workspace, "notes.unserved");
-			fs.writeFileSync(unserved, "plain text\n");
-			const lines: string[] = [];
-			for (const [operation, target] of [
+			const targets: Array<[string, string, Record<string, string>?]> = [
 				["hover", fx.file("a")],
 				["documentSymbol", fx.file("a")],
-				["hover", unserved],
-			] as const) {
+			];
+			if (extra === "unserved") {
+				const unserved = path.join(fx.workspace, "notes.unserved");
+				fs.writeFileSync(unserved, "plain text\n");
+				targets.push(["hover", unserved]);
+			}
+			// The fake answers every request it advertises; a name it has no
+			// symbol for is an empty answer from a running server.
+			if (extra === "findSymbol")
+				targets.push(["findSymbol", fx.file("a"), { query: "noSuchName" }]);
+			const lines: string[] = [];
+			for (const [operation, target, params] of targets) {
 				const result = await nav.execute(
 					"matrix-4403-nav-op",
-					{ operation, path: target, line: 1, character: 2 },
+					{ operation, path: target, line: 1, character: 2, ...params },
 					new AbortController().signal,
 					null,
 					ctx,
@@ -1668,10 +1694,38 @@ describe("navigation operations on a file whose primary is off (#4403 N4)", () =
 	it(
 		"names a disabled primary, and keeps the install hint for a file no server serves",
 		async () => {
-			expect(await navOps()).toEqual([
-				"hover ok=false status=no_server: No LSP server available for a.json: Primary LSP (json) is disabled in config by lsp.disabledServers.",
-				"documentSymbol ok=false status=no_server: No LSP server available for a.json: Primary LSP (json) is disabled in config by lsp.disabledServers.",
+			expect(await navOps("disabled, no aux", "unserved")).toEqual([
+				...noServer(NAV_DISABLED),
 				"hover ok=false status=no_server: No LSP server available for notes.unserved. Check that the language server is installed.",
+			]);
+		},
+		120_000 * testTimeoutScale,
+	);
+
+	const CASES: ReadonlyArray<[ColumnId, string[]]> = [
+		["disabled", noServer(NAV_DISABLED)],
+		["disabled, fallback", noServer(NAV_FALLBACK)],
+		["missing", noServer(NAV_UNSTARTED)],
+		["missing, no aux", noServer(NAV_UNSTARTED)],
+	];
+	for (const [columnId, expected] of CASES) {
+		it(
+			`answers no_server with the cause, not "No results": ${columnId}`,
+			async () => {
+				expect(await navOps(columnId)).toEqual(expected);
+			},
+			120_000 * testTimeoutScale,
+		);
+	}
+
+	// A running primary's answer, empty or not, is an answer.
+	it(
+		"keeps a running primary's answers, and its empty answer as No results",
+		async () => {
+			expect(await navOps("present", "findSymbol")).toEqual([
+				"hover ok=true status=success: undefined",
+				"documentSymbol ok=true status=success: undefined",
+				"findSymbol ok=true status=empty: No results for findSymbol at a.json:1:2",
 			]);
 		},
 		120_000 * testTimeoutScale,

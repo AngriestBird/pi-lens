@@ -23,7 +23,7 @@ export interface CascadeNeighborResult {
 	/**
 	 * #4403 round 4 (N2): no primary language server answered for this file,
 	 * and why. The cascade names the server in one line instead of listing the
-	 * file (clients/dispatch/integration.ts, `takeCascadeUnansweredPrimaries`).
+	 * file (clients/cascade-format.ts, `splitCascadeUnansweredPrimaries`).
 	 */
 	primaryUnavailable?: {
 		serverIds: string[];
@@ -32,11 +32,27 @@ export interface CascadeNeighborResult {
 	durationMs?: number;
 }
 
+/** #4403 round 5 (V1): one line naming primaries that did not answer. */
+export interface CascadeUnansweredPrimaryNote {
+	serverIds: readonly string[];
+	line: string;
+}
+
 export interface CascadeResult {
 	filePath: string;
 	impact: ImpactCascadeResult;
 	neighbors: CascadeNeighborResult[];
 	formatted: string;
+	/**
+	 * #4403 round 5 (V1): the lines naming primaries that did not answer,
+	 * which `formatted` carries, and `formatted` as it reads without them.
+	 * turn_end renders each server's line once per session
+	 * (`renderCascadeResult` in clients/cascade-format.ts).
+	 */
+	unansweredPrimaries?: {
+		notes: CascadeUnansweredPrimaryNote[];
+		formattedWithoutNotes: string;
+	};
 }
 
 /** Why a cascade run produced no formatted output. */

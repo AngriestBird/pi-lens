@@ -188,9 +188,10 @@ export function sessionRootConfigForFile(
  *   An alternate (`fallbackFor`) counts only when its owner is off too: with
  *   the owner on, the alternate is never consulted, so turning it off
  *   changes nothing for the file.
- * - `fallbackServerIds`: the enabled alternates standing in for a disabled
- *   owner. They answer only because the owner is off, so when they cannot,
- *   the denial is still the cause (round 4, N1).
+ * - `fallbackServerIds`: the alternates standing in for a disabled owner.
+ *   They answer only because the owner is off, so when they cannot, the
+ *   denial is still the cause (round 4, N1). A disabled alternate is in both
+ *   lists; `primaryUnavailableCause` reads the disabled list first.
  *
  * Here, not in `config.ts`: the LSP service and the routes import it, and
  * `config.js`'s import surface is mirrored by whole-module `vi.mock`
@@ -225,9 +226,7 @@ export function disabledPrimaries(filePath: string): {
 		fallbackServerIds: primaries
 			.filter(
 				(server) =>
-					!off.has(server.id) &&
-					server.fallbackFor !== undefined &&
-					off.has(server.fallbackFor),
+					server.fallbackFor !== undefined && off.has(server.fallbackFor),
 			)
 			.map((server) => server.id),
 	};

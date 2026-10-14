@@ -4,6 +4,12 @@
  * session, through the real turn path (pi's `tool_result`, `turn_end` and the
  * next model `context`).
  *
+ * Round 5 (V1) recurrence: the once-per-session mark was taken when a run
+ * computed the line. Writing b.ts and then its neighbour a.ts in one turn made
+ * turn_end drop b.ts's run as superseded, a.ts's run could no longer name the
+ * server, and the line was lost for the session. The mark is now taken when
+ * turn_end delivers the line.
+ *
  * Recurrence: round 3 made a collecting touch with a disabled primary return a
  * verdict instead of nothing. The cascade's neighbour touch reads that verdict,
  * so a.ts and c.ts came back as "Cascade diagnostics inconclusive for 2
@@ -101,7 +107,23 @@ const CASES: readonly Case[] = [
 	},
 ];
 
-function makeWorkspace(testCase: Case): string {
+/**
+ * a.ts and c.ts import b.ts, d.ts imports a.ts, and f.ts imports e.ts, which
+ * nothing else touches.
+ */
+const FILES: Record<string, (n: number) => string> = {
+	a: (n) => `import { b } from "./b";\nexport const a = b + ${n};\n`,
+	b: (n) => `export const b = ${n};\n`,
+	c: (n) => `import { b } from "./b";\nexport const c = b + ${n};\n`,
+	d: (n) => `import { a } from "./a";\nexport const d = a + ${n};\n`,
+	e: (n) => `export const e = ${n};\n`,
+	f: (n) => `import { e } from "./e";\nexport const f = e + ${n};\n`,
+};
+
+/** One turn's writes, in order: a file name and the value it is given. */
+type Turn = ReadonlyArray<readonly [name: string, n: number]>;
+
+function makeWorkspace(testCase: Pick<Case, "typescript" | "deno">): string {
 	const env = setupTestEnvironment(PREFIX);
 	const workspace = fs.realpathSync(env.tmpDir);
 	const shim = (serverId: string, delayMs = 0): string[] => {
@@ -127,15 +149,8 @@ function makeWorkspace(testCase: Case): string {
 	);
 	fs.mkdirSync(path.join(workspace, ".git"));
 	fs.mkdirSync(path.join(workspace, ".pi-lens"));
-	fs.writeFileSync(
-		path.join(workspace, "a.ts"),
-		'import { b } from "./b";\nexport const a = b + 1;\n',
-	);
-	fs.writeFileSync(path.join(workspace, "b.ts"), "export const b = 1;\n");
-	fs.writeFileSync(
-		path.join(workspace, "c.ts"),
-		'import { b } from "./b";\nexport const c = b;\n',
-	);
+	for (const [name, content] of Object.entries(FILES))
+		fs.writeFileSync(path.join(workspace, `${name}.ts`), content(1));
 	fs.writeFileSync(
 		path.join(workspace, ".pi-lens", "lsp.json"),
 		JSON.stringify({
@@ -186,6 +201,77 @@ async function deliveredCascadeLines(
 		.filter((line) => line.includes("Cascade"));
 }
 
+/**
+ * Runs the turns through one session and returns the cascade lines each
+ * turn's next model context delivers.
+ */
+async function runTurns(
+	testCase: Pick<Case, "name" | "typescript" | "deno">,
+	turns: readonly Turn[],
+): Promise<string[][]> {
+	const workspace = makeWorkspace(testCase);
+	const savedConfigPath = process.env.PI_LENS_CONFIG_PATH;
+	const savedInstall = process.env.PI_LENS_DISABLE_LSP_INSTALL;
+	const configPath = path.join(workspace, "global-config.json");
+	fs.writeFileSync(configPath, "{}\n");
+	process.env.PI_LENS_CONFIG_PATH = configPath;
+	process.env.PI_LENS_DISABLE_LSP_INSTALL = "1";
+	let shutdown: (() => Promise<unknown>) | undefined;
+	try {
+		const config = await import("../../clients/lsp/config.js");
+		await config.initLSPConfig(workspace);
+		const { default: extension } = await import("../../index.js");
+		const pi = createPiMock({});
+		extension(pi.asExtensionAPI());
+		// The command overrides are project config (#4248).
+		const ctx = makeCtx({
+			cwd: workspace,
+			sessionId: `cascade-4403-${testCase.name}`,
+			isProjectTrusted: true,
+		});
+		resetLSPService();
+		getLSPService();
+		await pi.emit("session_start", makeSessionStartEvent(), ctx);
+		shutdown = () => pi.emit("session_shutdown", { reason: "quit" }, ctx);
+		const write = async (name: string, n: number): Promise<void> => {
+			const target = path.join(workspace, `${name}.ts`);
+			fs.writeFileSync(target, FILES[name](n));
+			await pi.emit(
+				"tool_result",
+				{
+					toolName: "write",
+					input: { path: target, content: fs.readFileSync(target, "utf8") },
+					content: [{ type: "text", text: "wrote" }],
+				},
+				ctx,
+			);
+		};
+		const delivered: string[][] = [];
+		for (const writes of turns) {
+			await pi.emit("turn_start", {}, ctx);
+			for (const [name, n] of writes) await write(name, n);
+			await pi.emit("turn_end", {}, ctx);
+			delivered.push(await deliveredCascadeLines(pi, ctx));
+		}
+		return delivered;
+	} finally {
+		// Also after a failed assertion, so the next case starts a new session.
+		await shutdown?.();
+		await getLSPService().shutdown();
+		resetLSPService();
+		if (savedConfigPath === undefined) delete process.env.PI_LENS_CONFIG_PATH;
+		else process.env.PI_LENS_CONFIG_PATH = savedConfigPath;
+		if (savedInstall === undefined)
+			delete process.env.PI_LENS_DISABLE_LSP_INSTALL;
+		else process.env.PI_LENS_DISABLE_LSP_INSTALL = savedInstall;
+	}
+}
+
+const UNSTARTED_LINE = cascadeLine(
+	"typescript",
+	"it could not be started, or was still starting",
+);
+
 describe("a cascade neighbour no primary answered for (#4403 N2)", () => {
 	afterAll(async () => {
 		await cleanupTestEnvironmentsDrained(PREFIX, {
@@ -197,69 +283,69 @@ describe("a cascade neighbour no primary answered for (#4403 N2)", () => {
 
 	for (const testCase of CASES) {
 		it(`${testCase.name}: ${testCase.firstTurn.length > 0 ? "one cause-named line, then none" : "no cascade line"}`, async () => {
-			const workspace = makeWorkspace(testCase);
-			const savedConfigPath = process.env.PI_LENS_CONFIG_PATH;
-			const savedInstall = process.env.PI_LENS_DISABLE_LSP_INSTALL;
-			const configPath = path.join(workspace, "global-config.json");
-			fs.writeFileSync(configPath, "{}\n");
-			process.env.PI_LENS_CONFIG_PATH = configPath;
-			process.env.PI_LENS_DISABLE_LSP_INSTALL = "1";
-			let shutdown: (() => Promise<unknown>) | undefined;
-			try {
-				const config = await import("../../clients/lsp/config.js");
-				await config.initLSPConfig(workspace);
-				const { default: extension } = await import("../../index.js");
-				const pi = createPiMock({});
-				extension(pi.asExtensionAPI());
-				// The command overrides are project config (#4248).
-				const ctx = makeCtx({
-					cwd: workspace,
-					sessionId: `cascade-4403-${testCase.name}`,
-					isProjectTrusted: true,
-				});
-				resetLSPService();
-				getLSPService();
-				await pi.emit("session_start", makeSessionStartEvent(), ctx);
-				shutdown = () => pi.emit("session_shutdown", { reason: "quit" }, ctx);
-				const target = path.join(workspace, "b.ts");
-				const write = async (n: number): Promise<void> => {
-					fs.writeFileSync(target, `export const b = ${n};\n`);
-					await pi.emit(
-						"tool_result",
-						{
-							toolName: "write",
-							input: {
-								path: target,
-								content: fs.readFileSync(target, "utf8"),
-							},
-							content: [{ type: "text", text: "wrote" }],
-						},
-						ctx,
-					);
-				};
-				const turn = async (writes: number[]): Promise<string[]> => {
-					await pi.emit("turn_start", {}, ctx);
-					for (const n of writes) await write(n);
-					await pi.emit("turn_end", {}, ctx);
-					return deliveredCascadeLines(pi, ctx);
-				};
-				// Two writes of b.ts in the first turn: the first run is
-				// superseded at turn_end, so the line must ride the second.
-				const turns = [await turn([2, 3]), await turn([4]), await turn([5])];
-				expect(turns).toEqual([testCase.firstTurn, [], []]);
-			} finally {
-				// Also after a failed assertion, so the next case starts a
-				// new session.
-				await shutdown?.();
-				await getLSPService().shutdown();
-				resetLSPService();
-				if (savedConfigPath === undefined)
-					delete process.env.PI_LENS_CONFIG_PATH;
-				else process.env.PI_LENS_CONFIG_PATH = savedConfigPath;
-				if (savedInstall === undefined)
-					delete process.env.PI_LENS_DISABLE_LSP_INSTALL;
-				else process.env.PI_LENS_DISABLE_LSP_INSTALL = savedInstall;
-			}
+			// Two writes of b.ts in the first turn: the first run is
+			// superseded at turn_end, so the line must ride the second.
+			const turns = await runTurns(testCase, [
+				[
+					["b", 2],
+					["b", 3],
+				],
+				[["b", 4]],
+				[["b", 5]],
+			]);
+			expect(turns).toEqual([testCase.firstTurn, [], []]);
+		}, 180_000);
+	}
+
+	// Round 5 (V1): the server is marked once the line is delivered, so a run
+	// that turn_end drops does not use the line up, and two runs that name the
+	// same server in one turn show it once. typescript missing, deno disabled.
+	const SCRIPTS: ReadonlyArray<{
+		name: string;
+		firstTurn: Turn;
+		expected: string[][];
+	}> = [
+		{
+			// b.ts's run is superseded by the write of its neighbour a.ts, and
+			// a.ts's own run (neighbour d.ts) carries the line.
+			name: "b.ts, then its neighbour a.ts",
+			firstTurn: [
+				["b", 2],
+				["a", 2],
+			],
+			expected: [[UNSTARTED_LINE], [], []],
+		},
+		{
+			// c.ts has no importers, so nothing carries the line in turn 1;
+			// the server is not marked, and turn 2's run names it.
+			name: "b.ts, then its neighbour c.ts, which nothing imports",
+			firstTurn: [
+				["b", 2],
+				["c", 2],
+			],
+			expected: [[], [UNSTARTED_LINE], []],
+		},
+		{
+			// Both runs survive turn_end and both name typescript.
+			name: "b.ts and an unrelated e.ts",
+			firstTurn: [
+				["b", 2],
+				["e", 2],
+			],
+			expected: [[UNSTARTED_LINE], [], []],
+		},
+	];
+	for (const script of SCRIPTS) {
+		it(`delivers the line once: ${script.name}`, async () => {
+			const turns = await runTurns(
+				{
+					name: script.name,
+					typescript: "missing",
+					deno: "disabled",
+				},
+				[script.firstTurn, [["b", 4]], [["b", 5]]],
+			);
+			expect(turns).toEqual(script.expected);
 		}, 180_000);
 	}
 });

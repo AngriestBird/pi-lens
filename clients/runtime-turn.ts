@@ -150,7 +150,11 @@ import {
 	type PersistentReverifyResult,
 	runPersistentReverify,
 } from "./persistent-reverify.js";
-import { cascadeCarrySuffix } from "./cascade-format.js";
+import {
+	cascadeCarrySuffix,
+	markCascadeUnansweredPrimariesDelivered,
+	renderCascadeResult,
+} from "./cascade-format.js";
 import {
 	applyPushedFindingPolicy,
 	filterFindingsByDisposition,
@@ -1879,12 +1883,22 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		let injectedNeighborCount = 0;
 		let injectedDiagnosticCount = 0;
 		let suppressedByOwnership = 0;
+		// #4403 round 5 (V1): the servers whose "no language server answered"
+		// line this section shows. They are marked delivered only when the
+		// section reaches the agent (the delivery hold below), so a run
+		// superseded at this turn_end, or a cut section, does not use up the
+		// line.
+		const shownUnansweredServerIds = new Set<string>();
 		for (const result of seen.values()) {
 			const pk = normalizeMapKey(result.filePath);
 			const ownsAny = result.neighbors.some(
 				(n) => neighborOwner.get(normalizeMapKey(n.filePath)) === pk,
 			);
-			if (ownsAny && result.formatted) {
+			const text =
+				ownsAny && result.formatted
+					? renderCascadeResult(result, shownUnansweredServerIds).text
+					: "";
+			if (text) {
 				// Fix B (#3167/#3168): a carried run's re-rendered blocker is labeled
 				// so the agent can tell it from a fresh observation — with the
 				// run's own observation age (#3168 F3).
@@ -1893,11 +1907,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					carryMeta?.carriedTurns,
 					carryMeta?.observedAt,
 				);
-				parts.push(
-					carrySuffix
-						? `${result.formatted}\n${carrySuffix}`
-						: result.formatted,
-				);
+				parts.push(carrySuffix ? `${text}\n${carrySuffix}` : text);
 				if (carrySuffix) carriedRunsRendered += 1;
 				const sectionRun = runByResult.get(result);
 				if (sectionRun) sectionRuns.push(sectionRun);
@@ -1961,8 +1971,11 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			const section = parts.join("\n\n");
 			// @delivery-surface: runtime-turn:cascade-blocker
 			blockerParts.push(section);
+			const shownServerIds = [...shownUnansweredServerIds];
 			deliveryHolds.push({
 				part: section,
+				onDelivered: () =>
+					markCascadeUnansweredPrimariesDelivered(shownServerIds),
 				onHeld: () => {
 					for (const run of sectionRuns) runtime.appendCascadeRun(run);
 				},
