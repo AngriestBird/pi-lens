@@ -565,4 +565,126 @@ describe("an explicit LSP check with Opengrep switched off (#4323)", () => {
 			expect(text).toContain(OPENGREP_FINDING);
 		});
 	});
+
+	describe("through the actionable-warnings cold read", () => {
+		/**
+		 * A turn-end build with code actions on, so the loop pulls each file cold.
+		 * A cold pull with nothing primed runs off the hook; wait for it.
+		 */
+		async function buildReport(
+			files: string[],
+			getFlag?: (name: string) => boolean,
+		): Promise<void> {
+			const { buildActionableWarningsReport, _awaitDeferredLspPullForTest } =
+				await import("../../clients/actionable-warnings.js");
+			await buildActionableWarningsReport({
+				cwd: workspace,
+				sessionId: "actionable-4323",
+				turnIndex: 1,
+				files,
+				modifiedRangesByFile: new Map(),
+				dispatchWarnings: [],
+				includeLspCodeActions: true,
+				...(getFlag ? { getFlag } : {}),
+			});
+			await _awaitDeferredLspPullForTest();
+		}
+
+		it("does not start Opengrep when it is switched off", async () => {
+			await buildReport([probe], noOpengrep);
+
+			expect(opengrepStarts()).toBe(0);
+		});
+
+		it("does not start Opengrep for a cold file read after a primed one", async () => {
+			// The in-band loop: a primed file is read from the service's last-known
+			// store, which a real touch fills only when a server reported a finding
+			// (the fixture's JSON server answers clean), so seed it as a touch would.
+			const { normalizeMapKey } = await import("../../clients/path-utils.js");
+			const { createHash } = await import("node:crypto");
+			const key = normalizeMapKey(secondProbe);
+			const lsp = service as unknown as {
+				lastKnownDiagnostics: Map<string, unknown[]>;
+				lastKnownContentHash: Map<string, string>;
+			};
+			lsp.lastKnownDiagnostics.set(key, [
+				{
+					range: {
+						start: { line: 0, character: 0 },
+						end: { line: 0, character: 1 },
+					},
+					severity: 2,
+					message: "primed by an earlier touch",
+					source: "json",
+					serverId: "json",
+				},
+			]);
+			lsp.lastKnownContentHash.set(
+				key,
+				createHash("sha256")
+					.update(fs.readFileSync(secondProbe, "utf-8"))
+					.digest("hex"),
+			);
+
+			await buildReport([secondProbe, probe], noOpengrep);
+
+			expect(opengrepStarts()).toBe(0);
+		});
+
+		it("starts Opengrep when no switch is set", async () => {
+			await buildReport([probe]);
+
+			expect(opengrepStarts()).toBeGreaterThan(0);
+		});
+
+		it("does not start Opengrep through pi's turn_end when the global config switches it off", async () => {
+			// The hook is the producer of `getFlag`: this pins that turn_end hands
+			// the build its flag reader. The edit's own pipeline pass honours the
+			// switch already, so the cold read is the only start left to see.
+			const savedConfigPath = process.env.PI_LENS_CONFIG_PATH;
+			const configPath = path.join(workspace, "turn-end-config.json");
+			fs.writeFileSync(configPath, '{"opengrep":{"enabled":false}}\n');
+			process.env.PI_LENS_CONFIG_PATH = configPath;
+			try {
+				const { default: extension } = await import("../../index.js");
+				const { makeSessionStartEvent } =
+					await import("../support/host-event-factory.js");
+				const { makeCtx } = await import("../support/pi-mock.js");
+				const { _awaitDeferredLspPullForTest } =
+					await import("../../clients/actionable-warnings.js");
+				const pi = createPiMock({
+					"lens-actionable-warnings": true,
+					"lens-actionable-warning-actions": true,
+				});
+				extension(pi.asExtensionAPI());
+				// The host's own trust decision, which session_start latches.
+				const ctx = makeCtx({
+					cwd: workspace,
+					sessionId: "turn-end-4323",
+					isProjectTrusted: true,
+				});
+				await pi.emit("session_start", makeSessionStartEvent(), ctx);
+				await pi.emit("turn_start", {}, ctx);
+				await pi.emit(
+					"tool_result",
+					{
+						toolName: "edit",
+						input: { path: probe },
+						details: { diff: "+  1 changed();" },
+						content: [{ type: "text", text: "changed" }],
+					},
+					ctx,
+				);
+				await pi.emit("turn_end", {}, ctx);
+				await _awaitDeferredLspPullForTest();
+				await pi.emit("session_shutdown", { reason: "quit" }, ctx);
+			} finally {
+				if (savedConfigPath === undefined)
+					delete process.env.PI_LENS_CONFIG_PATH;
+				else process.env.PI_LENS_CONFIG_PATH = savedConfigPath;
+			}
+
+			expect(opengrepStarts()).toBe(0);
+		});
+	});
 });

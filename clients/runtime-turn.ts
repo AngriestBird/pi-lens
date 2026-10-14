@@ -4573,6 +4573,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				modifiedRangesByFile,
 				dispatchWarnings: runtime.peekActionableWarnings(sessionId),
 				includeLspCodeActions: !!getFlag("lens-actionable-warning-actions"),
+				// #4323: the cold LSP read leaves a switched-off Opengrep unstarted.
+				getFlag,
 				projectSeqStart: runtime.turnStartProjectSeq,
 				projectSeqEnd: runtime.projectSeq,
 				// #3676: the quick fix credits its writes with this epoch.
