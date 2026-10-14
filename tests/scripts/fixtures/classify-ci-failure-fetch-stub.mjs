@@ -84,15 +84,21 @@ const FORBIDDEN = () =>
 	});
 const comments = priorComment ? [{ id: 555, body: priorComment }] : [];
 
-function record(method, url) {
+// `authorization` is the request's own header as the CLI sent it (#4435
+// review F3): the wiring test reads it to prove the CLI's fetcher adds the
+// token, which no URL assertion can see.
+function record(method, url, authorization) {
 	if (!callLogPath) return;
-	appendFileSync(callLogPath, `${JSON.stringify({ method, url })}\n`);
+	appendFileSync(
+		callLogPath,
+		`${JSON.stringify({ method, url, authorization })}\n`,
+	);
 }
 
 globalThis.fetch = async (url, init = {}) => {
 	const method = init?.method ?? "GET";
 	const urlStr = String(url);
-	record(method, urlStr);
+	record(method, urlStr, init?.headers?.authorization);
 
 	if (urlStr.endsWith("/actions/runs/999")) {
 		// Production-faithful: a push/repository_dispatch run's

@@ -147,7 +147,9 @@ describe("#4350 one SHA per action repository across the workflow tree", () => {
 
 	it("reports a subpath split within one repository and not across repositories", () => {
 		const a = "2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2";
-		const b = "24c54180a607b1449ed407dd24f251e4e9147c8d";
+		// A fake SHA, not the live codeql pin: a live one goes stale on each bump
+		// (live-pin-literal-sweep.test.ts, #4418/#4421).
+		const b = "4444444444444444444444444444444444444444";
 		const pins = [
 			...parseActionPins(
 				[

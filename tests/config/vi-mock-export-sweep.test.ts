@@ -199,8 +199,11 @@ function compareAgainstBaseline(
 				`${entry}: regression; missing ${finding.missing.join(", ")}`,
 			);
 		else if (finding.missing.length > admitted)
-			warnings.push(
-				`${entry}: missing count rose from ${admitted} to ${finding.missing.length}; missing ${finding.missing.join(", ")}`,
+			// Recurrence #4411 round 2 F6 (mocks): a rise only warned, so adding an
+			// export to a module that ~17 admitted partial mocks omit stayed green.
+			// A rise is a regression like a new key; a fall stays a warning.
+			problems.push(
+				`${entry}: missing count rose from ${admitted} to ${finding.missing.length}; missing ${finding.missing.join(", ")}. Spread \`importOriginal()\` into the factory, or admit the rise with \`npm run test:regen -- vi-mock\``,
 			);
 		else if (finding.missing.length < admitted)
 			warnings.push(
@@ -591,6 +594,70 @@ describe("#2281 whole-module vi.mock export ratchet", () => {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
 	});
+
+	// Recurrence #4411 round 2 F5 / #4435 review: two lsp/config.js baseline
+	// rows were detector false positives. Both tests spread
+	// `await vi.importActual<typeof import(spec)>(spec)`, runtime-complete like
+	// the factory-parameter `importOriginal()`, but the detector only knew the
+	// parameter spelling.
+	const importActualFactories: Array<[string, string, boolean]> = [
+		[
+			"a typed vi.importActual alias",
+			'async () => { const actual = await vi.importActual<typeof import("./module.js")>("./module.js"); return { ...actual, a: 1 }; }',
+			true,
+		],
+		[
+			"an untyped vi.importActual alias",
+			'async () => { const actual = await vi.importActual("./module.js"); return { ...actual, a: 1 }; }',
+			true,
+		],
+		[
+			"an inline typed vi.importActual spread",
+			'async () => ({ ...(await vi.importActual<typeof import("./module.js")>("./module.js")), a: 1 })',
+			true,
+		],
+		[
+			'a bracket-access vi["importActual"] alias',
+			'async () => { const actual = await vi["importActual"]("./module.js"); return { ...actual, a: 1 }; }',
+			true,
+		],
+		[
+			"a vi.importActual of ANOTHER module",
+			'async () => { const actual = await vi.importActual<typeof import("./other.js")>("./other.js"); return { ...actual, a: 1 }; }',
+			false,
+		],
+		[
+			"a vi.importActual alias that is never spread",
+			'async () => { const actual = await vi.importActual("./module.js"); return { a: 1, c: actual.b }; }',
+			false,
+		],
+		[
+			"a non-vi importActual member",
+			'async () => { const actual = await other.importActual("./module.js"); return { ...actual, a: 1 }; }',
+			false,
+		],
+	];
+	it.each(importActualFactories)(
+		"vi.importActual pass-through: %s",
+		(_name, factory, complete) => {
+			const root = fs.mkdtempSync(path.join(REPO_ROOT, ".probe-vi-mock-"));
+			try {
+				fs.writeFileSync(path.join(root, "module.ts"), "export const b = 1;\n");
+				fs.writeFileSync(
+					path.join(root, "importer.ts"),
+					'import { b } from "./module.js"; export { b };\n',
+				);
+				const source = `import "./importer.js";\nvi.mock("./module.js", ${factory});\n`;
+				const testFile = path.join(root, "case.test.ts");
+				fs.writeFileSync(testFile, source);
+				const findings = findViMockExportGaps(testFile, source);
+				if (complete) expect(findings).toEqual([]);
+				else expect(findings).toMatchObject([{ missing: ["b"] }]);
+			} finally {
+				fs.rmSync(root, { recursive: true, force: true });
+			}
+		},
+	);
 
 	it("accepts a two-statement no-argument importOriginal binding spread", () => {
 		// The PREMISE transcript's seventh shape: the alias idiom without a
@@ -1103,7 +1170,7 @@ describe("#2281 whole-module vi.mock export ratchet", () => {
 		}
 	});
 
-	it("warns when production gains an omitted export", () => {
+	it("reds when production gains an omitted export", () => {
 		const root = fs.mkdtempSync(path.join(REPO_ROOT, ".probe-vi-mock-"));
 		try {
 			const moduleFile = path.join(root, "module.ts");
@@ -1119,8 +1186,34 @@ describe("#2281 whole-module vi.mock export ratchet", () => {
 			expect(
 				compareAgainstBaseline(finding, { [admissionKey]: 0 }),
 			).toMatchObject({
+				problems: [expect.stringMatching(/missing count rose from 0 to 1.*b/)],
+				warnings: [],
+			});
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("only warns when an admitted missing count falls", () => {
+		// The ratchet-down side of #4411 round 2 F6 (mocks): making a rise red
+		// must not turn a mock that gained an export into a red; the fall stays
+		// a warning until the baseline row is regenerated.
+		const root = fs.mkdtempSync(path.join(REPO_ROOT, ".probe-vi-mock-"));
+		try {
+			const moduleFile = path.join(root, "module.ts");
+			const testFile = path.join(root, "case.test.ts");
+			const source = 'vi.mock("./module.js", () => ({ a: 1 }));\n';
+			fs.writeFileSync(
+				moduleFile,
+				"export const a = 1;\nexport const b = 2;\n",
+			);
+			fs.writeFileSync(testFile, source);
+			const finding = findViMockExportGaps(testFile, source, "all");
+			expect(
+				compareAgainstBaseline(finding, { [key(finding[0])]: 2 }),
+			).toMatchObject({
 				problems: [],
-				warnings: [expect.stringContaining("b")],
+				warnings: [expect.stringContaining("fell from 2 to 1")],
 			});
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
@@ -1205,7 +1298,7 @@ describe("#2281 whole-module vi.mock export ratchet", () => {
 	});
 
 	it.skipIf(!!process.env.VI_MOCK_EXPORT_REGEN)(
-		"reports every omitted production export and warns on newly omitted exports",
+		"reports every omitted production export and reds on newly omitted exports",
 		async () => {
 			const findings = await scan();
 			const result = compareAgainstBaseline(findings, BASELINE);

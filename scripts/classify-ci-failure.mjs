@@ -14,6 +14,7 @@
 // infra-kill and skips runs whose Unit-tests job did not fail.
 
 import { runClassifier } from "./lib/ci-failure-classifier.mjs";
+import { githubFetcher } from "./lib/github-rest.mjs";
 
 // #2668 review F2: an unrecognized flag (a typo, or a workflow/CLI rename
 // drifting out of sync -- exactly what happened when this file's own flag
@@ -90,11 +91,7 @@ async function main() {
 	}
 	const [owner, repo] = repository.split("/");
 
-	const fetcher = (url, init) =>
-		fetch(url, {
-			...init,
-			headers: { ...init?.headers, authorization: `Bearer ${token}` },
-		});
+	const fetcher = githubFetcher(token);
 
 	const result = await runClassifier({
 		fetcher,
