@@ -66,12 +66,15 @@ export function planPertest(moduleFile, options) {
 }
 
 /**
- * Rotation size cap, in source lines of the `.ts` module. Pilot runs on GitHub
- * (4 vCPU, concurrency 2, 2026-10-14): clients/run-duration.ts 54 lines -> 16
- * mutants, 5 s; clients/json-cache-read.ts 72 lines -> 12 mutants, 39 s;
- * clients/read-bridge.ts 252 lines -> 103 mutants (0.41 per line), 234 s.
- * Time grows with mutants times the tests covering each; 600 lines is about 250
- * mutants, an estimated 10 to 25 minutes against the 90-minute job cap.
+ * Rotation size cap, in source lines of the `.ts` module. Runs on GitHub
+ * (ubuntu-latest, concurrency 2, bail off, 2026-10-14) measured 0.17 to 1.76
+ * mutants per line and 0.7 to 3.2 s per mutant: clients/run-duration.ts 54
+ * lines -> 16 mutants, 5 s; clients/read-bridge.ts 252 lines -> 103 mutants,
+ * 234 s; clients/bounded-pid-file-lock.ts 321 mutants, 5m33s; the slowest,
+ * clients/process-singletons.ts 71 mutants, took 14m50s. Time follows mutants
+ * times the tests covering each, not lines alone. 600 lines bounds the worst
+ * measured density (about 1000 mutants at 3.2 s, about 53 minutes) under the
+ * 90-minute job cap.
  */
 export const MAX_ROTATION_MODULE_LINES = 600;
 
