@@ -5022,3 +5022,259 @@ describe("scripts/hooks/guard-bash.mjs -- branch history guard (#3888)", () => {
 		expect(RULE_MESSAGES[rebase]).toContain("origin/master");
 	});
 });
+
+// #4348: agent writes under /tmp. Recurrence: on 2026-10-13 two Haiku
+// investigators wrote an error file to /tmp and deleted it, and a Haiku helper
+// wrote gh output there; `tmpCheckout` (#3526) only covers checkouts and
+// mktemp directories, so redirects, tee and file writes passed. /tmp on the
+// maintainer host is tmpfs (RAM + swap). Every row below is a command from that
+// family or a lookalike the rule must leave alone.
+describe("scripts/hooks/guard-bash.mjs -- writes under /tmp (#4348)", () => {
+	const uid = typeof process.getuid === "function" ? process.getuid() : 1000;
+	const NO_AMBIENT_TMPDIR_ENV: NodeJS.ProcessEnv = Object.fromEntries(
+		Object.entries(BASE_ENV).filter(
+			([key]) => !["TMPDIR", "TMP", "TEMP"].includes(key),
+		),
+	);
+	const deny = (command: string) => findDeny(command, PAYLOAD_CWD);
+
+	// Recurrence: the redirect branch (`>`, `>>`, `2>`, `&>`, `>&file`) missing
+	// or limited to a space-separated target -- the Haiku error file was
+	// `2> /tmp/err.txt`, and `echo hi>/tmp/x` has no space at all.
+	it.each([
+		"echo hi > /tmp/x",
+		"echo hi >/tmp/x",
+		"echo hi>/tmp/x",
+		"echo hi >> /tmp/x",
+		"gh pr view 1 2> /tmp/err.txt",
+		"gh pr view 1 2>/tmp/err.txt",
+		"gh pr view 1 2>>/tmp/err.txt",
+		"gh pr view 1 &> /tmp/out",
+		"gh pr view 1 &>> /tmp/out",
+		"gh pr view 1 >& /tmp/out",
+		"gh pr view 1 2>&1 > /tmp/out",
+		"> /tmp/x",
+		"> /tmp/x echo hi",
+		'echo "a">/tmp/x',
+		"echo a > /tmp/../tmp/x",
+		"cat <<EOF > /tmp/x\nbody\nEOF",
+		"cd /tmp && echo x > y",
+		"S=/tmp/scratch; echo a > $S/out",
+	])("denies the redirect %j", (command) => {
+		expect(deny(command)).toBe("tmpWrite");
+	});
+
+	// Recurrence: `tee` as the stdout-to-file spelling a redirect-only rule
+	// misses; every operand is a file, not only the first.
+	it.each([
+		"echo a | tee /tmp/x",
+		"echo a | tee -a /tmp/x",
+		"echo a | tee ./ok /tmp/y",
+		"echo a | sudo tee /tmp/x",
+	])("denies tee: %j", (command) => {
+		expect(deny(command)).toBe("tmpWrite");
+	});
+
+	// Recurrence: a cp/mv rule that judged the FIRST operand (the source) or
+	// ignored `-t DIR`, which names the destination before the sources.
+	it.each([
+		"cp a /tmp/b",
+		"cp -r a b /tmp/",
+		"mv a /tmp/b",
+		"cp -t /tmp a b",
+		"cp --target-directory=/tmp a",
+		"cp --target-directory /tmp a",
+		"cp -rt /tmp a",
+		"cp -t/tmp a",
+		"mv -t /tmp a",
+		"install a /tmp/b",
+		"install -m 755 a /tmp/b",
+		"install -d /tmp/a /home/dev/b",
+	])("denies the cp/mv/install target %j", (command) => {
+		expect(deny(command)).toBe("tmpWrite");
+	});
+
+	// Recurrence: mkdir/touch judged by the last operand only, or `-m 755`'s
+	// value read as the directory.
+	it.each([
+		"mkdir /tmp/a",
+		"mkdir -p /tmp/a/b",
+		"mkdir -m 755 /tmp/a",
+		"mkdir ./ok /tmp/a",
+		"touch /tmp/a",
+		"touch -d yesterday /tmp/a",
+	])("denies mkdir/touch: %j", (command) => {
+		expect(deny(command)).toBe("tmpWrite");
+	});
+
+	// Recurrence: the rule widening into reads ("reads that /tmp cannot
+	// serve"): /tmp as a source, an input redirect, a listing or a delete must
+	// stay allowed.
+	it.each([
+		"cat /tmp/x",
+		"cat < /tmp/x",
+		"cp /tmp/x ./y",
+		"cp /tmp/x /tmp/y ./dir",
+		"cp -t ./dir /tmp/x",
+		"mv /tmp/x ./y",
+		"install /tmp/x ./y",
+		"touch -r /tmp/ref ./x",
+		"mkdir -m 755 ./a",
+		"grep -r foo /tmp",
+		"ls /tmp",
+		"rm -rf /tmp/x",
+	])("allows the read or non-/tmp write %j", (command) => {
+		expect(deny(command)).toBeNull();
+	});
+
+	// Recurrence: a prefix match on "/tmp" (`/tmpfoo`) or a relative `tmp/`.
+	it.each([
+		"echo a > /tmpfoo/x",
+		"echo a > ./tmp/x",
+		"echo a > tmp/x",
+		"echo a > /home/dev/tmp/x",
+		"mkdir -p /home/dev/tmp/x",
+		"cp a /var/tmp-not/b",
+	])("does not treat %j as /tmp", (command) => {
+		expect(deny(command)).toBeNull();
+	});
+
+	// Recurrence (principles §2, "Detectors match code, not prose"): a quoted
+	// string, a comment, an escaped `>` or a heredoc body that merely spells a
+	// write must never deny.
+	it.each([
+		'echo "> /tmp/x"',
+		"echo '> /tmp/x'",
+		'echo ">/tmp/x"',
+		"echo '>/tmp/x'",
+		'echo ">" /tmp/x',
+		"echo \\>/tmp/x",
+		'echo "cp a /tmp/b"',
+		"echo \\> /tmp/x",
+		"echo a # > /tmp/x",
+		"grep '>' /tmp/x",
+		"cat <<'EOF'\n> /tmp/x\ncp a /tmp/b\ntee /tmp/c\nEOF",
+		"cat <<EOF\n> /tmp/x\nmkdir /tmp/y\nEOF",
+		"git commit -m 'write > /tmp/x with tee /tmp/y'",
+	])("a /tmp write spelled as text never denies: %j", (command) => {
+		expect(deny(command)).toBeNull();
+	});
+
+	// Recurrence: `2>&1`, `>&2` and `>&-` read as redirects into a file named
+	// `1`/`2`/`-`, or into whatever follows them.
+	it.each([
+		"gh pr view 1 >/dev/null 2>&1",
+		"gh pr view 1 2>&1",
+		"echo hi >&2",
+		"echo hi 2>&-",
+		"echo hi >&2 /tmp/not-a-target",
+	])("a descriptor duplicate writes no file: %j", (command) => {
+		expect(deny(command)).toBeNull();
+	});
+
+	// Recurrence: a `>`/`>>` with its target attached takes the NEXT word (the
+	// command's own argument, here a /tmp READ) as its target too.
+	it.each([
+		"cat >out.txt /tmp/in",
+		"cat >>out.txt /tmp/in",
+		"sort 2>>err /tmp/in",
+	])(
+		"an attached redirect target does not borrow the next word: %j",
+		(command) => {
+			expect(deny(command)).toBeNull();
+		},
+	);
+
+	// Recurrence: a descriptor duplicate read as a file NAMED `1`/`2`/`-` --
+	// only visible when the cwd is itself under /tmp, where a relative file is
+	// a /tmp file. A real redirect there still denies.
+	it("a descriptor duplicate is not a relative file even when the cwd is under /tmp", () => {
+		const underTmp = "/tmp/pi-lens-guard-bash-4348-cwd-fixture";
+		for (const command of ["cmd 2>&1", "echo hi >&2", "echo hi >&-"])
+			expect(findDeny(command, underTmp), command).toBeNull();
+		expect(findDeny("echo hi > out.txt", underTmp)).toBe("tmpWrite");
+	});
+
+	// The acceptance's exemption: the harness's own session directory. Another
+	// uid's directory is not the harness's, and `..` out of it lands in /tmp.
+	it("exempts /tmp/claude-<uid>/ and nothing beside it", () => {
+		expect(deny(`echo a > /tmp/claude-${uid}/scratch/x`)).toBeNull();
+		expect(deny(`mkdir -p /tmp/claude-${uid}/scratch`)).toBeNull();
+		expect(deny(`cp a /tmp/claude-${uid}/scratch/b`)).toBeNull();
+		expect(deny(`echo a | tee /tmp/claude-${uid}/x`)).toBeNull();
+		expect(deny(`echo a > /tmp/claude-${uid + 1}/x`)).toBe("tmpWrite");
+		expect(deny(`echo a > /tmp/claude-${uid}/../x`)).toBe("tmpWrite");
+		expect(deny(`echo a > /tmp/claude-${uid}x/x`)).toBe("tmpWrite");
+	});
+
+	// Recurrence: guessing $TMPDIR. It is expanded by the same resolver as
+	// every other path rule: the shell's value (command text, then the hook's
+	// own environment), and /tmp only when neither sets it. A lane pinned off
+	// /tmp writes $TMPDIR freely; an unset or /tmp-pointing one does not.
+	describe("$TMPDIR", () => {
+		const lane = "/home/dev/lane-tmp";
+		it.each(["echo a > $TMPDIR/x", "echo a > ${TMPDIR}/x", "mkdir $TMPDIR/d"])(
+			"%j follows the ambient TMPDIR",
+			(command) => {
+				expect(runHook(command, { ...BASE_ENV, TMPDIR: lane }).status).toBe(0);
+				expect(
+					runHook(command, { ...BASE_ENV, TMPDIR: "/tmp/pi-lens-x" }).stderr,
+				).toBe(`${RULE_MESSAGES.tmpWrite}\n`);
+				expect(runHook(command, NO_AMBIENT_TMPDIR_ENV).stderr).toBe(
+					`${RULE_MESSAGES.tmpWrite}\n`,
+				);
+			},
+		);
+
+		it("an assignment earlier in the command wins over the ambient value", () => {
+			expect(
+				runHook("TMPDIR=/tmp/y; echo a > $TMPDIR/x", {
+					...BASE_ENV,
+					TMPDIR: lane,
+				}).stderr,
+			).toBe(`${RULE_MESSAGES.tmpWrite}\n`);
+		});
+
+		// bash expands the redirect word before the inline `TMPDIR=` applies to
+		// the command (the #3997 rule for git's path words).
+		it("an inline TMPDIR= does not move the redirect target", () => {
+			expect(
+				runHook("TMPDIR=/tmp/y echo a > $TMPDIR/x", {
+					...BASE_ENV,
+					TMPDIR: lane,
+				}).status,
+			).toBe(0);
+		});
+	});
+
+	it("denies through the real hook with the rule's teaching message on stderr", () => {
+		const result = runHook("echo hi > /tmp/x");
+		expect(result.status).toBe(2);
+		expect(result.stderr).toBe(`${RULE_MESSAGES.tmpWrite}\n`);
+		expect(RULE_MESSAGES.tmpWrite).toContain("/tmp");
+		const allowed = runHook(`echo hi > /tmp/claude-${uid}/x`);
+		expect(allowed.status).toBe(0);
+		expect(allowed.stderr).toBe("");
+	});
+
+	// Named limits, pinned so each is a visible decision rather than an
+	// untested docblock claim. Every one is a write this static scan does not
+	// follow (see the PR body "Limits"); none is promised denied.
+	it.each([
+		"dd if=/dev/zero of=/tmp/x count=1",
+		"echo a >| /tmp/x",
+		"export A=1 > /tmp/x",
+		"bash -c 'echo a > /tmp/x'",
+		"sh -c 'cp a /tmp/b'",
+		"echo a | xargs -I{} touch /tmp/{}",
+		"find . -name x -exec cp {} /tmp/ ;",
+		"curl -o /tmp/x https://example.com",
+		"sed -i s/a/b/ /tmp/x",
+		"awk '{print > \"/tmp/x\"}' f",
+		"cp --target=/tmp a",
+		"echo a > ${TMPDIR:-/tmp}/x",
+		"echo a > /private/tmp/x",
+	])("limit: %j is not judged", (command) => {
+		expect(deny(command)).toBeNull();
+	});
+});

@@ -58,9 +58,11 @@ explicit orchestrator authorization for
 `--force-with-lease=<branch>:<sha>`.
 
 Push forms are in "Orchestrator lane mechanics". Before `gh pr create` or `gh pr edit`, lint the body with
-`node scripts/check-pr-body.mjs --lint-local <body-file> "<title>"`. Multiline
-text (bodies, commit messages, comments) goes through a file (`--body-file`,
-`git commit -F`); re-read what GitHub stored and check the newlines survived.
+`node scripts/check-pr-body.mjs --lint-local <body-file> "<title>"`. Read the
+lint's exit code directly, never through a pipe, before `gh pr create` or
+`gh pr edit`: a piped status is the last command's, and a failing lint opened a
+PR (#4348). Multiline text (bodies, commit messages, comments) goes through a
+file (`--body-file`, `git commit -F`); re-read what GitHub stored and check the newlines survived.
 
 ## Orchestrator lane mechanics
 
