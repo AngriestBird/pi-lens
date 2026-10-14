@@ -720,7 +720,7 @@ async function openFileBestEffort(
 			diagnostics: waitForDiagnostics ? "document" : "none",
 			source: "lsp_navigation",
 			clientScope: waitForDiagnostics ? "all" : "primary",
-			excludeServerIds,
+			...(excludeServerIds !== undefined && { excludeServerIds }),
 		});
 	} catch {
 		/* LSP server may not be ready yet — proceed anyway */

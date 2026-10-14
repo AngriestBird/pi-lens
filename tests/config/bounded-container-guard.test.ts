@@ -478,7 +478,7 @@ describe("#2981 long-lived containers are bounded or admitted", () => {
 		"clients/degradation-ledger.ts#OVERFLOW_KIND:8cf106dd",
 		"clients/degradation-ledger.ts#groups:218d12e1",
 		"clients/degradation-ledger.ts#onceKeys:b8a478d9",
-		"clients/dispatch/auxiliary-lsp.ts#enabledAuxiliaryLspServerIds:dd3e2650",
+		"clients/dispatch/auxiliary-lsp.ts#isEnabledByConfiguration:dd3e2650",
 		"clients/dispatch/collect-later-tier.ts#COLLECT_LATER_THRESHOLD_MS:6c0d1b78",
 		"clients/dispatch/dispatcher.ts#latencyReports:4e5c8069",
 		"clients/dispatch/integration.ts#getCascadeSessionStats:0753e302",
