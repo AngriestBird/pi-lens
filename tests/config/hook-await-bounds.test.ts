@@ -2402,7 +2402,14 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// wrapper-relative fallback. Each is a local stat/realpath/read before
 	// launch; hook-signal threading remains #2523 AC4, as for existing lookup
 	// awaits. This records the actual census rather than hiding a new lookup.
-	"clients/lsp/server.ts": 116,
+	// #4414: 116 -> 119. `findTsserverPath` resolves a bare PATH `tsc` before
+	// the tsserver lookup: one await on the resolver around each of the two
+	// `ensureTool("typescript")` calls, and one on `findCommandAsync`, which
+	// carries its own 5 s spawn timeout. Hook-signal threading stays #2523 AC4.
+	// #4414 round 2: 119 -> 121, the local `stat` of the typescript package
+	// directories beside a resolved `tsc` and the await on that helper, which
+	// tell a shim (no package) from a package whose version is unreadable.
+	"clients/lsp/server.ts": 121,
 	"clients/map-with-concurrency.ts": 2,
 	"clients/observed-mutation.ts": 18,
 	"clients/opaque-mutation-scan.ts": 10,

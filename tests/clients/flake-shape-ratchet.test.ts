@@ -797,6 +797,14 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the CLI's real exit code (2 vs. 4) and GITHUB_OUTPUT side effect are unobservable from an in-process stub",
 	},
+	// 2026-10-14 (#4401): the RPC session smoke's exit code is the contract; only
+	// a real child (a stand-in pi at the process boundary) can exit, or write a
+	// signal on stdout, and turn that code red.
+	"real-process-spawn:scripts/rpc-load-check-spawn.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the smoke's exit code is the contract; an in-process call of the classifier cannot prove that a pi child that exits, or a signal on its stdout, turns the exit code red",
+	},
 	// #3401: the seed script's default git argv (depth-2 fetch, refspec, blob
 	// specs) only means something against a real repo and a depth-1 clone.
 	"real-process-spawn:scripts/seed-matrix-from-bot-branch-real-git.test.ts": {

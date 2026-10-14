@@ -5,7 +5,11 @@ import { Worker } from "node:worker_threads";
 import { constants as zlibConstants, gunzipSync, gzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 import { writeFileAtomic } from "../atomic-write.js";
-import { reapStageFile } from "../gzip-stage-write.js";
+import {
+	type GzipStageWorkerResult,
+	readGzipStageWorkerResult,
+	reapStageFile,
+} from "../gzip-stage-write.js";
 import type { CallGraphEvidenceCoverage } from "../call-graph.js";
 import { FactStore, type ReadonlyFactStore } from "../dispatch/fact-store.js";
 import { fileContentProvider } from "../dispatch/facts/file-content.js";
@@ -94,11 +98,9 @@ import type {
 	ReviewGraphPersistCoverage,
 } from "./types.js";
 import type { SymbolKind, SymbolRef } from "../symbol-types.js";
-import type {
-	ReviewGraphPersistWorkerRequest,
-	ReviewGraphPersistWorkerResult,
-} from "./persist-worker.js";
+import type { ReviewGraphPersistWorkerRequest } from "./persist-worker.js";
 import {
+	notePersistWorkerMessageFault,
 	readWorkerHeapStatistics,
 	type PersistWorkerHeapStatistics,
 } from "../persist-worker-stats.js";
@@ -2468,7 +2470,26 @@ function writePendingOnMainThread(
 	}
 }
 
-function handleWorkerResult(result: ReviewGraphPersistWorkerResult): void {
+/**
+ * The persist worker's `message` listener (#4402). The message is wire data
+ * (#4400): it passes the shape check or is dropped and counted, and a throw
+ * below is counted here instead of leaving the listener, which would end the
+ * host.
+ */
+function handleWorkerMessage(message: unknown): void {
+	try {
+		const result = readGzipStageWorkerResult(message);
+		if (typeof result === "string") {
+			notePersistWorkerMessageFault("review-graph", "rejected", result);
+			return;
+		}
+		handleWorkerResult(result);
+	} catch (err) {
+		notePersistWorkerMessageFault("review-graph", "threw", err);
+	}
+}
+
+function handleWorkerResult(result: GzipStageWorkerResult): void {
 	// Checkpoint offloads share this worker but promote to a different target;
 	// route them out before the authoritative-persist path (disjoint id space,
 	// so a checkpoint id is never also an authoritative one).
@@ -2497,8 +2518,9 @@ function handleWorkerResult(result: ReviewGraphPersistWorkerResult): void {
 		// also means its stage namespace is clean (#1318). Caught (#1361 review):
 		// force suppresses ENOENT but not EBUSY/EPERM (Windows AV/backup can
 		// briefly hold the handle) -- a failed reap must never abort this
-		// callback, or the WINNING generation's completion is lost with it. The
-		// startup sweep reclaims anything a failed unlink leaves behind.
+		// callback, or the WINNING generation's completion is lost with it. A
+		// failed unlink stays until a later process's startup sweep: the sweep
+		// skips this live pid's own stage files.
 		const reapErr = reapStageFile(request.stagePath);
 		if (reapErr !== undefined) {
 			logReviewGraph({
@@ -2577,7 +2599,7 @@ function handleWorkerResult(result: ReviewGraphPersistWorkerResult): void {
 
 function handleCheckpointWorkerResult(
 	cp: PendingCheckpointWrite,
-	result: ReviewGraphPersistWorkerResult,
+	result: GzipStageWorkerResult,
 ): void {
 	_checkpointWorkerRequests.delete(result.id);
 	// Best-effort: a failed offload just means no checkpoint for this stride —
@@ -2703,7 +2725,7 @@ function getPersistWorker(): Worker | undefined {
 			return undefined;
 		}
 		const worker = new Worker(workerPath);
-		worker.on("message", handleWorkerResult);
+		worker.on("message", handleWorkerMessage);
 		worker.on("error", (err: Error) => handleWorkerDeath(err.message));
 		worker.on("exit", (code) => {
 			if (_persistWorker !== worker) return;
