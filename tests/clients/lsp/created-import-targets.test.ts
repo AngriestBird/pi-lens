@@ -179,6 +179,32 @@ describe("the producer's session rollup (#4368 r1 F3)", () => {
 			else process.env.PI_LENS_TEST_MODE = previous;
 		}
 	});
+
+	// Recurrence: #4368 r2 L1 (mutant S7: the rollup emitted on any
+	// resetLSPService reason). The row is a session-end record; a reset with
+	// any other reason (session_start) must emit nothing and leave the tally
+	// for the session's own shutdown.
+	it("emits no rollup row for a reset that is not session_shutdown", async () => {
+		const previous = process.env.PI_LENS_TEST_MODE;
+		process.env.PI_LENS_TEST_MODE = "0";
+		try {
+			emitCreatedImportScanRollupAtSessionEnd();
+			clearLatencyLog();
+			const root = workspace("pi-lens-4346-rollup-reason-");
+			const importer = path.join(root, "user.ts");
+			fs.writeFileSync(importer, 'import "./mod";\nexport {};\n');
+			fs.writeFileSync(path.join(root, "mod.ts"), "export {};\n");
+
+			await importTargetsToAnnounce(root, [importer]);
+			resetLSPService({ reason: "session_start" });
+
+			expect(await rollupRows()).toEqual([]);
+			expect(getCreatedImportScanRollup().calls).toBe(1);
+		} finally {
+			if (previous === undefined) delete process.env.PI_LENS_TEST_MODE;
+			else process.env.PI_LENS_TEST_MODE = previous;
+		}
+	});
 });
 
 describe("a workspace edit's resource operations with no LSP service (#4346)", () => {
