@@ -434,7 +434,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/git-tracked-ignore.ts": 2,
 		"clients/gitleaks-client.ts": 3,
 		"clients/govulncheck-client.ts": 6,
-		"clients/gzip-stage-write.ts": 2,
+		// 2 -> 4 (#4402): the worker loop's catch answers with an `error`, and
+		// readGzipStageWorkerResult reads the wire field `error` (the worker
+		// protocol's own field name, not a delivery tier).
+		"clients/gzip-stage-write.ts": 4,
 		"clients/install-diagnostics.ts": 4,
 		"clients/installer/index.ts": 26,
 		"clients/installer/managed-tool-refresh.ts": 2,
@@ -465,6 +468,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/project-diagnostics/runner-adapters/call-graph-impact.ts": 1,
 		"clients/project-diagnostics/runner-adapters/runner-findings.ts": 4,
 		"clients/project-lens-config.ts": 3,
+		"clients/project-snapshot-persist-worker.ts": 1,
 		"clients/project-snapshot.ts": 7,
 		"clients/project-trust.ts": 1,
 		"clients/review-graph-logger.ts": 1,
@@ -968,7 +972,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/lombok.ts": 14,
 		// #4299: 121 -> 124; OS path namespace calls for canonical compiler
 		// validation replace the wrapper-relative guess. No path-key owner changes.
-		"clients/lsp/server.ts": 124,
+		// 124 -> 125 (#4414): the Windows npm-global layout adds one `path.join` to
+		// `typescriptDirsForTsc`, the list of package dirs beside a resolved `tsc`.
+		"clients/lsp/server.ts": 125,
 		"clients/lsp/session-roots.ts": 6,
 		"clients/lsp/workspace-diagnostics-cache.ts": 13,
 		// 6 -> 5 (#3643): removed the obsolete ring path-comparison branch;

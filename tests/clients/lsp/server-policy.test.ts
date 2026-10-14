@@ -113,10 +113,13 @@ function mockLaunchedProcess(pid: number): void {
 	});
 }
 
+const originalPath = process.env.PATH;
+
 afterEach(() => {
 	for (const dir of dirs.splice(0)) {
 		removeTempDirSync(dir);
 	}
+	process.env.PATH = originalPath;
 	delete process.env.PI_LENS_DISABLE_LSP_INSTALL;
 	ensureTool.mockReset();
 	launchLSP.mockReset();
@@ -1268,13 +1271,17 @@ describe("lsp server policy", () => {
 		);
 	});
 
-	// A bare `tsc` from PATH has no readable version and no adjacent package
-	// layout. Repairing there would force-reinstall over a healthy global 5.x.
-	it("skips the classic TypeScript repair for a bare PATH compiler", async () => {
+	// A bare `tsc` that resolves to no file has no readable version and no
+	// adjacent package layout. Repairing there would force-reinstall over a
+	// healthy global 5.x. PATH is pinned to an empty directory: since #4414 a
+	// bare name that DOES resolve is read like any absolute hit (covered in
+	// tsserver-project-trust.test.ts), so the host's PATH must not decide this.
+	it("skips the classic TypeScript repair for an unresolvable bare PATH compiler", async () => {
 		const { TypeScriptServer, _resetClassicTsRepairForTests } =
 			await import("../../../clients/lsp/server.js");
 		_resetClassicTsRepairForTests();
 		const tree = createManagedTypeScriptTree("repair-path-hit");
+		process.env.PATH = path.join(tree.tmp, "empty-bin");
 		ensureTool.mockImplementation(async (toolId: string) => {
 			if (toolId === "typescript-language-server") return tree.lspPath;
 			if (toolId === "typescript") return "tsc";

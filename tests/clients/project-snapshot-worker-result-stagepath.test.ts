@@ -24,7 +24,6 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { Worker } from "node:worker_threads";
 import { gunzipSync } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -45,6 +44,7 @@ import {
 } from "../../clients/project-snapshot.js";
 import type { ProjectSnapshot } from "../../clients/project-snapshot.js";
 import { waitFor } from "./interleaving-kit.js";
+import { observeWorker } from "./worker-message-kit.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
 const CORPUS = path.join(
@@ -73,65 +73,6 @@ async function withProjectDataDirAsync(
 		else process.env.PILENS_DATA_DIR = previousDataDir;
 		env.cleanup();
 	}
-}
-
-interface WorkerResultLike {
-	id: number;
-	stagePath?: string;
-	error?: string;
-	[key: string]: unknown;
-}
-
-/**
- * Wrap the host's `message` listeners (recording what they saw and threw) and
- * `postMessage` (recording the stage path the host sent, optionally dropping
- * `stagePath` from the request so the real worker fails on it).
- */
-function observeWorker(options: {
-	stripResultStagePath?: boolean;
-	dropRequestStagePath?: boolean;
-}): {
-	seen: WorkerResultLike[];
-	thrown: unknown[];
-	sentStagePaths: string[];
-} {
-	const seen: WorkerResultLike[] = [];
-	const thrown: unknown[] = [];
-	const sentStagePaths: string[] = [];
-	const realOn = Worker.prototype.on;
-	vi.spyOn(Worker.prototype, "on").mockImplementation(function (
-		this: Worker,
-		event: string | symbol,
-		listener: (...args: unknown[]) => void,
-	) {
-		if (event !== "message") return realOn.call(this, event, listener);
-		return realOn.call(this, event, (message: WorkerResultLike) => {
-			seen.push(message);
-			const delivered = options.stripResultStagePath
-				? { ...message, stagePath: undefined }
-				: message;
-			try {
-				listener(delivered);
-			} catch (err) {
-				thrown.push(err);
-			}
-		});
-	} as typeof Worker.prototype.on);
-	const realPost = Worker.prototype.postMessage;
-	vi.spyOn(Worker.prototype, "postMessage").mockImplementation(function (
-		this: Worker,
-		message: { stagePath?: string },
-		transferList?: ArrayBuffer[],
-	) {
-		if (message.stagePath !== undefined) sentStagePaths.push(message.stagePath);
-		const { stagePath: _dropped, ...withoutStagePath } = message;
-		realPost.call(
-			this,
-			options.dropRequestStagePath ? withoutStagePath : message,
-			transferList,
-		);
-	} as typeof Worker.prototype.postMessage);
-	return { seen, thrown, sentStagePaths };
 }
 
 async function settle(cwd: string): Promise<void> {

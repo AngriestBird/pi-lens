@@ -403,7 +403,9 @@ file-scoped worklist and receives no project-wide scanner output.
     throw there bypasses the caller's `try/catch` and kills the pi host (#3375,
     #3383, #3389). `data` handlers are enforced by
     `tests/clients/data-handler-bounds-sweep.test.ts` and socket `error`
-    listeners by `tests/clients/socket-error-listener-sweep.test.ts`; screen
+    listeners by `tests/clients/socket-error-listener-sweep.test.ts`, and
+    worker or IPC `message` listeners (typed `unknown`, one non-rethrowing
+    try) by `tests/clients/worker-message-boundary-ratchet.test.ts`; screen
     `close` and timer callbacks by hand.
 
 60. **Wasm failure outside the #3605 containment:** every failure thrown out

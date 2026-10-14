@@ -30,6 +30,18 @@ export declare function closeKeywordErrors(result: {
 	negatedLines: string[];
 }): string[];
 export declare function closeKeywordPlacementMessage(missing: number[]): string;
+export declare function lintCommitCloseKeywords(
+	commits?: Array<{ sha: string; message: string }>,
+	title?: string,
+	body?: string,
+): {
+	valid: boolean;
+	offenses: Array<{ sha: string; number: number; line: string }>;
+};
+export declare function commitCloseKeywordErrors(result: {
+	valid: boolean;
+	offenses: Array<{ sha: string; number: number; line: string }>;
+}): string[];
 export declare function lintPullRequest(
 	fetchImpl?: typeof fetch,
 	event?: {

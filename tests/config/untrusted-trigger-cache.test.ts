@@ -45,7 +45,8 @@ function parse(source: string): Document {
 
 // `actions/setup-*` and the third-party `owner/setup-*` family restore and save
 // a cache when `cache:` is set. Four cache without it, each by its own default:
-// setup-node 6.x auto-caches npm when package.json names it in `packageManager`
+// setup-node 6.x and 7.x (v7.1.0 keeps `package-manager-cache` default true,
+// #4418) auto-cache npm when package.json names it in `packageManager`
 // (opt out with `package-manager-cache: false`), setup-go caches unless
 // `cache: false`, setup-uv's `enable-cache` defaults to auto (on for
 // GitHub-hosted runners), and setup-ruby caches with `bundler-cache`.

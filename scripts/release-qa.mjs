@@ -79,6 +79,7 @@ import { fileURLToPath } from "node:url";
 import { gitExecFileSync } from "./lib/git-fixture-env.mjs";
 import { McpStdioClient } from "./lib/mcp-stdio-client.mjs";
 import { parseTable } from "./lib/md-matrix.mjs";
+import { startRpcSession } from "./rpc-load-check.mjs";
 
 // ===========================================================================
 // Pure core — parsing, outcome rules, arithmetic, rendering.
@@ -2025,28 +2026,23 @@ function setUpFixture(projectDir) {
  */
 function captureGetCommands({ piBin, cwd, env, timeoutMs = RPC_TIMEOUT_MS }) {
 	return new Promise((resolve) => {
-		let child;
+		let pi;
 		try {
-			child = spawn(piBin, ["--mode", "rpc", "--no-session"], {
+			pi = startRpcSession(piBin, {
+				args: ["--mode", "rpc", "--no-session"],
 				cwd,
-				stdio: ["pipe", "pipe", "pipe"],
 				env,
 			});
 		} catch (err) {
 			resolve({ ok: false, reason: `spawn failed: ${err?.message || err}` });
 			return;
 		}
-		const extensionErrors = [];
-		const stderr = [];
-		let buf = "";
 		let settled = false;
 		const finish = (value) => {
 			if (settled) return;
 			settled = true;
 			clearTimeout(timer);
-			try {
-				child.kill("SIGKILL");
-			} catch {}
+			pi.kill();
 			resolve(value);
 		};
 		const timer = setTimeout(
@@ -2054,59 +2050,34 @@ function captureGetCommands({ piBin, cwd, env, timeoutMs = RPC_TIMEOUT_MS }) {
 				finish({
 					ok: false,
 					reason: `no get_commands response within ${timeoutMs}ms`,
-					extensionErrors,
-					stderr: stderr.join(""),
+					extensionErrors: pi.extensionErrors,
+					stderr: pi.stderrTail.join(""),
 				}),
 			timeoutMs,
 		);
-		child.stderr.on("data", (chunk) => stderr.push(chunk.toString()));
-		child.stdout.on("data", (chunk) => {
-			buf += chunk.toString();
-			let i = buf.indexOf("\n");
-			while (i >= 0) {
-				const line = buf.slice(0, i).replace(/\r$/, "");
-				buf = buf.slice(i + 1);
-				i = buf.indexOf("\n");
-				if (!line.trim()) continue;
-				let message;
-				try {
-					message = JSON.parse(line);
-				} catch {
-					continue;
-				}
-				if (
-					(message.type === "event" && message.event === "extension_error") ||
-					message.type === "extension_error"
-				) {
-					extensionErrors.push(message);
-				}
-				if (message.type === "response" && message.command === "get_commands") {
-					finish({
-						ok: true,
-						commands: message.data?.commands ?? [],
-						extensionErrors,
-						raw: message,
-					});
-				}
+		pi.onMessage((message) => {
+			if (message.type === "response" && message.command === "get_commands") {
+				finish({
+					ok: true,
+					commands: message.data?.commands ?? [],
+					extensionErrors: pi.extensionErrors,
+					raw: message,
+				});
 			}
 		});
-		child.on("error", (err) =>
+		pi.child.on("error", (err) =>
 			finish({ ok: false, reason: `pi error: ${err?.message || err}` }),
 		);
-		child.on("exit", (code) =>
+		pi.onExit((code) =>
 			finish({
 				ok: false,
 				reason: `pi exited early (code ${code})`,
-				extensionErrors,
-				stderr: stderr.join(""),
+				extensionErrors: pi.extensionErrors,
+				stderr: pi.stderrTail.join(""),
 			}),
 		);
 		// Extensions register asynchronously; ask once they have had a moment.
-		setTimeout(() => {
-			try {
-				child.stdin.write(`${JSON.stringify({ type: "get_commands" })}\n`);
-			} catch {}
-		}, 3000);
+		setTimeout(() => pi.send({ type: "get_commands" }), 3000);
 	});
 }
 
