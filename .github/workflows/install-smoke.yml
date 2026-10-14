@@ -154,8 +154,7 @@ jobs:
   # PR_SMOKE_PATHS and on every other event; pi-load and lsp-handshake read it.
   # Fail-open: the script exits 0 on an unreadable file list, and a failed job
   # (continue-on-error) leaves the output empty, which pi-load reads as "not
-  # false", so the full matrix runs. "(advisory)" is load-bearing (#3087): the
-  # job is continue-on-error, so its check always concludes success.
+  # false", so the full matrix runs. "(advisory)" is load-bearing (#3087).
   scope:
     name: Deep smoke scope (advisory)
     runs-on: ubuntu-latest
@@ -572,11 +571,13 @@ jobs:
   # launch or the installer shows on the PR and not only in the nightly. Same
   # command and fixtures as tool-smoke.yml's "LSP handshake layer" step; the
   # gating diagnostics gate and the other layers stay nightly-only. ADVISORY:
-  # continue-on-error, so the check always concludes success and the failing
-  # rows are the signal, in the step summary and as warning annotations
-  # ("(advisory)" is load-bearing, #3087). A PR runner provisions only node and
-  # python, so a server whose toolchain is absent reports a skipped row, as it
-  # does on a dev box; tool-smoke.yml provisions the full set.
+  # continue-on-error keeps the workflow run green, and its check row can still
+  # read failure (run 38641583432), so the "(advisory)" name is what tells
+  # ci-verdict not to gate on it (#3087). The failing rows are the signal, in
+  # the step summary and as warning annotations. A PR runner provisions node, python
+  # and the Elixir toolchain, so a server whose other toolchain is absent
+  # reports a skipped row, as it does on a dev box; tool-smoke.yml provisions
+  # the full set.
   lsp-handshake:
     name: LSP handshake (advisory)
     needs: scope
@@ -603,6 +604,15 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
+
+      # The two Elixir servers compile with `mix`; without it they report a
+      # setup failure (run 38641583432), which would keep this advisory job red
+      # on every filtered PR. Best-effort like the nightly's toolchains.
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
+        continue-on-error: true
+        with:
+          otp-version: "27"
+          elixir-version: "1.18"
 
       - name: Install dependencies
         run: npm install --no-audit --no-fund
