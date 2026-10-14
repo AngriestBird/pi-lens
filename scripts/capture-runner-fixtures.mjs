@@ -75,12 +75,28 @@ export const CAPTURES = [
 		],
 	},
 	{
+		// The runner prefers clang++, then g++, then c++; any of them emits the
+		// `file:line:col: error:` shape, so a host with g++ captures it.
+		runner: "cpp-check",
+		tool: "g++",
+		workspace: smoke("cpp"),
+		file: "main.cpp",
+		argv: ["-fsyntax-only", "main.cpp"],
+	},
+	{
 		runner: "cue-vet",
 		tool: "cue",
 		versionArgs: "version",
 		workspace: smoke("cue-vet"),
 		file: "bad.cue",
 		argv: ["vet", "-c=false", "."],
+	},
+	{
+		runner: "dotnet-build",
+		tool: "dotnet",
+		workspace: smoke("csharp"),
+		file: "Program.cs",
+		argv: ["build", "toolsmoke.csproj", "--nologo", "--verbosity", "minimal"],
 	},
 	{
 		runner: "dart-analyze",
@@ -106,6 +122,13 @@ export const CAPTURES = [
 		argv: ["--reporter=json", "Bad.kt"],
 	},
 	{
+		runner: "rust-clippy",
+		tool: "cargo",
+		workspace: smoke("rust"),
+		file: "src/main.rs",
+		argv: ["clippy", "--message-format=json", "-q"],
+	},
+	{
 		// Needs Erlang on PATH: gleam shells out to `escript` even for `check`.
 		runner: "gleam-check",
 		tool: "gleam",
@@ -124,6 +147,21 @@ export const CAPTURES = [
 		workspace: smoke("elixir-mix"),
 		file: "lib/bad.ex",
 		argv: ["compile", "--warnings-as-errors"],
+	},
+	{
+		runner: "fish-indent",
+		tool: "fish_indent",
+		workspace: smoke("fish-indent"),
+		file: "unformatted.fish",
+		argv: ["--check", "unformatted.fish"],
+	},
+	{
+		// The static build: the dynamic `swiftlint` needs libxml2 and SourceKit.
+		runner: "swiftlint",
+		tool: "swiftlint",
+		workspace: smoke("swiftlint"),
+		file: "bad.swift",
+		argv: ["--reporter", "json", "bad.swift"],
 	},
 	{
 		runner: "go-vet",

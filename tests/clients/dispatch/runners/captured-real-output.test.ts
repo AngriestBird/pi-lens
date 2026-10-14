@@ -80,6 +80,19 @@ vi.mock("../../../../clients/go-client.js", async (importOriginal) => {
 	};
 });
 
+// rust-clippy resolves cargo through rustClient and probes `cargo clippy
+// --version` before the real run, for the same reason go-vet uses goClient.
+vi.mock("../../../../clients/rust-client.js", async (importOriginal) => {
+	const original =
+		await importOriginal<typeof import("../../../../clients/rust-client.js")>();
+	return {
+		...original,
+		rustClient: Object.assign(Object.create(original.rustClient), {
+			findCargoPathAsync: async () => "cargo",
+		}),
+	};
+});
+
 vi.mock(
 	"../../../../clients/dispatch/runners/utils/runner-helpers.js",
 	async (importOriginal) => ({
@@ -110,11 +123,14 @@ vi.mock(
  */
 const RUNNER_DESCRIPTORS: Record<string, { module: string; kind: string }> = {
 	actionlint: { module: "actionlint", kind: "yaml" },
+	"cpp-check": { module: "cpp-check", kind: "cxx" },
 	"cue-vet": { module: "cue-vet", kind: "cue" },
 	"dart-analyze": { module: "dart-analyze", kind: "dart" },
+	"dotnet-build": { module: "dotnet-build", kind: "csharp" },
 	"elixir-check": { module: "elixir-check", kind: "elixir" },
 	eslint: { module: "eslint", kind: "jsts" },
 	"biome-check-json": { module: "biome-check", kind: "jsts" },
+	"fish-indent": { module: "fish-indent", kind: "fish" },
 	"gleam-check": { module: "gleam-check", kind: "gleam" },
 	"go-vet": { module: "go-vet", kind: "go" },
 	hadolint: { module: "hadolint", kind: "docker" },
@@ -128,11 +144,13 @@ const RUNNER_DESCRIPTORS: Record<string, { module: string; kind: string }> = {
 	phpstan: { module: "phpstan", kind: "php" },
 	pyright: { module: "pyright", kind: "python" },
 	"ruff-lint": { module: "ruff", kind: "python" },
+	"rust-clippy": { module: "rust-clippy", kind: "rust" },
 	shellcheck: { module: "shellcheck", kind: "shell" },
 	shfmt: { module: "shfmt", kind: "shell" },
 	spellcheck: { module: "spellcheck", kind: "markdown" },
 	sqlfluff: { module: "sqlfluff", kind: "sql" },
 	stylelint: { module: "stylelint", kind: "css" },
+	swiftlint: { module: "swiftlint", kind: "swift" },
 	taplo: { module: "taplo", kind: "toml" },
 	terragrunt: { module: "terragrunt", kind: "terragrunt" },
 	tflint: { module: "tflint", kind: "terraform" },
@@ -239,7 +257,24 @@ describe("captured real-binary output", () => {
 						`${fixture.relPath}: ${fixture.provenance.workspace}/${fixture.file} is missing`,
 					).toBe(true);
 
-					safeSpawnAsync.mockResolvedValue(materialize(fixture, env.tmpDir));
+					// Everything except an availability probe answers with the captured
+					// bytes. The probe (`cargo clippy --version`) is a different
+					// invocation whose own output nobody captured here, so it reports
+					// "installed" and the run under test reaches its parse step.
+					const captured = materialize(fixture, env.tmpDir);
+					safeSpawnAsync.mockImplementation(
+						async (_cmd: string, args: string[]) =>
+							args.length === 2 &&
+							args[0] === "clippy" &&
+							args[1] === "--version"
+								? {
+										error: null,
+										status: 0,
+										stdout: "clippy 0.1.99",
+										stderr: "",
+									}
+								: captured,
+					);
 
 					const runner = (
 						await import(
