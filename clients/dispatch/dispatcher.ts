@@ -803,11 +803,12 @@ function buildCoverageNotice(
 		? `no language server answered (${PRIMARY_UNAVAILABLE_CAUSE[cause]})`
 		: "not fully checked (a language tool is missing, timed out, or failed to run)";
 
-	if (cause === "disabled") {
+	if (cause === "disabled" || cause === "disabledFallback") {
 		// #4403: the operator turned the primary off on purpose. That is not a
 		// tool that is missing or failed, and it holds for every file the
 		// server serves, so it gets one note per server per session, then the
-		// status line alone.
+		// status line alone. Round 4 (N1): the same when the primary's
+		// `fallbackFor` alternate stands in and does not answer either.
 		const disabledIds = [
 			...new Set(relevant.flatMap((r) => r.disabledPrimaryServerIds ?? [])),
 		].sort((a, b) => Number(a > b) - Number(a < b));
@@ -820,7 +821,10 @@ function buildCoverageNotice(
 		return {
 			notice: {
 				id: `coverage-disabled:${ctx.kind}:${disabledIds.join(",")}`,
-				message: `Pi-lens ${ctx.kind} analysis unconfirmed — Primary LSP (${disabledIds.join(", ")}) is disabled in config by lsp.disabledServers, so no language server checks these files this session (not a clean result).`,
+				message:
+					cause === "disabled"
+						? `Pi-lens ${ctx.kind} analysis unconfirmed — Primary LSP (${disabledIds.join(", ")}) is disabled in config by lsp.disabledServers, so no language server checks these files this session (not a clean result).`
+						: `Pi-lens ${ctx.kind} analysis unconfirmed — Primary LSP (${disabledIds.join(", ")}) is disabled in config by lsp.disabledServers and its fallback did not answer, so no language server checked these files (not a clean result).`,
 				filePath: ctx.filePath,
 				severity: "warning",
 				semantic: "warning",

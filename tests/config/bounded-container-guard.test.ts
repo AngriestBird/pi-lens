@@ -27,6 +27,11 @@ const BOUNDED_HELPERS = new Set([
 ]);
 // Content-keyed, so an exemption must be re-confirmed after an edit.
 const FINITE_REASONS: Readonly<Record<string, string>> = {
+	// #4403 round 4 (N2): the cascade's once-per-session latch of primaries
+	// it named as not answering. Keyed by LSP server id, written only for a
+	// primary the touch named, and cleared at session_start.
+	"clients/dispatch/integration.ts#resetDispatchBaselines:1792f015":
+		"keys are LSP server ids from the server catalog (finite, ~60), one per primary named this session; cleared by resetDispatchBaselines",
 	// #2372: one adapter per live LSPService identity; WeakMap keys are the
 	// bounded process-local service population and entries die with the service.
 	"clients/lsp/capabilities.ts#1e3511a9":

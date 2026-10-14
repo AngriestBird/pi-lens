@@ -56,7 +56,7 @@ import {
 	fileMatchReason,
 	registeredServers,
 } from "./file-server-match.js";
-import { isSameOrWithin, LSP_SERVERS } from "./server.js";
+import { isSameOrWithin, LSP_SERVERS, type LSPServerInfo } from "./server.js";
 import { isAuxiliary } from "./server-traits.js";
 import path from "node:path";
 
@@ -181,10 +181,16 @@ export function sessionRootConfigForFile(
 }
 
 /**
- * #4403: the primaries the file gates select for this file that the operator
- * turned off in `lsp.disabledServers`, read from the file's session-root
- * config. No language server answers for such a file, so a read that
- * acquired no primary names these too.
+ * #4403: which primaries the operator's `lsp.disabledServers` keeps from
+ * answering for this file, read from the file's session-root config.
+ *
+ * - `disabledServerIds`: the primaries the file gates select that are off.
+ *   An alternate (`fallbackFor`) counts only when its owner is off too: with
+ *   the owner on, the alternate is never consulted, so turning it off
+ *   changes nothing for the file.
+ * - `fallbackServerIds`: the enabled alternates standing in for a disabled
+ *   owner. They answer only because the owner is off, so when they cannot,
+ *   the denial is still the cause (round 4, N1).
  *
  * Here, not in `config.ts`: the LSP service and the routes import it, and
  * `config.js`'s import surface is mirrored by whole-module `vi.mock`
@@ -196,18 +202,35 @@ export function sessionRootConfigForFile(
  * tried wherever the file gates select it, and named when it does not answer.
  * A disabled one is named in the same places.
  */
-export function disabledPrimaryServerIds(filePath: string): string[] {
+export function disabledPrimaries(filePath: string): {
+	disabledServerIds: string[];
+	fallbackServerIds: string[];
+} {
 	const config = sessionRootConfigForFile(filePath);
-	if (!config || config.disabledServerIds.size === 0) return [];
+	if (!config || config.disabledServerIds.size === 0)
+		return { disabledServerIds: [], fallbackServerIds: [] };
 	const { ext, base } = fileMatchKeys(filePath);
-	return registeredServers(config, LSP_SERVERS)
-		.filter(
-			(server) =>
-				config.disabledServerIds.has(server.id) &&
-				!isAuxiliary(server) &&
-				fileMatchReason(server, filePath, ext, base) === "selected",
-		)
-		.map((server) => server.id);
+	const off = config.disabledServerIds;
+	const primaries = registeredServers(config, LSP_SERVERS).filter(
+		(server) =>
+			!isAuxiliary(server) &&
+			fileMatchReason(server, filePath, ext, base) === "selected",
+	);
+	const ownerOff = (server: LSPServerInfo) =>
+		server.fallbackFor === undefined || off.has(server.fallbackFor);
+	return {
+		disabledServerIds: primaries
+			.filter((server) => off.has(server.id) && ownerOff(server))
+			.map((server) => server.id),
+		fallbackServerIds: primaries
+			.filter(
+				(server) =>
+					!off.has(server.id) &&
+					server.fallbackFor !== undefined &&
+					off.has(server.fallbackFor),
+			)
+			.map((server) => server.id),
+	};
 }
 
 /** Return whether this exact root is still served after cap eviction. */

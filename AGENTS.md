@@ -797,9 +797,11 @@ file-scoped worklist and receives no project-wide scanner output.
 - A file no primary answered for is unconfirmed, never clean, whether the
   primary could not start, was still starting, or is in `lsp.disabledServers`.
   The one rule is `unansweredPrimaries` (clients/lsp/index.ts), which names
-  the disabled ones through `disabledPrimaryServerIds`
+  the disabled ones through `disabledPrimaries`
   (clients/lsp/session-roots.ts, not `config.js`, whose import surface the
-  test mocks mirror).
+  test mocks mirror). A `fallbackFor` alternate standing in for a disabled
+  owner keeps the denial as the cause when it cannot answer either; the
+  cascade names such a server once per session, not per neighbour.
   Every route words the cause through `primaryUnavailableCause` and
   `PRIMARY_UNAVAILABLE_CAUSE` (clients/lsp/diagnostic-binding.ts), never its
   own sentence. A later write of such a file prints a one-line unconfirmed

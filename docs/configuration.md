@@ -227,8 +227,10 @@ diagnostics route then reports a file with no findings as **unconfirmed**, not
 clean, with a "Primary LSP (…): not available" note that says it is disabled in
 config. On write-time checks the note appears once per server per session, and
 a later write of such a file shows a one-line "unconfirmed" status instead of
-"clean". Auxiliary scanners such as `typos` still run and report their own
-findings.
+"clean". When the denied server has a fallback (`deno` for `typescript`) that
+cannot start either, the note says so. Cross-file (cascade) checks name the
+server once per session. Auxiliary scanners such as `typos` still run and
+report their own findings.
 
 Two rules make the rest of the table unambiguous:
 

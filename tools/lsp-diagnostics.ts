@@ -110,6 +110,7 @@ type LspHealthLike = {
 	mergedCount?: number;
 	unavailablePrimaryServerIds?: readonly string[];
 	disabledPrimaryServerIds?: readonly string[];
+	primaryUnavailableCause?: PrimaryUnavailableCause;
 };
 
 /** #4403: how many unconfirmed files no primary answered for, and why. */
@@ -933,17 +934,23 @@ export function describePrimaryUnavailable(
 ): { text: string; cause: PrimaryUnavailableCause } | undefined {
 	let serverIds: readonly string[];
 	let disabledServerIds: readonly string[];
+	let carriedCause: PrimaryUnavailableCause | undefined;
 	if (touched?.inconclusiveReason === "primary-unavailable") {
 		// The verdict always names the primary (clients/lsp/index.ts).
 		serverIds = touched.inconclusiveServerIds ?? [];
 		disabledServerIds = touched.disabledPrimaryServerIds ?? [];
+		carriedCause = touched.primaryUnavailableCause;
 	} else if (fallbackHealth?.unavailablePrimaryServerIds?.length) {
 		serverIds = fallbackHealth.unavailablePrimaryServerIds;
 		disabledServerIds = fallbackHealth.disabledPrimaryServerIds ?? [];
+		carriedCause = fallbackHealth.primaryUnavailableCause;
 	} else {
 		return undefined;
 	}
-	const cause = primaryUnavailableCause(serverIds, disabledServerIds);
+	// The service computes the cause once (`unansweredPrimaries`); a record
+	// without one (an older shape or a test double) is classified from its ids.
+	const cause =
+		carriedCause ?? primaryUnavailableCause(serverIds, disabledServerIds);
 	return {
 		text:
 			`Primary LSP (${serverIds.join(", ")}): not available — no language ` +

@@ -122,6 +122,7 @@ const NO_VERDICT_SURFACE: Partial<Record<RouteId, string>> = {
 type ColumnId =
 	| "present"
 	| "disabled"
+	| "disabled, fallback"
 	| "missing"
 	| "present, no aux"
 	| "disabled, no aux"
@@ -135,8 +136,13 @@ interface Column {
 	piFlags: Record<string, boolean>;
 	/** `~/.pi-lens/config.json`, through PI_LENS_CONFIG_PATH. */
 	globalConfig: Record<string, unknown>;
-	/** The JSON language server: a working fake, off in lsp.json, or a missing binary. */
-	primary: "fake" | "disabled" | "missing";
+	/**
+	 * The language server: a working fake, off in lsp.json, or a missing
+	 * binary. `disabledFallback` is a TypeScript file whose primary is off in
+	 * lsp.json while its `fallbackFor` alternate (deno) is a missing binary
+	 * (#4403 round 4, N1).
+	 */
+	primary: "fake" | "disabled" | "disabledFallback" | "missing";
 	/** typos and Opengrep running; false turns both off in `lsp.disabledServers`. */
 	aux: boolean;
 	opengrepOff: boolean;
@@ -165,12 +171,14 @@ const column = (
 
 /**
  * The state table's six columns (the primary present, disabled in config, or
- * missing, each with and without an auxiliary), then the two switches that
- * turn Opengrep off, which must change nothing but the servers started.
+ * missing, each with and without an auxiliary), the disabled primary whose
+ * fallback cannot start, then the two switches that turn Opengrep off, which
+ * must change nothing but the servers started.
  */
 const COLUMNS: readonly Column[] = [
 	column("present", "fake", true),
 	column("disabled", "disabled", true),
+	column("disabled, fallback", "disabledFallback", true),
 	column("missing", "missing", true),
 	column("present, no aux", "fake", false),
 	column("disabled, no aux", "disabled", false),
@@ -201,7 +209,37 @@ const NOT_APPLICABLE: ReadonlyArray<{
 
 type Verdict = "clean" | "unconfirmed" | "findings" | "unsupported";
 
-/** The servers a column's configuration selects for a JSON file. */
+/**
+ * The file language a column checks. The fallback column is TypeScript: JSON
+ * has no `fallbackFor` alternate. The rule it pins is read from that link, so
+ * python/python-jedi, csharp/omnisharp, docker/docker-official and
+ * elixir/expert take the same path.
+ */
+const LANGUAGE = {
+	json: {
+		ext: ".json",
+		label: "JSON",
+		kind: "json",
+		/** The primaries a file line names when none answered. */
+		unanswered: "json",
+		content: (name: string, n: number) => `{"${name}": ${n}}\n`,
+	},
+	ts: {
+		ext: ".ts",
+		label: "JavaScript/TypeScript",
+		kind: "jsts",
+		unanswered: "deno, typescript",
+		content: (name: string, n: number) =>
+			`export const ${name.replace(/\W/g, "_")} = ${n};\n`,
+	},
+} as const;
+type Language = (typeof LANGUAGE)[keyof typeof LANGUAGE];
+
+function languageOf(column: Column): Language {
+	return column.primary === "disabledFallback" ? LANGUAGE.ts : LANGUAGE.json;
+}
+
+/** The servers a column's configuration selects that can start. */
 function selectedServers(column: Column): string[] {
 	return [
 		...(column.primary === "fake" ? ["json"] : []),
@@ -220,11 +258,14 @@ function expectedStarted(route: RouteId, column: Column): string[] {
 			// clientless fallback that would ask the others never runs.
 			return column.primary === "fake"
 				? ["json"]
-				: column.primary === "disabled"
-					? []
-					: selected;
+				: column.primary === "missing"
+					? selected
+					: [];
 		case "sweep":
-			return column.primary === "missing"
+			// A fallback that cannot start fails the sweep's warm-up like a
+			// missing primary, so its group is skipped before any touch.
+			return column.primary === "missing" ||
+				column.primary === "disabledFallback"
 				? []
 				: selected.filter((id) => id !== "opengrep");
 	}
@@ -250,6 +291,8 @@ function expectedVerdict(column: Column): Verdict {
 
 const CAUSE = {
 	disabled: "it is disabled in config by lsp.disabledServers",
+	disabledFallback:
+		"it is disabled in config by lsp.disabledServers, and its fallback could not be started, or was still starting",
 	missing: "it could not be started, or was still starting",
 } as const;
 
@@ -257,11 +300,14 @@ const NOTE_GENERIC =
 	"🟡 1 warning(s):\nPi-lens json analysis unavailable — a language tool is missing, timed out, or failed to run, or the LSP server isn't ready yet, so this file was not fully checked (not a clean result).";
 const NOTE_DISABLED =
 	"🟡 1 warning(s):\nPi-lens json analysis unconfirmed — Primary LSP (json) is disabled in config by lsp.disabledServers, so no language server checks these files this session (not a clean result).";
+const NOTE_DISABLED_FALLBACK =
+	"🟡 1 warning(s):\nPi-lens jsts analysis unconfirmed — Primary LSP (typescript) is disabled in config by lsp.disabledServers and its fallback did not answer, so no language server checked these files (not a clean result).";
 
-function fileLine(primary: Column["primary"]): string {
+function fileLine(column: Column): string {
+	const { primary } = column;
 	return primary === "fake"
 		? "Primary LSP (json): confirmed clean."
-		: `Primary LSP (json): not available — no language server answered for this file (${CAUSE[primary]}). NOT the same as 0 diagnostics; auxiliary scanners do not check the language itself.`;
+		: `Primary LSP (${languageOf(column).unanswered}): not available — no language server answered for this file (${CAUSE[primary]}). NOT the same as 0 diagnostics; auxiliary scanners do not check the language itself.`;
 }
 
 /**
@@ -278,11 +324,12 @@ function fileSecondLine(column: Column, file: string, route: RouteId): string {
 }
 
 function tallyLine(primary: Column["primary"], count: number): string {
-	return `${count} with no language server answer (${CAUSE[primary as "disabled" | "missing"]}). NOT the same as 0 diagnostics.`;
+	return `${count} with no language server answer (${CAUSE[primary as Exclude<Column["primary"], "fake">]}). NOT the same as 0 diagnostics.`;
 }
 
 function expectedLines(route: RouteId, column: Column): string[] {
 	const { primary } = column;
+	const { ext, label } = languageOf(column);
 	const clean = primary === "fake";
 	switch (route) {
 		case "write-time dispatch": {
@@ -292,19 +339,21 @@ function expectedLines(route: RouteId, column: Column): string[] {
 					"✓ JSON clean · Nms",
 					"✓ JSON clean · Nms",
 				];
-			const status = `⚠ JSON unconfirmed — no language server answered (${CAUSE[primary]}) · Nms`;
+			const status = `⚠ ${label} unconfirmed — no language server answered (${CAUSE[primary]}) · Nms`;
 			// First write, a later write of it, then a second file's first write:
 			// one note per disabled server per session, one per file otherwise.
 			return primary === "disabled"
 				? [NOTE_DISABLED, status, status]
-				: [NOTE_GENERIC, status, NOTE_GENERIC];
+				: primary === "disabledFallback"
+					? [NOTE_DISABLED_FALLBACK, status, status]
+					: [NOTE_GENERIC, status, NOTE_GENERIC];
 		}
 		case "lsp_diagnostics file":
-			return [fileLine(primary), fileSecondLine(column, "file.json", route)];
+			return [fileLine(column), fileSecondLine(column, `file${ext}`, route)];
 		case "lsp_diagnostics primary-only":
-			return [fileLine(primary), fileSecondLine(column, "primary.json", route)];
+			return [fileLine(column), fileSecondLine(column, `primary${ext}`, route)];
 		case "MCP pilens_diagnostics":
-			return [fileLine(primary), fileSecondLine(column, "mcp.json", route)];
+			return [fileLine(column), fileSecondLine(column, `mcp${ext}`, route)];
 		case "lsp_diagnostics batch": {
 			if (clean)
 				return [
@@ -331,12 +380,13 @@ function expectedLines(route: RouteId, column: Column): string[] {
 		case "lsp_navigation workspaceDiagnostics":
 			return clean
 				? ["ok=true status=empty"]
-				: ["ok=true status=empty unconfirmed", fileLine(primary)];
+				: ["ok=true status=empty unconfirmed", fileLine(column)];
 		case "lens_diagnostics mode=full":
+			// #4403 N3: no retry hint where only a denial kept the server out.
 			return clean
 				? []
 				: [
-						`⚠ LSP sweep: 0 file(s) confirmed via LSP, 1 unconfirmed (no primary language server answered (${CAUSE[primary]})) — NOT the same as 0 diagnostics for: <ws>/sweep.json. These files' LSP contribution is excluded from this result; re-run mode=full to retry them (they may still show findings above from cached/project-runner state).`,
+						`⚠ LSP sweep: 0 file(s) confirmed via LSP, 1 unconfirmed (no primary language server answered (${CAUSE[primary]})) — NOT the same as 0 diagnostics for: <ws>/sweep${ext}. These files' LSP contribution is excluded from this result${primary === "disabled" ? "" : "; re-run mode=full to retry them"} (they may still show findings above from cached/project-runner state).`,
 					];
 		case "turn-end actionable warnings":
 			return [];
@@ -402,7 +452,7 @@ function writeOutcome(text: string, workspace: string): string {
 function writeTimeVerdict(outcomes: readonly string[]): string {
 	const verdicts = new Set(
 		outcomes.map((outcome) =>
-			/^✓ JSON clean · Nms$/.test(outcome)
+			/^✓ \S+ clean · Nms$/.test(outcome)
 				? "clean"
 				: /not a clean result|unconfirmed/.test(outcome)
 					? "unconfirmed"
@@ -519,7 +569,8 @@ interface Fixture {
 	workspace: string;
 	marker: string;
 	configPath: string;
-	file: (relative: string) => string;
+	/** Writes `<relative><ext>` in the column's language and returns its path. */
+	file: (relative: string, n?: number) => string;
 }
 
 function makeFixture(column: Column): Fixture {
@@ -548,6 +599,7 @@ function makeFixture(column: Column): Fixture {
 	// typos and Opengrep root at the nearest `.git` (clients/lsp/server.ts).
 	fs.mkdirSync(path.join(workspace, ".git"));
 	fs.mkdirSync(path.join(workspace, ".pi-lens"), { recursive: true });
+	const language = languageOf(column);
 	fs.writeFileSync(
 		path.join(workspace, ".pi-lens", "lsp.json"),
 		JSON.stringify({
@@ -561,6 +613,10 @@ function makeFixture(column: Column): Fixture {
 								]
 							: shim("json"),
 				},
+				// The fallback column's alternate; never started by another one.
+				deno: {
+					command: [path.join(workspace, "missing", "deno"), "lsp"],
+				},
 				typos: { command: shim("typos") },
 				opengrep: { command: shim("opengrep") },
 			},
@@ -571,6 +627,7 @@ function makeFixture(column: Column): Fixture {
 				"zizmor",
 				"rust",
 				...(column.primary === "disabled" ? ["json"] : []),
+				...(column.primary === "disabledFallback" ? ["typescript"] : []),
 				...(column.aux ? [] : ["typos", "opengrep"]),
 			],
 			// A configured warm file that does not exist: session_start's
@@ -586,10 +643,10 @@ function makeFixture(column: Column): Fixture {
 		workspace,
 		marker,
 		configPath,
-		file: (relative) => {
-			const target = path.join(workspace, relative);
+		file: (relative, n = 1) => {
+			const target = path.join(workspace, `${relative}${language.ext}`);
 			fs.mkdirSync(path.dirname(target), { recursive: true });
-			fs.writeFileSync(target, `{"${path.basename(relative, ".json")}": 1}\n`);
+			fs.writeFileSync(target, language.content(path.basename(relative), n));
 			return target;
 		},
 	};
@@ -671,8 +728,8 @@ async function runColumn(column: Column): Promise<Record<RouteId, Cell>> {
 
 		await cell("write-time dispatch", async () => {
 			clearLatencyReports();
-			const write = async (target: string, n: number): Promise<string> => {
-				fs.writeFileSync(target, `{"write": ${n}}\n`);
+			const write = async (relative: string, n: number): Promise<string> => {
+				const target = fx.file(relative, n);
 				const result = (await pi.emit(
 					"tool_result",
 					{
@@ -687,11 +744,10 @@ async function runColumn(column: Column): Promise<Record<RouteId, Cell>> {
 					fx.workspace,
 				);
 			};
-			const first = fx.file("write.json");
 			const outcomes = [
-				await write(first, 1),
-				await write(first, 2),
-				await write(fx.file("write-2.json"), 3),
+				await write("write", 1),
+				await write("write", 2),
+				await write("write-2", 3),
 			];
 			// The runner row agrees with what the agent was shown.
 			const rows = getLatencyReports().map(
@@ -718,11 +774,11 @@ async function runColumn(column: Column): Promise<Record<RouteId, Cell>> {
 			};
 		};
 		await cell("lsp_diagnostics file", () =>
-			fileCell({ path: fx.file("file.json") }),
+			fileCell({ path: fx.file("file") }),
 		);
 		await cell("lsp_diagnostics batch", async () => {
 			const result = await lspCheck({
-				paths: [fx.file("batch-a.json"), fx.file("batch-b.json")],
+				paths: [fx.file("batch-a"), fx.file("batch-b")],
 			});
 			return {
 				verdict: batchVerdict(result.details),
@@ -730,7 +786,7 @@ async function runColumn(column: Column): Promise<Record<RouteId, Cell>> {
 			};
 		});
 		await cell("lsp_diagnostics directory", async () => {
-			fx.file("dir/inner.json");
+			fx.file("dir/inner");
 			const result = await lspCheck({ path: path.join(fx.workspace, "dir") });
 			return {
 				verdict: batchVerdict(result.details),
@@ -738,12 +794,12 @@ async function runColumn(column: Column): Promise<Record<RouteId, Cell>> {
 			};
 		});
 		await cell("lsp_diagnostics primary-only", () =>
-			fileCell({ path: fx.file("primary.json"), serverScope: "primary" }),
+			fileCell({ path: fx.file("primary"), serverScope: "primary" }),
 		);
 		await cell("lsp_navigation workspaceDiagnostics", async () => {
 			const result = await nav.execute(
 				"matrix-4403-nav",
-				{ operation: "workspaceDiagnostics", path: fx.file("nav.json") },
+				{ operation: "workspaceDiagnostics", path: fx.file("nav") },
 				new AbortController().signal,
 				null,
 				ctx,
@@ -754,7 +810,7 @@ async function runColumn(column: Column): Promise<Record<RouteId, Cell>> {
 		await cell("lens_diagnostics mode=full", async () => {
 			const result = await lens.execute(
 				"matrix-4403-full",
-				{ mode: "full", paths: [fx.file("sweep.json")] },
+				{ mode: "full", paths: [fx.file("sweep")] },
 				undefined,
 				null,
 				{ cwd: fx.workspace },
@@ -766,7 +822,7 @@ async function runColumn(column: Column): Promise<Record<RouteId, Cell>> {
 		});
 		// The turn's edit runs its own dispatch first; the cell starts after it,
 		// with a fresh service, so turn_end's cold read is the only reader left.
-		const edited = fx.file("turn.json");
+		const edited = fx.file("turn");
 		await pi.emit(
 			"tool_result",
 			{
@@ -810,7 +866,7 @@ async function runColumn(column: Column): Promise<Record<RouteId, Cell>> {
 /** `pilens_diagnostics source=lsp` through the real MCP server process. */
 async function runMcpCell(fx: Fixture): Promise<Cell> {
 	const from = markerLines(fx.marker).length;
-	const probe = fx.file("mcp.json");
+	const probe = fx.file("mcp");
 	const harness = new McpHarness({
 		cwd: fx.workspace,
 		env: {
@@ -870,6 +926,96 @@ const DIAGNOSTICS_ENTRY_MEMBERS = [
 	"runWorkspaceDiagnostics",
 	"touchFile",
 ] as const;
+
+/**
+ * #4403 round 4 (N5): every other public `LSPService` method, by why it is
+ * not a diagnostics entry. The scan above reads only the entry members, so a
+ * new public method that returns diagnostics would be invisible to it; the
+ * pin below reds on any method not placed here or there.
+ */
+const NAVIGATION =
+	"a navigation or edit request: it returns locations, symbols, text or edits, never diagnostics or a verdict";
+const SYNC =
+	"document sync: it sends text or file events to servers and returns no diagnostics";
+const STATUS =
+	"a status read: it returns readiness, capability or health facts, never diagnostics rows";
+const NON_ENTRY_MEMBERS: Record<string, string> = {
+	constructor: "builds the service",
+	shutdown: "stops every server",
+	checkDestroyed: STATUS,
+	getOpenDocumentPaths: STATUS,
+	getTrackedContent: STATUS,
+	getClientForFile:
+		"returns one primary client; a diagnostics read on it is a member access the scan reads as its own site",
+	getWarmClientForFile:
+		"returns an already-running client without starting one; a diagnostics read on it is its own site",
+	hasServerPublishedForFileRoot: STATUS,
+	observeLateAuxiliaryAnswer:
+		"records how late an auxiliary answered; it returns nothing",
+	notifyExternalFileChange: SYNC,
+	announceCreatedFiles: SYNC,
+	resyncGitChangedFiles: SYNC,
+	sweepDocumentDrift: SYNC,
+	_driftTrackedCountForTests: STATUS,
+	openFile: SYNC,
+	updateFile: SYNC,
+	getDiagnosticsHealth:
+		"returns the health record a diagnostics read left, not rows; the routes that read it are pinned by the matrix",
+	definition: NAVIGATION,
+	typeDefinition: NAVIGATION,
+	declaration: NAVIGATION,
+	references: NAVIGATION,
+	hover: NAVIGATION,
+	signatureHelp: NAVIGATION,
+	documentSymbol: NAVIGATION,
+	workspaceSymbol: NAVIGATION,
+	getAdvertisedCommands: STATUS,
+	executeCommand: NAVIGATION,
+	executeReadOnlyCommandOnLiveClient: NAVIGATION,
+	getOperationSupport: STATUS,
+	getCapabilitySnapshots: STATUS,
+	getWorkspaceDiagnosticsSupport: STATUS,
+	codeAction: NAVIGATION,
+	rename: NAVIGATION,
+	renameFile: NAVIGATION,
+	implementation: NAVIGATION,
+	prepareCallHierarchy: NAVIGATION,
+	incomingCalls: NAVIGATION,
+	outgoingCalls: NAVIGATION,
+	ensureWarmForSweep:
+		"warms the server a `runWorkspaceDiagnostics` group gates on; only that entry member calls it",
+	supportsLSP: STATUS,
+	describeTouchCandidates: STATUS,
+	hasWarmLSP: STATUS,
+	hasLSP: STATUS,
+	isSpawnInFlight: STATUS,
+	getStatus: STATUS,
+	getBrokenStatus: STATUS,
+	getAliveClientCount: STATUS,
+	getAliveServerIds: STATUS,
+};
+
+/**
+ * The public methods of `LSPService`, read from its class body with comments
+ * and strings blanked: a one-tab-indented method head that is not `private`
+ * or `protected`.
+ */
+function lspServicePublicMethods(): string[] {
+	const source = stripSource(
+		fs.readFileSync(path.join(repoRoot, "clients", "lsp", "index.ts"), "utf8"),
+	);
+	const start = source.search(/^export class LSPService\b/m);
+	const end = source.indexOf("\n}", start);
+	return [
+		...source
+			.slice(start, end)
+			.matchAll(
+				/^\t(?:async\s+)?(?:static\s+)?(?:get\s+|set\s+)?([A-Za-z_$][\w$]*)\s*[<(]/gm,
+			),
+	]
+		.map((match) => match[1] as string)
+		.sort();
+}
 
 type SiteEntry = { routes: readonly RouteId[] } | { exempt: string };
 
@@ -1331,22 +1477,12 @@ describe("diagnostics routes are derived from code (#4403)", () => {
 		});
 	});
 
-	it("scans only names that are still methods of the LSP service", () => {
-		// Read from the service's code with comments and strings blanked, so a
-		// name kept alive only in prose does not count.
-		const service = stripSource(
-			fs.readFileSync(
-				path.join(repoRoot, "clients", "lsp", "index.ts"),
-				"utf8",
-			),
+	// Also the rename guard: an entry member that is no longer a method fails
+	// the equality, so the scan cannot keep looking for a name nothing calls.
+	it("places every public LSPService method as a diagnostics entry or not (#4403 N5)", () => {
+		expect(lspServicePublicMethods()).toEqual(
+			[...DIAGNOSTICS_ENTRY_MEMBERS, ...Object.keys(NON_ENTRY_MEMBERS)].sort(),
 		);
-
-		expect(
-			DIAGNOSTICS_ENTRY_MEMBERS.filter(
-				(name) =>
-					!new RegExp(`^\\t(?:async\\s+)?${name}\\s*\\(`, "m").test(service),
-			),
-		).toEqual([]);
 	});
 
 	it("keeps the MCP --no-opengrep cell inapplicable only while the flag has no environment spelling", () => {
@@ -1462,6 +1598,84 @@ describe("the navigation reader (#4403)", () => {
 			"unconfirmed",
 		);
 	});
+});
+
+// #4403 round 4 (N4): hover and documentSymbol gate on `supportsLSP` alone,
+// which a disabled primary fails, so they told the reader to install a server
+// the operator had turned off. They now give the cause the workspaceDiagnostics
+// gate gives.
+describe("navigation operations on a file whose primary is off (#4403 N4)", () => {
+	// The "disabled, no aux" column: JSON's primary is off, and a file no
+	// server serves sits beside it.
+	const navOps = async (): Promise<string[]> => {
+		const column = COLUMNS.find((entry) => entry.id === "disabled, no aux");
+		if (!column) throw new Error("no disabled, no aux column");
+		const fx = makeFixture(column);
+		const savedConfigPath = process.env.PI_LENS_CONFIG_PATH;
+		const savedInstall = process.env.PI_LENS_DISABLE_LSP_INSTALL;
+		process.env.PI_LENS_CONFIG_PATH = fx.configPath;
+		process.env.PI_LENS_DISABLE_LSP_INSTALL = "1";
+		const config = await import("../../clients/lsp/config.js");
+		const { default: extension } = await import("../../index.js");
+		const pi = createPiMock({});
+		const ctx = makeCtx({
+			cwd: fx.workspace,
+			sessionId: "matrix-4403-nav-ops",
+			isProjectTrusted: true,
+		});
+		let started = false;
+		try {
+			await config.initLSPConfig(fx.workspace);
+			extension(pi.asExtensionAPI());
+			resetLSPService();
+			getLSPService();
+			await pi.emit("session_start", makeSessionStartEvent(), ctx);
+			started = true;
+			const nav = pi.tools.get("lsp_navigation") as ToolLike;
+			const unserved = path.join(fx.workspace, "notes.unserved");
+			fs.writeFileSync(unserved, "plain text\n");
+			const lines: string[] = [];
+			for (const [operation, target] of [
+				["hover", fx.file("a")],
+				["documentSymbol", fx.file("a")],
+				["hover", unserved],
+			] as const) {
+				const result = await nav.execute(
+					"matrix-4403-nav-op",
+					{ operation, path: target, line: 1, character: 2 },
+					new AbortController().signal,
+					null,
+					ctx,
+				);
+				const envelope = navigationEnvelope(String(result.content[0]?.text));
+				lines.push(
+					`${operation} ok=${envelope.ok} status=${envelope.status}: ${envelope.notes?.join(" | ")}`,
+				);
+			}
+			return lines;
+		} finally {
+			if (started) await pi.emit("session_shutdown", { reason: "quit" }, ctx);
+			await getLSPService().shutdown();
+			resetLSPService();
+			if (savedConfigPath === undefined) delete process.env.PI_LENS_CONFIG_PATH;
+			else process.env.PI_LENS_CONFIG_PATH = savedConfigPath;
+			if (savedInstall === undefined)
+				delete process.env.PI_LENS_DISABLE_LSP_INSTALL;
+			else process.env.PI_LENS_DISABLE_LSP_INSTALL = savedInstall;
+		}
+	};
+
+	it(
+		"names a disabled primary, and keeps the install hint for a file no server serves",
+		async () => {
+			expect(await navOps()).toEqual([
+				"hover ok=false status=no_server: No LSP server available for a.json: Primary LSP (json) is disabled in config by lsp.disabledServers.",
+				"documentSymbol ok=false status=no_server: No LSP server available for a.json: Primary LSP (json) is disabled in config by lsp.disabledServers.",
+				"hover ok=false status=no_server: No LSP server available for notes.unserved. Check that the language server is installed.",
+			]);
+		},
+		120_000 * testTimeoutScale,
+	);
 });
 
 describe("every diagnostics route under every server-selecting switch (#4403)", () => {

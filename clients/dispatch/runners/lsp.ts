@@ -20,7 +20,7 @@ import {
 	touchCoverageGap,
 } from "../../lsp/diagnostic-binding.js";
 import { getLSPService } from "../../lsp/capabilities.js";
-import { disabledPrimaryServerIds as disabledPrimaryServerIdsForFile } from "../../lsp/session-roots.js";
+import { disabledPrimaries } from "../../lsp/session-roots.js";
 import { LSP_SERVERS } from "../../lsp/server.js";
 import { RUNTIME_CONFIG } from "../../runtime-config.js";
 import { PRIORITY } from "../priorities.js";
@@ -144,7 +144,7 @@ const lspRunner: RunnerDefinition = {
 		if (!lspService.supportsLSP(ctx.filePath)) {
 			// #4403: no server is selected, but a primary the operator disabled
 			// would have served the file. Say so; it is not "no LSP here".
-			const disabledPrimaryServerIds = disabledPrimaryServerIdsForFile(
+			const { disabledServerIds: disabledPrimaryServerIds } = disabledPrimaries(
 				ctx.filePath,
 			);
 			return {
@@ -258,10 +258,12 @@ const lspRunner: RunnerDefinition = {
 					const disabledPrimaryServerIds =
 						touched.disabledPrimaryServerIds ?? [];
 					primaryUnavailable = {
-						primaryUnavailableCause: primaryUnavailableCause(
-							inconclusiveServerIds,
-							disabledPrimaryServerIds,
-						),
+						primaryUnavailableCause:
+							touched.primaryUnavailableCause ??
+							primaryUnavailableCause(
+								inconclusiveServerIds,
+								disabledPrimaryServerIds,
+							),
 						...(disabledPrimaryServerIds.length > 0 && {
 							disabledPrimaryServerIds,
 						}),

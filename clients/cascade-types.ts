@@ -1,4 +1,5 @@
 import type { Diagnostic } from "./dispatch/types.js";
+import type { PrimaryUnavailableCause } from "./lsp/diagnostic-binding.js";
 import type {
 	CascadeIndeterminate,
 	ImpactCascadeResult,
@@ -19,6 +20,15 @@ export interface CascadeNeighborResult {
 	 * `inconclusive`: the primary answered and its findings stand.
 	 */
 	unconfirmedServerIds?: string[];
+	/**
+	 * #4403 round 4 (N2): no primary language server answered for this file,
+	 * and why. The cascade names the server in one line instead of listing the
+	 * file (clients/dispatch/integration.ts, `takeCascadeUnansweredPrimaries`).
+	 */
+	primaryUnavailable?: {
+		serverIds: string[];
+		cause: PrimaryUnavailableCause;
+	};
 	durationMs?: number;
 }
 

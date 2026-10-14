@@ -72,6 +72,8 @@ import {
 } from "../lsp/cascade-tier.js";
 import {
 	type BoundToCurrentDisk,
+	PRIMARY_UNAVAILABLE_CAUSE,
+	type PrimaryUnavailableCause,
 	type TouchFileResult,
 	bindingStateLabel,
 	touchCoverageGap,
@@ -525,6 +527,7 @@ export function resetDispatchBaselines(cwd?: string): void {
 	clearReverseDepsIndexCache();
 	clearModuleGraphCache();
 	recentlyCleanNeighborCache.clear();
+	cascadeUnansweredPrimariesNoted.clear();
 	primaryFilesThisTurn.clear();
 	cascadeSessionStats = {
 		runs: 0,
@@ -533,6 +536,78 @@ export function resetDispatchBaselines(cwd?: string): void {
 	};
 	for (const timer of astGrepWarnDebounceTimers.values()) clearTimeout(timer);
 	astGrepWarnDebounceTimers.clear();
+}
+
+/**
+ * #4403 round 4 (N2): the primary language servers a cascade line has named as
+ * not answering this session, with the turn and the edited file whose run
+ * named each first. The cause holds for every neighbour the server would
+ * serve, so it is said once per server; later runs drop those neighbours
+ * silently, as every run did before #4403. Runs of that same file in that same
+ * turn name it again: turn_end drops a run a later write superseded
+ * (clients/runtime-turn.ts), so only the turn's last run of the file is shown.
+ */
+const cascadeUnansweredPrimariesNoted = new Map<
+	string,
+	{ turnSeq: number; primaryKey: string }
+>();
+
+/**
+ * Splits out the neighbours whose primary did not answer, keeps those this run
+ * may still name (`cascadeUnansweredPrimariesNoted`), and returns the line
+ * naming them: one per server set and cause, in the order the touch named the
+ * servers.
+ */
+function takeCascadeUnansweredPrimaries(
+	neighbors: CascadeResult["neighbors"],
+	turnSeq: number,
+	primaryKey: string,
+): {
+	answered: CascadeResult["neighbors"];
+	unanswered: CascadeResult["neighbors"];
+	note: string;
+} {
+	const answered: CascadeResult["neighbors"] = [];
+	const groups = new Map<
+		string,
+		{
+			serverIds: readonly string[];
+			cause: PrimaryUnavailableCause;
+			neighbors: CascadeResult["neighbors"];
+		}
+	>();
+	for (const neighbor of neighbors) {
+		const unavailable = neighbor.primaryUnavailable;
+		if (!unavailable) {
+			answered.push(neighbor);
+			continue;
+		}
+		const key = `${unavailable.serverIds.join(",")}|${unavailable.cause}`;
+		const group = groups.get(key) ?? { ...unavailable, neighbors: [] };
+		group.neighbors.push(neighbor);
+		groups.set(key, group);
+	}
+	const unanswered: CascadeResult["neighbors"] = [];
+	const lines: string[] = [];
+	for (const group of groups.values()) {
+		const mayName = (id: string): boolean => {
+			const noted = cascadeUnansweredPrimariesNoted.get(id);
+			return (
+				noted === undefined ||
+				(noted.turnSeq === turnSeq && noted.primaryKey === primaryKey)
+			);
+		};
+		if (!group.serverIds.some(mayName)) continue;
+		for (const id of group.serverIds) {
+			if (!cascadeUnansweredPrimariesNoted.has(id))
+				cascadeUnansweredPrimariesNoted.set(id, { turnSeq, primaryKey });
+		}
+		unanswered.push(...group.neighbors);
+		lines.push(
+			`⚠️ Cascade: no language server answered for neighbor files of ${group.serverIds.join(", ")} (${PRIMARY_UNAVAILABLE_CAUSE[group.cause]}), so their cross-file errors were not checked (not a clean result).`,
+		);
+	}
+	return { answered, unanswered, note: lines.join("\n") };
 }
 
 let cascadeSessionStats = {
@@ -2144,6 +2219,7 @@ export async function computeCascadeForFile(
 						source: "cascade",
 						clientScope: "primary",
 						readStamp,
+						nameUnansweredPrimaries: true,
 					});
 					if (!rawDiags) {
 						// #3483: the idle reset can destroy the service this compute
@@ -2173,6 +2249,40 @@ export async function computeCascadeForFile(
 							diagnostics: [],
 							lspTouched: true as const,
 							inconclusive: true as const,
+							durationMs,
+						} satisfies CascadeResult["neighbors"][number];
+					}
+					// #4403 round 4 (N2): no primary answered, and the touch says
+					// why. That is not an inconclusive re-check of this neighbour;
+					// it holds for every file the server serves, so the run names
+					// the server once (`takeCascadeUnansweredPrimaries`) instead of
+					// listing each neighbour.
+					// `resolveTouchVerdict` gives this reason only with the ids.
+					if (rawDiags.inconclusiveReason === "primary-unavailable") {
+						const serverIds = rawDiags.inconclusiveServerIds ?? [];
+						const cause = rawDiags.primaryUnavailableCause ?? "unstarted";
+						const durationMs = Date.now() - neighborStart;
+						logCascade({
+							phase: "neighbor_touch",
+							filePath,
+							neighborFile: neighborPath,
+							diagnosticCount: 0,
+							durationMs,
+							lspTouched: true,
+							lspServerCount: configuredServerCount,
+							coldSnapshot: isColdSnapshot,
+							metadata: {
+								inconclusive: true,
+								...readInconclusiveAttribution(rawDiags),
+								primaryUnavailableCause: cause,
+							},
+						});
+						return {
+							filePath: neighborPath,
+							reason: neighborReason(importerSet, callerSet, neighborPath),
+							diagnostics: [],
+							lspTouched: true as const,
+							primaryUnavailable: { serverIds: [...serverIds], cause },
 							durationMs,
 						} satisfies CascadeResult["neighbors"][number];
 					}
@@ -2409,7 +2519,18 @@ export async function computeCascadeForFile(
 			inputTruncated: policyCounts.inputTruncated,
 		});
 
-		const visibleNeighbors = applyCascadeDeltaBaselines(neighbors);
+		// #4403 round 4 (N2): a neighbour no primary answered for has no
+		// diagnostics to baseline. It stays in the result only while the run
+		// names its server, so turn_end's ownership pass delivers the line.
+		const unansweredPrimaries = takeCascadeUnansweredPrimaries(
+			neighbors,
+			turnSeq,
+			normalizeMapKey(filePath),
+		);
+		const visibleNeighbors = [
+			...applyCascadeDeltaBaselines(unansweredPrimaries.answered),
+			...unansweredPrimaries.unanswered,
+		];
 
 		const formatted = formatCascadeResult(
 			cwd,
@@ -2418,6 +2539,7 @@ export async function computeCascadeForFile(
 			impact.neighborFiles.length,
 			policyCounts.suppressed,
 			policyCounts.inputTruncated,
+			unansweredPrimaries.note,
 		);
 
 		// #1104 HONESTY: filtering a bound-false display candidate must not turn a
@@ -2733,11 +2855,17 @@ function formatCascadeResult(
 	 * 3, N1) — ERRORs the policy never LOOKED at.
 	 */
 	policyInputTruncated: number,
+	/** #4403 round 4 (N2): the line naming primaries that did not answer. */
+	unansweredPrimaryNote = "",
 ): string {
-	const diagnosticsBlock = formatCascadeNeighborDiagnostics(cwd, neighbors, {
+	const neighborBlock = formatCascadeNeighborDiagnostics(cwd, neighbors, {
 		noun: "neighbor",
 		includeReason: true,
 	});
+	const diagnosticsBlock =
+		neighborBlock && unansweredPrimaryNote
+			? `${neighborBlock}\n${unansweredPrimaryNote}`
+			: neighborBlock || unansweredPrimaryNote;
 	// #3157 round 3, N1: an empty block is silence, and silence is a CLEAN
 	// verdict to the agent. That is honest only when everything was looked at.
 	// `policyInputTruncated > 0` means this run's own cost bound declined to

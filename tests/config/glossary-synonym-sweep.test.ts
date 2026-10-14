@@ -631,7 +631,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/server.ts": 5,
 		// 1 (#4403): `disabledPrimaryServerIds` is an `Array.prototype.filter`
 		// over registered servers, not a delivery filter.
-		"clients/lsp/session-roots.ts": 1,
+		// 1 -> 3 (#4403 round 4): `disabledPrimaries` selects the file's
+		// primaries once, then splits them into disabled ones and the enabled
+		// `fallbackFor` alternates standing in for a disabled owner.
+		"clients/lsp/session-roots.ts": 3,
 		"clients/lsp/tsserver-sync.ts": 1,
 		"clients/lsp/wait-policy/classification.ts": 1,
 		// 1 -> 2 (#3752): the count-vs-list merge adds one `result.warnings.filter`

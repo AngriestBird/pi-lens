@@ -537,7 +537,7 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 		id: "dispatch-integration:sessionCaches",
 		module: "dispatch/integration.ts",
 		state:
-			"recentlyCleanNeighborCache, primaryFilesThisTurn, sessionSlopRuleCounts, sessionFacts",
+			"recentlyCleanNeighborCache, primaryFilesThisTurn, sessionSlopRuleCounts, sessionFacts, cascadeUnansweredPrimariesNoted",
 		policy: "session_start",
 		resetName: "resetDispatchBaselines",
 		reason:
@@ -1632,7 +1632,11 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// prefix, so `CASCADE_GRAPH_KINDS` (an exported module-level `new Set`) is
 	// counted (10 -> 11). Import-time frozen vocabulary, same class as this
 	// file's other constant lookups above — SWEEP_HEURISTIC_LIMITS item 5.
-	"dispatch/integration.ts": 11,
+	// #4403 round 4 (N2): `cascadeUnansweredPrimariesNoted`, the cascade's
+	// once-per-session latch of primaries it named as not answering (11 ->
+	// 12). Registered above under dispatch-integration:sessionCaches; its
+	// reset is resetDispatchBaselines.
+	"dispatch/integration.ts": 12,
 	// #3968: the runner-id identity leaf beside the dispatcher — one Set fed
 	// by `RunnerRegistry.register` and re-derived at every process start
 	// (registration state, not session state); see the file-level exemption

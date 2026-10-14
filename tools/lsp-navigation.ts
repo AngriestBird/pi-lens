@@ -34,7 +34,7 @@ import {
 import type { SearchReadLocation } from "../clients/search-read-registration.js";
 import { buildLspNavigationEnvelope } from "./lsp-structured-output.js";
 import { describePrimaryUnavailable } from "./lsp-diagnostics.js";
-import { disabledPrimaryServerIds } from "../clients/lsp/session-roots.js";
+import { disabledPrimaries } from "../clients/lsp/session-roots.js";
 import { SYMBOL_KIND_NAMES } from "../clients/lsp-document-symbols.js";
 
 const VALID_OPERATIONS = [
@@ -1343,7 +1343,7 @@ export function createLspNavigationTool(
 					// reports as the cause instead of "not installed".
 					const hasLSP =
 						lspService.supportsLSP(filePath) ||
-						disabledPrimaryServerIds(filePath).length > 0;
+						disabledPrimaries(filePath).disabledServerIds.length > 0;
 					if (!hasLSP) {
 						return finalize(
 							{
@@ -1498,12 +1498,20 @@ export function createLspNavigationTool(
 
 			const hasLSP = filePath ? lspService.supportsLSP(filePath) : false;
 			if (needsFilePath && !hasLSP) {
+				// #4403 round 4 (N4): the same check as the workspaceDiagnostics
+				// gate above. A primary the operator turned off is not a missing
+				// install, so the advice would send the reader the wrong way.
+				const disabledServerIds = disabledPrimaries(filePath).disabledServerIds;
+				const fileName = path.basename(filePath);
 				return finalize(
 					{
 						content: [
 							{
 								type: "text" as const,
-								text: `No LSP server available for ${path.basename(filePath)}. Check that the language server is installed.`,
+								text:
+									disabledServerIds.length > 0
+										? `No LSP server available for ${fileName}: Primary LSP (${disabledServerIds.join(", ")}) is disabled in config by lsp.disabledServers.`
+										: `No LSP server available for ${fileName}. Check that the language server is installed.`,
 							},
 						],
 						isError: true,

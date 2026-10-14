@@ -1816,6 +1816,7 @@ const UNCONFIRMED_REASON_SENTENCE: Record<
 	// #4403: the per-file note's wording, one sentence per cause.
 	primary_unavailable: `no primary language server answered (${PRIMARY_UNAVAILABLE_CAUSE.unstarted})`,
 	primary_disabled: `no primary language server answered (${PRIMARY_UNAVAILABLE_CAUSE.disabled})`,
+	primary_disabled_fallback: `no primary language server answered (${PRIMARY_UNAVAILABLE_CAUSE.disabledFallback})`,
 };
 
 // Short per-reason label used only when MORE than one reason is present, so
@@ -1834,6 +1835,7 @@ const UNCONFIRMED_REASON_COUNT_LABEL: Record<
 	outside_project_root: "outside project root",
 	primary_unavailable: "no primary started",
 	primary_disabled: "primary disabled in config",
+	primary_disabled_fallback: "primary disabled, fallback did not answer",
 };
 
 /**
@@ -2798,6 +2800,13 @@ async function formatFullMode(
 		lspServerBreakdown.size > 1
 			? ` — by server: ${formatLspServerBreakdown(lspServerBreakdown)}.`
 			: "";
+	// #4403 round 4 (N3): a retry cannot change a denial, so a sweep whose
+	// every unconfirmed file is a disabled primary does not suggest one.
+	const retryClause = [...unconfirmedByReason.keys()].every(
+		(reason) => reason === "primary_disabled",
+	)
+		? ""
+		: "; re-run mode=full to retry them";
 	const unconfirmedLspNote =
 		unconfirmedLspResults.length > 0
 			? `\n\n⚠ LSP sweep: ${confirmedLspResults.length} file(s) confirmed via LSP, ` +
@@ -2808,7 +2817,7 @@ async function formatFullMode(
 					.map((result) => result.filePath)
 					.join(
 						", ",
-					)}${unconfirmedLspResults.length > 20 ? ", …" : ""}. These files' LSP contribution is excluded from this result; re-run mode=full to retry them (they may still show findings above from cached/project-runner state).`
+					)}${unconfirmedLspResults.length > 20 ? ", …" : ""}. These files' LSP contribution is excluded from this result${retryClause} (they may still show findings above from cached/project-runner state).`
 			: "";
 	// Code-unit comparator (#1883): this list ships as the
 	// `unconfirmedLspServerIds` structured field and as the lane names in the
