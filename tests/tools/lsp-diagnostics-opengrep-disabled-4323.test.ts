@@ -20,14 +20,23 @@
  * `--sequence.shuffle`. The switched-off cases also pin the two other places a
  * switched-off scanner showed through: the blocker coverage claim and the
  * cache key the workspace sweep shares, plus the
- * `lsp_navigation workspaceDiagnostics` route. The host wiring that supplies
- * the flag resolver is pinned in
- * `tests/index-lens-diagnostics-opengrep-flag-4323.test.ts`.
+ * `lsp_navigation workspaceDiagnostics` route. The last cases drive pi's own
+ * `lens_diagnostics` tool, registered by the real extension activation, so the
+ * flag resolver pi injects is exercised end to end (the MCP half is
+ * `tests/mcp/diagnostics-opengrep-disabled-4323.test.ts`).
  */
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import {
+	afterAll,
+	afterEach,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	it,
+} from "vitest";
 import {
 	resetProjectTrust,
 	setProjectTrustState,
@@ -38,6 +47,7 @@ import {
 	cleanupTestEnvironmentsDrained,
 	setupTestEnvironment,
 } from "../clients/test-utils.js";
+import { createPiMock } from "../support/pi-mock.js";
 
 const fakeServer = fileURLToPath(
 	new URL("../fixtures/fake-lsp-server.mjs", import.meta.url),
@@ -483,5 +493,66 @@ describe("an explicit LSP check with Opengrep switched off (#4323)", () => {
 		expect([...all.keys()].map(normalizeMapKey)).not.toContain(
 			normalizeMapKey(gone),
 		);
+	});
+
+	describe("through pi's lens_diagnostics tool", () => {
+		const savedConfigPath = process.env.PI_LENS_CONFIG_PATH;
+
+		afterEach(() => {
+			if (savedConfigPath === undefined) delete process.env.PI_LENS_CONFIG_PATH;
+			else process.env.PI_LENS_CONFIG_PATH = savedConfigPath;
+		});
+
+		/**
+		 * `lens_diagnostics source=lsp` on `probe`, through the tool the real
+		 * extension registers. The harness points PI_LENS_CONFIG_PATH at a missing
+		 * file (tests/support/vitest-setup.ts), so a maintainer's own
+		 * `~/.pi-lens/config.json` cannot decide a case.
+		 */
+		async function piLensDiagnostics(
+			flags: Record<string, boolean | string>,
+		): Promise<string> {
+			const { default: extension } = await import("../../index.js");
+			const pi = createPiMock(flags);
+			extension(pi.asExtensionAPI());
+			const tool = pi.tools.get("lens_diagnostics") as {
+				execute: (...args: unknown[]) => Promise<{
+					content: Array<{ text?: string }>;
+				}>;
+			};
+			const result = await tool.execute(
+				"pi-4323",
+				{ source: "lsp", path: probe, waitMs: 3000 },
+				undefined,
+				null,
+				{ cwd: workspace },
+			);
+			return String(result.content[0]?.text);
+		}
+
+		it("does not start Opengrep under --no-opengrep", async () => {
+			const text = await piLensDiagnostics({ "no-opengrep": true });
+
+			expect(opengrepStarts()).toBe(0);
+			expect(text).not.toContain(OPENGREP_FINDING);
+		});
+
+		it("does not start Opengrep when the global config sets opengrep.enabled=false", async () => {
+			const configPath = path.join(workspace, "global-config.json");
+			fs.writeFileSync(configPath, '{"opengrep":{"enabled":false}}\n');
+			process.env.PI_LENS_CONFIG_PATH = configPath;
+
+			const text = await piLensDiagnostics({});
+
+			expect(opengrepStarts()).toBe(0);
+			expect(text).not.toContain(OPENGREP_FINDING);
+		});
+
+		it("starts Opengrep and shows its finding when no switch is set", async () => {
+			const text = await piLensDiagnostics({});
+
+			expect(opengrepStarts()).toBeGreaterThan(0);
+			expect(text).toContain(OPENGREP_FINDING);
+		});
 	});
 });
