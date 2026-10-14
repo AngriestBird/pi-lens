@@ -392,6 +392,9 @@ const lspSpawnHeavyInclude = [
 	// LSP runner beside a real stdio fake-server child (the typos auxiliary)
 	// whose primary cannot start; waits on a real handshake like #4346's.
 	"tests/tools/lsp-diagnostics-missing-primary-4322.test.ts",
+	// #4322: the same handler and LSPService with no auxiliary at all; the
+	// primary's spawn fails for real (a missing command) on every touch.
+	"tests/tools/lsp-diagnostics-no-client-4322.test.ts",
 	// #3750: launches the fake server THROUGH the production `RustServer`,
 	// `OCamlServer` and `GoServer` entries (PATH shims) and waits on a real
 	// initialize handshake plus a pull round trip per case -- the same

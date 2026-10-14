@@ -860,10 +860,10 @@ async function collectDiagnosticsForFile(
  * one did (or nothing says otherwise). Two shapes reach here: the touch
  * acquired only auxiliaries and names the primaries it could not acquire
  * (`inconclusiveReason: "primary-unavailable"`), or the touch acquired no
- * client and the `getDiagnostics` fallback acquired only auxiliaries
- * (`unavailablePrimaryServerIds` non-empty). The service derives both lists
- * with one rule (`unacquiredPrimaryServerIds` in clients/lsp/index.ts), so
- * either way the result came from auxiliaries alone.
+ * client and the `getDiagnostics` fallback acquired no primary: only
+ * auxiliaries, or no client at all (`unavailablePrimaryServerIds` non-empty).
+ * The service derives both lists with one rule (`unacquiredPrimaryServerIds`
+ * in clients/lsp/index.ts), so either way no primary answered.
  */
 function describePrimaryUnavailable(
 	file: string,
@@ -1950,6 +1950,11 @@ function classifyBatchFileOutcome(
 	if (result.error) return "failed";
 	if (result.tooLargeReason) return "too_large";
 	if (result.diagnosticsUnsupported) return "unsupported";
+	// #4322: no client answered at all, and a primary resolved a root for the
+	// file. The result is unconfirmed, but "unavailable" names why.
+	if (result.unavailable && result.primaryUnavailable !== undefined) {
+		return "unavailable";
+	}
 	// A timed-out/unconfirmed answer may contain partial findings, but it cannot
 	// honestly be called a complete findings result. Keep the raw findings for
 	// investigation while making the aggregate incomplete.

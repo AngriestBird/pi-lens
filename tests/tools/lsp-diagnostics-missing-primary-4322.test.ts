@@ -226,6 +226,13 @@ describe("a JSON file whose language server cannot start (#4322)", () => {
 			"0 files confirmed clean, 2 unconfirmed: 2 with no language server " +
 				"answer (it could not be started, or was still starting).",
 		);
+		// typos did answer, so the files are inconclusive, not "unavailable":
+		// that outcome means no client answered at all.
+		const outcomes = result.details.outcomes as Array<{ outcome?: string }>;
+		expect(outcomes.map((outcome) => outcome.outcome)).toEqual([
+			"inconclusive",
+			"inconclusive",
+		]);
 	}, 30_000);
 
 	it("still shows typos' findings while the JSON check is unavailable", async () => {

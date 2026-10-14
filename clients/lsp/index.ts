@@ -504,9 +504,10 @@ export interface LSPDiagnosticsHealth {
 	/**
 	 * #4322: the primaries that resolved a root for this file but were not
 	 * acquired, when the clients this read acquired hold no primary at all (see
-	 * {@link unacquiredPrimaryServerIds}). Set only when at least one client was
-	 * acquired: a non-empty list means only auxiliaries answered, and the result
-	 * says nothing about the language itself.
+	 * {@link unacquiredPrimaryServerIds}). A non-empty list means no primary
+	 * answered: either only auxiliaries did, or no client was acquired and the
+	 * read fell back to the last known answer. Either way the result says
+	 * nothing current about the language itself.
 	 */
 	unavailablePrimaryServerIds?: string[];
 }
@@ -6475,6 +6476,12 @@ export class LSPService {
 		if (spawned.length === 0) {
 			const stale = this.lastKnownDiagnostics.get(normalizedPath);
 			const failureKind = stale?.length ? "no_clients_stale" : "no_clients";
+			// #4322: with nothing acquired, every primary that resolved a root went
+			// unanswered, so an empty answer here is not a clean one.
+			const unavailablePrimaryServerIds = unacquiredPrimaryServerIds(
+				spawned,
+				resolvedPrimaryRoots,
+			);
 			this.lastDiagnosticsHealth.set(normalizedPath, {
 				health: failureKind,
 				failureKind,
@@ -6484,6 +6491,7 @@ export class LSPService {
 				mergedCount: stale?.length ?? 0,
 				dedupDroppedCount: 0,
 				checkedAt: new Date().toISOString(),
+				unavailablePrimaryServerIds,
 			});
 			logLatency({
 				type: "phase",
@@ -6498,6 +6506,9 @@ export class LSPService {
 					failureKind,
 					health: failureKind,
 					servers: [],
+					...(unavailablePrimaryServerIds.length > 0 && {
+						unavailablePrimaryServerIds,
+					}),
 				},
 			});
 			return stale ?? [];
