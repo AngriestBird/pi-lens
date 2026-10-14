@@ -8,7 +8,10 @@
  */
 import { Minimatch } from "minimatch";
 import { configDefaults } from "vitest/config";
-import vitestConfig from "../../vitest.config.js";
+// The live config source, not the build's gitignored `vitest.config.js`,
+// which can lag it (same rule as lsp-spawn-heavy-coverage.test.ts).
+// Allowlisted in module-instance-coverage.test.ts.
+import vitestConfig from "../../vitest.config.ts";
 
 /** One pattern list: plain paths match by equality, the rest as globs. */
 interface Matcher {
