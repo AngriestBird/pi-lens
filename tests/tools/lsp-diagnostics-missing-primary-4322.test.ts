@@ -148,6 +148,16 @@ describe("a JSON file whose language server cannot start (#4322)", () => {
 				"",
 			].join("\n"),
 		);
+		// A CSS primary that holds its pulls past the check's wait budget.
+		const slowCssShim = path.join(workspace, "slow-css-server.mjs");
+		fs.writeFileSync(
+			slowCssShim,
+			[
+				'process.env.FAKE_LSP_DELAY_AFTER_FIRST_PULL_MS = "20000";',
+				`import(${JSON.stringify(pathToFileURL(fakeServer).href)});`,
+				"",
+			].join("\n"),
+		);
 		fs.writeFileSync(
 			path.join(workspace, "package.json"),
 			'{"name":"synthetic-json-fixture","private":true}\n',
@@ -166,6 +176,7 @@ describe("a JSON file whose language server cannot start (#4322)", () => {
 							"--stdio",
 						],
 					},
+					css: { command: [process.execPath, slowCssShim] },
 					typos: { command: [process.execPath, typosShim] },
 				},
 				disabledServers: ["ast-grep", "opengrep", "zizmor"],
@@ -276,6 +287,22 @@ describe("a JSON file whose language server cannot start (#4322)", () => {
 			}
 		}
 	}, 30_000);
+
+	it("names each reason when a batch mixes a missing language server with a timed-out check", async () => {
+		// Recurrence: `unconfirmedReasonClause`'s mixed branch (`rest > 0`) was
+		// replaced by the head alone and every test still passed, so a batch that
+		// lost files to two causes named only one of them.
+		const slow = path.join(workspace, "slow.css");
+		fs.writeFileSync(probe, '{"fake-lsp-clean": }\n');
+		fs.writeFileSync(slow, "a { color: red; } /* fake-lsp-clean */\n");
+
+		const result = await diagnose("primary", { paths: [probe, slow] });
+
+		expect(result.text).toContain(
+			"1 with no language server answer (it could not be started, or was " +
+				"still starting); the other 1: 1 timed out",
+		);
+	}, 60_000);
 
 	it("still shows typos' findings while the JSON check is unavailable", async () => {
 		fs.writeFileSync(probe, '{"probe": }\n');
