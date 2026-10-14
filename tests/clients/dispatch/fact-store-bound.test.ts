@@ -673,6 +673,22 @@ describe("FactStore accounting and pin survivors (#4365)", () => {
 		expect(axes[0]).toBe("bytes");
 	});
 
+	it("leaves no phantom record behind when a path it never stored is read", () => {
+		// Kills `!facts` forced false in touchFileFacts (campaign id 61): a read
+		// miss re-inserted `undefined` under the key, so the lone read of a missing
+		// path counted as a record and pushed the oldest real file out at the cap.
+		const store = new FactStore();
+		const paths = batchPaths("phantom", MAX_RECORDS);
+		for (const p of paths) store.setFileFact(p, "file.content", "x");
+
+		expect(
+			store.getFileFact("/repo/src/never-stored.ts", "file.content"),
+		).toBeUndefined();
+		store.setFileFact(paths[MAX_RECORDS - 1] as string, "other.fact", 1);
+
+		expect(store.hasFileFact(paths[0] as string, "file.content")).toBe(true);
+	});
+
 	it("labels an unnamed store's eviction record with the default subject", () => {
 		// Kills the constructor default `"session-fact-store"` emptied: the ledger
 		// dedupes on kind + subject, so an empty subject merges unrelated stores.
