@@ -2670,9 +2670,11 @@ describe("scripts/hooks/guard-bash.mjs -- round-2 survey corpus (#2705)", () => 
 
 describe(`scripts/hooks/guard-bash.mjs -- transcript corpus ${TRANSCRIPT_CORPUS_DATE} (#2705)`, () => {
 	it("keeps the transcript corpus at zero non-rule denies", () => {
-		const corpusHome = mkdtempSync(
-			join(tmpdir(), "pi-lens-guard-bash-corpus-home-"),
-		);
+		// A synthetic HOME that is never created, like PAYLOAD_CWD: the hook only
+		// resolves `~` against it. A mkdtemp under os.tmpdir() is /tmp when TMPDIR
+		// is unset or /tmp, which turned the corpus's `~/...` writes into /tmp
+		// writes (#4348 review r1: 5 rows flipped).
+		const corpusHome = "/home/dev/pi-lens-guard-bash-corpus-home";
 		const corpusEnv = {
 			...BASE_ENV,
 			HOME: corpusHome,
@@ -2683,28 +2685,35 @@ describe(`scripts/hooks/guard-bash.mjs -- transcript corpus ${TRANSCRIPT_CORPUS_
 		const started = performance.now();
 		const offenses: string[] = [];
 		let actualDenies = 0;
-		try {
-			for (const { command } of TRANSCRIPT_CORPUS) {
-				const result = runHook(command, corpusEnv);
-				const hash = commandHash(command);
-				const expectedDeny = EXPECTED_TRANSCRIPT_DENIES.has(hash);
-				const expectedAllow = EXPECTED_TRANSCRIPT_ALLOWS.has(hash);
-				if (result.status === 2) actualDenies++;
+		for (const { command } of TRANSCRIPT_CORPUS) {
+			// The fixture was captured as uid 1000: its 655 harness-scratch
+			// writes name /tmp/claude-1000/. The exemption is the RUNNER's own
+			// uid, so the hook sees the runner's directory; the hash and the
+			// EXPECTED_* sets stay keyed on the original row (#4348 review r1:
+			// a CI uid != 1000 gave `expected 313 to be 66`).
+			const result = runHook(
+				command.replaceAll(
+					"/tmp/claude-1000",
+					`/tmp/claude-${process.getuid?.() ?? 1000}`,
+				),
+				corpusEnv,
+			);
+			const hash = commandHash(command);
+			const expectedDeny = EXPECTED_TRANSCRIPT_DENIES.has(hash);
+			const expectedAllow = EXPECTED_TRANSCRIPT_ALLOWS.has(hash);
+			if (result.status === 2) actualDenies++;
 
-				if (expectedDeny) {
-					if (result.status !== 2)
-						offenses.push(`expected deny was allowed: ${command}`);
-					continue;
-				}
-				if (expectedAllow && result.status !== 0)
-					offenses.push(`expected allow was denied: ${command}`);
-				else if (!expectedAllow && result.status !== 0)
-					offenses.push(`non-rule deny (${result.status}): ${command}`);
-				else if (result.stderr !== "")
-					offenses.push(`unexpected stderr: ${command}`);
+			if (expectedDeny) {
+				if (result.status !== 2)
+					offenses.push(`expected deny was allowed: ${command}`);
+				continue;
 			}
-		} finally {
-			rmSync(corpusHome, { recursive: true, force: true });
+			if (expectedAllow && result.status !== 0)
+				offenses.push(`expected allow was denied: ${command}`);
+			else if (!expectedAllow && result.status !== 0)
+				offenses.push(`non-rule deny (${result.status}): ${command}`);
+			else if (result.stderr !== "")
+				offenses.push(`unexpected stderr: ${command}`);
 		}
 
 		const elapsedMs = performance.now() - started;
@@ -5220,11 +5229,38 @@ describe("scripts/hooks/guard-bash.mjs -- writes under /tmp (#4348)", () => {
 				expect(
 					runHook(command, { ...BASE_ENV, TMPDIR: "/tmp/pi-lens-x" }).stderr,
 				).toBe(`${RULE_MESSAGES.tmpWrite}\n`);
-				expect(runHook(command, NO_AMBIENT_TMPDIR_ENV).stderr).toBe(
+				expect(runHook(command, { ...BASE_ENV, TMPDIR: "/tmp" }).stderr).toBe(
 					`${RULE_MESSAGES.tmpWrite}\n`,
 				);
 			},
 		);
+
+		// Recurrence (review r1, 93,532 real commands): `> $TMPDIR/ci.txt` in a
+		// shell where TMPDIR was never exported. Bash expands the unset variable
+		// to the empty string -- the real write was `/ci.txt` ("Permission
+		// denied") -- so `/tmp` is mktemp's default, not the shell's. The hook's
+		// unresolved-expansion contract is to fail open; the rule must not
+		// invent /tmp for TMPDIR, TMP or TEMP.
+		it.each([
+			"echo a > $TMPDIR/x",
+			"echo a > ${TMPDIR}/x",
+			'echo a > "$TMPDIR/x"',
+			"mkdir -p $TMPDIR/d",
+			"echo a | tee $TMPDIR/x",
+			"cp a $TMP/x",
+			"touch $TEMP/x",
+		])("%j with TMPDIR unset everywhere fails open", (command) => {
+			const result = runHook(command, NO_AMBIENT_TMPDIR_ENV);
+			expect(result.status).toBe(0);
+			expect(result.stderr).toBe("");
+		});
+
+		it("an unset TMP does not hide a TMPDIR that points at /tmp", () => {
+			expect(
+				runHook("cp a $TMPDIR/x", { ...NO_AMBIENT_TMPDIR_ENV, TMPDIR: "/tmp" })
+					.stderr,
+			).toBe(`${RULE_MESSAGES.tmpWrite}\n`);
+		});
 
 		it("an assignment earlier in the command wins over the ambient value", () => {
 			expect(

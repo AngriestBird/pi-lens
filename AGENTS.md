@@ -1368,9 +1368,9 @@ node_modules/ -delete`; unlinking it with `rm node_modules` stays allowed;
 #4044); an unpinned `node` probe loading
 `clients/` or `dist/`; `TMPDIR`/`TMP`/`TEMP` aimed at the harness home; bare
 `pkill`/`killall` patterns (#3556); worktrees, clones, or `mktemp -d` under
-`/tmp` (#3526); any write under `/tmp` through `>`, `>>`, `2>`, `&>`, `tee`, a
-`cp`/`mv`/`install` target, `mkdir` or `touch` (the harness's own
-`/tmp/claude-<uid>/` stays allowed, as do reads); a commit or push
+`/tmp` (#3526); a write under `/tmp` through a redirect (`>`, `>>`, `2>`,
+`&>`), `tee`, a `cp`/`mv`/`install` target, `mkdir` or `touch` only (the
+harness's own `/tmp/claude-<uid>/` stays allowed, as do reads); a commit or push
 chained after a check with `;` or a pipe instead of `&&` (#3471); and every
 hook bypass (`--no-verify`, commit `-n`, `core.hooksPath`, `HUSKY=0`, `PI_LENS_SKIP_HOOKS=`; #3778). `kill $(pgrep -f …)`
 is a known blind spot; kill your own recorded PID. For a red that looks

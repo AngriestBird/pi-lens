@@ -43,8 +43,9 @@
  *     `bash -c`/`sh -c`/`eval`/`xargs`/`find -exec`, programs with their own
  *     output flags (`curl -o`, `sed -i`, `awk`, `git ... --output`), an
  *     `export` segment's redirect, abbreviated long options (`--target=`),
- *     `${TMPDIR:-/tmp}` and other unresolvable expansions, and macOS's
- *     `/private/tmp`.
+ *     `${TMPDIR:-/tmp}`, an unset `$TMPDIR` (bash expands it to empty) and
+ *     other unresolvable expansions, the `mktemp` FILE form, `ln -s`,
+ *     `tar -C /tmp`, `/var/tmp`, `/dev/shm`, and macOS's `/private/tmp`.
  *   - a git HOOK BYPASS on `git commit`/`push`/`merge`/`rebase` (#3778, the
  *     #3703 class): `--no-verify`, `-n` (commit only -- on `push` it is
  *     `--dry-run`), `-c core.hooksPath=…`, a `git config core.hooksPath`
@@ -262,7 +263,7 @@ export const RULE_MESSAGES = {
 	tmpCheckout:
 		"a checkout or scratch directory under /tmp is forbidden (#3526) -- /tmp on the maintainer host is tmpfs (RAM + swap; #2912 saw inode exhaustion there) and review/merge scratch checkouts filled it to 8/8 GB swap -- use `~/.local/share/pi-lens-orchestrator/tmp/<lane>` for orchestrator/reviewer scratch, `<worktree>/../probes-<pr>` for probe files, or `.claude/worktrees/` for a fixer's own worktree.",
 	tmpWrite:
-		"a write under /tmp is forbidden (#4348) -- /tmp on the maintainer host is tmpfs (RAM + swap), and a redirect (`>`, `>>`, `2>`, `&>`), `tee`, a `cp`/`mv`/`install` target, `mkdir` or `touch` there fills it the way the #3526 scratch checkouts did -- write scratch under `$TMPDIR` (the lane's `~/.local/share/pi-lens-orchestrator/tmp/<lane>`), `<worktree>/../probes-<lane>`, or the harness's own `/tmp/claude-<uid>/` directory. Reads from /tmp stay allowed.",
+		"a write under /tmp is forbidden (#4348) -- /tmp on the maintainer host is tmpfs (RAM + swap), and a redirect (`>`, `>>`, `2>`, `&>`), `tee`, a `cp`/`mv`/`install` target, `mkdir` or `touch` there fills it the way the #3526 scratch checkouts did -- write scratch under `$TMPDIR` (the lane's `~/.local/share/pi-lens-orchestrator/tmp/<lane>`; export it in the same command, an unset one expands to empty), `<worktree>/../probes-<lane>`, or the harness's own `/tmp/claude-<uid>/` directory. Reads from /tmp stay allowed.",
 	hookBypass:
 		"bypassing git hooks (`--no-verify`, `git commit -n`, `-c core.hooksPath=`, `git config core.hooksPath`, `HUSKY=0`, `PI_LENS_SKIP_HOOKS=`) is forbidden (#3778; #3703 pushed `--no-verify` and put 56 red files into CI) -- hooks always run; for a red that looks unrelated, prove it with `node scripts/red-on-base.mjs` and, unless it says RED-ON-BASE, fix it; if it does, stop and hand back its output instead of pushing past it; to repair a wrong `core.hooksPath`, run `node scripts/setup-git-hooks.mjs`.",
 	checkUngated:
@@ -2111,11 +2112,14 @@ const HARNESS_TMP_DIR =
 /**
  * Does `word`, as bash expands it, name a place under `/tmp` (#4348)? The
  * same expander as every other path rule (#3988), so `$TMPDIR/x` follows the
- * command's own `TMPDIR=` assignments, then THIS hook's ambient `TMPDIR`, then
- * `/tmp` when neither is set -- a lane that pins `TMPDIR` off `/tmp` writes
- * `$TMPDIR/x` freely. Like `tmpCheckout`, an expansion this scan cannot
- * resolve (`${TMPDIR:-/tmp}`, `$(mktemp)`) is judged on its best-effort text
- * and so ALLOWS: a hygiene rule, not a fail-closed one.
+ * command's own `TMPDIR=` assignments, then THIS hook's ambient `TMPDIR` -- a
+ * lane that pins `TMPDIR` off `/tmp` writes `$TMPDIR/x` freely, one whose
+ * `TMPDIR` is `/tmp` does not. A `TMPDIR`/`TMP`/`TEMP` set in neither place
+ * expands to the EMPTY string, as in bash (`$TMPDIR/x` is `/x`), not to
+ * `/tmp`: that default is `mktemp`'s, which {@link lookupShellVariable} lends
+ * the other rules. Like `tmpCheckout`, an expansion this scan cannot resolve
+ * (`${TMPDIR:-/tmp}`, `$(mktemp)`) is judged on its best-effort text and so
+ * ALLOWS: a hygiene rule, not a fail-closed one.
  *
  * @param {string} word
  * @param {string | null | undefined} cwd
@@ -2123,7 +2127,12 @@ const HARNESS_TMP_DIR =
  * @returns {boolean}
  */
 function isTmpWriteTarget(word, cwd, env) {
-	const { path } = resolveShellPath(word, cwd, env);
+	const unsetIsEmpty = Object.fromEntries(
+		TEMP_DIR_VARS.filter(
+			(name) => (env[name] ?? process.env[name]) === undefined,
+		).map((name) => [name, ""]),
+	);
+	const { path } = resolveShellPath(word, cwd, { ...unsetIsEmpty, ...env });
 	return (
 		isUnderTmpRoot(path) &&
 		!(HARNESS_TMP_DIR !== undefined && isUnderTmpRoot(path, HARNESS_TMP_DIR))
