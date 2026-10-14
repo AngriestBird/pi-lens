@@ -1,3 +1,4 @@
+import * as childProcess from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,6 +23,13 @@ import {
 // behavior directly, since that's the behavior check-close-keywords.mjs
 // actually depends on.
 import { fetchLivePrBody } from "../../scripts/check-pr-body.mjs";
+
+// True process boundary: the post-merge path shells out to `gh` to read and
+// post PR comments; no test may reach the real GitHub.
+vi.mock("node:child_process", async (importOriginal) => ({
+	...(await importOriginal<typeof import("node:child_process")>()),
+	execFileSync: vi.fn(() => ""),
+}));
 
 const REPO_ROOT = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -633,6 +641,11 @@ describe("negated and hedged close keywords (#4371)", () => {
 		["partially", "Partially closes #7"],
 		["no longer", "The bug no longer fixes #7"],
 		["a contraction", "It doesn't close #7"],
+		// F1 recurrence: Word, macOS and LLM output write U+2019.
+		["a curly-apostrophe contraction", "It doesn\u2019t close #7"],
+		["neither", "Neither fixes #7"],
+		["nor", "Nor closes #7"],
+		["hardly", "It hardly resolves #7"],
 	])("flags %s", (_name, line) => {
 		expect(lintCloseKeywords(line).valid).toBe(false);
 	});
@@ -642,22 +655,57 @@ describe("negated and hedged close keywords (#4371)", () => {
 			"a closing sentence after prose",
 			"The code and changelog are complete. Closes #3939",
 		],
-		["a parenthesis", "fix: thing (closes #4281"],
+		["an unclosed parenthesis", "fix: thing (closes #4281"],
 		["a bare keyword", "Closes #123"],
 		["a clause after a hedge", "Not a regression, so this closes #5"],
 		["a sentence after a negation", "Nothing else changes.\nFixes #9."],
 		["a semicolon list", "Fixes #1. resolves #2; CLOSED #3"],
 		["a heading line", "## Why\nCloses #8."],
+		// F2 recurrence: a hedge earlier in the sentence must not flag a plain
+		// close that has its own clause.
+		["a coordinated clause", "This PR is not a draft and closes #12"],
+		["a but clause", "Not a draft but closes #12"],
+		["an em dash", "Not a breaking change \u2014 Closes #12"],
+		["an en dash", "Not a breaking change \u2013 Closes #12"],
+		["a spaced hyphen", "No new deps - fixes #12"],
 	])("keeps %s clean", (_name, body) => {
 		const result = lintCloseKeywords(body);
 		expect(result.negatedLines).toEqual([]);
 		expect(result.valid).toBe(true);
 	});
 
-	it("keeps an issue clean when another line closes it plainly", () => {
-		const result = lintCloseKeywords("Closes #4.\nNot fixed: #4 elsewhere.");
+	// F6 recurrence: removing any one boundary character left the suite green.
+	// Each case puts the hedge BEFORE the boundary, so only the boundary keeps
+	// the close clean.
+	it.each([".", ",", ":", ";", "!", "?", "(", ")"])(
+		"treats %s as a clause boundary",
+		(boundary) => {
+			expect(lintCloseKeywords(`not x${boundary} closes #9`).valid).toBe(true);
+		},
+	);
+
+	// F3 recurrence (#3583): table rows named an issue another line closes
+	// plainly; the lint blocked a body with no behaviour change.
+	it("accepts an issue named in a table row that another line closes plainly", () => {
+		const result = lintCloseKeywords("Closes #4.\n| pre-fix | fixes #4 |");
 		expect(result.negatedIssues).toEqual([]);
+		expect(result.negatedLines).toEqual([]);
+		expect(result.valid).toBe(true);
+	});
+
+	it("still rejects an issue whose only close is hedged, beside a plain close of another", () => {
+		const result = lintCloseKeywords("Closes #4.\nNot fixed: #5 elsewhere.");
+		expect(result.negatedIssues).toEqual([5]);
+		expect(result.negatedLines).toEqual(["Not fixed: #5 elsewhere."]);
 		expect(result.valid).toBe(false);
+	});
+
+	// F4 recurrence (#2121): "It does not close\n#2074" linked nothing on
+	// GitHub, yet the parser read across the newline and blocked the body.
+	it("does not read a keyword and a number across a newline", () => {
+		expect(parseCloseKeywords("It does not close\n#2074").issues).toEqual([]);
+		expect(lintCloseKeywords("It does not close\n#2074").valid).toBe(true);
+		expect(parseCloseKeywords("Closes: #3\nFixes   #4").issues).toEqual([3, 4]);
 	});
 
 	it("explains the rephrase in the lint error", () => {
@@ -680,10 +728,76 @@ describe("negated and hedged close keywords (#4371)", () => {
 			fetchImpl,
 			{ pull_request: { number: 4344, body } },
 			getIssueState,
+			() => 4344,
 		);
 		expect(process.exitCode).toBe(1);
 		expect(errorLog.mock.calls[0]?.[0]).toContain(
 			"closed only through a table row or hedged close keyword: #4346",
+		);
+		errorLog.mockRestore();
+		process.exitCode = undefined;
+	});
+
+	// F5 recurrence: a hedged issue closed earlier by someone else, or a lookup
+	// that failed, must not read as this PR's accident (or hide it).
+	it.each([
+		["another PR closed it", () => 4000, undefined],
+		["a non-PR closer", () => null, undefined],
+		["the closer lookup failed", () => undefined, 1],
+	])("verify-merged when %s", async (_name, closer, exitCode) => {
+		vi.stubEnv("GITHUB_API_URL", "https://api.github.test");
+		vi.stubEnv("GITHUB_REPOSITORY", "apmantza/pi-lens");
+		vi.stubEnv("GITHUB_TOKEN", "test-token");
+		const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const body = `Closes #4320.\n${TABLE_CELL}`;
+		const fetchImpl = vi.fn().mockResolvedValue(
+			new Response(JSON.stringify({ title: "fix: x", body }), {
+				status: 200,
+			}),
+		);
+		await verifyMergedPullRequest(
+			fetchImpl,
+			{ pull_request: { number: 4344, body } },
+			vi.fn().mockReturnValue("closed"),
+			closer,
+		);
+		expect(process.exitCode).toBe(exitCode);
+		expect(errorLog.mock.calls.length > 0).toBe(exitCode === 1);
+		errorLog.mockRestore();
+		logSpy.mockRestore();
+		process.exitCode = undefined;
+	});
+
+	it("verify-merged still reports an open clean issue beside a hedged accident", async () => {
+		vi.stubEnv("GITHUB_API_URL", "https://api.github.test");
+		vi.stubEnv("GITHUB_REPOSITORY", "apmantza/pi-lens");
+		vi.stubEnv("GITHUB_TOKEN", "test-token");
+		const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+		const body = `Closes #4320.\n${TABLE_CELL}`;
+		const fetchImpl = vi.fn().mockResolvedValue(
+			new Response(JSON.stringify({ title: "fix: x", body }), {
+				status: 200,
+			}),
+		);
+		const getIssueState = vi.fn((_repo: string, n: number) =>
+			n === 4320 ? "open" : "closed",
+		);
+		await verifyMergedPullRequest(
+			fetchImpl,
+			{ pull_request: { number: 4344, body } },
+			getIssueState,
+			() => 4344,
+		);
+		const output = errorLog.mock.calls
+			.map((call) => String(call[0]))
+			.join("\n");
+		expect(output).toContain("hedged close keyword: #4346");
+		expect(output).toContain("#4320 (open)");
+		expect(vi.mocked(childProcess.execFileSync)).toHaveBeenCalledWith(
+			"gh",
+			expect.arrayContaining(["comment", "4344"]),
+			expect.anything(),
 		);
 		errorLog.mockRestore();
 		process.exitCode = undefined;

@@ -40,4 +40,8 @@ export declare function verifyMergedPullRequest(
 	fetchImpl?: typeof fetch,
 	event?: { pull_request?: { number: number; body?: string | null } },
 	getIssueState?: (repository: string, number: number) => string,
+	getIssueCloser?: (
+		repository: string,
+		number: number,
+	) => number | null | undefined,
 ): Promise<void>;
