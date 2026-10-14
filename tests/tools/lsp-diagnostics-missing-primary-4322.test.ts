@@ -3,7 +3,7 @@
  * not start but typos-lsp, an auxiliary spell checker, answered. typos speaks
  * for spelling only; an answer from it says nothing about JSON syntax. The hole
  * is in `LSPService.touchFile`, which the explicit check, pi's write-time LSP
- * runner, warm-attach and re-verification all share: a touch that acquired
+ * runner and the `mode=full` sweep share: a touch that acquired
  * auxiliaries but no language server still resolved `confirmation:
  * "confirmed"`. A primary-only check reaches the same answer another way: its
  * touch acquires no client, and the `getDiagnostics` fallback acquires typos.
