@@ -56,6 +56,20 @@ on:
       - "scripts/install-selftest.mjs"
       - "scripts/lib/web-tree-sitter-dir.mjs" # #1185: the selftest's grammar probe
       - "scripts/rpc-load-check.mjs"
+      - "scripts/lib/latency-log-phases.mjs" # #4401: the session smoke imports it
+      # #4401, the #4400 / #4314 recurrence: the smoke exists to catch a break in
+      # the bundle and the persist workers on the PR, not only nightly. A path
+      # filter on every clients/ change would run this workflow (about 250
+      # runner-seconds over 6 jobs) for ~half of all merged PRs (408 of 783 in
+      # 14 days touched clients/, index.ts, tools/ or commands/); these paths are
+      # the seams that crash a host or break the warm, ~7% of merges (53).
+      - "scripts/bundle-dist.mjs"
+      - "clients/project-snapshot.ts"
+      - "clients/project-snapshot-persist-worker.ts"
+      - "clients/gzip-stage-write.ts"
+      - "clients/review-graph/builder.ts"
+      - "clients/review-graph/persist-worker.ts"
+      - "clients/lsp-lazy.ts"
       - "scripts/resolve-newest-in-range-host.mjs"
       - "scripts/lib/resolve-newest-in-range-host.mjs"
       # Review F3: these four are on host-range-smoke/host-latest-smoke's

@@ -93,28 +93,23 @@ describe("logRecordFailure", () => {
 		).toContain("error");
 	});
 
-	it("passes debug lines and the one designed untrusted-project refusal only", () => {
+	it("passes debug lines and fails every warn, including the old untrusted-project refusal", () => {
 		expect(
 			logRecordFailure("extension.log", { level: "debug", subsystem: "x" }),
 		).toBeUndefined();
-		expect(
-			logRecordFailure("extension.log", UNTRUSTED_REFUSAL),
-		).toBeUndefined();
-		// Same subsystem, different warn: a throwing trust accessor stays a failure.
+		// Round 2 of #4409: this refusal used to be allow-listed, which hid a
+		// smoke project that was untrusted and so never ran the LSP spawn. The
+		// smoke now trusts its project; a refusal there is a defect.
+		expect(logRecordFailure("extension.log", UNTRUSTED_REFUSAL)).toContain(
+			"install/materialization blocked",
+		);
 		expect(
 			logRecordFailure("extension.log", {
 				level: "warn",
-				subsystem: "project-trust",
-				message: "isProjectTrusted() threw -- latching untrusted (fail-closed)",
+				subsystem: "lsp-registry",
+				message: "project-local LSP binary refused: mark the project trusted",
 			}),
-		).toContain("isProjectTrusted");
-		// Same message from a trusted state is not the designed refusal.
-		expect(
-			logRecordFailure("extension.log", {
-				...UNTRUSTED_REFUSAL,
-				metadata: { trustState: "trusted" },
-			}),
-		).toBeDefined();
+		).toContain("lsp-registry");
 	});
 
 	it("fails latency.log phases named *_failed and *_error", () => {

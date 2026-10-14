@@ -28,13 +28,19 @@ const tmpRoot = fs.mkdtempSync(
 afterAll(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
 const FAKE_PI = path.resolve("tests/fixtures/rpc-load-check/fake-pi.mjs");
 
-async function smoke(mode: string, extraArgs: string[] = [], stageMs?: number) {
+async function smoke(
+	mode: string,
+	extraArgs: string[] = [],
+	stageMs?: number,
+	marker?: string,
+) {
 	const env: NodeJS.ProcessEnv = {
 		...process.env,
 		FAKE_PI_MODE: mode,
 		TMPDIR: tmpRoot,
 	};
 	if (stageMs) env.RPC_LOAD_CHECK_STAGE_TIMEOUT_MS = String(stageMs);
+	if (marker) env.FAKE_PI_MARKER = marker;
 	// The ambient VITEST variables belong to the outer worker.
 	for (const key of Object.keys(env))
 		if (key.startsWith("VITEST") || key === "TEST") delete env[key];
@@ -136,6 +142,40 @@ describe.skipIf(process.platform === "win32")(
 				"TIMEOUT waiting for the forced worker failure",
 			);
 			expect(result.code).toBe(2);
+		});
+		it("fails, naming it, when the smoke project is not trusted (the LSP leg would be dark)", async () => {
+			// Recurrence: #4409 round 1. An untrusted CI project refused the LSP
+			// spawn; the allow-listed refusal then hid that the leg never ran.
+			const result = await smoke("untrusted");
+			expect(result.out).toContain("FAIL: smoke project is not trusted");
+			expect(result.code).toBe(1);
+		});
+
+		it("prints the offending record in full and the log tails on failure", async () => {
+			const result = await smoke("log-warn");
+			expect(result.out).toContain(
+				'offending record (extension.log): {"level":"warn"',
+			);
+			expect(result.out).toContain("--- sessionstart.log (last 40 lines)");
+			expect(result.out).toContain("--- extension.log (last 40 lines)");
+			expect(result.out).toContain("project trust = trusted");
+		});
+
+		it("retries once when the language-server install failed, and passes on the second run", async () => {
+			const marker = path.join(tmpRoot, "install-once-marker");
+			fs.rmSync(marker, { force: true });
+			const result = await smoke("install-fail-once", [], undefined, marker);
+			expect(result.out).toContain("install failure: ");
+			expect(result.out).toContain("retrying once");
+			expect(result.out).toContain("PASS");
+			expect(result.code).toBe(0);
+		});
+
+		it("fails after the one retry when the install keeps failing, printing the install lines", async () => {
+			const result = await smoke("install-fail-always");
+			expect(result.out.match(/retrying once/g)).toHaveLength(1);
+			expect(result.out.match(/install failure: /g)).toHaveLength(2);
+			expect(result.code).toBe(1);
 		});
 	},
 );

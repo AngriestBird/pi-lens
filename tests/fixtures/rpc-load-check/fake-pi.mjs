@@ -14,6 +14,35 @@ const append = (file, record) =>
 	fs.appendFileSync(path.join(lensHome, file), `${JSON.stringify(record)}\n`);
 const emit = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
 
+// Pi trusts the project only when its own setting says so (an RPC child has no
+// UI to ask); the smoke must pin that setting.
+const settings = JSON.parse(
+	fs.readFileSync(path.join(process.env.PI_CODING_AGENT_DIR, "settings.json"), "utf8"),
+);
+const trusted = settings.defaultProjectTrust === "always" && mode !== "untrusted";
+fs.appendFileSync(
+	path.join(lensHome, "sessionstart.log"),
+	`[2026-10-14T00:00:00.000Z] session_start: project trust = ${trusted ? "trusted" : "untrusted"}\n`,
+);
+// install-fail-once: the first attempt's language-server install fails (a
+// registry blip) and logs the cascade; a retry in a new scratch finds the marker.
+const marker = process.env.FAKE_PI_MARKER;
+const installFails =
+	mode === "install-fail-always" ||
+	(mode === "install-fail-once" && marker && !fs.existsSync(marker));
+if (installFails) {
+	if (marker) fs.writeFileSync(marker, "attempted");
+	fs.appendFileSync(
+		path.join(lensHome, "sessionstart.log"),
+		"[2026-10-14T00:00:00.000Z] auto-install typescript-language-server: failed (ECONNREFUSED)\n",
+	);
+	append("latency.log", {
+		type: "phase",
+		phase: "lsp_launch_candidate_failed",
+		metadata: { tool: "deno" },
+	});
+}
+
 setTimeout(() => {
 	if (mode === "log-warn") {
 		append("extension.log", {

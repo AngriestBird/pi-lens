@@ -285,4 +285,25 @@ describe("install-smoke RPC session smoke (#4401)", () => {
 		};
 		expect(step["timeout-minutes"]).toBeLessThan(10);
 	});
+
+	it("the PR path filter covers the script's import and the seams #4400 and #4314 broke", () => {
+		// Recurrence: #4400 and #4314 reached users because no PR-time check ran
+		// pi-lens as an RPC child, and a file the smoke imports sat outside the
+		// filter (the "Review F3" shape), so a PR touching only it ran no smoke.
+		const on = (workflow as { on?: { pull_request?: { paths?: string[] } } })
+			.on;
+		const paths = on?.pull_request?.paths ?? [];
+		for (const required of [
+			"scripts/rpc-load-check.mjs",
+			"scripts/lib/latency-log-phases.mjs",
+			"scripts/bundle-dist.mjs",
+			"clients/project-snapshot.ts",
+			"clients/project-snapshot-persist-worker.ts",
+			"clients/gzip-stage-write.ts",
+			"clients/review-graph/persist-worker.ts",
+			"clients/review-graph/builder.ts",
+			"clients/lsp-lazy.ts",
+		])
+			expect(paths).toContain(required);
+	});
 });

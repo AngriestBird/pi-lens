@@ -11,26 +11,36 @@
  * line, not an `extension_error`). Both shipped past a check that only waited
  * for `get_commands`. The issue is #4401.
  *
- * What one run does (about 5 s, measured):
- *   1. spawn `pi --mode rpc` with a PRIVATE agent dir and PI_LENS_HOME, and a
- *      fake OpenAI-compatible provider on 127.0.0.1 (no credentials, no network);
+ * What one run does (about 5 s warm, 12 s with a cold language-server install):
+ *   1. spawn `pi --mode rpc` with a PRIVATE agent dir and PI_LENS_HOME, a fake
+ *      OpenAI-compatible provider on 127.0.0.1 (no credentials), and pi's own
+ *      `defaultProjectTrust: "always"`, so the project is trusted and the LSP
+ *      spawn and warm really run;
  *   2. `get_commands`, and assert pi-lens's `lens-*` commands registered;
  *   3. wait for the session-start warm-up (`warmup_total` in latency.log);
- *   4. send a real `prompt`, wait for `agent_end` and a clean `stop`;
+ *   4. send a real `prompt` (text-only reply: no tool call runs), wait for
+ *      `agent_end` and a clean `stop`;
  *   5. read pi-lens's own logs under the pinned PI_LENS_HOME.
  * It FAILS (exit 1) on any of: the pi process exiting, an `extension_error`
  * event, a pi-lens notice at `warning` or `error` severity
- * (`extension_ui_request` / `notify`), an `extension.log` line at `error` or
- * `warn` (bar the one designed untrusted-project refusal), a latency.log
- * phase named `*_failed` / `*_error`, or a degraded snapshot-worker fallback.
- * Exit 2 = a stage timed out.
+ * (`extension_ui_request` / `notify`), ANY `extension.log` line at `error` or
+ * `warn`, a latency.log phase named `*_failed` / `*_error`, a degraded
+ * snapshot-worker fallback, or a session that did not log
+ * `project trust = trusted`. Exit 2 = a stage timed out. On failure it prints
+ * the offending records in full and the log tails (the runner's scratch dies
+ * with the job), and retries once when a language-server `auto-install`
+ * failed (a registry blip).
  *
  * `--fail-worker` forces the project-snapshot persist worker to answer its
  * first request with `{ id, generation, error }` and no `stagePath` (the #4400
  * wire shape; the seam is PI_LENS_TEST_SNAPSHOT_WORKER_FAIL in
- * clients/project-snapshot-persist-worker.ts). Pi must survive, finish the turn
+ * clients/project-snapshot-persist-worker.ts, and it forces only that worker,
+ * not the review-graph one). Pi must survive, finish the turn
  * and log the main-thread fallback for that exact reason; that one degraded
  * fallback is the only failure signal the variant tolerates.
+ *
+ * `startRpcSession` is the one RPC driver: scripts/release-qa.mjs and
+ * scripts/compat-smoke-behavioral.mjs start pi through it too.
  *
  * Used by .github/workflows/install-smoke.yml (pi-load: the installed package;
  * host-range-smoke: the packed tarball, plus the failing-worker variant).
@@ -63,6 +73,14 @@ const FAILING_NOTIFY_TYPES = new Set(["warning", "error"]);
 /** A latency.log phase named like a failure. */
 const FAILING_PHASE = /_(failed|error)$/;
 
+/** An `extension_error` in either shape pi has used. */
+export function isExtensionError(message) {
+	return (
+		message?.type === "extension_error" ||
+		(message?.type === "event" && message.event === "extension_error")
+	);
+}
+
 /**
  * Failure carried by one RPC stdout message, or undefined. Shapes (pi docs
  * json.md / rpc-extension-ui.md): `{type:"extension_error",...}` (older hosts
@@ -72,10 +90,7 @@ const FAILING_PHASE = /_(failed|error)$/;
  */
 export function rpcMessageFailure(message) {
 	if (!message || typeof message !== "object") return undefined;
-	if (
-		message.type === "extension_error" ||
-		(message.type === "event" && message.event === "extension_error")
-	) {
+	if (isExtensionError(message)) {
 		return `extension_error: ${String(message.error ?? "").slice(0, 300)} (${String(message.event ?? "")})`;
 	}
 	if (message.type === "extension_ui_request" && message.method === "notify") {
@@ -97,18 +112,6 @@ export function logRecordFailure(file, record, allowFallbackReason) {
 	if (!record || typeof record !== "object") return undefined;
 	if (file === "extension.log") {
 		if (record.level !== "error" && record.level !== "warn") return undefined;
-		// The designed refusal in an untrusted project (LSP/tool installs are
-		// blocked by design, and the smoke project is untrusted).
-		if (
-			record.subsystem === "project-trust" &&
-			record.level === "warn" &&
-			String(record.message ?? "").startsWith(
-				"install/materialization blocked:",
-			) &&
-			record.metadata?.trustState === "untrusted"
-		) {
-			return undefined;
-		}
 		return `extension.log ${record.level} [${record.subsystem}]: ${String(record.message ?? "").slice(0, 300)}`;
 	}
 	if (file === "latency.log" && record.type === "phase") {
@@ -177,7 +180,13 @@ function writeAgentDir(agentDir, port, linkAmbientPackages) {
 			},
 		}),
 	);
-	const settings = { defaultProvider: "fake", defaultModel: "fake-model" };
+	// pi's own setting: an RPC child has no UI to answer the trust prompt, and an
+	// untrusted project refuses the LSP spawn (the leg this smoke exists to run).
+	const settings = {
+		defaultProvider: "fake",
+		defaultModel: "fake-model",
+		defaultProjectTrust: "always",
+	};
 	if (linkAmbientPackages) {
 		const ambient =
 			process.env.PI_CODING_AGENT_DIR ||
@@ -213,7 +222,99 @@ function writeAgentDir(agentDir, port, linkAmbientPackages) {
 
 class StageTimeout extends Error {}
 
-async function run(piBin, { extension, failWorker }) {
+/**
+ * Spawn `pi` and frame its stdout as JSONL. The one RPC driver: this script's
+ * session smoke, release-qa's `get_commands` probe and the compat smoke's
+ * runs all start pi here, so the framing, the `extension_error` reading and
+ * the exit handling exist once (#4401; the two copies it replaced stopped at
+ * the first `get_commands` answer).
+ *
+ * `failures` holds every failure signal read off the wire (see
+ * `rpcMessageFailure`); `extensionErrors` only the `extension_error` events.
+ */
+export function startRpcSession(
+	piBin,
+	{ args, cwd, env, shell = false, stderr = "pipe" },
+) {
+	const child = spawn(piBin, args, {
+		cwd,
+		env,
+		shell,
+		stdio: ["pipe", "pipe", stderr],
+	});
+	const session = {
+		child,
+		failures: [],
+		extensionErrors: [],
+		stderrTail: [],
+		exited: undefined,
+		commandsResponse: undefined,
+		agentEnd: undefined,
+		/** Called with each parsed stdout message. */
+		onMessage: (fn) => messageListeners.push(fn),
+		/** Called once with the exit code. */
+		onExit: (fn) => exitListeners.push(fn),
+		send(message) {
+			try {
+				child.stdin.write(`${JSON.stringify(message)}\n`);
+			} catch {
+				// an exited pi is reported through `exited`
+			}
+		},
+		kill() {
+			try {
+				child.kill("SIGKILL");
+			} catch {}
+		},
+	};
+	const messageListeners = [];
+	const exitListeners = [];
+	let buf = "";
+	child.stderr?.on("data", (d) => {
+		session.stderrTail.push(d.toString());
+		if (session.stderrTail.length > 200) session.stderrTail.shift();
+	});
+	child.stdin.on("error", () => {
+		// a write to an exited pi; `exited` reports it
+	});
+	child.on("exit", (code, signal) => {
+		session.exited = { code, signal };
+		for (const fn of exitListeners) fn(code, signal);
+	});
+	child.stdout.on("data", (d) => {
+		// Strict JSONL: split on LF only (per pi RPC framing rules).
+		buf += d.toString();
+		let i = buf.indexOf("\n");
+		while (i >= 0) {
+			const line = buf.slice(0, i).replace(/\r$/, "");
+			buf = buf.slice(i + 1);
+			i = buf.indexOf("\n");
+			if (!line.trim()) continue;
+			let m;
+			try {
+				m = JSON.parse(line);
+			} catch {
+				continue;
+			}
+			const failure = rpcMessageFailure(m);
+			if (failure) session.failures.push(failure);
+			if (isExtensionError(m)) session.extensionErrors.push(m);
+			if (m.type === "response" && m.command === "get_commands")
+				session.commandsResponse = m;
+			if (m.type === "agent_end") session.agentEnd = m;
+			for (const fn of messageListeners) fn(m);
+		}
+	});
+	return session;
+}
+
+const tailOf = (text, lines) => text.split("\n").filter(Boolean).slice(-lines);
+
+/**
+ * One session smoke. Resolves `{ code, installFailed }` and prints its verdict;
+ * code 0 pass, 1 failure signals, 2 a stage timed out.
+ */
+export async function run(piBin, { extension, failWorker }) {
 	const scratch = fs.mkdtempSync(
 		path.join(os.tmpdir(), "pi-lens-rpc-session-smoke-"),
 	);
@@ -238,53 +339,16 @@ async function run(piBin, { extension, failWorker }) {
 
 	const args = ["--mode", "rpc", "--no-session"];
 	if (extension) args.push("-e", path.resolve(extension));
-	const pi = spawn(piBin, args, { stdio: ["pipe", "pipe", "pipe"], env });
-
-	const failures = [];
-	const stderrTail = [];
-	let exited;
-	let buf = "";
-	let commandsResponse;
-	let agentEnd;
-	pi.stderr.on("data", (d) => {
-		stderrTail.push(d.toString());
-		if (stderrTail.length > 40) stderrTail.shift();
-	});
-	pi.stdin.on("error", () => {
-		// a write to an exited pi; `exited` reports it
-	});
-	pi.on("exit", (code, signal) => {
-		exited = { code, signal };
-	});
-	pi.stdout.on("data", (d) => {
-		// Strict JSONL: split on LF only (per pi RPC framing rules).
-		buf += d.toString();
-		let i = buf.indexOf("\n");
-		while (i >= 0) {
-			const line = buf.slice(0, i).replace(/\r$/, "");
-			buf = buf.slice(i + 1);
-			i = buf.indexOf("\n");
-			if (!line.trim()) continue;
-			let m;
-			try {
-				m = JSON.parse(line);
-			} catch {
-				continue;
-			}
-			const failure = rpcMessageFailure(m);
-			if (failure) failures.push(failure);
-			if (m.type === "response" && m.command === "get_commands")
-				commandsResponse = m;
-			if (m.type === "agent_end") agentEnd = m;
-		}
-	});
+	const pi = startRpcSession(piBin, { args, env });
+	const failures = pi.failures;
+	const offending = [];
 
 	const stage = { name: "start" };
 	const waitFor = async (what, ms, probe) => {
 		stage.name = what;
 		const deadline = Date.now() + ms;
 		for (;;) {
-			if (exited) return undefined;
+			if (pi.exited) return undefined;
 			const value = probe();
 			if (value) return value;
 			if (Date.now() > deadline)
@@ -292,14 +356,14 @@ async function run(piBin, { extension, failWorker }) {
 			await new Promise((r) => setTimeout(r, 50));
 		}
 	};
-	const send = (message) => {
+	const latency = () => readNdjson(path.join(lensHome, "latency.log"));
+	const readLog = (name) => {
 		try {
-			pi.stdin.write(`${JSON.stringify(message)}\n`);
+			return fs.readFileSync(path.join(lensHome, name), "utf8");
 		} catch {
-			// an exited pi is reported through `exited`
+			return "";
 		}
 	};
-	const latency = () => readNdjson(path.join(lensHome, "latency.log"));
 	const forcedFallback = () =>
 		latency().find(
 			(r) =>
@@ -311,14 +375,14 @@ async function run(piBin, { extension, failWorker }) {
 	try {
 		// Give pi a moment to open stdin before the first command.
 		await new Promise((r) => setTimeout(r, 500));
-		send({ id: "cmds", type: "get_commands" });
+		pi.send({ id: "cmds", type: "get_commands" });
 		await waitFor(
 			"get_commands response",
 			STAGE_TIMEOUT_MS,
-			() => commandsResponse,
+			() => pi.commandsResponse,
 		);
-		if (!exited) {
-			const cmds = commandsResponse?.data?.commands || [];
+		if (!pi.exited) {
+			const cmds = pi.commandsResponse?.data?.commands || [];
 			const lens = cmds.filter(
 				(c) =>
 					String(c.name || "").startsWith("lens-") ||
@@ -335,10 +399,14 @@ async function run(piBin, { extension, failWorker }) {
 			STAGE_TIMEOUT_MS,
 			() => phaseWasLogged(latency(), "warmup_total"),
 		);
-		send({ id: "turn", type: "prompt", message: "hello" });
-		await waitFor("first turn (agent_end)", STAGE_TIMEOUT_MS, () => agentEnd);
-		if (agentEnd && !exited) {
-			const last = [...(agentEnd.messages || [])]
+		pi.send({ id: "turn", type: "prompt", message: "hello" });
+		await waitFor(
+			"first turn (agent_end)",
+			STAGE_TIMEOUT_MS,
+			() => pi.agentEnd,
+		);
+		if (pi.agentEnd && !pi.exited) {
+			const last = [...(pi.agentEnd.messages || [])]
 				.reverse()
 				.find((m) => m.role === "assistant");
 			if (!last || last.stopReason !== "stop")
@@ -363,14 +431,27 @@ async function run(piBin, { extension, failWorker }) {
 		else throw err;
 	}
 
-	if (exited) {
+	if (pi.exited) {
 		failures.push(
-			`pi exited during "${stage.name}" (code ${exited.code}, signal ${exited.signal})`,
+			`pi exited during "${stage.name}" (code ${pi.exited.code}, signal ${pi.exited.signal})`,
+		);
+	}
+	// The LSP spawn and the warm only run in a trusted project; an untrusted
+	// one would leave that leg dark and green.
+	const trustLine = tailOf(readLog("sessionstart.log"), 1e9).find((l) =>
+		l.includes("project trust = "),
+	);
+	if (!trustLine?.includes("project trust = trusted")) {
+		failures.push(
+			`smoke project is not trusted: the LSP spawn and warm are not exercised (${trustLine?.trim() ?? "no 'project trust' line in sessionstart.log"})`,
 		);
 	}
 	for (const r of readNdjson(path.join(lensHome, "extension.log"))) {
 		const f = logRecordFailure("extension.log", r);
-		if (f) failures.push(f);
+		if (f) {
+			failures.push(f);
+			offending.push(["extension.log", r]);
+		}
 	}
 	for (const r of latency()) {
 		const f = logRecordFailure(
@@ -378,34 +459,56 @@ async function run(piBin, { extension, failWorker }) {
 			r,
 			failWorker ? FORCED_ERROR_MARKER : undefined,
 		);
-		if (f) failures.push(f);
+		if (f) {
+			failures.push(f);
+			offending.push(["latency.log", r]);
+		}
 	}
 
+	// Graceful stop (stdin EOF runs pi's own teardown, which ends any language
+	// server), then SIGKILL if it does not leave in 5 s.
 	try {
-		pi.kill("SIGKILL");
+		pi.child.stdin.end();
 	} catch {}
+	for (let waited = 0; !pi.exited && waited < 5000; waited += 50)
+		await new Promise((r) => setTimeout(r, 50));
+	pi.kill();
 	provider.server.close();
 	const unique = [...new Set(failures)];
+	// A registry blip fails the language-server install, and the failure then
+	// shows up as a cascade (a deno launch failure); name it and let main retry.
+	const installFailures = readLog("sessionstart.log")
+		.split("\n")
+		.filter((l) =>
+			/auto-install[^\n]*(fail|ECONN|ENOTFOUND|ETIMEDOUT|EAI_AGAIN)/i.test(l),
+		);
 	if (unique.length || timedOut) {
 		for (const f of unique) console.log(`FAIL: ${f}`);
 		if (timedOut) console.log(timedOut);
-		if (stderrTail.length)
-			console.log(`pi stderr (tail):\n${stderrTail.join("").slice(-2000)}`);
+		// The runner's scratch dies with the job: print what a reader needs.
+		for (const [file, record] of offending)
+			console.log(`offending record (${file}): ${JSON.stringify(record)}`);
+		for (const l of installFailures) console.log(`install failure: ${l}`);
+		for (const name of ["sessionstart.log", "extension.log"]) {
+			console.log(`--- ${name} (last 40 lines)`);
+			console.log(tailOf(readLog(name), 40).join("\n"));
+		}
+		if (pi.stderrTail.length)
+			console.log(`pi stderr (tail):\n${pi.stderrTail.join("").slice(-2000)}`);
 		console.log(`scratch kept for forensics: ${scratch}`);
-		return unique.length ? 1 : 2;
+		return {
+			code: unique.length ? 1 : 2,
+			installFailed: installFailures.length > 0,
+		};
 	}
 	fs.rmSync(scratch, { recursive: true, force: true });
 	console.log(
 		`PASS: pi-lens loaded and survived start, warm-up and the first turn${failWorker ? " with the snapshot worker forced to fail" : ""}`,
 	);
-	return 0;
+	return { code: 0, installFailed: false };
 }
 
-if (
-	process.argv[1] &&
-	import.meta.url === pathToFileURL(process.argv[1]).href
-) {
-	const argv = process.argv.slice(2);
+async function main(argv) {
 	const opts = { extension: undefined, failWorker: false };
 	const positional = [];
 	for (let i = 0; i < argv.length; i++) {
@@ -413,7 +516,20 @@ if (
 		else if (argv[i] === "--fail-worker") opts.failWorker = true;
 		else positional.push(argv[i]);
 	}
-	run(positional[0] || "pi", opts).then(
+	const piBin = positional[0] || "pi";
+	let result = await run(piBin, opts);
+	if (result.code === 1 && result.installFailed) {
+		console.log("auto-install failed in the run above: retrying once");
+		result = await run(piBin, opts);
+	}
+	return result.code;
+}
+
+if (
+	process.argv[1] &&
+	import.meta.url === pathToFileURL(process.argv[1]).href
+) {
+	main(process.argv.slice(2)).then(
 		(code) => process.exit(code),
 		(err) => {
 			console.log(`ERROR: ${err?.stack || err}`);
