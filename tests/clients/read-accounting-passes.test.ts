@@ -182,6 +182,7 @@ async function bashResult(
 	file: string,
 	command: string,
 	output: string,
+	details?: unknown,
 ): Promise<number> {
 	io.target = file;
 	io.passes = 0;
@@ -190,6 +191,7 @@ async function bashResult(
 		toolCallId: `bash-${caseNo}`,
 		input: { command },
 		content: [{ type: "text", text: output }],
+		...(details !== undefined && { details }),
 	});
 	return io.passes;
 }
@@ -266,6 +268,28 @@ describe("read accounting reads a file once per hook (#1649)", () => {
 			effectiveOffset: 182,
 			effectiveLimit: 20,
 		});
+	});
+
+	it("keeps a vendor file in a clipped view's span count, so the tracked file gets no credit", async () => {
+		// A clipped view of two files cannot say which lines of which file pi
+		// showed, so it credits neither (#2802). Dropping the vendor file before
+		// that check would leave one span and credit a.ts's tail, which pi may
+		// never have shown (the vendor file's lines came last).
+		const file = path.join(root, "src", "a.ts");
+		fs.writeFileSync(file, source(200));
+		fs.writeFileSync(
+			path.join(root, "node_modules", "pkg", "index.js"),
+			source(200),
+		);
+		const runtime = runtimeFor();
+		await bashResult(
+			runtime,
+			file,
+			"cat src/a.ts node_modules/pkg/index.js",
+			source(20),
+			{ truncation: { truncated: true, outputLines: 20 } },
+		);
+		expect(runtime.readGuard.getReadHistory(file)).toEqual([]);
 	});
 
 	it("takes no capture of a bash view past the hash bound", async () => {
