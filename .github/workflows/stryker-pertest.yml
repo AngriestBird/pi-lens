@@ -10,8 +10,6 @@ name: Stryker per-test campaign (clients/)
 # here and the stryker-nightly tracking issue is never touched.
 
 on:
-  push:
-    branches: [fix/4365-stryker-pertest] # PILOT ONLY: removed before merge
   workflow_dispatch:
     inputs:
       module:

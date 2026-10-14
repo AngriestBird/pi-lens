@@ -30,10 +30,7 @@ describe("stryker-pertest workflow (#4365)", () => {
 	// Recurrence (#4005): the Stryker lane came back onto the pull_request path and
 	// cost 11-18% of CI job-minutes for no product defect.
 	it("is dispatch-only", () => {
-		expect(Object.keys(workflow.on).sort()).toEqual([
-			"push",
-			"workflow_dispatch",
-		]); // PILOT ONLY
+		expect(Object.keys(workflow.on)).toEqual(["workflow_dispatch"]);
 	});
 
 	// Recurrence (#4077): a dispatch on any ref runs branch code, so the job that

@@ -114,12 +114,15 @@ export function eligibleModules(
  * @param {number} index
  */
 export function pickModule(eligible, index) {
+	if (!Number.isInteger(index) || index < 0) {
+		throw new Error(
+			`stryker-pertest: rotation index is not a non-negative integer: ${index}`,
+		);
+	}
 	if (eligible.length === 0) {
 		throw new Error("stryker-pertest: no eligible module to rotate through");
 	}
-	return eligible[
-		((index % eligible.length) + eligible.length) % eligible.length
-	];
+	return eligible[index % eligible.length];
 }
 
 /**

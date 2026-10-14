@@ -88,6 +88,11 @@ exports change.
   `MUTATION` line, and no survivor triage. The nightly Stryker report on master
   is exploratory and is not read here. Use bounded hand probes locally; never
   run a full Stryker campaign in a worktree.
+- The manual per-test campaign (`stryker-pertest.yml`, #4365) lists tests that
+  cover mutated code but kill no mutant. It is a triage input, not a verdict:
+  a candidate that guards another seam or a named recurrence stays, and a
+  deletion it proposes lands only with the covering test named and the
+  reviewer's agreement test by test.
 - Every record the `Observability` section names is asserted by a test in the
   diff and quoted in the body (#2642, #2647, #2649, #2654).
 - Every behavioural sentence (a docstring invariant, a memo, a registry

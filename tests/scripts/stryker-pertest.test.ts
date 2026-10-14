@@ -361,6 +361,15 @@ describe("isGovernanceTest / planPertest (#4365)", () => {
 		);
 	});
 
+	it("refuses a path that is not a runtime .ts source", () => {
+		expect(() =>
+			planPertest("scripts/stryker-pertest.mjs", {
+				testFiles: [],
+				readFile: () => "",
+			}),
+		).toThrow(/runtime/);
+	});
+
 	it("refuses a module no test imports", () => {
 		expect(() =>
 			planPertest("clients/lonely.ts", { testFiles: [], readFile: () => "" }),
@@ -481,6 +490,15 @@ describe("eligibleModules / pickModule (#4365)", () => {
 		expect(pickModule(list, 0)).toBe("clients/small.ts");
 		expect(pickModule(list, 1)).toBe("clients/zeta.ts");
 		expect(pickModule(list, 2)).toBe("clients/small.ts");
+	});
+
+	// Recurrence: the workflow passes `$GITHUB_RUN_NUMBER` through `Number()`; an
+	// unset or garbled value became NaN and picked `undefined`, which `plan` then
+	// reported as a missing flag instead of a bad rotation index.
+	it("refuses an index that is not a non-negative integer", () => {
+		for (const bad of [Number.NaN, -1, 1.5]) {
+			expect(() => pickModule(["clients/a.ts"], bad)).toThrow(/index/);
+		}
 	});
 
 	it("refuses an empty rotation", () => {
