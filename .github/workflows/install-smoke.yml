@@ -56,6 +56,20 @@ on:
       - "scripts/install-selftest.mjs"
       - "scripts/lib/web-tree-sitter-dir.mjs" # #1185: the selftest's grammar probe
       - "scripts/rpc-load-check.mjs"
+      - "scripts/lib/latency-log-phases.mjs" # #4401: the session smoke imports it
+      # #4401, the #4400 / #4314 recurrence: the smoke exists to catch a break in
+      # the bundle and the persist workers on the PR, not only nightly. A path
+      # filter on every clients/ change would run this workflow (about 250
+      # runner-seconds over 6 jobs) for ~half of all merged PRs (408 of 783 in
+      # 14 days touched clients/, index.ts, tools/ or commands/); these paths are
+      # the seams that crash a host or break the warm, ~7% of merges (53).
+      - "scripts/bundle-dist.mjs"
+      - "clients/project-snapshot.ts"
+      - "clients/project-snapshot-persist-worker.ts"
+      - "clients/gzip-stage-write.ts"
+      - "clients/review-graph/builder.ts"
+      - "clients/review-graph/persist-worker.ts"
+      - "clients/lsp-lazy.ts"
       - "scripts/resolve-newest-in-range-host.mjs"
       - "scripts/lib/resolve-newest-in-range-host.mjs"
       # Review F3: these four are on host-range-smoke/host-latest-smoke's
@@ -462,14 +476,17 @@ jobs:
           pi list | grep -i 'pi-lens' || { echo "::error::pi-lens not registered after install"; exit 1; }
           echo "layout: $(readlink -f "$HOME/.pi/agent/npm/node_modules/pi-lens" 2>/dev/null || echo '(real dir)')"
 
-      - name: Verify pi-lens loads via RPC (get_commands — no model)
+      - name: Verify pi-lens loads via RPC (session, warm-up and first turn — fake provider)
         shell: bash
         env:
           ANTHROPIC_API_KEY: sk-ant-dummy-ci-no-credits-needed
         run: |
           set -uo pipefail
-          # Run from a clean git project; the driver spawns `pi --mode rpc`,
-          # asserts pi-lens's lens-* commands registered, fails on extension_error.
+          # Run from a clean git project; the driver spawns `pi --mode rpc`
+          # against a local fake provider (no credentials), asserts pi-lens's
+          # lens-* commands registered, waits for the warm-up, sends a prompt,
+          # and fails on a host exit, extension_error, a warning/error notice or
+          # a pi-lens failure log line (#4401; #4314 passed this step on a notice).
           mkdir -p "$RUNNER_TEMP/proj" && cd "$RUNNER_TEMP/proj"
           git init -q; git config user.email t@t.t; git config user.name t
           printf 'export const x: number = 1;\n' > a.ts
@@ -653,7 +670,7 @@ jobs:
               || echo "::warning::typescript UNRESOLVABLE from pi-lens/dist/clients — this is #285"
           fi
 
-      - name: Verify pi-lens loads via RPC (get_commands — no model)
+      - name: Verify pi-lens loads via RPC (session, warm-up and first turn — fake provider)
         shell: bash
         env:
           ANTHROPIC_API_KEY: sk-ant-dummy-ci-no-credits-needed
@@ -804,6 +821,33 @@ jobs:
           cd "$RUNNER_TEMP/proj"
           SELFTEST="$(node -e 'console.log(require.resolve("pi-lens/scripts/install-selftest.mjs"))')"
           bun "$SELFTEST" --allow-soft
+
+      # #4401, the #4400 / #4314 recurrence: start the PACKED tarball under
+      # `pi --mode rpc` (the way a studio chat runs it) at this cell's host, wait
+      # out the warm-up, run a real first turn against a local fake provider,
+      # and red on any host exit, extension_error, warning/error notice or
+      # pi-lens failure log line. The second run forces the snapshot persist
+      # worker to answer without a stagePath (the #4400 wire shape) and must see
+      # pi survive. Measured ~4 s per run; the step cap sits well below the job's
+      # 10-minute cap.
+      - name: RPC session smoke (packed tarball, fake provider) + failing-worker variant
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          PI="$GITHUB_WORKSPACE/node_modules/.bin/pi"
+          PKG="$RUNNER_TEMP/proj/node_modules/pi-lens"
+          mkdir -p "$RUNNER_TEMP/rpcproj" && cd "$RUNNER_TEMP/rpcproj"
+          git init -q; git config user.email t@t.t; git config user.name t
+          printf 'export const x: number = 1;\n' > a.ts
+          printf '{ "name": "d", "version": "1.0.0", "type": "module" }\n' > package.json
+          git add -A && git commit -qm init
+          echo "::group::session smoke"
+          node "$GITHUB_WORKSPACE/scripts/rpc-load-check.mjs" "$PI" --extension "$PKG"
+          echo "::endgroup::"
+          echo "::group::session smoke, snapshot worker forced to fail"
+          node "$GITHUB_WORKSPACE/scripts/rpc-load-check.mjs" "$PI" --extension "$PKG" --fail-worker
+          echo "::endgroup::"
 
       # Acceptance (#2613): a newest-in-range failure that ALSO fails on
       # master is upstream drift, not this PR's regression. Compares against

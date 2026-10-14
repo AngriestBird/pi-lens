@@ -81,6 +81,8 @@ const REPO_ROOT = path.resolve(
 const PINNED_SITES: Readonly<Record<string, string>> = {
 	"clients/gzip-stage-write.ts#serveGzipStageWorker port.on":
 		"worker side of both persist workers: a request that fails the shape check is answered with an error result carrying whatever routing fields it had",
+	"clients/project-snapshot-persist-worker.ts#serveForcedFailure parentPort.on":
+		"test-only seam (#4401, PI_LENS_TEST_SNAPSHOT_WORKER_FAIL): answers a routable request with an id and generation and no stagePath, the #4400 wire shape; inert unless the variable is set",
 	"clients/project-snapshot.ts#getSnapshotPersistWorker worker.on":
 		"project-snapshot host (#4400): readGzipStageWorkerResult, then handleSnapshotWorkerResult; a rejected or throwing message is counted in the degradation ledger",
 	"clients/review-graph/builder.ts#getPersistWorker worker.on":
