@@ -26,7 +26,10 @@ import {
 	loadPiLensProjectConfig,
 	type PiLensProjectConfig,
 } from "../../clients/project-lens-config.js";
-import { handleSessionStart } from "../../clients/runtime-session.js";
+import {
+	handleSessionStart,
+	STARTUP_TASK_DEFER_MS,
+} from "../../clients/runtime-session.js";
 import { _resetSlowFsForTests } from "../../clients/slow-fs.js";
 import { _resetSubagentModeForTests } from "../../clients/subagent-mode.js";
 import {
@@ -359,6 +362,76 @@ it(
 					),
 				{ timeout: HEAVY_IO_TIMEOUT_MS },
 			);
+		} finally {
+			await env.cleanup();
+		}
+	},
+	TEST_BUDGET_MS,
+);
+
+// #4352: the defer table is keyed by runTask names. A key that matches no task
+// ("ast-grep exports" for "ast-grep-exports") defers nothing, so the export scan
+// started on the next tick and froze the TUI on cold boot. One setImmediate turn
+// shows the difference: every next-tick scan has fired by then, while the 5400
+// ms defer has not elapsed. The eventual run is covered by the ast-grep export
+// path test above.
+it(
+	"defers ast-grep-exports by its taskDeferMs entry, not on the next tick (#4352)",
+	async () => {
+		const { env, astGrepEnsure, dbg } = await runSessionStart(
+			"full",
+			(tmpDir) =>
+				createTempFile(
+					tmpDir,
+					"package.json",
+					JSON.stringify({ type: "module" }),
+				),
+		);
+		try {
+			await new Promise((resolve) => setImmediate(resolve));
+			expect(dbg).not.toHaveBeenCalledWith(
+				expect.stringContaining("session_start task ast-grep-exports: start"),
+			);
+			expect(astGrepEnsure).not.toHaveBeenCalled();
+		} finally {
+			await env.cleanup();
+		}
+	},
+	TEST_BUDGET_MS,
+);
+
+// #4352 round 2: a defer-table key whose task was removed ("project index")
+// defers nothing and never runs. Every key must be a task session_start schedules,
+// and each key keeps its staggered delay. The real seam is the scheduled debug
+// line, which full-mode session_start emits for every task it starts.
+it(
+	"schedules every defer-table key with its staggered delay (#4352)",
+	async () => {
+		const { env, dbg } = await runSessionStart("full", (tmpDir) =>
+			createTempFile(
+				tmpDir,
+				"package.json",
+				JSON.stringify({ type: "module" }),
+			),
+		);
+		try {
+			await new Promise((resolve) => setImmediate(resolve));
+			const scheduled = new Map<string, number>();
+			for (const [msg] of dbg.mock.calls) {
+				const match =
+					/^session_start task (\S+): scheduled deferMs=(\d+)$/.exec(
+						String(msg),
+					);
+				if (match) scheduled.set(match[1], Number(match[2]));
+			}
+			for (const key of Object.keys(STARTUP_TASK_DEFER_MS)) {
+				expect(scheduled.has(key), `defer key ${key} is never scheduled`).toBe(
+					true,
+				);
+			}
+			expect(scheduled.get("call-graph")).toBe(5000);
+			expect(scheduled.get("codebase-model")).toBe(5200);
+			expect(scheduled.get("ast-grep-exports")).toBe(5400);
 		} finally {
 			await env.cleanup();
 		}
