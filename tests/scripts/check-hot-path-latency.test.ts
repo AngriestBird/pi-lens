@@ -78,6 +78,20 @@ describe("bootstrapCompare", () => {
 		expect(c.ratio.hi).toBeLessThan(1.7);
 	});
 
+	it("widens the interval as the confidence level rises", () => {
+		// Recurrence: a confidence level the code ignores. With the tail forced to
+		// zero every level reads the full resample range and the 95 percent rule
+		// is a 100 percent rule that the other tests cannot tell apart.
+		const base = noisy(100, 0.1, 15, 13);
+		const head = noisy(130, 0.1, 15, 14);
+		const width = (confidence: number) => {
+			const c = bootstrapCompare(base, head, { confidence });
+			return c.diff.hi - c.diff.lo;
+		};
+		expect(width(0.8)).toBeLessThan(width(0.95));
+		expect(width(0.95)).toBeLessThan(width(0.99));
+	});
+
 	it("refuses a group too small to resample", () => {
 		expect(() => bootstrapCompare([1], [1, 2])).toThrow(/at least 2 samples/);
 	});
