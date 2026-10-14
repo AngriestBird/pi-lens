@@ -369,10 +369,12 @@ async function resolveForwardImportsMemoized(
 }
 
 /**
- * #4346: one file's parsed import sources, kept while its mtime and size are
- * unchanged, so a caller that asks on every diagnostics call (the LSP
- * created-module producer, `clients/lsp/created-import-targets.ts`) parses
- * each file version once. Only the parse is kept: `extractForwardImportPaths`
+ * #4346: one file's parsed import sources, kept while its mtime, ctime and
+ * size are unchanged, so a caller that asks on every diagnostics call (the
+ * LSP created-module producer, `clients/lsp/created-import-targets.ts`)
+ * parses each file version once. #4368 r1: ctime is in the key because a
+ * rewrite that keeps the size and restores the mtime (`utimes`) is otherwise
+ * invisible; every write and every `utimes` moves ctime. Only the parse is kept: `extractForwardImportPaths`
  * resolves the sources on every call, because a module created since can
  * answer one without the importer changing. The stat is taken before the read,
  * so a write racing the parse leaves a key that no longer matches the disk.
@@ -384,6 +386,7 @@ async function resolveForwardImportsMemoized(
 const FORWARD_IMPORT_SOURCE_MEMO_ENTRIES = 1024;
 interface ForwardImportSourceEntry {
 	mtimeMs: number;
+	ctimeMs: number;
 	size: number;
 	sources: string[];
 	unresolved: ReadonlySet<string>;
@@ -411,7 +414,11 @@ async function forwardImportSources(
 	}
 	const key = normalizeMapKey(filePath);
 	const memo = forwardImportSourceMemo.get(key);
-	if (memo?.mtimeMs === stat.mtimeMs && memo.size === stat.size) {
+	if (
+		memo?.mtimeMs === stat.mtimeMs &&
+		memo.ctimeMs === stat.ctimeMs &&
+		memo.size === stat.size
+	) {
 		return memo;
 	}
 	const client = getSharedTreeSitterClient();
@@ -439,6 +446,7 @@ async function forwardImportSources(
 	forwardImportParses++;
 	const entry: ForwardImportSourceEntry = {
 		mtimeMs: stat.mtimeMs,
+		ctimeMs: stat.ctimeMs,
 		size: stat.size,
 		sources: [...new Set(outcome.value.map((ref) => ref.source))],
 		unresolved: memo?.unresolved ?? new Set(),

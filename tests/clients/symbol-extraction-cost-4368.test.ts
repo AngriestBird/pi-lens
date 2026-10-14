@@ -93,6 +93,32 @@ describe("symbol extraction cost (#4368 r1 F2)", () => {
 		expect(large).toBeLessThanOrEqual(Math.max(4 * small, 64));
 	});
 
+	// Recurrence: #4368 r1 F2. The import path ran the definitions and
+	// references passes as well, three tree queries per file for one answer.
+	it("runs one tree query per file to resolve its imports", async () => {
+		const root = workspace("pi-lens-4368-fwd-queries-", {
+			"pyproject.toml": '[project]\nname="x"\nversion="0.0.0"\n',
+			"m.py": pythonModule(10),
+		});
+		const { Query } = await loadWebTreeSitter();
+		const matches = Query.prototype.matches;
+		let queries = 0;
+		Query.prototype.matches = function (
+			this: InstanceType<typeof Query>,
+			...args: Parameters<typeof matches>
+		) {
+			queries += 1;
+			return matches.apply(this, args);
+		};
+		try {
+			await extractForwardImportPaths(root, path.join(root, "m.py"));
+		} finally {
+			Query.prototype.matches = matches;
+		}
+
+		expect(queries).toBe(1);
+	});
+
 	// Recurrence: #4368 r1 F2. The review graph's full extraction of the same
 	// 12000-line module took 9.6 s through the decorator and doc-comment
 	// helpers.

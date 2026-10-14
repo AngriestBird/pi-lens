@@ -116,6 +116,35 @@ describe("extractForwardImportPaths (#4346)", () => {
 		).toEqual(["src/cc.ts"]);
 	});
 
+	// Recurrence: #4368 r2. A rewrite that keeps the size and restores the
+	// mtime left the memo answering the old imports, so the producer resolved
+	// a module the importer no longer imports (the binding test in
+	// tests/tools/lsp-diagnostics-created-outside-4346.test.ts went stale).
+	it("parses again when a same-size rewrite restores the mtime", async () => {
+		const root = workspace("pi-lens-4346-fwd-ctime-", {
+			"package.json": '{"name":"g","version":"0.0.0"}\n',
+			"src/a.ts": 'import { b } from "./b";\n',
+			"src/b.ts": "export const b = 1;\n",
+			"src/c.ts": "export const c = 1;\n",
+		});
+		const importer = path.join(root, "src/a.ts");
+		const pinned = new Date(Date.now() - 60_000);
+		fs.utimesSync(importer, pinned, pinned);
+		expect(
+			relative(root, await extractForwardImportPaths(root, importer)),
+		).toEqual(["src/b.ts"]);
+		const before = fs.statSync(importer);
+
+		fs.writeFileSync(importer, 'import { c } from "./c";\n');
+		fs.utimesSync(importer, pinned, pinned);
+		const after = fs.statSync(importer);
+		expect([after.mtimeMs, after.size]).toEqual([before.mtimeMs, before.size]);
+
+		expect(
+			relative(root, await extractForwardImportPaths(root, importer)),
+		).toEqual(["src/c.ts"]);
+	});
+
 	// Recurrence: #4368 r1 row 13. A module moved in with `mv` keeps an inode
 	// born before the language server, so the birth rule read it as old and
 	// the server never heard Created. The resolver saw the import resolve to

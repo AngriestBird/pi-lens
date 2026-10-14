@@ -235,10 +235,13 @@ describe("a module created outside pi-lens (#4346)", () => {
 		fs.writeFileSync(path.join(workspace, "bind_a.ts"), "export {};\n");
 		const importer = path.join(workspace, "bind_user.ts");
 		fs.writeFileSync(importer, 'import "./bind_a";\nexport {};\n');
+		// Whole seconds, so restoring the mtime later is exact.
+		const pinned = Math.floor(Date.now() / 1000) - 30;
+		fs.utimesSync(importer, pinned, pinned);
 		expect(
 			(await diagnose({ paths: [importer] })).details.primaryDiagnosticsCount,
 		).toBe(0);
-		const { mtime } = fs.statSync(importer);
+		const { mtimeMs } = fs.statSync(importer);
 		// The server learns that bind_b is missing through another file.
 		const other = path.join(workspace, "bind_other.ts");
 		fs.writeFileSync(other, 'import "./bind_b";\nexport {};\n');
@@ -248,7 +251,9 @@ describe("a module created outside pi-lens (#4346)", () => {
 
 		fs.writeFileSync(path.join(workspace, "bind_b.ts"), "export {};\n");
 		fs.writeFileSync(importer, 'import "./bind_b";\nexport {};\n');
-		fs.utimesSync(importer, mtime, mtime);
+		fs.utimesSync(importer, pinned, pinned);
+		// Precondition: the stat check cannot see the rewrite.
+		expect(fs.statSync(importer).mtimeMs).toBe(mtimeMs);
 		const after = await diagnose({ paths: [importer] });
 
 		expect(after.text).not.toContain("Cannot find module bind_b");
