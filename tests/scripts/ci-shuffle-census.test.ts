@@ -861,12 +861,13 @@ describe("the ratchet file", () => {
 		"once-per-session-sink",
 		"persisted-graph-store",
 		"tree-sitter-wasm-state",
+		"wall-clock-resolution",
 	]);
 	// The ratchet's size, pinned both ways: adding a file raises it (a reviewer
 	// sees a new order-dependent file admitted), fixing one lowers it. Lower
 	// this number in the PR that fixes a file; never raise it to admit a new
 	// one without a named seam and an issue.
-	const PINNED_FILES = 31;
+	const PINNED_FILES = 32;
 
 	// Recurrence: a ratchet that grows silently (the point of #4405 is that it
 	// can only shrink).

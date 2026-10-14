@@ -128,6 +128,12 @@
 			"test": "word-index serialized memo lifecycle (#4124) > logs one row when a held memo is released and none when nothing is held"
 		},
 		{
+			"file": "tests/config/tmp-fixture-hygiene.test.ts",
+			"seam": "wall-clock-resolution",
+			"seed": 606,
+			"test": "tmp-fixture-hygiene > owner-marker liveness across platforms (#3186) > registers the heartbeat on the test lifecycle, not just defines it"
+		},
+		{
 			"file": "tests/index-2992-integration.test.ts",
 			"seam": "index-activation-state",
 			"seed": 202,
