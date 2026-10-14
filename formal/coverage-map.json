@@ -226,6 +226,10 @@
       "lsp-server-content",
       "store-freshness"
     ],
+    "clients/lsp/client-registry.ts": [
+      "lsp-crash",
+      "lsp-idle-reset"
+    ],
     "clients/lsp/client.ts": [
       "lsp-crash",
       "lsp-document-lifecycle",
@@ -380,7 +384,8 @@
   "notes": {
     "clients/installer/index.ts": "Only the install lock (tryAcquireInstallLock, acquireInstallLock, assertOwnsLock, the generation heartbeat) is modelled, and only partly: file-locks has no heartbeat or ownership recheck (#3553). The rest of the installer is not lifecycle.",
     "clients/lsp/server.ts": "The LSP service generation (captureLspServiceGeneration, lspServiceGenerationCell, #3755) is session-lifecycle's `svc` (one process counter; `perEvalSvc` is the pre-#3755 per-evaluation counter, `Mut3755GenPerEval`, caught by `FleetOwnersLive`), format-drain's ServiceGen and lsp-idle-reset's reset. The server registry table (idleEviction policy data, #3622) is not lifecycle.",
-    "clients/lsp/index.ts": "Per-client retirement (retireClient, #3672), capacity and idle eviction (#3622) map to lsp-crash `Evict`; per-generation derived state (EWMA, aux inflight, write-timeout streak) is not modelled yet (#3672, #3584). applyWorkspaceEdit callers are unmodelled (clients/lsp/edits.ts).",
+    "clients/lsp/client-registry.ts": "ClientRegistry (#2372 slice 3) holds what moved out of index.ts: per-client retirement (retireClient, #3672), capacity and idle eviction (#3622) map to lsp-crash `Evict`, the dead-client respawn and breaker to lsp-crash `Crash`/`Acquire`, and `markDestroyed` plus the client half of shutdown to lsp-idle-reset's reset. The per-generation derived state it drops through hooks stays in index.ts.",
+    "clients/lsp/index.ts": "Per-client retirement (retireClient, #3672), capacity and idle eviction (#3622) live in clients/lsp/client-registry.ts since #2372 slice 3 and map to lsp-crash `Evict`; per-generation derived state (EWMA, aux inflight, write-timeout streak) is not modelled yet (#3672, #3584). applyWorkspaceEdit callers are unmodelled (clients/lsp/edits.ts).",
     "clients/agent-nudge.ts": "The agent-advisories store (#3757, carried on /reload by #3777) belongs to session-lifecycle, which does not model it yet. The `_touched` accumulator is unscoped (#3758 class).",
     "clients/widget-state.ts": "The widget's per-verb write guards and rows (`diagnosticsWriteGuard`, `runnerWriteGuard`, `widgetStore`): session-lifecycle's WG policy row (carry on /reload, /fork, /clone, /tree; reset on the other starts, #3589) and, in SessionLifecycleF1, the two-verb pipeline write, the tie the guards must admit (`>=`), the rows' carry across a fork and the late verb's fence (F1 of #3803).",
     "clients/write-ordering-guard.ts": "`WriteOrderingGuard.shouldWrite` drops a token below the last seen and admits a tie. SessionLifecycleF1's `MutWidgetTieDrop` (`>`) and `Pre555WidgetNoGuard` pin both directions (F1 of #3803).",
