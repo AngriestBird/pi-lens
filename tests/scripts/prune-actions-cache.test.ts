@@ -8,6 +8,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
 	cacheFamily,
 	LIST_LIMIT,
+	main,
 	planPrune,
 	prune,
 } from "../../scripts/prune-actions-cache.mjs";
@@ -291,5 +292,172 @@ describe("prune (the gh boundary)", () => {
 			prune(failing, { apply: true, defaultBranch: "master" }),
 		).toThrow("HTTP 502");
 		expect(deletes(calls)).toEqual([]);
+	});
+});
+
+describe("tool-tree caches are bounded by count (r1 F3)", () => {
+	const week = (n: number) =>
+		cache(
+			`tool-smoke-tools-Linux-X64-2026-W${40 + n}-${"1".repeat(64)}`,
+			"refs/heads/master",
+			`2026-10-0${n}T04:00:00Z`,
+			943_000_000,
+		);
+
+	// Recurrence: review r1 F3. The ISO week sat inside the family, so five
+	// weekly 943 MB trees were five families of one and keep-2 never matched.
+	it("groups weekly copies of one tree and keeps the newest two", () => {
+		const copies = [1, 2, 3, 4, 5].map(week);
+		const plan = planPrune({ caches: copies, openPulls: [], branches: [] });
+		expect(ids(plan).sort()).toEqual(ids(copies.slice(0, 3)).sort());
+	});
+
+	// A pin change is a different hash, not a different family, so it competes
+	// with last week's tree for the two slots rather than adding a third.
+	it("keeps a tree per workflow prefix apart", () => {
+		expect(cacheFamily(week(1).key)).not.toBe(
+			cacheFamily(
+				week(1).key.replace("tool-smoke-tools", "parser-smoke-tools"),
+			),
+		);
+	});
+});
+
+describe("main (the CLI parse)", () => {
+	const caches = [
+		cache("npm-a", "refs/pull/99/merge", "2026-10-01T00:00:00Z", 100, 701),
+		cache(
+			`tool-develop-${"1".repeat(64)}`,
+			"refs/heads/develop",
+			"2026-10-03T00:00:00Z",
+			100,
+			711,
+		),
+		cache(
+			`tool-develop-${"2".repeat(64)}`,
+			"refs/heads/develop",
+			"2026-10-02T00:00:00Z",
+			100,
+			712,
+		),
+		cache(
+			`tool-develop-${"3".repeat(64)}`,
+			"refs/heads/develop",
+			"2026-10-01T00:00:00Z",
+			100,
+			713,
+		),
+	];
+	function run(argv: string[]) {
+		const calls: string[][] = [];
+		const gh = (args: string[]) => {
+			calls.push(args);
+			if (args[0] === "cache" && args[1] === "list")
+				return JSON.stringify(caches);
+			if (args[0] === "pr") return JSON.stringify([{ number: 10 }]);
+			if (args[0] === "api") return "develop\n";
+			return "";
+		};
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+		const error = vi.spyOn(console, "error").mockImplementation(() => {});
+		const code = main(argv, gh);
+		const out = log.mock.calls.map((call) => String(call[0]));
+		const err = error.mock.calls.map((call) => String(call[0]));
+		log.mockRestore();
+		error.mockRestore();
+		const deleted = calls
+			.filter((args) => args[0] === "cache" && args[1] === "delete")
+			.map((args) => Number(args[2]))
+			.sort();
+		return { code, out, err, deleted };
+	}
+
+	// Recurrence: review r1 F1. `const apply = argv.includes("--apply")` set to
+	// false makes the nightly prune a green no-op and the cap problem returns;
+	// set to true, a PR dry run deletes. No test ran `main`, so both survived.
+	it("deletes nothing without --apply", () => {
+		const result = run(["--default-branch", "develop"]);
+		expect(result.deleted).toEqual([]);
+		expect(result.out.at(-1)).toMatch(/^cache-prune: dry-run, /);
+		expect(result.code).toBe(0);
+	});
+
+	it("deletes the planned caches with --apply", () => {
+		const result = run(["--apply", "--default-branch", "develop"]);
+		expect(result.deleted).toEqual([701, 713]);
+		expect(result.out.at(-1)).toMatch(/^cache-prune: applied, 2 of 4 caches/);
+		expect(result.code).toBe(0);
+	});
+
+	// Recurrence: a hard-coded `master` would apply the keep-2 rule to the wrong
+	// ref (here develop is the default, so its third copy is superseded).
+	it("takes the default branch from --default-branch", () => {
+		const result = run(["--default-branch", "develop"]);
+		expect(
+			result.out.filter((line) => line.includes("superseded")),
+		).toHaveLength(1);
+	});
+
+	it.each([[["--default-branch"]], [["--default-branch", "--apply"]]])(
+		"exits 2 on %j and calls gh never",
+		(argv) => {
+			const result = run(argv);
+			expect(result.code).toBe(2);
+			expect(result.deleted).toEqual([]);
+			expect(result.err).toEqual(["--default-branch needs a branch name"]);
+		},
+	);
+});
+
+describe("an empty open-PR list never deletes PR caches (r1 F5)", () => {
+	function fakeGh(prs: unknown[]) {
+		const calls: string[][] = [];
+		const caches = [
+			cache(
+				"npm-open",
+				"refs/pull/4338/merge",
+				"2026-10-13T00:00:00Z",
+				100,
+				801,
+			),
+			cache("npm-old", "refs/pull/1/merge", "2026-10-01T00:00:00Z", 100, 802),
+			cache("tool-a", "refs/heads/gone", "2026-10-01T00:00:00Z", 100, 803),
+		];
+		const gh = (args: string[]) => {
+			calls.push(args);
+			if (args[0] === "cache" && args[1] === "list")
+				return JSON.stringify(caches);
+			if (args[0] === "pr") return JSON.stringify(prs);
+			if (args[0] === "api") return "master\n";
+			return "";
+		};
+		return { gh, calls };
+	}
+	const deleted = (calls: string[][]) =>
+		calls
+			.filter((args) => args[0] === "cache" && args[1] === "delete")
+			.map((args) => Number(args[2]));
+
+	// Recurrence: review r1 F5. A well-formed but wrong `gh pr list` (an empty
+	// array) read as "no PR is open" and --apply deleted open PR 4338's cache.
+	it("skips every PR-ref delete and reports why, but still prunes branches", () => {
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+		const { gh, calls } = fakeGh([]);
+		const result = prune(gh, { apply: true, defaultBranch: "master" });
+		const lines = log.mock.calls.map((call) => String(call[0]));
+		log.mockRestore();
+		expect(deleted(calls)).toEqual([803]);
+		expect(result.planned).toBe(1);
+		expect(
+			lines.filter((line) => line.startsWith("skipped 2 PR-cache deletions")),
+		).toHaveLength(1);
+	});
+
+	it("still deletes a closed PR's cache when some PR is open", () => {
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+		const { gh, calls } = fakeGh([{ number: 4338 }]);
+		prune(gh, { apply: true, defaultBranch: "master" });
+		log.mockRestore();
+		expect(deleted(calls).sort()).toEqual([802, 803]);
 	});
 });

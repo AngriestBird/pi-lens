@@ -117,15 +117,20 @@ describe("tool-tree cache composite action (#4358)", () => {
 			expect(saveAt).toBeGreaterThan(lastInstall);
 		});
 
-		// Recurrence: tool-smoke goes red on most nights; a save that only runs on
-		// success never fills the cache, and a save on an exact hit only logs a
-		// warning on every run.
-		it("saves after a red run, but not after a cancel or an exact hit", () => {
+		// Recurrence: review r1 F2. The key is first-wins for the week. Run
+		// 38586046285 went red at the LSP handshake layer, nine later layers were
+		// skipped, and the save still ran: that partial tree was then restored all
+		// week and re-downloaded the missing tools nightly. The save must wait for
+		// the LAST install-bearing step to have run (red or green), and still skip a
+		// cancel and an exact hit.
+		it("saves only once the last install step ran, not after a cancel or an exact hit", () => {
 			const save = jobSteps[saveAt];
 			const restore = jobSteps[restoreAt];
+			const last = jobSteps[lastInstall];
 			expect(restore.id).toBeTruthy();
+			expect(last.id).toBeTruthy();
 			expect(save.if).toBe(
-				`\${{ !cancelled() && steps.${restore.id}.outputs.cache-hit != 'true' }}`,
+				`\${{ !cancelled() && steps.${restore.id}.outputs.cache-hit != 'true' && steps.${last.id}.outcome != 'skipped' }}`,
 			);
 		});
 

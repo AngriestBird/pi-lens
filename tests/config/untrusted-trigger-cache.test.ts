@@ -43,8 +43,12 @@ function parse(source: string): Document {
 	return workflowDocument(source) as Document;
 }
 
-// actions/setup-node, -python, -go, -java, -dotnet and the third-party
-// `owner/setup-*` family restore and save a cache when `cache:` is set.
+// `actions/setup-*` and the third-party `owner/setup-*` family restore and save
+// a cache when `cache:` is set. Four cache without it, each by its own default:
+// setup-node 6.x auto-caches npm when package.json names it in `packageManager`
+// (opt out with `package-manager-cache: false`), setup-go caches unless
+// `cache: false`, setup-uv's `enable-cache` defaults to auto (on for
+// GitHub-hosted runners), and setup-ruby caches with `bundler-cache`.
 const SETUP_ACTION = /^[^/]+\/setup-[\w-]+$/;
 
 function truthyInput(value: unknown): boolean {
@@ -57,17 +61,34 @@ function truthyInput(value: unknown): boolean {
 	);
 }
 
+/** An input that is on unless the workflow sets it to a false value. */
+function onByDefault(inputs: Record<string, unknown>, name: string): boolean {
+	return inputs[name] === undefined || truthyInput(inputs[name]);
+}
+
 function stepCacheUse(step: Step): string | undefined {
 	if (typeof step.uses !== "string") return undefined;
 	const action = step.uses.split("@")[0].toLowerCase();
 	if (action === "actions/cache" || action.startsWith("actions/cache/"))
 		return action;
-	const input =
+	const inputs =
 		step.with && typeof step.with === "object"
-			? (step.with as Record<string, unknown>).cache
-			: undefined;
-	if (SETUP_ACTION.test(action) && truthyInput(input))
-		return `${action} with cache: ${String(input)}`;
+			? (step.with as Record<string, unknown>)
+			: {};
+	if (!SETUP_ACTION.test(action)) return undefined;
+	if (truthyInput(inputs.cache))
+		return `${action} with cache: ${String(inputs.cache)}`;
+	if (
+		action === "actions/setup-node" &&
+		onByDefault(inputs, "package-manager-cache")
+	)
+		return `${action} (auto-caches npm unless package-manager-cache: false)`;
+	if (action === "actions/setup-go" && inputs.cache === undefined)
+		return `${action} (caches by default)`;
+	if (action === "astral-sh/setup-uv" && onByDefault(inputs, "enable-cache"))
+		return `${action} (enable-cache defaults to auto)`;
+	if (action === "ruby/setup-ruby" && truthyInput(inputs["bundler-cache"]))
+		return `${action} with bundler-cache: ${String(inputs["bundler-cache"])}`;
 	return undefined;
 }
 
@@ -321,7 +342,7 @@ describe("untrusted triggers never restore or save a cache (#4358)", () => {
 			).toEqual([]);
 		});
 
-		it("does not flag a setup-* step with no cache input or cache: false", () => {
+		it("does not flag a setup-* step that does not cache", () => {
 			const workflow = [
 				"on: pull_request_target",
 				"jobs:",
@@ -329,11 +350,67 @@ describe("untrusted triggers never restore or save a cache (#4358)", () => {
 				"    runs-on: ubuntu-latest",
 				"    steps:",
 				"      - uses: actions/setup-node@abc",
-				"        with: { node-version: '22' }",
-				"      - uses: actions/setup-node@abc",
+				"        with: { node-version: '22', package-manager-cache: false }",
+				"      - uses: actions/setup-python@abc",
+				"        with: { python-version: '3.12' }",
+				"      - uses: actions/setup-go@abc",
 				"        with: { cache: false }",
+				"      - uses: astral-sh/setup-uv@abc",
+				"        with: { enable-cache: false }",
+				"      - uses: ruby/setup-ruby@abc",
+				"        with: { ruby-version: '3.3' }",
 			].join("\n");
 			expect(untrustedCacheFindings(workflow, "p.yml")).toEqual([]);
+		});
+
+		// Recurrence: review r1 F4. These setup actions cache without a `cache:`
+		// input: setup-go by default, setup-uv on GitHub-hosted runners by default
+		// (`enable-cache: auto`), setup-ruby through `bundler-cache`, and setup-node
+		// 6.x auto-caches npm when package.json names it in `packageManager`: the
+		// tool-smoke log of 2026-10-14 shows "Auto caching has been enabled for npm"
+		// and a cache hit with no `cache:` input at all.
+		it.each([
+			[
+				"setup-go with no cache input",
+				"actions/setup-go@abc",
+				"{ go-version: '1.23' }",
+			],
+			[
+				"setup-uv with no enable-cache",
+				"astral-sh/setup-uv@abc",
+				"{ version: '0.5' }",
+			],
+			[
+				"setup-uv enable-cache: true",
+				"astral-sh/setup-uv@abc",
+				"{ enable-cache: true }",
+			],
+			[
+				"setup-ruby bundler-cache: true",
+				"ruby/setup-ruby@abc",
+				"{ bundler-cache: true }",
+			],
+			[
+				"setup-node with no cache input",
+				"actions/setup-node@abc",
+				"{ node-version: '22' }",
+			],
+			[
+				"setup-node cache: npm with package-manager-cache: false",
+				"actions/setup-node@abc",
+				"{ cache: npm, package-manager-cache: false }",
+			],
+		])("flags %s", (_name, uses, withInput) => {
+			const workflow = [
+				"on: workflow_run",
+				"jobs:",
+				"  job:",
+				"    runs-on: ubuntu-latest",
+				"    steps:",
+				`      - uses: ${uses}`,
+				`        with: ${withInput}`,
+			].join("\n");
+			expect(untrustedCacheFindings(workflow, "p.yml")).toHaveLength(1);
 		});
 	});
 });

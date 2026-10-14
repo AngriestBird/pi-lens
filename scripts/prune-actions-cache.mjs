@@ -18,14 +18,18 @@
  *   3. The default branch: the newest KEEP caches per key family survive and
  *      the rest are superseded. A family is the key with its content hashes and
  *      run ids replaced, so `codeql-overlay-base-database-1-<digest>-javascript-
- *      2.27.2-<sha>-<run>-<attempt>` is one family across commits. CodeQL's
- *      overlay base database is ~600 MB per copy and only the newest is read, so
- *      it keeps 1; every other family keeps 2.
+ *      2.27.2-<sha>-<run>-<attempt>` is one family across commits, and an ISO
+ *      week (`-2026-W42-`) is replaced too, so the weekly tool trees are one
+ *      family. CodeQL's overlay base database is ~600 MB per copy and only the
+ *      newest is read, so it keeps 1; every other family keeps 2.
  * Any other ref shape (a tag) is left alone.
  *
  * Dry run by default: it lists what --apply would delete and changes nothing.
  * A failed listing (caches, open pull requests or branches) exits 1 before any
  * delete, so an empty or partial list can never read as "everything is stale".
+ * A successful but empty open-PR listing while PR-ref caches exist is not
+ * trusted either: the PR-ref deletions are skipped (and reported) and the
+ * branch and default-branch rules still run.
  * A failed delete is counted and the run exits 1 after the rest were tried.
  * Every deletion is printed with its reason, one line each, and a single
  * summary line closes the run.
@@ -43,12 +47,15 @@ export const KEEP_BY_PREFIX = Object.freeze({
 export const LIST_LIMIT = 1000;
 
 /**
- * The key with every 16+ hex digest and trailing run id / attempt replaced, so
- * successive saves of one cache share a family.
+ * The key with every ISO week (`2026-W42`), 16+ hex digest and trailing run id /
+ * attempt replaced, so successive saves of one cache share a family. The week
+ * is in the tool-tree keys (#4358); without this strip each week is its own
+ * family and keep-N never matches.
  * @param {string} key
  */
 export function cacheFamily(key) {
 	return key
+		.replace(/-\d{4}-W\d{2}(?=-)/g, "-*")
 		.replace(/-[0-9a-f]{16,}(?=-|$)/gi, "-*")
 		.replace(/-{1,2}\d{6,}-\d+$/, "-*");
 }
@@ -152,7 +159,19 @@ export function prune(gh, { apply, defaultBranch }) {
 	])
 		.split("\n")
 		.filter(Boolean);
-	const plan = planPrune({ caches, openPulls, branches, defaultBranch });
+	let plan = planPrune({ caches, openPulls, branches, defaultBranch });
+	// A well-formed but empty open-PR listing reads as "no PR is open" and would
+	// delete an open PR's cache; a real repository with PR caches has an open PR
+	// far more often than it has a wrong listing, so refuse those deletes.
+	const pullRef = (entry) => entry.ref.startsWith("refs/pull/");
+	const pullCaches = caches.filter(pullRef).length;
+	if (openPulls.length === 0 && pullCaches > 0) {
+		const skipped = plan.filter(pullRef).length;
+		plan = plan.filter((entry) => !pullRef(entry));
+		console.log(
+			`skipped ${skipped} PR-cache deletions: the open-PR listing is empty while ${pullCaches} PR-ref caches exist`,
+		);
+	}
 	let failed = 0;
 	for (const entry of plan) {
 		let outcome = apply ? "deleted" : "would delete";
@@ -175,7 +194,20 @@ export function prune(gh, { apply, defaultBranch }) {
 	return { planned: plan.length, total: caches.length, bytes, failed };
 }
 
-function main(argv) {
+const realGh = (args) =>
+	execFileSync("gh", args, {
+		encoding: "utf8",
+		stdio: ["ignore", "pipe", "pipe"],
+		maxBuffer: 16 * 1024 * 1024,
+	});
+
+/**
+ * The CLI body: flag parsing, then `prune`. `gh` is injectable so a test drives
+ * the real parse without a child process. Returns the exit code.
+ * @param {string[]} argv
+ * @param {(args: string[]) => string} [gh]
+ */
+export function main(argv, gh = realGh) {
 	const apply = argv.includes("--apply");
 	const at = argv.indexOf("--default-branch");
 	const defaultBranch = at >= 0 ? argv[at + 1] : "master";
@@ -183,12 +215,6 @@ function main(argv) {
 		console.error("--default-branch needs a branch name");
 		return 2;
 	}
-	const gh = (args) =>
-		execFileSync("gh", args, {
-			encoding: "utf8",
-			stdio: ["ignore", "pipe", "pipe"],
-			maxBuffer: 16 * 1024 * 1024,
-		});
 	try {
 		return prune(gh, { apply, defaultBranch }).failed > 0 ? 1 : 0;
 	} catch (error) {

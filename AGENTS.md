@@ -1181,9 +1181,12 @@ smoke workflows restore the managed tool tree through
 `.github/actions/tool-tree-cache`, keyed on the hash of
 `clients/installer/index.ts` (every pin) plus the ISO week; a pin that moves out
 of that file moves the action's `hashFiles` target in the same change
-(`tests/config/tool-tree-cache-workflow.test.ts`). `cache-prune.yml` runs
-`scripts/prune-actions-cache.mjs` nightly and on a push to master that edits
-it, so a closed pull request's caches and superseded copies never fill the cap.
+(`tests/config/tool-tree-cache-workflow.test.ts`). A smoke saves its tree once
+its last install step ran, red or green, because the key is first-wins per week.
+`cache-prune.yml` runs `scripts/prune-actions-cache.mjs` nightly and on a push
+to master that edits it, so a closed pull request's caches and superseded
+copies never fill the cap; only its `prune` job holds `actions: write` and
+passes `--apply` (`tests/config/cache-prune-workflow.test.ts`).
 A workflow that `pull_request_target` or `workflow_run` starts never restores
 or saves a cache, so a pull request cannot poison what a privileged run
 restores (`tests/config/untrusted-trigger-cache.test.ts`).

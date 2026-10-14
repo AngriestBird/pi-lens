@@ -46,7 +46,6 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: "22"
-          cache: npm
       # --ignore-scripts is safe here (unlike install-smoke.yml's tarball-pack
       # case, S6505's noted exception): this job runs `npm run build:dist`
       # itself as an explicit next step and never needs the `prepare` script's
@@ -94,7 +93,6 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: "22"
-          cache: npm
       # --ignore-scripts is safe here (unlike install-smoke.yml's tarball-pack
       # case, S6505's noted exception): this job runs `npm run build:dist`
       # itself as an explicit next step and never needs the `prepare` script's
@@ -124,7 +122,6 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: "22"
-          cache: npm
       # --ignore-scripts is safe here (unlike install-smoke.yml's tarball-pack
       # case, S6505's noted exception): this job runs `npm run build:dist`
       # itself as an explicit next step and never needs the `prepare` script's

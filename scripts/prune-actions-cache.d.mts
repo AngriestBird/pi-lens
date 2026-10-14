@@ -19,3 +19,7 @@ export declare function prune(
 	gh: (args: string[]) => string,
 	options: { apply: boolean; defaultBranch: string },
 ): { planned: number; total: number; bytes: number; failed: number };
+export declare function main(
+	argv: string[],
+	gh?: (args: string[]) => string,
+): number;

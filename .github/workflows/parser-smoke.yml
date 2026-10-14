@@ -57,7 +57,6 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '22'
-          cache: npm
 
       # pip carries ruff, yamllint, and sqlfluff. Everything else in tier 1 is
       # an npm package or a GitHub-release binary the harness fetches itself.
@@ -94,6 +93,7 @@ jobs:
           prefix: parser-smoke-tools
 
       - name: Tier-1 parsers against real binaries
+        id: tier1
         # --min-pass is the floor that keeps a green verdict honest. An
         # unavailable tool reports a warning, never a failure, so without it a
         # run where every install failed would exit 0 having proved nothing.
@@ -103,10 +103,12 @@ jobs:
           node scripts/smoke-tools.mjs --step2 --tier1 --install --verbose
           --min-pass=11
 
-      # Saved also when the tier-1 step went red (the tools it installed are
-      # still good); skipped on an exact hit and on a cancel.
+      # Saved once the tier-1 step has run, red or green: it is the only
+      # install-bearing step, so a tree saved after it is complete. Skipped when
+      # an earlier step failed (nothing installed), on an exact hit, and on a
+      # cancel.
       - name: Save the managed tool tree
-        if: ${{ !cancelled() && steps.tool_tree.outputs.cache-hit != 'true' }}
+        if: ${{ !cancelled() && steps.tool_tree.outputs.cache-hit != 'true' && steps.tier1.outcome != 'skipped' }}
         continue-on-error: true
         uses: ./.github/actions/tool-tree-cache
         with:

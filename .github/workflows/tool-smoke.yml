@@ -289,7 +289,6 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '22'
-          cache: npm
 
       # Python provides pip for the pip-distributed tools (ruff, yamllint,
       # sqlfluff, mypy). GitHub-release tools (shellcheck/shfmt/hadolint/taplo/
@@ -637,12 +636,16 @@ jobs:
           set -o pipefail
           node scripts/smoke-tools.mjs --resolution --verbose 2>&1 | tee "$RUNNER_TEMP/tool-smoke-resolution-layer.log"
 
-      # #4358: save what the layers above installed, also when one of them went
-      # red (a red night still installed most tools). Skipped on an exact hit,
-      # since a save to an existing key only logs a warning, and on a cancel,
-      # which can leave a half-written tree. A save problem never reds the job.
+      # #4358: save the tool tree once every `--install` layer above has run.
+      # The key is first-wins for the week, so a tree saved after an early red
+      # layer (the later layers skipped, their tools never installed) would be
+      # restored all week and re-download the rest each night. A red layer that
+      # still let the last install step run saves a complete tree, so the gate
+      # is that step's outcome, not the job's. Skipped on an exact hit, and on
+      # a cancel, which can leave a half-written tree. A save problem never
+      # reds the job.
       - name: Save the managed tool tree
-        if: ${{ !cancelled() && steps.tool_tree.outputs.cache-hit != 'true' }}
+        if: ${{ !cancelled() && steps.tool_tree.outputs.cache-hit != 'true' && steps.lens_full.outcome != 'skipped' }}
         continue-on-error: true
         uses: ./.github/actions/tool-tree-cache
         with:

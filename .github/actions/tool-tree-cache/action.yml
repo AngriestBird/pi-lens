@@ -11,8 +11,10 @@ description: >-
 # smoke keeps catching a dead or renamed package within seven days.
 #
 # Two modes, because a composite action has no post step and a job that goes
-# red must still save what it installed: `restore` runs before the first
-# `--install` step, `save` runs last with `if: ${{ !cancelled() }}`.
+# red after its installs must still save them: `restore` runs before the first
+# `--install` step, `save` runs after the last one. The caller gates the save on
+# that last install step having run (`outcome != 'skipped'`), because the key is
+# first-wins for the week and a tree saved after an early red layer would stick.
 #
 # Only schedule and workflow_dispatch workflows may use this: the cache scope
 # is the ref, and tests/config/untrusted-trigger-cache.test.ts fails a
