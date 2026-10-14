@@ -501,6 +501,33 @@ export interface LSPDiagnosticsHealth {
 	mergedCount: number;
 	dedupDroppedCount: number;
 	checkedAt: string;
+	/**
+	 * #4322: the primaries that resolved a root for this file but were not
+	 * acquired, when the clients this read acquired hold no primary at all (see
+	 * {@link unacquiredPrimaryServerIds}). A non-empty list means no primary
+	 * answered: either only auxiliaries did, or no client was acquired and the
+	 * read fell back to the last known answer. Either way the result says
+	 * nothing current about the language itself.
+	 */
+	unavailablePrimaryServerIds?: string[];
+}
+
+/**
+ * #4322: the one rule both collecting reads (`touchFile` and `getDiagnostics`)
+ * use to name the language servers that did not answer. An auxiliary speaks
+ * for its own scanner only, so when the acquired set holds no primary, every
+ * primary that resolved a root for this file (`resolvedPrimaryRoots`, filled by
+ * `ensureClientForServer` before it spawns) was tried and not acquired. A file
+ * with no rootable primary (an auxiliary-only language) has none; a touch that
+ * acquired any primary, a `fallbackFor` alternate included, has none either.
+ */
+function unacquiredPrimaryServerIds(
+	spawned: readonly SpawnedServer[],
+	resolvedPrimaryRoots: ReadonlyMap<string, string>,
+): string[] {
+	return spawned.some((entry) => !isAuxiliary(entry.info))
+		? []
+		: [...resolvedPrimaryRoots.keys()];
 }
 
 function mergeLspDiagnostics(
@@ -3838,6 +3865,13 @@ export class LSPService {
 			});
 			return;
 		}
+		// #4322: auxiliaries answered but no language server was acquired; a
+		// primary that resolved a root for this file and was not acquired makes
+		// the touch inconclusive (`resolveTouchVerdict`).
+		const unavailablePrimaryServerIds = unacquiredPrimaryServerIds(
+			spawned,
+			resolvedPrimaryRoots,
+		);
 		const leaseKeys = await this.clientRegistry.acquireClientLeases(
 			spawned,
 			filePath,
@@ -5876,6 +5910,7 @@ export class LSPService {
 			// is throw away the primary's answer, which is the #533 honesty doctrine
 			// cutting both ways.
 			const verdict = resolveTouchVerdict({
+				unavailablePrimaryServerIds,
 				primaryNotifyWriteTimedOutServerIds,
 				diagnosticsTimedOut,
 				diagnosticsUnansweredServerIds: diagnosticsUnansweredPrimaryServerIds,
@@ -6443,8 +6478,13 @@ export class LSPService {
 		const candidateServerIds = getServersForFileWithConfig(filePath).flatMap(
 			(s) => (excludeServerIds?.has(s.id) ? [] : [s.id]),
 		);
+		const resolvedPrimaryRoots = new Map<string, string>();
 		const { clients: spawned, serverCountAttempted } =
-			await this.getClientsForFile(filePath, excludeServerIds);
+			await this.getClientsForFile(
+				filePath,
+				excludeServerIds,
+				resolvedPrimaryRoots,
+			);
 		if (spawned.length === 0) {
 			// #4323: an excluded server's last answer is not this read's answer.
 			// Drop its rows from what this caller sees; the shared store keeps
@@ -6457,6 +6497,12 @@ export class LSPService {
 						)
 					: stored;
 			const failureKind = stale?.length ? "no_clients_stale" : "no_clients";
+			// #4322: with nothing acquired, every primary that resolved a root went
+			// unanswered, so an empty answer here is not a clean one.
+			const unavailablePrimaryServerIds = unacquiredPrimaryServerIds(
+				spawned,
+				resolvedPrimaryRoots,
+			);
 			this.lastDiagnosticsHealth.set(normalizedPath, {
 				health: failureKind,
 				failureKind,
@@ -6466,6 +6512,7 @@ export class LSPService {
 				mergedCount: stale?.length ?? 0,
 				dedupDroppedCount: 0,
 				checkedAt: new Date().toISOString(),
+				unavailablePrimaryServerIds,
 			});
 			logLatency({
 				type: "phase",
@@ -6480,6 +6527,9 @@ export class LSPService {
 					failureKind,
 					health: failureKind,
 					servers: [],
+					...(unavailablePrimaryServerIds.length > 0 && {
+						unavailablePrimaryServerIds,
+					}),
 				},
 			});
 			return stale ?? [];
@@ -6637,6 +6687,10 @@ export class LSPService {
 			(entry) => entry.diagnosticCount > 0,
 		).length;
 		const failureKind = merged.length === 0 ? "ok_empty" : "success";
+		const unavailablePrimaryServerIds = unacquiredPrimaryServerIds(
+			spawned,
+			resolvedPrimaryRoots,
+		);
 
 		this.lastDiagnosticsHealth.set(normalizedPath, {
 			health: failureKind === "success" ? "ok" : "ok_empty",
@@ -6647,6 +6701,7 @@ export class LSPService {
 			mergedCount: merged.length,
 			dedupDroppedCount: rawCount - merged.length,
 			checkedAt: new Date().toISOString(),
+			unavailablePrimaryServerIds,
 		});
 
 		logLatency({
@@ -6669,6 +6724,10 @@ export class LSPService {
 					waitMs: entry.waitMs,
 					diagnosticCount: entry.diagnosticCount,
 				})),
+				// #4322: present only when auxiliaries alone answered.
+				...(unavailablePrimaryServerIds.length > 0 && {
+					unavailablePrimaryServerIds,
+				}),
 			},
 		});
 

@@ -191,11 +191,26 @@ export interface TouchFileResult {
 /**
  * #1549: which deadline made a touch inconclusive. `"mixed"` means both a
  * primary's notify write and the diagnostics wait lapsed on this touch.
+ * #4322: `"primary-unavailable"` means no language server was acquired for a
+ * file that has one, so only auxiliaries (if any) answered.
  */
-type TouchInconclusiveReason = "notify-write" | "diagnostics-wait" | "mixed";
+type TouchInconclusiveReason =
+	| "notify-write"
+	| "diagnostics-wait"
+	| "mixed"
+	| "primary-unavailable";
 
 /** The inputs {@link resolveTouchVerdict} decides a touch's honesty verdict from. */
 export interface TouchVerdictInput {
+	/**
+	 * #4322: PRIMARY-role servers that resolved a root for this file but were
+	 * not acquired by the touch (spawn failed, breaker open, or still starting
+	 * when the client wait ended), while no other primary was acquired either.
+	 * An auxiliary's answer does not speak for the language server, so the
+	 * touch is inconclusive. Empty when a primary was acquired, or when the file
+	 * has no rootable primary at all.
+	 */
+	unavailablePrimaryServerIds?: readonly string[];
 	/**
 	 * PRIMARY-role servers whose `didOpen`/`didChange` write did not land inside
 	 * the notify budget (timed out or rejected). Auxiliary write failures are
@@ -243,6 +258,16 @@ export interface TouchVerdict {
  * `inconclusive` can be audited against, and it is unit-tested directly.
  */
 export function resolveTouchVerdict(input: TouchVerdictInput): TouchVerdict {
+	// #4322: with no language server acquired, the deadlines below can only
+	// describe auxiliaries, so the missing primary is the whole verdict.
+	const unavailableIds = [...new Set(input.unavailablePrimaryServerIds ?? [])];
+	if (unavailableIds.length > 0) {
+		return {
+			inconclusive: true,
+			inconclusiveServerIds: unavailableIds,
+			inconclusiveReason: "primary-unavailable",
+		};
+	}
 	const notifyIds = [...new Set(input.primaryNotifyWriteTimedOutServerIds)];
 	const waitIds = input.diagnosticsTimedOut
 		? [...new Set(input.diagnosticsUnansweredServerIds)]

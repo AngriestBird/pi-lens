@@ -76,6 +76,9 @@ real seam. Check that every gate the diff adds is exercised through that path.
   fixer's hand mutations. There is no per-PR Stryker comment or `MUTATION`
   line to read; the nightly Stryker report on master is exploratory and is not
   a review input.
+- For every relaxed or rewritten existing assertion, mutate the behaviour the
+  test is named for; a rewrite that stays green is a finding (#4390). This is
+  the exception to the one-spot-check cap above.
 - Repeat the pattern and population sweeps. Check blast radius, bounded
   observability, changelog, commit, and PR-body requirements.
 - Re-run the PR's `## Class sweep` search yourself and widen it when the
@@ -117,6 +120,10 @@ instead of rebuilding the probe.
   except `index.ts`, which gates on the lifecycle hook handler a hunk lands in.
   A green `TLA+ models` run over an unchanged model proves nothing about the
   new code.
+  For a `TLA+ unaffected` line, read the family's as-built config constants:
+  a diff that changes a behaviour one of them encodes refutes the line and is
+  a finding (#4387: #4235 changed read-guard authorship while the as-built
+  switches kept the old behaviour; #4393 will pin each constant to the code).
 - **Red-proof audit.** A claimed red without its quoted transcript is a finding
   of its own; reproduce it (step 3).
 - **Quoted-evidence audit.** Diff every CI line the body quotes against the job

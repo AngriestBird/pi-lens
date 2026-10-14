@@ -37,7 +37,9 @@ exports change.
   family in `formal/coverage-map.json`, write the invariant the change
   preserves or tightens, and show the violating config red on the pre-fix model
   and green after, or carry `TLA+ unaffected: <family> — <reason>` in the PR
-  body. A row is any-of (one listed family's model move or declaration
+  body. The unaffected line is wrong when the change alters a behaviour an
+  as-built config constant encodes: flip that constant and its configs instead
+  (#4387). A row is any-of (one listed family's model move or declaration
   satisfies it); a row of 4+ families only prints a note, except `index.ts`,
   whose row gates on the lifecycle hook handler a hunk lands in (#3878). The
   map owner is the lane that adds a `formal/<family>/`: it adds the family and
@@ -81,13 +83,19 @@ exports change.
   from the pre-fix SHA (`git checkout <sha> -- clients/…`), never `tests`
   (#3166) and never uncommitted work, and run `git status` after any bulk
   restore. Without Git authority, use a saved patch.
-- Hand-mutate only the NEW guard, branch, filter, or cap the PR is about, both
-  directions, one row per direction, and quote the compile-valid red. The new
-  test is the only red under at least one mutation. This is the whole PR
-  mutation layer (AGENTS.md, #4005): there is no per-PR Stryker job, comment, or
+- Hand-mutate only the NEW guard, branch, filter, or cap the PR is about, and
+  the behaviour behind each relaxed assertion (next bullet), both directions,
+  one row per direction, and quote the compile-valid red. The new test is the
+  only red under at least one mutation. These rows are the whole PR mutation
+  layer (AGENTS.md, #4005): there is no per-PR Stryker job, comment, or
   `MUTATION` line, and no survivor triage. The nightly Stryker report on master
   is exploratory and is not read here. Use bounded hand probes locally; never
   run a full Stryker campaign in a worktree.
+- A PR that relaxes or rewrites an existing assertion (a changed meaning makes
+  the old expectation wrong) mutates the behaviour that test is named for. Quote
+  the red on the new assertion. A rewrite that stays green with that
+  behaviour broken is a deleted test (#4390: the eviction smoke's rewrite
+  passed with root re-registration broken).
 - The manual per-test campaign (`stryker-pertest.yml`, #4365) lists tests that
   cover mutated code but kill no mutant. It is a triage input, not a verdict:
   a candidate that guards another seam or a named recurrence stays, and a

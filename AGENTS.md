@@ -66,9 +66,10 @@ The principles govern building, testing, and closes-versus-refs. pi-lens adds:
   title; the closing keyword goes in the body, because GitHub ignores it in a
   title.
 - Mutation acceptance has one PR layer (#4005, superseding #3973's two): every
-  new guard, branch, filter, cap, or fallback has bounded compile-valid
-  hand-mutation proof under the engineering principles, and a missing proof or
-  a demonstrated correctness gap blocks merge. There is no per-PR Stryker job,
+  new guard, branch, filter, cap, or fallback, and the behaviour behind every
+  relaxed or rewritten assertion, has bounded compile-valid hand-mutation
+  proof under the engineering principles, and a missing proof or a
+  demonstrated correctness gap blocks merge. There is no per-PR Stryker job,
   comment, or `MUTATION` line to read. Stryker runs nightly on master as an
   exploratory test-adequacy report (`.github/workflows/stryker-nightly.yml`,
   one rolling tracking issue); its survivors are candidates for a missing
@@ -95,6 +96,8 @@ The principles govern building, testing, and closes-versus-refs. pi-lens adds:
   except the `index.ts` row, which gates per lifecycle hook handler a changed
   hunk lands in (an edit outside every handler prints a note). A TLA lane that
   adds a family adds its map row (#3802, #3878).
+  The unaffected line never covers a change to behaviour an as-built config
+  constant encodes: flip the constant and its configs in the same PR.
 
 <important if="delegating work or coordinating a lane">
 
@@ -526,7 +529,25 @@ file-scoped worklist and receives no project-wide scanner output.
 
 66. **In-process module double with a real seam:** when a `clients/` module has
     a test setter, adopter, or reset, drive that seam; keep a double only at a
-    process or host boundary.
+    process or host boundary. New in-process `vi.mock` targets and hand-rolled
+    LSP client or service doubles are ratcheted by
+    `tests/clients/flake-shape-ratchet.test.ts` (`in-process-mock`,
+    `service-double`).
+
+67. **Sink read before drain:** a log sink's `log`/`append` only enqueue, so a
+    test that reads the sink's byte offset, line count, or rows while one of
+    its own writes is queued counts late bytes on the wrong side of its window,
+    or misses them. Await that sink's flush (or `flushAllNdjsonWriters`) right
+    before the read with no other await in between, or inside the reading
+    helper. Enforced by `tests/config/sink-read-drain-sweep.test.ts`.
+
+68. **Model switch drift:** a TLA+ config constant that mirrors a code choice
+    (inject a read, retire on an unknown range) goes stale when the code
+    changes and the constant does not, and TLC then proves the old design
+    green. A PR that changes such a behaviour flips the constant in the same
+    change; a `TLA+ unaffected` line never covers it. Screen: for a mapped
+    file's diff, list the CONSTANTS in the family's as-built
+    `formal/<family>/*.cfg` and check each against the changed branch.
 
 </important>
 
@@ -777,7 +798,11 @@ file-scoped worklist and receives no project-wide scanner output.
   inconclusive but the merged result contains answered diagnostics, dispatch
   preserves only diagnostics from content-confirmed contributors and carries
   the named primary gap as unconfirmed; only an empty inconclusive result is
-  skipped (#4219, #4231).
+  skipped (#4219, #4231). Auxiliaries never confirm a file alone: a touch that
+  acquired auxiliaries but no primary that rooted for the file is inconclusive
+  with `primary-unavailable`, naming those primaries, and `getDiagnostics`
+  records the same ids as `unavailablePrimaryServerIds` (one rule,
+  `unacquiredPrimaryServerIds`; an auxiliary-only language is unaffected).
 - The explicit `lsp_diagnostics` read checks `exceedsLspSyncLimits` once before
   warm attachment or `touchFile`; an over-bound file returns a `too_large`
   result with its byte/line measurement and records
@@ -1175,7 +1200,7 @@ uses `getGlobalPiLensLogDir()`. `PILENS_DATA_DIR` relocates project state and
 `displayProjectDataPath`; do not spell a project-data path in agent text.
 
 All loggers use `createNdjsonLogger`. Flush the specific logger before reading
-its file; graceful `session_shutdown` returns the shared bounded drain before
+its file (shape 67); graceful `session_shutdown` returns the shared bounded drain before
 pi closes stdin or exits. Relevant logs are `latency.log`, `sessionstart.log`, `cascade.log`,
 `review-graph.log`, `read-guard.log`, `actionable-warnings.log`,
 `extension.log`, `tree-sitter.log`, and `dispositions.log`.
@@ -1208,7 +1233,10 @@ Every logic change has relevant tests. New tests use fake clocks and
 processes. Real elapsed-time assertions belong in the serialized
 `wallClockBudgetInclude` lane. Real LSP child tests belong in
 `lsp-spawn-heavy`. Any admitted real spawn or timer carries the flake-shape
-header, baseline row, and lane membership.
+header, baseline row, and lane membership. A new `vi.mock` of a module outside
+`PROCESS_BOUNDARY_MODULES` (`tests/support/flake-shape-scan.ts`), or a new
+hand-rolled LSP client or service double, carries the flake-shape header for
+its detector, a baseline row, and an `ADMITTED_AFTER_BASELINE` entry.
 
 The real-pi harness defaults to `--no-session`; a persisted-session witness
 opts into `withRealPi({ persistedSession: true })`, which pins `--session-dir`
@@ -1371,9 +1399,11 @@ node_modules/ -delete`; unlinking it with `rm node_modules` stays allowed;
 #4044); an unpinned `node` probe loading
 `clients/` or `dist/`; `TMPDIR`/`TMP`/`TEMP` aimed at the harness home; bare
 `pkill`/`killall` patterns (#3556); worktrees, clones, or `mktemp -d` under
-`/tmp` (#3526); a commit or push chained after a check with `;` or a pipe
-instead of `&&` (#3471); and every hook bypass (`--no-verify`, commit `-n`,
-`core.hooksPath`, `HUSKY=0`, `PI_LENS_SKIP_HOOKS=`; #3778). `kill $(pgrep -f …)`
+`/tmp` (#3526); a write under `/tmp` through a redirect (`>`, `>>`, `2>`,
+`&>`), `tee`, a `cp`/`mv`/`install` target, `mkdir` or `touch` only (the
+harness's own `/tmp/claude-<uid>/` stays allowed, as do reads); a commit or push
+chained after a check with `;` or a pipe instead of `&&` (#3471); and every
+hook bypass (`--no-verify`, commit `-n`, `core.hooksPath`, `HUSKY=0`, `PI_LENS_SKIP_HOOKS=`; #3778). `kill $(pgrep -f …)`
 is a known blind spot; kill your own recorded PID. For a red that looks
 unrelated, prove it with `node scripts/red-on-base.mjs` and stop. Human-facing
 version: `CONTRIBUTING.md` "Local git hooks".

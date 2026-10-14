@@ -278,6 +278,37 @@ describe("lens_diagnostics compact filename", () => {
 	});
 });
 
+describe("lens_diagnostics compact line for a file no language server answered (#4322)", () => {
+	it("says no language server answered rather than that it cannot confirm clean", () => {
+		const tool = makeTool({}, {});
+		const rendered = (
+			tool.renderResult!(
+				{
+					content: [
+						{ type: "text", text: "Primary LSP (json): not available" },
+					],
+					details: {
+						source: "lsp",
+						mode: "file",
+						filePath: "/project/probe.json",
+						totalDiagnostics: 0,
+						unconfirmed: true,
+						primaryUnavailable: "Primary LSP (json): not available",
+					},
+				} as any,
+				{ expanded: false },
+				{} as Theme,
+				{ args: { source: "lsp", path: "/project/probe.json" } },
+			) as any
+		)
+			.render(200)
+			.join("\n");
+		expect(rendered).toContain(
+			"lens_diagnostics probe.json — unconfirmed (no language server answered)",
+		);
+	});
+});
+
 function withIgnoredFixture<T>(fn: (cwd: string) => Promise<T>): Promise<T> {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-diag-ignore-"));
 	fs.writeFileSync(
