@@ -341,7 +341,6 @@ class Judge {
 				(arg: SgNode) =>
 					`argument ${arg.text()} is evaluated before ${callee?.text() ?? "the delegate"}'s try runs; pass the message itself and read it inside the try`,
 			);
-		if (evaluated.length > 0) return evaluated;
 		const target =
 			callee?.kind() === "identifier" ? this.resolve(callee) : undefined;
 		const position = args.findIndex(
@@ -350,13 +349,17 @@ class Judge {
 		if (!target) {
 			this.unresolved = true;
 			return [
+				...evaluated,
 				`delegates to ${callee?.text() ?? "an expression"}, which this file does not define; the scan cannot follow it`,
 			];
 		}
-		return this.handler(
-			target,
-			position < 0 ? Number.MAX_SAFE_INTEGER : position,
-		);
+		return [
+			...evaluated,
+			...this.handler(
+				target,
+				position < 0 ? Number.MAX_SAFE_INTEGER : position,
+			),
+		];
 	}
 
 	private tryStatement(statement: SgNode): string[] {

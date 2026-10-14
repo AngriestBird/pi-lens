@@ -304,6 +304,16 @@ describe("worker message boundary ratchet (#4402, recurrence #4400)", () => {
 				),
 			),
 		).toEqual({ verdict: "contained", problems: [] });
+		// An unresolved delegate still names the argument it evaluates first.
+		expect(
+			verdictOf('worker.on("message", (m: unknown) => imported(parse(m)));'),
+		).toEqual({
+			verdict: "unresolved",
+			problems: [
+				"argument parse(m) is evaluated before imported's try runs; pass the message itself and read it inside the try",
+				"delegates to imported, which this file does not define; the scan cannot follow it",
+			],
+		});
 	});
 
 	it("judges an unhandled same-file async call in the try like the async IIFE", () => {
