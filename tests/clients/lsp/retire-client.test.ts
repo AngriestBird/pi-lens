@@ -75,15 +75,17 @@ type Raw = {
 		demonstratedReady: Set<string>;
 		demonstratedCold: Set<string>;
 	};
-	clientLastUsedAt: Map<string, number>;
-	idleEvictionTimers: Map<string, unknown>;
+	clientRegistry: {
+		clientLastUsedAt: Map<string, number>;
+		idleEvictionTimers: Map<string, unknown>;
+		makeCapacityForClient(key: string): Promise<boolean>;
+	};
 	auxNotifyInflight: Map<string, { client: unknown; unacked: number }>;
 	auxNotifyDrainLatencyEwma: Map<string, number>;
 	notifyWriteBackpressureStreak: Map<string, number>;
 	outstandingAuxNotifyWrites: Map<string, unknown>;
 	noteAuxNotifyIssued(key: string, client: unknown): void;
 	auxNotifyWedgeBudgetMs(key: string): number;
-	makeCapacityForClient(key: string): Promise<boolean>;
 	demoteForNotifyStall(
 		key: string,
 		entry: { client: Fake; info: { id: string } },
@@ -125,17 +127,17 @@ function seedLifetimeState(
 	raw.notifyWriteBackpressureStreak.set(key, 2);
 	raw.auxNotifyDrainLatencyEwma.set(key, 850);
 	raw.noteAuxNotifyIssued(key, client);
-	raw.clientLastUsedAt.set(key, 1);
+	raw.clientRegistry.clientLastUsedAt.set(key, 1);
 }
 
 function expectRetired(raw: Raw, key: string): void {
 	expect(raw.state.clients.has(key)).toBe(false);
 	expect(raw.state.clientSpawnedAt.has(key)).toBe(false);
-	expect(raw.clientLastUsedAt.has(key)).toBe(false);
+	expect(raw.clientRegistry.clientLastUsedAt.has(key)).toBe(false);
 	expect(raw.state.demonstratedReady.has(key)).toBe(false);
 	expect(raw.state.demonstratedCold.has(key)).toBe(false);
 	expect(raw.notifyWriteBackpressureStreak.has(key)).toBe(false);
-	expect(raw.idleEvictionTimers.has(key)).toBe(false);
+	expect(raw.clientRegistry.idleEvictionTimers.has(key)).toBe(false);
 	expect(raw.outstandingAuxNotifyWrites.has(key)).toBe(false);
 	// #3585: the two entries the paths disagreed on.
 	expect(raw.auxNotifyInflight.has(key)).toBe(false);
@@ -190,9 +192,9 @@ describe("#3585 retireClient — one retirement for every path", () => {
 			"capacity eviction",
 			async () => {
 				process.env.PI_LENS_LSP_CLIENT_CEILING = "1";
-				await expect(raw.makeCapacityForClient("go:/other")).resolves.toBe(
-					true,
-				);
+				await expect(
+					raw.clientRegistry.makeCapacityForClient("go:/other"),
+				).resolves.toBe(true);
 			},
 		],
 		[
@@ -200,7 +202,7 @@ describe("#3585 retireClient — one retirement for every path", () => {
 			async () => {
 				// `seedLifetimeState` bypassed the warm-reuse that arms the timer.
 				await raw.getClientForFile("/repo/main.ts");
-				expect(raw.idleEvictionTimers.has(key)).toBe(true);
+				expect(raw.clientRegistry.idleEvictionTimers.has(key)).toBe(true);
 				await vi.advanceTimersByTimeAsync(20);
 			},
 		],
@@ -274,7 +276,7 @@ describe("#3585 retirement population", () => {
 			const source = fs.readFileSync(path.join(dir, file), "utf8");
 			const blanked = stripCommentsAndStrings(source);
 			const helper = blanked.match(
-				/private retireClient\(key: string\): void \{[\s\S]*?\n\t\}\n/,
+				/\bretireClient\(key: string\): void \{[\s\S]*?\n\t\}\n/,
 			);
 			if (helper) helperFiles.push(file);
 			const outside = helper ? blanked.replace(helper[0], "") : blanked;
@@ -286,8 +288,36 @@ describe("#3585 retirement population", () => {
 		// Shape 10: a walk that found nothing must not read as a clean population.
 		assertNonEmptyScan("clients/lsp sources", scanned, 10);
 		expect(helperFiles, "retireClient is defined exactly once").toEqual([
-			"index.ts",
+			"client-registry.ts",
 		]);
+		expect(offenders).toEqual([]);
+	});
+
+	/**
+	 * Recurrence (#2372 slice 3): `LSPState` holds the registry's own Map
+	 * objects for the service's readers. A later slice that writes through
+	 * that alias (or reaches into the registry's maps) bypasses retirement
+	 * and the breaker, the same shape as #3502 and #3537. Blanked source.
+	 */
+	it("only client-registry.ts writes the registry's shared maps", () => {
+		const dir = path.resolve(__dirname, "../../../clients/lsp");
+		const offenders: string[] = [];
+		let scanned = 0;
+		for (const file of fs.readdirSync(dir, { recursive: true }) as string[]) {
+			if (!file.endsWith(".ts") || file.endsWith(".d.ts")) continue;
+			if (file === "client-registry.ts") continue;
+			scanned += 1;
+			const blanked = stripCommentsAndStrings(
+				fs.readFileSync(path.join(dir, file), "utf8"),
+			);
+			for (const hit of blanked.matchAll(
+				/\b(?:state|clientRegistry)\s*\.\s*(?:clients|inFlight|broken|clientSpawnedAt)\s*\.\s*(?:set|delete|clear)\s*\(/g,
+			)) {
+				const line = blanked.slice(0, hit.index).split("\n").length;
+				offenders.push(`${file}:${line}`);
+			}
+		}
+		assertNonEmptyScan("clients/lsp sources", scanned, 10);
 		expect(offenders).toEqual([]);
 	});
 });

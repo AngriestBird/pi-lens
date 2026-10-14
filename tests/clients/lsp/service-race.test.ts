@@ -114,10 +114,12 @@ describe("LSPService race hardening", () => {
 		expect(await timedOut).toBeUndefined();
 		const internal = service as unknown as {
 			state: { inFlight: Map<string, unknown>; clients: Map<string, unknown> };
-			clientLeases: Map<string, number>;
+			clientRegistry: {
+				clientLeases: Map<string, number>;
+			};
 		};
 		expect(internal.state.inFlight.size).toBe(1);
-		expect(internal.clientLeases.size).toBe(0);
+		expect(internal.clientRegistry.clientLeases.size).toBe(0);
 
 		initialize.release();
 		await service.getClientForFile(file);
@@ -126,7 +128,7 @@ describe("LSPService race hardening", () => {
 		expect(createLSPClient).toHaveBeenCalledTimes(1);
 		expect(service.getAliveClientCount()).toBe(1);
 		expect(internal.state.inFlight.size).toBe(0);
-		expect(internal.clientLeases.size).toBe(0);
+		expect(internal.clientRegistry.clientLeases.size).toBe(0);
 		await service.shutdown();
 		expect(client.shutdown).toHaveBeenCalledTimes(1);
 		expect(internal.state.clients.size).toBe(0);

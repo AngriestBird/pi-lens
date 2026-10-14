@@ -123,8 +123,10 @@ describe("LSPService circuit breaker — post-init runtime exits (#1127)", () =>
 		const service = new LSPService();
 		const internal = service as unknown as {
 			state: { broken: Map<string, number>; clients: Map<string, unknown> };
-			runtimeExitCounts: Map<string, number>;
-			permanentlyBroken: Set<string>;
+			clientRegistry: {
+				runtimeExitCounts: Map<string, number>;
+				permanentlyBroken: Set<string>;
+			};
 		};
 
 		const server = makeSpawnServer("opengrep");
@@ -164,7 +166,7 @@ describe("LSPService circuit breaker — post-init runtime exits (#1127)", () =>
 			const detect = await service.getClientForFile(file);
 			expect(detect).toBeUndefined();
 
-			if (internal.permanentlyBroken.has(key)) {
+			if (internal.clientRegistry.permanentlyBroken.has(key)) {
 				// Converged: give-up latched on this detection. No further spawn
 				// attempt happens even though nothing else changed.
 				break;
@@ -178,8 +180,10 @@ describe("LSPService circuit breaker — post-init runtime exits (#1127)", () =>
 			clients.at(-1)!.die();
 		}
 
-		expect(internal.permanentlyBroken.has(key)).toBe(true);
-		expect(internal.runtimeExitCounts.get(key)).toBe(BROKEN_PERMANENT_AFTER);
+		expect(internal.clientRegistry.permanentlyBroken.has(key)).toBe(true);
+		expect(internal.clientRegistry.runtimeExitCounts.get(key)).toBe(
+			BROKEN_PERMANENT_AFTER,
+		);
 		// Exactly BROKEN_PERMANENT_AFTER spawns happened before give-up — the
 		// breaker converged instead of respawning on every remaining iteration.
 		expect(server.getSpawnCount()).toBe(BROKEN_PERMANENT_AFTER);
@@ -200,8 +204,10 @@ describe("LSPService circuit breaker — post-init runtime exits (#1127)", () =>
 				broken: Map<string, number>;
 				clientSpawnedAt: Map<string, number>;
 			};
-			runtimeExitCounts: Map<string, number>;
-			permanentlyBroken: Set<string>;
+			clientRegistry: {
+				runtimeExitCounts: Map<string, number>;
+				permanentlyBroken: Set<string>;
+			};
 		};
 
 		const server = makeSpawnServer("opengrep");
@@ -231,8 +237,8 @@ describe("LSPService circuit breaker — post-init runtime exits (#1127)", () =>
 		const second = await service.getClientForFile(file);
 		expect(second).toBeUndefined(); // cooldown was just set by the count below
 
-		expect(internal.runtimeExitCounts.get(key)).toBe(1);
-		expect(internal.permanentlyBroken.has(key)).toBe(false);
+		expect(internal.clientRegistry.runtimeExitCounts.get(key)).toBe(1);
+		expect(internal.clientRegistry.permanentlyBroken.has(key)).toBe(false);
 	});
 
 	it("does NOT count a deliberate shutdown()-driven restart toward the breaker", async () => {
@@ -240,8 +246,10 @@ describe("LSPService circuit breaker — post-init runtime exits (#1127)", () =>
 		const service = new LSPService();
 		const internal = service as unknown as {
 			state: { broken: Map<string, number> };
-			runtimeExitCounts: Map<string, number>;
-			permanentlyBroken: Set<string>;
+			clientRegistry: {
+				runtimeExitCounts: Map<string, number>;
+				permanentlyBroken: Set<string>;
+			};
 		};
 
 		const server = makeSpawnServer("opengrep");
@@ -273,8 +281,8 @@ describe("LSPService circuit breaker — post-init runtime exits (#1127)", () =>
 			last.die();
 		}
 
-		expect(internal.runtimeExitCounts.get(key) ?? 0).toBe(0);
-		expect(internal.permanentlyBroken.has(key)).toBe(false);
+		expect(internal.clientRegistry.runtimeExitCounts.get(key) ?? 0).toBe(0);
+		expect(internal.clientRegistry.permanentlyBroken.has(key)).toBe(false);
 		expect(server.getSpawnCount()).toBe(8);
 	});
 
@@ -286,8 +294,10 @@ describe("LSPService circuit breaker — post-init runtime exits (#1127)", () =>
 				broken: Map<string, number>;
 				clientSpawnedAt: Map<string, number>;
 			};
-			runtimeExitCounts: Map<string, number>;
-			permanentlyBroken: Set<string>;
+			clientRegistry: {
+				runtimeExitCounts: Map<string, number>;
+				permanentlyBroken: Set<string>;
+			};
 		};
 
 		const server = makeSpawnServer("opengrep");
@@ -311,8 +321,8 @@ describe("LSPService circuit breaker — post-init runtime exits (#1127)", () =>
 		const second = await service.getClientForFile(file);
 		expect(second).toBeDefined();
 
-		expect(internal.runtimeExitCounts.get(key) ?? 0).toBe(0);
-		expect(internal.permanentlyBroken.has(key)).toBe(false);
+		expect(internal.clientRegistry.runtimeExitCounts.get(key) ?? 0).toBe(0);
+		expect(internal.clientRegistry.permanentlyBroken.has(key)).toBe(false);
 	});
 
 	it("does NOT double-count the REAL #743 notify-backpressure eviction path", async () => {
@@ -331,8 +341,10 @@ describe("LSPService circuit breaker — post-init runtime exits (#1127)", () =>
 			const service = new LSPService();
 			const internal = service as unknown as {
 				state: { broken: Map<string, number>; clients: Map<string, unknown> };
-				runtimeExitCounts: Map<string, number>;
-				permanentlyBroken: Set<string>;
+				clientRegistry: {
+					runtimeExitCounts: Map<string, number>;
+					permanentlyBroken: Set<string>;
+				};
 			};
 
 			const server = makeSpawnServer("opengrep");
@@ -361,8 +373,8 @@ describe("LSPService circuit breaker — post-init runtime exits (#1127)", () =>
 			expect(client.intentional).toBe(true);
 			expect(internal.state.broken.has(key)).toBe(true);
 
-			expect(internal.runtimeExitCounts.get(key) ?? 0).toBe(0);
-			expect(internal.permanentlyBroken.has(key)).toBe(false);
+			expect(internal.clientRegistry.runtimeExitCounts.get(key) ?? 0).toBe(0);
+			expect(internal.clientRegistry.permanentlyBroken.has(key)).toBe(false);
 		} finally {
 			if (originalBudget === undefined) {
 				delete process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS;
@@ -411,9 +423,11 @@ describe("LSPService circuit breaker — windowed-rate trip (#1142)", () => {
 				clients: Map<string, unknown>;
 				clientSpawnedAt: Map<string, number>;
 			};
-			runtimeExitCounts: Map<string, number>;
-			runtimeExitWindow: Map<string, number[]>;
-			permanentlyBroken: Set<string>;
+			clientRegistry: {
+				runtimeExitCounts: Map<string, number>;
+				runtimeExitWindow: Map<string, number[]>;
+				permanentlyBroken: Set<string>;
+			};
 		};
 
 		const server = makeSpawnServer("opengrep");
@@ -451,9 +465,9 @@ describe("LSPService circuit breaker — windowed-rate trip (#1142)", () => {
 		// turns that unbounded churn into a failing assertion rather than a hang.
 		const MAX_CYCLES = TRIP_COUNT + 5;
 		for (let cycle = 0; cycle < MAX_CYCLES; cycle++) {
-			if (internal.permanentlyBroken.has(key)) break;
+			if (internal.clientRegistry.permanentlyBroken.has(key)) break;
 			const result = await service.getClientForFile(file);
-			if (internal.permanentlyBroken.has(key)) {
+			if (internal.clientRegistry.permanentlyBroken.has(key)) {
 				// The tripping detection cooled down, so it returned undefined and
 				// did NOT respawn.
 				expect(result).toBeUndefined();
@@ -465,11 +479,11 @@ describe("LSPService circuit breaker — windowed-rate trip (#1142)", () => {
 			clients.at(-1)!.die(spawnAt + LIFETIME_MS);
 		}
 
-		expect(internal.permanentlyBroken.has(key)).toBe(true);
+		expect(internal.clientRegistry.permanentlyBroken.has(key)).toBe(true);
 		// Every death was OVER the 60s threshold, so the consecutive-early counter
 		// (#1139) never counted a single one — the windowed-rate stream alone
 		// tripped. This is the assertion that FAILS on pre-fix code.
-		expect(internal.runtimeExitCounts.get(key) ?? 0).toBe(0);
+		expect(internal.clientRegistry.runtimeExitCounts.get(key) ?? 0).toBe(0);
 		// Exactly TRIP_COUNT spawns happened before give-up.
 		expect(server.getSpawnCount()).toBe(TRIP_COUNT);
 		const { getDegradationSummary } =
@@ -507,8 +521,10 @@ describe("LSPService circuit breaker — windowed-rate trip (#1142)", () => {
 		const service = new LSPService();
 		const internal = service as unknown as {
 			state: { broken: Map<string, number> };
-			runtimeExitCounts: Map<string, number>;
-			permanentlyBroken: Set<string>;
+			clientRegistry: {
+				runtimeExitCounts: Map<string, number>;
+				permanentlyBroken: Set<string>;
+			};
 		};
 
 		const server = makeSpawnServer("opengrep");
@@ -533,17 +549,17 @@ describe("LSPService circuit breaker — windowed-rate trip (#1142)", () => {
 			internal.state.broken.delete(key);
 			const detect = await service.getClientForFile(file);
 			expect(detect).toBeUndefined(); // cooldown just set by the fast-path count
-			if (internal.permanentlyBroken.has(key)) break;
+			if (internal.clientRegistry.permanentlyBroken.has(key)) break;
 			internal.state.broken.delete(key);
 			const respawn = await service.getClientForFile(file);
 			expect(respawn).toBeDefined();
 			clients.at(-1)!.die();
 		}
 
-		expect(internal.permanentlyBroken.has(key)).toBe(true);
+		expect(internal.clientRegistry.permanentlyBroken.has(key)).toBe(true);
 		// #1139's fast-path trip point is unchanged: 5 consecutive early exits,
 		// 5 spawns — the window did not shorten it (no early trip) nor make it wait.
-		expect(internal.runtimeExitCounts.get(key)).toBe(TRIP_COUNT);
+		expect(internal.clientRegistry.runtimeExitCounts.get(key)).toBe(TRIP_COUNT);
 		expect(server.getSpawnCount()).toBe(TRIP_COUNT);
 	});
 
@@ -555,8 +571,10 @@ describe("LSPService circuit breaker — windowed-rate trip (#1142)", () => {
 				broken: Map<string, number>;
 				clientSpawnedAt: Map<string, number>;
 			};
-			runtimeExitWindow: Map<string, number[]>;
-			permanentlyBroken: Set<string>;
+			clientRegistry: {
+				runtimeExitWindow: Map<string, number[]>;
+				permanentlyBroken: Set<string>;
+			};
 		};
 
 		const server = makeSpawnServer("opengrep");
@@ -589,8 +607,10 @@ describe("LSPService circuit breaker — windowed-rate trip (#1142)", () => {
 			expect(result).toBeDefined(); // survived-long servers keep respawning
 		}
 
-		expect(internal.runtimeExitWindow.get(key) ?? []).toHaveLength(0);
-		expect(internal.permanentlyBroken.has(key)).toBe(false);
+		expect(
+			internal.clientRegistry.runtimeExitWindow.get(key) ?? [],
+		).toHaveLength(0);
+		expect(internal.clientRegistry.permanentlyBroken.has(key)).toBe(false);
 	});
 
 	it("NO false trip: sparse crashes age out of the rolling window (crashed twice, spaced past M, now healthy)", async () => {
@@ -601,8 +621,10 @@ describe("LSPService circuit breaker — windowed-rate trip (#1142)", () => {
 				broken: Map<string, number>;
 				clientSpawnedAt: Map<string, number>;
 			};
-			runtimeExitWindow: Map<string, number[]>;
-			permanentlyBroken: Set<string>;
+			clientRegistry: {
+				runtimeExitWindow: Map<string, number[]>;
+				permanentlyBroken: Set<string>;
+			};
 		};
 
 		const server = makeSpawnServer("opengrep");
@@ -631,7 +653,7 @@ describe("LSPService circuit breaker — windowed-rate trip (#1142)", () => {
 		internal.state.broken.delete(key);
 		const afterFirst = await service.getClientForFile(file);
 		expect(afterFirst).toBeDefined();
-		expect(internal.runtimeExitWindow.get(key)).toHaveLength(1);
+		expect(internal.clientRegistry.runtimeExitWindow.get(key)).toHaveLength(1);
 
 		// Second crash 20min after the first — outside the window from the first.
 		const secondSpawn = firstSpawn + 20 * 60_000;
@@ -644,8 +666,8 @@ describe("LSPService circuit breaker — windowed-rate trip (#1142)", () => {
 
 		// The first death aged out: only the second remains — a rolling window, not
 		// a cumulative-forever count. Nowhere near TRIP_COUNT; never trips.
-		expect(internal.runtimeExitWindow.get(key)).toHaveLength(1);
-		expect(internal.permanentlyBroken.has(key)).toBe(false);
+		expect(internal.clientRegistry.runtimeExitWindow.get(key)).toHaveLength(1);
+		expect(internal.clientRegistry.permanentlyBroken.has(key)).toBe(false);
 	});
 
 	it("NO false trip: deliberate shutdown()-driven restarts never feed the window (past TRIP_COUNT)", async () => {
@@ -653,8 +675,10 @@ describe("LSPService circuit breaker — windowed-rate trip (#1142)", () => {
 		const service = new LSPService();
 		const internal = service as unknown as {
 			state: { broken: Map<string, number> };
-			runtimeExitWindow: Map<string, number[]>;
-			permanentlyBroken: Set<string>;
+			clientRegistry: {
+				runtimeExitWindow: Map<string, number[]>;
+				permanentlyBroken: Set<string>;
+			};
 		};
 
 		const server = makeSpawnServer("opengrep");
@@ -683,8 +707,10 @@ describe("LSPService circuit breaker — windowed-rate trip (#1142)", () => {
 			last.die();
 		}
 
-		expect(internal.runtimeExitWindow.get(key) ?? []).toHaveLength(0);
-		expect(internal.permanentlyBroken.has(key)).toBe(false);
+		expect(
+			internal.clientRegistry.runtimeExitWindow.get(key) ?? [],
+		).toHaveLength(0);
+		expect(internal.clientRegistry.permanentlyBroken.has(key)).toBe(false);
 		expect(server.getSpawnCount()).toBe(8);
 	});
 
@@ -696,9 +722,11 @@ describe("LSPService circuit breaker — windowed-rate trip (#1142)", () => {
 				broken: Map<string, number>;
 				clientSpawnedAt: Map<string, number>;
 			};
-			runtimeExitWindow: Map<string, number[]>;
-			runtimeExitCounts: Map<string, number>;
-			permanentlyBroken: Set<string>;
+			clientRegistry: {
+				runtimeExitWindow: Map<string, number[]>;
+				runtimeExitCounts: Map<string, number>;
+				permanentlyBroken: Set<string>;
+			};
 		};
 
 		const server = makeSpawnServer("opengrep");
@@ -727,8 +755,8 @@ describe("LSPService circuit breaker — windowed-rate trip (#1142)", () => {
 		internal.state.broken.delete(key);
 		const detect1 = await service.getClientForFile(file);
 		expect(detect1).toBeUndefined(); // cooldown just set by the fast path
-		expect(internal.runtimeExitWindow.get(key)).toHaveLength(1);
-		expect(internal.permanentlyBroken.has(key)).toBe(false);
+		expect(internal.clientRegistry.runtimeExitWindow.get(key)).toHaveLength(1);
+		expect(internal.clientRegistry.permanentlyBroken.has(key)).toBe(false);
 
 		// Respawn.
 		internal.state.broken.delete(key);
@@ -751,8 +779,8 @@ describe("LSPService circuit breaker — windowed-rate trip (#1142)", () => {
 
 		// The now-fully-aged-out key was dropped entirely, not left behind as
 		// a stale empty/near-empty array.
-		expect(internal.runtimeExitWindow.has(key)).toBe(false);
-		expect(internal.runtimeExitCounts.has(key)).toBe(false);
-		expect(internal.permanentlyBroken.has(key)).toBe(false);
+		expect(internal.clientRegistry.runtimeExitWindow.has(key)).toBe(false);
+		expect(internal.clientRegistry.runtimeExitCounts.has(key)).toBe(false);
+		expect(internal.clientRegistry.permanentlyBroken.has(key)).toBe(false);
 	});
 });

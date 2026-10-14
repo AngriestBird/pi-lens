@@ -1722,7 +1722,10 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// cannot be evicted while its root is still served. `configInFlight` alone
 	// remains here.
 	"lsp/config.ts": 1,
-	"lsp/index.ts": 2,
+	// #2372 slice 3: 2 -> 1. The never-mutated `OPTIONAL_LSP_SERVER_IDS` set
+	// moved to lsp/client-registry.ts with the spawn path that reads it; that
+	// module exports no reset, so the scan does not flag it.
+	"lsp/index.ts": 1,
 	"lsp/jvm-runtime.ts": 0,
 	// #2324 R2-A added `napiFallbackCoverage`, the napi-run hand-off map
 	// (1 → 2). Registered above and cleared by the same

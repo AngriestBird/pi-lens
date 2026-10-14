@@ -226,9 +226,9 @@ describe("LSPService project-trust gate (#1334 S5)", () => {
 		]);
 		const adoptedService = new LSPService(undefined, sessionRoot);
 		const file = path.join(project, "main.ts");
-		expect((adoptedService as any).analysisRootModeForFile(file)).toBe(
-			"adopted",
-		);
+		expect(
+			(adoptedService as any).clientRegistry.analysisRootModeForFile(file),
+		).toBe("adopted");
 		const client = await adoptedService.getClientForFile(file);
 		expect(client).toBeUndefined();
 		expect(spawn).not.toHaveBeenCalled();
@@ -244,18 +244,19 @@ describe("LSPService project-trust gate (#1334 S5)", () => {
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const service = new LSPService();
 		const raw = service as any;
-		raw.analysisRootModeForFile = () => "adopted";
+		const registry = raw.clientRegistry;
+		registry.analysisRootModeForFile = () => "adopted";
 		for (const root of ["/repo/a", "/repo/b", "/repo/c"]) {
 			const rootKey = `server:${root}`;
-			expect(raw.admitAdoptedRoot(root, "/repo/file.ts")).toBe(true);
-			raw.adoptedClientKeys.add(rootKey);
+			expect(registry.admitAdoptedRoot(root, "/repo/file.ts")).toBe(true);
+			registry.adoptedClientKeys.add(rootKey);
 			raw.state.clients.set(rootKey, {
 				isAlive: () => true,
 				isBusy: () => false,
 				shutdown: vi.fn(async () => undefined),
 			});
 		}
-		expect(raw.adoptedRootLastUsedAt.size).toBe(2);
+		expect(registry.adoptedRootLastUsedAt.size).toBe(2);
 
 		const client = {
 			isAlive: () => true,
@@ -263,10 +264,10 @@ describe("LSPService project-trust gate (#1334 S5)", () => {
 			shutdown: vi.fn(async () => undefined),
 		};
 		const key = "server:/repo/a";
-		raw.adoptedClientKeys.add(key);
+		registry.adoptedClientKeys.add(key);
 		raw.state.clients.set(key, client);
-		raw.clientLastUsedAt.set(key, Date.now());
-		raw.scheduleIdleEviction(key, {
+		registry.clientLastUsedAt.set(key, Date.now());
+		registry.scheduleIdleEviction(key, {
 			id: "server",
 			idleEviction: "unmeasured",
 		});

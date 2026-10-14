@@ -279,11 +279,12 @@ describe("resolveToolCwd (#2777)", () => {
 		const server = LSP_SERVERS.find((entry) => entry.id === "python");
 		if (!server) throw new Error("python server missing from registry");
 		const service = new LSPService(undefined, project);
-		const resolveRoot = (
-			service as unknown as {
+		const { clientRegistry } = service as unknown as {
+			clientRegistry: {
 				resolveServerRoot(server: LSPServerInfo, file: string): Promise<string>;
-			}
-		).resolveServerRoot.bind(service);
+			};
+		};
+		const resolveRoot = clientRegistry.resolveServerRoot.bind(clientRegistry);
 		expect(await resolveRoot(server, file)).toBe(path.dirname(file));
 	});
 
