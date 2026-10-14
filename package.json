@@ -172,7 +172,7 @@
 		"knip": "6.41.0",
 		"oxfmt": "0.72.0",
 		"oxlint": "1.87.0",
-		"oxlint-tsgolint": "7.0.2003",
+		"oxlint-tsgolint": "7.0.2004",
 		"publint": "0.3.25",
 		"semver": "^7.8.0",
 		"typebox": "^1.0.0",
