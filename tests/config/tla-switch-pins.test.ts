@@ -36,7 +36,8 @@
  * as-built config resolves the constant to: its `=` value, the definition its
  * `<-` names, or else the module's own `Name == <literal>` definition. A
  * value a config uses only to narrow the explored schedules is admitted per
- * pin in `narrowedBy`, with its reason.
+ * pin, per value and per named config, in `narrowedBy`, with its reason; a
+ * config the entry does not list must match the pinned value.
  *
  * Detectors match code, not prose (principles §2):
  * - TLA+ text (`.cfg` and `.tla`) is read after `stripTlaComments` blanks
@@ -68,7 +69,7 @@ import { vitestCollects } from "../support/vitest-collection.js";
 const REPO_ROOT = path.resolve(import.meta.dirname, "../..");
 const REGISTRY_PATH = "formal/switch-pins.json";
 /** Families whose every code-choice constant has a pin (#4393 acceptance). */
-const FULLY_PINNED = ["read-guard"];
+const FULLY_PINNED = ["read-guard", "format-drain", "dispatch-pipeline"];
 /**
  * The deferred and notCodeChoice members across all families, pinned exactly
  * (#4399 verify r2 F4). A ceiling let a freed slot be reused, and let a member
@@ -76,7 +77,7 @@ const FULLY_PINNED = ["read-guard"];
  * place. Every change to either count is now a visible edit here: lower
  * `DEFERRED_COUNT` as pins land, and a reviewer judges every rise of either.
  */
-const DEFERRED_COUNT = 173;
+const DEFERRED_COUNT = 136;
 const NOT_CODE_CHOICE_COUNT = 205;
 
 interface PinTest {
@@ -88,7 +89,9 @@ interface Pin extends PinTest {
 	/** Further tests, when one value encodes several behaviours (a model
 	 *  definition such as `SpendLicense == BridgeNoAdvance` reuses it). */
 	also?: PinTest[];
-	narrowedBy?: Record<string, string>;
+	/** Per value, the as-built configs (file stems) that use it only to narrow
+	 *  the explored schedules, with the reason. */
+	narrowedBy?: Record<string, { configs: string[]; reason: string }>;
 }
 interface Group {
 	reason: string;
@@ -244,11 +247,13 @@ interface FamilyModels {
 	/** Every name a config of the family assigns, `=` or `<-`, and every
 	 *  module boolean definition that is not a `<-` target. */
 	population: Set<string>;
-	/** Each `\* expect: pass` config with its module's literal definitions. */
+	/** Each `\* expect: pass` config with its module's literal definitions and
+	 *  its comment-blanked text (undefined when the module file is absent). */
 	asBuilt: Array<{
 		file: string;
 		constants: Map<string, CfgAssignment>;
 		defs: Map<string, string>;
+		moduleText: string | undefined;
 	}>;
 }
 
@@ -257,6 +262,7 @@ function readFamily(root: string, family: string): FamilyModels {
 	const population = new Set<string>();
 	const asBuilt: FamilyModels["asBuilt"] = [];
 	const defsByModule = new Map<string, Map<string, string>>();
+	const textByModule = new Map<string, string | undefined>();
 	const targets = new Set<string>();
 	for (const name of fs.readdirSync(dir).sort()) {
 		if (!name.endsWith(".cfg")) continue;
@@ -271,12 +277,22 @@ function readFamily(root: string, family: string): FamilyModels {
 		let defs = defsByModule.get(header.module);
 		if (!defs) {
 			const tla = path.join(dir, `${header.module}.tla`);
-			defs = fs.existsSync(tla)
-				? parseLiteralDefinitions(fs.readFileSync(tla, "utf8"))
-				: new Map();
+			const moduleText = fs.existsSync(tla)
+				? stripTlaComments(fs.readFileSync(tla, "utf8"))
+				: undefined;
+			defs =
+				moduleText === undefined
+					? new Map()
+					: parseLiteralDefinitions(moduleText);
 			defsByModule.set(header.module, defs);
+			textByModule.set(header.module, moduleText);
 		}
-		asBuilt.push({ file: `formal/${family}/${name}`, constants, defs });
+		asBuilt.push({
+			file: `formal/${family}/${name}`,
+			constants,
+			defs,
+			moduleText: textByModule.get(header.module),
+		});
 	}
 	// A module's own boolean switch (`Name == TRUE`) that no config assigns is
 	// a code choice too (#4399 review F4); a `<-` target such as
@@ -363,17 +379,30 @@ export function auditSwitchPins(root: string, registry: Registry): string[] {
 		for (const [constant, pin] of Object.entries(entry.pins ?? {})) {
 			const label = `${family}.${constant}`;
 			const narrowedBy = pin.narrowedBy ?? {};
-			const used = new Set<string>();
+			// value -> the as-built configs (file stems) that resolve to it
+			const used = new Map<string, Set<string>>();
 			for (const config of models.asBuilt) {
 				const value = resolveValue(config, constant);
 				if (value === undefined) {
+					// A config of another module of the family (SiblingRestore.tla
+					// beside DispatchPipeline.tla): a module whose code never names
+					// the constant has no value for it, and nothing to compare.
+					if (
+						config.moduleText !== undefined &&
+						!new RegExp(`\\b${constant}\\b`).test(config.moduleText)
+					)
+						continue;
 					errors.push(
 						`${label}: ${config.file} gives no literal value to compare`,
 					);
 					continue;
 				}
-				used.add(value);
-				if (value !== pin.value && !Object.hasOwn(narrowedBy, value))
+				const stem = path.basename(config.file, ".cfg");
+				used.set(value, (used.get(value) ?? new Set<string>()).add(stem));
+				// Per config, not per value: a value admitted for one config must
+				// not hide the same value in another (#4393: RestoreGatesHold = TRUE
+				// stayed admitted for the headline config by a sibling's narrowing).
+				if (value !== pin.value && !narrowedBy[value]?.configs?.includes(stem))
 					errors.push(
 						`${label}: pinned ${pin.value}, but ${config.file} (expect: pass) has ${value}`,
 					);
@@ -382,13 +411,18 @@ export function auditSwitchPins(root: string, registry: Registry): string[] {
 				errors.push(
 					`${label}: no as-built config has the pinned value ${pin.value}`,
 				);
-			for (const [value, reason] of Object.entries(narrowedBy)) {
-				if (!reason.trim())
+			for (const [value, entry] of Object.entries(narrowedBy)) {
+				if (!entry.reason?.trim())
 					errors.push(`${label}: narrowedBy ${value} has no reason`);
-				if (!used.has(value))
-					errors.push(
-						`${label}: stale narrowedBy ${value}; no as-built config uses it`,
-					);
+				if (value === pin.value)
+					errors.push(`${label}: narrowedBy ${value} is the pinned value`);
+				if (!entry.configs?.length)
+					errors.push(`${label}: narrowedBy ${value} names no config`);
+				for (const stem of entry.configs ?? [])
+					if (!used.get(value)?.has(stem))
+						errors.push(
+							`${label}: stale narrowedBy ${value}; ${stem} is no as-built config with that value`,
+						);
 			}
 			for (const { test, title } of [pin, ...(pin.also ?? [])]) {
 				if (!vitestCollects(test)) {
@@ -764,10 +798,86 @@ describe("TLA+ switch pins (#4393, recurrence #4387)", () => {
 				...GOOD,
 				Mode: {
 					...GOOD.Mode,
-					narrowedBy: { '"atomic"': "a schedule on admits" },
+					narrowedBy: {
+						'"atomic"': { configs: ["Narrow"], reason: "a schedule on admits" },
+					},
 				},
 			};
 			expect(auditSwitchPins(fixture, registry(narrowed))).toEqual([]);
+		});
+
+		it("admits a narrowing value for the configs it names, not for every config that has it", () => {
+			// Recurrence: narrowedBy was value-wide, so flipping the headline config
+			// of dispatch-pipeline (SiblingRestoreQueued RestoreGatesHold FALSE to
+			// TRUE) stayed green: a sibling config already had TRUE admitted (#4393).
+			const fixture = tree({
+				"Pass.cfg": PASS,
+				"Narrow.cfg": cfg("pass", '    Mode = "atomic"\n    Size = 2'),
+				"Flipped.cfg": cfg("pass", '    Mode = "atomic"\n    Size = 2'),
+			});
+			const narrowed = {
+				...GOOD,
+				Mode: {
+					...GOOD.Mode,
+					narrowedBy: {
+						'"atomic"': { configs: ["Narrow"], reason: "a schedule on admits" },
+					},
+				},
+			};
+			expect(auditSwitchPins(fixture, registry(narrowed))).toEqual([
+				'fam.Mode: pinned "on", but formal/fam/Flipped.cfg (expect: pass) has "atomic"',
+			]);
+			// A listed config that no longer has the value, or is unknown, is stale.
+			const stale = {
+				...GOOD,
+				Mode: {
+					...GOOD.Mode,
+					narrowedBy: {
+						'"atomic"': {
+							configs: ["Narrow", "Flipped", "Pass"],
+							reason: "a schedule on admits",
+						},
+					},
+				},
+			};
+			expect(auditSwitchPins(fixture, registry(stale))).toEqual([
+				'fam.Mode: stale narrowedBy "atomic"; Pass is no as-built config with that value',
+			]);
+		});
+
+		it("compares a constant only against the as-built configs of modules that name it", () => {
+			// Recurrence: formal/dispatch-pipeline holds two modules
+			// (DispatchPipeline.tla and SiblingRestore.tla). The pass configs of one
+			// assign none of the other's constants, and the gate read that absence
+			// as a config with no value, so neither module's constants could be
+			// pinned (#4393).
+			const fixture = tree({ "Pass.cfg": PASS });
+			fs.writeFileSync(
+				path.join(fixture, "formal", "fam", "N.tla"),
+				["---- MODULE N ----", "CONSTANTS Other", "===="].join("\n"),
+			);
+			fs.writeFileSync(
+				path.join(fixture, "formal", "fam", "Other.cfg"),
+				[
+					"\\* expect: pass",
+					"\\* module: N",
+					"CONSTANTS",
+					"    Other = 1",
+					"SPECIFICATION Spec",
+				].join("\n"),
+			);
+			const both = {
+				notCodeChoice: [{ reason: "bounds", constants: ["Size", "Other"] }],
+			};
+			expect(auditSwitchPins(fixture, registry(GOOD, both))).toEqual([]);
+			// A config of the module that does name the constant still needs a value.
+			fs.writeFileSync(
+				path.join(fixture, "formal", "fam", "NoMode.cfg"),
+				cfg("pass", "    Size = 2"),
+			);
+			expect(auditSwitchPins(fixture, registry(GOOD, both))).toEqual([
+				"fam.Mode: formal/fam/NoMode.cfg gives no literal value to compare",
+			]);
 		});
 	});
 });
