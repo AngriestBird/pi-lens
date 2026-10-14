@@ -7,7 +7,10 @@ import { writeFileAtomic } from "./atomic-write.js";
 import { BoundedFifoMap } from "./bounded-cache.js";
 import { getProjectDataDir } from "./file-utils.js";
 import { incrementDegradationCount } from "./degradation-ledger.js";
-import { reapStageFile } from "./gzip-stage-write.js";
+import {
+	readGzipStageWorkerResult,
+	reapStageFile,
+} from "./gzip-stage-write.js";
 import { withGenerationLockSync } from "./generation-lock.js";
 import { isStaleStageFile } from "./instance-reaper.js";
 import { readJsonCache } from "./json-cache-read.js";
@@ -27,6 +30,7 @@ import type { RuleScanResult } from "./rules-scanner.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 import type { StartupScanContext } from "./startup-scan.js";
 import {
+	notePersistWorkerMessageFault,
 	readWorkerHeapStatistics,
 	type PersistWorkerHeapStatistics,
 } from "./persist-worker-stats.js";
@@ -2023,14 +2027,28 @@ function getSnapshotPersistWorker(): Worker | undefined {
 		// binds the sync handler directly, so scheduling is byte-identical when
 		// no test seam is installed (the async-handler variant of this shifted
 		// promotion timing under full-suite load and flaked the round-trip test).
-		worker.on("message", (result: ProjectSnapshotPersistWorkerResult) => {
-			if (_snapshotPromotionSeamForTests) {
-				void _snapshotPromotionSeamForTests().then(() =>
-					handleSnapshotWorkerResult(result),
-				);
-				return;
+		// #4402: the message is wire data (#4400). It passes the shape check or is
+		// dropped and counted, and a throw below is counted here instead of
+		// leaving the listener, which would end the host.
+		worker.on("message", (message: unknown) => {
+			try {
+				const result = readGzipStageWorkerResult(message);
+				if (typeof result === "string") {
+					notePersistWorkerMessageFault("project-snapshot", "rejected", result);
+					return;
+				}
+				if (_snapshotPromotionSeamForTests) {
+					void _snapshotPromotionSeamForTests()
+						.then(() => handleSnapshotWorkerResult(result))
+						.catch((err: unknown) =>
+							notePersistWorkerMessageFault("project-snapshot", "threw", err),
+						);
+					return;
+				}
+				handleSnapshotWorkerResult(result);
+			} catch (err) {
+				notePersistWorkerMessageFault("project-snapshot", "threw", err);
 			}
-			handleSnapshotWorkerResult(result);
 		});
 		worker.on("error", (err: Error) => handleSnapshotWorkerDeath(err.message));
 		worker.on("exit", (code) => {

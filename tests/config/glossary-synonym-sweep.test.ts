@@ -434,7 +434,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/git-tracked-ignore.ts": 2,
 		"clients/gitleaks-client.ts": 3,
 		"clients/govulncheck-client.ts": 6,
-		"clients/gzip-stage-write.ts": 2,
+		// 2 -> 4 (#4402): the worker loop's catch answers with an `error`, and
+		// readGzipStageWorkerResult reads the wire field `error` (the worker
+		// protocol's own field name, not a delivery tier).
+		"clients/gzip-stage-write.ts": 4,
 		"clients/install-diagnostics.ts": 4,
 		"clients/installer/index.ts": 26,
 		"clients/installer/managed-tool-refresh.ts": 2,

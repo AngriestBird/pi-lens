@@ -1007,6 +1007,14 @@ export type DegradationKind =
 	 */
 	| "path-variant-unresolved"
 	/**
+	 * #4402: a persist host's worker `message` listener contained a message.
+	 * Subject is `<host> persist worker: rejected` (no routable `id` and
+	 * `generation`; dropped) or `<host> persist worker: threw` (handling it
+	 * threw; caught so the host survives). Reason carries the shape verdict or
+	 * the error message.
+	 */
+	| "persist-worker-message-contained"
+	/**
 	 * #3311: a registry entry declares `pipConstraints`, but the constraints file
 	 * the pip ladder hands to `PIP_CONSTRAINT` could not be written. The install
 	 * then proceeds UNCONSTRAINED — the pre-#3311 resolution — so this row is the
