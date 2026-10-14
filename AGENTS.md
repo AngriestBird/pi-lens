@@ -1286,7 +1286,7 @@ Test authoring screens:
 - A case never reads state a sibling case or file wrote (a file, a latch, a
   once-per-session claim): `Targeted tests (advisory)` runs a PR's added or
   changed test files alone and under two fixed shuffle seeds
-  (`scripts/ci-shuffle-changed-tests.mjs`, #4397). After `vi.resetModules()`
+  (`scripts/ci-shuffle-changed-tests.mjs`). After `vi.resetModules()`
   every `await import(...)` is a second module copy; import statically what
   the tool under test also reads.
 - Keep performance bounds close to measured fixed and regressed values.
