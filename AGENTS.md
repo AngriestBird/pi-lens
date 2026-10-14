@@ -1286,7 +1286,13 @@ Test authoring screens:
 - A case never reads state a sibling case or file wrote (a file, a latch, a
   once-per-session claim): `Targeted tests (advisory)` runs a PR's added or
   changed test files alone and under two fixed shuffle seeds
-  (`scripts/ci-shuffle-changed-tests.mjs`). After `vi.resetModules()`
+  (`scripts/ci-shuffle-changed-tests.mjs`). The untouched tree is measured by
+  `scripts/ci-shuffle-census.mjs` (every file alone, and under seeds 202, 424
+  and 606; about an hour on three workers, so not a PR job); its known
+  members sit in `scripts/shuffle-census-ratchet.json`, which only shrinks.
+  A `vi.doMock` is undone in the file's top-level `afterEach`, not in the
+  case that mocks it: a shuffle runs the next case on the leaked mock.
+  After `vi.resetModules()`
   every `await import(...)` is a second module copy; import statically what
   the tool under test also reads.
 - Keep performance bounds close to measured fixed and regressed values.

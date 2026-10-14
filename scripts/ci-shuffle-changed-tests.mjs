@@ -73,19 +73,28 @@ export function selectChangedTestFiles(paths, exists = existsSync) {
 /**
  * @param {string[]} files
  * @param {readonly number[]} [seeds]
+ * @param {{ alone?: boolean }} [options] `alone: false` plans the shuffled
+ *   starts only (the census plans its alone starts over the whole tree and its
+ *   shuffled starts per chunk, #4405)
  * @returns {Array<{ label: string, files: string[], flags: string[] }>}
  */
-export function planRuns(files, seeds = SEEDS) {
+export function planRuns(
+	files,
+	seeds = SEEDS,
+	{ alone: withAlone = true } = {},
+) {
 	const shuffled = seeds.map((seed) => ({
 		label: `shuffle seed ${seed}`,
 		files,
 		flags: ["--sequence.shuffle", `--sequence.seed=${seed}`],
 	}));
-	const alone = files.map((file) => ({
-		label: `alone ${file}`,
-		files: [file],
-		flags: [],
-	}));
+	const alone = withAlone
+		? files.map((file) => ({
+				label: `alone ${file}`,
+				files: [file],
+				flags: [],
+			}))
+		: [];
 	return [...shuffled, ...alone];
 }
 

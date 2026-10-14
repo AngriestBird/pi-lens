@@ -28,6 +28,7 @@ export declare function selectChangedTestFiles(
 export declare function planRuns(
 	files: string[],
 	seeds?: readonly number[],
+	options?: { alone?: boolean },
 ): ShuffleRun[];
 export declare function reproCommand(run: {
 	files: string[];
