@@ -1990,6 +1990,34 @@ describe("#3522: a stale line is judged by the newest read that delivered it", (
 		}
 	});
 
+	/**
+	 * The pin of `WholeVouchesPastEnd = FALSE` (formal/switch-pins.json): a
+	 * whole-file read vouches for the lines it delivered, never that no line
+	 * follows its end. So an older read still speaks for a line past a newer
+	 * whole-file read's end, and an edit of it passes while it holds the
+	 * bytes that read showed. Recurrence (#4387, #4393): a guard change that
+	 * let a whole-file view vouch past its end would leave the switch at
+	 * FALSE, and TLC would keep proving the old design.
+	 */
+	it("lets an older read speak for a line past a newer whole-file read's end (WholeVouchesPastEnd)", async () => {
+		const env = setupTestEnvironment("rg-3522-past-whole-end-");
+		try {
+			// No trailing newline: pi delivers it as one more, empty, line.
+			const file = fixture(env.tmpDir, "s.ts", lines(12).join("\n"));
+			const runtime = newRuntime(env.tmpDir);
+			await read(runtime, file, {});
+			writeNow(file, lines(11).join("\n"));
+			// The agent's newest whole-file view ends at line 11.
+			await read(runtime, file, {});
+			writeNow(file, lines(12).join("\n"));
+			const edit = await positionalEdit(runtime, file, [[12, 12, "agent12"]]);
+			expect(edit.reason).toBeUndefined();
+			expect(edit.blocked).toBe(false);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("does not relocate from the read that delivered the first line when a newer read delivered the last (SpanSnapshotFixAnyReloc)", async () => {
 		const { env, file, runtime } = setup("any-reloc-last");
 		try {

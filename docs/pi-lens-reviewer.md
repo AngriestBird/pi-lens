@@ -123,7 +123,9 @@ instead of rebuilding the probe.
   For a `TLA+ unaffected` line, read the family's as-built config constants:
   a diff that changes a behaviour one of them encodes refutes the line and is
   a finding (#4387: #4235 changed read-guard authorship while the as-built
-  switches kept the old behaviour; #4393 will pin each constant to the code).
+  switches kept the old behaviour). `formal/switch-pins.json` names each
+  pinned constant's test (#4393); a changed behaviour with no flipped value
+  and pin is the same finding.
 - **Red-proof audit.** A claimed red without its quoted transcript is a finding
   of its own; reproduce it (step 3).
 - **Quoted-evidence audit.** Diff every CI line the body quotes against the job

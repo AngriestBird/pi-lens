@@ -5,6 +5,7 @@ import { Worker } from "node:worker_threads";
 import { constants as zlibConstants, gunzipSync, gzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 import { writeFileAtomic } from "../atomic-write.js";
+import { reapStageFile } from "../gzip-stage-write.js";
 import type { CallGraphEvidenceCoverage } from "../call-graph.js";
 import { FactStore, type ReadonlyFactStore } from "../dispatch/fact-store.js";
 import { fileContentProvider } from "../dispatch/facts/file-content.js";
@@ -2087,7 +2088,7 @@ const _persistTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const _persistGenerations = new Map<string, number>();
 const _workerRequests = new Map<
 	number,
-	{ key: string; pending: PendingPersist }
+	{ key: string; pending: PendingPersist; stagePath: string }
 >();
 let _persistWorker: Worker | undefined;
 let _persistWorkerRequestId = 0;
@@ -2476,10 +2477,16 @@ function handleWorkerResult(result: ReviewGraphPersistWorkerResult): void {
 	}
 	const request = _workerRequests.get(result.id);
 	if (!request) {
-		fs.rm(result.stagePath, { force: true }, () => {});
+		// Late result for a request the host no longer tracks: the echoed path is
+		// the only name left, and it is wire data (#4400).
+		if (typeof result.stagePath === "string") {
+			fs.rm(result.stagePath, { force: true }, () => {});
+		}
 		return;
 	}
 	_workerRequests.delete(result.id);
+	// #4400: the host sent `request.stagePath` (and `cp.stagePath` for a
+	// checkpoint), so cleanup and promotion use that record, never the echo.
 	const { key, pending } = request;
 	const currentGeneration = _persistGenerations.get(key);
 	if (currentGeneration !== result.generation) {
@@ -2490,9 +2497,8 @@ function handleWorkerResult(result: ReviewGraphPersistWorkerResult): void {
 		// briefly hold the handle) -- a failed reap must never abort this
 		// callback, or the WINNING generation's completion is lost with it. The
 		// startup sweep reclaims anything a failed unlink leaves behind.
-		try {
-			fs.rmSync(result.stagePath, { force: true });
-		} catch (reapErr) {
+		const reapErr = reapStageFile(request.stagePath);
+		if (reapErr !== undefined) {
 			logReviewGraph({
 				cwd: key,
 				phase: "persist_failed",
@@ -2521,7 +2527,7 @@ function handleWorkerResult(result: ReviewGraphPersistWorkerResult): void {
 		result.writeMs === undefined ||
 		result.durationMs === undefined
 	) {
-		fs.rm(result.stagePath, { force: true }, () => {});
+		fs.rm(request.stagePath, { force: true }, () => {});
 		writePendingOnMainThread(
 			key,
 			pending,
@@ -2535,7 +2541,7 @@ function handleWorkerResult(result: ReviewGraphPersistWorkerResult): void {
 		return;
 	}
 	try {
-		fs.renameSync(result.stagePath, pending.cachePath);
+		fs.renameSync(request.stagePath, pending.cachePath);
 		fs.rmSync(path.join(pending.cacheDir, LEGACY_GRAPH_CACHE_FILENAME), {
 			force: true,
 		});
@@ -2553,7 +2559,7 @@ function handleWorkerResult(result: ReviewGraphPersistWorkerResult): void {
 			{ started: true, completed: true },
 		);
 	} catch (err) {
-		fs.rm(result.stagePath, { force: true }, () => {});
+		fs.rm(request.stagePath, { force: true }, () => {});
 		writePendingOnMainThread(
 			key,
 			pending,
@@ -2583,7 +2589,7 @@ function handleCheckpointWorkerResult(
 			reason: "worker_error",
 			error: result.error ?? "worker returned no gz metrics",
 		});
-		fs.rm(result.stagePath, { force: true }, () => {});
+		fs.rm(cp.stagePath, { force: true }, () => {});
 		return;
 	}
 	// Generation gate: a newer checkpoint stride, or build completion / a
@@ -2591,11 +2597,11 @@ function handleCheckpointWorkerResult(
 	// removing the file), supersedes this write — discard the stale stage rather
 	// than resurrect a checkpoint over a fresher one or a completed build.
 	if (_checkpointGenerations.get(cp.cwd) !== cp.generation) {
-		fs.rm(result.stagePath, { force: true }, () => {});
+		fs.rm(cp.stagePath, { force: true }, () => {});
 		return;
 	}
 	try {
-		fs.renameSync(result.stagePath, cp.checkpointPath);
+		fs.renameSync(cp.stagePath, cp.checkpointPath);
 		logReviewGraph({
 			cwd: cp.cwd,
 			phase: "checkpoint_written",
@@ -2612,7 +2618,7 @@ function handleCheckpointWorkerResult(
 			reason: "promote_failed",
 			error: err instanceof Error ? err.message : String(err),
 		});
-		fs.rm(result.stagePath, { force: true }, () => {});
+		fs.rm(cp.stagePath, { force: true }, () => {});
 	}
 }
 
@@ -2760,7 +2766,7 @@ function writePending(key: string): void {
 				? Number(process.env.PI_LENS_TEST_PERSIST_WORKER_DELAY_MS) || undefined
 				: undefined,
 	};
-	_workerRequests.set(id, { key, pending });
+	_workerRequests.set(id, { key, pending, stagePath });
 	worker.postMessage(request);
 }
 
