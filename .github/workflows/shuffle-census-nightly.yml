@@ -44,7 +44,7 @@ on:
   workflow_dispatch:
     inputs:
       with_alone:
-        description: "Also run every test file alone (about 60 more runner-minutes)"
+        description: "Also run every test file alone (about 80 more runner-minutes)"
         type: boolean
         default: false
       files:
@@ -67,12 +67,13 @@ jobs:
   census:
     name: Census part ${{ matrix.part }} of 6
     runs-on: ubuntu-latest
-    # Measured on the first full rehearsal (run 38608471496, alone starts
-    # included): setup 0.5 min, a part 23 to 46 min, the slowest part holding
-    # the 350 s chunk of the LSP-heavy files. The weekly run is that
-    # shape; a daily run has only the shuffled starts, 11 to 24 min of them per
-    # part. The script stops starting vitest runs at 70 min (`--budget-ms`), so
-    # a start in flight at the cap still finishes under this timeout.
+    # Measured with three seeds and the alone starts (runs 38608471496 and
+    # 38618975465): a part 23 to 46 min, the slowest part holding the 350 s
+    # chunk of the LSP-heavy files; the alone starts are 78.5 min of the
+    # total. A daily run with the two seeds took 9.4 to 13.2 min a part (run
+    # 38638834171). The script stops starting vitest runs at 70 min
+    # (`--budget-ms`), so a start in flight at the cap still finishes under
+    # this timeout.
     timeout-minutes: 80
     strategy:
       fail-fast: false
