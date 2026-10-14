@@ -14,6 +14,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { Worker } from "node:worker_threads";
 import { beforeEach, describe, expect, it, afterEach, vi } from "vitest";
+import { parseDefectShapes } from "../../scripts/lib/defect-shapes.mjs";
 import {
 	gitExecFileSync,
 	gitExecSync,
@@ -33,6 +34,7 @@ import {
 	resolveTouchesTests,
 	DETECTION_LAYERS,
 	lintDetectionSection,
+	shapeCatalogReader,
 	resolveBugClosing,
 } from "../../scripts/check-pr-body.mjs";
 import { blankCommentsAndStrings } from "../../scripts/check-pr-body.mjs";
@@ -5188,10 +5190,14 @@ describe("class sweep reaches the CI event entry (#4273 F6)", () => {
 // label read is best-effort, so an offline/unreadable label warns and skips.
 describe("detection retrospective for bug-closing PRs (#4288)", () => {
 	const withDetection = (lines: string) => `${body}\n\n## Detection\n${lines}`;
+	const shapeLines =
+		"- **Shape:** new: stale mirror\n" +
+		"- **Enforcer:** none: judgment-only, no tree-wide scan exists yet";
 	const validDetection =
 		"- **Caught by:** reviewer probe\n" +
 		"- **Should have been caught by:** CI unit\n" +
-		"- **Gap:** none: no existing test covered the shape";
+		"- **Gap:** none: no existing test covered the shape\n" +
+		shapeLines;
 
 	it("exports one layer vocabulary", () => {
 		expect(DETECTION_LAYERS).toEqual([
@@ -5241,7 +5247,8 @@ describe("detection retrospective for bug-closing PRs (#4288)", () => {
 				withDetection(
 					"- Caught by: smoke\n" +
 						"- Should have been caught by: this layer\n" +
-						"- Gap: #4288",
+						"- Gap: #4288\n" +
+						shapeLines,
 				),
 				{ bugClosing: true },
 			),
@@ -5254,7 +5261,8 @@ describe("detection retrospective for bug-closing PRs (#4288)", () => {
 				withDetection(
 					"- Caught by: nightly\n" +
 						"- Should have been caught by: governance sweep\n" +
-						"- Gap: exists: tests/scripts/check-pr-body.test.ts",
+						"- Gap: exists: tests/scripts/check-pr-body.test.ts\n" +
+						shapeLines,
 				),
 				{ bugClosing: true },
 			),
@@ -5323,7 +5331,8 @@ describe("detection retrospective for bug-closing PRs (#4288)", () => {
 				withDetection(
 					"- Caught by: smoke\n" +
 						"- Should have been caught by: CI unit\n" +
-						"- Gap: none: n/a",
+						"- Gap: none: n/a\n" +
+						shapeLines,
 				),
 				{ bugClosing: true },
 			),
@@ -5360,6 +5369,255 @@ describe("detection retrospective for bug-closing PRs (#4288)", () => {
 			bugClosing: true,
 		});
 		expect(result.valid).toBe(false);
+	});
+});
+
+// Recurrence: #4390, #4391 and #4377 (2026-10-14) each closed a bug with a
+// regression test for one instance while the defect shape stayed unenforced
+// across the tree, and #4409 wrote "Gap: none: this change is the layer"
+// before install-smoke run 38610594076 failed on master (#4439). A bug-closing
+// body now names the AGENTS.md shape and its tree-wide enforcer, and a path
+// enforcer must be one the shape's catalog entry names.
+describe("Detection names the defect shape and its enforcer (#4439)", () => {
+	const catalog = parseDefectShapes(
+		readFileSync(resolve(repositoryRoot, "AGENTS.md"), "utf8"),
+	);
+	const head =
+		"## Detection\nCaught by: smoke\nShould have been caught by: CI unit\nGap: #4439\n";
+	const lines = (shape?: string, enforcer?: string) =>
+		head +
+		(shape === undefined ? "" : `Shape: ${shape}\n`) +
+		(enforcer === undefined ? "" : `Enforcer: ${enforcer}\n`);
+	const lint = (
+		section: string,
+		options: Parameters<typeof lintDetectionSection>[1] = {},
+	) =>
+		lintDetectionSection(section, {
+			requireShape: true,
+			existsOnBase: () => true,
+			shapeCatalog: () => catalog,
+			...options,
+		});
+	const SINK = "tests/config/sink-read-drain-sweep.test.ts";
+	const JUDGMENT = "none: judgment-only, the population has no lexical marker";
+
+	it("refuses a bug-closing body that names neither line", () => {
+		expect(lint(lines())).toEqual([expect.stringContaining('"Shape: #N')]);
+		const result = lintPrBody(`${body}\n\n${lines()}`, { bugClosing: true });
+		expect(result.valid).toBe(false);
+		expect(result.errors.join(" ")).toContain('"Enforcer:');
+	});
+
+	it("refuses a body with Shape but no Enforcer, and the reverse", () => {
+		expect(lint(lines("#67"))).toHaveLength(1);
+		expect(lint(lines(undefined, JUDGMENT))).toHaveLength(1);
+	});
+
+	it.each([
+		["a word instead of a number", "maybe", JUDGMENT],
+		["an empty new: name", "new:", JUDGMENT],
+		["an enforcer that is a non-test path", "#67", "docs/pi-lens-fixer.md"],
+		["a judgment-only line with no reason", "#67", "none: judgment-only"],
+		[
+			"a none: line that is not judgment-only",
+			"#67",
+			"none: oversight in the lint",
+		],
+		[
+			"a judgment-only reason of two words",
+			"#67",
+			"none: judgment-only, no scan",
+		],
+	])("refuses %s", (_name, shape, enforcer) => {
+		expect(lint(lines(shape, enforcer))).toEqual([
+			expect.stringContaining('"Shape: #N'),
+		]);
+	});
+
+	it("refuses a shape number the catalog does not have", () => {
+		expect(lint(lines("#999", JUDGMENT))).toEqual([
+			expect.stringContaining("has no shape 999"),
+		]);
+	});
+
+	it("refuses a path enforcer that the shape's catalog entry does not name", () => {
+		// Shape 68's enforcer is not shape 67's.
+		expect(lint(lines("#67", "tests/config/tla-switch-pins.test.ts"))).toEqual([
+			expect.stringContaining("AGENTS.md shape 67 does not name that path"),
+		]);
+	});
+
+	it("refuses a prefix or an extension of a path the entry names", () => {
+		for (const path of [
+			"tests/config/sink-read-drain-sweep",
+			`${SINK}.bak`,
+			"tests/config/sink-read-drain-sweep.test",
+		])
+			expect(lint(lines("#67", path))).toEqual([
+				expect.stringContaining("does not name that path"),
+			]);
+	});
+
+	it("refuses a suffix of a path the entry names", () => {
+		// Recurrence (#4448 review F3): a lookbehind-free match accepts
+		// `config/x.test.ts` for an entry that names `tests/config/x.test.ts`.
+		expect(lint(lines("#67", SINK.replace("tests/", "")))).toEqual([
+			expect.stringContaining("does not name that path"),
+		]);
+	});
+
+	it("accepts the path the catalog entry names", () => {
+		expect(lint(lines("#67", SINK))).toEqual([]);
+		expect(
+			lint(lines("#68", "`tests/config/tla-switch-pins.test.ts`")),
+		).toEqual([]);
+	});
+
+	it("accepts the judgement spelling of judgment-only", () => {
+		// Recurrence (#4448 round 3): a mutation that dropped the alternative
+		// survived, because every case used the other spelling.
+		expect(
+			lint(
+				lines(
+					"#67",
+					"none: judgement-only, the population has no lexical marker",
+				),
+			),
+		).toEqual([]);
+	});
+
+	it("accepts an issue enforcer and a judgment-only enforcer", () => {
+		expect(lint(lines("#67", "#4439 (build the census)"))).toEqual([]);
+		expect(lint(lines("#67", JUDGMENT))).toEqual([]);
+	});
+
+	it("accepts a new shape with a base path, and refuses a path off the base", () => {
+		const path = "tests/config/anything-on-base.test.ts";
+		expect(lint(lines("new: stale mirror", path))).toEqual([]);
+		const offBase = lint(lines("new: stale mirror", path), {
+			existsOnBase: () => false,
+		});
+		expect(offBase).toEqual([expect.stringContaining("not on the PR's base")]);
+	});
+
+	it("refuses a catalog path enforcer that this PR adds", () => {
+		expect(lint(lines("#67", SINK), { existsOnBase: () => false })).toEqual([
+			expect.stringContaining("regression test, not the enforcer"),
+		]);
+	});
+
+	it("fails closed on a path enforcer when the catalog cannot be read", () => {
+		const unreadable = lint(lines("#67", SINK), { shapeCatalog: () => null });
+		expect(unreadable).toEqual([expect.stringContaining("could not be read")]);
+		expect(lint(lines("#67", JUDGMENT), { shapeCatalog: () => null })).toEqual(
+			[],
+		);
+	});
+
+	it("does not count lines in a fenced block or an HTML comment", () => {
+		const fenced = `${head}\`\`\`md\nShape: #67\nEnforcer: ${JUDGMENT}\n\`\`\`\n`;
+		const commented = `${head}<!--\nShape: #67\nEnforcer: ${JUDGMENT}\n-->\n`;
+		// GitHub hides everything after an unterminated `<!--`.
+		const unterminated = `${head}<!--\nShape: #67\nEnforcer: ${JUDGMENT}\n`;
+		for (const section of [fenced, commented, unterminated])
+			expect(lint(section)).toEqual([expect.stringContaining('"Shape: #N')]);
+	});
+
+	it("leaves an old three-line section on a non-bug PR green", () => {
+		const old = head;
+		expect(lintDetectionSection(old, {})).toEqual([]);
+		expect(lintPrBody(`${body}\n\n${old}`)).toEqual({
+			valid: true,
+			errors: [],
+		});
+	});
+
+	it("validates a Shape or Enforcer line that a non-bug PR does write", () => {
+		const options = { shapeCatalog: () => catalog };
+		expect(lintDetectionSection(lines("maybe"), options)).toHaveLength(1);
+		expect(
+			lintDetectionSection(lines(undefined, "docs/pi-lens-fixer.md"), options),
+		).toHaveLength(1);
+	});
+
+	it("describes both fields in the template and the message", () => {
+		const template = readFileSync(
+			resolve(repositoryRoot, ".github/PULL_REQUEST_TEMPLATE.md"),
+			"utf8",
+		);
+		const hint =
+			/## Detection\r?\n\r?\n([\s\S]*?)(?=\r?\n## |$)/.exec(template)?.[1] ??
+			"";
+		const message = lint(lines())[0];
+		for (const text of [hint, message])
+			for (const field of ["Shape:", "Enforcer:", "judgment-only"])
+				expect(text).toContain(field);
+	});
+});
+
+// Recurrence (#4448 review F4): the catalog was read from the PR's own
+// checkout while the enforcer path was read from its base, so a PR could add
+// its test to catalog entry N and approve its own enforcer. The reader takes
+// AGENTS.md from the base commit. `git` is stubbed at the process boundary (a
+// stub, not a spawn): the checkout holds the head's AGENTS.md on disk, and the
+// stub answers `merge-base` and `show <base>:AGENTS.md` like a two-commit repo.
+describe("the shape catalog is read from the PR's base (#4439)", () => {
+	const ENFORCER = "tests/config/claimed-enforcer.test.ts";
+	const entry = (extra: string) =>
+		`## Recurring defect shapes\n\n4. **Unsettled resource:** settle it.${extra}\n\n## Next\n`;
+	const naming = `\n   Enforced by \`${ENFORCER}\`.`;
+	const checkouts: string[] = [];
+	afterEach(() => {
+		for (const checkout of checkouts.splice(0))
+			rmSync(checkout, { recursive: true, force: true });
+	});
+
+	function lintAgainst(base: string | null, head: string) {
+		const checkout = mkdtempSync(join(tmpdir(), "pi-lens-shape-catalog-"));
+		checkouts.push(checkout);
+		writeFileSync(join(checkout, "AGENTS.md"), head);
+		const git = (args: string[]): string => {
+			if (args[0] === "merge-base" && base !== null) return "base0000\n";
+			if (
+				args[0] === "show" &&
+				args[1] === "base0000:AGENTS.md" &&
+				base !== null
+			)
+				return base;
+			// A repository answers a show of HEAD with the head's file.
+			if (args[0] === "show" && args[1] === "HEAD:AGENTS.md") return head;
+			throw new Error(`git ${args.join(" ")} failed`);
+		};
+		return {
+			reader: shapeCatalogReader(checkout, git),
+			errors: lintDetectionSection(
+				"## Detection\nCaught by: smoke\nShould have been caught by: CI unit\nGap: #4439\n" +
+					`Shape: #4\nEnforcer: ${ENFORCER}\n`,
+				{
+					requireShape: true,
+					existsOnBase: () => true,
+					shapeCatalog: shapeCatalogReader(checkout, git),
+				},
+			),
+		};
+	}
+
+	it("refuses an enforcer that only the head's AGENTS.md names", () => {
+		expect(lintAgainst(entry(""), entry(naming)).errors).toEqual([
+			expect.stringContaining("AGENTS.md shape 4 does not name that path"),
+		]);
+	});
+
+	it("accepts an enforcer that the base's AGENTS.md names", () => {
+		expect(lintAgainst(entry(naming), entry(naming)).errors).toEqual([]);
+	});
+
+	it("fails closed when the base cannot be resolved", () => {
+		// The checkout names the enforcer; with no base the reader must say null
+		// rather than fall back to the checkout.
+		const run = lintAgainst(null, entry(naming));
+		expect(run.reader()).toBeNull();
+		expect(run.errors).toEqual([expect.stringContaining("could not be read")]);
 	});
 });
 
@@ -5560,12 +5818,20 @@ const existsBaseFixtures = {
 describe("--lint-local resolves the closed issue label through gh (#4288)", () => {
 	const closing = `${body}\n\nCloses #4321.`;
 	const detection = (caught: string) =>
-		`\n\n## Detection\n\nCaught by: ${caught}\nShould have been caught by: CI unit\nGap: none: no layer would have seen it\n`;
+		`\n\n## Detection\n\nCaught by: ${caught}\nShould have been caught by: CI unit\nGap: none: no layer would have seen it\nShape: new: stale mirror\nEnforcer: #4439\n`;
 	const proseDetection = detection(
 		"external report (issue #4321 filed after a user saw wrapped tabs)",
 	);
-	const templateHint =
-		"\n\n## Detection\n\nOptional unless this PR closes a bug-labelled issue: name `Caught by:` (one layer), `Should have been caught by:` (a layer or `this layer`), and `Gap:` (`#NNN`, `exists: <path of a test already on master>`, or `none: <reason>`; a test this PR adds does not count).\n";
+	// The template's own hint, read from the file so a template edit cannot
+	// leave this fixture describing the old wording.
+	const templateHint = `\n\n## Detection\n\n${
+		/## Detection\r?\n\r?\n([\s\S]*?)(?=\r?\n## |$)/.exec(
+			readFileSync(
+				resolve(repositoryRoot, ".github/PULL_REQUEST_TEMPLATE.md"),
+				"utf8",
+			),
+		)?.[1] ?? ""
+	}\n`;
 	const roots: string[] = [];
 	const fixtures: string[] = [];
 	afterEach(() => {
@@ -5710,6 +5976,54 @@ describe("--lint-local resolves the closed issue label through gh (#4288)", () =
 		expect(run.status).toBe(0);
 	});
 
+	// Recurrence: a rule wired into the bug-closing route only would pass the
+	// same body through the any-label route and the CI entry (#4439). The
+	// fixture checkout has no AGENTS.md, so a `Shape: #N` path enforcer reaches
+	// the catalog reader's unreadable branch on every route.
+	describe("Shape and Enforcer lines (#4439)", () => {
+		const shaped = (shape: string, enforcer: string) =>
+			`${closing}\n\n### Test assessment\nThe fixture file is the subject.${detection("external user").replace(/Shape: .*\nEnforcer: .*\n/, `Shape: ${shape}\nEnforcer: ${enforcer}\n`)}`;
+
+		posix("reds a bug-labelled body that has only the three old lines", () => {
+			const run = runLint(
+				`${closing}${detection("external user").replace(/Shape: .*\nEnforcer: .*\n/, "")}`,
+				"bug",
+			);
+			expect(run.output).toContain('"Shape: #N');
+			expect(run.status).toBe(1);
+		});
+
+		posix("reds a catalog path enforcer when AGENTS.md is unreadable", () => {
+			const run = runLint(
+				shaped("#4", OLD_TEST),
+				"bug",
+				existsBaseFixtures.baseHas(),
+			);
+			expect(run.output).toContain("could not be read from the base commit");
+			expect(run.status).toBe(1);
+		});
+
+		posix("validates the same lines for a non-bug issue", () => {
+			const run = runLint(
+				shaped("#4", OLD_TEST),
+				"feature",
+				existsBaseFixtures.baseHas(),
+			);
+			expect(run.output).toContain("could not be read from the base commit");
+			expect(run.status).toBe(1);
+		});
+
+		posix("accepts a new shape with a base path enforcer", () => {
+			const run = runLint(
+				shaped("new: stale mirror", OLD_TEST),
+				"bug",
+				existsBaseFixtures.baseHas(),
+			);
+			expect(run.output).not.toContain("Detection");
+			expect(run.status).toBe(0);
+		});
+	});
+
 	// Recurrence: #4390, #4391 and #4340 (October 2026) each answered the
 	// Detection retrospective with `Gap: exists: <test>` where the test was the
 	// regression test the PR itself added, so no layer issue was ever filed
@@ -5805,7 +6119,7 @@ describe("--lint-local resolves the closed issue label through gh (#4288)", () =
 // only into the local preflight would pass the same body in CI (#4404).
 describe("Gap exists: names a file on the PR's base through the CI event entry (#4404)", () => {
 	const closing = (gap: string) =>
-		`${body}\n\n### Test assessment\nThe fixture file is the subject.\n\n## Detection\n\nCaught by: external user\nShould have been caught by: CI unit\nGap: ${gap}\n\nCloses #4404.\n`;
+		`${body}\n\n### Test assessment\nThe fixture file is the subject.\n\n## Detection\n\nCaught by: external user\nShould have been caught by: CI unit\nGap: ${gap}\nShape: new: stale mirror\nEnforcer: #4439\n\nCloses #4404.\n`;
 	const eventFetch = (text: string) =>
 		vi.fn().mockImplementation(async (url: string) => {
 			if (String(url).includes("/files"))
@@ -5859,5 +6173,18 @@ describe("Gap exists: names a file on the PR's base through the CI event entry (
 		);
 		expect(run.output).not.toContain("Detection");
 		expect(run.result.valid).toBe(true);
+	});
+
+	// Recurrence: the CI entry builds its own `lintPrBody` options, so the
+	// catalog reader wired only into the local preflight would pass the same
+	// body in CI (#4439). The fixture checkout has no AGENTS.md.
+	it("reads the shape catalog through the CI event entry", async () => {
+		const text = closing("#4404").replace(
+			/Shape: .*\nEnforcer: .*\n/,
+			`Shape: #4\nEnforcer: ${OLD_TEST}\n`,
+		);
+		const run = await lintAt(existsBaseFixtures.baseHas(), text);
+		expect(run.output).toContain("could not be read from the base commit");
+		expect(run.result.valid).toBe(false);
 	});
 });
