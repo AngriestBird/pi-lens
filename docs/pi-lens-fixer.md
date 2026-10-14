@@ -162,6 +162,9 @@ exports change.
 - Spot-check one prior round's mutation on the new head (#2583).
 - Re-read the changelog fragment for any claim the round retracts (#3155), then
   add an honest review-round section to the PR body.
+- Lint the PR body (`--lint-local`) before the first push of a round, not only
+  at hand-back: `PR body (advisory)` re-reads the same body on every push, so
+  an unfixed finding reds each one.
 
 ## Before the report
 
@@ -202,6 +205,12 @@ rigor (#2599).
   hit); `internal` is CI, tests, `formal/`, contributor docs, orchestration, and
   refactors with no observable change. `npm run changelog:check` checks the
   rollup, not fragments (#2456).
+- A bug fix's detection lesson names the defect SHAPE and its tree-wide
+  enforcer, not only a test for the instance: the `Gap:` line names the
+  `AGENTS.md` "Recurring defect shapes" number (or a new shape) and either a
+  test that scans the whole population, an issue to build one, or
+  `judgment-only` with the reason. The fix's own one-bug test is its
+  regression test, not the closed gap. The lint half is #4439.
 - Every code fact in the PR body is a `` `path:line` `` citation the check
   verifies: the file must be in the committed tree (never an untracked or
   git-ignored path, which CI cannot read), and a fenced quote after it must
