@@ -1176,6 +1176,18 @@ The Unit shards are packed by the per-file seconds in
 `scripts/test-shard-weights.json`; regenerate it from the shards' uploaded
 `vitest-results.json` when `tests/config/test-shard-assignment.test.ts` reds.
 
+Actions cache. The repository cache is capped at 10 GB. The nightly
+smoke workflows restore the managed tool tree through
+`.github/actions/tool-tree-cache`, keyed on the hash of
+`clients/installer/index.ts` (every pin) plus the ISO week; a pin that moves out
+of that file moves the action's `hashFiles` target in the same change
+(`tests/config/tool-tree-cache-workflow.test.ts`). `cache-prune.yml` runs
+`scripts/prune-actions-cache.mjs` nightly and on a push to master that edits
+it, so a closed pull request's caches and superseded copies never fill the cap.
+A workflow that `pull_request_target` or `workflow_run` starts never restores
+or saves a cache, so a pull request cannot poison what a privileged run
+restores (`tests/config/untrusted-trigger-cache.test.ts`).
+
 A workflow job no pull request can run needs a registered reason in
 `tests/config/workflow-pull-request-reachability.test.ts`, and the branch run
 (`gh workflow run <file> --ref <branch>`) quoted with its run id (#3043). The

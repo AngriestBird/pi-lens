@@ -289,6 +289,7 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '22'
+          cache: npm
 
       # Python provides pip for the pip-distributed tools (ruff, yamllint,
       # sqlfluff, mypy). GitHub-release tools (shellcheck/shfmt/hadolint/taplo/
@@ -368,6 +369,18 @@ jobs:
           chmod +x "$dest/bin/docker-language-server"
           echo "$dest/bin" >> "$GITHUB_PATH"
           "$dest/bin/docker-language-server" --version
+
+      # #4358: restore the managed tool tree (the npm tools and release
+      # binaries every `--install` step below shares through PI_LENS_HOME)
+      # instead of re-downloading it nightly. The key is the installer
+      # registry's hash plus the ISO week, so a pin change installs cold and a
+      # floating package refreshes weekly. Saved by the last step of the job.
+      - name: Restore the managed tool tree
+        id: tool_tree
+        uses: ./.github/actions/tool-tree-cache
+        with:
+          mode: restore
+          prefix: tool-smoke-tools
 
       # `id:` + a captured log (#2723): this is one of the six steps whose
       # outcome can actually turn the job red (no continue-on-error), so the
@@ -623,6 +636,18 @@ jobs:
         run: |
           set -o pipefail
           node scripts/smoke-tools.mjs --resolution --verbose 2>&1 | tee "$RUNNER_TEMP/tool-smoke-resolution-layer.log"
+
+      # #4358: save what the layers above installed, also when one of them went
+      # red (a red night still installed most tools). Skipped on an exact hit,
+      # since a save to an existing key only logs a warning, and on a cancel,
+      # which can leave a half-written tree. A save problem never reds the job.
+      - name: Save the managed tool tree
+        if: ${{ !cancelled() && steps.tool_tree.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        uses: ./.github/actions/tool-tree-cache
+        with:
+          mode: save
+          prefix: tool-smoke-tools
 
       # #3319: PR analyses cover only their diff, so a master-only SonarCloud
       # quality regression otherwise stays invisible to the merge train. Keep
