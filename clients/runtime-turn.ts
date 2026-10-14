@@ -12,7 +12,6 @@ import { logActionableWarningsEvent } from "./actionable-warnings-logger.js";
 import {
 	appendCodeQualityWarningsHistory,
 	buildCodeQualityWarningsReport,
-	type CodeQualityWarningRecord,
 	formatCodeQualityWarningsAdvisory,
 	writeCodeQualityWarningsReport,
 } from "./code-quality-warnings.js";
@@ -157,6 +156,7 @@ import {
 } from "./cascade-format.js";
 import {
 	applyPushedFindingPolicy,
+	applyPushedFindingPolicyByFile,
 	filterFindingsByDisposition,
 } from "./dispatch/finding-policy.js";
 import { detectFileRole } from "./file-role.js";
@@ -4812,29 +4812,11 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		// at the report INPUT so the advisory, the persisted report and the delta
 		// view all agree; the delta view's own filter then re-applies to the same
 		// set and is idempotent. Per file, because the anchor is content-bound.
-		const qualityWarningsByFile = new Map<string, CodeQualityWarningRecord[]>();
-		for (const warning of runtime.peekCodeQualityWarnings(sessionId)) {
-			const group = qualityWarningsByFile.get(warning.filePath);
-			if (group) group.push(warning);
-			else qualityWarningsByFile.set(warning.filePath, [warning]);
-		}
-		const qualityWarnings: CodeQualityWarningRecord[] = [];
-		let qualityDispositionSuppressed = 0;
-		for (const [filePath, group] of qualityWarningsByFile) {
-			let content: string | undefined;
-			try {
-				content = fs.readFileSync(filePath, "utf-8");
-			} catch {
-				content = undefined;
-			}
-			const { kept, suppressed } = applyPushedFindingPolicy(group, {
+		const { kept: qualityWarnings, suppressed: qualityDispositionSuppressed } =
+			applyPushedFindingPolicyByFile(
+				runtime.peekCodeQualityWarnings(sessionId),
 				cwd,
-				filePath,
-				content,
-			});
-			qualityWarnings.push(...kept);
-			qualityDispositionSuppressed += suppressed;
-		}
+			);
 		const qualityReport = buildCodeQualityWarningsReport({
 			cwd,
 			sessionId: runtime.telemetrySessionId,

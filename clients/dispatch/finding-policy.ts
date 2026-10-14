@@ -19,6 +19,7 @@
  * which holds raw `LSPDiagnostic`s.
  */
 
+import * as fs from "node:fs";
 import {
 	applyDispositions,
 	applyDispositionsMultiFile,
@@ -291,6 +292,56 @@ export function applyPushedFindingPolicy<
 		identities: renderedRuleIdentities,
 	});
 	return { kept, suppressed: findings.length - kept.length };
+}
+
+/**
+ * A file's current content for this module's filters, or `undefined` when it
+ * cannot be read. `undefined` is the documented fail-open input
+ * (`FindingPolicyOptions.content`): inline suppression becomes a no-op and the
+ * strict anchor cannot match, so a read error never hides a finding
+ * (AGENTS.md shape 48).
+ */
+export function readPolicyContent(filePath: string): string | undefined {
+	try {
+		return fs.readFileSync(filePath, "utf-8");
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * {@link applyPushedFindingPolicy} over findings from several files: grouped by
+ * `filePath` in first-seen order, one content read per file, one summed
+ * suppressed count. `kept` keeps that grouping (each file's survivors in input
+ * order), which is the order the turn-end code-quality advisory has always
+ * rendered.
+ */
+export function applyPushedFindingPolicyByFile<
+	T extends DispositionCandidate & {
+		filePath: string;
+		rule?: string;
+		code?: string;
+		id?: string;
+	},
+>(findings: readonly T[], cwd: string): { kept: T[]; suppressed: number } {
+	const byFile = new Map<string, T[]>();
+	for (const finding of findings) {
+		const group = byFile.get(finding.filePath);
+		if (group) group.push(finding);
+		else byFile.set(finding.filePath, [finding]);
+	}
+	const kept: T[] = [];
+	let suppressed = 0;
+	for (const [filePath, group] of byFile) {
+		const policy = applyPushedFindingPolicy(group, {
+			cwd,
+			filePath,
+			content: readPolicyContent(filePath),
+		});
+		kept.push(...policy.kept);
+		suppressed += policy.suppressed;
+	}
+	return { kept, suppressed };
 }
 
 /** Every rendered `(tool, rule)` spelling plus the `tool`-omitted form of

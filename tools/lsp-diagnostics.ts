@@ -44,6 +44,7 @@ import {
 import {
 	applyLspFindingPolicy,
 	loadProjectRulePolicyMap,
+	readPolicyContent,
 } from "../clients/dispatch/finding-policy.js";
 import { hasStrictDispositionMarks } from "../clients/diagnostic-dispositions.js";
 import { recordDegradationOnce } from "../clients/degradation-ledger.js";
@@ -1305,14 +1306,9 @@ function replayContentForStrictMarks(
 	file: string,
 	cwd: string,
 ): string | undefined {
-	if (!hasStrictDispositionMarks(cwd)) return undefined;
-	try {
-		return fs.readFileSync(file, "utf-8");
-	} catch {
-		// Fail open — an unreadable file degrades to the weak-anchored filter
-		// rather than hiding or dropping anything.
-		return undefined;
-	}
+	// Fail open — an unreadable file degrades to the weak-anchored filter
+	// rather than hiding or dropping anything.
+	return hasStrictDispositionMarks(cwd) ? readPolicyContent(file) : undefined;
 }
 
 /** #1561: everything the retire decision needs, as one argument. */
