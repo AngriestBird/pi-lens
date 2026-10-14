@@ -84,7 +84,10 @@ import {
 	saveRuntimeProjectSnapshot,
 } from "./project-snapshot.js";
 import { scanProjectRules } from "./rules-scanner.js";
-import type { RuntimeCoordinator } from "./runtime-coordinator.js";
+import type {
+	RuntimeCoordinator,
+	StartupTaskName,
+} from "./runtime-coordinator.js";
 import { resetRustAvailability } from "./rust-client.js";
 import { resetSafeSpawnWindowsCommandCache } from "./safe-spawn.js";
 import {
@@ -1275,6 +1278,20 @@ async function buildOrRefreshWordIndex(args: {
 	};
 }
 
+// Some background scans are CPU-heavy and arrive on the event loop just as the
+// user is most likely typing (right after /new). Defer those by a few seconds so
+// the perceptible 50-100ms sync bursts they contain land during LLM streaming
+// idle time instead. All other tasks (those not listed here) run on the next
+// `setImmediate` tick as before. The delays are deliberately staggered (200ms
+// apart) so two heavy tasks don't both run on the same macrotask. Keys are
+// `StartupTaskName`, so a misspelled key fails the build; a key whose task
+// was removed (#4352, "project index") is caught by the defer-table test.
+export const STARTUP_TASK_DEFER_MS: Partial<Record<StartupTaskName, number>> = {
+	"call-graph": 5000,
+	"codebase-model": 5200,
+	"ast-grep-exports": 5400,
+};
+
 // Fire off heavy scans as background tasks — don't block session start.
 // Each consumer already handles the "not ready yet" case gracefully
 // (cachedExports.size > 0, cache miss paths).
@@ -1345,41 +1362,13 @@ function scheduleStartupScansWithClients(
 		});
 	}
 
-	// Every background scan name the runners below accept. The defer table and
-	// the scan list are keyed by it, so a misspelled name fails the build. #4352:
-	// "ast-grep exports" matched no task, so its defer was silently lost.
-	type StartupTaskName =
-		| "todo"
-		| "dead-code"
-		| "knip"
-		| "jscpd"
-		| "govulncheck"
-		| "gitleaks"
-		| "opengrep"
-		| "madge"
-		| "trivy"
-		| "call-graph"
-		| "codebase-model"
-		| "ast-grep-exports"
-		| "word-index";
-	// Some background scans are CPU-heavy and arrive on the event loop
-	// just as the user is most likely typing (right after /new). Defer
-	// those by a few seconds so the perceptible 50-100ms sync bursts they
-	// contain land during LLM streaming idle time instead. All other
-	// tasks (those not listed here) run on the next `setImmediate` tick
-	// as before. The delays are deliberately staggered (200ms apart) so
-	// two heavy tasks don't both run on the same macrotask.
-	const taskDeferMsByName: Partial<Record<StartupTaskName, number>> = {
-		"call-graph": 5000,
-		"codebase-model": 5200,
-		"ast-grep-exports": 5400,
-	};
 	const runTask = (
 		name: StartupTaskName,
 		task: () => Promise<void>,
 	): Promise<void> => {
 		const queuedAt = Date.now();
-		dbg(`session_start task ${name}: scheduled`);
+		const delay = STARTUP_TASK_DEFER_MS[name] ?? 0;
+		dbg(`session_start task ${name}: scheduled deferMs=${delay}`);
 		runtime.markStartupScanInFlight(name, sessionGeneration);
 		const completion = new Promise<void>((resolve) => {
 			const fire = (): void => {
@@ -1405,7 +1394,6 @@ function scheduleStartupScansWithClients(
 						resolve();
 					});
 			};
-			const delay = taskDeferMsByName[name] ?? 0;
 			if (delay > 0) {
 				// #1154: unref to match the repo-wide convention that every
 				// background timer is `.unref()`'d. Full-mode deferred scans only
