@@ -321,6 +321,7 @@ head that added this model. It is not checked in CI.
 | `AuthorOwnOldTextInflightPre4387R2` | the same on the round-1 head | violated `NoStaleAllow` | 23,222 |
 | `AuthorOwnOldTextIdless` | #4387 round 2, S12: only an id-less read was there, so the zero-read arm never ran; the UNKNOWN credit leaves an empty scope instead of advancing (`OldTextNeedsNamedRead`) | pass (`NoStaleAllow`, `NoBlindAllow`, `NoIdlessAuthoredRead`) | 693,523 |
 | `AuthorOwnOldTextIdlessPre4387R2` | the same with the credit advancing over the id-less read (round 1): after a move the advanced authorship vouches for the in-flight line (IdlessRead, BashWrite, Edit, External, EditRW, Turn, Tree, Edit) | violated `NoStaleAllow` | 184,915 |
+| `AuthorOwnOldTextIdlessPipelinePre4387R2` | the same on the pipeline credit before review G3 (`PipelineCreditsOldText`): the pipeline's whole-file credit widens the empty scope the edit's credit left, under the edit's id (IdlessRead, BashWrite, Edit, External, EditRW, Turn, Tree, Edit) | violated `NoStaleAllow` | 188,054 |
 | `AuthorInjectIdlessPre4387R2` | review F2: the injected read of round 1 names no tool call | violated `NoIdlessAuthoredRead` | 6 |
 | `AuthorOwnOldTextForeignNoIdentity` | the #4235 code's injection rule (`ZeroReadInjects` off) with `AuthorIdentity = FALSE`: with no read to check, the advanced authorship vouches for the other writer's line, so the identity clause is what refuses it | violated `NoStaleAllow` | 61 |
 | `BashAuthoredPre4387` | the #4387 sibling: `BashAuthored` on the code from #4235 until #4387, which dropped the zero-read injection for every authorship (55fa5210c); the own positional edit's read then shadows the authorship and an edit of another line is refused (BashWrite, Edit, EditRW, Edit). The code since #4387 injects again over a whole-file authorship only | violated `NoFalseBlock` | 30 |
@@ -409,12 +410,17 @@ the `#3522` block of the same file.
   which vouches for no line. Since #4387 round 2 that credit over a range
   scope leaves it empty instead of retiring it (review G2). The replays pin
   it ("#4387 S8", "#4387 S13").
-- Since #4387 round 2 (review G3) an oldText edit of a file with no
-  authorship leaves none (`EditRW`). The pipeline's whole-file credit it
-  replaced made an id-less record that no modelled verdict consults: an
-  allowed oldText edit implies a read, and every move drops an id-less
+- Since #4387 round 2 (review G3) the pipeline's whole-file credit no
+  longer follows an oldText edit (`PipelineCreditsOldText`). Over an
+  existing authorship it widened the edit credit's empty scope
+  (`AuthorOwnOldTextIdlessPipelinePre4387R2`). Over a file with no
+  authorship it made an id-less record that no modelled verdict consults:
+  an allowed oldText edit implies a read, and every move drops an id-less
   record. Probe configs over `rread`, `oedit`, `edit` and both moves passed
   `NoStaleAllow` with and without it.
+- The pipeline's whole-file credit after it rewrote the bytes (a format or
+  autofix of the edited file) is not modelled. It widens a range or empty
+  scope as before; review G3 did not change that path.
 - An injected read is unhashed past `READ_HASH_MAX_LINES` (3,000 lines) in
   the code; `Hashes` is global here. Such a file blocks every read-path edit
   after a move, which fails closed.

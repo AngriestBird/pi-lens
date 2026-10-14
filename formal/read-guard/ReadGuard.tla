@@ -183,6 +183,14 @@ InjectNamesAuthorshipPre4387R2 == FALSE
 \* 1): it advanced over a bridge read alone (S12).
 OldTextNeedsNamedRead == TRUE
 OldTextNeedsNamedReadPre4387R2 == FALSE
+\* #4387 round 2 (review G3): the pipeline's own-path whole-file credit after
+\* a native edit runs only when the pipeline rewrote the bytes
+\* (`preserveNativeAuthorship: mutation.kind !== "write"`). TRUE (code
+\* before): it ran after every oldText edit too, naming no tool call. With no
+\* authorship it made one (Carry); over the edit credit's empty scope it
+\* widened the scope back to the whole file, which keeps the edit's id.
+PipelineCreditsOldText == FALSE
+PipelineCreditsOldTextPre4387R2 == TRUE
 NoH == [l \in Lines |-> 0]
 Min(a, b) == IF a < b THEN a ELSE b
 
@@ -563,19 +571,22 @@ Edit(lo, span, oldText) ==
 \* edit's credit is UNKNOWN-range (#4387, OldTextRetires above): over an
 \* existing authorship it advances only with a read that names a tool call to
 \* bound it (OldTextNeedsNamedRead), else it leaves an empty scope. With no
-\* authorship the UNKNOWN credit makes none, and since #4387 round 2 (review
-\* G3) the pipeline's own-path whole-file credit no longer authors the file
-\* over it. Before, it did (Carry): an id-less record that no verdict here
-\* consults (a read exists, and every move drops it), so no switch keeps it.
+\* authorship the UNKNOWN credit makes none. The pipeline's own-path
+\* whole-file credit after it is PipelineCreditsOldText.
 EditRW ==
     /\ pc = "editRW"
     /\ ft' = rev /\ pendCreate' = FALSE
-    /\ written' = IF pend.own THEN AuthPart(disk)
-                  ELSE IF ~written.on THEN written
-                  ELSE IF OldTextRetires THEN Retired
-                  ELSE IF OldTextNeedsNamedRead /\ (~NamedRead \/ written.empty)
-                       THEN [Auth(disk) EXCEPT !.empty = TRUE]
-                  ELSE Auth(disk)
+    /\ written' = LET w == IF pend.own THEN AuthPart(disk)
+                           ELSE IF ~written.on THEN written
+                           ELSE IF OldTextRetires THEN Retired
+                           ELSE IF OldTextNeedsNamedRead /\ (~NamedRead \/ written.empty)
+                                THEN [Auth(disk) EXCEPT !.empty = TRUE]
+                           ELSE Auth(disk)
+                  IN IF PipelineCreditsOldText /\ ~pend.own
+                       THEN IF ~w.on THEN Carry(disk)
+                            ELSE IF w.ret THEN w
+                            ELSE [w EXCEPT !.empty = FALSE]
+                       ELSE w
     /\ reads' = LET r0 == IF pendCreate
                             THEN AddRec(reads, Rec(1, Len(disk), MkH(disk, 1, Len(disk)), FALSE), TRUE)
                             ELSE reads
