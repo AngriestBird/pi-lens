@@ -26,7 +26,12 @@ import {
 	tryWarmAttachedCodeActions,
 	tryWarmAttachedDiagnostics,
 } from "../../clients/warm-attach.js";
-import { removeTempDirSync, setupTestEnvironment } from "./test-utils.js";
+import {
+	connectOutcome,
+	plantStaleUnixSocket,
+	removeTempDirSync,
+	setupTestEnvironment,
+} from "./test-utils.js";
 
 function entry(pid: number, root: string, heartbeatAt: string): InstanceEntry {
 	return {
@@ -188,52 +193,102 @@ describe("warm-attach records a missing incumbent endpoint (#3255)", () => {
 	});
 });
 
-// Recurrence prevented (#4353): the stale-endpoint unlink named the untruncated
-// path, so under a TMPDIR long enough for Node to cut the bound name it missed
-// the stale file and `listen` failed EADDRINUSE, leaving the incumbent
-// unreachable. The file is planted at the BOUND name, which is what a killed
-// host leaves.
+// Recurrences prevented (#4353, #4376 review r1):
+//  - the stale-endpoint unlink named the untruncated path, so under a long
+//    TMPDIR it missed the stale file and `listen` failed EADDRINUSE;
+//  - from TMPDIR 66 the pid was cut out of the pid-scoped name, so a second
+//    session in one workspace bound the first session's name; once the unlink
+//    reached the bound file it silently replaced the live listener (F1);
+//  - the unlink could delete an unrelated regular file at the truncated name
+//    (F2).
+// Session A is a stub listener on another pid's endpoint; session B is the real
+// `configureWarmAttach` of this process.
 describe.skipIf(process.platform === "win32")(
-	"configureWarmAttach stale endpoint under a long TMPDIR (#4353)",
+	"configureWarmAttach endpoint ownership under a long TMPDIR (#4376)",
 	() => {
-		it("clears a stale file at the bound name and listens", async () => {
-			const { tmpDir } = setupTestEnvironment("pi-lens-wa-sock-");
-			// Pad to 100 characters so the socket name crosses sun_path inside
-			// the FILE name (a cut inside a directory would fail the bind).
-			const longTmp =
-				tmpDir.length >= 100
-					? tmpDir
-					: path.join(tmpDir, "p".repeat(100 - tmpDir.length - 1));
+		const OTHER_PID = 4_194_303;
+		const MIN_T = 75;
+
+		async function withLongTmp(
+			body: (ctx: { cwd: string; longTmp: string }) => Promise<void>,
+		): Promise<void> {
+			const { tmpDir } = setupTestEnvironment("pi-lens-wa-");
+			// Pad to 75 characters (more if the root is longer): the pid-scoped
+			// name then crosses sun_path, and the pad stays inside the root so
+			// the cut lands in the FILE name.
+			const pad = MIN_T - tmpDir.length - 1;
+			const longTmp = pad >= 1 ? path.join(tmpDir, "p".repeat(pad)) : tmpDir;
 			fs.mkdirSync(longTmp, { recursive: true });
+			const cwd = path.join(tmpDir, "ws");
+			fs.mkdirSync(cwd, { recursive: true });
 			vi.stubEnv("TMPDIR", longTmp);
 			vi.stubEnv("PI_LENS_WARM_ATTACH", "1");
 			try {
-				const cwd = path.join(tmpDir, "ws");
-				fs.mkdirSync(cwd, { recursive: true });
-				const endpoint = diagnosticsIpcPathForCwd(cwd, process.pid);
-				const bound = boundUnixSocketPath(endpoint);
-				expect(bound, "the planted path is really truncated").not.toBe(
-					endpoint,
-				);
-				fs.writeFileSync(bound, "");
-				await configureWarmAttach(cwd);
-				// A connect succeeds only if a server is listening on the bound
-				// file; the stale regular file refuses it (ECONNREFUSED).
-				const outcome = await new Promise<string>((resolve) => {
-					const probe = net.createConnection(endpoint);
-					probe.once("connect", () => {
-						probe.destroy();
-						resolve("connected");
-					});
-					probe.once("error", (error) =>
-						resolve((error as NodeJS.ErrnoException).code ?? String(error)),
-					);
-				});
-				expect(outcome).toBe("connected");
+				await body({ cwd, longTmp });
 			} finally {
 				_resetWarmAttachForTests();
 				vi.unstubAllEnvs();
 			}
+		}
+
+		/** Does B's pid survive the cut, so B's bound name is its own? */
+		function ownNameSurvives(cwd: string): boolean {
+			return boundUnixSocketPath(
+				diagnosticsIpcPathForCwd(cwd, process.pid),
+			).includes(`pi-lens-mcp-${process.pid}-`);
+		}
+
+		it("never replaces a live listener of another session in the workspace", async () => {
+			await withLongTmp(async ({ cwd }) => {
+				let reached = 0;
+				const sessionA = net.createServer((socket) => {
+					reached += 1;
+					socket.end();
+				});
+				const endpointA = diagnosticsIpcPathForCwd(cwd, OTHER_PID);
+				await new Promise<void>((resolve) =>
+					sessionA.listen(endpointA, resolve),
+				);
+				try {
+					await configureWarmAttach(cwd);
+					expect(await connectOutcome(endpointA)).toBe("connected");
+					expect(reached, "session A still owns its endpoint").toBe(1);
+				} finally {
+					(
+						sessionA as net.Server & { closeAllConnections?: () => void }
+					).closeAllConnections?.();
+					sessionA.close();
+				}
+			});
+		});
+
+		it("clears a stale socket at its own bound name, and leaves a shared name alone", async () => {
+			await withLongTmp(async ({ cwd }) => {
+				const endpoint = diagnosticsIpcPathForCwd(cwd, process.pid);
+				const bound = boundUnixSocketPath(endpoint);
+				expect(bound, "the stale socket sits at a truncated name").not.toBe(
+					endpoint,
+				);
+				await plantStaleUnixSocket(bound);
+				await configureWarmAttach(cwd);
+				// A pid inside the bound name makes the name B's own, so B clears the
+				// stale socket and listens. Without it the name is shared, B cannot
+				// tell whose socket it is, and it stays refused (cold fallback).
+				expect(await connectOutcome(endpoint)).toBe(
+					ownNameSurvives(cwd) ? "connected" : "ECONNREFUSED",
+				);
+			});
+		});
+
+		it("keeps an unrelated regular file at the bound name", async () => {
+			await withLongTmp(async ({ cwd }) => {
+				const endpoint = diagnosticsIpcPathForCwd(cwd, process.pid);
+				const bound = boundUnixSocketPath(endpoint);
+				fs.writeFileSync(bound, "user data");
+				await configureWarmAttach(cwd);
+				expect(fs.readFileSync(bound, "utf8")).toBe("user data");
+				expect(await connectOutcome(endpoint)).not.toBe("connected");
+			});
 		});
 	},
 );

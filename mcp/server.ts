@@ -42,7 +42,6 @@ import {
 	acknowledgeTurnEnd,
 	analyzeFile,
 	analyzeFileFresh,
-	boundUnixSocketPath,
 	canRebuildPiLens,
 	createMcpHost,
 	createWarmIpcLineReader,
@@ -78,6 +77,7 @@ import {
 	summarizeScan,
 	symbolSearch,
 	treeSitterRuntimeStatus,
+	unlinkStaleUnixSocket,
 	WARM_TURN_END_SCHEMA_VERSION,
 	type WarmAnalyzeRequest,
 	type WarmTurnEndRequest,
@@ -345,14 +345,9 @@ function isWithinServerWorkspace(cwd: string): boolean {
 
 function startIpcServer(): void {
 	// POSIX: a stale socket file blocks listen; remove it first. (Named pipes on
-	// Windows don't need this.)
-	if (process.platform !== "win32") {
-		try {
-			fs.unlinkSync(boundUnixSocketPath(IPC_PATH));
-		} catch {
-			// no stale socket — fine
-		}
-	}
+	// Windows don't need this; the helper is a no-op there.) It names the bound
+	// file and removes only a socket, never an unrelated file the cut lands on.
+	unlinkStaleUnixSocket(IPC_PATH);
 
 	const requestQueue = createWarmIpcRequestQueue();
 	const ipc = net.createServer((socket) => {
@@ -494,13 +489,9 @@ function startIpcServer(): void {
 		} catch {
 			// ignore
 		}
-		if (process.platform !== "win32") {
-			try {
-				fs.unlinkSync(boundUnixSocketPath(IPC_PATH));
-			} catch {
-				// ignore
-			}
-		}
+		// No unlink here: `ipc.close()` removes the file it bound. An explicit
+		// unlink of the shared name would also delete a LIVE sibling's socket when
+		// this server never bound (its `listen` failed EADDRINUSE).
 	};
 	process.on("exit", cleanup);
 }

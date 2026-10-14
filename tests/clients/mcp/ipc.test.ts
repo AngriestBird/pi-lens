@@ -10,7 +10,7 @@ import * as fs from "node:fs";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { McpAnalyzeResult } from "../../../clients/mcp/analyze.js";
 import {
 	boundUnixSocketPath,
@@ -26,10 +26,15 @@ import {
 	requestWarmAnalyze,
 	requestWarmTurnEnd,
 	turnEndStatusPathForCwd,
+	unlinkStaleUnixSocket,
 	WARM_DIAGNOSTICS_SCHEMA_VERSION,
 	WARM_TURN_END_SCHEMA_VERSION,
 } from "../../../clients/mcp/ipc.js";
-import { removeTempDirSync } from "../test-utils.js";
+import {
+	plantStaleUnixSocket,
+	removeTempDirSync,
+	setupTestEnvironment,
+} from "../test-utils.js";
 
 const SENTINEL = {
 	filePath: "/x/app.ts",
@@ -333,6 +338,96 @@ describe("boundUnixSocketPath (#4353)", () => {
 	});
 });
 
+describe("pid-scoped endpoint survives the sun_path cut (#4376 review r1, F1)", () => {
+	// Recurrence prevented: the pid sat after the hash, so from TMPDIR 66 the cut
+	// removed it and every session in a workspace bound one name.
+	const PID = 4_194_303;
+	const withRoot = (bytes: number, body: () => void): void => {
+		vi.stubEnv("TMPDIR", `/${"r".repeat(bytes - 1)}`);
+		try {
+			body();
+		} finally {
+			vi.unstubAllEnvs();
+		}
+	};
+
+	it.each([52, 66, 75, 80, 87])(
+		"keeps a 7-digit pid in the bound name at TMPDIR %i",
+		(bytes) => {
+			withRoot(bytes, () => {
+				const bound = boundUnixSocketPath(
+					diagnosticsIpcPathForCwd("/work/space", PID, "linux"),
+				);
+				expect(bound).toContain(`pi-lens-mcp-${PID}-`);
+			});
+		},
+	);
+
+	it("tells two pids apart in the bound name", () => {
+		withRoot(75, () => {
+			const bound = (pid: number): string =>
+				boundUnixSocketPath(
+					diagnosticsIpcPathForCwd("/work/space", pid, "linux"),
+				);
+			expect(bound(PID)).not.toBe(bound(PID - 1));
+		});
+	});
+});
+
+describe.skipIf(process.platform === "win32")(
+	"unlinkStaleUnixSocket (#4376 review r1, F2)",
+	() => {
+		// Recurrence prevented: the stale unlink deleted whatever file the
+		// truncated path named, a user's regular file included.
+		const make = (): { root: string; endpoint: string; bound: string } => {
+			const { tmpDir } = setupTestEnvironment("pi-lens-ss-");
+			const root =
+				tmpDir.length >= 100
+					? tmpDir
+					: path.join(tmpDir, "p".repeat(100 - tmpDir.length - 1));
+			fs.mkdirSync(root, { recursive: true });
+			const endpoint = path.join(root, "pi-lens-mcp-0123456789abcdef.sock");
+			return { root, endpoint, bound: boundUnixSocketPath(endpoint) };
+		};
+
+		it("unlinks a stale socket at the bound name", async () => {
+			const { endpoint, bound } = make();
+			await plantStaleUnixSocket(bound);
+			expect(unlinkStaleUnixSocket(endpoint)).toBe("unlinked");
+			expect(fs.existsSync(bound)).toBe(false);
+		});
+
+		it("keeps a regular file at the bound name", () => {
+			const { endpoint, bound } = make();
+			fs.writeFileSync(bound, "user data");
+			expect(unlinkStaleUnixSocket(endpoint)).toBe("not-a-socket");
+			expect(fs.readFileSync(bound, "utf8")).toBe("user data");
+		});
+
+		it("reports an absent file", () => {
+			expect(unlinkStaleUnixSocket(make().endpoint)).toBe("absent");
+		});
+
+		it("refuses a truncated name that lost the owner's pid", async () => {
+			// Recurrence prevented (F1): a name shared by every session cannot be
+			// cleared by one of them without replacing a live listener. The cut
+			// lands inside the file name, so the pid marker is not in the bound
+			// name whatever the root length.
+			const { root } = make();
+			const shared = path.join(
+				root,
+				"pi-lens-mcp-0123456789abcdef-diagnostics-4242.sock",
+			);
+			const bound = boundUnixSocketPath(shared);
+			await plantStaleUnixSocket(bound);
+			expect(unlinkStaleUnixSocket(shared, { ownerPid: 4242 })).toBe(
+				"shared-name",
+			);
+			expect(fs.existsSync(bound)).toBe(true);
+		});
+	},
+);
+
 // --- #3255: the case axis of the workspace rendezvous id --------------------
 //
 // Recurrence these cases prevent: `workspaceHash` lowercased its input
@@ -347,7 +442,10 @@ describe("boundUnixSocketPath (#4353)", () => {
 
 /** The 16 hex characters every per-workspace name embeds. */
 function workspaceIdIn(derivedPath: string): string {
-	const found = /pi-lens-(?:mcp|turn-end)-([0-9a-f]{16})/.exec(derivedPath);
+	const found =
+		/(?:pi-lens-(?:mcp|turn-end)-|-diagnostics-)([0-9a-f]{16})/.exec(
+			derivedPath,
+		);
 	if (!found) throw new Error(`no workspace id in ${derivedPath}`);
 	return found[1];
 }
@@ -504,7 +602,9 @@ describe("workspace id under an injected platform (#3255)", () => {
 			expect(endpoint.endsWith(".sock")).toBe(!pipe);
 			expect(
 				diagnosticsIpcPathForCwd(ALPHA, 4242, platform).endsWith(
-					pipe ? "-diagnostics-4242" : "-diagnostics-4242.sock",
+					pipe
+						? "-diagnostics-4242"
+						: `-diagnostics-${workspaceIdIn(endpoint)}.sock`,
 				),
 			).toBe(true);
 		},

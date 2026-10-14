@@ -967,7 +967,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 6 -> 5 (#3643): removed the obsolete ring path-comparison branch;
 		// dispatch identity now arrives on DispatchResult.
 		"clients/mcp/analyze.ts": 5,
-		"clients/mcp/ipc.ts": 4,
+		// 4 -> 7 (#4376): OS path namespace calls build the pid-first endpoint
+		// name and the stale-socket owner marker. No path-key owner changes.
+		"clients/mcp/ipc.ts": 7,
 		"clients/mcp/session.ts": 3,
 		"clients/metrics-client.ts": 6,
 		"clients/metrics-history.ts": 12,

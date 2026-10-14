@@ -13,11 +13,10 @@
  */
 
 import * as fs from "node:fs";
-import * as net from "node:net";
 import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { ipcPathForCwd } from "../../clients/mcp/ipc.js";
-import { setupTestEnvironment } from "../clients/test-utils.js";
+import { boundUnixSocketPath, ipcPathForCwd } from "../../clients/mcp/ipc.js";
+import { connectOutcome, setupTestEnvironment } from "../clients/test-utils.js";
 import { McpHarness } from "./harness.js";
 
 /** Sockets directly under `dir` (the file kind, not the name: the truncated
@@ -34,28 +33,13 @@ function socketsIn(dir: string): string[] {
  *  fail with ENOENT and prove nothing; a short CI TMPDIR gets the pad, a root
  *  already past 100 is used as is. */
 function longTmpRoot(): { tmpDir: string; longTmp: string } {
-	const { tmpDir } = setupTestEnvironment("pi-lens-hsock-");
+	const { tmpDir } = setupTestEnvironment("pi-lens-hs-");
 	const longTmp =
 		tmpDir.length >= 100
 			? tmpDir
 			: path.join(tmpDir, "p".repeat(100 - tmpDir.length - 1));
 	fs.mkdirSync(longTmp, { recursive: true });
 	return { tmpDir, longTmp };
-}
-
-/** Resolve with how a connect to `endpoint` ends: a listening server accepts,
- *  a stale socket file refuses (ECONNREFUSED). */
-function connectOutcome(endpoint: string): Promise<string> {
-	return new Promise((resolve) => {
-		const probe = net.createConnection(endpoint);
-		probe.once("connect", () => {
-			probe.destroy();
-			resolve("connected");
-		});
-		probe.once("error", (error) =>
-			resolve((error as NodeJS.ErrnoException).code ?? String(error)),
-		);
-	});
 }
 
 async function initialize(harness: McpHarness): Promise<void> {
@@ -125,6 +109,34 @@ describe.skipIf(process.platform === "win32")(
 				// A graceful end (stdin closed) leaves nothing behind.
 				await second.closeInput();
 				expect(socketsIn(longTmp)).toEqual([]);
+			} finally {
+				for (const harness of harnesses) harness.dispose();
+				vi.unstubAllEnvs();
+			}
+		}, 60_000);
+
+		it("a server start leaves an unrelated regular file at the bound name alone", async () => {
+			// Recurrence prevented (#4376 review r1, F2): the stale unlink named
+			// the truncated path, so `$TMPDIR/pi-lens` (any file the cut lands
+			// on) was deleted by the server.
+			const { tmpDir, longTmp } = longTmpRoot();
+			const workspace = path.join(tmpDir, "ws");
+			fs.mkdirSync(workspace, { recursive: true });
+			vi.stubEnv("TMPDIR", longTmp);
+			const harnesses: McpHarness[] = [];
+			try {
+				const bound = boundUnixSocketPath(ipcPathForCwd(workspace));
+				expect(bound, "the cut lands in the file name").not.toBe(
+					ipcPathForCwd(workspace),
+				);
+				fs.writeFileSync(bound, "user data");
+				const harness = new McpHarness({ cwd: workspace });
+				harnesses.push(harness);
+				await initialize(harness);
+				expect(fs.readFileSync(bound, "utf8")).toBe("user data");
+				expect(await connectOutcome(ipcPathForCwd(workspace))).not.toBe(
+					"connected",
+				);
 			} finally {
 				for (const harness of harnesses) harness.dispose();
 				vi.unstubAllEnvs();

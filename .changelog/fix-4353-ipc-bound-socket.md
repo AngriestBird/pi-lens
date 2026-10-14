@@ -3,4 +3,4 @@ section: Fixed
 audience: user
 ---
 
-- **The MCP warm side-channel restarts after a killed server on a long TMPDIR.** The server and the pi warm-attach host now unlink the socket file Node actually bound (it cuts a path past `sun_path`), so a stale socket no longer fails the next start with `EADDRINUSE`; the tmp-fixture hygiene owner also stops excusing creator-run leaks, and the MCP test harness removes the truncated socket name (#4353, #4354).
+- **MCP warm socket restarts after a kill on a long TMPDIR; a second pi session keeps its own endpoint.** The server and the warm-attach host now unlink only the socket file Node bound, never an unrelated file, and the pid-scoped endpoint is `pi-lens-mcp-<pid>-diagnostics-<hash>.sock` so the pid survives the path cut. The tmp-fixture hygiene owner also stops excusing creator-run leaks (#4353, #4354).

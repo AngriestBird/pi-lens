@@ -52,11 +52,11 @@ import {
 export { analyzeFile, type McpAnalyzeResult } from "./mcp/analyze.js";
 export { createMcpHost } from "./mcp/host-shim.js";
 export {
-	boundUnixSocketPath,
 	createWarmIpcLineReader,
 	createWarmIpcRequestQueue,
 	ipcPathForCwd,
 	readTurnEndStatus,
+	unlinkStaleUnixSocket,
 	WARM_TURN_END_SCHEMA_VERSION,
 	type WarmAnalyzeRequest,
 	type WarmTurnEndRequest,
