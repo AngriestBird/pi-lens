@@ -34,6 +34,8 @@ import {
 	resolveTouchesTests,
 	DETECTION_LAYERS,
 	lintDetectionSection,
+	baseFileReader,
+	shapeCatalogReader,
 	resolveBugClosing,
 } from "../../scripts/check-pr-body.mjs";
 import { blankCommentsAndStrings } from "../../scripts/check-pr-body.mjs";
@@ -5457,6 +5459,14 @@ describe("Detection names the defect shape and its enforcer (#4439)", () => {
 			]);
 	});
 
+	it("refuses a suffix of a path the entry names", () => {
+		// Recurrence (#4448 review F3): a lookbehind-free match accepts
+		// `config/x.test.ts` for an entry that names `tests/config/x.test.ts`.
+		expect(lint(lines("#67", SINK.replace("tests/", "")))).toEqual([
+			expect.stringContaining("does not name that path"),
+		]);
+	});
+
 	it("accepts the path the catalog entry names", () => {
 		expect(lint(lines("#67", SINK))).toEqual([]);
 		expect(
@@ -5495,7 +5505,9 @@ describe("Detection names the defect shape and its enforcer (#4439)", () => {
 	it("does not count lines in a fenced block or an HTML comment", () => {
 		const fenced = `${head}\`\`\`md\nShape: #67\nEnforcer: ${JUDGMENT}\n\`\`\`\n`;
 		const commented = `${head}<!--\nShape: #67\nEnforcer: ${JUDGMENT}\n-->\n`;
-		for (const section of [fenced, commented])
+		// GitHub hides everything after an unterminated `<!--`.
+		const unterminated = `${head}<!--\nShape: #67\nEnforcer: ${JUDGMENT}\n`;
+		for (const section of [fenced, commented, unterminated])
 			expect(lint(section)).toEqual([expect.stringContaining('"Shape: #N')]);
 	});
 
@@ -5528,6 +5540,77 @@ describe("Detection names the defect shape and its enforcer (#4439)", () => {
 		for (const text of [hint, message])
 			for (const field of ["Shape:", "Enforcer:", "judgment-only"])
 				expect(text).toContain(field);
+	});
+});
+
+// Recurrence (#4448 review F4): the catalog was read from the PR's own
+// checkout while the enforcer path was read from its base, so a PR could add
+// its test to catalog entry N and approve its own enforcer. The reader takes
+// AGENTS.md from the base commit. A real two-commit repository, no git stub.
+describe("the shape catalog is read from the PR's base (#4439)", () => {
+	const ENFORCER = "tests/config/claimed-enforcer.test.ts";
+	const entry = (extra: string) =>
+		`## Recurring defect shapes\n\n4. **Unsettled resource:** settle it.${extra}\n\n## Next\n`;
+	const naming = `\n   Enforced by \`${ENFORCER}\`.`;
+	const fixtures: string[] = [];
+	afterEach(() => {
+		for (const fixture of fixtures.splice(0))
+			rmSync(fixture, { recursive: true, force: true });
+	});
+
+	// `base` and `head` are the AGENTS.md text of the base and head commits;
+	// `originMaster: false` leaves no base to resolve.
+	function repository(base: string, head: string, originMaster = true) {
+		const dir = mkdtempSync(join(repositoryRoot, ".tmp-pr-body-origin-"));
+		fixtures.push(dir);
+		const git = (...args: string[]) =>
+			gitExecFileSync(
+				[
+					"-c",
+					"user.name=pi-lens-test",
+					"-c",
+					"user.email=t@example.com",
+					...args,
+				],
+				{ cwd: dir, encoding: "utf8" },
+			);
+		git("init", "--quiet", "--initial-branch=main");
+		mkdirSync(join(dir, "tests/config"), { recursive: true });
+		writeFileSync(join(dir, ENFORCER), "// on base\n");
+		writeFileSync(join(dir, "AGENTS.md"), base);
+		git("add", ".");
+		git("commit", "--quiet", "-m", "base");
+		if (originMaster) git("update-ref", "refs/remotes/origin/master", "HEAD");
+		writeFileSync(join(dir, "AGENTS.md"), head);
+		git("commit", "--quiet", "--allow-empty", "-am", "head");
+		return dir;
+	}
+	const section =
+		"## Detection\nCaught by: smoke\nShould have been caught by: CI unit\nGap: #4439\n" +
+		`Shape: #4\nEnforcer: ${ENFORCER}\n`;
+	const lintAt = (dir: string) =>
+		lintDetectionSection(section, {
+			requireShape: true,
+			existsOnBase: baseFileReader(dir),
+			shapeCatalog: shapeCatalogReader(dir),
+		});
+
+	it("refuses an enforcer that only the head's AGENTS.md names", () => {
+		const dir = repository(entry(""), entry(naming));
+		expect(lintAt(dir)).toEqual([
+			expect.stringContaining("AGENTS.md shape 4 does not name that path"),
+		]);
+	});
+
+	it("accepts an enforcer that the base's AGENTS.md names", () => {
+		expect(lintAt(repository(entry(naming), entry(naming)))).toEqual([]);
+	});
+
+	it("fails closed when the base cannot be resolved", () => {
+		// With no base the enforcer path is unresolved too; the reader alone
+		// must say null rather than fall back to the checkout.
+		const dir = repository(entry(naming), entry(naming), false);
+		expect(shapeCatalogReader(dir)()).toBeNull();
 	});
 });
 
@@ -5909,7 +5992,7 @@ describe("--lint-local resolves the closed issue label through gh (#4288)", () =
 				"bug",
 				existsBaseFixtures.baseHas(),
 			);
-			expect(run.output).toContain("could not be read from the checkout");
+			expect(run.output).toContain("could not be read from the base commit");
 			expect(run.status).toBe(1);
 		});
 
@@ -5919,7 +6002,7 @@ describe("--lint-local resolves the closed issue label through gh (#4288)", () =
 				"feature",
 				existsBaseFixtures.baseHas(),
 			);
-			expect(run.output).toContain("could not be read from the checkout");
+			expect(run.output).toContain("could not be read from the base commit");
 			expect(run.status).toBe(1);
 		});
 
@@ -6094,7 +6177,7 @@ describe("Gap exists: names a file on the PR's base through the CI event entry (
 			`Shape: #4\nEnforcer: ${OLD_TEST}\n`,
 		);
 		const run = await lintAt(existsBaseFixtures.baseHas(), text);
-		expect(run.output).toContain("could not be read from the checkout");
+		expect(run.output).toContain("could not be read from the base commit");
 		expect(run.result.valid).toBe(false);
 	});
 });

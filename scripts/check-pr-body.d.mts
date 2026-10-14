@@ -67,6 +67,7 @@ export declare const detectionEnforcerNotInCatalogMessage: (
 ) => string;
 export declare function shapeCatalogReader(
 	cwd?: string,
+	git?: (args: string[], options?: Record<string, unknown>) => string,
 ): () => Map<number, string> | null;
 export declare function resolvePrBase(
 	cwd?: string,

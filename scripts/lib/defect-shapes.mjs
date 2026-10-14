@@ -2,16 +2,79 @@
 // body Detection lint (`Shape:` / `Enforcer:`) and the catalog-to-HISTORY.md
 // governance test both read it here, so neither carries a private parser.
 
+/** A markdown section heading, levels 2 to 4: `## Title`. */
+export const HEADING = /^#{2,4}\s+(.+?)\s*$/;
+
+// Fenced (``` / ~~~) and 4-space indented code blocks are blanked line by line,
+// so a quoted example cannot satisfy a body section (#4288 R3) or a catalog or
+// history scan (#4439). A removed line keeps its length, so line numbers and
+// offsets (LF text) still match the raw source. An indented block cannot
+// interrupt a paragraph (CommonMark), so a 4-space line that follows body text
+// stays: list continuations and nested bullets are content, not code. The
+// closing fence must repeat the opener's character (>=3 of them).
+export function sourceWithoutFencedBlocks(source) {
+	const lines = String(source ?? "").split(/\r?\n/);
+	const output = [];
+	let fenceChar = null;
+	let fenceLength = 0;
+	let inIndented = false;
+	// "start" | "blank" | "heading" | "text": whether the previous emitted
+	// line can precede an indented code block.
+	let previous = "start";
+	for (const line of lines) {
+		if (fenceChar) {
+			const close = new RegExp(`^\\s*\\${fenceChar}{${fenceLength},}\\s*$`);
+			if (close.test(line)) {
+				fenceChar = null;
+				fenceLength = 0;
+			}
+			output.push(" ".repeat(line.length));
+			continue;
+		}
+		const open = /^\s*(`{3,}|~{3,})/.exec(line);
+		if (open) {
+			fenceChar = open[1][0];
+			fenceLength = open[1].length;
+			inIndented = false;
+			output.push(" ".repeat(line.length));
+			previous = "blank";
+			continue;
+		}
+		if (/^(?: {4,}|\t)/.test(line)) {
+			if (
+				inIndented ||
+				previous === "start" ||
+				previous === "blank" ||
+				previous === "heading"
+			) {
+				inIndented = true;
+				output.push(" ".repeat(line.length));
+				continue;
+			}
+		} else {
+			inIndented = false;
+		}
+		output.push(line);
+		const trimmed = line.trim();
+		if (trimmed === "") previous = "blank";
+		else if (HEADING.test(line)) previous = "heading";
+		else previous = "text";
+	}
+	return output.join("\n");
+}
+
 /**
- * Blank HTML comments and fenced blocks IN PLACE: every non-newline character
- * becomes a space, so offsets and line numbers still line up with the raw text.
- * A reference quoted in a comment or an example never counts as real content.
+ * Blank fenced and indented code blocks (see `sourceWithoutFencedBlocks`) and
+ * HTML comments, keeping line numbers. An unterminated `<!--` runs to the end
+ * of the text, as GitHub renders it. A reference or heading quoted in an
+ * example or a comment never counts as real content. Fences go first: a
+ * `<!--` inside a fence is literal text.
  */
 export function blankMarkdown(text) {
-	const blank = (value) => value.replace(/[^\n]/g, " ");
-	return String(text ?? "")
-		.replace(/<!--[\s\S]*?-->/g, blank)
-		.replace(/^```[^\n]*\n[\s\S]*?^```\s*$/gm, blank);
+	return sourceWithoutFencedBlocks(String(text ?? "")).replace(
+		/<!--[\s\S]*?(?:-->|$)/g,
+		(comment) => comment.replace(/[^\n]/g, " "),
+	);
 }
 
 const CATALOG_HEADING = /^## Recurring defect shapes[ \t]*$/m;

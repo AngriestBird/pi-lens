@@ -42,6 +42,21 @@ function shapesWithoutHistory(agents: string, history: string): number[] {
 		.sort((a, b) => a - b);
 }
 
+/**
+ * The two baseline guards: `added` are uncovered shapes outside the baseline
+ * (a new shape without history), `stale` are baseline shapes that gained
+ * history (the baseline only shrinks).
+ */
+function baselineViolations(
+	uncovered: readonly number[],
+	baseline: readonly number[],
+): { added: number[]; stale: number[] } {
+	return {
+		added: uncovered.filter((n) => !baseline.includes(n)),
+		stale: baseline.filter((n) => !uncovered.includes(n)),
+	};
+}
+
 // Shrink-only baseline: the 57 shapes without HISTORY.md coverage when #4439
 // landed (2026-10-14). Backfill a shape's history, then delete its number here;
 // never add one. A new shape lands with its HISTORY.md entry.
@@ -56,16 +71,16 @@ describe("catalog shapes have a HISTORY.md entry (#4439)", () => {
 	const history = read("HISTORY.md", "PI_LENS_HISTORY_PATH");
 	const uncovered = shapesWithoutHistory(agents, history);
 
+	const { added, stale } = baselineViolations(uncovered, NO_HISTORY_BASELINE);
+
 	it("lets no shape outside the baseline lack a HISTORY.md entry", () => {
-		const added = uncovered.filter((n) => !NO_HISTORY_BASELINE.includes(n));
 		expect(
 			added,
-			`shape(s) ${added.join(", ")} in AGENTS.md have no HISTORY.md entry: add their issues and PRs to HISTORY.md (retro step 4), never to the baseline`,
+			`shape(s) ${added.join(", ")} in AGENTS.md have no HISTORY.md entry: give each a HISTORY.md section whose heading names it, such as "## 2026-10-14 - model switch drift (shape 68)" (retro step 4), or cite one of its own issues there; never add to the baseline`,
 		).toEqual([]);
 	});
 
 	it("keeps the baseline shrink-only: a covered shape leaves it", () => {
-		const stale = NO_HISTORY_BASELINE.filter((n) => !uncovered.includes(n));
 		expect(
 			stale,
 			`shape(s) ${stale.join(", ")} now have history: delete them from NO_HISTORY_BASELINE`,
@@ -82,6 +97,31 @@ describe("catalog shapes have a HISTORY.md entry (#4439)", () => {
 
 	it("parses the whole catalog, so the scan is not vacuous", () => {
 		expect(parseDefectShapes(agents).size).toBeGreaterThanOrEqual(68);
+	});
+});
+
+describe("baselineViolations (#4439)", () => {
+	// Recurrence (#4448 review F2): both guards survived neutering because only
+	// an env override on the real files ever exercised them.
+	it("flags an uncovered shape that is not in the baseline", () => {
+		expect(baselineViolations([2, 69], [2, 3])).toEqual({
+			added: [69],
+			stale: [3],
+		});
+	});
+
+	it("flags nothing when the uncovered shapes equal the baseline", () => {
+		expect(baselineViolations([2, 3], [2, 3])).toEqual({
+			added: [],
+			stale: [],
+		});
+	});
+
+	it("flags a baseline shape that gained history", () => {
+		expect(baselineViolations([2], [2, 67])).toEqual({
+			added: [],
+			stale: [67],
+		});
 	});
 });
 
@@ -137,9 +177,40 @@ describe("shapesWithoutHistory (#4439)", () => {
 		expect(shapesWithoutHistory(agents, history)).toEqual([1, 7]);
 	});
 
-	it("is not satisfied by a reference inside a fenced block", () => {
+	// Recurrence (#4448 review F1): the first blanker handled only column-0
+	// backtick fences and terminated comments, so each of these covered a
+	// shape from text GitHub renders as code or hides.
+	it.each([
+		["a backtick fence", "```\n#100\n```\n"],
+		["an indented fence in a list", "- item\n  ```\n  #100\n  ```\n"],
+		["a tilde fence", "~~~\n#100\n~~~\n"],
+		["a four-backtick fence", "````md\n```\nx\n```\n#100\n````\n"],
+		["an unterminated comment", "<!-- #100\n"],
+	])("is not satisfied by a reference in %s", (_name, history) => {
 		const agents = catalog(shape(1, "old (#100)."));
-		expect(shapesWithoutHistory(agents, "```\n#100\n```\n")).toEqual([1]);
+		expect(shapesWithoutHistory(agents, history)).toEqual([1]);
+	});
+
+	it("is not satisfied by a shape heading inside a tilde fence", () => {
+		const agents = catalog(shape(1, "no issue."));
+		expect(
+			shapesWithoutHistory(agents, "~~~\n## Retro (shape 1)\n~~~\n"),
+		).toEqual([1]);
+	});
+
+	it("does not read a reference from a fence or unterminated comment in an entry", () => {
+		for (const hidden of ["    ~~~\n    (#100)\n    ~~~", "    <!-- (#100)"])
+			expect(
+				shapesWithoutHistory(
+					catalog(shape(1, `old.\n${hidden}`)),
+					"Fixed in #100.",
+				),
+			).toEqual([1]);
+	});
+
+	it("keeps the heading route working beside the new blanker", () => {
+		const agents = catalog(shape(1, "no issue."));
+		expect(shapesWithoutHistory(agents, "## Retro (shape 1)\n")).toEqual([]);
 	});
 
 	it("does not read a reference from a comment in the catalog entry", () => {
