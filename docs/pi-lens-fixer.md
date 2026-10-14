@@ -105,8 +105,10 @@ exports change.
   tool path also needs a size or time bound. Name and justify any regression
   (#4344 r1; #4368 r1). The `Hot-path latency (advisory)` lane (#4363) times
   `session_start`, `dispatchLint` and the diagnostics-cache replay on the head
-  and the merge base; read its job summary, and time by hand any hot path it
-  does not cover (a language server's time, a dependency bump).
+  and its first parent (`HEAD^1`); read its job summary, and time by hand any
+  hot path it does not cover (a language server's time, a dependency bump).
+  Green means no regression of 1.25x and 5 ms; a "slower, below threshold" row
+  is still a number to read.
 - A measured constant names its measuring command and keeps raw output as a
   tracked artifact pinned by a test (#3648). Run `git check-ignore -v` on every
   new artifact path before citing it (#3648).

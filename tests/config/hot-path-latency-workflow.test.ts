@@ -15,11 +15,20 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import yaml from "../../clients/deps/js-yaml.js";
-import { DEFAULT_BUDGET_MS } from "../../scripts/check-hot-path-latency.mjs";
+import {
+	DEFAULT_BUDGET_MS,
+	DEFAULT_RUNS,
+} from "../../scripts/check-hot-path-latency.mjs";
 import { isAdvisoryCheck } from "../../scripts/lib/ci-checks.mjs";
+import { stripSource } from "../support/sweep-kit.js";
 
 const ROOT = resolve(import.meta.dirname, "../..");
-type Step = { uses?: string; run?: string; with?: Record<string, unknown> };
+type Step = {
+	name?: string;
+	uses?: string;
+	run?: string;
+	with?: Record<string, unknown>;
+};
 const workflow = yaml.load(
 	readFileSync(resolve(ROOT, ".github/workflows/hot-path-latency.yml"), "utf8"),
 ) as {
@@ -28,6 +37,7 @@ const workflow = yaml.load(
 		push: { branches: string[]; paths: string[] };
 	};
 	permissions: unknown;
+	concurrency: { group: string; "cancel-in-progress": unknown };
 	jobs: Record<
 		string,
 		{
@@ -83,5 +93,59 @@ describe("hot-path latency workflow (#4363)", () => {
 		// The base is the checked-out commit's first parent: master's tip on a
 		// pull request's merge ref, the previous commit on a push.
 		expect(runs).toContain("git rev-parse HEAD^1");
+	});
+
+	it("pins the sample count the false-red argument rests on", () => {
+		// Recurrence (review r1 F1): `--runs 5` survived the suite, and N=5 fails
+		// about four times as often as N=15 at 20 percent runner spread.
+		const gate = job.steps.find((s) =>
+			s.run?.includes("check-hot-path-latency"),
+		);
+		expect(gate?.run).toContain(`--runs ${DEFAULT_RUNS}`);
+		expect(DEFAULT_RUNS).toBe(15);
+	});
+
+	it("keeps the lane-defining checkout and install lines", () => {
+		// Recurrence (review r1 F4): each of these edits survived the suite.
+		// Depth 1 makes `HEAD^1` fail, so the lane would red on every run.
+		const checkout = job.steps.find((s) =>
+			s.uses?.startsWith("actions/checkout@"),
+		);
+		expect(checkout?.with?.["fetch-depth"]).toBe(2);
+		expect(checkout?.with?.["persist-credentials"]).toBe(false);
+		const install = job.steps.find((s) => s.name === "Install dependencies");
+		expect(install?.run).toContain("npm ci");
+		expect(install?.run).toContain("--ignore-scripts");
+	});
+
+	it("keys master-push runs on the commit so a merge train cancels none", () => {
+		// Recurrence (review r1 F3): GitHub cancels a PENDING run when a newer one
+		// queues in the same group, even with cancel-in-progress false. A cancelled
+		// master run reads as not green in the 10-green flip command.
+		const { group } = workflow.concurrency;
+		expect(group).toContain("github.sha");
+		expect(group).toContain(
+			"github.event_name == 'pull_request' && github.ref",
+		);
+		expect(workflow.concurrency["cancel-in-progress"]).toBe(
+			"${{ github.event_name == 'pull_request' }}",
+		);
+	});
+});
+
+describe("hot-path sampler scope (#4363)", () => {
+	const sampler = stripSource(
+		readFileSync(resolve(ROOT, "scripts/hot-path-sample.mjs"), "utf8"),
+		{ strings: "keep" },
+	);
+
+	it("turns the lsp runner and tool installs off for dispatch", () => {
+		// Recurrence (review r1 F4, c1): with `no-lsp` false a language server's
+		// time enters dispatch_small and dispatch_large, which is neither pi-lens's
+		// nor repeatable (5.4 s, 10.4 s and 1.5 s in one probe).
+		expect(sampler).toMatch(
+			/flags\.set\("no-lsp", true\);\s*const \{ dispatchLint \}/,
+		);
+		expect(sampler).toContain('process.env.PI_LENS_DISABLE_TOOL_INSTALL = "1"');
 	});
 });

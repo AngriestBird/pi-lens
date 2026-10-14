@@ -66,8 +66,12 @@ on:
 
 permissions: {}
 
+# A pull request shares one group per ref and cancels superseded runs. A push
+# or a manual run gets its own group per commit: GitHub cancels a PENDING run
+# when a newer one queues in the same group even without cancel-in-progress,
+# and a `cancelled` master run would break the 10-green flip command above.
 concurrency:
-  group: hot-path-latency-${{ github.ref }}
+  group: hot-path-latency-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:

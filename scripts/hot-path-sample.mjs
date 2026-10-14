@@ -6,7 +6,7 @@
  *
  * Prints one JSON line of wall-clock milliseconds, one key per metric below.
  * `scripts/check-hot-path-latency.mjs` runs it N times against the PR head and
- * N times against the merge base, interleaved, and decides.
+ * N times against the base tree, interleaved, and decides.
  *
  * Every number comes from a production entry point of `--tree`, built with
  * `npm run build` (the compiled twins next to the sources):
@@ -16,8 +16,9 @@
  *   session_start    the registered `session_start` handler, awaited.
  *   dispatch_small /
  *   dispatch_large   `dispatchLint` (clients/dispatch/integration.js), the
- *                    entry `tool_result` uses, on a 40-line and a 4000-line
- *                    TypeScript fixture. Small is the process's first
+ *                    entry `tool_result` uses, on a 42-line and a 4002-line
+ *                    TypeScript fixture (whole six-line functions, so the
+ *                    file parses). Small is the process's first
  *                    dispatch (grammar and rule loading included), large the
  *                    second, on a file the process has not seen. The `lsp`
  *                    runner is off (`no-lsp`) and tool installs are disabled
@@ -51,7 +52,10 @@ const LARGE_LINES = 4000;
 const REPLAY_SMALL = 200;
 const REPLAY_LARGE = 2000;
 
-/** Deterministic TypeScript of `lines` lines: functions with a few branches. */
+/**
+ * Deterministic TypeScript of at least `lines` lines: whole six-line functions
+ * with a few branches, so the file is valid and every runner parses it.
+ */
 function fixtureSource(lines) {
 	const out = [];
 	let n = 0;
@@ -66,7 +70,7 @@ function fixtureSource(lines) {
 		);
 		n++;
 	}
-	return `${out.slice(0, lines).join("\n")}\n`;
+	return `${out.join("\n")}\n`;
 }
 
 /** A recording stand-in for pi's ExtensionAPI: the host boundary. */

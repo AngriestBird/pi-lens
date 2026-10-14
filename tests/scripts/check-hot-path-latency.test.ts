@@ -273,12 +273,23 @@ describe("main: exit codes and report", () => {
 		expect(lines.join("\n")).toContain("harness failure");
 	});
 
-	it("exits 2 on a missing tree or too few runs", () => {
+	it("exits 2 on a missing tree or too few runs, and runs from 5 up", () => {
+		// Recurrence (review r1 b5): the guard moved to `runs < 1` and stayed
+		// green, because the old row used a value below 1 and a real spawn failed
+		// into exit 2 anyway. The sample seam is injected here so only the guard
+		// decides, at the boundary on both sides.
 		const log = () => {};
-		expect(main(["--head", "H"], { log })).toBe(2);
-		expect(main(["--base", "B", "--head", "H", "--runs", "3"], { log })).toBe(
-			2,
-		);
+		const takeSample = fakeSamples("session_start", 0);
+		expect(main(["--head", "H"], { log, takeSample })).toBe(2);
+		expect(
+			main(["--base", "B", "--head", "H", "--runs", "4"], { log, takeSample }),
+		).toBe(2);
+		expect(
+			main(["--base", "B", "--head", "H", "--runs", "5"], {
+				log,
+				takeSample: fakeSamples("session_start", 0),
+			}),
+		).toBe(0);
 	});
 
 	it("appends the table to the step summary and writes the json rows", () => {

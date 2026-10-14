@@ -161,7 +161,9 @@ instead of rebuilding the probe.
   r1: replay went from 6 ms to 321 ms; #4368 r1: import extraction took 190 ms
   at 1.6k lines and 9.2 s at 12k). Read the `Hot-path latency (advisory)` job
   summary on the head (#4363) first; it covers `session_start`, dispatch and
-  replay, and a red there is a finding unless the body justifies it.
+  replay, and a red there is a finding unless the body justifies it. Green
+  means no regression of 1.25x and 5 ms; a "slower, below threshold" row is
+  still a number to read.
 - **Shutdown-path parity.** When the diff moves or rewraps code that stops a
   child (a server, a client, a spawned tool), compare the stop path before and
   after: does the child still get its graceful signal (stdin end, shutdown
