@@ -12,12 +12,14 @@
  * answering clean; the YAML server's command points at a missing path, so a
  * primary-only YAML check reaches the clientless `getDiagnostics` fallback.
  *
- * Every case that counts Opengrep starts runs before the control, which starts
- * Opengrep and so proves the fixture would have started it. The cases after the
- * control need the Opengrep it left running, and check what each route shows
- * rather than how often Opengrep starts. The switched-off cases also pin the two
- * other places a switched-off scanner showed through: the blocker coverage
- * claim and the cache key the workspace sweep shares, plus the
+ * Every case owns its state (#4391 F2): `beforeEach` empties the start marker
+ * and the workspace diagnostics cache and replaces the LSP service, so no
+ * Opengrep is warm and the start count is this case's alone. A case that needs a warm Opengrep or a first answer
+ * makes its own unswitched call, which also proves the fixture would have
+ * started it. The file passes in any order, alone, and under
+ * `--sequence.shuffle`. The switched-off cases also pin the two other places a
+ * switched-off scanner showed through: the blocker coverage claim and the
+ * cache key the workspace sweep shares, plus the
  * `lsp_navigation workspaceDiagnostics` route. The host wiring that supplies
  * the flag resolver is pinned in
  * `tests/index-lens-diagnostics-opengrep-flag-4323.test.ts`.
@@ -25,11 +27,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
 	resetProjectTrust,
 	setProjectTrustState,
 } from "../../clients/project-trust.js";
+import { getLSPService, resetLSPService } from "../../clients/lsp/index.js";
+import { clearWorkspaceDiagnosticsCache } from "../../clients/lsp/workspace-diagnostics-cache.js";
 import {
 	cleanupTestEnvironmentsDrained,
 	setupTestEnvironment,
@@ -113,7 +117,7 @@ async function navigateDiagnostics(
 }
 
 describe("an explicit LSP check with Opengrep switched off (#4323)", () => {
-	let service: { shutdown: () => Promise<void> } | undefined;
+	let service: ReturnType<typeof getLSPService> | undefined;
 	const savedInstall = process.env.PI_LENS_DISABLE_LSP_INSTALL;
 
 	beforeAll(async () => {
@@ -174,8 +178,16 @@ describe("an explicit LSP check with Opengrep switched off (#4323)", () => {
 		fs.writeFileSync(path.join(nested, "inner.json"), '{"c": 3}\n');
 		const config = await import("../../clients/lsp/config.js");
 		await config.initLSPConfig(workspace);
-		const lsp = await import("../../clients/lsp/index.js");
-		service = lsp.getLSPService();
+	});
+
+	beforeEach(() => {
+		// No case inherits a warm Opengrep, a start count, a tracked file or a
+		// cached batch answer from another (#4391 F2). The reset tears the old
+		// generation down; the new one waits for that before its first spawn (#850).
+		fs.rmSync(startsMarker, { force: true });
+		clearWorkspaceDiagnosticsCache(workspace);
+		resetLSPService();
+		service = getLSPService();
 	});
 
 	afterAll(async () => {
@@ -315,7 +327,8 @@ describe("an explicit LSP check with Opengrep switched off (#4323)", () => {
 	});
 
 	it("leaves a running Opengrep's rows out of the path-less lsp_navigation snapshot", async () => {
-		// The snapshot starts no server; Opengrep is running from the control.
+		// The snapshot starts no server: start Opengrep with an unswitched check.
+		await diagnose({ path: probe });
 		const before = await navigateDiagnostics(undefined);
 		expect(before).toContain(OPENGREP_FINDING);
 
