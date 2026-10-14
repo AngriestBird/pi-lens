@@ -72,7 +72,9 @@ export const PR_SMOKE_PATHS = [
 	"scripts/download-grammars.js",
 	"clients/installer/**",
 	"clients/bootstrap.ts",
-	// LSP launch.
+	// LSP launch, and the handshake harness itself (#4291 asks for it).
+	"scripts/smoke-tools.mjs",
+	"scripts/lib/lsp-fixture-workspace.mjs",
 	"clients/lsp-lazy.ts",
 	"clients/lsp/launch.ts",
 	"clients/lsp/server.ts",

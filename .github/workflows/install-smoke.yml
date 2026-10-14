@@ -72,6 +72,8 @@ on:
       - "tests/fixtures/rpc-load-check/**"
       - "clients/installer/**"
       - "clients/bootstrap.ts"
+      - "scripts/smoke-tools.mjs"
+      - "scripts/lib/lsp-fixture-workspace.mjs"
       - "clients/lsp/launch.ts"
       - "clients/lsp/server.ts"
       - "clients/lsp/config.ts"

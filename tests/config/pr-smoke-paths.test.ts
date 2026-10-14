@@ -65,7 +65,9 @@ describe("PR_SMOKE_PATHS entries (#4291)", () => {
 				"scripts/download-grammars.js",
 				"scripts/install-selftest.mjs",
 				"scripts/lib/latency-log-phases.mjs",
+				"scripts/lib/lsp-fixture-workspace.mjs",
 				"scripts/rpc-load-check.mjs",
+				"scripts/smoke-tools.mjs",
 				"tests/fixtures/rpc-load-check/**",
 			].sort(),
 		);
