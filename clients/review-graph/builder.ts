@@ -5,6 +5,7 @@ import { Worker } from "node:worker_threads";
 import { constants as zlibConstants, gunzipSync, gzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 import { writeFileAtomic } from "../atomic-write.js";
+import { reapStageFile } from "../gzip-stage-write.js";
 import type { CallGraphEvidenceCoverage } from "../call-graph.js";
 import { FactStore, type ReadonlyFactStore } from "../dispatch/fact-store.js";
 import { fileContentProvider } from "../dispatch/facts/file-content.js";
@@ -2496,9 +2497,8 @@ function handleWorkerResult(result: ReviewGraphPersistWorkerResult): void {
 		// briefly hold the handle) -- a failed reap must never abort this
 		// callback, or the WINNING generation's completion is lost with it. The
 		// startup sweep reclaims anything a failed unlink leaves behind.
-		try {
-			fs.rmSync(request.stagePath, { force: true });
-		} catch (reapErr) {
+		const reapErr = reapStageFile(request.stagePath);
+		if (reapErr !== undefined) {
 			logReviewGraph({
 				cwd: key,
 				phase: "persist_failed",

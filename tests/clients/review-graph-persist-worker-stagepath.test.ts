@@ -27,6 +27,7 @@ import { Worker } from "node:worker_threads";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FactStore } from "../../clients/dispatch/fact-store.js";
 import {
+	_readReviewGraphCheckpointForTests,
 	buildOrUpdateGraph,
 	clearGraphCache,
 	clearReviewGraphWorkspaceCache,
@@ -161,6 +162,7 @@ afterEach(async () => {
 	delete process.env.PI_LENS_TEST_PERSIST_WORKER_DELAY_MS;
 	delete process.env.PI_LENS_GRAPH_CHECKPOINT_EVERY_FILES;
 	delete process.env.PI_LENS_GRAPH_CHECKPOINT_MIN_INTERVAL_MS;
+	delete process.env.PI_LENS_GRAPH_CHECKPOINT_TEST_STOP_AFTER;
 	process.env.PI_LENS_GRAPH_PERSIST_DEBOUNCE_MS = "0";
 	for (const root of roots.splice(0)) removeTempDirSync(root);
 });
@@ -299,6 +301,62 @@ describe("review-graph worker result without stagePath (#4400)", () => {
 		await buildOrUpdateGraph(root, [], new FactStore());
 		expect(getCheckpointOffloadCountForTests()).toBeGreaterThanOrEqual(1);
 		await awaitMessages(seen, 2);
+		await waitForReviewGraphPersistsForTests();
+
+		expect(thrown).toEqual([]);
+		await expectStagesGone(sentStagePaths);
+	});
+
+	// #4400 r1 F1: the build aborts after its fifth sync checkpoint without
+	// retiring the checkpoint generation, so the four offloaded strides promote
+	// live. Without this seam every checkpoint result arrives after the build
+	// retired its generation and only the gate branch runs.
+	it("promotes a live checkpoint from the host's own stage when the result has no stagePath", async () => {
+		const root = makeRoot();
+		process.env.PI_LENS_GRAPH_CHECKPOINT_EVERY_FILES = "1";
+		process.env.PI_LENS_GRAPH_CHECKPOINT_MIN_INTERVAL_MS = "0";
+		process.env.PI_LENS_GRAPH_CHECKPOINT_TEST_STOP_AFTER = "5";
+		const { seen, thrown, sentStagePaths } = observeWorker({
+			stripResultStagePath: true,
+		});
+
+		await expect(buildOrUpdateGraph(root, [], new FactStore())).rejects.toThrow(
+			/checkpoint_test_abort/,
+		);
+		// The sync checkpoint holds 5 files; the last offloaded stride holds 4.
+		expect(
+			_readReviewGraphCheckpointForTests(root)?.processedFiles,
+		).toHaveLength(5);
+		await awaitMessages(seen, 4);
+		await waitFor(
+			() => _readReviewGraphCheckpointForTests(root)?.processedFiles.length,
+			(processed) => processed === 4,
+			{ timeoutMs: 15_000 },
+		);
+
+		expect(thrown).toEqual([]);
+		await expectStagesGone(sentStagePaths);
+	});
+
+	it("removes the host's stage when a live checkpoint promotion fails and the result has no stagePath", async () => {
+		const root = makeRoot();
+		process.env.PI_LENS_GRAPH_CHECKPOINT_EVERY_FILES = "1";
+		process.env.PI_LENS_GRAPH_CHECKPOINT_MIN_INTERVAL_MS = "0";
+		process.env.PI_LENS_GRAPH_CHECKPOINT_TEST_STOP_AFTER = "5";
+		const { seen, thrown, sentStagePaths } = observeWorker({
+			stripResultStagePath: true,
+		});
+
+		await expect(buildOrUpdateGraph(root, [], new FactStore())).rejects.toThrow(
+			/checkpoint_test_abort/,
+		);
+		// A non-empty directory where the checkpoint goes makes the live rename
+		// fail for real, so the promotion catch runs.
+		const checkpointPath = sentStagePaths[0]?.replace(/\.stage-.*$/, "") ?? "";
+		fs.rmSync(checkpointPath, { force: true });
+		fs.mkdirSync(checkpointPath, { recursive: true });
+		fs.writeFileSync(path.join(checkpointPath, "blocker"), "x");
+		await awaitMessages(seen, 4);
 		await waitForReviewGraphPersistsForTests();
 
 		expect(thrown).toEqual([]);

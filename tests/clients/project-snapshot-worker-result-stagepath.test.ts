@@ -28,6 +28,10 @@ import { Worker } from "node:worker_threads";
 import { gunzipSync } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
+import {
 	getProjectSnapshotPath,
 	getProjectSnapshotPersistErrorForTests,
 	getProjectSnapshotPersistStateForTests,
@@ -156,6 +160,7 @@ async function expectStagesGone(paths: readonly string[]): Promise<void> {
 }
 
 beforeEach(() => {
+	resetDegradationLedger();
 	delete process.env.PI_LENS_SNAPSHOT_PERSIST_SYNC;
 	resetProjectSnapshotPersistWorkerForTests();
 	_resetProjectSnapshotParseCacheForTests();
@@ -274,5 +279,93 @@ describe("snapshot worker result without stagePath (#4400)", () => {
 					"utf-8",
 				),
 			).toBe(releasedBodyJson);
+		}));
+});
+
+describe("snapshot stage reap that cannot remove the stage (#4400 r1 F2)", () => {
+	// A directory at the stage path makes the host's sync `rmSync` throw EISDIR,
+	// the stand-in for a Windows EBUSY/EPERM. Pre-fix the throw left the worker
+	// `message` listener and ended the host (probe exit 42).
+	/** The ledger bounds the subject, so assert the count, not the path. */
+	function reapFailureCount(): number | undefined {
+		return getDegradationSummary().find(
+			(entry) => entry.kind === "project-snapshot-stage-reap-failed",
+		)?.count;
+	}
+
+	/** Generation numbers are small and per-process; cover the ones a test uses. */
+	function blockStagePaths(cwd: string): string[] {
+		const gz = getProjectSnapshotPath(cwd);
+		fs.mkdirSync(path.dirname(gz), { recursive: true });
+		const blocked: string[] = [];
+		for (let generation = 0; generation < 6; generation++) {
+			const stagePath = `${gz}.stage-${process.pid}-${generation}`;
+			fs.mkdirSync(stagePath, { recursive: true });
+			fs.writeFileSync(path.join(stagePath, "blocker"), "x");
+			blocked.push(stagePath);
+		}
+		return blocked;
+	}
+
+	it("survives a failed reap of an error result's stage and still falls back", async () =>
+		withProjectDataDirAsync(async (cwd) => {
+			const { seen, thrown } = observeWorker({});
+			blockStagePaths(cwd);
+
+			saveProjectSnapshot(cwd, releasedSnapshot());
+			await awaitMessage(seen);
+			expect(thrown).toEqual([]);
+			await settle(cwd);
+
+			expect(seen[0]?.error).toBeTypeOf("string");
+			expect(
+				gunzipSync(fs.readFileSync(getProjectSnapshotPath(cwd))).toString(
+					"utf-8",
+				),
+			).toBe(releasedBodyJson);
+			expect(reapFailureCount()).toBe(1);
+		}));
+
+	it("survives a failed reap of a superseded generation's stage and completes the key", async () =>
+		withProjectDataDirAsync(async (cwd) => {
+			process.env.PI_LENS_TEST_SNAPSHOT_PERSIST_WORKER_DELAY_MS = "150";
+			const { seen, thrown, sentStagePaths } = observeWorker({});
+			const first = releasedSnapshot();
+			// Between the first result and its handler, the staged file is replaced
+			// by a non-empty directory, so the generation gate's reap fails.
+			let swapped = false;
+			setProjectSnapshotPromotionSeamForTests(async () => {
+				if (swapped) return;
+				swapped = true;
+				const stagePath = sentStagePaths[0] as string;
+				fs.rmSync(stagePath, { force: true });
+				fs.mkdirSync(stagePath, { recursive: true });
+				fs.writeFileSync(path.join(stagePath, "blocker"), "x");
+			});
+
+			saveProjectSnapshot(cwd, first);
+			saveProjectSnapshot(cwd, { ...first, seq: first.seq + 1 });
+			await settle(cwd);
+
+			expect(seen.length).toBeGreaterThanOrEqual(2);
+			expect(thrown).toEqual([]);
+			_resetProjectSnapshotParseCacheForTests();
+			expect(loadProjectSnapshot(cwd)?.seq).toBe(first.seq + 1);
+			expect(reapFailureCount()).toBe(1);
+		}));
+
+	it("survives a failed reap of a late result's echoed stage", async () =>
+		withProjectDataDirAsync(async (cwd) => {
+			process.env.PI_LENS_TEST_SNAPSHOT_PERSIST_WORKER_DELAY_MS = "200";
+			const { seen, thrown } = observeWorker({});
+			const blocked = blockStagePaths(cwd);
+
+			saveProjectSnapshot(cwd, releasedSnapshot());
+			resetProjectSnapshotPersistWorkerForTests();
+			await awaitMessage(seen);
+
+			expect(thrown).toEqual([]);
+			expect(blocked).toContain(seen[0]?.stagePath);
+			expect(reapFailureCount()).toBe(1);
 		}));
 });

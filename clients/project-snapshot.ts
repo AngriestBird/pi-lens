@@ -7,6 +7,7 @@ import { writeFileAtomic } from "./atomic-write.js";
 import { BoundedFifoMap } from "./bounded-cache.js";
 import { getProjectDataDir } from "./file-utils.js";
 import { incrementDegradationCount } from "./degradation-ledger.js";
+import { reapStageFile } from "./gzip-stage-write.js";
 import { withGenerationLockSync } from "./generation-lock.js";
 import { isStaleStageFile } from "./instance-reaper.js";
 import { readJsonCache } from "./json-cache-read.js";
@@ -1770,6 +1771,22 @@ function dispatchMainThreadWriteThroughSeam(
 	writeSnapshotBodyOnMainThread(pending, reason);
 }
 
+/**
+ * Remove a stage file from inside the worker `message` listener without ever
+ * throwing out of it (#4400): the caller's next step (the main-thread fallback,
+ * or completing the key) must still run. A failure is one ledger count per
+ * subject, not one record per message.
+ */
+function reapSnapshotStage(stagePath: string, subject: string): void {
+	const failure = reapStageFile(stagePath);
+	if (failure === undefined) return;
+	incrementDegradationCount({
+		kind: "project-snapshot-stage-reap-failed",
+		subject,
+		reason: `snapshot stage reap failed: ${failure instanceof Error ? failure.message : String(failure)}`,
+	});
+}
+
 function handleSnapshotWorkerResult(
 	result: ProjectSnapshotPersistWorkerResult,
 ): void {
@@ -1778,7 +1795,7 @@ function handleSnapshotWorkerResult(
 		// Late result for a request the host no longer tracks: the echoed path is
 		// the only name left, and it is wire data (#4400).
 		if (typeof result.stagePath === "string") {
-			fs.rmSync(result.stagePath, { force: true });
+			reapSnapshotStage(result.stagePath, result.stagePath);
 		}
 		return;
 	}
@@ -1793,7 +1810,7 @@ function handleSnapshotWorkerResult(
 		result.writeMs === undefined ||
 		result.semanticFingerprint === undefined
 	) {
-		fs.rmSync(pending.stagePath, { force: true });
+		reapSnapshotStage(pending.stagePath, pending.gzPath);
 		dispatchMainThreadWriteThroughSeam(
 			pending,
 			result.error ?? "invalid worker result",
@@ -1809,7 +1826,7 @@ function handleSnapshotWorkerResult(
 	) {
 		// The stale stage is part of the promotion transaction: remove it before
 		// returning so a superseded save cannot leave an orphan behind.
-		fs.rmSync(pending.stagePath, { force: true });
+		reapSnapshotStage(pending.stagePath, pending.gzPath);
 		completeSnapshotPersist(pending);
 		return;
 	}

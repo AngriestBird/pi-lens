@@ -68,6 +68,23 @@ export interface GzipStageWorkerResult {
 }
 
 /**
+ * Host-side reap of a stage file that a worker `message` listener no longer
+ * needs. `force` suppresses ENOENT but not EISDIR or EBUSY/EPERM (Windows AV
+ * or backup can briefly hold the handle), and a throw out of that listener is
+ * an uncaught exception that ends the host (#1361, #4400). Returns the failure
+ * so each host records it in its own sink; the startup stage sweep reclaims
+ * whatever a failed removal leaves behind.
+ */
+export function reapStageFile(stagePath: string): unknown {
+	try {
+		fs.rmSync(stagePath, { force: true });
+		return undefined;
+	} catch (err) {
+		return err;
+	}
+}
+
+/**
  * Shared worker-thread body-persist core (#958, single source of truth #883):
  * `JSON.stringify` (or pre-serialized bytes, #3789) → chunked `createGzip`
  * pipeline → a per-call staging file
