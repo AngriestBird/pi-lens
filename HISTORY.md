@@ -1,5 +1,110 @@
 # HISTORY
 
+## 2026-10-14 retro (contract rules and shape backfill)
+
+Run over the 2026-10-14 orchestration session by the retro writer lane
+(#4426). Eight findings, two contract rules, no refutation. Where each landed:
+
+- **Dist precondition (mechanical, filed).** At least 5 lanes (#4417, #4418,
+  the #4422 verify, the #4410 r1 review, the #4423 review F5) ruled out the
+  same 3 census reds that need `npm run build:dist`. Filed as #4436; `CLAUDE.md`
+  build bullet names the command meanwhile. Mistake row in
+  `docs/pi-lens-merge-policy.md`.
+- **Fixed 3000 ms wait budget (mechanical, filed).** `interleaving-kit`
+  `waitFor` ran out under CI load (run 38618401454,
+  `tests/clients/fix-run-restore.test.ts:378`); the file passed alone and under 3 seeds.
+  Filed as #4437. Mistake row.
+- **Brief asked a worker to wait for an answer (judgement).** "Report the size
+  first" before a large migration; the #4432 fixer did the migration anyway.
+  `AGENTS.md` "Orchestration and delegated work" and a mistake row.
+- **Brief named a file by basename (judgement).** "index.ts" meant
+  `clients/lsp/index.ts`; a Haiku pass searched the root `index.ts` and
+  reported the #2052 comment missing. Same bullet group and a mistake row.
+- **Haiku on a design lane (judgement).** #4342 rounds 1 and 2 left a
+  wall-clock bound, a wrong offline premise and a 13-vs-20 population; a fresh
+  Opus round with a state table passed verify first time (#4410 round 3).
+  Haiku folds with a prescribed remedy (#4340, #4341, #4345, #4356, #4368,
+  #4372, #4374, #4417) landed first try. `docs/pi-lens-merge-policy.md` already
+  said Haiku takes mechanical lanes and never detectors or lifecycle seams; the
+  missing half, a lane that must find its own failure space, is one sentence in
+  the `AGENTS.md` routing bullet. Mistake row.
+- **Blast radius missed a caller (judgement, rule already present).** #4411
+  round 3 changed `touchFile`'s result and the body left out the cascade
+  neighbour caller (`clients/dispatch/integration.ts:2139`), which then printed an uncaused
+  "inconclusive" line every turn (review N2). `AGENTS.md` already requires
+  `module_report` with `blastRadius: true` before and after, and the reviewer
+  contract already reads every caller; no new line, a mistake row only.
+- **Stale ledger rows on refs to closes (mechanical, orchestrator tooling).**
+  The closes-check refused two lands (#4422, #4409). Not a repo rule or check;
+  mistake row names it for the orchestrator's land tooling.
+- **PR body linted only at hand-back (judgement).** #4423's advisory `PR body`
+  check went red on 5 consecutive pushes in round 2 with the same findings.
+  `docs/pi-lens-subagent.md` already lints before `gh pr create` and
+  `gh pr edit`, `docs/pi-lens-fixer.md` before hand-back; the gap was the push
+  that edits no body. One line in the fixer's "Fix rounds" and a mistake row.
+  A hook would need the network and the PR number, so it stays judgement.
+
+Contract rules added the same day:
+
+- **User-facing assertion** (`AGENTS.md` "Test requirements"). #4411 review F1:
+  the route matrix read the runner row while the write path printed "✓ JSON
+  clean" for an unconfirmed file. A test that pins user-facing behaviour
+  asserts the user-facing text or effect, not only an internal status field.
+  A close relative of shape 7 (vacuous test); one instance, so a rule and not
+  a catalog shape.
+- **Timing contention model** (same section). #4426: the loop-block CPU-spin
+  case failed at 79% CPU on a loaded runner (run 38604587190). An admitted
+  timing test states its contention model: it measures how long the OS paused
+  the worker, or asserts on CPU time rather than wall time. One instance;
+  `tests/clients/flake-shape-ratchet.test.ts` already admits timing tests but
+  cannot judge the model, so the rule stays judgement.
+- **Detection lesson names the shape and its enforcer** (`docs/pi-lens-fixer.md`
+  and `docs/pi-lens-merge-policy.md` "Detection retrospective on every merged
+  bug fix"). Merges #4390, #4391 and #4377 each closed their gap with a
+  one-bug test, and #4409 said "this layer" before its class went red on
+  master (install-smoke run 38610594076). The lint half is #4439.
+
+Catalog decisions: no new shape. The uncontained worker message listener
+(#4400) is already shape 53 (commit 2e9e44c45). Test-order dependence found by
+shuffling (#4405) is the case the "A case never reads state a sibling case or
+file wrote" screen and the `Targeted tests (advisory)` shuffle lane already
+cover; the repo-wide census is #4405 itself. Shapes 4, 6, 7, 9, 10, 13, 17, 21,
+22 and 25 now cite their live sweep tests (2026-10-14 shape triage: 68 shapes,
+9 fully and 13 partially enforced); each partial names its gap, and none of
+those paths was missing from `git ls-files`.
+
+Steering audit: no line in `AGENTS.md`, the role contracts or the skills had
+session evidence of changing no decision, so no line was deleted.
+
+## 2026-10-14 — sink read before drain (shape 67)
+
+Shape 67 entered the `AGENTS.md` catalog with `tests/config/sink-read-drain-sweep.test.ts`
+as its enforcer. Incident: master run 38515888889 (ba42937f8, a docs-only
+merge) went red in `tests/clients/config-resolved-phase.test.ts` "re-arms
+nothing and publishes no config-resolution line of its own" (expected 0 lines,
+got 2). `loadLSPConfig` publishes its row synchronously while `logSessionStart`
+only enqueues, so the test took its byte offset at `:622` with bytes from the
+load still queued and counted them. Earlier members of the same shape: #3682
+(PR #3720), #3721 (PR #3892), #3193. Issue #4381; fix and sweep PR #4384
+(`629d68661`, catalog `c61d81584`). Only one hit in 169 failed runs since
+09-30, which is why a sweep and not a retry.
+
+## 2026-10-14 — model switch drift (shape 68)
+
+Shape 68 entered the `AGENTS.md` catalog with `tests/config/tla-switch-pins.test.ts`
+over `formal/switch-pins.json` as its enforcer. Incident: #4235 (55fa5210c)
+removed the injected whole-file read on the zero-read allow; the read-guard TLA+
+model kept modelling that read, and TLC proved the old design green, so two
+read-guard defects stayed invisible until the external report #4387 (a
+top-level `write` then `edit` retired authorship as a bridge write and blocked
+a later edit with "File modified since your write"). The TLA+ coverage rule
+(#3802) checks that a PR touching a modelled file mentions the model, not that
+the model still matches the code; a `TLA+ unaffected` line cleared the drift.
+Fix #4392 added the switches `ZeroReadInjects` and `OldTextRetires`; PR #4395
+made an unaffected line never cover an as-built constant and added the shape;
+PRs #4399 and #4432 pin the switches (read-guard fully; dispatch and format).
+Open: #4393 (the other families' code choices stay `deferred` with a reason).
+
 ## 2026-10-10 — project-trust test doubles (#4281)
 
 Four recent regressions showed that whole-module in-process doubles and hand-built
