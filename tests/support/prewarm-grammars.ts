@@ -18,7 +18,8 @@
  * Measured with a bundled timing harness calling `setup()` directly, Linux, network up, 3 runs each
  * (cold = `grammars/` absent; warm = every file present):
  *   CORE only (12 files, before):  cold 1039 / 908 / 1442 ms;  warm 0.2 / 0.2 / 0.2 ms
- *   GRAMMARS  (26 files, after):   cold 874 / 438 / 457 ms;  warm 0.5 / 0.5 / 0.6 ms
+ *   GRAMMARS  (26 files, after):   cold 444 / 415 / 431 ms;  warm 0.5 / 0.4 / 0.6 ms
+ *   (an earlier pass before the AbortSignal bound measured cold 874 / 438 / 457 ms)
  * The warm path is one existence check per grammar, so it stays cheap on every run.
  *
  * Each fetch is bounded by PREFETCH_TIMEOUT_MS. A stall or a failure throws one
