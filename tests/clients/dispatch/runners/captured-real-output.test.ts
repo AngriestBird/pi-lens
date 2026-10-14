@@ -67,32 +67,6 @@ vi.mock("../../../../clients/tool-policy.js", async (importOriginal) => ({
 	}),
 }));
 
-// go-vet resolves its binary through goClient rather than the shared
-// availability helper, so a host without Go would skip before it parsed.
-vi.mock("../../../../clients/go-client.js", async (importOriginal) => {
-	const original =
-		await importOriginal<typeof import("../../../../clients/go-client.js")>();
-	return {
-		...original,
-		goClient: Object.assign(Object.create(original.goClient), {
-			findGoPathAsync: async () => "go",
-		}),
-	};
-});
-
-// rust-clippy resolves cargo through rustClient and probes `cargo clippy
-// --version` before the real run, for the same reason go-vet uses goClient.
-vi.mock("../../../../clients/rust-client.js", async (importOriginal) => {
-	const original =
-		await importOriginal<typeof import("../../../../clients/rust-client.js")>();
-	return {
-		...original,
-		rustClient: Object.assign(Object.create(original.rustClient), {
-			findCargoPathAsync: async () => "cargo",
-		}),
-	};
-});
-
 vi.mock(
 	"../../../../clients/dispatch/runners/utils/runner-helpers.js",
 	async (importOriginal) => ({
@@ -158,6 +132,13 @@ const RUNNER_DESCRIPTORS: Record<string, { module: string; kind: string }> = {
 	yamllint: { module: "yamllint", kind: "yaml" },
 	"zig-check": { module: "zig-check", kind: "zig" },
 };
+
+/** Version probes the toolchain clients run before the invocation under test. */
+const AVAILABILITY_PROBE_ARGV: readonly (readonly string[])[] = [
+	["version"],
+	["--version"],
+	["clippy", "--version"],
+];
 
 /**
  * True when every token of `needle` appears in `haystack` in the same relative
@@ -258,21 +239,22 @@ describe("captured real-binary output", () => {
 					).toBe(true);
 
 					// Everything except an availability probe answers with the captured
-					// bytes. The probe (`cargo clippy --version`) is a different
-					// invocation whose own output nobody captured here, so it reports
-					// "installed" and the run under test reaches its parse step.
+					// bytes. go-vet and rust-clippy find their toolchain through
+					// goClient/rustClient, which run `<tool> version|--version` and
+					// `cargo clippy --version` before the real invocation. Those are
+					// different invocations whose own output nobody captured here, so
+					// they report "installed" and the run under test reaches its parse
+					// step; the process boundary (safeSpawnAsync) is the only thing
+					// mocked.
 					const captured = materialize(fixture, env.tmpDir);
 					safeSpawnAsync.mockImplementation(
 						async (_cmd: string, args: string[]) =>
-							args.length === 2 &&
-							args[0] === "clippy" &&
-							args[1] === "--version"
-								? {
-										error: null,
-										status: 0,
-										stdout: "clippy 0.1.99",
-										stderr: "",
-									}
+							AVAILABILITY_PROBE_ARGV.some(
+								(probe) =>
+									probe.length === args.length &&
+									probe.every((token, at) => token === args[at]),
+							)
+								? { error: null, status: 0, stdout: "probe ok", stderr: "" }
 								: captured,
 					);
 
