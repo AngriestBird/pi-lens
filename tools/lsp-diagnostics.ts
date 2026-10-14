@@ -907,7 +907,7 @@ async function collectDiagnosticsForFile(
  * The service derives both lists with one rule (`unacquiredPrimaryServerIds`
  * in clients/lsp/index.ts), so either way no primary answered.
  */
-function describePrimaryUnavailable(
+export function describePrimaryUnavailable(
 	touched: TouchFileResult | undefined,
 	fallbackHealth: LspHealthLike | undefined,
 ): string | undefined {

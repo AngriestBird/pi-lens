@@ -776,6 +776,15 @@ file-scoped worklist and receives no project-wide scanner output.
   is not part of it. The probe's batch cache key comes from
   `buildProbeScopeKey`, never equal to the workspace sweep's key, because the
   sweep records before `pi-lens-ignore` and the probe after it.
+- Every diagnostics entry route starts the same server set and gives the same
+  confirmation verdict under each server-selecting switch (`--no-opengrep`,
+  `opengrep.enabled=false`, a disabled or missing primary). Enforced by
+  `tests/tools/diagnostics-route-switch-matrix.test.ts`, which derives the
+  routes from every production read of an `LSPService` diagnostics member, so
+  a new read joins the matrix or carries a reasoned exemption keyed by its
+  `clientScope` and `diagnostics` options.
+  A divergence awaiting a decision sits in its shrink-only
+  `KNOWN_VERDICT_DIVERGENCES`.
 - LSP roots never exceed the session-cwd ceiling. Root/config discovery uses
   shared marker seams. Child cwd resolution uses `resolveToolCwd` and its
   caller-specific markers.

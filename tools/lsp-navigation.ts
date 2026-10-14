@@ -33,6 +33,7 @@ import {
 } from "../clients/lsp/capabilities.js";
 import type { SearchReadLocation } from "../clients/search-read-registration.js";
 import { buildLspNavigationEnvelope } from "./lsp-structured-output.js";
+import { describePrimaryUnavailable } from "./lsp-diagnostics.js";
 import { SYMBOL_KIND_NAMES } from "../clients/lsp-document-symbols.js";
 
 const VALID_OPERATIONS = [
@@ -1373,6 +1374,13 @@ export function createLspNavigationTool(
 						undefined,
 						excludeServerIds,
 					);
+					// #4403: #4322's rule on this route. When no language server
+					// answered, the read's health record names it, and an empty
+					// answer is not 0 diagnostics.
+					const primaryUnavailable = describePrimaryUnavailable(
+						undefined,
+						lspService.getDiagnosticsHealth(filePath),
+					);
 					const result = [
 						{
 							filePath,
@@ -1394,7 +1402,7 @@ export function createLspNavigationTool(
 							content: [
 								{
 									type: "text" as const,
-									text: `${note}\n${JSON.stringify(result)}`,
+									text: `${note}\n${JSON.stringify(result)}${primaryUnavailable ? `\nNote: ${primaryUnavailable}` : ""}`,
 								},
 							],
 							details: {
@@ -1402,6 +1410,10 @@ export function createLspNavigationTool(
 								resultCount,
 								diagnosticsMode,
 								coverage: "requested-file",
+								...(primaryUnavailable !== undefined && {
+									unconfirmed: true,
+									primaryUnavailable,
+								}),
 							},
 						},
 						{
