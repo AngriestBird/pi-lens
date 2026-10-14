@@ -235,11 +235,8 @@ describe("a JSON file whose language server cannot start (#4322)", () => {
 		const result = await diagnose("all", { paths: [probe, secondProbe] });
 
 		expect(result.text).toContain(
-			// #4403: a count over many files gives both causes; each file's
-			// outcome reason names its own.
 			"0 files confirmed clean, 2 unconfirmed: 2 with no language server " +
-				"answer (it could not be started, was still starting, or is " +
-				"disabled in config by lsp.disabledServers).",
+				"answer (it could not be started, or was still starting).",
 		);
 		// typos did answer, so the files are inconclusive, not "unavailable":
 		// that outcome means no client answered at all.
@@ -311,9 +308,8 @@ describe("a JSON file whose language server cannot start (#4322)", () => {
 		const result = await diagnose("primary", { paths: [mixed, slow] });
 
 		expect(result.text).toContain(
-			"1 with no language server answer (it could not be started, was " +
-				"still starting, or is disabled in config by lsp.disabledServers); " +
-				"the other 1: 1 timed out",
+			"1 with no language server answer (it could not be started, or was " +
+				"still starting); the other 1: 1 timed out",
 		);
 	}, 60_000);
 

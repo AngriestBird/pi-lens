@@ -68,6 +68,7 @@ import {
 	composeBoundToCurrentDisk,
 	createDiskBindingCache,
 	hashDiagnosticContent,
+	primaryUnavailableCause,
 	resolveTouchVerdict,
 	touchCoverageGap,
 	type BoundToCurrentDisk,
@@ -76,14 +77,14 @@ import {
 	type StoredDiagnosticBinding,
 	type TouchFileResult,
 } from "./diagnostic-binding.js";
-import {
-	configDisabledPrimaryServerIds,
-	getServersForFileWithConfig,
-} from "./config.js";
+import { getServersForFileWithConfig } from "./config.js";
 // #2052: deliberately NOT taken from `config.js`. This module's import surface
 // from `config.js` is mirrored by explicit `vi.mock` factories in ~58 test
 // files, so every new symbol taken from there breaks all of them.
-import { getSessionRootsForTelemetry } from "./session-roots.js";
+import {
+	disabledPrimaryServerIds,
+	getSessionRootsForTelemetry,
+} from "./session-roots.js";
 
 import {
 	configureLspServiceLifecycle,
@@ -507,12 +508,17 @@ export interface LSPDiagnosticsHealth {
 	/**
 	 * #4322: the primaries that resolved a root for this file but were not
 	 * acquired, when the clients this read acquired hold no primary at all (see
-	 * {@link unacquiredPrimaryServerIds}). A non-empty list means no primary
+	 * {@link UnansweredPrimaries}). A non-empty list means no primary
 	 * answered: either only auxiliaries did, or no client was acquired and the
 	 * read fell back to the last known answer. Either way the result says
 	 * nothing current about the language itself.
 	 */
 	unavailablePrimaryServerIds?: string[];
+	/**
+	 * #4403: the subset of `unavailablePrimaryServerIds` the operator turned off
+	 * in `lsp.disabledServers`, so a reader can say why without asking config.
+	 */
+	disabledPrimaryServerIds?: string[];
 }
 
 /**
@@ -523,21 +529,29 @@ export interface LSPDiagnosticsHealth {
  * `ensureClientForServer` before it spawns) was tried and not acquired. A file
  * with no rootable primary (an auxiliary-only language) has none; a touch that
  * acquired any primary, a `fallbackFor` alternate included, has none either.
- * #4403: a primary the operator disabled for this file never resolves a root,
- * and it did not answer either, so it is named too.
+ * #4403: a primary the operator disabled for this file did not answer either
+ * (`disabledPrimaryServerIds`, clients/lsp/session-roots.ts), so it is
+ * named too, and listed apart so a reader can say why.
  */
-function unacquiredPrimaryServerIds(
+interface UnansweredPrimaries {
+	serverIds: string[];
+	disabledServerIds: string[];
+}
+
+function unansweredPrimaries(
 	spawned: readonly SpawnedServer[],
 	resolvedPrimaryRoots: ReadonlyMap<string, string>,
 	filePath: string,
-): string[] {
-	if (spawned.some((entry) => !isAuxiliary(entry.info))) return [];
-	return [
-		...new Set([
-			...resolvedPrimaryRoots.keys(),
-			...configDisabledPrimaryServerIds(filePath),
-		]),
-	];
+): UnansweredPrimaries {
+	if (spawned.some((entry) => !isAuxiliary(entry.info)))
+		return { serverIds: [], disabledServerIds: [] };
+	const disabledServerIds = disabledPrimaryServerIds(filePath);
+	return {
+		serverIds: [
+			...new Set([...resolvedPrimaryRoots.keys(), ...disabledServerIds]),
+		],
+		disabledServerIds,
+	};
 }
 
 function mergeLspDiagnostics(
@@ -728,10 +742,12 @@ export type LSPWorkspaceUnconfirmedReason =
 	// clean would replay a false clean on every later sweep, which is the whole
 	// defect #2052 exists to close.
 	| "outside_project_root"
-	// #4403: no primary answered: it could not start, was still starting (a
-	// #744 warm-up failure), or the operator disabled it. Not a deadline, so it
-	// must not render as one.
-	| "primary_unavailable";
+	// #4403: no primary answered: it could not start, or was still starting
+	// (a #744 warm-up failure). Not a deadline, so it must not render as one.
+	| "primary_unavailable"
+	// #4403: no primary answered because the operator disabled every one that
+	// would serve the file. A retry cannot change that.
+	| "primary_disabled";
 
 export interface LSPWorkspaceDiagnosticResult {
 	filePath: string;
@@ -3853,6 +3869,14 @@ export class LSPService {
 			const failureKind = this.isSpawnInFlight(filePath, resolvedPrimaryRoots)
 				? "spawn_in_flight_budget_elapsed"
 				: "no_clients_none_spawning";
+			// #4403: a primary the operator disabled will not answer however long
+			// a caller waits, so a collecting touch says so instead of "no client
+			// yet". Only then; a file with nothing disabled keeps `undefined`.
+			const unanswered =
+				diagnosticsMode === "none"
+					? undefined
+					: unansweredPrimaries(spawned, resolvedPrimaryRoots, filePath);
+			const disabledPrimaryServerIds = unanswered?.disabledServerIds ?? [];
 			logLatency({
 				type: "phase",
 				phase: "lsp_touch_file",
@@ -3869,6 +3893,9 @@ export class LSPService {
 					...(waitSkipReasons.size > 0
 						? { reason: [...waitSkipReasons][0] }
 						: {}),
+					...(disabledPrimaryServerIds.length > 0 && {
+						disabledPrimaryServerIds,
+					}),
 					// #3873 O9: part of the touch's one row, so no extra record per touch.
 					candidates: this.describeTouchCandidates(
 						filePath,
@@ -3877,16 +3904,29 @@ export class LSPService {
 					),
 				},
 			});
+			if (unanswered !== undefined && disabledPrimaryServerIds.length > 0) {
+				return {
+					diags: [],
+					...resolveTouchVerdict({
+						unavailablePrimaryServerIds: unanswered.serverIds,
+						disabledPrimaryServerIds,
+						primaryNotifyWriteTimedOutServerIds: [],
+						diagnosticsTimedOut: false,
+						diagnosticsUnansweredServerIds: [],
+					}),
+				};
+			}
 			return;
 		}
 		// #4322: auxiliaries answered but no language server was acquired; a
 		// primary that resolved a root for this file and was not acquired makes
 		// the touch inconclusive (`resolveTouchVerdict`).
-		const unavailablePrimaryServerIds = unacquiredPrimaryServerIds(
+		const unanswered = unansweredPrimaries(
 			spawned,
 			resolvedPrimaryRoots,
 			filePath,
 		);
+		const unavailablePrimaryServerIds = unanswered.serverIds;
 		const leaseKeys = await this.clientRegistry.acquireClientLeases(
 			spawned,
 			filePath,
@@ -5926,6 +5966,7 @@ export class LSPService {
 			// cutting both ways.
 			const verdict = resolveTouchVerdict({
 				unavailablePrimaryServerIds,
+				disabledPrimaryServerIds: unanswered.disabledServerIds,
 				primaryNotifyWriteTimedOutServerIds,
 				diagnosticsTimedOut,
 				diagnosticsUnansweredServerIds: diagnosticsUnansweredPrimaryServerIds,
@@ -6164,6 +6205,9 @@ export class LSPService {
 					result.inconclusiveServerIds = verdict.inconclusiveServerIds;
 				}
 				result.inconclusiveReason = verdict.inconclusiveReason;
+				if (verdict.disabledPrimaryServerIds) {
+					result.disabledPrimaryServerIds = verdict.disabledPrimaryServerIds;
+				}
 			} else if (collected !== undefined && primaryDiagnosticsUnsupported) {
 				// A navigation-only primary has no diagnostic confirmation to report,
 				// but an uncovered auxiliary still needs to be named for delivery.
@@ -6514,11 +6558,12 @@ export class LSPService {
 			const failureKind = stale?.length ? "no_clients_stale" : "no_clients";
 			// #4322: with nothing acquired, every primary that resolved a root went
 			// unanswered, so an empty answer here is not a clean one.
-			const unavailablePrimaryServerIds = unacquiredPrimaryServerIds(
+			const unanswered = unansweredPrimaries(
 				spawned,
 				resolvedPrimaryRoots,
 				filePath,
 			);
+			const unavailablePrimaryServerIds = unanswered.serverIds;
 			this.lastDiagnosticsHealth.set(normalizedPath, {
 				health: failureKind,
 				failureKind,
@@ -6529,6 +6574,9 @@ export class LSPService {
 				dedupDroppedCount: 0,
 				checkedAt: new Date().toISOString(),
 				unavailablePrimaryServerIds,
+				...(unanswered.disabledServerIds.length > 0 && {
+					disabledPrimaryServerIds: unanswered.disabledServerIds,
+				}),
 			});
 			logLatency({
 				type: "phase",
@@ -6703,11 +6751,12 @@ export class LSPService {
 			(entry) => entry.diagnosticCount > 0,
 		).length;
 		const failureKind = merged.length === 0 ? "ok_empty" : "success";
-		const unavailablePrimaryServerIds = unacquiredPrimaryServerIds(
+		const unanswered = unansweredPrimaries(
 			spawned,
 			resolvedPrimaryRoots,
 			filePath,
 		);
+		const unavailablePrimaryServerIds = unanswered.serverIds;
 
 		this.lastDiagnosticsHealth.set(normalizedPath, {
 			health: failureKind === "success" ? "ok" : "ok_empty",
@@ -6719,6 +6768,9 @@ export class LSPService {
 			dedupDroppedCount: rawCount - merged.length,
 			checkedAt: new Date().toISOString(),
 			unavailablePrimaryServerIds,
+			...(unanswered.disabledServerIds.length > 0 && {
+				disabledPrimaryServerIds: unanswered.disabledServerIds,
+			}),
 		});
 
 		logLatency({
@@ -8698,7 +8750,12 @@ export class LSPService {
 							? "outside_project_root"
 							: inconclusive
 								? touchResult?.inconclusiveReason === "primary-unavailable"
-									? "primary_unavailable"
+									? primaryUnavailableCause(
+											touchResult.inconclusiveServerIds ?? [],
+											touchResult.disabledPrimaryServerIds ?? [],
+										) === "disabled"
+										? "primary_disabled"
+										: "primary_unavailable"
 									: "inconclusive"
 								: undefined;
 				// #1104 (shape 5 — AGENTS.md): the touch's content binding is an

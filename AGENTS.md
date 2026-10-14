@@ -790,17 +790,20 @@ file-scoped worklist and receives no project-wide scanner output.
   confirmation verdict under each server-selecting switch (`--no-opengrep`,
   `opengrep.enabled=false`, a disabled or missing primary). Enforced by
   `tests/tools/diagnostics-route-switch-matrix.test.ts`, which derives the
-  routes from every production read of an `LSPService` diagnostics member, so
-  a new read joins the matrix or carries a reasoned exemption keyed by its
-  `clientScope` and `diagnostics` options.
-  A divergence awaiting a decision sits in its shrink-only
-  `KNOWN_VERDICT_DIVERGENCES`.
+  routes from every production access to an `LSPService` diagnostics member
+  and fails closed on an access it cannot classify, so a new read joins the
+  matrix or carries a reasoned exemption keyed by its `clientScope` and
+  `diagnostics` options. Each cell asserts the exact lines the route shows.
 - A file no primary answered for is unconfirmed, never clean, whether the
   primary could not start, was still starting, or is in `lsp.disabledServers`.
-  The one rule is `unacquiredPrimaryServerIds` (clients/lsp/index.ts), which
-  folds in `configDisabledPrimaryServerIds`; every route words it through
-  `describePrimaryUnavailable` and `PRIMARY_UNAVAILABLE_CAUSE`
-  (tools/lsp-diagnostics.ts), never its own sentence.
+  The one rule is `unansweredPrimaries` (clients/lsp/index.ts), which names
+  the disabled ones through `disabledPrimaryServerIds`
+  (clients/lsp/session-roots.ts, not `config.js`, whose import surface the
+  test mocks mirror).
+  Every route words the cause through `primaryUnavailableCause` and
+  `PRIMARY_UNAVAILABLE_CAUSE` (clients/lsp/diagnostic-binding.ts), never its
+  own sentence. A later write of such a file prints a one-line unconfirmed
+  status naming the cause, never the clean line.
 - LSP roots never exceed the session-cwd ceiling. Root/config discovery uses
   shared marker seams. Child cwd resolution uses `resolveToolCwd` and its
   caller-specific markers.
@@ -835,7 +838,7 @@ file-scoped worklist and receives no project-wide scanner output.
   acquired auxiliaries but no primary that rooted for the file is inconclusive
   with `primary-unavailable`, naming those primaries, and `getDiagnostics`
   records the same ids as `unavailablePrimaryServerIds` (one rule,
-  `unacquiredPrimaryServerIds`; an auxiliary-only language is unaffected).
+  `unansweredPrimaries`; an auxiliary-only language is unaffected).
 - The explicit `lsp_diagnostics` read checks `exceedsLspSyncLimits` once before
   warm attachment or `touchFile`; an over-bound file returns a `too_large`
   result with its byte/line measurement and records
@@ -1007,7 +1010,9 @@ file-scoped worklist and receives no project-wide scanner output.
   (`pilens_analyze`, including its warm PostToolUse hook route) pass
   `dedupeCoverageNotice: false` so every call carries the notice and the push
   latch stays untouched (#3791). The warm hook deliberately repeats the notice
-  on every edit, matching its cold hook route.
+  on every edit, matching its cold hook route. A primary off in
+  `lsp.disabledServers` gets one "disabled in config" note per server per
+  session instead of the per-file notice.
 - `pilens:files:touched` publishers are `clients/pipeline.ts` and
   `clients/runtime-agent-end.ts`; `clients/agent-nudge.ts` is the subscriber.
   `clients/lsp-mutation.ts` has an optional callback but is not a publisher until

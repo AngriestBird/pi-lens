@@ -105,6 +105,11 @@ import {
 	formatDiagnostics,
 } from "./utils/format-utils.js";
 import { registerRunnerId } from "./known-runner-ids.js";
+import {
+	combinePrimaryUnavailableCauses,
+	PRIMARY_UNAVAILABLE_CAUSE,
+	type PrimaryUnavailableCause,
+} from "../lsp/diagnostic-binding.js";
 
 // --- Runner Registry ---
 
@@ -618,6 +623,10 @@ export interface RunnerLatency {
 	claimSource?: RunnerClaimSource;
 	unconfirmedServerIds?: readonly string[];
 	deferredServerIds?: readonly string[];
+	/** #4403: the runner's own `primaryUnavailableCause`. */
+	primaryUnavailableCause?: PrimaryUnavailableCause;
+	/** #4403: the runner's own `disabledPrimaryServerIds`. */
+	disabledPrimaryServerIds?: readonly string[];
 }
 
 export interface DispatchLatencyReport {
@@ -635,7 +644,9 @@ export interface DispatchLatencyReport {
 
 /**
  * Build the synthetic coverage notice for this dispatch, or `undefined` when
- * the runners covered the file.
+ * the runners covered the file. #4403: with it, `unconfirmedStatus`, set
+ * whenever the primary group gave no usable result for the file even when the
+ * latch withholds the notice, so the caller never renders that write clean.
  *
  * `dedupe` is the push/pull axis, always supplied by the sole caller
  * (`dispatchForFile`). `true` is the pi push surface, where the session-scoped
@@ -649,16 +660,16 @@ function buildCoverageNotice(
 	ctx: DispatchContext,
 	runnerLatencies: RunnerLatency[],
 	dedupe: boolean,
-): Diagnostic | undefined {
-	if (!ctx.kind) return undefined;
+): { notice?: Diagnostic; unconfirmedStatus?: string } {
+	if (!ctx.kind) return {};
 	const lspEnabled = !ctx.pi.getFlag("no-lsp");
 	const primary = getPrimaryDispatchGroup(ctx.kind, lspEnabled);
-	if (!primary || primary.runnerIds.length === 0) return undefined;
+	if (!primary || primary.runnerIds.length === 0) return {};
 
 	const relevant = runnerLatencies.filter((r) =>
 		primary.runnerIds.includes(r.runnerId),
 	);
-	if (relevant.length === 0) return undefined;
+	if (relevant.length === 0) return {};
 
 	// #1867 catalog shape 4: this is correlation, not classification. The LSP
 	// touch already decided which scanner publications were absent for these
@@ -705,7 +716,7 @@ function buildCoverageNotice(
 		// wording for the rest of the session.
 		const onceKey = `${ctx.kind}:${ctx.filePath}:${dedupeSet(silentServerIds)}|${dedupeSet(deferredServerIds)}`;
 		if (dedupe) {
-			if (coverageNoticeSeen.has(onceKey)) return undefined;
+			if (coverageNoticeSeen.has(onceKey)) return {};
 			coverageNoticeSeen.add(onceKey);
 		}
 		const coverageParts: string[] = [];
@@ -720,12 +731,14 @@ function buildCoverageNotice(
 			);
 		}
 		return {
-			id: `coverage-partial:${ctx.kind}:${path.basename(ctx.filePath)}`,
-			message: coverageParts.join("\n"),
-			filePath: ctx.filePath,
-			severity: "warning",
-			semantic: "warning",
-			tool: "pi-lens",
+			notice: {
+				id: `coverage-partial:${ctx.kind}:${path.basename(ctx.filePath)}`,
+				message: coverageParts.join("\n"),
+				filePath: ctx.filePath,
+				severity: "warning",
+				semantic: "warning",
+				tool: "pi-lens",
+			},
 		};
 	}
 
@@ -735,7 +748,7 @@ function buildCoverageNotice(
 	// primary produced no usable result and must not suppress the notice
 	// (#3867). `hasUsableResult` owns that rule in dispatch/types.ts.
 	const primaryHasCoverage = relevant.some(hasUsableResult);
-	if (primaryHasCoverage) return undefined;
+	if (primaryHasCoverage) return {};
 
 	// A primary still in flight (collect-later) may deliver findings at turn
 	// end, so it withholds the notice. A skipped or broken primary produced
@@ -743,7 +756,7 @@ function buildCoverageNotice(
 	const primaryStillInFlight = relevant.some(
 		(r) => r.status === "pending" || r.status === "deferred",
 	);
-	if (primaryStillInFlight) return undefined;
+	if (primaryStillInFlight) return {};
 
 	const plan = getToolPlan(ctx.kind);
 	const fallbackRunnerIds = new Set(
@@ -779,21 +792,60 @@ function buildCoverageNotice(
 			(!plan?.capabilities.includes("types") ||
 				TYPE_CAPABLE_FALLBACK_RUNNERS.has(r.runnerId)),
 	);
-	if (anyFallbackHasCoverage) return undefined;
+	if (anyFallbackHasCoverage) return {};
+
+	// #4403: no primary checked this file. When the runner knows why, the
+	// status line says it; otherwise it says what the notice says.
+	const cause = combinePrimaryUnavailableCauses(
+		relevant.flatMap((r) => r.primaryUnavailableCause ?? []),
+	);
+	const unconfirmedStatus = cause
+		? `no language server answered (${PRIMARY_UNAVAILABLE_CAUSE[cause]})`
+		: "not fully checked (a language tool is missing, timed out, or failed to run)";
+
+	if (cause === "disabled") {
+		// #4403: the operator turned the primary off on purpose. That is not a
+		// tool that is missing or failed, and it holds for every file the
+		// server serves, so it gets one note per server per session, then the
+		// status line alone.
+		const disabledIds = [
+			...new Set(relevant.flatMap((r) => r.disabledPrimaryServerIds ?? [])),
+		].sort((a, b) => Number(a > b) - Number(a < b));
+		const onceKeys = disabledIds.map((id) => `disabled-primary:${id}`);
+		if (dedupe) {
+			if (onceKeys.every((key) => coverageNoticeSeen.has(key)))
+				return { unconfirmedStatus };
+			for (const key of onceKeys) coverageNoticeSeen.add(key);
+		}
+		return {
+			notice: {
+				id: `coverage-disabled:${ctx.kind}:${disabledIds.join(",")}`,
+				message: `Pi-lens ${ctx.kind} analysis unconfirmed — Primary LSP (${disabledIds.join(", ")}) is disabled in config by lsp.disabledServers, so no language server checks these files this session (not a clean result).`,
+				filePath: ctx.filePath,
+				severity: "warning",
+				semantic: "warning",
+				tool: "pi-lens",
+			},
+			unconfirmedStatus,
+		};
+	}
 
 	const onceKey = `${ctx.kind}:${ctx.filePath}`;
 	if (dedupe) {
-		if (coverageNoticeSeen.has(onceKey)) return undefined;
+		if (coverageNoticeSeen.has(onceKey)) return { unconfirmedStatus };
 		coverageNoticeSeen.add(onceKey);
 	}
 
 	return {
-		id: `coverage-unavailable:${ctx.kind}:${path.basename(ctx.filePath)}`,
-		message: `Pi-lens ${ctx.kind} analysis unavailable — a language tool is missing, timed out, or failed to run, or the LSP server isn't ready yet, so this file was not fully checked (not a clean result).`,
-		filePath: ctx.filePath,
-		severity: "warning",
-		semantic: "warning",
-		tool: "pi-lens",
+		notice: {
+			id: `coverage-unavailable:${ctx.kind}:${path.basename(ctx.filePath)}`,
+			message: `Pi-lens ${ctx.kind} analysis unavailable — a language tool is missing, timed out, or failed to run, or the LSP server isn't ready yet, so this file was not fully checked (not a clean result).`,
+			filePath: ctx.filePath,
+			severity: "warning",
+			semantic: "warning",
+			tool: "pi-lens",
+		},
+		unconfirmedStatus,
 	};
 }
 
@@ -1185,6 +1237,12 @@ async function runGroup(
 			...(result.deferredServerIds !== undefined && {
 				deferredServerIds: result.deferredServerIds,
 			}),
+			...(result.primaryUnavailableCause !== undefined && {
+				primaryUnavailableCause: result.primaryUnavailableCause,
+			}),
+			...(result.disabledPrimaryServerIds !== undefined && {
+				disabledPrimaryServerIds: result.disabledPrimaryServerIds,
+			}),
 		});
 		logLatency({
 			type: "runner",
@@ -1531,7 +1589,7 @@ export async function dispatchForFile(
 
 	const inlineBlockers = blockers;
 	const inlineFixed = fixedItems;
-	const coverageNotice = buildCoverageNotice(
+	const { notice: coverageNotice, unconfirmedStatus } = buildCoverageNotice(
 		ctx,
 		runnerLatencies,
 		options?.dedupeCoverageNotice ?? true,
@@ -1621,6 +1679,7 @@ export async function dispatchForFile(
 		output,
 		blockerOutput,
 		hasBlockers: blockers.length > 0,
+		...(unconfirmedStatus !== undefined && { unconfirmedStatus }),
 	};
 }
 

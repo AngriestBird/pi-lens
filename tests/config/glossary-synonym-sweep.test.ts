@@ -628,6 +628,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/launch.ts": 2,
 		"clients/lsp/ruby-drive-dirs.ts": 1,
 		"clients/lsp/server.ts": 5,
+		// 1 (#4403): `disabledPrimaryServerIds` is an `Array.prototype.filter`
+		// over registered servers, not a delivery filter.
+		"clients/lsp/session-roots.ts": 1,
 		"clients/lsp/tsserver-sync.ts": 1,
 		"clients/lsp/wait-policy/classification.ts": 1,
 		// 1 -> 2 (#3752): the count-vs-list merge adds one `result.warnings.filter`
@@ -959,8 +962,12 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/log-cleanup.ts": 9,
 		"clients/lsp-mutation.ts": 3,
 		"clients/lsp/client-registry.ts": 4,
-		"clients/lsp/config.ts": 7,
+		// 9 -> 3 (#4403): the file gates' `path.extname`/`basename` moved to
+		// clients/lsp/file-server-match.ts (3, with its own import) and the
+		// session-root walk to clients/lsp/session-roots.ts (6 -> 8).
+		"clients/lsp/config.ts": 3,
 		"clients/lsp/edits.ts": 23,
+		"clients/lsp/file-server-match.ts": 3,
 		"clients/lsp/index.ts": 15,
 		"clients/lsp/inferred-project.ts": 3,
 		"clients/lsp/jvm-runtime.ts": 19,
@@ -974,7 +981,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 124 -> 125 (#4414): the Windows npm-global layout adds one `path.join` to
 		// `typescriptDirsForTsc`, the list of package dirs beside a resolved `tsc`.
 		"clients/lsp/server.ts": 125,
-		"clients/lsp/session-roots.ts": 6,
+		"clients/lsp/session-roots.ts": 8,
 		"clients/lsp/workspace-diagnostics-cache.ts": 13,
 		// 6 -> 5 (#3643): removed the obsolete ring path-comparison branch;
 		// dispatch identity now arrives on DispatchResult.

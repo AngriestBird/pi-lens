@@ -30,7 +30,6 @@ vi.hoisted(() => {
 });
 
 vi.mock("../../../clients/lsp/config.js", () => ({
-	configDisabledPrimaryServerIds: () => [],
 	getServersForFileWithConfig,
 	getServerInitOverride: vi.fn().mockReturnValue(undefined),
 }));

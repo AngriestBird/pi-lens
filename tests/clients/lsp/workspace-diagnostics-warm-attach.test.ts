@@ -10,7 +10,6 @@ let warmAttached = false;
 const tryWarmAttachedDiagnostics = vi.fn();
 
 vi.mock("../../../clients/lsp/config.js", () => ({
-	configDisabledPrimaryServerIds: () => [],
 	getServersForFileWithConfig,
 	getServerInitOverride: vi.fn().mockReturnValue(undefined),
 }));

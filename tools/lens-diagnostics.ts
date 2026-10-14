@@ -64,6 +64,7 @@ import { getFullScanWallClockMs } from "../clients/lsp/workspace-sweep-hold.js";
 import { demoteInferredProjectSweepResults } from "../clients/lsp/inferred-project.js";
 import {
 	hashDiagnosticContent,
+	PRIMARY_UNAVAILABLE_CAUSE,
 	type BoundToCurrentDisk,
 } from "../clients/lsp/diagnostic-binding.js";
 import type { CacheManager } from "../clients/cache-manager.js";
@@ -131,7 +132,6 @@ import {
 	createLspDiagnosticsTool,
 	LSP_SEVERITY_FILTERS,
 	MAX_BATCH_FILES,
-	PRIMARY_UNAVAILABLE_CAUSE,
 	renderBatchOutcomeLines,
 	type BatchOutcomeDetail,
 	type LspDiagnosticsFlagReader,
@@ -1813,8 +1813,9 @@ const UNCONFIRMED_REASON_SENTENCE: Record<
 	// path, so the reader does not read an empty result as "clean" or retry it.
 	outside_project_root:
 		"the file is outside every initialized session project root, so no language server was asked",
-	// #4403: the per-file note's wording, for a count that may mix causes.
-	primary_unavailable: `no primary language server answered (${PRIMARY_UNAVAILABLE_CAUSE.either})`,
+	// #4403: the per-file note's wording, one sentence per cause.
+	primary_unavailable: `no primary language server answered (${PRIMARY_UNAVAILABLE_CAUSE.unstarted})`,
+	primary_disabled: `no primary language server answered (${PRIMARY_UNAVAILABLE_CAUSE.disabled})`,
 };
 
 // Short per-reason label used only when MORE than one reason is present, so
@@ -1831,7 +1832,8 @@ const UNCONFIRMED_REASON_COUNT_LABEL: Record<
 	error: "errored",
 	binding_mismatch: "stale binding",
 	outside_project_root: "outside project root",
-	primary_unavailable: "no primary answered",
+	primary_unavailable: "no primary started",
+	primary_disabled: "primary disabled in config",
 };
 
 /**

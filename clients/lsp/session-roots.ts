@@ -51,7 +51,13 @@
 import { BoundedFifoMap } from "../bounded-cache.js";
 import { incrementDegradationCount } from "../degradation-ledger.js";
 import type { RegisteredLSPConfig } from "./config.js";
-import { isSameOrWithin } from "./server.js";
+import {
+	fileMatchKeys,
+	fileMatchReason,
+	registeredServers,
+} from "./file-server-match.js";
+import { isSameOrWithin, LSP_SERVERS } from "./server.js";
+import { isAuxiliary } from "./server-traits.js";
 import path from "node:path";
 
 /**
@@ -63,7 +69,7 @@ import path from "node:path";
  *
  * The value is `undefined` between `registerSessionRoot` and the config write
  * that follows the loader's `await` — the same window in which, before #2518,
- * no payload existed for the root at all. {@link sessionRootConfigEntries}
+ * no payload existed for the root at all. {@link sessionRootConfigForFile}
  * skips those entries, so an in-flight root resolves exactly as it did before:
  * to a shorter ancestor root's config, or to none.
  */
@@ -142,15 +148,66 @@ export function setSessionRootConfig(
 	return noteEvictedRoots(sessionRoots.set(path.resolve(cwd), config));
 }
 
+function isSameOrChildPath(filePath: string, candidateRoot: string): boolean {
+	if (filePath === candidateRoot) return true;
+	return filePath.startsWith(`${candidateRoot}${path.sep}`);
+}
+
 /**
- * Every served root that has a loaded config, in registration order —
- * `getConfigForFile`'s (`config.ts`) longest-prefix walk. Entries still
- * awaiting their first load are skipped; see the store's doc comment.
+ * The loaded config of the deepest served root that holds `filePath`, or
+ * undefined when none does. Entries still awaiting their first load are
+ * skipped; see the store's doc comment.
+ *
+ * #4403: the walk lives here, beside the store it reads, so a reader of the
+ * operator's `lsp.disabledServers` denial ({@link disabledPrimaryServerIds})
+ * reaches it without importing `config.js`. `getConfigForFile` (`config.ts`)
+ * is this walk with its empty fallback.
  */
-export function sessionRootConfigEntries(): Iterable<
-	[string, RegisteredLSPConfig | undefined]
-> {
-	return sessionRoots;
+export function sessionRootConfigForFile(
+	filePath: string,
+): RegisteredLSPConfig | undefined {
+	const resolvedFilePath = path.resolve(filePath);
+	let bestMatch: { root: string; config: RegisteredLSPConfig } | undefined;
+	// #2518: the per-root configs ARE this registry's values, so this walk sees
+	// a config for exactly the roots the registry still serves.
+	for (const [root, config] of sessionRoots) {
+		if (config === undefined) continue;
+		if (!isSameOrChildPath(resolvedFilePath, root)) continue;
+		if (!bestMatch || root.length > bestMatch.root.length) {
+			bestMatch = { root, config };
+		}
+	}
+	return bestMatch?.config;
+}
+
+/**
+ * #4403: the primaries the file gates select for this file that the operator
+ * turned off in `lsp.disabledServers`, read from the file's session-root
+ * config. No language server answers for such a file, so a read that
+ * acquired no primary names these too.
+ *
+ * Here, not in `config.ts`: the LSP service and the routes import it, and
+ * `config.js`'s import surface is mirrored by whole-module `vi.mock`
+ * factories (#2052; see `clients/lsp/file-server-match.ts`).
+ *
+ * No root gate, on purpose: the service's root rule (`resolveServerRoot` in
+ * clients/lsp/client-registry.ts) gives every built-in primary a root in any
+ * served project through the marker fallback (#3750), so an enabled one is
+ * tried wherever the file gates select it, and named when it does not answer.
+ * A disabled one is named in the same places.
+ */
+export function disabledPrimaryServerIds(filePath: string): string[] {
+	const config = sessionRootConfigForFile(filePath);
+	if (!config || config.disabledServerIds.size === 0) return [];
+	const { ext, base } = fileMatchKeys(filePath);
+	return registeredServers(config, LSP_SERVERS)
+		.filter(
+			(server) =>
+				config.disabledServerIds.has(server.id) &&
+				!isAuxiliary(server) &&
+				fileMatchReason(server, filePath, ext, base) === "selected",
+		)
+		.map((server) => server.id);
 }
 
 /** Return whether this exact root is still served after cap eviction. */

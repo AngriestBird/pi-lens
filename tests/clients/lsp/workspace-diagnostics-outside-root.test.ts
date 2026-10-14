@@ -35,7 +35,6 @@ const createLSPClient = vi.fn();
 // `initLSPConfig` populates that registry is pinned separately in
 // tests/clients/lsp/root-coalescing.test.ts, which mocks nothing.
 vi.mock("../../../clients/lsp/config.js", () => ({
-	configDisabledPrimaryServerIds: () => [],
 	getServersForFileWithConfig,
 	getServerInitOverride: () => undefined,
 }));

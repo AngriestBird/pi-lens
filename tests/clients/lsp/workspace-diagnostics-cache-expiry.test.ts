@@ -587,7 +587,6 @@ describe("runWorkspaceDiagnostics honors the expiry bound end to end (#1782 AC3)
 const getServersForFileWithConfig = vi.fn();
 const createLSPClient = vi.fn();
 vi.mock("../../../clients/lsp/config.js", () => ({
-	configDisabledPrimaryServerIds: () => [],
 	getServersForFileWithConfig,
 	getServerInitOverride: vi.fn().mockReturnValue(undefined),
 }));

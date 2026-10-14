@@ -22,7 +22,6 @@ vi.mock("../../../clients/latency-logger.js", async (importActual) => ({
 	logLatency,
 }));
 vi.mock("../../../clients/lsp/config.js", () => ({
-	configDisabledPrimaryServerIds: () => [],
 	getServersForFileWithConfig,
 	getServerInitOverride: vi.fn().mockReturnValue(undefined),
 }));

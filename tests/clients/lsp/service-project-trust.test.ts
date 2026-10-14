@@ -13,7 +13,6 @@ const logExtension = vi.fn();
 vi.mock("../../../clients/extension-log.js", () => ({ logExtension }));
 
 vi.mock("../../../clients/lsp/config.js", () => ({
-	configDisabledPrimaryServerIds: () => [],
 	getServersForFileWithConfig,
 	getServerInitOverride: vi.fn().mockReturnValue(undefined),
 }));

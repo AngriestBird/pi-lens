@@ -144,6 +144,12 @@ export interface TouchFileResult {
 	 */
 	inconclusiveReason?: TouchInconclusiveReason;
 	/**
+	 * #4403: the subset of {@link inconclusiveServerIds} the operator turned off
+	 * in `lsp.disabledServers`, present only on a `"primary-unavailable"`
+	 * touch. The rest could not be started, or were still starting.
+	 */
+	disabledPrimaryServerIds?: string[];
+	/**
 	 * #1470/#1493: server ids this touch carries NO evidence for. Populated (and
 	 * `confirmation` narrowed to `"partial"`) for every auxiliary that never
 	 * reported — its push wait cut off by the aux grace timer (R8/#714's
@@ -212,6 +218,10 @@ export interface TouchVerdictInput {
 	 */
 	unavailablePrimaryServerIds?: readonly string[];
 	/**
+	 * #4403: the subset of `unavailablePrimaryServerIds` the operator disabled.
+	 */
+	disabledPrimaryServerIds?: readonly string[];
+	/**
 	 * PRIMARY-role servers whose `didOpen`/`didChange` write did not land inside
 	 * the notify budget (timed out or rejected). Auxiliary write failures are
 	 * deliberately NOT passed here — they are coverage gaps.
@@ -233,6 +243,7 @@ export interface TouchVerdict {
 	inconclusive: boolean;
 	inconclusiveServerIds?: string[];
 	inconclusiveReason?: TouchInconclusiveReason;
+	disabledPrimaryServerIds?: string[];
 }
 
 /**
@@ -262,10 +273,12 @@ export function resolveTouchVerdict(input: TouchVerdictInput): TouchVerdict {
 	// describe auxiliaries, so the missing primary is the whole verdict.
 	const unavailableIds = [...new Set(input.unavailablePrimaryServerIds ?? [])];
 	if (unavailableIds.length > 0) {
+		const disabledIds = [...new Set(input.disabledPrimaryServerIds ?? [])];
 		return {
 			inconclusive: true,
 			inconclusiveServerIds: unavailableIds,
 			inconclusiveReason: "primary-unavailable",
+			...(disabledIds.length > 0 && { disabledPrimaryServerIds: disabledIds }),
 		};
 	}
 	const notifyIds = [...new Set(input.primaryNotifyWriteTimedOutServerIds)];
@@ -287,6 +300,44 @@ export function resolveTouchVerdict(input: TouchVerdictInput): TouchVerdict {
 		...(serverIds.length > 0 && { inconclusiveServerIds: serverIds }),
 		inconclusiveReason: reason,
 	};
+}
+
+/**
+ * #4403: why no primary answered, in the one wording every route renders: the
+ * per-file note, the batch tally, the `mode=full` sweep, and the write-time
+ * status line. `either` is a mix: some primaries could not start, and the
+ * operator disabled the others.
+ */
+export const PRIMARY_UNAVAILABLE_CAUSE = {
+	unstarted: "it could not be started, or was still starting",
+	disabled: "it is disabled in config by lsp.disabledServers",
+	either:
+		"it could not be started, was still starting, or is disabled in config by lsp.disabledServers",
+} as const;
+
+export type PrimaryUnavailableCause = keyof typeof PRIMARY_UNAVAILABLE_CAUSE;
+
+/**
+ * #4403: the cause for primaries that did not answer, from the ids that did
+ * not and the subset the operator disabled. An empty id list (a touch that
+ * found no client and could not say which) is `unstarted`.
+ */
+export function primaryUnavailableCause(
+	serverIds: readonly string[],
+	disabledServerIds: readonly string[],
+): PrimaryUnavailableCause {
+	const disabled = new Set(disabledServerIds);
+	if (disabled.size === 0) return "unstarted";
+	return serverIds.every((id) => disabled.has(id)) ? "disabled" : "either";
+}
+
+/** #4403: the combined cause of several files' or runners' causes. */
+export function combinePrimaryUnavailableCauses(
+	causes: Iterable<PrimaryUnavailableCause>,
+): PrimaryUnavailableCause | undefined {
+	const distinct = new Set(causes);
+	if (distinct.size === 0) return undefined;
+	return distinct.size === 1 ? [...distinct][0] : "either";
 }
 
 /**

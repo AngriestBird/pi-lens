@@ -34,6 +34,7 @@ import {
 import type { SearchReadLocation } from "../clients/search-read-registration.js";
 import { buildLspNavigationEnvelope } from "./lsp-structured-output.js";
 import { describePrimaryUnavailable } from "./lsp-diagnostics.js";
+import { disabledPrimaryServerIds } from "../clients/lsp/session-roots.js";
 import { SYMBOL_KIND_NAMES } from "../clients/lsp-document-symbols.js";
 
 const VALID_OPERATIONS = [
@@ -1337,7 +1338,12 @@ export function createLspNavigationTool(
 				diagnosticsMode = wsDiagSupport?.mode ?? "unknown";
 
 				if (rawPath && !filePathIsDirectory) {
-					const hasLSP = lspService.supportsLSP(filePath);
+					// #4403: a file whose primary the operator disabled has a
+					// language server; it is turned off, which the read below
+					// reports as the cause instead of "not installed".
+					const hasLSP =
+						lspService.supportsLSP(filePath) ||
+						disabledPrimaryServerIds(filePath).length > 0;
 					if (!hasLSP) {
 						return finalize(
 							{
@@ -1380,8 +1386,7 @@ export function createLspNavigationTool(
 					const primaryUnavailable = describePrimaryUnavailable(
 						undefined,
 						lspService.getDiagnosticsHealth(filePath),
-						filePath,
-					);
+					)?.text;
 					const result = [
 						{
 							filePath,

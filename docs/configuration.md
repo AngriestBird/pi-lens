@@ -225,7 +225,9 @@ Denying a file's **language server** (its primary, such as `json` or
 `typescript`) leaves that file unchecked for the language itself. Every
 diagnostics route then reports a file with no findings as **unconfirmed**, not
 clean, with a "Primary LSP (…): not available" note that says it is disabled in
-config. Auxiliary scanners such as `typos` still run and report their own
+config. On write-time checks the note appears once per server per session, and
+a later write of such a file shows a one-line "unconfirmed" status instead of
+"clean". Auxiliary scanners such as `typos` still run and report their own
 findings.
 
 Two rules make the rest of the table unambiguous:

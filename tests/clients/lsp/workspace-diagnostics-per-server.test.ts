@@ -15,7 +15,6 @@ import { removeTempDirSync } from "../test-utils.js";
 const getServersForFileWithConfig = vi.fn();
 const createLSPClient = vi.fn();
 vi.mock("../../../clients/lsp/config.js", () => ({
-	configDisabledPrimaryServerIds: () => [],
 	getServersForFileWithConfig,
 	getServerInitOverride: vi.fn().mockReturnValue(undefined),
 }));
