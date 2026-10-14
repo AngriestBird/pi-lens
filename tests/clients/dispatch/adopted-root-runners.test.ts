@@ -677,6 +677,41 @@ describe("#4242 adopted-root runner allowlist", () => {
 		expect(filtered).toEqual([{ mode: "all", runnerIds: ["php-lint"] }]);
 	});
 
+	it("narrows a partly admitted group to a copy and passes a fully admitted group through as the same object", () => {
+		// Pins the partial-group split in `filterGroupsForAdoptedRoot` (#4365
+		// batch 1 survivor: the `runnerIds.length === group.runnerIds.length`
+		// test forced `false`, so every kept group was rebuilt as
+		// `{ ...group, runnerIds }`). A group the admission list leaves whole must
+		// reach dispatch untouched; a partly admitted group must keep its mode,
+		// kind filter and semantic override, and must not change the caller's
+		// plan in place.
+		const whole = {
+			mode: "fallback" as const,
+			runnerIds: ["php-lint", "fish-indent"],
+			semantic: "warning" as const,
+		};
+		const partial = {
+			mode: "all" as const,
+			runnerIds: ["eslint", "fish-indent", "tflint"],
+			filterKinds: ["shell"] as const,
+			semantic: "blocking" as const,
+		};
+		const plan = [whole, partial];
+
+		const [keptWhole, keptPartial] = filterGroupsForAdoptedRoot(plan);
+
+		expect(keptWhole).toBe(whole);
+		expect(keptPartial).not.toBe(partial);
+		expect(keptPartial).toEqual({
+			mode: "all",
+			runnerIds: ["fish-indent"],
+			filterKinds: ["shell"],
+			semantic: "blocking",
+		});
+		expect(partial.runnerIds).toEqual(["eslint", "fish-indent", "tflint"]);
+		expect(plan).toEqual([whole, partial]);
+	});
+
 	it("runs an allowlisted runner for an adopted root and refuses a config-as-code linter", async () => {
 		const fixture = adoptedFixture();
 		try {
