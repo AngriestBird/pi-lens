@@ -1,45 +1,38 @@
 /**
- * Vitest globalSetup: pre-fetch any missing tree-sitter grammar wasms ONCE,
- * before any worker process spawns.
+ * Vitest globalSetup: fetch every missing tree-sitter grammar wasm ONCE, in
+ * parallel, before any worker process spawns.
  *
- * `clients/tree-sitter-client.ts`'s `ensureGrammar()` only de-duplicates a
- * concurrent fetch of the same grammar WITHIN one process (an in-flight-promise
- * cache on that process's singleton `TreeSitterClient`). Vitest runs multiple
- * worker PROCESSES in parallel, each with its own independent singleton — so
- * when a grammar is missing from disk (a fresh checkout/worktree where
- * `npm run prepare`'s grammar download didn't run, or was skipped), every
- * worker that needs it at that moment fires its OWN runtime fetch to the same
- * CDN URL simultaneously. The write itself is race-safe (a per-pid temp file +
- * atomic rename, see `clients/grammar-source.ts`), but N simultaneous real
- * network requests to the same endpoint is more likely to hit a transient
- * failure (rate-limit, timeout, drop) than one — and a failed fetch degrades
- * SILENTLY (no thrown exception, see `ensureGrammar`'s doc comment), so
- * whichever test happened to need that grammar in that exact worker at that
- * exact moment just gets an empty/degraded parse. Symptom: a symbol quietly
- * missing from extraction with no error, appearing and disappearing across
- * repeated runs of the same test file with no code change — a classic
- * resource-contention flake, confirmed in dogfooding (2026-07-14) by running
- * the same test batch 3 times back to back and getting 3 different results.
+ * `clients/tree-sitter-client.ts`'s `ensureGrammar()` de-duplicates a fetch only
+ * WITHIN one process. Vitest runs worker PROCESSES in parallel, each with its own
+ * singleton, so a grammar missing from disk would be fetched by every worker
+ * that needs it, at the same moment, from the same CDN URL. Fetching here, once,
+ * before any worker exists, removes that race.
  *
- * Fix: do this ONCE, here, in `globalSetup` (which vitest guarantees runs in
- * a single process before any worker exists) rather than in `setupFiles`
- * (which runs once PER WORKER — that would still let N workers race each
- * other at their own startup, just narrow the window instead of closing it).
- * By the time any worker spawns, every core grammar this repo bundles is
- * already on disk, so `ensureGrammar` never needs to fetch anything at all
- * during the actual test run.
+ * The set is `GRAMMARS` from `scripts/download-grammars.ts` (the download list),
+ * not a hand list. Earlier revisions prewarmed only `CORE` and left the long tail
+ * to a lazy fetch inside the test. That was measured to cost a 5 s test timeout:
+ * under a cold cache with a stalled CDN, 13 default-project files went red with
+ * about 42 timed-out tests (#4342). Prewarming the full set moves that failure to
+ * one error here, naming the grammar.
  *
- * Best-effort and cheap in the common case (the main repo already has every
- * grammar downloaded via `prepare`): the existence check below is synchronous
- * and skips the fetch entirely for anything already present, so this adds
- * negligible overhead when nothing is missing.
+ * Measured with a bundled timing harness calling `setup()` directly, Linux, network up, 3 runs each
+ * (cold = `grammars/` absent; warm = every file present):
+ *   CORE only (12 files, before):  cold 1039 / 908 / 1442 ms;  warm 0.2 / 0.2 / 0.2 ms
+ *   GRAMMARS  (26 files, after):   cold 874 / 438 / 457 ms;  warm 0.5 / 0.5 / 0.6 ms
+ * The warm path is one existence check per grammar, so it stays cheap on every run.
+ *
+ * Each fetch is bounded by PREFETCH_TIMEOUT_MS. A stall or a failure throws one
+ * error that names every grammar it could not fetch, so the run stops at setup
+ * rather than degrading tests silently or timing them out one by one. The cost is
+ * that an offline cold cache now refuses to start the suite; a warm cache, which
+ * `npm run prepare` and any earlier run leave behind, is unaffected.
  */
 
-import { downloadGrammar } from "../../clients/grammar-source.js";
-import { CORE } from "../../scripts/download-grammars.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { downloadGrammar } from "../../clients/grammar-source.js";
+import { GRAMMARS } from "../../scripts/download-grammars.js";
 
 const repoRoot = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -48,35 +41,55 @@ const repoRoot = path.resolve(
 );
 const grammarsDir = path.join(repoRoot, "grammars");
 
+/**
+ * Per-grammar bound on the prefetch. A healthy wasm lands well inside it; a
+ * stalled response fails the run here instead of hanging it (#4342).
+ */
+export const PREFETCH_TIMEOUT_MS = 30_000;
+
+type FetchOutcome = "ok" | "timeout" | "download failed";
+
+async function fetchBounded(filename: string): Promise<FetchOutcome> {
+	let timer: NodeJS.Timeout | undefined;
+	const stalled = new Promise<FetchOutcome>((resolve) => {
+		timer = setTimeout(() => resolve("timeout"), PREFETCH_TIMEOUT_MS);
+	});
+	const landed = downloadGrammar(grammarsDir, filename).then(
+		(ok): FetchOutcome => (ok ? "ok" : "download failed"),
+	);
+	try {
+		return await Promise.race([landed, stalled]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
 export default async function setup(): Promise<void> {
-	// Only the CORE set (`scripts/download-grammars.js`'s own list — the same
-	// set `npm run prepare --core` ships in the tarball) — these are the
-	// commonly-loaded grammars (ts/tsx/js/py/go/rust/json/yaml/bash/html/css/
-	// java) actually exercised across most of the suite, and thus the ones at
-	// real risk of the N-workers-race-the-CDN scenario this fixes. The long
-	// tail (kotlin/dart/c/cpp/elixir/ruby/…) is lazy-fetched at runtime by
-	// design and rarely loaded by more than one worker at once — pre-warming
-	// all of it here would just add unconditional startup latency to every
-	// test run for grammars that mostly aren't racing in practice.
-	const missing = CORE.filter(
+	const missing = GRAMMARS.filter(
 		(filename) => !fs.existsSync(path.join(grammarsDir, filename)),
 	);
 	if (missing.length === 0) return;
 
+	const started = performance.now();
 	console.error(
-		`[pi-lens test setup] pre-fetching ${missing.length} missing tree-sitter grammar(s) once, before test workers spawn: ${missing.join(", ")}`,
+		`[pi-lens test setup] pre-fetching ${missing.length} missing tree-sitter grammar(s) once, in parallel, before test workers spawn: ${missing.join(", ")}`,
 	);
-	// Sequential, not Promise.all: this already only runs when grammars are
-	// missing (rare outside a fresh worktree), and staying sequential avoids
-	// firing a burst of simultaneous requests at the CDN from this single
-	// process too — the whole point is to stop racing it, not just relocate
-	// the race to fewer callers.
-	for (const filename of missing) {
-		const ok = await downloadGrammar(grammarsDir, filename);
-		if (!ok) {
-			console.error(
-				`[pi-lens test setup] could not pre-fetch grammar '${filename}' (offline or CDN unreachable) — tests needing it will see the existing per-worker degrade path.`,
-			);
-		}
+	const outcomes = await Promise.all(
+		missing.map(async (filename) => ({
+			filename,
+			outcome: await fetchBounded(filename),
+		})),
+	);
+	const failed = outcomes.filter(({ outcome }) => outcome !== "ok");
+	if (failed.length > 0) {
+		const named = failed
+			.map(({ filename, outcome }) => `${filename} (${outcome})`)
+			.join(", ");
+		throw new Error(
+			`[pi-lens test setup] could not pre-fetch ${failed.length} of ${missing.length} tree-sitter grammar(s): ${named}. Each fetch is bounded to ${PREFETCH_TIMEOUT_MS} ms. Check the network or the CDN, or place the files in ${grammarsDir}. See #4342.`,
+		);
 	}
+	console.error(
+		`[pi-lens test setup] pre-fetched ${missing.length} grammar(s) in ${Math.round(performance.now() - started)} ms`,
+	);
 }
