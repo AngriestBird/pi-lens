@@ -1062,6 +1062,30 @@ describe("indent-detect survivors (#4365)", () => {
 		).toEqual([false, false, true, true]);
 	});
 
+	it("resumes scanning exactly after a block comment's closing marker", () => {
+		// Kills `j = closeAt + 2` as `closeAt - 2` (campaign id 197): rescanning
+		// from inside `//*/` read a line comment, so the backtick after the
+		// comment never opened its template and the next lines lost their mask.
+		expect(templateLiteralInteriorMask(["/*a//*/ `x", " y", "`"])).toEqual([
+			false,
+			true,
+			true,
+		]);
+	});
+
+	it("keeps a template open across an escape that ends the line", () => {
+		// Kills the template escape's `j += 2` as `j -= 2` (campaign id 210): the
+		// mutant stepped back onto the opening backtick, closed the template and
+		// left the next line unmasked. Bounded on purpose: this input ends the line
+		// on the escape, so the mutant fails here instead of hanging the suite the
+		// way a mid-line `\x` escape does.
+		expect(templateLiteralInteriorMask(["`\\", "  z", "`;"])).toEqual([
+			false,
+			true,
+			true,
+		]);
+	});
+
 	it("treats doubly tab-indented content as detectable indentation", () => {
 		// Kills `\t+` narrowed to `\t` in hasDetectableIndentation: the content has
 		// indentation evidence, and the formatter gate must see it.
