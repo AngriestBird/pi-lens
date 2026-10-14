@@ -3,8 +3,10 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { fetchLivePrBody } from "./check-pr-body.mjs";
 import {
+	closeKeywordErrors,
 	closeKeywordPlacementMessage,
 	INVALID_CLOSE_KEYWORD_MESSAGE,
+	NEGATED_CLOSE_KEYWORD_MESSAGE,
 	lintCloseKeywordPlacement,
 	lintCloseKeywords,
 	parseCloseKeywords,
@@ -12,8 +14,10 @@ import {
 } from "./lib/close-keywords.mjs";
 
 export {
+	closeKeywordErrors,
 	closeKeywordPlacementMessage,
 	INVALID_CLOSE_KEYWORD_MESSAGE,
+	NEGATED_CLOSE_KEYWORD_MESSAGE,
 	lintCloseKeywordPlacement,
 	lintCloseKeywords,
 	parseCloseKeywords,
@@ -51,10 +55,7 @@ export async function lintPullRequest(
 	}
 	const result = lintCloseKeywords(body);
 	if (!result.valid) {
-		console.error(INVALID_CLOSE_KEYWORD_MESSAGE);
-		for (const line of result.offendingLines) {
-			console.error(`  offending line: ${line}`);
-		}
+		for (const line of closeKeywordErrors(result)) console.error(line);
 		process.exitCode = 1;
 		return;
 	}
@@ -147,7 +148,24 @@ export async function verifyMergedPullRequest(
 		process.exitCode = 1;
 		return;
 	}
-	const { issues } = parseCloseKeywords(liveBody);
+	const { issues: allIssues, negatedIssues } = parseCloseKeywords(liveBody);
+	// #4371: an issue named only in a table row or after a hedge ("not fixed:
+	// #N") is closed by GitHub against the author's intent. A closed one is the
+	// failure; an open one is correct and is not expected closed.
+	const closedByAccident = negatedIssues
+		.map((number) => ({ number, state: getIssueState(repository, number) }))
+		.filter(({ state }) => state === "closed");
+	if (closedByAccident.length > 0) {
+		const details = closedByAccident
+			.map(({ number }) => `#${number}`)
+			.join(", ");
+		console.error(
+			`Post-merge close verification found issue(s) closed only through a table row or hedged close keyword: ${details}. Reopen them if the work is not done. ${NEGATED_CLOSE_KEYWORD_MESSAGE}`,
+		);
+		process.exitCode = 1;
+		return;
+	}
+	const issues = allIssues.filter((number) => !negatedIssues.includes(number));
 	const unresolved = issues
 		.map((number) => ({ number, state: getIssueState(repository, number) }))
 		.filter(({ state }) => state !== "closed");
@@ -214,7 +232,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
 			const body = readFileSync(process.argv[4], "utf8");
 			const result = lintCloseKeywords(body);
 			const placement = lintCloseKeywordPlacement(title, body);
-			if (!result.valid) console.error(INVALID_CLOSE_KEYWORD_MESSAGE);
+			for (const line of closeKeywordErrors(result)) console.error(line);
 			if (!placement.valid)
 				console.error(
 					closeKeywordPlacementMessage(placement.missingBodyIssues),

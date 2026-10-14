@@ -1265,6 +1265,19 @@ describe("PR body lint (#1844)", () => {
 		expect(result.errors).toContain("  offending line: Closes #12, #13");
 	});
 
+	// #4371: the local preflight names the hedged close line, so the author can
+	// rephrase before GitHub closes the issue (#4344 closed #4346 this way).
+	it("names a hedged close-keyword line in the local lint result", () => {
+		const cell = "| review graph edge | not fixed: #4346 |";
+		const result = lintLocalPrBody(
+			`${body}\n${cell}\n`,
+			process.cwd(),
+			() => "",
+		);
+		expect(result.valid).toBe(false);
+		expect(result.errors).toContain(`  offending line: ${cell}`);
+	});
+
 	it("requires a diff record literal for runtime changes", () => {
 		const runtimeDiff = [
 			"diff --git a/clients/example.ts b/clients/example.ts",

@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	INVALID_CLOSE_KEYWORD_MESSAGE,
 	lintCloseKeywords,
+	NEGATED_CLOSE_KEYWORD_MESSAGE,
 	lintPullRequest,
 	parseCloseKeywords,
 	verifyMergedPullRequest,
@@ -599,5 +600,121 @@ describe("verifyMergedPullRequest checks title close keywords (#2640)", () => {
 		);
 		errorLog.mockRestore();
 		process.exitCode = undefined;
+	});
+});
+
+// #4371 recurrence: #4344's body had the table cell below, GitHub read
+// "fixed: #4346" as a close and closed #4346 with its work undone; #4021's
+// "Whether this closes #1513" linked #1513 the same way. The parser mirrors
+// GitHub's adjacency rule, so a hedge or a table row does not stop it.
+describe("negated and hedged close keywords (#4371)", () => {
+	const TABLE_CELL =
+		"| review graph incremental update (importer edge) | not fixed: #4346 |";
+	const WHETHER =
+		"Whether this closes #1513 is for the orchestrator: every named criterion is met.";
+
+	it("flags the exact #4344 table cell", () => {
+		const result = lintCloseKeywords(TABLE_CELL);
+		expect(result.valid).toBe(false);
+		expect(result.negatedLines).toEqual([TABLE_CELL]);
+		expect(result.negatedIssues).toEqual([4346]);
+	});
+
+	it("flags the exact #4021 sentence", () => {
+		const result = lintCloseKeywords(WHETHER);
+		expect(result.valid).toBe(false);
+		expect(result.negatedIssues).toEqual([1513]);
+	});
+
+	it.each([
+		["a table row with no hedge", "| F4 | Closes #7 |"],
+		["not", "This is not fixed: #7"],
+		["never", "It never resolves #7"],
+		["partially", "Partially closes #7"],
+		["no longer", "The bug no longer fixes #7"],
+		["a contraction", "It doesn't close #7"],
+	])("flags %s", (_name, line) => {
+		expect(lintCloseKeywords(line).valid).toBe(false);
+	});
+
+	it.each([
+		[
+			"a closing sentence after prose",
+			"The code and changelog are complete. Closes #3939",
+		],
+		["a parenthesis", "fix: thing (closes #4281"],
+		["a bare keyword", "Closes #123"],
+		["a clause after a hedge", "Not a regression, so this closes #5"],
+		["a sentence after a negation", "Nothing else changes.\nFixes #9."],
+		["a semicolon list", "Fixes #1. resolves #2; CLOSED #3"],
+		["a heading line", "## Why\nCloses #8."],
+	])("keeps %s clean", (_name, body) => {
+		const result = lintCloseKeywords(body);
+		expect(result.negatedLines).toEqual([]);
+		expect(result.valid).toBe(true);
+	});
+
+	it("keeps an issue clean when another line closes it plainly", () => {
+		const result = lintCloseKeywords("Closes #4.\nNot fixed: #4 elsewhere.");
+		expect(result.negatedIssues).toEqual([]);
+		expect(result.valid).toBe(false);
+	});
+
+	it("explains the rephrase in the lint error", () => {
+		expect(NEGATED_CLOSE_KEYWORD_MESSAGE).toContain("not directly followed");
+	});
+
+	it("verify-merged reports a closed issue named only on a hedged line", async () => {
+		vi.stubEnv("GITHUB_API_URL", "https://api.github.test");
+		vi.stubEnv("GITHUB_REPOSITORY", "apmantza/pi-lens");
+		vi.stubEnv("GITHUB_TOKEN", "test-token");
+		const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+		const body = `Closes #4320.\n${TABLE_CELL}`;
+		const fetchImpl = vi.fn().mockResolvedValue(
+			new Response(JSON.stringify({ title: "fix: x", body }), {
+				status: 200,
+			}),
+		);
+		const getIssueState = vi.fn().mockReturnValue("closed");
+		await verifyMergedPullRequest(
+			fetchImpl,
+			{ pull_request: { number: 4344, body } },
+			getIssueState,
+		);
+		expect(process.exitCode).toBe(1);
+		expect(errorLog.mock.calls[0]?.[0]).toContain(
+			"closed only through a table row or hedged close keyword: #4346",
+		);
+		errorLog.mockRestore();
+		process.exitCode = undefined;
+	});
+
+	it("verify-merged does not expect an open hedged issue to be closed", async () => {
+		vi.stubEnv("GITHUB_API_URL", "https://api.github.test");
+		vi.stubEnv("GITHUB_REPOSITORY", "apmantza/pi-lens");
+		vi.stubEnv("GITHUB_TOKEN", "test-token");
+		const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const body = `Closes #4320.\n${TABLE_CELL}`;
+		const fetchImpl = vi.fn().mockResolvedValue(
+			new Response(JSON.stringify({ title: "fix: x", body }), {
+				status: 200,
+			}),
+		);
+		const getIssueState = vi.fn((_repo: string, n: number) =>
+			n === 4320 ? "closed" : "open",
+		);
+		await verifyMergedPullRequest(
+			fetchImpl,
+			{ pull_request: { number: 4344, body } },
+			getIssueState,
+		);
+		expect(process.exitCode).toBeUndefined();
+		expect(errorLog).not.toHaveBeenCalled();
+		expect(logSpy).toHaveBeenCalledWith(
+			"Post-merge close verification OK (1 issue closed).",
+		);
+		errorLog.mockRestore();
+		logSpy.mockRestore();
 	});
 });
