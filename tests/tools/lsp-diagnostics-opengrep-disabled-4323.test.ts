@@ -12,8 +12,10 @@
  * answering clean; the YAML server's command points at a missing path, so a
  * primary-only YAML check reaches the clientless `getDiagnostics` fallback.
  *
- * Every switched-off case runs before the control, which starts Opengrep and
- * so proves the fixture would have started it. The same cases pin the two
+ * Every case that counts Opengrep starts runs before the control, which starts
+ * Opengrep and so proves the fixture would have started it. The cases after the
+ * control need the Opengrep it left running, and check what each route shows
+ * rather than how often Opengrep starts. The switched-off cases also pin the two
  * other places a switched-off scanner showed through: the blocker coverage
  * claim and the cache key the workspace sweep shares, plus the
  * `lsp_navigation workspaceDiagnostics` route. The host wiring that supplies
