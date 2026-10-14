@@ -12,7 +12,7 @@ import {
 } from "./lib/tla-coverage.mjs";
 import { evaluateWorkflowRunEvidence } from "./lib/workflow-run-evidence.mjs";
 import {
-	INVALID_CLOSE_KEYWORD_MESSAGE,
+	closeKeywordErrors,
 	closeKeywordPlacementMessage,
 	lintCloseKeywordPlacement,
 	lintCloseKeywords,
@@ -2653,9 +2653,7 @@ export function lintLocalPrBody(
 	const closeSyntax = lintCloseKeywords(body);
 	if (!closeSyntax.valid) {
 		result.valid = false;
-		result.errors.push(INVALID_CLOSE_KEYWORD_MESSAGE);
-		for (const line of closeSyntax.offendingLines)
-			result.errors.push(`  offending line: ${line}`);
+		result.errors.push(...closeKeywordErrors(closeSyntax));
 	}
 	const placement = lintCloseKeywordPlacement(options.title ?? "", body);
 	if (!placement.valid) {
