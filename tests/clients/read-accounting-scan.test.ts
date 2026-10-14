@@ -136,6 +136,44 @@ describe("scanFileLines matches the released split (#1649)", () => {
 		).toBe(2);
 	});
 
+	// Recurrence prevented: wanted lines lost when their decode run is still
+	// open as the chunk ends and the chunk is refilled.
+	it("ends a run of wanted lines at the end of each chunk", () => {
+		for (const tail of ["\nab\ncdefghijklmnop\nq\n", "\nab\nc", "\n\n\n\n"])
+			for (const pad of [CHUNK - 10, CHUNK - 4, CHUNK - 1])
+				assertParity(
+					Buffer.concat([Buffer.alloc(pad, 0x61), Buffer.from(tail)]),
+					[
+						[1, 3],
+						[1, 6],
+						[2, 1],
+					],
+				);
+	});
+
+	// Recurrence prevented: a decode run that kept going past the last wanted
+	// line, so a count of a large log held every later line of each chunk.
+	it("keeps no line outside the ranges it was given", () => {
+		const text = Array.from({ length: 40 }, (_, i) => `line ${i + 1}`).join(
+			"\n",
+		);
+		const scan = scanFileLines(
+			fileWith(Buffer.from(text)),
+			[
+				{ offset: 3, limit: 2 },
+				{ offset: 20, limit: 1 },
+			],
+			{ count: true },
+		);
+		expect(scan?.totalLines).toBe(40);
+		expect(scan?.hashes(3, 2)).toEqual(
+			released(Buffer.from(text)).hashes(3, 2),
+		);
+		expect(scan?.hashes(5, 1)).toBeUndefined();
+		expect(scan?.hashes(21, 5)).toBeUndefined();
+		expect(scan?.hashes(1, 1)).toBeUndefined();
+	});
+
 	it("answers an unreadable path and a directory as the released catch did", () => {
 		expect(countFileLines(path.join(env.tmpDir, "missing.ts"))).toBe(1);
 		expect(countFileLines(env.tmpDir)).toBe(1);

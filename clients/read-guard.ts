@@ -788,21 +788,40 @@ export function scanFileLines(
 			consumed += n;
 			if (consumed > SCAN_MAX_BYTES) return undefined;
 			let start = 0;
+			// Wanted lines that start and end inside this chunk are decoded as
+			// one run and split at "\n", which gives each the text it decodes to
+			// alone (0x0A ends any partial sequence before it).
+			let runStart = -1;
+			let runLine = 0;
+			const flushRun = (end: number) => {
+				if (runStart < 0) return;
+				chunk
+					.toString("utf8", runStart, end)
+					.split("\n")
+					.forEach((text, i) => lines.set(runLine + i, text));
+				runStart = -1;
+			};
 			while (!done(lineNo)) {
 				const newline = chunk.indexOf(0x0a, start);
 				if (newline === -1 || newline >= n) {
 					if (keep) parts.push(Buffer.from(chunk.subarray(start, n)));
 					break;
 				}
-				if (keep) {
+				if (!keep) flushRun(start - 1);
+				else if (parts.length > 0) {
 					parts.push(chunk.subarray(start, newline));
 					keepLine();
+					parts = [];
+				} else if (runStart < 0) {
+					runStart = start;
+					runLine = lineNo;
 				}
-				parts = [];
 				lineNo += 1;
 				keep = wanted(lineNo);
 				start = newline + 1;
 			}
+			// The chunk is refilled next: decode the open run first.
+			flushRun(start - 1);
 		}
 		// The text after the last newline is the last line ("" after a trailing
 		// newline).
