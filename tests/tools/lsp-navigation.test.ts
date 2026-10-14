@@ -10,6 +10,7 @@ import {
 	_resetDeferredForTests,
 	_resetStateCacheForTests,
 } from "../../clients/diagnostic-dispositions.js";
+import { getRecentLoggedPhases } from "../../clients/latency-logger.js";
 import { hashDiagnosticContent } from "../../clients/lsp/diagnostic-binding.js";
 import { normalizeMapKey } from "../../clients/path-utils.js";
 import { readChangesSince } from "../../clients/project-changes.js";
@@ -1811,6 +1812,13 @@ describe("lsp_navigation workspaceDiagnostics delivery gate (#1634)", () => {
 		expect(result.details?.dispositionSuppressed).toBe(1);
 		expect(envelope.notes).toContainEqual(
 			expect.stringContaining("suppressed by disposition: 1 finding(s)"),
+		);
+		// The lane's bounded trace: one record for the file it filtered.
+		expect(getRecentLoggedPhases()).toContainEqual(
+			expect.objectContaining({
+				phase: "lsp_probe_disposition_filter",
+				metadata: expect.objectContaining({ suppressed: 1 }),
+			}),
 		);
 	});
 

@@ -103,7 +103,7 @@ import {
 } from "../clients/situational-tool-telemetry.js";
 import { logExtension, flushExtensionLog } from "../clients/extension-log.js";
 import { createLspNavigationTool } from "../tools/lsp-navigation.js";
-import { dispositionSuppressedLine } from "../tools/lsp-diagnostics.js";
+import { dispositionSuppressedLine } from "../clients/finding-delivery-gate.js";
 import { shouldInitializeSessionRoot } from "../clients/lsp/session-roots.js";
 import {
 	findIgnoredArguments,
@@ -1249,15 +1249,12 @@ async function callTool(
 		if (skipNotice) summaryLines.push(skipNotice);
 		// #1634: the count `projectScan`'s finding policy dropped, worded as the
 		// diagnostics probes word it.
-		const suppressedLine = dispositionSuppressedLine(
-			snapshot.dispositionSuppressed,
-		);
+		const { dispositionSuppressed } = snapshot;
+		const suppressedLine = dispositionSuppressedLine(dispositionSuppressed);
 		if (suppressedLine) summaryLines.push(suppressedLine);
 		return toolText(summaryLines.join("\n"), {
 			filesScanned: snapshot.filesScanned,
-			...(snapshot.dispositionSuppressed > 0
-				? { dispositionSuppressed: snapshot.dispositionSuppressed }
-				: {}),
+			...(dispositionSuppressed > 0 ? { dispositionSuppressed } : {}),
 			runners: snapshot.runners,
 			uniqueDiagnostics: deduped.length,
 			rawDiagnostics: snapshot.diagnostics.length,

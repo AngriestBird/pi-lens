@@ -47,6 +47,7 @@ import {
 	readPolicyContent,
 } from "../clients/dispatch/finding-policy.js";
 import { hasStrictDispositionMarks } from "../clients/diagnostic-dispositions.js";
+import { dispositionSuppressedLine } from "../clients/finding-delivery-gate.js";
 import { recordDegradationOnce } from "../clients/degradation-ledger.js";
 import { logLatency } from "../clients/latency-logger.js";
 import { detectFileRole } from "../clients/file-role.js";
@@ -2960,26 +2961,6 @@ async function runDirectoryDiagnostics(
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────
-
-/**
- * #3088: the one rendering of the probe lane's policy drop, shared by the
- * single-file, batch and directory renders so the three cannot word the same
- * fact differently. Returns `undefined` when nothing was dropped — the #1616
- * rule asks for a count when there IS one, not a "0 suppressed" line on every
- * clean probe.
- */
-export function dispositionSuppressedLine(
-	suppressed: number,
-): string | undefined {
-	if (suppressed <= 0) return undefined;
-	return (
-		`suppressed by disposition: ${suppressed} finding(s) dropped from this ` +
-		"result because they're marked false-positive/won't-fix, disabled by " +
-		"`.pi-lens.json` rule policy, or suppressed by an inline `pi-lens-ignore` " +
-		"comment. Not a clean verdict for those locations — they were found, " +
-		"then intentionally hidden."
-	);
-}
 
 function applySeverityFilter<T extends { severity: number }>(
 	diags: T[],

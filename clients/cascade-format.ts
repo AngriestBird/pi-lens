@@ -147,6 +147,7 @@ export function buildResolvedFoundCascadeRun(
 	const neighbors: CascadeNeighborResult[] = [
 		{ filePath, reason: "references", diagnostics, lspTouched: true },
 	];
+	// @delivery-surface: cascade-format:resolved-found-run
 	const rendered = formatCascadeNeighborDiagnostics(cwd, neighbors, {
 		noun: "cold neighbor",
 	});

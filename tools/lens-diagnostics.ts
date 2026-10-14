@@ -34,6 +34,7 @@ import {
 	parseScannedAtMs,
 } from "../clients/advisory-provenance.js";
 import {
+	dispositionSuppressedLine,
 	formatCacheAgeLabel,
 	markUnreconciledFindings,
 } from "../clients/finding-delivery-gate.js";
@@ -106,6 +107,7 @@ import type { CodeQualityWarningsReport } from "../clients/code-quality-warnings
 import {
 	classifyDiagnosticTier,
 	getFileDiagnosticSummaries,
+	getSuppressedDiagnostics,
 	type FileDiagnosticSummary,
 	reconcileCorrelatedScanDiagnostics,
 	reconcileScanDiagnostics,
@@ -3293,6 +3295,11 @@ async function formatAllMode(
 	// false-positive anchors against current content when the file is
 	// unchanged since observation, weak-only fallback otherwise.
 	const policyMap = loadProjectRulePolicyMap(cwd);
+	// #1634 criterion 4: what these stages drop is counted and said, scoped to
+	// the requested paths and severity like the rows themselves. Without it a
+	// file whose findings the agent marked after a mode=full read "No issues
+	// ✓" a minute after that sweep listed them.
+	let dispositionSuppressed = 0;
 	const dispositioned = isFullMode
 		? summaries
 		: summaries.map((s) => {
@@ -3302,6 +3309,19 @@ async function formatAllMode(
 					root: cwd,
 					filePath: s.filePath,
 				});
+				if (includeFile(s.filePath)) {
+					const inScope = (rows: readonly WidgetDiagnostic[]) =>
+						rows.reduce(
+							(n, d) => n + (matchesSeverity(d, severity) ? 1 : 0),
+							0,
+						);
+					// The rows a mark already tagged in the store (the footer's
+					// `suppressed: N`), plus what the stages above dropped now.
+					dispositionSuppressed +=
+						inScope(getSuppressedDiagnostics(s.filePath)) +
+						inScope(diagnostics) -
+						inScope(policyKept);
+				}
 				if (
 					policyKept.length === kept.length &&
 					kept.length === diagnostics.length
@@ -3357,6 +3377,10 @@ async function formatAllMode(
 	});
 
 	const pathsNote = isFullMode ? "" : pathsScopeCacheOnlyNote(pathsScope);
+	const suppressedLine = dispositionSuppressedLine(dispositionSuppressed);
+	const suppressedNote = suppressedLine ? `\n${suppressedLine}` : "";
+	const suppressedDetails =
+		dispositionSuppressed > 0 ? { dispositionSuppressed } : {};
 
 	if (withIssues.length === 0) {
 		const text =
@@ -3364,6 +3388,7 @@ async function formatAllMode(
 				? "No files diagnosed yet this session."
 				: `No ${severity === "all" ? "" : severity + " "}issues across ${visibleSummaries.length} file${visibleSummaries.length === 1 ? "" : "s"} diagnosed this session. ✓`) +
 			staleNote +
+			suppressedNote +
 			pathsNote;
 		return {
 			content: [{ type: "text" as const, text }],
@@ -3371,6 +3396,7 @@ async function formatAllMode(
 				...detailOverrides,
 				filesChecked: visibleSummaries.length,
 				staleDropped,
+				...suppressedDetails,
 			},
 		};
 	}
@@ -3489,7 +3515,10 @@ async function formatAllMode(
 
 	return {
 		content: [
-			{ type: "text" as const, text: lines.join("\n") + summary + staleNote },
+			{
+				type: "text" as const,
+				text: lines.join("\n") + summary + staleNote + suppressedNote,
+			},
 		],
 		details: {
 			...detailOverrides,
@@ -3499,6 +3528,7 @@ async function formatAllMode(
 			totalWarnings,
 			totalAdvisories,
 			staleDropped,
+			...suppressedDetails,
 		},
 	};
 }

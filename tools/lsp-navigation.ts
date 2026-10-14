@@ -41,9 +41,11 @@ import { buildLspNavigationEnvelope } from "./lsp-structured-output.js";
 import {
 	applyProbeFindingPolicy,
 	describePrimaryUnavailable,
-	dispositionSuppressedLine,
 } from "./lsp-diagnostics.js";
-import { formatCacheAgeLabel } from "../clients/finding-delivery-gate.js";
+import {
+	dispositionSuppressedLine,
+	formatCacheAgeLabel,
+} from "../clients/finding-delivery-gate.js";
 import { disabledPrimaries } from "../clients/lsp/session-roots.js";
 import { SYMBOL_KIND_NAMES } from "../clients/lsp-document-symbols.js";
 

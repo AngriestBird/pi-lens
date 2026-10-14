@@ -135,15 +135,15 @@ export async function projectScan(
 	maxFiles?: number,
 	includeGenerated?: boolean,
 ): Promise<ProjectDiagnosticsSnapshot & { dispositionSuppressed: number }> {
-	const snapshot = await scanProjectDiagnostics({
+	const scan = await scanProjectDiagnostics({
 		cwd,
 		tier: "cheap",
 		maxFiles,
 		includeGenerated,
 	});
-	const policy = applyPushedFindingPolicyByFile(snapshot.diagnostics, cwd);
+	const policy = applyPushedFindingPolicyByFile(scan.diagnostics, cwd);
 	return {
-		...snapshot,
+		...scan,
 		diagnostics: policy.kept,
 		dispositionSuppressed: policy.suppressed,
 	};

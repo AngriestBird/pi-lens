@@ -1250,7 +1250,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/word-index.ts": 8,
 		"tools/lens-diagnostics.ts": 12,
 		"tools/lsp-navigation.ts": 9,
-		"mcp/server.ts": 22,
+		// 22 -> 23 (#1634): `pilens_project_scan` reads the policy's suppressed
+		// count off the scan result its handler already names `snapshot`.
+		"mcp/server.ts": 23,
 	},
 	status: {
 		// #3867 moved the coverage decision onto `hasUsableResult`: dispatcher.ts
