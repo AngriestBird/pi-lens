@@ -78,39 +78,48 @@ function routingFields(
 	if (typeof value !== "object" || value === null || Array.isArray(value)) {
 		return `not a routable object (${value === null ? "null" : Array.isArray(value) ? "array" : typeof value})`;
 	}
-	const record = value as Record<string, unknown>;
-	if (typeof record.id !== "number" || typeof record.generation !== "number") {
-		return "no numeric id and generation";
-	}
+	const wire = value as Record<string, unknown>;
+	const missing: string[] = [];
+	const id = requiredNumber(wire, "id", missing);
+	const generation = requiredNumber(wire, "generation", missing);
+	if (missing.length > 0) return `no numeric ${missing.join(" and ")}`;
 	return {
-		id: record.id,
-		generation: record.generation,
-		...(typeof record.stagePath === "string"
-			? { stagePath: record.stagePath }
-			: {}),
+		id,
+		generation,
+		...fieldEntry(wire, "stagePath", "string", []),
 	};
 }
 
-function stringField(
-	record: Record<string, unknown>,
+function requiredNumber(
+	wire: Record<string, unknown>,
 	key: string,
-	malformed: string[],
-): string | undefined {
-	const field = record[key];
-	if (field === undefined || typeof field === "string") return field;
-	malformed.push(key);
-	return undefined;
+	missing: string[],
+): number {
+	const field = wire[key];
+	if (typeof field === "number") return field;
+	missing.push(key);
+	return Number.NaN;
 }
 
-function numberField(
-	record: Record<string, unknown>,
-	key: string,
+interface FieldTypes {
+	number: number;
+	string: string;
+	boolean: boolean;
+}
+
+/** `{ [key]: value }` when the field has `type`, `{}` when it is absent. */
+function fieldEntry<K extends string, T extends keyof FieldTypes>(
+	wire: Record<string, unknown>,
+	key: K,
+	type: T,
 	malformed: string[],
-): number | undefined {
-	const field = record[key];
-	if (field === undefined || typeof field === "number") return field;
-	malformed.push(key);
-	return undefined;
+): Partial<Record<K, FieldTypes[T]>> {
+	const field = wire[key];
+	if (typeof field === type) {
+		return { [key]: field } as Partial<Record<K, FieldTypes[T]>>;
+	}
+	if (field !== undefined) malformed.push(key);
+	return {};
 }
 
 /**
@@ -129,21 +138,19 @@ export function readGzipStageWorkerResult(
 ): GzipStageWorkerResult | string {
 	const routing = routingFields(value);
 	if (typeof routing === "string") return routing;
-	const record = value as Record<string, unknown>;
+	const wire = value as Record<string, unknown>;
 	const malformed: string[] = [];
 	const result: GzipStageWorkerResult = {
 		...routing,
-		rawBytes: numberField(record, "rawBytes", malformed),
-		gzBytes: numberField(record, "gzBytes", malformed),
-		serializeMs: numberField(record, "serializeMs", malformed),
-		writeMs: numberField(record, "writeMs", malformed),
-		durationMs: numberField(record, "durationMs", malformed),
-		semanticFingerprint: stringField(record, "semanticFingerprint", malformed),
-		error: stringField(record, "error", malformed),
+		...fieldEntry(wire, "rawBytes", "number", malformed),
+		...fieldEntry(wire, "gzBytes", "number", malformed),
+		...fieldEntry(wire, "serializeMs", "number", malformed),
+		...fieldEntry(wire, "writeMs", "number", malformed),
+		...fieldEntry(wire, "durationMs", "number", malformed),
+		...fieldEntry(wire, "semanticFingerprint", "string", malformed),
+		...fieldEntry(wire, "skippedUnchanged", "boolean", malformed),
+		...fieldEntry(wire, "error", "string", malformed),
 	};
-	const skipped = record.skippedUnchanged;
-	if (typeof skipped === "boolean") result.skippedUnchanged = skipped;
-	else if (skipped !== undefined) malformed.push("skippedUnchanged");
 	if (malformed.length === 0) return result;
 	return {
 		...routing,
