@@ -56,6 +56,8 @@ import {
 // Legacy v1 entries are rejected by the version guard and re-scanned — a
 // deliberately clean break so no entry lacking the field is ever served.
 export const WORKSPACE_DIAGNOSTICS_CACHE_VERSION = 4;
+/** Versions a released pi-lens wrote before this one (v1-v3). */
+const RELEASED_OLDER_CACHE_VERSIONS: ReadonlySet<number> = new Set([1, 2, 3]);
 const CACHE_FILE = "lsp-workspace-diagnostics.json";
 
 export interface WorkspaceDiagnosticsCacheEntry {
@@ -277,9 +279,9 @@ export function loadWorkspaceDiagnosticsCache(
 		if (!parsed || typeof parsed !== "object") return undefined;
 		const cache = parsed as WorkspaceDiagnosticsCache;
 		if (cache.version !== WORKSPACE_DIAGNOSTICS_CACHE_VERSION) {
-			// Every released older version (v1-v3) is a migration; an unknown
-			// version is not, and stays silent as before.
-			if (cache.version === 1 || cache.version === 2 || cache.version === 3) {
+			// Every released older version is a migration; an unknown version is
+			// not, and stays silent as before.
+			if (RELEASED_OLDER_CACHE_VERSIONS.has(cache.version)) {
 				recordDegradationOnce({
 					kind: "lsp-workspace-cache-migration",
 					subject: path.resolve(cwd),

@@ -772,8 +772,7 @@ file-scoped worklist and receives no project-wide scanner output.
   acquired auxiliaries but no primary that rooted for the file is inconclusive
   with `primary-unavailable`, naming those primaries, and `getDiagnostics`
   records the same ids as `unavailablePrimaryServerIds` (one rule,
-  `unacquiredPrimaryServerIds`; an auxiliary-only language is unaffected;
-  #4322).
+  `unacquiredPrimaryServerIds`; an auxiliary-only language is unaffected).
 - The explicit `lsp_diagnostics` read checks `exceedsLspSyncLimits` once before
   warm attachment or `touchFile`; an over-bound file returns a `too_large`
   result with its byte/line measurement and records

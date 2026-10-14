@@ -383,15 +383,15 @@ const lspSpawnHeavyInclude = [
 	// edit applier over a real stdio fake-server child (a project custom
 	// server); waits on a real handshake and diagnostics rounds like #4320's.
 	"tests/tools/lsp-diagnostics-created-outside-4346.test.ts",
-	// #4322: the production lsp_diagnostics handler, LSPService and the dispatch
-	// LSP runner beside a real stdio fake-server child (the typos auxiliary)
-	// whose primary cannot start; waits on a real handshake like #4346's.
-	"tests/tools/lsp-diagnostics-missing-primary-4322.test.ts",
 	// #3310: launches the fake server THROUGH the production `PHPServer` entry
 	// (an executable node_modules/.bin/intelephense shim) and waits on a real
 	// initialize handshake plus a two-publish diagnostics sequence per case —
 	// the same #1022/#2332 contention class as its lane siblings.
 	"tests/tools/lsp-diagnostics-empty-first-publish-3310.test.ts",
+	// #4322: the production lsp_diagnostics handler, LSPService and the dispatch
+	// LSP runner beside a real stdio fake-server child (the typos auxiliary)
+	// whose primary cannot start; waits on a real handshake like #4346's.
+	"tests/tools/lsp-diagnostics-missing-primary-4322.test.ts",
 	// #3750: launches the fake server THROUGH the production `RustServer`,
 	// `OCamlServer` and `GoServer` entries (PATH shims) and waits on a real
 	// initialize handshake plus a pull round trip per case -- the same
