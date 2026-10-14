@@ -5473,6 +5473,19 @@ describe("Detection names the defect shape and its enforcer (#4439)", () => {
 		).toEqual([]);
 	});
 
+	it("accepts the judgement spelling of judgment-only", () => {
+		// Recurrence (#4448 round 3): a mutation that dropped the alternative
+		// survived, because every case used the other spelling.
+		expect(
+			lint(
+				lines(
+					"#67",
+					"none: judgement-only, the population has no lexical marker",
+				),
+			),
+		).toEqual([]);
+	});
+
 	it("accepts an issue enforcer and a judgment-only enforcer", () => {
 		expect(lint(lines("#67", "#4439 (build the census)"))).toEqual([]);
 		expect(lint(lines("#67", JUDGMENT))).toEqual([]);

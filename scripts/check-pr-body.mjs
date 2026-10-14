@@ -1906,7 +1906,6 @@ export function shapeCatalogReader(cwd = process.cwd(), git = gitExecFileSync) {
 		if (catalog !== undefined) return catalog;
 		catalog = null;
 		const base = resolvePrBase(cwd, git);
-		if (!base) return catalog;
 		try {
 			catalog = parseDefectShapes(
 				String(

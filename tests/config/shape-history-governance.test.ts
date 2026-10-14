@@ -100,6 +100,18 @@ describe("catalog shapes have a HISTORY.md entry (#4439)", () => {
 	});
 });
 
+describe("blankMarkdown options (#4439)", () => {
+	const text = "- item\n\n    indented\n";
+
+	it("blanks an indented block by default", () => {
+		expect(blankMarkdown(text).trim()).toBe("- item");
+	});
+
+	it("keeps an indented block when indentedCode is false", () => {
+		expect(blankMarkdown(text, { indentedCode: false })).toContain("indented");
+	});
+});
+
 describe("baselineViolations (#4439)", () => {
 	// Recurrence (#4448 review F2): both guards survived neutering because only
 	// an env override on the real files ever exercised them.

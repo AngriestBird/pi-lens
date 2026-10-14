@@ -1,5 +1,11 @@
-export function blankMarkdown(text: string): string;
+export function blankMarkdown(
+	text: string,
+	options?: { indentedCode?: boolean },
+): string;
 export function parseDefectShapes(agentsMarkdown: string): Map<number, string>;
 export function issueNumbers(text: string): Set<number>;
 export declare const HEADING: RegExp;
-export function sourceWithoutFencedBlocks(source: string): string;
+export function sourceWithoutFencedBlocks(
+	source: string,
+	options?: { indentedCode?: boolean },
+): string;

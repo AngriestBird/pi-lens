@@ -12,7 +12,8 @@ export const HEADING = /^#{2,4}\s+(.+?)\s*$/;
 // interrupt a paragraph (CommonMark), so a 4-space line that follows body text
 // stays: list continuations and nested bullets are content, not code. The
 // closing fence must repeat the opener's character (>=3 of them).
-export function sourceWithoutFencedBlocks(source) {
+export function sourceWithoutFencedBlocks(source, options = {}) {
+	const indentedCode = options.indentedCode !== false;
 	const lines = String(source ?? "").split(/\r?\n/);
 	const output = [];
 	let fenceChar = null;
@@ -40,7 +41,7 @@ export function sourceWithoutFencedBlocks(source) {
 			previous = "blank";
 			continue;
 		}
-		if (/^(?: {4,}|\t)/.test(line)) {
+		if (indentedCode && /^(?: {4,}|\t)/.test(line)) {
 			if (
 				inIndented ||
 				previous === "start" ||
@@ -70,8 +71,8 @@ export function sourceWithoutFencedBlocks(source) {
  * example or a comment never counts as real content. Fences go first: a
  * `<!--` inside a fence is literal text.
  */
-export function blankMarkdown(text) {
-	return sourceWithoutFencedBlocks(String(text ?? "")).replace(
+export function blankMarkdown(text, options = {}) {
+	return sourceWithoutFencedBlocks(String(text ?? ""), options).replace(
 		/<!--[\s\S]*?(?:-->|$)/g,
 		(comment) => comment.replace(/[^\n]/g, " "),
 	);
