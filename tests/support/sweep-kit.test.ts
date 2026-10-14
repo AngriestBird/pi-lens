@@ -1608,6 +1608,61 @@ describe("testDeclarations (#4393)", () => {
 		]);
 	});
 
+	it("reads a skip from an options object, unread options, or a skip call in the body", () => {
+		// Recurrence: #4399 verify r2 F2 and Q5 (state-space rows 7 to 10, 12).
+		const source = [
+			'it("timed", { timeout: 5, skip: false }, () => {});',
+			'it("timed late", () => {}, 30_000);',
+			'it("options skip", { skip: true }, () => {});',
+			'test("options todo", { todo: true }, () => {});',
+			'it("options fails", { fails: 1 }, () => {});',
+			'it("unread options", opts, () => {});',
+			'it("spread options", { ...opts, timeout: 5 }, () => {});',
+			'it("shorthand skip", { skip }, () => {});',
+			'describe("options suite", { skip: true }, () => {',
+			'\tit("inside", () => {});',
+			"});",
+			'it("context skip", (ctx) => {',
+			"\tif (ctx) ctx.skip();",
+			"});",
+			'it("parameter skip", ({ skip }) => {',
+			"\tskip();",
+			"});",
+			'it("a skipped test named in a body is not a body skip", () => {',
+			'\tit.skip("inner", () => {});',
+			"});",
+		].join("\n");
+		expect(
+			testDeclarations(source)
+				.filter(({ title }) => title !== "inner")
+				.map(({ title, live }) => [title, live]),
+		).toEqual([
+			["timed", true],
+			["timed late", true],
+			["options skip", false],
+			["options todo", false],
+			["options fails", false],
+			["unread options", false],
+			["spread options", false],
+			["shorthand skip", false],
+			["options suite", false],
+			["inside", false],
+			["context skip", false],
+			["parameter skip", false],
+			["a skipped test named in a body is not a body skip", true],
+		]);
+		const onlyByOptions = [
+			'it("focused", { only: true }, () => {});',
+			'it("sibling", () => {});',
+		].join("\n");
+		expect(
+			testDeclarations(onlyByOptions).map(({ title, live }) => [title, live]),
+		).toEqual([
+			["focused", true],
+			["sibling", false],
+		]);
+	});
+
 	it("keeps only the .only declarations of a file that has one", () => {
 		const source = [
 			'it("sibling", () => {});',

@@ -48,7 +48,7 @@
  * - The assertion needle is `assert[\w$]*` followed by `.` or `(`, so an
  *   ordinary identifier that happens to start with `assert` — `assertions.`,
  *   `assertCount(` — clears the body without asserting anything.
- * - {@link SKIP_CALL} accepts any receiver outside the it/test/describe/suite
+ * - `hasSkipCall` (sweep-kit) accepts any receiver outside the it/test/describe/suite
  *   blocklist, so an unrelated `queue.skip(3)` reads as a skip call.
  * - An ASI bare `return` with no semicolon is likewise invisible; oxfmt writes
  *   the semicolon, so it cannot survive a formatted commit here.
@@ -61,6 +61,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
 	callbackBodyBrace,
+	hasSkipCall,
 	isFunctionBrace,
 	lineOf,
 	listSourceFiles,
@@ -71,6 +72,7 @@ import {
 	stripSource,
 	testDeclarations,
 } from "./sweep-kit.js";
+import { vitestCollects } from "./vitest-collection.js";
 
 export const repoRoot = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -103,19 +105,6 @@ export function vacuousSkipKey(entry: {
  */
 const ASSERTION = /(?<![\w$.])(?:expect|expectTypeOf|assert[\w$]*)\s*[.(]/;
 
-/** `ctx.skip(...)` / `skip(...)` / `this.skip()`, but never `it.skip(...)`. */
-const SKIP_CALL = /(?<![\w$])(?:([\w$]+)\s*\.\s*)?skip\s*\(/g;
-
-const SKIP_QUALIFIER_BLOCKLIST = new Set(["it", "test", "describe", "suite"]);
-
-function skipBefore(body: string): boolean {
-	SKIP_CALL.lastIndex = 0;
-	for (const match of body.matchAll(SKIP_CALL)) {
-		if (!match[1] || !SKIP_QUALIFIER_BLOCKLIST.has(match[1])) return true;
-	}
-	return false;
-}
-
 /** Every vacuous early return in one file's source text. */
 export function scanVacuousSkipsInSource(
 	file: string,
@@ -125,7 +114,7 @@ export function scanVacuousSkipsInSource(
 	const found: VacuousSkip[] = [];
 	// Every `it`/`test` call, live or not: a skipped test's early return is
 	// the same shape, and the walk is the shared one (#4393).
-	for (const declaration of testDeclarations(raw)) {
+	for (const declaration of testDeclarations(raw, stripped)) {
 		if (declaration.callee !== "it" && declaration.callee !== "test") continue;
 		const { callParen, callEnd } = declaration;
 		const bodyOpen = callbackBodyBrace(stripped, callParen, callEnd);
@@ -170,7 +159,7 @@ function firstVacuousReturn(
 		}
 		if (functionDepth > 0 || !isBareReturnAt(stripped, i)) continue;
 		const before = stripped.slice(bodyOpen + 1, i);
-		return ASSERTION.test(before) || skipBefore(before) ? -1 : i;
+		return ASSERTION.test(before) || hasSkipCall(before) ? -1 : i;
 	}
 	return -1;
 }
@@ -185,15 +174,16 @@ function isBareReturnAt(stripped: string, i: number): boolean {
 }
 
 /**
- * Every `*.test.ts` under `tests/`, minus the fixture tree — vitest treats
- * `tests/fixtures` as INPUT to tests rather than as tests, and its contents are
- * deliberately shaped like the code under test.
+ * Every file under `tests/` that vitest's own config collects
+ * ({@link vitestCollects}). The walk prunes `fixtures/` only for speed:
+ * vitest treats that tree as INPUT to tests, and the config, not this prune,
+ * decides membership.
  */
 export function listTestFiles(): string[] {
 	return listSourceFiles(path.join(repoRoot, "tests"), {
 		extensions: [".ts"],
 		exclude: (relative) => relative.startsWith("fixtures/"),
-	}).filter((file) => file.endsWith(".test.ts"));
+	}).filter((file) => vitestCollects(relativePosix(repoRoot, file)));
 }
 
 /** Scan the whole `tests/` tree for tests that pass by returning early.

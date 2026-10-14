@@ -563,7 +563,7 @@ file-scoped worklist and receives no project-wide scanner output.
     the constant to the pinned value. Flipping the code reds the pin's test;
     flipping the model without the registry reds the gate. read-guard is
     fully pinned; the other families' code choices are deferred, and the
-    deferred count may only fall.
+    deferred and notCodeChoice counts are pinned exactly.
 
 </important>
 
@@ -1301,8 +1301,10 @@ Test authoring screens:
 Governance sweeps use `tests/support/sweep-kit.ts`, explicit source roots, and
 comment/string-blanked source. Every sweep has a real floor and a checked
 exemption reason. A detector that decides a test exists counts only live
-declarations (`testDeclarations` in `tests/support/sweep-kit.ts`): a skipped,
-todo, conditional (`skipIf`/`runIf`) or uncalled test is absent. New mock
+declarations (`testDeclarations` in `tests/support/sweep-kit.ts`) in files
+vitest collects (`tests/support/vitest-collection.ts`): a skipped, todo,
+conditional (`skipIf`/`runIf`, an options key, a body skip) or uncalled test
+is absent. New mock
 exports, fixture shapes, path rules, spawn lanes, and durable fields must
 update their registered-or-fail coverage tests.
 

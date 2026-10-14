@@ -562,6 +562,7 @@ function isLoopBrace(source: string, index: number): boolean {
 function declarationCall(
 	source: string,
 	identifierEnd: number,
+	closes: Int32Array,
 ): { paren: number; modifiers: string[] } | undefined {
 	let i = identifierEnd;
 	let lastModifier = "";
@@ -590,7 +591,7 @@ function declarationCall(
 		if (ch === "(") {
 			if (!ARGUMENT_TAKING_MODIFIERS.has(lastModifier))
 				return { paren: i, modifiers };
-			const close = matchingCloseIndex(source, i, "(", ")");
+			const close = closes[i] - 1;
 			if (close < 0) return undefined;
 			lastModifier = "";
 			i = close + 1;
@@ -637,13 +638,17 @@ export interface TestDeclaration {
 	/** 1-based line of the callee identifier. */
 	line: number;
 	/**
-	 * Whether a run reaches it: no `skip`/`todo`/`skipIf`/`runIf`/`fails`
-	 * modifier on it or on an enclosing suite; it starts a statement at the
-	 * top level, in a loop body, or directly in a live `describe`/`suite`
-	 * callback (no `if`, no other function, no object between); and, in a
-	 * file with an `.only`, it or an enclosing suite carries the `.only`.
+	 * Whether a run reaches it, computed on first read for the whole file:
+	 * no not-run marker on it or on an enclosing suite (a `skip`/`todo`/
+	 * `skipIf`/`runIf`/`fails` modifier; an options object whose `skip`,
+	 * `todo` or `fails` key is not literally `false`; options that are not a
+	 * literal; for a test, a skip call in its inline callback); it starts a
+	 * statement at the top level, in a loop body, or directly in a live
+	 * `describe`/`suite` callback (no `if`, no other function, no object
+	 * between); and, in a file with an `.only` (chain or options), it or an
+	 * enclosing suite carries the `.only`.
 	 */
-	live: boolean;
+	readonly live: boolean;
 	/** Index of the `(` that opens the declaration call itself. */
 	callParen: number;
 	/** Index of its balancing `)`. */
@@ -659,46 +664,92 @@ const DECLARATION_IDENTIFIER =
  * (#4393): a detector that decides a test exists counts only `live`
  * declarations. Syntactic and conservative: a test declared through an alias,
  * inside a helper function, or in a concise arrow body reads as not live, a
- * false red that points the safe way. `ctx.skip()` inside a body is not seen.
+ * false red that points the safe way. `stripped`, when given, must be
+ * `stripSource(source)`; a caller that already stripped the file passes it,
+ * so the file is stripped once.
  */
-export function testDeclarations(source: string): TestDeclaration[] {
-	const stripped = stripSource(source, { strings: "blank" });
-	const found: Array<
-		TestDeclaration & { identifier: number; underOnly: boolean }
-	> = [];
+export function testDeclarations(
+	source: string,
+	stripped: string = stripSource(source, { strings: "blank" }),
+): TestDeclaration[] {
+	const closes = bracketCloses(stripped);
+	const found: Array<{
+		title: string;
+		callee: TestDeclaration["callee"];
+		modifiers: string[];
+		line: number;
+		callParen: number;
+		callEnd: number;
+		identifier: number;
+	}> = [];
 	for (const match of stripped.matchAll(DECLARATION_IDENTIFIER)) {
-		const call = declarationCall(stripped, match.index + match[0].length);
+		const call = declarationCall(
+			stripped,
+			match.index + match[0].length,
+			closes,
+		);
 		if (!call) continue;
-		const callEnd = matchingCloseIndex(stripped, call.paren, "(", ")");
+		const callEnd = closes[call.paren] - 1;
 		if (callEnd < 0) continue;
 		found.push({
 			title: titleAt(source, stripped, call.paren),
 			callee: match[0] as TestDeclaration["callee"],
 			modifiers: call.modifiers,
 			line: lineOf(stripped, match.index),
-			live: false,
 			callParen: call.paren,
 			callEnd,
 			identifier: match.index,
-			underOnly: false,
 		});
 	}
-	// Enclosing braces of each declaration, innermost last, in one pass.
-	const stacks: number[][] = [];
-	const stack: number[] = [];
+	// Liveness is a whole-file pass, run on the first read of any `live`:
+	// a caller that needs only call positions (vacuous-skip-scan) never pays
+	// it (#4399 verify r2 F1).
+	let liveness: boolean[] | undefined;
+	const live = (index: number): boolean => {
+		liveness ??= declarationLiveness(stripped, closes, found);
+		return liveness[index];
+	};
+	return found.map(({ identifier: _identifier, ...declaration }, index) => ({
+		...declaration,
+		get live() {
+			return live(index);
+		},
+	}));
+}
+
+/** {@link TestDeclaration.live} for every declaration of one file. */
+function declarationLiveness(
+	stripped: string,
+	closes: Int32Array,
+	found: ReadonlyArray<{
+		callee: TestDeclaration["callee"];
+		modifiers: string[];
+		callParen: number;
+		callEnd: number;
+		identifier: number;
+	}>,
+): boolean[] {
+	// The innermost enclosing brace of each declaration that is not a loop
+	// body, in one pass (loop bodies are transparent).
+	const innermostOf: Array<number | undefined> = [];
+	const braces: boolean[] = [];
+	const blocks: number[] = [];
 	let next = 0;
 	for (let i = 0; i < stripped.length && next < found.length; i++) {
 		while (next < found.length && found[next].identifier === i)
-			stacks[next++] = [...stack];
-		if (stripped[i] === "{") stack.push(i);
-		else if (stripped[i] === "}") stack.pop();
+			innermostOf[next++] = blocks.at(-1);
+		const code = stripped.charCodeAt(i);
+		if (code === 123) {
+			const loop = isLoopBrace(stripped, i);
+			braces.push(loop);
+			if (!loop) blocks.push(i);
+		} else if (code === 125 && braces.pop() === false) blocks.pop();
 	}
-	const suiteByBody = new Map<number, (typeof found)[number]>();
+	const reachable: boolean[] = [];
+	const underOnly: boolean[] = [];
+	const suiteByBody = new Map<number, number>();
 	for (const [index, declaration] of found.entries()) {
-		const enclosing = (stacks[index] ?? []).filter(
-			(brace) => !isLoopBrace(stripped, brace),
-		);
-		const innermost = enclosing.at(-1);
+		const innermost = innermostOf[index];
 		const parent =
 			innermost === undefined ? undefined : suiteByBody.get(innermost);
 		const before = prevNonSpace(stripped, declaration.identifier - 1);
@@ -707,41 +758,211 @@ export function testDeclarations(source: string): TestDeclaration[] {
 			"{;}".includes(stripped[before]) ||
 			(stripped[before] === ")" &&
 				LOOP_KEYWORDS.has(headKeyword(stripped, before)));
-		const reachable =
+		const isTest = declaration.callee === "it" || declaration.callee === "test";
+		const options = callOptions(stripped, closes, declaration, isTest);
+		reachable[index] =
 			startsStatement &&
-			(innermost === undefined || parent?.live === true) &&
+			(innermost === undefined ||
+				(parent !== undefined && reachable[parent])) &&
 			!declaration.modifiers.some((modifier) =>
 				NOT_RUN_MODIFIERS.has(modifier),
-			);
-		declaration.live = reachable;
-		declaration.underOnly =
-			declaration.modifiers.includes("only") || parent?.underOnly === true;
-		if (declaration.callee === "describe" || declaration.callee === "suite") {
+			) &&
+			!options.notRun;
+		underOnly[index] =
+			declaration.modifiers.includes("only") ||
+			options.only ||
+			(parent !== undefined && underOnly[parent]);
+		if (!isTest) {
 			const body = callbackBodyBrace(
 				stripped,
 				declaration.callParen,
 				declaration.callEnd,
 			);
-			if (body >= 0) suiteByBody.set(body, declaration);
+			if (body >= 0) suiteByBody.set(body, index);
 		}
 	}
-	const onlyMode = found.some((d) => d.modifiers.includes("only"));
-	return found.map(({ identifier: _i, underOnly, ...declaration }) => ({
-		...declaration,
-		live:
-			declaration.live &&
+	const onlyMode = underOnly.some(Boolean);
+	return found.map(
+		(declaration, index) =>
+			reachable[index] &&
 			(!onlyMode ||
-				underOnly ||
+				underOnly[index] ||
 				declaration.callee === "describe" ||
 				declaration.callee === "suite"),
-	}));
+	);
 }
 
-/** 1-based line of `index` in `source`. */
+/** `lineOf`'s newline index, for the last source it read. */
+let lineIndexSource: string | undefined;
+let lineStarts: number[] = [];
+
+/**
+ * 1-based line of `index` in `source`. Keeps the newline offsets of the last
+ * source it read, so a walk that asks for many lines of one file pays one
+ * scan, not one per call (#4399 verify r2 F1: per-declaration rescans made
+ * vacuous-skip-coverage 3x slower and timed it out in CI).
+ */
 export function lineOf(source: string, index: number): number {
-	let line = 1;
-	for (let i = 0; i < index; i++) if (source[i] === "\n") line++;
-	return line;
+	if (source !== lineIndexSource) {
+		lineStarts = [0];
+		for (let i = 0; i < source.length; i++)
+			if (source[i] === "\n") lineStarts.push(i + 1);
+		lineIndexSource = source;
+	}
+	let low = 0;
+	let high = lineStarts.length - 1;
+	while (low < high) {
+		const mid = (low + high + 1) >> 1;
+		if (lineStarts[mid] <= index) low = mid;
+		else high = mid - 1;
+	}
+	return low + 1;
+}
+
+/** `ctx.skip(...)` / `skip(...)` / `this.skip()`, but never `it.skip(...)`. */
+const SKIP_CALL = /(?<![\w$])(?:([\w$]+)\s*\.\s*)?skip\s*\(/g;
+
+const SKIP_QUALIFIER_BLOCKLIST = new Set(["it", "test", "describe", "suite"]);
+
+/** Does `text` (stripped source) call a run-time skip (`ctx.skip()`, `skip()`)? */
+export function hasSkipCall(text: string): boolean {
+	if (!text.includes("skip")) return false;
+	SKIP_CALL.lastIndex = 0;
+	for (const match of text.matchAll(SKIP_CALL)) {
+		if (!match[1] || !SKIP_QUALIFIER_BLOCKLIST.has(match[1])) return true;
+	}
+	return false;
+}
+
+/**
+ * For each `(`, `[` or `{` of stripped source, its balancing close index
+ * plus one (0 when unbalanced, so the table needs no fill; read it as
+ * `closes[i] - 1`). One pass, so a walk that jumps over many nested groups
+ * pays the file once, not once per enclosing call (#4399 verify r2 F1).
+ */
+function bracketCloses(stripped: string): Int32Array {
+	const closes = new Int32Array(stripped.length);
+	const opens: number[] = [];
+	for (let i = 0; i < stripped.length; i++) {
+		const code = stripped.charCodeAt(i);
+		// ( [ {  and  ) ] }
+		if (code === 40 || code === 91 || code === 123) opens.push(i);
+		else if (code === 41 || code === 93 || code === 125) {
+			const open = opens.at(-1);
+			if (open === undefined) continue;
+			const want = code === 41 ? 40 : code === 93 ? 91 : 123;
+			if (stripped.charCodeAt(open) !== want) continue;
+			opens.pop();
+			closes[open] = i + 1;
+		}
+	}
+	return closes;
+}
+
+/** The top-level argument spans `[start, end)`, trimmed, of a call. */
+function callArguments(
+	text: string,
+	closes: Int32Array | undefined,
+	callParen: number,
+	callEnd: number,
+): Array<[number, number]> {
+	const spans: Array<[number, number]> = [];
+	const push = (start: number, end: number) => {
+		let a = start;
+		let b = end;
+		while (a < b && /\s/.test(text[a])) a++;
+		while (b > a && /\s/.test(text[b - 1])) b--;
+		if (a < b) spans.push([a, b]);
+	};
+	let start = callParen + 1;
+	for (let i = callParen + 1; i < callEnd; i++) {
+		const ch = text[i];
+		if (ch === "(" || ch === "[" || ch === "{") {
+			const end = closes
+				? closes[i] - 1
+				: matchingCloseIndex(
+						text,
+						i,
+						ch,
+						ch === "(" ? ")" : ch === "[" ? "]" : "}",
+					);
+			if (end < 0) break;
+			i = end;
+		} else if (ch === ",") {
+			push(start, i);
+			start = i + 1;
+		}
+	}
+	push(start, callEnd);
+	return spans;
+}
+
+const FUNCTION_ARGUMENT =
+	/^(?:async\s*)?(?:function\b|[\w$]+\s*=>|\([\s\S]*?\)\s*(?::[^=]*)?=>)/;
+
+/** Options keys after which vitest does not run the declaration as written. */
+const NOT_RUN_OPTIONS = new Set(["skip", "todo", "fails"]);
+
+/**
+ * What a declaration's options say (#4399 verify r2 F2): `test(name, options,
+ * fn)` or the older `test(name, fn, options)`. `notRun` when a `skip`,
+ * `todo` or `fails` key is not literally `false`, or when the options are
+ * not a literal at all (vitest reads them at run time, so they prove
+ * nothing); `only` when an `only` key is not literally `false`. For a test,
+ * `notRun` also when its inline callback calls a run-time skip
+ * (`ctx.skip()`, a destructured `skip()`; #4399 verify r2 Q5).
+ */
+function callOptions(
+	stripped: string,
+	closes: Int32Array,
+	call: { callParen: number; callEnd: number },
+	isTest: boolean,
+): { notRun: boolean; only: boolean } {
+	const args = callArguments(stripped, closes, call.callParen, call.callEnd)
+		.slice(1)
+		.map(([start, end]) => ({
+			start,
+			end,
+			isFunction: FUNCTION_ARGUMENT.test(stripped.slice(start, start + 200)),
+			isObject: stripped[start] === "{",
+		}));
+	const result = { notRun: false, only: false };
+	for (const arg of args) {
+		if (!arg.isFunction) continue;
+		if (isTest && hasSkipCall(stripped.slice(arg.start, arg.end)))
+			result.notRun = true;
+	}
+	// Two arguments: the second is the callback, inline or by reference.
+	const candidates = args.length >= 2 ? args : args.filter((a) => a.isObject);
+	for (const arg of candidates) {
+		if (arg.isFunction || /^[\d_.]+$/.test(stripped.slice(arg.start, arg.end)))
+			continue;
+		if (!arg.isObject) {
+			result.notRun = true;
+			continue;
+		}
+		const object = stripped.slice(arg.start, arg.end);
+		const inner = `(${object.slice(1, -1)})`;
+		for (const [start, end] of callArguments(
+			inner,
+			undefined,
+			0,
+			inner.length - 1,
+		)) {
+			const entry = inner.slice(start, end);
+			if (entry.startsWith("...")) {
+				result.notRun = true;
+				continue;
+			}
+			const colon = entry.indexOf(":");
+			const key = (colon < 0 ? entry : entry.slice(0, colon)).trim();
+			const value = colon < 0 ? key : entry.slice(colon + 1).trim();
+			if (value === "false") continue;
+			if (NOT_RUN_OPTIONS.has(key)) result.notRun = true;
+			if (key === "only") result.only = true;
+		}
+	}
+	return result;
 }
 
 /**

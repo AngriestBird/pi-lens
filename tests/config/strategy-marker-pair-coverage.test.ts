@@ -20,7 +20,7 @@
  *
  * What it cannot see: whether the named test actually exercises the
  * interaction. It checks that a test a run reaches carries that title in the
- * named `*.test.ts` file (`testDeclarations`: a skipped, conditional or
+ * named file vitest collects (`testDeclarations`: a skipped, conditional or
  * uncalled test is absent) and that the file names the server; the reviewer
  * judges the rest.
  */
@@ -38,6 +38,7 @@ import {
 	stripSource,
 	testDeclarations,
 } from "../support/sweep-kit.js";
+import { vitestCollects } from "../support/vitest-collection.js";
 
 const repoRoot = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -133,8 +134,10 @@ export function auditPairCoverage(
 			problems.push(`MISSING ${pair}: ${file} does not exist`);
 			continue;
 		}
-		if (!file.endsWith(".test.ts")) {
-			problems.push(`NOT A TEST FILE ${pair}: ${file} is not a *.test.ts file`);
+		if (!vitestCollects(file)) {
+			problems.push(
+				`NOT A TEST FILE ${pair}: ${file} is not a test file vitest collects`,
+			);
 			continue;
 		}
 		// The title counts only on a test a run reaches (#4393's shared walker):
@@ -244,6 +247,12 @@ describe("strategy marker pair coverage (#3491)", () => {
 				`describe.skipIf(true)("s", () => {\n\tit(${body});\n});\n`,
 				`if (process.pid < 0) it(${body});\n`,
 				`const never = () => it(${body});\n`,
+				// #4399 verify r2 F2 and Q5: an options skip, unread options, a
+				// body skip (state-space rows 7 to 10).
+				`it("${title}", { skip: true }, () => { "php"; });\n`,
+				`describe("s", { skip: true }, () => {\n\tit(${body});\n});\n`,
+				`it("${title}", opts, () => { "php"; });\n`,
+				`it("${title}", (ctx) => { ctx.skip(); "php"; });\n`,
 			])
 				expect(auditPairCoverage([pair], tests, {}, reads(source))).toEqual([
 					`NO TEST ${pair}: ${file} has no test titled "${title}"`,
@@ -257,7 +266,19 @@ describe("strategy marker pair coverage (#3491)", () => {
 					(name) => (name === support ? `it(${body});\n` : null),
 				),
 			).toEqual([
-				`NOT A TEST FILE ${pair}: ${support} is not a *.test.ts file`,
+				`NOT A TEST FILE ${pair}: ${support} is not a test file vitest collects`,
+			]);
+			// #4399 verify r2 F3: vitest.config.ts excludes tests/fixtures/**.
+			const excluded = "tests/fixtures/x.test.ts";
+			expect(
+				auditPairCoverage(
+					[pair],
+					{ [pair]: { file: excluded, title } },
+					{},
+					(name) => (name === excluded ? `it(${body});\n` : null),
+				),
+			).toEqual([
+				`NOT A TEST FILE ${pair}: ${excluded} is not a test file vitest collects`,
 			]);
 		});
 

@@ -23,8 +23,9 @@
  *   behaviour, a mutant-only design, or a switch the model reads only under
  *   another switch's old value. Each group carries its reason.
  * - `deferred`: a code choice with no pin yet, with its reason. A family in
- *   `FULLY_PINNED` may defer nothing, and the count of deferred members may
- *   only fall (`DEFERRED_CEILING`).
+ *   `FULLY_PINNED` may defer nothing, and the counts of deferred and
+ *   notCodeChoice members are pinned exactly (`DEFERRED_COUNT`,
+ *   `NOT_CODE_CHOICE_COUNT`).
  *
  * The population is every name a family's configs assign in a `CONSTANTS`
  * section, `=` or `<-` (the `<-` form covers a module switch such as
@@ -45,15 +46,16 @@
  * - A pin's evidence is a test title, which is itself a string literal, so
  *   the per-needle policy is positional and liveness-checked: the title
  *   counts only as the first argument of an `it(...)` / `test(...)` call (or
- *   of the call an `it.each(...)` returns) that a run reaches, in a
- *   `*.test.ts` file under `tests/`. `testDeclarations`
+ *   of the call an `it.each(...)` returns) that a run reaches, in a file
+ *   vitest's own config collects (`vitestCollects`). `testDeclarations`
  *   (tests/support/sweep-kit.ts) decides that: a comment is not a call, and
- *   a skipped, todo, conditional (`skipIf`/`runIf`) or `fails` test, a test
- *   in a skipped suite, a dead branch or an uncalled function, and an
- *   `.only` file's siblings are absent. The title is compared as written in
+ *   a skipped, todo, conditional (`skipIf`/`runIf`) or `fails` test (by
+ *   chain, by options object, or by unread options), a test whose body calls
+ *   a skip, a test in such a suite, a dead branch or an uncalled function,
+ *   and an `.only` file's siblings are absent. The title is compared as written in
  *   source: escape sequences unexpanded and `${...}` placeholders verbatim.
- *   Not seen: a `ctx.skip()` inside the body, and a parametrized pin whose
- *   pinned row was removed from its table.
+ *   Not seen: an empty `each` table, an early `return` in a suite, and a
+ *   parametrized pin whose pinned row was removed from its table.
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -61,17 +63,21 @@ import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { parseModelHeader } from "../../scripts/check-tla-models.mjs";
 import { assertNonEmptyScan, testDeclarations } from "../support/sweep-kit.js";
+import { vitestCollects } from "../support/vitest-collection.js";
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "../..");
 const REGISTRY_PATH = "formal/switch-pins.json";
 /** Families whose every code-choice constant has a pin (#4393 acceptance). */
 const FULLY_PINNED = ["read-guard"];
 /**
- * Shrink-only: the deferred members across all families. A new code choice
- * must not land straight in `deferred`; lower this as pins land, never raise
- * it (#4399 review).
+ * The deferred and notCodeChoice members across all families, pinned exactly
+ * (#4399 verify r2 F4). A ceiling let a freed slot be reused, and let a member
+ * move from `deferred` to `notCodeChoice` while a new code choice took its
+ * place. Every change to either count is now a visible edit here: lower
+ * `DEFERRED_COUNT` as pins land, and a reviewer judges every rise of either.
  */
-const DEFERRED_CEILING = 173;
+const DEFERRED_COUNT = 173;
+const NOT_CODE_CHOICE_COUNT = 205;
 
 interface PinTest {
 	test: string;
@@ -385,9 +391,9 @@ export function auditSwitchPins(root: string, registry: Registry): string[] {
 					);
 			}
 			for (const { test, title } of [pin, ...(pin.also ?? [])]) {
-				if (!/^tests\/.+\.test\.ts$/.test(test)) {
+				if (!vitestCollects(test)) {
 					errors.push(
-						`${label}: pin test ${test} is not a *.test.ts file under tests/`,
+						`${label}: pin test ${test} is not a test file vitest collects`,
 					);
 					continue;
 				}
@@ -432,10 +438,12 @@ describe("TLA+ switch pins (#4393, recurrence #4387)", () => {
 			Object.keys(registry.families["read-guard"]?.pins ?? {}).length,
 		);
 		expect(auditSwitchPins(REPO_ROOT, registry)).toEqual([]);
-		const deferred = Object.values(registry.families).flatMap((entry) =>
-			(entry.deferred ?? []).flatMap((group) => group.constants),
-		);
-		expect(deferred.length).toBeLessThanOrEqual(DEFERRED_CEILING);
+		const members = (kind: "deferred" | "notCodeChoice") =>
+			Object.values(registry.families).flatMap((entry) =>
+				(entry[kind] ?? []).flatMap((group) => group.constants),
+			).length;
+		expect(members("deferred")).toBe(DEFERRED_COUNT);
+		expect(members("notCodeChoice")).toBe(NOT_CODE_CHOICE_COUNT);
 	});
 
 	describe("on a fixture tree", () => {
@@ -483,11 +491,32 @@ describe("TLA+ switch pins (#4393, recurrence #4387)", () => {
 			'const never = () => it("a pin in an uncalled function", () => {});',
 			'it.todo("a todo pin");',
 			'test.skip("a skipped test pin", () => {});',
+			'it("an options-skipped pin", { skip: true }, () => {});',
+			'it("an options-todo pin", { todo: true }, () => {});',
+			'it("an options-fails pin", { fails: true }, () => {});',
+			"const opts = { skip: true };",
+			'it("a pin with unread options", opts, () => {});',
+			'it("a pin with a timeout option", { timeout: 5, skip: false }, () => {});',
+			'it("a pin with a timeout", () => {}, 30_000);',
+			'describe("an options-skipped suite", { skip: true }, () => {',
+			'\tit("a pin in an options-skipped suite", () => {});',
+			"});",
+			'it("a pin that skips itself", (ctx) => {',
+			"\tctx.skip();",
+			"});",
+			'it("a pin that skips by its parameter", ({ skip }) => {',
+			"\tskip();",
+			"});",
 		].join("\n");
 		/** A file with an `.only`: its siblings never run. */
 		const ONLY = [
 			'it.only("the only test", () => {});',
 			'it("a sibling of an only", () => {});',
+		].join("\n");
+		/** The same through an options object. */
+		const OPTIONS_ONLY = [
+			'it("the options-only test", { only: true }, () => {});',
+			'it("a sibling of an options only", () => {});',
 		].join("\n");
 		/** A support module: vitest never collects it, whatever it declares. */
 		const SUPPORT = 'it("a support pin", () => {});';
@@ -505,6 +534,16 @@ describe("TLA+ switch pins (#4393, recurrence #4387)", () => {
 			fs.writeFileSync(path.join(root, "tests", "p.test.ts"), TEST);
 			fs.writeFileSync(path.join(root, "tests", "only.test.ts"), ONLY);
 			fs.writeFileSync(path.join(root, "tests", "support.ts"), SUPPORT);
+			fs.writeFileSync(
+				path.join(root, "tests", "options-only.test.ts"),
+				OPTIONS_ONLY,
+			);
+			// vitest.config.ts excludes tests/fixtures/**, so this never runs.
+			fs.mkdirSync(path.join(root, "tests", "fixtures"));
+			fs.writeFileSync(
+				path.join(root, "tests", "fixtures", "f.test.ts"),
+				SUPPORT,
+			);
 			return root;
 		}
 		const PASS = cfg("pass", '    Mode = "on"\n    Size = 2');
@@ -648,7 +687,53 @@ describe("TLA+ switch pins (#4393, recurrence #4387)", () => {
 			expect(
 				auditSwitchPins(fixture, pinAt("tests/support.ts", "a support pin")),
 			).toEqual([
-				"fam.Inject: pin test tests/support.ts is not a *.test.ts file under tests/",
+				"fam.Inject: pin test tests/support.ts is not a test file vitest collects",
+			]);
+		});
+
+		it("does not let an options-object skip, unread options, a body skip, an options .only's sibling or an excluded file name a pin", () => {
+			// Recurrence: #4399 verify r2 F2, F3 and Q5. Each form left both
+			// gates green while vitest skipped the test or never collected the
+			// file (state-space rows 7 to 10, 12 and 14).
+			const fixture = tree({ "Pass.cfg": PASS });
+			const pinAt = (test: string, title: string) =>
+				registry({ ...GOOD, Inject: { ...GOOD.Inject, test, title } });
+			for (const title of [
+				"a pin with a timeout option",
+				"a pin with a timeout",
+			])
+				expect(
+					auditSwitchPins(fixture, pinAt("tests/p.test.ts", title)),
+				).toEqual([]);
+			for (const title of [
+				"an options-skipped pin",
+				"an options-todo pin",
+				"an options-fails pin",
+				"a pin with unread options",
+				"a pin in an options-skipped suite",
+				"a pin that skips itself",
+				"a pin that skips by its parameter",
+			])
+				expect(
+					auditSwitchPins(fixture, pinAt("tests/p.test.ts", title)),
+				).toEqual([
+					`fam.Inject: tests/p.test.ts declares no test titled "${title}"`,
+				]);
+			expect(
+				auditSwitchPins(
+					fixture,
+					pinAt("tests/options-only.test.ts", "a sibling of an options only"),
+				),
+			).toEqual([
+				'fam.Inject: tests/options-only.test.ts declares no test titled "a sibling of an options only"',
+			]);
+			expect(
+				auditSwitchPins(
+					fixture,
+					pinAt("tests/fixtures/f.test.ts", "a support pin"),
+				),
+			).toEqual([
+				"fam.Inject: pin test tests/fixtures/f.test.ts is not a test file vitest collects",
 			]);
 		});
 
