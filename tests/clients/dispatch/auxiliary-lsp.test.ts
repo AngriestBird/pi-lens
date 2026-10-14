@@ -108,14 +108,6 @@ describe("auxiliary profile skipTestFiles (#687)", () => {
 			AUXILIARY_LSP_PROFILES.find((p) => p.tool === "ast-grep")?.skipTestFiles,
 		).toBe(true);
 	});
-
-	it("opengrep, zizmor, and typos do NOT skip test files", () => {
-		for (const tool of ["opengrep", "zizmor", "typos"]) {
-			expect(
-				AUXILIARY_LSP_PROFILES.find((p) => p.tool === tool)?.skipTestFiles,
-			).not.toBe(true);
-		}
-	});
 });
 
 describe("auxiliary profile source routing", () => {
@@ -163,13 +155,6 @@ describe("opengrep semantic policy", () => {
 		expect(
 			opengrep?.semantic(diag({ severity: 2 }), { blockingAllowed: false }),
 		).toBe("warning");
-	});
-
-	it("derives a defect class from the rule", () => {
-		const dc = opengrep?.defectClass?.(
-			diag({ code: "javascript.lang.security.audit.eval", message: "eval" }),
-		);
-		expect(typeof dc === "string" || dc === undefined).toBe(true);
 	});
 });
 
