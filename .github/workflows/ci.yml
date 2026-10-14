@@ -1082,8 +1082,9 @@ jobs:
       # manufacture their fixture with a case-variant symlink on the
       # case-sensitive ubuntu lane; here they exercise the real aliasing, which
       # is where #1024 was actually live. No extra install cost: `npm install`
-      # above already ran `prepare`, so devDependencies and the core grammars
-      # the vitest globalSetup pre-warms are already present.
+      # above already ran `prepare`, so devDependencies and the 12 core grammars
+      # are present; the vitest globalSetup fetches the other grammars once
+      # before the files run (#4342).
       # ADVISORY for now (`continue-on-error`), like the Windows Vitest subset
       # above: this job's install/pack/smoke steps gate, and a macOS-only unit
       # flake must not block an unrelated PR on its first outings. Promotion to
