@@ -21,6 +21,7 @@ export interface CensusRecord {
 	files: string[];
 	seed: Seed;
 	verdict: "ok" | "red" | "timeout" | "uncollected";
+	at?: number;
 	ms: number;
 	members: Member[];
 	tail?: string;
@@ -39,6 +40,7 @@ export declare function planCensus(
 ): CensusRun[];
 export declare function extractMembers(output: string): Member[];
 export declare function loadRecords(dir: string): CensusRecord[];
+export declare function isUnproven(record: CensusRecord): boolean;
 export declare function runCensus(
 	plan: CensusRun[],
 	options: {
@@ -70,6 +72,7 @@ export declare function parseArgs(argv: string[]): {
 	files: string[] | null;
 	confirm: boolean;
 	report: boolean;
+	redoUnproven: boolean;
 	ratchet: string;
 	cwd: string;
 };

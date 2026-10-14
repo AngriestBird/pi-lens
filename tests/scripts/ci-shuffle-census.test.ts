@@ -312,6 +312,64 @@ describe("runCensus", () => {
 	});
 });
 
+describe("redo-unproven", () => {
+	const A = "tests/a.test.ts";
+	const writeRecords = (dir: string, records: CensusRecord[]) =>
+		fs.writeFileSync(
+			path.join(dir, "census.0-of-1.jsonl"),
+			`${records.map((r) => JSON.stringify(r)).join("\n")}\n`,
+		);
+
+	// Recurrence: #4405's full pass lost one alone start to a stale-build guard
+	// another part tripped; without a redo the census stays "unproven" forever.
+	it("reruns the starts whose record proved nothing, and only those", () => {
+		const dir = scratchDir("redo");
+		const out = path.join(dir, "out");
+		fs.mkdirSync(out);
+		const files = [A, "tests/b.test.ts"];
+		const planned = planCensus(files, { seeds: [], chunk: 2 });
+		const [first, second] = planned.map((start) =>
+			record("alone", start.files, [], {
+				key: `npx vitest run ${start.files[0]}`,
+				verdict: start.files[0] === A ? "uncollected" : "ok",
+				at: 1,
+			}),
+		) as [CensusRecord, CensusRecord];
+		writeRecords(out, [first, second]);
+		const starts: string[] = [];
+		const exec: ExecVitest = (start) => {
+			starts.push(start.files.join(","));
+			return { status: 0, output: "", timedOut: false };
+		};
+		const args = ["--out", out, "--cwd", dir, "--files", files.join(",")];
+		// Without the flag only the never-run shuffled chunk starts.
+		expect(run([...args, "--seeds", "202"], { exec, log: quiet })).toBe(0);
+		expect(starts).toEqual([files.join(",")]);
+		starts.length = 0;
+		expect(
+			run([...args, "--seeds", "202", "--redo-unproven"], { exec, log: quiet }),
+		).toBe(0);
+		expect(starts).toEqual([A]);
+	});
+
+	// Recurrence: two records for one start (the unproven one and its redo)
+	// both reaching the judge would read the redo's green as a second start
+	// and the old uncollected as still open.
+	it("loads the latest record per start", () => {
+		const dir = scratchDir("latest");
+		writeRecords(dir, [
+			record(202, [A], [], { key: "k", verdict: "uncollected", at: 1 }),
+			record(202, [A], [], { key: "k", verdict: "ok", at: 2 }),
+			record(424, [A], [], { key: "j", verdict: "ok", at: 1 }),
+		]);
+		expect(
+			loadRecords(dir)
+				.map((r) => `${r.key}:${r.verdict}`)
+				.sort(),
+		).toEqual(["j:ok", "k:ok"]);
+	});
+});
+
 describe("judgeCensus", () => {
 	const A = "tests/a.test.ts";
 	const B = "tests/b.test.ts";

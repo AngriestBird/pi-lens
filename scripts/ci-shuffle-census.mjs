@@ -5,6 +5,7 @@
  *   node scripts/ci-shuffle-census.mjs --out <dir> [--part k/n] [--chunk 25]
  *       [--budget-ms N] [--seeds 202,424,606] [--files a.test.ts,b.test.ts]
  *   node scripts/ci-shuffle-census.mjs --out <dir> --confirm [--part k/n] [--budget-ms N]
+ *   node scripts/ci-shuffle-census.mjs --out <dir> --redo-unproven [--part k/n] [--budget-ms N]
  *   node scripts/ci-shuffle-census.mjs --out <dir> --report [--ratchet <file>]
  *
  * The whole-tree twin of `ci-shuffle-changed-tests.mjs` (#4397). That job runs
@@ -31,6 +32,11 @@
  * (`--confirm`) before it counts: a chunk start can red from the load of its
  * neighbours, and a reproducible `vitest run <file> --sequence.seed=<seed>`
  * is what a fixer needs.
+ *
+ * The parts share one worktree, so a test that touches a source file can trip
+ * another part's stale-build guard in vitest's global setup (seen once in 1624
+ * starts, #4405). That start is `uncollected`, never green; `--redo-unproven`
+ * runs the starts whose record proved nothing again, and the later record wins.
  *
  * `--report` reads the records and diffs the confirmed members against the
  * ratchet (`scripts/shuffle-census-ratchet.json`): a member the ratchet does
@@ -156,17 +162,36 @@ export function extractMembers(output) {
 	return [...seen.values()];
 }
 
-/** @param {string} dir */
+/**
+ * Every recorded start, the latest record per start (`--redo-unproven` appends
+ * a second record for a start whose first one proved nothing).
+ *
+ * @param {string} dir
+ */
 export function loadRecords(dir) {
 	if (!existsSync(dir)) return [];
-	return readdirSync(dir)
-		.filter((name) => /^census\.[\w-]+\.jsonl$/.test(name))
-		.flatMap((name) =>
-			readFileSync(path.join(dir, name), "utf8")
-				.split("\n")
-				.filter(Boolean)
-				.map((line) => JSON.parse(line)),
-		);
+	const latest = new Map();
+	for (const name of readdirSync(dir).filter((entry) =>
+		/^census\.[\w-]+\.jsonl$/.test(entry),
+	))
+		for (const line of readFileSync(path.join(dir, name), "utf8")
+			.split("\n")
+			.filter(Boolean)) {
+			const record = JSON.parse(line);
+			const kept = latest.get(record.key);
+			if (kept === undefined || (record.at ?? 0) >= (kept.at ?? 0))
+				latest.set(record.key, record);
+		}
+	return [...latest.values()];
+}
+
+/** A start that finished without proving anything about its files. */
+export function isUnproven(record) {
+	return (
+		record.verdict === "timeout" ||
+		record.verdict === "uncollected" ||
+		(record.verdict === "red" && record.members.length === 0)
+	);
 }
 
 /**
@@ -228,6 +253,7 @@ export function runCensus(plan, options) {
 			files: entry.files,
 			seed: seedOf(entry),
 			verdict: result.verdict,
+			at: Date.now(),
 			ms: Math.round(result.ms),
 			members,
 			tail:
@@ -363,13 +389,19 @@ export function parseArgs(argv) {
 		files: null,
 		confirm: false,
 		report: false,
+		redoUnproven: false,
 		ratchet: RATCHET_PATH,
 		cwd: process.cwd(),
 	};
 	for (let index = 0; index < argv.length; index += 1) {
 		const flag = argv[index];
-		if (flag === "--confirm" || flag === "--report") {
-			options[flag.slice(2)] = true;
+		if (
+			flag === "--confirm" ||
+			flag === "--report" ||
+			flag === "--redo-unproven"
+		) {
+			options[flag === "--redo-unproven" ? "redoUnproven" : flag.slice(2)] =
+				true;
 			continue;
 		}
 		const value = argv[++index];
@@ -439,7 +471,11 @@ export function run(argv, io = {}) {
 				seeds: options.seeds,
 				chunk: options.chunk,
 			});
-	const done = new Set(records.map((record) => record.key));
+	const done = new Set(
+		records
+			.filter((record) => !(options.redoUnproven && isUnproven(record)))
+			.map((record) => record.key),
+	);
 	const { ran, pending } = runCensus(mine(plan), {
 		cwd: options.cwd,
 		outFile: path.join(options.out, `census.${part}-of-${parts}.jsonl`),
