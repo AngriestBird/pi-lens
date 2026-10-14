@@ -1,3 +1,40 @@
+const ACCEPT = "application/vnd.github+json";
+const API_VERSION = "2022-11-28";
+
+/**
+ * The one place a GitHub REST request header block is built (#4427): the
+ * Accept and API-version pair, plus `Authorization: Bearer` when a token is
+ * given. A caller with no token (the anonymous action-pin reads) gets no
+ * Authorization header. `tests/config/github-bearer-ratchet.test.ts` reds on a
+ * `Bearer` header built anywhere else in `scripts/`.
+ *
+ * @param {string | undefined} token
+ * @returns {Record<string, string>}
+ */
+export function githubHeaders(token) {
+	return {
+		Accept: ACCEPT,
+		...(token ? { Authorization: `Bearer ${token}` } : {}),
+		"X-GitHub-Api-Version": API_VERSION,
+	};
+}
+
+/**
+ * A fetch that adds the token to each request and keeps the caller's own
+ * headers (the callers send their own `accept`). Reads the global `fetch` per
+ * call so a test that stubs it after construction is still seen.
+ *
+ * @param {string} token
+ * @returns {(url: string, init?: RequestInit) => Promise<Response>}
+ */
+export function githubFetcher(token) {
+	return (url, init) =>
+		fetch(url, {
+			...init,
+			headers: { ...init?.headers, authorization: `Bearer ${token}` },
+		});
+}
+
 /**
  * The one GitHub REST read the PR-metadata scripts share (#4371): the
  * GITHUB_TOKEN / GITHUB_API_URL / GITHUB_REPOSITORY env triple, a 10 s timeout
@@ -18,10 +55,6 @@ export async function githubGet(path, fetchImpl) {
 		throw new Error("GITHUB_API_URL or GITHUB_REPOSITORY is missing");
 	return fetchImpl(`${apiUrl}/repos/${repository}${path}`, {
 		signal: AbortSignal.timeout(10_000),
-		headers: {
-			Accept: "application/vnd.github+json",
-			Authorization: `Bearer ${token}`,
-			"X-GitHub-Api-Version": "2022-11-28",
-		},
+		headers: githubHeaders(token),
 	});
 }

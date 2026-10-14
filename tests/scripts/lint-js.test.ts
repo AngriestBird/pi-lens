@@ -304,6 +304,8 @@ describe("lint:js:promises (#4402 — floating promises in shipped code)", () =>
 				"\t}",
 				"});",
 			],
+			"no-floating-promises",
+			(text: string) => text.replace(/\t\t(persist|save)\(/, "\t\tvoid $1("),
 		],
 		[
 			"a sync function returning a promise, called un-voided",
@@ -319,6 +321,22 @@ describe("lint:js:promises (#4402 — floating promises in shipped code)", () =>
 				"\t}",
 				"}",
 			],
+			"no-floating-promises",
+			(text: string) => text.replace(/\t\t(persist|save)\(/, "\t\tvoid $1("),
+		],
+		[
+			// #4428 step 1 (#4411 review shape): an `await` of a value that is not
+			// a thenable reads as if it waited, and hides a call that lost its
+			// promise (a sync refactor that left the `await` behind).
+			"an await of a value that is not a thenable",
+			[
+				"declare function load(): number;",
+				"export async function handle(): Promise<number> {",
+				"\treturn await load();",
+				"}",
+			],
+			"await-thenable",
+			(text: string) => text.replace("return await load()", "return load()"),
 		],
 	] as const;
 
@@ -338,14 +356,15 @@ describe("lint:js:promises (#4402 — floating promises in shipped code)", () =>
 		expect(script).toMatch(
 			/^node scripts\/lint-js-advisory\.mjs\s+--deny-warnings\s+--format unix\s+--type-aware/,
 		);
+		expect(script).toContain("-D typescript/await-thenable");
 		expect(script).toContain("-D typescript/no-floating-promises");
 		expect(script).toContain("-D typescript/no-misused-promises");
 		expect(script.endsWith(` ${ROOTS}`)).toBe(true);
 	});
 
 	it.each(PROBES)(
-		"the real required command fails on %s, and passes once it is voided",
-		(_label, lines) => {
+		"the real required command fails on %s, and passes once it is repaired",
+		(_label, lines, rule, repair) => {
 			const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-lint-js-4402-");
 			const fixture = path.join(tmpDir, "clients", "probe.ts");
 			fs.mkdirSync(path.dirname(fixture), { recursive: true });
@@ -388,13 +407,8 @@ describe("lint:js:promises (#4402 — floating promises in shipped code)", () =>
 				fs.writeFileSync(fixture, `${lines.join("\n")}\n`);
 				const planted = run();
 				expect(planted.status, planted.stdout + planted.stderr).not.toBe(0);
-				expect(planted.stdout + planted.stderr).toContain(
-					"no-floating-promises",
-				);
-				fs.writeFileSync(
-					fixture,
-					`${lines.join("\n").replace(/\t\t(persist|save)\(/, "\t\tvoid $1(")}\n`,
-				);
+				expect(planted.stdout + planted.stderr).toContain(rule);
+				fs.writeFileSync(fixture, `${repair(lines.join("\n"))}\n`);
 				const voided = run();
 				expect(voided.status, voided.stdout + voided.stderr).toBe(0);
 			} finally {
