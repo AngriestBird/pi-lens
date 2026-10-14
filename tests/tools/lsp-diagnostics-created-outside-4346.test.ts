@@ -346,6 +346,9 @@ describe("a workspace edit's resource operations (#4346)", () => {
 		"announces an applied create when a later operation fails",
 		async () => {
 			const { applyWorkspaceEdit } = await import("../../clients/lsp/edits.js");
+			// #4397: a Created event reaches a RUNNING client only. A sibling case
+			// used to have started it; run first, no client existed to hear it.
+			await roundTrip();
 			const locked = path.join(workspace, "locked");
 			fs.mkdirSync(locked);
 			const target = path.join(locked, "target.ts");

@@ -629,6 +629,13 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the exact local CLI, shallow checkout, `git check-ignore` (#2904) and the gh label read behind `--lint-local` (#4288, PATH stub) are the subjects; an in-process double cannot prove any of those command boundaries",
 	},
+	// 2026-10-14 (#4397): the changed-test shuffle job's exit code is the contract;
+	// only a real vitest start reorders the cases of a fixture that shares state.
+	"real-process-spawn:scripts/ci-shuffle-changed-tests-spawn.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the job's exit code is the contract; an injected exec restates the flags the script builds instead of proving real vitest reorders and reds a file that shares state",
+	},
 	// 2026-10-07 (#4072 review F2): the executable CLI's exit status is the
 	// contract; an in-process main() call cannot prove the entry-point boundary.
 	"real-process-spawn:scripts/ci-test-diff.test.ts": {
@@ -1784,6 +1791,15 @@ describe("flake-shape scan — elapsed-time-assertion", () => {
 });
 
 describe("flake-shape scan — raw-timer-wait", () => {
+	// #4397 (recurrence #3514, #4385): the two (#2563) cases below read the
+	// whole-tree scan. Only the `flake-shape ratchet (#2547)` describe warmed it,
+	// so run first (a shuffle, or `-t`) they billed the ~12 s cold scan to the 5 s
+	// default. This describe pays it once, under the walk's own budget.
+	beforeAll(async () => {
+		await countsByDetector("raw-timer-wait");
+		await countsByDetector("real-process-spawn");
+	}, WALK_TIMEOUT_MS);
+
 	it("ATTACK named spelling: raw setTimeout wait via a Promise", () => {
 		const source = [
 			'it("waits a bit", async () => {',

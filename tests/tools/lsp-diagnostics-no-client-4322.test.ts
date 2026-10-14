@@ -250,8 +250,13 @@ describe("a JSON file with no language server and no auxiliary (#4322)", () => {
 		// to answer, so its outcome stays "unsupported".
 		const plain = path.join(workspace, "notes.unknownext");
 		fs.writeFileSync(plain, "plain text\n");
+		// #4397: this case writes the JSON file it expects "unavailable" for.
+		// `secondProbe` only exists once the batch case above has run; a
+		// shuffled order read a missing file and got "failed".
+		const unavailable = path.join(workspace, "unavailable.json");
+		fs.writeFileSync(unavailable, '{"unavailable": }\n');
 
-		const result = await diagnose("all", { paths: [plain, secondProbe] });
+		const result = await diagnose("all", { paths: [plain, unavailable] });
 
 		const outcomes = result.details.outcomes as Array<{ outcome?: string }>;
 		expect(outcomes.map((outcome) => outcome.outcome)).toEqual([

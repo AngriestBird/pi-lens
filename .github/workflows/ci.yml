@@ -373,6 +373,26 @@ jobs:
         # pre-push budget (#3426 H3432-1); this job is their CI row.
         run: node scripts/pre-push-targeted-tests.mjs --skip-build --include-ci-only
 
+      # #4397: a test file that depends on case order or on a sibling file
+      # passes in CI's file order and reds on a reorder or a shard split
+      # (#4390, #4391). Run the test files this PR adds or changes under two
+      # fixed shuffle seeds, and each alone. Advisory like the rest of this job:
+      # `continue-on-error` above keeps a red from gating, and the step still
+      # reds so the job row shows it. Flip plan: when 20 consecutive PR runs
+      # show no false red, move this step to its own job named
+      # `Changed tests shuffled` and add it to the required set. The script
+      # bounds itself to 6 min (BUDGET_MS), 2 min under this step's cap; the
+      # targeted run before it takes ~4 min, so the job stays under its 15.
+      # The SHAs reach the script through `env`, never the `run:` text.
+      - name: Changed test files, alone and shuffled
+        if: ${{ !cancelled() }}
+        timeout-minutes: 8
+        env:
+          PI_LENS_TEST_TIMEOUT_SCALE: '3'
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node scripts/ci-shuffle-changed-tests.mjs --base "$BASE_SHA" --head "$HEAD_SHA"
+
   # #3753: the suite runs as parallel `vitest --shard=k/N` jobs, N being the
   # matrix length (`strategy.job-total`, so the count has ONE source). This job
   # id stays `test` (the matrix-shard aggregate `needs:` it, and a matrix
