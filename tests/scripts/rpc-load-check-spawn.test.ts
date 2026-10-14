@@ -143,6 +143,34 @@ describe.skipIf(process.platform === "win32")(
 			);
 			expect(result.code).toBe(2);
 		});
+		// Recurrence: #4441 review F2. The bare-tsc refusal (#4414) logs about a
+		// second after the turn ends. A check that reads the logs a fixed second
+		// after agent_end passed published 4.4.3 whenever the tsc probe took 2 s
+		// or more. The fake logs the refusal 2.5 s after agent_end.
+		it("fails a TypeScript server refusal that logs seconds after the turn ends", async () => {
+			const result = await smoke("ts-late-refusal", [], 20_000);
+			expect(result.out).toContain(
+				"the TypeScript language server did not start",
+			);
+			expect(result.out).toContain("project-local LSP binary refused");
+			expect(result.code).toBe(1);
+		});
+
+		it("waits for a TypeScript server that starts seconds after the turn ends", async () => {
+			const result = await smoke("ts-late-start", [], 20_000);
+			expect(result.out).toContain("PASS");
+			expect(result.code).toBe(0);
+		});
+
+		it("times out (exit 2) when the TypeScript server neither starts nor fails", async () => {
+			// A smoke that never saw the server start proves nothing about the LSP leg.
+			const result = await smoke("ts-never", [], 2000);
+			expect(result.out).toContain(
+				"TIMEOUT waiting for the TypeScript language server to start or fail",
+			);
+			expect(result.code).toBe(2);
+		});
+
 		it("fails, naming it, when the smoke project is not trusted (the LSP leg would be dark)", async () => {
 			// Recurrence: #4409 round 1. An untrusted CI project refused the LSP
 			// spawn; the allow-listed refusal then hid that the leg never ran.

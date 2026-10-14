@@ -12,6 +12,29 @@ const mode = process.env.FAKE_PI_MODE ?? "clean";
 const lensHome = process.env.PI_LENS_HOME;
 const append = (file, record) =>
 	fs.appendFileSync(path.join(lensHome, file), `${JSON.stringify(record)}\n`);
+const sessionLog = (line) =>
+	fs.appendFileSync(
+		path.join(lensHome, "sessionstart.log"),
+		`[2026-10-14T00:00:00.000Z] ${line}\n`,
+	);
+// The TypeScript server's terminal states, as pi-lens logs them (#4401 review:
+// the real refusal lands about a second after the turn ends).
+const tsStarted = () => {
+	sessionLog("lsp spawn typescript: success source=managed (1800ms)");
+	append("latency.log", {
+		type: "phase",
+		phase: "lsp_server_spawned",
+		metadata: { serverId: "typescript", source: "managed" },
+	});
+};
+const tsRefused = () => {
+	append("extension.log", {
+		level: "warn",
+		subsystem: "lsp-registry",
+		message: "project-local LSP binary refused: mark the project trusted in pi or upgrade pi",
+	});
+	sessionLog("lsp spawn typescript: unavailable (2288ms)");
+};
 const emit = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
 
 // Pi trusts the project only when its own setting says so (an RPC child has no
@@ -41,6 +64,7 @@ if (installFails) {
 		phase: "lsp_launch_candidate_failed",
 		metadata: { tool: "deno" },
 	});
+	sessionLog("lsp spawn typescript: unavailable (900ms)");
 }
 
 setTimeout(() => {
@@ -81,6 +105,12 @@ setTimeout(() => {
 			},
 		});
 	}
+	if (
+		!installFails &&
+		!["ts-late-refusal", "ts-late-start", "ts-never"].includes(mode)
+	) {
+		tsStarted();
+	}
 	if (mode === "host-exit") process.exit(1);
 }, 300);
 
@@ -117,5 +147,7 @@ readline.createInterface({ input: process.stdin }).on("line", async (line) => {
 				},
 			],
 		});
+		if (mode === "ts-late-refusal") setTimeout(tsRefused, 2500);
+		if (mode === "ts-late-start") setTimeout(tsStarted, 2500);
 	}
 });
