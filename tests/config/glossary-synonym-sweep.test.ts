@@ -968,7 +968,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/lombok.ts": 14,
 		// #4299: 121 -> 124; OS path namespace calls for canonical compiler
 		// validation replace the wrapper-relative guess. No path-key owner changes.
-		"clients/lsp/server.ts": 124,
+		// 124 -> 125 (#4414): the Windows npm-global layout adds one `path.join` to
+		// `typescriptDirsForTsc`, the list of package dirs beside a resolved `tsc`.
+		"clients/lsp/server.ts": 125,
 		"clients/lsp/session-roots.ts": 6,
 		"clients/lsp/workspace-diagnostics-cache.ts": 13,
 		// 6 -> 5 (#3643): removed the obsolete ring path-comparison branch;

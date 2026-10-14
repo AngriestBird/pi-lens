@@ -1275,7 +1275,7 @@ describe("lsp server policy", () => {
 	// adjacent package layout. Repairing there would force-reinstall over a
 	// healthy global 5.x. PATH is pinned to an empty directory: since #4414 a
 	// bare name that DOES resolve is read like any absolute hit (covered in
-	// tsserver-bare-tsc-path.test.ts), so the host's PATH must not decide this.
+	// tsserver-project-trust.test.ts), so the host's PATH must not decide this.
 	it("skips the classic TypeScript repair for an unresolvable bare PATH compiler", async () => {
 		const { TypeScriptServer, _resetClassicTsRepairForTests } =
 			await import("../../../clients/lsp/server.js");

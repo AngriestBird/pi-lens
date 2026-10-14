@@ -2080,13 +2080,16 @@ export function _resetClassicTsRepairForTests(): void {
 /**
  * Directories that may hold the TypeScript package next to a resolved `tsc`
  * binary: `<bin>/../typescript` (npm-global layout) and
- * `<bin>/../../typescript` (managed `node_modules/.bin` layout).
+ * `<bin>/../../typescript` (managed `node_modules/.bin` layout), and
+ * `<bin>/node_modules/typescript` (Windows npm-global layout).
  */
 function typescriptDirsForTsc(tscPath: string): string[] {
 	const binDir = path.dirname(tscPath);
 	return [
 		path.join(binDir, "..", "typescript"),
 		path.join(binDir, "..", "..", "typescript"),
+		// Windows npm-global: `<prefix>/tsc.cmd` beside `<prefix>/node_modules`.
+		path.join(binDir, "node_modules", "typescript"),
 	];
 }
 
@@ -2130,6 +2133,14 @@ async function typescriptVersionForTsc(
 		return { version, major };
 	}
 	return undefined;
+}
+
+/** True when a `typescript` package directory sits next to the resolved `tsc`. */
+async function hasTypescriptPackageDir(tscPath: string): Promise<boolean> {
+	for (const dir of typescriptDirsForTsc(tscPath)) {
+		if ((await stat(dir).catch(() => undefined))?.isDirectory()) return true;
+	}
+	return false;
 }
 
 /**
@@ -2260,19 +2271,24 @@ async function findTsserverPath(
 		return discoveredTsserver;
 	}
 
-	// Repair only a compiler we can prove is TypeScript 7+. TypeScript 7 dropped
-	// lib/tsserver.js, so the classic wrapper cannot start against it. Any other
-	// version — or a version we cannot read — is left
-	// alone rather than force-reinstalled.
+	// Reinstall only for a compiler we can prove cannot serve the classic
+	// wrapper: TypeScript 7+ (it dropped lib/tsserver.js), or a resolved file
+	// with no TypeScript package next to it at all (a volta, asdf or pnpm
+	// shim, #4414), which is the same as having no compiler. A package whose
+	// version we cannot read is left alone rather than force-reinstalled.
 	const discoveredVersion = await typescriptVersionForTsc(discoveredTsc);
-	if (!discoveredVersion || discoveredVersion.major < 7) return undefined;
+	const shim = !(await hasTypescriptPackageDir(discoveredTsc));
+	if (!shim && (!discoveredVersion || discoveredVersion.major < 7))
+		return undefined;
 
 	// An older managed tree took `latest` before the registry pinned the classic
 	// compiler. Reinstall the pinned version once so that tree self-heals,
 	// without deleting user or project-local TypeScript installations.
 	classicTsRepairState().attempted = true;
 	logSessionStart(
-		`lsp typescript: managed compiler resolved to TypeScript ${discoveredVersion.version}, which ships no tsserver.js; reinstalling pinned classic fallback`,
+		shim
+			? `lsp typescript: ${discoveredTsc} has no TypeScript package beside it; installing pinned classic fallback`
+			: `lsp typescript: managed compiler resolved to TypeScript ${discoveredVersion?.version}, which ships no tsserver.js; reinstalling pinned classic fallback`,
 	);
 	const repairedTsc = await absoluteCommandPath(
 		await ensureTool("typescript", {

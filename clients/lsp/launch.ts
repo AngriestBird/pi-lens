@@ -532,11 +532,10 @@ export function admitProjectSuppliedTsserver(
 /**
  * #4414: no admitted absolute compiler is a resolution miss, not a trust
  * refusal (a trusted project with only a PATH `tsc` was told to "mark the
- * project trusted"). One ledger row and one warn per generation, on their own
- * subject so a genuine trust refusal still gets its own notice.
+ * project trusted"). The ledger row is per root per generation. The warn shares
+ * `unknownProjectLocalNoticeGeneration` with the trust notice, so a generation
+ * prints one notice: a genuine trust refusal is never followed by this one.
  */
-let unresolvedCompilerNoticeGeneration = -1;
-
 function recordUnresolvedTypeScriptCompiler(
 	cwd: string,
 	trust: ReturnType<typeof getProjectTrustState>,
@@ -549,8 +548,8 @@ function recordUnresolvedTypeScriptCompiler(
 			"LSP not started: no absolute TypeScript compiler (tsserver.js) was resolved",
 		metadata: { field: "typescript-compiler", trust },
 	});
-	if (unresolvedCompilerNoticeGeneration === generation) return;
-	unresolvedCompilerNoticeGeneration = generation;
+	if (unknownProjectLocalNoticeGeneration === generation) return;
+	unknownProjectLocalNoticeGeneration = generation;
 	logExtension({
 		subsystem: "lsp-registry",
 		level: "warn",

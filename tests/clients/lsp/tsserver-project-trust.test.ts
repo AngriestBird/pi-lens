@@ -538,6 +538,51 @@ function warnMessages(): string[] {
 		.map((entry) => entry.message);
 }
 
+/** A pinned classic compiler the managed repair would install. */
+function mockManagedClassicRepair(tree: PathTscTree): { tsserver: string } {
+	const managed = path.join(path.dirname(tree.project), "managed");
+	const managedPkg = path.join(managed, "node_modules", "typescript");
+	fs.mkdirSync(path.join(managedPkg, "lib"), { recursive: true });
+	fs.mkdirSync(path.join(managed, "node_modules", ".bin"), { recursive: true });
+	fs.writeFileSync(
+		path.join(managedPkg, "package.json"),
+		`${JSON.stringify({ name: "typescript", version: "5.9.3" })}\n`,
+	);
+	fs.writeFileSync(path.join(managedPkg, "lib", "tsserver.js"), "// classic\n");
+	const managedTsc = path.join(managed, "node_modules", ".bin", "tsc");
+	fs.writeFileSync(managedTsc, "#!/usr/bin/env node\n");
+	const wrapper = path.join(
+		tree.project,
+		"node_modules",
+		".bin",
+		"typescript-language-server",
+	);
+	ensureToolMock.mockImplementation(
+		async (toolId: string, options?: { forceReinstall?: boolean }) => {
+			if (toolId === "typescript-language-server") return wrapper;
+			if (toolId !== "typescript") return undefined;
+			return options?.forceReinstall ? managedTsc : "tsc";
+		},
+	);
+	return {
+		tsserver: fs.realpathSync(path.join(managedPkg, "lib", "tsserver.js")),
+	};
+}
+
+function forceReinstallCalls() {
+	return ensureToolMock.mock.calls.filter(
+		(call) => call[1]?.forceReinstall === true,
+	);
+}
+
+async function spawnTrusted(project: string, allowInstall: boolean) {
+	const { setProjectTrustState } =
+		await import("../../../clients/project-trust.js");
+	setProjectTrustState("trusted");
+	const { TypeScriptServer } = await import("../../../clients/lsp/server.js");
+	return TypeScriptServer.spawn(project, { allowInstall });
+}
+
 // POSIX layout: a symlinked `bin/tsc` found by `which`; Windows resolves `.cmd`
 // shims through `where`, a different shape this fixture does not model.
 describe.skipIf(process.platform === "win32")(
@@ -640,52 +685,98 @@ describe.skipIf(process.platform === "win32")(
 			const tree = buildPathTscTree("ts7", false, "7.0.2");
 			process.chdir(tree.project);
 			process.env.PATH = `${tree.pathBin}${path.delimiter}${originalPath ?? ""}`;
-			const managed = path.join(path.dirname(tree.project), "managed");
-			const managedPkg = path.join(managed, "node_modules", "typescript");
-			fs.mkdirSync(path.join(managedPkg, "lib"), { recursive: true });
-			fs.mkdirSync(path.join(managed, "node_modules", ".bin"), {
-				recursive: true,
-			});
+			const managed = mockManagedClassicRepair(tree);
+			const spawned = await spawnTrusted(tree.project, true);
+
+			expect(forceReinstallCalls()).toHaveLength(1);
+			expect(tsserverPathOf(spawned)).toBe(managed.tsserver);
+		});
+
+		// #4414 F2: volta, asdf, mise and pnpm-global put a shim on PATH, not a
+		// symlink into the package. The resolved file has no TypeScript package
+		// beside it, which is the same as no compiler: take the managed install.
+		it("takes the consent-gated managed install when the PATH tsc is a shim with no package beside it", async () => {
+			const tree = buildPathTscTree("shim");
+			process.chdir(tree.project);
+			const shimBin = path.join(path.dirname(tree.project), "shim-bin");
+			fs.mkdirSync(shimBin);
+			fs.writeFileSync(path.join(shimBin, "tsc"), "#!/bin/sh\nexit 0\n");
+			fs.chmodSync(path.join(shimBin, "tsc"), 0o755);
+			process.env.PATH = `${shimBin}${path.delimiter}${originalPath ?? ""}`;
+			const managed = mockManagedClassicRepair(tree);
+			const spawned = await spawnTrusted(tree.project, true);
+
+			expect(forceReinstallCalls()).toHaveLength(1);
+			expect(tsserverPathOf(spawned)).toBe(managed.tsserver);
+		});
+
+		it("never installs for a PATH shim when installs are not allowed", async () => {
+			const tree = buildPathTscTree("shim-noinstall");
+			process.chdir(tree.project);
+			const shimBin = path.join(path.dirname(tree.project), "shim-bin");
+			fs.mkdirSync(shimBin);
+			fs.writeFileSync(path.join(shimBin, "tsc"), "#!/bin/sh\nexit 0\n");
+			fs.chmodSync(path.join(shimBin, "tsc"), 0o755);
+			process.env.PATH = `${shimBin}${path.delimiter}${originalPath ?? ""}`;
+			mockManagedClassicRepair(tree);
+			const spawned = await spawnTrusted(tree.project, false);
+
+			expect(spawned).toBeUndefined();
+			expect(forceReinstallCalls()).toHaveLength(0);
+			expect(warnMessages()).toHaveLength(1);
+		});
+
+		// #4390 shape: a TypeScript package whose manifest cannot be read must not
+		// trigger a forced reinstall over a healthy global compiler.
+		it("never repairs a PATH tsc whose TypeScript package has an unreadable version", async () => {
+			const tree = buildPathTscTree("no-manifest", false);
+			const pkg = path.join(
+				path.dirname(path.dirname(tree.pathBin)),
+				"global",
+				"lib",
+				"node_modules",
+				"typescript",
+			);
+			fs.rmSync(path.join(pkg, "package.json"), { force: true });
+			process.chdir(tree.project);
+			process.env.PATH = `${tree.pathBin}${path.delimiter}${originalPath ?? ""}`;
+			mockManagedClassicRepair(tree);
+			const spawned = await spawnTrusted(tree.project, true);
+
+			expect(spawned).toBeUndefined();
+			expect(forceReinstallCalls()).toHaveLength(0);
+		});
+
+		// #4414 F3: the Windows npm-global layout puts the package under
+		// `<prefix>/node_modules/typescript` beside `tsc.cmd`. Driven with an
+		// absolute answer so it runs on every OS.
+		it("finds tsserver.js in the npm-global layout beside the compiler", async () => {
+			const tree = buildPathTscTree("npm-prefix", false);
+			process.chdir(tree.project);
+			const prefix = path.join(path.dirname(tree.project), "prefix");
+			const pkg = path.join(prefix, "node_modules", "typescript");
+			fs.mkdirSync(path.join(pkg, "lib"), { recursive: true });
 			fs.writeFileSync(
-				path.join(managedPkg, "package.json"),
+				path.join(pkg, "package.json"),
 				`${JSON.stringify({ name: "typescript", version: "5.9.3" })}\n`,
 			);
-			fs.writeFileSync(
-				path.join(managedPkg, "lib", "tsserver.js"),
-				"// classic\n",
-			);
-			const managedTsc = path.join(managed, "node_modules", ".bin", "tsc");
-			fs.writeFileSync(managedTsc, "#!/usr/bin/env node\n");
+			fs.writeFileSync(path.join(pkg, "lib", "tsserver.js"), "// classic\n");
+			fs.writeFileSync(path.join(prefix, "tsc"), "#!/bin/sh\n");
 			const wrapper = path.join(
 				tree.project,
 				"node_modules",
 				".bin",
 				"typescript-language-server",
 			);
-			ensureToolMock.mockImplementation(
-				async (toolId: string, options?: { forceReinstall?: boolean }) => {
-					if (toolId === "typescript-language-server") return wrapper;
-					if (toolId !== "typescript") return undefined;
-					return options?.forceReinstall ? managedTsc : "tsc";
-				},
+			ensureToolMock.mockImplementation(async (toolId: string) =>
+				toolId === "typescript-language-server"
+					? wrapper
+					: path.join(prefix, "tsc"),
 			);
-			const { setProjectTrustState } =
-				await import("../../../clients/project-trust.js");
-			setProjectTrustState("trusted");
-			const { TypeScriptServer } =
-				await import("../../../clients/lsp/server.js");
+			const spawned = await spawnTrusted(tree.project, false);
 
-			const spawned = await TypeScriptServer.spawn(tree.project, {
-				allowInstall: true,
-			});
-
-			expect(
-				ensureToolMock.mock.calls.filter(
-					(call) => call[1]?.forceReinstall === true,
-				),
-			).toHaveLength(1);
 			expect(tsserverPathOf(spawned)).toBe(
-				fs.realpathSync(path.join(managedPkg, "lib", "tsserver.js")),
+				fs.realpathSync(path.join(pkg, "lib", "tsserver.js")),
 			);
 		});
 
@@ -787,9 +878,12 @@ describe.skipIf(process.platform === "win32")(
 
 			expect(spawned).toBeUndefined();
 			expect(launchLSPMock).not.toHaveBeenCalled();
-			expect(warnMessages()).toContain(
+			// One notice per generation (#4414 F1): the genuine trust refusal is not
+			// followed by the "no compiler resolved" notice, which would blame
+			// resolution for a compiler pi found and refused.
+			expect(warnMessages()).toEqual([
 				"project-local LSP binary refused: mark the project trusted in pi or upgrade pi",
-			);
+			]);
 		});
 	},
 );

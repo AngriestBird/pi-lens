@@ -2587,8 +2587,8 @@ export async function findCommandAsync(
 
 	if (result.status !== 0 || result.error) return null;
 
-	// Take first line (first match)
-	return result.stdout.trim().split("\n")[0] || null;
+	// Take the first line (first match). `where` ends lines with CRLF.
+	return result.stdout.trim().split(/\r?\n/)[0] || null;
 }
 
 // ============================================================================
@@ -2761,5 +2761,5 @@ export function findCommand(command: string): string | null {
 
 	if (result.status !== 0) return null;
 
-	return result.stdout.trim().split("\n")[0] || null;
+	return result.stdout.trim().split(/\r?\n/)[0] || null;
 }
