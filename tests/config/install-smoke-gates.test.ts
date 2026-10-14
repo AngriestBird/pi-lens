@@ -117,7 +117,7 @@ describe("install-smoke.yml job event gates (#2613 review T1)", () => {
 		expect(GATES.map(([name]) => name)).toEqual(["host-latest-smoke"]);
 	});
 
-	it.each(["host-range-smoke", "pi-load", "smoke", "mise-repro"])(
+	it.each(["host-range-smoke", "smoke", "mise-repro"])(
 		"%s deliberately carries no event gate (its matrix is the whole gate)",
 		(jobName) => {
 			expect(workflow.jobs?.[jobName]?.if).toBeUndefined();
@@ -472,8 +472,12 @@ describe.each(MATRIX_GATED_JOBS)(
 				);
 		}
 
-		it("carries no job-level `if:` (the matrix is the whole gate)", () => {
-			expect(workflow.jobs?.[job]?.if).toBeUndefined();
+		// pi-load alone carries `!cancelled()` (#4291 F4): not an event gate, it
+		// only keeps the job alive when `scope` fails.
+		it("carries no event gate (the matrix is the whole gate)", () => {
+			expect(workflow.jobs?.[job]?.if).toBe(
+				job === "pi-load" ? "${{ !cancelled() }}" : undefined,
+			);
 		});
 
 		it(`runs exactly ${prCells.join(", ")} on pull_request`, () => {

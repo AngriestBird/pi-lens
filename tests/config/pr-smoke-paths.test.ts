@@ -4,11 +4,13 @@
 // its own `pull_request.paths:` is what starts the run at all. Every case names
 // the recurrence it keeps out, and the scan reads parsed YAML, never the text,
 // so a comment cannot satisfy it.
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import yaml from "../../clients/deps/js-yaml.js";
 import { PR_SMOKE_PATHS } from "../../scripts/ci-changed-files.mjs";
+import { stripCommentsAndStrings } from "../support/session-state-scan.js";
+import { assertNonEmptyScan } from "../support/sweep-kit.js";
 
 const ROOT = resolve(import.meta.dirname, "../..");
 const WORKFLOW = ".github/workflows/install-smoke.yml";
@@ -49,7 +51,9 @@ describe("PR_SMOKE_PATHS entries (#4291)", () => {
 				"clients/gzip-stage-write.ts",
 				"clients/installer/**",
 				"clients/lsp-lazy.ts",
+				"clients/lsp/client-registry.ts",
 				"clients/lsp/config.ts",
+				"clients/lsp/jvm-runtime.ts",
 				"clients/lsp/launch.ts",
 				"clients/lsp/resolved-config.ts",
 				"clients/lsp/server.ts",
@@ -64,8 +68,12 @@ describe("PR_SMOKE_PATHS entries (#4291)", () => {
 				"scripts/bundle-dist.mjs",
 				"scripts/download-grammars.js",
 				"scripts/install-selftest.mjs",
+				"scripts/lib/git-fixture-env.mjs",
 				"scripts/lib/latency-log-phases.mjs",
+				"scripts/lib/lsp-fixture-session-guard.mjs",
 				"scripts/lib/lsp-fixture-workspace.mjs",
+				"scripts/lib/safe-rm.mjs",
+				"scripts/lib/scratch-dir.mjs",
 				"scripts/rpc-load-check.mjs",
 				"scripts/smoke-tools.mjs",
 				"tests/fixtures/rpc-load-check/**",
@@ -91,6 +99,29 @@ describe("PR_SMOKE_PATHS entries (#4291)", () => {
 
 	it("lists no entry twice", () => {
 		expect(new Set(PR_SMOKE_PATHS).size).toBe(PR_SMOKE_PATHS.length);
+	});
+
+	// Recurrence (#4291 review F1): the list named four launch files by hand and
+	// missed clients/lsp/client-registry.ts, the only `.spawn(` call site and the
+	// trust backstop (#4374), so a PR touching only it ran the one-cell smoke.
+	// The rule is derived: any clients/lsp/*.ts that calls `.spawn(` must be on
+	// the list, so the #2372 split cannot move the call site off it. The scan
+	// reads comment-and-string-blanked text; a comment naming `.spawn(` neither
+	// adds a file nor excuses one.
+	it("lists every clients/lsp/*.ts file that holds a `.spawn(` call site", () => {
+		const dir = resolve(ROOT, "clients/lsp");
+		const holders = readdirSync(dir)
+			.filter((name) => name.endsWith(".ts"))
+			.filter((name) =>
+				/\.spawn\s*\(/.test(
+					stripCommentsAndStrings(readFileSync(resolve(dir, name), "utf8")),
+				),
+			)
+			.map((name) => `clients/lsp/${name}`);
+		assertNonEmptyScan("clients/lsp spawn call sites", holders.length);
+		expect(holders.filter((file) => !PR_SMOKE_PATHS.includes(file))).toEqual(
+			[],
+		);
 	});
 
 	// Recurrence: the list gaining an entry the workflow's own filter lacks. A PR
@@ -137,6 +168,14 @@ describe("install-smoke.yml reads the one verdict (#4291)", () => {
 		);
 	});
 
+	// Recurrence (#4291 review F4): `scope` is continue-on-error. If it fails or is
+	// skipped, a plain `needs` would skip pi-load too, and the four-cell fallback
+	// the matrix expression provides would never run. `!cancelled()` keeps the
+	// job alive on a failed `scope`; the matrix then reads an empty verdict.
+	it("keeps pi-load running when scope fails, stopping only on cancellation", () => {
+		expect(doc.jobs["pi-load"]?.if).toBe("${{ !cancelled() }}");
+	});
+
 	// Recurrence (#3087): a continue-on-error job whose name does not say so reads
 	// as a gating check that always passes.
 	it.each(["scope", "lsp-handshake"])(
@@ -162,22 +201,12 @@ describe("install-smoke.yml lsp-handshake job (#4291)", () => {
 		expect(handshake?.run).not.toMatch(/--lsp-gate/);
 	});
 
-	// Recurrence (#2723): `cmd | tee` takes tee's exit code without pipefail, so a
-	// red layer reported success.
-	it("sets pipefail before the pipe into tee", () => {
-		const run = handshake?.run ?? "";
-		expect(run.indexOf("set -o pipefail")).toBeGreaterThanOrEqual(0);
-		expect(run.indexOf("set -o pipefail")).toBeLessThan(run.indexOf("| tee"));
-	});
-
-	// Recurrence: an advisory job that fails with the rows only in a log nobody
-	// opens. The report runs on any outcome and writes the failing rows to the
-	// check's summary and to annotations.
-	it("reports failing rows on every outcome, to the summary and as annotations", () => {
+	// Recurrence: the report step moved before the handshake, or lost its
+	// `always()`, so a red handshake skips it. The behaviour of the step, and of
+	// the handshake's pipefail, is executed in
+	// tests/scripts/install-smoke-handshake-steps.test.ts.
+	it("reports after the handshake, on every outcome", () => {
 		expect(report?.if).toBe("always()");
-		expect(report?.run).toContain("grep '^✗'");
-		expect(report?.run).toContain('>> "$GITHUB_STEP_SUMMARY"');
-		expect(report?.run).toContain("::warning");
 		expect(steps.indexOf(report as Step)).toBeGreaterThan(
 			steps.indexOf(handshake as Step),
 		);

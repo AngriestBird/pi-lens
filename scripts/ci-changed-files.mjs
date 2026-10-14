@@ -74,8 +74,16 @@ export const PR_SMOKE_PATHS = [
 	"clients/bootstrap.ts",
 	// LSP launch, and the handshake harness itself (#4291 asks for it).
 	"scripts/smoke-tools.mjs",
+	"scripts/lib/git-fixture-env.mjs",
+	"scripts/lib/lsp-fixture-session-guard.mjs",
 	"scripts/lib/lsp-fixture-workspace.mjs",
+	"scripts/lib/safe-rm.mjs",
+	"scripts/lib/scratch-dir.mjs",
 	"clients/lsp-lazy.ts",
+	// The only `.spawn(` call site and the trust backstop (#4374), and the JVM
+	// launch runtime.
+	"clients/lsp/client-registry.ts",
+	"clients/lsp/jvm-runtime.ts",
 	"clients/lsp/launch.ts",
 	"clients/lsp/server.ts",
 	"clients/lsp/config.ts",

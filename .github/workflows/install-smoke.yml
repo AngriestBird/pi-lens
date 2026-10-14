@@ -73,7 +73,13 @@ on:
       - "clients/installer/**"
       - "clients/bootstrap.ts"
       - "scripts/smoke-tools.mjs"
+      - "scripts/lib/git-fixture-env.mjs"
+      - "scripts/lib/lsp-fixture-session-guard.mjs"
       - "scripts/lib/lsp-fixture-workspace.mjs"
+      - "scripts/lib/safe-rm.mjs"
+      - "scripts/lib/scratch-dir.mjs"
+      - "clients/lsp/client-registry.ts"
+      - "clients/lsp/jvm-runtime.ts"
       - "clients/lsp/launch.ts"
       - "clients/lsp/server.ts"
       - "clients/lsp/config.ts"
@@ -434,6 +440,10 @@ jobs:
     # tests/support/workflow-shell-portability.ts still sees this job as
     # macOS-capable; the PR-time narrowing is done with `exclude`.
     needs: scope
+    # A failed or skipped `scope` must not skip the four-cell fallback: its
+    # output is then empty, and the matrix below widens on anything but an
+    # explicit 'false'. Only a cancelled run stops (#4291 review F4).
+    if: ${{ !cancelled() }}
     runs-on: ${{ matrix.os }}
     # refs #3123: bounds a hang against GitHub's 360-min default.
     # Measured max leg over last 10 successful master runs (80 matrix legs):
@@ -616,8 +626,10 @@ jobs:
           otp-version: "27"
           elixir-version: "1.18"
 
+      # The sibling shape (hot-path-latency.yml, ci.yml): a locked install with no
+      # lifecycle scripts (Sonar S6505), then the one script this job needs.
       - name: Install dependencies
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund --ignore-scripts
 
       - name: Build dist
         run: npm run build:dist
@@ -636,22 +648,28 @@ jobs:
       # the log.
       - name: Report failing handshake rows
         if: always()
+        env:
+          HANDSHAKE_OUTCOME: ${{ steps.handshake.outcome }}
         run: |
           log="$RUNNER_TEMP/lsp-handshake.log"
+          rows=""
+          if [ -s "$log" ]; then rows="$(grep '^✗' "$log" || true)"; fi
           {
             echo "### LSP handshake failing rows"
-            if [ -s "$log" ] && grep -q '^✗' "$log"; then
+            if [ -n "$rows" ]; then
               echo '```'
-              grep '^✗' "$log"
+              echo "$rows"
               echo '```'
-            elif [ -s "$log" ]; then
+            elif [ "$HANDSHAKE_OUTCOME" = success ]; then
               echo "No failing rows."
             else
-              echo "The handshake wrote no log; see the step output."
+              echo "The handshake did not run to a result (step outcome: $HANDSHAKE_OUTCOME); see the step output."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
-          if [ -s "$log" ]; then
-            grep '^✗' "$log" | sed 's/^/::warning title=LSP handshake::/' || true
+          if [ -n "$rows" ]; then
+            echo "$rows" | sed 's/^/::warning title=LSP handshake::/'
+          elif [ "$HANDSHAKE_OUTCOME" != success ]; then
+            echo "::warning title=LSP handshake::the handshake did not run to a result (step outcome: $HANDSHAKE_OUTCOME)"
           fi
 
   # mise install coverage (+ a #285 probe): pi under mise + pnpm as npmCommand,
