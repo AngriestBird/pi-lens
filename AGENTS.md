@@ -1213,6 +1213,10 @@ other test job always run, because a docs edit can red tests outside tests/confi
 model-checks only when `formal/` (or its checker or ci.yml) changed. A REQUIRED
 job never skips at job level: ci-verdict and the merge train demand a literal
 `success`, so `TLA+ models` starts and skips its steps.
+The same script's `smoke` output (`PR_SMOKE_PATHS`: RPC, install, LSP launch,
+trust) makes `install-smoke.yml` run all four pi-load cells and an advisory LSP
+handshake job on a pull request; any other PR that reaches that workflow keeps
+the one pnpm-global cell (`tests/config/pr-smoke-paths.test.ts`).
 The Unit shards are packed by the per-file seconds in
 `scripts/test-shard-weights.json`; regenerate it from the shards' uploaded
 `vitest-results.json` when `tests/config/test-shard-assignment.test.ts` reds.
