@@ -29,8 +29,10 @@
  *
  * Time budget: BUDGET_MS in all, each vitest start bounded by what is left. A
  * start that does not finish, a file over the cap and an unreadable diff are
- * UNPROVEN (exit 3), never green. Exit codes: 0 clean (or no test file in the
- * diff), 1 an order-dependent file, 2 usage, 3 unproven.
+ * UNPROVEN (exit 3), never green. So is a start that vitest answers with "No
+ * test files found": it ran nothing. Exit codes: 0 clean (or no test file in
+ * the diff), 1 an order-dependent file or one that fails alone, 2 usage, 3
+ * unproven.
  */
 
 import { spawnSync } from "node:child_process";
@@ -65,7 +67,7 @@ export function selectChangedTestFiles(paths, exists = existsSync) {
 		if (file.startsWith("tests/fixtures/")) continue;
 		if (exists(file)) picked.add(file);
 	}
-	return [...picked].sort();
+	return [...picked].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
 /**
@@ -163,7 +165,7 @@ export function runPlan(plan, options) {
 		let verdict;
 		if (outcome.timedOut) verdict = "timeout";
 		else if (outcome.status === 0) verdict = "ok";
-		else if (/No test files found/.test(outcome.output))
+		else if (/^\s*No test files found/m.test(outcome.output))
 			verdict = "uncollected";
 		else verdict = "red";
 		results.push({ run, verdict, output: outcome.output, ms });
@@ -186,13 +188,21 @@ export function runPlan(plan, options) {
 export function judge({ files, over, results, notRun }) {
 	const red = results.filter((entry) => entry.verdict === "red");
 	const timedOut = results.filter((entry) => entry.verdict === "timeout");
+	const uncollected = results.filter(
+		(entry) => entry.verdict === "uncollected",
+	);
 	const lines = [];
-	for (const entry of red)
-		lines.push(
-			`order-dependent: ${entry.run.label} (${reproCommand(entry.run)})`,
-		);
+	for (const entry of red) {
+		// An alone start has no order to depend on: the file simply fails.
+		const kind = entry.run.label.startsWith("alone ")
+			? "fails alone"
+			: "order-dependent";
+		lines.push(`${kind}: ${entry.run.label} (${reproCommand(entry.run)})`);
+	}
 	for (const entry of timedOut)
 		lines.push(`did not finish in the budget: ${entry.run.label}`);
+	for (const entry of uncollected)
+		lines.push(`not run (no project collects it): ${entry.run.label}`);
 	for (const run of notRun) lines.push(`not run (budget spent): ${run.label}`);
 	for (const file of over)
 		lines.push(`not run (over ${MAX_FILES} files): ${file}`);

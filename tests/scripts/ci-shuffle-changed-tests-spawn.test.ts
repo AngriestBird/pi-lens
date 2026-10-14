@@ -9,17 +9,25 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { execVitest } from "../../scripts/ci-shuffle-changed-tests.mjs";
 import { setupTestEnvironment } from "../clients/test-utils.js";
 
 const SCRIPT = path.resolve("scripts/ci-shuffle-changed-tests.mjs");
 const env = setupTestEnvironment("pi-lens-4397-fixture-");
 
-function runJob(files: string[]) {
-	// The ambient VITEST_* variables belong to the OUTER worker; a nested
-	// vitest that inherits them takes itself for a worker of the outer run.
+/**
+ * The ambient VITEST_* variables belong to the OUTER worker; a nested vitest
+ * that inherits them takes itself for a worker of the outer run.
+ */
+function nestedEnv(): NodeJS.ProcessEnv {
 	const clean: NodeJS.ProcessEnv = { ...process.env };
 	for (const key of Object.keys(clean))
 		if (key.startsWith("VITEST") || key === "TEST") delete clean[key];
+	return clean;
+}
+
+function runJob(files: string[]) {
+	const clean = nestedEnv();
 	const result = spawnSync(
 		process.execPath,
 		[SCRIPT, "--cwd", env.tmpDir, "--files", files.join(",")],
@@ -56,6 +64,10 @@ beforeAll(() => {
 		].join("\n"),
 	);
 	fs.writeFileSync(
+		path.join(env.tmpDir, "tests", "slow.test.ts"),
+		'it("outlasts the budget", async () => { await new Promise((r) => setTimeout(r, 30000)); }, 60000);\n',
+	);
+	fs.writeFileSync(
 		path.join(env.tmpDir, "tests", "stateless.test.ts"),
 		"for (const n of [1, 2, 3, 4, 5, 6]) it(`case ${n}`, () => expect(n).toBeGreaterThan(0));\n",
 	);
@@ -90,4 +102,16 @@ describe("the changed-test shuffle job over a real vitest (#4397)", () => {
 		expect(result.out).toContain("shuffle-changed: exit 0 (clean)");
 		expect(result.status).toBe(0);
 	}, 130_000);
+
+	// Recurrence (review F3): a start killed at the budget read as a finished
+	// run when the kill was not recognised. The real kill, not an injected
+	// flag: spawnSync reports it as ETIMEDOUT or a SIGKILL signal.
+	it("reports a start that outlasts its timeout as timed out", () => {
+		const outcome = execVitest(
+			{ files: ["tests/slow.test.ts"], flags: [] },
+			{ cwd: env.tmpDir, timeoutMs: 2500, env: nestedEnv() },
+		);
+		expect(outcome.timedOut).toBe(true);
+		expect(outcome.status).toBeNull();
+	}, 60_000);
 });

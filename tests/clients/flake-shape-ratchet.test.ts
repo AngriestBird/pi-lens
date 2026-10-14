@@ -1791,6 +1791,15 @@ describe("flake-shape scan — elapsed-time-assertion", () => {
 });
 
 describe("flake-shape scan — raw-timer-wait", () => {
+	// #4397 (recurrence #3514, #4385): the two (#2563) cases below read the
+	// whole-tree scan. Only the `flake-shape ratchet (#2547)` describe warmed it,
+	// so run first (a shuffle, or `-t`) they billed the ~12 s cold scan to the 5 s
+	// default. This describe pays it once, under the walk's own budget.
+	beforeAll(async () => {
+		await countsByDetector("raw-timer-wait");
+		await countsByDetector("real-process-spawn");
+	}, WALK_TIMEOUT_MS);
+
 	it("ATTACK named spelling: raw setTimeout wait via a Promise", () => {
 		const source = [
 			'it("waits a bit", async () => {',

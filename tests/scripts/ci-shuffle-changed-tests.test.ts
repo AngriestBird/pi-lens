@@ -193,6 +193,85 @@ describe("runPlan", () => {
 	});
 });
 
+describe("runPlan: output and timeout classification (#4397 review r1)", () => {
+	// Recurrence (F2): the phrase matched anywhere in the output, so a real red
+	// whose failure text quotes it (this file's own assertions do) read as
+	// "uncollected" and the job exited 0. Only vitest's own line, at a line
+	// start, names an uncollected path.
+	it("reads a real red that quotes the phrase mid-line as a red", () => {
+		const { results } = runPlan(planRuns(["tests/a.test.ts"]).slice(0, 1), {
+			cwd: ".",
+			exec: () => ({
+				status: 1,
+				output:
+					"FAIL step 2\nAssertionError: expected 'No test files found, exiting' to be empty\n",
+				timedOut: false,
+			}),
+			log: quiet,
+		});
+		expect(results[0].verdict).toBe("red");
+	});
+
+	// Recurrence (F2): a changed file no project collects (tests/native-ts7-live-*
+	// is in sharedExclude) ran nothing and still exited 0 "clean". Nothing ran,
+	// so nothing is proven: exit 3 with a line naming the start.
+	it("exits 3, not 0, when no project collects a changed file", () => {
+		const lines: string[] = [];
+		const exec: ExecVitest = () => ({
+			status: 1,
+			output: "\nNo test files found, exiting with code 1\n",
+			timedOut: false,
+		});
+		const scratch = setupTestEnvironment("pi-lens-4397-uncollected-");
+		cleanups.push(scratch.cleanup);
+		fs.mkdirSync(path.join(scratch.tmpDir, "tests", "native-ts7-live-x"), {
+			recursive: true,
+		});
+		fs.writeFileSync(
+			path.join(scratch.tmpDir, "tests/native-ts7-live-x/a.test.ts"),
+			"",
+		);
+		const code = run(
+			["--cwd", scratch.tmpDir, "--files", "tests/native-ts7-live-x/a.test.ts"],
+			{ exec, log: (line) => lines.push(line) },
+		);
+		expect(code).toBe(3);
+		expect(lines.join("\n")).toContain(
+			"not run (no project collects it): shuffle seed 202",
+		);
+	});
+
+	// Recurrence (F3): a start that hit the budget kill read as a pass or a red
+	// when the timedOut flag was ignored. It is "timeout" and the job exits 3.
+	it("classifies a timed-out start as a timeout, whatever its status", () => {
+		const { results } = runPlan(planRuns(["tests/a.test.ts"]).slice(0, 1), {
+			cwd: ".",
+			exec: () => ({ status: 0, output: "", timedOut: true }),
+			log: quiet,
+		});
+		expect(results[0].verdict).toBe("timeout");
+	});
+
+	// Recurrence (F4): an alone run that fails is a failure of the file, not an
+	// order dependence; the label must not claim an order.
+	it("labels a red alone run `fails alone`, not order-dependent", () => {
+		const alone = {
+			label: "alone tests/a.test.ts",
+			files: ["tests/a.test.ts"],
+			flags: [],
+		};
+		const verdict = judge({
+			files: ["tests/a.test.ts"],
+			over: [],
+			notRun: [],
+			results: [{ run: alone, verdict: "red", output: "", ms: 1 }],
+		});
+		expect(verdict.code).toBe(1);
+		expect(verdict.lines[0]).toMatch(/^fails alone: alone tests\/a\.test\.ts/);
+		expect(verdict.lines[0]).not.toContain("order-dependent");
+	});
+});
+
 describe("judge and run: exit codes", () => {
 	const files = ["tests/a.test.ts"];
 
