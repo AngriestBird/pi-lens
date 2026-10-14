@@ -9161,7 +9161,14 @@ export class LSPService {
 	/**
 	 * Get all diagnostics across all tracked files (for cascade checking)
 	 */
-	async getAllDiagnostics(): Promise<
+	async getAllDiagnostics(
+		/**
+		 * #4323: servers whose retained rows this caller does not read, as
+		 * `getDiagnostics`' option of the same name. Their clients are still
+		 * pruned; only their rows are left out of the result.
+		 */
+		excludeServerIds?: ReadonlySet<string>,
+	): Promise<
 		Map<
 			string,
 			{
@@ -9207,6 +9214,7 @@ export class LSPService {
 				(filePath, ts) =>
 					!existingPaths.has(filePath) || now - ts > CASCADE_DIAGNOSTICS_TTL_MS,
 			);
+			if (excludeServerIds?.has(client.serverId)) continue;
 			const clientDiags = client.getAllDiagnostics();
 			for (const [filePath, entry] of clientDiags) {
 				const attributed = attributeDiagnostics(client.serverId, entry.diags);

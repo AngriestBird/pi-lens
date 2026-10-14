@@ -1413,7 +1413,11 @@ export function createLspNavigationTool(
 					);
 				}
 
-				const allDiagnostics = await lspService.getAllDiagnostics();
+				// #4323: the snapshot starts no server, but an auxiliary the
+				// operator turned off may still be running; leave its rows out.
+				const allDiagnostics = await lspService.getAllDiagnostics(
+					configDisabledAuxiliaryLspServerIds((name) => getFlag(name, ctx.cwd)),
+				);
 				const result = Array.from(allDiagnostics.entries()).map(
 					([trackedFile, { diags }]) => ({
 						filePath: trackedFile,

@@ -88,9 +88,12 @@ async function diagnose(
 	};
 }
 
-/** `lsp_navigation operation=workspaceDiagnostics` for one file. */
+/**
+ * `lsp_navigation operation=workspaceDiagnostics` for one file, or the
+ * path-less snapshot of every running client's rows when `file` is undefined.
+ */
 async function navigateDiagnostics(
-	file: string,
+	file: string | undefined,
 	getFlag?: (name: string) => boolean,
 ): Promise<string> {
 	const { createLspNavigationTool } =
@@ -99,7 +102,7 @@ async function navigateDiagnostics(
 		(name) => name === "lens-lsp" || getFlag?.(name) === true,
 	).execute(
 		"nav-4323",
-		{ operation: "workspaceDiagnostics", path: file },
+		{ operation: "workspaceDiagnostics", ...(file ? { path: file } : {}) },
 		new AbortController().signal,
 		null,
 		{ cwd: workspace },
@@ -309,6 +312,16 @@ describe("an explicit LSP check with Opengrep switched off (#4323)", () => {
 		expect(text).toContain(OPENGREP_FINDING);
 	});
 
+	it("leaves a running Opengrep's rows out of the path-less lsp_navigation snapshot", async () => {
+		// The snapshot starts no server; Opengrep is running from the control.
+		const before = await navigateDiagnostics(undefined);
+		expect(before).toContain(OPENGREP_FINDING);
+
+		const after = await navigateDiagnostics(undefined, noOpengrep);
+
+		expect(after).not.toContain(OPENGREP_FINDING);
+	});
+
 	it("does not serve an Opengrep finding from a batch cached before the switch", async () => {
 		// Without the switch, the batch caches Opengrep's finding for both files.
 		const before = await diagnose({ paths: [probe, secondProbe] });
@@ -364,5 +377,52 @@ describe("an explicit LSP check with Opengrep switched off (#4323)", () => {
 		const after = await navigateDiagnostics(secondYamlProbe, noOpengrep);
 
 		expect(after).not.toContain(OPENGREP_FINDING);
+	});
+
+	it("keeps the rows of servers it did not exclude from the last known answer", async () => {
+		const { normalizeMapKey } = await import("../../clients/path-utils.js");
+		const lsp = service as unknown as {
+			lastKnownDiagnostics: Map<string, unknown[]>;
+			getDiagnostics: (
+				file: string,
+				mode: "document",
+				excludeServerIds: ReadonlySet<string>,
+			) => Promise<Array<{ message: string }>>;
+		};
+		const thirdYaml = path.join(workspace, "third.yaml");
+		fs.writeFileSync(thirdYaml, "c: 3\n");
+		const row = (message: string, serverId?: string) => ({
+			range: {
+				start: { line: 0, character: 0 },
+				end: { line: 0, character: 1 },
+			},
+			severity: 1,
+			message,
+			source: "stored",
+			...(serverId ? { serverId } : {}),
+		});
+		// The YAML server's row, an Opengrep row, and a row with no server.
+		const key = normalizeMapKey(thirdYaml);
+		lsp.lastKnownDiagnostics.set(key, [
+			row("yaml server's row", "yaml"),
+			row(OPENGREP_FINDING, "opengrep"),
+			row("row with no server"),
+		]);
+
+		// No client starts for this read: the YAML server is missing and
+		// Opengrep is excluded, so it falls back to the last known answer.
+		const answer = await lsp.getDiagnostics(
+			thirdYaml,
+			"document",
+			new Set(["opengrep"]),
+		);
+
+		expect(answer.map((diagnostic) => diagnostic.message)).toEqual([
+			"yaml server's row",
+			"row with no server",
+		]);
+		// The shared store still holds all three for callers that did not
+		// exclude Opengrep.
+		expect(lsp.lastKnownDiagnostics.get(key)).toHaveLength(3);
 	});
 });
