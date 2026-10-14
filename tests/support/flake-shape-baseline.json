@@ -732,6 +732,7 @@
 		"clients/lsp/client-lifecycle-records.test.ts::clients/lsp/client": 1,
 		"clients/lsp/client-lifecycle-records.test.ts::clients/lsp/config": 1,
 		"clients/lsp/client-lifecycle-records.test.ts::clients/sessionstart-logger": 1,
+		"clients/lsp/client-registry-direct.test.ts::clients/latency-logger": 1,
 		"clients/lsp/client-registry-direct.test.ts::clients/lsp/client": 1,
 		"clients/lsp/client-selection-outcome.test.ts::clients/latency-logger": 1,
 		"clients/lsp/client-selection-outcome.test.ts::clients/lsp/client": 1,

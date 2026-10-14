@@ -264,6 +264,15 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			reason:
 				"the defect is wall-clock only (2^N globstar backtracking); a fake clock measures nothing",
 		},
+	// 2026-10-15 (#4449): the registry's skip and respawn records go to the
+	// latency log, a file sink. The test asserts the exact record fields from the
+	// captured call; reading them back from disk would add I/O, not signal.
+	"in-process-mock:clients/lsp/client-registry-direct.test.ts::clients/latency-logger":
+		{
+			detector: "in-process-mock",
+			reason:
+				"the latency log is a file sink; the registry's records are asserted from the captured call",
+		},
 	// 2026-10-15 (#4449): createLSPClient wraps the language-server child
 	// process; the extracted ClientRegistry's spawn bookkeeping is driven
 	// directly, so the client factory is the one boundary stood in for.

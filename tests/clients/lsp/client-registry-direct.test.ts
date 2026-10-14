@@ -1,4 +1,5 @@
 // flake-shape: service-double — LSPClientInfo is a spawned language-server process; the registry's capacity, lease and idle paths are driven by its liveness and busy answers, which a real server cannot be made to give on demand
+// flake-shape: in-process-mock — the latency log is a file sink; the records the registry emits are asserted from the captured call, not from disk
 // flake-shape: in-process-mock — createLSPClient wraps the language-server child process (JSON-RPC over stdio); the registry's spawn bookkeeping is the subject, the process is the boundary
 /**
  * #4449: the extracted ClientRegistry (clients/lsp/client-registry.ts, #4374)
@@ -16,6 +17,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resetBoundedTelemetry } from "../../../clients/bounded-telemetry.js";
 import {
 	getDegradationSummary,
 	resetDegradationLedger,
@@ -26,7 +28,15 @@ import {
 	type ClientGenerationHooks,
 	type SpawnedServer,
 } from "../../../clients/lsp/client-registry.js";
-import type { LSPServerInfo } from "../../../clients/lsp/server.js";
+import {
+	_markDirectLspCommandUnavailableForTests,
+	resetDirectLspCommandAvailability,
+	type LSPServerInfo,
+} from "../../../clients/lsp/server.js";
+import {
+	resetProjectTrust,
+	setProjectTrustState,
+} from "../../../clients/project-trust.js";
 import {
 	registerSessionRoot,
 	resetSessionRootsForTests,
@@ -37,6 +47,13 @@ import { removeTempDirSync } from "../test-utils.js";
 process.env.PI_LENS_TEST_MODE = "1";
 
 const createLSPClient = vi.hoisted(() => vi.fn());
+const logLatency = vi.hoisted(() => vi.fn());
+vi.mock("../../../clients/latency-logger.js", async (importOriginal) => ({
+	...(await importOriginal<
+		typeof import("../../../clients/latency-logger.js")
+	>()),
+	logLatency,
+}));
 vi.mock("../../../clients/lsp/client.js", async (importOriginal) => ({
 	...(await importOriginal<typeof import("../../../clients/lsp/client.js")>()),
 	createLSPClient,
@@ -45,7 +62,10 @@ vi.mock("../../../clients/lsp/client.js", async (importOriginal) => ({
 type FakeClient = LSPClientInfo & {
 	shutdown: ReturnType<typeof vi.fn>;
 	setBusy(busy: boolean): void;
+	/** Dies with a recorded death time (the real client stamps it on exit). */
 	die(at?: number): void;
+	/** Dies without a recorded death time (defensive path in the registry). */
+	kill(): void;
 };
 
 /** A language-server client: the process boundary, so a fake is allowed. */
@@ -63,6 +83,9 @@ function fakeClient(
 		isAlive: () => alive,
 		isBusy: () => busy,
 		wasShutdownIntentional: () => false,
+		kill: () => {
+			alive = false;
+		},
 		getExitedAt: () => exitedAt,
 		shutdown: vi.fn(async () => undefined),
 		setBusy: (next: boolean) => {
@@ -76,7 +99,10 @@ function fakeClient(
 	return client as unknown as FakeClient;
 }
 
-function server(id: string, extra: Partial<LSPServerInfo> = {}): LSPServerInfo {
+function server(
+	id: string,
+	extra: Record<string, unknown> = {},
+): LSPServerInfo {
 	return {
 		id,
 		name: id,
@@ -128,7 +154,10 @@ function tempProject(prefix: string, withMarker = true): string {
 beforeEach(() => {
 	resetSessionRootsForTests();
 	resetDegradationLedger();
+	resetBoundedTelemetry();
+	resetDirectLspCommandAvailability();
 	createLSPClient.mockReset();
+	logLatency.mockClear();
 });
 
 afterEach(() => {
@@ -138,6 +167,8 @@ afterEach(() => {
 	delete process.env.PI_LENS_LSP_IDLE_EVICT_MS;
 	delete process.env.PI_LENS_TS_IDLE_EVICT_MS;
 	delete process.env.PI_LENS_EPHEMERAL_LSP_IDLE_EVICT_MS;
+	delete process.env.PI_LENS_DISABLE_LSP_INSTALL;
+	resetProjectTrust();
 	resetSessionRootsForTests();
 	for (const dir of dirs.splice(0)) removeTempDirSync(dir);
 });
@@ -206,7 +237,7 @@ function registryWithClient(id: string, root: string) {
 	const info = server(id, {
 		root: async () => root,
 		idleEviction: "transparent",
-	} as Partial<LSPServerInfo>);
+	});
 	const client = fakeClient(id, root);
 	const key = keyFor(id, root);
 	registry.clients.set(key, client);
@@ -693,7 +724,7 @@ describe("ClientRegistry.makeCapacityForClient (#4449)", () => {
 
 describe("ClientRegistry.scheduleIdleEviction (#4449)", () => {
 	const IDLE_MS = 1_000;
-	function idleFixture(info?: Partial<LSPServerInfo>) {
+	function idleFixture(info?: Record<string, unknown>) {
 		process.env.PI_LENS_LSP_IDLE_EVICT_MS = String(IDLE_MS);
 		vi.useFakeTimers();
 		const { hooks, calls } = makeHooks();
@@ -701,7 +732,7 @@ describe("ClientRegistry.scheduleIdleEviction (#4449)", () => {
 		const serverInfo = server("ts", {
 			idleEviction: "transparent",
 			...info,
-		} as Partial<LSPServerInfo>);
+		});
 		const client = fakeClient("ts", "/r");
 		const key = "ts:/r";
 		registry.clients.set(key, client);
@@ -777,11 +808,11 @@ describe("ClientRegistry.scheduleIdleEviction (#4449)", () => {
 	// policy stays resident (#3645). Adopted roots are evicted regardless, on the
 	// fixed adopted window rather than the configured one.
 	it("arms no timer for a resident server and an adopted-window timer for an adopted key", async () => {
-		const resident = idleFixture({ idleEviction: "resident" } as never);
+		const resident = idleFixture({ idleEviction: "resident" });
 		resident.registry.scheduleIdleEviction(resident.key, resident.serverInfo);
 		expect(vi.getTimerCount()).toBe(0);
 
-		const adopted = idleFixture({ idleEviction: "resident" } as never);
+		const adopted = idleFixture({ idleEviction: "resident" });
 		internals(adopted.registry).adoptedClientKeys.add(adopted.key);
 		adopted.registry.scheduleIdleEviction(adopted.key, adopted.serverInfo);
 		await vi.advanceTimersByTimeAsync(IDLE_MS); // the configured window
@@ -947,5 +978,741 @@ describe("ClientRegistry.resolveServerRoot (#4449)", () => {
 				path.join(nested, "a.ts"),
 			),
 		).resolves.toBe(nested); // control: a fresh registry sees the manifest
+	});
+});
+
+// ---------------------------------------------------------------------------
+// ensureClientForServer: breaker, respawn, skip records, outcomes (#4449)
+// ---------------------------------------------------------------------------
+
+const T0 = 1_700_000_000_000;
+const MIN = 60_000;
+
+/** Ledger groups by kind, for the records the registry writes. */
+const ledger = (kind: string) =>
+	getDegradationSummary().find((group) => group.kind === kind);
+
+/** The latency records of one phase, in call order. */
+const latencyRecords = (phase: string) =>
+	logLatency.mock.calls
+		.map(([entry]) => entry as Record<string, unknown>)
+		.filter((entry) => entry.phase === phase);
+
+function ensureFixture(id = "ts") {
+	const root = tempProject(`ensure-${id}`);
+	const file = path.join(root, "a.fake");
+	const { hooks, calls } = makeHooks();
+	const registry = new ClientRegistry(hooks);
+	const spawn = vi.fn(async (_root: string, _options?: unknown) => ({
+		process: {
+			process: { killed: false, kill: vi.fn() },
+			stdin: {},
+			stdout: {},
+			stderr: {},
+			pid: 4242,
+		},
+	}));
+	const info = server(id, {
+		root: async () => root,
+		spawn,
+		idleEviction: "transparent",
+	});
+	const spawned: FakeClient[] = [];
+	createLSPClient.mockImplementation(async () => {
+		const client = fakeClient(id, root);
+		spawned.push(client);
+		return client;
+	});
+	const key = keyFor(id, root);
+	const ensure = (onOutcome?: (outcome: string) => void) =>
+		registry.ensureClientForServer(
+			file,
+			info,
+			undefined,
+			undefined,
+			onOutcome as never,
+		);
+	return { root, file, registry, calls, spawn, info, spawned, key, ensure };
+}
+
+type Fixture = ReturnType<typeof ensureFixture>;
+
+/** Put a dead client (and its spawn stamp) where the registry will find it. */
+function plantDead(
+	f: Fixture,
+	opts: { spawnedAt?: number; exitedAt?: number },
+): FakeClient {
+	const dead = fakeClient(f.info.id, f.root);
+	if (opts.exitedAt !== undefined) dead.die(opts.exitedAt);
+	else dead.kill();
+	f.registry.clients.set(f.key, dead);
+	if (opts.spawnedAt !== undefined) {
+		f.registry.clientSpawnedAt.set(f.key, opts.spawnedAt);
+	}
+	return dead;
+}
+
+const priv = (registry: ClientRegistry) =>
+	registry as unknown as {
+		runtimeExitCounts: Map<string, number>;
+		runtimeExitWindow: Map<string, number[]>;
+		failureCounts: Map<string, number>;
+		generationHandoff: Promise<void> | undefined;
+		withClientSpawnGate<T>(operation: () => Promise<T>): Promise<T>;
+	};
+
+describe("ClientRegistry respawn breaker, consecutive early exits (#4449, #1127)", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.setSystemTime(T0);
+	});
+
+	// Recurrence (#1127): a server that spawns fine and dies within a minute, every
+	// time, must climb the cooldown ladder 15s, 30s, 60s, 120s and be latched off at
+	// the fifth early exit. The ladder, the comparison (`>=`, not `>`), the min/cap
+	// and the latch were all unpinned: the existing convergence test passes through
+	// the OTHER breaker (five deaths inside the 15 minute window), so removing the
+	// fast path's latch left it green. These deaths are 20 minutes apart so the
+	// window never holds more than one, and only the fast path can trip.
+	it("climbs the cooldown ladder and latches at the fifth early exit, with no help from the window", async () => {
+		const f = ensureFixture();
+		const ladder = [15_000, 30_000, 60_000, 120_000];
+		for (let exit = 1; exit <= 5; exit++) {
+			const spawnedAt = T0 + exit * 20 * MIN;
+			plantDead(f, { spawnedAt, exitedAt: spawnedAt + 5_000 });
+			f.registry.broken.delete(f.key);
+			await expect(f.ensure()).resolves.toBeUndefined();
+
+			expect(priv(f.registry).runtimeExitCounts.get(f.key)).toBe(exit);
+			expect(priv(f.registry).runtimeExitWindow.get(f.key)).toHaveLength(1);
+			expect(f.registry.permanentlyBroken.has(f.key)).toBe(exit === 5);
+			if (exit < 5) {
+				expect(f.registry.broken.get(f.key)).toBe(T0 + ladder[exit - 1]);
+			}
+		}
+		const record = ledger("lsp-breaker");
+		expect(record?.latestReasons).toEqual([
+			{
+				subject: f.key,
+				reason: "permanently disabled after 5 early post-init exits",
+			},
+		]);
+		expect(f.spawn).not.toHaveBeenCalled();
+	});
+
+	// Recurrence (#1127): "early" means STRICTLY under the 60s threshold. A server
+	// that stayed up a full minute is a working server that restarted: it clears the
+	// streak and respawns at once. `<=` counted it, and `true` counted every death,
+	// so a legitimate restart marched a healthy server toward permanent disablement.
+	it("treats exactly the threshold as a healthy run that clears the streak and respawns", async () => {
+		const f = ensureFixture();
+		priv(f.registry).runtimeExitCounts.set(f.key, 3);
+		plantDead(f, { spawnedAt: T0, exitedAt: T0 + MIN });
+		const respawned = await f.ensure();
+
+		expect(respawned?.client).toBe(f.spawned[0]);
+		expect(priv(f.registry).runtimeExitCounts.has(f.key)).toBe(false);
+		expect(f.registry.broken.has(f.key)).toBe(false);
+		expect(f.registry.permanentlyBroken.has(f.key)).toBe(false);
+		expect(f.spawn).toHaveBeenCalledTimes(1);
+
+		// One millisecond less is early: it counts and cools down.
+		plantDead(f, { spawnedAt: T0, exitedAt: T0 + MIN - 1 });
+		priv(f.registry).runtimeExitCounts.set(f.key, 3);
+		await expect(f.ensure()).resolves.toBeUndefined();
+		expect(priv(f.registry).runtimeExitCounts.get(f.key)).toBe(4);
+		expect(f.registry.broken.get(f.key)).toBe(T0 + 120_000);
+	});
+
+	// Recurrence (#1127): lifetime is measured from the client's recorded death, and
+	// falls back to detection time only when the death time is missing. Each of the
+	// three inputs the uptime ternary reads had a mutant that left the suite green.
+	it("measures uptime from the recorded death, else from now, else not at all", async () => {
+		// Recorded death: 5 s of life, however long ago it was detected.
+		const recorded = ensureFixture();
+		plantDead(recorded, {
+			spawnedAt: T0 - 3_600_000,
+			exitedAt: T0 - 3_595_000,
+		});
+		await recorded.ensure();
+		expect(priv(recorded.registry).runtimeExitCounts.get(recorded.key)).toBe(1);
+
+		// No death time: detection-time delta (spawned 5 s ago) is early...
+		const lazy = ensureFixture();
+		plantDead(lazy, { spawnedAt: T0 - 5_000 });
+		await lazy.ensure();
+		expect(priv(lazy.registry).runtimeExitCounts.get(lazy.key)).toBe(1);
+
+		// ...and the same delta from a spawn an hour ago is not.
+		const longRun = ensureFixture();
+		plantDead(longRun, { spawnedAt: T0 - 3_600_000 });
+		await longRun.ensure();
+		expect(priv(longRun.registry).runtimeExitCounts.has(longRun.key)).toBe(
+			false,
+		);
+
+		// A death time but no spawn stamp: the lifetime is unknown, so the death is
+		// neither early nor recorded in the window (NaN lifetimes are not evidence).
+		const stampless = ensureFixture("rs");
+		plantDead(stampless, { exitedAt: T0 - 1_000 });
+		await stampless.ensure();
+		expect(priv(stampless.registry).runtimeExitCounts.has(stampless.key)).toBe(
+			false,
+		);
+		expect(priv(stampless.registry).runtimeExitWindow.has(stampless.key)).toBe(
+			false,
+		);
+
+		// Neither stamp: unknown lifetime is not early, and the key respawns.
+		const unknown = ensureFixture();
+		plantDead(unknown, {});
+		const result = await unknown.ensure();
+		expect(priv(unknown.registry).runtimeExitCounts.has(unknown.key)).toBe(
+			false,
+		);
+		expect(result).toBeDefined();
+	});
+
+	// Recurrence (#1127): dead-client cleanup order. The notify write is released
+	// (a waiter must not park on a dead client), the dead client is told to shut
+	// down once, any old cooldown is dropped so a healthy death does not inherit it,
+	// and the respawn is announced with the lifetime it measured.
+	it("releases the notify write, shuts the dead client down once, clears the old cooldown and records the respawn", async () => {
+		const f = ensureFixture();
+		const dead = plantDead(f, {
+			spawnedAt: T0 - 600_000,
+			exitedAt: T0 - 1_000,
+		});
+		f.registry.broken.set(f.key, T0 + 10_000); // a stale cooldown from before
+		let releasedBeforeShutdown: string[] = [];
+		dead.shutdown.mockImplementation(async () => {
+			releasedBeforeShutdown = [...f.calls];
+		});
+		const respawned = await f.ensure();
+
+		expect(dead.shutdown).toHaveBeenCalledTimes(1);
+		expect(releasedBeforeShutdown).toEqual([`releaseNotifyWrite:${f.key}`]);
+		expect(f.registry.broken.has(f.key)).toBe(false);
+		expect(respawned?.client).toBe(f.spawned[0]);
+		expect(f.registry.clients.get(f.key)).toBe(f.spawned[0]);
+		expect(latencyRecords("lsp_server_respawn")).toEqual([
+			{
+				type: "phase",
+				phase: "lsp_server_respawn",
+				filePath: f.file,
+				durationMs: 0,
+				metadata: {
+					serverId: "ts",
+					root: f.root,
+					uptimeMs: 599_000,
+					intentional: false,
+				},
+			},
+		]);
+	});
+});
+
+describe("ClientRegistry respawn breaker, windowed rate (#4449, #1142)", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.setSystemTime(T0);
+	});
+
+	// Recurrence (#1142): a server that dies just PAST the 60s threshold every
+	// time never feeds the fast path; five such deaths inside 15 minutes must still
+	// latch it, with a reason that says why. The reason text carries the window in
+	// minutes (`Math.round(ms / 60_000)`), so an arithmetic slip printed a
+	// nonsense number into the ledger that operators read.
+	it("latches five slow deaths inside the window, naming the rate in the ledger", async () => {
+		const f = ensureFixture();
+		for (let death = 0; death < 5; death++) {
+			const exitedAt = T0 + death * 2 * MIN;
+			plantDead(f, { spawnedAt: exitedAt - 70_000, exitedAt });
+			f.registry.broken.delete(f.key);
+			const result = await f.ensure();
+			// Slow deaths set no cooldown, so each respawns until the fifth latches.
+			expect(result === undefined).toBe(death === 4);
+			expect(f.registry.permanentlyBroken.has(f.key)).toBe(death === 4);
+		}
+		// The fast path saw none of them: every lifetime was 70 s.
+		expect(priv(f.registry).runtimeExitCounts.has(f.key)).toBe(false);
+		expect(ledger("lsp-breaker")?.latestReasons).toEqual([
+			{
+				subject: f.key,
+				reason: "windowed runtime-exit trip: 5 deaths within 15m",
+			},
+		]);
+		expect(f.spawn).toHaveBeenCalledTimes(4);
+	});
+
+	// Recurrence (#1183): the per-key window array is dropped once nothing in it is
+	// still in-window, and only then. `some` flipped to `every` or the boundary
+	// flipped to `>` dropped live evidence (a death exactly 15 minutes old still
+	// counts), and never dropping it leaked an array per crashed key forever.
+	it("drops a stale window array on a healthy death, but keeps one with an in-window entry", async () => {
+		// A first, early death records one timestamp in the window.
+		const stale = ensureFixture();
+		plantDead(stale, { spawnedAt: T0 - 70_000, exitedAt: T0 - 65_000 });
+		await stale.ensure();
+		expect(priv(stale.registry).runtimeExitWindow.get(stale.key)).toEqual([
+			T0 - 65_000,
+		]);
+		// A later healthy death (an hour of life: past the 10 minute ceiling, so it
+		// is not recorded) anchors "now" 40 minutes after the recorded one.
+		const later = T0 + 40 * MIN;
+		plantDead(stale, { spawnedAt: later - 3_600_000, exitedAt: later });
+		stale.registry.broken.delete(stale.key);
+		await stale.ensure();
+		expect(priv(stale.registry).runtimeExitWindow.has(stale.key)).toBe(false);
+
+		// Same shape, but the recorded death sits exactly on the window edge.
+		const edge = ensureFixture();
+		const recorded = T0 - 65_000;
+		// An ancient entry beside the edge one: one live entry is enough to keep it.
+		priv(edge.registry).runtimeExitWindow.set(edge.key, [
+			recorded - 3_600_000,
+			recorded,
+		]);
+		const anchor = recorded + 15 * MIN;
+		plantDead(edge, { spawnedAt: anchor - 3_600_000, exitedAt: anchor });
+		await edge.ensure();
+		expect(priv(edge.registry).runtimeExitWindow.get(edge.key)).toEqual([
+			recorded - 3_600_000,
+			recorded,
+		]);
+	});
+});
+
+describe("ClientRegistry skip records and cooldown expiry (#4449)", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.setSystemTime(T0);
+	});
+
+	// Recurrence (#1743): a cooling-down key is skipped with ONE record that says
+	// how long is left, and a latched key says it is permanent. The fields are what
+	// an operator reads to tell a 15 s blip from a dead server; both were unpinned,
+	// so `Math.max(0, ...)` could become `min` or a sum and the record lied.
+	it("records how long a cooldown has left and that a latch is permanent", async () => {
+		const cooling = ensureFixture();
+		cooling.registry.broken.set(cooling.key, T0 + 7_000);
+		await expect(cooling.ensure()).resolves.toBeUndefined();
+		expect(latencyRecords("lsp_client_skipped_broken")).toEqual([
+			{
+				type: "phase",
+				phase: "lsp_client_skipped_broken",
+				filePath: cooling.file,
+				durationMs: 0,
+				metadata: {
+					serverId: "ts",
+					retryInMs: 7_000,
+					identity: `ts:${normalizeMapKey(cooling.file)}`,
+				},
+			},
+		]);
+		expect(ledger("lsp-client-skipped-broken")?.latestReasons).toEqual([
+			{
+				subject: expect.any(String),
+				reason: "ts in breaker cooldown (count: 1)",
+			},
+		]);
+
+		logLatency.mockClear();
+		const latched = ensureFixture("go");
+		latched.registry.permanentlyBroken.add(latched.key);
+		await expect(latched.ensure()).resolves.toBeUndefined();
+		expect(latencyRecords("lsp_client_skipped_broken")).toEqual([
+			{
+				type: "phase",
+				phase: "lsp_client_skipped_broken",
+				filePath: latched.file,
+				durationMs: 0,
+				metadata: {
+					serverId: "go",
+					permanent: true,
+					identity: `go:${normalizeMapKey(latched.file)}`,
+				},
+			},
+		]);
+		expect(ledger("lsp-client-skipped-broken")?.latestReasons).toContainEqual({
+			subject: expect.any(String),
+			reason: "go latched permanently broken (count: 1)",
+		});
+	});
+
+	// Recurrence (#1743): a command the host reported unavailable is skipped with a
+	// record naming the command and the server, not spawned.
+	it("skips a command that is temporarily unavailable, and says which", async () => {
+		const f = ensureFixture("zz");
+		(f.info as { availabilityKey?: string }).availabilityKey = "zz-lsp-bin";
+		_markDirectLspCommandUnavailableForTests("zz-lsp-bin");
+		await expect(f.ensure()).resolves.toBeUndefined();
+		expect(f.spawn).not.toHaveBeenCalled();
+		expect(latencyRecords("lsp_client_skipped_unavailable_command")).toEqual([
+			{
+				type: "phase",
+				phase: "lsp_client_skipped_unavailable_command",
+				filePath: f.file,
+				durationMs: 0,
+				metadata: {
+					serverId: "zz",
+					command: "zz-lsp-bin",
+					identity: `zz-lsp-bin:${normalizeMapKey(f.file)}`,
+				},
+			},
+		]);
+		expect(
+			ledger("lsp-client-skipped-unavailable-command")?.latestReasons,
+		).toContainEqual({
+			subject: expect.any(String),
+			reason: "command zz-lsp-bin temporarily unavailable (count: 1)",
+		});
+	});
+
+	// Recurrence: a cooldown that ends THIS millisecond has ended. `>=` kept the key
+	// dark for one more touch; an expired entry that was not deleted made every
+	// later breaker read see a stale window.
+	it("treats a cooldown ending now as over, and deletes any expired entry", async () => {
+		const atEdge = ensureFixture();
+		atEdge.registry.broken.set(atEdge.key, T0);
+		const client = await atEdge.ensure();
+		expect(client?.client).toBe(atEdge.spawned[0]);
+		expect(atEdge.registry.broken.has(atEdge.key)).toBe(false);
+
+		const expired = ensureFixture("go");
+		expired.registry.broken.set(expired.key, T0 - 1);
+		await expect(expired.ensure()).resolves.toBeDefined();
+		expect(expired.registry.broken.has(expired.key)).toBe(false);
+
+		const live = ensureFixture("rs");
+		live.registry.broken.set(live.key, T0 + 1);
+		await expect(live.ensure()).resolves.toBeUndefined();
+		expect(live.registry.broken.get(live.key)).toBe(T0 + 1);
+		expect(live.spawn).not.toHaveBeenCalled();
+	});
+
+	// Recurrence: a warm reuse is the one touch that proves a key is healthy again.
+	// It clears the "unavailable" dedupe latch (so the NEXT outage is recorded),
+	// re-arms the idle timer, and reports the reuse.
+	it("clears the unavailable latch and re-arms idle eviction on warm reuse", async () => {
+		process.env.PI_LENS_LSP_IDLE_EVICT_MS = "5000";
+		const f = ensureFixture();
+		const live = fakeClient("ts", f.root);
+		f.registry.clients.set(f.key, live);
+		f.registry.unavailableLogged.add(f.key);
+		const outcomes: string[] = [];
+
+		const hit = await f.ensure((outcome) => outcomes.push(outcome));
+
+		expect(hit?.client).toBe(live);
+		expect(outcomes).toEqual(["warm-reuse"]);
+		expect(f.registry.unavailableLogged.has(f.key)).toBe(false);
+		expect(internals(f.registry).idleEvictionTimers.has(f.key)).toBe(true);
+		expect(internals(f.registry).clientLastUsedAt.get(f.key)).toBe(T0);
+		expect(f.spawn).not.toHaveBeenCalled();
+	});
+});
+
+describe("ClientRegistry acquisition outcomes (#4449)", () => {
+	/** A spawn whose process handle the test releases by hand. */
+	function gatedSpawn(f: Fixture) {
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		f.spawn.mockImplementation(async () => {
+			await gate;
+			return {
+				process: {
+					process: { killed: false, kill: vi.fn() },
+					stdin: {},
+					stdout: {},
+					stderr: {},
+					pid: 77,
+				},
+			};
+		});
+		return release;
+	}
+	/** Let queued microtasks run until the spawn is published in `inFlight`. */
+	async function untilInFlight(f: Fixture) {
+		for (let turn = 0; turn < 200 && !f.registry.inFlight.has(f.key); turn++) {
+			await Promise.resolve();
+		}
+		expect(f.registry.inFlight.has(f.key)).toBe(true);
+	}
+
+	// Recurrence (#2064): the caller that starts a spawn reports `cold-spawn`, one
+	// that arrives while it is in flight reports `cold-spawn-joined`. The unguarded
+	// read of `inFlight` is the join site the service-level tests do not reach (they
+	// join inside the gate); `startedSpawn` defaulting to true made every such
+	// joiner count as a second process start, the 3.0x over-count the field showed.
+	it("reports a caller that arrives mid-spawn as a joiner", async () => {
+		const f = ensureFixture();
+		const release = gatedSpawn(f);
+		const starter: string[] = [];
+		const joiner: string[] = [];
+		const first = f.ensure((o) => starter.push(o));
+		await untilInFlight(f);
+		const second = f.ensure((o) => joiner.push(o));
+		release();
+		const [a, b] = await Promise.all([first, second]);
+
+		expect(a?.client).toBe(b?.client);
+		expect(f.spawn).toHaveBeenCalledTimes(1);
+		expect(starter).toEqual(["cold-spawn"]);
+		expect(joiner).toEqual(["cold-spawn-joined"]);
+		expect(f.registry.inFlight.has(f.key)).toBe(false);
+	});
+
+	// Recurrence (#1325): when the ceiling declines the spawn the caller gets
+	// `undefined` and a `declined` outcome; it must not dereference the missing
+	// spawn handle. Likewise a registry destroyed while the caller waited for the
+	// spawn gate starts no process at all.
+	it("returns undefined without spawning when capacity declines or the registry was destroyed at the gate", async () => {
+		process.env.PI_LENS_LSP_CLIENT_CEILING = "1";
+		const full = ensureFixture();
+		const busyOther = fakeClient("other", "/elsewhere", { busy: true });
+		full.registry.clients.set("other:/elsewhere", busyOther);
+		const outcomes: string[] = [];
+		await expect(full.ensure((o) => outcomes.push(o))).resolves.toBeUndefined();
+		expect(full.spawn).not.toHaveBeenCalled();
+		expect(busyOther.shutdown).not.toHaveBeenCalled();
+
+		delete process.env.PI_LENS_LSP_CLIENT_CEILING;
+		const f = ensureFixture("go");
+		let openGate!: () => void;
+		const held = priv(f.registry).withClientSpawnGate(
+			() =>
+				new Promise<void>((resolve) => {
+					openGate = resolve;
+				}),
+		);
+		const pending = f.ensure();
+		for (let turn = 0; turn < 50; turn++) await Promise.resolve();
+		f.registry.markDestroyed();
+		openGate();
+		await held;
+		await expect(pending).resolves.toBeUndefined();
+		expect(f.spawn).not.toHaveBeenCalled();
+	});
+
+	// Recurrence (#1934 review F1): the outcome of a spawn that produced no client
+	// is read from the verdict the spawn wrote. A policy decline (the service shut
+	// down mid-spawn) is `declined`; a real failure is `spawn-failure`. A literal
+	// `""` or an inverted read mislabelled one as the other.
+	it("names a shutdown mid-spawn `declined` and a failed spawn `spawn-failure`", async () => {
+		const declined = ensureFixture();
+		const release = gatedSpawn(declined);
+		const declinedOutcomes: string[] = [];
+		const pending = declined.ensure((o) => declinedOutcomes.push(o));
+		await untilInFlight(declined);
+		declined.registry.markDestroyed();
+		release();
+		await expect(pending).resolves.toBeUndefined();
+		expect(declinedOutcomes).toEqual(["declined"]);
+
+		const failed = ensureFixture("go");
+		failed.spawn.mockRejectedValue(new Error("spawn exploded"));
+		const failedOutcomes: string[] = [];
+		await expect(
+			failed.ensure((o) => failedOutcomes.push(o)),
+		).resolves.toBeUndefined();
+		expect(failedOutcomes).toEqual(["spawn-failure"]);
+	});
+
+	// Recurrence (#2064 review F2): a spawn that throws BEFORE its own try (here the
+	// trust flag read, a throwing getter standing in for a host call) is an errored
+	// acquisition: the caller sees the original error, with or without an outcome
+	// callback. Calling an absent callback replaced the real error with a TypeError.
+	it("rethrows the spawn's own error whether or not the caller passed an outcome callback", async () => {
+		const f = ensureFixture();
+		Object.defineProperty(f.info, "trustAllowed", {
+			get() {
+				throw new Error("trust read exploded");
+			},
+		});
+		const outcomes: string[] = [];
+		await expect(f.ensure((o) => outcomes.push(o))).rejects.toThrow(
+			"trust read exploded",
+		);
+		expect(outcomes).toEqual(["spawn-failure"]);
+		expect(f.registry.inFlight.has(f.key)).toBe(false);
+		await expect(f.ensure()).rejects.toThrow("trust read exploded");
+	});
+
+	// Recurrence: the `finally` removes only ITS OWN promise. A shutdown clears
+	// `inFlight`; a replacement spawn may then publish a new promise under the same
+	// key while the old one is still settling. Deleting by key alone dropped the
+	// replacement, and a third caller started a duplicate process.
+	it("leaves a newer in-flight promise alone when an older spawn settles", async () => {
+		const f = ensureFixture();
+		const release = gatedSpawn(f);
+		const pending = f.ensure();
+		await untilInFlight(f);
+		const replacement = Promise.resolve<SpawnedServer | undefined>(undefined);
+		f.registry.inFlight.set(f.key, replacement);
+		release();
+		await pending;
+		expect(f.registry.inFlight.get(f.key)).toBe(replacement);
+	});
+
+	// Recurrence (#850): a replacement generation waits for its predecessor's
+	// teardown once. The handoff is cleared only if nobody replaced it meanwhile,
+	// and a registry destroyed while it waited acquires nothing.
+	it("awaits the generation handoff once, keeps a replaced handoff, and honours a destroy during the wait", async () => {
+		const f = ensureFixture();
+		let open!: () => void;
+		const handoff = new Promise<void>((resolve) => {
+			open = resolve;
+		});
+		priv(f.registry).generationHandoff = handoff;
+		const pending = f.ensure();
+		for (let turn = 0; turn < 50; turn++) await Promise.resolve();
+		expect(f.spawn).not.toHaveBeenCalled(); // still waiting on the predecessor
+		open();
+		await expect(pending).resolves.toBeDefined();
+		expect(priv(f.registry).generationHandoff).toBeUndefined();
+
+		const swapped = ensureFixture("go");
+		let openSwapped!: () => void;
+		const first = new Promise<void>((resolve) => {
+			openSwapped = resolve;
+		});
+		const second = new Promise<void>(() => undefined);
+		priv(swapped.registry).generationHandoff = first;
+		const waiting = swapped.ensure();
+		for (let turn = 0; turn < 50; turn++) await Promise.resolve();
+		priv(swapped.registry).generationHandoff = second;
+		openSwapped();
+		await waiting;
+		expect(priv(swapped.registry).generationHandoff).toBe(second);
+
+		const destroyed = ensureFixture("rs");
+		let openDestroyed!: () => void;
+		priv(destroyed.registry).generationHandoff = new Promise<void>(
+			(resolve) => {
+				openDestroyed = resolve;
+			},
+		);
+		const gone = destroyed.ensure();
+		for (let turn = 0; turn < 50; turn++) await Promise.resolve();
+		destroyed.registry.markDestroyed();
+		openDestroyed();
+		await expect(gone).resolves.toBeUndefined();
+		expect(destroyed.spawn).not.toHaveBeenCalled();
+	});
+});
+
+describe("ClientRegistry install policy (#4449)", () => {
+	// Recurrence (#1363): an untrusted project must never reach an auto-install,
+	// and the operator switch is honoured on top of trust. The spawn is told, via
+	// `allowInstall`, which of the two applied; the refusal is also a ledger record
+	// naming the server. Dropping the trust gate or flipping the return let a
+	// denied project install a language server.
+	it("passes allowInstall false when trust is denied or the switch is on, true otherwise", async () => {
+		const allowed = ensureFixture();
+		await allowed.ensure();
+		expect(allowed.spawn.mock.calls[0]?.[1]).toMatchObject({
+			allowInstall: true,
+		});
+
+		process.env.PI_LENS_DISABLE_LSP_INSTALL = "1";
+		const switched = ensureFixture("go");
+		await switched.ensure();
+		expect(switched.spawn.mock.calls[0]?.[1]).toMatchObject({
+			allowInstall: false,
+		});
+		delete process.env.PI_LENS_DISABLE_LSP_INSTALL;
+
+		setProjectTrustState("untrusted");
+		const denied = ensureFixture("rs");
+		// Admitted by the registry compiler, so the spawn backstop lets it through
+		// and only the install decision is under test.
+		(denied.info as { trustAllowed?: boolean }).trustAllowed = true;
+		await denied.ensure();
+		expect(denied.spawn.mock.calls[0]?.[1]).toMatchObject({
+			allowInstall: false,
+		});
+		expect(ledger("trust-refusal")?.latestReasons[0]?.subject).toBe(
+			"lsp install: rs",
+		);
+	});
+});
+
+describe("ClientRegistry adopted roots at acquisition (#4449)", () => {
+	function adoptedEnsure(withLocalBinary: boolean) {
+		const parent = tempProject("adopt-ensure", false);
+		const session = path.join(parent, "zzz-session");
+		const foreign = path.join(parent, "aaa-foreign");
+		fs.mkdirSync(session, { recursive: true });
+		fs.mkdirSync(foreign, { recursive: true });
+		fs.writeFileSync(path.join(session, "package.json"), "{}\n");
+		fs.writeFileSync(path.join(foreign, "package.json"), "{}\n");
+		registerSessionRoot(session);
+		const bin = path.join(foreign, "node_modules", ".bin", "tsls");
+		if (withLocalBinary) {
+			fs.mkdirSync(path.dirname(bin), { recursive: true });
+			fs.writeFileSync(bin, "#!/bin/sh\n");
+		}
+		const { hooks } = makeHooks();
+		const registry = new ClientRegistry(hooks, undefined, session);
+		const spawn = vi.fn(async (_root: string, _options?: unknown) => ({
+			process: {
+				process: { killed: false, kill: vi.fn() },
+				stdin: {},
+				stdout: {},
+				stderr: {},
+				pid: 9,
+			},
+		}));
+		const info = server("ts", {
+			root: async () => foreign,
+			spawn,
+			command: bin,
+		});
+		createLSPClient.mockImplementation(async () => fakeClient("ts", foreign));
+		const key = keyFor("ts", foreign);
+		return {
+			registry,
+			spawn,
+			info,
+			key,
+			foreign,
+			file: path.join(foreign, "a.ts"),
+		};
+	}
+
+	// Recurrence (#4257): a foreign workspace's own binary is code the user did not
+	// choose to run. It is refused with one ledger record, and nothing is marked
+	// adopted or spawned. `if (localBinary)` flipped to true would also have refused
+	// a foreign root with NO local binary, which the next case proves still spawns.
+	it("refuses a project-local binary in an adopted root, recording the decision", async () => {
+		const f = adoptedEnsure(true);
+		await expect(
+			f.registry.ensureClientForServer(f.file, f.info),
+		).resolves.toBeUndefined();
+		expect(f.spawn).not.toHaveBeenCalled();
+		expect(internals(f.registry).adoptedClientKeys.has(f.key)).toBe(false);
+		expect(ledger("lsp-registry-decision")?.latestReasons).toEqual([
+			{
+				subject: f.key,
+				reason: "project-local LSP binary refused for adopted root",
+			},
+		]);
+	});
+
+	// Recurrence (#4257): an adopted root with no project-local binary is served,
+	// marked adopted (so the cap, the lease guard and the 60 s idle window apply),
+	// and the server is told project code is NOT allowed.
+	it("spawns for an adopted root without a local binary, marks it adopted and withholds project code", async () => {
+		const f = adoptedEnsure(false);
+		(f.info as { command?: string }).command = undefined;
+		const result = await f.registry.ensureClientForServer(f.file, f.info);
+		expect(result).toBeDefined();
+		expect(internals(f.registry).adoptedClientKeys.has(f.key)).toBe(true);
+		expect(f.spawn.mock.calls[0]?.[1]).toMatchObject({
+			projectCodeAllowed: false,
+		});
 	});
 });
