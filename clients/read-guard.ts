@@ -1506,8 +1506,7 @@ export class ReadGuard {
 		if (!fileReads || fileReads.length === 0) {
 			// Only a write pi-lens observed (recordWritten, from any producer) is
 			// the agent's own; a newer mtime is any writer's (#3520). It stays the
-			// agent's own while the disk holds the bytes it wrote (#4131). A
-			// whole-file authorship gets a synthetic whole-file read below.
+			// agent's own while the disk holds the bytes it wrote (#4131).
 			this.retireChangedAuthorship(filePath);
 			if (this.writtenThisSession.get(filePath)?.retired) {
 				const verdict = this.blockOrWarn(
@@ -1524,11 +1523,13 @@ export class ReadGuard {
 			const authored = this.writtenThisSession.get(filePath);
 			if (authored && authoredRangeCovers(authored, touchedLines, editRanges)) {
 				// #4387: the bytes were just found intact, so the conversation
-				// holds every line; without the read, the own edit's one-line read
-				// would shadow the authorship for the rest of the file. A range
-				// scope gets none: it would widen to the whole file (#4210).
+				// holds every line. The authorship vouches from here through a
+				// whole-file read that names its write: a move keeps the read
+				// exactly when it keeps the authorship, and the own edit's
+				// one-line read cannot shadow the rest of the file. A range scope
+				// gets none: it would widen to the whole file (#4210).
 				if (authored.authoredRanges === undefined)
-					this.injectCreationRead(filePath, 0, 0);
+					this.injectCreationRead(filePath, 0, 0, authored.toolCallId);
 				const verdict = this.allow();
 				this.recordVerdict(filePath, "edit", touchedLines, verdict, {
 					reasonKind: "session_authored",
@@ -2339,8 +2340,6 @@ export class ReadGuard {
 		}
 		// F-4210-2: an UNKNOWN range is no license of its own and cannot be
 		// composed into a range scope, so it creates none and ends a scope.
-		// Over a whole-file authorship the range is moot, as for a partial
-		// credit (#4210 N3): the checked writer advances it (#4387).
 		if (
 			opts?.authorship === "unknown" &&
 			existing?.authoredRanges !== undefined
@@ -2348,16 +2347,26 @@ export class ReadGuard {
 			this.retireIfChanged(filePath, "unknown-range");
 			return;
 		}
+		// It names no line it produced and records no own-edit read, so with no
+		// read that names a tool call it leaves an empty scope, which vouches
+		// for no line (#4387): a move would keep the advanced authorship and
+		// drop every read that bounds it. Otherwise, over a whole-file
+		// authorship, the range is moot, as for a partial credit (#4210 N3),
+		// and that read bounds the advance.
 		if (opts?.authorship === "unknown" && !existing) return;
+		const unknownLeavesNoScope =
+			opts?.authorship === "unknown" &&
+			!this.reads.get(filePath)?.some((read) => read.toolCallId !== undefined);
 		const observed = observeAuthoredBytes(
 			filePath,
 			opts?.contentHash,
-			opts?.authoredRanges,
+			unknownLeavesNoScope ? [] : opts?.authoredRanges,
 		);
 		const { authoredRanges: _observedRanges, ...observedWithoutRanges } =
 			observed;
-		const composedRanges =
-			existing?.authoredRanges === undefined
+		const composedRanges = unknownLeavesNoScope
+			? []
+			: existing?.authoredRanges === undefined
 				? existing
 					? undefined
 					: observed.authoredRanges

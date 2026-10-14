@@ -2514,11 +2514,13 @@ describe("ReadGuard Tier-2 idle decay and bounds (#1389)", () => {
 		}
 	});
 
-	// #4387: over a whole-file authorship an UNKNOWN range is moot, so the
-	// writer rule alone decides, as for a partial credit (#4210 N3).
-	// Recurrence: the UNKNOWN short-circuit retired the authorship of the
-	// agent's own write at its own oldText edit, a checked writer.
-	it("advances a whole-file authorship over an UNKNOWN credit only from a checked writer (#4387)", () => {
+	// #4387: over a whole-file authorship an UNKNOWN range is moot while a read
+	// that names a tool call bounds the advance (the zero-read allow records
+	// one), and the writer rule decides. Recurrences: the UNKNOWN short-circuit
+	// retired the authorship of the agent's own write at its own oldText edit;
+	// with no such read, a move kept the advanced authorship alone over bytes no
+	// check covered (review r1 F1, S12).
+	it("advances a whole-file authorship over an UNKNOWN credit only from a checked writer with a bounding read (#4387)", () => {
 		const env = setupTestEnvironment("read-guard-authorship-unknown-whole-");
 		resetDegradationLedger();
 		try {
@@ -2531,26 +2533,50 @@ describe("ReadGuard Tier-2 idle decay and bounds (#1389)", () => {
 					authorship: "whole-file",
 					toolCallId: "call-write",
 				});
-				fs.writeFileSync(filePath, "one\nTWO\nthree\n");
-				return { filePath, guard };
+				const entry = () =>
+					guard
+						.exportAuthorship()
+						.entries?.find(
+							(candidate) => path.basename(candidate.filePath) === name,
+						);
+				return { filePath, guard, entry };
 			};
-			// A native oldText edit: its preflight checked this path. The
-			// licensed in-process writer is pinned through the bridge seam in
-			// mutation-bridge.test.ts.
+			const landEdit = (filePath: string) =>
+				fs.writeFileSync(filePath, "one\nTWO\nthree\n");
+			// A native oldText edit after the zero-read allow, which recorded a
+			// read naming the write. The licensed in-process writer is pinned
+			// through the bridge seam in mutation-bridge.test.ts.
 			const own = credit("own.ts");
+			expect(own.guard.checkEdit(own.filePath, [1, 1]).action).toBe("allow");
+			landEdit(own.filePath);
 			own.guard.recordWritten(own.filePath, {
-				stampFileTime: false,
 				authorship: "unknown",
 				toolCallId: "call-edit",
 			});
-			expect(own.guard.checkEdit(own.filePath, [3, 3]).action).toBe("allow");
+			expect(own.entry()).toMatchObject({ toolCallId: "call-edit" });
+			expect(own.entry()?.retired).toBeUndefined();
+			expect(own.entry()?.authoredRanges).toBeUndefined();
+			// No read names a tool call, so nothing would bound the advance after
+			// a move: the credit leaves an empty scope.
+			const unbounded = credit("unbounded.ts");
+			landEdit(unbounded.filePath);
+			unbounded.guard.recordWritten(unbounded.filePath, {
+				authorship: "unknown",
+				toolCallId: "call-edit",
+			});
+			expect(unbounded.entry()?.authoredRanges).toEqual([]);
+			expect(
+				unbounded.guard.checkEdit(unbounded.filePath, [1, 1]).reason,
+			).toContain("this write only covered part");
 			// No pre-write check: it can only end the authorship it changed.
 			const unchecked = credit("unchecked.ts");
+			landEdit(unchecked.filePath);
 			unchecked.guard.recordWritten(unchecked.filePath, {
 				stampFileTime: false,
 				authorship: "unknown",
 				advanceAuthorship: false,
 			});
+			expect(unchecked.entry()?.retired).toBe(true);
 			expect(unchecked.guard.checkEdit(unchecked.filePath, [1, 1]).action).toBe(
 				"block",
 			);
@@ -2563,6 +2589,7 @@ describe("ReadGuard Tier-2 idle decay and bounds (#1389)", () => {
 				authorship: "unknown",
 				toolCallId: "call-edit",
 			});
+			expect(freshGuard.exportAuthorship().entries).toEqual([]);
 			expect(freshGuard.checkEdit(fresh, [1, 1]).action).toBe("block");
 		} finally {
 			env.cleanup();

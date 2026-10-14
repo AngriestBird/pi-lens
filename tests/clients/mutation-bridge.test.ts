@@ -253,12 +253,12 @@ describe("mutation bridge bookkeeping", () => {
 	// observed replay advances it, and one its call did not license ends it.
 	// Recurrence: the UNKNOWN short-circuit ended every authorship, including
 	// the ones a checked writer of the conversation's own call advanced.
-	it("advances whole-file authorship over a licensed observed replay with no range, and ends it over an unlicensed one (#4387)", () => {
+	it("advances whole-file authorship over a licensed observed replay with no range only with a bounding read, and ends it over an unlicensed one (#4387)", () => {
 		const env = setupTestEnvironment("pi-lens-4387-observed-unknown-whole-");
 		const previousDataDir = process.env.PILENS_DATA_DIR;
 		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
 		try {
-			const run = (name: string, licensed: boolean) => {
+			const run = (name: string, licensed: boolean, bounded: boolean) => {
 				const filePath = path.join(env.tmpDir, name);
 				fs.writeFileSync(filePath, "one\ntwo\nthree\n");
 				const runtime = new RuntimeCoordinator();
@@ -277,6 +277,20 @@ describe("mutation bridge bookkeeping", () => {
 						deps,
 					),
 				).toBe(true);
+				// The agent's read of the file, which a move keeps with its call.
+				if (bounded)
+					runtime.readGuard.recordRead({
+						filePath,
+						requestedOffset: 1,
+						requestedLimit: 3,
+						effectiveOffset: 1,
+						effectiveLimit: 3,
+						expandedByLsp: false,
+						turnIndex: 0,
+						writeIndex: 0,
+						timestamp: Date.now(),
+						toolCallId: "call-4387-read",
+					});
 				if (licensed)
 					runtime.readGuard.noteCheckedPaths("call-4387-observed", [filePath]);
 				fs.writeFileSync(filePath, "one\nobserved\nthree\nfour\n");
@@ -292,10 +306,15 @@ describe("mutation bridge bookkeeping", () => {
 						deps,
 					),
 				).toBe(true);
-				return runtime.readGuard.checkEdit(filePath, [4, 4]).action;
+				return runtime.readGuard
+					.exportAuthorship()
+					.entries?.find((entry) => path.basename(entry.filePath) === name);
 			};
-			expect(run("licensed.ts", true)).toBe("allow");
-			expect(run("unlicensed.ts", false)).toBe("block");
+			const licensed = run("licensed.ts", true, true);
+			expect(licensed?.retired).toBeUndefined();
+			expect(licensed?.authoredRanges).toBeUndefined();
+			expect(run("unbounded.ts", true, false)?.authoredRanges).toEqual([]);
+			expect(run("unlicensed.ts", false, true)?.retired).toBe(true);
 		} finally {
 			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 			else process.env.PILENS_DATA_DIR = previousDataDir;

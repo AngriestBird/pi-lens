@@ -335,12 +335,16 @@ async function piWrite(
 	);
 }
 
-/** pi's native `edit` (oldText/newText): tool_call, host apply, tool_result. */
+/**
+ * pi's native `edit` (oldText/newText): tool_call, host apply, `gate`
+ * (another writer between the host apply and the handler), tool_result.
+ */
 async function textEdit(
 	runtime: RuntimeCoordinator,
 	file: string,
 	oldText: string,
 	newText: string,
+	gate?: () => void,
 ): Promise<{ blocked: boolean; reason?: string }> {
 	const toolCallId = `text-edit-${++seq}`;
 	const input = { path: file, edits: [{ oldText, newText }] };
@@ -349,6 +353,7 @@ async function textEdit(
 	)) as { block?: boolean; reason?: string } | undefined;
 	if (verdict?.block === true) return { blocked: true, reason: verdict.reason };
 	writeNow(file, fs.readFileSync(file, "utf8").replace(oldText, newText));
+	gate?.();
 	await handleToolResult(
 		resultDeps(runtime, {
 			toolName: "edit",
@@ -445,6 +450,40 @@ beforeEach(() => {
 	vi.mocked(dispatchLintWithResult).mockReset();
 	vi.mocked(dispatchLintWithResult).mockResolvedValue(CLEAN_DISPATCH as never);
 });
+
+/**
+ * The real cross-extension read bridge, registered once for the file (its
+ * global property is non-configurable); `_bridgeRuntime` points it at the
+ * current case's guard. #3654: the v1 shim runs the unified bridge body,
+ * wired as index.ts wires it; only the read half of the deps is reachable
+ * from a read.
+ */
+let _bridgeRuntime: RuntimeCoordinator | undefined;
+function wireReadBridge(): void {
+	const unused = (): never => {
+		throw new Error("read-only bridge deps: unexpected mutation call");
+	};
+	const deps = {
+		getRuntime: unused,
+		getCacheManager: unused,
+		getProjectRoot: unused,
+		getDispatchCwd: unused,
+		countFileLines: unused,
+		isRecordable: () => true,
+		getReadGuard: () => _bridgeRuntime!.readGuard,
+		getTurnIndex: () => 0,
+		peekWriteIndex: () => 0,
+		getFlag: () => undefined,
+		isExternalOrVendorFile: unused,
+		isPathIgnoredByProject: unused,
+		notifyExternalFileChange: unused,
+		nodeFs: { existsSync: fs.existsSync, statSync: fs.statSync },
+	};
+	registerReadBridge({
+		isRecordable: () => true,
+		forward: (entry) => recordIOEntry(entry, deps),
+	});
+}
 
 describe("#3519: the attached post-autofix bytes are a read", () => {
 	it("allows a one-line edit at the attachment's line numbers (AutofixFalseBlock)", async () => {
@@ -2304,16 +2343,15 @@ describe("#3525: FileTime moves only over bytes the conversation accounts for", 
 	});
 
 	/**
-	 * The zero-read state a `/tree` or `/fork` leaves: the injected read names
-	 * no tool call, so the move drops it, and the authorship, whose write is on
-	 * the branch, alone vouches (AuthorOwnOldTextNoInject).
+	 * `/tree` to the current leaf, or a resume of it: every tool call so far
+	 * is on the branch (`index.ts` passes `retainBranch` the branch's tool
+	 * call ids; `importBranch` and `importAuthorship` keep the same set).
 	 */
-	const moveKeepingAuthorship = (runtime: RuntimeCoordinator, file: string) => {
-		const id = runtime.readGuard
-			.exportAuthorship()
-			.entries?.find((entry) => entry.filePath === file)?.toolCallId;
-		runtime.readGuard.retainBranch(new Set(id === undefined ? [] : [id]));
-		expect(runtime.readGuard.getReadHistory(file)).toEqual([]);
+	const moveToLeaf = (runtime: RuntimeCoordinator) => {
+		const ids = new Set<string>();
+		for (const prefix of ["read-", "edit-", "write-", "text-edit-", "bash-"])
+			for (let n = 0; n <= seq; n += 1) ids.add(`${prefix}${n}`);
+		runtime.readGuard.retainBranch(ids);
 	};
 
 	it("allows the next edit after a bash write and its own oldText edits, also after a branch move (#4387)", async () => {
@@ -2329,7 +2367,7 @@ describe("#3525: FileTime moves only over bytes the conversation accounts for", 
 			const second = await textEdit(runtime, file, "alpha\n", "ALPHA\n");
 			expect(second.reason).toBeUndefined();
 			expect(second.blocked).toBe(false);
-			moveKeepingAuthorship(runtime, file);
+			moveToLeaf(runtime);
 			const positional = await positionalEdit(runtime, file, [[2, 2, "BETA2"]]);
 			expect(positional.reason).toBeUndefined();
 			expect(positional.blocked).toBe(false);
@@ -2340,8 +2378,9 @@ describe("#3525: FileTime moves only over bytes the conversation accounts for", 
 	});
 
 	// #4387 keeps #4210's fail-closed direction: the own oldText edit advances
-	// the authorship to its own bytes, so a later foreign change still ends it.
-	it("still ends that authorship when another writer changes the bytes after the own oldText edit (#4387)", async () => {
+	// the authorship to its own bytes, so a later foreign change is refused,
+	// before a move and after one.
+	it("still refuses the line another writer changed after the own oldText edit, also after a move (#4387)", async () => {
 		const env = setupTestEnvironment("rg-4387-own-bash-foreign-");
 		try {
 			const file = fixture(env.tmpDir, "probe.ts", "alpha\nbeta\ngamma\n");
@@ -2350,14 +2389,118 @@ describe("#3525: FileTime moves only over bytes the conversation accounts for", 
 			expect(
 				(await textEdit(runtime, file, "gamma\n", "GAMMA\n")).blocked,
 			).toBe(false);
-			moveKeepingAuthorship(runtime, file);
 			foreignWrite(file, 1, "EXTERNAL1");
-			const edit = await textEdit(runtime, file, "BETA\n", "BETA2\n");
+			expect((await positionalEdit(runtime, file, [[1, 1, "A"]])).blocked).toBe(
+				true,
+			);
+			moveToLeaf(runtime);
+			expect((await positionalEdit(runtime, file, [[1, 1, "A"]])).blocked).toBe(
+				true,
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	/**
+	 * #4387 review r1 F1 (S3, AuthorOwnOldTextForeign in formal/read-guard): an
+	 * own oldText edit that passes on the read path advances the authorship
+	 * over bytes its preflight never checked, here another writer's line 5.
+	 * The read that bounds it is the one the first own edit recorded from the
+	 * authorship. Recurrence: that read named no tool call, so a move dropped
+	 * it and kept the authorship, and the edit of the line the agent never saw
+	 * passed.
+	 */
+	it("keeps another writer's line refused after own oldText edits and a move (#4387 S3)", async () => {
+		const env = setupTestEnvironment("rg-4387-s3-");
+		try {
+			const file = fixture(env.tmpDir, "probe.ts", `${lines(10).join("\n")}\n`);
+			const runtime = newRuntime(env.tmpDir);
+			await bashSed(runtime, file, "line3", "agent3");
+			expect(
+				(await textEdit(runtime, file, "line1\n", "AGENT1\n")).blocked,
+			).toBe(false);
+			foreignWrite(file, 5, "EXTERNAL5");
+			expect(
+				(await textEdit(runtime, file, "line2\n", "AGENT2\n")).blocked,
+			).toBe(false);
+			moveToLeaf(runtime);
+			const edit = await positionalEdit(runtime, file, [[5, 5, "agent5"]]);
 			expect(edit.blocked).toBe(true);
-			expect(edit.reason).toContain(AUTHORSHIP_RETIRED);
-			const positional = await positionalEdit(runtime, file, [[3, 3, "G"]]);
-			expect(positional.blocked).toBe(true);
-			expect(positional.reason).toContain(AUTHORSHIP_RETIRED);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	/**
+	 * #4387 review r1 F1 (S10, AuthorOwnOldTextInflight): another writer lands
+	 * between the host's apply of an own oldText edit and pi-lens' tool_result,
+	 * so the credit advances over its line. Recurrence: commit 1 alone let the
+	 * next edit of that line pass with no move; with the id-less read, after one.
+	 */
+	it("keeps a line another writer changed during an own oldText edit refused, also after a move (#4387 S10)", async () => {
+		const env = setupTestEnvironment("rg-4387-s10-");
+		try {
+			const file = fixture(env.tmpDir, "probe.ts", `${lines(10).join("\n")}\n`);
+			const runtime = newRuntime(env.tmpDir);
+			await bashSed(runtime, file, "line3", "agent3");
+			expect(
+				(await textEdit(runtime, file, "line1\n", "AGENT1\n")).blocked,
+			).toBe(false);
+			const inflight = await textEdit(
+				runtime,
+				file,
+				"line2\n",
+				"AGENT2\n",
+				() => foreignWrite(file, 5, "EXTERNAL5"),
+			);
+			expect(inflight.blocked).toBe(false);
+			expect(
+				(await positionalEdit(runtime, file, [[5, 5, "agent5"]])).blocked,
+			).toBe(true);
+			moveToLeaf(runtime);
+			expect(
+				(await positionalEdit(runtime, file, [[5, 5, "agent5"]])).blocked,
+			).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	/**
+	 * #4387 r2 (S12, AuthorOwnOldTextIdless): an authorship vouches only through
+	 * a read a move keeps with it. A bridge read names no tool call, so with
+	 * only that read the own oldText edit's tool_call records the authorship
+	 * as a read itself. Recurrence: with the bridge read alone, the credit
+	 * advanced over a line another writer landed during the edit, the move
+	 * dropped the bridge read, and the authorship let that line be edited.
+	 */
+	it("keeps a line another writer changed during an own oldText edit refused when only a bridge read was there (#4387 S12)", async () => {
+		wireReadBridge();
+		const env = setupTestEnvironment("rg-4387-s12-");
+		try {
+			const file = fixture(env.tmpDir, "probe.ts", `${lines(10).join("\n")}\n`);
+			const runtime = newRuntime(env.tmpDir);
+			_bridgeRuntime = runtime;
+			await bashSed(runtime, file, "line3", "agent3");
+			(globalThis as Record<symbol, ReadBridge>)[READ_BRIDGE_KEY].recordRead({
+				filePath: file,
+				requestedOffset: 1,
+				requestedLimit: 3,
+			});
+			expect(runtime.readGuard.getReadHistory(file)).toHaveLength(1);
+			const inflight = await textEdit(
+				runtime,
+				file,
+				"line2\n",
+				"AGENT2\n",
+				() => foreignWrite(file, 5, "EXTERNAL5"),
+			);
+			expect(inflight.blocked).toBe(false);
+			moveToLeaf(runtime);
+			expect(
+				(await positionalEdit(runtime, file, [[5, 5, "agent5"]])).blocked,
+			).toBe(true);
 		} finally {
 			env.cleanup();
 		}
@@ -2746,40 +2889,10 @@ describe("#3524: the creation read is the written content", () => {
  * which carries read-time hashes and never a binding. This drives the real
  * cross-extension bridge and the real native `read` tool through
  * `handleToolCall` / `handleToolResult`: the stale binding is superseded only
- * by a newer covering read whose hashes still match disk. The bridge is
- * registered once for the file (its global property is non-configurable);
- * `_bridgeRuntime` points it at the current case's guard.
+ * by a newer covering read whose hashes still match disk.
  */
-let _bridgeRuntime: RuntimeCoordinator | undefined;
-
 describe("#3962: a native re-read supersedes a stale bridge binding", () => {
-	beforeAll(() => {
-		// #3654: the v1 shim runs the unified bridge body, wired as index.ts
-		// wires it; only the read half of the deps is reachable from a read.
-		const unused = (): never => {
-			throw new Error("read-only bridge deps: unexpected mutation call");
-		};
-		const deps = {
-			getRuntime: unused,
-			getCacheManager: unused,
-			getProjectRoot: unused,
-			getDispatchCwd: unused,
-			countFileLines: unused,
-			isRecordable: () => true,
-			getReadGuard: () => _bridgeRuntime!.readGuard,
-			getTurnIndex: () => 0,
-			peekWriteIndex: () => 0,
-			getFlag: () => undefined,
-			isExternalOrVendorFile: unused,
-			isPathIgnoredByProject: unused,
-			notifyExternalFileChange: unused,
-			nodeFs: { existsSync: fs.existsSync, statSync: fs.statSync },
-		};
-		registerReadBridge({
-			isRecordable: () => true,
-			forward: (entry) => recordIOEntry(entry, deps),
-		});
-	});
+	beforeAll(wireReadBridge);
 
 	it("lets the real read tool clear a stale bridge binding for a positional edit", async () => {
 		const env = setupTestEnvironment("rg-3962-native-");
