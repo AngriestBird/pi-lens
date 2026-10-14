@@ -2506,6 +2506,40 @@ describe("#3525: FileTime moves only over bytes the conversation accounts for", 
 		}
 	});
 
+	/**
+	 * #4387 review G3: the pipeline's own-path whole-file credit after a native
+	 * edit runs only when the pipeline rewrote the bytes, as it already did
+	 * for a positional edit. Recurrence: after an oldText edit of a file the
+	 * conversation had only partly read, it made a whole-file authorship the
+	 * edit's UNKNOWN credit refused, with no transcript id, which round 1 then
+	 * let outlive the next oldText edit.
+	 */
+	it("makes no authorship from an oldText edit of a file the conversation only read (#4387 G3)", async () => {
+		const env = setupTestEnvironment("rg-4387-g3-");
+		try {
+			const file = fixture(env.tmpDir, "probe.ts", `${lines(20).join("\n")}\n`);
+			const runtime = newRuntime(env.tmpDir);
+			await piRead(runtime, file, { offset: 1, limit: 3 });
+			const authorship = () =>
+				runtime.readGuard
+					.exportAuthorship()
+					.entries?.find((entry) => entry.filePath === file);
+			expect(
+				(await textEdit(runtime, file, "line2\n", "AGENT2\n")).blocked,
+			).toBe(false);
+			expect(authorship()).toBeUndefined();
+			expect(
+				(await textEdit(runtime, file, "line3\n", "AGENT3\n")).blocked,
+			).toBe(false);
+			expect(authorship()).toBeUndefined();
+			expect(
+				(await positionalEdit(runtime, file, [[15, 15, "x"]])).blocked,
+			).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("keeps another writer's change stale after an oldText edit passed it (R4)", async () => {
 		const env = setupTestEnvironment("rg-3525-r4-");
 		try {

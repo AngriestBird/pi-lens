@@ -1,6 +1,7 @@
 // lane: windows-vitest — #3294's case-spelling cell asserts the host
 // filesystem's own answer; no external toolchain is required because the
 // production handleToolResult path and pipeline boundary are in-process.
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
@@ -4560,6 +4561,11 @@ describe("runtime-tool-result inline behavior warnings", () => {
 				hasBlockers: false,
 				isError: false,
 				fileModified: true,
+				// runPipeline reports the target's post-write hash whenever its own
+				// write touched the target (pipeline.ts, #2499).
+				postWriteStateHash: createHash("sha256")
+					.update(fs.readFileSync(filePath))
+					.digest("hex"),
 				changedFiles: [filePath, siblingPath],
 			});
 			const runtime = new RuntimeCoordinator();

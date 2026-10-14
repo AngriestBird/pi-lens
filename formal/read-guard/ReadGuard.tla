@@ -563,13 +563,15 @@ Edit(lo, span, oldText) ==
 \* edit's credit is UNKNOWN-range (#4387, OldTextRetires above): over an
 \* existing authorship it advances only with a read that names a tool call to
 \* bound it (OldTextNeedsNamedRead), else it leaves an empty scope. With no
-\* authorship the UNKNOWN credit makes none, but the pipeline's own-path
-\* whole-file credit still authors the file, naming no tool call (Carry).
+\* authorship the UNKNOWN credit makes none, and since #4387 round 2 (review
+\* G3) the pipeline's own-path whole-file credit no longer authors the file
+\* over it. Before, it did (Carry): an id-less record that no verdict here
+\* consults (a read exists, and every move drops it), so no switch keeps it.
 EditRW ==
     /\ pc = "editRW"
     /\ ft' = rev /\ pendCreate' = FALSE
     /\ written' = IF pend.own THEN AuthPart(disk)
-                  ELSE IF ~written.on THEN Carry(disk)
+                  ELSE IF ~written.on THEN written
                   ELSE IF OldTextRetires THEN Retired
                   ELSE IF OldTextNeedsNamedRead /\ (~NamedRead \/ written.empty)
                        THEN [Auth(disk) EXCEPT !.empty = TRUE]

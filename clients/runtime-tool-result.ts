@@ -1267,9 +1267,11 @@ async function dispatchPipelineAnalysis(args: {
 			),
 		]);
 		for (const changedFile of changedForReadGuard) {
-			// A native positional edit already credited its own produced lines above.
-			// The pipeline may re-credit ownPath only when it actually rewrote those
-			// bytes; otherwise a whole-file stamp would erase the native scope.
+			// A native edit already credited its own bytes above (a positional
+			// edit with its produced lines, any other with UNKNOWN ones). The
+			// pipeline may re-credit ownPath only when it actually rewrote those
+			// bytes; otherwise a whole-file stamp would erase the native scope or
+			// make a first authorship the edit's credit refused (#4387).
 			if (
 				changedFile === ownPath &&
 				pipelineOwnedWriteHash === undefined &&
@@ -3032,7 +3034,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			participantTotal,
 			toolResultStart,
 			nativeAppliedPairs,
-			preserveNativeAuthorship: nativeAuthoredRanges !== undefined,
+			preserveNativeAuthorship: mutation.kind !== "write",
 			allowAutonomousWriters: bashAuthorshipConfirmed,
 			// #3512: one capture for the whole dispatch, the same one the
 			// inline verdict below writes through.
