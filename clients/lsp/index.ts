@@ -6438,8 +6438,10 @@ export class LSPService {
 			return [];
 		}
 		const startedAt = Date.now();
-		const candidateServerIds = getServersForFileWithConfig(filePath).map(
-			(s) => s.id,
+		// #4323: a server this read leaves unacquired is not a candidate for it,
+		// so the unavailable text never names one the operator switched off.
+		const candidateServerIds = getServersForFileWithConfig(filePath).flatMap(
+			(s) => (excludeServerIds?.has(s.id) ? [] : [s.id]),
 		);
 		const { clients: spawned, serverCountAttempted } =
 			await this.getClientsForFile(filePath, excludeServerIds);

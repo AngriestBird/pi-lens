@@ -316,6 +316,16 @@ describe("an explicit LSP check with Opengrep switched off (#4323)", () => {
 		expect(result.text).not.toContain(OPENGREP_FINDING);
 	});
 
+	it("does not name a switched-off Opengrep as a candidate in the unavailable text", async () => {
+		// Recurrence: the YAML server is missing, so the check reports the
+		// language server unavailable and lists the servers it could ask; a
+		// switched-off Opengrep was listed although it was never asked (#4391 F5).
+		const result = await diagnose({ path: yamlProbe }, noOpengrep);
+
+		expect(result.text).toContain("LSP unavailable for");
+		expect(result.text).toMatch(/ candidates=yaml\. /);
+	});
+
 	it("does not start Opengrep for lsp_navigation workspaceDiagnostics", async () => {
 		const text = await navigateDiagnostics(probe, noOpengrep);
 
