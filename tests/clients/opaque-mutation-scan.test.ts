@@ -689,6 +689,9 @@ describe("partial-recognition recovery (#2000 PR-B)", () => {
 			// Delta assertion: latency.log is append-only and shared, so assert
 			// on the LINES THIS RUN ADDED - a plain toContain would stay green
 			// forever after the first ever emission (review round-2 P2).
+			// Drain before the baseline (#4381): a row this test already queued would
+			// land after it and read as one this run added.
+			await flushLatencyLog();
 			const latencyPath = path.join(getGlobalPiLensDir(), "latency.log");
 			const beforeLines = new Set(
 				fs.existsSync(latencyPath)
@@ -732,6 +735,9 @@ describe("partial-recognition recovery (#2000 PR-B)", () => {
 				// Break the probe AFTER the baseline: git status now exits nonzero.
 				fs.writeFileSync(path.join(repoDir, ".git", "index"), "corrupt");
 
+				// Drain before the baseline (#4381): a row this test already queued would
+				// land after it and read as one this run added.
+				await flushLatencyLog();
 				const latencyPath = path.join(getGlobalPiLensDir(), "latency.log");
 				const beforeLines = new Set(
 					fs.existsSync(latencyPath)
@@ -1020,6 +1026,9 @@ describe("failed Git integration recovery dispatch", () => {
 
 				const runtime = integrationRuntime("failed-integration-telemetry");
 				const command = "git merge incoming";
+				// Drain before the baseline (#4381): a row this test already queued would
+				// land after it and read as one this run added.
+				await flushLatencyLog();
 				const latencyPath = path.join(getGlobalPiLensDir(), "latency.log");
 				const beforeLines = new Set(
 					fs.existsSync(latencyPath)
@@ -1074,6 +1083,9 @@ describe("failed Git integration recovery dispatch", () => {
 
 				const runtime = integrationRuntime("failed-integration-unknown-pair");
 				const command = "git merge incoming";
+				// Drain before the baseline (#4381): a row this test already queued would
+				// land after it and read as one this run added.
+				await flushLatencyLog();
 				const latencyPath = path.join(getGlobalPiLensDir(), "latency.log");
 				const beforeLines = new Set(
 					fs.existsSync(latencyPath)

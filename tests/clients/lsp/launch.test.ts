@@ -145,6 +145,11 @@ describe("lsp launch", () => {
 				startupFailureWindowMs: 1,
 			});
 
+			// Drain first (#4381): `logSessionStart` only enqueues, so a read before
+			// the append lands sees neither the token nor its redaction.
+			const { flushSessionStartLog } =
+				await import("../../../clients/sessionstart-logger.js");
+			await flushSessionStartLog();
 			const log = fs.readFileSync(
 				path.join(tempDir, "sessionstart.log"),
 				"utf8",
