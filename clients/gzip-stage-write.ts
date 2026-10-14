@@ -50,7 +50,13 @@ export interface GzipStageWorkerRequest {
 export interface GzipStageWorkerResult {
 	id: number;
 	generation: number;
-	stagePath: string;
+	/**
+	 * Optional on purpose (#4400): this is wire data from another thread, and a
+	 * worker that failed before staging (or a build that does not echo it) leaves
+	 * it out. A host cleans up the path it sent in its own request record and
+	 * reads this only for a result with no such record.
+	 */
+	stagePath?: string;
 	rawBytes?: number;
 	gzBytes?: number;
 	serializeMs?: number;
@@ -59,6 +65,23 @@ export interface GzipStageWorkerResult {
 	semanticFingerprint?: string;
 	skippedUnchanged?: boolean;
 	error?: string;
+}
+
+/**
+ * Host-side reap of a stage file that a worker `message` listener no longer
+ * needs. `force` suppresses ENOENT but not EISDIR or EBUSY/EPERM (Windows AV
+ * or backup can briefly hold the handle), and a throw out of that listener is
+ * an uncaught exception that ends the host (#1361, #4400). Returns the failure
+ * so each host records it in its own sink; the startup stage sweep reclaims
+ * whatever a failed removal leaves behind.
+ */
+export function reapStageFile(stagePath: string): Error | undefined {
+	try {
+		fs.rmSync(stagePath, { force: true });
+		return undefined;
+	} catch (err) {
+		return err instanceof Error ? err : new Error(String(err));
+	}
 }
 
 /**
@@ -185,9 +208,10 @@ export async function writeGzipStageFile(
  */
 export function serveGzipStageWorker<
 	Req extends GzipStageWorkerRequest,
-	Base extends { id: number; generation: number; stagePath: string },
+	Base extends { id: number; generation: number },
 >(
-	buildBaseResult: (request: Req) => Base,
+	// The worker must echo `stagePath`; its host may not rely on that (#4400).
+	buildBaseResult: (request: Req) => Base & { stagePath: string },
 	options?: {
 		semanticFingerprint?: (request: Req, body: string | Uint8Array) => string;
 		skipIfFingerprints?: (request: Req) => readonly string[] | undefined;
