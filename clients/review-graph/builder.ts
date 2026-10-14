@@ -45,6 +45,8 @@ import { getReviewGraphMaxFilesDerived } from "../project-scale.js";
 import { compareOrdinal, escapeRegExp } from "../string-utils.js";
 import { BoundedLruCache } from "../bounded-cache.js";
 import {
+	fileAnswerNames,
+	importSourceNameParts,
 	jsTsCandidatePaths,
 	resolveAliasedImport,
 	resolveImportToFiles,
@@ -5019,18 +5021,15 @@ function importersResolvingTo(
 	created: ReadonlySet<string>,
 	ignoredIds?: ReadonlySet<string>,
 ): string[] {
-	const names = new Set<string>();
-	for (const file of created) {
-		names.add(path.basename(file).split(".")[0] ?? "");
-		names.add(path.basename(path.dirname(file)));
-	}
-	names.delete("");
+	const names = new Set([...created].flatMap(fileAnswerNames));
 	const importers = new Set<string>();
 	for (const node of graph.nodes.values()) {
 		if (node.kind !== "module" && node.kind !== "external") continue;
 		const source = node.metadata?.source;
 		if (typeof source !== "string") continue;
-		if (!source.split(/[^\w$-]+/).some((part) => names.has(part))) continue;
+		if (!importSourceNameParts(source).some((part) => names.has(part))) {
+			continue;
+		}
 		for (const edge of graph.edgesByTo.get(node.id) ?? []) {
 			if (edge.kind !== "imports") continue;
 			const importer = graph.nodes.get(edge.from);

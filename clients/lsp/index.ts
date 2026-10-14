@@ -17,6 +17,7 @@ import { BoundedFifoMap } from "../bounded-cache.js";
 import { workspaceFileCreatedAtFor } from "./workspace-diagnostics-session.js";
 import {
 	emitCreatedImportScanRollupAtSessionEnd,
+	goPackageFilesToAnnounce,
 	importTargetsToAnnounce,
 } from "./created-import-targets.js";
 import { getProjectIgnoreMatcher, isExcludedDirName } from "../file-utils.js";
@@ -8257,9 +8258,11 @@ export class LSPService {
 		// #4320: lookups below run before any touch, so a module created since
 		// the last sweep must reach its servers first. #4346: so must one only
 		// a file's imports name (created outside pi-lens), for every file a
-		// fresh clean entry will not answer (#4368 r1 F1).
+		// fresh clean entry will not answer (#4368 r1 F1), and a Go file's
+		// package files; each resolved file's imports go to the cache.
 		this.announceCreatedFiles([
 			...files,
+			...goPackageFilesToAnnounce(files),
 			...(await importTargetsToAnnounce(
 				root,
 				files.filter(
@@ -8269,6 +8272,8 @@ export class LSPService {
 							workspaceSweepScopeKey,
 						),
 				),
+				(filePath, scope) =>
+					workspaceDiagnosticsCacheCtx.noteImportScope(filePath, scope),
 			)),
 		]);
 		const cachedResults: LSPWorkspaceDiagnosticResult[] = [];

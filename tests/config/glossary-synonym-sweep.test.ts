@@ -961,8 +961,13 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp-mutation.ts": 3,
 		"clients/lsp/client-registry.ts": 4,
 		"clients/lsp/config.ts": 9,
+		// #4346: resolves a Go importer's package directory to announce its peers.
+		"clients/lsp/created-import-targets.ts": 3,
 		"clients/lsp/edits.ts": 23,
 		"clients/lsp/index.ts": 15,
+		// #4346: Go package directories and TS/JS extensions of the implicit
+		// dependency scope (same-package files, ambient declarations).
+		"clients/lsp/implicit-scope.ts": 7,
 		"clients/lsp/inferred-project.ts": 3,
 		"clients/lsp/jvm-runtime.ts": 19,
 		"clients/lsp/language.ts": 3,
@@ -976,7 +981,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// `typescriptDirsForTsc`, the list of package dirs beside a resolved `tsc`.
 		"clients/lsp/server.ts": 125,
 		"clients/lsp/session-roots.ts": 6,
-		"clients/lsp/workspace-diagnostics-cache.ts": 13,
+		// 13 -> 15 (#4346): a creation's path joins the entry's dependency
+		// scope test (Go package directory, created-file stem/directory names).
+		"clients/lsp/workspace-diagnostics-cache.ts": 15,
+		// #4346: a creation record carries the created file's path.
+		"clients/lsp/workspace-diagnostics-session.ts": 2,
 		// 6 -> 5 (#3643): removed the obsolete ring path-comparison branch;
 		// dispatch identity now arrives on DispatchResult.
 		"clients/mcp/analyze.ts": 5,
@@ -1031,11 +1040,14 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/recent-touches.ts": 5,
 		"clients/reverse-deps.ts": 8,
 		"clients/review-graph-logger.ts": 2,
-		// 33 -> 36 (#4346): the importer pass names a created file by its stem and directory.
-		"clients/review-graph/builder.ts": 36,
+		// 33 -> 36 (#4346): the importer pass names a created file by its stem
+		// and directory; 36 -> 33 (#4346 final lane): that name test moved to
+		// import-resolvers.ts `fileAnswerNames`, shared with the LSP cache.
+		"clients/review-graph/builder.ts": 33,
 		"clients/review-graph/format.ts": 4,
 		"clients/review-graph/git-identity.ts": 10,
-		"clients/review-graph/import-resolvers.ts": 61,
+		// 61 -> 64 (#4346 final lane): `fileAnswerNames`, moved from builder.ts.
+		"clients/review-graph/import-resolvers.ts": 64,
 		"clients/review-graph/tsconfig-paths.ts": 35,
 		"clients/review-graph/workspace-modules.ts": 27,
 		"clients/ruff-client.ts": 4,
