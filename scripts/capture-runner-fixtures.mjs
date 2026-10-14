@@ -83,6 +83,49 @@ export const CAPTURES = [
 		argv: ["vet", "-c=false", "."],
 	},
 	{
+		runner: "dart-analyze",
+		tool: "dart",
+		workspace: smoke("dart"),
+		file: "bad.dart",
+		argv: ["analyze", "--format=machine", "bad.dart"],
+	},
+	{
+		runner: "javac",
+		tool: "javac",
+		versionArgs: "-version",
+		workspace: smoke("java"),
+		file: "Bad.java",
+		argv: ["-Xlint:none", "-proc:none", "Bad.java"],
+	},
+	{
+		// ktlint is a launcher script over `java -jar`, so a JDK must be on PATH.
+		runner: "ktlint",
+		tool: "ktlint",
+		workspace: smoke("kotlin"),
+		file: "Bad.kt",
+		argv: ["--reporter=json", "Bad.kt"],
+	},
+	{
+		// Needs Erlang on PATH: gleam shells out to `escript` even for `check`.
+		runner: "gleam-check",
+		tool: "gleam",
+		workspace: smoke("gleam"),
+		file: "src/smoke.gleam",
+		argv: ["check"],
+	},
+	{
+		// The Mix path (`mix.exs` present). tool-smoke/elixir keeps bad.ex at the
+		// project root, which `mix compile` never reads, so this capture uses
+		// tool-smoke/elixir-mix, whose file sits under lib/. `mix --version`
+		// leads with the Erlang banner, so the version comes from Elixir itself.
+		runner: "elixir-check",
+		tool: "mix",
+		versionArgs: "run --no-compile --no-start -e IO.puts(System.version())",
+		workspace: smoke("elixir-mix"),
+		file: "lib/bad.ex",
+		argv: ["compile", "--warnings-as-errors"],
+	},
+	{
 		runner: "go-vet",
 		case: "type-error",
 		tool: "go",

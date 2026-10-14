@@ -1,0 +1,20 @@
+{
+	"provenance": {
+		"runner": "dart-analyze",
+		"tool": "dart",
+		"version": "3.13.5",
+		"command": "dart analyze --format=machine bad.dart",
+		"argv": [
+			"analyze",
+			"--format=machine",
+			"bad.dart"
+		],
+		"workspace": "tests/fixtures/tool-smoke/dart",
+		"platform": "linux-x64",
+		"capturedAt": "2026-10-14"
+	},
+	"file": "bad.dart",
+	"exitCode": 3,
+	"stdout": "ERROR|COMPILE_TIME_ERROR|INVALID_ASSIGNMENT|__WORKSPACE__/bad.dart|3|11|14|A value of type 'String' can't be assigned to a variable of type 'int'.\n",
+	"stderr": ""
+}
