@@ -79,7 +79,7 @@ jobs:
       PI_LENS_TEST_MAX_WORKERS: "3"
       PI_LENS_TEST_TIMEOUT_SCALE: "3"
       WITH_ALONE: ${{ github.event.schedule == '0 5 * * 0' || inputs.with_alone == true || github.event_name == 'push' }}
-      CENSUS_FILES: ${{ inputs.files }}
+      CENSUS_FILES: ${{ inputs.files || 'tests/clients/ast-grep-antislop-error-floor.test.ts,tests/clients/dispatch/formatter-exit-code-posture.test.ts,tests/clients/dispatch/oxfmt-ignored-file-noop.test.ts,tests/clients/dispatch/runners/ast-grep-catalog-rules.test.ts,tests/clients/dispatch/runners/ast-grep-rule-tests.test.ts,tests/scripts/astgrep-self-scan.test.ts,tests/clients/formatter-template-preserve.test.ts' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
