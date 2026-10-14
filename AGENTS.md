@@ -556,6 +556,13 @@ file-scoped worklist and receives no project-wide scanner output.
     change; a `TLA+ unaffected` line never covers it. Screen: for a mapped
     file's diff, list the CONSTANTS in the family's as-built
     `formal/<family>/*.cfg` and check each against the changed branch.
+    Enforced by `tests/config/tla-switch-pins.test.ts` over
+    `formal/switch-pins.json`: every constant a config assigns is
+    pinned, `notCodeChoice` or `deferred` with a reason; a pin names the test
+    that drives the real code, and every `expect: pass` config must resolve
+    the constant to the pinned value. Flipping the code reds the pin's test;
+    flipping the model without the registry reds the gate. read-guard is
+    fully pinned; the other families' code choices are deferred.
 
 </important>
 

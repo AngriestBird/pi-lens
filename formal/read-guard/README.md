@@ -178,6 +178,15 @@ or is a mutant of a fix (`*NoRecord`, `EvidenceAtResultHandler`,
 `OwnEditRelocInsertRecorded`, `SpanSnapshotFixAnyReloc`, `SpanSnapshotFixNoOwnRecord`,
 `TreeDrainFencedMtime`, which sets `MtimeAuthored = TRUE`).
 
+Every switch above, and every `ReadGuard.tla` switch a config overrides with
+`<-` (`ZeroReadInjects`, `OldTextRetires`, `InjectNamesAuthorship`,
+`OldTextNeedsNamedRead`, `PipelineCreditsOldText`, `KeepEmptyScope`), is
+pinned in `formal/switch-pins.json` to a test that drives the real code
+(#4393). `tests/config/tla-switch-pins.test.ts` fails when an `expect: pass`
+config disagrees with a pinned value; `DrainMode = "atomic"` is admitted there
+as a narrowing of `"fenced"`. A change to a pinned behaviour flips the switch,
+its configs, the registry value and the pin test together.
+
 ## Guard (as coded)
 
 The model follows `checkEdit` step by step:

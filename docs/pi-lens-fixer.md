@@ -38,8 +38,9 @@ exports change.
   preserves or tightens, and show the violating config red on the pre-fix model
   and green after, or carry `TLA+ unaffected: <family> — <reason>` in the PR
   body. The unaffected line is wrong when the change alters a behaviour an
-  as-built config constant encodes: flip that constant and its configs instead
-  (#4387). A row is any-of (one listed family's model move or declaration
+  as-built config constant encodes: flip that constant, its configs and its
+  `formal/switch-pins.json` value instead, and keep its pin test red on the old
+  behaviour (#4387, #4393). A row is any-of (one listed family's model move or declaration
   satisfies it); a row of 4+ families only prints a note, except `index.ts`,
   whose row gates on the lifecycle hook handler a hunk lands in (#3878). The
   map owner is the lane that adds a `formal/<family>/`: it adds the family and
