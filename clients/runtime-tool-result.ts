@@ -702,20 +702,17 @@ function scheduleDebounced(
 /**
  * #1649: whether the file's last byte is `\n`, read alone (not the whole file),
  * so a clipped bash view of a large file pays one byte for it. A file that
- * cannot be read has none.
+ * cannot be read throws, as the whole-file read it replaced did.
  */
 function lastByteIsNewline(filePath: string): boolean {
-	let fd: number | undefined;
+	const fd = nodeFs.openSync(filePath, "r");
 	try {
-		fd = nodeFs.openSync(filePath, "r");
 		const size = nodeFs.fstatSync(fd).size;
 		if (size === 0) return false;
 		const last = Buffer.alloc(1);
 		return nodeFs.readSync(fd, last, 0, 1, size - 1) === 1 && last[0] === 0x0a;
-	} catch {
-		return false;
 	} finally {
-		if (fd !== undefined) nodeFs.closeSync(fd);
+		nodeFs.closeSync(fd);
 	}
 }
 

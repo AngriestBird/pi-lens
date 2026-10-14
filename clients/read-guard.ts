@@ -14,7 +14,10 @@ import { constants as bufferConstants } from "node:buffer";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import { BoundedSet } from "./bounded-cache.js";
-import { incrementDegradationCount } from "./degradation-ledger.js";
+import {
+	incrementDegradationCount,
+	recordDegradationOnce,
+} from "./degradation-ledger.js";
 import { createFileTime, type FileTime } from "./file-time.js";
 import { hashDiagnosticContent } from "./lsp/diagnostic-binding.js";
 import {
@@ -746,15 +749,24 @@ export function scanFileLines(
 	// whose length waits on the count (an unbounded limit, or one the end of
 	// the file clips) is hashed from them.
 	const windows = ranges
-		.map((r) => hashedWindow(r.offset, Math.min(r.limit, READ_HASH_MAX_LINES)))
-		.filter((w): w is [number, number] => w !== undefined)
+		.flatMap((r) => {
+			const window = hashedWindow(
+				r.offset,
+				Math.min(r.limit, READ_HASH_MAX_LINES),
+			);
+			return window ? [window] : [];
+		})
 		.sort((a, b) => a[0] - b[0]);
 	// Lines arrive in order, so a cursor skips every window that ended before
 	// the line; the next one by start covers it if any does.
 	let cursor = 0;
 	const wanted = (lineNo: number) => {
-		while (cursor < windows.length && windows[cursor][1] < lineNo) cursor += 1;
-		return cursor < windows.length && windows[cursor][0] <= lineNo;
+		let window = windows[cursor];
+		while (window && window[1] < lineNo) {
+			cursor += 1;
+			window = windows[cursor];
+		}
+		return window !== undefined && window[0] <= lineNo;
 	};
 	const lastWanted = windows.reduce((max, [, last]) => Math.max(max, last), 0);
 	const done = (lineNo: number) => !opts.count && lineNo > lastWanted;
@@ -763,7 +775,7 @@ export function scanFileLines(
 	try {
 		fd = fs.openSync(filePath, "r");
 		const size = fs.fstatSync(fd).size;
-		if (size > SCAN_MAX_BYTES) return undefined;
+		if (size > SCAN_MAX_BYTES) return overByteGate(filePath, size);
 		// readFileSync read `size` bytes of a regular file, and read to EOF
 		// only when the size was unknown (0: a procfs file, a pipe).
 		const byteBudget = size > 0 ? size : SCAN_MAX_BYTES + 1;
@@ -786,7 +798,7 @@ export function scanFileLines(
 			);
 			if (n === 0) break;
 			consumed += n;
-			if (consumed > SCAN_MAX_BYTES) return undefined;
+			if (consumed > SCAN_MAX_BYTES) return overByteGate(filePath, consumed);
 			let start = 0;
 			// Wanted lines that start and end inside this chunk are decoded as
 			// one run and split at "\n", which gives each the text it decodes to
@@ -840,14 +852,18 @@ export function scanFileLines(
 	} catch {
 		return undefined;
 	} finally {
-		if (fd !== undefined) {
-			try {
-				fs.closeSync(fd);
-			} catch {
-				// The descriptor is released either way.
-			}
-		}
+		if (fd !== undefined) fs.closeSync(fd);
 	}
+}
+
+/** The scan's answer for a file over the byte gate, recorded once per file. */
+function overByteGate(filePath: string, bytes: number): undefined {
+	recordDegradationOnce({
+		kind: "read-guard-scan-byte-gate",
+		subject: filePath,
+		reason: `${bytes} bytes is over the ${SCAN_MAX_BYTES}-byte read-accounting gate: one line counted, no line hashes`,
+	});
+	return undefined;
 }
 
 /**
@@ -1311,24 +1327,17 @@ export class ReadGuard {
 			normalizeEphemeralMapKey(record.filePath),
 			filePath,
 		);
+		const { effectiveOffset: offset, effectiveLimit: limit } = record;
 		const storedRecord: ReadRecord = {
 			...record,
 			filePath,
 			lineHashes:
 				record.lineHashes ??
-				(opts?.captureLineHashes === false ||
-				!hashedWindow(record.effectiveOffset, record.effectiveLimit)
+				(opts?.captureLineHashes === false || !hashedWindow(offset, limit)
 					? undefined
-					: scanFileLines(
-							filePath,
-							[
-								{
-									offset: record.effectiveOffset,
-									limit: record.effectiveLimit,
-								},
-							],
-							{ count: false },
-						)?.hashes(record.effectiveOffset, record.effectiveLimit)),
+					: scanFileLines(filePath, [{ offset, limit }], {
+							count: false,
+						})?.hashes(offset, limit)),
 		};
 		const arr = this.reads.get(storedRecord.filePath) ?? [];
 		this.consumedReadFiles.delete(storedRecord.filePath);

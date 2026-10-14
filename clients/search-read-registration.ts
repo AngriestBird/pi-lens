@@ -141,22 +141,27 @@ export function registerSearchReads(
 		});
 	}
 
+	const rangesByFile = new Map<string, { offset: number; limit: number }[]>();
+	for (const r of pending) {
+		const ranges = rangesByFile.get(r.filePath) ?? [];
+		ranges.push({ offset: r.effectiveOffset, limit: r.effectiveLimit });
+		rangesByFile.set(r.filePath, ranges);
+	}
 	const scans = new Map<string, FileLineScan | undefined>();
-	for (const record of pending) {
-		if (!scans.has(record.filePath)) {
-			const ranges = pending
-				.filter((r) => r.filePath === record.filePath)
-				.map((r) => ({ offset: r.effectiveOffset, limit: r.effectiveLimit }));
+	for (const hit of pending) {
+		if (!scans.has(hit.filePath)) {
 			scans.set(
-				record.filePath,
-				scanFileLines(record.filePath, ranges, { count: false }),
+				hit.filePath,
+				scanFileLines(hit.filePath, rangesByFile.get(hit.filePath) ?? [], {
+					count: false,
+				}),
 			);
 		}
 		const lineHashes = scans
-			.get(record.filePath)
-			?.hashes(record.effectiveOffset, record.effectiveLimit);
+			.get(hit.filePath)
+			?.hashes(hit.effectiveOffset, hit.effectiveLimit);
 		readGuard.recordRead(
-			{ ...record, ...(lineHashes && { lineHashes }) },
+			{ ...hit, ...(lineHashes && { lineHashes }) },
 			{ captureLineHashes: false },
 		);
 	}

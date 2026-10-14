@@ -67,6 +67,7 @@ vi.mock("node:fs", async (importOriginal) => {
 });
 
 import { CacheManager } from "../../clients/cache-manager.js";
+import { getDegradationSummary } from "../../clients/degradation-ledger.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { handleToolCall } from "../../clients/runtime-tool-call.js";
 import { handleToolResult } from "../../clients/runtime-tool-result.js";
@@ -356,5 +357,15 @@ describe("read accounting reads a file once per hook (#1649)", () => {
 		// no hashes; pi's own read still delivered and is still credited.
 		const record = runtime.readGuard.getReadHistory(file).at(-1);
 		expect(record?.lineHashes).toBeUndefined();
+		// Both hooks met the gate; the ledger says so once, naming the file.
+		// Recurrence prevented: a file that silently loses its line hashes.
+		await nativeRead(runtime, file, { path: file, offset: 21, limit: 20 });
+		const gate = getDegradationSummary().find(
+			(group) => group.kind === "read-guard-scan-byte-gate",
+		);
+		expect(gate?.count).toBe(1);
+		expect(gate?.latestReasons).toEqual([
+			expect.objectContaining({ subject: file }),
+		]);
 	});
 });

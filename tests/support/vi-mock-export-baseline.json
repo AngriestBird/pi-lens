@@ -259,7 +259,7 @@
 	"tests/clients/write-autofix-attachment-message.test.ts:../../clients/dispatch/integration.js:[\"computeCascadeForFile\",\"dispatchLintWithResult\"]": 21,
 	"tests/config/module-instance-binding.test.ts:../../clients/installer/index.js:[\"ensureTool\",\"findManagedToolBinary\",\"getToolEnvironment\",\"isSpawnableCommand\",\"resetPathWalkMemo\"]": 48,
 	"tests/config/module-instance-binding.test.ts:../../clients/safe-spawn.js:[\"safeSpawn\",\"safeSpawnAsync\"]": 21,
-	"tests/index-lsp-idle-reset.test.ts:../clients/read-guard.js:[\"action\"]": 1,
+	"tests/index-lsp-idle-reset.test.ts:../clients/read-guard.js:[\"action\"]": 2,
 	"tests/tools/lens-diagnostics-inferred-project.test.ts:../../clients/project-diagnostics/cache.js:[\"PROJECT_DIAGNOSTICS_CACHE_VERSION\",\"loadProjectDiagnosticsDeltaReport\",\"loadProjectDiagnosticsSnapshot\",\"reconcileProjectDiagnosticsSnapshot\"]": 2,
 	"tests/tools/lens-diagnostics-mode-all-freshness.test.ts:../../clients/project-diagnostics/fresh-fetch.js:[\"fetchFreshProjectDiagnostics\"]": 1,
 	"tests/tools/lens-diagnostics-rule-policy.test.ts:../../clients/project-diagnostics/cache.js:[\"PROJECT_DIAGNOSTICS_CACHE_VERSION\",\"loadProjectDiagnosticsDeltaReport\",\"loadProjectDiagnosticsSnapshot\",\"reconcileProjectDiagnosticsSnapshot\"]": 2,
