@@ -1345,6 +1345,23 @@ function scheduleStartupScansWithClients(
 		});
 	}
 
+	// Every background scan name the runners below accept. The defer table and
+	// the scan list are keyed by it, so a misspelled name fails the build. #4352:
+	// "ast-grep exports" matched no task, so its defer was silently lost.
+	type StartupTaskName =
+		| "todo"
+		| "dead-code"
+		| "knip"
+		| "jscpd"
+		| "govulncheck"
+		| "gitleaks"
+		| "opengrep"
+		| "madge"
+		| "trivy"
+		| "call-graph"
+		| "codebase-model"
+		| "ast-grep-exports"
+		| "word-index";
 	// Some background scans are CPU-heavy and arrive on the event loop
 	// just as the user is most likely typing (right after /new). Defer
 	// those by a few seconds so the perceptible 50-100ms sync bursts they
@@ -1352,13 +1369,15 @@ function scheduleStartupScansWithClients(
 	// tasks (those not listed here) run on the next `setImmediate` tick
 	// as before. The delays are deliberately staggered (200ms apart) so
 	// two heavy tasks don't both run on the same macrotask.
-	const taskDeferMsByName: Record<string, number> = {
+	const taskDeferMsByName: Partial<Record<StartupTaskName, number>> = {
 		"call-graph": 5000,
 		"codebase-model": 5200,
-		"ast-grep exports": 5400,
-		"project index": 5400,
+		"ast-grep-exports": 5400,
 	};
-	const runTask = (name: string, task: () => Promise<void>): Promise<void> => {
+	const runTask = (
+		name: StartupTaskName,
+		task: () => Promise<void>,
+	): Promise<void> => {
 		const queuedAt = Date.now();
 		dbg(`session_start task ${name}: scheduled`);
 		runtime.markStartupScanInFlight(name, sessionGeneration);
@@ -1402,9 +1421,9 @@ function scheduleStartupScansWithClients(
 	};
 
 	const canRunJsTsHeavyScans = canRunStartupHeavyScans(languageProfile, "jsts");
-	const scanNames = ["todo", "dead-code"];
+	const scanNames: StartupTaskName[] = ["todo", "dead-code"];
 	if (canRunJsTsHeavyScans) {
-		scanNames.push("knip", "jscpd", "ast-grep exports", "project index");
+		scanNames.push("knip", "jscpd", "ast-grep-exports");
 	}
 	dbg(`session_start: launching background scans (${scanNames.join(", ")})`);
 
@@ -1451,7 +1470,7 @@ function scheduleStartupScansWithClients(
 	const isSubagent = isSubagentSession();
 	const skipHeavyweightScans = isSlowFs(analysisRoot) || isSubagent;
 	const runHeavyweightTask = (
-		name: string,
+		name: StartupTaskName,
 		task: () => Promise<void>,
 	): void => {
 		const flag = `no-${name}`;

@@ -366,6 +366,37 @@ it(
 	TEST_BUDGET_MS,
 );
 
+// #4352: the defer table is keyed by runTask names. A key that matches no task
+// ("ast-grep exports" for "ast-grep-exports") defers nothing, so the export scan
+// started on the next tick and froze the TUI on cold boot. One setImmediate turn
+// shows the difference: every next-tick scan has fired by then, while the 5400
+// ms defer has not elapsed. The eventual run is covered by the ast-grep export
+// path test above.
+it(
+	"defers ast-grep-exports by its taskDeferMs entry, not on the next tick (#4352)",
+	async () => {
+		const { env, astGrepEnsure, dbg } = await runSessionStart(
+			"full",
+			(tmpDir) =>
+				createTempFile(
+					tmpDir,
+					"package.json",
+					JSON.stringify({ type: "module" }),
+				),
+		);
+		try {
+			await new Promise((resolve) => setImmediate(resolve));
+			expect(dbg).not.toHaveBeenCalledWith(
+				expect.stringContaining("session_start task ast-grep-exports: start"),
+			);
+			expect(astGrepEnsure).not.toHaveBeenCalled();
+		} finally {
+			await env.cleanup();
+		}
+	},
+	TEST_BUDGET_MS,
+);
+
 it(
 	"skips a disabled startup analyzer through session_start and records it",
 	async () => {
