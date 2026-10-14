@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { fetchLivePrBody } from "./check-pr-body.mjs";
+import { githubGet } from "./lib/github-rest.mjs";
 import {
 	commitCloseKeywordErrors,
 	closeKeywordErrors,
@@ -38,29 +39,14 @@ function eventPayload() {
 const COMMIT_PAGE_SIZE = 100;
 const COMMIT_LIST_CAP = 250;
 
-// Same request shape and env contract as fetchLivePrBody. Throws when the list
-// cannot be read in full, so the caller fails closed instead of linting a
-// partial list.
+// Throws when the list cannot be read in full, so the caller fails closed
+// instead of linting a partial list.
 async function fetchPrCommits(payloadPr, fetchImpl) {
-	const token = process.env.GITHUB_TOKEN;
-	const apiUrl = process.env.GITHUB_API_URL;
-	const repository = process.env.GITHUB_REPOSITORY;
-	if (!token || !apiUrl || !repository)
-		throw new Error(
-			"GITHUB_TOKEN, GITHUB_API_URL or GITHUB_REPOSITORY is unset",
-		);
 	const commits = [];
 	for (let page = 1; commits.length < COMMIT_LIST_CAP; page++) {
-		const response = await fetchImpl(
-			`${apiUrl}/repos/${repository}/pulls/${payloadPr.number}/commits?per_page=${COMMIT_PAGE_SIZE}&page=${page}`,
-			{
-				signal: AbortSignal.timeout(10_000),
-				headers: {
-					Accept: "application/vnd.github+json",
-					Authorization: `Bearer ${token}`,
-					"X-GitHub-Api-Version": "2022-11-28",
-				},
-			},
+		const response = await githubGet(
+			`/pulls/${payloadPr.number}/commits?per_page=${COMMIT_PAGE_SIZE}&page=${page}`,
+			fetchImpl,
 		);
 		if (!response.ok) throw new Error(`GitHub API returned ${response.status}`);
 		const data = await response.json();

@@ -148,14 +148,18 @@ export function closeKeywordPlacementMessage(missing) {
 }
 
 export const COMMIT_CLOSE_KEYWORD_MESSAGE =
-	'Unintended close keyword in a commit message: GitHub closes the issue for any "keyword #N" or "keyword: #N" in a commit that reaches master, even when quoted, hedged or negated (#4371). Rephrase the commit so the keyword is not directly followed by the number (for example "refs #N"), or name the issue in a line-leading "Closes #N" trailer.';
+	'Unintended close keyword in a commit message: GitHub closes the issue for any "keyword #N" or "keyword: #N" in a commit that reaches master, even when quoted, hedged or negated (#4371). Rephrase the commit so the keyword is not directly followed by the number (for example "refs #N"), or close it in the PR body (a commit trailer alone does not count).';
 
 /**
  * #4371: GitHub also closes on a close keyword in a COMMIT message once the
  * commit reaches the default branch, which no PR-body lint sees. Returns the
- * issues each commit would close that nothing names as intended: a line-leading
- * keyword in that commit (a trailer, or a "(closes #N)" on its headline), a
- * "(closes #N)" in the PR title, or a clean close keyword in the PR body.
+ * issues each commit would close that the PR itself does not close: a keyword
+ * is fine only when the PR title or a clean (not negated) body keyword names
+ * that issue. The PR body is the closes-versus-refs record, so no commit-level
+ * form (a trailer, a headline "(closes #N)", a line-leading keyword) is intent
+ * by itself: a line-leading keyword also closes inside prose ("...when it\n
+ * fixes #7 and similar") and after a negation, and a trailer would let a
+ * commit override a body that only refs the issue (#4422 review F1, F4).
  *
  * The scan runs on the RAW message, not markdown-stripped text: no GitHub
  * behaviour proves a fence or backtick shields a keyword in a commit message
@@ -173,16 +177,9 @@ export function lintCommitCloseKeywords(commits = [], title = "", body = "") {
 		const flagged = new Set();
 		const text = String(message).replace(/\r\n?/g, "\n");
 		for (const { number, index } of closeMatches(text)) {
-			const lineStart = text.lastIndexOf("\n", index) + 1;
-			const before = text.slice(lineStart, index);
-			if (
-				intended.has(number) ||
-				flagged.has(number) ||
-				/^[ \t]*$/.test(before) ||
-				(lineStart === 0 && /\([ \t]*$/.test(before))
-			)
-				continue;
+			if (intended.has(number) || flagged.has(number)) continue;
 			flagged.add(number);
+			const lineStart = text.lastIndexOf("\n", index) + 1;
 			const lineEnd = text.indexOf("\n", index);
 			offenses.push({
 				sha,

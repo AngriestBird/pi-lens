@@ -3,6 +3,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gitExecFileSync } from "./lib/git-fixture-env.mjs";
+import { githubGet } from "./lib/github-rest.mjs";
 import {
 	changedHookAnchors,
 	evaluateTlaCoverage,
@@ -2230,23 +2231,7 @@ export function lintPrBody(body = "", options = {}) {
  * @returns {Promise<{body: string, normalized: boolean, title: string | undefined}>}
  */
 export async function fetchLivePrBody(payloadPr, fetchImpl) {
-	const token = process.env.GITHUB_TOKEN;
-	if (!token) throw new Error("GITHUB_TOKEN is not set");
-	const apiUrl = process.env.GITHUB_API_URL;
-	const repository = process.env.GITHUB_REPOSITORY;
-	if (!apiUrl || !repository)
-		throw new Error("GITHUB_API_URL or GITHUB_REPOSITORY is missing");
-	const response = await fetchImpl(
-		`${apiUrl}/repos/${repository}/pulls/${payloadPr.number}`,
-		{
-			signal: AbortSignal.timeout(10_000),
-			headers: {
-				Accept: "application/vnd.github+json",
-				Authorization: `Bearer ${token}`,
-				"X-GitHub-Api-Version": "2022-11-28",
-			},
-		},
-	);
+	const response = await githubGet(`/pulls/${payloadPr.number}`, fetchImpl);
 	if (!response.ok) throw new Error(`GitHub API returned ${response.status}`);
 	const data = await response.json();
 	if (data.body !== null && typeof data.body !== "string")
@@ -2283,22 +2268,9 @@ export async function resolveTouchesTests(
 	fetchImpl = globalThis.fetch,
 ) {
 	try {
-		const token = process.env.GITHUB_TOKEN;
-		if (!token) throw new Error("GITHUB_TOKEN is not set");
-		const apiUrl = process.env.GITHUB_API_URL;
-		const repository = process.env.GITHUB_REPOSITORY;
-		if (!apiUrl || !repository)
-			throw new Error("GITHUB_API_URL or GITHUB_REPOSITORY is missing");
-		const response = await fetchImpl(
-			`${apiUrl}/repos/${repository}/pulls/${payloadPr.number}/files?per_page=100`,
-			{
-				signal: AbortSignal.timeout(10_000),
-				headers: {
-					Accept: "application/vnd.github+json",
-					Authorization: `Bearer ${token}`,
-					"X-GitHub-Api-Version": "2022-11-28",
-				},
-			},
+		const response = await githubGet(
+			`/pulls/${payloadPr.number}/files?per_page=100`,
+			fetchImpl,
 		);
 		if (!response.ok) throw new Error(`GitHub API returned ${response.status}`);
 		if (/rel="next"/.test(response.headers.get("link") ?? ""))
@@ -2334,22 +2306,10 @@ export async function resolveTouchesTests(
 export async function resolveBugClosing(body, fetchImpl = globalThis.fetch) {
 	const issues = parseCloseKeywords(body).issues;
 	if (issues.length === 0) return false;
-	const token = process.env.GITHUB_TOKEN;
-	const apiUrl = process.env.GITHUB_API_URL;
-	const repository = process.env.GITHUB_REPOSITORY;
-	if (!token || !apiUrl || !repository) return null;
+	// A missing env makes githubGet reject, which anyIssueLabelledBug reads as
+	// "cannot read the label" (null), as the old early return did.
 	return anyIssueLabelledBug(issues, async (number) => {
-		const response = await fetchImpl(
-			`${apiUrl}/repos/${repository}/issues/${number}`,
-			{
-				signal: AbortSignal.timeout(10_000),
-				headers: {
-					Accept: "application/vnd.github+json",
-					Authorization: `Bearer ${token}`,
-					"X-GitHub-Api-Version": "2022-11-28",
-				},
-			},
-		);
+		const response = await githubGet(`/issues/${number}`, fetchImpl);
 		return response.ok ? await response.json() : null;
 	});
 }

@@ -907,20 +907,39 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>`;
 		);
 	});
 
-	it("accepts a line-leading Closes trailer, any case, CRLF or not", () => {
-		for (const message of [
-			"fix: x\n\nbody.\n\nCloses #4371\n\nCo-Authored-By: A <a@b>",
-			"fix: x\n\nFIXES: #4371",
-			"fix: x\r\n\r\n  resolved #4371\r\n",
-		])
-			expect(offended([commit(message)])).toEqual([]);
+	// #4422 review F1: a line-leading keyword is not intent. Each message below
+	// closes #7 on GitHub, and a body that only refs #7 never asked for that.
+	it.each([
+		[
+			"a hard-wrapped sentence",
+			"fix: x\n\nrewrapped so it\nfixes #7 and similar text",
+		],
+		["a negated line", "fix: x\n\nCloses #7 is NOT what this commit does."],
+		["a bare trailer", "fix: x\n\nCloses #7\n\nCo-Authored-By: A <a@b>"],
+		["a colon trailer in CRLF", "fix: x\r\n\r\n  FIXES: #7\r\n"],
+	])("flags %s when the PR only refs the issue", (_name, message) => {
+		expect(offended([commit(message)], "fix: x (refs #7)", "Refs #7.")).toEqual(
+			[7],
+		);
 	});
 
-	it("accepts the headline (closes #N) form but not one mid-body", () => {
-		expect(offended([commit("fix: x (closes #4371)\n\nbody")])).toEqual([]);
-		expect(
-			offended([commit("fix: x\n\nthe patch (closes #4371) lands later")]),
-		).toEqual([4371]);
+	it("accepts any form of the keyword once the PR body closes the issue", () => {
+		for (const message of [
+			"fix: x\n\nCloses #7",
+			"fix: x\n\nit\nfixes #7 in prose",
+			"fix: x (closes #7)",
+		])
+			expect(offended([commit(message)], "fix: x", "Closes #7.")).toEqual([]);
+	});
+
+	// #4422 review F4: a headline "(closes #N)" is not intent either, and a
+	// parenthesis that does not close right after the number never was.
+	it("flags a headline keyword the PR does not close", () => {
+		for (const headline of [
+			"fix: x (closes #12)",
+			"fix: thing (fixes #12 was wrong)",
+		])
+			expect(offended([commit(headline)], TITLE, BODY)).toEqual([12]);
 	});
 
 	it("flags a mid-sentence keyword and one quoted in backticks or a fence", () => {
@@ -931,7 +950,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>`;
 		expect(offended([commit("fix: x\n\nsaid `closes #8` once")])).toEqual([8]);
 		expect(
 			offended([commit("fix: x\n\n```\ncloses #9\n```\nafter\n\n> fixes #10")]),
-		).toEqual([10]);
+		).toEqual([9, 10]);
 	});
 
 	it("takes the PR title (closes #N) and a clean body keyword as intent", () => {
@@ -970,7 +989,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>`;
 			const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
 			const log = vi.spyOn(console, "log").mockImplementation(() => {});
 			const fetchImpl = prFetch({ title: TITLE, body: BODY }, [
-				commit("ci: x\n\nCloses #4371", "1".repeat(40)),
+				commit("ci: x\n\nbody", "1".repeat(40)),
 				commit(F40AC6C28, "f40ac6c28" + "0".repeat(31)),
 			]);
 
