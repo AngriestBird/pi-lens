@@ -72,6 +72,31 @@ describe("project-snapshot persist worker failure seam", () => {
 		expect(fs.existsSync(stagePath)).toBe(false);
 	});
 
+	// Recurrence: #4400, a listener that throws on a message it did not expect
+	// is an uncaught worker exception. The seam must not add one (#4402).
+	it("drops a malformed message and still answers the next routable one", async () => {
+		const worker = new Worker(WORKER, {
+			env: { ...process.env, [FORCE_WORKER_FAIL_ENV]: "no-stage-path" },
+		});
+		try {
+			const result = await new Promise<Record<string, unknown>>(
+				(resolve, reject) => {
+					worker.once("message", resolve);
+					worker.once("error", reject);
+					for (const malformed of [null, "text", 5, {}, { id: 1 }]) {
+						worker.postMessage(malformed);
+					}
+					worker.postMessage({ id: 9, generation: 4 });
+				},
+			);
+			expect(result.id).toBe(9);
+			expect(result.generation).toBe(4);
+			expect(String(result.error)).toContain(FORCED_ERROR_MARKER);
+		} finally {
+			await worker.terminate();
+		}
+	});
+
 	it("is inert when the variable is unset: stages the file and echoes its path", async () => {
 		const { result, stagePath } = await roundTrip({
 			[FORCE_WORKER_FAIL_ENV]: undefined,

@@ -45,15 +45,33 @@ function semanticSnapshotFingerprint(
 // did, an `{ id, generation, error }` answer with no `stagePath`, so it can
 // prove pi survives a failing worker. Inert unless the variable is set, and
 // what it costs a user who sets it is the main-thread snapshot write.
-if (process.env.PI_LENS_TEST_SNAPSHOT_WORKER_FAIL === "no-stage-path") {
-	parentPort?.on("message", (request: ProjectSnapshotPersistWorkerRequest) => {
-		parentPort?.postMessage({
-			id: request.id,
-			generation: request.generation,
-			error:
-				"forced snapshot worker failure (PI_LENS_TEST_SNAPSHOT_WORKER_FAIL)",
-		});
+// The handler is in the contained form tests/clients/worker-message-boundary-
+// ratchet.test.ts enforces (#4402): an `unknown` message, narrowed before any
+// field read, inside one try. A message that fails the check gets no answer.
+function serveForcedFailure(): void {
+	parentPort?.on("message", (message: unknown) => {
+		try {
+			if (
+				typeof message !== "object" ||
+				message === null ||
+				!("id" in message) ||
+				!("generation" in message)
+			)
+				return;
+			parentPort?.postMessage({
+				id: message.id,
+				generation: message.generation,
+				error:
+					"forced snapshot worker failure (PI_LENS_TEST_SNAPSHOT_WORKER_FAIL)",
+			});
+		} catch {
+			// Test-only seam: a message that cannot be answered is dropped.
+		}
 	});
+}
+
+if (process.env.PI_LENS_TEST_SNAPSHOT_WORKER_FAIL === "no-stage-path") {
+	serveForcedFailure();
 } else {
 	serveGzipStageWorker<
 		ProjectSnapshotPersistWorkerRequest,
