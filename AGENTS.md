@@ -526,7 +526,10 @@ file-scoped worklist and receives no project-wide scanner output.
 
 66. **In-process module double with a real seam:** when a `clients/` module has
     a test setter, adopter, or reset, drive that seam; keep a double only at a
-    process or host boundary.
+    process or host boundary. New in-process `vi.mock` targets and hand-rolled
+    LSP client or service doubles are ratcheted by
+    `tests/clients/flake-shape-ratchet.test.ts` (`in-process-mock`,
+    `service-double`).
 
 </important>
 
@@ -1199,7 +1202,10 @@ Every logic change has relevant tests. New tests use fake clocks and
 processes. Real elapsed-time assertions belong in the serialized
 `wallClockBudgetInclude` lane. Real LSP child tests belong in
 `lsp-spawn-heavy`. Any admitted real spawn or timer carries the flake-shape
-header, baseline row, and lane membership.
+header, baseline row, and lane membership. A new `vi.mock` of a module outside
+`PROCESS_BOUNDARY_MODULES` (`tests/support/flake-shape-scan.ts`), or a new
+hand-rolled LSP client or service double, carries the flake-shape header for
+its detector, a baseline row, and an `ADMITTED_AFTER_BASELINE` entry.
 
 The real-pi harness defaults to `--no-session`; a persisted-session witness
 opts into `withRealPi({ persistedSession: true })`, which pins `--session-dir`

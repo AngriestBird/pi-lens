@@ -4,7 +4,7 @@
  * Three deflake PRs in two days (#2531 alone fixed three shared-slot races)
  * and nothing counted the contention surface those PRs kept fixing, so the
  * set only grew. This ratchet counts it: `tests/support/flake-shape-scan.ts`
- * runs five detectors over every `tests/**\/*.test.ts` file —
+ * runs seven detectors over every `tests/**\/*.test.ts` file —
  *
  * 1. `real-process-spawn` — a real child process (`child_process` import,
  *    `execFileSync`/`spawnSync`/`execSync`, a support spawn-helper call, or a
@@ -18,6 +18,20 @@
  *    fake-timer scope (#2885): only a real timer, often a production helper's
  *    budget the other detectors cannot read, ends an await on it. Minted with
  *    37 files / 73 hits.
+ * 6. `in-process-mock` — a `vi.mock`/`vi.doMock` of a module that is not a
+ *    process or host boundary (`PROCESS_BOUNDARY_MODULES`), keyed
+ *    `<file>::<module>` so the baseline pins which modules a file mocks, not
+ *    only how many (#4362). Minted with 480 files / 1,002 modules.
+ * 7. `service-double` — an object literal that hand-rolls a registered
+ *    in-process service (`SERVICE_SURFACES`: `LSPClientInfo`, `LSPService`),
+ *    keyed `<file>::<service>` (#4362). Minted with 83 files / 151 objects.
+ *
+ * Detectors 6 and 7 exist because #4344 round 3 (G5) added one method to
+ * `LSPClientInfo` and `LSPService` and then had to add it by hand to doubles
+ * in 40 test files: every in-process double is a copy of an interface that
+ * the next interface change must find. Their admission is the header and the
+ * `ADMITTED_AFTER_BASELINE` entry; a mock adds no contention, so they need no
+ * serialized lane (`MOCK_DETECTORS`).
  *
  * `FLAKE_SHAPE_BASELINE` (`tests/support/flake-shape-baseline.json`) is
  * today's population, content-keyed as `file → count` per detector — the
@@ -55,6 +69,7 @@
  * absent, so a future reader does not conclude the file was missed.
  */
 
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -66,13 +81,25 @@ import {
 	countsByDetector,
 	type DetectorName,
 	DETECTOR_NAMES,
+	declaredMembers,
 	DETECTORS,
+	hitKey,
+	IDENTITY_SEPARATOR,
+	MOCK_DETECTORS,
+	mockTarget,
+	NON_LITERAL_MOCK_TARGET,
+	PROCESS_BOUNDARY_MODULES,
 	repoRoot,
 	scanElapsedTimeAssertion,
+	scanInProcessMock,
 	scanNeverSettlingWait,
 	scanRawTimerWait,
 	scanRealProcessSpawn,
+	scanServiceDouble,
 	scanUngovernedWaitFor,
+	SERVICE_DOUBLE_MIN_MEMBERS,
+	SERVICE_SURFACES,
+	surfaceMembers,
 } from "../support/flake-shape-scan.js";
 import { testSourceFiles as allTestSourceFiles } from "../support/module-instance-scan.js";
 import { localImportTargets } from "../support/hook-await-scan.js";
@@ -88,6 +115,93 @@ const FLAKE_SHAPE_BASELINE: Baseline = JSON.parse(
 		"utf8",
 	),
 );
+
+// ── The frozen mint (#4383 review F1) ────────────────────────────────────
+//
+// Recurrence: a planted `vi.mock` plus ONLY its baseline row, or a planted
+// `execFileSync` plus only its real-process-spawn row, passed the ratchet
+// with no header and no ADMITTED_AFTER_BASELINE entry. The failure message
+// asked for both; nothing enforced them, because the live scan is compared
+// with the baseline and the baseline is plain data anyone can grow.
+//
+// `flake-shape-baseline-frozen.json` is the baseline as round 1 of #4383
+// shipped it, written once. A baseline row the mint does not cover (a new
+// key, or a count above the minted count) must have an ADMITTED entry, and
+// the existing admission test then demands its header (and, for a timing or
+// spawn detector, its serialized lane). The mint is digest-pinned so growing
+// it is a reviewed code change here, never a quiet data edit. CI's unit jobs
+// check out shallow, so the mint cannot be a git-history diff.
+
+const FROZEN_BASELINE_PATH = "tests/support/flake-shape-baseline-frozen.json";
+
+/** sha256 of the mint's canonical JSON (formatting and line endings do not count). */
+const FROZEN_BASELINE_DIGEST =
+	"db2450d7da2f0123a5bd4d366156598e709aea5a356073095ccc27ce0c9afbc2";
+
+const FROZEN_BASELINE_SOURCE = fs.readFileSync(
+	path.join(repoRoot, FROZEN_BASELINE_PATH),
+	"utf8",
+);
+
+const FROZEN_BASELINE: Baseline = JSON.parse(FROZEN_BASELINE_SOURCE);
+
+/** Problems with the mint's content against its pinned digest. */
+function frozenDigestProblems(
+	source: string,
+	digest: string = FROZEN_BASELINE_DIGEST,
+): string[] {
+	const actual = createHash("sha256")
+		.update(JSON.stringify(JSON.parse(source)))
+		.digest("hex");
+	if (actual === digest) return [];
+	return [
+		`${FROZEN_BASELINE_PATH} changed (sha256 ${actual}, pinned ${digest}). ` +
+			"The mint is write-once: admit a new row with an ADMITTED_AFTER_BASELINE " +
+			'entry and its "// flake-shape: <detector> — <reason>" header instead. ' +
+			"Only a deliberate re-mint (a renamed module behind hundreds of rows) " +
+			"edits the mint, and then FROZEN_BASELINE_DIGEST changes in the same PR " +
+			"with the reason in its description.",
+	];
+}
+
+/**
+ * Every baseline row the frozen mint does not cover needs an ADMITTED
+ * entry, and every ADMITTED entry needs a baseline row (a stale admission
+ * excuses nothing). The header and lane of each ADMITTED entry are the
+ * admission test's job (`validateAdmission`).
+ */
+function auditAgainstMint(
+	baseline: Readonly<Baseline> = FLAKE_SHAPE_BASELINE,
+	frozen: Readonly<Baseline> = FROZEN_BASELINE,
+	admitted: Readonly<
+		Record<string, { detector: DetectorName; reason: string }>
+	> = ADMITTED_AFTER_BASELINE,
+): string[] {
+	const problems: string[] = [];
+	for (const detector of DETECTOR_NAMES) {
+		for (const [key, count] of Object.entries(baseline[detector] ?? {})) {
+			const minted = frozen[detector]?.[key];
+			if (minted !== undefined && count <= minted) continue;
+			if (Object.hasOwn(admitted, `${detector}:${key}`)) continue;
+			problems.push(
+				`${detector}:${key}: baseline row ${count} is past the frozen mint ` +
+					`(${minted === undefined ? "absent" : `minted ${minted}`}) and has no ` +
+					"ADMITTED_AFTER_BASELINE entry; add the entry and its " +
+					`"// flake-shape: ${detector} — <reason>" header ` +
+					"(if the key only moved with a renamed file, re-mint the frozen file and its digest instead)",
+			);
+		}
+	}
+	for (const [admittedKey, entry] of Object.entries(admitted)) {
+		const key = admittedKey.slice(entry.detector.length + 1);
+		if (!Object.hasOwn(baseline[entry.detector] ?? {}, key)) {
+			problems.push(
+				`${admittedKey}: stale admission, no baseline row; remove the entry`,
+			);
+		}
+	}
+	return problems;
+}
 
 /**
  * Entries admitted to a detector's baseline AFTER it was minted — a merge-
@@ -916,9 +1030,14 @@ function describeProblem(p: RatchetProblem): string {
 	const admitted = ADMITTED_AFTER_BASELINE[`${p.detector}:${p.file}`];
 	const admittedNote = admitted
 		? ` (admitted: ${admitted.reason})`
-		: " — admit it with a `// flake-shape: <detector> — <reason>` header " +
-			"and add the file to vitest.config.ts's wallClockBudgetInclude, or " +
-			"remove the real spawn / wall-clock assertion / raw timer wait";
+		: MOCK_DETECTORS.has(p.detector)
+			? " — mock only a process boundary (PROCESS_BOUNDARY_MODULES) or drive " +
+				"the real seam or the shared double factory; to admit it, add a " +
+				"`// flake-shape: <detector> — <reason>` header, an " +
+				"ADMITTED_AFTER_BASELINE entry and the baseline row"
+			: " — admit it with a `// flake-shape: <detector> — <reason>` header " +
+				"and add the file to vitest.config.ts's wallClockBudgetInclude, or " +
+				"remove the real spawn / wall-clock assertion / raw timer wait";
 	if (p.kind === "new-file") {
 		return `${p.detector}: NEW flagged file ${p.file} (${p.after} hit(s))${admittedNote}`;
 	}
@@ -932,17 +1051,18 @@ function describeProblem(p: RatchetProblem): string {
 }
 
 // #3514: `countsByDetector` already shares one walk + one parse per file
-// across all five detectors (`countsCache`, flake-shape-scan.ts) — the walk
+// across every detector (`countsPromise`, flake-shape-scan.ts) — the walk
 // itself is not redone. But that shared cost is only PAID on the first call,
 // and `it.each(DETECTOR_NAMES)` below calls it in DETECTOR_NAMES order, so
 // whichever detector is first (`real-process-spawn`) absorbed the FULL
-// five-detector cost inside its own 30s per-test budget, not just its own
+// all-detector cost inside its own 30s per-test budget, not just its own
 // share. Measured on this box (4 cores, load average ~27, run 2026-09-26):
 // real-process-spawn's own detector work is ~22s of a ~117s total — raw-
 // timer-wait's AST walk (`timerBindings` + its own call-site visit) is the
 // biggest single share at ~84s. Paying the whole thing once here, under its
 // own budget decoupled from any one detector's timeout, means no single
-// "detector %s" case is billed for work that belongs to all five.
+// "detector %s" case is billed for work that belongs to all of them (seven
+// since #4362; the two mock detectors added ~2.5 s to the shared walk).
 const WALK_TIMEOUT_MS = 180_000;
 
 describe("flake-shape ratchet (#2547)", () => {
@@ -1117,6 +1237,8 @@ describe("flake-shape ratchet — the compare function", () => {
 			"raw-timer-wait": { [file]: 5 },
 			"ungoverned-wait-for": {},
 			"never-settling-wait": {},
+			"in-process-mock": {},
+			"service-double": {},
 		};
 
 		// Drops to 2 (an improvement — but the ceiling is now stale at 5).
@@ -1161,19 +1283,23 @@ function validateAdmission(
 	if (source === undefined) {
 		return [`${key}: file does not exist`];
 	}
-	const header = admissionHeader(source);
-	if (!header) {
+	// #4362: the header for THIS detector, so a file admitted under a spawn
+	// and a mock detector carries one header per detector.
+	const header = admissionHeader(source, entry.detector);
+	const otherHeader = header ? undefined : admissionHeader(source);
+	if (otherHeader) {
+		problems.push(
+			`${key}: header names detector "${otherHeader.detector}", expected "${entry.detector}"`,
+		);
+	} else if (!header) {
 		problems.push(
 			`${key}: missing "// flake-shape: <detector> — <reason>" header`,
-		);
-	} else if (header.detector !== entry.detector) {
-		problems.push(
-			`${key}: header names detector "${header.detector}", expected "${entry.detector}"`,
 		);
 	} else if (header.reason.length < 15) {
 		problems.push(`${key}: header reason too short to be real`);
 	}
 	const laneProof =
+		MOCK_DETECTORS.has(entry.detector) ||
 		serializedLaneIncluded.has(`tests/${relativeTestsPath}`) ||
 		(relativeTestsPath.startsWith("support/") &&
 			supportHelperHasLaneProof(relativeTestsPath, serializedLaneIncluded));
@@ -1210,7 +1336,9 @@ describe("flake-shape ratchet — admission gate", () => {
 		]);
 		const problems: string[] = [];
 		for (const [key, entry] of Object.entries(ADMITTED_AFTER_BASELINE)) {
-			const file = key.slice(entry.detector.length + 1);
+			const file = key
+				.slice(entry.detector.length + 1)
+				.split(IDENTITY_SEPARATOR)[0];
 			if (file.startsWith("support/") && !file.endsWith(".test.ts")) continue;
 			const absolute = path.join(repoRoot, "tests", file);
 			const source = fs.existsSync(absolute)
@@ -1373,6 +1501,117 @@ describe("flake-shape ratchet — admission gate", () => {
 				"clients/does-not-exist.test.ts",
 			),
 		).toEqual([expect.stringContaining("does not exist")]);
+	});
+});
+
+describe("flake-shape ratchet — frozen mint (#4383 review F1)", () => {
+	// Recurrence: a baseline row alone admitted a planted vi.mock or
+	// execFileSync with no header and no ADMITTED entry. Rows below follow
+	// the state table in PR #4383 ("F1 state table").
+	const file = "clients/__4383-mint-fixture.test.ts";
+	const mockKey = `${file}::clients/latency-logger`;
+	const baselineWith = (
+		detector: DetectorName,
+		rows: Record<string, number>,
+	): Baseline => {
+		const baseline = Object.fromEntries(
+			DETECTOR_NAMES.map((name) => [name, {}]),
+		) as Baseline;
+		baseline[detector] = rows;
+		return baseline;
+	};
+	const mint = {
+		mock: baselineWith("in-process-mock", { [mockKey]: 1 }),
+		spawn: baselineWith("real-process-spawn", { [file]: 2 }),
+	};
+	const none = {};
+	const admittedSpawn = {
+		[`real-process-spawn:${file}`]: {
+			detector: "real-process-spawn" as const,
+			reason: "the real CLI exit code is under test",
+		},
+	};
+	const admittedMock = {
+		[`in-process-mock:${mockKey}`]: {
+			detector: "in-process-mock" as const,
+			reason: "the logger's own flush order is under test",
+		},
+	};
+
+	it("passes the live baseline: every row past the mint is admitted, every admission has a row", () => {
+		expect(auditAgainstMint()).toEqual([]);
+	});
+
+	it("keeps the mint at its pinned digest, whatever its formatting", () => {
+		expect(frozenDigestProblems(FROZEN_BASELINE_SOURCE)).toEqual([]);
+		// Row 15: reformatting or CRLF is not an edit; a new row is.
+		expect(
+			frozenDigestProblems(
+				JSON.stringify(FROZEN_BASELINE, null, 2).replaceAll("\n", "\r\n"),
+			),
+		).toEqual([]);
+		const grown = structuredClone(FROZEN_BASELINE);
+		grown["in-process-mock"][mockKey] = 1;
+		expect(frozenDigestProblems(JSON.stringify(grown))).toEqual([
+			expect.stringContaining("write-once"),
+		]);
+	});
+
+	it("rows 1-2: a minted row at or below its minted count needs no admission", () => {
+		expect(auditAgainstMint(mint.spawn, mint.spawn, none)).toEqual([]);
+		expect(
+			auditAgainstMint(
+				baselineWith("real-process-spawn", { [file]: 1 }),
+				mint.spawn,
+				none,
+			),
+		).toEqual([]);
+	});
+
+	it("rows 3-4: ATTACK a minted row raised above the mint without an ADMITTED entry is refused", () => {
+		const raised = baselineWith("real-process-spawn", { [file]: 3 });
+		expect(auditAgainstMint(raised, mint.spawn, none)).toEqual([
+			expect.stringContaining(
+				`real-process-spawn:${file}: baseline row 3 is past the frozen mint (minted 2)`,
+			),
+		]);
+		// Row 6: the same raise with its admission passes here (the header and
+		// lane are validateAdmission's half).
+		expect(auditAgainstMint(raised, mint.spawn, admittedSpawn)).toEqual([]);
+	});
+
+	it("rows 9-10: ATTACK the reviewer's probes, a new row with no ADMITTED entry, are refused", () => {
+		const empty = baselineWith("in-process-mock", {});
+		// Probe A: a planted in-process vi.mock plus only its row.
+		expect(auditAgainstMint(mint.mock, empty, none)).toEqual([
+			expect.stringContaining(
+				`in-process-mock:${mockKey}: baseline row 1 is past the frozen mint (absent)`,
+			),
+		]);
+		// Probe B: a planted execFileSync plus only its spawn row.
+		expect(
+			auditAgainstMint(
+				mint.spawn,
+				baselineWith("real-process-spawn", {}),
+				none,
+			),
+		).toEqual([
+			expect.stringContaining(
+				"(absent) and has no ADMITTED_AFTER_BASELINE entry",
+			),
+		]);
+		// Row 12: admitted, the new row passes.
+		expect(auditAgainstMint(mint.mock, empty, admittedMock)).toEqual([]);
+	});
+
+	it("row 14: ATTACK an ADMITTED entry with no baseline row is a stale admission", () => {
+		expect(
+			auditAgainstMint(
+				baselineWith("in-process-mock", {}),
+				mint.mock,
+				admittedMock,
+			),
+		).toEqual([expect.stringContaining("stale admission")]);
 	});
 });
 
@@ -1774,6 +2013,9 @@ describe("flake-shape scan — mutation-proof self-test", () => {
 				"await vi.waitFor(() => expect(ready).toBe(true));\n",
 			"never-settling-wait":
 				"await expect(run(() => new Promise(() => {}))).rejects.toThrow();\n",
+			"in-process-mock": 'vi.mock("../clients/latency-logger.js");\n',
+			"service-double":
+				"const service = { touchFile: vi.fn(), hasLSP: vi.fn(), getStatus: vi.fn() };\n",
 		};
 		expect(Object.keys(canonicalFixtures).sort()).toEqual(
 			[...DETECTOR_NAMES].sort(),
@@ -1856,6 +2098,21 @@ describe("flake-shape scan — admission header parsing", () => {
 		expect(admissionHeader("execFileSync(cmd);\n")).toBeUndefined();
 	});
 
+	it("(#4362) finds the header for the asked detector when a file carries two", () => {
+		// Recurrence: a mock admission in a file that already admits a spawn.
+		// Read by first header only, the spawn header would answer for the
+		// mock detector and the admission could never validate.
+		const source =
+			"// flake-shape: real-process-spawn — the real CLI exit code is under test\n" +
+			"// flake-shape: in-process-mock — the module's own timer is the subject\n";
+		expect(admissionHeader(source)?.detector).toBe("real-process-spawn");
+		expect(admissionHeader(source, "in-process-mock")).toEqual({
+			detector: "in-process-mock",
+			reason: "the module's own timer is the subject",
+		});
+		expect(admissionHeader(source, "service-double")).toBeUndefined();
+	});
+
 	it("does not count a header-shaped string literal", () => {
 		expect(
 			admissionHeader('"// flake-shape: real-process-spawn — quoted";\n'),
@@ -1870,5 +2127,370 @@ describe("flake-shape scan — admission header parsing", () => {
 				"// flake-shape: real-process-spawn — a real comment reason\n",
 			)?.detector,
 		).toBe("real-process-spawn");
+	});
+});
+
+// ── In-process mocks and service doubles (#4362) ─────────────────────────
+//
+// Recurrence: #4344 round 3 (G5). One method added to `LSPClientInfo` and
+// `LSPService` had to be added by hand to doubles in 40 test files (34
+// client, 6 service), because nothing stopped in-process doubles from
+// multiplying. Every test below guards one way that population could grow
+// again without an admission.
+
+/** `tests/`-relative fixture name no baseline row will ever name. */
+const MOCK_FIXTURE = "clients/__4362-never-baselined.test.ts";
+
+function liveCounts(
+	file: string,
+	hits: ReturnType<typeof scanInProcessMock>,
+): Record<string, number> {
+	const live: Record<string, number> = {};
+	for (const hit of hits) {
+		const key = hitKey(file, hit);
+		live[key] = (live[key] ?? 0) + 1;
+	}
+	return live;
+}
+
+describe("flake-shape ratchet — in-process mocks and doubles (#4362)", () => {
+	it("ATTACK: a planted in-process vi.mock is a NEW flagged entry — RED", () => {
+		// The acceptance scenario through the real detector and the real
+		// baseline: an in-process module mocked in a file no row names.
+		const source = 'vi.mock("../../clients/latency-logger.js");\n';
+		const problems = auditAgainstBaseline(
+			"in-process-mock",
+			liveCounts(MOCK_FIXTURE, scanInProcessMock(MOCK_FIXTURE, source)),
+		);
+		expect(problems.map(describeProblem)).toEqual([
+			expect.stringContaining(
+				`NEW flagged file ${MOCK_FIXTURE}::clients/latency-logger`,
+			),
+		]);
+		expect(describeProblem(problems[0])).toContain("PROCESS_BOUNDARY_MODULES");
+	});
+
+	it("a process-boundary vi.mock passes — GREEN", () => {
+		// The other half of the acceptance: the same file mocking only
+		// boundaries produces no entry, so nothing reaches the baseline.
+		const source = [
+			'vi.mock("node:child_process", () => ({ spawn: vi.fn() }));',
+			'vi.mock("../../clients/safe-spawn.js");',
+			'vi.doMock("node:fs/promises");',
+		].join("\n");
+		const hits = scanInProcessMock(MOCK_FIXTURE, source);
+		expect(hits).toEqual([]);
+		expect(
+			auditAgainstBaseline("in-process-mock", liveCounts(MOCK_FIXTURE, hits)),
+		).toEqual([]);
+	});
+
+	it("ATTACK: swapping one mocked module for another in a pinned file is a NEW entry", () => {
+		// Shape 36 (count-based laundering): a file pinned at one mocked
+		// module that trades it for another keeps its count. The key carries
+		// the module, so the trade is a new entry, not a free pass.
+		const [pinnedKey] = Object.keys(FLAKE_SHAPE_BASELINE["in-process-mock"]);
+		const [file, target] = pinnedKey.split(IDENTITY_SEPARATOR);
+		const swapped = `${file}${IDENTITY_SEPARATOR}clients/__4362-swapped`;
+		expect(target).not.toBe("clients/__4362-swapped");
+		const problems = auditAgainstBaseline("in-process-mock", { [swapped]: 1 });
+		expect(problems).toEqual([
+			expect.objectContaining({ file: swapped, kind: "new-file" }),
+		]);
+	});
+
+	it("ATTACK: a pinned file whose hand-rolled double count rose is flagged", () => {
+		const [key, count] = Object.entries(
+			FLAKE_SHAPE_BASELINE["service-double"],
+		)[0];
+		const problems = auditAgainstBaseline("service-double", {
+			[key]: count + 1,
+		});
+		expect(problems).toEqual([
+			expect.objectContaining({ kind: "count-risen", before: count }),
+		]);
+	});
+
+	it("keys every mock and double baseline row as <file>::<identity>", () => {
+		// A row without the identity would pin a bare count again and let a
+		// swap through (the test above). Floors: the population minted with
+		// 1,002 mocked modules and 151 doubles; a scan that matched nothing
+		// would read as clean.
+		for (const detector of MOCK_DETECTORS) {
+			const keys = Object.keys(FLAKE_SHAPE_BASELINE[detector]);
+			expect(keys.length).toBeGreaterThan(50);
+			expect(
+				keys.filter((key) => key.split(IDENTITY_SEPARATOR).length !== 2),
+			).toEqual([]);
+		}
+	});
+
+	it("ATTACK: a mock admission needs its header but no serialized lane", () => {
+		const key = `in-process-mock:${MOCK_FIXTURE}::clients/latency-logger`;
+		const entry = {
+			detector: "in-process-mock" as const,
+			reason: "the logger's own flush order is the behaviour under test",
+		};
+		const header =
+			"// flake-shape: in-process-mock — the logger's own flush order is under test\n";
+		const body = 'vi.mock("../../clients/latency-logger.js");\n';
+		// Good header, no lane: admitted (a mock adds no contention).
+		expect(
+			validateAdmission(key, entry, header + body, new Set(), MOCK_FIXTURE),
+		).toEqual([]);
+		// No header: refused.
+		expect(
+			validateAdmission(key, entry, body, new Set(), MOCK_FIXTURE),
+		).toEqual([expect.stringContaining("missing")]);
+		// A header quoted in a comment of prose, or in a string, is no header.
+		expect(
+			validateAdmission(
+				key,
+				entry,
+				`const s = "${header.trim()}";\n${body}`,
+				new Set(),
+				MOCK_FIXTURE,
+			),
+		).toEqual([expect.stringContaining("missing")]);
+		// A spawn header first and the mock header second: both validate.
+		const twoHeaders =
+			"// flake-shape: real-process-spawn — the real CLI exit code is under test\n" +
+			header +
+			body;
+		expect(
+			validateAdmission(key, entry, twoHeaders, new Set(), MOCK_FIXTURE),
+		).toEqual([]);
+		// Only the spawn header: the mock entry names the wrong detector.
+		expect(
+			validateAdmission(
+				key,
+				entry,
+				"// flake-shape: real-process-spawn — the real CLI exit code is under test\n" +
+					body,
+				new Set(),
+				MOCK_FIXTURE,
+			),
+		).toEqual([expect.stringContaining('names detector "real-process-spawn"')]);
+	});
+});
+
+describe("flake-shape scan — in-process-mock (#4362)", () => {
+	const targetsIn = (source: string, file = MOCK_FIXTURE) =>
+		scanInProcessMock(file, source).map((hit) => hit.identity);
+
+	it("keys a relative specifier by its repo path, whatever the test file's depth", () => {
+		expect(targetsIn('vi.mock("../clients/x.js");\n', "top.test.ts")).toEqual([
+			"clients/x",
+		]);
+		expect(
+			targetsIn('vi.mock("../../../clients/x.js");\n', "clients/lsp/a.test.ts"),
+		).toEqual(["clients/x"]);
+		// Shape 34: the script extension is spelling, not identity. (The
+		// fixture module sits under tests/ so module-instance-coverage, which
+		// reads specifiers inside strings, sees no compiled-module .ts import.)
+		expect(
+			targetsIn(
+				'vi.mock("../x.ts");\nvi.doMock("../x");\nvi.doMock("../x.js");\n',
+			),
+		).toEqual(["tests/x"]);
+		expect(mockTarget("clients/a.test.ts", "fs")).toBe("node:fs");
+		expect(mockTarget("clients/a.test.ts", "node:path")).toBe("node:path");
+		expect(mockTarget("clients/a.test.ts", "@scope/pkg/sub")).toBe(
+			"@scope/pkg/sub",
+		);
+	});
+
+	it.each([
+		["vi.mock", 'vi.mock("../../clients/x.js", () => ({}));'],
+		["vi.doMock", 'vi.doMock("../../clients/x.js");'],
+		["bracket access", 'vi["mock"]("../../clients/x.js");'],
+		["spaced member access", 'vi . mock("../../clients/x.js");'],
+		["a template literal", "vi.mock(`../../clients/x.js`);"],
+		["vitest's typed import() form", 'vi.mock(import("../../clients/x.js"));'],
+	])("ATTACK spelling: flags %s", (_name, source) => {
+		// Shape 34: the call is read structurally, so an unlisted spelling
+		// of the same mock is the same entry.
+		expect(targetsIn(source)).toEqual(["clients/x"]);
+	});
+
+	it("counts each mocked module once, however many times it is mocked", () => {
+		const source = [
+			'vi.mock("../../clients/x.js");',
+			'it("a", () => { vi.doMock("../../clients/x.js"); });',
+			'it("b", () => { vi.doMock("../../clients/y.js"); });',
+		].join("\n");
+		expect(targetsIn(source)).toEqual(["clients/x", "clients/y"]);
+		// The entry points at the module's first mock, where a reader starts.
+		expect(scanInProcessMock(MOCK_FIXTURE, source)[0].line).toBe(1);
+	});
+
+	it("counts a specifier it cannot read as in-process (fails closed)", () => {
+		expect(targetsIn("const m = '../../clients/x.js';\nvi.mock(m);\n")).toEqual(
+			[NON_LITERAL_MOCK_TARGET],
+		);
+		expect(targetsIn("vi.mock(`../../clients/${name}.js`);\n")).toEqual([
+			NON_LITERAL_MOCK_TARGET,
+		]);
+	});
+
+	it("never counts or excuses vi.mock( quoted in a comment or a string", () => {
+		// Detector rule (AGENTS.md "Test requirements"): prose is not code.
+		const prose = [
+			'// vi.mock("../../clients/x.js")',
+			'/* vi.doMock("../../clients/y.js") */',
+			"const s = 'vi.mock(\"../../clients/z.js\")';",
+			'const t = `vi.mock("../../clients/w.js")`;',
+		].join("\n");
+		expect(targetsIn(prose)).toEqual([]);
+		// A comment naming a boundary module does not excuse a real call.
+		expect(
+			targetsIn(
+				'// vi.mock("node:child_process") — only a boundary here\nvi.mock("../../clients/x.js");\n',
+			),
+		).toEqual(["clients/x"]);
+	});
+
+	it("does not read vi.fn, vi.spyOn or vi.hoisted as a module mock", () => {
+		expect(
+			targetsIn(
+				'const f = vi.fn();\nvi.spyOn(obj, "m");\nconst h = vi.hoisted(() => ({}));\n',
+			),
+		).toEqual([]);
+	});
+
+	it("admits every PROCESS_BOUNDARY_MODULES entry, each with a real reason", () => {
+		// Shape 38: each allowlisted boundary is crossed by a fixture, and
+		// the list stays sorted and reasoned.
+		assertSortedRegistry(
+			"PROCESS_BOUNDARY_MODULES",
+			Object.keys(PROCESS_BOUNDARY_MODULES),
+		);
+		for (const [target, reason] of Object.entries(PROCESS_BOUNDARY_MODULES)) {
+			expect(reason.trim().length, target).toBeGreaterThanOrEqual(15);
+			const specifier = target.startsWith("clients/")
+				? `../../${target}`
+				: target;
+			expect(
+				scanInProcessMock(MOCK_FIXTURE, `vi.mock("${specifier}");\n`),
+				target,
+			).toEqual([]);
+		}
+		// A bare builtin is the same boundary as its node: spelling.
+		expect(targetsIn('vi.mock("child_process");\n')).toEqual([]);
+		// An in-process builtin is not a boundary.
+		expect(targetsIn('vi.mock("node:path");\n')).toEqual(["node:path"]);
+	});
+});
+
+describe("flake-shape scan — service-double (#4362)", () => {
+	const doubles = (source: string) =>
+		scanServiceDouble(MOCK_FIXTURE, source).map((hit) => hit.identity);
+
+	it("reads each surface's members from the production declaration", () => {
+		const service = surfaceMembers(
+			SERVICE_SURFACES.find((s) => s.name === "LSPService")!,
+		);
+		const client = surfaceMembers(
+			SERVICE_SURFACES.find((s) => s.name === "LSPClientInfo")!,
+		);
+		// The G5 methods, one per surface.
+		expect(service.has("announceCreatedFiles")).toBe(true);
+		expect(client.has("notify")).toBe(true);
+		// Declared after the first inline type import in the class body; the
+		// raw grammar closed the class early and dropped both.
+		expect(service.has("hasLSP")).toBe(true);
+		expect(service.has("getStatus")).toBe(true);
+		// Not the public surface: constructor and private methods.
+		expect(service.has("constructor")).toBe(false);
+		expect(service.has("noteAuxiliaryWait")).toBe(false);
+		expect(() =>
+			surfaceMembers({
+				name: "NoSuchService",
+				file: "clients/lsp/index.ts",
+				factories: [],
+			}),
+		).toThrow("is not declared");
+	});
+
+	it("reads past an inline type import, and refuses a declaration that does not parse", () => {
+		// Recurrence: tree-sitter misparses `import("…").T` in a type and
+		// closed `LSPService` 2,300 lines early, silently shrinking its
+		// vocabulary. A partial member list must red, never pass.
+		const withTypeImport = [
+			"class S {",
+			'\ta(): Promise<import("./c.js").T[]> { return f(); }',
+			"\tb(): void {}",
+			"}",
+		].join("\n");
+		expect([...declaredMembers(withTypeImport, "S", "fixture.ts")]).toEqual([
+			"a",
+			"b",
+		]);
+		expect(() =>
+			declaredMembers(
+				"class S {\n\ta() { return ) }\n\tb() {}\n}\n",
+				"S",
+				"fixture.ts",
+			),
+		).toThrow("does not parse cleanly");
+	});
+
+	it("ATTACK: flags the G5 client double in every key spelling", () => {
+		const source = [
+			"createLSPClient.mockResolvedValue({",
+			"\tisAlive: () => true,",
+			'\t"getDiagnostics": vi.fn(() => []),',
+			"\tshutdown() {},",
+			"\tnotify: { open: vi.fn() },",
+			"});",
+		].join("\n");
+		expect(doubles(source)).toEqual(["LSPClientInfo"]);
+	});
+
+	it("ATTACK: flags a hand-rolled service double handed over by injection", () => {
+		const source = [
+			"function makeService() {",
+			"\treturn {",
+			"\t\tannounceCreatedFiles: vi.fn(),",
+			"\t\ttouchFile: vi.fn(async () => ({ diags: [] })),",
+			"\t\tgetCapabilitySnapshots: vi.fn(async () => []),",
+			"\t};",
+			"}",
+		].join("\n");
+		expect(doubles(source)).toEqual(["LSPService"]);
+	});
+
+	it("does not flag objects seeded from the shared factory", () => {
+		const source = [
+			"makeLspServiceDouble({ touchFile: vi.fn(), hasLSP: vi.fn(), getDiagnostics: vi.fn() });",
+			"const s = { ...makeLspServiceDouble(), touchFile: vi.fn(), hasLSP: vi.fn(), getStatus: vi.fn() };",
+		].join("\n");
+		expect(doubles(source)).toEqual([]);
+	});
+
+	it("does not flag a data record that reuses the names", () => {
+		// A capability shape asserted with toMatchObject is not called by the
+		// code under test.
+		expect(
+			doubles(
+				"expect(support).toMatchObject({ definition: true, references: true, hover: false });\n",
+			),
+		).toEqual([]);
+	});
+
+	it(`does not flag an object below ${SERVICE_DOUBLE_MIN_MEMBERS} shared members`, () => {
+		expect(
+			doubles(
+				"const c = { isAlive: () => true, shutdown: vi.fn(), other: 1 };\n",
+			),
+		).toEqual([]);
+	});
+
+	it("never counts a double quoted in a comment or a string", () => {
+		const prose = [
+			"// { isAlive: () => true, shutdown() {}, getDiagnostics: vi.fn() }",
+			'const s = "{ isAlive: () => true, shutdown() {}, getDiagnostics: vi.fn() }";',
+		].join("\n");
+		expect(doubles(prose)).toEqual([]);
 	});
 });
