@@ -243,7 +243,7 @@ describe("untrusted triggers never restore or save a cache (#4358)", () => {
 				"  job:",
 				"    runs-on: ubuntu-latest",
 				"    steps:",
-				"      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
+				"      - uses: actions/setup-node@5555555555555555555555555555555555555555",
 				"        with:",
 				"          node-version: '22'",
 				"          cache: npm",

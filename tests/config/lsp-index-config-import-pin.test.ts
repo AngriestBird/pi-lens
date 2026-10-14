@@ -43,7 +43,7 @@ export function configImportSurface(source: string): string[] {
 			if (name) taken.push(name);
 		}
 	}
-	return taken.sort();
+	return taken.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
 describe("clients/lsp/index.ts import surface from ./config.js (#2052)", () => {

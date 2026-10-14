@@ -227,7 +227,10 @@ describe("check-action-pins parser (#4043)", () => {
 			}
 		});
 
-		it("sends the token on the single-tag resolver too", async () => {
+		it.each([
+			["GITHUB_TOKEN", { GITHUB_TOKEN: "gh-tok" }, "Bearer gh-tok"],
+			["GH_TOKEN", { GH_TOKEN: "cli-tok" }, "Bearer cli-tok"],
+		])("sends %s on the single-tag resolver too", async (_n, env, header) => {
 			const seen: Array<Record<string, string>> = [];
 			const fetchImpl = async (_input: unknown, init?: RequestInit) => {
 				seen.push(init?.headers as Record<string, string>);
@@ -235,10 +238,8 @@ describe("check-action-pins parser (#4043)", () => {
 					status: 200,
 				});
 			};
-			await resolveGithubTag("actions/cache", "v4.3.0", fetchImpl, {
-				GITHUB_TOKEN: "gh-tok",
-			});
-			expect(seen[0].Authorization).toBe("Bearer gh-tok");
+			await resolveGithubTag("actions/cache", "v4.3.0", fetchImpl, env);
+			expect(seen[0].Authorization).toBe(header);
 		});
 	});
 });

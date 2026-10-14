@@ -209,10 +209,58 @@ function isAwaitedBinding(
 	return false;
 }
 
+/**
+ * `await vi.importActual(spec)` / `await vi.importActual<T>(spec)` for the
+ * SAME module the factory mocks (#4427 review F5): runtime-complete exactly
+ * like the factory-parameter `importOriginal()`. Reuses `isViMockCall` for the
+ * `vi` member match. The generic form arrives misparsed as
+ * `(await vi.importActual) < typeof import(..) > (spec)` comparisons (the
+ * `isMisparsedGenericAwait` grammar quirk), so that spine is read here too.
+ * A spec that names another module is not a pass-through.
+ */
+function isAwaitedViImportActual(node: SgNode, specifier: string): boolean {
+	const unwrapped = unwrapExpression(node);
+	const sameModule = (argument: SgNode | undefined): boolean => {
+		const text = argument ? unquote(argument.text()) : undefined;
+		return text !== undefined && text === specifier;
+	};
+	if (unwrapped.kind() === "await_expression") {
+		const call = namedParts(unwrapped)[0];
+		const operand = call ? unwrapExpression(call) : undefined;
+		if (operand?.kind() !== "call_expression") return false;
+		if (!isViMockCall(operand.field("function"), ["importActual"]))
+			return false;
+		const args = namedParts(operand.field("arguments"));
+		return args.length === 1 && sameModule(args[0]);
+	}
+	if (unwrapped.kind() !== "binary_expression") return false;
+	// Left spine: ... < ... then the trailing `> (spec)`.
+	let current = unwrapped;
+	let sawComparison = false;
+	let trailing: SgNode | undefined;
+	while (current.kind() === "binary_expression") {
+		const operator = current.children().find((child) => !child.isNamed());
+		if (operator?.text() === "<") sawComparison = true;
+		if (operator?.text() === ">" && !trailing)
+			trailing = namedParts(current).at(-1);
+		const left = namedParts(current)[0];
+		if (!left) return false;
+		current = unwrapParens(left);
+	}
+	if (!sawComparison || !trailing || current.kind() !== "await_expression")
+		return false;
+	const awaited = namedParts(current)[0];
+	if (!awaited || !isViMockCall(unwrapExpression(awaited), ["importActual"]))
+		return false;
+	if (trailing.kind() !== "parenthesized_expression") return false;
+	const spec = unwrapParens(trailing);
+	return spec.kind() === "string" && sameModule(spec);
+}
+
 function isSameModulePassThrough(
 	object: SgNode,
 	factory: SgNode,
-	_specifier: string,
+	specifier: string,
 ): boolean {
 	const parameters = factory.field("parameters");
 	const actualBindings = new Set(
@@ -220,7 +268,6 @@ function isSameModulePassThrough(
 			.map((parameter) => parameter.text())
 			.filter((name) => /^(?:importActual|importOriginal)$/.test(name)),
 	);
-	if (actualBindings.size === 0) return false;
 	// Two-statement factories bind the awaited module first:
 	// `const actual = await importOriginal<T>(); return { ...actual };`
 	// Only the factory body's OWN top-level declarations qualify: a binding
@@ -242,7 +289,8 @@ function isSameModulePassThrough(
 				if (
 					name?.kind() === "identifier" &&
 					value &&
-					isAwaitedBinding(value, actualBindings, statement)
+					(isAwaitedBinding(value, actualBindings, statement) ||
+						isAwaitedViImportActual(value, specifier))
 				)
 					awaitedAliases.add(name.text());
 			}
@@ -252,7 +300,11 @@ function isSameModulePassThrough(
 		if (child.kind() !== "spread_element") return false;
 		const content = namedParts(child)[0];
 		if (!content) return false;
-		if (isAwaitedBinding(content, actualBindings, child)) return true;
+		if (
+			isAwaitedBinding(content, actualBindings, child) ||
+			isAwaitedViImportActual(content, specifier)
+		)
+			return true;
 		const target = unwrapExpression(content);
 		return target.kind() === "identifier" && awaitedAliases.has(target.text());
 	});

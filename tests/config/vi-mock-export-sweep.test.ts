@@ -595,6 +595,70 @@ describe("#2281 whole-module vi.mock export ratchet", () => {
 		}
 	});
 
+	// Recurrence #4411 round 2 F5 / #4435 review: two lsp/config.js baseline
+	// rows were detector false positives. Both tests spread
+	// `await vi.importActual<typeof import(spec)>(spec)`, runtime-complete like
+	// the factory-parameter `importOriginal()`, but the detector only knew the
+	// parameter spelling.
+	const importActualFactories: Array<[string, string, boolean]> = [
+		[
+			"a typed vi.importActual alias",
+			'async () => { const actual = await vi.importActual<typeof import("./module.js")>("./module.js"); return { ...actual, a: 1 }; }',
+			true,
+		],
+		[
+			"an untyped vi.importActual alias",
+			'async () => { const actual = await vi.importActual("./module.js"); return { ...actual, a: 1 }; }',
+			true,
+		],
+		[
+			"an inline typed vi.importActual spread",
+			'async () => ({ ...(await vi.importActual<typeof import("./module.js")>("./module.js")), a: 1 })',
+			true,
+		],
+		[
+			'a bracket-access vi["importActual"] alias',
+			'async () => { const actual = await vi["importActual"]("./module.js"); return { ...actual, a: 1 }; }',
+			true,
+		],
+		[
+			"a vi.importActual of ANOTHER module",
+			'async () => { const actual = await vi.importActual<typeof import("./other.js")>("./other.js"); return { ...actual, a: 1 }; }',
+			false,
+		],
+		[
+			"a vi.importActual alias that is never spread",
+			'async () => { const actual = await vi.importActual("./module.js"); return { a: 1, c: actual.b }; }',
+			false,
+		],
+		[
+			"a non-vi importActual member",
+			'async () => { const actual = await other.importActual("./module.js"); return { ...actual, a: 1 }; }',
+			false,
+		],
+	];
+	it.each(importActualFactories)(
+		"vi.importActual pass-through: %s",
+		(_name, factory, complete) => {
+			const root = fs.mkdtempSync(path.join(REPO_ROOT, ".probe-vi-mock-"));
+			try {
+				fs.writeFileSync(path.join(root, "module.ts"), "export const b = 1;\n");
+				fs.writeFileSync(
+					path.join(root, "importer.ts"),
+					'import { b } from "./module.js"; export { b };\n',
+				);
+				const source = `import "./importer.js";\nvi.mock("./module.js", ${factory});\n`;
+				const testFile = path.join(root, "case.test.ts");
+				fs.writeFileSync(testFile, source);
+				const findings = findViMockExportGaps(testFile, source);
+				if (complete) expect(findings).toEqual([]);
+				else expect(findings).toMatchObject([{ missing: ["b"] }]);
+			} finally {
+				fs.rmSync(root, { recursive: true, force: true });
+			}
+		},
+	);
+
 	it("accepts a two-statement no-argument importOriginal binding spread", () => {
 		// The PREMISE transcript's seventh shape: the alias idiom without a
 		// type argument is the same complete pass-through.
