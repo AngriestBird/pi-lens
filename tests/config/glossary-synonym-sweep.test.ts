@@ -714,7 +714,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"tools/lens-diagnostic-mark.ts": 1,
 		"tools/lens-diagnostics.ts": 37,
 		// 12 -> 13 (#4346): the batch selects its finding-bearing files to resolve.
-		"tools/lsp-diagnostics.ts": 13,
+		// 13 -> 14 (#4322): the batch counts its files with auxiliary findings
+		// only, one `Array.prototype.filter` use, not a delivery filter.
+		"tools/lsp-diagnostics.ts": 14,
 		"tools/lsp-navigation.ts": 6,
 		"tools/render-compact.ts": 3,
 		"mcp/analyze-cli.ts": 1,

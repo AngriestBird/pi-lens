@@ -1998,14 +1998,10 @@ function batchOutcomeReason(result: FileDiagnosticResult): string | undefined {
 function auxiliaryOnlyFindingsLine(
 	results: readonly FileDiagnosticResult[],
 ): string | undefined {
-	let count = 0;
-	for (const result of results) {
-		if (
-			result.diagnostics.length > 0 &&
-			result.primaryUnavailable !== undefined
-		)
-			count += 1;
-	}
+	const count = results.filter(
+		(result) =>
+			result.diagnostics.length > 0 && result.primaryUnavailable !== undefined,
+	).length;
 	if (count === 0) return undefined;
 	return (
 		`${count} file${count === 1 ? "" : "s"} with auxiliary findings only: no ` +
