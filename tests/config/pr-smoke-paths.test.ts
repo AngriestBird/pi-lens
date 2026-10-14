@@ -201,6 +201,13 @@ describe("install-smoke.yml lsp-handshake job (#4291)", () => {
 		expect(handshake?.run).not.toMatch(/--lsp-gate/);
 	});
 
+	// Recurrence (#4291 review F5): a copied `npm install` in a new job (Sonar
+	// S6505); the sibling shape is a locked install with no lifecycle scripts.
+	it("installs with npm ci --ignore-scripts", () => {
+		const install = steps.find((step) => step.name === "Install dependencies");
+		expect(install?.run).toMatch(/^npm ci\b.*--ignore-scripts\b/);
+	});
+
 	// Recurrence: the report step moved before the handshake, or lost its
 	// `always()`, so a red handshake skips it. The behaviour of the step, and of
 	// the handshake's pipefail, is executed in
