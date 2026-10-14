@@ -77,7 +77,8 @@ real seam. Check that every gate the diff adds is exercised through that path.
   line to read; the nightly Stryker report on master is exploratory and is not
   a review input.
 - For every relaxed or rewritten existing assertion, mutate the behaviour the
-  test is named for; a rewrite that stays green is a finding (#4390).
+  test is named for; a rewrite that stays green is a finding (#4390). This is
+  the exception to the one-spot-check cap above.
 - Repeat the pattern and population sweeps. Check blast radius, bounded
   observability, changelog, commit, and PR-body requirements.
 - Re-run the PR's `## Class sweep` search yourself and widen it when the
