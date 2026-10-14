@@ -32,6 +32,7 @@ export declare function lintPrBody(
 		testCorpus?: { paths: Set<string>; titles: Set<string> };
 		proseMode?: "block" | "warn";
 		bugClosing?: boolean;
+		existsOnBase?: (path: string) => boolean | null;
 	},
 ): {
 	valid: boolean;
@@ -45,8 +46,21 @@ export declare const DETECTION_LAYERS: readonly string[];
 export declare const DETECTION_MESSAGE: string;
 export declare function lintDetectionSection(
 	body?: string,
-	options?: { ignoreUnfilled?: boolean },
+	options?: {
+		ignoreUnfilled?: boolean;
+		existsOnBase?: (path: string) => boolean | null;
+	},
 ): string[];
+export declare const detectionExistsNotOnBaseMessage: (path: string) => string;
+export declare const DETECTION_EXISTS_BASE_UNRESOLVED_MESSAGE: string;
+export declare function resolvePrBase(
+	cwd?: string,
+	git?: (args: string[], options?: Record<string, unknown>) => string,
+): string | null;
+export declare function baseFileReader(
+	cwd?: string,
+	git?: (args: string[], options?: Record<string, unknown>) => string,
+): (path: string) => boolean | null;
 export declare function resolveBugClosing(
 	body: string,
 	fetchImpl?: typeof fetch,
