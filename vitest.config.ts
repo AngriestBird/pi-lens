@@ -368,6 +368,11 @@ const lspSpawnHeavyInclude = [
 	// fixture path, so the marker census cannot see that half; stated here by
 	// hand like analyze-cli above.
 	"tests/tools/diagnostics-route-switch-matrix.test.ts",
+	// #4403 round 4: the cascade line through pi's turn path. Real fake-LSP
+	// children (typescript, typos, Opengrep stand-ins) behind project command
+	// overrides, one of them held 8 s before it answers; same contention
+	// class as the matrix above.
+	"tests/clients/cascade-unanswered-primary-4403.test.ts",
 	// #873/#448: the dispatch LSP runner against a real stdio JSON-RPC server
 	// — a real child spawn through the production LSPService plus a
 	// `.pi-lens/lsp.json` custom server, waiting on real first-document
