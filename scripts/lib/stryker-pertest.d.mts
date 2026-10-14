@@ -13,6 +13,31 @@ export declare function planPertest(
 	tests: string[];
 	excluded: Array<{ file: string; reason: string }>;
 };
+export declare const MAX_ROTATION_MODULE_LINES: number;
+export declare function eligibleModules(
+	moduleFiles: string[],
+	options: {
+		testFiles: string[];
+		lineCount?: (file: string) => number;
+		maxLines?: number;
+	},
+): string[];
+export declare function pickModule(eligible: string[], index: number): string;
+export declare function splitRunnableTests(
+	tests: string[],
+	vitestJson: {
+		testResults: Array<{
+			name: string;
+			status: string;
+			message?: string;
+			assertionResults: Array<{ title: string; status: string }>;
+		}>;
+	},
+	root: string,
+): {
+	kept: string[];
+	dropped: Array<{ file: string; failures: string[] }>;
+};
 export declare function patchVitestRunner(runnerDir: string): {
 	patched: number;
 };
@@ -37,8 +62,16 @@ export type Candidate = {
 	kills: number;
 	survivedCovered: number;
 	killedByOthers: number;
+	own: boolean;
 };
-export declare function findWorthlessTests(report: MutationReport): Candidate[];
+export declare function isOwnTest(
+	testFile: string,
+	moduleFile: string,
+): boolean;
+export declare function findWorthlessTests(
+	report: MutationReport,
+	moduleFile?: string,
+): Candidate[];
 export declare function summarizeReport(
 	report: MutationReport,
 ): { total: number } & Record<string, number>;

@@ -14,17 +14,28 @@
  *     Prints GITHUB_OUTPUT lines `module=`, `target=<compiled .js>` and
  *     `tests=<comma-joined test files>`; the excluded tests go to stderr.
  *
+ *   node scripts/stryker-pertest.mjs pick --index N
+ *     Prints `module=<clients/x.ts>`: the Nth eligible module, wrapping (the
+ *     workflow passes its run number when no module is named).
+ *
+ *   node scripts/stryker-pertest.mjs preflight --tests A,B --report JSON
+ *     Drops the tests a vitest pre-flight run (threads pool, JSON reporter)
+ *     failed or never reported. Prints `tests=<kept>`; the dropped go to stderr.
+ *
  *   node scripts/stryker-pertest.mjs candidates --report JSON --out MD
  *     [--module M] [--json-out JSON]
  *     Lists the tests that cover mutated code but kill no mutant.
  */
-import { readFileSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import {
+	eligibleModules,
 	findWorthlessTests,
 	patchVitestRunner,
+	pickModule,
 	planPertest,
 	renderCandidates,
+	splitRunnableTests,
 	summarizeReport,
 } from "./lib/stryker-pertest.mjs";
 
@@ -43,20 +54,46 @@ export function main(argv = process.argv.slice(2)) {
 	if (command === "patch-runner") {
 		return patchVitestRunner(valueAfter(rest, "--dir", RUNNER_DIR));
 	}
+	if (command === "pick") {
+		const modules = readdirSync("clients", { recursive: true })
+			.map((entry) => `clients/${String(entry).replaceAll("\\", "/")}`)
+			.filter((file) => file.endsWith(".ts"));
+		const testFiles = readdirSync("tests", { recursive: true })
+			.map((entry) => `tests/${String(entry).replaceAll("\\", "/")}`)
+			.filter((file) => file.endsWith(".test.ts"));
+		return {
+			module: pickModule(
+				eligibleModules(modules, { testFiles }),
+				Number(valueAfter(rest, "--index")),
+			),
+		};
+	}
 	if (command === "plan") {
 		return planPertest(valueAfter(rest, "--module"));
+	}
+	if (command === "preflight") {
+		const split = splitRunnableTests(
+			valueAfter(rest, "--tests").split(",").filter(Boolean),
+			JSON.parse(readFileSync(valueAfter(rest, "--report"), "utf8")),
+			process.cwd(),
+		);
+		if (split.kept.length === 0) {
+			throw new Error(
+				`no planned test runs under the runner's pool: ${JSON.stringify(split.dropped)}`,
+			);
+		}
+		return split;
 	}
 	if (command === "candidates") {
 		const report = JSON.parse(
 			readFileSync(valueAfter(rest, "--report"), "utf8"),
 		);
-		const candidates = findWorthlessTests(report);
+		const moduleFile = valueAfter(rest, "--module", "");
+		const candidates = findWorthlessTests(report, moduleFile);
 		const summary = summarizeReport(report);
 		writeFileSync(
 			valueAfter(rest, "--out"),
-			renderCandidates(candidates, summary, {
-				module: valueAfter(rest, "--module", ""),
-			}),
+			renderCandidates(candidates, summary, { module: moduleFile }),
 		);
 		if (rest.includes("--json-out")) {
 			writeFileSync(
@@ -84,6 +121,13 @@ if (
 			console.log(
 				`module=${result.module}\ntarget=${result.target}\ntests=${result.tests.join(",")}`,
 			);
+		} else if (process.argv[2] === "preflight") {
+			for (const { file, failures } of result.dropped) {
+				console.error(`dropped ${file}: ${failures.join("; ")}`);
+			}
+			console.log(`tests=${result.kept.join(",")}`);
+		} else if (process.argv[2] === "pick") {
+			console.log(`module=${result.module}`);
 		} else if (process.argv[2] === "patch-runner") {
 			console.log(`patched=${result.patched}`);
 		}

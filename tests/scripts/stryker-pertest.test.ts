@@ -14,10 +14,14 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { main } from "../../scripts/stryker-pertest.mjs";
 import {
+	eligibleModules,
 	findWorthlessTests,
 	isGovernanceTest,
 	patchVitestRunner,
+	pickModule,
 	planPertest,
+	renderCandidates,
+	splitRunnableTests,
 	summarizeReport,
 } from "../../scripts/lib/stryker-pertest.mjs";
 
@@ -216,6 +220,61 @@ describe("findWorthlessTests (#4365)", () => {
 	});
 });
 
+describe("own tests (#4365)", () => {
+	// Recurrence (pilot, clients/single-flight.js, spawn-output-cap.js): nearly
+	// every listed test guards ANOTHER seam (a ratchet scan that never runs the
+	// module, a spawn test that touches two of its mutants). The module's own
+	// tests are the deletion review; the rest are reported apart.
+	const mixed = report(
+		[
+			["t0", "other seam"],
+			["t1", "own redundant"],
+			["t2", "kills"],
+		],
+		[
+			{
+				id: "0",
+				status: "Killed",
+				coveredBy: ["t0", "t1", "t2"],
+				killedBy: ["t2"],
+			},
+		],
+	);
+	mixed.testFiles = {
+		"tests/clients/other-seam.test.ts": {
+			tests: [{ id: "t0", name: "other seam" }],
+		},
+		"tests/clients/x.test.ts": {
+			tests: [
+				{ id: "t1", name: "own redundant" },
+				{ id: "t2", name: "kills" },
+			],
+		},
+	};
+
+	it("marks the candidates that live in the module's own test files", () => {
+		const found = findWorthlessTests(mixed, "clients/x.ts");
+		expect(found.map((c) => [c.id, c.own])).toEqual([
+			["t0", false],
+			["t1", true],
+		]);
+	});
+
+	it("renders the module's own tests before the other seams'", () => {
+		const text = renderCandidates(
+			findWorthlessTests(mixed, "clients/x.ts"),
+			summarizeReport(mixed),
+			{ module: "clients/x.ts" },
+		);
+		expect(text.indexOf("own redundant")).toBeGreaterThan(-1);
+		expect(text.indexOf("own redundant")).toBeLessThan(
+			text.indexOf("other seam"),
+		);
+		expect(text).toContain("Own tests");
+		expect(text).toContain("Other seams");
+	});
+});
+
 describe("summarizeReport (#4365)", () => {
 	it("counts mutants by status", () => {
 		const counts = summarizeReport(
@@ -246,6 +305,28 @@ describe("isGovernanceTest / planPertest (#4365)", () => {
 			true,
 		);
 		expect(isGovernanceTest("tests/clients/run-duration.test.ts")).toBe(false);
+	});
+
+	// Recurrence (pilot, clients/single-flight.js): the 14 cases of
+	// single-flight-ratchet.test.ts scan the source tree as text, ran no mutated
+	// line, and filled the "own tests" list. The repo defines governance suites
+	// by name (docs/pi-lens-subagent.md "Tests and probes"); so does this rule.
+	it("excludes the named governance suites under tests/clients", () => {
+		for (const word of [
+			"sweep",
+			"ratchet",
+			"conformance",
+			"coverage",
+			"gate",
+			"governance",
+			"silence",
+			"hermeticity",
+			"invariant",
+			"contract",
+		]) {
+			expect(isGovernanceTest(`tests/clients/foo-${word}.test.ts`)).toBe(true);
+		}
+		expect(isGovernanceTest("tests/clients/foo.test.ts")).toBe(false);
 	});
 
 	it("selects one-hop tests, drops governance and marker-excluded ones with a reason", () => {
@@ -364,5 +445,113 @@ describe("stryker-pertest candidates command (#4365)", () => {
 
 	it("rejects an unknown subcommand", () => {
 		expect(() => main(["nope"])).toThrow(/usage/);
+	});
+});
+
+describe("eligibleModules / pickModule (#4365)", () => {
+	const testFiles = [
+		"tests/clients/small.test.ts",
+		"tests/clients/big.test.ts",
+		"tests/config/governed.test.ts",
+		"tests/clients/zeta-extra.test.ts",
+		"tests/clients/other.test.ts",
+	];
+	const lines: Record<string, number> = {
+		"clients/small.ts": 40,
+		"clients/big.ts": 5000,
+		"clients/governed.ts": 40,
+		"clients/untested.ts": 40,
+		"clients/zeta.ts": 40,
+	};
+	const eligible = () =>
+		eligibleModules(Object.keys(lines), {
+			testFiles,
+			lineCount: (f: string) => lines[f],
+		});
+
+	// Recurrence: a rotation that picks a module with no test of its own, one only a
+	// governance suite names, or one too big for the 90-minute job cap, spends
+	// a run on a report that cannot answer the question.
+	it("keeps only modules with a sibling test and within the size cap, sorted", () => {
+		expect(eligible()).toEqual(["clients/small.ts", "clients/zeta.ts"]);
+	});
+
+	it("walks the list by index and wraps", () => {
+		const list = eligible();
+		expect(pickModule(list, 0)).toBe("clients/small.ts");
+		expect(pickModule(list, 1)).toBe("clients/zeta.ts");
+		expect(pickModule(list, 2)).toBe("clients/small.ts");
+	});
+
+	it("refuses an empty rotation", () => {
+		expect(() => pickModule([], 3)).toThrow(/no eligible module/);
+	});
+});
+
+describe("splitRunnableTests (#4365)", () => {
+	const root = "/repo";
+	const result = (file: string, failed: string[]) => ({
+		name: `${root}/${file}`,
+		status: failed.length > 0 ? "failed" : "passed",
+		assertionResults: [
+			...failed.map((title) => ({ title, status: "failed" })),
+			{ title: "fine", status: "passed" },
+		],
+	});
+
+	// Recurrence (pilot, clients/spawn-timeout-cooldown.js): the runner pins the
+	// threads pool, `process.chdir()` throws there, and Stryker aborts the whole
+	// dry run on one failing test. The files that cannot run under the pool are
+	// dropped before Stryker starts, and named.
+	it("drops a file with a failing test and names the failure", () => {
+		const { kept, dropped } = splitRunnableTests(
+			["tests/a.test.ts", "tests/b.test.ts"],
+			{
+				testResults: [
+					result("tests/a.test.ts", []),
+					result("tests/b.test.ts", ["uses process.chdir"]),
+				],
+			},
+			root,
+		);
+		expect(kept).toEqual(["tests/a.test.ts"]);
+		expect(dropped).toEqual([
+			{ file: "tests/b.test.ts", failures: ["uses process.chdir"] },
+		]);
+	});
+
+	// Recurrence: a file the pre-flight never reported (a crash before collect)
+	// reading as runnable would abort the dry run it was meant to protect.
+	it("drops a planned file the report does not mention", () => {
+		const { kept, dropped } = splitRunnableTests(
+			["tests/a.test.ts", "tests/missing.test.ts"],
+			{ testResults: [result("tests/a.test.ts", [])] },
+			root,
+		);
+		expect(kept).toEqual(["tests/a.test.ts"]);
+		expect(dropped).toEqual([
+			{
+				file: "tests/missing.test.ts",
+				failures: ["not reported by the pre-flight run"],
+			},
+		]);
+	});
+
+	it("drops a file whose suite failed to load", () => {
+		const { kept } = splitRunnableTests(
+			["tests/a.test.ts"],
+			{
+				testResults: [
+					{
+						name: `${root}/tests/a.test.ts`,
+						status: "failed",
+						assertionResults: [],
+						message: "boom",
+					},
+				],
+			},
+			root,
+		);
+		expect(kept).toEqual([]);
 	});
 });

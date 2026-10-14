@@ -12,19 +12,24 @@ import {
 } from "./stryker-diff.mjs";
 
 /**
- * Governance tests over documents, workflows and manifests are excluded by
- * rule: tests/config suites read docs, workflows and package manifests as text.
- * They import a module only to name it, so in every run they would read as
- * "covers the module, kills nothing" and the report could not tell them from a
- * worthless test.
+ * Governance tests are excluded by rule. Two spellings of the same idea:
+ * tests/config suites read docs, workflows and package manifests as text, and
+ * the `tests/clients` suites the repo selects as governance by name
+ * (docs/pi-lens-subagent.md "Tests and probes": sweep, ratchet, conformance,
+ * coverage, gate, governance, silence, hermeticity, invariant, contract) scan
+ * source as text. Neither runs the mutated code, so in every run they would read
+ * as "covers the module, kills nothing" and the report could not tell them from
+ * a worthless test.
  */
 export const GOVERNANCE_TEST_PREFIX = "tests/config/";
+const GOVERNANCE_NAME_RE =
+	/(?:sweep|ratchet|conformance|coverage|gate|governance|silence|hermeticity|invariant|contract)[^/]*\.test\.ts$/;
 const GOVERNANCE_REASON =
-	"governance suite: reads docs, workflows and manifests as text";
+	"governance suite: scans docs, workflows, manifests or source as text";
 
 /** @param {string} file */
 export const isGovernanceTest = (file) =>
-	file.startsWith(GOVERNANCE_TEST_PREFIX);
+	file.startsWith(GOVERNANCE_TEST_PREFIX) || GOVERNANCE_NAME_RE.test(file);
 
 /**
  * The tests one module's campaign runs: the one-hop importers and conventional
@@ -58,6 +63,106 @@ export function planPertest(moduleFile, options) {
 		tests: tests.sort(),
 		excluded: [...excluded, ...governance],
 	};
+}
+
+/**
+ * Rotation size cap, in source lines of the `.ts` module. Pilot runs on GitHub
+ * (4 vCPU, concurrency 2, 2026-10-14): clients/run-duration.ts 54 lines -> 16
+ * mutants, 5 s; clients/json-cache-read.ts 72 lines -> 12 mutants, 39 s;
+ * clients/read-bridge.ts 252 lines -> 103 mutants (0.41 per line), 234 s.
+ * Time grows with mutants times the tests covering each; 600 lines is about 250
+ * mutants, an estimated 10 to 25 minutes against the 90-minute job cap.
+ */
+export const MAX_ROTATION_MODULE_LINES = 600;
+
+/**
+ * Modules the rotation may pick: runtime `.ts` sources that have a conventional
+ * sibling test (`tests/<path>.test.ts` or `tests/<path>-*.test.ts`, the pairing
+ * `mapRelatedTests` calls a sibling) and are at most `maxLines` long. A sibling
+ * test is the module's own test, which is the population this campaign judges;
+ * the run itself still takes every one-hop importer (`planPertest`). Cheap on
+ * purpose: the full import scan costs minutes over the whole tree.
+ *
+ * @param {string[]} moduleFiles candidate `.ts` sources
+ * @param {{testFiles: string[], lineCount?: (file: string) => number, maxLines?: number}} options
+ * @returns {string[]} sorted
+ */
+export function eligibleModules(
+	moduleFiles,
+	{
+		testFiles,
+		lineCount = (file) => readFileSync(file, "utf8").split("\n").length,
+		maxLines = MAX_ROTATION_MODULE_LINES,
+	},
+) {
+	const tests = testFiles.filter((test) => !isGovernanceTest(test));
+	return moduleFiles
+		.filter(isCompiledMutationSource)
+		.filter(
+			(file) =>
+				tests.some((test) => isOwnTest(test, file)) &&
+				lineCount(file) <= maxLines,
+		)
+		.sort();
+}
+
+/**
+ * Deterministic rotation: the module at `index` modulo the list. The workflow
+ * passes its run number, so consecutive runs walk the list.
+ *
+ * @param {string[]} eligible
+ * @param {number} index
+ */
+export function pickModule(eligible, index) {
+	if (eligible.length === 0) {
+		throw new Error("stryker-pertest: no eligible module to rotate through");
+	}
+	return eligible[
+		((index % eligible.length) + eligible.length) % eligible.length
+	];
+}
+
+/**
+ * Split a module's planned tests by a pre-flight run under the runner's own
+ * pool. The runner pins `pool: "threads"` over any config, `process.chdir()`
+ * throws in a worker thread, and Stryker aborts the whole dry run on one failing
+ * test (pilot, clients/spawn-timeout-cooldown.js: 4 chdir failures, no report).
+ * A file that fails there, or that the report never mentions, is dropped and
+ * named; the rest run.
+ *
+ * @param {string[]} tests planned test files, repo-relative
+ * @param {{testResults: Array<{name: string, status: string, message?: string, assertionResults: Array<{title: string, status: string}>}>}} vitestJson
+ *   vitest `--reporter=json` output of the pre-flight run
+ * @param {string} root the absolute repo root the report's names are under
+ */
+export function splitRunnableTests(tests, vitestJson, root) {
+	const byFile = new Map(
+		vitestJson.testResults.map((result) => [
+			path.relative(root, result.name).replaceAll("\\", "/"),
+			result,
+		]),
+	);
+	const kept = [];
+	const dropped = [];
+	for (const file of tests) {
+		const result = byFile.get(file);
+		if (!result) {
+			dropped.push({
+				file,
+				failures: ["not reported by the pre-flight run"],
+			});
+			continue;
+		}
+		const failures = result.assertionResults
+			.filter((assertion) => assertion.status === "failed")
+			.map((assertion) => assertion.title);
+		if (failures.length === 0 && result.status === "failed") {
+			failures.push(result.message || "suite failed to run");
+		}
+		if (failures.length > 0) dropped.push({ file, failures });
+		else kept.push(file);
+	}
+	return { kept, dropped };
 }
 
 // @stryker-mutator/vitest-runner 10.0.0 builds a test's name by joining its
@@ -94,6 +199,21 @@ export function patchVitestRunner(runnerDir) {
 		patched += 1;
 	}
 	return { patched };
+}
+
+/**
+ * True when `testFile` is the module's own test: `tests/<path>.test.ts` or
+ * `tests/<path>-*.test.ts` for `<path>.ts` (the pairing `mapRelatedTests` calls
+ * a sibling). Anything else that imports the module guards some other seam.
+ *
+ * @param {string} testFile @param {string} moduleFile
+ */
+export function isOwnTest(testFile, moduleFile) {
+	const stem = `tests/${moduleFile.replace(/\.ts$/, "")}`;
+	return (
+		testFile === `${stem}.test.ts` ||
+		(testFile.startsWith(`${stem}-`) && testFile.endsWith(".test.ts"))
+	);
 }
 
 const COUNTED = new Set(["Killed", "Survived", "Timeout"]);
@@ -134,8 +254,10 @@ const allMutants = (report) =>
  * treated as covering it.
  *
  * @param {MutationReport} report
+ * @param {string} [moduleFile] the mutated `.ts` module; marks each candidate
+ *   `own` when it lives in that module's own test files
  */
-export function findWorthlessTests(report) {
+export function findWorthlessTests(report, moduleFile = "") {
 	const tests = indexTests(report);
 	const stats = new Map(
 		[...tests.keys()].map((id) => [
@@ -179,6 +301,7 @@ export function findWorthlessTests(report) {
 			kills: stat.kills,
 			survivedCovered: stat.survivors,
 			killedByOthers: stat.killedByOthers,
+			own: moduleFile !== "" && isOwnTest(file, moduleFile),
 		});
 	}
 	return found;
@@ -215,14 +338,28 @@ export function renderCandidates(candidates, summary, { module = "" } = {}) {
 		lines.push("Every test in the run kills at least one mutant.");
 		return `${lines.join("\n")}\n`;
 	}
-	lines.push(
-		"| test file | test | covers | kills | reason |",
-		"| --- | --- | --- | --- | --- |",
-	);
-	for (const c of candidates) {
+	const row = (c) =>
+		`| \`${c.file}\` | ${c.name.replaceAll("|", "\\|")} | ${c.covers} | ${c.kills} | ${c.reason} |`;
+	const table = (title, rows) => {
+		if (rows.length === 0) return;
 		lines.push(
-			`| \`${c.file}\` | ${c.name.replaceAll("|", "\\|")} | ${c.covers} | ${c.kills} | ${c.reason} |`,
+			`### ${title} (${rows.length})`,
+			"",
+			"| test file | test | covers | kills | reason |",
+			"| --- | --- | --- | --- | --- |",
+			...rows.map(row),
+			"",
 		);
-	}
+	};
+	// The module's own tests are the deletion review. The rest cover it as a
+	// side effect of guarding another seam and are listed for completeness.
+	table(
+		"Own tests",
+		candidates.filter((c) => c.own),
+	);
+	table(
+		"Other seams",
+		candidates.filter((c) => !c.own),
+	);
 	return `${lines.join("\n")}\n`;
 }

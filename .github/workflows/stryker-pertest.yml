@@ -15,8 +15,9 @@ on:
   workflow_dispatch:
     inputs:
       module:
-        description: "Runtime module to mutate, e.g. clients/run-duration.ts"
-        required: true
+        description: "Runtime module to mutate, e.g. clients/run-duration.ts. Empty takes the next module in the rotation (run number modulo the eligible list)."
+        required: false
+        default: ""
         type: string
 
 permissions: {}
@@ -32,8 +33,6 @@ jobs:
     timeout-minutes: 90
     permissions:
       contents: read
-    env:
-      MODULE: ${{ inputs.module || 'clients/run-duration.ts' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -53,14 +52,43 @@ jobs:
       # script throws if the runner no longer holds the spelling it patches.
       - name: Patch the Stryker vitest runner for vitest 5
         run: node scripts/stryker-pertest.mjs patch-runner
+      # An explicit module wins; otherwise the rotation walks the eligible list
+      # (scripts/lib/stryker-pertest.mjs: modules with a sibling test, at most
+      # 600 lines) by run number.
+      - name: Choose the module
+        id: choose
+        env:
+          INPUT_MODULE: ${{ inputs.module }}
+        run: |
+          set -euo pipefail
+          if [ -n "$INPUT_MODULE" ]; then
+            echo "module=$INPUT_MODULE" | tee -a "$GITHUB_OUTPUT"
+          else
+            node scripts/stryker-pertest.mjs pick --index "$GITHUB_RUN_NUMBER" | tee -a "$GITHUB_OUTPUT"
+          fi
       - name: Plan the run
         id: plan
+        env:
+          MODULE: ${{ steps.choose.outputs.module }}
         run: node scripts/stryker-pertest.mjs plan --module "$MODULE" | tee -a "$GITHUB_OUTPUT"
+      # The runner pins the threads pool over any config; `process.chdir()` throws
+      # there and Stryker aborts its dry run on one failing test. A pre-flight
+      # under the same pool drops, and names, the files that cannot run.
+      - name: Pre-flight the planned tests under the threads pool
+        id: preflight
+        env:
+          PILENS_MUTATION_TESTS: ${{ steps.plan.outputs.tests }}
+        run: |
+          set -uo pipefail
+          mkdir -p "$RUNNER_TEMP/pertest"
+          node_modules/.bin/vitest run --config vitest.mutation.config.ts --pool=threads --reporter=json --outputFile="$RUNNER_TEMP/preflight.json" || true
+          node scripts/stryker-pertest.mjs preflight --tests "$PILENS_MUTATION_TESTS" --report "$RUNNER_TEMP/preflight.json" 2> "$RUNNER_TEMP/pertest/dropped.txt" | tee -a "$GITHUB_OUTPUT"
+          cat "$RUNNER_TEMP/pertest/dropped.txt"
       - name: Mutate the module
         id: stryker
         continue-on-error: true
         env:
-          PILENS_MUTATION_TESTS: ${{ steps.plan.outputs.tests }}
+          PILENS_MUTATION_TESTS: ${{ steps.preflight.outputs.tests }}
           TARGET: ${{ steps.plan.outputs.target }}
         run: |
           set -uo pipefail
@@ -71,6 +99,8 @@ jobs:
           exit "$rc"
       - name: List tests that kill no mutant
         if: always()
+        env:
+          MODULE: ${{ steps.choose.outputs.module }}
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/pertest"
@@ -78,6 +108,9 @@ jobs:
             cp reports/mutation/pertest.json "$RUNNER_TEMP/pertest/pertest.json"
             node scripts/stryker-pertest.mjs candidates --report reports/mutation/pertest.json --module "$MODULE" --out "$RUNNER_TEMP/pertest/candidates.md" --json-out "$RUNNER_TEMP/pertest/candidates.json"
             cat "$RUNNER_TEMP/pertest/candidates.md" >> "$GITHUB_STEP_SUMMARY"
+            if [ -s "$RUNNER_TEMP/pertest/dropped.txt" ]; then
+              { echo; echo "Test files the threads pool could not run (not in this report):"; echo '```'; cat "$RUNNER_TEMP/pertest/dropped.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            fi
             echo "wall seconds: ${{ steps.stryker.outputs.wall_seconds }}" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "::error::no mutation report was written"

@@ -80,3 +80,35 @@ describe("stryker.pertest.config.mjs (#4365)", () => {
 		);
 	});
 });
+
+describe("stryker-pertest workflow pre-flight (#4365)", () => {
+	// Recurrence (pilot, clients/spawn-timeout-cooldown.js): one test calling
+	// process.chdir() under the runner's threads pool aborted the dry run and the
+	// job wrote no report. The pre-flight must run before Stryker and feed it.
+	it("feeds Stryker the pre-flight's kept tests", () => {
+		const pre = job.steps.findIndex((step) =>
+			step.run?.includes("stryker-pertest.mjs preflight"),
+		);
+		const mutate = job.steps.findIndex((step) =>
+			step.run?.includes("stryker run stryker.pertest.config.mjs"),
+		);
+		expect(pre).toBeGreaterThan(-1);
+		expect(pre).toBeLessThan(mutate);
+		expect(job.steps[mutate].env?.PILENS_MUTATION_TESTS).toBe(
+			"${{ steps.preflight.outputs.tests }}",
+		);
+	});
+});
+
+describe("stryker-pertest workflow rotation (#4365)", () => {
+	// Recurrence: a rotation step that is skipped or ordered after the plan step
+	// leaves an unnamed dispatch with no module to mutate.
+	it("chooses the module before it plans the run", () => {
+		const at = (needle: string) =>
+			job.steps.findIndex((step) => step.run?.includes(needle));
+		expect(at("stryker-pertest.mjs pick --index")).toBeGreaterThan(-1);
+		expect(at("stryker-pertest.mjs pick --index")).toBeLessThan(
+			at("stryker-pertest.mjs plan --module"),
+		);
+	});
+});
