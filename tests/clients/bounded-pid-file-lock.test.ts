@@ -23,10 +23,14 @@ import {
 
 const tempDirs: string[] = [];
 
+// #4405: the degradation ledger is module state. Only some describes reset it,
+// so under a shuffle a `generation-lock-legacy-held` record from another
+// describe leaked into a count (seeds 3, 5 and 606: expected 4 to be 1).
 afterEach(() => {
 	for (const dir of tempDirs.splice(0)) {
 		fs.rmSync(dir, { recursive: true, force: true });
 	}
+	resetDegradationLedger();
 });
 
 const testTimeoutScale = (() => {
@@ -439,8 +443,6 @@ describe("acquireBoundedPidFileLock across versions (#3476)", () => {
 		);
 	}
 
-	afterEach(() => resetDegradationLedger());
-
 	// A writer from before #3476 takes only `<store>.lock`, with `wx`.
 	it("holds the pre-generation lock file while inside, so an older writer blocks", () => {
 		const { lockPath } = lockIn();
@@ -584,8 +586,6 @@ describe("acquireQuarantinePidFileLock across versions (#3476)", () => {
 			getDegradationSummary().find((group) => group.kind === kind)?.count ?? 0
 		);
 	}
-
-	afterEach(() => resetDegradationLedger());
 
 	// A writer from before #3476 takes only the `<store>.lock` directory.
 	it("holds the pre-generation lock directory while inside, so an older writer blocks", async () => {
@@ -740,7 +740,6 @@ describe("acquireBoundedPidFileLock: remembered-holder skip (#3594)", () => {
 	afterEach(() => {
 		vi.useRealTimers();
 		vi.restoreAllMocks();
-		resetDegradationLedger();
 	});
 
 	/**

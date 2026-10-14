@@ -35,11 +35,13 @@ name: Shuffle census nightly (order-dependent test files)
 # Sunday run, or a dispatch with `with_alone`, includes them. The weekly cron
 # string below is compared with `github.event.schedule` in the workflow env,
 # which both the census parts and the report read, so they plan alike. The
-# dispatch inputs reach a shell only through that env, never inlined.
+# dispatch inputs reach a shell only through that env, never inlined. The
+# daily cron skips Sunday: both crons on one night would publish the stale
+# marker at 04:30 and read it back at 05:00, counting one night as two.
 
 on:
   schedule:
-    - cron: "30 4 * * *" # daily 04:30 UTC, shuffled chunks only
+    - cron: "30 4 * * 1-6" # Monday to Saturday 04:30 UTC, shuffled chunks only
     - cron: "0 5 * * 0" # Sundays 05:00 UTC, the alone starts as well
   workflow_dispatch:
     inputs:
@@ -197,6 +199,11 @@ jobs:
           node scripts/ci-shuffle-census.mjs "${ARGS[@]}" --report --previous-issues "$RUNNER_TEMP/census-issues.json" --title "$TRACKING_TITLE" --stale-out "$RUNNER_TEMP/census-report/stale.txt" --body-out "$RUNNER_TEMP/census-report/body.md" --run-url "$RUN_URL" || rc=$?
           echo "$rc" > "$RUNNER_TEMP/census-report/exit"
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          # The issue body, rendered on the run page: a branch dispatch skips
+          # the writer, so this is where a rehearsal shows what it would post.
+          if [ -f "$RUNNER_TEMP/census-report/body.md" ]; then
+            cat "$RUNNER_TEMP/census-report/body.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
           if [ "$rc" = 4 ]; then
             echo "::warning::ratchet entries are clean under every seed tonight; delete them if they stay clean (a second night reds)"
           fi
@@ -216,11 +223,13 @@ jobs:
           exit 1
 
   # The only writer. `always()` so a red night still updates the issue; the
-  # report job's exit code and body arrive as an artifact.
+  # report job's exit code and body arrive as an artifact. A `files` subset
+  # dispatch never writes: its clean exit says nothing about the whole tree
+  # and would close the tracking issue.
   publish-issue:
     name: Update the tracking issue
     needs: confirm-report
-    if: always() && (github.event_name == 'schedule' || github.ref == 'refs/heads/master') && needs.confirm-report.result != 'skipped' && needs.confirm-report.result != 'cancelled'
+    if: always() && (github.event_name == 'schedule' || github.ref == 'refs/heads/master') && inputs.files == '' && needs.confirm-report.result != 'skipped' && needs.confirm-report.result != 'cancelled'
     runs-on: ubuntu-latest
     # One `gh` label call and one upsert.
     timeout-minutes: 10

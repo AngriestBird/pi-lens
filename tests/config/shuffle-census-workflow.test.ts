@@ -42,6 +42,7 @@ const load = (text: string) => yaml.load(text) as Workflow;
 const WRITE_GUARD =
 	"github.event_name == 'schedule' || github.ref == 'refs/heads/master'";
 const WEEKLY = "0 5 * * 0";
+const DAILY = "30 4 * * 1-6";
 const run = (step: Step) => step.run ?? "";
 
 /** Every way the workflow can stop being the #4405 nightly shape. */
@@ -60,6 +61,13 @@ function findings(text: string): string[] {
 	const crons = (workflow.on?.schedule ?? []).map((entry) => entry.cron);
 	if (crons.length !== 2 || !crons.includes(WEEKLY))
 		out.push(`schedule is not a daily plus the weekly ${WEEKLY}`);
+	// Recurrence (F-B, #4423 verify r3): a daily `30 4 * * *` also fires on
+	// Sunday, so the 04:30 run's stale marker made the 05:00 run red on the
+	// same night (the two-night rule counted one night twice).
+	if (!crons.includes(DAILY))
+		out.push(
+			`the daily cron is not ${DAILY} (it must skip the weekly's Sunday)`,
+		);
 	if (!triggers.includes("workflow_dispatch")) out.push("no workflow_dispatch");
 	if (JSON.stringify(workflow.permissions) !== "{}")
 		out.push("workflow-level permissions are not {}");
@@ -231,6 +239,20 @@ function findings(text: string): string[] {
 		out.push("a confirm pass may run past 15 minutes or the job timeout");
 	const reportStep = (report.steps ?? []).find((step) => step.id === "report");
 	const reportRun = run(reportStep ?? {});
+	// Recurrence (F-A, #4423 verify r3): without `author` in the listed fields
+	// every issue fails the author filter, and the two-night rule never fires.
+	const listed =
+		/gh issue list [^\n]*--json ([\w,]+)/.exec(reportRun)?.[1] ?? "";
+	if (!listed.split(",").includes("author"))
+		out.push("the report lists the issues without their author");
+	// The rehearsal surface: a branch dispatch skips the writer, so the body
+	// is rendered on the run page instead.
+	if (
+		!reportRun.includes(
+			'cat "$RUNNER_TEMP/census-report/body.md" >> "$GITHUB_STEP_SUMMARY"',
+		)
+	)
+		out.push("the report does not render the issue body in the step summary");
 	// Recurrence (N1, #4423 verify r2): an empty record dir reported "clean"
 	// and closed the issue. The report plans with the parts' flags and reads
 	// the census job's result.
@@ -285,6 +307,10 @@ function findings(text: string): string[] {
 		out.push("the issue writer does not take the report job's artifact");
 	if (!String(writer.if ?? "").includes(WRITE_GUARD))
 		out.push("the issue writer is not scoped to schedule or master");
+	// Recurrence (F-C, #4423 verify r3): a `files` subset dispatched on master
+	// that exits 0 would run `--clean --close-when-clean` on the real issue.
+	if (!String(writer.if ?? "").includes("inputs.files == ''"))
+		out.push("the issue writer runs for a files subset dispatch");
 	const upserts = (writer.steps ?? []).map(run).join("\n");
 	if (
 		!/upsert-tracking-issue\.mjs --title "\$TRACKING_TITLE" --label nightly-drift --body-file/.test(
@@ -332,6 +358,30 @@ describe("shuffle-census-nightly.yml (#4405)", () => {
 	});
 
 	const mutations: Array<[string, (text: string) => string, RegExp]> = [
+		[
+			"listing the issues without their author (F-A)",
+			(text) => text.replace("--json title,body,author", "--json title,body"),
+			/without their author/,
+		],
+		[
+			"a daily cron that also fires on Sunday (F-B)",
+			(text) => text.replace('cron: "30 4 * * 1-6"', 'cron: "30 4 * * *"'),
+			/daily cron is not/,
+		],
+		[
+			"the writer running for a files subset (F-C)",
+			(text) => text.replace(" && inputs.files == ''", ""),
+			/files subset dispatch/,
+		],
+		[
+			"no issue body in the step summary",
+			(text) =>
+				text.replace(
+					'cat "$RUNNER_TEMP/census-report/body.md" >> "$GITHUB_STEP_SUMMARY"',
+					"true",
+				),
+			/step summary/,
+		],
 		[
 			"adding a workflow_run trigger (G3)",
 			(text) =>

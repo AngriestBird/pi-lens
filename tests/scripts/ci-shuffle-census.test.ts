@@ -1046,6 +1046,9 @@ describe("the ratchet file", () => {
 		expect(listedFiles.has("tests/config/tmp-fixture-hygiene.test.ts")).toBe(
 			false,
 		);
+		expect(listedFiles.has("tests/clients/bounded-pid-file-lock.test.ts")).toBe(
+			false,
+		);
 		expect(
 			listedFiles.has(
 				"tests/clients/dispatch/runners/tree-sitter-runner.test.ts",
