@@ -700,6 +700,9 @@ export const wallClockBudgetInclude = [
 	// #2613: the resolver CLI's real exit code (2 vs. 4) and GITHUB_OUTPUT
 	// write are the subject under test; no in-process double is faithful.
 	"tests/scripts/resolve-newest-in-range-host.test.ts",
+	// #4401: the RPC session smoke's exit code is the contract; only a real
+	// child process (a stand-in pi) can exit or write a signal to turn it red.
+	"tests/scripts/rpc-load-check-spawn.test.ts",
 	// #3401: the seed script's default git path (depth-2 fetch, refspec, blob
 	// specs) against real throwaway repos and a depth-1 clone (flake-shape
 	// admission).

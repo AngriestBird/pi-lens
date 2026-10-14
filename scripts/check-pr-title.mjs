@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { githubGet } from "./lib/github-rest.mjs";
 
 // Repo convention: conventional-commit-style prefix, then an issue
 // reference, BOTH IN THE TITLE. Merges are merge commits from the PR title
@@ -44,29 +45,8 @@ export async function resolveLivePrTitle(
 	fetchImpl = globalThis.fetch,
 ) {
 	const fallbackTitle = payloadPr.title ?? "";
-	const token = process.env.GITHUB_TOKEN;
-	if (!token) {
-		console.warn(
-			"::warning::PR title live fetch failed: GITHUB_TOKEN is missing; using event payload title",
-		);
-		return fallbackTitle;
-	}
 	try {
-		const apiUrl = process.env.GITHUB_API_URL;
-		const repository = process.env.GITHUB_REPOSITORY;
-		if (!apiUrl || !repository) {
-			throw new Error("GITHUB_API_URL or GITHUB_REPOSITORY is missing");
-		}
-		const response = await fetchImpl(
-			`${apiUrl}/repos/${repository}/pulls/${payloadPr.number}`,
-			{
-				signal: AbortSignal.timeout(10_000),
-				headers: {
-					Authorization: `Bearer ${token}`,
-					Accept: "application/vnd.github+json",
-				},
-			},
-		);
+		const response = await githubGet(`/pulls/${payloadPr.number}`, fetchImpl);
 		if (!response.ok) {
 			throw new Error(`HTTP ${response.status}`);
 		}

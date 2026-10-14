@@ -1106,8 +1106,12 @@ export class TreeSitterClient {
 	 * `vendor/grammars` comes first because it is the ONLY source for a grammar
 	 * we build ourselves (`VENDORED_GRAMMARS`) — nothing downloads into the
 	 * later dirs for it, so a miss here is a miss everywhere.
+	 *
+	 * Public so the Vitest grammar prefetch (`tests/support/prewarm-grammars.ts`)
+	 * counts a grammar as present exactly where this resolver would find it
+	 * (#4342), instead of keeping its own copy of the list.
 	 */
-	private grammarSourceDirs(): string[] {
+	grammarSourceDirs(): string[] {
 		const dirs: string[] = [];
 		const push = (d: string | undefined): void => {
 			if (d && !dirs.includes(d)) dirs.push(d);
