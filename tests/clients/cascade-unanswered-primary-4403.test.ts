@@ -26,6 +26,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 import { getLSPService, resetLSPService } from "../../clients/lsp/index.js";
+import { RUNTIME_CONFIG } from "../../clients/runtime-config.js";
 import { makeSessionStartEvent } from "../support/host-event-factory.js";
 import { createPiMock, makeCtx } from "../support/pi-mock.js";
 import {
@@ -44,6 +45,9 @@ const fakeServer = path.join(
 	"fake-lsp-server.mjs",
 );
 const PREFIX = "pi-lens-4403-cascade-";
+// The turn-end cap is read on every turn_end; the cases below lower it for
+// one turn and restore it.
+const turnEndCap = RUNTIME_CONFIG.turnEnd as { maxChars: number };
 
 const FALLBACK_CAUSE =
 	"it is disabled in config by lsp.disabledServers, and its fallback could not be started, or was still starting";
@@ -109,30 +113,40 @@ const CASES: readonly Case[] = [
 
 /**
  * a.ts and c.ts import b.ts, d.ts imports a.ts, and f.ts imports e.ts, which
- * nothing else touches.
+ * nothing else touches. g.ts lacks the fake server's clean marker, so a
+ * reporting typos (`typos: "reporting"`) gives it a blocker.
  */
+const CLEAN = "// fake-lsp-clean\n";
 const FILES: Record<string, (n: number) => string> = {
-	a: (n) => `import { b } from "./b";\nexport const a = b + ${n};\n`,
-	b: (n) => `export const b = ${n};\n`,
-	c: (n) => `import { b } from "./b";\nexport const c = b + ${n};\n`,
-	d: (n) => `import { a } from "./a";\nexport const d = a + ${n};\n`,
-	e: (n) => `export const e = ${n};\n`,
-	f: (n) => `import { e } from "./e";\nexport const f = e + ${n};\n`,
+	a: (n) => `import { b } from "./b";\nexport const a = b + ${n};\n${CLEAN}`,
+	b: (n) => `export const b = ${n};\n${CLEAN}`,
+	c: (n) => `import { b } from "./b";\nexport const c = b + ${n};\n${CLEAN}`,
+	d: (n) => `import { a } from "./a";\nexport const d = a + ${n};\n${CLEAN}`,
+	e: (n) => `export const e = ${n};\n${CLEAN}`,
+	f: (n) => `import { e } from "./e";\nexport const f = e + ${n};\n${CLEAN}`,
+	g: (n) => `export const g = ${n};\n`,
 };
 
 /** One turn's writes, in order: a file name and the value it is given. */
 type Turn = ReadonlyArray<readonly [name: string, n: number]>;
 
-function makeWorkspace(testCase: Pick<Case, "typescript" | "deno">): string {
+type Setup = Pick<Case, "name" | "typescript" | "deno"> & {
+	/** typos answers a file without the clean marker with one error. */
+	typos?: "reporting";
+	/** `RUNTIME_CONFIG.turnEnd.maxChars` per turn; undefined keeps it. */
+	maxChars?: ReadonlyArray<number | undefined>;
+};
+
+function makeWorkspace(testCase: Setup): string {
 	const env = setupTestEnvironment(PREFIX);
 	const workspace = fs.realpathSync(env.tmpDir);
-	const shim = (serverId: string, delayMs = 0): string[] => {
+	const shim = (serverId: string, delayMs = 0, reporting = false): string[] => {
 		const file = path.join(workspace, `${serverId}-server.mjs`);
 		fs.writeFileSync(
 			file,
 			[
 				`await new Promise((resolve) => setTimeout(resolve, ${delayMs}));`,
-				'process.env.FAKE_LSP_RESPOND_PULL_WITH = "empty";',
+				reporting ? "" : 'process.env.FAKE_LSP_RESPOND_PULL_WITH = "empty";',
 				`import(${JSON.stringify(pathToFileURL(fakeServer).href)});`,
 				"",
 			].join("\n"),
@@ -162,7 +176,9 @@ function makeWorkspace(testCase: Pick<Case, "typescript" | "deno">): string {
 							: shim("typescript", testCase.typescript === "slow" ? 8_000 : 0),
 				},
 				deno: { command: missing("deno") },
-				typos: { command: shim("typos") },
+				typos: {
+					command: shim("typos", 0, testCase.typos === "reporting"),
+				},
 				opengrep: { command: shim("opengrep") },
 			},
 			disabledServers: [
@@ -206,7 +222,7 @@ async function deliveredCascadeLines(
  * turn's next model context delivers.
  */
 async function runTurns(
-	testCase: Pick<Case, "name" | "typescript" | "deno">,
+	testCase: Setup,
 	turns: readonly Turn[],
 ): Promise<string[][]> {
 	const workspace = makeWorkspace(testCase);
@@ -217,6 +233,7 @@ async function runTurns(
 	process.env.PI_LENS_CONFIG_PATH = configPath;
 	process.env.PI_LENS_DISABLE_LSP_INSTALL = "1";
 	let shutdown: (() => Promise<unknown>) | undefined;
+	const savedMaxChars = turnEndCap.maxChars;
 	try {
 		const config = await import("../../clients/lsp/config.js");
 		await config.initLSPConfig(workspace);
@@ -247,7 +264,8 @@ async function runTurns(
 			);
 		};
 		const delivered: string[][] = [];
-		for (const writes of turns) {
+		for (const [index, writes] of turns.entries()) {
+			turnEndCap.maxChars = testCase.maxChars?.[index] ?? savedMaxChars;
 			await pi.emit("turn_start", {}, ctx);
 			for (const [name, n] of writes) await write(name, n);
 			await pi.emit("turn_end", {}, ctx);
@@ -256,6 +274,7 @@ async function runTurns(
 		return delivered;
 	} finally {
 		// Also after a failed assertion, so the next case starts a new session.
+		turnEndCap.maxChars = savedMaxChars;
 		await shutdown?.();
 		await getLSPService().shutdown();
 		resetLSPService();
@@ -335,6 +354,60 @@ describe("a cascade neighbour no primary answered for (#4403 N2)", () => {
 			expected: [[UNSTARTED_LINE], [], []],
 		},
 	];
+	// Round 6 (W1): the line is committed when the section reaches the agent,
+	// not when turn_end composes it. Recurrence: a mark taken at compose
+	// would spend the line on a section the cap cut. g.ts's blocker leads
+	// the message and the 40-char cap keeps only part of it, so the cascade
+	// section is held; the empty turn 2 delivers the held run, with the line
+	// at the head of the section.
+	it("delivers the line once: a section the cap cut, then the next turn", async () => {
+		const turns = await runTurns(
+			{
+				name: "cut section",
+				typescript: "missing",
+				deno: "disabled",
+				typos: "reporting",
+				maxChars: [40],
+			},
+			[
+				[
+					["g", 2],
+					["b", 2],
+				],
+				[],
+				[["b", 5]],
+			],
+		);
+		// The held run also lists g.ts, whose typos finding is cached, as a
+		// degraded-fallback neighbour (typescript answered for no neighbour).
+		// Round 6 (W2): the line heads the section, ahead of that block.
+		expect(turns).toEqual([
+			[],
+			[
+				UNSTARTED_LINE,
+				"📐 Cascade errors in 1 neighbor file(s) — fix before finishing turn:",
+			],
+			[],
+		]);
+	}, 180_000);
+
+	// Round 6 (W2): a cascade section that leads an over-long message counts
+	// as delivered. Recurrence: the line sat after the impact header, so a cap
+	// that cut inside it spent the line on a fragment. The kept lines now head
+	// the section.
+	it("delivers the line once: the cascade section leads and the cap cuts it", async () => {
+		const turns = await runTurns(
+			{
+				name: "leading section",
+				typescript: "missing",
+				deno: "disabled",
+				maxChars: [UNSTARTED_LINE.length + 5],
+			},
+			[[["b", 2]], [["b", 4]], [["b", 5]]],
+		);
+		expect(turns).toEqual([[UNSTARTED_LINE], [], []]);
+	}, 180_000);
+
 	for (const script of SCRIPTS) {
 		it(`delivers the line once: ${script.name}`, async () => {
 			const turns = await runTurns(

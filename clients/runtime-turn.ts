@@ -1889,26 +1889,33 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		// superseded at this turn_end, or a cut section, does not use up the
 		// line.
 		const shownUnansweredServerIds = new Set<string>();
+		// Round 6 (W2): the kept lines head the section (`renderCascadeResult`).
+		const unansweredLines: string[] = [];
 		for (const result of seen.values()) {
 			const pk = normalizeMapKey(result.filePath);
 			const ownsAny = result.neighbors.some(
 				(n) => neighborOwner.get(normalizeMapKey(n.filePath)) === pk,
 			);
-			const text =
+			const rendered =
 				ownsAny && result.formatted
-					? renderCascadeResult(result, shownUnansweredServerIds).text
-					: "";
-			if (text) {
-				// Fix B (#3167/#3168): a carried run's re-rendered blocker is labeled
-				// so the agent can tell it from a fresh observation — with the
-				// run's own observation age (#3168 F3).
-				const carryMeta = carriedMetaByResult.get(result);
-				const carrySuffix = cascadeCarrySuffix(
-					carryMeta?.carriedTurns,
-					carryMeta?.observedAt,
-				);
-				parts.push(carrySuffix ? `${text}\n${carrySuffix}` : text);
-				if (carrySuffix) carriedRunsRendered += 1;
+					? renderCascadeResult(result, shownUnansweredServerIds)
+					: undefined;
+			if (rendered && (rendered.text || rendered.lines.length > 0)) {
+				unansweredLines.push(...rendered.lines);
+				if (rendered.text) {
+					// Fix B (#3167/#3168): a carried run's re-rendered blocker is
+					// labeled so the agent can tell it from a fresh observation —
+					// with the run's own observation age (#3168 F3).
+					const carryMeta = carriedMetaByResult.get(result);
+					const carrySuffix = cascadeCarrySuffix(
+						carryMeta?.carriedTurns,
+						carryMeta?.observedAt,
+					);
+					parts.push(
+						carrySuffix ? `${rendered.text}\n${carrySuffix}` : rendered.text,
+					);
+					if (carrySuffix) carriedRunsRendered += 1;
+				}
 				const sectionRun = runByResult.get(result);
 				if (sectionRun) sectionRuns.push(sectionRun);
 				injectedNeighborCount += result.neighbors.length;
@@ -1967,6 +1974,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				parts.push(testSection);
 			}
 		}
+		if (unansweredLines.length > 0) parts.unshift(unansweredLines.join("\n"));
 		if (parts.length > 0) {
 			const section = parts.join("\n\n");
 			// @delivery-surface: runtime-turn:cascade-blocker

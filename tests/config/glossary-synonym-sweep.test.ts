@@ -522,10 +522,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/cache-manager.ts": 3,
 		"clients/cache-observability.ts": 2,
 		"clients/call-graph.ts": 4,
-		// 4 -> 7 (#4403 round 5): `renderCascadeResult` keeps the notes whose
-		// servers are undelivered and drops the others' lines from the text,
-		// three `Array.prototype.filter` calls, not a delivery filter.
-		"clients/cascade-format.ts": 7,
+		// 4 -> 5 (#4403): `renderCascadeResult` keeps the notes whose servers
+		// are undelivered, an `Array.prototype.filter` call, not a delivery
+		// filter.
+		"clients/cascade-format.ts": 5,
 		"clients/code-quality-warnings.ts": 5,
 		"clients/codebase-model.ts": 4,
 		"clients/complexity-client.ts": 3,

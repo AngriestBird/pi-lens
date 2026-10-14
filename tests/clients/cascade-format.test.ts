@@ -97,21 +97,24 @@ describe("the cascade's unanswered-primary line, per server (#4403 V1)", () => {
 			filePath: "/repo/x.ts",
 			impact: {} as CascadeResult["impact"],
 			neighbors: neighbors(),
-			formatted: ["header", ...notes.map((note) => note.line)].join("\n"),
-			unansweredPrimaries: { notes, formattedWithoutNotes: "" },
+			formatted: ["body", ...notes.map((note) => note.line)].join("\n"),
+			unansweredPrimaries: { notes, formattedWithoutNotes: "body" },
 		};
 		const shown = new Set<string>();
 		const first = renderCascadeResult(result, shown);
 		const again = renderCascadeResult(result, shown);
 		markCascadeUnansweredPrimariesDelivered(["pyright"]);
 		const nextTurn = renderCascadeResult(result, new Set());
+		// The text never carries the lines: turn_end puts the kept ones at the
+		// head of the section (round 6, W2).
 		expect([first, again, nextTurn]).toEqual([
 			{
-				text: `header\n${line("typescript")}\n${line("pyright")}`,
+				text: "body",
+				lines: [line("typescript"), line("pyright")],
 				serverIds: ["typescript", "pyright"],
 			},
-			{ text: "", serverIds: [] },
-			{ text: `header\n${line("typescript")}`, serverIds: ["typescript"] },
+			{ text: "body", lines: [], serverIds: [] },
+			{ text: "body", lines: [line("typescript")], serverIds: ["typescript"] },
 		]);
 	});
 });

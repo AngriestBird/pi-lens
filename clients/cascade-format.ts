@@ -489,18 +489,21 @@ export function splitCascadeUnansweredPrimaries(
 }
 
 /**
- * The text turn_end shows for a cascade result. A line naming primaries
- * stays only while one of its servers is neither delivered nor already shown
- * in this turn's section (`shownServerIds`, which this adds the kept
- * servers to), so two runs of one turn show it once and a run carried past
- * the delivery shows it no more. Returns the servers whose lines it kept.
+ * What turn_end shows for a cascade result: its text without the lines naming
+ * primaries, and the lines it keeps. A line stays only while one of its
+ * servers is neither delivered nor already shown in this turn's section
+ * (`shownServerIds`, which this adds the kept servers to), so two runs of one
+ * turn show it once and a run carried past the delivery shows it no more.
+ * turn_end puts the kept lines at the head of the section (round 6, W2): a
+ * leading section the cap cuts still counts as delivered, so a line after the
+ * cut point would be marked without being read.
  */
 export function renderCascadeResult(
 	result: CascadeResult,
 	shownServerIds: Set<string>,
-): { text: string; serverIds: string[] } {
+): { text: string; lines: string[]; serverIds: string[] } {
 	const unanswered = result.unansweredPrimaries;
-	if (!unanswered) return { text: result.formatted, serverIds: [] };
+	if (!unanswered) return { text: result.formatted, lines: [], serverIds: [] };
 	const kept = unanswered.notes.filter((note) =>
 		note.serverIds.some(
 			(id) =>
@@ -509,18 +512,9 @@ export function renderCascadeResult(
 	);
 	const serverIds = kept.flatMap((note) => [...note.serverIds]);
 	for (const id of serverIds) shownServerIds.add(id);
-	if (kept.length === 0)
-		return { text: unanswered.formattedWithoutNotes, serverIds };
-	const dropped = new Set(
-		unanswered.notes
-			.filter((note) => !kept.includes(note))
-			.map((note) => note.line),
-	);
 	return {
-		text: result.formatted
-			.split("\n")
-			.filter((line) => !dropped.has(line))
-			.join("\n"),
+		text: unanswered.formattedWithoutNotes,
+		lines: kept.map((note) => note.line),
 		serverIds,
 	};
 }
