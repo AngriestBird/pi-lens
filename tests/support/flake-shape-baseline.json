@@ -80,6 +80,7 @@
 		"scripts/check-allow-scripts.test.ts": 3,
 		"scripts/check-lockfile-sync.test.ts": 2,
 		"scripts/check-pr-body.test.ts": 10,
+		"scripts/ci-shuffle-changed-tests-spawn.test.ts": 2,
 		"scripts/ci-test-diff.test.ts": 2,
 		"scripts/ci-verdict.test.ts": 4,
 		"scripts/classify-ci-failure-cli.test.ts": 2,

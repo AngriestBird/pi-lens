@@ -606,6 +606,9 @@ export const wallClockBudgetInclude = [
 	// subject; an in-process call of the pure policy cannot prove that boundary.
 	"tests/scripts/check-allow-scripts.test.ts",
 	"tests/scripts/check-pr-body.test.ts",
+	// #4397: the changed-test shuffle job's exit code is the contract; only a
+	// real vitest start reorders cases under `--sequence.shuffle`.
+	"tests/scripts/ci-shuffle-changed-tests-spawn.test.ts",
 	// #4072 review F2: the CLI's real exit status is the contract; an
 	// in-process main() call cannot prove the executable entry point.
 	"tests/scripts/ci-test-diff.test.ts",
