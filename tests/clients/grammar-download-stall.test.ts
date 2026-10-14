@@ -102,29 +102,37 @@ describe("grammar download stall bound (#4342)", () => {
 	it("completes a slow body that keeps delivering past the bound", async () => {
 		vi.useFakeTimers();
 		let feed: ReadableStreamDefaultController<Uint8Array> | undefined;
+		let aborted = false;
 		vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
 			const body = new ReadableStream<Uint8Array>({
 				start(controller) {
 					feed = controller;
 					// The fetch contract: aborting the request's signal errors
 					// its body stream.
-					init?.signal?.addEventListener("abort", () =>
-						controller.error(init.signal?.reason),
-					);
+					init?.signal?.addEventListener("abort", () => {
+						aborted = true;
+						controller.error(init.signal?.reason);
+					});
 				},
 			});
 			return new Response(body, { status: 200 });
 		});
+		/** Send a chunk, or end the body, unless the download already aborted. */
+		const offer = (chunk?: Uint8Array): void => {
+			if (aborted) return;
+			if (chunk) feed?.enqueue(chunk);
+			else feed?.close();
+		};
 
 		const pending = downloadGrammarDetailed(env.tmpDir, GRAMMAR, {
 			stallMs: STALL_MS,
 		});
 		await vi.advanceTimersByTimeAsync(STALL_MS - 20);
-		feed?.enqueue(WASM_HEADER.slice(0, 4));
+		offer(WASM_HEADER.slice(0, 4));
 		await vi.advanceTimersByTimeAsync(STALL_MS - 20);
-		feed?.enqueue(WASM_HEADER.slice(4));
+		offer(WASM_HEADER.slice(4));
 		await vi.advanceTimersByTimeAsync(STALL_MS - 20);
-		feed?.close();
+		offer();
 
 		expect(await pending).toEqual({ ok: true, retryable: true });
 		expect(fs.readFileSync(path.join(env.tmpDir, GRAMMAR))).toEqual(
