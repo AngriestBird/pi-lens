@@ -322,6 +322,10 @@ const lspSpawnHeavyInclude = [
 	// first is SIGKILLed), each through a real initialize handshake, then a
 	// first-diagnostics wait on the replacement — the #1022/#2332 shape.
 	"tests/clients/lsp/crash-respawn-debounce-wire.test.ts",
+	// #4322: the production LSPService over two real stdio fake-server children
+	// (a JSON primary and a typos auxiliary); waits on real handshakes and a
+	// diagnostics round, the same #1022/#2332 shape as its lane siblings.
+	"tests/clients/lsp/diagnostics-health-unavailable-primary-4322.test.ts",
 	// #3405: its last describe spawns two real fake-server children through
 	// `spawnFakeLspServer` and waits on a real initialize handshake before
 	// asserting which notifications reached the server — the same #1022/#2332
@@ -384,6 +388,13 @@ const lspSpawnHeavyInclude = [
 	// initialize handshake plus a two-publish diagnostics sequence per case —
 	// the same #1022/#2332 contention class as its lane siblings.
 	"tests/tools/lsp-diagnostics-empty-first-publish-3310.test.ts",
+	// #4322: the production lsp_diagnostics handler, LSPService and the dispatch
+	// LSP runner beside a real stdio fake-server child (the typos auxiliary)
+	// whose primary cannot start; waits on a real handshake like #4346's.
+	"tests/tools/lsp-diagnostics-missing-primary-4322.test.ts",
+	// #4322: the same handler and LSPService with no auxiliary at all; the
+	// primary's spawn fails for real (a missing command) on every touch.
+	"tests/tools/lsp-diagnostics-no-client-4322.test.ts",
 	// #3750: launches the fake server THROUGH the production `RustServer`,
 	// `OCamlServer` and `GoServer` entries (PATH shims) and waits on a real
 	// initialize handshake plus a pull round trip per case -- the same

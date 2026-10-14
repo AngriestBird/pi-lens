@@ -338,7 +338,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/installer/index.ts": 8,
 		"clients/lsp/inferred-project.ts": 4,
 		"clients/lsp/server.ts": 3,
-		"clients/lsp/workspace-diagnostics-cache.ts": 14,
+		"clients/lsp/workspace-diagnostics-cache.ts": 13,
 		"clients/project-diagnostics/runner-adapters/runner-findings.ts": 8,
 		"clients/review-graph/builder.ts": 4,
 		"clients/review-graph/tsconfig-paths.ts": 6,
@@ -499,7 +499,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"tools/effective-config.ts": 2,
 		"tools/lens-diagnostic-mark.ts": 4,
 		"tools/lens-diagnostics.ts": 6,
-		"tools/lsp-diagnostics.ts": 10,
+		"tools/lsp-diagnostics.ts": 8,
 		"tools/module-report.ts": 11,
 		"mcp/analyze-cli.ts": 1,
 		"mcp/server.ts": 32,
@@ -714,7 +714,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"tools/lens-diagnostic-mark.ts": 1,
 		"tools/lens-diagnostics.ts": 37,
 		// 12 -> 13 (#4346): the batch selects its finding-bearing files to resolve.
-		"tools/lsp-diagnostics.ts": 13,
+		// 13 -> 14 (#4322): the batch counts its files with auxiliary findings
+		// only, one `Array.prototype.filter` use, not a delivery filter.
+		"tools/lsp-diagnostics.ts": 14,
 		"tools/lsp-navigation.ts": 6,
 		"tools/render-compact.ts": 3,
 		"mcp/analyze-cli.ts": 1,
@@ -1391,7 +1393,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// #4299: 16 -> 18; two reads of the external TypeScript package
 		// manifest's literal version field, not a pi-lens generation identity.
 		"clients/lsp/server.ts": 18,
-		"clients/lsp/workspace-diagnostics-cache.ts": 7,
+		"clients/lsp/workspace-diagnostics-cache.ts": 6,
 		"clients/mcp/ipc.ts": 15,
 		"clients/metrics-history.ts": 3,
 		"clients/module-report.ts": 1,

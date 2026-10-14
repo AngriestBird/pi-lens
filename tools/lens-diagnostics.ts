@@ -353,6 +353,7 @@ export function createLensDiagnosticsTool(
 			incompleteFiles?: number;
 			unconfirmed?: boolean;
 			timedOut?: boolean;
+			primaryUnavailable?: string;
 			filePath?: string;
 		}>(({ details, args, isError, text }) => {
 			if (details?.source === "lsp") {
@@ -397,7 +398,10 @@ export function createLensDiagnosticsTool(
 				if (count === 0 && details.unconfirmed)
 					return details.timedOut
 						? `lens_diagnostics${scope} — timed out (result may be incomplete)`
-						: `lens_diagnostics${scope} — unconfirmed (server cannot confirm clean)`;
+						: // #4322: no language server answered; it is not a silent server.
+							details.primaryUnavailable !== undefined
+							? `lens_diagnostics${scope} — unconfirmed (no language server answered)`
+							: `lens_diagnostics${scope} — unconfirmed (server cannot confirm clean)`;
 				return `lens_diagnostics${scope} — ${count} ${noun}`;
 			}
 			// Streaming progress partials render the live bar (see scanningSummaryLine)

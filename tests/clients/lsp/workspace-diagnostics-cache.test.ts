@@ -132,7 +132,7 @@ describe("loadWorkspaceDiagnosticsCache / saveWorkspaceDiagnosticsCache (#671)",
 
 	it("fails open on a v2 cache so provenance-less diagnostics are re-collected (#2776)", () => {
 		saveWorkspaceDiagnosticsCache(tmp, {
-			version: WORKSPACE_DIAGNOSTICS_CACHE_VERSION - 1,
+			version: 2,
 			entries: { "/a.ts": makeEntry() },
 		});
 		// Old records still parse safely, but the strict cache consumer refuses
@@ -154,7 +154,7 @@ describe("loadWorkspaceDiagnosticsCache / saveWorkspaceDiagnosticsCache (#671)",
 		expect(loadWorkspaceDiagnosticsCache(tmp)).toBeUndefined();
 	});
 
-	it("rejects only a v3 entry whose diagnostic lacks serverId (#2776)", () => {
+	it("rejects only a current-version entry whose diagnostic lacks serverId (#2776)", () => {
 		saveWorkspaceDiagnosticsCache(tmp, {
 			version: WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
 			entries: {
@@ -205,6 +205,22 @@ describe("loadWorkspaceDiagnosticsCache / saveWorkspaceDiagnosticsCache (#671)",
 		expect(group?.count).toBe(1);
 		expect(group?.latestReasons[0]?.reason).toContain("v2");
 		expect(group?.latestReasons[0]?.reason).toContain("2 entries");
+	});
+
+	it("rejects a v3 cache, whose clean entries may rest on auxiliaries alone (#4322)", () => {
+		// A well-formed v3 entry: provenance present, so only the version
+		// guard can keep its (possibly false) clean from replaying.
+		saveWorkspaceDiagnosticsCache(tmp, {
+			version: 3,
+			entries: { a: makeEntry() },
+		});
+		expect(loadWorkspaceDiagnosticsCache(tmp)).toBeUndefined();
+		const group = getDegradationSummary().find(
+			(entry) => entry.kind === "lsp-workspace-cache-migration",
+		);
+		expect(group?.count).toBe(1);
+		expect(group?.latestReasons[0]?.reason).toContain("v3");
+		expect(group?.latestReasons[0]?.reason).toContain("1 entries");
 	});
 });
 
@@ -1380,7 +1396,7 @@ describe("runWorkspaceDiagnostics cache integration (#671)", () => {
 		fs.writeFileSync(file, "const z = 1;\n");
 		const stat = fs.statSync(file);
 		saveWorkspaceDiagnosticsCache(tmpSweep, {
-			version: WORKSPACE_DIAGNOSTICS_CACHE_VERSION - 1,
+			version: 2,
 			entries: {
 				[cacheKeyFor(file)]: {
 					diagnostics: [
