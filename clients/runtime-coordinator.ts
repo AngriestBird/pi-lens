@@ -67,6 +67,27 @@ function nextTelemetrySessionId(): string {
  */
 export const MAX_CUT_ADVISORY_LANES = 16;
 
+/**
+ * Every background startup scan name. `session_start` starts scans under these
+ * names, the defer table in `runtime-session.ts` is keyed by them, and the
+ * in-flight ledger below is read by name in `runtime-turn.ts`. One type makes a
+ * misspelled or orphan name fail the build (#4352).
+ */
+export type StartupTaskName =
+	| "todo"
+	| "dead-code"
+	| "knip"
+	| "jscpd"
+	| "govulncheck"
+	| "gitleaks"
+	| "opengrep"
+	| "madge"
+	| "trivy"
+	| "call-graph"
+	| "codebase-model"
+	| "ast-grep-exports"
+	| "word-index";
+
 export interface ErrorDebtBaseline {
 	testsPassed: boolean;
 	buildPassed: boolean;
@@ -507,7 +528,7 @@ export class RuntimeCoordinator {
 	private _errorDebtBaseline: ErrorDebtBaseline | null = null;
 	private _pipelineCrashCounts = new Map<string, number>();
 	private _cachedExports = new Map<string, string>();
-	private _startupScansInFlight = new Map<string, number>();
+	private _startupScansInFlight = new Map<StartupTaskName, number>();
 	private _cascadeRuns: CascadeRun[] = [];
 	// #3813/#3901: items an item-bearing turn-end advisory showed and the cap
 	// cut (knip, dead-code, call-graph impact), keyed by lane. Parked once,
@@ -1283,18 +1304,18 @@ export class RuntimeCoordinator {
 		return this._scope.scopeId === generation && this._scope.isLive();
 	}
 
-	markStartupScanInFlight(name: string, generation: number): void {
+	markStartupScanInFlight(name: StartupTaskName, generation: number): void {
 		this._startupScansInFlight.set(name, generation);
 	}
 
-	clearStartupScanInFlight(name: string, generation: number): void {
+	clearStartupScanInFlight(name: StartupTaskName, generation: number): void {
 		const owner = this._startupScansInFlight.get(name);
 		if (owner === generation) {
 			this._startupScansInFlight.delete(name);
 		}
 	}
 
-	isStartupScanInFlight(name: string): boolean {
+	isStartupScanInFlight(name: StartupTaskName): boolean {
 		return this._startupScansInFlight.has(name);
 	}
 
