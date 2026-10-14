@@ -123,6 +123,7 @@ describe("finding entries: the import scope", () => {
 		ctx.noteImportScope(user, {
 			targets: [path.join(tmp, "dep.ts")],
 			unresolved: [],
+			complete: true,
 		});
 		expect(ctx.lookup(user, SCOPE)).toBeDefined();
 	});
@@ -138,6 +139,7 @@ describe("finding entries: the import scope", () => {
 		ctx.noteImportScope(user, {
 			targets: [path.join(tmp, ".", "dep.ts")],
 			unresolved: [],
+			complete: true,
 		});
 		expect(ctx.lookup(user, SCOPE)).toBeUndefined();
 	});
@@ -150,7 +152,11 @@ describe("finding entries: the import scope", () => {
 		created(write("data.json", "{}\n"));
 
 		const ctx = createWorkspaceDiagnosticsCacheContext(tmp);
-		ctx.noteImportScope(user, { targets: [], unresolved: ["./data.json"] });
+		ctx.noteImportScope(user, {
+			targets: [],
+			unresolved: ["./data.json"],
+			complete: true,
+		});
 		expect(ctx.lookup(user, SCOPE)).toBeUndefined();
 	});
 
@@ -163,7 +169,11 @@ describe("finding entries: the import scope", () => {
 		created(write("gen/index.ts", "export {};\n"));
 
 		const ctx = createWorkspaceDiagnosticsCacheContext(tmp);
-		ctx.noteImportScope(user, { targets: [], unresolved: ["./gen"] });
+		ctx.noteImportScope(user, {
+			targets: [],
+			unresolved: ["./gen"],
+			complete: true,
+		});
 		expect(ctx.lookup(user, SCOPE)).toBeUndefined();
 	});
 
@@ -184,7 +194,11 @@ describe("finding entries: the import scope", () => {
 		created(write("unrelated.ts", "export const u = 1;\n"));
 
 		const ctx = createWorkspaceDiagnosticsCacheContext(tmp);
-		ctx.noteImportScope(user, { targets: [], unresolved: ["."] });
+		ctx.noteImportScope(user, {
+			targets: [],
+			unresolved: ["."],
+			complete: true,
+		});
 		expect(ctx.lookup(user, SCOPE)).toBeUndefined();
 	});
 
@@ -199,6 +213,25 @@ describe("finding entries: the import scope", () => {
 		ctx.noteImportScope(user, {
 			targets: [write("pkg/__init__.py", "")],
 			unresolved: [],
+			complete: true,
+		});
+		expect(ctx.lookup(user, SCOPE)).toBeUndefined();
+	});
+
+	// Rows F1, F1b, F2. Recurrence: #4430 r1 review F1/F2, where a dependency
+	// the extraction never saw (a dynamic import, a re-export in a target)
+	// left the scope looking complete, and a stale finding was served.
+	it("refuses it on any creation when the producer reports the scope incomplete", () => {
+		const user = write("user.ts", 'import "./dep";\nexport {};\n');
+		write("dep.ts", "export {};\n");
+		seed([{ file: user, serverId: "typescript" }]);
+		created(write("unrelated.ts", "export const u = 1;\n"));
+
+		const ctx = createWorkspaceDiagnosticsCacheContext(tmp);
+		ctx.noteImportScope(user, {
+			targets: [path.join(tmp, "dep.ts")],
+			unresolved: [],
+			complete: false,
 		});
 		expect(ctx.lookup(user, SCOPE)).toBeUndefined();
 	});
@@ -265,7 +298,7 @@ describe("the implicit scope (rows 11 and 12)", () => {
 		created(write("types/globals.d.ts", "declare const FOO: number;\n"));
 
 		const ctx = createWorkspaceDiagnosticsCacheContext(tmp);
-		ctx.noteImportScope(user, { targets: [], unresolved: [] });
+		ctx.noteImportScope(user, { targets: [], unresolved: [], complete: true });
 		expect(ctx.lookup(user, SCOPE)).toBeUndefined();
 		expect(ctx.lookup(clean, SCOPE)).toBeUndefined();
 	});
@@ -278,6 +311,24 @@ describe("the implicit scope (rows 11 and 12)", () => {
 		expect(
 			createWorkspaceDiagnosticsCacheContext(tmp).lookup(clean, SCOPE),
 		).toBeDefined();
+	});
+
+	// Recurrence: #4430 r1 review F3, the fail-closed branch for a created
+	// file over the LSP sync limits had no test. A module-shaped file, so only
+	// that branch answers true (a script parses as feeding the scope anyway).
+	it("refuses a clean JS/TS entry when a module over the LSP sync limits is created", () => {
+		const clean = write("src/clean.ts", "export const y = 1;\n");
+		seed([{ file: clean }]);
+		created(
+			write(
+				"src/huge.ts",
+				`export const h = 1;\n${"const x = 1;\n".repeat(5_001)}`,
+			),
+		);
+
+		expect(
+			createWorkspaceDiagnosticsCacheContext(tmp).lookup(clean, SCOPE),
+		).toBeUndefined();
 	});
 
 	it("serves a clean JS/TS entry past a created module", () => {
@@ -312,7 +363,7 @@ describe("the implicit scope (rows 11 and 12)", () => {
 		created(peer, "gopls");
 
 		const ctx = createWorkspaceDiagnosticsCacheContext(tmp);
-		ctx.noteImportScope(user, { targets: [], unresolved: [] });
+		ctx.noteImportScope(user, { targets: [], unresolved: [], complete: true });
 		expect(ctx.lookup(user, SCOPE)).toBeUndefined();
 		expect(ctx.lookup(clean, SCOPE)).toBeUndefined();
 		expect(ctx.lookup(elsewhere, SCOPE)).toBeDefined();
@@ -451,7 +502,11 @@ describe("bounds and observability", () => {
 
 		const ctx = createWorkspaceDiagnosticsCacheContext(tmp);
 		for (const file of [user, later]) {
-			ctx.noteImportScope(file, { targets: [], unresolved: [] });
+			ctx.noteImportScope(file, {
+				targets: [],
+				unresolved: [],
+				complete: true,
+			});
 			expect(ctx.lookup(file, SCOPE)).toBeDefined();
 		}
 		ctx.persist();

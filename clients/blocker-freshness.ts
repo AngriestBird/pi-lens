@@ -382,6 +382,10 @@ async function resolveForwardImportsMemoized(
  * #4368 r1 row 13: `unresolved` holds the sources that resolved to nothing at
  * the last call, carried across the file's versions, so a later call that
  * resolves one sees a path that appeared in between (`notePathAppeared`).
+ *
+ * #4346 r2 F1: `uncaptured` is set when a JS/TS file holds a dependency form
+ * the import query does not capture (`UNCAPTURED_JS_TS_DEPENDENCY`), so its
+ * sources are not all of its dependencies.
  */
 const FORWARD_IMPORT_SOURCE_MEMO_ENTRIES = 1024;
 interface ForwardImportSourceEntry {
@@ -390,7 +394,20 @@ interface ForwardImportSourceEntry {
 	size: number;
 	sources: string[];
 	unresolved: ReadonlySet<string>;
+	uncaptured: boolean;
 }
+
+/** The JS/TS grammars, whose import query captures only `import`/`export`
+ * statement sources. */
+const JS_TS_LANGUAGES = new Set(["typescript", "tsx", "javascript"]);
+/**
+ * #4346 r2 F1: dependency forms of a JS/TS file the import query does not
+ * capture: dynamic or type-position `import("./x")`, `import x =
+ * require("./x")`, `require("./x")`, `/// <reference path>`. A match in a
+ * comment or string only makes the scope incomplete, which fails closed.
+ */
+const UNCAPTURED_JS_TS_DEPENDENCY =
+	/\bimport\s*\(|\brequire\s*\(|\/\/\/\s*<reference\s+path/;
 const forwardImportSourceMemo = new BoundedLruCache<
 	string,
 	ForwardImportSourceEntry
@@ -450,6 +467,9 @@ async function forwardImportSources(
 		size: stat.size,
 		sources: [...new Set(outcome.value.map((ref) => ref.source))],
 		unresolved: memo?.unresolved ?? new Set(),
+		uncaptured:
+			JS_TS_LANGUAGES.has(languageId) &&
+			UNCAPTURED_JS_TS_DEPENDENCY.test(content),
 	};
 	forwardImportSourceMemo.set(key, entry);
 	return entry;
@@ -460,6 +480,12 @@ async function forwardImportSources(
 export interface ForwardImports {
 	targets: string[];
 	unresolved: string[];
+	/**
+	 * #4346 r2 F1: whether the sources are all of the file's dependencies:
+	 * false when it could not be parsed (no grammar, client or read) or holds
+	 * a form the query does not capture.
+	 */
+	complete: boolean;
 }
 
 /**
@@ -473,9 +499,9 @@ export async function extractForwardImports(
 	filePath: string,
 ): Promise<ForwardImports> {
 	const languageId = resolveTreeSitterLanguage(filePath);
-	if (!languageId) return { targets: [], unresolved: [] };
+	if (!languageId) return { targets: [], unresolved: [], complete: false };
 	const entry = await forwardImportSources(filePath, languageId);
-	if (!entry) return { targets: [], unresolved: [] };
+	if (!entry) return { targets: [], unresolved: [], complete: false };
 	const resolved = new Set<string>();
 	const unresolved = new Set<string>();
 	for (const source of entry.sources) {
@@ -488,7 +514,11 @@ export async function extractForwardImports(
 		}
 	}
 	entry.unresolved = unresolved;
-	return { targets: [...resolved], unresolved: [...unresolved] };
+	return {
+		targets: [...resolved],
+		unresolved: [...unresolved],
+		complete: !entry.uncaptured,
+	};
 }
 
 /** The files `filePath`'s imports resolve to now ({@link extractForwardImports}). */

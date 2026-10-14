@@ -126,6 +126,163 @@ describe("importTargetsToAnnounce (#4346)", () => {
 	});
 });
 
+describe("importTargetsToAnnounce: scope completeness (#4346 r2)", () => {
+	async function scopeOf(root: string, importer: string): Promise<ImportScope> {
+		let heard: ImportScope | undefined;
+		await importTargetsToAnnounce(root, [importer], (_file, scope) => {
+			heard = scope;
+		});
+		if (!heard) throw new Error(`no scope heard for ${importer}`);
+		return heard;
+	}
+
+	// Row F1. Recurrence: #4430 r1 review F1, the import query captures only
+	// import and export statements, so these dependencies were neither targets
+	// nor unresolved, and the cache served a stale finding past their creation.
+	it.each([
+		["dynamic import", 'export const f = () => import("./lazy");\n'],
+		["type-position import", 'export let t: import("./types").T;\n'],
+		["import = require", 'import m = require("./mod");\nexport { m };\n'],
+		["require", 'const m = require("./mod");\nexport { m };\n'],
+		["reference path", '/// <reference path="./globals.ts" />\nexport {};\n'],
+	])("reports a file holding a %s incomplete", async (_shape, content) => {
+		const root = workspace("pi-lens-4346-uncaptured-");
+		const importer = path.join(root, "user.ts");
+		fs.writeFileSync(importer, `import "./dep";\n${content}`);
+		fs.writeFileSync(path.join(root, "dep.ts"), "export {};\n");
+
+		const scope = await scopeOf(root, importer);
+
+		expect(scope.targets.map((file) => path.basename(file))).toEqual([
+			"dep.ts",
+		]);
+		expect(scope.complete).toBe(false);
+	});
+
+	it("reports a file whose imports are all statements complete", async () => {
+		const root = workspace("pi-lens-4346-captured-");
+		const importer = path.join(root, "user.ts");
+		fs.writeFileSync(
+			importer,
+			'import { a } from "./dep";\nexport { b } from "./other";\nexport const c = a;\n',
+		);
+		fs.writeFileSync(path.join(root, "dep.ts"), "export const a = 1;\n");
+		fs.writeFileSync(path.join(root, "other.ts"), "export const b = 1;\n");
+
+		expect((await scopeOf(root, importer)).complete).toBe(true);
+	});
+
+	// The forms above are JS/TS; a Go grouped import is `import (`, which the
+	// Go query captures.
+	it("reports a Go file with a grouped import complete", async () => {
+		const root = workspace("pi-lens-4346-go-group-");
+		const importer = path.join(root, "main.go");
+		fs.writeFileSync(
+			importer,
+			'package main\n\nimport (\n\t"fmt"\n)\n\nfunc main() { fmt.Println() }\n',
+		);
+
+		expect((await scopeOf(root, importer)).complete).toBe(true);
+	});
+
+	// Row F1b: an importer with a grammar that cannot be read now.
+	it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+		"reports a file it cannot read incomplete",
+		async () => {
+			const root = workspace("pi-lens-4346-unread-importer-");
+			const importer = path.join(root, "user.ts");
+			fs.writeFileSync(importer, 'import "./dep";\nexport {};\n');
+			fs.writeFileSync(path.join(root, "dep.ts"), "export {};\n");
+			fs.chmodSync(importer, 0o000);
+			try {
+				const scope = await scopeOf(root, importer);
+				expect(scope.targets).toEqual([]);
+				expect(scope.complete).toBe(false);
+			} finally {
+				fs.chmodSync(importer, 0o644);
+			}
+		},
+	);
+
+	// Row F1b. Recurrence: an importer the extraction cannot parse (here a Vue
+	// file, which has no grammar) answered an empty scope that counted as
+	// complete, so its finding entry ignored every creation.
+	it("reports a file it cannot parse incomplete", async () => {
+		const root = workspace("pi-lens-4346-unparsed-");
+		const importer = path.join(root, "view.vue");
+		fs.writeFileSync(
+			importer,
+			'<script setup lang="ts">\nimport { a } from "./dep";\n</script>\n',
+		);
+		fs.writeFileSync(path.join(root, "dep.ts"), "export const a = 1;\n");
+
+		const scope = await scopeOf(root, importer);
+
+		expect(scope.targets).toEqual([]);
+		expect(scope.complete).toBe(false);
+	});
+
+	// Row F2. Recurrence: #4430 r1 review F2, a target that re-exports another
+	// module lets the importer use that module, which its imports do not name.
+	it.each([
+		["export * from", 'export * from "./b";\n'],
+		["export * as ns from", 'export * as ns from "./b";\n'],
+		["export { x } from", 'export { x } from "./b";\n'],
+		["export type { T } from", 'export type { T } from "./b";\n'],
+	])(
+		"reports a file whose target holds %s incomplete",
+		async (_form, content) => {
+			const root = workspace("pi-lens-4346-reexport-");
+			const importer = path.join(root, "user.ts");
+			fs.writeFileSync(
+				importer,
+				'import { x } from "./a";\nexport const y = x;\n',
+			);
+			fs.writeFileSync(path.join(root, "a.ts"), content);
+
+			expect((await scopeOf(root, importer)).complete).toBe(false);
+		},
+	);
+
+	it("reports a file whose target only imports and exports its own names complete", async () => {
+		const root = workspace("pi-lens-4346-no-reexport-");
+		const importer = path.join(root, "user.ts");
+		fs.writeFileSync(
+			importer,
+			'import { x } from "./a";\nexport const y = x;\n',
+		);
+		fs.writeFileSync(
+			path.join(root, "a.ts"),
+			'import { b } from "./b";\nexport const x = b;\nexport { b };\n',
+		);
+		fs.writeFileSync(path.join(root, "b.ts"), "export const b = 1;\n");
+
+		expect((await scopeOf(root, importer)).complete).toBe(true);
+	});
+
+	// A target the extraction resolved but that cannot be read now (gone, or
+	// no permission) may re-export anything: the scope fails closed.
+	it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+		"reports a file whose target cannot be read incomplete",
+		async () => {
+			const root = workspace("pi-lens-4346-unreadable-");
+			const importer = path.join(root, "user.ts");
+			fs.writeFileSync(
+				importer,
+				'import { x } from "./a";\nexport const y = x;\n',
+			);
+			const target = path.join(root, "a.ts");
+			fs.writeFileSync(target, "export const x = 1;\n");
+			fs.chmodSync(target, 0o000);
+			try {
+				expect((await scopeOf(root, importer)).complete).toBe(false);
+			} finally {
+				fs.chmodSync(target, 0o644);
+			}
+		},
+	);
+});
+
 describe("importTargetsToAnnounce bounds (#4368 r1 F2)", () => {
 	// Recurrence: #4368 r1 F2. A file the LSP does not sync (over its byte or
 	// line limit) gets no server answer, so its imports have nothing to make

@@ -388,6 +388,59 @@ describe("cache entries past a creation: the dependency scope (#4346)", () => {
 		expect(after.text).toContain("Cannot find module scope_never");
 	}, 30_000);
 
+	// Rows F1 and F2 on the batch route. Recurrence: #4430 r1 review F1/F2.
+	// The import query captures import and export statements only, so a
+	// dependency held another way was neither a target nor unresolved; the
+	// scope looked complete and the finding was served past the dependency's
+	// creation (base refused it). Each file's finding is its `import "./*_never"`
+	// line; the created module is the one the other form names.
+	it.each([
+		[
+			"a dynamic import",
+			"dynf",
+			'export const f = () => import("./dynf_mod");\n',
+			undefined,
+		],
+		[
+			"a type-position import",
+			"typf",
+			'export let t: import("./typf_mod").T;\n',
+			undefined,
+		],
+		[
+			"an import = require",
+			"reqf",
+			'import m = require("./reqf_mod");\nexport { m };\n',
+			undefined,
+		],
+		[
+			"a target that re-exports",
+			"reexf",
+			'import "./reexf_a";\n',
+			'export * from "./reexf_mod";\n',
+		],
+	])(
+		"refuses a cached finding when %s names the created module",
+		async (_shape, stem, rest, reexporter) => {
+			if (reexporter) {
+				fs.writeFileSync(path.join(workspace, `${stem}_a.ts`), reexporter);
+			}
+			const user = path.join(workspace, `${stem}_user.ts`);
+			fs.writeFileSync(user, `import "./${stem}_never";\n${rest}`);
+			const scannedAt = await cached(user);
+
+			const created = path.join(workspace, `${stem}_mod.ts`);
+			fs.writeFileSync(created, "export const T = 1;\n");
+			await diagnose({ paths: [created, user] });
+
+			expect(watchedLines()).toContain(
+				`watched ${pathToFileURL(created).href} 1`,
+			);
+			expect(await scannedAtOf(user)).toBeGreaterThan(scannedAt ?? Infinity);
+		},
+		30_000,
+	);
+
 	// Row 11. Recurrence: #4368 r1 probe, a TypeScript ambient declaration
 	// answers a name in a file that never imports it, so no edge exists, and a
 	// clean entry was never refused on a creation: a new global that collides

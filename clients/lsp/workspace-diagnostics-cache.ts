@@ -661,11 +661,17 @@ export interface WorkspaceDiagnosticsCacheContext {
 	/**
 	 * #4346: `filePath`'s imports as this call resolved them (the created-module
 	 * producer, `importTargetsToAnnounce`). A finding entry's dependency scope
-	 * is complete only for a file noted here; see `createdInScopeAt`.
+	 * is complete only for a file noted here with `complete` (the producer saw
+	 * every dependency form, #4346 r2) and every unresolved source spelling a
+	 * name; see `createdInScopeAt`.
 	 */
 	noteImportScope(
 		filePath: string,
-		scope: { targets: readonly string[]; unresolved: readonly string[] },
+		scope: {
+			targets: readonly string[];
+			unresolved: readonly string[];
+			complete: boolean;
+		},
 	): void;
 	/** Fresh cached result for `filePath` under `scopeKey`, or `undefined`
 	 * when there's no entry, the entry's scope doesn't match, or it fails the
@@ -716,7 +722,8 @@ interface ImportScope {
 	targets: ReadonlySet<string>;
 	/** The name parts of its unresolved import sources. */
 	unresolvedNames: ReadonlySet<string>;
-	/** False when an unresolved source spells no name a file could answer. */
+	/** False when an unresolved source spells no name a file could answer, or
+	 * the producer reported the scope incomplete (#4346 r2 F1/F2). */
 	complete: boolean;
 }
 
@@ -792,7 +799,8 @@ export function createWorkspaceDiagnosticsCacheContext(
 	 * implicit scope (`implicit-scope.ts`: the TS/JS ambient files for a JS/TS
 	 * file, the package's files for a Go file). A finding entry whose scope
 	 * pi-lens cannot enumerate (another language, an unresolved source with no
-	 * name, or no resolution this call) counts every created file: its claim
+	 * name, a dependency form the extraction does not capture, a JS/TS target
+	 * that re-exports, or no resolution this call) counts every created file: its claim
 	 * is positive, so an unknown scope fails closed, as #4320 did for every
 	 * entry. A clean entry counts only what can be enumerated: refusing it on
 	 * every creation is the cost this cache exists to avoid (#1782).
@@ -1044,9 +1052,9 @@ export function createWorkspaceDiagnosticsCacheContext(
 				answer !== undefined && answer.binding.boundToCurrentDisk !== false
 			);
 		},
-		noteImportScope(filePath, { targets, unresolved }) {
+		noteImportScope(filePath, { targets, unresolved, complete: enumerated }) {
 			const unresolvedNames = new Set<string>();
-			let complete = true;
+			let complete = enumerated;
 			for (const source of unresolved) {
 				const parts = importSourceNameParts(source);
 				if (parts.length === 0) complete = false;

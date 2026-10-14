@@ -26,7 +26,9 @@
  * names stays outside the producer: finding one needs a walk of the project.
  * Each resolved importer's scope (its targets and its unresolved sources) is
  * handed to the caller, so the workspace-diagnostics cache can refuse an entry
- * only for a creation in that scope.
+ * only for a creation in that scope. A scope is incomplete when the importer
+ * holds a dependency form the extraction does not capture (#4346 r2 F1) or a
+ * JS/TS target re-exports (`reexportsFrom`, r2 F2).
  *
  * Observed by one `lsp_created_import_scan_rollup` row per session
  * ({@link emitCreatedImportScanRollupAtSessionEnd}), never one per call.
@@ -124,6 +126,35 @@ export interface ImportScope {
 	targets: readonly string[];
 	/** Its import sources that resolve to nothing now. */
 	unresolved: readonly string[];
+	/** Whether the targets and sources are all of its direct dependencies,
+	 * and no target re-exports another module. */
+	complete: boolean;
+}
+
+/**
+ * #4346 r2 F2: a JS/TS re-export statement (`export * from`, `export * as ns
+ * from`, `export { x } from`, `export type { x } from`). Through one, the
+ * importer depends on a module its own imports do not name.
+ */
+const JS_TS_REEXPORT =
+	/\bexport\s+(?:type\s+)?(?:\*(?:\s+as\s+[\w$]+)?|\{[^}]*\})\s*from\s*["'`]/;
+
+/**
+ * Whether `target` holds a JS/TS re-export; an unreadable one counts as
+ * re-exporting (the scope fails closed). No other language's syntax matches,
+ * so the test needs no language gate. Memoized per call in `seen`.
+ */
+function reexportsFrom(target: string, seen: Map<string, boolean>): boolean {
+	let answer = seen.get(target);
+	if (answer === undefined) {
+		try {
+			answer = JS_TS_REEXPORT.test(fs.readFileSync(target, "utf8"));
+		} catch {
+			answer = true;
+		}
+		seen.set(target, answer);
+	}
+	return answer;
 }
 
 /**
@@ -151,6 +182,7 @@ export async function importTargetsToAnnounce(
 	// call has an importer to resolve.
 	const { extractForwardImports } = await import("../blocker-freshness.js");
 	const targets = new Set<string>();
+	const reexports = new Map<string, boolean>();
 	let resolved = 0;
 	// Extraction answers [] for a missing, unreadable or non-source file; it
 	// does not throw (its own contract, which the blocker sweep relies on too).
@@ -167,7 +199,12 @@ export async function importTargetsToAnnounce(
 		}
 		resolved += 1;
 		const scope = await extractForwardImports(cwd, importer);
-		onScope?.(importer, scope);
+		if (onScope) {
+			const complete =
+				scope.complete &&
+				!scope.targets.some((target) => reexportsFrom(target, reexports));
+			onScope(importer, { ...scope, complete });
+		}
 		for (const target of scope.targets) targets.add(target);
 	}
 	const elapsedMs = performance.now() - started;
