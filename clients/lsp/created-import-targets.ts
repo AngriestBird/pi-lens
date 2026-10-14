@@ -27,8 +27,9 @@
  * Each resolved importer's scope (its targets and its unresolved sources) is
  * handed to the caller, so the workspace-diagnostics cache can refuse an entry
  * only for a creation in that scope. A scope is incomplete when the importer
- * holds a dependency form the extraction does not capture (#4346 r2 F1) or a
- * JS/TS target re-exports (`reexportsFrom`, r2 F2).
+ * may hold a dependency the extraction did not capture
+ * (`holdsUncapturedDependency` in `blocker-freshness.ts`, #4346 r3) or a
+ * target may re-export (`reexportsFrom`).
  *
  * Observed by one `lsp_created_import_scan_rollup` row per session
  * ({@link emitCreatedImportScanRollupAtSessionEnd}), never one per call.
@@ -149,9 +150,10 @@ function holdsReexport(text: string): boolean {
 }
 
 /**
- * Whether `target` holds a JS/TS re-export; an unreadable one counts as
- * re-exporting (the scope fails closed). No other language's syntax matches,
- * so the test needs no language gate. Memoized per call in `seen`.
+ * Whether `target` may re-export ({@link holdsReexport}); an unreadable one
+ * counts as re-exporting. Every target is read, whatever its language: a
+ * match in a non-JS/TS file only makes the scope incomplete (fails closed).
+ * Memoized per call in `seen`.
  */
 function reexportsFrom(target: string, seen: Map<string, boolean>): boolean {
 	let answer = seen.get(target);
