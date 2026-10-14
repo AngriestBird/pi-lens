@@ -501,6 +501,13 @@ export interface LSPDiagnosticsHealth {
 	mergedCount: number;
 	dedupDroppedCount: number;
 	checkedAt: string;
+	/**
+	 * #4322: the language (non-auxiliary) servers among the clients this read
+	 * acquired. Set only when at least one client was acquired, so an empty
+	 * list means only auxiliaries answered and the result says nothing about
+	 * the language itself.
+	 */
+	readyPrimaryServerIds?: string[];
 }
 
 function mergeLspDiagnostics(
@@ -3838,6 +3845,16 @@ export class LSPService {
 			});
 			return;
 		}
+		// #4322: auxiliaries answered but no language server was acquired. An
+		// auxiliary speaks for its own scanner only, so a primary that resolved a
+		// root for this file and was not acquired makes the touch inconclusive.
+		// `resolvedPrimaryRoots` holds exactly the primaries this touch tried;
+		// a file with no rootable primary (an auxiliary-only language) has none.
+		const unavailablePrimaryServerIds = spawned.some(
+			(entry) => !isAuxiliary(entry.info),
+		)
+			? []
+			: [...resolvedPrimaryRoots.keys()];
 		const leaseKeys = await this.clientRegistry.acquireClientLeases(
 			spawned,
 			filePath,
@@ -5876,6 +5893,7 @@ export class LSPService {
 			// is throw away the primary's answer, which is the #533 honesty doctrine
 			// cutting both ways.
 			const verdict = resolveTouchVerdict({
+				unavailablePrimaryServerIds,
 				primaryNotifyWriteTimedOutServerIds,
 				diagnosticsTimedOut,
 				diagnosticsUnansweredServerIds: diagnosticsUnansweredPrimaryServerIds,
@@ -6630,6 +6648,9 @@ export class LSPService {
 			mergedCount: merged.length,
 			dedupDroppedCount: rawCount - merged.length,
 			checkedAt: new Date().toISOString(),
+			readyPrimaryServerIds: spawned
+				.filter((entry) => !isAuxiliary(entry.info))
+				.map((entry) => entry.info.id),
 		});
 
 		logLatency({

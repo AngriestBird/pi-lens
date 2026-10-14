@@ -103,6 +103,7 @@ type LspHealthLike = {
 	serverCountReady?: number;
 	candidateServerIds?: string[];
 	mergedCount?: number;
+	readyPrimaryServerIds?: readonly string[];
 };
 
 type BatchOptions = {
@@ -148,6 +149,8 @@ type FileDiagnosticResult = {
 	unavailable?: string;
 	error?: string;
 	inconclusiveReason?: string;
+	/** #4322: see `DiagnosticsCollectionResult.primaryUnavailable`. */
+	primaryUnavailable?: string;
 	/**
 	 * #533: discriminated per-file outcome, mirroring the #240 doctrine at the
 	 * LSP layer (found | clean | unresolved) up through the tool's aggregation.
@@ -629,6 +632,13 @@ type DiagnosticsCollectionResult = {
 	/** Custom navigation-only servers that supplied no diagnostic evidence. */
 	diagnosticsUnsupportedServerIds: readonly string[];
 	/**
+	 * #4322: the file has a language server, but the touch acquired only
+	 * auxiliaries (`inconclusiveReason: "primary-unavailable"`). Whatever the
+	 * result holds came from auxiliaries, so it is never a clean verdict for
+	 * the file.
+	 */
+	primaryUnavailable?: string;
+	/**
 	 * #692: the file content read while collecting (undefined only when the
 	 * read itself failed) — reused by the widget-reconcile caller so it can
 	 * derive `fileRole` for `retagAuxiliaryDiagnostics`'s `skipTestFiles` gate
@@ -765,7 +775,11 @@ async function collectDiagnosticsForFile(
 			// as clean.
 			saved: true,
 		});
-		timedOut = touched?.inconclusive === true;
+		// #4322: a missing language server is not a deadline; it is reported
+		// through `primaryUnavailable` below, with its own wording.
+		timedOut =
+			touched?.inconclusive === true &&
+			touched.inconclusiveReason !== "primary-unavailable";
 	} catch {
 		// Non-fatal: getDiagnostics may still have stale/health information.
 	}
@@ -783,6 +797,15 @@ async function collectDiagnosticsForFile(
 					absPath,
 					waitMs !== undefined ? "document" : "full",
 				);
+	// #4322: the fallback writes a health record on every path past root
+	// admission (touchFile declines an outside-root file before this runs), so
+	// this is the record of the answer just read.
+	const fallbackHealth =
+		touched === undefined
+			? (lspService.getDiagnosticsHealth?.(absPath) as
+					| LspHealthLike
+					| undefined)
+			: undefined;
 	// #586: honor each auxiliary profile's native inline-suppression comment
 	// (e.g. opengrep's `// nosemgrep`, #441) the same way the per-edit dispatch
 	// runner does — previously this standalone query path ignored it entirely.
@@ -810,11 +833,17 @@ async function collectDiagnosticsForFile(
 	// cut off. Excluding it would render "Primary LSP: unconfirmed" for a primary
 	// that did confirm. The coverage gap is carried separately, below.
 	const confirmedByTouch = touchCompletedConfirmationPolicy(touched);
+	const primaryUnavailable = describePrimaryUnavailable(
+		absPath,
+		touched,
+		fallbackHealth,
+	);
 	return {
 		diagnostics: filtered,
 		timedOut,
 		skipReason: touched?.skipReason,
 		confirmedByTouch,
+		...(primaryUnavailable !== undefined && { primaryUnavailable }),
 		// #1470: only a touch that resolved clients contributes a coverage gap;
 		// the getDiagnostics fallback never reports one, which is honest — that
 		// path claims no confirmation at all.
@@ -824,6 +853,45 @@ async function collectDiagnosticsForFile(
 		content,
 		binding,
 	};
+}
+
+/**
+ * #4322: the reason no language server answered for a file, or undefined when
+ * one did (or nothing says otherwise). Two shapes reach here: the touch
+ * acquired only auxiliaries and names the primaries it could not acquire
+ * (`inconclusiveReason: "primary-unavailable"`), or the touch acquired no
+ * client and the `getDiagnostics` fallback acquired only auxiliaries
+ * (`readyPrimaryServerIds` empty). Either way the result came from
+ * auxiliaries alone.
+ */
+function describePrimaryUnavailable(
+	file: string,
+	touched: TouchFileResult | undefined,
+	fallbackHealth: LspHealthLike | undefined,
+): string | undefined {
+	let serverIds: readonly string[];
+	if (touched?.inconclusiveReason === "primary-unavailable") {
+		// The verdict always names the primary; fail closed if it ever does not.
+		serverIds = touched.inconclusiveServerIds?.length
+			? touched.inconclusiveServerIds
+			: [primaryServerId(file) ?? "unknown"];
+	} else {
+		const primaryId = primaryServerId(file);
+		if (
+			primaryId === undefined ||
+			fallbackHealth?.readyPrimaryServerIds === undefined ||
+			fallbackHealth.readyPrimaryServerIds.length > 0
+		) {
+			return undefined;
+		}
+		serverIds = [primaryId];
+	}
+	return (
+		`Primary LSP (${serverIds.join(", ")}): not available — no language ` +
+		"server answered for this file (it could not be started, or was still " +
+		"starting). NOT the same as 0 diagnostics; auxiliary scanners do not " +
+		"check the language itself."
+	);
 }
 
 function diagnosticsToFileDiags(
@@ -1353,6 +1421,7 @@ async function collectFileDiagnosticResult(
 		binding,
 		tooLargeReason,
 		skipReason,
+		primaryUnavailable,
 	} = await collectDiagnosticsForFile(
 		file,
 		lspService,
@@ -1379,7 +1448,7 @@ async function collectFileDiagnosticResult(
 		// No diagnostic provider and no push evidence is a capability boundary,
 		// not a clean result and not a timeout.
 		confirmation = undefined;
-	} else if (skipReason !== undefined) {
+	} else if (skipReason !== undefined || primaryUnavailable !== undefined) {
 		confirmation = "unconfirmed";
 	} else if (timedOut) {
 		if (applySeverityFilter(rawDiags, severity).length === 0) {
@@ -1502,6 +1571,7 @@ async function collectFileDiagnosticResult(
 		timedOut: confirmation === "unconfirmed" ? timedOut : undefined,
 		...(rootFallback && { rootFallback }),
 		...(skipReason !== undefined && { skipReason }),
+		...(primaryUnavailable !== undefined && { primaryUnavailable }),
 		primaryServerId: primaryServerId(file),
 		diagnosticsUnsupported: diagnosticsUnsupportedServerIds.length > 0,
 		...(policy.suppressed > 0 && {
@@ -1543,6 +1613,7 @@ async function runFileDiagnostics(
 		binding,
 		tooLargeReason,
 		skipReason,
+		primaryUnavailable,
 	} = await collectDiagnosticsForFile(
 		absPath,
 		lspService,
@@ -1582,7 +1653,7 @@ async function runFileDiagnostics(
 	let confirmation: "clean" | "unconfirmed" | undefined;
 	if (diagnosticsUnsupportedServerIds.length > 0) {
 		confirmation = undefined;
-	} else if (skipReason !== undefined) {
+	} else if (skipReason !== undefined || primaryUnavailable !== undefined) {
 		confirmation = "unconfirmed";
 	} else if (timedOut) {
 		if (applySeverityFilter(rawDiags, severity).length === 0) {
@@ -1683,6 +1754,9 @@ async function runFileDiagnostics(
 	// auxiliary findings exist — a wall of ast-grep/opengrep noise must never
 	// bury whether the actual language server confirmed the file clean.
 	const primaryLine = (() => {
+		// #4322: the language server never answered, so neither "timed out" nor
+		// "silent-on-clean" describes it.
+		if (primaryUnavailable !== undefined) return primaryUnavailable;
 		if (diagnosticsUnsupportedServerIds.length > 0) {
 			return `Primary LSP${primaryId ? ` (${primaryId})` : ""}: navigation-only — diagnostics unsupported (no pull provider or publish evidence).`;
 		}
@@ -1790,6 +1864,7 @@ async function runFileDiagnostics(
 			navigationOnlyFiles:
 				diagnosticsUnsupportedServerIds.length > 0 ? 1 : undefined,
 			...(skipReason !== undefined && { skipReason }),
+			...(primaryUnavailable !== undefined && { primaryUnavailable }),
 			...(rootFallback && {
 				rootFallbackReason: describeRootFallback(rootFallback),
 			}),
@@ -1816,6 +1891,7 @@ function tallyConfirmation(results: FileDiagnosticResult[]): {
 	clean: number;
 	unconfirmed: number;
 	timedOut: number;
+	primaryUnavailable: number;
 	rootFallbackReasons: string[];
 	navigationOnly: number;
 	tooLarge: number;
@@ -1823,6 +1899,7 @@ function tallyConfirmation(results: FileDiagnosticResult[]): {
 	let clean = 0;
 	let unconfirmed = 0;
 	let timedOut = 0;
+	let primaryUnavailable = 0;
 	const rootFallbackReasons = new Set<string>();
 	let navigationOnly = 0;
 	let tooLarge = 0;
@@ -1841,6 +1918,8 @@ function tallyConfirmation(results: FileDiagnosticResult[]): {
 			// #570: timed-out checks are a subset of "unconfirmed" — tallied
 			// separately so the aggregate text can say WHY, not just THAT.
 			if (result.timedOut) timedOut += 1;
+			// #4322: so is a file whose language server never answered.
+			if (result.primaryUnavailable !== undefined) primaryUnavailable += 1;
 			if (result.rootFallback) {
 				rootFallbackReasons.add(describeRootFallback(result.rootFallback));
 			}
@@ -1853,6 +1932,7 @@ function tallyConfirmation(results: FileDiagnosticResult[]): {
 		clean,
 		unconfirmed,
 		timedOut,
+		primaryUnavailable,
 		rootFallbackReasons: [...rootFallbackReasons],
 		navigationOnly,
 		tooLarge,
@@ -1904,7 +1984,19 @@ function unconfirmedReasonClause(
 	unconfirmed: number,
 	timedOut: number,
 	rootFallbackReasons: readonly string[] = [],
+	primaryUnavailable = 0,
 ): string {
+	// #4322: a fourth, disjoint reason — no language server answered at all.
+	// The rest of the unconfirmed files keep their own explanation.
+	if (primaryUnavailable > 0) {
+		const head =
+			`${primaryUnavailable} with no language server answer (it could not ` +
+			"be started, or was still starting)";
+		const rest = unconfirmed - primaryUnavailable;
+		return rest > 0
+			? `${head}; the other ${rest}: ${unconfirmedReasonClause(rest, timedOut, rootFallbackReasons)}`
+			: `${head}.`;
+	}
 	// #3750: a third, disjoint reason — the file's server root fell back, so its
 	// empty answer was demoted (`primaryRootFallback`). Named per server.
 	if (rootFallbackReasons.length > 0) {
@@ -1960,6 +2052,7 @@ async function collectBatchDiagnostics(
 	unconfirmed: number;
 	timedOut: number;
 	rootFallbackReasons: string[];
+	primaryUnavailable: number;
 	outcomeCounts: Record<BatchFileOutcome, number>;
 	incompleteFiles: number;
 }> {
@@ -2090,8 +2183,13 @@ async function collectBatchDiagnostics(
 	const total = allDiags.length;
 	const truncated = total > MAX_DIAGNOSTICS;
 	const display = truncated ? allDiags.slice(0, MAX_DIAGNOSTICS) : allDiags;
-	const { clean, unconfirmed, timedOut, rootFallbackReasons } =
-		tallyConfirmation(results);
+	const {
+		clean,
+		unconfirmed,
+		timedOut,
+		primaryUnavailable,
+		rootFallbackReasons,
+	} = tallyConfirmation(results);
 	for (const result of results) {
 		result.outcome = classifyBatchFileOutcome(result);
 	}
@@ -2137,6 +2235,7 @@ async function collectBatchDiagnostics(
 		unconfirmed,
 		timedOut,
 		rootFallbackReasons,
+		primaryUnavailable,
 		outcomeCounts,
 		incompleteFiles: Math.max(0, files.length - results.length),
 	};
@@ -2259,6 +2358,7 @@ async function runBatchFileDiagnostics(
 		unconfirmed,
 		timedOut,
 		rootFallbackReasons,
+		primaryUnavailable,
 		outcomeCounts,
 		incompleteFiles,
 	} = await collectBatchDiagnostics(absPaths, severity, lspService, options);
@@ -2334,7 +2434,7 @@ async function runBatchFileDiagnostics(
 		lines.push(
 			"",
 			`${clean} file${clean === 1 ? "" : "s"} confirmed clean, ${unconfirmed} unconfirmed: ` +
-				`${unconfirmedReasonClause(unconfirmed, timedOut, rootFallbackReasons)} NOT the same as 0 diagnostics.`,
+				`${unconfirmedReasonClause(unconfirmed, timedOut, rootFallbackReasons, primaryUnavailable)} NOT the same as 0 diagnostics.`,
 		);
 	}
 	if (display.length === 0) {
@@ -2539,6 +2639,7 @@ async function runDirectoryDiagnostics(
 		unconfirmed,
 		timedOut,
 		rootFallbackReasons,
+		primaryUnavailable,
 		outcomeCounts,
 	} = await collectBatchDiagnostics(
 		filesToProcess,
@@ -2576,7 +2677,7 @@ async function runDirectoryDiagnostics(
 		const cleanLine =
 			unconfirmed > 0
 				? `${clean} clean · ${unconfirmed} unconfirmed: ` +
-					`${unconfirmedReasonClause(unconfirmed, timedOut, rootFallbackReasons)} NOT the same as 0 diagnostics.`
+					`${unconfirmedReasonClause(unconfirmed, timedOut, rootFallbackReasons, primaryUnavailable)} NOT the same as 0 diagnostics.`
 				: "No diagnostics found.";
 		text = [
 			`Directory: ${absPath}`,
@@ -2614,6 +2715,7 @@ async function runDirectoryDiagnostics(
 								unconfirmed,
 								timedOut,
 								rootFallbackReasons,
+								primaryUnavailable,
 							),
 					]
 				: []),
