@@ -160,6 +160,14 @@ describe("extractForwardImportPaths (#4346)", () => {
 		expect(await extractForwardImportPaths(root, importer)).toEqual([]);
 		fs.renameSync(path.join(root, "stash/moved.ts"), moved);
 		const inodeBirth = fs.statSync(moved).birthtimeMs;
+		// A fast runner creates, renames and resolves within one clock tick, so
+		// the appearance time can tie the inode birth and the strict check below
+		// cannot tell them apart (#4375 shard 3/5 red). Let the clock pass the
+		// inode birth first; no timer, only event-loop turns, bounded in case
+		// the filesystem clock runs ahead of Date.now().
+		for (let turn = 0; turn < 100_000 && Date.now() <= inodeBirth; turn++) {
+			await new Promise<void>((resolve) => setImmediate(resolve));
+		}
 		const resolvedAt = Date.now();
 
 		expect(
