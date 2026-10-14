@@ -843,7 +843,6 @@ async function collectDiagnosticsForFile(
 	// that did confirm. The coverage gap is carried separately, below.
 	const confirmedByTouch = touchCompletedConfirmationPolicy(touched);
 	const primaryUnavailable = describePrimaryUnavailable(
-		absPath,
 		touched,
 		fallbackHealth,
 	);
@@ -879,16 +878,13 @@ async function collectDiagnosticsForFile(
  * in clients/lsp/index.ts), so either way no primary answered.
  */
 function describePrimaryUnavailable(
-	file: string,
 	touched: TouchFileResult | undefined,
 	fallbackHealth: LspHealthLike | undefined,
 ): string | undefined {
 	let serverIds: readonly string[];
 	if (touched?.inconclusiveReason === "primary-unavailable") {
-		// The verdict always names the primary; fail closed if it ever does not.
-		serverIds = touched.inconclusiveServerIds?.length
-			? touched.inconclusiveServerIds
-			: [primaryServerId(file) ?? "unknown"];
+		// The verdict always names the primary (clients/lsp/index.ts).
+		serverIds = touched.inconclusiveServerIds ?? [];
 	} else if (fallbackHealth?.unavailablePrimaryServerIds?.length) {
 		serverIds = fallbackHealth.unavailablePrimaryServerIds;
 	} else {
