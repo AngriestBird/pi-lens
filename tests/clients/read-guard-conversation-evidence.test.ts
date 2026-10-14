@@ -2468,6 +2468,30 @@ describe("#3525: FileTime moves only over bytes the conversation accounts for", 
 	});
 
 	/**
+	 * S12's setup: a bash write, a bridge read of lines 1-3 (no tool call id),
+	 * then an own oldText edit of line 2 during which another writer changes
+	 * line 5. The edit's credit leaves an empty scope.
+	 */
+	const bashThenBridgeEditInflight = async (
+		runtime: RuntimeCoordinator,
+		file: string,
+	) => {
+		wireReadBridge();
+		_bridgeRuntime = runtime;
+		await bashSed(runtime, file, "line3", "agent3");
+		(globalThis as Record<symbol, ReadBridge>)[READ_BRIDGE_KEY].recordRead({
+			filePath: file,
+			requestedOffset: 1,
+			requestedLimit: 3,
+		});
+		expect(runtime.readGuard.getReadHistory(file)).toHaveLength(1);
+		const inflight = await textEdit(runtime, file, "line2\n", "AGENT2\n", () =>
+			foreignWrite(file, 5, "EXTERNAL5"),
+		);
+		expect(inflight.blocked).toBe(false);
+	};
+
+	/**
 	 * #4387 r2 (S12, AuthorOwnOldTextIdless): an authorship vouches only through
 	 * a read a move keeps with it. A bridge read names no tool call, so with
 	 * only that read the own oldText edit's tool_call records the authorship
@@ -2476,27 +2500,11 @@ describe("#3525: FileTime moves only over bytes the conversation accounts for", 
 	 * dropped the bridge read, and the authorship let that line be edited.
 	 */
 	it("keeps a line another writer changed during an own oldText edit refused when only a bridge read was there (#4387 S12)", async () => {
-		wireReadBridge();
 		const env = setupTestEnvironment("rg-4387-s12-");
 		try {
 			const file = fixture(env.tmpDir, "probe.ts", `${lines(10).join("\n")}\n`);
 			const runtime = newRuntime(env.tmpDir);
-			_bridgeRuntime = runtime;
-			await bashSed(runtime, file, "line3", "agent3");
-			(globalThis as Record<symbol, ReadBridge>)[READ_BRIDGE_KEY].recordRead({
-				filePath: file,
-				requestedOffset: 1,
-				requestedLimit: 3,
-			});
-			expect(runtime.readGuard.getReadHistory(file)).toHaveLength(1);
-			const inflight = await textEdit(
-				runtime,
-				file,
-				"line2\n",
-				"AGENT2\n",
-				() => foreignWrite(file, 5, "EXTERNAL5"),
-			);
-			expect(inflight.blocked).toBe(false);
+			await bashThenBridgeEditInflight(runtime, file);
 			moveToLeaf(runtime);
 			expect(
 				(await positionalEdit(runtime, file, [[5, 5, "agent5"]])).blocked,
@@ -2602,6 +2610,98 @@ describe("#3525: FileTime moves only over bytes the conversation accounts for", 
 			expect(
 				(await positionalEdit(runtime, file, [[3, 3, "agent3"]])).blocked,
 			).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	/**
+	 * #4387 r3: a scope widens only over bytes the conversation holds. A
+	 * whole-file credit that holds none (the agent_end drain, a bash write, a
+	 * pipeline rewrite) keeps the scope it meets. Recurrences: after S12's
+	 * empty scope absorbed the in-flight line, the drain (S14) or an own bash
+	 * write of another line (S16) widened it to the whole file, and the line
+	 * passed after a move; after S13 the drain widened it with no move (S17);
+	 * on base the drain widened a bridge's range scope over a line the agent
+	 * never saw (S15b).
+	 */
+	it("keeps the in-flight line refused after a format drain and a move (#4387 S14)", async () => {
+		const env = setupTestEnvironment("rg-4387-s14-");
+		try {
+			const file = fixture(env.tmpDir, "probe.ts", `${lines(10).join("\n")}\n`);
+			const runtime = newRuntime(env.tmpDir);
+			await bashThenBridgeEditInflight(runtime, file);
+			await drainFormat(runtime, file, (text) =>
+				text.replace("line10", "line10;"),
+			);
+			moveToLeaf(runtime);
+			expect(
+				(await positionalEdit(runtime, file, [[5, 5, "agent5"]])).blocked,
+			).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("keeps the in-flight line refused after an own bash write of another line and a move (#4387 S16)", async () => {
+		const env = setupTestEnvironment("rg-4387-s16-");
+		try {
+			const file = fixture(env.tmpDir, "probe.ts", `${lines(10).join("\n")}\n`);
+			const runtime = newRuntime(env.tmpDir);
+			await bashThenBridgeEditInflight(runtime, file);
+			await bashSed(runtime, file, "line9", "agent9");
+			moveToLeaf(runtime);
+			expect(
+				(await positionalEdit(runtime, file, [[5, 5, "agent5"]])).blocked,
+			).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("keeps a scope line another writer changed during an own oldText edit refused after a format drain (#4387 S17)", async () => {
+		const env = setupTestEnvironment("rg-4387-s17-");
+		try {
+			const file = fixture(env.tmpDir, "probe.ts", `${lines(10).join("\n")}\n`);
+			const runtime = newRuntime(env.tmpDir);
+			foreignWrite(file, 4, "BRIDGE4");
+			bridgeScope(runtime, file);
+			const inflight = await textEdit(
+				runtime,
+				file,
+				"BRIDGE4\n",
+				"AGENT4\n",
+				() => foreignWrite(file, 3, "EXTERNAL3"),
+			);
+			expect(inflight.blocked).toBe(false);
+			await drainFormat(runtime, file, (text) =>
+				text.replace("line10", "line10;"),
+			);
+			expect(
+				(await positionalEdit(runtime, file, [[3, 3, "agent3"]])).blocked,
+			).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("keeps a range scope to its lines through a format drain (#4387 S15b)", async () => {
+		const env = setupTestEnvironment("rg-4387-s15b-");
+		try {
+			const file = fixture(env.tmpDir, "probe.ts", `${lines(10).join("\n")}\n`);
+			const runtime = newRuntime(env.tmpDir);
+			bridgeScope(runtime, file);
+			await drainFormat(runtime, file, (text) =>
+				text.replace("line10", "line10;"),
+			);
+			// Line 8 was never shown to the agent: the drain holds no bytes for it.
+			const outside = await positionalEdit(runtime, file, [[8, 8, "x"]]);
+			expect(outside.blocked).toBe(true);
+			expect(outside.reason).toContain("this write only covered part");
+			// The scope itself survives the same-length format (no-drop).
+			expect(
+				(await positionalEdit(runtime, file, [[4, 4, "agent4"]])).blocked,
+			).toBe(false);
 		} finally {
 			env.cleanup();
 		}

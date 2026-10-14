@@ -2317,6 +2317,7 @@ export class ReadGuard {
 			| {
 					toolCallId?: string;
 					contentHash?: string;
+					writtenContent?: string;
 					advanceAuthorship?: boolean;
 					authoredRanges?: Array<[number, number]>;
 					authorship?: "partial" | "whole-file" | "unknown";
@@ -2331,41 +2332,49 @@ export class ReadGuard {
 			this.retireIfChanged(filePath, "bridge");
 			return;
 		}
-		// F-4210-2: an UNKNOWN range is no license of its own, so it creates
-		// none. It names no line it produced and records no own-edit read, so
-		// in two cases it leaves an empty scope, which vouches for no line
-		// (#4387). Over a range scope, it cannot be composed into one. With no
-		// read that names a tool call, a move would keep the advanced
-		// authorship and drop every read that bounds it. Otherwise, over a
-		// whole-file authorship, the range is moot, as for a partial credit
-		// (#4210 N3), and that read bounds the advance.
+		// F-4210-2: an UNKNOWN range is no license of its own: no first credit.
 		if (opts?.authorship === "unknown" && !existing) return;
-		const unknownLeavesNoScope =
-			opts?.authorship === "unknown" &&
-			(existing?.authoredRanges !== undefined ||
-				!this.reads
+		// #4387: a scope covers a line only while the conversation holds that
+		// line's bytes, or while a read that a move keeps with the authorship
+		// bounds the file. So the scope after a credit is what the credit holds
+		// (a write's content: the whole file; a positional edit: its produced
+		// lines; any other credit: nothing) plus what it may keep. A credit that
+		// names the lines it changed keeps the old scope. An UNKNOWN credit
+		// absorbs bytes no check covered, so it keeps the scope only while a read
+		// that names a call bounds it and the credit names its own call, which
+		// makes that read older than the authorship (S12, S13). No credit
+		// without the conversation's bytes widens a scope (S14 to S17).
+		const keeps =
+			opts?.authorship !== "unknown" ||
+			(opts.toolCallId !== undefined &&
+				(this.reads
 					.get(filePath)
-					?.some((read) => read.toolCallId !== undefined));
+					?.some((read) => read.toolCallId !== undefined) ??
+					false));
+		const nextRanges = !existing
+			? opts?.authoredRanges
+			: opts?.writtenContent !== undefined
+				? undefined
+				: keeps && existing.authoredRanges === undefined
+					? undefined
+					: (opts?.authoredRanges ?? []);
 		const observed = observeAuthoredBytes(
 			filePath,
 			opts?.contentHash,
-			unknownLeavesNoScope ? [] : opts?.authoredRanges,
+			nextRanges,
 		);
 		const { authoredRanges: _observedRanges, ...observedWithoutRanges } =
 			observed;
-		const composedRanges = unknownLeavesNoScope
-			? []
-			: existing?.authoredRanges === undefined
-				? existing
-					? undefined
-					: observed.authoredRanges
-				: opts?.authoredRanges === undefined
-					? undefined
-					: composeAuthoredRanges(
-							existing,
-							opts.authoredRanges,
-							observed.authoredLineCount,
-						);
+		const composedRanges =
+			nextRanges !== undefined &&
+			keeps &&
+			existing?.authoredRanges !== undefined
+				? composeAuthoredRanges(
+						existing,
+						nextRanges,
+						observed.authoredLineCount,
+					)
+				: nextRanges;
 		const toolCallId = opts?.toolCallId ?? existing?.toolCallId;
 		// Re-inserted, so the map's order is credit order for the cap.
 		this.writtenThisSession.delete(filePath);
