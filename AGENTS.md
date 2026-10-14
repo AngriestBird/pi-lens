@@ -1283,6 +1283,12 @@ Test authoring screens:
   and honour every input the production seam honours on the axis under test (a
   timeout, a budget, a generation).
 - Restore env, timers, cwd, and module state; run the case in isolation.
+- A case never reads state a sibling case or file wrote (a file, a latch, a
+  once-per-session claim): `Targeted tests (advisory)` runs a PR's added or
+  changed test files alone and under two fixed shuffle seeds
+  (`scripts/ci-shuffle-changed-tests.mjs`). After `vi.resetModules()`
+  every `await import(...)` is a second module copy; import statically what
+  the tool under test also reads.
 - Keep performance bounds close to measured fixed and regressed values.
 - Assert real behavior, not only mock calls or `not.toThrow`.
 - Derive expected values independently; do not mirror production tables.

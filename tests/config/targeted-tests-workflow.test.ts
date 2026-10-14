@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve, sep } from "node:path";
 import { describe, expect, it } from "vitest";
 import yaml from "../../clients/deps/js-yaml.js";
+import { BUDGET_MS } from "../../scripts/ci-shuffle-changed-tests.mjs";
 import {
 	CI_ONLY_PRE_PUSH_TESTS,
 	TEST_TREE_GOVERNANCE_TESTS,
@@ -591,13 +592,19 @@ function readWorkflow() {
 				name?: string;
 				if?: string;
 				"continue-on-error"?: boolean;
+				"timeout-minutes"?: number;
 				steps?: Array<{
+					name?: string;
+					if?: string;
+					"timeout-minutes"?: number;
+					env?: Record<string, string>;
 					uses?: string;
 					run?: string;
 					with?: Record<string, unknown>;
 				}>;
 			}
 		>;
+		on: Record<string, unknown>;
 	};
 }
 
@@ -727,6 +734,47 @@ describe("targeted advisory workflow contract (#3215)", () => {
 		);
 		expect(selector).toContain("GITHUB_STEP_SUMMARY");
 		expect(selector).toContain("cap exceeded");
+	});
+
+	// #4397 recurrence: a PR's new test file that depends on case order passes
+	// in CI's file order and reds on a reorder or a shard split (#4390, #4391).
+	// The step below is the only thing that reorders it before merge, so a
+	// reworded step name, a dropped `env`, or SHAs spliced into `run:` (event
+	// data in a shell string) must red here.
+	it("runs the changed-test shuffle step after the build, with the SHAs in env only (#4397)", () => {
+		const workflow = readWorkflow();
+		const job = workflow.jobs["targeted-tests-advisory"];
+		const steps = job?.steps ?? [];
+		const index = steps.findIndex(
+			(step) => step.name === "Changed test files, alone and shuffled",
+		);
+		expect(index).toBeGreaterThan(-1);
+		const step = steps[index];
+		expect(step.run).toBe(
+			'node scripts/ci-shuffle-changed-tests.mjs --base "$BASE_SHA" --head "$HEAD_SHA"',
+		);
+		expect(step.run).not.toContain("${{");
+		expect(step.env).toMatchObject({
+			BASE_SHA: "${{ github.event.pull_request.base.sha }}",
+			HEAD_SHA: "${{ github.event.pull_request.head.sha }}",
+		});
+		// It follows the build and the selector run: the compiled twins exist.
+		expect(index).toBeGreaterThan(
+			steps.findIndex((other) => other.run === "npm run build"),
+		);
+		expect(index).toBeGreaterThan(
+			steps.findIndex((other) => other.name === "Run targeted tests"),
+		);
+		// A red selector must not skip it, and a cancelled run must.
+		expect(step.if).toBe("${{ !cancelled() }}");
+		// The script's own budget sits under the step cap, the step cap under
+		// the job's (15 min).
+		const stepCap = step["timeout-minutes"] ?? Infinity;
+		expect(stepCap * 60_000).toBeGreaterThan(BUDGET_MS);
+		expect(stepCap).toBeLessThan(job?.["timeout-minutes"] ?? 0);
+		// pull_request, never pull_request_target: the step runs the PR's code.
+		expect(Object.keys(workflow.on)).toContain("pull_request");
+		expect(Object.keys(workflow.on)).not.toContain("pull_request_target");
 	});
 });
 

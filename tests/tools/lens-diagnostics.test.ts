@@ -4,6 +4,8 @@ import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createLensDiagnosticsTool } from "../../tools/lens-diagnostics.js";
+import * as lspConfig from "../../clients/lsp/config.js";
+import { LSP_SERVERS } from "../../clients/lsp/server.js";
 import { createLensDiagnosticMarkTool } from "../../tools/lens-diagnostic-mark.js";
 import { hashDiagnosticContent } from "../../clients/lsp/diagnostic-binding.js";
 import { PROJECT_DIAGNOSTICS_CACHE_VERSION } from "../../clients/project-diagnostics/cache.js";
@@ -137,6 +139,10 @@ vi.mock(
 
 beforeEach(() => {
 	resetDegradationLedger();
+	// #4397: the once-per-session claims (`runner_coverage_retired` per runner)
+	// are process state shared by every case; a case that logs the row must not
+	// depend on which sibling consumed the claim first.
+	resetOncePerSessionPhases();
 	projectDiagnosticsMocks.scanProjectDiagnostics.mockReset();
 	projectDiagnosticsMocks.loadProjectDiagnosticsSnapshot.mockReset();
 	projectDiagnosticsMocks.loadProjectDiagnosticsDeltaReport.mockReset();
@@ -886,7 +892,9 @@ describe("lens_diagnostics mode=delta", () => {
 
 	it("uses the server-owned cwd for the rendered row", async () => {
 		// #2846: the renderer must not independently rediscover a marker root.
-		const { LSP_SERVERS } = await import("../../clients/lsp/server.js");
+		// #4397: LSP_SERVERS is imported statically at the top of the file: a
+		// dynamic import after the wall-clock case's `vi.resetModules()` is a
+		// second copy the tool never reads.
 		const server = LSP_SERVERS.find((entry) => entry.id === "typescript");
 		if (!server) throw new Error("typescript server missing from registry");
 		const originalRoot = server.root;
@@ -3899,8 +3907,7 @@ describe("lens_diagnostics mode=all", () => {
 		// has no findings at all (dropped by withIssues), the `.ts` row
 		// renders — so the seam is called exactly once, for the rendered file.
 		// Pre-O2 the projection ran over every summary and the count was 2.
-		const config = await import("../../clients/lsp/config.js");
-		const seamSpy = vi.spyOn(config, "resolveLspCwdForFile");
+		const seamSpy = vi.spyOn(lspConfig, "resolveLspCwdForFile");
 		try {
 			mockSummaries.push({
 				filePath: "/proj/src/a.ts",
@@ -4962,6 +4969,10 @@ describe("lens_diagnostics honors the turn abort (ctx.signal)", () => {
 
 describe("lens_diagnostics wall-clock ceiling (never-hang guarantee)", () => {
 	it("stops mode=full and marks timedOut when the wall-clock budget is exceeded", async () => {
+		// The sweep ceiling is read once at module load (`FULL_SCAN_WALL_CLOCK_MS`),
+		// so this case needs a fresh module graph. #4397: that reset makes every
+		// later `await import(...)` return a SECOND copy; cases that patch a module
+		// the tool reads import it statically at the top of the file instead.
 		vi.resetModules();
 		process.env.PI_LENS_LENS_DIAGNOSTICS_FULL_TIMEOUT_MS = "1";
 		const { createLensDiagnosticsTool: freshCreate } =
