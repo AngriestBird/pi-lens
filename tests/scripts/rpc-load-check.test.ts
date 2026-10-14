@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import {
 	logRecordFailure,
 	rpcMessageFailure,
+	tsServerOutcome,
 } from "../../scripts/rpc-load-check.mjs";
 
 // Recorded from `pi --mode rpc` with an extension that called ctx.ui.notify
@@ -155,5 +156,37 @@ describe("logRecordFailure", () => {
 		expect(
 			logRecordFailure("latency.log", fallback("exit_hook", false)),
 		).toBeUndefined();
+	});
+});
+
+// Recurrence: #4441 review F2, a refusal logged after a fixed read never
+// reached the check. Shapes recorded from published 4.4.3 runs (a started
+// server; a bare-PATH-tsc refusal).
+describe("tsServerOutcome", () => {
+	const SPAWNED = JSON.parse(
+		'{"type":"phase","phase":"lsp_server_spawned","durationMs":1817,"metadata":{"serverId":"typescript","source":"managed","launchVariant":"classic"}}',
+	);
+	const OTHER_SERVER = JSON.parse(
+		'{"type":"phase","phase":"lsp_server_spawned","durationMs":90,"metadata":{"serverId":"typos","source":"managed"}}',
+	);
+	const UNAVAILABLE =
+		"[2026-10-14T17:55:30.738Z] lsp spawn typescript: unavailable (2288ms)";
+	const START_ONLY =
+		"[2026-10-14T17:55:28.450Z] lsp spawn typescript: start root=/p install=enabled file=/p/a.ts";
+
+	it("reports started once the typescript server has spawned", () => {
+		expect(tsServerOutcome([SPAWNED], START_ONLY)).toEqual({ started: true });
+	});
+
+	it("reports a terminal failure line, not a start line", () => {
+		expect(tsServerOutcome([], `${START_ONLY}\n${UNAVAILABLE}\n`)).toEqual({
+			started: false,
+			line: UNAVAILABLE,
+		});
+	});
+
+	it("is undecided while the server is still spawning, and ignores other servers", () => {
+		expect(tsServerOutcome([], `${START_ONLY}\n`)).toBeUndefined();
+		expect(tsServerOutcome([OTHER_SERVER], "")).toBeUndefined();
 	});
 });

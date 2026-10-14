@@ -61,6 +61,30 @@ import {
 	phaseWasLogged,
 } from "./lib/latency-log-phases.mjs";
 
+/**
+ * Where the TypeScript language server stands, from the two logs: started
+ * (`lsp_server_spawned` for `typescript` in latency.log), failed (a terminal
+ * `lsp spawn typescript: ...` line in sessionstart.log), or undefined while it
+ * is still spawning. The smoke project is TypeScript, so a started server is
+ * the positive evidence that the LSP leg ran (#4401 review: a refusal that
+ * logs after a fixed read never reached the check).
+ */
+export function tsServerOutcome(latencyRecords, sessionstartText) {
+	const spawned = latencyRecords.find(
+		(r) =>
+			r.phase === "lsp_server_spawned" && r.metadata?.serverId === "typescript",
+	);
+	if (spawned) return { started: true };
+	const line = String(sessionstartText)
+		.split("\n")
+		.find((l) =>
+			/lsp spawn typescript: (unavailable|failed|refused|aborted|permanently disabled)/.test(
+				l,
+			),
+		);
+	return line ? { started: false, line: line.trim() } : undefined;
+}
+
 /** Every executable `name` on PATH, in order (a runner-image tool can shadow the install). */
 function commandsOnPath(name) {
 	const found = [];
@@ -434,6 +458,17 @@ export async function run(piBin, { extension, failWorker }) {
 			if (provider.state.requests < 1)
 				failures.push("first turn never reached the fake provider");
 		}
+		// The LSP spawn is asynchronous: its refusal logs about a second after
+		// the turn ends (the PATH-compiler probe), so wait for a terminal state.
+		const tsServer = await waitFor(
+			"the TypeScript language server to start or fail (lsp_server_spawned in latency.log)",
+			STAGE_TIMEOUT_MS,
+			() => tsServerOutcome(latency(), readLog("sessionstart.log")),
+		);
+		if (tsServer && !tsServer.started)
+			failures.push(
+				`the TypeScript language server did not start: ${tsServer.line}`,
+			);
 		if (failWorker) {
 			await waitFor(
 				"the forced worker failure's main-thread fallback",

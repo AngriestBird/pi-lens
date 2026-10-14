@@ -299,13 +299,20 @@ describe("install-smoke RPC session smoke (#4401)", () => {
 			);
 			const install = lines.findIndex(
 				(line) =>
-					line.startsWith("npm install") && line.includes("typescript@5.9.3"),
+					line.includes("scripts/npm-retry.mjs") &&
+					line.includes(" install ") &&
+					line.includes("--ignore-scripts") &&
+					line.includes("typescript@5.9.3"),
 			);
 			const run = lines.findIndex((line) =>
 				line.includes("rpc-load-check.mjs"),
 			);
 			expect(install).toBeGreaterThan(-1);
 			expect(run).toBeGreaterThan(install);
+			// The marker the sibling named-package installs carry for zizmor.
+			expect(
+				stepRun(workflow, jobName, "Verify pi-lens loads via RPC"),
+			).toContain("# pi-lens-ignore: zizmor:adhoc-packages");
 			expect(lines).toContain("printf 'node_modules\\n' > .gitignore");
 		});
 	}
