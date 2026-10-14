@@ -54,6 +54,23 @@ function runOxlint(targetFile: string) {
 	);
 }
 
+/**
+ * Run a node entry (the lint wrapper) in `cwd` with the shipped oxlint on
+ * PATH, as the wrapper spawns `oxlint` by name. One spawn site for every
+ * type-aware planted-probe case (#3244, #4402).
+ */
+function runNodeWithOxlint(args: string[], cwd: string) {
+	return spawnSync(process.execPath, args, {
+		encoding: "utf8",
+		cwd,
+		env: {
+			...process.env,
+			PATH: `${path.dirname(OXLINT_ENTRY)}${path.delimiter}${process.env.PATH ?? ""}`,
+		},
+		timeout: SPAWN_TIMEOUT_MS * 2,
+	});
+}
+
 describe("lint:js (#2439 — oxlint wired over .mjs/.cjs)", () => {
 	it("package.json wires lint:js into npm run lint", () => {
 		const pkg = JSON.parse(
@@ -238,16 +255,7 @@ describe("lint:js:tests (#3244 — required type-aware test population)", () => 
 					configPath,
 					fixture,
 				];
-				const run = (args: string[]) =>
-					spawnSync(process.execPath, args, {
-						encoding: "utf8",
-						cwd: tmpDir,
-						env: {
-							...process.env,
-							PATH: `${path.dirname(OXLINT_ENTRY)}${path.delimiter}${process.env.PATH ?? ""}`,
-						},
-						timeout: SPAWN_TIMEOUT_MS * 2,
-					});
+				const run = (args: string[]) => runNodeWithOxlint(args, tmpDir);
 				const result = run(commandArgs);
 				expect(result.status, result.stdout + result.stderr).not.toBe(0);
 				expect(result.stdout + result.stderr).toContain(
@@ -368,22 +376,13 @@ describe("lint:js:promises (#4402 — floating promises in shipped code)", () =>
 				.replace(` ${ROOTS}`, "")
 				.split(/\s+/);
 			const run = () =>
-				spawnSync(
-					process.execPath,
+				runNodeWithOxlint(
 					[
 						path.join(REPO_ROOT, "scripts/lint-js-advisory.mjs"),
 						...argv,
 						fixture,
 					],
-					{
-						encoding: "utf8",
-						cwd: tmpDir,
-						env: {
-							...process.env,
-							PATH: `${path.dirname(OXLINT_ENTRY)}${path.delimiter}${process.env.PATH ?? ""}`,
-						},
-						timeout: SPAWN_TIMEOUT_MS * 2,
-					},
+					tmpDir,
 				);
 			try {
 				fs.writeFileSync(fixture, `${lines.join("\n")}\n`);
