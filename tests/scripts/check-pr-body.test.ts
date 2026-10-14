@@ -5565,8 +5565,14 @@ describe("the shape catalog is read from the PR's base (#4439)", () => {
 		writeFileSync(join(checkout, "AGENTS.md"), head);
 		const git = (args: string[]): string => {
 			if (args[0] === "merge-base" && base !== null) return "base0000\n";
-			if (args[0] === "show" && args[1] === "base0000:AGENTS.md")
-				return base ?? "";
+			if (
+				args[0] === "show" &&
+				args[1] === "base0000:AGENTS.md" &&
+				base !== null
+			)
+				return base;
+			// A repository answers a show of HEAD with the head's file.
+			if (args[0] === "show" && args[1] === "HEAD:AGENTS.md") return head;
 			throw new Error(`git ${args.join(" ")} failed`);
 		};
 		return {
