@@ -1066,6 +1066,14 @@ export type DegradationKind =
 	 */
 	| "project-snapshot-serialize-failed"
 	/**
+	 * #4400: the host could not remove a project-snapshot stage file from inside
+	 * the persist worker's `message` listener (a directory in its place, or a
+	 * Windows handle held by antivirus). The reap is contained so the host
+	 * survives and the persist continues. Subject is the gz body path (the stage
+	 * path for a late result); reason carries the error message.
+	 */
+	| "project-snapshot-stage-reap-failed"
+	/**
 	 * The orphan backstop's OWN process-table scanner blew the scan timeout and
 	 * had to be tree-killed (#1864 review F3). Reason carries the kill verdict,
 	 * so a scanner that survived its own sweep's escalation — an orphan sweep
