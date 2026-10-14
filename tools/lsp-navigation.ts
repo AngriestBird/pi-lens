@@ -26,6 +26,7 @@ import {
 	workspaceEditTextPaths,
 } from "../clients/lsp/edits.js";
 import { configDisabledAuxiliaryLspServerIds } from "../clients/dispatch/auxiliary-lsp.js";
+import { readPolicyContent } from "../clients/dispatch/finding-policy.js";
 import {
 	hashDiagnosticContent,
 	PRIMARY_UNAVAILABLE_CAUSE,
@@ -37,7 +38,12 @@ import {
 } from "../clients/lsp/capabilities.js";
 import type { SearchReadLocation } from "../clients/search-read-registration.js";
 import { buildLspNavigationEnvelope } from "./lsp-structured-output.js";
-import { describePrimaryUnavailable } from "./lsp-diagnostics.js";
+import {
+	applyProbeFindingPolicy,
+	describePrimaryUnavailable,
+	dispositionSuppressedLine,
+} from "./lsp-diagnostics.js";
+import { formatCacheAgeLabel } from "../clients/finding-delivery-gate.js";
 import { disabledPrimaries } from "../clients/lsp/session-roots.js";
 import { SYMBOL_KIND_NAMES } from "../clients/lsp-document-symbols.js";
 
@@ -1356,6 +1362,7 @@ export function createLspNavigationTool(
 			}
 
 			if (operation === "workspaceDiagnostics") {
+				const policyCwd = ctx.cwd || process.cwd();
 				const wsDiagSupport = rawPath
 					? await lspService.getWorkspaceDiagnosticsSupport(filePath)
 					: await lspService.getWorkspaceDiagnosticsSupport(
@@ -1396,17 +1403,30 @@ export function createLspNavigationTool(
 					const excludeServerIds = configDisabledAuxiliaryLspServerIds((name) =>
 						getFlag(name, ctx.cwd),
 					);
-					await openFileBestEffort(
+					// #1634: the content the diagnostics below answer for is the
+					// content the policy's inline and strict-anchor checks read.
+					const openedContent = await openFileBestEffort(
 						lspService,
 						filePath,
 						true,
 						excludeServerIds,
 					);
-					const diagnostics = await lspService.getDiagnostics(
+					// #1634: the same finding policy (stored dispositions, `.pi-lens.json`
+					// rule policy, inline `pi-lens-ignore`) the `lens_diagnostics
+					// source=lsp` probe applies to the same server answer.
+					const policy = applyProbeFindingPolicy(
 						filePath,
-						undefined,
-						excludeServerIds,
+						await lspService.getDiagnostics(
+							filePath,
+							undefined,
+							excludeServerIds,
+						),
+						policyCwd,
+						openedContent,
+						"all",
 					);
+					const diagnostics = policy.kept;
+					const suppressedLine = dispositionSuppressedLine(policy.suppressed);
 					// #4403: #4322's rule on this route. When no language server
 					// answered, the read's health record names it, and an empty
 					// answer is not 0 diagnostics.
@@ -1435,7 +1455,7 @@ export function createLspNavigationTool(
 							content: [
 								{
 									type: "text" as const,
-									text: `${note}\n${JSON.stringify(result)}${primaryUnavailable ? `\nNote: ${primaryUnavailable}` : ""}`,
+									text: `${note}\n${JSON.stringify(result)}${primaryUnavailable ? `\nNote: ${primaryUnavailable}` : ""}${suppressedLine ? `\nNote: ${suppressedLine}` : ""}`,
 								},
 							],
 							details: {
@@ -1443,6 +1463,9 @@ export function createLspNavigationTool(
 								resultCount,
 								diagnosticsMode,
 								coverage: "requested-file",
+								...(policy.suppressed > 0 && {
+									dispositionSuppressed: policy.suppressed,
+								}),
 								...(primaryUnavailable !== undefined && {
 									unconfirmed: true,
 									primaryUnavailable,
@@ -1463,13 +1486,34 @@ export function createLspNavigationTool(
 				const allDiagnostics = await lspService.getAllDiagnostics(
 					configDisabledAuxiliaryLspServerIds((name) => getFlag(name, ctx.cwd)),
 				);
+				// #1634: a tracked snapshot replays what each client last published,
+				// so every row passes the same finding policy as the path read and
+				// carries its age: nothing here re-checks the file.
+				let snapshotSuppressed = 0;
 				const result = Array.from(allDiagnostics.entries()).map(
-					([trackedFile, { diags }]) => ({
-						filePath: trackedFile,
-						diagnostics: diags,
-						count: diags.length,
-					}),
+					([trackedFile, { diags, ts }]) => {
+						let kept = diags;
+						if (diags.length > 0) {
+							const policy = applyProbeFindingPolicy(
+								trackedFile,
+								diags,
+								policyCwd,
+								readPolicyContent(trackedFile),
+								"all",
+							);
+							snapshotSuppressed += policy.suppressed;
+							kept = policy.kept;
+						}
+						return {
+							filePath: trackedFile,
+							diagnostics: kept,
+							count: kept.length,
+							lag: formatCacheAgeLabel(ts),
+						};
+					},
 				);
+				const snapshotSuppressedLine =
+					dispositionSuppressedLine(snapshotSuppressed);
 				const noteMap2: Record<string, string> = {
 					"push-only":
 						"Note: push-only tracked diagnostics snapshot (not full workspace pull diagnostics).",
@@ -1483,7 +1527,7 @@ export function createLspNavigationTool(
 						content: [
 							{
 								type: "text" as const,
-								text: `${note}\n${JSON.stringify(result)}`,
+								text: `${note}\n${JSON.stringify(result)}${snapshotSuppressedLine ? `\nNote: ${snapshotSuppressedLine}` : ""}`,
 							},
 						],
 						details: {
@@ -1491,6 +1535,9 @@ export function createLspNavigationTool(
 							resultCount: result.length,
 							diagnosticsMode,
 							coverage: "tracked-open-files",
+							...(snapshotSuppressed > 0 && {
+								dispositionSuppressed: snapshotSuppressed,
+							}),
 						},
 					},
 					{

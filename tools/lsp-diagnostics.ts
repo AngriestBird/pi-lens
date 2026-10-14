@@ -1222,7 +1222,7 @@ function demoteInferredForFile(
  * hidden by a broken filter is the harm this lane exists to prevent
  * (AGENTS.md shape 48).
  */
-function applyProbeFindingPolicy(
+export function applyProbeFindingPolicy(
 	file: string,
 	diagnostics: LSPDiagnostic[],
 	cwd: string,
@@ -2968,7 +2968,9 @@ async function runDirectoryDiagnostics(
  * rule asks for a count when there IS one, not a "0 suppressed" line on every
  * clean probe.
  */
-function dispositionSuppressedLine(suppressed: number): string | undefined {
+export function dispositionSuppressedLine(
+	suppressed: number,
+): string | undefined {
 	if (suppressed <= 0) return undefined;
 	return (
 		`suppressed by disposition: ${suppressed} finding(s) dropped from this ` +
