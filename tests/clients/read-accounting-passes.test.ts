@@ -225,6 +225,44 @@ describe("read accounting reads a file once per hook (#1649)", () => {
 		);
 	});
 
+	it("reads a native read past the end of the file once at tool_call", async () => {
+		// Its range holds no line, so the pass hashes nothing; recordRead must
+		// not read the file again looking for one.
+		const file = path.join(root, "src", "a.ts");
+		fs.writeFileSync(file, source(200));
+		const runtime = runtimeFor();
+		io.target = file;
+		await toolCall(runtime, {
+			toolName: "read",
+			toolCallId: "read-past-end",
+			input: { path: file, offset: 500 },
+		});
+		expect(io.passes).toBe(1);
+		const record = runtime.readGuard.getReadHistory(file).at(-1);
+		expect(record).toMatchObject({ effectiveOffset: 500, effectiveLimit: 1 });
+		expect(record?.lineHashes).toBeUndefined();
+	});
+
+	it("reads a file once for grep hits past its end", async () => {
+		// Output from before the file shrank: the hits past the end hash
+		// nothing, and must not each read the file again looking for a line.
+		const file = path.join(root, "src", "a.ts");
+		fs.writeFileSync(file, source(200));
+		const runtime = runtimeFor();
+		const output = ["3:const v2 = 2;", "250:x", "260:y"].join("\n");
+		expect(
+			await bashResult(runtime, file, "grep -n const src/a.ts", output),
+		).toBe(1);
+		const records = runtime.readGuard.getReadHistory(file);
+		expect(
+			records.map((r) => [r.effectiveOffset, r.lineHashes !== undefined]),
+		).toEqual([
+			[3, true],
+			[250, false],
+			[260, false],
+		]);
+	});
+
 	it("reads a file once for five grep hits in it", async () => {
 		const file = path.join(root, "src", "a.ts");
 		fs.writeFileSync(file, source(200));

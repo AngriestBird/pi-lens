@@ -2248,7 +2248,6 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 						// The capture is keyed by this call's own identity.
 						...(toolCallId && { supersedes: { toolCallId } }),
 						stampFileTime: !raced,
-						...(!raced && { captureLineHashes: false }),
 					});
 				}
 			}

@@ -731,11 +731,11 @@ export interface FileLineScan {
  * line count and the text of the lines `ranges` will hash; no other line is
  * decoded or kept. The file is read in {@link SCAN_CHUNK_BYTES} chunks after
  * the {@link SCAN_MAX_BYTES} gate on its size, and `count: false` stops at the
- * end of the last range. Lines end at `\n`, less one `\r` before it, so the
- * lines and the count are exactly `split(/\r?\n/)` of the decoded text: bytes
- * 0x0A and 0x0D never occur inside a UTF-8 sequence, so a line decoded alone
- * is the text the whole-file decode gave it. Undefined when the file cannot
- * be read (a directory included) or is over the gate.
+ * end of the last range. Lines end at `\n`, so the count and the hashes are
+ * those of `split(/\r?\n/)` over the decoded text: byte 0x0A never occurs
+ * inside a UTF-8 sequence, so a line decoded alone is the text the whole-file
+ * decode gave it. Undefined when the file cannot be read (a directory
+ * included) or is over the gate.
  */
 export function scanFileLines(
 	filePath: string,
@@ -772,14 +772,10 @@ export function scanFileLines(
 		let lineNo = 1;
 		let keep = wanted(lineNo);
 		let parts: Buffer[] = [];
-		const keepLine = (dropCr: boolean) => {
-			const bytes = Buffer.concat(parts);
-			const end =
-				dropCr && bytes.length > 0 && bytes[bytes.length - 1] === 0x0d
-					? bytes.length - 1
-					: bytes.length;
-			lines.set(lineNo, bytes.toString("utf8", 0, end));
-		};
+		// A `\r` before the `\n` stays on the line: `lineContentHash` drops
+		// whitespace, so the hash is the one the released `split(/\r?\n/)` gave.
+		const keepLine = () =>
+			lines.set(lineNo, Buffer.concat(parts).toString("utf8"));
 		while (consumed < byteBudget && !done(lineNo)) {
 			const n = fs.readSync(
 				fd,
@@ -800,7 +796,7 @@ export function scanFileLines(
 				}
 				if (keep) {
 					parts.push(chunk.subarray(start, newline));
-					keepLine(true);
+					keepLine();
 				}
 				parts = [];
 				lineNo += 1;
@@ -809,8 +805,8 @@ export function scanFileLines(
 			}
 		}
 		// The text after the last newline is the last line ("" after a trailing
-		// newline), and a `\r` there is not a separator.
-		if (keep && !done(lineNo)) keepLine(false);
+		// newline).
+		if (keep && !done(lineNo)) keepLine();
 		return {
 			totalLines: opts.count ? lineNo : undefined,
 			hashes(offset, limit) {

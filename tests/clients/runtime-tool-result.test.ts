@@ -764,9 +764,7 @@ describe("bash grep searchReads registration", () => {
 					effectiveLimit: 120,
 				}),
 				// #3524: no writer raced this read, so it re-stamps FileTime.
-				// #1649: the delivered range's hashes come from the handler's one
-				// pass, so the guard takes no second capture of its own.
-				{ stampFileTime: true, captureLineHashes: false },
+				{ stampFileTime: true },
 			);
 		} finally {
 			env.cleanup();
