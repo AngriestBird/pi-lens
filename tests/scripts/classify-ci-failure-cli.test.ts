@@ -146,11 +146,35 @@ describe("classify-ci-failure.mjs CLI (#2668 review F2 -- real child process, re
 
 	function readCalls() {
 		const raw = readFileSync(callLogPath, "utf8").trim();
-		if (!raw) return [] as Array<{ method: string; url: string }>;
-		return raw
-			.split("\n")
-			.map((line) => JSON.parse(line) as { method: string; url: string });
+		if (!raw)
+			return [] as Array<{
+				method: string;
+				url: string;
+				authorization?: string;
+			}>;
+		return raw.split("\n").map(
+			(line) =>
+				JSON.parse(line) as {
+					method: string;
+					url: string;
+					authorization?: string;
+				},
+		);
 	}
+
+	// Recurrence #4435 review F3: replacing the CLI's `githubFetcher(token)`
+	// with a bare `fetch` stayed green across 155 tests, because no assertion
+	// read the request headers. Every API request the real process makes must
+	// carry the GITHUB_TOKEN as a Bearer header.
+	it("sends the GitHub token as a Bearer header on every API request", () => {
+		const result = runCli(PRODUCTION_PUSH_ARGV);
+		expect(result.status).toBe(0);
+		const requests = readCalls().filter((c) => c.method !== "PATCHED_BODY");
+		expect(requests.length).toBeGreaterThanOrEqual(3);
+		expect(requests.map((c) => c.authorization)).toEqual(
+			requests.map(() => "Bearer fake-token-for-test"),
+		);
+	});
 
 	it("runs the workflow's exact push/dispatch argv end to end: classifies, reruns, exits 0, and never touches the comments API", () => {
 		const result = runCli(PRODUCTION_PUSH_ARGV);

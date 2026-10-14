@@ -110,7 +110,15 @@ The principles' delegation contract applies. pi-lens adds:
   touches Git. The warden is read-only.
 - Route to the strongest available fixer, whatever the priority label: a brief
   that adds or edits a `tests/support/sweep-kit.ts` registered-or-fail sweep,
-  and a path-key or normalizer change on a shared map (#3178).
+  and a path-key or normalizer change on a shared map (#3178). A cheap model
+  (Haiku) takes a fix lane only when its brief prescribes the change; a lane
+  that must find its own failure space or make a design call goes to Sonnet or
+  Opus.
+- A brief never asks a worker to wait for an answer ("report the size first"):
+  a worker cannot wait for a reply. It either authorizes the conditional
+  branch with its bound, or tells the worker to stop and hand back there.
+- A brief names every file by its repo path (`clients/lsp/index.ts`, never
+  `index.ts`): a bare basename resolves to another file in a read-only pass.
 - After every completion, push, verdict, merge, or status request, trigger the
   next named owner in the same pass, and keep the handoff (exact head, verdict,
   dispositions, next owner) on the PR or the ledger.
@@ -248,12 +256,21 @@ the surface they bite; each block loads only when its trigger applies.
 4. **Unsettled resource:** every timer, worker, child, watcher, and loser path
    is unref'd or cleared on every settle path. Tracked entries are removed on
    failure as well as success. Teardown does not await a dead resource forever.
+   Enforced by `tests/config/hook-await-bounds.test.ts` (partial: hook awaits
+   and timeout races only; timer handles have no detector).
 
 6. **Incomplete freshness:** use the right content, size, mtime, dependency,
    and existence axes. Missing finding paths are not current findings.
+   Enforced by `tests/clients/freshness-sweep.test.ts` (partial: mtime
+   comparisons must go through the kernel comparator; an mtime cache-key
+   equality without a size or hash sibling is not scanned).
 
 9. **One-axis bound:** bound the resource axis that grows, including bytes,
    timers, WASM objects, and retained evidence.
+   Enforced by `tests/config/bounded-container-guard.test.ts`,
+   `tests/config/bounded-eviction-idiom-sweep.test.ts` and
+   `tests/clients/bounded-telemetry-sweep.test.ts` (partial: container count
+   and telemetry only; bytes, WASM objects and timers have no detector).
 
 12. **Out-of-guard mirror refresh:** refresh behavior-gating mirrors before the
     guard releases, or validate the committed generation/object identity.
@@ -321,6 +338,10 @@ file-scoped worklist and receives no project-wide scanner output.
     uses the existing advisory notice seam; intended vendor skips and pi-owned
     OS-temp artifacts stay silent (`clients/runtime-tool-result.ts`,
     `clients/ephemeral-root.ts`).
+    Enforced by `tests/clients/dispatch/runners/run-outcome-ratchet.test.ts`,
+    `tests/clients/dispatch/runners/parsed-nothing-sweep.test.ts` and
+    `tests/clients/delivery-surface-ratchet.test.ts` (partial: no detector
+    for an agent-facing bound that omits its truncation line).
 
 26. **Old-role filter on a substitute:** compare fallback output with the
     substituted surface's contract, including non-blocking findings.
@@ -378,6 +399,10 @@ file-scoped worklist and receives no project-wide scanner output.
     extracting a count; the exact Windows bytes are pinned by
     `tests/config/windows-vitest-failure-count.test.ts`, and the parser is
     `parseVitestSummary` (shape 63).
+    Enforced by `tests/clients/dispatch/runners/run-outcome-ratchet.test.ts`
+    and `tests/clients/dispatch/runners/parsed-nothing-sweep.test.ts`
+    (partial: the classification choice itself is review-enforced; a
+    latch-literal rule fires on every correct write).
 
 16. **Unverified external-tool claim:** probe the real binary before encoding
     exit codes, output shapes, severity names, or fixtures. For a third-party
@@ -485,6 +510,9 @@ file-scoped worklist and receives no project-wide scanner output.
    test: call it through `runHandlerExpectingNoThrow`
    (`tests/support/handler-verdict.ts`; the pi mock does it for `tool_call`
    hooks), enforced by `tests/config/handler-verdict-sweep.test.ts` (#4182).
+   Enforced by `tests/config/vacuous-skip-coverage.test.ts` (partial: skips
+   and conditional tests; "fails pre-fix" is the PR body's red transcript,
+   not scannable).
 
 8. **Name heuristic:** a filename skip has an observable count and a content
    escape hatch; never silently drop a real file.
@@ -579,6 +607,8 @@ file-scoped worklist and receives no project-wide scanner output.
     the process-lifetime `WeakSet<object>` in `clients/session-scope.ts`:
     pi's RPC re-delivery reuses one event object, while each genuine start
     allocates another, and weak identity needs no `session_shutdown` release.
+    Enforced by `tests/config/session-scope-sweep.test.ts` (partial: session
+    state outside the store; "every once-latch has a reset" is not scanned).
 
 19. **Re-derived identity:** carry resolved identity or correlation across
     asynchronous stages; do not reconstruct it from ambiguous later inputs.
@@ -588,15 +618,24 @@ file-scoped worklist and receives no project-wide scanner output.
 
 21. **Late loser overwrite:** concurrent writers carry a monotonic generation;
     mutation of the generation guard must turn a test red.
+    Enforced by `tests/clients/generation-guard-sweep.test.ts` (partial: no
+    new hand-rolled guard; an unguarded concurrent writer is not scanned).
 
 22. **Session-straddling write:** capture the session generation before an
     await and check it before publishing.
+    Enforced by `tests/config/session-scope-sweep.test.ts` and
+    `tests/clients/session-event-guard-sweep.test.ts` (partial: stale-context
+    wrappers only; a write after an await with no captured scope is not
+    scanned).
 
 23. **Advanced cursor predicate:** predicates about the starting leaf receive
     the starting path, not the loop cursor.
 
 25. **Module-scope uniqueness assumption:** process evaluation can create
     multiple copies; process-wide registries and latches use `getProcessSingleton`.
+    Enforced by `tests/config/module-instance-coverage.test.ts` (partial: the
+    test-side duplicate-instance half; module-level registries without
+    `getProcessSingleton` are not censused).
 
 30. **Load-time platform constant:** use a live platform read or an isolated
     fresh import for every platform branch test.
@@ -1329,6 +1368,11 @@ Test authoring screens:
 - Prefer behavioral assertions over snapshots.
 - Name tests as declarative behavior, not hopes.
 - Assert the guard's reason or sink record, not only its boolean outcome.
+- A test that pins user-facing behaviour asserts the user-facing text or
+  effect, not only an internal status field. History: `HISTORY.md`, 2026-10-14.
+- An admitted timing test states its contention model: it measures how long
+  the OS paused the worker, or asserts on CPU time rather than wall time, so a
+  descheduled worker cannot red it. History: `HISTORY.md`, 2026-10-14.
 
 Governance sweeps use `tests/support/sweep-kit.ts`, explicit source roots, and
 comment/string-blanked source. Every sweep has a real floor and a checked

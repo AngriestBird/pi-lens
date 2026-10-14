@@ -28,6 +28,7 @@ import {
 	relativePosix,
 	stripSource,
 } from "../support/sweep-kit.js";
+import { siblingPin } from "../support/sibling-pin.js";
 
 const ROOT = resolve(import.meta.dirname, "../..");
 const WORKFLOWS = resolve(ROOT, ".github/workflows");
@@ -622,10 +623,25 @@ const NON_WRITER_RUNS: Array<[string, string]> = [
 	["unrelated script", "node scripts/smoke-tools.mjs"],
 ];
 
+// Recurrence #4418/#4421: the first three used to spell the live SHA, which
+// goes stale on every Dependabot bump of the action. They derive it from the
+// workflow that uses the action, inside the test (siblingPin asserts).
+function workflowActionPin(file: string, action: string): string {
+	const workflow = load(readFileSync(resolve(WORKFLOWS, file), "utf8"));
+	return siblingPin(
+		(workflow.jobs ?? {}) as Parameters<typeof siblingPin>[0],
+		action,
+		"",
+	);
+}
+
+const PINNED_WRITER_ACTIONS: Array<[string, string]> = [
+	["actions/stale", "stale.yml"],
+	["micnncim/action-label-syncer", "labels.yml"],
+	["peter-evans/create-pull-request", "tool-smoke.yml"],
+];
+
 const WRITER_ACTION_FIXTURES = [
-	"actions/stale@4391f3da665fdf50b6810c1a66712fb9ba21aa93",
-	"micnncim/action-label-syncer@3abd5ab72fda571e69fffd97bd4e0033dd5f495c",
-	"peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1",
 	"peter-evans/create-or-update-comment@v4",
 	"actions/github-script@v7",
 	"softprops/action-gh-release@v2",
@@ -915,6 +931,13 @@ describe("workflow writer governance (#4053)", () => {
 			expect(flag({ uses })).toHaveLength(1);
 		});
 
+		it.each(PINNED_WRITER_ACTIONS)(
+			"flags %s at its live pin",
+			(action, file) => {
+				expect(flag({ uses: workflowActionPin(file, action) })).toHaveLength(1);
+			},
+		);
+
 		it("flags a reusable workflow job it cannot see inside", () => {
 			expect(flag({ jobUses: "./.github/workflows/publish.yml" })).toHaveLength(
 				1,
@@ -930,7 +953,7 @@ describe("workflow writer governance (#4053)", () => {
 		it("does not flag a reader action", () => {
 			expect(
 				flag({
-					uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+					uses: workflowActionPin("ci.yml", "actions/checkout"),
 				}),
 			).toEqual([]);
 		});

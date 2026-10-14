@@ -20,6 +20,7 @@ import { resolve } from "node:path";
 import yaml from "../../clients/deps/js-yaml.js";
 import { setupTestEnvironment } from "../clients/test-utils.js";
 import { gitExecFileSync } from "../support/git-fixture-env.js";
+import { siblingPin } from "../support/sibling-pin.js";
 import { assertNonEmptyScan } from "../support/sweep-kit.js";
 import { provesNotPullRequestEligible } from "../support/workflow-pull-request-reachability.js";
 import {
@@ -127,8 +128,11 @@ const gated = Object.entries(CI.jobs).filter(
 const WORKFLOW_DIR = resolve(ROOT, ".github/workflows");
 const EPHEMERAL_PULL_REF = "${{ github.ref }}";
 const CAPTURED_COMMIT = "${{ github.sha }}";
-const PINNED_CHECKOUT =
-	"actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1";
+// Recurrence #4418/#4421: a literal pin goes stale on every Dependabot bump of
+// the action. Derive it from ci.yml's other jobs (called inside a test, because
+// siblingPin asserts).
+const pinnedCheckout = () =>
+	siblingPin(CI.jobs, "actions/checkout", "heavy-gate");
 
 type Stage = "A" | "B" | "C" | "D" | "gate";
 type CensusRow = {
@@ -685,9 +689,7 @@ describe("#3926 a gated checkout pins the captured commit, never the merge ref",
 		for (const [id, job] of gated) {
 			for (const step of job.steps ?? []) {
 				if (!step.uses?.startsWith("actions/checkout@")) continue;
-				expect(step.uses, `${id} checkout revision`).toBe(
-					"actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
-				);
+				expect(step.uses, `${id} checkout revision`).toBe(pinnedCheckout());
 			}
 		}
 	});
@@ -699,7 +701,7 @@ describe("#3926 a gated checkout pins the captured commit, never the merge ref",
 // `refs/pull/<n>/merge` that `github.ref` names. This is the separate producer
 // the gate-based #3926 rule cannot cover. No field incident is claimed on
 // these eleven: the failure class is proven by the same pinned checkout
-// source contract (`actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1`,
+// source contract (the pinned `actions/checkout` revision ci.yml's other jobs use,
 // asserted below) and the real deleted-ref / captured-SHA witness in the
 // #3926 block; the production failure (#3926) is the same checkout mechanism
 // on the one gated Windows site. The rule folds onto the shared census, so a
@@ -778,7 +780,7 @@ describe("#3941 early-start advisory checkouts pin the captured commit", () => {
 			`    name: ${jobName}`,
 			"    runs-on: ubuntu-latest",
 			"    steps:",
-			`      - uses: ${PINNED_CHECKOUT} # v7`,
+			`      - uses: ${pinnedCheckout()} # v7`,
 			"        with:",
 			refLine,
 			"          persist-credentials: false",
@@ -847,7 +849,7 @@ describe("#3941 early-start advisory checkouts pin the captured commit", () => {
 		// Recurrence (#4068 F-4068-1): a newly added checkout job was present only
 		// in the actual census, so the old implicit expected count of one erased
 		// its +1 row and site deltas. A removed baseline job must remain -1.
-		const addedSource = `${CENSUS_SOURCES.get("ci.yml")}\n  census-review-fake:\n    name: census review fake\n    if: github.event_name == 'pull_request'\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ${PINNED_CHECKOUT}\n`;
+		const addedSource = `${CENSUS_SOURCES.get("ci.yml")}\n  census-review-fake:\n    name: census review fake\n    if: github.event_name == 'pull_request'\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ${pinnedCheckout()}\n`;
 		const addedSources = new Map(CENSUS_SOURCES).set("ci.yml", addedSource);
 		const addedRows = censusRows(addedSources);
 		const addedDelta = censusDelta(addedRows, sitesOf(addedRows));
@@ -963,7 +965,7 @@ describe("#3941 early-start advisory checkouts pin the captured commit", () => {
 			// actions/checkout revision whose default fetches the captured
 			// `github.sha`.
 			expect(site?.events, `${key} trigger`).toContain("pull_request");
-			expect(site?.uses, `${key} checkout revision`).toBe(PINNED_CHECKOUT);
+			expect(site?.uses, `${key} checkout revision`).toBe(pinnedCheckout());
 			// The captured commit is the default, so `ref` is unset.
 			expect(site?.ref, `${key} ref`).toBeUndefined();
 		}
@@ -1105,7 +1107,7 @@ describe("#3941 stage eligibility is the shared event-only projection", () => {
 			`    if: ${JSON.stringify(ifLine)}`,
 			"    runs-on: ubuntu-latest",
 			"    steps:",
-			`      - uses: ${PINNED_CHECKOUT} # v7`,
+			`      - uses: ${pinnedCheckout()} # v7`,
 			"        with:",
 			...(refLine ? [refLine] : []),
 			"          persist-credentials: false",
