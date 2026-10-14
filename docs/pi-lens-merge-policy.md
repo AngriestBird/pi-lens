@@ -530,7 +530,12 @@ operator's private notes, so a different orchestrator can run the same train.
   words are the `DETECTION_LAYERS` list exported by `scripts/check-pr-body.mjs`,
   which the `## Detection` body check reads; the prose does not restate them.
   If that layer does not exist, file it as an issue with the bug as
-  its named recurrence — the same standard shapes are held to. The ledger
+  its named recurrence — the same standard shapes are held to. The lesson
+  names the defect SHAPE and its tree-wide enforcer, not only a test for the
+  instance: the Gap names the `AGENTS.md` catalog shape (or a new shape) and
+  either a test that scans the whole population, an issue to build one, or
+  `judgment-only` with the reason. A one-bug test is the fix's regression
+  test, not the closed gap (lint half: #4439). The ledger
   carries a `caught by / should have been caught by` column. Record: #2587's
   manifest entry escaped the package for four releases; a second registration
   path masked it, so the shipped defect was foreign-tree adoption, not absence
@@ -780,3 +785,11 @@ Each row cost a lane at least once; the prose above carries the record.
 | Asking the maintainer whether to build or file a missing detection layer | The orchestrator owns the detection retrospective: it files the layer issue, or folds it into the same-seam PR, the same day, and tells the maintainer (maintainer, 2026-10-13). |
 | Sending a detector or governance-test round to a cheap model | The #4341 npx-pin scanner went to a Haiku round before the Opus-from-round-1 rule was re-read; check the routing bullets before every detector brief. |
 | Routing on the word "governance" instead of the risk | #4350 (a CodeQL pin-equality test) went to Opus as "governance authoring"; the Opus rule is for source-scanning detectors only. |
+| Leaving the `dist/` precondition undeclared | At least 5 lanes (#4417, #4418, the #4422 verify, the #4410 r1 review, the #4423 review F5) each ruled out the same 3 census reds that need `npm run build:dist` (2026-10-14). Mechanical: fail fast when a selected test needs `dist/` and it is missing or stale (#4436); `CLAUDE.md` names `npm run build:dist` for those files meanwhile |
+| A wait helper with a fixed wall-clock budget | `interleaving-kit` `waitFor` ran out at 3000 ms under CI load (run 38618401454, `tests/clients/fix-run-restore.test.ts:378`); the file passed alone and under 3 shuffle seeds, so the red read as a flake. Mechanical, filed as #4437 |
+| Briefing a worker to "report the size first" before a large migration | A worker cannot wait for a reply, so the #4432 fixer did the migration anyway (2026-10-14). A brief authorizes the conditional branch with its bound, or tells the worker to stop and hand back; `AGENTS.md` "Orchestration and delegated work" |
+| Naming a file by basename in a brief | "index.ts" meant `clients/lsp/index.ts`; a Haiku measurement pass searched the root `index.ts` and reported the #2052 comment missing (2026-10-14). Name every file by its repo path |
+| Sending a lane that must find its own failure space to Haiku | #4342 rounds 1 and 2 left three review findings (a wall-clock bound, a wrong offline premise, a 13-vs-20 population); a fresh Opus round with a state table passed verify first time (#4410 round 3). Haiku folds with a prescribed remedy (#4340, #4341, #4345, #4356, #4368, #4372, #4374, #4417) landed first try. Haiku takes only a prescribed change; `AGENTS.md` "Orchestration and delegated work" |
+| Listing a blast radius without the changed result's callers | #4411 round 3 changed `touchFile`'s result and the body omitted the cascade neighbour caller (`clients/dispatch/integration.ts:2139`), which then printed an uncaused "inconclusive" line every turn (review N2). `AGENTS.md` already requires `module_report` with `blastRadius: true` before and after; run it for the changed result and quote every caller, then read each one |
+| Leaving a ledger row reading as a remainder after a PR flips from `refs` to `closes` | The orchestrator's closes-check refused two lands (#4422, #4409) because the row still named a remainder after verify confirmed every criterion (2026-10-14). Mechanical, orchestrator tooling outside this repo: to be fixed in the orchestrator's land tooling, not by a repo check |
+| Linting the PR body only at the end of a round | #4423's advisory `PR body` check went red on 5 consecutive pushes in round 2 with the same passive-voice findings (2026-10-14); a push does not change the body, so the check re-read the unfixed one each time. Lint the body with `--lint-local` before the first push of a round (`docs/pi-lens-fixer.md` "Fix rounds") |
