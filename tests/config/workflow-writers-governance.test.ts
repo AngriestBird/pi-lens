@@ -175,6 +175,7 @@ const SCRIPT_WRITERS: Record<string, string> = {
 	"scripts/notify-clean-signal-drift.mjs": "tracking issue",
 	"scripts/notify-install-smoke-drift.mjs": "tracking issue",
 	"scripts/notify-tool-smoke-red.mjs": "gh issue create/edit/close",
+	"scripts/prune-actions-cache.mjs": "gh cache delete (--apply only)",
 	"scripts/upsert-tracking-issue.mjs": "tracking issue",
 };
 
