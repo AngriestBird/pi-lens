@@ -36,7 +36,8 @@
  * as-built config resolves the constant to: its `=` value, the definition its
  * `<-` names, or else the module's own `Name == <literal>` definition. A
  * value a config uses only to narrow the explored schedules is admitted per
- * pin in `narrowedBy`, with its reason.
+ * pin, per value and per named config, in `narrowedBy`, with its reason; a
+ * config the entry does not list must match the pinned value.
  *
  * Detectors match code, not prose (principles §2):
  * - TLA+ text (`.cfg` and `.tla`) is read after `stripTlaComments` blanks
@@ -88,7 +89,9 @@ interface Pin extends PinTest {
 	/** Further tests, when one value encodes several behaviours (a model
 	 *  definition such as `SpendLicense == BridgeNoAdvance` reuses it). */
 	also?: PinTest[];
-	narrowedBy?: Record<string, string>;
+	/** Per value, the as-built configs (file stems) that use it only to narrow
+	 *  the explored schedules, with the reason. */
+	narrowedBy?: Record<string, { configs: string[]; reason: string }>;
 }
 interface Group {
 	reason: string;
@@ -376,7 +379,8 @@ export function auditSwitchPins(root: string, registry: Registry): string[] {
 		for (const [constant, pin] of Object.entries(entry.pins ?? {})) {
 			const label = `${family}.${constant}`;
 			const narrowedBy = pin.narrowedBy ?? {};
-			const used = new Set<string>();
+			// value -> the as-built configs (file stems) that resolve to it
+			const used = new Map<string, Set<string>>();
 			for (const config of models.asBuilt) {
 				const value = resolveValue(config, constant);
 				if (value === undefined) {
@@ -393,8 +397,12 @@ export function auditSwitchPins(root: string, registry: Registry): string[] {
 					);
 					continue;
 				}
-				used.add(value);
-				if (value !== pin.value && !Object.hasOwn(narrowedBy, value))
+				const stem = path.basename(config.file, ".cfg");
+				used.set(value, (used.get(value) ?? new Set<string>()).add(stem));
+				// Per config, not per value: a value admitted for one config must
+				// not hide the same value in another (#4393: RestoreGatesHold = TRUE
+				// stayed admitted for the headline config by a sibling's narrowing).
+				if (value !== pin.value && !narrowedBy[value]?.configs?.includes(stem))
 					errors.push(
 						`${label}: pinned ${pin.value}, but ${config.file} (expect: pass) has ${value}`,
 					);
@@ -403,13 +411,18 @@ export function auditSwitchPins(root: string, registry: Registry): string[] {
 				errors.push(
 					`${label}: no as-built config has the pinned value ${pin.value}`,
 				);
-			for (const [value, reason] of Object.entries(narrowedBy)) {
-				if (!reason.trim())
+			for (const [value, entry] of Object.entries(narrowedBy)) {
+				if (!entry.reason?.trim())
 					errors.push(`${label}: narrowedBy ${value} has no reason`);
-				if (!used.has(value))
-					errors.push(
-						`${label}: stale narrowedBy ${value}; no as-built config uses it`,
-					);
+				if (value === pin.value)
+					errors.push(`${label}: narrowedBy ${value} is the pinned value`);
+				if (!entry.configs?.length)
+					errors.push(`${label}: narrowedBy ${value} names no config`);
+				for (const stem of entry.configs ?? [])
+					if (!used.get(value)?.has(stem))
+						errors.push(
+							`${label}: stale narrowedBy ${value}; ${stem} is no as-built config with that value`,
+						);
 			}
 			for (const { test, title } of [pin, ...(pin.also ?? [])]) {
 				if (!vitestCollects(test)) {
@@ -785,10 +798,51 @@ describe("TLA+ switch pins (#4393, recurrence #4387)", () => {
 				...GOOD,
 				Mode: {
 					...GOOD.Mode,
-					narrowedBy: { '"atomic"': "a schedule on admits" },
+					narrowedBy: {
+						'"atomic"': { configs: ["Narrow"], reason: "a schedule on admits" },
+					},
 				},
 			};
 			expect(auditSwitchPins(fixture, registry(narrowed))).toEqual([]);
+		});
+
+		it("admits a narrowing value for the configs it names, not for every config that has it", () => {
+			// Recurrence: narrowedBy was value-wide, so flipping the headline config
+			// of dispatch-pipeline (SiblingRestoreQueued RestoreGatesHold FALSE to
+			// TRUE) stayed green: a sibling config already had TRUE admitted (#4393).
+			const fixture = tree({
+				"Pass.cfg": PASS,
+				"Narrow.cfg": cfg("pass", '    Mode = "atomic"\n    Size = 2'),
+				"Flipped.cfg": cfg("pass", '    Mode = "atomic"\n    Size = 2'),
+			});
+			const narrowed = {
+				...GOOD,
+				Mode: {
+					...GOOD.Mode,
+					narrowedBy: {
+						'"atomic"': { configs: ["Narrow"], reason: "a schedule on admits" },
+					},
+				},
+			};
+			expect(auditSwitchPins(fixture, registry(narrowed))).toEqual([
+				'fam.Mode: pinned "on", but formal/fam/Flipped.cfg (expect: pass) has "atomic"',
+			]);
+			// A listed config that no longer has the value, or is unknown, is stale.
+			const stale = {
+				...GOOD,
+				Mode: {
+					...GOOD.Mode,
+					narrowedBy: {
+						'"atomic"': {
+							configs: ["Narrow", "Flipped", "Pass"],
+							reason: "a schedule on admits",
+						},
+					},
+				},
+			};
+			expect(auditSwitchPins(fixture, registry(stale))).toEqual([
+				'fam.Mode: stale narrowedBy "atomic"; Pass is no as-built config with that value',
+			]);
 		});
 
 		it("compares a constant only against the as-built configs of modules that name it", () => {
