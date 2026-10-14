@@ -692,7 +692,9 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
           if [ -n "$rows" ]; then
-            echo "$rows" | sed 's/^/::warning title=LSP handshake::/'
+            while IFS= read -r row; do
+              echo "::warning title=LSP handshake::$row"
+            done <<< "$rows"
           elif [ "$HANDSHAKE_OUTCOME" != success ]; then
             echo "::warning title=LSP handshake::the handshake did not run to a result (step outcome: $HANDSHAKE_OUTCOME)"
           fi
