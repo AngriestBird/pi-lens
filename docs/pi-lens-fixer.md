@@ -206,11 +206,13 @@ rigor (#2599).
   refactors with no observable change. `npm run changelog:check` checks the
   rollup, not fragments (#2456).
 - A bug fix's detection lesson names the defect SHAPE and its tree-wide
-  enforcer, not only a test for the instance: the `Gap:` line names the
-  `AGENTS.md` "Recurring defect shapes" number (or a new shape) and either a
-  test that scans the whole population, an issue to build one, or
-  `judgment-only` with the reason. The fix's own one-bug test is its
-  regression test, not the closed gap. The lint half is #4439.
+  enforcer, not only a test for the instance: the `Shape:` line names the
+  `AGENTS.md` "Recurring defect shapes" number (or `new: <name>`), and the
+  `Enforcer:` line a test on base that scans the whole population, an issue to
+  build one, or `none: judgment-only, <reason>`. With `Shape: #N` a path
+  enforcer must be one catalog entry N names. The fix's own one-bug test is its
+  regression test, not the closed gap. The body lint enforces both lines
+  (#4439).
 - Every code fact in the PR body is a `` `path:line` `` citation the check
   verifies: the file must be in the committed tree (never an untracked or
   git-ignored path, which CI cannot read), and a fenced quote after it must

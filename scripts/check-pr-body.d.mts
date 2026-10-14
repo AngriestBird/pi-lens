@@ -33,6 +33,7 @@ export declare function lintPrBody(
 		proseMode?: "block" | "warn";
 		bugClosing?: boolean;
 		existsOnBase?: (path: string) => boolean | null;
+		shapeCatalog?: () => Map<number, string> | null;
 	},
 ): {
 	valid: boolean;
@@ -48,11 +49,25 @@ export declare function lintDetectionSection(
 	body?: string,
 	options?: {
 		ignoreUnfilled?: boolean;
+		requireShape?: boolean;
 		existsOnBase?: (path: string) => boolean | null;
+		shapeCatalog?: () => Map<number, string> | null;
 	},
 ): string[];
 export declare const detectionExistsNotOnBaseMessage: (path: string) => string;
 export declare const DETECTION_EXISTS_BASE_UNRESOLVED_MESSAGE: string;
+export declare const DETECTION_SHAPE_CATALOG_UNRESOLVED_MESSAGE: string;
+export declare const detectionUnknownShapeMessage: (number: number) => string;
+export declare const detectionEnforcerNotOnBaseMessage: (
+	path: string,
+) => string;
+export declare const detectionEnforcerNotInCatalogMessage: (
+	path: string,
+	number: number,
+) => string;
+export declare function shapeCatalogReader(
+	cwd?: string,
+): () => Map<number, string> | null;
 export declare function resolvePrBase(
 	cwd?: string,
 	git?: (args: string[], options?: Record<string, unknown>) => string,
