@@ -1,5 +1,5 @@
 {
-	"$comment": "#4393: every constant a formal/<family>/*.cfg assigns (`=` or `<-`) is classified here, per family. `pins`: the constant mirrors a code choice; `value` is what every `\\* expect: pass` config resolves it to (its `=` value, the definition its `<-` names, or the module's `Name == <literal>`), and `test`/`title` name a test that drives the real code and asserts that behaviour, so flipping the code reds the test and flipping the model reds tests/config/tla-switch-pins.test.ts. `narrowedBy` admits a value an as-built config uses only to cut the explored schedules, with its reason. `notCodeChoice` and `deferred` groups carry a reason for each member. A PR that changes a pinned behaviour flips the constant, its configs and this value together (AGENTS.md shape 68).",
+	"$comment": "#4393: every constant a formal/<family>/*.cfg assigns (`=` or `<-`), and every module `Name == TRUE|FALSE` that is not a `<-` target, is classified here, per family. `pins`: the constant mirrors a code choice; `value` is what every `\\* expect: pass` config resolves it to (its `=` value, the definition its `<-` names, or the module's `Name == <literal>`), and `test`/`title` name a test a run reaches that drives the real code and asserts that behaviour, so flipping the code reds the test and flipping the model alone reds tests/config/tla-switch-pins.test.ts. `also` names further tests when one value encodes several behaviours. `narrowedBy` admits a value an as-built config uses only to cut the explored schedules, with its reason. `notCodeChoice` and `deferred` groups carry a reason for each member, and the count of deferred members may only fall. Flipping a model value and this value together, without the code, reds neither the gate nor the pin, so a change to a value here is a reviewer's call. A PR that changes a pinned behaviour flips the constant, its configs and this value together (AGENTS.md shape 68).",
 	"families": {
 		"dispatch-pipeline": {
 			"notCodeChoice": [
@@ -80,12 +80,6 @@
 						"AllowExpiry",
 						"HeartbeatStall"
 					]
-				},
-				{
-					"reason": "A code constant at model scale (a retry count, a cap, a tolerance or a budget in ticks): the model shrinks it to bound the state space, so its value is not the code's.",
-					"constants": [
-						"Retries"
-					]
 				}
 			],
 			"deferred": [
@@ -105,6 +99,12 @@
 						"IdentityCheck",
 						"Cleanup",
 						"Recheck"
+					]
+				},
+				{
+					"reason": "Deferred: a code constant at its code value, not shrunk. Every config sets `Retries = 3`, which is `REGISTRY_WRITE_RETRIES = 3` (clients/instance-registry.ts), so the value mirrors the code; no test that drives the retry loop was matched in #4393.",
+					"constants": [
+						"Retries"
 					]
 				}
 			]
@@ -600,7 +600,13 @@
 				"BridgeNoAdvance": {
 					"value": "TRUE",
 					"test": "tests/clients/mutation-bridge.test.ts",
-					"title": "ends the authorship a ${provenance ?? \"co-process\"} write lands on"
+					"title": "ends the authorship a ${provenance ?? \"co-process\"} write lands on",
+					"also": [
+						{
+							"test": "tests/clients/runtime-tool-call.test.ts",
+							"title": "spends an observed bridge license after one whole-file write (SpendLicense)"
+						}
+					]
 				},
 				"CoverageCheck": {
 					"value": "TRUE",
@@ -1089,13 +1095,6 @@
 					"constants": [
 						"Flaky"
 					]
-				},
-				{
-					"reason": "A code constant at model scale (a retry count, a cap, a tolerance or a budget in ticks): the model shrinks it to bound the state space, so its value is not the code's.",
-					"constants": [
-						"LatchThreshold",
-						"Budget"
-					]
 				}
 			],
 			"deferred": [
@@ -1121,6 +1120,13 @@
 						"KeyBatch",
 						"CacheGuard",
 						"DistinctBatchKeys"
+					]
+				},
+				{
+					"reason": "Deferred: code constants at their code values, not shrunk. The as-built configs set `Budget = 3` (`WASM_TRAP_BUDGET = 3`) and `LatchThreshold = 2` (`GRAMMAR_TRAP_LATCH_THRESHOLD = WASM_TRAP_BUDGET - 1`, clients/tree-sitter-client.ts), so the values mirror the code; no budget or latch test was matched in #4393.",
+					"constants": [
+						"LatchThreshold",
+						"Budget"
 					]
 				}
 			]

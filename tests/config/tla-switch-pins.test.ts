@@ -13,17 +13,23 @@
  *
  * - `pins`: the constant mirrors a code choice, and a named test drives the
  *   real code (a dispatcher or the guard's entry point) and asserts the
- *   behaviour of the pinned `value`. Flipping the code reds that test;
- *   flipping the model without the registry reds this one.
+ *   behaviour of the pinned `value`; `also` names further tests when one
+ *   value encodes several behaviours. Flipping the code reds that test;
+ *   flipping the model without the registry reds this one. Flipping the
+ *   model and the registry together, without the code, reds neither: the
+ *   registry ties a constant to a title, not to what the test asserts, so a
+ *   value change in the registry is the reviewer's to judge.
  * - `notCodeChoice`: a scenario bound, an actor set, an environment
  *   behaviour, a mutant-only design, or a switch the model reads only under
  *   another switch's old value. Each group carries its reason.
  * - `deferred`: a code choice with no pin yet, with its reason. A family in
- *   `FULLY_PINNED` may defer nothing.
+ *   `FULLY_PINNED` may defer nothing, and the count of deferred members may
+ *   only fall (`DEFERRED_CEILING`).
  *
  * The population is every name a family's configs assign in a `CONSTANTS`
  * section, `=` or `<-` (the `<-` form covers a module switch such as
- * `ZeroReadInjects <- ZeroReadInjectsPre4387`). The as-built configs are the
+ * `ZeroReadInjects <- ZeroReadInjectsPre4387`), and every module
+ * `Name == TRUE|FALSE` that no config substitutes as a `<-` target. The as-built configs are the
  * ones whose header says `\* expect: pass` (the existing convention; no
  * family has a separate "current" config). A pin's value must be what every
  * as-built config resolves the constant to: its `=` value, the definition its
@@ -37,32 +43,45 @@
  *   `ZeroReadInjects == FALSE` or an old assignment cannot decide a value.
  *   TLA+ string literals are values and stay intact.
  * - A pin's evidence is a test title, which is itself a string literal, so
- *   the per-needle policy is positional: the title counts only as the first
- *   argument of an `it(...)` / `test(...)` call, or of the call an
- *   `it.each(...)` / `test.each(...)` returns, found in the TypeScript AST.
- *   A comment that names a title is not a call; a string anywhere else
- *   (a variable, a skipped `it.skip`, an `it.skipIf(...)` or an `it.todo`)
- *   is not that argument. The title is compared as written in source: escape
- *   sequences unexpanded and `${...}` placeholders verbatim.
+ *   the per-needle policy is positional and liveness-checked: the title
+ *   counts only as the first argument of an `it(...)` / `test(...)` call (or
+ *   of the call an `it.each(...)` returns) that a run reaches, in a
+ *   `*.test.ts` file under `tests/`. `testDeclarations`
+ *   (tests/support/sweep-kit.ts) decides that: a comment is not a call, and
+ *   a skipped, todo, conditional (`skipIf`/`runIf`) or `fails` test, a test
+ *   in a skipped suite, a dead branch or an uncalled function, and an
+ *   `.only` file's siblings are absent. The title is compared as written in
+ *   source: escape sequences unexpanded and `${...}` placeholders verbatim.
+ *   Not seen: a `ctx.skip()` inside the body, and a parametrized pin whose
+ *   pinned row was removed from its table.
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Lang, parse } from "@ast-grep/napi";
 import { afterEach, describe, expect, it } from "vitest";
-import type { SgNode } from "../../clients/deps/ast-grep-napi.js";
 import { parseModelHeader } from "../../scripts/check-tla-models.mjs";
-import { assertNonEmptyScan } from "../support/sweep-kit.js";
+import { assertNonEmptyScan, testDeclarations } from "../support/sweep-kit.js";
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "../..");
 const REGISTRY_PATH = "formal/switch-pins.json";
 /** Families whose every code-choice constant has a pin (#4393 acceptance). */
 const FULLY_PINNED = ["read-guard"];
+/**
+ * Shrink-only: the deferred members across all families. A new code choice
+ * must not land straight in `deferred`; lower this as pins land, never raise
+ * it (#4399 review).
+ */
+const DEFERRED_CEILING = 173;
 
-interface Pin {
-	value: string;
+interface PinTest {
 	test: string;
 	title: string;
+}
+interface Pin extends PinTest {
+	value: string;
+	/** Further tests, when one value encodes several behaviours (a model
+	 *  definition such as `SpendLicense == BridgeNoAdvance` reuses it). */
+	also?: PinTest[];
 	narrowedBy?: Record<string, string>;
 }
 interface Group {
@@ -198,42 +217,26 @@ export function parseLiteralDefinitions(text: string): Map<string, string> {
 }
 
 /**
- * Titles of the tests a TypeScript source declares, as written in source:
- * the first argument of `it(...)`/`test(...)`, or of the call that
- * `it.each(...)`/`test.each(...)` returns, when it is a string or template
- * literal. Comments are not calls, and a string elsewhere is not that
- * argument, so neither can name a pin.
+ * Titles of the `it`/`test` declarations a run reaches, as written in source
+ * (the shared walker, {@link testDeclarations}). A skipped, todo,
+ * conditional or `fails` test, one in a skipped suite, a dead branch or an
+ * uncalled function, and an `.only` file's siblings are absent.
  */
 export function declaredTestTitles(source: string): Set<string> {
-	const titles = new Set<string>();
-	const isTestCallee = (fn: SgNode | null): boolean => {
-		if (!fn) return false;
-		if (fn.kind() === "identifier") return /^(it|test)$/.test(fn.text());
-		if (fn.kind() !== "call_expression") return false;
-		const inner = fn.field("function");
-		return (
-			inner?.kind() === "member_expression" &&
-			/^(it|test)$/.test(inner.field("object")?.text() ?? "") &&
-			inner.field("property")?.text() === "each"
-		);
-	};
-	const visit = (node: SgNode): void => {
-		if (
-			node.kind() === "call_expression" &&
-			isTestCallee(node.field("function"))
-		) {
-			const first = node.field("arguments")?.namedChildren()[0];
-			if (first?.kind() === "string" || first?.kind() === "template_string")
-				titles.add(first.text().slice(1, -1));
-		}
-		for (const child of node.children()) visit(child);
-	};
-	visit(parse(Lang.TypeScript, source).root());
-	return titles;
+	return new Set(
+		testDeclarations(source)
+			.filter(
+				(declaration) =>
+					declaration.live &&
+					(declaration.callee === "it" || declaration.callee === "test"),
+			)
+			.map((declaration) => declaration.title),
+	);
 }
 
 interface FamilyModels {
-	/** Every name a config of the family assigns, `=` or `<-`. */
+	/** Every name a config of the family assigns, `=` or `<-`, and every
+	 *  module boolean definition that is not a `<-` target. */
 	population: Set<string>;
 	/** Each `\* expect: pass` config with its module's literal definitions. */
 	asBuilt: Array<{
@@ -248,11 +251,15 @@ function readFamily(root: string, family: string): FamilyModels {
 	const population = new Set<string>();
 	const asBuilt: FamilyModels["asBuilt"] = [];
 	const defsByModule = new Map<string, Map<string, string>>();
+	const targets = new Set<string>();
 	for (const name of fs.readdirSync(dir).sort()) {
 		if (!name.endsWith(".cfg")) continue;
 		const text = fs.readFileSync(path.join(dir, name), "utf8");
 		const constants = parseCfgConstants(text);
-		for (const constant of constants.keys()) population.add(constant);
+		for (const [constant, assignment] of constants) {
+			population.add(constant);
+			if (assignment.kind === "<-") targets.add(assignment.value);
+		}
 		const header = parseModelHeader(text);
 		if ("error" in header || header.expect.status !== "pass") continue;
 		let defs = defsByModule.get(header.module);
@@ -264,6 +271,18 @@ function readFamily(root: string, family: string): FamilyModels {
 			defsByModule.set(header.module, defs);
 		}
 		asBuilt.push({ file: `formal/${family}/${name}`, constants, defs });
+	}
+	// A module's own boolean switch (`Name == TRUE`) that no config assigns is
+	// a code choice too (#4399 review F4); a `<-` target such as
+	// `ZeroReadInjectsPre4387` is a mutant's value, not a switch.
+	for (const name of fs.readdirSync(dir).sort()) {
+		if (!name.endsWith(".tla")) continue;
+		const defs = parseLiteralDefinitions(
+			fs.readFileSync(path.join(dir, name), "utf8"),
+		);
+		for (const [constant, value] of defs)
+			if ((value === "TRUE" || value === "FALSE") && !targets.has(constant))
+				population.add(constant);
 	}
 	return { population, asBuilt };
 }
@@ -365,25 +384,27 @@ export function auditSwitchPins(root: string, registry: Registry): string[] {
 						`${label}: stale narrowedBy ${value}; no as-built config uses it`,
 					);
 			}
-			if (!pin.test.startsWith("tests/")) {
-				errors.push(`${label}: pin test ${pin.test} is not under tests/`);
-				continue;
+			for (const { test, title } of [pin, ...(pin.also ?? [])]) {
+				if (!/^tests\/.+\.test\.ts$/.test(test)) {
+					errors.push(
+						`${label}: pin test ${test} is not a *.test.ts file under tests/`,
+					);
+					continue;
+				}
+				if (!titleCache.has(test)) {
+					const file = path.join(root, test);
+					titleCache.set(
+						test,
+						fs.existsSync(file)
+							? declaredTestTitles(fs.readFileSync(file, "utf8"))
+							: undefined,
+					);
+				}
+				const titles = titleCache.get(test);
+				if (!titles) errors.push(`${label}: pin test ${test} does not exist`);
+				else if (!titles.has(title))
+					errors.push(`${label}: ${test} declares no test titled "${title}"`);
 			}
-			if (!titleCache.has(pin.test)) {
-				const file = path.join(root, pin.test);
-				titleCache.set(
-					pin.test,
-					fs.existsSync(file)
-						? declaredTestTitles(fs.readFileSync(file, "utf8"))
-						: undefined,
-				);
-			}
-			const titles = titleCache.get(pin.test);
-			if (!titles) errors.push(`${label}: pin test ${pin.test} does not exist`);
-			else if (!titles.has(pin.title))
-				errors.push(
-					`${label}: ${pin.test} declares no test titled "${pin.title}"`,
-				);
 		}
 	}
 	return errors;
@@ -411,6 +432,10 @@ describe("TLA+ switch pins (#4393, recurrence #4387)", () => {
 			Object.keys(registry.families["read-guard"]?.pins ?? {}).length,
 		);
 		expect(auditSwitchPins(REPO_ROOT, registry)).toEqual([]);
+		const deferred = Object.values(registry.families).flatMap((entry) =>
+			(entry.deferred ?? []).flatMap((group) => group.constants),
+		);
+		expect(deferred.length).toBeLessThanOrEqual(DEFERRED_CEILING);
 	});
 
 	describe("on a fixture tree", () => {
@@ -443,7 +468,29 @@ describe("TLA+ switch pins (#4393, recurrence #4387)", () => {
 			'// it("a fake pin", () => {});',
 			'const t = "a string pin";',
 			'it.skip("a skipped pin", () => {});',
+			'describe("a live suite", () => {',
+			"\tfor (const n of [1, 2]) {",
+			'\t\tit("a loop pin", () => {});',
+			"\t}",
+			"});",
+			'describe.skip("a skipped suite", () => {',
+			'\tit("a pin in a skipped suite", () => {});',
+			"});",
+			'describe.skipIf(true)("a conditional suite", () => {',
+			'\tit("a pin in a conditional suite", () => {});',
+			"});",
+			'if (process.pid < 0) it("a pin in a dead branch", () => {});',
+			'const never = () => it("a pin in an uncalled function", () => {});',
+			'it.todo("a todo pin");',
+			'test.skip("a skipped test pin", () => {});',
 		].join("\n");
+		/** A file with an `.only`: its siblings never run. */
+		const ONLY = [
+			'it.only("the only test", () => {});',
+			'it("a sibling of an only", () => {});',
+		].join("\n");
+		/** A support module: vitest never collects it, whatever it declares. */
+		const SUPPORT = 'it("a support pin", () => {});';
 
 		function tree(cfgs: Record<string, string>) {
 			root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-switch-pins-"));
@@ -456,6 +503,8 @@ describe("TLA+ switch pins (#4393, recurrence #4387)", () => {
 			}))
 				fs.writeFileSync(path.join(root, "formal", "fam", name), text);
 			fs.writeFileSync(path.join(root, "tests", "p.test.ts"), TEST);
+			fs.writeFileSync(path.join(root, "tests", "only.test.ts"), ONLY);
+			fs.writeFileSync(path.join(root, "tests", "support.ts"), SUPPORT);
 			return root;
 		}
 		const PASS = cfg("pass", '    Mode = "on"\n    Size = 2');
@@ -524,6 +573,19 @@ describe("TLA+ switch pins (#4393, recurrence #4387)", () => {
 			]);
 		});
 
+		it("reds a module switch no config assigns, but not a mutant's target", () => {
+			// Recurrence: #4399 review F4. A `.tla`-only `Name == TRUE` was
+			// outside the population, so a new switch needed no pin.
+			const fixture = tree({ "Pass.cfg": PASS });
+			fs.writeFileSync(
+				path.join(fixture, "formal", "fam", "M.tla"),
+				MODULE.replace("====", "NewSwitch == TRUE\n===="),
+			);
+			expect(auditSwitchPins(fixture, registry(GOOD))).toEqual([
+				"fam.NewSwitch: unclassified; pin it, or give a notCodeChoice or deferred reason",
+			]);
+		});
+
 		it("reds a constant with no classification, and a stale one", () => {
 			const fixture = tree({ "Pass.cfg": PASS });
 			const { Mode: _mode, ...withoutMode } = GOOD;
@@ -550,6 +612,44 @@ describe("TLA+ switch pins (#4393, recurrence #4387)", () => {
 				expect(auditSwitchPins(fixture, registry(pins(title)))).toEqual([
 					`fam.Inject: tests/p.test.ts declares no test titled "${title}"`,
 				]);
+		});
+
+		it("does not let a skipped or conditional suite, a dead branch, an uncalled function, a todo, an only's sibling or a support file name a pin", () => {
+			// Recurrence: #4399 review F1. Each form left the gate green on the
+			// real tree while vitest never ran the pin (a skipped pin is a
+			// deleted pin).
+			const fixture = tree({ "Pass.cfg": PASS });
+			const pinAt = (test: string, title: string) =>
+				registry({ ...GOOD, Inject: { ...GOOD.Inject, test, title } });
+			expect(
+				auditSwitchPins(fixture, pinAt("tests/p.test.ts", "a loop pin")),
+			).toEqual([]);
+			for (const title of [
+				"a pin in a skipped suite",
+				"a pin in a conditional suite",
+				"a pin in a dead branch",
+				"a pin in an uncalled function",
+				"a todo pin",
+				"a skipped test pin",
+			])
+				expect(
+					auditSwitchPins(fixture, pinAt("tests/p.test.ts", title)),
+				).toEqual([
+					`fam.Inject: tests/p.test.ts declares no test titled "${title}"`,
+				]);
+			expect(
+				auditSwitchPins(
+					fixture,
+					pinAt("tests/only.test.ts", "a sibling of an only"),
+				),
+			).toEqual([
+				'fam.Inject: tests/only.test.ts declares no test titled "a sibling of an only"',
+			]);
+			expect(
+				auditSwitchPins(fixture, pinAt("tests/support.ts", "a support pin")),
+			).toEqual([
+				"fam.Inject: pin test tests/support.ts is not a *.test.ts file under tests/",
+			]);
 		});
 
 		it("admits a narrowing value only with its reason", () => {

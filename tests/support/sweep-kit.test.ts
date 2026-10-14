@@ -38,6 +38,7 @@ import {
 	callSites,
 	tagPattern,
 	assertSortedRegistry,
+	testDeclarations,
 	VANISHED_PATH_RECORD_CAP,
 	walkedFilesVanished,
 } from "./sweep-kit.js";
@@ -1514,5 +1515,112 @@ describe("assertSortedRegistry (#2671)", () => {
 		expect(() => assertSortedRegistry("fixture", ["a", "c", "b"])).toThrow(
 			"first out-of-order key is c",
 		);
+	});
+});
+
+describe("testDeclarations (#4393)", () => {
+	// Recurrence: #4399 review F1. Title-lookup detectors counted a test vitest
+	// never runs; this walker is the one place that decides liveness.
+	const live = (source: string) =>
+		testDeclarations(source).map(
+			({ title, callee, modifiers, line, live }) => ({
+				title,
+				callee,
+				modifiers,
+				line,
+				live,
+			}),
+		);
+
+	it("reports each declaration with its chain, line and liveness", () => {
+		const source = [
+			'describe("suite", () => {',
+			'\tit.each([1])("row %s", () => {});',
+			"\tfor (const n of [1]) {",
+			'\t\ttest("in a loop", () => {});',
+			"\t}",
+			'\tif (n) it("in a branch", () => {});',
+			'\tconst f = () => it("in a helper", () => {});',
+			'\tit.skipIf(true)("conditional", () => {});',
+			"});",
+			'describe.skip("skipped", () => {',
+			'\tit("inside skipped", () => {});',
+			"});",
+			'// it("a comment", () => {});',
+		].join("\n");
+		expect(live(source)).toEqual([
+			{
+				title: "suite",
+				callee: "describe",
+				modifiers: [],
+				line: 1,
+				live: true,
+			},
+			{
+				title: "row %s",
+				callee: "it",
+				modifiers: ["each"],
+				line: 2,
+				live: true,
+			},
+			{
+				title: "in a loop",
+				callee: "test",
+				modifiers: [],
+				line: 4,
+				live: true,
+			},
+			{
+				title: "in a branch",
+				callee: "it",
+				modifiers: [],
+				line: 6,
+				live: false,
+			},
+			{
+				title: "in a helper",
+				callee: "it",
+				modifiers: [],
+				line: 7,
+				live: false,
+			},
+			{
+				title: "conditional",
+				callee: "it",
+				modifiers: ["skipIf"],
+				line: 8,
+				live: false,
+			},
+			{
+				title: "skipped",
+				callee: "describe",
+				modifiers: ["skip"],
+				line: 10,
+				live: false,
+			},
+			{
+				title: "inside skipped",
+				callee: "it",
+				modifiers: [],
+				line: 11,
+				live: false,
+			},
+		]);
+	});
+
+	it("keeps only the .only declarations of a file that has one", () => {
+		const source = [
+			'it("sibling", () => {});',
+			'describe.only("focused", () => {',
+			'\tit("inside focused", () => {});',
+			"});",
+		].join("\n");
+		expect(
+			testDeclarations(source).map(({ title, live }) => [title, live]),
+		).toEqual([
+			["sibling", false],
+			["focused", true],
+			["inside focused", true],
+		]);
 	});
 });

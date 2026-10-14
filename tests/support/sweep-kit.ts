@@ -474,6 +474,290 @@ export function matchingOpenIndex(
 	return -1;
 }
 
+/** Modifiers that take their own argument list before the test call. */
+const ARGUMENT_TAKING_MODIFIERS = new Set(["each", "skipIf", "runIf", "for"]);
+
+/**
+ * Modifiers after which vitest does not run the declaration as written:
+ * skipped, a placeholder, conditional on a runtime value, or inverted
+ * (`fails` passes only when its body fails).
+ */
+const NOT_RUN_MODIFIERS = new Set(["skip", "todo", "skipIf", "runIf", "fails"]);
+
+/** `(`-introducing keywords whose `) {` opens a BLOCK, not a function body. */
+const CONTROL_KEYWORDS = new Set([
+	"if",
+	"for",
+	"while",
+	"switch",
+	"catch",
+	"with",
+]);
+
+/** Bare-brace keywords — `try {`, `else {`, `do {`, `finally {`, `catch {`. */
+const BLOCK_KEYWORDS = new Set(["try", "else", "do", "finally", "catch"]);
+
+/** Loop heads: a declaration in a loop body still runs once per iteration. */
+const LOOP_KEYWORDS = new Set(["for", "while"]);
+
+function prevNonSpace(source: string, from: number): number {
+	let i = from;
+	while (i >= 0 && /\s/.test(source[i])) i--;
+	return i;
+}
+
+/** Index of the first non-space character at or after `from`. */
+export function nextNonSpace(source: string, from: number): number {
+	let i = from;
+	while (i < source.length && /\s/.test(source[i])) i++;
+	return i;
+}
+
+function wordEndingAt(source: string, end: number): string {
+	if (end < 0 || !/[\w$]/.test(source[end])) return "";
+	let start = end;
+	while (start > 0 && /[\w$]/.test(source[start - 1])) start--;
+	return source.slice(start, end + 1);
+}
+
+/** The keyword before the `(` that the `)` at `close` balances, or "". */
+function headKeyword(source: string, close: number): string {
+	const open = matchingOpenIndex(source, close, "(", ")");
+	return open < 0 ? "" : wordEndingAt(source, prevNonSpace(source, open - 1));
+}
+
+/**
+ * Does the `{` at `index` of stripped source open a FUNCTION body (as opposed
+ * to a block or an object literal)? Decided from the preceding token: `=> {`
+ * and `) {` are function bodies unless that `)` closes a control-flow head.
+ */
+export function isFunctionBrace(source: string, index: number): boolean {
+	const j = prevNonSpace(source, index - 1);
+	if (j < 0) return false;
+	if (source[j] === ">" && source[j - 1] === "=") return true;
+	if (source[j] === ")") {
+		if (matchingOpenIndex(source, j, "(", ")") < 0) return false;
+		return !CONTROL_KEYWORDS.has(headKeyword(source, j));
+	}
+	const word = wordEndingAt(source, j);
+	if (word) return !BLOCK_KEYWORDS.has(word);
+	return false;
+}
+
+/** Does the `{` at `index` open a loop body (`for (…) {`, `while (…) {`, `do {`)? */
+function isLoopBrace(source: string, index: number): boolean {
+	const j = prevNonSpace(source, index - 1);
+	if (j < 0) return false;
+	if (source[j] === ")") return LOOP_KEYWORDS.has(headKeyword(source, j));
+	return wordEndingAt(source, j) === "do";
+}
+
+/**
+ * Walk from a declaration identifier through its modifier chain to the `(`
+ * that opens the declaration call itself — `it(`, `it.only(`,
+ * `it.each([...])(`, `it.skipIf(cond)(`, ``it.each`table`(``. Returns
+ * undefined when the chain does not end in a call (`it.todo` with no parens,
+ * a bare mention).
+ */
+function declarationCall(
+	source: string,
+	identifierEnd: number,
+): { paren: number; modifiers: string[] } | undefined {
+	let i = identifierEnd;
+	let lastModifier = "";
+	const modifiers: string[] = [];
+	for (;;) {
+		i = nextNonSpace(source, i);
+		if (i >= source.length) return undefined;
+		const ch = source[i];
+		if (ch === ".") {
+			const start = nextNonSpace(source, i + 1);
+			let end = start;
+			while (end < source.length && /[\w$]/.test(source[end])) end++;
+			if (end === start) return undefined;
+			lastModifier = source.slice(start, end);
+			modifiers.push(lastModifier);
+			i = end;
+			continue;
+		}
+		if (ch === "`" && ARGUMENT_TAKING_MODIFIERS.has(lastModifier)) {
+			const close = source.indexOf("`", i + 1);
+			if (close < 0) return undefined;
+			lastModifier = "";
+			i = close + 1;
+			continue;
+		}
+		if (ch === "(") {
+			if (!ARGUMENT_TAKING_MODIFIERS.has(lastModifier))
+				return { paren: i, modifiers };
+			const close = matchingCloseIndex(source, i, "(", ")");
+			if (close < 0) return undefined;
+			lastModifier = "";
+			i = close + 1;
+			continue;
+		}
+		return undefined;
+	}
+}
+
+/**
+ * Index of the `{` opening the call's inline callback body, or -1 when it has
+ * none (an extracted handler, a concise arrow body). Nested groups are skipped
+ * whole, so a brace inside an options object or an `each` table cannot be
+ * mistaken for the body. `stripped` is strings-blanked source.
+ */
+export function callbackBodyBrace(
+	stripped: string,
+	callParen: number,
+	callEnd: number,
+): number {
+	for (let i = callParen + 1; i < callEnd; i++) {
+		const ch = stripped[i];
+		if (ch === "(" || ch === "[") {
+			i = matchingCloseIndex(stripped, i, ch, ch === "(" ? ")" : "]");
+			if (i < 0) return -1;
+			continue;
+		}
+		if (ch !== "{") continue;
+		if (isFunctionBrace(stripped, i)) return i;
+		i = matchingCloseIndex(stripped, i, "{", "}");
+		if (i < 0) return -1;
+	}
+	return -1;
+}
+
+/** One vitest declaration found by {@link testDeclarations}. */
+export interface TestDeclaration {
+	/** The first argument as written in the RAW source (escapes unexpanded,
+	 *  `${...}` and `%s` verbatim), or "" when it is not a literal. */
+	title: string;
+	callee: "it" | "test" | "describe" | "suite";
+	/** The chain in order, e.g. `["each"]`, `["skipIf"]`, `["concurrent", "only"]`. */
+	modifiers: string[];
+	/** 1-based line of the callee identifier. */
+	line: number;
+	/**
+	 * Whether a run reaches it: no `skip`/`todo`/`skipIf`/`runIf`/`fails`
+	 * modifier on it or on an enclosing suite; it starts a statement at the
+	 * top level, in a loop body, or directly in a live `describe`/`suite`
+	 * callback (no `if`, no other function, no object between); and, in a
+	 * file with an `.only`, it or an enclosing suite carries the `.only`.
+	 */
+	live: boolean;
+	/** Index of the `(` that opens the declaration call itself. */
+	callParen: number;
+	/** Index of its balancing `)`. */
+	callEnd: number;
+}
+
+const DECLARATION_IDENTIFIER =
+	/(?<![\w$.])(?:it|test|describe|suite)(?![\w$])/g;
+
+/**
+ * Every `it`/`test`/`describe`/`suite` call in a test file's source, with
+ * whether vitest runs it. The one walker for test-existence detectors
+ * (#4393): a detector that decides a test exists counts only `live`
+ * declarations. Syntactic and conservative: a test declared through an alias,
+ * inside a helper function, or in a concise arrow body reads as not live, a
+ * false red that points the safe way. `ctx.skip()` inside a body is not seen.
+ */
+export function testDeclarations(source: string): TestDeclaration[] {
+	const stripped = stripSource(source, { strings: "blank" });
+	const found: Array<
+		TestDeclaration & { identifier: number; underOnly: boolean }
+	> = [];
+	for (const match of stripped.matchAll(DECLARATION_IDENTIFIER)) {
+		const call = declarationCall(stripped, match.index + match[0].length);
+		if (!call) continue;
+		const callEnd = matchingCloseIndex(stripped, call.paren, "(", ")");
+		if (callEnd < 0) continue;
+		found.push({
+			title: titleAt(source, stripped, call.paren),
+			callee: match[0] as TestDeclaration["callee"],
+			modifiers: call.modifiers,
+			line: lineOf(stripped, match.index),
+			live: false,
+			callParen: call.paren,
+			callEnd,
+			identifier: match.index,
+			underOnly: false,
+		});
+	}
+	// Enclosing braces of each declaration, innermost last, in one pass.
+	const stacks: number[][] = [];
+	const stack: number[] = [];
+	let next = 0;
+	for (let i = 0; i < stripped.length && next < found.length; i++) {
+		while (next < found.length && found[next].identifier === i)
+			stacks[next++] = [...stack];
+		if (stripped[i] === "{") stack.push(i);
+		else if (stripped[i] === "}") stack.pop();
+	}
+	const suiteByBody = new Map<number, (typeof found)[number]>();
+	for (const [index, declaration] of found.entries()) {
+		const enclosing = (stacks[index] ?? []).filter(
+			(brace) => !isLoopBrace(stripped, brace),
+		);
+		const innermost = enclosing.at(-1);
+		const parent =
+			innermost === undefined ? undefined : suiteByBody.get(innermost);
+		const before = prevNonSpace(stripped, declaration.identifier - 1);
+		const startsStatement =
+			before < 0 ||
+			"{;}".includes(stripped[before]) ||
+			(stripped[before] === ")" &&
+				LOOP_KEYWORDS.has(headKeyword(stripped, before)));
+		const reachable =
+			startsStatement &&
+			(innermost === undefined || parent?.live === true) &&
+			!declaration.modifiers.some((modifier) =>
+				NOT_RUN_MODIFIERS.has(modifier),
+			);
+		declaration.live = reachable;
+		declaration.underOnly =
+			declaration.modifiers.includes("only") || parent?.underOnly === true;
+		if (declaration.callee === "describe" || declaration.callee === "suite") {
+			const body = callbackBodyBrace(
+				stripped,
+				declaration.callParen,
+				declaration.callEnd,
+			);
+			if (body >= 0) suiteByBody.set(body, declaration);
+		}
+	}
+	const onlyMode = found.some((d) => d.modifiers.includes("only"));
+	return found.map(({ identifier: _i, underOnly, ...declaration }) => ({
+		...declaration,
+		live:
+			declaration.live &&
+			(!onlyMode ||
+				underOnly ||
+				declaration.callee === "describe" ||
+				declaration.callee === "suite"),
+	}));
+}
+
+/** 1-based line of `index` in `source`. */
+export function lineOf(source: string, index: number): number {
+	let line = 1;
+	for (let i = 0; i < index; i++) if (source[i] === "\n") line++;
+	return line;
+}
+
+/**
+ * The first argument of the call at `callParen`, sliced out of the RAW source.
+ * `stripSource` preserves every index, so the delimiters found in the
+ * stripped text address the same characters in the original.
+ */
+function titleAt(raw: string, stripped: string, callParen: number): string {
+	const start = nextNonSpace(stripped, callParen + 1);
+	const quote = stripped[start];
+	if (quote !== '"' && quote !== "'" && quote !== "`") return "";
+	const close = stripped.indexOf(quote, start + 1);
+	if (close < 0) return "";
+	return raw.slice(start + 1, close);
+}
+
 /**
  * Return every raw match whose span contains source code.
  *
