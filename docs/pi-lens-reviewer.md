@@ -156,8 +156,10 @@ instead of rebuilding the probe.
   baseline tightened; a stale ceiling re-admits regrowth.
 - **Hot-path timing.** When the diff touches dispatch, `session_start`, LSP
   diagnostics, a cache lookup or turn-end, re-run the body's before/after
-  timing on the real path. A regression the body does not name and justify is
-  a finding (#4344 r1: replay went from 6 ms to 321 ms).
+  timing on the real path, at a small and a large input (file size, file
+  count). A regression the body does not name and justify is a finding (#4344
+  r1: replay went from 6 ms to 321 ms; #4368 r1: import extraction took 190 ms
+  at 1.6k lines and 9.2 s at 12k).
 - **Shutdown-path parity.** When the diff moves or rewraps code that stops a
   child (a server, a client, a spawned tool), compare the stop path before and
   after: does the child still get its graceful signal (stdin end, shutdown
