@@ -400,8 +400,12 @@ interface ForwardImportSourceEntry {
  * statement sources. Go captures every import spec, and `import (` is its
  * grouped import. */
 const JS_TS_LANGUAGES = new Set(["typescript", "tsx", "javascript"]);
-/** A relative specifier string: quoted or backticked, starting `./` or `../`. */
-const RELATIVE_SPECIFIER = /(["'`])(\.{1,2}\/(?:(?!\1)[^\n])*)\1/g;
+/**
+ * A relative specifier string: quoted, starting `./` or `../`. A backtick
+ * specifier is valid only in an `import(` or `require(` call, which
+ * `DEPENDENCY_CALL` already counts.
+ */
+const RELATIVE_SPECIFIER = /(["'])(\.{1,2}\/(?:(?!\1)[^\n])*)\1/g;
 /** A call whose specifier may be a package or alias name, or computed. */
 const DEPENDENCY_CALL = /\bimport\s*\(|\brequire\s*\(/;
 

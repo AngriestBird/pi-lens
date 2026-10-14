@@ -141,8 +141,9 @@ describe("importTargetsToAnnounce: scope completeness (#4346 r2)", () => {
 	// so these dependencies were neither targets nor unresolved, and the cache
 	// served a stale finding past their creation (on real tsserver for the
 	// JSDoc `@import` and the module augmentation). Rule A (a relative
-	// specifier string that is not a captured source) covers every row; the
-	// call rows also match rule K.
+	// specifier string that is not a captured source) covers the rows with a
+	// quoted relative specifier; rule K (an `import(` or `require(` call)
+	// covers the call rows, and alone the alias and backtick rows.
 	it.each([
 		["dynamic import", "user.ts", 'export const f = () => import("./lazy");\n'],
 		["type-position import", "user.ts", 'export let t: import("./types").T;\n'],
@@ -171,6 +172,17 @@ describe("importTargetsToAnnounce: scope completeness (#4346 r2)", () => {
 			"comment-split dynamic import",
 			"user.ts",
 			'export const p = import /* c */ ("./lazy");\n',
+		],
+		// Rule K alone: an alias or package specifier, and a backtick one.
+		[
+			"dynamic import of an alias",
+			"user.ts",
+			'export const f = () => import("@/lazy");\n',
+		],
+		[
+			"template dynamic import",
+			"user.ts",
+			"export const f = () => import(`./lazy`);\n",
 		],
 	])(
 		"reports a file holding a %s incomplete",
@@ -298,21 +310,33 @@ describe("importTargetsToAnnounce: scope completeness (#4346 r2)", () => {
 		},
 	);
 
-	it("reports a file whose target only imports and exports its own names complete", async () => {
-		const root = workspace("pi-lens-4346-no-reexport-");
-		const importer = path.join(root, "user.ts");
-		fs.writeFileSync(
-			importer,
-			'import { x } from "./a";\nexport const y = x;\n',
-		);
-		fs.writeFileSync(
-			path.join(root, "a.ts"),
-			'import { b } from "./b";\nexport const x = b;\nexport { b };\n',
-		);
-		fs.writeFileSync(path.join(root, "b.ts"), "export const b = 1;\n");
+	// Rows T10 and T13: rule R reads an `export` and a later `from` in one
+	// `;`-free run. A `from` before the `export`, or past a `;`, is no
+	// re-export, with or without semicolons.
+	it.each([
+		[
+			"with semicolons",
+			'export const z = 1;\nimport { b } from "./b";\nexport const x = b;\nexport { b };\n',
+		],
+		[
+			"without semicolons",
+			'import { b } from "./b"\nexport const x = b\nexport { b }\n',
+		],
+	])(
+		"reports a file whose target only imports and exports its own names complete (%s)",
+		async (_style, content) => {
+			const root = workspace("pi-lens-4346-no-reexport-");
+			const importer = path.join(root, "user.ts");
+			fs.writeFileSync(
+				importer,
+				'import { x } from "./a";\nexport const y = x;\n',
+			);
+			fs.writeFileSync(path.join(root, "a.ts"), content);
+			fs.writeFileSync(path.join(root, "b.ts"), "export const b = 1;\n");
 
-		expect((await scopeOf(root, importer)).complete).toBe(true);
-	});
+			expect((await scopeOf(root, importer)).complete).toBe(true);
+		},
+	);
 
 	// A target the extraction resolved but that cannot be read now (gone, or
 	// no permission) may re-export anything: the scope fails closed.
