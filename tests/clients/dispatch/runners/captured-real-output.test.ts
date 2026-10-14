@@ -67,6 +67,19 @@ vi.mock("../../../../clients/tool-policy.js", async (importOriginal) => ({
 	}),
 }));
 
+// go-vet resolves its binary through goClient rather than the shared
+// availability helper, so a host without Go would skip before it parsed.
+vi.mock("../../../../clients/go-client.js", async (importOriginal) => {
+	const original =
+		await importOriginal<typeof import("../../../../clients/go-client.js")>();
+	return {
+		...original,
+		goClient: Object.assign(Object.create(original.goClient), {
+			findGoPathAsync: async () => "go",
+		}),
+	};
+});
+
 vi.mock(
 	"../../../../clients/dispatch/runners/utils/runner-helpers.js",
 	async (importOriginal) => ({
@@ -97,8 +110,10 @@ vi.mock(
  */
 const RUNNER_DESCRIPTORS: Record<string, { module: string; kind: string }> = {
 	actionlint: { module: "actionlint", kind: "yaml" },
+	"cue-vet": { module: "cue-vet", kind: "cue" },
 	eslint: { module: "eslint", kind: "jsts" },
 	"biome-check-json": { module: "biome-check", kind: "jsts" },
+	"go-vet": { module: "go-vet", kind: "go" },
 	hadolint: { module: "hadolint", kind: "docker" },
 	htmlhint: { module: "htmlhint", kind: "html" },
 	markdownlint: { module: "markdownlint", kind: "markdown" },
@@ -118,6 +133,7 @@ const RUNNER_DESCRIPTORS: Record<string, { module: string; kind: string }> = {
 	tflint: { module: "tflint", kind: "terraform" },
 	vale: { module: "vale", kind: "markdown" },
 	yamllint: { module: "yamllint", kind: "yaml" },
+	"zig-check": { module: "zig-check", kind: "zig" },
 };
 
 /**
@@ -201,7 +217,7 @@ describe("captured real-binary output", () => {
 		// generous because this suite spawns nothing; a real assertion failure
 		// still reds immediately.
 		it(
-			`${runnerId} parses findings out of ${fixture.provenance.tool} ${fixture.provenance.version} output`,
+			`${runnerId} (${fixture.caseName}) parses findings out of ${fixture.provenance.tool} ${fixture.provenance.version} output`,
 			{
 				timeout: 30000,
 			},

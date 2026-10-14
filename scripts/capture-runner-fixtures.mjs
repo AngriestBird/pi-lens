@@ -75,6 +75,38 @@ export const CAPTURES = [
 		],
 	},
 	{
+		runner: "cue-vet",
+		tool: "cue",
+		versionArgs: "version",
+		workspace: smoke("cue-vet"),
+		file: "bad.cue",
+		argv: ["vet", "-c=false", "."],
+	},
+	{
+		runner: "go-vet",
+		case: "type-error",
+		tool: "go",
+		versionArgs: "version",
+		workspace: smoke("go"),
+		file: "bad.go",
+		argv: ["vet", "."],
+		// #4451 — a Go type error prints `vet: ./bad.go:8:21: ...`, the prefixed
+		// shape the runner dropped. tool-smoke/go holds a type error, so go never
+		// reaches its analyzers there.
+		note: "type error: go vet prefixes the line with `vet: `",
+	},
+	{
+		// #4451 — the analyzer shape (`bad.go:9:14: ...`, no prefix), from a file
+		// that type-checks.
+		runner: "go-vet",
+		case: "printf-analyzer",
+		tool: "go",
+		versionArgs: "version",
+		workspace: smoke("go-vet-printf"),
+		file: "bad.go",
+		argv: ["vet", "."],
+	},
+	{
 		runner: "markdownlint",
 		tool: "markdownlint",
 		bin: "markdownlint-cli2",
@@ -233,6 +265,14 @@ export const CAPTURES = [
 		file: "bad.yaml",
 		argv: ["-f", "parsable", "bad.yaml"],
 	},
+	{
+		runner: "zig-check",
+		tool: "zig",
+		versionArgs: "version",
+		workspace: smoke("zig"),
+		file: "bad.zig",
+		argv: ["build-exe", "bad.zig", "-fno-emit-bin"],
+	},
 ];
 
 /** Directories searched for a tool binary, in order. */
@@ -301,6 +341,7 @@ function main() {
 					entry.file,
 					"--case",
 					entry.case ?? "real",
+					...(entry.versionArgs ? ["--version-args", entry.versionArgs] : []),
 					...(entry.note ? ["--note", entry.note] : []),
 					...(entry.shell ? ["--shell", entry.shell] : []),
 					"--",
