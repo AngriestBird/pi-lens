@@ -465,6 +465,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/project-diagnostics/runner-adapters/call-graph-impact.ts": 1,
 		"clients/project-diagnostics/runner-adapters/runner-findings.ts": 4,
 		"clients/project-lens-config.ts": 3,
+		"clients/project-snapshot-persist-worker.ts": 1,
 		"clients/project-snapshot.ts": 7,
 		"clients/project-trust.ts": 1,
 		"clients/review-graph-logger.ts": 1,

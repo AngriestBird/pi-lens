@@ -1,3 +1,4 @@
+import { parentPort } from "node:worker_threads";
 import {
 	type GzipStageWorkerRequest,
 	type GzipStageWorkerResult,
@@ -39,17 +40,33 @@ function semanticSnapshotFingerprint(
 	return fingerprintProjectSnapshotJson(body, request.generatedAt);
 }
 
-serveGzipStageWorker<
-	ProjectSnapshotPersistWorkerRequest,
-	ProjectSnapshotPersistWorkerResult
->(
-	(request) => ({
-		id: request.id,
-		generation: request.generation,
-		stagePath: request.stagePath,
-	}),
-	{
-		semanticFingerprint: semanticSnapshotFingerprint,
-		skipIfFingerprints: (request) => request.priorFingerprints,
-	},
-);
+// Smoke seam (#4401): the RPC session smoke (scripts/rpc-load-check.mjs
+// --fail-worker) sets this to make the worker fail the way #4400's reporter's
+// did, an `{ id, generation, error }` answer with no `stagePath`, so it can
+// prove pi survives a failing worker. Inert unless the variable is set, and
+// what it costs a user who sets it is the main-thread snapshot write.
+if (process.env.PI_LENS_TEST_SNAPSHOT_WORKER_FAIL === "no-stage-path") {
+	parentPort?.on("message", (request: ProjectSnapshotPersistWorkerRequest) => {
+		parentPort?.postMessage({
+			id: request.id,
+			generation: request.generation,
+			error:
+				"forced snapshot worker failure (PI_LENS_TEST_SNAPSHOT_WORKER_FAIL)",
+		});
+	});
+} else {
+	serveGzipStageWorker<
+		ProjectSnapshotPersistWorkerRequest,
+		ProjectSnapshotPersistWorkerResult
+	>(
+		(request) => ({
+			id: request.id,
+			generation: request.generation,
+			stagePath: request.stagePath,
+		}),
+		{
+			semanticFingerprint: semanticSnapshotFingerprint,
+			skipIfFingerprints: (request) => request.priorFingerprints,
+		},
+	);
+}

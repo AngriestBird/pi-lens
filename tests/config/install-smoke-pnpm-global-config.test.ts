@@ -257,3 +257,32 @@ describe("install-smoke pnpm global-bin configuration", () => {
 		});
 	}
 });
+
+// #4401, recurrence #4400 / #4314: the RPC session smoke has to run against the
+// PACKED tarball, once plain and once with the snapshot worker forced to fail.
+// Dropping the step, the tarball path or the `--fail-worker` run would leave
+// the host-exit class (#4400) and the failed-warm class (#4314) unseen again.
+describe("install-smoke RPC session smoke (#4401)", () => {
+	const workflow = loadWorkflow();
+
+	it("host-range-smoke runs it plain and failing-worker, on the installed tarball", () => {
+		const jobName = "host-range-smoke";
+		const name = "RPC session smoke";
+		const install = stepIndex(workflow, jobName, "Install tarball");
+		const smoke = stepIndex(workflow, jobName, name);
+		expect(smoke).toBeGreaterThan(install);
+		const lines = executableLines(stepRun(workflow, jobName, name));
+		const pkg = lines.find((line) => line.startsWith("PKG="));
+		expect(pkg).toContain("$RUNNER_TEMP/proj/node_modules/pi-lens");
+		const runs = lines.filter((line) => line.includes("rpc-load-check.mjs"));
+		expect(runs).toHaveLength(2);
+		for (const line of runs) expect(line).toContain('--extension "$PKG"');
+		expect(runs.filter((line) => line.includes("--fail-worker"))).toHaveLength(
+			1,
+		);
+		const step = namedSteps(workflow, jobName)[smoke] as Step & {
+			"timeout-minutes"?: unknown;
+		};
+		expect(step["timeout-minutes"]).toBeLessThan(10);
+	});
+});
