@@ -720,7 +720,7 @@ interface LspEnrichmentDeps {
 	 * per build from `BuildActionableWarningsArgs.getFlag`; the cold read never
 	 * acquires them.
 	 */
-	excludeServerIds?: ReadonlySet<string>;
+	excludeServerIds?: ReadonlySet<string> | undefined;
 	/** Per-round-trip timeout; the bound a between-files deadline cannot give. */
 	pullTimeoutMs: number;
 	/**
