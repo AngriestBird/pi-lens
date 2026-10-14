@@ -14,16 +14,21 @@
  * ("Flush the specific logger before reading its file"); this sweep makes it
  * a check.
  *
- * The rule, per read: every `statSync` / `lstatSync` / `readFileSync` /
- * `readFile` / `createReadStream` call in `tests/**` whose first argument
- * names an in-process sink needs a drain OF THAT SINK earlier in its scope,
- * with no other `await` between the drain and the read (an await lets the
- * code under test enqueue more). A drain is the sink module's own `flush*`
- * export (awaited, or a `*Sync` variant), `flushAllNdjsonWriters()`, or an
- * awaited call to a local helper whose own body drains that sink. The scope
- * is the nearest enclosing function that is a declaration, a method, or a
- * test/hook callback; inline callbacks (`.map(...)`, `withHome(() => ...)`)
- * are transparent. A read inside a local helper with no drain of its own is
+ * The rule, per read: every `stat` / `statSync` / `lstat` / `lstatSync` /
+ * `open` / `openSync` / `readFileSync` / `readFile` / `createReadStream` call
+ * in `tests/**` whose first argument names an in-process sink needs a drain
+ * OF THAT SINK before it, with no other `await` between the drain and the
+ * read (an await lets the code under test enqueue more). A drain is the sink
+ * module's own `flush*` export (awaited, or a `*Sync` variant),
+ * `flushAllNdjsonWriters()`, or an awaited call to a local helper whose body
+ * ends drained. A drain counts only where it DOMINATES the read: it must run
+ * unconditionally in a block that encloses the read and lies inside the
+ * read's scope. A drain under an `if`, a ternary, a `&&`/`||`/`??` operand, a
+ * loop, a `catch`, or an inner function does not count; one in a `try` body
+ * with no `catch` does (a throw before it skips the read). The scope is the
+ * nearest enclosing function that is a declaration, a method, or a test/hook
+ * callback; inline callbacks (`.map(...)`, `withHome(() => ...)`) are
+ * transparent. A read inside a local helper with no drain of its own is
  * drained when every call site of the helper is.
  *
  * Detectors match code, not prose (#4381 acceptance; principles §2):
@@ -48,11 +53,28 @@
  * - A read whose path reaches the sink through a function parameter, a value
  *   computed in another module, or a directory a `vi.doMock` redirected
  *   (`tests/clients/lsp/launch.test.ts`) is invisible.
+ * - Path shapes the needles do not see: a shell read (`wc -l ${file}`), a
+ *   template or concatenated path (`${dir}/latency.log`, `dir +
+ *   "/latency.log"`), a basename held in a variable, a root held in any
+ *   variable that is not an alias of `LOG_ROOT_SYMBOLS`, and
+ *   `fstatSync(fd)` on a descriptor opened elsewhere.
+ * - Sinks with no path evidence. `clients/diagnostic-logger.ts` exports no
+ *   path symbol, no `flush*`, and builds a dated file name, so no read of it
+ *   can match: it is pinned in `BLIND_SINKS`, and a new blind sink reds the
+ *   "every blind sink is named" case. Seven sinks are basename-only with no
+ *   flush export (actionable-warnings, ast-grep-tools, bus-events, cascade,
+ *   dead-code, dispositions, word-index): a read is seen only through a
+ *   quoted basename under a recognised root, and only `flushAllNdjsonWriters`
+ *   drains them.
  * - A synchronous write between the drain and the read is not modelled. It
  *   cannot flake: its append needs a loop turn, so the read never sees it
  *   and a test that depends on it reds every run.
  * - A reader helper passed by reference (not called) has no call sites to
  *   check, so it is judged on its own body.
+ * - Drain forms the matcher does not credit (loud false positives, not
+ *   silent passes): `Promise.all([flush...()])`, a dynamic-import flush, and
+ *   two drains in sequence before a read of the first sink (the second's
+ *   await voids the first). `flushAllNdjsonWriters()` serves all three.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -99,6 +121,16 @@ const GLOBAL_DRAINS = ["flushAllNdjsonWriters"];
  * file, which no in-process flush can drain. Pinned against drift by the
  * "every sink module roots its path in LOG_ROOT_SYMBOLS" case below.
  */
+/**
+ * Sink modules with no path evidence at all: no exported path symbol and no
+ * basename literal, so the sweep can match no read of them. Each is named
+ * with its reason; the "every blind sink is named" case reds on a new one.
+ */
+const BLIND_SINKS: Record<string, string> = {
+	"clients/diagnostic-logger.ts":
+		"dated file name (logs/<date>.jsonl) and an instance `.flush()`; its one reader, tests/index-3190-inline-blocker-deleted-path-witness.test.ts, drains by hand",
+};
+
 const LOG_ROOT_SYMBOLS = [
 	"getGlobalPiLensLogDir",
 	"getGlobalPiLensDir",
@@ -157,9 +189,15 @@ interface UndrainedRead {
 	undrainedCallers: number[];
 }
 
+// `open`/`openSync` count because `fstatSync(fd).size` carries no path: the
+// open of the sink is where its offset is taken.
 const READ_CALLEES = new Set([
+	"stat",
 	"statSync",
+	"lstat",
 	"lstatSync",
+	"open",
+	"openSync",
 	"readFileSync",
 	"readFile",
 	"createReadStream",
@@ -240,27 +278,92 @@ function declaredName(fn: SgNode): string | undefined {
 	return name?.kind() === "identifier" ? name.text() : undefined;
 }
 
-function drainPattern(names: readonly string[]): RegExp {
-	const awaited = names.filter((name) => !name.endsWith("Sync"));
-	const sync = names.filter((name) => name.endsWith("Sync"));
-	const parts: string[] = [];
-	if (awaited.length > 0) {
-		parts.push(
-			`\\bawait\\s+(?:[\\w$]+\\s*\\??\\.\\s*)*(?:${awaited.map(escapeRegExp).join("|")})\\s*\\(`,
-		);
-	}
-	if (sync.length > 0) {
-		parts.push(`\\b(?:${sync.map(escapeRegExp).join("|")})\\s*\\(`);
-	}
-	return new RegExp(parts.join("|"), "g");
+/**
+ * Kinds a drain may not sit under on its way up to its block: under any of
+ * them it runs conditionally, late, or never (state table D3, D4, D5).
+ */
+const CONDITIONAL_KINDS = new Set([
+	...FUNCTION_KINDS,
+	"if_statement",
+	"else_clause",
+	"ternary_expression",
+	"switch_case",
+	"switch_default",
+	"for_statement",
+	"for_in_statement",
+	"while_statement",
+	"do_statement",
+	"catch_clause",
+	"finally_clause",
+]);
+const SHORT_CIRCUIT = /^(?:&&|\|\||\?\?)$/;
+
+/** A call that can drain: awaited, or a `*Sync` call that needs no await. */
+interface DrainCall {
+	name: string;
+	/** The block it runs in unconditionally, or undefined (see drainBlock). */
+	block: SgNode | undefined;
+	end: number;
 }
 
-/** `text` holds a drain from `names` with no other `await` after the last one. */
-function endsDrained(text: string, names: readonly string[]): boolean {
-	const last = [...text.matchAll(drainPattern(names))].at(-1);
-	if (!last) return false;
-	return !/\bawait\b/.test(text.slice((last.index ?? 0) + last[0].length));
+/** Every awaited or `*Sync` call in `calls`, with its name and drain block. */
+function drainCalls(calls: readonly SgNode[]): DrainCall[] {
+	const out: DrainCall[] = [];
+	for (const call of calls) {
+		const fn = call.field("function");
+		const name =
+			fn?.kind() === "identifier"
+				? fn.text()
+				: fn?.kind() === "member_expression"
+					? fn.field("property")?.text()
+					: undefined;
+		if (!name) continue;
+		if (!name.endsWith("Sync") && call.parent()?.kind() !== "await_expression")
+			continue;
+		out.push({ name, block: drainBlock(call), end: call.range().end.index });
+	}
+	return out;
 }
+
+/**
+ * The block a drain call runs in unconditionally: the nearest enclosing
+ * `statement_block` (or the program), reached without passing a condition, a
+ * loop, a short-circuit operand, or a function boundary. `undefined` when
+ * the drain is conditional or nested (state table D3, D4).
+ */
+function drainBlock(call: SgNode): SgNode | undefined {
+	let node = call;
+	for (;;) {
+		const parent = node.parent();
+		if (!parent) return undefined;
+		const kind = String(parent.kind());
+		// A `try` body with no `catch` dominates the code after the try: if it
+		// throws before the drain, the finally rethrows and the read never runs
+		// (D7). A `catch` can swallow that throw, so its body does not (D8).
+		const owner = parent.parent();
+		if (
+			kind === "statement_block" &&
+			owner?.kind() === "try_statement" &&
+			owner.field("body")?.range().start.index === parent.range().start.index &&
+			!owner.field("handler")
+		) {
+			node = owner;
+			continue;
+		}
+		if (kind === "statement_block" || kind === "program") return parent;
+		if (CONDITIONAL_KINDS.has(kind)) return undefined;
+		if (
+			kind === "binary_expression" &&
+			SHORT_CIRCUIT.test(parent.field("operator")?.text() ?? "")
+		)
+			return undefined;
+		node = parent;
+	}
+}
+
+const within = (inner: SgNode, outer: SgNode): boolean =>
+	outer.range().start.index <= inner.range().start.index &&
+	inner.range().end.index <= outer.range().end.index;
 
 const nameNeedle = (name: string, member: boolean): RegExp =>
 	new RegExp(`${member ? "\\b" : "(?<![\\w$.])"}${escapeRegExp(name)}\\b`);
@@ -383,27 +486,46 @@ function scanUndrainedSinkReads(
 	}
 
 	// Drains per sink: its flush exports, the global drain, and every local
-	// helper whose own body ends drained (`await configResolvedRows()`): its
-	// last drain of the sink has no other await after it.
+	// helper whose body ends drained (`await configResolvedRows()`): a drain
+	// that is a direct statement of the helper's body, with no await after it
+	// (state table D11, D12).
 	const drainNames = new Map<string, string[]>();
 	for (const sink of sinks) {
 		drainNames.set(sink.module, [...sink.flushSymbols, ...GLOBAL_DRAINS]);
 	}
-	const functions = root.findAll({
+	const calls = root.findAll({ rule: { kind: "call_expression" } });
+	const drains = drainCalls(calls);
+	const bodies: Array<{ name: string; start: number; end: number }> = [];
+	for (const fn of root.findAll({
 		rule: { any: FUNCTION_KINDS.map((kind) => ({ kind })) },
-	});
+	})) {
+		const name = declaredName(fn);
+		const body = fn.field("body");
+		if (!name || body?.kind() !== "statement_block") continue;
+		bodies.push({
+			name,
+			start: body.range().start.index,
+			end: body.range().end.index,
+		});
+	}
 	for (let pass = 0; pass < 3; pass++) {
-		for (const fn of functions) {
-			const name = declaredName(fn);
-			if (!name) continue;
-			const body = blanked.slice(fn.range().start.index, fn.range().end.index);
+		for (const body of bodies) {
 			for (const names of drainNames.values()) {
-				if (!names.includes(name) && endsDrained(body, names)) names.push(name);
+				if (names.includes(body.name)) continue;
+				const last = drains
+					.filter(
+						(drain) =>
+							names.includes(drain.name) &&
+							drain.block?.range().start.index === body.start,
+					)
+					.at(-1);
+				if (!last) continue;
+				const after = blanked.slice(last.end, body.end);
+				if (!/\bawait\b/.test(after)) names.push(body.name);
 			}
 		}
 	}
 
-	const calls = root.findAll({ rule: { kind: "call_expression" } });
 	const callsTo = (name: string, inside: SgNode): SgNode[] => {
 		const start = inside.range().start.index;
 		const end = inside.range().end.index;
@@ -419,10 +541,12 @@ function scanUndrainedSinkReads(
 	};
 
 	/**
-	 * Drained at `node` for `owner`: the last drain of that sink in the
-	 * node's scope precedes it with no other `await` in between (any await
-	 * lets the code under test enqueue more). With no drain in scope, a local
-	 * helper is drained when every call site of it is.
+	 * Drained at `node` for `owner`: the last credited drain of that sink
+	 * precedes it with no other `await` in between (any await lets the code
+	 * under test enqueue more). A drain is credited when the block it runs in
+	 * unconditionally encloses `node` and lies inside `node`'s scope (state
+	 * table D1, D2). With no credited drain, a local helper is drained when
+	 * every call site of it is (D13).
 	 */
 	const undrainedAt = (
 		node: SgNode,
@@ -430,14 +554,22 @@ function scanUndrainedSinkReads(
 		depth: number,
 	): number[] => {
 		const scope = scopeOf(node);
-		const scopeStart = scope?.range().start.index ?? 0;
-		const before = blanked
-			.slice(scopeStart, node.range().start.index)
-			.replace(/\bawait\s*$/, "");
 		const names = drainNames.get(owner) ?? GLOBAL_DRAINS;
 		const line = node.range().start.line + 1;
-		if (drainPattern(names).test(before)) {
-			return endsDrained(before, names) ? [] : [line];
+		const at = node.range().start.index;
+		const last = drains
+			.filter(
+				({ name, block, end }) =>
+					end <= at &&
+					names.includes(name) &&
+					block !== undefined &&
+					within(node, block) &&
+					(scope === undefined || within(block, scope)),
+			)
+			.at(-1);
+		if (last) {
+			const gap = blanked.slice(last.end, at).replace(/\bawait\s*$/, "");
+			return /\bawait\b/.test(gap) ? [line] : [];
 		}
 		const helper = scope ? declaredName(scope) : undefined;
 		if (!scope || !helper || depth >= CALLER_DEPTH) return [line];
@@ -532,7 +664,9 @@ describe("sink reads drain first (#4381)", () => {
 			"a test reads a log sink while its own writes may still be queued (#4381). " +
 				"Await the sink's flush (flushSessionStartLog, flushLatencyLog, ..., or " +
 				"flushAllNdjsonWriters) in the same scope right before the read, with no " +
-				"other await in between, or inside the helper that reads.",
+				"other await in between, or inside the helper that reads. " +
+				"Promise.all([flush...]), a dynamic-import flush, and sequential drains " +
+				"are not recognised; use flushAllNdjsonWriters().",
 		).toEqual([]);
 	}, 120_000);
 
@@ -548,6 +682,17 @@ describe("sink reads drain first (#4381)", () => {
 			)
 			.map(({ module }) => module);
 		expect(unrooted).toEqual([]);
+	});
+
+	it("every blind sink is named (no path symbol, no basename)", () => {
+		// Recurrence: review r1 of #4384 F1. diagnostic-logger.ts matched
+		// nothing, the drift pin above still passed, and its one undrained
+		// offset read (index-3190 witness) was in neither sweep table.
+		const blind = discoverSinkModules()
+			.filter((s) => s.pathSymbols.length === 0 && s.basenames.length === 0)
+			.map(({ module }) => module)
+			.sort();
+		expect(blind).toEqual(Object.keys(BLIND_SINKS).sort());
 	});
 
 	describe("sink discovery", () => {
@@ -705,6 +850,167 @@ describe("sink reads drain first (#4381)", () => {
 				].join("\n"),
 			);
 			expect(hits.map((hit) => hit.line)).toEqual([7]);
+		});
+
+		it("stat, lstat, open and openSync of a sink are reads (A2, A4)", () => {
+			const hits = scanFixture(
+				[
+					'it("x", async () => {',
+					"\tawait loadLSPConfig(dir, home);",
+					"\tconst a = (await fs.promises.stat(getLatencyLogPath())).size;",
+					"\tconst b = (await fsp.lstat(getLatencyLogPath())).size;",
+					'\tconst fd = fs.openSync(SESSIONSTART_LOG_FILE, "r");',
+					"\tconst c = fs.fstatSync(fd).size;",
+					'\tconst handle = await fs.promises.open(SESSIONSTART_LOG_FILE, "r");',
+					"});",
+				].join("\n"),
+			);
+			expect(hits.map((hit) => [hit.line, hit.callee])).toEqual([
+				[3, "stat"],
+				[4, "lstat"],
+				[5, "openSync"],
+				[7, "open"],
+			]);
+		});
+
+		it("a drain that does not dominate the read is not credited (A19, A20)", () => {
+			// Each case is a drain the read cannot rely on: it sits behind a
+			// condition, inside a function nothing calls, inside a callback the
+			// read does not wait on, or inside a try block whose catch can
+			// swallow a throw raised before the drain.
+			const cases: Array<[string, string[]]> = [
+				[
+					"if block (A19)",
+					["\tif (cond) {", "\t\tawait flushLatencyLog();", "\t}"],
+				],
+				["braceless if", ["\tif (cond) await flushLatencyLog();"]],
+				["ternary", ["\tcond ? await flushLatencyLog() : undefined;"]],
+				["logical and", ["\tcond && (await flushLatencyLog());"]],
+				[
+					"uncalled inner function, block body (A20)",
+					[
+						"\tconst unused = async () => {",
+						"\t\tawait flushLatencyLog();",
+						"\t};",
+					],
+				],
+				[
+					"uncalled inner function, expression body",
+					["\tconst unused = async () => await flushLatencyLog();"],
+				],
+				[
+					"callback the read does not wait on",
+					[
+						"\tsetImmediate(async () => {",
+						"\t\tawait flushLatencyLog();",
+						"\t});",
+					],
+				],
+				[
+					"try block with a catch the read follows",
+					["\ttry {", "\t\tawait flushLatencyLog();", "\t} catch {}"],
+				],
+			];
+			const verdicts = cases.map(([label, drain]) => {
+				const source = [
+					'it("x", async () => {',
+					...drain,
+					'\tconst rows = fs.readFileSync(getLatencyLogPath(), "utf8");',
+					"});",
+				];
+				const flagged = scanFixture(source.join("\n")).map((hit) => hit.line);
+				return `${label}: ${flagged.includes(source.length - 1) ? "flagged" : "credited"}`;
+			});
+			expect(verdicts).toEqual(cases.map(([label]) => `${label}: flagged`));
+		});
+
+		it("a helper whose drain is conditional is no draining helper", () => {
+			const hits = scanFixture(
+				[
+					"async function maybeDrain(): Promise<void> {",
+					"\tif (cond) await flushLatencyLog();",
+					"}",
+					'it("x", async () => {',
+					"\tawait maybeDrain();",
+					'\tconst rows = fs.readFileSync(getLatencyLogPath(), "utf8");',
+					"});",
+				].join("\n"),
+			);
+			expect(hits.map((hit) => hit.line)).toEqual([6]);
+		});
+
+		it("a helper whose drain sits in an inner function it never calls is no draining helper", () => {
+			// The drain's block is the inner arrow's body, not the helper's, so
+			// the helper does not end drained (state table D11).
+			const hits = scanFixture(
+				[
+					"async function notADrain(): Promise<void> {",
+					"\tconst later = async () => {",
+					"\t\tawait flushLatencyLog();",
+					"\t};",
+					"}",
+					'it("x", async () => {',
+					"\tawait notADrain();",
+					'\tconst rows = fs.readFileSync(getLatencyLogPath(), "utf8");',
+					"});",
+				].join("\n"),
+			);
+			expect(hits.map((hit) => hit.line)).toEqual([8]);
+		});
+
+		it("a drain outside a reader helper's scope does not credit its read", () => {
+			// The drain dominates the helper's declaration, not its call: the
+			// helper runs after `await write()` (state table D2, D13).
+			const hits = scanFixture(
+				[
+					'it("x", async () => {',
+					"\tawait flushLatencyLog();",
+					"\tfunction offset(): number {",
+					"\t\treturn fs.statSync(getLatencyLogPath()).size;",
+					"\t}",
+					"\tawait write();",
+					"\tconst before = offset();",
+					"});",
+				].join("\n"),
+			);
+			expect(hits.map((hit) => [hit.line, hit.undrainedCallers])).toEqual([
+				[4, [7]],
+			]);
+		});
+
+		it("a drain in a try body with no catch credits the read after the try", () => {
+			// The tree's shape (runtime-turn-test-runner-bounds, result-contract-
+			// governance): the drain ends a try whose finally restores an env
+			// var; a throw before it skips the read, so it dominates.
+			expect(
+				scanFixture(
+					[
+						'it("x", async () => {',
+						"	try {",
+						"		await flushLatencyLog();",
+						"	} finally {",
+						"		restore();",
+						"	}",
+						'	const rows = fs.readFileSync(getLatencyLogPath(), "utf8");',
+						"});",
+					].join("\n"),
+				),
+			).toEqual([]);
+		});
+
+		it("a drain in an enclosing block credits a read nested below it", () => {
+			expect(
+				scanFixture(
+					[
+						'it("x", async () => {',
+						"\tawait flushLatencyLog();",
+						"\tif (cond) {",
+						'\t\tconst rows = fs.readFileSync(getLatencyLogPath(), "utf8");',
+						"\t}",
+						"});",
+					].join("\n"),
+				),
+			).toEqual([]);
 		});
 
 		it("an inline callback reads inside its caller's drain order; aliases resolve", () => {
