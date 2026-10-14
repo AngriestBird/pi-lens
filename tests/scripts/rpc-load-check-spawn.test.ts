@@ -13,16 +13,28 @@
  * pi and expects the script's exit code and message.
  */
 import { execFile } from "node:child_process";
+import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 
 const run = promisify(execFile);
 const SCRIPT = path.resolve("scripts/rpc-load-check.mjs");
+// A failing run keeps its scratch dir for forensics; keep it out of the shared tmp.
+const tmpRoot = fs.mkdtempSync(
+	path.join(os.tmpdir(), "pi-lens-rpc-load-check-"),
+);
+afterAll(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
 const FAKE_PI = path.resolve("tests/fixtures/rpc-load-check/fake-pi.mjs");
 
-async function smoke(mode: string, extraArgs: string[] = []) {
-	const env: NodeJS.ProcessEnv = { ...process.env, FAKE_PI_MODE: mode };
+async function smoke(mode: string, extraArgs: string[] = [], stageMs?: number) {
+	const env: NodeJS.ProcessEnv = {
+		...process.env,
+		FAKE_PI_MODE: mode,
+		TMPDIR: tmpRoot,
+	};
+	if (stageMs) env.RPC_LOAD_CHECK_STAGE_TIMEOUT_MS = String(stageMs);
 	// The ambient VITEST variables belong to the outer worker.
 	for (const key of Object.keys(env))
 		if (key.startsWith("VITEST") || key === "TEST") delete env[key];
@@ -91,6 +103,39 @@ describe.skipIf(process.platform === "win32")(
 			const result = await smoke("host-exit", ["--fail-worker"]);
 			expect(result.out).toContain("FAIL: pi exited during");
 			expect(result.code).toBe(1);
+		});
+		it("fails a first turn that ends in an error, not a stop", async () => {
+			const result = await smoke("turn-error");
+			expect(result.out).toContain("first turn did not finish cleanly");
+			expect(result.code).toBe(1);
+		});
+
+		it("fails a first turn that never reached the provider", async () => {
+			const result = await smoke("no-provider");
+			expect(result.out).toContain("never reached the fake provider");
+			expect(result.code).toBe(1);
+		});
+
+		it("times out (exit 2) when the warm-up never completes", async () => {
+			const result = await smoke("no-warmup", [], 2000);
+			expect(result.out).toContain("TIMEOUT waiting for session-start warm-up");
+			expect(result.code).toBe(2);
+		});
+
+		it("times out (exit 2) when the first turn never ends", async () => {
+			const result = await smoke("no-agent-end", [], 2000);
+			expect(result.out).toContain("TIMEOUT waiting for first turn");
+			expect(result.code).toBe(2);
+		});
+
+		it("failing-worker variant: times out when the forced fallback is never logged", async () => {
+			// Without this the variant would be a vacuous green: pi surviving proves
+			// nothing if the seam never made the worker fail.
+			const result = await smoke("no-fallback", ["--fail-worker"], 2000);
+			expect(result.out).toContain(
+				"TIMEOUT waiting for the forced worker failure",
+			);
+			expect(result.code).toBe(2);
 		});
 	},
 );

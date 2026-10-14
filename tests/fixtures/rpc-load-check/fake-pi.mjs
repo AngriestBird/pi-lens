@@ -39,8 +39,10 @@ setTimeout(() => {
 			error: "boom",
 		});
 	}
-	append("latency.log", { type: "phase", phase: "warmup_total" });
-	if (process.env.PI_LENS_TEST_SNAPSHOT_WORKER_FAIL) {
+	if (mode !== "no-warmup") {
+		append("latency.log", { type: "phase", phase: "warmup_total" });
+	}
+	if (process.env.PI_LENS_TEST_SNAPSHOT_WORKER_FAIL && mode !== "no-fallback") {
 		append("latency.log", {
 			type: "phase",
 			phase: "project_snapshot_worker_fallback",
@@ -67,16 +69,24 @@ readline.createInterface({ input: process.stdin }).on("line", async (line) => {
 		});
 	}
 	if (message.type === "prompt") {
+		if (mode === "no-agent-end") return;
 		const models = JSON.parse(
 			fs.readFileSync(path.join(process.env.PI_CODING_AGENT_DIR, "models.json"), "utf8"),
 		);
-		await fetch(`${models.providers.fake.baseUrl}/chat/completions`, {
-			method: "POST",
-			body: "{}",
-		}).then((res) => res.text());
+		if (mode !== "no-provider") {
+			await fetch(`${models.providers.fake.baseUrl}/chat/completions`, {
+				method: "POST",
+				body: "{}",
+			}).then((res) => res.text());
+		}
 		emit({
 			type: "agent_end",
-			messages: [{ role: "assistant", stopReason: "stop" }],
+			messages: [
+				{
+					role: "assistant",
+					stopReason: mode === "turn-error" ? "error" : "stop",
+				},
+			],
 		});
 	}
 });

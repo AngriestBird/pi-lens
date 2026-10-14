@@ -55,6 +55,9 @@ import {
 export const FORCE_WORKER_FAIL_ENV = "PI_LENS_TEST_SNAPSHOT_WORKER_FAIL";
 /** The worker's forced error starts with this; the smoke keys its tolerance on it. */
 export const FORCED_ERROR_MARKER = "forced snapshot worker failure";
+/** Per-stage wait; the env override exists for the spawn test's timeout cases. */
+const STAGE_TIMEOUT_MS =
+	Number(process.env.RPC_LOAD_CHECK_STAGE_TIMEOUT_MS) || 30000;
 /** Notice severities (`notifyType`) that are failures; `info` is not. */
 const FAILING_NOTIFY_TYPES = new Set(["warning", "error"]);
 /** A latency.log phase named like a failure. */
@@ -309,7 +312,11 @@ async function run(piBin, { extension, failWorker }) {
 		// Give pi a moment to open stdin before the first command.
 		await new Promise((r) => setTimeout(r, 500));
 		send({ id: "cmds", type: "get_commands" });
-		await waitFor("get_commands response", 30000, () => commandsResponse);
+		await waitFor(
+			"get_commands response",
+			STAGE_TIMEOUT_MS,
+			() => commandsResponse,
+		);
 		if (!exited) {
 			const cmds = commandsResponse?.data?.commands || [];
 			const lens = cmds.filter(
@@ -325,11 +332,11 @@ async function run(piBin, { extension, failWorker }) {
 		}
 		await waitFor(
 			"session-start warm-up (warmup_total in latency.log)",
-			30000,
+			STAGE_TIMEOUT_MS,
 			() => phaseWasLogged(latency(), "warmup_total"),
 		);
 		send({ id: "turn", type: "prompt", message: "hello" });
-		await waitFor("first turn (agent_end)", 30000, () => agentEnd);
+		await waitFor("first turn (agent_end)", STAGE_TIMEOUT_MS, () => agentEnd);
 		if (agentEnd && !exited) {
 			const last = [...(agentEnd.messages || [])]
 				.reverse()
@@ -344,7 +351,7 @@ async function run(piBin, { extension, failWorker }) {
 		if (failWorker) {
 			await waitFor(
 				"the forced worker failure's main-thread fallback",
-				15000,
+				STAGE_TIMEOUT_MS / 2,
 				() => forcedFallback(),
 			);
 		} else {
