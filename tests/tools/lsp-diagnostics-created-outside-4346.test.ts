@@ -97,6 +97,13 @@ beforeAll(async () => {
 	);
 	// Born before any server starts: an existing module, never Created.
 	fs.writeFileSync(path.join(workspace, "old_module.ts"), "export {};\n");
+	// Row 13: a module whose inode is older than the server, moved into place
+	// later. `mv` keeps the inode and its birth time.
+	fs.mkdirSync(path.join(workspace, "stash"));
+	fs.writeFileSync(
+		path.join(workspace, "stash", "moved_module.ts"),
+		"export {};\n",
+	);
 	fs.mkdirSync(path.join(workspace, ".pi-lens"), { recursive: true });
 	fs.writeFileSync(
 		path.join(workspace, ".pi-lens", "lsp.json"),
@@ -191,6 +198,80 @@ describe("a module created outside pi-lens (#4346)", () => {
 
 		expect(await sweep()).toBe(0);
 	}, 60_000);
+
+	// Recurrence: #4368 r1 F1. pi's write hook touches the importer without
+	// recording a cache entry, so a gate on cached findings skipped it, and the
+	// first batch call after the module appeared replayed the server's stale
+	// lookup (the single-file route already cleared on its first call).
+	it("clears an importer pi's write hook touched, on the first batch call", async () => {
+		const lsp = service as unknown as {
+			touchFile: (
+				filePath: string,
+				content: string,
+				options: { diagnostics: "document"; source: string },
+			) => Promise<unknown>;
+		};
+		const importer = path.join(workspace, "hook_user.ts");
+		const content = 'import "./hook_module";\nexport {};\n';
+		fs.writeFileSync(importer, content);
+		await lsp.touchFile(importer, content, {
+			diagnostics: "document",
+			source: "write-hook-4368",
+		});
+
+		fs.writeFileSync(path.join(workspace, "hook_module.ts"), "export {};\n");
+		const first = await diagnose({ paths: [importer] });
+
+		expect(first.text).not.toContain("Cannot find module hook_module");
+		expect(first.details.primaryDiagnosticsCount).toBe(0);
+	}, 30_000);
+
+	// Recurrence: #4368 r1 F1, the binding half of "a fresh clean entry". A
+	// rewrite that keeps the size and mtime passes the stat check, and only
+	// the content binding shows the bytes changed: the new import must still
+	// be resolved, or the server's stale lookup for it is served on the
+	// re-touch.
+	it("resolves an importer whose clean entry no longer matches its bytes", async () => {
+		fs.writeFileSync(path.join(workspace, "bind_a.ts"), "export {};\n");
+		const importer = path.join(workspace, "bind_user.ts");
+		fs.writeFileSync(importer, 'import "./bind_a";\nexport {};\n');
+		expect(
+			(await diagnose({ paths: [importer] })).details.primaryDiagnosticsCount,
+		).toBe(0);
+		const { mtime } = fs.statSync(importer);
+		// The server learns that bind_b is missing through another file.
+		const other = path.join(workspace, "bind_other.ts");
+		fs.writeFileSync(other, 'import "./bind_b";\nexport {};\n');
+		expect((await diagnose({ paths: [other] })).text).toContain(
+			"Cannot find module bind_b",
+		);
+
+		fs.writeFileSync(path.join(workspace, "bind_b.ts"), "export {};\n");
+		fs.writeFileSync(importer, 'import "./bind_b";\nexport {};\n');
+		fs.utimesSync(importer, mtime, mtime);
+		const after = await diagnose({ paths: [importer] });
+
+		expect(after.text).not.toContain("Cannot find module bind_b");
+	}, 30_000);
+
+	// Recurrence: #4368 r1 row 13. A module moved in with `mv` keeps its old
+	// inode birth, so the birth rule sent Changed and the importer stayed stale
+	// for the server's life. The resolver saw the import unresolved, then
+	// resolved: the path appeared in between.
+	it("announces a module moved in with an old inode as Created", async () => {
+		const importer = path.join(workspace, "moved_user.ts");
+		fs.writeFileSync(importer, 'import "./moved_module";\nexport {};\n');
+		expect((await diagnose({ paths: [importer] })).text).toContain(
+			"Cannot find module moved_module",
+		);
+
+		const moved = path.join(workspace, "moved_module.ts");
+		fs.renameSync(path.join(workspace, "stash", "moved_module.ts"), moved);
+		const after = await diagnose({ paths: [importer] });
+
+		expect(after.text).not.toContain("Cannot find module moved_module");
+		expect(watchedLines()).toContain(`watched ${pathToFileURL(moved).href} 1`);
+	}, 30_000);
 
 	it("announces no module born before the server started", async () => {
 		const importer = path.join(workspace, "old_user.ts");
@@ -307,23 +388,31 @@ describe("a workspace edit's resource operations (#4346)", () => {
 
 describe("the producer's cost gate (#4346)", () => {
 	// Recurrence: #4344 r1, where a per-call extra pass took the cached replay
-	// from 6 ms to 321 ms. A batch resolves the imports of finding-bearing
-	// files only; a clean file's imports already resolved.
-	it("resolves no clean file's imports in a batch", async () => {
-		// Created after the client started, then imported: the server finds it
-		// on its first lookup, so the importer is clean from the start.
-		const module = path.join(workspace, "gate_module.ts");
-		fs.writeFileSync(module, "export {};\n");
+	// from 6 ms to 321 ms. A fresh clean entry for the current bytes cannot
+	// show a missing import (every import it names resolved), so a batch
+	// resolves every file except those (#4368 r1 F1 widened the gate from
+	// "has cached findings" to this).
+	it("resolves no file a fresh clean entry answers, and resolves it again once edited", async () => {
+		const { getCreatedImportScanRollup } =
+			await import("../../clients/lsp/created-import-targets.js");
+		fs.writeFileSync(path.join(workspace, "gate_module.ts"), "export {};\n");
 		const importer = path.join(workspace, "gate_user.ts");
 		fs.writeFileSync(importer, 'import "./gate_module";\nexport {};\n');
+		const resolved = () => getCreatedImportScanRollup().importers;
+
+		const before = resolved();
 		expect(
 			(await diagnose({ paths: [importer] })).details.primaryDiagnosticsCount,
 		).toBe(0);
-		await diagnose({ paths: [importer] });
+		expect(resolved() - before).toBe(1);
 
-		await roundTrip();
-		expect(watchedLines()).not.toContain(
-			`watched ${pathToFileURL(module).href} 1`,
-		);
+		await diagnose({ paths: [importer] });
+		expect(resolved() - before).toBe(1);
+
+		fs.appendFileSync(importer, "// edited\n");
+		const later = new Date(Date.now() + 60_000);
+		fs.utimesSync(importer, later, later);
+		await diagnose({ paths: [importer] });
+		expect(resolved() - before).toBe(2);
 	}, 30_000);
 });

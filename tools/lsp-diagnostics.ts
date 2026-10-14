@@ -1984,13 +1984,14 @@ async function collectBatchDiagnostics(
 	});
 	// #4320: a module created since a file was cached must reach its servers
 	// before any lookup below, whatever the order of `files`. #4346: so must a
-	// module named only by a finding-bearing file's imports, which nothing
-	// reports when it was created outside pi-lens.
+	// module named only by a file's imports, which nothing reports when it was
+	// created outside pi-lens: for every file a fresh clean entry will not
+	// answer (#4368 r1 F1; a write-hook touch records no entry).
 	lspService.announceCreatedFiles([
 		...files,
 		...(await importTargetsToAnnounce(
 			resolvedCwd,
-			files.filter((file) => cacheCtx.hasFindings(file)),
+			files.filter((file) => !cacheCtx.servesClean(file, scopeKey)),
 		)),
 	]);
 	const groups = groupFilesByPrimaryServer(files);

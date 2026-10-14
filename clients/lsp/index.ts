@@ -15,7 +15,10 @@ import path from "node:path";
 import { pathToFileURL, URL } from "node:url";
 import { BoundedFifoMap } from "../bounded-cache.js";
 import { workspaceFileCreatedAtFor } from "./workspace-diagnostics-session.js";
-import { importTargetsToAnnounce } from "./created-import-targets.js";
+import {
+	emitCreatedImportScanRollupAtSessionEnd,
+	importTargetsToAnnounce,
+} from "./created-import-targets.js";
 import { getProjectIgnoreMatcher, isExcludedDirName } from "../file-utils.js";
 import { recordLsp } from "../widget-state.js";
 import { applyAuxiliarySuppressions } from "../dispatch/auxiliary-lsp.js";
@@ -9528,13 +9531,18 @@ export class LSPService {
 		};
 		// #4320: lookups below run before any touch, so a module created since
 		// the last sweep must reach its servers first. #4346: so must one only
-		// a finding-bearing file's imports name (created outside pi-lens).
+		// a file's imports name (created outside pi-lens), for every file a
+		// fresh clean entry will not answer (#4368 r1 F1).
 		this.announceCreatedFiles([
 			...files,
 			...(await importTargetsToAnnounce(
 				root,
-				files.filter((filePath) =>
-					workspaceDiagnosticsCacheCtx.hasFindings(filePath),
+				files.filter(
+					(filePath) =>
+						!workspaceDiagnosticsCacheCtx.servesClean(
+							filePath,
+							workspaceSweepScopeKey,
+						),
 				),
 			)),
 		]);
@@ -11015,6 +11023,10 @@ export function resetLSPService(options: LSPShutdownOptions = {}): void {
 		resetClassicTsRepairGuard();
 		clearWorkspaceSweepHoldForSessionStart();
 	}
+	// #4368 r1 F3: index.ts's session_shutdown resets the service here; the
+	// created-module producer's tally leaves its one row per session now.
+	if (options.reason === "session_shutdown")
+		emitCreatedImportScanRollupAtSessionEnd();
 	resetOwnedLspService<LSPService>(options);
 }
 

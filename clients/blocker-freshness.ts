@@ -137,6 +137,7 @@ import { BoundedLruCache } from "./bounded-cache.js";
 import { bounded } from "./deadline-utils.js";
 import { recordDegradationOnce } from "./degradation-ledger.js";
 import { HOOK_WALL_BUDGET_MS } from "./hook-budgets.js";
+import { notePathAppeared } from "./path-birth.js";
 import { normalizeEphemeralMapKey, normalizeMapKey } from "./path-utils.js";
 import { toRunnerDisplayPath } from "./dispatch/runner-context.js";
 import { resolveImportToFiles } from "./review-graph/import-resolvers.js";
@@ -375,11 +376,21 @@ async function resolveForwardImportsMemoized(
  * resolves the sources on every call, because a module created since can
  * answer one without the importer changing. The stat is taken before the read,
  * so a write racing the parse leaves a key that no longer matches the disk.
+ *
+ * #4368 r1 row 13: `unresolved` holds the sources that resolved to nothing at
+ * the last call, carried across the file's versions, so a later call that
+ * resolves one sees a path that appeared in between (`notePathAppeared`).
  */
 const FORWARD_IMPORT_SOURCE_MEMO_ENTRIES = 1024;
+interface ForwardImportSourceEntry {
+	mtimeMs: number;
+	size: number;
+	sources: string[];
+	unresolved: ReadonlySet<string>;
+}
 const forwardImportSourceMemo = new BoundedLruCache<
 	string,
-	{ mtimeMs: number; size: number; sources: string[] }
+	ForwardImportSourceEntry
 >(FORWARD_IMPORT_SOURCE_MEMO_ENTRIES);
 let forwardImportParses = 0;
 
@@ -391,46 +402,49 @@ export function _getForwardImportParsesForTests(): number {
 async function forwardImportSources(
 	filePath: string,
 	languageId: string,
-): Promise<string[]> {
+): Promise<ForwardImportSourceEntry | undefined> {
 	let stat: fs.Stats;
 	try {
 		stat = fs.statSync(filePath);
 	} catch {
-		return [];
+		return undefined;
 	}
 	const key = normalizeMapKey(filePath);
 	const memo = forwardImportSourceMemo.get(key);
 	if (memo?.mtimeMs === stat.mtimeMs && memo.size === stat.size) {
-		return memo.sources;
+		return memo;
 	}
 	const client = getSharedTreeSitterClient();
-	if (!client) return [];
+	if (!client) return undefined;
 	const extractor = await getExtractor(languageId);
-	if (!extractor) return [];
+	if (!extractor) return undefined;
 
 	let content: string;
 	try {
 		content = fs.readFileSync(filePath, "utf-8");
 	} catch {
-		return [];
+		return undefined;
 	}
 
 	const outcome = await client.withParsedTree(
 		filePath,
 		languageId,
 		content,
-		(tree) => extractor.extract(tree, filePath, content).imports,
+		// Imports only (#4368 r1 F2): the definitions pass of a full extract is
+		// what made a large file cost seconds.
+		(tree) => extractor.extractImports(tree),
 		"blocker-freshness",
 	);
-	if (!outcome.parsed) return [];
+	if (!outcome.parsed) return undefined;
 	forwardImportParses++;
-	const sources = [...new Set(outcome.value.map((ref) => ref.source))];
-	forwardImportSourceMemo.set(key, {
+	const entry: ForwardImportSourceEntry = {
 		mtimeMs: stat.mtimeMs,
 		size: stat.size,
-		sources,
-	});
-	return sources;
+		sources: [...new Set(outcome.value.map((ref) => ref.source))],
+		unresolved: memo?.unresolved ?? new Set(),
+	};
+	forwardImportSourceMemo.set(key, entry);
+	return entry;
 }
 
 /**
@@ -445,17 +459,20 @@ export async function extractForwardImportPaths(
 ): Promise<string[]> {
 	const languageId = resolveTreeSitterLanguage(filePath);
 	if (!languageId) return [];
+	const entry = await forwardImportSources(filePath, languageId);
+	if (!entry) return [];
 	const resolved = new Set<string>();
-	for (const source of await forwardImportSources(filePath, languageId)) {
-		for (const target of resolveImportToFiles(
-			cwd,
-			filePath,
-			languageId,
-			source,
-		)) {
+	const unresolved = new Set<string>();
+	for (const source of entry.sources) {
+		const targets = resolveImportToFiles(cwd, filePath, languageId, source);
+		if (targets.length === 0) unresolved.add(source);
+		for (const target of targets) {
+			// #4368 r1 row 13: resolved to nothing last time, to `target` now.
+			if (entry.unresolved.has(source)) notePathAppeared(target);
 			resolved.add(target);
 		}
 	}
+	entry.unresolved = unresolved;
 	return [...resolved];
 }
 

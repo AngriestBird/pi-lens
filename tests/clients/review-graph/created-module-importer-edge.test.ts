@@ -212,6 +212,36 @@ describe("the importer pass's name filter (#4346)", () => {
 	});
 });
 
+describe("the importer pass's trigger (#4346)", () => {
+	// Recurrence: #4368 r1 R16 (a surviving mutant). Only a file new to the
+	// graph can answer an unresolved import; treating every updated file as
+	// created resolves on each edit, the post-write cascade's hot path.
+	it("resolves nothing on an update that only edits existing files", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-4346-edit-"));
+		roots.push(root);
+		writeTree(root, {
+			"pyproject.toml": '[project]\nname="x"\nversion="0.0.0"\n',
+			"src/fixturepkg/__init__.py": "",
+			"src/fixturepkg/new_module.py": "def describe():\n    return 1\n",
+			// Unresolved, and named by the edited file's stem.
+			"tools/probe.py": "import new_module\n\nvalue = 1\n",
+		});
+		clearGraphCache();
+		await buildOrUpdateGraph(root, [], new FactStore());
+		const edited = path.join(root, "src/fixturepkg/new_module.py");
+		writeTree(root, {
+			"src/fixturepkg/new_module.py": "def describe():\n    return 2\n",
+		});
+		_resetReviewGraphRebuildCountersForTests();
+		clearGraphCache();
+		await buildOrUpdateGraph(root, [edited], new FactStore());
+
+		expect(
+			_getReviewGraphRebuildCountersForTests().createdImportResolutions,
+		).toBe(0);
+	});
+});
+
 describe("the workspace-diagnostics cache on the new edge (#4346)", () => {
 	it("refuses a clean importer entry once the module it now imports changes", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-4346-edge-"));

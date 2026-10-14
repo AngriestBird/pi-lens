@@ -13,6 +13,7 @@ import {
 	_getForwardImportParsesForTests,
 	extractForwardImportPaths,
 } from "../../clients/blocker-freshness.js";
+import { pathBirthtimeMs } from "../../clients/path-birth.js";
 import { toPosix } from "../../clients/path-utils.js";
 import { removeTempDirSync } from "./test-utils.js";
 
@@ -88,5 +89,101 @@ describe("extractForwardImportPaths (#4346)", () => {
 			relative(root, await extractForwardImportPaths(root, importer)),
 		).toEqual(["src/c.ts"]);
 		expect(_getForwardImportParsesForTests() - before).toBe(2);
+	});
+
+	// Recurrence: #4368 r1 R13 (a surviving mutant). A rewrite that lands in
+	// the same mtime bucket with a different length must be a new parse, or
+	// the memo keeps answering the old imports.
+	it("parses again when the size changes under the same mtime", async () => {
+		const root = workspace("pi-lens-4346-fwd-size-", {
+			"package.json": '{"name":"g","version":"0.0.0"}\n',
+			"src/a.ts": 'import { b } from "./b";\n',
+			"src/b.ts": "export const b = 1;\n",
+			"src/cc.ts": "export const c = 1;\n",
+		});
+		const importer = path.join(root, "src/a.ts");
+		const pinned = new Date(Date.now() - 60_000);
+		fs.utimesSync(importer, pinned, pinned);
+		expect(
+			relative(root, await extractForwardImportPaths(root, importer)),
+		).toEqual(["src/b.ts"]);
+
+		fs.writeFileSync(importer, 'import { c } from "./cc";\n');
+		fs.utimesSync(importer, pinned, pinned);
+
+		expect(
+			relative(root, await extractForwardImportPaths(root, importer)),
+		).toEqual(["src/cc.ts"]);
+	});
+
+	// Recurrence: #4368 r1 row 13. A module moved in with `mv` keeps an inode
+	// born before the language server, so the birth rule read it as old and
+	// the server never heard Created. The resolver saw the import resolve to
+	// nothing, then to the module: the path appeared in between.
+	it("notes a path born when an import that resolved to nothing now resolves to it", async () => {
+		const root = workspace("pi-lens-4346-fwd-moved-", {
+			"package.json": '{"name":"g","version":"0.0.0"}\n',
+			"src/a.ts": 'import { m } from "./moved";\n',
+			"stash/moved.ts": "export const m = 1;\n",
+		});
+		const importer = path.join(root, "src/a.ts");
+		const moved = path.join(root, "src/moved.ts");
+		expect(await extractForwardImportPaths(root, importer)).toEqual([]);
+		fs.renameSync(path.join(root, "stash/moved.ts"), moved);
+		const inodeBirth = fs.statSync(moved).birthtimeMs;
+		const resolvedAt = Date.now();
+
+		expect(
+			relative(root, await extractForwardImportPaths(root, importer)),
+		).toEqual(["src/moved.ts"]);
+
+		const birth = pathBirthtimeMs(fs.statSync(moved), moved);
+		expect(birth).toBeGreaterThanOrEqual(resolvedAt);
+		expect(birth).toBeGreaterThan(inodeBirth);
+	});
+
+	// The importer's own edit between the two calls is a new parse; the
+	// sources it saw unresolved must survive it, or a module moved in while
+	// the importer was being edited stays announced as Changed.
+	it("keeps the unresolved observation across an edit of the importer", async () => {
+		const root = workspace("pi-lens-4346-fwd-moved-edit-", {
+			"package.json": '{"name":"g","version":"0.0.0"}\n',
+			"src/a.ts": 'import { m } from "./moved";\n',
+			"stash/moved.ts": "export const m = 1;\n",
+		});
+		const importer = path.join(root, "src/a.ts");
+		const moved = path.join(root, "src/moved.ts");
+		expect(await extractForwardImportPaths(root, importer)).toEqual([]);
+		fs.writeFileSync(
+			importer,
+			'import { m } from "./moved";\nexport const n = m;\n',
+		);
+		const later = new Date(Date.now() + 60_000);
+		fs.utimesSync(importer, later, later);
+		fs.renameSync(path.join(root, "stash/moved.ts"), moved);
+		const resolvedAt = Date.now();
+
+		expect(
+			relative(root, await extractForwardImportPaths(root, importer)),
+		).toEqual(["src/moved.ts"]);
+		expect(pathBirthtimeMs(fs.statSync(moved), moved)).toBeGreaterThanOrEqual(
+			resolvedAt,
+		);
+	});
+
+	it("notes no birth for an import that resolved at every call", async () => {
+		const root = workspace("pi-lens-4346-fwd-steady-", {
+			"package.json": '{"name":"g","version":"0.0.0"}\n',
+			"src/a.ts": 'import { b } from "./b";\n',
+			"src/b.ts": "export const b = 1;\n",
+		});
+		const importer = path.join(root, "src/a.ts");
+		const module = path.join(root, "src/b.ts");
+		await extractForwardImportPaths(root, importer);
+		await extractForwardImportPaths(root, importer);
+
+		expect(pathBirthtimeMs(fs.statSync(module), module)).toBe(
+			fs.statSync(module).birthtimeMs,
+		);
 	});
 });

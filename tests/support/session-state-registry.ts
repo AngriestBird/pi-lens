@@ -130,6 +130,7 @@ import {
 } from "../../clients/lsp/workspace-diagnostics-session.js";
 import {
 	noteAtomicReplace,
+	notePathAppeared,
 	pathBirthtimeMs,
 	resetPathBirthForTests,
 } from "../../clients/path-birth.js";
@@ -1017,6 +1018,25 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 			"#2319: the verified path-attribution guess tally is a per-session counter that emits one path_attribution_verified_rollup row at session end; PR #2312's class sweep flagged the module-scope `let` as the same latent shape as the bind rollup, so it now rides getProcessSingleton (shape 25). Its reset runs in index.ts's session_start closure after the #473 decision and only on the primary path, so a secondary cannot erase the primary's tally; the count is memory-only best-effort observability, so a lost tally is noise, not data.",
 	},
 	{
+		id: "path-birth:appearedPaths",
+		module: "path-birth.ts",
+		state: "appearedPaths",
+		policy: "process_lifetime",
+		resetName: "resetPathBirthForTests",
+		reason:
+			"#4368 r1 row 13: `appearedPaths` records that the import resolver saw a path absent and then present, so a module moved into place (old inode) answers with that later observation. A fact about files on disk, not about a session: a client started after the observation reads the path as older than itself and sends nothing, so keeping it across sessions changes no answer, and a session_start clear would only lose the record for a client that is still live. Bounded (1024).",
+		probe: {
+			arm: () => notePathAppeared("/session-state-probe/moved.py", 20_000),
+			// Unarmed, the path answers its inode's own birth.
+			isArmed: () =>
+				pathBirthtimeMs(
+					{ dev: 1, ino: 7, birthtimeMs: 5_000, ctimeMs: 5_001 },
+					"/session-state-probe/moved.py",
+				) !== 20_000,
+			reset: () => resetPathBirthForTests(),
+		},
+	},
+	{
 		id: "path-birth:replacedPathBirths",
 		module: "path-birth.ts",
 		state: "replacedPathBirths; birthIsCtimeAlias",
@@ -1750,7 +1770,8 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// is what flags this file now.
 	"path-attribution-telemetry.ts": 0,
 	// #4320 r2: `replacedPathBirths`, registered above (process_lifetime).
-	"path-birth.ts": 1,
+	// #4368 r1 row 13: `appearedPaths` (1 -> 2), registered above.
+	"path-birth.ts": 2,
 	// #2506: the container key is a Symbol.for constant, so the scan sees no
 	// mutable module-scope container here — the same shape as
 	// process-singletons.ts just below.

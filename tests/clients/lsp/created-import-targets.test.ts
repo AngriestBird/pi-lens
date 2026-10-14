@@ -10,9 +10,17 @@ import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	CREATED_IMPORT_SCAN_MAX_FILES,
+	emitCreatedImportScanRollupAtSessionEnd,
+	getCreatedImportScanRollup,
 	importTargetsToAnnounce,
 } from "../../../clients/lsp/created-import-targets.js";
+import {
+	clearLatencyLog,
+	flushLatencyLog,
+	getLatencyLogPath,
+} from "../../../clients/latency-logger.js";
 import { applyWorkspaceEdit } from "../../../clients/lsp/edits.js";
+import { resetLSPService } from "../../../clients/lsp/index.js";
 import { peekOwnedLspService } from "../../../clients/lsp/service-singleton.js";
 import {
 	getDegradationSummary,
@@ -82,6 +90,94 @@ describe("importTargetsToAnnounce (#4346)", () => {
 				(group) => group.kind === "lsp-created-import-scan-incomplete",
 			),
 		).toBe(false);
+	});
+});
+
+describe("importTargetsToAnnounce bounds (#4368 r1 F2)", () => {
+	// Recurrence: #4368 r1 F2. A file the LSP does not sync (over its byte or
+	// line limit) gets no server answer, so its imports have nothing to make
+	// stale; resolving it only spent the diagnostics call's time.
+	it("skips an importer over the LSP sync limits and records it once", async () => {
+		const root = workspace("pi-lens-4346-oversized-");
+		const importer = path.join(root, "huge.ts");
+		fs.writeFileSync(
+			importer,
+			`import "./mod";\n${"export const x = 1;\n".repeat(5_001)}`,
+		);
+		fs.writeFileSync(path.join(root, "mod.ts"), "export {};\n");
+
+		expect(await importTargetsToAnnounce(root, [importer])).toEqual([]);
+		await importTargetsToAnnounce(root, [importer]);
+
+		const record = getDegradationSummary().find(
+			(group) => group.kind === "lsp-created-import-scan-incomplete",
+		);
+		expect(record?.count).toBe(1);
+		expect(record?.latestReasons[0]?.subject).toBe("oversized");
+	});
+});
+
+describe("the producer's session rollup (#4368 r1 F3)", () => {
+	async function rollupRows(): Promise<Array<Record<string, unknown>>> {
+		await flushLatencyLog();
+		const logPath = getLatencyLogPath();
+		const text = fs.existsSync(logPath) ? fs.readFileSync(logPath, "utf8") : "";
+		return text
+			.split("\n")
+			.filter(Boolean)
+			.map(
+				(line) =>
+					JSON.parse(line) as {
+						phase?: string;
+						metadata?: Record<string, unknown>;
+					},
+			)
+			.filter((row) => row.phase === "lsp_created_import_scan_rollup")
+			.map((row) => row.metadata ?? {});
+	}
+
+	// Recurrence: #4368 r1 F3. The producer's cost (60 ms to 9 s measured)
+	// left no record; one row per session carries it, never one per call.
+	it("writes one row per session with the calls, importers and targets, then starts over", async () => {
+		const previous = process.env.PI_LENS_TEST_MODE;
+		process.env.PI_LENS_TEST_MODE = "0";
+		try {
+			emitCreatedImportScanRollupAtSessionEnd();
+			clearLatencyLog();
+			const root = workspace("pi-lens-4346-rollup-");
+			const importer = path.join(root, "user.ts");
+			fs.writeFileSync(importer, 'import "./mod";\nexport {};\n');
+			fs.writeFileSync(path.join(root, "mod.ts"), "export {};\n");
+
+			await importTargetsToAnnounce(root, [importer]);
+			await importTargetsToAnnounce(root, [importer]);
+			expect(await rollupRows()).toEqual([]);
+			expect(getCreatedImportScanRollup()).toMatchObject({
+				calls: 2,
+				importers: 2,
+				targets: 2,
+			});
+
+			// The session_shutdown reset index.ts runs (no service here).
+			resetLSPService({ reason: "session_shutdown" });
+			resetLSPService({ reason: "session_shutdown" });
+
+			const rows = await rollupRows();
+			expect(rows).toHaveLength(1);
+			expect(rows[0]).toMatchObject({
+				calls: 2,
+				importers: 2,
+				targets: 2,
+				capped: 0,
+				oversized: 0,
+			});
+			expect(typeof rows[0]?.totalMs).toBe("number");
+			expect(typeof rows[0]?.maxMs).toBe("number");
+			expect(getCreatedImportScanRollup().calls).toBe(0);
+		} finally {
+			if (previous === undefined) delete process.env.PI_LENS_TEST_MODE;
+			else process.env.PI_LENS_TEST_MODE = previous;
+		}
 	});
 });
 

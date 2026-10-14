@@ -605,11 +605,16 @@ export interface WorkspaceDiagnosticsCacheContext {
 	/** Cached complete imports for a file, when the reverse-dependency index covers it. */
 	importsFor(filePath: string): string[] | undefined;
 	/**
-	 * #4346: whether `filePath`'s entry, under any scope, holds findings. Read
-	 * only: no expiry, no freshness check. A file whose last answer was clean
-	 * cannot be replaying a missing import.
+	 * #4346, #4368 r1 F1: whether {@link lookup} will answer `filePath` under
+	 * `scopeKey` with a clean entry bound to the bytes on disk. Such an answer
+	 * cannot show a missing import a new module fixes: every import those bytes
+	 * name resolved when it was recorded. Every other file is answered by its
+	 * server now, or by a findings replay, and its imports must reach the
+	 * server first. Asks only clean entries, which no expiry rule drops, so
+	 * asking before the batch's own lookup changes nothing that lookup would
+	 * not.
 	 */
-	hasFindings(filePath: string): boolean;
+	servesClean(filePath: string, scopeKey: string): boolean;
 	/** Fresh cached result for `filePath` under `scopeKey`, or `undefined`
 	 * when there's no entry, the entry's scope doesn't match, or it fails the
 	 * mtime/dependency freshness check. */
@@ -760,99 +765,109 @@ export function createWorkspaceDiagnosticsCacheContext(
 		depIndexColdRefusalCount = 0;
 	};
 
+	const lookup = (
+		filePath: string,
+		scopeKey: string,
+	): WorkspaceDiagnosticsCacheLookup | undefined => {
+		// #1669 review N4: the epoch guarded `persist()` but not `lookup()` —
+		// an in-flight sweep kept REPLAYING disowned entries into its OWN
+		// served results for the rest of its run even though the on-disk
+		// cache was already correctly cleared (disk stayed clean, but the
+		// user still saw stale results for the remainder of THIS sweep).
+		// Check on every call, not just at load time: a refresh landing
+		// mid-sweep must stop lookups from serving pre-refresh entries
+		// immediately, not only prevent them from being written back.
+		// `cacheEpoch` is in-memory only (see its doc comment) — this runs
+		// per file, and a same-process clear always updates memory
+		// synchronously, so this needs no disk read to be authoritative.
+		if (!epoch.isCurrent()) return undefined;
+		const key = cacheKeyFor(filePath);
+		const entry = entries[key];
+		if (!entry || entry.scopeKey !== scopeKey) return undefined;
+		// #1782: age gate BEFORE the mtime/dependency gate — it is two number
+		// comparisons and no syscalls, so an expired entry costs strictly less
+		// than a served one did. An entry that asserts findings and predates
+		// this session (or has aged past the in-session ceiling) is DROPPED,
+		// not served: the caller falls through to a fresh touch, and that
+		// re-touch is what re-subjects the file to every live-publish gate,
+		// including the #1640 inferred-project demote (which needs a live
+		// tsserver for the file and therefore cannot fire on a pure cache hit).
+		// Deleting rather than merely refusing keeps the on-disk file from
+		// carrying ghosts forever: the #1782 cache was rewritten hours after
+		// the entries went stale and still contained them.
+		const now = Date.now();
+		const expiry = classifyWorkspaceDiagnosticsCacheExpiry(
+			entry,
+			now,
+			workspaceDiagnosticsCacheSessionStart(),
+			fileCreatedAtFor(filePath, entry),
+		);
+		if (expiry) {
+			delete entries[key];
+			dirty = true;
+			expiredCount += 1;
+			expiredByReason[expiry] += 1;
+			oldestExpiredAgeMs = Math.max(
+				oldestExpiredAgeMs,
+				Math.max(0, now - entry.scannedAt),
+			);
+			return undefined;
+		}
+		// #1793, widened by #1814: an entry that asserted dependency
+		// knowledge this session can't revalidate is DELETED, not merely
+		// refused — mirroring the #1782 age gate just above. Refusing
+		// without deleting (the #1793 review's F3 finding) would leave
+		// the same stale entry to be refused again on every LATER cold
+		// sweep too, and both `record()` call sites (`index.ts`,
+		// `tools/lsp-diagnostics.ts`) skip recording an unconfirmed
+		// (`timedOut`/`error`) touch — so a file whose forced re-touch
+		// happens to time out would pay that timeout budget on EVERY
+		// sweep forever, whereas pre-fix it served instantly. Deleting
+		// bounds the repeat cost to exactly what a file that was NEVER
+		// cached already costs: one re-touch attempt per sweep until a
+		// CONFIRMED result lands — a real, accepted, pre-existing cost
+		// class, not a new one. The first confirmed re-touch (this
+		// session or a later one) re-records the file stamped against
+		// THAT session's own dependency knowledge, healing it either
+		// way. `!hasDepKnowledge(filePath)` (#1814) covers BOTH "no
+		// index this session at all" (#1793's original population) AND
+		// "an index exists but doesn't cover this file" (#1814's
+		// addition, the probe F gap) — one check for both, since both
+		// mean the same thing to this entry: nothing here can revalidate
+		// the stronger claim it made when it was recorded.
+		if (entry.depIndexAtScan === true && !hasDepKnowledge(filePath)) {
+			delete entries[key];
+			dirty = true;
+			depIndexColdRefusalCount += 1;
+			return undefined;
+		}
+		if (!isEntryFresh(filePath, entry, getImports)) return undefined;
+		return {
+			diagnostics: entry.diagnostics,
+			count: entry.count,
+			binding: {
+				contentHash: entry.contentHash,
+				boundToCurrentDisk: diskBindingCache.boundToCurrentDisk(filePath, {
+					contentHash: entry.contentHash,
+				}),
+			},
+			scannedAt: entry.scannedAt,
+		};
+	};
+
 	return {
 		importsFor(filePath) {
 			return getImports(filePath);
 		},
-		hasFindings(filePath) {
-			return (entries[cacheKeyFor(filePath)]?.diagnostics.length ?? 0) > 0;
-		},
-		lookup(filePath, scopeKey) {
-			// #1669 review N4: the epoch guarded `persist()` but not `lookup()` —
-			// an in-flight sweep kept REPLAYING disowned entries into its OWN
-			// served results for the rest of its run even though the on-disk
-			// cache was already correctly cleared (disk stayed clean, but the
-			// user still saw stale results for the remainder of THIS sweep).
-			// Check on every call, not just at load time: a refresh landing
-			// mid-sweep must stop lookups from serving pre-refresh entries
-			// immediately, not only prevent them from being written back.
-			// `cacheEpoch` is in-memory only (see its doc comment) — this runs
-			// per file, and a same-process clear always updates memory
-			// synchronously, so this needs no disk read to be authoritative.
-			if (!epoch.isCurrent()) return undefined;
-			const key = cacheKeyFor(filePath);
-			const entry = entries[key];
-			if (!entry || entry.scopeKey !== scopeKey) return undefined;
-			// #1782: age gate BEFORE the mtime/dependency gate — it is two number
-			// comparisons and no syscalls, so an expired entry costs strictly less
-			// than a served one did. An entry that asserts findings and predates
-			// this session (or has aged past the in-session ceiling) is DROPPED,
-			// not served: the caller falls through to a fresh touch, and that
-			// re-touch is what re-subjects the file to every live-publish gate,
-			// including the #1640 inferred-project demote (which needs a live
-			// tsserver for the file and therefore cannot fire on a pure cache hit).
-			// Deleting rather than merely refusing keeps the on-disk file from
-			// carrying ghosts forever: the #1782 cache was rewritten hours after
-			// the entries went stale and still contained them.
-			const now = Date.now();
-			const expiry = classifyWorkspaceDiagnosticsCacheExpiry(
-				entry,
-				now,
-				workspaceDiagnosticsCacheSessionStart(),
-				fileCreatedAtFor(filePath, entry),
+		servesClean(filePath, scopeKey) {
+			const entry = entries[cacheKeyFor(filePath)];
+			if (!entry || entry.diagnostics.length > 0) return false;
+			const answer = lookup(filePath, scopeKey);
+			return (
+				answer !== undefined && answer.binding.boundToCurrentDisk !== false
 			);
-			if (expiry) {
-				delete entries[key];
-				dirty = true;
-				expiredCount += 1;
-				expiredByReason[expiry] += 1;
-				oldestExpiredAgeMs = Math.max(
-					oldestExpiredAgeMs,
-					Math.max(0, now - entry.scannedAt),
-				);
-				return undefined;
-			}
-			// #1793, widened by #1814: an entry that asserted dependency
-			// knowledge this session can't revalidate is DELETED, not merely
-			// refused — mirroring the #1782 age gate just above. Refusing
-			// without deleting (the #1793 review's F3 finding) would leave
-			// the same stale entry to be refused again on every LATER cold
-			// sweep too, and both `record()` call sites (`index.ts`,
-			// `tools/lsp-diagnostics.ts`) skip recording an unconfirmed
-			// (`timedOut`/`error`) touch — so a file whose forced re-touch
-			// happens to time out would pay that timeout budget on EVERY
-			// sweep forever, whereas pre-fix it served instantly. Deleting
-			// bounds the repeat cost to exactly what a file that was NEVER
-			// cached already costs: one re-touch attempt per sweep until a
-			// CONFIRMED result lands — a real, accepted, pre-existing cost
-			// class, not a new one. The first confirmed re-touch (this
-			// session or a later one) re-records the file stamped against
-			// THAT session's own dependency knowledge, healing it either
-			// way. `!hasDepKnowledge(filePath)` (#1814) covers BOTH "no
-			// index this session at all" (#1793's original population) AND
-			// "an index exists but doesn't cover this file" (#1814's
-			// addition, the probe F gap) — one check for both, since both
-			// mean the same thing to this entry: nothing here can revalidate
-			// the stronger claim it made when it was recorded.
-			if (entry.depIndexAtScan === true && !hasDepKnowledge(filePath)) {
-				delete entries[key];
-				dirty = true;
-				depIndexColdRefusalCount += 1;
-				return undefined;
-			}
-			if (!isEntryFresh(filePath, entry, getImports)) return undefined;
-			return {
-				diagnostics: entry.diagnostics,
-				count: entry.count,
-				binding: {
-					contentHash: entry.contentHash,
-					boundToCurrentDisk: diskBindingCache.boundToCurrentDisk(filePath, {
-						contentHash: entry.contentHash,
-					}),
-				},
-				scannedAt: entry.scannedAt,
-			};
 		},
+		lookup,
 		record(
 			filePath,
 			scopeKey,
