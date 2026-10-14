@@ -117,6 +117,10 @@ instead of rebuilding the probe.
   except `index.ts`, which gates on the lifecycle hook handler a hunk lands in.
   A green `TLA+ models` run over an unchanged model proves nothing about the
   new code.
+  For a `TLA+ unaffected` line, read the family's as-built config constants:
+  a diff that changes a behaviour one of them encodes refutes the line and is
+  a finding (#4387: a removed read stayed modelled after #4235; #4393 pins the
+  constants to the code).
 - **Red-proof audit.** A claimed red without its quoted transcript is a finding
   of its own; reproduce it (step 3).
 - **Quoted-evidence audit.** Diff every CI line the body quotes against the job

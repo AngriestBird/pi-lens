@@ -95,6 +95,8 @@ The principles govern building, testing, and closes-versus-refs. pi-lens adds:
   except the `index.ts` row, which gates per lifecycle hook handler a changed
   hunk lands in (an edit outside every handler prints a note). A TLA lane that
   adds a family adds its map row (#3802, #3878).
+  The unaffected line never covers a change to behaviour an as-built config
+  constant encodes: flip the constant and its configs in the same PR.
 
 <important if="delegating work or coordinating a lane">
 
@@ -537,6 +539,13 @@ file-scoped worklist and receives no project-wide scanner output.
     or misses them. Await that sink's flush (or `flushAllNdjsonWriters`) right
     before the read with no other await in between, or inside the reading
     helper. Enforced by `tests/config/sink-read-drain-sweep.test.ts`.
+68. **Model switch drift:** a TLA+ config constant that mirrors a code choice
+    (inject a read, retire on an unknown range) goes stale when the code
+    changes and the constant does not, and TLC then proves the old design
+    green. A PR that changes such a behaviour flips the constant in the same
+    change; a `TLA+ unaffected` line never covers it. Screen: for a mapped
+    file's diff, list the family's as-built constants and check each against
+    the changed branch.
 
 </important>
 
