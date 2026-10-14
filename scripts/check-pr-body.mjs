@@ -1783,13 +1783,71 @@ function normalizeDetectionLayer(value) {
 
 // `Gap:` names a follow-up issue, an existing test that now covers the bug, or
 // a reasoned `none:`. `exists:` must name a test path (under tests/ or a test
-// extension), so "exists: TBD" is refused.
+// extension), so "exists: TBD" is refused. When the caller supplies
+// `existsOnBase` (#4404), the path must also be a file on the PR's base: a test
+// this PR adds is the fix, not a layer that already existed.
+const DETECTION_EXISTS_ALTERNATIVES =
+	'Give an issue ref (#NNN) or "none: <reason>" instead.';
+
+export const detectionExistsNotOnBaseMessage = (path) =>
+	`PR body "## Detection" says "Gap: exists: ${path}", but that file is not on the PR's base commit (git merge-base origin/master HEAD). A test this PR adds is not an existing layer. ${DETECTION_EXISTS_ALTERNATIVES}`;
+
+export const DETECTION_EXISTS_BASE_UNRESOLVED_MESSAGE =
+	'PR body "## Detection" says "Gap: exists: <path>", but the PR\'s base commit could not be resolved (git merge-base origin/master HEAD failed; fetch origin/master), so the path cannot be verified. ' +
+	DETECTION_EXISTS_ALTERNATIVES;
+
+/**
+ * #4404: the PR's base commit, the merge base `localDiff` already diffs from.
+ * `null` when it cannot be resolved (no `origin/master`, a shallow checkout, a
+ * git stub that prints nothing).
+ */
+export function resolvePrBase(cwd = process.cwd(), git = gitExecFileSync) {
+	try {
+		const sha = String(
+			git(["merge-base", "origin/master", "HEAD"], { cwd, encoding: "utf8" }),
+		).trim();
+		return sha || null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * The `existsOnBase` reader for `lintDetectionSection`: `true` when the path is
+ * a file on the PR's base, `false` when it is not, `null` when the base cannot
+ * be resolved. The base resolves once, on first use.
+ */
+export function baseFileReader(cwd = process.cwd(), git = gitExecFileSync) {
+	let base;
+	return (path) => {
+		base ??= resolvePrBase(cwd, git) ?? false;
+		if (!base) return null;
+		try {
+			return (
+				String(
+					git(["cat-file", "-t", `${base}:${path}`], {
+						cwd,
+						encoding: "utf8",
+						stdio: ["ignore", "pipe", "ignore"],
+					}),
+				).trim() === "blob"
+			);
+		} catch {
+			return false;
+		}
+	};
+}
+
+function existsGapPath(value) {
+	const exists = /^exists\s*:\s*(.+)$/i.exec(String(value ?? "").trim());
+	return exists ? exists[1].replace(/[*_`]/g, "").trim() : null;
+}
+
 function validDetectionGap(value) {
 	const text = String(value ?? "").trim();
 	if (/(?:^|\s|[(])#\d+\b/.test(text)) return true;
-	const exists = /^exists\s*:\s*(.+)$/i.exec(text);
-	if (exists) {
-		const testPath = exists[1].replace(/[*_`]/g, "").trim();
+	const testPath = existsGapPath(text);
+	if (testPath !== null) {
 		return (
 			testPath.startsWith("tests/") ||
 			/(?:^|\/)test_[^/]+$/.test(testPath) ||
@@ -1863,6 +1921,12 @@ export function lintDetectionSection(body = "", options = {}) {
 	)
 		return [DETECTION_MESSAGE];
 	if (gap === null || !validDetectionGap(gap)) return [DETECTION_MESSAGE];
+	const claimed = existsGapPath(gap);
+	if (claimed !== null && typeof options.existsOnBase === "function") {
+		const onBase = options.existsOnBase(claimed);
+		if (onBase === null) return [DETECTION_EXISTS_BASE_UNRESOLVED_MESSAGE];
+		if (!onBase) return [detectionExistsNotOnBaseMessage(claimed)];
+	}
 	return [];
 }
 
@@ -2128,7 +2192,10 @@ export function lintPrBody(body = "", options = {}) {
 					".",
 			);
 	}
-	if (options.bugClosing) errors.push(...lintDetectionSection(body));
+	if (options.bugClosing)
+		errors.push(
+			...lintDetectionSection(body, { existsOnBase: options.existsOnBase }),
+		);
 	if (options.diff)
 		errors.push(
 			...lintRuntimeObservability(lines, headings, options.diff, options),
@@ -2397,6 +2464,7 @@ export async function lintPullRequestEvent(
 	const result = lintPrBody(body, {
 		requireTestAssessment,
 		bugClosing: bugClosing === true,
+		existsOnBase: baseFileReader(),
 		diff,
 		workingTree: true,
 		// Existing open bodies were authored before #4280. Set PI_LENS_PROSE_GRACE=1
@@ -2527,15 +2595,7 @@ export function lintWorkflowRunEvidence(
 	const unreadable = [];
 	// The merge base is what `localDiff` diffs from; no base image (an added
 	// file, a shallow checkout) reads as "not a comment-only edit".
-	let mergeBase = null;
-	try {
-		mergeBase = gitExecFileSync(["merge-base", "origin/master", "HEAD"], {
-			cwd,
-			encoding: "utf8",
-		}).trim();
-	} catch {
-		mergeBase = null;
-	}
+	const mergeBase = resolvePrBase(cwd);
 	const errors = evaluateWorkflowRunEvidence({
 		changedFiles: parseChangedFiles(diff),
 		body,
@@ -2615,9 +2675,11 @@ export function lintLocalPrBody(
 		console.warn(
 			'::warning::PR body check could not read the closed issue label (gh missing, unauthenticated, or failed), so the "## Detection" requirement check was skipped (#4288).',
 		);
+	const existsOnBase = baseFileReader(cwd, git);
 	const result = lintPrBody(body, {
 		requireTestAssessment: localTouchesTests(cwd, git),
 		bugClosing: bugClosing === true,
+		existsOnBase,
 		diff,
 		cwd,
 		workingTree: true,
@@ -2629,7 +2691,10 @@ export function lintLocalPrBody(
 	// answer reds here instead of at CI. `lintPrBody` already did it for a
 	// resolved bug.
 	if (bugClosing !== true) {
-		const detection = lintDetectionSection(body, { ignoreUnfilled: true });
+		const detection = lintDetectionSection(body, {
+			ignoreUnfilled: true,
+			existsOnBase,
+		});
 		result.errors.push(...detection);
 		if (detection.length) result.valid = false;
 	}

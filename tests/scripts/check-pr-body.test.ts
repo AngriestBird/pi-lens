@@ -5528,6 +5528,29 @@ describe("detection on the local preflight (#4288)", () => {
 	});
 });
 
+// Repositories for the `Gap: exists:` base rule (#4404): `origin/master` is an
+// empty commit and the head adds NEW_TEST, or `origin/master` already holds
+// OLD_TEST and the head edits it, or the `origin/master` ref is gone.
+const NEW_TEST = "tests/new-layer.test.ts";
+const OLD_TEST = "tests/old-layer.test.ts";
+const existsBaseFixtures = {
+	headAdds: () => createOriginMasterFixture(NEW_TEST),
+	baseHas: () => {
+		const rows = ["// layer"];
+		return createOriginMasterFixture(undefined, {
+			path: OLD_TEST,
+			pre: rows,
+			post: [...rows, "// edited"],
+			dirty: [...rows, "// edited"],
+		});
+	},
+	noBase: () => {
+		const fixture = createOriginMasterFixture(NEW_TEST);
+		rmSync(join(fixture, ".git", "refs", "remotes", "origin", "master"));
+		return fixture;
+	},
+};
+
 // Recurrence: #4340 and #4341 (2026-10-13) linted green with
 // `check-pr-body.mjs --lint-local` and then failed CI's "PR body (advisory)"
 // on the `## Detection` rule, because the offline preflight could not read the
@@ -5552,10 +5575,14 @@ describe("--lint-local resolves the closed issue label through gh (#4288)", () =
 			rmSync(fixture, { recursive: true, force: true });
 	});
 
-	function runLint(text: string, gh: "bug" | "feature" | "fail") {
+	function runLint(
+		text: string,
+		gh: "bug" | "feature" | "fail",
+		repository: string = createOriginMasterFixture(),
+	) {
 		const root = mkdtempSync(join(tmpdir(), "pi-lens-lint-local-gh-"));
 		roots.push(root);
-		const fixture = createOriginMasterFixture();
+		const fixture = repository;
 		fixtures.push(fixture);
 		const binDir = join(root, "bin");
 		const log = join(root, "gh-calls.log");
@@ -5681,5 +5708,156 @@ describe("--lint-local resolves the closed issue label through gh (#4288)", () =
 		const run = runLint(`${body}\n\nRefs #4321.`, "bug");
 		expect(run.calls).toBe("");
 		expect(run.status).toBe(0);
+	});
+
+	// Recurrence: #4390, #4391 and #4340 (October 2026) each answered the
+	// Detection retrospective with `Gap: exists: <test>` where the test was the
+	// regression test the PR itself added, so no layer issue was ever filed
+	// (#4404). The CLI runs for real over a real two-commit repository:
+	// `exists:` must name a file on the merge base of `origin/master` and HEAD,
+	// the same base `localDiff` and the workflow-run rule read.
+	describe("Gap exists: names a file on the PR's base (#4404)", () => {
+		const assessed = (gap: string) =>
+			`${closing}\n\n### Test assessment\nThe fixture file is the subject.${detection("external user").replace(/Gap: .*\n/, `Gap: ${gap}\n`)}`;
+		const lint = (repository: string, gap: string) =>
+			runLint(assessed(gap), "bug", repository);
+
+		posix(
+			"refuses an exists: path the head adds, pointing at an issue ref or none:",
+			() => {
+				const run = lint(existsBaseFixtures.headAdds(), `exists: ${NEW_TEST}`);
+				expect(run.output).toContain(
+					`"Gap: exists: ${NEW_TEST}", but that file is not on the PR's base commit`,
+				);
+				expect(run.output).toContain('issue ref (#NNN) or "none: <reason>"');
+				expect(run.status).toBe(1);
+			},
+		);
+
+		// The local preflight validates a present section whatever the label, a
+		// route separate from the bug-closing one (#4288): both carry the rule.
+		posix("refuses an exists: path the head adds for a non-bug issue", () => {
+			const run = runLint(
+				assessed(`exists: ${NEW_TEST}`),
+				"feature",
+				existsBaseFixtures.headAdds(),
+			);
+			expect(run.output).toContain("is not on the PR's base commit");
+			expect(run.status).toBe(1);
+		});
+
+		posix("accepts an exists: path that is on the base", () => {
+			const run = lint(existsBaseFixtures.baseHas(), `exists: ${OLD_TEST}`);
+			expect(run.output).not.toContain("Detection");
+			expect(run.status).toBe(0);
+		});
+
+		posix("refuses an exists: path that is on neither side", () => {
+			const run = lint(
+				existsBaseFixtures.baseHas(),
+				"exists: tests/nowhere.test.ts",
+			);
+			expect(run.output).toContain("is not on the PR's base commit");
+			expect(run.status).toBe(1);
+		});
+
+		posix("refuses an exists: path that names a directory on the base", () => {
+			const run = lint(existsBaseFixtures.baseHas(), "exists: tests/");
+			expect(run.output).toContain("is not on the PR's base commit");
+			expect(run.status).toBe(1);
+		});
+
+		posix(
+			"fails closed with a fetch hint when the base cannot be resolved",
+			() => {
+				const run = lint(existsBaseFixtures.noBase(), `exists: ${NEW_TEST}`);
+				expect(run.output).toContain("base commit could not be resolved");
+				expect(run.output).toContain("fetch origin/master");
+				expect(run.status).toBe(1);
+			},
+		);
+
+		posix(
+			"keeps the issue-ref and none: forms available when the head adds the test",
+			() => {
+				for (const gap of ["#4404", "none: no layer would have seen it"]) {
+					const run = lint(existsBaseFixtures.headAdds(), gap);
+					expect(run.output).not.toContain("Detection");
+					expect(run.status).toBe(0);
+				}
+			},
+		);
+
+		posix(
+			"keeps the issue-ref and none: forms available when the base cannot be resolved",
+			() => {
+				for (const gap of ["#4404", "none: no layer would have seen it"]) {
+					const run = lint(existsBaseFixtures.noBase(), gap);
+					expect(run.output).not.toContain("Detection");
+					expect(run.status).toBe(0);
+				}
+			},
+		);
+	});
+});
+
+// Recurrence: the CI entry builds its own options for `lintPrBody`; a rule wired
+// only into the local preflight would pass the same body in CI (#4404).
+describe("Gap exists: names a file on the PR's base through the CI event entry (#4404)", () => {
+	const closing = (gap: string) =>
+		`${body}\n\n### Test assessment\nThe fixture file is the subject.\n\n## Detection\n\nCaught by: external user\nShould have been caught by: CI unit\nGap: ${gap}\n\nCloses #4404.\n`;
+	const eventFetch = (text: string) =>
+		vi.fn().mockImplementation(async (url: string) => {
+			if (String(url).includes("/files"))
+				return new Response(JSON.stringify([]), { status: 200 });
+			if (String(url).includes("/issues/"))
+				return new Response(JSON.stringify({ labels: [{ name: "bug" }] }), {
+					status: 200,
+				});
+			return new Response(JSON.stringify({ body: text }), { status: 200 });
+		});
+	const fixtures: string[] = [];
+	let previousCwd = "";
+	beforeEach(() => {
+		previousCwd = process.cwd();
+		vi.stubEnv("GITHUB_TOKEN", "t");
+		vi.stubEnv("GITHUB_API_URL", "https://api.example");
+		vi.stubEnv("GITHUB_REPOSITORY", "o/r");
+	});
+	afterEach(() => {
+		vi.unstubAllEnvs();
+		vi.restoreAllMocks();
+		process.chdir(previousCwd);
+		for (const fixture of fixtures.splice(0))
+			rmSync(fixture, { recursive: true, force: true });
+	});
+
+	async function lintAt(fixture: string, text: string) {
+		fixtures.push(fixture);
+		const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		process.chdir(fixture);
+		const result = await lintPullRequestEvent(eventFetch(text), {
+			pull_request: { number: 4404, body: text },
+		});
+		return { result, output: errors.mock.calls.flat().join("\n") };
+	}
+
+	it("refuses an exists: path the head adds", async () => {
+		const run = await lintAt(
+			existsBaseFixtures.headAdds(),
+			closing(`exists: ${NEW_TEST}`),
+		);
+		expect(run.output).toContain("is not on the PR's base commit");
+		expect(run.result.valid).toBe(false);
+	});
+
+	it("accepts an exists: path on the base", async () => {
+		const run = await lintAt(
+			existsBaseFixtures.baseHas(),
+			closing(`exists: ${OLD_TEST}`),
+		);
+		expect(run.output).not.toContain("Detection");
+		expect(run.result.valid).toBe(true);
 	});
 });
