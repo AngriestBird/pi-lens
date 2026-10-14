@@ -129,6 +129,31 @@ export function diagnosticsIpcPathForCwd(
 	return base.replace(/\.sock$/, `-diagnostics-${pid}.sock`);
 }
 
+/**
+ * The file name Node actually binds for a Unix socket path (#4353). A path past
+ * the `sun_path` size is cut to its first 108 bytes (104 on darwin) without an
+ * error, so under a long TMPDIR (a 79-character root already reaches it for
+ * the 33-character socket name) the bound file has lost its `.sock` tail.
+ * Every stale-socket `unlink` of an endpoint must name THIS path: unlinking the
+ * untruncated one misses the file, the next `listen` then fails `EADDRINUSE`,
+ * and the warm channel stays down until the file is removed by hand. Connects
+ * need no change, because `net.createConnection` truncates the same way.
+ * Windows pipes and paths that fit come back unchanged.
+ *
+ * Decision: unlink the bound name rather than move long paths to a short
+ * directory. A relocation would change where the server and the hook meet and
+ * who may create the entry; the unlink changes neither.
+ */
+export function boundUnixSocketPath(
+	endpoint: string,
+	platform: NodeJS.Platform = process.platform,
+): string {
+	const limit = platform === "darwin" ? 104 : platform === "win32" ? 0 : 108;
+	const bytes = Buffer.from(endpoint);
+	if (limit === 0 || bytes.length <= limit) return endpoint;
+	return bytes.subarray(0, limit).toString();
+}
+
 export interface WarmDiagnosticsRequest {
 	route: "diagnostics";
 	version: number;

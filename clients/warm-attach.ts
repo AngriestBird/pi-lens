@@ -11,6 +11,7 @@ import { logLatency } from "./latency-logger.js";
 import { touchCoverageGap } from "./lsp/diagnostic-binding.js";
 import { loadLspService } from "./lsp-lazy.js";
 import {
+	boundUnixSocketPath,
 	contentHash,
 	createWarmIpcLineReader,
 	diagnosticsIpcPathForCwd,
@@ -197,7 +198,7 @@ function startServer(cwd: string): void {
 	const endpoint = diagnosticsIpcPathForCwd(cwd, process.pid);
 	if (process.platform !== "win32") {
 		try {
-			fs.unlinkSync(endpoint);
+			fs.unlinkSync(boundUnixSocketPath(endpoint));
 		} catch {
 			// No stale socket.
 		}

@@ -42,6 +42,7 @@ import {
 	acknowledgeTurnEnd,
 	analyzeFile,
 	analyzeFileFresh,
+	boundUnixSocketPath,
 	canRebuildPiLens,
 	createMcpHost,
 	createWarmIpcLineReader,
@@ -347,7 +348,7 @@ function startIpcServer(): void {
 	// Windows don't need this.)
 	if (process.platform !== "win32") {
 		try {
-			fs.unlinkSync(IPC_PATH);
+			fs.unlinkSync(boundUnixSocketPath(IPC_PATH));
 		} catch {
 			// no stale socket — fine
 		}
@@ -495,7 +496,7 @@ function startIpcServer(): void {
 		}
 		if (process.platform !== "win32") {
 			try {
-				fs.unlinkSync(IPC_PATH);
+				fs.unlinkSync(boundUnixSocketPath(IPC_PATH));
 			} catch {
 				// ignore
 			}

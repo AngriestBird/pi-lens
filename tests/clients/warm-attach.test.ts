@@ -2,24 +2,31 @@ import * as fs from "node:fs";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	getDegradationSummary,
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
 import type { InstanceEntry } from "../../clients/instance-registry.js";
-import { diagnosticsIpcPathForCwd } from "../../clients/mcp/ipc.js";
+import {
+	boundUnixSocketPath,
+	diagnosticsIpcPathForCwd,
+} from "../../clients/mcp/ipc.js";
 import { STALE_HEARTBEAT_MS } from "../../clients/instance-reaper.js";
 import { normalizeFilePath } from "../../clients/path-utils.js";
-import { selectWarmAttachIncumbent } from "../../clients/warm-attach.js";
+import {
+	configureWarmAttach,
+	selectWarmAttachIncumbent,
+} from "../../clients/warm-attach.js";
 import {
 	_resetWarmAttachForTests,
 	_setWarmAttachForTests,
+	_warmAttachServerForTests,
 	isWarmAttached,
 	tryWarmAttachedCodeActions,
 	tryWarmAttachedDiagnostics,
 } from "../../clients/warm-attach.js";
-import { removeTempDirSync } from "./test-utils.js";
+import { removeTempDirSync, setupTestEnvironment } from "./test-utils.js";
 
 function entry(pid: number, root: string, heartbeatAt: string): InstanceEntry {
 	return {
@@ -180,3 +187,53 @@ describe("warm-attach records a missing incumbent endpoint (#3255)", () => {
 		}
 	});
 });
+
+// Recurrence prevented (#4353): the stale-endpoint unlink named the untruncated
+// path, so under a TMPDIR long enough for Node to cut the bound name it missed
+// the stale file and `listen` failed EADDRINUSE, leaving the incumbent
+// unreachable. The file is planted at the BOUND name, which is what a killed
+// host leaves.
+describe.skipIf(process.platform === "win32")(
+	"configureWarmAttach stale endpoint under a long TMPDIR (#4353)",
+	() => {
+		it("clears a stale file at the bound name and listens", async () => {
+			const { tmpDir } = setupTestEnvironment("pi-lens-wa-sock-");
+			// Pad to 100 characters so the socket name crosses sun_path inside
+			// the FILE name (a cut inside a directory would fail the bind).
+			const longTmp =
+				tmpDir.length >= 100
+					? tmpDir
+					: path.join(tmpDir, "p".repeat(100 - tmpDir.length - 1));
+			fs.mkdirSync(longTmp, { recursive: true });
+			vi.stubEnv("TMPDIR", longTmp);
+			vi.stubEnv("PI_LENS_WARM_ATTACH", "1");
+			try {
+				const cwd = path.join(tmpDir, "ws");
+				fs.mkdirSync(cwd, { recursive: true });
+				const endpoint = diagnosticsIpcPathForCwd(cwd, process.pid);
+				const bound = boundUnixSocketPath(endpoint);
+				expect(bound, "the planted path is really truncated").not.toBe(
+					endpoint,
+				);
+				fs.writeFileSync(bound, "");
+				await configureWarmAttach(cwd);
+				// A connect succeeds only if a server is listening on the bound
+				// file; the stale regular file refuses it (ECONNREFUSED).
+				const outcome = await new Promise<string>((resolve) => {
+					const probe = net.createConnection(endpoint);
+					probe.once("connect", () => {
+						probe.destroy();
+						resolve("connected");
+					});
+					probe.once("error", (error) =>
+						resolve((error as NodeJS.ErrnoException).code ?? String(error)),
+					);
+				});
+				expect(outcome).toBe("connected");
+			} finally {
+				_resetWarmAttachForTests();
+				vi.unstubAllEnvs();
+			}
+		});
+	},
+);

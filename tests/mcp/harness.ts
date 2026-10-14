@@ -13,6 +13,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+	boundUnixSocketPath,
 	diagnosticsIpcPathForCwd,
 	ipcPathForCwd,
 } from "../../clients/mcp/ipc.js";
@@ -32,26 +33,6 @@ export const testTimeoutScale = (() => {
 	const parsed = Number(process.env.PI_LENS_TEST_TIMEOUT_SCALE ?? "1");
 	return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
 })();
-
-/**
- * The file name Node actually binds for a Unix socket path (#4353). A path past
- * the `sun_path` size is cut to its first 108 bytes (104 on darwin) without an
- * error, so under a long TMPDIR (the orchestrator lane roots make this socket's
- * path 113 characters) the bound file has lost its `.sock` tail. Neither
- * `fs.rmSync(endpoint)` nor the server's own `unlinkSync(IPC_PATH)` names that
- * file; only libuv's unlink on a graceful `close()` does, and the harness
- * SIGKILLs the child, so the teardown removes the truncated name itself.
- * Windows pipes and paths that fit come back unchanged.
- */
-export function boundUnixSocketPath(
-	endpoint: string,
-	platform: NodeJS.Platform = process.platform,
-): string {
-	const limit = platform === "darwin" ? 104 : platform === "win32" ? 0 : 108;
-	const bytes = Buffer.from(endpoint);
-	if (limit === 0 || bytes.length <= limit) return endpoint;
-	return bytes.subarray(0, limit).toString();
-}
 
 export interface McpHarnessOptions {
 	/** Project root the server operates on (--cwd). Defaults to the repo root. */
@@ -178,6 +159,17 @@ export class McpHarness {
 		return new Promise((resolve) => {
 			this.child.once("exit", () => resolve());
 			this.child.stdin.end();
+		});
+	}
+
+	/** SIGKILL the server and wait for it to exit, with no endpoint cleanup: the
+	 *  non-graceful end that leaves the server's socket file behind (#4353). */
+	kill(): Promise<void> {
+		return new Promise((resolve) => {
+			if (this.child.exitCode !== null || this.child.signalCode !== null)
+				return resolve();
+			this.child.once("exit", () => resolve());
+			this.child.kill("SIGKILL");
 		});
 	}
 

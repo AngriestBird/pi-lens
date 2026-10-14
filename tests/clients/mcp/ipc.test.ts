@@ -13,6 +13,7 @@ import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { McpAnalyzeResult } from "../../../clients/mcp/analyze.js";
 import {
+	boundUnixSocketPath,
 	contentHash,
 	createWarmIpcLineReader,
 	createWarmIpcRequestQueue,
@@ -306,6 +307,29 @@ describe("ipcPathForCwd", () => {
 		} else {
 			expect(p.endsWith(".sock")).toBe(true);
 		}
+	});
+});
+
+describe("boundUnixSocketPath (#4353)", () => {
+	// Recurrence prevented: the server unlinked the untruncated endpoint, so a
+	// killed server's socket (bound under a name Node had cut to `sun_path`)
+	// survived and the next `listen` failed EADDRINUSE.
+	const long = `/${"a".repeat(120)}/pi-lens-mcp-0123456789abcdef.sock`;
+
+	it("cuts a Linux path to the 108 bytes sun_path holds", () => {
+		const bound = boundUnixSocketPath(long, "linux");
+		expect(Buffer.byteLength(bound)).toBe(108);
+		expect(long.startsWith(bound)).toBe(true);
+	});
+
+	it("cuts a darwin path to 104 bytes", () => {
+		expect(Buffer.byteLength(boundUnixSocketPath(long, "darwin"))).toBe(104);
+	});
+
+	it("leaves a path that fits, and every Windows pipe, unchanged", () => {
+		const short = "/tmp/pi-lens-mcp-0123456789abcdef.sock";
+		expect(boundUnixSocketPath(short, "linux")).toBe(short);
+		expect(boundUnixSocketPath(long, "win32")).toBe(long);
 	});
 });
 
