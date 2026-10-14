@@ -14,7 +14,6 @@
  * the server's `spawn()`.
  */
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetBoundedTelemetry } from "../../../clients/bounded-telemetry.js";
@@ -144,7 +143,7 @@ const internals = (registry: ClientRegistry) =>
 const dirs: string[] = [];
 function tempProject(prefix: string, withMarker = true): string {
 	const dir = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), `reg4449-${prefix}-`)),
+		fs.mkdtempSync(path.join(process.cwd(), `.probe-reg4449-${prefix}-`)),
 	);
 	if (withMarker) fs.writeFileSync(path.join(dir, "package.json"), "{}\n");
 	dirs.push(dir);
