@@ -2239,6 +2239,31 @@ describe("#3525: FileTime moves only over bytes the conversation accounts for", 
 	});
 
 	/**
+	 * #4387 sibling (BashAuthoredPre4387 in formal/read-guard): the zero-read
+	 * allow over a whole-file authorship injects a whole-file read, so the own
+	 * positional edit's one-line read does not shadow the authorship. #4235
+	 * (55fa5210c) dropped the injection for every authorship to keep a range
+	 * scope narrow; an edit of another line after the first own edit was then
+	 * refused with no other writer (#3520's no-drop direction).
+	 */
+	it("keeps a bash write's whole-file authorship vouching after its own positional edit (#4387)", async () => {
+		const env = setupTestEnvironment("rg-4387-own-positional-");
+		try {
+			const file = fixture(env.tmpDir, "probe.ts", "alpha\nbeta\ngamma\n");
+			const runtime = newRuntime(env.tmpDir);
+			await bashSed(runtime, file, "beta", "BETA");
+			const first = await positionalEdit(runtime, file, [[1, 1, "ALPHA"]]);
+			expect(first.blocked).toBe(false);
+			await applyEdit(runtime, file, first);
+			const other = await positionalEdit(runtime, file, [[3, 3, "GAMMA"]]);
+			expect(other.reason).toBeUndefined();
+			expect(other.blocked).toBe(false);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	/**
 	 * #4387: the conversation's own oldText edit of a file it authored whole
 	 * lands its own bytes; only which lines they occupy is unknown, and a
 	 * whole-file authorship needs no range (the #4210 N3 rule for a partial
@@ -2278,7 +2303,20 @@ describe("#3525: FileTime moves only over bytes the conversation accounts for", 
 		}
 	});
 
-	it("allows the next zero-read edit after a bash write and its own oldText edit (#4387)", async () => {
+	/**
+	 * The zero-read state a `/tree` or `/fork` leaves: the injected read names
+	 * no tool call, so the move drops it, and the authorship, whose write is on
+	 * the branch, alone vouches (AuthorOwnOldTextNoInject).
+	 */
+	const moveKeepingAuthorship = (runtime: RuntimeCoordinator, file: string) => {
+		const id = runtime.readGuard
+			.exportAuthorship()
+			.entries?.find((entry) => entry.filePath === file)?.toolCallId;
+		runtime.readGuard.retainBranch(new Set(id === undefined ? [] : [id]));
+		expect(runtime.readGuard.getReadHistory(file)).toEqual([]);
+	};
+
+	it("allows the next edit after a bash write and its own oldText edits, also after a branch move (#4387)", async () => {
 		const env = setupTestEnvironment("rg-4387-own-bash-");
 		resetDegradationLedger();
 		try {
@@ -2291,6 +2329,7 @@ describe("#3525: FileTime moves only over bytes the conversation accounts for", 
 			const second = await textEdit(runtime, file, "alpha\n", "ALPHA\n");
 			expect(second.reason).toBeUndefined();
 			expect(second.blocked).toBe(false);
+			moveKeepingAuthorship(runtime, file);
 			const positional = await positionalEdit(runtime, file, [[2, 2, "BETA2"]]);
 			expect(positional.reason).toBeUndefined();
 			expect(positional.blocked).toBe(false);
@@ -2311,6 +2350,7 @@ describe("#3525: FileTime moves only over bytes the conversation accounts for", 
 			expect(
 				(await textEdit(runtime, file, "gamma\n", "GAMMA\n")).blocked,
 			).toBe(false);
+			moveKeepingAuthorship(runtime, file);
 			foreignWrite(file, 1, "EXTERNAL1");
 			const edit = await textEdit(runtime, file, "BETA\n", "BETA2\n");
 			expect(edit.blocked).toBe(true);

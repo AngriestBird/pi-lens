@@ -3694,9 +3694,9 @@ describe("runtime-tool-result inline behavior warnings", () => {
 				authorship: "whole-file",
 				toolCallId: "4387-earlier-write",
 			});
-			expect(runtime.readGuard.checkEdit(directPath, [1, 1]).action).toBe(
-				"allow",
-			);
+			expect(runtime.readGuard.exportAuthorship().written).toEqual([
+				normalizeFilePath(directPath),
+			]);
 			await runHandlerExpectingNoThrow(() =>
 				handleToolCall({
 					event: {

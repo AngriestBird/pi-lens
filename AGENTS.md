@@ -226,8 +226,8 @@ the surface they bite; each block loads only when its trigger applies.
     an existing range-scoped license and creates none. Only an explicit
     `whole-file` signal may widen authorship. Over a whole-file authorship
     the range is moot, so whether the credit advances it is the writer rule
-    alone (`mayAdvanceAuthorship`), as for a partial credit (#4387: an own
-    oldText edit retired its write's authorship). A producer with no
+    alone (`mayAdvanceAuthorship`), as for a partial credit; an own oldText
+    edit must not retire its write's authorship. A producer with no
     pre-write check says so with `advanceAuthorship: false`, never by
     leaning on UNKNOWN. Enforced at `clients/mutation-bridge.ts` and
     `clients/read-guard.ts`, with the F-4210-2 production bridge witness.
@@ -1076,7 +1076,10 @@ read binding from actual content drift (#4265). Authorship (`writtenThisSession`
 follows content identity (#4131): it holds the bytes the conversation last
 wrote, `stat` only pre-filters the hash, and another writer's byte change ends
 it at the next zero-read edit, bash write or drain on the file
-(`retireChangedAuthorship`); no later write resumes it. A mutation-bridge
+(`retireChangedAuthorship`); no later write resumes it. A zero-read allow
+over a whole-file authorship injects a whole-file read, so the own edit's
+one-line read cannot shadow the rest; a range scope gets none.
+A mutation-bridge
 write (no pre-write check) may create a first authorship but ends an
 existing one; the observed replay alone advances it, its tool_call having
 retired every file it may replay. The store holds at most 4096 files. A branch move keeps it

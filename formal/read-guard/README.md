@@ -307,6 +307,12 @@ head that added this model. It is not checked in CI.
 | `AuthorDrainForeign` | #4187 F6 P3 fixed: bash, another writer, the agent_end drain (a whitespace-only format), an edit | pass | 209 |
 | `AuthorDrainForeignNoRetire` | the same, the drain re-baselining (round 1 of #4187) | violated `NoStaleAllow` | 121 |
 | `AuthorTouch` | #4187 F5 no-drop: another writer's whitespace-only rewrite (a new mtime, the same tokens) keeps bash authorship | pass (all three invariants) | 39 |
+| `AuthorOwnOldText` | #4387 fixed: bash authors a never-read file, then the agent's own oldText edits, no other writer; the edit's UNKNOWN-range credit advances the whole-file authorship (`OldTextRetires = FALSE`) | pass (all three invariants) | 51 |
+| `AuthorOwnOldTextNoInject` | the same in the zero-read state a `/tree` or `/fork` leaves (`ZeroReadInjects <- ZeroReadInjectsPre4387`: the injected read names no tool call, so a move drops it and keeps the authorship); every edit asks the advanced authorship | pass (all three invariants) | 50 |
+| `AuthorOwnOldTextPre4387` | the same on the code from #4235 until #4387 (both overrides): the own oldText edit retires its own write's authorship, and the next exact oldText edit is refused (BashWrite, Edit, EditRW, Edit) | violated `NoFalseBlock` | 29 |
+| `AuthorOwnOldTextForeign` | #4387 keeps #4210's fail-closed direction: bash, the own oldText edit, another writer, a positional edit, with no injected read; the advanced authorship no longer holds the disk's bytes, so the edit is refused | pass (`NoStaleAllow`, `NoBlindAllow`) | 534 |
+| `AuthorOwnOldTextForeignNoIdentity` | the same with `AuthorIdentity = FALSE`: the advanced authorship vouches for the other writer's line, so the Foreign pass is not vacuous | violated `NoStaleAllow` | 61 |
+| `BashAuthoredPre4387` | the #4387 sibling: `BashAuthored` on the code from #4235 until #4387, which dropped the zero-read injection for every authorship (55fa5210c); the own positional edit's read then shadows the authorship and an edit of another line is refused (BashWrite, Edit, EditRW, Edit). The code since #4387 injects again over a whole-file authorship only | violated `NoFalseBlock` | 30 |
 | `AuthorBranch` | #3603 fixed: bash, `/tree` or `/fork`, an edit; the kept branch shows the write | pass (all three invariants) | 303 |
 | `AuthorBranchCleared` | the same, every move clearing authorship (the code before #4187) | violated `NoFalseBlock` | 149 |
 | `AuthorBranchExt` | #3603 with another writer before or after the move | pass | 1,833 |

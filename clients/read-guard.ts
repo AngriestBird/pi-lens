@@ -1507,7 +1507,7 @@ export class ReadGuard {
 			// Only a write pi-lens observed (recordWritten, from any producer) is
 			// the agent's own; a newer mtime is any writer's (#3520). It stays the
 			// agent's own while the disk holds the bytes it wrote (#4131). A
-			// synthetic read is injected for it.
+			// whole-file authorship gets a synthetic whole-file read below.
 			this.retireChangedAuthorship(filePath);
 			if (this.writtenThisSession.get(filePath)?.retired) {
 				const verdict = this.blockOrWarn(
@@ -1523,6 +1523,12 @@ export class ReadGuard {
 			}
 			const authored = this.writtenThisSession.get(filePath);
 			if (authored && authoredRangeCovers(authored, touchedLines, editRanges)) {
+				// #4387: the bytes were just found intact, so the conversation
+				// holds every line; without the read, the own edit's one-line read
+				// would shadow the authorship for the rest of the file. A range
+				// scope gets none: it would widen to the whole file (#4210).
+				if (authored.authoredRanges === undefined)
+					this.injectCreationRead(filePath, 0, 0);
 				const verdict = this.allow();
 				this.recordVerdict(filePath, "edit", touchedLines, verdict, {
 					reasonKind: "session_authored",

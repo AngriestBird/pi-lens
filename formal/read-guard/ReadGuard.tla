@@ -152,6 +152,23 @@ Lines == 1..MaxLen
 \* The license switch reuses the existing boolean in the focused configs;
 \* configs without an own-repeat action are unchanged by this abstraction.
 SpendLicense == BridgeNoAdvance
+\* #4387: TRUE (code from #4235 until #4387): an oldText edit's tool_result, an
+\* UNKNOWN-range credit, retires the authorship it was allowed under; FALSE
+\* (code since #4387): the range is moot over a whole-file authorship (the
+\* only kind modelled), so the checked edit advances it like a positional one.
+\* A config selects the old code with `OldTextRetires <- OldTextRetiresPre4387`.
+OldTextRetires == FALSE
+OldTextRetiresPre4387 == TRUE
+\* The zero-read allow over a whole-file authorship injects a whole-file read
+\* (ReadGuard.checkEdit's session_authored arm): TRUE (code before #4235 and
+\* since #4387); FALSE (code from #4235 until #4387, which dropped it for every
+\* authorship to keep a range scope narrow). Without it the own positional
+\* edit's read shadows the authorship, and an edit of another line is refused
+\* (BashAuthoredPre4387.cfg). FALSE is also the state a /tree or /fork leaves:
+\* the injected read names no tool call, so the move drops it and keeps the
+\* authorship. A config selects it with `ZeroReadInjects <- ZeroReadInjectsPre4387`.
+ZeroReadInjects == TRUE
+ZeroReadInjectsPre4387 == FALSE
 NoH == [l \in Lines |-> 0]
 Min(a, b) == IF a < b THEN a ELSE b
 
@@ -314,7 +331,7 @@ Reloc(lo, hi) ==
 Verdict(lo, hi) ==
     IF Len(reads) = 0
     THEN IF Authored \/ (MtimeAuthored /\ rev > born)           \* the zero-read authorship check (writtenThisSession)
-           THEN [act |-> "allow", to |-> lo, inject |-> TRUE, why |-> "session_authored"]
+           THEN [act |-> "allow", to |-> lo, inject |-> ZeroReadInjects, why |-> "session_authored"]
            ELSE [act |-> "block", to |-> lo, inject |-> FALSE,
                  why |-> IF written.on THEN "authorship_retired" ELSE "zero_read"]
     ELSE IF FileTimeCheck /\ ft # rev
@@ -336,7 +353,7 @@ Verdict(lo, hi) ==
 VerdictOldText(lo, hi) ==
     IF Len(reads) = 0
     THEN IF Authored \/ (MtimeAuthored /\ rev > born)
-           THEN [act |-> "allow", to |-> lo, inject |-> TRUE, why |-> "session_authored"]
+           THEN [act |-> "allow", to |-> lo, inject |-> ZeroReadInjects, why |-> "session_authored"]
            ELSE [act |-> "block", to |-> lo, inject |-> FALSE, why |-> "zero_read"]
     ELSE [act |-> "allow", to |-> lo, inject |-> FALSE, why |-> "old_text"]
 
@@ -498,10 +515,14 @@ Edit(lo, span, oldText) ==
     /\ ops' = ops + 1
     /\ UNCHANGED <<kTurn, ft, written, pendCreate, born, turnNo, ext, nb, fixedTurn, dr>>
 
-\* tool_result of the edit: recordWritten (FileTime from disk now).
+\* tool_result of the edit: recordWritten (FileTime from disk now). An oldText
+\* edit's credit is UNKNOWN-range (#4387, OldTextRetires above); with no
+\* authorship the code's pipeline credit still authors the file, so only an
+\* existing one differs.
 EditRW ==
     /\ pc = "editRW"
-    /\ ft' = rev /\ written' = Auth(disk) /\ pendCreate' = FALSE
+    /\ ft' = rev /\ pendCreate' = FALSE
+    /\ written' = IF OldTextRetires /\ ~pend.own /\ written.on THEN Retired ELSE Auth(disk)
     /\ reads' = LET r0 == IF pendCreate
                             THEN AddRec(reads, Rec(1, Len(disk), MkH(disk, 1, Len(disk)), FALSE), TRUE)
                             ELSE reads
