@@ -56,6 +56,7 @@ export {
 	createWarmIpcRequestQueue,
 	ipcPathForCwd,
 	readTurnEndStatus,
+	unlinkStaleUnixSocket,
 	WARM_TURN_END_SCHEMA_VERSION,
 	type WarmAnalyzeRequest,
 	type WarmTurnEndRequest,

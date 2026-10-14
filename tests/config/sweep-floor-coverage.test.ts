@@ -200,6 +200,10 @@ const DECLARED_EXCEPTIONS: Readonly<Record<string, string>> = {
 		"host type cases, not a production population sweep",
 	"tests/packaging.test.ts":
 		"packaging behavior cases, not a production population sweep",
+	"tests/mcp/harness-socket-teardown.test.ts":
+		"lists one harness-owned TMPDIR root after dispose() and asserts no " +
+		"socket remains (#4353); a behavior case over a fixture root, not a " +
+		"production population sweep",
 	"tests/scripts/guard-bash-probe.test.ts":
 		"corpus-runner behavior cases over fixture rows and stub hooks (#4071), " +
 		"not a production source-population sweep",

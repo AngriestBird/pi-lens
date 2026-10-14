@@ -443,19 +443,25 @@ function repoRootEntryCandidates(entry: string): string[] {
 	return hits;
 }
 
+/** The pre-#4354 shape of the foreign-run cases: no creator on record. */
+const NO_CREATORS: ReadonlyMap<string, string> = new Map();
+
 describe("tmp-fixture-hygiene", () => {
 	afterAll(async () => {
 		const scan = await tmpHygieneWaitForOwnerDrain();
 		const liveOwners = scan.live;
 		const { testFile, leftovers } = tmpHygieneLeakReport();
+		const creators = tmpHygieneCreators();
 		// #3314: entries whose every candidate owner is a file no worker of THIS
 		// run id loaded belong to another vitest invocation sharing this TMPDIR.
 		// They are dropped before attribution AND spared by the sweep below.
+		// #4354: an entry a file of this run is on record as creating never is.
 		const otherInvocation = new Set(
 			tmpHygieneForeignRunEntries(
 				leftovers,
 				ownersForTmpEntry,
 				tmpHygieneRunFiles(),
+				creators,
 			),
 		);
 		const attributable = tmpHygieneExcludeLiveOwnerEntries(
@@ -463,7 +469,6 @@ describe("tmp-fixture-hygiene", () => {
 			ownerForTmpEntry,
 			liveOwners,
 		);
-		const creators = tmpHygieneCreators();
 		const described = attributable.map((entry) =>
 			formatTmpHygieneLeakEntry(
 				entry,
@@ -1607,8 +1612,45 @@ describe("tmp-fixture-hygiene", () => {
 					["pi-lens-wiring-resume-iCpHXp"],
 					ownersForTmpEntry,
 					manifest([OWN], "foreign"),
+					NO_CREATORS,
 				),
 			).toEqual(["pi-lens-wiring-resume-iCpHXp"]);
+		});
+
+		it("never excuses an entry whose creator ran in this run, only one with no creator on record", () => {
+			// #4354: the #4347 jscpd leak. Its prefix owner (jscpd-client) never ran
+			// in the fork, so the unanimous-owner filter above excused it, yet the
+			// creators record named a file that DID run: a leak this run made.
+			const leaked = "pi-lens-wiring-resume-iCpHXp";
+			const sibling = "pi-lens-wiring-new-AbCdEf";
+			const record = path.join(
+				TMP_HYGIENE_HOME,
+				`tmp-hygiene-creators-foreign-4354-${process.pid}.log`,
+			);
+			fs.writeFileSync(record, `${leaked}\t${OWN}\n`);
+			try {
+				const creators = tmpHygieneCreators(record);
+				expect(
+					tmpHygieneForeignRunEntries(
+						[leaked, sibling],
+						ownersForTmpEntry,
+						manifest([OWN], "creator"),
+						creators,
+					),
+					"only the entry with no creator on record stays foreign",
+				).toEqual([sibling]);
+				// Without the record both are excused: the case #4347 hid in.
+				expect(
+					tmpHygieneForeignRunEntries(
+						[leaked, sibling],
+						ownersForTmpEntry,
+						manifest([OWN], "creator"),
+						NO_CREATORS,
+					),
+				).toEqual([leaked, sibling]);
+			} finally {
+				fs.rmSync(record, { force: true });
+			}
 		});
 
 		it("judges an entry whose owner ran here, and every entry with no manifest", () => {
@@ -1619,6 +1661,7 @@ describe("tmp-fixture-hygiene", () => {
 					["pi-lens-wiring-resume-iCpHXp"],
 					ownersForTmpEntry,
 					manifest([OWN, WIRING], "own"),
+					NO_CREATORS,
 				),
 			).toEqual([]);
 			expect(
@@ -1626,6 +1669,7 @@ describe("tmp-fixture-hygiene", () => {
 					["pi-lens-wiring-resume-iCpHXp"],
 					ownersForTmpEntry,
 					new Set<string>(),
+					NO_CREATORS,
 				),
 			).toEqual([]);
 			// An entry no file claims is judged too — `pi-lens-ast-grep` is
@@ -1635,6 +1679,7 @@ describe("tmp-fixture-hygiene", () => {
 					["pi-lens-ast-grep"],
 					ownersForTmpEntry,
 					manifest([OWN], "unowned"),
+					NO_CREATORS,
 				),
 			).toEqual([]);
 		});
@@ -1650,6 +1695,7 @@ describe("tmp-fixture-hygiene", () => {
 					["pi-lens-shared-1"],
 					owners,
 					new Set(["b.test.ts"]),
+					NO_CREATORS,
 				),
 			).toEqual([]);
 			expect(
@@ -1657,6 +1703,7 @@ describe("tmp-fixture-hygiene", () => {
 					["pi-lens-shared-1"],
 					owners,
 					new Set(["c.test.ts"]),
+					NO_CREATORS,
 				),
 			).toEqual(["pi-lens-shared-1"]);
 		});
@@ -1798,6 +1845,7 @@ describe("tmp-fixture-hygiene", () => {
 						["pi-lens-planted-lit-XyZ"],
 						(entry) => ownersForTmpEntry(entry, index),
 						new Set(["decoy.test.ts"]),
+						NO_CREATORS,
 					),
 					"an entry whose owner this run never loaded stays another invocation's",
 				).toEqual(["pi-lens-planted-lit-XyZ"]);
@@ -1808,6 +1856,7 @@ describe("tmp-fixture-hygiene", () => {
 						["pi-lens-planted-lit-XyZ"],
 						(entry) => ownersForTmpEntry(entry, index),
 						new Set(["decoy.test.ts", "planted.test.ts"]),
+						NO_CREATORS,
 					),
 				).toEqual([]);
 			} finally {
