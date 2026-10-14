@@ -187,7 +187,8 @@ function auditAgainstMint(
 				`${detector}:${key}: baseline row ${count} is past the frozen mint ` +
 					`(${minted === undefined ? "absent" : `minted ${minted}`}) and has no ` +
 					"ADMITTED_AFTER_BASELINE entry; add the entry and its " +
-					`"// flake-shape: ${detector} — <reason>" header`,
+					`"// flake-shape: ${detector} — <reason>" header ` +
+					"(if the key only moved with a renamed file, re-mint the frozen file and its digest instead)",
 			);
 		}
 	}
