@@ -160,6 +160,18 @@ blocks dispatch above the thresholds (no hand-written fallback;
 every refill; state them in the lane ledger. Standing rule from
 2026-09-03, lifted only when the maintainer says so.
 
+## Host capacity (orchestrator)
+
+The maintainer may cap how many subagents run at once, for example when RAM is
+shared with a local model. This is a machine-load cap, separate from
+`PI_LENS_TEST_MAX_WORKERS` and from Git authority. A lane counts by what it
+runs, not by its role or brief wording: any agent that runs a build, Vitest, a
+language server or a probe counts, including an investigator that reproduces
+through a probe and a Git-read-only reviewer. Agents that only read files and
+call `gh`, grep or Explore never count and run in parallel with the capped
+lanes; their brief says "no builds, no tests, no language servers, no probes"
+(maintainer, 2026-10-14).
+
 ## Brief contract (orchestrator)
 
 Before dispatching any issue that adds a shared helper or seam: grep for
@@ -738,6 +750,8 @@ Each row cost a lane at least once; the prose above carries the record.
 | Diagnosing a red from the first `##[error]` line | #4054's shard-5 red was called "npm registry unreachable"; that line came from a passing stubbed test, and the real failure was a 5 s timeout in check-pr-body.test.ts (#4088, 2026-10-07). Read the FAIL lines; treat annotation lines from stubbed tests as noise |
 | Triggering CI on a bot PR before checking whether a run already exists | land.sh closed and reopened #4084 30 s after an update-branch, before the new run registered, which cancelled the run, and the cancelled aggregate read red (2026-10-07). Reopen only when no run exists for the head after a real wait |
 | Writing a closing keyword where GitHub does not honour it, or by accident | #4121's title said `closes #3873`, which fails the close-keyword check (titles are never honoured); #4094's body said "then fixed #4080", an accidental closing keyword (2026-10-07). Put closing keywords in the body only, and reread the body for `fix(es\|ed) #N` prose |
+| Quoting a closing keyword in a commit message | #4375's commit f40ac6c28 quoted `not fixed: #4346` and `Whether this closes #1513` as lint examples; GitHub acts on commit-message keywords that reach the default branch, so the merge closed both (2026-10-14). `closingIssuesReferences` omits them. Commit messages get the same keyword rules as the body; quote examples as `#N` without the keyword |
+| Merging a contract-doc edit on an orchestrator read alone | #4379's seven-line host-cap section used "read-only" for the opposite of its meaning in `docs/pi-lens-subagent.md`, and left probe-running investigators unclassified; a scoped review caught both (2026-10-14). An edit to `docs/pi-lens-*.md` or AGENTS.md gets one scoped reviewer pass |
 | Seeding a group list from the active queue instead of the tracker | The orchestrator's session group held 3 issues while `area:session` had 8 more open p2s, so "is the session group done?" was answered from an incomplete list (2026-10-08). Build a group from the label and the tracker, then subtract what is out of scope |
 | Filing every LOW review finding as an issue | Each review spawned about one follow-up, so the CI group stayed at about 36 open after 16 closures (2026-10-07). Fold or drop LOW findings; file only MEDIUM and above or a reproduced sibling, and give each group a "done when" |
 | No cleanup when lanes end | 78 GB of finished lane trees and a 22 GB leaking test TMPDIR filled the root disk twice; two reviewers lost probe runs and one fixer's test file was truncated (2026-10-07). Remove a lane's trees and TMPDIR when its PR merges, and keep a disk alarm |
