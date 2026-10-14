@@ -36,7 +36,6 @@ import {
 	bootstrapCompare,
 	DEFAULT_THRESHOLD,
 	judge,
-	median,
 	mulberry32,
 } from "../../scripts/lib/latency-stats.mjs";
 
@@ -52,13 +51,6 @@ function noisy(centre: number, spread: number, n: number, seed: number) {
 
 const verdict = (base: number[], head: number[]) =>
 	judge(bootstrapCompare(base, head, { iterations: 500 }));
-
-describe("median", () => {
-	it("takes the middle of an odd group and the mean of the middle pair of an even one", () => {
-		expect(median([9, 1, 5])).toBe(5);
-		expect(median([4, 1, 3, 2])).toBe(2.5);
-	});
-});
 
 describe("bootstrapCompare", () => {
 	it("returns the same interval for the same samples (seeded)", () => {

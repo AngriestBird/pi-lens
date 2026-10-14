@@ -32,7 +32,6 @@ export const DEFAULT_ITERATIONS: number;
 export const DEFAULT_CONFIDENCE: number;
 export const DEFAULT_SEED: number;
 export function mulberry32(seed: number): () => number;
-export function median(values: readonly number[]): number;
 export function bootstrapCompare(
 	base: readonly number[],
 	head: readonly number[],

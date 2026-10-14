@@ -1,7 +1,7 @@
 // Bootstrapped comparison of two latency samples (#4363).
 //
 // `scripts/check-hot-path-latency.mjs` times each hot path N times on the
-// merge base and N times on the PR head. One run per tree says nothing about
+// base tree and N times on the head tree. One run per tree says nothing about
 // noise: #4344 round 2 claimed 624 ms to 7 ms from one run each. This module
 // resamples both groups with replacement, so the verdict carries a confidence
 // interval instead of a point estimate.
@@ -14,10 +14,12 @@
 //     above threshold the point estimate is at least `minRatio` times the base
 //                     median AND at least `minDiffMs` slower.
 //
-// Medians, not means: a host hiccup that slows one sample does not move them.
+// Medians (the shared one in test-shard-assignment.mjs), not means: a host hiccup that slows one sample does not move them.
 // The ratio threshold keeps a real 3 % shift on a 600 ms path from failing
 // the lane; the millisecond floor keeps a 40 % shift on a 2 ms path (below the
 // noise of a shared runner) from failing it.
+
+import { median } from "./test-shard-assignment.mjs";
 
 export const DEFAULT_THRESHOLD = Object.freeze({
 	minRatio: 1.25,
@@ -38,15 +40,6 @@ export function mulberry32(seed) {
 		t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
 		return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
 	};
-}
-
-export function median(values) {
-	if (values.length === 0) return Number.NaN;
-	const sorted = [...values].sort((a, b) => a - b);
-	const mid = sorted.length >> 1;
-	return sorted.length % 2 === 1
-		? sorted[mid]
-		: (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
 function resample(values, random) {
