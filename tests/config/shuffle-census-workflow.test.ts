@@ -162,22 +162,23 @@ function findings(text: string): string[] {
 			);
 	}
 
-	// Recurrence (rehearsal run 38608471496): `npm ci --ignore-scripts` leaves
-	// the ast-grep CLI binary and the formatter executables uninstalled, so
-	// seven files failed "alone" that pass in ci.yml's Unit job, and the census
-	// reported tool absence as members. Both jobs that start vitest install with
-	// scripts, as the Unit job does.
-	for (const [name, job] of [
-		["census", census],
-		["confirm-report", report],
+	// Recurrence (rehearsal run 38608471496): a bare `node scripts/...` has no
+	// node_modules/.bin on PATH (only `npm run` adds it), so the ast-grep and
+	// formatter tests, which look their CLI up on PATH and red under CI=true,
+	// reported seven files as failing alone that pass in ci.yml's Unit job.
+	for (const [name, step] of [
+		["census", censusRun],
+		[
+			"confirm-report",
+			(report.steps ?? []).find((s2) => run(s2).includes("--confirm")),
+		],
 	] as const)
 		if (
-			!(job.steps ?? []).some((step) =>
-				/^npm ci --no-audit --no-fund$/.test(run(step).trim()),
-			) ||
-			(job.steps ?? []).some((step) => /--ignore-scripts/.test(run(step)))
+			!/export PATH="\$GITHUB_WORKSPACE\/node_modules\/\.bin:\$PATH"/.test(
+				run(step ?? {}),
+			)
 		)
-			out.push(`${name} installs without the install scripts`);
+			out.push(`${name} does not put node_modules/.bin on PATH`);
 
 	// The report job: merges all six artifacts, confirms twice, reports.
 	if (report.needs !== "census" || !/always\(\)/.test(String(report.if ?? "")))
@@ -356,22 +357,22 @@ describe("shuffle-census-nightly.yml (#4405)", () => {
 			/census does not build/,
 		],
 		[
-			"installing with --ignore-scripts in the census job",
+			"dropping node_modules/.bin from the census PATH",
 			(text) =>
 				text.replace(
-					"      - run: npm ci --no-audit --no-fund\n",
-					"      - run: npm ci --no-audit --no-fund --ignore-scripts\n",
+					'          export PATH="$GITHUB_WORKSPACE/node_modules/.bin:$PATH"\n          ARGS=',
+					"          ARGS=",
 				),
-			/census installs without the install scripts/,
+			/census does not put node_modules\/\.bin on PATH/,
 		],
 		[
-			"installing with --ignore-scripts in the report job",
+			"dropping node_modules/.bin from the confirm PATH",
 			(text) =>
 				text.replace(
-					/(confirm-report:[\s\S]*?)npm ci --no-audit --no-fund\n/,
-					"$1npm ci --no-audit --no-fund --ignore-scripts\n",
+					'          export PATH="$GITHUB_WORKSPACE/node_modules/.bin:$PATH"\n          for pass',
+					"          for pass",
 				),
-			/confirm-report installs without the install scripts/,
+			/confirm-report does not put node_modules\/\.bin on PATH/,
 		],
 		[
 			"a single confirm pass",

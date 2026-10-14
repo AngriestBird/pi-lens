@@ -86,13 +86,9 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-      # Install scripts run (ci.yml's `Unit` job runs `npm install` the same
-      # way): `--ignore-scripts` leaves the ast-grep CLI binary and the
-      # formatter executables uninstalled, and the first rehearsal (run
-      # 38608471496) then reported seven files as failing alone that pass in
-      # the Unit job. `prepare` downloads the core grammars and builds dist/;
-      # the explicit steps below repeat both cheaply so the order stays visible.
-      - run: npm ci --no-audit --no-fund
+      - run: npm ci --no-audit --no-fund --ignore-scripts
+      # `--ignore-scripts` skips `prepare`, whose core grammar download the
+      # tests parse with; the explicit step ci.yml's targeted tests run.
       - name: Download core grammars
         run: node scripts/download-grammars.js --core --dest grammars
       - run: npm run build
@@ -102,6 +98,11 @@ jobs:
       - name: Run this part of the census
         run: |
           set -uo pipefail
+          # `npm run` puts node_modules/.bin on PATH; a bare `node` does not.
+          # The ast-grep and formatter tests look their CLI up on PATH and, with
+          # CI set, red "not installed" without it (rehearsal run 38608471496:
+          # seven files "failing alone", all tool absence).
+          export PATH="$GITHUB_WORKSPACE/node_modules/.bin:$PATH"
           ARGS=(--out "$RUNNER_TEMP/census" --part "${{ matrix.part }}/6" --budget-ms 4200000 --seeds 202,424,606)
           if [ "$WITH_ALONE" != "true" ]; then
             ARGS+=(--no-alone)
@@ -151,7 +152,7 @@ jobs:
           pattern: census-*
           path: ${{ runner.temp }}/census
           merge-multiple: true
-      - run: npm ci --no-audit --no-fund
+      - run: npm ci --no-audit --no-fund --ignore-scripts
       - name: Download core grammars
         run: node scripts/download-grammars.js --core --dest grammars
       - run: npm run build
@@ -163,6 +164,7 @@ jobs:
       - name: Confirm each failing member file alone, then rerun green-alone chunks
         run: |
           set -uo pipefail
+          export PATH="$GITHUB_WORKSPACE/node_modules/.bin:$PATH"
           for pass in 1 2; do
             node scripts/ci-shuffle-census.mjs --out "$RUNNER_TEMP/census" --confirm --part 0/1 --budget-ms 1800000 || true
           done
