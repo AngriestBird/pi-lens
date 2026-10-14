@@ -19,6 +19,21 @@ export const NEGATED_CLOSE_KEYWORD_MESSAGE =
 export const INVALID_CLOSE_KEYWORD_MESSAGE =
 	'Invalid close-keyword syntax: GitHub only applies the first issue in a comma-separated close list. Use one close keyword per issue, for example "Closes #123. Closes #456." (not "Closes #123, #456").';
 
+// Every "keyword #N" GitHub's closer sees in `text`, in order: the number, the
+// keyword's start, and the offset just past the number.
+function* closeMatches(text) {
+	for (const match of text.matchAll(CLOSE_KEYWORD)) {
+		CLOSE_ISSUE.lastIndex = 0;
+		const issue = CLOSE_ISSUE.exec(text.slice(match.index + match[0].length));
+		if (!issue) continue;
+		yield {
+			number: Number(issue[1]),
+			index: match.index,
+			end: match.index + match[0].length + issue[0].length,
+		};
+	}
+}
+
 export function stripNonSemanticMarkdown(body = "") {
 	return body
 		.replace(/```[\s\S]*?```/g, "")
@@ -37,23 +52,18 @@ function scanCloseIssues(text = "") {
 	const offendingLines = [];
 	const negatedMatches = [];
 	const cleanIssues = [];
-	for (const match of scanned.matchAll(CLOSE_KEYWORD)) {
-		const rest = scanned.slice(match.index + match[0].length);
-		CLOSE_ISSUE.lastIndex = 0;
-		const issue = CLOSE_ISSUE.exec(rest);
-		if (!issue) continue;
-		const number = Number(issue[1]);
+	for (const { number, index, end } of closeMatches(scanned)) {
 		if (!issues.includes(number)) issues.push(number);
-		const lineStart = scanned.lastIndexOf("\n", match.index) + 1;
-		const lineEnd = scanned.indexOf("\n", match.index);
+		const lineStart = scanned.lastIndexOf("\n", index) + 1;
+		const lineEnd = scanned.indexOf("\n", index);
 		const line = scanned
 			.slice(lineStart, lineEnd === -1 ? undefined : lineEnd)
 			.trim();
-		if (line.startsWith("|") || isHedged(scanned, match.index, lineStart)) {
+		if (line.startsWith("|") || isHedged(scanned, index, lineStart)) {
 			negatedMatches.push({ number, line });
 		} else if (!cleanIssues.includes(number)) cleanIssues.push(number);
 		COMMA_ISSUE.lastIndex = 0;
-		if (COMMA_ISSUE.exec(rest.slice(issue[0].length))) {
+		if (COMMA_ISSUE.exec(scanned.slice(end))) {
 			commaLists.push(number);
 			offendingLines.push(line);
 		}
@@ -113,12 +123,8 @@ export function closeKeywordErrors(result) {
 export function lintCloseKeywordPlacement(title = "", body = "") {
 	const scannedTitle = String(title);
 	const titleIssues = [...scanCloseIssues(scannedTitle).issues];
-	for (const match of scannedTitle.matchAll(CLOSE_KEYWORD)) {
-		const rest = scannedTitle.slice(match.index + match[0].length);
-		CLOSE_ISSUE.lastIndex = 0;
-		const issue = CLOSE_ISSUE.exec(rest);
-		if (!issue) continue;
-		const commaTail = rest.slice(issue[0].length).match(/^(?:\s*,\s*#\d+)+/);
+	for (const { end } of closeMatches(scannedTitle)) {
+		const commaTail = scannedTitle.slice(end).match(/^(?:\s*,\s*#\d+)+/);
 		for (const number of commaTail?.[0].matchAll(/#(\d+)/g) ?? []) {
 			const value = Number(number[1]);
 			if (!titleIssues.includes(value)) titleIssues.push(value);
@@ -139,4 +145,64 @@ export function closeKeywordPlacementMessage(missing) {
 	const repairs = missing.map((number) => `Closes #${number}.`).join(" ");
 	const alternatives = missing.map((number) => `refs #${number}`).join(", ");
 	return `Invalid close-keyword placement: GitHub only honours closing keywords in the PR body, never in the title. Add the matching body keyword(s): ${repairs} Alternatively, use ${alternatives} in the title.`;
+}
+
+export const COMMIT_CLOSE_KEYWORD_MESSAGE =
+	'Unintended close keyword in a commit message: GitHub closes the issue for any "keyword #N" or "keyword: #N" in a commit that reaches master, even when quoted, hedged or negated (#4371). Rephrase the commit so the keyword is not directly followed by the number (for example "refs #N"), or name the issue in a line-leading "Closes #N" trailer.';
+
+/**
+ * #4371: GitHub also closes on a close keyword in a COMMIT message once the
+ * commit reaches the default branch, which no PR-body lint sees. Returns the
+ * issues each commit would close that nothing names as intended: a line-leading
+ * keyword in that commit (a trailer, or a "(closes #N)" on its headline), a
+ * "(closes #N)" in the PR title, or a clean close keyword in the PR body.
+ *
+ * The scan runs on the RAW message, not markdown-stripped text: no GitHub
+ * behaviour proves a fence or backtick shields a keyword in a commit message
+ * (a probe needs a scratch repository), and a false positive costs one
+ * rephrase where a false negative closes an issue.
+ */
+export function lintCommitCloseKeywords(commits = [], title = "", body = "") {
+	const { issues: bodyIssues, negatedIssues } = parseCloseKeywords(body);
+	const intended = new Set([
+		...lintCloseKeywordPlacement(title, "").titleIssues,
+		...bodyIssues.filter((number) => !negatedIssues.includes(number)),
+	]);
+	const offenses = [];
+	for (const { sha, message } of commits) {
+		const flagged = new Set();
+		const text = String(message).replace(/\r\n?/g, "\n");
+		for (const { number, index } of closeMatches(text)) {
+			const lineStart = text.lastIndexOf("\n", index) + 1;
+			const before = text.slice(lineStart, index);
+			if (
+				intended.has(number) ||
+				flagged.has(number) ||
+				/^[ \t]*$/.test(before) ||
+				(lineStart === 0 && /\([ \t]*$/.test(before))
+			)
+				continue;
+			flagged.add(number);
+			const lineEnd = text.indexOf("\n", index);
+			offenses.push({
+				sha,
+				number,
+				line: text
+					.slice(lineStart, lineEnd === -1 ? undefined : lineEnd)
+					.trim(),
+			});
+		}
+	}
+	return { valid: offenses.length === 0, offenses };
+}
+
+export function commitCloseKeywordErrors(result) {
+	if (result.valid) return [];
+	return [
+		COMMIT_CLOSE_KEYWORD_MESSAGE,
+		...result.offenses.map(
+			({ sha, number, line }) =>
+				`  commit ${String(sha).slice(0, 9)} would close #${number}: ${line}`,
+		),
+	];
 }
