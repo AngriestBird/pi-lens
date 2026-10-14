@@ -25,6 +25,7 @@ import {
 	summarizeWorkspaceEdit,
 	workspaceEditTextPaths,
 } from "../clients/lsp/edits.js";
+import { configDisabledAuxiliaryLspServerIds } from "../clients/dispatch/auxiliary-lsp.js";
 import { hashDiagnosticContent } from "../clients/lsp/diagnostic-binding.js";
 import {
 	getLSPService,
@@ -697,6 +698,8 @@ async function openFileBestEffort(
 	lspService: ReturnType<typeof getLSPService>,
 	filePath: string,
 	waitForDiagnostics = false,
+	// #4323: auxiliaries the operator's configuration turns off; never acquired.
+	excludeServerIds?: ReadonlySet<string>,
 ): Promise<string | undefined> {
 	let fileContent: string | undefined;
 	try {
@@ -717,6 +720,7 @@ async function openFileBestEffort(
 			diagnostics: waitForDiagnostics ? "document" : "none",
 			source: "lsp_navigation",
 			clientScope: waitForDiagnostics ? "all" : "primary",
+			excludeServerIds,
 		});
 	} catch {
 		/* LSP server may not be ready yet — proceed anyway */
@@ -1353,8 +1357,22 @@ export function createLspNavigationTool(
 						);
 					}
 
-					await openFileBestEffort(lspService, filePath, true);
-					const diagnostics = await lspService.getDiagnostics(filePath);
+					// #4323: an explicit diagnostics read leaves an auxiliary the
+					// operator turned off unstarted, as `lsp_diagnostics` does.
+					const excludeServerIds = configDisabledAuxiliaryLspServerIds((name) =>
+						getFlag(name, ctx.cwd),
+					);
+					await openFileBestEffort(
+						lspService,
+						filePath,
+						true,
+						excludeServerIds,
+					);
+					const diagnostics = await lspService.getDiagnostics(
+						filePath,
+						undefined,
+						excludeServerIds,
+					);
 					const result = [
 						{
 							filePath,

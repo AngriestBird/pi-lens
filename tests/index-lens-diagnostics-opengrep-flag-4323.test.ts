@@ -65,13 +65,9 @@ describe("pi's lens_diagnostics leaves a switched-off Opengrep unstarted (#4323)
 	function excludedAfterActivation(
 		flags: Record<string, boolean | string>,
 	): string[] {
-		// An explicit, empty global config, so a maintainer's own
-		// `~/.pi-lens/config.json` cannot decide the control case.
-		if (process.env.PI_LENS_CONFIG_PATH === undefined) {
-			const empty = path.join(tmp, "empty-config.json");
-			fs.writeFileSync(empty, "{}\n");
-			process.env.PI_LENS_CONFIG_PATH = empty;
-		}
+		// A maintainer's own `~/.pi-lens/config.json` cannot decide the control
+		// case: the harness points PI_LENS_CONFIG_PATH at a missing file
+		// (tests/support/vitest-setup.ts), and the config case sets its own.
 		const pi = createPiMock({ "no-lsp": true, ...flags });
 		extension(pi.asExtensionAPI());
 		const getFlag = captured.getFlag;

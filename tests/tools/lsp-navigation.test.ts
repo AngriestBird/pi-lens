@@ -1220,7 +1220,7 @@ describe("lsp_navigation tool", () => {
 			expect(
 				(mocked.service as { getDiagnostics: ReturnType<typeof vi.fn> })
 					.getDiagnostics,
-			).toHaveBeenCalledWith(filePath);
+			).toHaveBeenCalledWith(filePath, undefined, new Set());
 		} finally {
 			removeTempDirSync(tmpDir);
 		}

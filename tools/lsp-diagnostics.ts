@@ -17,7 +17,7 @@ import {
 	runPerServerGroups,
 } from "../clients/lsp/capabilities.js";
 import {
-	buildScopeKey,
+	buildProbeScopeKey,
 	createWorkspaceDiagnosticsCacheContext,
 	type WorkspaceDiagnosticsCacheContext,
 } from "../clients/lsp/workspace-diagnostics-cache.js";
@@ -1033,11 +1033,16 @@ type LspReconcileVerdict = {
  * for this content, so claiming coverage for it would be the #1470/#1493 lie one
  * layer up. (Today an aux gap also demotes the whole verdict to "unconfirmed",
  * so the hook does not fire at all — this stays correct if that ever narrows.)
+ *
+ * #4323: a server in `excludeServerIds` (an auxiliary the operator's
+ * configuration turns off) was never asked, so it is dropped as well; an
+ * Opengrep-origin blocker must outlive a check that left Opengrep unstarted.
  */
 function coveredSourcesForCheck(
 	file: string,
 	serverScope: "primary" | "all",
 	unconfirmedServerIds: readonly string[],
+	excludeServerIds?: ReadonlySet<string>,
 ): string[] {
 	const unconfirmed = new Set(unconfirmedServerIds);
 	const covered = new Set<string>();
@@ -1057,6 +1062,7 @@ function coveredSourcesForCheck(
 		const auxiliary = isAuxiliary(server);
 		if (auxiliary && serverScope === "primary") continue;
 		if (unconfirmed.has(server.id)) continue;
+		if (excludeServerIds?.has(server.id)) continue;
 		// The dispatch runner tags the primary language server's findings `lsp`;
 		// auxiliaries keep their own tool id.
 		covered.add(auxiliary ? server.id : "lsp");
@@ -1490,6 +1496,7 @@ async function collectFileDiagnosticResult(
 				file,
 				serverScope,
 				unconfirmedServerIds,
+				excludeServerIds,
 			),
 			cwd,
 		});
@@ -1706,6 +1713,7 @@ async function runFileDiagnostics(
 				absPath,
 				serverScope,
 				unconfirmedServerIds,
+				excludeServerIds,
 			),
 			cwd,
 		});
@@ -2008,15 +2016,15 @@ async function collectBatchDiagnostics(
 	// actually match what each asked for (see `buildScopeKey`'s doc). #4323:
 	// an all-server check excludes the auxiliaries the operator turned off, so
 	// they are part of its key; a primary-only touch attaches no auxiliary, so
-	// the exclusion does not change its coverage.
+	// the exclusion does not change its coverage. `buildProbeScopeKey` keeps
+	// this writer's keys apart from the sweep's, whose payload skips
+	// `pi-lens-ignore`.
 	const resolvedCwd = options.cwd ?? process.cwd();
 	const cacheCtx = createWorkspaceDiagnosticsCacheContext(resolvedCwd);
 	const serverScope = options.serverScope ?? "all";
-	const scopeKey = buildScopeKey(
+	const scopeKey = buildProbeScopeKey(
 		serverScope,
-		serverScope === "all" && options.excludeServerIds
-			? [...options.excludeServerIds]
-			: undefined,
+		serverScope === "all" ? options.excludeServerIds : undefined,
 	);
 	const resultsByIndex = new Map<number, FileDiagnosticResult>();
 	let completed = 0;

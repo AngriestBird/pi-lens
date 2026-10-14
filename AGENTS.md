@@ -741,9 +741,12 @@ file-scoped worklist and receives no project-wide scanner output.
 - Which auxiliaries the operator's configuration switches off (a kill switch
   such as `--no-opengrep` / `opengrep.enabled=false`) has one owner,
   `configDisabledAuxiliaryLspServerIds` in `clients/dispatch/auxiliary-lsp.ts`.
-  The explicit `lsp_diagnostics` probe passes that set as `excludeServerIds` to
-  both its touch and its `getDiagnostics` fallback, through the flag resolver
-  each host injects; the session's resource degrade is not part of it (#4323).
+  The explicit `lsp_diagnostics` probe and `lsp_navigation workspaceDiagnostics`
+  pass that set as `excludeServerIds` to both the touch and `getDiagnostics`,
+  through the flag resolver each host injects; the session's resource degrade
+  is not part of it. The probe's batch cache key comes from
+  `buildProbeScopeKey`, never equal to the workspace sweep's key, because the
+  sweep records before `pi-lens-ignore` and the probe after it.
 - LSP roots never exceed the session-cwd ceiling. Root/config discovery uses
   shared marker seams. Child cwd resolution uses `resolveToolCwd` and its
   caller-specific markers.

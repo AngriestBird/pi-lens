@@ -13,7 +13,10 @@
  * primary-only YAML check reaches the clientless `getDiagnostics` fallback.
  *
  * Every switched-off case runs before the control, which starts Opengrep and
- * so proves the fixture would have started it. The host wiring that supplies
+ * so proves the fixture would have started it. The same cases pin the two
+ * other places a switched-off scanner showed through: the blocker coverage
+ * claim and the cache key the workspace sweep shares, plus the
+ * `lsp_navigation workspaceDiagnostics` route. The host wiring that supplies
  * the flag resolver is pinned in
  * `tests/index-lens-diagnostics-opengrep-flag-4323.test.ts`.
  */
@@ -42,6 +45,7 @@ const yamlProbe = path.join(workspace, "probe.yaml");
 const nested = path.join(workspace, "nested");
 const startsMarker = path.join(workspace, "opengrep-starts.txt");
 const OPENGREP_FINDING = "opengrep stand-in finding";
+const SWEEP_FINDING = "finding cached by a workspace sweep";
 
 /** The operator's switch, as both hosts resolve it. */
 const noOpengrep = (name: string) => name === "no-opengrep";
@@ -52,16 +56,19 @@ function opengrepStarts(): number {
 		.length;
 }
 
+type ConfirmedNoBlockers = { filePath: string; coveredSources?: string[] };
+
 async function diagnose(
 	params: Record<string, unknown>,
 	getFlag?: (name: string) => boolean,
+	confirmed?: ConfirmedNoBlockers[],
 ): Promise<{ text: string; details: Record<string, unknown> }> {
 	const { createLspDiagnosticsTool } =
 		await import("../../tools/lsp-diagnostics.js");
 	const { getLSPService } = await import("../../clients/lsp/index.js");
 	const result = (await createLspDiagnosticsTool(
 		undefined,
-		undefined,
+		confirmed ? (info) => confirmed.push(info) : undefined,
 		getLSPService,
 		getFlag ? (name) => getFlag(name) : undefined,
 	).execute(
@@ -78,6 +85,25 @@ async function diagnose(
 		text: String(result.content[0]?.text),
 		details: result.details ?? {},
 	};
+}
+
+/** `lsp_navigation operation=workspaceDiagnostics` for one file. */
+async function navigateDiagnostics(
+	file: string,
+	getFlag?: (name: string) => boolean,
+): Promise<string> {
+	const { createLspNavigationTool } =
+		await import("../../tools/lsp-navigation.js");
+	const result = (await createLspNavigationTool(
+		(name) => name === "lens-lsp" || getFlag?.(name) === true,
+	).execute(
+		"nav-4323",
+		{ operation: "workspaceDiagnostics", path: file },
+		new AbortController().signal,
+		null,
+		{ cwd: workspace },
+	)) as { content: Array<{ text?: string }> };
+	return String(result.content[0]?.text);
 }
 
 describe("an explicit LSP check with Opengrep switched off (#4323)", () => {
@@ -158,19 +184,88 @@ describe("an explicit LSP check with Opengrep switched off (#4323)", () => {
 	});
 
 	it("does not start Opengrep for a single-file check", async () => {
-		const result = await diagnose({ path: probe }, noOpengrep);
+		const confirmed: ConfirmedNoBlockers[] = [];
+		const result = await diagnose({ path: probe }, noOpengrep, confirmed);
 
 		expect(opengrepStarts()).toBe(0);
 		expect(result.text).not.toContain(OPENGREP_FINDING);
 		// The language server still answers; the switch narrows nothing else.
 		expect(result.details.unconfirmed).not.toBe(true);
+		// The clean answer may retire a language-server blocker, never an
+		// Opengrep one: Opengrep was not asked.
+		expect(confirmed.map((info) => info.coveredSources)).toEqual([["lsp"]]);
 	});
 
 	it("does not start Opengrep for a batch check", async () => {
-		const result = await diagnose({ paths: [probe, secondProbe] }, noOpengrep);
+		const confirmed: ConfirmedNoBlockers[] = [];
+		const result = await diagnose(
+			{ paths: [probe, secondProbe] },
+			noOpengrep,
+			confirmed,
+		);
 
 		expect(opengrepStarts()).toBe(0);
 		expect(result.text).not.toContain(OPENGREP_FINDING);
+		expect(confirmed.map((info) => info.coveredSources)).toEqual([
+			["lsp"],
+			["lsp"],
+		]);
+	});
+
+	it("does not serve a workspace sweep's cache entry to a check with Opengrep switched off", async () => {
+		// `mode=full` records under `all|opengrep`, before `pi-lens-ignore` is
+		// applied. Seed that entry exactly as the sweep's writer does.
+		const sweptA = path.join(workspace, "swept-a.json");
+		const sweptB = path.join(workspace, "swept-b.json");
+		fs.writeFileSync(sweptA, '{"d": 4}\n');
+		fs.writeFileSync(sweptB, '{"e": 5}\n');
+		// A sweep touches each file before it records, so the JSON server has
+		// already heard Created for it; #4320 refuses a finding entry scanned at
+		// or before that announcement. Let the server see the files first.
+		await diagnose({ paths: [sweptA, sweptB] }, noOpengrep);
+		const { buildScopeKey, createWorkspaceDiagnosticsCacheContext } =
+			await import("../../clients/lsp/workspace-diagnostics-cache.js");
+		const { workspaceFileCreatedAtFor } =
+			await import("../../clients/lsp/workspace-diagnostics-session.js");
+		const announcedAt = workspaceFileCreatedAtFor(
+			(serverId) => serverId === "json",
+			() => true,
+		);
+		const scannedAt = Math.max(Date.now(), announcedAt + 1);
+		const sweepCache = createWorkspaceDiagnosticsCacheContext(workspace);
+		for (const file of [sweptA, sweptB]) {
+			const stat = fs.statSync(file);
+			sweepCache.record(
+				file,
+				buildScopeKey("all", ["opengrep"]),
+				[
+					{
+						range: {
+							start: { line: 0, character: 1 },
+							end: { line: 0, character: 4 },
+						},
+						severity: 1,
+						message: SWEEP_FINDING,
+						source: "json",
+						// The sweep stamps each finding with its server (#2776); the
+						// loader drops an entry without one.
+						serverId: "json",
+					},
+				],
+				stat.mtimeMs,
+				undefined,
+				stat.size,
+				scannedAt,
+			);
+		}
+		sweepCache.persist();
+
+		const result = await diagnose({ paths: [sweptA, sweptB] }, noOpengrep);
+
+		expect(result.text).not.toContain(SWEEP_FINDING);
+		// No-drop: both files were still checked, by a fresh touch.
+		expect(result.text).toContain("Files checked: 2");
+		expect(opengrepStarts()).toBe(0);
 	});
 
 	it("does not start Opengrep for a directory check", async () => {
@@ -192,11 +287,24 @@ describe("an explicit LSP check with Opengrep switched off (#4323)", () => {
 		expect(result.text).not.toContain(OPENGREP_FINDING);
 	});
 
+	it("does not start Opengrep for lsp_navigation workspaceDiagnostics", async () => {
+		const text = await navigateDiagnostics(probe, noOpengrep);
+
+		expect(opengrepStarts()).toBe(0);
+		expect(text).not.toContain(OPENGREP_FINDING);
+	});
+
 	it("starts Opengrep and shows its finding when no switch is set", async () => {
 		const result = await diagnose({ path: probe });
 
 		expect(opengrepStarts()).toBeGreaterThan(0);
 		expect(result.text).toContain(OPENGREP_FINDING);
+	});
+
+	it("shows Opengrep's finding through lsp_navigation when no switch is set", async () => {
+		const text = await navigateDiagnostics(probe);
+
+		expect(text).toContain(OPENGREP_FINDING);
 	});
 
 	it("does not serve an Opengrep finding from a batch cached before the switch", async () => {
