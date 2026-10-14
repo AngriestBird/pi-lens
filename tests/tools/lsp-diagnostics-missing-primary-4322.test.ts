@@ -153,6 +153,7 @@ describe("a JSON file whose language server cannot start (#4322)", () => {
 		fs.writeFileSync(
 			slowCssShim,
 			[
+				'process.env.FAKE_LSP_DELAY_FIRST_PULL = "1";',
 				'process.env.FAKE_LSP_DELAY_AFTER_FIRST_PULL_MS = "20000";',
 				`import(${JSON.stringify(pathToFileURL(fakeServer).href)});`,
 				"",
@@ -293,10 +294,18 @@ describe("a JSON file whose language server cannot start (#4322)", () => {
 		// replaced by the head alone and every test still passed, so a batch that
 		// lost files to two causes named only one of them.
 		const slow = path.join(workspace, "slow.css");
-		fs.writeFileSync(probe, '{"fake-lsp-clean": }\n');
+		// Its own file: no earlier case has left a document on typos for it.
+		const mixed = path.join(workspace, "mixed.json");
+		fs.writeFileSync(mixed, '{"fake-lsp-clean": }\n');
 		fs.writeFileSync(slow, "a { color: red; } /* fake-lsp-clean */\n");
 
-		const result = await diagnose("primary", { paths: [probe, slow] });
+		// Warm-up: typos answers a pull for a document it has not been sent with a
+		// finding (the fake serves "" for an unopened uri). A full check opens
+		// `probe` on it, so the batch below sees the clean answer an earlier case
+		// would otherwise have supplied; run alone, the case is order-independent.
+		await diagnose("all", { path: mixed });
+
+		const result = await diagnose("primary", { paths: [mixed, slow] });
 
 		expect(result.text).toContain(
 			"1 with no language server answer (it could not be started, or was " +

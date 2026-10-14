@@ -184,7 +184,10 @@ const DELAY_AFTER_FIRST_PULL_MS = Number.parseInt(
 	process.env.FAKE_LSP_DELAY_AFTER_FIRST_PULL_MS ?? "0",
 	10,
 );
-let pullCount = 0;
+// `FAKE_LSP_DELAY_FIRST_PULL=1` counts the first pull as already served, so
+// `FAKE_LSP_DELAY_AFTER_FIRST_PULL_MS` delays it too (#4322: a server that is
+// slow from its very first answer, with no earlier case priming it).
+let pullCount = process.env.FAKE_LSP_DELAY_FIRST_PULL === "1" ? 1 : 0;
 
 function sendPullPush(uri) {
 	send({
