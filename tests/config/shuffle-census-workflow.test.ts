@@ -196,7 +196,7 @@ function findings(text: string): string[] {
 	);
 	// Recurrence (F3, #4423 review r1): the second confirm pass is the one that
 	// plans the chunk reruns; a single pass leaves "chunk not rerun yet".
-	if (!/for pass in 1 2; do/.test(run(confirm ?? {})))
+	if (!/for _pass in 1 2; do/.test(run(confirm ?? {})))
 		out.push("the confirm pass does not run twice");
 	const reportStep = (report.steps ?? []).find((step) => step.id === "report");
 	const reportRun = run(reportStep ?? {});
@@ -369,14 +369,14 @@ describe("shuffle-census-nightly.yml (#4405)", () => {
 			"dropping node_modules/.bin from the confirm PATH",
 			(text) =>
 				text.replace(
-					'          export PATH="$GITHUB_WORKSPACE/node_modules/.bin:$PATH"\n          for pass',
-					"          for pass",
+					'          export PATH="$GITHUB_WORKSPACE/node_modules/.bin:$PATH"\n          for _pass',
+					"          for _pass",
 				),
 			/confirm-report does not put node_modules\/\.bin on PATH/,
 		],
 		[
 			"a single confirm pass",
-			(text) => text.replace("for pass in 1 2; do", "for pass in 1; do"),
+			(text) => text.replace("for _pass in 1 2; do", "for pass in 1; do"),
 			/confirm pass does not run twice/,
 		],
 		[
@@ -390,7 +390,7 @@ describe("shuffle-census-nightly.yml (#4405)", () => {
 			/after every census part/,
 		],
 		[
-			"reding on the stale-only exit 4",
+			"failing the job on the stale-only exit 4",
 			(text) => text.replace(" && steps.report.outputs.rc != '4'", ""),
 			/exit 1 or 3 only/,
 		],

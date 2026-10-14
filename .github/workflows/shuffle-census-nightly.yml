@@ -103,7 +103,7 @@ jobs:
           # CI set, red "not installed" without it (rehearsal run 38608471496:
           # seven files "failing alone", all tool absence).
           export PATH="$GITHUB_WORKSPACE/node_modules/.bin:$PATH"
-          ARGS=(--out "$RUNNER_TEMP/census" --part "${{ matrix.part }}/6" --budget-ms 4200000 --seeds 202,424,606)
+          ARGS=(--out "$RUNNER_TEMP/census" --part "${{ matrix.part }}/6" --budget-ms 4200000 --seeds "202,424,606")
           if [ "$WITH_ALONE" != "true" ]; then
             ARGS+=(--no-alone)
           fi
@@ -165,7 +165,7 @@ jobs:
         run: |
           set -uo pipefail
           export PATH="$GITHUB_WORKSPACE/node_modules/.bin:$PATH"
-          for pass in 1 2; do
+          for _pass in 1 2; do
             node scripts/ci-shuffle-census.mjs --out "$RUNNER_TEMP/census" --confirm --part 0/1 --budget-ms 1800000 || true
           done
       - name: Report against the ratchet
