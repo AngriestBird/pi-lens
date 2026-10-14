@@ -160,6 +160,15 @@ blocks dispatch above the thresholds (no hand-written fallback;
 every refill; state them in the lane ledger. Standing rule from
 2026-09-03, lifted only when the maintainer says so.
 
+## Host capacity (orchestrator)
+
+The maintainer may cap how many subagents run at once, for example when RAM is
+shared with a local model. The cap counts only lanes that build, run Vitest,
+or start language servers or probes: fixers, reviewers and verifiers. Read-only
+agents never count and run in parallel with the capped lanes. These are
+locate passes, `gh`/grep-only audits and Explore agents. Their brief says "no
+builds, no tests, no language servers" (maintainer, 2026-10-14).
+
 ## Brief contract (orchestrator)
 
 Before dispatching any issue that adds a shared helper or seam: grep for
