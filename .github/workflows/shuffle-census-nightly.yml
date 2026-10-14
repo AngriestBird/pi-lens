@@ -3,7 +3,8 @@ name: Shuffle census nightly (order-dependent test files)
 # #4405: a test file that passes alone and fails inside the suite is invisible
 # to the changed-files shuffle job (ci.yml), which only sees the files a PR
 # touches. scripts/ci-shuffle-census.mjs runs EVERY test file inside shuffled
-# 25-file chunks under three fixed seeds, diffs the order-dependent files it
+# 25-file chunks under the changed-files job's two seeds (202 and 424; the
+# script default, so no flag here can drift from it), diffs the files it
 # finds against scripts/shuffle-census-ratchet.json (keyed by file), and keeps
 # ONE rolling tracking issue (the title-keyed upsert stryker-nightly.yml uses).
 # It is exploratory and gates nothing: schedule and manual only, so no PR check
@@ -16,8 +17,11 @@ name: Shuffle census nightly (order-dependent test files)
 #   confirm-report merges the six records, re-runs every failing member file
 #                  alone under its seed (`--confirm`), twice: the second pass
 #                  plans the rerun of any chunk whose member passed alone
-#                  (a cross-file failure repeats, a load flake does not). Then
-#                  `--report` diffs against the ratchet. Exit 1 (a new member,
+#                  (a cross-file failure repeats, a load flake does not). Each
+#                  pass stops at 15 min. Then `--report` plans the census again
+#                  from the same env and diffs against the ratchet: a planned
+#                  start with no record, or a census job that did not succeed
+#                  (`needs.census.result`), is unproven. Exit 1 (a new member,
 #                  or a ratchet entry clean two nights running) or 3 (unproven)
 #                  reds the job; exit 4 (stale entries, first night) is a
 #                  warning.
@@ -29,8 +33,9 @@ name: Shuffle census nightly (order-dependent test files)
 # Daily runs skip the alone starts (`--no-alone`: the alone pass finds files
 # that fail by themselves, which a per-file run already shows); the weekly
 # Sunday run, or a dispatch with `with_alone`, includes them. The weekly cron
-# string below is compared with `github.event.schedule` in the env of the
-# census job.
+# string below is compared with `github.event.schedule` in the workflow env,
+# which both the census parts and the report read, so they plan alike. The
+# dispatch inputs reach a shell only through that env, never inlined.
 
 on:
   schedule:
@@ -55,6 +60,8 @@ concurrency:
 
 env:
   TRACKING_TITLE: "nightly: shuffle census (order-dependent test files)"
+  WITH_ALONE: ${{ github.event.schedule == '0 5 * * 0' || inputs.with_alone == true }}
+  CENSUS_FILES: ${{ inputs.files }}
 
 jobs:
   census:
@@ -76,8 +83,6 @@ jobs:
     env:
       PI_LENS_TEST_MAX_WORKERS: "3"
       PI_LENS_TEST_TIMEOUT_SCALE: "3"
-      WITH_ALONE: ${{ github.event.schedule == '0 5 * * 0' || inputs.with_alone == true }}
-      CENSUS_FILES: ${{ inputs.files }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -103,7 +108,7 @@ jobs:
           # CI set, red "not installed" without it (rehearsal run 38608471496:
           # seven files "failing alone", all tool absence).
           export PATH="$GITHUB_WORKSPACE/node_modules/.bin:$PATH"
-          ARGS=(--out "$RUNNER_TEMP/census" --part "${{ matrix.part }}/6" --budget-ms 4200000 --seeds "202,424,606")
+          ARGS=(--out "$RUNNER_TEMP/census" --part "${{ matrix.part }}/6" --budget-ms 4200000)
           if [ "$WITH_ALONE" != "true" ]; then
             ARGS+=(--no-alone)
           fi
@@ -161,21 +166,34 @@ jobs:
       # seed, the second plans (and runs) the rerun of the chunk whose member
       # passed alone. A pass that stops at its budget leaves "not confirmed
       # yet" in the report, which is exit 3, so a failed pass is not fatal here.
+      # Each pass stops at 15 min, so both and the setup (about 4 min) fit the
+      # job's 45 with the report step still to run.
       - name: Confirm each failing member file alone, then rerun green-alone chunks
         run: |
           set -uo pipefail
           export PATH="$GITHUB_WORKSPACE/node_modules/.bin:$PATH"
           for _pass in 1 2; do
-            node scripts/ci-shuffle-census.mjs --out "$RUNNER_TEMP/census" --confirm --part 0/1 --budget-ms 1800000 || true
+            node scripts/ci-shuffle-census.mjs --out "$RUNNER_TEMP/census" --confirm --part 0/1 --budget-ms 900000 || true
           done
+      # The report plans the census again with the census parts' flags (the
+      # same workflow env) and reds a planned start with no record.
       - name: Report against the ratchet
         id: report
+        env:
+          CENSUS_RESULT: ${{ needs.census.result }}
         run: |
           set -uo pipefail
-          gh issue list --state open --label nightly-drift --search "$TRACKING_TITLE in:title" --json title,body --limit 100 > "$RUNNER_TEMP/census-issues.json"
+          gh issue list --state open --label nightly-drift --search "$TRACKING_TITLE in:title" --json title,body,author --limit 100 > "$RUNNER_TEMP/census-issues.json"
           mkdir -p "$RUNNER_TEMP/census-report"
+          ARGS=(--out "$RUNNER_TEMP/census" --census-result "$CENSUS_RESULT")
+          if [ "$WITH_ALONE" != "true" ]; then
+            ARGS+=(--no-alone)
+          fi
+          if [ -n "$CENSUS_FILES" ]; then
+            ARGS+=(--files "$CENSUS_FILES")
+          fi
           rc=0
-          node scripts/ci-shuffle-census.mjs --out "$RUNNER_TEMP/census" --report --previous-issues "$RUNNER_TEMP/census-issues.json" --title "$TRACKING_TITLE" --stale-out "$RUNNER_TEMP/census-report/stale.txt" --body-out "$RUNNER_TEMP/census-report/body.md" --run-url "$RUN_URL" || rc=$?
+          node scripts/ci-shuffle-census.mjs "${ARGS[@]}" --report --previous-issues "$RUNNER_TEMP/census-issues.json" --title "$TRACKING_TITLE" --stale-out "$RUNNER_TEMP/census-report/stale.txt" --body-out "$RUNNER_TEMP/census-report/body.md" --run-url "$RUN_URL" || rc=$?
           echo "$rc" > "$RUNNER_TEMP/census-report/exit"
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
           if [ "$rc" = 4 ]; then

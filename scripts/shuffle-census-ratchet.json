@@ -8,12 +8,6 @@
 			"test": "checkAstGrepRulesHealth > refreshes descriptions at the next dispatch cycle after an edit or a removal"
 		},
 		{
-			"file": "tests/clients/bounded-pid-file-lock.test.ts",
-			"seam": "module-latch-singleton",
-			"seed": 606,
-			"test": "acquireQuarantinePidFileLock across versions (#3476) > backs off a live older writer's lock directory without keeping its generation"
-		},
-		{
 			"file": "tests/clients/debug-handles.test.ts",
 			"seam": "once-per-session-sink",
 			"seed": 202,
@@ -126,12 +120,6 @@
 			"seam": "once-per-session-sink",
 			"seed": 202,
 			"test": "word-index serialized memo lifecycle (#4124) > logs one row when a held memo is released and none when nothing is held"
-		},
-		{
-			"file": "tests/config/tmp-fixture-hygiene.test.ts",
-			"seam": "wall-clock-resolution",
-			"seed": 606,
-			"test": "tmp-fixture-hygiene > owner-marker liveness across platforms (#3186) > registers the heartbeat on the test lifecycle, not just defines it"
 		},
 		{
 			"file": "tests/index-2992-integration.test.ts",

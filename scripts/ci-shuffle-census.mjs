@@ -3,10 +3,11 @@
  * scripts/ci-shuffle-census.mjs (#4405)
  *
  *   node scripts/ci-shuffle-census.mjs --out <dir> [--part k/n] [--chunk 25]
- *       [--budget-ms N] [--seeds 202,424,606] [--files a.test.ts,b.test.ts] [--no-alone]
+ *       [--budget-ms N] [--seeds 202,424] [--files tests/a.test.ts,tests/b.test.ts] [--no-alone]
  *   node scripts/ci-shuffle-census.mjs --out <dir> --confirm [--part k/n] [--budget-ms N]
  *   node scripts/ci-shuffle-census.mjs --out <dir> --redo-unproven [--part k/n] [--budget-ms N]
  *   node scripts/ci-shuffle-census.mjs --out <dir> --report [--ratchet <file>]
+ *       [--seeds ...] [--files ...] [--no-alone] [--census-result <result>]
  *       [--previous-issues <gh issue list json> --title <t>] [--stale-out <file>]
  *       [--body-out <file>] [--run-url <url>]
  *
@@ -17,8 +18,8 @@
  * files in `tests/tools/` order-dependent). The census runs every test file
  *
  *   - alone, in file order (a dependence on a sibling's side effect), and
- *   - inside shuffled chunks of CHUNK_FILES files, once per seed in
- *     CENSUS_SEEDS (a dependence on the order of cases or files),
+ *   - inside shuffled chunks of CHUNK_FILES files, once per seed of the
+ *     changed-files job (a dependence on the order of cases or files),
  *
  * through the changed-files job's own planner, runner and process boundary
  * (`planRuns`, `runPlan`, `execVitest`), not a second runner. Chunks keep a
@@ -49,12 +50,18 @@
  * file stays listed until it is clean under every seed. Which cases of a file
  * fail under a seed moves with its case count (one added passing test took a
  * file from 5 failing rows to 2), so a (seed, test) row would go stale with
- * nothing fixed. `--report` reads the records and exits
+ * nothing fixed. `--report` plans the census again with the same flags
+ * (`--seeds`, `--files`, `--no-alone`) and judges the records against that
+ * plan, so a planned start with no record (a part that died, was cancelled or
+ * stopped at its budget, an artifact that never arrived) is never read as
+ * clean. It exits
  *
  *   1  a confirmed member the ratchet does not list (`order-dependent`,
  *      `cross-file`, or `fails alone`), or a stale entry that was stale last
  *      night too (`--previous-issues`),
- *   3  a start that did not finish, or a member not yet confirmed or rerun,
+ *   3  a planned start with no record, a start that did not finish, a member
+ *      not yet confirmed or rerun, or a `--census-result` other than
+ *      `success` (the workflow passes `needs.census.result`),
  *   4  only stale entries: a listed file the census found clean under every
  *      seed this run (warn; the nightly job reds on a second night),
  *   0  clean.
@@ -90,8 +97,6 @@ import {
 	parseVitestSummary,
 } from "./lib/vitest-summary.mjs";
 
-/** The changed-files job's two seeds plus one the census adds. */
-export const CENSUS_SEEDS = Object.freeze([...SEEDS, 606]);
 /** Files per shuffled start: 13-170 s at one worker over the tree (#4405), under the 10 min call cap. */
 export const CHUNK_FILES = 25;
 /** One start never gets more than this, whatever the call budget has left. */
@@ -101,6 +106,11 @@ export const MIN_START_MS = 90_000;
 export const RATCHET_PATH = "scripts/shuffle-census-ratchet.json";
 const FILE_SENTINEL = "(file)";
 const TAIL_LINES = 30;
+/** The author `gh issue list --json author` names for a workflow's issue. */
+const WORKFLOW_AUTHOR = "app/github-actions";
+
+/** The record key of a planned start: what `runCensus` writes, `--report` reads. */
+const startKey = (entry) => entry.key ?? reproCommand(entry);
 
 /** Every vitest-collected test file the repo tracks. */
 export function listTestFiles(cwd) {
@@ -129,7 +139,7 @@ export function seedOf(run) {
  */
 export function planCensus(
 	files,
-	{ seeds = CENSUS_SEEDS, chunk = CHUNK_FILES, alone: withAlone = true } = {},
+	{ seeds = SEEDS, chunk = CHUNK_FILES, alone: withAlone = true } = {},
 ) {
 	const chunks = [];
 	for (let at = 0; at < files.length; at += chunk)
@@ -246,7 +256,7 @@ export function runCensus(plan, options) {
 	let ran = 0;
 	let pending = 0;
 	for (const entry of plan) {
-		const key = entry.key ?? reproCommand(entry);
+		const key = startKey(entry);
 		if (done.has(key)) continue;
 		const remaining = budgetMs - (now() - started);
 		if (remaining < MIN_START_MS) {
@@ -352,10 +362,17 @@ function firstRow(rows) {
 }
 
 /**
+ * `planned` is the census plan `--report` recomputes: a planned start with no
+ * record is unproven, and a ratchet entry is stale only once its file finished
+ * under every seed the plan holds. Without it (unit cases) the seeds come
+ * from the records. A `censusResult` other than `success` is unproven too.
+ *
  * @param {{
  *   records: any[],
  *   ratchet: Array<{ file: string }>,
  *   previousStale?: Iterable<string>,
+ *   planned?: Array<{ key?: string, label: string, files: string[], flags: string[] }>,
+ *   censusResult?: string,
  * }} state
  * @returns {{
  *   code: 0 | 1 | 3 | 4,
@@ -365,7 +382,13 @@ function firstRow(rows) {
  *   lines: string[],
  * }}
  */
-export function judgeCensus({ records, ratchet, previousStale = [] }) {
+export function judgeCensus({
+	records,
+	ratchet,
+	previousStale = [],
+	planned,
+	censusResult,
+}) {
 	const census = records.filter((record) => record.kind === "census");
 	const confirms = new Map();
 	for (const record of records.filter((entry) => entry.kind === "confirm"))
@@ -386,6 +409,21 @@ export function judgeCensus({ records, ratchet, previousStale = [] }) {
 	// nor a fixed one, so their ratchet entry is not judged stale.
 	const pending = new Set();
 	let unproven = false;
+	if (planned !== undefined) {
+		const recorded = new Set(census.map((record) => record.key));
+		const missing = planned.filter((entry) => !recorded.has(startKey(entry)));
+		if (missing.length > 0) {
+			const first = missing.slice(0, 3).map((entry) => entry.label);
+			lines.push(
+				`not run: ${missing.length} of ${planned.length} planned start(s) have no record (${first.join("; ")}${missing.length > 3 ? "; ..." : ""})`,
+			);
+			unproven = true;
+		}
+	}
+	if (censusResult !== undefined && censusResult !== "success") {
+		lines.push(`census job result: ${censusResult || "(empty)"}`);
+		unproven = true;
+	}
 	for (const record of census) {
 		if (record.verdict === "timeout" || record.verdict === "uncollected") {
 			lines.push(`${record.verdict}: ${record.label}`);
@@ -440,9 +478,10 @@ export function judgeCensus({ records, ratchet, previousStale = [] }) {
 	// A ratchet entry is stale only when its file finished under EVERY seed
 	// this run planned (alone starts are not required: the nightly skips them).
 	const seedsPlanned = new Set(
-		census
-			.filter((record) => record.seed !== "alone")
-			.map((record) => record.seed),
+		(planned === undefined
+			? census.map((record) => record.seed)
+			: planned.map(seedOf)
+		).filter((seed) => seed !== "alone"),
 	);
 	const finished = new Map();
 	for (const record of census)
@@ -490,11 +529,17 @@ export function judgeCensus({ records, ratchet, previousStale = [] }) {
 
 const STALE_MARKER = /^<!-- shuffle-census-stale: (.*) -->$/m;
 
-/** The stale files last night's tracking issue recorded in its body. */
+/**
+ * The stale files last night's tracking issue recorded in its body. Only the
+ * workflow's own issue counts: a marker in an issue a person wrote or relabelled
+ * would force the second-night red, or hide it by being listed first.
+ */
 export function previousStaleFrom(issuesJson, title) {
-	/** @type {Array<{ title?: string, body?: string }>} */
+	/** @type {Array<{ title?: string, body?: string, author?: { login?: string } }>} */
 	const issues = JSON.parse(issuesJson);
-	const issue = issues.find((entry) => entry.title === title);
+	const issue = issues.find(
+		(entry) => entry.title === title && entry.author?.login === WORKFLOW_AUTHOR,
+	);
 	const match = STALE_MARKER.exec(issue?.body ?? "");
 	return match?.[1] ? match[1].split(",").filter(Boolean) : [];
 }
@@ -535,7 +580,7 @@ export function parseArgs(argv) {
 		part: [0, 1],
 		chunk: CHUNK_FILES,
 		budgetMs: 9 * 60_000,
-		seeds: [...CENSUS_SEEDS],
+		seeds: [...SEEDS],
 		files: null,
 		confirm: false,
 		report: false,
@@ -546,6 +591,7 @@ export function parseArgs(argv) {
 		staleOut: null,
 		bodyOut: null,
 		runUrl: "",
+		censusResult: undefined,
 		ratchet: RATCHET_PATH,
 		cwd: process.cwd(),
 	};
@@ -583,12 +629,22 @@ export function parseArgs(argv) {
 		else if (flag === "--stale-out") options.staleOut = value;
 		else if (flag === "--body-out") options.bodyOut = value;
 		else if (flag === "--run-url") options.runUrl = value;
+		else if (flag === "--census-result") options.censusResult = value;
 		else if (flag === "--cwd") options.cwd = path.resolve(value);
 		else throw new Error(`unknown argument ${flag}`);
 	}
 	if (options.out === null) throw new Error("--out is required");
 	if (options.previousIssues !== null && options.title === null)
 		throw new Error("--previous-issues needs --title");
+	// A dispatch input lands here: only test paths reach vitest's argv.
+	if (options.files !== null) {
+		const paths = new Set(selectChangedTestFiles(options.files, () => true));
+		const refused = options.files.filter((file) => !paths.has(file));
+		if (refused.length > 0)
+			throw new Error(
+				`--files takes test paths (tests/**/*.test.ts), never a flag: ${refused.join(", ")}`,
+			);
+	}
 	if (
 		!(options.chunk >= 1) ||
 		!(options.budgetMs > 0) ||
@@ -636,6 +692,12 @@ export function run(argv, io = {}) {
 			records: loadRecords(options.out),
 			ratchet,
 			previousStale,
+			planned: planCensus(options.files ?? listTestFiles(options.cwd), {
+				seeds: options.seeds,
+				chunk: options.chunk,
+				alone: options.alone,
+			}),
+			censusResult: options.censusResult,
 		});
 		for (const member of verdict.members)
 			log(

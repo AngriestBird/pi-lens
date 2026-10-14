@@ -33,6 +33,7 @@ type Job = {
 type Workflow = {
 	on?: { schedule?: Array<{ cron?: string }> } & Record<string, unknown>;
 	concurrency?: { group?: string; "cancel-in-progress"?: boolean };
+	env?: Record<string, string>;
 	permissions?: unknown;
 	jobs?: Record<string, Job>;
 };
@@ -48,15 +49,14 @@ function findings(text: string): string[] {
 	const out: string[] = [];
 	const workflow = load(text);
 	const triggers = Object.keys(workflow.on ?? {});
-	// Recurrence: a census is about 2 runner-hours; on a PR trigger it would
-	// queue behind and double every code PR.
-	for (const forbidden of [
-		"pull_request",
-		"pull_request_target",
-		"push",
-		"merge_group",
-	])
-		if (triggers.includes(forbidden)) out.push(`trigger: ${forbidden}`);
+	// Recurrence: a census is about 1.5 runner-hours; on a PR trigger it would
+	// queue behind and double every code PR. G3 (#4423 verify r2): a
+	// `workflow_run` trigger runs at refs/heads/master, so the writer's guard
+	// would pass for a run another workflow started. Exactly two triggers.
+	for (const extra of triggers.filter(
+		(name) => name !== "schedule" && name !== "workflow_dispatch",
+	))
+		out.push(`trigger: ${extra}`);
 	const crons = (workflow.on?.schedule ?? []).map((entry) => entry.cron);
 	if (crons.length !== 2 || !crons.includes(WEEKLY))
 		out.push(`schedule is not a daily plus the weekly ${WEEKLY}`);
@@ -122,11 +122,30 @@ function findings(text: string): string[] {
 	// Recurrence: the weekly alone pass is chosen by comparing the schedule
 	// string; retiming the cron without the comparison would never run it.
 	if (
-		!String(census.env?.WITH_ALONE ?? "").includes(
+		!String(workflow.env?.WITH_ALONE ?? "").includes(
 			`github.event.schedule == '${WEEKLY}'`,
 		)
 	)
 		out.push("the alone pass is not tied to the weekly cron");
+	// Recurrence (N1, #4423 verify r2): the report plans the census again to
+	// find the starts with no record. Planned from other flags than the parts',
+	// it misses the alone starts a weekly part skipped, or reds every night. One
+	// home: the workflow env, never a job's own copy, and seeds from the script.
+	for (const [name, job] of [
+		["census", census],
+		["confirm-report", report],
+	] as const)
+		for (const key of ["WITH_ALONE", "CENSUS_FILES"])
+			if (job.env?.[key] !== undefined)
+				out.push(`job ${name} redefines ${key}: the plan has two homes`);
+	if (
+		/--seeds/.test(
+			Object.values(workflow.jobs ?? {})
+				.flatMap((job) => (job.steps ?? []).map(run))
+				.join("\n"),
+		)
+	)
+		out.push("a job passes --seeds: the seeds have one home, the script");
 	if (
 		!/if \[ "\$WITH_ALONE" != "true" \]; then\n\s*ARGS\+=\(--no-alone\)/.test(
 			run(censusRun ?? {}),
@@ -198,8 +217,37 @@ function findings(text: string): string[] {
 	// plans the chunk reruns; a single pass leaves "chunk not rerun yet".
 	if (!/for _pass in 1 2; do/.test(run(confirm ?? {})))
 		out.push("the confirm pass does not run twice");
+	// Recurrence (N2, #4423 verify r2): two 30 min passes outlived the 45 min
+	// job, which then died before its report step, and the writer failed on the
+	// missing artifact. Each pass stops at 15 min, both leave 10 for the rest.
+	const confirmBudget = Number(
+		/--budget-ms (\d+)/.exec(run(confirm ?? {}))?.[1],
+	);
+	if (
+		!(confirmBudget > 0) ||
+		confirmBudget > 15 * 60_000 ||
+		2 * confirmBudget > ((report["timeout-minutes"] ?? 0) - 10) * 60_000
+	)
+		out.push("a confirm pass may run past 15 minutes or the job timeout");
 	const reportStep = (report.steps ?? []).find((step) => step.id === "report");
 	const reportRun = run(reportStep ?? {});
+	// Recurrence (N1, #4423 verify r2): an empty record dir reported "clean"
+	// and closed the issue. The report plans with the parts' flags and reads
+	// the census job's result.
+	if (
+		!/if \[ "\$WITH_ALONE" != "true" \]; then\n\s*ARGS\+=\(--no-alone\)/.test(
+			reportRun,
+		) ||
+		!reportRun.includes('ARGS+=(--files "$CENSUS_FILES")') ||
+		!run(censusRun ?? {}).includes('ARGS+=(--files "$CENSUS_FILES")') ||
+		!/"\$\{ARGS\[@\]\}" --report/.test(reportRun)
+	)
+		out.push("the report does not plan with the census parts' flags");
+	if (
+		reportStep?.env?.CENSUS_RESULT !== "${{ needs.census.result }}" ||
+		!reportRun.includes('--census-result "$CENSUS_RESULT"')
+	)
+		out.push("the report does not read the census job's result");
 	if (
 		!/--report --previous-issues "\$RUNNER_TEMP\/census-issues\.json" --title "\$TRACKING_TITLE"/.test(
 			reportRun,
@@ -253,6 +301,13 @@ function findings(text: string): string[] {
 	if (/gh issue (create|edit|comment|close)/.test(all.map(run).join("\n")))
 		out.push("a raw gh issue write bypasses the shared upsert CLI");
 
+	// Recurrence (G1, #4423 verify r2): a dispatch input inlined into a script
+	// is shell text from whoever dispatches; it reaches the shell only as env.
+	for (const step of all)
+		if (/\$\{\{\s*(github\.event\.)?inputs\./.test(run(step)))
+			out.push(
+				`a run script inlines a dispatch input: ${step.name ?? run(step).slice(0, 40)}`,
+			);
 	// Recurrence (stryker run 37599048379): an action input is not a shell
 	// string; `$RUNNER_TEMP` there is a literal directory.
 	for (const step of all)
@@ -277,6 +332,65 @@ describe("shuffle-census-nightly.yml (#4405)", () => {
 	});
 
 	const mutations: Array<[string, (text: string) => string, RegExp]> = [
+		[
+			"adding a workflow_run trigger (G3)",
+			(text) =>
+				text.replace(
+					"on:\n",
+					'on:\n  workflow_run:\n    workflows: ["CI"]\n    types: [completed]\n',
+				),
+			/trigger: workflow_run/,
+		],
+		[
+			"inlining the files input into the census script (G1)",
+			(text) =>
+				text.replace(
+					'          if [ -n "$CENSUS_FILES" ]; then\n            ARGS+=(--files "$CENSUS_FILES")\n          fi\n          node scripts/ci-shuffle-census.mjs "${ARGS[@]}"\n',
+					'          ARGS+=(--files "${{ inputs.files }}")\n          node scripts/ci-shuffle-census.mjs "${ARGS[@]}"\n',
+				),
+			/inlines a dispatch input/,
+		],
+		[
+			"a confirm pass back at 30 minutes (N2)",
+			(text) => text.replace("--budget-ms 900000", "--budget-ms 1800000"),
+			/confirm pass may run past 15 minutes/,
+		],
+		[
+			"the report planning without the alone flag (N1)",
+			(text) =>
+				text.replace(
+					'ARGS=(--out "$RUNNER_TEMP/census" --census-result "$CENSUS_RESULT")\n          if [ "$WITH_ALONE" != "true" ]; then\n            ARGS+=(--no-alone)\n          fi\n',
+					'ARGS=(--out "$RUNNER_TEMP/census" --census-result "$CENSUS_RESULT")\n',
+				),
+			/plan with the census parts' flags/,
+		],
+		[
+			"the report ignoring the census job's result (N1)",
+			(text) =>
+				text.replace(
+					"          CENSUS_RESULT: ${{ needs.census.result }}\n",
+					"          CENSUS_RESULT: success\n",
+				),
+			/census job's result/,
+		],
+		[
+			"a census job with its own copy of WITH_ALONE (N1)",
+			(text) =>
+				text.replace(
+					'      PI_LENS_TEST_TIMEOUT_SCALE: "3"\n    steps:\n',
+					'      PI_LENS_TEST_TIMEOUT_SCALE: "3"\n      WITH_ALONE: "true"\n    steps:\n',
+				),
+			/job census redefines WITH_ALONE/,
+		],
+		[
+			"a census part passing its own seed list",
+			(text) =>
+				text.replace(
+					"--budget-ms 4200000)",
+					'--budget-ms 4200000 --seeds "202,424,606")',
+				),
+			/passes --seeds/,
+		],
 		[
 			"adding a pull_request trigger",
 			(text) =>
@@ -341,10 +455,7 @@ describe("shuffle-census-nightly.yml (#4405)", () => {
 		[
 			"confirming inside a census part",
 			(text) =>
-				text.replace(
-					"--budget-ms 4200000 --seeds",
-					"--confirm --budget-ms 4200000 --seeds",
-				),
+				text.replace("--budget-ms 4200000)", "--confirm --budget-ms 4200000)"),
 			/confirms or reports/,
 		],
 		[

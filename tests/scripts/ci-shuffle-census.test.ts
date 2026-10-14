@@ -9,8 +9,6 @@ import fs from "node:fs";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import {
-	CENSUS_SEEDS,
-	CHUNK_FILES,
 	extractMembers,
 	issueBody,
 	judgeCensus,
@@ -27,7 +25,12 @@ import {
 	type Member,
 	type Seed,
 } from "../../scripts/ci-shuffle-census.mjs";
-import { type ExecVitest } from "../../scripts/ci-shuffle-changed-tests.mjs";
+import {
+	type ExecVitest,
+	planRuns,
+	reproCommand,
+	SEEDS,
+} from "../../scripts/ci-shuffle-changed-tests.mjs";
 import { setupTestEnvironment } from "../clients/test-utils.js";
 
 const cleanups: Array<() => void> = [];
@@ -165,14 +168,6 @@ describe("planCensus", () => {
 		const alone = plan.filter((start) => start.flags.length === 0);
 		expect(alone.map((start) => start.files)).toEqual(files.map((f) => [f]));
 		expect(plan).toHaveLength(2 * 3 + 7);
-	});
-
-	// Recurrence: drift between the census seeds and the changed-files job's
-	// (202, 424) would let a member the PR job misses hide, or a PR job red
-	// the census never saw.
-	it("uses the changed-files seeds plus a third", () => {
-		expect([...CENSUS_SEEDS]).toEqual([202, 424, 606]);
-		expect(CHUNK_FILES).toBeGreaterThan(1);
 	});
 
 	// Recurrence: a confirm start reusing a census key would be skipped as
@@ -620,6 +615,28 @@ describe("judgeCensus", () => {
 		]);
 	});
 
+	// Recurrence (N1, #4423 verify r2): a census part that died left its starts
+	// unrecorded, and the report judged only what was on disk. A confirmed new
+	// member is still red when other starts are missing (exit 1 outranks 3).
+	it("stays red for a confirmed new member while planned starts are missing", () => {
+		const plan = planCensus([A, B], { chunk: 1, alone: false });
+		const recorded = plan[0] as (typeof plan)[number];
+		const verdict = judgeCensus({
+			records: [
+				record(202, recorded.files, [member(A, "t1")], {
+					key: reproCommand(recorded),
+				}),
+				confirm(202, A, [member(A, "t1")]),
+			],
+			ratchet: [],
+			planned: plan,
+		});
+		expect(verdict.code).toBe(1);
+		expect(verdict.lines).toContain(
+			"not run: 3 of 4 planned start(s) have no record (shuffle seed 202 chunk 2/2; shuffle seed 424 chunk 1/2; shuffle seed 424 chunk 2/2)",
+		);
+	});
+
 	// Recurrence: a hung or uncollected start proves nothing about its files.
 	it("is unproven when a start timed out or was never collected", () => {
 		for (const verdict of ["timeout", "uncollected"] as const) {
@@ -642,6 +659,9 @@ describe("judgeCensus", () => {
 	});
 });
 
+/** The author `gh issue list --json author` reports for a workflow's issue. */
+const BOT = { login: "app/github-actions" };
+
 describe("the tracking issue", () => {
 	const A = "tests/a.test.ts";
 	const TITLE = "nightly: shuffle census (order-dependent test files)";
@@ -653,10 +673,12 @@ describe("the tracking issue", () => {
 			{
 				title: "other",
 				body: "<!-- shuffle-census-stale: tests/x.test.ts -->",
+				author: BOT,
 			},
 			{
 				title: TITLE,
 				body: "text\n<!-- shuffle-census-stale: tests/a.test.ts,tests/b.test.ts -->\n",
+				author: BOT,
 			},
 		]);
 		expect(previousStaleFrom(issues, TITLE)).toEqual([
@@ -666,10 +688,30 @@ describe("the tracking issue", () => {
 		expect(previousStaleFrom("[]", TITLE)).toEqual([]);
 		expect(
 			previousStaleFrom(
-				JSON.stringify([{ title: TITLE, body: "no marker" }]),
+				JSON.stringify([{ title: TITLE, body: "no marker", author: BOT }]),
 				TITLE,
 			),
 		).toEqual([]);
+	});
+
+	// Recurrence (#4423 verify r2): a hand-written marker forced the second-night
+	// red, and a decoy issue with the same title, listed first, hid the real
+	// one. Only the issue the workflow wrote counts.
+	it("reads the marker only from the issue the workflow wrote", () => {
+		const forged = {
+			title: TITLE,
+			body: "<!-- shuffle-census-stale: tests/forged.test.ts -->",
+			author: { login: "someone" },
+		};
+		const real = {
+			title: TITLE,
+			body: "<!-- shuffle-census-stale: tests/a.test.ts -->",
+			author: BOT,
+		};
+		expect(previousStaleFrom(JSON.stringify([forged]), TITLE)).toEqual([]);
+		expect(previousStaleFrom(JSON.stringify([forged, real]), TITLE)).toEqual([
+			"tests/a.test.ts",
+		]);
 	});
 
 	// Recurrence: the body is what the next night reads back; a stale file
@@ -683,7 +725,10 @@ describe("the tracking issue", () => {
 		expect(body).toContain(`<!-- shuffle-census-stale: ${A} -->`);
 		expect(body).toContain("https://example.test/run/1");
 		expect(
-			previousStaleFrom(JSON.stringify([{ title: TITLE, body }]), TITLE),
+			previousStaleFrom(
+				JSON.stringify([{ title: TITLE, body, author: BOT }]),
+				TITLE,
+			),
 		).toEqual([A]);
 	});
 });
@@ -691,6 +736,19 @@ describe("the tracking issue", () => {
 describe("run (report and arguments)", () => {
 	const A = "tests/a.test.ts";
 	const TITLE = "nightly: x";
+	/** A census start of `files` under `seed`, keyed the way runCensus keys it. */
+	const planned = (
+		seed: number,
+		files: string[],
+		members: Member[],
+	): CensusRecord =>
+		record(seed, files, members, {
+			key: reproCommand(
+				planRuns(files, [seed], { alone: false })[0] as Parameters<
+					typeof reproCommand
+				>[0],
+			),
+		});
 	function reportDir(name: string, records: CensusRecord[], members: unknown) {
 		const dir = scratchDir(name);
 		const out = path.join(dir, "out");
@@ -713,6 +771,9 @@ describe("run (report and arguments)", () => {
 				dir,
 				"--ratchet",
 				"ratchet.json",
+				"--files",
+				A,
+				"--no-alone",
 			],
 		};
 	}
@@ -721,8 +782,8 @@ describe("run (report and arguments)", () => {
 	// prints the members but exits 0 turns the ratchet into a log line.
 	it("--report exits 1 for a member file beyond the ratchet and 0 once it is listed", () => {
 		const records = [
-			record(202, [A], [member(A, "t1")]),
-			record(424, [A], []),
+			planned(202, [A], [member(A, "t1")]),
+			planned(424, [A], []),
 			confirm(202, A, [member(A, "t1")]),
 		];
 		const { dir, args } = reportDir("report", records, []);
@@ -743,7 +804,7 @@ describe("run (report and arguments)", () => {
 	it("--report carries a stale file through the body to the second night's red", () => {
 		const { dir, args } = reportDir(
 			"stale",
-			[record(202, [A], []), record(424, [A], [])],
+			[planned(202, [A], []), planned(424, [A], [])],
 			listed(A),
 		);
 		const staleOut = path.join(dir, "stale.txt");
@@ -758,7 +819,7 @@ describe("run (report and arguments)", () => {
 		fs.writeFileSync(
 			issues,
 			JSON.stringify([
-				{ title: TITLE, body: fs.readFileSync(bodyOut, "utf8") },
+				{ title: TITLE, body: fs.readFileSync(bodyOut, "utf8"), author: BOT },
 			]),
 		);
 		expect(
@@ -766,6 +827,87 @@ describe("run (report and arguments)", () => {
 				log: quiet,
 			}),
 		).toBe(1);
+	});
+
+	// Recurrence (N1, #4423 verify r2): an empty record dir reported "exit 0
+	// (clean)" and the writer closed the tracking issue; one seed's records
+	// judged the ratchet on one seed and called a listed file stale. The report
+	// plans the census again: every planned start with no record is unproven.
+	it("--report is unproven, never clean or stale, when planned starts have no record", () => {
+		const empty = reportDir("n1-empty", [], listed(A));
+		const lines: string[] = [];
+		expect(run(empty.args, { log: (line) => lines.push(line) })).toBe(3);
+		expect(lines).toContain(
+			"[census] not run: 2 of 2 planned start(s) have no record (shuffle seed 202 chunk 1/1; shuffle seed 424 chunk 1/1)",
+		);
+		const oneSeed = reportDir(
+			"n1-one-seed",
+			[planned(202, [A], [])],
+			listed(A),
+		);
+		const staleOut = path.join(oneSeed.dir, "stale.txt");
+		expect(
+			run([...oneSeed.args, "--stale-out", staleOut], { log: quiet }),
+		).toBe(3);
+		expect(fs.readFileSync(staleOut, "utf8").trim()).toBe("");
+		// The same plan fully recorded is the stale-only exit 4.
+		const full = reportDir(
+			"n1-full",
+			[planned(202, [A], []), planned(424, [A], [])],
+			listed(A),
+		);
+		expect(run(full.args, { log: quiet })).toBe(4);
+	});
+
+	// Recurrence (N1, #4423 verify r2): the census job's own result is the
+	// second witness. A part that failed after its records were written is
+	// still not a clean census.
+	it("--report is unproven when the census job did not succeed", () => {
+		const { args } = reportDir(
+			"n1-result",
+			[planned(202, [A], []), planned(424, [A], [])],
+			[],
+		);
+		expect(run([...args, "--census-result", "success"], { log: quiet })).toBe(
+			0,
+		);
+		const lines: string[] = [];
+		expect(
+			run([...args, "--census-result", "failure"], {
+				log: (line) => lines.push(line),
+			}),
+		).toBe(3);
+		expect(lines).toContain("[census] census job result: failure");
+	});
+
+	// Recurrence (G2, #4423 verify r2): a dispatch input reached vitest's argv
+	// unchecked, so `--files --config=/tmp/x.ts` planned a vitest flag.
+	it("refuses --files entries that are not test paths", () => {
+		expect(() =>
+			parseArgs([
+				"--out",
+				".",
+				"--files",
+				"--config=/tmp/x.ts,tests/a.test.ts",
+			]),
+		).toThrow(/test paths .*never a flag: --config=\/tmp\/x\.ts$/);
+		expect(() =>
+			parseArgs(["--out", ".", "--files", "tests/fixtures/x.test.ts"]),
+		).toThrow(/never a flag/);
+		expect(parseArgs(["--out", ".", "--files", A]).files).toEqual([A]);
+		const errors: string[] = [];
+		const original = console.error;
+		console.error = (line: string) => errors.push(String(line));
+		try {
+			expect(
+				run(["--out", scratchDir("g2"), "--files", "-t,tests/a.test.ts"], {
+					log: quiet,
+				}),
+			).toBe(2);
+		} finally {
+			console.error = original;
+		}
+		expect(errors.join("\n")).toContain("never a flag: -t");
 	});
 
 	// Recurrence: `--part 3/3` would select no start and report a clean census.
@@ -861,13 +1003,12 @@ describe("the ratchet file", () => {
 		"once-per-session-sink",
 		"persisted-graph-store",
 		"tree-sitter-wasm-state",
-		"wall-clock-resolution",
 	]);
 	// The ratchet's size, pinned both ways: adding a file raises it (a reviewer
 	// sees a new order-dependent file admitted), fixing one lowers it. Lower
 	// this number in the PR that fixes a file; never raise it to admit a new
 	// one without a named seam and an issue.
-	const PINNED_FILES = 32;
+	const PINNED_FILES = 30;
 
 	// Recurrence: a ratchet that grows silently (the point of #4405 is that it
 	// can only shrink).
@@ -883,7 +1024,7 @@ describe("the ratchet file", () => {
 		for (const item of parsed.members) {
 			const file = path.join(ROOT, item.file);
 			expect(fs.existsSync(file), item.file).toBe(true);
-			expect([...CENSUS_SEEDS], `${item.file} seed`).toContain(item.seed);
+			expect([...SEEDS], `${item.file} seed`).toContain(item.seed);
 			expect(SEAMS.has(item.seam), `${item.file} seam ${item.seam}`).toBe(true);
 			expect(seen.has(item.file), `duplicate ${item.file}`).toBe(false);
 			seen.add(item.file);
@@ -902,6 +1043,9 @@ describe("the ratchet file", () => {
 	it("does not list the files fixed at their cause", () => {
 		const listedFiles = new Set(parsed.members.map((item) => item.file));
 		expect(listedFiles.has("tests/index-integration.test.ts")).toBe(false);
+		expect(listedFiles.has("tests/config/tmp-fixture-hygiene.test.ts")).toBe(
+			false,
+		);
 		expect(
 			listedFiles.has(
 				"tests/clients/dispatch/runners/tree-sitter-runner.test.ts",

@@ -1,6 +1,5 @@
 import type { ExecVitest, ShuffleRun } from "./ci-shuffle-changed-tests.mjs";
 
-export declare const CENSUS_SEEDS: readonly number[];
 export declare const CHUNK_FILES: number;
 export declare const START_CAP_MS: number;
 export declare const MIN_START_MS: number;
@@ -71,6 +70,8 @@ export declare function judgeCensus(state: {
 	records: CensusRecord[];
 	ratchet: Array<{ file: string }>;
 	previousStale?: Iterable<string>;
+	planned?: CensusRun[];
+	censusResult?: string;
 }): Verdict;
 export declare function previousStaleFrom(
 	issuesJson: string,
@@ -96,6 +97,7 @@ export declare function parseArgs(argv: string[]): {
 	staleOut: string | null;
 	bodyOut: string | null;
 	runUrl: string;
+	censusResult: string | undefined;
 	ratchet: string;
 	cwd: string;
 };
