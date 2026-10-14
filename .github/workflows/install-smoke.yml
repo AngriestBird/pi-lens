@@ -491,6 +491,18 @@ jobs:
           git init -q; git config user.email t@t.t; git config user.name t
           printf 'export const x: number = 1;\n' > a.ts
           printf '{ "name": "d", "version": "1.0.0", "type": "module" }\n' > package.json
+          # A TypeScript project has its own compiler (#4401). This leg runs the
+          # PUBLISHED pi-lens, and 4.4.3 refuses the TS server when the only
+          # compiler is a runner-image `tsc` found on PATH as a bare name (#4414,
+          # fixed in #4415, unreleased). With this install the leg no longer
+          # covers that shape at all; host-range-smoke covers it on PR code.
+          # REMOVAL TRIGGER: once a release carries #4415, drop these install
+          # lines in at least one published leg, so the shipped artifact runs
+          # the common user shape (global tsc, project without typescript) again.
+          # The pin is the one pi-lens installs for itself (classic tsserver.js).
+          printf 'node_modules\n' > .gitignore
+          # pi-lens-ignore: zizmor:adhoc-packages
+          node "$GITHUB_WORKSPACE/scripts/npm-retry.mjs" install --no-audit --no-fund --ignore-scripts --save-dev typescript@5.9.3
           git add -A && git commit -qm init
           node "$GITHUB_WORKSPACE/scripts/rpc-load-check.mjs" "$(command -v pi)"
 
@@ -680,6 +692,18 @@ jobs:
           git init -q; git config user.email t@t.t; git config user.name t
           printf 'export const x: number = 1;\n' > a.ts
           printf '{ "name": "d", "version": "1.0.0", "type": "module" }\n' > package.json
+          # A TypeScript project has its own compiler (#4401). This leg runs the
+          # PUBLISHED pi-lens, and 4.4.3 refuses the TS server when the only
+          # compiler is a runner-image `tsc` found on PATH as a bare name (#4414,
+          # fixed in #4415, unreleased). With this install the leg no longer
+          # covers that shape at all; host-range-smoke covers it on PR code.
+          # REMOVAL TRIGGER: once a release carries #4415, drop these install
+          # lines in at least one published leg, so the shipped artifact runs
+          # the common user shape (global tsc, project without typescript) again.
+          # The pin is the one pi-lens installs for itself (classic tsserver.js).
+          printf 'node_modules\n' > .gitignore
+          # pi-lens-ignore: zizmor:adhoc-packages
+          node "$GITHUB_WORKSPACE/scripts/npm-retry.mjs" install --no-audit --no-fund --ignore-scripts --save-dev typescript@5.9.3
           git add -A && git commit -qm init
           node "$GITHUB_WORKSPACE/scripts/rpc-load-check.mjs" "$(command -v pi)"
 

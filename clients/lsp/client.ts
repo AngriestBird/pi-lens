@@ -6143,7 +6143,10 @@ export async function createLSPClient(options: {
 		},
 		undefined,
 		// #4320: a creation can answer an import a cached finding reported missing.
-		() => noteWorkspaceFileCreated(state.serverId, state.root),
+		// #4346: the paths go with it, so only entries whose dependency scope
+		// holds one are refused.
+		(uris) =>
+			noteWorkspaceFileCreated(state.serverId, state.root, uris.map(uriToPath)),
 	);
 
 	setupIncomingHandlers(state, initialization, onDiagnosticsPublished);

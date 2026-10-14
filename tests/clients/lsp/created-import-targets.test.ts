@@ -12,6 +12,8 @@ import {
 	CREATED_IMPORT_SCAN_MAX_FILES,
 	emitCreatedImportScanRollupAtSessionEnd,
 	getCreatedImportScanRollup,
+	goPackageFilesToAnnounce,
+	type ImportScope,
 	importTargetsToAnnounce,
 } from "../../../clients/lsp/created-import-targets.js";
 import {
@@ -74,6 +76,37 @@ describe("importTargetsToAnnounce (#4346)", () => {
 		expect(record?.latestReasons[0]?.subject).toBe("capped");
 	});
 
+	// #4346: the cache's dependency scope is complete only for a file the
+	// producer resolved, so it hears every resolved file's targets and
+	// unresolved sources, and never a file past the cap (which then keeps the
+	// base rule).
+	it("hands each resolved importer's scope to the caller, and none past the cap", async () => {
+		const root = workspace("pi-lens-4346-scope-");
+		const importers: string[] = [];
+		for (let i = 0; i <= CREATED_IMPORT_SCAN_MAX_FILES; i++) {
+			const importer = path.join(root, `user${i}.ts`);
+			fs.writeFileSync(
+				importer,
+				`import "./mod${i}";\nimport "./missing${i}";\nexport {};\n`,
+			);
+			fs.writeFileSync(path.join(root, `mod${i}.ts`), "export {};\n");
+			importers.push(importer);
+		}
+		const heard = new Map<string, ImportScope>();
+
+		await importTargetsToAnnounce(root, importers, (importer, scope) =>
+			heard.set(importer, scope),
+		);
+
+		expect(heard.size).toBe(CREATED_IMPORT_SCAN_MAX_FILES);
+		expect(heard.has(importers[CREATED_IMPORT_SCAN_MAX_FILES]!)).toBe(false);
+		const first = heard.get(importers[0]!);
+		expect(first?.targets.map((file) => path.basename(file))).toEqual([
+			"mod0.ts",
+		]);
+		expect(first?.unresolved).toEqual(["./missing0"]);
+	});
+
 	it("records nothing within the cap", async () => {
 		const root = workspace("pi-lens-4346-cap-under-");
 		const importer = path.join(root, "user.ts");
@@ -91,6 +124,255 @@ describe("importTargetsToAnnounce (#4346)", () => {
 			),
 		).toBe(false);
 	});
+});
+
+describe("importTargetsToAnnounce: scope completeness (#4346 r2)", () => {
+	async function scopeOf(root: string, importer: string): Promise<ImportScope> {
+		let heard: ImportScope | undefined;
+		await importTargetsToAnnounce(root, [importer], (_file, scope) => {
+			heard = scope;
+		});
+		if (!heard) throw new Error(`no scope heard for ${importer}`);
+		return heard;
+	}
+
+	// Completeness table rows C2-C10. Recurrence: #4430 r1 review F1 and r2
+	// verify V1, the import query captures only import and export statements,
+	// so these dependencies were neither targets nor unresolved, and the cache
+	// served a stale finding past their creation (on real tsserver for the
+	// JSDoc `@import` and the module augmentation). Rule A (a relative
+	// specifier string that is not a captured source) covers the rows with a
+	// quoted relative specifier; rule K (an `import(` or `require(` call)
+	// covers the call rows, and alone the alias and backtick rows.
+	it.each([
+		["dynamic import", "user.ts", 'export const f = () => import("./lazy");\n'],
+		["type-position import", "user.ts", 'export let t: import("./types").T;\n'],
+		[
+			"import = require",
+			"user.ts",
+			'import m = require("./mod");\nexport { m };\n',
+		],
+		["require", "user.ts", 'const m = require("./mod");\nexport { m };\n'],
+		[
+			"reference path",
+			"user.ts",
+			'/// <reference path="./globals.ts" />\nexport {};\n',
+		],
+		[
+			"JSDoc @import",
+			"user.js",
+			'/** @import { T } from "./types" */\n/** @type {T} */\nexport const t = 1;\n',
+		],
+		[
+			"module augmentation",
+			"user.ts",
+			'declare module "./augmod" {\n\tinterface A { x: number }\n}\nexport {};\n',
+		],
+		[
+			"comment-split dynamic import",
+			"user.ts",
+			'export const p = import /* c */ ("./lazy");\n',
+		],
+		// Rule K alone: an alias or package specifier, and a backtick one.
+		[
+			"dynamic import of an alias",
+			"user.ts",
+			'export const f = () => import("@/lazy");\n',
+		],
+		[
+			"template dynamic import",
+			"user.ts",
+			"export const f = () => import(`./lazy`);\n",
+		],
+	])(
+		"reports a file holding a %s incomplete",
+		async (_shape, name, content) => {
+			const root = workspace("pi-lens-4346-uncaptured-");
+			const importer = path.join(root, name);
+			fs.writeFileSync(importer, `import "./dep";\n${content}`);
+			fs.writeFileSync(path.join(root, "dep.ts"), "export {};\n");
+
+			const scope = await scopeOf(root, importer);
+
+			expect(scope.targets.map((file) => path.basename(file))).toEqual([
+				"dep.ts",
+			]);
+			expect(scope.complete).toBe(false);
+		},
+	);
+
+	it("reports a file whose imports are all statements complete", async () => {
+		const root = workspace("pi-lens-4346-captured-");
+		const importer = path.join(root, "user.ts");
+		fs.writeFileSync(
+			importer,
+			'import { a } from "./dep";\nexport { b } from "./other";\nexport const c = a;\n',
+		);
+		fs.writeFileSync(path.join(root, "dep.ts"), "export const a = 1;\n");
+		fs.writeFileSync(path.join(root, "other.ts"), "export const b = 1;\n");
+
+		expect((await scopeOf(root, importer)).complete).toBe(true);
+	});
+
+	// Row C11. Recurrence: #4430 r3 verify, round 3 deleted the reference-path
+	// keyword on the claim that a referenced file reaches F only through
+	// global declarations. A module target does too: TS6053 ("file not found")
+	// depends only on the file existing, so the ambient arm misses its
+	// creation, and real tsserver served the stale finding. Rule K counts it.
+	it("reports a file referencing a module path without ./ incomplete", async () => {
+		const root = workspace("pi-lens-4346-reference-bare-");
+		const importer = path.join(root, "user.ts");
+		fs.writeFileSync(
+			importer,
+			'/// <reference path="x.ts" />\nimport "./dep";\nexport {};\n',
+		);
+		fs.writeFileSync(path.join(root, "dep.ts"), "export {};\n");
+		fs.writeFileSync(path.join(root, "x.ts"), "export const x = 1;\n");
+
+		expect((await scopeOf(root, importer)).complete).toBe(false);
+	});
+
+	// Row C19: rules A and K are JS/TS only. A Go grouped import is `import (`,
+	// and a Go string may spell `./x`; the Go query captures every import spec.
+	it("reports a Go file with a grouped import and a relative string complete", async () => {
+		const root = workspace("pi-lens-4346-go-group-");
+		const importer = path.join(root, "main.go");
+		fs.writeFileSync(
+			importer,
+			'package main\n\nimport (\n\t"fmt"\n)\n\nfunc main() { fmt.Println("./x") }\n',
+		);
+
+		expect((await scopeOf(root, importer)).complete).toBe(true);
+	});
+
+	// Row F1b: an importer with a grammar that cannot be read now.
+	it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+		"reports a file it cannot read incomplete",
+		async () => {
+			const root = workspace("pi-lens-4346-unread-importer-");
+			const importer = path.join(root, "user.ts");
+			fs.writeFileSync(importer, 'import "./dep";\nexport {};\n');
+			fs.writeFileSync(path.join(root, "dep.ts"), "export {};\n");
+			fs.chmodSync(importer, 0o000);
+			try {
+				const scope = await scopeOf(root, importer);
+				expect(scope.targets).toEqual([]);
+				expect(scope.complete).toBe(false);
+			} finally {
+				fs.chmodSync(importer, 0o644);
+			}
+		},
+	);
+
+	// Row F1b. Recurrence: an importer the extraction cannot parse (here a Vue
+	// file, which has no grammar) answered an empty scope that counted as
+	// complete, so its finding entry ignored every creation.
+	it("reports a file it cannot parse incomplete", async () => {
+		const root = workspace("pi-lens-4346-unparsed-");
+		const importer = path.join(root, "view.vue");
+		fs.writeFileSync(
+			importer,
+			'<script setup lang="ts">\nimport { a } from "./dep";\n</script>\n',
+		);
+		fs.writeFileSync(path.join(root, "dep.ts"), "export const a = 1;\n");
+
+		const scope = await scopeOf(root, importer);
+
+		expect(scope.targets).toEqual([]);
+		expect(scope.complete).toBe(false);
+	});
+
+	// Rows T1-T8. Recurrence: #4430 r1 review F2 and the r2 verify's three
+	// slips (T6-T8): a target that re-exports another module lets the
+	// importer use that module, which its imports do not name. Rule R (an
+	// `export` then a `from` with no `;` between) covers every row.
+	it.each([
+		["export * from", 'export * from "./b";\n'],
+		["export * as ns from", 'export * as ns from "./b";\n'],
+		["export { x } from", 'export {\n  x,\n} from "./b";\n'],
+		["export type { T } from", 'export type { T } from "./b";\n'],
+		["export { default } from", 'export { default } from "./b";\n'],
+		["export /* c */ * from", 'export /* c */ * from "./b";\n'],
+		[
+			"a } in a comment within export { } from",
+			'export {\n  x, // see }\n} from "./b";\n',
+		],
+		['export * as "ns" from', 'export * as "ns" from "./b";\n'],
+		// #4430 r3 verify nitpick: a `;` inside a comment split the run.
+		[
+			"a ; in a comment within export { } from",
+			'export { a /* ; */ } from "./b";\n',
+		],
+		// Both readings count: removing "comments" alone would drop this
+		// line from `//` on.
+		[
+			"a re-export after a URL string on its line",
+			'const u = "http://x"; export * from "./b";\n',
+		],
+	])(
+		"reports a file whose target holds %s incomplete",
+		async (_form, content) => {
+			const root = workspace("pi-lens-4346-reexport-");
+			const importer = path.join(root, "user.ts");
+			fs.writeFileSync(
+				importer,
+				'import { x } from "./a";\nexport const y = x;\n',
+			);
+			fs.writeFileSync(path.join(root, "a.ts"), content);
+
+			expect((await scopeOf(root, importer)).complete).toBe(false);
+		},
+	);
+
+	// Rows T10 and T13: rule R reads an `export` and a later `from` in one
+	// `;`-free run. A `from` before the `export`, or past a `;`, is no
+	// re-export, with or without semicolons.
+	it.each([
+		[
+			"with semicolons",
+			'export const z = 1;\nimport { b } from "./b";\nexport const x = b;\nexport { b };\n',
+		],
+		[
+			"without semicolons",
+			'import { b } from "./b"\nexport const x = b\nexport { b }\n',
+		],
+	])(
+		"reports a file whose target only imports and exports its own names complete (%s)",
+		async (_style, content) => {
+			const root = workspace("pi-lens-4346-no-reexport-");
+			const importer = path.join(root, "user.ts");
+			fs.writeFileSync(
+				importer,
+				'import { x } from "./a";\nexport const y = x;\n',
+			);
+			fs.writeFileSync(path.join(root, "a.ts"), content);
+			fs.writeFileSync(path.join(root, "b.ts"), "export const b = 1;\n");
+
+			expect((await scopeOf(root, importer)).complete).toBe(true);
+		},
+	);
+
+	// A target the extraction resolved but that cannot be read now (gone, or
+	// no permission) may re-export anything: the scope fails closed.
+	it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+		"reports a file whose target cannot be read incomplete",
+		async () => {
+			const root = workspace("pi-lens-4346-unreadable-");
+			const importer = path.join(root, "user.ts");
+			fs.writeFileSync(
+				importer,
+				'import { x } from "./a";\nexport const y = x;\n',
+			);
+			const target = path.join(root, "a.ts");
+			fs.writeFileSync(target, "export const x = 1;\n");
+			fs.chmodSync(target, 0o000);
+			try {
+				expect((await scopeOf(root, importer)).complete).toBe(false);
+			} finally {
+				fs.chmodSync(target, 0o644);
+			}
+		},
+	);
 });
 
 describe("importTargetsToAnnounce bounds (#4368 r1 F2)", () => {
@@ -224,5 +506,30 @@ describe("a workspace edit's resource operations with no LSP service (#4346)", (
 
 		expect(fs.existsSync(created)).toBe(true);
 		expect(peekOwnedLspService()).toBeUndefined();
+	});
+});
+
+describe("goPackageFilesToAnnounce (#4346)", () => {
+	// Row 12. Recurrence: a Go file uses its package's files with no import,
+	// so the import producer never named one created outside pi-lens.
+	it("lists the Go files beside the call's Go files that the call does not list", () => {
+		const root = workspace("pi-lens-4346-gopkg-");
+		const pkg = path.join(root, "pkg");
+		fs.mkdirSync(pkg);
+		for (const name of ["a.go", "b.go", "c.go", "notes.md"]) {
+			fs.writeFileSync(path.join(pkg, name), "package pkg\n");
+		}
+		fs.mkdirSync(path.join(pkg, "nested.go"));
+		const other = path.join(root, "other.ts");
+		fs.writeFileSync(other, "export {};\n");
+
+		const peers = goPackageFilesToAnnounce([
+			path.join(pkg, "a.go"),
+			path.join(pkg, "b.go"),
+			other,
+		]).map((file) => toPosix(path.relative(root, file)));
+
+		expect(peers).toEqual(["pkg/c.go"]);
+		expect(goPackageFilesToAnnounce([other])).toEqual([]);
 	});
 });

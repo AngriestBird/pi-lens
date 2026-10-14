@@ -81,7 +81,10 @@ import {
 	SCAN_LANGUAGE_PRIORITY,
 } from "../clients/language-registry.js";
 import { exceedsLspSyncLimits } from "../clients/lsp/content-limits.js";
-import { importTargetsToAnnounce } from "../clients/lsp/created-import-targets.js";
+import {
+	goPackageFilesToAnnounce,
+	importTargetsToAnnounce,
+} from "../clients/lsp/created-import-targets.js";
 
 const MAX_FILES = 100;
 export const MAX_BATCH_FILES = 100;
@@ -1691,10 +1694,11 @@ async function runFileDiagnostics(
 	const writeIndex = nextWriteIndex?.();
 	// #4346: a module this file imports, created outside pi-lens, reaches its
 	// servers before the touch (the batch path gates this on cached findings;
-	// one file needs no gate).
-	lspService.announceCreatedFiles(
-		await importTargetsToAnnounce(cwd, [absPath]),
-	);
+	// one file needs no gate), and so do a Go file's package files.
+	lspService.announceCreatedFiles([
+		...goPackageFilesToAnnounce([absPath]),
+		...(await importTargetsToAnnounce(cwd, [absPath])),
+	]);
 	// #3505 r2: the widget row is observed at the read, not after the touch.
 	const observedAt = Date.now();
 	const {
@@ -2250,12 +2254,17 @@ async function collectBatchDiagnostics(
 	// before any lookup below, whatever the order of `files`. #4346: so must a
 	// module named only by a file's imports, which nothing reports when it was
 	// created outside pi-lens: for every file a fresh clean entry will not
-	// answer (#4368 r1 F1; a write-hook touch records no entry).
+	// answer (#4368 r1 F1; a write-hook touch records no entry). So must a Go
+	// file's package files, which no import names; and each resolved file's
+	// imports go to the cache, which refuses an entry only for a creation in
+	// its dependency scope.
 	lspService.announceCreatedFiles([
 		...files,
+		...goPackageFilesToAnnounce(files),
 		...(await importTargetsToAnnounce(
 			resolvedCwd,
 			files.filter((file) => !cacheCtx.servesClean(file, scopeKey)),
+			(file, scope) => cacheCtx.noteImportScope(file, scope),
 		)),
 	]);
 	const groups = groupFilesByPrimaryServer(files);

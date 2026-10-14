@@ -382,6 +382,9 @@ async function resolveForwardImportsMemoized(
  * #4368 r1 row 13: `unresolved` holds the sources that resolved to nothing at
  * the last call, carried across the file's versions, so a later call that
  * resolves one sees a path that appeared in between (`notePathAppeared`).
+ *
+ * #4346 r3: `uncaptured` is set when a JS/TS file's sources may not be all of
+ * its dependencies ({@link holdsUncapturedDependency}).
  */
 const FORWARD_IMPORT_SOURCE_MEMO_ENTRIES = 1024;
 interface ForwardImportSourceEntry {
@@ -390,6 +393,49 @@ interface ForwardImportSourceEntry {
 	size: number;
 	sources: string[];
 	unresolved: ReadonlySet<string>;
+	uncaptured: boolean;
+}
+
+/** The JS/TS grammars, whose import query captures only `import`/`export`
+ * statement sources. Go captures every import spec, and `import (` is its
+ * grouped import. */
+const JS_TS_LANGUAGES = new Set(["typescript", "tsx", "javascript"]);
+/**
+ * A relative specifier string: quoted, starting `./` or `../`. A backtick
+ * specifier is valid only in an `import(` or `require(` call, which
+ * `DEPENDENCY_CALL` already counts.
+ */
+const RELATIVE_SPECIFIER = /(["'])(\.{1,2}\/(?:(?!\1)[^\n])*)\1/g;
+/**
+ * A dependency whose specifier rule A cannot see: an `import(` or `require(`
+ * call (a package or alias name, or computed), or a `/// <reference path>`,
+ * whose path needs no `./` and may name a module (TS6053 depends only on the
+ * file existing, so the ambient arm misses its creation; #4430 r3 verify).
+ */
+const DEPENDENCY_CALL =
+	/\bimport\s*\(|\brequire\s*\(|\/\/\/\s*<reference\s+path/;
+
+/**
+ * #4346 r3: whether a JS/TS file's captured `sources` may miss a dependency.
+ * Derived from the text, not from a list of forms (rounds 1 and 2 listed forms
+ * and each review found one more): any relative specifier string, comments
+ * included, that is not a captured source (a JSDoc `@import`, `declare
+ * module "./x"`, `import("./x")`, `require("./x")`), or an `import(` or
+ * `require(` call or a `/// <reference path>`, whose specifier a relative
+ * test cannot see. A false
+ * positive only makes the scope incomplete, which refuses a finding entry
+ * once more (fails closed).
+ */
+function holdsUncapturedDependency(
+	content: string,
+	sources: readonly string[],
+): boolean {
+	if (DEPENDENCY_CALL.test(content)) return true;
+	const captured = new Set(sources);
+	for (const match of content.matchAll(RELATIVE_SPECIFIER)) {
+		if (!captured.has(match[2]!)) return true;
+	}
+	return false;
 }
 const forwardImportSourceMemo = new BoundedLruCache<
 	string,
@@ -444,31 +490,48 @@ async function forwardImportSources(
 	);
 	if (!outcome.parsed) return undefined;
 	forwardImportParses++;
+	const sources = [...new Set(outcome.value.map((ref) => ref.source))];
 	const entry: ForwardImportSourceEntry = {
 		mtimeMs: stat.mtimeMs,
 		ctimeMs: stat.ctimeMs,
 		size: stat.size,
-		sources: [...new Set(outcome.value.map((ref) => ref.source))],
+		sources,
 		unresolved: memo?.unresolved ?? new Set(),
+		uncaptured:
+			JS_TS_LANGUAGES.has(languageId) &&
+			holdsUncapturedDependency(content, sources),
 	};
 	forwardImportSourceMemo.set(key, entry);
 	return entry;
 }
 
+/** #4346: one file's imports now: the files they resolve to, and the sources
+ * that resolve to nothing. */
+export interface ForwardImports {
+	targets: string[];
+	unresolved: string[];
+	/**
+	 * #4346 r2 F1: whether the sources are all of the file's dependencies:
+	 * false when it could not be parsed (no grammar, client or read) or holds
+	 * a form the query does not capture.
+	 */
+	complete: boolean;
+}
+
 /**
  * Production forward-import resolver. Parses `filePath` with its tree-sitter grammar
  * and resolves every extracted import source to in-project files. Degrades to an
- * empty list (never throws) when the grammar, client, or file is unavailable — the
- * sweep then falls back to checking only the blocker file's own drift.
+ * empty answer (never throws) when the grammar, client, or file is unavailable —
+ * the sweep then falls back to checking only the blocker file's own drift.
  */
-export async function extractForwardImportPaths(
+export async function extractForwardImports(
 	cwd: string,
 	filePath: string,
-): Promise<string[]> {
+): Promise<ForwardImports> {
 	const languageId = resolveTreeSitterLanguage(filePath);
-	if (!languageId) return [];
+	if (!languageId) return { targets: [], unresolved: [], complete: false };
 	const entry = await forwardImportSources(filePath, languageId);
-	if (!entry) return [];
+	if (!entry) return { targets: [], unresolved: [], complete: false };
 	const resolved = new Set<string>();
 	const unresolved = new Set<string>();
 	for (const source of entry.sources) {
@@ -481,7 +544,19 @@ export async function extractForwardImportPaths(
 		}
 	}
 	entry.unresolved = unresolved;
-	return [...resolved];
+	return {
+		targets: [...resolved],
+		unresolved: [...unresolved],
+		complete: !entry.uncaptured,
+	};
+}
+
+/** The files `filePath`'s imports resolve to now ({@link extractForwardImports}). */
+export function extractForwardImportPaths(
+	cwd: string,
+	filePath: string,
+): Promise<string[]> {
+	return extractForwardImports(cwd, filePath).then(({ targets }) => targets);
 }
 
 async function statSignature(
