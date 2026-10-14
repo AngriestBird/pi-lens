@@ -652,6 +652,21 @@ describe("TLA+ switch pins (#4393, recurrence #4387)", () => {
 			]);
 		});
 
+		it("checks every further test a pin names in also", () => {
+			// Recurrence: #4399 review F2. One value encoded two behaviours
+			// (SpendLicense == BridgeNoAdvance) and only one had a test.
+			const fixture = tree({ "Pass.cfg": PASS });
+			const also = [{ test: "tests/p.test.ts", title: "a gone pin" }];
+			expect(
+				auditSwitchPins(
+					fixture,
+					registry({ ...GOOD, Inject: { ...GOOD.Inject, also } }),
+				),
+			).toEqual([
+				'fam.Inject: tests/p.test.ts declares no test titled "a gone pin"',
+			]);
+		});
+
 		it("admits a narrowing value only with its reason", () => {
 			const fixture = tree({
 				"Pass.cfg": PASS,
