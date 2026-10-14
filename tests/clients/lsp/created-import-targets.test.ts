@@ -12,6 +12,8 @@ import {
 	CREATED_IMPORT_SCAN_MAX_FILES,
 	emitCreatedImportScanRollupAtSessionEnd,
 	getCreatedImportScanRollup,
+	goPackageFilesToAnnounce,
+	type ImportScope,
 	importTargetsToAnnounce,
 } from "../../../clients/lsp/created-import-targets.js";
 import {
@@ -72,6 +74,37 @@ describe("importTargetsToAnnounce (#4346)", () => {
 		);
 		expect(record?.count).toBe(1);
 		expect(record?.latestReasons[0]?.subject).toBe("capped");
+	});
+
+	// #4346: the cache's dependency scope is complete only for a file the
+	// producer resolved, so it hears every resolved file's targets and
+	// unresolved sources, and never a file past the cap (which then keeps the
+	// base rule).
+	it("hands each resolved importer's scope to the caller, and none past the cap", async () => {
+		const root = workspace("pi-lens-4346-scope-");
+		const importers: string[] = [];
+		for (let i = 0; i <= CREATED_IMPORT_SCAN_MAX_FILES; i++) {
+			const importer = path.join(root, `user${i}.ts`);
+			fs.writeFileSync(
+				importer,
+				`import "./mod${i}";\nimport "./missing${i}";\nexport {};\n`,
+			);
+			fs.writeFileSync(path.join(root, `mod${i}.ts`), "export {};\n");
+			importers.push(importer);
+		}
+		const heard = new Map<string, ImportScope>();
+
+		await importTargetsToAnnounce(root, importers, (importer, scope) =>
+			heard.set(importer, scope),
+		);
+
+		expect(heard.size).toBe(CREATED_IMPORT_SCAN_MAX_FILES);
+		expect(heard.has(importers[CREATED_IMPORT_SCAN_MAX_FILES]!)).toBe(false);
+		const first = heard.get(importers[0]!);
+		expect(first?.targets.map((file) => path.basename(file))).toEqual([
+			"mod0.ts",
+		]);
+		expect(first?.unresolved).toEqual(["./missing0"]);
 	});
 
 	it("records nothing within the cap", async () => {
@@ -224,5 +257,30 @@ describe("a workspace edit's resource operations with no LSP service (#4346)", (
 
 		expect(fs.existsSync(created)).toBe(true);
 		expect(peekOwnedLspService()).toBeUndefined();
+	});
+});
+
+describe("goPackageFilesToAnnounce (#4346)", () => {
+	// Row 12. Recurrence: a Go file uses its package's files with no import,
+	// so the import producer never named one created outside pi-lens.
+	it("lists the Go files beside the call's Go files that the call does not list", () => {
+		const root = workspace("pi-lens-4346-gopkg-");
+		const pkg = path.join(root, "pkg");
+		fs.mkdirSync(pkg);
+		for (const name of ["a.go", "b.go", "c.go", "notes.md"]) {
+			fs.writeFileSync(path.join(pkg, name), "package pkg\n");
+		}
+		fs.mkdirSync(path.join(pkg, "nested.go"));
+		const other = path.join(root, "other.ts");
+		fs.writeFileSync(other, "export {};\n");
+
+		const peers = goPackageFilesToAnnounce([
+			path.join(pkg, "a.go"),
+			path.join(pkg, "b.go"),
+			other,
+		]).map((file) => toPosix(path.relative(root, file)));
+
+		expect(peers).toEqual(["pkg/c.go"]);
+		expect(goPackageFilesToAnnounce([other])).toEqual([]);
 	});
 });

@@ -264,6 +264,15 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			reason:
 				"the defect is wall-clock only (2^N globstar backtracking); a fake clock measures nothing",
 		},
+	// 2026-10-14 (#4346): the ast-grep native addon's load is the host
+	// boundary, and `loadAstGrepNapiSync` is its only seam; no host lane
+	// lacks the addon, so the fail-closed record has no real driver.
+	"in-process-mock:clients/lsp/implicit-scope-napi-unavailable-4346.test.ts::clients/deps/ast-grep-napi":
+		{
+			detector: "in-process-mock",
+			reason:
+				"the native addon's load is the host boundary; its sync loader is the only seam to make it fail",
+		},
 	"never-settling-wait:scripts/mutate-fixture.test.ts": {
 		detector: "never-settling-wait",
 		reason:

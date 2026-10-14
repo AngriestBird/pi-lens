@@ -957,8 +957,13 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp-mutation.ts": 3,
 		"clients/lsp/client-registry.ts": 4,
 		"clients/lsp/config.ts": 9,
+		// #4346: resolves a Go importer's package directory to announce its peers.
+		"clients/lsp/created-import-targets.ts": 3,
 		"clients/lsp/edits.ts": 23,
 		"clients/lsp/index.ts": 15,
+		// #4346: Go package directories and TS/JS extensions of the implicit
+		// dependency scope (same-package files, ambient declarations).
+		"clients/lsp/implicit-scope.ts": 7,
 		"clients/lsp/inferred-project.ts": 3,
 		"clients/lsp/jvm-runtime.ts": 19,
 		"clients/lsp/language.ts": 3,
@@ -970,7 +975,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// validation replace the wrapper-relative guess. No path-key owner changes.
 		"clients/lsp/server.ts": 124,
 		"clients/lsp/session-roots.ts": 6,
-		"clients/lsp/workspace-diagnostics-cache.ts": 13,
+		// 13 -> 15 (#4346): a creation's path joins the entry's dependency
+		// scope test (Go package directory, created-file stem/directory names).
+		"clients/lsp/workspace-diagnostics-cache.ts": 15,
+		// #4346: a creation record carries the created file's path.
+		"clients/lsp/workspace-diagnostics-session.ts": 2,
 		// 6 -> 5 (#3643): removed the obsolete ring path-comparison branch;
 		// dispatch identity now arrives on DispatchResult.
 		"clients/mcp/analyze.ts": 5,

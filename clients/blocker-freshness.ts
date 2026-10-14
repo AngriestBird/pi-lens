@@ -455,20 +455,27 @@ async function forwardImportSources(
 	return entry;
 }
 
+/** #4346: one file's imports now: the files they resolve to, and the sources
+ * that resolve to nothing. */
+export interface ForwardImports {
+	targets: string[];
+	unresolved: string[];
+}
+
 /**
  * Production forward-import resolver. Parses `filePath` with its tree-sitter grammar
  * and resolves every extracted import source to in-project files. Degrades to an
- * empty list (never throws) when the grammar, client, or file is unavailable — the
- * sweep then falls back to checking only the blocker file's own drift.
+ * empty answer (never throws) when the grammar, client, or file is unavailable —
+ * the sweep then falls back to checking only the blocker file's own drift.
  */
-export async function extractForwardImportPaths(
+export async function extractForwardImports(
 	cwd: string,
 	filePath: string,
-): Promise<string[]> {
+): Promise<ForwardImports> {
 	const languageId = resolveTreeSitterLanguage(filePath);
-	if (!languageId) return [];
+	if (!languageId) return { targets: [], unresolved: [] };
 	const entry = await forwardImportSources(filePath, languageId);
-	if (!entry) return [];
+	if (!entry) return { targets: [], unresolved: [] };
 	const resolved = new Set<string>();
 	const unresolved = new Set<string>();
 	for (const source of entry.sources) {
@@ -481,7 +488,15 @@ export async function extractForwardImportPaths(
 		}
 	}
 	entry.unresolved = unresolved;
-	return [...resolved];
+	return { targets: [...resolved], unresolved: [...unresolved] };
+}
+
+/** The files `filePath`'s imports resolve to now ({@link extractForwardImports}). */
+export function extractForwardImportPaths(
+	cwd: string,
+	filePath: string,
+): Promise<string[]> {
+	return extractForwardImports(cwd, filePath).then(({ targets }) => targets);
 }
 
 async function statSignature(
