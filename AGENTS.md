@@ -225,9 +225,17 @@ the surface they bite; each block loads only when its trigger applies.
     sibling files, and agent_end are pinned whole-file exceptions.
 
 65. **Unknown authorship range:** a producer that cannot recover a truthful
-    range must carry UNKNOWN to `ReadGuard.creditAuthorship`; UNKNOWN retires
-    the existing scoped license and creates none. Only an explicit
-    `whole-file` signal may widen authorship. Enforced at
+    range must carry UNKNOWN to `ReadGuard.creditAuthorship`; UNKNOWN
+    creates no authorship. A scope after a credit is what the credit holds
+    plus what it may keep, so no credit widens an empty or range scope past
+    the lines it produced: not a drain, a bash write or a pipeline credit.
+    A native write's creation read vouches for the whole file instead.
+    UNKNOWN keeps a scope only under the writer rule
+    (`mayAdvanceAuthorship`) and while a read that names a tool call bounds
+    it after a move; otherwise it leaves an empty scope, which vouches for
+    no line. An own oldText edit must not retire its write's authorship. A
+    producer with no pre-write check says so with `advanceAuthorship:
+    false`, never by leaning on UNKNOWN. Enforced at
     `clients/mutation-bridge.ts` and `clients/read-guard.ts`, with the
     F-4210-2 production bridge witness.
 
@@ -1096,7 +1104,11 @@ read binding from actual content drift (#4265). Authorship (`writtenThisSession`
 follows content identity (#4131): it holds the bytes the conversation last
 wrote, `stat` only pre-filters the hash, and another writer's byte change ends
 it at the next zero-read edit, bash write or drain on the file
-(`retireChangedAuthorship`); no later write resumes it. A mutation-bridge
+(`retireChangedAuthorship`); no later write resumes it. A zero-read allow
+over a whole-file authorship injects a whole-file read that names the
+authorship's call, so the own edit's one-line read cannot shadow the rest
+and a move keeps that read exactly when it keeps the authorship; a range
+scope gets none. A mutation-bridge
 write (no pre-write check) may create a first authorship but ends an
 existing one; the observed replay alone advances it, its tool_call having
 retired every file it may replay. The store holds at most 4096 files. A branch move keeps it

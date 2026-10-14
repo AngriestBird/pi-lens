@@ -1353,19 +1353,15 @@ export class ReadGuard {
 
 	/**
 	 * {@link retireChangedAuthorship} on a key. `writer` names a write that
-	 * ended it after the fact (a bridge write, which no pre-write check
+	 * ended it after the fact (a `bridge` write, which no pre-write check
 	 * guarded), so the record tells the two triggers apart.
 	 */
-	private retireIfChanged(
-		filePath: string,
-		writer?: "bridge",
-		force = false,
-	): boolean {
+	private retireIfChanged(filePath: string, writer?: "bridge"): boolean {
 		const authored = this.writtenThisSession.get(filePath);
 		if (
 			!authored ||
 			authored.retired ||
-			(!force && authoredBytesIntact(filePath, authored))
+			authoredBytesIntact(filePath, authored)
 		)
 			return false;
 		authored.retired = true;
@@ -1373,9 +1369,8 @@ export class ReadGuard {
 		const isRisingEdge = incrementDegradationCount({
 			kind: "read-guard-authorship-retired",
 			subject: filePath,
-			reason: force
-				? "authored range was unknown; the next edit needs a read"
-				: "another writer changed the bytes the conversation wrote; the next edit needs a read",
+			reason:
+				"another writer changed the bytes the conversation wrote; the next edit needs a read",
 		});
 		if (isRisingEdge)
 			logReadGuardEvent({
@@ -1504,8 +1499,7 @@ export class ReadGuard {
 		if (!fileReads || fileReads.length === 0) {
 			// Only a write pi-lens observed (recordWritten, from any producer) is
 			// the agent's own; a newer mtime is any writer's (#3520). It stays the
-			// agent's own while the disk holds the bytes it wrote (#4131). A
-			// synthetic read is injected for it.
+			// agent's own while the disk holds the bytes it wrote (#4131).
 			this.retireChangedAuthorship(filePath);
 			if (this.writtenThisSession.get(filePath)?.retired) {
 				const verdict = this.blockOrWarn(
@@ -1521,6 +1515,14 @@ export class ReadGuard {
 			}
 			const authored = this.writtenThisSession.get(filePath);
 			if (authored && authoredRangeCovers(authored, touchedLines, editRanges)) {
+				// #4387: the bytes were just found intact, so the conversation
+				// holds every line. The authorship vouches from here through a
+				// whole-file read that names its write: a move keeps the read
+				// exactly when it keeps the authorship, and the own edit's
+				// one-line read cannot shadow the rest of the file. A range scope
+				// gets none: it would widen to the whole file (#4210).
+				if (authored.authoredRanges === undefined)
+					this.injectCreationRead(filePath, 0, 0, authored.toolCallId);
 				const verdict = this.allow();
 				this.recordVerdict(filePath, "edit", touchedLines, verdict, {
 					reasonKind: "session_authored",
@@ -2325,35 +2327,51 @@ export class ReadGuard {
 		const existing = this.writtenThisSession.get(filePath);
 		if (!existing && opts?.allowFirstAuthorship === false) return;
 		if (existing?.retired) return;
-		if (opts?.authorship === "unknown") {
-			// F-4210-2: unavailable observed coverage is not a whole-file write.
-			// Retire the prior scope and create no replacement license.
-			if (existing) this.retireIfChanged(filePath, "bridge", true);
-			return;
-		}
 		if (existing && !this.mayAdvanceAuthorship(filePath, opts)) {
 			this.retireIfChanged(filePath, "bridge");
 			return;
 		}
+		// F-4210-2: an UNKNOWN range is no license of its own: no first credit.
+		if (opts?.authorship === "unknown" && !existing) return;
+		// #4387: a scope covers a line only while the conversation holds that
+		// line's bytes, or while a read that a move keeps with the authorship
+		// bounds the file. So the scope after a credit is what the credit holds
+		// (a positional edit: its produced lines; any other credit: nothing) plus
+		// what it may keep. A native write holds the whole file through its
+		// creation read, which a move keeps with the authorship, so its scope is
+		// never consulted. A credit that names the lines it changed keeps the old
+		// scope. An UNKNOWN credit absorbs bytes no check covered, so it keeps
+		// the scope only while a read that names a call bounds it after a move
+		// (S12, S13). No credit widens a scope past the lines it holds (S14 to
+		// S17).
+		const keeps =
+			opts?.authorship !== "unknown" ||
+			(this.reads
+				.get(filePath)
+				?.some((read) => read.toolCallId !== undefined) ??
+				false);
+		const nextRanges = !existing
+			? opts?.authoredRanges
+			: keeps && existing.authoredRanges === undefined
+				? undefined
+				: (opts?.authoredRanges ?? []);
 		const observed = observeAuthoredBytes(
 			filePath,
 			opts?.contentHash,
-			opts?.authoredRanges,
+			nextRanges,
 		);
 		const { authoredRanges: _observedRanges, ...observedWithoutRanges } =
 			observed;
 		const composedRanges =
-			existing?.authoredRanges === undefined
-				? existing
-					? undefined
-					: observed.authoredRanges
-				: opts?.authoredRanges === undefined
-					? undefined
-					: composeAuthoredRanges(
-							existing,
-							opts.authoredRanges,
-							observed.authoredLineCount,
-						);
+			nextRanges !== undefined &&
+			keeps &&
+			existing?.authoredRanges !== undefined
+				? composeAuthoredRanges(
+						existing,
+						nextRanges,
+						observed.authoredLineCount,
+					)
+				: nextRanges;
 		const toolCallId = opts?.toolCallId ?? existing?.toolCallId;
 		// Re-inserted, so the map's order is credit order for the cap.
 		this.writtenThisSession.delete(filePath);
