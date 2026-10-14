@@ -382,6 +382,25 @@ describe("worker message boundary ratchet (#4402, recurrence #4400)", () => {
 		);
 	});
 
+	it("reports a name two functions share as unresolved, never the first match", () => {
+		// The contained twin comes first, so a resolver that took the first
+		// match would pass the bare handler the listener may actually bind.
+		const source = [
+			"function outer() {",
+			"  function handle(message: unknown): void {",
+			...CONTAINED_BODY,
+			"  }",
+			"  return handle;",
+			"}",
+			"function handle(message: unknown): void {",
+			"  const result = readResult(message);",
+			"  apply(result);",
+			"}",
+			'worker.on("message", handle);',
+		].join("\n");
+		expect(verdictOf(source).verdict).toBe("unresolved");
+	});
+
 	it("reports a handler it cannot follow as unresolved, never contained", () => {
 		for (const handler of [
 			"importedHandler",
