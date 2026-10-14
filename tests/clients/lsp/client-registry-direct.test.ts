@@ -1716,3 +1716,230 @@ describe("ClientRegistry adopted roots at acquisition (#4449)", () => {
 		});
 	});
 });
+
+describe("ClientRegistry.spawnClient breaker ladder (#4449)", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.setSystemTime(T0);
+	});
+
+	/** Ensure once, forget the cooldown it set (time passed), return the outcome. */
+	async function attempt(f: Fixture) {
+		const outcomes: string[] = [];
+		const result = await f.ensure((o) => outcomes.push(o));
+		const cooldown = f.registry.broken.get(f.key);
+		f.registry.broken.delete(f.key);
+		return { result, outcomes, cooldown };
+	}
+
+	// Recurrence (#1127): a server that cannot be spawned at all (binary missing
+	// WITH installs allowed) climbs 15s, 30s, 60s, 120s and is latched at the fifth
+	// failure. The ladder base, the doubling, the `>=`, and the latch were each
+	// reachable by a mutant that left the suite green because every existing
+	// spawn-failure test stops at the first cooldown.
+	it("climbs the unavailable-spawn ladder and latches at the fifth failure", async () => {
+		const f = ensureFixture();
+		f.spawn.mockResolvedValue(undefined as never);
+		const expected = [15_000, 30_000, 60_000, 120_000, 240_000];
+		for (let failure = 1; failure <= 5; failure++) {
+			const { result, outcomes, cooldown } = await attempt(f);
+			expect(result).toBeUndefined();
+			expect(outcomes).toEqual(["spawn-failure"]);
+			expect(priv(f.registry).failureCounts.get(f.key)).toBe(failure);
+			expect(cooldown).toBe(T0 + expected[failure - 1]);
+			expect(f.registry.permanentlyBroken.has(f.key)).toBe(failure === 5);
+		}
+		expect(ledger("lsp-breaker")?.latestReasons).toEqual([
+			{
+				subject: f.key,
+				reason: "permanently disabled after 5 unavailable spawns",
+			},
+		]);
+	});
+
+	// Recurrence (#1934 review F1): with installs disabled a missing binary is a
+	// POLICY decline, not a server failure. It cools down for one base interval,
+	// never climbs the ladder or latches, and reports `declined`.
+	it("cools a missing binary for one interval without counting it when installs are disabled", async () => {
+		process.env.PI_LENS_DISABLE_LSP_INSTALL = "1";
+		const f = ensureFixture();
+		f.spawn.mockResolvedValue(undefined as never);
+		for (let touch = 0; touch < 6; touch++) {
+			const { result, outcomes, cooldown } = await attempt(f);
+			expect(result).toBeUndefined();
+			expect(outcomes).toEqual(["declined"]);
+			expect(cooldown).toBe(T0 + 15_000);
+		}
+		expect(priv(f.registry).failureCounts.has(f.key)).toBe(false);
+		expect(f.registry.permanentlyBroken.has(f.key)).toBe(false);
+	});
+
+	// Recurrence (#1127): a spawn or initialize THROW is the same ladder through the
+	// catch path, with its own latch reason and the cap at five minutes.
+	it("climbs the throw ladder, latches at the fifth, and reports spawn-failure", async () => {
+		const f = ensureFixture();
+		createLSPClient.mockRejectedValue(new Error("initialize timed out"));
+		const expected = [15_000, 30_000, 60_000, 120_000, 240_000];
+		for (let failure = 1; failure <= 5; failure++) {
+			const { result, outcomes, cooldown } = await attempt(f);
+			expect(result).toBeUndefined();
+			expect(outcomes).toEqual(["spawn-failure"]);
+			expect(cooldown).toBe(T0 + expected[failure - 1]);
+			expect(f.registry.permanentlyBroken.has(f.key)).toBe(failure === 5);
+		}
+		expect(ledger("lsp-breaker")?.latestReasons).toEqual([
+			{
+				subject: f.key,
+				reason: "permanently disabled after 5 spawn/initialize failures",
+			},
+		]);
+	});
+
+	// Recurrence: the ladder is capped at five minutes. A sixth step would otherwise
+	// double past it; `Math.min` flipped to `max` made the FIRST cooldown five
+	// minutes and the cap meaningless.
+	it("never cools down longer than five minutes", async () => {
+		const f = ensureFixture();
+		createLSPClient.mockRejectedValue(new Error("boom"));
+		priv(f.registry).failureCounts.set(f.key, 7);
+		const { cooldown } = await attempt(f);
+		expect(cooldown).toBe(T0 + 300_000);
+	});
+
+	// Recurrence (#1934 review F1): trust refusals are declines. An untrusted host
+	// reaches a raw server (no compiler admission) and the backstop refuses it
+	// without cooling the key; a server that executes project code is refused with a
+	// FAILED verdict and is never spawned.
+	it("declines a raw server under an untrusted host and fails a project-code server", async () => {
+		setProjectTrustState("untrusted");
+		const raw = ensureFixture();
+		const rawOutcomes: string[] = [];
+		await expect(
+			raw.ensure((o) => rawOutcomes.push(o)),
+		).resolves.toBeUndefined();
+		expect(rawOutcomes).toEqual(["declined"]);
+		expect(raw.spawn).not.toHaveBeenCalled();
+		expect(raw.registry.broken.has(raw.key)).toBe(false);
+
+		const code = ensureFixture("go");
+		(code.info as { trustAllowed?: boolean }).trustAllowed = true;
+		(code.info as { executesProjectCode?: boolean }).executesProjectCode = true;
+		const codeOutcomes: string[] = [];
+		await expect(
+			code.ensure((o) => codeOutcomes.push(o)),
+		).resolves.toBeUndefined();
+		expect(codeOutcomes).toEqual(["spawn-failure"]);
+		expect(code.spawn).not.toHaveBeenCalled();
+	});
+});
+
+describe("ClientRegistry.spawnClient success and shutdown guards (#4449)", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.setSystemTime(T0);
+	});
+
+	// Recurrence (#3502, #2356, #1934): publishing a client is one transaction. The
+	// replacement is registered with fresh spawn and use stamps, its readiness and
+	// stall-demotion markers are dropped, first contact is re-armed BEFORE the
+	// process initializes, the breaker's failure streak is cleared and the idle
+	// clock starts. Each step had a mutant that left every test green.
+	it("registers a spawned client with fresh stamps, re-arms the service hooks and clears the failure streak", async () => {
+		process.env.PI_LENS_LSP_IDLE_EVICT_MS = "5000";
+		const f = ensureFixture();
+		priv(f.registry).failureCounts.set(f.key, 3);
+		f.registry.unavailableLogged.add(f.key);
+		const initCalls: unknown[] = [];
+		createLSPClient.mockImplementation(async (args: unknown) => {
+			initCalls.push({ ...(args as object), seenHooks: [...f.calls] });
+			const client = fakeClient("ts", f.root);
+			f.spawned.push(client);
+			return client;
+		});
+		const result = await f.ensure();
+
+		expect(result?.client).toBe(f.spawned[0]);
+		expect(f.registry.clients.get(f.key)).toBe(f.spawned[0]);
+		expect(f.registry.clientSpawnedAt.get(f.key)).toBe(T0);
+		expect(internals(f.registry).clientLastUsedAt.get(f.key)).toBe(T0);
+		expect(priv(f.registry).failureCounts.has(f.key)).toBe(false);
+		expect(f.registry.unavailableLogged.has(f.key)).toBe(false);
+		expect(internals(f.registry).idleEvictionTimers.has(f.key)).toBe(true);
+		// Hooks: first contact re-armed before the client was created; readiness and
+		// stall markers cleared after it was registered.
+		expect((initCalls[0] as { seenHooks: string[] }).seenHooks).toEqual([
+			"rearmFirstContact:ts",
+		]);
+		expect(f.calls).toEqual([
+			"rearmFirstContact:ts",
+			`forgetReadiness:${f.key}`,
+			`clearStallDemotion:${f.key}`,
+		]);
+		// What the client factory was handed, and the diagnostics callback wiring.
+		const handed = initCalls[0] as Record<string, unknown> & {
+			onDiagnosticsPublished(serverId: string): void;
+		};
+		expect(handed).toMatchObject({
+			serverId: "ts",
+			root: f.root,
+			sessionCwd: undefined,
+		});
+		handed.onDiagnosticsPublished("ts");
+		expect(f.calls.at(-1)).toBe("diagnostics:ts");
+		// The one record that says a process started, with its two path fields.
+		expect(latencyRecords("lsp_server_spawned")).toEqual([
+			{
+				type: "phase",
+				phase: "lsp_server_spawned",
+				filePath: f.root,
+				durationMs: 0,
+				metadata: {
+					serverId: "ts",
+					source: "unknown",
+					launchVariant: "default",
+					triggerFilePath: f.file,
+				},
+			},
+		]);
+	});
+
+	// Recurrence (#1127 review): a service shut down WHILE the process was spawning
+	// has no client yet; the raw process is killed, the key is NOT marked broken
+	// (this is not a server failure) and nothing is registered. If the shutdown
+	// lands during the initialize handshake instead, the live client is shut down
+	// fast and not registered. Dropping either guard leaked a language server past
+	// `lsp_service_reset`.
+	it("kills a process spawned after shutdown, and shuts a client down fast when shutdown hit the handshake", async () => {
+		const midSpawn = ensureFixture();
+		const kill = vi.fn();
+		midSpawn.spawn.mockImplementation(async () => {
+			midSpawn.registry.markDestroyed();
+			return {
+				process: {
+					process: { killed: false, kill },
+					stdin: {},
+					stdout: {},
+					stderr: {},
+					pid: 5,
+				},
+			};
+		});
+		await expect(midSpawn.ensure()).resolves.toBeUndefined();
+		expect(kill).toHaveBeenCalledTimes(1);
+		expect(midSpawn.registry.clients.size).toBe(0);
+		expect(midSpawn.registry.broken.has(midSpawn.key)).toBe(false);
+		expect(priv(midSpawn.registry).failureCounts.has(midSpawn.key)).toBe(false);
+
+		const midInit = ensureFixture("go");
+		const lateClient = fakeClient("go", midInit.root);
+		createLSPClient.mockImplementation(async () => {
+			midInit.registry.markDestroyed();
+			return lateClient;
+		});
+		await expect(midInit.ensure()).resolves.toBeUndefined();
+		expect(lateClient.shutdown).toHaveBeenCalledWith({ fast: true });
+		expect(midInit.registry.clients.size).toBe(0);
+		expect(midInit.registry.broken.has(midInit.key)).toBe(false);
+		expect(midInit.calls).toEqual(["rearmFirstContact:go"]);
+	});
+});
