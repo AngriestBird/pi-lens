@@ -1025,11 +1025,14 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/recent-touches.ts": 5,
 		"clients/reverse-deps.ts": 8,
 		"clients/review-graph-logger.ts": 2,
-		// 33 -> 36 (#4346): the importer pass names a created file by its stem and directory.
-		"clients/review-graph/builder.ts": 36,
+		// 33 -> 36 (#4346): the importer pass names a created file by its stem
+		// and directory; 36 -> 33 (#4346 final lane): that name test moved to
+		// import-resolvers.ts `fileAnswerNames`, shared with the LSP cache.
+		"clients/review-graph/builder.ts": 33,
 		"clients/review-graph/format.ts": 4,
 		"clients/review-graph/git-identity.ts": 10,
-		"clients/review-graph/import-resolvers.ts": 61,
+		// 61 -> 64 (#4346 final lane): `fileAnswerNames`, moved from builder.ts.
+		"clients/review-graph/import-resolvers.ts": 64,
 		"clients/review-graph/tsconfig-paths.ts": 35,
 		"clients/review-graph/workspace-modules.ts": 27,
 		"clients/ruff-client.ts": 4,
