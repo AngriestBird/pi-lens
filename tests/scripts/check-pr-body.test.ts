@@ -5565,7 +5565,7 @@ describe("--lint-local resolves the closed issue label through gh (#4288)", () =
 		"external report (issue #4321 filed after a user saw wrapped tabs)",
 	);
 	const templateHint =
-		"\n\n## Detection\n\nOptional unless this PR closes a bug-labelled issue: name `Caught by:` (one layer), `Should have been caught by:` (a layer or `this layer`), and `Gap:` (`#NNN`, `exists: <test path>`, or `none: <reason>`).\n";
+		"\n\n## Detection\n\nOptional unless this PR closes a bug-labelled issue: name `Caught by:` (one layer), `Should have been caught by:` (a layer or `this layer`), and `Gap:` (`#NNN`, `exists: <path of a test already on master>`, or `none: <reason>`; a test this PR adds does not count).\n";
 	const roots: string[] = [];
 	const fixtures: string[] = [];
 	afterEach(() => {
@@ -5772,7 +5772,7 @@ describe("--lint-local resolves the closed issue label through gh (#4288)", () =
 			() => {
 				const run = lint(existsBaseFixtures.noBase(), `exists: ${NEW_TEST}`);
 				expect(run.output).toContain("base commit could not be resolved");
-				expect(run.output).toContain("fetch origin/master");
+				expect(run.output).toContain("git fetch origin master");
 				expect(run.status).toBe(1);
 			},
 		);

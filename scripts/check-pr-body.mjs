@@ -1752,7 +1752,7 @@ const DETECTION_SHOULD_SET = new Set([...DETECTION_LAYER_SET, "this layer"]);
 export const DETECTION_MESSAGE =
 	'PR body "## Detection" must state the bug-detection lesson in three lines: ' +
 	'"Caught by: <layer>", "Should have been caught by: <layer|this layer>", ' +
-	'and "Gap: <issue ref> | exists: <test path> | none: <reason>". ' +
+	'and "Gap: <issue ref> | exists: <path of a test already on master> | none: <reason>". ' +
 	`Layers: ${DETECTION_LAYERS.join(", ")}. See ${TEMPLATE_PATH}.`;
 
 // A field value is found by its line prefix, never a sentence mention: a
@@ -1790,10 +1790,10 @@ const DETECTION_EXISTS_ALTERNATIVES =
 	'Give an issue ref (#NNN) or "none: <reason>" instead.';
 
 export const detectionExistsNotOnBaseMessage = (path) =>
-	`PR body "## Detection" says "Gap: exists: ${path}", but that file is not on the PR's base commit (git merge-base origin/master HEAD). A test this PR adds is not an existing layer. ${DETECTION_EXISTS_ALTERNATIVES}`;
+	`PR body "## Detection" says "Gap: exists: ${path}", but that file is not on the PR's base commit (git merge-base origin/master HEAD). A test this PR adds is not an existing layer. Name one repo-relative path with forward slashes and no line number. ${DETECTION_EXISTS_ALTERNATIVES}`;
 
 export const DETECTION_EXISTS_BASE_UNRESOLVED_MESSAGE =
-	'PR body "## Detection" says "Gap: exists: <path>", but the PR\'s base commit could not be resolved (git merge-base origin/master HEAD failed; fetch origin/master), so the path cannot be verified. ' +
+	'PR body "## Detection" says "Gap: exists: <path>", but the PR\'s base commit could not be resolved (git merge-base origin/master HEAD failed; run "git fetch origin master", plus "git fetch --unshallow" in a shallow clone), so the path cannot be verified. ' +
 	DETECTION_EXISTS_ALTERNATIVES;
 
 /**
