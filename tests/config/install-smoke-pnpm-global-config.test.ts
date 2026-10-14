@@ -286,6 +286,30 @@ describe("install-smoke RPC session smoke (#4401)", () => {
 		expect(step["timeout-minutes"]).toBeLessThan(10);
 	});
 
+	// Recurrence: master went red on the #4409 merge (install-smoke run
+	// 38610594076, pi-load npm-global). These legs run the PUBLISHED pi-lens,
+	// which finds a runner-image `tsc` on PATH only as a bare name and refuses
+	// the TS server (#4414, fixed on master, unreleased). Whether the leg failed
+	// then depended on the image and on timing. A project that carries its own
+	// compiler takes the project path in every release.
+	for (const jobName of ["pi-load", "mise-repro"] as const) {
+		it(`${jobName} gives the smoke project its own typescript before the run`, () => {
+			const lines = executableLines(
+				stepRun(workflow, jobName, "Verify pi-lens loads via RPC"),
+			);
+			const install = lines.findIndex(
+				(line) =>
+					line.startsWith("npm install") && line.includes("typescript@5.9.3"),
+			);
+			const run = lines.findIndex((line) =>
+				line.includes("rpc-load-check.mjs"),
+			);
+			expect(install).toBeGreaterThan(-1);
+			expect(run).toBeGreaterThan(install);
+			expect(lines).toContain("printf 'node_modules\\n' > .gitignore");
+		});
+	}
+
 	it("the PR path filter covers the script's import and the seams #4400 and #4314 broke", () => {
 		// Recurrence: #4400 and #4314 reached users because no PR-time check ran
 		// pi-lens as an RPC child, and a file the smoke imports sat outside the

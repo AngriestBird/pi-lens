@@ -491,6 +491,13 @@ jobs:
           git init -q; git config user.email t@t.t; git config user.name t
           printf 'export const x: number = 1;\n' > a.ts
           printf '{ "name": "d", "version": "1.0.0", "type": "module" }\n' > package.json
+          # A TypeScript project has its own compiler (#4401). This leg runs the
+          # PUBLISHED pi-lens, which finds a runner-image `tsc` on PATH only as a bare
+          # name and then refuses the TS server (#4414, fixed on master, not yet
+          # released). The pin is the one pi-lens installs for itself (classic
+          # tsserver.js); host-range-smoke covers the PATH-compiler case on PR code.
+          printf 'node_modules\n' > .gitignore
+          npm install --no-audit --no-fund --ignore-scripts --save-dev typescript@5.9.3
           git add -A && git commit -qm init
           node "$GITHUB_WORKSPACE/scripts/rpc-load-check.mjs" "$(command -v pi)"
 
@@ -680,6 +687,13 @@ jobs:
           git init -q; git config user.email t@t.t; git config user.name t
           printf 'export const x: number = 1;\n' > a.ts
           printf '{ "name": "d", "version": "1.0.0", "type": "module" }\n' > package.json
+          # A TypeScript project has its own compiler (#4401). This leg runs the
+          # PUBLISHED pi-lens, which finds a runner-image `tsc` on PATH only as a bare
+          # name and then refuses the TS server (#4414, fixed on master, not yet
+          # released). The pin is the one pi-lens installs for itself (classic
+          # tsserver.js); host-range-smoke covers the PATH-compiler case on PR code.
+          printf 'node_modules\n' > .gitignore
+          npm install --no-audit --no-fund --ignore-scripts --save-dev typescript@5.9.3
           git add -A && git commit -qm init
           node "$GITHUB_WORKSPACE/scripts/rpc-load-check.mjs" "$(command -v pi)"
 
