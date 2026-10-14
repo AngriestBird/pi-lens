@@ -322,10 +322,12 @@ describe("an explicit LSP check with Opengrep switched off (#4323)", () => {
 		expect(after).not.toContain(OPENGREP_FINDING);
 		// The JSON server is not switched off: the files it tracks stay in the
 		// snapshot, so the switch drops Opengrep's rows and nothing else.
+		// Both sides through one normalizer: snapshot keys use forward slashes.
+		const { normalizeMapKey } = await import("../../clients/path-utils.js");
 		const tracked = (
 			JSON.parse(after) as { result: Array<{ filePath: string }> }
-		).result.map((entry) => entry.filePath.toLowerCase());
-		expect(tracked).toContain(probe.toLowerCase());
+		).result.map((entry) => normalizeMapKey(entry.filePath));
+		expect(tracked).toContain(normalizeMapKey(probe));
 	});
 
 	it("does not serve an Opengrep finding from a batch cached before the switch", async () => {
