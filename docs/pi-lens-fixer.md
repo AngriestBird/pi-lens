@@ -96,7 +96,9 @@ exports change.
   `session_start` (#2649, #2654).
 - A change on a hot path (dispatch, `session_start`, LSP diagnostics, a cache
   lookup, turn-end) quotes a before/after timing from the real path in the
-  body, with the command. Name and justify any regression (#4344 r1).
+  body, with the command, at a small and a large input; per-input work on a
+  tool path also needs a size or time bound. Name and justify any regression
+  (#4344 r1; #4368 r1).
 - A measured constant names its measuring command and keeps raw output as a
   tracked artifact pinned by a test (#3648). Run `git check-ignore -v` on every
   new artifact path before citing it (#3648).
