@@ -151,6 +151,8 @@ type FileDiagnosticResult = {
 	inconclusiveReason?: string;
 	/** #4322: see `DiagnosticsCollectionResult.primaryUnavailable`. */
 	primaryUnavailable?: string;
+	/** #4322: see `DiagnosticsCollectionResult.noClientAnswered`. */
+	noClientAnswered?: true;
 	/**
 	 * #533: discriminated per-file outcome, mirroring the #240 doctrine at the
 	 * LSP layer (found | clean | unresolved) up through the tool's aggregation.
@@ -639,6 +641,13 @@ type DiagnosticsCollectionResult = {
 	 */
 	primaryUnavailable?: string;
 	/**
+	 * #4322: this read acquired no client at all: the touch resolved none and
+	 * the `getDiagnostics` fallback's own health record says `no_clients`.
+	 * Whatever the result holds is the last known answer, from any server.
+	 * Read from this call's fallback, never from an earlier call's record.
+	 */
+	noClientAnswered?: true;
+	/**
 	 * #692: the file content read while collecting (undefined only when the
 	 * read itself failed) — reused by the widget-reconcile caller so it can
 	 * derive `fileRole` for `retagAuxiliaryDiagnostics`'s `skipTestFiles` gate
@@ -838,11 +847,15 @@ async function collectDiagnosticsForFile(
 		touched,
 		fallbackHealth,
 	);
+	const noClientAnswered =
+		fallbackHealth !== undefined &&
+		String(fallbackHealth.health ?? "").startsWith("no_clients");
 	return {
 		diagnostics: filtered,
 		timedOut,
 		skipReason: touched?.skipReason,
 		confirmedByTouch,
+		...(noClientAnswered && { noClientAnswered: true as const }),
 		...(primaryUnavailable !== undefined && { primaryUnavailable }),
 		// #1470: only a touch that resolved clients contributes a coverage gap;
 		// the getDiagnostics fallback never reports one, which is honest — that
@@ -1425,6 +1438,7 @@ async function collectFileDiagnosticResult(
 		tooLargeReason,
 		skipReason,
 		primaryUnavailable,
+		noClientAnswered,
 	} = await collectDiagnosticsForFile(
 		file,
 		lspService,
@@ -1576,6 +1590,7 @@ async function collectFileDiagnosticResult(
 		...(rootFallback && { rootFallback }),
 		...(skipReason !== undefined && { skipReason }),
 		...(primaryUnavailable !== undefined && { primaryUnavailable }),
+		...(noClientAnswered && { noClientAnswered }),
 		primaryServerId: primaryServerId(file),
 		diagnosticsUnsupported: diagnosticsUnsupportedServerIds.length > 0,
 		...(policy.suppressed > 0 && {
@@ -1950,9 +1965,9 @@ function classifyBatchFileOutcome(
 	if (result.error) return "failed";
 	if (result.tooLargeReason) return "too_large";
 	if (result.diagnosticsUnsupported) return "unsupported";
-	// #4322: no client answered at all, and a primary resolved a root for the
-	// file. The result is unconfirmed, but "unavailable" names why.
-	if (result.unavailable && result.primaryUnavailable !== undefined) {
+	// #4322: this read acquired no client at all, and a primary resolved a root
+	// for the file. The result is unconfirmed, but "unavailable" names why.
+	if (result.noClientAnswered && result.primaryUnavailable !== undefined) {
 		return "unavailable";
 	}
 	// A timed-out/unconfirmed answer may contain partial findings, but it cannot
@@ -1999,13 +2014,18 @@ function batchOutcomeReason(result: FileDiagnosticResult): string | undefined {
  * #4322: the unconfirmed tally counts files with no findings, so a file whose
  * findings came from auxiliaries alone needs its own line: without it a batch
  * shows those findings and never says the language itself was not checked.
+ * A read no client answered is left out: its rows are the last known answer,
+ * which can hold the language server's own rows, and its health warning
+ * already says they are stale.
  */
 function auxiliaryOnlyFindingsLine(
 	results: readonly FileDiagnosticResult[],
 ): string | undefined {
 	const count = results.filter(
 		(result) =>
-			result.diagnostics.length > 0 && result.primaryUnavailable !== undefined,
+			result.diagnostics.length > 0 &&
+			result.primaryUnavailable !== undefined &&
+			result.noClientAnswered === undefined,
 	).length;
 	if (count === 0) return undefined;
 	return (

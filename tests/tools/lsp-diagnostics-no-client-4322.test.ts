@@ -259,4 +259,37 @@ describe("a JSON file with no language server and no auxiliary (#4322)", () => {
 			"unavailable",
 		]);
 	}, 30_000);
+
+	it("does not count the language server's last known rows as auxiliary findings", async () => {
+		const fourthProbe = path.join(workspace, "fourth.json");
+		fs.writeFileSync(fourthProbe, '{"fourth": }\n');
+		// The JSON server's own row from an earlier answer, before it went away.
+		// With no client this read returns it as the last known answer.
+		const { normalizeMapKey } = await import("../../clients/path-utils.js");
+		(
+			service as unknown as { lastKnownDiagnostics: Map<string, unknown[]> }
+		).lastKnownDiagnostics.set(normalizeMapKey(fourthProbe), [
+			{
+				range: {
+					start: { line: 0, character: 10 },
+					end: { line: 0, character: 11 },
+				},
+				severity: 1,
+				message: "json server's earlier row",
+				source: "json",
+				serverId: "json",
+			},
+		]);
+
+		const result = await diagnose("all", { paths: [fourthProbe] });
+
+		const outcomes = result.details.outcomes as Array<{
+			outcome?: string;
+			primaryDiagnosticsCount?: number;
+		}>;
+		expect(outcomes.map((outcome) => outcome.outcome)).toEqual(["unavailable"]);
+		expect(outcomes[0]?.primaryDiagnosticsCount).toBe(1);
+		expect(result.text).toContain("Showing stale last-known diagnostics");
+		expect(result.text).not.toContain("auxiliary findings only");
+	}, 30_000);
 });

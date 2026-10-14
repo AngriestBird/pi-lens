@@ -235,6 +235,48 @@ describe("a JSON file whose language server cannot start (#4322)", () => {
 		]);
 	}, 30_000);
 
+	it("keeps a file typos answered inconclusive beside an earlier read's no-client record", async () => {
+		fs.writeFileSync(probe, '{"fake-lsp-clean": }\n');
+		fs.writeFileSync(secondProbe, '{"fake-lsp-clean": 1,}\n');
+		// The record an earlier read that acquired no client leaves behind. Only
+		// `getDiagnostics` writes this record, so a later touch does not replace it.
+		const { normalizeMapKey } = await import("../../clients/path-utils.js");
+		const health = (
+			service as unknown as {
+				lastDiagnosticsHealth: Map<string, Record<string, unknown>>;
+			}
+		).lastDiagnosticsHealth;
+		for (const file of [probe, secondProbe]) {
+			health.set(normalizeMapKey(file), {
+				health: "no_clients",
+				failureKind: "no_clients",
+				serverCountAttempted: 1,
+				serverCountReady: 0,
+				candidateServerIds: ["json"],
+				mergedCount: 0,
+				dedupDroppedCount: 0,
+				checkedAt: new Date().toISOString(),
+				unavailablePrimaryServerIds: ["json"],
+			});
+		}
+
+		try {
+			const result = await diagnose("all", { paths: [probe, secondProbe] });
+
+			// typos answered this read, so the old record does not make it
+			// "unavailable".
+			const outcomes = result.details.outcomes as Array<{ outcome?: string }>;
+			expect(outcomes.map((outcome) => outcome.outcome)).toEqual([
+				"inconclusive",
+				"inconclusive",
+			]);
+		} finally {
+			for (const file of [probe, secondProbe]) {
+				health.delete(normalizeMapKey(file));
+			}
+		}
+	}, 30_000);
+
 	it("still shows typos' findings while the JSON check is unavailable", async () => {
 		fs.writeFileSync(probe, '{"probe": }\n');
 
