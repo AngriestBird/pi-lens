@@ -23,7 +23,6 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Worker } from "node:worker_threads";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FactStore } from "../../clients/dispatch/fact-store.js";
 import {
@@ -42,6 +41,7 @@ import {
 	waitForReviewGraphPersistsForTests,
 } from "../../clients/review-graph/builder.js";
 import { waitFor } from "./interleaving-kit.js";
+import { observeWorker } from "./worker-message-kit.js";
 import { removeTempDirSync } from "./test-utils.js";
 
 const SOURCES: Record<string, string> = {
@@ -65,65 +65,6 @@ function makeRoot(): string {
 		fs.writeFileSync(file, content);
 	}
 	return root;
-}
-
-interface WorkerResultLike {
-	id: number;
-	stagePath?: string;
-	error?: string;
-	[key: string]: unknown;
-}
-
-/**
- * Wrap the host's `message` listeners (recording what they saw and threw) and
- * `postMessage` (recording the stage paths the host sent, optionally dropping
- * `stagePath` from the request so the real worker fails on it).
- */
-function observeWorker(options: {
-	stripResultStagePath?: boolean;
-	dropRequestStagePath?: boolean;
-}): {
-	seen: WorkerResultLike[];
-	thrown: unknown[];
-	sentStagePaths: string[];
-} {
-	const seen: WorkerResultLike[] = [];
-	const thrown: unknown[] = [];
-	const sentStagePaths: string[] = [];
-	const realOn = Worker.prototype.on;
-	vi.spyOn(Worker.prototype, "on").mockImplementation(function (
-		this: Worker,
-		event: string | symbol,
-		listener: (...args: unknown[]) => void,
-	) {
-		if (event !== "message") return realOn.call(this, event, listener);
-		return realOn.call(this, event, (message: WorkerResultLike) => {
-			seen.push(message);
-			const delivered = options.stripResultStagePath
-				? { ...message, stagePath: undefined }
-				: message;
-			try {
-				listener(delivered);
-			} catch (err) {
-				thrown.push(err);
-			}
-		});
-	} as typeof Worker.prototype.on);
-	const realPost = Worker.prototype.postMessage;
-	vi.spyOn(Worker.prototype, "postMessage").mockImplementation(function (
-		this: Worker,
-		message: { stagePath?: string },
-		transferList?: ArrayBuffer[],
-	) {
-		if (message.stagePath !== undefined) sentStagePaths.push(message.stagePath);
-		const { stagePath: _dropped, ...withoutStagePath } = message;
-		realPost.call(
-			this,
-			options.dropRequestStagePath ? withoutStagePath : message,
-			transferList,
-		);
-	} as typeof Worker.prototype.postMessage);
-	return { seen, thrown, sentStagePaths };
 }
 
 async function awaitMessages(
@@ -316,6 +257,9 @@ describe("review-graph worker result without stagePath (#4400)", () => {
 		process.env.PI_LENS_GRAPH_CHECKPOINT_EVERY_FILES = "1";
 		process.env.PI_LENS_GRAPH_CHECKPOINT_MIN_INTERVAL_MS = "0";
 		process.env.PI_LENS_GRAPH_CHECKPOINT_TEST_STOP_AFTER = "5";
+		// Holds each result past the build's last yield, so the order asserted
+		// after the rejection does not depend on how fast the worker gzips.
+		process.env.PI_LENS_TEST_PERSIST_WORKER_DELAY_MS = "150";
 		const { seen, thrown, sentStagePaths } = observeWorker({
 			stripResultStagePath: true,
 		});
@@ -323,6 +267,13 @@ describe("review-graph worker result without stagePath (#4400)", () => {
 		await expect(buildOrUpdateGraph(root, [], new FactStore())).rejects.toThrow(
 			/checkpoint_test_abort/,
 		);
+		// #4402: the order this test depends on. Every offloaded result must
+		// arrive after the build rejected, or the promotions below already ran
+		// and the assertions after this one prove nothing.
+		expect(
+			seen,
+			"a checkpoint result arrived before the build rejected",
+		).toEqual([]);
 		// The sync checkpoint holds 5 files; the last offloaded stride holds 4.
 		expect(
 			_readReviewGraphCheckpointForTests(root)?.processedFiles,
@@ -343,6 +294,9 @@ describe("review-graph worker result without stagePath (#4400)", () => {
 		process.env.PI_LENS_GRAPH_CHECKPOINT_EVERY_FILES = "1";
 		process.env.PI_LENS_GRAPH_CHECKPOINT_MIN_INTERVAL_MS = "0";
 		process.env.PI_LENS_GRAPH_CHECKPOINT_TEST_STOP_AFTER = "5";
+		// Holds each result past the build's last yield, so the order asserted
+		// after the rejection does not depend on how fast the worker gzips.
+		process.env.PI_LENS_TEST_PERSIST_WORKER_DELAY_MS = "150";
 		const { seen, thrown, sentStagePaths } = observeWorker({
 			stripResultStagePath: true,
 		});
@@ -350,6 +304,12 @@ describe("review-graph worker result without stagePath (#4400)", () => {
 		await expect(buildOrUpdateGraph(root, [], new FactStore())).rejects.toThrow(
 			/checkpoint_test_abort/,
 		);
+		// #4402: a result that arrived before the rejection was promoted before
+		// the blocker below existed, so its promotion catch never ran.
+		expect(
+			seen,
+			"a checkpoint result arrived before the build rejected",
+		).toEqual([]);
 		// A non-empty directory where the checkpoint goes makes the live rename
 		// fail for real, so the promotion catch runs.
 		const checkpointPath = sentStagePaths[0]?.replace(/\.stage-.*$/, "") ?? "";
