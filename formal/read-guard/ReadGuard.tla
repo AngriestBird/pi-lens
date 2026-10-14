@@ -191,6 +191,16 @@ OldTextNeedsNamedReadPre4387R2 == FALSE
 \* widened the scope back to the whole file, which keeps the edit's id.
 PipelineCreditsOldText == FALSE
 PipelineCreditsOldTextPre4387R2 == TRUE
+\* #4387 round 3 (review F5, F6): no credit widens an empty scope. A
+\* recognized bash write, a partial bash write and a format drain hold none
+\* of the bytes they credit, so they keep it (AuthKeep, KeepEmpty). A native
+\* write holds the whole file through its creation read, which a move keeps
+\* with the authorship, so its scope is never consulted and it keeps it too.
+\* FALSE (#4387 round 2): all four widened it to the whole file, keeping the
+\* edit's id, so a move then let the authorship vouch for bytes no check
+\* covered (S14, S16).
+KeepEmptyScope == TRUE
+KeepEmptyScopePre4387R3 == FALSE
 NoH == [l \in Lines |-> 0]
 Min(a, b) == IF a < b THEN a ELSE b
 
@@ -243,8 +253,9 @@ Rec(lo, hi, h, prov) == [lo |-> lo, hi |-> hi, h |-> h, prov |-> prov, g |-> tur
 \* retired because another writer changed the bytes (#4131). A retired record
 \* stays (no write resumes it) and moves with its write like a live one.
 \* empty = an empty scope (#4387 round 2): it vouches for no line until a
-\* whole-file write widens it; a partial credit keeps it empty here, stricter
-\* than the code, which composes the produced lines into it.
+\* whole-file write widens it (round 2; since round 3 no credit does,
+\* KeepEmptyScope); a partial credit keeps it empty here,
+\* stricter than the code, which composes the produced lines into it.
 NoAuth == [on |-> FALSE, c |-> <<>>, g |-> 0, id |-> FALSE, ret |-> FALSE, lic |-> FALSE, empty |-> FALSE]
 \* recordWritten by a write that names its transcript entry.
 Auth(c) == IF written.ret THEN written
@@ -255,6 +266,10 @@ AuthPart(c) == IF written.empty THEN [Auth(c) EXCEPT !.empty = TRUE] ELSE Auth(c
 Carry(c) == IF written.ret THEN written
             ELSE IF written.on THEN [written EXCEPT !.c = c]
             ELSE [on |-> TRUE, c |-> c, g |-> turnNo, id |-> FALSE, ret |-> FALSE, lic |-> FALSE, empty |-> FALSE]
+\* The same under KeepEmptyScope: a write, a bash write, a partial bash
+\* write, a format drain.
+KeepEmpty(rec) == IF KeepEmptyScope THEN rec ELSE [rec EXCEPT !.empty = FALSE]
+AuthKeep(c) == IF KeepEmptyScope THEN AuthPart(c) ELSE Auth(c)
 \* The zero-read arm's authorship question (ReadGuard.checkEdit).
 Authored == written.on /\ ~written.ret /\ ~written.empty /\ (AuthorIdentity => written.c = disk)
 \* A read record names a tool call (`read.toolCallId !== undefined`).
@@ -613,7 +628,7 @@ Write ==
 \* recordWritten before the pipeline: stamps FileTime, injects the creation read.
 WriteRW1 ==
     /\ pc = "writeRW1"
-    /\ ft' = rev /\ written' = Auth(disk) /\ pendCreate' = FALSE
+    /\ ft' = rev /\ written' = AuthKeep(disk) /\ pendCreate' = FALSE
     /\ reads' = IF pendCreate
                   THEN AddRec(reads, Rec(1, IF CreationHandlerEvidence THEN Len(disk) ELSE pend.n,
                                          IF CreationHandlerEvidence THEN MkH(disk, 1, Len(disk))
@@ -658,7 +673,7 @@ BashWrite ==
     /\ CanOp("bash")
     /\ LET c == [l \in 1..N0 |-> tok + l - 1]
        IN /\ disk' = c /\ know' = KnowAll(c)
-          /\ written' = IF Broken THEN Retired ELSE Auth(c)
+          /\ written' = IF Broken THEN Retired ELSE AuthKeep(c)
     /\ rev' = rev + 1 /\ tok' = tok + N0
     /\ ops' = ops + 1 /\ mutatedTurn' = TRUE
     /\ UNCHANGED <<kTurn, reads, ft, pendCreate, lastEditOk, born, turnNo, pc, pend, ext, nb,
@@ -672,7 +687,7 @@ BashWrite ==
 PartialBashWrite ==
     /\ CanOp("pbash") /\ written.on
     /\ disk' = Replace(disk, 1, tok) /\ know' = [know EXCEPT ![1] = tok]
-    /\ written' = IF Broken THEN Retired ELSE Auth(Replace(disk, 1, tok))
+    /\ written' = IF Broken THEN Retired ELSE AuthKeep(Replace(disk, 1, tok))
     /\ rev' = rev + 1 /\ tok' = tok + 1
     /\ ops' = ops + 1 /\ mutatedTurn' = TRUE
     /\ UNCHANGED <<kTurn, reads, ft, pendCreate, lastEditOk, born, turnNo, pc, pend, ext, nb,
@@ -803,7 +818,7 @@ Turn ==
     /\ IF DrainMode = "atomic" /\ FormatDrain # "none" /\ mutatedTurn /\ ModOk(FormatDrain, disk, 1)
          THEN /\ disk' = Mod(FormatDrain, disk, 1, tok) /\ rev' = rev + 1 /\ tok' = tok + 1
               /\ written' = IF Broken THEN Retired              \* recordWritten after the format
-                             ELSE Carry(Mod(FormatDrain, disk, 1, tok))
+                             ELSE KeepEmpty(Carry(Mod(FormatDrain, disk, 1, tok)))
               /\ ft' = IF FormatStamp THEN rev + 1 ELSE ft
          ELSE UNCHANGED <<disk, rev, tok, ft, written>>
     /\ reads' = IF BlockRelease # "none" THEN SelectSeq(reads, Delivered) ELSE reads
@@ -840,7 +855,7 @@ Drain ==
          THEN /\ disk' = Mod(FormatDrain, disk, 1, tok) /\ rev' = rev + 1 /\ tok' = tok + 1
               /\ IF DrainMode = "unfenced" \/ dr.ep = dr.cur
                    THEN /\ written' = IF Broken THEN Retired
-                                      ELSE Carry(Mod(FormatDrain, disk, 1, tok))
+                                      ELSE KeepEmpty(Carry(Mod(FormatDrain, disk, 1, tok)))
                         /\ ft' = IF FormatStamp THEN rev + 1 ELSE ft
                    ELSE UNCHANGED <<ft, written>>
          ELSE UNCHANGED <<disk, rev, tok, ft, written>>
