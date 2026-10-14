@@ -206,6 +206,22 @@ describe("loadWorkspaceDiagnosticsCache / saveWorkspaceDiagnosticsCache (#671)",
 		expect(group?.latestReasons[0]?.reason).toContain("v2");
 		expect(group?.latestReasons[0]?.reason).toContain("2 entries");
 	});
+
+	it("rejects a v3 cache, whose clean entries may rest on auxiliaries alone (#4322)", () => {
+		// A well-formed v3 entry: provenance present, so only the version
+		// guard can keep its (possibly false) clean from replaying.
+		saveWorkspaceDiagnosticsCache(tmp, {
+			version: 3,
+			entries: { a: makeEntry() },
+		});
+		expect(loadWorkspaceDiagnosticsCache(tmp)).toBeUndefined();
+		const group = getDegradationSummary().find(
+			(entry) => entry.kind === "lsp-workspace-cache-migration",
+		);
+		expect(group?.count).toBe(1);
+		expect(group?.latestReasons[0]?.reason).toContain("v3");
+		expect(group?.latestReasons[0]?.reason).toContain("1 entries");
+	});
 });
 
 describe("isEntryFresh (#671)", () => {

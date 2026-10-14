@@ -768,7 +768,12 @@ file-scoped worklist and receives no project-wide scanner output.
   inconclusive but the merged result contains answered diagnostics, dispatch
   preserves only diagnostics from content-confirmed contributors and carries
   the named primary gap as unconfirmed; only an empty inconclusive result is
-  skipped (#4219, #4231).
+  skipped (#4219, #4231). Auxiliaries never confirm a file alone: a touch that
+  acquired auxiliaries but no primary that rooted for the file is inconclusive
+  with `primary-unavailable`, naming those primaries, and `getDiagnostics`
+  records the same ids as `unavailablePrimaryServerIds` (one rule,
+  `unacquiredPrimaryServerIds`; an auxiliary-only language is unaffected;
+  #4322).
 - The explicit `lsp_diagnostics` read checks `exceedsLspSyncLimits` once before
   warm attachment or `touchFile`; an over-bound file returns a `too_large`
   result with its byte/line measurement and records

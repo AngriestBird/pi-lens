@@ -42,13 +42,17 @@ const TYPOS_FINDING = "typos stand-in finding";
 async function diagnose(
 	serverScope: "primary" | "all",
 	target: { path: string } | { paths: string[] } = { path: probe },
+	onConfirmedNoBlockers?: (info: { coveredSources: string[] }) => void,
 ): Promise<{
 	text: string;
 	details: Record<string, unknown>;
 }> {
 	const { createLspDiagnosticsTool } =
 		await import("../../tools/lsp-diagnostics.js");
-	const result = (await createLspDiagnosticsTool().execute(
+	const result = (await createLspDiagnosticsTool(
+		undefined,
+		onConfirmedNoBlockers,
+	).execute(
 		"probe-4322",
 		{ ...target, serverScope, waitMs: 3000 },
 		undefined,
@@ -165,6 +169,60 @@ describe("a JSON file whose language server cannot start (#4322)", () => {
 		expect(result.text).toContain("Primary LSP (json): not available");
 	}, 30_000);
 
+	it("does not retire a language-server blocker on typos' finding alone", async () => {
+		// typos' finding is not blocking, so an answer taken as the file's
+		// current view would read as "nothing blocking here, the LSP checked it".
+		fs.writeFileSync(probe, '{"probe": }\n');
+		const retired: string[][] = [];
+
+		const result = await diagnose("all", { path: probe }, (info) =>
+			retired.push(info.coveredSources),
+		);
+
+		expect(result.details.auxiliaryDiagnosticsCount).toBe(1);
+		expect(retired).toEqual([]);
+	}, 30_000);
+
+	it("names the missing language server in a batch that shows typos' findings", async () => {
+		fs.writeFileSync(probe, '{"probe": }\n');
+		fs.writeFileSync(secondProbe, '{"fake-lsp-clean": 1,}\n');
+		const retired: string[][] = [];
+
+		const result = await diagnose(
+			"all",
+			{ paths: [probe, secondProbe] },
+			(info) => retired.push(info.coveredSources),
+		);
+
+		expect(result.text).toContain(TYPOS_FINDING);
+		expect(result.text).toContain(
+			"1 file with auxiliary findings only: no language server answered",
+		);
+		const outcomes = result.details.outcomes as Array<{ reason?: string }>;
+		expect(outcomes.map((outcome) => outcome.reason)).toEqual([
+			expect.stringContaining("Primary LSP (json): not available"),
+			expect.stringContaining("Primary LSP (json): not available"),
+		]);
+		expect(retired).toEqual([]);
+	}, 30_000);
+
+	it("names the missing language server in a directory that shows typos' findings", async () => {
+		const dir = path.join(workspace, "dir");
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(path.join(dir, "only.json"), '{"probe": }\n');
+
+		const result = await diagnose("all", { path: dir });
+
+		expect(result.text).toContain(TYPOS_FINDING);
+		expect(result.text).toContain(
+			"1 file with auxiliary findings only: no language server answered",
+		);
+		const outcomes = result.details.outcomes as Array<{ reason?: string }>;
+		expect(outcomes.map((outcome) => outcome.reason)).toEqual([
+			expect.stringContaining("Primary LSP (json): not available"),
+		]);
+	}, 30_000);
+
 	it("does not report the primary-only check clean when no language server ran", async () => {
 		fs.writeFileSync(probe, '{"fake-lsp-clean":"valid"}\n');
 
@@ -173,6 +231,15 @@ describe("a JSON file whose language server cannot start (#4322)", () => {
 		expect(result.details.unconfirmed).toBe(true);
 		expect(result.text).toContain("Primary LSP (json): not available");
 		expect(result.text).not.toContain("confirmed clean");
+		// The fallback read's health record names the server that did not answer.
+		const health = (
+			service as unknown as {
+				getDiagnosticsHealth: (
+					file: string,
+				) => { unavailablePrimaryServerIds?: string[] } | undefined;
+			}
+		).getDiagnosticsHealth(probe);
+		expect(health?.unavailablePrimaryServerIds).toEqual(["json"]);
 	}, 30_000);
 
 	it("pi's write-time LSP runner does not report the file as checked clean", async () => {

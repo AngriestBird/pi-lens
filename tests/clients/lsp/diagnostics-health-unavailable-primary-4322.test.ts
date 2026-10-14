@@ -2,8 +2,10 @@
  * #4322: `lsp_diagnostics` falls back to `LSPService.getDiagnostics` when its
  * touch acquires no client, and reads the fallback's health record to tell an
  * answer from the language server apart from one only auxiliaries gave
- * (`readyPrimaryServerIds`). This pins the producer in both directions: an
- * acquired language server is listed, and an acquired auxiliary is not.
+ * (`unavailablePrimaryServerIds`). The missing-primary direction is pinned in
+ * tests/tools/lsp-diagnostics-missing-primary-4322.test.ts; this file pins the
+ * no-drop direction: when the JSON server answers beside typos, the record
+ * names no unavailable language server.
  *
  * Real LSPService and real clients over a stdio JSON-RPC wire; both the JSON
  * server and typos are the shared fake server.
@@ -43,14 +45,14 @@ function writeShim(name: string, source: string): string {
 	return shim;
 }
 
-describe("the getDiagnostics health record names its ready language servers (#4322)", () => {
+describe("the getDiagnostics health record names no unavailable language server when one answered (#4322)", () => {
 	let service:
 		| {
 				shutdown: () => Promise<void>;
 				getDiagnostics: (file: string, mode: "document") => Promise<unknown>;
 				getDiagnosticsHealth: (
 					file: string,
-				) => { readyPrimaryServerIds?: string[] } | undefined;
+				) => { unavailablePrimaryServerIds?: string[] } | undefined;
 		  }
 		| undefined;
 	const savedInstall = process.env.PI_LENS_DISABLE_LSP_INSTALL;
@@ -97,13 +99,15 @@ describe("the getDiagnostics health record names its ready language servers (#43
 		else process.env.PI_LENS_DISABLE_LSP_INSTALL = savedInstall;
 	});
 
-	it("lists the acquired JSON server and leaves out the acquired typos auxiliary", async () => {
+	it("lists nothing when the JSON server answers beside the typos auxiliary", async () => {
 		fs.writeFileSync(probe, '{"fake-lsp-clean": true}\n');
 
 		await service!.getDiagnostics(probe, "document");
 
-		expect(service!.getDiagnosticsHealth(probe)?.readyPrimaryServerIds).toEqual(
-			["json"],
-		);
+		// The collecting read sets the field whenever it acquired a client; the
+		// JSON server answered, so no language server is missing.
+		expect(
+			service!.getDiagnosticsHealth(probe)?.unavailablePrimaryServerIds,
+		).toEqual([]);
 	}, 30_000);
 });

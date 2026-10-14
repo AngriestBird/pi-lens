@@ -40,6 +40,11 @@ import {
  * `LSPWorkspaceDiagnosticResult.timedOut` in `./index.ts`) into
  * `WorkspaceDiagnosticsCacheEntry`.
  */
+// v4 (#4322): a v3 writer could record a clean entry that only auxiliaries
+// answered for, while the file's language server never started (invalid JSON
+// cached clean on typos' answer). The entry looks like any confirmed clean and
+// replays while the file is unchanged, so v3 caches are rejected and their
+// files re-checked once.
 // v3 (#2776): cached diagnostics must carry per-diagnostic `serverId`
 // provenance before replay, because primary/auxiliary partitioning is
 // server-owned rather than source-owned. v2 entries predate that contract and
@@ -50,7 +55,7 @@ import {
 // surface a content `binding` (boundToCurrentDisk) beyond the mtime proxy.
 // Legacy v1 entries are rejected by the version guard and re-scanned — a
 // deliberately clean break so no entry lacking the field is ever served.
-export const WORKSPACE_DIAGNOSTICS_CACHE_VERSION = 3;
+export const WORKSPACE_DIAGNOSTICS_CACHE_VERSION = 4;
 const CACHE_FILE = "lsp-workspace-diagnostics.json";
 
 export interface WorkspaceDiagnosticsCacheEntry {
@@ -272,7 +277,9 @@ export function loadWorkspaceDiagnosticsCache(
 		if (!parsed || typeof parsed !== "object") return undefined;
 		const cache = parsed as WorkspaceDiagnosticsCache;
 		if (cache.version !== WORKSPACE_DIAGNOSTICS_CACHE_VERSION) {
-			if (cache.version === 1 || cache.version === 2) {
+			// Every released older version (v1-v3) is a migration; an unknown
+			// version is not, and stays silent as before.
+			if (cache.version === 1 || cache.version === 2 || cache.version === 3) {
 				recordDegradationOnce({
 					kind: "lsp-workspace-cache-migration",
 					subject: path.resolve(cwd),
@@ -280,7 +287,7 @@ export function loadWorkspaceDiagnosticsCache(
 						cache.entries && typeof cache.entries === "object"
 							? Object.keys(cache.entries).length
 							: 0
-					} entries during provenance migration`,
+					} entries during cache version migration`,
 				});
 			}
 			return undefined;

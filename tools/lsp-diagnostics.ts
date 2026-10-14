@@ -103,7 +103,7 @@ type LspHealthLike = {
 	serverCountReady?: number;
 	candidateServerIds?: string[];
 	mergedCount?: number;
-	readyPrimaryServerIds?: readonly string[];
+	unavailablePrimaryServerIds?: readonly string[];
 };
 
 type BatchOptions = {
@@ -861,8 +861,9 @@ async function collectDiagnosticsForFile(
  * acquired only auxiliaries and names the primaries it could not acquire
  * (`inconclusiveReason: "primary-unavailable"`), or the touch acquired no
  * client and the `getDiagnostics` fallback acquired only auxiliaries
- * (`readyPrimaryServerIds` empty). Either way the result came from
- * auxiliaries alone.
+ * (`unavailablePrimaryServerIds` non-empty). The service derives both lists
+ * with one rule (`unacquiredPrimaryServerIds` in clients/lsp/index.ts), so
+ * either way the result came from auxiliaries alone.
  */
 function describePrimaryUnavailable(
 	file: string,
@@ -875,16 +876,10 @@ function describePrimaryUnavailable(
 		serverIds = touched.inconclusiveServerIds?.length
 			? touched.inconclusiveServerIds
 			: [primaryServerId(file) ?? "unknown"];
+	} else if (fallbackHealth?.unavailablePrimaryServerIds?.length) {
+		serverIds = fallbackHealth.unavailablePrimaryServerIds;
 	} else {
-		const primaryId = primaryServerId(file);
-		if (
-			primaryId === undefined ||
-			fallbackHealth?.readyPrimaryServerIds === undefined ||
-			fallbackHealth.readyPrimaryServerIds.length > 0
-		) {
-			return undefined;
-		}
-		serverIds = [primaryId];
+		return undefined;
 	}
 	return (
 		`Primary LSP (${serverIds.join(", ")}): not available — no language ` +
@@ -1268,7 +1263,15 @@ function reconcileWidgetFromLspResult(
 	// footer's `touchedAt` isn't re-armed to now() and the mtime-staleness gate
 	// stays live (the #1092 re-arming defect).
 	observedAt?: number,
+	// #4322: true when no language server answered (`primaryUnavailable`).
+	// Auxiliaries' findings are not the file's current view: reconciling them
+	// would replace the footer's language rows with the scanners' rows alone, and
+	// a non-blocking scanner finding would retire a language-server blocker
+	// (`coveredSourcesForCheck` would claim `lsp`). Same verdict as #1095's
+	// stale view: not confirmed, still blocking.
+	auxiliariesOnly = false,
 ): LspReconcileVerdict {
+	if (auxiliariesOnly) return { confirmed: false, blocking: true };
 	const confirmed =
 		(rawDiags.length > 0 || confirmation !== "unconfirmed") && !boundMismatch;
 	if (!confirmed) return { confirmed: false, blocking: true };
@@ -1517,6 +1520,7 @@ async function collectFileDiagnosticResult(
 		// #3505 r1 F1: the widget row is observed at the read, as the cache
 		// entry recorded below is.
 		scannedAt,
+		primaryUnavailable !== undefined,
 	);
 	if (verdict.confirmed && !verdict.blocking) {
 		onConfirmedNoBlockers?.({
@@ -1728,6 +1732,7 @@ async function runFileDiagnostics(
 		collectedContent,
 		boundMismatch,
 		observedAt,
+		primaryUnavailable !== undefined,
 	);
 	// #1561: a confirmed current view with nothing at the blocking tier retires
 	// this file's stale inline blocker — the store #571 corrected the footer for
@@ -1971,6 +1976,38 @@ function inconclusiveBatchResult(
 		outcome: "inconclusive",
 		inconclusiveReason: reason,
 	};
+}
+
+/** The one reason a batch or directory names for a file's outcome. */
+function batchOutcomeReason(result: FileDiagnosticResult): string | undefined {
+	return (
+		result.tooLargeReason ??
+		// #4322: a file only auxiliaries answered for names its language server.
+		result.primaryUnavailable ??
+		result.inconclusiveReason ??
+		result.error ??
+		result.unavailable
+	);
+}
+
+/**
+ * #4322: the unconfirmed tally counts files with no findings, so a file whose
+ * findings came from auxiliaries alone needs its own line: without it a batch
+ * shows those findings and never says the language itself was not checked.
+ */
+function auxiliaryOnlyFindingsLine(
+	results: readonly FileDiagnosticResult[],
+): string | undefined {
+	const count = results.filter(
+		(result) =>
+			result.diagnostics.length > 0 && result.primaryUnavailable !== undefined,
+	).length;
+	if (count === 0) return undefined;
+	return (
+		`${count} file${count === 1 ? "" : "s"} with auxiliary findings only: no ` +
+		"language server answered (it could not be started, or was still " +
+		"starting), so the language itself was not checked."
+	);
 }
 
 /**
@@ -2411,11 +2448,7 @@ async function runBatchFileDiagnostics(
 	const outcomeDetails: BatchOutcomeDetail[] = results.map((result) => ({
 		file: result.file,
 		outcome: result.outcome!,
-		reason:
-			result.tooLargeReason ??
-			result.inconclusiveReason ??
-			result.error ??
-			result.unavailable,
+		reason: batchOutcomeReason(result),
 	}));
 	const tooLargeLines = renderBatchOutcomeLines(outcomeDetails);
 	if (tooLargeLines.length > 0) {
@@ -2437,6 +2470,8 @@ async function runBatchFileDiagnostics(
 				`${unconfirmedReasonClause(unconfirmed, timedOut, rootFallbackReasons, primaryUnavailable)} NOT the same as 0 diagnostics.`,
 		);
 	}
+	const auxiliaryOnlyLine = auxiliaryOnlyFindingsLine(results);
+	if (auxiliaryOnlyLine) lines.push("", auxiliaryOnlyLine);
 	if (display.length === 0) {
 		if (unconfirmed === 0 && outcomeCounts.clean === results.length) {
 			lines.push("", "No diagnostics found.");
@@ -2486,11 +2521,7 @@ async function runBatchFileDiagnostics(
 			outcomes: results.map((result) => ({
 				file: result.file,
 				outcome: result.outcome,
-				reason:
-					result.tooLargeReason ??
-					result.inconclusiveReason ??
-					result.error ??
-					result.unavailable,
+				reason: batchOutcomeReason(result),
 				primaryDiagnosticsCount: result.diagnostics.filter(
 					(diagnostic) => diagnostic.serverId === result.primaryServerId,
 				).length,
@@ -2659,12 +2690,9 @@ async function runDirectoryDiagnostics(
 	const outcomeDetails: BatchOutcomeDetail[] = results.map((result) => ({
 		file: result.file,
 		outcome: result.outcome!,
-		reason:
-			result.tooLargeReason ??
-			result.inconclusiveReason ??
-			result.error ??
-			result.unavailable,
+		reason: batchOutcomeReason(result),
 	}));
+	const auxiliaryOnlyLine = auxiliaryOnlyFindingsLine(results);
 	const tooLargeLines = renderBatchOutcomeLines(outcomeDetails, (file) =>
 		path.relative(absPath, file),
 	);
@@ -2719,6 +2747,7 @@ async function runDirectoryDiagnostics(
 							),
 					]
 				: []),
+			...(auxiliaryOnlyLine ? ["", auxiliaryOnlyLine] : []),
 			"",
 		];
 		const toRelative = (d: FileDiag): FileDiag => ({
