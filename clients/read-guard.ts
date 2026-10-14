@@ -1353,14 +1353,16 @@ export class ReadGuard {
 
 	/**
 	 * {@link retireChangedAuthorship} on a key. `writer` names a write that
-	 * ended it after the fact (a bridge write, which no pre-write check
-	 * guarded), so the record tells the two triggers apart.
+	 * ended it after the fact, so the record tells the triggers apart:
+	 * `bridge`, a write no pre-write check guarded, ends it only when its
+	 * bytes changed; `unknown-range`, a checked write whose produced lines
+	 * are unknown, always ends a range-scoped authorship (#4387).
 	 */
 	private retireIfChanged(
 		filePath: string,
-		writer?: "bridge",
-		force = false,
+		writer?: "bridge" | "unknown-range",
 	): boolean {
+		const force = writer === "unknown-range";
 		const authored = this.writtenThisSession.get(filePath);
 		if (
 			!authored ||
@@ -2325,16 +2327,22 @@ export class ReadGuard {
 		const existing = this.writtenThisSession.get(filePath);
 		if (!existing && opts?.allowFirstAuthorship === false) return;
 		if (existing?.retired) return;
-		if (opts?.authorship === "unknown") {
-			// F-4210-2: unavailable observed coverage is not a whole-file write.
-			// Retire the prior scope and create no replacement license.
-			if (existing) this.retireIfChanged(filePath, "bridge", true);
-			return;
-		}
 		if (existing && !this.mayAdvanceAuthorship(filePath, opts)) {
 			this.retireIfChanged(filePath, "bridge");
 			return;
 		}
+		// F-4210-2: an UNKNOWN range is no license of its own and cannot be
+		// composed into a range scope, so it creates none and ends a scope.
+		// Over a whole-file authorship the range is moot, as for a partial
+		// credit (#4210 N3): the checked writer advances it (#4387).
+		if (
+			opts?.authorship === "unknown" &&
+			existing?.authoredRanges !== undefined
+		) {
+			this.retireIfChanged(filePath, "unknown-range");
+			return;
+		}
+		if (opts?.authorship === "unknown" && !existing) return;
 		const observed = observeAuthoredBytes(
 			filePath,
 			opts?.contentHash,

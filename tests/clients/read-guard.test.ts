@@ -681,6 +681,35 @@ describe("ReadGuard", () => {
 			}
 		});
 
+		// #4187 R2-4 / #4131: a write no pre-write check guarded ends only an
+		// authorship whose bytes it changed (BridgeWrite in formal/read-guard).
+		// Recurrence: #4387 routes the opaque-recovery bash credit here, so a
+		// forced retire would end authorship over bytes the conversation still
+		// holds, which #4131's content identity keeps.
+		it("keeps an authorship whose bytes an unchecked write left identical", () => {
+			const env = setupTestEnvironment("read-guard-authorship-bridge-same-");
+			resetDegradationLedger();
+			try {
+				const filePath = path.join(env.tmpDir, "authored.ts");
+				fs.writeFileSync(filePath, "export const x = 1;\n");
+				const guard = createReadGuard("test-session");
+				guard.recordWritten(filePath, { toolCallId: "call_write" });
+				guard.recordWritten(filePath, {
+					stampFileTime: false,
+					authorship: "unknown",
+					advanceAuthorship: false,
+				});
+				expect(guard.checkEdit(filePath, [1, 1]).action).toBe("allow");
+				expect(
+					getDegradationSummary().find(
+						(group) => group.kind === "read-guard-authorship-retired",
+					),
+				).toBeUndefined();
+			} finally {
+				env.cleanup();
+			}
+		});
+
 		it("blocks zero-read edit on a file the agent never wrote and was last touched before this session", () => {
 			const env = setupTestEnvironment("read-guard-old-file-");
 			try {
@@ -2468,6 +2497,73 @@ describe("ReadGuard Tier-2 idle decay and bounds (#1389)", () => {
 					(group) => group.kind === "read-guard-authorship-retired",
 				)?.latestReasons[0]?.reason,
 			).toContain("authored range was unknown");
+			// #4387: the row names the trigger, a write of unknown range. It said
+			// `writer: "bridge"` for the agent's own edit, which no bridge made.
+			expect(
+				vi
+					.mocked(logReadGuardEvent)
+					.mock.calls.map(([entry]) => entry)
+					.filter((entry) => entry.event === "authorship_retired"),
+			).toEqual([
+				expect.objectContaining({
+					metadata: expect.objectContaining({ writer: "unknown-range" }),
+				}),
+			]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// #4387: over a whole-file authorship an UNKNOWN range is moot, so the
+	// writer rule alone decides, as for a partial credit (#4210 N3).
+	// Recurrence: the UNKNOWN short-circuit retired the authorship of the
+	// agent's own write at its own oldText edit, a checked writer.
+	it("advances a whole-file authorship over an UNKNOWN credit only from a checked writer (#4387)", () => {
+		const env = setupTestEnvironment("read-guard-authorship-unknown-whole-");
+		resetDegradationLedger();
+		try {
+			const credit = (name: string) => {
+				const filePath = path.join(env.tmpDir, name);
+				fs.writeFileSync(filePath, "one\ntwo\n");
+				const guard = createReadGuard(`authorship-unknown-${name}`);
+				guard.recordWritten(filePath, {
+					stampFileTime: false,
+					authorship: "whole-file",
+					toolCallId: "call-write",
+				});
+				fs.writeFileSync(filePath, "one\nTWO\nthree\n");
+				return { filePath, guard };
+			};
+			// A native oldText edit: its preflight checked this path. The
+			// licensed in-process writer is pinned through the bridge seam in
+			// mutation-bridge.test.ts.
+			const own = credit("own.ts");
+			own.guard.recordWritten(own.filePath, {
+				stampFileTime: false,
+				authorship: "unknown",
+				toolCallId: "call-edit",
+			});
+			expect(own.guard.checkEdit(own.filePath, [3, 3]).action).toBe("allow");
+			// No pre-write check: it can only end the authorship it changed.
+			const unchecked = credit("unchecked.ts");
+			unchecked.guard.recordWritten(unchecked.filePath, {
+				stampFileTime: false,
+				authorship: "unknown",
+				advanceAuthorship: false,
+			});
+			expect(unchecked.guard.checkEdit(unchecked.filePath, [1, 1]).action).toBe(
+				"block",
+			);
+			// And an UNKNOWN credit still creates no first authorship.
+			const fresh = path.join(env.tmpDir, "fresh.ts");
+			fs.writeFileSync(fresh, "one\n");
+			const freshGuard = createReadGuard("authorship-unknown-fresh");
+			freshGuard.recordWritten(fresh, {
+				stampFileTime: false,
+				authorship: "unknown",
+				toolCallId: "call-edit",
+			});
+			expect(freshGuard.checkEdit(fresh, [1, 1]).action).toBe("block");
 		} finally {
 			env.cleanup();
 		}

@@ -223,10 +223,14 @@ the surface they bite; each block loads only when its trigger applies.
 
 65. **Unknown authorship range:** a producer that cannot recover a truthful
     range must carry UNKNOWN to `ReadGuard.creditAuthorship`; UNKNOWN retires
-    the existing scoped license and creates none. Only an explicit
-    `whole-file` signal may widen authorship. Enforced at
-    `clients/mutation-bridge.ts` and `clients/read-guard.ts`, with the
-    F-4210-2 production bridge witness.
+    an existing range-scoped license and creates none. Only an explicit
+    `whole-file` signal may widen authorship. Over a whole-file authorship
+    the range is moot, so whether the credit advances it is the writer rule
+    alone (`mayAdvanceAuthorship`), as for a partial credit (#4387: an own
+    oldText edit retired its write's authorship). A producer with no
+    pre-write check says so with `advanceAuthorship: false`, never by
+    leaning on UNKNOWN. Enforced at `clients/mutation-bridge.ts` and
+    `clients/read-guard.ts`, with the F-4210-2 production bridge witness.
 
 </important>
 

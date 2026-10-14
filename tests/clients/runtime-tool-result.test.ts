@@ -3613,6 +3613,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 			// refresh names none and keeps it, handing over the bytes it hashed.
 			expect(recordWritten).toHaveBeenCalledWith(directPath, {
 				authorship: "unknown",
+				advanceAuthorship: false,
 				stampFileTime: false,
 				toolCallId: "3226-opaque",
 			});
@@ -3655,6 +3656,94 @@ describe("runtime-tool-result inline behavior warnings", () => {
 			expect(runtime.readGuard.checkEdit(directPath, [1, 1]).action).toBe(
 				"allow",
 			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// #4387: an UNKNOWN credit now advances a whole-file authorship when its
+	// writer checked the path. The opaque recovery's bytes had no such check,
+	// so this credit sends advanceAuthorship: false and still ends the
+	// authorship. Recurrence: without it, a script the parser cannot see would
+	// re-baseline bytes the conversation never wrote.
+	it("ends an existing authorship when a bash write comes with opaque recovery (#4387)", async () => {
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		const env = setupTestEnvironment("pi-lens-4387-opaque-authored-");
+		try {
+			vi.mocked(runPipeline).mockImplementation(async () => ({
+				output: "",
+				hasBlockers: false,
+				isError: false,
+				fileModified: false,
+			}));
+			const existingPath = createTempFile(
+				env.tmpDir,
+				"extracted/existing.js",
+				"(function(){ return 1; })();\n",
+			);
+			const directPath = createTempFile(
+				env.tmpDir,
+				"direct.js",
+				"const direct = 1;\n",
+			);
+			const command = `echo direct > "${directPath}"; node opaque-extractor.js`;
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			// An earlier own write authored the file whole.
+			runtime.readGuard.recordWritten(directPath, {
+				authorship: "whole-file",
+				toolCallId: "4387-earlier-write",
+			});
+			expect(runtime.readGuard.checkEdit(directPath, [1, 1]).action).toBe(
+				"allow",
+			);
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall({
+					event: {
+						toolName: "bash",
+						toolCallId: "4387-opaque",
+						input: { command },
+					},
+					ctx: { cwd: env.tmpDir },
+					lensEnabled: true,
+					getFlag: () => false,
+					dbg: () => {},
+					runtime,
+					cacheManager: new CacheManager(false),
+					ensureLSPConfigInitialized: async () => {},
+					updateLspStatus: () => {},
+					resetLSPService: () => {},
+				} as any),
+			);
+			fs.writeFileSync(existingPath, "(function(){ return 2; })();\n");
+			fs.writeFileSync(directPath, "const direct = 2;\n");
+			await handleToolResult({
+				event: {
+					toolName: "bash",
+					toolCallId: "4387-opaque",
+					input: { command },
+					content: [{ type: "text", text: "extracted" }],
+				},
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				resetLSPService: () => {},
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+				readGuard: runtime.readGuard,
+			} as any);
+
+			expect(
+				readChangesSince(env.tmpDir, 0).some(
+					(change) =>
+						change.source === "opaque-script" &&
+						change.filePath === existingPath,
+				),
+			).toBe(true);
+			const verdict = runtime.readGuard.checkEdit(directPath, [1, 1]);
+			expect(verdict.action).toBe("block");
+			expect(verdict.reason).toContain("File modified since your write");
 		} finally {
 			env.cleanup();
 		}

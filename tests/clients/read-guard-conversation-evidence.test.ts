@@ -2238,6 +2238,91 @@ describe("#3525: FileTime moves only over bytes the conversation accounts for", 
 		}
 	});
 
+	/**
+	 * #4387: the conversation's own oldText edit of a file it authored whole
+	 * lands its own bytes; only which lines they occupy is unknown, and a
+	 * whole-file authorship needs no range (the #4210 N3 rule for a partial
+	 * credit). Recurrence: the edit's UNKNOWN-range credit force-retired that
+	 * authorship, logged as a "bridge" writer. A native write also leaves a
+	 * whole-file read, so there the retirement shows only in pilens_health
+	 * and read-guard.log; after a bash write, which leaves none, the next
+	 * edit read "File modified since your write" with no other writer.
+	 */
+	const authorshipRetiredFor = (file: string) =>
+		getDegradationSummary()
+			.find((group) => group.kind === "read-guard-authorship-retired")
+			?.latestReasons.some(
+				(row) => path.basename(row.subject) === path.basename(file),
+			) ?? false;
+
+	it("does not retire a write's authorship at its own oldText edit (#4387)", async () => {
+		const env = setupTestEnvironment("rg-4387-own-write-");
+		resetDegradationLedger();
+		try {
+			// The issue's reproduction: a pre-existing file, a native write, then
+			// a native oldText edit, with no other writer.
+			const file = fixture(env.tmpDir, "probe.ts", "alpha\nbeta\ngamma\n");
+			const runtime = newRuntime(env.tmpDir);
+			await piWrite(runtime, file, "alpha\nbeta\ngamma\ndelta\n");
+			expect((await textEdit(runtime, file, "beta\n", "BETA\n")).blocked).toBe(
+				false,
+			);
+			expect(authorshipRetiredFor(file)).toBe(false);
+			expect(
+				runtime.readGuard
+					.exportAuthorship()
+					.entries?.find((entry) => entry.filePath === file)?.retired,
+			).toBeUndefined();
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("allows the next zero-read edit after a bash write and its own oldText edit (#4387)", async () => {
+		const env = setupTestEnvironment("rg-4387-own-bash-");
+		resetDegradationLedger();
+		try {
+			const file = fixture(env.tmpDir, "probe.ts", "alpha\nbeta\ngamma\n");
+			const runtime = newRuntime(env.tmpDir);
+			await bashSed(runtime, file, "beta", "BETA");
+			expect(
+				(await textEdit(runtime, file, "gamma\n", "GAMMA\n")).blocked,
+			).toBe(false);
+			const second = await textEdit(runtime, file, "alpha\n", "ALPHA\n");
+			expect(second.reason).toBeUndefined();
+			expect(second.blocked).toBe(false);
+			const positional = await positionalEdit(runtime, file, [[2, 2, "BETA2"]]);
+			expect(positional.reason).toBeUndefined();
+			expect(positional.blocked).toBe(false);
+			expect(authorshipRetiredFor(file)).toBe(false);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// #4387 keeps #4210's fail-closed direction: the own oldText edit advances
+	// the authorship to its own bytes, so a later foreign change still ends it.
+	it("still ends that authorship when another writer changes the bytes after the own oldText edit (#4387)", async () => {
+		const env = setupTestEnvironment("rg-4387-own-bash-foreign-");
+		try {
+			const file = fixture(env.tmpDir, "probe.ts", "alpha\nbeta\ngamma\n");
+			const runtime = newRuntime(env.tmpDir);
+			await bashSed(runtime, file, "beta", "BETA");
+			expect(
+				(await textEdit(runtime, file, "gamma\n", "GAMMA\n")).blocked,
+			).toBe(false);
+			foreignWrite(file, 1, "EXTERNAL1");
+			const edit = await textEdit(runtime, file, "BETA\n", "BETA2\n");
+			expect(edit.blocked).toBe(true);
+			expect(edit.reason).toContain(AUTHORSHIP_RETIRED);
+			const positional = await positionalEdit(runtime, file, [[3, 3, "G"]]);
+			expect(positional.blocked).toBe(true);
+			expect(positional.reason).toContain(AUTHORSHIP_RETIRED);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("keeps another writer's change stale after an oldText edit passed it (R4)", async () => {
 		const env = setupTestEnvironment("rg-3525-r4-");
 		try {

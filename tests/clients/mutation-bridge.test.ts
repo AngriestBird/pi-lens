@@ -248,6 +248,61 @@ describe("mutation bridge bookkeeping", () => {
 		}
 	});
 
+	// #4387: over a whole-file authorship an UNKNOWN range is moot, so the
+	// writer rule decides, as for a partial credit (#4210 N3): the licensed
+	// observed replay advances it, and one its call did not license ends it.
+	// Recurrence: the UNKNOWN short-circuit ended every authorship, including
+	// the ones a checked writer of the conversation's own call advanced.
+	it("advances whole-file authorship over a licensed observed replay with no range, and ends it over an unlicensed one (#4387)", () => {
+		const env = setupTestEnvironment("pi-lens-4387-observed-unknown-whole-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const run = (name: string, licensed: boolean) => {
+				const filePath = path.join(env.tmpDir, name);
+				fs.writeFileSync(filePath, "one\ntwo\nthree\n");
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				runtime.setTelemetryIdentity({ sessionId: `s-4387-${name}` });
+				runtime.beginTurn();
+				const deps = makeDeps({
+					tmpDir: env.tmpDir,
+					runtime,
+					cacheManager: new CacheManager(false),
+				});
+				// A whole-file first credit.
+				expect(
+					recordMutationThroughSeam(
+						{ filePath, kind: "write", consumer: "bridge-v1" },
+						deps,
+					),
+				).toBe(true);
+				if (licensed)
+					runtime.readGuard.noteCheckedPaths("call-4387-observed", [filePath]);
+				fs.writeFileSync(filePath, "one\nobserved\nthree\nfour\n");
+				expect(
+					recordMutationThroughSeam(
+						{
+							filePath,
+							kind: "edit",
+							consumer: "observed-replay",
+							provenance: "observed",
+							toolCallId: "call-4387-observed",
+						},
+						deps,
+					),
+				).toBe(true);
+				return runtime.readGuard.checkEdit(filePath, [4, 4]).action;
+			};
+			expect(run("licensed.ts", true)).toBe("allow");
+			expect(run("unlicensed.ts", false)).toBe("block");
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
 	it("#2465: under no-read-guard, a recordable write still gets turn-state + receipt + the observed-handled mark, but skips only the read-guard stamp", () => {
 		const env = setupTestEnvironment("pi-lens-2465-no-read-guard-");
 		const previousDataDir = process.env.PILENS_DATA_DIR;

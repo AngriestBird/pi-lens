@@ -1798,11 +1798,14 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			// #3525: a parser-recognized bash write is whole-file authorship only
 			// after the tool_call preflight proved no foreign writer intervened.
 			// Opaque recovery is observed bridge evidence, not bytes the parser
-			// accounted for, so it remains UNKNOWN for F-4210-2.
+			// accounted for, so it remains UNKNOWN for F-4210-2. No pre-write
+			// check covered those bytes, so it may only end an existing
+			// authorship, never advance it (#4387).
+			const opaqueEvidence = hadOpaqueRecovery || opaqueSet.has(wp);
 			if (!getFlag("no-read-guard") && recognizedAuthoredSet.has(wp))
 				deps.readGuard?.recordWritten(wp, {
-					authorship:
-						hadOpaqueRecovery || opaqueSet.has(wp) ? "unknown" : "whole-file",
+					authorship: opaqueEvidence ? "unknown" : "whole-file",
+					...(opaqueEvidence && { advanceAuthorship: false }),
 					stampFileTime: false,
 					...(toolCallId !== undefined && { toolCallId }),
 				});
