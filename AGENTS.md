@@ -556,6 +556,14 @@ file-scoped worklist and receives no project-wide scanner output.
     change; a `TLA+ unaffected` line never covers it. Screen: for a mapped
     file's diff, list the CONSTANTS in the family's as-built
     `formal/<family>/*.cfg` and check each against the changed branch.
+    Enforced by `tests/config/tla-switch-pins.test.ts` over
+    `formal/switch-pins.json`: every constant a config assigns is
+    pinned, `notCodeChoice` or `deferred` with a reason; a pin names the test
+    that drives the real code, and every `expect: pass` config must resolve
+    the constant to the pinned value. Flipping the code reds the pin's test;
+    flipping the model without the registry reds the gate. read-guard is
+    fully pinned; the other families' code choices are deferred, and the
+    deferred and notCodeChoice counts are pinned exactly.
 
 </important>
 
@@ -1298,8 +1306,13 @@ Test authoring screens:
 
 Governance sweeps use `tests/support/sweep-kit.ts`, explicit source roots, and
 comment/string-blanked source. Every sweep has a real floor and a checked
-exemption reason. New mock exports, fixture shapes, path rules, spawn lanes,
-and durable fields must update their registered-or-fail coverage tests.
+exemption reason. A detector that decides a test exists counts only live
+declarations (`testDeclarations` in `tests/support/sweep-kit.ts`) in files
+vitest collects (`tests/support/vitest-collection.ts`): a skipped, todo,
+conditional (`skipIf`/`runIf`, an options key, a body skip) or uncalled test
+is absent. New mock
+exports, fixture shapes, path rules, spawn lanes, and durable fields must
+update their registered-or-fail coverage tests.
 
 <important if="adding or changing a rule or analyzer">
 

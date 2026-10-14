@@ -58,6 +58,7 @@ import {
 	relativePosix,
 	stripSource,
 } from "../support/sweep-kit.js";
+import { vitestCollects } from "../support/vitest-collection.js";
 
 const repoRoot = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -196,13 +197,14 @@ describe("lsp-spawn-heavy Vitest project coverage", () => {
 
 	it("phases or documents every test that spawns a real LSP child", () => {
 		const included = lspSpawnHeavyInclude();
+		// Fixture projects carry *.test.ts inputs belonging to the fixture's
+		// own toolchain; vitest never runs them, so the sweep must not count
+		// them either. vitestCollects reads that from vitest.config.ts: the
+		// hand-written `tests/fixtures/` exclude it replaces never matched,
+		// because listSourceFiles passes paths relative to `tests/` (#4399).
 		const files = listSourceFiles(path.join(repoRoot, "tests"), {
 			extensions: [".ts"],
-			// Fixture projects carry *.test.ts inputs belonging to the fixture's
-			// own toolchain; vitest's sharedExclude never runs them, so the sweep
-			// must not count them as candidates either.
-			exclude: (rel) => rel.startsWith("tests/fixtures/"),
-		}).filter((file) => file.endsWith(".test.ts"));
+		}).filter((file) => vitestCollects(relativePosix(repoRoot, file)));
 
 		// readWalkedFiles: a path that vanished between the walk and the read is
 		// out of the population, not a finding (#3082 — this scan was one of the
