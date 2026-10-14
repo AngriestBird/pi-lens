@@ -1775,10 +1775,16 @@ function handleSnapshotWorkerResult(
 ): void {
 	const pending = _snapshotWorkerRequests.get(result.id);
 	if (!pending) {
-		fs.rmSync(result.stagePath, { force: true });
+		// Late result for a request the host no longer tracks: the echoed path is
+		// the only name left, and it is wire data (#4400).
+		if (typeof result.stagePath === "string") {
+			fs.rmSync(result.stagePath, { force: true });
+		}
 		return;
 	}
 	_snapshotWorkerRequests.delete(result.id);
+	// #4400: the host sent `pending.stagePath`, so every cleanup and promotion
+	// below uses its own record, never the worker's echo of it.
 	if (
 		result.error ||
 		result.rawBytes === undefined ||
@@ -1787,7 +1793,7 @@ function handleSnapshotWorkerResult(
 		result.writeMs === undefined ||
 		result.semanticFingerprint === undefined
 	) {
-		fs.rmSync(result.stagePath, { force: true });
+		fs.rmSync(pending.stagePath, { force: true });
 		dispatchMainThreadWriteThroughSeam(
 			pending,
 			result.error ?? "invalid worker result",
@@ -1803,7 +1809,7 @@ function handleSnapshotWorkerResult(
 	) {
 		// The stale stage is part of the promotion transaction: remove it before
 		// returning so a superseded save cannot leave an orphan behind.
-		fs.rmSync(result.stagePath, { force: true });
+		fs.rmSync(pending.stagePath, { force: true });
 		completeSnapshotPersist(pending);
 		return;
 	}
@@ -1853,7 +1859,7 @@ function handleSnapshotWorkerResult(
 	try {
 		const promoted = promoteSnapshotBody(
 			pending,
-			{ stagePath: result.stagePath },
+			{ stagePath: pending.stagePath },
 			{
 				fingerprint: result.semanticFingerprint,
 				generatedAt: pending.snapshot.generatedAt,
@@ -1878,7 +1884,7 @@ function handleSnapshotWorkerResult(
 		});
 		completeSnapshotPersist(pending);
 	} catch (err) {
-		fs.rm(result.stagePath, { force: true }, () => {});
+		fs.rm(pending.stagePath, { force: true }, () => {});
 		dispatchMainThreadWriteThroughSeam(
 			pending,
 			err instanceof Error ? err.message : String(err),
