@@ -223,14 +223,16 @@ the surface they bite; each block loads only when its trigger applies.
 
 65. **Unknown authorship range:** a producer that cannot recover a truthful
     range must carry UNKNOWN to `ReadGuard.creditAuthorship`; UNKNOWN
-    creates no authorship. Only an explicit `whole-file` signal may widen
-    authorship. Over a range scope UNKNOWN leaves
-    an empty scope, which vouches for no line. Over a whole-file authorship
-    it advances only under the writer rule (`mayAdvanceAuthorship`) and only
-    while a read that names a tool call bounds it after a move; otherwise it
-    leaves an empty scope. An own oldText edit must not retire its write's
-    authorship. A producer with no pre-write check says so with
-    `advanceAuthorship: false`, never by leaning on UNKNOWN. Enforced at
+    creates no authorship. A scope after a credit is what the credit holds
+    plus what it may keep, so no credit widens an empty or range scope past
+    the lines it produced: not a drain, a bash write or a pipeline credit.
+    A native write's creation read vouches for the whole file instead.
+    UNKNOWN keeps a scope only under the writer rule
+    (`mayAdvanceAuthorship`) and while a read that names a tool call bounds
+    it after a move; otherwise it leaves an empty scope, which vouches for
+    no line. An own oldText edit must not retire its write's authorship. A
+    producer with no pre-write check says so with `advanceAuthorship:
+    false`, never by leaning on UNKNOWN. Enforced at
     `clients/mutation-bridge.ts` and `clients/read-guard.ts`, with the
     F-4210-2 production bridge witness.
 
