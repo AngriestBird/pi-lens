@@ -33,6 +33,22 @@ const PREFIX = "pi-lens-1634-all-full-";
 const KEPT = "Cannot find name 'missing'.";
 const MARKED = "Type 'string' is not assignable to type 'number'.";
 
+const OTHER = "'unused' is declared but its value is never read.";
+
+/** A warning in a second file, outside a `paths: [a.ts]` call's scope. */
+function otherWarning() {
+	return {
+		severity: 2,
+		message: OTHER,
+		source: "typescript",
+		code: 6133,
+		range: {
+			start: { line: 0, character: 6 },
+			end: { line: 0, character: 12 },
+		},
+	};
+}
+
 function serverDiagnostics() {
 	return [
 		{
@@ -62,12 +78,14 @@ describe("lens_diagnostics mode=all agrees with a same-minute mode=full (#1634 c
 	let tmp: string;
 	let file: string;
 	let dep: string;
+	let other: string;
 	let previousDataDir: string | undefined;
 
 	async function run(params: Record<string, unknown>): Promise<string> {
 		const service = makeLspServiceDouble({
 			runWorkspaceDiagnostics: vi.fn(async () => [
 				{ filePath: file, diagnostics: serverDiagnostics(), count: 2 },
+				{ filePath: other, diagnostics: [otherWarning()], count: 1 },
 			]),
 		});
 		const tool = createLensDiagnosticsTool(
@@ -85,11 +103,16 @@ describe("lens_diagnostics mode=all agrees with a same-minute mode=full (#1634 c
 		return result.content.map((c) => c.text).join("\n");
 	}
 
-	async function mark(message: string, line: number, code: number) {
+	async function mark(
+		message: string,
+		line: number,
+		code: number,
+		filePath = file,
+	) {
 		const result = await createLensDiagnosticMarkTool(() => tmp).execute(
 			"mark-1634",
 			{
-				filePath: file,
+				filePath,
 				line,
 				message,
 				rule: `typescript:${code}`,
@@ -112,13 +135,15 @@ describe("lens_diagnostics mode=all agrees with a same-minute mode=full (#1634 c
 		_resetStateCacheForTests();
 		file = path.join(tmp, "a.ts");
 		dep = path.join(tmp, "dep.ts");
+		other = path.join(tmp, "b.ts");
+		fs.writeFileSync(other, "const unused = 1;\nexport {};\n");
 		fs.writeFileSync(dep, "export const y = 1;\n");
 		fs.writeFileSync(
 			file,
 			'import { y } from "./dep.js";\nconst value: number = y;\nexport { value };\n',
 		);
 		const past = (Date.now() - 60_000) / 1000;
-		for (const p of [file, dep]) fs.utimesSync(p, past, past);
+		for (const p of [file, dep, other]) fs.utimesSync(p, past, past);
 	});
 
 	afterEach(() => {
@@ -170,5 +195,19 @@ describe("lens_diagnostics mode=all agrees with a same-minute mode=full (#1634 c
 		expect(rows(all)).toEqual([]);
 		expect(all).toContain("suppressed by disposition: 2 finding(s)");
 		expect(all).toContain("Not a clean verdict");
+	});
+	it("counts only what is hidden inside the call's paths and severity", async () => {
+		await run({ mode: "full", paths: [file, other] });
+		await mark(KEPT, 1, 2304);
+		await mark(MARKED, 2, 2322);
+		await mark(OTHER, 1, 6133, other);
+
+		const everything = await run({ mode: "all" });
+		const onePath = await run({ mode: "all", paths: [file] });
+		const errorsOnly = await run({ mode: "all", severity: "error" });
+
+		expect(everything).toContain("suppressed by disposition: 3 finding(s)");
+		expect(onePath).toContain("suppressed by disposition: 2 finding(s)");
+		expect(errorsOnly).toContain("suppressed by disposition: 2 finding(s)");
 	});
 });
