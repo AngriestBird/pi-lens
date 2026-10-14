@@ -185,6 +185,10 @@ describe("shapesWithoutHistory (#4439)", () => {
 		["an indented fence in a list", "- item\n  ```\n  #100\n  ```\n"],
 		["a tilde fence", "~~~\n#100\n~~~\n"],
 		["a four-backtick fence", "````md\n```\nx\n```\n#100\n````\n"],
+		[
+			"a four-backtick fence that holds a short fence line",
+			"````md\n```\n#100\n````\n",
+		],
 		["an unterminated comment", "<!-- #100\n"],
 	])("is not satisfied by a reference in %s", (_name, history) => {
 		const agents = catalog(shape(1, "old (#100)."));
