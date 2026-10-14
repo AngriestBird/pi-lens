@@ -38,7 +38,6 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: "24" # the version where #423 reproduces
-          cache: npm
       - name: Install dependencies (downloads core grammars via prepare)
         run: npm install --no-audit --no-fund
       - name: Build
@@ -69,7 +68,6 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: "24" # the version where #423 reproduces
-          cache: npm
       - name: Install dependencies (downloads the prebuilt swift grammar)
         run: npm install --no-audit --no-fund
       - name: Build
