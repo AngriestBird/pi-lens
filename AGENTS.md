@@ -556,6 +556,14 @@ file-scoped worklist and receives no project-wide scanner output.
     change; a `TLA+ unaffected` line never covers it. Screen: for a mapped
     file's diff, list the CONSTANTS in the family's as-built
     `formal/<family>/*.cfg` and check each against the changed branch.
+    Enforced by `tests/config/tla-switch-pins.test.ts` over
+    `formal/switch-pins.json`: every constant a config assigns is
+    pinned, `notCodeChoice` or `deferred` with a reason; a pin names the test
+    that drives the real code, and every `expect: pass` config must resolve
+    the constant to the pinned value. Flipping the code reds the pin's test;
+    flipping the model without the registry reds the gate. read-guard is
+    fully pinned; the other families' code choices are deferred, and the
+    deferred and notCodeChoice counts are pinned exactly.
 
 </important>
 
@@ -1168,6 +1176,21 @@ The Unit shards are packed by the per-file seconds in
 `scripts/test-shard-weights.json`; regenerate it from the shards' uploaded
 `vitest-results.json` when `tests/config/test-shard-assignment.test.ts` reds.
 
+Actions cache. The repository cache is capped at 10 GB. The nightly
+smoke workflows restore the managed tool tree through
+`.github/actions/tool-tree-cache`, keyed on the hash of
+`clients/installer/index.ts` (every pin) plus the ISO week; a pin that moves out
+of that file moves the action's `hashFiles` target in the same change
+(`tests/config/tool-tree-cache-workflow.test.ts`). A smoke saves its tree once
+its last install step ran, red or green, because the key is first-wins per week.
+`cache-prune.yml` runs `scripts/prune-actions-cache.mjs` nightly and on a push
+to master that edits it, so a closed pull request's caches and superseded
+copies never fill the cap; only its `prune` job holds `actions: write` and
+passes `--apply` (`tests/config/cache-prune-workflow.test.ts`).
+A workflow that `pull_request_target` or `workflow_run` starts never restores
+or saves a cache, so a pull request cannot poison what a privileged run
+restores (`tests/config/untrusted-trigger-cache.test.ts`).
+
 A workflow job no pull request can run needs a registered reason in
 `tests/config/workflow-pull-request-reachability.test.ts`, and the branch run
 (`gh workflow run <file> --ref <branch>`) quoted with its run id (#3043). The
@@ -1304,8 +1327,13 @@ Test authoring screens:
 
 Governance sweeps use `tests/support/sweep-kit.ts`, explicit source roots, and
 comment/string-blanked source. Every sweep has a real floor and a checked
-exemption reason. New mock exports, fixture shapes, path rules, spawn lanes,
-and durable fields must update their registered-or-fail coverage tests.
+exemption reason. A detector that decides a test exists counts only live
+declarations (`testDeclarations` in `tests/support/sweep-kit.ts`) in files
+vitest collects (`tests/support/vitest-collection.ts`): a skipped, todo,
+conditional (`skipIf`/`runIf`, an options key, a body skip) or uncalled test
+is absent. New mock
+exports, fixture shapes, path rules, spawn lanes, and durable fields must
+update their registered-or-fail coverage tests.
 
 <important if="adding or changing a rule or analyzer">
 
