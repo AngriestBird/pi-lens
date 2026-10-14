@@ -721,6 +721,24 @@ describe("sink reads drain first (#4381)", () => {
 			).toEqual([]);
 		});
 
+		it("an alias is visible only in the scope that declares it", () => {
+			// `file` names the latency sink inside `writerSide` only; the same name
+			// as another function's parameter is an unrelated path.
+			expect(
+				scanFixture(
+					[
+						"function writerSide(): string {",
+						"\tconst file = getLatencyLogPath();",
+						"\treturn file;",
+						"}",
+						"function unrelated(file: string): number {",
+						"\treturn fs.statSync(file).size;",
+						"}",
+					].join("\n"),
+				),
+			).toEqual([]);
+		});
+
 		it("a sync reader helper is drained only when every call site drains", () => {
 			const reader = [
 				"function rowsFor(): string {",
