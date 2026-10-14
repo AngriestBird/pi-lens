@@ -268,6 +268,21 @@ describe("read accounting reads a file once per hook (#1649)", () => {
 		});
 	});
 
+	it("takes no capture of a bash view past the hash bound", async () => {
+		// The released capture returned before reading for a span over
+		// READ_HASH_MAX_LINES (3000); a scan window capped at that bound must
+		// not turn it into a read of 3000 lines that hashes nothing.
+		const file = path.join(root, "src", "long.ts");
+		fs.writeFileSync(file, source(3500));
+		const runtime = runtimeFor();
+		expect(
+			await bashResult(runtime, file, "cat src/long.ts", source(3500)),
+		).toBe(1);
+		const record = runtime.readGuard.getReadHistory(file).at(-1);
+		expect(record).toMatchObject({ effectiveOffset: 1, effectiveLimit: 3501 });
+		expect(record?.lineHashes).toBeUndefined();
+	});
+
 	it("reads no byte of a file over the byte gate and keeps the released answer", async () => {
 		const file = path.join(root, "src", "huge.log");
 		fs.writeFileSync(file, source(200));
