@@ -93,10 +93,15 @@ function sessionLines(prefix: string): string[] {
 		.filter((line) => line.startsWith(prefix));
 }
 
-function latencyRecords(phase: string): Array<Record<string, any>> {
+interface LatencyRecord {
+	phase?: string;
+	metadata?: Record<string, unknown>;
+}
+
+function latencyRecords(phase: string): LatencyRecord[] {
 	return logLatency.mock.calls
-		.map(([entry]) => entry)
-		.filter((entry) => entry?.phase === phase);
+		.map(([entry]) => entry as LatencyRecord | undefined)
+		.filter((entry): entry is LatencyRecord => entry?.phase === phase);
 }
 
 describe("client lifecycle records (#2372 ClientRegistry move)", () => {
@@ -248,7 +253,7 @@ describe("client lifecycle records (#2372 ClientRegistry move)", () => {
 			uptimeMs: 5_000,
 			intentional: false,
 		});
-		expect(normalizeMapKey(respawn.metadata.root)).toBe(
+		expect(normalizeMapKey(String(respawn?.metadata?.root))).toBe(
 			normalizeMapKey(FIXTURE_ROOT),
 		);
 	});
