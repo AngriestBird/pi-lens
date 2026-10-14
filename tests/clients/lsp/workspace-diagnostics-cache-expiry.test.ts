@@ -33,6 +33,7 @@ import {
 } from "../../../clients/lsp/workspace-diagnostics-cache.js";
 import type { LSPDiagnostic } from "../../../clients/lsp/client.js";
 import {
+	MAX_FILE_CREATIONS,
 	noteWorkspaceFileCreated,
 	resetWorkspaceDiagnosticsCacheSession,
 	workspaceDiagnosticsCacheSessionStart,
@@ -151,7 +152,11 @@ describe("classifyWorkspaceDiagnosticsCacheExpiry — the policy, in isolation",
 		).toBeUndefined();
 	});
 
-	it("never expires a clean entry on a file creation (#4320)", () => {
+	// #4346: the caller passes the latest creation in the entry's dependency
+	// scope, so a clean entry scanned before it is refused like any other
+	// dependency change (a new global or package file can break a clean file).
+	// Recurrence: #4320 kept every clean entry serving past every creation.
+	it("expires a clean entry scanned at or before a creation in its dependency scope (#4346)", () => {
 		const clean: WorkspaceDiagnosticsCacheEntry = {
 			diagnostics: [],
 			count: 0,
@@ -161,6 +166,9 @@ describe("classifyWorkspaceDiagnosticsCacheExpiry — the policy, in isolation",
 		};
 		expect(
 			classifyWorkspaceDiagnosticsCacheExpiry(clean, now, now - 10, now),
+		).toBe("file-created");
+		expect(
+			classifyWorkspaceDiagnosticsCacheExpiry(clean, now, now - 10, now - 6),
 		).toBeUndefined();
 	});
 
@@ -357,7 +365,12 @@ describe("expiry observability (#1782 AC4)", () => {
 				},
 			},
 		});
-		sessionModule.noteWorkspaceFileCreated("typescript", tmp, start + 10);
+		sessionModule.noteWorkspaceFileCreated(
+			"typescript",
+			tmp,
+			[cacheModule.cacheKeyFor(path.join(tmp, "new_module.ts"))],
+			start + 10,
+		);
 
 		const ctx = cacheModule.createWorkspaceDiagnosticsCacheContext(tmp);
 		expect(ctx.lookup(file, SCOPE)).toBeUndefined();
@@ -377,6 +390,13 @@ describe("expiry observability (#1782 AC4)", () => {
 });
 
 describe("lookup() after a file creation (#4320)", () => {
+	// #4346: records carry the created path. This one is a module nothing
+	// imports, on disk, so only an entry whose scope is unknown counts it.
+	const created = (): string[] => {
+		const file = path.join(tmp, "new_module.ts");
+		fs.writeFileSync(file, "export const b = 2;\n");
+		return [cacheKeyFor(file)];
+	};
 	function seedTwo(): { importer: string; clean: string } {
 		const importer = path.join(tmp, "importer.ts");
 		const clean = path.join(tmp, "clean.ts");
@@ -404,7 +424,7 @@ describe("lookup() after a file creation (#4320)", () => {
 
 	it("drops a finding-bearing entry scanned before the creation and keeps a clean one", () => {
 		const { importer, clean } = seedTwo();
-		noteWorkspaceFileCreated("typescript", tmp, sessionStart + 10);
+		noteWorkspaceFileCreated("typescript", tmp, created(), sessionStart + 10);
 		const ctx = createWorkspaceDiagnosticsCacheContext(tmp);
 		expect(ctx.lookup(importer, SCOPE)).toBeUndefined();
 		expect(ctx.lookup(clean, SCOPE)).toBeDefined();
@@ -423,7 +443,7 @@ describe("lookup() after a file creation (#4320)", () => {
 	// the new file can answer differently, and only under the root it serves.
 	it("keeps serving a finding entry when the creation reached another server", () => {
 		const { importer } = seedTwo();
-		noteWorkspaceFileCreated("pyrefly", tmp, sessionStart + 10);
+		noteWorkspaceFileCreated("pyrefly", tmp, created(), sessionStart + 10);
 		expect(
 			createWorkspaceDiagnosticsCacheContext(tmp).lookup(importer, SCOPE),
 		).toBeDefined();
@@ -435,7 +455,12 @@ describe("lookup() after a file creation (#4320)", () => {
 			path.join(os.tmpdir(), "pi-lens-cache-expiry-other-"),
 		);
 		try {
-			noteWorkspaceFileCreated("typescript", elsewhere, sessionStart + 10);
+			noteWorkspaceFileCreated(
+				"typescript",
+				elsewhere,
+				created(),
+				sessionStart + 10,
+			);
 			expect(
 				createWorkspaceDiagnosticsCacheContext(tmp).lookup(importer, SCOPE),
 			).toBeDefined();
@@ -448,9 +473,14 @@ describe("lookup() after a file creation (#4320)", () => {
 	// more entries, never serve one a dropped record covered.
 	it("still refuses the entry after its creation record is evicted", () => {
 		const { importer } = seedTwo();
-		noteWorkspaceFileCreated("typescript", tmp, sessionStart + 10);
-		for (let index = 0; index < 200; index += 1) {
-			noteWorkspaceFileCreated(`other-${index}`, tmp, sessionStart + 2);
+		noteWorkspaceFileCreated("typescript", tmp, created(), sessionStart + 10);
+		for (let index = 0; index < MAX_FILE_CREATIONS; index += 1) {
+			noteWorkspaceFileCreated(
+				`other-${index}`,
+				tmp,
+				[`/elsewhere/${index}.ts`],
+				sessionStart + 2,
+			);
 		}
 		expect(
 			createWorkspaceDiagnosticsCacheContext(tmp).lookup(importer, SCOPE),
@@ -461,7 +491,7 @@ describe("lookup() after a file creation (#4320)", () => {
 	// every later session in a long-lived extension host.
 	it("does not outlive the session: re-arming the clock clears it", () => {
 		const { importer } = seedTwo();
-		noteWorkspaceFileCreated("typescript", tmp, sessionStart + 10);
+		noteWorkspaceFileCreated("typescript", tmp, created(), sessionStart + 10);
 		resetWorkspaceDiagnosticsCacheSession(sessionStart);
 		expect(
 			createWorkspaceDiagnosticsCacheContext(tmp).lookup(importer, SCOPE),

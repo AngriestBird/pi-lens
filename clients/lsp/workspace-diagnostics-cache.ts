@@ -11,9 +11,21 @@ import { logLatency } from "../latency-logger.js";
 import { recordDegradationOnce } from "../degradation-ledger.js";
 import { compareOrdinal } from "../string-utils.js";
 import {
+	type FileCreation,
 	workspaceDiagnosticsCacheSessionStart,
 	workspaceFileCreatedAtFor,
 } from "./workspace-diagnostics-session.js";
+import {
+	fileAnswerNames,
+	importSourceNameParts,
+} from "../review-graph/import-resolvers.js";
+import {
+	feedsJsTsGlobalScope,
+	goPackageFiles,
+	inOneGoPackage,
+	isGoSourceFile,
+	seesJsTsGlobalScope,
+} from "./implicit-scope.js";
 import type { LSPDiagnostic } from "./client.js";
 import {
 	createDiskBindingCache,
@@ -433,18 +445,19 @@ export function classifyWorkspaceDiagnosticsCacheExpiry(
 	const findings = Array.isArray(entry.diagnostics)
 		? entry.diagnostics.length
 		: 0;
+	if (findings > 0 && entry.scannedAt < sessionStartedAt) return "pre-session";
+	// #4320, #4346: `fileCreatedAt` is the latest Created sent for a file in
+	// this entry's dependency scope (`createdInScopeAt` in the context below),
+	// so an entry scanned no later than it may answer for a file set its
+	// servers no longer see: a "cannot find module" the new file answers, or a
+	// clean answer a new global or package file breaks. This is the dependency
+	// check on the creation axis, so it binds clean entries too; the scope
+	// itself is narrower for them (see `createdInScopeAt`).
+	// 0 means no creation this session.
+	if (fileCreatedAt > 0 && entry.scannedAt <= fileCreatedAt) {
+		return "file-created";
+	}
 	if (findings === 0) return undefined;
-	if (entry.scannedAt < sessionStartedAt) return "pre-session";
-	// #4320: a findings entry scanned no later than the latest Created its own
-	// servers were sent under its root (`workspaceFileCreatedAtFor`) may be a
-	// "cannot find module" the new file now answers. Clean entries keep
-	// serving, and re-touching every clean file per new file is the cost this
-	// cache exists to avoid. A clean importer whose module is later broken is
-	// judged by the dependency check: the incremental graph update gives it the
-	// edge to a created module (#4346). The edge does not replace this drop:
-	// a file no import names (a TypeScript ambient `.d.ts`, a Go same-package
-	// file) answers a finding with no edge in any build (#4346 probe).
-	if (entry.scannedAt <= fileCreatedAt) return "file-created";
 	if (now - entry.scannedAt > WORKSPACE_DIAGNOSTICS_FINDING_MAX_AGE_MS) {
 		return "max-age";
 	}
@@ -640,11 +653,26 @@ export interface WorkspaceDiagnosticsCacheContext {
 	 * cannot show a missing import a new module fixes: every import those bytes
 	 * name resolved when it was recorded. Every other file is answered by its
 	 * server now, or by a findings replay, and its imports must reach the
-	 * server first. Asks only clean entries, which no expiry rule drops, so
-	 * asking before the batch's own lookup changes nothing that lookup would
-	 * not.
+	 * server first. It asks {@link lookup}, so a clean entry a creation in its
+	 * dependency scope refuses is dropped here as that lookup would drop it,
+	 * and the file is resolved like a file with no entry.
 	 */
 	servesClean(filePath: string, scopeKey: string): boolean;
+	/**
+	 * #4346: `filePath`'s imports as this call resolved them (the created-module
+	 * producer, `importTargetsToAnnounce`). A finding entry's dependency scope
+	 * is complete only for a file noted here with `complete` (the producer saw
+	 * every dependency form, #4346 r2) and every unresolved source spelling a
+	 * name; see `createdInScopeAt`.
+	 */
+	noteImportScope(
+		filePath: string,
+		scope: {
+			targets: readonly string[];
+			unresolved: readonly string[];
+			complete: boolean;
+		},
+	): void;
 	/** Fresh cached result for `filePath` under `scopeKey`, or `undefined`
 	 * when there's no entry, the entry's scope doesn't match, or it fails the
 	 * mtime/dependency freshness check. */
@@ -689,22 +717,14 @@ export interface WorkspaceDiagnosticsCacheContext {
 	persist(): void;
 }
 
-/**
- * #4320: the latest Created sent to a server behind `entry`'s findings, at a
- * client root holding `filePath`. The expiry policy keeps a clean entry
- * serving whatever this answers.
- */
-function fileCreatedAtFor(
-	filePath: string,
-	entry: WorkspaceDiagnosticsCacheEntry,
-): number {
-	// v3 entries carry each finding's `serverId` (#2776); the loader drops any
-	// that do not.
-	const serverIds = new Set(entry.diagnostics.map((d) => d.serverId));
-	return workspaceFileCreatedAtFor(
-		(serverId) => serverIds.has(serverId),
-		(root) => isUnderDir(filePath, root),
-	);
+/** #4346: what one producer call learned of a file's imports. */
+interface ImportScope {
+	targets: ReadonlySet<string>;
+	/** The name parts of its unresolved import sources. */
+	unresolvedNames: ReadonlySet<string>;
+	/** False when an unresolved source spells no name a file could answer, or
+	 * the producer reported the scope incomplete (#4346 r2 F1/F2). */
+	complete: boolean;
 }
 
 export function createWorkspaceDiagnosticsCacheContext(
@@ -746,6 +766,124 @@ export function createWorkspaceDiagnosticsCacheContext(
 		getImports(filePath) !== undefined;
 	// #1095: per-sweep disk-fingerprint memo (per file+mtime) for binding verify.
 	const diskBindingCache = createDiskBindingCache();
+	// #4346: per-context state for the dependency scope; one batch or sweep,
+	// so none outlives the files it was learned from.
+	const importScopes = new Map<string, ImportScope>();
+	const feedsGlobalScope = new Map<string, boolean>();
+	const answerNames = new Map<string, readonly string[]>();
+	const feedsGlobalScopeOf = (created: string): boolean => {
+		let feeds = feedsGlobalScope.get(created);
+		if (feeds === undefined) {
+			feeds = feedsJsTsGlobalScope(created);
+			feedsGlobalScope.set(created, feeds);
+		}
+		return feeds;
+	};
+	const answerNamesOf = (created: string): readonly string[] => {
+		let found = answerNames.get(created);
+		if (!found) {
+			found = fileAnswerNames(created);
+			answerNames.set(created, found);
+		}
+		return found;
+	};
+	const goPackageChangedAt = new Map<string, number | undefined>();
+
+	/**
+	 * #4346: the latest Created sent for a file in `entry`'s dependency scope,
+	 * by a server that could answer for it, at a root holding `filePath`, at or
+	 * after the entry's scan (the eviction fold counts for every file).
+	 *
+	 * The scope is F's imports (the graph's edges, this call's resolution, and
+	 * any file whose stem or directory an unresolved source spells) plus its
+	 * implicit scope (`implicit-scope.ts`: the TS/JS ambient files for a JS/TS
+	 * file, the package's files for a Go file). A finding entry whose scope
+	 * pi-lens cannot enumerate (another language, an unresolved source with no
+	 * name, a dependency form the extraction does not capture, a JS/TS target
+	 * that re-exports, or no resolution this call) counts every created file: its claim
+	 * is positive, so an unknown scope fails closed, as #4320 did for every
+	 * entry. A clean entry counts only what can be enumerated: refusing it on
+	 * every creation is the cost this cache exists to avoid (#1782).
+	 *
+	 * Servers: a finding entry's own (`serverId`, #2776); any for a clean
+	 * entry, which names none.
+	 */
+	const createdInScopeAt = (
+		filePath: string,
+		key: string,
+		entry: WorkspaceDiagnosticsCacheEntry,
+		onOutOfScope: () => void,
+	): number => {
+		const serverIds = new Set(entry.diagnostics.map((d) => d.serverId));
+		const findings = serverIds.size > 0;
+		const scope = importScopes.get(key);
+		// Asked once per entry, not once per creation record: a sweep looks up
+		// thousands of entries past up to MAX_FILE_CREATIONS records (#4370).
+		const seesGlobals = seesJsTsGlobalScope(filePath);
+		const goPackage = isGoSourceFile(key);
+		const unknown =
+			findings && (!(seesGlobals || goPackage) || scope?.complete !== true);
+		const names = scope?.unresolvedNames;
+		let indexed: ReadonlySet<string> | undefined;
+		const inScope = (created: string): boolean => {
+			if (created === key) return false;
+			indexed ??= new Set(getImports(filePath) ?? []);
+			if (indexed.has(created) || scope?.targets.has(created)) return true;
+			if (names?.size && answerNamesOf(created).some((n) => names.has(n))) {
+				return true;
+			}
+			if (goPackage && inOneGoPackage(key, created)) return true;
+			return seesGlobals && feedsGlobalScopeOf(created);
+		};
+		// Roots are per client, so few; `isUnderDir` canonicalizes both sides.
+		const holds = new Map<string, boolean>();
+		return workspaceFileCreatedAtFor(
+			(serverId) => !findings || serverIds.has(serverId),
+			(root) => {
+				let held = holds.get(root);
+				if (held === undefined) {
+					held = isUnderDir(filePath, root);
+					holds.set(root, held);
+				}
+				return held;
+			},
+			(creation: FileCreation) => {
+				if (creation.at < entry.scannedAt) return false;
+				if (unknown || inScope(creation.path)) return true;
+				onOutOfScope();
+				return false;
+			},
+		);
+	};
+
+	/**
+	 * #4346: whether a Go file's package changed after `scannedAt`: its
+	 * directory's entries (a file added, removed or renamed) or any Go file's
+	 * bytes, on the mtime axis the import edges use. An unreadable directory
+	 * counts as changed. One read per directory per context.
+	 */
+	const goPackageChangedSince = (key: string, scannedAt: number): boolean => {
+		if (!isGoSourceFile(key)) return false;
+		const dir = path.posix.dirname(key);
+		if (!goPackageChangedAt.has(dir)) {
+			let changedAt: number | undefined;
+			try {
+				changedAt = fs.statSync(dir).mtimeMs;
+				for (const peer of goPackageFiles(dir) ?? []) {
+					changedAt = Math.max(changedAt, fs.statSync(peer).mtimeMs);
+				}
+			} catch {
+				changedAt = undefined;
+			}
+			goPackageChangedAt.set(dir, changedAt);
+		}
+		return (
+			freshnessFromMtime({
+				mtimeMs: goPackageChangedAt.get(dir),
+				referenceMs: scannedAt,
+			}).verdict !== "fresh"
+		);
+	};
 	let dirty = false;
 	// #1782 (AC4): one BOUNDED record per context, not one per expired entry —
 	// a sweep that ages out 400 ghosts emits a single line carrying the count,
@@ -768,9 +906,19 @@ export function createWorkspaceDiagnosticsCacheContext(
 	// second event kind, so a sweep's whole "what did I refuse to serve"
 	// picture stays in one line.
 	let depIndexColdRefusalCount = 0;
+	// #4346: entries served although a Created reached their servers after
+	// their scan, because no created file was in their dependency scope. The
+	// decision acceptance item 4 makes; counted, never one record per entry.
+	let servedPastCreationCount = 0;
 
 	const flushExpiryTelemetry = (): void => {
-		if (expiredCount === 0 && depIndexColdRefusalCount === 0) return;
+		if (
+			expiredCount === 0 &&
+			depIndexColdRefusalCount === 0 &&
+			servedPastCreationCount === 0
+		) {
+			return;
+		}
 		logLatency({
 			type: "phase",
 			phase: "lsp_workspace_diagnostics_cache_expiry",
@@ -783,6 +931,7 @@ export function createWorkspaceDiagnosticsCacheContext(
 				maxAge: expiredByReason["max-age"],
 				fileCreated: expiredByReason["file-created"],
 				depIndexColdRefusals: depIndexColdRefusalCount,
+				servedPastCreation: servedPastCreationCount,
 				sessionStartedAt: workspaceDiagnosticsCacheSessionStart(),
 				maxAgeMs: WORKSPACE_DIAGNOSTICS_FINDING_MAX_AGE_MS,
 			},
@@ -793,6 +942,7 @@ export function createWorkspaceDiagnosticsCacheContext(
 		expiredByReason["max-age"] = 0;
 		expiredByReason["file-created"] = 0;
 		depIndexColdRefusalCount = 0;
+		servedPastCreationCount = 0;
 	};
 
 	const lookup = (
@@ -826,11 +976,14 @@ export function createWorkspaceDiagnosticsCacheContext(
 		// carrying ghosts forever: the #1782 cache was rewritten hours after
 		// the entries went stale and still contained them.
 		const now = Date.now();
+		let pastCreation = false;
 		const expiry = classifyWorkspaceDiagnosticsCacheExpiry(
 			entry,
 			now,
 			workspaceDiagnosticsCacheSessionStart(),
-			fileCreatedAtFor(filePath, entry),
+			createdInScopeAt(filePath, key, entry, () => {
+				pastCreation = true;
+			}),
 		);
 		if (expiry) {
 			delete entries[key];
@@ -872,6 +1025,8 @@ export function createWorkspaceDiagnosticsCacheContext(
 			return undefined;
 		}
 		if (!isEntryFresh(filePath, entry, getImports)) return undefined;
+		if (goPackageChangedSince(key, entry.scannedAt)) return undefined;
+		if (pastCreation) servedPastCreationCount += 1;
 		return {
 			diagnostics: entry.diagnostics,
 			count: entry.count,
@@ -896,6 +1051,20 @@ export function createWorkspaceDiagnosticsCacheContext(
 			return (
 				answer !== undefined && answer.binding.boundToCurrentDisk !== false
 			);
+		},
+		noteImportScope(filePath, { targets, unresolved, complete: enumerated }) {
+			const unresolvedNames = new Set<string>();
+			let complete = enumerated;
+			for (const source of unresolved) {
+				const parts = importSourceNameParts(source);
+				if (parts.length === 0) complete = false;
+				for (const part of parts) unresolvedNames.add(part);
+			}
+			importScopes.set(cacheKeyFor(filePath), {
+				targets: new Set(targets.map(cacheKeyFor)),
+				unresolvedNames,
+				complete,
+			});
 		},
 		lookup,
 		record(
