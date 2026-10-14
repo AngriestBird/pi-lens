@@ -448,4 +448,40 @@ describe("an explicit LSP check with Opengrep switched off (#4323)", () => {
 		// exclude Opengrep.
 		expect(lsp.lastKnownDiagnostics.get(key)).toHaveLength(3);
 	});
+
+	it("still prunes an excluded server's deleted files while leaving its rows out", async () => {
+		// Recurrence: skipping an excluded client before the prune would let its
+		// deleted files' rows outlive them, for every caller that excludes it
+		// (#4391 F4). Only this read prunes, so the client itself is the witness.
+		const { normalizeMapKey } = await import("../../clients/path-utils.js");
+		const gone = path.join(workspace, "gone.json");
+		fs.writeFileSync(gone, '{"g": 7}\n');
+		await diagnose({ path: gone });
+		const opengrep = [
+			...(
+				service as unknown as {
+					state: {
+						clients: Map<
+							string,
+							{ serverId: string; getTrackedDiagnosticPaths: () => string[] }
+						>;
+					};
+				}
+			).state.clients.values(),
+		].find((client) => client.serverId === "opengrep");
+		const tracksGone = () =>
+			opengrep
+				?.getTrackedDiagnosticPaths()
+				.some((tracked) => normalizeMapKey(tracked) === normalizeMapKey(gone));
+		// The control: Opengrep is running and tracks the file before it goes.
+		expect(tracksGone()).toBe(true);
+		fs.rmSync(gone);
+
+		const all = await service!.getAllDiagnostics(new Set(["opengrep"]));
+
+		expect(tracksGone()).toBe(false);
+		expect([...all.keys()].map(normalizeMapKey)).not.toContain(
+			normalizeMapKey(gone),
+		);
+	});
 });
