@@ -1433,6 +1433,9 @@ describe("isAdvisoryCheck — every job name from a PR-triggered workflow is cla
 		// #2697 item 9: the strictness census lane (two scratch tsconfigs) is advisory.
 		"strictness (advisory)",
 		"Targeted tests (advisory)",
+		// #4363: the head-against-base latency lane. It is not a required check
+		// and keeps a truthful run conclusion, so only the suffix marks it advisory.
+		"Hot-path latency (advisory)",
 		"host latest nightly (advisory)",
 		// #4077: its tracking-issue writer job, same suffix rule.
 		"host latest notify (advisory)",
