@@ -57,6 +57,7 @@ import {
 	EXPANSION_LIMIT_LINES,
 	tryExpandRead,
 } from "./read-expansion.js";
+import { scanFileLines } from "./read-guard.js";
 import {
 	boundedIndexesForCount,
 	createReadGuardEditBatchSummary,
@@ -64,7 +65,6 @@ import {
 	logReadGuardEvent,
 } from "./read-guard-logger.js";
 import {
-	countFileLines,
 	formatAlreadyAppliedNotes,
 	getTouchedLinesForGuard,
 	relocateEditRange,
@@ -256,19 +256,6 @@ function getReadToolInput(
 ): ReadToolInput | undefined {
 	if (toolName !== "read") return undefined;
 	return input as ReadToolInput;
-}
-
-function getEffectiveReadLimit(
-	filePath: string | undefined,
-	readInput: ReadToolInput | undefined,
-): number | undefined {
-	if (!filePath || !readInput) return undefined;
-	const requestedOffset = Math.max(1, readInput.offset ?? 1);
-	const requestedLimit = readInput.limit;
-	return (
-		requestedLimit ??
-		Math.max(1, countFileLines(filePath) - requestedOffset + 1)
-	);
 }
 
 function isLspCapableFile(filePath: string): boolean {
@@ -999,7 +986,30 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 	const requestedReadOffset = Math.max(1, readInput?.offset ?? 1);
 	const requestedReadLimit = readInput?.limit;
 	let effectiveReadOffset = requestedReadOffset;
-	let effectiveReadLimit = getEffectiveReadLimit(filePath, readInput);
+	// #1649: one bounded pass serves every read-accounting consumer below: the
+	// effective limit, the expansion's line count, the read_pattern total and
+	// the provisional record's line hashes. None of them runs for an external
+	// or vendor file, so it pays nothing.
+	let readScan =
+		readInput && filePath && !isExternalOrVendor
+			? scanFileLines(
+					filePath,
+					[
+						{
+							offset: requestedReadOffset,
+							limit: requestedReadLimit ?? Number.POSITIVE_INFINITY,
+						},
+					],
+					{ count: true },
+				)
+			: undefined;
+	// An unreadable file counts one line, as countFileLines always answered.
+	let readTotalLines = readScan?.totalLines ?? 1;
+	let effectiveReadLimit =
+		readInput && filePath
+			? (requestedReadLimit ??
+				Math.max(1, readTotalLines - requestedReadOffset + 1))
+			: undefined;
 
 	// --- Opportunistic read expansion via tree-sitter ---
 	// For partial reads (small limit, not from line 1), find the enclosing
@@ -1038,16 +1048,12 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 		readInput &&
 		requestedReadLimit != null
 	) {
-		const totalLines =
-			effectiveReadLimit != null && requestedReadLimit == null
-				? effectiveReadLimit
-				: countFileLines(filePath);
 		try {
 			const expansion = await tryExpandRead(
 				filePath,
 				requestedReadOffset,
 				requestedReadLimit,
-				totalLines,
+				readTotalLines,
 				readExpansionClient,
 			);
 			if (expansion) {
@@ -1138,6 +1144,15 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 		} catch {
 			// Best-effort only.
 		}
+		// The expansion awaited tree-sitter, so the record's evidence is read
+		// again now, over the range it settled on: the capture is taken after
+		// the await, next to the FileTime stamp, as it always was.
+		readScan = scanFileLines(
+			filePath,
+			[{ offset: effectiveReadOffset, limit: effectiveReadLimit ?? 1 }],
+			{ count: true },
+		);
+		readTotalLines = readScan?.totalLines ?? 1;
 	}
 
 	// Register the host-resolved path at tool_call. This path is load-bearing for
@@ -1145,8 +1160,9 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 	// --no-read-guard. The paired tool_result adds the authoritative delivered
 	// range after the host applies EOF and output-cap clipping (#2802 probe 3).
 	if (toolName === "read" && filePath && !isExternalOrVendor) {
-		const totalLines = countFileLines(filePath);
+		const totalLines = readTotalLines;
 		const deliveredLimit = effectiveReadLimit ?? 1;
+		const lineHashes = readScan?.hashes(effectiveReadOffset, deliveredLimit);
 		logToolReadGuardEvent({
 			event: "read_pattern",
 			sessionId: runtime.telemetrySessionId,
@@ -1167,27 +1183,32 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 				expandedByTs: enclosingSymbol !== undefined,
 			},
 		});
-		runtime.readGuard.recordRead({
-			filePath,
-			requestedOffset: requestedReadOffset,
-			requestedLimit: requestedReadLimit ?? deliveredLimit,
-			effectiveOffset: effectiveReadOffset,
-			effectiveLimit: deliveredLimit,
-			expandedByLsp: enclosingSymbol !== undefined,
-			...(enclosingSymbol !== undefined && { enclosingSymbol }),
-			turnIndex: runtime.turnIndex,
-			writeIndex: runtime.peekWriteIndex(),
-			timestamp: Date.now(),
-			provisional: true,
-			// The call identity keys this capture for the tool_result that
-			// supersedes it (unique per call, nested or not). No `toolCallId`: the
-			// record showed the agent nothing yet, so no branch move may keep it.
-			// A read that errors leaves only this record, and with an identity it
-			// licensed an edit after /clone (#4185 round 1, F1).
-			...(toolCallId !== undefined && {
-				source: `native-read:${toolCallId}:provisional`,
-			}),
-		});
+		runtime.readGuard.recordRead(
+			{
+				filePath,
+				requestedOffset: requestedReadOffset,
+				requestedLimit: requestedReadLimit ?? deliveredLimit,
+				effectiveOffset: effectiveReadOffset,
+				effectiveLimit: deliveredLimit,
+				expandedByLsp: enclosingSymbol !== undefined,
+				...(enclosingSymbol !== undefined && { enclosingSymbol }),
+				turnIndex: runtime.turnIndex,
+				writeIndex: runtime.peekWriteIndex(),
+				timestamp: Date.now(),
+				provisional: true,
+				...(lineHashes && { lineHashes }),
+				// The call identity keys this capture for the tool_result that
+				// supersedes it (unique per call, nested or not). No `toolCallId`: the
+				// record showed the agent nothing yet, so no branch move may keep it.
+				// A read that errors leaves only this record, and with an identity it
+				// licensed an edit after /clone (#4185 round 1, F1).
+				...(toolCallId !== undefined && {
+					source: `native-read:${toolCallId}:provisional`,
+				}),
+			},
+			// The scan above is the disk capture; recordRead takes none of its own.
+			{ captureLineHashes: false },
+		);
 	}
 
 	// Record complexity baseline for historical tracking (booboo/tdi).

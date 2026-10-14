@@ -36,7 +36,11 @@ import {
 } from "./file-utils.js";
 import { invalidateFormatterCacheForPath } from "./formatters.js";
 import { judgeConfirmedDelete } from "./confirmed-delete.js";
-import { deliveredLineEvidence, type ReadGuard } from "./read-guard.js";
+import {
+	deliveredLineEvidence,
+	type ReadGuard,
+	scanFileLines,
+} from "./read-guard.js";
 import {
 	expectationFromToolInput,
 	noteAgentCallEnd,
@@ -80,7 +84,6 @@ import {
 	getReadGuardCorrelationId,
 	logReadGuardEvent,
 } from "./read-guard-logger.js";
-import { countFileLines } from "./read-guard-tool-lines.js";
 import type { PiLensFlagSource } from "./lens-config.js";
 import type { EditToolDetails } from "@earendil-works/pi-coding-agent";
 import type { LSPShutdownOptions } from "./lsp/client.js";
@@ -694,6 +697,26 @@ function scheduleDebounced(
 	};
 	debouncedPipelines.set(filePath, entry);
 	return promise;
+}
+
+/**
+ * #1649: whether the file's last byte is `\n`, read alone (not the whole file),
+ * so a clipped bash view of a large file pays one byte for it. A file that
+ * cannot be read has none.
+ */
+function lastByteIsNewline(filePath: string): boolean {
+	let fd: number | undefined;
+	try {
+		fd = nodeFs.openSync(filePath, "r");
+		const size = nodeFs.fstatSync(fd).size;
+		if (size === 0) return false;
+		const last = Buffer.alloc(1);
+		return nodeFs.readSync(fd, last, 0, 1, size - 1) === 1 && last[0] === 0x0a;
+	} catch {
+		return false;
+	} finally {
+		if (fd !== undefined) nodeFs.closeSync(fd);
+	}
 }
 
 function getFileStateHash(filePath: string): string {
@@ -1877,12 +1900,27 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 					};
 				}
 			)?.truncation;
-			const parsedSpans = extractReadPathsFromCommand(command, workspaceRoot);
-			let spans = parsedSpans;
-			if (
+			const clippedLines =
 				truncation?.truncated === true &&
 				typeof truncation.outputLines === "number"
-			) {
+					? truncation.outputLines
+					: undefined;
+			const clipped = clippedLines !== undefined;
+			// #1649: an unclipped view drops vendor and ignored files before their
+			// lines are counted. A clipped one keeps every span: the multi-span
+			// check below must still see a file the loop then skips, or
+			// `cat a.ts vendor.js` would credit lines of a.ts pi never showed.
+			const parsedSpans = extractReadPathsFromCommand(
+				command,
+				workspaceRoot,
+				clipped
+					? undefined
+					: (candidate) =>
+							!isExternalOrVendorFile(candidate, workspaceRoot) &&
+							!isPathIgnoredByProject(candidate, workspaceRoot, false),
+			);
+			let spans = parsedSpans;
+			if (clipped) {
 				if (parsedSpans.length === 1) {
 					const span = parsedSpans[0];
 					if (span) {
@@ -1890,13 +1928,11 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 						// convention, where a trailing newline contributes an empty final
 						// element. The host's output line count does not include that
 						// element, so remove it from the span basis before taking the tail.
-						const hasTrailingNewline = nodeFs
-							.readFileSync(span.filePath, "utf8")
-							.endsWith("\n");
+						const hasTrailingNewline = lastByteIsNewline(span.filePath);
 						const spanLineCount = hasTrailingNewline
 							? Math.max(1, span.limit - 1)
 							: span.limit;
-						const shown = Math.min(truncation.outputLines, spanLineCount);
+						const shown = Math.min(clippedLines, spanLineCount);
 						spans =
 							shown > 0
 								? [
@@ -2052,10 +2088,24 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 					  }
 					| undefined
 			)?.truncation;
-			const available = Math.max(
-				0,
-				countFileLines(deliveredFilePath) - requestedOffset + 1,
+			// #1649: one bounded pass gives the count and the delivered range's
+			// line hashes, read at the same moment the capture always was.
+			const deliveredScan = scanFileLines(
+				deliveredFilePath,
+				[
+					{
+						offset: requestedOffset,
+						limit:
+							truncation?.outputLines ??
+							requestedLimit ??
+							Number.POSITIVE_INFINITY,
+					},
+				],
+				{ count: true },
 			);
+			// An unreadable file counts one line, as countFileLines always answered.
+			const totalLines = deliveredScan?.totalLines ?? 1;
+			const available = Math.max(0, totalLines - requestedOffset + 1);
 			const deliveredLimit = Math.min(
 				available,
 				truncation?.outputLines ?? requestedLimit ?? available,
@@ -2077,7 +2127,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 					effectiveOffset: requestedOffset,
 					effectiveLimit: deliveredLimit,
 					metadata: {
-						totalLines: countFileLines(deliveredFilePath),
+						totalLines,
 						isPartial: deliveredLimit < available,
 						fileKind: detectFileKind(deliveredFilePath) ?? "unknown",
 						fractionRead:
@@ -2172,7 +2222,11 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 						: {
 								effectiveOffset: requestedOffset,
 								effectiveLimit: delivered?.lineCount ?? deliveredLimit,
-								lineHashes: delivered?.lineHashes,
+								// Unraced, the disk is what pi delivered: the scan above is
+								// the capture recordRead would otherwise take again.
+								lineHashes: raced
+									? delivered?.lineHashes
+									: deliveredScan?.hashes(requestedOffset, deliveredLimit),
 							};
 				if (evidence) {
 					const deliveredRecord = {
@@ -2194,6 +2248,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 						// The capture is keyed by this call's own identity.
 						...(toolCallId && { supersedes: { toolCallId } }),
 						stampFileTime: !raced,
+						...(!raced && { captureLineHashes: false }),
 					});
 				}
 			}

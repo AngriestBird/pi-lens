@@ -10,6 +10,7 @@
  * Falls back safely when LSP is unavailable.
  */
 
+import { constants as bufferConstants } from "node:buffer";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import { BoundedSet } from "./bounded-cache.js";
@@ -681,19 +682,156 @@ function hashLines(
 	return lines.length > 0 ? hashes : undefined;
 }
 
-function captureLineHashes(
-	filePath: string,
+/**
+ * #1649: bytes {@link scanFileLines} reads at a time. A scan holds one chunk
+ * plus the lines its ranges want, whatever the file's size.
+ */
+const SCAN_CHUNK_BYTES = 64 * 1024;
+
+/**
+ * #1649: the byte gate, checked on the open file before any byte is read.
+ * Past V8's string limit the `readFileSync(path, "utf-8")` this scan replaced
+ * threw (`ERR_STRING_TOO_LONG`, or `ERR_FS_FILE_TOO_LARGE` past 2 GiB), so
+ * every read-accounting caller took its failure answer: a line count of 1 and
+ * no hashes. The gate gives that answer without reading the file.
+ */
+const SCAN_MAX_BYTES = bufferConstants.MAX_STRING_LENGTH;
+
+/** The lines a read of `[offset, offset + limit - 1]` hashes, if any. */
+function hashedWindow(
 	offset: number,
 	limit: number,
-): Record<number, string> | undefined {
+): [number, number] | undefined {
 	if (limit <= 0 || limit > READ_HASH_MAX_LINES) return undefined;
+	const first = Math.max(1, offset);
+	const last = offset + limit - 1;
+	return last < first ? undefined : [first, last];
+}
+
+/** One pass of {@link scanFileLines}. */
+export interface FileLineScan {
+	/**
+	 * `text.split(/\r?\n/).length` of the file's UTF-8 text (1 for an empty
+	 * file). Undefined when the scan was asked not to count.
+	 */
+	readonly totalLines: number | undefined;
+	/**
+	 * The read-time line hashes of `[offset, offset + limit - 1]`, clipped at
+	 * the end of the file: undefined when `limit` is outside
+	 * `1..READ_HASH_MAX_LINES` or no line of the range exists. The range must
+	 * lie inside one the scan was given, and a range keeps at most
+	 * `READ_HASH_MAX_LINES` lines from its offset, so a scan of
+	 * `{ offset, limit: L }` answers `hashes(offset, l)` for every `l <= L`.
+	 */
+	hashes(offset: number, limit: number): Record<number, string> | undefined;
+}
+
+/**
+ * #1649: the read-accounting pass. One bounded read of the file gives its
+ * line count and the text of the lines `ranges` will hash; no other line is
+ * decoded or kept. The file is read in {@link SCAN_CHUNK_BYTES} chunks after
+ * the {@link SCAN_MAX_BYTES} gate on its size, and `count: false` stops at the
+ * end of the last range. Lines end at `\n`, less one `\r` before it, so the
+ * lines and the count are exactly `split(/\r?\n/)` of the decoded text: bytes
+ * 0x0A and 0x0D never occur inside a UTF-8 sequence, so a line decoded alone
+ * is the text the whole-file decode gave it. Undefined when the file cannot
+ * be read (a directory included) or is over the gate.
+ */
+export function scanFileLines(
+	filePath: string,
+	ranges: ReadonlyArray<{ offset: number; limit: number }>,
+	opts: { count: boolean },
+): FileLineScan | undefined {
+	// A range keeps at most READ_HASH_MAX_LINES lines from its offset: a read
+	// whose length waits on the count (an unbounded limit, or one the end of
+	// the file clips) is hashed from them.
+	const windows = ranges
+		.map((r) => hashedWindow(r.offset, Math.min(r.limit, READ_HASH_MAX_LINES)))
+		.filter((w): w is [number, number] => w !== undefined)
+		.sort((a, b) => a[0] - b[0]);
+	// Lines arrive in order, so a cursor skips every window that ended before
+	// the line; the next one by start covers it if any does.
+	let cursor = 0;
+	const wanted = (lineNo: number) => {
+		while (cursor < windows.length && windows[cursor][1] < lineNo) cursor += 1;
+		return cursor < windows.length && windows[cursor][0] <= lineNo;
+	};
+	const lastWanted = windows.reduce((max, [, last]) => Math.max(max, last), 0);
+	const done = (lineNo: number) => !opts.count && lineNo > lastWanted;
+	const lines = new Map<number, string>();
+	let fd: number | undefined;
 	try {
-		const lines = splitLines(fs.readFileSync(filePath, "utf-8"));
-		const start = Math.max(1, offset);
-		const end = Math.min(lines.length, offset + limit - 1);
-		return hashLines(lines.slice(start - 1, end), start);
+		fd = fs.openSync(filePath, "r");
+		const size = fs.fstatSync(fd).size;
+		if (size > SCAN_MAX_BYTES) return undefined;
+		// readFileSync read `size` bytes of a regular file, and read to EOF
+		// only when the size was unknown (0: a procfs file, a pipe).
+		const byteBudget = size > 0 ? size : SCAN_MAX_BYTES + 1;
+		const chunk = Buffer.allocUnsafe(Math.min(SCAN_CHUNK_BYTES, byteBudget));
+		let consumed = 0;
+		let lineNo = 1;
+		let keep = wanted(lineNo);
+		let parts: Buffer[] = [];
+		const keepLine = (dropCr: boolean) => {
+			const bytes = Buffer.concat(parts);
+			const end =
+				dropCr && bytes.length > 0 && bytes[bytes.length - 1] === 0x0d
+					? bytes.length - 1
+					: bytes.length;
+			lines.set(lineNo, bytes.toString("utf8", 0, end));
+		};
+		while (consumed < byteBudget && !done(lineNo)) {
+			const n = fs.readSync(
+				fd,
+				chunk,
+				0,
+				Math.min(chunk.length, byteBudget - consumed),
+				null,
+			);
+			if (n === 0) break;
+			consumed += n;
+			if (consumed > SCAN_MAX_BYTES) return undefined;
+			let start = 0;
+			while (!done(lineNo)) {
+				const newline = chunk.indexOf(0x0a, start);
+				if (newline === -1 || newline >= n) {
+					if (keep) parts.push(Buffer.from(chunk.subarray(start, n)));
+					break;
+				}
+				if (keep) {
+					parts.push(chunk.subarray(start, newline));
+					keepLine(true);
+				}
+				parts = [];
+				lineNo += 1;
+				keep = wanted(lineNo);
+				start = newline + 1;
+			}
+		}
+		// The text after the last newline is the last line ("" after a trailing
+		// newline), and a `\r` there is not a separator.
+		if (keep && !done(lineNo)) keepLine(false);
+		return {
+			totalLines: opts.count ? lineNo : undefined,
+			hashes(offset, limit) {
+				const window = hashedWindow(offset, limit);
+				if (!window) return undefined;
+				const shown: string[] = [];
+				for (let n = window[0]; n <= window[1] && lines.has(n); n += 1)
+					shown.push(lines.get(n) as string);
+				return hashLines(shown, window[0]);
+			},
+		};
 	} catch {
 		return undefined;
+	} finally {
+		if (fd !== undefined) {
+			try {
+				fs.closeSync(fd);
+			} catch {
+				// The descriptor is released either way.
+			}
+		}
 	}
 }
 
@@ -1163,13 +1301,19 @@ export class ReadGuard {
 			filePath,
 			lineHashes:
 				record.lineHashes ??
-				(opts?.captureLineHashes === false
+				(opts?.captureLineHashes === false ||
+				!hashedWindow(record.effectiveOffset, record.effectiveLimit)
 					? undefined
-					: captureLineHashes(
+					: scanFileLines(
 							filePath,
-							record.effectiveOffset,
-							record.effectiveLimit,
-						)),
+							[
+								{
+									offset: record.effectiveOffset,
+									limit: record.effectiveLimit,
+								},
+							],
+							{ count: false },
+						)?.hashes(record.effectiveOffset, record.effectiveLimit)),
 		};
 		const arr = this.reads.get(storedRecord.filePath) ?? [];
 		this.consumedReadFiles.delete(storedRecord.filePath);

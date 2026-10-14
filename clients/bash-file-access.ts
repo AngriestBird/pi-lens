@@ -417,13 +417,19 @@ function extractRedirectTargets(command: string): string[] {
  *   head [-n N] FILE          → lines 1..N (default 10)
  *   tail [-n N] FILE          → last N lines (default 10)
  *   sed -n 'A,Bp' FILE        → lines A..B
+ *
+ * #1649: `isRecordable` drops a file before its lines are counted, so a view
+ * of a vendor or ignored file pays no read. Each file is counted once per
+ * command (`head` and `tail` resolve a file twice).
  */
 export function extractReadPathsFromCommand(
 	command: string,
 	cwd: string,
+	isRecordable?: (abs: string) => boolean,
 ): ReadSpan[] {
 	const spans: ReadSpan[] = [];
 	const seen = new Set<string>();
+	const totals = new Map<string, number>();
 
 	const resolveFile = (
 		token: string,
@@ -435,7 +441,13 @@ export function extractReadPathsFromCommand(
 		} catch {
 			return null;
 		}
-		return { abs, total: countFileLines(abs) };
+		if (isRecordable && !isRecordable(abs)) return null;
+		let total = totals.get(abs);
+		if (total === undefined) {
+			total = countFileLines(abs);
+			totals.set(abs, total);
+		}
+		return { abs, total };
 	};
 
 	const addSpan = (token: string, start: number, count: number) => {
