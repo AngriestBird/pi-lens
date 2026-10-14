@@ -109,7 +109,9 @@ snapshots; no additional telemetry sink is created.
    displaced is another; a subagent beside a live primary writes none)
    transitions,
    `session_end_fence_rollup` (one per primary shutdown: `sources[]` with
-   `guarded` and `dropped`, plus totals). Read `read_guard_branch_retained` with
+   `guarded` and `dropped`, plus totals), `lsp_created_import_scan_rollup`
+   (one per primary shutdown when the created-module producer ran: `calls`,
+   `importers`, `targets`, `capped`, `oversized`, `totalMs`, `maxMs`). Read `read_guard_branch_retained` with
    `payloadReads`: `kept 0, dropped 0` is a missing payload when `payloadReads`
    is `null`, an empty read set at `0`, and an ignored payload when it is above
    0 beside a `payloadVersion` that is not the current one.

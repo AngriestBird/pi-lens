@@ -17,6 +17,14 @@
  *   birth unknown: {@link pathBirthtimeMs} returns `undefined` and leaves one
  *   degradation record per cause per session.
  *
+ * - #4368 r1 row 13: a file moved into place (`mv`, a rename) keeps its inode
+ *   and the inode's old birth, so it reads as older than the server that
+ *   holds a failed lookup for its path. When pi-lens saw the path absent and
+ *   later sees it present, the path was born in between: the import resolver
+ *   ({@link notePathAppeared}) reports an import that resolved to nothing and
+ *   now resolves to the path, and {@link pathBirthtimeMs} answers with that
+ *   later observation.
+ *
  * An editor or tool that replaces a file this way outside pi-lens leaves no
  * record, and its new inode reads exactly like a newly created file. Nothing
  * in a stat result tells the two apart.
@@ -24,6 +32,7 @@
 import * as fs from "node:fs";
 import { BoundedFifoMap } from "./bounded-cache.js";
 import { recordDegradationOnce } from "./degradation-ledger.js";
+import { normalizeMapKey } from "./path-utils.js";
 
 /** The stat fields a path birth is read from. */
 export type BirthStat = Pick<
@@ -50,6 +59,21 @@ const inodeKey = (stat: BirthStat): string =>
 export function noteAtomicReplace(before: BirthStat, after: BirthStat): void {
 	const birth = replacedPathBirths.get(inodeKey(before)) ?? before.birthtimeMs;
 	replacedPathBirths.set(inodeKey(after), birth);
+}
+
+/**
+ * Paths pi-lens saw absent and then present, mapped to the first observation
+ * of their presence. Bounded: an evicted record only means that path falls
+ * back to its inode's birth.
+ */
+const appearedPaths = new BoundedFifoMap<string, number>(1024);
+
+/**
+ * Record that `filePath` was absent at an earlier observation and is present
+ * now (#4368 r1 row 13), so its path was born no earlier than `atMs`.
+ */
+export function notePathAppeared(filePath: string, atMs = Date.now()): void {
+	appearedPaths.set(normalizeMapKey(filePath), atMs);
 }
 
 let birthIsCtimeAlias: boolean | undefined;
@@ -81,13 +105,29 @@ function birthTimeIsCtimeAlias(): boolean {
 export function resetPathBirthForTests(ctimeAlias?: boolean): void {
 	birthIsCtimeAlias = ctimeAlias;
 	replacedPathBirths.clear();
+	appearedPaths.clear();
 }
 
 /**
  * The birth time of the path `stat` describes, or `undefined` when this
- * process cannot know it (see the module comment).
+ * process cannot know it (see the module comment). With `filePath`, a
+ * recorded appearance of that path (`notePathAppeared`) answers when it is
+ * later than the inode's birth, or when the inode's birth is unknown.
  */
-export function pathBirthtimeMs(stat: BirthStat): number | undefined {
+export function pathBirthtimeMs(
+	stat: BirthStat,
+	filePath?: string,
+): number | undefined {
+	const appeared =
+		filePath === undefined
+			? undefined
+			: appearedPaths.get(normalizeMapKey(filePath));
+	const inode = inodeBirthtimeMs(stat);
+	if (appeared === undefined) return inode;
+	return inode === undefined ? appeared : Math.max(inode, appeared);
+}
+
+function inodeBirthtimeMs(stat: BirthStat): number | undefined {
 	if (!(stat.birthtimeMs > 0)) {
 		recordDegradationOnce({
 			kind: "lsp-file-birth-unknown",

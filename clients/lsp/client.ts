@@ -4304,7 +4304,9 @@ function watchedTypeForExisting(
 	normalizedPath: string,
 	info: BirthStat,
 ): number {
-	const birth = pathBirthtimeMs(info);
+	// #4368 r1 row 13: the path, so a module moved into place (old inode)
+	// answers with when pi-lens first saw it present.
+	const birth = pathBirthtimeMs(info, normalizedPath);
 	if (birth === undefined) return FILE_CHANGED;
 	if (watchedTypeForOpen(birth, state.startedAtMs) !== FILE_CREATED) {
 		return FILE_CHANGED;

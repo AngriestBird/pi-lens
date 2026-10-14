@@ -30,8 +30,8 @@ was created in the session.
   full build with `b.ts` missing, create it, update with only `[b.ts]`, then
   read the importers of `b.ts` from the graph.
   - Control: a fresh full build lists `src/a.ts` as an importer.
-  - The incremental update must list the same. It does not before #4346: the
-    scenario prints `KNOWN` while it is empty and `XPASS` when #4346 lands.
+  - The incremental update must list the same: the update reparses the
+    importers a created file answers (#4346).
 
 Evidence in `$EVIDENCE/review-graph-<variant>-<stamp>-<pid>/`: `steps.json` (importer lists
 per build), `mcp-wire.jsonl` for the MCP variant, `summary.json`.

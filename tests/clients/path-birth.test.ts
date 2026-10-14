@@ -16,6 +16,7 @@ import {
 } from "../../clients/degradation-ledger.js";
 import {
 	noteAtomicReplace,
+	notePathAppeared,
 	pathBirthtimeMs,
 	resetPathBirthForTests,
 } from "../../clients/path-birth.js";
@@ -93,4 +94,37 @@ describe("pathBirthtimeMs (#4320)", () => {
 			expect(birthRecords()).toBeUndefined();
 		},
 	);
+});
+
+// #4368 r1 row 13: a module moved into place keeps an inode born before the
+// server, so the inode's birth reads as old and the server never hears
+// Created. A recorded appearance of the PATH (the resolver saw an import
+// resolve to nothing, then to it) answers instead.
+describe("pathBirthtimeMs with a recorded appearance (#4368 r1 row 13)", () => {
+	const moved = path.resolve("moved_module.py");
+	beforeEach(() => {
+		resetPathBirthForTests(false);
+		resetDegradationLedger();
+	});
+	afterEach(() => {
+		resetPathBirthForTests();
+		resetDegradationLedger();
+	});
+
+	it("answers the appearance when it is later than the inode's birth", () => {
+		notePathAppeared(moved, 20_000);
+		expect(pathBirthtimeMs(stat(1, 7, 5_000), moved)).toBe(20_000);
+		expect(pathBirthtimeMs(stat(1, 7, 5_000))).toBe(5_000);
+		expect(pathBirthtimeMs(stat(1, 7, 5_000), `${moved}.other`)).toBe(5_000);
+	});
+
+	it("keeps the inode's birth when the appearance is older", () => {
+		notePathAppeared(moved, 1_000);
+		expect(pathBirthtimeMs(stat(1, 7, 5_000), moved)).toBe(5_000);
+	});
+
+	it("answers the appearance when the inode's birth is unknown", () => {
+		notePathAppeared(moved, 20_000);
+		expect(pathBirthtimeMs(stat(1, 7, 0), moved)).toBe(20_000);
+	});
 });

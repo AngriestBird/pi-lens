@@ -2177,7 +2177,10 @@ const HELPER_EXEMPTION_REASON =
 const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	"clients/actionable-warnings.ts": 14,
 	"clients/ast-grep-client.ts": 15,
-	"clients/blocker-freshness.ts": 13,
+	// #4346: 13 -> 14. `extractForwardImportPaths` awaits its memoized parse
+	// (`forwardImportSources`) before resolving; the parse's own two awaits
+	// moved with it unchanged.
+	"clients/blocker-freshness.ts": 14,
 	"clients/bootstrap.ts": 23,
 	// #3274: `readCacheAsync`'s two `await readJsonCacheAsync(...)` — the meta
 	// envelope and then the data — which are the whole point of the method: the
@@ -2447,7 +2450,10 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// to the session-scope hand-off (`adoptHandoff`, below).
 	"clients/read-guard-branch.ts": 3,
 	"clients/recent-touches.ts": 8,
-	"clients/review-graph/builder.ts": 41,
+	// #4346: 41 -> 42. `updateGraphFiles` re-extracts each importer a newly
+	// created file resolves, the same per-file extraction await its update
+	// loop already pins.
+	"clients/review-graph/builder.ts": 42,
 	"clients/safe-spawn.ts": 9,
 	// #3612: `adoptHandoff` awaits the own and parent sidecar loads and each
 	// store's restore: the session_start sidecar I/O that read-guard-branch.ts

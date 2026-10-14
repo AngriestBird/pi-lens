@@ -635,6 +635,13 @@ export type DegradationKind =
 	 */
 	| "lsp-covers-unvalidated"
 	/**
+	 * #4346: a diagnostics call resolved the imports of only the first
+	 * `CREATED_IMPORT_SCAN_MAX_FILES` finding-bearing files, so a module the
+	 * rest import, created outside pi-lens, may not reach a server that caches
+	 * a failed lookup. Subject is `capped`. Once per session.
+	 */
+	| "lsp-created-import-scan-incomplete"
+	/**
 	 * `loadWebTreeSitter()` (clients/deps/web-tree-sitter.js) rejected during
 	 * MODULE EVALUATION, not resolution (#1592). Node's ESM loader permanently
 	 * memoizes a module record that threw while evaluating, so re-importing

@@ -42,10 +42,9 @@ asserts them.
   Same checks, in the same call. This is the order the cache lookup used to get
   wrong (#4344 r1 F1). Directory scopes sort paths, so layout decides the order.
 - **Goal, `importer-only`: the module appears behind pi-lens and only the
-  importer is re-checked.** No path ever opens the module, so no Created is
-  sent. The importer staying stale is the known residual #4346: the scenario
-  prints `KNOWN` while it is stale and `XPASS` once it clears. `XPASS` means the
-  issue's acceptance holds: say so in the report.
+  importer is re-checked.** No path ever opens the module. The call resolves
+  the importer's own imports and announces the module as Created before it
+  answers (#4346), so the importer must be clean on that call.
 - **Goal, `replay`: edit an unrelated file, then re-check the findings.**
   - Timing: the replay after the edit is within `max(5 x warm replay, 150 ms)`.
     A spurious Created drops every finding-bearing entry (measured on #4344: 6 ms

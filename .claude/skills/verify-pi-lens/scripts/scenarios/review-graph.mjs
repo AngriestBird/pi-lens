@@ -103,10 +103,9 @@ async function builderIncremental(ctx) {
 		fresh.includes(IMPORTER),
 		JSON.stringify(fresh),
 	);
-	ctx.expectKnown(
+	ctx.expect(
 		"the incremental update has the same importer edge",
 		incremental.includes(IMPORTER),
-		"#4346",
 		JSON.stringify(incremental),
 	);
 }

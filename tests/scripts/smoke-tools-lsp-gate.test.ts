@@ -5,8 +5,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	classifyLspGateResult,
 	classifyOfficialDockerGateResult,
+	LSP_FIXTURES,
+	runCreatedModuleWitness,
 	runLspGate,
 } from "../../scripts/smoke-tools.mjs";
+import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 
 const { safeSpawnAsync } = vi.hoisted(() => ({ safeSpawnAsync: vi.fn() }));
 vi.mock("../../clients/safe-spawn.js", async (importOriginal) => ({
@@ -246,5 +249,119 @@ describe("smoke-tools --lsp-gate census admission (#3309)", () => {
 		const context = deps.adoptProjectTrustFromContext.mock.calls[0][0];
 		expect(context).toEqual({ isProjectTrusted: expect.any(Function) });
 		expect(context.isProjectTrusted()).toBe(true);
+	});
+});
+
+// #4320/#4346: the witness's verdicts, through its real entry with a scripted
+// language-server answer (the server is the process boundary; the nightly
+// runs it against pyright). A witness that cannot red, or that passes when the
+// missing import was never reported, would be a vacuous nightly row.
+describe("smoke-tools created-module witness (#4320/#4346)", () => {
+	const python = LSP_FIXTURES.find(
+		(fixture) =>
+			fixture.lang === "python" &&
+			(fixture as { createdModuleWitness?: unknown }).createdModuleWitness,
+	);
+
+	async function witness(reports: (call: number, name: string) => boolean) {
+		const workspace = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-created-witness-"),
+		);
+		tempHomes.push(workspace);
+		const calls: string[] = [];
+		const execute = vi.fn(async (_id: string, params: { path: string }) => {
+			const source = fs.readFileSync(params.path, "utf8");
+			const name = /import (\w+)/.exec(source)?.[1] ?? "";
+			calls.push(name);
+			const missing = reports(
+				calls.filter((entry) => entry === name).length,
+				name,
+			);
+			return {
+				content: [
+					{ text: missing ? `Import "${name}" could not be resolved` : "ok" },
+				],
+			};
+		});
+		const touchFile = vi.fn(async () => undefined);
+		const rows = await runCreatedModuleWitness(python, {
+			workspace,
+			execute,
+			getLSPService: () => makeLspServiceDouble({ touchFile }),
+		});
+		return { rows, touchFile, workspace };
+	}
+
+	it("passes both cases when the missing import clears on the next call", async () => {
+		const { rows, touchFile } = await witness((call) => call === 1);
+		expect(rows.map((row) => row.state)).toEqual(["pass", "pass"]);
+		// The pi write case syncs the module through the service; the outside
+		// case never does.
+		expect(touchFile).toHaveBeenCalledOnce();
+	});
+
+	it("reds a case whose importer still reports the created module", async () => {
+		const { rows } = await witness(() => true);
+		expect(rows.map((row) => row.state)).toEqual(["fail", "fail"]);
+		expect(rows[1].detail).toContain("still reports");
+	});
+
+	it("runs inside the clean gate and counts its red", async () => {
+		const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-gate-census-"));
+		const workspace = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-created-witness-gate-"),
+		);
+		tempHomes.push(home, workspace);
+		process.env.PI_LENS_HOME = home;
+		fs.writeFileSync(
+			path.join(home, "lsp-handshake-census.json"),
+			JSON.stringify({ python: { state: "pass" } }),
+		);
+		const output: string[] = [];
+		vi.spyOn(console, "log").mockImplementation((...args) =>
+			output.push(args.join(" ")),
+		);
+		// Every call reports one primary finding, the module included: the
+		// clean gate passes and the witness's importer never clears.
+		const execute = vi.fn(async (_id: string, params: { path: string }) => {
+			const name = /import (\w+)/.exec(
+				fs.readFileSync(params.path, "utf8"),
+			)?.[1];
+			return {
+				details: { totalDiagnostics: 1, primaryDiagnosticsCount: 1 },
+				content: [{ text: `Import "${name}" could not be resolved` }],
+			};
+		});
+		fs.writeFileSync(path.join(workspace, "bad.py"), "import os\n");
+		const failures = await runLspGate({
+			langs: ["python"],
+			install: false,
+			verbose: false,
+			deps: {
+				population: { eligible: [python], gated: [python], exempt: [] },
+				ensureTool: vi.fn(async () => "/mock/tool"),
+				getInstallAttempt: vi.fn(),
+				initLSPConfig: vi.fn(async () => undefined),
+				bootstrapFixtureWorkspace: vi.fn(async () => ({
+					workspace,
+					absFile: path.join(workspace, "bad.py"),
+					cleanup: vi.fn(),
+				})),
+				createLspDiagnosticsTool: () => ({ execute }),
+				adoptProjectTrustFromContext: vi.fn(),
+				getLSPService: () => makeLspServiceDouble(),
+			},
+		});
+
+		expect(output.join("\n")).toContain("LSP created-module witness");
+		expect(failures).toBe(2);
+	});
+
+	it("reds a case whose missing import was never reported first", async () => {
+		const { rows } = await witness(() => false);
+		expect(rows.map((row) => row.detail)).toEqual([
+			expect.stringContaining("precondition"),
+			expect.stringContaining("precondition"),
+		]);
 	});
 });

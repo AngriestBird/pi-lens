@@ -84,11 +84,11 @@ export async function run(ctx, variant) {
 
 	if (variant === "importer-only") {
 		const after = await check(ctx, [IMPORTER], "after: importer only");
-		// No producer reports a file created behind pi-lens's back.
-		ctx.expectKnown(
+		// #4346: the importer's own imports name the module, so the call
+		// announces it as Created before it answers.
+		ctx.expect(
 			"importer-only: the importer is clean",
 			!MISSING.test(after.text),
-			"#4346",
 		);
 		return;
 	}

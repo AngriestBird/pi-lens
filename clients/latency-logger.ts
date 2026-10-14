@@ -153,6 +153,9 @@ let recentPhases: Array<{ phase: string; ts: string }> = [];
  * decision and rollup rows written inside the session transition that owns any
  * real stall. `format_late_resync_chained` marks a formatter give-up and its
  * `durationMs` is the formatter's age at the give-up, not work of its own.
+ *
+ * #4368 r1 F3: `lsp_created_import_scan_rollup` is a zero-duration session-end
+ * rollup of the created-module producer.
  */
 const LAST_PHASE_EXCLUDED = new Set([
 	"loop_block",
@@ -189,6 +192,7 @@ const LAST_PHASE_EXCLUDED = new Set([
 	"session_store_action",
 	"session_end_fence_rollup",
 	"format_late_resync_chained",
+	"lsp_created_import_scan_rollup",
 ]);
 
 /**

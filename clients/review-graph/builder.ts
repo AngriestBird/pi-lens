@@ -4824,12 +4824,16 @@ async function addFileToGraph(
  * removing edges; batching keeps a high-fan-in bucket linear instead of
  * rescanning its prefix for every edge. They are the count-based signal the
  * issue asks for, because wall time on this hardware is IO-noisy (#1920).
+ * #4346: `createdImportResolutions` counts the imports `importersResolvingTo`
+ * resolves after a creation; its name filter keeps that to the imports that
+ * name a created file's stem or directory, not every import in the graph.
  */
 const _rebuildCounters = {
 	restoreComparisons: 0,
 	importTargetEdgeScans: 0,
 	removeOwnedEdgeVisits: 0,
 	removeOwnedEdgePositions: 0,
+	createdImportResolutions: 0,
 };
 
 export function _getReviewGraphRebuildCountersForTests(): {
@@ -4837,6 +4841,7 @@ export function _getReviewGraphRebuildCountersForTests(): {
 	importTargetEdgeScans: number;
 	removeOwnedEdgeVisits: number;
 	removeOwnedEdgePositions: number;
+	createdImportResolutions: number;
 } {
 	return { ..._rebuildCounters };
 }
@@ -4846,6 +4851,7 @@ export function _resetReviewGraphRebuildCountersForTests(): void {
 	_rebuildCounters.importTargetEdgeScans = 0;
 	_rebuildCounters.removeOwnedEdgeVisits = 0;
 	_rebuildCounters.removeOwnedEdgePositions = 0;
+	_rebuildCounters.createdImportResolutions = 0;
 }
 
 /**
@@ -4970,6 +4976,63 @@ function importTargetsForFile(graph: ReviewGraph, filePath: string): string[] {
 	return [...targets].sort((a, b) => compareOrdinal(a, b));
 }
 
+/**
+ * #4346: the graph's importers whose unresolved import (an `imports` edge to a
+ * `module:` or `external:` placeholder) now resolves to a file in `created`,
+ * through the resolver a full build uses for the importer's language. A cheap
+ * name test runs first: a placeholder is resolved only when a part of its
+ * source equals a created file's stem or its directory's name, so a new
+ * `os.py` resolves the placeholders that name `os`, never every external.
+ * C and C++ includes leave no placeholder, so they are not found here.
+ */
+function importersResolvingTo(
+	graph: ReviewGraph,
+	cwd: string,
+	created: ReadonlySet<string>,
+	ignoredIds?: ReadonlySet<string>,
+): string[] {
+	const names = new Set<string>();
+	for (const file of created) {
+		names.add(path.basename(file).split(".")[0] ?? "");
+		names.add(path.basename(path.dirname(file)));
+	}
+	names.delete("");
+	const importers = new Set<string>();
+	for (const node of graph.nodes.values()) {
+		if (node.kind !== "module" && node.kind !== "external") continue;
+		const source = node.metadata?.source;
+		if (typeof source !== "string") continue;
+		if (!source.split(/[^\w$-]+/).some((part) => names.has(part))) continue;
+		for (const edge of graph.edgesByTo.get(node.id) ?? []) {
+			if (edge.kind !== "imports") continue;
+			const importer = graph.nodes.get(edge.from);
+			const importerPath = importer?.filePath;
+			if (!importer || !importerPath || importers.has(importerPath)) continue;
+			_rebuildCounters.createdImportResolutions++;
+			const targets =
+				importer.language === "jsts"
+					? [localImportToFile(cwd, importerPath, source, ignoredIds)]
+					: resolveImportToFiles(
+							cwd,
+							importerPath,
+							importer.language ?? "",
+							source,
+						);
+			if (
+				targets.some(
+					(target) =>
+						target !== undefined &&
+						!ignoredIds?.has(target) &&
+						created.has(normalizeMapKey(target)),
+				)
+			) {
+				importers.add(importerPath);
+			}
+		}
+	}
+	return [...importers];
+}
+
 async function updateGraphFiles(
 	graph: ReviewGraph,
 	cwd: string,
@@ -5003,6 +5066,37 @@ async function updateGraphFiles(
 			...removeFileOwnedGraphData(graph, file, removedEdges),
 		);
 		await addFileToGraph(graph, cwd, file, ignoredIds);
+	}
+	// #4346: a file new to the graph can resolve an import another file left
+	// unresolved, and only that importer's own parse adds the edge a full build
+	// has. Reparse each such importer in this same pass, so the returned delta
+	// (and the reverse-dependency index patched from it) carries the edge.
+	const created = new Set(
+		prior
+			.filter((entry) => !entry.existedBefore)
+			.map((entry) => entry.filePath)
+			.filter((file) => graph.fileNodes.has(file)),
+	);
+	if (created.size > 0) {
+		const batch = new Set(prior.map((entry) => entry.filePath));
+		for (const importer of importersResolvingTo(
+			graph,
+			cwd,
+			created,
+			ignoredIds,
+		)) {
+			if (batch.has(importer)) continue;
+			batch.add(importer);
+			prior.push({
+				filePath: importer,
+				existedBefore: true,
+				priorTargets: importTargetsForFile(graph, importer),
+			});
+			preservedIncoming.push(
+				...removeFileOwnedGraphData(graph, importer, removedEdges),
+			);
+			await addFileToGraph(graph, cwd, importer, ignoredIds);
+		}
 	}
 	if (removedEdges.size > 0) {
 		unindexEdges(graph, removedEdges);

@@ -61,6 +61,9 @@ export interface LspFixture {
 	/** The one fixture the nightly `lens_diagnostics mode=full` row drives
 	 *  (#2780), mirroring `lspGate`. */
 	lensFull?: boolean;
+	/** #4320/#4346: the created-module witness the clean gate runs on this
+	 *  fixture once its server is up (`runCreatedModuleWitness`). */
+	createdModuleWitness?: CreatedModuleWitness;
 	lombokJar?: boolean;
 	expectNoMessageMatch?: string;
 	/** A diagnostic message that MUST arrive. The lane's default verdict passes
@@ -160,6 +163,24 @@ export function classifyOfficialDockerGateResult(
 	buildxAvailable: boolean,
 	expectedCode?: string,
 ): { state: "pass" | "skip" | "fail"; detail: string; diags: number };
+/** How a fixture's server reports an import the witness creates (#4346). */
+export interface CreatedModuleWitness {
+	ext: string;
+	importerText: (name: string) => string;
+	moduleText: string;
+	reportsMissing: (text: string, name: string) => boolean;
+}
+/** Create a module through pi-lens's write path and from outside it; one row
+ *  per case, failing while the importer still reports it (#4320/#4346). */
+export function runCreatedModuleWitness(
+	fixture: LspFixture | undefined,
+	options: {
+		workspace: string;
+		execute: (...args: never[]) => Promise<unknown>;
+		/** The LSP service whose `touchFile` syncs the pi-written module. */
+		getLSPService: () => unknown;
+	},
+): Promise<SmokeRow[]>;
 /** Run the production LSP clean-gate layer, optionally with test seams. */
 export function runLspGate(options?: {
 	langs?: string[];
