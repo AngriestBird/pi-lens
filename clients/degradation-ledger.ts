@@ -730,7 +730,7 @@ export type DegradationKind =
 	 * (older host, unexpected shape) never reaches this kind.
 	 */
 	| "lsp-nav-request-timeout"
-	/** A workspace diagnostics cache was rejected during the v3 provenance migration (#2776). */
+	/** A workspace diagnostics cache was rejected by a version migration (#2776's v3 provenance, #4322's v4). */
 	| "lsp-notify-inflight-stall"
 	/**
 	 * A tool-event path did not resolve to an existing file, and pi's own

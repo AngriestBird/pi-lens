@@ -132,7 +132,7 @@ describe("loadWorkspaceDiagnosticsCache / saveWorkspaceDiagnosticsCache (#671)",
 
 	it("fails open on a v2 cache so provenance-less diagnostics are re-collected (#2776)", () => {
 		saveWorkspaceDiagnosticsCache(tmp, {
-			version: WORKSPACE_DIAGNOSTICS_CACHE_VERSION - 1,
+			version: 2,
 			entries: { "/a.ts": makeEntry() },
 		});
 		// Old records still parse safely, but the strict cache consumer refuses
@@ -154,7 +154,7 @@ describe("loadWorkspaceDiagnosticsCache / saveWorkspaceDiagnosticsCache (#671)",
 		expect(loadWorkspaceDiagnosticsCache(tmp)).toBeUndefined();
 	});
 
-	it("rejects only a v3 entry whose diagnostic lacks serverId (#2776)", () => {
+	it("rejects only a current-version entry whose diagnostic lacks serverId (#2776)", () => {
 		saveWorkspaceDiagnosticsCache(tmp, {
 			version: WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
 			entries: {
@@ -1396,7 +1396,7 @@ describe("runWorkspaceDiagnostics cache integration (#671)", () => {
 		fs.writeFileSync(file, "const z = 1;\n");
 		const stat = fs.statSync(file);
 		saveWorkspaceDiagnosticsCache(tmpSweep, {
-			version: WORKSPACE_DIAGNOSTICS_CACHE_VERSION - 1,
+			version: 2,
 			entries: {
 				[cacheKeyFor(file)]: {
 					diagnostics: [

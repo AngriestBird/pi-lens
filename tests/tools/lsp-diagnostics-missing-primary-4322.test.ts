@@ -19,9 +19,17 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+	flushLatencyLog,
+	getLatencyLogPath,
+} from "../../clients/latency-logger.js";
+import {
 	resetProjectTrust,
 	setProjectTrustState,
 } from "../../clients/project-trust.js";
+import {
+	getFileDiagnostics,
+	reconcileScanDiagnostics,
+} from "../../clients/widget-state.js";
 import {
 	cleanupTestEnvironmentsDrained,
 	setupTestEnvironment,
@@ -38,6 +46,56 @@ const workspace = fs.realpathSync(env.tmpDir);
 const probe = path.join(workspace, "probe.json");
 const secondProbe = path.join(workspace, "second.json");
 const TYPOS_FINDING = "typos stand-in finding";
+
+type LatencyRow = {
+	phase?: string;
+	filePath?: string;
+	metadata?: Record<string, unknown>;
+};
+
+/**
+ * Runs `work` with the latency sink on: `logLatency` writes nothing in test
+ * mode (`isTestMode`, read live), and this case reads the record it writes.
+ */
+async function withLatencySink<T>(work: () => Promise<T>): Promise<T> {
+	const saved = process.env.PI_LENS_TEST_MODE;
+	process.env.PI_LENS_TEST_MODE = "0";
+	try {
+		return await work();
+	} finally {
+		if (saved === undefined) delete process.env.PI_LENS_TEST_MODE;
+		else process.env.PI_LENS_TEST_MODE = saved;
+	}
+}
+
+/** The real latency sink's lines, after a flush. */
+async function latencyLines(): Promise<string[]> {
+	await flushLatencyLog();
+	const logPath = getLatencyLogPath();
+	return fs.existsSync(logPath)
+		? fs.readFileSync(logPath, "utf8").split("\n").filter(Boolean)
+		: [];
+}
+
+/** `phase` rows for `file` from line `from` on, so earlier cases' rows are
+ *  never read as this case's evidence. */
+async function latencyRows(
+	phase: string,
+	file: string,
+	from: number,
+): Promise<LatencyRow[]> {
+	const name = path.basename(file).toLowerCase();
+	return (await latencyLines())
+		.slice(from)
+		.map((line) => JSON.parse(line) as LatencyRow)
+		.filter(
+			(row) =>
+				row.phase === phase &&
+				String(row.filePath ?? "")
+					.toLowerCase()
+					.endsWith(name),
+		);
+}
 
 async function diagnose(
 	serverScope: "primary" | "all",
@@ -135,7 +193,8 @@ describe("a JSON file whose language server cannot start (#4322)", () => {
 		// Invalid JSON that typos answers clean for.
 		fs.writeFileSync(probe, '{"fake-lsp-clean": }\n');
 
-		const result = await diagnose("all");
+		const from = (await latencyLines()).length;
+		const result = await withLatencySink(() => diagnose("all"));
 
 		expect(result.details.unconfirmed).toBe(true);
 		expect(result.details.primaryUnavailable).toContain("Primary LSP (json)");
@@ -143,6 +202,18 @@ describe("a JSON file whose language server cannot start (#4322)", () => {
 		expect(result.text).not.toContain("confirmed clean");
 		// A server that never started is not a check that ran out of time.
 		expect(result.details.timedOut).not.toBe(true);
+		// The touch's own record names the reason and the server (real sink).
+		expect(
+			(await latencyRows("lsp_touch_file", probe, from)).map(
+				(row) => row.metadata,
+			),
+		).toContainEqual(
+			expect.objectContaining({
+				inconclusive: true,
+				inconclusiveReason: "primary-unavailable",
+				inconclusiveServerIds: ["json"],
+			}),
+		);
 	}, 30_000);
 
 	it("names the missing language server in a batch check", async () => {
@@ -169,11 +240,16 @@ describe("a JSON file whose language server cannot start (#4322)", () => {
 		expect(result.text).toContain("Primary LSP (json): not available");
 	}, 30_000);
 
-	it("does not retire a language-server blocker on typos' finding alone", async () => {
+	it("does not retire a language-server blocker or replace its footer rows on typos' finding alone", async () => {
 		// typos' finding is not blocking, so an answer taken as the file's
 		// current view would read as "nothing blocking here, the LSP checked it".
 		fs.writeFileSync(probe, '{"probe": }\n');
 		const retired: string[][] = [];
+		// The footer holds the JSON server's last answer for this file.
+		const lastAnswer = [
+			{ severity: "error", message: "JSON server's last answer", tool: "lsp" },
+		];
+		expect(reconcileScanDiagnostics(probe, lastAnswer, true)).toBe(true);
 
 		const result = await diagnose("all", { path: probe }, (info) =>
 			retired.push(info.coveredSources),
@@ -181,6 +257,10 @@ describe("a JSON file whose language server cannot start (#4322)", () => {
 
 		expect(result.details.auxiliaryDiagnosticsCount).toBe(1);
 		expect(retired).toEqual([]);
+		// typos' rows alone do not replace the footer's language-server rows.
+		expect(getFileDiagnostics(probe)?.map((d) => d.message)).toEqual([
+			"JSON server's last answer",
+		]);
 	}, 30_000);
 
 	it("names the missing language server in a batch that shows typos' findings", async () => {
@@ -226,7 +306,8 @@ describe("a JSON file whose language server cannot start (#4322)", () => {
 	it("does not report the primary-only check clean when no language server ran", async () => {
 		fs.writeFileSync(probe, '{"fake-lsp-clean":"valid"}\n');
 
-		const result = await diagnose("primary");
+		const from = (await latencyLines()).length;
+		const result = await withLatencySink(() => diagnose("primary"));
 
 		expect(result.details.unconfirmed).toBe(true);
 		expect(result.text).toContain("Primary LSP (json): not available");
@@ -240,6 +321,12 @@ describe("a JSON file whose language server cannot start (#4322)", () => {
 			}
 		).getDiagnosticsHealth(probe);
 		expect(health?.unavailablePrimaryServerIds).toEqual(["json"]);
+		// ...and so does the fallback read's own record (real sink).
+		expect(
+			(await latencyRows("lsp_diagnostics_aggregate", probe, from)).map(
+				(row) => row.metadata?.unavailablePrimaryServerIds,
+			),
+		).toContainEqual(["json"]);
 	}, 30_000);
 
 	it("pi's write-time LSP runner does not report the file as checked clean", async () => {
