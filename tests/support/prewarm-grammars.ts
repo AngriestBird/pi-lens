@@ -49,19 +49,16 @@ export const PREFETCH_TIMEOUT_MS = 30_000;
 
 type FetchOutcome = "ok" | "timeout" | "download failed";
 
+/**
+ * The bound is an `AbortSignal` handed to the download, not a raw timer: a
+ * stalled response is aborted by the runtime, and the fetch then reports the
+ * failure through the same retryable path as any other.
+ */
 async function fetchBounded(filename: string): Promise<FetchOutcome> {
-	let timer: NodeJS.Timeout | undefined;
-	const stalled = new Promise<FetchOutcome>((resolve) => {
-		timer = setTimeout(() => resolve("timeout"), PREFETCH_TIMEOUT_MS);
-	});
-	const landed = downloadGrammar(grammarsDir, filename).then(
-		(ok): FetchOutcome => (ok ? "ok" : "download failed"),
-	);
-	try {
-		return await Promise.race([landed, stalled]);
-	} finally {
-		clearTimeout(timer);
-	}
+	const signal = AbortSignal.timeout(PREFETCH_TIMEOUT_MS);
+	const ok = await downloadGrammar(grammarsDir, filename, signal);
+	if (ok) return "ok";
+	return signal.aborted ? "timeout" : "download failed";
 }
 
 export default async function setup(): Promise<void> {

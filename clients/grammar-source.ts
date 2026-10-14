@@ -528,11 +528,12 @@ function shortHash(hash: string): string {
 export async function downloadGrammarDetailed(
 	destDir: string,
 	filename: string,
+	signal?: AbortSignal,
 ): Promise<GrammarDownloadResult> {
 	if (isVendoredGrammar(filename)) return vendoredGrammarRefusal(filename);
 	try {
 		fs.mkdirSync(destDir, { recursive: true });
-		const res = await fetch(grammarSourceUrl(filename));
+		const res = await fetch(grammarSourceUrl(filename), { signal });
 		if (!res.ok) {
 			// 404/410: the CDN has authoritatively answered "this wasm does not
 			// exist at this URL" — a retry hits the same answer. Every other
@@ -608,6 +609,7 @@ export async function downloadGrammarDetailed(
 export async function downloadGrammar(
 	destDir: string,
 	filename: string,
+	signal?: AbortSignal,
 ): Promise<boolean> {
-	return (await downloadGrammarDetailed(destDir, filename)).ok;
+	return (await downloadGrammarDetailed(destDir, filename, signal)).ok;
 }
