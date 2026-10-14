@@ -225,6 +225,30 @@ describe("an explicit LSP check with Opengrep switched off (#4323)", () => {
 		expect(confirmed.map((info) => info.coveredSources)).toEqual([["lsp"]]);
 	});
 
+	it("says a switched-off Opengrep did not run instead of reporting no findings", async () => {
+		// Recurrence: "No auxiliary findings." read like a scanner result when
+		// Opengrep was never started (#4391 F8).
+		const result = await diagnose({ path: probe }, noOpengrep);
+
+		expect(result.text).toBe(
+			"Primary LSP (json): confirmed clean.\n\n" +
+				"No auxiliary findings. Switched off, not run: opengrep.",
+		);
+	});
+
+	it("keeps the plain no-findings line when no auxiliary was asked", async () => {
+		// A primary-only check never asks Opengrep, switched off or not, so the
+		// switch adds nothing to say.
+		const result = await diagnose(
+			{ path: probe, serverScope: "primary" },
+			noOpengrep,
+		);
+
+		expect(result.text).toBe(
+			"Primary LSP (json): confirmed clean.\n\nNo auxiliary findings.",
+		);
+	});
+
 	it("does not start Opengrep for a batch check", async () => {
 		const confirmed: ConfirmedNoBlockers[] = [];
 		const result = await diagnose(

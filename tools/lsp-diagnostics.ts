@@ -1776,12 +1776,26 @@ async function runFileDiagnostics(
 	// (AGENTS.md shape 10). Bounded: one line per call, whatever the count.
 	const suppressedLine = dispositionSuppressedLine(policy.suppressed);
 
+	// #4323 (#4391 F8): an auxiliary the operator turned off never ran, so a bare
+	// "No auxiliary findings." would read like a scanner result. Name it. A
+	// primary-only check never asks an auxiliary, so it keeps the plain line.
+	const switchedOffServerIds =
+		serverScope === "all" && excludeServerIds && excludeServerIds.size > 0
+			? getServersForFileWithConfig(absPath).flatMap((server) =>
+					excludeServerIds.has(server.id) ? [server.id] : [],
+				)
+			: [];
+	const noAuxiliaryLine =
+		switchedOffServerIds.length > 0
+			? `No auxiliary findings. Switched off, not run: ${switchedOffServerIds.join(", ")}.`
+			: "No auxiliary findings.";
+
 	let text: string;
 	if (total === 0) {
 		text = [
 			primaryLine,
 			"",
-			unavailable ?? "No auxiliary findings.",
+			unavailable ?? noAuxiliaryLine,
 			...(coverageLine ? [coverageLine] : []),
 			...(suppressedLine ? [suppressedLine] : []),
 		].join("\n");
