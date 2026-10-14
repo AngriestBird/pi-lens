@@ -511,19 +511,52 @@ export function admitProjectSuppliedTsserver(
 		(!projectSupplied || (projectCodeAllowed && trust === "trusted"))
 	)
 		return tsserverPath;
+	if (!tsserverPath) {
+		recordUnresolvedTypeScriptCompiler(cwd, trust);
+		return undefined;
+	}
 	recordUntrustedLspExecution(
 		{
 			kind: "project-local-binary",
-			command: tsserverPath ?? "tsserver.js",
-			resolvedCommand: tsserverPath ?? "tsserver.js",
+			command: tsserverPath,
+			resolvedCommand: tsserverPath,
 			cwd,
-			reason: tsserverPath
-				? "LSP execution refused: project compiler requires trusted session ownership"
-				: "LSP execution refused: no admitted absolute TypeScript compiler",
+			reason:
+				"LSP execution refused: project compiler requires trusted session ownership",
 		},
 		trust,
 	);
 	return undefined;
+}
+
+/**
+ * #4414: no admitted absolute compiler is a resolution miss, not a trust
+ * refusal (a trusted project with only a PATH `tsc` was told to "mark the
+ * project trusted"). The ledger row is per root per generation. The warn shares
+ * `unknownProjectLocalNoticeGeneration` with the trust notice, so a generation
+ * prints one notice: a genuine trust refusal is never followed by this one.
+ */
+function recordUnresolvedTypeScriptCompiler(
+	cwd: string,
+	trust: ReturnType<typeof getProjectTrustState>,
+): void {
+	const generation = getDegradationLedgerGeneration();
+	recordDegradationOnce({
+		kind: "lsp-registry-decision",
+		subject: `typescript-compiler:g${generation}:${cwd}`,
+		reason:
+			"LSP not started: no absolute TypeScript compiler (tsserver.js) was resolved",
+		metadata: { field: "typescript-compiler", trust },
+	});
+	if (unknownProjectLocalNoticeGeneration === generation) return;
+	unknownProjectLocalNoticeGeneration = generation;
+	logExtension({
+		subsystem: "lsp-registry",
+		level: "warn",
+		message:
+			"TypeScript language server not started: no absolute TypeScript compiler (tsserver.js) could be resolved; install typescript in the project or let pi-lens install it",
+		metadata: { field: "typescript-compiler" },
+	});
 }
 
 /**
