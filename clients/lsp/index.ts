@@ -6444,6 +6444,12 @@ export class LSPService {
 	async getDiagnostics(
 		filePath: string,
 		diagnosticsMode: LSPDiagnosticsMode = "full",
+		/**
+		 * #4323: servers to leave unacquired, as `touchFile`'s option of the same
+		 * name. The `lsp_diagnostics` fallback passes the auxiliaries the
+		 * operator's configuration turns off.
+		 */
+		excludeServerIds?: ReadonlySet<string>,
 	): Promise<import("./client.js").LSPDiagnostic[]> {
 		const normalizedPath = normalizeMapKey(filePath);
 		const outsideRoot = await this.findOutsideProjectRoot(filePath);
@@ -6467,14 +6473,29 @@ export class LSPService {
 			return [];
 		}
 		const startedAt = Date.now();
-		const candidateServerIds = getServersForFileWithConfig(filePath).map(
-			(s) => s.id,
+		// #4323: a server this read leaves unacquired is not a candidate for it,
+		// so the unavailable text never names one the operator switched off.
+		const candidateServerIds = getServersForFileWithConfig(filePath).flatMap(
+			(s) => (excludeServerIds?.has(s.id) ? [] : [s.id]),
 		);
 		const resolvedPrimaryRoots = new Map<string, string>();
 		const { clients: spawned, serverCountAttempted } =
-			await this.getClientsForFile(filePath, undefined, resolvedPrimaryRoots);
+			await this.getClientsForFile(
+				filePath,
+				excludeServerIds,
+				resolvedPrimaryRoots,
+			);
 		if (spawned.length === 0) {
-			const stale = this.lastKnownDiagnostics.get(normalizedPath);
+			// #4323: an excluded server's last answer is not this read's answer.
+			// Drop its rows from what this caller sees; the shared store keeps
+			// them for callers that did not exclude it.
+			const stored = this.lastKnownDiagnostics.get(normalizedPath);
+			const stale =
+				excludeServerIds !== undefined && excludeServerIds.size > 0
+					? stored?.filter(
+							(diagnostic) => !excludeServerIds.has(diagnostic.serverId ?? ""),
+						)
+					: stored;
 			const failureKind = stale?.length ? "no_clients_stale" : "no_clients";
 			// #4322: with nothing acquired, every primary that resolved a root went
 			// unanswered, so an empty answer here is not a clean one.
@@ -9201,7 +9222,14 @@ export class LSPService {
 	/**
 	 * Get all diagnostics across all tracked files (for cascade checking)
 	 */
-	async getAllDiagnostics(): Promise<
+	async getAllDiagnostics(
+		/**
+		 * #4323: servers whose retained rows this caller does not read, as
+		 * `getDiagnostics`' option of the same name. Their clients are still
+		 * pruned; only their rows are left out of the result.
+		 */
+		excludeServerIds?: ReadonlySet<string>,
+	): Promise<
 		Map<
 			string,
 			{
@@ -9247,6 +9275,7 @@ export class LSPService {
 				(filePath, ts) =>
 					!existingPaths.has(filePath) || now - ts > CASCADE_DIAGNOSTICS_TTL_MS,
 			);
+			if (excludeServerIds?.has(client.serverId)) continue;
 			const clientDiags = client.getAllDiagnostics();
 			for (const [filePath, entry] of clientDiags) {
 				const attributed = attributeDiagnostics(client.serverId, entry.diags);

@@ -96,15 +96,17 @@ export interface WorkspaceDiagnosticsCacheEntry {
 	 * `clientScope: "all"` but excludes opengrep (`WORKSPACE_SWEEP_EXCLUDED_SERVER_IDS`,
 	 * #584 — a separate CLI extractor covers it for that sweep), while
 	 * `lsp_diagnostics`' batch/directory scan (`tools/lsp-diagnostics.ts`)
-	 * touches with no exclusions and supports a `"primary"`-only scope. An
+	 * excludes only the auxiliaries the operator's configuration switches off
+	 * (#4323, keyed by `buildProbeScopeKey`) and supports a `"primary"`-only
+	 * scope. An
 	 * entry produced under one scope must never be served to a lookup under a
 	 * DIFFERENT scope — that would either silently drop diagnostics the
 	 * caller asked for (entry missing a server the caller wants) or return
 	 * extras the caller deliberately excluded (double-counting against a
 	 * separately-run extractor). Both call sites share this one cache store
-	 * (so a file swept by either tool benefits the other's NEXT sweep under
-	 * the SAME scope), but only ever cross-serve entries recorded under an
-	 * identical scope.
+	 * but only ever cross-serve entries recorded under an identical key, and
+	 * the two writers' keys never match: their payloads differ in inline
+	 * suppression (see `buildProbeScopeKey`).
 	 */
 	scopeKey: string;
 	/**
@@ -554,11 +556,11 @@ export function cacheKeyFor(filePath: string): string {
 
 /**
  * Fingerprint identifying "what a touch actually covered" — see the
- * `scopeKey` doc on `WorkspaceDiagnosticsCacheEntry`. Both sweep call sites
- * (`runWorkspaceDiagnostics` and `tools/lsp-diagnostics.ts`'s batch/directory
- * scan) build this from the same two inputs (`touchFile`'s `clientScope` and
- * `excludeServerIds`) so an entry is only ever reused where its coverage is
- * IDENTICAL to what the new lookup is asking for.
+ * `scopeKey` doc on `WorkspaceDiagnosticsCacheEntry`. The workspace sweep
+ * (`runWorkspaceDiagnostics`) builds its key from `touchFile`'s `clientScope`
+ * and `excludeServerIds`, so an entry is only ever reused where its coverage
+ * is IDENTICAL to what the new lookup is asking for. `tools/lsp-diagnostics.ts`'s
+ * batch/directory scan builds its key with `buildProbeScopeKey` (#4323).
  */
 export function buildScopeKey(
 	clientScope: "all" | "primary",
@@ -568,6 +570,25 @@ export function buildScopeKey(
 		? [...excludeServerIds].sort(compareOrdinal)
 		: [];
 	return `${clientScope}|${excluded.join(",")}`;
+}
+
+/**
+ * #4323: the `lsp_diagnostics` batch/directory key. The two writers store
+ * different payloads: this tool records the inline-suppressed set and its
+ * replay skips inline suppression, while the workspace sweep records its
+ * diagnostics before `pi-lens-ignore` is applied. So a probe key never equals
+ * a sweep key, even when both leave the same servers out (`--no-opengrep`
+ * gives the sweep's `all|opengrep` coverage). The auxiliaries the operator's
+ * configuration turns off sit under an `off=` part no sweep key carries; with
+ * nothing turned off the key is `buildScopeKey(clientScope)`, as before.
+ */
+export function buildProbeScopeKey(
+	clientScope: "all" | "primary",
+	configDisabledServerIds?: Iterable<string>,
+): string {
+	const off = [...(configDisabledServerIds ?? [])].sort(compareOrdinal);
+	const base = buildScopeKey(clientScope);
+	return off.length === 0 ? base : `${base}off=${off.join(",")}`;
 }
 
 export interface WorkspaceDiagnosticsCacheLookup {

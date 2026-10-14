@@ -16,6 +16,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+	buildProbeScopeKey,
 	buildScopeKey,
 	cacheKeyFor,
 	clearAllWorkspaceDiagnosticsCaches,
@@ -375,6 +376,29 @@ describe("buildScopeKey / cacheKeyFor (#671)", () => {
 	it("distinguishes scopes that differ in clientScope or exclusions", () => {
 		expect(buildScopeKey("all")).not.toBe(buildScopeKey("primary"));
 		expect(buildScopeKey("all", ["opengrep"])).not.toBe(buildScopeKey("all"));
+	});
+
+	it("keeps a probe key with a config-disabled auxiliary apart from the sweep key (#4323)", () => {
+		// The workspace sweep records before `pi-lens-ignore` and leaves
+		// Opengrep out; the probe records the suppressed set. Same coverage,
+		// different payload, so the keys must differ.
+		expect(buildProbeScopeKey("all", new Set(["opengrep"]))).not.toBe(
+			buildScopeKey("all", ["opengrep"]),
+		);
+		expect(buildProbeScopeKey("all", ["typos", "opengrep"])).toBe(
+			buildProbeScopeKey("all", ["opengrep", "typos"]),
+		);
+		expect(buildProbeScopeKey("all", ["opengrep"])).not.toBe(
+			buildProbeScopeKey("all", ["typos"]),
+		);
+		// Nothing turned off: the key master wrote, so existing entries serve.
+		expect(buildProbeScopeKey("all", new Set())).toBe(buildScopeKey("all"));
+		expect(buildProbeScopeKey("primary")).toBe(buildScopeKey("primary"));
+		// A primary-only check reads through a fallback that acquires
+		// auxiliaries, so its key carries the switched-off set as well.
+		expect(buildProbeScopeKey("primary", ["opengrep"])).not.toBe(
+			buildProbeScopeKey("primary"),
+		);
 	});
 
 	it("normalizes path separators/casing the same way for repeated calls", () => {

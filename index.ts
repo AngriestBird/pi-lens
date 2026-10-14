@@ -1897,6 +1897,9 @@ function activateExtension(hostPi: ExtensionAPI) {
 			captureLspStatusRepaint,
 			() => runtime,
 			() => Boolean(getLensFlag("lens-guard")),
+			// #4323: `--no-opengrep` / `opengrep.enabled=false` keep the explicit
+			// `source=lsp` probe from starting Opengrep, as they do for dispatch.
+			(name) => getLensFlag(name),
 		),
 		createSymbolSearchTool(() => runtime.projectRoot),
 		createEffectiveConfigTool(() => runtime.projectRoot, noToolFlag),

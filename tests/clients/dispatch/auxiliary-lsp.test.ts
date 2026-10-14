@@ -6,6 +6,7 @@ import type { LSPDiagnostic } from "../../../clients/lsp/client.js";
 import {
 	AUXILIARY_LSP_PROFILES,
 	applyAuxiliarySuppressions,
+	configDisabledAuxiliaryLspServerIds,
 	enabledAuxiliaryLspServerIds,
 	findAuxiliaryProfileForSource,
 	isAuxiliaryDiagnosticSuppressed,
@@ -98,6 +99,70 @@ describe("auxiliary LSP enablement", () => {
 			delete process.env.PI_SUBAGENT_CHILD;
 			delete process.env.PI_LENS_SUBAGENT_FULL;
 			_resetSubagentModeForTests();
+		}
+	});
+});
+
+describe("configDisabledAuxiliaryLspServerIds (#4323)", () => {
+	beforeEach(() => {
+		_resetSubagentModeForTests();
+	});
+	afterEach(() => {
+		_resetSubagentModeForTests();
+	});
+
+	it("lists nothing when no kill switch is set", () => {
+		expect([...configDisabledAuxiliaryLspServerIds(() => undefined)]).toEqual(
+			[],
+		);
+	});
+
+	it("lists opengrep when the no-opengrep kill switch is set", () => {
+		expect([
+			...configDisabledAuxiliaryLspServerIds((f) => f === "no-opengrep"),
+		]).toEqual(["opengrep"]);
+	});
+
+	it("lists each profile whose kill switch is set, and only those", () => {
+		const switches = new Set(["no-zizmor", "no-typos"]);
+		expect(
+			[...configDisabledAuxiliaryLspServerIds((f) => switches.has(f))].sort(),
+		).toEqual(["typos", "zizmor"]);
+	});
+
+	it("treats a non-true flag value as not set", () => {
+		expect([
+			...configDisabledAuxiliaryLspServerIds((f) =>
+				f === "no-opengrep" ? "false" : undefined,
+			),
+		]).toEqual([]);
+	});
+
+	// The resource degrade is not a configuration decision: an explicit check
+	// still asks those scanners, so a subagent session excludes nothing.
+	it("excludes nothing for a subagent session's light mode alone", () => {
+		process.env.PI_SUBAGENT_CHILD = "1";
+		_resetSubagentModeForTests();
+		try {
+			expect(enabledAuxiliaryLspServerIds(() => undefined)).toEqual([]);
+			expect([...configDisabledAuxiliaryLspServerIds(() => undefined)]).toEqual(
+				[],
+			);
+		} finally {
+			delete process.env.PI_SUBAGENT_CHILD;
+			_resetSubagentModeForTests();
+		}
+	});
+
+	it("is the complement of the enabled set for every profile outside the degrade", () => {
+		const switches = new Set(["no-opengrep", "no-ast-grep"]);
+		const getFlag = (f: string) => switches.has(f);
+		const enabled = new Set(enabledAuxiliaryLspServerIds(getFlag));
+		const disabled = configDisabledAuxiliaryLspServerIds(getFlag);
+		for (const profile of AUXILIARY_LSP_PROFILES) {
+			expect(enabled.has(profile.serverId)).toBe(
+				!disabled.has(profile.serverId),
+			);
 		}
 	});
 });

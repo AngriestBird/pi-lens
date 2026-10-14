@@ -358,6 +358,11 @@ const lspSpawnHeavyInclude = [
 	// here by hand rather than pretended to be derived. The file runs once: the
 	// default project excludes this list.
 	"tests/mcp/analyze-cli.test.ts",
+	// #4323: real MCP server children, each spawning real fake-LSP children (the
+	// JSON server and an Opengrep stand-in) for `pilens_diagnostics source=lsp`.
+	// The fixture path is passed to the bin, not imported, so the marker census
+	// cannot see it; stated here by hand like analyze-cli above.
+	"tests/mcp/diagnostics-opengrep-disabled-4323.test.ts",
 	// #4300: the MCP witness crosses Lean's real initialize handshake.
 	"tests/mcp/server.smoke.test.ts",
 	"tests/support/fake-lsp-server.test.ts",
@@ -395,6 +400,11 @@ const lspSpawnHeavyInclude = [
 	// #4322: the same handler and LSPService with no auxiliary at all; the
 	// primary's spawn fails for real (a missing command) on every touch.
 	"tests/tools/lsp-diagnostics-no-client-4322.test.ts",
+	// #4323: the production lsp_diagnostics handler and LSPService over real
+	// stdio fake-server children (the JSON server and an Opengrep stand-in,
+	// project command overrides); waits on real handshakes and pull rounds like
+	// #4320's.
+	"tests/tools/lsp-diagnostics-opengrep-disabled-4323.test.ts",
 	// #3750: launches the fake server THROUGH the production `RustServer`,
 	// `OCamlServer` and `GoServer` entries (PATH shims) and waits on a real
 	// initialize handshake plus a pull round trip per case -- the same
