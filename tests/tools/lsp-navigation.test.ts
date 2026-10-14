@@ -458,6 +458,11 @@ describe("lsp_navigation tool", () => {
 
 	it("reports an empty declaration result with the no-results reason", async () => {
 		const tool = createLspNavigationTool((flag) => flag === "lens-lsp");
+		// A server answered: the service has a client for the file. With no
+		// client (`null`), an empty answer is no_server (#4403 round 5, V5).
+		(
+			mocked.service as { getOperationSupport: ReturnType<typeof vi.fn> }
+		).getOperationSupport = vi.fn().mockResolvedValue({ declaration: true });
 
 		const result = await tool.execute(
 			"declaration-empty",

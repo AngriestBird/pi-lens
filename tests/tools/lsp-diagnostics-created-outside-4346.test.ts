@@ -53,6 +53,34 @@ async function diagnose(
 	};
 }
 
+/** #4346: how many documents the server was sent for `file` (open or change);
+ * a cached answer sends none. */
+function touchesOf(file: string): number {
+	if (!fs.existsSync(trace)) return 0;
+	const uri = pathToFileURL(file).href;
+	return fs
+		.readFileSync(trace, "utf8")
+		.split("\n")
+		.filter(
+			(line) =>
+				line === `recv textDocument/didOpen ${uri}` ||
+				line === `recv textDocument/didChange ${uri}`,
+		).length;
+}
+
+/**
+ * #4346: when `file`'s persisted cache entry was scanned. A served entry keeps
+ * it; a refused one is answered by the server and recorded again. A touch
+ * count cannot show a refusal of a clean entry: the client sends nothing for
+ * an open document whose bytes did not change.
+ */
+async function scannedAtOf(file: string): Promise<number | undefined> {
+	const { cacheKeyFor, loadWorkspaceDiagnosticsCache } =
+		await import("../../clients/lsp/workspace-diagnostics-cache.js");
+	return loadWorkspaceDiagnosticsCache(workspace)?.entries[cacheKeyFor(file)]
+		?.scannedAt;
+}
+
 function watchedLines(): string[] {
 	if (!fs.existsSync(trace)) return [];
 	return fs
@@ -91,6 +119,20 @@ beforeAll(async () => {
 			"",
 		].join("\n"),
 	);
+	// #4346: the same profile for Go files, `import "./name"` resolving to
+	// `name.go`, in a server of its own, as gopls is.
+	const goShim = path.join(workspace, "stale-go-server.mjs");
+	fs.writeFileSync(
+		goShim,
+		[
+			'process.env.FAKE_LSP_NO_DIAGNOSTIC_PROVIDER = "1";',
+			'process.env.FAKE_LSP_STALE_MODULE_LOOKUP = "1";',
+			'process.env.FAKE_LSP_STALE_MODULE_EXT = ".go";',
+			`process.env.FAKE_LSP_TRACE_FILE = ${JSON.stringify(trace)};`,
+			`import(${JSON.stringify(pathToFileURL(fakeServer).href)});`,
+			"",
+		].join("\n"),
+	);
 	fs.writeFileSync(
 		path.join(workspace, "package.json"),
 		'{"name":"outside","version":"0.0.0"}\n',
@@ -111,13 +153,27 @@ beforeAll(async () => {
 			servers: {
 				"stale-ts": {
 					name: "stale lookup server",
-					extensions: [".ts"],
+					extensions: [".ts", ".js"],
 					command: process.execPath,
 					args: [shim],
 					rootMarkers: ["package.json"],
 				},
+				"stale-go": {
+					name: "stale lookup server for Go",
+					extensions: [".go"],
+					command: process.execPath,
+					args: [goShim],
+					rootMarkers: ["package.json"],
+				},
 			},
-			disabledServers: ["typescript", "deno", "opengrep", "ast-grep", "typos"],
+			disabledServers: [
+				"typescript",
+				"deno",
+				"go",
+				"opengrep",
+				"ast-grep",
+				"typos",
+			],
 		}),
 	);
 	// Older than the client, which starts at the first diagnostics call.
@@ -291,6 +347,250 @@ describe("a module created outside pi-lens (#4346)", () => {
 
 		const oldUri = pathToFileURL(path.join(workspace, "old_module.ts")).href;
 		expect(watchedLines()).not.toContain(`watched ${oldUri} 1`);
+	}, 30_000);
+});
+
+describe("cache entries past a creation: the dependency scope (#4346)", () => {
+	/** Diagnose `file` until its answer is served from the cache. */
+	async function cached(file: string): Promise<number | undefined> {
+		await diagnose({ paths: [file] });
+		// The first call's Created (the file itself, its Go package peers) may
+		// be flushed after its scan began, which refuses that entry once; the
+		// second call records one past every creation.
+		await diagnose({ paths: [file] });
+		const touches = touchesOf(file);
+		const scannedAt = await scannedAtOf(file);
+		await diagnose({ paths: [file] });
+		// Precondition: the second call replayed the entry.
+		expect(touchesOf(file)).toBe(touches);
+		expect(scannedAt).toBeGreaterThan(0);
+		expect(await scannedAtOf(file)).toBe(scannedAt);
+		return scannedAt;
+	}
+
+	// Acceptance item 4. Recurrence: #4320/#4344 refused every finding entry of
+	// a server under a root on any Created there, so one new module re-touched
+	// every finding file. A created file outside an entry's scope cannot change
+	// its answer.
+	it("serves a cached finding past a creation outside its dependency scope", async () => {
+		const user = path.join(workspace, "scope_user.ts");
+		fs.writeFileSync(user, 'import "./scope_never";\nexport {};\n');
+		const scannedAt = await cached(user);
+		const touches = touchesOf(user);
+
+		const other = path.join(workspace, "scope_other.ts");
+		fs.writeFileSync(other, "export const other = 1;\n");
+		const after = await diagnose({ paths: [other, user] });
+
+		expect(watchedLines()).toContain(`watched ${pathToFileURL(other).href} 1`);
+		expect(touchesOf(user)).toBe(touches);
+		expect(await scannedAtOf(user)).toBe(scannedAt);
+		expect(after.text).toContain("Cannot find module scope_never");
+	}, 30_000);
+
+	// Rows F1 and F2 on the batch route. Recurrence: #4430 r1 review F1/F2.
+	// The import query captures import and export statements only, so a
+	// dependency held another way was neither a target nor unresolved; the
+	// scope looked complete and the finding was served past the dependency's
+	// creation (base refused it). Each file's finding is its `import "./*_never"`
+	// line; the created module is the one the other form names. Recurrence
+	// also: #4430 r2 verify V1, a JSDoc `@import` in a checkJs file and a
+	// relative module augmentation, both served stale on real tsserver.
+	it.each([
+		[
+			"a dynamic import",
+			"dynf",
+			'export const f = () => import("./dynf_mod");\n',
+			undefined,
+			".ts",
+		],
+		[
+			"a type-position import",
+			"typf",
+			'export let t: import("./typf_mod").T;\n',
+			undefined,
+			".ts",
+		],
+		[
+			"an import = require",
+			"reqf",
+			'import m = require("./reqf_mod");\nexport { m };\n',
+			undefined,
+			".ts",
+		],
+		[
+			"a target that re-exports",
+			"reexf",
+			'import "./reexf_a";\n',
+			'export * from "./reexf_mod";\n',
+			".ts",
+		],
+		[
+			"a JSDoc @import",
+			"jsdf",
+			'/** @import { T } from "./jsdf_mod" */\n/** @type {T} */\nexport const t = 1;\n',
+			undefined,
+			".js",
+		],
+		[
+			"a module augmentation",
+			"augf",
+			'declare module "./augf_mod" {\n\tinterface A { x: number }\n}\nexport {};\n',
+			undefined,
+			".ts",
+		],
+	])(
+		"refuses a cached finding when %s names the created module",
+		async (_shape, stem, rest, reexporter, ext) => {
+			if (reexporter) {
+				fs.writeFileSync(path.join(workspace, `${stem}_a.ts`), reexporter);
+			}
+			const user = path.join(workspace, `${stem}_user${ext}`);
+			fs.writeFileSync(user, `import "./${stem}_never";\n${rest}`);
+			const scannedAt = await cached(user);
+
+			const created = path.join(workspace, `${stem}_mod.ts`);
+			fs.writeFileSync(created, "export const T = 1;\n");
+			await diagnose({ paths: [created, user] });
+
+			expect(watchedLines()).toContain(
+				`watched ${pathToFileURL(created).href} 1`,
+			);
+			expect(await scannedAtOf(user)).toBeGreaterThan(scannedAt ?? Infinity);
+		},
+		30_000,
+	);
+
+	// Row 11. Recurrence: #4368 r1 probe, a TypeScript ambient declaration
+	// answers a name in a file that never imports it, so no edge exists, and a
+	// clean entry was never refused on a creation: a new global that collides
+	// with the file's own was served as clean.
+	it("refuses a clean entry when an ambient declaration file appears", async () => {
+		const user = path.join(workspace, "ambient_user.ts");
+		fs.writeFileSync(user, "export const ambientUser = 1;\n");
+		const scannedAt = await cached(user);
+
+		const globals = path.join(workspace, "ambient_globals.d.ts");
+		fs.writeFileSync(globals, "declare const AMBIENT: number;\n");
+		await diagnose({ paths: [globals, user] });
+
+		expect(await scannedAtOf(user)).toBeGreaterThan(scannedAt ?? Infinity);
+	}, 30_000);
+
+	// Row 12. Recurrence: #4368 r1 row 11, a Go file uses its package's files
+	// with no import, so the producer, which resolves imports, never announced
+	// one created outside pi-lens, and the server kept its failed lookup.
+	it("announces a Go file created beside a diagnosed one, which clears its stale lookup", async () => {
+		const dir = path.join(workspace, "gopkg");
+		fs.mkdirSync(dir, { recursive: true });
+		const user = path.join(dir, "user.go");
+		fs.writeFileSync(user, 'package gopkg\nimport "./peer"\n');
+		expect((await diagnose({ paths: [user] })).text).toContain(
+			"Cannot find module peer",
+		);
+
+		const peer = path.join(dir, "peer.go");
+		fs.writeFileSync(peer, "package gopkg\n");
+		const after = await diagnose({ paths: [user] });
+
+		expect(watchedLines()).toContain(`watched ${pathToFileURL(peer).href} 1`);
+		expect(after.text).not.toContain("Cannot find module peer");
+	}, 30_000);
+
+	it("announces a Go file created beside one on the single-file route", async () => {
+		const dir = path.join(workspace, "goscalar");
+		fs.mkdirSync(dir, { recursive: true });
+		const user = path.join(dir, "user.go");
+		fs.writeFileSync(user, 'package goscalar\nimport "./peer"\n');
+		expect((await diagnose({ path: user })).text).toContain(
+			"Cannot find module peer",
+		);
+
+		const peer = path.join(dir, "peer.go");
+		fs.writeFileSync(peer, "package goscalar\n");
+		const after = await diagnose({ path: user });
+
+		expect(watchedLines()).toContain(`watched ${pathToFileURL(peer).href} 1`);
+		expect(after.text).not.toContain("Cannot find module peer");
+	}, 30_000);
+
+	// Acceptance item 4 on the sweep's route: its producer call hands each
+	// resolved file's imports to the cache as the batch's does. Recurrence:
+	// without them a swept finding's scope is unknown, and every creation in
+	// the workspace refuses it.
+	it("serves a swept finding past a creation outside its dependency scope", async () => {
+		const user = path.join(workspace, "sweep_scope_user.ts");
+		fs.writeFileSync(user, 'import "./sweep_scope_never";\nexport {};\n');
+		const sweep = async () =>
+			(
+				await (
+					service as unknown as {
+						runWorkspaceDiagnostics: (
+							cwd: string,
+						) => Promise<Array<{ filePath: string; diagnostics: unknown[] }>>;
+					}
+				).runWorkspaceDiagnostics(workspace)
+			).find((result) => result.filePath === user)?.diagnostics.length;
+		expect(await sweep()).toBe(1);
+		expect(await sweep()).toBe(1);
+		const scannedAt = await scannedAtOf(user);
+		expect(scannedAt).toBeGreaterThan(0);
+
+		fs.writeFileSync(
+			path.join(workspace, "sweep_scope_other.ts"),
+			"export const other = 1;\n",
+		);
+
+		expect(await sweep()).toBe(1);
+		expect(await scannedAtOf(user)).toBe(scannedAt);
+	}, 60_000);
+
+	// The sweep lists every Go file it diagnoses, so only a peer it skips (a
+	// gitignored generated file) needs the package pass. Recurrence: the
+	// sweep's producer call, like the batch's, announced import targets only.
+	it("announces a gitignored Go peer in a workspace sweep", async () => {
+		fs.appendFileSync(path.join(workspace, ".gitignore"), "*_gen.go\n");
+		const dir = path.join(workspace, "gosweep");
+		fs.mkdirSync(dir);
+		const user = path.join(dir, "user.go");
+		fs.writeFileSync(user, 'package gosweep\nimport "./peer_gen"\n');
+		const sweep = async () =>
+			(
+				await (
+					service as unknown as {
+						runWorkspaceDiagnostics: (
+							cwd: string,
+						) => Promise<Array<{ filePath: string; diagnostics: unknown[] }>>;
+					}
+				).runWorkspaceDiagnostics(workspace)
+			).find((result) => result.filePath === user)?.diagnostics.length;
+		expect(await sweep()).toBe(1);
+		expect(await sweep()).toBe(1);
+
+		const peer = path.join(dir, "peer_gen.go");
+		fs.writeFileSync(peer, "package gosweep\n");
+
+		expect(await sweep()).toBe(0);
+		expect(watchedLines()).toContain(`watched ${pathToFileURL(peer).href} 1`);
+	}, 60_000);
+
+	// Row E2. Recurrence: a Go file's package files are named by no import,
+	// so an edit to one left the file's clean entry serving.
+	it("refuses a Go file's clean entry when a file of its package changes", async () => {
+		const dir = path.join(workspace, "gochange");
+		fs.mkdirSync(dir, { recursive: true });
+		const peer = path.join(dir, "peer.go");
+		fs.writeFileSync(peer, "package gochange\n");
+		const user = path.join(dir, "user.go");
+		fs.writeFileSync(user, "package gochange\n");
+		const scannedAt = await cached(user);
+
+		fs.appendFileSync(peer, "// edited\n");
+		const later = new Date(Date.now() + 60_000);
+		fs.utimesSync(peer, later, later);
+		await diagnose({ paths: [user] });
+
+		expect(await scannedAtOf(user)).toBeGreaterThan(scannedAt ?? Infinity);
 	}, 30_000);
 });
 

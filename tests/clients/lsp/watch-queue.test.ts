@@ -102,6 +102,24 @@ describe("WatchedFilesQueue (#271)", () => {
 		expect(calls).toEqual(["flush"]);
 	});
 
+	// #4346: the cache refuses an entry only for a created path in its
+	// dependency scope, so the paths must reach the record, and a Changed in
+	// the same batch must not count as created.
+	it("hands onCreated the created URIs only (#4346)", () => {
+		const created: Array<readonly string[]> = [];
+		const q = new WatchedFilesQueue(
+			() => {},
+			WATCH_DEBOUNCE_MS,
+			(uris) => created.push(uris),
+		);
+		q.enqueue("file:///edited", 2);
+		q.enqueue("file:///new-a", 1);
+		q.enqueue("file:///new-b", 1);
+		q.enqueue("file:///gone", 3);
+		q.flush();
+		expect(created).toEqual([["file:///new-a", "file:///new-b"]]);
+	});
+
 	// #4320 r2 (F1): an importer read before the 100 ms window closed was
 	// answered by a server that had not yet heard Created for its module.
 	it("sends at once when a Created is waiting, and leaves edits to coalesce (#4320)", () => {

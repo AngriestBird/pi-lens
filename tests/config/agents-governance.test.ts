@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
+import { blankMarkdown } from "../../scripts/lib/defect-shapes.mjs";
 import { stripSource } from "../support/sweep-kit.js";
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "../..");
@@ -10,13 +11,6 @@ function agentsText(): string {
 		process.env.PI_LENS_AGENTS_PATH ?? path.join(REPO_ROOT, "AGENTS.md"),
 		"utf8",
 	);
-}
-
-function blankMarkdown(text: string): string {
-	const blank = (value: string): string => value.replace(/[^\n]/g, " ");
-	return text
-		.replace(/<!--[\s\S]*?-->/g, blank)
-		.replace(/^```[^\n]*\n[\s\S]*?^```\s*$/gm, blank);
 }
 
 function shapeNumbers(text: string): number[] {

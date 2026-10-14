@@ -85,7 +85,11 @@ real seam. Check that every gate the diff adds is exercised through that path.
   named shape is broader than the touched seam (#4273, #4268).
 - On a bug-closing PR, check the `## Detection` lesson: the layer named under
   `Should have been caught by:` must be one that would actually have caught
-  the bug, and `Gap:` must be a real issue, test, or reason (#4288).
+  the bug, and `Gap:` must be a real issue, test, or reason (#4288). Judge
+  `Shape:` and `Enforcer:` too: the lint checks the catalog number and that the
+  path is on the base and named by the entry, not that the test scans the
+  shape's whole population, so open the enforcer and decide whether it does
+  (#4439).
 - For LSP, dispatch, cache, runner, or tool changes, test one non-TypeScript
   registry entry through the same seam.
 - On a net-count fold, mutate every predicate the deleted sibling used to

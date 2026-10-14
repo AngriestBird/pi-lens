@@ -46,58 +46,72 @@ export function workspaceDiagnosticsCacheSessionStart(): number {
  * reverse-dependency index), so neither freshness check in `isEntryFresh` can
  * see it.
  *
- * One record per language-server client: the last time that client SENT a
- * `Created` watched-files notification, keyed by its server id and root. Only
- * that server can answer differently because of it, and only for files under
- * that root, so a finding entry is refused when one of the servers behind its
- * findings has a record at a root holding the file, at or after the entry's
- * scan (`workspaceFileCreatedAtFor`). A creation reported to another server,
- * or under another root, leaves the entry serving.
+ * One record per created path per language-server client: the last time that
+ * client SENT a `Created` watched-files notification for the path, keyed by
+ * its server id, root and the path (normalized by the caller, `uriToPath`).
+ * Only that server can answer differently because of it, and only for files
+ * under that root. #4346: the path decides which entries it touches. The
+ * workspace-diagnostics cache refuses an entry only for a created path in the
+ * entry's dependency scope (`workspace-diagnostics-cache.ts`), so a creation
+ * nothing depends on leaves every entry serving.
  *
- * Bounded by the live client population; an evicted record folds into
- * `_evictedCreatedAt`, which every entry honours, so eviction can only refuse
- * more, never serve a stale finding. Re-armed with the session clock above.
+ * Bounded at {@link MAX_FILE_CREATIONS} paths per session; an evicted record
+ * folds into `_evictedCreatedAt`, which counts for every path, server and
+ * root, so eviction can only refuse more, never serve a stale finding.
+ * Re-armed with the session clock above.
  */
-interface FileCreation {
+export interface FileCreation {
 	serverId: string;
 	root: string;
+	/** The created path, as `normalizeMapKey` spells it. */
+	path: string;
 	at: number;
 }
-const _fileCreations = new BoundedFifoMap<string, FileCreation>(128);
+/** Created paths kept per session before the oldest fold. */
+export const MAX_FILE_CREATIONS = 1024;
+const _fileCreations = new BoundedFifoMap<string, FileCreation>(
+	MAX_FILE_CREATIONS,
+);
 let _evictedCreatedAt = 0;
 
-/** Record that the client for `serverId` at `root` just sent a Created. */
+/** Record that the client for `serverId` at `root` just sent `paths` as Created. */
 export function noteWorkspaceFileCreated(
 	serverId: string,
 	root: string,
+	paths: readonly string[],
 	at: number = Date.now(),
 ): void {
-	const key = `${serverId}\0${root}`;
-	const latest = Math.max(_fileCreations.get(key)?.at ?? 0, at);
-	for (const [, evicted] of _fileCreations.set(key, {
-		serverId,
-		root,
-		at: latest,
-	})) {
-		_evictedCreatedAt = Math.max(_evictedCreatedAt, evicted.at);
+	for (const created of paths) {
+		const key = `${serverId}\0${root}\0${created}`;
+		const latest = Math.max(_fileCreations.get(key)?.at ?? 0, at);
+		for (const [, evicted] of _fileCreations.set(key, {
+			serverId,
+			root,
+			path: created,
+			at: latest,
+		})) {
+			_evictedCreatedAt = Math.max(_evictedCreatedAt, evicted.at);
+		}
 	}
 }
 
 /**
  * The latest Created a server `fromServer` accepts was sent at a root `holds`
- * accepts
- * (0 when none this session).
+ * accepts, for a path `counts` accepts (every path when omitted), or the
+ * eviction fold, whichever is later (0 when none this session).
  */
 export function workspaceFileCreatedAtFor(
 	fromServer: (serverId: string) => boolean,
 	holds: (root: string) => boolean,
+	counts: (creation: FileCreation) => boolean = () => true,
 ): number {
 	let latest = _evictedCreatedAt;
 	for (const creation of _fileCreations.values()) {
 		if (
 			creation.at > latest &&
 			fromServer(creation.serverId) &&
-			holds(creation.root)
+			holds(creation.root) &&
+			counts(creation)
 		) {
 			latest = creation.at;
 		}
