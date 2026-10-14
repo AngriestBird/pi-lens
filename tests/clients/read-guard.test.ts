@@ -2513,6 +2513,37 @@ describe("ReadGuard Tier-2 idle decay and bounds (#1389)", () => {
 					.mocked(logReadGuardEvent)
 					.mock.calls.filter(([entry]) => entry.event === "authorship_retired"),
 			).toEqual([]);
+			// A read that names a call bounds a whole-file advance, never a scope:
+			// the scope stays empty, so after a resume that keeps the edit and
+			// drops the read, line 2 (never read, never authored) is still refused.
+			// Recurrence: an UNKNOWN credit composed into a range scope widens it
+			// to the whole file (F-4210-2's shape behind a read).
+			const scoped = path.join(env.tmpDir, "scoped.ts");
+			fs.writeFileSync(scoped, "one\ntwo\n");
+			guard.recordRead(
+				createReadRecord(scoped, {
+					requestedLimit: 1,
+					effectiveLimit: 1,
+					toolCallId: "call-read",
+				}),
+			);
+			guard.recordWritten(scoped, {
+				stampFileTime: false,
+				authoredRanges: [[1, 1]],
+				allowFirstAuthorship: true,
+				toolCallId: "call-scope",
+			});
+			guard.recordWritten(scoped, {
+				stampFileTime: false,
+				authorship: "unknown",
+				toolCallId: "call-edit",
+			});
+			const resumed = createReadGuard("authorship-unknown-resumed");
+			resumed.importAuthorship(
+				guard.exportAuthorship(),
+				new Set(["call-edit"]),
+			);
+			expect(resumed.checkEdit(scoped, [2, 2]).action).toBe("block");
 		} finally {
 			env.cleanup();
 		}
