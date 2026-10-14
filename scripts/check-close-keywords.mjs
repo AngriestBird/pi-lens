@@ -2,24 +2,29 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { fetchLivePrBody } from "./check-pr-body.mjs";
+import { githubGet } from "./lib/github-rest.mjs";
 import {
+	commitCloseKeywordErrors,
 	closeKeywordErrors,
 	closeKeywordPlacementMessage,
 	INVALID_CLOSE_KEYWORD_MESSAGE,
 	NEGATED_CLOSE_KEYWORD_MESSAGE,
 	lintCloseKeywordPlacement,
 	lintCloseKeywords,
+	lintCommitCloseKeywords,
 	parseCloseKeywords,
 	stripNonSemanticMarkdown,
 } from "./lib/close-keywords.mjs";
 
 export {
+	commitCloseKeywordErrors,
 	closeKeywordErrors,
 	closeKeywordPlacementMessage,
 	INVALID_CLOSE_KEYWORD_MESSAGE,
 	NEGATED_CLOSE_KEYWORD_MESSAGE,
 	lintCloseKeywordPlacement,
 	lintCloseKeywords,
+	lintCommitCloseKeywords,
 	parseCloseKeywords,
 	stripNonSemanticMarkdown,
 };
@@ -28,6 +33,37 @@ function eventPayload() {
 	const eventPath = process.env.GITHUB_EVENT_PATH;
 	if (!eventPath) throw new Error("GITHUB_EVENT_PATH is required");
 	return JSON.parse(readFileSync(eventPath, "utf8"));
+}
+
+// #4371: GitHub lists at most 250 commits of a pull request, 100 per page.
+const COMMIT_PAGE_SIZE = 100;
+const COMMIT_LIST_CAP = 250;
+
+// Throws when the list cannot be read in full, so the caller fails closed
+// instead of linting a partial list.
+async function fetchPrCommits(payloadPr, fetchImpl) {
+	const commits = [];
+	for (let page = 1; commits.length < COMMIT_LIST_CAP; page++) {
+		const response = await githubGet(
+			`/pulls/${payloadPr.number}/commits?per_page=${COMMIT_PAGE_SIZE}&page=${page}`,
+			fetchImpl,
+		);
+		if (!response.ok) throw new Error(`GitHub API returned ${response.status}`);
+		const data = await response.json();
+		if (!Array.isArray(data))
+			throw new Error("GitHub API returned no commit list");
+		for (const entry of data) {
+			if (typeof entry?.commit?.message !== "string")
+				throw new Error("GitHub API returned a commit without a message");
+			commits.push({ sha: entry.sha, message: entry.commit.message });
+		}
+		if (data.length < COMMIT_PAGE_SIZE) break;
+	}
+	if (commits.length >= COMMIT_LIST_CAP)
+		throw new Error(
+			`the pull request has ${COMMIT_LIST_CAP} or more commits, which is all GitHub lists`,
+		);
+	return commits;
 }
 
 export async function lintPullRequest(
@@ -62,6 +98,28 @@ export async function lintPullRequest(
 	const placement = lintCloseKeywordPlacement(title, body);
 	if (!placement.valid) {
 		console.error(closeKeywordPlacementMessage(placement.missingBodyIssues));
+		process.exitCode = 1;
+		return;
+	}
+	// #4371: GitHub also closes on a keyword in a commit message that reaches
+	// master (merge commits and rebase merges land every commit; a squash lands
+	// a message built from them), so every listed commit is scanned, merge
+	// commits included.
+	let commits;
+	try {
+		commits = await fetchPrCommits(pullRequest, fetchImpl);
+	} catch (error) {
+		const reason = error instanceof Error ? error.message : String(error);
+		console.error(
+			`::error::Close-keyword syntax check could not read the PR commits, so it did not scan commit messages: ${reason}`,
+		);
+		process.exitCode = 1;
+		return;
+	}
+	const commitResult = lintCommitCloseKeywords(commits, title, body);
+	if (!commitResult.valid) {
+		for (const line of commitCloseKeywordErrors(commitResult))
+			console.error(line);
 		process.exitCode = 1;
 		return;
 	}
