@@ -75,12 +75,12 @@ export interface GzipStageWorkerResult {
  * so each host records it in its own sink; the startup stage sweep reclaims
  * whatever a failed removal leaves behind.
  */
-export function reapStageFile(stagePath: string): unknown {
+export function reapStageFile(stagePath: string): Error | undefined {
 	try {
 		fs.rmSync(stagePath, { force: true });
 		return undefined;
 	} catch (err) {
-		return err;
+		return err instanceof Error ? err : new Error(String(err));
 	}
 }
 

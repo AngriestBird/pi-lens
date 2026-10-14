@@ -1783,7 +1783,7 @@ function reapSnapshotStage(stagePath: string, subject: string): void {
 	incrementDegradationCount({
 		kind: "project-snapshot-stage-reap-failed",
 		subject,
-		reason: `snapshot stage reap failed: ${failure instanceof Error ? failure.message : String(failure)}`,
+		reason: `snapshot stage reap failed: ${failure.message}`,
 	});
 }
 
