@@ -66,9 +66,10 @@ The principles govern building, testing, and closes-versus-refs. pi-lens adds:
   title; the closing keyword goes in the body, because GitHub ignores it in a
   title.
 - Mutation acceptance has one PR layer (#4005, superseding #3973's two): every
-  new guard, branch, filter, cap, or fallback has bounded compile-valid
-  hand-mutation proof under the engineering principles, and a missing proof or
-  a demonstrated correctness gap blocks merge. There is no per-PR Stryker job,
+  new guard, branch, filter, cap, or fallback, and the behaviour behind every
+  relaxed or rewritten assertion, has bounded compile-valid hand-mutation
+  proof under the engineering principles, and a missing proof or a
+  demonstrated correctness gap blocks merge. There is no per-PR Stryker job,
   comment, or `MUTATION` line to read. Stryker runs nightly on master as an
   exploratory test-adequacy report (`.github/workflows/stryker-nightly.yml`,
   one rolling tracking issue); its survivors are candidates for a missing
