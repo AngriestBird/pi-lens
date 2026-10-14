@@ -2014,18 +2014,15 @@ async function collectBatchDiagnostics(
 	// diagnostics mode=full`'s engine); `scopeKey` keeps the two tools'
 	// differently-scoped touches from cross-serving entries that wouldn't
 	// actually match what each asked for (see `buildScopeKey`'s doc). #4323:
-	// an all-server check excludes the auxiliaries the operator turned off, so
-	// they are part of its key; a primary-only touch attaches no auxiliary, so
-	// the exclusion does not change its coverage. `buildProbeScopeKey` keeps
+	// a check excludes the auxiliaries the operator turned off, so they are
+	// part of its key. A primary-only check is included: its clientless
+	// fallback read acquires auxiliaries too. `buildProbeScopeKey` keeps
 	// this writer's keys apart from the sweep's, whose payload skips
 	// `pi-lens-ignore`.
 	const resolvedCwd = options.cwd ?? process.cwd();
 	const cacheCtx = createWorkspaceDiagnosticsCacheContext(resolvedCwd);
 	const serverScope = options.serverScope ?? "all";
-	const scopeKey = buildProbeScopeKey(
-		serverScope,
-		serverScope === "all" ? options.excludeServerIds : undefined,
-	);
+	const scopeKey = buildProbeScopeKey(serverScope, options.excludeServerIds);
 	const resultsByIndex = new Map<number, FileDiagnosticResult>();
 	let completed = 0;
 	const pendingIndices = new Map<string, number[]>();

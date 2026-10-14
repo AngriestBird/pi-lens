@@ -378,6 +378,11 @@ describe("buildScopeKey / cacheKeyFor (#671)", () => {
 		// Nothing turned off: the key master wrote, so existing entries serve.
 		expect(buildProbeScopeKey("all", new Set())).toBe(buildScopeKey("all"));
 		expect(buildProbeScopeKey("primary")).toBe(buildScopeKey("primary"));
+		// A primary-only check reads through a fallback that acquires
+		// auxiliaries, so its key carries the switched-off set as well.
+		expect(buildProbeScopeKey("primary", ["opengrep"])).not.toBe(
+			buildProbeScopeKey("primary"),
+		);
 	});
 
 	it("normalizes path separators/casing the same way for repeated calls", () => {

@@ -547,11 +547,11 @@ export function cacheKeyFor(filePath: string): string {
 
 /**
  * Fingerprint identifying "what a touch actually covered" — see the
- * `scopeKey` doc on `WorkspaceDiagnosticsCacheEntry`. Both sweep call sites
- * (`runWorkspaceDiagnostics` and `tools/lsp-diagnostics.ts`'s batch/directory
- * scan) build this from the same two inputs (`touchFile`'s `clientScope` and
- * `excludeServerIds`) so an entry is only ever reused where its coverage is
- * IDENTICAL to what the new lookup is asking for.
+ * `scopeKey` doc on `WorkspaceDiagnosticsCacheEntry`. The workspace sweep
+ * (`runWorkspaceDiagnostics`) builds its key from `touchFile`'s `clientScope`
+ * and `excludeServerIds`, so an entry is only ever reused where its coverage
+ * is IDENTICAL to what the new lookup is asking for. `tools/lsp-diagnostics.ts`'s
+ * batch/directory scan builds its key with `buildProbeScopeKey` (#4323).
  */
 export function buildScopeKey(
 	clientScope: "all" | "primary",

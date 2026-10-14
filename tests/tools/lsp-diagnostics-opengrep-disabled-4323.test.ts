@@ -42,6 +42,7 @@ const workspace = fs.realpathSync(env.tmpDir);
 const probe = path.join(workspace, "probe.json");
 const secondProbe = path.join(workspace, "second.json");
 const yamlProbe = path.join(workspace, "probe.yaml");
+const secondYamlProbe = path.join(workspace, "second.yaml");
 const nested = path.join(workspace, "nested");
 const startsMarker = path.join(workspace, "opengrep-starts.txt");
 const OPENGREP_FINDING = "opengrep stand-in finding";
@@ -163,6 +164,7 @@ describe("an explicit LSP check with Opengrep switched off (#4323)", () => {
 		fs.writeFileSync(probe, '{"a": 1}\n');
 		fs.writeFileSync(secondProbe, '{"b": 2}\n');
 		fs.writeFileSync(yamlProbe, "a: 1\n");
+		fs.writeFileSync(secondYamlProbe, "b: 2\n");
 		fs.mkdirSync(nested);
 		fs.writeFileSync(path.join(nested, "inner.json"), '{"c": 3}\n');
 		const config = await import("../../clients/lsp/config.js");
@@ -317,5 +319,50 @@ describe("an explicit LSP check with Opengrep switched off (#4323)", () => {
 		const after = await diagnose({ paths: [probe, secondProbe] }, noOpengrep);
 
 		expect(after.text).not.toContain(OPENGREP_FINDING);
+	});
+
+	// The YAML server never starts, so the cases below reach the clientless
+	// `getDiagnostics` read. Each control first lets the warm Opengrep answer
+	// there, which records its finding as the file's last known answer.
+	it("does not show a warm Opengrep's last answer through the primary-only fallback", async () => {
+		const before = await diagnose({ path: yamlProbe, serverScope: "primary" });
+		expect(before.text).toContain(OPENGREP_FINDING);
+
+		// With the switch the read acquires no client at all; the last known
+		// answer it falls back to must not carry Opengrep's rows.
+		const after = await diagnose(
+			{ path: yamlProbe, serverScope: "primary" },
+			noOpengrep,
+		);
+
+		expect(after.text).not.toContain(OPENGREP_FINDING);
+	});
+
+	it("does not serve a primary-only batch cached before the switch", async () => {
+		// Without the switch the primary-only batch caches the fallback's
+		// Opengrep finding for both files.
+		const before = await diagnose({
+			paths: [yamlProbe, secondYamlProbe],
+			serverScope: "primary",
+		});
+		expect(before.text).toContain(OPENGREP_FINDING);
+
+		const after = await diagnose(
+			{ paths: [yamlProbe, secondYamlProbe], serverScope: "primary" },
+			noOpengrep,
+		);
+
+		expect(after.text).not.toContain(OPENGREP_FINDING);
+		// No-drop: both files are still checked.
+		expect(after.text).toContain("Files checked: 2");
+	});
+
+	it("does not show a warm Opengrep's last answer through lsp_navigation", async () => {
+		const before = await navigateDiagnostics(secondYamlProbe);
+		expect(before).toContain(OPENGREP_FINDING);
+
+		const after = await navigateDiagnostics(secondYamlProbe, noOpengrep);
+
+		expect(after).not.toContain(OPENGREP_FINDING);
 	});
 });

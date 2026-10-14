@@ -6444,7 +6444,16 @@ export class LSPService {
 		const { clients: spawned, serverCountAttempted } =
 			await this.getClientsForFile(filePath, excludeServerIds);
 		if (spawned.length === 0) {
-			const stale = this.lastKnownDiagnostics.get(normalizedPath);
+			// #4323: an excluded server's last answer is not this read's answer.
+			// Drop its rows from what this caller sees; the shared store keeps
+			// them for callers that did not exclude it.
+			const stored = this.lastKnownDiagnostics.get(normalizedPath);
+			const stale =
+				excludeServerIds !== undefined && excludeServerIds.size > 0
+					? stored?.filter(
+							(diagnostic) => !excludeServerIds.has(diagnostic.serverId ?? ""),
+						)
+					: stored;
 			const failureKind = stale?.length ? "no_clients_stale" : "no_clients";
 			this.lastDiagnosticsHealth.set(normalizedPath, {
 				health: failureKind,
