@@ -44,12 +44,17 @@
  * Known limits, named: a catch or finally body is the containment boundary
  * and is trusted not to throw beyond an explicit `throw` (a helper that
  * rethrows passes); a callback a handler schedules (`fs.rm(p, cb)`, a timer)
- * runs outside its try and is shape 53's hand screen; an un-voided call in
- * the try to an imported async function passes, because without type
- * information it cannot be told apart from a sync call; `const r: any = m`
+ * runs outside its try and is shape 53's hand screen; `const r: any = m`
  * widens without a cast; an event name is followed only to a same-file
  * declarator, and computed members (`worker["on"]`), `events.on(worker,
  * "message")` and `Object.assign(port, { onmessage })` are not sites.
+ *
+ * Covered elsewhere: this scan has no type information, so an un-voided call
+ * to an imported async function, or to a sync function that returns a
+ * promise, is invisible to it. `npm run lint:js:promises` (type-aware
+ * `no-floating-promises` and `no-misused-promises` over `clients/`, `mcp/`,
+ * `tools/` and `index.ts`, chained into the gating `npm run lint`) reds on
+ * every such call; tests/scripts/lint-js.test.ts plants both forms.
  */
 
 import { Lang, parse } from "@ast-grep/napi";
@@ -339,7 +344,7 @@ class Judge {
 			)
 			.map(
 				(arg: SgNode) =>
-					`argument ${arg.text()} is evaluated before ${callee?.text() ?? "the delegate"}'s try runs; pass the message itself and read it inside the try`,
+					`argument ${firstLine(arg.text())} is evaluated before ${callee?.text() ?? "the delegate"}'s try runs; pass the message itself and read it inside the try`,
 			);
 		const target =
 			callee?.kind() === "identifier" ? this.resolve(callee) : undefined;
