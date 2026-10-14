@@ -15,7 +15,6 @@
 								"SiblingRestoreInFlightHeld",
 								"SiblingRestoreLostVerdict",
 								"SiblingRestoreOneEdit",
-								"SiblingRestoreQueuedInHoldNoLsp",
 								"SiblingRestoreQueuedSilent",
 								"SiblingRestoreRecheck",
 								"SiblingSequential"
@@ -212,7 +211,6 @@
 								"SiblingRestoreInFlightHeld",
 								"SiblingRestoreLostVerdict",
 								"SiblingRestoreOneEdit",
-								"SiblingRestoreQueuedInHoldNoLsp",
 								"SiblingRestoreRecheck",
 								"SiblingSequential"
 							],
@@ -288,7 +286,6 @@
 								"SiblingRestoreCallBeforeRun",
 								"SiblingRestoreInFlightHeld",
 								"SiblingRestoreOneEdit",
-								"SiblingRestoreQueuedInHoldNoLsp",
 								"SiblingRestoreQueuedSilent",
 								"SiblingRestoreRecheck",
 								"SiblingSequential"
@@ -365,7 +362,13 @@
 							],
 							"reason": "No LSP multi-path edit competes for F's entry (LspMulti = FALSE in these configs), so F's hold waits on nothing and changes no schedule."
 						}
-					}
+					},
+					"also": [
+						{
+							"test": "tests/clients/fix-run-restore.test.ts",
+							"title": "TargetHold (#3506): an agent edit of a Dart target made while dart fix --apply runs waits for the pipeline"
+						}
+					]
 				},
 				"WidgetGuard": {
 					"value": "TRUE",

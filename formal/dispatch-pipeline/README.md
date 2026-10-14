@@ -270,11 +270,11 @@ sibling.
 | `MutSiblingNoRecheck` | #3741 round 1, before the re-check | violated `NoRestoreOverPreCheckEdit` | 272 (at the violation) |
 | `SiblingRestoreMerged` | **defect 2** on the merged restore: an edit lands between the re-check and the write | violated `NoRestoreOverGapEdit` | 271 (at the violation) |
 | `SiblingRestoreGap` | defect 2 alone: with `SettleCapture` the other windows below are closed, and this one is left | violated `NoRestoreOverNewer` | 246 (at the violation) |
-| `SiblingRestoreQueued` | **the code (#3830)**: `SettleCapture` and `RestoreQueue`, the restore started after the caller's scan, with F still held and not waiting for it, an LSP multi-path edit (checks `NoNoopRestore`, `CHECK_DEADLOCK TRUE`) | pass | 3,202 |
+| `SiblingRestoreQueued` | **the code (#3830)**: `SettleCapture` and `RestoreQueue`, the restore started after the caller's scan, with F still held and not waiting for it, an LSP multi-path edit (checks `NoNoopRestore`, `CHECK_DEADLOCK TRUE`) | pass | 3,630 |
 | `SiblingRestoreQueuedInHold` | the rejected shape: the same, with the pipeline holding F until the restore has ended (`RestoreGatesHold = TRUE`) | violated `Deadlock` | 77 (at the violation) |
-| `SiblingRestoreQueuedInHoldNoLsp` | the same without the LSP edit: no cycle, so the edit is the cycle's third edge | pass | 859 |
-| `MutSiblingNoRestoreQueue` | `SiblingRestoreQueued` without the queue entry | violated `NoRestoreOverNewer` | 2,093 (at the violation) |
-| `MutSiblingNoSettleCapture` | `SiblingRestoreQueued` without `SettleCapture` (window A) | violated `NoRestoreOverNewer` | 3,160 (at the violation) |
+| `SiblingRestoreQueuedInHoldNoLsp` | the same without the LSP edit: no cycle, so the edit is the cycle's third edge | pass | 964 |
+| `MutSiblingNoRestoreQueue` | `SiblingRestoreQueued` without the queue entry | violated `NoRestoreOverNewer` | 2,251 (at the violation) |
+| `MutSiblingNoSettleCapture` | `SiblingRestoreQueued` without `SettleCapture` (window A), keeping the report-history values before #3830 (`KeepCaptureHistory`, `CarryPreRunCalls`, `RestoreNoCapInFlight` = `FALSE`): with the code's values the carry (`CarryPreRunCalls = TRUE`) closes window A and TLC finds no violation (8,920 states generated, 4,483 distinct) | violated `NoRestoreOverNewer` | 3,160 (at the violation) |
 | `SiblingRestoreLostVerdict` | the `overwritten` verdict, observed with finding B closed by `RestoreNoCapInFlight` | pass | 93 |
 | `SiblingRestoreInFlightHeld` | the in-flight check, with the other windows closed and every call reaching pi-lens during the run | pass | 612 |
 | `MutSiblingNoInFlight` | the same without the in-flight check (the restore before #3741 round 2) | violated `NoRestoreOverNewer` | 493 (at the violation) |
@@ -295,8 +295,13 @@ configuration as a concurrent one, so `SConcurrent` is what opens the windows
 (on its own it exercises no restore path);
 the queue is what closes the gap (`MutSiblingNoRestoreQueue` against
 `SiblingRestoreQueued`, which differ only in `RestoreQueue`); keeping the run
-registered through the restore is what closes window A (`MutSiblingNoSettleCapture`
-against `SiblingRestoreQueued`, which differ only in `SettleCapture`); the
+registered through the restore is what closes window A when the run's earlier calls
+are not carried in (`MutSiblingNoSettleCapture` against `SiblingRestoreQueued`
+differs in `SettleCapture` and in the three pre-#3830 report-history values,
+`KeepCaptureHistory`, `CarryPreRunCalls` and `RestoreNoCapInFlight`; under the
+code's values the model does not show `SettleCapture` as load-bearing, though
+the code's own tests do: mutating it in `clients/fix-run-restore.ts` reds 18
+tests of `tests/clients/fix-run-restore.test.ts`); the
 release order is what closes the cycle (`SiblingRestoreQueuedInHold` against
 `SiblingRestoreQueued`, which differ only in `RestoreGatesHold`), and the LSP
 edit is what makes it a cycle (`SiblingRestoreQueuedInHoldNoLsp` against

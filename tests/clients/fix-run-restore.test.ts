@@ -2105,18 +2105,23 @@ describe("whole-package fixer restores agent edits (#3598)", () => {
 		// the lock-order cycle of the two tests above exists only because of that
 		// hold. Removing the acquire before `beginFixRun` left every other test
 		// green: the deadlock tests pass trivially with no hold, and no test
-		// asserted that F's own edits wait for the fixer.
-		it("TargetHold (#3506): an agent edit of the target made while a whole-package fixer runs waits for the pipeline", async () => {
+		// asserted that F's own edits wait for the fixer. Two code sites decide
+		// it, `tryRustClippyFix` and `tryDartFix` (clients/pipeline.ts), one test
+		// each: the Dart site's acquire survived the Rust test alone (#4432 r1 F1).
+		async function expectTargetHeldWhileFixerRuns(
+			target: string,
+			setFixer: (body: () => Promise<number>) => void,
+		) {
 			const started = gate();
 			const proceed = gate();
-			fake.clippy = async () => {
+			setFixer(async () => {
 				started.open();
 				await proceed.p;
 				return 0;
-			};
-			const run = runPipelineSettled(pipelineContext(mainRs), pipelineDeps());
+			});
+			const run = runPipelineSettled(pipelineContext(target), pipelineDeps());
 			await started.p;
-			const edit = agentAppend(mainRs, "// AGENT_EDIT\n");
+			const edit = agentAppend(target, "// AGENT_EDIT\n");
 			await afterQueueRegistration();
 			expect(edit.wrote()).toBe(false);
 			proceed.open();
@@ -2124,7 +2129,30 @@ describe("whole-package fixer restores agent edits (#3598)", () => {
 			await edit.done;
 			// No-drop: once the pipeline releases F, the edit lands.
 			expect(edit.wrote()).toBe(true);
-			expect(fs.readFileSync(mainRs, "utf-8")).toContain("// AGENT_EDIT");
+			expect(fs.readFileSync(target, "utf-8")).toContain("// AGENT_EDIT");
+		}
+
+		it("TargetHold (#3506): an agent edit of the target made while a whole-package fixer runs waits for the pipeline", async () => {
+			await expectTargetHeldWhileFixerRuns(mainRs, (body) => {
+				fake.clippy = body;
+			});
+		});
+
+		it("TargetHold (#3506): an agent edit of a Dart target made while dart fix --apply runs waits for the pipeline", async () => {
+			const libDir = path.join(tmpDir, "pkg", "lib");
+			fs.mkdirSync(libDir, { recursive: true });
+			fs.writeFileSync(
+				path.join(tmpDir, "pkg", "pubspec.yaml"),
+				"name: fixture\nenvironment:\n  sdk: ^3.5.0\n",
+			);
+			// The agreement evidence is anchored at the pipeline cwd (#3005 fixture
+			// recurrence, as the Cargo.toml above).
+			fs.writeFileSync(path.join(tmpDir, "pubspec.yaml"), "name: root\n");
+			const mainDart = path.join(libDir, "main.dart");
+			fs.writeFileSync(mainDart, "void main() {}\n");
+			await expectTargetHeldWhileFixerRuns(mainDart, (body) => {
+				fake.dartFix = body;
+			});
 		});
 
 		// Recurrence: #3914 r1, F2. The handler awaited the restore at its end, so
