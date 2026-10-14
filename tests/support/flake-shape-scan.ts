@@ -97,7 +97,7 @@ import { Lang, parse } from "@ast-grep/napi";
 
 import { bareIdentifier } from "./lsp-double-gate.js";
 import { unwrapParens } from "./spawn-cwd-scan.js";
-import { isViMockCall, unquote } from "./vi-mock-export-gate.js";
+import { isViMockCall, mockSpecifier, unquote } from "./vi-mock-export-gate.js";
 import {
 	createCallSiteScanner,
 	codeMatches,
@@ -751,32 +751,6 @@ export function mockTarget(file: string, specifier: string): string {
 		return relativePosix(repoRoot, absolute).replace(/\.[cm]?[jt]s$/, "");
 	}
 	return specifier;
-}
-
-/**
- * The module a `vi.mock`/`vi.doMock` call names: a string, a template with no
- * substitution, or vitest's typed `import("…")` form. Anything else (a
- * variable, a computed template) is unreadable and returns `undefined`, which
- * the detector counts as in-process: unknown fails closed.
- */
-function mockSpecifier(arg: SgNode | undefined): string | undefined {
-	if (!arg) return undefined;
-	const node = unwrapParens(arg);
-	if (node.kind() === "string") return unquote(node.text());
-	if (node.kind() === "template_string") {
-		return node
-			.children()
-			.some((child) => child.kind() === "template_substitution")
-			? undefined
-			: unquote(node.text());
-	}
-	if (
-		node.kind() === "call_expression" &&
-		node.field("function")?.kind() === "import"
-	) {
-		return mockSpecifier(node.field("arguments")?.namedChildren()[0]);
-	}
-	return undefined;
 }
 
 // `vi.mock`, `vi.doMock`, `vi["mock"]`: every spelling keeps `vi` followed by

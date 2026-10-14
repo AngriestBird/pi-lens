@@ -49,6 +49,34 @@ export function unquote(text: string): string | undefined {
 }
 
 /**
+ * The module a `vi.mock`/`vi.doMock` call names: a string, a template with no
+ * substitution, or vitest's typed `import("…")` form. Anything else (a
+ * variable, a computed template) is unreadable and returns `undefined`, which
+ * every caller treats as unknown and fails closed on: the flake-shape scan
+ * counts it as an in-process mock, and the project-trust seam ratchet reports
+ * it as an unclassified spelling (#4429).
+ */
+export function mockSpecifier(arg: SgNode | undefined): string | undefined {
+	if (!arg) return undefined;
+	const node = unwrapParens(arg);
+	if (node.kind() === "string") return unquote(node.text());
+	if (node.kind() === "template_string") {
+		return node
+			.children()
+			.some((child) => child.kind() === "template_substitution")
+			? undefined
+			: unquote(node.text());
+	}
+	if (
+		node.kind() === "call_expression" &&
+		node.field("function")?.kind() === "import"
+	) {
+		return mockSpecifier(node.field("arguments")?.namedChildren()[0]);
+	}
+	return undefined;
+}
+
+/**
  * Semantic mock-call check: the object must be `vi` and the property must be
  * one of `names`, whether written dot (`vi.mock`), bracket (`vi["mock"]` — a
  * `subscript_expression`, not a `member_expression`), or spaced
