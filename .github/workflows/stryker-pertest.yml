@@ -68,7 +68,9 @@ jobs:
         id: plan
         env:
           MODULE: ${{ steps.choose.outputs.module }}
-        run: node scripts/stryker-pertest.mjs plan --module "$MODULE" | tee -a "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          node scripts/stryker-pertest.mjs plan --module "$MODULE" | tee -a "$GITHUB_OUTPUT"
       # The runner pins the threads pool over any config; `process.chdir()` throws
       # there and Stryker aborts its dry run on one failing test. A pre-flight
       # under the same pool drops, and names, the files that cannot run.

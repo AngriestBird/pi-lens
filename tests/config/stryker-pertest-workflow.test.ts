@@ -109,3 +109,18 @@ describe("stryker-pertest workflow rotation (#4365)", () => {
 		);
 	});
 });
+
+describe("stryker-pertest workflow pipes (#4365)", () => {
+	// Recurrence (PR #4372 review, F1): the plan step piped `plan` into `tee`
+	// without pipefail, so a throwing plan exited 0 and the failure surfaced only
+	// in a later step. Every step that pipes sets pipefail.
+	it("sets pipefail in every step that pipes a command", () => {
+		const piping = job.steps.filter((step) =>
+			/(?<!\|)\|(?!\|)/.test(step.run ?? ""),
+		);
+		expect(piping.length).toBeGreaterThan(0);
+		for (const step of piping) {
+			expect(step.run, step.name).toMatch(/set -[a-z]*o pipefail/);
+		}
+	});
+});

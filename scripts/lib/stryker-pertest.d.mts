@@ -20,6 +20,7 @@ export declare function eligibleModules(
 		testFiles: string[];
 		lineCount?: (file: string) => number;
 		maxLines?: number;
+		readFile?: (file: string) => string;
 	},
 ): string[];
 export declare function pickModule(eligible: string[], index: number): string;

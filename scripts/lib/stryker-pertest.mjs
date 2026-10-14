@@ -7,6 +7,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import {
 	compiledJsPath,
+	importsMutationSource,
 	isCompiledMutationSource,
 	mapRelatedTests,
 } from "./stryker-diff.mjs";
@@ -79,15 +80,16 @@ export function planPertest(moduleFile, options) {
 export const MAX_ROTATION_MODULE_LINES = 600;
 
 /**
- * Modules the rotation may pick: runtime `.ts` sources that have a conventional
- * sibling test (`tests/<path>.test.ts` or `tests/<path>-*.test.ts`, the pairing
- * `mapRelatedTests` calls a sibling) and are at most `maxLines` long. A sibling
- * test is the module's own test, which is the population this campaign judges;
- * the run itself still takes every one-hop importer (`planPertest`). Cheap on
- * purpose: the full import scan costs minutes over the whole tree.
+ * Modules the rotation may pick: runtime `.ts` sources with an own test (see
+ * `isOwnTest`) that imports them, and at most `maxLines` long. The import is
+ * required: a test named for a module but not importing it (PR #4372 pilot,
+ * clients/dispatch/rule-ignores.ts) gives `planPertest` no importer, so the
+ * rotation would pick a module whose run always throws. The run itself still
+ * takes every one-hop importer (`planPertest`). Cheap on purpose: the full
+ * import scan costs minutes over the whole tree, and only own tests are read.
  *
  * @param {string[]} moduleFiles candidate `.ts` sources
- * @param {{testFiles: string[], lineCount?: (file: string) => number, maxLines?: number}} options
+ * @param {{testFiles: string[], lineCount?: (file: string) => number, maxLines?: number, readFile?: (file: string) => string}} options
  * @returns {string[]} sorted
  */
 export function eligibleModules(
@@ -96,16 +98,19 @@ export function eligibleModules(
 		testFiles,
 		lineCount = (file) => readFileSync(file, "utf8").split("\n").length,
 		maxLines = MAX_ROTATION_MODULE_LINES,
+		readFile = (file) => readFileSync(file, "utf8"),
 	},
 ) {
 	const tests = testFiles.filter((test) => !isGovernanceTest(test));
+	const importsModule = (file) =>
+		tests.some(
+			(test) =>
+				isOwnTest(test, file) &&
+				importsMutationSource(test, readFile(test), file),
+		);
 	return moduleFiles
 		.filter(isCompiledMutationSource)
-		.filter(
-			(file) =>
-				tests.some((test) => isOwnTest(test, file)) &&
-				lineCount(file) <= maxLines,
-		)
+		.filter((file) => importsModule(file) && lineCount(file) <= maxLines)
 		.sort();
 }
 

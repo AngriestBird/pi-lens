@@ -17,6 +17,7 @@ import {
 	eligibleModules,
 	findWorthlessTests,
 	isGovernanceTest,
+	isOwnTest,
 	patchVitestRunner,
 	pickModule,
 	planPertest,
@@ -275,6 +276,21 @@ describe("own tests (#4365)", () => {
 	});
 });
 
+describe("isOwnTest (#4365)", () => {
+	// Recurrence (PR #4372 review, F2): a stem prefix without the hyphen made
+	// tests/clients/lspx.test.ts the own test of clients/lsp.ts, so an unrelated
+	// seam's test landed in the "Own tests" deletion review.
+	it("does not count a stem prefix without the hyphen as an own test", () => {
+		expect(isOwnTest("tests/clients/lspx.test.ts", "clients/lsp.ts")).toBe(
+			false,
+		);
+		expect(isOwnTest("tests/clients/lsp.test.ts", "clients/lsp.ts")).toBe(true);
+		expect(isOwnTest("tests/clients/lsp-cache.test.ts", "clients/lsp.ts")).toBe(
+			true,
+		);
+	});
+});
+
 describe("summarizeReport (#4365)", () => {
 	it("counts mutants by status", () => {
 		const counts = summarizeReport(
@@ -472,10 +488,19 @@ describe("eligibleModules / pickModule (#4365)", () => {
 		"clients/untested.ts": 40,
 		"clients/zeta.ts": 40,
 	};
+	// Each own test imports the module it is named for; the rule under test reads
+	// the import, so the fixture supplies it.
+	const imports: Record<string, string> = {
+		"tests/clients/small.test.ts": "clients/small.js",
+		"tests/clients/big.test.ts": "clients/big.js",
+		"tests/clients/zeta-extra.test.ts": "clients/zeta.js",
+		"tests/clients/other.test.ts": "clients/other.js",
+	};
 	const eligible = () =>
 		eligibleModules(Object.keys(lines), {
 			testFiles,
 			lineCount: (f: string) => lines[f],
+			readFile: (f: string) => `import "../../${imports[f] ?? ""}";`,
 		});
 
 	// Recurrence: a rotation that picks a module with no test of its own, one only a
@@ -483,6 +508,26 @@ describe("eligibleModules / pickModule (#4365)", () => {
 	// a run on a report that cannot answer the question.
 	it("keeps only modules with a sibling test and within the size cap, sorted", () => {
 		expect(eligible()).toEqual(["clients/small.ts", "clients/zeta.ts"]);
+	});
+
+	// Recurrence (PR #4372 pilot, clients/dispatch/rule-ignores.ts): its own test
+	// sits at tests/clients/dispatch/rule-ignores.test.ts and never imports the
+	// module, so the rotation picked it and `plan` threw "no test imports" on
+	// every run that landed there.
+	it("drops an own-named test that does not import its module", () => {
+		const sources: Record<string, string> = {
+			"tests/clients/dud.test.ts":
+				'import { x } from "../../clients/other.js";',
+			"tests/clients/real.test.ts":
+				'import { r } from "../../clients/real.js";',
+		};
+		expect(
+			eligibleModules(["clients/dud.ts", "clients/real.ts"], {
+				testFiles: Object.keys(sources),
+				lineCount: () => 40,
+				readFile: (f: string) => sources[f],
+			}),
+		).toEqual(["clients/real.ts"]);
 	});
 
 	it("walks the list by index and wraps", () => {
