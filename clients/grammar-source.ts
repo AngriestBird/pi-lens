@@ -533,7 +533,10 @@ export async function downloadGrammarDetailed(
 	if (isVendoredGrammar(filename)) return vendoredGrammarRefusal(filename);
 	try {
 		fs.mkdirSync(destDir, { recursive: true });
-		const res = await fetch(grammarSourceUrl(filename), { signal });
+		const res = await fetch(
+			grammarSourceUrl(filename),
+			signal ? { signal } : undefined,
+		);
 		if (!res.ok) {
 			// 404/410: the CDN has authoritatively answered "this wasm does not
 			// exist at this URL" — a retry hits the same answer. Every other
