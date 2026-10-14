@@ -208,6 +208,29 @@ describe("install-smoke.yml lsp-handshake job (#4291)", () => {
 		expect(install?.run).toMatch(/^npm ci\b.*--ignore-scripts\b/);
 	});
 
+	// Recurrence: the handshake job carries a copy of tool-smoke.yml's pinned
+	// Docker-server install (without it the dockerfile-official row fails on
+	// master). A copy drifts: a digest bumped in the nightly only would make this
+	// job download a binary the nightly no longer vouches for.
+	it("pins the same Docker language server release and digests as tool-smoke.yml", () => {
+		const name = "Install official Docker language server v0.20.1";
+		const pins = (file: string, job: string) => {
+			const document = yaml.load(
+				readFileSync(resolve(ROOT, file), "utf8"),
+			) as Doc;
+			const run = document.jobs[job]?.steps?.find(
+				(step) => step.name === name,
+			)?.run;
+			expect(run, `${file} ${job} step "${name}"`).toBeDefined();
+			return [...(run ?? "").matchAll(/digest="([0-9a-f]{64})"/g)].map(
+				(match) => match[1],
+			);
+		};
+		const nightly = pins(".github/workflows/tool-smoke.yml", "tool-smoke");
+		expect(nightly).toHaveLength(2);
+		expect(pins(WORKFLOW, "lsp-handshake")).toEqual(nightly);
+	});
+
 	// Recurrence: the report step moved before the handshake, or lost its
 	// `always()`, so a red handshake skips it. The behaviour of the step, and of
 	// the handshake's pipefail, is executed in
