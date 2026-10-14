@@ -1249,6 +1249,24 @@ function selectionReason(
 	base: string,
 ): ServerSelectionReason {
 	if (config.disabledServerIds.has(server.id)) return "disabled-by-config";
+	return fileMatchReason(server, filePath, ext, base);
+}
+
+/** The lower-cased extension and basename the file gates match against. */
+function fileMatchKeys(filePath: string): { ext: string; base: string } {
+	return {
+		ext: path.extname(filePath).toLowerCase(),
+		base: path.basename(filePath).toLowerCase(),
+	};
+}
+
+/** The file gates of {@link selectionReason}, without the operator's denial. */
+function fileMatchReason(
+	server: LSPServerInfo,
+	filePath: string,
+	ext: string,
+	base: string,
+): Exclude<ServerSelectionReason, "disabled-by-config"> {
 	let matched = false;
 	for (const value of server.extensions) {
 		const lower = value.toLowerCase();
@@ -1280,18 +1298,38 @@ export function explainServersForFile(
 	filePath: string,
 	config: RegisteredLSPConfig = getConfigForFile(filePath),
 ): ServerSelection[] {
-	const ext = path.extname(filePath).toLowerCase();
-	const base = path.basename(filePath).toLowerCase();
+	const { ext, base } = fileMatchKeys(filePath);
 	return registeredServers(config).map((server) => {
 		const reason = selectionReason(server, config, filePath, ext, base);
 		return { server, selected: reason === "selected", reason };
 	});
 }
 
+/**
+ * #4403: the primaries that would serve this file but the operator turned off
+ * in `lsp.disabledServers`. No language server answers for such a file, so its
+ * result is unconfirmed, the rule #4322 set for a primary that could not start.
+ * Only a read whose acquired clients hold no primary asks.
+ */
+export function configDisabledPrimaryServerIds(filePath: string): string[] {
+	const config = getConfigForFile(filePath);
+	if (config.disabledServerIds.size === 0) return [];
+	const { ext, base } = fileMatchKeys(filePath);
+	const ids: string[] = [];
+	for (const server of registeredServers(config)) {
+		if (
+			config.disabledServerIds.has(server.id) &&
+			!isAuxiliary(server) &&
+			fileMatchReason(server, filePath, ext, base) === "selected"
+		)
+			ids.push(server.id);
+	}
+	return ids;
+}
+
 export function getServersForFileWithConfig(filePath: string): LSPServerInfo[] {
 	const config = getConfigForFile(filePath);
-	const ext = path.extname(filePath).toLowerCase();
-	const base = path.basename(filePath).toLowerCase();
+	const { ext, base } = fileMatchKeys(filePath);
 	return registeredServers(config).filter(
 		(server) =>
 			selectionReason(server, config, filePath, ext, base) === "selected",

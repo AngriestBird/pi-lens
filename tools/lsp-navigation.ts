@@ -1380,6 +1380,7 @@ export function createLspNavigationTool(
 					const primaryUnavailable = describePrimaryUnavailable(
 						undefined,
 						lspService.getDiagnosticsHealth(filePath),
+						filePath,
 					);
 					const result = [
 						{

@@ -6,6 +6,7 @@ const createLSPClient = vi.fn();
 const logLatency = vi.fn();
 
 vi.mock("../../../clients/lsp/config.js", () => ({
+	configDisabledPrimaryServerIds: () => [],
 	getServersForFileWithConfig,
 	getServerInitOverride: vi.fn().mockReturnValue(undefined),
 }));

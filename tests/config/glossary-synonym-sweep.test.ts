@@ -956,7 +956,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/log-cleanup.ts": 9,
 		"clients/lsp-mutation.ts": 3,
 		"clients/lsp/client-registry.ts": 4,
-		"clients/lsp/config.ts": 9,
+		"clients/lsp/config.ts": 7,
 		"clients/lsp/edits.ts": 23,
 		"clients/lsp/index.ts": 15,
 		"clients/lsp/inferred-project.ts": 3,

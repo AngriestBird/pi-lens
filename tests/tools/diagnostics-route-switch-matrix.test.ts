@@ -9,6 +9,11 @@
  *
  * Two halves:
  *
+ * Each cell also reads the reason a route gives when no primary answered: a
+ * disabled primary and a missing one are both unconfirmed, and every route
+ * that renders a reason names the primary and says which (#4403's decision,
+ * the #4322 rule extended to `lsp.disabledServers`).
+ *
  * 1. The route list is derived from code. Every production read of an
  *    `LSPService` member that starts a server or returns diagnostics
  *    (`DIAGNOSTICS_ENTRY_MEMBERS`) is a site. The AST scan never sees a
@@ -189,32 +194,26 @@ type Verdict = "clean" | "unconfirmed" | "findings" | "unsupported";
 /**
  * Verdicts that differ from their column's, kept visible until a decision
  * lands. Shrink-only: a row whose route stops diverging reds as a mismatch, and
- * so does a new divergence.
- *
- * A file with no primary configured (the JSON server off in `lsp.json`) is
- * answered by auxiliaries alone. #4322's rule names only primaries that
- * resolved a root, so the touch treats the file like an auxiliary-only
- * language: the write-time runner, the single-file renderer ("Primary LSP:
- * confirmed clean.") and the sweep call it clean, while the batch and
- * directory classifier reads a file with no primary server as `unsupported`
- * (`classifyBatchFileOutcome`). Which one is right is a maintainer decision.
+ * so does a new divergence. Empty since the disabled-primary decision (#4403):
+ * batch and directory used to read a file with its primary off in `lsp.json`
+ * as `unsupported` while the other routes called it clean.
  */
 const KNOWN_VERDICT_DIVERGENCES: ReadonlyArray<{
 	route: RouteId;
 	column: ColumnId;
 	verdict: Verdict;
-}> = [
-	{
-		route: "lsp_diagnostics batch",
-		column: "primary disabled",
-		verdict: "unsupported",
-	},
-	{
-		route: "lsp_diagnostics directory",
-		column: "primary disabled",
-		verdict: "unsupported",
-	},
-];
+}> = [];
+
+/**
+ * A route that renders no reason text the matrix reads, with why. Every other
+ * route's note is read from what it shows the agent.
+ */
+const NO_NOTE_SURFACE: Partial<Record<RouteId, string>> = {
+	"write-time dispatch":
+		"the matrix reads the dispatch report's runner status row, which carries no reason text",
+	"turn-end actionable warnings":
+		"it reports only warnings that carry a code action; a file with none adds nothing",
+};
 
 /** The servers a column's configuration selects for a JSON file. */
 function selectedServers(column: Column): string[] {
@@ -243,13 +242,27 @@ function expectedStarted(route: RouteId, column: Column): string[] {
  * The column's verdict, from the rules alone: a working language server that
  * answers clean confirms the file, switches that drop only Opengrep change
  * nothing about that, and auxiliaries never confirm a file whose primary did
- * not answer (#4322).
+ * not answer, whether it could not start (#4322) or is off in config (#4403).
  */
 function expectedVerdict(column: Column): Verdict {
-	return column.primary === "missing" ? "unconfirmed" : "clean";
+	return column.primary === "fake" ? "clean" : "unconfirmed";
 }
 
-type Cell = { started: string[] | "n/a"; verdict: string };
+/**
+ * The reason a route gives when no primary answered: the primary it names and
+ * why. The sweep's note counts files instead of naming servers, so it gives
+ * both causes at once.
+ */
+function expectedNote(route: RouteId, column: Column): string {
+	if (NO_NOTE_SURFACE[route] !== undefined) return "n/a";
+	if (column.primary === "fake") return "none";
+	if (ROUTE_SCOPE[route] === "sweep") return "either";
+	return column.primary === "disabled"
+		? "json: disabled in config"
+		: "json: not started";
+}
+
+type Cell = { started: string[] | "n/a"; verdict: string; note: string };
 
 function expectedRow(column: Column): Record<RouteId, Cell> {
 	const row = {} as Record<RouteId, Cell>;
@@ -257,7 +270,7 @@ function expectedRow(column: Column): Record<RouteId, Cell> {
 		if (
 			NOT_APPLICABLE.some((na) => na.route === route && na.column === column.id)
 		) {
-			row[route] = { started: "n/a", verdict: "n/a" };
+			row[route] = { started: "n/a", verdict: "n/a", note: "n/a" };
 			continue;
 		}
 		const divergence = KNOWN_VERDICT_DIVERGENCES.find(
@@ -269,6 +282,7 @@ function expectedRow(column: Column): Record<RouteId, Cell> {
 				NO_VERDICT_SURFACE[route] !== undefined
 					? "none"
 					: (divergence?.verdict ?? expectedVerdict(column)),
+			note: expectedNote(route, column),
 		};
 	}
 	return row;
@@ -283,6 +297,37 @@ function fileModeVerdict(text: string): string {
 	if (/^Primary LSP[^:]*: (not available|unconfirmed|timed out)/.test(line))
 		return "unconfirmed";
 	return `unread: ${line}`;
+}
+
+/**
+ * The primary a route names as not answering, and the cause it gives:
+ * `<ids>: disabled in config`, `<ids>: not started`, a bare cause when the
+ * text names no server (`either` when it gives both), or `none`.
+ */
+function primaryNote(text: string): string {
+	const disabled = text.includes("disabled in config");
+	const unstarted = text.includes("could not be started");
+	const cause =
+		disabled && unstarted
+			? "either"
+			: disabled
+				? "disabled in config"
+				: unstarted
+					? "not started"
+					: "none";
+	const named = /Primary LSP \(([^)]*)\): not available/.exec(text);
+	return named && cause !== "none" ? `${named[1]}: ${cause}` : cause;
+}
+
+/** The per-file reasons a batch or directory gives in its outcomes. */
+function batchNote(details: Record<string, unknown> | undefined): string {
+	const outcomes = (details?.outcomes ?? []) as Array<{ reason?: string }>;
+	const notes = [
+		...new Set(outcomes.map((entry) => primaryNote(entry.reason ?? ""))),
+	];
+	return notes.length === 1
+		? (notes[0] as string)
+		: `mixed: ${notes.join(",")}`;
 }
 
 const BATCH_OUTCOME_VERDICT: Record<string, Verdict> = {
@@ -390,9 +435,12 @@ function makeFixture(column: Column): Fixture {
 				typos: { command: shim("typos") },
 				opengrep: { command: shim("opengrep") },
 			},
+			// `rust` is a disabled primary for another language: no JSON file's
+			// note may name it, in any column.
 			disabledServers: [
 				"ast-grep",
 				"zizmor",
+				"rust",
 				...(column.primary === "disabled" ? ["json"] : []),
 			],
 			// A configured warm file that does not exist: session_start's
@@ -467,16 +515,17 @@ async function runColumn(column: Column): Promise<Record<RouteId, Cell>> {
 		/** A fresh service, so the marker lines `work` adds are its starts. */
 		const cell = async (
 			route: RouteId,
-			work: () => Promise<string>,
+			work: () => Promise<{ verdict: string; note: string }>,
 		): Promise<void> => {
 			resetLSPService();
 			getLSPService();
 			clearWorkspaceDiagnosticsCache(fx.workspace);
 			const from = markerLines(fx.marker).length;
-			const verdict = await work();
+			const { verdict, note } = await work();
 			observed[route] = {
 				started: [...new Set(markerLines(fx.marker).slice(from))].sort(),
 				verdict,
+				note,
 			};
 		};
 		const lens = pi.tools.get("lens_diagnostics") as ToolLike;
@@ -505,31 +554,42 @@ async function runColumn(column: Column): Promise<Record<RouteId, Cell>> {
 			const report = getLatencyReports().find(
 				(entry) => path.resolve(entry.filePath) === written,
 			);
-			return writeTimeVerdict(
-				report?.runners.find((runner) => runner.runnerId === "lsp"),
-			);
+			return {
+				verdict: writeTimeVerdict(
+					report?.runners.find((runner) => runner.runnerId === "lsp"),
+				),
+				note: "n/a",
+			};
 		});
 		await cell("lsp_diagnostics file", async () => {
 			const result = await lspCheck({ path: fx.file("file.json") });
-			return fileModeVerdict(String(result.content[0]?.text));
+			const text = String(result.content[0]?.text);
+			return { verdict: fileModeVerdict(text), note: primaryNote(text) };
 		});
 		await cell("lsp_diagnostics batch", async () => {
 			const result = await lspCheck({
 				paths: [fx.file("batch-a.json"), fx.file("batch-b.json")],
 			});
-			return batchVerdict(result.details);
+			return {
+				verdict: batchVerdict(result.details),
+				note: batchNote(result.details),
+			};
 		});
 		await cell("lsp_diagnostics directory", async () => {
 			fx.file("dir/inner.json");
 			const result = await lspCheck({ path: path.join(fx.workspace, "dir") });
-			return batchVerdict(result.details);
+			return {
+				verdict: batchVerdict(result.details),
+				note: batchNote(result.details),
+			};
 		});
 		await cell("lsp_diagnostics primary-only", async () => {
 			const result = await lspCheck({
 				path: fx.file("primary.json"),
 				serverScope: "primary",
 			});
-			return fileModeVerdict(String(result.content[0]?.text));
+			const text = String(result.content[0]?.text);
+			return { verdict: fileModeVerdict(text), note: primaryNote(text) };
 		});
 		await cell("lsp_navigation workspaceDiagnostics", async () => {
 			const result = await nav.execute(
@@ -539,7 +599,8 @@ async function runColumn(column: Column): Promise<Record<RouteId, Cell>> {
 				null,
 				ctx,
 			);
-			return navigationVerdict(String(result.content[0]?.text));
+			const text = String(result.content[0]?.text);
+			return { verdict: navigationVerdict(text), note: primaryNote(text) };
 		});
 		await cell("lens_diagnostics mode=full", async () => {
 			const result = await lens.execute(
@@ -549,7 +610,10 @@ async function runColumn(column: Column): Promise<Record<RouteId, Cell>> {
 				null,
 				{ cwd: fx.workspace },
 			);
-			return sweepVerdict(result.details);
+			return {
+				verdict: sweepVerdict(result.details),
+				note: primaryNote(String(result.content[0]?.text)),
+			};
 		});
 		// The turn's edit runs its own dispatch first; the cell starts after it,
 		// with a fresh service, so turn_end's cold read is the only reader left.
@@ -567,7 +631,7 @@ async function runColumn(column: Column): Promise<Record<RouteId, Cell>> {
 		await cell("turn-end actionable warnings", async () => {
 			await pi.emit("turn_end", {}, ctx);
 			await _awaitDeferredLspPullForTest();
-			return "none";
+			return { verdict: "none", note: "n/a" };
 		});
 		await pi.emit("session_shutdown", { reason: "quit" }, ctx);
 		await getLSPService().shutdown();
@@ -576,7 +640,7 @@ async function runColumn(column: Column): Promise<Record<RouteId, Cell>> {
 		observed["MCP pilens_diagnostics"] = NOT_APPLICABLE.some(
 			(na) => na.route === "MCP pilens_diagnostics" && na.column === column.id,
 		)
-			? { started: "n/a", verdict: "n/a" }
+			? { started: "n/a", verdict: "n/a", note: "n/a" }
 			: await runMcpCell(fx);
 	} finally {
 		if (savedConfigPath === undefined) delete process.env.PI_LENS_CONFIG_PATH;
@@ -622,9 +686,11 @@ async function runMcpCell(fx: Fixture): Promise<Cell> {
 			60_000 * testTimeoutScale,
 		);
 		const result = response.result as { content: Array<{ text: string }> };
+		const text = result.content[0]?.text ?? "";
 		return {
 			started: [...new Set(markerLines(fx.marker).slice(from))].sort(),
-			verdict: fileModeVerdict(result.content[0]?.text ?? ""),
+			verdict: fileModeVerdict(text),
+			note: primaryNote(text),
 		};
 	} finally {
 		harness.dispose();
@@ -965,6 +1031,49 @@ describe("diagnostics routes are derived from code (#4403)", () => {
 	});
 });
 
+// #4403: the matrix's disabled and missing columns each have one cause. A file
+// whose primaries mix the two must not be told only one of them.
+describe("the primary-unavailable note's cause (#4403)", () => {
+	it("names a disabled primary, an unstarted one, and both when they mix", async () => {
+		const env = setupTestEnvironment(PREFIX);
+		const workspace = fs.realpathSync(env.tmpDir);
+		fs.mkdirSync(path.join(workspace, ".pi-lens"));
+		fs.writeFileSync(
+			path.join(workspace, ".pi-lens", "lsp.json"),
+			JSON.stringify({ disabledServers: ["json"] }),
+		);
+		const file = path.join(workspace, "probe.json");
+		fs.writeFileSync(file, "{}\n");
+		const trust = await import("../../clients/project-trust.js");
+		const config = await import("../../clients/lsp/config.js");
+		const { describePrimaryUnavailable } =
+			await import("../../tools/lsp-diagnostics.js");
+		trust.setProjectTrustState("trusted");
+		try {
+			await config.initLSPConfig(workspace);
+			const note = (ids: string[]) =>
+				describePrimaryUnavailable(
+					undefined,
+					{ unavailablePrimaryServerIds: ids },
+					file,
+				) ?? "";
+
+			expect(note(["json"])).toContain(
+				"(it is disabled in config by lsp.disabledServers)",
+			);
+			expect(note(["yaml"])).toContain(
+				"(it could not be started, or was still starting)",
+			);
+			expect(note(["json", "yaml"])).toContain(
+				"(it could not be started, was still starting, or is disabled in config by lsp.disabledServers)",
+			);
+		} finally {
+			trust.resetProjectTrust();
+			config.resetLSPConfigStateForTests();
+		}
+	});
+});
+
 describe("every diagnostics route under every server-selecting switch (#4403)", () => {
 	afterAll(async () => {
 		await cleanupTestEnvironmentsDrained(PREFIX, {
@@ -992,5 +1101,10 @@ describe("every diagnostics route under every server-selecting switch (#4403)", 
 			expect(ROUTES).toContain(row.route);
 			expect(columns.has(row.column)).toBe(true);
 		}
+		for (const route of Object.keys({
+			...NO_VERDICT_SURFACE,
+			...NO_NOTE_SURFACE,
+		}))
+			expect(ROUTES).toContain(route);
 	});
 });

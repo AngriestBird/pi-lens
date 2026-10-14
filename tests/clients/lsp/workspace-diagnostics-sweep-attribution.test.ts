@@ -31,6 +31,7 @@ const createLSPClient = vi.fn();
 // Only server selection and client creation are stubbed, so no language server
 // is spawned. Everything the sweep itself does is the real code path.
 vi.mock("../../../clients/lsp/config.js", () => ({
+	configDisabledPrimaryServerIds: () => [],
 	getServersForFileWithConfig,
 	getServerInitOverride: () => undefined,
 }));

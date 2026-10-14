@@ -793,6 +793,12 @@ file-scoped worklist and receives no project-wide scanner output.
   `clientScope` and `diagnostics` options.
   A divergence awaiting a decision sits in its shrink-only
   `KNOWN_VERDICT_DIVERGENCES`.
+- A file no primary answered for is unconfirmed, never clean, whether the
+  primary could not start, was still starting, or is in `lsp.disabledServers`.
+  The one rule is `unacquiredPrimaryServerIds` (clients/lsp/index.ts), which
+  folds in `configDisabledPrimaryServerIds`; every route words it through
+  `describePrimaryUnavailable` and `PRIMARY_UNAVAILABLE_CAUSE`
+  (tools/lsp-diagnostics.ts), never its own sentence.
 - LSP roots never exceed the session-cwd ceiling. Root/config discovery uses
   shared marker seams. Child cwd resolution uses `resolveToolCwd` and its
   caller-specific markers.

@@ -76,7 +76,10 @@ import {
 	type StoredDiagnosticBinding,
 	type TouchFileResult,
 } from "./diagnostic-binding.js";
-import { getServersForFileWithConfig } from "./config.js";
+import {
+	configDisabledPrimaryServerIds,
+	getServersForFileWithConfig,
+} from "./config.js";
 // #2052: deliberately NOT taken from `config.js`. This module's import surface
 // from `config.js` is mirrored by explicit `vi.mock` factories in ~58 test
 // files, so every new symbol taken from there breaks all of them.
@@ -520,14 +523,21 @@ export interface LSPDiagnosticsHealth {
  * `ensureClientForServer` before it spawns) was tried and not acquired. A file
  * with no rootable primary (an auxiliary-only language) has none; a touch that
  * acquired any primary, a `fallbackFor` alternate included, has none either.
+ * #4403: a primary the operator disabled for this file never resolves a root,
+ * and it did not answer either, so it is named too.
  */
 function unacquiredPrimaryServerIds(
 	spawned: readonly SpawnedServer[],
 	resolvedPrimaryRoots: ReadonlyMap<string, string>,
+	filePath: string,
 ): string[] {
-	return spawned.some((entry) => !isAuxiliary(entry.info))
-		? []
-		: [...resolvedPrimaryRoots.keys()];
+	if (spawned.some((entry) => !isAuxiliary(entry.info))) return [];
+	return [
+		...new Set([
+			...resolvedPrimaryRoots.keys(),
+			...configDisabledPrimaryServerIds(filePath),
+		]),
+	];
 }
 
 function mergeLspDiagnostics(
@@ -717,7 +727,11 @@ export type LSPWorkspaceUnconfirmedReason =
 	// workspace-cache write-back — persisting a declined file as confirmed
 	// clean would replay a false clean on every later sweep, which is the whole
 	// defect #2052 exists to close.
-	| "outside_project_root";
+	| "outside_project_root"
+	// #4403: no primary answered: it could not start, was still starting (a
+	// #744 warm-up failure), or the operator disabled it. Not a deadline, so it
+	// must not render as one.
+	| "primary_unavailable";
 
 export interface LSPWorkspaceDiagnosticResult {
 	filePath: string;
@@ -3871,6 +3885,7 @@ export class LSPService {
 		const unavailablePrimaryServerIds = unacquiredPrimaryServerIds(
 			spawned,
 			resolvedPrimaryRoots,
+			filePath,
 		);
 		const leaseKeys = await this.clientRegistry.acquireClientLeases(
 			spawned,
@@ -6502,6 +6517,7 @@ export class LSPService {
 			const unavailablePrimaryServerIds = unacquiredPrimaryServerIds(
 				spawned,
 				resolvedPrimaryRoots,
+				filePath,
 			);
 			this.lastDiagnosticsHealth.set(normalizedPath, {
 				health: failureKind,
@@ -6690,6 +6706,7 @@ export class LSPService {
 		const unavailablePrimaryServerIds = unacquiredPrimaryServerIds(
 			spawned,
 			resolvedPrimaryRoots,
+			filePath,
 		);
 
 		this.lastDiagnosticsHealth.set(normalizedPath, {
@@ -8680,7 +8697,9 @@ export class LSPService {
 						: declinedOutsideRoot
 							? "outside_project_root"
 							: inconclusive
-								? "inconclusive"
+								? touchResult?.inconclusiveReason === "primary-unavailable"
+									? "primary_unavailable"
+									: "inconclusive"
 								: undefined;
 				// #1104 (shape 5 — AGENTS.md): the touch's content binding is an
 				// EXPLICIT enumerable field on the wrapper now (#1179), so it survives
@@ -8906,7 +8925,7 @@ export class LSPService {
 									diagnostics: [],
 									count: 0,
 									timedOut: true,
-									unconfirmedReason: "inconclusive",
+									unconfirmedReason: "primary_unavailable",
 									skippedWarmupFailure: true,
 								});
 								timedOutFiles += 1;

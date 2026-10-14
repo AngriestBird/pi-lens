@@ -40,6 +40,7 @@ const getServersForFileWithConfig = vi.fn();
 const isDirectLspCommandTemporarilyUnavailable = vi.fn(() => false);
 
 vi.mock("../../../clients/lsp/config.js", () => ({
+	configDisabledPrimaryServerIds: () => [],
 	getServersForFileWithConfig,
 	getServerInitOverride: vi.fn().mockReturnValue(undefined),
 }));

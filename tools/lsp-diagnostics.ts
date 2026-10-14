@@ -23,6 +23,7 @@ import {
 } from "../clients/lsp/workspace-diagnostics-cache.js";
 import {
 	getServersForFileWithConfig,
+	isServerDisabled,
 	primaryServerId,
 	resolveLspCwdForFile,
 } from "../clients/lsp/config.js";
@@ -875,6 +876,7 @@ async function collectDiagnosticsForFile(
 	const primaryUnavailable = describePrimaryUnavailable(
 		touched,
 		fallbackHealth,
+		absPath,
 	);
 	const noClientAnswered =
 		fallbackHealth !== undefined &&
@@ -898,6 +900,18 @@ async function collectDiagnosticsForFile(
 }
 
 /**
+ * #4403: why no primary answered, in the one wording every route renders: the
+ * per-file note, the batch tally, and the `mode=full` sweep. A note about one
+ * file knows the cause; a count over many files gives both.
+ */
+export const PRIMARY_UNAVAILABLE_CAUSE = {
+	unstarted: "it could not be started, or was still starting",
+	disabled: "it is disabled in config by lsp.disabledServers",
+	either:
+		"it could not be started, was still starting, or is disabled in config by lsp.disabledServers",
+} as const;
+
+/**
  * #4322: the reason no language server answered for a file, or undefined when
  * one did (or nothing says otherwise). Two shapes reach here: the touch
  * acquired only auxiliaries and names the primaries it could not acquire
@@ -905,11 +919,14 @@ async function collectDiagnosticsForFile(
  * client and the `getDiagnostics` fallback acquired no primary: only
  * auxiliaries, or no client at all (`unavailablePrimaryServerIds` non-empty).
  * The service derives both lists with one rule (`unacquiredPrimaryServerIds`
- * in clients/lsp/index.ts), so either way no primary answered.
+ * in clients/lsp/index.ts), so either way no primary answered. #4403: the
+ * list includes a primary the operator disabled for the file, and the note
+ * says so.
  */
 export function describePrimaryUnavailable(
 	touched: TouchFileResult | undefined,
 	fallbackHealth: LspHealthLike | undefined,
+	filePath: string,
 ): string | undefined {
 	let serverIds: readonly string[];
 	if (touched?.inconclusiveReason === "primary-unavailable") {
@@ -920,11 +937,16 @@ export function describePrimaryUnavailable(
 	} else {
 		return undefined;
 	}
+	const isDisabled = (id: string) => isServerDisabled(id, filePath);
+	const cause = !serverIds.some(isDisabled)
+		? PRIMARY_UNAVAILABLE_CAUSE.unstarted
+		: serverIds.every(isDisabled)
+			? PRIMARY_UNAVAILABLE_CAUSE.disabled
+			: PRIMARY_UNAVAILABLE_CAUSE.either;
 	return (
 		`Primary LSP (${serverIds.join(", ")}): not available — no language ` +
-		"server answered for this file (it could not be started, or was still " +
-		"starting). NOT the same as 0 diagnostics; auxiliary scanners do not " +
-		"check the language itself."
+		`server answered for this file (${cause}). NOT the same as 0 ` +
+		"diagnostics; auxiliary scanners do not check the language itself."
 	);
 }
 
@@ -2084,8 +2106,8 @@ function auxiliaryOnlyFindingsLine(
 	if (count === 0) return undefined;
 	return (
 		`${count} file${count === 1 ? "" : "s"} with auxiliary findings only: no ` +
-		"language server answered (it could not be started, or was still " +
-		"starting), so the language itself was not checked."
+		`language server answered (${PRIMARY_UNAVAILABLE_CAUSE.either}), so the ` +
+		"language itself was not checked."
 	);
 }
 
@@ -2106,8 +2128,8 @@ function unconfirmedReasonClause(
 	// The rest of the unconfirmed files keep their own explanation.
 	if (primaryUnavailable > 0) {
 		const head =
-			`${primaryUnavailable} with no language server answer (it could not ` +
-			"be started, or was still starting)";
+			`${primaryUnavailable} with no language server answer ` +
+			`(${PRIMARY_UNAVAILABLE_CAUSE.either})`;
 		const rest = unconfirmed - primaryUnavailable;
 		return rest > 0
 			? `${head}; the other ${rest}: ${unconfirmedReasonClause(rest, timedOut, rootFallbackReasons)}`
