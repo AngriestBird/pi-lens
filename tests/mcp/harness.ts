@@ -13,6 +13,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+	boundUnixSocketPath,
 	diagnosticsIpcPathForCwd,
 	ipcPathForCwd,
 } from "../../clients/mcp/ipc.js";
@@ -161,11 +162,22 @@ export class McpHarness {
 		});
 	}
 
+	/** SIGKILL the server and wait for it to exit, with no endpoint cleanup: the
+	 *  non-graceful end that leaves the server's socket file behind (#4353). */
+	kill(): Promise<void> {
+		return new Promise((resolve) => {
+			if (this.child.exitCode !== null || this.child.signalCode !== null)
+				return resolve();
+			this.child.once("exit", () => resolve());
+			this.child.kill("SIGKILL");
+		});
+	}
+
 	dispose(): void {
 		const endpoints = [
 			ipcPathForCwd(this.workspaceDir),
 			diagnosticsIpcPathForCwd(this.workspaceDir, this.child.pid ?? 0),
-		];
+		].flatMap((endpoint) => [endpoint, boundUnixSocketPath(endpoint)]);
 		const cleanup = (): void => {
 			for (const endpoint of endpoints) {
 				try {

@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, vi } from "vitest";
@@ -305,4 +306,35 @@ export function createTempFile(
 	fs.mkdirSync(path.dirname(filePath), { recursive: true });
 	fs.writeFileSync(filePath, content);
 	return filePath;
+}
+
+/** How a connect to a Unix socket path ends: `connected` when a server
+ *  listens there, otherwise the errno code (a stale socket or a regular file
+ *  refuses with `ECONNREFUSED`). */
+export function connectOutcome(endpoint: string): Promise<string> {
+	return new Promise((resolve) => {
+		const probe = net.createConnection(endpoint);
+		probe.once("connect", () => {
+			probe.destroy();
+			resolve("connected");
+		});
+		probe.once("error", (error) =>
+			resolve((error as NodeJS.ErrnoException).code ?? String(error)),
+		);
+	});
+}
+
+/** Leave a stale Unix socket file at `file`, as a killed host does, without a
+ *  child process: bind, move the file aside so the close-time unlink finds
+ *  nothing, close the listener, move the file back. */
+export async function plantStaleUnixSocket(file: string): Promise<void> {
+	const parked = `${file}.parked`;
+	const server = net.createServer();
+	await new Promise<void>((resolve, reject) => {
+		server.once("error", reject);
+		server.listen(file, resolve);
+	});
+	fs.renameSync(file, parked);
+	await new Promise<void>((resolve) => server.close(() => resolve()));
+	fs.renameSync(parked, file);
 }

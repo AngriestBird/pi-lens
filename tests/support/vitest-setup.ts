@@ -1374,14 +1374,22 @@ export function reapStaleTmpHygieneRecords(
  * ran here, the entry stays judged. Fail-closed is the rule on both axes — an
  * unreadable manifest (`runFiles` empty) and an entry no file claims are both
  * judged exactly as before this record existed.
+ *
+ * An entry the creators record names (#4354) is never foreign: the record is
+ * run-id scoped, so a test file of THIS run created it, and the prefix-owner
+ * question this filter asks cannot excuse what the run's own file made. The
+ * #4347 jscpd leak stayed hidden because its creator ran in the fork while its
+ * prefix owner (`jscpd-client.test.ts`) did not.
  */
 export function tmpHygieneForeignRunEntries(
 	entries: readonly string[],
 	ownersFor: (entry: string) => readonly string[],
 	runFiles: ReadonlySet<string>,
+	creators: ReadonlyMap<string, string>,
 ): string[] {
 	if (runFiles.size === 0) return [];
 	return entries.filter((entry) => {
+		if (creators.has(entry)) return false;
 		const owners = ownersFor(entry);
 		return owners.length > 0 && owners.every((owner) => !runFiles.has(owner));
 	});
