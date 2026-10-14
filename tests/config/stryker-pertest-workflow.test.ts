@@ -124,3 +124,24 @@ describe("stryker-pertest workflow pipes (#4365)", () => {
 		}
 	});
 });
+
+describe("stryker-pertest workflow facade inputs (#4449)", () => {
+	// Recurrence: clients/lsp/client-registry.ts (1,760 lines) is imported only
+	// by the service. Without a tests input the plan refuses it, and without a
+	// lines input one run exceeds the 90-minute job cap. Both flow through env
+	// (never interpolated into the script) so a dispatch input is not shell text.
+	it("passes the tests and lines inputs through env into plan and mutate", () => {
+		const plan = job.steps.find((step) =>
+			step.run?.includes("stryker-pertest.mjs plan --module"),
+		);
+		const mutate = job.steps.find((step) =>
+			step.run?.includes("stryker run stryker.pertest.config.mjs"),
+		);
+		expect(plan?.env?.ALSO_TESTS).toBe("${{ inputs.tests }}");
+		expect(plan?.run).toContain('--also "$ALSO_TESTS"');
+		expect(mutate?.env?.LINES).toBe("${{ inputs.lines }}");
+		expect(mutate?.run).toContain('--mutate "${TARGET}${LINES:+:$LINES}"');
+		expect(plan?.run).not.toContain("${{");
+		expect(mutate?.run).not.toContain("${{");
+	});
+});

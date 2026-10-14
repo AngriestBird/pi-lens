@@ -17,6 +17,16 @@ on:
         required: false
         default: ""
         type: string
+      tests:
+        description: "Extra comma-separated test files for a module only a facade imports (#4449: clients/lsp/client-registry.ts). Added to the one-hop plan."
+        required: false
+        default: ""
+        type: string
+      lines:
+        description: "Line range of the compiled .js twin to mutate, e.g. 1-400 (#4449). Empty mutates the whole module."
+        required: false
+        default: ""
+        type: string
 
 permissions: {}
 
@@ -68,9 +78,10 @@ jobs:
         id: plan
         env:
           MODULE: ${{ steps.choose.outputs.module }}
+          ALSO_TESTS: ${{ inputs.tests }}
         run: |
           set -euo pipefail
-          node scripts/stryker-pertest.mjs plan --module "$MODULE" | tee -a "$GITHUB_OUTPUT"
+          node scripts/stryker-pertest.mjs plan --module "$MODULE" --also "$ALSO_TESTS" | tee -a "$GITHUB_OUTPUT"
       # The runner pins the threads pool over any config; `process.chdir()` throws
       # there and Stryker aborts its dry run on one failing test. A pre-flight
       # under the same pool drops, and names, the files that cannot run.
@@ -90,11 +101,12 @@ jobs:
         env:
           PILENS_MUTATION_TESTS: ${{ steps.preflight.outputs.tests }}
           TARGET: ${{ steps.plan.outputs.target }}
+          LINES: ${{ inputs.lines }}
         run: |
           set -uo pipefail
           START=$(date +%s)
           rc=0
-          node_modules/.bin/stryker run stryker.pertest.config.mjs --mutate "$TARGET" || rc=$?
+          node_modules/.bin/stryker run stryker.pertest.config.mjs --mutate "${TARGET}${LINES:+:$LINES}" || rc=$?
           echo "wall_seconds=$(( $(date +%s) - START ))" | tee -a "$GITHUB_OUTPUT"
           exit "$rc"
       - name: List tests that kill no mutant
