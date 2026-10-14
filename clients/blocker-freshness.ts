@@ -406,8 +406,14 @@ const JS_TS_LANGUAGES = new Set(["typescript", "tsx", "javascript"]);
  * `DEPENDENCY_CALL` already counts.
  */
 const RELATIVE_SPECIFIER = /(["'])(\.{1,2}\/(?:(?!\1)[^\n])*)\1/g;
-/** A call whose specifier may be a package or alias name, or computed. */
-const DEPENDENCY_CALL = /\bimport\s*\(|\brequire\s*\(/;
+/**
+ * A dependency whose specifier rule A cannot see: an `import(` or `require(`
+ * call (a package or alias name, or computed), or a `/// <reference path>`,
+ * whose path needs no `./` and may name a module (TS6053 depends only on the
+ * file existing, so the ambient arm misses its creation; #4430 r3 verify).
+ */
+const DEPENDENCY_CALL =
+	/\bimport\s*\(|\brequire\s*\(|\/\/\/\s*<reference\s+path/;
 
 /**
  * #4346 r3: whether a JS/TS file's captured `sources` may miss a dependency.
@@ -415,7 +421,8 @@ const DEPENDENCY_CALL = /\bimport\s*\(|\brequire\s*\(/;
  * and each review found one more): any relative specifier string, comments
  * included, that is not a captured source (a JSDoc `@import`, `declare
  * module "./x"`, `import("./x")`, `require("./x")`), or an `import(` or
- * `require(` call, whose specifier a relative test cannot see. A false
+ * `require(` call or a `/// <reference path>`, whose specifier a relative
+ * test cannot see. A false
  * positive only makes the scope incomplete, which refuses a finding entry
  * once more (fails closed).
  */

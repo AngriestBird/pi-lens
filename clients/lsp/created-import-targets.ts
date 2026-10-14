@@ -132,6 +132,9 @@ export interface ImportScope {
 	complete: boolean;
 }
 
+/** A block or line comment, for {@link holdsReexport}. */
+const COMMENT = /\/\*[\s\S]*?\*\/|\/\/[^\n]*/g;
+
 /**
  * #4346 r3: whether `text` may re-export: an `export` followed by a `from`
  * with no `;` between. That is `/\bexport\b[^;]*?\bfrom\b/s`, tested per
@@ -141,12 +144,20 @@ export interface ImportScope {
  * not name. Not a list of forms (round 2 listed them and its verify found
  * three more); a false positive (semicolon-free code, a comment) makes the
  * scope incomplete, which fails closed.
+ *
+ * A `;` inside a comment must not end a run (a block comment holding `;`
+ * inside `export { ... } from`, #4430 r3 verify), so the text is also read
+ * with its comments removed. Both readings count: the comment pattern does
+ * not know strings (`"http://x"` reads as a line comment), so asking it alone
+ * could hide a re-export.
  */
 function holdsReexport(text: string): boolean {
-	return text.split(";").some((run) => {
-		const at = run.search(/\bexport\b/);
-		return at >= 0 && /\bfrom\b/.test(run.slice(at));
-	});
+	return [text, text.replace(COMMENT, "")].some((form) =>
+		form.split(";").some((run) => {
+			const at = run.search(/\bexport\b/);
+			return at >= 0 && /\bfrom\b/.test(run.slice(at));
+		}),
+	);
 }
 
 /**

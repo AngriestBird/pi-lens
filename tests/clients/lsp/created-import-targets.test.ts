@@ -214,19 +214,22 @@ describe("importTargetsToAnnounce: scope completeness (#4346 r2)", () => {
 		expect((await scopeOf(root, importer)).complete).toBe(true);
 	});
 
-	// Row C11: the r2 `/// <reference path` keyword is deleted. A referenced
-	// file reaches F only through global declarations, which the ambient arm
-	// counts for every JS/TS entry, so this scope stays complete.
-	it("reports a file referencing a path without ./ complete", async () => {
+	// Row C11. Recurrence: #4430 r3 verify, round 3 deleted the reference-path
+	// keyword on the claim that a referenced file reaches F only through
+	// global declarations. A module target does too: TS6053 ("file not found")
+	// depends only on the file existing, so the ambient arm misses its
+	// creation, and real tsserver served the stale finding. Rule K counts it.
+	it("reports a file referencing a module path without ./ incomplete", async () => {
 		const root = workspace("pi-lens-4346-reference-bare-");
 		const importer = path.join(root, "user.ts");
 		fs.writeFileSync(
 			importer,
-			'/// <reference path="globals.d.ts" />\nimport "./dep";\nexport {};\n',
+			'/// <reference path="x.ts" />\nimport "./dep";\nexport {};\n',
 		);
 		fs.writeFileSync(path.join(root, "dep.ts"), "export {};\n");
+		fs.writeFileSync(path.join(root, "x.ts"), "export const x = 1;\n");
 
-		expect((await scopeOf(root, importer)).complete).toBe(true);
+		expect((await scopeOf(root, importer)).complete).toBe(false);
 	});
 
 	// Row C19: rules A and K are JS/TS only. A Go grouped import is `import (`,
@@ -295,6 +298,17 @@ describe("importTargetsToAnnounce: scope completeness (#4346 r2)", () => {
 			'export {\n  x, // see }\n} from "./b";\n',
 		],
 		['export * as "ns" from', 'export * as "ns" from "./b";\n'],
+		// #4430 r3 verify nitpick: a `;` inside a comment split the run.
+		[
+			"a ; in a comment within export { } from",
+			'export { a /* ; */ } from "./b";\n',
+		],
+		// Both readings count: removing "comments" alone would drop this
+		// line from `//` on.
+		[
+			"a re-export after a URL string on its line",
+			'const u = "http://x"; export * from "./b";\n',
+		],
 	])(
 		"reports a file whose target holds %s incomplete",
 		async (_form, content) => {
