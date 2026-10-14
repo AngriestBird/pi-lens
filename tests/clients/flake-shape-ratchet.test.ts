@@ -629,6 +629,13 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the exact local CLI, shallow checkout, `git check-ignore` (#2904) and the gh label read behind `--lint-local` (#4288, PATH stub) are the subjects; an in-process double cannot prove any of those command boundaries",
 	},
+	// 2026-10-14 (#4397): the changed-test shuffle job's exit code is the contract;
+	// only a real vitest start reorders the cases of a fixture that shares state.
+	"real-process-spawn:scripts/ci-shuffle-changed-tests-spawn.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the job's exit code is the contract; an injected exec restates the flags the script builds instead of proving real vitest reorders and reds a file that shares state",
+	},
 	// 2026-10-07 (#4072 review F2): the executable CLI's exit status is the
 	// contract; an in-process main() call cannot prove the entry-point boundary.
 	"real-process-spawn:scripts/ci-test-diff.test.ts": {
