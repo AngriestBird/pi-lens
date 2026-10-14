@@ -162,6 +162,23 @@ function findings(text: string): string[] {
 			);
 	}
 
+	// Recurrence (rehearsal run 38608471496): `npm ci --ignore-scripts` leaves
+	// the ast-grep CLI binary and the formatter executables uninstalled, so
+	// seven files failed "alone" that pass in ci.yml's Unit job, and the census
+	// reported tool absence as members. Both jobs that start vitest install with
+	// scripts, as the Unit job does.
+	for (const [name, job] of [
+		["census", census],
+		["confirm-report", report],
+	] as const)
+		if (
+			!(job.steps ?? []).some((step) =>
+				/^npm ci --no-audit --no-fund$/.test(run(step).trim()),
+			) ||
+			(job.steps ?? []).some((step) => /--ignore-scripts/.test(run(step)))
+		)
+			out.push(`${name} installs without the install scripts`);
+
 	// The report job: merges all six artifacts, confirms twice, reports.
 	if (report.needs !== "census" || !/always\(\)/.test(String(report.if ?? "")))
 		out.push("confirm-report does not run after every census part");
@@ -307,7 +324,7 @@ describe("shuffle-census-nightly.yml (#4405)", () => {
 		],
 		[
 			"a budget at the job timeout",
-			(text) => text.replace("--budget-ms 3000000", "--budget-ms 3600000"),
+			(text) => text.replace("--budget-ms 4200000", "--budget-ms 4800000"),
 			/census budget/,
 		],
 		[
@@ -324,8 +341,8 @@ describe("shuffle-census-nightly.yml (#4405)", () => {
 			"confirming inside a census part",
 			(text) =>
 				text.replace(
-					"--budget-ms 3000000 --seeds",
-					"--confirm --budget-ms 3000000 --seeds",
+					"--budget-ms 4200000 --seeds",
+					"--confirm --budget-ms 4200000 --seeds",
 				),
 			/confirms or reports/,
 		],
@@ -337,6 +354,24 @@ describe("shuffle-census-nightly.yml (#4405)", () => {
 					"      - name: Run this part",
 				),
 			/census does not build/,
+		],
+		[
+			"installing with --ignore-scripts in the census job",
+			(text) =>
+				text.replace(
+					"      - run: npm ci --no-audit --no-fund\n",
+					"      - run: npm ci --no-audit --no-fund --ignore-scripts\n",
+				),
+			/census installs without the install scripts/,
+		],
+		[
+			"installing with --ignore-scripts in the report job",
+			(text) =>
+				text.replace(
+					/(confirm-report:[\s\S]*?)npm ci --no-audit --no-fund\n/,
+					"$1npm ci --no-audit --no-fund --ignore-scripts\n",
+				),
+			/confirm-report installs without the install scripts/,
 		],
 		[
 			"a single confirm pass",

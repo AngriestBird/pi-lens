@@ -62,10 +62,13 @@ jobs:
   census:
     name: Census part ${{ matrix.part }} of 6
     runs-on: ubuntu-latest
-    # Setup is about 4 min; the script stops starting vitest runs at 50 min
-    # (`--budget-ms`), so even a start in flight at the cap leaves room under
-    # this timeout. The rehearsal run measures the real part time.
-    timeout-minutes: 60
+    # Measured on the first full rehearsal (run 38608471496, alone starts
+    # included): setup 0.5 min, a part 23 to 46 min, the slowest part holding
+    # the 350 s chunk of the LSP-heavy files. The weekly run is that
+    # shape; a daily run has only the shuffled starts, 11 to 24 min of them per
+    # part. The script stops starting vitest runs at 70 min (`--budget-ms`), so
+    # a start in flight at the cap still finishes under this timeout.
+    timeout-minutes: 80
     strategy:
       fail-fast: false
       matrix:
@@ -85,9 +88,13 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-      - run: npm ci --no-audit --no-fund --ignore-scripts
-      # `--ignore-scripts` skips `prepare`, whose core grammar download the
-      # tests parse with; the explicit step ci.yml's targeted tests run.
+      # Install scripts run (ci.yml's `Unit` job runs `npm install` the same
+      # way): `--ignore-scripts` leaves the ast-grep CLI binary and the
+      # formatter executables uninstalled, and the first rehearsal (run
+      # 38608471496) then reported seven files as failing alone that pass in
+      # the Unit job. `prepare` downloads the core grammars and builds dist/;
+      # the explicit steps below repeat both cheaply so the order stays visible.
+      - run: npm ci --no-audit --no-fund
       - name: Download core grammars
         run: node scripts/download-grammars.js --core --dest grammars
       - run: npm run build
@@ -97,7 +104,7 @@ jobs:
       - name: Run this part of the census
         run: |
           set -uo pipefail
-          ARGS=(--out "$RUNNER_TEMP/census" --part "${{ matrix.part }}/6" --budget-ms 3000000 --seeds 202,424,606)
+          ARGS=(--out "$RUNNER_TEMP/census" --part "${{ matrix.part }}/6" --budget-ms 4200000 --seeds 202,424,606)
           if [ "$WITH_ALONE" != "true" ]; then
             ARGS+=(--no-alone)
           fi
@@ -146,7 +153,7 @@ jobs:
           pattern: census-*
           path: ${{ runner.temp }}/census
           merge-multiple: true
-      - run: npm ci --no-audit --no-fund --ignore-scripts
+      - run: npm ci --no-audit --no-fund
       - name: Download core grammars
         run: node scripts/download-grammars.js --core --dest grammars
       - run: npm run build
