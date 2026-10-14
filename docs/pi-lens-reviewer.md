@@ -95,6 +95,9 @@ real seam. Check that every gate the diff adds is exercised through that path.
 ## Standing probes
 
 Run every probe the diff can trip and say which ran and what each returned.
+For LSP diagnostics, the formatter, the review graph and `rename_file`, start
+from the `verify-pi-lens` skill (`.claude/skills/verify-pi-lens/SKILL.md`)
+instead of rebuilding the probe.
 
 - **Ladder and deletion sweep.** Every ask names the ladder rung it serves. An
   ask that adds a guard names its recurrence; an ask that deletes a defensive
@@ -151,6 +154,20 @@ Run every probe the diff can trip and say which ran and what each returned.
   `// flake-shape: <detector> — <reason>` header and `wallClockBudgetInclude`
   membership (#2547). A pinned file whose count falls below its pin needs its
   baseline tightened; a stale ceiling re-admits regrowth.
+- **Hot-path timing.** When the diff touches dispatch, `session_start`, LSP
+  diagnostics, a cache lookup or turn-end, re-run the body's before/after
+  timing on the real path. A regression the body does not name and justify is
+  a finding (#4344 r1: replay went from 6 ms to 321 ms).
+- **Shutdown-path parity.** When the diff moves or rewraps code that stops a
+  child (a server, a client, a spawned tool), compare the stop path before and
+  after: does the child still get its graceful signal (stdin end, shutdown
+  request) before any kill, and do its exit-time records and files still
+  appear? Count them over a few runs on both heads. A green suite proves
+  nothing here (#4366 r2: a shared-client fold swapped stdin end for SIGTERM;
+  the shutdown record went from 3/3 to 0/12 and 11 sockets leaked).
+- **Windows path shapes.** A new test or runtime comparison of paths goes
+  through `toPosix` or `path.win32` (`AGENTS.md`). A host-default separator is
+  a finding even when Linux CI is green (#4356: Windows advisory red).
 - **Platform skips and session-start resets.** Apply the `AGENTS.md` test
   screens and the `SessionStartClassification` invariant.
 

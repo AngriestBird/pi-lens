@@ -1588,6 +1588,7 @@ describe("release-QA pack call site (#3887 F1)", () => {
 			for (const rel of [
 				"scripts/release-qa.mjs",
 				"scripts/lib/md-matrix.mjs",
+				"scripts/lib/mcp-stdio-client.mjs",
 				"scripts/lib/git-fixture-env.mjs",
 				"scripts/supply-host-provided-deps.mjs",
 				"scripts/lib/host-provided-deps.mjs",
@@ -1703,6 +1704,7 @@ describe("release-QA dirty-checkout refusal (#2619 review F1)", () => {
 			for (const rel of [
 				"scripts/release-qa.mjs",
 				"scripts/lib/md-matrix.mjs",
+				"scripts/lib/mcp-stdio-client.mjs",
 				"scripts/lib/git-fixture-env.mjs",
 			]) {
 				fs.copyFileSync(path.join(REPO_ROOT, rel), path.join(root, rel));

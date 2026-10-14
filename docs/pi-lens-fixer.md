@@ -94,6 +94,9 @@ exports change.
   justification) maps to a test or a probe, or is deleted (#2643, #2654).
 - Name where new state sits in its ladder and what happens to it at
   `session_start` (#2649, #2654).
+- A change on a hot path (dispatch, `session_start`, LSP diagnostics, a cache
+  lookup, turn-end) quotes a before/after timing from the real path in the
+  body, with the command. Name and justify any regression (#4344 r1).
 - A measured constant names its measuring command and keeps raw output as a
   tracked artifact pinned by a test (#3648). Run `git check-ignore -v` on every
   new artifact path before citing it (#3648).
@@ -114,7 +117,8 @@ exports change.
   `node_modules`.
 - Run release-QA end to end when a release-QA row changes.
 - Run the reviewer's standing probes (`docs/pi-lens-reviewer.md`) that the diff
-  can trip, and quote their output in the PR body.
+  can trip, and quote their output in the PR body. The `verify-pi-lens` skill
+  (`.claude/skills/verify-pi-lens/SKILL.md`) holds the real-path recipes.
 
 ## Fix rounds
 
