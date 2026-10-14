@@ -1353,21 +1353,15 @@ export class ReadGuard {
 
 	/**
 	 * {@link retireChangedAuthorship} on a key. `writer` names a write that
-	 * ended it after the fact, so the record tells the triggers apart:
-	 * `bridge`, a write no pre-write check guarded, ends it only when its
-	 * bytes changed; `unknown-range`, a checked write whose produced lines
-	 * are unknown, always ends a range-scoped authorship (#4387).
+	 * ended it after the fact (a `bridge` write, which no pre-write check
+	 * guarded), so the record tells the two triggers apart.
 	 */
-	private retireIfChanged(
-		filePath: string,
-		writer?: "bridge" | "unknown-range",
-	): boolean {
-		const force = writer === "unknown-range";
+	private retireIfChanged(filePath: string, writer?: "bridge"): boolean {
 		const authored = this.writtenThisSession.get(filePath);
 		if (
 			!authored ||
 			authored.retired ||
-			(!force && authoredBytesIntact(filePath, authored))
+			authoredBytesIntact(filePath, authored)
 		)
 			return false;
 		authored.retired = true;
@@ -1375,9 +1369,8 @@ export class ReadGuard {
 		const isRisingEdge = incrementDegradationCount({
 			kind: "read-guard-authorship-retired",
 			subject: filePath,
-			reason: force
-				? "authored range was unknown; the next edit needs a read"
-				: "another writer changed the bytes the conversation wrote; the next edit needs a read",
+			reason:
+				"another writer changed the bytes the conversation wrote; the next edit needs a read",
 		});
 		if (isRisingEdge)
 			logReadGuardEvent({
@@ -2338,25 +2331,21 @@ export class ReadGuard {
 			this.retireIfChanged(filePath, "bridge");
 			return;
 		}
-		// F-4210-2: an UNKNOWN range is no license of its own and cannot be
-		// composed into a range scope, so it creates none and ends a scope.
-		if (
-			opts?.authorship === "unknown" &&
-			existing?.authoredRanges !== undefined
-		) {
-			this.retireIfChanged(filePath, "unknown-range");
-			return;
-		}
-		// It names no line it produced and records no own-edit read, so with no
-		// read that names a tool call it leaves an empty scope, which vouches
-		// for no line (#4387): a move would keep the advanced authorship and
-		// drop every read that bounds it. Otherwise, over a whole-file
-		// authorship, the range is moot, as for a partial credit (#4210 N3),
-		// and that read bounds the advance.
+		// F-4210-2: an UNKNOWN range is no license of its own, so it creates
+		// none. It names no line it produced and records no own-edit read, so
+		// in two cases it leaves an empty scope, which vouches for no line
+		// (#4387). Over a range scope, it cannot be composed into one. With no
+		// read that names a tool call, a move would keep the advanced
+		// authorship and drop every read that bounds it. Otherwise, over a
+		// whole-file authorship, the range is moot, as for a partial credit
+		// (#4210 N3), and that read bounds the advance.
 		if (opts?.authorship === "unknown" && !existing) return;
 		const unknownLeavesNoScope =
 			opts?.authorship === "unknown" &&
-			!this.reads.get(filePath)?.some((read) => read.toolCallId !== undefined);
+			(existing?.authoredRanges !== undefined ||
+				!this.reads
+					.get(filePath)
+					?.some((read) => read.toolCallId !== undefined));
 		const observed = observeAuthoredBytes(
 			filePath,
 			opts?.contentHash,

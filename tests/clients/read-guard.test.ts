@@ -2475,7 +2475,12 @@ describe("ReadGuard Tier-2 idle decay and bounds (#1389)", () => {
 		}
 	});
 
-	it("records unknown authored-range retirement distinctly", () => {
+	// #4387: an UNKNOWN credit names no line it produced, so over a range scope
+	// it leaves an empty scope. Every zero-read edit then needs a read, as
+	// before, and no record claims another writer changed the bytes.
+	// Recurrence: the credit force-retired the scope, so the next edit read
+	// "File modified since your write" with no other writer (review G2, S8).
+	it("leaves an empty scope, not a retirement, when an UNKNOWN credit lands on a range scope (#4387)", () => {
 		const env = setupTestEnvironment("read-guard-authorship-unknown-");
 		resetDegradationLedger();
 		try {
@@ -2491,24 +2496,23 @@ describe("ReadGuard Tier-2 idle decay and bounds (#1389)", () => {
 				stampFileTime: false,
 				authorship: "unknown",
 			});
-			expect(guard.checkEdit(filePath, [1, 1]).action).toBe("block");
+			const inside = guard.checkEdit(filePath, [1, 1]);
+			expect(inside.action).toBe("block");
+			expect(inside.reason).toContain("this write only covered part");
+			expect(guard.checkEdit(filePath, [2, 2]).action).toBe("block");
+			expect(
+				guard.exportAuthorship().entries?.find((entry) => entry.retired),
+			).toBeUndefined();
 			expect(
 				getDegradationSummary().find(
 					(group) => group.kind === "read-guard-authorship-retired",
-				)?.latestReasons[0]?.reason,
-			).toContain("authored range was unknown");
-			// #4387: the row names the trigger, a write of unknown range. It said
-			// `writer: "bridge"` for the agent's own edit, which no bridge made.
+				),
+			).toBeUndefined();
 			expect(
 				vi
 					.mocked(logReadGuardEvent)
-					.mock.calls.map(([entry]) => entry)
-					.filter((entry) => entry.event === "authorship_retired"),
-			).toEqual([
-				expect.objectContaining({
-					metadata: expect.objectContaining({ writer: "unknown-range" }),
-				}),
-			]);
+					.mock.calls.filter(([entry]) => entry.event === "authorship_retired"),
+			).toEqual([]);
 		} finally {
 			env.cleanup();
 		}

@@ -2540,6 +2540,73 @@ describe("#3525: FileTime moves only over bytes the conversation accounts for", 
 		}
 	});
 
+	/** A first credit of lines 3-5 from a writer no pre-write check guarded. */
+	const bridgeScope = (runtime: RuntimeCoordinator, file: string) =>
+		runtime.readGuard.recordWritten(file, {
+			stampFileTime: false,
+			advanceAuthorship: false,
+			authorship: "partial",
+			authoredRanges: [[3, 5]],
+			allowFirstAuthorship: true,
+			toolCallId: "bridge-scope",
+		});
+
+	/**
+	 * #4387 review G2 (S8): an own oldText edit inside a range scope names no
+	 * line it produced, so it leaves an empty scope: the next zero-read edit
+	 * needs a read, and says so. Recurrence: the credit retired the scope, and
+	 * the next edit read "File modified since your write" with no other writer.
+	 */
+	it("asks for a read, without blaming another writer, after an own oldText edit inside a range scope (#4387 S8)", async () => {
+		const env = setupTestEnvironment("rg-4387-s8-");
+		resetDegradationLedger();
+		try {
+			const file = fixture(env.tmpDir, "probe.ts", `${lines(10).join("\n")}\n`);
+			const runtime = newRuntime(env.tmpDir);
+			foreignWrite(file, 4, "BRIDGE4");
+			bridgeScope(runtime, file);
+			expect(
+				(await textEdit(runtime, file, "BRIDGE4\n", "AGENT4\n")).blocked,
+			).toBe(false);
+			const next = await positionalEdit(runtime, file, [[4, 4, "x"]]);
+			expect(next.blocked).toBe(true);
+			expect(next.reason).toContain("this write only covered part");
+			expect(authorshipRetiredFor(file)).toBe(false);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	/**
+	 * #4387 r2 (S13): the empty scope is what keeps G2 fail-closed. A range
+	 * scope gets no read from the zero-read arm (#4210), so nothing but the
+	 * scope bounds the authorship. Recurrence it guards: composing the old
+	 * scope with an empty range kept lines 3-5 vouching after the credit
+	 * advanced over a line another writer landed during the own edit.
+	 */
+	it("keeps a scope line another writer changed during an own oldText edit refused (#4387 S13)", async () => {
+		const env = setupTestEnvironment("rg-4387-s13-");
+		try {
+			const file = fixture(env.tmpDir, "probe.ts", `${lines(10).join("\n")}\n`);
+			const runtime = newRuntime(env.tmpDir);
+			foreignWrite(file, 4, "BRIDGE4");
+			bridgeScope(runtime, file);
+			const inflight = await textEdit(
+				runtime,
+				file,
+				"BRIDGE4\n",
+				"AGENT4\n",
+				() => foreignWrite(file, 3, "EXTERNAL3"),
+			);
+			expect(inflight.blocked).toBe(false);
+			expect(
+				(await positionalEdit(runtime, file, [[3, 3, "agent3"]])).blocked,
+			).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("keeps another writer's change stale after an oldText edit passed it (R4)", async () => {
 		const env = setupTestEnvironment("rg-3525-r4-");
 		try {

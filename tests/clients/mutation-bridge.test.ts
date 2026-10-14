@@ -232,15 +232,19 @@ describe("mutation bridge bookkeeping", () => {
 			expect(runtime.readGuard.checkEdit(filePath, [2, 2]).action).toBe(
 				"block",
 			);
-			// UNKNOWN retires the prior range too; no guessed replacement survives.
+			// UNKNOWN empties the prior range too; no guessed replacement survives.
 			expect(runtime.readGuard.checkEdit(filePath, [3, 3]).action).toBe(
 				"block",
 			);
+			// #4387: an empty scope, not a retirement: no other writer is blamed.
 			expect(
-				getDegradationSummary()
-					.find((group) => group.kind === "read-guard-authorship-retired")
-					?.latestReasons.some((row) => row.subject === filePath),
-			).toBe(true);
+				runtime.readGuard
+					.exportAuthorship()
+					.entries?.find(
+						(entry) =>
+							normalizeFilePath(entry.filePath) === normalizeFilePath(filePath),
+					)?.authoredRanges,
+			).toEqual([]);
 		} finally {
 			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 			else process.env.PILENS_DATA_DIR = previousDataDir;
