@@ -36,3 +36,8 @@ export function run(
 	piBin: string,
 	options: { extension?: string; failWorker?: boolean },
 ): Promise<{ code: number; installFailed: boolean }>;
+
+export function tsServerOutcome(
+	latencyRecords: ReadonlyArray<Record<string, any>>,
+	sessionstartText: string,
+): { started: true } | { started: false; line: string } | undefined;
