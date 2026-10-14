@@ -66,6 +66,27 @@
  *   still cannot resolve arbitrary aliases, so aliases remain conservative
  *   false positives. Quoted and commented helper names are excluded by
  *   `codeMatches`.
+ * - Detector 6 reads the callee through `isViMockCall`, which needs the
+ *   object to be the identifier `vi`: an alias (`const v = vi`,
+ *   `import { vi as v }`, `(vi).mock`, `vi!.mock`, `(vi as any).mock`) is
+ *   not seen (#4383 review F4; none in the tree today). `vi.spyOn` on a
+ *   module namespace and `vi.mock` in `tests/support/` (the global setup
+ *   mocks two modules) are out of scope.
+ * - Detector 7 reads one object literal at a time. A double split across
+ *   literals (`const s = { ...a, getStatus }` where `a` holds the other
+ *   members), built with `Object.assign`, written as a class
+ *   (`class FakeService implements LSPService`), assembled by a helper in
+ *   another module, or patched in later (`s.touchFile = vi.fn()`, which
+ *   `lsp-double-gate.ts` owns) is not seen (#4383 review F2).
+ * - Detector 7 needs one shared member whose value is a function or a call
+ *   result, so an all-identifier double (`{ touchFile: mockTouch, hasLSP:
+ *   mockHas, getStatus: mockStatus }`) is not seen (#4383 review F3). None
+ *   exists today: dropping the rule adds only capability data records.
+ * - Detector 7 covers the two #4344 G5 surfaces only (`SERVICE_SURFACES`).
+ *   Hand-rolled doubles of other in-process services (the siblings of
+ *   `makeRunnerCtx` and `makeRealRunnerEnv`) are unmeasured; widening is one
+ *   registry row plus its baseline rows.
+ * All of these are false negatives, the safe direction for a ratchet.
  */
 
 import * as fs from "node:fs";
@@ -884,7 +905,11 @@ export function declaredMembers(
 	if (broken) {
 		throw new Error(
 			`service surface ${name} does not parse cleanly at ` +
-				`${where}:${broken.range().start.line + 1}; its member list would be partial`,
+				`${where}:${broken.range().start.line + 1}; its member list would be partial. ` +
+				"Find the construct on that line the tree-sitter grammar cannot read: " +
+				"if it is a type form like the inline type import, blank it the way " +
+				"INLINE_TYPE_IMPORT does (same length, offsets kept); otherwise restate " +
+				"it in the production file (a named type alias usually parses).",
 		);
 	}
 	const members = new Set<string>();

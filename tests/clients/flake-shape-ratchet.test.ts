@@ -69,6 +69,7 @@
  * absent, so a future reader does not conclude the file was missed.
  */
 
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -114,6 +115,92 @@ const FLAKE_SHAPE_BASELINE: Baseline = JSON.parse(
 		"utf8",
 	),
 );
+
+// ── The frozen mint (#4383 review F1) ────────────────────────────────────
+//
+// Recurrence: a planted `vi.mock` plus ONLY its baseline row, or a planted
+// `execFileSync` plus only its real-process-spawn row, passed the ratchet
+// with no header and no ADMITTED_AFTER_BASELINE entry. The failure message
+// asked for both; nothing enforced them, because the live scan is compared
+// with the baseline and the baseline is plain data anyone can grow.
+//
+// `flake-shape-baseline-frozen.json` is the baseline as round 1 of #4383
+// shipped it, written once. A baseline row the mint does not cover (a new
+// key, or a count above the minted count) must have an ADMITTED entry, and
+// the existing admission test then demands its header (and, for a timing or
+// spawn detector, its serialized lane). The mint is digest-pinned so growing
+// it is a reviewed code change here, never a quiet data edit. CI's unit jobs
+// check out shallow, so the mint cannot be a git-history diff.
+
+const FROZEN_BASELINE_PATH = "tests/support/flake-shape-baseline-frozen.json";
+
+/** sha256 of the mint's canonical JSON (formatting and line endings do not count). */
+const FROZEN_BASELINE_DIGEST =
+	"db2450d7da2f0123a5bd4d366156598e709aea5a356073095ccc27ce0c9afbc2";
+
+const FROZEN_BASELINE_SOURCE = fs.readFileSync(
+	path.join(repoRoot, FROZEN_BASELINE_PATH),
+	"utf8",
+);
+
+const FROZEN_BASELINE: Baseline = JSON.parse(FROZEN_BASELINE_SOURCE);
+
+/** Problems with the mint's content against its pinned digest. */
+function frozenDigestProblems(
+	source: string,
+	digest: string = FROZEN_BASELINE_DIGEST,
+): string[] {
+	const actual = createHash("sha256")
+		.update(JSON.stringify(JSON.parse(source)))
+		.digest("hex");
+	if (actual === digest) return [];
+	return [
+		`${FROZEN_BASELINE_PATH} changed (sha256 ${actual}, pinned ${digest}). ` +
+			"The mint is write-once: admit a new row with an ADMITTED_AFTER_BASELINE " +
+			'entry and its "// flake-shape: <detector> — <reason>" header instead. ' +
+			"Only a deliberate re-mint (a renamed module behind hundreds of rows) " +
+			"edits the mint, and then FROZEN_BASELINE_DIGEST changes in the same PR " +
+			"with the reason in its description.",
+	];
+}
+
+/**
+ * Every baseline row the frozen mint does not cover needs an ADMITTED
+ * entry, and every ADMITTED entry needs a baseline row (a stale admission
+ * excuses nothing). The header and lane of each ADMITTED entry are the
+ * admission test's job (`validateAdmission`).
+ */
+function auditAgainstMint(
+	baseline: Readonly<Baseline> = FLAKE_SHAPE_BASELINE,
+	frozen: Readonly<Baseline> = FROZEN_BASELINE,
+	admitted: Readonly<
+		Record<string, { detector: DetectorName; reason: string }>
+	> = ADMITTED_AFTER_BASELINE,
+): string[] {
+	const problems: string[] = [];
+	for (const detector of DETECTOR_NAMES) {
+		for (const [key, count] of Object.entries(baseline[detector] ?? {})) {
+			const minted = frozen[detector]?.[key];
+			if (minted !== undefined && count <= minted) continue;
+			if (Object.hasOwn(admitted, `${detector}:${key}`)) continue;
+			problems.push(
+				`${detector}:${key}: baseline row ${count} is past the frozen mint ` +
+					`(${minted === undefined ? "absent" : `minted ${minted}`}) and has no ` +
+					"ADMITTED_AFTER_BASELINE entry; add the entry and its " +
+					`"// flake-shape: ${detector} — <reason>" header`,
+			);
+		}
+	}
+	for (const [admittedKey, entry] of Object.entries(admitted)) {
+		const key = admittedKey.slice(entry.detector.length + 1);
+		if (!Object.hasOwn(baseline[entry.detector] ?? {}, key)) {
+			problems.push(
+				`${admittedKey}: stale admission, no baseline row; remove the entry`,
+			);
+		}
+	}
+	return problems;
+}
 
 /**
  * Entries admitted to a detector's baseline AFTER it was minted — a merge-
@@ -963,17 +1050,18 @@ function describeProblem(p: RatchetProblem): string {
 }
 
 // #3514: `countsByDetector` already shares one walk + one parse per file
-// across all five detectors (`countsCache`, flake-shape-scan.ts) — the walk
+// across every detector (`countsPromise`, flake-shape-scan.ts) — the walk
 // itself is not redone. But that shared cost is only PAID on the first call,
 // and `it.each(DETECTOR_NAMES)` below calls it in DETECTOR_NAMES order, so
 // whichever detector is first (`real-process-spawn`) absorbed the FULL
-// five-detector cost inside its own 30s per-test budget, not just its own
+// all-detector cost inside its own 30s per-test budget, not just its own
 // share. Measured on this box (4 cores, load average ~27, run 2026-09-26):
 // real-process-spawn's own detector work is ~22s of a ~117s total — raw-
 // timer-wait's AST walk (`timerBindings` + its own call-site visit) is the
 // biggest single share at ~84s. Paying the whole thing once here, under its
 // own budget decoupled from any one detector's timeout, means no single
-// "detector %s" case is billed for work that belongs to all five.
+// "detector %s" case is billed for work that belongs to all of them (seven
+// since #4362; the two mock detectors added ~2.5 s to the shared walk).
 const WALK_TIMEOUT_MS = 180_000;
 
 describe("flake-shape ratchet (#2547)", () => {
@@ -1412,6 +1500,117 @@ describe("flake-shape ratchet — admission gate", () => {
 				"clients/does-not-exist.test.ts",
 			),
 		).toEqual([expect.stringContaining("does not exist")]);
+	});
+});
+
+describe("flake-shape ratchet — frozen mint (#4383 review F1)", () => {
+	// Recurrence: a baseline row alone admitted a planted vi.mock or
+	// execFileSync with no header and no ADMITTED entry. Rows below follow
+	// the state table in PR #4383 ("F1 state table").
+	const file = "clients/__4383-mint-fixture.test.ts";
+	const mockKey = `${file}::clients/latency-logger`;
+	const baselineWith = (
+		detector: DetectorName,
+		rows: Record<string, number>,
+	): Baseline => {
+		const baseline = Object.fromEntries(
+			DETECTOR_NAMES.map((name) => [name, {}]),
+		) as Baseline;
+		baseline[detector] = rows;
+		return baseline;
+	};
+	const mint = {
+		mock: baselineWith("in-process-mock", { [mockKey]: 1 }),
+		spawn: baselineWith("real-process-spawn", { [file]: 2 }),
+	};
+	const none = {};
+	const admittedSpawn = {
+		[`real-process-spawn:${file}`]: {
+			detector: "real-process-spawn" as const,
+			reason: "the real CLI exit code is under test",
+		},
+	};
+	const admittedMock = {
+		[`in-process-mock:${mockKey}`]: {
+			detector: "in-process-mock" as const,
+			reason: "the logger's own flush order is under test",
+		},
+	};
+
+	it("passes the live baseline: every row past the mint is admitted, every admission has a row", () => {
+		expect(auditAgainstMint()).toEqual([]);
+	});
+
+	it("keeps the mint at its pinned digest, whatever its formatting", () => {
+		expect(frozenDigestProblems(FROZEN_BASELINE_SOURCE)).toEqual([]);
+		// Row 15: reformatting or CRLF is not an edit; a new row is.
+		expect(
+			frozenDigestProblems(
+				JSON.stringify(FROZEN_BASELINE, null, 2).replaceAll("\n", "\r\n"),
+			),
+		).toEqual([]);
+		const grown = structuredClone(FROZEN_BASELINE);
+		grown["in-process-mock"][mockKey] = 1;
+		expect(frozenDigestProblems(JSON.stringify(grown))).toEqual([
+			expect.stringContaining("write-once"),
+		]);
+	});
+
+	it("rows 1-2: a minted row at or below its minted count needs no admission", () => {
+		expect(auditAgainstMint(mint.spawn, mint.spawn, none)).toEqual([]);
+		expect(
+			auditAgainstMint(
+				baselineWith("real-process-spawn", { [file]: 1 }),
+				mint.spawn,
+				none,
+			),
+		).toEqual([]);
+	});
+
+	it("rows 3-4: ATTACK a minted row raised above the mint without an ADMITTED entry is refused", () => {
+		const raised = baselineWith("real-process-spawn", { [file]: 3 });
+		expect(auditAgainstMint(raised, mint.spawn, none)).toEqual([
+			expect.stringContaining(
+				`real-process-spawn:${file}: baseline row 3 is past the frozen mint (minted 2)`,
+			),
+		]);
+		// Row 6: the same raise with its admission passes here (the header and
+		// lane are validateAdmission's half).
+		expect(auditAgainstMint(raised, mint.spawn, admittedSpawn)).toEqual([]);
+	});
+
+	it("rows 9-10: ATTACK the reviewer's probes, a new row with no ADMITTED entry, are refused", () => {
+		const empty = baselineWith("in-process-mock", {});
+		// Probe A: a planted in-process vi.mock plus only its row.
+		expect(auditAgainstMint(mint.mock, empty, none)).toEqual([
+			expect.stringContaining(
+				`in-process-mock:${mockKey}: baseline row 1 is past the frozen mint (absent)`,
+			),
+		]);
+		// Probe B: a planted execFileSync plus only its spawn row.
+		expect(
+			auditAgainstMint(
+				mint.spawn,
+				baselineWith("real-process-spawn", {}),
+				none,
+			),
+		).toEqual([
+			expect.stringContaining(
+				"(absent) and has no ADMITTED_AFTER_BASELINE entry",
+			),
+		]);
+		// Row 12: admitted, the new row passes.
+		expect(auditAgainstMint(mint.mock, empty, admittedMock)).toEqual([]);
+	});
+
+	it("row 14: ATTACK an ADMITTED entry with no baseline row is a stale admission", () => {
+		expect(
+			auditAgainstMint(
+				baselineWith("in-process-mock", {}),
+				mint.mock,
+				admittedMock,
+			),
+		).toEqual([expect.stringContaining("stale admission")]);
 	});
 });
 
