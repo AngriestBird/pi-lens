@@ -13,6 +13,7 @@ export type DenyRule =
 	| "tmpdirCollision"
 	| "sharedKill"
 	| "tmpCheckout"
+	| "tmpWrite"
 	| "checkUngated"
 	| "hookBypass"
 	| "forcePush"
