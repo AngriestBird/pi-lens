@@ -528,6 +528,13 @@ file-scoped worklist and receives no project-wide scanner output.
     a test setter, adopter, or reset, drive that seam; keep a double only at a
     process or host boundary.
 
+67. **Sink read before drain:** a log sink's `log`/`append` only enqueue, so a
+    test that reads the sink's byte offset, line count, or rows while one of
+    its own writes is queued counts late bytes on the wrong side of its window,
+    or misses them. Await that sink's flush (or `flushAllNdjsonWriters`) right
+    before the read with no other await in between, or inside the reading
+    helper. Enforced by `tests/config/sink-read-drain-sweep.test.ts`.
+
 </important>
 
 <important if="session, turn or generation lifecycle">
@@ -1166,7 +1173,7 @@ uses `getGlobalPiLensLogDir()`. `PILENS_DATA_DIR` relocates project state and
 `displayProjectDataPath`; do not spell a project-data path in agent text.
 
 All loggers use `createNdjsonLogger`. Flush the specific logger before reading
-its file; graceful `session_shutdown` returns the shared bounded drain before
+its file (shape 67); graceful `session_shutdown` returns the shared bounded drain before
 pi closes stdin or exits. Relevant logs are `latency.log`, `sessionstart.log`, `cascade.log`,
 `review-graph.log`, `read-guard.log`, `actionable-warnings.log`,
 `extension.log`, `tree-sitter.log`, and `dispositions.log`.
