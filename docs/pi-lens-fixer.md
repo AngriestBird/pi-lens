@@ -103,7 +103,10 @@ exports change.
   lookup, turn-end) quotes a before/after timing from the real path in the
   body, with the command, at a small and a large input; per-input work on a
   tool path also needs a size or time bound. Name and justify any regression
-  (#4344 r1; #4368 r1).
+  (#4344 r1; #4368 r1). The `Hot-path latency (advisory)` lane (#4363) times
+  `session_start`, `dispatchLint` and the diagnostics-cache replay on the head
+  and the merge base; read its job summary, and time by hand any hot path it
+  does not cover (a language server's time, a dependency bump).
 - A measured constant names its measuring command and keeps raw output as a
   tracked artifact pinned by a test (#3648). Run `git check-ignore -v` on every
   new artifact path before citing it (#3648).

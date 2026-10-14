@@ -337,11 +337,11 @@ function censusPins(
 }
 
 const PINNED_PRINT = [
-	"expect(CENSUS_SITES.length).toBe(69);",
-	'expect(CENSUS_ROWS.filter((row) => row.stage !== "gate").length).toBe(74);',
+	"expect(CENSUS_SITES.length).toBe(70);",
+	'expect(CENSUS_ROWS.filter((row) => row.stage !== "gate").length).toBe(75);',
 	'expect(stageJobs("A")).toBe(25);',
 	'expect(stageJobs("B")).toBe(2);',
-	'expect(stageJobs("C")).toBe(14);',
+	'expect(stageJobs("C")).toBe(15);',
 	'expect(stageJobs("D")).toBe(33);',
 	"expect(CENSUS_SITES.filter((site) => site.ref !== undefined).length).toBe(21);",
 	"expect(CENSUS_SITES.filter((site) => site.ref === EPHEMERAL_PULL_REF).length).toBe(17);",
@@ -810,17 +810,17 @@ describe("#3941 early-start advisory checkouts pin the captured commit", () => {
 		assertNonEmptyScan(
 			"early-start advisory checkout census",
 			CENSUS_SITES.length,
-			69,
+			70,
 		);
-		pinnedNumber("checkout sites", CENSUS_SITES.length, 69);
+		pinnedNumber("checkout sites", CENSUS_SITES.length, 70);
 		pinnedNumber(
 			"non-gate job rows",
 			CENSUS_ROWS.filter((row) => row.stage !== "gate").length,
-			74,
+			75,
 		);
 		pinnedNumber("stage A rows", stageJobs("A"), 25);
 		pinnedNumber("stage B rows", stageJobs("B"), 2);
-		pinnedNumber("stage C rows", stageJobs("C"), 14);
+		pinnedNumber("stage C rows", stageJobs("C"), 15);
 		pinnedNumber("stage D rows", stageJobs("D"), 33);
 		// The gate's own checkout is its own stage and is excluded from A-D.
 		pinnedNumber("gate checkout sites", summary.get("gate")?.sites ?? 0, 1);
