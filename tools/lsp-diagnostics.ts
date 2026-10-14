@@ -38,6 +38,7 @@ import {
 } from "../clients/deadline-utils.js";
 import {
 	applyAuxiliarySuppressions,
+	configDisabledAuxiliaryLspServerIds,
 	retagAuxiliaryDiagnostics,
 } from "../clients/dispatch/auxiliary-lsp.js";
 import {
@@ -128,7 +129,19 @@ type BatchOptions = {
 	// retires the same stale verdicts a single-file check does. A sibling surface
 	// left without it would be the very defect this fixes, one call site over.
 	onConfirmedNoBlockers?: (info: ConfirmedNoBlockersInfo) => void;
+	// #4323: auxiliaries the operator's configuration turns off; never acquired.
+	excludeServerIds?: ReadonlySet<string>;
 };
+
+/**
+ * #4323: the host's flag resolver (`getLensFlag` in pi, the config-backed
+ * `createMcpHost().getFlag` in the MCP server), for the project `cwd` the call
+ * runs in.
+ */
+export type LspDiagnosticsFlagReader = (
+	name: string,
+	cwd: string,
+) => boolean | string | undefined;
 
 type FileDiag = {
 	file: string;
@@ -400,6 +413,12 @@ export function createLspDiagnosticsTool(
 	// `runtime.retireInlineBlockerOnConfirmedClean`. Optional/undefined in tests.
 	onConfirmedNoBlockers?: (info: ConfirmedNoBlockersInfo) => void,
 	getService: () => ReturnType<typeof getLSPService> = getLSPService,
+	// #4323: the write-time runner leaves an auxiliary the operator turned off
+	// (`--no-opengrep`, `opengrep.enabled=false`) unstarted; this probe asks the
+	// same owner, `configDisabledAuxiliaryLspServerIds`, through the host's
+	// flag resolver. Both hosts inject it (index.ts, mcp/server.ts); omitted
+	// in tests, where no flag is set.
+	getFlag?: LspDiagnosticsFlagReader,
 ) {
 	return {
 		async execute(
@@ -440,6 +459,9 @@ export function createLspDiagnosticsTool(
 					: undefined;
 			const serverScope: "primary" | "all" =
 				typedParams.serverScope === "primary" ? "primary" : "all";
+			const excludeServerIds = getFlag
+				? configDisabledAuxiliaryLspServerIds((name) => getFlag(name, cwd))
+				: undefined;
 
 			const lspService = getService();
 			if (!lspService) {
@@ -531,6 +553,7 @@ export function createLspDiagnosticsTool(
 						serverScope,
 						cwd,
 						onConfirmedNoBlockers,
+						excludeServerIds,
 					},
 					expanded,
 				);
@@ -579,6 +602,7 @@ export function createLspDiagnosticsTool(
 					serverScope,
 					cwd,
 					onConfirmedNoBlockers,
+					excludeServerIds,
 				});
 			}
 			return runFileDiagnostics(
@@ -590,6 +614,7 @@ export function createLspDiagnosticsTool(
 				serverScope,
 				cwd,
 				onConfirmedNoBlockers,
+				excludeServerIds,
 			);
 		},
 	};
@@ -661,6 +686,9 @@ async function collectDiagnosticsForFile(
 	scanRoot: string,
 	waitMs?: number,
 	serverScope: "primary" | "all" = "all",
+	// #4323: auxiliaries the operator's configuration turns off. Both the touch
+	// and the clientless fallback below leave them unacquired.
+	excludeServerIds?: ReadonlySet<string>,
 ): Promise<DiagnosticsCollectionResult> {
 	let timedOut = false;
 	let content: string | undefined;
@@ -758,6 +786,7 @@ async function collectDiagnosticsForFile(
 			maxClientWaitMs: waitMs,
 			source: "lsp_diagnostics",
 			clientScope: serverScope,
+			excludeServerIds,
 			// #3405: the caller asked whether THIS file is clean right now, and the
 			// content above was just read from disk — so it is the file's saved
 			// state. Without the save a save-triggered server answers zero
@@ -782,6 +811,7 @@ async function collectDiagnosticsForFile(
 			: await lspService.getDiagnostics(
 					absPath,
 					waitMs !== undefined ? "document" : "full",
+					excludeServerIds,
 				);
 	// #586: honor each auxiliary profile's native inline-suppression comment
 	// (e.g. opengrep's `// nosemgrep`, #441) the same way the per-edit dispatch
@@ -1259,6 +1289,8 @@ async function collectFileDiagnosticResult(
 	// FRESH observation — never on the cache-hit replay below, whose `rawDiags`
 	// are an OLD observation (#1093) and therefore no evidence about now.
 	onConfirmedNoBlockers?: (info: ConfirmedNoBlockersInfo) => void,
+	// #4323: see `BatchOptions.excludeServerIds`.
+	excludeServerIds?: ReadonlySet<string>,
 ): Promise<FileDiagnosticResult> {
 	// Reserve the ordering token when this diagnostic operation starts, not when
 	// its LSP promise settles. A slower old result must not receive a newer token
@@ -1359,6 +1391,7 @@ async function collectFileDiagnosticResult(
 		cwd,
 		waitMs,
 		serverScope,
+		excludeServerIds,
 	);
 	if (tooLargeReason !== undefined) {
 		return { file, diagnostics: [], outcome: "too_large", tooLargeReason };
@@ -1521,6 +1554,8 @@ async function runFileDiagnostics(
 	// #1561: see `createLspDiagnosticsTool`'s parameter doc. This is the path the
 	// live incident took (`mode: "file"`).
 	onConfirmedNoBlockers?: (info: ConfirmedNoBlockersInfo) => void,
+	// #4323: see `BatchOptions.excludeServerIds`.
+	excludeServerIds?: ReadonlySet<string>,
 ) {
 	// Reserve the token before awaiting this file's LSP result. The direct-file
 	// path performs its own confirmation/reconciliation below (#1198).
@@ -1549,6 +1584,7 @@ async function runFileDiagnostics(
 		cwd,
 		waitMs,
 		serverScope,
+		excludeServerIds,
 	);
 	if (tooLargeReason !== undefined) {
 		return {
@@ -1968,12 +2004,20 @@ async function collectBatchDiagnostics(
 	// `persist()` call below), rather than round-tripping the on-disk cache
 	// file per-file. Shared store with `runWorkspaceDiagnostics` (`lens_
 	// diagnostics mode=full`'s engine); `scopeKey` keeps the two tools'
-	// differently-scoped touches (this tool never excludes any server, that
-	// one excludes opengrep — see `buildScopeKey`'s doc) from cross-serving
-	// entries that wouldn't actually match what each asked for.
+	// differently-scoped touches from cross-serving entries that wouldn't
+	// actually match what each asked for (see `buildScopeKey`'s doc). #4323:
+	// an all-server check excludes the auxiliaries the operator turned off, so
+	// they are part of its key; a primary-only touch attaches no auxiliary, so
+	// the exclusion does not change its coverage.
 	const resolvedCwd = options.cwd ?? process.cwd();
 	const cacheCtx = createWorkspaceDiagnosticsCacheContext(resolvedCwd);
-	const scopeKey = buildScopeKey(options.serverScope ?? "all");
+	const serverScope = options.serverScope ?? "all";
+	const scopeKey = buildScopeKey(
+		serverScope,
+		serverScope === "all" && options.excludeServerIds
+			? [...options.excludeServerIds]
+			: undefined,
+	);
 	const resultsByIndex = new Map<number, FileDiagnosticResult>();
 	let completed = 0;
 	const pendingIndices = new Map<string, number[]>();
@@ -2029,6 +2073,7 @@ async function collectBatchDiagnostics(
 						scopeKey,
 						resolvedCwd,
 						options.onConfirmedNoBlockers,
+						options.excludeServerIds,
 					);
 					const bounded = withDeadline(work, {
 						ms: batchFileDeadlineMs(),

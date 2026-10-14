@@ -89,7 +89,8 @@ export interface WorkspaceDiagnosticsCacheEntry {
 	 * `clientScope: "all"` but excludes opengrep (`WORKSPACE_SWEEP_EXCLUDED_SERVER_IDS`,
 	 * #584 — a separate CLI extractor covers it for that sweep), while
 	 * `lsp_diagnostics`' batch/directory scan (`tools/lsp-diagnostics.ts`)
-	 * touches with no exclusions and supports a `"primary"`-only scope. An
+	 * excludes only the auxiliaries the operator's configuration switches off
+	 * (#4323) and supports a `"primary"`-only scope. An
 	 * entry produced under one scope must never be served to a lookup under a
 	 * DIFFERENT scope — that would either silently drop diagnostics the
 	 * caller asked for (entry missing a server the caller wants) or return

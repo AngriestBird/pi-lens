@@ -356,6 +356,11 @@ const lspSpawnHeavyInclude = [
 	"tests/mcp/analyze-cli.test.ts",
 	// #4300: the MCP witness crosses Lean's real initialize handshake.
 	"tests/mcp/server.smoke.test.ts",
+	// #4323: real MCP server children, each spawning real fake-LSP children (the
+	// JSON server and an Opengrep stand-in) for `pilens_diagnostics source=lsp`.
+	// The fixture path is passed to the bin, not imported, so the marker census
+	// cannot see it; stated here by hand like analyze-cli above.
+	"tests/mcp/diagnostics-opengrep-disabled-4323.test.ts",
 	"tests/support/fake-lsp-server.test.ts",
 	// #873/#448: the dispatch LSP runner against a real stdio JSON-RPC server
 	// — a real child spawn through the production LSPService plus a
@@ -379,6 +384,11 @@ const lspSpawnHeavyInclude = [
 	// edit applier over a real stdio fake-server child (a project custom
 	// server); waits on a real handshake and diagnostics rounds like #4320's.
 	"tests/tools/lsp-diagnostics-created-outside-4346.test.ts",
+	// #4323: the production lsp_diagnostics handler and LSPService over real
+	// stdio fake-server children (the JSON server and an Opengrep stand-in,
+	// project command overrides); waits on real handshakes and pull rounds like
+	// #4320's.
+	"tests/tools/lsp-diagnostics-opengrep-disabled-4323.test.ts",
 	// #3310: launches the fake server THROUGH the production `PHPServer` entry
 	// (an executable node_modules/.bin/intelephense shim) and waits on a real
 	// initialize handshake plus a two-publish diagnostics sequence per case —

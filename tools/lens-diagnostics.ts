@@ -133,6 +133,7 @@ import {
 	MAX_BATCH_FILES,
 	renderBatchOutcomeLines,
 	type BatchOutcomeDetail,
+	type LspDiagnosticsFlagReader,
 } from "./lsp-diagnostics.js";
 import {
 	demotePastEofDiagnostics,
@@ -290,6 +291,10 @@ export function createLensDiagnosticsTool(
 		| import("../clients/runtime-coordinator.js").RuntimeCoordinator
 		| undefined,
 	isLensGuardEnabled: () => boolean = () => true,
+	// #4323: the host's flag resolver, so the `source=lsp` probe leaves the
+	// auxiliaries the operator turned off unstarted (see
+	// `createLspDiagnosticsTool`'s `getFlag`). index.ts and mcp/server.ts inject it.
+	getFlag?: LspDiagnosticsFlagReader,
 ) {
 	const lspProbe = createLspDiagnosticsTool(
 		nextWriteIndex,
@@ -316,6 +321,7 @@ export function createLensDiagnosticsTool(
 			}
 		},
 		getLspService,
+		getFlag,
 	);
 	return {
 		name: "lens_diagnostics" as const,

@@ -611,6 +611,10 @@ const lensDiagnosticsTool = createLensDiagnosticsTool(
 	// Matches index.ts:1656 and the two sibling readers
 	// (clients/runtime-tool-call.ts, clients/runtime-tool-result.ts).
 	() => isLensGuardEnabled(),
+	// #4323: `opengrep.enabled=false` keeps the explicit `source=lsp` probe from
+	// starting Opengrep, as it does for `pilens_analyze`. Resolved per call
+	// against the call's own project, like `lspNavigationTool` below (#792).
+	(name, cwd) => createMcpHost(undefined, cwd).getFlag(name),
 );
 const astGrepClient = new AstGrepClient();
 const astGrepSearchTool = createAstGrepSearchTool(astGrepClient);

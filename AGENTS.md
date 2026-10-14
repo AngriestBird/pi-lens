@@ -738,6 +738,12 @@ file-scoped worklist and receives no project-wide scanner output.
   `tests/config/lsp-role-predicate-sweep.test.ts` (production and `scripts/`
   trees at zero inlined predicates) and
   `tests/config/lsp-server-trait-table.test.ts` (registered-or-fail).
+- Which auxiliaries the operator's configuration switches off (a kill switch
+  such as `--no-opengrep` / `opengrep.enabled=false`) has one owner,
+  `configDisabledAuxiliaryLspServerIds` in `clients/dispatch/auxiliary-lsp.ts`.
+  The explicit `lsp_diagnostics` probe passes that set as `excludeServerIds` to
+  both its touch and its `getDiagnostics` fallback, through the flag resolver
+  each host injects; the session's resource degrade is not part of it (#4323).
 - LSP roots never exceed the session-cwd ceiling. Root/config discovery uses
   shared marker seams. Child cwd resolution uses `resolveToolCwd` and its
   caller-specific markers.

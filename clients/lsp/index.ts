@@ -6409,6 +6409,12 @@ export class LSPService {
 	async getDiagnostics(
 		filePath: string,
 		diagnosticsMode: LSPDiagnosticsMode = "full",
+		/**
+		 * #4323: servers to leave unacquired, as `touchFile`'s option of the same
+		 * name. The `lsp_diagnostics` fallback passes the auxiliaries the
+		 * operator's configuration turns off.
+		 */
+		excludeServerIds?: ReadonlySet<string>,
 	): Promise<import("./client.js").LSPDiagnostic[]> {
 		const normalizedPath = normalizeMapKey(filePath);
 		const outsideRoot = await this.findOutsideProjectRoot(filePath);
@@ -6436,7 +6442,7 @@ export class LSPService {
 			(s) => s.id,
 		);
 		const { clients: spawned, serverCountAttempted } =
-			await this.getClientsForFile(filePath);
+			await this.getClientsForFile(filePath, excludeServerIds);
 		if (spawned.length === 0) {
 			const stale = this.lastKnownDiagnostics.get(normalizedPath);
 			const failureKind = stale?.length ? "no_clients_stale" : "no_clients";

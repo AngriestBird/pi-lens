@@ -471,7 +471,13 @@ describe("lens_diagnostics source and scope routing", () => {
 			expect(result.details.source).toBe("lsp");
 			expect(result.details.scope).toBe("paths");
 			expect(result.content[0].text).toContain("probe finding");
-			expect(service.getDiagnostics).toHaveBeenCalledWith(file, "full");
+			// #4323: the third argument is the config-disabled auxiliaries; this
+			// tool is built without a flag resolver, so nothing is excluded.
+			expect(service.getDiagnostics).toHaveBeenCalledWith(
+				file,
+				"full",
+				undefined,
+			);
 		} finally {
 			removeTempDirSync(cwd);
 		}
