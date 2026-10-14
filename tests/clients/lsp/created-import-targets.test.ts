@@ -136,28 +136,58 @@ describe("importTargetsToAnnounce: scope completeness (#4346 r2)", () => {
 		return heard;
 	}
 
-	// Row F1. Recurrence: #4430 r1 review F1, the import query captures only
-	// import and export statements, so these dependencies were neither targets
-	// nor unresolved, and the cache served a stale finding past their creation.
+	// Completeness table rows C2-C10. Recurrence: #4430 r1 review F1 and r2
+	// verify V1, the import query captures only import and export statements,
+	// so these dependencies were neither targets nor unresolved, and the cache
+	// served a stale finding past their creation (on real tsserver for the
+	// JSDoc `@import` and the module augmentation). Rule A (a relative
+	// specifier string that is not a captured source) covers every row; the
+	// call rows also match rule K.
 	it.each([
-		["dynamic import", 'export const f = () => import("./lazy");\n'],
-		["type-position import", 'export let t: import("./types").T;\n'],
-		["import = require", 'import m = require("./mod");\nexport { m };\n'],
-		["require", 'const m = require("./mod");\nexport { m };\n'],
-		["reference path", '/// <reference path="./globals.ts" />\nexport {};\n'],
-	])("reports a file holding a %s incomplete", async (_shape, content) => {
-		const root = workspace("pi-lens-4346-uncaptured-");
-		const importer = path.join(root, "user.ts");
-		fs.writeFileSync(importer, `import "./dep";\n${content}`);
-		fs.writeFileSync(path.join(root, "dep.ts"), "export {};\n");
+		["dynamic import", "user.ts", 'export const f = () => import("./lazy");\n'],
+		["type-position import", "user.ts", 'export let t: import("./types").T;\n'],
+		[
+			"import = require",
+			"user.ts",
+			'import m = require("./mod");\nexport { m };\n',
+		],
+		["require", "user.ts", 'const m = require("./mod");\nexport { m };\n'],
+		[
+			"reference path",
+			"user.ts",
+			'/// <reference path="./globals.ts" />\nexport {};\n',
+		],
+		[
+			"JSDoc @import",
+			"user.js",
+			'/** @import { T } from "./types" */\n/** @type {T} */\nexport const t = 1;\n',
+		],
+		[
+			"module augmentation",
+			"user.ts",
+			'declare module "./augmod" {\n\tinterface A { x: number }\n}\nexport {};\n',
+		],
+		[
+			"comment-split dynamic import",
+			"user.ts",
+			'export const p = import /* c */ ("./lazy");\n',
+		],
+	])(
+		"reports a file holding a %s incomplete",
+		async (_shape, name, content) => {
+			const root = workspace("pi-lens-4346-uncaptured-");
+			const importer = path.join(root, name);
+			fs.writeFileSync(importer, `import "./dep";\n${content}`);
+			fs.writeFileSync(path.join(root, "dep.ts"), "export {};\n");
 
-		const scope = await scopeOf(root, importer);
+			const scope = await scopeOf(root, importer);
 
-		expect(scope.targets.map((file) => path.basename(file))).toEqual([
-			"dep.ts",
-		]);
-		expect(scope.complete).toBe(false);
-	});
+			expect(scope.targets.map((file) => path.basename(file))).toEqual([
+				"dep.ts",
+			]);
+			expect(scope.complete).toBe(false);
+		},
+	);
 
 	it("reports a file whose imports are all statements complete", async () => {
 		const root = workspace("pi-lens-4346-captured-");
@@ -172,14 +202,29 @@ describe("importTargetsToAnnounce: scope completeness (#4346 r2)", () => {
 		expect((await scopeOf(root, importer)).complete).toBe(true);
 	});
 
-	// The forms above are JS/TS; a Go grouped import is `import (`, which the
-	// Go query captures.
-	it("reports a Go file with a grouped import complete", async () => {
+	// Row C11: the r2 `/// <reference path` keyword is deleted. A referenced
+	// file reaches F only through global declarations, which the ambient arm
+	// counts for every JS/TS entry, so this scope stays complete.
+	it("reports a file referencing a path without ./ complete", async () => {
+		const root = workspace("pi-lens-4346-reference-bare-");
+		const importer = path.join(root, "user.ts");
+		fs.writeFileSync(
+			importer,
+			'/// <reference path="globals.d.ts" />\nimport "./dep";\nexport {};\n',
+		);
+		fs.writeFileSync(path.join(root, "dep.ts"), "export {};\n");
+
+		expect((await scopeOf(root, importer)).complete).toBe(true);
+	});
+
+	// Row C19: rules A and K are JS/TS only. A Go grouped import is `import (`,
+	// and a Go string may spell `./x`; the Go query captures every import spec.
+	it("reports a Go file with a grouped import and a relative string complete", async () => {
 		const root = workspace("pi-lens-4346-go-group-");
 		const importer = path.join(root, "main.go");
 		fs.writeFileSync(
 			importer,
-			'package main\n\nimport (\n\t"fmt"\n)\n\nfunc main() { fmt.Println() }\n',
+			'package main\n\nimport (\n\t"fmt"\n)\n\nfunc main() { fmt.Println("./x") }\n',
 		);
 
 		expect((await scopeOf(root, importer)).complete).toBe(true);
@@ -222,13 +267,22 @@ describe("importTargetsToAnnounce: scope completeness (#4346 r2)", () => {
 		expect(scope.complete).toBe(false);
 	});
 
-	// Row F2. Recurrence: #4430 r1 review F2, a target that re-exports another
-	// module lets the importer use that module, which its imports do not name.
+	// Rows T1-T8. Recurrence: #4430 r1 review F2 and the r2 verify's three
+	// slips (T6-T8): a target that re-exports another module lets the
+	// importer use that module, which its imports do not name. Rule R (an
+	// `export` then a `from` with no `;` between) covers every row.
 	it.each([
 		["export * from", 'export * from "./b";\n'],
 		["export * as ns from", 'export * as ns from "./b";\n'],
-		["export { x } from", 'export { x } from "./b";\n'],
+		["export { x } from", 'export {\n  x,\n} from "./b";\n'],
 		["export type { T } from", 'export type { T } from "./b";\n'],
+		["export { default } from", 'export { default } from "./b";\n'],
+		["export /* c */ * from", 'export /* c */ * from "./b";\n'],
+		[
+			"a } in a comment within export { } from",
+			'export {\n  x, // see }\n} from "./b";\n',
+		],
+		['export * as "ns" from', 'export * as "ns" from "./b";\n'],
 	])(
 		"reports a file whose target holds %s incomplete",
 		async (_form, content) => {

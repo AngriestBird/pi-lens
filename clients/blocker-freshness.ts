@@ -383,9 +383,8 @@ async function resolveForwardImportsMemoized(
  * the last call, carried across the file's versions, so a later call that
  * resolves one sees a path that appeared in between (`notePathAppeared`).
  *
- * #4346 r2 F1: `uncaptured` is set when a JS/TS file holds a dependency form
- * the import query does not capture (`UNCAPTURED_JS_TS_DEPENDENCY`), so its
- * sources are not all of its dependencies.
+ * #4346 r3: `uncaptured` is set when a JS/TS file's sources may not be all of
+ * its dependencies ({@link holdsUncapturedDependency}).
  */
 const FORWARD_IMPORT_SOURCE_MEMO_ENTRIES = 1024;
 interface ForwardImportSourceEntry {
@@ -398,16 +397,35 @@ interface ForwardImportSourceEntry {
 }
 
 /** The JS/TS grammars, whose import query captures only `import`/`export`
- * statement sources. */
+ * statement sources. Go captures every import spec, and `import (` is its
+ * grouped import. */
 const JS_TS_LANGUAGES = new Set(["typescript", "tsx", "javascript"]);
+/** A relative specifier string: quoted or backticked, starting `./` or `../`. */
+const RELATIVE_SPECIFIER = /(["'`])(\.{1,2}\/(?:(?!\1)[^\n])*)\1/g;
+/** A call whose specifier may be a package or alias name, or computed. */
+const DEPENDENCY_CALL = /\bimport\s*\(|\brequire\s*\(/;
+
 /**
- * #4346 r2 F1: dependency forms of a JS/TS file the import query does not
- * capture: dynamic or type-position `import("./x")`, `import x =
- * require("./x")`, `require("./x")`, `/// <reference path>`. A match in a
- * comment or string only makes the scope incomplete, which fails closed.
+ * #4346 r3: whether a JS/TS file's captured `sources` may miss a dependency.
+ * Derived from the text, not from a list of forms (rounds 1 and 2 listed forms
+ * and each review found one more): any relative specifier string, comments
+ * included, that is not a captured source (a JSDoc `@import`, `declare
+ * module "./x"`, `import("./x")`, `require("./x")`), or an `import(` or
+ * `require(` call, whose specifier a relative test cannot see. A false
+ * positive only makes the scope incomplete, which refuses a finding entry
+ * once more (fails closed).
  */
-const UNCAPTURED_JS_TS_DEPENDENCY =
-	/\bimport\s*\(|\brequire\s*\(|\/\/\/\s*<reference\s+path/;
+function holdsUncapturedDependency(
+	content: string,
+	sources: readonly string[],
+): boolean {
+	if (DEPENDENCY_CALL.test(content)) return true;
+	const captured = new Set(sources);
+	for (const match of content.matchAll(RELATIVE_SPECIFIER)) {
+		if (!captured.has(match[2]!)) return true;
+	}
+	return false;
+}
 const forwardImportSourceMemo = new BoundedLruCache<
 	string,
 	ForwardImportSourceEntry
@@ -461,15 +479,16 @@ async function forwardImportSources(
 	);
 	if (!outcome.parsed) return undefined;
 	forwardImportParses++;
+	const sources = [...new Set(outcome.value.map((ref) => ref.source))];
 	const entry: ForwardImportSourceEntry = {
 		mtimeMs: stat.mtimeMs,
 		ctimeMs: stat.ctimeMs,
 		size: stat.size,
-		sources: [...new Set(outcome.value.map((ref) => ref.source))],
+		sources,
 		unresolved: memo?.unresolved ?? new Set(),
 		uncaptured:
 			JS_TS_LANGUAGES.has(languageId) &&
-			UNCAPTURED_JS_TS_DEPENDENCY.test(content),
+			holdsUncapturedDependency(content, sources),
 	};
 	forwardImportSourceMemo.set(key, entry);
 	return entry;

@@ -153,7 +153,7 @@ beforeAll(async () => {
 			servers: {
 				"stale-ts": {
 					name: "stale lookup server",
-					extensions: [".ts"],
+					extensions: [".ts", ".js"],
 					command: process.execPath,
 					args: [shim],
 					rootMarkers: ["package.json"],
@@ -393,39 +393,59 @@ describe("cache entries past a creation: the dependency scope (#4346)", () => {
 	// dependency held another way was neither a target nor unresolved; the
 	// scope looked complete and the finding was served past the dependency's
 	// creation (base refused it). Each file's finding is its `import "./*_never"`
-	// line; the created module is the one the other form names.
+	// line; the created module is the one the other form names. Recurrence
+	// also: #4430 r2 verify V1, a JSDoc `@import` in a checkJs file and a
+	// relative module augmentation, both served stale on real tsserver.
 	it.each([
 		[
 			"a dynamic import",
 			"dynf",
 			'export const f = () => import("./dynf_mod");\n',
 			undefined,
+			".ts",
 		],
 		[
 			"a type-position import",
 			"typf",
 			'export let t: import("./typf_mod").T;\n',
 			undefined,
+			".ts",
 		],
 		[
 			"an import = require",
 			"reqf",
 			'import m = require("./reqf_mod");\nexport { m };\n',
 			undefined,
+			".ts",
 		],
 		[
 			"a target that re-exports",
 			"reexf",
 			'import "./reexf_a";\n',
 			'export * from "./reexf_mod";\n',
+			".ts",
+		],
+		[
+			"a JSDoc @import",
+			"jsdf",
+			'/** @import { T } from "./jsdf_mod" */\n/** @type {T} */\nexport const t = 1;\n',
+			undefined,
+			".js",
+		],
+		[
+			"a module augmentation",
+			"augf",
+			'declare module "./augf_mod" {\n\tinterface A { x: number }\n}\nexport {};\n',
+			undefined,
+			".ts",
 		],
 	])(
 		"refuses a cached finding when %s names the created module",
-		async (_shape, stem, rest, reexporter) => {
+		async (_shape, stem, rest, reexporter, ext) => {
 			if (reexporter) {
 				fs.writeFileSync(path.join(workspace, `${stem}_a.ts`), reexporter);
 			}
-			const user = path.join(workspace, `${stem}_user.ts`);
+			const user = path.join(workspace, `${stem}_user${ext}`);
 			fs.writeFileSync(user, `import "./${stem}_never";\n${rest}`);
 			const scannedAt = await cached(user);
 

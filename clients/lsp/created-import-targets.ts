@@ -132,12 +132,21 @@ export interface ImportScope {
 }
 
 /**
- * #4346 r2 F2: a JS/TS re-export statement (`export * from`, `export * as ns
- * from`, `export { x } from`, `export type { x } from`). Through one, the
- * importer depends on a module its own imports do not name.
+ * #4346 r3: whether `text` may re-export: an `export` followed by a `from`
+ * with no `;` between. That is `/\bexport\b[^;]*?\bfrom\b/s`, tested per
+ * `;`-free run from its first `export`, because the regex alone takes
+ * quadratic time on a file with no semicolons (20 s on 1.9 MB, measured).
+ * Through a re-export the importer depends on a module its own imports do
+ * not name. Not a list of forms (round 2 listed them and its verify found
+ * three more); a false positive (semicolon-free code, a comment) makes the
+ * scope incomplete, which fails closed.
  */
-const JS_TS_REEXPORT =
-	/\bexport\s+(?:type\s+)?(?:\*(?:\s+as\s+[\w$]+)?|\{[^}]*\})\s*from\s*["'`]/;
+function holdsReexport(text: string): boolean {
+	return text.split(";").some((run) => {
+		const at = run.search(/\bexport\b/);
+		return at >= 0 && /\bfrom\b/.test(run.slice(at));
+	});
+}
 
 /**
  * Whether `target` holds a JS/TS re-export; an unreadable one counts as
@@ -148,7 +157,7 @@ function reexportsFrom(target: string, seen: Map<string, boolean>): boolean {
 	let answer = seen.get(target);
 	if (answer === undefined) {
 		try {
-			answer = JS_TS_REEXPORT.test(fs.readFileSync(target, "utf8"));
+			answer = holdsReexport(fs.readFileSync(target, "utf8"));
 		} catch {
 			answer = true;
 		}
