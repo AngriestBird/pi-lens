@@ -19,13 +19,21 @@
  * - Shape: the message parameter is typed `unknown` and never cast (`as`,
  *   `<T>`). The type checker then refuses every field read until a check has
  *   narrowed it, so "reads only shape-checked fields" is tsc's verdict.
- * - Containment: the handler body is one `try` with a `catch` that does not
- *   rethrow, and the try block lets no promise rejection out (a `.then`
- *   without `.catch`, or an async IIFE whose own body is not contained). A
- *   body that only delegates (`(m: unknown) => handle(m)`, `void (async () =>
- *   {…})()`) is contained when the function it delegates to is.
+ * - Containment: the handler body is one `try` whose `catch` and `finally`
+ *   do not throw, and the try block lets no promise rejection out. A call in
+ *   the try that is neither awaited nor followed by `.catch` is judged by its
+ *   callee's body when the callee is an async IIFE or a same-file async
+ *   function, and is `unresolved` when it is voided and the callee is not a
+ *   same-file function; a `.then` without `.catch` fails.
+ * - A body that only delegates (`(m: unknown) => handle(m)`, `void (async ()
+ *   => {…})()`) is contained when the function it delegates to is and every
+ *   argument is the message itself or a literal: any other argument is
+ *   evaluated in the listener, before the delegate's try (#4413 r1 F1).
  * - A handler the scan cannot follow (an imported function, a factory call)
  *   is `unresolved`, which fails loud: it is never counted as contained.
+ * - A site's key names the nearest named function that encloses the
+ *   registration in the AST, or `<module>` at top level; a repeated key gets
+ *   ` #2`, ` #3` in source order.
  *
  * The scan parses comment-blanked source (`stripSource`, strings kept,
  * because the event name `"message"` is itself a string literal: the
@@ -34,13 +42,18 @@
  * rule.
  *
  * Known limits, named: a catch or finally body is the containment boundary
- * and is trusted not to throw beyond an explicit `throw`; a callback a
- * handler schedules (`fs.rm(p, cb)`, a timer) runs outside its try and is
- * shape 53's hand screen; an event name held in a variable is not a site.
+ * and is trusted not to throw beyond an explicit `throw` (a helper that
+ * rethrows passes); a callback a handler schedules (`fs.rm(p, cb)`, a timer)
+ * runs outside its try and is shape 53's hand screen; an un-voided call in
+ * the try to an imported async function passes, because without type
+ * information it cannot be told apart from a sync call; `const r: any = m`
+ * widens without a cast; an event name is followed only to a same-file
+ * declarator, and computed members (`worker["on"]`), `events.on(worker,
+ * "message")` and `Object.assign(port, { onmessage })` are not sites.
  */
 
 import { Lang, parse } from "@ast-grep/napi";
-import { findEnclosingSymbol, stripSource } from "./sweep-kit.js";
+import { stripSource } from "./sweep-kit.js";
 
 /** The napi node type is untyped, exactly as the socket sweep walks it. */
 // oxlint-disable-next-line typescript/no-explicit-any
@@ -67,7 +80,10 @@ const FUNCTION_KINDS = new Set([
 export type MessageHandlerVerdict = "contained" | "uncontained" | "unresolved";
 
 export interface MessageHandlerSite {
-	/** `<file>#<enclosing symbol> <receiver>.<method>`: stable under line churn. */
+	/**
+	 * `<file>#<enclosing function or <module>> <receiver>.<method>`, with ` #N`
+	 * on a repeat: stable under line churn.
+	 */
 	key: string;
 	/** 1-based line of the registration. */
 	line: number;
@@ -101,6 +117,81 @@ function isMessageLiteral(node: SgNode | undefined): boolean {
 		parts[0].kind() === "string_fragment" &&
 		parts[0].text() === "message"
 	);
+}
+
+/** Names a same-file declarator binds to the `"message"` literal (#4413 r1 F5). */
+function messageNameIndex(root: SgNode): Set<string> {
+	const names = new Set<string>();
+	walk(root, (node: SgNode) => {
+		if (
+			node.kind() === "variable_declarator" &&
+			isMessageLiteral(node.field("value"))
+		) {
+			const name = node.field("name");
+			if (name?.kind() === "identifier") names.add(name.text());
+		}
+	});
+	return names;
+}
+
+const LITERAL_KINDS = new Set(["number", "true", "false", "null", "undefined"]);
+
+/** An argument whose evaluation cannot throw: a literal (#4413 r1 F1). */
+function isLiteral(node: SgNode): boolean {
+	if (LITERAL_KINDS.has(node.kind())) return true;
+	if (node.kind() === "identifier" && node.text() === "undefined") return true;
+	if (node.kind() === "string") return true;
+	return (
+		node.kind() === "template_string" &&
+		!node
+			.namedChildren()
+			.some((part: SgNode) => part.kind() === "template_substitution")
+	);
+}
+
+function isAsync(fn: SgNode): boolean {
+	return fn.child(0)?.text() === "async";
+}
+
+/** Is this call's promise awaited or caught? A rejection then stays in the try. */
+function handled(call: SgNode): boolean {
+	return unwrapParent(call)?.kind() === "await_expression" || caughtAfter(call);
+}
+
+function isVoided(call: SgNode): boolean {
+	const parent = unwrapParent(call);
+	return (
+		parent?.kind() === "unary_expression" && parent.child(0)?.text() === "void"
+	);
+}
+
+function unwrapParent(node: SgNode): SgNode | undefined {
+	let parent = node.parent();
+	while (parent?.kind() === "parenthesized_expression")
+		parent = parent.parent();
+	return parent;
+}
+
+/** The nearest named function enclosing `node`, or `<module>` (#4413 r1 F6). */
+function enclosingName(node: SgNode): string {
+	for (let current = node.parent(); current; current = current.parent()) {
+		const kind = current.kind();
+		if (
+			kind === "function_declaration" ||
+			kind === "generator_function_declaration" ||
+			kind === "method_definition"
+		) {
+			const name = current.field("name")?.text();
+			if (name) return name;
+		} else if (FUNCTION_KINDS.has(kind)) {
+			const holder = current.parent();
+			if (holder?.kind() === "variable_declarator") {
+				const name = holder.field("name")?.text();
+				if (name) return name;
+			}
+		}
+	}
+	return "<module>";
 }
 
 /** Named functions in the file: declarations and `const f = (…) => …`. */
@@ -239,6 +330,18 @@ class Judge {
 			// An IIFE: its body runs as this handler's body.
 			return this.body(callee.field("body"), param);
 		}
+		// #4413 r1 F1: arguments run in the listener, before the delegate's try.
+		const evaluated = args
+			.filter(
+				(arg: SgNode) =>
+					!isLiteral(arg) &&
+					!(arg.kind() === "identifier" && arg.text() === param),
+			)
+			.map(
+				(arg: SgNode) =>
+					`argument ${arg.text()} is evaluated before ${callee?.text() ?? "the delegate"}'s try runs; pass the message itself and read it inside the try`,
+			);
+		if (evaluated.length > 0) return evaluated;
 		const target =
 			callee?.kind() === "identifier" ? this.resolve(callee) : undefined;
 		const position = args.findIndex(
@@ -270,6 +373,17 @@ class Judge {
 				}
 			});
 		}
+		// #4413 r1 F3: a throw in finally leaves the listener as one in catch does.
+		const finalizer = statement
+			.namedChildren()
+			.find((child: SgNode) => child.kind() === "finally_clause");
+		if (finalizer) {
+			walkOwnBody(finalizer, (node: SgNode) => {
+				if (node.kind() === "throw_statement") {
+					problems.push(`finally throws (${node.text()})`);
+				}
+			});
+		}
 		const block = statement.field("body");
 		if (block) {
 			walkOwnBody(block, (node: SgNode) => {
@@ -284,17 +398,55 @@ class Judge {
 						`a .then() chain without .catch() lets a rejection out of the try (${firstLine(node.text())})`,
 					);
 				}
-				const callee = unwrapParens(fn);
-				if (
-					callee &&
-					FUNCTION_KINDS.has(callee.kind()) &&
-					callee.child(0)?.text() === "async"
-				) {
-					problems.push(...this.body(callee.field("body"), undefined));
-				}
+				problems.push(...this.floating(node));
 			});
 		}
 		return problems;
+	}
+
+	/**
+	 * A call in a try whose rejection is not awaited or caught (#4413 r1 F2):
+	 * an async IIFE or a same-file async callee is judged by its body, as the
+	 * listener body is; a voided call the scan cannot follow is unresolved.
+	 */
+	private floating(call: SgNode): string[] {
+		if (handled(call)) return [];
+		const fn = unwrapParens(call.field("function"));
+		const property =
+			fn?.kind() === "member_expression"
+				? fn.field("property")?.text()
+				: undefined;
+		// `.then` has its own rule above; `.catch` handles the rejection.
+		if (property === "then" || property === "catch") return [];
+		const target =
+			fn && FUNCTION_KINDS.has(fn.kind())
+				? fn
+				: fn?.kind() === "identifier"
+					? this.resolve(fn)
+					: undefined;
+		if (target && (isAsync(target) || isVoided(call))) {
+			if (this.visiting.has(target)) return [];
+			this.visiting.add(target);
+			const reason =
+				target === fn
+					? ""
+					: `${firstLine(call.text())} is neither awaited nor caught, so its rejection leaves the try: `;
+			const args = call.field("arguments")?.namedChildren() ?? [];
+			const passed = args.findIndex(
+				(arg: SgNode) => arg.kind() === "identifier",
+			);
+			const param = passed < 0 ? undefined : parameters(target)[passed]?.name;
+			return this.body(target.field("body"), param).map(
+				(problem) => `${reason}${problem}`,
+			);
+		}
+		if (!target && isVoided(call)) {
+			this.unresolved = true;
+			return [
+				`voided promise from ${fn?.text() ?? "an expression"}, which this file does not define; the scan cannot follow it`,
+			];
+		}
+		return [];
 	}
 }
 
@@ -324,8 +476,9 @@ export function scanMessageHandlers(
 	if (!/["'`]message["'`]|\bonmessage\b/.test(stripped)) return [];
 	const root = parse(Lang.TypeScript, stripped).root();
 	const index = functionIndex(root);
-	const lines = source.split("\n");
+	const messageNames = messageNameIndex(root);
 	const sites: MessageHandlerSite[] = [];
+	const seen = new Map<string, number>();
 	const judgeSite = (
 		node: SgNode,
 		receiver: SgNode,
@@ -333,7 +486,9 @@ export function scanMessageHandlers(
 		handler: SgNode | undefined,
 	) => {
 		const line = node.range().start.line;
-		const symbol = findEnclosingSymbol(lines, line) ?? `line-${line + 1}`;
+		const base = `${relPath}#${enclosingName(node)} ${receiver.text().replace(/\s+/g, "")}.${method}`;
+		const ordinal = (seen.get(base) ?? 0) + 1;
+		seen.set(base, ordinal);
 		const judge = new Judge(index);
 		const fn = judge.resolve(handler);
 		const problems = fn
@@ -343,7 +498,7 @@ export function scanMessageHandlers(
 				];
 		const unresolved = !fn || judge.unresolved;
 		sites.push({
-			key: `${relPath}#${symbol} ${receiver.text().replace(/\s+/g, "")}.${method}`,
+			key: ordinal === 1 ? base : `${base} #${ordinal}`,
 			line: line + 1,
 			verdict:
 				problems.length === 0
@@ -361,7 +516,13 @@ export function scanMessageHandlers(
 			const method = fn.field("property")?.text() ?? "";
 			if (!LISTENER_METHODS.has(method)) return;
 			const args = node.field("arguments")?.namedChildren() ?? [];
-			if (!isMessageLiteral(args[0])) return;
+			const event = args[0];
+			if (
+				!isMessageLiteral(event) &&
+				!(event?.kind() === "identifier" && messageNames.has(event.text()))
+			) {
+				return;
+			}
 			judgeSite(node, fn.field("object"), method, args[1]);
 		} else if (node.kind() === "assignment_expression") {
 			const left = node.field("left");

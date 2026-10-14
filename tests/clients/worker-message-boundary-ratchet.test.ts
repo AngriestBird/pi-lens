@@ -29,18 +29,25 @@
  * | inline, param untyped or typed as the expected result | uncontained (shape) |
  * | inline, a statement outside the try | uncontained |
  * | try/catch whose catch rethrows | uncontained |
+ * | try/catch/finally whose finally throws (#4413 r1 F3) | uncontained |
  * | try/finally with no catch | uncontained |
  * | `.then()` without `.catch()` in the try | uncontained |
  * | async IIFE in the try, its body not contained | uncontained |
+ * | same-file async call in the try, not awaited or caught, body not contained (F2) | uncontained |
+ * | the same call awaited, or followed by `.catch` | contained |
+ * | `void f(m)` in the try, `f` not a same-file function (F2) | unresolved |
  * | `m as T` or `<T>m` anywhere in the handler | uncontained (shape) |
  * | identifier naming a same-file declaration or const arrow | that function's verdict |
  * | `(m: unknown) => handle(m)` / `void (async () => {…})()` | the delegate's verdict |
+ * | delegate with an argument other than the message or a literal (F1) | uncontained |
  * | identifier or delegate this file does not define (an import) | unresolved |
  * | factory call or member expression as the handler | unresolved |
  * | `try` only in a comment, or only in a string | uncontained |
  * | registration only in a comment or a string | not a site |
  * | `once`, `prependListener`, `addEventListener`, `onmessage =`, `` `message` `` | a site |
- * | event name in a variable | not a site (known limit) |
+ * | event name in a same-file declarator bound to `"message"` (F5) | a site |
+ * | event name from a parameter or an import | not a site (known limit) |
+ * | module-level registration (F6) | keyed `#<module>`, a repeat ` #2` |
  *
  * There is no exemption list. Every live handler is decidable by the rule, so
  * the list would start empty and could only shrink; a handler the rule cannot
@@ -249,6 +256,126 @@ describe("worker message boundary ratchet (#4402, recurrence #4400)", () => {
 		]);
 	});
 
+	it("fails a finally that throws, as it fails a catch that rethrows", () => {
+		// #4413 r1 F3: the finally clause was never walked.
+		const source = [
+			'worker.on("message", (message: unknown) => {',
+			"  try { handle(message); } catch (err) { note(err); } finally { throw new Error('late'); }",
+			"});",
+		].join("\n");
+		expect(verdictOf(source)).toEqual({
+			verdict: "uncontained",
+			problems: ["finally throws (throw new Error('late');)"],
+		});
+	});
+
+	it("fails a delegate whose argument is evaluated before the delegate's try", () => {
+		// #4413 r1 F1: `handle(parse(m))` runs parse in the listener, before
+		// handle's try, so a parse throw ends the host as #4400 did.
+		const withDelegate = (registration: string) =>
+			[
+				"function handle(message: unknown, ...rest: unknown[]): void {",
+				...CONTAINED_BODY,
+				"}",
+				registration,
+			].join("\n");
+		for (const [registration, argument] of [
+			['worker.on("message", (m: unknown) => handle(parse(m)));', "parse(m)"],
+			[
+				'worker.on("message", (m: unknown) => handle(m, extra(m)));',
+				"extra(m)",
+			],
+			[
+				'worker.on("message", (m: unknown) => { handle(readResult(m)); });',
+				"readResult(m)",
+			],
+		]) {
+			expect(verdictOf(withDelegate(registration)), registration).toEqual({
+				verdict: "uncontained",
+				problems: [
+					`argument ${argument} is evaluated before handle's try runs; pass the message itself and read it inside the try`,
+				],
+			});
+		}
+		expect(
+			verdictOf(
+				withDelegate(
+					'worker.on("message", (m: unknown) => handle(m, "x", 1, null, undefined, true));',
+				),
+			),
+		).toEqual({ verdict: "contained", problems: [] });
+	});
+
+	it("judges an unhandled same-file async call in the try like the async IIFE", () => {
+		// #4413 r1 F2: the rejection of an un-awaited async call leaves the try,
+		// and pi's crash guard rethrows an unhandled rejection (host death).
+		const source = (call: string, runBody: string[], asyncHandler = false) =>
+			[
+				"async function run(message: unknown): Promise<void> {",
+				...runBody,
+				"}",
+				`worker.on("message", ${asyncHandler ? "async " : ""}(message: unknown) => {`,
+				"  try {",
+				`    ${call}`,
+				"  } catch (err) {",
+				"    note(err);",
+				"  }",
+				"});",
+			].join("\n");
+		const uncontainedRun = [
+			"  const result = readResult(message);",
+			"  apply(result);",
+		];
+		const notContained =
+			"body is not one try/catch: a throw from a statement outside a try leaves the listener and ends the host";
+		expect(verdictOf(source("void run(message);", uncontainedRun))).toEqual({
+			verdict: "uncontained",
+			problems: [
+				`run(message) is neither awaited nor caught, so its rejection leaves the try: ${notContained}`,
+			],
+		});
+		expect(verdictOf(source("run(message);", uncontainedRun))).toEqual({
+			verdict: "uncontained",
+			problems: [
+				`run(message) is neither awaited nor caught, so its rejection leaves the try: ${notContained}`,
+			],
+		});
+		expect(
+			verdictOf(source("void run(message);", CONTAINED_BODY)).verdict,
+		).toBe("contained");
+		expect(
+			verdictOf(source("await run(message);", uncontainedRun, true)).verdict,
+		).toBe("contained");
+		expect(
+			verdictOf(
+				source("void run(message).catch((err) => note(err));", uncontainedRun),
+			).verdict,
+		).toBe("contained");
+		// A voided call marks a promise even when the callee is not declared
+		// async (it returns one), so its body is judged the same way.
+		const syncReturningPromise = source("void run(message);", [
+			"  const pending = save(message);",
+			"  return pending;",
+		]).replace("async function run", "function run");
+		expect(verdictOf(syncReturningPromise)).toEqual({
+			verdict: "uncontained",
+			problems: [
+				`run(message) is neither awaited nor caught, so its rejection leaves the try: ${notContained}`,
+			],
+		});
+		for (const callee of ["imported", "store.persist"]) {
+			expect(
+				verdictOf(source(`void ${callee}(message);`, uncontainedRun)),
+				callee,
+			).toEqual({
+				verdict: "unresolved",
+				problems: [
+					`voided promise from ${callee}, which this file does not define; the scan cannot follow it`,
+				],
+			});
+		}
+	});
+
 	it("fails a rejection that can leave the try, and passes it once caught", () => {
 		const floating = [
 			'worker.on("message", (message: unknown) => {',
@@ -323,8 +450,11 @@ describe("worker message boundary ratchet (#4402, recurrence #4400)", () => {
 			"target.addEventListener(`message`, handle);",
 			"port.onmessage = handle;",
 			'child.on("message", handle);',
+			// #4413 r1 F5: an event name held in a same-file declarator is a site.
 			"const event = 'message';",
-			"worker.on(event, handle);",
+			"worker.on(event, (message) => handle(message));",
+			"const other = 'error';",
+			"worker.on(other, handle);",
 		].join("\n");
 		expect(
 			scanMessageHandlers(source, "fixture.ts").map((site) => [
@@ -337,6 +467,36 @@ describe("worker message boundary ratchet (#4402, recurrence #4400)", () => {
 			["target.addEventListener", "contained"],
 			["port.onmessage", "contained"],
 			["child.on", "contained"],
+			["worker.on", "uncontained"],
+		]);
+	});
+
+	it("keys a module-level listener as the module, never the function above it", () => {
+		// #4413 r1 F6: a line-based lookup keyed #4409's module-level listener
+		// by the previous function, so inserting a function above moved the pin.
+		const source = [
+			"function handle(message: unknown): void {",
+			...CONTAINED_BODY,
+			"}",
+			'parentPort.on("message", handle);',
+			"function start(): void {",
+			'  worker.on("message", (message: unknown) => {',
+			"    worker.on('message', handle);",
+			"  });",
+			"}",
+			"const boot = () => {",
+			"  setup(() => worker.on('message', handle));",
+			"};",
+			'parentPort.on("message", handle);',
+		].join("\n");
+		expect(
+			scanMessageHandlers(source, "fixture.ts").map((site) => site.key),
+		).toEqual([
+			"fixture.ts#<module> parentPort.on",
+			"fixture.ts#start worker.on",
+			"fixture.ts#start worker.on #2",
+			"fixture.ts#boot worker.on",
+			"fixture.ts#<module> parentPort.on #2",
 		]);
 	});
 
