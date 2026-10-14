@@ -301,6 +301,36 @@ describe("#3585 retirement population", () => {
 	 */
 	it("only client-registry.ts writes the registry's shared maps", () => {
 		const dir = path.resolve(__dirname, "../../../clients/lsp");
+		// Every mutable registry map or set, public or private. `unavailableLogged`
+		// and `permanentlyBroken` are public, so a writer outside the registry is
+		// reachable (PR #4374 review F2).
+		const FIELDS = [
+			"clients",
+			"inFlight",
+			"broken",
+			"clientSpawnedAt",
+			"permanentlyBroken",
+			"unavailableLogged",
+		];
+		const FIELD_RE = FIELDS.join("|");
+		const WRITE_RE = "set|delete|clear|add";
+		/**
+		 * Documented allowance. `unavailableLogged` is added by the service when
+		 * it records the one-time unavailable notice (index.ts), and deleted by the
+		 * registry on retirement (client-registry.ts, excluded below). The service's
+		 * add is legitimate; any other writer, or a second add, is not. The count
+		 * is exact, so a new add beside it reds the test.
+		 */
+		const ALLOWED = [
+			{
+				file: "index.ts",
+				field: "unavailableLogged",
+				verb: "add",
+				count: 1,
+				reason: "service logs the one-time unavailable notice",
+			},
+		];
+		const seen = new Map<string, number>();
 		const offenders: string[] = [];
 		let scanned = 0;
 		for (const file of fs.readdirSync(dir, { recursive: true }) as string[]) {
@@ -310,14 +340,67 @@ describe("#3585 retirement population", () => {
 			const blanked = stripCommentsAndStrings(
 				fs.readFileSync(path.join(dir, file), "utf8"),
 			);
+			const lineOf = (index: number) =>
+				blanked.slice(0, index).split("\n").length;
+			// Direct writes: `state.X.set(` or `clientRegistry.X.delete(`.
 			for (const hit of blanked.matchAll(
-				/\b(?:state|clientRegistry)\s*\.\s*(?:clients|inFlight|broken|clientSpawnedAt)\s*\.\s*(?:set|delete|clear)\s*\(/g,
+				new RegExp(
+					`\\b(?:state|clientRegistry)\\s*\\.\\s*(${FIELD_RE})\\s*\\.\\s*(${WRITE_RE})\\s*\\(`,
+					"g",
+				),
 			)) {
-				const line = blanked.slice(0, hit.index).split("\n").length;
-				offenders.push(`${file}:${line}`);
+				const [, field, verb] = hit;
+				const allowed = ALLOWED.find(
+					(a) => a.file === file && a.field === field && a.verb === verb,
+				);
+				if (allowed) {
+					const key = `${file}|${field}|${verb}`;
+					seen.set(key, (seen.get(key) ?? 0) + 1);
+					continue;
+				}
+				offenders.push(`${file}:${lineOf(hit.index)} ${field}.${verb}`);
+			}
+			// Aliases: a local bound to a shared map, the whole `state`/`clientRegistry`
+			// object, or destructured from either. Writes through them are never allowed.
+			const aliases = new Map<string, string | null>();
+			for (const m of blanked.matchAll(
+				new RegExp(
+					`\\b(?:const|let|var)\\s+(\\w+)\\s*=\\s*(?:[\\w$]+\\s*\\.\\s*)?(?:state|clientRegistry)\\s*\\.\\s*(${FIELD_RE})\\b`,
+					"g",
+				),
+			))
+				aliases.set(m[1], m[2]);
+			for (const m of blanked.matchAll(
+				/\b(?:const|let|var)\s+(\w+)\s*=\s*(?:[\w$]+\s*\.\s*)?(?:state|clientRegistry)\s*;/g,
+			))
+				aliases.set(m[1], null);
+			for (const m of blanked.matchAll(
+				/\b(?:const|let|var)\s*\{([^}]*)\}\s*=\s*(?:[\w$]+\s*\.\s*)?(?:state|clientRegistry)\b(?!\s*\.)/g,
+			)) {
+				for (const entry of m[1].split(",")) {
+					const parts = entry.trim().match(/^(\w+)\s*(?::\s*(\w+))?/);
+					if (parts && FIELDS.includes(parts[1]))
+						aliases.set(parts[2] ?? parts[1], parts[1]);
+				}
+			}
+			for (const [alias, field] of aliases) {
+				const re = field
+					? new RegExp(`\\b${alias}\\s*\\.\\s*(${WRITE_RE})\\s*\\(`, "g")
+					: new RegExp(
+							`\\b${alias}\\s*\\.\\s*(${FIELD_RE})\\s*\\.\\s*(${WRITE_RE})\\s*\\(`,
+							"g",
+						);
+				for (const hit of blanked.matchAll(re))
+					offenders.push(`${file}:${lineOf(hit.index)} alias ${alias}`);
 			}
 		}
 		assertNonEmptyScan("clients/lsp sources", scanned, 10);
+		for (const a of ALLOWED) {
+			expect(
+				seen.get(`${a.file}|${a.field}|${a.verb}`) ?? 0,
+				`allowance ${a.field}.${a.verb} in ${a.file}: ${a.reason}`,
+			).toBe(a.count);
+		}
 		expect(offenders).toEqual([]);
 	});
 });
