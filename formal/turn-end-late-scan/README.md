@@ -172,6 +172,11 @@ V1 and J1 were filed as #4154 and are fixed there.
   with the same `projectSeq`. The one state they share with this lane is
   `HardFailureStamps`, which the model covers. `clients/knip-client.ts` is
   mapped to this family so a change to the shared stamp class meets the model.
+  Its join follows J1's `Join` rule but is not modelled (#4166): a successful,
+  non-memo result whose `scannedAt` predates the lane's ask is withheld, and
+  the turn's files are carried in `knipCarriedFilesOf` (a scope cell, cleared by
+  the root's next successful scan) instead of parked as an entry. "carries the
+  turn's files past a joined pre-edit scan" pins it.
 - **Edits while a handler awaits, and a session replacement while one awaits.**
   The agent is stopped for the budget (3 s), so `Edit`, `SessionReplace` and
   `ForeignWrite` wait for the handler. The inline continuation has no

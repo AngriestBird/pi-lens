@@ -535,10 +535,29 @@ function lateDeadCodeScansOf(
  * them. `scannedAt` is the initiator's read stamp, which a joiner inherits
  * (#3600); a result without one never reached a scan.
  */
-function joinedEarlierScan(result: DeadCodeResult, askedAt: number): boolean {
+function joinedEarlierScan(
+	result: { scannedAt?: string },
+	askedAt: number,
+): boolean {
 	return (
 		result.scannedAt !== undefined && Date.parse(result.scannedAt) < askedAt
 	);
+}
+
+const KNIP_CARRIED_FILES = "knip-carried-files";
+
+/**
+ * #4166: per scan root, the turn files whose edits a joined pre-edit knip scan
+ * could not cover. The next scan of the root attributes them with its own
+ * turn's files; a successful one clears the root's entry. Lives on the
+ * session scope, so a replaced session starts with none.
+ */
+function knipCarriedFilesOf(scope: SessionScope): Map<string, Set<string>> {
+	return scopeCell(
+		scope,
+		KNIP_CARRIED_FILES,
+		() => new Map<string, Set<string>>(),
+	) as Map<string, Set<string>>;
 }
 
 /**
@@ -2302,7 +2321,13 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		nestedWorktrees?: number;
 		/** #3872: files with issues dropped from the result for living in one. */
 		nestedFilesDropped?: number;
+		/** #4166: the scan joined was already running before this turn's edits; its answer was withheld. */
+		joined?: boolean;
+		/** #4166: files now carried for the root's next scan. */
+		carried?: number;
 	};
+	// #4166: the entry scope, never one read after the knip await.
+	const knipCarried = knipCarriedFilesOf(turnScope);
 	// #3872: knip runs in the checkout that owns each edit. A linked worktree is
 	// its own project; the session root would walk it as a nested copy of the
 	// whole tree (live: +300 issues per worktree, a 7 s scan past a 3 s budget).
@@ -2377,7 +2402,11 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			const issueKey = (i: KnipIssue) =>
 				stableFindingKey(i.type, i.file, i.name, i.package);
 			const prevKeys = new Set((prevKnip?.data?.issues ?? []).map(issueKey));
-			const modifiedSet = new Set(files.map((f) => resolveRunnerPath(cwd, f)));
+			const modifiedSet = new Set(
+				[...files, ...(knipCarried.get(scanRoot) ?? [])].map((f) =>
+					resolveRunnerPath(cwd, f),
+				),
+			);
 
 			const newIssues = knipResult.issues.filter((issue) => {
 				if (prevKeys.has(issueKey(issue))) return false;
@@ -2501,6 +2530,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				);
 			}
 		}
+		if (knipResult.success) knipCarried.delete(scanRoot);
 		return knipMeta;
 	};
 	const logKnipRow = (
@@ -2619,6 +2649,29 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 							reason: `${nestedWorktrees} linked worktree(s) nested under the scan root: knip walks them as project files and the scan did not fit the turn_end budget; add their directory (for example /.worktrees/) to .gitignore to drop the cost`,
 						});
 					}
+				} else if (
+					scanned.result.success &&
+					scanned.result.execution !== "cache" &&
+					joinedEarlierScan(scanned.result, startedAt)
+				) {
+					// #4166: the single flight is process-wide, so the scan joined may
+					// have read the tree before this turn's edits (the previous turn's
+					// deferred scan, another session's, a fresh fetch). Its answer is
+					// not theirs, and as a baseline it would hide what they added: it
+					// is withheld, and this turn's files join the root's next scan. A
+					// memo hit is no join: its project sequence says nothing changed.
+					dbg(
+						`turn_end: knip for ${scanRoot} joined a scan older than the turn`,
+					);
+					const carry = knipCarried.get(scanRoot) ?? new Set<string>();
+					for (const file of files) carry.add(file);
+					knipCarried.set(scanRoot, carry);
+					metadata = {
+						execution: "executed",
+						success: true,
+						joined: true,
+						carried: carry.size,
+					};
 				} else {
 					metadata = applyKnipResult(
 						scanRoot,

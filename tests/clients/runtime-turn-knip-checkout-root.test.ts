@@ -1295,3 +1295,137 @@ describe("#4154 a failed scan never replaces the good knip row on disk", () => {
 		expect(failedRow?.metadata).toMatchObject({ cacheKept: true });
 	});
 });
+
+describe("#4166 a knip scan that predates this turn's edits is not their answer", () => {
+	const unread = (): string =>
+		consumeTurnEndFindings(cacheManager, main)?.messages?.[0]?.content ?? "";
+
+	/**
+	 * A fresh fetch (lens_diagnostics) starts knip, the agent then adds
+	 * `unusedNew` to src/a.ts, and turn_end joins that scan inside the budget.
+	 * The scan read the tree at spawn, so its answer cannot hold `unusedNew`.
+	 */
+	async function joinedPreEditTurn(): Promise<{ first: string }> {
+		const file = path.join(main, "src", "a.ts");
+		let tree = "";
+		knipProcess.scan = () => tree;
+		let release!: () => void;
+		knipProcess.gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let spawn!: () => void;
+		const spawned = new Promise<void>((resolve) => {
+			spawn = resolve;
+		});
+		knipProcess.onSpawn = () => {
+			tree = fakeKnip(main);
+			spawn();
+		};
+		vi.useFakeTimers();
+		const freshFetch = knipClient.analyze(main);
+		await spawned;
+		knipProcess.onSpawn = undefined;
+		await vi.advanceTimersByTimeAsync(50);
+
+		fs.appendFileSync(file, "export const unusedNew = 3;\n");
+		edit(file);
+		const turn = handleTurnEnd(turnEndDeps());
+		await vi.advanceTimersByTimeAsync(100);
+		release();
+		await turn;
+		await freshFetch;
+		vi.useRealTimers();
+		knipProcess.gate = undefined;
+		knipProcess.scan = fakeKnip;
+		return { first: unread() };
+	}
+
+	it("carries the turn's files past a joined pre-edit scan, so the next scan reports what the edit added", async () => {
+		// Recurrence prevented (#4166, the J1 shape of #4154 on the knip lane):
+		// the turn joined the older scan, took its answer for the edit and wrote
+		// it as the baseline, so `unusedNew` was never attributed to any turn.
+		const { first } = await joinedPreEditTurn();
+
+		expect(knipProcess.spawns).toHaveLength(1);
+		expect(knipRows().at(-1)?.metadata).toMatchObject({
+			execution: "executed",
+			joined: true,
+			carried: 1,
+		});
+		expect(first).not.toContain("Knip");
+
+		write(main, "src/b.ts", "export const unusedB = 2;\n");
+		edit(path.join(main, "src", "b.ts"));
+		const second = await turnEnd();
+
+		expect(second).toContain("unusedNew");
+		expect(second).toContain("unusedB");
+		expect(knipProcess.spawns).toHaveLength(2);
+		expect(knipRows().at(-1)?.metadata).not.toHaveProperty("joined");
+	});
+
+	it("clears the carry once a scan has attributed it", async () => {
+		await joinedPreEditTurn();
+		write(main, "src/b.ts", "export const unusedB = 2;\n");
+		edit(path.join(main, "src", "b.ts"));
+		await turnEnd();
+
+		// A change nobody recorded: src/a.ts is no longer one of the turn's files.
+		fs.appendFileSync(
+			path.join(main, "src", "a.ts"),
+			"export const unusedExternal = 4;\n",
+		);
+		write(main, "src/c.ts", "export const unusedC = 3;\n");
+		edit(path.join(main, "src", "c.ts"));
+		const third = await turnEnd();
+
+		expect(third).toContain("unusedC");
+		expect(third).not.toContain("unusedExternal");
+	});
+
+	it("keeps the carry through a scan that fails, until a scan succeeds", async () => {
+		await joinedPreEditTurn();
+
+		knipProcess.failure = new Error("spawn knip ENOENT");
+		write(main, "src/b.ts", "export const unusedB = 2;\n");
+		edit(path.join(main, "src", "b.ts"));
+		await turnEnd();
+		expect(knipRows().at(-1)?.metadata).toMatchObject({ success: false });
+
+		knipProcess.failure = undefined;
+		write(main, "src/c.ts", "export const unusedC = 3;\n");
+		edit(path.join(main, "src", "c.ts"));
+		const third = await turnEnd();
+
+		expect(third).toContain("unusedNew");
+	});
+
+	it("does not carry a scan this turn started, nor an answer for the unchanged project", async () => {
+		edit(path.join(main, "src", "a.ts"));
+		await turnEnd();
+		expect(knipRows().at(-1)?.metadata).not.toHaveProperty("joined");
+
+		cacheManager.addModifiedRange(
+			path.join(main, "src", "a.ts"),
+			{ start: 1, end: 1 },
+			false,
+			main,
+			SESSION,
+		);
+		await turnEnd();
+
+		expect(knipRows().at(-1)?.metadata).toMatchObject({ execution: "cache" });
+		expect(knipRows().at(-1)?.metadata).not.toHaveProperty("joined");
+		expect(knipProcess.spawns).toHaveLength(1);
+	});
+
+	it("leaves a replaced session's carry behind", async () => {
+		await joinedPreEditTurn();
+		runtime.resetForSession();
+
+		write(main, "src/b.ts", "export const unusedB = 2;\n");
+		edit(path.join(main, "src", "b.ts"));
+
+		expect(await turnEnd()).not.toContain("unusedNew");
+	});
+});
