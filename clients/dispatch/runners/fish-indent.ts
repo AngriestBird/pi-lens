@@ -41,13 +41,14 @@ function parseSyntaxErrors(
 ): Diagnostic[] {
 	const diagnostics: Diagnostic[] = [];
 	for (const line of output.split("\n")) {
-		const header = line.match(/^(.+) \(line (\d+)\): (.+)$/);
-		if (!header) continue;
-		if (!pathsEqual(resolve(cwd, header[1]), resolve(cwd, filePath))) continue;
-		const lineNumber = Number(header[2]);
+		const [, reported, lineText, message] =
+			line.match(/^(.+) \(line (\d+)\): (.+)$/) ?? [];
+		if (!reported || !lineText || !message) continue;
+		if (!pathsEqual(resolve(cwd, reported), resolve(cwd, filePath))) continue;
+		const lineNumber = Number(lineText);
 		diagnostics.push({
 			id: `fish-syntax-${filePath}:${lineNumber}`,
-			message: `fish: ${header[3].trim()}`,
+			message: `fish: ${message.trim()}`,
 			filePath,
 			line: lineNumber,
 			column: 1,
@@ -66,6 +67,10 @@ function parseSyntaxErrors(
 // on stderr) and for a file it could not read (no header). Any other exit is
 // a rejected invocation, never a completed parse.
 const FISH_SYNTAX_EXIT_CODES = { ran: [127] } as const;
+
+// Both blocking returns below (a syntax error, an I/O error) fail the run the
+// same way.
+const BLOCKING_VERDICT = { status: "failed", semantic: "blocking" } as const;
 
 const fishIndentRunner: RunnerDefinition = {
 	id: "fish-indent",
@@ -110,10 +115,7 @@ const fishIndentRunner: RunnerDefinition = {
 				(output) => parseSyntaxErrors(output, ctx.filePath, cwd),
 			);
 			if (parsed.diagnostics.length > 0) {
-				return findingsResult(parsed.diagnostics, {
-					status: "failed",
-					semantic: "blocking",
-				});
+				return findingsResult(parsed.diagnostics, BLOCKING_VERDICT);
 			}
 		} else {
 			recordDegradationOnce({
@@ -165,10 +167,7 @@ const fishIndentRunner: RunnerDefinition = {
 					rule: "fish-indent-parse-error",
 				},
 			];
-			return findingsResult(diagnostics, {
-				status: "failed",
-				semantic: "blocking",
-			});
+			return findingsResult(diagnostics, BLOCKING_VERDICT);
 		}
 
 		// Clean stderr — file just needs formatting
