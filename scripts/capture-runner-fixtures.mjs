@@ -75,6 +75,127 @@ export const CAPTURES = [
 		],
 	},
 	{
+		// The runner prefers clang++, then g++, then c++; any of them emits the
+		// `file:line:col: error:` shape, so a host with g++ captures it.
+		runner: "cpp-check",
+		tool: "g++",
+		workspace: smoke("cpp"),
+		file: "main.cpp",
+		argv: ["-fsyntax-only", "main.cpp"],
+	},
+	{
+		runner: "cue-vet",
+		tool: "cue",
+		versionArgs: "version",
+		workspace: smoke("cue-vet"),
+		file: "bad.cue",
+		argv: ["vet", "-c=false", "."],
+	},
+	{
+		runner: "dotnet-build",
+		tool: "dotnet",
+		workspace: smoke("csharp"),
+		file: "Program.cs",
+		argv: ["build", "toolsmoke.csproj", "--nologo", "--verbosity", "minimal"],
+	},
+	{
+		runner: "dart-analyze",
+		tool: "dart",
+		workspace: smoke("dart"),
+		file: "bad.dart",
+		argv: ["analyze", "--format=machine", "bad.dart"],
+	},
+	{
+		runner: "javac",
+		tool: "javac",
+		versionArgs: "-version",
+		workspace: smoke("java"),
+		file: "Bad.java",
+		argv: ["-Xlint:none", "-proc:none", "Bad.java"],
+	},
+	{
+		// ktlint is a launcher script over `java -jar`, so a JDK must be on PATH.
+		runner: "ktlint",
+		tool: "ktlint",
+		workspace: smoke("kotlin"),
+		file: "Bad.kt",
+		argv: ["--reporter=json", "Bad.kt"],
+	},
+	{
+		// Needs Ruby on PATH; the gem's launcher is a Ruby script.
+		runner: "rubocop",
+		tool: "rubocop",
+		workspace: smoke("ruby"),
+		file: "bad.rb",
+		argv: ["--format", "json", "--no-color", "bad.rb"],
+	},
+	{
+		runner: "rust-clippy",
+		tool: "cargo",
+		workspace: smoke("rust"),
+		file: "src/main.rs",
+		argv: ["clippy", "--message-format=json", "-q"],
+	},
+	{
+		// Needs Erlang on PATH: gleam shells out to `escript` even for `check`.
+		runner: "gleam-check",
+		tool: "gleam",
+		workspace: smoke("gleam"),
+		file: "src/smoke.gleam",
+		argv: ["check"],
+	},
+	{
+		// The Mix path (`mix.exs` present). tool-smoke/elixir keeps bad.ex at the
+		// project root, which `mix compile` never reads, so this capture uses
+		// tool-smoke/elixir-mix, whose file sits under lib/. `mix --version`
+		// leads with the Erlang banner, so the version comes from Elixir itself.
+		runner: "elixir-check",
+		tool: "mix",
+		versionArgs: "run --no-compile --no-start -e IO.puts(System.version())",
+		workspace: smoke("elixir-mix"),
+		file: "lib/bad.ex",
+		argv: ["compile", "--warnings-as-errors"],
+	},
+	{
+		runner: "fish-indent",
+		tool: "fish_indent",
+		workspace: smoke("fish-indent"),
+		file: "unformatted.fish",
+		argv: ["--check", "unformatted.fish"],
+	},
+	{
+		// The static build: the dynamic `swiftlint` needs libxml2 and SourceKit.
+		runner: "swiftlint",
+		tool: "swiftlint",
+		workspace: smoke("swiftlint"),
+		file: "bad.swift",
+		argv: ["--reporter", "json", "bad.swift"],
+	},
+	{
+		runner: "go-vet",
+		case: "type-error",
+		tool: "go",
+		versionArgs: "version",
+		workspace: smoke("go"),
+		file: "bad.go",
+		argv: ["vet", "."],
+		// #4451 — a Go type error prints `vet: ./bad.go:8:21: ...`, the prefixed
+		// shape the runner dropped. tool-smoke/go holds a type error, so go never
+		// reaches its analyzers there.
+		note: "type error: go vet prefixes the line with `vet: `",
+	},
+	{
+		// #4451 — the analyzer shape (`bad.go:9:14: ...`, no prefix), from a file
+		// that type-checks.
+		runner: "go-vet",
+		case: "printf-analyzer",
+		tool: "go",
+		versionArgs: "version",
+		workspace: smoke("go-vet-printf"),
+		file: "bad.go",
+		argv: ["vet", "."],
+	},
+	{
 		runner: "markdownlint",
 		tool: "markdownlint",
 		bin: "markdownlint-cli2",
@@ -233,6 +354,14 @@ export const CAPTURES = [
 		file: "bad.yaml",
 		argv: ["-f", "parsable", "bad.yaml"],
 	},
+	{
+		runner: "zig-check",
+		tool: "zig",
+		versionArgs: "version",
+		workspace: smoke("zig"),
+		file: "bad.zig",
+		argv: ["build-exe", "bad.zig", "-fno-emit-bin"],
+	},
 ];
 
 /** Directories searched for a tool binary, in order. */
@@ -301,6 +430,7 @@ function main() {
 					entry.file,
 					"--case",
 					entry.case ?? "real",
+					...(entry.versionArgs ? ["--version-args", entry.versionArgs] : []),
 					...(entry.note ? ["--note", entry.note] : []),
 					...(entry.shell ? ["--shell", entry.shell] : []),
 					"--",

@@ -409,6 +409,10 @@ file-scoped worklist and receives no project-wide scanner output.
     extension, server, or file format, read its source or schema at a pinned
     SHA and pin a test vector generated from it, citing the SHA; a double
     built from an issue's description encodes the same guess (#2432).
+    Enforced by `tests/clients/dispatch/smoke-fixture-coverage.test.ts`
+    (partial: every registered dispatch runner needs captured real-binary bytes
+    replayed by `tests/clients/dispatch/runners/captured-real-output.test.ts`,
+    or an exemption naming a fact about the tool; presence only, not fidelity).
 
 40. **Tool root drift:** all runner, formatter, and LSP child spawns use
     `resolveToolCwd`; mutation of the seam, log, or fallback must turn a test red.
