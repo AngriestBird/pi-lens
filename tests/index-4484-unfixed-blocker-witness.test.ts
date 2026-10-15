@@ -1,4 +1,5 @@
 // flake-shape: in-process-mock — clients/lsp/capabilities stands in for the language-server process (the LSP double computes diagnostics from the bytes it is handed); every other pi-lens module on the chain is real
+// flake-shape: ungoverned-wait-for — a collect-later run settles on the runner's own promise, which the pending-runner store does not expose; vi.waitFor polls the store's settled view, the commit gate's own input
 /**
  * #4484 witness (ADR 0007): a second write must not clear a blocker it left
  * in place.

@@ -135,6 +135,9 @@ function windowsVitestFiles(): string[] {
 }
 
 const LANE_ALREADY_REACHED: Readonly<Record<string, string>> = {
+	"tests/index-4484-unfixed-blocker-witness.test.ts":
+		"already reached through the Vitest config's default project graph; " +
+		"Knip reports an explicit entry as redundant",
 	"tests/mcp/turn-end-route.smoke.test.ts":
 		"already reached through the Vitest config's default project graph; " +
 		"Knip reports an explicit entry as redundant",
