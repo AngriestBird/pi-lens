@@ -298,6 +298,23 @@ export interface BlockerFreshnessOptions {
  */
 const MAX_IMPLICIT_SCOPE_PARSES = 32;
 
+/**
+ * #4438: `feedsJsTsGlobalScope` answers across sweeps, keyed by the file's
+ * stat identity (mtime, ctime and size, as {@link forwardImportSources} keys
+ * its parses), so a file the receipts keep naming is parsed once per version,
+ * not once per turn: 32 parses cost ~23 ms on pi-lens's own files.
+ */
+const GLOBAL_SCOPE_FEED_MEMO_ENTRIES = 1024;
+interface GlobalScopeFeedEntry {
+	mtimeMs: number;
+	ctimeMs: number;
+	size: number;
+	feeds: boolean;
+}
+const globalScopeFeedMemo = new BoundedLruCache<string, GlobalScopeFeedEntry>(
+	GLOBAL_SCOPE_FEED_MEMO_ENTRIES,
+);
+
 interface ImplicitScopeDrift {
 	/** Files in the entry's implicit scope that changed after the verdict. */
 	drifted: string[];
@@ -326,12 +343,37 @@ function createImplicitScopeCheck(
 	const feedsGlobalScope = (other: string): boolean => {
 		const known = feeds.get(other);
 		if (known !== undefined) return known;
-		if (parses >= MAX_IMPLICIT_SCOPE_PARSES) {
+		let stat: fs.Stats | undefined;
+		try {
+			stat = fs.statSync(other);
+		} catch {
+			// Unreadable: `feedsJsTsGlobalScope` fails closed with no parse.
+		}
+		const key = normalizeMapKey(other);
+		const memo = globalScopeFeedMemo.get(key);
+		let answer: boolean;
+		if (
+			stat &&
+			memo?.mtimeMs === stat.mtimeMs &&
+			memo.ctimeMs === stat.ctimeMs &&
+			memo.size === stat.size
+		) {
+			answer = memo.feeds;
+		} else if (stat && parses >= MAX_IMPLICIT_SCOPE_PARSES) {
 			budgetSpent = true;
 			return false;
+		} else {
+			if (stat) parses += 1;
+			answer = feedsJsTsGlobalScope(other);
+			if (stat) {
+				globalScopeFeedMemo.set(key, {
+					mtimeMs: stat.mtimeMs,
+					ctimeMs: stat.ctimeMs,
+					size: stat.size,
+					feeds: answer,
+				});
+			}
 		}
-		parses += 1;
-		const answer = feedsJsTsGlobalScope(other);
 		feeds.set(other, answer);
 		return answer;
 	};
@@ -502,9 +544,10 @@ interface ForwardImportSourceEntry {
 	uncaptured: boolean;
 }
 
-/** The JS/TS grammars, whose import query captures only `import`/`export`
- * statement sources. Go captures every import spec, and `import (` is its
- * grouped import. */
+/** The JS/TS grammars, whose import query captures `import`/`export`
+ * statement sources and, since #4438, `import("x")` and `require("x")` with a
+ * string argument, never a computed one. Go captures every import spec, and
+ * `import (` is its grouped import. */
 const JS_TS_LANGUAGES = new Set(["typescript", "tsx", "javascript"]);
 /**
  * A relative specifier string: quoted, starting `./` or `../`. A backtick

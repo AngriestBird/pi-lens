@@ -8,7 +8,7 @@
 import { CASCADE_DIAGNOSTICS_TTL_MS } from "../cascade-types.js";
 import { getDiagnosticLogger, type LogContext } from "../diagnostic-logger.js";
 import type { FileKind } from "../file-kinds.js";
-import { detectFileKind, isFileKind } from "../file-kinds.js";
+import { detectFileKind } from "../file-kinds.js";
 import {
 	getLspCapableKinds,
 	getPrimaryDispatchGroup,
@@ -1036,7 +1036,10 @@ function implicitScopeDependentsOf(
 				.filter(reaches),
 		};
 	}
-	if (!isFileKind(changedFile, "jsts") || !feeds(changed)) return { files: [] };
+	// A cost bound, not a filter: when the changed file feeds no global scope,
+	// `reaches` answers false for every candidate, so this skips ranking the
+	// whole index on every module write.
+	if (!feeds(changed)) return { files: [] };
 	const reached = rankFilesByReverseDependencyCentrality(index).filter(reaches);
 	return reached.length > IMPLICIT_SCOPE_NEIGHBOR_CAP
 		? {

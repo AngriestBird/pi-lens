@@ -272,6 +272,59 @@ describe("inline-blocker sweep: ambient files (#4438)", () => {
 		expect(counts.truncatedImports).toBe(1);
 	});
 
+	// The parse memo outlives the sweep: the files the last sweep classified
+	// cost no budget, so the next turn reads past them to the older receipt.
+	// Without it every turn re-parsed the same 32 files (~23 ms on pi-lens's
+	// own files) and never reached the fix.
+	it("reads past the files a previous sweep classified", async () => {
+		const files: Record<string, string> = {
+			"use.ts": "export const u: number = FOO;\n",
+			"globals.ts": "declare const FOO: number;\n",
+		};
+		for (let i = 0; i < 40; i++) {
+			files[`m${i}.ts`] = `export const m${i} = 1;\n`;
+		}
+		const dir = project("ambient-memo", files);
+		const runtime = new RuntimeCoordinator();
+		block(runtime, path.join(dir, "use.ts"), ["lsp"], verdictAgo());
+		runtime.recordProjectMutation({
+			filePath: path.join(dir, "globals.ts"),
+			source: "agent-edit",
+		});
+		for (let i = 0; i < 40; i++) {
+			runtime.recordProjectMutation({
+				filePath: path.join(dir, `m${i}.ts`),
+				source: "agent-edit",
+			});
+		}
+		expect((await sweepInlineBlockerFreshness(runtime, dir)).kept).toBe(1);
+
+		const counts = await sweepInlineBlockerFreshness(runtime, dir);
+		expect(counts.revalidated).toBe(1);
+		expect(stale(runtime)).toBe(true);
+	});
+
+	// The memo is keyed by the file's version: a module rewritten into a
+	// script feeds the global scope from then on.
+	it("classifies a file again once it is rewritten", async () => {
+		const dir = project("ambient-rewrite", {
+			"use.ts": "export const u: number = FOO;\n",
+			"shared.ts": "export const s = 1;\n",
+		});
+		const runtime = new RuntimeCoordinator();
+		block(runtime, path.join(dir, "use.ts"), ["lsp"], verdictAgo());
+		const shared = path.join(dir, "shared.ts");
+		runtime.recordProjectMutation({ filePath: shared, source: "agent-edit" });
+		expect((await sweepInlineBlockerFreshness(runtime, dir)).kept).toBe(1);
+
+		fs.writeFileSync(shared, "declare const FOO: number;\n");
+		later(shared);
+		runtime.recordProjectMutation({ filePath: shared, source: "agent-edit" });
+		expect((await sweepInlineBlockerFreshness(runtime, dir)).revalidated).toBe(
+			1,
+		);
+	});
+
 	// The receipt ring is bounded; a receipt it evicted may be the fix, so a
 	// window with evictions after the verdict is counted, not read as clean.
 	it("counts the cut when the receipt ring evicted receipts after the verdict", async () => {
