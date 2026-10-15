@@ -87,15 +87,18 @@ export function createProbeFixture(deps) {
 
 		const auxIds = fx.auxiliaryServerIds ?? [];
 		const useAux = auxIds.length > 0;
+		const touchOptions = {
+			diagnostics: "document",
+			collectDiagnostics: true,
+			clientScope: useAux ? "with-auxiliary" : "primary",
+			...(useAux ? { auxiliaryServerIds: auxIds } : {}),
+			maxClientWaitMs: CLIENT_WAIT_MS,
+			source: "clean-probe",
+		};
 		const touch = (content, diagWaitMs) =>
 			lsp.touchFile(absFile, content, {
-				diagnostics: "document",
-				collectDiagnostics: true,
-				clientScope: useAux ? "with-auxiliary" : "primary",
-				...(useAux ? { auxiliaryServerIds: auxIds } : {}),
-				maxClientWaitMs: CLIENT_WAIT_MS,
+				...touchOptions,
 				maxDiagnosticsWaitMs: diagWaitMs,
-				source: "clean-probe",
 			});
 
 		const dirtyContent = fs.readFileSync(absFile, "utf8");
@@ -151,7 +154,7 @@ export function createProbeFixture(deps) {
 			cleanTransitionVersioned: cleanPubs.filter((p) => p.versioned).length,
 		};
 		const dirtyDiagCount =
-			touchAnsweredDiagnostics(dirtyResult, { auxiliary: useAux })?.length ?? 0;
+			touchAnsweredDiagnostics(dirtyResult, touchOptions, lsp)?.length ?? 0;
 		const verdict = classifyCleanBehavior(obs);
 		// #3310: the first-publish class comes from the dirty phase's publish ORDER,
 		// which this trace already holds — no extra touch, no extra server time.

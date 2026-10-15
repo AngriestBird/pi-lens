@@ -1,7 +1,7 @@
 /**
  * #4403: the LSP scripts' one reading of a touch (scripts/lib/touch-result.mjs)
- * takes a touch that no language server answered as "no client ready", a
- * disabled primary included, and a wrapped answer as an answer.
+ * takes a touch that no server answered as "no client ready", a disabled
+ * primary included, and a wrapped answer as an answer.
  *
  * Recurrences:
  * - Since PR #4411, `touchFile` returns the `primary-unavailable` verdict with
@@ -9,13 +9,15 @@
  *   nothing else answered. The smoke handshake lane read that as an answer, so
  *   PR #4450's handshake job failed the official Docker row ("expected
  *   alternate docker-official, got no warm client") on a runner without the
- *   binary, where it had reported the row unavailable.
+ *   binary, where it had reported the row unavailable (#4465).
  * - Since #1179 the answer is a `{ diags }` wrapper; bench-lsp still tested
  *   `Array.isArray` and reported every installed server unavailable.
+ * - #4466 review F1: an auxiliary requested but never started read as a clean
+ *   answer, so bench-lsp timed spawns that did not happen.
  *
- * The real LSPService with the smoke row's own touch options. The official
- * Docker server's command is a project override: a path that does not exist,
- * or the shared fake server.
+ * The real LSPService with the smoke rows' own touch options. Server commands
+ * are project overrides: a path that does not exist, or the shared fake server,
+ * which answers with one finding.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -46,47 +48,67 @@ type Service = {
 	getWarmClientForFile: (
 		file: string,
 	) => Promise<{ info: { id: string } } | undefined>;
+	getAliveServerIds: () => string[];
 	shutdown: () => Promise<void>;
 };
 let service: Service | undefined;
 const savedInstall = process.env.PI_LENS_DISABLE_LSP_INSTALL;
 
 /**
- * The `dockerfile-official` row's workspace: `docker` off in
- * `lsp.disabledServers` (as the row writes it), the official server's command
- * overridden, and typos as a fake auxiliary.
+ * A workspace whose `.pi-lens/lsp.json` points each named server at the fake
+ * server, or at a missing binary, and turns off `disabled` plus the
+ * auxiliaries no case asks for.
  */
-async function dockerfileRow(official: "missing" | "fake") {
-	const workspace = fs.realpathSync(setupTestEnvironment(PREFIX).tmpDir);
-	fs.mkdirSync(path.join(workspace, ".git"));
-	fs.mkdirSync(path.join(workspace, ".pi-lens"));
+async function workspace(options: {
+	file: string;
+	content: string;
+	fake: string[];
+	missing?: string[];
+	disabled: string[];
+}) {
+	const root = fs.realpathSync(setupTestEnvironment(PREFIX).tmpDir);
+	fs.mkdirSync(path.join(root, ".git"));
+	fs.mkdirSync(path.join(root, ".pi-lens"));
+	const serverOverrides = Object.fromEntries([
+		...options.fake.map((id) => [
+			id,
+			{ command: [process.execPath, fakeServer] },
+		]),
+		...(options.missing ?? []).map((id) => [
+			id,
+			{ command: [path.join(root, "missing", id)] },
+		]),
+	]);
 	fs.writeFileSync(
-		path.join(workspace, ".pi-lens", "lsp.json"),
+		path.join(root, ".pi-lens", "lsp.json"),
 		JSON.stringify({
-			serverOverrides: {
-				"docker-official": {
-					command:
-						official === "missing"
-							? [path.join(workspace, "missing", "docker-language-server")]
-							: [process.execPath, fakeServer],
-				},
-				typos: { command: [process.execPath, fakeServer] },
-			},
-			disabledServers: ["docker", "ast-grep", "opengrep", "zizmor"],
+			serverOverrides,
+			disabledServers: [...options.disabled, "ast-grep", "opengrep", "zizmor"],
 		}),
 	);
-	const file = path.join(workspace, "Dockerfile");
-	fs.writeFileSync(file, "FROM alpine:3.16.1\nCMD ls\n");
+	const file = path.join(root, options.file);
+	fs.writeFileSync(file, options.content);
 	process.env.PI_LENS_DISABLE_LSP_INSTALL = "1";
 	// Host-boundary stub: project command overrides need a trusted project.
 	setProjectTrustState("trusted");
 	const config = await import("../../clients/lsp/config.js");
 	config.resetLSPConfigStateForTests();
-	await config.initLSPConfig(workspace);
+	await config.initLSPConfig(root);
 	const lsp = await import("../../clients/lsp/index.js");
 	lsp.resetLSPService();
 	service = lsp.getLSPService() as unknown as Service;
-	return { file, content: fs.readFileSync(file, "utf8") };
+	return { file, content: options.content };
+}
+
+/** The `dockerfile-official` smoke row: `docker` off, as the row writes it. */
+function dockerfileRow(official: "missing" | "fake", fake: string[] = []) {
+	return workspace({
+		file: "Dockerfile",
+		content: "FROM alpine:3.16.1\nCMD ls\n",
+		fake: official === "fake" ? ["docker-official", ...fake] : fake,
+		missing: official === "missing" ? ["docker-official"] : [],
+		disabled: ["docker"],
+	});
 }
 
 /** The touch `runLspHandshake` sends, with or without auxiliaries. */
@@ -115,44 +137,74 @@ afterAll(async () => {
 	else process.env.PI_LENS_DISABLE_LSP_INSTALL = savedInstall;
 });
 
-describe("the handshake lane's reading of a touch (#4403)", () => {
+describe("the LSP scripts' reading of a touch (#4403)", () => {
 	it("reads a disabled primary whose alternate is missing as no client ready", async () => {
 		const row = await dockerfileRow("missing");
+		const options = rowTouch();
 
-		const touched = await service!.touchFile(row.file, row.content, rowTouch());
+		const touched = await service!.touchFile(row.file, row.content, options);
 
 		expect(touched).toMatchObject({
 			inconclusiveReason: "primary-unavailable",
 			disabledPrimaryServerIds: ["docker"],
 		});
-		expect(touchAnsweredDiagnostics(touched)).toBeUndefined();
+		expect(
+			touchAnsweredDiagnostics(touched, options, service!),
+		).toBeUndefined();
 	}, 30_000);
 
 	it("reads the alternate's answer as an answer", async () => {
 		const row = await dockerfileRow("fake");
+		const options = rowTouch();
 
-		const touched = await service!.touchFile(row.file, row.content, rowTouch());
+		const touched = await service!.touchFile(row.file, row.content, options);
 
-		expect(touchAnsweredDiagnostics(touched)).toEqual(expect.any(Array));
+		expect(touchAnsweredDiagnostics(touched, options, service!)).toEqual([
+			expect.objectContaining({ serverId: "docker-official" }),
+		]);
 		expect((await service!.getWarmClientForFile(row.file))?.info.id).toBe(
 			"docker-official",
 		);
 	}, 30_000);
 
-	it("keeps an auxiliary row's findings when no primary answered", async () => {
-		const row = await dockerfileRow("missing");
+	it("keeps a running auxiliary's findings when no primary answered", async () => {
+		const notes = await workspace({
+			file: "notes.md",
+			content: "# Notes\n",
+			fake: ["typos"],
+			disabled: ["marksman"],
+		});
+		const options = rowTouch(["typos"]);
 
 		const touched = await service!.touchFile(
-			row.file,
-			row.content,
-			rowTouch(["typos"]),
+			notes.file,
+			notes.content,
+			options,
 		);
 
 		expect(touched).toMatchObject({
 			inconclusiveReason: "primary-unavailable",
 		});
-		expect(touchAnsweredDiagnostics(touched, { auxiliary: true })).toEqual(
-			expect.any(Array),
-		);
+		expect(touchAnsweredDiagnostics(touched, options, service!)).toEqual([
+			expect.objectContaining({ serverId: "typos" }),
+		]);
+	}, 30_000);
+
+	it("reads a requested auxiliary that never started as no client ready", async () => {
+		// typos is configured but does not attach to a Dockerfile, the shape
+		// bench-lsp met for an auxiliary whose tool is not installed.
+		const row = await dockerfileRow("missing", ["typos"]);
+		const options = rowTouch(["typos"]);
+
+		const touched = await service!.touchFile(row.file, row.content, options);
+
+		expect(touched).toMatchObject({
+			diags: [],
+			inconclusiveReason: "primary-unavailable",
+		});
+		expect(service!.getAliveServerIds()).not.toContain("typos");
+		expect(
+			touchAnsweredDiagnostics(touched, options, service!),
+		).toBeUndefined();
 	}, 30_000);
 });

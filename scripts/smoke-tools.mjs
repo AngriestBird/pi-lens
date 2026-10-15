@@ -3041,30 +3041,25 @@ async function runLspHandshake({ langs, install, verbose }) {
 				auxToolList.length > 0 &&
 				auxToolList.every((t) => unavailableTools.has(t));
 			const maxAttempts = auxRe && !auxToolUnavailable ? AUX_TOUCH_ATTEMPTS : 1;
+			const touchOptions = {
+				diagnostics: "document",
+				collectDiagnostics: true,
+				clientScope: useAux ? "with-auxiliary" : "primary",
+				...(useAux ? { auxiliaryServerIds: auxIds } : {}),
+				maxClientWaitMs: LSP_CLIENT_WAIT_MS,
+				maxDiagnosticsWaitMs: LSP_DIAGNOSTICS_WAIT_MS,
+				source: "smoke-lsp",
+			};
 			for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 				try {
-					touched = await lsp.touchFile(absFile, content, {
-						diagnostics: "document",
-						collectDiagnostics: true,
-						clientScope: useAux ? "with-auxiliary" : "primary",
-						...(useAux ? { auxiliaryServerIds: auxIds } : {}),
-						maxClientWaitMs: LSP_CLIENT_WAIT_MS,
-						maxDiagnosticsWaitMs: LSP_DIAGNOSTICS_WAIT_MS,
-						source: "smoke-lsp",
-					});
+					touched = await lsp.touchFile(absFile, content, touchOptions);
 				} catch (err) {
 					threw = err?.message ?? String(err);
 					break;
 				}
-				// #1179 (shape-5): touchFile now returns a `{ diags, inconclusive?,
-				// binding? }` wrapper instead of the bare diagnostics array (the
-				// copy-loss structural fix — the flags became explicit enumerable
-				// fields). Normalize both shapes here so every consumer below
-				// survives either build; `undefined` still means "no client became
-				// ready" (skip semantics unchanged), a disabled primary included.
-				touchedDiags = touchAnsweredDiagnostics(touched, {
-					auxiliary: Boolean(auxRe),
-				});
+				// `undefined` means "no client became ready" (skip semantics),
+				// a disabled primary included (#4465).
+				touchedDiags = touchAnsweredDiagnostics(touched, touchOptions, lsp);
 				if (fx.expectedCwd && touchedDiags) {
 					await assertCwdResolutionLog(
 						fx,

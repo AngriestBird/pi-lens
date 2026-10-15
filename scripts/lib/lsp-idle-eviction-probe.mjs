@@ -397,9 +397,7 @@ export function createServiceDriver(args) {
 				target.content,
 				touchOptions,
 			);
-			const diags = touchAnsweredDiagnostics(result, {
-				auxiliary: auxIds.length > 0,
-			});
+			const diags = touchAnsweredDiagnostics(result, touchOptions, lsp);
 			return diags === undefined ? undefined : [...diags];
 		},
 		isTargetAlive: () => lsp.getAliveServerIds().includes(server.id),

@@ -2,11 +2,12 @@ export interface TouchDiagnostic {
 	message?: string;
 	source?: string;
 	severity?: number;
+	serverId?: string;
 }
 export declare function touchAnsweredDiagnostics(
 	touched:
-		| readonly TouchDiagnostic[]
 		| { diags?: TouchDiagnostic[]; inconclusiveReason?: string }
 		| undefined,
-	options?: { auxiliary?: boolean },
-): readonly TouchDiagnostic[] | undefined;
+	touchOptions: { auxiliaryServerIds?: readonly string[] } | undefined,
+	service: { getAliveServerIds(): string[] },
+): TouchDiagnostic[] | undefined;

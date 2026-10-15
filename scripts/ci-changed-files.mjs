@@ -79,6 +79,7 @@ export const PR_SMOKE_PATHS = [
 	"scripts/lib/lsp-fixture-workspace.mjs",
 	"scripts/lib/safe-rm.mjs",
 	"scripts/lib/scratch-dir.mjs",
+	"scripts/lib/touch-result.mjs",
 	"clients/lsp-lazy.ts",
 	// The only `.spawn(` call site and the trust backstop (#4374), and the JVM
 	// launch runtime.
