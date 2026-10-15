@@ -396,6 +396,14 @@ export type DegradationKind =
 	| "gradle-ktlint-scan-budget-exceeded"
 	| "grammar-blocked"
 	/**
+	 * #3096: `holdOwnChildPid` found the held-pid set full of still-live
+	 * groups and `BoundedSet.add` dropped the oldest, usually the longest-lived
+	 * LSP leader, so a group kill after that leader dies is refused. Counted;
+	 * subject is the call site (`lsp-spawn`), a fixed tiny set; the dropped
+	 * pids are in the reason and the per-call drop count in the metadata.
+	 */
+	| "held-own-pid-evicted"
+	/**
 	 * A selected formatter's executable was proven absent (#2413): its
 	 * `resolveCommand` probed every install location and PATH and found nothing,
 	 * or the static fallback spawn returned a typed `tool-not-found`. Distinct
