@@ -1792,6 +1792,73 @@
 					]
 				}
 			]
+		},
+		"blocker-pending": {
+			"pins": {
+				"ClearOnCurrent": {
+					"value": "TRUE",
+					"test": "tests/index-4484-unfixed-blocker-witness.test.ts",
+					"title": "keeps an LSP error that write 2 left in place blocking on every surface (cell A)",
+					"also": [
+						{
+							"test": "tests/index-4484-unfixed-blocker-witness.test.ts",
+							"title": "keeps the later helm blocker when fixing the earlier one renumbers it (cell R)"
+						},
+						{
+							"test": "tests/clients/runtime-coordinator.test.ts",
+							"title": "refuses a clear while the clearing run still observes a blocker, whatever its authorship (#4484)"
+						}
+					],
+					"narrowedBy": {
+						"FALSE": {
+							"configs": [
+								"NoDelta"
+							],
+							"reason": "NoDelta is the causal differential: the code before #4484 under --no-delta (Delta = FALSE), where the delta's blockers are the whole observation, so the switch is inert there and the config shows the defect needs the delta."
+						}
+					}
+				},
+				"OpaqueKeep": {
+					"value": "TRUE",
+					"test": "tests/clients/opaque-mutation-scan.test.ts",
+					"title": "keeps an authored blocker when an opaque run of changed bytes still observes it (#4484)",
+					"narrowedBy": {
+						"FALSE": {
+							"configs": [
+								"NoDelta"
+							],
+							"reason": "NoDelta has no unauthored write (OpaqueWrites = 0), so the switch is inert; it keeps the whole code before #4484 for the --no-delta differential."
+						}
+					}
+				}
+			},
+			"notCodeChoice": [
+				{
+					"reason": "Scenario bound or actor set: it sizes the state space or picks which actors, inputs and steps TLC explores; no code branch reads it.",
+					"constants": [
+						"Writes",
+						"OpaqueWrites",
+						"Turns",
+						"MaxShift"
+					]
+				},
+				{
+					"reason": "Environment: which linter reports the finding (line-bound LSP ids or helm-lint's ordinal ids, a collect-later runner or none) and the user's --no-delta flag; the code must be honest under every value, so the as-built configs set them both ways.",
+					"constants": [
+						"Ordinal",
+						"Deferred",
+						"Delta"
+					]
+				}
+			],
+			"deferred": [
+				{
+					"reason": "Deferred: a residual, not yet fixed (#4484 hand-back). The as-built value depends on the runner: tree-sitter drops blocking matches on lines the write did not change (TRUE), the LSP and CLI linters do not (FALSE). The pass configs model the FALSE runners; RangeGatedResidual expects the violation the TRUE runner still has.",
+					"constants": [
+						"RangeGated"
+					]
+				}
+			]
 		}
 	}
 }

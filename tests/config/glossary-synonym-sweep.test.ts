@@ -548,7 +548,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/diagnostic-tracker.ts": 1,
 		"clients/diagnostics-publish.ts": 2,
 		"clients/dispatch/auxiliary-lsp.ts": 3,
-		"clients/dispatch/dispatcher.ts": 16,
+		// 16 -> 17 (#4484): `heldBackBlockers` keeps the blocking findings the
+		// delta calls not new, an `Array.prototype.filter` call, not a delivery
+		// filter.
+		"clients/dispatch/dispatcher.ts": 17,
 		"clients/dispatch/fact-runner.ts": 1,
 		"clients/dispatch/fact-scheduler.ts": 2,
 		"clients/dispatch/facts/function-facts.ts": 2,
@@ -655,7 +658,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/opengrep-client.ts": 2,
 		"clients/path-utils.ts": 1,
 		"clients/persistent-reverify.ts": 4,
-		"clients/pipeline.ts": 4,
+		// 4 -> 6 (#4484): `liveBlockers.filter` and `recordBlockers.filter` split the
+		// live blocking set into the delta's and the held-back ones, two
+		// `Array.prototype.filter` calls, not a delivery filter.
+		"clients/pipeline.ts": 6,
 		"clients/process-snapshot.ts": 5,
 		"clients/project-changes.ts": 3,
 		"clients/project-diagnostics/cache.ts": 2,

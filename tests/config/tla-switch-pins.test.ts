@@ -77,8 +77,8 @@ const FULLY_PINNED = ["read-guard", "format-drain", "dispatch-pipeline"];
  * place. Every change to either count is now a visible edit here: lower
  * `DEFERRED_COUNT` as pins land, and a reviewer judges every rise of either.
  */
-const DEFERRED_COUNT = 136;
-const NOT_CODE_CHOICE_COUNT = 205;
+const DEFERRED_COUNT = 137;
+const NOT_CODE_CHOICE_COUNT = 212;
 
 interface PinTest {
 	test: string;
