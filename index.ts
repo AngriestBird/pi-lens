@@ -3626,12 +3626,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// next turn_end merges), reusing the existing neighbor→turn-end formatting —
 	// previously this outcome was logs-only, a silent under-report (#533).
 	registerCascadeTierReconcileTask(() => getLSPService(), {
-		onResolvedFound: ({ filePath, diagnostics, publishedAt }) => {
-			const run = buildResolvedFoundCascadeRun(runtime.projectRoot, {
-				filePath,
-				diagnostics,
-				publishedAt,
-			});
+		// #4495 round 3: the whole neighbour goes through, so its read bound
+		// (`touchedAt`) reaches the run with its publish stamp.
+		onResolvedFound: (neighbor) => {
+			const run = buildResolvedFoundCascadeRun(runtime.projectRoot, neighbor);
 			// #1443: the appended run outlives this turn's consumption —
 			// `beginTurn` carries it into the next turn_end exactly once instead
 			// of wiping it (which used to dead-end this whole delivery path).

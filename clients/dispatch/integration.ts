@@ -2840,6 +2840,8 @@ export async function computeCascadeForFile(
 			},
 			neighborCount: visibleNeighbors.length,
 			diagnosticCount: diagCount,
+			// #4495 round 3: the read bound of every neighbour listed above.
+			checkedAt: cascadeStart,
 			...(unconfirmed && { unconfirmed }),
 			...(observedNeighborPaths && { observedNeighborPaths }),
 			// #1023: even when some fallback neighbors surfaced, a degraded graph means

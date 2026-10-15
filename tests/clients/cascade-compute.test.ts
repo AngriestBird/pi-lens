@@ -4360,6 +4360,41 @@ describe("computeCascadeForFile", () => {
 			}
 		});
 
+		// Recurrence (#4495 round-2 verify R2-1): the pending record took its
+		// stamp from turn_end's delivery, after any write that landed between
+		// the compute's read and turn_end, so the freshness gate never saw a
+		// neighbour fixed in that window. The run carries its read bound.
+		it("a run that lists neighbour errors carries its read time: the compute's start, before every read", async () => {
+			const { env, primary, neighbor } = project("cascade-4495-checked-at-");
+			try {
+				const reads: number[] = [];
+				const getAllDiagnostics = publishedDuringCompute([
+					[neighbor, [lspError("read error")]],
+				]);
+				mocks.getLSPService.mockReturnValue({
+					...makeLspServiceDouble(),
+					getAllDiagnostics: vi.fn(async () => {
+						reads.push(Date.now());
+						return getAllDiagnostics();
+					}),
+					touchFile: vi.fn(),
+				});
+				const { computeCascadeForFile } =
+					await import("../../clients/dispatch/integration.js");
+				const before = Date.now();
+				const run = await computeCascadeForFile(primary, env.tmpDir, {
+					turnSeq: 1,
+					writeSeq: 1,
+				});
+				expect(run.result?.formatted).toContain("read error");
+				expect(reads.length).toBeGreaterThan(0);
+				expect(run.checkedAt).toBeGreaterThanOrEqual(before);
+				expect(run.checkedAt).toBeLessThanOrEqual(Math.min(...reads));
+			} finally {
+				env.cleanup();
+			}
+		});
+
 		// Recurrence (#4485 row 7): once the #4403 "no language server
 		// answered" line was delivered, a later run over the same unavailable
 		// server listed no neighbour and returned `no_neighbors`, a leaf's

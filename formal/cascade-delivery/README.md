@@ -39,8 +39,8 @@ stamped with the current epoch was published after the edit the run is about.
 | `LaterWrite` | a later write of the primary supersedes the run before turn_end | `runtime-turn.ts` consume filter (`cascade_carry_over_drop`) |
 | `QuietWindow` | optional: the quiet window reconciles answered outstanding touches | `clients/quiet-window.ts`, `cascade-tier.ts` `reconcileOutstandingCascadeTouches` |
 | `Expire(n)` | an outstanding touch ages out of the registry | `cascade-tier.ts` prune (`cascade_tier3_expired`, `deliverResolvedOutcome`) |
-| `OutsideChange(n)` | between turns, the neighbour's file is written by something pi never saw (git checkout, an external editor) or deleted; the server is not notified, and the cached publish and the record's observation now predate the change | the filesystem; read by `runtime-turn.ts` `gatePendingCascadeNeighbors` (`gateFindingsByPathFreshness`, per-entry `scannedAtOf: checkedAt`) |
-| `TurnEnd` | the registry peek, the run's section, the late answers, the unresolved line (after the freshness gate), the record update | `runtime-turn.ts` `handleTurnEnd` (`peekOutstandingCascadeTouches`, the pending and unresolved sections), `cascade-format.ts` `recordDeliveredCascadeNeighbor`, `forgetCascadePendingNeighbor` |
+| `OutsideChange(n, k)` | the neighbour's file is written (`k = "write"`, a fix, a touch or a rewrite) by something pi never saw (git checkout, an external editor or formatter), or deleted (`k = "delete"`), between turns (`phase = "start"`) or between the compute's read and turn_end (`phase = "computed"`, #4495 round-2 verify R2-1); the server is not notified, and the cached publish and the record's observation (and, mid-turn, this run's) now predate the change | the filesystem; read by `runtime-turn.ts` `handleTurnEnd`'s `pendingGate` (`gateFindingsByPathFreshness`, quiet, per-entry `scannedAtOf: checkedAt`) |
+| `TurnEnd` | the registry peek, the run's section, the late answers, the unresolved and "changed since checked" lines (after the freshness gate), the record update | `runtime-turn.ts` `handleTurnEnd` (`peekOutstandingCascadeTouches`, the pending and unresolved sections), `cascade-format.ts` `recordDeliveredCascadeNeighbor` (stamped with `CascadeRun.checkedAt`), `forgetCascadePendingNeighbor` |
 
 Out of scope, by design: two runs in one turn (turn_end's ownership pass gives
 each neighbour to the last run that observed it; `cascade-turn-merge.test.ts`
@@ -63,8 +63,15 @@ models them), a primary with blockers (the cascade is skipped,
   again: as this turn's error, as a late answer, or on the unresolved line.
 - `NoUnresolvedAfterChange`: the unresolved line never names a neighbour
   whose file changed (or was deleted) after the observation its record holds
-  (#4495 review F1). Checked at the render, through the `staleClaim` flag the
+  (#4495 review F1; round-2 verify R2-1 for a change between the read and
+  turn_end). Checked at the render, through the `staleClaim` flag the
   rendering `TurnEnd` sets.
+- `NoSilentForget`: a recorded error whose file was written outside pi is
+  never forgotten without the "changed since checked, not re-checked" line
+  (#4495 round-2 verify R2-2); a deleted file's entry may go silently.
+  Checked at the render through `silentDrop`. The line is forgotten only when
+  delivered; that cut-line hold is `turn-end-cap-consumed-state.test.ts`'s,
+  not the model's.
 - `TouchEndsWithinBound`: every touch the run sent ends answered, or shown
   pending, in the same turn. The temporal form,
   `[](outstanding(n) => <>(answered(n) \/ pendingShown(n)))` under weak
@@ -90,10 +97,20 @@ The fix value first, then the as-built (pre-#4485) value.
 | `UnconfirmedMarker` | `"marked"` | `"none"` | `MutUnconfirmedMarker` | `TouchEndsWithinBound` |
 | `ExpiryRead` | `"peekLog"` | `"drop"` | `MutExpiryRead` | `ExpiryKeepsAnswer` |
 | `Reserve` | `"record"` | `"none"` | `MutReserve` | `PersistentReserved` |
-| `PendingGate` | `"fresh"` | `"none"` (#4495 round 1) | `MutPendingGate` | `NoUnresolvedAfterChange` |
+| `PendingGate` | `"notify"` | `"none"` (#4495 round 1) | `MutPendingGate` | `NoUnresolvedAfterChange` |
+| | | `"drop"` (#4495 round 2) | `MutPendingDrop` | `NoSilentForget` |
+| `CheckStamp` | `"read"` | `"delivery"` (#4495 round 2) | `MutCheckStamp` | `NoUnresolvedAfterChange` |
 
-`PendingGate`'s as-built value is the PR's own round 1, not master: master
-has no record. `Merged` sets every switch to its fix value and passes. `AsBuilt` sets every
+`PendingGate` and `CheckStamp` have the PR's own earlier rounds as their
+as-built values, not master: master has no record. `OutsidePhases` and
+`OutsideKinds` are scenario bounds, not switches. `Merged` sets every switch
+to its fix value and passes over three turns with between-turn writes.
+`MergedOutside` sets the same fix values over two turns, the record's whole
+life (delivered at the first turn_end, judged at the second), with writes
+and deletes both between turns and between the read and turn_end. It passes.
+The split keeps each config inside the CI shard budget: both timings and both
+kinds over three turns is about 14 million distinct states. `MutPendingGate`,
+`MutPendingDrop` and `MutCheckStamp` use `MergedOutside`'s bounds. `AsBuilt` sets every
 switch to its as-built value; TLC's first counterexample is a stale clean
 snapshot served for the edit (`NoCleanWithoutFreshObs`). Each mutant config
 flips one switch and checks `TypeOK` with the invariant it breaks. Every

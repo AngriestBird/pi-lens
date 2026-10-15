@@ -173,6 +173,8 @@ export function buildResolvedFoundCascadeRun(
 		/** #3168 F3: the #1444 publish stamp, threaded to the run so the carried
 		 * age label renders the real observation age. */
 		publishedAt?: number;
+		/** #4495 round 3: the touch's pre-notify stamp, the run's read bound. */
+		touchedAt?: number;
 	},
 ): CascadeRun | undefined {
 	const { filePath } = neighbor;
@@ -252,6 +254,9 @@ export function buildResolvedFoundCascadeRun(
 		// no stamp exists.
 		...(neighbor.publishedAt !== undefined
 			? { observedAt: neighbor.publishedAt }
+			: {}),
+		...(neighbor.touchedAt !== undefined
+			? { checkedAt: neighbor.touchedAt }
 			: {}),
 	};
 }

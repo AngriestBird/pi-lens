@@ -304,6 +304,7 @@ function readTouchedClient(
 		ageMs: now - touch.touchedAt,
 		diagnosticCount: entry.diags.length,
 		publishedAt: entry.ts,
+		touchedAt: touch.touchedAt,
 		...(found && { diagnostics: entry.diags }),
 	};
 }
@@ -326,6 +327,7 @@ function deliverResolvedOutcome(
 				serverId: o.serverId,
 				diagnostics: o.diagnostics,
 				...(o.publishedAt !== undefined ? { publishedAt: o.publishedAt } : {}),
+				...(o.touchedAt !== undefined ? { touchedAt: o.touchedAt } : {}),
 			};
 			const deliver = () => _reconcileOptions.onResolvedFound?.(neighbor);
 			if (guard) guard.guardedWrite(o.filePath, deliver);
@@ -514,6 +516,11 @@ export interface ReconcileOutcome {
 	 * recorded as observed "now". Never set for `unresolved`.
 	 */
 	publishedAt?: number;
+	/**
+	 * #4495 round 3: the touch's pre-notify stamp, the earliest moment the
+	 * answered content could have been read. Set with `publishedAt`.
+	 */
+	touchedAt?: number;
 }
 
 /**
@@ -590,6 +597,7 @@ export async function reconcileOutstandingCascadeTouches(
 				ageMs,
 				diagnosticCount: entry.diags.length,
 				publishedAt: entry.ts,
+				touchedAt: touch.touchedAt,
 				// #1023: carry the diagnostics so the task can re-surface them.
 				...(found && { diagnostics: entry.diags }),
 			});
@@ -627,6 +635,8 @@ export interface ResolvedFoundNeighbor {
 	 * neighbor carries its own observation time — the carried-run age label
 	 * renders from it instead of claiming no stamp exists. */
 	publishedAt?: number;
+	/** #4495 round 3: the touch's pre-notify stamp, the run's read bound. */
+	touchedAt?: number;
 }
 
 export interface CascadeTierReconcileOptions {

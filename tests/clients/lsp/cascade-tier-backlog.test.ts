@@ -460,6 +460,40 @@ describe("residual peek, expiry read and reset count (#4485)", () => {
 		});
 	});
 
+	// Recurrence (#4495 round-2 verify R2-1): a late answer's run carried
+	// only its publish stamp, so the pending record could not tell a write
+	// that landed between the touch and the publish from no write at all.
+	// Both reads hand on the touch's pre-notify stamp, the read bound.
+	it("a late answer carries the touch's pre-notify stamp, from the peek and from the quiet-window reconcile", async () => {
+		const onResolvedFound = vi.fn();
+		mod.registerCascadeTierReconcileTask(
+			() => ({ getWarmClientForFile: vi.fn() }) as never,
+			{ onResolvedFound },
+		);
+		const touchedAt = Date.now() - 1_000;
+		const client = liveClient([[FILE, [errorDiag], touchedAt + 5]]);
+		mod.recordOutstandingCascadeTouch({
+			filePath: FILE,
+			serverId: "typescript",
+			touchedAt,
+			client: new WeakRef(client),
+		} as never);
+		mod.peekOutstandingCascadeTouches();
+		expect(onResolvedFound).toHaveBeenCalledWith(
+			expect.objectContaining({ filePath: FILE, touchedAt }),
+		);
+
+		record(FILE, touchedAt);
+		const outcomes = await mod.reconcileOutstandingCascadeTouches({
+			getWarmClientForFile: vi
+				.fn()
+				.mockResolvedValue(
+					warm("typescript", [[FILE, [errorDiag], touchedAt + 5]]),
+				),
+		} as never);
+		expect(outcomes[0]).toMatchObject({ outcome: "resolved-found", touchedAt });
+	});
+
 	// Recurrence (#4495 review F3): the peek rebuilt the client's whole
 	// per-file diagnostics map once per outstanding touch, O(touches x
 	// tracked files) on turn_end's synchronous path.

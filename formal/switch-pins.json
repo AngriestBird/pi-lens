@@ -3,6 +3,21 @@
 	"families": {
 		"cascade-delivery": {
 			"pins": {
+				"CheckStamp": {
+					"value": "\"read\"",
+					"test": "tests/clients/cascade-turn-merge.test.ts",
+					"title": "an outside fix after the compute read and before turn_end is not left unresolved",
+					"also": [
+						{
+							"test": "tests/clients/cascade-compute.test.ts",
+							"title": "a run that lists neighbour errors carries its read time: the compute's start, before every read"
+						},
+						{
+							"test": "tests/clients/cascade-turn-merge.test.ts",
+							"title": "a late answer's errors, written over between the touch and the publish, are named as changed"
+						}
+					]
+				},
 				"Delta": {
 					"value": "\"none\"",
 					"test": "tests/clients/cascade-compute.test.ts",
@@ -52,13 +67,17 @@
 					]
 				},
 				"PendingGate": {
-					"value": "\"fresh\"",
+					"value": "\"notify\"",
 					"test": "tests/clients/cascade-turn-merge.test.ts",
-					"title": "is dropped when written outside pi after the check",
+					"title": "an outside touch that keeps the error names it once as changed, then says nothing",
 					"also": [
 						{
 							"test": "tests/clients/cascade-turn-merge.test.ts",
-							"title": "is dropped when deleted"
+							"title": "is forgotten without a line when deleted"
+						},
+						{
+							"test": "tests/clients/turn-end-cap-consumed-state.test.ts",
+							"title": "a cut changed line keeps its entry and is named on the next turn, then forgotten"
 						}
 					]
 				},
@@ -112,7 +131,9 @@
 						"Neighbours",
 						"Models",
 						"MaxTurns",
-						"QuietFires"
+						"QuietFires",
+						"OutsidePhases",
+						"OutsideKinds"
 					]
 				},
 				{

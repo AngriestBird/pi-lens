@@ -33,6 +33,7 @@ export interface CascadeLogEntry {
 		| "cascade_tier3_dropped" // #4485: unanswered touches a session reset discarded
 		| "cascade_unconfirmed_rendered" // #4485: the turn's pending line for unanswered neighbours rendered
 		| "cascade_pending_rendered" // #4487: the turn's line for pending neighbour errors no cascade re-checked
+		| "cascade_pending_gated" // #4495 round 3: pending entries whose file changed outside pi (named once) or was deleted (forgotten)
 		| "cascade_carry_over_drop" // #1443: late/carried run dropped — superseded by a later write, or the one-turn carry bound lapsed
 		| "cascade_carry_rendered" // #3168 F6: a carried run/coverage advisory actually rendered with its carry label this turn
 		| "cascade_injected" // #1446 item 1: what cascade text actually reached blockerParts this turn

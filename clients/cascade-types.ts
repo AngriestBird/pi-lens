@@ -153,6 +153,16 @@ export interface CascadeRun {
 	 */
 	observedAt?: number;
 	/**
+	 * #4495 round 3: the earliest moment the content behind this run's
+	 * neighbour diagnostics could have been read: the in-lane compute's start
+	 * (every touch, pull, post-edit snapshot and fallback reads after it), or
+	 * a late answer's pre-notify touch stamp. The pending record keeps it as
+	 * `checkedAt`, so a file written after it (by anything pi never saw) is
+	 * known to have changed since the check. `observedAt` is the publish stamp
+	 * and only labels a carried run's age.
+	 */
+	checkedAt?: number;
+	/**
 	 * #1443: how many turn boundaries this run has survived without being
 	 * consumed. Stamped by `RuntimeCoordinator.beginTurn` when it carries a run
 	 * appended after the previous turn_end's `consumeCascadeRuns` (the

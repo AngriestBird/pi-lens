@@ -993,34 +993,6 @@ function formatWriteOrdinal(n: number): string {
 	}
 }
 
-/**
- * #4495 review F1: the cascade pending record's freshness gate. Each entry is
- * an observation at its `checkedAt`; one whose file is gone, or was written
- * after that by something pi never saw, is forgotten and not rendered. The
- * stat pass, its budget and its records are `gateFindingsByPathFreshness`'s.
- */
-function gatePendingCascadeNeighbors<
-	T extends { filePath: string; checkedAt: number },
->(candidates: readonly T[], cwd: string): readonly T[] {
-	if (candidates.length === 0) return candidates;
-	const { "cascade-pending-neighbors": pendingGate } =
-		gateFindingsByPathFreshness({
-			cwd,
-			sources: {
-				"cascade-pending-neighbors": {
-					findings: candidates,
-					citedPath: (entry: T) => entry.filePath,
-					scannedAtOf: (entry: T) => entry.checkedAt,
-				},
-			},
-		});
-	const live = new Set(pendingGate.live);
-	for (const entry of candidates) {
-		if (!live.has(entry)) forgetCascadePendingNeighbor(entry.filePath);
-	}
-	return pendingGate.live;
-}
-
 export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	const {
 		ctxCwd,
@@ -1986,7 +1958,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		const sectionObservations: Array<{
 			filePath: string;
 			diagnostics: CascadeResult["neighbors"][number]["diagnostics"];
-			observedAt: number | undefined;
+			checkedAt: number | undefined;
 		}> = [];
 		// #4403 round 5 (V1): the servers whose "no language server answered"
 		// line this section shows. They are marked delivered only when the
@@ -2055,10 +2027,14 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				if (sectionRun) sectionRuns.push(sectionRun);
 				for (const n of ownedNeighbors) {
 					if (n.diagnostics.length === 0) continue;
+					// #4495 round 3: a neighbour pi edited this turn is reported by
+					// its own dispatch; the record keeps nothing for it, even when a
+					// run read it before the edit.
+					if (editedKeys.has(normalizeMapKey(n.filePath))) continue;
 					sectionObservations.push({
 						filePath: n.filePath,
 						diagnostics: n.diagnostics,
-						observedAt: sectionRun?.observedAt,
+						checkedAt: sectionRun?.checkedAt,
 					});
 				}
 				injectedNeighborCount += ownedNeighbors.length;
@@ -2123,19 +2099,22 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			// @delivery-surface: runtime-turn:cascade-blocker
 			blockerParts.push(section);
 			const shownServerIds = [...shownUnansweredServerIds];
-			const deliveredAt = Date.now();
 			deliveryHolds.push({
 				part: section,
 				onDelivered: () => {
 					markCascadeUnansweredPrimariesDelivered(shownServerIds);
 					// #4487: peek-then-commit. What the agent was shown is pending
-					// until a fresh observation clears it.
+					// until a fresh observation clears it. #4495 round 3: stamped
+					// with the run's read bound, never the delivery time, which
+					// would postdate a write landing between the read and now. A
+					// run with no read bound records 0, so it never passes the
+					// freshness gate as unchanged.
 					for (const o of sectionObservations) {
 						recordDeliveredCascadeNeighbor(
 							o.filePath,
 							o.diagnostics,
 							cascadeTurn,
-							o.observedAt ?? deliveredAt,
+							o.checkedAt ?? 0,
 						);
 					}
 				},
@@ -2192,40 +2171,107 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		if (lastObserver.has(key) || editedKeys.has(key)) return false;
 		return isUnderDir(entry.filePath, cwd);
 	});
-	// #4495 review F1: the record's claim is an observation at `checkedAt`. A
-	// neighbour deleted since, or written since by something pi never saw (git
-	// checkout, an external editor), no longer has the content the errors
-	// were computed from, so the claim is forgotten rather than re-served as
-	// "unresolved": the same rule #4486 applies to a snapshot from before the
-	// edit. The stale arm is dropped, not demoted: a demoted line would repeat
-	// every turn with nothing but a cascade over that neighbour to clear it,
-	// and a later cascade re-observes the file anyway. An unreadable path or a
-	// spent stat budget fails open (the line renders).
-	const unresolvedNeighbors = gatePendingCascadeNeighbors(
-		pendingCandidates,
-		cwd,
-	);
+	// #4495 (review F1, round 3): each entry is a claim about the file's
+	// content at `checkedAt`, the earliest moment it could have been read. The
+	// shared freshness gate judges it against the file: gone (`dropped`), the
+	// claim is moot and is forgotten silently; written after `checkedAt` by
+	// something pi never saw (`stale`: git checkout, an external editor or
+	// formatter), pi cannot tell a fix from a touch without a re-check, so the
+	// line says once that it changed and was not re-checked, and the entry is
+	// forgotten when that line is delivered; otherwise (`live`) the errors
+	// stay unresolved. Quiet: the gate's own rows name a demotion, and this
+	// store drops or announces, so it writes `cascade_pending_gated` instead.
+	// An unreadable path fails open (live); the stat budget equals the
+	// record's cap, so it cannot be spent here.
+	const { "cascade-pending-neighbors": pendingGate } =
+		gateFindingsByPathFreshness({
+			cwd,
+			quiet: true,
+			sources: {
+				"cascade-pending-neighbors": {
+					findings: pendingCandidates,
+					citedPath: (entry) => entry.filePath,
+					scannedAtOf: (entry) => entry.checkedAt,
+				},
+			},
+		});
+	const unresolvedNeighbors = pendingGate.live;
+	const changedNeighbors = pendingGate.stale;
+	const gateKept = new Set([...unresolvedNeighbors, ...changedNeighbors]);
+	const deletedNeighbors: typeof pendingCandidates = [];
+	for (const entry of pendingCandidates) {
+		if (gateKept.has(entry)) continue;
+		deletedNeighbors.push(entry);
+		forgetCascadePendingNeighbor(entry.filePath);
+	}
+	const maxShown = RUNTIME_CONFIG.pipeline.cascadeMaxFiles;
+	const pendingAge = (checkedAt: number) =>
+		formatCacheAgeLabel(checkedAt > 0 ? checkedAt : undefined);
+	const pendingBlocks: string[] = [];
+	let unresolvedShown = 0;
 	if (unresolvedNeighbors.length > 0) {
-		const maxShown = RUNTIME_CONFIG.pipeline.cascadeMaxFiles;
 		const lines = unresolvedNeighbors
 			.slice(-maxShown)
 			.reverse()
 			.map(
 				(entry) =>
-					`  • ${toRunnerDisplayPath(cwd, entry.filePath)}: ${entry.errorCount} error(s) unresolved (${formatCacheAgeLabel(entry.checkedAt)})`,
+					`  • ${toRunnerDisplayPath(cwd, entry.filePath)}: ${entry.errorCount} error(s) unresolved (${pendingAge(entry.checkedAt)})`,
 			);
+		unresolvedShown = lines.length;
 		const more = unresolvedNeighbors.length - lines.length;
 		if (more > 0) lines.push(`  ... and ${more} more neighbor file(s)`);
-		// @delivery-surface: runtime-turn:cascade-pending-errors
-		blockerParts.push(
+		pendingBlocks.push(
 			`📐 Cascade errors from an earlier turn, not re-checked this turn — still unresolved until a cascade or an edit shows them gone:\n${lines.join("\n")}`,
 		);
+	}
+	// Only the named entries are forgotten on delivery; the rest stay changed
+	// and are named on a later turn.
+	const changedShown = changedNeighbors.slice(-maxShown).reverse();
+	if (changedShown.length > 0) {
+		const lines = changedShown.map(
+			(entry) =>
+				`  • ${toRunnerDisplayPath(cwd, entry.filePath)}: ${entry.errorCount} error(s) changed since checked (${pendingAge(entry.checkedAt)}), not re-checked`,
+		);
+		const more = changedNeighbors.length - changedShown.length;
+		if (more > 0) lines.push(`  ... and ${more} more neighbor file(s)`);
+		pendingBlocks.push(
+			`📐 Cascade errors from an earlier turn whose file changed outside pi since they were checked — not re-checked, named this once:\n${lines.join("\n")}`,
+		);
+	}
+	if (pendingBlocks.length > 0) {
+		const pendingSection = pendingBlocks.join("\n");
+		// @delivery-surface: runtime-turn:cascade-pending-errors
+		blockerParts.push(pendingSection);
+		if (changedShown.length > 0) {
+			// Peek-then-commit: a cut line keeps its entries for the next turn.
+			deliveryHolds.push({
+				part: pendingSection,
+				onDelivered: () => {
+					for (const entry of changedShown) {
+						forgetCascadePendingNeighbor(entry.filePath);
+					}
+				},
+			});
+		}
 		logCascade({
 			phase: "cascade_pending_rendered",
 			filePath: cascadeLogFilePath,
 			metadata: {
 				neighbors: unresolvedNeighbors.length,
-				shown: lines.length - (more > 0 ? 1 : 0),
+				shown: unresolvedShown,
+				changed: changedShown.length,
+			},
+		});
+	}
+	if (changedNeighbors.length + deletedNeighbors.length > 0) {
+		logCascade({
+			phase: "cascade_pending_gated",
+			filePath: cascadeLogFilePath,
+			metadata: {
+				changed: changedNeighbors.length,
+				deleted: deletedNeighbors.length,
+				changedPaths: changedNeighbors.slice(0, 10).map((e) => e.filePath),
+				deletedPaths: deletedNeighbors.slice(0, 10).map((e) => e.filePath),
 			},
 		});
 	}
