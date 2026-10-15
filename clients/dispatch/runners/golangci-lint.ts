@@ -30,6 +30,18 @@ import { finishParsedRun, parseToolRun } from "./utils/tool-failure.js";
 
 const golangci = createAvailabilityChecker("golangci-lint", ".exe");
 
+/** Every `golangci-lint run` output format except json (2.14.0 `run --help`). */
+const OTHER_OUTPUT_FORMATS = [
+	"text",
+	"tab",
+	"html",
+	"checkstyle",
+	"code-climate",
+	"junit-xml",
+	"teamcity",
+	"sarif",
+];
+
 interface GolangciInlineReplacement {
 	StartCol?: number;
 	Length?: number;
@@ -160,10 +172,19 @@ const golangciRunner: RunnerDefinition = {
 		// v2 (the major the installer downloads) removed `--out-format`: it exits
 		// 3 "unknown flag" (#4455). JSON now comes from `--output.json.path`, and
 		// the run stats go to stdout after the document unless switched off,
-		// which leaves stdout unparseable as one JSON value.
+		// which leaves stdout unparseable as one JSON value. The project's own
+		// `output.formats` merge with the flags, so a config that prints any other
+		// format to stdout puts that text beside the JSON; every other format is
+		// pointed at nowhere (`--output.<format>.path=`), probed against 2.14.0.
 		const result = await safeSpawnAsync(
 			cmd,
-			["run", "--output.json.path=stdout", "--show-stats=false", ctx.filePath],
+			[
+				"run",
+				"--output.json.path=stdout",
+				...OTHER_OUTPUT_FORMATS.map((format) => `--output.${format}.path=`),
+				"--show-stats=false",
+				ctx.filePath,
+			],
 			{ timeout: 60000, cwd },
 		);
 

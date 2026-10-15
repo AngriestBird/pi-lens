@@ -56,7 +56,9 @@ const fishIndentRunner: RunnerDefinition = {
 					!pathsEqual(resolve(cwd, l.trim()), resolve(cwd, ctx.filePath)),
 			);
 		if (stderrLine) {
-			// Parse/syntax error — extract line number from "filename (line N): message" if present
+			// Any other stderr is an I/O error such as `Opening "x" failed` (4.9.3
+			// --check never reports a syntax error; fish-lsp does, #4454). Take the
+			// line number from "filename (line N): message" if present.
 			const lineMatch = stderrLine.match(/\(line\s+(\d+)\)/);
 			const line = lineMatch ? Number(lineMatch[1]) : 1;
 			const diagnostics: Diagnostic[] = [

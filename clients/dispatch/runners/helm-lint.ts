@@ -54,12 +54,14 @@ function diagnosticLocation(
 	message: string,
 	chartRoot: string,
 ): { filePath: string; line?: number; message: string } {
-	// A path is a run of non-space, non-delimiter characters ending in a chart
-	// file extension. helm 4.3.0 also prints template parse errors as
-	// `templates/: parse error at (<chart>/templates/bad.yaml:5): ...`, where the
-	// real file sits after prose and parentheses (#4453).
+	// helm 4.3.0 does not quote a template name, so `templates/my file.yaml`
+	// reaches us with a space in it, in three spellings: `templates/my file.yaml:
+	// unable to parse`, `(chart/templates/my file.yaml:5)` and
+	// `chart/templates/my file.yaml:1:10` (#4453). A path may hold spaces only
+	// after its first slash: prose such as `cannot load values.yaml` has no slash
+	// before the file name, so it never joins the path.
 	const location = message.match(
-		/(?:^|[\s(])([^\s:()\r\n]+\.(?:ya?ml|tpl|json))(?::(\d+))?(?::\d+)?(?=[:\s)]|$)/i,
+		/(?:^|[\s(])((?:[^\s:()\r\n]*\/[^:()\r\n"]*?|[^\s:()\r\n]+)\.(?:ya?ml|tpl|json))(?::(\d+))?(?=[:\s)]|$)/i,
 	);
 	const [, found, rawLine] = location ?? [];
 	if (!found) {
@@ -68,10 +70,7 @@ function diagnosticLocation(
 	// A message-leading path is relative to the chart root. One embedded later
 	// in the message is spelled `<chart name>/<path>` by helm: drop the chart name.
 	const embedded = !message.startsWith(found);
-	const relative =
-		embedded && found.includes("/")
-			? found.slice(found.indexOf("/") + 1)
-			: found;
+	const relative = embedded ? found.slice(found.indexOf("/") + 1) : found;
 	const candidate = path.resolve(chartRoot, relative);
 	return {
 		filePath: isWithin(chartRoot, candidate)

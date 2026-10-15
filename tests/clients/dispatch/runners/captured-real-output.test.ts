@@ -192,6 +192,14 @@ const REPLAY_EXPECTATIONS: Record<string, ReplayExpectation> = {
 			{ rule: "unused", semantic: "warning", file: "bad.go", line: 9 },
 		],
 	},
+	"golangci-lint/config-text-stdout": {
+		status: "succeeded",
+		semantic: "warning",
+		findings: [
+			{ rule: "errcheck", semantic: "warning", file: "bad.go", line: 6 },
+			{ rule: "unused", semantic: "warning", file: "bad.go", line: 9 },
+		],
+	},
 	// helm 4.3.0 prefixes the chart name inside the message; the real template
 	// is `templates/bad.yaml` line 5, not the prose around it.
 	"helm-lint/real": {
@@ -203,6 +211,21 @@ const REPLAY_EXPECTATIONS: Record<string, ReplayExpectation> = {
 				rule: "error",
 				semantic: "blocking",
 				file: "templates/bad.yaml",
+				line: 5,
+			},
+		],
+	},
+	// helm does not quote the name in a template parse error, so a name with a
+	// space must still resolve to the real file (#4453).
+	"helm-lint/space-in-name": {
+		status: "succeeded",
+		semantic: "blocking",
+		findings: [
+			{ rule: "info", semantic: "warning", file: "Chart.yaml" },
+			{
+				rule: "error",
+				semantic: "blocking",
+				file: "templates/my file.yaml",
 				line: 5,
 			},
 		],

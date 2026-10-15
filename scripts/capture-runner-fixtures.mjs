@@ -31,6 +31,18 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 const smoke = (dir) => `tests/fixtures/tool-smoke/${dir}`;
 
+/** `--output.<format>.path=` for every golangci-lint format except json. */
+const GOLANGCI_OTHER_FORMATS_OFF = [
+	"text",
+	"tab",
+	"html",
+	"checkstyle",
+	"code-climate",
+	"junit-xml",
+	"teamcity",
+	"sarif",
+].map((format) => `--output.${format}.path=`);
+
 /**
  * One capture. `argv` mirrors the runner's own invocation; `file` is the
  * workspace-relative path the runner is pointed at.
@@ -181,7 +193,29 @@ export const CAPTURES = [
 		tool: "golangci-lint",
 		workspace: smoke("golangci-lint"),
 		file: "bad.go",
-		argv: ["run", "--output.json.path=stdout", "--show-stats=false", "bad.go"],
+		argv: [
+			"run",
+			"--output.json.path=stdout",
+			...GOLANGCI_OTHER_FORMATS_OFF,
+			"--show-stats=false",
+			"bad.go",
+		],
+	},
+	{
+		// A project config that prints a text format to stdout puts that text beside
+		// the JSON unless the runner switches the other formats off.
+		runner: "golangci-lint",
+		case: "config-text-stdout",
+		tool: "golangci-lint",
+		workspace: smoke("golangci-lint-text-stdout"),
+		file: "bad.go",
+		argv: [
+			"run",
+			"--output.json.path=stdout",
+			...GOLANGCI_OTHER_FORMATS_OFF,
+			"--show-stats=false",
+			"bad.go",
+		],
 	},
 	{
 		// #4453 — the runner lints the chart ROOT by absolute path, so the capture
@@ -192,6 +226,17 @@ export const CAPTURES = [
 		versionArgs: "version --short",
 		workspace: smoke("helm"),
 		file: "templates/bad.yaml",
+		argv: ["lint", "__WORKSPACE__"],
+	},
+	{
+		// A template whose file name holds a space: helm prints the name unquoted
+		// inside `(<chart>/templates/my file.yaml:5)`.
+		runner: "helm-lint",
+		case: "space-in-name",
+		tool: "helm",
+		versionArgs: "version --short",
+		workspace: smoke("helm-space-name"),
+		file: "templates/my file.yaml",
 		argv: ["lint", "__WORKSPACE__"],
 	},
 	{
