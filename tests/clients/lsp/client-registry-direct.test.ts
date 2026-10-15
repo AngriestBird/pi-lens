@@ -1615,6 +1615,7 @@ describe("ClientRegistry acquisition outcomes (#4449)", () => {
 		expect(priv(swapped.registry).generationHandoff).toBe(second);
 
 		const destroyed = ensureFixture("rs");
+		const resolveRoot = vi.spyOn(destroyed.info, "root");
 		let openDestroyed!: () => void;
 		priv(destroyed.registry).generationHandoff = new Promise<void>(
 			(resolve) => {
@@ -1626,6 +1627,9 @@ describe("ClientRegistry acquisition outcomes (#4449)", () => {
 		destroyed.registry.markDestroyed();
 		openDestroyed();
 		await expect(gone).resolves.toBeUndefined();
+		// Recurrence: the destroy check right after the wait stops the work there;
+		// without it the root was still resolved for a registry nobody can use.
+		expect(resolveRoot).not.toHaveBeenCalled();
 		expect(destroyed.spawn).not.toHaveBeenCalled();
 	});
 });
