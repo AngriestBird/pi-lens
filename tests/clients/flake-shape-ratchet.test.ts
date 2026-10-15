@@ -681,6 +681,13 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the real hook stdin/exit-code contract and head-to-head differential are unobservable through an in-process classifier call",
 	},
+	// #4291: the handshake and report steps of install-smoke.yml are shell text;
+	// pipefail and the crash line are observable only by running the real bash.
+	"real-process-spawn:scripts/install-smoke-handshake-steps.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the pipefail pipe into tee and the failing-row report are shell text from the workflow; only a real bash running the extracted run: shows that a red handshake exits non-zero and that a crash with no rows is not reported as clean",
+	},
 	// #2698: gitignore/tracked-vs-untracked resolution (git init/add/commit/
 	// ls-files against a throwaway fixture repo) is the exact mechanism
 	// scripts/lib/knip-sibling-purge.mjs depends on and this file tests.
