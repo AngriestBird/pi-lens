@@ -365,6 +365,10 @@ const lspSpawnHeavyInclude = [
 	"tests/mcp/analyze-cli.test.ts",
 	// #4300: the MCP witness crosses Lean's real initialize handshake.
 	"tests/mcp/server.smoke.test.ts",
+	// #4403: the LSP scripts' touch reading over the production
+	// LSPService, with fake-server children for the official Docker server and
+	// typos; waits on real handshakes like its lane siblings.
+	"tests/scripts/touch-result.test.ts",
 	"tests/support/fake-lsp-server.test.ts",
 	// #4403: the diagnostics route matrix. Real fake-LSP children (the JSON
 	// server, typos and an Opengrep stand-in, project command overrides) behind

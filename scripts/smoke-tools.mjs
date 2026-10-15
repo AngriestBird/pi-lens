@@ -66,6 +66,7 @@ import {
 	sweepScratchDirs,
 } from "./lib/scratch-dir.mjs";
 import { safeRm } from "./lib/safe-rm.mjs";
+import { touchAnsweredDiagnostics } from "./lib/touch-result.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
@@ -3060,8 +3061,10 @@ async function runLspHandshake({ langs, install, verbose }) {
 				// copy-loss structural fix — the flags became explicit enumerable
 				// fields). Normalize both shapes here so every consumer below
 				// survives either build; `undefined` still means "no client became
-				// ready" (skip semantics unchanged).
-				touchedDiags = Array.isArray(touched) ? touched : touched?.diags;
+				// ready" (skip semantics unchanged), a disabled primary included.
+				touchedDiags = touchAnsweredDiagnostics(touched, {
+					auxiliary: Boolean(auxRe),
+				});
 				if (fx.expectedCwd && touchedDiags) {
 					await assertCwdResolutionLog(
 						fx,
@@ -3131,7 +3134,7 @@ async function runLspHandshake({ langs, install, verbose }) {
 			const diags = touchedDiags?.length ?? 0;
 			if (verbose) {
 				console.error(
-					`[${fx.lang}] touched=${touchedDiags?.length ?? touched} health=${JSON.stringify(lsp.getDiagnosticsHealth(absFile))}`,
+					`[${fx.lang}] touched=${touchedDiags?.length ?? touched?.inconclusiveReason ?? touched} health=${JSON.stringify(lsp.getDiagnosticsHealth(absFile))}`,
 				);
 			}
 			// Alternate fixtures disable the default server in the workspace. Verify the

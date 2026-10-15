@@ -10,6 +10,7 @@ import {
 	classifyFirstPublish,
 	resolveProbeServerId,
 } from "./clean-signal.mjs";
+import { touchAnsweredDiagnostics } from "./touch-result.mjs";
 
 // Budgets (reuse the original probe's generosity — this is off the hot path).
 const CLIENT_WAIT_MS = 30000; // cold spawn + initialize
@@ -149,7 +150,8 @@ export function createProbeFixture(deps) {
 			cleanTransitionPublishes: cleanPubs.length,
 			cleanTransitionVersioned: cleanPubs.filter((p) => p.versioned).length,
 		};
-		const dirtyDiagCount = Array.isArray(dirtyResult) ? dirtyResult.length : 0;
+		const dirtyDiagCount =
+			touchAnsweredDiagnostics(dirtyResult, { auxiliary: useAux })?.length ?? 0;
 		const verdict = classifyCleanBehavior(obs);
 		// #3310: the first-publish class comes from the dirty phase's publish ORDER,
 		// which this trace already holds — no extra touch, no extra server time.

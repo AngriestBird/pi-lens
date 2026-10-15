@@ -27,6 +27,7 @@ import {
 	bootstrapFixtureWorkspace,
 	withScratchHome,
 } from "./lib/lsp-fixture-workspace.mjs";
+import { touchAnsweredDiagnostics } from "./lib/touch-result.mjs";
 
 const repoRoot = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -153,7 +154,10 @@ for (const fx of fixtures) {
 		const c0 = performance.now();
 		const cold = await touch(content);
 		const coldMs = performance.now() - c0;
-		if (!Array.isArray(cold)) {
+		if (
+			touchAnsweredDiagnostics(cold, { auxiliary: auxIds.length > 0 }) ===
+			undefined
+		) {
 			results.push({
 				lang: fx.lang,
 				server: fx.serverHint,
