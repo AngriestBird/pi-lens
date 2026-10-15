@@ -264,6 +264,24 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			reason:
 				"the defect is wall-clock only (2^N globstar backtracking); a fake clock measures nothing",
 		},
+	// 2026-10-15 (#4449): the registry's skip and respawn records go to
+	// logLatency. Its in-process ring drops the fields the test asserts, and
+	// test mode never reaches the file sink, so the captured call is the seam.
+	"in-process-mock:clients/lsp/client-registry-direct.test.ts::clients/latency-logger":
+		{
+			detector: "in-process-mock",
+			reason:
+				"the ring getRecentLoggedPhases reads keeps only phase and metadata, and test mode skips the file sink; the registry's filePath and durationMs fields are asserted from the captured call",
+		},
+	// 2026-10-15 (#4449): createLSPClient wraps the language-server child
+	// process; the extracted ClientRegistry's spawn bookkeeping is driven
+	// directly, so the client factory is the one boundary stood in for.
+	"in-process-mock:clients/lsp/client-registry-direct.test.ts::clients/lsp/client":
+		{
+			detector: "in-process-mock",
+			reason:
+				"createLSPClient wraps the language-server child process; the registry's spawn bookkeeping is the subject",
+		},
 	// 2026-10-14 (#4346): the ast-grep native addon's load is the host
 	// boundary, and `loadAstGrepNapiSync` is its only seam; no host lane
 	// lacks the addon, so the fail-closed record has no real driver.
@@ -910,6 +928,14 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		detector: "real-process-spawn",
 		reason:
 			"#3617: the subject is Vitest's own fork teardown (the pool SIGTERMs the worker after the shared afterAll); no in-process double reproduces that kill or a hook timeout",
+	},
+	// 2026-10-15 (#4449): the registry's capacity, lease and idle paths read a
+	// client's liveness and busy answers; a real language server cannot be made
+	// to give them on demand.
+	"service-double:clients/lsp/client-registry-direct.test.ts::LSPClientInfo": {
+		detector: "service-double",
+		reason:
+			"a language-server client is a spawned process; the registry's lease, capacity and idle paths are driven by its liveness and busy answers",
 	},
 	// 2026-09-26 (#3511 review round 3): the quick-mode warmup witness must
 	// run the real warmup timer and background word-index save, which no

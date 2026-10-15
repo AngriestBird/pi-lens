@@ -3,7 +3,7 @@
 // (planPertest), the vitest-5 compatibility patch to Stryker's runner
 // (patchVitestRunner), and the report reader that names tests which cover
 // mutated code but kill no mutant (findWorthlessTests).
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import {
 	compiledJsPath,
@@ -39,18 +39,29 @@ export const isGovernanceTest = (file) =>
  * checked reasons in tests/config/stryker-diff-exclusions.json) apply as in
  * that lane.
  *
+ * `options.also` names tests that reach the module through a facade (#4449:
+ * `clients/lsp/client-registry.ts` is imported only by the service, so the
+ * one-hop rule finds no behavioural test). They are added unless governance
+ * excluded or missing; the one-hop rule still runs first.
+ *
  * @param {string} moduleFile a runtime `.ts` source, e.g. `clients/run-duration.ts`
- * @param {Parameters<typeof mapRelatedTests>[1]} [options]
+ * @param {Parameters<typeof mapRelatedTests>[1] & {also?: string[], exists?: (file: string) => boolean}} [options]
  * @returns {{module: string, target: string, tests: string[], excluded: Array<{file: string, reason: string}>}}
  */
 export function planPertest(moduleFile, options) {
 	if (!isCompiledMutationSource(moduleFile)) {
 		throw new Error(`stryker-pertest: not a runtime .ts source: ${moduleFile}`);
 	}
-	const { related, excluded } = mapRelatedTests([moduleFile], options);
+	const { also = [], exists = existsSync, ...mapOptions } = options ?? {};
+	const { related, excluded } = mapRelatedTests([moduleFile], mapOptions);
 	const governance = [];
 	const tests = [];
-	for (const test of related.get(moduleFile)) {
+	for (const test of also) {
+		if (!exists(test)) {
+			throw new Error(`stryker-pertest: --also names a missing test: ${test}`);
+		}
+	}
+	for (const test of new Set([...related.get(moduleFile), ...also])) {
 		if (isGovernanceTest(test)) {
 			governance.push({ file: test, reason: GOVERNANCE_REASON });
 		} else tests.push(test);

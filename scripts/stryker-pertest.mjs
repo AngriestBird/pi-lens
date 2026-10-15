@@ -10,7 +10,7 @@
  *   node scripts/stryker-pertest.mjs patch-runner [--dir DIR]
  *     Patches the installed runner for vitest 5's test-name separator.
  *
- *   node scripts/stryker-pertest.mjs plan --module clients/x.ts
+ *   node scripts/stryker-pertest.mjs plan --module clients/x.ts [--also A,B]
  *     Prints GITHUB_OUTPUT lines `module=`, `target=<compiled .js>` and
  *     `tests=<comma-joined test files>`; the excluded tests go to stderr.
  *
@@ -69,7 +69,9 @@ export function main(argv = process.argv.slice(2)) {
 		};
 	}
 	if (command === "plan") {
-		return planPertest(valueAfter(rest, "--module"));
+		return planPertest(valueAfter(rest, "--module"), {
+			also: valueAfter(rest, "--also", "").split(",").filter(Boolean),
+		});
 	}
 	if (command === "preflight") {
 		const split = splitRunnableTests(

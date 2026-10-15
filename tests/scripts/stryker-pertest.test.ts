@@ -377,6 +377,38 @@ describe("isGovernanceTest / planPertest (#4365)", () => {
 		);
 	});
 
+	// Recurrence (#4449): clients/lsp/client-registry.ts is imported only by the
+	// service, so the one-hop rule found "no test imports" it and the campaign
+	// could not be planned. `also` names the facade tests; governance suites and
+	// missing files still refuse, so a typo cannot silently shrink the run.
+	it("adds explicit facade tests, drops governance ones, refuses a missing one", () => {
+		const present = new Set([
+			"tests/clients/lsp/idle-eviction.test.ts",
+			"tests/clients/lsp/foo-sweep.test.ts",
+		]);
+		const plan = planPertest("clients/lsp/foo.ts", {
+			testFiles: [],
+			readFile: () => "",
+			also: [
+				"tests/clients/lsp/idle-eviction.test.ts",
+				"tests/clients/lsp/foo-sweep.test.ts",
+			],
+			exists: (file: string) => present.has(file),
+		});
+		expect(plan.tests).toEqual(["tests/clients/lsp/idle-eviction.test.ts"]);
+		expect(plan.excluded).toEqual([
+			expect.objectContaining({ file: "tests/clients/lsp/foo-sweep.test.ts" }),
+		]);
+		expect(() =>
+			planPertest("clients/lsp/foo.ts", {
+				testFiles: [],
+				readFile: () => "",
+				also: ["tests/clients/lsp/typo.test.ts"],
+				exists: () => false,
+			}),
+		).toThrow(/missing test: tests\/clients\/lsp\/typo\.test\.ts/);
+	});
+
 	it("refuses a path that is not a runtime .ts source", () => {
 		expect(() =>
 			planPertest("scripts/stryker-pertest.mjs", {

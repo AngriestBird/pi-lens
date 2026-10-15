@@ -102,6 +102,21 @@ function deepMergeObjects(
 }
 
 /**
+ * A client key is `<serverId>:<normalized root>`. A built-in server id never
+ * holds a colon (a custom `lsp.servers` id can, and no key reader handles that
+ * yet); the root can (a Windows drive `c:/work`, a POSIX `a:b` directory), so
+ * the key is cut at the FIRST colon only. One reading for every status and
+ * bookkeeping path: `getStatus` once split at every colon and kept `c` for
+ * `c:/work/proj`. A key with no colon reads as a bare server id with no root.
+ */
+function parseClientKey(key: string): { serverId: string; root: string } {
+	const separator = key.indexOf(":");
+	return separator < 0
+		? { serverId: key, root: "" }
+		: { serverId: key.slice(0, separator), root: key.slice(separator + 1) };
+}
+
+/**
  * Merges user-supplied initializationOptions onto a server's built-in defaults.
  * - If neither side is defined → undefined (no options sent).
  * - If only one side is defined → that side is returned directly.
@@ -434,7 +449,7 @@ export class ClientRegistry {
 		const liveRoots = new Set<string>();
 		for (const key of this.clients.keys()) {
 			if (this.adoptedClientKeys.has(key))
-				liveRoots.add(key.slice(key.indexOf(":") + 1));
+				liveRoots.add(parseClientKey(key).root);
 		}
 		for (const root of this.adoptedRootLastUsedAt.keys()) {
 			if (!liveRoots.has(root)) this.adoptedRootLastUsedAt.delete(root);
@@ -458,7 +473,10 @@ export class ClientRegistry {
 		if (!victim) return true;
 		this.adoptedRootLastUsedAt.delete(victim);
 		for (const [key, client] of this.clients) {
-			if (!this.adoptedClientKeys.has(key) || !key.endsWith(`:${victim}`))
+			if (
+				!this.adoptedClientKeys.has(key) ||
+				parseClientKey(key).root !== victim
+			)
 				continue;
 			if ((this.clientLeases.get(key) ?? 0) > 0) continue;
 			this.retireClient(key);
@@ -694,10 +712,10 @@ export class ClientRegistry {
 		this.hooks.forgetReadiness(key);
 		this.clientLastUsedAt.delete(key);
 		if (this.adoptedClientKeys.delete(key)) {
-			const root = key.slice(key.indexOf(":") + 1);
+			const { root } = parseClientKey(key);
 			if (
-				![...this.adoptedClientKeys].some((candidate) =>
-					candidate.endsWith(`:${root}`),
+				![...this.adoptedClientKeys].some(
+					(candidate) => parseClientKey(candidate).root === root,
 				)
 			)
 				this.adoptedRootLastUsedAt.delete(root);
@@ -720,7 +738,7 @@ export class ClientRegistry {
 		// warm-LSP-friendly 20-minute default instead.
 		this.clearIdleEvictionTimer(key);
 		const lastUsedAt = this.clientLastUsedAt.get(key) ?? Date.now();
-		const root = key.slice(key.indexOf(":") + 1);
+		const { root } = parseClientKey(key);
 		const idleMs = this.adoptedClientKeys.has(key)
 			? ADOPTED_ROOT_IDLE_EVICT_MS
 			: getLspIdleEvictMsForRoot(root);
@@ -1561,7 +1579,7 @@ export class ClientRegistry {
 		pullFailureHistory: LSPPullFailure[];
 	}> {
 		return Array.from(this.clients.entries()).map(([key, client]) => {
-			const [serverId, root] = key.split(":");
+			const { serverId, root } = parseClientKey(key);
 			return {
 				serverId,
 				root,
@@ -1645,10 +1663,8 @@ export class ClientRegistry {
 	}> {
 		const keys = new Set([...this.broken.keys(), ...this.permanentlyBroken]);
 		return [...keys].map((key) => {
-			const separator = key.indexOf(":");
 			return {
-				serverId: separator >= 0 ? key.slice(0, separator) : key,
-				root: separator >= 0 ? key.slice(separator + 1) : "",
+				...parseClientKey(key),
 				// #1127/#1142: spawn/init failures, consecutive early post-init
 				// exits, and the windowed-rate stream all feed the same breaker
 				// (see `runtimeExitCounts`/`runtimeExitWindow` docs). Sum spawn/init

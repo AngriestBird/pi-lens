@@ -6,6 +6,8 @@ export declare function planPertest(
 		testFiles?: string[];
 		readFile?: (file: string) => string;
 		exclusions?: Record<string, { reason?: string }>;
+		also?: string[];
+		exists?: (file: string) => boolean;
 	},
 ): {
 	module: string;
