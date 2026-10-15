@@ -196,6 +196,7 @@ describe("lens_diagnostics mode=all agrees with a same-minute mode=full (#1634 c
 		expect(all).toContain("suppressed by disposition: 2 finding(s)");
 		expect(all).toContain("Not a clean verdict");
 	});
+
 	it("counts only what is hidden inside the call's paths and severity", async () => {
 		await run({ mode: "full", paths: [file, other] });
 		await mark(KEPT, 1, 2304);
@@ -209,5 +210,57 @@ describe("lens_diagnostics mode=all agrees with a same-minute mode=full (#1634 c
 		expect(everything).toContain("suppressed by disposition: 3 finding(s)");
 		expect(onePath).toContain("suppressed by disposition: 2 finding(s)");
 		expect(errorsOnly).toContain("suppressed by disposition: 2 finding(s)");
+	});
+
+	// A `.pi-lens.json` rule is not a mark: the count said "suppressed by
+	// disposition" for a finding the project's rule policy disabled.
+	it("does not count a rule-policy drop as a disposition", async () => {
+		await run({ mode: "full", paths: [file, other] });
+		fs.writeFileSync(
+			path.join(tmp, ".pi-lens.json"),
+			JSON.stringify({
+				rules: { "typescript:6133": { disable: ["typescript:6133"] } },
+			}),
+		);
+		const all = await run({ mode: "all", paths: [other] });
+
+		expect(rows(all)).toEqual([]);
+		expect(all).not.toContain("suppressed by disposition");
+	});
+
+	// #4459 review F2 (probe S3): mode=full's first widget write handed the
+	// pre-policy sweep to the store, so the re-reported marked rows replaced
+	// their disposition-tagged rows and the post-policy write then dropped them.
+	// The next mode=all read "No issues ✓" with no count, and mode=full itself
+	// never said what it dropped.
+	it("keeps saying what a mark hides across a second mode=full", async () => {
+		await run({ mode: "full", paths: [file] });
+		await mark(KEPT, 1, 2304);
+		await mark(MARKED, 2, 2322);
+		const allBefore = await run({ mode: "all", paths: [file] });
+		const fullAgain = await run({ mode: "full", paths: [file] });
+		const allAfter = await run({ mode: "all", paths: [file] });
+
+		expect(allBefore).toContain("suppressed by disposition: 2 finding(s)");
+		expect(rows(fullAgain)).toEqual([]);
+		expect(fullAgain).toContain("suppressed by disposition: 2 finding(s)");
+		expect(rows(allAfter)).toEqual([]);
+		expect(allAfter).toContain("suppressed by disposition: 2 finding(s)");
+	});
+
+	// Same review: mode=full dropped marked findings without a count, so its
+	// "No issues ✓" was the unlabeled side of the contradiction.
+	it("mode=full counts what a mark hides inside the call's paths and severity", async () => {
+		await mark(MARKED, 2, 2322);
+		await mark(OTHER, 1, 6133, other);
+
+		const everything = await run({ mode: "full" });
+		const onePath = await run({ mode: "full", paths: [file] });
+		const errorsOnly = await run({ mode: "full", severity: "error" });
+
+		expect(rows(onePath)).toEqual([`🔴 L1: ${KEPT} [typescript:2304]`]);
+		expect(everything).toContain("suppressed by disposition: 2 finding(s)");
+		expect(onePath).toContain("suppressed by disposition: 1 finding(s)");
+		expect(errorsOnly).toContain("suppressed by disposition: 1 finding(s)");
 	});
 });

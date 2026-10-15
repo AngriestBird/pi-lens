@@ -79,6 +79,13 @@ export interface FindingPolicyResult<T> {
 	 * would keep a finding hidden long after its mark was removed.
 	 */
 	inlineKept: T[];
+	/**
+	 * Survivors of inline suppression AND the disposition filter, before the
+	 * rule policy: `inlineKept` minus `disposed` is what marks hid. mode=full
+	 * states that count (#1634), so the rule policy's own drops never read as
+	 * "suppressed by disposition".
+	 */
+	disposed: T[];
 }
 
 /**
@@ -100,6 +107,7 @@ export function applyFindingPolicy<
 			filePath: options.filePath,
 		}),
 		inlineKept,
+		disposed,
 	};
 }
 

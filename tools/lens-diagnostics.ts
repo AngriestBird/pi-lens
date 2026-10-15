@@ -29,6 +29,7 @@ import {
 	applyFindingPolicy,
 	loadProjectRulePolicyMap,
 } from "../clients/dispatch/finding-policy.js";
+import { readFileContent } from "../clients/dispatch/runners/utils.js";
 import {
 	gateFindingsByPathFreshness,
 	parseScannedAtMs,
@@ -2133,6 +2134,12 @@ async function applyInlineSuppressionsToSummaries(
 	summaries: FileDiagnosticSummary[],
 	cwd: string,
 	policyMap: ReturnType<typeof rulePolicyMapFromConfig>,
+	/**
+	 * #1634: receives the rows a disposition mark hid, so the caller can state
+	 * the count scoped to its severity. Inline `pi-lens-ignore` and rule-policy
+	 * drops are not marks and are not added.
+	 */
+	dispositionDropped: WidgetDiagnostic[],
 ): Promise<FileDiagnosticSummary[]> {
 	return Promise.all(
 		summaries.map(async (summary) => {
@@ -2164,12 +2171,22 @@ async function applyInlineSuppressionsToSummaries(
 			// reappears here. #3088 folded the three calls onto the shared
 			// `applyFindingPolicy` seam, which the `source=lsp` probe lane now calls
 			// too — one stack, one order, for every model-facing surface.
-			const { kept: policyKept } = applyFindingPolicy(summary.diagnostics, {
+			const {
+				kept: policyKept,
+				inlineKept,
+				disposed,
+			} = applyFindingPolicy(summary.diagnostics, {
 				cwd,
 				filePath: summary.filePath,
 				content,
 				policyMap,
 			});
+			if (disposed.length < inlineKept.length) {
+				const survivors = new Set(disposed);
+				for (const d of inlineKept) {
+					if (!survivors.has(d)) dispositionDropped.push(d);
+				}
+			}
 			// Tag `flagged` diagnostics for the render loop (formatAllMode). Content
 			// is already in hand here (unlike mode=all/delta's cache-only path), so
 			// this is the one place the tag can be computed without adding I/O to
@@ -2477,6 +2494,18 @@ async function formatFullMode(
 	);
 	const authoritativeLspFiles = new Set<string>();
 	const unreconciledFiles = new Set<string>();
+	// Project rule policy (`.pi-lens.json` `rules.<id>.disable`/`select`) —
+	// loaded once per mode=full call, BEFORE the footer write below and before
+	// `projectSnapshot`/`projectDelta` are built, so `.diagnostics.length` on
+	// both (which feeds `details.projectDiagnostics`/
+	// `details.projectDiagnosticsDelta` as well as the merge into `summaries`)
+	// is the POST-policy count. Threaded into
+	// `applyInlineSuppressionsToSummaries` too (idempotent re-apply there) so
+	// the merged summaries honor the same policy the per-edit dispatch path
+	// applies. A project config read failure is treated as "no policy"
+	// (defensive, matches the `applyInlineSuppressionsToSummaries` read-error
+	// discipline).
+	const policyMap = loadProjectRulePolicyMap(cwd);
 	// #571: reconcile this scan's fresh, CONFIRMED per-file results into the
 	// footer cache. A footer write is never allowed to fail the tool call, so
 	// any unexpected throw is swallowed.
@@ -2492,8 +2521,8 @@ async function formatFullMode(
 			// #692: re-tag aux-sourced findings (ast-grep, opengrep, zizmor, typos)
 			// with their real tool id + semantic policy — the same treatment the
 			// per-edit dispatch runner gives them — so a scan-reconciled entry no
-			// longer keeps tool "lsp". No file content is read here (this loop
-			// only has `result.diagnostics`/`result.filePath` from the sweep, not
+			// longer keeps tool "lsp". The retag is given no file content (it
+			// runs on `result.diagnostics`/`result.filePath` from the sweep, not
 			// the file body) — `detectFileRole` still classifies test files
 			// correctly from the path alone (its content-based checks only refine
 			// generated/stub detection), and native inline-suppression comments
@@ -2506,9 +2535,22 @@ async function formatFullMode(
 				"",
 				{ cwd, fileRole: detectFileRole(result.filePath) },
 			);
+			// #4459 review F2: the store is handed the POST-policy set, as every
+			// other scan writer hands it (the per-edit dispatch, the correlated
+			// write below). Handing it the raw sweep made a re-reported marked
+			// finding read as "the mark no longer applies" (#3158 retention rule
+			// 2): it replaced the disposition-tagged row, the correlated write then
+			// dropped it, and the footer chip and mode=all lost the mark.
+			const content = readFileContent(result.filePath);
+			const { kept: policyKept } = applyFindingPolicy(retagged, {
+				cwd,
+				filePath: result.filePath,
+				content: content ?? "",
+				policyMap,
+			});
 			const retired = reconcileScanDiagnostics(
 				result.filePath,
-				retagged,
+				policyKept,
 				true,
 				// The service reserves this token when the file enters the scan. The
 				// fallback preserves compatibility with older test doubles/services.
@@ -2547,17 +2589,6 @@ async function formatFullMode(
 			});
 		}
 	}
-	// Project rule policy (`.pi-lens.json` `rules.<id>.disable`/`select`) —
-	// loaded once per mode=full call, BEFORE `projectSnapshot`/`projectDelta`
-	// are built below, so `.diagnostics.length` on both (which feeds
-	// `details.projectDiagnostics`/`details.projectDiagnosticsDelta` as well
-	// as the merge into `summaries`) is the POST-policy count. Threaded into
-	// `applyInlineSuppressionsToSummaries` too (idempotent re-apply there) so
-	// the merged summaries honor the same policy the per-edit dispatch path
-	// applies. A project config read failure is treated as "no policy"
-	// (defensive, matches the `applyInlineSuppressionsToSummaries` read-error
-	// discipline).
-	const policyMap = loadProjectRulePolicyMap(cwd);
 	const scannedSnapshot = filterProjectDiagnosticsSnapshot(
 		rawProjectSnapshot,
 		includeFile,
@@ -2695,6 +2726,7 @@ async function formatFullMode(
 			},
 		});
 	}
+	const dispositionDropped: WidgetDiagnostic[] = [];
 	let summaries = await applyInlineSuppressionsToSummaries(
 		mergeDiagnosticsWithWidgetSummaries(
 			getFileDiagnosticSummaries().filter((summary) =>
@@ -2709,6 +2741,7 @@ async function formatFullMode(
 		),
 		cwd,
 		policyMap,
+		dispositionDropped,
 	);
 	if (unreconciledFiles.size > 0) {
 		summaries = summaries.map((summary) =>
@@ -2771,6 +2804,19 @@ async function formatFullMode(
 		},
 		0,
 		pathsScope,
+		0,
+		{
+			dropped: dispositionDropped,
+			// #1617: the #1616 suppressed-bucket rule applied to the analyzers —
+			// a finding marked false-positive/won't-fix drops out of
+			// `diagnostics` (fresh-fetch.ts's `record()`), and the drop stays
+			// visible as a count. Review-round F4 (#1625): per-lane attribution
+			// ("gitleaks 2, knip 1") says WHICH analyzer's marks are doing the
+			// suppressing. A lane that's 100% suppressed still won't appear in
+			// `runners`/`cold` as distinct from "ran clean" — #1623's territory.
+			analyzers: extracted.dispositionSuppressed ?? 0,
+			analyzersByLane: extracted.dispositionSuppressedByLane ?? {},
+		},
 	);
 	const missingNote = pathsScopeMissingNote(pathsScope);
 	// #630: mirrors `tools/lsp-diagnostics.ts`'s `unconfirmedReasonClause`/
@@ -2961,24 +3007,6 @@ async function formatFullMode(
 						", ",
 					)}. These analyzers were not cached and will be retried; absence of their findings is NOT a clean verdict.`
 			: "";
-	// #1617: the #1616 suppressed-bucket rule applied to mode=full — a finding
-	// an agent/user marked false-positive/won't-fix now drops out of
-	// `diagnostics` (fresh-fetch.ts's `record()`), but that drop must stay
-	// visible as a count rather than reading as "nothing was wrong here".
-	// Review-round F4 (#1625): per-lane attribution — "gitleaks 2, knip 1" says
-	// WHICH analyzer's marks are doing the suppressing, not just a bare total.
-	// A lane that's 100% suppressed still won't appear in `runners`/`cold` as
-	// distinct from "ran clean" — that gap is #1623's lane-status territory,
-	// not fixed here.
-	const dispositionSuppressedByLaneText = Object.entries(
-		extracted.dispositionSuppressedByLane ?? {},
-	)
-		.map(([id, count]) => `${id} ${count}`)
-		.join(", ");
-	const dispositionSuppressedNote =
-		(extracted.dispositionSuppressed ?? 0) > 0
-			? `\n\nsuppressed by disposition: ${extracted.dispositionSuppressed} finding(s) dropped from this result because they're marked false-positive or won't-fix (${dispositionSuppressedByLaneText}). Not a clean verdict for those locations — they were found, then intentionally hidden.`
-			: "";
 	// #747/#250: the cheap project-diagnostics scan (scanProjectDiagnostics) and
 	// the LSP workspace sweep (collectWorkspaceDiagnosticFiles) both refuse to
 	// WALK from a cwd at/above $HOME — from there, walking would enumerate every
@@ -3086,7 +3114,11 @@ async function formatFullMode(
 			coldReasons: extracted.coldReasons ?? {},
 			failedAnalyzers,
 			analyzerTimingsMs: extracted.timings,
-			dispositionSuppressed: extracted.dispositionSuppressed ?? 0,
+			// #1634: every lane the call filtered — the sweep's and the
+			// analyzers' — in one count, the one the text states.
+			dispositionSuppressed:
+				(result.details as { dispositionSuppressed?: number })
+					.dispositionSuppressed ?? 0,
 			dispositionSuppressedByLane: extracted.dispositionSuppressedByLane ?? {},
 			// #1623: ms-old each cache-read-by-design lane's data was (today, only
 			// test-runner) — lets a caller distinguish "just ran" from "served
@@ -3171,7 +3203,6 @@ async function formatFullMode(
 						coldNote +
 						testRunnerEditScopedNote +
 						failedNote +
-						dispositionSuppressedNote +
 						walkUnsafeRootNote +
 						scanTruncatedNote +
 						generatedSkipNote +
@@ -3191,7 +3222,6 @@ async function formatFullMode(
 		partialNote ||
 		testRunnerEditScopedNote ||
 		failedNote ||
-		dispositionSuppressedNote ||
 		walkUnsafeRootNote ||
 		scanTruncatedNote ||
 		generatedSkipNote ||
@@ -3216,7 +3246,6 @@ async function formatFullMode(
 						coldNote +
 						testRunnerEditScopedNote +
 						failedNote +
-						dispositionSuppressedNote +
 						walkUnsafeRootNote +
 						scanTruncatedNote +
 						generatedSkipNote +
@@ -3258,6 +3287,15 @@ async function formatAllMode(
 	staleDropped = 0,
 	pathsScope?: PathsScope,
 	dependencyDemoted = 0,
+	/**
+	 * mode=full only: the rows its policy pass dropped for a mark, and what the
+	 * fresh analyzers dropped for one, per lane.
+	 */
+	fullModeDisposition: {
+		dropped: readonly WidgetDiagnostic[];
+		analyzers: number;
+		analyzersByLane: Record<string, number>;
+	} = { dropped: [], analyzers: 0, analyzersByLane: {} },
 ): Promise<{ content: [{ type: "text"; text: string }]; details: object }> {
 	// #2275 review F2: the widget footer stops DRAWING a dependency-drift
 	// demotion once it hits `DEPENDENCY_DRIFT_MAX_DELIVERIES` unconfirmed
@@ -3295,11 +3333,26 @@ async function formatAllMode(
 	// false-positive anchors against current content when the file is
 	// unchanged since observation, weak-only fallback otherwise.
 	const policyMap = loadProjectRulePolicyMap(cwd);
-	// #1634 criterion 4: what these stages drop is counted and said, scoped to
-	// the requested paths and severity like the rows themselves. Without it a
-	// file whose findings the agent marked after a mode=full read "No issues
-	// ✓" a minute after that sweep listed them.
-	let dispositionSuppressed = 0;
+	// #1634 criterion 4: what marks hide is counted and said, scoped to the
+	// requested paths and severity like the rows themselves. Without it a file
+	// whose findings the agent marked after a mode=full read "No issues ✓" a
+	// minute after that sweep listed them. mode=full counts its own policy
+	// pass's drops (its summaries arrive filtered to the requested paths) plus
+	// the fresh analyzers'; mode=all counts the rows a mark tagged in the store
+	// (the footer's `suppressed: N`) plus what its cache-only disposition pass
+	// drops now.
+	const inScope = (rows: readonly WidgetDiagnostic[]) =>
+		rows.reduce((n, d) => n + (matchesSeverity(d, severity) ? 1 : 0), 0);
+	const sweepSuppressed = isFullMode ? inScope(fullModeDisposition.dropped) : 0;
+	const lanes: string[] = [];
+	for (const [id, count] of Object.entries(
+		fullModeDisposition.analyzersByLane,
+	)) {
+		if (count > 0) lanes.push(`${id} ${count}`);
+	}
+	const suppressedBreakdown =
+		lanes.length > 0 ? `analyzer lanes: ${lanes.join(", ")}` : undefined;
+	let dispositionSuppressed = sweepSuppressed + fullModeDisposition.analyzers;
 	const dispositioned = isFullMode
 		? summaries
 		: summaries.map((s) => {
@@ -3310,17 +3363,10 @@ async function formatAllMode(
 					filePath: s.filePath,
 				});
 				if (includeFile(s.filePath)) {
-					const inScope = (rows: readonly WidgetDiagnostic[]) =>
-						rows.reduce(
-							(n, d) => n + (matchesSeverity(d, severity) ? 1 : 0),
-							0,
-						);
-					// The rows a mark already tagged in the store (the footer's
-					// `suppressed: N`), plus what the stages above dropped now.
 					dispositionSuppressed +=
 						inScope(getSuppressedDiagnostics(s.filePath)) +
 						inScope(diagnostics) -
-						inScope(policyKept);
+						inScope(kept);
 				}
 				if (
 					policyKept.length === kept.length &&
@@ -3377,7 +3423,10 @@ async function formatAllMode(
 	});
 
 	const pathsNote = isFullMode ? "" : pathsScopeCacheOnlyNote(pathsScope);
-	const suppressedLine = dispositionSuppressedLine(dispositionSuppressed);
+	const suppressedLine = dispositionSuppressedLine(
+		dispositionSuppressed,
+		suppressedBreakdown,
+	);
 	const suppressedNote = suppressedLine ? `\n${suppressedLine}` : "";
 	const suppressedDetails =
 		dispositionSuppressed > 0 ? { dispositionSuppressed } : {};

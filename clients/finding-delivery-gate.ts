@@ -68,15 +68,22 @@
  * of that line — and WEAK (no line hash) for defer/flagged/suppress, which
  * are intent-level judgments that must survive incidental nearby edits.
  * `formatFullMode` (tools/lens-diagnostics.ts) applies this on every
- * mode=full pass; the per-edit dispatch path applies the identical filter
- * before writing into widget-state. A mark made later is reconciled into the
- * store at mark time (`reconcileWidgetDisposition` tags the row rather than
- * deleting it), and `mode=all` re-applies the cached dispositions
- * (`applyCachedDispositions`) without a scan, so it stays cache-only and
- * instant. It counts both, the tagged rows (the footer's `suppressed: N`) and
- * what its own filter dropped, and states the count, so a file whose findings
- * were marked after a mode=full never reads "No issues" with no reason given
- * (#1634 criterion 4).
+ * mode=full pass and states how many findings it dropped. Every scan writer
+ * hands widget-state the POST-policy set: the per-edit dispatch path, and both
+ * mode=full writes (#4459 review F2: its first write used to hand over the raw
+ * sweep, so a re-reported marked finding replaced its tagged row under #3158
+ * retention rule 2 and the mark's count vanished on the next mode=full). A
+ * mark made later is reconciled into the store at mark time
+ * (`reconcileWidgetDisposition` tags the row rather than deleting it), and
+ * the tagged row survives later scans that no longer report the finding.
+ * `mode=all` re-applies the cached dispositions (`applyCachedDispositions`)
+ * without a scan, so it stays cache-only and instant. It counts both, the
+ * tagged rows (the footer's `suppressed: N`) and what its own filter dropped,
+ * and states the count, so a file whose findings were marked after a
+ * mode=full reads "No issues" only with that count beside it (#1634
+ * criterion 4). A mark made while the store held no row for the finding
+ * leaves no tagged row: mode=full states that drop, and mode=all, which lists
+ * the same rows, states none.
  *
  * ── Demotion rendering (#1419) ─────────────────────────────────────────────
  * A demoted finding is never silently dropped and never re-asserted at full
@@ -172,15 +179,18 @@
  *     Pinned by `tests/clients/demoted-blocker-render-retirement.test.ts` and
  *     `tests/clients/widget-dependency-drift-delivery-cap.test.ts`.
  *   - What a disposition dropped is also told to the agent, never only
- *     logged: "suppressed by disposition: N finding(s)" on the turn-end tiers
- *     (`dispositionSuppressedTotal`), on the `lsp_diagnostics` probe,
- *     `lsp_navigation`, `lens_diagnostics mode=all` and `pilens_project_scan`
- *     (`dispositionSuppressedLine` below is the one wording). Pinned by
+ *     logged: "suppressed by disposition: N finding(s)". The tool results
+ *     that filter at delivery word it through `dispositionSuppressedLine`
+ *     below: the `lsp_diagnostics` probe, `lsp_navigation`,
+ *     `lens_diagnostics` mode=full and mode=all, and `pilens_project_scan`.
+ *     The turn-end tiers (`dispositionSuppressedTotal`), the cascade runs
+ *     (`clients/cascade-format.ts`, `clients/dispatch/integration.ts`) and the
+ *     actionable-warnings advisory keep their own inline forms;
+ *     `clients/git-guard.ts` parses the runtime-turn one. Pinned by
  *     `tests/index-3246-turn-end-delivery.test.ts`,
  *     `tests/tools/lsp-navigation.test.ts`,
  *     `tests/tools/lens-diagnostics-mode-all-full-agreement.test.ts` and
- *     `tests/mcp/server.smoke.test.ts`. `mode=full` drops marked findings
- *     without a count today.
+ *     `tests/mcp/server.smoke.test.ts`.
  */
 
 const MS_PER_MINUTE = 60_000;
@@ -224,19 +234,24 @@ export function formatCacheAgeLabel(
 }
 
 /**
- * #3088/#1634: the one rendering of a finding-policy drop, for every surface
- * that filters findings at delivery (the `lsp_diagnostics` probe's single-file,
- * batch and directory renders, `lsp_navigation workspaceDiagnostics`,
- * `pilens_project_scan`), so none words the same fact differently. Returns
+ * #3088/#1634: the rendering of a finding-policy drop shared by the tool
+ * results that filter findings at delivery (the `lsp_diagnostics` probe's
+ * single-file, batch and directory renders, `lsp_navigation
+ * workspaceDiagnostics`, `lens_diagnostics` mode=full and mode=all,
+ * `pilens_project_scan`), so none of them words the same fact differently.
+ * The turn-end and cascade forms are listed in the module doc above. Returns
  * `undefined` when nothing was dropped: the #1616 rule asks for a count when
  * there IS one, not a "0 suppressed" line on every clean result.
  */
 export function dispositionSuppressedLine(
 	suppressed: number,
+	/** Per-lane attribution, e.g. "analyzer lanes: knip 2" (mode=full, #1625). */
+	breakdown?: string,
 ): string | undefined {
 	if (suppressed <= 0) return undefined;
+	const lanes = breakdown ? ` (${breakdown})` : "";
 	return (
-		`suppressed by disposition: ${suppressed} finding(s) dropped from this ` +
+		`suppressed by disposition: ${suppressed} finding(s)${lanes} dropped from this ` +
 		"result because they're marked false-positive/won't-fix, disabled by " +
 		"`.pi-lens.json` rule policy, or suppressed by an inline `pi-lens-ignore` " +
 		"comment. Not a clean verdict for those locations — they were found, " +
