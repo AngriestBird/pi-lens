@@ -461,6 +461,29 @@ describe("cache entries past a creation: the dependency scope (#4346)", () => {
 		30_000,
 	);
 
+	// #4438: the cases above name the created module in the call. When only
+	// the importer is named, the producer's import query had to capture the
+	// dynamic `import()` itself: it captured statements only, so a target a
+	// shell created was never announced, no creation record existed, and the
+	// finding was served past the module's creation.
+	it("announces a dynamic-import target created outside pi-lens and refuses the finding", async () => {
+		const user = path.join(workspace, "dyno_user.ts");
+		fs.writeFileSync(
+			user,
+			'import "./dyno_never";\nexport const f = () => import("./dyno_mod");\n',
+		);
+		const scannedAt = await cached(user);
+
+		const created = path.join(workspace, "dyno_mod.ts");
+		fs.writeFileSync(created, "export const T = 1;\n");
+		await diagnose({ paths: [user] });
+
+		expect(watchedLines()).toContain(
+			`watched ${pathToFileURL(created).href} 1`,
+		);
+		expect(await scannedAtOf(user)).toBeGreaterThan(scannedAt ?? Infinity);
+	}, 30_000);
+
 	// Row 11. Recurrence: #4368 r1 probe, a TypeScript ambient declaration
 	// answers a name in a file that never imports it, so no edge exists, and a
 	// clean entry was never refused on a creation: a new global that collides

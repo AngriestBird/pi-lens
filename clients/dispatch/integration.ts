@@ -79,6 +79,13 @@ import {
 	touchCoverageGap,
 } from "../lsp/diagnostic-binding.js";
 import { getServersForFileWithConfig } from "../lsp/config.js";
+import {
+	classifyJsTsGlobalScope,
+	goPackageFiles,
+	goPackagePeersOf,
+	implicitScopeOf,
+	isGoSourceFile,
+} from "../lsp/implicit-scope.js";
 import { getLSPService } from "../lsp/capabilities.js";
 import { isExternalOrVendorFile, normalizeMapKey } from "../path-utils.js";
 import { getProjectIgnoreMatcher } from "../file-utils.js";
@@ -102,6 +109,7 @@ import {
 	buildReverseDependencyIndexFromGraph,
 	getAffectedFilesFromIndex,
 	patchReverseDependencyIndex,
+	rankFilesByReverseDependencyCentrality,
 	writeReverseDependencyIndexToSnapshot,
 	type ReverseDependencyIndex,
 } from "../reverse-deps.js";
@@ -997,6 +1005,67 @@ async function updateWordIndexForCascade(args: {
 	onUpdated?.(wordIndex);
 }
 
+/**
+ * #4438: the most an ambient file's change adds to the cascade. Such a file
+ * reaches every JS/TS file of the project, so the expansion takes the most
+ * central ones by reverse-dependency rank and discloses the cut.
+ */
+const IMPLICIT_SCOPE_NEIGHBOR_CAP = MAX_FILES * 2;
+
+/**
+ * #4438: the files whose implicit scope holds `changedFile` (absolute), as
+ * `normalizeMapKey` spellings: a Go file's package peers that
+ * `goPackagePeersOf` admits in both directions (same package clause, both in
+ * the host build, a test file evidence only for test peers), and for
+ * a file whose global-scope role reads `"feeds"`, the JS/TS files of the
+ * reverse-dependency index, most central first, at most
+ * {@link IMPLICIT_SCOPE_NEIGHBOR_CAP}. `cut` is set when the cap left some out.
+ * Membership is {@link implicitScopeOf}, asked of each candidate. #4438 r2: a
+ * role that cannot be read (`"unknown"`) expands nothing; the cache's
+ * fail-closed answer is not this caller's.
+ */
+function implicitScopeDependentsOf(
+	changedFile: string,
+	index: ReverseDependencyIndex,
+): { files: string[]; cut?: { checked: number; total: number } } {
+	const changed = normalizeMapKey(changedFile);
+	if (isGoSourceFile(changed)) {
+		// #4438 r3: a dependent is a peer in the host build (`peerOf`) for
+		// which the changed file is evidence; the second test differs from the
+		// first for a test or build-excluded changed file.
+		const peerOf = goPackagePeersOf(changed);
+		return {
+			files: peerOf
+				? (goPackageFiles(nodePath.dirname(changedFile)) ?? [])
+						.map((file) => normalizeMapKey(file))
+						.filter(
+							(peer) =>
+								peerOf(peer) && goPackagePeersOf(peer)?.(changed) === true,
+						)
+				: [],
+		};
+	}
+	let changedFeeds: boolean | undefined;
+	const feeds = (): boolean =>
+		(changedFeeds ??= classifyJsTsGlobalScope(changedFile) === "feeds");
+	const reaches = (candidate: string) =>
+		implicitScopeOf(candidate, feeds)?.(changed) === true;
+	// A cost bound, not a filter: when the changed file feeds no global scope,
+	// `reaches` answers false for every candidate, so this skips ranking the
+	// whole index on every module write.
+	if (!feeds()) return { files: [] };
+	const reached = rankFilesByReverseDependencyCentrality(index).filter(reaches);
+	return reached.length > IMPLICIT_SCOPE_NEIGHBOR_CAP
+		? {
+				files: reached.slice(0, IMPLICIT_SCOPE_NEIGHBOR_CAP),
+				cut: {
+					checked: IMPLICIT_SCOPE_NEIGHBOR_CAP,
+					total: reached.length,
+				},
+			}
+		: { files: reached };
+}
+
 export async function computeCascadeForFile(
 	filePath: string,
 	cwd: string,
@@ -1167,6 +1236,9 @@ export async function computeCascadeForFile(
 		// would overstate what a larger budget could actually recover.
 		let cascadeBudgetTruncated = 0;
 		let transitiveTruncated = false;
+		// #4438: the implicit-scope expansion's cut, when an ambient file reached
+		// more JS/TS files than IMPLICIT_SCOPE_NEIGHBOR_CAP.
+		let implicitScopeCut: { checked: number; total: number } | undefined;
 		// #1462: the budget actually in force for THIS run and the settle time left
 		// when it was sized. Both are overwritten inside the graph branch below,
 		// which is the only path that reaches `cascade_result` — the other branch
@@ -1435,6 +1507,29 @@ export async function computeCascadeForFile(
 				});
 			}
 
+			// #4438: dependents no import names, through the one implicit-scope
+			// test (`lsp/implicit-scope.ts`) the diagnostics cache and the
+			// inline-blocker sweep read: a Go file's package peers, and the JS/TS
+			// files whose scope a changed ambient file feeds.
+			const implicitDependents = implicitScopeDependentsOf(
+				normalizedFile,
+				reverseDepsIndex,
+			);
+			implicitScopeCut = implicitDependents.cut;
+			if (implicitDependents.files.length > 0) {
+				impact.neighborFiles = [
+					...new Set([...impact.neighborFiles, ...implicitDependents.files]),
+				];
+				logCascade({
+					phase: "neighbor_snapshot",
+					filePath,
+					neighborFile: "[implicit-scope]",
+					diagnosticCount: implicitDependents.files.length,
+					autoPropagate: false,
+					metadata: { implicitScope: true, ...implicitDependents.cut },
+				});
+			}
+
 			// Symbol-level blast radius via LSP references (precision upgrade over
 			// file-level import edges). Only when changed symbols are detected.
 			// Keep the budget tight: 750ms per symbol, 1200ms total, max 3 symbols.
@@ -1633,7 +1728,11 @@ export async function computeCascadeForFile(
 				eligibleNeighbors.length - cascadeNeighbourBudget,
 			);
 			sortedNeighbors = eligibleNeighbors.slice(0, cascadeNeighbourBudget);
-			if (cascadeBudgetTruncated > 0 || transitiveTruncated) {
+			if (
+				cascadeBudgetTruncated > 0 ||
+				transitiveTruncated ||
+				implicitScopeCut
+			) {
 				const budget = {
 					candidateCount: cascadeCandidateCount,
 					eligibleCount: cascadeEligibleCount,
@@ -1651,6 +1750,11 @@ export async function computeCascadeForFile(
 					...(transitiveTruncated
 						? [
 								"transitive expansion was capped before all eligible dependents were enumerated",
+							]
+						: []),
+					...(implicitScopeCut
+						? [
+								`implicit-scope expansion checked ${implicitScopeCut.checked} of ${implicitScopeCut.total} JS/TS files`,
 							]
 						: []),
 				];

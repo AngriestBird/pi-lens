@@ -556,7 +556,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/finding-policy.ts": 3,
 		"clients/dispatch/indent-detect.ts": 4,
 		"clients/dispatch/inline-suppressions.ts": 2,
-		"clients/dispatch/integration.ts": 18,
+		// 18 -> 20 (#4438): the cascade's implicit-scope dependents keep the Go
+		// peers and the ranked JS/TS files a change reaches, two
+		// `Array.prototype.filter` calls, not a delivery filter.
+		"clients/dispatch/integration.ts": 20,
 		"clients/dispatch/rule-policy.ts": 1,
 		"clients/dispatch/rules/high-fan-out.ts": 1,
 		"clients/dispatch/rules/missing-error-propagation.ts": 3,
@@ -980,7 +983,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/index.ts": 15,
 		// #4346: Go package directories and TS/JS extensions of the implicit
 		// dependency scope (same-package files, ambient declarations).
-		"clients/lsp/implicit-scope.ts": 7,
+		// 7 -> 8 (#4438 r2): a Go file name's `_GOOS`/`_GOARCH` suffix, read
+		// with `path.basename`, a filesystem path.
+		"clients/lsp/implicit-scope.ts": 8,
 		"clients/lsp/inferred-project.ts": 3,
 		"clients/lsp/jvm-runtime.ts": 19,
 		"clients/lsp/language.ts": 3,

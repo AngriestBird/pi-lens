@@ -21,10 +21,9 @@ import {
 } from "../review-graph/import-resolvers.js";
 import {
 	feedsJsTsGlobalScope,
-	goPackageFiles,
-	inOneGoPackage,
+	goPackageChangedAt,
+	implicitScopeOf,
 	isGoSourceFile,
-	seesJsTsGlobalScope,
 } from "./implicit-scope.js";
 import type { LSPDiagnostic } from "./client.js";
 import {
@@ -787,7 +786,7 @@ export function createWorkspaceDiagnosticsCacheContext(
 		}
 		return found;
 	};
-	const goPackageChangedAt = new Map<string, number | undefined>();
+	const goPackageChangedAtByDir = new Map<string, number | undefined>();
 
 	/**
 	 * #4346: the latest Created sent for a file in `entry`'s dependency scope,
@@ -819,10 +818,8 @@ export function createWorkspaceDiagnosticsCacheContext(
 		const scope = importScopes.get(key);
 		// Asked once per entry, not once per creation record: a sweep looks up
 		// thousands of entries past up to MAX_FILE_CREATIONS records (#4370).
-		const seesGlobals = seesJsTsGlobalScope(filePath);
-		const goPackage = isGoSourceFile(key);
-		const unknown =
-			findings && (!(seesGlobals || goPackage) || scope?.complete !== true);
+		const implicit = implicitScopeOf(key, feedsGlobalScopeOf);
+		const unknown = findings && (!implicit || scope?.complete !== true);
 		const names = scope?.unresolvedNames;
 		let indexed: ReadonlySet<string> | undefined;
 		const inScope = (created: string): boolean => {
@@ -832,8 +829,7 @@ export function createWorkspaceDiagnosticsCacheContext(
 			if (names?.size && answerNamesOf(created).some((n) => names.has(n))) {
 				return true;
 			}
-			if (goPackage && inOneGoPackage(key, created)) return true;
-			return seesGlobals && feedsGlobalScopeOf(created);
+			return implicit?.(created) === true;
 		};
 		// Roots are per client, so few; `isUnderDir` canonicalizes both sides.
 		const holds = new Map<string, boolean>();
@@ -865,21 +861,12 @@ export function createWorkspaceDiagnosticsCacheContext(
 	const goPackageChangedSince = (key: string, scannedAt: number): boolean => {
 		if (!isGoSourceFile(key)) return false;
 		const dir = path.posix.dirname(key);
-		if (!goPackageChangedAt.has(dir)) {
-			let changedAt: number | undefined;
-			try {
-				changedAt = fs.statSync(dir).mtimeMs;
-				for (const peer of goPackageFiles(dir) ?? []) {
-					changedAt = Math.max(changedAt, fs.statSync(peer).mtimeMs);
-				}
-			} catch {
-				changedAt = undefined;
-			}
-			goPackageChangedAt.set(dir, changedAt);
+		if (!goPackageChangedAtByDir.has(dir)) {
+			goPackageChangedAtByDir.set(dir, goPackageChangedAt(dir));
 		}
 		return (
 			freshnessFromMtime({
-				mtimeMs: goPackageChangedAt.get(dir),
+				mtimeMs: goPackageChangedAtByDir.get(dir),
 				referenceMs: scannedAt,
 			}).verdict !== "fresh"
 		);
