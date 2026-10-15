@@ -86,13 +86,14 @@ function literalValue(node: SgNode): string | undefined {
  * - the source of a static `import { … }` that resolves to the module from
  *   the runners directory (any relative spelling or extension). Each
  *   specifier is then classified against the module's own exports, read from
- *   its AST: a `type`-marked specifier or an imported interface or type alias
- *   is a TYPE (with or without the keyword: a type cannot classify an
- *   outcome); an imported function, class, variable or enum is a VALUE.
+ *   its AST: an imported interface or type alias is a TYPE (a type cannot
+ *   classify an outcome); an imported function, class, variable or enum is
+ *   a VALUE.
  * - the runner USES the primitive only when it references a value it
  *   imported this way somewhere outside the import and outside a type
  *   position (`typeof x` in a type) (#4429 review F4: an import specifier
- *   and a type query are not use sites).
+ *   and a type query are not use sites). A `type`-marked specifier needs no
+ *   rule of its own: TypeScript admits it only in type positions.
  *
  * Every other needle hit (a namespace or default import, a bare side-effect
  * import, `export … from`, a dynamic `import()` or `require`, a specifier
@@ -135,7 +136,6 @@ export function primitiveUse(
 			continue;
 		}
 		for (const specifier of imported.specifiers) {
-			if (specifier.typeMarked) continue;
 			const kind = primitiveExports(imported.module).get(specifier.name);
 			if (kind === "value") valueLocals.add(specifier.local);
 			else if (kind === undefined) report(literal);
@@ -165,7 +165,7 @@ function importedSpecifiers(
 ):
 	| {
 			module: string;
-			specifiers: { name: string; local: string; typeMarked: boolean }[];
+			specifiers: { name: string; local: string }[];
 	  }
 	| undefined {
 	const statement = literal.parent();
@@ -176,9 +176,6 @@ function importedSpecifiers(
 		.replace(/\.[cm]?[jt]s$/, "")
 		.replace(/^runners\//, "");
 	if (!PRIMITIVE_MODULES.has(module)) return undefined;
-	const statementTyped = statement
-		.children()
-		.some((child) => child.kind() === "type");
 	const clause = statement.children().find((c) => c.kind() === "import_clause");
 	const parts = clause?.namedChildren() ?? [];
 	if (parts.length !== 1 || parts[0].kind() !== "named_imports")
@@ -193,9 +190,6 @@ function importedSpecifiers(
 				return {
 					name,
 					local: specifier.field("alias")?.text() ?? name,
-					typeMarked:
-						statementTyped ||
-						specifier.children().some((c) => c.kind() === "type"),
 				};
 			}),
 	};
