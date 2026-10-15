@@ -15,8 +15,8 @@ const cli = "scripts/mutate.mjs";
 const target = "tests/scripts/mutate-fixture.test.ts";
 const find = "true";
 const replace = "Boolean(1)";
-const digest = () =>
-	createHash("sha256").update(readFileSync(target)).digest("hex");
+const digest = (file: string = target) =>
+	createHash("sha256").update(readFileSync(file)).digest("hex");
 
 function invoke(testFile: string, ...extra: string[]) {
 	return execFileAsync(
@@ -112,6 +112,46 @@ it("restores the source after a failing test run and reports RED with a title", 
 		),
 	});
 	expect(digest()).toBe(before);
+});
+
+// Recurrence (#4490 L1): a failed test title is free text, and the mutation-
+// table row is pasted into PR_BODY.md. A pipe in the title must not add a
+// table cell, so the escaped row keeps its five unescaped pipes.
+it("keeps a failed title's pipe inside its mutation-table cell (#4490 L1)", async () => {
+	const pipeTarget = "tests/scripts/mutate-pipe-title.test.ts";
+	const before = createHash("sha256")
+		.update(readFileSync(pipeTarget))
+		.digest("hex");
+	const error = await execFileAsync(
+		process.execPath,
+		[
+			cli,
+			"--file",
+			pipeTarget,
+			"--find",
+			"const mutatePipeMarker = true;",
+			"--replace",
+			"const mutatePipeMarker = false;",
+			"--tests",
+			pipeTarget,
+		],
+		{ cwd: root },
+	).then(
+		() => null,
+		(thrown: { stdout: string }) => thrown,
+	);
+	const row = error?.stdout
+		.split("\n")
+		.find((line) => line.startsWith("mutation-table:"));
+	expect(row).toContain("pipe \\| in a title");
+	const cells = row?.slice("mutation-table: ".length) ?? "";
+	let unescaped = 0;
+	for (let i = 0; i < cells.length; i++) {
+		if (cells[i] === "\\") i++;
+		else if (cells[i] === "|") unescaped++;
+	}
+	expect(unescaped).toBe(5);
+	expect(digest(pipeTarget)).toBe(before);
 });
 
 // The failed-title row is pasted into PR bodies; under CI's colour the titles
