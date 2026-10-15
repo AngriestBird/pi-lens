@@ -409,6 +409,10 @@ file-scoped worklist and receives no project-wide scanner output.
     extension, server, or file format, read its source or schema at a pinned
     SHA and pin a test vector generated from it, citing the SHA; a double
     built from an issue's description encodes the same guess (#2432).
+    Enforced by `tests/clients/dispatch/smoke-fixture-coverage.test.ts`
+    (partial: every registered dispatch runner needs captured real-binary bytes
+    replayed by `tests/clients/dispatch/runners/captured-real-output.test.ts`,
+    or an exemption naming a fact about the tool; presence only, not fidelity).
 
 40. **Tool root drift:** all runner, formatter, and LSP child spawns use
     `resolveToolCwd`; mutation of the seam, log, or fallback must turn a test red.
@@ -1235,6 +1239,10 @@ other test job always run, because a docs edit can red tests outside tests/confi
 model-checks only when `formal/` (or its checker or ci.yml) changed. A REQUIRED
 job never skips at job level: ci-verdict and the merge train demand a literal
 `success`, so `TLA+ models` starts and skips its steps.
+The same script's `smoke` output (`PR_SMOKE_PATHS`: RPC, install, LSP launch,
+trust) makes `install-smoke.yml` run all four pi-load cells and an advisory LSP
+handshake job on a pull request; any other PR that reaches that workflow keeps
+the one pnpm-global cell (`tests/config/pr-smoke-paths.test.ts`).
 The Unit shards are packed by the per-file seconds in
 `scripts/test-shard-weights.json`; regenerate it from the shards' uploaded
 `vitest-results.json` when `tests/config/test-shard-assignment.test.ts` reds.

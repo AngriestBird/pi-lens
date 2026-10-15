@@ -1463,6 +1463,11 @@ describe("isAdvisoryCheck — every job name from a PR-triggered workflow is cla
 		// ci-verdict read them as advisory instead of a gating pass.
 		"mise repro (#285) · ubuntu-latest · ${{ matrix.pi_via }} (advisory)",
 		"mise repro (#285) · macos-latest · ${{ matrix.pi_via }} (advisory)",
+		// #4291: install-smoke's deep-smoke classifier (continue-on-error, fails
+		// open to the full matrix) and the PR-time LSP handshake (its check row can
+		// read failure while the workflow run stays green).
+		"Deep smoke scope (advisory)",
+		"LSP handshake (advisory)",
 		...EXTERNAL_ADVISORY_NAMES,
 	]);
 

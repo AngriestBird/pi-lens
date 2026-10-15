@@ -1,0 +1,19 @@
+{
+	"provenance": {
+		"runner": "elixir-check",
+		"tool": "mix",
+		"version": "1.20.4",
+		"command": "mix compile --warnings-as-errors",
+		"argv": [
+			"compile",
+			"--warnings-as-errors"
+		],
+		"workspace": "tests/fixtures/tool-smoke/elixir-mix",
+		"platform": "linux-x64",
+		"capturedAt": "2026-10-14"
+	},
+	"file": "lib/bad.ex",
+	"exitCode": 1,
+	"stdout": "Compiling 1 file (.ex)\n",
+	"stderr": "    error: undefined function undefined_function/0 (expected Smoke to define such a function or for it to be imported, but none are available)\n    │\n  4 │     undefined_function()\n    │     ^^^^^^^^^^^^^^^^^^\n    │\n    └─ lib/bad.ex:4:5: Smoke.greet/0\n\n\n== Compilation error in file lib/bad.ex ==\n** (CompileError) lib/bad.ex: cannot compile module Smoke (errors have been logged)\n\n"
+}
