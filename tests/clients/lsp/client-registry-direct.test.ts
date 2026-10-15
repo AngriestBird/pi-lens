@@ -22,6 +22,7 @@ import {
 	resetDegradationLedger,
 } from "../../../clients/degradation-ledger.js";
 import type { LSPClientInfo } from "../../../clients/lsp/client.js";
+import { initLSPConfig } from "../../../clients/lsp/config.js";
 import {
 	ClientRegistry,
 	type ClientGenerationHooks,
@@ -41,6 +42,14 @@ import {
 	resetSessionRootsForTests,
 } from "../../../clients/lsp/session-roots.js";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
+import {
+	_clearSuccessfulLspSpawnHistoryForTests,
+	getSuccessfulLspSpawnDurationMs,
+} from "../../../clients/lsp/spawn-history.js";
+import {
+	clearWidgetState,
+	getFailedLspServerIds,
+} from "../../../clients/widget-state.js";
 import { removeTempDirSync } from "../test-utils.js";
 
 process.env.PI_LENS_TEST_MODE = "1";
@@ -157,6 +166,8 @@ beforeEach(() => {
 	resetDirectLspCommandAvailability();
 	createLSPClient.mockReset();
 	logLatency.mockClear();
+	clearWidgetState();
+	_clearSuccessfulLspSpawnHistoryForTests();
 });
 
 afterEach(() => {
@@ -997,11 +1008,12 @@ const latencyRecords = (phase: string) =>
 		.map(([entry]) => entry as Record<string, unknown>)
 		.filter((entry) => entry.phase === phase);
 
-function ensureFixture(id = "ts") {
+/** `sessionCwd` may name the registry's session root as a function of the fixture root. */
+function ensureFixture(id = "ts", sessionCwd?: (root: string) => string) {
 	const root = tempProject(`ensure-${id}`);
 	const file = path.join(root, "a.fake");
 	const { hooks, calls } = makeHooks();
-	const registry = new ClientRegistry(hooks);
+	const registry = new ClientRegistry(hooks, undefined, sessionCwd?.(root));
 	const spawn = vi.fn(async (_root: string, _options?: unknown) => ({
 		process: {
 			process: { killed: false, kill: vi.fn() },
@@ -1056,7 +1068,17 @@ const priv = (registry: ClientRegistry) =>
 		runtimeExitCounts: Map<string, number>;
 		runtimeExitWindow: Map<string, number[]>;
 		failureCounts: Map<string, number>;
+		lastSpawnVerdict: Map<string, "failed" | "declined">;
 		generationHandoff: Promise<void> | undefined;
+		inFlight: Map<string, Promise<unknown>>;
+		permanentlyBroken: Set<string>;
+		workspaceProbeLogged: Set<string>;
+		warmStartLogged: Set<string>;
+		recordRuntimeExitWindow(
+			key: string,
+			exitedAt: number | undefined,
+			uptimeMs: number | null,
+		): boolean;
 		withClientSpawnGate<T>(operation: () => Promise<T>): Promise<T>;
 	};
 
@@ -1902,6 +1924,141 @@ describe("ClientRegistry.spawnClient success and shutdown guards (#4449)", () =>
 		]);
 	});
 
+	// Recurrence (#4299, #3502): what the registry hands the server's spawn() is a
+	// policy decision, not plumbing. A file the session root owns may run project
+	// code; the session root is the registry's own cwd, else the process cwd. A
+	// mutant that withheld project code everywhere, or dropped the session root,
+	// still spawned a server and passed every other test.
+	it("hands spawn() project-code permission and the session root", async () => {
+		const bare = ensureFixture("ts");
+		await bare.ensure();
+		expect(bare.spawn).toHaveBeenCalledWith(bare.root, {
+			allowInstall: true,
+			projectCodeAllowed: true,
+			sessionRoot: process.cwd(),
+		});
+
+		const owned = ensureFixture("go", (root) => root);
+		await owned.ensure();
+		expect(owned.spawn).toHaveBeenCalledWith(owned.root, {
+			allowInstall: true,
+			projectCodeAllowed: true,
+			sessionRoot: owned.root,
+		});
+	});
+
+	// Recurrence (#1934 review F1, #2064): a success is the last word on the
+	// attempts before it. The previous failed verdict is dropped so the map never
+	// outlives what it describes, the spawn duration enters the process-lifetime
+	// history the LSP readiness budget reads, and the widget's server record turns
+	// from "spawning" to "ready" rather than staying failed. Each step survived
+	// its removal.
+	it("retires the failed verdict, records the spawn duration and marks the widget record ready", async () => {
+		const f = ensureFixture();
+		f.spawn.mockResolvedValueOnce(undefined as never);
+		await expect(f.ensure()).resolves.toBeUndefined();
+		expect(priv(f.registry).lastSpawnVerdict.get(f.key)).toBe("failed");
+		expect(getFailedLspServerIds()).toEqual(["ts"]);
+
+		vi.setSystemTime(T0 + 60 * MIN);
+		f.spawn.mockImplementationOnce(async () => {
+			vi.setSystemTime(T0 + 60 * MIN + 120);
+			return {
+				process: {
+					process: { killed: false, kill: vi.fn() },
+					stdin: {},
+					stdout: {},
+					stderr: {},
+					pid: 4243,
+				},
+			};
+		});
+		await expect(f.ensure()).resolves.toBeDefined();
+
+		expect(priv(f.registry).lastSpawnVerdict.has(f.key)).toBe(false);
+		expect(getSuccessfulLspSpawnDurationMs("ts")).toBe(120);
+		expect(getFailedLspServerIds()).toEqual([]);
+	});
+
+	// Recurrence (#1937 widget audit): the widget shows "LSP↑" only for a server in
+	// spawning state. A start record whose status string was wrong landed the
+	// server in the failed list while it was still starting, so /lens-health
+	// reported a healthy cold start as a failed server.
+	it("keeps a spawning server out of the failed list until the spawn settles", async () => {
+		const f = ensureFixture();
+		let release!: (value: never) => void;
+		f.spawn.mockImplementationOnce(
+			() => new Promise<never>((resolve) => (release = resolve)),
+		);
+		const pending = f.ensure();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(getFailedLspServerIds()).toEqual([]);
+		release(undefined as never);
+		await pending;
+		expect(getFailedLspServerIds()).toEqual(["ts"]);
+	});
+
+	// Recurrence (#4299): a launch variant decides who wins a config conflict. The
+	// default launch lets the user's `serverOverrides` override the server's own
+	// initializationOptions; the classic launch (the compiler owner's admitted
+	// path) must survive config merging, so the server's options win there. No
+	// override at all must not throw. Both orders, and the absent override, had
+	// surviving mutants.
+	it("merges a configured init override under the launch variant's precedence", async () => {
+		setProjectTrustState("trusted");
+		const initFor = async (
+			variant: string | undefined,
+			withOverride: boolean,
+		) => {
+			const f = ensureFixture("ts");
+			if (withOverride) {
+				fs.mkdirSync(path.join(f.root, ".pi-lens"), { recursive: true });
+				fs.writeFileSync(
+					path.join(f.root, ".pi-lens/lsp.json"),
+					JSON.stringify({
+						serverOverrides: {
+							ts: {
+								initializationOptions: { shared: "override", fromOverride: 1 },
+							},
+						},
+					}),
+				);
+				await initLSPConfig(f.root);
+			}
+			f.spawn.mockImplementation(async () => ({
+				process: {
+					process: { killed: false, kill: vi.fn() },
+					stdin: {},
+					stdout: {},
+					stderr: {},
+					pid: 4244,
+				},
+				launchVariant: variant,
+				initialization: { shared: "server", fromServer: 1 },
+			}));
+			await f.ensure();
+			const handed = createLSPClient.mock.calls.at(-1)?.[0] as
+				| { initialization: unknown }
+				| undefined;
+			return handed?.initialization;
+		};
+		expect(await initFor("classic", true)).toEqual({
+			shared: "server",
+			fromServer: 1,
+			fromOverride: 1,
+		});
+		expect(await initFor(undefined, true)).toEqual({
+			shared: "override",
+			fromServer: 1,
+			fromOverride: 1,
+		});
+		resetSessionRootsForTests();
+		expect(await initFor("classic", false)).toEqual({
+			shared: "server",
+			fromServer: 1,
+		});
+	});
+
 	// Recurrence (#1127 review): a service shut down WHILE the process was spawning
 	// has no client yet; the raw process is killed, the key is NOT marked broken
 	// (this is not a server failure) and nothing is registered. If the shutdown
@@ -1940,5 +2097,340 @@ describe("ClientRegistry.spawnClient success and shutdown guards (#4449)", () =>
 		expect(midInit.registry.clients.size).toBe(0);
 		expect(midInit.registry.broken.has(midInit.key)).toBe(false);
 		expect(midInit.calls).toEqual(["rearmFirstContact:go"]);
+	});
+});
+
+describe("ClientRegistry status snapshots (#4449)", () => {
+	// Recurrence (#4449 campaign finding): a client key is `<serverId>:<root>` and
+	// the root can carry colons of its own (a Windows drive `c:/work/proj`, or a
+	// POSIX directory named `a:b`). `getStatus` split the key at EVERY colon and
+	// kept the second piece, so /lens-health and the engine status read the root
+	// as `c` or `/srv/a`. `getBrokenStatus` always cut at the first colon only.
+	// Both must read the same key the same way.
+	it("reads a key as the server id before the first colon and the whole root after it", () => {
+		const { hooks } = makeHooks();
+		const registry = new ClientRegistry(hooks);
+		const keys = [
+			["typescript", "c:/work/proj"],
+			["typescript", "/srv/a:b/proj"],
+		] as const;
+		for (const [id, root] of keys) {
+			registry.clients.set(`${id}:${root}`, fakeClient(id, root));
+			registry.broken.set(`${id}:${root}`, T0);
+		}
+
+		expect(
+			registry.getStatus().map(({ serverId, root }) => [serverId, root]),
+		).toEqual(keys.map(([id, root]) => [id, root]));
+		expect(
+			registry.getBrokenStatus().map(({ serverId, root }) => [serverId, root]),
+		).toEqual(keys.map(([id, root]) => [id, root]));
+	});
+});
+
+describe("ClientRegistry status snapshots, shapes (#4449)", () => {
+	// Recurrence (#1127): the `/lens-health` breaker line sums spawn failures with
+	// the LARGER of the two runtime-exit streams. `+` for `-`, or `min` for `max`,
+	// would show a permanent disable as fewer failures than its own counters hold.
+	it("reports the breaker state of a key, summing failures with the larger exit stream", () => {
+		const { hooks } = makeHooks();
+		const registry = new ClientRegistry(hooks);
+		const key = "ts:/work/a";
+		registry.broken.set(key, T0 + 5);
+		priv(registry).failureCounts.set(key, 2);
+		priv(registry).runtimeExitCounts.set(key, 1);
+		priv(registry).runtimeExitWindow.set(key, [T0, T0, T0]);
+		priv(registry).permanentlyBroken.add("go:/work/b");
+		priv(registry).failureCounts.set("go:/work/b", 5);
+		priv(registry).runtimeExitCounts.set("go:/work/b", 4);
+		registry.broken.set("bare", T0);
+
+		expect(registry.getBrokenStatus()).toEqual([
+			{
+				serverId: "ts",
+				root: "/work/a",
+				failures: 5,
+				permanentlyBroken: false,
+				cooldownUntil: T0 + 5,
+			},
+			{
+				serverId: "bare",
+				root: "",
+				failures: 0,
+				permanentlyBroken: false,
+				cooldownUntil: T0,
+			},
+			{
+				serverId: "go",
+				root: "/work/b",
+				failures: 9,
+				permanentlyBroken: true,
+				cooldownUntil: 0,
+			},
+		]);
+	});
+
+	// Recurrence (#1127): `getStatus` is the surface that feeds the health line, so
+	// an unbounded server message was a telemetry leak. Messages are cut to 200
+	// characters on a copy (the client keeps its own history), a client without a
+	// history reads as empty, and a dead client reads as disconnected.
+	it("reports liveness and copies the pull-failure history with messages cut to 200 characters", () => {
+		const { hooks } = makeHooks();
+		const registry = new ClientRegistry(hooks);
+		const longMessage = "x".repeat(300);
+		const history = [
+			{
+				timestamp: 7,
+				method: "textDocument/diagnostic" as const,
+				code: 1,
+				message: longMessage,
+			},
+		];
+		const alive = Object.assign(fakeClient("ts", "/work/a"), {
+			getPullFailureHistory: () => history,
+		});
+		const dead = fakeClient("go", "/work/b");
+		dead.kill();
+		registry.clients.set("ts:/work/a", alive);
+		registry.clients.set("go:/work/b", dead);
+
+		expect(registry.getStatus()).toEqual([
+			{
+				serverId: "ts",
+				root: "/work/a",
+				connected: true,
+				pullFailureHistory: [
+					{
+						timestamp: 7,
+						method: "textDocument/diagnostic",
+						code: 1,
+						message: "x".repeat(200),
+					},
+				],
+			},
+			{
+				serverId: "go",
+				root: "/work/b",
+				connected: false,
+				pullFailureHistory: [],
+			},
+		]);
+		expect(history[0].message).toHaveLength(300);
+	});
+
+	// Recurrence (#267): the alive count and the alive-id list feed the footer and
+	// the readiness widget. A dead client must not count, one server serving two
+	// roots collapses to one id, and cross-cutting scanners (opengrep) sort after
+	// the language servers whatever order they spawned in.
+	it("counts only live clients and lists server ids primary-first, deduped across roots", () => {
+		const { hooks } = makeHooks();
+		const registry = new ClientRegistry(hooks);
+		const add = (id: string, root: string, live = true) => {
+			const client = fakeClient(id, root);
+			if (!live) client.kill();
+			registry.clients.set(`${id}:${root}`, client);
+		};
+		add("opengrep", "/work/a");
+		add("typescript", "/work/a");
+		add("typescript", "/work/b");
+		add("go", "/work/a", false);
+		add("python", "/work/a");
+
+		expect(registry.getAliveClientCount()).toBe(4);
+		expect(registry.getAliveServerIds()).toEqual([
+			"typescript",
+			"python",
+			"opengrep",
+		]);
+	});
+});
+
+describe("ClientRegistry.recordRuntimeExitWindow (#4449)", () => {
+	// Recurrence (#1142): the windowed-rate breaker only counts deaths that carry
+	// a known, short lifetime. A sleep-gap (a lifetime past ten minutes) or a
+	// death with no recorded time is not churn; a lifetime of exactly ten minutes
+	// still is. The window is anchored on the newest death and keeps an entry
+	// exactly one window old; the retained array never holds more than the trip
+	// count (drop-oldest).
+	it("ignores unmeasured and long-lived deaths, keeps the window edge and caps the retained array", () => {
+		const { hooks } = makeHooks();
+		const registry = new ClientRegistry(hooks);
+		const record = (at: number | undefined, uptime: number | null) =>
+			priv(registry).recordRuntimeExitWindow("ts:/r", at, uptime);
+		const window = () => priv(registry).runtimeExitWindow.get("ts:/r");
+
+		expect(record(undefined, 1000)).toBe(false);
+		expect(record(T0, null)).toBe(false);
+		expect(record(T0, 10 * MIN + 1)).toBe(false);
+		expect(window()).toBeUndefined();
+
+		expect(record(T0, 10 * MIN)).toBe(false);
+		expect(window()).toEqual([T0]);
+		// Exactly 15 minutes older than the newest death: still inside the window.
+		expect(record(T0 + 15 * MIN, 1000)).toBe(false);
+		expect(window()).toEqual([T0, T0 + 15 * MIN]);
+		// One millisecond older than the window: dropped.
+		expect(record(T0 + 15 * MIN + 1, 1000)).toBe(false);
+		expect(window()).toEqual([T0 + 15 * MIN, T0 + 15 * MIN + 1]);
+
+		// Fill to the trip count: the fifth death trips, the sixth is capped.
+		expect(record(T0 + 15 * MIN + 2, 1000)).toBe(false);
+		expect(record(T0 + 15 * MIN + 3, 1000)).toBe(false);
+		expect(record(T0 + 15 * MIN + 4, 1000)).toBe(true);
+		expect(window()).toHaveLength(5);
+		expect(record(T0 + 15 * MIN + 5, 1000)).toBe(true);
+		expect(window()).toEqual([
+			T0 + 15 * MIN + 1,
+			T0 + 15 * MIN + 2,
+			T0 + 15 * MIN + 3,
+			T0 + 15 * MIN + 4,
+			T0 + 15 * MIN + 5,
+		]);
+	});
+});
+
+describe("ClientRegistry shutdown (#4449)", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.setSystemTime(T0);
+	});
+
+	// Recurrence (#1127 review, lsp_service_reset): a reset waits for spawns that
+	// are still in flight so the client they produce is shut down fast and not
+	// leaked, then hands every registered client the caller's options. Dropping
+	// the wait, the fast shutdown or the options leaked a language server past
+	// `lsp_service_reset`.
+	it("shuts down a client that finishes spawning during the reset, then hands every client the caller's options", async () => {
+		const f = ensureFixture();
+		let release!: (value: never) => void;
+		f.spawn.mockImplementationOnce(
+			() => new Promise<never>((resolve) => (release = resolve)),
+		);
+		const pending = f.ensure();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(f.registry.inFlight.size).toBe(1);
+
+		const reset = f.registry.shutdownClients({ fast: false });
+		release({
+			process: {
+				process: { killed: false, kill: vi.fn() },
+				stdin: {},
+				stdout: {},
+				stderr: {},
+				pid: 7,
+			},
+		} as never);
+		await pending;
+		await reset;
+
+		expect(f.registry.inFlight.size).toBe(0);
+		expect(f.spawned[0].shutdown.mock.calls).toEqual([
+			[{ fast: true }],
+			[{ fast: false }],
+		]);
+	});
+
+	// Recurrence (#1127 review): an in-flight spawn that came back empty or threw
+	// has no client to shut down; the reset must neither throw nor stall on it.
+	it("tolerates an in-flight spawn that returned nothing or failed", async () => {
+		for (const outcome of ["empty", "throws"] as const) {
+			const f = ensureFixture();
+			let settle!: () => void;
+			f.spawn.mockImplementationOnce(
+				() =>
+					new Promise<never>((resolve, reject) => {
+						settle = () =>
+							outcome === "empty"
+								? resolve(undefined as never)
+								: reject(new Error("spawn exploded"));
+					}),
+			);
+			const pending = f.ensure().catch(() => undefined);
+			await vi.advanceTimersByTimeAsync(0);
+			const reset = f.registry.shutdownClients({});
+			settle();
+			await pending;
+			await expect(reset).resolves.toBe(0);
+			expect(f.registry.inFlight.size).toBe(0);
+			expect(f.spawned).toHaveLength(0);
+		}
+	});
+
+	// Recurrence (#1127 review, lsp_service_reset): the count the reset reports is
+	// what was alive BEFORE teardown, a snapshot that would always read zero
+	// after it. A client whose shutdown rejects must not stop the others, every
+	// idle-eviction timer is dropped, and the dead client is told to shut down
+	// too (its process tree can outlive the connection).
+	it("reports the pre-teardown alive count, survives a rejecting client and drops the idle timers", async () => {
+		process.env.PI_LENS_LSP_IDLE_EVICT_MS = "5000";
+		const f = ensureFixture("ts");
+		await f.ensure();
+		const other = ensureFixture("go");
+		const stay = fakeClient("go", other.root);
+		const dead = fakeClient("py", other.root);
+		dead.kill();
+		for (const [id, c] of [
+			["go", stay],
+			["py", dead],
+		] as const) {
+			f.registry.clients.set(`${id}:${other.root}`, c);
+		}
+		for (const c of [f.spawned[0], stay]) {
+			c.shutdown.mockImplementation(async () => {
+				c.kill();
+			});
+		}
+		dead.shutdown.mockRejectedValue(new Error("already gone"));
+		expect(internals(f.registry).idleEvictionTimers.size).toBe(1);
+
+		const aliveBefore = await f.registry.shutdownClients({ fast: true });
+
+		expect(aliveBefore).toBe(2);
+		expect(f.registry.getAliveClientCount()).toBe(0);
+		for (const c of [f.spawned[0], stay, dead]) {
+			expect(c.shutdown).toHaveBeenCalledWith({ fast: true });
+		}
+		expect(internals(f.registry).idleEvictionTimers.size).toBe(0);
+	});
+
+	// Recurrence (#1127 review): when the host process itself is exiting the event
+	// loop is closing and the reset must not block on a spawn that may never
+	// settle. The in-flight map is dropped, not awaited.
+	it("does not wait for an in-flight spawn when the process is exiting", async () => {
+		const f = ensureFixture();
+		let release!: (value: never) => void;
+		f.spawn.mockImplementationOnce(
+			() => new Promise<never>((resolve) => (release = resolve)),
+		);
+		const pending = f.ensure();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(f.registry.inFlight.size).toBe(1);
+
+		await expect(
+			f.registry.shutdownClients({ processExiting: true }),
+		).resolves.toBe(0);
+		expect(f.registry.inFlight.size).toBe(0);
+		release(undefined as never);
+		await pending;
+	});
+
+	// Recurrence (#1934 review F1): `clearAfterShutdown` is the second half of a
+	// reset. Every per-generation map is emptied; a map left behind held a verdict
+	// or a log latch for a client generation that no longer exists.
+	it("empties every per-generation map after a reset", () => {
+		const f = ensureFixture();
+		f.registry.clients.set(f.key, fakeClient("ts", f.root));
+		f.registry.broken.set(f.key, T0);
+		priv(f.registry).lastSpawnVerdict.set(f.key, "failed");
+		priv(f.registry).workspaceProbeLogged.add(f.key);
+		priv(f.registry).warmStartLogged.add(f.key);
+
+		f.registry.clearAfterShutdown();
+
+		expect(f.registry.clients.size).toBe(0);
+		expect(f.registry.broken.size).toBe(0);
+		expect(priv(f.registry).lastSpawnVerdict.size).toBe(0);
+		expect(priv(f.registry).workspaceProbeLogged.size).toBe(0);
+		expect(priv(f.registry).warmStartLogged.size).toBe(0);
 	});
 });
