@@ -111,6 +111,7 @@ migrate-*.js
 !docs/usage.md
 !docs/lsp-capability-matrix.md
 !docs/lsp-latency-benchmark.md
+!docs/performance/1740-cooperative-file-yields.md
 !docs/servercapabilities.md
 !docs/lsp-idle-eviction.md
 !docs/mcp.md
