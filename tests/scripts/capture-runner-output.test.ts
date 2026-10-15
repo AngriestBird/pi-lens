@@ -80,6 +80,15 @@ describe("expandWorkspaceArgs", () => {
 		).toEqual(["lint", "/tmp/pi-lens-capture-x"]);
 	});
 
+	// Recurrence: fish 3.3.1 spells an absolute argv path differently from a
+	// relative one, and only a capture spawned with the absolute path holds the
+	// bytes production receives (#4454).
+	it("expands the token inside an argument, as an absolute file path", () => {
+		expect(
+			expandWorkspaceArgs([`${WORKSPACE_TOKEN}/bad.fish`], "/tmp/w"),
+		).toEqual(["/tmp/w/bad.fish"]);
+	});
+
 	it("leaves every other argument alone", () => {
 		expect(expandWorkspaceArgs(["--check", "bad.fish"], "/tmp/w")).toEqual([
 			"--check",

@@ -184,6 +184,72 @@ const REPLAY_EXPECTATIONS: Record<string, ReplayExpectation> = {
 			},
 		],
 	},
+	// fish_indent --check never reports a syntax error, so the runner also asks
+	// `fish --no-execute`; its real bytes for the three defects (and the fish-lsp
+	// smoke fixture) must reach the agent as a blocking finding on the real file
+	// and line (#4454). Each file is already formatted: only fish -n sees it.
+	"fish-indent/syntax-missing-end": {
+		status: "failed",
+		semantic: "blocking",
+		findings: [
+			{
+				rule: "fish-syntax-error",
+				semantic: "blocking",
+				file: "missing-end.fish",
+				line: 1,
+			},
+		],
+	},
+	"fish-indent/syntax-unterminated-quote": {
+		status: "failed",
+		semantic: "blocking",
+		findings: [
+			{
+				rule: "fish-syntax-error",
+				semantic: "blocking",
+				file: "unterminated-quote.fish",
+				line: 1,
+			},
+		],
+	},
+	"fish-indent/syntax-stray-end": {
+		status: "failed",
+		semantic: "blocking",
+		findings: [
+			{
+				rule: "fish-syntax-error",
+				semantic: "blocking",
+				file: "stray-end.fish",
+				line: 2,
+			},
+		],
+	},
+	// fish 3.3.1 (Ubuntu 22.04) prints the header of an absolute argv path as `~`
+	// plus that path; the attribution dropped every syntax error there (#4454).
+	"fish-indent/syntax-stray-end-fish-3.3.1": {
+		status: "failed",
+		semantic: "blocking",
+		findings: [
+			{
+				rule: "fish-syntax-error",
+				semantic: "blocking",
+				file: "stray-end.fish",
+				line: 2,
+			},
+		],
+	},
+	"fish-indent/syntax-smoke-bad": {
+		status: "failed",
+		semantic: "blocking",
+		findings: [
+			{
+				rule: "fish-syntax-error",
+				semantic: "blocking",
+				file: "bad.fish",
+				line: 1,
+			},
+		],
+	},
 	"golangci-lint/real": {
 		status: "succeeded",
 		semantic: "warning",
@@ -387,7 +453,7 @@ describe("captured real-binary output", () => {
 					const recorded = (fixture.provenance.argv ?? [])
 						.filter((token) => !fileTokens.has(token))
 						.map((token) =>
-							token === WORKSPACE_TOKEN ? path.resolve(env.tmpDir) : token,
+							token.split(WORKSPACE_TOKEN).join(path.resolve(env.tmpDir)),
 						);
 					const spawnedArgvs = safeSpawnAsync.mock.calls.map(
 						(call) => (call[1] ?? []) as string[],

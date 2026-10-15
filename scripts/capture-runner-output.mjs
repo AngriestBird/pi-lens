@@ -118,7 +118,8 @@ export function redactWorkspace(text, workspace) {
 }
 
 /**
- * The argv to spawn: every `WORKSPACE_TOKEN` argument becomes the workspace.
+ * The argv to spawn: every `WORKSPACE_TOKEN` in an argument becomes the
+ * workspace, so `__WORKSPACE__/bad.fish` is that file's absolute path (#4454).
  *
  * A runner that hands its tool an ABSOLUTE path (helm lint `<chart root>`) can
  * only be captured by spawning with the workspace's absolute path, while the
@@ -126,7 +127,7 @@ export function redactWorkspace(text, workspace) {
  * in the recorded argv, and the replay maps it back to its own temp dir.
  */
 export function expandWorkspaceArgs(argv, workspace) {
-	return argv.map((arg) => (arg === WORKSPACE_TOKEN ? workspace : arg));
+	return argv.map((arg) => arg.split(WORKSPACE_TOKEN).join(workspace));
 }
 
 /**
