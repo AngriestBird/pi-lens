@@ -15,6 +15,7 @@ import {
 } from "../support/sweep-kit.js";
 import type { SgNode } from "../../clients/deps/ast-grep-napi.js";
 import {
+	isViMockCall,
 	mockSpecifier,
 	unwrapExpression,
 } from "../support/vi-mock-export-gate.js";
@@ -45,13 +46,21 @@ const ADMITTED_DATA: Record<string, string> = {
 		"the PR smoke path filter list names the source file as a repo path",
 	'tests/config/glossary-synonym-sweep.test.ts: "clients/project-trust.ts": 1,':
 		"a per-file glossary baseline count keyed by repo path",
+	'tests/config/project-trust-seam-ratchet.test.ts: module: "clients/project-trust.js",':
+		"this ratchet's own SEAM_MODULES row names the module it scans for",
+	'tests/config/project-trust-seam-ratchet.test.ts: "clients/project-trust.js": 1,':
+		"this ratchet's own BASELINE row, keyed by the module it scans for",
 };
 
 /**
- * This file: it names each seam module as data and passes it to its own
- * scanner in the planted cases, so the walk skips it.
+ * This file passes each seam module name to its own scanner in the planted
+ * cases, so its calls count like any other. It is scanned (#4457 verify G3:
+ * a skip hid a real `vi.doMock` here) and its count is pinned exactly, so an
+ * added site reds.
  */
 const SELF = path.relative(REPO_ROOT, __filename).split(path.sep).join("/");
+/** One per planted case that hands the module name to `scanViMockSites` or `countViMockSites`. */
+const SELF_SITES = 10;
 
 /**
  * Resolve a module specifier to its module identity: posix separators, any
@@ -272,7 +281,16 @@ function flowOf(node: SgNode): Flow {
  * by {@link provenNames}: an unknown callee counts, which is the fail-closed
  * direction. Every other position, and a template or `+` concatenation that
  * spells the module's base name around a computed part, is UNCLASSIFIED,
- * reported with its line, unless {@link ADMITTED_DATA} names it.
+ * reported with its line, unless {@link ADMITTED_DATA} names it. A direct
+ * `vi.mock`/`vi.doMock` whose specifier is not a literal (`path.join(…)`, a
+ * concatenation, a template with a substitution, `[…].join()`) is
+ * UNCLASSIFIED too (round 1's rule, #4457 verify G1): its value may be the
+ * module even where no string spells it.
+ *
+ * Residual (#4457 verify G2, not built): a mock written onto a root the scan
+ * proved, such as `api.mock = vi.doMock`, `Object.assign(fs, { m: vi.doMock })`,
+ * `Object.defineProperty(path, "m", …)` or an inert array's `push`, keeps the
+ * proof, so a later `fs.m(S)` does not count. None exists in the tree.
  */
 function scanViMockSites(
 	file: string,
@@ -330,6 +348,11 @@ function scanViMockSites(
 			result.count++;
 		}
 	}
+	for (const call of root.findAll({ rule: { kind: "call_expression" } })) {
+		if (!isViMockCall(call.field("function"), ["mock", "doMock"])) continue;
+		const first = call.field("arguments")?.namedChildren()[0];
+		if (mockSpecifier(first) === undefined) report(call);
+	}
 	return result;
 }
 
@@ -344,6 +367,7 @@ function seamBaseName(module: string): string {
 async function counts(): Promise<{
 	counts: Record<string, number>;
 	unclassified: string[];
+	selfSites: number;
 }> {
 	const files = listSourceFiles(TESTS_ROOT, {
 		extensions: [".ts"],
@@ -354,6 +378,7 @@ async function counts(): Promise<{
 		SEAM_MODULES.map(({ module }) => [module, 0]),
 	);
 	const unclassified = new Set<string>();
+	let selfSites = 0;
 	for (const { file, source } of readWalkedFiles(files)) {
 		// Parse only files that name a seam module: every mock spelling the
 		// liveness case pins carries the module's base name as text, so the
@@ -363,14 +388,14 @@ async function counts(): Promise<{
 		// outside this needle; the flake-shape ratchet's in-process-mock
 		// detector counts every unreadable specifier in tests/ (#4429).
 		const relative = path.relative(REPO_ROOT, file).split(path.sep).join("/");
-		if (relative === SELF) continue;
 		const named = SEAM_MODULES.filter(({ module }) =>
 			source.includes(seamBaseName(module)),
 		);
 		if (named.length === 0) continue;
 		for (const { module } of named) {
 			const scan = scanViMockSites(relative, source, module);
-			result[module] += scan.count;
+			if (relative === SELF) selfSites += scan.count;
+			else result[module] += scan.count;
 			for (const entry of scan.unclassified) unclassified.add(entry);
 		}
 		// Turn the loop between files so `@ast-grep/napi` can free each parsed
@@ -378,7 +403,7 @@ async function counts(): Promise<{
 		// `vi-mock-export-sweep` memory bound, #3565).
 		await new Promise<void>((resolve) => setImmediate(resolve));
 	}
-	return { counts: result, unclassified: [...unclassified] };
+	return { counts: result, unclassified: [...unclassified], selfSites };
 }
 
 describe("project-trust real seam ratchet (#4281)", () => {
@@ -390,6 +415,8 @@ describe("project-trust real seam ratchet (#4281)", () => {
 		// Recurrence: #4411 review F3, a population scanner that skipped
 		// spellings it did not recognise and passed (#4429).
 		expect(live.unclassified).toEqual([]);
+		// Recurrence: #4457 verify G3, a skip of this file hid a real doMock.
+		expect(live.selfSites).toBe(SELF_SITES);
 	});
 
 	// Liveness: a detector that silently counts zero would pass the shrink-only
@@ -514,6 +541,43 @@ describe("project-trust real seam ratchet (#4281)", () => {
 		},
 	);
 
+	it("counts a spread seam argument and reports its unreadable first argument (#4429)", () => {
+		// A spread is an argument wrapper (the string counts) and, as a direct
+		// vi.doMock's first argument, not a readable specifier (round 1's rule).
+		const source = 'vi.doMock(...["../clients/project-trust.js", () => ({})]);';
+		expect(
+			scanViMockSites("fake.test.ts", source, "clients/project-trust.js"),
+		).toEqual({
+			count: 1,
+			unclassified: [`unclassified spelling at fake.test.ts:1: ${source}`],
+		});
+	});
+
+	it.each([
+		[
+			"path.join",
+			'vi.doMock(path.join(__dirname, "../clients", "project-trust.js"));',
+		],
+		["a concatenation", 'vi.doMock("../clients/project-" + "trust.js");'],
+		["a template substitution", 'vi.mock(`../clients/project-${"trust"}.js`);'],
+		[
+			"an array join",
+			'vi.doMock(["..", "clients", "project-trust.js"].join("/"));',
+		],
+	])(
+		"reports a direct mock whose specifier is computed through %s (#4457 verify G1)",
+		(_name, source) => {
+			// Recurrence: #4457 verify G1, round 3 dropped round 1's rule and the
+			// path.join spelling replaced the seam at runtime with the ratchet green.
+			expect(
+				scanViMockSites("fake.test.ts", source, "clients/project-trust.js"),
+			).toEqual({
+				count: 0,
+				unclassified: [`unclassified spelling at fake.test.ts:1: ${source}`],
+			});
+		},
+	);
+
 	it("does not count a seam string under a callee proven non-vitest (#4429)", () => {
 		// The one exemption in the state table: a root bound once, by a vitest
 		// export other than vi, a node: builtin, or inert literal data.
@@ -524,6 +588,7 @@ describe("project-trust real seam ratchet (#4281)", () => {
 			"expect(value).toBe(S);",
 			"path.join(dir, S);",
 			"ids.includes(S);",
+			"ids[0].startsWith(S);",
 			'path.join("a", "b");',
 		]
 			.join("\n")
@@ -577,6 +642,7 @@ describe("project-trust real seam ratchet (#4281)", () => {
 				'unclassified spelling at fake.test.ts:8: vi.doMock(flag ? "../clients/project-trust.js" : other);',
 				'unclassified spelling at fake.test.ts:9: const pending = import("../clients/project-trust.js");',
 				'unclassified spelling at fake.test.ts:10: vi.doMock("../clients/" + "project-trust" + ".js");',
+				"unclassified spelling at fake.test.ts:2: vi.mock(target, () => ({}));",
 			],
 		});
 	});
@@ -590,7 +656,12 @@ describe("project-trust real seam ratchet (#4281)", () => {
 			const lines = readFileSync(path.join(REPO_ROOT, file), "utf8")
 				.split("\n")
 				.map((line) => line.trim());
-			expect(lines, key).toContain(text);
+			// One occurrence: a duplicate line would share the admission (#4457
+			// verify LOW: `PATHS[0]` beside the admitted list entry).
+			expect(
+				lines.filter((line) => line === text),
+				key,
+			).toHaveLength(1);
 			expect(reason.length, key).toBeGreaterThan(30);
 		}
 	});
