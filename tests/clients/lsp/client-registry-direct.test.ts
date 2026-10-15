@@ -2549,4 +2549,13 @@ describe("mergeInitializationOptions (#4449)", () => {
 		).toEqual({ a: 5, b: null, c: [1] });
 		expect(base.nested.deep).toEqual({ x: 1, y: 2 });
 	});
+
+	// Recurrence (#4299): one-sided input is returned as it came, never merged
+	// into an empty object, so a server that sends no options stays optionless.
+	it("returns the only defined side untouched", () => {
+		const side = { a: { b: 1 } };
+		expect(mergeInitializationOptions(undefined, undefined)).toBeUndefined();
+		expect(mergeInitializationOptions(side, undefined)).toBe(side);
+		expect(mergeInitializationOptions(undefined, side)).toBe(side);
+	});
 });
