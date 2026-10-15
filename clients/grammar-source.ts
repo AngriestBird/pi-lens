@@ -618,13 +618,24 @@ export async function downloadGrammarDetailed(
 	}
 }
 
+/**
+ * A grammar fetch that receives no bytes for this long is aborted. A healthy
+ * unpkg response starts within a second or two, and 26 parallel streams on a
+ * 5 Mbps link still deliver a chunk every few milliseconds each (#4342).
+ * Without a bound a black-holed CDN holds the fetch for undici's 300 s headers
+ * timeout (#4425). Shared by the runtime fetch, the install script's mirror
+ * (`scripts/download-grammars.ts`, pinned by `tests/clients/grammar-source.test.ts`)
+ * and the test-setup prefetch.
+ */
+export const GRAMMAR_STALL_MS = 15_000;
+
 export interface GrammarDownloadOptions {
 	/**
 	 * Abort the transfer once this many ms pass with no response bytes,
 	 * headers included. Each body chunk restarts the count, so a slow link
-	 * that keeps delivering completes and a stalled one fails fast. Unset
-	 * (every runtime caller): no bound of pi-lens's own. The test-setup
-	 * prefetch sets it (#4342).
+	 * that keeps delivering completes and a stalled one fails fast. Unset: no
+	 * bound of pi-lens's own. The runtime fetch, the install script and the
+	 * test-setup prefetch pass `GRAMMAR_STALL_MS`.
 	 */
 	stallMs?: number;
 }

@@ -6,6 +6,7 @@ import {
 	BLOCKED_GRAMMARS,
 	GRAMMAR_FILES,
 	GRAMMAR_SOURCE_OVERRIDES,
+	GRAMMAR_STALL_MS,
 	grammarBlockReason,
 	type GrammarRuntime,
 	grammarSourceUrl,
@@ -95,6 +96,25 @@ function readScriptOverrides(file: string): OverrideTable {
 describe("grammar-source ↔ download-grammars stay in sync", () => {
 	it("pins the same tree-sitter-wasms version", () => {
 		expect(scriptVersion).toBe(TREE_SITTER_WASMS_VERSION);
+	});
+
+	// Recurrence: the install script cannot import the runtime constant, so a
+	// bound retuned in one place alone leaves the other at a different wait (#4425).
+	it("bounds the install script's fetch at the runtime's stall bound (#4425)", () => {
+		for (const file of ["download-grammars.ts", "download-grammars.js"]) {
+			const src = readFileSync(
+				path.resolve(
+					path.dirname(fileURLToPath(import.meta.url)),
+					"../../scripts",
+					file,
+				),
+				"utf8",
+			);
+			const declared = src.match(/GRAMMAR_STALL_MS\s*=\s*([0-9_]+)/)?.[1];
+			expect(Number(declared?.replaceAll("_", "")), file).toBe(
+				GRAMMAR_STALL_MS,
+			);
+		}
 	});
 
 	it("pins scripts/grammars.lock.json to the same release the runtime downloads (#1564 G1)", () => {

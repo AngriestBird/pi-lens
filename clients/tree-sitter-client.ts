@@ -33,6 +33,7 @@ import { getProjectIgnoreMatcher, isExcludedDirName } from "./file-utils.js";
 import {
 	downloadGrammarDetailed,
 	fileHasWasmMagic,
+	GRAMMAR_STALL_MS,
 	grammarBlockReason,
 	grammarFileSha256,
 	isVendoredGrammar,
@@ -486,6 +487,8 @@ export class TreeSitterClient {
 	 * (the `transientRetryDelayMs` shape from availability-policy.ts) instead
 	 * of latching for the process lifetime. */
 	private grammarRetryAtMs = new Map<string, number>();
+	/** Instance field so a test can shorten it without waiting out the real bound. */
+	private grammarStallMs = GRAMMAR_STALL_MS;
 	/**
 	 * Grammar path → the `size:mtimeMs` stamp at which its wasm preamble was
 	 * verified (#1548). A POSITIVE-only memo, so the steady-state resolve costs
@@ -1540,6 +1543,7 @@ export class TreeSitterClient {
 		const { ok, retryable, reason } = await downloadGrammarDetailed(
 			dir,
 			grammarFile,
+			{ stallMs: this.grammarStallMs },
 		);
 		if (ok) {
 			if (!this.grammarsDir) this.grammarsDir = dir;
