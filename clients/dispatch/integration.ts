@@ -54,6 +54,8 @@ import {
 } from "../cascade-budget.js";
 import {
 	applyCascadeDisplayPolicy,
+	type CascadeSectionLayout,
+	composeCascadeSection,
 	formatCascadeNeighborDiagnostics,
 	recordCascadeFindingPolicy,
 	resetCascadeUnansweredPrimariesDelivered,
@@ -2899,79 +2901,64 @@ function formatCascadeResult(
 	/** #4403 round 4 (N2): the lines naming primaries that did not answer. */
 	unansweredPrimaryNote = "",
 ): string {
+	const layout = cascadeSectionLayout(
+		cwd,
+		impact,
+		neighbors.length,
+		totalNeighbors,
+		policySuppressed,
+		policyInputTruncated,
+	);
 	// @delivery-surface: dispatch-integration:in-lane-cascade
 	const neighborBlock = formatCascadeNeighborDiagnostics(cwd, neighbors, {
-		noun: "neighbor",
-		includeReason: true,
+		noun: layout.noun,
+		includeReason: layout.includeReason,
 	});
-	const diagnosticsBlock =
-		neighborBlock && unansweredPrimaryNote
-			? `${neighborBlock}\n${unansweredPrimaryNote}`
-			: neighborBlock || unansweredPrimaryNote;
-	// #3157 round 3, N1: an empty block is silence, and silence is a CLEAN
-	// verdict to the agent. That is honest only when everything was looked at.
-	// `policyInputTruncated > 0` means this run's own cost bound declined to
-	// evaluate findings that exist — the #1459 coverage-gap case, not a verdict —
-	// so it must speak even with nothing to render. `policySuppressed` does NOT
-	// get the same treatment on purpose: those findings WERE evaluated and every
-	// drop is the agent's own mark or its project's own rule policy, and the
-	// quiet-window lane deliberately says nothing at all for that case
-	// (`buildResolvedFoundCascadeRun` returns `undefined`). Speaking here and not
-	// there would re-open the two-lane divergence #3157 exists to close.
-	if (!diagnosticsBlock && policyInputTruncated === 0) return "";
+	return composeCascadeSection(neighborBlock, layout, unansweredPrimaryNote);
+}
 
-	const impactHeader = formatImpactCascade(
-		impact,
-		RUNTIME_CONFIG.pipeline.cascadeMaxFiles,
-	);
-	let out = !diagnosticsBlock
-		? ""
-		: impactHeader
-			? `${impactHeader}\n${diagnosticsBlock}`
-			: diagnosticsBlock;
-
+/** The in-lane section's frame around its neighbour block. */
+function cascadeSectionLayout(
+	cwd: string,
+	impact: ReturnType<typeof computeImpactCascade>,
+	listedNeighbors: number,
+	totalNeighbors: number,
+	policySuppressed: number,
+	policyInputTruncated: number,
+): CascadeSectionLayout {
 	// A10: include truncated filenames so agent knows which files were cut
-	const truncated = totalNeighbors - neighbors.length;
+	const truncated = totalNeighbors - listedNeighbors;
+	let truncationLine = "";
 	if (truncated > 0) {
 		const truncatedNames = impact.neighborFiles
-			.slice(neighbors.length, neighbors.length + 3)
+			.slice(listedNeighbors, listedNeighbors + 3)
 			.map((p) => toRunnerDisplayPath(cwd, p))
 			.join(", ");
 		const moreLabel = truncatedNames
 			? `${truncated} more dependent file(s): ${truncatedNames}`
 			: `${truncated} more dependent file(s)`;
-		out += `\n... and ${moreLabel}`;
+		truncationLine = `... and ${moreLabel}`;
 	}
-
-	// #1616 / #3157: a delivery that still has something to say states what it
-	// dropped, once per delivery — the same sentence the quiet-window cascade run
-	// (`buildResolvedFoundCascadeRun`) and the late-auxiliary advisory render, so
-	// the two cascade lanes do not disagree about whether a mark is worth
-	// mentioning. Policy drops only: an aux drop is the file's own suppression
-	// comment, which the per-edit dispatch path honours silently too, and it stays
-	// in the `cascade_finding_policy` record. A run with NOTHING left returned ""
-	// above and says nothing at all — silence is not a claim that a neighbour is
-	// clean.
-	// #3157 round 3, N1: the same shape and the same closing clause as the
-	// "did not cover" line this file's renderer already uses for a neighbour no
-	// scanner looked at (`clients/cascade-format.ts`) — the agent must not read
-	// an empty or short block as a clean verdict when the bound cut findings
-	// nobody evaluated.
-	if (policyInputTruncated > 0) {
-		if (out) out += "\n";
-		out +=
-			`⚠️ Cascade did not evaluate ${policyInputTruncated} finding(s) — the per-neighbor ` +
-			`policy input is bounded at ${MAX_POLICY_INPUT_PER_FILE}; no findings does NOT mean clean here.`;
-	}
-
-	// Rides along whenever anything is rendered at all: when the block is empty
-	// and the coverage line above is speaking, this is what explains WHY it is
-	// empty. The empty-and-nothing-truncated case returned above.
-	if (policySuppressed > 0) {
-		out += `\nsuppressed by disposition: ${policySuppressed} finding(s) (marked false-positive or won't-fix).`;
-	}
-
-	return out;
+	return {
+		cwd,
+		noun: "neighbor",
+		includeReason: true,
+		header:
+			formatImpactCascade(impact, RUNTIME_CONFIG.pipeline.cascadeMaxFiles) ??
+			"",
+		truncationLine,
+		// #3157 round 3, N1: `policyInputTruncated > 0` means this run's own
+		// cost bound declined to evaluate findings that exist — the #1459
+		// coverage-gap case, not a verdict — so it must speak even with nothing
+		// to render, with the same closing clause as the "did not cover" line
+		// for a neighbour no scanner looked at (`clients/cascade-format.ts`).
+		coverageLine:
+			policyInputTruncated > 0
+				? `⚠️ Cascade did not evaluate ${policyInputTruncated} finding(s) — the per-neighbor ` +
+					`policy input is bounded at ${MAX_POLICY_INPUT_PER_FILE}; no findings does NOT mean clean here.`
+				: "",
+		policySuppressed,
+	};
 }
 
 /**

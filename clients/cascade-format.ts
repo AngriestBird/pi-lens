@@ -86,6 +86,74 @@ export function formatCascadeNeighborDiagnostics(
 }
 
 /**
+ * Everything around a cascade section's neighbour block, so the block can be
+ * rendered again for a subset of its neighbours with the same frame. The
+ * in-lane compute (`clients/dispatch/integration.ts`) and the quiet-window
+ * builder below compose through {@link composeCascadeSection}.
+ */
+export interface CascadeSectionLayout {
+	/** Language root the neighbour paths display against. */
+	cwd: string;
+	noun: string;
+	includeReason: boolean;
+	/** The impact header (`formatImpactCascade`), or "". */
+	header: string;
+	/** "... and N more dependent file(s)", or "". */
+	truncationLine: string;
+	/**
+	 * #3157 round 3, N1: the line saying the policy input bound cut findings
+	 * nobody evaluated, or "". It speaks even when the block is empty.
+	 */
+	coverageLine: string;
+	/** This delivery's disposition drops (#1616 / #3157). */
+	policySuppressed: number;
+}
+
+/**
+ * One cascade section from its neighbour block (the
+ * `formatCascadeNeighborDiagnostics` text, which each caller renders at its
+ * own registered delivery seam) and its layout. Returns "" when there is
+ * nothing to say: an empty block is silence, and silence is honest only when
+ * everything was looked at, so the coverage line alone still speaks.
+ */
+export function composeCascadeSection(
+	block: string,
+	layout: CascadeSectionLayout,
+	/** #4403 round 4 (N2): the lines naming primaries that did not answer. */
+	unansweredPrimaryNote = "",
+): string {
+	const diagnosticsBlock =
+		block && unansweredPrimaryNote
+			? `${block}\n${unansweredPrimaryNote}`
+			: block || unansweredPrimaryNote;
+	// #3157 round 3, N1: `policySuppressed` does NOT speak on its own on
+	// purpose: those findings WERE evaluated and every drop is the agent's own
+	// mark or its project's own rule policy, and the quiet-window lane says
+	// nothing at all for that case (`buildResolvedFoundCascadeRun` returns
+	// `undefined`).
+	if (!diagnosticsBlock && !layout.coverageLine) return "";
+	let out = !diagnosticsBlock
+		? ""
+		: layout.header
+			? `${layout.header}\n${diagnosticsBlock}`
+			: diagnosticsBlock;
+	// A10: include truncated filenames so agent knows which files were cut
+	if (layout.truncationLine) out += `\n${layout.truncationLine}`;
+	if (layout.coverageLine) {
+		if (out) out += "\n";
+		out += layout.coverageLine;
+	}
+	// #1616 / #3157: a delivery that still has something to say states what it
+	// dropped, once per delivery. Policy drops only: an aux drop is the file's
+	// own suppression comment, which the per-edit dispatch path honours
+	// silently too, and it stays in the `cascade_finding_policy` record.
+	if (layout.policySuppressed > 0) {
+		out += `\nsuppressed by disposition: ${layout.policySuppressed} finding(s) (marked false-positive or won't-fix).`;
+	}
+	return out;
+}
+
+/**
  * Build the turn-end `CascadeRun` for a neighbour whose diagnostics landed only
  * AFTER its cascade touch skipped the in-lane wait (#1023's `resolved-found`
  * quiet-window outcome; #1444 made native TS7 take that same path). Returns
@@ -147,22 +215,26 @@ export function buildResolvedFoundCascadeRun(
 	const neighbors: CascadeNeighborResult[] = [
 		{ filePath, reason: "references", diagnostics, lspTouched: true },
 	];
+	const layout: CascadeSectionLayout = {
+		cwd,
+		noun: "cold neighbor",
+		includeReason: false,
+		header: "",
+		truncationLine: "",
+		coverageLine: "",
+		policySuppressed: suppressed,
+	};
 	// @delivery-surface: cascade-format:resolved-found-run
 	const rendered = formatCascadeNeighborDiagnostics(cwd, neighbors, {
-		noun: "cold neighbor",
+		noun: layout.noun,
 	});
 	if (!rendered) return undefined;
 	// #1616 / #3102 AC 4, round 2 F2: a delivery that still has something to say
 	// states what it dropped, once per delivery — the same sentence the
-	// late-auxiliary advisory renders (`clients/runtime-turn.ts`). Policy drops
-	// only: an aux drop is the file's own suppression comment, which the
-	// per-edit dispatch path honours silently too, and it stays in the record
-	// above. A delivery with NOTHING left says nothing at all — silence on a
-	// push surface is not a claim that the neighbour is clean.
-	const formatted =
-		suppressed > 0
-			? `${rendered}\nsuppressed by disposition: ${suppressed} finding(s) (marked false-positive or won't-fix).`
-			: rendered;
+	// late-auxiliary advisory renders (`clients/runtime-turn.ts`). A delivery
+	// with NOTHING left says nothing at all — silence on a push surface is not
+	// a claim that the neighbour is clean.
+	const formatted = composeCascadeSection(rendered, layout);
 	return {
 		filePath,
 		result: {
