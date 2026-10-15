@@ -1421,7 +1421,10 @@ Test authoring screens:
 
 Governance sweeps use `tests/support/sweep-kit.ts`, explicit source roots, and
 comment/string-blanked source. Every sweep has a real floor and a checked
-exemption reason. A detector that decides a test exists counts only live
+exemption reason. A population-deriving scanner fails closed: a needle hit
+that matches none of its classified forms reds as an unclassified spelling
+with its file and line, never a skip, and the scanner ships a case that plants
+one. History: `HISTORY.md`, 2026-10-15. A detector that decides a test exists counts only live
 declarations (`testDeclarations` in `tests/support/sweep-kit.ts`) in files
 vitest collects (`tests/support/vitest-collection.ts`): a skipped, todo,
 conditional (`skipIf`/`runIf`, an options key, a body skip) or uncalled test
