@@ -475,6 +475,57 @@ describe("RuntimeCoordinator", () => {
 			).toBe(true);
 			expect(runtime.getInlineBlockersSnapshot()).toHaveLength(0);
 		});
+
+		// #4484: a blocker is pending until a fresh observation no longer holds
+		// it. A clearing run whose own observation still holds one (an opaque
+		// recovery of new bytes, whose blocker channel is withheld) left the
+		// record cleared and turn end reported a false "Resolved".
+		it("refuses a clear while the clearing run still observes a blocker, whatever its authorship (#4484)", () => {
+			const runtime = new RuntimeCoordinator();
+			runtime.recordInlineBlockers(
+				file,
+				"🔴 STOP L2",
+				1,
+				["biome"],
+				[2],
+				recorded,
+			);
+			for (const [writeIndex, authored] of [
+				[2, false],
+				[3, true],
+			] as const) {
+				expect(
+					runtime.clearInlineBlockers(file, writeIndex, undefined, {
+						authored,
+						sha256: "b".repeat(64),
+						blocking: 1,
+					}),
+				).toBe(false);
+			}
+			expect(runtime.getInlineBlockersSnapshot()).toHaveLength(1);
+			expect(runtime.hasResolvedBlockerFiles()).toBe(false);
+			expect(
+				getDegradationSummary().find((c) => c.kind === "blocker-clear-refused")
+					?.latestReasons,
+			).toEqual([
+				{
+					subject: normalizeMapKey(file),
+					reason: expect.stringMatching(
+						/still observed a blocker.*\(count: 2\)/,
+					),
+				},
+			]);
+			// An observation with nothing left clears and reports it resolved.
+			expect(
+				runtime.clearInlineBlockers(file, 4, undefined, {
+					authored: false,
+					sha256: "b".repeat(64),
+					blocking: 0,
+				}),
+			).toBe(true);
+			expect(runtime.getInlineBlockersSnapshot()).toHaveLength(0);
+			expect(runtime.hasResolvedBlockerFiles()).toBe(true);
+		});
 	});
 
 	describe("inline blockers reconcile against disk (#1245)", () => {

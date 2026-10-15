@@ -138,6 +138,14 @@ export interface DispatchResult {
 	/** Whether any blockers were found */
 	hasBlockers: boolean;
 	/**
+	 * #4484: the blocking findings this observation still holds that the delta
+	 * did not call new (it saw their ids before). Not rendered as a STOP, but
+	 * the file's current blocking set is `blockers` plus these: the record, the
+	 * store and the commit gate read both, so an empty delta never clears a
+	 * blocker that is still there. Absent when there are none.
+	 */
+	heldBackBlockers?: Diagnostic[];
+	/**
 	 * #4403: why the file's primary group did not check it. Set whenever the
 	 * coverage notice's rule finds no coverage, whether or not the once-only
 	 * latch shows the notice, so a write the latch silences still does not

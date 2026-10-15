@@ -1732,14 +1732,32 @@ export class RuntimeCoordinator {
 	 * counted as `blocker-clear-refused` per file key. A record with no
 	 * `recordedHash` (#2982: the file was unreadable or over the baseline cap at
 	 * record time) cannot be matched and is cleared as before.
+	 *
+	 * #4484: a blocker is pending until a fresh observation no longer holds it,
+	 * so a run whose own observation still holds `analysis.blocking` blockers
+	 * never clears the record, whatever its authorship or its delta said; it
+	 * is refused and counted the same way.
 	 */
 	clearInlineBlockers(
 		filePath: string,
 		writeIndex?: number,
 		orderTurn = this._writeOrderTurn,
-		analysis?: { authored: boolean; sha256: string | undefined },
+		analysis?: {
+			authored: boolean;
+			sha256: string | undefined;
+			blocking?: number;
+		},
 	): boolean {
 		const existing = this._pendingInlineBlockers.get(path.resolve(filePath));
+		if (existing && (analysis?.blocking ?? 0) > 0) {
+			incrementDegradationCount({
+				kind: "blocker-clear-refused",
+				subject: normalizeMapKey(filePath),
+				reason:
+					"the clearing run still observed a blocker on the file; the record stays until an observation holds none (#4484)",
+			});
+			return false;
+		}
 		if (
 			existing &&
 			analysis &&

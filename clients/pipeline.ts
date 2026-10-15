@@ -420,6 +420,14 @@ export interface PipelineResult {
 	 * baseline cap.
 	 */
 	inlineBlockerFileContent?: { size: number; sha256: string };
+	/**
+	 * #4484: how many blockers this run's observation still holds after the
+	 * deleted-path gate, new or held back by the delta, whether or not the run
+	 * may deliver them. `clearInlineBlockers` refuses a clear while it is
+	 * non-zero, so a run without authorship (#3226) cannot retire a record
+	 * about a blocker that is still there.
+	 */
+	currentBlockerCount?: number;
 	/** Fixable warning diagnostics introduced by this pipeline run. */
 	actionableWarnings?: ActionableWarningRecord[];
 	/** Non-fixable code-quality warnings introduced/touched by this pipeline run. */
@@ -1618,6 +1626,24 @@ function buildAllClearOutput(
 	return `checkmark ${parts.join(" · ")}`.replace("checkmark", "\u2713");
 }
 
+/**
+ * #4484: the one line a write gets for blockers that are still on the file
+ * but not new to it (the delta held them back). Bounded: at most five line
+ * numbers, then a count.
+ */
+function formatStillUnfixedLine(
+	blockers: readonly Diagnostic[],
+	filePath: string,
+): string {
+	const lines = [...new Set(inlineBlockerLines(blockers, filePath))];
+	const shown = lines.slice(0, 5).map((line) => `L${line}`);
+	if (lines.length > shown.length)
+		shown.push(`+${lines.length - shown.length} more`);
+	const where = shown.length > 0 ? ` (${shown.join(", ")})` : "";
+	const count = blockers.length;
+	return `🔴 Still unfixed: ${count} blocker${count === 1 ? "" : "s"} reported earlier${where}.`;
+}
+
 export interface FormatPhaseResult {
 	formatChanged: boolean;
 	formattersUsed: string[];
@@ -2149,9 +2175,17 @@ async function analysePipeline(
 			telemetryProvider: ctx.telemetry?.provider,
 		},
 	);
+	// #4484: the store, the widget and the published set hold the file's
+	// blockers, not only the ones the delta called new; a blocker held back as
+	// already seen is still on the file.
+	const heldBackBlockers = dispatchResult.heldBackBlockers ?? [];
+	const storedDiagnostics =
+		heldBackBlockers.length > 0
+			? [...dispatchResult.diagnostics, ...heldBackBlockers]
+			: dispatchResult.diagnostics;
 	recordDiagnostics(
 		filePath,
-		dispatchResult.diagnostics,
+		storedDiagnostics,
 		widgetOrder(),
 		analysisReadAtMs,
 	);
@@ -2166,15 +2200,13 @@ async function analysePipeline(
 	{
 		const absPath = path.resolve(filePath);
 		const wasDirty = wasPreviouslyReportedDirty(absPath);
-		if (dispatchResult.diagnostics.length > 0 || wasDirty) {
+		if (storedDiagnostics.length > 0 || wasDirty) {
 			publishDiagnostics({
 				cwd,
 				files: [
 					{
 						path: absPath,
-						diagnostics: dispatchResult.diagnostics.map(
-							toPilensDiagnosticEntry,
-						),
+						diagnostics: storedDiagnostics.map(toPilensDiagnosticEntry),
 					},
 				],
 				dbg,
@@ -2214,14 +2246,32 @@ async function analysePipeline(
 	// the deleted file's content), so it is dropped here rather than re-asserted.
 	// One bounded stat per unique cited path, only when blockers exist — zero
 	// cost on the clean/fast paths.
+	//
+	// #4484: the gate runs over the file's current blocking set, the delta's
+	// blockers plus the ones it held back. The new ones render as the STOP
+	// block; the held-back ones get one line and stay in the record, so an
+	// empty delta no longer reads as a fix.
+	const currentBlockers =
+		heldBackBlockers.length > 0
+			? [...dispatchResult.blockers, ...heldBackBlockers]
+			: dispatchResult.blockers;
+	const liveBlockers =
+		currentBlockers.length > 0
+			? dropFindingsForMissingPaths({
+					store: "stop-blocker",
+					findings: currentBlockers,
+					cwd,
+					citedPath: (b) => b.filePath || undefined,
+				})
+			: [];
+	const newBlockers = new Set(dispatchResult.blockers);
 	const deliverableBlockers = hasBlockers
-		? dropFindingsForMissingPaths({
-				store: "stop-blocker",
-				findings: dispatchResult.blockers,
-				cwd,
-				citedPath: (b) => b.filePath || undefined,
-			})
+		? liveBlockers.filter((b) => newBlockers.has(b))
 		: [];
+	// The record's blockers: every live one, withheld like the STOP block from
+	// a run without authorship (#3226).
+	const recordBlockers = allowAutonomousWriters ? liveBlockers : [];
+	const stillUnfixed = recordBlockers.filter((b) => !newBlockers.has(b));
 	// #3190: ONE gate, applied once here, for EVERY surface. The durable record
 	// this function hands `runtime.recordInlineBlockers` (and through it the
 	// turn-end `Unresolved from this turn` re-serve) used to be built from the
@@ -2296,6 +2346,9 @@ async function analysePipeline(
 		} else {
 			output += `\n\n${deliveredOutput}`;
 		}
+	}
+	if (stillUnfixed.length > 0) {
+		output += `\n\n${formatStillUnfixedLine(stillUnfixed, filePath)}`;
 	}
 	if (fixedCount > 0) {
 		const detail =
@@ -2444,20 +2497,25 @@ async function analysePipeline(
 		// drops something the stored text can no longer disagree with the tool
 		// result, and `inline-blocker-dispositions.ts`' re-render at turn end still
 		// matches this string exactly.
-		inlineBlockerSummary: hasDeliverableBlockers
-			? formatDiagnostics(deliverableBlockers, "blocking").trim() || undefined
-			: undefined,
+		// #4484: over the file's whole live blocking set (`recordBlockers`), so a
+		// write that adds nothing new refreshes the record instead of clearing it.
+		inlineBlockerSummary:
+			recordBlockers.length > 0
+				? formatDiagnostics(recordBlockers, "blocking").trim() || undefined
+				: undefined,
 		// #1561 F1: taken from the very diagnostics `blockerOutput` was rendered
 		// from, so the provenance can never disagree with the text it guards. An
 		// untagged diagnostic contributes the literal "unknown", which no verdict
 		// claims coverage for — it pins the entry rather than silently widening
 		// what an LSP check is allowed to clear.
-		inlineBlockerSources: hasDeliverableBlockers
-			? inlineBlockerSources(deliverableBlockers)
-			: undefined,
-		inlineBlockerLines: hasDeliverableBlockers
-			? inlineBlockerLines(deliverableBlockers, filePath)
-			: undefined,
+		inlineBlockerSources:
+			recordBlockers.length > 0
+				? inlineBlockerSources(recordBlockers)
+				: undefined,
+		inlineBlockerLines:
+			recordBlockers.length > 0
+				? inlineBlockerLines(recordBlockers, filePath)
+				: undefined,
 		actionableWarnings,
 		codeQualityWarnings,
 		diagnostics: dispatchResult.diagnostics,
@@ -2482,8 +2540,9 @@ async function analysePipeline(
 		// turn-end policy filter and its re-render can never disagree with the
 		// text they guard — the same provenance argument `inlineBlockerSources`
 		// makes one field up.
-		inlineBlockerDiagnostics: hasDeliverableBlockers
-			? deliverableBlockers
-			: undefined,
+		inlineBlockerDiagnostics:
+			recordBlockers.length > 0 ? recordBlockers : undefined,
+		// #4484: what a clear must find empty, whatever the authorship.
+		currentBlockerCount: liveBlockers.length,
 	};
 }

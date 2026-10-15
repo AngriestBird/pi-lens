@@ -1537,6 +1537,13 @@ export async function dispatchForFile(
 	};
 	let visibleDiagnostics = applyOutputFilters(dedupedDiagnostics);
 	let resolvedCount = 0;
+	// #4484: the delta decides only what the agent is told is NEW, never
+	// whether a blocker is still pending. The blocking findings it holds back
+	// as already seen are still in this observation, so they go back beside
+	// the delta: the inline-blocker record, the store and the commit gate read
+	// them, and the record clears only when they and the delta's blockers are
+	// both gone.
+	let heldBackBlockers: Diagnostic[] = [];
 	if (ctx.deltaMode && previousBaseline) {
 		// Silencing a rule is not fixing it. The stored baseline is deliberately
 		// unfiltered (below), so compare against a fully-filtered view of it
@@ -1548,6 +1555,10 @@ export async function dispatchForFile(
 			visibleDiagnostics,
 			applyOutputFilters(previousBaseline),
 			(d) => d.id,
+		);
+		const isNew = new Set(filtered.new);
+		heldBackBlockers = visibleDiagnostics.filter(
+			(d) => d.semantic === "blocking" && !isNew.has(d),
 		);
 		visibleDiagnostics = promoteDeltaUnusedToBlockers(filtered.new);
 		resolvedCount = filtered.fixed.length;
@@ -1669,6 +1680,8 @@ export async function dispatchForFile(
 			// baseline read ever runs and cannot carry either value.
 			baselineHit: previousBaseline !== undefined,
 			baselineWarningCount,
+			// #4484: blockers still observed that the delta did not call new.
+			heldBackBlockers: heldBackBlockers.length,
 		},
 	});
 
@@ -1683,6 +1696,7 @@ export async function dispatchForFile(
 		output,
 		blockerOutput,
 		hasBlockers: blockers.length > 0,
+		...(heldBackBlockers.length > 0 && { heldBackBlockers }),
 		...(unconfirmedStatus !== undefined && { unconfirmedStatus }),
 	};
 }

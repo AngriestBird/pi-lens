@@ -3321,9 +3321,12 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 					// #4137 round 3: a run without authorship does not retire a
 					// record about the very bytes it read. The already-analysed latch
 					// is a cost rule, not the record's guard.
+					// #4484: and no run retires a record while its own observation
+					// still holds a blocker.
 					{
 						authored: bashAuthorshipConfirmed,
 						sha256: result.inlineBlockerFileContent?.sha256,
+						blocking: result.currentBlockerCount ?? 0,
 					},
 				),
 			) ?? false;
