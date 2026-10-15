@@ -87,7 +87,10 @@ vi.mock("node:fs", async (importOriginal) => {
 });
 
 import { CacheManager } from "../../clients/cache-manager.js";
-import { getDegradationSummary } from "../../clients/degradation-ledger.js";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { handleToolCall } from "../../clients/runtime-tool-call.js";
 import { handleToolResult } from "../../clients/runtime-tool-result.js";
@@ -105,6 +108,9 @@ let caseNo = 0;
 let root: string;
 
 beforeEach(() => {
+	// The degradation ledger is one per process: two over-gate files in one
+	// run make a group of two, so each case starts from an empty ledger.
+	resetDegradationLedger();
 	io.target = "";
 	io.passes = 0;
 	io.bytesRead = 0;
