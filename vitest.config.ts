@@ -642,6 +642,9 @@ export const wallClockBudgetInclude = [
 	// #4071: the probe's real hook stdin/exit-code contract and ref diff are
 	// unobservable through an in-process classifier call.
 	"tests/scripts/guard-bash-probe.test.ts",
+	// #4291: the install-smoke handshake and report steps are shell text; only
+	// a real bash running the extracted `run:` shows pipefail and the crash line.
+	"tests/scripts/install-smoke-handshake-steps.test.ts",
 	// #2698: real `git init`/`add`/`commit`/`ls-files` calls against a
 	// throwaway fixture repo — gitignore/tracked-vs-untracked resolution is
 	// the exact mechanism under test, which no mock reproduces faithfully.
