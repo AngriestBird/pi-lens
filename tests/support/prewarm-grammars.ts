@@ -20,7 +20,7 @@
  * `grammars/`: a lane worktree has no `grammars/`, while the shared install's
  * `node_modules/web-tree-sitter/grammars` already holds most of the set.
  *
- * Each fetch carries a stall bound (`PREFETCH_STALL_MS` with no bytes), not a
+ * Each fetch carries a stall bound (`GRAMMAR_STALL_MS` with no bytes), not a
  * wall-clock limit, so a slow link that keeps delivering completes; a retryable
  * failure (a stall, a reset, offline, 5xx, 429) gets one more attempt. A grammar
  * still missing after that fails the run under CI and warns once locally, naming
@@ -39,7 +39,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { downloadGrammarDetailed } from "../../clients/grammar-source.js";
+import {
+	downloadGrammarDetailed,
+	GRAMMAR_STALL_MS,
+} from "../../clients/grammar-source.js";
 import { TreeSitterClient } from "../../clients/tree-sitter-client.js";
 import { GRAMMARS } from "../../scripts/download-grammars.js";
 
@@ -49,13 +52,6 @@ const repoRoot = path.resolve(
 	"..",
 );
 const grammarsDir = path.join(repoRoot, "grammars");
-
-/**
- * A fetch that receives no bytes for this long is aborted. A healthy unpkg
- * response starts within a second or two; 26 streams sharing a 5 Mbps link
- * still deliver a chunk every few milliseconds each (#4342).
- */
-export const PREFETCH_STALL_MS = 15_000;
 
 export interface PrefetchOptions {
 	grammars: readonly string[];
@@ -128,7 +124,7 @@ export function setupOptions(
 		searchDirs: client.grammarSourceDirs(),
 		destDir: grammarsDir,
 		ci: Boolean(process.env.CI),
-		stallMs: PREFETCH_STALL_MS,
+		stallMs: GRAMMAR_STALL_MS,
 		log: (line) => console.error(line),
 	};
 }
