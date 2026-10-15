@@ -1894,6 +1894,59 @@
 							"reason": "NoDelta keeps the whole code before #4484 for the --no-delta differential; it has no range-gated runner, no failing run, no collect-later finding and no unused value (RangeGated, MayFail, Deferred and Unused are FALSE), so the switch is inert there."
 						}
 					}
+				},
+				"CarryByPosition": {
+					"value": "TRUE",
+					"test": "tests/index-4484-unfixed-blocker-witness.test.ts",
+					"title": "retires a fixed ast-grep blocker beside an untouched match of the same rule (row 6)",
+					"also": [
+						{
+							"test": "tests/index-4484-unfixed-blocker-witness.test.ts",
+							"title": "retires a fixed tree-sitter blocker beside an untouched match of the same rule (row 6)"
+						},
+						{
+							"test": "tests/clients/finding-identity-retain.test.ts",
+							"title": "retires a fixed finding although the same rule still matches elsewhere"
+						},
+						{
+							"test": "tests/clients/runtime-coordinator.test.ts",
+							"title": "retires a blocker whose identity the run observes only at another line"
+						}
+					]
+				},
+				"SkipNoVerdict": {
+					"value": "TRUE",
+					"test": "tests/index-4484-unfixed-blocker-witness.test.ts",
+					"title": "keeps an LSP error pending when the file outgrows the language server's sync limit (row 11)",
+					"also": [
+						{
+							"test": "tests/index-4484-unfixed-blocker-witness.test.ts",
+							"title": "keeps an ast-grep blocker pending when the file outgrows the runner's size cap (row 11)"
+						},
+						{
+							"test": "tests/clients/dispatch/reached-no-verdict.test.ts",
+							"title": "reads a skip without a stated reason as no verdict"
+						},
+						{
+							"test": "tests/clients/dispatch/dispatcher-flow.test.ts",
+							"title": "skips a runner whose when() throws and continues with the others"
+						}
+					]
+				},
+				"OwedRanges": {
+					"value": "TRUE",
+					"test": "tests/index-4484-unfixed-blocker-witness.test.ts",
+					"title": "records a blocker first written while its runner had no verdict once the runner next answers (row 15)",
+					"also": [
+						{
+							"test": "tests/clients/dispatch/dispatcher-flow.test.ts",
+							"title": "widens only the owing runner's range"
+						},
+						{
+							"test": "tests/clients/line-alignment.test.ts",
+							"title": "keeps every earlier owed line after a run that may not deliver"
+						}
+					]
 				}
 			},
 			"notCodeChoice": [
@@ -1907,14 +1960,16 @@
 					]
 				},
 				{
-					"reason": "Environment: which linter reports the finding (line-bound LSP ids or helm-lint's ordinal ids, a collect-later runner or none, a runner with an edit-range gate or without, an unused value or none), whether a run reaches a verdict, and the user's --no-delta flag; the code must be honest under every value, so the as-built configs set them both ways.",
+					"reason": "Environment: which linter reports the finding (line-bound LSP ids or helm-lint's ordinal ids, a collect-later runner or none, a runner with an edit-range gate or without, an unused value or none, a second occurrence of a finding's rule already in the bytes or none), whether a run reaches a verdict or skips without reading the bytes, and the user's --no-delta flag; the code must be honest under every value, so the as-built configs set them both ways.",
 					"constants": [
 						"Ordinal",
 						"Deferred",
 						"Delta",
 						"RangeGated",
 						"MayFail",
-						"Unused"
+						"Unused",
+						"Twin",
+						"MaySkip"
 					]
 				}
 			]

@@ -23,18 +23,26 @@ The seam:
 - Round 2: the runners' withheld findings (`RunnerResult.outOfEditScope`) and
   no-verdict runs (`reachedNoVerdict`, `clients/dispatch/types.ts`) become
   `DispatchResult.stillObserved` and `inconclusiveSources`. The pipeline's
-  `carryRecordedBlockers` keeps a recorded blocker by line-agnostic identity
-  (`retainRecordedFindings`, `clients/finding-identity.ts`). A settled
-  collect-later run retires its own runner's blockers through
-  `retireSettledRunnerBlockers` (`clients/deferred-runner-blockers.ts`) and
-  `retireUnobservedRunnerBlockers` (the coordinator).
+  `carryRecordedBlockers` keeps a recorded blocker (`retainRecordedFindings`,
+  `clients/finding-identity.ts`). A settled collect-later run retires its own
+  runner's blockers through `retireSettledRunnerBlockers`
+  (`clients/deferred-runner-blockers.ts`) and `retireUnobservedRunnerBlockers`
+  (the coordinator).
+- Round 3: the carry matches a recorded blocker only at its own line, aligned
+  from the bytes it was read from to the current bytes
+  (`clients/line-alignment.ts`, the coordinator's analysis anchor). A skip
+  without a stated reason reaches no verdict (`reachedNoVerdict`). The lines a
+  runner with no verdict covered join its next range
+  (`DispatchContext.owedRanges`, `owedRangesAfterDispatch`).
 
 ## What the model covers
 
 - **Findings.** `"a"` and `"b"` are blockers that a fast (inline) runner
   reports. `"d"` is a blocker that a collect-later runner reports (`Deferred`).
   `"u"` is an unused value (`Unused`): it blocks only while the delta calls it
-  new.
+  new. `"p"` (`Twin`) is a second occurrence of `"a"`'s rule, with `"a"`'s
+  identity, already in the bytes at the start and never delivered unless a
+  write changes its line.
 - **Ids.** A finding's id is the one the delta keys on.
   - A line-bound id is `<<finding, line offset>>`. LSP ids work this way
     (`lsp:<code>:<line>`, `clients/dispatch/utils/lsp-diagnostics.ts`). A line
@@ -84,6 +92,23 @@ The seam:
       empties.
     - `CarryPromoted`: a recorded promoted unused value stays while the run
       still observes it.
+  - Round 3 environment: `Twin` adds `"p"`; `MaySkip` lets a fast run skip
+    without reading the bytes (a size or line cap, an aborted WASM runtime, an
+    unavailable grammar or server).
+  - Round 3 (#4484, each pinned TRUE; rules R1 to R4 of PR #4491's state
+    table). FALSE is the round-2 code.
+    - `CarryByPosition` (R2, R3): a recorded blocker is kept only by an
+      observation of its identity at its own line. FALSE matched by identity
+      alone and kept the observed copy, so a withheld `"p"` stood in for a
+      fixed `"a"`.
+    - `SkipNoVerdict` (R1): a skip without a stated not-applicable reason
+      reaches no verdict. FALSE read such a skip as a conclusive, empty
+      observation.
+    - `OwedRanges` (R4): the lines a run with no verdict covered stay owed
+      (the variable `owe`) and join the next run's range. An authored verdict
+      discharges them; an unauthored run delivers nothing, so it discharges
+      none. FALSE withheld a blocker first written while its runner had no
+      verdict on every later run.
 
 ## Invariants
 
@@ -96,9 +121,13 @@ The seam:
   blocker, that is a conclusive run of bytes without it. For d, it is a
   settled conclusive run of the current bytes without it. A write never
   observes d, because its re-check is in flight.
-- `GateSound`: the gate is open only when the bytes hold no fast blocker. This
-  is stronger than `GateHonest`, because it also catches a blocker that no
-  runner observes.
+- `GateSound`: the gate is open only when the bytes hold no fast blocker
+  outside the lines a run with no verdict still owes (`owe`). This is stronger
+  than `GateHonest`, because it also catches a blocker that a runner withholds
+  or misreads. With `MayFail` and `MaySkip` FALSE nothing is owed, so it is
+  round 2's `GateSound`.
+- `RecordedReported`: the record holds only findings some run delivered (the
+  ghost `reported`), so no observation stands in for a recorded blocker.
 - `RecordedKept`: every blocker a run delivered stays in the record until a
   conclusive observation from its own source shows it gone (the ghost
   `owed`). It is the `GateSound` of a run that can fail, or of a value that
@@ -114,21 +143,27 @@ States are as TLC reported them with `-workers 1` (generated / distinct).
 |---|---|---|---|
 | `MutDeltaClear` | violated `GateHonest` | 53 / 21 | The code before #4484 (the issue's trace, below). Write 1 introduces E, the agent ignores it, and write 2 leaves E in place. The empty delta clears the record and the gate opens. |
 | `MutDeltaClean` | violated `CleanHonest` | 53 / 21 | The same trace: write 2's tool result says clean while its observation holds E. |
-| `MutDeltaResolved` | violated `ResolvedHonest` | 207 / 55 | The same trace, then a turn end that reports F resolved. |
+| `MutDeltaResolved` | violated `ResolvedHonest` | 207 / 59 | The same trace, then a turn end that reports F resolved. |
 | `MutDeltaClearOrdinal` | violated `GateHonest` | 20 / 10 | Ordinal ids are red too. The renumbering case (write {a, b}, then write {b}: b takes ordinal 1, which the baseline holds) is a trace of the same length. |
 | `MutOpaqueClear` | violated `GateHonest` | 14 / 9 | The fix without part 2. An unauthored run of changed bytes that still holds E clears the record. |
-| `ClearOnCurrent` | pass | 5232 / 654 | The fix, line-bound ids. It covers three writes, an unauthored write, two turn ends and a line shift. Every invariant holds, `GateSound` included. |
-| `ClearOnCurrentOrdinal` | pass | 5232 / 654 | The fix, ordinal ids. Renumbering never clears a blocker that the observation still holds. |
-| `NoDelta` | pass | 1328 / 183 | The causal differential. The code before #4484 under `--no-delta` is honest, so the defect needs the delta. |
-| `DeferredGateHonest` | pass | 22769 / 2298 | The fix with a collect-later blocker. Whatever the deferred run's timing, the gate and the tool result stay honest. `GateHonest` counts a settled run only. That is the #3814 design: the commit gate absorbs a settled answer first (`absorbSettledRunnerBlockers`), and a run in flight does not gate. |
-| `DeferredInFlight` | pass | 789 / 123 | The round-2 fix. A collect-later blocker stays recorded while its re-check is in flight. Only a settled run of the current bytes that no longer observes it retires it, so a Resolved line names F only after that run. |
-| `MutDeferredInFlight` | violated `ResolvedHonest` | 731 / 126 | The round-1 code (`CarryDeferred` FALSE). A later write clears the record while d's re-check is in flight, and the turn end reports F resolved. |
-| `RangeGatedResidual` | pass | 1338 / 247 | The round-2 fix. An edit-range gate decides delivery only, so a recorded E on an unchanged line stays recorded, an unauthored write included. `GateSound` holds. |
+| `ClearOnCurrent` | pass | 6298 / 830 | The fix, line-bound ids. It covers three writes, an unauthored write, two turn ends and a line shift. Every invariant holds, `GateSound` included. |
+| `ClearOnCurrentOrdinal` | pass | 6298 / 830 | The fix, ordinal ids. Renumbering never clears a blocker that the observation still holds. |
+| `NoDelta` | pass | 1627 / 239 | The causal differential. The code before #4484 under `--no-delta` is honest, so the defect needs the delta. |
+| `DeferredGateHonest` | pass | 36411 / 4184 | The fix with a collect-later blocker. Whatever the deferred run's timing, the gate and the tool result stay honest. `GateHonest` counts a settled run only. That is the #3814 design: the commit gate absorbs a settled answer first (`absorbSettledRunnerBlockers`), and a run in flight does not gate. |
+| `DeferredInFlight` | pass | 875 / 184 | The round-2 fix. A collect-later blocker stays recorded while its re-check is in flight. Only a settled run of the current bytes that no longer observes it retires it, so a Resolved line names F only after that run. |
+| `MutDeferredInFlight` | violated `ResolvedHonest` | 743 / 150 | The round-1 code (`CarryDeferred` FALSE). A later write clears the record while d's re-check is in flight, and the turn end reports F resolved. |
+| `RangeGatedResidual` | pass | 1623 / 310 | The round-2 fix. An edit-range gate decides delivery only, so a recorded E on an unchanged line stays recorded, an unauthored write included. `GateSound` holds. |
 | `MutRangeGated` | violated `GateSound` | 20 / 10 | The round-1 code (`ScopeDeliveryOnly` FALSE). The gated runner never delivers E after an unrelated write, so the gate opens while E is in the bytes. |
-| `CarryInconclusive` | pass | 141687 / 8173 | The round-2 fix. Any fast, unauthored or collect-later run may reach no verdict. A recorded blocker stays until a conclusive run of its source shows it gone, and no clean text or Resolved line rests on a failed run. |
-| `MutFailClear` | violated `RecordedKept` | 47 / 17 | The round-1 code (`CarryInconclusive` FALSE). A write whose runner fails observes nothing, so the record clears. |
-| `CarryPromoted` | pass | 3415 / 314 | The round-2 fix. A promoted unused value stays recorded on every later write that still observes it. |
-| `MutPromotedClear` | violated `RecordedKept` | 183 / 37 | The round-1 code (`CarryPromoted` FALSE). The next unrelated write holds u back as already seen, and the record clears. |
+| `CarryInconclusive` | pass | 367275 / 27104 | The round-2 fix. Any fast, unauthored or collect-later run may reach no verdict. A recorded blocker stays until a conclusive run of its source shows it gone, and no clean text or Resolved line rests on a failed run. Since round 3 it also holds `GateSound` and `RecordedReported`. |
+| `MutFailClear` | violated `RecordedKept` | 182 / 26 | The round-1 code (`CarryInconclusive` FALSE). A write whose runner fails observes nothing, so the record clears. |
+| `CarryPromoted` | pass | 4535 / 480 | The round-2 fix. A promoted unused value stays recorded on every later write that still observes it. |
+| `MutPromotedClear` | violated `RecordedKept` | 183 / 46 | The round-1 code (`CarryPromoted` FALSE). The next unrelated write holds u back as already seen, and the record clears. |
+| `CarryTwin` | pass | 66759 / 3926 | The round-3 fix (R2, R3). A pre-existing second occurrence of a recorded blocker's rule never keeps it once it is fixed, across three writes, an unauthored write, a turn end and a line shift. |
+| `MutTwinIdentity` | violated `RecordedReported` | 57 / 27 | The round-2 code (`CarryByPosition` FALSE). The withheld twin p keeps the fixed a, recorded as p, which no run delivered (review F1, probes P9 and P10). |
+| `CarrySkip` | pass | 12709 / 1562 | The round-3 fix (R1). A skip that never read the bytes keeps the record, and nothing reads the skip as clean. |
+| `MutSkipVerdict` | violated `GateSound` | 13 / 6 | The round-2 code (`SkipNoVerdict` FALSE). A skip past a size or line cap clears the record while the blocker is in the bytes (review F2, probes P1 to P3). |
+| `CarryOwed` | pass | 20394 / 1602 | The round-3 fix (R4). A blocker first written while its range-gated runner fails or skips is delivered and recorded by the next authored verdict, an unauthored write between them included. |
+| `MutOwedRanges` | violated `GateSound` | 65 / 26 | The round-2 code (`OwedRanges` FALSE). Every later run withholds that blocker, so it is never recorded (residual a). |
 
 The `MutDeltaClear` trace is write, ignore, write:
 
@@ -157,6 +192,12 @@ Each switch has a config that flips when it is turned:
 - `CarryDeferred`: `DeferredInFlight` to `MutDeferredInFlight` (the same
   scenario).
 - `CarryPromoted`: `CarryPromoted` to `MutPromotedClear`.
+- `CarryByPosition`: `CarryTwin` to `MutTwinIdentity` (`CarryTwin` with the
+  switch FALSE is red on `RecordedReported` too).
+- `SkipNoVerdict`: `CarrySkip` to `MutSkipVerdict`.
+- `OwedRanges`: `CarryOwed` to `MutOwedRanges`. The discharge rule for an
+  unauthored run is checked by hand: with `OpaqueStep` setting `owe' = {}` on
+  a verdict, `CarryOwed` is red on `GateSound` (134 / 33).
 
 ## Residuals TLC shows
 
@@ -165,12 +206,16 @@ recorded collect-later blocker while its re-check is in flight
 (`DeferredInFlight`, now a pass), and a range-gated runner that never
 observes E after an unrelated write (`RangeGatedResidual`, now a pass).
 
-What remains is on the failure path, and `CarryInconclusive` leaves
-`GateHonest` out for it. A blocker that first appears while its runner fails
-is reported by no run. If an unauthored run is the next to observe it, that
-run withholds the record (#3226), so the gate stays open until an authored
-conclusive run reports it. The same holds for a blocker a range-gated runner
-first observes only outside the edit.
+Round 3 closed the failure-path half: a blocker first written while its
+runner fails or skips is now delivered by the next authored verdict, because
+its lines stay owed (`CarryOwed`, `GateSound` holds).
+
+What remains is the gap before that verdict, and `CarryInconclusive`,
+`CarrySkip` and `CarryOwed` leave `GateHonest` out for it. Until an authored
+run reports such a blocker, the gate stays open; an unauthored run that
+observes it first withholds the record (#3226). A blocker a range-gated runner
+observes only outside the edit, on lines no run owes, is still never recorded
+(#4481, by design).
 
 ## What the model cannot see
 
@@ -181,9 +226,13 @@ first observes only outside the edit.
 - A stale collect-later answer (one about older bytes). The model settles
   only the current bytes' run; the code refuses a stale one by the record's
   content hash and read time (`retireUnobservedRunnerBlockers`).
-- Identity collisions. The carry matches by `[tool, rule, message]` with
-  multiset counts, so a fixed finding and a new one of the same rule and text
-  are one finding to it.
+- Line alignment. The model's findings keep their atoms across writes, so a
+  recorded blocker's position is exact. The code aligns lines by content hash
+  (`alignLines`, bounded by `MAX_ALIGNMENT_EDITS`); a rewrite past that bound
+  falls back to the recorded line number, counted as
+  `blocker-position-unaligned`.
+- Per-runner owed lines. The model has one fast runner group; the code keeps
+  owed lines per runner and widens only that runner's range.
 
 ## Replay on the real code
 
@@ -198,6 +247,10 @@ service and the process spawn are doubled at their host boundary. Its cells:
 - K: the `--no-delta` differential.
 - F and H: helm, before and after a line shift.
 - R: helm renumbering.
+- Round 3 (rows of PR #4491's state table): rows 6 (twins, ast-grep and
+  tree-sitter), 7 (a moved blocker beside its twin), 11 (an LSP sync-limit
+  skip, an ast-grep size-cap skip), 12 (a carried blocker moves with its
+  line), 15 (owed lines) and 16 (a new error on a fixed one's id).
 - Round 2 (rows of the PR's state table): ast-grep and tree-sitter blockers
   kept after an edit to another line (row 7), a pre-existing ast-grep finding
   that never blocks (row 8), an unanswered and a failed language server

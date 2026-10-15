@@ -341,7 +341,11 @@ file-scoped worklist and receives no project-wide scanner output.
     A delta decides only what is new: a blocker stays pending, recorded and
     gating, until an observation no longer holds it. An edit-range gate
     decides only delivery, and a run with no verdict (failed, unanswered, in
-    flight) observes nothing, so neither retires a recorded blocker.
+    flight) observes nothing, so neither retires a recorded blocker. A skip
+    has a verdict only with a stated not-applicable reason
+    (`RUNNER_SKIP_REASONS`). A recorded blocker is still observed only at its
+    own line, aligned to the current bytes: another occurrence of the same
+    rule is not it (#4484 round 3).
     Enforced by `tests/clients/dispatch/runners/run-outcome-ratchet.test.ts`,
     `tests/clients/dispatch/runners/parsed-nothing-sweep.test.ts` and
     `tests/clients/delivery-surface-ratchet.test.ts` (partial: no detector
