@@ -80,8 +80,9 @@ import {
 } from "../lsp/diagnostic-binding.js";
 import { getServersForFileWithConfig } from "../lsp/config.js";
 import {
-	feedsJsTsGlobalScope,
+	classifyJsTsGlobalScope,
 	goPackageFiles,
+	goPackagePeersOf,
 	implicitScopeOf,
 	isGoSourceFile,
 } from "../lsp/implicit-scope.js";
@@ -1013,33 +1014,39 @@ const IMPLICIT_SCOPE_NEIGHBOR_CAP = MAX_FILES * 2;
 
 /**
  * #4438: the files whose implicit scope holds `changedFile` (absolute), as
- * `normalizeMapKey` spellings: the Go files of a Go file's directory, and for
- * a file that feeds the TS/JS global scope, the JS/TS files of the
+ * `normalizeMapKey` spellings: a Go file's package peers that
+ * `goPackagePeersOf` admits (same package clause, in the host build), and for
+ * a file whose global-scope role reads `"feeds"`, the JS/TS files of the
  * reverse-dependency index, most central first, at most
  * {@link IMPLICIT_SCOPE_NEIGHBOR_CAP}. `cut` is set when the cap left some out.
- * Membership is {@link implicitScopeOf}, asked of each candidate.
+ * Membership is {@link implicitScopeOf}, asked of each candidate. #4438 r2: a
+ * role that cannot be read (`"unknown"`) expands nothing; the cache's
+ * fail-closed answer is not this caller's.
  */
 function implicitScopeDependentsOf(
 	changedFile: string,
 	index: ReverseDependencyIndex,
 ): { files: string[]; cut?: { checked: number; total: number } } {
 	const changed = normalizeMapKey(changedFile);
-	let changedFeeds: boolean | undefined;
-	const feeds = (other: string) =>
-		other === changed && (changedFeeds ??= feedsJsTsGlobalScope(changedFile));
-	const reaches = (candidate: string) =>
-		implicitScopeOf(candidate, feeds)?.(changed) === true;
-	if (isGoSourceFile(changedFile)) {
+	if (isGoSourceFile(changed)) {
+		const peerOf = goPackagePeersOf(changed);
 		return {
-			files: (goPackageFiles(nodePath.dirname(changedFile)) ?? [])
-				.map((file) => normalizeMapKey(file))
-				.filter(reaches),
+			files: peerOf
+				? (goPackageFiles(nodePath.dirname(changedFile)) ?? [])
+						.map((file) => normalizeMapKey(file))
+						.filter(peerOf)
+				: [],
 		};
 	}
+	let changedFeeds: boolean | undefined;
+	const feeds = (): boolean =>
+		(changedFeeds ??= classifyJsTsGlobalScope(changedFile) === "feeds");
+	const reaches = (candidate: string) =>
+		implicitScopeOf(candidate, feeds)?.(changed) === true;
 	// A cost bound, not a filter: when the changed file feeds no global scope,
 	// `reaches` answers false for every candidate, so this skips ranking the
 	// whole index on every module write.
-	if (!feeds(changed)) return { files: [] };
+	if (!feeds()) return { files: [] };
 	const reached = rankFilesByReverseDependencyCentrality(index).filter(reaches);
 	return reached.length > IMPLICIT_SCOPE_NEIGHBOR_CAP
 		? {

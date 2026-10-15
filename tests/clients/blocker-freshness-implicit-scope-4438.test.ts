@@ -78,15 +78,27 @@ function stale(runtime: RuntimeCoordinator): boolean | undefined {
 }
 
 describe("inline-blocker sweep: Go package peers (#4438)", () => {
+	const verdictAgo = (): number => Date.now() - 10_000;
+
+	/** A write pi-lens recorded, as every write tool and bash recovery does. */
+	function write(
+		runtime: RuntimeCoordinator,
+		file: string,
+		content: string,
+	): void {
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(file, content);
+		runtime.recordProjectMutation({ filePath: file, source: "agent-edit" });
+	}
+
 	it("demotes a Go blocker when a package peer is edited", async () => {
 		const dir = project("go-edit", {
 			"a.go": "package p\n\nvar X = Y\n",
 			"b.go": "package p\n\nconst Z = 1\n",
 		});
 		const runtime = new RuntimeCoordinator();
-		block(runtime, path.join(dir, "a.go"));
-		fs.writeFileSync(path.join(dir, "b.go"), "package p\n\nconst Y = 1\n");
-		later(path.join(dir, "b.go"));
+		block(runtime, path.join(dir, "a.go"), ["lsp"], verdictAgo());
+		write(runtime, path.join(dir, "b.go"), "package p\n\nconst Y = 1\n");
 
 		const counts = await sweepInlineBlockerFreshness(runtime, dir);
 		expect(counts.revalidated).toBe(1);
@@ -96,9 +108,8 @@ describe("inline-blocker sweep: Go package peers (#4438)", () => {
 	it("demotes a Go blocker when a package peer is created", async () => {
 		const dir = project("go-create", { "a.go": "package p\n\nvar X = Y\n" });
 		const runtime = new RuntimeCoordinator();
-		block(runtime, path.join(dir, "a.go"));
-		fs.writeFileSync(path.join(dir, "c.go"), "package p\n\nconst Y = 1\n");
-		later(path.join(dir, "c.go"));
+		block(runtime, path.join(dir, "a.go"), ["lsp"], verdictAgo());
+		write(runtime, path.join(dir, "c.go"), "package p\n\nconst Y = 1\n");
 
 		expect((await sweepInlineBlockerFreshness(runtime, dir)).revalidated).toBe(
 			1,
@@ -106,37 +117,148 @@ describe("inline-blocker sweep: Go package peers (#4438)", () => {
 		expect(stale(runtime)).toBe(true);
 	});
 
-	it("demotes a Go blocker when a package peer is deleted", async () => {
+	// #4438 r2 (F2): a demotion needs a peer pi-lens saw written. A deleted
+	// peer has no package clause left to read, so the blocker stays, as the
+	// import axis keeps a deleted dependency (#1631). Round 1 demoted on the
+	// directory's mtime.
+	it("keeps a Go blocker when a package peer is deleted", async () => {
 		const dir = project("go-delete", {
 			"a.go": "package p\n\nvar X = Y\n",
 			"b.go": "package p\n\nconst Y = 1\n",
 		});
 		const runtime = new RuntimeCoordinator();
-		block(runtime, path.join(dir, "a.go"));
+		block(runtime, path.join(dir, "a.go"), ["lsp"], verdictAgo());
 		fs.rmSync(path.join(dir, "b.go"));
-		// The deletion's only trace is the directory's mtime.
+		runtime.recordProjectMutation({
+			filePath: path.join(dir, "b.go"),
+			source: "agent-edit",
+		});
 		later(dir);
 
-		expect((await sweepInlineBlockerFreshness(runtime, dir)).revalidated).toBe(
-			1,
-		);
+		expect((await sweepInlineBlockerFreshness(runtime, dir)).kept).toBe(1);
 	});
 
-	// Recurrence the package check would add: the own file's mtime is in the
-	// package's, so a `touch` of the blocker's own Go file would demote a
-	// verdict whose bytes the content axis just confirmed unchanged.
+	// Recurrence: the own file's write is the content axis's, so a `touch`
+	// of the blocker's own Go file must not demote a verdict whose bytes the
+	// content axis just confirmed unchanged.
 	it("keeps a Go blocker when only its own file is touched", async () => {
 		const dir = project("go-touch", {
 			"a.go": "package p\n\nvar X = Y\n",
 			"b.go": "package p\n\nconst Z = 1\n",
 		});
 		const runtime = new RuntimeCoordinator();
-		block(runtime, path.join(dir, "a.go"));
+		block(runtime, path.join(dir, "a.go"), ["lsp"], verdictAgo());
 		later(path.join(dir, "a.go"));
+		runtime.recordProjectMutation({
+			filePath: path.join(dir, "a.go"),
+			source: "agent-edit",
+		});
 
 		const counts = await sweepInlineBlockerFreshness(runtime, dir);
 		expect(counts.kept).toBe(1);
 		expect(stale(runtime)).toBe(false);
+	});
+
+	// #4438 r2 (F2, review S7): an atomic save rewrites the own file through
+	// a temp file and a rename; the bytes are the same and the directory's
+	// mtime moves. Round 1 demoted on that directory mtime.
+	it("keeps a Go blocker when its own file is saved byte-identical through a rename", async () => {
+		const dir = project("go-rename", {
+			"a.go": "package p\n\nvar X = Y\n",
+			"b.go": "package p\n\nconst Z = 1\n",
+		});
+		const runtime = new RuntimeCoordinator();
+		block(runtime, path.join(dir, "a.go"), ["lsp"], verdictAgo());
+		const temp = path.join(dir, ".a.go.tmp");
+		fs.writeFileSync(temp, fs.readFileSync(path.join(dir, "a.go")));
+		fs.renameSync(temp, path.join(dir, "a.go"));
+		later(dir);
+		runtime.recordProjectMutation({
+			filePath: path.join(dir, "a.go"),
+			source: "agent-edit",
+		});
+
+		expect((await sweepInlineBlockerFreshness(runtime, dir)).kept).toBe(1);
+	});
+
+	// #4438 r2 (F2, review S4): a file that is not Go source is no peer.
+	it("keeps a Go blocker when a non-Go file is created in its directory", async () => {
+		const dir = project("go-notes", { "a.go": "package p\n\nvar X = Y\n" });
+		const runtime = new RuntimeCoordinator();
+		block(runtime, path.join(dir, "a.go"), ["lsp"], verdictAgo());
+		write(runtime, path.join(dir, "NOTES.md"), "notes\n");
+		later(dir);
+
+		expect((await sweepInlineBlockerFreshness(runtime, dir)).kept).toBe(1);
+	});
+
+	// #4438 r2 (F2, review S5): an external test package imports the package
+	// it tests; its edit cannot change the package's own diagnostics.
+	it("keeps a Go blocker when an external test package file is edited", async () => {
+		const dir = project("go-xtest", { "a.go": "package p\n\nvar X = Y\n" });
+		const runtime = new RuntimeCoordinator();
+		block(runtime, path.join(dir, "a.go"), ["lsp"], verdictAgo());
+		write(
+			runtime,
+			path.join(dir, "a_test.go"),
+			'package p_test\n\nimport "testing"\n\nfunc TestX(t *testing.T) {}\n',
+		);
+
+		expect((await sweepInlineBlockerFreshness(runtime, dir)).kept).toBe(1);
+	});
+
+	// #4438 r2 (F2): an in-package test file is compiled only into the test
+	// variant, so it does not change a non-test file's verdict either.
+	it("keeps a Go blocker when an in-package test file is edited", async () => {
+		const dir = project("go-itest", { "a.go": "package p\n\nvar X = Y\n" });
+		const runtime = new RuntimeCoordinator();
+		block(runtime, path.join(dir, "a.go"), ["lsp"], verdictAgo());
+		write(runtime, path.join(dir, "b_test.go"), "package p\n\nconst Y = 1\n");
+
+		expect((await sweepInlineBlockerFreshness(runtime, dir)).kept).toBe(1);
+	});
+
+	it("keeps a Go blocker when a file of another package clause is edited", async () => {
+		const dir = project("go-clause", { "a.go": "package p\n\nvar X = Y\n" });
+		const runtime = new RuntimeCoordinator();
+		block(runtime, path.join(dir, "a.go"), ["lsp"], verdictAgo());
+		write(runtime, path.join(dir, "gen.go"), "package q\n\nconst Y = 1\n");
+
+		expect((await sweepInlineBlockerFreshness(runtime, dir)).kept).toBe(1);
+	});
+
+	// #4438 r2 (F2, review S6): a peer built only for another OS is not in
+	// the host's package build. The tag is never the host's.
+	const otherOs = process.platform === "win32" ? "darwin" : "windows";
+
+	it("keeps a Go blocker when a peer whose build line excludes the host is edited", async () => {
+		const dir = project("go-build-line", {
+			"a.go": "package p\n\nvar X = Y\n",
+		});
+		const runtime = new RuntimeCoordinator();
+		block(runtime, path.join(dir, "a.go"), ["lsp"], verdictAgo());
+		write(
+			runtime,
+			path.join(dir, "b.go"),
+			`//go:build ${otherOs}\n\npackage p\n\nconst Y = 1\n`,
+		);
+
+		expect((await sweepInlineBlockerFreshness(runtime, dir)).kept).toBe(1);
+	});
+
+	it("keeps a Go blocker when a peer whose file name excludes the host is edited", async () => {
+		const dir = project("go-build-name", {
+			"a.go": "package p\n\nvar X = Y\n",
+		});
+		const runtime = new RuntimeCoordinator();
+		block(runtime, path.join(dir, "a.go"), ["lsp"], verdictAgo());
+		write(
+			runtime,
+			path.join(dir, `b_${otherOs}.go`),
+			"package p\n\nconst Y = 1\n",
+		);
+
+		expect((await sweepInlineBlockerFreshness(runtime, dir)).kept).toBe(1);
 	});
 
 	it("keeps a Go blocker when a Go file in another package is edited", async () => {
@@ -145,8 +267,8 @@ describe("inline-blocker sweep: Go package peers (#4438)", () => {
 			"q/b.go": "package q\n\nconst Y = 1\n",
 		});
 		const runtime = new RuntimeCoordinator();
-		block(runtime, path.join(dir, "p", "a.go"));
-		later(path.join(dir, "q", "b.go"));
+		block(runtime, path.join(dir, "p", "a.go"), ["lsp"], verdictAgo());
+		write(runtime, path.join(dir, "q", "b.go"), "package q\n\nconst Y = 2\n");
 
 		expect((await sweepInlineBlockerFreshness(runtime, dir)).kept).toBe(1);
 	});
@@ -157,8 +279,8 @@ describe("inline-blocker sweep: Go package peers (#4438)", () => {
 			"b.go": "package p\n\nconst Y = 1\n",
 		});
 		const runtime = new RuntimeCoordinator();
-		block(runtime, path.join(dir, "a.go"), ["tree-sitter"]);
-		later(path.join(dir, "b.go"));
+		block(runtime, path.join(dir, "a.go"), ["tree-sitter"], verdictAgo());
+		write(runtime, path.join(dir, "b.go"), "package p\n\nconst Y = 2\n");
 
 		expect((await sweepInlineBlockerFreshness(runtime, dir)).kept).toBe(1);
 		expect(stale(runtime)).toBe(false);
@@ -269,6 +391,142 @@ describe("inline-blocker sweep: ambient files (#4438)", () => {
 
 		const counts = await sweepInlineBlockerFreshness(runtime, dir);
 		expect(counts.kept).toBe(1);
+		expect(counts.truncatedImports).toBe(1);
+	});
+
+	// #4438 r2 (F1, review S1): a receipt whose file is gone is no evidence.
+	// Round 1 asked the cache's fail-closed classifier, which answers "feeds"
+	// for an unreadable file, and demoted every earlier JS/TS blocker.
+	it("keeps a JS/TS blocker when the file written after it is deleted", async () => {
+		const dir = project("ambient-deleted", {
+			"use.ts": "export const u: number = FOO;\n",
+		});
+		const runtime = new RuntimeCoordinator();
+		block(runtime, path.join(dir, "use.ts"), ["lsp"], verdictAgo());
+		const helper = path.join(dir, "helper.ts");
+		fs.writeFileSync(helper, "export const h = 1;\n");
+		runtime.recordProjectMutation({ filePath: helper, source: "agent-write" });
+		fs.rmSync(helper);
+
+		const counts = await sweepInlineBlockerFreshness(runtime, dir);
+		expect(counts.kept).toBe(1);
+		expect(counts.truncatedImports).toBe(0);
+		expect(stale(runtime)).toBe(false);
+	});
+
+	// #4438 r2 (F1, review S1b): the same after a sweep classified the file.
+	it("keeps a JS/TS blocker when a module a sweep classified is deleted", async () => {
+		const dir = project("ambient-deleted-later", {
+			"use.ts": "export const u: number = FOO;\n",
+			"helper.ts": "export const h = 1;\n",
+		});
+		const runtime = new RuntimeCoordinator();
+		block(runtime, path.join(dir, "use.ts"), ["lsp"], verdictAgo());
+		const helper = path.join(dir, "helper.ts");
+		runtime.recordProjectMutation({ filePath: helper, source: "agent-edit" });
+		expect((await sweepInlineBlockerFreshness(runtime, dir)).kept).toBe(1);
+
+		fs.rmSync(helper);
+		expect((await sweepInlineBlockerFreshness(runtime, dir)).kept).toBe(1);
+		expect(stale(runtime)).toBe(false);
+	});
+
+	// #4438 r2 (F1, review S9): a module over the LSP sync limits cannot be
+	// classified; that is a cut, not a demotion. Five pi-lens files are over
+	// the limits (`clients/lsp/index.ts` among them), so each of their edits
+	// demoted every earlier TS blocker in round 1.
+	it("keeps a JS/TS blocker and counts the cut when the file written after it is over the sync limits", async () => {
+		const lines = ["import * as fs from 'node:fs';"];
+		for (let i = 0; i < 5_100; i++) lines.push(`export const v${i} = ${i};`);
+		const dir = project("ambient-oversized", {
+			"use.ts": "export const u: number = FOO;\n",
+			"big.ts": `${lines.join("\n")}\n`,
+		});
+		const runtime = new RuntimeCoordinator();
+		block(runtime, path.join(dir, "use.ts"), ["lsp"], verdictAgo());
+		runtime.recordProjectMutation({
+			filePath: path.join(dir, "big.ts"),
+			source: "agent-edit",
+		});
+
+		const counts = await sweepInlineBlockerFreshness(runtime, dir);
+		expect(counts.kept).toBe(1);
+		expect(counts.truncatedImports).toBe(1);
+		expect(stale(runtime)).toBe(false);
+	});
+
+	// #4438 r2 (F3, review S2): receipts are session-wide, and a linked
+	// worktree records its own; an ambient file outside the sweep's root is
+	// not in the blocker's scope.
+	it("keeps a JS/TS blocker when the ambient file written after it is outside the root", async () => {
+		const dir = project("ambient-root", {
+			"app/use.ts": "export const u: number = FOO;\n",
+		});
+		const runtime = new RuntimeCoordinator();
+		block(runtime, path.join(dir, "app", "use.ts"), ["lsp"], verdictAgo());
+		const outside = path.join(dir, "other", "globals.d.ts");
+		fs.mkdirSync(path.dirname(outside), { recursive: true });
+		fs.writeFileSync(outside, "declare const FOO: number;\n");
+		runtime.recordProjectMutation({ filePath: outside, source: "agent-write" });
+
+		const counts = await sweepInlineBlockerFreshness(
+			runtime,
+			path.join(dir, "app"),
+		);
+		expect(counts.kept).toBe(1);
+		expect(stale(runtime)).toBe(false);
+	});
+
+	// #4438 r2 (F4, review U4): a file its name decides (a declaration file,
+	// a file that is not JS/TS) costs no parse, so 33 newer `.md` receipts do
+	// not spend the budget before the older ambient one is read.
+	it("reads past receipts its name decides without spending the parse budget", async () => {
+		const files: Record<string, string> = {
+			"use.ts": "export const u: number = FOO;\n",
+			"globals.d.ts": "declare const FOO: number;\n",
+		};
+		for (let i = 0; i < 33; i++) files[`n${i}.md`] = `note ${i}\n`;
+		const dir = project("ambient-by-name", files);
+		const runtime = new RuntimeCoordinator();
+		block(runtime, path.join(dir, "use.ts"), ["lsp"], verdictAgo());
+		runtime.recordProjectMutation({
+			filePath: path.join(dir, "globals.d.ts"),
+			source: "agent-write",
+		});
+		for (let i = 0; i < 33; i++) {
+			runtime.recordProjectMutation({
+				filePath: path.join(dir, `n${i}.md`),
+				source: "agent-edit",
+			});
+		}
+
+		const counts = await sweepInlineBlockerFreshness(runtime, dir);
+		expect(counts.revalidated).toBe(1);
+		expect(counts.truncatedImports).toBe(0);
+	});
+
+	// #4438 r2 (F5): the cut is per entry. A second blocker recorded after
+	// every receipt reads none of them and is not counted.
+	it("counts the cut only for the entry whose check stopped short", async () => {
+		const files: Record<string, string> = {
+			"use.ts": "export const u: number = FOO;\n",
+			"late.ts": "export const l: number = FOO;\n",
+		};
+		for (let i = 0; i < 40; i++)
+			files[`m${i}.ts`] = `export const m${i} = 1;\n`;
+		const dir = project("ambient-cut-per-entry", files);
+		const runtime = new RuntimeCoordinator();
+		block(runtime, path.join(dir, "use.ts"), ["lsp"], verdictAgo());
+		for (let i = 0; i < 40; i++) {
+			runtime.recordProjectMutation({
+				filePath: path.join(dir, `m${i}.ts`),
+				source: "agent-edit",
+			});
+		}
+		block(runtime, path.join(dir, "late.ts"), ["lsp"], Date.now() + 1_000);
+
+		const counts = await sweepInlineBlockerFreshness(runtime, dir);
+		expect(counts.kept).toBe(2);
 		expect(counts.truncatedImports).toBe(1);
 	});
 

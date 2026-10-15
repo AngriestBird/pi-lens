@@ -15,7 +15,16 @@
  * cache reads it for an entry's dependency scope (`workspace-diagnostics-cache.ts`),
  * the inline-blocker sweep for a blocker's (`blocker-freshness.ts`), and the
  * cascade in the inverse direction, for the files a change reaches
- * (`dispatch/integration.ts`, #4438). The created-module producer announces a
+ * (`dispatch/integration.ts`, #4438).
+ *
+ * #4438 r2: the cache and the other two differ in what a doubt costs. For the
+ * cache a member it cannot rule out costs one refusal and one re-touch, so it
+ * fails closed ({@link feedsJsTsGlobalScope}, the directory clock of
+ * {@link goPackageChangedAt}). The sweep demotes a blocker, which retires it
+ * after three deliveries, and the cascade touches files and renders an
+ * advisory; both act only on positive evidence: a role
+ * {@link classifyJsTsGlobalScope} read as `"feeds"`, a Go peer
+ * {@link goPackagePeersOf} admits. The created-module producer announces a
  * Go file's package files to its servers (`created-import-targets.ts`). Other
  * languages' implicit scopes are not modelled; the cache treats their finding
  * entries' scope as unknown.
@@ -90,26 +99,148 @@ export function implicitScopeOf(
 }
 
 /**
- * #4346, moved here by #4438: when the Go package in `dir` last changed: the
- * directory's own mtime (a file added, removed or renamed) or the newest Go
- * file's, leaving `exclude` (a path as {@link goPackageFiles} spells it) out.
- * `undefined` when the directory or a file cannot be stat'ed, which callers
- * read as changed.
+ * #4346, moved here by #4438: when the Go package in `dir` last changed, for
+ * the diagnostics cache: the directory's own mtime (a file added, removed or
+ * renamed) or the newest Go file's. `undefined` when the directory or a file
+ * cannot be stat'ed, which the cache reads as changed.
  */
-export function goPackageChangedAt(
-	dir: string,
-	exclude?: string,
-): number | undefined {
+export function goPackageChangedAt(dir: string): number | undefined {
 	try {
 		let changedAt = fs.statSync(dir).mtimeMs;
 		for (const peer of goPackageFiles(dir) ?? []) {
-			if (peer === exclude) continue;
 			changedAt = Math.max(changedAt, fs.statSync(peer).mtimeMs);
 		}
 		return changedAt;
 	} catch {
 		return undefined;
 	}
+}
+
+/** Bytes of a Go file read for its build line and package clause. */
+const GO_HEADER_BYTES = 8 * 1024;
+
+/** `GOOS` values (`go tool dist list`), for build lines and file names. */
+const KNOWN_GOOS = new Set(
+	"aix android darwin dragonfly freebsd hurd illumos ios js linux netbsd openbsd plan9 solaris wasip1 windows zos".split(
+		" ",
+	),
+);
+/** `GOARCH` values (`go tool dist list`). */
+const KNOWN_GOARCH = new Set(
+	"386 amd64 arm arm64 loong64 mips mips64 mips64le mipsle ppc64 ppc64le riscv64 s390x wasm".split(
+		" ",
+	),
+);
+const GOOS_BY_PLATFORM: Record<string, string> = {
+	win32: "windows",
+	sunos: "solaris",
+};
+const GOARCH_BY_ARCH: Record<string, string> = { x64: "amd64", ia32: "386" };
+const UNIX_GOOS = new Set(
+	"aix android darwin dragonfly freebsd hurd illumos ios linux netbsd openbsd solaris".split(
+		" ",
+	),
+);
+
+/** Whether the host's Go build (`GOOS`/`GOARCH`, else the platform) satisfies `tag`. */
+function hostSatisfiesGoTag(tag: string): boolean {
+	const goos =
+		process.env.GOOS || GOOS_BY_PLATFORM[process.platform] || process.platform;
+	const goarch =
+		process.env.GOARCH || GOARCH_BY_ARCH[process.arch] || process.arch;
+	return (
+		tag === goos || tag === goarch || (tag === "unix" && UNIX_GOOS.has(goos))
+	);
+}
+
+/**
+ * Whether a Go file is left out of the host's build: by a `_GOOS`, `_GOARCH`
+ * or `_GOOS_GOARCH` file-name suffix, or by a `//go:build` line of one OS or
+ * architecture term (`windows`, `!linux`). A compound line counts as built:
+ * that over-includes, so a peer it would exclude still demotes (stated
+ * trade-off, #4438 r2).
+ */
+function goBuildExcludesHost(filePath: string, header: string): boolean {
+	const parts = path
+		.basename(filePath, ".go")
+		.replace(/_test$/, "")
+		.split("_");
+	const last = parts.at(-1) ?? "";
+	const prev = parts.length > 2 ? (parts.at(-2) ?? "") : "";
+	if (parts.length > 1 && KNOWN_GOARCH.has(last)) {
+		if (!hostSatisfiesGoTag(last)) return true;
+		if (KNOWN_GOOS.has(prev) && !hostSatisfiesGoTag(prev)) return true;
+	} else if (
+		parts.length > 1 &&
+		KNOWN_GOOS.has(last) &&
+		!hostSatisfiesGoTag(last)
+	) {
+		return true;
+	}
+	const term = /^\/\/go:build\s+(!?)([\w.]+)\s*$/m.exec(header);
+	if (!term) return false;
+	const tag = term[2]!;
+	if (!KNOWN_GOOS.has(tag) && !KNOWN_GOARCH.has(tag) && tag !== "unix")
+		return false;
+	return hostSatisfiesGoTag(tag) === (term[1] === "!");
+}
+
+/** The first `GO_HEADER_BYTES` of a Go file, or `undefined` when unreadable. */
+function goHeaderOf(filePath: string): string | undefined {
+	let fd: number | undefined;
+	try {
+		fd = fs.openSync(filePath, "r");
+		const buffer = Buffer.alloc(GO_HEADER_BYTES);
+		const read = fs.readSync(fd, buffer, 0, GO_HEADER_BYTES, 0);
+		return buffer.toString("utf8", 0, read);
+	} catch {
+		return undefined;
+	} finally {
+		if (fd !== undefined) fs.closeSync(fd);
+	}
+}
+
+/** The package clause of a Go file's header, comments skipped. */
+function goPackageClauseOf(header: string): string | undefined {
+	const code = header
+		.replace(/\/\*[\s\S]*?\*\//g, " ")
+		.replace(/\/\/[^\n]*/g, "");
+	return /^\s*package\s+([\p{L}_][\p{L}\p{N}_]*)/mu.exec(code)?.[1];
+}
+
+/**
+ * #4438 r2: the Go files whose write is evidence that `filePath`'s verdict
+ * may have changed, as a membership test over `normalizeMapKey` spellings, or
+ * `undefined` when `filePath` is not Go or its package clause cannot be read.
+ * A peer counts when {@link implicitScopeOf} holds it, it reads, it has the
+ * same package clause (so `package p_test` does not), it is not a `_test.go`
+ * file unless `filePath` is one (a test file is compiled only into the test
+ * variant), and the host build includes it ({@link goBuildExcludesHost}).
+ * An unreadable peer, a deleted one included, is no evidence.
+ */
+export function goPackagePeersOf(
+	filePath: string,
+): ((peer: string) => boolean) | undefined {
+	const inScope = isGoSourceFile(filePath)
+		? implicitScopeOf(filePath)
+		: undefined;
+	const ownHeader = inScope && goHeaderOf(filePath);
+	const clause = ownHeader ? goPackageClauseOf(ownHeader) : undefined;
+	if (!inScope || !clause) return undefined;
+	const testFile = isGoTestFile(filePath);
+	return (peer) => {
+		if (!inScope(peer) || (isGoTestFile(peer) && !testFile)) return false;
+		const header = goHeaderOf(peer);
+		return (
+			header !== undefined &&
+			goPackageClauseOf(header) === clause &&
+			!goBuildExcludesHost(peer, header)
+		);
+	};
+}
+
+function isGoTestFile(filePath: string): boolean {
+	return filePath.toLowerCase().endsWith("_test.go");
 }
 
 /** What a parse of `filePath` must look for, by extension. */
@@ -134,36 +265,52 @@ function probeFor(filePath: string): GlobalScopeProbe | undefined {
 }
 
 /**
+ * #4438 r2: a file's role in the TS/JS global scope. `"unknown"` when no
+ * answer could be read: the file is unreadable or over the LSP sync limits,
+ * the parser does not load, or the parse fails.
+ */
+export type GlobalScopeRole = "feeds" | "none" | "unknown";
+
+/**
+ * #4438 r2: the role `filePath`'s name decides with no read (a declaration
+ * file always feeds; a file no parse probes, such as `.mjs`, `.vue` or a
+ * non-JS/TS file, never does), or `undefined` when a parse must decide.
+ */
+export function globalScopeRoleByName(
+	filePath: string,
+): GlobalScopeRole | undefined {
+	if (isDeclarationFile(filePath)) return "feeds";
+	return probeFor(filePath) ? undefined : "none";
+}
+
+/**
  * Whether `filePath` feeds the TS/JS global scope. A declaration file always
  * counts. A TS file counts when it is a script or holds `declare global` or
  * `declare module`; a `.js`/`.jsx` file when it is a script with no CommonJS
  * marker (`require(...)`, `module.exports`, `exports.x`), which TypeScript
  * treats as a module. `.mjs`, `.cjs`, Vue and Svelte files never count.
- *
- * Fails closed: an unreadable file, one over the LSP sync limits, or a parser
- * that does not load answers true, so the caller refuses rather than serves.
  * A parser that does not load is recorded once per session.
  */
-export function feedsJsTsGlobalScope(filePath: string): boolean {
-	if (isDeclarationFile(filePath)) return true;
-	const probe = probeFor(filePath);
-	if (!probe) return false;
+export function classifyJsTsGlobalScope(filePath: string): GlobalScopeRole {
+	const byName = globalScopeRoleByName(filePath);
+	if (byName) return byName;
+	const probe = probeFor(filePath)!;
 	let content: string;
 	try {
 		content = fs.readFileSync(filePath, "utf8");
 	} catch {
-		return true;
+		return "unknown";
 	}
-	if (exceedsLspSyncLimits(content).tooLarge) return true;
+	if (exceedsLspSyncLimits(content).tooLarge) return "unknown";
 	const napi = loadAstGrepNapiSync();
 	if (!napi) {
 		recordDegradationOnce({
 			kind: "ast-grep-napi-unavailable",
 			subject: "implicit-scope",
 			reason:
-				"native addon failed to load; every created JS/TS file counts as feeding the global scope",
+				"native addon failed to load; every created JS/TS file counts as feeding the global scope in the diagnostics cache, and its role is unknown to the blocker sweep and the cascade",
 		});
-		return true;
+		return "unknown";
 	}
 	const lang =
 		probe === "js-script"
@@ -175,7 +322,7 @@ export function feedsJsTsGlobalScope(filePath: string): boolean {
 	try {
 		root = napi.parse(lang, content).root();
 	} catch {
-		return true;
+		return "unknown";
 	}
 	let isModule = false;
 	for (const child of root.children()) {
@@ -188,14 +335,25 @@ export function feedsJsTsGlobalScope(filePath: string): boolean {
 				.children()
 				.some((part) => part.kind() === "global" || part.kind() === "module")
 		) {
-			return true;
+			return "feeds";
 		}
 	}
-	if (probe === "ambient" || isModule) return false;
+	if (probe === "ambient" || isModule) return "none";
 	if (probe === "js-script") {
-		return !["require($$$ARGS)", "module.exports", "exports.$NAME"].some(
+		return ["require($$$ARGS)", "module.exports", "exports.$NAME"].some(
 			(pattern) => root.find(pattern) !== null,
-		);
+		)
+			? "none"
+			: "feeds";
 	}
-	return true;
+	return "feeds";
+}
+
+/**
+ * The diagnostics cache's answer: {@link classifyJsTsGlobalScope}, failing
+ * closed, so an unknown role counts as feeding and the cache refuses rather
+ * than serves.
+ */
+export function feedsJsTsGlobalScope(filePath: string): boolean {
+	return classifyJsTsGlobalScope(filePath) !== "none";
 }

@@ -3766,6 +3766,97 @@ describe("computeCascadeForFile", () => {
 			}
 		});
 
+		// #4438 r2 (F1): a changed file the classifier cannot read (here over
+		// the LSP sync limits, as `clients/lsp/index.ts` is) is no evidence of
+		// a global-scope feed. Round 1 asked the cache's fail-closed answer,
+		// touched 10 unrelated files and rendered a false budget advisory.
+		it("adds no implicit neighbour when the changed module is over the sync limits", async () => {
+			const env = setupTestEnvironment("cascade-4438-oversized-");
+			try {
+				const primary = path.join(env.tmpDir, "big.ts");
+				const lines = ["import * as fs from 'node:fs';"];
+				for (let i = 0; i < 5_100; i++) {
+					lines.push(`export const v${i} = ${i};`);
+				}
+				fs.writeFileSync(primary, `${lines.join("\n")}\n`);
+				const users: string[] = [];
+				for (let i = 0; i < 14; i++) {
+					const user = path.join(env.tmpDir, `u${i}.ts`);
+					fs.writeFileSync(user, `export const u${i} = 1;\n`);
+					users.push(user);
+				}
+				mocks.buildOrUpdateGraph.mockResolvedValue(graphWith(users));
+				mocks.computeImpactCascade.mockReturnValue(impact(primary, []));
+				const touchFile = vi.fn();
+				mocks.getLSPService.mockReturnValue({
+					...makeLspServiceDouble(),
+					getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
+					touchFile,
+					getDiagnostics: vi.fn(),
+				});
+
+				const { computeCascadeForFile } =
+					await import("../../clients/dispatch/integration.js");
+				const result = await computeCascadeForFile(primary, env.tmpDir, {
+					turnSeq: 1,
+					writeSeq: 1,
+				});
+
+				expect(touchFile).not.toHaveBeenCalled();
+				expect(result?.neighborCount).toBe(0);
+				expect(result?.indeterminate).toBeUndefined();
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		// #4438 r2 (F2): the cascade's Go peers need the same evidence as the
+		// sweep's: same package clause, in the host build. A test file is
+		// already dropped by the cascade's test-role filter.
+		it("touches only the Go peers of the changed file's package build", async () => {
+			const env = setupTestEnvironment("cascade-4438-go-evidence-");
+			try {
+				const primary = path.join(env.tmpDir, "b.go");
+				const peer = path.join(env.tmpDir, "a.go");
+				const otherOs = process.platform === "win32" ? "darwin" : "windows";
+				fs.writeFileSync(primary, "package p\n\nconst Y = 1\n");
+				fs.writeFileSync(peer, "package p\n\nvar X = Y\n");
+				fs.writeFileSync(
+					path.join(env.tmpDir, "gen.go"),
+					"package q\n\nconst Z = 1\n",
+				);
+				fs.writeFileSync(
+					path.join(env.tmpDir, "c.go"),
+					`//go:build ${otherOs}\n\npackage p\n\nvar W = Y\n`,
+				);
+				fs.writeFileSync(
+					path.join(env.tmpDir, `d_${otherOs}.go`),
+					"package p\n\nvar V = Y\n",
+				);
+				mocks.computeImpactCascade.mockReturnValue(impact(primary, []));
+				const touchFile = vi
+					.fn()
+					.mockResolvedValue({ diags: [lspError("undefined: Y")] });
+				mocks.getLSPService.mockReturnValue({
+					...makeLspServiceDouble(),
+					getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
+					touchFile,
+					getDiagnostics: vi.fn(),
+				});
+
+				const { computeCascadeForFile } =
+					await import("../../clients/dispatch/integration.js");
+				await computeCascadeForFile(primary, env.tmpDir, {
+					turnSeq: 1,
+					writeSeq: 1,
+				});
+
+				expect(touchFile.mock.calls.map(([file]) => file)).toEqual([peer]);
+			} finally {
+				env.cleanup();
+			}
+		});
+
 		it("adds no implicit neighbour when the changed file is a module", async () => {
 			const env = setupTestEnvironment("cascade-4438-module-");
 			try {

@@ -101,12 +101,14 @@
  * Implicit scope (#4438). An LSP verdict also depends on files no import names:
  * a Go file's package peers and, for a JS/TS file, every file that feeds the
  * global scope (`clients/lsp/implicit-scope.ts`, the diagnostics cache's scope).
- * A Go blocker is demoted when its package changed after the verdict (a peer's
- * mtime, or the directory's for a peer added or removed; its own file is left
- * to the content axis). A JS/TS blocker is demoted when a mutation receipt
- * after the verdict names a file that feeds the global scope. The receipts are
- * the writes pi-lens observed (every tool, bash included); a writer pi-lens
- * never sees, and a deletion, leave the blocker as it is (#4438 R1, R2).
+ * A blocker is demoted when a mutation receipt after the verdict, under the
+ * sweep's root, names such a file: for a Go blocker a same-package, non-test
+ * peer in the host build (its own file is left to the content axis), for a
+ * JS/TS blocker a file whose role reads as feeding the global scope. Only
+ * positive evidence demotes (#4438 r2): a file whose role cannot be read is a
+ * cut counted in `truncatedImports`. The receipts are the writes pi-lens
+ * observed (every tool, bash included); a writer pi-lens never sees, and a
+ * deletion, leave the blocker as it is (#4476).
  *
  * Delivery cap (#1950). A demoted-but-confirmable entry (`alreadyStale` above)
  * is deliberately NOT retired after its past-EOF sibling's one-delivery rule
@@ -142,19 +144,24 @@
  */
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
-import * as nodePath from "node:path";
 import { BoundedLruCache } from "./bounded-cache.js";
 import { bounded } from "./deadline-utils.js";
 import { recordDegradationOnce } from "./degradation-ledger.js";
 import { HOOK_WALL_BUDGET_MS } from "./hook-budgets.js";
 import {
-	feedsJsTsGlobalScope,
-	goPackageChangedAt,
+	classifyJsTsGlobalScope,
+	globalScopeRoleByName,
+	goPackagePeersOf,
 	implicitScopeOf,
 	isGoSourceFile,
+	type GlobalScopeRole,
 } from "./lsp/implicit-scope.js";
 import { notePathAppeared } from "./path-birth.js";
-import { normalizeEphemeralMapKey, normalizeMapKey } from "./path-utils.js";
+import {
+	isUnderDir,
+	normalizeEphemeralMapKey,
+	normalizeMapKey,
+} from "./path-utils.js";
 import { toRunnerDisplayPath } from "./dispatch/runner-context.js";
 import { resolveImportToFiles } from "./review-graph/import-resolvers.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
@@ -290,35 +297,36 @@ export interface BlockerFreshnessOptions {
 }
 
 /**
- * #4438: files one sweep may classify as feeding the TS/JS global scope or not
- * (`feedsJsTsGlobalScope` reads and parses a JS/TS file that is not a
- * declaration file). The receipts after a long-lived verdict can name hundreds
- * of files; past this budget a receipt is not read, the entry stays as it is,
- * and the cut is counted in `truncatedImports`.
+ * #4438: files one sweep may parse to classify their TS/JS global-scope role
+ * (`classifyJsTsGlobalScope` reads and parses a JS/TS file its name does not
+ * decide). The receipts after a long-lived verdict can name hundreds of
+ * files; past this budget a receipt is not classified, the entry stays as it
+ * is, and the cut is counted in `truncatedImports`. A role the name decides
+ * (a declaration file, a file that is not JS/TS) spends nothing (#4438 r2).
  */
 const MAX_IMPLICIT_SCOPE_PARSES = 32;
 
 /**
- * #4438: `feedsJsTsGlobalScope` answers across sweeps, keyed by the file's
- * stat identity (mtime, ctime and size, as {@link forwardImportSources} keys
- * its parses), so a file the receipts keep naming is parsed once per version,
+ * #4438: global-scope roles kept across sweeps, keyed by the file's stat
+ * identity (mtime, ctime and size, as {@link forwardImportSources} keys its
+ * parses), so a file the receipts keep naming is parsed once per version,
  * not once per turn: 32 parses cost ~23 ms on pi-lens's own files.
  */
-const GLOBAL_SCOPE_FEED_MEMO_ENTRIES = 1024;
-interface GlobalScopeFeedEntry {
+const GLOBAL_SCOPE_ROLE_MEMO_ENTRIES = 1024;
+interface GlobalScopeRoleEntry {
 	mtimeMs: number;
 	ctimeMs: number;
 	size: number;
-	feeds: boolean;
+	role: GlobalScopeRole;
 }
-const globalScopeFeedMemo = new BoundedLruCache<string, GlobalScopeFeedEntry>(
-	GLOBAL_SCOPE_FEED_MEMO_ENTRIES,
+const globalScopeRoleMemo = new BoundedLruCache<string, GlobalScopeRoleEntry>(
+	GLOBAL_SCOPE_ROLE_MEMO_ENTRIES,
 );
 
 interface ImplicitScopeDrift {
 	/** Files in the entry's implicit scope that changed after the verdict. */
 	drifted: string[];
-	/** The check stopped short (parse budget, or receipts evicted). */
+	/** The check stopped short (an unknown role, the parse budget, or receipts evicted). */
 	truncated: boolean;
 }
 
@@ -329,84 +337,95 @@ type ImplicitScopeCheck = (
 
 /**
  * #4438: one sweep's implicit-scope check (see the module doc). The receipts
- * are read once, at the first JS/TS entry, and each file is classified at most
- * once per sweep.
+ * are read once, at the first eligible entry; each file's role is read at
+ * most once per sweep, and each receipt's root containment once.
+ *
+ * #4438 r2: only positive evidence demotes. A receipt counts when it lies
+ * under `cwd` and names a file in the entry's scope: for a JS/TS entry one
+ * whose role reads `"feeds"`, for a Go entry a peer `goPackagePeersOf`
+ * admits. A file that no longer stats is no evidence and no cut (a deleted
+ * dependency is not drift, #1631); an `"unknown"` role or a spent budget is
+ * a cut.
  */
 function createImplicitScopeCheck(
 	runtime: RuntimeCoordinator,
+	cwd: string,
 ): ImplicitScopeCheck {
 	let receipts: Array<{ filePath: string; ts: number }> | undefined;
 	let receiptsDropped = false;
-	const feeds = new Map<string, boolean>();
+	const roles = new Map<string, GlobalScopeRole>();
+	const underRoot = new Map<string, boolean>();
 	let parses = 0;
-	let budgetSpent = false;
-	const feedsGlobalScope = (other: string): boolean => {
-		const known = feeds.get(other);
+	let cut = false;
+	const roleOf = (other: string): GlobalScopeRole => {
+		const known = roles.get(other);
 		if (known !== undefined) return known;
-		let stat: fs.Stats | undefined;
+		let stat: fs.Stats;
 		try {
 			stat = fs.statSync(other);
 		} catch {
-			// Unreadable: `feedsJsTsGlobalScope` fails closed with no parse.
+			roles.set(other, "none");
+			return "none";
 		}
 		const key = normalizeMapKey(other);
-		const memo = globalScopeFeedMemo.get(key);
-		let answer: boolean;
+		const memo = globalScopeRoleMemo.get(key);
+		let role: GlobalScopeRole;
 		if (
-			stat &&
 			memo?.mtimeMs === stat.mtimeMs &&
 			memo.ctimeMs === stat.ctimeMs &&
 			memo.size === stat.size
 		) {
-			answer = memo.feeds;
-		} else if (stat && parses >= MAX_IMPLICIT_SCOPE_PARSES) {
-			budgetSpent = true;
-			return false;
+			role = memo.role;
 		} else {
-			if (stat) parses += 1;
-			answer = feedsJsTsGlobalScope(other);
-			if (stat) {
-				globalScopeFeedMemo.set(key, {
+			const byName = globalScopeRoleByName(other);
+			if (byName) {
+				role = byName;
+			} else if (parses >= MAX_IMPLICIT_SCOPE_PARSES) {
+				return "unknown";
+			} else {
+				parses += 1;
+				role = classifyJsTsGlobalScope(other);
+				globalScopeRoleMemo.set(key, {
 					mtimeMs: stat.mtimeMs,
 					ctimeMs: stat.ctimeMs,
 					size: stat.size,
-					feeds: answer,
+					role,
 				});
 			}
 		}
-		feeds.set(other, answer);
-		return answer;
+		roles.set(other, role);
+		return role;
+	};
+	const feedsGlobalScope = (other: string): boolean => {
+		const role = roleOf(other);
+		if (role === "unknown") cut = true;
+		return role === "feeds";
+	};
+	const inRoot = (file: string): boolean => {
+		let held = underRoot.get(file);
+		if (held === undefined) {
+			held = isUnderDir(file, cwd);
+			underRoot.set(file, held);
+		}
+		return held;
 	};
 	return (filePath, recordedAtMs) => {
 		const key = normalizeMapKey(filePath);
-		const inScope = implicitScopeOf(key, feedsGlobalScope);
+		const inScope = isGoSourceFile(key)
+			? goPackagePeersOf(key)
+			: implicitScopeOf(key, feedsGlobalScope);
 		if (!inScope) return { drifted: [], truncated: false };
-		if (isGoSourceFile(key)) {
-			// The own file is the content axis's: a `touch` must not demote.
-			const dir = nodePath.dirname(filePath);
-			const changed = freshnessFromMtime({
-				mtimeMs: goPackageChangedAt(
-					dir,
-					nodePath.join(dir, nodePath.basename(filePath)),
-				),
-				referenceMs: recordedAtMs,
-			});
-			return {
-				drifted: changed.verdict === "stale" ? [dir] : [],
-				truncated: false,
-			};
-		}
 		if (receipts === undefined) {
 			const coordinator = runtime as Partial<RuntimeCoordinator>;
 			receipts = coordinator.getMutationsSince?.(0) ?? [];
 			receiptsDropped = (coordinator.droppedMutationReceiptCount ?? 0) > 0;
 		}
-		budgetSpent = false;
+		cut = false;
 		// Newest first: the fix that landed last is the likeliest one.
 		for (let i = receipts.length - 1; i >= 0; i--) {
 			const receipt = receipts[i]!;
 			if (receipt.ts <= recordedAtMs) break;
-			if (inScope(receipt.filePath)) {
+			if (inRoot(receipt.filePath) && inScope(receipt.filePath)) {
 				return { drifted: [receipt.filePath], truncated: false };
 			}
 		}
@@ -414,7 +433,7 @@ function createImplicitScopeCheck(
 		const evictedAfter =
 			receiptsDropped &&
 			(receipts.length === 0 || receipts[0]!.ts > recordedAtMs);
-		return { drifted: [], truncated: budgetSpent || evictedAfter };
+		return { drifted: [], truncated: cut || evictedAfter };
 	};
 }
 
@@ -1098,7 +1117,7 @@ export async function sweepInlineBlockerFreshness(
 	};
 	const resolveForwardImports =
 		options?.resolveForwardImports ?? extractForwardImportPaths;
-	const implicitScope = createImplicitScopeCheck(runtime);
+	const implicitScope = createImplicitScopeCheck(runtime, cwd);
 	let turnIndex: number | undefined;
 	try {
 		turnIndex = runtime.turnIndex;
