@@ -78,6 +78,7 @@ on:
       - "scripts/lib/lsp-fixture-workspace.mjs"
       - "scripts/lib/safe-rm.mjs"
       - "scripts/lib/scratch-dir.mjs"
+      - "scripts/lib/touch-result.mjs"
       - "clients/lsp/client-registry.ts"
       - "clients/lsp/jvm-runtime.ts"
       - "clients/lsp/launch.ts"
@@ -625,31 +626,6 @@ jobs:
         with:
           otp-version: "27"
           elixir-version: "1.18"
-
-      # The official Docker server has no installer-registry entry, and without
-      # it the `dockerfile-official` row fails on current master (the harness
-      # gets an empty touch result, then "no warm client": run 38648299846 and a
-      # local repro) instead of reporting unavailable. This is a copy of
-      # tool-smoke.yml's step of the same name (#3939): same release, same
-      # digests. Remove it when #4465 (the regression behind the empty touch
-      # result) lands, unless that fix shows the harness is wrong.
-      - name: Install official Docker language server v0.20.1
-        run: |
-          set -euo pipefail
-          case "$(uname -m)" in
-            x86_64) asset="docker-language-server-linux-amd64-v0.20.1"; digest="01907aa5b0eae11e44cffea0a993d08aa155542a9af570295dd1dff39e67692a" ;;
-            aarch64|arm64) asset="docker-language-server-linux-arm64-v0.20.1"; digest="bd56c7815e0a22cfb708669f3d5e817de91d9b54039ff7e52867142a132ad8d7" ;;
-            *) echo "unsupported runner architecture: $(uname -m)" >&2; exit 1 ;;
-          esac
-          dest="$RUNNER_TEMP/pi-lens-docker-language-server"
-          mkdir -p "$dest/bin"
-          curl --fail --location --proto '=https' --proto-redir '=https' --silent --show-error \
-            "https://github.com/docker/docker-language-server/releases/download/v0.20.1/$asset" \
-            --output "$dest/bin/docker-language-server"
-          printf '%s  %s\n' "$digest" "$dest/bin/docker-language-server" | sha256sum --check --status
-          chmod +x "$dest/bin/docker-language-server"
-          echo "$dest/bin" >> "$GITHUB_PATH"
-          "$dest/bin/docker-language-server" --version
 
       # The sibling shape (hot-path-latency.yml, ci.yml): a locked install with no
       # lifecycle scripts (Sonar S6505), then the one script this job needs.
