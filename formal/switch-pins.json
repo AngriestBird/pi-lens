@@ -51,6 +51,17 @@
 						}
 					]
 				},
+				"PendingGate": {
+					"value": "\"fresh\"",
+					"test": "tests/clients/cascade-turn-merge.test.ts",
+					"title": "is dropped when written outside pi after the check",
+					"also": [
+						{
+							"test": "tests/clients/cascade-turn-merge.test.ts",
+							"title": "is dropped when deleted"
+						}
+					]
+				},
 				"RecentlyClean": {
 					"value": "FALSE",
 					"test": "tests/clients/cascade-compute.test.ts",

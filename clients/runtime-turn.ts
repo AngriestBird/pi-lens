@@ -993,6 +993,34 @@ function formatWriteOrdinal(n: number): string {
 	}
 }
 
+/**
+ * #4495 review F1: the cascade pending record's freshness gate. Each entry is
+ * an observation at its `checkedAt`; one whose file is gone, or was written
+ * after that by something pi never saw, is forgotten and not rendered. The
+ * stat pass, its budget and its records are `gateFindingsByPathFreshness`'s.
+ */
+function gatePendingCascadeNeighbors<
+	T extends { filePath: string; checkedAt: number },
+>(candidates: readonly T[], cwd: string): readonly T[] {
+	if (candidates.length === 0) return candidates;
+	const { "cascade-pending-neighbors": pendingGate } =
+		gateFindingsByPathFreshness({
+			cwd,
+			sources: {
+				"cascade-pending-neighbors": {
+					findings: candidates,
+					citedPath: (entry: T) => entry.filePath,
+					scannedAtOf: (entry: T) => entry.checkedAt,
+				},
+			},
+		});
+	const live = new Set(pendingGate.live);
+	for (const entry of candidates) {
+		if (!live.has(entry)) forgetCascadePendingNeighbor(entry.filePath);
+	}
+	return pendingGate.live;
+}
+
 export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	const {
 		ctxCwd,
@@ -2159,11 +2187,24 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// derived from the record each turn, so a cut line needs no hold. Only
 	// turns that reach this merge render it (a read-only turn with no runs
 	// returns earlier).
-	const unresolvedNeighbors = listCascadePendingNeighbors().filter((entry) => {
+	const pendingCandidates = listCascadePendingNeighbors().filter((entry) => {
 		const key = normalizeMapKey(entry.filePath);
 		if (lastObserver.has(key) || editedKeys.has(key)) return false;
 		return isUnderDir(entry.filePath, cwd);
 	});
+	// #4495 review F1: the record's claim is an observation at `checkedAt`. A
+	// neighbour deleted since, or written since by something pi never saw (git
+	// checkout, an external editor), no longer has the content the errors
+	// were computed from, so the claim is forgotten rather than re-served as
+	// "unresolved": the same rule #4486 applies to a snapshot from before the
+	// edit. The stale arm is dropped, not demoted: a demoted line would repeat
+	// every turn with nothing but a cascade over that neighbour to clear it,
+	// and a later cascade re-observes the file anyway. An unreadable path or a
+	// spent stat budget fails open (the line renders).
+	const unresolvedNeighbors = gatePendingCascadeNeighbors(
+		pendingCandidates,
+		cwd,
+	);
 	if (unresolvedNeighbors.length > 0) {
 		const maxShown = RUNTIME_CONFIG.pipeline.cascadeMaxFiles;
 		const lines = unresolvedNeighbors

@@ -230,6 +230,7 @@ type DeliveryGuard = Pick<GenerationHandle, "guardedWrite">;
 function pruneExpiredOutstandingTouches(
 	now: number,
 	guard?: DeliveryGuard,
+	reads: ClientReads = new Map(),
 ): void {
 	const expired: OutstandingTouch[] = [];
 	for (const [key, touch] of _outstandingTouches) {
@@ -242,7 +243,7 @@ function pruneExpiredOutstandingTouches(
 	let found = 0;
 	let clean = 0;
 	for (const touch of expired) {
-		const outcome = readTouchedClient(touch, now);
+		const outcome = readTouchedClient(touch, now, reads);
 		if (!outcome) continue;
 		if (outcome.outcome === "resolved-found") found++;
 		else clean++;
@@ -266,6 +267,16 @@ function pruneExpiredOutstandingTouches(
 }
 
 /**
+ * One sweep's reads of each touched client's per-file diagnostics.
+ * `getAllDiagnostics` rebuilds the map over every file the client tracks, so
+ * a sweep reads it once per client, not once per touch (#4495 review F3).
+ */
+type ClientReads = Map<
+	OutstandingTouchClient,
+	ReturnType<OutstandingTouchClient["getAllDiagnostics"]>
+>;
+
+/**
  * #4485: a synchronous read of one touch against the client it went to. The
  * same per-file rule as the async reconcile below (a publish for THAT file,
  * stamped after the pre-notify `touchedAt`); anything less is no answer.
@@ -273,11 +284,17 @@ function pruneExpiredOutstandingTouches(
 function readTouchedClient(
 	touch: OutstandingTouch,
 	now: number,
+	reads: ClientReads,
 ): ReconcileOutcome | undefined {
 	const client = touch.client?.deref();
 	if (!client || client.serverId !== touch.serverId) return undefined;
 	if (client.isAlive?.() === false) return undefined;
-	const entry = client.getAllDiagnostics().get(normalizeMapKey(touch.filePath));
+	let all = reads.get(client);
+	if (all === undefined) {
+		all = client.getAllDiagnostics();
+		reads.set(client, all);
+	}
+	const entry = all.get(normalizeMapKey(touch.filePath));
 	if (!entry || entry.ts <= touch.touchedAt) return undefined;
 	const found = entry.diags.length > 0;
 	return {
@@ -409,13 +426,14 @@ export function _resetOutstandingCascadeTouchesForTests(): void {
  */
 export function peekOutstandingCascadeTouches(guard?: DeliveryGuard): void {
 	const now = Date.now();
-	pruneExpiredOutstandingTouches(now, guard);
+	const reads: ClientReads = new Map();
+	pruneExpiredOutstandingTouches(now, guard, reads);
 	const count = _outstandingTouches.size;
 	if (count === 0) return;
 	let found = 0;
 	let clean = 0;
 	for (const [key, touch] of _outstandingTouches) {
-		const outcome = readTouchedClient(touch, now);
+		const outcome = readTouchedClient(touch, now, reads);
 		if (!outcome) continue;
 		_outstandingTouches.delete(key);
 		if (outcome.outcome === "resolved-found") found++;

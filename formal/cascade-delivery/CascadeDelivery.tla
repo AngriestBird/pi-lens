@@ -32,6 +32,9 @@ Actions:
    superseded and renders nothing (runtime-turn.ts `getFilesChangedSince`).
  - QuietWindow: optional; reconciles answered outstanding touches.
  - Expire(n): an outstanding touch ages out of the registry.
+ - OutsideChange(n): the neighbour's file is written by something pi never
+   saw (git checkout, an external editor) or deleted, between turns. Its
+   verdict may flip; the client's cached publish now predates the change.
  - TurnEnd: settle, peek the registry, render the run, the late answers,
    the unresolved line, and update the record.
 
@@ -50,6 +53,8 @@ Invariants:
    answered, never left outstanding.
  - ExpiryKeepsAnswer: no answer that arrived for an outstanding touch is
    dropped unread when the touch expires.
+ - NoUnresolvedAfterChange: the unresolved line never names a neighbour
+   whose file changed after the observation its record holds (#4495 F1).
  - TypeOK.
 ***************************************************************************)
 EXTENDS Naturals, FiniteSets
@@ -82,9 +87,15 @@ CONSTANTS
                         \*           is read before it is dropped (cascade-tier.ts
                         \*           peekOutstandingCascadeTouches, deliverResolvedOutcome)
                         \* "drop"    no peek; expiry drops the touch unread
-    Reserve             \* "record" a delivered error stays pending until observed
+    Reserve,            \* "record" a delivered error stays pending until observed
                         \*          clean, and turn_end renders it when not re-checked
                         \* "none"   no record (pre-#4487)
+    PendingGate         \* "fresh" turn_end passes each record entry through the
+                        \*         freshness gate against its own observation time
+                        \*         (runtime-turn.ts gatePendingCascadeNeighbors); a
+                        \*         changed or deleted neighbour is forgotten
+                        \* "none"  the record renders whatever happened to the file
+                        \*         (#4495 r1)
 
 VARIABLES
     turn,       \* 1..MaxTurns + 1
@@ -111,11 +122,15 @@ VARIABLES
     recBefore,  \* rec at the start of this TurnEnd
     freshClean, \* [Neighbours -> BOOLEAN] observed clean after the edit this turn
     freshErr,   \* [Neighbours -> BOOLEAN] observed err after the edit this turn
-    lost        \* an answered touch expired unread
+    lost,       \* an answered touch expired unread
+    cacheChg,   \* [Neighbours -> BOOLEAN] the cached publish predates an outside change
+    vchg,       \* [Neighbours -> BOOLEAN] this turn's observation predates an outside change
+    chg,        \* [Neighbours -> BOOLEAN] the file changed after the observation rec holds
+    staleClaim  \* some turn_end named a changed neighbour on the unresolved line
 
 vars == <<turn, phase, model, opened, truth, epoch, cache, owed, reg, answered,
           rc, lastErr, verdict, fresh, vep, display, touched, superseded, lateQ,
-          rec, shown, recBefore, freshClean, freshErr, lost>>
+          rec, shown, recBefore, freshClean, freshErr, lost, cacheChg, vchg, chg, staleClaim>>
 
 Vals == {"clean", "err"}
 Tags == {"err", "pending", "late", "unresolved"}
@@ -150,6 +165,10 @@ TypeOK ==
     /\ freshClean \in [Neighbours -> BOOLEAN]
     /\ freshErr \in [Neighbours -> BOOLEAN]
     /\ lost \in BOOLEAN
+    /\ cacheChg \in [Neighbours -> BOOLEAN]
+    /\ vchg \in [Neighbours -> BOOLEAN]
+    /\ chg \in [Neighbours -> BOOLEAN]
+    /\ staleClaim \in BOOLEAN
 
 \* Warm start: an open neighbour holds a publish of its starting verdict.
 Init ==
@@ -180,6 +199,10 @@ Init ==
     /\ freshClean = [n \in Neighbours |-> FALSE]
     /\ freshErr = [n \in Neighbours |-> FALSE]
     /\ lost = FALSE
+    /\ cacheChg = [n \in Neighbours |-> FALSE]
+    /\ vchg = [n \in Neighbours |-> FALSE]
+    /\ chg = [n \in Neighbours |-> FALSE]
+    /\ staleClaim = FALSE
 
 \* A push server's publish rule: Always after every notify; CmdPull and
 \* Silent only on a change of verdict (classic tsserver, probe S0-S4).
@@ -199,7 +222,7 @@ Edit ==
     /\ phase' = "edited"
     /\ UNCHANGED <<turn, model, opened, cache, reg, answered, rc, lastErr,
                    verdict, fresh, vep, display, touched, superseded, lateQ, rec,
-                   shown, recBefore, freshClean, freshErr, lost>>
+                   shown, recBefore, freshClean, freshErr, lost, cacheChg, vchg, chg, staleClaim>>
 
 \* Publish(n): the owed publish lands in the client's per-file cache
 \* (client.ts publishDiagnostics handling). A touch outstanding in the
@@ -209,9 +232,10 @@ Publish(n) ==
     /\ owed' = [owed EXCEPT ![n] = FALSE]
     /\ cache' = [cache EXCEPT ![n] = [val |-> truth[n], ep |-> epoch]]
     /\ answered' = [answered EXCEPT ![n] = reg[n] # 0 \/ answered[n]]
+    /\ cacheChg' = [cacheChg EXCEPT ![n] = FALSE]
     /\ UNCHANGED <<turn, phase, model, opened, truth, epoch, reg, rc, lastErr,
                    verdict, fresh, vep, display, touched, superseded, lateQ, rec,
-                   shown, recBefore, freshClean, freshErr, lost>>
+                   shown, recBefore, freshClean, freshErr, lost, vchg, chg, staleClaim>>
 
 PostEdit(n) == cache[n].ep = epoch
 PassiveServes(n) ==
@@ -288,10 +312,17 @@ Compute ==
         /\ rc' = [n \in Neighbours |->
                     s[n].v = "clean" \/ (rc[n] /\ s[n].v # "err")]
         /\ lastErr' = [n \in Neighbours |-> s[n].v = "err"]
+        \* A touch answered with a new publish observes the file as it is
+        \* now; a passive snapshot is as old as the publish it came from.
+        /\ vchg' = [n \in Neighbours |->
+                      IF s[n].t /\ s[n].v \in {"clean", "err"} THEN FALSE
+                      ELSE cacheChg[n]]
+        /\ cacheChg' = [n \in Neighbours |->
+                          IF s[n].c # cache[n] THEN FALSE ELSE cacheChg[n]]
     /\ superseded' = FALSE
     /\ phase' = "computed"
     /\ UNCHANGED <<turn, model, truth, epoch, lateQ, rec, shown, recBefore,
-                   lost>>
+                   lost, chg, staleClaim>>
 
 \* LaterWrite: a later write of the primary supersedes the run before
 \* turn_end (runtime-turn.ts consume filter, `cascade_carry_over_drop`).
@@ -306,8 +337,10 @@ LaterWrite ==
     /\ freshErr' = [n \in Neighbours |-> FALSE]
     /\ freshClean' = [n \in Neighbours |-> FALSE]
     /\ phase' = "computed"
+    /\ vchg' = [n \in Neighbours |-> FALSE]
     /\ UNCHANGED <<turn, model, opened, truth, epoch, cache, owed, reg,
-                   answered, rc, lastErr, lateQ, rec, shown, recBefore, lost>>
+                   answered, rc, lastErr, lateQ, rec, shown, recBefore, lost,
+                   cacheChg, chg, staleClaim>>
 
 \* QuietWindow: quiet-window.ts reconciles answered outstanding touches
 \* (cascade-tier.ts reconcileOutstandingCascadeTouches); the answer reaches
@@ -321,7 +354,8 @@ QuietWindow ==
         /\ lateQ' = lateQ \cup {n}
     /\ UNCHANGED <<turn, phase, model, opened, truth, epoch, cache, owed, rc,
                    lastErr, verdict, fresh, vep, display, touched, superseded, rec,
-                   shown, recBefore, freshClean, freshErr, lost>>
+                   shown, recBefore, freshClean, freshErr, lost, cacheChg, vchg,
+                   chg, staleClaim>>
 
 \* Expire(n): cascade-tier.ts prune of an outstanding touch past its
 \* maximum age.
@@ -337,7 +371,24 @@ Expire(n) ==
                /\ UNCHANGED lateQ
     /\ UNCHANGED <<turn, phase, model, opened, truth, epoch, cache, owed, rc,
                    lastErr, verdict, fresh, vep, display, touched, superseded, rec,
-                   shown, recBefore, freshClean, freshErr>>
+                   shown, recBefore, freshClean, freshErr, cacheChg, vchg, chg, staleClaim>>
+
+\* OutsideChange(n): the file is written by something pi never saw, or
+\* deleted, between turns (phase "start", before the next edit). The server
+\* is not notified, so nothing is owed; the cached publish now predates the
+\* change, and so does the observation the record holds. One change per
+\* cached publish keeps the state space finite; a second change before the
+\* next publish is the same state.
+OutsideChange(n) ==
+    /\ phase = "start"
+    /\ turn <= MaxTurns
+    /\ ~cacheChg[n]
+    /\ \E v \in Vals: truth' = [truth EXCEPT ![n] = v]
+    /\ cacheChg' = [cacheChg EXCEPT ![n] = TRUE]
+    /\ chg' = [chg EXCEPT ![n] = rec[n].val = "err"]
+    /\ UNCHANGED <<turn, phase, model, opened, epoch, cache, owed, reg, answered,
+                   rc, lastErr, verdict, fresh, vep, display, touched, superseded,
+                   lateQ, rec, shown, recBefore, freshClean, freshErr, lost, vchg, staleClaim>>
 
 \* TurnEnd: runtime-turn.ts handleTurnEnd. The registry peek
 \* (peekOutstandingCascadeTouches) moves answered touches to the late queue;
@@ -356,8 +407,11 @@ TurnEnd ==
            \* this turn's (the carried-run label)
            lateFresh(n) == n \in late /\ cache[n].ep = epoch
            observed(n) == verdict[n] \in {"clean", "err"} \/ n \in late
+           \* the freshness gate: an entry whose file changed after its
+           \* observation is forgotten, not rendered
+           gatedOut(n) == PendingGate = "fresh" /\ chg[n]
            unresolved(n) == Reserve = "record" /\ rec[n].val = "err"
-                            /\ ~observed(n)
+                            /\ ~observed(n) /\ ~gatedOut(n)
        IN
        /\ shown' = [n \in Neighbours |->
                       display[n]
@@ -378,7 +432,15 @@ TurnEnd ==
                     ELSE IF lateErr(n) THEN [val |-> "err", ep |-> cache[n].ep]
                     ELSE IF verdict[n] = "clean" /\ vep[n] > rec[n].ep THEN NoRec
                     ELSE IF lateClean(n) /\ cache[n].ep > rec[n].ep THEN NoRec
+                    ELSE IF ~observed(n) /\ gatedOut(n) THEN NoRec
                     ELSE rec[n]]
+       /\ staleClaim' = (staleClaim \/ (\E n \in Neighbours: unresolved(n) /\ chg[n]))
+       \* whether the observation the record now holds predates a change
+       /\ chg' = [n \in Neighbours |->
+                    IF verdict[n] = "err" THEN vchg[n]
+                    ELSE IF lateErr(n) THEN cacheChg[n]
+                    ELSE IF rec'[n].val = "none" THEN FALSE
+                    ELSE chg[n]]
        /\ reg' = [n \in Neighbours |-> IF n \in peeked THEN 0 ELSE reg[n]]
        /\ answered' = [n \in Neighbours |->
                          IF n \in peeked THEN FALSE ELSE answered[n]]
@@ -386,7 +448,8 @@ TurnEnd ==
     /\ turn' = turn + 1
     /\ phase' = "start"
     /\ UNCHANGED <<model, opened, truth, epoch, cache, owed, rc, lastErr,
-                   verdict, fresh, vep, display, touched, superseded, lost>>
+                   verdict, fresh, vep, display, touched, superseded, lost,
+                   cacheChg, vchg>>
 
 Next ==
     \/ Edit
@@ -395,6 +458,7 @@ Next ==
     \/ LaterWrite
     \/ QuietWindow
     \/ \E n \in Neighbours: Expire(n)
+    \/ \E n \in Neighbours: OutsideChange(n)
     \/ TurnEnd
 
 Spec == Init /\ [][Next]_vars
@@ -432,4 +496,8 @@ AnswerWhenAskable ==
                 verdict[n] \in {"clean", "err"} /\ fresh[n]
 
 ExpiryKeepsAnswer == ~lost
+
+\* Read at the render itself (staleClaim is set by the TurnEnd that renders
+\* the line), not against a later change of a line already delivered.
+NoUnresolvedAfterChange == ~staleClaim
 =============================================================================

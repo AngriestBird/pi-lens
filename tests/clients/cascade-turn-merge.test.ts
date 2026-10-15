@@ -1437,6 +1437,12 @@ describe("cascade delivery at turn_end (#4485, #4487)", () => {
 			coverageLine: "",
 			policySuppressed: 0,
 		};
+		// The neighbours exist on disk, as a real cascade's do: turn_end's
+		// pending line checks each recorded file before claiming it (#4487 F1).
+		for (const [filePath] of neighbors) {
+			if (!fs.existsSync(filePath))
+				fs.writeFileSync(filePath, "export const n = 1;\n");
+		}
 		const rows = neighbors.map(([filePath, messages]) => ({
 			filePath,
 			reason: "imports" as const,
@@ -1727,6 +1733,79 @@ describe("cascade delivery at turn_end (#4485, #4487)", () => {
 		}
 	});
 
+	// Recurrence (#4495 review F1): the 📐 line said "2 error(s) unresolved"
+	// for a neighbour fixed by a write pi never saw (git checkout, an external
+	// editor) and for a deleted one, every edit turn until a cascade happened
+	// to cover it, and for a deleted file until the session reset.
+	describe("a pending neighbour whose file changed since its errors were checked", () => {
+		async function deliverN1Errors(
+			runtime: RuntimeCoordinator,
+			cacheManager: CacheManager,
+			cwd: string,
+		): Promise<string> {
+			const a = path.join(cwd, "a.ts");
+			const n1 = path.join(cwd, "n1.ts");
+			runtime.beginTurn();
+			edit(cacheManager, a, cwd);
+			runtime.appendCascadeRun({
+				filePath: a,
+				result: await computedResult(cwd, a, [
+					[n1, ["first error", "second error"]],
+				]),
+				neighborCount: 1,
+				diagnosticCount: 2,
+				observedNeighborPaths: [n1],
+			} as any);
+			const first = await turnEndOf(runtime, cacheManager, cwd);
+			expect(first).toContain("first error");
+			return n1;
+		}
+
+		it("is dropped when written outside pi after the check", async () => {
+			const env = setupTestEnvironment("cascade-4487-outside-");
+			try {
+				const runtime = new RuntimeCoordinator();
+				const cacheManager = new CacheManager(false);
+				const n1 = await deliverN1Errors(runtime, cacheManager, env.tmpDir);
+				// A write no pi tool made; its mtime is past the check by more
+				// than the gate's 50 ms drift tolerance.
+				fs.writeFileSync(n1, "export const n = 2;\n");
+				const later = new Date(Date.now() + 10_000);
+				fs.utimesSync(n1, later, later);
+
+				runtime.beginTurn();
+				edit(cacheManager, path.join(env.tmpDir, "other.ts"), env.tmpDir);
+				const second = await turnEndOf(runtime, cacheManager, env.tmpDir);
+				expect(second).not.toContain("n1.ts");
+				const { listCascadePendingNeighbors } =
+					await import("../../clients/cascade-format.js");
+				expect(listCascadePendingNeighbors()).toEqual([]);
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("is dropped when deleted", async () => {
+			const env = setupTestEnvironment("cascade-4487-deleted-");
+			try {
+				const runtime = new RuntimeCoordinator();
+				const cacheManager = new CacheManager(false);
+				const n1 = await deliverN1Errors(runtime, cacheManager, env.tmpDir);
+				fs.rmSync(n1);
+
+				runtime.beginTurn();
+				edit(cacheManager, path.join(env.tmpDir, "other.ts"), env.tmpDir);
+				const second = await turnEndOf(runtime, cacheManager, env.tmpDir);
+				expect(second).not.toContain("n1.ts");
+				const { listCascadePendingNeighbors } =
+					await import("../../clients/cascade-format.js");
+				expect(listCascadePendingNeighbors()).toEqual([]);
+			} finally {
+				env.cleanup();
+			}
+		});
+	});
+
 	// Recurrence: one process serves more than one root (an MCP session over
 	// two projects, a secondary activation), and the pending record is
 	// process-wide; one root's neighbour errors must not reach another's turn.
@@ -1749,6 +1828,7 @@ describe("cascade delivery at turn_end (#4485, #4487)", () => {
 					semantic: "blocking",
 					tool: "lsp",
 				}) as Diagnostic;
+			fs.writeFileSync(inside, "export const n = 1;\n");
 			recordDeliveredCascadeNeighbor(inside, [error(inside)], 1, Date.now());
 			recordDeliveredCascadeNeighbor(outside, [error(outside)], 1, Date.now());
 

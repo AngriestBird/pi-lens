@@ -460,6 +460,49 @@ describe("residual peek, expiry read and reset count (#4485)", () => {
 		});
 	});
 
+	// Recurrence (#4495 review F3): the peek rebuilt the client's whole
+	// per-file diagnostics map once per outstanding touch, O(touches x
+	// tracked files) on turn_end's synchronous path.
+	it("a peek reads each client's diagnostics once, however many touches it holds", () => {
+		mod.registerCascadeTierReconcileTask(
+			() => ({ getWarmClientForFile: vi.fn() }) as never,
+			{ onResolvedFound: vi.fn(), onResolvedClean: vi.fn() },
+		);
+		const touchedAt = Date.now() - 1_000;
+		const client = liveClient([
+			["C:/repo/found.ts", [errorDiag], touchedAt + 5],
+			["C:/repo/clean.ts", [], touchedAt + 5],
+		]);
+		const read = vi.spyOn(client, "getAllDiagnostics");
+		const other = liveClient([["C:/repo/other.ts", [], touchedAt + 5]]);
+		const otherRead = vi.spyOn(other, "getAllDiagnostics");
+		for (const filePath of [
+			"C:/repo/found.ts",
+			"C:/repo/clean.ts",
+			"C:/repo/silent-1.ts",
+			"C:/repo/silent-2.ts",
+		]) {
+			mod.recordOutstandingCascadeTouch({
+				filePath,
+				serverId: "typescript",
+				touchedAt,
+				client: new WeakRef(client),
+			} as never);
+		}
+		mod.recordOutstandingCascadeTouch({
+			filePath: "C:/repo/other.ts",
+			serverId: "typescript",
+			touchedAt,
+			client: new WeakRef(other),
+		} as never);
+
+		mod.peekOutstandingCascadeTouches();
+
+		expect(read).toHaveBeenCalledTimes(1);
+		expect(otherRead).toHaveBeenCalledTimes(1);
+		expect(heldPaths()).toEqual(["C:/repo/silent-1.ts", "C:/repo/silent-2.ts"]);
+	});
+
 	it("a peek of an empty registry writes no row", () => {
 		mod.peekOutstandingCascadeTouches();
 		expect(rowsOf("cascade_tier3_peek")).toEqual([]);
