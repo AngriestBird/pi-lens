@@ -145,6 +145,7 @@ import { makeSessionStartEvent } from "./support/host-event-factory.js";
 import { createPiMock, makeCtx } from "./support/pi-mock.js";
 
 let tmpDir = "";
+let pendingCleanup: (() => Promise<void>) | undefined;
 const originalTestMode = process.env.PI_LENS_TEST_MODE;
 
 beforeAll(() => {
@@ -160,7 +161,12 @@ beforeEach(() => {
 	boundary.helm.stdout = "";
 	boundary.helm.lintCalls = 0;
 });
-afterEach(() => {
+afterEach(async () => {
+	// A cell that failed before its own fix still leaves no record, gate
+	// state or persisted guard record for the next cell (shuffle-safe).
+	const cleanup = pendingCleanup;
+	pendingCleanup = undefined;
+	if (cleanup) await cleanup().catch(() => {});
 	if (originalTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
 	else process.env.PI_LENS_TEST_MODE = originalTestMode;
 });
@@ -179,6 +185,7 @@ const scrub = (s: string) =>
 async function openSession(
 	name: string,
 	file: string,
+	fixed: string,
 	flags: Record<string, unknown> = {},
 ) {
 	const pi = createPiMock({ "lens-guard": true, ...flags });
@@ -193,7 +200,7 @@ async function openSession(
 	const target = path.join(tmpDir, file);
 	fs.mkdirSync(path.dirname(target), { recursive: true });
 	let helmAfter: string | undefined;
-	return {
+	const session = {
 		target,
 		/** The next write's helm stdout (helm cells only). */
 		helmNext(stdout: string) {
@@ -251,6 +258,12 @@ async function openSession(
 				.reduce((n, f) => n + (f.diagnosticCounts?.blocking ?? 0), 0);
 		},
 	};
+	pendingCleanup = async () => {
+		helmAfter = "";
+		await session.write(fixed);
+		await session.endTurn();
+	};
+	return session;
 }
 
 const V1 = "const a = 1;\nBAD_CALL();\nconst b = 2;\n";
@@ -262,19 +275,17 @@ const V_FIXED = "const a = 1;\nconst b = 2;\n";
 const STILL_UNFIXED = /Still unfixed: 1 blocker reported earlier \(L(\d+)\)/;
 
 /** Cleanup: fix the file and drain the turn, so the next cell starts clean. */
-async function fixAndDrain(
-	s: Awaited<ReturnType<typeof openSession>>,
-	content: string,
-) {
-	await s.write(content);
-	await s.endTurn();
+async function fixAndDrain(s: Awaited<ReturnType<typeof openSession>>) {
+	const cleanup = pendingCleanup;
+	pendingCleanup = undefined;
+	await cleanup?.();
 	expect(await s.commitBlocked()).toBe(false);
 }
 
 describe("#4484 witness: a repeat write keeps an unfixed blocker pending", () => {
 	it("keeps an LSP error that write 2 left in place blocking on every surface (cell A)", async () => {
 		boundary.lsp.enabled = true;
-		const s = await openSession("a", "src/cell-a.ts");
+		const s = await openSession("a", "src/cell-a.ts", V_FIXED);
 		const w1 = await s.write(V1);
 		expect(w1).toContain("🔴 STOP — 1 issue(s) must be fixed:");
 		expect(await s.commitBlocked()).toBe(true);
@@ -318,12 +329,12 @@ describe("#4484 witness: a repeat write keeps an unfixed blocker pending", () =>
 			"L2: Cannot find name 'BAD_CALL'.",
 		);
 		expect(s.widgetBlocking()).toBe(1);
-		await fixAndDrain(s, V_FIXED);
+		await fixAndDrain(s);
 	}, 120_000);
 
 	it("still reports a write that removes the error as resolved and opens the gate (cell C)", async () => {
 		boundary.lsp.enabled = true;
-		const s = await openSession("c", "src/cell-c.ts");
+		const s = await openSession("c", "src/cell-c.ts", V_FIXED);
 		await s.write(V1);
 		expect(await s.commitBlocked()).toBe(true);
 		const w2 = await s.write(V_FIXED);
@@ -340,7 +351,7 @@ describe("#4484 witness: a repeat write keeps an unfixed blocker pending", () =>
 
 	it("re-blocks an LSP error moved by a line inserted above it as new (cell B, unchanged)", async () => {
 		boundary.lsp.enabled = true;
-		const s = await openSession("b", "src/cell-b.ts");
+		const s = await openSession("b", "src/cell-b.ts", V_FIXED);
 		await s.write(V1);
 		const w2 = await s.write(V2_INSERT_ABOVE);
 		expect(w2).toContain("🔴 STOP — 1 issue(s) must be fixed:");
@@ -349,12 +360,12 @@ describe("#4484 witness: a repeat write keeps an unfixed blocker pending", () =>
 		expect(await s.commitBlocked()).toBe(true);
 		const turnEnd = await s.endTurn();
 		expect(turnEnd).toContain("L3: Cannot find name 'BAD_CALL'.");
-		await fixAndDrain(s, V_FIXED);
+		await fixAndDrain(s);
 	}, 120_000);
 
 	it("keeps the error pending when write 2 comes in the next turn (cell I, cross-turn)", async () => {
 		boundary.lsp.enabled = true;
-		const s = await openSession("i", "src/cell-i.ts");
+		const s = await openSession("i", "src/cell-i.ts", V_FIXED);
 		await s.write(V1);
 		expect(await s.endTurn()).toContain("Unresolved from this turn");
 		const w2 = await s.write(V2_OTHER_LINE);
@@ -365,19 +376,21 @@ describe("#4484 witness: a repeat write keeps an unfixed blocker pending", () =>
 		expect(turnEnd).toContain("Unresolved from this turn — src/cell-i.ts:");
 		expect(turnEnd).not.toMatch(/Resolved (this turn|since)/);
 		expect(await s.commitBlocked()).toBe(true);
-		await fixAndDrain(s, V_FIXED);
+		await fixAndDrain(s);
 	}, 120_000);
 
 	it("re-delivers the error under --no-delta, before and after the fix (cell K)", async () => {
 		boundary.lsp.enabled = true;
-		const s = await openSession("k", "src/cell-k.ts", { "no-delta": true });
+		const s = await openSession("k", "src/cell-k.ts", V_FIXED, {
+			"no-delta": true,
+		});
 		await s.write(V1);
 		const w2 = await s.write(V2_OTHER_LINE);
 		expect(w2).toContain("🔴 STOP — 1 issue(s) must be fixed:");
 		expect(w2).not.toMatch(STILL_UNFIXED);
 		expect(await s.commitBlocked()).toBe(true);
 		expect(await s.endTurn()).toContain("Unresolved from this turn");
-		await fixAndDrain(s, V_FIXED);
+		await fixAndDrain(s);
 	}, 120_000);
 
 	describe("a linter with ordinal ids (helm-lint)", () => {
@@ -404,7 +417,7 @@ describe("#4484 witness: a repeat write keeps an unfixed blocker pending", () =>
 
 		it("keeps a helm blocker that write 2 left in place, and after a line shift (cells F and H)", async () => {
 			chart();
-			const s = await openSession("f", "chart/templates/deploy-f.yaml", {
+			const s = await openSession("f", "chart/templates/deploy-f.yaml", T2, {
 				"no-lsp": true,
 			});
 			const e4 = lint(
@@ -432,13 +445,12 @@ describe("#4484 witness: a repeat write keeps an unfixed blocker pending", () =>
 			expect(turnEnd).not.toContain("Resolved this turn");
 			expect(await s.commitBlocked()).toBe(true);
 			expect(s.widgetBlocking()).toBe(1);
-			s.helmNext("");
-			await fixAndDrain(s, T2);
+			await fixAndDrain(s);
 		}, 120_000);
 
 		it("keeps the later helm blocker when fixing the earlier one renumbers it (cell R)", async () => {
 			chart();
-			const s = await openSession("r", "chart/templates/deploy-r.yaml", {
+			const s = await openSession("r", "chart/templates/deploy-r.yaml", T2, {
 				"no-lsp": true,
 			});
 			s.helmNext(
@@ -462,8 +474,7 @@ describe("#4484 witness: a repeat write keeps an unfixed blocker pending", () =>
 			expect(turnEnd).toContain("deploy-r.yaml:4: nil pointer");
 			expect(turnEnd).not.toContain("unknown field kind");
 			expect(turnEnd).not.toContain("Resolved this turn");
-			s.helmNext("");
-			await fixAndDrain(s, T2);
+			await fixAndDrain(s);
 		}, 120_000);
 	});
 });
