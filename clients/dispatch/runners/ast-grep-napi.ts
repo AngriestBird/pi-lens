@@ -41,7 +41,7 @@ import type {
 	RunnerDefinition,
 	RunnerResult,
 } from "../types.js";
-import { findingsResult } from "../types.js";
+import { findingsResult, spanOverlapsModifiedRanges } from "../types.js";
 import {
 	calculateRuleComplexity,
 	isOverlyBroadPattern,
@@ -538,6 +538,15 @@ export interface AstGrepEvaluateOptions {
 	projectRoot?: string;
 	/** Shared config rule policy for scan-time path admission. */
 	rulePolicy?: RulePolicyMap;
+	/**
+	 * The lines the write changed, set only on the per-edit blocking pass
+	 * (#4481). An `error`-severity match whose line span does not overlap them
+	 * is skipped before it counts toward a cap, as the tree-sitter runner does.
+	 * A relational match anchored on a sibling node can still be skipped when
+	 * the edit touched only the sibling; that is a named residual. Absent or
+	 * empty means the whole file.
+	 */
+	modifiedRanges?: DispatchContext["modifiedRanges"];
 	/**
 	 * Optional sink for a rule that napi's native engine rejected outright
 	 * (malformed shape, unresolved `matches: <name>` reference, invalid kind,
@@ -1169,9 +1178,12 @@ export function evaluateAstGrepRules(
 				// file's line-start table, all in UTF-16 code units (#2347); the
 				// file-root scope is the node's own range, so its derived
 				// id/diagnostic stay byte-identical to the pre-#2347 path.
+				// `endLine` is the match's 0-based last FILE line, mapped the same
+				// way, for the per-edit span gate below (#4481 r2).
 				const scopes: Array<{
 					root: { findAll(config: never): unknown[] };
 					position(match: unknown): { line: number; column: number };
+					endLine(match: unknown): number;
 				}> = runsInsideHtmlScript
 					? htmlInjections.map((injection) => ({
 							root: injection.root,
@@ -1188,6 +1200,15 @@ export function evaluateAstGrepRules(
 									injection.startIndex + start.index,
 								);
 							},
+							endLine(match) {
+								const end = (
+									match as { range(): { end: { index: number } } }
+								).range().end;
+								return filePositionForIndex(
+									fileLineStarts,
+									injection.startIndex + end.index,
+								).line;
+							},
 						}))
 					: [
 							{
@@ -1199,6 +1220,11 @@ export function evaluateAstGrepRules(
 										}
 									).range().start;
 									return { line: start.line, column: start.column };
+								},
+								endLine(match) {
+									return (
+										match as { range(): { end: { line: number } } }
+									).range().end.line;
 								},
 							},
 						];
@@ -1224,6 +1250,9 @@ export function evaluateAstGrepRules(
 					position: { line: number; column: number };
 				}> = [];
 				let rejectLogged = false;
+				const editScoped =
+					options.modifiedRanges !== undefined &&
+					normalizeRuleSeverity(rule.severity) === "error";
 				for (const scope of scopes) {
 					let found: unknown[];
 					try {
@@ -1241,7 +1270,17 @@ export function evaluateAstGrepRules(
 					}
 					for (const match of found) {
 						if (collected.length >= maxMatchesPerRule) break;
-						collected.push({ match, position: scope.position(match) });
+						const position = scope.position(match);
+						if (
+							editScoped &&
+							!spanOverlapsModifiedRanges(
+								position.line + 1,
+								scope.endLine(match) + 1,
+								options.modifiedRanges,
+							)
+						)
+							continue;
+						collected.push({ match, position });
 					}
 					if (collected.length >= maxMatchesPerRule) break;
 				}
@@ -1462,6 +1501,10 @@ const astGrepNapiRunner: RunnerDefinition = {
 				blockingOnly: runningAsLspSubstitute ? false : ctx.blockingOnly,
 				projectRoot: ctx.projectRoot,
 				rulePolicy: ctx.rulePolicy,
+				// #4481: keyed off the per-edit pass, not the substitute floor
+				// above, so a pre-existing blocker on an unchanged line never
+				// STOPs the write in either role.
+				modifiedRanges: ctx.blockingOnly ? ctx.modifiedRanges : undefined,
 				log: (message: string) => ctx.log(message),
 				content,
 				sgModule,
