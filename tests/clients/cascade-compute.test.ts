@@ -3977,9 +3977,11 @@ describe("computeCascadeForFile", () => {
 						.mockResolvedValue(
 							tsSnapshot(env.tmpDir, ["typescript.tsserverRequest"]),
 						),
+					// A client that would stay silent through a silent-push wait,
+					// so only the command-pull tier reaches the sync confirm.
 					getClientForFile: vi
 						.fn()
-						.mockResolvedValue({ client: { serverId: "typescript" } }),
+						.mockResolvedValue({ client: silentClient() }),
 					touchFile,
 				});
 
@@ -4169,6 +4171,32 @@ describe("computeCascadeForFile", () => {
 				expect(touchFile).not.toHaveBeenCalled();
 				expect(run.result?.neighbors[0]?.lspTouched).toBe(false);
 				expect(run.result?.formatted).toContain("fresh error");
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		// Recurrence (#4487): a clean run carries no result, so a neighbour the
+		// passive snapshot showed clean would never clear its pending error,
+		// and the unresolved line would keep naming a fixed file.
+		it("a clean passive snapshot published after the cascade started counts as an observation of the neighbour", async () => {
+			const { env, primary, neighbor } = project("cascade-4487-clean-obs-");
+			try {
+				mocks.getLSPService.mockReturnValue({
+					...makeLspServiceDouble(),
+					getAllDiagnostics: vi.fn(publishedDuringCompute([[neighbor, []]])),
+					touchFile: vi.fn(),
+				});
+
+				const { computeCascadeForFile } =
+					await import("../../clients/dispatch/integration.js");
+				const run = await computeCascadeForFile(primary, env.tmpDir, {
+					turnSeq: 1,
+					writeSeq: 1,
+				});
+
+				expect(run.result).toBeUndefined();
+				expect(run.observedNeighborPaths).toEqual([neighbor]);
 			} finally {
 				env.cleanup();
 			}

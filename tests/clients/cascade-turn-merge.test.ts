@@ -1,7 +1,7 @@
 // flake-shape: service-double — #4485: turn_end's registry peek reads the client an outstanding touch holds; a real server cannot be made to publish between the compute and turn_end on demand
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../../clients/cache-manager.js";
 import type { CascadeResult } from "../../clients/cascade-types.js";
 import type { Diagnostic } from "../../clients/dispatch/types.js";
@@ -71,6 +71,14 @@ function cascade(
 		formatted: `Cascade errors in 1 dependent file\n${neighborBase}: ${message}`,
 	};
 }
+
+// The pending neighbour-error record (#4487) is module state that every
+// turn_end here writes; no test hands its entries to the next.
+afterEach(async () => {
+	const { resetCascadePendingNeighbors } =
+		await import("../../clients/cascade-format.js");
+	resetCascadePendingNeighbors();
+});
 
 describe("cascade turn-end merge", () => {
 	it("deduplicates cascade diagnostics by neighbor file with last writer winning", async () => {
@@ -1654,6 +1662,9 @@ describe("cascade delivery at turn_end (#4485, #4487)", () => {
 			expect(second).toContain("persistent error (still present since turn 1)");
 			expect(second).toContain("new error");
 			expect(second).not.toContain("new error (still present");
+			// Re-observed this turn, so the earlier-turn unresolved line does
+			// not repeat it (a double report of one error).
+			expect(second).not.toContain("not re-checked this turn");
 		} finally {
 			env.cleanup();
 		}
@@ -1713,6 +1724,44 @@ describe("cascade delivery at turn_end (#4485, #4487)", () => {
 			);
 		} finally {
 			env.cleanup();
+		}
+	});
+
+	// Recurrence: one process serves more than one root (an MCP session over
+	// two projects, a secondary activation), and the pending record is
+	// process-wide; one root's neighbour errors must not reach another's turn.
+	it("a pending neighbour error outside the turn's root is not rendered", async () => {
+		const env = setupTestEnvironment("cascade-4487-root-");
+		const elsewhere = setupTestEnvironment("cascade-4487-elsewhere-");
+		try {
+			const { recordDeliveredCascadeNeighbor } =
+				await import("../../clients/cascade-format.js");
+			const inside = path.join(env.tmpDir, "inside.ts");
+			const outside = path.join(elsewhere.tmpDir, "outside.ts");
+			const error = (filePath: string) =>
+				({
+					id: "typescript:2322",
+					message: "pending error",
+					filePath,
+					line: 1,
+					column: 1,
+					severity: "error",
+					semantic: "blocking",
+					tool: "lsp",
+				}) as Diagnostic;
+			recordDeliveredCascadeNeighbor(inside, [error(inside)], 1, Date.now());
+			recordDeliveredCascadeNeighbor(outside, [error(outside)], 1, Date.now());
+
+			const runtime = new RuntimeCoordinator();
+			const cacheManager = new CacheManager(false);
+			runtime.beginTurn();
+			edit(cacheManager, path.join(env.tmpDir, "a.ts"), env.tmpDir);
+			const text = await turnEndOf(runtime, cacheManager, env.tmpDir);
+			expect(text).toMatch(/inside\.ts: 1 error\(s\) unresolved/);
+			expect(text).not.toContain("outside.ts");
+		} finally {
+			env.cleanup();
+			elsewhere.cleanup();
 		}
 	});
 
