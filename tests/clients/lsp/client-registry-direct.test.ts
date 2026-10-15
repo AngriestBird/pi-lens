@@ -1,5 +1,5 @@
 // flake-shape: service-double — LSPClientInfo is a spawned language-server process; the registry's capacity, lease and idle paths are driven by its liveness and busy answers, which a real server cannot be made to give on demand
-// flake-shape: in-process-mock — the latency log is a file sink; the records the registry emits are asserted from the captured call, not from disk
+// flake-shape: in-process-mock — the ring getRecentLoggedPhases reads keeps only phase and metadata, and test mode skips the file sink; the registry's filePath and durationMs fields are asserted from the captured call
 // flake-shape: in-process-mock — createLSPClient wraps the language-server child process (JSON-RPC over stdio); the registry's spawn bookkeeping is the subject, the process is the boundary
 /**
  * #4449: the extracted ClientRegistry (clients/lsp/client-registry.ts, #4374)
@@ -202,6 +202,35 @@ describe("ClientRegistry breaker cooldown (#4449)", () => {
 	});
 });
 
+/**
+ * A linked worktree of the session repository, made of plain files the way git
+ * lays one out (`<repo>/.git/worktrees/wt/commondir`, and a `.git` FILE in the
+ * worktree naming that gitdir). No `git` process: the classifier reads files
+ * only (`clients/review-graph/git-identity.ts`). The worktree sits inside the
+ * repository directory, as `.claude/worktrees/*` does, so the registered-root
+ * gate admits its files. `aaa-other` is a sibling project registered BEFORE
+ * the session repo, so the classifier loop meets a root that calls the
+ * worktree file "adopted" first.
+ */
+function linkedWorktreeFixture() {
+	const parent = tempProject("linked-wt", false);
+	const repo = path.join(parent, "zzz-repo");
+	const other = path.join(parent, "aaa-other");
+	const worktree = path.join(repo, "wt");
+	const gitDir = path.join(repo, ".git", "worktrees", "wt");
+	fs.mkdirSync(gitDir, { recursive: true });
+	fs.writeFileSync(path.join(gitDir, "commondir"), "../..\n");
+	fs.writeFileSync(path.join(repo, "package.json"), "{}\n");
+	fs.mkdirSync(other, { recursive: true });
+	fs.writeFileSync(path.join(other, "package.json"), "{}\n");
+	fs.mkdirSync(worktree, { recursive: true });
+	fs.writeFileSync(path.join(worktree, ".git"), `gitdir: ${gitDir}\n`);
+	fs.writeFileSync(path.join(worktree, "package.json"), "{}\n");
+	registerSessionRoot(other);
+	registerSessionRoot(repo);
+	return { repo, other, worktree, file: path.join(worktree, "a.ts") };
+}
+
 describe("ClientRegistry.analysisRootModeForFile (#4449)", () => {
 	// Recurrence: the first-match-wins loop and its classification strings had no
 	// direct test, so `mode === "session"` flipped to a literal "", to `!==`, or the
@@ -239,6 +268,23 @@ describe("ClientRegistry.analysisRootModeForFile (#4449)", () => {
 				path.join(session, "node_modules", "dep", "index.js"),
 			),
 		).toBe("none");
+	});
+
+	// Recurrence (#4449 survivors 19 and 21): `mode === "linked-worktree"` flipped
+	// to `false` or its literal emptied, so the early return never fired. With a
+	// second registered root the loop then answered "adopted" for a worktree of
+	// the user's own repository, and every adopted-root rule applied to it (the
+	// acquisition case below shows the spawn effect). With the session root alone
+	// it answered "none".
+	it("classifies a file in a linked worktree of the session repo as linked-worktree, even when an earlier registered root calls it adopted", () => {
+		const f = linkedWorktreeFixture();
+		const registry = new ClientRegistry(makeHooks().hooks, undefined, f.repo);
+		expect(registry.analysisRootModeForFile(f.file)).toBe("linked-worktree");
+
+		resetSessionRootsForTests();
+		registerSessionRoot(f.repo);
+		const single = new ClientRegistry(makeHooks().hooks, undefined, f.repo);
+		expect(single.analysisRootModeForFile(f.file)).toBe("linked-worktree");
 	});
 });
 
@@ -410,6 +456,26 @@ describe("ClientRegistry.retireClient adopted-root bookkeeping (#4449)", () => {
 		]);
 	});
 
+	// Recurrence (#4479 review F1): the "another adopted client on this root?"
+	// check read the root with `candidate.endsWith(":" + root)`, a second reading
+	// of the key next to `parseClientKey`. A POSIX root may hold a colon, so the
+	// key of root `/foreign/w:/foreign/v` ends with `:/foreign/v`, and retiring
+	// the last client of `/foreign/v` kept that root's LRU entry, holding a cap
+	// slot for a root with no client.
+	it("drops a root's LRU entry when another adopted root merely ends with ':' and its path", () => {
+		const registry = new ClientRegistry(makeHooks().hooks);
+		const a = internals(registry);
+		const rootV = "/foreign/v";
+		const rootW = "/foreign/w:/foreign/v";
+		for (const root of [rootV, rootW]) {
+			a.adoptedClientKeys.add(`ts:${root}`);
+			registry.clients.set(`ts:${root}`, fakeClient("ts", root));
+			a.adoptedRootLastUsedAt.set(root, 1);
+		}
+		registry.retireClient(`ts:${rootV}`);
+		expect([...a.adoptedRootLastUsedAt.keys()]).toEqual([rootW]);
+	});
+
 	// Recurrence: a non-adopted retirement must not touch the adopted LRU.
 	it("leaves the adopted-root LRU alone when the retired client was not adopted", () => {
 		const registry = new ClientRegistry(makeHooks().hooks);
@@ -438,13 +504,15 @@ describe("ClientRegistry.admitAdoptedRoot (#4449)", () => {
 	// Foreign projects (adopted roots) are admitted under a cap of 2 with LRU
 	// eviction. The cap itself has a service-level test; the victim choice, the
 	// lease guard and the eviction record had none.
-	function adoptedFixture() {
+	function adoptedFixture(
+		rootsUnder: (parent: string) => string[] = (parent) =>
+			["f1", "f2", "f3"].map((name) => path.join(parent, `aaa-${name}`)),
+	) {
 		const parent = tempProject("adopt-parent", false);
 		const session = path.join(parent, "zzz-session");
 		fs.mkdirSync(session, { recursive: true });
 		fs.writeFileSync(path.join(session, "package.json"), "{}\n");
-		const roots = ["f1", "f2", "f3"].map((name) => {
-			const dir = path.join(parent, `aaa-${name}`);
+		const roots = rootsUnder(parent).map((dir) => {
 			fs.mkdirSync(dir, { recursive: true });
 			fs.writeFileSync(path.join(dir, "package.json"), "{}\n");
 			return dir;
@@ -543,6 +611,44 @@ describe("ClientRegistry.admitAdoptedRoot (#4449)", () => {
 			internals(f.registry).adoptedRootLastUsedAt.has(f.normalized[0]),
 		).toBe(false);
 	});
+
+	// Recurrence (#4479 review F1): eviction picked the victim's clients with
+	// `key.endsWith(":" + victim)`, apart from `parseClientKey`. A POSIX directory
+	// may hold a colon, so the key of root W = `<P>/aaa-w:<P>/aaa-v` ends with
+	// `:<P>/aaa-v`, and evicting root V also retired and shut down W's client,
+	// which is a different, more recently used root.
+	// lane: Linux and macOS unit shards; a Windows directory name cannot hold ':'.
+	it.skipIf(process.platform === "win32")(
+		"evicts only the clients whose root is the victim, not a root that ends with ':' and the victim's path",
+		() => {
+			vi.useFakeTimers();
+			const f = adoptedFixture((parent) => {
+				const victim = path.join(parent, "aaa-v");
+				return [
+					victim,
+					path.join(parent, "aaa-w:") + victim,
+					path.join(parent, "aaa-x"),
+				];
+			});
+			const keyOf = (i: number) => `ts:${f.normalized[i]}`;
+			vi.setSystemTime(1_000);
+			expect(f.adopt(0)).toBe(true);
+			vi.setSystemTime(2_000);
+			expect(f.adopt(1)).toBe(true);
+			vi.setSystemTime(3_000);
+			expect(f.adopt(2)).toBe(true); // V is the least recently used root
+
+			expect(f.registry.clients.has(keyOf(0))).toBe(false);
+			expect(f.clients.get(keyOf(0))?.shutdown).toHaveBeenCalledWith({
+				reason: "adopted-root-lru",
+			});
+			expect(f.registry.clients.has(keyOf(1))).toBe(true);
+			expect(f.clients.get(keyOf(1))?.shutdown).not.toHaveBeenCalled();
+			expect(
+				[...internals(f.registry).adoptedRootLastUsedAt.keys()].sort(),
+			).toEqual([f.normalized[1], f.normalized[2]].sort());
+		},
+	);
 
 	// Recurrence: a clock step backwards (NTP) makes the root being admitted the
 	// "oldest". The victim filter must still exclude it; without it the registry
@@ -927,6 +1033,33 @@ describe("ClientRegistry.resolveServerRoot (#4449)", () => {
 
 		await expect(resolveWith([mid, project])).resolves.toBe(mid);
 		await expect(resolveWith([project, mid])).resolves.toBe(mid);
+	});
+
+	// Recurrence (#4449 survivor 134): the ancestor test picks `path.win32` only
+	// for a Windows-shaped key. `path.win32.relative` ignores case on every host
+	// (`/srv/Proj` to `/srv/proj/sub` reads `sub`), so forcing it (the condition
+	// flipped to `true`) made a nested root join the client of a DIFFERENT
+	// directory that differs only in case, on a case-sensitive filesystem.
+	it("does not coalesce a nested root into the client of a sibling that differs only in case", async (ctx) => {
+		const project = tempProject("res-case", false);
+		const upper = path.join(project, "Proj");
+		fs.mkdirSync(upper, { recursive: true });
+		ctx.skip(
+			fs.existsSync(path.join(project, "proj")),
+			"case-insensitive filesystem: Proj and proj cannot be two directories here",
+		);
+		const leaf = path.join(project, "proj", "sub");
+		fs.mkdirSync(leaf, { recursive: true });
+		vi.spyOn(process, "cwd").mockReturnValue(project);
+		const registry = new ClientRegistry(makeHooks().hooks);
+		registry.clients.set(keyFor("ts", upper), live(upper));
+
+		await expect(
+			registry.resolveServerRoot(
+				rootServer("ts", leaf),
+				path.join(leaf, "a.ts"),
+			),
+		).resolves.toBe(leaf);
 	});
 
 	// Recurrence (#1373): a root equal to the session cwd is returned as is, never
@@ -1744,6 +1877,41 @@ describe("ClientRegistry adopted roots at acquisition (#4449)", () => {
 		expect(f.spawn.mock.calls[0]?.[1]).toMatchObject({
 			projectCodeAllowed: false,
 		});
+	});
+
+	// Recurrence (#4449 survivors 19 and 21): with the linked-worktree early
+	// return gone, a second registered root made a worktree of the session's own
+	// repository read "adopted". An adopted client may sit only at the
+	// classifier's root (#4257), which for a path inside the session repo is the
+	// repo itself, so the worktree got no client at all. A linked worktree is the
+	// user's code: it is served with project code allowed and is never marked
+	// adopted, so the cap-2 adopted LRU cannot evict it.
+	it("spawns for a linked worktree of the session repo with project code allowed and does not mark it adopted", async () => {
+		const f = linkedWorktreeFixture();
+		const registry = new ClientRegistry(makeHooks().hooks, undefined, f.repo);
+		const spawn = vi.fn(async (_root: string, _options?: unknown) => ({
+			process: {
+				process: { killed: false, kill: vi.fn() },
+				stdin: {},
+				stdout: {},
+				stderr: {},
+				pid: 9,
+			},
+		}));
+		const info = server("ts", { root: async () => f.worktree, spawn });
+		createLSPClient.mockImplementation(async () =>
+			fakeClient("ts", f.worktree),
+		);
+
+		await expect(
+			registry.ensureClientForServer(f.file, info),
+		).resolves.toBeDefined();
+		expect(spawn.mock.calls[0]?.[1]).toMatchObject({
+			projectCodeAllowed: true,
+		});
+		const a = internals(registry);
+		expect(a.adoptedClientKeys.has(keyFor("ts", f.worktree))).toBe(false);
+		expect(a.adoptedRootLastUsedAt.size).toBe(0);
 	});
 });
 

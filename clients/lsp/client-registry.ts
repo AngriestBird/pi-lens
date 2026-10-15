@@ -102,8 +102,9 @@ function deepMergeObjects(
 }
 
 /**
- * A client key is `<serverId>:<normalized root>`. The server id never holds a
- * colon, the root can (a Windows drive `c:/work`, a POSIX `a:b` directory), so
+ * A client key is `<serverId>:<normalized root>`. A built-in server id never
+ * holds a colon (a custom `lsp.servers` id can, and no key reader handles that
+ * yet); the root can (a Windows drive `c:/work`, a POSIX `a:b` directory), so
  * the key is cut at the FIRST colon only. One reading for every status and
  * bookkeeping path: `getStatus` once split at every colon and kept `c` for
  * `c:/work/proj`. A key with no colon reads as a bare server id with no root.
@@ -472,7 +473,10 @@ export class ClientRegistry {
 		if (!victim) return true;
 		this.adoptedRootLastUsedAt.delete(victim);
 		for (const [key, client] of this.clients) {
-			if (!this.adoptedClientKeys.has(key) || !key.endsWith(`:${victim}`))
+			if (
+				!this.adoptedClientKeys.has(key) ||
+				parseClientKey(key).root !== victim
+			)
 				continue;
 			if ((this.clientLeases.get(key) ?? 0) > 0) continue;
 			this.retireClient(key);
@@ -710,8 +714,8 @@ export class ClientRegistry {
 		if (this.adoptedClientKeys.delete(key)) {
 			const { root } = parseClientKey(key);
 			if (
-				![...this.adoptedClientKeys].some((candidate) =>
-					candidate.endsWith(`:${root}`),
+				![...this.adoptedClientKeys].some(
+					(candidate) => parseClientKey(candidate).root === root,
 				)
 			)
 				this.adoptedRootLastUsedAt.delete(root);
