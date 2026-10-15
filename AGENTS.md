@@ -338,6 +338,8 @@ file-scoped worklist and receives no project-wide scanner output.
     uses the existing advisory notice seam; intended vendor skips and pi-owned
     OS-temp artifacts stay silent (`clients/runtime-tool-result.ts`,
     `clients/ephemeral-root.ts`).
+    A delta decides only what is new: a blocker stays pending, recorded and
+    gating, until an observation no longer holds it.
     Enforced by `tests/clients/dispatch/runners/run-outcome-ratchet.test.ts`,
     `tests/clients/dispatch/runners/parsed-nothing-sweep.test.ts` and
     `tests/clients/delivery-surface-ratchet.test.ts` (partial: no detector
