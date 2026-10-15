@@ -97,6 +97,11 @@ exports change.
   the red on the new assertion. A rewrite that stays green with that
   behaviour broken is a deleted test (#4390: the eviction smoke's rewrite
   passed with root re-registration broken).
+- A PR that adds or changes a detector (a ratchet, census or source scan)
+  plants three spellings its author did not design for: an alias, an
+  indirect call and a value reached through another binding. Quote each
+  result. A plant that stays green is fixed, or named in the body as a
+  stated residual (AGENTS.md shape 69).
 - The manual per-test campaign (`stryker-pertest.yml`, #4365) lists tests that
   cover mutated code but kill no mutant. It is a triage input, not a verdict:
   a candidate that guards another seam or a named recurrence stays, and a

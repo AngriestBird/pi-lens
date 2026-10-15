@@ -326,7 +326,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/mcp/session.ts": 4,
 		"clients/metrics-client.ts": 7,
 		"clients/observed-mutation.ts": 7,
-		"clients/runtime-tool-call.ts": 13,
+		"clients/runtime-tool-call.ts": 12,
 		"clients/sgconfig.ts": 6,
 		"clients/widget-state.ts": 2,
 	},
@@ -1192,7 +1192,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/project-lens-config.ts": 8,
 		"clients/project-snapshot.ts": 10,
 		"clients/read-guard-tool-lines.ts": 4,
-		"clients/read-guard.ts": 24,
+		"clients/read-guard.ts": 23,
 		"clients/runtime-agent-end.ts": 56,
 		"clients/runtime-context.ts": 2,
 		// 17 -> 23 (#3218): `noteResolvedBlockerFile` reads the removed
@@ -1250,7 +1250,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/word-index.ts": 8,
 		"tools/lens-diagnostics.ts": 12,
 		"tools/lsp-navigation.ts": 9,
-		"mcp/server.ts": 22,
+		// 22 -> 23 (#1634): `pilens_project_scan` reads the policy's suppressed
+		// count off the scan result its handler already names `snapshot`.
+		"mcp/server.ts": 23,
 	},
 	status: {
 		// #3867 moved the coverage decision onto `hasUsableResult`: dispatcher.ts
@@ -1495,7 +1497,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/pipeline.ts": 6,
 		"clients/project-diagnostics/runner-adapters/call-graph-impact.ts": 1,
 		"clients/runtime-agent-end.ts": 6,
-		"clients/runtime-turn.ts": 21,
+		"clients/runtime-turn.ts": 16,
 		"clients/secret-findings.ts": 3,
 		"clients/widget-state.ts": 1,
 		"tools/ast-grep-search.ts": 6,

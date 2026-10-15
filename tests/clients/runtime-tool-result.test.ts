@@ -1288,6 +1288,8 @@ describe("bash grep searchReads registration", () => {
 						effectiveLimit: 1,
 						toolCallId: "codemode-1",
 					}),
+					// #1649: hashed from the file's one pass, not re-captured.
+					{ captureLineHashes: false },
 				);
 			} finally {
 				env.cleanup();
@@ -2132,6 +2134,8 @@ describe("bash grep searchReads registration", () => {
 						reason: "match-lines-only",
 					},
 				}),
+				// #1649: hashed from the file's one pass, not re-captured.
+				{ captureLineHashes: false },
 			);
 		} finally {
 			env.cleanup();
@@ -2181,6 +2185,8 @@ describe("bash grep searchReads registration", () => {
 						reason: "delivered-context-flags",
 					},
 				}),
+				// #1649: hashed from the file's one pass, not re-captured.
+				{ captureLineHashes: false },
 			);
 		} finally {
 			env.cleanup();

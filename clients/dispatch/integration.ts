@@ -2795,6 +2795,7 @@ function formatCascadeResult(
 	/** #4403 round 4 (N2): the lines naming primaries that did not answer. */
 	unansweredPrimaryNote = "",
 ): string {
+	// @delivery-surface: dispatch-integration:in-lane-cascade
 	const neighborBlock = formatCascadeNeighborDiagnostics(cwd, neighbors, {
 		noun: "neighbor",
 		includeReason: true,
