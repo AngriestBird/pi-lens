@@ -119,6 +119,19 @@ describe("tree-sitter runner — dispatch filtering (#448)", () => {
 		expect(loopLines).toEqual([2]);
 	}, 30_000);
 
+	// Recurrence: a span that over-counted a single-line match's end (one line
+	// too many) would re-block the untouched line just above an edit.
+	it("drops a single-line blocking match on the line just above the edit (#4481 r2)", async () => {
+		const { ctx } = env.addFile("adjacent-above.ts", MIXED_SRC, {
+			blockingOnly: true,
+			modifiedRanges: [{ start: 4, end: 4 }],
+		});
+		const result = await treeSitterRunner.run(ctx);
+		expect(
+			result.diagnostics.filter((d) => d.rule === "debugger-statement"),
+		).toEqual([]);
+	}, 30_000);
+
 	it("drops a blocking multi-line match wholly outside the edit (#4481 r2)", async () => {
 		const { ctx } = env.addFile("span-outside.ts", LOOP_SRC, {
 			blockingOnly: true,
