@@ -193,8 +193,9 @@ export function main(argv = process.argv.slice(2)) {
 		...targeted.output.matchAll(/^\s+- (tests\/[^\s]+\.test\.ts)$/gm),
 	].map((match) => match[1]);
 	const targetedFailing = reportedFailureFiles(targeted.output, selected);
-	// Over the selector's cap only the governance registries and history picks
-	// ran, and the selector still exits 0: that is not a clean targeted run.
+	// Over the selector's cap the import matches past the best 25 did not run
+	// (the change's own tests, the registries and the history picks did), and the
+	// selector still exits 0: that is not a clean targeted run.
 	const cap = targeted.output.match(
 		/selection too broad \((\d+) test files matched/,
 	);

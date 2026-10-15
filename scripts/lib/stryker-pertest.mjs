@@ -11,6 +11,7 @@ import {
 	isCompiledMutationSource,
 	mapRelatedTests,
 } from "./stryker-diff.mjs";
+import { escapeMarkdownCell } from "./markdown-cell.mjs";
 
 /**
  * Governance tests are excluded by rule. Two spellings of the same idea:
@@ -361,7 +362,7 @@ export function renderCandidates(candidates, summary, { module = "" } = {}) {
 		return `${lines.join("\n")}\n`;
 	}
 	const row = (c) =>
-		`| \`${c.file}\` | ${c.name.replaceAll("|", "\\|")} | ${c.covers} | ${c.kills} | ${c.reason} |`;
+		`| \`${c.file}\` | ${escapeMarkdownCell(c.name)} | ${c.covers} | ${c.kills} | ${c.reason} |`;
 	const table = (title, rows) => {
 		if (rows.length === 0) return;
 		lines.push(
