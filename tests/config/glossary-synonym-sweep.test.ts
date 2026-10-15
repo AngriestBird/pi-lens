@@ -572,7 +572,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/golangci-lint.ts": 1,
 		"clients/dispatch/runners/helm-lint.ts": 1,
 		"clients/dispatch/runners/helm-render.ts": 3,
-		"clients/dispatch/runners/lsp.ts": 4,
+		// 4 -> 5 (#4481): the per-edit pass drops an ast-grep LSP blocker on a
+		// line the write did not change (a runner-side scope, not a delivery gate).
+		"clients/dispatch/runners/lsp.ts": 5,
 		"clients/dispatch/runners/oxlint.ts": 1,
 		"clients/dispatch/runners/prisma-validate.ts": 3,
 		"clients/dispatch/runners/psscriptanalyzer.ts": 1,

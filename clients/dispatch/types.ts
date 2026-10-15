@@ -38,6 +38,22 @@ export interface ModifiedRange {
 	end: number;
 }
 
+/**
+ * Whether a finding's 1-based line span `[startLine, endLine]` overlaps the
+ * lines a write changed. A match anchors at its start line, so an edit inside
+ * a multi-line match leaves the anchor unchanged; the whole span is what the
+ * edit can have touched (#4481 r2). Absent or empty `ranges` mean the whole
+ * file (a full-file dispatch, a fresh write).
+ */
+export function spanOverlapsModifiedRanges(
+	startLine: number,
+	endLine: number,
+	ranges: ReadonlyArray<ModifiedRange> | undefined,
+): boolean {
+	if (!ranges || ranges.length === 0) return true;
+	return ranges.some((r) => startLine <= r.end && endLine >= r.start);
+}
+
 // --- API Interface ---
 
 export interface PiAgentAPI {
