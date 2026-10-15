@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { reachedNoVerdict } from "../../../../clients/dispatch/types.js";
 import { makeRunnerCtx } from "../../../support/runner-ctx.js";
 
 function createCtx(filePath: string, cwdOverride?: string) {
@@ -454,6 +455,20 @@ describe("tree-sitter runner — degraded grammar is not a clean file (#3409)", 
 
 		expect(result.status).toBe("succeeded");
 		expect(result.diagnostics).toHaveLength(0);
+	});
+
+	// #4484 round 2. Recurrence: a query run that threw part way returned an
+	// empty "succeeded", so a recorded tree-sitter blocker left the record.
+	it("flags a rejected query run as reaching no verdict", async () => {
+		const { runner, runQueriesOnFile } = await loadRunnerWithQueries([
+			fakeQuery,
+		]);
+		runQueriesOnFile.mockRejectedValue(new Error("query batch failed"));
+
+		const result = await runner.run(createCtx("/fake/file.ts") as any);
+
+		expect(result.inconclusive).toBe(true);
+		expect(reachedNoVerdict(result)).toBe(true);
 	});
 
 	describe("a rejected query run goes through the shared wasm classifier (#3605)", () => {

@@ -39,10 +39,13 @@ describe("tree-sitter runner grammar retirement (#4010)", () => {
 			env.addFile("retired.ts", "function f() { debugger; }\n").ctx,
 		);
 
+		// #4484 round 2: flagged `inconclusive`, so this empty skip never
+		// retires a tree-sitter blocker recorded before the grammar retired.
 		expect(result).toEqual({
 			status: "skipped",
 			diagnostics: [],
 			semantic: "none",
+			inconclusive: true,
 		});
 	});
 });

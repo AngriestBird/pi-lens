@@ -43,6 +43,64 @@ export function normalizeMessage(message: string): string {
 	return message.replace(/\s+/g, " ").trim().toLowerCase();
 }
 
+/**
+ * A finding's line-agnostic identity: `[tool, rule, normalised message]`. The
+ * same finding keeps it when an edit above it moves its line, and two
+ * occurrences of one rule with one message share it, so callers that must
+ * tell occurrences apart count matches (see {@link retainRecordedFindings}).
+ * Shared by the widget's retention match (`widget-state.ts`) and the
+ * recorded-blocker carry (#4484 round 2).
+ */
+export function findingIdentity(d: {
+	tool?: string | undefined;
+	rule?: string | undefined;
+	message: string;
+}): string {
+	return JSON.stringify([
+		d.tool ?? "",
+		d.rule ?? "",
+		normalizeMessage(d.message),
+	]);
+}
+
+/**
+ * #4484 round 2: which recorded findings a fresh observation leaves standing.
+ * Each prior finding matched by {@link findingIdentity} in `observed` is
+ * replaced by its observed copy (current line and text), one observed copy per
+ * prior entry. An unmatched prior entry survives only when `keepUnobserved`
+ * says its source gave no verdict; otherwise the observation retired it.
+ * Observed findings no prior entry matched are not returned: an observation
+ * keeps a recorded finding, it never records one by itself.
+ */
+export function retainRecordedFindings<
+	T extends {
+		tool?: string | undefined;
+		rule?: string | undefined;
+		message: string;
+	},
+>(
+	prior: readonly T[],
+	observed: readonly T[],
+	keepUnobserved: (finding: T) => boolean,
+): { kept: T[]; retired: T[] } {
+	const byIdentity = new Map<string, T[]>();
+	for (const d of observed) {
+		const key = findingIdentity(d);
+		const bucket = byIdentity.get(key);
+		if (bucket) bucket.push(d);
+		else byIdentity.set(key, [d]);
+	}
+	const kept: T[] = [];
+	const retired: T[] = [];
+	for (const d of prior) {
+		const match = byIdentity.get(findingIdentity(d))?.shift();
+		if (match !== undefined) kept.push(match);
+		else if (keepUnobserved(d)) kept.push(d);
+		else retired.push(d);
+	}
+	return { kept, retired };
+}
+
 export function hashText(
 	value: string,
 	length: number = FINDING_ID_HASH_LENGTH,

@@ -47,23 +47,54 @@ Switches:
    `analysis.blocking`). FALSE is the code before #4484: it cleared on any
    new bytes;
  - Delta: FALSE is `--no-delta` (the causal differential);
- - RangeGated: finding "a" comes from a runner that drops blocking matches
-   on lines the write did not change (tree-sitter today;
-   clients/dispatch/runners/tree-sitter.ts, `blockingOnly`). The observation
-   then does not see "a" on an untouched line.
+ - RangeGated: finding "a" comes from a runner whose edit-range gate
+   withholds blocking matches on lines the write did not change (tree-sitter,
+   the ast-grep runners; `spanOverlapsModifiedRanges`). The delivered
+   observation then does not show "a" on an untouched line;
+ - MayFail: a fast run, an unauthored run or a settling collect-later run may
+   reach no verdict (a timeout, a server error, an unanswered wait). Its
+   findings are absent and it shows nothing gone;
+ - Unused: finding "u" is an unused value. It blocks only while the delta
+   calls it new (dispatcher.ts `promoteDeltaUnusedToBlockers`); held back as
+   already seen it is still observed, as a warning.
+
+The round-2 fix switches (#4484 round 2, each pinned TRUE). A recorded
+blocker leaves the record only when a conclusive observation from its own
+source shows it gone. FALSE is the round-1 code, where the record was the
+delivered blocking set:
+ - ScopeDeliveryOnly: an edit-range gate decides delivery only. A recorded
+   blocker the gate withheld stays in the record (`outOfEditScope`,
+   `DispatchResult.stillObserved`); one never recorded does not enter it;
+ - CarryInconclusive: a recorded blocker whose runner reached no verdict on
+   the write stays (`reachedNoVerdict`, `DispatchResult.inconclusiveSources`);
+ - CarryDeferred: a recorded collect-later blocker stays while its re-check is
+   in flight, and a settled conclusive run of the current bytes that no
+   longer observes it retires it (`retireUnobservedRunnerBlockers`), noting
+   F Resolved when the record empties;
+ - CarryPromoted: a recorded promoted unused value stays while the run still
+   observes it, held back as already seen.
 
 Invariants:
  - GateHonest: the commit gate is open only when no completed observation of
    the current bytes holds a blocker;
  - CleanHonest: a write's tool result says clean only when its observation
    holds no blocker;
- - ResolvedHonest: F is reported resolved only when every blocker the
-   cleared record held was observed gone: a fast blocker is absent from the
-   bytes the clearing write's runners saw, a deferred one from a settled
-   run of the current bytes;
+ - ResolvedHonest: F is reported resolved only when the run that cleared
+   the record observed every blocker it held gone (the ghost `clearOk`): a
+   conclusive inline run of bytes without the inline ones, and a settled
+   conclusive collect-later run of the current bytes without d. A write
+   never observes d (its re-check is in flight), so a write that clears a
+   recorded d is never honest about it;
  - GateSound: the gate is open only when the bytes hold no fast blocker
    (stronger than GateHonest: it also catches a blocker a runner does not
-   observe).
+   observe);
+ - RecordedKept: every blocker a run delivered stays in the record until a
+   conclusive observation from its own source shows it gone (the ghost
+   `owed`). It is the GateSound of a run that can fail or a value that blocks
+   only when new: no write can block on a finding no run reported, so the
+   property is about what was reported;
+ - CleanSound: a write's tool result says clean only when nothing reported
+   was still owed when it said so (the ghost `cleanOk`).
 ***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -74,18 +105,27 @@ CONSTANTS
     MaxShift,       \* line insertions above the findings
     Ordinal,        \* TRUE: ids are ordinal ranks (helm-lint); FALSE: line-bound (LSP)
     Deferred,       \* TRUE: the collect-later finding "d" exists
-    RangeGated,     \* TRUE: "a" is reported only on a line the write changed
+    RangeGated,     \* TRUE: "a" is delivered only on a line the write changed
+    MayFail,        \* TRUE: a run may reach no verdict
+    Unused,         \* TRUE: the unused value "u" exists
     Delta,          \* FALSE: --no-delta
     ClearOnCurrent, \* the #4484 fix: record/clean/clear read the current blocking set
-    OpaqueKeep      \* the #4484 fix, part 2: an unauthored run that still observes a blocker keeps the record
+    OpaqueKeep,     \* the #4484 fix, part 2: an unauthored run that still observes a blocker keeps the record
+    ScopeDeliveryOnly, \* round 2: a range gate decides delivery only
+    CarryInconclusive, \* round 2: a no-verdict run keeps its recorded blockers
+    CarryDeferred,     \* round 2: an in-flight re-check keeps d; only a settled run retires it
+    CarryPromoted      \* round 2: a recorded promoted unused value stays while observed
 
 Fast == {"a", "b"}
+U == IF Unused THEN {"u"} ELSE {}
 Def == IF Deferred THEN {"d"} ELSE {}
-AllF == Fast \cup Def
+Inline == Fast \cup U
+AllF == Inline \cup Def
 
 \* The id the delta keys on, for finding f in observation obs at line offsets l.
+\* "u" is an LSP finding, so its id is line-bound whatever Ordinal says.
 Id(f, obs, l) ==
-    IF Ordinal
+    IF Ordinal /\ f \in Fast
       THEN <<"ord", IF f = "b" /\ "a" \in obs THEN 2 ELSE 1>>
       ELSE <<f, l[f]>>
 
@@ -103,60 +143,101 @@ VARIABLES
     toolClean,  \* the latest authored write's tool result says clean
     noted,      \* a clear noted F for the Resolved line, not yet printed
     cleared,    \* the findings the noted clear retired
+    clearOk,    \* ghost: the noted clear's own run showed every finding it retired gone
     claim,      \* the latest turn end printed Resolved for F
     claimSet,   \* the findings that Resolved line claimed gone
     claimOk,    \* each claimed finding was observed gone when the line printed
+    owed,       \* ghost: blockers a run delivered that no conclusive run has shown gone
+    cleanOk,    \* ghost: when the latest write said clean, nothing was owed
     nW, nO, nT
 
 vars == <<disk, ln, base, hasBase, rec, obsF, wobs, dState, toolClean, noted,
-          cleared, claim, claimSet, claimOk, nW, nO, nT>>
+          cleared, clearOk, claim, claimSet, claimOk, owed, cleanOk, nW, nO, nT>>
 
 TypeOK ==
-    /\ disk \subseteq AllF /\ rec \subseteq AllF /\ obsF \subseteq Fast
-    /\ dState \in {"idle", "flight", "settled"}
+    /\ disk \subseteq AllF /\ rec \subseteq AllF /\ obsF \subseteq Inline
+    /\ owed \subseteq AllF
+    /\ dState \in {"idle", "flight", "settled", "failed"}
 
 Init ==
     /\ disk = {} /\ ln = [f \in AllF |-> 0]
     /\ base = {} /\ hasBase = FALSE
     /\ rec = {} /\ obsF = {} /\ wobs = {}
     /\ dState = "idle" /\ toolClean = TRUE
-    /\ noted = FALSE /\ cleared = {}
+    /\ noted = FALSE /\ cleared = {} /\ clearOk = TRUE
     /\ claim = FALSE /\ claimSet = {} /\ claimOk = TRUE
+    /\ owed = {} /\ cleanOk = TRUE
     /\ nW = 0 /\ nO = 0 /\ nT = 0
 
-\* What the fast runners report for bytes `new` when the write changed `touched`.
+\* What the fast runners deliver as blocking for bytes `new` when the write
+\* changed `touched`: the edit-range gate withholds "a" on an untouched line.
 Observe(new, touched) ==
     {f \in new \cap Fast : ~(RangeGated /\ f = "a" /\ f \notin touched)}
+
+\* One inline run of bytes `new` (fail: it reached no verdict).
+Full(new, fail) == IF fail THEN {} ELSE new \cap Fast
+Deliv(new, touched, fail) == IF fail THEN {} ELSE Observe(new, touched)
+USeen(new, fail) == IF fail THEN {} ELSE new \cap U
+\* The unused values the delta calls new, promoted to blockers.
+UBlock(new, fail, l) ==
+    IF Delta /\ hasBase
+      THEN {f \in USeen(new, fail) : Id(f, {}, l) \notin base}
+      ELSE {}
+\* The recorded blockers the run keeps although it did not deliver them.
+Carried(new, touched, fail, l) ==
+    (IF ScopeDeliveryOnly
+       THEN rec \cap (Full(new, fail) \ Deliv(new, touched, fail)) ELSE {})
+    \cup (IF CarryPromoted
+       THEN rec \cap (USeen(new, fail) \ UBlock(new, fail, l)) ELSE {})
+    \cup (IF CarryInconclusive /\ fail THEN rec \cap Inline ELSE {})
+    \cup (IF CarryDeferred THEN rec \cap Def ELSE {})
+\* The findings an inline run shows gone: none when it reached no verdict,
+\* and never d, whose re-check every write leaves in flight.
+Gone(new, fail) == IF fail THEN {} ELSE Inline \ new
+
+\* What a conclusive inline run leaves owed: a finding it still observes,
+\* delivered or not; a failed run shows nothing gone. d's re-check is in
+\* flight on every write, so d stays owed.
+OwedAfter(new, fail) ==
+    IF fail THEN owed
+    ELSE (owed \cap (Full(new, fail) \cup USeen(new, fail))) \cup (owed \cap Def)
 
 \* The record verb after one dispatch: record `set`, or clear when it is empty.
 \* recordInlineBlockers drops a carried Resolved entry; a clear of an existing
 \* record notes one (noteResolvedBlockerFile).
-RecordVerb(set) ==
+RecordVerb(set, gone) ==
     /\ rec' = set
     /\ noted' = IF set # {} THEN FALSE ELSE IF rec # {} THEN TRUE ELSE noted
     /\ cleared' = IF set # {} THEN {} ELSE IF rec # {} THEN rec ELSE cleared
+    /\ clearOk' = IF set # {} THEN TRUE
+                  ELSE IF rec # {} THEN rec \subseteq gone ELSE clearOk
 
-Write(new, shift, touched) ==
+Write(new, shift, touched, fail) ==
     LET l == IF shift THEN [f \in AllF |-> ln[f] + 1] ELSE ln
-        obs == Observe(new, touched)
-        ids == IdsOf(obs, l)
+        obs == Deliv(new, touched, fail)
+        ub == UBlock(new, fail, l)
+        ids == IdsOf(obs, l) \cup IdsOf(USeen(new, fail), l)
         newIds == IF Delta /\ hasBase THEN ids \ base ELSE ids
         deltaSet == {f \in obs : Id(f, obs, l) \in newIds}
-        current == IF ClearOnCurrent THEN obs ELSE deltaSet
+        delivered == IF ClearOnCurrent THEN obs \cup ub ELSE deltaSet \cup ub
+        current == delivered \cup Carried(new, touched, fail, l)
     IN /\ disk' = new /\ ln' = l
        /\ base' = ids /\ hasBase' = TRUE
-       /\ obsF' = obs /\ wobs' = obs
-       /\ RecordVerb(current)
+       /\ obsF' = obs \cup ub /\ wobs' = obs \cup ub
+       /\ RecordVerb(current, Gone(new, fail))
        /\ toolClean' = (current = {})
+       /\ owed' = OwedAfter(new, fail) \cup delivered
+       /\ cleanOk' = (current = {} => OwedAfter(new, fail) \cup delivered = {})
        /\ dState' = IF Deferred THEN "flight" ELSE "idle"
        /\ claim' = FALSE
 
 WriteStep ==
     /\ nW < Writes
-    /\ \E new \in SUBSET AllF, shift \in BOOLEAN, touched \in SUBSET Fast :
+    /\ \E new \in SUBSET AllF, shift \in BOOLEAN, touched \in SUBSET Fast,
+          fail \in (IF MayFail THEN BOOLEAN ELSE {FALSE}) :
         /\ ((new \ disk) \cup (disk \ new)) \cap Fast \subseteq touched
         /\ (shift => \A f \in AllF : ln[f] < MaxShift)
-        /\ Write(new, shift, touched)
+        /\ Write(new, shift, touched, fail)
     /\ nW' = nW + 1
     /\ UNCHANGED <<claimSet, claimOk, nO, nT>>
 
@@ -166,49 +247,74 @@ WriteStep ==
 \* observation.
 OpaqueStep ==
     /\ nO < OpaqueWrites
-    /\ \E new \in SUBSET disk :
-        LET obs == Observe(new, (disk \ new) \cap Fast)
-            clears == IF OpaqueKeep THEN obs = {} ELSE TRUE
+    /\ \E new \in SUBSET disk, fail \in (IF MayFail THEN BOOLEAN ELSE {FALSE}) :
+        LET touched == (disk \ new) \cap Fast
+            obs == Deliv(new, touched, fail)
+            ub == UBlock(new, fail, ln)
+            held == obs \cup ub \cup Carried(new, touched, fail, ln)
+            clears == IF OpaqueKeep THEN held = {} ELSE TRUE
         IN /\ disk' = new
-           /\ base' = IdsOf(obs, ln) /\ hasBase' = TRUE
-           /\ obsF' = obs
-           /\ IF clears THEN RecordVerb({})
-                        ELSE UNCHANGED <<rec, noted, cleared>>
+           /\ base' = IdsOf(obs, ln) \cup IdsOf(USeen(new, fail), ln)
+           /\ hasBase' = TRUE
+           /\ obsF' = obs \cup ub
+           /\ IF clears THEN RecordVerb({}, Gone(new, fail))
+                        ELSE UNCHANGED <<rec, noted, cleared, clearOk>>
+           /\ owed' = OwedAfter(new, fail)
            /\ dState' = IF Deferred THEN "flight" ELSE "idle"
     /\ nO' = nO + 1
     /\ claim' = FALSE
-    /\ UNCHANGED <<ln, wobs, toolClean, claimSet, claimOk, nW, nT>>
+    /\ UNCHANGED <<ln, wobs, toolClean, claimSet, claimOk, cleanOk, nW, nT>>
 
-\* The collect-later run of the current bytes settles; its blocker joins the
-\* record (recordDeferredInlineBlockers merges and leaves the Resolved entry).
-DoSettle ==
-    /\ dState' = "settled"
-    /\ rec' = IF "d" \in disk THEN rec \cup {"d"} ELSE rec
+\* The collect-later run of the current bytes settles. A conclusive run's
+\* blocker joins the record (recordDeferredInlineBlockers merges and leaves
+\* the Resolved entry); under CarryDeferred, a conclusive run that no longer
+\* observes d retires it, and an emptied record notes F Resolved
+\* (retireUnobservedRunnerBlockers). A run that reached no verdict changes
+\* nothing.
+SettledRec(ok) ==
+    IF ~ok THEN rec
+    ELSE IF "d" \in disk THEN rec \cup {"d"}
+    ELSE IF CarryDeferred THEN rec \ {"d"}
+    ELSE rec
+SettledOwed(ok) ==
+    IF ~ok THEN owed
+    ELSE IF "d" \in disk THEN owed \cup {"d"} ELSE owed \ {"d"}
+\* The settle's retire empties the record: F is noted Resolved with what it held.
+Retires(ok) == rec # {} /\ SettledRec(ok) = {}
 
 SettleStep ==
     /\ dState = "flight"
-    /\ DoSettle
-    /\ UNCHANGED <<disk, ln, base, hasBase, obsF, wobs, toolClean, noted,
-                   cleared, claim, claimSet, claimOk, nW, nO, nT>>
-
-ObservedGone(f, ds) ==
-    /\ f \notin disk
-    /\ (f \in Def => ds = "settled")
+    /\ \E ok \in (IF MayFail THEN BOOLEAN ELSE {TRUE}) :
+        /\ dState' = IF ok THEN "settled" ELSE "failed"
+        /\ rec' = SettledRec(ok)
+        /\ owed' = SettledOwed(ok)
+        /\ noted' = (noted \/ Retires(ok))
+        /\ cleared' = IF Retires(ok) THEN rec ELSE cleared
+        /\ clearOk' = IF Retires(ok) THEN TRUE ELSE clearOk
+    /\ UNCHANGED <<disk, ln, base, hasBase, obsF, wobs, toolClean,
+                   claim, claimSet, claimOk, cleanOk, nW, nO, nT>>
 
 TurnEndStep ==
     /\ nT < Turns
-    /\ \E settle \in BOOLEAN :
-        LET ds == IF settle /\ dState = "flight" THEN "settled" ELSE dState
-            r == IF settle /\ dState = "flight" /\ "d" \in disk THEN rec \cup {"d"} ELSE rec
-            prints == noted /\ r = {}
+    /\ \E settle \in BOOLEAN, ok \in (IF MayFail THEN BOOLEAN ELSE {TRUE}) :
+        LET settles == settle /\ dState = "flight"
+            ds == IF settles THEN (IF ok THEN "settled" ELSE "failed") ELSE dState
+            r == IF settles THEN SettledRec(ok) ELSE rec
+            nt == noted \/ (settles /\ Retires(ok))
+            cl == IF settles /\ Retires(ok) THEN rec ELSE cleared
+            ck == IF settles /\ Retires(ok) THEN TRUE ELSE clearOk
+            prints == nt /\ r = {}
         IN /\ dState' = ds /\ rec' = r
+           /\ owed' = IF settles THEN SettledOwed(ok) ELSE owed
            /\ claim' = prints
-           /\ claimSet' = IF prints THEN cleared ELSE {}
-           /\ claimOk' = IF prints THEN \A f \in cleared : ObservedGone(f, ds) ELSE TRUE
-           /\ noted' = IF prints THEN FALSE ELSE noted
-           /\ cleared' = IF prints THEN {} ELSE cleared
+           /\ claimSet' = IF prints THEN cl ELSE {}
+           /\ claimOk' = IF prints THEN ck ELSE TRUE
+           /\ noted' = IF prints THEN FALSE ELSE nt
+           /\ cleared' = IF prints THEN {} ELSE cl
+           /\ clearOk' = IF prints THEN TRUE ELSE ck
     /\ nT' = nT + 1
-    /\ UNCHANGED <<disk, ln, base, hasBase, obsF, wobs, toolClean, nW, nO>>
+    /\ UNCHANGED <<disk, ln, base, hasBase, obsF, wobs, toolClean, cleanOk,
+                   nW, nO>>
 
 Next == WriteStep \/ OpaqueStep \/ SettleStep \/ TurnEndStep
 
@@ -221,4 +327,6 @@ GateHonest == rec = {} => CurObs = {}
 CleanHonest == toolClean => wobs = {}
 ResolvedHonest == claim => claimOk
 GateSound == rec = {} => disk \cap Fast = {}
+RecordedKept == owed \subseteq rec
+CleanSound == cleanOk
 =============================================================================

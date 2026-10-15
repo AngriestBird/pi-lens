@@ -572,9 +572,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/golangci-lint.ts": 1,
 		"clients/dispatch/runners/helm-lint.ts": 1,
 		"clients/dispatch/runners/helm-render.ts": 3,
-		// 4 -> 5 (#4481): the per-edit pass drops an ast-grep LSP blocker on a
-		// line the write did not change (a runner-side scope, not a delivery gate).
-		"clients/dispatch/runners/lsp.ts": 5,
+		// 4 -> 5 (#4481), 5 -> 4 (#4484 r2): the per-edit pass partitions an
+		// ast-grep LSP blocker on an unchanged line into `outOfEditScope` instead
+		// of dropping it, so the scope decides delivery only.
+		"clients/dispatch/runners/lsp.ts": 4,
 		"clients/dispatch/runners/oxlint.ts": 1,
 		"clients/dispatch/runners/prisma-validate.ts": 3,
 		"clients/dispatch/runners/psscriptanalyzer.ts": 1,
@@ -1084,7 +1085,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 28 -> 29 (#3814): the deferred-blocker merge derives the map key with
 		// `path.resolve(filePath)`, the expression every sibling method uses.
 		// 29 -> 30 (#4213): the lifecycle identity lookup uses the same map key.
-		"clients/runtime-coordinator.ts": 30,
+		// 30 -> 32 (#4484 r2): the record read for the carry and the settled-run
+		// retire derive the same map key.
+		"clients/runtime-coordinator.ts": 32,
 		"clients/runtime-session.ts": 15,
 		// 22 -> 21 (#4137): the baseline slot's `path.resolve` moved into
 		// `opaqueBaselineSlot` (clients/opaque-mutation-scan.ts).
@@ -1345,7 +1348,8 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/vale.ts": 4,
 		"clients/dispatch/runners/yamllint.ts": 2,
 		"clients/dispatch/runners/zig-check.ts": 3,
-		"clients/dispatch/types.ts": 5,
+		// 5 -> 6 (#4484 r2): `reachedNoVerdict` reads the runner result's status.
+		"clients/dispatch/types.ts": 6,
 		"clients/file-utils.ts": 2,
 		"clients/finding-delivery-gate.ts": 3,
 		"clients/formatters.ts": 8,

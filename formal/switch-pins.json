@@ -1830,6 +1830,70 @@
 							"reason": "NoDelta has no unauthored write (OpaqueWrites = 0), so the switch is inert; it keeps the whole code before #4484 for the --no-delta differential."
 						}
 					}
+				},
+				"ScopeDeliveryOnly": {
+					"value": "TRUE",
+					"test": "tests/index-4484-unfixed-blocker-witness.test.ts",
+					"title": "keeps an ast-grep blocker pending after an edit to another line (row 7)",
+					"also": [
+						{
+							"test": "tests/index-4484-unfixed-blocker-witness.test.ts",
+							"title": "keeps a tree-sitter blocker pending after an edit to another line (row 7)"
+						}
+					],
+					"narrowedBy": {
+						"FALSE": {
+							"configs": [
+								"NoDelta"
+							],
+							"reason": "NoDelta keeps the whole code before #4484 for the --no-delta differential; it has no range-gated runner, no failing run, no collect-later finding and no unused value (RangeGated, MayFail, Deferred and Unused are FALSE), so the switch is inert there."
+						}
+					}
+				},
+				"CarryInconclusive": {
+					"value": "TRUE",
+					"test": "tests/index-4484-unfixed-blocker-witness.test.ts",
+					"title": "keeps an LSP error pending when the server does not answer the next write (row 10)",
+					"also": [
+						{
+							"test": "tests/index-4484-unfixed-blocker-witness.test.ts",
+							"title": "keeps an LSP error pending when the server fails on the next write (row 10)"
+						}
+					],
+					"narrowedBy": {
+						"FALSE": {
+							"configs": [
+								"NoDelta"
+							],
+							"reason": "NoDelta keeps the whole code before #4484 for the --no-delta differential; it has no range-gated runner, no failing run, no collect-later finding and no unused value (RangeGated, MayFail, Deferred and Unused are FALSE), so the switch is inert there."
+						}
+					}
+				},
+				"CarryDeferred": {
+					"value": "TRUE",
+					"test": "tests/index-4484-unfixed-blocker-witness.test.ts",
+					"title": "keeps a blocker pending while its collect-later re-check runs, and retires it only when a current run settles clean (rows 12, 14)",
+					"narrowedBy": {
+						"FALSE": {
+							"configs": [
+								"NoDelta"
+							],
+							"reason": "NoDelta keeps the whole code before #4484 for the --no-delta differential; it has no range-gated runner, no failing run, no collect-later finding and no unused value (RangeGated, MayFail, Deferred and Unused are FALSE), so the switch is inert there."
+						}
+					}
+				},
+				"CarryPromoted": {
+					"value": "TRUE",
+					"test": "tests/index-4484-unfixed-blocker-witness.test.ts",
+					"title": "keeps a delta-promoted unused value blocking on the next unrelated write (row 16)",
+					"narrowedBy": {
+						"FALSE": {
+							"configs": [
+								"NoDelta"
+							],
+							"reason": "NoDelta keeps the whole code before #4484 for the --no-delta differential; it has no range-gated runner, no failing run, no collect-later finding and no unused value (RangeGated, MayFail, Deferred and Unused are FALSE), so the switch is inert there."
+						}
+					}
 				}
 			},
 			"notCodeChoice": [
@@ -1843,19 +1907,14 @@
 					]
 				},
 				{
-					"reason": "Environment: which linter reports the finding (line-bound LSP ids or helm-lint's ordinal ids, a collect-later runner or none) and the user's --no-delta flag; the code must be honest under every value, so the as-built configs set them both ways.",
+					"reason": "Environment: which linter reports the finding (line-bound LSP ids or helm-lint's ordinal ids, a collect-later runner or none, a runner with an edit-range gate or without, an unused value or none), whether a run reaches a verdict, and the user's --no-delta flag; the code must be honest under every value, so the as-built configs set them both ways.",
 					"constants": [
 						"Ordinal",
 						"Deferred",
-						"Delta"
-					]
-				}
-			],
-			"deferred": [
-				{
-					"reason": "Deferred: a residual, not yet fixed (#4484 hand-back). The as-built value depends on the runner: tree-sitter drops blocking matches on lines the write did not change (TRUE), the LSP and CLI linters do not (FALSE). The pass configs model the FALSE runners; RangeGatedResidual expects the violation the TRUE runner still has.",
-					"constants": [
-						"RangeGated"
+						"Delta",
+						"RangeGated",
+						"MayFail",
+						"Unused"
 					]
 				}
 			]

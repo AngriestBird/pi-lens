@@ -17,7 +17,7 @@ import * as nodeFs from "node:fs";
 import * as nodeCrypto from "node:crypto";
 import * as path from "node:path";
 import type { PiLensFlagSource } from "./lens-config.js";
-import { findNearestContaining } from "./path-utils.js";
+import { findNearestContaining, normalizeMapKey } from "./path-utils.js";
 import {
 	inlineBlockerLines,
 	inlineBlockerSources,
@@ -38,6 +38,7 @@ import {
 import { writeOrderToken } from "./write-ordering-guard.js";
 import { getDiagnosticLogger } from "./diagnostic-logger.js";
 import { getDiagnosticTracker } from "./diagnostic-tracker.js";
+import { retainRecordedFindings } from "./finding-identity.js";
 import { loadDispatchIntegration } from "./dispatch/lazy.js";
 import { toRunnerDisplayPath } from "./dispatch/runner-context.js";
 import {
@@ -266,6 +267,12 @@ export interface PipelineContext {
 	 */
 	allowAutonomousWriters?: boolean;
 	modifiedRanges?: { start: number; end: number }[];
+	/**
+	 * #4484 round 2: the file's recorded inline blockers before this run, read
+	 * when the dispatch returns. A recorded blocker leaves the record only when
+	 * a conclusive observation from its own source shows it gone.
+	 */
+	priorInlineBlockers?: () => readonly Diagnostic[] | undefined;
 	telemetry?: {
 		model: string;
 		sessionId: string;
@@ -1852,6 +1859,43 @@ function buildEnrichedBlockerOutput(
 
 // --- Main Pipeline ---
 
+/**
+ * #4484 round 2: the recorded blockers this run leaves standing beyond what it
+ * observed as blocking. A recorded blocker matched (line-agnostic identity) by
+ * a blocker this run delivers or holds back is already in `observed`. One
+ * matched only by `stillObserved` stays as its observed copy. One no finding
+ * matches stays as recorded only when its runner or server reached no verdict;
+ * that carry is counted per file.
+ */
+function carryRecordedBlockers(
+	prior: readonly Diagnostic[],
+	observed: readonly Diagnostic[],
+	dispatchResult: Pick<DispatchResult, "stillObserved" | "inconclusiveSources">,
+	filePath: string,
+): Diagnostic[] {
+	if (prior.length === 0) return [];
+	const runnerIds = new Set(dispatchResult.inconclusiveSources?.runnerIds);
+	const serverIds = new Set(dispatchResult.inconclusiveSources?.serverIds);
+	const observedNow = new Set(observed);
+	const { kept } = retainRecordedFindings(
+		prior,
+		[...observed, ...(dispatchResult.stillObserved ?? [])],
+		(d) =>
+			(d.runnerId !== undefined && runnerIds.has(d.runnerId)) ||
+			(d.serverId !== undefined && serverIds.has(d.serverId)),
+	);
+	const carried = kept.flatMap((d) => (observedNow.has(d) ? [] : [d]));
+	if (carried.some((d) => !dispatchResult.stillObserved?.includes(d))) {
+		incrementDegradationCount({
+			kind: "blocker-carried-unobserved",
+			subject: normalizeMapKey(filePath),
+			reason:
+				"a recorded blocker's source reached no verdict on this write, so the blocker stays pending (#4484)",
+		});
+	}
+	return carried;
+}
+
 export async function runPipeline(
 	ctx: PipelineContext,
 	deps: PipelineDeps,
@@ -2178,10 +2222,24 @@ async function analysePipeline(
 	// #4484: the store, the widget and the published set hold the file's
 	// blockers, not only the ones the delta called new; a blocker held back as
 	// already seen is still on the file.
+	// #4484 r2: so does a recorded blocker this run did not retire: one an
+	// edit-range gate withheld or the delta held back as an old unused value
+	// (its observed copy), or one whose source reached no verdict (its recorded
+	// copy).
 	const heldBackBlockers = dispatchResult.heldBackBlockers ?? [];
+	const carriedBlockers = carryRecordedBlockers(
+		ctx.priorInlineBlockers?.() ?? [],
+		[...dispatchResult.blockers, ...heldBackBlockers],
+		dispatchResult,
+		filePath,
+	);
+	const keptBlockers =
+		carriedBlockers.length > 0
+			? [...heldBackBlockers, ...carriedBlockers]
+			: heldBackBlockers;
 	const storedDiagnostics =
-		heldBackBlockers.length > 0
-			? [...dispatchResult.diagnostics, ...heldBackBlockers]
+		keptBlockers.length > 0
+			? [...dispatchResult.diagnostics, ...keptBlockers]
 			: dispatchResult.diagnostics;
 	recordDiagnostics(
 		filePath,
@@ -2252,8 +2310,8 @@ async function analysePipeline(
 	// block; the held-back ones get one line and stay in the record, so an
 	// empty delta no longer reads as a fix.
 	const currentBlockers =
-		heldBackBlockers.length > 0
-			? [...dispatchResult.blockers, ...heldBackBlockers]
+		keptBlockers.length > 0
+			? [...dispatchResult.blockers, ...keptBlockers]
 			: dispatchResult.blockers;
 	const liveBlockers =
 		currentBlockers.length > 0

@@ -13,6 +13,7 @@ import {
 } from "./project-changes.js";
 import type { CodeQualityWarningRecord } from "./code-quality-warnings.js";
 import type { Diagnostic } from "./dispatch/types.js";
+import { retainRecordedFindings } from "./finding-identity.js";
 import { formatDiagnostics } from "./dispatch/utils/format-utils.js";
 import {
 	inlineBlockerLines,
@@ -1682,6 +1683,74 @@ export class RuntimeCoordinator {
 			policySuppressed: false,
 		});
 		return added.length;
+	}
+
+	/**
+	 * #4484 round 2: the file's recorded blocking diagnostics, which the next
+	 * write's pipeline carries forward unless a conclusive observation from
+	 * their own source shows them gone. Undefined when nothing is recorded or
+	 * the record holds text only.
+	 */
+	getInlineBlockerDiagnostics(
+		filePath: string,
+	): readonly Diagnostic[] | undefined {
+		return this._pendingInlineBlockers.get(path.resolve(filePath))?.diagnostics;
+	}
+
+	/**
+	 * #4484 round 2: a settled collect-later run is the observation that can
+	 * retire the blockers its runner left pending while it was in flight. Its
+	 * runner's recorded blockers that the run no longer observes leave the
+	 * record; blockers from other runners, and from a server the run left
+	 * unconfirmed, stay. The run must be about the recorded bytes: marked after
+	 * they were read (`recordedAtMs`), with the file still holding them
+	 * (`recordedHash`). An emptied record is deleted and its file is noted
+	 * Resolved for turn end, as a clean write's clear does.
+	 *
+	 * @returns how many recorded blockers the run retired.
+	 */
+	retireUnobservedRunnerBlockers(
+		filePath: string,
+		run: {
+			runnerId: string;
+			observed: readonly Diagnostic[];
+			markedAtMs: number;
+			sha256: string | undefined;
+			unconfirmedServerIds?: readonly string[];
+		},
+	): number {
+		const key = path.resolve(filePath);
+		const existing = this._pendingInlineBlockers.get(key);
+		if (
+			!existing?.diagnostics ||
+			run.sha256 === undefined ||
+			existing.recordedHash !== run.sha256 ||
+			existing.recordedAtMs === undefined ||
+			run.markedAtMs < existing.recordedAtMs
+		)
+			return 0;
+		const unconfirmed = new Set(run.unconfirmedServerIds);
+		const { kept, retired } = retainRecordedFindings(
+			existing.diagnostics,
+			run.observed,
+			(d) =>
+				d.runnerId !== run.runnerId ||
+				(d.serverId !== undefined && unconfirmed.has(d.serverId)),
+		);
+		if (retired.length === 0) return 0;
+		if (kept.length === 0) {
+			this.noteResolvedBlockerFile(existing, undefined, false);
+			this._pendingInlineBlockers.delete(key);
+			return retired.length;
+		}
+		this._pendingInlineBlockers.set(key, {
+			...existing,
+			summary: formatDiagnostics(kept, "blocking").trim(),
+			diagnostics: kept,
+			sources: inlineBlockerSources(kept),
+			lines: inlineBlockerLines(kept, existing.filePath),
+		});
+		return retired.length;
 	}
 
 	/**

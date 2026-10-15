@@ -20,11 +20,21 @@ The seam:
   from `clients/runtime-tool-result.ts`.
 - The clear refusal is in `clearInlineBlockers` in
   `clients/runtime-coordinator.ts` (`analysis.blocking`).
+- Round 2: the runners' withheld findings (`RunnerResult.outOfEditScope`) and
+  no-verdict runs (`reachedNoVerdict`, `clients/dispatch/types.ts`) become
+  `DispatchResult.stillObserved` and `inconclusiveSources`. The pipeline's
+  `carryRecordedBlockers` keeps a recorded blocker by line-agnostic identity
+  (`retainRecordedFindings`, `clients/finding-identity.ts`). A settled
+  collect-later run retires its own runner's blockers through
+  `retireSettledRunnerBlockers` (`clients/deferred-runner-blockers.ts`) and
+  `retireUnobservedRunnerBlockers` (the coordinator).
 
 ## What the model covers
 
 - **Findings.** `"a"` and `"b"` are blockers that a fast (inline) runner
   reports. `"d"` is a blocker that a collect-later runner reports (`Deferred`).
+  `"u"` is an unused value (`Unused`): it blocks only while the delta calls it
+  new.
 - **Ids.** A finding's id is the one the delta keys on.
   - A line-bound id is `<<finding, line offset>>`. LSP ids work this way
     (`lsp:<code>:<line>`, `clients/dispatch/utils/lsp-diagnostics.ts`). A line
@@ -54,9 +64,26 @@ The seam:
     the record only when it observes no blocker. FALSE is the code before
     #4484: it cleared on any new bytes.
   - `Delta`: FALSE is `--no-delta`, the causal differential.
-  - `RangeGated`: finding `"a"` comes from a runner that drops blocking matches
-    on lines the write did not change. tree-sitter does this today
-    (`blockingOnly`). After #4482, the ast-grep runners do too.
+  - `RangeGated`: finding `"a"` comes from a runner whose edit-range gate
+    withholds blocking matches on lines the write did not change (tree-sitter,
+    and the ast-grep runners since #4482).
+  - `MayFail`: a fast run, an unauthored run or a settling collect-later run
+    may reach no verdict.
+  - `Unused`: finding `"u"` exists.
+  - Round 2 (#4484, each pinned TRUE). A recorded blocker leaves the record
+    only when a conclusive observation from its own source shows it gone.
+    FALSE is the round-1 code, where the record was the delivered set.
+    - `ScopeDeliveryOnly`: an edit-range gate decides delivery only. A recorded
+      blocker the gate withheld stays in the record; one never recorded does
+      not enter it.
+    - `CarryInconclusive`: a recorded blocker whose runner reached no verdict
+      stays.
+    - `CarryDeferred`: a recorded collect-later blocker stays while its
+      re-check is in flight. A settled conclusive run of the current bytes that
+      no longer observes it retires it and notes F Resolved when the record
+      empties.
+    - `CarryPromoted`: a recorded promoted unused value stays while the run
+      still observes it.
 
 ## Invariants
 
@@ -64,13 +91,20 @@ The seam:
   no completed observation of the current bytes holds a blocker.
 - `CleanHonest`: a write's tool result says clean only when its observation
   holds no blocker.
-- `ResolvedHonest`: F is reported resolved only when every blocker in the
-  cleared record was observed gone. A fast blocker must be absent from the
-  bytes the clearing write's runners saw. A deferred blocker must be absent from
-  a settled run of the current bytes.
+- `ResolvedHonest`: F is reported resolved only when the run that cleared the
+  record observed every blocker in it gone (the ghost `clearOk`). For an inline
+  blocker, that is a conclusive run of bytes without it. For d, it is a
+  settled conclusive run of the current bytes without it. A write never
+  observes d, because its re-check is in flight.
 - `GateSound`: the gate is open only when the bytes hold no fast blocker. This
   is stronger than `GateHonest`, because it also catches a blocker that no
   runner observes.
+- `RecordedKept`: every blocker a run delivered stays in the record until a
+  conclusive observation from its own source shows it gone (the ghost
+  `owed`). It is the `GateSound` of a run that can fail, or of a value that
+  blocks only when new: no write can block on a finding no run reported.
+- `CleanSound`: a write's tool result says clean only when nothing reported
+  was still owed at that moment (the ghost `cleanOk`).
 
 ## Configs
 
@@ -86,9 +120,15 @@ States are as TLC reported them with `-workers 1` (generated / distinct).
 | `ClearOnCurrent` | pass | 5232 / 654 | The fix, line-bound ids. It covers three writes, an unauthored write, two turn ends and a line shift. Every invariant holds, `GateSound` included. |
 | `ClearOnCurrentOrdinal` | pass | 5232 / 654 | The fix, ordinal ids. Renumbering never clears a blocker that the observation still holds. |
 | `NoDelta` | pass | 1328 / 183 | The causal differential. The code before #4484 under `--no-delta` is honest, so the defect needs the delta. |
-| `DeferredGateHonest` | pass | 33231 / 4350 | The fix with a collect-later blocker. Whatever the deferred run's timing, the gate and the tool result stay honest. `GateHonest` counts a settled run only. That is the #3814 design: the commit gate absorbs a settled answer first (`absorbSettledRunnerBlockers`), and a run in flight does not gate. |
-| `DeferredInFlight` | violated `ResolvedHonest` | 731 / 114 | A residual that TLC found, not fixed here (see below). |
-| `RangeGatedResidual` | violated `GateSound` | 20 / 10 | A residual of the same shape, not fixed here (see below). |
+| `DeferredGateHonest` | pass | 22769 / 2298 | The fix with a collect-later blocker. Whatever the deferred run's timing, the gate and the tool result stay honest. `GateHonest` counts a settled run only. That is the #3814 design: the commit gate absorbs a settled answer first (`absorbSettledRunnerBlockers`), and a run in flight does not gate. |
+| `DeferredInFlight` | pass | 789 / 123 | The round-2 fix. A collect-later blocker stays recorded while its re-check is in flight. Only a settled run of the current bytes that no longer observes it retires it, so a Resolved line names F only after that run. |
+| `MutDeferredInFlight` | violated `ResolvedHonest` | 731 / 126 | The round-1 code (`CarryDeferred` FALSE). A later write clears the record while d's re-check is in flight, and the turn end reports F resolved. |
+| `RangeGatedResidual` | pass | 1338 / 247 | The round-2 fix. An edit-range gate decides delivery only, so a recorded E on an unchanged line stays recorded, an unauthored write included. `GateSound` holds. |
+| `MutRangeGated` | violated `GateSound` | 20 / 10 | The round-1 code (`ScopeDeliveryOnly` FALSE). The gated runner never delivers E after an unrelated write, so the gate opens while E is in the bytes. |
+| `CarryInconclusive` | pass | 141687 / 8173 | The round-2 fix. Any fast, unauthored or collect-later run may reach no verdict. A recorded blocker stays until a conclusive run of its source shows it gone, and no clean text or Resolved line rests on a failed run. |
+| `MutFailClear` | violated `RecordedKept` | 47 / 17 | The round-1 code (`CarryInconclusive` FALSE). A write whose runner fails observes nothing, so the record clears. |
+| `CarryPromoted` | pass | 3415 / 314 | The round-2 fix. A promoted unused value stays recorded on every later write that still observes it. |
+| `MutPromotedClear` | violated `RecordedKept` | 183 / 37 | The round-1 code (`CarryPromoted` FALSE). The next unrelated write holds u back as already seen, and the record clears. |
 
 The `MutDeltaClear` trace is write, ignore, write:
 
@@ -109,21 +149,28 @@ Each switch has a config that flips when it is turned:
 - `Ordinal`: `ClearOnCurrent` to `ClearOnCurrentOrdinal` (both pass: the fix
   does not read the id), and `MutDeltaClear` to `MutDeltaClearOrdinal` (both
   red).
-- `Deferred`: `ClearOnCurrent` to `DeferredInFlight`.
-- `RangeGated`: `ClearOnCurrent` to `RangeGatedResidual`.
+- `Deferred`: `ClearOnCurrent` to `DeferredInFlight` (both pass with the
+  round-2 fix).
+- `RangeGated`: `ClearOnCurrent` to `RangeGatedResidual` (both pass).
+- `ScopeDeliveryOnly`: `RangeGatedResidual` to `MutRangeGated`.
+- `CarryInconclusive`: `CarryInconclusive` to `MutFailClear`.
+- `CarryDeferred`: `DeferredInFlight` to `MutDeferredInFlight` (the same
+  scenario).
+- `CarryPromoted`: `CarryPromoted` to `MutPromotedClear`.
 
 ## Residuals TLC shows
 
-- **Deferred in flight (`DeferredInFlight`).** A collect-later blocker d joined
-  the record. A later write's fast runners observe nothing, so the record
-  clears while d's re-check is in flight (the #3814 design). A turn end whose
-  late lane does not find that run settled then reports F resolved, but d was
-  never observed gone. The gate stays honest (`DeferredGateHonest` passes). A runner that changes tier between writes reaches the same
-  state.
-- **Range-gated runners (`RangeGatedResidual`).** A runner that reports
-  blockers only on changed lines does not observe E after an unrelated write.
-  The current set is then empty, the record clears, and the gate opens while E
-  is still in the bytes. This was true before #4484 for tree-sitter.
+Round 2 closed the two residuals round 1 named: a write that clears a
+recorded collect-later blocker while its re-check is in flight
+(`DeferredInFlight`, now a pass), and a range-gated runner that never
+observes E after an unrelated write (`RangeGatedResidual`, now a pass).
+
+What remains is on the failure path, and `CarryInconclusive` leaves
+`GateHonest` out for it. A blocker that first appears while its runner fails
+is reported by no run. If an unauthored run is the next to observe it, that
+run withholds the record (#3226), so the gate stays open until an authored
+conclusive run reports it. The same holds for a blocker a range-gated runner
+first observes only outside the edit.
 
 ## What the model cannot see
 
@@ -131,11 +178,12 @@ Each switch has a config that flips when it is turned:
 - Neighbour-file cascade baselines (`applyCascadeDeltaBaselines` in
   `clients/dispatch/integration.ts`). That is another file's record, a separate
   seam.
-- Delta-promoted unused values (`promoteDeltaUnusedToBlockers`). Such a value
-  blocks only while it is new, so the model does not include it. The witness
-  does not cover it either.
-- A runner that fails or times out. Its missing result looks like an empty
-  observation.
+- A stale collect-later answer (one about older bytes). The model settles
+  only the current bytes' run; the code refuses a stale one by the record's
+  content hash and read time (`retireUnobservedRunnerBlockers`).
+- Identity collisions. The carry matches by `[tool, rule, message]` with
+  multiset counts, so a fixed finding and a new one of the same rule and text
+  are one finding to it.
 
 ## Replay on the real code
 
@@ -150,6 +198,11 @@ service and the process spawn are doubled at their host boundary. Its cells:
 - K: the `--no-delta` differential.
 - F and H: helm, before and after a line shift.
 - R: helm renumbering.
+- Round 2 (rows of the PR's state table): ast-grep and tree-sitter blockers
+  kept after an edit to another line (row 7), a pre-existing ast-grep finding
+  that never blocks (row 8), an unanswered and a failed language server
+  (row 10), a collect-later re-check in flight and its settle (rows 12 and
+  14), and a delta-promoted unused value (row 16).
 
 `tests/clients/opaque-mutation-scan.test.ts` covers part 2 ("keeps an authored
 blocker when an opaque run of changed bytes still observes it (#4484)").

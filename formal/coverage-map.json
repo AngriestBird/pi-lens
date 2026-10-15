@@ -267,7 +267,8 @@
     "clients/runtime-turn.ts": [
       "lsp-idle-reset",
       "late-aux-drain",
-      "session-straddle"
+      "session-straddle",
+      "blocker-pending"
     ],
     "clients/turn-end/delivery-holds.ts": [
       "turn-end-delivery-holds"
@@ -341,7 +342,8 @@
     "clients/workspace-topology.ts": "unmodelled",
     "clients/test-runner-client.ts": "unmodelled",
     "clients/deferred-runner-blockers.ts": [
-      "pending-runner-store"
+      "pending-runner-store",
+      "blocker-pending"
     ],
     "clients/finding-delivery-gate.ts": "unmodelled",
     "clients/git-guard.ts": "unmodelled",

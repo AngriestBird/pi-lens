@@ -163,6 +163,7 @@ import { detectFileRole } from "./file-role.js";
 import {
 	judgeDeferredRunnerFindings,
 	recordDeferredRunnerBlockers,
+	retireSettledRunnerBlockers,
 } from "./deferred-runner-blockers.js";
 import {
 	applyInlineBlockerPolicy,
@@ -1370,6 +1371,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	let runnerFindingsDropped = 0;
 	/** #3814: blocking survivors newly entered into the blocker map this turn end. */
 	let runnerBlockersRecorded = 0;
+	/** #4484 r2: recorded blockers a settled run of their runner retired. */
+	let runnerBlockersRetired = 0;
 	/** #3248: bounded per-turn on this lane's own row, never per finding. */
 	let runnerFindingsDispositionSuppressed = 0;
 	const runnerFindingsDeliveredIds: string[] = [];
@@ -1420,6 +1423,13 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			dropStaleRunnerFindings(pending);
 			runnerFindingsDropped += 1;
 		}
+		// #4484 r2: a settled run of a recorded blocker's own runner that no
+		// longer observes it retires it, before the replay below reads the map.
+		runnerBlockersRetired += retireSettledRunnerBlockers(
+			runtime,
+			pending,
+			verdict,
+		);
 		if (verdict.live === 0) continue;
 		const displayPath = toRunnerDisplayPath(cwd, pending.filePath);
 		const runnerKept = verdict.kept;
@@ -1494,6 +1504,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			failed: runnerFindingsFailed,
 			dropped: runnerFindingsDropped,
 			blockersRecorded: runnerBlockersRecorded,
+			blockersRetired: runnerBlockersRetired,
 			dispositionSuppressed: runnerFindingsDispositionSuppressed,
 			deliveredIds: runnerFindingsDeliveredIds,
 		},

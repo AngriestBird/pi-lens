@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { Diagnostic } from "../../clients/dispatch/types.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import {
 	getDegradationSummary,
@@ -523,6 +524,119 @@ describe("RuntimeCoordinator", () => {
 					blocking: 0,
 				}),
 			).toBe(true);
+			expect(runtime.getInlineBlockersSnapshot()).toHaveLength(0);
+			expect(runtime.hasResolvedBlockerFiles()).toBe(true);
+		});
+	});
+
+	// #4484 round 2: a settled collect-later run is the only observation that
+	// may retire what its runner left pending while it was in flight. Without
+	// the guards it would retire another runner's blocker, a server's it never
+	// heard from, or a verdict about bytes it did not read.
+	describe("retireUnobservedRunnerBlockers (#4484 round 2)", () => {
+		// A real file: the snapshot drops a record whose file is gone (#1245).
+		let dir = "";
+		let file = "";
+		beforeEach(() => {
+			dir = mkdtempSync(path.join(tmpdir(), "pi-lens-4484-retire-"));
+			file = path.join(dir, "carry.ts");
+			writeFileSync(file, "BAD_CALL();\n");
+		});
+		afterEach(() => rmSync(dir, { recursive: true, force: true }));
+		const sha256 = "c".repeat(64);
+		const blocker = (
+			runnerId: string,
+			message: string,
+			serverId?: string,
+		): Diagnostic => ({
+			id: `${runnerId}:${message}`,
+			message,
+			filePath: file,
+			line: 2,
+			severity: "error",
+			semantic: "blocking",
+			tool: runnerId === "lsp" ? "lsp" : runnerId,
+			rule: `${runnerId}:rule`,
+			runnerId,
+			...(serverId !== undefined && { serverId }),
+		});
+		const record = (runtime: RuntimeCoordinator, diags: Diagnostic[]) =>
+			runtime.recordInlineBlockers(
+				file,
+				"🔴 STOP",
+				1,
+				undefined,
+				[2],
+				{ size: 10, sha256 },
+				diags,
+				undefined,
+				1_000,
+			);
+
+		it("retires only its own runner's unobserved blockers and keeps an unconfirmed server's", () => {
+			const runtime = new RuntimeCoordinator();
+			const ts = blocker("lsp", "Cannot find name 'X'.", "typescript");
+			const deno = blocker("lsp", "Deno says no.", "deno");
+			const lint = blocker("eslint", "no-debugger");
+			record(runtime, [ts, deno, lint]);
+			expect(
+				runtime.retireUnobservedRunnerBlockers(file, {
+					runnerId: "lsp",
+					observed: [],
+					markedAtMs: 2_000,
+					sha256,
+					unconfirmedServerIds: ["deno"],
+				}),
+			).toBe(1);
+			expect(runtime.getInlineBlockerDiagnostics(file)).toEqual([deno, lint]);
+			expect(runtime.hasResolvedBlockerFiles()).toBe(false);
+		});
+
+		it("keeps a blocker the run still observes, as its observed copy", () => {
+			const runtime = new RuntimeCoordinator();
+			record(runtime, [blocker("lsp", "Cannot find name 'X'.")]);
+			const moved = { ...blocker("lsp", "Cannot  find name 'x'."), line: 7 };
+			expect(
+				runtime.retireUnobservedRunnerBlockers(file, {
+					runnerId: "lsp",
+					observed: [moved],
+					markedAtMs: 2_000,
+					sha256,
+				}),
+			).toBe(0);
+			expect(runtime.getInlineBlockerDiagnostics(file)).toHaveLength(1);
+		});
+
+		it("refuses a run about other bytes, or marked before the record's read", () => {
+			const runtime = new RuntimeCoordinator();
+			record(runtime, [blocker("lsp", "Cannot find name 'X'.")]);
+			for (const run of [
+				{ markedAtMs: 2_000, sha256: "d".repeat(64) },
+				{ markedAtMs: 2_000, sha256: undefined },
+				{ markedAtMs: 999, sha256 },
+			]) {
+				expect(
+					runtime.retireUnobservedRunnerBlockers(file, {
+						runnerId: "lsp",
+						observed: [],
+						...run,
+					}),
+				).toBe(0);
+			}
+			expect(runtime.getInlineBlockersSnapshot()).toHaveLength(1);
+		});
+
+		it("deletes an emptied record and notes the file resolved", () => {
+			const runtime = new RuntimeCoordinator();
+			record(runtime, [blocker("lsp", "Cannot find name 'X'.")]);
+			expect(
+				runtime.retireUnobservedRunnerBlockers(file, {
+					runnerId: "lsp",
+					observed: [],
+					markedAtMs: 1_000,
+					sha256,
+				}),
+			).toBe(1);
 			expect(runtime.getInlineBlockersSnapshot()).toHaveLength(0);
 			expect(runtime.hasResolvedBlockerFiles()).toBe(true);
 		});

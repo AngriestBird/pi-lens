@@ -82,6 +82,7 @@ import {
 	hasUsableResult,
 	isRunnerClaimSource,
 	isRunnerSkipReason,
+	reachedNoVerdict,
 } from "./types.js";
 
 const dispatcherProbeFlights = createAvailabilityProbeFlight<
@@ -931,6 +932,11 @@ interface GroupResult {
 	diagnostics: Diagnostic[];
 	latencies: RunnerLatency[];
 	hadBlocker: boolean;
+	/** #4484 r2: findings the runners' edit-range gates withheld (`outOfEditScope`). */
+	outOfEditScope: Diagnostic[];
+	/** #4484 r2: runners and servers that reached no verdict in this group. */
+	inconclusiveRunnerIds: string[];
+	inconclusiveServerIds: string[];
 }
 
 /**
@@ -953,6 +959,9 @@ async function runGroup(
 	const diagnostics: Diagnostic[] = [];
 	const latencies: RunnerLatency[] = [];
 	let hadBlocker = false;
+	const outOfEditScope: Diagnostic[] = [];
+	const inconclusiveRunnerIds: string[] = [];
+	const inconclusiveServerIds: string[] = [];
 
 	// Filter runners by kind if specified
 	const runnerIds = group.filterKinds
@@ -1156,6 +1165,8 @@ async function runGroup(
 				semantic: semantic,
 			});
 			recordRunner(ctx.filePath, runner.id, "pending", 0, 0, ctx.writeIndex);
+			// #4484 r2: a run still in flight has observed nothing yet.
+			inconclusiveRunnerIds.push(runner.id);
 			logLatency({
 				type: "runner",
 				filePath: ctx.filePath,
@@ -1281,6 +1292,18 @@ async function runGroup(
 			ctx.writeIndex,
 		);
 
+		// #4484 r2: every finding names the runner that observed it, so a
+		// recorded blocker is retired only by a conclusive run of its own source.
+		for (const d of result.diagnostics) d.runnerId ??= runnerId;
+		for (const d of result.outOfEditScope ?? []) {
+			d.runnerId ??= runnerId;
+			outOfEditScope.push(d);
+		}
+		if (reachedNoVerdict(result)) inconclusiveRunnerIds.push(runnerId);
+		inconclusiveServerIds.push(
+			...(result.unconfirmedServerIds ?? []),
+			...(result.deferredServerIds ?? []),
+		);
 		diagnostics.push(...result.diagnostics);
 
 		const resultSemantic = result.semantic ?? semantic;
@@ -1297,7 +1320,14 @@ async function runGroup(
 		}
 	}
 
-	return { diagnostics, latencies, hadBlocker };
+	return {
+		diagnostics,
+		latencies,
+		hadBlocker,
+		outOfEditScope,
+		inconclusiveRunnerIds,
+		inconclusiveServerIds,
+	};
 }
 
 // --- Main Dispatch Function ---
@@ -1468,12 +1498,21 @@ export async function dispatchForFile(
 	);
 	const baselineWarningCount = baselineWarnings?.length ?? 0;
 
+	const outOfEditScope: Diagnostic[] = [];
+	const inconclusiveRunnerIds = new Set<string>();
+	const inconclusiveServerIds = new Set<string>();
 	for (const {
 		diagnostics: groupDiags,
 		latencies,
 		hadBlocker,
+		outOfEditScope: groupOutOfScope,
+		inconclusiveRunnerIds: groupRunnerIds,
+		inconclusiveServerIds: groupServerIds,
 	} of groupResults) {
 		runnerLatencies.push(...latencies);
+		outOfEditScope.push(...groupOutOfScope);
+		for (const id of groupRunnerIds) inconclusiveRunnerIds.add(id);
+		for (const id of groupServerIds) inconclusiveServerIds.add(id);
 
 		allDiagnostics.push(...groupDiags);
 		if (hadBlocker) stopped = true;
@@ -1537,6 +1576,17 @@ export async function dispatchForFile(
 	};
 	let visibleDiagnostics = applyOutputFilters(dedupedDiagnostics);
 	let resolvedCount = 0;
+	// #4484 r2: what this observation still holds that neither delivers nor
+	// enters the record alone. An edit-range gate decides delivery only, so the
+	// blocking findings it withheld (through the same output filters) keep a
+	// recorded blocker of the same identity pending. They stay out of the
+	// baseline and the delta.
+	const stillObserved: Diagnostic[] =
+		outOfEditScope.length > 0
+			? applyOutputFilters(outOfEditScope).flatMap((d) =>
+					d.semantic === "blocking" ? [d] : [],
+				)
+			: [];
 	// #4484: the delta decides only what the agent is told is NEW, never
 	// whether a blocker is still pending. The blocking findings it holds back
 	// as already seen are still in this observation, so they go back beside
@@ -1559,6 +1609,20 @@ export async function dispatchForFile(
 		const isNew = new Set(filtered.new);
 		heldBackBlockers = visibleDiagnostics.filter(
 			(d) => d.semantic === "blocking" && !isNew.has(d),
+		);
+		// #4484 r2: an unused value is a blocker only while the delta calls it
+		// new. Held back as already seen, it is still observed, promoted as it
+		// was when it was recorded, so the record keeps it pending.
+		stillObserved.push(
+			...promoteDeltaUnusedToBlockers(
+				visibleDiagnostics.flatMap((d) =>
+					!isNew.has(d) &&
+					d.semantic !== "blocking" &&
+					isUnusedValueDiagnostic(d)
+						? [d]
+						: [],
+				),
+			),
 		);
 		visibleDiagnostics = promoteDeltaUnusedToBlockers(filtered.new);
 		resolvedCount = filtered.fixed.length;
@@ -1682,6 +1746,11 @@ export async function dispatchForFile(
 			baselineWarningCount,
 			// #4484: blockers still observed that the delta did not call new.
 			heldBackBlockers: heldBackBlockers.length,
+			// #4484 r2: findings that only keep a recorded blocker pending, and
+			// the sources whose silence is no evidence.
+			stillObserved: stillObserved.length,
+			inconclusiveRunners: inconclusiveRunnerIds.size,
+			inconclusiveServers: inconclusiveServerIds.size,
 		},
 	});
 
@@ -1697,6 +1766,13 @@ export async function dispatchForFile(
 		blockerOutput,
 		hasBlockers: blockers.length > 0,
 		...(heldBackBlockers.length > 0 && { heldBackBlockers }),
+		...(stillObserved.length > 0 && { stillObserved }),
+		...((inconclusiveRunnerIds.size > 0 || inconclusiveServerIds.size > 0) && {
+			inconclusiveSources: {
+				runnerIds: [...inconclusiveRunnerIds],
+				serverIds: [...inconclusiveServerIds],
+			},
+		}),
 		...(unconfirmedStatus !== undefined && { unconfirmedStatus }),
 	};
 }

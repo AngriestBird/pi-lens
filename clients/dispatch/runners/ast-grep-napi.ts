@@ -548,6 +548,12 @@ export interface AstGrepEvaluateOptions {
 	 */
 	modifiedRanges?: DispatchContext["modifiedRanges"];
 	/**
+	 * #4484 r2: sink for the matches the `modifiedRanges` gate withheld. The
+	 * gate decides delivery only; a withheld match is still observed and keeps
+	 * a recorded blocker pending. Capped per rule like the delivered matches.
+	 */
+	outOfEditScope?: Diagnostic[];
+	/**
 	 * Optional sink for a rule that napi's native engine rejected outright
 	 * (malformed shape, unresolved `matches: <name>` reference, invalid kind,
 	 * …). Without this, a rule failure is swallowed as "zero diagnostics"
@@ -1249,6 +1255,8 @@ export function evaluateAstGrepRules(
 					match: unknown;
 					position: { line: number; column: number };
 				}> = [];
+				const withheld: Array<{ position: { line: number; column: number } }> =
+					[];
 				let rejectLogged = false;
 				const editScoped =
 					options.modifiedRanges !== undefined &&
@@ -1278,16 +1286,20 @@ export function evaluateAstGrepRules(
 								scope.endLine(match) + 1,
 								options.modifiedRanges,
 							)
-						)
+						) {
+							if (withheld.length < maxMatchesPerRule)
+								withheld.push({ position });
 							continue;
+						}
 						collected.push({ match, position });
 					}
 					if (collected.length >= maxMatchesPerRule) break;
 				}
 
-				for (const { position } of collected) {
-					if (diagnostics.length >= maxTotalDiagnostics) break;
-
+				const toDiagnostic = (position: {
+					line: number;
+					column: number;
+				}): Diagnostic => {
 					// #1777: carry the rule's own tier through. The old collapse
 					// (`=== "error" ? "error" : "warning"`) erased hint and info,
 					// so the quiet tier the #1727 anti-slop rules ship at did not
@@ -1304,7 +1316,7 @@ export function evaluateAstGrepRules(
 					);
 					const ruleFix = explicitRuleFixSuggestion(rule);
 
-					diagnostics.push({
+					return {
 						id: `ast-grep-napi-${position.line}-${rule.id}`,
 						message: `[${rule.metadata?.category || "slop"}] ${rule.message || rule.id}`,
 						filePath,
@@ -1322,7 +1334,14 @@ export function evaluateAstGrepRules(
 							semantic === "blocking"
 								? (ruleFix ?? defaultFixSuggestion(defectClass, rule.id))
 								: ruleFix,
-					});
+					};
+				};
+				for (const { position } of collected) {
+					if (diagnostics.length >= maxTotalDiagnostics) break;
+					diagnostics.push(toDiagnostic(position));
+				}
+				for (const { position } of withheld) {
+					options.outOfEditScope?.push(toDiagnostic(position));
 				}
 
 				if (diagnostics.length >= maxTotalDiagnostics) break;
@@ -1492,6 +1511,7 @@ const astGrepNapiRunner: RunnerDefinition = {
 		// either the LSP is publishing (Gate B skipped napi already) or the user
 		// retired ast-grep with `no-ast-grep`. Paying the cost only when napi is
 		// the sole ast-grep surface buys coverage that nothing else provides.
+		const outOfEditScope: Diagnostic[] = [];
 		const diagnostics = evaluateAstGrepRules(
 			ctx.filePath,
 			rootNode,
@@ -1505,6 +1525,7 @@ const astGrepNapiRunner: RunnerDefinition = {
 				// above, so a pre-existing blocker on an unchanged line never
 				// STOPs the write in either role.
 				modifiedRanges: ctx.blockingOnly ? ctx.modifiedRanges : undefined,
+				outOfEditScope,
 				log: (message: string) => ctx.log(message),
 				content,
 				sgModule,
@@ -1543,10 +1564,13 @@ const astGrepNapiRunner: RunnerDefinition = {
 		} else if (diagnostics.length > 0) {
 			semantic = "warning";
 		}
-		return findingsResult(diagnostics, {
-			status: hasBlocking ? "failed" : "succeeded",
-			semantic,
-		});
+		return {
+			...findingsResult(diagnostics, {
+				status: hasBlocking ? "failed" : "succeeded",
+				semantic,
+			}),
+			...(outOfEditScope.length > 0 && { outOfEditScope }),
+		};
 	},
 };
 

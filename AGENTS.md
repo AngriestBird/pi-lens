@@ -339,7 +339,9 @@ file-scoped worklist and receives no project-wide scanner output.
     OS-temp artifacts stay silent (`clients/runtime-tool-result.ts`,
     `clients/ephemeral-root.ts`).
     A delta decides only what is new: a blocker stays pending, recorded and
-    gating, until an observation no longer holds it.
+    gating, until an observation no longer holds it. An edit-range gate
+    decides only delivery, and a run with no verdict (failed, unanswered, in
+    flight) observes nothing, so neither retires a recorded blocker.
     Enforced by `tests/clients/dispatch/runners/run-outcome-ratchet.test.ts`,
     `tests/clients/dispatch/runners/parsed-nothing-sweep.test.ts` and
     `tests/clients/delivery-surface-ratchet.test.ts` (partial: no detector

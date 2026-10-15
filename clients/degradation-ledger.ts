@@ -147,6 +147,14 @@ export type DegradationKind =
 	| "bash-view-clipped"
 	| "biome-explain-unavailable"
 	/**
+	 * #4484 round 2: a write's dispatch did not observe a recorded inline
+	 * blocker, and the blocker's runner or language server reached no verdict
+	 * on that write (failed, timed out, unanswered, still in flight). The
+	 * blocker stays pending. One subject per file key, counted across the
+	 * session.
+	 */
+	| "blocker-carried-unobserved"
+	/**
 	 * #4137 round 3: `clearInlineBlockers` refused a clean result from a run
 	 * without authorship (an opaque recovery, #3226) over the very bytes an
 	 * authored verdict recorded; the inline blocker record stays. One subject per

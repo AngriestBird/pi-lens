@@ -1045,6 +1045,9 @@ async function dispatchPipelineAnalysis(args: {
 			autofixMode,
 			allowAutonomousWriters,
 			modifiedRanges,
+			// #4484 r2: read when the dispatch returns, so a collect-later answer
+			// absorbed meanwhile is part of what the run carries forward.
+			priorInlineBlockers: () => runtime.getInlineBlockerDiagnostics(filePath),
 			telemetry: {
 				model: runtime.telemetryModel,
 				sessionId: runtime.telemetrySessionId,

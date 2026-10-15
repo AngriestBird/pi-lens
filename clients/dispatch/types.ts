@@ -130,6 +130,33 @@ export interface Diagnostic {
 	 * blocks. Absent on every other diagnostic.
 	 */
 	promotionNote?: string;
+	/**
+	 * #4484 round 2: the dispatcher runner whose run produced this finding,
+	 * stamped by `dispatchForFile`. A recorded blocker leaves the record only
+	 * when a conclusive run of this runner no longer observes it. Never part of
+	 * identity, dedup or suppression.
+	 */
+	runnerId?: string;
+	/**
+	 * #4484 round 2: the language server that published an LSP finding
+	 * (`convertLspDiagnostics`), so a run that names the server unconfirmed
+	 * keeps that server's recorded blockers. Never part of identity.
+	 */
+	serverId?: string;
+}
+
+/**
+ * #4484 round 2: which sources reached no verdict in one dispatch. A recorded
+ * blocker from one of them stays: its absence from the run is not evidence
+ * that it is gone.
+ */
+export interface InconclusiveSources {
+	/** Runners whose whole run reached no verdict (failed without findings, an
+	 *  unanswered or unavailable language server, a collect-later run still in
+	 *  flight). */
+	runnerIds: readonly string[];
+	/** Language servers a run named unconfirmed (`unconfirmedServerIds`). */
+	serverIds: readonly string[];
 }
 
 export interface DispatchResult {
@@ -161,6 +188,16 @@ export interface DispatchResult {
 	 * blocker that is still there. Absent when there are none.
 	 */
 	heldBackBlockers?: Diagnostic[];
+	/**
+	 * #4484 round 2: findings this observation still holds that neither
+	 * deliver nor enter the record on their own: a blocking finding an
+	 * edit-range gate withheld because the edit did not touch its lines, and an
+	 * unused value the delta held back (promoted, as when it was new). Each
+	 * keeps a recorded blocker of the same identity pending. Absent when none.
+	 */
+	stillObserved?: Diagnostic[];
+	/** #4484 round 2: the runners and servers that reached no verdict. */
+	inconclusiveSources?: InconclusiveSources;
 	/**
 	 * #4403: why the file's primary group did not check it. Set whenever the
 	 * coverage notice's rule finds no coverage, whether or not the once-only
@@ -278,6 +315,20 @@ export interface RunnerResult {
 	primaryUnavailableCause?: PrimaryUnavailableCause;
 	/** #4403: the disabled primaries, which get one note per server per session. */
 	disabledPrimaryServerIds?: readonly string[];
+	/**
+	 * #4484 round 2: blocking findings the runner's edit-range gate withheld
+	 * from delivery because the edit did not touch their span
+	 * (`spanOverlapsModifiedRanges`). They are still observed: they keep a
+	 * recorded blocker pending, and never deliver or enter the record alone.
+	 */
+	outOfEditScope?: Diagnostic[];
+	/**
+	 * #4484 round 2: the run reached no verdict although it returned no
+	 * failure kind (the language server's diagnostics wait hit its deadline
+	 * with nothing collected, or a query run threw part way). What it did not
+	 * report is not evidence of a clean file.
+	 */
+	inconclusive?: boolean;
 }
 
 /**
@@ -337,6 +388,35 @@ export function hasUsableResult(result: {
 		(result.status === "failed" &&
 			result.failureKind === BLOCKING_DIAGNOSTICS_FAILURE_KIND)
 	);
+}
+
+/**
+ * Whether a runner's whole run reached no verdict about the file (#4484 round
+ * 2). The other side of {@link hasUsableResult}, narrowed to the runs that say
+ * so: a run flagged `inconclusive`, a `failed` run without findings (timeout,
+ * spawn or server failure), a `deferred` one, and a skip that names an
+ * unavailable primary. Any other skip is deliberate (the runner does
+ * not apply, or another one covers the file) and stays conclusive. A run that
+ * answered names its unconfirmed servers, which the dispatcher adds to
+ * `InconclusiveSources.serverIds`, so the rest of the run still counts.
+ */
+export function reachedNoVerdict(
+	result: Pick<
+		RunnerResult,
+		"status" | "failureKind" | "inconclusive" | "primaryUnavailableCause"
+	>,
+): boolean {
+	if (result.inconclusive === true) return true;
+	switch (result.status) {
+		case "failed":
+			return !hasUsableResult(result);
+		case "deferred":
+			return true;
+		case "skipped":
+			return result.primaryUnavailableCause !== undefined;
+		default:
+			return false;
+	}
 }
 
 // --- Dispatch Context ---

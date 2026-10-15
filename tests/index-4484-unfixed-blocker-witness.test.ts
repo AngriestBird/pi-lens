@@ -42,34 +42,100 @@ import {
 
 const boundary = vi.hoisted(() => {
 	const lsp = {
-		/** The fake language server: error 2304 on each `BAD_CALL` line. */
+		/** The fake language server: error 2304 on each `BAD_CALL` line, and
+		 *  warning 6133 on each `unusedVar` line (round 2, row 16). */
 		diagnose: (content: string): unknown[] =>
-			content.split("\n").flatMap((line, i) =>
-				line.includes("BAD_CALL")
-					? [
-							{
-								severity: 1,
-								message: "Cannot find name 'BAD_CALL'.",
-								code: 2304,
-								source: "ts",
-								serverId: "typescript",
-								range: {
-									start: { line: i, character: 0 },
-									end: { line: i, character: 8 },
-								},
-							},
-						]
-					: [],
-			),
+			content.split("\n").flatMap((line, i) => {
+				const range = {
+					start: { line: i, character: 0 },
+					end: { line: i, character: 8 },
+				};
+				if (line.includes("BAD_CALL"))
+					return [
+						{
+							severity: 1,
+							message: "Cannot find name 'BAD_CALL'.",
+							code: 2304,
+							source: "ts",
+							serverId: "typescript",
+							range,
+						},
+					];
+				if (line.includes("unusedVar"))
+					return [
+						{
+							severity: 2,
+							message: "'unusedVar' is declared but its value is never read.",
+							code: 6133,
+							source: "ts",
+							serverId: "typescript",
+							range,
+						},
+					];
+				return [];
+			}),
 		enabled: false,
 		touches: 0,
+		/**
+		 * Round 2: how the server answers the next touch. `inconclusive` is a
+		 * touch whose diagnostics wait hit its deadline, `partial` one where
+		 * another server answered but typescript did not, `throw` a server
+		 * that failed, `hold` an answer that arrives only when the test
+		 * releases it.
+		 */
+		mode: "answer" as "answer" | "inconclusive" | "partial" | "throw" | "hold",
+		/** Pending held answers; `release(true)` fails the touch instead. */
+		held: [] as Array<(fail?: boolean) => void>,
 		/**
 		 * The double's touchFile. It lives here, not in the `vi.mock` factory:
 		 * `tests/config/vi-mock-export-sweep.test.ts` reads a factory's export
 		 * list off the first `return` it finds (the #3190 witness's note).
 		 */
-		touch: async (_file: string, content: string) => {
+		touch: async (
+			_file: string,
+			content: string,
+			options?: { source?: string },
+		) => {
 			lsp.touches += 1;
+			if (lsp.mode === "inconclusive")
+				return {
+					diags: [],
+					inconclusive: true,
+					inconclusiveServerIds: ["typescript"],
+				};
+			if (lsp.mode === "partial")
+				return {
+					diags: [
+						{
+							severity: 2,
+							message: "Prefer a const declaration.",
+							code: "use-const",
+							source: "biome",
+							serverId: "biome",
+							range: {
+								start: { line: 0, character: 0 },
+								end: { line: 0, character: 5 },
+							},
+						},
+					],
+					inconclusive: true,
+					inconclusiveServerIds: ["typescript"],
+				};
+			if (lsp.mode === "throw")
+				throw new Error("connection closed: the JSON RPC server exited");
+			// Only the dispatch runner's check is held: the turn end's own
+			// re-verify touch of a recorded blocker answers, so it never waits
+			// out its hook budget on an answer the test has not released.
+			if (lsp.mode === "hold" && options?.source === "dispatch-lsp-runner")
+				return new Promise((resolve, reject) => {
+					lsp.held.push((fail) =>
+						fail
+							? reject(
+									new Error("connection closed: the JSON RPC server exited"),
+								)
+							: resolve({ diags: lsp.diagnose(content) }),
+					);
+				});
 			return { diags: lsp.diagnose(content) };
 		},
 	};
@@ -136,9 +202,18 @@ vi.mock("../clients/lsp/capabilities.js", async (importOriginal) => {
 
 import extension from "../index.js";
 import {
+	observeRunnerLatency,
+	resetObservedRunnerLatency,
+} from "../clients/dispatch/collect-later-tier.js";
+import {
+	peekSettledRunnerFindings,
+	resetPendingRunnerFindings,
+} from "../clients/dispatch/pending-runner-findings.js";
+import {
 	flushLatencyLog,
 	getLatencyLogPath,
 } from "../clients/latency-logger.js";
+import { getDegradationSummary } from "../clients/degradation-ledger.js";
 import { exportWidgetState } from "../clients/widget-state.js";
 import { removeTempDirSync } from "./clients/test-utils.js";
 import { makeSessionStartEvent } from "./support/host-event-factory.js";
@@ -158,6 +233,7 @@ beforeEach(() => {
 	process.env.PI_LENS_TEST_MODE = "0";
 	boundary.lsp.enabled = false;
 	boundary.lsp.touches = 0;
+	boundary.lsp.mode = "answer";
 	boundary.helm.stdout = "";
 	boundary.helm.lintCalls = 0;
 });
@@ -166,7 +242,11 @@ afterEach(async () => {
 	// state or persisted guard record for the next cell (shuffle-safe).
 	const cleanup = pendingCleanup;
 	pendingCleanup = undefined;
+	boundary.lsp.mode = "answer";
+	for (const release of boundary.lsp.held.splice(0)) release();
+	resetObservedRunnerLatency();
 	if (cleanup) await cleanup().catch(() => {});
+	resetPendingRunnerFindings();
 	if (originalTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
 	else process.env.PI_LENS_TEST_MODE = originalTestMode;
 });
@@ -215,6 +295,24 @@ async function openSession(
 					toolName: "write",
 					input: { path: target, content },
 					content: [{ type: "text", text: "wrote" }],
+				},
+				ctx(),
+			)) as { content?: Array<{ text?: string }> } | undefined;
+			return scrub((r?.content ?? []).map((p) => p.text ?? "").join("\n"));
+		},
+		/** A host `edit` that changed `lines` (1-based), as its diff names them. */
+		async edit(content: string, lines: number[]): Promise<string> {
+			fs.writeFileSync(target, content);
+			const after = content.split("\n");
+			const r = (await pi.emit(
+				"tool_result",
+				{
+					toolName: "edit",
+					input: { path: target },
+					details: {
+						diff: lines.map((n) => `+ ${n} ${after[n - 1] ?? ""}`).join("\n"),
+					},
+					content: [{ type: "text", text: "edited" }],
 				},
 				ctx(),
 			)) as { content?: Array<{ text?: string }> } | undefined;
@@ -271,6 +369,7 @@ const V2_OTHER_LINE = "const a = 1;\nBAD_CALL();\nconst b = 3;\n";
 const V2_INSERT_ABOVE =
 	"const z = 0;\nconst a = 1;\nBAD_CALL();\nconst b = 2;\n";
 const V_FIXED = "const a = 1;\nconst b = 2;\n";
+const V_FIXED_OTHER = "const a = 1;\nconst b = 4;\n";
 
 const STILL_UNFIXED = /Still unfixed: 1 blocker reported earlier \(L(\d+)\)/;
 
@@ -477,4 +576,242 @@ describe("#4484 witness: a repeat write keeps an unfixed blocker pending", () =>
 			await fixAndDrain(s);
 		}, 120_000);
 	});
+});
+
+/**
+ * Round 2 (#4484): a recorded blocker leaves the record only when a
+ * conclusive observation from its own source shows it gone. Rows refer to
+ * the state table at the top of PR #4491.
+ */
+describe("#4484 witness, round 2: only evidence retires a recorded blocker", () => {
+	/** `no-unknown-returns` (ast-grep, severity error) on line 3 (#4482's shape). */
+	const AST_GREP_SRC = [
+		'export const CLIENT_VERSION = "1.0.50";',
+		"export const plain = CLIENT_VERSION;",
+		"export function dig(obj: Record<string, string>, key: string): unknown {",
+		"\treturn obj[key];",
+		"}",
+		"",
+	].join("\n");
+	const AST_GREP_EDITED = AST_GREP_SRC.replace("1.0.50", "1.0.51");
+	const AST_GREP_FIXED = AST_GREP_SRC.replace("): unknown {", "): string {");
+	/** `debugger-statement` (tree-sitter, severity error) on line 2. */
+	const TS_SRC =
+		"export function run(): void {\n\tdebugger;\n}\nexport const a = 1;\n";
+	const TS_EDITED = TS_SRC.replace("a = 1", "a = 2");
+	const TS_FIXED = "export function run(): void {}\nexport const a = 1;\n";
+	const SCOPED = { "no-lsp": true, "no-ast-grep": true };
+
+	// Recurrence: since #4482 the ast-grep runner drops a blocker on a line the
+	// edit did not change, so an edit elsewhere emptied the observation and the
+	// record cleared (TLC MutRangeGated).
+	it("keeps an ast-grep blocker pending after an edit to another line (row 7)", async () => {
+		const s = await openSession(
+			"sa",
+			"src/scope-ag.ts",
+			AST_GREP_FIXED,
+			SCOPED,
+		);
+		const w1 = await s.write(AST_GREP_SRC);
+		expect(w1).toContain("🔴 STOP");
+		expect(w1).toContain("no-unknown-returns");
+		expect(await s.commitBlocked()).toBe(true);
+		const w2 = await s.edit(AST_GREP_EDITED, [1]);
+		expect(w2).not.toMatch(/clean/);
+		expect(w2).not.toContain("🔴 STOP");
+		expect(w2).toMatch(/Still unfixed: 1 blocker reported earlier \(L3\)/);
+		expect(await s.commitBlocked()).toBe(true);
+		const turnEnd = await s.endTurn();
+		expect(turnEnd).toContain("Unresolved from this turn — src/scope-ag.ts:");
+		expect(turnEnd).not.toContain("Resolved this turn");
+		await fixAndDrain(s);
+	}, 120_000);
+
+	// Recurrence: tree-sitter's edit-range gate did the same before #4482.
+	it("keeps a tree-sitter blocker pending after an edit to another line (row 7)", async () => {
+		const s = await openSession("st", "src/scope-ts.ts", TS_FIXED, SCOPED);
+		const w1 = await s.write(TS_SRC);
+		expect(w1).toContain("🔴 STOP");
+		expect(w1).toContain("debugger");
+		const w2 = await s.edit(TS_EDITED, [4]);
+		expect(w2).not.toMatch(/clean/);
+		expect(w2).not.toContain("🔴 STOP");
+		expect(w2).toMatch(/Still unfixed: \d+ blockers? reported earlier \(L2\)/);
+		expect(await s.commitBlocked()).toBe(true);
+		const turnEnd = await s.endTurn();
+		expect(turnEnd).toContain("Unresolved from this turn — src/scope-ts.ts:");
+		await fixAndDrain(s);
+	}, 120_000);
+
+	// Control (#4481 kept): a pre-existing finding on a line the agent never
+	// touched is observed, not delivered, and never enters the record.
+	it("does not block on a pre-existing ast-grep finding outside the first edit (row 8)", async () => {
+		const file = "src/scope-pre.ts";
+		fs.mkdirSync(path.join(tmpDir, "src"), { recursive: true });
+		fs.writeFileSync(path.join(tmpDir, file), AST_GREP_SRC);
+		const s = await openSession("sp", file, AST_GREP_EDITED, SCOPED);
+		const w1 = await s.edit(AST_GREP_EDITED, [1]);
+		expect(w1).not.toContain("🔴 STOP");
+		expect(w1).not.toMatch(/Still unfixed/);
+		expect(await s.commitBlocked()).toBe(false);
+		expect(await s.endTurn()).not.toContain("Unresolved from this turn");
+		pendingCleanup = undefined;
+	}, 120_000);
+
+	// Recurrence: a run with no verdict read as an empty, clean observation
+	// (TLC MutFailClear).
+	it("keeps an LSP error pending when the server does not answer the next write (row 10)", async () => {
+		boundary.lsp.enabled = true;
+		const s = await openSession("xt", "src/carry-timeout.ts", V_FIXED);
+		expect(await s.write(V1)).toContain("🔴 STOP");
+		boundary.lsp.mode = "inconclusive";
+		const w2 = await s.write(V2_OTHER_LINE);
+		expect(w2).not.toMatch(/✓ .*clean/);
+		expect(w2).toMatch(STILL_UNFIXED);
+		// The carry of an unobserved blocker is counted once per file.
+		expect(
+			getDegradationSummary().find(
+				(c) => c.kind === "blocker-carried-unobserved",
+			)?.latestReasons,
+		).toContainEqual(
+			expect.objectContaining({
+				subject: expect.stringContaining("carry-timeout.ts"),
+			}),
+		);
+		expect(await s.commitBlocked()).toBe(true);
+		const turnEnd = await s.endTurn();
+		expect(turnEnd).toContain(
+			"Unresolved from this turn — src/carry-timeout.ts:",
+		);
+		expect(turnEnd).not.toContain("Resolved this turn");
+		boundary.lsp.mode = "answer";
+		await fixAndDrain(s);
+	}, 120_000);
+
+	it("keeps an LSP error pending when the server fails on the next write (row 10)", async () => {
+		boundary.lsp.enabled = true;
+		const s = await openSession("xf", "src/carry-fail.ts", V_FIXED);
+		expect(await s.write(V1)).toContain("🔴 STOP");
+		boundary.lsp.mode = "throw";
+		const w2 = await s.write(V2_OTHER_LINE);
+		expect(w2).toMatch(STILL_UNFIXED);
+		expect(await s.commitBlocked()).toBe(true);
+		expect(await s.endTurn()).not.toContain("Resolved this turn");
+		boundary.lsp.mode = "answer";
+		await fixAndDrain(s);
+	}, 120_000);
+
+	// Recurrence: a run that answered for one server read as a verdict for
+	// every server, so the silent server's recorded error left the record.
+	it("keeps an LSP error pending when its own server is unconfirmed while another answers (row 10)", async () => {
+		boundary.lsp.enabled = true;
+		const s = await openSession("xp", "src/carry-partial.ts", V_FIXED);
+		expect(await s.write(V1)).toContain("🔴 STOP");
+		boundary.lsp.mode = "partial";
+		const w2 = await s.write(V2_OTHER_LINE);
+		expect(w2).not.toMatch(/✓ .*clean/);
+		expect(w2).toMatch(STILL_UNFIXED);
+		expect(await s.commitBlocked()).toBe(true);
+		expect(await s.endTurn()).not.toContain("Resolved this turn");
+		boundary.lsp.mode = "answer";
+		await fixAndDrain(s);
+	}, 120_000);
+
+	// Recurrence: TLC MutDeferredInFlight. A write cleared the record while the
+	// blocker's own re-check ran collect-later, and turn end called it resolved.
+	it("keeps a blocker pending while its collect-later re-check runs, and retires it only when a current run settles clean (rows 12, 14)", async () => {
+		boundary.lsp.enabled = true;
+		const s = await openSession("dl", "src/carry-deferred.ts", V_FIXED);
+		expect(await s.write(V1)).toContain("🔴 STOP");
+		// The language server is now slow: its next runs leave the write path.
+		observeRunnerLatency({
+			projectRoot: tmpDir,
+			runnerId: "lsp",
+			durationMs: 6_000,
+		});
+		boundary.lsp.mode = "hold";
+		const w2 = await s.write(V2_OTHER_LINE);
+		expect(w2).not.toMatch(/✓ .*clean/);
+		expect(w2).toMatch(STILL_UNFIXED);
+		expect(await s.commitBlocked()).toBe(true);
+		const turnEnd = await s.endTurn();
+		expect(turnEnd).toContain(
+			"Unresolved from this turn — src/carry-deferred.ts:",
+		);
+		expect(turnEnd).not.toContain("Resolved this turn");
+		// The fix lands while the server is still slow: nothing has seen it yet.
+		await s.write(V_FIXED);
+		expect(await s.commitBlocked()).toBe(true);
+		expect(await s.endTurn()).not.toContain("Resolved this turn");
+		// Both held runs answer; only the one about the current bytes counts.
+		for (const release of boundary.lsp.held.splice(0)) release();
+		await vi.waitFor(() =>
+			expect(peekSettledRunnerFindings().length).toBeGreaterThanOrEqual(2),
+		);
+		expect(await s.commitBlocked()).toBe(false);
+		expect(await s.endTurn()).toMatch(
+			/Resolved this turn: src\/carry-deferred\.ts/,
+		);
+		pendingCleanup = undefined;
+	}, 120_000);
+
+	// Recurrence: a settled re-check that failed is no evidence, yet an empty
+	// failed answer would read as "E gone"; and with no commit before turn end,
+	// only the turn end's late lane can retire the blocker.
+	it("retires nothing on a failed collect-later re-check, and retires at turn end on a clean one (rows 10, 14)", async () => {
+		boundary.lsp.enabled = true;
+		const s = await openSession("df", "src/carry-deferred-fail.ts", V_FIXED);
+		expect(await s.write(V1)).toContain("🔴 STOP");
+		observeRunnerLatency({
+			projectRoot: tmpDir,
+			runnerId: "lsp",
+			durationMs: 6_000,
+		});
+		boundary.lsp.mode = "hold";
+		await s.write(V_FIXED);
+		for (const release of boundary.lsp.held.splice(0)) release(true);
+		await vi.waitFor(() =>
+			expect(peekSettledRunnerFindings().length).toBeGreaterThanOrEqual(1),
+		);
+		expect(await s.commitBlocked()).toBe(true);
+		expect(await s.endTurn()).not.toContain("Resolved this turn");
+		// A clean re-check of the current bytes settles; no commit asks first.
+		// The quick failure moved the server back inline, so slow it again.
+		observeRunnerLatency({
+			projectRoot: tmpDir,
+			runnerId: "lsp",
+			durationMs: 6_000,
+		});
+		await s.write(V_FIXED_OTHER);
+		for (const release of boundary.lsp.held.splice(0)) release();
+		await vi.waitFor(() =>
+			expect(peekSettledRunnerFindings().length).toBeGreaterThanOrEqual(1),
+		);
+		expect(await s.endTurn()).toMatch(
+			/Resolved this turn: src\/carry-deferred-fail\.ts/,
+		);
+		expect(await s.commitBlocked()).toBe(false);
+		pendingCleanup = undefined;
+	}, 120_000);
+
+	// Recurrence: an unused value blocks only while the delta calls it new, so
+	// the next unrelated write dropped it from the record as if fixed (TLC
+	// MutPromotedClear).
+	it("keeps a delta-promoted unused value blocking on the next unrelated write (row 16)", async () => {
+		boundary.lsp.enabled = true;
+		const U1 = "const a = 1;\nconst unusedVar = 2;\nconst b = 2;\n";
+		const U2 = "const a = 1;\nconst unusedVar = 2;\nconst b = 3;\n";
+		const s = await openSession("un", "src/carry-unused.ts", V_FIXED);
+		// The delta promotes only against a baseline, so the file exists first.
+		await s.write(V_FIXED);
+		const w1 = await s.write(U1);
+		expect(w1).toContain("🔴 STOP");
+		expect(w1).toContain("unusedVar");
+		const w2 = await s.write(U2);
+		expect(w2).not.toMatch(/clean/);
+		expect(w2).toMatch(STILL_UNFIXED);
+		expect(await s.commitBlocked()).toBe(true);
+		expect(await s.endTurn()).not.toContain("Resolved this turn");
+		await fixAndDrain(s);
+	}, 120_000);
 });
