@@ -44,7 +44,15 @@ function parseSyntaxErrors(
 		const [, reported, lineText, message] =
 			line.match(/^(.+) \(line (\d+)\): (.+)$/) ?? [];
 		if (!reported || !lineText || !message) continue;
-		if (!pathsEqual(resolve(cwd, reported), resolve(cwd, filePath))) continue;
+		// fish 3.3.1 prints an absolute argv path as `~` + that path
+		// (`~/home/u/x.fish`), and 3.1 abbreviates HOME to `~`; both end in the
+		// checked file's own path. Another file's header still fails this test.
+		const wanted = resolve(cwd, filePath);
+		if (
+			!pathsEqual(resolve(cwd, reported), wanted) &&
+			!(reported.startsWith("~/") && wanted.endsWith(reported.slice(1)))
+		)
+			continue;
 		const lineNumber = Number(lineText);
 		diagnostics.push({
 			id: `fish-syntax-${filePath}:${lineNumber}`,

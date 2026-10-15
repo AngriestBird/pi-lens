@@ -340,6 +340,52 @@ describe("#4242 adopted-root runner allowlist", () => {
 		}
 	});
 
+	it("runs the fish syntax step from an external fish and refuses its local PATH replacement", async () => {
+		const fixture = adoptedFixture();
+		try {
+			const file = path.join(fixture.adoptedRoot, "broken.fish");
+			fs.writeFileSync(file, "if\n");
+			const mk = (dir: string, name: string, extra = "") => {
+				const p = path.join(dir, name);
+				fs.writeFileSync(p, `#!/bin/sh\n${extra}`);
+				fs.chmodSync(p, 0o755);
+				return p;
+			};
+			const ext = globalEnv.tmpDir;
+			const extFish = mk(ext, "fish");
+			const extIndent = mk(ext, "fish_indent");
+			const registry = new RunnerRegistry();
+			registry.register(
+				(await import("../../../clients/dispatch/runners/fish-indent.js"))
+					.default,
+			);
+			await dispatchForFile(
+				makeCtx(file, fixture.sessionRoot),
+				[{ mode: "all", runnerIds: ["fish-indent"] }],
+				registry,
+			);
+			const real = (p: string) => fs.realpathSync(p);
+			const cmds = spawnCalls.map((c) => c.cmd);
+			expect(cmds).toContain(real(extFish));
+			expect(cmds).toContain(real(extIndent));
+			spawnCalls.length = 0;
+			const marker = path.join(fixture.adoptedRoot, "fish-ran");
+			mk(fixture.adoptedRoot, "fish", `# marker: ${marker}\n`);
+			vi.stubEnv("PATH", `${fixture.adoptedRoot}${path.delimiter}${ext}`);
+			await dispatchForFile(
+				makeCtx(file, fixture.sessionRoot),
+				[{ mode: "all", runnerIds: ["fish-indent"] }],
+				registry,
+			);
+			expect(fs.existsSync(marker)).toBe(false);
+			expect(spawnCalls.map((c) => c.cmd)).not.toContain(
+				path.join(fixture.adoptedRoot, "fish"),
+			);
+		} finally {
+			fixture.cleanup();
+		}
+	});
+
 	it("skips an adopted checker when no executable resolves", async () => {
 		const fixture = adoptedFixture();
 		try {

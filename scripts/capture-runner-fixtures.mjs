@@ -215,6 +215,19 @@ export const CAPTURES = [
 		argv: ["--no-config", "--no-execute", "stray-end.fish"],
 	},
 	{
+		// Production hands fish an ABSOLUTE path, and fish 3.3.1 (Ubuntu 22.04)
+		// then prints the header as `~` + that path. Captured with a 3.3.1
+		// binary only: `--bin-dir` selects one fish for every fish-indent
+		// entry, so run this entry alone with that binary and keep the other
+		// fixtures from the newer one.
+		runner: "fish-indent",
+		case: "syntax-stray-end-fish-3.3.1",
+		tool: "fish",
+		workspace: smoke("fish-syntax"),
+		file: "stray-end.fish",
+		argv: ["--no-config", "--no-execute", "__WORKSPACE__/stray-end.fish"],
+	},
+	{
 		runner: "fish-indent",
 		case: "syntax-smoke-bad",
 		tool: "fish",

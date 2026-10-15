@@ -224,6 +224,20 @@ const REPLAY_EXPECTATIONS: Record<string, ReplayExpectation> = {
 			},
 		],
 	},
+	// fish 3.3.1 (Ubuntu 22.04) prints the header of an absolute argv path as `~`
+	// plus that path; the attribution dropped every syntax error there (#4454).
+	"fish-indent/syntax-stray-end-fish-3.3.1": {
+		status: "failed",
+		semantic: "blocking",
+		findings: [
+			{
+				rule: "fish-syntax-error",
+				semantic: "blocking",
+				file: "stray-end.fish",
+				line: 2,
+			},
+		],
+	},
 	"fish-indent/syntax-smoke-bad": {
 		status: "failed",
 		semantic: "blocking",
@@ -439,7 +453,7 @@ describe("captured real-binary output", () => {
 					const recorded = (fixture.provenance.argv ?? [])
 						.filter((token) => !fileTokens.has(token))
 						.map((token) =>
-							token === WORKSPACE_TOKEN ? path.resolve(env.tmpDir) : token,
+							token.split(WORKSPACE_TOKEN).join(path.resolve(env.tmpDir)),
 						);
 					const spawnedArgvs = safeSpawnAsync.mock.calls.map(
 						(call) => (call[1] ?? []) as string[],

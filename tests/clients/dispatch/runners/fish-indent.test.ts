@@ -448,6 +448,66 @@ describe("fish-indent runner", () => {
 		}
 	});
 
+	// Recurrence: fish 3.3.1 (Ubuntu 22.04) prints the header as `~` + the
+	// absolute path (`~/home/u/x.fish (line 2): ...`), so the attribution
+	// dropped every syntax error and left only a runner-parsed-nothing row.
+	it("reports a syntax error whose header fish 3.3.1 spells with a leading tilde", async () => {
+		const env = setupTestEnvironment("pi-lens-fish-indent-");
+		try {
+			const filePath = path.join(env.tmpDir, "stray.fish");
+			fs.writeFileSync(filePath, "echo hello\nend\n");
+			answer(
+				{
+					error: null,
+					status: 127,
+					stdout: "",
+					stderr: `~${filePath} (line 2): 'end' outside of a block\nend\n^\nwarning: Error while reading file ${filePath}\n`,
+				},
+				OK,
+			);
+			const runner = (
+				await import("../../../../clients/dispatch/runners/fish-indent.js")
+			).default;
+			const result = await runner.run(
+				createFishCtx(filePath, env.tmpDir) as never,
+			);
+			expect(
+				result.diagnostics.map((d) => [d.rule, d.filePath, d.line]),
+			).toEqual([["fish-syntax-error", filePath, 2]]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// The tilde spelling must not widen attribution: a header that names a
+	// different file under `~/` is still not this file's finding.
+	it("ignores a tilde header that names another file", async () => {
+		const env = setupTestEnvironment("pi-lens-fish-indent-");
+		try {
+			const filePath = path.join(env.tmpDir, "stray.fish");
+			fs.writeFileSync(filePath, "echo hello\n");
+			answer(
+				{
+					error: null,
+					status: 127,
+					stdout: "",
+					stderr: `~${path.join(env.tmpDir, "other.fish")} (line 2): Missing end\n`,
+				},
+				OK,
+			);
+			const runner = (
+				await import("../../../../clients/dispatch/runners/fish-indent.js")
+			).default;
+			const result = await runner.run(
+				createFishCtx(filePath, env.tmpDir) as never,
+			);
+			expect(result.diagnostics).toEqual([]);
+			expect(result.status).toBe("succeeded");
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("skips when fish_indent is not available", async () => {
 		availability.present = false;
 		vi.resetModules();
