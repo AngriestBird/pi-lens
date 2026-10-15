@@ -10,7 +10,10 @@ import {
 	_resetDeferredForTests,
 	_resetStateCacheForTests,
 } from "../../clients/diagnostic-dispositions.js";
-import { getRecentLoggedPhases } from "../../clients/latency-logger.js";
+import {
+	_setRecentPhasesForTest,
+	getRecentLoggedPhases,
+} from "../../clients/latency-logger.js";
 import { hashDiagnosticContent } from "../../clients/lsp/diagnostic-binding.js";
 import { normalizeMapKey } from "../../clients/path-utils.js";
 import { readChangesSince } from "../../clients/project-changes.js";
@@ -1704,10 +1707,6 @@ describe("lsp_navigation tool", () => {
 // of unknown age. Recurrence it prevents: an agent that marked a finding
 // `false-positive` saw it again on this route, and a snapshot row published
 // before an out-of-band edit read as current.
-// #1634 recurrence: both workspaceDiagnostics arms rendered raw server output,
-// so a finding the agent marked false-positive through lens_diagnostic_mark
-// came back on this route while lens_diagnostics source=lsp dropped it, and the
-// tracked snapshot replayed client publishes with no age.
 describe("lsp_navigation workspaceDiagnostics delivery gate (#1634)", () => {
 	const MARKED = "Type 'string' is not assignable to type 'number'.";
 	const KEPT = "Cannot find name 'other'.";
@@ -1757,6 +1756,9 @@ describe("lsp_navigation workspaceDiagnostics delivery gate (#1634)", () => {
 		});
 		_resetDeferredForTests();
 		_resetStateCacheForTests();
+		// The phase ring is process state: an earlier case's record must not
+		// satisfy this case's trace assertion.
+		_setRecentPhasesForTest([]);
 		const marked = await createLensDiagnosticMarkTool(() => cwd).execute(
 			"mark-1634",
 			{
@@ -1813,10 +1815,12 @@ describe("lsp_navigation workspaceDiagnostics delivery gate (#1634)", () => {
 		expect(envelope.notes).toContainEqual(
 			expect.stringContaining("suppressed by disposition: 1 finding(s)"),
 		);
-		// The lane's bounded trace: one record for the file it filtered.
+		// The lane's bounded trace: one record for the file it filtered, named
+		// for the tool that rendered it (#4459 review F5).
 		expect(getRecentLoggedPhases()).toContainEqual(
 			expect.objectContaining({
 				phase: "lsp_probe_disposition_filter",
+				toolName: "lsp_navigation",
 				metadata: expect.objectContaining({ suppressed: 1 }),
 			}),
 		);
@@ -1851,6 +1855,12 @@ describe("lsp_navigation workspaceDiagnostics delivery gate (#1634)", () => {
 		expect(result.details?.dispositionSuppressed).toBe(1);
 		expect(envelope.notes).toContainEqual(
 			expect.stringContaining("suppressed by disposition: 1 finding(s)"),
+		);
+		expect(getRecentLoggedPhases()).toContainEqual(
+			expect.objectContaining({
+				phase: "lsp_probe_disposition_filter",
+				toolName: "lsp_navigation",
+			}),
 		);
 	});
 });

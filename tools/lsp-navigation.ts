@@ -1426,6 +1426,7 @@ export function createLspNavigationTool(
 						policyCwd,
 						openedContent,
 						"all",
+						"lsp_navigation",
 					);
 					const diagnostics = policy.kept;
 					const suppressedLine = dispositionSuppressedLine(policy.suppressed);
@@ -1502,6 +1503,7 @@ export function createLspNavigationTool(
 								policyCwd,
 								readFileContent(trackedFile),
 								"all",
+								"lsp_navigation",
 							);
 							snapshotSuppressed += policy.suppressed;
 							kept = policy.kept;

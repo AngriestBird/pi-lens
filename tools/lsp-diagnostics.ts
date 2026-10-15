@@ -1241,6 +1241,12 @@ export function applyProbeFindingPolicy(
 	 * other caller (`mode=full`) has no severity axis at all.
 	 */
 	severity: string,
+	/**
+	 * The tool whose result renders this filter's output, stamped on the
+	 * `lsp_probe_disposition_filter` record (#4459 review F5: the
+	 * `lsp_navigation` route's records said `lsp_diagnostics`).
+	 */
+	toolName: "lsp_diagnostics" | "lsp_navigation" = "lsp_diagnostics",
 ): { kept: LSPDiagnostic[]; inlineKept: LSPDiagnostic[]; suppressed: number } {
 	const started = Date.now();
 	try {
@@ -1272,7 +1278,7 @@ export function applyProbeFindingPolicy(
 			// `retainedSuppressed` is what the footer chip is still counting.
 			logLatency({
 				type: "phase",
-				toolName: "lsp_diagnostics",
+				toolName,
 				filePath: file,
 				phase: "lsp_probe_disposition_filter",
 				durationMs: Date.now() - started,
