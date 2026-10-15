@@ -38,6 +38,18 @@ export interface ModifiedRange {
 	end: number;
 }
 
+/**
+ * Whether a 1-based `line` falls inside the lines a write changed. Absent or
+ * empty `ranges` mean the whole file (a full-file dispatch, a fresh write).
+ */
+export function isLineInModifiedRanges(
+	line: number,
+	ranges: ReadonlyArray<ModifiedRange> | undefined,
+): boolean {
+	if (!ranges || ranges.length === 0) return true;
+	return ranges.some((r) => line >= r.start && line <= r.end);
+}
+
 // --- API Interface ---
 
 export interface PiAgentAPI {

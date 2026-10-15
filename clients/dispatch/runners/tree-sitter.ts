@@ -42,7 +42,7 @@ import type {
 	RunnerDefinition,
 	RunnerResult,
 } from "../types.js";
-import { findingsResult } from "../types.js";
+import { findingsResult, isLineInModifiedRanges } from "../types.js";
 
 const blastCooldownByFile = new Map<string, number>();
 const BLAST_COOLDOWN_MS = 5_000;
@@ -337,14 +337,6 @@ function defaultFixSuggestion(defectClass: string, ruleId: string): string {
 		return "Replace unwrap() with explicit error handling (match/if-let) or propagate with ?.";
 	}
 	return "Refactor this pattern to a safer, explicit form matching project conventions.";
-}
-
-function isLineInModifiedRanges(
-	line: number,
-	ranges: ReadonlyArray<{ start: number; end: number }> | undefined,
-): boolean {
-	if (!ranges || ranges.length === 0) return true;
-	return ranges.some((r) => line >= r.start && line <= r.end);
 }
 
 /**
@@ -661,7 +653,7 @@ const treeSitterRunner: RunnerDefinition = {
 		// ~500-800ms snapshot cost on every dispatch. One guarded block now
 		// serves both paths.
 		// Absent/empty modifiedRanges means "whole file" (full-file dispatches,
-		// fresh writes — see isLineInModifiedRanges above), never "trivial edit":
+		// fresh writes — see isLineInModifiedRanges in ../types.ts), never "trivial edit":
 		// entity extraction must run in that case.
 		const totalLinesChanged = getTotalLinesChanged(ctx.modifiedRanges);
 		const skipEntityExtraction =
