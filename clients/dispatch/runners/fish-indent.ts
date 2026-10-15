@@ -147,8 +147,9 @@ const fishIndentRunner: RunnerDefinition = {
 			);
 		if (stderrLine) {
 			// Any other stderr is an I/O error such as `Opening "x" failed` (4.9.3
-			// --check never reports a syntax error; fish-lsp does, #4454). Take the
-			// line number from "filename (line N): message" if present.
+			// --check never reports a syntax error; the fish --no-execute step above
+			// does, #4454). Take the line number from "filename (line N): message"
+			// if present.
 			const lineMatch = stderrLine.match(/\(line\s+(\d+)\)/);
 			const line = lineMatch ? Number(lineMatch[1]) : 1;
 			const diagnostics: Diagnostic[] = [
