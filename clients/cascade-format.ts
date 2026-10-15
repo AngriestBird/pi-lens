@@ -2,6 +2,7 @@ import type {
 	CascadeNeighborResult,
 	CascadeResult,
 	CascadeRun,
+	CascadeSectionLayout,
 	CascadeUnansweredPrimaryNote,
 } from "./cascade-types.js";
 import { retagAuxiliaryDiagnostics } from "./dispatch/auxiliary-lsp.js";
@@ -13,6 +14,8 @@ import {
 import { detectFileRole } from "./file-role.js";
 import { logLatency } from "./latency-logger.js";
 import { formatCacheAgeLabel } from "./finding-delivery-gate.js";
+import { recordDegradationOnce } from "./degradation-ledger.js";
+import { normalizeMapKey } from "./path-utils.js";
 import type { LSPDiagnostic } from "./lsp/client.js";
 import {
 	PRIMARY_UNAVAILABLE_CAUSE,
@@ -26,7 +29,19 @@ import { readFileContent } from "./dispatch/runners/utils.js";
 export function formatCascadeNeighborDiagnostics(
 	cwd: string,
 	neighbors: CascadeNeighborResult[],
-	options: { noun?: string; includeReason?: boolean } = {},
+	options: {
+		noun?: string;
+		includeReason?: boolean;
+		/**
+		 * #4487: the turn a diagnostic was first delivered, when that was an
+		 * earlier turn. turn_end passes it (`cascadeStillPresentSince`); the
+		 * line then reads "(still present since turn N)".
+		 */
+		stillPresentSince?: (
+			neighbor: CascadeNeighborResult,
+			diagnostic: Diagnostic,
+		) => number | undefined;
+	} = {},
 ): string {
 	const withErrors = neighbors.filter((n) => n.diagnostics.length > 0);
 	const inconclusive = neighbors.filter(
@@ -63,7 +78,10 @@ export function formatCascadeNeighborDiagnostics(
 			const line = d.line ?? 1;
 			const col = d.column ?? 1;
 			const rule = d.rule ? ` rule=${d.rule}` : "";
-			out += `\n  line ${line}, col ${col}${rule}: ${d.message.split("\n")[0].slice(0, 100)}`;
+			const since = options.stillPresentSince?.(neighbor, d);
+			const label =
+				since === undefined ? "" : ` (still present since turn ${since})`;
+			out += `\n  line ${line}, col ${col}${rule}: ${d.message.split("\n")[0].slice(0, 100)}${label}`;
 		}
 		out += "\n</diagnostics>";
 	}
@@ -83,30 +101,6 @@ export function formatCascadeNeighborDiagnostics(
 		}
 	}
 	return out;
-}
-
-/**
- * Everything around a cascade section's neighbour block, so the block can be
- * rendered again for a subset of its neighbours with the same frame. The
- * in-lane compute (`clients/dispatch/integration.ts`) and the quiet-window
- * builder below compose through {@link composeCascadeSection}.
- */
-export interface CascadeSectionLayout {
-	/** Language root the neighbour paths display against. */
-	cwd: string;
-	noun: string;
-	includeReason: boolean;
-	/** The impact header (`formatImpactCascade`), or "". */
-	header: string;
-	/** "... and N more dependent file(s)", or "". */
-	truncationLine: string;
-	/**
-	 * #3157 round 3, N1: the line saying the policy input bound cut findings
-	 * nobody evaluated, or "". It speaks even when the block is empty.
-	 */
-	coverageLine: string;
-	/** This delivery's disposition drops (#1616 / #3157). */
-	policySuppressed: number;
 }
 
 /**
@@ -249,6 +243,7 @@ export function buildResolvedFoundCascadeRun(
 			},
 			neighbors,
 			formatted,
+			layout,
 		},
 		neighborCount: 1,
 		diagnosticCount: diagnostics.length,
@@ -503,14 +498,17 @@ export function markCascadeUnansweredPrimariesDelivered(
 /**
  * Splits out the neighbours whose primary did not answer and returns a line
  * per server set and cause, in the order the touch named the servers. A set
- * whose servers were all delivered is dropped with its neighbours, so the run
- * has nothing to say about them.
+ * whose servers were all delivered gets no line again; its neighbours come
+ * back as `dropped`, so the run can still refuse to read clean (#4485).
  */
 export function splitCascadeUnansweredPrimaries(
 	neighbors: CascadeNeighborResult[],
 ): {
 	answered: CascadeNeighborResult[];
 	unanswered: CascadeNeighborResult[];
+	/** #4485: neighbours of a set whose line was already delivered: not
+	 * shown again, and not checked, so the run is not clean. */
+	dropped: CascadeNeighborResult[];
 	notes: CascadeUnansweredPrimaryNote[];
 } {
 	const answered: CascadeNeighborResult[] = [];
@@ -534,19 +532,22 @@ export function splitCascadeUnansweredPrimaries(
 		groups.set(key, group);
 	}
 	const unanswered: CascadeNeighborResult[] = [];
+	const dropped: CascadeNeighborResult[] = [];
 	const notes: CascadeUnansweredPrimaryNote[] = [];
 	for (const group of groups.values()) {
 		if (
 			group.serverIds.every((id) => cascadeUnansweredPrimariesDelivered.has(id))
-		)
+		) {
+			dropped.push(...group.neighbors);
 			continue;
+		}
 		unanswered.push(...group.neighbors);
 		notes.push({
 			serverIds: group.serverIds,
 			line: `⚠️ Cascade: no language server answered for neighbor files of ${group.serverIds.join(", ")} (${PRIMARY_UNAVAILABLE_CAUSE[group.cause]}), so their cross-file errors were not checked (not a clean result).`,
 		});
 	}
-	return { answered, unanswered, notes };
+	return { answered, unanswered, dropped, notes };
 }
 
 /**
@@ -578,4 +579,132 @@ export function renderCascadeResult(
 		lines: kept.map((note) => note.line),
 		serverIds,
 	};
+}
+
+// --- #4487: pending neighbour errors ---------------------------------------
+
+/**
+ * A neighbour's cascade errors the agent was shown and no fresh observation
+ * has cleared yet, each with the turn it was first delivered. turn_end is the
+ * only writer of errors (it writes what it delivered) and clears an entry on
+ * a fresh clean observation; it reads the record to label a re-observed error
+ * "still present since turn N" and to name, in one line each, the neighbours
+ * no cascade covered this turn.
+ *
+ * Its own store, not the footer widget's: a widget entry carries an error
+ * but not whether it was a cascade neighbour's (the per-edit writes share the
+ * `lsp` tool), so the turn_end re-serve could not select from it. It replaces
+ * two stores this lane deleted, the recently-clean neighbour cache and the
+ * rolling `session.baseline.cascade.*` delta facts.
+ */
+interface PendingNeighbor {
+	filePath: string;
+	/** `cascadeErrorKey` → the turn the error was first delivered. */
+	errors: Map<string, number>;
+	/** When the observation behind the record was made. */
+	checkedAt: number;
+}
+
+/** Bound on the record; the oldest-written entry goes first. */
+const MAX_PENDING_NEIGHBORS = 256;
+const pendingNeighbors = new Map<string, PendingNeighbor>();
+
+/** One diagnostic's identity across observations: the rule, place and text
+ * the agent reads. */
+export function cascadeErrorKey(diagnostic: Diagnostic): string {
+	return [
+		diagnostic.id,
+		diagnostic.rule ?? "",
+		diagnostic.line ?? 0,
+		diagnostic.column ?? 0,
+		diagnostic.message,
+	].join(":");
+}
+
+/**
+ * The turn `diagnostic` of `filePath` was first delivered, when that was
+ * before `turn`; `undefined` for an error new this turn.
+ */
+export function cascadeStillPresentSince(
+	filePath: string,
+	diagnostic: Diagnostic,
+	turn: number,
+): number | undefined {
+	const first = pendingNeighbors
+		.get(normalizeMapKey(filePath))
+		?.errors.get(cascadeErrorKey(diagnostic));
+	return first !== undefined && first < turn ? first : undefined;
+}
+
+/**
+ * Record what turn_end delivered for one neighbour: exactly the observed set
+ * (an error the observation lacks is dropped, the #4484 rule), keeping each
+ * error's first-delivered turn. An empty set clears the neighbour.
+ */
+export function recordDeliveredCascadeNeighbor(
+	filePath: string,
+	diagnostics: readonly Diagnostic[],
+	turn: number,
+	checkedAt: number,
+): void {
+	const key = normalizeMapKey(filePath);
+	const previous = pendingNeighbors.get(key);
+	const errors = new Map<string, number>();
+	for (const d of diagnostics) {
+		const k = cascadeErrorKey(d);
+		errors.set(k, previous?.errors.get(k) ?? turn);
+	}
+	pendingNeighbors.delete(key);
+	if (errors.size === 0) return;
+	pendingNeighbors.set(key, { filePath, errors, checkedAt });
+	while (pendingNeighbors.size > MAX_PENDING_NEIGHBORS) {
+		const oldest = pendingNeighbors.keys().next();
+		if (oldest.done) break;
+		pendingNeighbors.delete(oldest.value);
+		recordDegradationOnce({
+			kind: "cascade-pending-neighbors-evicted",
+			subject: `cap=${MAX_PENDING_NEIGHBORS}`,
+			reason:
+				"the pending cascade neighbour-error record hit its cap; the oldest neighbour's errors are no longer re-served",
+		});
+	}
+}
+
+/**
+ * A fresh observation says `filePath` holds no cascade error: a confirmed
+ * clean, a late clean publish, or the file's own dispatch after an edit.
+ * `observedAt`, when given, must be newer than the record's own observation.
+ */
+export function forgetCascadePendingNeighbor(
+	filePath: string,
+	observedAt?: number,
+): void {
+	const key = normalizeMapKey(filePath);
+	const entry = pendingNeighbors.get(key);
+	if (!entry) return;
+	if (observedAt !== undefined && observedAt <= entry.checkedAt) return;
+	pendingNeighbors.delete(key);
+}
+
+/** The record, oldest-written first. */
+export function listCascadePendingNeighbors(): ReadonlyArray<{
+	filePath: string;
+	errorCount: number;
+	checkedAt: number;
+}> {
+	return [...pendingNeighbors.values()].map((entry) => ({
+		filePath: entry.filePath,
+		errorCount: entry.errors.size,
+		checkedAt: entry.checkedAt,
+	}));
+}
+
+/** O(1) entry count, for the memory sample. */
+export function getCascadePendingNeighborCount(): number {
+	return pendingNeighbors.size;
+}
+
+/** Session reset (`resetDispatchBaselines` in clients/dispatch/integration.ts). */
+export function resetCascadePendingNeighbors(): void {
+	pendingNeighbors.clear();
 }

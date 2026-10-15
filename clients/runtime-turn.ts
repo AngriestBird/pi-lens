@@ -16,7 +16,11 @@ import {
 	writeCodeQualityWarningsReport,
 } from "./code-quality-warnings.js";
 import type { CacheEntry, CacheManager } from "./cache-manager.js";
-import type { CascadeSkipReason } from "./cascade-types.js";
+import type {
+	CascadeResult,
+	CascadeRun,
+	CascadeSkipReason,
+} from "./cascade-types.js";
 import {
 	clearGitGuardTestFailure,
 	mergeGitGuardTestFailure,
@@ -26,7 +30,7 @@ import {
 } from "./git-guard.js";
 import { cascadeSettleWaitMs } from "./cascade-budget.js";
 import { logCascade } from "./cascade-logger.js";
-import { normalizeMapKey } from "./path-utils.js";
+import { isUnderDir, normalizeMapKey } from "./path-utils.js";
 import {
 	boundDeferredTargets,
 	mergeDeferredTargets,
@@ -151,9 +155,16 @@ import {
 } from "./persistent-reverify.js";
 import {
 	cascadeCarrySuffix,
+	cascadeStillPresentSince,
+	composeCascadeSection,
+	forgetCascadePendingNeighbor,
+	formatCascadeNeighborDiagnostics,
+	listCascadePendingNeighbors,
 	markCascadeUnansweredPrimariesDelivered,
+	recordDeliveredCascadeNeighbor,
 	renderCascadeResult,
 } from "./cascade-format.js";
+import { peekOutstandingCascadeTouches } from "./lsp/cascade-tier.js";
 import {
 	applyPushedFindingPolicy,
 	applyPushedFindingPolicyByFile,
@@ -1763,6 +1774,12 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		durationMs: Date.now() - cascadeSettleStart,
 		metadata: { settled, timedOut },
 	});
+	// #4485: one read of the silent-push touches the computes left unanswered,
+	// now that they have settled. An answer that landed meanwhile appends its
+	// run through the reconcile wiring in time for the consume below; silence
+	// stays for the quiet window. Synchronous, and only reads clients the
+	// touches already hold.
+	peekOutstandingCascadeTouches(holdScope);
 
 	// Merge accumulated cascade results from all pipeline runs this turn.
 	// Two-pass dedup:
@@ -1880,20 +1897,52 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// per-file cause is claimed), so one label suffices; the edited file and cwd
 	// stay as fallbacks.
 	const cascadeLogFilePath = cascadeResults[0]?.filePath ?? files[0] ?? cwd;
+	// #4487: the turn the pending record labels and records against.
+	const cascadeTurn = runtime.turnIndex;
+	// #4487: an edited file's own dispatch reports its errors (with #4484,
+	// the ones still observed as well as the new ones); the cascade record
+	// keeps none for it.
+	const editedKeys = new Set<string>();
+	for (const file of files) {
+		const absolute = path.resolve(cwd, file);
+		editedKeys.add(normalizeMapKey(absolute));
+		forgetCascadePendingNeighbor(absolute);
+	}
+	// The latest result per primary (last writer wins).
+	const seen = new Map<string, CascadeResult>();
+	for (const result of cascadeResults) {
+		seen.set(normalizeMapKey(result.filePath), result);
+	}
+	const keptResults = new Set(seen.values());
+	// #4487: the run that observed each neighbour last this turn. Iterating
+	// in reverse lets the latest claim it first. A run covers a neighbour its
+	// result lists or its `observedNeighborPaths` names, so a later clean run
+	// (which has no result) supersedes an earlier result's errors too. Each
+	// neighbour then renders at most once per turn, from its last observer.
+	const lastObserver = new Map<string, { run: CascadeRun; filePath: string }>();
+	for (const run of [...cascadeRuns].reverse()) {
+		if (run.result && !keptResults.has(run.result)) continue;
+		for (const neighborPath of [
+			...(run.result?.neighbors ?? []).map((n) => n.filePath),
+			...(run.observedNeighborPaths ?? []),
+		]) {
+			const nk = normalizeMapKey(neighborPath);
+			if (!lastObserver.has(nk))
+				lastObserver.set(nk, { run, filePath: neighborPath });
+		}
+	}
+	// #4487: a fresh clean observation clears the neighbour's pending errors
+	// at once; errors are recorded only when the section showing them is
+	// delivered (the cascade section's hold below).
+	for (const [nk, { run, filePath }] of lastObserver) {
+		const observedClean =
+			run.observedNeighborPaths?.some((p) => normalizeMapKey(p) === nk) &&
+			!run.result?.neighbors.some(
+				(n) => normalizeMapKey(n.filePath) === nk && n.diagnostics.length > 0,
+			);
+		if (observedClean) forgetCascadePendingNeighbor(filePath);
+	}
 	if (cascadeResults.length > 0) {
-		const seen = new Map<string, (typeof cascadeResults)[number]>();
-		for (const result of cascadeResults) {
-			seen.set(normalizeMapKey(result.filePath), result);
-		}
-		// Iterate in reverse so the latest result claims each neighbor first.
-		const neighborOwner = new Map<string, string>();
-		for (const result of [...seen.values()].reverse()) {
-			const pk = normalizeMapKey(result.filePath);
-			for (const n of result.neighbors) {
-				const nk = normalizeMapKey(n.filePath);
-				if (!neighborOwner.has(nk)) neighborOwner.set(nk, pk);
-			}
-		}
 		const parts: string[] = [];
 		const sectionRuns: Array<(typeof cascadeRuns)[number]> = [];
 		// #1446 item 1: track what actually gets injected — a suppressed result
@@ -1904,6 +1953,13 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		let injectedNeighborCount = 0;
 		let injectedDiagnosticCount = 0;
 		let suppressedByOwnership = 0;
+		// #4487: the neighbour errors this section shows, recorded as pending
+		// when it is delivered.
+		const sectionObservations: Array<{
+			filePath: string;
+			diagnostics: CascadeResult["neighbors"][number]["diagnostics"];
+			observedAt: number | undefined;
+		}> = [];
 		// #4403 round 5 (V1): the servers whose "no language server answered"
 		// line this section shows. They are marked delivered only when the
 		// section reaches the agent (the delivery hold below), so a run
@@ -1913,14 +1969,44 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		// Round 6 (W2): the kept lines head the section (`renderCascadeResult`).
 		const unansweredLines: string[] = [];
 		for (const result of seen.values()) {
-			const pk = normalizeMapKey(result.filePath);
-			const ownsAny = result.neighbors.some(
-				(n) => neighborOwner.get(normalizeMapKey(n.filePath)) === pk,
+			const ownedNeighbors = result.neighbors.filter(
+				(n) =>
+					lastObserver.get(normalizeMapKey(n.filePath))?.run.result === result,
 			);
-			const rendered =
+			const ownsAny = ownedNeighbors.length > 0;
+			let rendered =
 				ownsAny && result.formatted
 					? renderCascadeResult(result, shownUnansweredServerIds)
 					: undefined;
+			// #4487: render again from the result's layout when it no longer owns
+			// every neighbour (a later observer shows the rest), or when an error
+			// it shows was first delivered on an earlier turn.
+			const layout = result.layout;
+			if (rendered && layout) {
+				const since = (
+					n: CascadeResult["neighbors"][number],
+					d: CascadeResult["neighbors"][number]["diagnostics"][number],
+				) => cascadeStillPresentSince(n.filePath, d, cascadeTurn);
+				const relabel = ownedNeighbors.some((n) =>
+					n.diagnostics.some((d) => since(n, d) !== undefined),
+				);
+				if (relabel || ownedNeighbors.length < result.neighbors.length) {
+					// @delivery-surface: runtime-turn:cascade-blocker
+					const block = formatCascadeNeighborDiagnostics(
+						layout.cwd,
+						ownedNeighbors,
+						{
+							noun: layout.noun,
+							includeReason: layout.includeReason,
+							stillPresentSince: since,
+						},
+					);
+					rendered = {
+						...rendered,
+						text: composeCascadeSection(block, layout),
+					};
+				}
+			}
 			if (rendered && (rendered.text || rendered.lines.length > 0)) {
 				unansweredLines.push(...rendered.lines);
 				if (rendered.text) {
@@ -1939,8 +2025,16 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				}
 				const sectionRun = runByResult.get(result);
 				if (sectionRun) sectionRuns.push(sectionRun);
-				injectedNeighborCount += result.neighbors.length;
-				injectedDiagnosticCount += result.neighbors.reduce(
+				for (const n of ownedNeighbors) {
+					if (n.diagnostics.length === 0) continue;
+					sectionObservations.push({
+						filePath: n.filePath,
+						diagnostics: n.diagnostics,
+						observedAt: sectionRun?.observedAt,
+					});
+				}
+				injectedNeighborCount += ownedNeighbors.length;
+				injectedDiagnosticCount += ownedNeighbors.reduce(
 					(s, n) => s + n.diagnostics.length,
 					0,
 				);
@@ -2001,10 +2095,22 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			// @delivery-surface: runtime-turn:cascade-blocker
 			blockerParts.push(section);
 			const shownServerIds = [...shownUnansweredServerIds];
+			const deliveredAt = Date.now();
 			deliveryHolds.push({
 				part: section,
-				onDelivered: () =>
-					markCascadeUnansweredPrimariesDelivered(shownServerIds),
+				onDelivered: () => {
+					markCascadeUnansweredPrimariesDelivered(shownServerIds);
+					// #4487: peek-then-commit. What the agent was shown is pending
+					// until a fresh observation clears it.
+					for (const o of sectionObservations) {
+						recordDeliveredCascadeNeighbor(
+							o.filePath,
+							o.diagnostics,
+							cascadeTurn,
+							o.observedAt ?? deliveredAt,
+						);
+					}
+				},
 				onHeld: () => {
 					for (const run of sectionRuns) runtime.appendCascadeRun(run);
 				},
@@ -2045,6 +2151,102 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			},
 		});
 	}
+	// #4487: pending neighbour errors no run observed this turn. A
+	// neighbour error the agent was shown stays pending until a fresh
+	// observation lacks it; a turn whose cascade did not cover the neighbour
+	// says so in one line per neighbour instead of going silent (which reads
+	// as resolved). Blocker tier, like the section the errors came from;
+	// derived from the record each turn, so a cut line needs no hold. Only
+	// turns that reach this merge render it (a read-only turn with no runs
+	// returns earlier).
+	const unresolvedNeighbors = listCascadePendingNeighbors().filter((entry) => {
+		const key = normalizeMapKey(entry.filePath);
+		if (lastObserver.has(key) || editedKeys.has(key)) return false;
+		return isUnderDir(entry.filePath, cwd);
+	});
+	if (unresolvedNeighbors.length > 0) {
+		const maxShown = RUNTIME_CONFIG.pipeline.cascadeMaxFiles;
+		const lines = unresolvedNeighbors
+			.slice(-maxShown)
+			.reverse()
+			.map(
+				(entry) =>
+					`  • ${toRunnerDisplayPath(cwd, entry.filePath)}: ${entry.errorCount} error(s) unresolved (${formatCacheAgeLabel(entry.checkedAt)})`,
+			);
+		const more = unresolvedNeighbors.length - lines.length;
+		if (more > 0) lines.push(`  ... and ${more} more neighbor file(s)`);
+		// @delivery-surface: runtime-turn:cascade-pending-errors
+		blockerParts.push(
+			`📐 Cascade errors from an earlier turn, not re-checked this turn — still unresolved until a cascade or an edit shows them gone:\n${lines.join("\n")}`,
+		);
+		logCascade({
+			phase: "cascade_pending_rendered",
+			filePath: cascadeLogFilePath,
+			metadata: {
+				neighbors: unresolvedNeighbors.length,
+				shown: lines.length - (more > 0 ? 1 : 0),
+			},
+		});
+	}
+
+	// Fix B (#3167/#3168 F4): a coverage advisory computed from a CARRIED
+	// indeterminate run describes the previous turn's evidence — label it so
+	// the absence-of-coverage statement is not read as current. A MIXED
+	// bucket (some carried, some fresh) is left UNLABELED: a Math.max
+	// suffix on the finished multi-line advisory would attach the carry to
+	// a file that was not carried.
+	const withCarryLabel = (
+		advisory: string | undefined,
+		runs: ReadonlyArray<{ carriedTurns?: number; observedAt?: number }>,
+	): string | undefined => {
+		if (advisory === undefined) return undefined;
+		const carried = runs.filter((r) => (r.carriedTurns ?? 0) > 0);
+		if (carried.length === 0 || carried.length !== runs.length) {
+			return advisory;
+		}
+		// #3168 F13: the bucket's age is the OLDEST carried observation, and
+		// only when EVERY carried run carries one. A `Math.min` sentinel
+		// (`?? Number.MAX_SAFE_INTEGER`) silently ignored the unstamped runs
+		// and stated a confident age for a bucket that contains an unaged
+		// one; one missing stamp collapses the age half to the helper's
+		// neutral "scan age unknown" wording instead.
+		const stamps = carried.map((r) => r.observedAt);
+		const observedAt = stamps.every((s): s is number => s !== undefined)
+			? Math.min(...stamps)
+			: undefined;
+		const suffix = cascadeCarrySuffix(carried[0]?.carriedTurns, observedAt);
+		if (!suffix) return advisory;
+		labeledAdvisories += 1;
+		// #3168 F11: newline, as the blocker path does above. A space join
+		// welded the suffix onto the LAST bullet of a multi-bullet advisory,
+		// so the carry label read as a property of that one file.
+		return `${advisory}\n${suffix}`;
+	};
+	// #3813: drain-then-restore. A cut coverage advisory hands its runs back
+	// for the next turn WITHOUT their results (the section rides ahead of every
+	// advisory and may have been delivered) and without what the other
+	// advisories and the pending record read from them (#4485/#4487), so one
+	// cut advisory does not bring back another.
+	const holdAdvisory = (
+		advisory: string | undefined,
+		runs: readonly CascadeRun[],
+		keep: "indeterminate" | "unconfirmed",
+	): void => {
+		if (advisory === undefined) return;
+		deliveryHolds.push({
+			part: advisory,
+			onHeld: () => {
+				for (const run of runs) {
+					const restored: CascadeRun = { ...run, result: undefined };
+					delete restored.observedNeighborPaths;
+					if (keep !== "indeterminate") delete restored.indeterminate;
+					if (keep !== "unconfirmed") delete restored.unconfirmed;
+					runtime.appendCascadeRun(restored);
+				}
+			},
+		});
+	};
+
 	// #1023: surface an HONEST note whenever a cascade run could not compute
 	// downstream impact (degraded/over-cap graph, missing node, a thrown compute,
 	// or a deliberately budget-truncated neighbor set) — never a silent all-clear
@@ -2127,52 +2329,6 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		// "ℹ️ Advisory — no action required this turn:" label, so an imperative
 		// ("review dependents manually") would contradict it. The #533 substance
 		// stays: a clean cascade result does NOT cover these files' dependents.
-		// Fix B (#3167/#3168 F4): a coverage advisory computed from a CARRIED
-		// indeterminate run describes the previous turn's evidence — label it so
-		// the absence-of-coverage statement is not read as current. A MIXED
-		// bucket (some carried, some fresh) is left UNLABELED: a Math.max
-		// suffix on the finished multi-line advisory would attach the carry to
-		// a file that was not carried.
-		const withCarryLabel = (
-			advisory: string | undefined,
-			runs: ReadonlyArray<{ carriedTurns?: number; observedAt?: number }>,
-		): string | undefined => {
-			if (advisory === undefined) return undefined;
-			const carried = runs.filter((r) => (r.carriedTurns ?? 0) > 0);
-			if (carried.length === 0 || carried.length !== runs.length) {
-				return advisory;
-			}
-			// #3168 F13: the bucket's age is the OLDEST carried observation, and
-			// only when EVERY carried run carries one. A `Math.min` sentinel
-			// (`?? Number.MAX_SAFE_INTEGER`) silently ignored the unstamped runs
-			// and stated a confident age for a bucket that contains an unaged
-			// one; one missing stamp collapses the age half to the helper's
-			// neutral "scan age unknown" wording instead.
-			const stamps = carried.map((r) => r.observedAt);
-			const observedAt = stamps.every((s): s is number => s !== undefined)
-				? Math.min(...stamps)
-				: undefined;
-			const suffix = cascadeCarrySuffix(carried[0]?.carriedTurns, observedAt);
-			if (!suffix) return advisory;
-			labeledAdvisories += 1;
-			// #3168 F11: newline, as the blocker path does above. A space join
-			// welded the suffix onto the LAST bullet of a multi-bullet advisory,
-			// so the carry label read as a property of that one file.
-			return `${advisory}\n${suffix}`;
-		};
-		const holdAdvisory = (
-			advisory: string | undefined,
-			runs: typeof indeterminateRuns,
-		): void => {
-			if (advisory === undefined) return;
-			deliveryHolds.push({
-				part: advisory,
-				onHeld: () => {
-					for (const run of runs)
-						runtime.appendCascadeRun({ ...run, result: undefined });
-				},
-			});
-		};
 		const graphAdvisory = withCarryLabel(
 			buildAdvisory(graphRuns, {
 				lead: (fileCount, reasons) =>
@@ -2188,7 +2344,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		);
 		// @delivery-surface: runtime-turn:cascade-coverage-advisory
 		if (graphAdvisory) advisoryParts.push(graphAdvisory);
-		holdAdvisory(graphAdvisory, graphRuns);
+		holdAdvisory(graphAdvisory, graphRuns, "indeterminate");
 
 		const bindingAdvisory = withCarryLabel(
 			buildAdvisory(bindingRuns, {
@@ -2202,7 +2358,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		);
 		// @delivery-surface: runtime-turn:cascade-coverage-advisory
 		if (bindingAdvisory) advisoryParts.push(bindingAdvisory);
-		holdAdvisory(bindingAdvisory, bindingRuns);
+		holdAdvisory(bindingAdvisory, bindingRuns, "indeterminate");
 
 		const budgetAdvisory = withCarryLabel(
 			buildAdvisory(budgetRuns, {
@@ -2223,7 +2379,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		);
 		// @delivery-surface: runtime-turn:cascade-coverage-advisory
 		if (budgetAdvisory) advisoryParts.push(budgetAdvisory);
-		holdAdvisory(budgetAdvisory, budgetRuns);
+		holdAdvisory(budgetAdvisory, budgetRuns, "indeterminate");
 
 		const fileCount = new Set(
 			indeterminateRuns.map((r) => normalizeMapKey(r.filePath)),
@@ -2260,6 +2416,79 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				...(byFile.length > 20 && { byFileTruncated: byFile.length - 20 }),
 			},
 		});
+	}
+
+	// #4485: selected neighbours a run touched but got no answer for within
+	// its bound. One advisory line per server, aggregated over the turn's
+	// runs: a neighbour a later run observed drops out, and so does one the
+	// turn edited (its own dispatch answers for it). Advisory tier, the
+	// #1023 doctrine: an unanswered neighbour is a coverage gap, not a
+	// finding. Not repeated next turn: a late answer renders through the peek
+	// or the quiet window, silence expires with its own log row.
+	const unconfirmedRuns = cascadeRuns.filter((r) => r.unconfirmed);
+	if (unconfirmedRuns.length > 0) {
+		const runOrder = new Map(cascadeRuns.map((r, i) => [r, i]));
+		const byServer = new Map<
+			string,
+			{ waitMs: number; primaries: Set<string>; paths: Map<string, string> }
+		>();
+		for (const run of unconfirmedRuns) {
+			for (const group of run.unconfirmed?.servers ?? []) {
+				for (const neighborPath of group.paths) {
+					const nk = normalizeMapKey(neighborPath);
+					if (editedKeys.has(nk)) continue;
+					const observer = lastObserver.get(nk)?.run;
+					if (
+						observer &&
+						(runOrder.get(observer) ?? -1) > (runOrder.get(run) ?? -1)
+					)
+						continue;
+					const bucket = byServer.get(group.serverId) ?? {
+						waitMs: group.waitMs,
+						primaries: new Set<string>(),
+						paths: new Map<string, string>(),
+					};
+					bucket.waitMs = Math.max(bucket.waitMs, group.waitMs);
+					bucket.primaries.add(toRunnerDisplayPath(cwd, run.filePath));
+					bucket.paths.set(nk, toRunnerDisplayPath(cwd, neighborPath));
+					byServer.set(group.serverId, bucket);
+				}
+			}
+		}
+		const capped = (items: string[], max: number): string =>
+			items.length > max
+				? `${items.slice(0, max).join(", ")} (+${items.length - max} more)`
+				: items.join(", ");
+		const blocks: string[] = [];
+		let pathCount = 0;
+		for (const [serverId, bucket] of byServer) {
+			const paths = [...bucket.paths.values()];
+			pathCount += paths.length;
+			const within = bucket.waitMs > 0 ? ` within ${bucket.waitMs} ms` : "";
+			blocks.push(
+				`Cascade sent ${paths.length} dependent(s) of ${capped([...bucket.primaries], 3)} to ${serverId}, ` +
+					`but no answer arrived${within}; a clean cascade result does not cover them.\n` +
+					`  • ${serverId}: ${capped(paths, 5)}`,
+			);
+		}
+		if (blocks.length > 0) {
+			const pendingAdvisory = withCarryLabel(
+				blocks.join("\n"),
+				unconfirmedRuns,
+			);
+			// @delivery-surface: runtime-turn:cascade-coverage-advisory
+			if (pendingAdvisory) advisoryParts.push(pendingAdvisory);
+			holdAdvisory(pendingAdvisory, unconfirmedRuns, "unconfirmed");
+			logCascade({
+				phase: "cascade_unconfirmed_rendered",
+				filePath: cascadeLogFilePath,
+				metadata: {
+					servers: byServer.size,
+					paths: pathCount,
+					runs: unconfirmedRuns.length,
+				},
+			});
+		}
 	}
 
 	// Fix B (#3168 F6): the success-path record — see the counters above.

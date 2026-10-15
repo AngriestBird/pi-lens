@@ -2885,7 +2885,7 @@ describe('#1533 — silent auxiliary honesty on clientScope "all"', () => {
 	// BLAST-RADIUS PINS (#1533 review). The highest-frequency `"all"` caller is the
 	// cascade per-edit neighbour fan-out, which caps the touch at 1000/2000ms and
 	// does NOT exclude opengrep. The concern raised was that newly-`silent` verdicts
-	// there would block `recentlyCleanNeighborCache` seeding via
+	// there would block `recentlyCleanNeighborCache` (deleted since, #4486) seeding via
 	// `isConfirmedTouch`.
 	//
 	// The answer has TWO cases, and stating only the first would be the same

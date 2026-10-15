@@ -588,6 +588,23 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 		["cascadeCarrySuffix("],
 		{ evidenceMin: 1 },
 	),
+	// #4487: cascade neighbour errors a cascade showed in an EARLIER turn and
+	// no later cascade or edit has shown gone. A cached claim, not a fresh
+	// observation: each line carries the age of the result that last showed
+	// it (the pending record's `checkedAt`), so the agent can tell it from
+	// this turn's 🧪 section.
+	"runtime-turn:cascade-pending-errors": labeled(
+		RUNTIME_TURN_FILE,
+		"Turn-end 📐 list of cascade neighbour errors shown in an earlier turn and not re-checked since.",
+		"Rendered from the cascade pending record (`listCascadePendingNeighbors`, " +
+			"clients/cascade-format.ts), which only a delivered cascade section " +
+			"writes and only a later cascade observation of that neighbour or an " +
+			"edit to it clears; every line is labeled `(scanned Xm ago)` and the " +
+			"header says it was not re-checked this turn.",
+		"pending-record checkedAt (observedAt of the delivered result)",
+		["formatCacheAgeLabel("],
+		{ evidenceMin: 1 },
+	),
 	"runtime-turn:cascade-coverage-advisory": labeled(
 		RUNTIME_TURN_FILE,
 		"Turn-end cascade-coverage-gap advisories (graph/binding/budget).",

@@ -1,6 +1,117 @@
 {
 	"$comment": "#4393: every constant a formal/<family>/*.cfg assigns (`=` or `<-`), and every module `Name == TRUE|FALSE` that is not a `<-` target, is classified here, per family. `pins`: the constant mirrors a code choice; `value` is what every `\\* expect: pass` config resolves it to (its `=` value, the definition its `<-` names, or the module's `Name == <literal>`), and `test`/`title` name a test a run reaches, in a file vitest collects, that drives the real code and asserts that behaviour, so flipping the code reds the test and flipping the model alone reds tests/config/tla-switch-pins.test.ts. `also` names further tests when one value encodes several behaviours. `narrowedBy` admits, per value, the named as-built configs (file stems) that use it only to cut the explored schedules, with its reason; a config it does not list must match `value`. `notCodeChoice` and `deferred` groups carry a reason for each member, and tests/config/tla-switch-pins.test.ts pins the counts of deferred and notCodeChoice members exactly, so every move between them is a visible edit. Flipping a model value and this value together, without the code, reds neither the gate nor the pin, so a change to a value here is a reviewer's call. A PR that changes a pinned behaviour flips the constant, its configs and this value together (AGENTS.md shape 68).",
 	"families": {
+		"cascade-delivery": {
+			"pins": {
+				"Delta": {
+					"value": "\"none\"",
+					"test": "tests/clients/cascade-compute.test.ts",
+					"title": "#4487: three cascades over a persistent neighbour error list it each time",
+					"also": [
+						{
+							"test": "tests/clients/cascade-compute.test.ts",
+							"title": "lists a repeated cascade diagnostic on every run (no rolling delta)"
+						}
+					]
+				},
+				"ExpiryRead": {
+					"value": "\"peekLog\"",
+					"test": "tests/clients/lsp/cascade-tier-backlog.test.ts",
+					"title": "an expiring outstanding touch is peeked once and its path logged",
+					"also": [
+						{
+							"test": "tests/clients/lsp/cascade-tier-backlog.test.ts",
+							"title": "a peek delivers answered touches and keeps the silent ones outstanding"
+						},
+						{
+							"test": "tests/clients/cascade-turn-merge.test.ts",
+							"title": "turn_end peeks the outstanding touches after its settle and delivers a late answer"
+						}
+					]
+				},
+				"FallbackGate": {
+					"value": "\"afterEdit\"",
+					"test": "tests/clients/cascade-compute.test.ts",
+					"title": "#4486: the touch-error fallback does not display a snapshot from before the cascade started",
+					"also": [
+						{
+							"test": "tests/clients/cascade-compute.test.ts",
+							"title": "#4486: the degraded fallback does not display cache entries from before the cascade started"
+						}
+					]
+				},
+				"PassiveGate": {
+					"value": "\"afterEdit\"",
+					"test": "tests/clients/cascade-compute.test.ts",
+					"title": "#4486: a passive snapshot with ts <= cascadeStart is not served; the neighbour is touched",
+					"also": [
+						{
+							"test": "tests/clients/cascade-compute.test.ts",
+							"title": "#4486: a passive snapshot published after the cascade started serves the neighbour without a touch"
+						}
+					]
+				},
+				"RecentlyClean": {
+					"value": "FALSE",
+					"test": "tests/clients/cascade-compute.test.ts",
+					"title": "a neighbour checked clean on an earlier turn is checked again after the next edit"
+				},
+				"Reserve": {
+					"value": "\"record\"",
+					"test": "tests/clients/cascade-turn-merge.test.ts",
+					"title": "a pending neighbour error no cascade covered this turn renders one unresolved line until a fresh observation clears it",
+					"also": [
+						{
+							"test": "tests/clients/cascade-turn-merge.test.ts",
+							"title": "a neighbour error re-observed on a later turn is labelled with the turn it was first delivered"
+						}
+					]
+				},
+				"TierPath": {
+					"value": "\"inLane\"",
+					"test": "tests/clients/cascade-compute.test.ts",
+					"title": "a tier-3 neighbour whose server advertises typescript.tsserverRequest is answered in-lane and records no outstanding touch",
+					"also": [
+						{
+							"test": "tests/clients/lsp/cascade-tier.test.ts",
+							"title": "classifies a silent classic typescript server that advertises typescript.tsserverRequest as command-pull"
+						},
+						{
+							"test": "tests/clients/cascade-compute.test.ts",
+							"title": "a silent-push neighbour that publishes inside the wait is answered with that publish"
+						}
+					]
+				},
+				"UnconfirmedMarker": {
+					"value": "\"marked\"",
+					"test": "tests/clients/cascade-compute.test.ts",
+					"title": "a run whose selected neighbours were all unanswered carries unconfirmed and never no_neighbors/clean",
+					"also": [
+						{
+							"test": "tests/clients/cascade-turn-merge.test.ts",
+							"title": "turn_end renders one pending line per server for unconfirmed neighbours, once per turn"
+						}
+					]
+				}
+			},
+			"notCodeChoice": [
+				{
+					"reason": "Scenario bound or actor set: it sizes the state space or picks which actors, inputs and steps TLC explores; no code branch reads it.",
+					"constants": [
+						"Neighbours",
+						"Models",
+						"MaxTurns",
+						"QuietFires"
+					]
+				},
+				{
+					"reason": "A code constant at model scale (a retry count, a cap, a tolerance or a budget in ticks): the model shrinks it to bound the state space, so its value is not the code's.",
+					"constants": [
+						"Expiry"
+					]
+				}
+			]
+		},
 		"dispatch-pipeline": {
 			"pins": {
 				"CarryPreRunCalls": {

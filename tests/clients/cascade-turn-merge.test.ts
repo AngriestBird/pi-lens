@@ -1,3 +1,4 @@
+// flake-shape: service-double — #4485: turn_end's registry peek reads the client an outstanding touch holds; a real server cannot be made to publish between the compute and turn_end on demand
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -1368,6 +1369,452 @@ describe("cascade_indeterminate attribution (#1550)", () => {
 				expect.objectContaining({ file: "carried.ts", reason: "missing_node" }),
 			]);
 		} finally {
+			env.cleanup();
+		}
+	});
+});
+
+/**
+ * #4485/#4487: what turn_end does with unanswered neighbours, with a
+ * neighbour two results of one turn both cover, and with neighbour errors
+ * that persist across turns.
+ */
+describe("cascade delivery at turn_end (#4485, #4487)", () => {
+	async function turnEndOf(
+		runtime: RuntimeCoordinator,
+		cacheManager: CacheManager,
+		cwd: string,
+	): Promise<string> {
+		await handleTurnEnd({
+			ctxCwd: cwd,
+			getFlag: () => false,
+			dbg: () => {},
+			runtime,
+			cacheManager,
+			knipClient: {
+				ensureAvailable: async () => false,
+				analyze: async () => EMPTY_KNIP_RESULT,
+			},
+			deadCodeClients: [],
+			depChecker: { ensureAvailable: async () => false },
+			testRunnerClient: { getTestRunTarget: () => null },
+			resetLSPService: () => {},
+			resetFormatService: () => {},
+		} as any);
+		return (
+			consumeTurnEndFindings(cacheManager, cwd)?.messages[0]?.content ?? ""
+		);
+	}
+
+	function edit(cacheManager: CacheManager, file: string, cwd: string): void {
+		fs.writeFileSync(file, `export const v = ${Date.now()};\n`);
+		cacheManager.addModifiedRange(file, { start: 1, end: 1 }, false, cwd);
+	}
+
+	/** A result the way the in-lane compute builds it: its section text and
+	 * the layout turn_end re-renders an owned subset with. */
+	async function computedResult(
+		cwd: string,
+		primary: string,
+		neighbors: Array<[string, string[]]>,
+	): Promise<CascadeResult> {
+		const { composeCascadeSection, formatCascadeNeighborDiagnostics } =
+			await import("../../clients/cascade-format.js");
+		const layout = {
+			cwd,
+			noun: "neighbor",
+			includeReason: true,
+			header: `Impact cascade for ${path.basename(primary)}`,
+			truncationLine: "",
+			coverageLine: "",
+			policySuppressed: 0,
+		};
+		const rows = neighbors.map(([filePath, messages]) => ({
+			filePath,
+			reason: "imports" as const,
+			diagnostics: messages.map((m, i) => diagnostic(filePath, m, i + 1)),
+			lspTouched: true,
+		}));
+		return {
+			filePath: primary,
+			impact: {
+				filePath: primary,
+				changedSymbols: [],
+				directImporters: neighbors.map(([p]) => p),
+				directCallers: [],
+				neighborFiles: neighbors.map(([p]) => p),
+				riskFlags: [],
+			},
+			neighbors: rows,
+			formatted: composeCascadeSection(
+				formatCascadeNeighborDiagnostics(cwd, rows, {
+					noun: "neighbor",
+					includeReason: true,
+				}),
+				layout,
+			),
+			layout,
+		} as CascadeResult;
+	}
+
+	function occurrences(text: string, needle: string): number {
+		return text.split(needle).length - 1;
+	}
+
+	// Recurrence (#4485): 58 real runs whose every neighbour went unanswered
+	// reached the agent as nothing at all, the same silence as a clean leaf.
+	it("turn_end renders one pending line per server for unconfirmed neighbours, once per turn", async () => {
+		const env = setupTestEnvironment("cascade-4485-pending-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			const cacheManager = new CacheManager(false);
+			const a = path.join(env.tmpDir, "a.lua");
+			const b = path.join(env.tmpDir, "b.lua");
+			const [n1, n2, n3] = ["n1.lua", "n2.lua", "n3.lua"].map((f) =>
+				path.join(env.tmpDir, f),
+			);
+			runtime.beginTurn();
+			edit(cacheManager, a, env.tmpDir);
+			edit(cacheManager, b, env.tmpDir);
+			runtime.appendCascadeRun({
+				filePath: a,
+				result: undefined,
+				neighborCount: 0,
+				diagnosticCount: 0,
+				skipReason: "indeterminate",
+				selectedNeighborPaths: [n1, n2],
+				unconfirmed: {
+					count: 2,
+					servers: [
+						{ serverId: "lua-language-server", waitMs: 1000, paths: [n1, n2] },
+					],
+				},
+			} as any);
+			runtime.appendCascadeRun({
+				filePath: b,
+				result: undefined,
+				neighborCount: 0,
+				diagnosticCount: 0,
+				skipReason: "indeterminate",
+				selectedNeighborPaths: [n3],
+				unconfirmed: {
+					count: 1,
+					servers: [
+						{ serverId: "lua-language-server", waitMs: 1000, paths: [n3] },
+					],
+				},
+			} as any);
+
+			logCascadeMock.mockClear();
+			const content = await turnEndOf(runtime, cacheManager, env.tmpDir);
+
+			expect(content).toContain(
+				"Cascade sent 3 dependent(s) of a.lua, b.lua to lua-language-server, but no answer arrived within 1000 ms; a clean cascade result does not cover them.",
+			);
+			expect(content).toContain(
+				"  • lua-language-server: n1.lua, n2.lua, n3.lua",
+			);
+			expect(occurrences(content, "no answer arrived")).toBe(1);
+			expect(content).toContain("Advisory — no action required this turn");
+			const rendered = logCascadeMock.mock.calls
+				.map((args) => args[0])
+				.filter((e) => e?.phase === "cascade_unconfirmed_rendered");
+			expect(rendered).toHaveLength(1);
+			expect(rendered[0].metadata).toMatchObject({ servers: 1, paths: 3 });
+
+			// The next turn does not repeat it.
+			runtime.beginTurn();
+			edit(cacheManager, a, env.tmpDir);
+			expect(await turnEndOf(runtime, cacheManager, env.tmpDir)).not.toContain(
+				"no answer arrived",
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("a neighbour a later run of the turn answered drops out of the pending line", async () => {
+		const env = setupTestEnvironment("cascade-4485-pending-answered-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			const cacheManager = new CacheManager(false);
+			const a = path.join(env.tmpDir, "a.lua");
+			const [n1, n2] = ["n1.lua", "n2.lua"].map((f) =>
+				path.join(env.tmpDir, f),
+			);
+			runtime.beginTurn();
+			edit(cacheManager, a, env.tmpDir);
+			runtime.appendCascadeRun({
+				filePath: a,
+				result: undefined,
+				neighborCount: 0,
+				diagnosticCount: 0,
+				skipReason: "indeterminate",
+				selectedNeighborPaths: [n1, n2],
+				unconfirmed: {
+					count: 2,
+					servers: [
+						{ serverId: "lua-language-server", waitMs: 1000, paths: [n1, n2] },
+					],
+				},
+			} as any);
+			runtime.appendCascadeRun({
+				filePath: a,
+				result: undefined,
+				neighborCount: 1,
+				diagnosticCount: 0,
+				skipReason: "clean",
+				observedNeighborPaths: [n1],
+			} as any);
+
+			const content = await turnEndOf(runtime, cacheManager, env.tmpDir);
+
+			expect(content).toContain(
+				"Cascade sent 1 dependent(s) of a.lua to lua-language-server",
+			);
+			expect(content).toContain("  • lua-language-server: n2.lua");
+			expect(content).not.toContain("n1.lua");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// Recurrence (#4487): with the rolling delta gone, a result that owns only
+	// some of its neighbours rendered all of them, so a neighbour a later
+	// result also covered reached the agent twice in one turn.
+	it("a result that owns only some of its neighbours renders only those", async () => {
+		const env = setupTestEnvironment("cascade-4487-partial-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			const cacheManager = new CacheManager(false);
+			const a = path.join(env.tmpDir, "a.ts");
+			const b = path.join(env.tmpDir, "b.ts");
+			const n1 = path.join(env.tmpDir, "n1.ts");
+			const n2 = path.join(env.tmpDir, "n2.ts");
+			runtime.beginTurn();
+			edit(cacheManager, a, env.tmpDir);
+			edit(cacheManager, b, env.tmpDir);
+			runtime.appendCascadeRun({
+				filePath: a,
+				result: await computedResult(env.tmpDir, a, [
+					[n1, ["alpha error"]],
+					[n2, ["beta error, earlier state"]],
+				]),
+				neighborCount: 2,
+				diagnosticCount: 2,
+			});
+			runtime.appendCascadeRun({
+				filePath: b,
+				result: await computedResult(env.tmpDir, b, [
+					[n2, ["beta error, latest state"]],
+				]),
+				neighborCount: 1,
+				diagnosticCount: 1,
+			});
+
+			const content = await turnEndOf(runtime, cacheManager, env.tmpDir);
+
+			expect(occurrences(content, "alpha error")).toBe(1);
+			expect(occurrences(content, "beta error, latest state")).toBe(1);
+			expect(content).not.toContain("beta error, earlier state");
+			expect(occurrences(content, 'file="n2.ts"')).toBe(1);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// Recurrence (#4487): a neighbour error that outlived the edit read as new
+	// once, then vanished; the agent could not tell it was still there.
+	it("a neighbour error re-observed on a later turn is labelled with the turn it was first delivered", async () => {
+		const env = setupTestEnvironment("cascade-4487-label-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			const cacheManager = new CacheManager(false);
+			const a = path.join(env.tmpDir, "a.ts");
+			const n1 = path.join(env.tmpDir, "n1.ts");
+			const runOf = async (messages: string[]) => ({
+				filePath: a,
+				result: await computedResult(env.tmpDir, a, [[n1, messages]]),
+				neighborCount: 1,
+				diagnosticCount: messages.length,
+				observedNeighborPaths: [n1],
+			});
+
+			runtime.beginTurn();
+			edit(cacheManager, a, env.tmpDir);
+			runtime.appendCascadeRun(await runOf(["persistent error"]));
+			const first = await turnEndOf(runtime, cacheManager, env.tmpDir);
+			expect(first).toContain("persistent error");
+			expect(first).not.toContain("still present");
+
+			runtime.beginTurn();
+			edit(cacheManager, a, env.tmpDir);
+			runtime.appendCascadeRun(await runOf(["persistent error", "new error"]));
+			const second = await turnEndOf(runtime, cacheManager, env.tmpDir);
+			expect(second).toContain("persistent error (still present since turn 1)");
+			expect(second).toContain("new error");
+			expect(second).not.toContain("new error (still present");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// Recurrence (#4487): a turn whose cascade did not cover a neighbour with
+	// known errors said nothing about it, which reads as resolved.
+	it("a pending neighbour error no cascade covered this turn renders one unresolved line until a fresh observation clears it", async () => {
+		const env = setupTestEnvironment("cascade-4487-unresolved-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			const cacheManager = new CacheManager(false);
+			const a = path.join(env.tmpDir, "a.ts");
+			const other = path.join(env.tmpDir, "other.ts");
+			const n1 = path.join(env.tmpDir, "n1.ts");
+
+			runtime.beginTurn();
+			edit(cacheManager, a, env.tmpDir);
+			runtime.appendCascadeRun({
+				filePath: a,
+				result: await computedResult(env.tmpDir, a, [
+					[n1, ["first error", "second error"]],
+				]),
+				neighborCount: 1,
+				diagnosticCount: 2,
+				observedNeighborPaths: [n1],
+			} as any);
+			await turnEndOf(runtime, cacheManager, env.tmpDir);
+
+			// Turn 2: an unrelated edit, no cascade covers n1.
+			runtime.beginTurn();
+			edit(cacheManager, other, env.tmpDir);
+			const second = await turnEndOf(runtime, cacheManager, env.tmpDir);
+			expect(second).toMatch(/n1\.ts: 2 error\(s\) unresolved \(scanned/);
+			expect(occurrences(second, "n1.ts")).toBe(1);
+
+			// Turn 3: a confirmed clean observation of n1.
+			runtime.beginTurn();
+			edit(cacheManager, a, env.tmpDir);
+			runtime.appendCascadeRun({
+				filePath: a,
+				result: undefined,
+				neighborCount: 1,
+				diagnosticCount: 0,
+				skipReason: "clean",
+				observedNeighborPaths: [n1],
+			} as any);
+			expect(await turnEndOf(runtime, cacheManager, env.tmpDir)).not.toContain(
+				"n1.ts",
+			);
+
+			// Turn 4: nothing left pending.
+			runtime.beginTurn();
+			edit(cacheManager, other, env.tmpDir);
+			expect(await turnEndOf(runtime, cacheManager, env.tmpDir)).not.toContain(
+				"unresolved",
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("an edited neighbour's pending errors are left to its own dispatch", async () => {
+		const env = setupTestEnvironment("cascade-4487-edited-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			const cacheManager = new CacheManager(false);
+			const a = path.join(env.tmpDir, "a.ts");
+			const n1 = path.join(env.tmpDir, "n1.ts");
+			runtime.beginTurn();
+			edit(cacheManager, a, env.tmpDir);
+			runtime.appendCascadeRun({
+				filePath: a,
+				result: await computedResult(env.tmpDir, a, [[n1, ["n1 error"]]]),
+				neighborCount: 1,
+				diagnosticCount: 1,
+				observedNeighborPaths: [n1],
+			} as any);
+			await turnEndOf(runtime, cacheManager, env.tmpDir);
+
+			runtime.beginTurn();
+			edit(cacheManager, n1, env.tmpDir);
+			expect(await turnEndOf(runtime, cacheManager, env.tmpDir)).not.toContain(
+				"unresolved",
+			);
+			runtime.beginTurn();
+			edit(cacheManager, a, env.tmpDir);
+			expect(await turnEndOf(runtime, cacheManager, env.tmpDir)).not.toContain(
+				"unresolved",
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// Recurrence (#4485): an answer that landed between the compute and
+	// turn_end waited for a quiet window that mostly never came.
+	it("turn_end peeks the outstanding touches after its settle and delivers a late answer", async () => {
+		const env = setupTestEnvironment("cascade-4485-peek-");
+		const tier = await import("../../clients/lsp/cascade-tier.js");
+		const { buildResolvedFoundCascadeRun } =
+			await import("../../clients/cascade-format.js");
+		const { normalizeMapKey } = await import("../../clients/path-utils.js");
+		tier._resetOutstandingCascadeTouchesForTests();
+		tier._resetCascadeTierReconcileRegistrationForTests();
+		try {
+			const runtime = new RuntimeCoordinator();
+			const cacheManager = new CacheManager(false);
+			const a = path.join(env.tmpDir, "a.ts");
+			const n1 = path.join(env.tmpDir, "n1.ts");
+			fs.writeFileSync(n1, "import { v } from './a';\n");
+			// What index.ts wires.
+			tier.registerCascadeTierReconcileTask(
+				() => ({ getWarmClientForFile: async () => undefined }) as any,
+				{
+					onResolvedFound: (neighbor) => {
+						const run = buildResolvedFoundCascadeRun(env.tmpDir, neighbor);
+						if (run) runtime.appendCascadeRun(run);
+					},
+				},
+			);
+			const touchedAt = Date.now() - 100;
+			const client = {
+				serverId: "typescript",
+				isAlive: () => true,
+				getAllDiagnostics: () =>
+					new Map([
+						[
+							normalizeMapKey(n1),
+							{
+								ts: touchedAt + 50,
+								diags: [
+									{
+										severity: 1,
+										message: "answer after the compute",
+										range: {
+											start: { line: 0, character: 0 },
+											end: { line: 0, character: 1 },
+										},
+									},
+								],
+							},
+						],
+					]),
+			};
+			tier.recordOutstandingCascadeTouch({
+				filePath: n1,
+				serverId: "typescript",
+				touchedAt,
+				client: new WeakRef(client),
+			} as any);
+
+			runtime.beginTurn();
+			edit(cacheManager, a, env.tmpDir);
+			const content = await turnEndOf(runtime, cacheManager, env.tmpDir);
+
+			expect(content).toContain("answer after the compute");
+			expect(tier._getOutstandingCascadeTouchesForTests()).toEqual([]);
+		} finally {
+			tier._resetOutstandingCascadeTouchesForTests();
+			tier._resetCascadeTierReconcileRegistrationForTests();
 			env.cleanup();
 		}
 	});
