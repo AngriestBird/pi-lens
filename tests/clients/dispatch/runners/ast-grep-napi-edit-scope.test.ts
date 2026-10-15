@@ -67,16 +67,20 @@ const { dispatchLintWithResult } =
 const RULE = "no-unknown-returns";
 
 /** The reporter's shape: a constant on line 1 and a pre-existing
- *  `no-unknown-returns` (`severity: error`) violation on line 3. */
+ *  `no-unknown-returns` (`severity: error`) violation on line 3. Line 2
+ *  violates `no-any-type` (`severity: hint`), which only the substitute role
+ *  evaluates. */
 const SOURCE = [
 	'export const CLIENT_VERSION = "1.0.50";',
-	"",
+	"export const loose: any = CLIENT_VERSION;",
 	"export function dig(obj: Record<string, string>, key: string): unknown {",
 	"\treturn obj[key];",
 	"}",
 	"",
 ].join("\n");
 const CONSTANT_LINE = 1;
+const HINT_RULE = "no-any-type";
+const HINT_LINE = 2;
 const FINDING_LINE = 3;
 /** The line a later write appends after SOURCE's trailing newline. */
 const LATER_LINE = 6;
@@ -102,9 +106,10 @@ beforeEach(() => {
 
 function napiFindings(
 	diagnostics: readonly { tool?: string; rule?: string; line?: number }[],
+	rule = RULE,
 ): { rule?: string; line?: number }[] {
 	return diagnostics.filter(
-		(d) => d.tool === "ast-grep-napi" && d.rule === RULE,
+		(d) => d.tool === "ast-grep-napi" && d.rule === rule,
 	);
 }
 
@@ -163,6 +168,44 @@ describe.each([
 		]);
 
 		expect(napiFindings(result.blockers)).toEqual([
+			expect.objectContaining({ rule: RULE, line: FINDING_LINE }),
+		]);
+	}, 30_000);
+});
+
+describe("ast-grep-napi edit scope outside the blocking tier (#4481)", () => {
+	// Recurrence: a gate that also scoped warning-tier rules would cut the
+	// substitute's LSP-equivalent coverage (#2336) on every unchanged line.
+	it("keeps a hint finding on an unchanged line in the LSP substitute role", async () => {
+		const { filePath } = env.addFile("hint-unchanged.ts", SOURCE);
+
+		const result = await dispatchLintWithResult(
+			filePath,
+			env.cwd,
+			SUBSTITUTE_FLAGS,
+			[{ start: CONSTANT_LINE, end: CONSTANT_LINE }],
+		);
+
+		expect(napiFindings(result.warnings, HINT_RULE)).toEqual([
+			expect.objectContaining({ rule: HINT_RULE, line: HINT_LINE }),
+		]);
+	}, 30_000);
+
+	// Recurrence: a gate keyed off the ranges alone would drop findings from a
+	// full (non-blocking) pass that happens to carry the write's ranges.
+	it("keeps an unchanged-line error finding when the pass is not blocking-only", async () => {
+		const { filePath } = env.addFile("full-pass.ts", SOURCE);
+
+		const result = await dispatchLintWithResult(
+			filePath,
+			env.cwd,
+			PER_EDIT_FLAGS,
+			[{ start: CONSTANT_LINE, end: CONSTANT_LINE }],
+			undefined,
+			{ blockingOnly: false },
+		);
+
+		expect(napiFindings(result.diagnostics)).toEqual([
 			expect.objectContaining({ rule: RULE, line: FINDING_LINE }),
 		]);
 	}, 30_000);

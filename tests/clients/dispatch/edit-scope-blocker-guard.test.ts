@@ -74,9 +74,9 @@ beforeEach(() => {
 });
 afterEach(() => env.cleanup());
 
-function lspDiag(line: number, source?: string) {
+function lspDiag(line: number, source?: string, severity = 1) {
 	return {
-		severity: 1,
+		severity,
 		message: source ? `${source} finding` : "Type error",
 		range: {
 			start: { line: line - 1, character: 0 },
@@ -87,7 +87,7 @@ function lspDiag(line: number, source?: string) {
 	};
 }
 
-async function dispatchLsp(diags: unknown[]) {
+async function dispatchLsp(diags: unknown[], blockingOnly = true) {
 	const filePath = path.join(env.tmpDir, "main.ts");
 	fs.writeFileSync(filePath, SOURCE_TS);
 	boundary.touchFile.mockResolvedValue({ diags });
@@ -99,7 +99,7 @@ async function dispatchLsp(diags: unknown[]) {
 			env.tmpDir,
 			{ getFlag: (flag: string) => flag === "lens-lsp" },
 			new FactStore(),
-			true,
+			blockingOnly,
 			CHANGED,
 		),
 		[{ mode: "all", runnerIds: ["lsp"] }],
@@ -123,6 +123,26 @@ describe("per-edit blocker scope (#4481)", () => {
 
 		expect(result.blockers).toEqual([
 			expect.objectContaining({ tool: "ast-grep", line: 2 }),
+		]);
+	});
+
+	// Recurrence: a gate that dropped every out-of-range ast-grep finding would
+	// erase its warning tier from lens_diagnostics, not only its STOP.
+	it("keeps an ast-grep LSP warning on an unchanged line", async () => {
+		const result = await dispatchLsp([lspDiag(1, "ast-grep", 2)]);
+
+		expect(result.warnings).toEqual([
+			expect.objectContaining({ tool: "ast-grep", line: 1 }),
+		]);
+	});
+
+	// Recurrence: a gate keyed off the ranges alone would drop blockers from a
+	// full (non-blocking) pass that carries the write's ranges.
+	it("keeps an unchanged-line ast-grep LSP blocker outside the blocking-only pass", async () => {
+		const result = await dispatchLsp([lspDiag(1, "ast-grep")], false);
+
+		expect(result.blockers).toEqual([
+			expect.objectContaining({ tool: "ast-grep", line: 1 }),
 		]);
 	});
 
