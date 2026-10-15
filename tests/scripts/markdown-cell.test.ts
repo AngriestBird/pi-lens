@@ -23,4 +23,22 @@ describe("escapeMarkdownCell", () => {
 		const row = `| ${escapeMarkdownCell(input)} | x |`;
 		expect(unescapedPipes(row)).toBe(3);
 	});
+
+	// Recurrence (#4490 review M2): the row test above passed with a no-op
+	// escaper, because its input was already escaped by the author. These pin
+	// the exact output, so an identity or a wrong-order escaper reds.
+	it("escapes a pipe", () => {
+		expect(escapeMarkdownCell("a|b")).toBe("a\\|b");
+	});
+
+	it("doubles a lone backslash", () => {
+		expect(escapeMarkdownCell("a\\b")).toBe("a\\\\b");
+	});
+
+	it("escapes the backslash before the pipe, not after", () => {
+		// Input `a\|b`: the backslash doubles first (`a\\|b`), then the pipe
+		// is escaped (`a\\\|b`). Pipe-then-backslash would give `a\\|b`,
+		// which GFM splits.
+		expect(escapeMarkdownCell("a\\|b")).toBe("a\\\\\\|b");
+	});
 });

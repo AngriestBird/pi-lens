@@ -1295,3 +1295,30 @@ describe("the ratchet file", () => {
 		).toBe(false);
 	});
 });
+
+// Recurrence (#4490 M2): the census issue body is the first real caller of
+// escapeMarkdownCell. A no-op escaper left the helper suite green, so each
+// caller pins its exact row, through the real issueBody.
+describe("issueBody table cells (#4490)", () => {
+	it("writes a pipe and a backslash-before-pipe in the test and error cells escaped", () => {
+		const verdict = {
+			code: 1 as const,
+			kind: "red" as const,
+			lines: [],
+			stale: [],
+			members: [
+				{
+					file: "tests/a.test.ts",
+					kind: "order-dependent" as const,
+					seed: 202 as const,
+					test: "a|b",
+					firstError: "x\\|y",
+				},
+			],
+		};
+		const body = issueBody(verdict);
+		expect(body).toContain(
+			"| `tests/a.test.ts` | order-dependent | 202 | a\\|b | x\\\\\\|y |",
+		);
+	});
+});
