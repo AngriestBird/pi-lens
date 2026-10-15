@@ -13,8 +13,8 @@
  * directory — `index.ts` alone selected 176 test files, and a real 43-file
  * commit selected 282 (~10 minutes). These tests pin the fix: full-path
  * import resolution (not a basename/substring guess) plus a hard cap that
- * degrades to build-only instead of ever approaching "the whole suite" by
- * accident.
+ * keeps the change's own tests and the best-ranked import matches instead of
+ * ever approaching "the whole suite" by accident (#4489).
  *
  * `selectTargetedTests` resolves paths relative to `process.cwd()` (mirrors
  * a real repo checkout: `clients/x.ts` <-> `tests/clients/x.test.ts`), so
@@ -2023,6 +2023,35 @@ describe("history pass through the real hook and real git (#3215 lane 3)", () =>
 			"1 governance registry suite(s) and 1 history pick(s)",
 		);
 		expect(stepText).not.toContain("governance registries only");
+		expect(result.status).toBe(0);
+	}, 120_000);
+
+	it("counts a capped selection's own mirrored test in the warning", () => {
+		// Recurrence: PR #4494 review M15. describeCappedKeep could drop the
+		// mirror count and every capped-warning test still passed, because each
+		// asserted "0 own test file(s)".
+		const importers = Object.fromEntries(
+			Array.from({ length: MAX_SELECTED_TESTS + 1 }, (_, i) => [
+				`tests/gen-${i}.test.ts`,
+				"import { hub } from '../clients/hub.js';\nimport { it } from 'vitest';\nvoid hub;\nit('ok', () => {});\n",
+			]),
+		);
+		const { result, stepText } = runHookWithHistory({
+			baseFiles: {
+				"clients/hub.ts": "export const hub = 1;\n",
+				"tests/clients/hub.test.ts":
+					"import { it } from 'vitest';\nit('ok', () => {});\n",
+				...importers,
+			},
+			failingChange: { "clients/other.ts": "a\n" },
+			pushedChange: { "clients/hub.ts": "export const hub = 2;\n" },
+		});
+		expect(result.stdout + result.stderr).toContain(
+			`running the change's 1 own test file(s), the ${MAX_SELECTED_TESTS} import match(es)`,
+		);
+		expect(stepText).toContain(
+			"cap exceeded (25); running the change's 1 own test file(s)",
+		);
 		expect(result.status).toBe(0);
 	}, 120_000);
 });

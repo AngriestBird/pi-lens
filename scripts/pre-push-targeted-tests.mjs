@@ -42,7 +42,7 @@
 // outranks one that imports a hub (fewest importers first), ties broken by
 // path. A test importing several changed files ranks by the most specific of
 // them. The change's own tests, the armed governance registries and the history
-// picks stay on top of the cap (all bounded by construction), and the hook says
+// picks stay on top of the cap (the own tests grow only with the diff), and the hook says
 // when it capped — the "never the full suite" claim holds by construction, not
 // by hoping the heuristic stays narrow (#4489; before it, a capped selection
 // kept the registries alone and dropped the change's own tests).
@@ -450,7 +450,8 @@ export function selectTargetedTests(changed, allTests, options = {}) {
 	}
 
 	// The heuristic passes above are what the cap bounds. The registries are
-	// bounded by construction (their measured cost is in the budget note), so
+	// a fixed set (their measured cost is in the budget note); the own tests
+	// grow only with the diff (p99 20 changed test files over 300 merges), so
 	// they are kept apart and survive a capped selection: a change to a hub
 	// module (clients/lsp/client.ts alone matches 71 test files) otherwise
 	// caps and runs nothing at all (#3492, 2026-09-26).
