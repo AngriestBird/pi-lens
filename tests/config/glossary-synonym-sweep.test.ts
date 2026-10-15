@@ -458,7 +458,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/mcp/review.ts": 8,
 		"clients/mcp/session.ts": 1,
 		"clients/module-report.ts": 27,
-		"clients/opaque-mutation-scan.ts": 3,
+		// 3 -> 5 (#4493): readGitHead and listGitHeadDelta read the spawn
+		// result's `error` field (SpawnResult.error), not a delivery tier.
+		"clients/opaque-mutation-scan.ts": 5,
 		"clients/opengrep-client.ts": 11,
 		"clients/package-manager.ts": 2,
 		"clients/partial-edit-apply.ts": 7,
@@ -654,6 +656,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/mutation-attribution.ts": 2,
 		"clients/ndjson-logger.ts": 1,
 		"clients/observed-mutation.ts": 2,
+		// 0 -> 1 (#4493): listGitHeadDelta drops the empty NUL-split entries,
+		// an `Array.prototype.filter` call, not a delivery filter.
+		"clients/opaque-mutation-scan.ts": 1,
 		"clients/opengrep-client.ts": 2,
 		"clients/path-utils.ts": 1,
 		"clients/persistent-reverify.ts": 4,
@@ -693,7 +698,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// branches onto the observational net's arm, and the surviving ast-grep
 		// site walks its `paths` array instead of filtering it.
 		"clients/runtime-tool-call.ts": 3,
-		"clients/runtime-tool-result.ts": 5,
+		// 5 -> 8 (#4493): the HEAD-move look keeps the held documents of the
+		// delta and the stale ones among them, and counts the dispositions;
+		// three `Array.prototype.filter` calls, not a delivery filter.
+		"clients/runtime-tool-result.ts": 8,
 		// 31 -> 33 (#3901): the cut-advisory hold keeps the fresh items of a part
 		// (one `Array.prototype.filter`), and the call-graph lane drops a parked
 		// file it already walks as fresh (one). The knip and dead-code re-offers
@@ -1022,7 +1030,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/mutation-attribution.ts": 3,
 		"clients/ndjson-logger.ts": 5,
 		"clients/observed-mutation.ts": 6,
-		"clients/opaque-mutation-scan.ts": 6,
+		// 6 -> 7 (#4493): listGitHeadDelta resolves git's relative names with
+		// the OS `path` namespace; the keys still go through normalizeMapKey.
+		"clients/opaque-mutation-scan.ts": 7,
 		"clients/opengrep-client.ts": 8,
 		"clients/opengrep-config.ts": 3,
 		"clients/package-manager.ts": 21,
@@ -1365,7 +1375,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/mcp/analyze.ts": 9,
 		"clients/mcp/review.ts": 1,
 		"clients/module-report.ts": 6,
-		"clients/opaque-mutation-scan.ts": 24,
+		// 24 -> 26 (#4493): readGitHead and listGitHeadDelta read the spawn
+		// result's exit `status`, not a delivery status.
+		"clients/opaque-mutation-scan.ts": 26,
 		"clients/opengrep-client.ts": 9,
 		"clients/package-manager.ts": 2,
 		"clients/pipeline.ts": 4,

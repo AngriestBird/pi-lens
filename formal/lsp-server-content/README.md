@@ -6,7 +6,8 @@ file at the same time. Each config's first line is its `\* expect:` verdict,
 the same format `formal/file-locks/README.md` uses, and the `TLA+ models` CI
 job (`node scripts/check-tla-models.mjs`) checks every config against it.
 
-Issues: #3480 (the debounce fingerprint), #3481 (the stale cascade touch).
+Issues: #3480 (the debounce fingerprint), #3481 (the stale cascade touch),
+#4493 (the HEAD-move resync, `HeadMoveResync.tla`, below).
 
 ## What the model covers
 
@@ -220,3 +221,83 @@ read. `DebounceFullFp` and the flipped `DebounceLossyFp` pass.
   touch or workspace diagnostics call fires its heartbeat.
 - `floor(mtime)` ties within one millisecond are not modelled. They would
   widen the blind window.
+
+## HeadMoveResync: held documents across a HEAD move (#4493)
+
+`HeadMoveResync.tla` models what the server holds after HEAD moves on a
+clean tree. A checkout, `reset --hard`, or a completed rebase or cherry-pick
+leaves `git status` empty, so opaque recovery (the dirty set) never saw it,
+and the server kept the pre-move bytes of every held document.
+
+### What the model covers
+
+- **Two sessions, one server.** One `LSPService` and one
+  `RuntimeCoordinator` serve the primary and a concurrent secondary, so they
+  share the scan slot. Each session runs two bash calls in parallel.
+- **Moves.** A call's command may check out (the held documents' bytes
+  change), commit (HEAD moves, the bytes stay), or do neither. An outside
+  move (a terminal, an IDE) does either with no tool event.
+- **Looks** (`resyncHeadMove`, at every bash `tool_call` and `tool_result`).
+  A look has three steps, with each `await` a boundary:
+  1. `Read` takes HEAD (`git rev-parse`, awaited).
+  2. `Cas` is `observeGitHead`, a synchronous compare-and-set on the
+     session's record.
+  3. `Resync` runs only when `Cas` reported a move. It is
+     `resyncGitChangedFiles` with forced passes. It resends the held
+     documents in the delta whose sent bytes differ from the disk, up to
+     `Cap`, reading the disk as it is at that moment. Then it writes the one
+     `opaque_mutation_head_moved` row.
+- **Serialization.** Looks of one key run one at a time (`Serial`): the code
+  runs them under a coalescing `createSingleFlight` per key.
+
+The model does not cover the first-tool-call-per-turn look of a non-bash
+tool. That look is the same look gated by a per-turn flag, and the
+outside-pi test pins it. Nor does it cover the 500 ms hook bound: a bound
+that fires returns the hook while the resync continues, and its row still
+lands.
+
+### Invariants
+
+- `HeldFreshWhenQuiet`: no look is in flight, and a hook ran after the
+  latest move. Then every held document's server bytes equal the disk, or
+  that move's row states the drain cap's remainder.
+- `OneRowPerEvent`: no row reports a HEAD moving to itself, and no session
+  writes two rows for one transition.
+- `SessionIsolation`: no record is written by looks of two sessions.
+- `NoRedundantSend`: no resync resends bytes the server already holds.
+
+### Results
+
+TLC 1.7.4, one worker, `MaxMoves = 2`, `Outside = TRUE`.
+
+| Config | Expect | TLC | Distinct states | s |
+|---|---|---|---|---|
+| `HeadMovePreFix` (`Track = FALSE`) | violated HeldFreshWhenQuiet | violated | 8 | 0.7 |
+| `HeadMoveFix` | pass | pass | 1,260,722 | 17.0 |
+| `HeadMoveFixCapped` (`Cap = 1`) | pass | pass | 1,685,552 | 22.9 |
+| `HeadMoveMutNoReport` | violated HeldFreshWhenQuiet | violated | 454 | 0.7 |
+| `HeadMoveMutSlotKey` | violated SessionIsolation | violated | 670 | 0.7 |
+| `HeadMoveMutNoCompare` | violated OneRowPerEvent | violated | 89 | 0.7 |
+| `HeadMoveMutResendAll` | violated NoRedundantSend | violated | 449 | 0.7 |
+| `HeadMoveMutNoSerial` | violated OneRowPerEvent | violated | 79,998 | 1.7 |
+| `HeadMoveWarmupGap` (`InitRec = FALSE`) | violated HeldFreshWhenQuiet | violated | 159 | 0.7 |
+
+**`HeadMoveMutNoSerial`: a record regresses.** This is the trace that led
+to the per-key single-flight. The first draft of the fix let a session's
+looks run concurrently.
+
+1. Look 1 (call 1's `tool_call`) reads HEAD 0.
+2. An outside move takes HEAD to 1.
+3. Look 2 (call 2's `tool_call`) reads 1. Its `Cas` sets the record from 0
+   to 1 and reports the move.
+4. Look 1's `Cas` runs last. It sets the record back to 0 and reports a
+   move from 1 to 0.
+5. A later look reads 1 and reports the move from 0 to 1 a second time.
+
+No document stays stale, because the resync resends only stale bytes. The
+row stream is wrong, though, and the record disagrees with HEAD.
+
+**`HeadMoveWarmupGap` is the residual as built.** A move before a session's
+first look is recorded as the session's first HEAD, not as a move. A
+document opened before that first look keeps the pre-move bytes until the
+drift heartbeat. The #4493 PR names this residual.

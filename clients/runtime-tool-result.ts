@@ -10,8 +10,14 @@ import {
 	type CaptureOptions,
 	diffFileContent,
 	getOpaqueBaselineStore,
+	headRecordKey,
+	isGitWorktree,
+	listGitHeadDelta,
+	observeGitHead,
 	opaqueBaselineSlot,
+	readGitHead,
 	recoverOpaqueChangesViaGit,
+	serializeHeadLook,
 } from "./opaque-mutation-scan.js";
 import { normalizeMapKey } from "./path-utils.js";
 import { detectFileKind } from "./file-kinds.js";
@@ -90,6 +96,7 @@ import type { EditToolDetails } from "@earendil-works/pi-coding-agent";
 import type { LSPShutdownOptions } from "./lsp/client.js";
 import {
 	notifyExternalFileChange,
+	peekLSPService,
 	resyncGitChangedFiles,
 } from "./lsp/capabilities.js";
 import type { MetricsClient } from "./metrics-client.js";
@@ -112,6 +119,7 @@ import { syncGitGuardRecord } from "./git-guard.js";
 import { scheduleWordIndexPersist } from "./word-index.js";
 import { RUNTIME_CONFIG } from "./runtime-config.js";
 import { getActiveSessionId } from "./session-lifecycle.js";
+import { hashDiagnosticContent } from "./lsp/diagnostic-binding.js";
 import {
 	type LineageHandle,
 	recordDroppedRead,
@@ -199,6 +207,109 @@ export function isFailedGitIntegrationCommand(
 			return GIT_INTEGRATION_SUBCOMMANDS.has(token);
 		}
 		return false;
+	});
+}
+
+/**
+ * #4493: forced drift passes a HEAD move's resync may run before it reports
+ * the rest deferred: 16 passes of `DRIFT_RESYNC_BATCH` (4) cover 64 held
+ * documents.
+ */
+const HEAD_MOVE_RESYNC_MAX_PASSES = 16;
+
+/**
+ * #4493: when HEAD moved since this session last looked, resync the held
+ * documents in `git diff <old> <new>`.
+ *
+ * A clean-tree move (checkout, reset --hard, a completed rebase or
+ * cherry-pick, or the same outside pi) leaves `git status` empty, so opaque
+ * recovery finds nothing and the server kept the pre-move bytes. The delta is
+ * incoming content, not the agent's: it reaches the LSP resync only, never
+ * mutation bookkeeping, authorship or dispatch. One `opaque_mutation_head_moved`
+ * row per move, none when HEAD did not move.
+ */
+export function resyncHeadMove(args: HeadLook): Promise<void> {
+	return serializeHeadLook(args.key, () => lookAtHead(args));
+}
+
+interface HeadLook {
+	root: string;
+	key: string;
+	turnKey: number | undefined;
+	trigger: "tool_call" | "tool_result";
+	label: string;
+}
+
+/**
+ * One look, the only one of its key in flight. A look that joined a flight is
+ * answered by the flight's trailing look, which carries the first caller's
+ * `trigger` and `label` in its row.
+ */
+async function lookAtHead(args: HeadLook): Promise<void> {
+	if (!(await isGitWorktree(args.root))) return;
+	const head = await readGitHead(args.root);
+	if (!head) return;
+	const from = observeGitHead(args.key, head, args.turnKey);
+	if (!from) return;
+	const started = Date.now();
+	const delta = await listGitHeadDelta(args.root, from, head);
+	// Only a held document can be stale, and the reverse-import lookup inside
+	// the resync costs one index build per path, so a large delta is cut here.
+	const service = peekLSPService();
+	const held = new Set(service?.getOpenDocumentPaths(args.root));
+	const inDelta = (delta ?? []).filter((filePath) => held.has(filePath));
+	// A queued target is resent unconditionally, and most HEAD moves (every
+	// `git commit`, an amend) leave the held bytes current: only a document
+	// whose last-sent bytes differ from the disk is resent. An unreadable one
+	// goes too, so the resync reports it vanished.
+	const targets = (
+		await Promise.all(
+			inDelta.map(async (filePath) => {
+				const sent = service?.getTrackedContent(filePath, args.root)?.hash;
+				try {
+					const disk = await nodeFs.promises.readFile(filePath, "utf8");
+					return sent === hashDiagnosticContent(disk) ? undefined : filePath;
+				} catch {
+					return filePath;
+				}
+			}),
+		)
+	).filter((filePath): filePath is string => filePath !== undefined);
+	let dispositions: ReadonlyMap<string, string> | undefined;
+	let resyncFailed = false;
+	if (targets.length > 0) {
+		try {
+			dispositions = await resyncGitChangedFiles(targets, {
+				maxPasses: HEAD_MOVE_RESYNC_MAX_PASSES,
+			});
+		} catch {
+			resyncFailed = true;
+		}
+	}
+	const outcomes = [...(dispositions?.values() ?? [])];
+	const count = (kind: string) =>
+		outcomes.filter((outcome) => outcome === kind).length;
+	logLatency({
+		type: "phase",
+		phase: "opaque_mutation_head_moved",
+		filePath: args.label.slice(0, 80),
+		durationMs: Date.now() - started,
+		result: resyncFailed
+			? "resync-failed"
+			: delta === undefined
+				? "delta-unknown"
+				: `changed:${delta.length}`,
+		metadata: {
+			trigger: args.trigger,
+			from: from.slice(0, 12),
+			to: head.slice(0, 12),
+			changed: delta?.length ?? -1,
+			held: inDelta.length,
+			current: inDelta.length - targets.length,
+			resynced: count("resynced"),
+			deferred: count("deferred"),
+			failed: count("failed"),
+		},
 	});
 }
 
@@ -1804,6 +1915,29 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 					dbg(`git-change LSP resync failed: ${err}`);
 				});
 			}
+		}
+		// #4493: a command that moved HEAD resyncs the held documents it
+		// rewrote before this result returns, ahead of the synthetic dispatches
+		// below, so their diagnostics read the new dependencies.
+		if (workspaceRoot) {
+			await bounded(
+				resyncHeadMove({
+					root: workspaceRoot,
+					key: headRecordKey(
+						opaqueBaselineSlot(workspaceRoot, runtime.sessionGeneration),
+						deps.sessionId,
+					),
+					turnKey: runtime.turnKey(deps.sessionId),
+					trigger: "tool_result",
+					label: command,
+				}),
+				{
+					ms: HOOK_WALL_BUDGET_MS.tool_result_read_only,
+					signal: deps.signal ?? undefined,
+					hook: "tool_result_read_only",
+					label: "head-move-resync",
+				},
+			);
 		}
 		// wp iterates opaquePaths VERBATIM (already normalizeMapKey keys), so the
 		// set must hold those exact strings - no re-resolution.

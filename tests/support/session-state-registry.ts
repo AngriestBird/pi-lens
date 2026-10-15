@@ -999,11 +999,12 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 	{
 		id: "opaque-mutation-scan:baselineStore+gitMemo",
 		module: "opaque-mutation-scan.ts",
-		state: "OpaqueBaselineStore pending map, gitRepoMemo, gitToplevelMemo",
+		state:
+			"OpaqueBaselineStore pending map, gitRepoMemo, gitToplevelMemo, headRecords, headLooks",
 		policy: "session_start",
 		resetName: "resetOpaqueMutationState",
 		reason:
-			"#2000 phase 2: pending pre-command baselines are keyed cwd:generation (plus the tool-call id, #4137) and become unreachable when the session generation advances; and the git-worktree and toplevel memos must re-probe after a session that may have seen a directory become a worktree, or become a LINKED worktree of another (#2007). Without the reset the baselines leak per session and the memos mis-answer forever.",
+			"#2000 phase 2: pending pre-command baselines are keyed cwd:generation (plus the tool-call id, #4137) and become unreachable when the session generation advances; and the git-worktree and toplevel memos must re-probe after a session that may have seen a directory become a worktree, or become a LINKED worktree of another (#2007). Without the reset the baselines leak per session and the memos mis-answer forever. #4493: the per-session HEAD records (capped at 64) and the per-key HEAD-look flights clear at the same boundary, where the LSP service resets too, so no record outlives the documents it guards.",
 	},
 
 	// ── The rest of the session_start reset chain ────────────────────────────
@@ -1779,7 +1780,9 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// no session identity, so they need no reset (SWEEP_HEURISTIC_LIMITS item 5).
 	// #2007 added `gitToplevelMemo`, the worktree-identity cache (3 → 4). It
 	// is registered above and cleared by the same `resetOpaqueMutationState`.
-	"opaque-mutation-scan.ts": 4,
+	// #4493: 4 -> 5, the HEAD records and the HEAD-look single-flight, both
+	// in the entry above and cleared by `resetOpaqueMutationState`.
+	"opaque-mutation-scan.ts": 5,
 	// #1602 added `globalBinDirCache` (1 → 2), cleared by the same
 	// `_resetPackageManagerCache` the registry entry above names.
 	"package-manager.ts": 2,

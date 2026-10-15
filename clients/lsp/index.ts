@@ -3425,7 +3425,13 @@ export class LSPService {
 	 */
 	async resyncGitChangedFiles(
 		changedPaths: readonly string[],
-		options: { saved?: boolean } = {},
+		/**
+		 * #4493 `maxPasses`: forced passes this call may run, serially, while a
+		 * target it queued is still waiting; each pass keeps the per-pass cap. A
+		 * HEAD move passes more than one so its held documents heal before its
+		 * tool_result returns; the default is the one paced pass (#2817 r2 F1).
+		 */
+		options: { saved?: boolean; maxPasses?: number } = {},
 	): Promise<ReadonlyMap<string, DriftDisposition>> {
 		const dispositions = new Map<string, DriftDisposition>();
 		if (this.checkDestroyed() || changedPaths.length === 0) {
@@ -3463,7 +3469,19 @@ export class LSPService {
 			openTargets.filter((filePath) => written.has(filePath)),
 			{ saved: options.saved === true },
 		);
-		const pass = await this.sweepDocumentDrift({ force: true });
+		let pass: DriftSweepResult | undefined;
+		/** What the passes did to each queued target, the latest pass winning. */
+		const reached = new Map<string, DriftDisposition>();
+		const waiting = (filePath: string): boolean => {
+			const disposition = reached.get(normalizeMapKey(filePath));
+			return disposition === undefined || disposition === "deferred";
+		};
+		for (let n = 0; n < Math.max(1, options.maxPasses ?? 1); n++) {
+			pass = await this.sweepDocumentDrift({ force: true });
+			for (const [key, disposition] of pass?.queued ?? [])
+				reached.set(key, disposition);
+			if (!pass || !openTargets.some(waiting)) break;
+		}
 		logLatency({
 			type: "phase",
 			phase: "lsp_external_change_resync",
@@ -3479,7 +3497,7 @@ export class LSPService {
 			dispositions.set(
 				changedPath,
 				openTargets.includes(resolved)
-					? (pass?.queued.get(normalizeMapKey(resolved)) ?? "deferred")
+					? (reached.get(normalizeMapKey(resolved)) ?? "deferred")
 					: "unheld",
 			);
 		}

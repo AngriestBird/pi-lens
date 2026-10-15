@@ -45,6 +45,7 @@ import { incrementDegradationCount } from "./degradation-ledger.js";
 import { normalizeMapKey } from "./path-utils.js";
 import { freshnessFromMtime } from "./freshness.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
+import { createSingleFlight } from "./single-flight.js";
 import { truncatedByOutputCap } from "./spawn-output-cap.js";
 
 interface FileStatEntry {
@@ -422,6 +423,111 @@ export function resetOpaqueMutationState(): void {
 	getOpaqueBaselineStore().takeAllForTest();
 	gitRepoMemo.clear();
 	gitToplevelMemo.clear();
+	headRecords.clear();
+	headLooks.clear();
+}
+
+/**
+ * #4493: the HEAD each session last saw in a scan slot, so a clean-tree HEAD
+ * move (checkout, reset --hard, a completed rebase or cherry-pick, or one made
+ * outside pi) is seen at all: `git status` is empty after one. Keyed by
+ * {@link headRecordKey}, so one session never reads or writes another's.
+ * `turnKey` is the turn of the last observation (`RuntimeCoordinator.turnKey`).
+ * Cleared with the rest of this module at the session boundary, where the LSP
+ * service resets too, so no held document outlives its record.
+ */
+const HEAD_RECORD_CAP = 64;
+const headRecords = new BoundedFifoMap<
+	string,
+	{ head: string; turnKey: number | undefined }
+>(HEAD_RECORD_CAP);
+
+/** One session's HEAD record key in a scan slot ({@link opaqueBaselineSlot}). */
+export function headRecordKey(
+	slot: string,
+	sessionId: string | undefined,
+): string {
+	return `${slot}|${sessionId ?? ""}`;
+}
+
+/**
+ * Record `head` for `key` and return the HEAD it replaces when that differs:
+ * the move to resync. A first observation returns `undefined`. Synchronous, so
+ * two calls that each awaited their own `rev-parse` cannot both claim a move;
+ * {@link serializeHeadLook} keeps such reads of one key in order.
+ */
+export function observeGitHead(
+	key: string,
+	head: string,
+	turnKey: number | undefined,
+): string | undefined {
+	const previous = headRecords.get(key)?.head;
+	headRecords.delete(key);
+	headRecords.set(key, { head, turnKey });
+	return previous !== undefined && previous !== head ? previous : undefined;
+}
+
+/**
+ * #4493: one HEAD look per record key at a time. A session's parallel bash
+ * calls look concurrently; two looks reading HEAD on either side of a move
+ * could set the record in the other order, regressing it, so a later look
+ * reported the same move again. A look that arrives mid-flight waits and gets
+ * one trailing look of its own (it reads HEAD after the flight), and returns
+ * only once the flight's resync is done. An entry lives while its flight runs.
+ */
+const headLooks = createSingleFlight<void>({ coalesceTrailing: true });
+
+/** Run `look` as the only HEAD look of `key` in flight. */
+export function serializeHeadLook(
+	key: string,
+	look: () => Promise<void>,
+): Promise<void> {
+	return headLooks.run(key, look);
+}
+
+/** Whether `key` was observed during `turnKey` already. */
+export function headObservedInTurn(
+	key: string,
+	turnKey: number | undefined,
+): boolean {
+	const entry = headRecords.get(key);
+	return entry !== undefined && entry.turnKey === turnKey;
+}
+
+/** HEAD's commit id, or `undefined` for an unborn HEAD or a failed read. */
+export async function readGitHead(root: string): Promise<string | undefined> {
+	const result = await safeSpawnAsync(
+		"git",
+		["rev-parse", "--verify", "-q", "HEAD"],
+		{ cwd: root, timeout: 3000 },
+	);
+	const head =
+		!result.error && result.status === 0 ? result.stdout?.trim() : undefined;
+	return head && /^[0-9a-f]{40,64}$/.test(head) ? head : undefined;
+}
+
+/**
+ * The files that differ between commits `from` and `to`, as map keys under
+ * `root`, or `undefined` when git failed or the listing was cut. `--relative`
+ * keeps the paths under `root` in its own spelling (git's toplevel is a real
+ * path); `--no-renames` lists both sides of a rename.
+ */
+export async function listGitHeadDelta(
+	root: string,
+	from: string,
+	to: string,
+): Promise<string[] | undefined> {
+	const result = await safeSpawnAsync(
+		"git",
+		["diff", "--name-only", "--no-renames", "--relative", "-z", from, to],
+		{ cwd: root, timeout: 5000, maxOutputBytes: MAX_GIT_STATUS_OUTPUT_BYTES },
+	);
+	if (truncatedByOutputCap(result) || result.error || result.status !== 0)
+		return undefined;
+	return (result.stdout ?? "")
+		.split("\0")
+		.filter(Boolean)
+		.map((relPath) => normalizeMapKey(path.resolve(root, relPath)));
 }
 
 /** Cached git-worktree probe (repos don't stop being git mid-session). */

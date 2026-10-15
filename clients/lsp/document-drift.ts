@@ -336,7 +336,10 @@ export class DocumentDriftTracker {
 				if (intervalMs === 0) return SKIPPED;
 				if (now() - this.lastSweepAt < intervalMs) return SKIPPED;
 			}
-			if (this.synced.size === 0) {
+			// #4493: queued targets need no record (a held document whose record
+			// was evicted or never stamped), so only an empty queue AND no record
+			// leave nothing to do.
+			if (this.synced.size === 0 && this.pendingResync.size === 0) {
 				this.lastSweepAt = now();
 				return SKIPPED;
 			}
@@ -358,7 +361,7 @@ export class DocumentDriftTracker {
 		for (let i = 0; i < Math.min(DRIFT_CHECK_BATCH, tracked); i++) {
 			window.push(keys[(this.cursor + i) % tracked] as string);
 		}
-		this.cursor = (this.cursor + window.length) % tracked;
+		this.cursor = tracked === 0 ? 0 : (this.cursor + window.length) % tracked;
 
 		// Drop records nobody holds BEFORE spending a stat on them.
 		let unheld = 0;

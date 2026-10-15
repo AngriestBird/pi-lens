@@ -142,9 +142,12 @@ const POPULATION_FILES = [
  * `safeSpawnAsync(` again the file re-enters and its site is checked — and the
  * one cwd decision they used to make 23 times over is now made once, inside
  * `probeToolAsync`, where this file admits it by name.
+ *
+ * #4493: 133 -> 135, the `git rev-parse HEAD` in readGitHead and the
+ * `git diff` in listGitHeadDelta (opaque-mutation-scan.ts, already counted).
  */
 const EXPECTED_FILES = 79;
-const EXPECTED_DIRECT_SITES = 133;
+const EXPECTED_DIRECT_SITES = 135;
 /**
  * Every same-file spawn-routing wrapper call site the scan discovers. Pinned
  * as a LIST, not a count, because the list is the part round 2 got wrong: it
@@ -644,6 +647,14 @@ const ORIGIN_ADMISSION_ROWS: ReadonlyArray<readonly [string, string]> = [
 	[
 		"clients/opaque-mutation-scan.ts#resolveGitToplevel:49511e7e~1167a91f",
 		"cwd is resolveGitToplevel's own `root` parameter — `git rev-parse --show-toplevel` asks about exactly that directory; the answer IS the root, so resolving one first would be circular (#2894)",
+	],
+	[
+		"clients/opaque-mutation-scan.ts#listGitHeadDelta:6ff8d36c~c87eec21",
+		"cwd is listGitHeadDelta's own `root` parameter — `git diff --relative` lists the HEAD delta relative to exactly that directory, so the paths resolve against the root the caller asked about (#4493)",
+	],
+	[
+		"clients/opaque-mutation-scan.ts#readGitHead:bc5a0a36~edb3d44f",
+		"cwd is readGitHead's own `root` parameter — `git rev-parse HEAD` names the commit of the worktree at that directory, which is the query's subject (#4493)",
 	],
 	[
 		"clients/opaque-mutation-scan.ts#recoverOpaqueChangesViaGit:dad86fa7~1167a91f",

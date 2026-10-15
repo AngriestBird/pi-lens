@@ -1,6 +1,7 @@
 // Minimal JSON-RPC 2.0 LSP fake server over stdio
 // Used for integration tests — speaks real LSP protocol without actual language smarts
 
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -424,6 +425,20 @@ function handle(raw) {
 		trace(
 			`recv ${data.method ?? "<response>"} ${data.params?.textDocument?.uri ?? ""}`.trim(),
 		);
+		// #4493: which bytes each didOpen/didChange carried, as a short sha256,
+		// so a test reads what the server holds from the wire. Off by default.
+		if (process.env.FAKE_LSP_TRACE_TEXT === "1") {
+			const text =
+				data.method === "textDocument/didOpen"
+					? data.params?.textDocument?.text
+					: data.method === "textDocument/didChange"
+						? data.params?.contentChanges?.at(-1)?.text
+						: undefined;
+			if (typeof text === "string")
+				trace(
+					`text ${data.params?.textDocument?.uri} ${createHash("sha256").update(text).digest("hex").slice(0, 12)}`,
+				);
+		}
 		// #4320 r3: which watched-files changes reached this server.
 		if (data.method === "workspace/didChangeWatchedFiles") {
 			for (const change of data.params?.changes ?? []) {

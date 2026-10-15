@@ -394,6 +394,11 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"real git children decide tracked-versus-ignored files from index state no stub reproduces",
 	},
+	"real-process-spawn:clients/head-move-resync-4493.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"a clean-tree HEAD move only exists in a real repository that git checks out, rebases or resets; a stubbed git cannot rewrite the files the server holds",
+	},
 	"real-process-spawn:clients/installer/pip-pep668.test.ts": {
 		detector: "real-process-spawn",
 		reason:

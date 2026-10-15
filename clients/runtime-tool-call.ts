@@ -13,10 +13,14 @@ import { toPosix } from "./path-utils.js";
 import {
 	captureFileStats,
 	getOpaqueBaselineStore,
+	headObservedInTurn,
+	headRecordKey,
 	isGitWorktree,
 	opaqueBaselineSlot,
 	type PendingOpaqueBaseline,
 } from "./opaque-mutation-scan.js";
+import { bounded } from "./deadline-utils.js";
+import { HOOK_WALL_BUDGET_MS } from "./hook-budgets.js";
 import { normalizeForGuardMatch } from "./host-edit-normalize.js";
 import { retargetReplacementIndentation } from "./indent-retarget.js";
 import {
@@ -72,7 +76,7 @@ import {
 	tryCorrectIndentationMismatchFromContent,
 } from "./read-guard-tool-lines.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
-import { handleToolResult } from "./runtime-tool-result.js";
+import { handleToolResult, resyncHeadMove } from "./runtime-tool-result.js";
 import {
 	resolveReadEvidenceCorrelationId,
 	resolveToolCallCorrelationId,
@@ -611,6 +615,34 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 			},
 		});
 	if (!lensEnabled) return;
+	// #4493: a HEAD move this session has not seen (made outside pi, between
+	// turns or between two bash calls) resyncs the held documents it rewrote
+	// before this tool runs. Every bash call looks, since it may move HEAD
+	// itself; any other tool looks once per turn (turn_start may not await).
+	const headRoot = ctx.cwd ?? runtime.projectRoot;
+	if (headRoot) {
+		const headKey = headRecordKey(
+			opaqueBaselineSlot(headRoot, runtime.sessionGeneration),
+			deps.sessionId,
+		);
+		const headTurn = runtime.turnKey(deps.sessionId);
+		if (toolName === "bash" || !headObservedInTurn(headKey, headTurn))
+			await bounded(
+				resyncHeadMove({
+					root: headRoot,
+					key: headKey,
+					turnKey: headTurn,
+					trigger: "tool_call",
+					label: toolName,
+				}),
+				{
+					ms: HOOK_WALL_BUDGET_MS.tool_result_read_only,
+					signal: ctx.signal,
+					hook: "tool_call",
+					label: "head-move-resync",
+				},
+			);
+	}
 	// #2000 phase 2: opaque-command pre-snapshot. A bash command whose writes
 	// the extractor will not recognize gets a bounded stat snapshot of the
 	// project source universe BEFORE it runs; the tool_result side diffs it.
