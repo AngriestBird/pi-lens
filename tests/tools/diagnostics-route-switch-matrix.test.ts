@@ -1058,6 +1058,12 @@ const SITE_REGISTRY: Record<string, SiteEntry> = {
 		exempt:
 			"the cascade's snapshot of running clients' rows for import neighbours of a written file; it starts no server",
 	},
+	// #4485: the silent-push wait's read of what the touched client published
+	// for the neighbour after the touch.
+	"clients/dispatch/integration.ts#computeCascadeForFile:getDiagnostics": {
+		exempt:
+			"an LSPClient's own per-file read on the client the cascade just touched (spawned.client), not the service: it starts nothing",
+	},
 	'clients/dispatch/integration.ts#computeCascadeForFile:touchFile{clientScope: "primary", diagnostics: "document"}':
 		{
 			exempt:
@@ -1088,6 +1094,12 @@ const SITE_REGISTRY: Record<string, SiteEntry> = {
 		},
 	'clients/lsp/capabilities.ts#adaptLspService:"runWorkspaceDiagnostics"': {
 		exempt: CAPABILITY_FACADE_BINDING,
+	},
+	// #4485: the expiry read of an outstanding touch's own client, held by a
+	// WeakRef, so a dead client is never revived.
+	"clients/lsp/cascade-tier.ts#readTouchedClient:getAllDiagnostics": {
+		exempt:
+			"an LSPClient's own getAllDiagnostics on the client the touch was sent to, read through a WeakRef at expiry: it starts nothing",
 	},
 	"clients/lsp/cascade-tier.ts#reconcileOutstandingCascadeTouches:getAllDiagnostics":
 		{

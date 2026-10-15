@@ -378,17 +378,11 @@ describe("a cascade neighbour no primary answered for (#4403 N2)", () => {
 				[["b", 5]],
 			],
 		);
-		// The held run also lists g.ts, whose typos finding is cached, as a
-		// degraded-fallback neighbour (typescript answered for no neighbour).
-		// Round 6 (W2): the line heads the section, ahead of that block.
-		expect(turns).toEqual([
-			[],
-			[
-				UNSTARTED_LINE,
-				"📐 Cascade errors in 1 neighbor file(s) — fix before finishing turn:",
-			],
-			[],
-		]);
+		// #4486: the held run no longer lists g.ts as a degraded-fallback
+		// neighbour. Its cached typos finding was stored before b.ts's cascade
+		// started, so it is not an observation after the edit (and g.ts's own
+		// dispatch reports it). The section is the line alone.
+		expect(turns).toEqual([[], [UNSTARTED_LINE], []]);
 	}, 180_000);
 
 	// Round 6 (W2): a cascade section that leads an over-long message counts
