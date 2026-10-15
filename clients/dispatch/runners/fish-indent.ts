@@ -32,7 +32,7 @@ const SYNTAX_STEP = "fish-syntax-check";
 /**
  * `fish --no-execute` header: `<file> (line N): <message>`, the file as spelled
  * in argv. Source excerpts and the `warning: Error while reading file` trailer
- * follow it and are ignored. A header naming another file is not ours to report.
+ * follow it and are ignored; only the first matching header counts. A header naming another file is not ours to report.
  */
 function parseSyntaxErrors(
 	output: string,
@@ -65,6 +65,9 @@ function parseSyntaxErrors(
 			tool: "fish-indent",
 			rule: "fish-syntax-error",
 		});
+		// fish reports only the first parse error, and its header precedes the
+		// source excerpt; a later header-shaped line is file text, not fish's.
+		break;
 	}
 	return diagnostics;
 }

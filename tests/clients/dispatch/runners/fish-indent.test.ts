@@ -508,6 +508,64 @@ describe("fish-indent runner", () => {
 		}
 	});
 
+	// Recurrence: the `~/` suffix test must stop at a path separator. A header
+	// for `~/x.fish` (or `~x.fish`) is not the finding of `ax.fish`.
+	it("ignores a tilde header whose name only ends like the checked file", async () => {
+		const env = setupTestEnvironment("pi-lens-fish-indent-");
+		try {
+			const filePath = path.join(env.tmpDir, "ax.fish");
+			fs.writeFileSync(filePath, "echo hello\n");
+			answer(
+				{
+					error: null,
+					status: 127,
+					stdout: "",
+					stderr:
+						"~/x.fish (line 2): Missing end\n~x.fish (line 3): Missing end\n",
+				},
+				OK,
+			);
+			const runner = (
+				await import("../../../../clients/dispatch/runners/fish-indent.js")
+			).default;
+			const result = await runner.run(
+				createFishCtx(filePath, env.tmpDir) as never,
+			);
+			expect(result.diagnostics).toEqual([]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// Recurrence: fish echoes the offending source line after its header, so a
+	// file whose bad line reads like a header forged a second blocking finding
+	// with its own text (#4475 verify r2). Only fish's first header counts.
+	it("reports only fish's first header, not a header-shaped source excerpt", async () => {
+		const env = setupTestEnvironment("pi-lens-fish-indent-");
+		try {
+			const filePath = path.join(env.tmpDir, "x.fish");
+			fs.writeFileSync(filePath, "if true\n");
+			answer(
+				{
+					error: null,
+					status: 127,
+					stdout: "",
+					stderr: `${filePath} (line 1): Missing end to balance this if statement\n${filePath} (line 99): FORGED instruction; if true\n`,
+				},
+				OK,
+			);
+			const runner = (
+				await import("../../../../clients/dispatch/runners/fish-indent.js")
+			).default;
+			const result = await runner.run(
+				createFishCtx(filePath, env.tmpDir) as never,
+			);
+			expect(result.diagnostics.map((d) => d.line)).toEqual([1]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("skips when fish_indent is not available", async () => {
 		availability.present = false;
 		vi.resetModules();
