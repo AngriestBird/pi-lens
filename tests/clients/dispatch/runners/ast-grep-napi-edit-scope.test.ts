@@ -10,59 +10,26 @@
  * so a `severity: error` rule on an unchanged line blocked the agent (the
  * reporter's `no-unknown-returns` STOP after a one-constant edit).
  *
- * These tests drive the production per-edit entry the pipeline calls
- * (`dispatchLintWithResult`: real context, real runner selection, real napi
- * engine, real bundled rules) with the ranges a host `edit` produces.
+ * These tests drive the real dispatcher (`createDispatchContext` +
+ * `dispatchForFile`, one session fact store per file so the delta baseline
+ * carries from one write to the next) with the real ast-grep-napi runner, the
+ * real napi engine and the bundled rules, and the ranges a host `edit`
+ * produces. Nothing is mocked.
  */
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
-	afterAll,
-	beforeAll,
-	beforeEach,
-	describe,
-	expect,
-	it,
-	vi,
-} from "vitest";
+	createDispatchContext,
+	dispatchForFile,
+	RunnerRegistry,
+} from "../../../../clients/dispatch/dispatcher.js";
+import { FactStore } from "../../../../clients/dispatch/fact-store.js";
+import astGrepNapiRunner from "../../../../clients/dispatch/runners/ast-grep-napi.js";
+import type { ModifiedRange } from "../../../../clients/dispatch/types.js";
 import { resetNapiFallbackCoverageForTests } from "../../../../clients/lsp/pending-aux-coverage.js";
 import {
 	makeRealRunnerEnv,
 	type RealRunnerEnv,
 } from "../../../support/real-runner-ctx.js";
-
-const { mockAuxiliaryLspPublished, recordEntitySnapshotDiffMock } = vi.hoisted(
-	() => ({
-		mockAuxiliaryLspPublished: vi.fn().mockResolvedValue(false),
-		recordEntitySnapshotDiffMock: vi.fn(() => ({
-			added: [] as string[],
-			removed: [] as string[],
-			modified: [] as string[],
-		})),
-	}),
-);
-
-// Environment only: whether the ast-grep LSP has published for this root is LSP
-// state, not the behavior under test.
-vi.mock("../../../../clients/lsp/capabilities.js", async (importOriginal) => ({
-	...(await importOriginal<
-		typeof import("../../../../clients/lsp/capabilities.js")
-	>()),
-	hasAuxiliaryLspPublishedForRoot: mockAuxiliaryLspPublished,
-}));
-
-// The tree-sitter runner shares the dispatch group; an empty entity diff keeps
-// its background blast-radius work out of the suite (tests/support/real-runner-ctx.ts).
-vi.mock(
-	"../../../../clients/review-graph/service.js",
-	async (importOriginal) => ({
-		...(await importOriginal<
-			typeof import("../../../../clients/review-graph/service.js")
-		>()),
-		recordEntitySnapshotDiff: recordEntitySnapshotDiffMock,
-	}),
-);
-
-const { dispatchLintWithResult } =
-	await import("../../../../clients/dispatch/integration.js");
 
 const RULE = "no-unknown-returns";
 
@@ -100,9 +67,28 @@ beforeAll(() => {
 });
 afterAll(() => env?.cleanup());
 beforeEach(() => {
-	mockAuxiliaryLspPublished.mockResolvedValue(false);
 	resetNapiFallbackCoverageForTests();
 });
+
+/** One file's session: the facts (and so the delta baseline) outlive a write. */
+function session(flags: { getFlag: (flag: string) => boolean }) {
+	const facts = new FactStore();
+	const registry = new RunnerRegistry();
+	registry.register(astGrepNapiRunner);
+	return (filePath: string, ranges: ModifiedRange[], blockingOnly = true) =>
+		dispatchForFile(
+			createDispatchContext(
+				filePath,
+				env.cwd,
+				flags,
+				facts,
+				blockingOnly,
+				ranges,
+			),
+			[{ mode: "all", runnerIds: ["ast-grep-napi"] }],
+			registry,
+		);
+}
 
 function napiFindings(
 	diagnostics: readonly { tool?: string; rule?: string; line?: number }[],
@@ -124,7 +110,7 @@ describe.each([
 	it("does not block on an unchanged pre-existing finding on the first write", async () => {
 		const { filePath } = env.addFile(`first-write-${slug}.ts`, SOURCE);
 
-		const result = await dispatchLintWithResult(filePath, env.cwd, flags, [
+		const result = await session(flags)(filePath, [
 			{ start: CONSTANT_LINE, end: CONSTANT_LINE },
 		]);
 
@@ -137,7 +123,8 @@ describe.each([
 	it("still blocks a finding on the changed line, on the first and a later write", async () => {
 		const { filePath } = env.addFile(`changed-line-${slug}.ts`, SOURCE);
 
-		const first = await dispatchLintWithResult(filePath, env.cwd, flags, [
+		const write = session(flags);
+		const first = await write(filePath, [
 			{ start: FINDING_LINE, end: FINDING_LINE },
 		]);
 		expect(napiFindings(first.blockers)).toEqual([
@@ -150,7 +137,7 @@ describe.each([
 			`changed-line-${slug}.ts`,
 			`${SOURCE}export const read = (): unknown => undefined;\n`,
 		);
-		const later = await dispatchLintWithResult(filePath, env.cwd, flags, [
+		const later = await write(filePath, [
 			{ start: LATER_LINE, end: LATER_LINE },
 		]);
 		expect(napiFindings(later.blockers)).toEqual([
@@ -163,7 +150,7 @@ describe.each([
 	it("blocks on a whole-file write", async () => {
 		const { filePath } = env.addFile(`whole-file-${slug}.ts`, SOURCE);
 
-		const result = await dispatchLintWithResult(filePath, env.cwd, flags, [
+		const result = await session(flags)(filePath, [
 			{ start: 1, end: SOURCE.split("\n").length },
 		]);
 
@@ -179,12 +166,9 @@ describe("ast-grep-napi edit scope outside the blocking tier (#4481)", () => {
 	it("keeps a hint finding on an unchanged line in the LSP substitute role", async () => {
 		const { filePath } = env.addFile("hint-unchanged.ts", SOURCE);
 
-		const result = await dispatchLintWithResult(
-			filePath,
-			env.cwd,
-			SUBSTITUTE_FLAGS,
-			[{ start: CONSTANT_LINE, end: CONSTANT_LINE }],
-		);
+		const result = await session(SUBSTITUTE_FLAGS)(filePath, [
+			{ start: CONSTANT_LINE, end: CONSTANT_LINE },
+		]);
 
 		expect(napiFindings(result.warnings, HINT_RULE)).toEqual([
 			expect.objectContaining({ rule: HINT_RULE, line: HINT_LINE }),
@@ -196,13 +180,10 @@ describe("ast-grep-napi edit scope outside the blocking tier (#4481)", () => {
 	it("keeps an unchanged-line error finding when the pass is not blocking-only", async () => {
 		const { filePath } = env.addFile("full-pass.ts", SOURCE);
 
-		const result = await dispatchLintWithResult(
+		const result = await session(PER_EDIT_FLAGS)(
 			filePath,
-			env.cwd,
-			PER_EDIT_FLAGS,
 			[{ start: CONSTANT_LINE, end: CONSTANT_LINE }],
-			undefined,
-			{ blockingOnly: false },
+			false,
 		);
 
 		expect(napiFindings(result.diagnostics)).toEqual([
