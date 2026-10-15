@@ -66,6 +66,7 @@ import {
 	sweepScratchDirs,
 } from "./lib/scratch-dir.mjs";
 import { safeRm } from "./lib/safe-rm.mjs";
+import { touchAnsweredDiagnostics } from "./lib/touch-result.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
@@ -3040,28 +3041,25 @@ async function runLspHandshake({ langs, install, verbose }) {
 				auxToolList.length > 0 &&
 				auxToolList.every((t) => unavailableTools.has(t));
 			const maxAttempts = auxRe && !auxToolUnavailable ? AUX_TOUCH_ATTEMPTS : 1;
+			const touchOptions = {
+				diagnostics: "document",
+				collectDiagnostics: true,
+				clientScope: useAux ? "with-auxiliary" : "primary",
+				...(useAux ? { auxiliaryServerIds: auxIds } : {}),
+				maxClientWaitMs: LSP_CLIENT_WAIT_MS,
+				maxDiagnosticsWaitMs: LSP_DIAGNOSTICS_WAIT_MS,
+				source: "smoke-lsp",
+			};
 			for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 				try {
-					touched = await lsp.touchFile(absFile, content, {
-						diagnostics: "document",
-						collectDiagnostics: true,
-						clientScope: useAux ? "with-auxiliary" : "primary",
-						...(useAux ? { auxiliaryServerIds: auxIds } : {}),
-						maxClientWaitMs: LSP_CLIENT_WAIT_MS,
-						maxDiagnosticsWaitMs: LSP_DIAGNOSTICS_WAIT_MS,
-						source: "smoke-lsp",
-					});
+					touched = await lsp.touchFile(absFile, content, touchOptions);
 				} catch (err) {
 					threw = err?.message ?? String(err);
 					break;
 				}
-				// #1179 (shape-5): touchFile now returns a `{ diags, inconclusive?,
-				// binding? }` wrapper instead of the bare diagnostics array (the
-				// copy-loss structural fix — the flags became explicit enumerable
-				// fields). Normalize both shapes here so every consumer below
-				// survives either build; `undefined` still means "no client became
-				// ready" (skip semantics unchanged).
-				touchedDiags = Array.isArray(touched) ? touched : touched?.diags;
+				// `undefined` means "no client became ready" (skip semantics),
+				// a disabled primary included (#4465).
+				touchedDiags = touchAnsweredDiagnostics(touched, touchOptions, lsp);
 				if (fx.expectedCwd && touchedDiags) {
 					await assertCwdResolutionLog(
 						fx,
@@ -3131,7 +3129,7 @@ async function runLspHandshake({ langs, install, verbose }) {
 			const diags = touchedDiags?.length ?? 0;
 			if (verbose) {
 				console.error(
-					`[${fx.lang}] touched=${touchedDiags?.length ?? touched} health=${JSON.stringify(lsp.getDiagnosticsHealth(absFile))}`,
+					`[${fx.lang}] touched=${touchedDiags?.length ?? touched?.inconclusiveReason ?? touched} health=${JSON.stringify(lsp.getDiagnosticsHealth(absFile))}`,
 				);
 			}
 			// Alternate fixtures disable the default server in the workspace. Verify the
