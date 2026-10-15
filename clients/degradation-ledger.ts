@@ -282,6 +282,14 @@ export type DegradationKind =
 	/** #2007: `git status` could not answer for that same decision. */
 	| "fact-store-pinned-over-budget"
 	/**
+	 * #4454: the fish runner could not find `fish` next to `fish_indent`, so it
+	 * checked formatting but not syntax (`fish_indent --check` reports no syntax
+	 * error). Subject is the tool; recorded once per session via
+	 * `recordDegradationOnce`, since the binary's absence does not change per
+	 * file.
+	 */
+	| "fish-syntax-check-unavailable"
+	/**
 	 * The blind review-graph read (`getCachedReviewGraph`) either DROPPED a
 	 * persisted snapshot because its git stamp names a different worktree, or
 	 * SERVED one whose stamp names a different HEAD (#1961). Subject is

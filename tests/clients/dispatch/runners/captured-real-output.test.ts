@@ -184,6 +184,58 @@ const REPLAY_EXPECTATIONS: Record<string, ReplayExpectation> = {
 			},
 		],
 	},
+	// fish_indent --check never reports a syntax error, so the runner also asks
+	// `fish --no-execute`; its real bytes for the three defects (and the fish-lsp
+	// smoke fixture) must reach the agent as a blocking finding on the real file
+	// and line (#4454). Each file is already formatted: only fish -n sees it.
+	"fish-indent/syntax-missing-end": {
+		status: "failed",
+		semantic: "blocking",
+		findings: [
+			{
+				rule: "fish-syntax-error",
+				semantic: "blocking",
+				file: "missing-end.fish",
+				line: 1,
+			},
+		],
+	},
+	"fish-indent/syntax-unterminated-quote": {
+		status: "failed",
+		semantic: "blocking",
+		findings: [
+			{
+				rule: "fish-syntax-error",
+				semantic: "blocking",
+				file: "unterminated-quote.fish",
+				line: 1,
+			},
+		],
+	},
+	"fish-indent/syntax-stray-end": {
+		status: "failed",
+		semantic: "blocking",
+		findings: [
+			{
+				rule: "fish-syntax-error",
+				semantic: "blocking",
+				file: "stray-end.fish",
+				line: 2,
+			},
+		],
+	},
+	"fish-indent/syntax-smoke-bad": {
+		status: "failed",
+		semantic: "blocking",
+		findings: [
+			{
+				rule: "fish-syntax-error",
+				semantic: "blocking",
+				file: "bad.fish",
+				line: 1,
+			},
+		],
+	},
 	"golangci-lint/real": {
 		status: "succeeded",
 		semantic: "warning",

@@ -185,6 +185,43 @@ export const CAPTURES = [
 		file: "bad.fish",
 		argv: ["--check", "bad.fish"],
 	},
+	// #4454 — fish_indent --check never reports a syntax error (a missing `end`
+	// or an unterminated quote exits 0 with no output), so the runner also asks
+	// `fish --no-execute`, which parses without running anything. These four
+	// capture its real bytes for the three defects and for the fish-lsp smoke
+	// fixture. The file is already formatted in each, so fish_indent is silent.
+	{
+		runner: "fish-indent",
+		case: "syntax-missing-end",
+		tool: "fish",
+		workspace: smoke("fish-syntax"),
+		file: "missing-end.fish",
+		argv: ["--no-config", "--no-execute", "missing-end.fish"],
+	},
+	{
+		runner: "fish-indent",
+		case: "syntax-unterminated-quote",
+		tool: "fish",
+		workspace: smoke("fish-syntax"),
+		file: "unterminated-quote.fish",
+		argv: ["--no-config", "--no-execute", "unterminated-quote.fish"],
+	},
+	{
+		runner: "fish-indent",
+		case: "syntax-stray-end",
+		tool: "fish",
+		workspace: smoke("fish-syntax"),
+		file: "stray-end.fish",
+		argv: ["--no-config", "--no-execute", "stray-end.fish"],
+	},
+	{
+		runner: "fish-indent",
+		case: "syntax-smoke-bad",
+		tool: "fish",
+		workspace: smoke("fish"),
+		file: "bad.fish",
+		argv: ["--no-config", "--no-execute", "bad.fish"],
+	},
 	{
 		// #4455 — golangci-lint v2 removed `--out-format`; JSON now comes from
 		// `--output.json.path`, and the run stats it prints to stdout would
