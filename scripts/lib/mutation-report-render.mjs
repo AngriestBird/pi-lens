@@ -11,6 +11,8 @@
  * callers that touch the filesystem.
  */
 
+import { escapeMarkdownCell } from "./markdown-cell.mjs";
+
 function shortSha(sha) {
 	return typeof sha === "string" ? sha.slice(0, 12) : "unknown";
 }
@@ -291,8 +293,8 @@ export function renderMutationMarkdown(report, { maxSurvivors } = {}) {
 			const location = mutant.tsLocation
 				? `${mutant.tsLocation.fileName}:${mutant.tsLocation.line}`
 				: `${mutant.fileName}:${mutant.location?.start?.line ?? "?"}`;
-			const original = cell(mutant.original ?? "").replaceAll("|", "\\|");
-			const replacement = cell(mutant.replacement ?? "").replaceAll("|", "\\|");
+			const original = escapeMarkdownCell(cell(mutant.original ?? ""));
+			const replacement = escapeMarkdownCell(cell(mutant.replacement ?? ""));
 			lines.push(
 				`| \`${location}\` | ${mutant.mutatorName} | \`${original}\` → \`${replacement}\` |`,
 			);
