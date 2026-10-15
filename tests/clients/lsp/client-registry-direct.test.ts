@@ -2322,6 +2322,9 @@ describe("ClientRegistry shutdown (#4449)", () => {
 		expect(f.registry.inFlight.size).toBe(1);
 
 		const reset = f.registry.shutdownClients({ fast: false });
+		// The pending set is taken and emptied before the wait, so a spawn that
+		// starts during it cannot be shut down twice or be re-awaited.
+		expect(f.registry.inFlight.size).toBe(0);
 		release({
 			process: {
 				process: { killed: false, kill: vi.fn() },
