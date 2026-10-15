@@ -265,3 +265,31 @@ it("blocks the review's array-callback-return probe in the LSP substitute role (
 		expect.objectContaining({ rule: CALLBACK_RULE, line: 2 }),
 	]);
 }, 30_000);
+
+// Recurrence: the span's end line of a match inside an HTML `<script>` body is
+// body-relative and must be mapped onto the file (#2347); an unmapped end
+// would drop a blocker the edit caused inside the script.
+it("blocks a multi-line match inside an HTML script body whose span contains the edit (#4481 r2)", async () => {
+	const { filePath } = env.addFile(
+		"span-script.html",
+		[
+			"<html>",
+			"<script>",
+			"setTimeout(",
+			'\t"tick()",',
+			"\t10,",
+			");",
+			"</script>",
+			"</html>",
+			"",
+		].join("\n"),
+	);
+
+	const result = await session(PER_EDIT_FLAGS)(filePath, [
+		{ start: 4, end: 4 },
+	]);
+
+	expect(napiFindings(result.blockers, "no-implied-eval-js")).toEqual([
+		expect.objectContaining({ rule: "no-implied-eval-js", line: 3 }),
+	]);
+}, 30_000);
