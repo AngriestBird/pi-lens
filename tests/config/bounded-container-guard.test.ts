@@ -36,6 +36,9 @@ const FINITE_REASONS: Readonly<Record<string, string>> = {
 	// bounded process-local service population and entries die with the service.
 	"clients/lsp/capabilities.ts#1e3511a9":
 		"adapter cache is keyed by live LSPService objects and reclaimed with them; it cannot retain path or user-key growth",
+	// #4496: one literal requirement per loaded ast-grep rule object.
+	"clients/dispatch/runners/ast-grep-literal-anchors.ts#satisfied:c607e2fd":
+		"WeakMap keyed by the YamlRule objects the rule loaders cache; entries are reclaimed with those objects, so it cannot grow with files, paths or sessions",
 	// #3968: the runner-id identity leaf — written once per runner definition
 	// that enters a `RunnerRegistry` through `register` (the dispatch
 	// registry's own population, finite and ~50 today), never per file, per

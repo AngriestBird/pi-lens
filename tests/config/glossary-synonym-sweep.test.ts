@@ -563,6 +563,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/rule-policy.ts": 1,
 		"clients/dispatch/rules/high-fan-out.ts": 1,
 		"clients/dispatch/rules/missing-error-propagation.ts": 3,
+		// New (#4496): drops `true` parts from a literal requirement, an
+		// `Array.prototype.filter` call, not a delivery gate.
+		"clients/dispatch/runners/ast-grep-literal-anchors.ts": 1,
 		"clients/dispatch/runners/ast-grep-napi.ts": 2,
 		"clients/dispatch/runners/cue-vet.ts": 2,
 		"clients/dispatch/runners/go-vet.ts": 2,

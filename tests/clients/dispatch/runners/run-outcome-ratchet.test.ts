@@ -25,6 +25,8 @@ const NOT_A_RUNNER = new Set(["index.ts", "utils.ts"]);
  */
 const NOT_YET_ON_PRIMITIVE: Record<string, string> = {
 	// No child process at all — there is no spawn outcome to classify.
+	"ast-grep-literal-anchors.ts":
+		"in-process rule-text prefilter, no child process",
 	"ast-grep-napi.ts": "in-process NAPI analysis, no child process",
 	"fact-rules.ts": "in-process FactRule pipeline, no child process",
 	"lsp.ts": "language-server requests, no child process of its own",
