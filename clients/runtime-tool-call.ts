@@ -1004,7 +1004,7 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 				)
 			: undefined;
 	// An unreadable file counts one line, as countFileLines always answered.
-	let readTotalLines = readScan?.totalLines ?? 1;
+	const readTotalLines = readScan?.totalLines ?? 1;
 	let effectiveReadLimit =
 		readInput && filePath
 			? (requestedReadLimit ??
@@ -1146,13 +1146,13 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 		}
 		// The expansion awaited tree-sitter, so the record's evidence is read
 		// again now, over the range it settled on: the capture is taken after
-		// the await, next to the FileTime stamp, as it always was.
+		// the await, next to the FileTime stamp, as it always was. Only the
+		// hashes are needed, so the pass stops after the range.
 		readScan = scanFileLines(
 			filePath,
 			[{ offset: effectiveReadOffset, limit: effectiveReadLimit ?? 1 }],
-			{ count: true },
+			{ count: false },
 		);
-		readTotalLines = readScan?.totalLines ?? 1;
 	}
 
 	// Register the host-resolved path at tool_call. This path is load-bearing for

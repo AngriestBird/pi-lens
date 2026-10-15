@@ -33,6 +33,7 @@ import {
 	invalidateProjectIgnoreMatcherForPath,
 	isPiLensInternalPath,
 	isPathIgnoredByProject,
+	isRecordableProjectPath,
 } from "./file-utils.js";
 import { invalidateFormatterCacheForPath } from "./formatters.js";
 import { judgeConfirmedDelete } from "./confirmed-delete.js";
@@ -708,7 +709,7 @@ function lastByteIsNewline(filePath: string): boolean {
 	const fd = nodeFs.openSync(filePath, "r");
 	try {
 		const size = nodeFs.fstatSync(fd).size;
-		if (size === 0) return false;
+		// An empty file reads at position -1, the current one, and gets 0 bytes.
 		const last = Buffer.alloc(1);
 		return nodeFs.readSync(fd, last, 0, 1, size - 1) === 1 && last[0] === 0x0a;
 	} finally {
@@ -1666,11 +1667,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		// excluded here, attributed nowhere.
 		let recognizedWritten =
 			event.isError !== true
-				? recognized.filter(
-						(wp) =>
-							!isExternalOrVendorFile(wp, workspaceRoot) &&
-							!isPathIgnoredByProject(wp, workspaceRoot, false),
-					)
+				? recognized.filter((wp) => isRecordableProjectPath(wp, workspaceRoot))
 				: [];
 		// #2000 phase 2: when the extractor recognizes NOTHING, the command is
 		// opaque-candidate — recover its actual changed set by diffing the pre
@@ -1715,10 +1712,8 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 					},
 				);
 				if (recovery.verdict === "recovered") {
-					opaquePaths = recovery.paths.filter(
-						(p) =>
-							!isExternalOrVendorFile(p, scanRoot) &&
-							!isPathIgnoredByProject(p, scanRoot, false),
+					opaquePaths = recovery.paths.filter((p) =>
+						isRecordableProjectPath(p, scanRoot),
 					);
 					observedChangedKeys = new Set(opaquePaths);
 				} else if (recovery.verdict === "unknown") {
@@ -1912,9 +1907,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				workspaceRoot,
 				clipped
 					? undefined
-					: (candidate) =>
-							!isExternalOrVendorFile(candidate, workspaceRoot) &&
-							!isPathIgnoredByProject(candidate, workspaceRoot, false),
+					: (candidate) => isRecordableProjectPath(candidate, workspaceRoot),
 			);
 			let spans = parsedSpans;
 			if (clipped) {
@@ -1963,9 +1956,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				}
 			}
 			for (const span of spans) {
-				if (isExternalOrVendorFile(span.filePath, workspaceRoot)) continue;
-				if (isPathIgnoredByProject(span.filePath, workspaceRoot, false))
-					continue;
+				if (!isRecordableProjectPath(span.filePath, workspaceRoot)) continue;
 				deps.readGuard?.recordRead({
 					filePath: span.filePath,
 					requestedOffset: span.offset,
@@ -2086,18 +2077,12 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 					| undefined
 			)?.truncation;
 			// #1649: one bounded pass gives the count and the delivered range's
-			// line hashes, read at the same moment the capture always was.
+			// line hashes, read at the same moment the capture always was. The
+			// delivered limit waits on the count, so the range is open-ended: the
+			// scan keeps at most READ_HASH_MAX_LINES lines from the offset.
 			const deliveredScan = scanFileLines(
 				deliveredFilePath,
-				[
-					{
-						offset: requestedOffset,
-						limit:
-							truncation?.outputLines ??
-							requestedLimit ??
-							Number.POSITIVE_INFINITY,
-					},
-				],
+				[{ offset: requestedOffset, limit: Number.POSITIVE_INFINITY }],
 				{ count: true },
 			);
 			// An unreadable file counts one line, as countFileLines always answered.
@@ -2322,8 +2307,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			getStoredLineHashes: (candidate) =>
 				storedLineHashesFor(deps.readGuard, candidate),
 			isRecordable: (candidate) =>
-				!isExternalOrVendorFile(candidate, workspaceRoot) &&
-				!isPathIgnoredByProject(candidate, workspaceRoot, false),
+				isRecordableProjectPath(candidate, workspaceRoot),
 			dbg,
 		});
 		observedReplayed = observed.replayed;

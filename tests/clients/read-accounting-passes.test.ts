@@ -26,6 +26,9 @@ const io = vi.hoisted(() => ({
 	target: "",
 	passes: 0,
 	bytesRead: 0,
+	reads: 0,
+	readLimit: 500,
+	stream: false,
 	fds: new Set<number>(),
 	reportSize: undefined as number | undefined,
 }));
@@ -58,9 +61,26 @@ vi.mock("node:fs", async (importOriginal) => {
 			size: io.reportSize,
 		});
 	}) as typeof actual.fstatSync;
+	// A scan that stops reading on nothing would loop forever on a file that
+	// ends before its reported size; the cap turns that hang into a red.
+	// `stream` stands in for a size-0 file (procfs) that never ends: every read
+	// fills the buffer with 1 KiB lines.
 	const readSync = ((...args: Parameters<typeof actual.readSync>) => {
+		const tracked = io.fds.has(args[0] as number);
+		if (tracked && (io.reads += 1) > io.readLimit)
+			throw new Error("runaway scan");
+		if (tracked && io.stream) {
+			// The scan calls readSync(fd, buffer, offset, length, position).
+			const [, target, at, size] = args as unknown[];
+			const buffer = target as Buffer;
+			const offset = Number(at);
+			const length = Number(size);
+			buffer.fill("a".repeat(1023) + "\n", offset, offset + length);
+			io.bytesRead += length;
+			return length;
+		}
 		const n = actual.readSync(...args);
-		if (io.fds.has(args[0] as number)) io.bytesRead += n;
+		if (tracked) io.bytesRead += n;
 		return n;
 	}) as typeof actual.readSync;
 	return { ...actual, readFileSync, openSync, closeSync, fstatSync, readSync };
@@ -88,6 +108,9 @@ beforeEach(() => {
 	io.target = "";
 	io.passes = 0;
 	io.bytesRead = 0;
+	io.reads = 0;
+	io.readLimit = 500;
+	io.stream = false;
 	io.reportSize = undefined;
 	root = path.join(env.tmpDir, `case-${caseNo++}`);
 	fs.mkdirSync(path.join(root, "src"), { recursive: true });
@@ -367,5 +390,86 @@ describe("read accounting reads a file once per hook (#1649)", () => {
 		expect(gate?.latestReasons).toEqual([
 			expect.objectContaining({ subject: file }),
 		]);
+	});
+
+	// Recurrence prevented: a search or recordRead capture that reads a large
+	// file to its end for a hit near the top (the count:false early stop).
+	it("stops reading a file after the window of its last grep hit", async () => {
+		const file = path.join(root, "src", "big.ts");
+		fs.writeFileSync(file, source(30000));
+		const runtime = runtimeFor();
+		await bashResult(
+			runtime,
+			file,
+			"grep -n const src/big.ts",
+			"3:const v2 = 2;",
+		);
+		expect(fs.statSync(file).size).toBeGreaterThan(8 * 64 * 1024);
+		expect(io.bytesRead).toBeLessThanOrEqual(64 * 1024);
+	});
+
+	// Recurrence prevented: a procfs-style file whose fstat size is 0 counted
+	// as one empty line, where the released read took its whole content.
+	it("reads a file whose reported size is 0 to its end", async () => {
+		const file = path.join(root, "src", "zero.ts");
+		fs.writeFileSync(file, source(200));
+		const runtime = runtimeFor();
+		io.reportSize = 0;
+		await nativeRead(runtime, file, { path: file, offset: 1, limit: 20 });
+		const record = runtime.readGuard.getReadHistory(file).at(-1);
+		expect(Object.keys(record?.lineHashes ?? {})).toHaveLength(20);
+	});
+
+	// Recurrence prevented: a sysfs-style file (size 4096, 23 bytes of
+	// content), or one truncated after the fstat, that the scan never finishes.
+	it("stops at the end of a file shorter than its reported size", async () => {
+		const file = path.join(root, "src", "short.ts");
+		fs.writeFileSync(file, source(10));
+		const runtime = runtimeFor();
+		io.reportSize = fs.statSync(file).size + 4096;
+		await nativeRead(runtime, file, { path: file, offset: 1, limit: 5 });
+		const record = runtime.readGuard.getReadHistory(file).at(-1);
+		expect(Object.keys(record?.lineHashes ?? {})).toHaveLength(5);
+	});
+
+	// Recurrence prevented: a size-0 stream past V8's string limit hashed from
+	// its first half gigabyte, where the released read threw and kept nothing.
+	it("gives up on a size-0 file once it reads past the byte gate", async () => {
+		const file = path.join(root, "src", "stream.log");
+		fs.writeFileSync(file, source(20));
+		const runtime = runtimeFor();
+		io.reportSize = 0;
+		io.stream = true;
+		io.readLimit = 20000;
+		io.target = file;
+		await toolCall(runtime, {
+			toolName: "read",
+			toolCallId: "stream-1",
+			input: { path: file, offset: 1, limit: 20 },
+		});
+		expect(io.bytesRead).toBeGreaterThan(bufferConstants.MAX_STRING_LENGTH);
+		const record = runtime.readGuard.getReadHistory(file).at(-1);
+		expect(record?.lineHashes).toBeUndefined();
+		const gate = getDegradationSummary().find(
+			(group) => group.kind === "read-guard-scan-byte-gate",
+		);
+		expect(gate?.latestReasons).toContainEqual(
+			expect.objectContaining({ subject: file }),
+		);
+	});
+
+	// Recurrence prevented: an external or vendor native read that pays a scan
+	// whose every consumer is skipped for such a file.
+	it("does not read a vendor file a native read names at tool_call", async () => {
+		const file = path.join(root, "node_modules", "pkg", "index.js");
+		fs.writeFileSync(file, source(200));
+		const runtime = runtimeFor();
+		io.target = file;
+		await toolCall(runtime, {
+			toolName: "read",
+			toolCallId: "vendor-1",
+			input: { path: file },
+		});
+		expect(io.passes).toBe(0);
 	});
 });
