@@ -2227,6 +2227,8 @@ describe("index.ts integration", () => {
 					effectiveOffset: 1,
 					effectiveLimit: 6,
 				}),
+				// #1649: the tool_call's one pass is the capture; the guard takes none.
+				{ captureLineHashes: false },
 			);
 		},
 		INTEGRATION_TIMEOUT_MS,

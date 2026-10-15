@@ -1145,6 +1145,13 @@ export type DegradationKind =
 	 */
 	| "read-guard-record-cap-trim"
 	/**
+	 * #1649: a file the read-accounting scan (`scanFileLines`) would not read,
+	 * because its size is over the byte gate (V8's string limit, past which
+	 * the released whole-file read threw). Its reads count one line and keep no
+	 * line hashes, as they did before. Subject is the file; once per file.
+	 */
+	| "read-guard-scan-byte-gate"
+	/**
 	 * #3521: a deferred writer (the agent_settled sweep or the format, autofix
 	 * or LSP quick-fix drain) captured the read guard's branch epoch before a
 	 * `/tree`, and its `recordWritten` landed after it. The write is not
