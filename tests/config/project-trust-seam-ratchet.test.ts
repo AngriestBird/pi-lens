@@ -237,8 +237,6 @@ function flowOf(node: SgNode): Flow {
 		const kind = String(up.kind());
 		if (kind === "import_statement" || kind === "export_statement")
 			return { kind: "import" };
-		if (kind === "call_expression" && sameNode(up.field("arguments"), current))
-			return { kind: "argument", call: up }; // a tagged template
 		if (kind === "arguments") {
 			const call = up.parent();
 			if (!call) return { kind: "unclassified" };
@@ -523,7 +521,7 @@ describe("project-trust real seam ratchet (#4281)", () => {
 			'import { expect } from "vitest";',
 			'import * as path from "node:path";',
 			'const ids = ["a", { b: 1 }];',
-			"expect(S).toBe(other);",
+			"expect(value).toBe(S);",
 			"path.join(dir, S);",
 			"ids.includes(S);",
 			'path.join("a", "b");',
