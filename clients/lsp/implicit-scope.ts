@@ -11,11 +11,14 @@
  * - A Go file shares its package with every Go file in its directory, and
  *   uses their declarations with no import.
  *
- * The workspace-diagnostics cache reads these as members of an entry's
- * dependency scope (`workspace-diagnostics-cache.ts`), and the created-module
- * producer announces a Go file's package files to its servers
- * (`created-import-targets.ts`). Other languages' implicit scopes are not
- * modelled; the cache treats their finding entries' scope as unknown.
+ * {@link implicitScopeOf} is the one membership test. The workspace-diagnostics
+ * cache reads it for an entry's dependency scope (`workspace-diagnostics-cache.ts`),
+ * the inline-blocker sweep for a blocker's (`blocker-freshness.ts`), and the
+ * cascade in the inverse direction, for the files a change reaches
+ * (`dispatch/integration.ts`, #4438). The created-module producer announces a
+ * Go file's package files to its servers (`created-import-targets.ts`). Other
+ * languages' implicit scopes are not modelled; the cache treats their finding
+ * entries' scope as unknown.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -31,7 +34,7 @@ export function isGoSourceFile(filePath: string): boolean {
 }
 
 /** Whether `filePath` is a JS or TS file, which sees the TS/JS global scope. */
-export function seesJsTsGlobalScope(filePath: string): boolean {
+function seesJsTsGlobalScope(filePath: string): boolean {
 	return isFileKind(filePath, "jsts");
 }
 
@@ -39,7 +42,7 @@ export function seesJsTsGlobalScope(filePath: string): boolean {
  * Whether `a` and `b`, both spelled by `normalizeMapKey` (forward slashes on
  * every platform), are Go files of one package directory.
  */
-export function inOneGoPackage(a: string, b: string): boolean {
+function inOneGoPackage(a: string, b: string): boolean {
 	return (
 		isGoSourceFile(a) &&
 		isGoSourceFile(b) &&
@@ -63,6 +66,50 @@ export function goPackageFiles(dir: string): string[] | undefined {
 			? [path.join(dir, entry.name)]
 			: [],
 	);
+}
+
+/**
+ * #4438: `filePath`'s implicit scope as a membership test, or `undefined` when
+ * it is not modelled (a file neither Go nor JS/TS). The scope of a Go file is
+ * the Go files of its directory; of a JS/TS file, every file that feeds the
+ * TS/JS global scope (`feeds`, {@link feedsJsTsGlobalScope} unless a caller
+ * memoizes it). A file is never in its own scope. `filePath` and every member
+ * asked about are `normalizeMapKey` spellings.
+ */
+export function implicitScopeOf(
+	filePath: string,
+	feeds: (other: string) => boolean = feedsJsTsGlobalScope,
+): ((other: string) => boolean) | undefined {
+	if (isGoSourceFile(filePath)) {
+		return (other) => other !== filePath && inOneGoPackage(filePath, other);
+	}
+	if (seesJsTsGlobalScope(filePath)) {
+		return (other) => other !== filePath && feeds(other);
+	}
+	return undefined;
+}
+
+/**
+ * #4346, moved here by #4438: when the Go package in `dir` last changed: the
+ * directory's own mtime (a file added, removed or renamed) or the newest Go
+ * file's, leaving `exclude` (a path as {@link goPackageFiles} spells it) out.
+ * `undefined` when the directory or a file cannot be stat'ed, which callers
+ * read as changed.
+ */
+export function goPackageChangedAt(
+	dir: string,
+	exclude?: string,
+): number | undefined {
+	try {
+		let changedAt = fs.statSync(dir).mtimeMs;
+		for (const peer of goPackageFiles(dir) ?? []) {
+			if (peer === exclude) continue;
+			changedAt = Math.max(changedAt, fs.statSync(peer).mtimeMs);
+		}
+		return changedAt;
+	} catch {
+		return undefined;
+	}
 }
 
 /** What a parse of `filePath` must look for, by extension. */
