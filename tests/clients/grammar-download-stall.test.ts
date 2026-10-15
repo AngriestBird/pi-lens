@@ -360,6 +360,9 @@ describe("grammar download stall bound (#4342)", () => {
 			feed?.close();
 
 			await pending;
+			// Recurrence: a stall timer left armed after success keeps the install
+			// process alive for the full bound (15 s) after the last byte.
+			expect(vi.getTimerCount()).toBe(0);
 			expect(fs.readFileSync(path.join(env.tmpDir, GRAMMAR))).toEqual(
 				Buffer.from(WASM_HEADER),
 			);
