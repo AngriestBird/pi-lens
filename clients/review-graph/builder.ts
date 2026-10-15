@@ -6063,6 +6063,9 @@ async function _doBuildGraph(
 				filesSinceCheckpoint = 0;
 				lastCheckpointMs = Date.now();
 			}
+			// Complete extraction and checkpoint bookkeeping before letting host
+			// requests run. Awaiting ready extraction work alone cannot do this.
+			await yieldToLoop();
 		}
 	};
 	const extractAndDrainIr = async (): Promise<void> => {

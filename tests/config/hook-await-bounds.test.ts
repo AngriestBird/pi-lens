@@ -2464,7 +2464,10 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// #4346: 41 -> 42. `updateGraphFiles` re-extracts each importer a newly
 	// created file resolves, the same per-file extraction await its update
 	// loop already pins.
-	"clients/review-graph/builder.ts": 42,
+	// #1740: 42 -> 43. Full extraction yields with the existing setImmediate
+	// helper after each completed file. This is a host-scheduling boundary,
+	// not another external operation needing a timeout or abort dependency.
+	"clients/review-graph/builder.ts": 43,
 	"clients/safe-spawn.ts": 9,
 	// #3612: `adoptHandoff` awaits the own and parent sidecar loads and each
 	// store's restore: the session_start sidecar I/O that read-guard-branch.ts
