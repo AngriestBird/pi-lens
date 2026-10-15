@@ -104,6 +104,7 @@ function literalValue(node: SgNode): string | undefined {
  */
 /** Where a reference to an imported value is not a runtime use of it. */
 const NON_USE_CONTEXTS: ReadonlySet<string> = new Set([
+	"export_specifier",
 	"import_statement",
 	"type_query",
 ]);
@@ -396,6 +397,11 @@ describe("run-outcome primitive ratchet", () => {
 		// leaves the runner off the primitive; a renamed one used is on it.
 		expect(
 			usesPrimitive('import { parseToolRun } from "./utils/tool-failure.js";'),
+		).toBe(false);
+		expect(
+			usesPrimitive(
+				'import { parseToolRun } from "./utils/tool-failure.js";\nexport { parseToolRun };',
+			),
 		).toBe(false);
 		expect(
 			usesPrimitive(

@@ -84,310 +84,36 @@ export function mockSpecifier(arg: SgNode | undefined): string | undefined {
 const VITEST_UTILS: ReadonlySet<string> = new Set(["vi", "vitest"]);
 
 /**
- * Vitest's module APIs. A call to one of these names whose object the
- * resolver cannot bind is `unresolved`, never `other`: it may mock a module.
- */
-const VITEST_MODULE_APIS: ReadonlySet<string> = new Set([
-	"doMock",
-	"doUnmock",
-	"hoisted",
-	"importActual",
-	"importMock",
-	"mock",
-	"unmock",
-]);
-
-/**
- * What a callee resolves to. `mock` names one of the requested methods on the
- * utils object, called directly or through `.call`/`.apply` (the specifier is
- * then the second argument, or the array's first element). `other` is a
- * callee the resolver bound to something that is not one. `unresolved` is a
- * module-API name on an object it could not bind, or an unreadable key on the
- * utils object.
- */
-export type ViCallee =
-	| { kind: "mock"; via: "direct" | "call" | "apply" }
-	| { kind: "other" }
-	| { kind: "unresolved" };
-
-const OPAQUE_VALUE_KINDS: ReadonlySet<string> = new Set([
-	"assignment_expression",
-	"await_expression",
-	"binary_expression",
-	"call_expression",
-	"sequence_expression",
-	"ternary_expression",
-	"this",
-]);
-
-/**
- * `unknownMethod` is a named member of an object the resolver cannot bind
- * (`getVitest().doMock`, `const { doMock: dm } = getVitest()`): unknown, but
- * its name still says whether it may be a module API.
- */
-type Resolved =
-	| "utils"
-	| "namespace"
-	| "other"
-	| "unknown"
-	| { method: string }
-	| { unknownMethod: string };
-
-type Binding =
-	| "utils"
-	| "namespace"
-	| "other"
-	| "unknown"
-	| { value: SgNode }
-	| { method: string; of: SgNode };
-
-function isUnknown(resolved: Resolved): boolean {
-	return (
-		resolved === "unknown" ||
-		(typeof resolved === "object" && "unknownMethod" in resolved)
-	);
-}
-
-/** The literal member name of a member or subscript callee, or undefined. */
-function memberName(node: SgNode): string | undefined {
-	if (node.kind() === "member_expression") {
-		const property = node.field("property");
-		return property?.kind() === "property_identifier"
-			? property.text()
-			: undefined;
-	}
-	return mockSpecifier(node.field("index") ?? undefined);
-}
-
-function isMember(node: SgNode): boolean {
-	return (
-		node.kind() === "member_expression" ||
-		node.kind() === "subscript_expression"
-	);
-}
-
-/** Every file-level binding the resolver reads, by local name. */
-function collectBindings(root: SgNode): Map<string, Binding[]> {
-	const bindings = new Map<string, Binding[]>();
-	const add = (name: string | undefined, binding: Binding) => {
-		if (!name) return;
-		bindings.set(name, [...(bindings.get(name) ?? []), binding]);
-	};
-	for (const statement of root.findAll({
-		rule: { kind: "import_statement" },
-	})) {
-		const fromVitest =
-			mockSpecifier(statement.field("source") ?? undefined) === "vitest";
-		for (const specifier of statement.findAll({
-			rule: { kind: "import_specifier" },
-		})) {
-			const imported = specifier.field("name")?.text();
-			const local = specifier.field("alias")?.text() ?? imported;
-			add(
-				local,
-				fromVitest && imported !== undefined && VITEST_UTILS.has(imported)
-					? "utils"
-					: "other",
-			);
-		}
-		for (const namespace of statement.findAll({
-			rule: { kind: "namespace_import" },
-		})) {
-			add(
-				namespace.namedChildren().at(-1)?.text(),
-				fromVitest ? "namespace" : "other",
-			);
-		}
-		const clause = statement
-			.children()
-			.find((child) => child.kind() === "import_clause");
-		const defaultName = clause
-			?.children()
-			.find((child) => child.kind() === "identifier");
-		add(defaultName?.text(), "other");
-	}
-	for (const declarator of root.findAll({
-		rule: { kind: "variable_declarator" },
-	})) {
-		const name = declarator.field("name");
-		const value = declarator.field("value");
-		if (!name) continue;
-		if (name.kind() === "identifier") {
-			// `let v;` is assigned later, so its value is unknown.
-			add(name.text(), value ? { value } : "unknown");
-			continue;
-		}
-		for (const shorthand of name.findAll({
-			rule: { kind: "shorthand_property_identifier_pattern" },
-		})) {
-			add(
-				shorthand.text(),
-				value ? { method: shorthand.text(), of: value } : "other",
-			);
-		}
-		for (const pair of name.findAll({ rule: { kind: "pair_pattern" } })) {
-			const key = pair.field("key");
-			const local = pair.field("value");
-			const method =
-				key?.kind() === "property_identifier"
-					? key.text()
-					: mockSpecifier(key ?? undefined);
-			if (local?.kind() !== "identifier") continue;
-			add(local.text(), value && method ? { method, of: value } : "other");
-		}
-	}
-	for (const node of root.findAll({
-		rule: {
-			any: [
-				{ kind: "function_declaration" },
-				{ kind: "class_declaration" },
-				{ kind: "required_parameter" },
-				{ kind: "optional_parameter" },
-			],
-		},
-	})) {
-		const named = node.field("name") ?? node.field("pattern");
-		if (named?.kind() === "identifier") add(named.text(), "other");
-	}
-	return bindings;
-}
-
-/**
- * A per-file resolver from a callee to vitest's utils object (#4429 review
- * F2). It reads the AST, so a comment or a string is never a callee. It binds
- * `vi`/`vitest` (global or imported, any alias), a `const` alias of either, a
- * namespace import's `vi` member, a destructured method (`const { doMock } =
- * vi`, renamed or not), and sees through parentheses, `as`, `satisfies`, `!`
- * and `.call`/`.apply`. Bindings are file-level and read once, on the first
- * callee that needs them; a name bound two ways resolves as unknown.
- */
-export interface ViResolver {
-	classify(
-		callee: SgNode | null | undefined,
-		names: readonly string[],
-	): ViCallee;
-	/** Read the file's bindings now, so a bare renamed method resolves too. */
-	prime(): void;
-}
-
-export function createViResolver(root: SgNode): ViResolver {
-	let bindings: Map<string, Binding[]> | undefined;
-	const lookup = () => (bindings ??= collectBindings(root));
-	const resolveName = (name: string, depth: number): Resolved => {
-		if (VITEST_UTILS.has(name)) return "utils";
-		const found = lookup().get(name);
-		if (!found) return "unknown";
-		const results = found.map((binding) => resolveBinding(binding, depth));
-		const first = JSON.stringify(results[0]);
-		return results.every((result) => JSON.stringify(result) === first)
-			? results[0]
-			: "unknown";
-	};
-	const resolveBinding = (binding: Binding, depth: number): Resolved => {
-		if (typeof binding === "string") return binding;
-		if ("value" in binding) return resolveNode(binding.value, depth + 1);
-		const owner = resolveNode(binding.of, depth + 1);
-		if (owner === "utils") return { method: binding.method };
-		return isUnknown(owner) ? { unknownMethod: binding.method } : "other";
-	};
-	const resolveNode = (raw: SgNode, depth: number): Resolved => {
-		if (depth > 8) return "unknown";
-		const node = unwrapExpression(raw);
-		if (node.kind() === "identifier") return resolveName(node.text(), depth);
-		if (isMember(node)) {
-			const owner = resolveNode(node.field("object") as SgNode, depth + 1);
-			const name = memberName(node);
-			if (owner === "namespace" && name !== undefined && VITEST_UTILS.has(name))
-				return "utils";
-			if (owner === "utils" && name !== undefined) return { method: name };
-			if (!isUnknown(owner)) return "other";
-			return name === undefined ? "unknown" : { unknownMethod: name };
-		}
-		// A value whose result the resolver cannot see (a call, an await, a
-		// conditional or logical expression) may be the utils object; a
-		// literal-shaped value (object, array, function, class, primitive,
-		// `new`) is not.
-		return OPAQUE_VALUE_KINDS.has(String(node.kind())) ? "unknown" : "other";
-	};
-	const classify = (
-		callee: SgNode | null | undefined,
-		names: readonly string[],
-	): ViCallee => {
-		if (!callee) return { kind: "other" };
-		const node = unwrapExpression(callee);
-		if (node.kind() === "identifier") {
-			const name = node.text();
-			// A bare call can only be a destructured method; read bindings only
-			// for a module-API name or once a caller has needed them anyway.
-			if (!VITEST_MODULE_APIS.has(name) && bindings === undefined)
-				return { kind: "other" };
-			const resolved = resolveName(name, 0);
-			if (typeof resolved === "object" && "method" in resolved)
-				return names.includes(resolved.method)
-					? { kind: "mock", via: "direct" }
-					: { kind: "other" };
-			// Unknown, and named like a module API locally or at its source.
-			const apiNamed =
-				VITEST_MODULE_APIS.has(name) ||
-				(typeof resolved === "object" &&
-					VITEST_MODULE_APIS.has(resolved.unknownMethod));
-			return isUnknown(resolved) && apiNamed
-				? { kind: "unresolved" }
-				: { kind: "other" };
-		}
-		if (!isMember(node)) return { kind: "other" };
-		const name = memberName(node);
-		const object = node.field("object") as SgNode;
-		if (name === "call" || name === "apply") {
-			const inner = classify(object, names);
-			if (inner.kind === "mock" && inner.via === "direct")
-				return { kind: "mock", via: name };
-			return inner.kind === "unresolved" ? inner : { kind: "other" };
-		}
-		if (name !== undefined && !VITEST_MODULE_APIS.has(name))
-			return { kind: "other" };
-		const owner = resolveNode(object, 0);
-		if (name === undefined)
-			return owner === "utils" ? { kind: "unresolved" } : { kind: "other" };
-		if (owner === "utils")
-			return names.includes(name)
-				? { kind: "mock", via: "direct" }
-				: { kind: "other" };
-		return isUnknown(owner) ? { kind: "unresolved" } : { kind: "other" };
-	};
-	return {
-		classify,
-		prime() {
-			lookup();
-		},
-	};
-}
-
-function rootOf(node: SgNode): SgNode {
-	let current = node;
-	for (let up = node.parent(); up; up = up.parent()) current = up;
-	return current;
-}
-
-/**
- * Semantic mock-call check: the callee resolves to one of `names` on vitest's
- * utils object, called directly ({@link createViResolver}): dot, bracket,
- * spaced, `vitest.`, aliased, parenthesised or cast. Checking
+ * Semantic mock-call check: the callee is one of `names` on vitest's utils
+ * object written directly, `vi` or `vitest` (through parentheses, `as`,
+ * `satisfies` or `!`), with a dot, spaced or literal bracket key
+ * (`vi["mock"]`, a `subscript_expression`). Checking
  * `callee.text() === "vi.mock"` enumerates one surface spelling and misses
- * the others (shape 34). `names` defaults to `["mock"]`, so the whole-module
- * export gate keeps its existing population; a caller that also owns the
- * non-hoisted `vi.doMock` passes both names. A bare call through a renamed
- * destructure (`const { doMock: dm } = vi; dm(…)`) needs the file's
- * bindings, which this per-callee check reads only for a module-API name:
- * a per-file {@link createViResolver} sees it.
+ * the others (shape 34). It follows no values (an alias, a destructure, a
+ * helper's parameter): the fail-closed consumer, the project-trust seam
+ * ratchet, keys on the mocked specifier instead (#4429 round 3). It reads
+ * the callee alone, so a caller looping over every call pays no per-file
+ * cost (#4457 review F8). `names` defaults to `["mock"]`, so the
+ * whole-module export gate keeps its existing population; a caller that
+ * also owns the non-hoisted `vi.doMock` passes both names.
  */
 export function isViMockCall(
 	callee: SgNode | undefined | null,
 	names: readonly string[] = ["mock"],
 ): boolean {
 	if (!callee) return false;
-	const resolved = createViResolver(rootOf(callee)).classify(callee, names);
-	return resolved.kind === "mock" && resolved.via === "direct";
+	const node = unwrapExpression(callee);
+	const member = node.kind() === "member_expression";
+	if (!member && node.kind() !== "subscript_expression") return false;
+	const object = node.field("object");
+	if (!object) return false;
+	const owner = unwrapExpression(object);
+	if (owner.kind() !== "identifier" || !VITEST_UTILS.has(owner.text()))
+		return false;
+	const key = node.field(member ? "property" : "index") ?? undefined;
+	const name =
+		key?.kind() === "property_identifier" ? key.text() : mockSpecifier(key);
+	return name !== undefined && names.includes(name);
 }
 
 function objectReturns(factory: SgNode): SgNode | undefined {
@@ -413,7 +139,7 @@ function objectReturns(factory: SgNode): SgNode | undefined {
  * a text-only helper cannot carry because the zero-argument and await
  * requirements live on the nodes it returns.
  */
-function unwrapExpression(node: SgNode): SgNode {
+export function unwrapExpression(node: SgNode): SgNode {
 	let current = unwrapParens(node);
 	while (
 		current?.kind() === "as_expression" ||
