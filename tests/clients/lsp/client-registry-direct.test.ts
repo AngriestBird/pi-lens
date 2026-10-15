@@ -14,6 +14,7 @@
  * the server's `spawn()`.
  */
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetBoundedTelemetry } from "../../../clients/bounded-telemetry.js";
@@ -25,6 +26,10 @@ import type { LSPClientInfo } from "../../../clients/lsp/client.js";
 import { initLSPConfig } from "../../../clients/lsp/config.js";
 import {
 	ClientRegistry,
+	getLspClientCeiling,
+	getLspIdleEvictMs,
+	getLspIdleEvictMsForRoot,
+	mergeInitializationOptions,
 	type ClientGenerationHooks,
 	type SpawnedServer,
 } from "../../../clients/lsp/client-registry.js";
@@ -2432,5 +2437,107 @@ describe("ClientRegistry shutdown (#4449)", () => {
 		expect(priv(f.registry).lastSpawnVerdict.size).toBe(0);
 		expect(priv(f.registry).workspaceProbeLogged.size).toBe(0);
 		expect(priv(f.registry).warmStartLogged.size).toBe(0);
+	});
+});
+
+describe("client-registry environment limits (#4449)", () => {
+	// Recurrence (#3645): the idle window has a generic spelling and a legacy
+	// TypeScript one. The generic wins; an unset, zero, negative, fractional-only
+	// or unsafe value is ignored and the next spelling, then the 20 minute default,
+	// answers. A `>= 0` comparison let a zero window evict every client at once.
+	it("reads the idle window from the generic spelling, then the legacy one, else 20 minutes", () => {
+		expect(getLspIdleEvictMs()).toBe(20 * MIN);
+		process.env.PI_LENS_TS_IDLE_EVICT_MS = "30000";
+		expect(getLspIdleEvictMs()).toBe(30_000);
+		process.env.PI_LENS_LSP_IDLE_EVICT_MS = "45000";
+		expect(getLspIdleEvictMs()).toBe(45_000);
+		for (const bad of ["0", "-5", "abc", "", "99999999999999999999"]) {
+			process.env.PI_LENS_LSP_IDLE_EVICT_MS = bad;
+			expect(getLspIdleEvictMs()).toBe(30_000);
+		}
+		process.env.PI_LENS_TS_IDLE_EVICT_MS = "0";
+		expect(getLspIdleEvictMs()).toBe(20 * MIN);
+	});
+
+	// Recurrence (#1129 F6): only a git checkout inside the host temp directory
+	// takes the aggressive window; its own variable falls back to 60 seconds on a
+	// zero, negative or unparsable value, never to the generic window.
+	it("gives a temporary checkout its own idle window, defaulting to 60 seconds", () => {
+		const checkout = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-reg4449-eph-"),
+		);
+		dirs.push(checkout);
+		fs.mkdirSync(path.join(checkout, ".git"), { recursive: true });
+		fs.writeFileSync(
+			path.join(checkout, ".git", "HEAD"),
+			"ref: refs/heads/m\n",
+		);
+		const plain = tempProject("plain");
+		process.env.PI_LENS_LSP_IDLE_EVICT_MS = "120000";
+
+		expect(getLspIdleEvictMsForRoot(checkout)).toBe(60_000);
+		process.env.PI_LENS_EPHEMERAL_LSP_IDLE_EVICT_MS = "1000";
+		expect(getLspIdleEvictMsForRoot(checkout)).toBe(1000);
+		expect(getLspIdleEvictMsForRoot(plain)).toBe(120_000);
+		for (const bad of ["0", "-1", "soon"]) {
+			process.env.PI_LENS_EPHEMERAL_LSP_IDLE_EVICT_MS = bad;
+			expect(getLspIdleEvictMsForRoot(checkout)).toBe(60_000);
+		}
+	});
+
+	// Recurrence (#267): the client ceiling bounds how many language servers a
+	// session holds. Unset or unusable values keep the default of 24.
+	it("reads the client ceiling, ignoring zero, negative and unparsable values", () => {
+		expect(getLspClientCeiling()).toBe(24);
+		process.env.PI_LENS_LSP_CLIENT_CEILING = "3";
+		expect(getLspClientCeiling()).toBe(3);
+		for (const bad of ["0", "-2", "many", "99999999999999999999"]) {
+			process.env.PI_LENS_LSP_CLIENT_CEILING = bad;
+			expect(getLspClientCeiling()).toBe(24);
+		}
+	});
+});
+
+describe("mergeInitializationOptions (#4449)", () => {
+	// Recurrence (#4299): a user override reaches into nested server settings. A
+	// plain object merges key by key at every depth; an array, a primitive, a
+	// null, or a plain object landing on a non-object REPLACES the base value.
+	// Each guard in the recursion condition had a surviving mutant.
+	it("merges plain objects recursively and replaces everything else", () => {
+		const base = {
+			keep: 1,
+			nested: { a: 1, deep: { x: 1, y: 2 } },
+			list: [1, 2],
+			obj: { k: 1 },
+			str: "text",
+			nul: null,
+			num: 5,
+		};
+		const override = {
+			nested: { b: 2, deep: { y: 9 } },
+			list: [3],
+			obj: [7],
+			str: { now: "object" },
+			nul: { was: "null" },
+			num: { n: 1 },
+			fresh: { z: 1 },
+		};
+		expect(mergeInitializationOptions(base, override)).toEqual({
+			keep: 1,
+			nested: { a: 1, b: 2, deep: { x: 1, y: 9 } },
+			list: [3],
+			obj: [7],
+			str: { now: "object" },
+			nul: { was: "null" },
+			num: { n: 1 },
+			fresh: { z: 1 },
+		});
+		expect(
+			mergeInitializationOptions(
+				{ a: { x: 1 }, b: { x: 1 }, c: { x: 1 } },
+				{ a: 5, b: null, c: [1] },
+			),
+		).toEqual({ a: 5, b: null, c: [1] });
+		expect(base.nested.deep).toEqual({ x: 1, y: 2 });
 	});
 });
