@@ -18,7 +18,9 @@ import {
 	type AvailabilityOutcome,
 } from "./utils/runner-helpers.js";
 
-const helm = createAvailabilityChecker("helm", ".exe");
+// helm 4 has no --version flag ("Error: unknown flag: --version", exit 1);
+// the version lives under a subcommand (#4453).
+const helm = createAvailabilityChecker("helm", ".exe", ["version", "--short"]);
 const inFlightByChartRoot = new PathKeyedMap<Promise<RunnerResult>>(
 	normalizeMapKey,
 );
