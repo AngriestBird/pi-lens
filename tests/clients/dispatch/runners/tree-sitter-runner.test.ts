@@ -180,6 +180,10 @@ afterEach(() => {
 	vi.doUnmock("../../../../clients/tree-sitter-query-loader.js");
 	vi.doUnmock("../../../../clients/cache/rule-cache.js");
 	vi.doUnmock("../../../../clients/tree-sitter-client.js");
+	// The wasm-aborted case partial-mocks it; only the next wasm-free
+	// loadRunnerWithQueries unmocks it again, so a shuffle that ran another
+	// loader next kept `isTreeSitterWasmAborted: () => true` (#4405: seed 424).
+	vi.doUnmock("../../../../clients/tree-sitter-shared.js");
 });
 
 describe("tree-sitter runner — metadata", () => {

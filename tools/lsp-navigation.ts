@@ -26,13 +26,27 @@ import {
 	workspaceEditTextPaths,
 } from "../clients/lsp/edits.js";
 import { configDisabledAuxiliaryLspServerIds } from "../clients/dispatch/auxiliary-lsp.js";
-import { hashDiagnosticContent } from "../clients/lsp/diagnostic-binding.js";
+import { readFileContent } from "../clients/dispatch/runners/utils.js";
+import {
+	hashDiagnosticContent,
+	PRIMARY_UNAVAILABLE_CAUSE,
+	primaryUnavailableCause,
+} from "../clients/lsp/diagnostic-binding.js";
 import {
 	getLSPService,
 	type LSPWorkspaceScopeAttribution,
 } from "../clients/lsp/capabilities.js";
 import type { SearchReadLocation } from "../clients/search-read-registration.js";
 import { buildLspNavigationEnvelope } from "./lsp-structured-output.js";
+import {
+	applyProbeFindingPolicy,
+	describePrimaryUnavailable,
+} from "./lsp-diagnostics.js";
+import {
+	dispositionSuppressedLine,
+	formatCacheAgeLabel,
+} from "../clients/finding-delivery-gate.js";
+import { disabledPrimaries } from "../clients/lsp/session-roots.js";
 import { SYMBOL_KIND_NAMES } from "../clients/lsp-document-symbols.js";
 
 const VALID_OPERATIONS = [
@@ -103,6 +117,26 @@ function operationSupportStatus(
 	)
 		return support.callHierarchy;
 	return null;
+}
+
+/**
+ * #4403: why no language server answered a file operation on a file the
+ * service has no client for, from the operator's `lsp.disabledServers`. A
+ * primary turned off is not a missing install, and a disabled owner whose
+ * fallback did not answer is still the denial (round 4, N1).
+ */
+function noServerAnsweredText(filePath: string): string {
+	const { disabledServerIds, fallbackServerIds } = disabledPrimaries(filePath);
+	const cause = primaryUnavailableCause(
+		[...fallbackServerIds, ...disabledServerIds],
+		disabledServerIds,
+		fallbackServerIds,
+	);
+	const who =
+		disabledServerIds.length > 0
+			? `Primary LSP (${disabledServerIds.join(", ")}) did not answer`
+			: "no language server answered";
+	return `No LSP server available for ${path.basename(filePath)}: ${who} (${PRIMARY_UNAVAILABLE_CAUSE[cause]}).`;
 }
 
 function emptyReasonForOperation(operation: LspNavigationOperation): string {
@@ -1030,6 +1064,9 @@ export function createLspNavigationTool(
 			const session = mutationDeps?.runtime?.captureSessionGeneration?.();
 			const startedAt = Date.now();
 			let supported: boolean | null = null;
+			// #4403 round 5 (V5): `getOperationSupport` found no client for the
+			// file, after trying to start one.
+			let noFileClient = false;
 			let diagnosticsMode: "pull" | "push-only" | "unknown" = "unknown";
 			let columnResolution: SymbolColumnResolution | undefined;
 			// #3601: the content the rename's pre-flight `openFileBestEffort` read,
@@ -1327,6 +1364,7 @@ export function createLspNavigationTool(
 			}
 
 			if (operation === "workspaceDiagnostics") {
+				const policyCwd = ctx.cwd || process.cwd();
 				const wsDiagSupport = rawPath
 					? await lspService.getWorkspaceDiagnosticsSupport(filePath)
 					: await lspService.getWorkspaceDiagnosticsSupport(
@@ -1336,7 +1374,12 @@ export function createLspNavigationTool(
 				diagnosticsMode = wsDiagSupport?.mode ?? "unknown";
 
 				if (rawPath && !filePathIsDirectory) {
-					const hasLSP = lspService.supportsLSP(filePath);
+					// #4403: a file whose primary the operator disabled has a
+					// language server; it is turned off, which the read below
+					// reports as the cause instead of "not installed".
+					const hasLSP =
+						lspService.supportsLSP(filePath) ||
+						disabledPrimaries(filePath).disabledServerIds.length > 0;
 					if (!hasLSP) {
 						return finalize(
 							{
@@ -1362,17 +1405,38 @@ export function createLspNavigationTool(
 					const excludeServerIds = configDisabledAuxiliaryLspServerIds((name) =>
 						getFlag(name, ctx.cwd),
 					);
-					await openFileBestEffort(
+					// #1634: the content the diagnostics below answer for is the
+					// content the policy's inline and strict-anchor checks read.
+					const openedContent = await openFileBestEffort(
 						lspService,
 						filePath,
 						true,
 						excludeServerIds,
 					);
-					const diagnostics = await lspService.getDiagnostics(
+					// #1634: the same finding policy (stored dispositions, `.pi-lens.json`
+					// rule policy, inline `pi-lens-ignore`) the `lens_diagnostics
+					// source=lsp` probe applies to the same server answer.
+					const policy = applyProbeFindingPolicy(
 						filePath,
-						undefined,
-						excludeServerIds,
+						await lspService.getDiagnostics(
+							filePath,
+							undefined,
+							excludeServerIds,
+						),
+						policyCwd,
+						openedContent,
+						"all",
+						"lsp_navigation",
 					);
+					const diagnostics = policy.kept;
+					const suppressedLine = dispositionSuppressedLine(policy.suppressed);
+					// #4403: #4322's rule on this route. When no language server
+					// answered, the read's health record names it, and an empty
+					// answer is not 0 diagnostics.
+					const primaryUnavailable = describePrimaryUnavailable(
+						undefined,
+						lspService.getDiagnosticsHealth(filePath),
+					)?.text;
 					const result = [
 						{
 							filePath,
@@ -1394,7 +1458,7 @@ export function createLspNavigationTool(
 							content: [
 								{
 									type: "text" as const,
-									text: `${note}\n${JSON.stringify(result)}`,
+									text: `${note}\n${JSON.stringify(result)}${primaryUnavailable ? `\nNote: ${primaryUnavailable}` : ""}${suppressedLine ? `\nNote: ${suppressedLine}` : ""}`,
 								},
 							],
 							details: {
@@ -1402,6 +1466,13 @@ export function createLspNavigationTool(
 								resultCount,
 								diagnosticsMode,
 								coverage: "requested-file",
+								...(policy.suppressed > 0 && {
+									dispositionSuppressed: policy.suppressed,
+								}),
+								...(primaryUnavailable !== undefined && {
+									unconfirmed: true,
+									primaryUnavailable,
+								}),
 							},
 						},
 						{
@@ -1418,13 +1489,35 @@ export function createLspNavigationTool(
 				const allDiagnostics = await lspService.getAllDiagnostics(
 					configDisabledAuxiliaryLspServerIds((name) => getFlag(name, ctx.cwd)),
 				);
+				// #1634: a tracked snapshot replays what each client last published,
+				// so every row passes the same finding policy as the path read and
+				// carries its age: nothing here re-checks the file.
+				let snapshotSuppressed = 0;
 				const result = Array.from(allDiagnostics.entries()).map(
-					([trackedFile, { diags }]) => ({
-						filePath: trackedFile,
-						diagnostics: diags,
-						count: diags.length,
-					}),
+					([trackedFile, { diags, ts }]) => {
+						let kept = diags;
+						if (diags.length > 0) {
+							const policy = applyProbeFindingPolicy(
+								trackedFile,
+								diags,
+								policyCwd,
+								readFileContent(trackedFile),
+								"all",
+								"lsp_navigation",
+							);
+							snapshotSuppressed += policy.suppressed;
+							kept = policy.kept;
+						}
+						return {
+							filePath: trackedFile,
+							diagnostics: kept,
+							count: kept.length,
+							lag: formatCacheAgeLabel(ts),
+						};
+					},
 				);
+				const snapshotSuppressedLine =
+					dispositionSuppressedLine(snapshotSuppressed);
 				const noteMap2: Record<string, string> = {
 					"push-only":
 						"Note: push-only tracked diagnostics snapshot (not full workspace pull diagnostics).",
@@ -1438,7 +1531,7 @@ export function createLspNavigationTool(
 						content: [
 							{
 								type: "text" as const,
-								text: `${note}\n${JSON.stringify(result)}`,
+								text: `${note}\n${JSON.stringify(result)}${snapshotSuppressedLine ? `\nNote: ${snapshotSuppressedLine}` : ""}`,
 							},
 						],
 						details: {
@@ -1446,6 +1539,9 @@ export function createLspNavigationTool(
 							resultCount: result.length,
 							diagnosticsMode,
 							coverage: "tracked-open-files",
+							...(snapshotSuppressed > 0 && {
+								dispositionSuppressed: snapshotSuppressed,
+							}),
 						},
 					},
 					{
@@ -1480,12 +1576,18 @@ export function createLspNavigationTool(
 
 			const hasLSP = filePath ? lspService.supportsLSP(filePath) : false;
 			if (needsFilePath && !hasLSP) {
+				// #4403 round 4 (N4): the same check as the workspaceDiagnostics
+				// gate above. A primary the operator turned off is not a missing
+				// install, so the advice would send the reader the wrong way.
 				return finalize(
 					{
 						content: [
 							{
 								type: "text" as const,
-								text: `No LSP server available for ${path.basename(filePath)}. Check that the language server is installed.`,
+								text:
+									disabledPrimaries(filePath).disabledServerIds.length > 0
+										? noServerAnsweredText(filePath)
+										: `No LSP server available for ${path.basename(filePath)}. Check that the language server is installed.`,
 							},
 						],
 						isError: true,
@@ -1501,6 +1603,7 @@ export function createLspNavigationTool(
 
 			if (needsFilePath) {
 				const support = await lspService.getOperationSupport(filePath);
+				noFileClient = support === null;
 				supported = operationSupportStatus(operation, support);
 				if (supported === false) {
 					return finalize(
@@ -1967,6 +2070,22 @@ export function createLspNavigationTool(
 			}
 
 			const isEmpty = !result || (Array.isArray(result) && result.length === 0);
+			// #4403 round 5 (V5): with no client for the file (a missing binary,
+			// a disabled primary while an auxiliary serves the file, a disabled
+			// owner whose fallback is missing), an empty answer came from no
+			// language server. `hover` returns null for both cases, so the
+			// empty answer here is no_server, not "No results".
+			if (isEmpty && noFileClient) {
+				return finalize(
+					{
+						content: [
+							{ type: "text" as const, text: noServerAnsweredText(filePath) },
+						],
+						isError: true,
+					},
+					{ operation, filePath, failureKind: "no_server", resultCount: 0 },
+				);
+			}
 			const fileCtx = filePath ? " at " + path.basename(filePath) : "";
 			const lineCtx = line ? ":" + line + ":" + character : "";
 			let output = isEmpty

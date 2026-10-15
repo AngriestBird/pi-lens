@@ -45,16 +45,22 @@ import {
 	applyLspFindingPolicy,
 	loadProjectRulePolicyMap,
 } from "../clients/dispatch/finding-policy.js";
+import { readFileContent } from "../clients/dispatch/runners/utils.js";
 import { hasStrictDispositionMarks } from "../clients/diagnostic-dispositions.js";
+import { dispositionSuppressedLine } from "../clients/finding-delivery-gate.js";
 import { recordDegradationOnce } from "../clients/degradation-ledger.js";
 import { logLatency } from "../clients/latency-logger.js";
 import { detectFileRole } from "../clients/file-role.js";
 import type { LSPDiagnostic } from "../clients/lsp/client.js";
 import {
+	combinePrimaryUnavailableCauses,
 	hashDiagnosticContent,
+	PRIMARY_UNAVAILABLE_CAUSE,
+	primaryUnavailableCause,
 	touchCompletedConfirmationPolicy,
 	touchCoverageGap,
 	type DiagnosticBinding,
+	type PrimaryUnavailableCause,
 	type TouchFileResult,
 } from "../clients/lsp/diagnostic-binding.js";
 import { classifyCascadeWaitTier } from "../clients/lsp/wait-policy/index.js";
@@ -77,7 +83,10 @@ import {
 	SCAN_LANGUAGE_PRIORITY,
 } from "../clients/language-registry.js";
 import { exceedsLspSyncLimits } from "../clients/lsp/content-limits.js";
-import { importTargetsToAnnounce } from "../clients/lsp/created-import-targets.js";
+import {
+	goPackageFilesToAnnounce,
+	importTargetsToAnnounce,
+} from "../clients/lsp/created-import-targets.js";
 
 const MAX_FILES = 100;
 export const MAX_BATCH_FILES = 100;
@@ -105,6 +114,14 @@ type LspHealthLike = {
 	candidateServerIds?: string[];
 	mergedCount?: number;
 	unavailablePrimaryServerIds?: readonly string[];
+	disabledPrimaryServerIds?: readonly string[];
+	primaryUnavailableCause?: PrimaryUnavailableCause;
+};
+
+/** #4403: how many unconfirmed files no primary answered for, and why. */
+type PrimaryUnavailableTally = {
+	count: number;
+	cause: PrimaryUnavailableCause | undefined;
 };
 
 type BatchOptions = {
@@ -164,6 +181,8 @@ type FileDiagnosticResult = {
 	inconclusiveReason?: string;
 	/** #4322: see `DiagnosticsCollectionResult.primaryUnavailable`. */
 	primaryUnavailable?: string;
+	/** #4403: see `DiagnosticsCollectionResult.primaryUnavailableCause`. */
+	primaryUnavailableCause?: PrimaryUnavailableCause;
 	/** #4322: see `DiagnosticsCollectionResult.noClientAnswered`. */
 	noClientAnswered?: true;
 	/**
@@ -665,6 +684,8 @@ type DiagnosticsCollectionResult = {
 	 * the file.
 	 */
 	primaryUnavailable?: string;
+	/** #4403: why, so a count over many files can say it too. */
+	primaryUnavailableCause?: PrimaryUnavailableCause;
 	/**
 	 * #4322: this read acquired no client at all: the touch resolved none and
 	 * the `getDiagnostics` fallback's own health record says `no_clients`.
@@ -885,7 +906,10 @@ async function collectDiagnosticsForFile(
 		skipReason: touched?.skipReason,
 		confirmedByTouch,
 		...(noClientAnswered && { noClientAnswered: true as const }),
-		...(primaryUnavailable !== undefined && { primaryUnavailable }),
+		...(primaryUnavailable !== undefined && {
+			primaryUnavailable: primaryUnavailable.text,
+			primaryUnavailableCause: primaryUnavailable.cause,
+		}),
 		// #1470: only a touch that resolved clients contributes a coverage gap;
 		// the getDiagnostics fallback never reports one, which is honest — that
 		// path claims no confirmation at all.
@@ -900,32 +924,46 @@ async function collectDiagnosticsForFile(
 /**
  * #4322: the reason no language server answered for a file, or undefined when
  * one did (or nothing says otherwise). Two shapes reach here: the touch
- * acquired only auxiliaries and names the primaries it could not acquire
- * (`inconclusiveReason: "primary-unavailable"`), or the touch acquired no
- * client and the `getDiagnostics` fallback acquired no primary: only
- * auxiliaries, or no client at all (`unavailablePrimaryServerIds` non-empty).
- * The service derives both lists with one rule (`unacquiredPrimaryServerIds`
- * in clients/lsp/index.ts), so either way no primary answered.
+ * acquired only auxiliaries, or none and the operator disabled the primary,
+ * and names the primaries that did not answer (`inconclusiveReason:
+ * "primary-unavailable"`); or the touch acquired no client and the
+ * `getDiagnostics` fallback acquired no primary: only auxiliaries, or no
+ * client at all (`unavailablePrimaryServerIds` non-empty). The service derives
+ * both lists with one rule (`UnansweredPrimaries` in clients/lsp/index.ts), so
+ * either way no primary answered. #4403: each record also lists the ones the
+ * operator disabled, so the cause comes from the read, not from config.
  */
-function describePrimaryUnavailable(
+export function describePrimaryUnavailable(
 	touched: TouchFileResult | undefined,
 	fallbackHealth: LspHealthLike | undefined,
-): string | undefined {
+): { text: string; cause: PrimaryUnavailableCause } | undefined {
 	let serverIds: readonly string[];
+	let disabledServerIds: readonly string[];
+	let carriedCause: PrimaryUnavailableCause | undefined;
 	if (touched?.inconclusiveReason === "primary-unavailable") {
 		// The verdict always names the primary (clients/lsp/index.ts).
 		serverIds = touched.inconclusiveServerIds ?? [];
+		disabledServerIds = touched.disabledPrimaryServerIds ?? [];
+		carriedCause = touched.primaryUnavailableCause;
 	} else if (fallbackHealth?.unavailablePrimaryServerIds?.length) {
 		serverIds = fallbackHealth.unavailablePrimaryServerIds;
+		disabledServerIds = fallbackHealth.disabledPrimaryServerIds ?? [];
+		carriedCause = fallbackHealth.primaryUnavailableCause;
 	} else {
 		return undefined;
 	}
-	return (
-		`Primary LSP (${serverIds.join(", ")}): not available — no language ` +
-		"server answered for this file (it could not be started, or was still " +
-		"starting). NOT the same as 0 diagnostics; auxiliary scanners do not " +
-		"check the language itself."
-	);
+	// The service computes the cause once (`unansweredPrimaries`); a record
+	// without one (an older shape or a test double) is classified from its ids.
+	const cause =
+		carriedCause ?? primaryUnavailableCause(serverIds, disabledServerIds);
+	return {
+		text:
+			`Primary LSP (${serverIds.join(", ")}): not available — no language ` +
+			`server answered for this file (${PRIMARY_UNAVAILABLE_CAUSE[cause]}). ` +
+			"NOT the same as 0 diagnostics; auxiliary scanners do not check the " +
+			"language itself.",
+		cause,
+	};
 }
 
 function diagnosticsToFileDiags(
@@ -1185,7 +1223,7 @@ function demoteInferredForFile(
  * hidden by a broken filter is the harm this lane exists to prevent
  * (AGENTS.md shape 48).
  */
-function applyProbeFindingPolicy(
+export function applyProbeFindingPolicy(
 	file: string,
 	diagnostics: LSPDiagnostic[],
 	cwd: string,
@@ -1203,6 +1241,12 @@ function applyProbeFindingPolicy(
 	 * other caller (`mode=full`) has no severity axis at all.
 	 */
 	severity: string,
+	/**
+	 * The tool whose result renders this filter's output, stamped on the
+	 * `lsp_probe_disposition_filter` record (#4459 review F5: the
+	 * `lsp_navigation` route's records said `lsp_diagnostics`).
+	 */
+	toolName: "lsp_diagnostics" | "lsp_navigation" = "lsp_diagnostics",
 ): { kept: LSPDiagnostic[]; inlineKept: LSPDiagnostic[]; suppressed: number } {
 	const started = Date.now();
 	try {
@@ -1234,7 +1278,7 @@ function applyProbeFindingPolicy(
 			// `retainedSuppressed` is what the footer chip is still counting.
 			logLatency({
 				type: "phase",
-				toolName: "lsp_diagnostics",
+				toolName,
 				filePath: file,
 				phase: "lsp_probe_disposition_filter",
 				durationMs: Date.now() - started,
@@ -1269,14 +1313,9 @@ function replayContentForStrictMarks(
 	file: string,
 	cwd: string,
 ): string | undefined {
-	if (!hasStrictDispositionMarks(cwd)) return undefined;
-	try {
-		return fs.readFileSync(file, "utf-8");
-	} catch {
-		// Fail open — an unreadable file degrades to the weak-anchored filter
-		// rather than hiding or dropping anything.
-		return undefined;
-	}
+	// Fail open — an unreadable file degrades to the weak-anchored filter
+	// rather than hiding or dropping anything.
+	return hasStrictDispositionMarks(cwd) ? readFileContent(file) : undefined;
 }
 
 /** #1561: everything the retire decision needs, as one argument. */
@@ -1472,6 +1511,7 @@ async function collectFileDiagnosticResult(
 		tooLargeReason,
 		skipReason,
 		primaryUnavailable,
+		primaryUnavailableCause,
 		noClientAnswered,
 	} = await collectDiagnosticsForFile(
 		file,
@@ -1625,7 +1665,10 @@ async function collectFileDiagnosticResult(
 		timedOut: confirmation === "unconfirmed" ? timedOut : undefined,
 		...(rootFallback && { rootFallback }),
 		...(skipReason !== undefined && { skipReason }),
-		...(primaryUnavailable !== undefined && { primaryUnavailable }),
+		...(primaryUnavailable !== undefined && {
+			primaryUnavailable,
+			primaryUnavailableCause,
+		}),
 		...(noClientAnswered && { noClientAnswered }),
 		primaryServerId: primaryServerId(file),
 		diagnosticsUnsupported: diagnosticsUnsupportedServerIds.length > 0,
@@ -1654,10 +1697,11 @@ async function runFileDiagnostics(
 	const writeIndex = nextWriteIndex?.();
 	// #4346: a module this file imports, created outside pi-lens, reaches its
 	// servers before the touch (the batch path gates this on cached findings;
-	// one file needs no gate).
-	lspService.announceCreatedFiles(
-		await importTargetsToAnnounce(cwd, [absPath]),
-	);
+	// one file needs no gate), and so do a Go file's package files.
+	lspService.announceCreatedFiles([
+		...goPackageFilesToAnnounce([absPath]),
+		...(await importTargetsToAnnounce(cwd, [absPath])),
+	]);
 	// #3505 r2: the widget row is observed at the read, not after the touch.
 	const observedAt = Date.now();
 	const {
@@ -1965,7 +2009,7 @@ function tallyConfirmation(results: FileDiagnosticResult[]): {
 	clean: number;
 	unconfirmed: number;
 	timedOut: number;
-	primaryUnavailable: number;
+	primaryUnavailable: PrimaryUnavailableTally;
 	rootFallbackReasons: string[];
 	navigationOnly: number;
 	tooLarge: number;
@@ -1974,6 +2018,7 @@ function tallyConfirmation(results: FileDiagnosticResult[]): {
 	let unconfirmed = 0;
 	let timedOut = 0;
 	let primaryUnavailable = 0;
+	const primaryUnavailableCauses: PrimaryUnavailableCause[] = [];
 	const rootFallbackReasons = new Set<string>();
 	let navigationOnly = 0;
 	let tooLarge = 0;
@@ -1993,7 +2038,11 @@ function tallyConfirmation(results: FileDiagnosticResult[]): {
 			// separately so the aggregate text can say WHY, not just THAT.
 			if (result.timedOut) timedOut += 1;
 			// #4322: so is a file whose language server never answered.
-			if (result.primaryUnavailable !== undefined) primaryUnavailable += 1;
+			if (result.primaryUnavailable !== undefined) {
+				primaryUnavailable += 1;
+				if (result.primaryUnavailableCause !== undefined)
+					primaryUnavailableCauses.push(result.primaryUnavailableCause);
+			}
 			if (result.rootFallback) {
 				rootFallbackReasons.add(describeRootFallback(result.rootFallback));
 			}
@@ -2006,7 +2055,10 @@ function tallyConfirmation(results: FileDiagnosticResult[]): {
 		clean,
 		unconfirmed,
 		timedOut,
-		primaryUnavailable,
+		primaryUnavailable: {
+			count: primaryUnavailable,
+			cause: combinePrimaryUnavailableCauses(primaryUnavailableCauses),
+		},
 		rootFallbackReasons: [...rootFallbackReasons],
 		navigationOnly,
 		tooLarge,
@@ -2075,17 +2127,22 @@ function batchOutcomeReason(result: FileDiagnosticResult): string | undefined {
 function auxiliaryOnlyFindingsLine(
 	results: readonly FileDiagnosticResult[],
 ): string | undefined {
-	const count = results.filter(
+	const auxiliaryOnly = results.filter(
 		(result) =>
 			result.diagnostics.length > 0 &&
 			result.primaryUnavailable !== undefined &&
 			result.noClientAnswered === undefined,
-	).length;
+	);
+	const count = auxiliaryOnly.length;
 	if (count === 0) return undefined;
+	const cause =
+		combinePrimaryUnavailableCauses(
+			auxiliaryOnly.flatMap((result) => result.primaryUnavailableCause ?? []),
+		) ?? "unstarted";
 	return (
 		`${count} file${count === 1 ? "" : "s"} with auxiliary findings only: no ` +
-		"language server answered (it could not be started, or was still " +
-		"starting), so the language itself was not checked."
+		`language server answered (${PRIMARY_UNAVAILABLE_CAUSE[cause]}), so the ` +
+		"language itself was not checked."
 	);
 }
 
@@ -2100,15 +2157,15 @@ function unconfirmedReasonClause(
 	unconfirmed: number,
 	timedOut: number,
 	rootFallbackReasons: readonly string[] = [],
-	primaryUnavailable = 0,
+	primaryUnavailable: PrimaryUnavailableTally = { count: 0, cause: undefined },
 ): string {
 	// #4322: a fourth, disjoint reason — no language server answered at all.
 	// The rest of the unconfirmed files keep their own explanation.
-	if (primaryUnavailable > 0) {
+	if (primaryUnavailable.count > 0) {
 		const head =
-			`${primaryUnavailable} with no language server answer (it could not ` +
-			"be started, or was still starting)";
-		const rest = unconfirmed - primaryUnavailable;
+			`${primaryUnavailable.count} with no language server answer ` +
+			`(${PRIMARY_UNAVAILABLE_CAUSE[primaryUnavailable.cause ?? "unstarted"]})`;
+		const rest = unconfirmed - primaryUnavailable.count;
 		return rest > 0
 			? `${head}; the other ${rest}: ${unconfirmedReasonClause(rest, timedOut, rootFallbackReasons)}`
 			: `${head}.`;
@@ -2168,7 +2225,7 @@ async function collectBatchDiagnostics(
 	unconfirmed: number;
 	timedOut: number;
 	rootFallbackReasons: string[];
-	primaryUnavailable: number;
+	primaryUnavailable: PrimaryUnavailableTally;
 	outcomeCounts: Record<BatchFileOutcome, number>;
 	incompleteFiles: number;
 }> {
@@ -2200,12 +2257,17 @@ async function collectBatchDiagnostics(
 	// before any lookup below, whatever the order of `files`. #4346: so must a
 	// module named only by a file's imports, which nothing reports when it was
 	// created outside pi-lens: for every file a fresh clean entry will not
-	// answer (#4368 r1 F1; a write-hook touch records no entry).
+	// answer (#4368 r1 F1; a write-hook touch records no entry). So must a Go
+	// file's package files, which no import names; and each resolved file's
+	// imports go to the cache, which refuses an entry only for a creation in
+	// its dependency scope.
 	lspService.announceCreatedFiles([
 		...files,
+		...goPackageFilesToAnnounce(files),
 		...(await importTargetsToAnnounce(
 			resolvedCwd,
 			files.filter((file) => !cacheCtx.servesClean(file, scopeKey)),
+			(file, scope) => cacheCtx.noteImportScope(file, scope),
 		)),
 	]);
 	const groups = groupFilesByPrimaryServer(files);
@@ -2800,9 +2862,14 @@ async function runDirectoryDiagnostics(
 						"LSP unavailable for one or more files:",
 						...lspHealthWarnings.slice(0, 10),
 					]
-				: unconfirmed > 0 || outcomeCounts.clean === filesToProcess.length
-					? [cleanLine]
-					: []),
+				: []),
+			// #4403: an unconfirmed file says why even beside a health warning,
+			// which names what was missing but not that the file is unconfirmed.
+			...(unconfirmed > 0 ||
+			(lspHealthWarnings.length === 0 &&
+				outcomeCounts.clean === filesToProcess.length)
+				? [cleanLine]
+				: []),
 			...(tooLargeLines.length > 0
 				? ["", "Files too large for LSP diagnostics:", ...tooLargeLines]
 				: []),
@@ -2900,24 +2967,6 @@ async function runDirectoryDiagnostics(
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────
-
-/**
- * #3088: the one rendering of the probe lane's policy drop, shared by the
- * single-file, batch and directory renders so the three cannot word the same
- * fact differently. Returns `undefined` when nothing was dropped — the #1616
- * rule asks for a count when there IS one, not a "0 suppressed" line on every
- * clean probe.
- */
-function dispositionSuppressedLine(suppressed: number): string | undefined {
-	if (suppressed <= 0) return undefined;
-	return (
-		`suppressed by disposition: ${suppressed} finding(s) dropped from this ` +
-		"result because they're marked false-positive/won't-fix, disabled by " +
-		"`.pi-lens.json` rule policy, or suppressed by an inline `pi-lens-ignore` " +
-		"comment. Not a clean verdict for those locations — they were found, " +
-		"then intentionally hidden."
-	);
-}
 
 function applySeverityFilter<T extends { severity: number }>(
 	diags: T[],

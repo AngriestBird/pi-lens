@@ -10,6 +10,7 @@ import {
 	classifyFirstPublish,
 	resolveProbeServerId,
 } from "./clean-signal.mjs";
+import { touchAnsweredDiagnostics } from "./touch-result.mjs";
 
 // Budgets (reuse the original probe's generosity — this is off the hot path).
 const CLIENT_WAIT_MS = 30000; // cold spawn + initialize
@@ -86,15 +87,18 @@ export function createProbeFixture(deps) {
 
 		const auxIds = fx.auxiliaryServerIds ?? [];
 		const useAux = auxIds.length > 0;
+		const touchOptions = {
+			diagnostics: "document",
+			collectDiagnostics: true,
+			clientScope: useAux ? "with-auxiliary" : "primary",
+			...(useAux ? { auxiliaryServerIds: auxIds } : {}),
+			maxClientWaitMs: CLIENT_WAIT_MS,
+			source: "clean-probe",
+		};
 		const touch = (content, diagWaitMs) =>
 			lsp.touchFile(absFile, content, {
-				diagnostics: "document",
-				collectDiagnostics: true,
-				clientScope: useAux ? "with-auxiliary" : "primary",
-				...(useAux ? { auxiliaryServerIds: auxIds } : {}),
-				maxClientWaitMs: CLIENT_WAIT_MS,
+				...touchOptions,
 				maxDiagnosticsWaitMs: diagWaitMs,
-				source: "clean-probe",
 			});
 
 		const dirtyContent = fs.readFileSync(absFile, "utf8");
@@ -149,7 +153,8 @@ export function createProbeFixture(deps) {
 			cleanTransitionPublishes: cleanPubs.length,
 			cleanTransitionVersioned: cleanPubs.filter((p) => p.versioned).length,
 		};
-		const dirtyDiagCount = Array.isArray(dirtyResult) ? dirtyResult.length : 0;
+		const dirtyDiagCount =
+			touchAnsweredDiagnostics(dirtyResult, touchOptions, lsp)?.length ?? 0;
 		const verdict = classifyCleanBehavior(obs);
 		// #3310: the first-publish class comes from the dirty phase's publish ORDER,
 		// which this trace already holds — no extra touch, no extra server time.

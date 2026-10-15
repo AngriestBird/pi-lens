@@ -24,6 +24,7 @@ import { FactStore } from "../../../../clients/dispatch/fact-store.js";
 import {
 	listCapturedOutputs,
 	materialize,
+	WORKSPACE_TOKEN,
 } from "../../../helpers/captured-runner-output.js";
 import { setupTestEnvironment } from "../../test-utils.js";
 
@@ -97,28 +98,212 @@ vi.mock(
  */
 const RUNNER_DESCRIPTORS: Record<string, { module: string; kind: string }> = {
 	actionlint: { module: "actionlint", kind: "yaml" },
+	"cpp-check": { module: "cpp-check", kind: "cxx" },
+	"cue-vet": { module: "cue-vet", kind: "cue" },
+	"dart-analyze": { module: "dart-analyze", kind: "dart" },
+	"dotnet-build": { module: "dotnet-build", kind: "csharp" },
+	"elixir-check": { module: "elixir-check", kind: "elixir" },
 	eslint: { module: "eslint", kind: "jsts" },
 	"biome-check-json": { module: "biome-check", kind: "jsts" },
+	"fish-indent": { module: "fish-indent", kind: "fish" },
+	"gleam-check": { module: "gleam-check", kind: "gleam" },
+	"go-vet": { module: "go-vet", kind: "go" },
+	"golangci-lint": { module: "golangci-lint", kind: "go" },
 	hadolint: { module: "hadolint", kind: "docker" },
+	"helm-lint": { module: "helm-lint", kind: "yaml" },
 	htmlhint: { module: "htmlhint", kind: "html" },
+	javac: { module: "javac", kind: "java" },
+	ktlint: { module: "ktlint", kind: "kotlin" },
 	markdownlint: { module: "markdownlint", kind: "markdown" },
 	mypy: { module: "mypy", kind: "python" },
 	oxlint: { module: "oxlint", kind: "jsts" },
 	"php-lint": { module: "php-lint", kind: "php" },
 	phpstan: { module: "phpstan", kind: "php" },
 	pyright: { module: "pyright", kind: "python" },
+	rubocop: { module: "rubocop", kind: "ruby" },
 	"ruff-lint": { module: "ruff", kind: "python" },
+	"rust-clippy": { module: "rust-clippy", kind: "rust" },
 	shellcheck: { module: "shellcheck", kind: "shell" },
 	shfmt: { module: "shfmt", kind: "shell" },
 	spellcheck: { module: "spellcheck", kind: "markdown" },
 	sqlfluff: { module: "sqlfluff", kind: "sql" },
 	stylelint: { module: "stylelint", kind: "css" },
+	swiftlint: { module: "swiftlint", kind: "swift" },
 	taplo: { module: "taplo", kind: "toml" },
 	terragrunt: { module: "terragrunt", kind: "terragrunt" },
 	tflint: { module: "tflint", kind: "terraform" },
 	vale: { module: "vale", kind: "markdown" },
 	yamllint: { module: "yamllint", kind: "yaml" },
+	"zig-check": { module: "zig-check", kind: "zig" },
 };
+
+/**
+ * What a fixture's replay must produce beyond "at least one finding". Keyed
+ * `<runner>/<case>`. Presence alone passed a fish-indent replay that reported a
+ * merely unformatted file as a blocking parse error (#4454), and a helm-lint
+ * replay whose path was built from prose (#4453): neither asserts the
+ * semantic, the rule, the file or the line.
+ */
+interface ExpectedFinding {
+	rule: string;
+	semantic: string;
+	/** Workspace-relative, forward slashes. */
+	file: string;
+	/** Absent when the tool reports the finding with no line. */
+	line?: number;
+}
+interface ReplayExpectation {
+	status: string;
+	semantic: string;
+	findings: ExpectedFinding[];
+}
+const REPLAY_EXPECTATIONS: Record<string, ReplayExpectation> = {
+	// fish_indent 4.9.3 --check prints the file name on stderr and exits 1 for a
+	// file that only needs formatting: a fixable warning, never a blocker.
+	"fish-indent/real": {
+		status: "succeeded",
+		semantic: "warning",
+		findings: [
+			{
+				rule: "fish-indent-unformatted",
+				semantic: "warning",
+				file: "unformatted.fish",
+				line: 1,
+			},
+		],
+	},
+	"fish-indent/smoke-bad": {
+		status: "succeeded",
+		semantic: "warning",
+		findings: [
+			{
+				rule: "fish-indent-unformatted",
+				semantic: "warning",
+				file: "bad.fish",
+				line: 1,
+			},
+		],
+	},
+	// fish_indent --check never reports a syntax error, so the runner also asks
+	// `fish --no-execute`; its real bytes for the three defects (and the fish-lsp
+	// smoke fixture) must reach the agent as a blocking finding on the real file
+	// and line (#4454). Each file is already formatted: only fish -n sees it.
+	"fish-indent/syntax-missing-end": {
+		status: "failed",
+		semantic: "blocking",
+		findings: [
+			{
+				rule: "fish-syntax-error",
+				semantic: "blocking",
+				file: "missing-end.fish",
+				line: 1,
+			},
+		],
+	},
+	"fish-indent/syntax-unterminated-quote": {
+		status: "failed",
+		semantic: "blocking",
+		findings: [
+			{
+				rule: "fish-syntax-error",
+				semantic: "blocking",
+				file: "unterminated-quote.fish",
+				line: 1,
+			},
+		],
+	},
+	"fish-indent/syntax-stray-end": {
+		status: "failed",
+		semantic: "blocking",
+		findings: [
+			{
+				rule: "fish-syntax-error",
+				semantic: "blocking",
+				file: "stray-end.fish",
+				line: 2,
+			},
+		],
+	},
+	// fish 3.3.1 (Ubuntu 22.04) prints the header of an absolute argv path as `~`
+	// plus that path; the attribution dropped every syntax error there (#4454).
+	"fish-indent/syntax-stray-end-fish-3.3.1": {
+		status: "failed",
+		semantic: "blocking",
+		findings: [
+			{
+				rule: "fish-syntax-error",
+				semantic: "blocking",
+				file: "stray-end.fish",
+				line: 2,
+			},
+		],
+	},
+	"fish-indent/syntax-smoke-bad": {
+		status: "failed",
+		semantic: "blocking",
+		findings: [
+			{
+				rule: "fish-syntax-error",
+				semantic: "blocking",
+				file: "bad.fish",
+				line: 1,
+			},
+		],
+	},
+	"golangci-lint/real": {
+		status: "succeeded",
+		semantic: "warning",
+		findings: [
+			{ rule: "errcheck", semantic: "warning", file: "bad.go", line: 6 },
+			{ rule: "unused", semantic: "warning", file: "bad.go", line: 9 },
+		],
+	},
+	"golangci-lint/config-text-stdout": {
+		status: "succeeded",
+		semantic: "warning",
+		findings: [
+			{ rule: "errcheck", semantic: "warning", file: "bad.go", line: 6 },
+			{ rule: "unused", semantic: "warning", file: "bad.go", line: 9 },
+		],
+	},
+	// helm 4.3.0 prefixes the chart name inside the message; the real template
+	// is `templates/bad.yaml` line 5, not the prose around it.
+	"helm-lint/real": {
+		status: "succeeded",
+		semantic: "blocking",
+		findings: [
+			{ rule: "info", semantic: "warning", file: "Chart.yaml" },
+			{
+				rule: "error",
+				semantic: "blocking",
+				file: "templates/bad.yaml",
+				line: 5,
+			},
+		],
+	},
+	// helm does not quote the name in a template parse error, so a name with a
+	// space must still resolve to the real file (#4453).
+	"helm-lint/space-in-name": {
+		status: "succeeded",
+		semantic: "blocking",
+		findings: [
+			{ rule: "info", semantic: "warning", file: "Chart.yaml" },
+			{
+				rule: "error",
+				semantic: "blocking",
+				file: "templates/my file.yaml",
+				line: 5,
+			},
+		],
+	},
+};
+
+/** Version probes the toolchain clients run before the invocation under test. */
+const AVAILABILITY_PROBE_ARGV: readonly (readonly string[])[] = [
+	["version"],
+	["--version"],
+	["clippy", "--version"],
+];
 
 /**
  * True when every token of `needle` appears in `haystack` in the same relative
@@ -201,7 +386,7 @@ describe("captured real-binary output", () => {
 		// generous because this suite spawns nothing; a real assertion failure
 		// still reds immediately.
 		it(
-			`${runnerId} parses findings out of ${fixture.provenance.tool} ${fixture.provenance.version} output`,
+			`${runnerId} (${fixture.caseName}) parses findings out of ${fixture.provenance.tool} ${fixture.provenance.version} output`,
 			{
 				timeout: 30000,
 			},
@@ -218,7 +403,25 @@ describe("captured real-binary output", () => {
 						`${fixture.relPath}: ${fixture.provenance.workspace}/${fixture.file} is missing`,
 					).toBe(true);
 
-					safeSpawnAsync.mockResolvedValue(materialize(fixture, env.tmpDir));
+					// Everything except an availability probe answers with the captured
+					// bytes. go-vet and rust-clippy find their toolchain through
+					// goClient/rustClient, which run `<tool> version|--version` and
+					// `cargo clippy --version` before the real invocation. Those are
+					// different invocations whose own output nobody captured here, so
+					// they report "installed" and the run under test reaches its parse
+					// step; the process boundary (safeSpawnAsync) is the only thing
+					// mocked.
+					const captured = materialize(fixture, env.tmpDir);
+					safeSpawnAsync.mockImplementation(
+						async (_cmd: string, args: string[]) =>
+							AVAILABILITY_PROBE_ARGV.some(
+								(probe) =>
+									probe.length === args.length &&
+									probe.every((token, at) => token === args[at]),
+							)
+								? { error: null, status: 0, stdout: "probe ok", stderr: "" }
+								: captured,
+					);
 
 					const runner = (
 						await import(
@@ -245,9 +448,13 @@ describe("captured real-binary output", () => {
 						path.basename(fixture.file),
 						fixture.file.replace(/\\/g, "/"),
 					]);
-					const recorded = (fixture.provenance.argv ?? []).filter(
-						(token) => !fileTokens.has(token),
-					);
+					// A token the capture spawned with the workspace's absolute path
+					// (helm lint `<chart root>`) maps to this replay's own workspace.
+					const recorded = (fixture.provenance.argv ?? [])
+						.filter((token) => !fileTokens.has(token))
+						.map((token) =>
+							token.split(WORKSPACE_TOKEN).join(path.resolve(env.tmpDir)),
+						);
 					const spawnedArgvs = safeSpawnAsync.mock.calls.map(
 						(call) => (call[1] ?? []) as string[],
 					);
@@ -265,6 +472,30 @@ describe("captured real-binary output", () => {
 						`${runnerId} parsed 0 diagnostics out of real ${fixture.provenance.tool} ${fixture.provenance.version} output (exit ${fixture.exitCode}). Re-capture with \`${fixture.provenance.command}\` and fix the parser.`,
 					).toBeGreaterThan(0);
 					expect(result.status).not.toBe("skipped");
+					const expected =
+						REPLAY_EXPECTATIONS[`${runnerId}/${fixture.caseName}`];
+					if (expected) {
+						expect(
+							{ status: result.status, semantic: result.semantic },
+							`${runnerId} verdict over real ${fixture.provenance.tool} ${fixture.provenance.version} output`,
+						).toEqual({
+							status: expected.status,
+							semantic: expected.semantic,
+						});
+						expect(
+							(result.diagnostics as Array<Record<string, unknown>>).map(
+								(diagnostic) => ({
+									rule: diagnostic.rule,
+									semantic: diagnostic.semantic,
+									file: path
+										.relative(env.tmpDir, String(diagnostic.filePath))
+										.replace(/\\/g, "/"),
+									line: diagnostic.line,
+								}),
+							),
+						).toEqual(expected.findings);
+						return;
+					}
 					for (const diagnostic of result.diagnostics as Array<
 						Record<string, unknown>
 					>) {

@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
+import { blankMarkdown } from "../../scripts/lib/defect-shapes.mjs";
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "../..");
 const SECTION = "Orchestrator lane mechanics";
@@ -17,16 +18,9 @@ function doc(name: string): string {
 	);
 }
 
-// Fenced blocks and HTML comments do not count: a heading or grant name quoted
-// in an example must not satisfy a presence pin.
-function blankMarkdown(text: string): string {
-	const blank = (value: string): string => value.replace(/[^\n]/g, " ");
-	return text
-		.replace(/<!--[\s\S]*?-->/g, blank)
-		.replace(/^```[^\n]*\n[\s\S]*?^```\s*$/gm, blank);
-}
-
-// Blanking keeps offsets, so the section's span in the blanked text is its
+// Fenced blocks and HTML comments do not count (`blankMarkdown`): a heading or
+// grant name quoted in an example must not satisfy a presence pin. Blanking
+// keeps offsets, so the section's span in the blanked text is its
 // span in the raw text.
 function sectionSpan(text: string): [number, number] | undefined {
 	const blanked = blankMarkdown(text);

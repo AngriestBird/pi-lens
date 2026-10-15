@@ -9,6 +9,7 @@
 
 import { describe, expect, it } from "vitest";
 import {
+	expandWorkspaceArgs,
 	extractVersion,
 	needsShell,
 	quoteForShell,
@@ -65,6 +66,34 @@ describe("redactWorkspace", () => {
 
 	it("is a no-op without a workspace", () => {
 		expect(redactWorkspace("text", "")).toBe("text");
+	});
+});
+
+// Recurrence: helm-lint (#4453) hands helm an ABSOLUTE chart root, so a capture
+// that spawned `helm lint .` recorded an argv the runner never sends and the
+// replay argv tie could not hold. The token lets a manifest entry spawn with the
+// workspace's absolute path while the recorded argv stays machine-neutral.
+describe("expandWorkspaceArgs", () => {
+	it("spawns with the workspace where the manifest wrote the token", () => {
+		expect(
+			expandWorkspaceArgs(["lint", WORKSPACE_TOKEN], "/tmp/pi-lens-capture-x"),
+		).toEqual(["lint", "/tmp/pi-lens-capture-x"]);
+	});
+
+	// Recurrence: fish 3.3.1 spells an absolute argv path differently from a
+	// relative one, and only a capture spawned with the absolute path holds the
+	// bytes production receives (#4454).
+	it("expands the token inside an argument, as an absolute file path", () => {
+		expect(
+			expandWorkspaceArgs([`${WORKSPACE_TOKEN}/bad.fish`], "/tmp/w"),
+		).toEqual(["/tmp/w/bad.fish"]);
+	});
+
+	it("leaves every other argument alone", () => {
+		expect(expandWorkspaceArgs(["--check", "bad.fish"], "/tmp/w")).toEqual([
+			"--check",
+			"bad.fish",
+		]);
 	});
 });
 

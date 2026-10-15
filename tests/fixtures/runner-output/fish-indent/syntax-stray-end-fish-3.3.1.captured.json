@@ -1,0 +1,20 @@
+{
+	"provenance": {
+		"runner": "fish-indent",
+		"tool": "fish",
+		"version": "3.3.1",
+		"command": "fish --no-config --no-execute __WORKSPACE__/stray-end.fish",
+		"argv": [
+			"--no-config",
+			"--no-execute",
+			"__WORKSPACE__/stray-end.fish"
+		],
+		"workspace": "tests/fixtures/tool-smoke/fish-syntax",
+		"platform": "linux-x64",
+		"capturedAt": "2026-10-15"
+	},
+	"file": "stray-end.fish",
+	"exitCode": 127,
+	"stdout": "",
+	"stderr": "~__WORKSPACE__/stray-end.fish (line 2): 'end' outside of a block\nend\n^\nwarning: Error while reading file __WORKSPACE__/stray-end.fish\n\n"
+}

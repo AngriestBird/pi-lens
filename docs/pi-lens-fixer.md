@@ -97,6 +97,11 @@ exports change.
   the red on the new assertion. A rewrite that stays green with that
   behaviour broken is a deleted test (#4390: the eviction smoke's rewrite
   passed with root re-registration broken).
+- A PR that adds or changes a detector (a ratchet, census or source scan)
+  plants three spellings its author did not design for: an alias, an
+  indirect call and a value reached through another binding. Quote each
+  result. A plant that stays green is fixed, or named in the body as a
+  stated residual (AGENTS.md shape 69).
 - The manual per-test campaign (`stryker-pertest.yml`, #4365) lists tests that
   cover mutated code but kill no mutant. It is a triage input, not a verdict:
   a candidate that guards another seam or a named recurrence stays, and a
@@ -192,7 +197,8 @@ rigor (#2599).
   issue's labels through `gh api`; a `::warning::` that the Detection check
   was skipped means gh failed, so the section was not required, not that it
   passed (#4288). A non-bug PR either deletes the `## Detection` section or
-  fills all three lines; free text in between reds the local preflight. A red
+  fills the three lines, and a `Shape:` or `Enforcer:` line it does write is
+  validated too; free text in between reds the local preflight. A red
   `PR body (advisory)` check is a fix-before-review item.
   A changelog fragment is `---` /
   `section: <Added|Changed|Deprecated|Removed|Fixed|Security>` /
@@ -206,11 +212,13 @@ rigor (#2599).
   refactors with no observable change. `npm run changelog:check` checks the
   rollup, not fragments (#2456).
 - A bug fix's detection lesson names the defect SHAPE and its tree-wide
-  enforcer, not only a test for the instance: the `Gap:` line names the
-  `AGENTS.md` "Recurring defect shapes" number (or a new shape) and either a
-  test that scans the whole population, an issue to build one, or
-  `judgment-only` with the reason. The fix's own one-bug test is its
-  regression test, not the closed gap. The lint half is #4439.
+  enforcer, not only a test for the instance: the `Shape:` line names the
+  `AGENTS.md` "Recurring defect shapes" number (or `new: <name>`), and the
+  `Enforcer:` line a test on base that scans the whole population, an issue to
+  build one, or `none: judgment-only, <reason>`. With `Shape: #N` a path
+  enforcer must be one catalog entry N names. The fix's own one-bug test is its
+  regression test, not the closed gap. The body lint enforces both lines
+  (#4439).
 - Every code fact in the PR body is a `` `path:line` `` citation the check
   verifies: the file must be in the committed tree (never an untracked or
   git-ignored path, which CI cannot read), and a fenced quote after it must

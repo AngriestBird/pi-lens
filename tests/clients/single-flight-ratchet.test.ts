@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+	classifyInFlightSpellings,
 	findInFlightDeclarations,
 	scanInFlightDeclarations,
+	scanInFlightSpellings,
 } from "../../tests/support/single-flight-scan.js";
 
 /**
@@ -17,8 +19,6 @@ import {
  * Keys are `clients/`-relative-path:symbol.
  */
 const EXEMPTIONS: Record<string, string> = {
-	"lsp/client-registry.ts:onSpawnInFlight":
-		"Read-only callback observer: ensureClientForServer owns the existing state.inFlight coordinator; this callback only resolves the known-slow wait sentinel.",
 	// ── The `ensureInFlight` availability family: #1753's migration backlog ──
 	// Identical shape to the two converted sites (biome-client, sg-runner):
 	// a latch short-circuit, then at-most-one probe/auto-install. #1753 converts
@@ -138,6 +138,13 @@ describe("singleFlight ratchet (#1753)", () => {
 		).toEqual([]);
 	});
 
+	it("classifies every inFlight spelling in clients/ (#4429)", () => {
+		// Recurrence: #4411 review F3, a population scanner that skipped five
+		// spellings it did not recognise and passed. Every needle hit must land
+		// in a role (single-flight-scan.ts); an unknown position reds here.
+		expect(scanInFlightSpellings().unclassified).toEqual([]);
+	});
+
 	it("has no stale exemptions", () => {
 		// A site that gets migrated (or deleted) must take its entry with it.
 		// Otherwise the list rots into a lie, and the next reader trusts it.
@@ -254,6 +261,100 @@ describe("singleFlight ratchet — the scan itself", () => {
 			"class C {\n\t#ensureInFlight = new Map<string, Promise<void>>();\n}\n",
 		);
 		expect(found.map((d) => d.symbol)).toEqual(["ensureInFlight"]);
+	});
+
+	it.each([
+		[
+			"an override field",
+			"class C {\n\toverride inFlight: Promise<void> | null = null;\n}\n",
+		],
+		[
+			"a declare field",
+			"class C {\n\tdeclare inFlight: Map<string, Promise<void>>;\n}\n",
+		],
+		[
+			"an accessor field",
+			"class C {\n\taccessor inFlight = new Map<string, Promise<void>>();\n}\n",
+		],
+		[
+			"an unannotated modifier-less field",
+			"class C {\n\tinFlight = new Map<string, Promise<void>>();\n}\n",
+		],
+		["a one-line class", "class C { private inFlight = new Map(); }\n"],
+		[
+			"a second declarator",
+			"let ready = false, inFlight = new Map<string, Promise<void>>();\n",
+		],
+		["a module-level destructuring", "const { inFlight } = makeState();\n"],
+		[
+			"a multi-line constructor parameter property",
+			"class C {\n\tconstructor(\n\t\tprivate readonly inFlight = new Map<string, Promise<void>>(),\n\t) {}\n}\n",
+		],
+		[
+			"a one-line constructor parameter property",
+			"class C { constructor(private inFlight: Map<string, Promise<void>>) {} }\n",
+		],
+		[
+			"an override parameter property",
+			"class C extends B { constructor(override inFlight?: Promise<void>) { super(); } }\n",
+		],
+	])(
+		"counts a declaration the regex scan missed: %s (#4429)",
+		(_name, source) => {
+			// Shape 34: the regex enumerated three line-leading spellings; the AST
+			// reads the grammar position, so each of these is the same declaration.
+			expect(
+				findInFlightDeclarations("fake.ts", source).map((d) => d.symbol),
+			).toEqual(["inFlight"]);
+		},
+	);
+
+	it("reports a spelling it cannot classify, with its file and line (#4429)", () => {
+		// The fail-closed branch: an enum member and an import alias are
+		// positions the role table does not know, so they red, never skip.
+		const scan = classifyInFlightSpellings(
+			"fake.ts",
+			[
+				"const ready = true;",
+				"enum Phase { inFlight }",
+				'import inFlight = require("./state");',
+			].join("\n"),
+		);
+		expect(scan.declarations).toEqual([]);
+		expect(scan.unclassified).toEqual([
+			"unclassified spelling at fake.ts:2: enum Phase { inFlight } (property_identifier under enum_body)",
+			'unclassified spelling at fake.ts:3: import inFlight = require("./state"); (identifier under import_require_clause)',
+		]);
+	});
+
+	it("ignores an unclassifiable spelling inside a comment or a string (#4429)", () => {
+		const scan = classifyInFlightSpellings(
+			"fake.ts",
+			[
+				"// enum Phase { inFlight }",
+				'/* import inFlight = require("./state"); */',
+				'const text = "enum Phase { inFlight }";',
+			].join("\n"),
+		);
+		expect(scan).toEqual({ declarations: [], unclassified: [] });
+	});
+
+	it("classifies parameters and function locals as locals, not state (#4429)", () => {
+		// `lsp/client-registry.ts`'s `onSpawnInFlight` parameter was a regex
+		// false positive with an exemption; a parameter holds no module state.
+		const scan = classifyInFlightSpellings(
+			"fake.ts",
+			[
+				"function f(",
+				"\tonSpawnInFlight?: (id: string) => void,",
+				") {",
+				"\tconst inFlight = new Map();",
+				"\ttry {} catch (inFlightError) {}",
+				"\tfor (const inFlightItem of inFlight.values()) void inFlightItem;",
+				"}",
+			].join("\n"),
+		);
+		expect(scan).toEqual({ declarations: [], unclassified: [] });
 	});
 
 	it("does not fire on a bare assignment to an existing field", () => {

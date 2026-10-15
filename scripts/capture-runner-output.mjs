@@ -118,6 +118,19 @@ export function redactWorkspace(text, workspace) {
 }
 
 /**
+ * The argv to spawn: every `WORKSPACE_TOKEN` in an argument becomes the
+ * workspace, so `__WORKSPACE__/bad.fish` is that file's absolute path (#4454).
+ *
+ * A runner that hands its tool an ABSOLUTE path (helm lint `<chart root>`) can
+ * only be captured by spawning with the workspace's absolute path, while the
+ * recorded argv must stay machine-neutral. The token stands for the workspace
+ * in the recorded argv, and the replay maps it back to its own temp dir.
+ */
+export function expandWorkspaceArgs(argv, workspace) {
+	return argv.map((arg) => arg.split(WORKSPACE_TOKEN).join(workspace));
+}
+
+/**
  * Whether this spawn needs a shell.
  *
  * On Windows an npm-installed tool is a `.cmd` shim that `spawnSync` cannot
@@ -230,7 +243,12 @@ function main() {
 		process.exit(2);
 	}
 
-	const run = spawnCaptured(bin, rest, cwd, shellOverride);
+	const run = spawnCaptured(
+		bin,
+		expandWorkspaceArgs(rest, cwd),
+		cwd,
+		shellOverride,
+	);
 	if (run.error) {
 		console.error(`spawn failed: ${run.error.message}`);
 		process.exit(2);

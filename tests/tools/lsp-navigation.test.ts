@@ -2,10 +2,18 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { removeTempDirSync } from "../clients/test-utils.js";
 import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 import { CacheManager } from "../../clients/cache-manager.js";
+import {
+	_resetDeferredForTests,
+	_resetStateCacheForTests,
+} from "../../clients/diagnostic-dispositions.js";
+import {
+	_setRecentPhasesForTest,
+	getRecentLoggedPhases,
+} from "../../clients/latency-logger.js";
 import { hashDiagnosticContent } from "../../clients/lsp/diagnostic-binding.js";
 import { normalizeMapKey } from "../../clients/path-utils.js";
 import { readChangesSince } from "../../clients/project-changes.js";
@@ -19,6 +27,7 @@ vi.mock("../../clients/lsp/capabilities.js", () => ({
 	getLSPService: () => mocked.service,
 }));
 
+import { createLensDiagnosticMarkTool } from "../../tools/lens-diagnostic-mark.js";
 import { createLspNavigationTool } from "../../tools/lsp-navigation.js";
 
 const tmpPath = (name: string): string => path.join(os.tmpdir(), name);
@@ -458,6 +467,11 @@ describe("lsp_navigation tool", () => {
 
 	it("reports an empty declaration result with the no-results reason", async () => {
 		const tool = createLspNavigationTool((flag) => flag === "lens-lsp");
+		// A server answered: the service has a client for the file. With no
+		// client (`null`), an empty answer is no_server (#4403 round 5, V5).
+		(
+			mocked.service as { getOperationSupport: ReturnType<typeof vi.fn> }
+		).getOperationSupport = vi.fn().mockResolvedValue({ declaration: true });
 
 		const result = await tool.execute(
 			"declaration-empty",
@@ -1683,4 +1697,170 @@ describe("lsp_navigation tool", () => {
 	// tests/clients/lsp/integration.test.ts ("records a server-initiated
 	// edit on a sibling package when the mutation context's isRecordable
 	// judges against the project root, not cwd").
+});
+
+// #1634: every diagnostics read routes through the shared finding policy or
+// carries an age label. `lsp_navigation workspaceDiagnostics` did neither: the
+// path read rendered raw server findings with no disposition, rule-policy or
+// inline `pi-lens-ignore` filter (the stack `lens_diagnostics source=lsp`
+// applies since #3088), and the tracked snapshot replayed client-published rows
+// of unknown age. Recurrence it prevents: an agent that marked a finding
+// `false-positive` saw it again on this route, and a snapshot row published
+// before an out-of-band edit read as current.
+describe("lsp_navigation workspaceDiagnostics delivery gate (#1634)", () => {
+	const MARKED = "Type 'string' is not assignable to type 'number'.";
+	const KEPT = "Cannot find name 'other'.";
+	let cwd: string;
+	let filePath: string;
+	let previousDataDir: string | undefined;
+
+	const serverDiagnostics = () => [
+		{
+			severity: 1,
+			message: MARKED,
+			source: "typescript",
+			code: 2322,
+			range: {
+				start: { line: 0, character: 6 },
+				end: { line: 0, character: 11 },
+			},
+		},
+		{
+			severity: 1,
+			message: KEPT,
+			source: "typescript",
+			code: 2304,
+			range: {
+				start: { line: 1, character: 13 },
+				end: { line: 1, character: 18 },
+			},
+		},
+	];
+
+	beforeEach(async () => {
+		cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-1634-nav-"));
+		filePath = path.join(cwd, "app.ts");
+		fs.writeFileSync(
+			filePath,
+			"const value: number = 'bad';\nexport const other = 1;\n",
+		);
+		previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(cwd, "data");
+		mocked.service = makeLspServiceDouble({
+			supportsLSP: vi.fn().mockReturnValue(true),
+			getDiagnostics: vi.fn().mockResolvedValue([]),
+			getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
+			getWorkspaceDiagnosticsSupport: vi
+				.fn()
+				.mockResolvedValue({ mode: "push-only" }),
+		});
+		_resetDeferredForTests();
+		_resetStateCacheForTests();
+		// The phase ring is process state: an earlier case's record must not
+		// satisfy this case's trace assertion.
+		_setRecentPhasesForTest([]);
+		const marked = await createLensDiagnosticMarkTool(() => cwd).execute(
+			"mark-1634",
+			{
+				filePath,
+				line: 1,
+				message: MARKED,
+				rule: "typescript:2322",
+				tool: "lsp",
+				disposition: "false-positive",
+			},
+			undefined,
+			() => {},
+			{ cwd },
+		);
+		expect(marked.isError).toBeFalsy();
+	});
+
+	afterEach(() => {
+		if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+		else process.env.PILENS_DATA_DIR = previousDataDir;
+		_resetDeferredForTests();
+		_resetStateCacheForTests();
+		removeTempDirSync(cwd);
+	});
+
+	const resultMessages = (envelope: Record<string, unknown>): string[] =>
+		(envelope.result as Array<{ diagnostics: Array<{ message: string }> }>)
+			.flatMap((entry) => entry.diagnostics)
+			.map((diagnostic) => diagnostic.message);
+
+	it("drops a finding marked false-positive from the path read and states the count", async () => {
+		(mocked.service as { getDiagnostics: unknown }).getDiagnostics = vi
+			.fn()
+			.mockResolvedValue(serverDiagnostics());
+		(
+			mocked.service as { getWorkspaceDiagnosticsSupport: unknown }
+		).getWorkspaceDiagnosticsSupport = vi
+			.fn()
+			.mockResolvedValue({ mode: "pull" });
+
+		const result = await createLspNavigationTool(
+			(flag) => flag === "lens-lsp",
+		).execute(
+			"nav-1634-path",
+			{ operation: "workspaceDiagnostics", path: filePath },
+			new AbortController().signal,
+			null,
+			{ cwd },
+		);
+		const envelope = parseToolJson(result);
+
+		expect(resultMessages(envelope)).toEqual([KEPT]);
+		expect(result.details?.dispositionSuppressed).toBe(1);
+		expect(envelope.notes).toContainEqual(
+			expect.stringContaining("suppressed by disposition: 1 finding(s)"),
+		);
+		// The lane's bounded trace: one record for the file it filtered, named
+		// for the tool that rendered it (#4459 review F5).
+		expect(getRecentLoggedPhases()).toContainEqual(
+			expect.objectContaining({
+				phase: "lsp_probe_disposition_filter",
+				toolName: "lsp_navigation",
+				metadata: expect.objectContaining({ suppressed: 1 }),
+			}),
+		);
+	});
+
+	it("filters the tracked snapshot the same way and labels each file's age", async () => {
+		(mocked.service as { getAllDiagnostics: unknown }).getAllDiagnostics = vi
+			.fn()
+			.mockResolvedValue(
+				new Map([
+					[
+						filePath,
+						{ diags: serverDiagnostics(), ts: Date.now() - 5 * 60_000 },
+					],
+				]),
+			);
+
+		const result = await createLspNavigationTool(
+			(flag) => flag === "lens-lsp",
+		).execute(
+			"nav-1634-snapshot",
+			{ operation: "workspaceDiagnostics" },
+			new AbortController().signal,
+			null,
+			{ cwd },
+		);
+		const envelope = parseToolJson(result);
+		const [entry] = envelope.result as Array<{ lag?: string }>;
+
+		expect(resultMessages(envelope)).toEqual([KEPT]);
+		expect(entry?.lag).toBe("scanned 5m ago");
+		expect(result.details?.dispositionSuppressed).toBe(1);
+		expect(envelope.notes).toContainEqual(
+			expect.stringContaining("suppressed by disposition: 1 finding(s)"),
+		);
+		expect(getRecentLoggedPhases()).toContainEqual(
+			expect.objectContaining({
+				phase: "lsp_probe_disposition_filter",
+				toolName: "lsp_navigation",
+			}),
+		);
+	});
 });

@@ -144,7 +144,7 @@ const POPULATION_FILES = [
  * `probeToolAsync`, where this file admits it by name.
  */
 const EXPECTED_FILES = 79;
-const EXPECTED_DIRECT_SITES = 132;
+const EXPECTED_DIRECT_SITES = 133;
 /**
  * Every same-file spawn-routing wrapper call site the scan discovers. Pinned
  * as a LIST, not a count, because the list is the part round 2 got wrong: it

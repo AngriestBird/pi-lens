@@ -31,6 +31,18 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 const smoke = (dir) => `tests/fixtures/tool-smoke/${dir}`;
 
+/** `--output.<format>.path=` for every golangci-lint format except json. */
+const GOLANGCI_OTHER_FORMATS_OFF = [
+	"text",
+	"tab",
+	"html",
+	"checkstyle",
+	"code-climate",
+	"junit-xml",
+	"teamcity",
+	"sarif",
+].map((format) => `--output.${format}.path=`);
+
 /**
  * One capture. `argv` mirrors the runner's own invocation; `file` is the
  * workspace-relative path the runner is pointed at.
@@ -73,6 +85,241 @@ export const CAPTURES = [
 			"unix",
 			"bad.html",
 		],
+	},
+	{
+		// The runner prefers clang++, then g++, then c++; any of them emits the
+		// `file:line:col: error:` shape, so a host with g++ captures it.
+		runner: "cpp-check",
+		tool: "g++",
+		workspace: smoke("cpp"),
+		file: "main.cpp",
+		argv: ["-fsyntax-only", "main.cpp"],
+	},
+	{
+		runner: "cue-vet",
+		tool: "cue",
+		versionArgs: "version",
+		workspace: smoke("cue-vet"),
+		file: "bad.cue",
+		argv: ["vet", "-c=false", "."],
+	},
+	{
+		runner: "dotnet-build",
+		tool: "dotnet",
+		workspace: smoke("csharp"),
+		file: "Program.cs",
+		argv: ["build", "toolsmoke.csproj", "--nologo", "--verbosity", "minimal"],
+	},
+	{
+		runner: "dart-analyze",
+		tool: "dart",
+		workspace: smoke("dart"),
+		file: "bad.dart",
+		argv: ["analyze", "--format=machine", "bad.dart"],
+	},
+	{
+		runner: "javac",
+		tool: "javac",
+		versionArgs: "-version",
+		workspace: smoke("java"),
+		file: "Bad.java",
+		argv: ["-Xlint:none", "-proc:none", "Bad.java"],
+	},
+	{
+		// ktlint is a launcher script over `java -jar`, so a JDK must be on PATH.
+		runner: "ktlint",
+		tool: "ktlint",
+		workspace: smoke("kotlin"),
+		file: "Bad.kt",
+		argv: ["--reporter=json", "Bad.kt"],
+	},
+	{
+		// Needs Ruby on PATH; the gem's launcher is a Ruby script.
+		runner: "rubocop",
+		tool: "rubocop",
+		workspace: smoke("ruby"),
+		file: "bad.rb",
+		argv: ["--format", "json", "--no-color", "bad.rb"],
+	},
+	{
+		runner: "rust-clippy",
+		tool: "cargo",
+		workspace: smoke("rust"),
+		file: "src/main.rs",
+		argv: ["clippy", "--message-format=json", "-q"],
+	},
+	{
+		// Needs Erlang on PATH: gleam shells out to `escript` even for `check`.
+		runner: "gleam-check",
+		tool: "gleam",
+		workspace: smoke("gleam"),
+		file: "src/smoke.gleam",
+		argv: ["check"],
+	},
+	{
+		// The Mix path (`mix.exs` present). tool-smoke/elixir keeps bad.ex at the
+		// project root, which `mix compile` never reads, so this capture uses
+		// tool-smoke/elixir-mix, whose file sits under lib/. `mix --version`
+		// leads with the Erlang banner, so the version comes from Elixir itself.
+		runner: "elixir-check",
+		tool: "mix",
+		versionArgs: "run --no-compile --no-start -e IO.puts(System.version())",
+		workspace: smoke("elixir-mix"),
+		file: "lib/bad.ex",
+		argv: ["compile", "--warnings-as-errors"],
+	},
+	{
+		runner: "fish-indent",
+		tool: "fish_indent",
+		workspace: smoke("fish-indent"),
+		file: "unformatted.fish",
+		argv: ["--check", "unformatted.fish"],
+	},
+	{
+		// #4454 — the fish-lsp smoke fixture also has to be something fish_indent
+		// objects to. It was already formatted, so exit 0 and no finding.
+		runner: "fish-indent",
+		case: "smoke-bad",
+		tool: "fish_indent",
+		workspace: smoke("fish"),
+		file: "bad.fish",
+		argv: ["--check", "bad.fish"],
+	},
+	// #4454 — fish_indent --check never reports a syntax error (a missing `end`
+	// or an unterminated quote exits 0 with no output), so the runner also asks
+	// `fish --no-execute`, which parses without running anything. These four
+	// capture its real bytes for the three defects and for the fish-lsp smoke
+	// fixture. The file is already formatted in each, so fish_indent is silent.
+	{
+		runner: "fish-indent",
+		case: "syntax-missing-end",
+		tool: "fish",
+		workspace: smoke("fish-syntax"),
+		file: "missing-end.fish",
+		argv: ["--no-config", "--no-execute", "missing-end.fish"],
+	},
+	{
+		runner: "fish-indent",
+		case: "syntax-unterminated-quote",
+		tool: "fish",
+		workspace: smoke("fish-syntax"),
+		file: "unterminated-quote.fish",
+		argv: ["--no-config", "--no-execute", "unterminated-quote.fish"],
+	},
+	{
+		runner: "fish-indent",
+		case: "syntax-stray-end",
+		tool: "fish",
+		workspace: smoke("fish-syntax"),
+		file: "stray-end.fish",
+		argv: ["--no-config", "--no-execute", "stray-end.fish"],
+	},
+	{
+		// Production hands fish an ABSOLUTE path, and fish 3.3.1 (Ubuntu 22.04)
+		// then prints the header as `~` + that path. Captured with a 3.3.1
+		// binary only: `--bin-dir` selects one fish for every fish-indent
+		// entry, so run this entry alone with that binary and keep the other
+		// fixtures from the newer one.
+		runner: "fish-indent",
+		case: "syntax-stray-end-fish-3.3.1",
+		tool: "fish",
+		workspace: smoke("fish-syntax"),
+		file: "stray-end.fish",
+		argv: ["--no-config", "--no-execute", "__WORKSPACE__/stray-end.fish"],
+	},
+	{
+		runner: "fish-indent",
+		case: "syntax-smoke-bad",
+		tool: "fish",
+		workspace: smoke("fish"),
+		file: "bad.fish",
+		argv: ["--no-config", "--no-execute", "bad.fish"],
+	},
+	{
+		// #4455 — golangci-lint v2 removed `--out-format`; JSON now comes from
+		// `--output.json.path`, and the run stats it prints to stdout would
+		// otherwise trail the JSON document.
+		runner: "golangci-lint",
+		tool: "golangci-lint",
+		workspace: smoke("golangci-lint"),
+		file: "bad.go",
+		argv: [
+			"run",
+			"--output.json.path=stdout",
+			...GOLANGCI_OTHER_FORMATS_OFF,
+			"--show-stats=false",
+			"bad.go",
+		],
+	},
+	{
+		// A project config that prints a text format to stdout puts that text beside
+		// the JSON unless the runner switches the other formats off.
+		runner: "golangci-lint",
+		case: "config-text-stdout",
+		tool: "golangci-lint",
+		workspace: smoke("golangci-lint-text-stdout"),
+		file: "bad.go",
+		argv: [
+			"run",
+			"--output.json.path=stdout",
+			...GOLANGCI_OTHER_FORMATS_OFF,
+			"--show-stats=false",
+			"bad.go",
+		],
+	},
+	{
+		// #4453 — the runner lints the chart ROOT by absolute path, so the capture
+		// spawns with the workspace (the token) and the file is the template the
+		// replay points the runner at.
+		runner: "helm-lint",
+		tool: "helm",
+		versionArgs: "version --short",
+		workspace: smoke("helm"),
+		file: "templates/bad.yaml",
+		argv: ["lint", "__WORKSPACE__"],
+	},
+	{
+		// A template whose file name holds a space: helm prints the name unquoted
+		// inside `(<chart>/templates/my file.yaml:5)`.
+		runner: "helm-lint",
+		case: "space-in-name",
+		tool: "helm",
+		versionArgs: "version --short",
+		workspace: smoke("helm-space-name"),
+		file: "templates/my file.yaml",
+		argv: ["lint", "__WORKSPACE__"],
+	},
+	{
+		// The static build: the dynamic `swiftlint` needs libxml2 and SourceKit.
+		runner: "swiftlint",
+		tool: "swiftlint",
+		workspace: smoke("swiftlint"),
+		file: "bad.swift",
+		argv: ["--reporter", "json", "bad.swift"],
+	},
+	{
+		runner: "go-vet",
+		case: "type-error",
+		tool: "go",
+		versionArgs: "version",
+		workspace: smoke("go"),
+		file: "bad.go",
+		argv: ["vet", "."],
+		// #4451 — a Go type error prints `vet: ./bad.go:8:21: ...`, the prefixed
+		// shape the runner dropped. tool-smoke/go holds a type error, so go never
+		// reaches its analyzers there.
+		note: "type error: go vet prefixes the line with `vet: `",
+	},
+	{
+		// #4451 — the analyzer shape (`bad.go:9:14: ...`, no prefix), from a file
+		// that type-checks.
+		runner: "go-vet",
+		case: "printf-analyzer",
+		tool: "go",
+		versionArgs: "version",
+		workspace: smoke("go-vet-printf"),
+		file: "bad.go",
+		argv: ["vet", "."],
 	},
 	{
 		runner: "markdownlint",
@@ -233,6 +480,14 @@ export const CAPTURES = [
 		file: "bad.yaml",
 		argv: ["-f", "parsable", "bad.yaml"],
 	},
+	{
+		runner: "zig-check",
+		tool: "zig",
+		versionArgs: "version",
+		workspace: smoke("zig"),
+		file: "bad.zig",
+		argv: ["build-exe", "bad.zig", "-fno-emit-bin"],
+	},
 ];
 
 /** Directories searched for a tool binary, in order. */
@@ -301,6 +556,7 @@ function main() {
 					entry.file,
 					"--case",
 					entry.case ?? "real",
+					...(entry.versionArgs ? ["--version-args", entry.versionArgs] : []),
 					...(entry.note ? ["--note", entry.note] : []),
 					...(entry.shell ? ["--shell", entry.shell] : []),
 					"--",

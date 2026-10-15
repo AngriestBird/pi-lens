@@ -66,12 +66,13 @@
  *   still cannot resolve arbitrary aliases, so aliases remain conservative
  *   false positives. Quoted and commented helper names are excluded by
  *   `codeMatches`.
- * - Detector 6 reads the callee through `isViMockCall`, which needs the
- *   object to be the identifier `vi`: an alias (`const v = vi`,
- *   `import { vi as v }`, `(vi).mock`, `vi!.mock`, `(vi as any).mock`) is
- *   not seen (#4383 review F4; none in the tree today). `vi.spyOn` on a
- *   module namespace and `vi.mock` in `tests/support/` (the global setup
- *   mocks two modules) are out of scope.
+ * - Detector 6 reads the callee through `isViMockCall`: `vi` or `vitest`
+ *   written directly (parentheses and casts allowed). A callee reached
+ *   through a value (an alias, a destructure, a helper's parameter) is not
+ *   seen here (none in the tree today); the project-trust seam ratchet keys
+ *   on the mocked specifier instead, so it counts those (#4429 round 3).
+ *   `vi.spyOn` on a module namespace and `vi.mock` in `tests/support/` (the
+ *   global setup mocks two modules) are out of scope.
  * - Detector 7 reads one object literal at a time. A double split across
  *   literals (`const s = { ...a, getStatus }` where `a` holds the other
  *   members), built with `Object.assign`, written as a class
@@ -97,7 +98,7 @@ import { Lang, parse } from "@ast-grep/napi";
 
 import { bareIdentifier } from "./lsp-double-gate.js";
 import { unwrapParens } from "./spawn-cwd-scan.js";
-import { isViMockCall, unquote } from "./vi-mock-export-gate.js";
+import { isViMockCall, mockSpecifier, unquote } from "./vi-mock-export-gate.js";
 import {
 	createCallSiteScanner,
 	codeMatches,
@@ -751,32 +752,6 @@ export function mockTarget(file: string, specifier: string): string {
 		return relativePosix(repoRoot, absolute).replace(/\.[cm]?[jt]s$/, "");
 	}
 	return specifier;
-}
-
-/**
- * The module a `vi.mock`/`vi.doMock` call names: a string, a template with no
- * substitution, or vitest's typed `import("…")` form. Anything else (a
- * variable, a computed template) is unreadable and returns `undefined`, which
- * the detector counts as in-process: unknown fails closed.
- */
-function mockSpecifier(arg: SgNode | undefined): string | undefined {
-	if (!arg) return undefined;
-	const node = unwrapParens(arg);
-	if (node.kind() === "string") return unquote(node.text());
-	if (node.kind() === "template_string") {
-		return node
-			.children()
-			.some((child) => child.kind() === "template_substitution")
-			? undefined
-			: unquote(node.text());
-	}
-	if (
-		node.kind() === "call_expression" &&
-		node.field("function")?.kind() === "import"
-	) {
-		return mockSpecifier(node.field("arguments")?.namedChildren()[0]);
-	}
-	return undefined;
 }
 
 // `vi.mock`, `vi.doMock`, `vi["mock"]`: every spelling keeps `vi` followed by

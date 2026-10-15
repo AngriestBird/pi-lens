@@ -166,7 +166,7 @@ describe("topology-derived cache re-arm (#2263)", () => {
 
 			const runtime = {
 				sessionGeneration: 0,
-				complexityBaselines: new Map(),
+				complexityBaselines: new Set(),
 				resetForSession() {
 					(this as { sessionGeneration: number }).sessionGeneration += 1;
 				},

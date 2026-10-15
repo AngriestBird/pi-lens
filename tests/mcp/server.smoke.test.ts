@@ -27,6 +27,9 @@ import {
 import { setupTestEnvironment } from "../clients/test-utils.js";
 import { McpHarness, repoRoot } from "./harness.js";
 import { isProcessAlive } from "../support/process-tree.js";
+import { projectScan } from "../../clients/lens-engine.js";
+import { _resetStateCacheForTests } from "../../clients/diagnostic-dispositions.js";
+import { createLensDiagnosticMarkTool } from "../../tools/lens-diagnostic-mark.js";
 import { stripSource } from "../support/sweep-kit.js";
 
 // Spawns the MCP server as a real stdio subprocess; like analyze-cli, it can lose
@@ -456,6 +459,71 @@ describe("pi-lens MCP server (stdio smoke)", { retry: 2 }, () => {
 			expect(text).not.toMatch(/(?<![A-Za-z0-9_])lens_diagnostics/);
 		} finally {
 			isolated.dispose();
+			fs.rmSync(cwd, { recursive: true, force: true });
+		}
+	}, 60_000);
+
+	it("pilens_project_scan drops a marked finding and states the count (#1634)", async () => {
+		// #1634 recurrence: this tool rendered the raw cheap scan, so a finding
+		// marked false-positive through lens_diagnostic_mark came back here
+		// while every other surface dropped it. The mark is written in-process
+		// into the data directory the spawned server then reads.
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-mcp-1634-"));
+		const dataDir = path.join(cwd, ".data");
+		const filePath = path.join(cwd, "a.ts");
+		fs.writeFileSync(
+			filePath,
+			"export function f(x: unknown) {\n\tconsole.log(x);\n\treturn x;\n}\n",
+		);
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = dataDir;
+		_resetStateCacheForTests();
+		let isolated: McpHarness | undefined;
+		try {
+			const target = (await projectScan(cwd)).diagnostics.find(
+				(d) => d.filePath === filePath,
+			);
+			expect(target).toBeDefined();
+			if (!target) return;
+			const marked = await createLensDiagnosticMarkTool(() => cwd).execute(
+				"mark-1634-mcp",
+				{
+					filePath,
+					line: target.line,
+					message: target.message,
+					rule: target.rule,
+					tool: target.tool,
+					disposition: "false-positive",
+				},
+				undefined,
+				() => {},
+				{ cwd },
+			);
+			expect(marked.isError).toBeFalsy();
+			isolated = new McpHarness({ cwd, env: { PILENS_DATA_DIR: dataDir } });
+			await isolated.request(52, "initialize", {
+				protocolVersion: "2025-06-18",
+				capabilities: {},
+				clientInfo: { name: "scan-1634-test", version: "0" },
+			});
+			const response = await isolated.request(53, "tools/call", {
+				name: "pilens_project_scan",
+				arguments: { cwd },
+			});
+			const result = response.result as {
+				isError?: boolean;
+				content: { text: string }[];
+			};
+			expect(result.isError).toBeFalsy();
+			const text = result.content.map((part) => part.text).join("\n");
+			expect(text).toContain("suppressed by disposition: 1 finding(s)");
+			expect(text).not.toContain(target.message);
+			expect(text).toContain('"dispositionSuppressed": 1');
+		} finally {
+			isolated?.dispose();
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			_resetStateCacheForTests();
 			fs.rmSync(cwd, { recursive: true, force: true });
 		}
 	}, 60_000);

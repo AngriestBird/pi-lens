@@ -12,7 +12,6 @@ import { logActionableWarningsEvent } from "./actionable-warnings-logger.js";
 import {
 	appendCodeQualityWarningsHistory,
 	buildCodeQualityWarningsReport,
-	type CodeQualityWarningRecord,
 	formatCodeQualityWarningsAdvisory,
 	writeCodeQualityWarningsReport,
 } from "./code-quality-warnings.js";
@@ -150,9 +149,14 @@ import {
 	type PersistentReverifyResult,
 	runPersistentReverify,
 } from "./persistent-reverify.js";
-import { cascadeCarrySuffix } from "./cascade-format.js";
+import {
+	cascadeCarrySuffix,
+	markCascadeUnansweredPrimariesDelivered,
+	renderCascadeResult,
+} from "./cascade-format.js";
 import {
 	applyPushedFindingPolicy,
+	applyPushedFindingPolicyByFile,
 	filterFindingsByDisposition,
 } from "./dispatch/finding-policy.js";
 import { detectFileRole } from "./file-role.js";
@@ -531,10 +535,31 @@ function lateDeadCodeScansOf(
  * them. `scannedAt` is the initiator's read stamp, which a joiner inherits
  * (#3600); a result without one never reached a scan.
  */
-function joinedEarlierScan(result: DeadCodeResult, askedAt: number): boolean {
+function joinedEarlierScan(
+	result: { scannedAt?: string },
+	askedAt: number,
+): boolean {
 	return (
 		result.scannedAt !== undefined && Date.parse(result.scannedAt) < askedAt
 	);
+}
+
+const KNIP_CARRIED_FILES = "knip-carried-files";
+
+/**
+ * #4166: per scan root, the files of the last turn that joined a knip scan
+ * already running when the lane asked (J1's rule, as the dead-code lane
+ * applies it). The joined scan may have read the tree before those edits, so
+ * the root's next scan attributes them with its own turn's files. A scan the
+ * lane started itself clears the entry once it succeeds. Lives on the session
+ * scope, so a replaced session starts with none.
+ */
+function knipCarriedFilesOf(scope: SessionScope): Map<string, Set<string>> {
+	return scopeCell(
+		scope,
+		KNIP_CARRIED_FILES,
+		() => new Map<string, Set<string>>(),
+	) as Map<string, Set<string>>;
 }
 
 /**
@@ -1879,26 +1904,39 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		let injectedNeighborCount = 0;
 		let injectedDiagnosticCount = 0;
 		let suppressedByOwnership = 0;
+		// #4403 round 5 (V1): the servers whose "no language server answered"
+		// line this section shows. They are marked delivered only when the
+		// section reaches the agent (the delivery hold below), so a run
+		// superseded at this turn_end, or a cut section, does not use up the
+		// line.
+		const shownUnansweredServerIds = new Set<string>();
+		// Round 6 (W2): the kept lines head the section (`renderCascadeResult`).
+		const unansweredLines: string[] = [];
 		for (const result of seen.values()) {
 			const pk = normalizeMapKey(result.filePath);
 			const ownsAny = result.neighbors.some(
 				(n) => neighborOwner.get(normalizeMapKey(n.filePath)) === pk,
 			);
-			if (ownsAny && result.formatted) {
-				// Fix B (#3167/#3168): a carried run's re-rendered blocker is labeled
-				// so the agent can tell it from a fresh observation — with the
-				// run's own observation age (#3168 F3).
-				const carryMeta = carriedMetaByResult.get(result);
-				const carrySuffix = cascadeCarrySuffix(
-					carryMeta?.carriedTurns,
-					carryMeta?.observedAt,
-				);
-				parts.push(
-					carrySuffix
-						? `${result.formatted}\n${carrySuffix}`
-						: result.formatted,
-				);
-				if (carrySuffix) carriedRunsRendered += 1;
+			const rendered =
+				ownsAny && result.formatted
+					? renderCascadeResult(result, shownUnansweredServerIds)
+					: undefined;
+			if (rendered && (rendered.text || rendered.lines.length > 0)) {
+				unansweredLines.push(...rendered.lines);
+				if (rendered.text) {
+					// Fix B (#3167/#3168): a carried run's re-rendered blocker is
+					// labeled so the agent can tell it from a fresh observation —
+					// with the run's own observation age (#3168 F3).
+					const carryMeta = carriedMetaByResult.get(result);
+					const carrySuffix = cascadeCarrySuffix(
+						carryMeta?.carriedTurns,
+						carryMeta?.observedAt,
+					);
+					parts.push(
+						carrySuffix ? `${rendered.text}\n${carrySuffix}` : rendered.text,
+					);
+					if (carrySuffix) carriedRunsRendered += 1;
+				}
 				const sectionRun = runByResult.get(result);
 				if (sectionRun) sectionRuns.push(sectionRun);
 				injectedNeighborCount += result.neighbors.length;
@@ -1957,12 +1995,16 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				parts.push(testSection);
 			}
 		}
+		if (unansweredLines.length > 0) parts.unshift(unansweredLines.join("\n"));
 		if (parts.length > 0) {
 			const section = parts.join("\n\n");
 			// @delivery-surface: runtime-turn:cascade-blocker
 			blockerParts.push(section);
+			const shownServerIds = [...shownUnansweredServerIds];
 			deliveryHolds.push({
 				part: section,
+				onDelivered: () =>
+					markCascadeUnansweredPrimariesDelivered(shownServerIds),
 				onHeld: () => {
 					for (const run of sectionRuns) runtime.appendCascadeRun(run);
 				},
@@ -2281,7 +2323,13 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		nestedWorktrees?: number;
 		/** #3872: files with issues dropped from the result for living in one. */
 		nestedFilesDropped?: number;
+		/** #4166: the scan joined was already running when the lane asked; its delta was delivered and the turn's files carried. */
+		joined?: boolean;
+		/** #4166: files now carried for the root's next scan. */
+		carried?: number;
 	};
+	// #4166: the entry scope, never one read after the knip await.
+	const knipCarried = knipCarriedFilesOf(turnScope);
 	// #3872: knip runs in the checkout that owns each edit. A linked worktree is
 	// its own project; the session root would walk it as a nested copy of the
 	// whole tree (live: +300 issues per worktree, a 7 s scan past a 3 s budget).
@@ -2300,12 +2348,17 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	const KNOWN_SLOW_KNIP_GRACE_MS = 1;
 	/** Issues each knip section names; a cut section parks exactly these (#3901). */
 	const KNIP_MAX_SHOWN = 5;
-	/** One checkout's finished scan: cache write, delta, delivery. `scanRoot === cwd` is the session checkout. */
+	/**
+	 * One checkout's finished scan: cache write, delta, delivery. `scanRoot ===
+	 * cwd` is the session checkout. `joined`: a successful scan that was already
+	 * running when the lane asked (#4166).
+	 */
 	const applyKnipResult = (
 		scanRoot: string,
 		prevKnip: CacheEntry<KnipResult> | null,
 		knipResult: KnipResult,
 		rowNow: { data: { success: boolean } } | null,
+		joined: boolean,
 	): KnipTurnMeta => {
 		// Never overwrite a good scan with a failure (#925, #1467): the last
 		// good result stays until a new successful scan replaces it. `rowNow` is
@@ -2356,7 +2409,11 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			const issueKey = (i: KnipIssue) =>
 				stableFindingKey(i.type, i.file, i.name, i.package);
 			const prevKeys = new Set((prevKnip?.data?.issues ?? []).map(issueKey));
-			const modifiedSet = new Set(files.map((f) => resolveRunnerPath(cwd, f)));
+			const modifiedSet = new Set(
+				[...files, ...(knipCarried.get(scanRoot) ?? [])].map((f) =>
+					resolveRunnerPath(cwd, f),
+				),
+			);
 
 			const newIssues = knipResult.issues.filter((issue) => {
 				if (prevKeys.has(issueKey(issue))) return false;
@@ -2480,6 +2537,19 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				);
 			}
 		}
+		// #4166 J1: a joined scan's delta is delivered above, against the row
+		// read when the lane asked, as for any scan. It may have read the tree
+		// before this turn's edits, so they are carried to the root's next scan;
+		// the row written above keeps that scan from re-delivering this delta.
+		// A carry this replaces needs no keeping: its files were edited before
+		// an earlier join settled, and the single flight (one scan per root)
+		// started this scan after that, so it read them and attributed them.
+		if (joined) {
+			const carry = new Set(files);
+			knipCarried.set(scanRoot, carry);
+			knipMeta.joined = true;
+			knipMeta.carried = carry.size;
+		} else if (knipResult.success) knipCarried.delete(scanRoot);
 		return knipMeta;
 	};
 	const logKnipRow = (
@@ -2599,11 +2669,21 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						});
 					}
 				} else {
+					// #4166: the single flight is process-wide, so the scan joined may
+					// have read the tree before this turn's edits (the previous turn's
+					// deferred scan, a fresh fetch). A memo hit is no join: its
+					// project sequence says nothing changed. A failure carries
+					// `scannedAt` too, but it attributes nothing.
+					const joined =
+						scanned.result.success &&
+						scanned.result.execution !== "cache" &&
+						joinedEarlierScan(scanned.result, startedAt);
 					metadata = applyKnipResult(
 						scanRoot,
 						prevKnip,
 						scanned.result,
 						scanned.row,
+						joined,
 					);
 				}
 			}
@@ -4791,29 +4871,11 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		// at the report INPUT so the advisory, the persisted report and the delta
 		// view all agree; the delta view's own filter then re-applies to the same
 		// set and is idempotent. Per file, because the anchor is content-bound.
-		const qualityWarningsByFile = new Map<string, CodeQualityWarningRecord[]>();
-		for (const warning of runtime.peekCodeQualityWarnings(sessionId)) {
-			const group = qualityWarningsByFile.get(warning.filePath);
-			if (group) group.push(warning);
-			else qualityWarningsByFile.set(warning.filePath, [warning]);
-		}
-		const qualityWarnings: CodeQualityWarningRecord[] = [];
-		let qualityDispositionSuppressed = 0;
-		for (const [filePath, group] of qualityWarningsByFile) {
-			let content: string | undefined;
-			try {
-				content = fs.readFileSync(filePath, "utf-8");
-			} catch {
-				content = undefined;
-			}
-			const { kept, suppressed } = applyPushedFindingPolicy(group, {
+		const { kept: qualityWarnings, suppressed: qualityDispositionSuppressed } =
+			applyPushedFindingPolicyByFile(
+				runtime.peekCodeQualityWarnings(sessionId),
 				cwd,
-				filePath,
-				content,
-			});
-			qualityWarnings.push(...kept);
-			qualityDispositionSuppressed += suppressed;
-		}
+			);
 		const qualityReport = buildCodeQualityWarningsReport({
 			cwd,
 			sessionId: runtime.telemetrySessionId,

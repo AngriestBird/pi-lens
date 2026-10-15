@@ -25,7 +25,7 @@ export const CAPTURED_OUTPUT_DIR = path.resolve(
 );
 
 /** Placeholder the capture script substitutes for its workspace path. */
-const WORKSPACE_TOKEN = "__WORKSPACE__";
+export const WORKSPACE_TOKEN = "__WORKSPACE__";
 
 /** Fields every provenance header must carry, all non-empty strings. */
 const REQUIRED_PROVENANCE_FIELDS = [

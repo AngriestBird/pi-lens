@@ -56,6 +56,8 @@ import {
 	applyCascadeDisplayPolicy,
 	formatCascadeNeighborDiagnostics,
 	recordCascadeFindingPolicy,
+	resetCascadeUnansweredPrimariesDelivered,
+	splitCascadeUnansweredPrimaries,
 } from "../cascade-format.js";
 import { logCascade } from "../cascade-logger.js";
 import type {
@@ -77,6 +79,13 @@ import {
 	touchCoverageGap,
 } from "../lsp/diagnostic-binding.js";
 import { getServersForFileWithConfig } from "../lsp/config.js";
+import {
+	classifyJsTsGlobalScope,
+	goPackageFiles,
+	goPackagePeersOf,
+	implicitScopeOf,
+	isGoSourceFile,
+} from "../lsp/implicit-scope.js";
 import { getLSPService } from "../lsp/capabilities.js";
 import { isExternalOrVendorFile, normalizeMapKey } from "../path-utils.js";
 import { getProjectIgnoreMatcher } from "../file-utils.js";
@@ -100,6 +109,7 @@ import {
 	buildReverseDependencyIndexFromGraph,
 	getAffectedFilesFromIndex,
 	patchReverseDependencyIndex,
+	rankFilesByReverseDependencyCentrality,
 	writeReverseDependencyIndexToSnapshot,
 	type ReverseDependencyIndex,
 } from "../reverse-deps.js";
@@ -525,6 +535,7 @@ export function resetDispatchBaselines(cwd?: string): void {
 	clearReverseDepsIndexCache();
 	clearModuleGraphCache();
 	recentlyCleanNeighborCache.clear();
+	resetCascadeUnansweredPrimariesDelivered();
 	primaryFilesThisTurn.clear();
 	cascadeSessionStats = {
 		runs: 0,
@@ -994,6 +1005,67 @@ async function updateWordIndexForCascade(args: {
 	onUpdated?.(wordIndex);
 }
 
+/**
+ * #4438: the most an ambient file's change adds to the cascade. Such a file
+ * reaches every JS/TS file of the project, so the expansion takes the most
+ * central ones by reverse-dependency rank and discloses the cut.
+ */
+const IMPLICIT_SCOPE_NEIGHBOR_CAP = MAX_FILES * 2;
+
+/**
+ * #4438: the files whose implicit scope holds `changedFile` (absolute), as
+ * `normalizeMapKey` spellings: a Go file's package peers that
+ * `goPackagePeersOf` admits in both directions (same package clause, both in
+ * the host build, a test file evidence only for test peers), and for
+ * a file whose global-scope role reads `"feeds"`, the JS/TS files of the
+ * reverse-dependency index, most central first, at most
+ * {@link IMPLICIT_SCOPE_NEIGHBOR_CAP}. `cut` is set when the cap left some out.
+ * Membership is {@link implicitScopeOf}, asked of each candidate. #4438 r2: a
+ * role that cannot be read (`"unknown"`) expands nothing; the cache's
+ * fail-closed answer is not this caller's.
+ */
+function implicitScopeDependentsOf(
+	changedFile: string,
+	index: ReverseDependencyIndex,
+): { files: string[]; cut?: { checked: number; total: number } } {
+	const changed = normalizeMapKey(changedFile);
+	if (isGoSourceFile(changed)) {
+		// #4438 r3: a dependent is a peer in the host build (`peerOf`) for
+		// which the changed file is evidence; the second test differs from the
+		// first for a test or build-excluded changed file.
+		const peerOf = goPackagePeersOf(changed);
+		return {
+			files: peerOf
+				? (goPackageFiles(nodePath.dirname(changedFile)) ?? [])
+						.map((file) => normalizeMapKey(file))
+						.filter(
+							(peer) =>
+								peerOf(peer) && goPackagePeersOf(peer)?.(changed) === true,
+						)
+				: [],
+		};
+	}
+	let changedFeeds: boolean | undefined;
+	const feeds = (): boolean =>
+		(changedFeeds ??= classifyJsTsGlobalScope(changedFile) === "feeds");
+	const reaches = (candidate: string) =>
+		implicitScopeOf(candidate, feeds)?.(changed) === true;
+	// A cost bound, not a filter: when the changed file feeds no global scope,
+	// `reaches` answers false for every candidate, so this skips ranking the
+	// whole index on every module write.
+	if (!feeds()) return { files: [] };
+	const reached = rankFilesByReverseDependencyCentrality(index).filter(reaches);
+	return reached.length > IMPLICIT_SCOPE_NEIGHBOR_CAP
+		? {
+				files: reached.slice(0, IMPLICIT_SCOPE_NEIGHBOR_CAP),
+				cut: {
+					checked: IMPLICIT_SCOPE_NEIGHBOR_CAP,
+					total: reached.length,
+				},
+			}
+		: { files: reached };
+}
+
 export async function computeCascadeForFile(
 	filePath: string,
 	cwd: string,
@@ -1164,6 +1236,9 @@ export async function computeCascadeForFile(
 		// would overstate what a larger budget could actually recover.
 		let cascadeBudgetTruncated = 0;
 		let transitiveTruncated = false;
+		// #4438: the implicit-scope expansion's cut, when an ambient file reached
+		// more JS/TS files than IMPLICIT_SCOPE_NEIGHBOR_CAP.
+		let implicitScopeCut: { checked: number; total: number } | undefined;
 		// #1462: the budget actually in force for THIS run and the settle time left
 		// when it was sized. Both are overwritten inside the graph branch below,
 		// which is the only path that reaches `cascade_result` — the other branch
@@ -1432,6 +1507,29 @@ export async function computeCascadeForFile(
 				});
 			}
 
+			// #4438: dependents no import names, through the one implicit-scope
+			// test (`lsp/implicit-scope.ts`) the diagnostics cache and the
+			// inline-blocker sweep read: a Go file's package peers, and the JS/TS
+			// files whose scope a changed ambient file feeds.
+			const implicitDependents = implicitScopeDependentsOf(
+				normalizedFile,
+				reverseDepsIndex,
+			);
+			implicitScopeCut = implicitDependents.cut;
+			if (implicitDependents.files.length > 0) {
+				impact.neighborFiles = [
+					...new Set([...impact.neighborFiles, ...implicitDependents.files]),
+				];
+				logCascade({
+					phase: "neighbor_snapshot",
+					filePath,
+					neighborFile: "[implicit-scope]",
+					diagnosticCount: implicitDependents.files.length,
+					autoPropagate: false,
+					metadata: { implicitScope: true, ...implicitDependents.cut },
+				});
+			}
+
 			// Symbol-level blast radius via LSP references (precision upgrade over
 			// file-level import edges). Only when changed symbols are detected.
 			// Keep the budget tight: 750ms per symbol, 1200ms total, max 3 symbols.
@@ -1630,7 +1728,11 @@ export async function computeCascadeForFile(
 				eligibleNeighbors.length - cascadeNeighbourBudget,
 			);
 			sortedNeighbors = eligibleNeighbors.slice(0, cascadeNeighbourBudget);
-			if (cascadeBudgetTruncated > 0 || transitiveTruncated) {
+			if (
+				cascadeBudgetTruncated > 0 ||
+				transitiveTruncated ||
+				implicitScopeCut
+			) {
 				const budget = {
 					candidateCount: cascadeCandidateCount,
 					eligibleCount: cascadeEligibleCount,
@@ -1648,6 +1750,11 @@ export async function computeCascadeForFile(
 					...(transitiveTruncated
 						? [
 								"transitive expansion was capped before all eligible dependents were enumerated",
+							]
+						: []),
+					...(implicitScopeCut
+						? [
+								`implicit-scope expansion checked ${implicitScopeCut.checked} of ${implicitScopeCut.total} JS/TS files`,
 							]
 						: []),
 				];
@@ -2144,6 +2251,7 @@ export async function computeCascadeForFile(
 						source: "cascade",
 						clientScope: "primary",
 						readStamp,
+						nameUnansweredPrimaries: true,
 					});
 					if (!rawDiags) {
 						// #3483: the idle reset can destroy the service this compute
@@ -2173,6 +2281,40 @@ export async function computeCascadeForFile(
 							diagnostics: [],
 							lspTouched: true as const,
 							inconclusive: true as const,
+							durationMs,
+						} satisfies CascadeResult["neighbors"][number];
+					}
+					// #4403 round 4 (N2): no primary answered, and the touch says
+					// why. That is not an inconclusive re-check of this neighbour;
+					// it holds for every file the server serves, so the run names
+					// the server once (`splitCascadeUnansweredPrimaries`) instead of
+					// listing each neighbour.
+					// `resolveTouchVerdict` gives this reason only with the ids.
+					if (rawDiags.inconclusiveReason === "primary-unavailable") {
+						const serverIds = rawDiags.inconclusiveServerIds ?? [];
+						const cause = rawDiags.primaryUnavailableCause ?? "unstarted";
+						const durationMs = Date.now() - neighborStart;
+						logCascade({
+							phase: "neighbor_touch",
+							filePath,
+							neighborFile: neighborPath,
+							diagnosticCount: 0,
+							durationMs,
+							lspTouched: true,
+							lspServerCount: configuredServerCount,
+							coldSnapshot: isColdSnapshot,
+							metadata: {
+								inconclusive: true,
+								...readInconclusiveAttribution(rawDiags),
+								primaryUnavailableCause: cause,
+							},
+						});
+						return {
+							filePath: neighborPath,
+							reason: neighborReason(importerSet, callerSet, neighborPath),
+							diagnostics: [],
+							lspTouched: true as const,
+							primaryUnavailable: { serverIds: [...serverIds], cause },
 							durationMs,
 						} satisfies CascadeResult["neighbors"][number];
 					}
@@ -2409,16 +2551,27 @@ export async function computeCascadeForFile(
 			inputTruncated: policyCounts.inputTruncated,
 		});
 
-		const visibleNeighbors = applyCascadeDeltaBaselines(neighbors);
+		// #4403 round 4 (N2): a neighbour no primary answered for has no
+		// diagnostics to baseline. It stays in the result only while the run
+		// names its server, so turn_end's ownership pass delivers the line.
+		const unansweredPrimaries = splitCascadeUnansweredPrimaries(neighbors);
+		const visibleNeighbors = [
+			...applyCascadeDeltaBaselines(unansweredPrimaries.answered),
+			...unansweredPrimaries.unanswered,
+		];
 
-		const formatted = formatCascadeResult(
-			cwd,
-			impact,
-			visibleNeighbors,
-			impact.neighborFiles.length,
-			policyCounts.suppressed,
-			policyCounts.inputTruncated,
-		);
+		const format = (unansweredPrimaryNote?: string): string =>
+			formatCascadeResult(
+				cwd,
+				impact,
+				visibleNeighbors,
+				impact.neighborFiles.length,
+				policyCounts.suppressed,
+				policyCounts.inputTruncated,
+				unansweredPrimaryNote,
+			);
+		const notes = unansweredPrimaries.notes;
+		const formatted = format(notes.map((note) => note.line).join("\n"));
 
 		// #1104 HONESTY: filtering a bound-false display candidate must not turn a
 		// degraded/indeterminate cascade into a clean-looking one (same doctrine as
@@ -2565,7 +2718,17 @@ export async function computeCascadeForFile(
 
 		return {
 			filePath,
-			result: { filePath, impact, neighbors: visibleNeighbors, formatted },
+			result: {
+				filePath,
+				impact,
+				neighbors: visibleNeighbors,
+				formatted,
+				// #4403 round 5 (V1): turn_end drops a line whose servers were
+				// delivered or already shown this turn (clients/cascade-format.ts).
+				...(notes.length > 0 && {
+					unansweredPrimaries: { notes, formattedWithoutNotes: format() },
+				}),
+			},
 			neighborCount: visibleNeighbors.length,
 			diagnosticCount: diagCount,
 			// #1023: even when some fallback neighbors surfaced, a degraded graph means
@@ -2733,11 +2896,18 @@ function formatCascadeResult(
 	 * 3, N1) — ERRORs the policy never LOOKED at.
 	 */
 	policyInputTruncated: number,
+	/** #4403 round 4 (N2): the lines naming primaries that did not answer. */
+	unansweredPrimaryNote = "",
 ): string {
-	const diagnosticsBlock = formatCascadeNeighborDiagnostics(cwd, neighbors, {
+	// @delivery-surface: dispatch-integration:in-lane-cascade
+	const neighborBlock = formatCascadeNeighborDiagnostics(cwd, neighbors, {
 		noun: "neighbor",
 		includeReason: true,
 	});
+	const diagnosticsBlock =
+		neighborBlock && unansweredPrimaryNote
+			? `${neighborBlock}\n${unansweredPrimaryNote}`
+			: neighborBlock || unansweredPrimaryNote;
 	// #3157 round 3, N1: an empty block is silence, and silence is a CLEAN
 	// verdict to the agent. That is honest only when everything was looked at.
 	// `policyInputTruncated > 0` means this run's own cost bound declined to

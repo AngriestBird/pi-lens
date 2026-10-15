@@ -326,7 +326,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/mcp/session.ts": 4,
 		"clients/metrics-client.ts": 7,
 		"clients/observed-mutation.ts": 7,
-		"clients/runtime-tool-call.ts": 13,
+		"clients/runtime-tool-call.ts": 12,
 		"clients/sgconfig.ts": 6,
 		"clients/widget-state.ts": 2,
 	},
@@ -522,7 +522,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/cache-manager.ts": 3,
 		"clients/cache-observability.ts": 2,
 		"clients/call-graph.ts": 4,
-		"clients/cascade-format.ts": 4,
+		// 4 -> 5 (#4403): `renderCascadeResult` keeps the notes whose servers
+		// are undelivered, an `Array.prototype.filter` call, not a delivery
+		// filter.
+		"clients/cascade-format.ts": 5,
 		"clients/code-quality-warnings.ts": 5,
 		"clients/codebase-model.ts": 4,
 		"clients/complexity-client.ts": 3,
@@ -553,7 +556,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/finding-policy.ts": 3,
 		"clients/dispatch/indent-detect.ts": 4,
 		"clients/dispatch/inline-suppressions.ts": 2,
-		"clients/dispatch/integration.ts": 18,
+		// 18 -> 20 (#4438): the cascade's implicit-scope dependents keep the Go
+		// peers and the ranked JS/TS files a change reaches, two
+		// `Array.prototype.filter` calls, not a delivery filter.
+		"clients/dispatch/integration.ts": 20,
 		"clients/dispatch/rule-policy.ts": 1,
 		"clients/dispatch/rules/high-fan-out.ts": 1,
 		"clients/dispatch/rules/missing-error-propagation.ts": 3,
@@ -629,6 +635,12 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/launch.ts": 2,
 		"clients/lsp/ruby-drive-dirs.ts": 1,
 		"clients/lsp/server.ts": 5,
+		// 1 (#4403): `disabledPrimaryServerIds` is an `Array.prototype.filter`
+		// over registered servers, not a delivery filter.
+		// 1 -> 3 (#4403 round 4): `disabledPrimaries` selects the file's
+		// primaries once, then splits them into disabled ones and the
+		// `fallbackFor` alternates standing in for a disabled owner.
+		"clients/lsp/session-roots.ts": 3,
 		"clients/lsp/tsserver-sync.ts": 1,
 		"clients/lsp/wait-policy/classification.ts": 1,
 		// 1 -> 2 (#3752): the count-vs-list merge adds one `result.warnings.filter`
@@ -960,9 +972,20 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/log-cleanup.ts": 9,
 		"clients/lsp-mutation.ts": 3,
 		"clients/lsp/client-registry.ts": 4,
-		"clients/lsp/config.ts": 9,
+		// 9 -> 3 (#4403): the file gates' `path.extname`/`basename` moved to
+		// clients/lsp/file-server-match.ts (3, with its own import) and the
+		// session-root walk to clients/lsp/session-roots.ts (6 -> 8).
+		"clients/lsp/config.ts": 3,
+		// #4346: resolves a Go importer's package directory to announce its peers.
+		"clients/lsp/created-import-targets.ts": 3,
 		"clients/lsp/edits.ts": 23,
+		"clients/lsp/file-server-match.ts": 3,
 		"clients/lsp/index.ts": 15,
+		// #4346: Go package directories and TS/JS extensions of the implicit
+		// dependency scope (same-package files, ambient declarations).
+		// 7 -> 8 (#4438 r2): a Go file name's `_GOOS`/`_GOARCH` suffix, read
+		// with `path.basename`, a filesystem path.
+		"clients/lsp/implicit-scope.ts": 8,
 		"clients/lsp/inferred-project.ts": 3,
 		"clients/lsp/jvm-runtime.ts": 19,
 		"clients/lsp/language.ts": 3,
@@ -975,8 +998,12 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 124 -> 125 (#4414): the Windows npm-global layout adds one `path.join` to
 		// `typescriptDirsForTsc`, the list of package dirs beside a resolved `tsc`.
 		"clients/lsp/server.ts": 125,
-		"clients/lsp/session-roots.ts": 6,
-		"clients/lsp/workspace-diagnostics-cache.ts": 13,
+		"clients/lsp/session-roots.ts": 8,
+		// 13 -> 15 (#4346): a creation's path joins the entry's dependency
+		// scope test (Go package directory, created-file stem/directory names).
+		"clients/lsp/workspace-diagnostics-cache.ts": 15,
+		// #4346: a creation record carries the created file's path.
+		"clients/lsp/workspace-diagnostics-session.ts": 2,
 		// 6 -> 5 (#3643): removed the obsolete ring path-comparison branch;
 		// dispatch identity now arrives on DispatchResult.
 		"clients/mcp/analyze.ts": 5,
@@ -1031,11 +1058,14 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/recent-touches.ts": 5,
 		"clients/reverse-deps.ts": 8,
 		"clients/review-graph-logger.ts": 2,
-		// 33 -> 36 (#4346): the importer pass names a created file by its stem and directory.
-		"clients/review-graph/builder.ts": 36,
+		// 33 -> 36 (#4346): the importer pass names a created file by its stem
+		// and directory; 36 -> 33 (#4346 final lane): that name test moved to
+		// import-resolvers.ts `fileAnswerNames`, shared with the LSP cache.
+		"clients/review-graph/builder.ts": 33,
 		"clients/review-graph/format.ts": 4,
 		"clients/review-graph/git-identity.ts": 10,
-		"clients/review-graph/import-resolvers.ts": 61,
+		// 61 -> 64 (#4346 final lane): `fileAnswerNames`, moved from builder.ts.
+		"clients/review-graph/import-resolvers.ts": 64,
 		"clients/review-graph/tsconfig-paths.ts": 35,
 		"clients/review-graph/workspace-modules.ts": 27,
 		"clients/ruff-client.ts": 4,
@@ -1121,7 +1151,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"tools/lens-diagnostic-mark.ts": 6,
 		"tools/lens-diagnostics.ts": 30,
 		"tools/lsp-diagnostics.ts": 10,
-		"tools/lsp-navigation.ts": 14,
+		// 14 -> 15 (#4403 round 5): `noServerAnsweredText` names the file by
+		// its `path.basename`, beside the install hint's own.
+		"tools/lsp-navigation.ts": 15,
 		"tools/module-report.ts": 29,
 		"tools/render-compact.ts": 3,
 		"tools/symbol-search.ts": 5,
@@ -1165,7 +1197,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/project-lens-config.ts": 8,
 		"clients/project-snapshot.ts": 10,
 		"clients/read-guard-tool-lines.ts": 4,
-		"clients/read-guard.ts": 24,
+		"clients/read-guard.ts": 23,
 		"clients/runtime-agent-end.ts": 56,
 		"clients/runtime-context.ts": 2,
 		// 17 -> 23 (#3218): `noteResolvedBlockerFile` reads the removed
@@ -1223,7 +1255,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/word-index.ts": 8,
 		"tools/lens-diagnostics.ts": 12,
 		"tools/lsp-navigation.ts": 9,
-		"mcp/server.ts": 22,
+		// 22 -> 23 (#1634): `pilens_project_scan` reads the policy's suppressed
+		// count off the scan result its handler already names `snapshot`.
+		"mcp/server.ts": 23,
 	},
 	status: {
 		// #3867 moved the coverage decision onto `hasUsableResult`: dispatcher.ts
@@ -1468,7 +1502,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/pipeline.ts": 6,
 		"clients/project-diagnostics/runner-adapters/call-graph-impact.ts": 1,
 		"clients/runtime-agent-end.ts": 6,
-		"clients/runtime-turn.ts": 21,
+		"clients/runtime-turn.ts": 16,
 		"clients/secret-findings.ts": 3,
 		"clients/widget-state.ts": 1,
 		"tools/ast-grep-search.ts": 6,

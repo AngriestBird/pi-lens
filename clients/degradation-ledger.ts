@@ -282,6 +282,14 @@ export type DegradationKind =
 	/** #2007: `git status` could not answer for that same decision. */
 	| "fact-store-pinned-over-budget"
 	/**
+	 * #4454: the fish runner could not find `fish` next to `fish_indent`, so it
+	 * checked formatting but not syntax (`fish_indent --check` reports no syntax
+	 * error). Subject is the tool; recorded once per session via
+	 * `recordDegradationOnce`, since the binary's absence does not change per
+	 * file.
+	 */
+	| "fish-syntax-check-unavailable"
+	/**
 	 * The blind review-graph read (`getCachedReviewGraph`) either DROPPED a
 	 * persisted snapshot because its git stamp names a different worktree, or
 	 * SERVED one whose stamp names a different HEAD (#1961). Subject is
@@ -395,6 +403,14 @@ export type DegradationKind =
 	 */
 	| "gradle-ktlint-scan-budget-exceeded"
 	| "grammar-blocked"
+	/**
+	 * #3096: `holdOwnChildPid` found the held-pid set full of still-live
+	 * groups and `BoundedSet.add` dropped the oldest, usually the longest-lived
+	 * LSP leader, so a group kill after that leader dies is refused. Counted;
+	 * subject is the call site (`lsp-spawn`), a fixed tiny set; the dropped
+	 * pids are in the reason and the per-call drop count in the metadata.
+	 */
+	| "held-own-pid-evicted"
 	/**
 	 * A selected formatter's executable was proven absent (#2413): its
 	 * `resolveCommand` probed every install location and PATH and found nothing,
@@ -1144,6 +1160,13 @@ export type DegradationKind =
 	 * mismatch) is diagnosable from the ledger alone.
 	 */
 	| "read-guard-record-cap-trim"
+	/**
+	 * #1649: a file the read-accounting scan (`scanFileLines`) would not read,
+	 * because its size is over the byte gate (V8's string limit, past which
+	 * the released whole-file read threw). Its reads count one line and keep no
+	 * line hashes, as they did before. Subject is the file; once per file.
+	 */
+	| "read-guard-scan-byte-gate"
 	/**
 	 * #3521: a deferred writer (the agent_settled sweep or the format, autofix
 	 * or LSP quick-fix drain) captured the read guard's branch epoch before a

@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
+import { blankMarkdown } from "../../scripts/lib/defect-shapes.mjs";
 import { stripSource } from "../support/sweep-kit.js";
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "../..");
@@ -10,13 +11,6 @@ function agentsText(): string {
 		process.env.PI_LENS_AGENTS_PATH ?? path.join(REPO_ROOT, "AGENTS.md"),
 		"utf8",
 	);
-}
-
-function blankMarkdown(text: string): string {
-	const blank = (value: string): string => value.replace(/[^\n]/g, " ");
-	return text
-		.replace(/<!--[\s\S]*?-->/g, blank)
-		.replace(/^```[^\n]*\n[\s\S]*?^```\s*$/gm, blank);
 }
 
 function shapeNumbers(text: string): number[] {
@@ -48,10 +42,10 @@ describe("AGENTS.md trigger-block governance (#3259)", () => {
 
 	it("keeps every numbered defect shape exactly once", () => {
 		const numbers = shapeNumbers(agentsText());
-		expect(numbers).toHaveLength(68);
-		expect(new Set(numbers).size).toBe(68);
+		expect(numbers).toHaveLength(70);
+		expect(new Set(numbers).size).toBe(70);
 		expect(numbers.sort((a, b) => a - b)).toEqual(
-			Array.from({ length: 68 }, (_, index) => index + 1),
+			Array.from({ length: 70 }, (_, index) => index + 1),
 		);
 	});
 
@@ -60,7 +54,7 @@ describe("AGENTS.md trigger-block governance (#3259)", () => {
 		const counterfeit = agentsText()
 			.replace(/^1\. \*\*.*$/m, "")
 			.concat("\n<!--\n1. **Counterfeit shape:** hidden comment\n-->\n");
-		expect(shapeNumbers(counterfeit)).toHaveLength(67);
+		expect(shapeNumbers(counterfeit)).toHaveLength(69);
 		expect(shapeNumbers(counterfeit)).not.toContain(1);
 	});
 

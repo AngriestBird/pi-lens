@@ -355,6 +355,16 @@ export function touchTmpHygieneOwnerMarker(
 		// ages this marker toward the orphan bound, which fails safe.
 	}
 }
+/**
+ * Lets the next lifecycle beat through the throttle. The registration case in
+ * tests/config/tmp-fixture-hygiene.test.ts needs a beat it can wait for: under
+ * a shuffle it can run within 250 ms of this file's load, when no hook has
+ * beaten yet (#4405 census, seed 606).
+ */
+export function resetTmpHygieneHeartbeatThrottle(): void {
+	tmpHygieneLastHeartbeatNs =
+		process.hrtime.bigint() - TMP_HYGIENE_OWNER_HEARTBEAT_NS;
+}
 beforeEach(() => touchTmpHygieneOwnerMarker());
 afterEach(() => touchTmpHygieneOwnerMarker());
 

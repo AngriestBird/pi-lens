@@ -166,7 +166,12 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
 
 // Cases install their own doubles for these modules with vi.doMock;
 // resetModules does not clear the mock registry, so drop them after each case
-// in every describe below (#2883).
+// in every describe below (#2883). EVERY module the file doMocks is listed:
+// a module unmocked only in the body of the case that mocks it, or in another
+// describe's beforeEach, leaks into whichever case a shuffle runs next and
+// that case rejects with `No "readHostModelIdentity" export is defined on the
+// "../clients/runtime-coordinator.js" mock` (#4405: 64 member rows over three
+// seeds).
 afterEach(async () => {
 	vi.doUnmock("../clients/bootstrap.js");
 	vi.doUnmock("../clients/bus-events-logger.js");
@@ -176,11 +181,17 @@ afterEach(async () => {
 	vi.doUnmock("../clients/diagnostic-tracker.js");
 	vi.doUnmock("../clients/dispatch/integration.js");
 	vi.doUnmock("../clients/extension-log.js");
+	vi.doUnmock("../clients/installer/index.js");
+	vi.doUnmock("../clients/latency-logger.js");
+	vi.doUnmock("../clients/lsp/capabilities.js");
 	vi.doUnmock("../clients/pipeline.js");
 	vi.doUnmock("../clients/quiet-window.js");
 	vi.doUnmock("../clients/runtime-agent-end.js");
+	vi.doUnmock("../clients/runtime-coordinator.js");
+	vi.doUnmock("../clients/runtime-session.js");
 	vi.doUnmock("../clients/runtime-turn.js");
 	vi.doUnmock("../clients/session-scope.js");
+	vi.doUnmock("../clients/turn-context.js");
 	// #4133: a jscpd scan started by the real bootstrap is fire-and-forget; wait
 	// for it before this test's fixture roots and the worker's tmp root are
 	// removed, so a kill cannot strand its report directory. Runs after every
@@ -2146,7 +2157,7 @@ describe("index.ts integration", () => {
 				RuntimeCoordinator: class {
 					projectRoot = tmpDir;
 					turnIndex = 0;
-					complexityBaselines = new Map();
+					complexityBaselines = new Set();
 					cachedExports = new Map();
 					readGuard = mockReadGuard;
 					shouldWarmLspOnRead() {
@@ -2227,6 +2238,8 @@ describe("index.ts integration", () => {
 					effectiveOffset: 1,
 					effectiveLimit: 6,
 				}),
+				// #1649: the tool_call's one pass is the capture; the guard takes none.
+				{ captureLineHashes: false },
 			);
 		},
 		INTEGRATION_TIMEOUT_MS,
@@ -2244,7 +2257,7 @@ describe("index.ts integration", () => {
 				RuntimeCoordinator: class {
 					projectRoot = tmpDir;
 					turnIndex = 0;
-					complexityBaselines = new Map();
+					complexityBaselines = new Set();
 					cachedExports = new Map();
 					readGuard = {
 						recordRead: () => {},
@@ -2356,7 +2369,7 @@ describe("index.ts integration", () => {
 				RuntimeCoordinator: class {
 					projectRoot = tmpDir;
 					turnIndex = 0;
-					complexityBaselines = new Map();
+					complexityBaselines = new Set();
 					cachedExports = new Map();
 					readGuard = {
 						recordRead: () => {},
@@ -2483,7 +2496,7 @@ describe("index.ts integration", () => {
 				RuntimeCoordinator: class {
 					projectRoot = tmpDir;
 					turnIndex = 0;
-					complexityBaselines = new Map();
+					complexityBaselines = new Set();
 					cachedExports = new Map();
 					readGuard = {
 						recordRead: () => {},
@@ -2591,7 +2604,7 @@ describe("index.ts integration", () => {
 				RuntimeCoordinator: class {
 					projectRoot = tmpDir;
 					turnIndex = 0;
-					complexityBaselines = new Map();
+					complexityBaselines = new Set();
 					cachedExports = new Map();
 					readGuard = {
 						recordRead: () => {},
@@ -2694,7 +2707,7 @@ describe("index.ts integration", () => {
 				RuntimeCoordinator: class {
 					projectRoot = tmpDir;
 					turnIndex = 0;
-					complexityBaselines = new Map();
+					complexityBaselines = new Set();
 					cachedExports = new Map();
 					readGuard = {
 						recordRead: () => {},
@@ -2798,7 +2811,7 @@ describe("index.ts integration", () => {
 						return 0;
 					}
 					resetForSession() {}
-					complexityBaselines = new Map();
+					complexityBaselines = new Set();
 					projectRulesScan = { hasCustomRules: false, rules: [] };
 					cachedExports = new Map();
 					errorDebtBaseline = null;

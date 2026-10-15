@@ -19,24 +19,16 @@
  * started it. The file passes in any order, alone, and under
  * `--sequence.shuffle`. The switched-off cases also pin the two other places a
  * switched-off scanner showed through: the blocker coverage claim and the
- * cache key the workspace sweep shares, plus the
- * `lsp_navigation workspaceDiagnostics` route. The last cases drive pi's own
- * `lens_diagnostics` tool, registered by the real extension activation, so the
- * flag resolver pi injects is exercised end to end (the MCP half is
- * `tests/mcp/diagnostics-opengrep-disabled-4323.test.ts`).
+ * cache key the workspace sweep shares, plus warm-server and stored-row
+ * shapes of the `lsp_navigation workspaceDiagnostics` route. Which servers
+ * each route starts under each switch, through pi's and the MCP server's own
+ * flag resolvers, is the matrix in
+ * `tests/tools/diagnostics-route-switch-matrix.test.ts` (#4403).
  */
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import {
-	afterAll,
-	afterEach,
-	beforeAll,
-	beforeEach,
-	describe,
-	expect,
-	it,
-} from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
 	resetProjectTrust,
 	setProjectTrustState,
@@ -47,7 +39,6 @@ import {
 	cleanupTestEnvironmentsDrained,
 	setupTestEnvironment,
 } from "../clients/test-utils.js";
-import { createPiMock } from "../support/pi-mock.js";
 
 const fakeServer = fileURLToPath(
 	new URL("../fixtures/fake-lsp-server.mjs", import.meta.url),
@@ -321,13 +312,6 @@ describe("an explicit LSP check with Opengrep switched off (#4323)", () => {
 		expect(opengrepStarts()).toBe(0);
 	});
 
-	it("does not start Opengrep for a directory check", async () => {
-		const result = await diagnose({ path: nested }, noOpengrep);
-
-		expect(opengrepStarts()).toBe(0);
-		expect(result.text).not.toContain(OPENGREP_FINDING);
-	});
-
 	it("does not start Opengrep through the primary-only fallback read", async () => {
 		// No YAML server starts, so the touch acquires no client and the tool
 		// falls back to an unscoped `getDiagnostics` read.
@@ -348,13 +332,6 @@ describe("an explicit LSP check with Opengrep switched off (#4323)", () => {
 
 		expect(result.text).toContain("LSP unavailable for");
 		expect(result.text).toMatch(/ candidates=yaml\. /);
-	});
-
-	it("does not start Opengrep for lsp_navigation workspaceDiagnostics", async () => {
-		const text = await navigateDiagnostics(probe, noOpengrep);
-
-		expect(opengrepStarts()).toBe(0);
-		expect(text).not.toContain(OPENGREP_FINDING);
 	});
 
 	it("starts Opengrep and shows its finding when no switch is set", async () => {
@@ -529,67 +506,6 @@ describe("an explicit LSP check with Opengrep switched off (#4323)", () => {
 		);
 	});
 
-	describe("through pi's lens_diagnostics tool", () => {
-		const savedConfigPath = process.env.PI_LENS_CONFIG_PATH;
-
-		afterEach(() => {
-			if (savedConfigPath === undefined) delete process.env.PI_LENS_CONFIG_PATH;
-			else process.env.PI_LENS_CONFIG_PATH = savedConfigPath;
-		});
-
-		/**
-		 * `lens_diagnostics source=lsp` on `probe`, through the tool the real
-		 * extension registers. The harness points PI_LENS_CONFIG_PATH at a missing
-		 * file (tests/support/vitest-setup.ts), so a maintainer's own
-		 * `~/.pi-lens/config.json` cannot decide a case.
-		 */
-		async function piLensDiagnostics(
-			flags: Record<string, boolean | string>,
-		): Promise<string> {
-			const { default: extension } = await import("../../index.js");
-			const pi = createPiMock(flags);
-			extension(pi.asExtensionAPI());
-			const tool = pi.tools.get("lens_diagnostics") as {
-				execute: (...args: unknown[]) => Promise<{
-					content: Array<{ text?: string }>;
-				}>;
-			};
-			const result = await tool.execute(
-				"pi-4323",
-				{ source: "lsp", path: probe, waitMs: 3000 },
-				undefined,
-				null,
-				{ cwd: workspace },
-			);
-			return String(result.content[0]?.text);
-		}
-
-		it("does not start Opengrep under --no-opengrep", async () => {
-			const text = await piLensDiagnostics({ "no-opengrep": true });
-
-			expect(opengrepStarts()).toBe(0);
-			expect(text).not.toContain(OPENGREP_FINDING);
-		});
-
-		it("does not start Opengrep when the global config sets opengrep.enabled=false", async () => {
-			const configPath = path.join(workspace, "global-config.json");
-			fs.writeFileSync(configPath, '{"opengrep":{"enabled":false}}\n');
-			process.env.PI_LENS_CONFIG_PATH = configPath;
-
-			const text = await piLensDiagnostics({});
-
-			expect(opengrepStarts()).toBe(0);
-			expect(text).not.toContain(OPENGREP_FINDING);
-		});
-
-		it("starts Opengrep and shows its finding when no switch is set", async () => {
-			const text = await piLensDiagnostics({});
-
-			expect(opengrepStarts()).toBeGreaterThan(0);
-			expect(text).toContain(OPENGREP_FINDING);
-		});
-	});
-
 	describe("through the actionable-warnings cold read", () => {
 		/**
 		 * A turn-end build with code actions on, so the loop pulls each file cold.
@@ -613,12 +529,6 @@ describe("an explicit LSP check with Opengrep switched off (#4323)", () => {
 			});
 			await _awaitDeferredLspPullForTest();
 		}
-
-		it("does not start Opengrep when it is switched off", async () => {
-			await buildReport([probe], noOpengrep);
-
-			expect(opengrepStarts()).toBe(0);
-		});
 
 		it("does not start Opengrep for a cold file read after a primed one", async () => {
 			// The in-band loop: a primed file is read from the service's last-known
@@ -659,56 +569,6 @@ describe("an explicit LSP check with Opengrep switched off (#4323)", () => {
 			await buildReport([probe]);
 
 			expect(opengrepStarts()).toBeGreaterThan(0);
-		});
-
-		it("does not start Opengrep through pi's turn_end when the global config switches it off", async () => {
-			// The hook is the producer of `getFlag`: this pins that turn_end hands
-			// the build its flag reader. The edit's own pipeline pass honours the
-			// switch already, so the cold read is the only start left to see.
-			const savedConfigPath = process.env.PI_LENS_CONFIG_PATH;
-			const configPath = path.join(workspace, "turn-end-config.json");
-			fs.writeFileSync(configPath, '{"opengrep":{"enabled":false}}\n');
-			process.env.PI_LENS_CONFIG_PATH = configPath;
-			try {
-				const { default: extension } = await import("../../index.js");
-				const { makeSessionStartEvent } =
-					await import("../support/host-event-factory.js");
-				const { makeCtx } = await import("../support/pi-mock.js");
-				const { _awaitDeferredLspPullForTest } =
-					await import("../../clients/actionable-warnings.js");
-				const pi = createPiMock({
-					"lens-actionable-warnings": true,
-					"lens-actionable-warning-actions": true,
-				});
-				extension(pi.asExtensionAPI());
-				// The host's own trust decision, which session_start latches.
-				const ctx = makeCtx({
-					cwd: workspace,
-					sessionId: "turn-end-4323",
-					isProjectTrusted: true,
-				});
-				await pi.emit("session_start", makeSessionStartEvent(), ctx);
-				await pi.emit("turn_start", {}, ctx);
-				await pi.emit(
-					"tool_result",
-					{
-						toolName: "edit",
-						input: { path: probe },
-						details: { diff: "+  1 changed();" },
-						content: [{ type: "text", text: "changed" }],
-					},
-					ctx,
-				);
-				await pi.emit("turn_end", {}, ctx);
-				await _awaitDeferredLspPullForTest();
-				await pi.emit("session_shutdown", { reason: "quit" }, ctx);
-			} finally {
-				if (savedConfigPath === undefined)
-					delete process.env.PI_LENS_CONFIG_PATH;
-				else process.env.PI_LENS_CONFIG_PATH = savedConfigPath;
-			}
-
-			expect(opengrepStarts()).toBe(0);
 		});
 	});
 });
