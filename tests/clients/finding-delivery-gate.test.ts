@@ -406,6 +406,7 @@ function handleTurnEnd() {
 // constant still has a `content: [` array, and a file-local constant bound to
 // "text" is resolved. A constant imported from another file and a content
 // array built away from its `content:` key are not resolved (named residual).
+// Verify r2 plant (g): the host's message APIs are a sink of their own.
 
 const SINK_SHAPES: ReadonlyArray<{
 	name: string;
@@ -432,6 +433,13 @@ const SINK_SHAPES: ReadonlyArray<{
 		strings: "blank",
 	},
 	{ name: "host notification", pattern: /\.notify\(/, strings: "blank" },
+	// #4459 verify r2 plant (g): the host's message APIs put text in the
+	// agent's context; `sendMessage` built away from its `customType` key too.
+	{
+		name: "host message",
+		pattern: /\bsend(?:User)?Message\b/,
+		strings: "blank",
+	},
 	{
 		name: "rendered tool text",
 		pattern: /\brenderToolText\b/,
@@ -591,6 +599,11 @@ function censusProblems(
 // `noFindings` tool, must now reference no finding READ: a store getter, a
 // scanner, or a language server's diagnostics call. An exception is named
 // with its reason; one nothing needs any more fails as stale.
+//
+// Verify r2: a handler region also takes in the same-file helpers it reaches
+// and resolves renamed bindings (plants c and e), and the read list gained
+// the stores it missed (plant f). Named residual: a helper imported from
+// another module is not followed.
 
 /** Finding reads by defining module; each name is ground-truthed below. */
 const FINDING_READS: ReadonlyArray<{ module: string; names: string[] }> = [
@@ -616,6 +629,20 @@ const FINDING_READS: ReadonlyArray<{ module: string; names: string[] }> = [
 		names: ["scanProjectDiagnostics"],
 	},
 	{ module: "clients/lens-engine.ts", names: ["projectScan"] },
+	// #4459 verify r2 plant (f): stores the round-2 list missed.
+	{
+		module: "clients/lsp/workspace-diagnostics-cache.ts",
+		names: ["loadWorkspaceDiagnosticsCache"],
+	},
+	{
+		module: "clients/dispatch/pending-runner-findings.ts",
+		names: ["drainPendingRunnerFindings", "peekSettledRunnerFindings"],
+	},
+	{ module: "clients/diagnostic-tracker.ts", names: ["getDiagnosticTracker"] },
+	{
+		module: "clients/test-runner-delivery.ts",
+		names: ["consumeStagedTestRunnerFindings"],
+	},
 	{
 		module: "clients/runtime-context.ts",
 		names: [
@@ -642,11 +669,16 @@ const NO_FINDINGS_READ_EXEMPTIONS: Record<string, string> = {
 	"tools/lens-diagnostic-mark.ts::getFileDiagnostics":
 		"looks up the marked finding's live line to anchor the mark; the result " +
 		"confirms the disposition and renders no finding rows",
+	"clients/runtime-session.ts::getDiagnosticTracker":
+		"resets the session tracker at session start; reads no rows",
 };
 
 /**
  * The body of the `if (… name === "<tool>" …) { … }` handler in
- * `mcp/server.ts` (one handler may serve two tools, as the ast-grep pair does).
+ * `mcp/server.ts` (one handler may serve two tools, as the ast-grep pair does),
+ * with the same-file helpers it reaches and the original name of every
+ * renamed binding it uses. A helper imported from another module is not
+ * followed (named residual).
  */
 function mcpHandlerBody(raw: string, tool: string): string | undefined {
 	const kept = stripSource(raw, { strings: "keep" });
@@ -657,7 +689,109 @@ function mcpHandlerBody(raw: string, tool: string): string | undefined {
 	const open = match.index + match[0].length - 1;
 	const blanked = stripSource(raw);
 	const close = matchingCloseIndex(blanked, open, "{", "}");
-	return close < 0 ? undefined : blanked.slice(open, close + 1);
+	if (close < 0) return undefined;
+	return withOriginalNames(
+		withSameFileHelpers(blanked, blanked.slice(open, close + 1)),
+		renamedBindings(blanked),
+	);
+}
+
+const IDENT = "[A-Za-z_$][\\w$]*";
+
+/**
+ * `local → original` for every renamed binding in blanked `text`:
+ * `import { X as Y }` and `const { X: Y } = …` (a destructured dynamic import).
+ * #4459 verify r2 plant (c): `pilens_health` read the snapshot through
+ * `loadProjectDiagnosticsSnapshot as probeSnapshot`, and only the alias sits in
+ * the handler body.
+ */
+function renamedBindings(text: string): Map<string, string> {
+	const renames = new Map<string, string>();
+	for (const [, list] of text.matchAll(/\bimport\s+(?:type\s+)?\{([^}]*)\}/g)) {
+		for (const [, from, to] of list.matchAll(
+			new RegExp(`\\b(${IDENT})\\s+as\\s+(${IDENT})`, "g"),
+		)) {
+			renames.set(to, from);
+		}
+	}
+	for (const [, list] of text.matchAll(
+		/\b(?:const|let|var)\s*\{([^}]*)\}\s*=/g,
+	)) {
+		for (const [, from, to] of list.matchAll(
+			new RegExp(`\\b(${IDENT})\\s*:\\s*(${IDENT})`, "g"),
+		)) {
+			renames.set(to, from);
+		}
+	}
+	return renames;
+}
+
+const escapeIdent = (name: string) => name.replace(/\$/g, "\\$");
+
+/** `region` plus the original name of every rename it references. */
+function withOriginalNames(region: string, renames: Map<string, string>) {
+	const originals = [...renames]
+		.filter(([local]) => new RegExp(`\\b${escapeIdent(local)}\\b`).test(region))
+		.map(([, original]) => original);
+	return originals.length ? `${region}\n${originals.join(" ")}` : region;
+}
+
+/**
+ * Column-0 declarations in blanked `text` (oxfmt keeps top-level statements
+ * there), each spanning to the next column-0 statement.
+ */
+function topLevelDeclarations(
+	text: string,
+): Array<{ name: string; start: number; end: number }> {
+	const lines = text.split("\n");
+	const offsets: number[] = [];
+	let at = 0;
+	for (const line of lines) {
+		offsets.push(at);
+		at += line.length + 1;
+	}
+	const declaration = new RegExp(
+		`^(?:export\\s+)?(?:default\\s+)?(?:async\\s+)?(?:function\\*?\\s+(${IDENT})|(?:const|let|var|class)\\s+(${IDENT}))`,
+	);
+	const statementStarts = lines.flatMap((line, i) =>
+		/^[^\s})\]]/.test(line) ? [i] : [],
+	);
+	return lines.flatMap((line, i) => {
+		const m = declaration.exec(line);
+		if (!m) return [];
+		const next = statementStarts.find((j) => j > i);
+		return [
+			{
+				name: m[1] ?? m[2],
+				start: offsets[i],
+				end: next === undefined ? text.length : offsets[next],
+			},
+		];
+	});
+}
+
+/**
+ * `body` plus every top-level declaration of blanked `text` (its file) that it
+ * references, transitively. #4459 verify r2 plant (e):
+ * `pilens_health` delegated the read to a module-level helper. A handler that
+ * names its own dispatcher takes in every handler, since it can reach them.
+ */
+function withSameFileHelpers(text: string, body: string): string {
+	const helpers = topLevelDeclarations(text);
+	const taken = new Set<string>();
+	let region = body;
+	let frontier = body;
+	for (;;) {
+		const added = helpers.filter(
+			(d) =>
+				!taken.has(d.name) &&
+				new RegExp(`\\b${escapeIdent(d.name)}\\b`).test(frontier),
+		);
+		if (added.length === 0) return region;
+		for (const d of added) taken.add(d.name);
+		frontier = added.map((d) => text.slice(d.start, d.end)).join("\n");
+		region += `\n${frontier}`;
+	}
 }
 
 /** Every `noFindings` region under `root`, as comment-and-string-blanked text. */
@@ -932,6 +1066,122 @@ export const report = (cwd: string) => ({ content: [{ type: "text", text: String
 				"mcp/server.ts#pilens_health is classified noFindings but reads findings through getFileDiagnosticSummaries",
 			),
 		]);
+	});
+
+	// #4459 verify r2 plant (c), verbatim: only the alias is in the handler.
+	it("RED PROOF: a noFindings MCP handler reading through an import alias is flagged", () => {
+		const problems = withSyntheticTree(
+			{
+				"mcp/server.ts": `import { loadProjectDiagnosticsSnapshot as probeSnapshot } from "../clients/project-diagnostics/cache.js";
+async function call(name: string) {
+	if (name === "pilens_health") {
+		const snap = probeSnapshot(DEFAULT_CWD);
+		return toolText(String(snap?.diagnostics.length));
+	}
+}
+`,
+			},
+			(root) =>
+				noFindingsReadProblems(root, {}, { health: TOOL_CENSUS.health }, {}),
+		);
+		expect(problems).toEqual([
+			expect.stringContaining(
+				"mcp/server.ts#pilens_health is classified noFindings but reads findings through loadProjectDiagnosticsSnapshot",
+			),
+		]);
+	});
+
+	// Same shape as plant (c), renamed by a module-level destructure instead.
+	it("RED PROOF: a noFindings MCP handler reading through a destructured rename is flagged", () => {
+		const problems = withSyntheticTree(
+			{
+				"mcp/server.ts": `const { loadProjectDiagnosticsSnapshot: snap } = await import("../clients/project-diagnostics/cache.js");
+async function call(name: string) {
+	if (name === "pilens_health") {
+		return toolText(String(snap(DEFAULT_CWD)));
+	}
+}
+`,
+			},
+			(root) =>
+				noFindingsReadProblems(root, {}, { health: TOOL_CENSUS.health }, {}),
+		);
+		expect(problems).toEqual([
+			expect.stringContaining(
+				"mcp/server.ts#pilens_health is classified noFindings but reads findings through loadProjectDiagnosticsSnapshot",
+			),
+		]);
+	});
+
+	// #4459 verify r2 plant (e): the read sits in a helper two calls away, and
+	// the sibling handler in the same dispatcher stays clean.
+	it("RED PROOF: a noFindings MCP handler reading through same-file helpers is flagged", () => {
+		const problems = withSyntheticTree(
+			{
+				"mcp/server.ts": `function findingRows() {
+	return getFileDiagnosticSummaries();
+}
+
+function healthFindingsLine(): string {
+	return String(findingRows().length);
+}
+
+async function call(name: string) {
+	if (name === "pilens_health") {
+		return toolText(healthFindingsLine());
+	}
+	if (name === "pilens_latency") {
+		return toolText("ok");
+	}
+}
+`,
+			},
+			(root) =>
+				noFindingsReadProblems(
+					root,
+					{},
+					{ health: TOOL_CENSUS.health, latency: TOOL_CENSUS.latency },
+					{},
+				),
+		);
+		expect(problems).toEqual([
+			expect.stringContaining(
+				"mcp/server.ts#pilens_health is classified noFindings but reads findings through getFileDiagnosticSummaries",
+			),
+		]);
+	});
+
+	// #4459 verify r2 plant (f).
+	it("RED PROOF: a noFindings file that reads the workspace diagnostics cache is flagged", () => {
+		const problems = withSyntheticTree(
+			{
+				"tools/project-report.ts": `import { loadWorkspaceDiagnosticsCache } from "../clients/lsp/workspace-diagnostics-cache.js";
+export const report = (cwd: string) => ({ content: [{ type: "text", text: JSON.stringify(loadWorkspaceDiagnosticsCache(cwd)) }] });
+`,
+			},
+			(root) => noFindingsReadProblems(root, SINK_FILES, {}, {}),
+		);
+		expect(problems).toEqual([
+			expect.stringContaining(
+				"tools/project-report.ts is classified noFindings but reads findings through loadWorkspaceDiagnosticsCache",
+			),
+		]);
+	});
+
+	// #4459 verify r2 plant (g).
+	it("RED PROOF: a NEW file sending findings through the host's user message is unclassified", () => {
+		const problems = withSyntheticTree(
+			{
+				"clients/finding-steer.ts": `export function steer(pi: { sendUserMessage(text: string): void }, rawFindings: string) {
+	pi.sendUserMessage(rawFindings);
+}
+`,
+			},
+			(root) => censusProblems(root, {}, DELIVERY_SURFACES),
+		);
+		expect(problems.join("\n")).toContain(
+			"clients/finding-steer.ts (host message)",
+		);
 	});
 
 	it("RED PROOF: a read named only in a comment or a string is no read", () => {
