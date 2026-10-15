@@ -103,7 +103,7 @@ describe("owedRangesAfterDispatch", () => {
 	const run = (over: Partial<Parameters<typeof owedRangesAfterDispatch>[0]>) =>
 		owedRangesAfterDispatch({
 			noVerdict: [],
-			inFlight: [],
+			collectLater: [],
 			modifiedRanges: [{ start: 3, end: 4 }],
 			owed,
 			lineCount: () => 12,
@@ -133,7 +133,7 @@ describe("owedRangesAfterDispatch", () => {
 	});
 
 	it("owes nothing to a runner still in flight or one with a verdict", () => {
-		expect(run({ noVerdict: ["lsp"], inFlight: ["lsp"] }).size).toBe(0);
+		expect(run({ noVerdict: ["lsp"], collectLater: ["lsp"] }).size).toBe(0);
 		expect(run({}).size).toBe(0);
 	});
 

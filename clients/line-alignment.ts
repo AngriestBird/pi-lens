@@ -75,7 +75,7 @@ export function alignLines(
 		if (!Number.isInteger(index) || index < 0 || index >= n) return undefined;
 		if (index < prefix) return line;
 		if (index >= n - suffix) return index + (m - n) + 1;
-		const target = middle[index - prefix];
+		const target = middle[index - prefix] ?? -1;
 		return target === -1 ? undefined : prefix + target + 1;
 	};
 }
@@ -96,15 +96,17 @@ function myersMatches(
 	const limit = Math.min(n + m, maxEdits);
 	const offset = limit + 1;
 	const v = new Int32Array(2 * limit + 3);
+	// Every index read below lies inside `v`; `?? 0` only narrows the type.
+	const furthest = (k: number) => v[offset + k] ?? 0;
 	// trace[d] is v over k in [-(d+1), d+1] before step d.
 	const trace: Int32Array[] = [];
 	for (let d = 0; d <= limit; d += 1) {
 		trace.push(v.slice(offset - d - 1, offset + d + 2));
 		for (let k = -d; k <= d; k += 2) {
 			let x =
-				k === -d || (k !== d && v[offset + k - 1] < v[offset + k + 1])
-					? v[offset + k + 1]
-					: v[offset + k - 1] + 1;
+				k === -d || (k !== d && furthest(k - 1) < furthest(k + 1))
+					? furthest(k + 1)
+					: furthest(k - 1) + 1;
 			let y = x - k;
 			while (x < n && y < m && a[x] === b[y]) {
 				x += 1;
@@ -128,9 +130,9 @@ function backtrack(
 ): void {
 	let x = n;
 	let y = m;
-	for (let d = trace.length - 1; d >= 0; d -= 1) {
-		const v = trace[d];
-		const at = (k: number) => v[k + d + 1];
+	for (const [d, v] of [...trace.entries()].reverse()) {
+		// Every k read below lies in [-(d+1), d+1]; `?? 0` only narrows the type.
+		const at = (k: number) => v[k + d + 1] ?? 0;
 		const k = x - y;
 		const prevK =
 			k === -d || (k !== d && at(k - 1) < at(k + 1)) ? k + 1 : k - 1;
@@ -183,16 +185,16 @@ export function rangesOfLines(
  */
 export function owedRangesAfterDispatch(input: {
 	noVerdict: readonly string[];
-	inFlight: readonly string[];
+	collectLater: readonly string[];
 	modifiedRanges: ReadonlyArray<{ start: number; end: number }> | undefined;
 	owed: ReadonlyMap<string, ReadonlyArray<{ start: number; end: number }>>;
 	lineCount: () => number;
 	delivers: boolean;
 }): Map<string, { start: number; end: number }[]> {
-	const inFlight = new Set(input.inFlight);
+	const collectLater = new Set(input.collectLater);
 	const owedRanges = new Map<string, { start: number; end: number }[]>();
 	for (const runnerId of input.noVerdict) {
-		if (inFlight.has(runnerId)) continue;
+		if (collectLater.has(runnerId)) continue;
 		const lineCount = input.modifiedRanges ? 0 : input.lineCount();
 		const ranges = input.modifiedRanges
 			? rangesOfLines([

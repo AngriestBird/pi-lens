@@ -2008,7 +2008,7 @@ function anchorToPriorAnalysis(
 			const owedRanges = owedRangesAfterDispatch({
 				delivers,
 				noVerdict: sources?.runnerIds ?? [],
-				inFlight: sources?.inFlightRunnerIds ?? [],
+				collectLater: sources?.collectLaterRunnerIds ?? [],
 				modifiedRanges,
 				owed,
 				lineCount: () =>
@@ -2349,7 +2349,8 @@ async function analysePipeline(
 			sessionId: ctx.telemetry?.sessionId,
 			telemetryModel: ctx.telemetry?.modelId,
 			telemetryProvider: ctx.telemetry?.provider,
-			owedRanges: anchoring.owed,
+			// #4484 round 3 (R4): lines owed to runners that had no verdict.
+			owedRanges: anchoring.owed.size > 0 ? anchoring.owed : undefined,
 		},
 	);
 	// #4484: the store, the widget and the published set hold the file's

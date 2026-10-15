@@ -939,7 +939,7 @@ interface GroupResult {
 	inconclusiveRunnerIds: string[];
 	inconclusiveServerIds: string[];
 	/** #4484 round 3: the inconclusive runners still in flight (collect-later). */
-	inFlightRunnerIds: string[];
+	collectLaterRunnerIds: string[];
 }
 
 /**
@@ -985,7 +985,7 @@ async function runGroup(
 	const outOfEditScope: Diagnostic[] = [];
 	const inconclusiveRunnerIds: string[] = [];
 	const inconclusiveServerIds: string[] = [];
-	const inFlightRunnerIds: string[] = [];
+	const collectLaterRunnerIds: string[] = [];
 
 	// Filter runners by kind if specified
 	const runnerIds = group.filterKinds
@@ -1196,7 +1196,7 @@ async function runGroup(
 			recordRunner(ctx.filePath, runner.id, "pending", 0, 0, ctx.writeIndex);
 			// #4484 r2: a run still in flight has observed nothing yet.
 			inconclusiveRunnerIds.push(runner.id);
-			inFlightRunnerIds.push(runner.id);
+			collectLaterRunnerIds.push(runner.id);
 			logLatency({
 				type: "runner",
 				filePath: ctx.filePath,
@@ -1357,7 +1357,7 @@ async function runGroup(
 		outOfEditScope,
 		inconclusiveRunnerIds,
 		inconclusiveServerIds,
-		inFlightRunnerIds,
+		collectLaterRunnerIds,
 	};
 }
 
@@ -1532,7 +1532,7 @@ export async function dispatchForFile(
 	const outOfEditScope: Diagnostic[] = [];
 	const inconclusiveRunnerIds = new Set<string>();
 	const inconclusiveServerIds = new Set<string>();
-	const inFlightRunnerIds = new Set<string>();
+	const collectLaterRunnerIds = new Set<string>();
 	for (const {
 		diagnostics: groupDiags,
 		latencies,
@@ -1540,13 +1540,13 @@ export async function dispatchForFile(
 		outOfEditScope: groupOutOfScope,
 		inconclusiveRunnerIds: groupRunnerIds,
 		inconclusiveServerIds: groupServerIds,
-		inFlightRunnerIds: groupInFlight,
+		collectLaterRunnerIds: groupCollectLater,
 	} of groupResults) {
 		runnerLatencies.push(...latencies);
 		outOfEditScope.push(...groupOutOfScope);
 		for (const id of groupRunnerIds) inconclusiveRunnerIds.add(id);
 		for (const id of groupServerIds) inconclusiveServerIds.add(id);
-		for (const id of groupInFlight) inFlightRunnerIds.add(id);
+		for (const id of groupCollectLater) collectLaterRunnerIds.add(id);
 
 		allDiagnostics.push(...groupDiags);
 		if (hadBlocker) stopped = true;
@@ -1805,7 +1805,7 @@ export async function dispatchForFile(
 			inconclusiveSources: {
 				runnerIds: [...inconclusiveRunnerIds],
 				serverIds: [...inconclusiveServerIds],
-				inFlightRunnerIds: [...inFlightRunnerIds],
+				collectLaterRunnerIds: [...collectLaterRunnerIds],
 			},
 		}),
 		...(unconfirmedStatus !== undefined && { unconfirmedStatus }),

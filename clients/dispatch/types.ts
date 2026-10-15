@@ -162,7 +162,7 @@ export interface InconclusiveSources {
 	 * Their settled run answers for the write on its own, so the next write
 	 * owes them no lines.
 	 */
-	inFlightRunnerIds: readonly string[];
+	collectLaterRunnerIds: readonly string[];
 }
 
 export interface DispatchResult {

@@ -345,7 +345,7 @@ file-scoped worklist and receives no project-wide scanner output.
     has a verdict only with a stated not-applicable reason
     (`RUNNER_SKIP_REASONS`). A recorded blocker is still observed only at its
     own line, aligned to the current bytes: another occurrence of the same
-    rule is not it (#4484 round 3).
+    rule is not it.
     Enforced by `tests/clients/dispatch/runners/run-outcome-ratchet.test.ts`,
     `tests/clients/dispatch/runners/parsed-nothing-sweep.test.ts` and
     `tests/clients/delivery-surface-ratchet.test.ts` (partial: no detector

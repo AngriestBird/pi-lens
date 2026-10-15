@@ -1247,7 +1247,9 @@ describe("Dispatch Flow", () => {
 					{ mode: "all", runnerIds: ["slow"] },
 				]);
 				expect(result.inconclusiveSources?.runnerIds).toEqual(["slow"]);
-				expect(result.inconclusiveSources?.inFlightRunnerIds).toEqual(["slow"]);
+				expect(result.inconclusiveSources?.collectLaterRunnerIds).toEqual([
+					"slow",
+				]);
 			} finally {
 				resetObservedRunnerLatency();
 				resetPendingRunnerFindings();

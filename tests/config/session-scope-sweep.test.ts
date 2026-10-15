@@ -144,6 +144,7 @@ const ACTIVATION_STATE: Readonly<Record<string, string>> = {
  */
 const COORDINATOR_FIELDS: Readonly<Record<string, "reset" | string>> = {
 	_actionableWarningsThisTurn: "reset",
+	_analysisAnchors: "reset",
 	_autofixDemotedThisTurn: "reset",
 	_cachedExports: "reset",
 	_cascadeRuns: "reset",
