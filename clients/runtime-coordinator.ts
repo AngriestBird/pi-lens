@@ -23,6 +23,7 @@ import type { MutationKind } from "./mutating-tool.js";
 import { normalizeMapKey, pathsEqual } from "./path-utils.js";
 import { PathKeyedMap } from "./path-keyed-map.js";
 import { BoundedFifoMap, BoundedLruCache } from "./bounded-cache.js";
+import type { AnalysisAnchor } from "./line-alignment.js";
 import { PartialApplyRecordStore } from "./partial-edit-apply.js";
 import { ReadGuard } from "./read-guard.js";
 import type { RuleScanResult } from "./rules-scanner.js";
@@ -66,6 +67,8 @@ function nextTelemetrySessionId(): string {
  * oldest is evicted past it, and the eviction is counted by the caller.
  */
 export const MAX_CUT_ADVISORY_LANES = 16;
+/** #4484 round 3: files whose last inline verdict's anchor is kept. */
+export const MAX_ANALYSIS_ANCHORS = 256;
 
 /**
  * Every background startup scan name. `session_start` starts scans under these
@@ -649,6 +652,15 @@ export class RuntimeCoordinator {
 	private readonly _pendingInlineBlockers =
 		new PathKeyedMap<InlineBlockerRecord>(normalizeMapKey);
 	/**
+	 * #4484 round 3: per file, the anchor of its last applied inline verdict
+	 * (`setAnalysisAnchor`). Bounded LRU: an evicted file's next write takes
+	 * recorded lines as they are, counted as `blocker-position-unaligned`.
+	 */
+	private readonly _analysisAnchors = new BoundedLruCache<
+		string,
+		AnalysisAnchor
+	>(MAX_ANALYSIS_ANCHORS);
+	/**
 	 * #3507: one per-path order for BOTH verbs on `_pendingInlineBlockers`,
 	 * the widget store's guard shape (`widget-state.ts` diagnosticsWriteGuard).
 	 * Pipelines of two same-file edits overlap under pi's parallel tools, so
@@ -748,6 +760,7 @@ export class RuntimeCoordinator {
 		this._readWidenings.clear();
 		this._lspReadWarmState.clear();
 		this._pendingInlineBlockers.clear();
+		this._analysisAnchors.clear();
 		this._inlineBlockerWriteOrder.clear();
 		this._resolvedBlockerFilesThisTurn.clear();
 		this._resolvedBlockerFilesDropped = 0;
@@ -1698,11 +1711,37 @@ export class RuntimeCoordinator {
 	}
 
 	/**
+	 * #4484 round 3: the anchor of the file's last applied inline verdict: the
+	 * line hashes of the bytes it analysed, which its recorded blockers' lines
+	 * refer to, and the lines it still owes. The next write's pipeline aligns
+	 * to it.
+	 */
+	getAnalysisAnchor(filePath: string): AnalysisAnchor | undefined {
+		return this._analysisAnchors.get(normalizeMapKey(filePath));
+	}
+
+	/**
+	 * #4484 round 3: store the anchor of an inline verdict that just applied
+	 * (`recordInlineBlockers` or `clearInlineBlockers` returned applied), so it
+	 * always describes the bytes the record is about. Undefined drops it.
+	 */
+	setAnalysisAnchor(
+		filePath: string,
+		anchor: AnalysisAnchor | undefined,
+	): void {
+		const key = normalizeMapKey(filePath);
+		if (anchor) this._analysisAnchors.set(key, anchor);
+		else this._analysisAnchors.delete(key);
+	}
+
+	/**
 	 * #4484 round 2: a settled collect-later run is the observation that can
 	 * retire the blockers its runner left pending while it was in flight. Its
 	 * runner's recorded blockers that the run no longer observes leave the
 	 * record; blockers from other runners, and from a server the run left
-	 * unconfirmed, stay. The run must be about the recorded bytes: marked after
+	 * unconfirmed, stay. A blocker is still observed only at its own line, in
+	 * range or withheld by the run's edit-range gate (#4484 round 3). The run
+	 * must be about the recorded bytes: marked after
 	 * they were read (`recordedAtMs`), with the file still holding them
 	 * (`recordedHash`). An emptied record is deleted and its file is noted
 	 * Resolved for turn end, as a clean write's clear does.
@@ -1730,12 +1769,17 @@ export class RuntimeCoordinator {
 		)
 			return 0;
 		const unconfirmed = new Set(run.unconfirmedServerIds);
+		// #4484 round 3: the run is about the recorded bytes, so a recorded
+		// blocker's position is its own line.
 		const { kept, retired } = retainRecordedFindings(
 			existing.diagnostics,
 			run.observed,
-			(d) =>
-				d.runnerId !== run.runnerId ||
-				(d.serverId !== undefined && unconfirmed.has(d.serverId)),
+			{
+				positionOf: (d) => d.line,
+				keepUnobserved: (d) =>
+					d.runnerId !== run.runnerId ||
+					(d.serverId !== undefined && unconfirmed.has(d.serverId)),
+			},
 		);
 		if (retired.length === 0) return 0;
 		if (kept.length === 0) {

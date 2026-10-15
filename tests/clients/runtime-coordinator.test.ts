@@ -595,16 +595,32 @@ describe("RuntimeCoordinator", () => {
 		it("keeps a blocker the run still observes, as its observed copy", () => {
 			const runtime = new RuntimeCoordinator();
 			record(runtime, [blocker("lsp", "Cannot find name 'X'.")]);
-			const moved = { ...blocker("lsp", "Cannot  find name 'x'."), line: 7 };
+			const observed = blocker("lsp", "Cannot  find name 'x'.");
 			expect(
 				runtime.retireUnobservedRunnerBlockers(file, {
 					runnerId: "lsp",
-					observed: [moved],
+					observed: [observed],
 					markedAtMs: 2_000,
 					sha256,
 				}),
 			).toBe(0);
 			expect(runtime.getInlineBlockerDiagnostics(file)).toHaveLength(1);
+		});
+
+		// #4484 round 3 (R3): the run is about the recorded bytes, so the
+		// blocker is still observed only at its own line. Recurrence: another
+		// occurrence of the same rule kept a fixed blocker (review F1).
+		it("retires a blocker whose identity the run observes only at another line", () => {
+			const runtime = new RuntimeCoordinator();
+			record(runtime, [blocker("lsp", "Cannot find name 'X'.")]);
+			expect(
+				runtime.retireUnobservedRunnerBlockers(file, {
+					runnerId: "lsp",
+					observed: [{ ...blocker("lsp", "Cannot find name 'X'."), line: 7 }],
+					markedAtMs: 2_000,
+					sha256,
+				}),
+			).toBe(1);
 		});
 
 		it("refuses a run about other bytes, or marked before the record's read", () => {
@@ -639,6 +655,31 @@ describe("RuntimeCoordinator", () => {
 			).toBe(1);
 			expect(runtime.getInlineBlockersSnapshot()).toHaveLength(0);
 			expect(runtime.hasResolvedBlockerFiles()).toBe(true);
+		});
+	});
+
+	// #4484 round 3: the anchor follows the record. Recurrence: a new
+	// session's first write aligned its recorded lines (none) to a dead
+	// session's bytes, or an owed range outlived the session that owed it.
+	describe("analysis anchor (#4484 round 3)", () => {
+		const anchor = {
+			lineHashes: ["a", "b"],
+			owedRanges: new Map([["ast-grep-napi", [{ start: 2, end: 2 }]]]),
+		};
+
+		it("hands back the anchor stored for a file, under any spelling of its path", () => {
+			const runtime = new RuntimeCoordinator();
+			runtime.setAnalysisAnchor("/p/src/../src/a.ts", anchor);
+			expect(runtime.getAnalysisAnchor("/p/src/a.ts")).toBe(anchor);
+			runtime.setAnalysisAnchor("/p/src/a.ts", undefined);
+			expect(runtime.getAnalysisAnchor("/p/src/a.ts")).toBeUndefined();
+		});
+
+		it("drops every anchor at a session reset", () => {
+			const runtime = new RuntimeCoordinator();
+			runtime.setAnalysisAnchor("/p/a.ts", anchor);
+			runtime.resetForSession();
+			expect(runtime.getAnalysisAnchor("/p/a.ts")).toBeUndefined();
 		});
 	});
 

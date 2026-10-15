@@ -182,8 +182,10 @@ export function retireSettledRunnerBlockers(
 	const bytes = readBytes(pending.filePath);
 	const retired = runtime.retireUnobservedRunnerBlockers(pending.filePath, {
 		runnerId: pending.runnerId,
-		observed: verdict.kept.flatMap((d) =>
-			d.semantic === "blocking" ? [d] : [],
+		// #4484 round 3: what the run's edit-range gate withheld is still
+		// observed, at its own line.
+		observed: [...verdict.kept, ...(result.outOfEditScope ?? [])].flatMap(
+			(d) => (d.semantic === "blocking" ? [d] : []),
 		),
 		markedAtMs: pending.markedAtMs,
 		sha256: bytes

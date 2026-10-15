@@ -17,7 +17,11 @@ import * as nodeFs from "node:fs";
 import * as nodeCrypto from "node:crypto";
 import * as path from "node:path";
 import type { PiLensFlagSource } from "./lens-config.js";
-import { findNearestContaining, normalizeMapKey } from "./path-utils.js";
+import {
+	findNearestContaining,
+	normalizeEphemeralMapKey,
+	normalizeMapKey,
+} from "./path-utils.js";
 import {
 	inlineBlockerLines,
 	inlineBlockerSources,
@@ -39,6 +43,15 @@ import { writeOrderToken } from "./write-ordering-guard.js";
 import { getDiagnosticLogger } from "./diagnostic-logger.js";
 import { getDiagnosticTracker } from "./diagnostic-tracker.js";
 import { retainRecordedFindings } from "./finding-identity.js";
+import {
+	type AnalysisAnchor,
+	alignLines,
+	type LineMap,
+	lineHashesOf,
+	linesOfRanges,
+	owedRangesAfterDispatch,
+	rangesOfLines,
+} from "./line-alignment.js";
 import { loadDispatchIntegration } from "./dispatch/lazy.js";
 import { toRunnerDisplayPath } from "./dispatch/runner-context.js";
 import {
@@ -55,7 +68,11 @@ import {
 	resolveToolCommandWithInstallFallback,
 } from "./dispatch/runners/utils/runner-helpers.js";
 import { findDetektConfig } from "./dispatch/runners/detekt.js";
-import type { Diagnostic, PiAgentAPI } from "./dispatch/types.js";
+import type {
+	Diagnostic,
+	InconclusiveSources,
+	PiAgentAPI,
+} from "./dispatch/types.js";
 import {
 	formatDiagnostics,
 	formatPromotionNotes,
@@ -273,6 +290,13 @@ export interface PipelineContext {
 	 * a conclusive observation from its own source shows it gone.
 	 */
 	priorInlineBlockers?: () => readonly Diagnostic[] | undefined;
+	/**
+	 * #4484 round 3: the anchor of the file's last applied inline verdict,
+	 * read before the dispatch. It places each recorded blocker's line in the
+	 * current bytes (R2) and names the lines a run without a verdict still
+	 * owes, which join this run's range (R4).
+	 */
+	priorAnalysisAnchor?: () => AnalysisAnchor | undefined;
 	telemetry?: {
 		model: string;
 		sessionId: string;
@@ -435,6 +459,13 @@ export interface PipelineResult {
 	 * about a blocker that is still there.
 	 */
 	currentBlockerCount?: number;
+	/**
+	 * #4484 round 3: the anchor the inline verdict this run hands on is about
+	 * (the analysed bytes' line hashes and the lines still owed). The caller
+	 * stores it only when that verdict applied. Absent when the bytes are over
+	 * the hash cap and no line is owed.
+	 */
+	analysisAnchor?: AnalysisAnchor;
 	/** Fixable warning diagnostics introduced by this pipeline run. */
 	actionableWarnings?: ActionableWarningRecord[];
 	/** Non-fixable code-quality warnings introduced/touched by this pipeline run. */
@@ -1860,31 +1891,44 @@ function buildEnrichedBlockerOutput(
 // --- Main Pipeline ---
 
 /**
- * #4484 round 2: the recorded blockers this run leaves standing beyond what it
- * observed as blocking. A recorded blocker matched (line-agnostic identity) by
- * a blocker this run delivers or holds back is already in `observed`. One
- * matched only by `stillObserved` stays as its observed copy. One no finding
- * matches stays as recorded only when its runner or server reached no verdict;
- * that carry is counted per file.
+ * #4484: the recorded blockers this run leaves standing beyond what it
+ * observed as blocking (R3 in PR #4491's round-3 table). A recorded blocker
+ * matched by a blocker this run delivers or holds back, of the same identity
+ * at the blocker's position (`positionOf`), is already in `observed`; the
+ * observed copies matched this way are returned as `matched`. One matched only
+ * by `stillObserved` stays as its observed copy. One no finding matches stays,
+ * at its position when it has one, only when its runner or server reached no
+ * verdict; that carry is counted per file.
  */
 function carryRecordedBlockers(
 	prior: readonly Diagnostic[],
 	observed: readonly Diagnostic[],
 	dispatchResult: Pick<DispatchResult, "stillObserved" | "inconclusiveSources">,
 	filePath: string,
-): Diagnostic[] {
-	if (prior.length === 0) return [];
+	positionOf: (d: Diagnostic) => number | undefined,
+): { carried: Diagnostic[]; matched: ReadonlySet<Diagnostic> } {
+	if (prior.length === 0) return { carried: [], matched: new Set() };
 	const runnerIds = new Set(dispatchResult.inconclusiveSources?.runnerIds);
 	const serverIds = new Set(dispatchResult.inconclusiveSources?.serverIds);
 	const observedNow = new Set(observed);
+	const recorded = new Set(prior);
 	const { kept } = retainRecordedFindings(
 		prior,
 		[...observed, ...(dispatchResult.stillObserved ?? [])],
-		(d) =>
-			(d.runnerId !== undefined && runnerIds.has(d.runnerId)) ||
-			(d.serverId !== undefined && serverIds.has(d.serverId)),
+		{
+			positionOf,
+			keepUnobserved: (d) =>
+				(d.runnerId !== undefined && runnerIds.has(d.runnerId)) ||
+				(d.serverId !== undefined && serverIds.has(d.serverId)),
+		},
 	);
-	const carried = kept.flatMap((d) => (observedNow.has(d) ? [] : [d]));
+	const matched = new Set(kept.flatMap((d) => (observedNow.has(d) ? [d] : [])));
+	const carried = kept.flatMap((d) => {
+		if (observedNow.has(d)) return [];
+		if (!recorded.has(d)) return [d];
+		const at = positionOf(d);
+		return [at === undefined || at === d.line ? d : { ...d, line: at }];
+	});
 	if (carried.some((d) => !dispatchResult.stillObserved?.includes(d))) {
 		incrementDegradationCount({
 			kind: "blocker-carried-unobserved",
@@ -1893,7 +1937,87 @@ function carryRecordedBlockers(
 				"a recorded blocker's source reached no verdict on this write, so the blocker stays pending (#4484)",
 		});
 	}
-	return carried;
+	return { carried, matched };
+}
+
+/**
+ * #4484 round 3: this run's bytes against the anchor of the file's last
+ * applied inline verdict. `positionOf` maps a line of the anchor's bytes to
+ * this run's (R2): undefined when the line was edited or deleted, and the
+ * line itself, counted once per file, when there is no alignment. `owed` is
+ * the anchor's owed lines per runner, in this run's bytes (R4). `next` is the
+ * anchor this run's verdict hands on: its own line hashes, and for each runner
+ * that reached no verdict and is not still in flight (a collect-later run
+ * settles on its own), the lines it analysed for that runner; a run without
+ * authorship keeps every earlier owed line too. It is handed on
+ * for every verdict, so a record a collect-later answer starts later is
+ * anchored too.
+ */
+function anchorToPriorAnalysis(
+	prior: AnalysisAnchor | undefined,
+	fileContent: string | undefined,
+	fileBytes: Buffer | undefined,
+	filePath: string,
+) {
+	let hashes: string[] | undefined | null = null;
+	const currentHashes = (): string[] | undefined => {
+		// The inline blocker baseline's own cap.
+		hashes ??=
+			fileContent !== undefined &&
+			fileBytes !== undefined &&
+			fileBytes.byteLength <= 2 * 1024 * 1024
+				? lineHashesOf(fileContent)
+				: undefined;
+		return hashes ?? undefined;
+	};
+	let lineMap: LineMap | undefined | null = null;
+	const positionOf = (line: number): number | undefined => {
+		if (lineMap === null) {
+			const now = currentHashes();
+			lineMap =
+				prior?.lineHashes && now
+					? alignLines(prior.lineHashes, now)
+					: undefined;
+		}
+		if (lineMap) return lineMap(line);
+		recordDegradationOnce({
+			kind: "blocker-position-unaligned",
+			subject: normalizeMapKey(filePath),
+			reason:
+				"the write's bytes could not be aligned to the bytes its recorded blockers were read from; recorded line numbers are used as they are (#4484)",
+		});
+		return line;
+	};
+	const owed = new Map<string, { start: number; end: number }[]>();
+	for (const [runnerId, ranges] of prior?.owedRanges ?? []) {
+		const lines = linesOfRanges(ranges).flatMap((line) => {
+			const at = positionOf(line);
+			return at === undefined ? [] : [at];
+		});
+		if (lines.length > 0) owed.set(runnerId, rangesOfLines(lines));
+	}
+	return {
+		positionOf,
+		owed,
+		next(
+			sources: InconclusiveSources | undefined,
+			modifiedRanges: { start: number; end: number }[] | undefined,
+			delivers: boolean,
+		): AnalysisAnchor | undefined {
+			const lineHashes = currentHashes();
+			const owedRanges = owedRangesAfterDispatch({
+				delivers,
+				noVerdict: sources?.runnerIds ?? [],
+				inFlight: sources?.inFlightRunnerIds ?? [],
+				modifiedRanges,
+				owed,
+				lineCount: () =>
+					lineHashes?.length ?? fileContent?.split(/\r?\n/).length ?? 0,
+			});
+			if (lineHashes === undefined && owedRanges.size === 0) return undefined;
+			return { lineHashes, owedRanges };
+		},
+	};
 }
 
 export async function runPipeline(
@@ -2196,6 +2320,14 @@ async function analysePipeline(
 					: undefined;
 			})()
 		: undefined;
+	// #4484 round 3 (R2, R4): place the last verdict's lines in these bytes,
+	// and hand each runner the lines an earlier write owes it.
+	const anchoring = anchorToPriorAnalysis(
+		ctx.priorAnalysisAnchor?.(),
+		fileContent,
+		fileBytes,
+		filePath,
+	);
 	const dispatchResult = await dispatchLintWithResult(
 		filePath,
 		cwd,
@@ -2217,6 +2349,7 @@ async function analysePipeline(
 			sessionId: ctx.telemetry?.sessionId,
 			telemetryModel: ctx.telemetry?.modelId,
 			telemetryProvider: ctx.telemetry?.provider,
+			owedRanges: anchoring.owed,
 		},
 	);
 	// #4484: the store, the widget and the published set hold the file's
@@ -2226,12 +2359,26 @@ async function analysePipeline(
 	// edit-range gate withheld or the delta held back as an old unused value
 	// (its observed copy), or one whose source reached no verdict (its recorded
 	// copy).
+	// #4484 round 3: a recorded blocker is matched only at its own position.
 	const heldBackBlockers = dispatchResult.heldBackBlockers ?? [];
-	const carriedBlockers = carryRecordedBlockers(
-		ctx.priorInlineBlockers?.() ?? [],
-		[...dispatchResult.blockers, ...heldBackBlockers],
-		dispatchResult,
-		filePath,
+	const ownFile = normalizeEphemeralMapKey(filePath);
+	const { carried: carriedBlockers, matched: matchedBlockers } =
+		carryRecordedBlockers(
+			ctx.priorInlineBlockers?.() ?? [],
+			[...dispatchResult.blockers, ...heldBackBlockers],
+			dispatchResult,
+			filePath,
+			(d) =>
+				d.line === undefined ||
+				(d.filePath && normalizeEphemeralMapKey(d.filePath) !== ownFile)
+					? d.line
+					: anchoring.positionOf(d.line),
+		);
+	// #4484 round 3 (F4): a held-back blocker no recorded blocker matched was
+	// never delivered (a new error that took a fixed one's line-bound id), so
+	// it renders in the STOP block, not as still unfixed.
+	const promotedBlockers = heldBackBlockers.flatMap((d) =>
+		matchedBlockers.has(d) ? [] : [d],
 	);
 	const keptBlockers =
 		carriedBlockers.length > 0
@@ -2322,10 +2469,12 @@ async function analysePipeline(
 					citedPath: (b) => b.filePath || undefined,
 				})
 			: [];
-	const newBlockers = new Set(dispatchResult.blockers);
-	const deliverableBlockers = hasBlockers
-		? liveBlockers.filter((b) => newBlockers.has(b))
-		: [];
+	const newBlockers = new Set([
+		...(hasBlockers ? dispatchResult.blockers : []),
+		...(allowAutonomousWriters ? promotedBlockers : []),
+	]);
+	const deliverableBlockers =
+		newBlockers.size > 0 ? liveBlockers.filter((b) => newBlockers.has(b)) : [];
 	// The record's blockers: every live one, withheld like the STOP block from
 	// a run without authorship (#3226).
 	const recordBlockers = allowAutonomousWriters ? liveBlockers : [];
@@ -2371,7 +2520,9 @@ async function analysePipeline(
 		!allowAutonomousWriters && dispatchResult.hasBlockers
 			? dispatchResult.output.slice(dispatchResult.blockerOutput.length)
 			: dispatchResult.output;
-	if (hasBlockers && fileContent) {
+	// #4484 round 3 (F4): a promoted held-back blocker opens the STOP block too.
+	const rendersStop = newBlockers.size > 0;
+	if (rendersStop && fileContent) {
 		// Enrich blocker output with a code snippet so the agent can see the
 		// exact line it wrote that caused each violation — no re-read needed.
 		if (deliverableBlockers.length > 0) {
@@ -2388,7 +2539,7 @@ async function analysePipeline(
 		// still cites possibly-deleted files. Re-render from the gated set
 		// (no snippets without fileContent) and keep the post-blocker slice.
 		if (
-			hasBlockers &&
+			rendersStop &&
 			deliverableBlockers.length !== dispatchResult.blockers.length
 		) {
 			let gatedOut = buildEnrichedBlockerOutput(deliverableBlockers);
@@ -2594,6 +2745,11 @@ async function analysePipeline(
 					}
 				: undefined,
 		inlineBlockerFileContent,
+		analysisAnchor: anchoring.next(
+			dispatchResult.inconclusiveSources,
+			ctx.modifiedRanges,
+			allowAutonomousWriters,
+		),
 		// #3246: the very array `blockerOutput` above was rendered from, so the
 		// turn-end policy filter and its re-render can never disagree with the
 		// text they guard — the same provenance argument `inlineBlockerSources`

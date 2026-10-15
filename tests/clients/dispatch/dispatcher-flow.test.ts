@@ -18,7 +18,12 @@ import {
 	RunnerRegistry,
 	dispatchForFile as runDispatchForFile,
 } from "../../../clients/dispatch/dispatcher.js";
+import {
+	observeRunnerLatency,
+	resetObservedRunnerLatency,
+} from "../../../clients/dispatch/collect-later-tier.js";
 import { FactStore } from "../../../clients/dispatch/fact-store.js";
+import { resetPendingRunnerFindings } from "../../../clients/dispatch/pending-runner-findings.js";
 import type {
 	Diagnostic,
 	RunnerGroup,
@@ -1166,6 +1171,87 @@ describe("Dispatch Flow", () => {
 			const result = await dispatchForFile(ctx, groups);
 
 			expect(result.diagnostics.map((d) => d.id)).toEqual(["healthy-warning"]);
+			// #4484 round 3 (R1): a precondition that threw never decided the
+			// runner does not apply, so its skip reaches no verdict. Recurrence:
+			// the throw read as "not applicable", a verdict, and retired the
+			// runner's recorded blockers while they were on disk.
+			expect(result.inconclusiveSources?.runnerIds).toEqual(["throws-when"]);
+		});
+
+		it("counts a precondition that declines as a verdict (#4484 round 3)", async () => {
+			registerRunner(createConditionalRunner("declines", () => false));
+			const result = await dispatchForFile(createMockContext("test.ts"), [
+				{ mode: "all", runnerIds: ["declines"] },
+			]);
+			expect(result.inconclusiveSources).toBeUndefined();
+		});
+	});
+
+	// #4484 round 3 (R4): lines an earlier write owed a runner because it
+	// reached no verdict join that runner's range, and only that runner's.
+	// Recurrence: a blocker first written while its runner had no verdict was
+	// withheld as out of range on the next write and never recorded (TLC
+	// MutOwedRanges, witness row 15).
+	describe("owed ranges (#4484 round 3)", () => {
+		it("widens only the owing runner's range", async () => {
+			const seen = new Map<string, unknown>();
+			for (const id of ["owed", "settled"]) {
+				registerRunner({
+					id,
+					appliesTo: ["jsts"],
+					priority: 1,
+					run: async (ctx) => {
+						seen.set(id, ctx.modifiedRanges);
+						return { status: "succeeded", diagnostics: [], semantic: "none" };
+					},
+				});
+			}
+			const ctx = createDispatchContext(
+				"test.ts",
+				"/project",
+				{ getFlag: () => false },
+				new FactStore(),
+				undefined,
+				[{ start: 1, end: 1 }],
+			);
+			await dispatchForFile(
+				{ ...ctx, owedRanges: new Map([["owed", [{ start: 2, end: 3 }]]]) },
+				[{ mode: "all", runnerIds: ["owed", "settled"] }],
+			);
+			expect(seen.get("owed")).toEqual([{ start: 1, end: 3 }]);
+			expect(seen.get("settled")).toEqual([{ start: 1, end: 1 }]);
+		});
+
+		// A collect-later run settles on its own and owes the next write
+		// nothing. Recurrence: unmarked, a runner deferred on every write would
+		// owe every edited line for good and widen each later edit's range.
+		it("names a collect-later run in flight apart from the runners that owe", async () => {
+			registerRunner(createCleanRunner("slow"));
+			observeRunnerLatency({
+				projectRoot: "/project",
+				runnerId: "slow",
+				durationMs: 60_000,
+			});
+			try {
+				const ctx = createDispatchContext(
+					"test.ts",
+					"/project",
+					{ getFlag: () => false },
+					new FactStore(),
+					undefined,
+					[{ start: 1, end: 1 }],
+					"/project",
+					1,
+				);
+				const result = await dispatchForFile(ctx, [
+					{ mode: "all", runnerIds: ["slow"] },
+				]);
+				expect(result.inconclusiveSources?.runnerIds).toEqual(["slow"]);
+				expect(result.inconclusiveSources?.inFlightRunnerIds).toEqual(["slow"]);
+			} finally {
+				resetObservedRunnerLatency();
+				resetPendingRunnerFindings();
+			}
 		});
 	});
 

@@ -592,9 +592,6 @@ export const wallClockBudgetInclude = [
 	"tests/config/strictness-ratchet.test.ts",
 	"tests/config/tracked-control-bytes.test.ts",
 	"tests/config/workflow-writers-governance.test.ts",
-	// #4484 round 2: the host witness joins a held collect-later run's settle
-	// with vi.waitFor (flake-shape admission).
-	"tests/index-4484-unfixed-blocker-witness.test.ts",
 	"tests/mcp/session-end.smoke.test.ts",
 	// published-manifest guard runs the real `npm pack` (flake-shape admission).
 	"tests/packaging-pack-manifest.test.ts",

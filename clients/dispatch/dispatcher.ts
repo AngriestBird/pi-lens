@@ -58,6 +58,7 @@ import {
 import { createAvailabilityProbeFlight } from "../availability-probe-flight.js";
 import type { FactStore } from "./fact-store.js";
 import { applyDispositions } from "../diagnostic-dispositions.js";
+import { linesOfRanges, rangesOfLines } from "../line-alignment.js";
 import { applyInlineSuppressions } from "./inline-suppressions.js";
 import { getToolPlan } from "./plan.js";
 import { resolveRunnerPath } from "./runner-context.js";
@@ -937,6 +938,28 @@ interface GroupResult {
 	/** #4484 r2: runners and servers that reached no verdict in this group. */
 	inconclusiveRunnerIds: string[];
 	inconclusiveServerIds: string[];
+	/** #4484 round 3: the inconclusive runners still in flight (collect-later). */
+	inFlightRunnerIds: string[];
+}
+
+/**
+ * #4484 round 3 (R4): `ctx` for one runner, its `modifiedRanges` widened by
+ * the lines an earlier write owed it (`DispatchContext.owedRanges`). A
+ * whole-file dispatch (no ranges) already covers them.
+ */
+export function runnerDispatchContext(
+	ctx: DispatchContext,
+	runnerId: string,
+): DispatchContext {
+	const owed = ctx.owedRanges?.get(runnerId);
+	if (!owed?.length || !ctx.modifiedRanges) return ctx;
+	return {
+		...ctx,
+		modifiedRanges: rangesOfLines([
+			...linesOfRanges(ctx.modifiedRanges),
+			...linesOfRanges(owed),
+		]),
+	};
 }
 
 /**
@@ -962,6 +985,7 @@ async function runGroup(
 	const outOfEditScope: Diagnostic[] = [];
 	const inconclusiveRunnerIds: string[] = [];
 	const inconclusiveServerIds: string[] = [];
+	const inFlightRunnerIds: string[] = [];
 
 	// Filter runners by kind if specified
 	const runnerIds = group.filterKinds
@@ -1062,6 +1086,9 @@ async function runGroup(
 			} catch (error) {
 				ctx.log(`Runner ${runner.id} precondition failed: ${error}`);
 				shouldRun = false;
+				// #4484 round 3: a precondition that threw never decided the runner
+				// does not apply, so the skip reaches no verdict (R1).
+				inconclusiveRunnerIds.push(runner.id);
 			}
 		}
 		if (!shouldRun) {
@@ -1087,6 +1114,8 @@ async function runGroup(
 		}
 
 		const projectRoot = ctx.projectRoot ?? ctx.cwd;
+		// #4484 round 3: this runner's range, with the lines owed to it.
+		const runnerCtx = runnerDispatchContext(ctx, runner.id);
 		// Only post-write dispatches participate. Project scans and direct API
 		// callers must retain their existing synchronous semantics.
 		const observedTier =
@@ -1095,7 +1124,7 @@ async function runGroup(
 				: classifyObservedRunner(projectRoot, runner.id);
 		if (observedTier === "collect-later") {
 			const markedAtMs = Date.now();
-			const deferred = runRunner(ctx, runner, semantic).then((result) => {
+			const deferred = runRunner(runnerCtx, runner, semantic).then((result) => {
 				const durationMs = Date.now() - markedAtMs;
 				const tier = observeRunnerLatency({
 					projectRoot,
@@ -1167,6 +1196,7 @@ async function runGroup(
 			recordRunner(ctx.filePath, runner.id, "pending", 0, 0, ctx.writeIndex);
 			// #4484 r2: a run still in flight has observed nothing yet.
 			inconclusiveRunnerIds.push(runner.id);
+			inFlightRunnerIds.push(runner.id);
 			logLatency({
 				type: "runner",
 				filePath: ctx.filePath,
@@ -1180,7 +1210,7 @@ async function runGroup(
 			continue;
 		}
 
-		const result = await runRunner(ctx, runner, semantic);
+		const result = await runRunner(runnerCtx, runner, semantic);
 		onRunnerResult?.(runnerId, result);
 		const runnerEnd = Date.now();
 		const duration = runnerEnd - runnerStart;
@@ -1327,6 +1357,7 @@ async function runGroup(
 		outOfEditScope,
 		inconclusiveRunnerIds,
 		inconclusiveServerIds,
+		inFlightRunnerIds,
 	};
 }
 
@@ -1501,6 +1532,7 @@ export async function dispatchForFile(
 	const outOfEditScope: Diagnostic[] = [];
 	const inconclusiveRunnerIds = new Set<string>();
 	const inconclusiveServerIds = new Set<string>();
+	const inFlightRunnerIds = new Set<string>();
 	for (const {
 		diagnostics: groupDiags,
 		latencies,
@@ -1508,11 +1540,13 @@ export async function dispatchForFile(
 		outOfEditScope: groupOutOfScope,
 		inconclusiveRunnerIds: groupRunnerIds,
 		inconclusiveServerIds: groupServerIds,
+		inFlightRunnerIds: groupInFlight,
 	} of groupResults) {
 		runnerLatencies.push(...latencies);
 		outOfEditScope.push(...groupOutOfScope);
 		for (const id of groupRunnerIds) inconclusiveRunnerIds.add(id);
 		for (const id of groupServerIds) inconclusiveServerIds.add(id);
+		for (const id of groupInFlight) inFlightRunnerIds.add(id);
 
 		allDiagnostics.push(...groupDiags);
 		if (hadBlocker) stopped = true;
@@ -1771,6 +1805,7 @@ export async function dispatchForFile(
 			inconclusiveSources: {
 				runnerIds: [...inconclusiveRunnerIds],
 				serverIds: [...inconclusiveServerIds],
+				inFlightRunnerIds: [...inFlightRunnerIds],
 			},
 		}),
 		...(unconfirmedStatus !== undefined && { unconfirmedStatus }),

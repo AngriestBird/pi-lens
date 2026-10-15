@@ -359,13 +359,13 @@ const lspRunner: RunnerDefinition = {
 			// With no answered diagnostics, report "skipped" so the coverage notice
 			// flags the gap instead of reading this as a confirmed clean result (#570).
 			// #4403: when no primary answered at all, the result says why.
-			// #4484 r2: and `inconclusive`, so this empty result never retires a
-			// recorded blocker.
+			// #4484: a skip without a stated reason reaches no verdict
+			// (`reachedNoVerdict`), so this empty result never retires a recorded
+			// blocker.
 			return {
 				status: "skipped",
 				diagnostics: [],
 				semantic: "none",
-				inconclusive: true,
 				...primaryUnavailable,
 			};
 		}

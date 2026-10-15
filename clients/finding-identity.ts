@@ -64,38 +64,57 @@ export function findingIdentity(d: {
 }
 
 /**
- * #4484 round 2: which recorded findings a fresh observation leaves standing.
- * Each prior finding matched by {@link findingIdentity} in `observed` is
- * replaced by its observed copy (current line and text), one observed copy per
- * prior entry. An unmatched prior entry survives only when `keepUnobserved`
- * says its source gave no verdict; otherwise the observation retired it.
- * Observed findings no prior entry matched are not returned: an observation
- * keeps a recorded finding, it never records one by itself.
+ * #4484: which recorded findings a fresh observation leaves standing (R3 in
+ * PR #4491's round-3 table). A prior finding is matched by an observed finding
+ * of the same {@link findingIdentity} that sits at the prior finding's
+ * position (`positionOf`: its line, aligned to the observed bytes), and is
+ * replaced by that observed copy, one per prior entry. Identity alone is not
+ * enough: two occurrences of one rule share it, so an untouched occurrence
+ * elsewhere would stand in for a fixed one. With the position pinned, digit
+ * runs in the message are folded, so a message that cites its own line
+ * (helm-lint's `deploy.yaml:4: …`) still matches after the line moves. A
+ * prior finding with no position
+ * (its line was edited) is matched by nothing. An unmatched prior entry
+ * survives only when `keepUnobserved` says its source gave no verdict;
+ * otherwise the observation retired it. Observed findings no prior entry
+ * matched are not returned: an observation keeps a recorded finding, it never
+ * records one by itself.
  */
 export function retainRecordedFindings<
 	T extends {
 		tool?: string | undefined;
 		rule?: string | undefined;
 		message: string;
+		line?: number | undefined;
 	},
 >(
 	prior: readonly T[],
 	observed: readonly T[],
-	keepUnobserved: (finding: T) => boolean,
+	options: {
+		positionOf: (finding: T) => number | undefined;
+		keepUnobserved: (finding: T) => boolean;
+	},
 ): { kept: T[]; retired: T[] } {
-	const byIdentity = new Map<string, T[]>();
+	const byPlace = new Map<string, T[]>();
+	const place = (d: T, line: number) => {
+		const folded = { ...d, message: d.message.replace(/\d+/g, "#") };
+		return `${findingIdentity(folded)}@${line}`;
+	};
 	for (const d of observed) {
-		const key = findingIdentity(d);
-		const bucket = byIdentity.get(key);
+		if (d.line === undefined) continue;
+		const key = place(d, d.line);
+		const bucket = byPlace.get(key);
 		if (bucket) bucket.push(d);
-		else byIdentity.set(key, [d]);
+		else byPlace.set(key, [d]);
 	}
 	const kept: T[] = [];
 	const retired: T[] = [];
 	for (const d of prior) {
-		const match = byIdentity.get(findingIdentity(d))?.shift();
+		const at = options.positionOf(d);
+		const match =
+			at === undefined ? undefined : byPlace.get(place(d, at))?.shift();
 		if (match !== undefined) kept.push(match);
-		else if (keepUnobserved(d)) kept.push(d);
+		else if (options.keepUnobserved(d)) kept.push(d);
 		else retired.push(d);
 	}
 	return { kept, retired };

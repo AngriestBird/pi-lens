@@ -319,7 +319,6 @@
 		"clients/word-index-lifecycle.test.ts": 13,
 		"clients/word-index-observability.test.ts": 5,
 		"clients/word-index.test.ts": 5,
-		"index-4484-unfixed-blocker-witness.test.ts": 3,
 		"mcp/turn-end-route.smoke.test.ts": 1,
 		"tools/lens-diagnostics.test.ts": 1,
 		"tools/lsp-diagnostics.test.ts": 1,

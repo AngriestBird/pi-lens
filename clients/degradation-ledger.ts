@@ -162,6 +162,14 @@ export type DegradationKind =
 	 */
 	| "blocker-clear-refused"
 	/**
+	 * #4484 round 3: a write could not align its bytes to the bytes the file's
+	 * recorded blockers were read from (no stored line hashes, a file over the
+	 * alignment caps, or a rewrite past `MAX_ALIGNMENT_EDITS`). Each recorded
+	 * line and owed line is taken at its recorded number instead. Once per file
+	 * per session.
+	 */
+	| "blocker-position-unaligned"
+	/**
 	 * #3594: `acquireBoundedPidFileLock`'s wait (the durable-store sync
 	 * waiter) was skipped because the same top-generation holder an earlier
 	 * wait ran out on is still there. The call falls back at once, same as

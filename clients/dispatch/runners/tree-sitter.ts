@@ -752,7 +752,6 @@ const treeSitterRunner: RunnerDefinition = {
 					status: "skipped",
 					diagnostics: [],
 					semantic: "none",
-					inconclusive: true,
 				};
 			}
 			logTreeSitter({

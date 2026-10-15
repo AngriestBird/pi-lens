@@ -1048,6 +1048,8 @@ async function dispatchPipelineAnalysis(args: {
 			// #4484 r2: read when the dispatch returns, so a collect-later answer
 			// absorbed meanwhile is part of what the run carries forward.
 			priorInlineBlockers: () => runtime.getInlineBlockerDiagnostics(filePath),
+			// #4484 round 3: what those blockers' lines refer to.
+			priorAnalysisAnchor: () => runtime.getAnalysisAnchor(filePath),
 			telemetry: {
 				model: runtime.telemetryModel,
 				sessionId: runtime.telemetrySessionId,
@@ -3334,6 +3336,10 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				),
 			) ?? false;
 	}
+	// #4484 round 3: the anchor follows the record, so it moves only with a
+	// verdict that applied.
+	if (inlineVerdictApplied)
+		runtime.setAnalysisAnchor(filePath, result.analysisAnchor);
 
 	// A superseded verdict must not latch the commit gate either (#3507).
 	if (resultLive) {

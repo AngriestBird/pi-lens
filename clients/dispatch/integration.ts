@@ -33,6 +33,7 @@ import { recordDegradationOnce } from "../degradation-ledger.js";
 import { FactStore, setFactStoreEvictionReporter } from "./fact-store.js";
 import { TOOL_PLANS } from "./plan.js";
 import type {
+	DispatchContext,
 	DispatchResult,
 	ModifiedRange,
 	PiAgentAPI,
@@ -3053,12 +3054,14 @@ export async function dispatchLintWithResult(
 		 * the pi push surface, which keeps the once-per-session latch.
 		 */
 		dedupeCoverageNotice?: boolean;
+		/** #4484 round 3: `DispatchContext.owedRanges`. */
+		owedRanges?: ReadonlyMap<string, readonly ModifiedRange[]>;
 	},
 ): Promise<DispatchResult> {
 	// Default true preserves the per-edit fast path (errors only). Callers that
 	// want the full picture (warnings + structural smells), e.g. the MCP review
 	// facade, pass blockingOnly=false to run every runner.
-	const ctx = createDispatchContext(
+	const created = createDispatchContext(
 		filePath,
 		cwd,
 		pi,
@@ -3073,6 +3076,9 @@ export async function dispatchLintWithResult(
 		options?.sessionId,
 		options?.analysisRootMode,
 	);
+	const ctx: DispatchContext = options?.owedRanges?.size
+		? { ...created, owedRanges: options.owedRanges }
+		: created;
 	sessionFacts.clearFileFactsFor(ctx.filePath);
 	// #2243 item 2: release the pin when the dispatch settles.
 	try {

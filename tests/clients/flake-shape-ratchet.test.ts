@@ -954,13 +954,6 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"session_start's background tasks and the quick-mode warmup timer expose no awaitable, so a real-time vi.waitFor is the only join on their snapshot save",
 	},
-	// 2026-10-16 (#4484 round 2): the rows 12 and 14 cells settle a held
-	// collect-later run on demand; the store exposes no awaitable for it.
-	"ungoverned-wait-for:index-4484-unfixed-blocker-witness.test.ts": {
-		detector: "ungoverned-wait-for",
-		reason:
-			"a collect-later run settles on the runner's own promise, which the pending-runner store does not expose; vi.waitFor polls the store's settled view, the commit gate's own input",
-	},
 };
 
 /** The `wallClockBudgetInclude` project's `include` list, read from the live config — not a hand-copied mirror of it (single-source-of-truth). */

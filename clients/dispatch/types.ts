@@ -157,6 +157,12 @@ export interface InconclusiveSources {
 	runnerIds: readonly string[];
 	/** Language servers a run named unconfirmed (`unconfirmedServerIds`). */
 	serverIds: readonly string[];
+	/**
+	 * #4484 round 3: the subset of `runnerIds` still in flight (collect-later).
+	 * Their settled run answers for the write on its own, so the next write
+	 * owes them no lines.
+	 */
+	inFlightRunnerIds: readonly string[];
 }
 
 export interface DispatchResult {
@@ -391,19 +397,24 @@ export function hasUsableResult(result: {
 }
 
 /**
- * Whether a runner's whole run reached no verdict about the file (#4484 round
- * 2). The other side of {@link hasUsableResult}, narrowed to the runs that say
- * so: a run flagged `inconclusive`, a `failed` run without findings (timeout,
- * spawn or server failure), a `deferred` one, and a skip that names an
- * unavailable primary. Any other skip is deliberate (the runner does
- * not apply, or another one covers the file) and stays conclusive. A run that
- * answered names its unconfirmed servers, which the dispatcher adds to
- * `InconclusiveSources.serverIds`, so the rest of the run still counts.
+ * Whether a runner's whole run reached no verdict about the file (#4484). The
+ * other side of {@link hasUsableResult}: a run has a verdict only when it read
+ * the file and finished (R1 in PR #4491's round-3 table). That is a
+ * `succeeded` run not flagged `inconclusive`, a `failed` run with its own
+ * findings, or a skip that states a not-applicable reason from
+ * {@link RUNNER_SKIP_REASONS}. Every other outcome has none: a `failed` run
+ * without findings (timeout, spawn or server failure), a `deferred` one, a
+ * run flagged `inconclusive`, and any skip without a stated reason, since a
+ * skip that never read the file (a size or line cap, an aborted WASM runtime,
+ * a grammar or server that is unavailable) says nothing about it. Unknown
+ * skip forms therefore fail closed. A run that answered names its unconfirmed
+ * servers, which the dispatcher adds to `InconclusiveSources.serverIds`, so
+ * the rest of the run still counts.
  */
 export function reachedNoVerdict(
 	result: Pick<
 		RunnerResult,
-		"status" | "failureKind" | "inconclusive" | "primaryUnavailableCause"
+		"status" | "failureKind" | "inconclusive" | "skipReason"
 	>,
 ): boolean {
 	if (result.inconclusive === true) return true;
@@ -413,7 +424,7 @@ export function reachedNoVerdict(
 		case "deferred":
 			return true;
 		case "skipped":
-			return result.primaryUnavailableCause !== undefined;
+			return !isRunnerSkipReason(result.skipReason);
 		default:
 			return false;
 	}
@@ -475,6 +486,13 @@ export interface DispatchContext {
 	/** Only run blocking rules (severity: error) - used for fast feedback on file write */
 	readonly blockingOnly?: boolean;
 	readonly modifiedRanges?: ModifiedRange[];
+	/**
+	 * #4484 round 3 (R4): per runner, the lines an earlier write owed it
+	 * because it reached no verdict there. They join that runner's
+	 * `modifiedRanges` (`runnerDispatchContext`), so a blocker first written
+	 * while it had no verdict is in range when it next answers.
+	 */
+	readonly owedRanges?: ReadonlyMap<string, readonly ModifiedRange[]>;
 	/** Ordered per-file pipeline token used by widget reconciliation (#1198). */
 	readonly writeIndex?: number;
 	/**

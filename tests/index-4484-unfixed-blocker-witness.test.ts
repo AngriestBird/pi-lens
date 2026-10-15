@@ -1,5 +1,4 @@
 // flake-shape: in-process-mock — clients/lsp/capabilities stands in for the language-server process (the LSP double computes diagnostics from the bytes it is handed); every other pi-lens module on the chain is real
-// flake-shape: ungoverned-wait-for — a collect-later run settles on the runner's own promise, which the pending-runner store does not expose; vi.waitFor polls the store's settled view, the commit gate's own input
 /**
  * #4484 witness (ADR 0007): a second write must not clear a blocker it left
  * in place.
@@ -56,6 +55,17 @@ const boundary = vi.hoisted(() => {
 						{
 							severity: 1,
 							message: "Cannot find name 'BAD_CALL'.",
+							code: 2304,
+							source: "ts",
+							serverId: "typescript",
+							range,
+						},
+					];
+				if (line.includes("BAD_OTHER"))
+					return [
+						{
+							severity: 1,
+							message: "Cannot find name 'BAD_OTHER'.",
 							code: 2304,
 							source: "ts",
 							serverId: "typescript",
@@ -209,6 +219,7 @@ import {
 import {
 	peekSettledRunnerFindings,
 	resetPendingRunnerFindings,
+	settlePendingRunnerFindingsForTests,
 } from "../clients/dispatch/pending-runner-findings.js";
 import {
 	flushLatencyLog,
@@ -403,9 +414,13 @@ describe("#4484 witness: a repeat write keeps an unfixed blocker pending", () =>
 		expect(await s.commitBlocked()).toBe(true);
 		// The dispatch's own record says one blocker was held back by the delta.
 		await flushLatencyLog();
+		// The offset is a byte count, so slice the bytes before decoding: a
+		// multi-byte character earlier in the log (an emoji in a message) moves
+		// a character index off the row boundary (review F3, seed 202).
 		const rows = fs
-			.readFileSync(latencyLog, "utf8")
-			.slice(offset)
+			.readFileSync(latencyLog)
+			.subarray(offset)
+			.toString("utf8")
 			.split("\n")
 			.filter(Boolean)
 			.map((line) => JSON.parse(line) as Record<string, unknown>)
@@ -746,9 +761,8 @@ describe("#4484 witness, round 2: only evidence retires a recorded blocker", () 
 		expect(await s.endTurn()).not.toContain("Resolved this turn");
 		// Both held runs answer; only the one about the current bytes counts.
 		for (const release of boundary.lsp.held.splice(0)) release();
-		await vi.waitFor(() =>
-			expect(peekSettledRunnerFindings().length).toBeGreaterThanOrEqual(2),
-		);
+		await settlePendingRunnerFindingsForTests();
+		expect(peekSettledRunnerFindings().length).toBeGreaterThanOrEqual(2);
 		expect(await s.commitBlocked()).toBe(false);
 		expect(await s.endTurn()).toMatch(
 			/Resolved this turn: src\/carry-deferred\.ts/,
@@ -771,9 +785,8 @@ describe("#4484 witness, round 2: only evidence retires a recorded blocker", () 
 		boundary.lsp.mode = "hold";
 		await s.write(V_FIXED);
 		for (const release of boundary.lsp.held.splice(0)) release(true);
-		await vi.waitFor(() =>
-			expect(peekSettledRunnerFindings().length).toBeGreaterThanOrEqual(1),
-		);
+		await settlePendingRunnerFindingsForTests();
+		expect(peekSettledRunnerFindings().length).toBeGreaterThanOrEqual(1);
 		expect(await s.commitBlocked()).toBe(true);
 		expect(await s.endTurn()).not.toContain("Resolved this turn");
 		// A clean re-check of the current bytes settles; no commit asks first.
@@ -785,9 +798,8 @@ describe("#4484 witness, round 2: only evidence retires a recorded blocker", () 
 		});
 		await s.write(V_FIXED_OTHER);
 		for (const release of boundary.lsp.held.splice(0)) release();
-		await vi.waitFor(() =>
-			expect(peekSettledRunnerFindings().length).toBeGreaterThanOrEqual(1),
-		);
+		await settlePendingRunnerFindingsForTests();
+		expect(peekSettledRunnerFindings().length).toBeGreaterThanOrEqual(1);
 		expect(await s.endTurn()).toMatch(
 			/Resolved this turn: src\/carry-deferred-fail\.ts/,
 		);
@@ -813,6 +825,190 @@ describe("#4484 witness, round 2: only evidence retires a recorded blocker", () 
 		expect(w2).toMatch(STILL_UNFIXED);
 		expect(await s.commitBlocked()).toBe(true);
 		expect(await s.endTurn()).not.toContain("Resolved this turn");
+		await fixAndDrain(s);
+	}, 120_000);
+});
+
+/**
+ * Round 3 (#4484): rows refer to the round-3 state table at the top of PR
+ * #4491. R1: a run has a verdict only when it read the file and finished.
+ * R2: a recorded blocker's position is its line aligned to the current bytes.
+ * R3: it stays only while its source has no verdict, or a verdict saw its
+ * identity at its position. R4: lines a no-verdict run owed join the next
+ * run's range.
+ */
+describe("#4484 witness, round 3: position, verdict and owed lines", () => {
+	const SCOPED = { "no-lsp": true, "no-ast-grep": true };
+	const AG_PRE = [
+		'export const CLIENT_VERSION = "1.0.50";',
+		"export const plain = CLIENT_VERSION;",
+		"export function dig(obj: Record<string, string>, key: string): unknown {",
+		"\treturn obj[key];",
+		"}",
+		"",
+	].join("\n");
+	const AG_TWIN = `${AG_PRE}export function dig2(obj: Record<string, string>, key: string): unknown {\n\treturn obj[key];\n}\n`;
+	const AG_TWIN_FIXED = AG_TWIN.replace(
+		"dig2(obj: Record<string, string>, key: string): unknown",
+		"dig2(obj: Record<string, string>, key: string): string",
+	);
+	const TS_PRE =
+		"export function run(): void {\n\tdebugger;\n}\nexport const a = 1;\n";
+	const TS_TWIN = `${TS_PRE}export function run2(): void {\n\tdebugger;\n}\n`;
+	const TS_TWIN_FIXED = `${TS_PRE}export function run2(): void {\n\treturn;\n}\n`;
+
+	// Recurrence (F1, review probe P9): the carry matched on identity alone, so
+	// a pre-existing, never-delivered match of the same rule outside the edit
+	// stood in for the blocker the edit fixed. The gate stayed shut on L3, a
+	// line the agent never touched (TLC MutTwinIdentity).
+	it("retires a fixed ast-grep blocker beside an untouched match of the same rule (row 6)", async () => {
+		const file = "src/twin-ag.ts";
+		fs.mkdirSync(path.join(tmpDir, "src"), { recursive: true });
+		fs.writeFileSync(path.join(tmpDir, file), AG_PRE);
+		const s = await openSession("ta", file, AG_PRE, SCOPED);
+		const w1 = await s.edit(AG_TWIN, [6, 7, 8]);
+		expect(w1).toContain("🔴 STOP");
+		expect(w1).toContain("L6:");
+		expect(await s.commitBlocked()).toBe(true);
+		const w2 = await s.edit(AG_TWIN_FIXED, [6]);
+		expect(w2).not.toMatch(/Still unfixed/);
+		expect(w2).not.toContain("🔴 STOP");
+		expect(await s.commitBlocked()).toBe(false);
+		const turnEnd = await s.endTurn();
+		expect(turnEnd).not.toContain("Unresolved from this turn");
+		expect(turnEnd).toMatch(/Resolved this turn: src\/twin-ag\.ts/);
+		pendingCleanup = undefined;
+	}, 120_000);
+
+	// Recurrence (F1, review probe P10): the same stand-in through tree-sitter.
+	it("retires a fixed tree-sitter blocker beside an untouched match of the same rule (row 6)", async () => {
+		const file = "src/twin-ts.ts";
+		fs.mkdirSync(path.join(tmpDir, "src"), { recursive: true });
+		fs.writeFileSync(path.join(tmpDir, file), TS_PRE);
+		const s = await openSession("tt", file, TS_PRE, SCOPED);
+		const w1 = await s.edit(TS_TWIN, [5, 6, 7]);
+		expect(w1).toContain("🔴 STOP");
+		expect(w1).toContain("L6:");
+		const w2 = await s.edit(TS_TWIN_FIXED, [6]);
+		expect(w2).not.toMatch(/Still unfixed/);
+		expect(w2).not.toContain("🔴 STOP");
+		expect(await s.commitBlocked()).toBe(false);
+		const turnEnd = await s.endTurn();
+		expect(turnEnd).not.toContain("Unresolved from this turn");
+		pendingCleanup = undefined;
+	}, 120_000);
+
+	// Control (row 7): the recorded blocker's own line, moved by an edit above
+	// it, still holds the match; the other occurrence never enters the record.
+	it("keeps a recorded ast-grep blocker at its own moved line, and only that one (row 7)", async () => {
+		const file = "src/twin-move.ts";
+		fs.mkdirSync(path.join(tmpDir, "src"), { recursive: true });
+		fs.writeFileSync(path.join(tmpDir, file), AG_PRE);
+		const s = await openSession("tm", file, AG_PRE, SCOPED);
+		expect(await s.edit(AG_TWIN, [6, 7, 8])).toContain("🔴 STOP");
+		const moved = `// header\n${AG_TWIN}`;
+		const w2 = await s.edit(moved, [1]);
+		expect(w2).not.toContain("🔴 STOP");
+		expect(w2).toMatch(/Still unfixed: 1 blocker reported earlier \(L7\)/);
+		expect(await s.commitBlocked()).toBe(true);
+		const turnEnd = await s.endTurn();
+		expect(turnEnd).toContain("L7:");
+		expect(turnEnd).not.toContain("L4:");
+		pendingCleanup = async () => {
+			await s.write(moved.replaceAll("): unknown {", "): string {"));
+			await s.endTurn();
+		};
+		await fixAndDrain(s);
+	}, 120_000);
+
+	// Recurrence (row 12, R3): a blocker carried while its server had no verdict
+	// kept its recorded line after an edit above it, so the write and turn end
+	// named a line the error was no longer on.
+	it("moves a carried LSP error with its line while the server does not answer (row 12)", async () => {
+		boundary.lsp.enabled = true;
+		const s = await openSession("cm", "src/carry-move.ts", V_FIXED);
+		expect(await s.write(V1)).toContain("🔴 STOP");
+		boundary.lsp.mode = "inconclusive";
+		const w2 = await s.write(V2_INSERT_ABOVE);
+		expect(w2.match(STILL_UNFIXED)?.[1]).toBe("3");
+		const turnEnd = await s.endTurn();
+		expect(turnEnd).toContain("L3:");
+		expect(turnEnd).not.toContain("L2:");
+		boundary.lsp.mode = "answer";
+		await fixAndDrain(s);
+	}, 120_000);
+
+	// Recurrence (F2, review probe P1): a skip that never read the file counted
+	// as a verdict. Past the LSP sync limit the runner skips without touching
+	// the server, and the record retired while BAD_CALL was on disk (TLC
+	// MutSkipVerdict).
+	it("keeps an LSP error pending when the file outgrows the language server's sync limit (row 11)", async () => {
+		boundary.lsp.enabled = true;
+		const s = await openSession("sl", "src/skip-lsp.ts", V_FIXED);
+		expect(await s.write(V1)).toContain("🔴 STOP");
+		const touches = boundary.lsp.touches;
+		const big = `${V1}${"const pad = 0;\n".repeat(5_100)}`;
+		const w2 = await s.write(big);
+		expect(boundary.lsp.touches).toBe(touches);
+		expect(w2).not.toMatch(/✓ .*clean/);
+		expect(w2).toMatch(STILL_UNFIXED);
+		expect(await s.commitBlocked()).toBe(true);
+		expect(await s.endTurn()).not.toContain("Resolved this turn");
+		await fixAndDrain(s);
+	}, 120_000);
+
+	// Recurrence (F2, review probe P2): the ast-grep runner skips a file over
+	// 1 MiB without reading it, and the edit said clean.
+	it("keeps an ast-grep blocker pending when the file outgrows the runner's size cap (row 11)", async () => {
+		const s = await openSession("sg", "src/skip-ag.ts", AG_PRE, SCOPED);
+		const AG_FIXED = AG_PRE.replace("): unknown {", "): string {");
+		await s.write(AG_FIXED);
+		expect(await s.edit(AG_PRE, [3])).toContain("🔴 STOP");
+		const big = `${AG_PRE}// ${"x".repeat(1_100_000)}\n`;
+		const w2 = await s.edit(big, [6]);
+		expect(w2).not.toMatch(/✓ .*clean/);
+		expect(w2).toMatch(/Still unfixed: 1 blocker reported earlier \(L3\)/);
+		expect(await s.commitBlocked()).toBe(true);
+		expect(await s.endTurn()).not.toContain("Resolved this turn");
+		pendingCleanup = async () => {
+			await s.write(AG_FIXED);
+			await s.endTurn();
+		};
+		await fixAndDrain(s);
+	}, 120_000);
+
+	// Recurrence (residual a): a blocker first seen while its runner had no
+	// verdict was never recorded, because the next run withheld it as out of
+	// range (TLC MutOwedRanges).
+	it("records a blocker first written while its runner had no verdict once the runner next answers (row 15)", async () => {
+		const AG_FIXED = AG_PRE.replace("): unknown {", "): string {");
+		const s = await openSession("ow", "src/owed-ag.ts", AG_FIXED, SCOPED);
+		await s.write(AG_FIXED);
+		// One edit adds the blocker at L3 and grows the file past the cap, so
+		// the ast-grep run skips without reading it.
+		const big = `${AG_PRE}// ${"x".repeat(1_100_000)}\n`;
+		const w1 = await s.edit(big, [3, 6]);
+		expect(w1).not.toContain("no-unknown-returns");
+		// The next edit only removes the padding; L3 is outside its range.
+		const w2 = await s.edit(AG_PRE, [6]);
+		expect(w2).toContain("🔴 STOP");
+		expect(w2).toContain("L3:");
+		expect(await s.commitBlocked()).toBe(true);
+		await fixAndDrain(s);
+	}, 120_000);
+
+	// Recurrence (F4, review probe P5): a new error that took a fixed error's
+	// line-bound id was held back by the delta and labelled "still unfixed …
+	// earlier", although the agent had never seen it.
+	it("delivers a new error that takes a fixed error's id in the STOP block (row 16)", async () => {
+		boundary.lsp.enabled = true;
+		const s = await openSession("lb", "src/label-new.ts", V_FIXED);
+		expect(await s.write(V1)).toContain("🔴 STOP");
+		const w2 = await s.write(V1.replace("BAD_CALL", "BAD_OTHER"));
+		expect(w2).toContain("🔴 STOP");
+		expect(w2).toContain("L2: Cannot find name 'BAD_OTHER'.");
+		expect(w2).not.toMatch(/Still unfixed/);
+		expect(await s.commitBlocked()).toBe(true);
 		await fixAndDrain(s);
 	}, 120_000);
 });
