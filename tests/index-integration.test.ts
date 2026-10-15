@@ -2146,7 +2146,7 @@ describe("index.ts integration", () => {
 				RuntimeCoordinator: class {
 					projectRoot = tmpDir;
 					turnIndex = 0;
-					complexityBaselines = new Map();
+					complexityBaselines = new Set();
 					cachedExports = new Map();
 					readGuard = mockReadGuard;
 					shouldWarmLspOnRead() {
@@ -2246,7 +2246,7 @@ describe("index.ts integration", () => {
 				RuntimeCoordinator: class {
 					projectRoot = tmpDir;
 					turnIndex = 0;
-					complexityBaselines = new Map();
+					complexityBaselines = new Set();
 					cachedExports = new Map();
 					readGuard = {
 						recordRead: () => {},
@@ -2358,7 +2358,7 @@ describe("index.ts integration", () => {
 				RuntimeCoordinator: class {
 					projectRoot = tmpDir;
 					turnIndex = 0;
-					complexityBaselines = new Map();
+					complexityBaselines = new Set();
 					cachedExports = new Map();
 					readGuard = {
 						recordRead: () => {},
@@ -2485,7 +2485,7 @@ describe("index.ts integration", () => {
 				RuntimeCoordinator: class {
 					projectRoot = tmpDir;
 					turnIndex = 0;
-					complexityBaselines = new Map();
+					complexityBaselines = new Set();
 					cachedExports = new Map();
 					readGuard = {
 						recordRead: () => {},
@@ -2593,7 +2593,7 @@ describe("index.ts integration", () => {
 				RuntimeCoordinator: class {
 					projectRoot = tmpDir;
 					turnIndex = 0;
-					complexityBaselines = new Map();
+					complexityBaselines = new Set();
 					cachedExports = new Map();
 					readGuard = {
 						recordRead: () => {},
@@ -2696,7 +2696,7 @@ describe("index.ts integration", () => {
 				RuntimeCoordinator: class {
 					projectRoot = tmpDir;
 					turnIndex = 0;
-					complexityBaselines = new Map();
+					complexityBaselines = new Set();
 					cachedExports = new Map();
 					readGuard = {
 						recordRead: () => {},
@@ -2800,7 +2800,7 @@ describe("index.ts integration", () => {
 						return 0;
 					}
 					resetForSession() {}
-					complexityBaselines = new Map();
+					complexityBaselines = new Set();
 					projectRulesScan = { hasCustomRules: false, rules: [] };
 					cachedExports = new Map();
 					errorDebtBaseline = null;

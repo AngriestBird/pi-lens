@@ -35,17 +35,22 @@ const pendingLoad = vi.hoisted(() => ({
 	resolve: undefined as ((clients: unknown) => void) | undefined,
 }));
 
+const analyzedPaths: string[] = [];
+
 const LOADED_CLIENTS = {
 	complexityClient: {
 		isSupportedFile: () => true,
-		analyzeFile: async () => ({
-			maintainabilityIndex: 70,
-			cognitiveComplexity: 1,
-			maxNestingDepth: 1,
-			linesOfCode: 1,
-			maxCyclomaticComplexity: 1,
-			codeEntropy: 0,
-		}),
+		analyzeFile: async (analyzedPath: string) => {
+			analyzedPaths.push(analyzedPath);
+			return {
+				maintainabilityIndex: 70,
+				cognitiveComplexity: 1,
+				maxNestingDepth: 1,
+				linesOfCode: 1,
+				maxCyclomaticComplexity: 1,
+				codeEntropy: 0,
+			};
+		},
 	},
 	biomeClient: {},
 	ruffClient: {},
@@ -89,6 +94,7 @@ let filePath: string;
 
 beforeEach(() => {
 	pendingLoad.resolve = undefined;
+	analyzedPaths.length = 0;
 	env = setupTestEnvironment("pi-lens-2939-escape-");
 	runtime = new RuntimeCoordinator();
 	runtime.projectRoot = env.tmpDir;
@@ -159,5 +165,22 @@ describe("#2939 M7 — Escape releases the complexity-baseline demand", () => {
 		await call;
 
 		expect(runtime.complexityBaselines.size).toBe(1);
+	});
+});
+
+describe("#4125 S3 — the baseline memo keeps the path, not the analysis", () => {
+	it("analyzes a file once and holds only its path", async () => {
+		vi.useFakeTimers();
+		for (let call = 0; call < 2; call++) {
+			const pending = runHandlerExpectingNoThrow(() =>
+				handleToolCall(deps(new AbortController().signal)),
+			);
+			await vi.advanceTimersByTimeAsync(0);
+			pendingLoad.resolve?.(LOADED_CLIENTS);
+			await pending;
+		}
+
+		expect(analyzedPaths).toEqual([filePath]);
+		expect([...runtime.complexityBaselines]).toEqual([filePath]);
 	});
 });

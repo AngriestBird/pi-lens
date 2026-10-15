@@ -18,7 +18,6 @@ import {
 	inlineBlockerLines,
 	inlineBlockerSources,
 } from "./inline-blocker-fields.js";
-import type { FileComplexity } from "./complexity-client.js";
 import type { MutationKind } from "./mutating-tool.js";
 import { normalizeMapKey, pathsEqual } from "./path-utils.js";
 import { PathKeyedMap } from "./path-keyed-map.js";
@@ -547,7 +546,7 @@ export class RuntimeCoordinator {
 		diagnosticsSurfaced: 0,
 		coldSnapshotTouches: 0,
 	};
-	private _complexityBaselines = new Map<string, FileComplexity>();
+	private _complexityBaselines = new Set<string>();
 	private readonly _fixedThisTurn = new PathKeyedMap<true>(normalizeMapKey);
 	private readonly _writtenThisTurn = new PathKeyedMap<true>(normalizeMapKey);
 	private readonly _autofixDemotedThisTurn = new PathKeyedMap<true>(
@@ -2248,7 +2247,7 @@ export class RuntimeCoordinator {
 		return this._turnSummary;
 	}
 
-	get complexityBaselines(): Map<string, FileComplexity> {
+	get complexityBaselines(): Set<string> {
 		return this._complexityBaselines;
 	}
 
