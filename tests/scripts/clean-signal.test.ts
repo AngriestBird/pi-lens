@@ -171,10 +171,20 @@ describe("classifyCleanBehavior (phase-aware 4-way)", () => {
 			const probeFixture = createProbeFixture({
 				lsp: {
 					supportsLSP: () => true,
+					// The wrapper `touchFile` has returned since #1179: the dirty touch
+					// answers with one finding, the clean touch with none. A bare array
+					// here kept the probe's own `Array.isArray` reading green while it
+					// printed `dirtyDiags=0` for every real row (#4466 review F3).
 					async touchFile() {
 						const next = phases[touches++] ?? [];
 						log = Buffer.concat([log, Buffer.from(`${next.join("\n")}\n`)]);
-						return [];
+						return {
+							diags:
+								touches === 1
+									? [{ message: "ast-grep finding", source: "ast-grep" }]
+									: [],
+							inconclusive: false,
+						};
 					},
 					getWorkspaceDiagnosticsSupport: async () => ({ mode: "push-only" }),
 				},
@@ -213,6 +223,7 @@ describe("classifyCleanBehavior (phase-aware 4-way)", () => {
 			expect(row.serverId).toBe("ast-grep");
 			expect(row.behavior).toBe("publishes-versioned");
 			expect(row.detail).toContain("dirtyPubs=2(v:2) cleanPubs=1(v:1)");
+			expect(row.detail).toContain("dirtyDiags=1");
 		} finally {
 			fs.rmSync(dst, { recursive: true, force: true });
 		}
