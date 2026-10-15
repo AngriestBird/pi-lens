@@ -1452,10 +1452,17 @@ describe("verification-budget delivery across non-npm strategies", () => {
 		}
 	}
 
-	/** Every `--version` spawn's `timeout` option, across all calls. */
+	/**
+	 * Every version-probe spawn's `timeout` option, across all calls. SpotBugs
+	 * takes `-version`: it rejects `--version` (probed against 4.10.2).
+	 */
 	function versionProbeTimeouts(): Array<number | undefined> {
 		return spawnMock.mock.calls
-			.filter(([, args]) => (args ?? []).includes("--version"))
+			.filter(([, args]) =>
+				(args ?? []).some(
+					(arg: string) => arg === "--version" || arg === "-version",
+				),
+			)
 			.map(([, , options]) => (options as { timeout?: number })?.timeout);
 	}
 

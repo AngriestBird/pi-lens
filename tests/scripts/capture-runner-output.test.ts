@@ -9,6 +9,7 @@
 
 import { describe, expect, it } from "vitest";
 import {
+	expandWorkspaceArgs,
 	extractVersion,
 	needsShell,
 	quoteForShell,
@@ -65,6 +66,25 @@ describe("redactWorkspace", () => {
 
 	it("is a no-op without a workspace", () => {
 		expect(redactWorkspace("text", "")).toBe("text");
+	});
+});
+
+// Recurrence: helm-lint (#4453) hands helm an ABSOLUTE chart root, so a capture
+// that spawned `helm lint .` recorded an argv the runner never sends and the
+// replay argv tie could not hold. The token lets a manifest entry spawn with the
+// workspace's absolute path while the recorded argv stays machine-neutral.
+describe("expandWorkspaceArgs", () => {
+	it("spawns with the workspace where the manifest wrote the token", () => {
+		expect(
+			expandWorkspaceArgs(["lint", WORKSPACE_TOKEN], "/tmp/pi-lens-capture-x"),
+		).toEqual(["lint", "/tmp/pi-lens-capture-x"]);
+	});
+
+	it("leaves every other argument alone", () => {
+		expect(expandWorkspaceArgs(["--check", "bad.fish"], "/tmp/w")).toEqual([
+			"--check",
+			"bad.fish",
+		]);
 	});
 });
 

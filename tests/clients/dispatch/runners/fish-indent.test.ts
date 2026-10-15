@@ -115,6 +115,68 @@ describe("fish-indent runner", () => {
 		}
 	});
 
+	// Recurrence: fish_indent 4.9.3 --check prints the file's own name on stderr
+	// for a merely unformatted file, and the runner read any stderr line as a
+	// syntax error (#4454). It hands fish_indent an absolute path and fish
+	// prints it back as spelled, so the production stderr is the absolute name.
+	it("treats the file's own name on stderr as an unformatted file, not a syntax error", async () => {
+		const env = setupTestEnvironment("pi-lens-fish-indent-");
+		try {
+			const filePath = path.join(env.tmpDir, "config.fish");
+			fs.writeFileSync(filePath, "if true\n        echo hi\nend\n");
+			safeSpawnAsync.mockResolvedValue({
+				error: null,
+				status: 1,
+				stdout: "",
+				stderr: `${filePath}\n`,
+			});
+
+			const runner = (
+				await import("../../../../clients/dispatch/runners/fish-indent.js")
+			).default;
+			const result = await runner.run(
+				createFishCtx(filePath, env.tmpDir) as never,
+			);
+
+			expect(result.status).toBe("succeeded");
+			expect(result.semantic).toBe("warning");
+			expect(result.diagnostics.map((d) => [d.rule, d.semantic])).toEqual([
+				["fish-indent-unformatted", "warning"],
+			]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// fish_indent 4.9.3's own bytes for a file it could not open: stderr that
+	// does not name the file stays a blocking finding.
+	it("keeps other stderr text blocking", async () => {
+		const env = setupTestEnvironment("pi-lens-fish-indent-");
+		try {
+			const filePath = path.join(env.tmpDir, "gone.fish");
+			fs.writeFileSync(filePath, "echo hi\n");
+			safeSpawnAsync.mockResolvedValue({
+				error: null,
+				status: 1,
+				stdout: "",
+				stderr: `Opening "${filePath}" failed: No such file or directory (os error 2)\n`,
+			});
+
+			const runner = (
+				await import("../../../../clients/dispatch/runners/fish-indent.js")
+			).default;
+			const result = await runner.run(
+				createFishCtx(filePath, env.tmpDir) as never,
+			);
+
+			expect(result.status).toBe("failed");
+			expect(result.semantic).toBe("blocking");
+			expect(result.diagnostics[0]?.rule).toBe("fish-indent-parse-error");
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("returns blocking error diagnostic on parse failure (stderr present)", async () => {
 		const env = setupTestEnvironment("pi-lens-fish-indent-");
 		try {

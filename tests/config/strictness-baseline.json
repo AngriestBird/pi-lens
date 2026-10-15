@@ -11,7 +11,7 @@
 		"clients/config-core": 18,
 		"clients/dispatch": 27,
 		"clients/dispatch/rules": 12,
-		"clients/dispatch/runners": 82,
+		"clients/dispatch/runners": 81,
 		"clients/dispatch/runners/utils": 3,
 		"clients/lsp": 45,
 		"clients/lsp/wait-policy": 1,
