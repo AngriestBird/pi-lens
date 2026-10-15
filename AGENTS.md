@@ -599,6 +599,13 @@ file-scoped worklist and receives no project-wide scanner output.
     fully pinned; the other families' code choices are deferred, and the
     deferred and notCodeChoice counts are pinned exactly.
 
+69. **Enumerated detector:** a scanner that lists the spellings it knows
+    passes every spelling it does not, so the guard is green while the
+    defect ships. Derive the rule from the seam (the specifier, the store,
+    the sink) and fail closed on an unrecognised form. Screen: plant an
+    alias, an indirect call and a value reached through another binding,
+    and quote each result; every green plant is fixed or named as a residual.
+
 </important>
 
 <important if="session, turn or generation lifecycle">
@@ -661,6 +668,14 @@ file-scoped worklist and receives no project-wide scanner output.
 58. **Known identity carried forward:** when a producer knows an identity,
     carry it through asynchronous stages instead of re-deriving it downstream
     (#3643 F3).
+
+70. **Joined single flight answers for edits after it started:** a caller
+    that joins an in-flight scan gets an answer computed before its own
+    edits. Withholding that answer and re-reading the baseline later loses
+    findings when another writer stores the row in between. Deliver the
+    joined answer and carry the edited files into the next scan. Screen:
+    for a join, list the writers that can store the row between the join and
+    the next scan, and show the finding survives each.
 
 **Expired successor hand-off:** an expired successor marker may authorize
     its named interrupted successor only for the fixed retention window in
@@ -1380,7 +1395,16 @@ Test authoring screens:
 - A case never reads state a sibling case or file wrote (a file, a latch, a
   once-per-session claim): `Targeted tests (advisory)` runs a PR's added or
   changed test files alone and under two fixed shuffle seeds
-  (`scripts/ci-shuffle-changed-tests.mjs`). After `vi.resetModules()`
+  (`scripts/ci-shuffle-changed-tests.mjs`). The untouched tree is measured by
+  `scripts/ci-shuffle-census.mjs` (every file under seeds 202 and 424, and
+  alone; it needs `npm run build` and `npm run build:dist` first). It
+  runs nightly in `shuffle-census-nightly.yml`, not on a PR. Its known
+  members sit in `scripts/shuffle-census-ratchet.json`, keyed by file, which
+  only shrinks: a new member reds, and an entry clean two nights running
+  must be deleted.
+  A `vi.doMock` is undone in the file's top-level `afterEach`, not in the
+  case that mocks it: a shuffle runs the next case on the leaked mock.
+  After `vi.resetModules()`
   every `await import(...)` is a second module copy; import statically what
   the tool under test also reads.
 - Keep performance bounds close to measured fixed and regressed values.
@@ -1397,7 +1421,10 @@ Test authoring screens:
 
 Governance sweeps use `tests/support/sweep-kit.ts`, explicit source roots, and
 comment/string-blanked source. Every sweep has a real floor and a checked
-exemption reason. A detector that decides a test exists counts only live
+exemption reason. A population-deriving scanner fails closed: a needle hit
+that matches none of its classified forms reds as an unclassified spelling
+with its file and line, never a skip, and the scanner ships a case that plants
+one. History: `HISTORY.md`, 2026-10-15. A detector that decides a test exists counts only live
 declarations (`testDeclarations` in `tests/support/sweep-kit.ts`) in files
 vitest collects (`tests/support/vitest-collection.ts`): a skipped, todo,
 conditional (`skipIf`/`runIf`, an options key, a body skip) or uncalled test

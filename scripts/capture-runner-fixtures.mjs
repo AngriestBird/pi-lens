@@ -31,6 +31,18 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 const smoke = (dir) => `tests/fixtures/tool-smoke/${dir}`;
 
+/** `--output.<format>.path=` for every golangci-lint format except json. */
+const GOLANGCI_OTHER_FORMATS_OFF = [
+	"text",
+	"tab",
+	"html",
+	"checkstyle",
+	"code-climate",
+	"junit-xml",
+	"teamcity",
+	"sarif",
+].map((format) => `--output.${format}.path=`);
+
 /**
  * One capture. `argv` mirrors the runner's own invocation; `file` is the
  * workspace-relative path the runner is pointed at.
@@ -162,6 +174,70 @@ export const CAPTURES = [
 		workspace: smoke("fish-indent"),
 		file: "unformatted.fish",
 		argv: ["--check", "unformatted.fish"],
+	},
+	{
+		// #4454 — the fish-lsp smoke fixture also has to be something fish_indent
+		// objects to. It was already formatted, so exit 0 and no finding.
+		runner: "fish-indent",
+		case: "smoke-bad",
+		tool: "fish_indent",
+		workspace: smoke("fish"),
+		file: "bad.fish",
+		argv: ["--check", "bad.fish"],
+	},
+	{
+		// #4455 — golangci-lint v2 removed `--out-format`; JSON now comes from
+		// `--output.json.path`, and the run stats it prints to stdout would
+		// otherwise trail the JSON document.
+		runner: "golangci-lint",
+		tool: "golangci-lint",
+		workspace: smoke("golangci-lint"),
+		file: "bad.go",
+		argv: [
+			"run",
+			"--output.json.path=stdout",
+			...GOLANGCI_OTHER_FORMATS_OFF,
+			"--show-stats=false",
+			"bad.go",
+		],
+	},
+	{
+		// A project config that prints a text format to stdout puts that text beside
+		// the JSON unless the runner switches the other formats off.
+		runner: "golangci-lint",
+		case: "config-text-stdout",
+		tool: "golangci-lint",
+		workspace: smoke("golangci-lint-text-stdout"),
+		file: "bad.go",
+		argv: [
+			"run",
+			"--output.json.path=stdout",
+			...GOLANGCI_OTHER_FORMATS_OFF,
+			"--show-stats=false",
+			"bad.go",
+		],
+	},
+	{
+		// #4453 — the runner lints the chart ROOT by absolute path, so the capture
+		// spawns with the workspace (the token) and the file is the template the
+		// replay points the runner at.
+		runner: "helm-lint",
+		tool: "helm",
+		versionArgs: "version --short",
+		workspace: smoke("helm"),
+		file: "templates/bad.yaml",
+		argv: ["lint", "__WORKSPACE__"],
+	},
+	{
+		// A template whose file name holds a space: helm prints the name unquoted
+		// inside `(<chart>/templates/my file.yaml:5)`.
+		runner: "helm-lint",
+		case: "space-in-name",
+		tool: "helm",
+		versionArgs: "version --short",
+		workspace: smoke("helm-space-name"),
+		file: "templates/my file.yaml",
+		argv: ["lint", "__WORKSPACE__"],
 	},
 	{
 		// The static build: the dynamic `swiftlint` needs libxml2 and SourceKit.

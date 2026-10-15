@@ -29,6 +29,7 @@ import {
 	reapStaleTmpHygieneRecords,
 	formatTmpHygieneOwnerSummary,
 	realTmpHygieneProcessProbe,
+	resetTmpHygieneHeartbeatThrottle,
 	touchTmpHygieneOwnerMarker,
 	TMP_HYGIENE_HOME,
 	TMP_HYGIENE_OWNER_STALE_MS,
@@ -59,16 +60,13 @@ const REPO_ROOT = path.resolve(
 	"../..",
 );
 
-// #3186 round 3: this worker's own owner marker as the setup wrote it, read at
-// module load — before a single `beforeEach` of this file has run. The last
-// case of the liveness suite compares the live mtime against it to prove the
-// heartbeat hooks are actually registered, not merely defined.
+// #3186 round 3: this worker's own owner marker, the one the setup writes and
+// the lifecycle hooks beat.
 const OWN_MARKER_PATH = path.join(
 	TMP_HYGIENE_HOME,
 	"tmp-hygiene-owners",
 	`${process.env.PI_LENS_TMP_HYGIENE_RUN_ID}-${process.pid}.json`,
 );
-const OWN_MARKER_MTIME_AT_LOAD = fs.statSync(OWN_MARKER_PATH).mtimeMs;
 
 // Tmp-fixture hygiene governance (#2912). The setup hook in
 // tests/support/vitest-setup.ts keeps the REAL TMPDIR: it never repoints
@@ -1521,15 +1519,25 @@ describe("tmp-fixture-hygiene", () => {
 			).toBe("live");
 		});
 
-		it("registers the heartbeat on the test lifecycle, not just defines it", () => {
+		it("registers the heartbeat on the test lifecycle, not just defines it", ({
+			onTestFinished,
+		}) => {
 			// F6: the hooks in tests/support/vitest-setup.ts are what keep a live
-			// worker's marker fresh. This worker's marker has been beaten by its own
-			// beforeEach/afterEach since this file was loaded, so its mtime has
-			// moved off the value the setup's initial write left. Deleting the
-			// `beforeEach`/`afterEach` registration reds this case.
-			expect(fs.statSync(OWN_MARKER_PATH).mtimeMs).not.toBe(
-				OWN_MARKER_MTIME_AT_LOAD,
-			);
+			// worker's marker fresh. Age the marker, let the next beat through the
+			// 250 ms throttle, and read the mtime once this case's own afterEach
+			// has run (onTestFinished runs after it). Deleting the `afterEach`
+			// registration reds this case. #4405: comparing against the mtime at
+			// module load redded whenever a shuffle ran this case within 250 ms of
+			// the setup's load (seed 606 runs it sixth; a warm transform cache in
+			// a 25-file chunk makes the load that fast).
+			const agedMs = Date.now() - TMP_HYGIENE_OWNER_STALE_MS - 60_000;
+			fs.utimesSync(OWN_MARKER_PATH, agedMs / 1000, agedMs / 1000);
+			resetTmpHygieneHeartbeatThrottle();
+			onTestFinished(() => {
+				expect(fs.statSync(OWN_MARKER_PATH).mtimeMs).toBeGreaterThan(
+					agedMs + 60_000,
+				);
+			});
 		});
 		it("beats a stale marker back to live", () => {
 			// F3 producer side, mutation-provable: age this worker's own marker past

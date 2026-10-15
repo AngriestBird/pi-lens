@@ -20,6 +20,16 @@ export function redactWorkspace(
 	workspace: string,
 ): string;
 
+/**
+ * `argv` with every `WORKSPACE_TOKEN` argument replaced by `workspace`, so a
+ * capture can hand its tool the absolute workspace path while the recorded argv
+ * stays machine-neutral.
+ */
+export function expandWorkspaceArgs(
+	argv: readonly string[],
+	workspace: string,
+): string[];
+
 /** Whether this spawn needs a shell (a Windows npm shim, never a real .exe). */
 export function needsShell(bin: string, platform?: NodeJS.Platform): boolean;
 

@@ -1011,8 +1011,8 @@ export const TOOLS: ToolDefinition[] = [
 		id: "helm",
 		name: "Helm",
 		checkCommand: "helm",
-		// intended: version --short — unverified against real binary (shape 16), do not wire until probed
-		checkArgs: ["--version"],
+		// Probed against helm 4.3.0: `--version` exits 1 ("unknown flag"), `version --short` exits 0.
+		checkArgs: ["version", "--short"],
 		installStrategy: "github",
 		binaryName: "helm",
 		github: {
@@ -1355,8 +1355,8 @@ export const TOOLS: ToolDefinition[] = [
 		id: "spotbugs",
 		name: "SpotBugs",
 		checkCommand: "spotbugs",
-		// intended: -version — unverified against real binary (shape 16), do not wire until probed
-		checkArgs: ["--version"],
+		// Probed against spotbugs 4.10.2 (JRE 21): `--version` exits 1 ("Unknown option"), `-version` prints 4.10.2.
+		checkArgs: ["-version"],
 		installStrategy: "archive",
 		binaryName: "spotbugs",
 		archive: {
@@ -1658,7 +1658,7 @@ export const TOOLS: ToolDefinition[] = [
 		id: "gitleaks",
 		name: "gitleaks",
 		checkCommand: "gitleaks",
-		// intended: version — unverified against real binary (shape 16), do not wire until probed
+		// Probed against gitleaks 8.30.1: `--version` exits 0.
 		checkArgs: ["--version"],
 		installStrategy: "github",
 		binaryName: "gitleaks",
@@ -1770,7 +1770,7 @@ export const TOOLS: ToolDefinition[] = [
 		id: "terraform-ls",
 		name: "terraform-ls",
 		checkCommand: "terraform-ls",
-		// intended: version — unverified against real binary (shape 16), do not wire until probed
+		// Probed against terraform-ls 0.39.0: `--version` exits 0.
 		checkArgs: ["--version"],
 		installStrategy: "github",
 		binaryName: "terraform-ls",
