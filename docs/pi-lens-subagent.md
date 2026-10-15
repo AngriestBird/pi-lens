@@ -174,8 +174,9 @@ sets the exit code and only `clean` exits 0:
   file is tracked.
 - `unproven` (3): a step failed or a red could not be attributed (the build, a
   run with no named failing file, an `INCONCLUSIVE` red-on-base verdict, a
-  failed lint or format check, a selection over the 25-file cap where only
-  governance suites ran). That is not evidence of unrelated: report it and
+  failed lint or format check, a selection over the 25-file cap, where the
+  change's own tests, the governance suites and the best 25 import matches ran
+  and the rest did not). That is not evidence of unrelated: report it and
   stop, or fix the cause. The summary prints `selection: selected S, matched
   M, capped C`.
 - `2`: usage error (`--body <path>` or `--body=<path>` missing, unknown, or the
@@ -198,9 +199,9 @@ change adds or removes a pinned use, run it on the head and on the merge of
 
 Each pre-push head has a durable result record at
 `$(git rev-parse --git-common-dir)/pi-lens-prepush/<sha>.json`. It contains the
-head/base, timestamp, selected test files and their `import`, `history`, or
-`governance` reason, plus passed/failed/skipped counts, the Vitest exit code,
-and wall time. Re-pushes overwrite that head's record; writes prune records
+head/base, timestamp, selected test files and their `changed`, `mirror`,
+`import`, `history`, or `governance` reason, plus passed/failed/skipped
+counts, the Vitest exit code, and wall time. Re-pushes overwrite that head's record; writes prune records
 older than fourteen days. The provisional record is written before build and
 self-scan work with outcome `tests-not-started`; preparation failures update it
 to `build-failed` or `self-scan-failed`. The write uses a same-directory
