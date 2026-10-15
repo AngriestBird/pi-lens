@@ -2118,6 +2118,8 @@ describe("ClientRegistry status snapshots (#4449)", () => {
 		const keys = [
 			["typescript", "c:/work/proj"],
 			["typescript", "/srv/a:b/proj"],
+			// A key that opens with its separator reads as an empty server id.
+			["", "/work/empty-id"],
 		] as const;
 		for (const [id, root] of keys) {
 			registry.clients.set(`${id}:${root}`, fakeClient(id, root));
