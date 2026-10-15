@@ -67,6 +67,10 @@ const reviewedExceptions = new Map<string, string>([
 		"tests/support/vitest-collection.ts -> vitest.config.ts",
 		"reads the live config source, not the stale compiled vitest.config.js",
 	],
+	[
+		"tests/scripts/ci-shuffle-census.test.ts -> vitest.config.ts",
+		"evaluates the live config source under a chosen npm_lifecycle_event (#4405)",
+	],
 ]);
 
 describe("test imports bind the compiled module instance (#1565)", () => {

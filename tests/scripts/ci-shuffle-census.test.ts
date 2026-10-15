@@ -8,16 +8,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import { afterAll, describe, expect, it, vi } from "vitest";
-import { configDefaults } from "vitest/config";
 import {
-	type CensusRecord,
-	censusCollectionGaps,
 	extractMembers,
 	issueBody,
 	judgeCensus,
 	listTestFiles,
+	listTrackedFiles,
 	loadRecords,
-	type Member,
 	MIN_START_MS,
 	parseArgs,
 	planCensus,
@@ -25,8 +22,10 @@ import {
 	previousStaleFrom,
 	run,
 	runCensus,
-	type Seed,
 	START_CAP_MS,
+	type CensusRecord,
+	type Member,
+	type Seed,
 } from "../../scripts/ci-shuffle-census.mjs";
 import {
 	type ExecVitest,
@@ -36,7 +35,7 @@ import {
 	selectChangedTestFiles,
 } from "../../scripts/ci-shuffle-changed-tests.mjs";
 import { setupTestEnvironment } from "../clients/test-utils.js";
-import { gitExecFileSync } from "../support/git-fixture-env.js";
+import { vitestCollector } from "../support/vitest-collection.js";
 
 const cleanups: Array<() => void> = [];
 afterAll(() => {
@@ -250,17 +249,24 @@ describe("planCensus", () => {
 // the census does not plan is never started. Either way a file sits outside
 // every seed while the nightly reads green. A project's own `sequence` hides
 // nothing: the census's command-line shuffle flags win (probed in the PR).
-describe("censusCollectionGaps", () => {
-	/** The census plan for a tracked list: the selection and planner `run` uses. */
-	const planFor = (tracked: string[]) =>
-		planCensus(
-			selectChangedTestFiles(tracked, () => true),
-			{
-				seeds: [202],
-				chunk: 2,
-			},
-		);
-	const defaults = { include: ["**/*.test.?(m)ts"], exclude: [] };
+// Collection is read through `vitestCollector`, the suite's one reader of
+// the config's include and exclude lists.
+describe("census plan against vitest collection", () => {
+	type Config = Parameters<typeof vitestCollector>[0];
+	/** Planned files no project collects, and collected files never planned. */
+	function collectionGaps(
+		plan: Array<{ files: string[] }>,
+		tracked: string[],
+		collects: (file: string) => boolean,
+	) {
+		const planned = new Set(plan.flatMap((start) => start.files));
+		return {
+			uncollected: [...planned].filter((file) => !collects(file)).sort(),
+			unplanned: tracked
+				.filter((file) => !planned.has(file) && collects(file))
+				.sort(),
+		};
+	}
 	const tracked = [
 		"tests/a.test.ts",
 		"tests/lane/a.test.ts",
@@ -270,13 +276,20 @@ describe("censusCollectionGaps", () => {
 		".hidden/d.test.ts",
 		"clients/e.ts",
 	];
+	/** The census over the fixture: the selection and planner `run` uses. */
+	const fixturePlan = planCensus(
+		selectChangedTestFiles(tracked, () => true),
+		{
+			seeds: [202],
+			chunk: 2,
+		},
+	);
 	const gaps = (projects: unknown[], exclude: string[]) =>
-		censusCollectionGaps({
-			plan: planFor(tracked),
+		collectionGaps(
+			fixturePlan,
 			tracked,
-			config: { test: { exclude, projects } },
-			defaults,
-		});
+			vitestCollector({ test: { exclude, projects } }),
+		);
 	const laneSplit = (laneInclude: string[], laneExclude?: string[]) => [
 		{ test: { name: "default", exclude: ["tests/lane/**"] } },
 		{ test: { name: "lane", include: laneInclude, exclude: laneExclude } },
@@ -300,11 +313,11 @@ describe("censusCollectionGaps", () => {
 		expect(found.uncollected).toEqual(["tests/lane/a.test.ts"]);
 	});
 
-	// Recurrence: the root `exclude` applies on top of a project's own (probed
-	// with `vitest list`); a check that read only the project's would call the
-	// file covered.
+	// Recurrence: vitest adds the root `exclude` to a project's own (probed
+	// with `vitest list`); a reader that took only the project's would call
+	// the file covered.
 	it("names a planned file that the root exclude drops from its project", () => {
-		const found = gaps(laneSplit(["tests/lane/**"]), [
+		const found = gaps(laneSplit(["tests/lane/**"], ["tests/lane/old/**"]), [
 			"tests/fixtures/**",
 			"tests/lane/b.test.ts",
 		]);
@@ -323,30 +336,43 @@ describe("censusCollectionGaps", () => {
 		});
 	});
 
-	// Recurrence: a config shape the check cannot read would otherwise read as
-	// collecting nothing, or everything, and pass.
+	// Recurrence: vitest adds the root `include` to a project's own (probed);
+	// a reader that took only the project's would miss a file the root adds.
+	it("reads a root include as part of every project's", () => {
+		const collects = vitestCollector({
+			test: {
+				include: ["tests/a.test.ts"],
+				projects: [{ test: { name: "lane", include: ["tests/lane/**"] } }],
+			},
+		});
+		expect(collects("tests/a.test.ts")).toBe(true);
+		expect(collects("tests/lane/b.test.ts")).toBe(true);
+		expect(collects("scripts/c.test.mts")).toBe(false);
+	});
+
+	// Recurrence: a config shape the reader does not model would otherwise
+	// read as collecting nothing, or everything, and pass.
 	it("throws on a config shape it does not read", () => {
-		const read = (config: { test?: Record<string, unknown> }) => () =>
-			censusCollectionGaps({ plan: [], tracked, config, defaults });
+		const read = (config: Config) => () => vitestCollector(config);
 		expect(read({ test: { projects: ["packages/*"] } })).toThrow(/unreadable/);
 		expect(
 			read({ test: { projects: [{ extends: true, test: { name: "x" } }] } }),
 		).toThrow(/unreadable/);
-		expect(read({ test: { include: ["tests/**"] } })).toThrow(/test\.include/);
+		expect(read({ test: { dir: "pkg" } })).toThrow(/root sets test\.dir/);
 		expect(
-			read({ test: { projects: [{ test: { name: "x", dir: "pkg" } }] } }),
-		).toThrow(/test\.dir/);
+			read({
+				test: { projects: [{ test: { name: "x", includeSource: [] } }] },
+			}),
+		).toThrow(/test\.includeSource/);
 	});
 
 	const ROOT = path.resolve(import.meta.dirname, "../..");
 	/** The real config, evaluated under one `npm_lifecycle_event`. */
-	async function realConfig(lifecycle: string | undefined) {
+	async function realConfig(lifecycle: string | undefined): Promise<Config> {
 		vi.stubEnv("npm_lifecycle_event", lifecycle);
 		vi.resetModules();
 		try {
-			return (await import("../../vitest.config.ts")).default as {
-				test?: Record<string, unknown>;
-			};
+			return (await import("../../vitest.config.ts")).default as Config;
 		} finally {
 			vi.unstubAllEnvs();
 			vi.resetModules();
@@ -361,32 +387,23 @@ describe("censusCollectionGaps", () => {
 	it("finds no gap between the census plan and the real vitest projects", async () => {
 		const files = listTestFiles(ROOT);
 		expect(files.length).toBeGreaterThan(1000);
-		const realTracked = gitExecFileSync("git", ["ls-files", "-z"], {
-			cwd: ROOT,
-			encoding: "utf8",
-		})
-			.split("\0")
-			.filter(Boolean);
-		const check = (
-			plan: ReturnType<typeof planCensus>,
-			config: { test?: Record<string, unknown> },
-		) =>
-			censusCollectionGaps({
-				plan,
-				tracked: realTracked,
-				config,
-				defaults: configDefaults,
-			});
-		const config = await realConfig(undefined);
-		expect(check(planCensus(files), config)).toEqual({
+		const everything = listTrackedFiles(ROOT);
+		const collects = vitestCollector(await realConfig(undefined));
+		expect(collectionGaps(planCensus(files), everything, collects)).toEqual({
 			uncollected: [],
 			unplanned: [],
 		});
 		// Not vacuous: a file the plan leaves out is named, and the same config
 		// under `npm run test:unit` names the files that switch excludes.
 		const [first, ...rest] = files;
-		expect(check(planCensus(rest), config).unplanned).toEqual([first]);
-		const unit = check(planCensus(files), await realConfig("test:unit"));
+		expect(
+			collectionGaps(planCensus(rest), everything, collects).unplanned,
+		).toEqual([first]);
+		const unit = collectionGaps(
+			planCensus(files),
+			everything,
+			vitestCollector(await realConfig("test:unit")),
+		);
 		expect(unit.uncollected.length).toBeGreaterThan(0);
 		expect(unit.unplanned).toEqual([]);
 	});

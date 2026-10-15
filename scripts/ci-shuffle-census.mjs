@@ -77,13 +77,13 @@ import {
 	appendFileSync,
 	existsSync,
 	mkdirSync,
-	readdirSync,
 	readFileSync,
+	readdirSync,
 	writeFileSync,
 } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { Minimatch } from "minimatch";
+import { gitExecFileSync } from "./lib/git-fixture-env.mjs";
 import {
 	execVitest,
 	planRuns,
@@ -92,7 +92,6 @@ import {
 	SEEDS,
 	selectChangedTestFiles,
 } from "./ci-shuffle-changed-tests.mjs";
-import { gitExecFileSync } from "./lib/git-fixture-env.mjs";
 import {
 	normalizeVitestOutput,
 	parseVitestSummary,
@@ -113,90 +112,25 @@ const WORKFLOW_AUTHOR = "app/github-actions";
 /** The record key of a planned start: what `runCensus` writes, `--report` reads. */
 const startKey = (entry) => entry.key ?? reproCommand(entry);
 
-/**
- * Every vitest-collected test file the repo tracks. `censusCollectionGaps`
- * holds the two lists equal; the census test runs it over the real config.
- */
-export function listTestFiles(cwd) {
-	const listed = gitExecFileSync(["ls-files", "-z", "--", "tests"], {
+/** The paths git tracks under `pathspecs` (every path when none), repo-relative. */
+export function listTrackedFiles(cwd, pathspecs = []) {
+	return gitExecFileSync(["ls-files", "-z", "--", ...pathspecs], {
 		cwd,
 		encoding: "utf8",
 		maxBuffer: 64 * 1024 * 1024,
-	});
-	return selectChangedTestFiles(listed.split("\0").filter(Boolean), (file) =>
-		existsSync(path.join(cwd, file)),
-	);
-}
-
-/** A predicate true for a path any of `globs` matches, the way vitest's picomatch does. */
-function globMatcher(globs) {
-	const compiled = globs.map((glob) => new Minimatch(glob, { dot: true }));
-	return (file) => compiled.some((matcher) => matcher.match(file));
-}
-
-/** Throws on a config key this check does not read: it never reads as covered. */
-function refuseKeys(where, test, keys) {
-	for (const key of keys)
-		if (test[key] !== undefined)
-			throw new Error(`census coverage: ${where} sets test.${key}`);
+	})
+		.split("\0")
+		.filter(Boolean);
 }
 
 /**
- * The files a vitest config hides from the census, either way round (#4405
- * round 5). The census plans from `git ls-files` (`listTestFiles`), but vitest
- * decides from its config which project runs a file, so the two lists can part:
- *
- *   - `uncollected`: planned, but no project collects it. Inside a chunk vitest
- *     skips it without a word and the start reads `ok`; alone it exits 1 with
- *     no failing test. An `exclude` (a lane list, or the `npm run test:unit`
- *     switch) hides the file under every seed.
- *   - `unplanned`: a project collects it, but the census never starts it (the
- *     `default` project takes vitest's default include, wider than `tests/`).
- *
- * A project's own `sequence` cannot hide a file: the census passes
- * `--sequence.shuffle --sequence.seed=N`, and the command line wins over it
- * (probed in the PR). Matching follows vitest: picomatch globs with `dot`, the
- * project's `include` or the default one, and the root `exclude` added to the
- * project's own (probed). A shape this does not read (a project given as a
- * path, `extends`, `dir`, `root`, `includeSource`, a root `include`) throws.
- * The census test runs this over the real `vitest.config.ts` on every PR, so
- * the change that hides a file reds there, not in a nightly run.
- *
- * @param {{
- *   plan: Array<{ files: string[] }>,
- *   tracked: string[],
- *   config: { test?: Record<string, unknown> },
- *   defaults: { include: string[], exclude: string[] },
- * }} input
- * @returns {{ uncollected: string[], unplanned: string[] }}
+ * Every vitest-collected test file the repo tracks. The census test holds
+ * this list to what the `vitest.config.ts` projects collect, both ways.
  */
-export function censusCollectionGaps({ plan, tracked, config, defaults }) {
-	const root = config.test ?? {};
-	refuseKeys("the root", root, ["include", "includeSource", "dir", "root"]);
-	const rootExclude = root.exclude;
-	const collectors = (root.projects ?? [{ test: {} }]).map((entry) => {
-		const test = typeof entry === "object" ? entry?.test : undefined;
-		if (typeof test !== "object" || test === null || "extends" in entry)
-			throw new Error(
-				`census coverage: unreadable project ${JSON.stringify(entry)}`,
-			);
-		refuseKeys(`project ${test.name}`, test, ["includeSource", "dir", "root"]);
-		const included = globMatcher(test.include ?? defaults.include);
-		const excluded = globMatcher(
-			rootExclude === undefined && test.exclude === undefined
-				? defaults.exclude
-				: [...(rootExclude ?? []), ...(test.exclude ?? [])],
-		);
-		return (file) => included(file) && !excluded(file);
-	});
-	const collected = (file) => collectors.some((collects) => collects(file));
-	const planned = new Set(plan.flatMap((entry) => entry.files));
-	return {
-		uncollected: [...planned].filter((file) => !collected(file)).sort(),
-		unplanned: tracked
-			.filter((file) => !planned.has(file) && collected(file))
-			.sort(),
-	};
+export function listTestFiles(cwd) {
+	return selectChangedTestFiles(listTrackedFiles(cwd, ["tests"]), (file) =>
+		existsSync(path.join(cwd, file)),
+	);
 }
 
 /** @param {{ flags: string[] }} run @returns {number | "alone"} */
