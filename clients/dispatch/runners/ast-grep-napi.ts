@@ -41,7 +41,7 @@ import type {
 	RunnerDefinition,
 	RunnerResult,
 } from "../types.js";
-import { findingsResult, isLineInModifiedRanges } from "../types.js";
+import { findingsResult, spanOverlapsModifiedRanges } from "../types.js";
 import {
 	calculateRuleComplexity,
 	isOverlyBroadPattern,
@@ -540,10 +540,11 @@ export interface AstGrepEvaluateOptions {
 	rulePolicy?: RulePolicyMap;
 	/**
 	 * The lines the write changed, set only on the per-edit blocking pass
-	 * (#4481). An `error`-severity match on a line outside them is skipped
-	 * before it counts toward a cap, as the tree-sitter runner does: a
-	 * structural rule matches the lines it flags, so the write did not cause
-	 * it. Absent or empty means the whole file.
+	 * (#4481). An `error`-severity match whose line span does not overlap them
+	 * is skipped before it counts toward a cap, as the tree-sitter runner does.
+	 * A relational match anchored on a sibling node can still be skipped when
+	 * the edit touched only the sibling; that is a named residual. Absent or
+	 * empty means the whole file.
 	 */
 	modifiedRanges?: DispatchContext["modifiedRanges"];
 	/**
@@ -1177,9 +1178,12 @@ export function evaluateAstGrepRules(
 				// file's line-start table, all in UTF-16 code units (#2347); the
 				// file-root scope is the node's own range, so its derived
 				// id/diagnostic stay byte-identical to the pre-#2347 path.
+				// `endLine` is the match's 0-based last FILE line, mapped the same
+				// way, for the per-edit span gate below (#4481 r2).
 				const scopes: Array<{
 					root: { findAll(config: never): unknown[] };
 					position(match: unknown): { line: number; column: number };
+					endLine(match: unknown): number;
 				}> = runsInsideHtmlScript
 					? htmlInjections.map((injection) => ({
 							root: injection.root,
@@ -1196,6 +1200,15 @@ export function evaluateAstGrepRules(
 									injection.startIndex + start.index,
 								);
 							},
+							endLine(match) {
+								const end = (
+									match as { range(): { end: { index: number } } }
+								).range().end;
+								return filePositionForIndex(
+									fileLineStarts,
+									injection.startIndex + end.index,
+								).line;
+							},
 						}))
 					: [
 							{
@@ -1207,6 +1220,11 @@ export function evaluateAstGrepRules(
 										}
 									).range().start;
 									return { line: start.line, column: start.column };
+								},
+								endLine(match) {
+									return (
+										match as { range(): { end: { line: number } } }
+									).range().end.line;
 								},
 							},
 						];
@@ -1255,7 +1273,11 @@ export function evaluateAstGrepRules(
 						const position = scope.position(match);
 						if (
 							editScoped &&
-							!isLineInModifiedRanges(position.line + 1, options.modifiedRanges)
+							!spanOverlapsModifiedRanges(
+								position.line + 1,
+								scope.endLine(match) + 1,
+								options.modifiedRanges,
+							)
 						)
 							continue;
 						collected.push({ match, position });

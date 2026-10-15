@@ -31,7 +31,7 @@ import type {
 	RunnerDefinition,
 	RunnerResult,
 } from "../types.js";
-import { findingsResult, isLineInModifiedRanges } from "../types.js";
+import { findingsResult, spanOverlapsModifiedRanges } from "../types.js";
 import { convertLspDiagnostics } from "../utils/lsp-diagnostics.js";
 import { demoteInferredProjectDiagnostics } from "../../lsp/inferred-project.js";
 import {
@@ -499,26 +499,37 @@ const lspRunner: RunnerDefinition = {
 		// #692: shared with the scan/sweep reconcile paths (`retagAuxiliaryDiagnostics`
 		// in `../auxiliary-lsp.js`) so a scan-reconciled aux finding gets identical
 		// tool/semantic/defectClass tagging instead of keeping tool "lsp".
+		// #4481 r2: each converted diagnostic's raw LSP range (1:1, as above),
+		// captured before the re-tag drops suppressed entries, so the edit-scope
+		// filter below reads the match's full span, not only its start line.
+		const rawRangeByDiagnostic = new Map(
+			diagnostics.map((d, i) => [d, validLspDiags[i]?.range]),
+		);
 		const retaggedDiagnostics = retagAuxiliaryDiagnostics(
 			diagnostics,
 			validLspDiags,
 			content,
 			{ cwd: ctx.cwd, fileRole: ctx.fileRole },
 		);
-		// #4481: the ast-grep LSP runs the same line-local rule catalog as the
-		// ast-grep-napi runner, so on the per-edit pass its blocker on a line
-		// the write did not change is pre-existing and is dropped, as napi and
-		// tree-sitter drop theirs. Language-server diagnostics (tool "lsp") and
-		// every other auxiliary stay unscoped by design: an edit can cause a
-		// type error or a finding at a line it never touched.
+		// #4481: the ast-grep LSP runs the same rule catalog as the
+		// ast-grep-napi runner, so on the per-edit pass its blocker whose span
+		// does not overlap the edited lines is dropped, as napi and tree-sitter
+		// drop theirs. Language-server diagnostics (tool "lsp") and every other
+		// auxiliary stay unscoped by design: an edit can cause a type error or a
+		// finding at a line it never touched.
 		const keptDiagnostics = ctx.blockingOnly
-			? retaggedDiagnostics.filter(
-					(d) =>
-						d.tool !== "ast-grep" ||
-						d.semantic !== "blocking" ||
-						d.line === undefined ||
-						isLineInModifiedRanges(d.line, ctx.modifiedRanges),
-				)
+			? retaggedDiagnostics.filter((d) => {
+					if (d.tool !== "ast-grep" || d.semantic !== "blocking") return true;
+					const range = rawRangeByDiagnostic.get(d);
+					return (
+						range === undefined ||
+						spanOverlapsModifiedRanges(
+							range.start.line + 1,
+							range.end.line + 1,
+							ctx.modifiedRanges,
+						)
+					);
+				})
 			: retaggedDiagnostics;
 
 		const hasErrors = keptDiagnostics.some((d) => d.semantic === "blocking");

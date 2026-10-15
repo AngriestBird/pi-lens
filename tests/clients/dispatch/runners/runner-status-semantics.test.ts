@@ -1384,13 +1384,18 @@ describe("per-edit blocker scope (#4481)", () => {
 		warmAttach.diagnostics.mockResolvedValue(undefined);
 	});
 
-	function lspDiag(line: number, source?: string, severity = 1) {
+	function lspDiag(
+		line: number,
+		source?: string,
+		severity = 1,
+		endLine = line,
+	) {
 		return {
 			severity,
 			message: source ? `${source} finding` : "Type error",
 			range: {
 				start: { line: line - 1, character: 0 },
-				end: { line: line - 1, character: 1 },
+				end: { line: endLine - 1, character: 1 },
 			},
 			code: source ? "no-unknown-returns" : "2322",
 			...(source && { source }),
@@ -1430,6 +1435,25 @@ describe("per-edit blocker scope (#4481)", () => {
 	// as ast-grep-napi, delivered by `ast-grep lsp` when its binary is present.
 	it("drops an ast-grep LSP blocker on an unchanged line", async () => {
 		const result = await dispatchLsp([lspDiag(1, "ast-grep")]);
+
+		expect(result.blockers.filter((d) => d.tool === "ast-grep")).toEqual([]);
+	});
+
+	// Recurrence: #4482 review r1 F1 — the real ast-grep LSP reports
+	// `array-callback-return` from line 1 to line 3; an edit inside it (line 2)
+	// caused it, and a start-line gate dropped it.
+	it("keeps an ast-grep LSP blocker whose span contains the edit", async () => {
+		const result = await dispatchLsp([lspDiag(1, "ast-grep", 1, 3)]);
+
+		expect(result.blockers).toEqual([
+			expect.objectContaining({ tool: "ast-grep", line: 1 }),
+		]);
+	});
+
+	// Recurrence: a span gate that read the wrong end (or widened every span)
+	// would bring back the #4481 STOP on an untouched multi-line match.
+	it("drops a multi-line ast-grep LSP blocker wholly outside the edit", async () => {
+		const result = await dispatchLsp([lspDiag(3, "ast-grep", 1, 4)]);
 
 		expect(result.blockers.filter((d) => d.tool === "ast-grep")).toEqual([]);
 	});

@@ -4,11 +4,13 @@
  *
  * The delta baseline (`session.baseline.<file>`, clients/dispatch/dispatcher.ts)
  * only exists after a file's first dispatch, so on that first write every
- * finding counts as new. The tree-sitter runner already scopes its blocking
- * tier to the lines the write changed (`isLineInModifiedRanges`); the
- * ast-grep-napi runner received the same `ctx.modifiedRanges` and ignored it,
- * so a `severity: error` rule on an unchanged line blocked the agent (the
- * reporter's `no-unknown-returns` STOP after a one-constant edit).
+ * finding counts as new. The tree-sitter runner already scoped its blocking
+ * tier to the edited lines; the ast-grep-napi runner received the same
+ * `ctx.modifiedRanges` and ignored them, so a `severity: error` rule on an
+ * unchanged line blocked the agent (the reporter's `no-unknown-returns` STOP
+ * after a one-constant edit). Both now gate on overlap between the match's
+ * line span and the edited lines (`spanOverlapsModifiedRanges`), so an edit
+ * inside a multi-line match still blocks (#4482 review r1 F1).
  *
  * These tests drive the real dispatcher (`createDispatchContext` +
  * `dispatchForFile`, one session fact store per file so the delta baseline
@@ -191,3 +193,75 @@ describe("ast-grep-napi edit scope outside the blocking tier (#4481)", () => {
 		]);
 	}, 30_000);
 });
+
+/** `no-implied-eval` (`severity: error`, inside the per-edit floor's rule
+ *  set): the string-code `setTimeout(...)` call starts on line 2 and ends on
+ *  line 5; the string argument sits on line 3. */
+const EVAL_SOURCE = [
+	"export function later() {",
+	"\tsetTimeout(",
+	'\t\t"tick()",',
+	"\t\t10,",
+	"\t);",
+	"}",
+	"",
+].join("\n");
+const EVAL_RULE = "no-implied-eval";
+const EVAL_START = 2;
+
+/** `array-callback-return` (the review's probe; outside the per-edit floor's
+ *  complexity cap, so only the substitute evaluates it): the `.map` callback
+ *  on lines 2-4 returns nothing. */
+const CALLBACK_SOURCE = [
+	"export function names(items: string[]) {",
+	"\treturn items.map((item) => {",
+	"\t\titem.trim();",
+	"\t});",
+	"}",
+	"",
+].join("\n");
+const CALLBACK_RULE = "array-callback-return";
+
+describe.each([
+	["per-edit floor", PER_EDIT_FLAGS],
+	["LSP substitute", SUBSTITUTE_FLAGS],
+])("ast-grep-napi multi-line match span (#4481 r2, %s)", (label, flags) => {
+	const slug = label.replace(/\W+/g, "-");
+
+	// Recurrence: #4482 review r1 F1 — the edit put the string on line 3 and so
+	// caused the finding, but it is anchored at the call's start line (2), so a
+	// start-line gate dropped a blocker the edit introduced.
+	it("blocks a match whose span contains the edit while its start line is unchanged", async () => {
+		const { filePath } = env.addFile(`span-inside-${slug}.ts`, EVAL_SOURCE);
+
+		const result = await session(flags)(filePath, [{ start: 3, end: 3 }]);
+
+		expect(napiFindings(result.blockers, EVAL_RULE)).toEqual([
+			expect.objectContaining({ rule: EVAL_RULE, line: EVAL_START }),
+		]);
+	}, 30_000);
+
+	// Recurrence: a span gate that over-widened (every multi-line match, or the
+	// whole file) would bring back the #4481 STOP on an untouched construct.
+	it("does not block a multi-line match wholly outside the edit", async () => {
+		const { filePath } = env.addFile(`span-outside-${slug}.ts`, EVAL_SOURCE);
+
+		const result = await session(flags)(filePath, [{ start: 6, end: 6 }]);
+
+		expect(napiFindings(result.blockers, EVAL_RULE)).toEqual([]);
+	}, 30_000);
+});
+
+// Recurrence: #4482 review r1 F1 probe 1 verbatim — removing `return` inside
+// the callback (line 3) dropped `array-callback-return@2` in the substitute.
+it("blocks the review's array-callback-return probe in the LSP substitute role (#4481 r2)", async () => {
+	const { filePath } = env.addFile("span-callback.ts", CALLBACK_SOURCE);
+
+	const result = await session(SUBSTITUTE_FLAGS)(filePath, [
+		{ start: 3, end: 3 },
+	]);
+
+	expect(napiFindings(result.blockers, CALLBACK_RULE)).toEqual([
+		expect.objectContaining({ rule: CALLBACK_RULE, line: 2 }),
+	]);
+}, 30_000);
