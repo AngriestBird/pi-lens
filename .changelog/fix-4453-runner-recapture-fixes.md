@@ -1,0 +1,6 @@
+---
+section: Fixed
+audience: user
+---
+
+- **helm-lint, fish-indent and golangci-lint now read their tools' real output (#4453, #4454, #4455, #1937)** — helm 4 prints a template parse error as `templates/: parse error at (<chart>/templates/bad.yaml:5)`; the parser built the finding's path from the prose around the file and recorded no line, and now reports the template and line with the chart name stripped. `fish_indent --check` prints the file's own name on stderr and exits 1 for a file that only needs formatting; the runner reported that as a blocking `fish-indent-parse-error` and now reports the non-blocking `fish-indent-unformatted` finding. golangci-lint v2, which the installer downloads, rejects `--out-format=json` (exit 3, unknown flag); the runner now asks for `--output.json.path=stdout --show-stats=false`, so the JSON document is not followed by run statistics. golangci-lint v1 binaries do not understand these flags.

@@ -350,7 +350,12 @@ describe("JSON runner outcome seam (#1816)", () => {
 							"--no-error-on-unmatched-pattern",
 							expect.any(String),
 						]
-					: ["run", "--out-format=json", expect.any(String)],
+					: [
+							"run",
+							"--output.json.path=stdout",
+							"--show-stats=false",
+							expect.any(String),
+						],
 				expect.objectContaining({ cwd: expect.any(String) }),
 			);
 		});

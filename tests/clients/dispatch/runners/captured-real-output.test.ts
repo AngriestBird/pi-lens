@@ -24,6 +24,7 @@ import { FactStore } from "../../../../clients/dispatch/fact-store.js";
 import {
 	listCapturedOutputs,
 	materialize,
+	WORKSPACE_TOKEN,
 } from "../../../helpers/captured-runner-output.js";
 import { setupTestEnvironment } from "../../test-utils.js";
 
@@ -107,7 +108,9 @@ const RUNNER_DESCRIPTORS: Record<string, { module: string; kind: string }> = {
 	"fish-indent": { module: "fish-indent", kind: "fish" },
 	"gleam-check": { module: "gleam-check", kind: "gleam" },
 	"go-vet": { module: "go-vet", kind: "go" },
+	"golangci-lint": { module: "golangci-lint", kind: "go" },
 	hadolint: { module: "hadolint", kind: "docker" },
+	"helm-lint": { module: "helm-lint", kind: "yaml" },
 	htmlhint: { module: "htmlhint", kind: "html" },
 	javac: { module: "javac", kind: "java" },
 	ktlint: { module: "ktlint", kind: "kotlin" },
@@ -132,6 +135,78 @@ const RUNNER_DESCRIPTORS: Record<string, { module: string; kind: string }> = {
 	vale: { module: "vale", kind: "markdown" },
 	yamllint: { module: "yamllint", kind: "yaml" },
 	"zig-check": { module: "zig-check", kind: "zig" },
+};
+
+/**
+ * What a fixture's replay must produce beyond "at least one finding". Keyed
+ * `<runner>/<case>`. Presence alone passed a fish-indent replay that reported a
+ * merely unformatted file as a blocking parse error (#4454), and a helm-lint
+ * replay whose path was built from prose (#4453): neither asserts the
+ * semantic, the rule, the file or the line.
+ */
+interface ExpectedFinding {
+	rule: string;
+	semantic: string;
+	/** Workspace-relative, forward slashes. */
+	file: string;
+	/** Absent when the tool reports the finding with no line. */
+	line?: number;
+}
+interface ReplayExpectation {
+	status: string;
+	semantic: string;
+	findings: ExpectedFinding[];
+}
+const REPLAY_EXPECTATIONS: Record<string, ReplayExpectation> = {
+	// fish_indent 4.9.3 --check prints the file name on stderr and exits 1 for a
+	// file that only needs formatting: a fixable warning, never a blocker.
+	"fish-indent/real": {
+		status: "succeeded",
+		semantic: "warning",
+		findings: [
+			{
+				rule: "fish-indent-unformatted",
+				semantic: "warning",
+				file: "unformatted.fish",
+				line: 1,
+			},
+		],
+	},
+	"fish-indent/smoke-bad": {
+		status: "succeeded",
+		semantic: "warning",
+		findings: [
+			{
+				rule: "fish-indent-unformatted",
+				semantic: "warning",
+				file: "bad.fish",
+				line: 1,
+			},
+		],
+	},
+	"golangci-lint/real": {
+		status: "succeeded",
+		semantic: "warning",
+		findings: [
+			{ rule: "errcheck", semantic: "warning", file: "bad.go", line: 6 },
+			{ rule: "unused", semantic: "warning", file: "bad.go", line: 9 },
+		],
+	},
+	// helm 4.3.0 prefixes the chart name inside the message; the real template
+	// is `templates/bad.yaml` line 5, not the prose around it.
+	"helm-lint/real": {
+		status: "succeeded",
+		semantic: "blocking",
+		findings: [
+			{ rule: "info", semantic: "warning", file: "Chart.yaml" },
+			{
+				rule: "error",
+				semantic: "blocking",
+				file: "templates/bad.yaml",
+				line: 5,
+			},
+		],
+	},
 };
 
 /** Version probes the toolchain clients run before the invocation under test. */
@@ -284,9 +359,13 @@ describe("captured real-binary output", () => {
 						path.basename(fixture.file),
 						fixture.file.replace(/\\/g, "/"),
 					]);
-					const recorded = (fixture.provenance.argv ?? []).filter(
-						(token) => !fileTokens.has(token),
-					);
+					// A token the capture spawned with the workspace's absolute path
+					// (helm lint `<chart root>`) maps to this replay's own workspace.
+					const recorded = (fixture.provenance.argv ?? [])
+						.filter((token) => !fileTokens.has(token))
+						.map((token) =>
+							token === WORKSPACE_TOKEN ? path.resolve(env.tmpDir) : token,
+						);
 					const spawnedArgvs = safeSpawnAsync.mock.calls.map(
 						(call) => (call[1] ?? []) as string[],
 					);
@@ -304,6 +383,30 @@ describe("captured real-binary output", () => {
 						`${runnerId} parsed 0 diagnostics out of real ${fixture.provenance.tool} ${fixture.provenance.version} output (exit ${fixture.exitCode}). Re-capture with \`${fixture.provenance.command}\` and fix the parser.`,
 					).toBeGreaterThan(0);
 					expect(result.status).not.toBe("skipped");
+					const expected =
+						REPLAY_EXPECTATIONS[`${runnerId}/${fixture.caseName}`];
+					if (expected) {
+						expect(
+							{ status: result.status, semantic: result.semantic },
+							`${runnerId} verdict over real ${fixture.provenance.tool} ${fixture.provenance.version} output`,
+						).toEqual({
+							status: expected.status,
+							semantic: expected.semantic,
+						});
+						expect(
+							(result.diagnostics as Array<Record<string, unknown>>).map(
+								(diagnostic) => ({
+									rule: diagnostic.rule,
+									semantic: diagnostic.semantic,
+									file: path
+										.relative(env.tmpDir, String(diagnostic.filePath))
+										.replace(/\\/g, "/"),
+									line: diagnostic.line,
+								}),
+							),
+						).toEqual(expected.findings);
+						return;
+					}
 					for (const diagnostic of result.diagnostics as Array<
 						Record<string, unknown>
 					>) {

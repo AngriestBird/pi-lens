@@ -140,10 +140,6 @@ const EXEMPT = new Map<string, string>([
 		"alternate: ktlint is the Kotlin primary; detekt needs the detekt CLI plus its formatting plugin, which is not a single-binary install",
 	],
 	[
-		"golangci-lint",
-		"alternate: go-vet is the Go lint primary; golangci-lint is config-first and exercised by the --autofix lane",
-	],
-	[
 		"prisma-validate",
 		"lsp: exercised through the --lsp prisma smoke lane; the runner shells out to the same @prisma/language-server package",
 	],
@@ -154,10 +150,6 @@ const EXEMPT = new Map<string, string>([
 	[
 		"lsp",
 		"lsp: the dispatch lsp runner relays language-server diagnostics rather than parsing a CLI; its evidence is the --lsp tool-smoke lane and the clients/lsp suites",
-	],
-	[
-		"helm-lint",
-		"pending: #4453 helm 4 prints a template parse error that parseHelmLintOutput attributes to a path made of the prose around it, with no line; the capture lands with that parser fix",
 	],
 	[
 		"psscriptanalyzer",
@@ -373,7 +365,7 @@ describe("smoke-fixture coverage", () => {
 	// and the runners that only a live fixture backs must still be flagged.
 	it("a live smoke fixture alone does not satisfy the census", () => {
 		const gaps = censusGaps(new Map());
-		for (const id of ["helm-lint", "psscriptanalyzer"]) {
+		for (const id of ["psscriptanalyzer"]) {
 			expect(
 				liveFixtureRunnerIds().has(id),
 				`${id} lost its live fixture, so this probe no longer separates live from captured; pick another live-only runner`,
@@ -407,19 +399,19 @@ describe("smoke-fixture coverage", () => {
 	// PowerShell, both preinstalled on ubuntu-latest (#4452 review F2). The set
 	// of ids allowed there is a table a reviewer must edit.
 	// Recurrence: the alternate rule kept counting a live smoke fixture as the
-	// primary's coverage after the census stopped (#4452 review F4). helm-lint
+	// primary's coverage after the census stopped (#4452 review F4). psscriptanalyzer
 	// has a live fixture and no captured bytes.
 	it("an alternate whose primary has only a live fixture is rejected", () => {
-		expect(liveFixtureRunnerIds().has("helm-lint")).toBe(true);
-		expect(capturedFixtureRunnerIds().has("helm-lint")).toBe(false);
+		expect(liveFixtureRunnerIds().has("psscriptanalyzer")).toBe(true);
+		expect(capturedFixtureRunnerIds().has("psscriptanalyzer")).toBe(false);
 		const problems = realExemptionProblems([
 			[
 				"synthetic-alt",
-				"alternate: helm-lint is the primary for this language",
+				"alternate: psscriptanalyzer is the primary for this language",
 			],
 		]);
 		expect(problems).toHaveLength(1);
-		expect(problems[0]).toMatch(/names "helm-lint" as its primary/);
+		expect(problems[0]).toMatch(/names "psscriptanalyzer" as its primary/);
 	});
 
 	it("toolchain and platform exemptions are a pinned set", () => {

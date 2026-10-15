@@ -164,6 +164,37 @@ export const CAPTURES = [
 		argv: ["--check", "unformatted.fish"],
 	},
 	{
+		// #4454 — the fish-lsp smoke fixture also has to be something fish_indent
+		// objects to. It was already formatted, so exit 0 and no finding.
+		runner: "fish-indent",
+		case: "smoke-bad",
+		tool: "fish_indent",
+		workspace: smoke("fish"),
+		file: "bad.fish",
+		argv: ["--check", "bad.fish"],
+	},
+	{
+		// #4455 — golangci-lint v2 removed `--out-format`; JSON now comes from
+		// `--output.json.path`, and the run stats it prints to stdout would
+		// otherwise trail the JSON document.
+		runner: "golangci-lint",
+		tool: "golangci-lint",
+		workspace: smoke("golangci-lint"),
+		file: "bad.go",
+		argv: ["run", "--output.json.path=stdout", "--show-stats=false", "bad.go"],
+	},
+	{
+		// #4453 — the runner lints the chart ROOT by absolute path, so the capture
+		// spawns with the workspace (the token) and the file is the template the
+		// replay points the runner at.
+		runner: "helm-lint",
+		tool: "helm",
+		versionArgs: "version --short",
+		workspace: smoke("helm"),
+		file: "templates/bad.yaml",
+		argv: ["lint", "__WORKSPACE__"],
+	},
+	{
 		// The static build: the dynamic `swiftlint` needs libxml2 and SourceKit.
 		runner: "swiftlint",
 		tool: "swiftlint",

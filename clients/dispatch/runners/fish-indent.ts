@@ -1,3 +1,5 @@
+import { resolve } from "node:path";
+import { pathsEqual } from "../../path-utils.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
 import { resolveRunnerCwd } from "../../tool-cwd.js";
 import { PRIORITY } from "../priorities.js";
@@ -42,8 +44,17 @@ const fishIndentRunner: RunnerDefinition = {
 			return { status: "succeeded", diagnostics: [], semantic: "none" };
 		}
 
-		// Non-zero exit: either needs formatting or a parse error was reported on stderr
-		const stderrLine = (result.stderr ?? "").split("\n").find((l) => l.trim());
+		// Non-zero exit: either needs formatting or something else was reported on
+		// stderr. fish_indent 4.9.3 --check prints the file's own name there for a
+		// merely unformatted file (#4454); that is the format finding below, not an
+		// error. It prints the path as spelled in argv, so compare resolved paths.
+		const stderrLine = (result.stderr ?? "")
+			.split("\n")
+			.find(
+				(l) =>
+					l.trim() &&
+					!pathsEqual(resolve(cwd, l.trim()), resolve(cwd, ctx.filePath)),
+			);
 		if (stderrLine) {
 			// Parse/syntax error — extract line number from "filename (line N): message" if present
 			const lineMatch = stderrLine.match(/\(line\s+(\d+)\)/);

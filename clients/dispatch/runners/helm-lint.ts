@@ -52,18 +52,30 @@ function diagnosticLocation(
 	message: string,
 	chartRoot: string,
 ): { filePath: string; line?: number; message: string } {
+	// A path is a run of non-space, non-delimiter characters ending in a chart
+	// file extension. helm 4.3.0 also prints template parse errors as
+	// `templates/: parse error at (<chart>/templates/bad.yaml:5): ...`, where the
+	// real file sits after prose and parentheses (#4453).
 	const location = message.match(
-		/(?:^|\s)([^:\r\n]+\.(?:ya?ml|tpl|json))(?::(\d+))?(?::\d+)?(?::|\s)/i,
+		/(?:^|[\s(])([^\s:()\r\n]+\.(?:ya?ml|tpl|json))(?::(\d+))?(?::\d+)?(?=[:\s)]|$)/i,
 	);
-	if (!location) {
+	const [, found, rawLine] = location ?? [];
+	if (!found) {
 		return { filePath: path.join(chartRoot, "Chart.yaml"), message };
 	}
-	const candidate = path.resolve(chartRoot, location[1]);
+	// A message-leading path is relative to the chart root. One embedded later
+	// in the message is spelled `<chart name>/<path>` by helm: drop the chart name.
+	const embedded = !message.startsWith(found);
+	const relative =
+		embedded && found.includes("/")
+			? found.slice(found.indexOf("/") + 1)
+			: found;
+	const candidate = path.resolve(chartRoot, relative);
 	return {
 		filePath: isWithin(chartRoot, candidate)
 			? candidate
 			: path.join(chartRoot, "Chart.yaml"),
-		line: location[2] ? Number(location[2]) : undefined,
+		line: rawLine ? Number(rawLine) : undefined,
 		message,
 	};
 }
