@@ -13,7 +13,10 @@ import {
 	readWalkedFiles,
 } from "../support/sweep-kit.js";
 import type { SgNode } from "../../clients/deps/ast-grep-napi.js";
-import { isViMockCall, mockSpecifier } from "../support/vi-mock-export-gate.js";
+import {
+	createViResolver,
+	mockSpecifier,
+} from "../support/vi-mock-export-gate.js";
 
 const REPO_ROOT = path.resolve(__dirname, "../..");
 const TESTS_ROOT = path.join(REPO_ROOT, "tests");
@@ -31,9 +34,7 @@ const BASELINE: Record<string, number> = {
 
 /**
  * Both the hoisted `vi.mock` and the non-hoisted `vi.doMock` replace a whole
- * module, so the ratchet owns both. The structural {@link isViMockCall}
- * (shared with the export gate) answers dot, bracket and spaced forms; this is
- * the one caller that widens its property set.
+ * module, so the ratchet owns both.
  */
 const MOCK_METHODS = ["mock", "doMock"] as const;
 
@@ -52,29 +53,20 @@ function resolvesToModule(specifier: string, moduleName: string): boolean {
 }
 
 /**
- * A `vi[…]` call whose key is not a literal: it may name `mock`, and the scan
- * cannot tell. Dot and literal-bracket forms are read by {@link isViMockCall}.
- */
-function isOpaqueViCall(callee: SgNode | null | undefined): boolean {
-	return (
-		callee?.kind() === "subscript_expression" &&
-		callee.field("object")?.text() === "vi" &&
-		mockSpecifier(callee.field("index") ?? undefined) === undefined
-	);
-}
-
-/**
  * Whole-module mocks of `moduleName` in one test file, and every spelling the
  * scan cannot classify (#4429: a population-deriving scanner fails closed).
  *
- * The needle is every call on `vi` in the AST (a comment or string quoting
- * one is not a node). Classified: a `mock`/`doMock` call whose specifier
+ * The needle is every call in the AST (a comment or string quoting one is not
+ * a node) that the file's {@link createViResolver} binds to vitest's utils
+ * object or cannot bind. Classified: a `mock`/`doMock` call on `vi` or
+ * `vitest`, under any alias, cast or `.call`/`.apply`, whose specifier
  * {@link mockSpecifier} reads (a string, a substitution-free template, or the
  * typed `import("…")` form) is counted when it resolves to the module and
- * ignored otherwise; every other readable `vi` method is not a mock. A mock
- * call whose specifier is not readable (a variable, a computed template),
- * and a `vi[…]` call whose key is not a literal, are UNCLASSIFIED and reported
- * with their line: they may mock the seam module, so they red, never skip.
+ * ignored otherwise; every other bound method is not a mock. UNCLASSIFIED,
+ * reported with the line: a mock call whose specifier is not readable (a
+ * variable, a computed template), a utils call whose key is not a literal,
+ * and a vitest module-API name (`mock`, `doMock`, `hoisted`, …) on an object
+ * the resolver cannot bind. Each may mock the seam module, so it reds.
  */
 function scanViMockSites(
 	file: string,
@@ -82,9 +74,9 @@ function scanViMockSites(
 	moduleName: string,
 ): { count: number; unclassified: string[] } {
 	const lines = source.split("\n");
-	const calls = parse(Lang.TypeScript, source)
-		.root()
-		.findAll({ rule: { kind: "call_expression" } });
+	const root = parse(Lang.TypeScript, source).root();
+	const resolver = createViResolver(root);
+	resolver.prime();
 	const result = { count: 0, unclassified: [] as string[] };
 	const report = (call: SgNode) => {
 		const line = call.range().start.line + 1;
@@ -92,16 +84,23 @@ function scanViMockSites(
 			`unclassified spelling at ${file}:${line}: ${lines[line - 1]?.trim() ?? ""}`,
 		);
 	};
-	for (const call of calls) {
-		const callee = call.field("function");
-		if (isOpaqueViCall(callee)) {
+	for (const call of root.findAll({ rule: { kind: "call_expression" } })) {
+		const callee = resolver.classify(call.field("function"), MOCK_METHODS);
+		if (callee.kind === "other") continue;
+		if (callee.kind === "unresolved") {
 			report(call);
 			continue;
 		}
-		if (!isViMockCall(callee, MOCK_METHODS)) continue;
-		const specifier = mockSpecifier(
-			call.field("arguments")?.namedChildren()[0],
-		);
+		const args = call.field("arguments")?.namedChildren() ?? [];
+		const specifierNode =
+			callee.via === "direct"
+				? args[0]
+				: callee.via === "call"
+					? args[1]
+					: args[1]?.kind() === "array"
+						? args[1].namedChildren()[0]
+						: undefined;
+		const specifier = mockSpecifier(specifierNode);
 		if (specifier === undefined) report(call);
 		else if (resolvesToModule(specifier, moduleName)) result.count++;
 	}
@@ -195,15 +194,56 @@ describe("project-trust real seam ratchet (#4281)", () => {
 		).toBe(1);
 	});
 
+	it.each([
+		[
+			"vitest.mock",
+			'import { vitest } from "vitest";\nvitest.mock(S, () => ({}));',
+		],
+		[
+			"an import alias",
+			'import { vi as v } from "vitest";\nv.doMock(S, () => ({}));',
+		],
+		["a const alias", "const v = vi;\nv.doMock(S, () => ({}));"],
+		["a destructured method", "const { doMock } = vi;\ndoMock(S, () => ({}));"],
+		[
+			"a renamed destructure",
+			"const { doMock: dm } = vitest;\ndm(S, () => ({}));",
+		],
+		[
+			"a namespace import",
+			'import * as V from "vitest";\nV.vi.mock(S, () => ({}));',
+		],
+		["parentheses", "(vi).doMock(S, () => ({}));"],
+		["a cast", "(vi as any).doMock(S, () => ({}));"],
+		["a non-null assertion", "vi!.mock(S, () => ({}));"],
+		[".call", "vi.doMock.call(vi, S, () => ({}));"],
+		[".apply", "vi.doMock.apply(vi, [S, () => ({})]);"],
+	])(
+		"counts a seam mock spelled through %s (#4429 review F2)",
+		(_name, body) => {
+			// Recurrence: #4457 review F2, each of these mocked the seam module and
+			// the `vi`-identifier needle neither counted nor reported it.
+			const source = body.replaceAll("S", '"../clients/project-trust.js"');
+			expect(
+				scanViMockSites("fake.test.ts", source, "clients/project-trust.js"),
+			).toEqual({ count: 1, unclassified: [] });
+		},
+	);
+
 	it("reports a mock spelling it cannot classify, with its line (#4429)", () => {
-		// The fail-closed branch: a specifier the scan cannot read, and a `vi`
-		// key it cannot read, may mock the seam module, so each reds.
+		// The fail-closed branches: a specifier the scan cannot read, a utils
+		// key it cannot read, and a module-API name on an object it cannot bind
+		// may each mock the seam module, so each reds.
 		const source = [
 			'const target = "../clients/project-trust.js";',
 			"vi.mock(target, () => ({}));",
 			"vi.doMock(`../clients/${'project-trust'}.js`, () => ({}));",
 			'vi["mo" + "ck"]("../clients/project-trust.js", () => ({}));',
+			'getVitest().doMock("../clients/project-trust.js", () => ({}));',
+			'jest.mock("../clients/project-trust.js");',
 			"vi.fn(target);",
+			"const helper = { mock: (path: string) => path };",
+			'helper.mock("../clients/project-trust.js");',
 		].join("\n");
 		expect(
 			scanViMockSites("fake.test.ts", source, "clients/project-trust.js"),
@@ -213,6 +253,8 @@ describe("project-trust real seam ratchet (#4281)", () => {
 				"unclassified spelling at fake.test.ts:2: vi.mock(target, () => ({}));",
 				"unclassified spelling at fake.test.ts:3: vi.doMock(`../clients/${'project-trust'}.js`, () => ({}));",
 				'unclassified spelling at fake.test.ts:4: vi["mo" + "ck"]("../clients/project-trust.js", () => ({}));',
+				'unclassified spelling at fake.test.ts:5: getVitest().doMock("../clients/project-trust.js", () => ({}));',
+				'unclassified spelling at fake.test.ts:6: jest.mock("../clients/project-trust.js");',
 			],
 		});
 	});

@@ -66,10 +66,12 @@
  *   still cannot resolve arbitrary aliases, so aliases remain conservative
  *   false positives. Quoted and commented helper names are excluded by
  *   `codeMatches`.
- * - Detector 6 reads the callee through `isViMockCall`, which needs the
- *   object to be the identifier `vi`: an alias (`const v = vi`,
- *   `import { vi as v }`, `(vi).mock`, `vi!.mock`, `(vi as any).mock`) is
- *   not seen (#4383 review F4; none in the tree today). `vi.spyOn` on a
+ * - Detector 6 reads the callee through `isViMockCall`, which resolves it to
+ *   vitest's utils object (`vi` or `vitest`, an import or `const` alias,
+ *   parentheses, casts; #4429 review F2). A bare call through a renamed
+ *   destructure (`const { mock: m } = vi; m(…)`) needs a per-file
+ *   `createViResolver` and is not seen here (none in the tree today; the
+ *   project-trust seam ratchet uses the per-file resolver). `vi.spyOn` on a
  *   module namespace and `vi.mock` in `tests/support/` (the global setup
  *   mocks two modules) are out of scope.
  * - Detector 7 reads one object literal at a time. A double split across

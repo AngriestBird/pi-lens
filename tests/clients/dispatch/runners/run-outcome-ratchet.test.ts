@@ -84,15 +84,19 @@ function literalValue(node: SgNode): string | undefined {
  * Classified forms, decided from the AST:
  *
  * - the source of a static `import { … }` that resolves to the module from
- *   the runners directory (any relative spelling or extension), with at least
- *   one value specifier: the runner USES the primitive;
- * - the same import with only type specifiers (`import type { … }`, or every
- *   specifier marked `type`): a type cannot classify an outcome, so the
- *   runner does NOT use it.
+ *   the runners directory (any relative spelling or extension). Each
+ *   specifier is then classified against the module's own exports, read from
+ *   its AST: a `type`-marked specifier or an imported interface or type alias
+ *   is a TYPE (with or without the keyword: a type cannot classify an
+ *   outcome); an imported function, class, variable or enum is a VALUE.
+ * - the runner USES the primitive only when it references a value it
+ *   imported this way somewhere outside the import (#4429 review F4: an
+ *   import specifier is not a use site).
  *
  * Every other needle hit (a namespace or default import, a bare side-effect
  * import, `export … from`, a dynamic `import()` or `require`, a specifier
- * that does not resolve to the module, or the name in a data string) is an
+ * that does not resolve to the module, an imported name the module does not
+ * declare as a value or a type, or the name in a data string) is an
  * UNCLASSIFIED spelling, reported with its file and line, never skipped and
  * never counted as use. A comment or string quoting an import is not a node.
  */
@@ -102,55 +106,143 @@ export function primitiveUse(
 ): { uses: boolean; unclassified: string[] } {
 	const result = { uses: false, unclassified: [] as string[] };
 	const lines = source.split("\n");
-	const literals = parse(Lang.TypeScript, source)
-		.root()
-		.findAll({
-			rule: { any: [{ kind: "string" }, { kind: "template_string" }] },
-		});
+	const root = parse(Lang.TypeScript, source).root();
+	const valueLocals = new Set<string>();
+	const report = (node: SgNode) => {
+		const line = node.range().start.line + 1;
+		result.unclassified.push(
+			`unclassified spelling at ${file}:${line}: ${lines[line - 1]?.trim() ?? ""}`,
+		);
+	};
+	const literals = root.findAll({
+		rule: { any: [{ kind: "string" }, { kind: "template_string" }] },
+	});
 	for (const literal of literals) {
 		const value = literalValue(literal);
 		if (value === undefined) continue;
 		const stem = path.posix.basename(value).replace(/\.[cm]?[jt]s$/, "");
 		if (!PRIMITIVE_BASENAMES.has(stem)) continue;
-		const use = classifyImport(literal, value);
-		if (use === "value") result.uses = true;
-		else if (use === undefined) {
-			const line = literal.range().start.line + 1;
-			result.unclassified.push(
-				`unclassified spelling at ${file}:${line}: ${lines[line - 1]?.trim() ?? ""}`,
-			);
+		const imported = importedSpecifiers(literal, value);
+		if (imported === undefined) {
+			report(literal);
+			continue;
+		}
+		for (const specifier of imported.specifiers) {
+			if (specifier.typeMarked) continue;
+			const kind = primitiveExports(imported.module).get(specifier.name);
+			if (kind === "value") valueLocals.add(specifier.local);
+			else if (kind === undefined) report(literal);
 		}
 	}
+	result.uses = root
+		.findAll({
+			rule: {
+				any: [
+					{ kind: "identifier" },
+					{ kind: "shorthand_property_identifier" },
+				],
+			},
+		})
+		.some(
+			(node) =>
+				valueLocals.has(node.text()) &&
+				!node.ancestors().some((up) => up.kind() === "import_statement"),
+		);
 	return result;
 }
 
-function classifyImport(
+/** The specifiers of a static named import of a primitive module, or undefined. */
+function importedSpecifiers(
 	literal: SgNode,
 	value: string,
-): "value" | "type" | undefined {
+):
+	| {
+			module: string;
+			specifiers: { name: string; local: string; typeMarked: boolean }[];
+	  }
+	| undefined {
 	const statement = literal.parent();
 	if (statement?.kind() !== "import_statement") return undefined;
 	if (!value.startsWith(".")) return undefined;
 	const module = path.posix
 		.normalize(path.posix.join("runners", value))
-		.replace(/\.[cm]?[jt]s$/, "");
-	if (!PRIMITIVE_MODULES.has(module.replace(/^runners\//, "")))
-		return undefined;
-	if (statement.children().some((child) => child.kind() === "type")) {
-		return "type";
-	}
+		.replace(/\.[cm]?[jt]s$/, "")
+		.replace(/^runners\//, "");
+	if (!PRIMITIVE_MODULES.has(module)) return undefined;
+	const statementTyped = statement
+		.children()
+		.some((child) => child.kind() === "type");
 	const clause = statement.children().find((c) => c.kind() === "import_clause");
 	const parts = clause?.namedChildren() ?? [];
 	if (parts.length !== 1 || parts[0].kind() !== "named_imports")
 		return undefined;
-	const specifiers = parts[0]
-		.namedChildren()
-		.filter((child) => child.kind() === "import_specifier");
-	return specifiers.some(
-		(specifier) => !specifier.children().some((c) => c.kind() === "type"),
-	)
-		? "value"
-		: "type";
+	return {
+		module,
+		specifiers: parts[0]
+			.namedChildren()
+			.filter((child) => child.kind() === "import_specifier")
+			.map((specifier) => {
+				const name = specifier.field("name")?.text() ?? "";
+				return {
+					name,
+					local: specifier.field("alias")?.text() ?? name,
+					typeMarked:
+						statementTyped ||
+						specifier.children().some((c) => c.kind() === "type"),
+				};
+			}),
+	};
+}
+
+const VALUE_DECLARATIONS = new Set([
+	"abstract_class_declaration",
+	"class_declaration",
+	"enum_declaration",
+	"function_declaration",
+	"generator_function_declaration",
+	"lexical_declaration",
+	"variable_declaration",
+]);
+const TYPE_DECLARATIONS = new Set([
+	"interface_declaration",
+	"type_alias_declaration",
+]);
+
+const exportsByModule = new Map<string, Map<string, "value" | "type">>();
+
+/**
+ * Each primitive module's exported names, by kind, read from its source. An
+ * export form this does not read (`export { x }`, `export *`) adds no name,
+ * so a runner importing through it reports unclassified rather than passing.
+ */
+function primitiveExports(module: string): Map<string, "value" | "type"> {
+	const cached = exportsByModule.get(module);
+	if (cached) return cached;
+	const source = fs.readFileSync(
+		path.join(RUNNERS_DIR, `${module}.ts`),
+		"utf8",
+	);
+	const kinds = new Map<string, "value" | "type">();
+	for (const statement of parse(Lang.TypeScript, source)
+		.root()
+		.findAll({ rule: { kind: "export_statement" } })) {
+		const declaration = statement.field("declaration");
+		if (!declaration) continue;
+		const kind = String(declaration.kind());
+		if (TYPE_DECLARATIONS.has(kind)) {
+			const name = declaration.field("name")?.text();
+			if (name) kinds.set(name, "type");
+		} else if (VALUE_DECLARATIONS.has(kind)) {
+			const names = declaration.field("name")
+				? [declaration.field("name")?.text()]
+				: declaration
+						.findAll({ rule: { kind: "variable_declarator" } })
+						.map((declarator) => declarator.field("name")?.text());
+			for (const name of names) if (name) kinds.set(name, "value");
+		}
+	}
+	exportsByModule.set(module, kinds);
+	return kinds;
 }
 
 export function usesPrimitive(source: string): boolean {
@@ -259,6 +351,8 @@ describe("run-outcome primitive ratchet", () => {
 			'export { parseToolRun } from "./utils/tool-failure.js";',
 			'const lazy = await import("./utils/spawn-outcome.js");',
 			'import { parseToolRun } from "./utils/tool-failure-legacy.js";',
+			'import { classifyOutcomeV2 } from "./utils/spawn-outcome.js";',
+			"return finishParsedRun(input);",
 		].join("\n");
 		expect(primitiveUse("fake.ts", source)).toEqual({
 			uses: true,
@@ -266,26 +360,42 @@ describe("run-outcome primitive ratchet", () => {
 				'unclassified spelling at fake.ts:2: import * as outcome from "./utils/spawn-outcome.js";',
 				'unclassified spelling at fake.ts:3: export { parseToolRun } from "./utils/tool-failure.js";',
 				'unclassified spelling at fake.ts:4: const lazy = await import("./utils/spawn-outcome.js");',
+				'unclassified spelling at fake.ts:6: import { classifyOutcomeV2 } from "./utils/spawn-outcome.js";',
 			],
 		});
 	});
 
 	it("does not count a type-only import as use (#4429)", () => {
-		// The regex scan read `import { type X }` as use: a runner importing
-		// only `ToolExitCodes` would pass the ratchet without the classifier.
+		// The regex scan read `import { type X }` as use; round 1 still read an
+		// unmarked `import { ToolExitCodes }` (an interface) as use (#4457
+		// review F4). Kind comes from the module's own exports.
+		for (const source of [
+			'import { type ToolExitCodes } from "./utils/spawn-outcome.js";\nconst c: ToolExitCodes = codes;',
+			'import type { ToolExitCodes } from "./utils/spawn-outcome.js";\nconst c: ToolExitCodes = codes;',
+			'import { ToolExitCodes } from "./utils/spawn-outcome.js";\nconst c: ToolExitCodes = codes;',
+			'import { ParsedToolRun as Run } from "./utils/tool-failure.js";\nlet r: Run;',
+		]) {
+			expect(primitiveUse("fake.ts", source), source).toEqual({
+				uses: false,
+				unclassified: [],
+			});
+		}
 		expect(
 			usesPrimitive(
-				'import { type ToolExitCodes } from "./utils/spawn-outcome.js";',
+				'import { type ToolExitCodes, parseToolRun } from "../runners/utils/tool-failure.ts";\nparseToolRun(input);',
 			),
+		).toBe(true);
+	});
+
+	it("counts a value import only where the runner references it (#4429)", () => {
+		// An import specifier is not a use site: an unreferenced value import
+		// leaves the runner off the primitive; a renamed one used is on it.
+		expect(
+			usesPrimitive('import { parseToolRun } from "./utils/tool-failure.js";'),
 		).toBe(false);
 		expect(
 			usesPrimitive(
-				'import type { ToolExitCodes } from "./utils/spawn-outcome.js";',
-			),
-		).toBe(false);
-		expect(
-			usesPrimitive(
-				'import { type ToolExitCodes, parseToolRun } from "../runners/utils/tool-failure.ts";',
+				'import { classifyRunOutcome as classify } from "./utils/spawn-outcome.js";\nconst o = classify(input);',
 			),
 		).toBe(true);
 	});
@@ -310,7 +420,7 @@ describe("run-outcome primitive ratchet", () => {
 		).toBe(false);
 		expect(
 			usesPrimitive(
-				'import { classifyRunOutcome } from "./utils/tool-failure.js"',
+				'import { classifyRunOutcome } from "./utils/spawn-outcome.js";\nclassifyRunOutcome(input);',
 			),
 		).toBe(true);
 		expect(

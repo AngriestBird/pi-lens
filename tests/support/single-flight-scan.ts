@@ -48,10 +48,11 @@ export interface InFlightScan {
  *
  * - `state`, counted: a variable declarator's binding outside every function
  *   (module state, destructured or not), a class field (any modifier set,
- *   `#private`, annotated or not), an interface or type member, and an
+ *   `#private`, annotated or not, or a constructor parameter property), an
+ *   interface or type member, and an
  *   object-literal key (the false-positive direction, kept from the regex scan
  *   this replaced: a person dismisses it with one exemption line).
- * - `local`: a binding inside a function (a parameter, a function-scoped
+ * - `local`: a binding inside a function (a plain parameter, a function-scoped
  *   declarator, a `catch` or `for…of` binding). State a factory closes over is
  *   the documented false negative: by shape it is any function local.
  * - `name`: the name of a function, method, class, interface, type or enum.
@@ -137,6 +138,13 @@ const FUNCTION_SCOPES = new Set([
 	"method_definition",
 ]);
 
+/** Parameter children that make a constructor parameter a class field. */
+const PARAMETER_PROPERTY_MODIFIERS = new Set([
+	"accessibility_modifier",
+	"override_modifier",
+	"readonly",
+]);
+
 /** Destructuring wrappers a binding can sit inside. */
 const PATTERN_KINDS = new Set([
 	"array_pattern",
@@ -203,9 +211,17 @@ function roleOf(node: SgNode): Role | undefined {
 			return fills("key") ? "state" : "reference";
 		case "required_parameter":
 		case "optional_parameter":
-			return fills("pattern") ? "local" : "reference";
+			if (!fills("pattern")) return "reference";
+			// A constructor parameter with an accessibility, `readonly` or
+			// `override` modifier is a parameter property: a class field.
+			return parent
+				.children()
+				.some((child) => PARAMETER_PROPERTY_MODIFIERS.has(String(child.kind())))
+				? "state"
+				: "local";
 		case "catch_clause":
-			return fills("parameter") ? "local" : undefined;
+			// The grammar puts only the binding directly under the clause.
+			return "local";
 		case "for_in_statement":
 			// `for (const x of y)` binds `x`; `for (x of y)` assigns an existing one.
 			if (!fills("left")) return "reference";

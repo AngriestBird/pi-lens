@@ -69,6 +69,8 @@ const NUMERIC_LITERAL =
 	/^(?:0[xX][\da-fA-F_]+|0[oO][0-7_]+|0[bB][01_]+|\d[\d_]*)$/;
 const UNICODE_ESCAPE = /\\u\{([\da-fA-F]+)\}|\\u([\da-fA-F]{4})/g;
 const CODE_POINT_CALL = /\bfrom(?:CodePoint|CharCode)\b/g;
+const BRACKET_KEY = /\[\s*(["'`])[\w$]+\1\s*\]/g;
+const STRING_SUBSCRIPT = /\bString\s*\[/g;
 
 function isSurrogate(text: string): boolean {
 	return /[\uD800-\uDFFF]/.test(
@@ -127,14 +129,34 @@ function scanMarkers(rel: string, source: string): MarkerScan {
 		}
 	}
 	flush();
+	// A code-point constructor is a member of `String`, read by dot or by a
+	// literal bracket key (#4457 review F5); a `String[…]` key the scan cannot
+	// read may name one, so it is unclassified.
+	const sites: { name: string; start: number; after: number }[] = [];
 	for (const match of blanked.matchAll(CODE_POINT_CALL)) {
 		const start = match.index ?? 0;
-		const open = /^\s*\(/.exec(blanked.slice(start + match[0].length));
+		sites.push({ name: match[0], start, after: start + match[0].length });
+	}
+	for (const match of kept.matchAll(BRACKET_KEY)) {
+		const start = match.index ?? 0;
+		if (blanked[start] !== "[") continue; // inside a string or regex
+		const key = /^\[\s*(["'`])([\w$]+)\1\s*\]$/.exec(match[0])?.[2];
+		if (key === "fromCodePoint" || key === "fromCharCode")
+			sites.push({ name: key, start, after: start + match[0].length });
+	}
+	for (const match of blanked.matchAll(STRING_SUBSCRIPT)) {
+		const openIndex = (match.index ?? 0) + match[0].length - 1;
+		const close = matchingCloseIndex(blanked, openIndex, "[", "]");
+		const key = close < 0 ? "" : kept.slice(openIndex + 1, close).trim();
+		if (!/^(["'`])[\w$]+\1$/.test(key)) classify(openIndex, undefined);
+	}
+	for (const { name, start, after } of sites) {
+		const open = /^\s*\(/.exec(blanked.slice(after));
 		if (!open) {
 			classify(start, undefined); // a reference: called somewhere unseen
 			continue;
 		}
-		const openIndex = start + match[0].length + open[0].length - 1;
+		const openIndex = after + open[0].length - 1;
 		const close = matchingCloseIndex(blanked, openIndex, "(", ")");
 		const args =
 			close < 0
@@ -150,7 +172,7 @@ function scanMarkers(rel: string, source: string): MarkerScan {
 		const units = args.map((arg) => Number(arg.replace(/_/g, "")));
 		classify(
 			start,
-			match[0] === "fromCodePoint"
+			name === "fromCodePoint"
 				? String.fromCodePoint(...units)
 				: String.fromCharCode(...units),
 		);
@@ -290,10 +312,11 @@ describe("delivery-surface adoption ratchet (#2028/#2029)", () => {
 			"const b = `\\uD83D\\uDED1 stop`;",
 			"const c = String.fromCodePoint(0x1f7e1);",
 			"const d = String.fromCharCode(0xd83d, 0xdd34);",
+			'const e = String["fromCodePoint"](0x1f534);',
 			'const plain = "\\u{1F7E2} \\\\u{1F534} " + String.fromCodePoint(1);',
 		].join("\n");
 		expect(scanMarkers("fake.ts", source)).toEqual({
-			markerLines: [1, 2, 3, 4],
+			markerLines: [1, 2, 3, 4, 5],
 			unclassified: [],
 		});
 	});
@@ -306,13 +329,17 @@ describe("delivery-surface adoption ratchet (#2028/#2029)", () => {
 			'const half = "\\uD83D" + tail;',
 			"const built = String.fromCodePoint(base + 0x534);",
 			"const make = String.fromCharCode;",
+			"const keyed = String[key](0x1f534);",
+			"const bracketRef = String['fromCharCode'];",
 		].join("\n");
 		expect(scanMarkers("fake.ts", source)).toEqual({
 			markerLines: [],
 			unclassified: [
 				'fake.ts: const half = "\\uD83D" + tail;',
+				"fake.ts: const keyed = String[key](0x1f534);",
 				"fake.ts: const built = String.fromCodePoint(base + 0x534);",
 				"fake.ts: const make = String.fromCharCode;",
+				"fake.ts: const bracketRef = String['fromCharCode'];",
 			],
 		});
 	});

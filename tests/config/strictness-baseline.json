@@ -1,4 +1,11 @@
 {
+	"reasons": {
+		"index.ts": "The host adapter at the repo root. Before #4429 its strict errors fell into an `other` bucket the ratchet dropped; pinned at the counts tsc reported when it became visible."
+	},
+	"outOfScope": {
+		"vitest.config.ts": "The test runner's config: it never ships (package.json `files` holds only dist/ and named scripts), and the spike measures production code.",
+		"vitest.mutation.config.ts": "The per-test mutation campaign's test runner config (#4365): it never ships, and the spike measures production code."
+	},
 	"tsconfig.strict-indexed.json": {
 		"clients": 430,
 		"clients/config-core": 18,

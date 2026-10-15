@@ -286,6 +286,18 @@ describe("singleFlight ratchet — the scan itself", () => {
 			"let ready = false, inFlight = new Map<string, Promise<void>>();\n",
 		],
 		["a module-level destructuring", "const { inFlight } = makeState();\n"],
+		[
+			"a multi-line constructor parameter property",
+			"class C {\n\tconstructor(\n\t\tprivate readonly inFlight = new Map<string, Promise<void>>(),\n\t) {}\n}\n",
+		],
+		[
+			"a one-line constructor parameter property",
+			"class C { constructor(private inFlight: Map<string, Promise<void>>) {} }\n",
+		],
+		[
+			"an override parameter property",
+			"class C extends B { constructor(override inFlight?: Promise<void>) { super(); } }\n",
+		],
 	])(
 		"counts a declaration the regex scan missed: %s (#4429)",
 		(_name, source) => {

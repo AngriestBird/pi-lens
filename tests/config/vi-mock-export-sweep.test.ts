@@ -315,6 +315,50 @@ describe("#2281 whole-module vi.mock export ratchet", () => {
 		}
 	});
 
+	it("reads a typed vi.mock(import(...)) specifier at the gap site (#4429 review F7)", () => {
+		// #4429 review F7: the gap loop read the specifier through
+		// `unquote(text)`, so a typed `vi.mock(import("./module.js"), …)` had no
+		// specifier and its omitted export passed silently.
+		const root = fs.mkdtempSync(path.join(REPO_ROOT, ".probe-vi-mock-"));
+		try {
+			fs.writeFileSync(path.join(root, "module.ts"), "export const b = 1;\n");
+			fs.writeFileSync(
+				path.join(root, "importer.ts"),
+				'import { b } from "./module.js"; export { b };\n',
+			);
+			const source =
+				'import "./importer.js";\nvi.mock(import("./module.js"), () => ({ a: 1 }));\n';
+			const testFile = path.join(root, "case.test.ts");
+			fs.writeFileSync(testFile, source);
+			expect(findViMockExportGaps(testFile, source)).toMatchObject([
+				{ line: 2, specifier: "./module.js", missing: ["b"] },
+			]);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("skips an importer mocked through a typed import(...) (#4429 review F7)", () => {
+		// #4429 review F7: the mocked-specifier set read `unquote(text)`, so an
+		// importer mocked as `vi.mock(import("./importer.js"), …)` was still
+		// walked and its real imports were demanded from the module's mock.
+		const root = fs.mkdtempSync(path.join(REPO_ROOT, ".probe-vi-mock-"));
+		try {
+			fs.writeFileSync(path.join(root, "module.ts"), "export const b = 1;\n");
+			fs.writeFileSync(
+				path.join(root, "importer.ts"),
+				'import { b } from "./module.js"; export { b };\n',
+			);
+			const source =
+				'import "./importer.js";\nvi.mock(import("./importer.js"), () => ({ b: 1 }));\nvi.mock("./module.js", () => ({ a: 1 }));\n';
+			const testFile = path.join(root, "case.test.ts");
+			fs.writeFileSync(testFile, source);
+			expect(findViMockExportGaps(testFile, source)).toEqual([]);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("flags an imported factory the file cannot resolve", () => {
 		// #2959 MEDIUM spelling 2 (ours, not the review's): a re-exported or
 		// imported factory has no local body to prove complete, so the guard
