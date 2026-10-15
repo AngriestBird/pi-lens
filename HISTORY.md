@@ -90,6 +90,26 @@ those paths was missing from `git ls-files`.
 Steering audit: no line in `AGENTS.md`, the role contracts or the skills had
 session evidence of changing no decision, so no line was deleted.
 
+## 2026-10-15 — enumerated detector (shape 69)
+
+Shape 69 entered the `AGENTS.md` catalog with a fixer contract bullet: a
+detector PR plants three spellings its author did not design for and quotes
+each result. Incident: three detector PRs in one day passed their own plants
+and missed the reviewer's. On #4457 (refs #4429) the vi-mock resolver let a
+helper parameter, a re-export alias and object members through in r2, the
+third round on that seam. On #4459 (refs #1634) the delivery census missed an
+aliased import, a missing store and `sendUserMessage`. The remedy in both was
+to key the needle on the seam, not on the spellings. Enforcer: the contract
+bullet; an advisory survivor list is #4467.
+
+## 2026-10-15 — joined single flight (shape 70)
+
+Shape 70 entered the catalog on its second instance. #4154 settled J1 as
+deliver-and-carry for a joined scan. The first fix for #4166 (contributor PR
+#4462) withheld the joined knip answer instead. The #4462 review showed a
+foreign row write between the join and the next scan dropped the finding,
+which master delivered. Its fix round uses J1's rule.
+
 ## 2026-10-14 — sink read before drain (shape 67)
 
 Shape 67 entered the `AGENTS.md` catalog with `tests/config/sink-read-drain-sweep.test.ts`

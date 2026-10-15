@@ -520,7 +520,8 @@ function sweepHeldOwnPids(): void {
 	}
 	// No hand-rolled "drop the oldest" block (#2442 / #3091 round 4): the
 	// last-resort eviction, for the case where every held group is still alive
-	// at the ceiling, is `BoundedSet.add`'s own FIFO overflow.
+	// at the ceiling, is `BoundedSet.add`'s own FIFO overflow; the caller
+	// records it (#3096).
 }
 
 /**
@@ -545,7 +546,15 @@ export function holdOwnChildPid(
 	// and its release mutation-inert — the FIFO copy would answer for them.
 	verifiedOwnPids.delete(pid);
 	sweepHeldOwnPids();
-	heldOwnPids.add(pid);
+	const evicted = heldOwnPids.add(pid);
+	if (evicted.length > 0) {
+		incrementDegradationCount({
+			kind: "held-own-pid-evicted",
+			subject: site,
+			reason: `held-pid set full of live groups at ${HELD_OWN_PID_SWEEP_AT}; dropped oldest pid ${evicted.join(",")}, a group kill after its leader dies is refused`,
+			metadata: { evicted: evicted.length },
+		});
+	}
 	return true;
 }
 

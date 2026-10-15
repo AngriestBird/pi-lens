@@ -1297,7 +1297,7 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"an invented one.",
 		owner: "#2523 slice 2",
 	},
-	"clients/runtime-tool-call.ts#handleToolCallImpl:d7b23cdc~b1998233": {
+	"clients/runtime-tool-call.ts#handleToolCallImpl:d7b23cdc~eab210c1": {
 		family: "hook-await",
 		site: "unbudgeted-hook",
 		reason:
@@ -2380,7 +2380,11 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// threads it.
 	"clients/instance-registry.ts": 37,
 	"clients/language-profile.ts": 3,
-	"clients/lens-engine.ts": 1,
+	// 1 → 2 (#1634): `projectScan` now awaits the cheap project scan it used
+	// to return unawaited, to pass its rows through the finding policy before
+	// `pilens_project_scan` renders them. The same scan, the same unbounded
+	// wait its MCP caller already had; no hook awaits projectScan.
+	"clients/lens-engine.ts": 2,
 	"clients/lens-map.ts": 2,
 	"clients/lsp-budget.ts": 1,
 	"clients/lsp-document-symbols.ts": 2,

@@ -1939,6 +1939,21 @@ export function getFileDiagnosticSummaries(): FileDiagnosticSummary[] {
 }
 
 /**
+ * #1634: copies of the disposition-tagged rows {@link getFileDiagnosticSummaries}
+ * leaves out of a file's projection — the rows the footer's `suppressed: N`
+ * chip counts — so a cache-only report can say how many findings a mark is
+ * hiding instead of reading clean.
+ */
+export function getSuppressedDiagnostics(filePath: string): WidgetDiagnostic[] {
+	const rec = files.get(fileMapKey(filePath));
+	const rows: WidgetDiagnostic[] = [];
+	for (const d of rec?.allDiagnostics ?? []) {
+		if (d.disposition !== undefined) rows.push({ ...d });
+	}
+	return rows;
+}
+
+/**
  * How many {@link WidgetDiagnostic.suppressedRetained} rows this file's record
  * is currently carrying (#3158 round 2 F4).
  *

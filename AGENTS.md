@@ -599,6 +599,13 @@ file-scoped worklist and receives no project-wide scanner output.
     fully pinned; the other families' code choices are deferred, and the
     deferred and notCodeChoice counts are pinned exactly.
 
+69. **Enumerated detector:** a scanner that lists the spellings it knows
+    passes every spelling it does not, so the guard is green while the
+    defect ships. Derive the rule from the seam (the specifier, the store,
+    the sink) and fail closed on an unrecognised form. Screen: plant an
+    alias, an indirect call and a value reached through another binding,
+    and quote each result; every green plant is fixed or named as a residual.
+
 </important>
 
 <important if="session, turn or generation lifecycle">
@@ -661,6 +668,14 @@ file-scoped worklist and receives no project-wide scanner output.
 58. **Known identity carried forward:** when a producer knows an identity,
     carry it through asynchronous stages instead of re-deriving it downstream
     (#3643 F3).
+
+70. **Joined single flight answers for edits after it started:** a caller
+    that joins an in-flight scan gets an answer computed before its own
+    edits. Withholding that answer and re-reading the baseline later loses
+    findings when another writer stores the row in between. Deliver the
+    joined answer and carry the edited files into the next scan. Screen:
+    for a join, list the writers that can store the row between the join and
+    the next scan, and show the finding survives each.
 
 **Expired successor hand-off:** an expired successor marker may authorize
     its named interrupted successor only for the fixed retention window in

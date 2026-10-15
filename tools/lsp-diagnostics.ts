@@ -45,7 +45,9 @@ import {
 	applyLspFindingPolicy,
 	loadProjectRulePolicyMap,
 } from "../clients/dispatch/finding-policy.js";
+import { readFileContent } from "../clients/dispatch/runners/utils.js";
 import { hasStrictDispositionMarks } from "../clients/diagnostic-dispositions.js";
+import { dispositionSuppressedLine } from "../clients/finding-delivery-gate.js";
 import { recordDegradationOnce } from "../clients/degradation-ledger.js";
 import { logLatency } from "../clients/latency-logger.js";
 import { detectFileRole } from "../clients/file-role.js";
@@ -1221,7 +1223,7 @@ function demoteInferredForFile(
  * hidden by a broken filter is the harm this lane exists to prevent
  * (AGENTS.md shape 48).
  */
-function applyProbeFindingPolicy(
+export function applyProbeFindingPolicy(
 	file: string,
 	diagnostics: LSPDiagnostic[],
 	cwd: string,
@@ -1239,6 +1241,12 @@ function applyProbeFindingPolicy(
 	 * other caller (`mode=full`) has no severity axis at all.
 	 */
 	severity: string,
+	/**
+	 * The tool whose result renders this filter's output, stamped on the
+	 * `lsp_probe_disposition_filter` record (#4459 review F5: the
+	 * `lsp_navigation` route's records said `lsp_diagnostics`).
+	 */
+	toolName: "lsp_diagnostics" | "lsp_navigation" = "lsp_diagnostics",
 ): { kept: LSPDiagnostic[]; inlineKept: LSPDiagnostic[]; suppressed: number } {
 	const started = Date.now();
 	try {
@@ -1270,7 +1278,7 @@ function applyProbeFindingPolicy(
 			// `retainedSuppressed` is what the footer chip is still counting.
 			logLatency({
 				type: "phase",
-				toolName: "lsp_diagnostics",
+				toolName,
 				filePath: file,
 				phase: "lsp_probe_disposition_filter",
 				durationMs: Date.now() - started,
@@ -1305,14 +1313,9 @@ function replayContentForStrictMarks(
 	file: string,
 	cwd: string,
 ): string | undefined {
-	if (!hasStrictDispositionMarks(cwd)) return undefined;
-	try {
-		return fs.readFileSync(file, "utf-8");
-	} catch {
-		// Fail open — an unreadable file degrades to the weak-anchored filter
-		// rather than hiding or dropping anything.
-		return undefined;
-	}
+	// Fail open — an unreadable file degrades to the weak-anchored filter
+	// rather than hiding or dropping anything.
+	return hasStrictDispositionMarks(cwd) ? readFileContent(file) : undefined;
 }
 
 /** #1561: everything the retire decision needs, as one argument. */
@@ -2964,24 +2967,6 @@ async function runDirectoryDiagnostics(
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────
-
-/**
- * #3088: the one rendering of the probe lane's policy drop, shared by the
- * single-file, batch and directory renders so the three cannot word the same
- * fact differently. Returns `undefined` when nothing was dropped — the #1616
- * rule asks for a count when there IS one, not a "0 suppressed" line on every
- * clean probe.
- */
-function dispositionSuppressedLine(suppressed: number): string | undefined {
-	if (suppressed <= 0) return undefined;
-	return (
-		`suppressed by disposition: ${suppressed} finding(s) dropped from this ` +
-		"result because they're marked false-positive/won't-fix, disabled by " +
-		"`.pi-lens.json` rule policy, or suppressed by an inline `pi-lens-ignore` " +
-		"comment. Not a clean verdict for those locations — they were found, " +
-		"then intentionally hidden."
-	);
-}
 
 function applySeverityFilter<T extends { severity: number }>(
 	diags: T[],

@@ -2146,7 +2146,7 @@ describe("index.ts integration", () => {
 				RuntimeCoordinator: class {
 					projectRoot = tmpDir;
 					turnIndex = 0;
-					complexityBaselines = new Map();
+					complexityBaselines = new Set();
 					cachedExports = new Map();
 					readGuard = mockReadGuard;
 					shouldWarmLspOnRead() {
@@ -2227,6 +2227,8 @@ describe("index.ts integration", () => {
 					effectiveOffset: 1,
 					effectiveLimit: 6,
 				}),
+				// #1649: the tool_call's one pass is the capture; the guard takes none.
+				{ captureLineHashes: false },
 			);
 		},
 		INTEGRATION_TIMEOUT_MS,
@@ -2244,7 +2246,7 @@ describe("index.ts integration", () => {
 				RuntimeCoordinator: class {
 					projectRoot = tmpDir;
 					turnIndex = 0;
-					complexityBaselines = new Map();
+					complexityBaselines = new Set();
 					cachedExports = new Map();
 					readGuard = {
 						recordRead: () => {},
@@ -2356,7 +2358,7 @@ describe("index.ts integration", () => {
 				RuntimeCoordinator: class {
 					projectRoot = tmpDir;
 					turnIndex = 0;
-					complexityBaselines = new Map();
+					complexityBaselines = new Set();
 					cachedExports = new Map();
 					readGuard = {
 						recordRead: () => {},
@@ -2483,7 +2485,7 @@ describe("index.ts integration", () => {
 				RuntimeCoordinator: class {
 					projectRoot = tmpDir;
 					turnIndex = 0;
-					complexityBaselines = new Map();
+					complexityBaselines = new Set();
 					cachedExports = new Map();
 					readGuard = {
 						recordRead: () => {},
@@ -2591,7 +2593,7 @@ describe("index.ts integration", () => {
 				RuntimeCoordinator: class {
 					projectRoot = tmpDir;
 					turnIndex = 0;
-					complexityBaselines = new Map();
+					complexityBaselines = new Set();
 					cachedExports = new Map();
 					readGuard = {
 						recordRead: () => {},
@@ -2694,7 +2696,7 @@ describe("index.ts integration", () => {
 				RuntimeCoordinator: class {
 					projectRoot = tmpDir;
 					turnIndex = 0;
-					complexityBaselines = new Map();
+					complexityBaselines = new Set();
 					cachedExports = new Map();
 					readGuard = {
 						recordRead: () => {},
@@ -2798,7 +2800,7 @@ describe("index.ts integration", () => {
 						return 0;
 					}
 					resetForSession() {}
-					complexityBaselines = new Map();
+					complexityBaselines = new Set();
 					projectRulesScan = { hasCustomRules: false, rules: [] };
 					cachedExports = new Map();
 					errorDebtBaseline = null;

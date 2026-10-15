@@ -789,6 +789,37 @@ describe("lens_diagnostics schema", () => {
 		);
 	});
 
+	// #1617/#1625, folded onto the shared line by #1634: what the fresh
+	// analyzers dropped for a mark is counted with its lanes, in the text and in
+	// `details`. Recurrence: the analyzer note had no pin, and once mode=full
+	// gained its own count a second "suppressed by disposition" line (or a
+	// `details` count that overwrote the other) went unseen.
+	it("mode=full states what the analyzers dropped for a mark, with its lanes", async () => {
+		freshFetchMocks.fetchFreshProjectDiagnostics.mockResolvedValue({
+			diagnostics: [],
+			runners: ["knip"],
+			analyzed: ["knip"],
+			cold: [],
+			timings: {},
+			failed: [],
+			dispositionSuppressed: 2,
+			dispositionSuppressedByLane: { knip: 2 },
+		});
+		const result = await run(
+			makeTool({}, { runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]) }),
+			{ mode: "full", refreshRunners: "all" },
+		);
+		const text = result.content[0].text;
+		expect(text).toContain(
+			"suppressed by disposition: 2 finding(s) (analyzer lanes: knip 2) dropped from this result",
+		);
+		expect(text.match(/suppressed by disposition/g)).toHaveLength(1);
+		expect(result.details).toMatchObject({
+			dispositionSuppressed: 2,
+			dispositionSuppressedByLane: { knip: 2 },
+		});
+	});
+
 	it("rejects an invalid explicit analysis root as a failed tool call (#2977 F2)", async () => {
 		freshFetchMocks.fetchFreshProjectDiagnostics.mockResolvedValue({
 			diagnostics: [],
