@@ -107,7 +107,7 @@ describe.each([
 
 	// Recurrence: #4481 — a one-constant edit, the file's first dispatch this
 	// session, STOPped on an unchanged `no-unknown-returns` line.
-	it("does not block on an unchanged pre-existing finding on the first write", async () => {
+	it("does not block on an old finding at an unchanged line on the first write", async () => {
 		const { filePath } = env.addFile(`first-write-${slug}.ts`, SOURCE);
 
 		const result = await session(flags)(filePath, [
