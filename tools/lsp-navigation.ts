@@ -26,7 +26,7 @@ import {
 	workspaceEditTextPaths,
 } from "../clients/lsp/edits.js";
 import { configDisabledAuxiliaryLspServerIds } from "../clients/dispatch/auxiliary-lsp.js";
-import { readPolicyContent } from "../clients/dispatch/finding-policy.js";
+import { readFileContent } from "../clients/dispatch/runners/utils.js";
 import {
 	hashDiagnosticContent,
 	PRIMARY_UNAVAILABLE_CAUSE,
@@ -1500,7 +1500,7 @@ export function createLspNavigationTool(
 								trackedFile,
 								diags,
 								policyCwd,
-								readPolicyContent(trackedFile),
+								readFileContent(trackedFile),
 								"all",
 							);
 							snapshotSuppressed += policy.suppressed;

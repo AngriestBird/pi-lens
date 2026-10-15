@@ -19,7 +19,6 @@
  * which holds raw `LSPDiagnostic`s.
  */
 
-import * as fs from "node:fs";
 import {
 	applyDispositions,
 	applyDispositionsMultiFile,
@@ -31,6 +30,7 @@ import type { LSPDiagnostic } from "../lsp/client.js";
 import type { ProjectDiagnostic } from "../project-diagnostics/types.js";
 import { retagAuxiliaryDiagnostics } from "./auxiliary-lsp.js";
 import { applyInlineSuppressions } from "./inline-suppressions.js";
+import { readFileContent } from "./runners/utils.js";
 import {
 	applyRulePolicy,
 	resolvedRulePolicyMap,
@@ -295,21 +295,6 @@ export function applyPushedFindingPolicy<
 }
 
 /**
- * A file's current content for this module's filters, or `undefined` when it
- * cannot be read. `undefined` is the documented fail-open input
- * (`FindingPolicyOptions.content`): inline suppression becomes a no-op and the
- * strict anchor cannot match, so a read error never hides a finding
- * (AGENTS.md shape 48).
- */
-export function readPolicyContent(filePath: string): string | undefined {
-	try {
-		return fs.readFileSync(filePath, "utf-8");
-	} catch {
-		return undefined;
-	}
-}
-
-/**
  * {@link applyPushedFindingPolicy} over findings from several files: grouped by
  * `filePath` in first-seen order, one content read per file, one summed
  * suppressed count. `kept` keeps that grouping (each file's survivors in input
@@ -336,7 +321,7 @@ export function applyPushedFindingPolicyByFile<
 		const policy = applyPushedFindingPolicy(group, {
 			cwd,
 			filePath,
-			content: readPolicyContent(filePath),
+			content: readFileContent(filePath),
 		});
 		kept.push(...policy.kept);
 		suppressed += policy.suppressed;

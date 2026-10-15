@@ -44,8 +44,8 @@ import {
 import {
 	applyLspFindingPolicy,
 	loadProjectRulePolicyMap,
-	readPolicyContent,
 } from "../clients/dispatch/finding-policy.js";
+import { readFileContent } from "../clients/dispatch/runners/utils.js";
 import { hasStrictDispositionMarks } from "../clients/diagnostic-dispositions.js";
 import { dispositionSuppressedLine } from "../clients/finding-delivery-gate.js";
 import { recordDegradationOnce } from "../clients/degradation-ledger.js";
@@ -1309,7 +1309,7 @@ function replayContentForStrictMarks(
 ): string | undefined {
 	// Fail open — an unreadable file degrades to the weak-anchored filter
 	// rather than hiding or dropping anything.
-	return hasStrictDispositionMarks(cwd) ? readPolicyContent(file) : undefined;
+	return hasStrictDispositionMarks(cwd) ? readFileContent(file) : undefined;
 }
 
 /** #1561: everything the retire decision needs, as one argument. */

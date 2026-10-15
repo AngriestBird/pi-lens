@@ -1,4 +1,3 @@
-import * as fs from "node:fs";
 import type {
 	CascadeNeighborResult,
 	CascadeResult,
@@ -22,6 +21,7 @@ import {
 import type { Diagnostic } from "./dispatch/types.js";
 import { convertLspDiagnostics } from "./dispatch/utils/lsp-diagnostics.js";
 import { toRunnerDisplayPath } from "./dispatch/runner-context.js";
+import { readFileContent } from "./dispatch/runners/utils.js";
 
 export function formatCascadeNeighborDiagnostics(
 	cwd: string,
@@ -287,7 +287,27 @@ export function applyCascadeDisplayPolicy(
 	// `undefined` → the fail-open empty string: inline suppression becomes a
 	// no-op and a STRICT `false-positive` anchor hashes an empty line, so a
 	// finding is never hidden by an I/O error (AGENTS.md shape 48).
-	const content = options.content ?? readNeighborContent(filePath);
+	//
+	// The neighbour's current bytes, for the two content-bound halves of the
+	// policy stack (inline `pi-lens-ignore` and the STRICT `false-positive`
+	// anchor). One synchronous read, paid only once a neighbour actually has ERROR
+	// diagnostics to render — the same read `mode=full` pays per flagged file and
+	// the probe lane pays per cache replay.
+	//
+	// SYNC here, while the in-lane cascade's own neighbour read at
+	// `clients/dispatch/integration.ts` (the active touch, under its "A6: async
+	// read to avoid blocking event loop on network-mounted drives" comment) is
+	// ASYNC. The asymmetry is deliberate and measured, not an oversight: that read
+	// happens for EVERY actively-touched neighbour in a parallel fan-out, while
+	// this one is paid at most once per DELIVERING neighbour — 0.0125 ms per
+	// neighbour measured on 40 real 15.6 KiB sources (#3157 AC 3), on loops that
+	// already do synchronous fs work (`nodeFs.existsSync` in the degraded
+	// fallback, and the `boundToCurrentDisk` verify whenever the producer attached
+	// a content hash and its (path, mtime, size) memo misses —
+	// `clients/lsp/diagnostic-binding.ts`). An async read here would force the
+	// quiet-window builder's synchronous callback to become async for no
+	// measurable gain.
+	const content = options.content ?? readFileContent(filePath);
 	const converted = convertLspDiagnostics(errors, filePath);
 	// #692/#3046: identity comes from the ONE shared derivation every other
 	// surface anchors a mark against — never a hardcoded `tool: "lsp"`.
@@ -363,38 +383,6 @@ export function recordCascadeFindingPolicy(entry: {
 			...(inputTruncated > 0 && { inputTruncated }),
 		},
 	});
-}
-
-/**
- * The neighbour's current bytes, for the two content-bound halves of the
- * policy stack (inline `pi-lens-ignore` and the STRICT `false-positive`
- * anchor). One synchronous read, paid only once a neighbour actually has ERROR
- * diagnostics to render — the same read `mode=full` pays per flagged file and
- * the probe lane pays per cache replay.
- *
- * SYNC here, while the in-lane cascade's own neighbour read at
- * `clients/dispatch/integration.ts` (the active touch, under its "A6: async
- * read to avoid blocking event loop on network-mounted drives" comment) is
- * ASYNC. The asymmetry is deliberate and measured, not an oversight: that read
- * happens for EVERY actively-touched neighbour in a parallel fan-out, while
- * this one is paid at most once per DELIVERING neighbour — 0.0125 ms per
- * neighbour measured on 40 real 15.6 KiB sources (#3157 AC 3), on loops that
- * already do synchronous fs work (`nodeFs.existsSync` in the degraded
- * fallback, and the `boundToCurrentDisk` verify whenever the producer attached
- * a content hash and its (path, mtime, size) memo misses —
- * `clients/lsp/diagnostic-binding.ts`). An async read here would force the
- * quiet-window builder's synchronous callback to become async for no
- * measurable gain.
- *
- * `undefined` on any failure: the caller degrades to the content-free half
- * rather than hiding a finding it could not identify.
- */
-function readNeighborContent(filePath: string): string | undefined {
-	try {
-		return fs.readFileSync(filePath, "utf-8");
-	} catch {
-		return undefined;
-	}
 }
 
 /**

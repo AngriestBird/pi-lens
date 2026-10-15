@@ -828,10 +828,10 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 			"last client publish.",
 		"A replay of what each language client last published, with no re-check " +
 			"of the file, so every row states its age. The rows also pass the same " +
-			"finding policy as the path read (`readPolicyContent` supplies the " +
+			"finding policy as the path read (`readFileContent` supplies the " +
 			"current content), so the label and the disposition filter compose.",
 		"LSP client publish ts",
-		["lag: formatCacheAgeLabel(ts)", "readPolicyContent(trackedFile)"],
+		["lag: formatCacheAgeLabel(ts)", "readFileContent(trackedFile)"],
 	),
 	"runtime-context:persisted-findings": gated(
 		"clients/runtime-context.ts",
