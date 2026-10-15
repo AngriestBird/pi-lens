@@ -144,6 +144,7 @@
  */
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
+import * as nodePath from "node:path";
 import { BoundedLruCache } from "./bounded-cache.js";
 import { bounded } from "./deadline-utils.js";
 import { recordDegradationOnce } from "./degradation-ledger.js";
@@ -151,17 +152,14 @@ import { HOOK_WALL_BUDGET_MS } from "./hook-budgets.js";
 import {
 	classifyJsTsGlobalScope,
 	globalScopeRoleByName,
+	globalScopeRoleByText,
 	goPackagePeersOf,
 	implicitScopeOf,
 	isGoSourceFile,
 	type GlobalScopeRole,
 } from "./lsp/implicit-scope.js";
 import { notePathAppeared } from "./path-birth.js";
-import {
-	isUnderDir,
-	normalizeEphemeralMapKey,
-	normalizeMapKey,
-} from "./path-utils.js";
+import { normalizeEphemeralMapKey, normalizeMapKey } from "./path-utils.js";
 import { toRunnerDisplayPath } from "./dispatch/runner-context.js";
 import { resolveImportToFiles } from "./review-graph/import-resolvers.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
@@ -302,7 +300,8 @@ export interface BlockerFreshnessOptions {
  * decide). The receipts after a long-lived verdict can name hundreds of
  * files; past this budget a receipt is not classified, the entry stays as it
  * is, and the cut is counted in `truncatedImports`. A role the name decides
- * (a declaration file, a file that is not JS/TS) spends nothing (#4438 r2).
+ * (a declaration file, a file that is not JS/TS) or the text decides (a
+ * module with no ambient declaration) spends nothing (#4438 r2).
  */
 const MAX_IMPLICIT_SCOPE_PARSES = 32;
 
@@ -310,7 +309,7 @@ const MAX_IMPLICIT_SCOPE_PARSES = 32;
  * #4438: global-scope roles kept across sweeps, keyed by the file's stat
  * identity (mtime, ctime and size, as {@link forwardImportSources} keys its
  * parses), so a file the receipts keep naming is parsed once per version,
- * not once per turn: 32 parses cost ~23 ms on pi-lens's own files.
+ * not once per turn.
  */
 const GLOBAL_SCOPE_ROLE_MEMO_ENTRIES = 1024;
 interface GlobalScopeRoleEntry {
@@ -336,14 +335,29 @@ type ImplicitScopeCheck = (
 ) => ImplicitScopeDrift;
 
 /**
+ * #4438 r2: a receipt file's role from its text alone
+ * (`globalScopeRoleByText`), or `undefined` when a parse must decide or the
+ * file does not read. Most JS/TS files open a line with `import` or
+ * `export`, so most receipts cost a read and no parse: 32 parses cost
+ * ~80 ms on pi-lens's own files.
+ */
+function roleByTextOf(filePath: string): GlobalScopeRole | undefined {
+	try {
+		return globalScopeRoleByText(fs.readFileSync(filePath, "utf8"));
+	} catch {
+		return undefined;
+	}
+}
+
+/**
  * #4438: one sweep's implicit-scope check (see the module doc). The receipts
  * are read once, at the first eligible entry; each file's role is read at
- * most once per sweep, and each receipt's root containment once.
+ * most once per sweep.
  *
- * #4438 r2: only positive evidence demotes. A receipt counts when it lies
- * under `cwd` and names a file in the entry's scope: for a JS/TS entry one
- * whose role reads `"feeds"`, for a Go entry a peer `goPackagePeersOf`
- * admits. A file that no longer stats is no evidence and no cut (a deleted
+ * #4438 r2: only positive evidence demotes. A receipt counts when it names
+ * a file in the entry's scope: for a JS/TS entry a file under `cwd` whose
+ * role reads `"feeds"`, for a Go entry a peer `goPackagePeersOf` admits (a
+ * peer shares the blocker's directory). A file that no longer stats is no evidence and no cut (a deleted
  * dependency is not drift, #1631); an `"unknown"` role or a spent budget is
  * a cut.
  */
@@ -354,9 +368,7 @@ function createImplicitScopeCheck(
 	let receipts: Array<{ filePath: string; ts: number }> | undefined;
 	let receiptsDropped = false;
 	const roles = new Map<string, GlobalScopeRole>();
-	const underRoot = new Map<string, boolean>();
 	let parses = 0;
-	let cut = false;
 	const roleOf = (other: string): GlobalScopeRole => {
 		const known = roles.get(other);
 		if (known !== undefined) return known;
@@ -367,8 +379,8 @@ function createImplicitScopeCheck(
 			roles.set(other, "none");
 			return "none";
 		}
-		const key = normalizeMapKey(other);
-		const memo = globalScopeRoleMemo.get(key);
+		// A receipt path is a `normalizeMapKey` spelling already.
+		const memo = globalScopeRoleMemo.get(other);
 		let role: GlobalScopeRole;
 		if (
 			memo?.mtimeMs === stat.mtimeMs &&
@@ -378,40 +390,60 @@ function createImplicitScopeCheck(
 			role = memo.role;
 		} else {
 			const byName = globalScopeRoleByName(other);
-			if (byName) {
-				role = byName;
+			const byText = byName ? undefined : roleByTextOf(other);
+			if (byName ?? byText) {
+				role = (byName ?? byText)!;
 			} else if (parses >= MAX_IMPLICIT_SCOPE_PARSES) {
 				return "unknown";
 			} else {
 				parses += 1;
 				role = classifyJsTsGlobalScope(other);
-				globalScopeRoleMemo.set(key, {
-					mtimeMs: stat.mtimeMs,
-					ctimeMs: stat.ctimeMs,
-					size: stat.size,
-					role,
-				});
 			}
+			globalScopeRoleMemo.set(other, {
+				mtimeMs: stat.mtimeMs,
+				ctimeMs: stat.ctimeMs,
+				size: stat.size,
+				role,
+			});
 		}
 		roles.set(other, role);
 		return role;
 	};
-	const feedsGlobalScope = (other: string): boolean => {
-		const role = roleOf(other);
-		if (role === "unknown") cut = true;
-		return role === "feeds";
-	};
-	const inRoot = (file: string): boolean => {
-		let held = underRoot.get(file);
-		if (held === undefined) {
-			held = isUnderDir(file, cwd);
-			underRoot.set(file, held);
+	// Receipt paths are `normalizeMapKey` spellings already
+	// (`MutationReceipt.filePath`), so the root is spelled once and compared
+	// by prefix: `isUnderDir` normalizing both sides cost ~2.4 ms per 459
+	// receipts per sweep.
+	const rootKey = normalizeMapKey(nodePath.resolve(cwd));
+	const rootPrefix = rootKey.endsWith("/") ? rootKey : `${rootKey}/`;
+	const inRoot = (file: string): boolean =>
+		file === rootKey || file.startsWith(rootPrefix);
+	// JS/TS entries share one newest-first scan: a receipt's role does not
+	// depend on the entry, so each receipt is classified once per sweep, and
+	// the scan reaches back only as far as the oldest JS/TS verdict asked.
+	let scanned: number | undefined;
+	const feeding: Array<{ filePath: string; ts: number }> = [];
+	let newestUnknownTs = Number.NEGATIVE_INFINITY;
+	const scanBackTo = (
+		all: ReadonlyArray<{ filePath: string; ts: number }>,
+		recordedAtMs: number,
+	): void => {
+		scanned ??= all.length;
+		while (scanned > 0 && all[scanned - 1]!.ts > recordedAtMs) {
+			const receipt = all[--scanned]!;
+			if (!inRoot(receipt.filePath)) continue;
+			const role = roleOf(receipt.filePath);
+			if (role === "feeds") feeding.push(receipt);
+			else if (role === "unknown") {
+				newestUnknownTs = Math.max(newestUnknownTs, receipt.ts);
+			}
 		}
-		return held;
 	};
+	const feedsGlobalScope = (other: string): boolean =>
+		roles.get(other) === "feeds";
 	return (filePath, recordedAtMs) => {
 		const key = normalizeMapKey(filePath);
-		const inScope = isGoSourceFile(key)
+		const goFile = isGoSourceFile(key);
+		const inScope = goFile
 			? goPackagePeersOf(key)
 			: implicitScopeOf(key, feedsGlobalScope);
 		if (!inScope) return { drifted: [], truncated: false };
@@ -420,20 +452,32 @@ function createImplicitScopeCheck(
 			receipts = coordinator.getMutationsSince?.(0) ?? [];
 			receiptsDropped = (coordinator.droppedMutationReceiptCount ?? 0) > 0;
 		}
-		cut = false;
-		// Newest first: the fix that landed last is the likeliest one.
-		for (let i = receipts.length - 1; i >= 0; i--) {
-			const receipt = receipts[i]!;
-			if (receipt.ts <= recordedAtMs) break;
-			if (inRoot(receipt.filePath) && inScope(receipt.filePath)) {
-				return { drifted: [receipt.filePath], truncated: false };
+		let drifted: string | undefined;
+		let unknownAfter = false;
+		if (goFile) {
+			// Newest first: the fix that landed last is the likeliest one.
+			for (let i = receipts.length - 1; i >= 0; i--) {
+				const receipt = receipts[i]!;
+				if (receipt.ts <= recordedAtMs) break;
+				// A peer shares the blocker's directory, so its root too.
+				if (inScope(receipt.filePath)) {
+					drifted = receipt.filePath;
+					break;
+				}
 			}
+		} else {
+			scanBackTo(receipts, recordedAtMs);
+			drifted = feeding.find(
+				(receipt) => receipt.ts > recordedAtMs && inScope(receipt.filePath),
+			)?.filePath;
+			unknownAfter = newestUnknownTs > recordedAtMs;
 		}
+		if (drifted) return { drifted: [drifted], truncated: false };
 		// The ring evicted receipts that may be newer than the verdict.
 		const evictedAfter =
 			receiptsDropped &&
 			(receipts.length === 0 || receipts[0]!.ts > recordedAtMs);
-		return { drifted: [], truncated: cut || evictedAfter };
+		return { drifted: [], truncated: unknownAfter || evictedAfter };
 	};
 }
 

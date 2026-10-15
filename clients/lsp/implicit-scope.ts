@@ -283,6 +283,28 @@ export function globalScopeRoleByName(
 	return probeFor(filePath) ? undefined : "none";
 }
 
+/** A line that opens with an ES `import` or `export`. */
+const MODULE_LINE = /^[ \t]*(?:import|export)\b/m;
+/** An ambient declaration that feeds the global scope from a module. */
+const AMBIENT_DECLARATION = /\bdeclare\s+(?:global|module)\b/;
+
+/**
+ * #4438 r2: a module's role read from its text with no parse: a line that
+ * opens with `import` or `export`, and no `declare global` or `declare
+ * module` anywhere, answers `"none"`; otherwise `undefined` (a parse
+ * decides). A comment or string line opening with `export` can make a script
+ * read as a module, so only a caller that acts on `"feeds"` alone may use it
+ * (the blocker sweep, which then keeps a blocker); the cache's fail-closed
+ * answer never does.
+ */
+export function globalScopeRoleByText(
+	content: string,
+): GlobalScopeRole | undefined {
+	return MODULE_LINE.test(content) && !AMBIENT_DECLARATION.test(content)
+		? "none"
+		: undefined;
+}
+
 /**
  * Whether `filePath` feeds the TS/JS global scope. A declaration file always
  * counts. A TS file counts when it is a script or holds `declare global` or

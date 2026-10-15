@@ -77,6 +77,14 @@ function stale(runtime: RuntimeCoordinator): boolean | undefined {
 	return runtime.getInlineBlockersSnapshot()[0]?.stale;
 }
 
+/**
+ * A module whose text does not decide its role (no line opens with
+ * `import` or `export`), so classifying it costs a parse from the budget.
+ */
+function parsedModule(i: number): string {
+	return `const m${i} = 1; export { m${i} };\n`;
+}
+
 describe("inline-blocker sweep: Go package peers (#4438)", () => {
 	const verdictAgo = (): number => Date.now() - 10_000;
 
@@ -134,6 +142,18 @@ describe("inline-blocker sweep: Go package peers (#4438)", () => {
 			source: "agent-edit",
 		});
 		later(dir);
+
+		expect((await sweepInlineBlockerFreshness(runtime, dir)).kept).toBe(1);
+	});
+
+	it("keeps a Go blocker recorded after the peer write", async () => {
+		const dir = project("go-older", {
+			"a.go": "package p\n\nvar X = Y\n",
+			"b.go": "package p\n\nconst Z = 1\n",
+		});
+		const runtime = new RuntimeCoordinator();
+		write(runtime, path.join(dir, "b.go"), "package p\n\nconst Y = 1\n");
+		block(runtime, path.join(dir, "a.go"), ["lsp"], Date.now() + 1_000);
 
 		expect((await sweepInlineBlockerFreshness(runtime, dir)).kept).toBe(1);
 	});
@@ -351,6 +371,32 @@ describe("inline-blocker sweep: ambient files (#4438)", () => {
 		expect((await sweepInlineBlockerFreshness(runtime, dir)).kept).toBe(1);
 	});
 
+	// #4438 r2: JS/TS entries share one scan per sweep; each is still judged
+	// against its own verdict.
+	it("demotes only the blocker recorded before the ambient write", async () => {
+		const dir = project("ambient-two-verdicts", {
+			"early.ts": "export const e: number = FOO;\n",
+			"late.ts": "export const l: number = FOO;\n",
+		});
+		const runtime = new RuntimeCoordinator();
+		block(runtime, path.join(dir, "early.ts"), ["lsp"], verdictAgo());
+		const globals = path.join(dir, "globals.d.ts");
+		fs.writeFileSync(globals, "declare const FOO: number;\n");
+		runtime.recordProjectMutation({ filePath: globals, source: "agent-write" });
+		block(runtime, path.join(dir, "late.ts"), ["lsp"], Date.now() + 1_000);
+
+		const counts = await sweepInlineBlockerFreshness(runtime, dir);
+		expect(counts.revalidated).toBe(1);
+		expect(counts.kept).toBe(1);
+		const byFile = new Map(
+			runtime
+				.getInlineBlockersSnapshot()
+				.map((entry) => [path.basename(entry.filePath), entry.stale]),
+		);
+		expect(byFile.get("early.ts")).toBe(true);
+		expect(byFile.get("late.ts")).toBe(false);
+	});
+
 	it("keeps a Python blocker when an ambient file is written after it", async () => {
 		const dir = project("ambient-python", {
 			"app.py": "x = FOO\n",
@@ -373,7 +419,7 @@ describe("inline-blocker sweep: ambient files (#4438)", () => {
 			"globals.ts": "declare const FOO: number;\n",
 		};
 		for (let i = 0; i < 40; i++) {
-			files[`m${i}.ts`] = `export const m${i} = 1;\n`;
+			files[`m${i}.ts`] = parsedModule(i);
 		}
 		const dir = project("ambient-budget", files);
 		const runtime = new RuntimeCoordinator();
@@ -431,11 +477,12 @@ describe("inline-blocker sweep: ambient files (#4438)", () => {
 		expect(stale(runtime)).toBe(false);
 	});
 
-	// #4438 r2 (F1, review S9): a module over the LSP sync limits cannot be
-	// classified; that is a cut, not a demotion. Five pi-lens files are over
-	// the limits (`clients/lsp/index.ts` among them), so each of their edits
-	// demoted every earlier TS blocker in round 1.
-	it("keeps a JS/TS blocker and counts the cut when the file written after it is over the sync limits", async () => {
+	// #4438 r2 (F1, review S9): a module over the LSP sync limits (a copy of
+	// `clients/lsp/index.ts`, 9,729 lines, in the review) is no evidence.
+	// Round 1 asked the cache's fail-closed classifier, which answers "feeds"
+	// past the limits, so each edit of one of pi-lens's five oversized files
+	// demoted every earlier TS blocker. Its text now says module.
+	it("keeps a JS/TS blocker when the module written after it is over the sync limits", async () => {
 		const lines = ["import * as fs from 'node:fs';"];
 		for (let i = 0; i < 5_100; i++) lines.push(`export const v${i} = ${i};`);
 		const dir = project("ambient-oversized", {
@@ -451,8 +498,78 @@ describe("inline-blocker sweep: ambient files (#4438)", () => {
 
 		const counts = await sweepInlineBlockerFreshness(runtime, dir);
 		expect(counts.kept).toBe(1);
+		expect(stale(runtime)).toBe(false);
+	});
+
+	// #4438 r2 (F1): a file neither its name nor its text decides, and no
+	// parse may read (over the LSP sync limits), has an unknown role: a cut,
+	// not a demotion.
+	it("keeps a JS/TS blocker and counts the cut when the file written after it cannot be classified", async () => {
+		const lines: string[] = [];
+		for (let i = 0; i < 5_100; i++) lines.push(`const v${i} = ${i};`);
+		const dir = project("ambient-unknown", {
+			"use.ts": "export const u: number = FOO;\n",
+			"big.ts": `${lines.join("\n")}\n`,
+		});
+		const runtime = new RuntimeCoordinator();
+		block(runtime, path.join(dir, "use.ts"), ["lsp"], verdictAgo());
+		runtime.recordProjectMutation({
+			filePath: path.join(dir, "big.ts"),
+			source: "agent-edit",
+		});
+
+		const counts = await sweepInlineBlockerFreshness(runtime, dir);
+		expect(counts.kept).toBe(1);
 		expect(counts.truncatedImports).toBe(1);
 		expect(stale(runtime)).toBe(false);
+	});
+
+	// #4438 r2: most modules open a line with `import` or `export`; their
+	// text decides the role, so they cost no parse and spend no budget.
+	it("reads past modules its text decides without spending the parse budget", async () => {
+		const files: Record<string, string> = {
+			"use.ts": "export const u: number = FOO;\n",
+			"globals.ts": "declare const FOO: number;\n",
+		};
+		for (let i = 0; i < 40; i++)
+			files[`e${i}.ts`] = `export const e${i} = 1;\n`;
+		const dir = project("ambient-by-text", files);
+		const runtime = new RuntimeCoordinator();
+		block(runtime, path.join(dir, "use.ts"), ["lsp"], verdictAgo());
+		runtime.recordProjectMutation({
+			filePath: path.join(dir, "globals.ts"),
+			source: "agent-edit",
+		});
+		for (let i = 0; i < 40; i++) {
+			runtime.recordProjectMutation({
+				filePath: path.join(dir, `e${i}.ts`),
+				source: "agent-edit",
+			});
+		}
+
+		const counts = await sweepInlineBlockerFreshness(runtime, dir);
+		expect(counts.revalidated).toBe(1);
+		expect(counts.truncatedImports).toBe(0);
+	});
+
+	// #4438 r2: the text rule leaves an ambient declaration in a module to
+	// the parse.
+	it("demotes a JS/TS blocker when a module that declares a global is written after it", async () => {
+		const dir = project("ambient-declare-global", {
+			"use.ts": "export const u: number = FOO;\n",
+		});
+		const runtime = new RuntimeCoordinator();
+		block(runtime, path.join(dir, "use.ts"), ["lsp"], verdictAgo());
+		const globals = path.join(dir, "globals.ts");
+		fs.writeFileSync(
+			globals,
+			"export {};\ndeclare global {\n\tconst FOO: number;\n}\n",
+		);
+		runtime.recordProjectMutation({ filePath: globals, source: "agent-edit" });
+
+		expect((await sweepInlineBlockerFreshness(runtime, dir)).revalidated).toBe(
+			1,
+		);
 	});
 
 	// #4438 r2 (F3, review S2): receipts are session-wide, and a linked
@@ -512,8 +629,7 @@ describe("inline-blocker sweep: ambient files (#4438)", () => {
 			"use.ts": "export const u: number = FOO;\n",
 			"late.ts": "export const l: number = FOO;\n",
 		};
-		for (let i = 0; i < 40; i++)
-			files[`m${i}.ts`] = `export const m${i} = 1;\n`;
+		for (let i = 0; i < 40; i++) files[`m${i}.ts`] = parsedModule(i);
 		const dir = project("ambient-cut-per-entry", files);
 		const runtime = new RuntimeCoordinator();
 		block(runtime, path.join(dir, "use.ts"), ["lsp"], verdictAgo());
@@ -540,7 +656,7 @@ describe("inline-blocker sweep: ambient files (#4438)", () => {
 			"globals.ts": "declare const FOO: number;\n",
 		};
 		for (let i = 0; i < 40; i++) {
-			files[`m${i}.ts`] = `export const m${i} = 1;\n`;
+			files[`m${i}.ts`] = parsedModule(i);
 		}
 		const dir = project("ambient-memo", files);
 		const runtime = new RuntimeCoordinator();
