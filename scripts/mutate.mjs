@@ -21,6 +21,7 @@ import {
 	normalizeVitestOutput,
 	parseVitestSummary,
 } from "./lib/vitest-summary.mjs";
+import { escapeMarkdownCell } from "./lib/markdown-cell.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -364,7 +365,7 @@ function build() {
 }
 
 function appendTable(options, result) {
-	const row = `| ${options.file} | ${result.code} | ${result.status} | ${result.failed.length ? result.failed.join(" ") : "—"} |\n`;
+	const row = `| ${options.file} | ${result.code} | ${result.status} | ${result.failed.length ? escapeMarkdownCell(result.failed.join(" ")) : "—"} |\n`;
 	const body = path.join(root, "PR_BODY.md");
 	if (options.table && statExists(body))
 		writeFileSync(body, `${readFileSync(body, "utf8")}${row}`);

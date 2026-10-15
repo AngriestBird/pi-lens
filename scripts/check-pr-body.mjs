@@ -1687,6 +1687,8 @@ export const DETECTION_LAYERS = Object.freeze([
 	"reviewer probe",
 	"CI unit",
 	"governance sweep",
+	// #4490: CodeQL code scanning caught a defect no other layer names.
+	"static analysis",
 	"smoke",
 	"nightly",
 	"dogfood",

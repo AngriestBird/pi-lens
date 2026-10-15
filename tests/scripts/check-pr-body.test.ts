@@ -5205,6 +5205,9 @@ describe("detection retrospective for bug-closing PRs (#4288)", () => {
 			"reviewer probe",
 			"CI unit",
 			"governance sweep",
+			// #4490: CodeQL code scanning found the escaping defect, and no layer
+			// named it; the body had to claim "CI unit" for a static analyser.
+			"static analysis",
 			"smoke",
 			"nightly",
 			"dogfood",
@@ -5262,6 +5265,21 @@ describe("detection retrospective for bug-closing PRs (#4288)", () => {
 					"- Caught by: nightly\n" +
 						"- Should have been caught by: governance sweep\n" +
 						"- Gap: exists: tests/scripts/check-pr-body.test.ts\n" +
+						shapeLines,
+				),
+				{ bugClosing: true },
+			),
+		).toEqual({ valid: true, errors: [] });
+	});
+
+	it("accepts a static analysis catch", () => {
+		// #4490: a CodeQL-found bug had no honest layer word and claimed "CI unit".
+		expect(
+			lintPrBody(
+				withDetection(
+					"- Caught by: static analysis\n" +
+						"- Should have been caught by: this layer\n" +
+						"- Gap: none: the analyser caught it before any user\n" +
 						shapeLines,
 				),
 				{ bugClosing: true },

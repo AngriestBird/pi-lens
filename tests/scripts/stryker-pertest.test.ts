@@ -650,3 +650,30 @@ describe("splitRunnableTests (#4365)", () => {
 		expect(kept).toEqual([]);
 	});
 });
+
+// Recurrence (#4490 M2): renderCandidates escapes each test name through the
+// shared escaper. A no-op escaper left every suite green, so the exact row
+// is pinned here, through the real renderCandidates.
+describe("renderCandidates table cell (#4490)", () => {
+	it("writes a test name holding a pipe with the pipe escaped", () => {
+		const text = renderCandidates(
+			[
+				{
+					id: "t0",
+					file: "tests/clients/x.test.ts",
+					name: "a|b",
+					code: "covers-no-mutant",
+					covers: 1,
+					kills: 0,
+					survivedCovered: 0,
+					killedByOthers: 0,
+					reason: "r",
+					own: false,
+				},
+			],
+			summarizeReport({ files: {} }),
+			{ module: "clients/x.ts" },
+		);
+		expect(text).toContain("| `tests/clients/x.test.ts` | a\\|b | 1 | 0 | r |");
+	});
+});
