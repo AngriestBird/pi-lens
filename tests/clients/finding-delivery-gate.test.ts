@@ -31,6 +31,7 @@ import {
 	bindTagsToSeams,
 	findSeams,
 	listSourceFiles,
+	matchingCloseIndex,
 	relativePosix,
 	scanTaggedSeams as scanTaggedSeamsWith,
 	type SeamHit,
@@ -44,7 +45,7 @@ import {
 	formatCacheAgeLabel,
 	type DeliverySurfaceEntry,
 } from "../../clients/finding-delivery-gate.js";
-import { LENS_TOOL_NAMES } from "../../clients/tool-config.js";
+import { LENS_TOOL_NAMES, TOOL_REGISTRY } from "../../clients/tool-config.js";
 
 const REPO_ROOT = path.resolve(__dirname, "../..");
 
@@ -398,6 +399,13 @@ function handleTurnEnd() {
 // `type: "text"` and `role: "user"` are found in comment-blanked text with
 // strings kept, because their evidence IS a string literal; every other needle
 // is found in comment-and-string-blanked text.
+//
+// #4459 review F1: needles name the IDENTIFIER, not one spelling of a call. An
+// aliased import (`renderToolText as toolText`, the form `mcp/server.ts`
+// uses) still names `renderToolText`; a tool result built with a `type`
+// constant still has a `content: [` array, and a file-local constant bound to
+// "text" is resolved. A constant imported from another file and a content
+// array built away from its `content:` key are not resolved (named residual).
 
 const SINK_SHAPES: ReadonlyArray<{
 	name: string;
@@ -405,6 +413,11 @@ const SINK_SHAPES: ReadonlyArray<{
 	strings: "keep" | "blank";
 }> = [
 	{ name: "tool result text", pattern: /\btype:\s*"text"/, strings: "keep" },
+	{
+		name: "tool result content",
+		pattern: /\bcontent:\s*\[/,
+		strings: "blank",
+	},
 	{ name: "user-role message", pattern: /\brole:\s*"user"/, strings: "keep" },
 	{ name: "tool_call block", pattern: /\bblock:\s*true\b/, strings: "blank" },
 	{
@@ -421,7 +434,7 @@ const SINK_SHAPES: ReadonlyArray<{
 	{ name: "host notification", pattern: /\.notify\(/, strings: "blank" },
 	{
 		name: "rendered tool text",
-		pattern: /\brenderToolText\(/,
+		pattern: /\brenderToolText\b/,
 		strings: "blank",
 	},
 ];
@@ -495,8 +508,28 @@ function scanSinkFiles(root: string): {
 			const text = shape.strings === "keep" ? kept : blanked;
 			if (shape.pattern.test(text)) (sinks[file] ??= []).push(shape.name);
 		}
+		if (textConstantTypes(kept, blanked)) {
+			(sinks[file] ??= []).push("tool result text constant");
+		}
 	}
 	return { sinks, scanned: files.length };
+}
+
+/**
+ * True when a file-local constant bound to the literal "text" is used as an
+ * object's `type` (`const TEXT = "text"; … { type: TEXT, text }`).
+ */
+function textConstantTypes(kept: string, blanked: string): boolean {
+	for (const [, name] of kept.matchAll(
+		/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=;]*)?=\s*"text"/g,
+	)) {
+		if (
+			new RegExp(`\\btype:\\s*${name.replace(/\$/g, "\\$")}\\b`).test(blanked)
+		) {
+			return true;
+		}
+	}
+	return false;
 }
 
 /** Problems with the census over `root`; empty means every sink file is accounted. */
@@ -550,6 +583,157 @@ function censusProblems(
 	return problems;
 }
 
+// ── noFindings proof (#4459 review F1) ─────────────────────────────────────
+//
+// A `noFindings` classification was prose nothing checked: raw findings
+// appended to `tools/project-report.ts`, or a raw branch in `pilens_health`,
+// stayed green. Each `noFindings` sink file, and the MCP handler of each
+// `noFindings` tool, must now reference no finding READ: a store getter, a
+// scanner, or a language server's diagnostics call. An exception is named
+// with its reason; one nothing needs any more fails as stale.
+
+/** Finding reads by defining module; each name is ground-truthed below. */
+const FINDING_READS: ReadonlyArray<{ module: string; names: string[] }> = [
+	{
+		module: "clients/widget-state.ts",
+		names: [
+			"exportWidgetState",
+			"getFileDiagnosticSummaries",
+			"getFileDiagnostics",
+			"getSuppressedDiagnostics",
+			"getWidgetBlockingFilesForSweep",
+		],
+	},
+	{
+		module: "clients/project-diagnostics/cache.ts",
+		names: [
+			"loadProjectDiagnosticsDeltaReport",
+			"loadProjectDiagnosticsSnapshot",
+		],
+	},
+	{
+		module: "clients/project-diagnostics/scanner.ts",
+		names: ["scanProjectDiagnostics"],
+	},
+	{ module: "clients/lens-engine.ts", names: ["projectScan"] },
+	{
+		module: "clients/runtime-context.ts",
+		names: [
+			"consumeTestFindings",
+			"consumeTurnEndFindings",
+			"peekTestFindings",
+			"peekTurnEndFindings",
+		],
+	},
+];
+
+/** Language-server diagnostics reads, called as methods on the service. */
+const LSP_READ_METHODS = [
+	"getAllDiagnostics",
+	"getDiagnostics",
+	"runWorkspaceDiagnostics",
+];
+
+/**
+ * `region::read` → why this `noFindings` region may name that read. A region
+ * is a file, or `mcp/server.ts#<tool>` for an MCP handler.
+ */
+const NO_FINDINGS_READ_EXEMPTIONS: Record<string, string> = {
+	"tools/lens-diagnostic-mark.ts::getFileDiagnostics":
+		"looks up the marked finding's live line to anchor the mark; the result " +
+		"confirms the disposition and renders no finding rows",
+};
+
+/**
+ * The body of the `if (… name === "<tool>" …) { … }` handler in
+ * `mcp/server.ts` (one handler may serve two tools, as the ast-grep pair does).
+ */
+function mcpHandlerBody(raw: string, tool: string): string | undefined {
+	const kept = stripSource(raw, { strings: "keep" });
+	const match = new RegExp(
+		`\\bif\\s*\\([^{]*\\bname\\s*===\\s*"${tool}"[^{]*\\)\\s*\\{`,
+	).exec(kept);
+	if (!match) return undefined;
+	const open = match.index + match[0].length - 1;
+	const blanked = stripSource(raw);
+	const close = matchingCloseIndex(blanked, open, "{", "}");
+	return close < 0 ? undefined : blanked.slice(open, close + 1);
+}
+
+/** Every `noFindings` region under `root`, as comment-and-string-blanked text. */
+function noFindingsRegions(
+	root: string,
+	classified: Record<string, Classification>,
+	tools: Record<string, Classification>,
+): { regions: Record<string, string>; problems: string[] } {
+	const regions: Record<string, string> = {};
+	const problems: string[] = [];
+	for (const [file, c] of Object.entries(classified)) {
+		if (!("noFindings" in c)) continue;
+		const full = path.join(root, file);
+		if (fs.existsSync(full)) {
+			regions[file] = stripSource(fs.readFileSync(full, "utf8"));
+		}
+	}
+	const serverFile = path.join(root, "mcp/server.ts");
+	const server = fs.existsSync(serverFile)
+		? fs.readFileSync(serverFile, "utf8")
+		: undefined;
+	for (const [tool, c] of Object.entries(tools)) {
+		if (!("noFindings" in c)) continue;
+		const mcpName = TOOL_REGISTRY.find((t) => t.name === tool)?.mcpName;
+		if (!mcpName || server === undefined) continue;
+		const body = mcpHandlerBody(server, mcpName);
+		if (body === undefined) {
+			problems.push(
+				`${tool}: no \`if (name === "${mcpName}")\` handler found in mcp/server.ts, so its noFindings claim cannot be checked`,
+			);
+			continue;
+		}
+		regions[`mcp/server.ts#${mcpName}`] = body;
+	}
+	return { regions, problems };
+}
+
+/** Problems for `noFindings` regions that name a finding read. */
+function noFindingsReadProblems(
+	root: string,
+	classified: Record<string, Classification> = SINK_FILES,
+	tools: Record<string, Classification> = TOOL_CENSUS,
+	exemptions: Record<string, string> = NO_FINDINGS_READ_EXEMPTIONS,
+): string[] {
+	const { regions, problems } = noFindingsRegions(root, classified, tools);
+	const used = new Set<string>();
+	const reads = [
+		...FINDING_READS.flatMap(({ names }) =>
+			names.map((name) => ({ name, pattern: new RegExp(`\\b${name}\\b`) })),
+		),
+		...LSP_READ_METHODS.map((name) => ({
+			name,
+			pattern: new RegExp(`\\.${name}\\s*\\(`),
+		})),
+	];
+	for (const [region, text] of Object.entries(regions)) {
+		for (const { name, pattern } of reads) {
+			if (!pattern.test(text)) continue;
+			const key = `${region}::${name}`;
+			if (exemptions[key]) {
+				used.add(key);
+				continue;
+			}
+			problems.push(
+				`${region} is classified noFindings but reads findings through ${name}; classify what it delivers, or name the exception in NO_FINDINGS_READ_EXEMPTIONS`,
+			);
+		}
+	}
+	for (const key of Object.keys(exemptions)) {
+		if (!used.has(key)) {
+			problems.push(`${key}: stale NO_FINDINGS_READ_EXEMPTIONS entry`);
+		}
+	}
+	return problems;
+}
+
 describe("finding-delivery-gate sink census (#1634)", () => {
 	it("every production file with an agent-facing sink is a surface file or classified", () => {
 		const problems = censusProblems(REPO_ROOT, SINK_FILES, DELIVERY_SURFACES, {
@@ -570,7 +754,7 @@ describe("finding-delivery-gate sink census (#1634)", () => {
 			(root) => censusProblems(root, {}, DELIVERY_SURFACES),
 		);
 		expect(problems.join("\n")).toContain(
-			"tools/finding-digest.ts (tool result text)",
+			"tools/finding-digest.ts (tool result text, tool result content)",
 		);
 	});
 
@@ -638,6 +822,157 @@ export const unrelated = 1;
 		expect(problems).toContainEqual(
 			expect.stringContaining('"digest:made-up"'),
 		);
+	});
+
+	// #4459 review F1 plant (a): the alias `mcp/server.ts` itself uses.
+	it("RED PROOF: a NEW file rendering through an aliased renderToolText is unclassified", () => {
+		const problems = withSyntheticTree(
+			{
+				"tools/finding-digest.ts": `import { renderToolText as toolText } from "./render-compact.js";
+export const digest = (text: string) => toolText(text);
+`,
+			},
+			(root) => censusProblems(root, {}, DELIVERY_SURFACES),
+		);
+		expect(problems.join("\n")).toContain(
+			"tools/finding-digest.ts (rendered tool text)",
+		);
+	});
+
+	// #4459 review F1 plant (b): no `type: "text"` literal anywhere.
+	it("RED PROOF: a NEW file whose tool result types its text through a constant is unclassified", () => {
+		const problems = withSyntheticTree(
+			{
+				"tools/finding-digest.ts": `const TEXT = "text" as const;
+export function digest(text: string) {
+	const block = { type: TEXT, text };
+	return block;
+}
+`,
+			},
+			(root) => censusProblems(root, {}, DELIVERY_SURFACES),
+		);
+		expect(problems.join("\n")).toContain(
+			"tools/finding-digest.ts (tool result text constant)",
+		);
+	});
+
+	it("every noFindings sink file and noFindings MCP handler reads no findings", () => {
+		const problems = noFindingsReadProblems(REPO_ROOT);
+		expect(problems, problems.join("\n")).toEqual([]);
+	});
+
+	// A renamed or moved read would make the proof above vacuous.
+	it("every finding read the proof looks for still exists where it is listed", () => {
+		const missing = [
+			...FINDING_READS.flatMap(({ module, names }) => {
+				const text = stripSource(readSource(module));
+				return names
+					.filter(
+						(name) =>
+							!new RegExp(
+								`\\bexport\\s+(?:async\\s+)?(?:function\\s+|const\\s+)${name}\\b`,
+							).test(text),
+					)
+					.map((name) => `${module}: ${name}`);
+			}),
+			...LSP_READ_METHODS.filter(
+				(name) =>
+					!new RegExp(`^\\s*async\\s+${name}\\s*\\(`, "m").test(
+						stripSource(readSource("clients/lsp/index.ts")),
+					),
+			).map((name) => `clients/lsp/index.ts: ${name}`),
+		];
+		expect(missing).toEqual([]);
+	});
+
+	// #4459 review F1 plant (d).
+	it("RED PROOF: a noFindings file that reads the persisted snapshot is flagged", () => {
+		const problems = withSyntheticTree(
+			{
+				"tools/project-report.ts": `import { loadProjectDiagnosticsSnapshot } from "../clients/project-diagnostics/cache.js";
+export const report = (cwd: string) => ({ content: [{ type: "text", text: String(loadProjectDiagnosticsSnapshot(cwd)?.diagnostics) }] });
+`,
+			},
+			(root) => noFindingsReadProblems(root, SINK_FILES, {}, {}),
+		);
+		expect(problems).toEqual([
+			expect.stringContaining(
+				"tools/project-report.ts is classified noFindings but reads findings through loadProjectDiagnosticsSnapshot",
+			),
+		]);
+	});
+
+	// #4459 review F1 plant (c): the file is a registered surface file, so only
+	// the handler's own body can carry the proof.
+	it("RED PROOF: a noFindings MCP handler that reads the widget store is flagged", () => {
+		const problems = withSyntheticTree(
+			{
+				"mcp/server.ts": `async function call(name: string) {
+	if (name === "pilens_health") {
+		const rows = getFileDiagnosticSummaries();
+		return toolText(String(rows.length));
+	}
+	if (name === "pilens_latency") {
+		return toolText("ok");
+	}
+}
+`,
+			},
+			(root) =>
+				noFindingsReadProblems(
+					root,
+					{},
+					{ health: TOOL_CENSUS.health, latency: TOOL_CENSUS.latency },
+					{},
+				),
+		);
+		expect(problems).toEqual([
+			expect.stringContaining(
+				"mcp/server.ts#pilens_health is classified noFindings but reads findings through getFileDiagnosticSummaries",
+			),
+		]);
+	});
+
+	it("RED PROOF: a read named only in a comment or a string is no read", () => {
+		const problems = withSyntheticTree(
+			{
+				"tools/project-report.ts": `// never calls loadProjectDiagnosticsSnapshot or lsp.getDiagnostics()
+export const hint = "see getFileDiagnosticSummaries";
+`,
+			},
+			(root) => noFindingsReadProblems(root, SINK_FILES, {}, {}),
+		);
+		expect(problems).toEqual([]);
+	});
+
+	it("RED PROOF: a noFindings tool whose MCP handler cannot be found is flagged", () => {
+		const problems = withSyntheticTree(
+			{ "mcp/server.ts": "export const nothing = 1;\n" },
+			(root) =>
+				noFindingsReadProblems(root, {}, { health: TOOL_CENSUS.health }, {}),
+		);
+		expect(problems).toEqual([
+			expect.stringContaining('no `if (name === "pilens_health")` handler'),
+		]);
+	});
+
+	it("RED PROOF: an exemption nothing needs is stale", () => {
+		const problems = withSyntheticTree(
+			{ "tools/project-report.ts": "export const quiet = 1;\n" },
+			(root) =>
+				noFindingsReadProblems(
+					root,
+					SINK_FILES,
+					{},
+					{
+						"tools/project-report.ts::projectScan": "it used to scan",
+					},
+				),
+		);
+		expect(problems).toEqual([
+			"tools/project-report.ts::projectScan: stale NO_FINDINGS_READ_EXEMPTIONS entry",
+		]);
 	});
 });
 
