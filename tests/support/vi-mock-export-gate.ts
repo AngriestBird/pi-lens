@@ -120,19 +120,33 @@ const OPAQUE_VALUE_KINDS: ReadonlySet<string> = new Set([
 	"this",
 ]);
 
+/**
+ * `unknownMethod` is a named member of an object the resolver cannot bind
+ * (`getVitest().doMock`, `const { doMock: dm } = getVitest()`): unknown, but
+ * its name still says whether it may be a module API.
+ */
 type Resolved =
 	| "utils"
 	| "namespace"
 	| "other"
 	| "unknown"
-	| { method: string };
+	| { method: string }
+	| { unknownMethod: string };
 
 type Binding =
 	| "utils"
 	| "namespace"
 	| "other"
+	| "unknown"
 	| { value: SgNode }
 	| { method: string; of: SgNode };
+
+function isUnknown(resolved: Resolved): boolean {
+	return (
+		resolved === "unknown" ||
+		(typeof resolved === "object" && "unknownMethod" in resolved)
+	);
+}
 
 /** The literal member name of a member or subscript callee, or undefined. */
 function memberName(node: SgNode): string | undefined {
@@ -199,7 +213,8 @@ function collectBindings(root: SgNode): Map<string, Binding[]> {
 		const value = declarator.field("value");
 		if (!name) continue;
 		if (name.kind() === "identifier") {
-			add(name.text(), value ? { value } : "other");
+			// `let v;` is assigned later, so its value is unknown.
+			add(name.text(), value ? { value } : "unknown");
 			continue;
 		}
 		for (const shorthand of name.findAll({
@@ -273,7 +288,7 @@ export function createViResolver(root: SgNode): ViResolver {
 		if ("value" in binding) return resolveNode(binding.value, depth + 1);
 		const owner = resolveNode(binding.of, depth + 1);
 		if (owner === "utils") return { method: binding.method };
-		return owner === "unknown" ? "unknown" : "other";
+		return isUnknown(owner) ? { unknownMethod: binding.method } : "other";
 	};
 	const resolveNode = (raw: SgNode, depth: number): Resolved => {
 		if (depth > 8) return "unknown";
@@ -285,7 +300,8 @@ export function createViResolver(root: SgNode): ViResolver {
 			if (owner === "namespace" && name !== undefined && VITEST_UTILS.has(name))
 				return "utils";
 			if (owner === "utils" && name !== undefined) return { method: name };
-			return owner === "unknown" ? "unknown" : "other";
+			if (!isUnknown(owner)) return "other";
+			return name === undefined ? "unknown" : { unknownMethod: name };
 		}
 		// A value whose result the resolver cannot see (a call, an await, a
 		// conditional or logical expression) may be the utils object; a
@@ -306,11 +322,16 @@ export function createViResolver(root: SgNode): ViResolver {
 			if (!VITEST_MODULE_APIS.has(name) && bindings === undefined)
 				return { kind: "other" };
 			const resolved = resolveName(name, 0);
-			if (typeof resolved === "object")
+			if (typeof resolved === "object" && "method" in resolved)
 				return names.includes(resolved.method)
 					? { kind: "mock", via: "direct" }
 					: { kind: "other" };
-			return VITEST_MODULE_APIS.has(name) && resolved === "unknown"
+			// Unknown, and named like a module API locally or at its source.
+			const apiNamed =
+				VITEST_MODULE_APIS.has(name) ||
+				(typeof resolved === "object" &&
+					VITEST_MODULE_APIS.has(resolved.unknownMethod));
+			return isUnknown(resolved) && apiNamed
 				? { kind: "unresolved" }
 				: { kind: "other" };
 		}
@@ -332,7 +353,7 @@ export function createViResolver(root: SgNode): ViResolver {
 			return names.includes(name)
 				? { kind: "mock", via: "direct" }
 				: { kind: "other" };
-		return owner === "unknown" ? { kind: "unresolved" } : { kind: "other" };
+		return isUnknown(owner) ? { kind: "unresolved" } : { kind: "other" };
 	};
 	return {
 		classify,

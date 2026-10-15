@@ -233,7 +233,9 @@ describe("project-trust real seam ratchet (#4281)", () => {
 	it("reports a mock spelling it cannot classify, with its line (#4429)", () => {
 		// The fail-closed branches: a specifier the scan cannot read, a utils
 		// key it cannot read, and a module-API name on an object it cannot bind
-		// may each mock the seam module, so each reds.
+		// (called by that name or under a rename, or held in a `let` assigned
+		// later, or bound where the resolver reads no bindings) may each mock
+		// the seam module, so each reds.
 		const source = [
 			'const target = "../clients/project-trust.js";',
 			"vi.mock(target, () => ({}));",
@@ -244,6 +246,14 @@ describe("project-trust real seam ratchet (#4281)", () => {
 			"vi.fn(target);",
 			"const helper = { mock: (path: string) => path };",
 			'helper.mock("../clients/project-trust.js");',
+			"const { doMock: dm } = getVitest();",
+			'dm("../clients/project-trust.js");',
+			"const late = getVitest().mock;",
+			'late("../clients/project-trust.js");',
+			"let held;",
+			"held = vi;",
+			'held.mock("../clients/project-trust.js");',
+			'for (const doMock of [vi.doMock]) doMock("../clients/project-trust.js");',
 		].join("\n");
 		expect(
 			scanViMockSites("fake.test.ts", source, "clients/project-trust.js"),
@@ -255,6 +265,10 @@ describe("project-trust real seam ratchet (#4281)", () => {
 				'unclassified spelling at fake.test.ts:4: vi["mo" + "ck"]("../clients/project-trust.js", () => ({}));',
 				'unclassified spelling at fake.test.ts:5: getVitest().doMock("../clients/project-trust.js", () => ({}));',
 				'unclassified spelling at fake.test.ts:6: jest.mock("../clients/project-trust.js");',
+				'unclassified spelling at fake.test.ts:11: dm("../clients/project-trust.js");',
+				'unclassified spelling at fake.test.ts:13: late("../clients/project-trust.js");',
+				'unclassified spelling at fake.test.ts:16: held.mock("../clients/project-trust.js");',
+				'unclassified spelling at fake.test.ts:17: for (const doMock of [vi.doMock]) doMock("../clients/project-trust.js");',
 			],
 		});
 	});
