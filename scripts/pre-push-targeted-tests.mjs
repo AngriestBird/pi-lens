@@ -157,6 +157,13 @@ export const TREE_SCANNING_GOVERNANCE_TESTS = [
 	// CacheManager, so a production change must arm it.
 	"tests/config/turn-state-partition-owner-sweep.test.ts",
 	"tests/config/project-trust-seam-ratchet.test.ts",
+	// #4291: walks clients/lsp for `.spawn(` call sites and requires each on
+	// PR_SMOKE_PATHS, so a production change that moves the call site must arm it.
+	"tests/config/pr-smoke-paths.test.ts",
+	// #4403: walks clients/tools/mcp + index.ts for LSPService diagnostics
+	// reads and maps each to a matrix route; a new route must arm it. The whole
+	// file, matrix included, measured ~28 s alone (2026-10-14).
+	"tests/tools/diagnostics-route-switch-matrix.test.ts",
 ];
 
 // Suites that scan the TESTS tree for a test shape (a real spawn, a raw timer

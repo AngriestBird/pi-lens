@@ -522,7 +522,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/cache-manager.ts": 3,
 		"clients/cache-observability.ts": 2,
 		"clients/call-graph.ts": 4,
-		"clients/cascade-format.ts": 4,
+		// 4 -> 5 (#4403): `renderCascadeResult` keeps the notes whose servers
+		// are undelivered, an `Array.prototype.filter` call, not a delivery
+		// filter.
+		"clients/cascade-format.ts": 5,
 		"clients/code-quality-warnings.ts": 5,
 		"clients/codebase-model.ts": 4,
 		"clients/complexity-client.ts": 3,
@@ -629,6 +632,12 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/launch.ts": 2,
 		"clients/lsp/ruby-drive-dirs.ts": 1,
 		"clients/lsp/server.ts": 5,
+		// 1 (#4403): `disabledPrimaryServerIds` is an `Array.prototype.filter`
+		// over registered servers, not a delivery filter.
+		// 1 -> 3 (#4403 round 4): `disabledPrimaries` selects the file's
+		// primaries once, then splits them into disabled ones and the
+		// `fallbackFor` alternates standing in for a disabled owner.
+		"clients/lsp/session-roots.ts": 3,
 		"clients/lsp/tsserver-sync.ts": 1,
 		"clients/lsp/wait-policy/classification.ts": 1,
 		// 1 -> 2 (#3752): the count-vs-list merge adds one `result.warnings.filter`
@@ -960,10 +969,14 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/log-cleanup.ts": 9,
 		"clients/lsp-mutation.ts": 3,
 		"clients/lsp/client-registry.ts": 4,
-		"clients/lsp/config.ts": 9,
+		// 9 -> 3 (#4403): the file gates' `path.extname`/`basename` moved to
+		// clients/lsp/file-server-match.ts (3, with its own import) and the
+		// session-root walk to clients/lsp/session-roots.ts (6 -> 8).
+		"clients/lsp/config.ts": 3,
 		// #4346: resolves a Go importer's package directory to announce its peers.
 		"clients/lsp/created-import-targets.ts": 3,
 		"clients/lsp/edits.ts": 23,
+		"clients/lsp/file-server-match.ts": 3,
 		"clients/lsp/index.ts": 15,
 		// #4346: Go package directories and TS/JS extensions of the implicit
 		// dependency scope (same-package files, ambient declarations).
@@ -980,7 +993,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 124 -> 125 (#4414): the Windows npm-global layout adds one `path.join` to
 		// `typescriptDirsForTsc`, the list of package dirs beside a resolved `tsc`.
 		"clients/lsp/server.ts": 125,
-		"clients/lsp/session-roots.ts": 6,
+		"clients/lsp/session-roots.ts": 8,
 		// 13 -> 15 (#4346): a creation's path joins the entry's dependency
 		// scope test (Go package directory, created-file stem/directory names).
 		"clients/lsp/workspace-diagnostics-cache.ts": 15,
@@ -1133,7 +1146,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"tools/lens-diagnostic-mark.ts": 6,
 		"tools/lens-diagnostics.ts": 30,
 		"tools/lsp-diagnostics.ts": 10,
-		"tools/lsp-navigation.ts": 14,
+		// 14 -> 15 (#4403 round 5): `noServerAnsweredText` names the file by
+		// its `path.basename`, beside the install hint's own.
+		"tools/lsp-navigation.ts": 15,
 		"tools/module-report.ts": 29,
 		"tools/render-compact.ts": 3,
 		"tools/symbol-search.ts": 5,

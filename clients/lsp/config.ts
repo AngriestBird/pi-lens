@@ -107,9 +107,14 @@ import { launchLSP } from "./launch.js";
 import {
 	registerSessionRoot,
 	resetSessionRootsForTests,
-	sessionRootConfigEntries,
+	sessionRootConfigForFile,
 	setSessionRootConfig,
 } from "./session-roots.js";
+import {
+	fileMatchKeys,
+	fileMatchReason,
+	registeredServers,
+} from "./file-server-match.js";
 import {
 	LSP_SERVERS,
 	resetLSPCaseSensitivityState,
@@ -905,28 +910,8 @@ function registryDecision(
 	}
 }
 
-function isSameOrChildPath(filePath: string, candidateRoot: string): boolean {
-	if (filePath === candidateRoot) return true;
-	return filePath.startsWith(`${candidateRoot}${path.sep}`);
-}
-
 function getConfigForFile(filePath: string): RegisteredLSPConfig {
-	const resolvedFilePath = path.resolve(filePath);
-	let bestMatch: { root: string; config: RegisteredLSPConfig } | undefined;
-
-	// #2518: the per-root configs ARE the session-root registry's values, so
-	// this walk sees a config for exactly the roots that registry still serves.
-	// `undefined` is a root whose first load is still in flight — the same
-	// "no entry yet" state this walk skipped before the two stores merged.
-	for (const [root, config] of sessionRootConfigEntries()) {
-		if (config === undefined) continue;
-		if (!isSameOrChildPath(resolvedFilePath, root)) continue;
-		if (!bestMatch || root.length > bestMatch.root.length) {
-			bestMatch = { root, config };
-		}
-	}
-
-	return bestMatch?.config ?? EMPTY_CONFIG;
+	return sessionRootConfigForFile(filePath) ?? EMPTY_CONFIG;
 }
 
 /**
@@ -1166,27 +1151,11 @@ export async function initLSPConfig(cwd: string): Promise<void> {
 }
 
 /**
- * Every server a workspace knows about, in registry-then-custom order and
- * BEFORE any gate is applied.
- *
- * Spelled once because two callers need the same list for opposite purposes:
- * `getAllServers` DROPS the disabled ones, `explainServersForFile` REPORTS
- * them. A custom server that only one of the two composed would be a server
- * the runtime runs and the introspection cannot see, or the reverse.
- */
-function registeredServers(config: RegisteredLSPConfig): LSPServerInfo[] {
-	const builtins = config.registeredServers.length
-		? config.registeredServers
-		: LSP_SERVERS;
-	return [...builtins, ...config.customServers];
-}
-
-/**
  * Get all available servers (built-in + custom, minus disabled)
  */
 export function getAllServers(filePath?: string): LSPServerInfo[] {
 	const config = filePath ? getConfigForFile(filePath) : EMPTY_CONFIG;
-	return registeredServers(config).filter(
+	return registeredServers(config, LSP_SERVERS).filter(
 		(s) => !config.disabledServerIds.has(s.id),
 	);
 }
@@ -1249,21 +1218,7 @@ function selectionReason(
 	base: string,
 ): ServerSelectionReason {
 	if (config.disabledServerIds.has(server.id)) return "disabled-by-config";
-	let matched = false;
-	for (const value of server.extensions) {
-		const lower = value.toLowerCase();
-		if (lower === ext || lower === base) {
-			matched = true;
-			break;
-		}
-	}
-	if (!matched) return "extension-mismatch";
-	// #636: a server's extension match can be intentionally broader than what
-	// it can usefully act on (zizmor attaches to "yaml" but only ever reports
-	// on GitHub Actions workflow/action/dependabot paths). `pathFilter`, when
-	// present, is an ADDITIONAL narrowing gate — never a widening one.
-	if (server.pathFilter && !server.pathFilter(filePath)) return "path-filter";
-	return "selected";
+	return fileMatchReason(server, filePath, ext, base);
 }
 
 /**
@@ -1280,9 +1235,8 @@ export function explainServersForFile(
 	filePath: string,
 	config: RegisteredLSPConfig = getConfigForFile(filePath),
 ): ServerSelection[] {
-	const ext = path.extname(filePath).toLowerCase();
-	const base = path.basename(filePath).toLowerCase();
-	return registeredServers(config).map((server) => {
+	const { ext, base } = fileMatchKeys(filePath);
+	return registeredServers(config, LSP_SERVERS).map((server) => {
 		const reason = selectionReason(server, config, filePath, ext, base);
 		return { server, selected: reason === "selected", reason };
 	});
@@ -1290,9 +1244,8 @@ export function explainServersForFile(
 
 export function getServersForFileWithConfig(filePath: string): LSPServerInfo[] {
 	const config = getConfigForFile(filePath);
-	const ext = path.extname(filePath).toLowerCase();
-	const base = path.basename(filePath).toLowerCase();
-	return registeredServers(config).filter(
+	const { ext, base } = fileMatchKeys(filePath);
+	return registeredServers(config, LSP_SERVERS).filter(
 		(server) =>
 			selectionReason(server, config, filePath, ext, base) === "selected",
 	);

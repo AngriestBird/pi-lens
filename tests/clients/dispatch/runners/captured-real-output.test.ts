@@ -97,28 +97,49 @@ vi.mock(
  */
 const RUNNER_DESCRIPTORS: Record<string, { module: string; kind: string }> = {
 	actionlint: { module: "actionlint", kind: "yaml" },
+	"cpp-check": { module: "cpp-check", kind: "cxx" },
+	"cue-vet": { module: "cue-vet", kind: "cue" },
+	"dart-analyze": { module: "dart-analyze", kind: "dart" },
+	"dotnet-build": { module: "dotnet-build", kind: "csharp" },
+	"elixir-check": { module: "elixir-check", kind: "elixir" },
 	eslint: { module: "eslint", kind: "jsts" },
 	"biome-check-json": { module: "biome-check", kind: "jsts" },
+	"fish-indent": { module: "fish-indent", kind: "fish" },
+	"gleam-check": { module: "gleam-check", kind: "gleam" },
+	"go-vet": { module: "go-vet", kind: "go" },
 	hadolint: { module: "hadolint", kind: "docker" },
 	htmlhint: { module: "htmlhint", kind: "html" },
+	javac: { module: "javac", kind: "java" },
+	ktlint: { module: "ktlint", kind: "kotlin" },
 	markdownlint: { module: "markdownlint", kind: "markdown" },
 	mypy: { module: "mypy", kind: "python" },
 	oxlint: { module: "oxlint", kind: "jsts" },
 	"php-lint": { module: "php-lint", kind: "php" },
 	phpstan: { module: "phpstan", kind: "php" },
 	pyright: { module: "pyright", kind: "python" },
+	rubocop: { module: "rubocop", kind: "ruby" },
 	"ruff-lint": { module: "ruff", kind: "python" },
+	"rust-clippy": { module: "rust-clippy", kind: "rust" },
 	shellcheck: { module: "shellcheck", kind: "shell" },
 	shfmt: { module: "shfmt", kind: "shell" },
 	spellcheck: { module: "spellcheck", kind: "markdown" },
 	sqlfluff: { module: "sqlfluff", kind: "sql" },
 	stylelint: { module: "stylelint", kind: "css" },
+	swiftlint: { module: "swiftlint", kind: "swift" },
 	taplo: { module: "taplo", kind: "toml" },
 	terragrunt: { module: "terragrunt", kind: "terragrunt" },
 	tflint: { module: "tflint", kind: "terraform" },
 	vale: { module: "vale", kind: "markdown" },
 	yamllint: { module: "yamllint", kind: "yaml" },
+	"zig-check": { module: "zig-check", kind: "zig" },
 };
+
+/** Version probes the toolchain clients run before the invocation under test. */
+const AVAILABILITY_PROBE_ARGV: readonly (readonly string[])[] = [
+	["version"],
+	["--version"],
+	["clippy", "--version"],
+];
 
 /**
  * True when every token of `needle` appears in `haystack` in the same relative
@@ -201,7 +222,7 @@ describe("captured real-binary output", () => {
 		// generous because this suite spawns nothing; a real assertion failure
 		// still reds immediately.
 		it(
-			`${runnerId} parses findings out of ${fixture.provenance.tool} ${fixture.provenance.version} output`,
+			`${runnerId} (${fixture.caseName}) parses findings out of ${fixture.provenance.tool} ${fixture.provenance.version} output`,
 			{
 				timeout: 30000,
 			},
@@ -218,7 +239,25 @@ describe("captured real-binary output", () => {
 						`${fixture.relPath}: ${fixture.provenance.workspace}/${fixture.file} is missing`,
 					).toBe(true);
 
-					safeSpawnAsync.mockResolvedValue(materialize(fixture, env.tmpDir));
+					// Everything except an availability probe answers with the captured
+					// bytes. go-vet and rust-clippy find their toolchain through
+					// goClient/rustClient, which run `<tool> version|--version` and
+					// `cargo clippy --version` before the real invocation. Those are
+					// different invocations whose own output nobody captured here, so
+					// they report "installed" and the run under test reaches its parse
+					// step; the process boundary (safeSpawnAsync) is the only thing
+					// mocked.
+					const captured = materialize(fixture, env.tmpDir);
+					safeSpawnAsync.mockImplementation(
+						async (_cmd: string, args: string[]) =>
+							AVAILABILITY_PROBE_ARGV.some(
+								(probe) =>
+									probe.length === args.length &&
+									probe.every((token, at) => token === args[at]),
+							)
+								? { error: null, status: 0, stdout: "probe ok", stderr: "" }
+								: captured,
+					);
 
 					const runner = (
 						await import(

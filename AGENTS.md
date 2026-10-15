@@ -409,6 +409,10 @@ file-scoped worklist and receives no project-wide scanner output.
     extension, server, or file format, read its source or schema at a pinned
     SHA and pin a test vector generated from it, citing the SHA; a double
     built from an issue's description encodes the same guess (#2432).
+    Enforced by `tests/clients/dispatch/smoke-fixture-coverage.test.ts`
+    (partial: every registered dispatch runner needs captured real-binary bytes
+    replayed by `tests/clients/dispatch/runners/captured-real-output.test.ts`,
+    or an exemption naming a fact about the tool; presence only, not fidelity).
 
 40. **Tool root drift:** all runner, formatter, and LSP child spawns use
     `resolveToolCwd`; mutation of the seam, log, or fallback must turn a test red.
@@ -825,6 +829,26 @@ file-scoped worklist and receives no project-wide scanner output.
   is not part of it. The probe's batch cache key comes from
   `buildProbeScopeKey`, never equal to the workspace sweep's key, because the
   sweep records before `pi-lens-ignore` and the probe after it.
+- Every diagnostics entry route starts the same server set and gives the same
+  confirmation verdict under each server-selecting switch (`--no-opengrep`,
+  `opengrep.enabled=false`, a disabled or missing primary). Enforced by
+  `tests/tools/diagnostics-route-switch-matrix.test.ts`, which derives the
+  routes from every production access to an `LSPService` diagnostics member
+  and fails closed on an access it cannot classify, so a new read joins the
+  matrix or carries a reasoned exemption keyed by its `clientScope` and
+  `diagnostics` options. Each cell asserts the exact lines the route shows.
+- A file no primary answered for is unconfirmed, never clean, whether the
+  primary could not start, was still starting, or is in `lsp.disabledServers`.
+  The one rule is `unansweredPrimaries` (clients/lsp/index.ts), which names
+  the disabled ones through `disabledPrimaries`
+  (clients/lsp/session-roots.ts, not `config.js`, whose import surface the
+  test mocks mirror). A `fallbackFor` alternate standing in for a disabled
+  owner keeps the denial as the cause when it cannot answer either; the
+  cascade names such a server once per session, not per neighbour.
+  Every route words the cause through `primaryUnavailableCause` and
+  `PRIMARY_UNAVAILABLE_CAUSE` (clients/lsp/diagnostic-binding.ts), never its
+  own sentence. A later write of such a file prints a one-line unconfirmed
+  status naming the cause, never the clean line.
 - LSP roots never exceed the session-cwd ceiling. Root/config discovery uses
   shared marker seams. Child cwd resolution uses `resolveToolCwd` and its
   caller-specific markers.
@@ -859,7 +883,7 @@ file-scoped worklist and receives no project-wide scanner output.
   acquired auxiliaries but no primary that rooted for the file is inconclusive
   with `primary-unavailable`, naming those primaries, and `getDiagnostics`
   records the same ids as `unavailablePrimaryServerIds` (one rule,
-  `unacquiredPrimaryServerIds`; an auxiliary-only language is unaffected).
+  `unansweredPrimaries`; an auxiliary-only language is unaffected).
 - The explicit `lsp_diagnostics` read checks `exceedsLspSyncLimits` once before
   warm attachment or `touchFile`; an over-bound file returns a `too_large`
   result with its byte/line measurement and records
@@ -1031,7 +1055,9 @@ file-scoped worklist and receives no project-wide scanner output.
   (`pilens_analyze`, including its warm PostToolUse hook route) pass
   `dedupeCoverageNotice: false` so every call carries the notice and the push
   latch stays untouched (#3791). The warm hook deliberately repeats the notice
-  on every edit, matching its cold hook route.
+  on every edit, matching its cold hook route. A primary off in
+  `lsp.disabledServers` gets one "disabled in config" note per server per
+  session instead of the per-file notice.
 - `pilens:files:touched` publishers are `clients/pipeline.ts` and
   `clients/runtime-agent-end.ts`; `clients/agent-nudge.ts` is the subscriber.
   `clients/lsp-mutation.ts` has an optional callback but is not a publisher until
@@ -1213,6 +1239,10 @@ other test job always run, because a docs edit can red tests outside tests/confi
 model-checks only when `formal/` (or its checker or ci.yml) changed. A REQUIRED
 job never skips at job level: ci-verdict and the merge train demand a literal
 `success`, so `TLA+ models` starts and skips its steps.
+The same script's `smoke` output (`PR_SMOKE_PATHS`: RPC, install, LSP launch,
+trust) makes `install-smoke.yml` run all four pi-load cells and an advisory LSP
+handshake job on a pull request; any other PR that reaches that workflow keeps
+the one pnpm-global cell (`tests/config/pr-smoke-paths.test.ts`).
 The Unit shards are packed by the per-file seconds in
 `scripts/test-shard-weights.json`; regenerate it from the shards' uploaded
 `vitest-results.json` when `tests/config/test-shard-assignment.test.ts` reds.
