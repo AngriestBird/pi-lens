@@ -28,7 +28,9 @@
  * Every exemption now carries one of a closed set of categories, each of which
  * says something true about the world rather than about the backlog, and the
  * deferral phrasing itself is rejected. Only `pending` defers, and it must name
- * the issue that closes it.
+ * the issue that closes it. Every other category states a time-invariant fact
+ * about the tool, so it may not speak of evidence, the host or time, and the
+ * ids allowed under `toolchain` and `platform` are a pinned table.
  */
 
 import * as fs from "node:fs";
@@ -55,7 +57,7 @@ const repoRoot = path.resolve(CAPTURED_OUTPUT_DIR, "../../..");
  * part: it states a fact about the tool, not a position in a queue.
  */
 const EXEMPTION_CATEGORIES = {
-	/** In-process analysis. There is no external binary whose bytes to capture. */
+	/** In-process analysis. There is no external binary to capture. */
 	structural: "structural",
 	/**
 	 * A per-language alternate whose primary is covered. The detail must START
@@ -65,18 +67,52 @@ const EXEMPTION_CATEGORIES = {
 	alternate: "alternate",
 	/** Exercised through the LSP lane rather than the dispatch CLI path. */
 	lsp: "lsp",
-	/** Needs a language toolchain or build artifact absent from dev and CI. */
+	/**
+	 * A tool the CI image cannot provide: name the tool and why. Every id here
+	 * is pinned in `PINNED_FACT_EXEMPTIONS`, so a new one is a visible diff.
+	 */
 	toolchain: "toolchain",
-	/** No binary exists for any platform pi-lens develops or tests on. */
+	/** No binary exists for any platform pi-lens develops or tests on. Pinned. */
 	platform: "platform",
 	/** Flag-gated off by default; running it has side effects. */
 	"opt-in": "opt-in",
 	/**
-	 * The only category that expires. The detail must reference the issue or PR
-	 * that removes it, so the deferral has an owner and an end.
+	 * The only category that may describe the state of the repo, the host or
+	 * time, and the only one that expires. The detail must reference the issue
+	 * or PR that removes it, so the deferral has an owner and an end.
 	 */
 	pending: "pending",
 } as const;
+
+/**
+ * Every category but `pending` states a time-invariant fact about the TOOL. A
+ * fact about the capture host, the fixture backlog or the calendar is a
+ * deferral however it is worded, and no phrase list closes that (#1937 review:
+ * "awaiting capture on a CI image, fixture to follow" passed a lexical list, and
+ * "absent from this host" was filed as `toolchain` while ubuntu-latest ships
+ * Ruby and PowerShell). So the derived rule bans the vocabulary of evidence,
+ * host and time in those categories, instead of listing deferral phrases.
+ */
+const FACT_CATEGORIES: ReadonlySet<string> = new Set([
+	"structural",
+	"alternate",
+	"lsp",
+	"toolchain",
+	"platform",
+	"opt-in",
+]);
+const EVIDENCE_HOST_OR_TIME =
+	/\b(?:fixtures?|captur\w*|bytes|replay\w*|this host|the host|here|yet|later|will|soon|todo|tbd|to follow|awaiting|pending|missing|absent|currently|for now|right now)\b/i;
+
+/**
+ * Exemption ids allowed in the categories a reviewer must approve one by one.
+ * `toolchain` and `platform` are where "the tool is absent on my machine" gets
+ * laundered, so adding to either is a diff to this table, not a quiet map entry.
+ */
+const PINNED_FACT_EXEMPTIONS: Readonly<Record<string, readonly string[]>> = {
+	toolchain: [],
+	platform: [],
+};
 
 /**
  * Runners with neither a live tool-smoke fixture nor captured real bytes.
@@ -85,11 +121,11 @@ const EXEMPTION_CATEGORIES = {
 const EXEMPT = new Map<string, string>([
 	[
 		"tree-sitter",
-		"structural: in-process grammar queries on every dispatch; no external process emits bytes to parse",
+		"structural: in-process grammar queries on every dispatch; no external process emits output to parse",
 	],
 	[
 		"fact-rules",
-		"structural: in-process fact evaluation on every dispatch; no external process emits bytes to parse",
+		"structural: in-process fact evaluation on every dispatch; no external process emits output to parse",
 	],
 	[
 		"ast-grep-napi",
@@ -109,31 +145,27 @@ const EXEMPT = new Map<string, string>([
 	],
 	[
 		"prisma-validate",
-		"lsp: covered through the --lsp prisma fixture; the runner shells out to the same @prisma/language-server package",
+		"lsp: exercised through the --lsp prisma smoke lane; the runner shells out to the same @prisma/language-server package",
 	],
 	[
 		"spotbugs",
-		"toolchain: analyses compiled JVM bytecode, so it needs a JDK plus a built artifact, and it is flag-gated behind withSpotbugsGroup",
+		"pending: #1937 analyses a compiled .class tree and is flag-gated behind withSpotbugsGroup; ubuntu-latest ships a JDK, so a CI job that builds the smoke java project can capture it",
 	],
 	[
 		"lsp",
-		"lsp: the dispatch lsp runner relays language-server diagnostics rather than parsing a CLI; its real-server evidence is the --lsp tool-smoke fixture and the clients/lsp suites",
+		"lsp: the dispatch lsp runner relays language-server diagnostics rather than parsing a CLI; its evidence is the --lsp tool-smoke lane and the clients/lsp suites",
 	],
 	[
 		"helm-lint",
-		"pending: #1937 recaptured helm 4.3.0 bytes, and parseHelmLintOutput attributes a template parse error to a path made of the prose around it with no line; the fixture lands with that parser fix",
+		"pending: #4453 helm 4 prints a template parse error that parseHelmLintOutput attributes to a path made of the prose around it, with no line; the capture lands with that parser fix",
 	],
 	[
 		"psscriptanalyzer",
-		"toolchain: needs PowerShell 7 and the PSScriptAnalyzer module from the PowerShell Gallery, neither on this host, and the runner issues several probe spawns the replay harness does not model",
-	],
-	[
-		"rubocop",
-		"toolchain: a Ruby gem, and Ruby is absent from this host and from the capture environment",
+		"pending: #1937 ubuntu-latest ships PowerShell 7 and the module installs from the PowerShell Gallery; the runner writes a per-pid temp script into its argv, which the replay argv tie does not model",
 	],
 	[
 		"trivy-config",
-		"opt-in: trivy.enabled is off by default; a capture would need trivy plus an opt-in fixture",
+		"opt-in: trivy.enabled is off by default, and running it needs trivy plus an explicit opt-in",
 	],
 	[
 		"helm-render",
@@ -160,15 +192,6 @@ function registeredRunnerIds(): string[] {
 }
 
 /**
- * Runner ids whose binary meets a real invocation somewhere, live or captured.
- * Only the `alternate` rule reads this: a primary that is exercised nightly is
- * a fair stand-in for the alternate's language. It is NOT parser coverage.
- */
-function realBinaryRunnerIds(): Set<string> {
-	return new Set([...liveFixtureRunnerIds(), ...capturedFixtureRunnerIds()]);
-}
-
-/**
  * The census: registered runner ids that neither have a captured fixture nor an
  * exemption. A pure function so a synthetic runner can prove it fires.
  */
@@ -178,6 +201,50 @@ function uncapturedRunners(
 	exempt: ReadonlyMap<string, string>,
 ): string[] {
 	return registered.filter((id) => !captured.has(id) && !exempt.has(id));
+}
+
+/**
+ * Exemptions for a runner that already has captured bytes. A pure function so
+ * a synthetic map can prove it fires; on the real map it is an empty loop.
+ */
+function redundantExemptions(
+	exempt: ReadonlyMap<string, string>,
+	captured: ReadonlySet<string>,
+): string[] {
+	return [...exempt.keys()].filter((id) => captured.has(id));
+}
+
+/** `toolchain`/`platform` exemptions that are not in the pinned table, or pinned ids that are gone. */
+function unpinnedFactExemptions(
+	exempt: ReadonlyMap<string, string>,
+	pinned: Readonly<Record<string, readonly string[]>>,
+): string[] {
+	const problems: string[] = [];
+	for (const category of Object.keys(pinned)) {
+		const actual = [...exempt]
+			.filter(
+				([, reason]) => parseExemptionReason(reason)?.category === category,
+			)
+			.map(([id]) => id)
+			.sort();
+		const expected = [...(pinned[category] ?? [])].sort();
+		for (const id of actual)
+			if (!expected.includes(id))
+				problems.push(`${category}: ${id} is not pinned`);
+		for (const id of expected)
+			if (!actual.includes(id))
+				problems.push(`${category}: ${id} is pinned but gone`);
+	}
+	return problems;
+}
+
+/**
+ * The exemption rules over the real fixture directory. `alternate` asks whether
+ * the primary is covered, and covered means captured: a live smoke fixture is
+ * not parser evidence (#4452 review F4).
+ */
+function realExemptionProblems(exempt: Iterable<[string, string]>): string[] {
+	return exemptionProblems(exempt, capturedFixtureRunnerIds());
 }
 
 /** The census over the real registry and fixture directory. */
@@ -230,6 +297,14 @@ function exemptionProblems(
 		if (!(parsed.category in EXEMPTION_CATEGORIES)) {
 			problems.push(
 				`${id}: unknown category "${parsed.category}" (allowed: ${Object.keys(EXEMPTION_CATEGORIES).join(", ")})`,
+			);
+		}
+		if (
+			FACT_CATEGORIES.has(parsed.category) &&
+			EVIDENCE_HOST_OR_TIME.test(parsed.detail)
+		) {
+			problems.push(
+				`${id}: ${parsed.category} detail "${parsed.detail}" speaks of evidence, the host or time; only pending may, and it needs an issue`,
 			);
 		}
 		if (DEFERRAL_PHRASE.test(parsed.detail)) {
@@ -285,8 +360,7 @@ describe("smoke-fixture coverage", () => {
 	// the map keeps growing and stops describing anything; #209's `lsp` and
 	// `pyright` entries had both outlived their reasons by the time #1937 looked.
 	it("no exemption for a runner that already has captured bytes", () => {
-		const captured = capturedFixtureRunnerIds();
-		const redundant = [...EXEMPT.keys()].filter((id) => captured.has(id));
+		const redundant = redundantExemptions(EXEMPT, capturedFixtureRunnerIds());
 		expect(
 			redundant,
 			`runner(s) exempted despite having a captured fixture — delete the exemption: ${redundant.join(", ")}`,
@@ -299,7 +373,7 @@ describe("smoke-fixture coverage", () => {
 	// and the runners that only a live fixture backs must still be flagged.
 	it("a live smoke fixture alone does not satisfy the census", () => {
 		const gaps = censusGaps(new Map());
-		for (const id of ["rubocop", "psscriptanalyzer"]) {
+		for (const id of ["helm-lint", "psscriptanalyzer"]) {
 			expect(
 				liveFixtureRunnerIds().has(id),
 				`${id} lost its live fixture, so this probe no longer separates live from captured; pick another live-only runner`,
@@ -313,6 +387,57 @@ describe("smoke-fixture coverage", () => {
 
 	// Recurrence: the census is a loop over the registry, and a loop that has
 	// never seen a gap proves nothing. Feed it a runner nobody captured.
+	// Recurrence: the rewritten redundancy test looped over the real map, which
+	// holds no redundant entry, so neutering its filter stayed green (#4452
+	// review F3). Feed the pure function a map that does hold one.
+	it("an exemption for a runner that has captured bytes is flagged", () => {
+		const exempt = new Map([
+			[
+				"captured-one",
+				"structural: in-process analysis with no external process",
+			],
+			["bare-one", "structural: in-process analysis with no external process"],
+		]);
+		expect(redundantExemptions(exempt, new Set(["captured-one"]))).toEqual([
+			"captured-one",
+		]);
+	});
+
+	// Recurrence: "absent from this host" was filed as `toolchain` for Ruby and
+	// PowerShell, both preinstalled on ubuntu-latest (#4452 review F2). The set
+	// of ids allowed there is a table a reviewer must edit.
+	// Recurrence: the alternate rule kept counting a live smoke fixture as the
+	// primary's coverage after the census stopped (#4452 review F4). helm-lint
+	// has a live fixture and no captured bytes.
+	it("an alternate whose primary has only a live fixture is rejected", () => {
+		expect(liveFixtureRunnerIds().has("helm-lint")).toBe(true);
+		expect(capturedFixtureRunnerIds().has("helm-lint")).toBe(false);
+		const problems = realExemptionProblems([
+			[
+				"synthetic-alt",
+				"alternate: helm-lint is the primary for this language",
+			],
+		]);
+		expect(problems).toHaveLength(1);
+		expect(problems[0]).toMatch(/names "helm-lint" as its primary/);
+	});
+
+	it("toolchain and platform exemptions are a pinned set", () => {
+		expect(
+			unpinnedFactExemptions(EXEMPT, PINNED_FACT_EXEMPTIONS),
+			"a toolchain or platform exemption was added or removed without editing PINNED_FACT_EXEMPTIONS; name the missing tool and why CI cannot provide it",
+		).toEqual([]);
+		const planted = new Map([
+			["rubocop", "toolchain: a Ruby gem, and Ruby is not installed"],
+		]);
+		expect(unpinnedFactExemptions(planted, PINNED_FACT_EXEMPTIONS)).toEqual([
+			"toolchain: rubocop is not pinned",
+		]);
+		expect(
+			unpinnedFactExemptions(new Map(), { toolchain: ["gone-one"] }),
+		).toEqual(["toolchain: gone-one is pinned but gone"]);
+	});
+
 	it("the census flags a synthetic runner with no fixture and no exemption", () => {
 		const exempt = new Map([
 			[
@@ -326,7 +451,7 @@ describe("smoke-fixture coverage", () => {
 	});
 
 	it("every exemption is well formed under the shared rules", () => {
-		const problems = exemptionProblems(EXEMPT, realBinaryRunnerIds());
+		const problems = realExemptionProblems(EXEMPT);
 		expect(problems, `malformed exemption(s): ${problems.join(" | ")}`).toEqual(
 			[],
 		);
@@ -339,8 +464,10 @@ describe("smoke-fixture coverage", () => {
 		const covered = new Set(["oxlint"]);
 		const reject = (id: string, reason: string, expected: RegExp) => {
 			const problems = exemptionProblems([[id, reason]], covered);
-			expect(problems, `expected "${reason}" to be rejected`).toHaveLength(1);
-			expect(problems[0]).toMatch(expected);
+			expect(
+				problems.some((problem) => expected.test(problem)),
+				`expected "${reason}" to be rejected as ${expected}, got ${JSON.stringify(problems)}`,
+			).toBe(true);
 		};
 
 		reject("a", "no fixture yet", /not "<category>: <detail>"/);
@@ -352,7 +479,7 @@ describe("smoke-fixture coverage", () => {
 		reject("c", "platform: too short", /too short/);
 		reject(
 			"d",
-			"alternate: detekt is the primary here and covers this language",
+			"alternate: detekt is the primary and covers this language",
 			/names "detekt" as its primary/,
 		);
 		reject(
@@ -360,6 +487,53 @@ describe("smoke-fixture coverage", () => {
 			"pending: someone will get around to capturing this one",
 			/must reference the issue or PR/,
 		);
+		// Each DEFERRAL_PHRASE arm gets its own row under `pending`, where the
+		// derived rule does not apply, so a neutered arm reds here and nowhere
+		// else (#4452 review F3: two of four arms were unpinned).
+		reject(
+			"j",
+			"pending: #1937 we will capture it later on a bigger runner",
+			/deferral phrasing/,
+		);
+		reject(
+			"k",
+			"pending: #1937 TODO write the capture for this runner",
+			/deferral phrasing/,
+		);
+		// The derived rule: only `pending` may speak of evidence, the host or
+		// time. Each phrasing below slipped the lexical list or was filed as a
+		// fact about the capture host.
+		const rejectDerived = (id: string, reason: string) => {
+			const problems = exemptionProblems([[id, reason]], covered);
+			expect(
+				problems.some((problem) =>
+					/speaks of evidence, the host or time/.test(problem),
+				),
+				`expected "${reason}" to be rejected by the derived rule, got ${JSON.stringify(problems)}`,
+			).toBe(true);
+		};
+		rejectDerived(
+			"l",
+			"toolchain: awaiting capture on a CI image, fixture to follow",
+		);
+		rejectDerived("m", "toolchain: Ruby is absent from this host entirely");
+		rejectDerived("n", "platform: no binary exists here for macOS yet");
+		rejectDerived(
+			"o",
+			"opt-in: runs once the replay harness models its probes",
+		);
+		// A fact about the tool passes the same rule.
+		expect(
+			exemptionProblems(
+				[
+					[
+						"p",
+						"toolchain: needs the Swift toolchain, which ubuntu-latest does not ship",
+					],
+				],
+				covered,
+			),
+		).toEqual([]);
 		// The category prefix must not launder the phrase #1937 removed.
 		reject(
 			"h",

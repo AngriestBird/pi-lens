@@ -117,6 +117,7 @@ const RUNNER_DESCRIPTORS: Record<string, { module: string; kind: string }> = {
 	"php-lint": { module: "php-lint", kind: "php" },
 	phpstan: { module: "phpstan", kind: "php" },
 	pyright: { module: "pyright", kind: "python" },
+	rubocop: { module: "rubocop", kind: "ruby" },
 	"ruff-lint": { module: "ruff", kind: "python" },
 	"rust-clippy": { module: "rust-clippy", kind: "rust" },
 	shellcheck: { module: "shellcheck", kind: "shell" },

@@ -122,6 +122,14 @@ export const CAPTURES = [
 		argv: ["--reporter=json", "Bad.kt"],
 	},
 	{
+		// Needs Ruby on PATH; the gem's launcher is a Ruby script.
+		runner: "rubocop",
+		tool: "rubocop",
+		workspace: smoke("ruby"),
+		file: "bad.rb",
+		argv: ["--format", "json", "--no-color", "bad.rb"],
+	},
+	{
 		runner: "rust-clippy",
 		tool: "cargo",
 		workspace: smoke("rust"),
