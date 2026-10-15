@@ -204,6 +204,7 @@ describe("project-trust real seam ratchet (#4281)", () => {
 			'import { vi as v } from "vitest";\nv.doMock(S, () => ({}));',
 		],
 		["a const alias", "const v = vi;\nv.doMock(S, () => ({}));"],
+		["a const method alias", "const late = vi.doMock;\nlate(S, () => ({}));"],
 		["a destructured method", "const { doMock } = vi;\ndoMock(S, () => ({}));"],
 		[
 			"a renamed destructure",
