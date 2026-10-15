@@ -631,8 +631,8 @@ jobs:
       # gets an empty touch result, then "no warm client": run 38648299846 and a
       # local repro) instead of reporting unavailable. This is a copy of
       # tool-smoke.yml's step of the same name (#3939): same release, same
-      # digests. Folding both onto one composite action edits the nightly, which
-      # needs its own branch dispatch, so it is left as a follow-up.
+      # digests. Remove it when #4465 (the regression behind the empty touch
+      # result) lands, unless that fix shows the harness is wrong.
       - name: Install official Docker language server v0.20.1
         run: |
           set -euo pipefail
