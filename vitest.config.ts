@@ -312,6 +312,11 @@ const timingSensitiveInclude = [
 // silently goes stale.
 const lspSpawnHeavyInclude = [
 	"tests/clients/ast-grep-rule-precedence-followups.test.ts",
+	// #4403 round 4: the cascade line through pi's turn path. Real fake-LSP
+	// children (typescript, typos, Opengrep stand-ins) behind project command
+	// overrides, one of them held 8 s before it answers; same contention
+	// class as tests/tools/diagnostics-route-switch-matrix.test.ts.
+	"tests/clients/cascade-unanswered-primary-4403.test.ts",
 	"tests/clients/dispatch/runners/lsp-real-runner.test.ts",
 	// #3968: the builtin shuck row's smoke — a real `shuck server` child driven
 	// through the production LSP runner (real initialize handshake, real
@@ -358,14 +363,16 @@ const lspSpawnHeavyInclude = [
 	// here by hand rather than pretended to be derived. The file runs once: the
 	// default project excludes this list.
 	"tests/mcp/analyze-cli.test.ts",
-	// #4323: real MCP server children, each spawning real fake-LSP children (the
-	// JSON server and an Opengrep stand-in) for `pilens_diagnostics source=lsp`.
-	// The fixture path is passed to the bin, not imported, so the marker census
-	// cannot see it; stated here by hand like analyze-cli above.
-	"tests/mcp/diagnostics-opengrep-disabled-4323.test.ts",
 	// #4300: the MCP witness crosses Lean's real initialize handshake.
 	"tests/mcp/server.smoke.test.ts",
 	"tests/support/fake-lsp-server.test.ts",
+	// #4403: the diagnostics route matrix. Real fake-LSP children (the JSON
+	// server, typos and an Opengrep stand-in, project command overrides) behind
+	// pi's hooks and tools, plus a real MCP server child per column; waits on
+	// real handshakes and pull rounds like #4320's. The MCP bin receives the
+	// fixture path, so the marker census cannot see that half; stated here by
+	// hand like analyze-cli above.
+	"tests/tools/diagnostics-route-switch-matrix.test.ts",
 	// #873/#448: the dispatch LSP runner against a real stdio JSON-RPC server
 	// — a real child spawn through the production LSPService plus a
 	// `.pi-lens/lsp.json` custom server, waiting on real first-document

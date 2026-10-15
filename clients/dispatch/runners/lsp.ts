@@ -15,8 +15,12 @@
 import { logExtension } from "../../extension-log.js";
 import { getLspCapableKinds } from "../../language-policy.js";
 import { exceedsLspSyncLimits } from "../../lsp/content-limits.js";
-import { touchCoverageGap } from "../../lsp/diagnostic-binding.js";
+import {
+	primaryUnavailableCause,
+	touchCoverageGap,
+} from "../../lsp/diagnostic-binding.js";
 import { getLSPService } from "../../lsp/capabilities.js";
+import { disabledPrimaries } from "../../lsp/session-roots.js";
 import { LSP_SERVERS } from "../../lsp/server.js";
 import { RUNTIME_CONFIG } from "../../runtime-config.js";
 import { PRIORITY } from "../priorities.js";
@@ -138,7 +142,20 @@ const lspRunner: RunnerDefinition = {
 		// Fast capability check only — actual client creation happens when we
 		// open the file below.
 		if (!lspService.supportsLSP(ctx.filePath)) {
-			return { status: "skipped", diagnostics: [], semantic: "none" };
+			// #4403: no server is selected, but a primary the operator disabled
+			// would have served the file. Say so; it is not "no LSP here".
+			const { disabledServerIds: disabledPrimaryServerIds } = disabledPrimaries(
+				ctx.filePath,
+			);
+			return {
+				status: "skipped",
+				diagnostics: [],
+				semantic: "none",
+				...(disabledPrimaryServerIds.length > 0 && {
+					primaryUnavailableCause: "disabled" as const,
+					disabledPrimaryServerIds,
+				}),
+			};
 		}
 
 		// Always sync current file content before reading diagnostics so dispatch
@@ -155,6 +172,13 @@ const lspRunner: RunnerDefinition = {
 		// confirmed clean result and must not be reported as one (#570).
 		let diagnosticsInconclusive = false;
 		let inconclusiveServerIds: readonly string[] = [];
+		// #4403: set when the touch says no primary answered (`primary-unavailable`).
+		let primaryUnavailable:
+			| Pick<
+					RunnerResult,
+					"primaryUnavailableCause" | "disabledPrimaryServerIds"
+			  >
+			| undefined;
 		// #1470/#1493: server ids the touch carries no evidence for — an auxiliary
 		// whose push wait our aux grace timer cut off (#1470), or one that stayed
 		// silent with no stored publication for this content (#1493). The touch is
@@ -230,6 +254,21 @@ const lspRunner: RunnerDefinition = {
 				lspDiags = touched.diags;
 				diagnosticsInconclusive = touched.inconclusive === true;
 				inconclusiveServerIds = touched.inconclusiveServerIds ?? [];
+				if (touched.inconclusiveReason === "primary-unavailable") {
+					const disabledPrimaryServerIds =
+						touched.disabledPrimaryServerIds ?? [];
+					primaryUnavailable = {
+						primaryUnavailableCause:
+							touched.primaryUnavailableCause ??
+							primaryUnavailableCause(
+								inconclusiveServerIds,
+								disabledPrimaryServerIds,
+							),
+						...(disabledPrimaryServerIds.length > 0 && {
+							disabledPrimaryServerIds,
+						}),
+					};
+				}
 				unconfirmedServerIds = [
 					...new Set([
 						...touchCoverageGap(touched),
@@ -304,7 +343,14 @@ const lspRunner: RunnerDefinition = {
 			// reply. Report "skipped" so the coverage notice can flag the gap and
 			// the next edit re-checks once the server has warmed; any diagnostics
 			// published late still land in the client cache and surface then.
-			return { status: "skipped", diagnostics: [], semantic: "none" };
+			// #4403: no client was ready, and a disabled primary would have made
+			// the touch say so, so the language server could not start in time.
+			return {
+				status: "skipped",
+				diagnostics: [],
+				semantic: "none",
+				primaryUnavailableCause: "unstarted",
+			};
 		}
 
 		if (diagnosticsInconclusive && lspDiags.length === 0) {
@@ -312,7 +358,13 @@ const lspRunner: RunnerDefinition = {
 			// diagnostics wait hit their deadline without any collected findings.
 			// With no answered diagnostics, report "skipped" so the coverage notice
 			// flags the gap instead of reading this as a confirmed clean result (#570).
-			return { status: "skipped", diagnostics: [], semantic: "none" };
+			// #4403: when no primary answered at all, the result says why.
+			return {
+				status: "skipped",
+				diagnostics: [],
+				semantic: "none",
+				...primaryUnavailable,
+			};
 		}
 
 		if (lspDiags.length === 0) {

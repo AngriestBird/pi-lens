@@ -369,6 +369,15 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 		},
 	},
 	{
+		id: "cascade-format:cascadeUnansweredPrimariesDelivered",
+		module: "cascade-format.ts",
+		state: "cascadeUnansweredPrimariesDelivered",
+		policy: "session_start",
+		resetName: "resetCascadeUnansweredPrimariesDelivered",
+		reason:
+			"#4403: the primaries whose cascade 'no language server answered' line reached this session's agent; the next session's agent has not been told.",
+	},
+	{
 		id: "cascade-tier:outstandingTouches",
 		module: "lsp/cascade-tier.ts",
 		state:
@@ -1584,6 +1593,9 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"bus-publish.ts": 0,
 	// #1071 added the per-session miss-attribution ledger (1 → 2).
 	"cache-observability.ts": 2,
+	// #4403 round 5 (V1): the primaries whose cascade line was delivered,
+	// registered above and reset by resetDispatchBaselines.
+	"cascade-format.ts": 1,
 	// #2418: the one warn-once latch behind all three config loaders, moved
 	// here out of lens-config.ts and project-lens-config.ts.
 	// #2426: 1 -> 2. The second symbol is `DEPRECATION_NOUN_BY_CODE`, an

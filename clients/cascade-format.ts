@@ -1,5 +1,10 @@
 import * as fs from "node:fs";
-import type { CascadeNeighborResult, CascadeRun } from "./cascade-types.js";
+import type {
+	CascadeNeighborResult,
+	CascadeResult,
+	CascadeRun,
+	CascadeUnansweredPrimaryNote,
+} from "./cascade-types.js";
 import { retagAuxiliaryDiagnostics } from "./dispatch/auxiliary-lsp.js";
 import {
 	applyFindingPolicy,
@@ -10,6 +15,10 @@ import { detectFileRole } from "./file-role.js";
 import { logLatency } from "./latency-logger.js";
 import { formatCacheAgeLabel } from "./finding-delivery-gate.js";
 import type { LSPDiagnostic } from "./lsp/client.js";
+import {
+	PRIMARY_UNAVAILABLE_CAUSE,
+	type PrimaryUnavailableCause,
+} from "./lsp/diagnostic-binding.js";
 import type { Diagnostic } from "./dispatch/types.js";
 import { convertLspDiagnostics } from "./dispatch/utils/lsp-diagnostics.js";
 import { toRunnerDisplayPath } from "./dispatch/runner-context.js";
@@ -405,4 +414,107 @@ export function cascadeCarrySuffix(
 	if (carriedTurns === undefined || carriedTurns < 1) return undefined;
 	const noun = carriedTurns === 1 ? "turn" : "turns";
 	return `(carried ${carriedTurns} ${noun} · ${formatCacheAgeLabel(observedAt)})`;
+}
+
+/**
+ * #4403 round 5 (V1): the primary language servers whose cascade line reached
+ * the agent this session. The cause holds for every neighbour the server
+ * would serve, so it is said once per server; later runs drop those
+ * neighbours silently, as every run did before #4403. A server is marked
+ * when turn_end delivers its line, not when a run computes it: turn_end drops
+ * a run a later write superseded (clients/runtime-turn.ts), and the line must
+ * not go with it.
+ */
+const cascadeUnansweredPrimariesDelivered = new Set<string>();
+
+/** Session reset (`resetDispatchBaselines` in clients/dispatch/integration.ts). */
+export function resetCascadeUnansweredPrimariesDelivered(): void {
+	cascadeUnansweredPrimariesDelivered.clear();
+}
+
+/** The cascade section that rendered these servers' lines reached the agent. */
+export function markCascadeUnansweredPrimariesDelivered(
+	serverIds: readonly string[],
+): void {
+	for (const id of serverIds) cascadeUnansweredPrimariesDelivered.add(id);
+}
+
+/**
+ * Splits out the neighbours whose primary did not answer and returns a line
+ * per server set and cause, in the order the touch named the servers. A set
+ * whose servers were all delivered is dropped with its neighbours, so the run
+ * has nothing to say about them.
+ */
+export function splitCascadeUnansweredPrimaries(
+	neighbors: CascadeNeighborResult[],
+): {
+	answered: CascadeNeighborResult[];
+	unanswered: CascadeNeighborResult[];
+	notes: CascadeUnansweredPrimaryNote[];
+} {
+	const answered: CascadeNeighborResult[] = [];
+	const groups = new Map<
+		string,
+		{
+			serverIds: readonly string[];
+			cause: PrimaryUnavailableCause;
+			neighbors: CascadeNeighborResult[];
+		}
+	>();
+	for (const neighbor of neighbors) {
+		const unavailable = neighbor.primaryUnavailable;
+		if (!unavailable) {
+			answered.push(neighbor);
+			continue;
+		}
+		const key = `${unavailable.serverIds.join(",")}|${unavailable.cause}`;
+		const group = groups.get(key) ?? { ...unavailable, neighbors: [] };
+		group.neighbors.push(neighbor);
+		groups.set(key, group);
+	}
+	const unanswered: CascadeNeighborResult[] = [];
+	const notes: CascadeUnansweredPrimaryNote[] = [];
+	for (const group of groups.values()) {
+		if (
+			group.serverIds.every((id) => cascadeUnansweredPrimariesDelivered.has(id))
+		)
+			continue;
+		unanswered.push(...group.neighbors);
+		notes.push({
+			serverIds: group.serverIds,
+			line: `⚠️ Cascade: no language server answered for neighbor files of ${group.serverIds.join(", ")} (${PRIMARY_UNAVAILABLE_CAUSE[group.cause]}), so their cross-file errors were not checked (not a clean result).`,
+		});
+	}
+	return { answered, unanswered, notes };
+}
+
+/**
+ * What turn_end shows for a cascade result: its text without the lines naming
+ * primaries, and the lines it keeps. A line stays only while one of its
+ * servers is neither delivered nor already shown in this turn's section
+ * (`shownServerIds`, which this adds the kept servers to), so two runs of one
+ * turn show it once and a run carried past the delivery shows it no more.
+ * turn_end puts the kept lines at the head of the section (round 6, W2): a
+ * leading section the cap cuts still counts as delivered, so a line after the
+ * cut point would be marked without being read.
+ */
+export function renderCascadeResult(
+	result: CascadeResult,
+	shownServerIds: Set<string>,
+): { text: string; lines: string[]; serverIds: string[] } {
+	const unanswered = result.unansweredPrimaries;
+	if (!unanswered) return { text: result.formatted, lines: [], serverIds: [] };
+	const kept = unanswered.notes.filter((note) =>
+		note.serverIds.some(
+			(id) =>
+				!cascadeUnansweredPrimariesDelivered.has(id) && !shownServerIds.has(id),
+		),
+	);
+	const serverIds = kept.flatMap((note) => [...note.serverIds]);
+	for (const id of serverIds) shownServerIds.add(id);
+	return {
+		text: unanswered.formattedWithoutNotes,
+		lines: kept.map((note) => note.line),
+		serverIds,
+	};
 }
