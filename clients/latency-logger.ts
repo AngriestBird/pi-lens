@@ -853,7 +853,7 @@ export function logLatency(entry: LatencyEntry): void {
 				phase: entry.phase,
 				ts,
 				...(entry.toolName !== undefined && { toolName: entry.toolName }),
-				metadata: entry.metadata,
+				...(entry.metadata !== undefined && { metadata: entry.metadata }),
 			},
 			...recentPhases,
 		].slice(0, RECENT_PHASE_CAP);
