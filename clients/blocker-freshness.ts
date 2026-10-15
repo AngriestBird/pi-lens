@@ -92,12 +92,21 @@
  * that, because it is what makes widening this sweep to security provenance
  * safe at all.
  *
- * Resolution boundary (#1631 review F8): `extractForwardImportPaths` parses static
- * import/require syntax via tree-sitter. It does not, and cannot, resolve a
- * dependency reached only through a dynamic `import()` or `require()` behind a
- * runtime condition — that edge is invisible to this gate, so a blocker whose only
- * stale dependency arrives that way survives a replay. This is an honest boundary,
- * not a silently-closed one.
+ * Resolution boundary (#1631 review F8, narrowed by #4438): `extractForwardImportPaths`
+ * parses import and export statements and, since #4438, `import("x")` and
+ * `require("x")` calls with a string argument. A computed specifier
+ * (`import(name)`, a template literal) is still invisible to this gate, so a
+ * blocker whose only stale dependency arrives that way survives a replay.
+ *
+ * Implicit scope (#4438). An LSP verdict also depends on files no import names:
+ * a Go file's package peers and, for a JS/TS file, every file that feeds the
+ * global scope (`clients/lsp/implicit-scope.ts`, the diagnostics cache's scope).
+ * A Go blocker is demoted when its package changed after the verdict (a peer's
+ * mtime, or the directory's for a peer added or removed; its own file is left
+ * to the content axis). A JS/TS blocker is demoted when a mutation receipt
+ * after the verdict names a file that feeds the global scope. The receipts are
+ * the writes pi-lens observed (every tool, bash included); a writer pi-lens
+ * never sees, and a deletion, leave the blocker as it is (#4438 R1, R2).
  *
  * Delivery cap (#1950). A demoted-but-confirmable entry (`alreadyStale` above)
  * is deliberately NOT retired after its past-EOF sibling's one-delivery rule
@@ -133,10 +142,17 @@
  */
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
+import * as nodePath from "node:path";
 import { BoundedLruCache } from "./bounded-cache.js";
 import { bounded } from "./deadline-utils.js";
 import { recordDegradationOnce } from "./degradation-ledger.js";
 import { HOOK_WALL_BUDGET_MS } from "./hook-budgets.js";
+import {
+	feedsJsTsGlobalScope,
+	goPackageChangedAt,
+	implicitScopeOf,
+	isGoSourceFile,
+} from "./lsp/implicit-scope.js";
 import { notePathAppeared } from "./path-birth.js";
 import { normalizeEphemeralMapKey, normalizeMapKey } from "./path-utils.js";
 import { toRunnerDisplayPath } from "./dispatch/runner-context.js";
@@ -191,6 +207,9 @@ export interface BlockerFreshnessCounts {
 	 * {@link MAX_DRIFT_CHECK_IMPORTS} and was truncated before the drift check —
 	 * a signal the sweep could have missed drift past the cap, surfaced rather
 	 * than folded silently into a clean-looking `kept`/`revalidated` count.
+	 * #4438: also entries whose implicit-scope check stopped short: the
+	 * per-sweep parse budget ({@link MAX_IMPLICIT_SCOPE_PARSES}) ran out, or
+	 * the receipt ring evicted receipts newer than the verdict.
 	 */
 	truncatedImports: number;
 	/**
@@ -268,6 +287,93 @@ export interface BlockerFreshnessOptions {
 	 * `undefined` for exactly that reason, and a wall-clock bound still applies.
 	 */
 	signal?: AbortSignal;
+}
+
+/**
+ * #4438: files one sweep may classify as feeding the TS/JS global scope or not
+ * (`feedsJsTsGlobalScope` reads and parses a JS/TS file that is not a
+ * declaration file). The receipts after a long-lived verdict can name hundreds
+ * of files; past this budget a receipt is not read, the entry stays as it is,
+ * and the cut is counted in `truncatedImports`.
+ */
+const MAX_IMPLICIT_SCOPE_PARSES = 32;
+
+interface ImplicitScopeDrift {
+	/** Files in the entry's implicit scope that changed after the verdict. */
+	drifted: string[];
+	/** The check stopped short (parse budget, or receipts evicted). */
+	truncated: boolean;
+}
+
+type ImplicitScopeCheck = (
+	filePath: string,
+	recordedAtMs: number,
+) => ImplicitScopeDrift;
+
+/**
+ * #4438: one sweep's implicit-scope check (see the module doc). The receipts
+ * are read once, at the first JS/TS entry, and each file is classified at most
+ * once per sweep.
+ */
+function createImplicitScopeCheck(
+	runtime: RuntimeCoordinator,
+): ImplicitScopeCheck {
+	let receipts: Array<{ filePath: string; ts: number }> | undefined;
+	let receiptsDropped = false;
+	const feeds = new Map<string, boolean>();
+	let parses = 0;
+	let budgetSpent = false;
+	const feedsGlobalScope = (other: string): boolean => {
+		const known = feeds.get(other);
+		if (known !== undefined) return known;
+		if (parses >= MAX_IMPLICIT_SCOPE_PARSES) {
+			budgetSpent = true;
+			return false;
+		}
+		parses += 1;
+		const answer = feedsJsTsGlobalScope(other);
+		feeds.set(other, answer);
+		return answer;
+	};
+	return (filePath, recordedAtMs) => {
+		const key = normalizeMapKey(filePath);
+		const inScope = implicitScopeOf(key, feedsGlobalScope);
+		if (!inScope) return { drifted: [], truncated: false };
+		if (isGoSourceFile(key)) {
+			// The own file is the content axis's: a `touch` must not demote.
+			const dir = nodePath.dirname(filePath);
+			const changed = freshnessFromMtime({
+				mtimeMs: goPackageChangedAt(
+					dir,
+					nodePath.join(dir, nodePath.basename(filePath)),
+				),
+				referenceMs: recordedAtMs,
+			});
+			return {
+				drifted: changed.verdict === "stale" ? [dir] : [],
+				truncated: false,
+			};
+		}
+		if (receipts === undefined) {
+			const coordinator = runtime as Partial<RuntimeCoordinator>;
+			receipts = coordinator.getMutationsSince?.(0) ?? [];
+			receiptsDropped = (coordinator.droppedMutationReceiptCount ?? 0) > 0;
+		}
+		budgetSpent = false;
+		// Newest first: the fix that landed last is the likeliest one.
+		for (let i = receipts.length - 1; i >= 0; i--) {
+			const receipt = receipts[i]!;
+			if (receipt.ts <= recordedAtMs) break;
+			if (inScope(receipt.filePath)) {
+				return { drifted: [receipt.filePath], truncated: false };
+			}
+		}
+		// The ring evicted receipts that may be newer than the verdict.
+		const evictedAfter =
+			receiptsDropped &&
+			(receipts.length === 0 || receipts[0]!.ts > recordedAtMs);
+		return { drifted: [], truncated: budgetSpent || evictedAfter };
+	};
 }
 
 /**
@@ -772,6 +878,7 @@ async function detectDrift(
 	recordedAtMs: number,
 	resolveForwardImports: ForwardImportResolver,
 	turnIndex: number | undefined,
+	implicitScope: ImplicitScopeCheck,
 	/** Skip the own-file mtime tier after content confirms it is unchanged. */
 	skipOwnFile = false,
 ): Promise<DriftResult> {
@@ -796,7 +903,9 @@ async function detectDrift(
 		});
 		if (verdict.verdict === "stale") drifted.push(depPath);
 	}
-	return { drifted, truncated };
+	const implicit = implicitScope(filePath, recordedAtMs);
+	drifted.push(...implicit.drifted);
+	return { drifted, truncated: truncated || implicit.truncated };
 }
 
 /**
@@ -946,6 +1055,7 @@ export async function sweepInlineBlockerFreshness(
 	};
 	const resolveForwardImports =
 		options?.resolveForwardImports ?? extractForwardImportPaths;
+	const implicitScope = createImplicitScopeCheck(runtime);
 	let turnIndex: number | undefined;
 	try {
 		turnIndex = runtime.turnIndex;
@@ -1226,6 +1336,7 @@ export async function sweepInlineBlockerFreshness(
 				entry.recordedAtMs,
 				resolveForwardImports,
 				turnIndex,
+				implicitScope,
 				skipOwnFile,
 			);
 			if (truncated) counts.truncatedImports += 1;

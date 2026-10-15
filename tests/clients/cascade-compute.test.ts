@@ -3634,4 +3634,167 @@ describe("computeCascadeForFile", () => {
 			}
 		});
 	});
+
+	// #4438: a change reaches files no import names: a Go file's package peers,
+	// and every JS/TS file for a file that feeds the global scope. The cascade
+	// took its neighbours from import and call edges only, so those files were
+	// listed only by the degraded fallback, from the passive snapshot, and a Go
+	// peer was never re-touched. Red on base ff67dd428.
+	describe("implicit-scope dependents (#4438)", () => {
+		function graphWith(files: string[]): ReviewGraph {
+			const graph = emptyGraph();
+			for (const file of files) {
+				graph.fileNodes.set(normalizeMapKey(file), `file:${file}`);
+			}
+			return graph;
+		}
+
+		it("touches a Go file's package peer as a neighbour", async () => {
+			const env = setupTestEnvironment("cascade-4438-go-");
+			try {
+				const primary = path.join(env.tmpDir, "b.go");
+				const peer = path.join(env.tmpDir, "a.go");
+				const other = path.join(env.tmpDir, "q", "c.go");
+				fs.mkdirSync(path.dirname(other), { recursive: true });
+				fs.writeFileSync(primary, "package p\n\nconst Y = 1\n");
+				fs.writeFileSync(peer, "package p\n\nvar X = Y\n");
+				fs.writeFileSync(other, "package q\n\nconst Z = 1\n");
+				mocks.computeImpactCascade.mockReturnValue(impact(primary, []));
+				const touchFile = vi
+					.fn()
+					.mockResolvedValue({ diags: [lspError("undefined: Y")] });
+				mocks.getLSPService.mockReturnValue({
+					...makeLspServiceDouble(),
+					getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
+					touchFile,
+					getDiagnostics: vi.fn(),
+				});
+
+				const { computeCascadeForFile } =
+					await import("../../clients/dispatch/integration.js");
+				const result = await computeCascadeForFile(primary, env.tmpDir, {
+					turnSeq: 1,
+					writeSeq: 1,
+				});
+
+				expect(touchFile.mock.calls.map(([file]) => file)).toEqual([peer]);
+				const neighbor = result?.result?.neighbors[0];
+				expect(neighbor?.filePath).toBe(peer);
+				expect(neighbor?.reason).not.toBe("fallback");
+				expect(neighbor?.lspTouched).toBe(true);
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("lists the JS/TS files as neighbours when an ambient file changes", async () => {
+			const env = setupTestEnvironment("cascade-4438-ambient-");
+			try {
+				const primary = path.join(env.tmpDir, "globals.d.ts");
+				const user = path.join(env.tmpDir, "use.ts");
+				fs.writeFileSync(primary, "declare const FOO: string;\n");
+				fs.writeFileSync(user, "export const u: number = FOO;\n");
+				mocks.buildOrUpdateGraph.mockResolvedValue(graphWith([user]));
+				mocks.computeImpactCascade.mockReturnValue(impact(primary, []));
+				mocks.getLSPService.mockReturnValue({
+					...makeLspServiceDouble(),
+					getAllDiagnostics: vi.fn().mockResolvedValue(
+						new Map([
+							[
+								user.split(path.sep).join("/"),
+								{
+									diags: [lspError("Type 'string' is not assignable")],
+									ts: Date.now(),
+								},
+							],
+						]),
+					),
+					touchFile: vi.fn(),
+					getDiagnostics: vi.fn(),
+				});
+
+				const { computeCascadeForFile } =
+					await import("../../clients/dispatch/integration.js");
+				const result = await computeCascadeForFile(primary, env.tmpDir, {
+					turnSeq: 1,
+					writeSeq: 1,
+				});
+
+				const neighbor = result?.result?.neighbors[0];
+				expect(neighbor?.filePath).toBe(user);
+				expect(neighbor?.reason).not.toBe("fallback");
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		// The bound: an ambient file reaches every JS/TS file of the project, so
+		// the expansion takes the most central ones and says it stopped.
+		it("caps the ambient expansion and discloses the cut", async () => {
+			const env = setupTestEnvironment("cascade-4438-ambient-cap-");
+			try {
+				const primary = path.join(env.tmpDir, "globals.d.ts");
+				fs.writeFileSync(primary, "declare const FOO: string;\n");
+				const users: string[] = [];
+				for (let i = 0; i < 14; i++) {
+					const user = path.join(env.tmpDir, `u${i}.ts`);
+					fs.writeFileSync(user, `export const u${i} = FOO;\n`);
+					users.push(user);
+				}
+				mocks.buildOrUpdateGraph.mockResolvedValue(graphWith(users));
+				mocks.computeImpactCascade.mockReturnValue(impact(primary, []));
+				mocks.getLSPService.mockReturnValue({
+					...makeLspServiceDouble(),
+					getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
+					touchFile: vi.fn(),
+					getDiagnostics: vi.fn(),
+				});
+
+				const { computeCascadeForFile } =
+					await import("../../clients/dispatch/integration.js");
+				const result = await computeCascadeForFile(primary, env.tmpDir, {
+					turnSeq: 1,
+					writeSeq: 1,
+				});
+
+				expect(result?.indeterminate?.reason).toBe("budget_truncated");
+				expect(result?.indeterminate?.detail).toContain(
+					"implicit-scope expansion checked 10 of 14 JS/TS files",
+				);
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("adds no implicit neighbour when the changed file is a module", async () => {
+			const env = setupTestEnvironment("cascade-4438-module-");
+			try {
+				const primary = path.join(env.tmpDir, "mod.ts");
+				const user = path.join(env.tmpDir, "use.ts");
+				fs.writeFileSync(primary, "export const m = 1;\n");
+				fs.writeFileSync(user, "export const u = 1;\n");
+				mocks.buildOrUpdateGraph.mockResolvedValue(graphWith([user]));
+				mocks.computeImpactCascade.mockReturnValue(impact(primary, []));
+				const getAllDiagnostics = vi.fn().mockResolvedValue(new Map());
+				mocks.getLSPService.mockReturnValue({
+					...makeLspServiceDouble(),
+					getAllDiagnostics,
+					touchFile: vi.fn(),
+					getDiagnostics: vi.fn(),
+				});
+
+				const { computeCascadeForFile } =
+					await import("../../clients/dispatch/integration.js");
+				const result = await computeCascadeForFile(primary, env.tmpDir, {
+					turnSeq: 1,
+					writeSeq: 1,
+				});
+
+				expect(result?.neighborCount).toBe(0);
+				expect(result?.indeterminate).toBeUndefined();
+			} finally {
+				env.cleanup();
+			}
+		});
+	});
 });

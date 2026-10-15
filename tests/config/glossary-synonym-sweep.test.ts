@@ -556,7 +556,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/finding-policy.ts": 3,
 		"clients/dispatch/indent-detect.ts": 4,
 		"clients/dispatch/inline-suppressions.ts": 2,
-		"clients/dispatch/integration.ts": 18,
+		// 18 -> 20 (#4438): the cascade's implicit-scope dependents keep the Go
+		// peers and the ranked JS/TS files a change reaches, two
+		// `Array.prototype.filter` calls, not a delivery filter.
+		"clients/dispatch/integration.ts": 20,
 		"clients/dispatch/rule-policy.ts": 1,
 		"clients/dispatch/rules/high-fan-out.ts": 1,
 		"clients/dispatch/rules/missing-error-propagation.ts": 3,

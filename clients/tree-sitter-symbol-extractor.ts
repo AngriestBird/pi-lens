@@ -619,19 +619,29 @@ export function getSymbolQueryLanguages(): readonly string[] {
 // `Query.matches()` DOES apply these predicates (probed on the shipped grammars):
 // an unpredicated ruby `require` query over-matches `puts`/`foo`, the predicated
 // one returns only the require args.
+const JS_TS_IMPORT_QUERY = `
+      (import_statement source: (string) @importSource)
+      (export_statement source: (string) @importSource)
+      (call_expression
+        function: (import)
+        arguments: (arguments . (string) @importSource))
+      (call_expression
+        function: (identifier) @_m
+        arguments: (arguments . (string) @importSource)
+        (#eq? @_m "require"))
+    `;
 const IMPORT_QUERIES: Record<string, string> = {
 	// ESM import + re-export source strings; `source:` is a (string) on both the
 	// typescript and tsx grammars (validated). parseImportMatch strips the quotes.
-	// CJS `require(...)` is intentionally out of scope — the cold path's dominant
-	// case is ESM, and the warm graph already covers require via the TS compiler.
-	typescript: `
-      (import_statement source: (string) @importSource)
-      (export_statement source: (string) @importSource)
-    `,
-	tsx: `
-      (import_statement source: (string) @importSource)
-      (export_statement source: (string) @importSource)
-    `,
+	// #4438: a dynamic `import("x")` and a `require("x")` call with a string
+	// argument count too, as the review graph's import facts already count them
+	// (`dispatch/facts/import-facts.ts`): the inline-blocker sweep and the
+	// created-module producer read this query, and a dependency it missed
+	// stayed stale there. Node names probed on the shipped typescript, tsx and
+	// javascript grammars; a pattern one grammar lacks would fail the whole
+	// query (javascript shares this one), so `import x = require()` is left out.
+	typescript: JS_TS_IMPORT_QUERY,
+	tsx: JS_TS_IMPORT_QUERY,
 	// #include "foo.h" (string_literal) and #include <stdio.h> (system_lib_string)
 	// on both the c and cpp grammars (validated). parseImportMatch strips the quotes
 	// from the local form; the system form keeps its <> so the resolver/bucketer can

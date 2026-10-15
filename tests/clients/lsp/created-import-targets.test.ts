@@ -168,11 +168,6 @@ describe("importTargetsToAnnounce: scope completeness (#4346 r2)", () => {
 			"user.ts",
 			'declare module "./augmod" {\n\tinterface A { x: number }\n}\nexport {};\n',
 		],
-		[
-			"comment-split dynamic import",
-			"user.ts",
-			'export const p = import /* c */ ("./lazy");\n',
-		],
 		// Rule K alone: an alias or package specifier, and a backtick one.
 		[
 			"dynamic import of an alias",
@@ -200,6 +195,29 @@ describe("importTargetsToAnnounce: scope completeness (#4346 r2)", () => {
 			expect(scope.complete).toBe(false);
 		},
 	);
+
+	// #4438 rewrote completeness row C4: the import query captures a dynamic
+	// `import()` now, comments inside the call included, so its target is in
+	// the scope and the scope is complete (rule K does not see this spelling).
+	// Before, rule A refused the uncaptured `./lazy` and no target was named.
+	it("names a comment-split dynamic import's target in a complete scope", async () => {
+		const root = workspace("pi-lens-4346-comment-split-");
+		const importer = path.join(root, "user.ts");
+		fs.writeFileSync(
+			importer,
+			'import "./dep";\nexport const p = import /* c */ ("./lazy");\n',
+		);
+		fs.writeFileSync(path.join(root, "dep.ts"), "export {};\n");
+		fs.writeFileSync(path.join(root, "lazy.ts"), "export {};\n");
+
+		const scope = await scopeOf(root, importer);
+
+		expect(scope.targets.map((file) => path.basename(file)).sort()).toEqual([
+			"dep.ts",
+			"lazy.ts",
+		]);
+		expect(scope.complete).toBe(true);
+	});
 
 	it("reports a file whose imports are all statements complete", async () => {
 		const root = workspace("pi-lens-4346-captured-");

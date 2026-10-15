@@ -8,7 +8,7 @@
 import { CASCADE_DIAGNOSTICS_TTL_MS } from "../cascade-types.js";
 import { getDiagnosticLogger, type LogContext } from "../diagnostic-logger.js";
 import type { FileKind } from "../file-kinds.js";
-import { detectFileKind } from "../file-kinds.js";
+import { detectFileKind, isFileKind } from "../file-kinds.js";
 import {
 	getLspCapableKinds,
 	getPrimaryDispatchGroup,
@@ -79,6 +79,12 @@ import {
 	touchCoverageGap,
 } from "../lsp/diagnostic-binding.js";
 import { getServersForFileWithConfig } from "../lsp/config.js";
+import {
+	feedsJsTsGlobalScope,
+	goPackageFiles,
+	implicitScopeOf,
+	isGoSourceFile,
+} from "../lsp/implicit-scope.js";
 import { getLSPService } from "../lsp/capabilities.js";
 import { isExternalOrVendorFile, normalizeMapKey } from "../path-utils.js";
 import { getProjectIgnoreMatcher } from "../file-utils.js";
@@ -102,6 +108,7 @@ import {
 	buildReverseDependencyIndexFromGraph,
 	getAffectedFilesFromIndex,
 	patchReverseDependencyIndex,
+	rankFilesByReverseDependencyCentrality,
 	writeReverseDependencyIndexToSnapshot,
 	type ReverseDependencyIndex,
 } from "../reverse-deps.js";
@@ -997,6 +1004,51 @@ async function updateWordIndexForCascade(args: {
 	onUpdated?.(wordIndex);
 }
 
+/**
+ * #4438: the most an ambient file's change adds to the cascade. Such a file
+ * reaches every JS/TS file of the project, so the expansion takes the most
+ * central ones by reverse-dependency rank and discloses the cut.
+ */
+const IMPLICIT_SCOPE_NEIGHBOR_CAP = MAX_FILES * 2;
+
+/**
+ * #4438: the files whose implicit scope holds `changedFile` (absolute), as
+ * `normalizeMapKey` spellings: the Go files of a Go file's directory, and for
+ * a file that feeds the TS/JS global scope, the JS/TS files of the
+ * reverse-dependency index, most central first, at most
+ * {@link IMPLICIT_SCOPE_NEIGHBOR_CAP}. `cut` is set when the cap left some out.
+ * Membership is {@link implicitScopeOf}, asked of each candidate.
+ */
+function implicitScopeDependentsOf(
+	changedFile: string,
+	index: ReverseDependencyIndex,
+): { files: string[]; cut?: { checked: number; total: number } } {
+	const changed = normalizeMapKey(changedFile);
+	let changedFeeds: boolean | undefined;
+	const feeds = (other: string) =>
+		other === changed && (changedFeeds ??= feedsJsTsGlobalScope(changedFile));
+	const reaches = (candidate: string) =>
+		implicitScopeOf(candidate, feeds)?.(changed) === true;
+	if (isGoSourceFile(changedFile)) {
+		return {
+			files: (goPackageFiles(nodePath.dirname(changedFile)) ?? [])
+				.map((file) => normalizeMapKey(file))
+				.filter(reaches),
+		};
+	}
+	if (!isFileKind(changedFile, "jsts") || !feeds(changed)) return { files: [] };
+	const reached = rankFilesByReverseDependencyCentrality(index).filter(reaches);
+	return reached.length > IMPLICIT_SCOPE_NEIGHBOR_CAP
+		? {
+				files: reached.slice(0, IMPLICIT_SCOPE_NEIGHBOR_CAP),
+				cut: {
+					checked: IMPLICIT_SCOPE_NEIGHBOR_CAP,
+					total: reached.length,
+				},
+			}
+		: { files: reached };
+}
+
 export async function computeCascadeForFile(
 	filePath: string,
 	cwd: string,
@@ -1167,6 +1219,9 @@ export async function computeCascadeForFile(
 		// would overstate what a larger budget could actually recover.
 		let cascadeBudgetTruncated = 0;
 		let transitiveTruncated = false;
+		// #4438: the implicit-scope expansion's cut, when an ambient file reached
+		// more JS/TS files than IMPLICIT_SCOPE_NEIGHBOR_CAP.
+		let implicitScopeCut: { checked: number; total: number } | undefined;
 		// #1462: the budget actually in force for THIS run and the settle time left
 		// when it was sized. Both are overwritten inside the graph branch below,
 		// which is the only path that reaches `cascade_result` — the other branch
@@ -1435,6 +1490,29 @@ export async function computeCascadeForFile(
 				});
 			}
 
+			// #4438: dependents no import names, through the one implicit-scope
+			// test (`lsp/implicit-scope.ts`) the diagnostics cache and the
+			// inline-blocker sweep read: a Go file's package peers, and the JS/TS
+			// files whose scope a changed ambient file feeds.
+			const implicitDependents = implicitScopeDependentsOf(
+				normalizedFile,
+				reverseDepsIndex,
+			);
+			implicitScopeCut = implicitDependents.cut;
+			if (implicitDependents.files.length > 0) {
+				impact.neighborFiles = [
+					...new Set([...impact.neighborFiles, ...implicitDependents.files]),
+				];
+				logCascade({
+					phase: "neighbor_snapshot",
+					filePath,
+					neighborFile: "[implicit-scope]",
+					diagnosticCount: implicitDependents.files.length,
+					autoPropagate: false,
+					metadata: { implicitScope: true, ...implicitDependents.cut },
+				});
+			}
+
 			// Symbol-level blast radius via LSP references (precision upgrade over
 			// file-level import edges). Only when changed symbols are detected.
 			// Keep the budget tight: 750ms per symbol, 1200ms total, max 3 symbols.
@@ -1633,7 +1711,11 @@ export async function computeCascadeForFile(
 				eligibleNeighbors.length - cascadeNeighbourBudget,
 			);
 			sortedNeighbors = eligibleNeighbors.slice(0, cascadeNeighbourBudget);
-			if (cascadeBudgetTruncated > 0 || transitiveTruncated) {
+			if (
+				cascadeBudgetTruncated > 0 ||
+				transitiveTruncated ||
+				implicitScopeCut
+			) {
 				const budget = {
 					candidateCount: cascadeCandidateCount,
 					eligibleCount: cascadeEligibleCount,
@@ -1651,6 +1733,11 @@ export async function computeCascadeForFile(
 					...(transitiveTruncated
 						? [
 								"transitive expansion was capped before all eligible dependents were enumerated",
+							]
+						: []),
+					...(implicitScopeCut
+						? [
+								`implicit-scope expansion checked ${implicitScopeCut.checked} of ${implicitScopeCut.total} JS/TS files`,
 							]
 						: []),
 				];
