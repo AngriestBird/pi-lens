@@ -366,6 +366,75 @@ describe("census plan against vitest collection", () => {
 		).toThrow(/test\.includeSource/);
 	});
 
+	// Recurrence (#4423 r5 verify): shapes the reader read wrong without a
+	// throw. Each was probed against `vitest list`. A negated include
+	// over-matched, so the red named the wrong files. A negated exclude, a
+	// `./` pattern and a `typecheck` block reported a false red. A project
+	// `dir` moves what it collects.
+	it.each([
+		[
+			"a negated include",
+			{ test: { projects: [{ test: { include: ["!tests/lane/**"] } }] } },
+			/starts with "!"/,
+		],
+		[
+			"a negated exclude",
+			{ test: { exclude: ["!tests/lane/**"], projects: [{ test: {} }] } },
+			/starts with "!"/,
+		],
+		[
+			"a ./ pattern",
+			{ test: { projects: [{ test: { include: ["./tests/**"] } }] } },
+			/starts with "\.\/"/,
+		],
+		[
+			"a typecheck block",
+			{
+				test: {
+					projects: [
+						{
+							test: {
+								name: "types",
+								typecheck: { include: ["**/*.test-d.ts"] },
+							},
+						},
+					],
+				},
+			},
+			/test\.typecheck/,
+		],
+		[
+			"a project dir",
+			{
+				test: {
+					projects: [{ test: { name: "default", dir: "tests/lane" } }],
+				},
+			},
+			/project default sets test\.dir/,
+		],
+	])("throws on %s", (_shape, config, message) => {
+		expect(() => vitestCollector(config as Config)).toThrow(message);
+	});
+
+	// Recurrence (#4423 r5 verify): a glob-free exclude hides a whole
+	// directory in vitest (`vitest list`: `tests/x` and `tests/x/` drop
+	// `tests/x/in.test.ts` and keep `tests/xy/in.test.ts`). The reader matched
+	// it as one path, so the guard stayed green over a hidden directory. A
+	// glob-free include is a path only: `tests/x` collects nothing in vitest.
+	it("reads a glob-free exclude as its directory, and a glob-free include as one path", () => {
+		const projects = [{ test: { include: ["tests/**/*.test.ts"] } }];
+		for (const plain of ["tests/lane", "tests/lane/"])
+			expect(gaps(projects, ["tests/fixtures/**", plain]).uncollected).toEqual([
+				"tests/lane/a.test.ts",
+				"tests/lane/b.test.ts",
+			]);
+		expect(
+			gaps(projects, ["tests/fixtures/**", "tests/la"]).uncollected,
+		).toEqual([]);
+		const pathOnly = vitestCollector({ test: { include: ["tests/lane"] } });
+		expect(pathOnly("tests/lane/a.test.ts")).toBe(false);
+	});
+
 	const ROOT = path.resolve(import.meta.dirname, "../..");
 	/** The real config, evaluated under one `npm_lifecycle_event`. */
 	async function realConfig(lifecycle: string | undefined): Promise<Config> {

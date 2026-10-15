@@ -15,9 +15,16 @@ import { configDefaults } from "vitest/config";
 // Allowlisted in module-instance-coverage.test.ts.
 import vitestConfig from "../../vitest.config.ts";
 
-/** One pattern list: plain paths match by equality, the rest as globs. */
+/**
+ * One pattern list: plain paths match by equality, the rest as globs. In an
+ * exclude list a plain path also drops everything under it, as vitest does
+ * (probed with `vitest list`: `tests/x` and `tests/x/` drop
+ * `tests/x/in.test.ts` and keep `tests/xy/in.test.ts`; a plain include
+ * `tests/x` collects nothing).
+ */
 interface Matcher {
 	paths: Set<string>;
+	directories: string[];
 	globs: RegExp[];
 }
 
@@ -28,21 +35,30 @@ interface ProjectGlobs {
 
 const GLOB_CHARACTER = /[*?[\]{}()!]/;
 
-function compile(patterns: readonly string[]): Matcher {
+function compile(
+	patterns: readonly string[],
+	{ directories: asDirectories }: { directories: boolean },
+): Matcher {
 	const paths = new Set<string>();
+	const directories: string[] = [];
 	const globs: RegExp[] = [];
 	for (const pattern of patterns) {
 		const glob = GLOB_CHARACTER.test(pattern)
 			? new Minimatch(pattern, { dot: true }).makeRe()
 			: false;
 		if (glob) globs.push(glob);
-		else paths.add(pattern);
+		else {
+			const plain = pattern.replace(/\/+$/, "");
+			paths.add(plain);
+			if (asDirectories) directories.push(`${plain}/`);
+		}
 	}
-	return { paths, globs };
+	return { paths, directories, globs };
 }
 
 const matches = (matcher: Matcher, relativePath: string): boolean =>
 	matcher.paths.has(relativePath) ||
+	matcher.directories.some((directory) => relativePath.startsWith(directory)) ||
 	matcher.globs.some((glob) => glob.test(relativePath));
 
 /** The `test` block of a vitest config, as far as collection reads it. */
@@ -53,13 +69,21 @@ export interface VitestTestBlock {
 	[key: string]: unknown;
 }
 
-/** Keys that move where a project collects from; this reader does not model them. */
-const UNREAD_KEYS = ["dir", "root", "includeSource"] as const;
+/** Keys that move where or what a project collects; this reader does not model them. */
+const UNREAD_KEYS = ["dir", "root", "includeSource", "typecheck"] as const;
+/** Pattern prefixes the reader would match wrong: a negation, a `./` path. */
+const UNREAD_PREFIXES = ["!", "./"] as const;
 
 function refuseUnread(where: string, test: VitestTestBlock): void {
 	for (const key of UNREAD_KEYS)
 		if (test[key] !== undefined)
 			throw new Error(`vitest-collection: ${where} sets test.${key}`);
+	for (const pattern of [...(test.include ?? []), ...(test.exclude ?? [])])
+		for (const prefix of UNREAD_PREFIXES)
+			if (pattern.startsWith(prefix))
+				throw new Error(
+					`vitest-collection: ${where} pattern "${pattern}" starts with "${prefix}"`,
+				);
 }
 
 /** A project's list: the root's entries and its own, as vitest merges them (#4405 r5, probed with `vitest list`). */
@@ -77,8 +101,11 @@ function merged(
  * root). An inline project takes the root's `include` and `exclude` in
  * addition to its own (probed with `vitest list`: a root exclude still drops
  * a file from a project that sets its own). A shape this does not read (a
- * project given as a path, `extends`, `dir`, `root`, `includeSource`) throws,
- * so it never reads as collecting nothing, or everything.
+ * project given as a path, `extends`, `dir`, `root`, `includeSource`,
+ * `typecheck`, a pattern starting with `!` or `./`) throws, so it never reads
+ * as collecting nothing, or everything. One blind spot no reader closes: a
+ * config that stops collecting the file holding the guard removes the guard
+ * with it.
  */
 export function vitestCollector(config: {
 	test?: VitestTestBlock;
@@ -102,9 +129,11 @@ export function vitestCollector(config: {
 	const projects: ProjectGlobs[] = tests.map((test) => ({
 		include: compile(
 			merged(root.include, test.include, configDefaults.include),
+			{ directories: false },
 		),
 		exclude: compile(
 			merged(root.exclude, test.exclude, configDefaults.exclude),
+			{ directories: true },
 		),
 	}));
 	return (relativePath) =>
