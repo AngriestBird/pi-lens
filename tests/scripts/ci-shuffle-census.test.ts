@@ -1,5 +1,5 @@
 // #4405: scripts/ci-shuffle-census.mjs runs every test file alone and inside
-// shuffled chunks under three seeds, and diffs the order-dependent members it
+// shuffled chunks under two seeds, and diffs the order-dependent members it
 // finds against scripts/shuffle-census-ratchet.json. Every case names the
 // recurrence it keeps out. The vitest start is the only process boundary and
 // is injected here; the real start is `ci-shuffle-changed-tests-spawn.test.ts`
@@ -7,12 +7,17 @@
 // re-broken-fix reds are quoted in the PR body).
 import fs from "node:fs";
 import path from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
+import { configDefaults } from "vitest/config";
 import {
+	type CensusRecord,
+	censusCollectionGaps,
 	extractMembers,
 	issueBody,
 	judgeCensus,
+	listTestFiles,
 	loadRecords,
+	type Member,
 	MIN_START_MS,
 	parseArgs,
 	planCensus,
@@ -20,18 +25,18 @@ import {
 	previousStaleFrom,
 	run,
 	runCensus,
-	START_CAP_MS,
-	type CensusRecord,
-	type Member,
 	type Seed,
+	START_CAP_MS,
 } from "../../scripts/ci-shuffle-census.mjs";
 import {
 	type ExecVitest,
 	planRuns,
 	reproCommand,
 	SEEDS,
+	selectChangedTestFiles,
 } from "../../scripts/ci-shuffle-changed-tests.mjs";
 import { setupTestEnvironment } from "../clients/test-utils.js";
+import { gitExecFileSync } from "../support/git-fixture-env.js";
 
 const cleanups: Array<() => void> = [];
 afterAll(() => {
@@ -236,6 +241,154 @@ describe("planCensus", () => {
 		).toHaveLength(2);
 		expect(parseArgs(["--out", ".", "--no-alone"]).alone).toBe(false);
 		expect(parseArgs(["--out", "."]).alone).toBe(true);
+	});
+});
+
+// #4405 round 5: the census plans from `git ls-files`, vitest runs what its
+// config's projects collect. A planned file no project collects is skipped
+// inside its chunk without a word (the start reads ok), and a collected file
+// the census does not plan is never started. Either way a file sits outside
+// every seed while the nightly reads green. A project's own `sequence` hides
+// nothing: the census's command-line shuffle flags win (probed in the PR).
+describe("censusCollectionGaps", () => {
+	/** The census plan for a tracked list: the selection and planner `run` uses. */
+	const planFor = (tracked: string[]) =>
+		planCensus(
+			selectChangedTestFiles(tracked, () => true),
+			{
+				seeds: [202],
+				chunk: 2,
+			},
+		);
+	const defaults = { include: ["**/*.test.?(m)ts"], exclude: [] };
+	const tracked = [
+		"tests/a.test.ts",
+		"tests/lane/a.test.ts",
+		"tests/lane/b.test.ts",
+		"tests/fixtures/x.test.ts",
+		"scripts/c.test.mts",
+		".hidden/d.test.ts",
+		"clients/e.ts",
+	];
+	const gaps = (projects: unknown[], exclude: string[]) =>
+		censusCollectionGaps({
+			plan: planFor(tracked),
+			tracked,
+			config: { test: { exclude, projects } },
+			defaults,
+		});
+	const laneSplit = (laneInclude: string[], laneExclude?: string[]) => [
+		{ test: { name: "default", exclude: ["tests/lane/**"] } },
+		{ test: { name: "lane", include: laneInclude, exclude: laneExclude } },
+	];
+
+	// Recurrence: a lane list that takes a file out of `default` but misses it
+	// in its own include. The file runs in no project, so no seed reaches it.
+	it("names a planned file that no project includes", () => {
+		const found = gaps(laneSplit(["tests/lane/a.test.ts"]), [
+			"tests/fixtures/**",
+		]);
+		expect(found.uncollected).toEqual(["tests/lane/b.test.ts"]);
+	});
+
+	// Recurrence: a project that includes a file and excludes it again (the
+	// `npm run test:unit` switch drops two files from their projects this way).
+	it("names a planned file that its own project excludes", () => {
+		const found = gaps(laneSplit(["tests/lane/**"], ["tests/lane/a.test.ts"]), [
+			"tests/fixtures/**",
+		]);
+		expect(found.uncollected).toEqual(["tests/lane/a.test.ts"]);
+	});
+
+	// Recurrence: the root `exclude` applies on top of a project's own (probed
+	// with `vitest list`); a check that read only the project's would call the
+	// file covered.
+	it("names a planned file that the root exclude drops from its project", () => {
+		const found = gaps(laneSplit(["tests/lane/**"]), [
+			"tests/fixtures/**",
+			"tests/lane/b.test.ts",
+		]);
+		expect(found.uncollected).toEqual(["tests/lane/b.test.ts"]);
+	});
+
+	// Recurrence: `default` takes vitest's default include, which is wider
+	// than the census's `tests/**/*.test.ts`. A `.test.mts`, or a test under a
+	// dot directory (vitest globs with `dot`), runs in CI and never in the
+	// census.
+	it("names a collected file that the census does not plan", () => {
+		const found = gaps(laneSplit(["tests/lane/**"]), ["tests/fixtures/**"]);
+		expect(found).toEqual({
+			uncollected: [],
+			unplanned: [".hidden/d.test.ts", "scripts/c.test.mts"],
+		});
+	});
+
+	// Recurrence: a config shape the check cannot read would otherwise read as
+	// collecting nothing, or everything, and pass.
+	it("throws on a config shape it does not read", () => {
+		const read = (config: { test?: Record<string, unknown> }) => () =>
+			censusCollectionGaps({ plan: [], tracked, config, defaults });
+		expect(read({ test: { projects: ["packages/*"] } })).toThrow(/unreadable/);
+		expect(
+			read({ test: { projects: [{ extends: true, test: { name: "x" } }] } }),
+		).toThrow(/unreadable/);
+		expect(read({ test: { include: ["tests/**"] } })).toThrow(/test\.include/);
+		expect(
+			read({ test: { projects: [{ test: { name: "x", dir: "pkg" } }] } }),
+		).toThrow(/test\.dir/);
+	});
+
+	const ROOT = path.resolve(import.meta.dirname, "../..");
+	/** The real config, evaluated under one `npm_lifecycle_event`. */
+	async function realConfig(lifecycle: string | undefined) {
+		vi.stubEnv("npm_lifecycle_event", lifecycle);
+		vi.resetModules();
+		try {
+			return (await import("../../vitest.config.ts")).default as {
+				test?: Record<string, unknown>;
+			};
+		} finally {
+			vi.unstubAllEnvs();
+			vi.resetModules();
+		}
+	}
+
+	// Recurrence: a lane list, an exclude, or a wider include in
+	// `vitest.config.ts` that parts the two lists. This is the PR-time red: the
+	// change that hides a file fails here, not in a nightly run later. The
+	// census starts `node scripts/ci-shuffle-census.mjs` outside npm, so the
+	// config is read with no `npm_lifecycle_event`.
+	it("finds no gap between the census plan and the real vitest projects", async () => {
+		const files = listTestFiles(ROOT);
+		expect(files.length).toBeGreaterThan(1000);
+		const realTracked = gitExecFileSync("git", ["ls-files", "-z"], {
+			cwd: ROOT,
+			encoding: "utf8",
+		})
+			.split("\0")
+			.filter(Boolean);
+		const check = (
+			plan: ReturnType<typeof planCensus>,
+			config: { test?: Record<string, unknown> },
+		) =>
+			censusCollectionGaps({
+				plan,
+				tracked: realTracked,
+				config,
+				defaults: configDefaults,
+			});
+		const config = await realConfig(undefined);
+		expect(check(planCensus(files), config)).toEqual({
+			uncollected: [],
+			unplanned: [],
+		});
+		// Not vacuous: a file the plan leaves out is named, and the same config
+		// under `npm run test:unit` names the files that switch excludes.
+		const [first, ...rest] = files;
+		expect(check(planCensus(rest), config).unplanned).toEqual([first]);
+		const unit = check(planCensus(files), await realConfig("test:unit"));
+		expect(unit.uncollected.length).toBeGreaterThan(0);
+		expect(unit.unplanned).toEqual([]);
 	});
 });
 

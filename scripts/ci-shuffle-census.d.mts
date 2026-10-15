@@ -45,6 +45,12 @@ export interface Verdict {
 	lines: string[];
 }
 export declare function listTestFiles(cwd: string): string[];
+export declare function censusCollectionGaps(input: {
+	plan: Array<{ files: string[] }>;
+	tracked: string[];
+	config: { test?: Record<string, unknown> };
+	defaults: { include: readonly string[]; exclude: readonly string[] };
+}): { uncollected: string[]; unplanned: string[] };
 export declare function seedOf(run: { flags: string[] }): Seed;
 export declare function planCensus(
 	files: string[],
