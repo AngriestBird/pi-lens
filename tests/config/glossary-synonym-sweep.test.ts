@@ -326,7 +326,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/mcp/session.ts": 4,
 		"clients/metrics-client.ts": 7,
 		"clients/observed-mutation.ts": 7,
-		"clients/runtime-tool-call.ts": 13,
+		"clients/runtime-tool-call.ts": 12,
 		"clients/sgconfig.ts": 6,
 		"clients/widget-state.ts": 2,
 	},

@@ -1240,7 +1240,7 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 		)?.complexityClient;
 		const baseline = await complexityClient?.analyzeFile(filePath);
 		if (baseline) {
-			runtime.complexityBaselines.set(filePath, baseline);
+			runtime.complexityBaselines.add(filePath);
 			const { captureSnapshot } = await import("./metrics-history.js");
 			captureSnapshot(filePath, {
 				maintainabilityIndex: baseline.maintainabilityIndex,
