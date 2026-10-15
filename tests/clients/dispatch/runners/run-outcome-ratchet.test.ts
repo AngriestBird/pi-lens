@@ -90,8 +90,9 @@ function literalValue(node: SgNode): string | undefined {
  *   is a TYPE (with or without the keyword: a type cannot classify an
  *   outcome); an imported function, class, variable or enum is a VALUE.
  * - the runner USES the primitive only when it references a value it
- *   imported this way somewhere outside the import (#4429 review F4: an
- *   import specifier is not a use site).
+ *   imported this way somewhere outside the import and outside a type
+ *   position (`typeof x` in a type) (#4429 review F4: an import specifier
+ *   and a type query are not use sites).
  *
  * Every other needle hit (a namespace or default import, a bare side-effect
  * import, `export … from`, a dynamic `import()` or `require`, a specifier
@@ -100,6 +101,12 @@ function literalValue(node: SgNode): string | undefined {
  * UNCLASSIFIED spelling, reported with its file and line, never skipped and
  * never counted as use. A comment or string quoting an import is not a node.
  */
+/** Where a reference to an imported value is not a runtime use of it. */
+const NON_USE_CONTEXTS: ReadonlySet<string> = new Set([
+	"import_statement",
+	"type_query",
+]);
+
 export function primitiveUse(
 	file: string,
 	source: string,
@@ -146,7 +153,7 @@ export function primitiveUse(
 		.some(
 			(node) =>
 				valueLocals.has(node.text()) &&
-				!node.ancestors().some((up) => up.kind() === "import_statement"),
+				!node.ancestors().some((up) => NON_USE_CONTEXTS.has(String(up.kind()))),
 		);
 	return result;
 }
@@ -374,6 +381,9 @@ describe("run-outcome primitive ratchet", () => {
 			'import type { ToolExitCodes } from "./utils/spawn-outcome.js";\nconst c: ToolExitCodes = codes;',
 			'import { ToolExitCodes } from "./utils/spawn-outcome.js";\nconst c: ToolExitCodes = codes;',
 			'import { ParsedToolRun as Run } from "./utils/tool-failure.js";\nlet r: Run;',
+			// A value referenced only in a type position classifies nothing.
+			'import { type classifyRunOutcome } from "./utils/spawn-outcome.js";\ntype Classify = typeof classifyRunOutcome;',
+			'import { classifyRunOutcome } from "./utils/spawn-outcome.js";\nlet c: typeof classifyRunOutcome;',
 		]) {
 			expect(primitiveUse("fake.ts", source), source).toEqual({
 				uses: false,

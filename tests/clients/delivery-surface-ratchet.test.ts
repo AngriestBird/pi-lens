@@ -344,13 +344,14 @@ describe("delivery-surface adoption ratchet (#2028/#2029)", () => {
 		});
 	});
 
-	it("ignores markers and unevaluable spellings inside comments (#4429)", () => {
+	it("ignores markers and unevaluable spellings inside comments and strings (#4429)", () => {
 		// The self-excuse direction: before #4429 a marker in a doc comment
 		// kept two exemptions (widget-state.ts, inline-blocker-dispositions.ts)
 		// alive with no marker in their code.
 		const source = [
 			"// 🔴 BLOCKED, String.fromCodePoint(base)",
 			'/* "\\u{1F534}" and "\\uD83D" */',
+			"const doc = \"call String['fromCodePoint'](base) here\";",
 		].join("\n");
 		expect(scanMarkers("fake.ts", source)).toEqual({
 			markerLines: [],
