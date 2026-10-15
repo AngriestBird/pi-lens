@@ -319,6 +319,8 @@ describe("handleToolCall", () => {
 					provisional: true,
 					source: "native-read:read-call:provisional",
 				}),
+				// #1649: the handler's one pass is the capture; the guard takes none.
+				{ captureLineHashes: false },
 			);
 			expect(recordRead.mock.calls[0]?.[0]).not.toHaveProperty("toolCallId");
 			expect(touchFileMock).toHaveBeenCalled();
