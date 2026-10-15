@@ -3857,6 +3857,46 @@ describe("computeCascadeForFile", () => {
 			}
 		});
 
+		// #4438 r3 (review V3): a write is evidence for a peer only when the
+		// written file is in that peer's build, so an in-package test file or a
+		// file outside the host build touches no non-test peer.
+		it.each([
+			["an in-package test file", "a_test.go"],
+			[
+				"a file outside the host build",
+				`x_${process.platform === "win32" ? "darwin" : "windows"}.go`,
+			],
+		])("touches no peer when the changed file is %s", async (_label, name) => {
+			const env = setupTestEnvironment("cascade-4438-go-direction-");
+			try {
+				const primary = path.join(env.tmpDir, name);
+				fs.writeFileSync(primary, "package p\n\nconst Y = 1\n");
+				fs.writeFileSync(
+					path.join(env.tmpDir, "b.go"),
+					"package p\n\nvar X = Y\n",
+				);
+				mocks.computeImpactCascade.mockReturnValue(impact(primary, []));
+				const touchFile = vi.fn().mockResolvedValue({ diags: [] });
+				mocks.getLSPService.mockReturnValue({
+					...makeLspServiceDouble(),
+					getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
+					touchFile,
+					getDiagnostics: vi.fn(),
+				});
+
+				const { computeCascadeForFile } =
+					await import("../../clients/dispatch/integration.js");
+				await computeCascadeForFile(primary, env.tmpDir, {
+					turnSeq: 1,
+					writeSeq: 1,
+				});
+
+				expect(touchFile).not.toHaveBeenCalled();
+			} finally {
+				env.cleanup();
+			}
+		});
+
 		it("adds no implicit neighbour when the changed file is a module", async () => {
 			const env = setupTestEnvironment("cascade-4438-module-");
 			try {

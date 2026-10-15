@@ -17,7 +17,7 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { sweepInlineBlockerFreshness } from "../../clients/blocker-freshness.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { setupTestEnvironment } from "./test-utils.js";
@@ -304,6 +304,122 @@ describe("inline-blocker sweep: Go package peers (#4438)", () => {
 
 		expect((await sweepInlineBlockerFreshness(runtime, dir)).kept).toBe(1);
 		expect(stale(runtime)).toBe(false);
+	});
+
+	// #4438 r3: the host build is read from `GOOS`/`GOARCH` when set, so each
+	// case pins the host and runs the same on every platform. Each case names
+	// the `goBuildExcludesHost` branch it pins (review V1, V2).
+	describe("build constraints on a pinned host", () => {
+		const saved = { GOOS: process.env.GOOS, GOARCH: process.env.GOARCH };
+		beforeEach(() => {
+			process.env.GOOS = "linux";
+			process.env.GOARCH = "amd64";
+		});
+		afterEach(() => {
+			for (const [key, value] of Object.entries(saved)) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+		});
+
+		/** Sweep counts after a recorded write of `peer` beside `blocker`. */
+		async function sweepAfterPeerWrite(
+			peer: string,
+			content: string,
+			blocker = "a.go",
+		): Promise<{ revalidated: number; kept: number }> {
+			const dir = project("go-build-pinned", {
+				[blocker]: "package p\n\nvar X = Y\n",
+			});
+			const runtime = new RuntimeCoordinator();
+			block(runtime, path.join(dir, blocker), ["lsp"], verdictAgo());
+			write(runtime, path.join(dir, peer), content);
+			const { revalidated, kept } = await sweepInlineBlockerFreshness(
+				runtime,
+				dir,
+			);
+			return { revalidated, kept };
+		}
+		const kept = { revalidated: 0, kept: 1 };
+		const demoted = { revalidated: 1, kept: 0 };
+		const peerBody = "package p\n\nconst Y = 1\n";
+
+		// The arch suffix: a peer built for another architecture.
+		it("keeps a Go blocker when a peer named for another architecture is edited", async () => {
+			expect(await sweepAfterPeerWrite("b_linux_arm64.go", peerBody)).toEqual(
+				kept,
+			);
+		});
+
+		// The OS of an OS_arch pair: the arch matches, the OS does not.
+		it("keeps a Go blocker when a peer named for another OS and the host architecture is edited", async () => {
+			expect(await sweepAfterPeerWrite("b_windows_amd64.go", peerBody)).toEqual(
+				kept,
+			);
+		});
+
+		// `!` negation of the host's OS.
+		it("keeps a Go blocker when a peer whose build line negates the host is edited", async () => {
+			expect(
+				await sweepAfterPeerWrite("b.go", `//go:build !linux\n\n${peerBody}`),
+			).toEqual(kept);
+		});
+
+		// The `_test` strip: the OS suffix before `_test` still excludes.
+		it("keeps a Go test blocker when a test peer named for another OS is edited", async () => {
+			expect(
+				await sweepAfterPeerWrite("b_windows_test.go", peerBody, "a_test.go"),
+			).toEqual(kept);
+		});
+
+		// The base-name rule: in `linux_amd64.go`, `linux` is the base name,
+		// not an OS constraint, so only the arch suffix applies.
+		it("demotes a Go blocker when a peer whose base name is an OS is edited", async () => {
+			process.env.GOOS = "windows";
+			expect(await sweepAfterPeerWrite("linux_amd64.go", peerBody)).toEqual(
+				demoted,
+			);
+		});
+
+		// The `unix` tag holds on every Unix-like OS.
+		it("demotes a Go blocker when a peer whose build line is unix is edited", async () => {
+			expect(
+				await sweepAfterPeerWrite("b.go", `//go:build unix\n\n${peerBody}`),
+			).toEqual(demoted);
+		});
+
+		// A one-term line that names the host is positive evidence.
+		it("demotes a Go blocker when a peer whose build line names the host is edited", async () => {
+			expect(
+				await sweepAfterPeerWrite("b.go", `//go:build linux\n\n${peerBody}`),
+			).toEqual(demoted);
+		});
+
+		// Review V2 (G14): a compound line is not evaluated, so it is no
+		// evidence that the peer is built.
+		it("keeps a Go blocker when a peer whose build line is compound is edited", async () => {
+			expect(
+				await sweepAfterPeerWrite(
+					"b.go",
+					`//go:build windows && amd64\n\n${peerBody}`,
+				),
+			).toEqual(kept);
+		});
+
+		// Review V2 (G11): a legacy `// +build` line is not evaluated either.
+		it("keeps a Go blocker when a peer with a legacy build line is edited", async () => {
+			expect(
+				await sweepAfterPeerWrite("b.go", `// +build windows\n\n${peerBody}`),
+			).toEqual(kept);
+		});
+
+		// Review V2 (G16): a tag that names no OS or architecture (`ignore`)
+		// cannot be decided.
+		it("keeps a Go blocker when a peer whose build line names an unknown tag is edited", async () => {
+			expect(
+				await sweepAfterPeerWrite("b.go", `//go:build ignore\n\n${peerBody}`),
+			).toEqual(kept);
+		});
 	});
 });
 

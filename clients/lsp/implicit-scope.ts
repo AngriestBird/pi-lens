@@ -154,11 +154,13 @@ function hostSatisfiesGoTag(tag: string): boolean {
 }
 
 /**
- * Whether a Go file is left out of the host's build: by a `_GOOS`, `_GOARCH`
- * or `_GOOS_GOARCH` file-name suffix, or by a `//go:build` line of one OS or
- * architecture term (`windows`, `!linux`). A compound line counts as built:
- * that over-includes, so a peer it would exclude still demotes (stated
- * trade-off, #4438 r2).
+ * Whether a Go file is not known to be in the host's build: left out by a
+ * `_GOOS`, `_GOARCH` or `_GOOS_GOARCH` file-name suffix or by a `//go:build`
+ * line of one OS, architecture or `unix` term (`windows`, `!linux`), or
+ * carrying a constraint this does not evaluate: a compound line, a tag that
+ * names no OS or architecture (`ignore`, `go1.21`), or a legacy `// +build`
+ * line with no `//go:build` line. #4438 r3: an undecided constraint is no
+ * evidence, so a built compound peer does not demote (stated trade-off).
  */
 function goBuildExcludesHost(filePath: string, header: string): boolean {
 	const parts = path
@@ -177,12 +179,13 @@ function goBuildExcludesHost(filePath: string, header: string): boolean {
 	) {
 		return true;
 	}
-	const term = /^\/\/go:build\s+(!?)([\w.]+)\s*$/m.exec(header);
-	if (!term) return false;
-	const tag = term[2]!;
-	if (!KNOWN_GOOS.has(tag) && !KNOWN_GOARCH.has(tag) && tag !== "unix")
-		return false;
-	return hostSatisfiesGoTag(tag) === (term[1] === "!");
+	const line = /^\/\/go:build[ \t](.*)$/m.exec(header);
+	if (!line) return /^\/\/[ \t]*\+build[ \t]/m.test(header);
+	const term = /^\s*(!?)([\w.]+)\s*$/.exec(line[1]!);
+	const tag = term?.[2] ?? "";
+	if (!(KNOWN_GOOS.has(tag) || KNOWN_GOARCH.has(tag) || tag === "unix"))
+		return true;
+	return hostSatisfiesGoTag(tag) === (term?.[1] === "!");
 }
 
 /** The first `GO_HEADER_BYTES` of a Go file, or `undefined` when unreadable. */

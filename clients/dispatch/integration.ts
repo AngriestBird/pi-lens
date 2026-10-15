@@ -1015,7 +1015,8 @@ const IMPLICIT_SCOPE_NEIGHBOR_CAP = MAX_FILES * 2;
 /**
  * #4438: the files whose implicit scope holds `changedFile` (absolute), as
  * `normalizeMapKey` spellings: a Go file's package peers that
- * `goPackagePeersOf` admits (same package clause, in the host build), and for
+ * `goPackagePeersOf` admits in both directions (same package clause, both in
+ * the host build, a test file evidence only for test peers), and for
  * a file whose global-scope role reads `"feeds"`, the JS/TS files of the
  * reverse-dependency index, most central first, at most
  * {@link IMPLICIT_SCOPE_NEIGHBOR_CAP}. `cut` is set when the cap left some out.
@@ -1029,12 +1030,18 @@ function implicitScopeDependentsOf(
 ): { files: string[]; cut?: { checked: number; total: number } } {
 	const changed = normalizeMapKey(changedFile);
 	if (isGoSourceFile(changed)) {
+		// #4438 r3: a dependent is a peer in the host build (`peerOf`) for
+		// which the changed file is evidence; the second test differs from the
+		// first for a test or build-excluded changed file.
 		const peerOf = goPackagePeersOf(changed);
 		return {
 			files: peerOf
 				? (goPackageFiles(nodePath.dirname(changedFile)) ?? [])
 						.map((file) => normalizeMapKey(file))
-						.filter(peerOf)
+						.filter(
+							(peer) =>
+								peerOf(peer) && goPackagePeersOf(peer)?.(changed) === true,
+						)
 				: [],
 		};
 	}
