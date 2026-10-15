@@ -41,7 +41,7 @@ import type {
 	RunnerDefinition,
 	RunnerResult,
 } from "../types.js";
-import { findingsResult } from "../types.js";
+import { findingsResult, isLineInModifiedRanges } from "../types.js";
 import {
 	calculateRuleComplexity,
 	isOverlyBroadPattern,
@@ -538,6 +538,14 @@ export interface AstGrepEvaluateOptions {
 	projectRoot?: string;
 	/** Shared config rule policy for scan-time path admission. */
 	rulePolicy?: RulePolicyMap;
+	/**
+	 * The lines the write changed, set only on the per-edit blocking pass
+	 * (#4481). An `error`-severity match on a line outside them is skipped
+	 * before it counts toward a cap, as the tree-sitter runner does: a
+	 * structural rule matches the lines it flags, so the write did not cause
+	 * it. Absent or empty means the whole file.
+	 */
+	modifiedRanges?: DispatchContext["modifiedRanges"];
 	/**
 	 * Optional sink for a rule that napi's native engine rejected outright
 	 * (malformed shape, unresolved `matches: <name>` reference, invalid kind,
@@ -1224,6 +1232,9 @@ export function evaluateAstGrepRules(
 					position: { line: number; column: number };
 				}> = [];
 				let rejectLogged = false;
+				const editScoped =
+					options.modifiedRanges !== undefined &&
+					normalizeRuleSeverity(rule.severity) === "error";
 				for (const scope of scopes) {
 					let found: unknown[];
 					try {
@@ -1241,7 +1252,13 @@ export function evaluateAstGrepRules(
 					}
 					for (const match of found) {
 						if (collected.length >= maxMatchesPerRule) break;
-						collected.push({ match, position: scope.position(match) });
+						const position = scope.position(match);
+						if (
+							editScoped &&
+							!isLineInModifiedRanges(position.line + 1, options.modifiedRanges)
+						)
+							continue;
+						collected.push({ match, position });
 					}
 					if (collected.length >= maxMatchesPerRule) break;
 				}
@@ -1462,6 +1479,10 @@ const astGrepNapiRunner: RunnerDefinition = {
 				blockingOnly: runningAsLspSubstitute ? false : ctx.blockingOnly,
 				projectRoot: ctx.projectRoot,
 				rulePolicy: ctx.rulePolicy,
+				// #4481: keyed off the per-edit pass, not the substitute floor
+				// above, so a pre-existing blocker on an unchanged line never
+				// STOPs the write in either role.
+				modifiedRanges: ctx.blockingOnly ? ctx.modifiedRanges : undefined,
 				log: (message: string) => ctx.log(message),
 				content,
 				sgModule,
