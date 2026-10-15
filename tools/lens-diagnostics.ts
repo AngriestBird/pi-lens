@@ -64,6 +64,7 @@ import { getFullScanWallClockMs } from "../clients/lsp/workspace-sweep-hold.js";
 import { demoteInferredProjectSweepResults } from "../clients/lsp/inferred-project.js";
 import {
 	hashDiagnosticContent,
+	PRIMARY_UNAVAILABLE_CAUSE,
 	type BoundToCurrentDisk,
 } from "../clients/lsp/diagnostic-binding.js";
 import type { CacheManager } from "../clients/cache-manager.js";
@@ -1812,6 +1813,10 @@ const UNCONFIRMED_REASON_SENTENCE: Record<
 	// path, so the reader does not read an empty result as "clean" or retry it.
 	outside_project_root:
 		"the file is outside every initialized session project root, so no language server was asked",
+	// #4403: the per-file note's wording, one sentence per cause.
+	primary_unavailable: `no primary language server answered (${PRIMARY_UNAVAILABLE_CAUSE.unstarted})`,
+	primary_disabled: `no primary language server answered (${PRIMARY_UNAVAILABLE_CAUSE.disabled})`,
+	primary_disabled_fallback: `no primary language server answered (${PRIMARY_UNAVAILABLE_CAUSE.disabledFallback})`,
 };
 
 // Short per-reason label used only when MORE than one reason is present, so
@@ -1828,6 +1833,9 @@ const UNCONFIRMED_REASON_COUNT_LABEL: Record<
 	error: "errored",
 	binding_mismatch: "stale binding",
 	outside_project_root: "outside project root",
+	primary_unavailable: "no primary started",
+	primary_disabled: "primary disabled in config",
+	primary_disabled_fallback: "primary disabled, fallback did not answer",
 };
 
 /**
@@ -2792,6 +2800,13 @@ async function formatFullMode(
 		lspServerBreakdown.size > 1
 			? ` — by server: ${formatLspServerBreakdown(lspServerBreakdown)}.`
 			: "";
+	// #4403 round 4 (N3): a retry cannot change a denial, so a sweep whose
+	// every unconfirmed file is a disabled primary does not suggest one.
+	const retryClause = [...unconfirmedByReason.keys()].every(
+		(reason) => reason === "primary_disabled",
+	)
+		? ""
+		: "; re-run mode=full to retry them";
 	const unconfirmedLspNote =
 		unconfirmedLspResults.length > 0
 			? `\n\n⚠ LSP sweep: ${confirmedLspResults.length} file(s) confirmed via LSP, ` +
@@ -2802,7 +2817,7 @@ async function formatFullMode(
 					.map((result) => result.filePath)
 					.join(
 						", ",
-					)}${unconfirmedLspResults.length > 20 ? ", …" : ""}. These files' LSP contribution is excluded from this result; re-run mode=full to retry them (they may still show findings above from cached/project-runner state).`
+					)}${unconfirmedLspResults.length > 20 ? ", …" : ""}. These files' LSP contribution is excluded from this result${retryClause} (they may still show findings above from cached/project-runner state).`
 			: "";
 	// Code-unit comparator (#1883): this list ships as the
 	// `unconfirmedLspServerIds` structured field and as the lane names in the

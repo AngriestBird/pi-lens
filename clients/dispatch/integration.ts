@@ -56,6 +56,8 @@ import {
 	applyCascadeDisplayPolicy,
 	formatCascadeNeighborDiagnostics,
 	recordCascadeFindingPolicy,
+	resetCascadeUnansweredPrimariesDelivered,
+	splitCascadeUnansweredPrimaries,
 } from "../cascade-format.js";
 import { logCascade } from "../cascade-logger.js";
 import type {
@@ -525,6 +527,7 @@ export function resetDispatchBaselines(cwd?: string): void {
 	clearReverseDepsIndexCache();
 	clearModuleGraphCache();
 	recentlyCleanNeighborCache.clear();
+	resetCascadeUnansweredPrimariesDelivered();
 	primaryFilesThisTurn.clear();
 	cascadeSessionStats = {
 		runs: 0,
@@ -2144,6 +2147,7 @@ export async function computeCascadeForFile(
 						source: "cascade",
 						clientScope: "primary",
 						readStamp,
+						nameUnansweredPrimaries: true,
 					});
 					if (!rawDiags) {
 						// #3483: the idle reset can destroy the service this compute
@@ -2173,6 +2177,40 @@ export async function computeCascadeForFile(
 							diagnostics: [],
 							lspTouched: true as const,
 							inconclusive: true as const,
+							durationMs,
+						} satisfies CascadeResult["neighbors"][number];
+					}
+					// #4403 round 4 (N2): no primary answered, and the touch says
+					// why. That is not an inconclusive re-check of this neighbour;
+					// it holds for every file the server serves, so the run names
+					// the server once (`splitCascadeUnansweredPrimaries`) instead of
+					// listing each neighbour.
+					// `resolveTouchVerdict` gives this reason only with the ids.
+					if (rawDiags.inconclusiveReason === "primary-unavailable") {
+						const serverIds = rawDiags.inconclusiveServerIds ?? [];
+						const cause = rawDiags.primaryUnavailableCause ?? "unstarted";
+						const durationMs = Date.now() - neighborStart;
+						logCascade({
+							phase: "neighbor_touch",
+							filePath,
+							neighborFile: neighborPath,
+							diagnosticCount: 0,
+							durationMs,
+							lspTouched: true,
+							lspServerCount: configuredServerCount,
+							coldSnapshot: isColdSnapshot,
+							metadata: {
+								inconclusive: true,
+								...readInconclusiveAttribution(rawDiags),
+								primaryUnavailableCause: cause,
+							},
+						});
+						return {
+							filePath: neighborPath,
+							reason: neighborReason(importerSet, callerSet, neighborPath),
+							diagnostics: [],
+							lspTouched: true as const,
+							primaryUnavailable: { serverIds: [...serverIds], cause },
 							durationMs,
 						} satisfies CascadeResult["neighbors"][number];
 					}
@@ -2409,16 +2447,27 @@ export async function computeCascadeForFile(
 			inputTruncated: policyCounts.inputTruncated,
 		});
 
-		const visibleNeighbors = applyCascadeDeltaBaselines(neighbors);
+		// #4403 round 4 (N2): a neighbour no primary answered for has no
+		// diagnostics to baseline. It stays in the result only while the run
+		// names its server, so turn_end's ownership pass delivers the line.
+		const unansweredPrimaries = splitCascadeUnansweredPrimaries(neighbors);
+		const visibleNeighbors = [
+			...applyCascadeDeltaBaselines(unansweredPrimaries.answered),
+			...unansweredPrimaries.unanswered,
+		];
 
-		const formatted = formatCascadeResult(
-			cwd,
-			impact,
-			visibleNeighbors,
-			impact.neighborFiles.length,
-			policyCounts.suppressed,
-			policyCounts.inputTruncated,
-		);
+		const format = (unansweredPrimaryNote?: string): string =>
+			formatCascadeResult(
+				cwd,
+				impact,
+				visibleNeighbors,
+				impact.neighborFiles.length,
+				policyCounts.suppressed,
+				policyCounts.inputTruncated,
+				unansweredPrimaryNote,
+			);
+		const notes = unansweredPrimaries.notes;
+		const formatted = format(notes.map((note) => note.line).join("\n"));
 
 		// #1104 HONESTY: filtering a bound-false display candidate must not turn a
 		// degraded/indeterminate cascade into a clean-looking one (same doctrine as
@@ -2565,7 +2614,17 @@ export async function computeCascadeForFile(
 
 		return {
 			filePath,
-			result: { filePath, impact, neighbors: visibleNeighbors, formatted },
+			result: {
+				filePath,
+				impact,
+				neighbors: visibleNeighbors,
+				formatted,
+				// #4403 round 5 (V1): turn_end drops a line whose servers were
+				// delivered or already shown this turn (clients/cascade-format.ts).
+				...(notes.length > 0 && {
+					unansweredPrimaries: { notes, formattedWithoutNotes: format() },
+				}),
+			},
 			neighborCount: visibleNeighbors.length,
 			diagnosticCount: diagCount,
 			// #1023: even when some fallback neighbors surfaced, a degraded graph means
@@ -2733,11 +2792,17 @@ function formatCascadeResult(
 	 * 3, N1) — ERRORs the policy never LOOKED at.
 	 */
 	policyInputTruncated: number,
+	/** #4403 round 4 (N2): the lines naming primaries that did not answer. */
+	unansweredPrimaryNote = "",
 ): string {
-	const diagnosticsBlock = formatCascadeNeighborDiagnostics(cwd, neighbors, {
+	const neighborBlock = formatCascadeNeighborDiagnostics(cwd, neighbors, {
 		noun: "neighbor",
 		includeReason: true,
 	});
+	const diagnosticsBlock =
+		neighborBlock && unansweredPrimaryNote
+			? `${neighborBlock}\n${unansweredPrimaryNote}`
+			: neighborBlock || unansweredPrimaryNote;
 	// #3157 round 3, N1: an empty block is silence, and silence is a CLEAN
 	// verdict to the agent. That is honest only when everything was looked at.
 	// `policyInputTruncated > 0` means this run's own cost bound declined to

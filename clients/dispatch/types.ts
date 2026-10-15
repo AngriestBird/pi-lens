@@ -14,6 +14,7 @@
 import type { GenerationHandle } from "../generation-guard.js";
 import type { AnalysisRootMode } from "../analysis-root.js";
 import type { ExtensionLogLevel } from "../extension-log.js";
+import type { PrimaryUnavailableCause } from "../lsp/diagnostic-binding.js";
 import type { FileKind } from "../file-kinds.js";
 import type { FileRole } from "../file-role.js";
 import type { GeneratedArtifactEvidence } from "../generated-artifacts.js";
@@ -136,6 +137,13 @@ export interface DispatchResult {
 	blockerOutput: string;
 	/** Whether any blockers were found */
 	hasBlockers: boolean;
+	/**
+	 * #4403: why the file's primary group did not check it. Set whenever the
+	 * coverage notice's rule finds no coverage, whether or not the once-only
+	 * latch shows the notice, so a write the latch silences still does not
+	 * read as clean: the write-time all-clear line gives this instead.
+	 */
+	unconfirmedStatus?: string;
 }
 
 // --- Runner Definition ---
@@ -238,6 +246,14 @@ export interface RunnerResult {
 	 * the rest of that set has no delivery path and reads as silent.
 	 */
 	deferredServerIds?: readonly string[];
+	/**
+	 * #4403: why no primary language server answered, when the runner knows:
+	 * the operator disabled it, it could not be started (or was still
+	 * starting), or both. The coverage notice and the status line name it.
+	 */
+	primaryUnavailableCause?: PrimaryUnavailableCause;
+	/** #4403: the disabled primaries, which get one note per server per session. */
+	disabledPrimaryServerIds?: readonly string[];
 }
 
 /**
