@@ -42,7 +42,7 @@ import type {
 	RunnerDefinition,
 	RunnerResult,
 } from "../types.js";
-import { findingsResult } from "../types.js";
+import { findingsResult, spanOverlapsModifiedRanges } from "../types.js";
 
 const blastCooldownByFile = new Map<string, number>();
 const BLAST_COOLDOWN_MS = 5_000;
@@ -339,14 +339,6 @@ function defaultFixSuggestion(defectClass: string, ruleId: string): string {
 	return "Refactor this pattern to a safer, explicit form matching project conventions.";
 }
 
-function isLineInModifiedRanges(
-	line: number,
-	ranges: ReadonlyArray<{ start: number; end: number }> | undefined,
-): boolean {
-	if (!ranges || ranges.length === 0) return true;
-	return ranges.some((r) => line >= r.start && line <= r.end);
-}
-
 /**
  * Calculate total lines changed in modified ranges.
  * Used to skip expensive entity extraction for trivial changes.
@@ -576,10 +568,14 @@ const treeSitterRunner: RunnerDefinition = {
 					query.severity === "error" ||
 					query.inline_tier === "blocking" ||
 					SILENT_ERROR_QUERY_IDS.has(query.id);
+				// #4481 r2: gate on the match's span, not its start line. The
+				// first capture's text is the node's exact source, so its line
+				// breaks give the end line.
+				const endLine = line + (match.matchedText.match(/\n/g)?.length ?? 0);
 				if (
 					ctx.blockingOnly &&
 					isSeverityBlocking &&
-					!isLineInModifiedRanges(line, ctx.modifiedRanges)
+					!spanOverlapsModifiedRanges(line, endLine, ctx.modifiedRanges)
 				) {
 					continue;
 				}
@@ -661,7 +657,7 @@ const treeSitterRunner: RunnerDefinition = {
 		// ~500-800ms snapshot cost on every dispatch. One guarded block now
 		// serves both paths.
 		// Absent/empty modifiedRanges means "whole file" (full-file dispatches,
-		// fresh writes — see isLineInModifiedRanges above), never "trivial edit":
+		// fresh writes — see spanOverlapsModifiedRanges in ../types.ts), never "trivial edit":
 		// entity extraction must run in that case.
 		const totalLinesChanged = getTotalLinesChanged(ctx.modifiedRanges);
 		const skipEntityExtraction =
