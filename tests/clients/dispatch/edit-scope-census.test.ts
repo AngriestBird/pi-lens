@@ -14,8 +14,10 @@
  * ast-grep lanes and tree-sitter are span-gated. Language-server diagnostics,
  * type checkers, compilers, linters and the other scanners stay unscoped by
  * design: an edit can cause their findings at a line it never touched. A
- * runner source outside the span-gated set that calls the predicate fails,
- * so a gate cannot drift onto a semantic runner unnoticed.
+ * runner source outside the span-gated set that references the predicate or
+ * `modifiedRanges` fails, so a gate, shared or private (tree-sitter's was a
+ * private function before #4481 r2), cannot drift onto an unscoped runner
+ * through the runner module itself.
  *
  * Derivation (AGENTS.md shape 69): lanes come from the live registry
  * (`registerDefaultRunners`) plus one lane per auxiliary LSP profile, never a
@@ -26,8 +28,21 @@
  * module identity (the runner module whose default export IS the registered
  * object); a registered runner with no such module fails. A gated runner
  * needs a direct call found in the AST (`callSites`); an unscoped runner must
- * hold no code reference at all (`codeMatches`, comments and strings blanked).
- * Either way a comment or string quoting the call never counts.
+ * hold no code reference to the predicate or to `modifiedRanges`
+ * (`codeMatches`, comments and strings blanked). Either way a comment or
+ * string quoting the call never counts.
+ *
+ * Blind spots, each named so nobody reads this census as wider than it is:
+ * - The classification itself is judgment: a runner filed under the wrong
+ *   unscoped kind passes.
+ * - Only each runner's own default-export module is scanned. A gate inside a
+ *   `runners/utils/` helper (or any other imported module) is not seen.
+ * - The `lsp` runner is one module for the `lsp` (semantic) lane and the
+ *   `lsp/ast-grep` (gated) lane. A gate inside `lsp.ts` widened to every tool
+ *   passes the census; only the behaviour guard `keeps a language-server
+ *   blocker on an unchanged line` (runner-status-semantics.test.ts) catches it.
+ * - A gated call in code that never runs on the per-edit pass passes; the
+ *   behaviour tests for the three gates catch that.
  */
 
 import { readdirSync, readFileSync } from "node:fs";
@@ -169,12 +184,17 @@ function callsPredicate(sourcePath: string): boolean {
 }
 
 /**
- * Drift direction: any code reference (import, alias, namespace member), so
- * an unscoped runner cannot gate through an alias the call scan would miss.
+ * Drift direction: any code reference (import, alias, namespace member) to the
+ * predicate, or to `modifiedRanges` itself, so an unscoped runner can gate
+ * neither through an alias the call scan would miss nor through its own
+ * inline range check.
  */
-function referencesPredicate(sourcePath: string): boolean {
+function referencesEditScope(sourcePath: string): boolean {
 	const source = readFileSync(sourcePath, "utf8");
-	return codeMatches(source, /\bspanOverlapsModifiedRanges\b/).length > 0;
+	return (
+		codeMatches(source, /\b(?:spanOverlapsModifiedRanges|modifiedRanges)\b/)
+			.length > 0
+	);
 }
 
 describe("edit-scope census (#4481)", () => {
@@ -234,7 +254,7 @@ describe("edit-scope census (#4481)", () => {
 			.filter((id) => !gatedRunnerIds.has(id))
 			.filter((id) => {
 				const source = sources.get(id);
-				return source !== undefined && referencesPredicate(source);
+				return source !== undefined && referencesEditScope(source);
 			});
 		expect(
 			driftedGates,

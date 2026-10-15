@@ -525,7 +525,7 @@ const lspRunner: RunnerDefinition = {
 						range === undefined ||
 						spanOverlapsModifiedRanges(
 							range.start.line + 1,
-							range.end.line + 1,
+							(range.end?.line ?? range.start.line) + 1,
 							ctx.modifiedRanges,
 						)
 					);
