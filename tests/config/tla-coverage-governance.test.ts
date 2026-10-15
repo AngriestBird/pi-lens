@@ -361,6 +361,19 @@ describe("TLA+ coverage rule", () => {
 		expect(result.errors).toHaveLength(1);
 	});
 
+	// Recurrence (#4448 round 3): folding this blanker onto the shared one made
+	// the 4-space code-block rule hide a declaration written as a list
+	// continuation, which GitHub renders as list text. The fold keeps the rule
+	// off here (`indentedCode: false`).
+	it("accepts a declaration written as an indented list continuation", () => {
+		const result = evaluateTlaCoverage({
+			map: READ_GUARD_MAP,
+			changedFiles: ["clients/read-guard.ts"],
+			body: "- Notes\n\n    TLA+ unaffected: read-guard — only a local helper moved.",
+		});
+		expect(result).toEqual({ errors: [], advisories: [] });
+	});
+
 	it("accepts a declaration that follows a closed fence and comment", () => {
 		const result = evaluateTlaCoverage({
 			map: READ_GUARD_MAP,

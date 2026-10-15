@@ -1592,13 +1592,22 @@ type DispatchResult = Awaited<
 		(typeof import("./dispatch/integration.js"))["dispatchLintWithResult"]
 	>
 >;
+/**
+ * The line a write with nothing else to say ends with. #4403: "clean" only
+ * when the file's primary group checked it; otherwise one line naming why not
+ * (`DispatchResult.unconfirmedStatus`), so a write after the once-only
+ * coverage notice does not read as a clean result.
+ */
 function buildAllClearOutput(
-	_dispatchResult: DispatchResult,
+	dispatchResult: DispatchResult,
 	elapsed: number,
 	filePath: string,
 ): string {
 	const kind = detectFileKind(filePath);
 	const langLabel = kind ? getFileKindLabel(kind) : path.extname(filePath);
+	if (kind && dispatchResult.unconfirmedStatus !== undefined) {
+		return `\u26a0 ${langLabel} unconfirmed — ${dispatchResult.unconfirmedStatus} · ${elapsed}ms`;
+	}
 	const parts: string[] = [];
 
 	if (kind) {

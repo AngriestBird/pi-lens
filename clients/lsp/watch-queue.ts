@@ -77,9 +77,11 @@ export class WatchedFilesQueue {
 		/**
 		 * #4320: called right after a batch carrying a Created is sent: from then
 		 * on the server answers with the new path in view, and any answer it gave
-		 * before may be a stale "module not found".
+		 * before may be a stale "module not found". #4346: it receives the
+		 * created URIs, so a cached answer is refused only when one of them is
+		 * in its file's dependency scope.
 		 */
-		private readonly onCreated?: () => void,
+		private readonly onCreated?: (createdUris: readonly string[]) => void,
 	) {}
 
 	/** Queue a change; arms the debounce timer if not already pending. */
@@ -110,9 +112,10 @@ export class WatchedFilesQueue {
 		);
 		this.pending.clear();
 		this.flushFn(changes);
-		if (changes.some((change) => change.type === FILE_CREATED)) {
-			this.onCreated?.();
-		}
+		const created = changes.flatMap((change) =>
+			change.type === FILE_CREATED ? [change.uri] : [],
+		);
+		if (created.length > 0) this.onCreated?.(created);
 	}
 
 	/**

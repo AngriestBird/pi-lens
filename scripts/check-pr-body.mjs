@@ -3,6 +3,12 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gitExecFileSync } from "./lib/git-fixture-env.mjs";
+import {
+	blankMarkdown,
+	HEADING,
+	parseDefectShapes,
+	sourceWithoutFencedBlocks,
+} from "./lib/defect-shapes.mjs";
 import { githubGet } from "./lib/github-rest.mjs";
 import {
 	changedHookAnchors,
@@ -40,7 +46,6 @@ const REQUIRED_SECTIONS = [
 	"Class sweep",
 	"Observability",
 ];
-const HEADING = /^#{2,4}\s+(.+?)\s*$/;
 // The PR footer the template requires (.github/PULL_REQUEST_TEMPLATE.md).
 const GENERATED_FOOTER =
 	/^🤖 Generated with \[Claude Code\]\(https:\/\/claude\.com\/claude-code\)$/;
@@ -117,62 +122,6 @@ function hasSection(heading, section) {
 	return Array.isArray(heading?.section)
 		? heading.section.includes(section)
 		: heading?.section === section;
-}
-
-// Fenced (``` / ~~~) and 4-space indented code blocks are stripped, so a quoted
-// example cannot satisfy a body section (#4288 R3). An indented block cannot
-// interrupt a paragraph (CommonMark), so a 4-space line that follows body text
-// stays: list continuations and nested bullets are content, not code. The
-// closing fence must repeat the opener's character (>=3 of them).
-function sourceWithoutFencedBlocks(source) {
-	const lines = String(source ?? "").split(/\r?\n/);
-	const output = [];
-	let fenceChar = null;
-	let fenceLength = 0;
-	let inIndented = false;
-	// "start" | "blank" | "heading" | "text": whether the previous emitted
-	// line can precede an indented code block.
-	let previous = "start";
-	for (const line of lines) {
-		if (fenceChar) {
-			const close = new RegExp(`^\\s*\\${fenceChar}{${fenceLength},}\\s*$`);
-			if (close.test(line)) {
-				fenceChar = null;
-				fenceLength = 0;
-			}
-			output.push("");
-			continue;
-		}
-		const open = /^\s*(`{3,}|~{3,})/.exec(line);
-		if (open) {
-			fenceChar = open[1][0];
-			fenceLength = open[1].length;
-			inIndented = false;
-			output.push("");
-			previous = "blank";
-			continue;
-		}
-		if (/^(?: {4,}|\t)/.test(line)) {
-			if (
-				inIndented ||
-				previous === "start" ||
-				previous === "blank" ||
-				previous === "heading"
-			) {
-				inIndented = true;
-				output.push("");
-				continue;
-			}
-		} else {
-			inIndented = false;
-		}
-		output.push(line);
-		const trimmed = line.trim();
-		if (trimmed === "") previous = "blank";
-		else if (HEADING.test(line)) previous = "heading";
-		else previous = "text";
-	}
-	return output.join("\n");
 }
 
 function templatePlaceholderLines() {
@@ -1751,9 +1700,11 @@ const DETECTION_LAYER_SET = new Set(
 const DETECTION_SHOULD_SET = new Set([...DETECTION_LAYER_SET, "this layer"]);
 
 export const DETECTION_MESSAGE =
-	'PR body "## Detection" must state the bug-detection lesson in three lines: ' +
+	'PR body "## Detection" must state the bug-detection lesson in five lines: ' +
 	'"Caught by: <layer>", "Should have been caught by: <layer|this layer>", ' +
-	'and "Gap: <issue ref> | exists: <path of a test already on master> | none: <reason>". ' +
+	'"Gap: <issue ref> | exists: <path of a test already on master> | none: <reason>", ' +
+	'"Shape: #N (an AGENTS.md Recurring defect shapes number) | new: <name>", ' +
+	'and "Enforcer: <tree-wide test path on master> | #N (an issue to build one) | none: judgment-only, <reason>". ' +
 	`Layers: ${DETECTION_LAYERS.join(", ")}. See ${TEMPLATE_PATH}.`;
 
 // A field value is found by its line prefix, never a sentence mention: a
@@ -1844,18 +1795,20 @@ function existsGapPath(value) {
 	return exists ? exists[1].replace(/[*_`]/g, "").trim() : null;
 }
 
+function isDetectionTestPath(testPath) {
+	return (
+		testPath.startsWith("tests/") ||
+		/(?:^|\/)test_[^/]+$/.test(testPath) ||
+		/\.(?:test|spec)\.[cm]?[jt]sx?$/.test(testPath) ||
+		/_test\.(?:py|go|rs)$/.test(testPath)
+	);
+}
+
 function validDetectionGap(value) {
 	const text = String(value ?? "").trim();
 	if (/(?:^|\s|[(])#\d+\b/.test(text)) return true;
 	const testPath = existsGapPath(text);
-	if (testPath !== null) {
-		return (
-			testPath.startsWith("tests/") ||
-			/(?:^|\/)test_[^/]+$/.test(testPath) ||
-			/\.(?:test|spec)\.[cm]?[jt]sx?$/.test(testPath) ||
-			/_test\.(?:py|go|rs)$/.test(testPath)
-		);
-	}
+	if (testPath !== null) return isDetectionTestPath(testPath);
 	const none = /^none\s*:\s*(.+)$/i.exec(text);
 	// A one-word reason ("none: oversight") is legitimate; the shape only
 	// requires a reason to be present (#4288 R5).
@@ -1863,10 +1816,120 @@ function validDetectionGap(value) {
 	return false;
 }
 
+// #4439: a bug fix names the defect SHAPE and the tree-wide enforcer of that
+// shape, not only a test for the instance. `Shape:` is a catalog number from
+// AGENTS.md "Recurring defect shapes" or `new: <name>`; `Enforcer:` is a test
+// path on the base, an issue to build one, or `none: judgment-only, <reason>`.
+// With `Shape: #N`, a path enforcer must be one the catalog entry for #N names.
+export const DETECTION_SHAPE_CATALOG_UNRESOLVED_MESSAGE =
+	'PR body "## Detection" says "Shape: #N" with a path "Enforcer:", but AGENTS.md "Recurring defect shapes" could not be read from the base commit of the PR (git show <merge-base>:AGENTS.md), so the catalog entry cannot be checked. Give an issue ref (#NNN) or "none: judgment-only, <reason>" as the enforcer instead.';
+
+export const detectionUnknownShapeMessage = (number) =>
+	`PR body "## Detection" says "Shape: #${number}", but AGENTS.md "Recurring defect shapes" has no shape ${number}. Use a catalog number, or "Shape: new: <name>" for a shape the catalog lacks.`;
+
+export const detectionEnforcerNotOnBaseMessage = (path) =>
+	`PR body "## Detection" says "Enforcer: ${path}", but that file is not on the PR's base commit (git merge-base origin/master HEAD). A test this PR adds is the regression test, not the enforcer of the shape. Name a tree-wide test already on the base, an issue (#NNN) to build one, or "none: judgment-only, <reason>".`;
+
+export const detectionEnforcerNotInCatalogMessage = (path, number) =>
+	`PR body "## Detection" says "Shape: #${number}" and "Enforcer: ${path}", but AGENTS.md shape ${number} does not name that path. Name a test the catalog entry lists, or give an issue (#NNN) to add it, or "none: judgment-only, <reason>".`;
+
+const stripEmphasis = (value) =>
+	String(value ?? "")
+		.replace(/[*_`]/g, "")
+		.trim();
+
+function detectionShape(value) {
+	const text = stripEmphasis(value);
+	const number = /^#(\d+)\b/.exec(text);
+	if (number) return { number: Number(number[1]) };
+	const created = /^new\s*:\s*(\S.*)$/i.exec(text);
+	return created ? { name: created[1] } : null;
+}
+
+function detectionEnforcer(value) {
+	const text = stripEmphasis(value);
+	if (/^#\d+\b/.test(text)) return { issue: true };
+	const none = /^none\s*:\s*(?:judgment|judgement)-only\s*,\s*(.+)$/i.exec(
+		text,
+	);
+	if (none) return wordCount(none[1]) >= 3 ? { none: true } : null;
+	const path = /^\S+/.exec(text)?.[0].replace(/[.,;]+$/, "");
+	return path && isDetectionTestPath(path) ? { path } : null;
+}
+
+// A path is named when it stands as its own token in the entry: not a prefix
+// of a longer file name and not the middle of a longer path.
+function entryNamesPath(entry, path) {
+	const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	return new RegExp(`(?<![\\w./-])${escaped}(?![\\w/-])(?!\\.\\w)`).test(entry);
+}
+
+/**
+ * `shapeCatalog` reads the AGENTS.md catalog: a `Map<number, entry text>`, or
+ * `null` when AGENTS.md cannot be read. `existsOnBase` is the Gap reader.
+ */
+function lintShapeAndEnforcer(content, options) {
+	const shape = detectionShape(detectionFieldValue(content, "shape"));
+	const enforcer = detectionEnforcer(detectionFieldValue(content, "enforcer"));
+	if (!shape || !enforcer) return [DETECTION_MESSAGE];
+	let catalog;
+	if (
+		shape.number !== undefined &&
+		typeof options.shapeCatalog === "function"
+	) {
+		catalog = options.shapeCatalog();
+		if (catalog && !catalog.has(shape.number))
+			return [detectionUnknownShapeMessage(shape.number)];
+	}
+	if (!enforcer.path) return [];
+	if (typeof options.existsOnBase === "function") {
+		const onBase = options.existsOnBase(enforcer.path);
+		if (onBase === null) return [DETECTION_EXISTS_BASE_UNRESOLVED_MESSAGE];
+		if (!onBase) return [detectionEnforcerNotOnBaseMessage(enforcer.path)];
+	}
+	if (catalog === null) return [DETECTION_SHAPE_CATALOG_UNRESOLVED_MESSAGE];
+	if (catalog && !entryNamesPath(catalog.get(shape.number), enforcer.path))
+		return [detectionEnforcerNotInCatalogMessage(enforcer.path, shape.number)];
+	return [];
+}
+
+/**
+ * The `shapeCatalog` reader for `lintDetectionSection`: AGENTS.md as the PR's
+ * base commit has it (the base `baseFileReader` reads the enforcer path from),
+ * parsed once on first use. `null` when the base or its AGENTS.md cannot be
+ * read. The base, never the checkout: a PR that edits entry N to name its own
+ * enforcer must not approve itself (#4439).
+ */
+export function shapeCatalogReader(cwd = process.cwd(), git = gitExecFileSync) {
+	let catalog;
+	return () => {
+		if (catalog !== undefined) return catalog;
+		catalog = null;
+		const base = resolvePrBase(cwd, git);
+		try {
+			catalog = parseDefectShapes(
+				String(
+					git(["show", `${base}:AGENTS.md`], {
+						cwd,
+						encoding: "utf8",
+						maxBuffer: 16 * 1024 * 1024,
+						stdio: ["ignore", "pipe", "ignore"],
+					}),
+				),
+			);
+		} catch {
+			// null: a path enforcer under `Shape: #N` fails closed.
+		}
+		return catalog;
+	};
+}
+
 /**
  * #4288: the `## Detection` contract. Returns [] when the section is absent
  * (the missing-section error stays owned by `lintPrBody`), otherwise one
- * message when any of the three lines is missing or invalid. `ignoreUnfilled`
+ * message when any of the three lines is missing or invalid, and (#4439) the
+ * `Shape:` / `Enforcer:` lines when `requireShape` is set or either is
+ * present. `ignoreUnfilled`
  * (the local preflight, where the label does not require the section) also
  * returns [] for a section holding only the template's own hint. Parsing runs over
  * the fenced-block-free body, so a quoted example inside a code fence never
@@ -1892,9 +1955,12 @@ export function lintDetectionSection(body = "", options = {}) {
 		(candidate) =>
 			candidate.index > heading.index && candidate.level <= heading.level,
 	);
-	const content = lines
-		.slice(heading.index + 1, nextHeading?.index ?? lines.length)
-		.join("\n");
+	// An HTML comment is not an answer: lines quoted in one never count (#4439).
+	const content = blankMarkdown(
+		lines
+			.slice(heading.index + 1, nextHeading?.index ?? lines.length)
+			.join("\n"),
+	);
 	// A non-bug PR may leave the template's optional hint in place; that is an
 	// unanswered section, not a malformed answer.
 	// The mandatory footer is the last line of the body, so it lands inside
@@ -1928,6 +1994,12 @@ export function lintDetectionSection(body = "", options = {}) {
 		if (onBase === null) return [DETECTION_EXISTS_BASE_UNRESOLVED_MESSAGE];
 		if (!onBase) return [detectionExistsNotOnBaseMessage(claimed)];
 	}
+	if (
+		options.requireShape ||
+		detectionFieldValue(content, "shape") !== null ||
+		detectionFieldValue(content, "enforcer") !== null
+	)
+		return lintShapeAndEnforcer(content, options);
 	return [];
 }
 
@@ -2195,7 +2267,11 @@ export function lintPrBody(body = "", options = {}) {
 	}
 	if (options.bugClosing)
 		errors.push(
-			...lintDetectionSection(body, { existsOnBase: options.existsOnBase }),
+			...lintDetectionSection(body, {
+				existsOnBase: options.existsOnBase,
+				shapeCatalog: options.shapeCatalog,
+				requireShape: true,
+			}),
 		);
 	if (options.diff)
 		errors.push(
@@ -2425,6 +2501,7 @@ export async function lintPullRequestEvent(
 		requireTestAssessment,
 		bugClosing: bugClosing === true,
 		existsOnBase: baseFileReader(),
+		shapeCatalog: shapeCatalogReader(),
 		diff,
 		workingTree: true,
 		// Existing open bodies were authored before #4280. Set PI_LENS_PROSE_GRACE=1
@@ -2636,10 +2713,12 @@ export function lintLocalPrBody(
 			'::warning::PR body check could not read the closed issue label (gh missing, unauthenticated, or failed), so the "## Detection" requirement check was skipped (#4288).',
 		);
 	const existsOnBase = baseFileReader(cwd, git);
+	const shapeCatalog = shapeCatalogReader(cwd, git);
 	const result = lintPrBody(body, {
 		requireTestAssessment: localTouchesTests(cwd, git),
 		bugClosing: bugClosing === true,
 		existsOnBase,
+		shapeCatalog,
 		diff,
 		cwd,
 		workingTree: true,
@@ -2654,6 +2733,7 @@ export function lintLocalPrBody(
 		const detection = lintDetectionSection(body, {
 			ignoreUnfilled: true,
 			existsOnBase,
+			shapeCatalog,
 		});
 		result.errors.push(...detection);
 		if (detection.length) result.valid = false;

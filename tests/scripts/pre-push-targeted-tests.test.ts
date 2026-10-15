@@ -428,6 +428,8 @@ describe("selectTargetedTests — path-mirror pass", () => {
 			"tests/scripts/dist-freshness.test.ts",
 			"tests/config/turn-state-partition-owner-sweep.test.ts",
 			"tests/config/project-trust-seam-ratchet.test.ts",
+			"tests/config/pr-smoke-paths.test.ts",
+			"tests/tools/diagnostics-route-switch-matrix.test.ts",
 		];
 		const testScanners = [
 			"tests/clients/flake-shape-ratchet.test.ts",
