@@ -273,6 +273,15 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			reason:
 				"tool installation and discovery are the host boundary; the stub hands the real typescript-language-server wrapper and a classic compiler to the real launcher, service, client and cascade",
 		},
+	// 2026-10-16 (#4495 round 3): the cascade's pending gate runs the shared
+	// freshness gate quiet; whether its rows were written is only visible in
+	// the logLatency call, since turn_end overruns the five-phase ring.
+	"in-process-mock:clients/cascade-turn-merge.test.ts::clients/latency-logger":
+		{
+			detector: "in-process-mock",
+			reason:
+				"the freshness gate writes its rows through logLatency; turn_end logs more phases after the gate than the five the getRecentLoggedPhases ring keeps, and test mode skips the file sink, so a passed-through spy is the only reader",
+		},
 	// 2026-10-15 (#4449): the registry's skip and respawn records go to
 	// logLatency. Its in-process ring drops the fields the test asserts, and
 	// test mode never reaches the file sink, so the captured call is the seam.

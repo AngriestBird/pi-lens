@@ -1,4 +1,5 @@
 // flake-shape: service-double — #4485: turn_end's registry peek reads the client an outstanding touch holds; a real server cannot be made to publish between the compute and turn_end on demand
+// flake-shape: in-process-mock — the freshness gate writes its rows through logLatency; turn_end logs more phases after the gate than the five the getRecentLoggedPhases ring keeps, and test mode skips the file sink, so a passed-through spy is the only reader (#4495 round 3)
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
