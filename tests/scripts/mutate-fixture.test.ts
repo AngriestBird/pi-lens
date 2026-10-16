@@ -47,8 +47,11 @@ it("mutation fixture can hold an interrupting run", async () => {
 	// #4510: lets the CLI test check that this worker dies with the run.
 	if (process.env.PI_LENS_MUTATION_PIDFILE) {
 		writeFileSync(process.env.PI_LENS_MUTATION_PIDFILE, String(process.pid));
-		// Bounded: a worker the run failed to kill still ends by itself.
-		await new Promise((resolve) => setTimeout(resolve, 30_000));
+		// A synchronous spin, as in the orphan this models: vitest's 5 s test
+		// timeout cannot fire. Bounded, so a worker the run failed to kill still
+		// ends by itself.
+		const end = Date.now() + 30_000;
+		while (Date.now() < end);
 		return;
 	}
 	await new Promise(() => {});
