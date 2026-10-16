@@ -47,6 +47,9 @@ const boundary = vi.hoisted(() => {
 	 *  `cutoff`, the server does not answer the touch: unconfirmed, and none
 	 *  of its diagnostics. */
 	const ag = { published: false, diag: false, cutoff: false };
+	/** Round 8 (P39): with `silent`, the bash server does not answer a
+	 *  `.sh` touch; `runs` counts shellcheck's CLI scans. */
+	const sh = { silent: false, runs: 0 };
 	const lsp = {
 		/** The fake language server: error 2304 on each `BAD_CALL` line, and
 		 *  warning 6133 on each `unusedVar` line (round 2, row 16). */
@@ -124,11 +127,17 @@ const boundary = vi.hoisted(() => {
 		 * list off the first `return` it finds (the #3190 witness's note).
 		 */
 		touch: async (
-			_file: string,
+			file: string,
 			content: string,
 			options?: { source?: string },
 		) => {
 			lsp.touches += 1;
+			if (sh.silent && file.endsWith(".sh"))
+				return {
+					diags: [],
+					inconclusive: true,
+					inconclusiveServerIds: ["bash"],
+				};
 			if (ag.cutoff)
 				return {
 					diags: (lsp.diagnose(content) as Array<{ serverId?: string }>).filter(
@@ -181,7 +190,50 @@ const boundary = vi.hoisted(() => {
 	};
 	const helm = { stdout: "", lintCalls: 0 };
 	const isHelm = (c: string) => /(^|[\\/])helm(\.exe)?$/i.test(c);
+	/** Round 8 (P39): shellcheck and the bash server are present too. */
+	const isDoubled = (c: string) =>
+		isHelm(c) || /(^|[\\/])(shellcheck|bash-language-server)(\.exe)?$/i.test(c);
+	/** shellcheck's JSON: SC1072 on each `BAD_SH` line of the named file. */
+	function shellcheckJson(file: string, text: string) {
+		const items = text.split("\n").flatMap((l, i) =>
+			l.includes("BAD_SH")
+				? [
+						{
+							file,
+							line: i + 1,
+							endLine: i + 1,
+							column: 1,
+							endColumn: 2,
+							level: "error",
+							code: 1072,
+							message: "Unexpected BAD_SH token",
+						},
+					]
+				: [],
+		);
+		return {
+			stdout: JSON.stringify(items),
+			stderr: "",
+			status: items.length ? 1 : 0,
+		};
+	}
 	function run(command: string, args: readonly string[] = []) {
+		if (/shellcheck/.test(command) && args.includes("--format")) {
+			sh.runs += 1;
+			const file = args[args.length - 1] ?? "";
+			const fs = (
+				process as unknown as {
+					getBuiltinModule: (m: "node:fs") => typeof import("node:fs");
+				}
+			).getBuiltinModule("node:fs");
+			return shellcheckJson(
+				file,
+				fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "",
+			);
+		}
+		// Version and gate probes of the other doubled binaries succeed.
+		if (isDoubled(command) && !isHelm(command))
+			return { stdout: "version: 0.10.0", stderr: "", status: 0 };
 		if (!isHelm(command))
 			return {
 				stdout: "",
@@ -206,7 +258,7 @@ const boundary = vi.hoisted(() => {
 			status: 0,
 		};
 	}
-	return { lsp, helm, isHelm, run, ag };
+	return { lsp, helm, isHelm, isDoubled, run, ag, sh };
 });
 
 vi.mock("../clients/safe-spawn.js", async (importOriginal) => ({
@@ -214,11 +266,13 @@ vi.mock("../clients/safe-spawn.js", async (importOriginal) => ({
 	safeSpawn: boundary.run,
 	safeSpawnAsync: async (command: string, args: readonly string[] = []) =>
 		boundary.run(command, args),
-	isCommandAvailable: boundary.isHelm,
-	isCommandAvailableAsync: async (command: string) => boundary.isHelm(command),
-	findCommand: (command: string) => (boundary.isHelm(command) ? "helm" : null),
+	isCommandAvailable: boundary.isDoubled,
+	isCommandAvailableAsync: async (command: string) =>
+		boundary.isDoubled(command),
+	findCommand: (command: string) =>
+		boundary.isDoubled(command) ? command : null,
 	findCommandAsync: async (command: string) =>
-		boundary.isHelm(command) ? "helm" : null,
+		boundary.isDoubled(command) ? command : null,
 }));
 
 vi.mock("../clients/lsp/capabilities.js", async (importOriginal) => {
@@ -282,6 +336,7 @@ beforeEach(() => {
 	boundary.ag.published = false;
 	boundary.ag.diag = false;
 	boundary.ag.cutoff = false;
+	boundary.sh.silent = false;
 });
 afterEach(async () => {
 	// A cell that failed before its own fix still leaves no record, gate
@@ -295,6 +350,7 @@ afterEach(async () => {
 	boundary.ag.published = false;
 	boundary.ag.diag = false;
 	boundary.ag.cutoff = false;
+	boundary.sh.silent = false;
 	resetPendingRunnerFindings();
 	if (originalTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
 	else process.env.PI_LENS_TEST_MODE = originalTestMode;
@@ -331,6 +387,10 @@ async function openSession(
 	let helmAfter: string | undefined;
 	const session = {
 		target,
+		/** Round 8 (P39): flip a host flag mid-session. */
+		setFlag(flag: string, value: boolean) {
+			pi.setFlag(flag, value);
+		},
 		/** The next write's helm stdout (helm cells only). */
 		helmNext(stdout: string) {
 			helmAfter = stdout;
@@ -443,6 +503,36 @@ async function fixAndDrain(s: Awaited<ReturnType<typeof openSession>>) {
 	pendingCleanup = undefined;
 	await cleanup?.();
 	expect(await s.commitBlocked()).toBe(false);
+}
+
+/** Round 8: each runner's row in the file's last dispatch record. */
+async function lastRunnerRows(
+	file: string,
+): Promise<Record<string, { status?: string }>> {
+	await flushLatencyLog();
+	const target = path.join(tmpDir, file);
+	const row = fs
+		.readFileSync(getLatencyLogPath(), "utf8")
+		.split("\n")
+		.filter((line) => line.includes(target) && line.includes('"runners"'))
+		.map(
+			(line) =>
+				JSON.parse(line) as {
+					filePath?: string;
+					metadata?: {
+						runners?: Array<{
+							id: string;
+							status?: string;
+							skipReason?: string;
+						}>;
+					};
+				},
+		)
+		.filter((r) => r.filePath === target)
+		.at(-1);
+	return Object.fromEntries(
+		(row?.metadata?.runners ?? []).map((r) => [r.id, r]),
+	);
 }
 
 describe("#4484 witness: a repeat write keeps an unfixed blocker pending", () => {
@@ -1485,6 +1575,61 @@ describe("#4484 witness, round 6: Gate B answers only for what its server sees",
 		await fixAndDrain(s);
 	}, 180_000);
 
+	// Recurrence (Q2, verify probe P43): the lsp runner answered, with a
+	// typescript warning, while the ast-grep server stayed unconfirmed. Only
+	// the runner half of round 7's void had a cell, so dropping the server
+	// half (mutation M3) kept the witness green while the blocker retired:
+	// an open gate and "Resolved" with the violation on disk.
+	it("keeps a napi blocker edited but still violating while lsp answers and the ast-grep server does not (row 26b, P43)", async () => {
+		const PRE = `${AG_PRE}export const unusedVar = 1;\n`;
+		const FIXED = PRE.replace("): unknown {", "): string {");
+		boundary.lsp.enabled = true;
+		const s = await openSession("p43", "src/p43.ts", FIXED);
+		await s.write(FIXED);
+		expect(await s.edit(PRE, [3])).toContain("🔴 STOP");
+		serverCovers();
+		boundary.ag.cutoff = true;
+		const w2 = await s.edit(
+			PRE.replace("key: string): unknown", "k2: string): unknown").replace(
+				"obj[key]",
+				"obj[k2]",
+			),
+			[3, 4],
+		);
+		// The lane's runner reached a verdict; only its server was silent.
+		expect((await lastRunnerRows("src/p43.ts")).lsp?.status).toBe("succeeded");
+		expect(w2).toMatch(/Still unfixed: 1 blocker reported earlier \(L3\)/);
+		expect(await s.commitBlocked()).toBe(true);
+		const turnEnd = await s.endTurn();
+		expect(turnEnd).toContain("STOP");
+		expect(turnEnd).not.toContain("Resolved this turn");
+		boundary.ag.cutoff = false;
+		boundary.ag.published = false;
+		await fixAndDrain(s);
+	}, 180_000);
+
+	// Recurrence (row 28, verify probe P40): a whole-file write left the
+	// violation while the ast-grep server did not answer. Gate B's skip
+	// covered the whole file, so the blocker retired at 7cecb0339: an open
+	// gate and "Resolved" with the violation on disk.
+	it("keeps a napi blocker on a whole-file write while the ast-grep server does not answer (row 28, P40)", async () => {
+		boundary.lsp.enabled = true;
+		const s = await openSession("p40", "src/p40.ts", AG_FIXED);
+		await s.write(AG_FIXED);
+		expect(await s.edit(AG_PRE, [3])).toContain("🔴 STOP");
+		serverCovers();
+		boundary.ag.cutoff = true;
+		const w2 = await s.write(AG_PRE.replace("plain =", "plain2 ="));
+		expect(w2).not.toMatch(/✓ .*clean/);
+		expect(await s.commitBlocked()).toBe(true);
+		const turnEnd = await s.endTurn();
+		expect(turnEnd).toContain("STOP");
+		expect(turnEnd).not.toContain("Resolved this turn");
+		boundary.ag.cutoff = false;
+		boundary.ag.published = false;
+		await fixAndDrain(s);
+	}, 180_000);
+
 	// Recurrence (N1 per entry): one write fixed a napi blocker inside the
 	// edit and left another outside it. Gate B's skip retired both; a
 	// runner-wide bare skip would keep both, and the fixed one, its text
@@ -1499,5 +1644,60 @@ describe("#4484 witness, round 6: Gate B answers only for what its server sees",
 		expect(w2).toMatch(/Still unfixed: 1 blocker reported earlier \(L6\)/);
 		expect(await s.commitBlocked()).toBe(true);
 		await fixAndDrain(s);
+	}, 180_000);
+});
+
+describe("#4484 witness, round 8: a covered skip counts only when its lane answered", () => {
+	const SH = "#!/bin/bash\necho one\nBAD_SH here\necho two\n";
+	const SH_FIXED = SH.replace("BAD_SH here\n", "");
+
+	// Recurrence (Q1, verify probe P39): shellcheck recorded a blocker while
+	// the lsp lane was off. Then the bash server's cover engaged, but the
+	// server did not answer. shellcheck's covered skip still counted as a
+	// verdict, so the gate opened and turn end said "Resolved" with the
+	// violation on disk.
+	it("keeps a shellcheck blocker when its covering bash server does not answer (row 32, P39)", async () => {
+		// The cover's gate walks PATH for the bash server's binaries (no
+		// spawn), so stub files stand in for them; spawns stay doubled.
+		const bin = path.join(tmpDir, "p39-bin");
+		fs.mkdirSync(bin, { recursive: true });
+		for (const tool of ["bash-language-server", "shellcheck"])
+			fs.writeFileSync(path.join(bin, tool), "#!/bin/sh\n", { mode: 0o755 });
+		const originalPath = process.env.PATH;
+		process.env.PATH = `${bin}${path.delimiter}${originalPath ?? ""}`;
+		try {
+			boundary.lsp.enabled = true;
+			const s = await openSession("p39", "scripts/p39.sh", SH_FIXED, {
+				"no-lsp": true,
+				"no-ast-grep": true,
+			});
+			expect(await s.write(SH.replace("echo one", "echo zero"))).toContain(
+				"🔴 STOP",
+			);
+			expect(await s.edit(SH, [2])).toMatch(
+				/Still unfixed: 1 blocker reported earlier \(L3\)/,
+			);
+			// The cover engages (in production: `no-lsp` turned off, or a gate
+			// probe that failed once and later succeeds), and the server is silent.
+			s.setFlag("no-lsp", false);
+			boundary.sh.silent = true;
+			const scans = boundary.sh.runs;
+			const w2 = await s.edit(SH.replace("echo two", "echo three"), [4]);
+			expect(boundary.sh.runs).toBe(scans);
+			// The cover engaged: shellcheck skipped without a scan.
+			expect((await lastRunnerRows("scripts/p39.sh")).shellcheck?.status).toBe(
+				"skipped",
+			);
+			expect(w2).toMatch(/Still unfixed: 1 blocker reported earlier \(L3\)/);
+			expect(await s.commitBlocked()).toBe(true);
+			const turnEnd = await s.endTurn();
+			expect(turnEnd).toContain("SC1072");
+			expect(turnEnd).not.toContain("Resolved this turn");
+			boundary.sh.silent = false;
+			s.setFlag("no-lsp", true);
+			await fixAndDrain(s);
+		} finally {
+			process.env.PATH = originalPath;
+		}
 	}, 180_000);
 });
