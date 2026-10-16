@@ -1731,7 +1731,25 @@
 						"Dedupe"
 					]
 				}
-			]
+			],
+			"pins": {
+				"Capacity": {
+					"value": "4",
+					"test": "tests/index-4483-first-write-seed-witness.test.ts",
+					"title": "bounds distinct captures and refuses a seed after cancellation"
+				},
+				"CheckCancellation": {
+					"value": "TRUE",
+					"test": "tests/index-4483-first-write-seed-witness.test.ts",
+					"title": "session reset cancels held captures before their unchanged bytes can seed",
+					"also": [
+						{
+							"test": "tests/index-4483-first-write-seed-witness.test.ts",
+							"title": "bounds distinct captures and refuses a seed after cancellation"
+						}
+					]
+				}
+			}
 		},
 		"snapshot-freshness": {
 			"notCodeChoice": [

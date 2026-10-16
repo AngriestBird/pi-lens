@@ -334,6 +334,16 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			reason:
 				"spawning the managed language server is the process boundary; the wrapper delegates every other command, the refused project-local candidate included, to the real launchLSP",
 		},
+	// 2026-10-16 (#4483): the first-write seed witness keeps every pi-lens
+	// module on the tool_call-to-turn-end chain real; only the language-server
+	// process behind the LSP capability adapter is stood in for, for the
+	// language-server guard cell (acceptance 5).
+	"in-process-mock:index-4483-first-write-seed-witness.test.ts::clients/lsp/capabilities":
+		{
+			detector: "in-process-mock",
+			reason:
+				"the language-server process is the boundary; the capability adapter is where every host witness stands in for it",
+		},
 	// 2026-10-15 (#4484): the host witness keeps every pi-lens module on the
 	// write-to-turn-end chain real; only the language-server process behind the
 	// LSP capability adapter is stood in for, answering from the bytes it gets.

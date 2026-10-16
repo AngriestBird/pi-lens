@@ -1687,6 +1687,25 @@ function formatStillUnfixedLine(
 	return `🔴 Still unfixed: ${count} blocker${count === 1 ? "" : "s"} reported earlier${where}.`;
 }
 
+/**
+ * #4483: the one line a write gets for linter errors the file already held
+ * before its first edit this session (`DispatchResult.preExisting`). They do
+ * not stop the agent or shut the commit gate. Bounded like the still-unfixed
+ * line: at most five line numbers, then a count.
+ */
+function formatPreExistingLine(
+	findings: readonly Diagnostic[],
+	filePath: string,
+): string {
+	const lines = [...new Set(inlineBlockerLines(findings, filePath))];
+	const shown = lines.slice(0, 5).map((line) => `L${line}`);
+	if (lines.length > shown.length)
+		shown.push(`+${lines.length - shown.length} more`);
+	const where = shown.length > 0 ? ` (${shown.join(", ")})` : "";
+	const count = findings.length;
+	return `ℹ Pre-existing: ${count} linter error${count === 1 ? "" : "s"} already in this file before its first edit this session${where}; not blocking.`;
+}
+
 export interface FormatPhaseResult {
 	formatChanged: boolean;
 	formattersUsed: string[];
@@ -2468,11 +2487,13 @@ async function analysePipeline(
 	// copy).
 	// #4484 round 3: a recorded blocker is matched only at its own position.
 	const heldBackBlockers = dispatchResult.heldBackBlockers ?? [];
+	// #4483: linter errors the file held before its first edit this session.
+	const seededFindings = dispatchResult.preExisting ?? [];
 	const ownFile = normalizeEphemeralMapKey(filePath);
 	const { carried: carriedBlockers, matched: matchedBlockers } =
 		carryRecordedBlockers(
 			ctx.priorInlineBlockers?.() ?? [],
-			[...dispatchResult.blockers, ...heldBackBlockers],
+			[...dispatchResult.blockers, ...heldBackBlockers, ...seededFindings],
 			dispatchResult,
 			filePath,
 			(d) =>
@@ -2493,9 +2514,14 @@ async function analysePipeline(
 	const promotedBlockers = heldBackBlockers.flatMap((d) =>
 		matchedBlockers.has(d) ? [] : [d],
 	);
+	// #4483: the record wins over the seed. A pre-existing copy that a recorded
+	// blocker matched is still that blocker (recorded on another write, or
+	// carried over a session boundary), so it stays recorded and unfixed.
+	const preExisting = seededFindings.filter((d) => !matchedBlockers.has(d));
+	const recordedSeeded = seededFindings.filter((d) => matchedBlockers.has(d));
 	const keptBlockers =
-		carriedBlockers.length > 0
-			? [...heldBackBlockers, ...carriedBlockers]
+		carriedBlockers.length > 0 || recordedSeeded.length > 0
+			? [...heldBackBlockers, ...recordedSeeded, ...carriedBlockers]
 			: heldBackBlockers;
 	const storedDiagnostics =
 		keptBlockers.length > 0
@@ -2671,6 +2697,9 @@ async function analysePipeline(
 	}
 	if (stillUnfixed.length > 0) {
 		output += `\n\n${formatStillUnfixedLine(stillUnfixed, filePath)}`;
+	}
+	if (preExisting.length > 0) {
+		output += `\n\n${formatPreExistingLine(preExisting, filePath)}`;
 	}
 	if (fixedCount > 0) {
 		const detail =
