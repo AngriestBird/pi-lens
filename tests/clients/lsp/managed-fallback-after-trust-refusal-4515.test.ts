@@ -397,6 +397,36 @@ describe("resolveAndLaunch trust-refusal surface (#4515)", () => {
 		expect(fs.existsSync(marker)).toBe(false);
 	});
 
+	it.skipIf(process.platform === "win32")(
+		"skips the runtime install after a refusal",
+		async () => {
+			// Step 4 runs a language runtime (go, gem, dotnet) in the project cwd,
+			// where a go.mod toolchain line or a nuget.config feed is project
+			// input; before #4515 a refusal never reached it.
+			setProjectTrustState("unknown");
+			const whichDir = (originalPath ?? "")
+				.split(path.delimiter)
+				.find((dir) => dir && fs.existsSync(path.join(dir, "which")));
+			expect(whichDir).toBeDefined();
+			process.env.PATH = [outsideBin, whichDir].join(path.delimiter);
+			const install = vi.fn(async () => true);
+			const { spec } = makeProject("fixture-lsp", false);
+
+			await expect(
+				resolveAndLaunch(
+					{
+						...spec,
+						managedToolId: undefined,
+						runtimeInstall: { runtimeCommand: "sh", install },
+					},
+					true,
+				),
+			).rejects.toThrow(/project-local binary refused/);
+
+			expect(install).not.toHaveBeenCalled();
+		},
+	);
+
 	it("records the refusal once per session per tool across repeated attempts", async () => {
 		setProjectTrustState("unknown");
 		seedStoreIntelephense();
