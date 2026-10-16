@@ -16,6 +16,7 @@ import {
 	headRecordKey,
 	isGitWorktree,
 	opaqueBaselineSlot,
+	shouldRunOpaqueRecovery,
 	type PendingOpaqueBaseline,
 } from "./opaque-mutation-scan.js";
 import { bounded } from "./deadline-utils.js";
@@ -661,7 +662,7 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 				runtime.readGuard?.retireChangedAuthorship?.(target);
 		if (typeof commandInput?.command === "string" && commandInput.command) {
 			const scanRoot = ctx.cwd ?? runtime.projectRoot;
-			if (scanRoot) {
+			if (scanRoot && shouldRunOpaqueRecovery(toolName, scanRoot)) {
 				const started = Date.now();
 				const baselineSlot = opaqueBaselineSlot(
 					scanRoot,

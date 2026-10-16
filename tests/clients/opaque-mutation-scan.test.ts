@@ -1,8 +1,7 @@
 /**
  * Opaque-mutation recovery (#2000 phase 2) — real-filesystem tests: actual
  * stat walks over temp trees and real diffs. This file pins the SEAM contract
- * only; handler wiring coverage (real node -e / python -c child writes through
- * handleToolCall/handleToolResult) is PR-B scope and NOT covered here.
+ * only; handler wiring coverage uses the same real child-process path.
  */
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
@@ -38,6 +37,16 @@ vi.mock("../../clients/opaque-mutation-scan.js", async (importOriginal) => {
 		recoverOpaqueChangesViaGit: vi.fn(actual.recoverOpaqueChangesViaGit),
 	};
 });
+
+const resyncGitChangedFiles = vi.hoisted(() =>
+	vi.fn(async () => new Map<string, string>()),
+);
+vi.mock("../../clients/lsp/capabilities.js", async (importOriginal) => ({
+	...(await importOriginal<
+		typeof import("../../clients/lsp/capabilities.js")
+	>()),
+	resyncGitChangedFiles,
+}));
 
 import { handleToolCall } from "../../clients/runtime-tool-call.js";
 import {
@@ -560,6 +569,87 @@ describe("recoverOpaqueChangesViaGit (real git repo)", () => {
 					true,
 				);
 			} finally {
+				if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+				else process.env.PILENS_DATA_DIR = previousDataDir;
+			}
+		},
+	);
+
+	it(
+		"keeps opaque recovery dispatch and LSP resync with read guard disabled (#4534)",
+		{ timeout: 15_000 },
+		async () => {
+			const previousDataDir = process.env.PILENS_DATA_DIR;
+			process.env.PILENS_DATA_DIR = path.join(repoDir, "data");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = repoDir;
+			runtime.setTelemetryIdentity({ sessionId: "opaque-no-read-guard" });
+			const target = path.join(repoDir, "src", "no-read-guard.ts");
+			const command = nodeScriptFile(
+				`require('fs').writeFileSync(${JSON.stringify(target)}, 'recovered\\n');`,
+			);
+			const noReadGuard = () => true;
+			resyncGitChangedFiles.mockClear();
+			const { runPipeline } = await import("../../clients/pipeline.js");
+			vi.mocked(runPipeline).mockClear();
+			try {
+				await runHandlerExpectingNoThrow(() =>
+					handleToolCall({
+						event: {
+							toolName: "bash",
+							input: { command },
+							toolCallId: "4534-no-read-guard",
+						},
+						ctx: { cwd: repoDir },
+						lensEnabled: true,
+						getFlag: noReadGuard,
+						dbg: () => {},
+						runtime,
+						cacheManager: new CacheManager(false),
+						ensureLSPConfigInitialized: async () => {},
+						updateLspStatus: () => {},
+						resetLSPService: () => {},
+					} as Parameters<typeof handleToolCall>[0]),
+				);
+				execSync(`node "${command}"`, { cwd: repoDir });
+				await handleToolResult({
+					event: {
+						toolName: "bash",
+						input: { command },
+						toolCallId: "4534-no-read-guard",
+						content: [{ type: "text", text: "done" }],
+					},
+					getFlag: noReadGuard,
+					dbg: () => {},
+					runtime,
+					readGuard: runtime.readGuard,
+					cacheManager: new CacheManager(false),
+					biomeClient: {},
+					ruffClient: {},
+					testRunnerClient: {},
+					metricsClient: {},
+					resetLSPService: () => {},
+					agentBehaviorRecord: () => [],
+					formatBehaviorWarnings: () => "",
+				} as unknown as Parameters<typeof handleToolResult>[0]);
+
+				expect(
+					vi
+						.mocked(runPipeline)
+						.mock.calls.some(([ctx]) =>
+							String(ctx?.filePath).endsWith("no-read-guard.ts"),
+						),
+				).toBe(true);
+				await vi.waitFor(() =>
+					expect(resyncGitChangedFiles).toHaveBeenCalledWith(
+						expect.arrayContaining([normalizeMapKey(target)]),
+					),
+				);
+				expect(runtime.readGuard.exportAuthorship().written).not.toContain(
+					normalizeFilePath(target),
+				);
+			} finally {
+				fs.rmSync(command, { force: true });
 				if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 				else process.env.PILENS_DATA_DIR = previousDataDir;
 			}
