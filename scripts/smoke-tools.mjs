@@ -55,6 +55,7 @@ import https from "node:https";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { assertEvaluated } from "./lib/assert-evaluated.mjs";
 import { gitExecFileSync } from "./lib/git-fixture-env.mjs";
 import {
 	adoptFixtureProjectTrust,
@@ -1953,12 +1954,18 @@ async function ensureSmokeLombokJar(workspace, verbose) {
  * installed nothing and proved nothing", which must be red.
  */
 export function passFloorBreach(rows, minPass) {
-	if (minPass === null || minPass === undefined) return null;
-	const passed = rows.filter((r) => r.state === "pass").length;
-	if (passed >= minPass) return null;
+	if (minPass === null || minPass === undefined || minPass <= 0) return null;
+	// The comparison is the shared proof-of-work helper's (#4518); a NaN floor
+	// (`--min-pass=abc`) makes it throw, which main() turns into exit 2: red.
+	const verdict = assertEvaluated({
+		producer: "smoke-tools",
+		evaluated: rows.filter((r) => r.state === "pass").length,
+		expectedAtLeast: minPass,
+	});
+	if (verdict.ok) return null;
 	const unavailable = rows.filter((r) => r.state === "skip").length;
 	return `
-✗ pass floor: ${passed} runner(s) passed, at least ${minPass} required (${unavailable} unavailable). A lane that installs nothing proves nothing — treat this as red, not as flaky tooling.`;
+✗ pass floor: ${verdict.evaluated} runner(s) passed, at least ${verdict.floor} required (${unavailable} unavailable). A lane that installs nothing proves nothing — treat this as red, not as flaky tooling.`;
 }
 
 // A transient/offline registry condition — the runner has no network, or the

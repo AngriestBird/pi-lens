@@ -835,7 +835,14 @@ file-scoped worklist and receives no project-wide scanner output.
   to `scripts/lib/assert-evaluated.mjs` (one pure count function per producer,
   called by the script and by its test); the nightly's floor step fails below
   each measured floor and when a matrix cell classified at HEAD turned
-  `unknown` (`tests/config/nightly-evaluated-floors.test.ts`).
+  `unknown` (`tests/config/nightly-evaluated-floors.test.ts`). Every other
+  `continue-on-error` producer either calls the same helper (`--count
+  <producer>=<n> --floor <m>` from a workflow step; `--min-pass`, the
+  complexity file count and the shuffle census's missing starts already do) or
+  carries a `# No floor (<issue>): <reason>` header above its job; a floor comes
+  from a run recorded in `tests/fixtures/nightly-floors/measurements.json`.
+  The helper must stay importable without `dist/` (the refresh-PR job runs it
+  on a fresh checkout).
 - LSP service generations, workspace-sweep holds, and repair latches use
   versioned process singletons. Reset tears down the old generation before a
   replacement can spawn. Idle eviction is lease-guarded and clears ownership
