@@ -137,7 +137,8 @@ async function drainWriter(
 /**
  * Wait for every known background writer that can recreate a fixture root
  * after its test removed it: review-graph persists, project-snapshot body
- * persists, and extension-log appends. Each costs nothing when idle.
+ * persists, extension-log appends, and the resident jscpd scan (#4505). Each
+ * costs nothing when idle.
  *
  * The modules are loaded here, at call time, never at the top of this file,
  * so a file that never touched a writer pays only the import. Skipped under
@@ -165,6 +166,10 @@ export async function drainBackgroundWritesForTests(): Promise<void> {
 		() => import("../../clients/extension-log.js"),
 		["flushExtensionLog"],
 	);
+	// #4505: a session_start jscpd scan is fire-and-forget, so a file that ends
+	// right after its last turn strands the report directory (the 4403 cascade
+	// file, in the pre-push batch). Every drained cleanup waits for it.
+	await drainResidentJscpdScans();
 }
 
 /**
