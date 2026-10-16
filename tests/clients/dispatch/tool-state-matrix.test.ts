@@ -68,6 +68,73 @@ import { setupTestEnvironment } from "../test-utils.js";
 
 const { safeSpawnAsync } = vi.hoisted(() => ({ safeSpawnAsync: vi.fn() }));
 
+const childProcessWindow = vi.hoisted(() => {
+	let active = false;
+	const calls: Array<{ method: string; command: unknown; args: unknown[] }> =
+		[];
+	const methods = [
+		"spawn",
+		"spawnSync",
+		"execFile",
+		"execFileSync",
+		"exec",
+		"execSync",
+		"fork",
+	] as const;
+
+	function begin() {
+		calls.length = 0;
+		active = true;
+	}
+
+	function end() {
+		active = false;
+	}
+
+	function assertNoRealCall(method: string, args: unknown[]) {
+		if (!active) return;
+		const command = args[0];
+		calls.push({ method, command, args: [...args.slice(1)] });
+		const renderedArgs = args.slice(1).map((arg) => {
+			try {
+				return JSON.stringify(arg);
+			} catch {
+				return String(arg);
+			}
+		});
+		const stack = (new Error().stack ?? "").split("\n").slice(2, 6).join("\n");
+		throw new Error(
+			`Unexpected real child_process.${method} during matrix cell: command=${String(command)} args=[${renderedArgs.join(", ")} ]\n${stack}`,
+		);
+	}
+
+	function wrap(actual: typeof import("node:child_process")) {
+		const wrapped = { ...actual };
+		for (const method of methods) {
+			const original = actual[method];
+			wrapped[method] = function (this: unknown, ...args: unknown[]) {
+				assertNoRealCall(method, args);
+				return Reflect.apply(original, this, args) as never;
+			} as never;
+		}
+		return wrapped;
+	}
+
+	return { begin, end, wrap };
+});
+
+// Recurrence: biome-check-json read clean on CI 2026-10-16 with no probe spawn.
+vi.mock("node:child_process", async (importOriginal) =>
+	childProcessWindow.wrap(
+		await importOriginal<typeof import("node:child_process")>(),
+	),
+);
+vi.mock("child_process", async (importOriginal) =>
+	childProcessWindow.wrap(
+		await importOriginal<typeof import("node:child_process")>(),
+	),
+);
+
 // CI 2026-10-16 on c6dcf906c: the runner image has Go at an absolute
 // candidate, and candidate-probe.ts accepts an absolute candidate through
 // `existsSync` without spawning it, so the go-vet probe cells read clean.
@@ -418,34 +485,36 @@ describe("tool-state matrix (#4522)", () => {
 							? `${cell.name} (${fixture.caseName})`
 							: cell.name;
 					it(`${label} reads ${cell.expect}`, { timeout: 30000 }, async () => {
-						vi.resetModules();
-						const { resetGoAvailability } =
-							await import("../../../clients/go-client.js");
-						const { resetSpawnTimeoutCooldowns } =
-							await import("../../../clients/spawn-timeout-cooldown.js");
-						// Go availability is process-scoped; reset the singleton before
-						// loading the runner graph so every import shares this instance.
-						resetGoAvailability();
-						// The timeout cooldown is also process-scoped on globalThis. The
-						// probe-timeout cell immediately before a clean/dirty cell must
-						// not make the next fresh module graph skip its work spawn.
-						resetSpawnTimeoutCooldowns();
-						const dispatcher =
-							await import("../../../clients/dispatch/dispatcher.js");
-						const { registerDefaultRunners } =
-							await import("../../../clients/dispatch/runners/index.js");
-						const { FactStore } =
-							await import("../../../clients/dispatch/fact-store.js");
-						const { reachedNoVerdict } =
-							await import("../../../clients/dispatch/types.js");
-						const spawn = await import("../../../clients/safe-spawn.js");
-						const installer =
-							await import("../../../clients/installer/index.js");
-						installer.resetPathWalkMemo();
-						installer.resetResolvedPathCache();
-						installer.resetProbeCacheStateForTesting();
-						const env = setupTestEnvironment("pi-lens-tool-state-");
+						childProcessWindow.begin();
+						let env: ReturnType<typeof setupTestEnvironment> | undefined;
 						try {
+							vi.resetModules();
+							const { resetGoAvailability } =
+								await import("../../../clients/go-client.js");
+							const { resetSpawnTimeoutCooldowns } =
+								await import("../../../clients/spawn-timeout-cooldown.js");
+							// Go availability is process-scoped; reset the singleton before
+							// loading the runner graph so every import shares this instance.
+							resetGoAvailability();
+							// The timeout cooldown is also process-scoped on globalThis. The
+							// probe-timeout cell immediately before a clean/dirty cell must
+							// not make the next fresh module graph skip its work spawn.
+							resetSpawnTimeoutCooldowns();
+							const dispatcher =
+								await import("../../../clients/dispatch/dispatcher.js");
+							const { registerDefaultRunners } =
+								await import("../../../clients/dispatch/runners/index.js");
+							const { FactStore } =
+								await import("../../../clients/dispatch/fact-store.js");
+							const { reachedNoVerdict } =
+								await import("../../../clients/dispatch/types.js");
+							const spawn = await import("../../../clients/safe-spawn.js");
+							const installer =
+								await import("../../../clients/installer/index.js");
+							installer.resetPathWalkMemo();
+							installer.resetResolvedPathCache();
+							installer.resetProbeCacheStateForTesting();
+							env = setupTestEnvironment("pi-lens-tool-state-");
 							fs.cpSync(
 								path.join(repoRoot, fixture.provenance.workspace),
 								env.tmpDir,
@@ -462,7 +531,7 @@ describe("tool-state matrix (#4522)", () => {
 							const spawned: Array<{ call: Call; args: string[] }> = [];
 							safeSpawnAsync.mockImplementation(
 								async (cmd: string, args: string[]) => {
-									const call: Call = isWork(args, fixture, env.tmpDir)
+									const call: Call = isWork(args, fixture, answerCtx.workspace)
 										? "work"
 										: "probe";
 									spawned.push({ call, args });
@@ -516,7 +585,8 @@ describe("tool-state matrix (#4522)", () => {
 							}
 							expect(verdict, context).toBe(cell.expect);
 						} finally {
-							env.cleanup();
+							childProcessWindow.end();
+							env?.cleanup();
 						}
 					});
 				}
