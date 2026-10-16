@@ -146,7 +146,6 @@
 		"clients/lsp/service-tsserver-sync-confirm.test.ts": 3,
 		"clients/lsp/shutdown-live-wedged-process.test.ts": 2,
 		"clients/lsp/shutdown-wedged-connection.test.ts": 1,
-		"clients/lsp/silent-clean-confirm.test.ts": 1,
 		"clients/lsp/workspace-diagnostics-sweep-batch-open.test.ts": 2,
 		"clients/performance-report-occupancy.test.ts": 1,
 		"clients/pipeline-lsp-sync.test.ts": 5,

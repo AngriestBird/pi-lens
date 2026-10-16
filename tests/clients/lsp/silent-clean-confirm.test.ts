@@ -48,11 +48,7 @@ function makeServer(id: string, ext: string, root: string) {
  * `undefined` right at its deadline, exactly like a real client's wait
  * timing out with nothing having arrived.
  */
-function makeSilentPushOnlyClient(
-	serverId: string,
-	root: string,
-	fakeClockStart?: () => number,
-) {
+function makeSilentPushOnlyClient(serverId: string, root: string) {
 	const waitCalls: Array<{ filePath: string; ms: number }> = [];
 	return {
 		client: {
@@ -72,13 +68,6 @@ function makeSilentPushOnlyClient(
 			notify: { open: vi.fn(async () => {}) },
 			waitForDiagnostics: vi.fn(async (filePath: string, ms: number) => {
 				waitCalls.push({ filePath, ms });
-				if (fakeClockStart) {
-					// Resolve at this call's own deadline on the faked clock. Waits
-					// share the touch's start, so elapsed is the longest budget, not
-					// the sum of the concurrent ones.
-					vi.setSystemTime(Math.max(Date.now(), fakeClockStart() + ms));
-					return undefined;
-				}
 				await new Promise<void>((resolve) => {
 					const t = setTimeout(resolve, ms);
 					t.unref?.();
@@ -501,25 +490,35 @@ describe("touchFile capability-aware AGGREGATE wait (#814)", () => {
 		getServersForFileWithConfig.mockImplementation((fp: string) =>
 			fp.endsWith(".ts") ? [marksman, typescript] : [],
 		);
-		// Only Date is faked: each silent wait advances the clock to its own
-		// budget instead of sleeping through it.
-		vi.useFakeTimers({ toFake: ["Date"] });
-		const startedAt = Date.now();
 		createLSPClient.mockImplementation(async (opts: { serverId: string }) => {
-			return makeSilentPushOnlyClient(opts.serverId, tmp, () => startedAt)
-				.client;
+			return makeSilentPushOnlyClient(opts.serverId, tmp).client;
 		});
 
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const service = new LSPService();
 
-		const result = await service.touchFile(filePath, "const x = 1;\n", {
-			diagnostics: "document",
-			collectDiagnostics: true,
-			clientScope: "all",
-			source: "lens_diagnostics_full",
-		});
-		const elapsedMs = Date.now() - startedAt;
+		// The stubs' silent waits sleep on the faked setTimeout; setImmediate
+		// stays real so the touch's own file I/O can interleave with the pump.
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+		const startedAt = Date.now();
+		let finishedAt: number | undefined;
+		const touch = service
+			.touchFile(filePath, "const x = 1;\n", {
+				diagnostics: "document",
+				collectDiagnostics: true,
+				clientScope: "all",
+				source: "lens_diagnostics_full",
+			})
+			.then((settled) => {
+				finishedAt = Date.now();
+				return settled;
+			});
+		for (let step = 0; step < 100 && finishedAt === undefined; step++) {
+			await vi.advanceTimersByTimeAsync(50);
+			await new Promise((resolve) => setImmediate(resolve));
+		}
+		const result = await touch;
+		const elapsedMs = (finishedAt ?? Number.NaN) - startedAt;
 
 		expect(Array.isArray(result?.diags)).toBe(true);
 		expect(result?.diags).toHaveLength(0);
