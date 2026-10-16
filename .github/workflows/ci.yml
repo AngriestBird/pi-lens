@@ -381,8 +381,9 @@ jobs:
       # reds so the job row shows it. Flip plan: when 20 consecutive PR runs
       # show no false red, move this step to its own job named
       # `Changed tests shuffled` and add it to the required set. The script
-      # bounds itself to 6 min (BUDGET_MS), 2 min under this step's cap; the
-      # targeted run before it takes ~4 min, so the job stays under its 15.
+      # bounds itself to 7 min (BUDGET_MS), 1 min under this step's cap; the
+      # steps before it take ~5.5 min, so the job stays under its 15. Files the
+      # PR adds run alone first; the time budget is the only bound (#4456).
       # The SHAs reach the script through `env`, never the `run:` text.
       - name: Changed test files, alone and shuffled
         if: ${{ !cancelled() }}

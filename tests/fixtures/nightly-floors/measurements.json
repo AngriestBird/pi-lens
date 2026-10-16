@@ -1,0 +1,91 @@
+{
+	"_comment": "Raw nightly log lines behind the floors in scripts/lib/assert-evaluated.mjs and the LSP handshake --min-pass in .github/workflows/tool-smoke.yml (#4514). Measuring command: `gh run view <run> --log`, filtered to the lines below (timestamp prefix removed). `healthy` is the last good run before #4248 (2026-10-09 14:01Z); `degraded` is the first nightly after the regression that read green (2026-10-15). tests/config/nightly-evaluated-floors.test.ts pins every floor above the degraded count and at or below the healthy one.",
+	"command": "gh run view <run> --log",
+	"producers": {
+		"characterize-lsp": {
+			"healthy": {
+				"run": 37867865627,
+				"evaluated": 46,
+				"lines": [
+					"  pull-capable (clean confirmable via pull): 9",
+					"  push-only (needs re-publish-empty, else silent → budget-bound): 37"
+				]
+			},
+			"degraded": {
+				"run": 38722270673,
+				"evaluated": 21,
+				"lines": [
+					"  pull-capable (clean confirmable via pull): 2",
+					"  push-only (needs re-publish-empty, else silent → budget-bound): 19"
+				]
+			}
+		},
+		"probe-clean-signal": {
+			"healthy": {
+				"run": 37867865627,
+				"evaluated": 42,
+				"lines": [
+					"  Tier 2  (publishes-versioned — affirmative + currency-proven):        11",
+					"  Tier 2* (publishes-unversioned — early-returns, currency correlated): 19",
+					"  Tier 3  (silent on clean — budget-wait, the #458 target set):         3",
+					"  pull-capable (clean confirmable via pull): 9"
+				]
+			},
+			"degraded": {
+				"run": 38722270673,
+				"evaluated": 21,
+				"lines": [
+					"  Tier 2  (publishes-versioned — affirmative + currency-proven):        9",
+					"  Tier 2* (publishes-unversioned — early-returns, currency correlated): 7",
+					"  Tier 3  (silent on clean — budget-wait, the #458 target set):         3",
+					"  pull-capable (clean confirmable via pull): 2"
+				]
+			}
+		},
+		"server-capabilities": {
+			"healthy": {
+				"run": 37867865627,
+				"evaluated": 41,
+				"lines": [
+					"Wrote docs/servercapabilities.md (41 servers captured this run, 8 unavailable)."
+				]
+			},
+			"degraded": {
+				"run": 38722270673,
+				"evaluated": 16,
+				"lines": [
+					"Wrote docs/servercapabilities.md (16 servers captured this run, 33 unavailable)."
+				]
+			}
+		},
+		"measure-lsp-idle-eviction": {
+			"healthy": {
+				"run": 37867865627,
+				"evaluated": 35,
+				"lines": [
+					"48 registry servers: 33 eligible, 0 vetoed, 2 inconclusive, 13 unavailable (0 not reached: budget)."
+				]
+			},
+			"degraded": {
+				"run": 38722270673,
+				"evaluated": 15,
+				"lines": [
+					"49 registry servers: 7 eligible, 0 vetoed, 8 inconclusive, 34 unavailable (0 not reached: budget)."
+				]
+			}
+		}
+	},
+	"lspHandshake": {
+		"note": "The handshake layer passed 46 rows in BOTH runs: it adopts trust (#4262), so its --min-pass guards a different failure (an install lane that proved nothing), not this regression.",
+		"healthy": {
+			"run": 37867865627,
+			"passed": 46,
+			"line": "46 passed · 0 failed · 0 setup-failed · 8 skipped (tool/config unavailable)"
+		},
+		"degraded": {
+			"run": 38722270673,
+			"passed": 46,
+			"line": "46 passed · 0 failed · 0 setup-failed · 9 skipped (tool/config unavailable)"
+		}
+	}
+}

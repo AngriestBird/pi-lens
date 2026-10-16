@@ -51,6 +51,7 @@ import {
 	getToolPath,
 } from "../installer/index.js";
 import * as installer from "../installer/index.js";
+import { commandSearchReachesProject } from "../package-manager.js";
 import {
 	classifyProbeFailure,
 	describeInstallAttempt,
@@ -1029,8 +1030,12 @@ export async function resolveAndLaunch(
 		);
 		trackRuntimeFailure(failure.err);
 	}
+	// #4515: a project-local candidate refused by trust is repairable too: the
+	// managed install lives outside the project, so it needs no trust.
 	const hasOnlyRepairableCandidateFailures = candidateFailures.every(
-		(failure) => hasSpawnFailureKind(failure.err, "tool-not-found"),
+		(failure) =>
+			hasSpawnFailureKind(failure.err, "tool-not-found") ||
+			hasSpawnFailureKind(failure.err, "trust-refused"),
 	);
 	if (!hasOnlyRepairableCandidateFailures) {
 		if (lastRuntimeFailure) throw lastRuntimeFailure;
@@ -1052,8 +1057,26 @@ export async function resolveAndLaunch(
 				globalInstallDisabled: isLspInstallDisabled(),
 			},
 		});
+		// A trust refusal is not tool-not-found: keep surfacing it.
+		if (lastRuntimeFailure) throw lastRuntimeFailure;
 		return undefined;
 	}
+
+	// #4515: after a trust refusal the repair must not run project code. The
+	// installer spawns bare names (its PATH rung, npm and Python probes, the
+	// package manager), so when a refused bare candidate or a PATH entry reaches
+	// the project, only pi-lens's own store is read and nothing is installed.
+	// Step 4 runs a runtime in the project cwd, so it is skipped after any
+	// refusal.
+	const isRefusal = (failure: (typeof candidateFailures)[number]): boolean =>
+		hasSpawnFailureKind(failure.err, "trust-refused");
+	const trustRefused = candidateFailures.some(isRefusal);
+	const storeOnly =
+		trustRefused &&
+		(candidateFailures.some(
+			(failure) => isRefusal(failure) && isSimpleCommand(failure.command),
+		) ||
+			commandSearchReachesProject(spec.cwd));
 
 	// Step 3 — managed install via installer registry
 	if (spec.managedToolId) {
@@ -1070,9 +1093,9 @@ export async function resolveAndLaunch(
 						? failedCandidate.err
 						: undefined,
 				spawnFailure: {
-					kind: hasSpawnFailureKind(failedCandidate?.err, "tool-not-found")
-						? "tool-not-found"
-						: undefined,
+					kind: (["tool-not-found", "trust-refused"] as const).find((kind) =>
+						hasSpawnFailureKind(failedCandidate?.err, kind),
+					),
 				},
 			},
 			{ command: failedCandidate?.command },
@@ -1088,12 +1111,25 @@ export async function resolveAndLaunch(
 			producer: "lsp-launch",
 			evidence: classifiedFailure.evidence,
 		});
+		if (storeOnly) {
+			recordDegradationOnce({
+				kind: "lsp-registry-decision",
+				subject: `store-only-repair:${spec.managedToolId}`,
+				reason:
+					"LSP repair read only the pi-lens tool store: after a trust refusal a bare-name lookup reaches the project, so nothing was probed on PATH or installed",
+				metadata: { field: "store-only-repair", tool: spec.managedToolId },
+			});
+		}
 		logSessionStart(
-			`lsp launch ensure-tool start tool=${spec.managedToolId} cwd=${spec.cwd}`,
+			`lsp launch ensure-tool start tool=${spec.managedToolId} cwd=${spec.cwd} storeOnly=${storeOnly}`,
 		);
 		const installStartedAt = Date.now();
-		const installed = await ensureTool(spec.managedToolId);
-		const installAttempt = captureInstallAttempt(spec.managedToolId);
+		const installed = await (storeOnly
+			? getToolPath(spec.managedToolId, { storeOnly: true })
+			: ensureTool(spec.managedToolId));
+		const installAttempt = storeOnly
+			? undefined
+			: captureInstallAttempt(spec.managedToolId);
 		if (staleLaunch(generation, `${toolLabel}:ensureTool`)) {
 			return undefined;
 		}
@@ -1272,7 +1308,7 @@ export async function resolveAndLaunch(
 	}
 
 	// Step 4 — language-native runtime install (go install, gem install, …)
-	const runtimeInstall = spec.runtimeInstall;
+	const runtimeInstall = trustRefused ? undefined : spec.runtimeInstall;
 	const runtimeAvailable = runtimeInstall
 		? await isOnPath(runtimeInstall.runtimeCommand)
 		: false;

@@ -44,6 +44,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { writeEvaluatedRecord } from "./lib/assert-evaluated.mjs";
 import {
 	COMPARABLE_FIRST_PUBLISH,
 	DRIFT_SUMMARY_PATH,
@@ -55,7 +56,9 @@ import {
 	targetLangForFixture,
 } from "./lib/clean-signal.mjs";
 import {
+	adoptFixtureProjectTrust,
 	bootstrapFixtureWorkspace,
+	fixtureTrustRefusal,
 	withScratchHome,
 } from "./lib/lsp-fixture-workspace.mjs";
 import { createProbeFixture } from "./lib/probe-fixture.mjs";
@@ -93,6 +96,10 @@ const { getServersForFileWithConfig, initLSPConfig } = await imp(
 const { SERVER_DIAGNOSTIC_STRATEGIES } = await imp(
 	"dist/clients/lsp/wait-policy/strategies.js",
 );
+// #4514: this script is a standalone host, not pi. Adopt project trust before
+// the first touch, or the launch gate refuses every project-local and
+// project-code server and the rows read as unavailable.
+await adoptFixtureProjectTrust({ repoRoot });
 let ensureTool;
 if (install) {
 	({ ensureTool } = await imp("dist/clients/installer/index.js"));
@@ -197,6 +204,7 @@ const probeFixture = createProbeFixture({
 	initLSPConfig,
 	getServersForFileWithConfig,
 	bootstrapFixtureWorkspace,
+	trustRefusal: () => fixtureTrustRefusal(repoRoot),
 	drainPublishTrace,
 	pubLogSize,
 	sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
@@ -352,6 +360,9 @@ console.log(
 	`  unknown (slow/absent/ambiguous — conservative, not guessed):          ${unk}`,
 );
 console.log("  n/a (pull) rows are Tier 1 by protocol (#240), not probed.\n");
+// #4514: the step exits 0 by design, so the nightly's floor step reads this.
+// A pull row is answered by protocol; a push row is answered when classified.
+writeEvaluatedRecord({ producer: "probe-clean-signal", input: rows });
 // #3310 first-publish census: which push servers answer didOpen with an EMPTY
 // set before their real one. `emptyFirstPublish: "indexing"` in
 // wait-policy/strategies.ts is derived from THIS measurement, and
