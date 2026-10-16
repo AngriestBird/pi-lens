@@ -82,4 +82,12 @@ describe("ruleCanMatchText", () => {
 		expect(ruleCanMatchText(r, "run(code)")).toBe(false);
 		expect(ruleCanMatchText(rule({ matches: "missing" }, {}), "")).toBe(true);
 	});
+
+	it("treats a null `utils` as no util and still runs the rule", () => {
+		// #4501 r1: a bare `utils:` key loads as null; Object.hasOwn(null, ...) threw
+		// out of evaluateAstGrepRules and dropped every ast-grep finding for the file.
+		expect(ruleCanMatchText(rule({ matches: "foo" }, null as never), "")).toBe(
+			true,
+		);
+	});
 });

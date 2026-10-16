@@ -65,7 +65,7 @@ function requirementOf(
 	const name = node.matches;
 	if (
 		typeof name === "string" &&
-		utils !== undefined &&
+		utils != null &&
 		Object.hasOwn(utils, name) &&
 		!resolving.has(name)
 	) {
