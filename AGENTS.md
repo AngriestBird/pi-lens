@@ -829,7 +829,7 @@ file-scoped worklist and receives no project-wide scanner output.
   `continue-on-error` producer either calls the same helper (`--count
   <producer>=<n> --floor <m>` from a workflow step; `--min-pass`, the
   complexity file count and the shuffle census's missing starts already do) or
-  carries a `# No floor (#4518): <reason>` header above its job; a floor comes
+  carries a `# No floor (<issue>): <reason>` header above its job; a floor comes
   from a run recorded in `tests/fixtures/nightly-floors/measurements.json`.
   The helper must stay importable without `dist/` (the refresh-PR job runs it
   on a fresh checkout).
