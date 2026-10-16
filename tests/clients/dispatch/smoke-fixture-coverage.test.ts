@@ -746,6 +746,10 @@ describe("tier-1 parser lane", () => {
 		expect(passFloorBreach(unavailable, 1)).toBeNull();
 		// No floor declared is the pre-existing behaviour, unchanged.
 		expect(passFloorBreach(unavailable, null)).toBeNull();
+		// `--min-pass=0` (and below) is "no floor", not an invalid one: the helper
+		// rejects a floor under 1, so the guard in front of it carries this.
+		expect(passFloorBreach(unavailable, 0)).toBeNull();
+		expect(passFloorBreach(unavailable, -1)).toBeNull();
 		// The message keeps its counts (the helper's record supplies them).
 		expect(passFloorBreach(unavailable, 3)).toContain(
 			"1 runner(s) passed, at least 3 required (2 unavailable)",

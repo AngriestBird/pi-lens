@@ -259,13 +259,14 @@ const nonLsp = (
 			};
 			"swift-crash-watch": { healthy: { evaluated: number } };
 			"complexity-report": { healthy: { evaluated: number } };
+			"windows-vitest": { healthy: { evaluated: number; line: string } };
 		};
 	}
 ).nonLspFloors;
-const withinMeasured = (floor: number, measured: number) => {
+const withinMeasured = (floor: number, measured: number, fraction = 0.5) => {
 	expect(floor).toBeGreaterThan(0);
 	expect(floor).toBeLessThanOrEqual(measured);
-	expect(floor).toBeGreaterThanOrEqual(measured / 2);
+	expect(floor).toBeGreaterThanOrEqual(measured * fraction);
 };
 const loadWorkflow = (file: string) =>
 	yaml.load(read(`.github/workflows/${file}`)) as {
@@ -293,9 +294,13 @@ describe("the floors outside the LSP nightly are measured and wired (#4518)", ()
 		expect(floor.run).toContain('"$RUNNER_TEMP/apfs-anchors.json"');
 		expect(floor.run).toContain("j.numPassedTests+j.numFailedTests");
 		expect(floor.run).toMatch(/--count "apfs-anchors=\$\{count\}"/);
+		// 100 of the measured 223 is a decision (review r1 F5): the leg is
+		// required, the step exists to catch a run that executed nothing, and a
+		// 10% margin would red it on a legitimate removal of 24 tests.
 		withinMeasured(
 			floorOf(floor.run, /--floor (\d+)/),
 			nonLsp["apfs-anchors"].healthy.evaluated,
+			0.4,
 		);
 		expect(nonLsp["apfs-anchors"].healthy.line).toContain(
 			`${nonLsp["apfs-anchors"].healthy.evaluated} passed`,
@@ -353,11 +358,17 @@ describe("the floors outside the LSP nightly are measured and wired (#4518)", ()
 		);
 	});
 
-	it("keeps the complexity pipe honest (the default shell has no pipefail)", () => {
-		const job = loadWorkflow("lint.yml").jobs.complexity;
-		const run = step(job, "Generate complexity report").run ?? "";
-		expect(run).toMatch(
-			/^\s*set -o pipefail\s*\n\s*node scripts\/complexity-report\.mjs \| tee /m,
+	it("floors the Windows subset on tests executed, in the step that already reds a failed outcome", () => {
+		const job = loadWorkflow("ci.yml").jobs["unit-tests-windows"];
+		const failStep = step(job, "Fail Windows advisory");
+		expect(failStep["continue-on-error"]).toBeUndefined();
+		expect(failStep.run).toContain('--count "windows-vitest=${executed}"');
+		withinMeasured(
+			floorOf(failStep.run, /--floor (\d+)/),
+			nonLsp["windows-vitest"].healthy.evaluated,
+		);
+		expect(nonLsp["windows-vitest"].healthy.line).toContain(
+			`${nonLsp["windows-vitest"].healthy.evaluated} passed`,
 		);
 	});
 

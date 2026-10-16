@@ -645,6 +645,9 @@ export const wallClockBudgetInclude = [
 	// #4030: the real `gh` process boundary is the subject of the retry test;
 	// serialize it with other child-process admissions.
 	"tests/scripts/download-test-history-artifacts.test.ts",
+	// #4518: the evaluated-floor steps are shell text; only a real bash running
+	// the extracted `run:` shows the exit-code mapping, `set +e` and pipefail.
+	"tests/scripts/floor-steps-executed.test.ts",
 	"tests/scripts/git-fixture-env.test.ts",
 	// #2699: the subject is the guard's own stdin/exit-code/stderr contract --
 	// what Claude Code actually invokes for a PreToolUse hook. No in-process

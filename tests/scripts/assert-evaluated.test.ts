@@ -521,6 +521,11 @@ describe("--count: a workflow step's own count against a floor (#4518)", () => {
 		expect(main(["--count", "swift-crash-watch=1"])).toBe(2);
 		expect(main(["--count", "swift-crash-watch=1", "--floor", "0"])).toBe(2);
 		expect(main(["--count", "swift-crash-watch=1", "--floor", "x"])).toBe(2);
+		// `--count` with no value, or a flag where its value belongs, is a usage
+		// error: it used to be dropped silently (`--docs --count` exited 0).
+		expect(main(["--count"])).toBe(2);
+		expect(main(["--count", "--floor", "5"])).toBe(2);
+		expect(main(["--docs", "--count"], () => null)).toBe(2);
 	});
 
 	it("prints the failing row in the shape the red-night notifier lists, and a step-summary row", () => {

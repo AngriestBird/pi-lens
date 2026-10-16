@@ -166,9 +166,15 @@ export function main(argv, headText = gitHeadText, root = ".") {
 	const wantDocs = argv.includes("--docs");
 	const countAt = argv.indexOf("--count");
 	const floorAt = argv.indexOf("--floor");
-	const wantCount = countAt >= 0 && argv[countAt + 1] !== undefined;
+	// `--count` with no value (or another flag in its place) is a usage error,
+	// never a mode that silently does nothing (#4518 review F-nit).
+	const countValue = countAt >= 0 ? argv[countAt + 1] : undefined;
+	const countMalformed =
+		countAt >= 0 && (countValue === undefined || countValue.startsWith("--"));
+	const wantCount = countAt >= 0 && !countMalformed;
 	const floor = floorAt >= 0 ? Number(argv[floorAt + 1]) : Number.NaN;
 	if (
+		countMalformed ||
 		(!wantRecords && !wantDocs && !wantCount) ||
 		(wantCount && !(Number.isInteger(floor) && floor >= 1))
 	) {

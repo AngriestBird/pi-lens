@@ -133,6 +133,16 @@
 				"evaluated": 521,
 				"line": "[evaluated] complexity-report: 521"
 			}
+		},
+		"windows-vitest": {
+			"producer": "ci.yml unit-tests-windows (advisory), step 'Fail Windows advisory when Vitest fails'",
+			"evaluated": "tests executed (passed plus failed; skipped excluded)",
+			"healthy": {
+				"run": 38875637520,
+				"job": "Unit tests Windows (advisory)",
+				"evaluated": 2516,
+				"line": "Tests 2516 passed | 26 skipped (2542)"
+			}
 		}
 	}
 }
