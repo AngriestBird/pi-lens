@@ -48,7 +48,11 @@ function makeServer(id: string, ext: string, root: string) {
  * `undefined` right at its deadline, exactly like a real client's wait
  * timing out with nothing having arrived.
  */
-function makeSilentPushOnlyClient(serverId: string, root: string) {
+function makeSilentPushOnlyClient(
+	serverId: string,
+	root: string,
+	fakeClockStart?: () => number,
+) {
 	const waitCalls: Array<{ filePath: string; ms: number }> = [];
 	return {
 		client: {
@@ -68,6 +72,13 @@ function makeSilentPushOnlyClient(serverId: string, root: string) {
 			notify: { open: vi.fn(async () => {}) },
 			waitForDiagnostics: vi.fn(async (filePath: string, ms: number) => {
 				waitCalls.push({ filePath, ms });
+				if (fakeClockStart) {
+					// Resolve at this call's own deadline on the faked clock. Waits
+					// share the touch's start, so elapsed is the longest budget, not
+					// the sum of the concurrent ones.
+					vi.setSystemTime(Math.max(Date.now(), fakeClockStart() + ms));
+					return undefined;
+				}
 				await new Promise<void>((resolve) => {
 					const t = setTimeout(resolve, ms);
 					t.unref?.();
@@ -298,6 +309,7 @@ describe("touchFile capability-aware AGGREGATE wait (#814)", () => {
 		process.env.PI_LENS_LSP_DIAGNOSTICS_MAX_WAIT_MS = "50";
 	});
 	afterEach(() => {
+		vi.useRealTimers();
 		delete process.env.PI_LENS_LSP_DIAGNOSTICS_MAX_WAIT_MS;
 		removeTempDirSync(tmp);
 	});
@@ -489,14 +501,18 @@ describe("touchFile capability-aware AGGREGATE wait (#814)", () => {
 		getServersForFileWithConfig.mockImplementation((fp: string) =>
 			fp.endsWith(".ts") ? [marksman, typescript] : [],
 		);
+		// Only Date is faked: each silent wait advances the clock to its own
+		// budget instead of sleeping through it.
+		vi.useFakeTimers({ toFake: ["Date"] });
+		const startedAt = Date.now();
 		createLSPClient.mockImplementation(async (opts: { serverId: string }) => {
-			return makeSilentPushOnlyClient(opts.serverId, tmp).client;
+			return makeSilentPushOnlyClient(opts.serverId, tmp, () => startedAt)
+				.client;
 		});
 
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const service = new LSPService();
 
-		const startedAt = Date.now();
 		const result = await service.touchFile(filePath, "const x = 1;\n", {
 			diagnostics: "document",
 			collectDiagnostics: true,

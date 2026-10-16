@@ -34,8 +34,8 @@
  *
  * This test fakes the client's `notify.open` to reproduce the real
  * `WatchedFilesQueue` coalescing behavior (imported from source, not
- * reimplemented) plus a deliberately SLOW `waitForDiagnostics` (150ms, well
- * past the 100ms debounce) standing in for tsserver's real per-file
+ * reimplemented) plus a deliberately SLOW `waitForDiagnostics` (SLOW_WAIT_MS,
+ * past the DEBOUNCE_MS window) standing in for tsserver's real per-file
  * recompute latency — the exact condition that used to spread first-opens
  * past the debounce window one file at a time. If the pre-open batching
  * regressed back to "open lazily inside the per-file touch", this slow wait
@@ -56,6 +56,11 @@ vi.mock("../../../clients/lsp/config.js", () => ({
 	getServerInitOverride: vi.fn().mockReturnValue(undefined),
 }));
 vi.mock("../../../clients/lsp/client.js", () => ({ createLSPClient }));
+
+// The debounce window and the stub's per-file wait keep the production ratio
+// (100ms window, 150ms wait: the wait is 1.5x the window) at half the scale.
+const DEBOUNCE_MS = 50;
+const SLOW_WAIT_MS = 75;
 
 function makeServer(id: string, ext: string) {
 	return {
@@ -105,7 +110,7 @@ describe("runWorkspaceDiagnostics — batch-open restores #271 coalescing for a 
 		const watchQueue = new WatchedFilesQueue((changes) => {
 			flushCount += 1;
 			notifiedUriCount += changes.length;
-		});
+		}, DEBOUNCE_MS);
 
 		const client = {
 			isAlive: () => true,
@@ -129,13 +134,13 @@ describe("runWorkspaceDiagnostics — batch-open restores #271 coalescing for a 
 					watchQueue.enqueue(`file://${filePath}`, 2);
 				}),
 			},
-			// Deliberately slower than the 100ms debounce window — stands in for
+			// Deliberately slower than the DEBOUNCE_MS window — stands in for
 			// tsserver's real per-file diagnostics latency. Without pre-opening
 			// up front, serially awaiting this between each file's `notify.open`
 			// would let the debounce timer fire and flush after every single
 			// file, reproducing the pre-#608 bug.
 			waitForDiagnostics: vi.fn(
-				() => new Promise((resolve) => setTimeout(resolve, 150)),
+				() => new Promise((resolve) => setTimeout(resolve, SLOW_WAIT_MS)),
 			),
 			getDiagnostics: vi.fn(() => []),
 		};
@@ -165,8 +170,8 @@ describe("runWorkspaceDiagnostics — batch-open restores #271 coalescing for a 
 		// own single flush — 12 files at the default chunk width of 8 is 2
 		// chunks (8+4), so 2 flushes from the #608 pre-open pass itself. The
 		// #667 warm-up touch above runs BEFORE that pass and pays its own
-		// (slow, 150ms) `waitForDiagnostics` wait standing alone against just
-		// f0.ts — well past the 100ms debounce window on its own, so it closes
+		// (slow, SLOW_WAIT_MS) `waitForDiagnostics` wait standing alone against
+		// just f0.ts — past the DEBOUNCE_MS window on its own, so it closes
 		// out its own flush before the pre-open pass's first chunk even starts
 		// enqueuing. That predicts 3 flushes total (2 chunks + 1 warm-up),
 		// still nowhere near one flush per file (12) — the #608 regression
@@ -174,7 +179,7 @@ describe("runWorkspaceDiagnostics — batch-open restores #271 coalescing for a 
 		//
 		// The EXACT count is not pinned, though: `preOpenGroupFiles` (product
 		// code) does a real `await nodeFs.promises.readFile` per file ahead of
-		// each `notify.open`, racing the real 100ms debounce timer. Under
+		// each `notify.open`, racing the real DEBOUNCE_MS debounce timer. Under
 		// scheduler contention (full test-suite parallelism) that real I/O can
 		// occasionally spread a single chunk's opens fractionally past the
 		// window (one extra flush) — legitimate scheduling variance, not a
