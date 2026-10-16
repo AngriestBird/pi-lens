@@ -1136,7 +1136,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/slow-fs.ts": 4,
 		"clients/smells-rollup.ts": 3,
 		"clients/source-filter.ts": 11,
-		"clients/source-walker.ts": 3,
+		// 3 -> 4 (#1979): `DirectoryListing.mayContain` takes the final segment of
+		// the target with `path.basename`, the same call every walker path uses.
+		"clients/source-walker.ts": 4,
 		"clients/spawn-timeout-cooldown.ts": 3,
 		"clients/startup-scan.ts": 11,
 		// 61 -> 66: filesystem ownership/discovery operations plus the alias
