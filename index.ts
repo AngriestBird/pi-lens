@@ -173,7 +173,10 @@ import {
 	readCrossProcessTouchesForTurnStart,
 } from "./clients/recent-touches.js";
 import { registerCascadeTierReconcileTask } from "./clients/lsp/cascade-tier.js";
-import { buildResolvedFoundCascadeRun } from "./clients/cascade-format.js";
+import {
+	buildResolvedFoundCascadeRun,
+	forgetCascadePendingNeighbor,
+} from "./clients/cascade-format.js";
 import { initLSPConfig } from "./clients/lsp/config.js";
 import { getLSPService, resetLSPService } from "./clients/lsp/capabilities.js";
 import { shouldInitializeSessionRoot } from "./clients/lsp/session-roots.js";
@@ -3623,12 +3626,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// next turn_end merges), reusing the existing neighbor→turn-end formatting —
 	// previously this outcome was logs-only, a silent under-report (#533).
 	registerCascadeTierReconcileTask(() => getLSPService(), {
-		onResolvedFound: ({ filePath, diagnostics, publishedAt }) => {
-			const run = buildResolvedFoundCascadeRun(runtime.projectRoot, {
-				filePath,
-				diagnostics,
-				publishedAt,
-			});
+		// #4495 round 3: the whole neighbour goes through, so its read bound
+		// (`touchedAt`) reaches the run with its publish stamp.
+		onResolvedFound: (neighbor) => {
+			const run = buildResolvedFoundCascadeRun(runtime.projectRoot, neighbor);
 			// #1443: the appended run outlives this turn's consumption —
 			// `beginTurn` carries it into the next turn_end exactly once instead
 			// of wiping it (which used to dead-end this whole delivery path).
@@ -3644,8 +3645,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 		// Scope caveat: the touch was `clientScope: "primary"`, so this clears the
 		// LSP-error entries of a multi-primary-server file on one server's clean —
 		// the same errors-only tradeoff the in-lane reconcile documents.
+		// #4487: the same clean also clears the neighbour's pending cascade
+		// errors, when it is newer than the observation that recorded them.
 		onResolvedClean: ({ filePath, publishedAt }) => {
 			reconcileCascadeNeighborLspErrors(filePath, [], undefined, publishedAt);
+			forgetCascadePendingNeighbor(filePath, publishedAt);
 		},
 	});
 	// #484: emit the opt-in run summary entry HERE, not at turn_end. The SDK's

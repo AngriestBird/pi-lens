@@ -638,12 +638,14 @@ describe("lane-check verdict table (#4047 round 2)", () => {
 
 	// Recurrence (#4074 verify r2 F1): one comment line in a hub file matched 144
 	// test files, the selector ran only the governance registries and exited 0,
-	// and lane:check printed `verdict: clean`.
+	// and lane:check printed `verdict: clean`. Since #4489 the capped run also
+	// keeps the change's own tests and the best 25 import matches; it is still
+	// unproven, because the matches past the cap did not run.
 	it(
 		"a capped selection is unproven, never clean, and says what ran",
 		() => {
 			const many: Files = {};
-			for (let i = 0; i < 25; i += 1)
+			for (let i = 0; i < 26; i += 1)
 				many[`tests/clients/many-${i}.test.ts`] = FOO_TEST;
 			const lane = makeLane({
 				base: { ...BASE_FILES, ...many },
@@ -655,19 +657,19 @@ describe("lane-check verdict table (#4047 round 2)", () => {
 			expect(run.record.checks.targeted).toEqual({
 				status: 0,
 				failed: [],
-				selected: 0,
-				matched: 26,
+				selected: 26,
+				matched: 27,
 				capped: true,
 			});
 			expect(run.record.findings).toEqual([
 				{
 					kind: "unproven",
 					reason:
-						"selection capped: 26 test files matched, 0 ran; run the full suite or narrow the change",
+						"selection capped: 27 test files matched, 26 ran; run the full suite or narrow the change",
 				},
 			]);
 			expect(run.out).toContain(
-				"selection: selected 0, matched 26, capped true",
+				"selection: selected 26, matched 27, capped true",
 			);
 			expect(run.out).toContain(
 				"selection capped: run the full suite or narrow the change",

@@ -82,6 +82,8 @@ const EXPECTED_SURFACE_IDS = [
 	"runtime-turn:late-auxiliary-findings",
 	"runtime-turn:late-runner-findings",
 	"runtime-turn:cascade-blocker",
+	// #4487: earlier-turn cascade errors not re-checked this turn.
+	"runtime-turn:cascade-pending-errors",
 	"runtime-turn:cascade-coverage-advisory",
 	// #3102: the cold-neighbour cascade run's own build-time lane, a turn
 	// earlier than the runtime-turn render that carries it.
@@ -273,6 +275,8 @@ describe("finding-delivery-gate render-seam scan (#1634 review F2, #3165)", () =
 		expect(filesOf("cascade neighbour render")).toEqual([
 			"clients/cascade-format.ts",
 			"clients/dispatch/integration.ts",
+			// #4487: the turn_end re-render of a partly-owned or labeled section.
+			"clients/runtime-turn.ts",
 		]);
 	});
 

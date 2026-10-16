@@ -13,8 +13,8 @@
  * directory — `index.ts` alone selected 176 test files, and a real 43-file
  * commit selected 282 (~10 minutes). These tests pin the fix: full-path
  * import resolution (not a basename/substring guess) plus a hard cap that
- * degrades to build-only instead of ever approaching "the whole suite" by
- * accident.
+ * keeps the change's own tests and the best-ranked import matches instead of
+ * ever approaching "the whole suite" by accident (#4489).
  *
  * `selectTargetedTests` resolves paths relative to `process.cwd()` (mirrors
  * a real repo checkout: `clients/x.ts` <-> `tests/clients/x.test.ts`), so
@@ -664,14 +664,14 @@ describe("selectTargetedTests — import-resolution pass (full path, not basenam
 });
 
 describe("selectTargetedTests — the >25-file cap (F1)", () => {
-	it("degrades to build-only (empty selection, capped=true) once matches exceed MAX_SELECTED_TESTS", () => {
+	it("keeps only the best MAX_SELECTED_TESTS import matches, by path among equals, once matches exceed it", () => {
 		enterFixture();
 		write("clients/shared.ts", "export const shared = 1;\n");
 
 		const testCount = MAX_SELECTED_TESTS + 1;
 		for (let i = 0; i < testCount; i++) {
 			write(
-				`tests/generated-${i}.test.ts`,
+				`tests/generated-${String(i).padStart(2, "0")}.test.ts`,
 				`import { shared } from '../clients/shared.js';\n`,
 			);
 		}
@@ -685,8 +685,13 @@ describe("selectTargetedTests — the >25-file cap (F1)", () => {
 		// wrong way, `selected` would contain all `testCount` entries and
 		// `capped` would read false — this assertion goes red on either.
 		expect(result.capped).toBe(true);
-		expect(result.selected).toEqual([]);
 		expect(result.totalBeforeCap).toBe(testCount);
+		// #4489 recurrence: a capped selection used to keep no import match at
+		// all. Equally specific matches break the tie by path, so the last one
+		// is the one dropped.
+		expect([...result.selected].sort()).toEqual(
+			allTests.filter((test) => !test.endsWith("generated-25.test.ts")).sort(),
+		);
 	});
 
 	// #3215 lane 3: history picks are bounded by their own cap, so a hub-module
@@ -697,7 +702,7 @@ describe("selectTargetedTests — the >25-file cap (F1)", () => {
 		write("clients/shared.ts", "export const shared = 1;\n");
 		for (let i = 0; i < MAX_SELECTED_TESTS; i++)
 			write(
-				`tests/generated-${i}.test.ts`,
+				`tests/generated-${String(i).padStart(2, "0")}.test.ts`,
 				`import { shared } from '../clients/shared.js';\n`,
 			);
 		write("tests/by-history.test.ts", "export const h = 1;\n");
@@ -719,7 +724,13 @@ describe("selectTargetedTests — the >25-file cap (F1)", () => {
 			{ historyPicks: ["tests/by-history.test.ts"] },
 		);
 		expect(capped.capped).toBe(true);
-		expect(capped.selected).toEqual(["tests/by-history.test.ts"]);
+		// The cap keeps MAX_SELECTED_TESTS import matches and the history pick
+		// rides on top of them (#4489).
+		expect(capped.selected).toHaveLength(MAX_SELECTED_TESTS + 1);
+		expect(capped.selected).toContain("tests/by-history.test.ts");
+		expect(capped.selected).not.toContain(
+			`tests/generated-${MAX_SELECTED_TESTS}.test.ts`,
+		);
 		expect(capped.fromHistory).toEqual(["tests/by-history.test.ts"]);
 	});
 
@@ -731,17 +742,25 @@ describe("selectTargetedTests — the >25-file cap (F1)", () => {
 		write("clients/shared.ts", "export const shared = 1;\n");
 		for (let i = 0; i <= MAX_SELECTED_TESTS; i++)
 			write(
-				`tests/generated-${i}.test.ts`,
+				`tests/generated-${String(i).padStart(2, "0")}.test.ts`,
 				`import { shared } from '../clients/shared.js';\n`,
 			);
+		// generated-25 is last by path, so the ranking drops it and only history
+		// keeps it; generated-03 survives the ranking, so history added nothing.
 		const result = selectTargetedTests(
 			["clients/shared.ts"],
 			collectTestFiles("tests"),
-			{ historyPicks: ["tests/generated-3.test.ts"] },
+			{
+				historyPicks: [
+					"tests/generated-25.test.ts",
+					"tests/generated-03.test.ts",
+				],
+			},
 		);
 		expect(result.capped).toBe(true);
-		expect(result.selected).toEqual(["tests/generated-3.test.ts"]);
-		expect(result.fromHistory).toEqual(["tests/generated-3.test.ts"]);
+		expect(result.selected).toHaveLength(MAX_SELECTED_TESTS + 1);
+		expect(result.selected).toContain("tests/generated-25.test.ts");
+		expect(result.fromHistory).toEqual(["tests/generated-25.test.ts"]);
 	});
 
 	it("does not let a history pick smuggle a CI-only suite into the local pre-push run", () => {
@@ -794,8 +813,19 @@ describe("selectTargetedTests — the >25-file cap (F1)", () => {
 		);
 
 		expect(result.capped).toBe(true);
-		expect([...result.selected].sort()).toEqual(
-			[...TREE_SCANNING_GOVERNANCE_TESTS, ...TEST_TREE_GOVERNANCE_TESTS].sort(),
+		const registries = [
+			...TREE_SCANNING_GOVERNANCE_TESTS,
+			...TEST_TREE_GOVERNANCE_TESTS,
+		];
+		for (const registry of registries)
+			expect(result.selected).toContain(registry);
+		// The changed test file survives the cap (#4489), and the rest of the
+		// selection is the ranked import matches.
+		expect(result.selected).toContain(
+			"tests/clients/lsp/diagnostics-fence.test.ts",
+		);
+		expect(result.selected).toHaveLength(
+			registries.length + 1 + MAX_SELECTED_TESTS,
 		);
 		// The registries never push the heuristic selection over the cap.
 		for (let i = MAX_SELECTED_TESTS - 1; i <= MAX_SELECTED_TESTS + 1; i++)
@@ -826,6 +856,106 @@ describe("selectTargetedTests — the >25-file cap (F1)", () => {
 
 		expect(result.capped).toBe(false);
 		expect(result.selected.length).toBe(MAX_SELECTED_TESTS);
+	});
+});
+
+// #4489: the cap dropped the change's own tests with the rest of the import
+// matches (31 of 113 own tests recalled over 20 merged PRs, 17 of them capped),
+// so a fixer's red-first test never ran locally.
+describe("selectTargetedTests — own tests and ranking under the cap (#4489)", () => {
+	// The selector reads `from "…"` specifiers, not bare side-effect imports.
+	const importsOf = (spec: string) => `import * as m from '${spec}';\n`;
+	const pad = (i: number) => String(i).padStart(2, "0");
+
+	function hubFixture(importers: number) {
+		enterFixture();
+		write("clients/hub.ts", "export const hub = 1;\n");
+		for (let i = 0; i < importers; i++)
+			write(`tests/hub-${pad(i)}.test.ts`, importsOf("../clients/hub.js"));
+	}
+
+	it("keeps a changed test file and the mirrored test of a changed source file past the cap", () => {
+		hubFixture(MAX_SELECTED_TESTS + 5);
+		write("clients/mirrored.ts", "export const m = 1;\n");
+		write("tests/clients/mirrored.test.ts", "it('m');\n");
+		write("tests/zz-own-red-first.test.ts", "it('own');\n");
+
+		const result = selectTargetedTests(
+			[
+				"clients/hub.ts",
+				"clients/mirrored.ts",
+				"tests/zz-own-red-first.test.ts",
+			],
+			collectTestFiles("tests"),
+		);
+
+		expect(result.capped).toBe(true);
+		expect(result.selected).toContain("tests/zz-own-red-first.test.ts");
+		expect(result.selected).toContain("tests/clients/mirrored.test.ts");
+		expect(result.selectionReasons.get("tests/zz-own-red-first.test.ts")).toBe(
+			"changed",
+		);
+		expect(result.selectionReasons.get("tests/clients/mirrored.test.ts")).toBe(
+			"mirror",
+		);
+		// Both own tests ride on top of the import cap.
+		expect(result.selected).toHaveLength(MAX_SELECTED_TESTS + 2);
+	});
+
+	it("counts none of the change's own tests against the cap", () => {
+		// Exactly MAX_SELECTED_TESTS import matches plus two own tests: the old
+		// count was 27 > 25 and capped, dropping everything but the registries.
+		hubFixture(MAX_SELECTED_TESTS);
+		write("clients/mirrored.ts", "export const m = 1;\n");
+		write("tests/clients/mirrored.test.ts", "it('m');\n");
+		write("tests/zz-own-red-first.test.ts", "it('own');\n");
+
+		const result = selectTargetedTests(
+			[
+				"clients/hub.ts",
+				"clients/mirrored.ts",
+				"tests/zz-own-red-first.test.ts",
+			],
+			collectTestFiles("tests"),
+		);
+
+		expect(result.capped).toBe(false);
+		expect(result.selected).toHaveLength(MAX_SELECTED_TESTS + 2);
+	});
+
+	it("ranks a capped selection's import matches by fewest importers of the changed file, then by path", () => {
+		// A specific file imported by 3 tests and a hub imported by 30. Both
+		// change; the 3 specific importers must outrank every hub importer even
+		// though their paths sort last, and a test that imports both ranks as a
+		// specific importer.
+		hubFixture(30);
+		write("clients/specific.ts", "export const s = 1;\n");
+		for (const name of ["zz-a", "zz-b"])
+			write(`tests/${name}.test.ts`, importsOf("../clients/specific.js"));
+		write(
+			"tests/zz-both.test.ts",
+			importsOf("../clients/specific.js") + importsOf("../clients/hub.js"),
+		);
+
+		const result = selectTargetedTests(
+			["clients/hub.ts", "clients/specific.ts"],
+			collectTestFiles("tests"),
+		);
+
+		expect(result.capped).toBe(true);
+		expect(result.selected).toHaveLength(MAX_SELECTED_TESTS);
+		for (const name of ["zz-a", "zz-b", "zz-both"])
+			expect(result.selected).toContain(`tests/${name}.test.ts`);
+		// The remaining 22 slots go to the hub importers, first by path.
+		const hubKept = result.selected.filter((test) =>
+			test.startsWith("tests/hub-"),
+		);
+		expect(hubKept.sort()).toEqual(
+			Array.from(
+				{ length: MAX_SELECTED_TESTS - 3 },
+				(_, i) => `tests/hub-${pad(i)}.test.ts`,
+			),
+		);
 	});
 });
 
@@ -1866,7 +1996,7 @@ describe("history pass through the real hook and real git (#3215 lane 3)", () =>
 		expect(result.status).toBe(0);
 	}, 120_000);
 
-	it("labels a capped selection's history picks as history picks, not governance registry suites", () => {
+	it("labels a capped selection's history picks as history picks, not governance registry suites, beside the ranked import matches", () => {
 		// Recurrence: PR #4026 review F4. On the capped path `selected` is the
 		// armed registries plus the history picks, and the console line and the
 		// step summary called all of it "governance registry suite(s)".
@@ -1882,14 +2012,46 @@ describe("history pass through the real hook and real git (#3215 lane 3)", () =>
 			pushedChange: { "clients/hub.ts": "export const hub = 2;\n" },
 		});
 		// sweep-floor-coverage is an armed registry suite; rule-catalogs is the
-		// history pick.
+		// history pick; the 26 importers of the hub keep their best 25 (#4489).
 		expect(result.stdout + result.stderr).toContain(
-			"running only the 1 governance registry suite(s) and 1 history pick(s)",
+			`running the change's 0 own test file(s), the ${MAX_SELECTED_TESTS} import match(es) with the fewest importers first (ties by path), 1 governance registry suite(s) and 1 history pick(s)`,
 		);
 		expect(stepText).toContain(
-			"1 governance registries and 1 history pick(s) only",
+			"cap exceeded (25); running the change's 0 own test file(s)",
+		);
+		expect(stepText).toContain(
+			"1 governance registry suite(s) and 1 history pick(s)",
 		);
 		expect(stepText).not.toContain("governance registries only");
+		expect(result.status).toBe(0);
+	}, 120_000);
+
+	it("counts a capped selection's own mirrored test in the warning", () => {
+		// Recurrence: PR #4494 review M15. describeCappedKeep could drop the
+		// mirror count and every capped-warning test still passed, because each
+		// asserted "0 own test file(s)".
+		const importers = Object.fromEntries(
+			Array.from({ length: MAX_SELECTED_TESTS + 1 }, (_, i) => [
+				`tests/gen-${i}.test.ts`,
+				"import { hub } from '../clients/hub.js';\nimport { it } from 'vitest';\nvoid hub;\nit('ok', () => {});\n",
+			]),
+		);
+		const { result, stepText } = runHookWithHistory({
+			baseFiles: {
+				"clients/hub.ts": "export const hub = 1;\n",
+				"tests/clients/hub.test.ts":
+					"import { it } from 'vitest';\nit('ok', () => {});\n",
+				...importers,
+			},
+			failingChange: { "clients/other.ts": "a\n" },
+			pushedChange: { "clients/hub.ts": "export const hub = 2;\n" },
+		});
+		expect(result.stdout + result.stderr).toContain(
+			`running the change's 1 own test file(s), the ${MAX_SELECTED_TESTS} import match(es)`,
+		);
+		expect(stepText).toContain(
+			"cap exceeded (25); running the change's 1 own test file(s)",
+		);
 		expect(result.status).toBe(0);
 	}, 120_000);
 });

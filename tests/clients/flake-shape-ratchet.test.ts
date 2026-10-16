@@ -264,6 +264,24 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			reason:
 				"the defect is wall-clock only (2^N globstar backtracking); a fake clock measures nothing",
 		},
+	// 2026-10-15 (#1712/#4485): the cascade's live twin over a real classic
+	// TypeScript server. Installation is the external tool boundary: the stub
+	// hands the real wrapper and a classic compiler to the real launcher.
+	"in-process-mock:clients/cascade-classic-ts-live.test.ts::clients/installer/index":
+		{
+			detector: "in-process-mock",
+			reason:
+				"tool installation and discovery are the host boundary; the stub hands the real typescript-language-server wrapper and a classic compiler to the real launcher, service, client and cascade",
+		},
+	// 2026-10-16 (#4495 round 3): the cascade's pending gate runs the shared
+	// freshness gate quiet; whether its rows were written is only visible in
+	// the logLatency call, since turn_end overruns the five-phase ring.
+	"in-process-mock:clients/cascade-turn-merge.test.ts::clients/latency-logger":
+		{
+			detector: "in-process-mock",
+			reason:
+				"the freshness gate writes its rows through logLatency; turn_end logs more phases after the gate than the five the getRecentLoggedPhases ring keeps, and test mode skips the file sink, so a passed-through spy is the only reader",
+		},
 	// 2026-10-16 (#4493 r2): the auxiliary half of the default stack. A
 	// project lsp.json cannot declare an auxiliary (role is reserved and
 	// inert), so the catalog lookup adds one; the servers stay real children.
@@ -942,6 +960,24 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"#3617: the subject is Vitest's own fork teardown (the pool SIGTERMs the worker after the shared afterAll); no in-process double reproduces that kill or a hook timeout",
 	},
+	// 2026-10-15 (#4485): the cascade's silent-push wait, turn_end's registry
+	// peek and the expiry read each read a language-server client's publish
+	// state; a real server cannot be made to publish or stay silent on demand.
+	"service-double:clients/cascade-compute.test.ts::LSPClientInfo": {
+		detector: "service-double",
+		reason:
+			"a language-server client is a spawned process; the cascade's silent-push wait is driven by its per-file publish version and its wait, which a real server cannot be made to answer or leave silent on demand",
+	},
+	"service-double:clients/cascade-turn-merge.test.ts::LSPClientInfo": {
+		detector: "service-double",
+		reason:
+			"a language-server client is a spawned process; turn_end's registry peek is driven by what the client an outstanding touch holds has published",
+	},
+	"service-double:clients/lsp/cascade-tier-backlog.test.ts::LSPClientInfo": {
+		detector: "service-double",
+		reason:
+			"a language-server client is a spawned process; the expiry and peek reads are driven by what the client an outstanding touch holds has published",
+	},
 	// 2026-10-15 (#4449): the registry's capacity, lease and idle paths read a
 	// client's liveness and busy answers; a real language server cannot be made
 	// to give them on demand.
@@ -950,6 +986,13 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"a language-server client is a spawned process; the registry's lease, capacity and idle paths are driven by its liveness and busy answers",
 	},
+	// 2026-10-15 (#4485): see the cascade entries above.
+	"service-double:clients/quiet-window-session-straddle.test.ts::LSPClientInfo":
+		{
+			detector: "service-double",
+			reason:
+				"a language-server client is a spawned process; the straddle needs it silent through the cascade's bounded wait so the touch is recorded outstanding",
+		},
 	// 2026-09-26 (#3511 review round 3): the quick-mode warmup witness must
 	// run the real warmup timer and background word-index save, which no
 	// test hook awaits.

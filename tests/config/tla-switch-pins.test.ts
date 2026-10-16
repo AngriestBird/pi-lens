@@ -69,7 +69,12 @@ import { vitestCollects } from "../support/vitest-collection.js";
 const REPO_ROOT = path.resolve(import.meta.dirname, "../..");
 const REGISTRY_PATH = "formal/switch-pins.json";
 /** Families whose every code-choice constant has a pin (#4393 acceptance). */
-const FULLY_PINNED = ["read-guard", "format-drain", "dispatch-pipeline"];
+const FULLY_PINNED = [
+	"read-guard",
+	"format-drain",
+	"dispatch-pipeline",
+	"cascade-delivery",
+];
 /**
  * The deferred and notCodeChoice members across all families, pinned exactly
  * (#4399 verify r2 F4). A ceiling let a freed slot be reused, and let a member
@@ -78,7 +83,7 @@ const FULLY_PINNED = ["read-guard", "format-drain", "dispatch-pipeline"];
  * `DEFERRED_COUNT` as pins land, and a reviewer judges every rise of either.
  */
 const DEFERRED_COUNT = 136;
-const NOT_CODE_CHOICE_COUNT = 209;
+const NOT_CODE_CHOICE_COUNT = 216;
 
 interface PinTest {
 	test: string;

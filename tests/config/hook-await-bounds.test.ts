@@ -2260,7 +2260,12 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// `bounded()` itself awaits the raced work; this is the shared primitive's
 	// implementation await, not an additional hook-path await at the caller.
 	"clients/deadline-utils.ts": 1,
-	"clients/dispatch/integration.ts": 20,
+	// #4485: 20 -> 21. The cascade's silent-push wait,
+	// `touchedClient.waitForDiagnostics(path, SILENT_PUSH_WAIT_MS, ...)`, which
+	// carries its own 1000 ms deadline as an argument (the client resolves it
+	// on timeout); a bounded() race around it would add a second timer for the
+	// same deadline.
+	"clients/dispatch/integration.ts": 21,
 	"clients/dispatch/pending-runner-findings.ts": 2,
 	"clients/dispatch/runners/psscriptanalyzer.ts": 7,
 	"clients/dispatch/runners/utils/lazy-installer.ts": 2,

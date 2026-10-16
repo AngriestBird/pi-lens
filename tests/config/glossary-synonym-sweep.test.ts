@@ -561,7 +561,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 18 -> 20 (#4438): the cascade's implicit-scope dependents keep the Go
 		// peers and the ranked JS/TS files a change reaches, two
 		// `Array.prototype.filter` calls, not a delivery filter.
-		"clients/dispatch/integration.ts": 20,
+		// 20 -> 19 (#4485): the rolling delta's per-neighbour diagnostics
+		// `Array.prototype.filter` is deleted with the delta.
+		"clients/dispatch/integration.ts": 19,
 		"clients/dispatch/rule-policy.ts": 1,
 		"clients/dispatch/rules/high-fan-out.ts": 1,
 		"clients/dispatch/rules/missing-error-propagation.ts": 3,
@@ -709,7 +711,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 33 -> 31 (#2542 ask 3): the deferred-target merge and bound moved to
 		// clients/deferred-test-targets.ts, taking its two `Array.prototype.filter`
 		// passes with it.
-		"clients/runtime-turn.ts": 30,
+		// 30 -> 33 (#4485/#4487): the turn_end cascade delivery keeps the
+		// neighbours a run owns, the pending entries this turn did not observe
+		// and the runs that carry an unconfirmed bucket, three
+		// `Array.prototype.filter` calls, not a delivery filter.
+		"clients/runtime-turn.ts": 33,
 		"clients/safe-spawn.ts": 4,
 		"clients/sanitize.ts": 9,
 		"clients/scratch-tree-policy.ts": 2,
@@ -1104,7 +1110,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// blocker set and each resolved entry with `path.resolve`.
 		// 27 -> 26 (#2542 ask 3): `deferralEntryKey` moved to
 		// clients/deferred-test-targets.ts, taking its one `path.resolve` with it.
-		"clients/runtime-turn.ts": 26,
+		// 26 -> 27 (#4487): the turn_end cascade delivery resolves each edited
+		// file with `path.resolve` to forget its pending cascade errors.
+		"clients/runtime-turn.ts": 27,
 		"clients/rust-client.ts": 5,
 		"clients/safe-spawn.ts": 26,
 		"clients/sanitize.ts": 2,
@@ -1238,7 +1246,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/tree-sitter.ts": 5,
 		"clients/file-utils.ts": 3,
 		"clients/lens-engine.ts": 11,
-		"clients/lsp/cascade-tier.ts": 2,
+		// 2 -> 3 (#4485): the command-pull tier reads the primary's capability
+		// `snapshot` for the tsserver request command.
+		"clients/lsp/cascade-tier.ts": 3,
 		"clients/lsp/index.ts": 6,
 		"clients/lsp/wait-policy/classification.ts": 11,
 		"clients/mcp/analyze.ts": 2,
