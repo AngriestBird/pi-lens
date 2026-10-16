@@ -130,6 +130,47 @@ export interface Diagnostic {
 	 * blocks. Absent on every other diagnostic.
 	 */
 	promotionNote?: string;
+	/**
+	 * #4484 round 2: the dispatcher runner whose run produced this finding,
+	 * stamped by `dispatchForFile`. A recorded blocker leaves the record only
+	 * when a conclusive run of this runner no longer observes it. Never part of
+	 * identity, dedup or suppression.
+	 */
+	runnerId?: string;
+	/**
+	 * #4484 round 2: the language server that published an LSP finding
+	 * (`convertLspDiagnostics`), so a run that names the server unconfirmed
+	 * keeps that server's recorded blockers. Never part of identity.
+	 */
+	serverId?: string;
+	/**
+	 * #4484 round 5: the content hash (`lineContentHash`, as a number) of this
+	 * finding's own line in the bytes it was observed in, stamped when it
+	 * enters the inline-blocker record (`stampLineHashes`). A write with no
+	 * usable position matches a recorded blocker only on a line with this
+	 * text. Never part of identity, dedup or suppression.
+	 */
+	lineHash?: number;
+}
+
+/**
+ * #4484 round 2: which sources reached no verdict in one dispatch. A recorded
+ * blocker from one of them stays: its absence from the run is not evidence
+ * that it is gone.
+ */
+export interface InconclusiveSources {
+	/** Runners whose whole run reached no verdict (failed without findings, an
+	 *  unanswered or unavailable language server, a collect-later run still in
+	 *  flight). */
+	runnerIds: readonly string[];
+	/** Language servers a run named unconfirmed (`unconfirmedServerIds`). */
+	serverIds: readonly string[];
+	/**
+	 * #4484 round 3: the subset of `runnerIds` still in flight (collect-later).
+	 * Their settled run answers for the write on its own, so the next write
+	 * owes them no lines.
+	 */
+	collectLaterRunnerIds: readonly string[];
 }
 
 export interface DispatchResult {
@@ -153,6 +194,29 @@ export interface DispatchResult {
 	blockerOutput: string;
 	/** Whether any blockers were found */
 	hasBlockers: boolean;
+	/**
+	 * #4484: the blocking findings this observation still holds that the delta
+	 * did not call new (it saw their ids before). Not rendered as a STOP, but
+	 * the file's current blocking set is `blockers` plus these: the record, the
+	 * store and the commit gate read both, so an empty delta never clears a
+	 * blocker that is still there. Absent when there are none.
+	 */
+	heldBackBlockers?: Diagnostic[];
+	/**
+	 * #4484 round 2: findings this observation still holds that neither
+	 * deliver nor enter the record on their own: a blocking finding an
+	 * edit-range gate withheld because the edit did not touch its lines, and an
+	 * unused value the delta held back (promoted, as when it was new). Each
+	 * keeps a recorded blocker of the same identity pending. Absent when none.
+	 */
+	stillObserved?: Diagnostic[];
+	/**
+	 * #4484 round 6: runners whose verdict covers only the edit's ranges
+	 * (`RunnerResult.editScopedVerdict`). Absent when none.
+	 */
+	editScopedRunnerIds?: string[];
+	/** #4484 round 2: the runners and servers that reached no verdict. */
+	inconclusiveSources?: InconclusiveSources;
 	/**
 	 * #4403: why the file's primary group did not check it. Set whenever the
 	 * coverage notice's rule finds no coverage, whether or not the once-only
@@ -263,6 +327,20 @@ export interface RunnerResult {
 	 */
 	deferredServerIds?: readonly string[];
 	/**
+	 * #4484 round 6: the verdict covers only the edit's ranges. napi's Gate B
+	 * skip sets it: the ast-grep server answers for the file, but its gate
+	 * withholds a blocking finding outside the edit (`outOfEditScope`) under
+	 * another identity, so it says nothing about napi's findings there.
+	 */
+	editScopedVerdict?: boolean;
+	/**
+	 * #4484 round 7: the lane a `covered-by-primary` skip defers to. The skip
+	 * is a verdict only when that runner reached one and that server (when
+	 * named) confirmed; otherwise the dispatcher reads it as no verdict, and a
+	 * settled skip retires nothing.
+	 */
+	coveredBy?: { runnerId: string; serverId?: string };
+	/**
 	 * #4403: why no primary language server answered, when the runner knows:
 	 * the operator disabled it, it could not be started (or was still
 	 * starting), or both. The coverage notice and the status line name it.
@@ -270,6 +348,20 @@ export interface RunnerResult {
 	primaryUnavailableCause?: PrimaryUnavailableCause;
 	/** #4403: the disabled primaries, which get one note per server per session. */
 	disabledPrimaryServerIds?: readonly string[];
+	/**
+	 * #4484 round 2: blocking findings the runner's edit-range gate withheld
+	 * from delivery because the edit did not touch their span
+	 * (`spanOverlapsModifiedRanges`). They are still observed: they keep a
+	 * recorded blocker pending, and never deliver or enter the record alone.
+	 */
+	outOfEditScope?: Diagnostic[];
+	/**
+	 * #4484 round 2: the run reached no verdict although it returned no
+	 * failure kind (the language server's diagnostics wait hit its deadline
+	 * with nothing collected, or a query run threw part way). What it did not
+	 * report is not evidence of a clean file.
+	 */
+	inconclusive?: boolean;
 }
 
 /**
@@ -331,6 +423,40 @@ export function hasUsableResult(result: {
 	);
 }
 
+/**
+ * Whether a runner's whole run reached no verdict about the file (#4484). The
+ * other side of {@link hasUsableResult}: a run has a verdict only when it read
+ * the file and finished (R1 in PR #4491's round-3 table). That is a
+ * `succeeded` run not flagged `inconclusive`, a `failed` run with its own
+ * findings, or a skip that states a not-applicable reason from
+ * {@link RUNNER_SKIP_REASONS}. Every other outcome has none: a `failed` run
+ * without findings (timeout, spawn or server failure), a `deferred` one, a
+ * run flagged `inconclusive`, and any skip without a stated reason, since a
+ * skip that never read the file (a size or line cap, an aborted WASM runtime,
+ * a grammar or server that is unavailable) says nothing about it. Unknown
+ * skip forms therefore fail closed. A run that answered names its unconfirmed
+ * servers, which the dispatcher adds to `InconclusiveSources.serverIds`, so
+ * the rest of the run still counts.
+ */
+export function reachedNoVerdict(
+	result: Pick<
+		RunnerResult,
+		"status" | "failureKind" | "inconclusive" | "skipReason"
+	>,
+): boolean {
+	if (result.inconclusive === true) return true;
+	switch (result.status) {
+		case "failed":
+			return !hasUsableResult(result);
+		case "deferred":
+			return true;
+		case "skipped":
+			return !isRunnerSkipReason(result.skipReason);
+		default:
+			return false;
+	}
+}
+
 // --- Dispatch Context ---
 
 /**
@@ -387,6 +513,13 @@ export interface DispatchContext {
 	/** Only run blocking rules (severity: error) - used for fast feedback on file write */
 	readonly blockingOnly?: boolean;
 	readonly modifiedRanges?: ModifiedRange[];
+	/**
+	 * #4484 round 3 (R4): per runner, the lines an earlier write owed it
+	 * because it reached no verdict there. They join that runner's
+	 * `modifiedRanges` (`runnerDispatchContext`), so a blocker first written
+	 * while it had no verdict is in range when it next answers.
+	 */
+	readonly owedRanges?: ReadonlyMap<string, readonly ModifiedRange[]>;
 	/** Ordered per-file pipeline token used by widget reconciliation (#1198). */
 	readonly writeIndex?: number;
 	/**

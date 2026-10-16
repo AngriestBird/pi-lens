@@ -58,6 +58,7 @@ import {
 import { createAvailabilityProbeFlight } from "../availability-probe-flight.js";
 import type { FactStore } from "./fact-store.js";
 import { applyDispositions } from "../diagnostic-dispositions.js";
+import { linesOfRanges, rangesOfLines } from "../line-alignment.js";
 import { applyInlineSuppressions } from "./inline-suppressions.js";
 import { getToolPlan } from "./plan.js";
 import { resolveRunnerPath } from "./runner-context.js";
@@ -82,6 +83,7 @@ import {
 	hasUsableResult,
 	isRunnerClaimSource,
 	isRunnerSkipReason,
+	reachedNoVerdict,
 } from "./types.js";
 
 const dispatcherProbeFlights = createAvailabilityProbeFlight<
@@ -931,6 +933,41 @@ interface GroupResult {
 	diagnostics: Diagnostic[];
 	latencies: RunnerLatency[];
 	hadBlocker: boolean;
+	/** #4484 r2: findings the runners' edit-range gates withheld (`outOfEditScope`). */
+	outOfEditScope: Diagnostic[];
+	/** #4484 r2: runners and servers that reached no verdict in this group. */
+	inconclusiveRunnerIds: string[];
+	inconclusiveServerIds: string[];
+	/** #4484 round 3: the inconclusive runners still in flight (collect-later). */
+	collectLaterRunnerIds: string[];
+	/** #4484 round 6: runners whose verdict covers only the edit's ranges. */
+	editScopedRunnerIds: string[];
+	/** #4484 round 7: runners that reached a verdict, and the lanes covered skips defer to. */
+	answeredRunnerIds: string[];
+	coveredRunners: {
+		runnerId: string;
+		lane: { runnerId: string; serverId?: string };
+	}[];
+}
+
+/**
+ * #4484 round 3 (R4): `ctx` for one runner, its `modifiedRanges` widened by
+ * the lines an earlier write owed it (`DispatchContext.owedRanges`). A
+ * whole-file dispatch (no ranges) already covers them.
+ */
+export function runnerDispatchContext(
+	ctx: DispatchContext,
+	runnerId: string,
+): DispatchContext {
+	const owed = ctx.owedRanges?.get(runnerId);
+	if (!owed?.length || !ctx.modifiedRanges) return ctx;
+	return {
+		...ctx,
+		modifiedRanges: rangesOfLines([
+			...linesOfRanges(ctx.modifiedRanges),
+			...linesOfRanges(owed),
+		]),
+	};
 }
 
 /**
@@ -953,6 +990,13 @@ async function runGroup(
 	const diagnostics: Diagnostic[] = [];
 	const latencies: RunnerLatency[] = [];
 	let hadBlocker = false;
+	const outOfEditScope: Diagnostic[] = [];
+	const inconclusiveRunnerIds: string[] = [];
+	const inconclusiveServerIds: string[] = [];
+	const collectLaterRunnerIds: string[] = [];
+	const editScopedRunnerIds: string[] = [];
+	const answeredRunnerIds: string[] = [];
+	const coveredRunners: GroupResult["coveredRunners"] = [];
 
 	// Filter runners by kind if specified
 	const runnerIds = group.filterKinds
@@ -1053,6 +1097,9 @@ async function runGroup(
 			} catch (error) {
 				ctx.log(`Runner ${runner.id} precondition failed: ${error}`);
 				shouldRun = false;
+				// #4484 round 3: a precondition that threw never decided the runner
+				// does not apply, so the skip reaches no verdict (R1).
+				inconclusiveRunnerIds.push(runner.id);
 			}
 		}
 		if (!shouldRun) {
@@ -1078,6 +1125,8 @@ async function runGroup(
 		}
 
 		const projectRoot = ctx.projectRoot ?? ctx.cwd;
+		// #4484 round 3: this runner's range, with the lines owed to it.
+		const runnerCtx = runnerDispatchContext(ctx, runner.id);
 		// Only post-write dispatches participate. Project scans and direct API
 		// callers must retain their existing synchronous semantics.
 		const observedTier =
@@ -1086,7 +1135,7 @@ async function runGroup(
 				: classifyObservedRunner(projectRoot, runner.id);
 		if (observedTier === "collect-later") {
 			const markedAtMs = Date.now();
-			const deferred = runRunner(ctx, runner, semantic).then((result) => {
+			const deferred = runRunner(runnerCtx, runner, semantic).then((result) => {
 				const durationMs = Date.now() - markedAtMs;
 				const tier = observeRunnerLatency({
 					projectRoot,
@@ -1156,6 +1205,9 @@ async function runGroup(
 				semantic: semantic,
 			});
 			recordRunner(ctx.filePath, runner.id, "pending", 0, 0, ctx.writeIndex);
+			// #4484 r2: a run still in flight has observed nothing yet.
+			inconclusiveRunnerIds.push(runner.id);
+			collectLaterRunnerIds.push(runner.id);
 			logLatency({
 				type: "runner",
 				filePath: ctx.filePath,
@@ -1169,7 +1221,7 @@ async function runGroup(
 			continue;
 		}
 
-		const result = await runRunner(ctx, runner, semantic);
+		const result = await runRunner(runnerCtx, runner, semantic);
 		onRunnerResult?.(runnerId, result);
 		const runnerEnd = Date.now();
 		const duration = runnerEnd - runnerStart;
@@ -1281,6 +1333,24 @@ async function runGroup(
 			ctx.writeIndex,
 		);
 
+		// #4484 r2: every finding names the runner that observed it, so a
+		// recorded blocker is retired only by a conclusive run of its own source.
+		for (const d of result.diagnostics) d.runnerId ??= runnerId;
+		for (const d of result.outOfEditScope ?? []) {
+			d.runnerId ??= runnerId;
+			outOfEditScope.push(d);
+		}
+		if (reachedNoVerdict(result)) inconclusiveRunnerIds.push(runnerId);
+		else {
+			answeredRunnerIds.push(runnerId);
+			if (result.coveredBy)
+				coveredRunners.push({ runnerId, lane: result.coveredBy });
+			if (result.editScopedVerdict === true) editScopedRunnerIds.push(runnerId);
+		}
+		inconclusiveServerIds.push(
+			...(result.unconfirmedServerIds ?? []),
+			...(result.deferredServerIds ?? []),
+		);
 		diagnostics.push(...result.diagnostics);
 
 		const resultSemantic = result.semantic ?? semantic;
@@ -1297,7 +1367,18 @@ async function runGroup(
 		}
 	}
 
-	return { diagnostics, latencies, hadBlocker };
+	return {
+		diagnostics,
+		latencies,
+		hadBlocker,
+		outOfEditScope,
+		inconclusiveRunnerIds,
+		inconclusiveServerIds,
+		collectLaterRunnerIds,
+		editScopedRunnerIds,
+		answeredRunnerIds,
+		coveredRunners,
+	};
 }
 
 // --- Main Dispatch Function ---
@@ -1468,15 +1549,47 @@ export async function dispatchForFile(
 	);
 	const baselineWarningCount = baselineWarnings?.length ?? 0;
 
+	const outOfEditScope: Diagnostic[] = [];
+	const inconclusiveRunnerIds = new Set<string>();
+	const inconclusiveServerIds = new Set<string>();
+	const collectLaterRunnerIds = new Set<string>();
+	const editScopedRunnerIds: string[] = [];
+	const answeredRunnerIds = new Set<string>();
+	const coveredRunners: GroupResult["coveredRunners"] = [];
 	for (const {
 		diagnostics: groupDiags,
 		latencies,
 		hadBlocker,
+		outOfEditScope: groupOutOfScope,
+		inconclusiveRunnerIds: groupRunnerIds,
+		inconclusiveServerIds: groupServerIds,
+		collectLaterRunnerIds: groupCollectLater,
+		editScopedRunnerIds: groupEditScoped,
+		answeredRunnerIds: groupAnswered,
+		coveredRunners: groupCovered,
 	} of groupResults) {
 		runnerLatencies.push(...latencies);
+		outOfEditScope.push(...groupOutOfScope);
+		for (const id of groupRunnerIds) inconclusiveRunnerIds.add(id);
+		for (const id of groupServerIds) inconclusiveServerIds.add(id);
+		for (const id of groupCollectLater) collectLaterRunnerIds.add(id);
+		editScopedRunnerIds.push(...groupEditScoped);
+		for (const id of groupAnswered) answeredRunnerIds.add(id);
+		coveredRunners.push(...groupCovered);
 
 		allDiagnostics.push(...groupDiags);
 		if (hadBlocker) stopped = true;
+	}
+	// #4484 round 7: a covered skip is a verdict only when the lane it defers
+	// to answered: its runner reached a verdict, and its server confirmed.
+	const voidedCovers = new Set<string>();
+	for (const { runnerId, lane } of coveredRunners) {
+		const silent =
+			!answeredRunnerIds.has(lane.runnerId) ||
+			(lane.serverId !== undefined && inconclusiveServerIds.has(lane.serverId));
+		if (!silent) continue;
+		voidedCovers.add(runnerId);
+		inconclusiveRunnerIds.add(runnerId);
 	}
 
 	// Apply delta mode ONCE across the full diagnostic set.
@@ -1537,6 +1650,24 @@ export async function dispatchForFile(
 	};
 	let visibleDiagnostics = applyOutputFilters(dedupedDiagnostics);
 	let resolvedCount = 0;
+	// #4484 r2: what this observation still holds that neither delivers nor
+	// enters the record alone. An edit-range gate decides delivery only, so the
+	// blocking findings it withheld (through the same output filters) keep a
+	// recorded blocker of the same identity pending. They stay out of the
+	// baseline and the delta.
+	const stillObserved: Diagnostic[] =
+		outOfEditScope.length > 0
+			? applyOutputFilters(outOfEditScope).flatMap((d) =>
+					d.semantic === "blocking" ? [d] : [],
+				)
+			: [];
+	// #4484: the delta decides only what the agent is told is NEW, never
+	// whether a blocker is still pending. The blocking findings it holds back
+	// as already seen are still in this observation, so they go back beside
+	// the delta: the inline-blocker record, the store and the commit gate read
+	// them, and the record clears only when they and the delta's blockers are
+	// both gone.
+	let heldBackBlockers: Diagnostic[] = [];
 	if (ctx.deltaMode && previousBaseline) {
 		// Silencing a rule is not fixing it. The stored baseline is deliberately
 		// unfiltered (below), so compare against a fully-filtered view of it
@@ -1548,6 +1679,24 @@ export async function dispatchForFile(
 			visibleDiagnostics,
 			applyOutputFilters(previousBaseline),
 			(d) => d.id,
+		);
+		const isNew = new Set(filtered.new);
+		heldBackBlockers = visibleDiagnostics.filter(
+			(d) => d.semantic === "blocking" && !isNew.has(d),
+		);
+		// #4484 r2: an unused value is a blocker only while the delta calls it
+		// new. Held back as already seen, it is still observed, promoted as it
+		// was when it was recorded, so the record keeps it pending.
+		stillObserved.push(
+			...promoteDeltaUnusedToBlockers(
+				visibleDiagnostics.flatMap((d) =>
+					!isNew.has(d) &&
+					d.semantic !== "blocking" &&
+					isUnusedValueDiagnostic(d)
+						? [d]
+						: [],
+				),
+			),
 		);
 		visibleDiagnostics = promoteDeltaUnusedToBlockers(filtered.new);
 		resolvedCount = filtered.fixed.length;
@@ -1669,6 +1818,13 @@ export async function dispatchForFile(
 			// baseline read ever runs and cannot carry either value.
 			baselineHit: previousBaseline !== undefined,
 			baselineWarningCount,
+			// #4484: blockers still observed that the delta did not call new.
+			heldBackBlockers: heldBackBlockers.length,
+			// #4484 r2: findings that only keep a recorded blocker pending, and
+			// the sources whose silence is no evidence.
+			stillObserved: stillObserved.length,
+			inconclusiveRunners: inconclusiveRunnerIds.size,
+			inconclusiveServers: inconclusiveServerIds.size,
 		},
 	});
 
@@ -1683,6 +1839,20 @@ export async function dispatchForFile(
 		output,
 		blockerOutput,
 		hasBlockers: blockers.length > 0,
+		...(heldBackBlockers.length > 0 && { heldBackBlockers }),
+		...(stillObserved.length > 0 && { stillObserved }),
+		...(editScopedRunnerIds.some((id) => !voidedCovers.has(id)) && {
+			editScopedRunnerIds: editScopedRunnerIds.flatMap((id) =>
+				voidedCovers.has(id) ? [] : [id],
+			),
+		}),
+		...((inconclusiveRunnerIds.size > 0 || inconclusiveServerIds.size > 0) && {
+			inconclusiveSources: {
+				runnerIds: [...inconclusiveRunnerIds],
+				serverIds: [...inconclusiveServerIds],
+				collectLaterRunnerIds: [...collectLaterRunnerIds],
+			},
+		}),
 		...(unconfirmedStatus !== undefined && { unconfirmedStatus }),
 	};
 }

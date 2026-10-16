@@ -317,6 +317,15 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			reason:
 				"the native addon's load is the host boundary; its sync loader is the only seam to make it fail",
 		},
+	// 2026-10-15 (#4484): the host witness keeps every pi-lens module on the
+	// write-to-turn-end chain real; only the language-server process behind the
+	// LSP capability adapter is stood in for, answering from the bytes it gets.
+	"in-process-mock:index-4484-unfixed-blocker-witness.test.ts::clients/lsp/capabilities":
+		{
+			detector: "in-process-mock",
+			reason:
+				"the language-server process is the boundary; the capability adapter is where every host witness stands in for it",
+		},
 	"never-settling-wait:scripts/mutate-fixture.test.ts": {
 		detector: "never-settling-wait",
 		reason:
@@ -603,6 +612,16 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"two concurrent real pi children must share one project root and one PI_LENS_HOME; the cross-session stores are keyed by that pair",
 	},
+	// 2026-10-16 (#4513): 3 -> 4. pi 1.3 restores a resumed session's active tools
+	// from the transcript while pi-lens re-plans its lazy-tool set at
+	// session_start; which of the two decides, and whether the first request after
+	// a `--continue` restart advertises the same roster, is observable only on a
+	// real second pi process reading the first one's session file and sidecar.
+	"real-process-spawn:real-harness/lifecycle.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the first request after a real pi restart on a persisted session must advertise the lazy-tool roster pi restored and pi-lens planned; no in-process double runs the host's restore",
+	},
 	"real-process-spawn:real-harness/negative.test.ts": {
 		detector: "real-process-spawn",
 		reason:
@@ -767,6 +786,13 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		detector: "real-process-spawn",
 		reason:
 			"the real pinned npm child is required to reproduce lockfile optional-binding rewrites; a process double cannot validate npm behavior",
+	},
+	// 2026-10-16 (#4510): the killed-runner witness ends its own vitest
+	// launcher from outside the worker (the kill guard refuses process.kill).
+	"real-process-spawn:scripts/mutate-fixture.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the fixture kills its parent vitest launcher through kill(1), because the kill guard refuses process.kill on a pid the file does not own; no in-process call ends the runner",
 	},
 	// 2026-09-26 (#3531): the CLI smoke test spawns a real node child to prove
 	// scripts/mutation-report.mjs's own argv parsing (--report/--out) and

@@ -1227,6 +1227,11 @@ async function dispatchPipelineAnalysis(args: {
 			autofixMode,
 			allowAutonomousWriters,
 			modifiedRanges,
+			// #4484 r2: read when the dispatch returns, so a collect-later answer
+			// absorbed meanwhile is part of what the run carries forward.
+			priorInlineBlockers: () => runtime.getInlineBlockerDiagnostics(filePath),
+			// #4484 round 3: what those blockers' lines refer to.
+			priorAnalysisAnchor: () => runtime.getAnalysisAnchor(filePath),
 			telemetry: {
 				model: runtime.telemetryModel,
 				sessionId: runtime.telemetrySessionId,
@@ -3564,13 +3569,20 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 					// #4137 round 3: a run without authorship does not retire a
 					// record about the very bytes it read. The already-analysed latch
 					// is a cost rule, not the record's guard.
+					// #4484: and no run retires a record while its own observation
+					// still holds a blocker.
 					{
 						authored: bashAuthorshipConfirmed,
 						sha256: result.inlineBlockerFileContent?.sha256,
+						blocking: result.currentBlockerCount ?? 0,
 					},
 				),
 			) ?? false;
 	}
+	// #4484 round 3: the anchor follows the record, so it moves only with a
+	// verdict that applied.
+	if (inlineVerdictApplied)
+		runtime.setAnalysisAnchor(filePath, result.analysisAnchor);
 
 	// A superseded verdict must not latch the commit gate either (#3507).
 	if (resultLive) {
