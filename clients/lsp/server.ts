@@ -1124,9 +1124,9 @@ export async function resolveAndLaunch(
 			`lsp launch ensure-tool start tool=${spec.managedToolId} cwd=${spec.cwd} storeOnly=${storeOnly}`,
 		);
 		const installStartedAt = Date.now();
-		const installed = storeOnly
-			? await getToolPath(spec.managedToolId, { storeOnly: true })
-			: await ensureTool(spec.managedToolId);
+		const installed = await (storeOnly
+			? getToolPath(spec.managedToolId, { storeOnly: true })
+			: ensureTool(spec.managedToolId));
 		const installAttempt = storeOnly
 			? undefined
 			: captureInstallAttempt(spec.managedToolId);
