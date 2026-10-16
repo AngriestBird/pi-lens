@@ -68,10 +68,28 @@ import { setupTestEnvironment } from "../test-utils.js";
 
 const { safeSpawnAsync } = vi.hoisted(() => ({ safeSpawnAsync: vi.fn() }));
 
+// CI 2026-10-16 on c6dcf906c: the runner image has Go at an absolute
+// candidate, and candidate-probe.ts accepts an absolute candidate through
+// `existsSync` without spawning it, so the go-vet probe cells read clean.
+// Hide the absolute entries of GO_UNIX_PATHS (clients/go-client.ts) so only the
+// bare `go` candidate answers, through the mocked spawn. Cargo needs no entry:
+// rust-clippy's cells pass with an absolute cargo present.
+const ABSOLUTE_GO_CANDIDATES = new Set(["/usr/local/go/bin/go", "/usr/bin/go"]);
+
 vi.mock("../../../clients/safe-spawn.js", async (importOriginal) => ({
 	...(await importOriginal<Record<string, unknown>>()),
 	safeSpawnAsync,
 }));
+
+vi.mock("node:fs", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:fs")>();
+	return {
+		...actual,
+		existsSync: (candidate: fs.PathLike) =>
+			!ABSOLUTE_GO_CANDIDATES.has(String(candidate)) &&
+			actual.existsSync(candidate),
+	};
+});
 
 const repoRoot = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
