@@ -746,5 +746,11 @@ describe("tier-1 parser lane", () => {
 		expect(passFloorBreach(unavailable, 1)).toBeNull();
 		// No floor declared is the pre-existing behaviour, unchanged.
 		expect(passFloorBreach(unavailable, null)).toBeNull();
+		// The message keeps its counts (the helper's record supplies them).
+		expect(passFloorBreach(unavailable, 3)).toContain(
+			"1 runner(s) passed, at least 3 required (2 unavailable)",
+		);
+		// A floor that is not a number (`--min-pass=abc`) is red, never "no floor".
+		expect(() => passFloorBreach(unavailable, Number.NaN)).toThrow(TypeError);
 	});
 });

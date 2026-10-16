@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+	checkCount,
 	checkDocs,
 	checkRecords,
 	gitHeadText,
@@ -17,6 +18,7 @@ import {
 	readEvaluatedRecord,
 	writeEvaluatedRecord,
 } from "../../scripts/lib/assert-evaluated.mjs";
+import { stripSource } from "../support/sweep-kit.js";
 
 // Recurrence #4514 / retro P2: an artifact that degrades under
 // continue-on-error (41 servers captured fell to 16, ~54 classified rows to
@@ -469,5 +471,119 @@ describe("checkRecords and main: the dedicated floor step (#4514)", () => {
 		writeAll(low, { ...healthy, "characterize-lsp": 1 });
 		expect(main(["--records", low])).toBe(1);
 		expect(main([])).toBe(2);
+	});
+});
+
+// Recurrence #4518: the producers outside the LSP nightly (the APFS anchors,
+// the Swift crash-watch) derive their count in shell, so the one helper needs a
+// door a workflow step can use without writing a record file. Same record
+// shape, same floor comparison; an empty count is a producer that did not
+// report, never a zero it measured.
+describe("--count: a workflow step's own count against a floor (#4518)", () => {
+	it("passes a count at the floor and fails one below it, with the one record shape", () => {
+		expect(checkCount("apfs-anchors=200", 200)).toEqual({
+			producer: "apfs-anchors",
+			evaluated: 200,
+			floor: 200,
+			prevEvaluated: null,
+			ok: true,
+			reason: "ok",
+		});
+		const low = checkCount("apfs-anchors=199", 200);
+		expect(low.ok).toBe(false);
+		expect(low.reason).toBe("evaluated 199, below the floor of 200");
+	});
+
+	it("reads an empty, missing or non-numeric count as a producer that never reported", () => {
+		for (const spec of [
+			"swift-crash-watch=",
+			"swift-crash-watch",
+			"swift-crash-watch=abc",
+			"swift-crash-watch=-1",
+			"swift-crash-watch=1.5",
+		]) {
+			const record = checkCount(spec, 1);
+			expect(record, spec).toMatchObject({
+				producer: "swift-crash-watch",
+				evaluated: 0,
+				ok: false,
+			});
+			expect(record.reason, spec).toMatch(/no record/);
+		}
+	});
+
+	it("main exits 0 at the floor, 1 on a zero count, 1 on a missing count, 2 without a valid --floor", () => {
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		expect(main(["--count", "swift-crash-watch=1", "--floor", "1"])).toBe(0);
+		expect(main(["--count", "swift-crash-watch=0", "--floor", "1"])).toBe(1);
+		expect(main(["--count", "swift-crash-watch=", "--floor", "1"])).toBe(1);
+		expect(main(["--count", "swift-crash-watch=1"])).toBe(2);
+		expect(main(["--count", "swift-crash-watch=1", "--floor", "0"])).toBe(2);
+		expect(main(["--count", "swift-crash-watch=1", "--floor", "x"])).toBe(2);
+	});
+
+	it("prints the failing row in the shape the red-night notifier lists, and a step-summary row", () => {
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		const summary = path.join(tmp(), "summary.md");
+		vi.stubEnv("GITHUB_STEP_SUMMARY", summary);
+		try {
+			main(["--count", "apfs-anchors=3", "--floor", "200"]);
+		} finally {
+			vi.unstubAllEnvs();
+		}
+		expect(log).toHaveBeenCalledWith(
+			"✗  apfs-anchors  evaluated floor  3  evaluated 3, below the floor of 200",
+		);
+		expect(fs.readFileSync(summary, "utf8")).toContain(
+			"| apfs-anchors | 3 | 200 | n/a | evaluated 3, below the floor of 200 |",
+		);
+	});
+});
+
+// Recurrence #4518 (found while reusing the helper): the refresh-PR job
+// (tool-smoke-prs) runs `scripts/assert-evaluated.mjs` on a fresh checkout that
+// never builds, and the helper imported scripts/lib/clean-signal.mjs, which
+// imports `dist/clients/lsp/server-traits.js`. The guard died with
+// ERR_MODULE_NOT_FOUND, so every refresh PR was held for a reason that was not
+// a degraded night. A static import walk, not a spawn, so it needs no admission.
+describe("the helper loads on a checkout with no dist/ (#4518)", () => {
+	const root = path.resolve(import.meta.dirname, "../..");
+	const closure = (entry: string) => {
+		const seen = new Set<string>();
+		const visit = (file: string) => {
+			if (seen.has(file)) return;
+			seen.add(file);
+			const code = stripSource(fs.readFileSync(file, "utf8"), {
+				strings: "keep",
+			});
+			for (const m of code.matchAll(
+				/(?:^|\n)\s*(?:import|export)\b[^;]*?from\s+"(\.[^"]+)"/g,
+			))
+				visit(path.resolve(path.dirname(file), m[1]));
+		};
+		visit(path.resolve(root, entry));
+		return [...seen];
+	};
+
+	it("reaches no module under dist/ from either entry point", () => {
+		for (const entry of [
+			"scripts/assert-evaluated.mjs",
+			"scripts/lib/assert-evaluated.mjs",
+		]) {
+			const files = closure(entry);
+			expect(files.length, entry).toBeGreaterThanOrEqual(2);
+			const code = files
+				.map((f) =>
+					stripSource(fs.readFileSync(f, "utf8"), { strings: "keep" }),
+				)
+				.join("\n");
+			expect(code, entry).not.toMatch(/from\s+"[^"]*\/dist\//);
+			expect(
+				files.map((f) => path.relative(root, f)),
+				entry,
+			).not.toContain("scripts/lib/clean-signal.mjs");
+		}
 	});
 });

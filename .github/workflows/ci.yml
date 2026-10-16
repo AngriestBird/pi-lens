@@ -1097,7 +1097,23 @@ jobs:
         run: |
           set -euo pipefail
           npm run build
-          node_modules/.bin/vitest run tests/clients/path-utils.test.ts tests/clients/diagnostic-dispositions.test.ts --configLoader runner
+          node_modules/.bin/vitest run tests/clients/path-utils.test.ts tests/clients/diagnostic-dispositions.test.ts --configLoader runner --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/apfs-anchors.json"
+
+      # #4518: the step above stays advisory about test RESULTS, but a run that
+      # evaluated nothing (a build that did not compile, a file that did not
+      # load, a reporter that wrote no file) read as an ordinary advisory red,
+      # or as green when vitest's filter matched nothing. This step is NOT
+      # continue-on-error: it fails the leg only when fewer than 200 tests ran
+      # (passed plus failed; 223 ran on the measured macOS leg, tests/fixtures/
+      # nightly-floors/measurements.json). The summary table it appends is the
+      # counter the promotion decision above reads.
+      - name: APFS anchors evaluated floor
+        if: ${{ !cancelled() && matrix.os == 'macos-latest' }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          count="$(node -e 'try{const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(j.numPassedTests+j.numFailedTests)}catch{}' "$RUNNER_TEMP/apfs-anchors.json")"
+          node scripts/assert-evaluated.mjs --count "apfs-anchors=${count}" --floor 200
 
       - name: Rule catalog report (non-blocking)
         continue-on-error: true
