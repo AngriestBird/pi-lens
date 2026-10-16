@@ -88,6 +88,7 @@
 		"scripts/dispatch-safety.test.ts": 2,
 		"scripts/download-grammars.test.ts": 2,
 		"scripts/download-test-history-artifacts.test.ts": 2,
+		"scripts/floor-steps-executed.test.ts": 2,
 		"scripts/git-fixture-env.test.ts": 5,
 		"scripts/guard-bash-hook.test.ts": 19,
 		"scripts/guard-bash-probe.test.ts": 4,
