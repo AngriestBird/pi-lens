@@ -514,7 +514,7 @@ describe("#2981 long-lived containers are bounded or admitted", () => {
 		"clients/latency-logger.ts#_setRecentPhasesForTest:b45c37e8",
 		"clients/latency-logger.ts#resetCurrentPhaseForSession:9d04beac",
 		"clients/lsp/client.ts#safeSendNotification:63295a96",
-		"clients/lsp/server.ts#PROJECT_BOUNDARY_MARKERS:cc0fbaf1",
+		"clients/lsp/server.ts#PYTHON_EXTENSIONS:cc0fbaf1",
 		"clients/lsp/server.ts#loggedRootCeilingClamps:3e9d9204",
 		"clients/lsp/server.ts#DIRECT_LSP_NEGATIVE_TTL_MS:6f24c89e",
 		"clients/lsp/server.ts#directLspCommandUnavailableUntil:831316db",

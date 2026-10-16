@@ -8,6 +8,7 @@ import {
 	type LSPServerInfo,
 	PythonJediServer,
 	PythonServer,
+	TypeScriptServer,
 } from "../../../clients/lsp/server.js";
 import {
 	initLSPConfig,
@@ -423,6 +424,45 @@ describe("LSP per-server nested-root coalescing (#1373)", () => {
 			await expect(
 				service.clientRegistry.resolveServerRoot(
 					server,
+					path.join(nested, "qq.py"),
+				),
+			).resolves.toBe(nested);
+		},
+	);
+
+	// #4548: Python packaging manifests must not split a TypeScript client at a
+	// nested directory; the shared boundary predicate used to overreach here.
+	it.each(["requirements.txt", "setup.py", "setup.cfg"])(
+		"does not treat a Python $0 as a TypeScript project boundary",
+		async (marker) => {
+			const project = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-typescript-python-boundary-"),
+			);
+			dirs.push(project);
+			vi.spyOn(process, "cwd").mockReturnValue(project);
+			const nested = path.join(project, "smoke");
+			fs.mkdirSync(nested, { recursive: true });
+			fs.writeFileSync(path.join(nested, marker), "\n");
+
+			const service = new LSPService() as unknown as RootPolicyHarness;
+			service.state.clients.set(
+				`typescript:${normalizeMapKey(project)}`,
+				fakeClient(project),
+			);
+			service.state.clients.set(
+				`python:${normalizeMapKey(project)}`,
+				fakeClient(project),
+			);
+
+			await expect(
+				service.clientRegistry.resolveServerRoot(
+					TypeScriptServer,
+					path.join(nested, "app.ts"),
+				),
+			).resolves.toBe(project);
+			await expect(
+				service.clientRegistry.resolveServerRoot(
+					PythonServer,
 					path.join(nested, "qq.py"),
 				),
 			).resolves.toBe(nested);
