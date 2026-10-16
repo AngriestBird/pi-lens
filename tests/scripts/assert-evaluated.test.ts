@@ -312,6 +312,46 @@ describe("checkDocs: the refresh PR refuses a degraded regeneration (#4514)", ()
 		);
 	});
 
+	// #4537: expiry is legitimate, but only HEAD can justify it (#4338 M1).
+	it.each([
+		["2026-10-10", true],
+		["2026-10-11", true],
+		["2026-10-12", false],
+		["2026-10-17", false],
+		["garbage", false],
+		["2026-02-30", false],
+		[undefined, false],
+	])(
+		"judges the M1 five-cell loss with HEAD firstMissed %s as %s",
+		(stamp, ok) => {
+			vi.useFakeTimers();
+			vi.setSystemTime(new Date("2026-10-16T23:59:00Z"));
+			try {
+				const state = (firstMissed: string | undefined) =>
+					`\n## Capability matrix refresh state (nightly-generated)\n\n\`\`\`json\n${JSON.stringify({ "first-publish": Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`l${23 + i}`, { firstMissed }])) })}\n\`\`\`\n`;
+				const headMatrix = matrixDoc(Array(28).fill("direct")) + state(stamp);
+				// An expired stamp in the output must not authorize an unstamped HEAD.
+				const flipped =
+					matrixDoc([
+						...Array(23).fill("direct"),
+						...Array(5).fill("unknown"),
+					]) + state("2026-10-01");
+				const root = stage({
+					...head,
+					"docs/lsp-capability-matrix.md": flipped,
+				});
+				const records = checkDocs(root, (p) =>
+					p === "docs/lsp-capability-matrix.md"
+						? headMatrix
+						: (head[p] ?? null),
+				);
+				expect(records.every((r) => r.ok)).toBe(ok);
+			} finally {
+				vi.useRealTimers();
+			}
+		},
+	);
+
 	it("fails a larger flip on the count and on the cells", () => {
 		const flipped = matrixDoc([
 			...Array(20).fill("direct"),

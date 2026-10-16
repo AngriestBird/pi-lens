@@ -79,7 +79,7 @@ export function checkRecords(dir, headText = gitHeadText) {
 
 /**
  * The per-cell check of a doc whose count margin is too coarse to see a
- * handful of cells go `unknown`: every cell classified at HEAD must still be.
+ * handful of cells go `unknown`: HEAD must justify losses with an expired stamp.
  * Same record shape: `evaluated` is how many of HEAD's classified cells held.
  */
 function cellRecord(producer, doc, head, text) {
