@@ -18,6 +18,7 @@ import {
 	readGitHead,
 	recoverOpaqueChangesViaGit,
 	serializeHeadLook,
+	shouldRunOpaqueRecovery,
 } from "./opaque-mutation-scan.js";
 import { normalizeMapKey } from "./path-utils.js";
 import { detectFileKind } from "./file-kinds.js";
@@ -1887,7 +1888,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		// with zero telemetry; git-first recovery is cheap enough (~60ms) to
 		// close that gap, subtracting already-recognized paths so nothing
 		// double-dispatches.
-		if (workspaceRoot && !getFlag("no-read-guard")) {
+		if (shouldRunOpaqueRecovery(event.toolName, workspaceRoot)) {
 			const scanRoot = workspaceRoot;
 			const started = Date.now();
 			const pending = getOpaqueBaselineStore().take(
