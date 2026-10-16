@@ -3036,6 +3036,45 @@ describe("PR body lint (#1844)", () => {
 		}
 	});
 
+	// F-4551-3: pr-preflight and lane-check pass only `--lint-local <body>`, so
+	// the refactor "Behavior equivalence" rule (title-gated) never ran locally,
+	// and the documented positional title form was ignored.
+	it("feeds the local CLI a title from the positional form or COMMIT_MSG.txt (#4551)", () => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-lens-pr-body-cli-title-"));
+		const bodyPath = join(directory, "PR_BODY.md");
+		const checker = resolve(repositoryRoot, "scripts/check-pr-body.mjs");
+		const refactorTitle = "refactor(test): verify local body lint (refs #2807)";
+		const run = (args: string[]) =>
+			spawnSync(process.execPath, [checker, ...args], {
+				cwd: fixtureCwd,
+				encoding: "utf8",
+			});
+		try {
+			writeFileSync(
+				bodyPath,
+				`${body}\n\n### Test assessment\nThe targeted test covers the local CLI.`,
+			);
+			const positional = run(["--lint-local", bodyPath, refactorTitle]);
+			expect(positional.status).toBe(1);
+			expect(positional.stderr).toContain('"## Behavior equivalence"');
+
+			writeFileSync(join(fixtureCwd, "COMMIT_MSG.txt"), `${refactorTitle}\n`);
+			const fromCommit = run(["--lint-local", bodyPath]);
+			expect(fromCommit.status).toBe(1);
+			expect(fromCommit.stderr).toContain('"## Behavior equivalence"');
+
+			writeFileSync(
+				join(fixtureCwd, "COMMIT_MSG.txt"),
+				"ci(test): verify local body lint (refs #2807)\n",
+			);
+			const control = run(["--lint-local", bodyPath]);
+			expect(control.stderr).not.toContain('"## Behavior equivalence"');
+			expect(control.status).toBe(0);
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
 	it("accepts the required sections", () => {
 		expect(lintPrBody(body)).toEqual({ valid: true, errors: [] });
 	});

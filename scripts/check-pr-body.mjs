@@ -2892,7 +2892,30 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
 	const bodyIndex = process.argv.indexOf("--body");
 	const titleIndex = process.argv.indexOf("--title");
 	const refIndex = process.argv.indexOf("--ref");
-	const title = titleIndex === -1 ? "" : process.argv[titleIndex + 1];
+	// The documented local form also takes the title positionally:
+	// `--lint-local <body-file> "<title>"` (docs/pi-lens-subagent.md). Without
+	// it a title-gated rule (Behavior equivalence) never fired locally (#4551).
+	const positionalTitle =
+		process.argv[2] === "--lint-local" &&
+		process.argv[4] &&
+		!process.argv[4].startsWith("--")
+			? process.argv[4]
+			: "";
+	// With neither, the handoff's commit subject stands in for the title, the
+	// proxy check-pr-title.mjs reads too, so pr-preflight and lane-check (which
+	// pass only the body) still apply the title-gated rules.
+	const commitSubject = () => {
+		try {
+			return readFileSync("COMMIT_MSG.txt", "utf8").split(/\r?\n/, 1)[0].trim();
+		} catch {
+			return "";
+		}
+	};
+	const title =
+		titleIndex !== -1
+			? process.argv[titleIndex + 1]
+			: positionalTitle ||
+				(process.argv[2] === "--lint-local" ? commitSubject() : "");
 	const ref = refIndex === -1 ? undefined : process.argv[refIndex + 1];
 	const proseMode = process.argv.includes("--prose-grace") ? "warn" : "block";
 	if (titleIndex !== -1 && !title) throw new Error("--title requires text");
