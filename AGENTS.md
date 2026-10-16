@@ -906,7 +906,7 @@ file-scoped worklist and receives no project-wide scanner output.
   route), never a sweep warm-up, cascade or sweep touch. The touch debounce
   never drops a save: a saved touch whose push it skipped sends the save alone
   (`notify.save`). Its key is (path, server): the client scope never re-pushes
-  bytes a server holds (#3405 r2).
+  bytes a server holds.
 - `touchFile` freezes content-bound auxiliary coverage at merge time. A later
   publication cannot undo a finding drop. Auxiliary gaps narrow coverage and
   never turn a primary answer inconclusive. When a primary touch is
