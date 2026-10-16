@@ -24,7 +24,7 @@ type Requirement =
 type Utils = YamlRule["utils"];
 
 // Identifier-shaped words; `$`-prefixed ones are metavariables.
-const PATTERN_WORD = /\$*[A-Za-z_][A-Za-z0-9_]*/g;
+const PATTERN_WORD = /\$?[A-Za-z_]\w*/g;
 // A regex with no metacharacter other than leading `^`, trailing `$` and `\.`.
 const LITERAL_REGEX = /^\^?((?:[A-Za-z0-9_"'`:\- =!<>/@#%&,;~]|\\\.)+)\$?$/;
 const RELATIONAL_KEYS = ["has", "inside", "follows", "precedes"] as const;
@@ -39,7 +39,7 @@ function ownLiterals(node: YamlRuleCondition): string[] {
 	}
 	const regex = typeof node.regex === "string" ? node.regex : "";
 	const literal = LITERAL_REGEX.exec(regex)?.[1];
-	if (literal) literals.push(literal.replaceAll("\\.", "."));
+	if (literal) literals.push(literal.replaceAll(String.raw`\.`, "."));
 	return literals;
 }
 
