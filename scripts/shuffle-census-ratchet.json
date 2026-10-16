@@ -38,12 +38,6 @@
 			"test": "bridge is absent before registerIOBridge is called"
 		},
 		{
-			"file": "tests/clients/lsp/client-internals.test.ts",
-			"seam": "lsp-real-server-timing",
-			"seed": 202,
-			"test": "publishDiagnostics handler — superseded push guard (cache-poisoning fix) > logSequence — push-path pull-settle record shape (#1639) > a quiet-window settle's durationMs times the debounce wait, not document age"
-		},
-		{
 			"file": "tests/clients/lsp/integration.test.ts",
 			"seam": "lsp-real-server-timing",
 			"seed": 202,
