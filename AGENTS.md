@@ -136,6 +136,9 @@ The principles' delegation contract applies. pi-lens adds:
   these rules.
 - Every regroup, merged bug fix, second round on one shape, and incident runs
   the retrospective in `docs/pi-lens-retro.md`.
+- Three open issues on one mechanism, in any seam groups, open a consolidation
+  audit across every consumer of that mechanism before the next one is filed
+  (history: `HISTORY.md`, 2026-10-16).
 - The per-PR loop (review, verify, auto-merge on green), round routing, the
   merge gate and the Common mistakes table live in `docs/pi-lens-merge-policy.md`.
 - Read CI with `node scripts/ci-verdict.mjs <pr|sha>` (exact head, all pages).
@@ -691,6 +694,13 @@ file-scoped worklist and receives no project-wide scanner output.
     joined answer and carry the edited files into the next scan. Screen:
     for a join, list the writers that can store the row between the join and
     the next scan, and show the finding survives each.
+
+71. **One signal wired consumer by consumer:** a detector or notifier added on
+    one consumer's seam, while other consumers derive state from the same
+    files. Each detector then picks its own subset, and two tools disagree
+    about one file. Screen: for a new detector, notifier or staleness marker,
+    list every consumer that holds state derived from the same content, and
+    show each one receives the change or record why not.
 
 **Expired successor hand-off:** an expired successor marker may authorize
     its named interrupted successor only for the fixed retention window in
