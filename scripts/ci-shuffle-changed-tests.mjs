@@ -15,10 +15,12 @@
  *
  * Scope is bounded to the test files the PR adds or changes
  * (`git diff --name-only <base>...<head>`, the pre-push selector's
- * `changedFiles`), at most MAX_FILES of them. Files the PR ADDS come before
- * files it only modifies (`--diff-filter=A`, #4456): the added file is what the
- * PR exists to prove, and it sorted past the cap and the budget when the order
- * was alphabetical. Per set it runs, in this order,
+ * `changedFiles`). Files the PR ADDS come before files it only modifies
+ * (`--diff-filter=A`, #4456): the added file is what the PR exists to prove,
+ * and it sorted past the old 20-file cap when the order was alphabetical. The
+ * time budget is the only bound on the set (no count cap): a 20-file plan cost
+ * 167 s of a 420 s budget on PR #4491 (run 38864877898), so the count, not the
+ * time, left that run unproven. Per set it runs, in this order,
  *
  *   - every ADDED file alone,
  *   - the whole set under `--sequence.shuffle` once per fixed seed in SEEDS
@@ -32,7 +34,7 @@
  * wall-clock file to its own `maxWorkers` and `groupOrder`.
  *
  * Time budget: BUDGET_MS in all, each vitest start bounded by what is left. A
- * start that does not finish, a file over the cap and an unreadable diff are
+ * start that does not finish, a start the budget never reached and an unreadable diff are
  * UNPROVEN (exit 3), never green, and each line names the files it did not
  * prove. So is a start that vitest answers with "No test files found": it ran
  * nothing. Exit codes: 0 clean (or no test file in
@@ -49,8 +51,6 @@ import { changedFiles } from "./pre-push-targeted-tests.mjs";
 
 /** Two fixed seeds: every run is reproducible with `--sequence.seed=<seed>`. */
 export const SEEDS = Object.freeze([202, 424]);
-/** Test files run per PR; the rest are listed as not run. */
-export const MAX_FILES = 20;
 /**
  * Total wall time: the step's `timeout-minutes: 8` less a 60 s margin for the
  * kill and the summary. Measured, not guessed (#4456): a PR that touches
@@ -225,10 +225,10 @@ function describeRun(run) {
 }
 
 /**
- * @param {{ files: string[], over: string[], results: ReturnType<typeof runPlan>["results"], notRun: ReturnType<typeof runPlan>["notRun"] }} state
+ * @param {{ files: string[], results: ReturnType<typeof runPlan>["results"], notRun: ReturnType<typeof runPlan>["notRun"] }} state
  * @returns {{ code: 0 | 1 | 3, kind: "clean" | "red" | "unproven", lines: string[] }}
  */
-export function judge({ files, over, results, notRun }) {
+export function judge({ files, results, notRun }) {
 	const red = results.filter((entry) => entry.verdict === "red");
 	const timedOut = results.filter((entry) => entry.verdict === "timeout");
 	const uncollected = results.filter(
@@ -248,8 +248,6 @@ export function judge({ files, over, results, notRun }) {
 		lines.push(`not run (no project collects it): ${describeRun(entry.run)}`);
 	for (const run of notRun)
 		lines.push(`not run (budget spent): ${describeRun(run)}`);
-	for (const file of over)
-		lines.push(`not run (over ${MAX_FILES} files): ${file}`);
 	if (red.length > 0) return { code: 1, kind: "red", lines };
 	if (lines.length > 0) return { code: 3, kind: "unproven", lines };
 	return {
@@ -283,12 +281,14 @@ export function parseArgs(argv) {
 	return options;
 }
 
+/** @typedef {{ cwd?: string, env?: NodeJS.ProcessEnv }} GitOptions */
+
 /**
  * @param {string[]} argv
  * @param {{
  *   env?: NodeJS.ProcessEnv,
- *   diff?: (range: string) => string[] | null,
- *   added?: (range: string) => string[] | null,
+ *   diff?: (range: string, options: GitOptions) => string[] | null,
+ *   added?: (range: string, options: GitOptions) => string[] | null,
  *   exec?: typeof execVitest,
  *   now?: () => number,
  *   budgetMs?: number,
@@ -300,7 +300,8 @@ export function run(argv, io = {}) {
 	const {
 		env = process.env,
 		diff = changedFiles,
-		added: addedOf = (range) => changedFiles(range, { diffFilter: "A" }),
+		added: addedOf = (range, git) =>
+			changedFiles(range, { ...git, diffFilter: "A" }),
 		exec = execVitest,
 		now,
 		budgetMs,
@@ -324,9 +325,11 @@ export function run(argv, io = {}) {
 			);
 		return verdict.code;
 	};
+	// The diff runs where the tests are (`--cwd`), under the run's own env.
+	const git = { cwd: options.cwd, env };
 	let paths = options.files;
 	if (paths === null) {
-		paths = diff(`${options.base}...${options.head}`);
+		paths = diff(`${options.base}...${options.head}`, git);
 		if (paths === null)
 			return finish({
 				code: 3,
@@ -337,7 +340,10 @@ export function run(argv, io = {}) {
 	let added = [];
 	if (options.files === null) {
 		const range = `${options.base}...${options.head}`;
-		const answer = addedOf(range);
+		// A rename is not an add: a delete plus a >= 50% similar add reads as
+		// one (git's rename detection), so that new file counts as modified and
+		// keeps its place after the added ones. Chosen, not missed (#4456 r1 F2).
+		const answer = addedOf(range, git);
 		// The added list only orders the plan; the diff above already answered,
 		// so an unreadable list falls back to path order, once, in the log.
 		if (answer === null)
@@ -357,8 +363,7 @@ export function run(argv, io = {}) {
 			kind: "clean",
 			lines: ["no test file added or changed"],
 		});
-	const files = found.slice(0, MAX_FILES);
-	const over = found.slice(MAX_FILES);
+	const files = found;
 	log(
 		`[shuffle-changed] ${files.length} file(s), seeds ${SEEDS.join(", ")}, budget ${BUDGET_MS / 1000}s`,
 	);
@@ -369,7 +374,7 @@ export function run(argv, io = {}) {
 		now,
 		log,
 	});
-	return finish(judge({ files, over, results, notRun }));
+	return finish(judge({ files, results, notRun }));
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href)

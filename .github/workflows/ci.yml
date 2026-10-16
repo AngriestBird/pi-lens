@@ -383,7 +383,7 @@ jobs:
       # `Changed tests shuffled` and add it to the required set. The script
       # bounds itself to 7 min (BUDGET_MS), 1 min under this step's cap; the
       # steps before it take ~5.5 min, so the job stays under its 15. Files the
-      # PR adds run alone first, ahead of the 20-file cap and the budget (#4456).
+      # PR adds run alone first; the time budget is the only bound (#4456).
       # The SHAs reach the script through `env`, never the `run:` text.
       - name: Changed test files, alone and shuffled
         if: ${{ !cancelled() }}

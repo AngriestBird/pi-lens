@@ -8,7 +8,6 @@ import { afterAll, describe, expect, it } from "vitest";
 import {
 	BUDGET_MS,
 	judge,
-	MAX_FILES,
 	parseArgs,
 	planRuns,
 	reproCommand,
@@ -274,7 +273,6 @@ describe("runPlan: output and timeout classification (#4397 review r1)", () => {
 		};
 		const verdict = judge({
 			files: ["tests/a.test.ts"],
-			over: [],
 			notRun: [],
 			results: [{ run: alone, verdict: "red", output: "", ms: 1 }],
 		});
@@ -290,7 +288,7 @@ describe("judge and run: exit codes", () => {
 	// Recurrence: "absent is not green". Every way the job fails to prove the
 	// files order-independent exits 3, a different code from a proven red.
 	it("exits 0 clean, 1 on an order-dependent start, 3 when unproven", () => {
-		const base = { files, over: [], notRun: [] };
+		const base = { files, notRun: [] };
 		const ok = (label: string) => ({
 			run: { label, files, flags: [] },
 			verdict: "ok" as const,
@@ -317,16 +315,12 @@ describe("judge and run: exit codes", () => {
 				notRun: [{ label: "alone b", files, flags: [] }],
 			}).code,
 		).toBe(3);
-		expect(
-			judge({ ...base, results: [ok("alone a")], over: ["tests/x.test.ts"] })
-				.code,
-		).toBe(3);
 		// A red wins over an unproven part: the author needs the red first.
 		expect(
 			judge({
 				...base,
 				results: [{ ...ok("a"), verdict: "red" as const }],
-				over: ["tests/x.test.ts"],
+				notRun: [{ label: "alone b", files, flags: [] }],
 			}).code,
 		).toBe(1);
 	});
@@ -355,32 +349,62 @@ describe("judge and run: exit codes", () => {
 		expect(code).toBe(3);
 	});
 
-	// Recurrence: a 200-file test rename running the whole suite twice. Files
-	// past MAX_FILES are named, not run, and the exit is 3, not green.
-	it("runs at most MAX_FILES files and names the rest", () => {
+	// Recurrence: the 20-file count cap left PR #4491 (22 test files) unproven
+	// at 167 s of a 420 s budget (run 38864877898). The time budget is the bound.
+	it("runs every changed file when the budget allows, with no count cap", () => {
 		const names = Array.from(
-			{ length: MAX_FILES + 2 },
+			{ length: 30 },
 			(_, index) => `tests/f${String(index).padStart(2, "0")}.test.ts`,
 		);
-		const scratch = setupTestEnvironment("pi-lens-4397-cap-");
+		const scratch = setupTestEnvironment("pi-lens-4456-nocap-");
 		cleanups.push(scratch.cleanup);
 		fs.mkdirSync(path.join(scratch.tmpDir, "tests"));
 		for (const name of names)
 			fs.writeFileSync(path.join(scratch.tmpDir, name), "");
 		const exec = execBy({});
-		const lines: string[] = [];
 		const code = run(["--cwd", scratch.tmpDir, "--files", names.join(",")], {
 			exec,
+			log: quiet,
+		});
+		expect(code).toBe(0);
+		expect(exec.starts[0].filter((arg) => arg.endsWith(".test.ts"))).toEqual(
+			names,
+		);
+		for (const name of names) expect(exec.starts).toContainEqual([name]);
+	});
+
+	// Recurrence: a 200-file test rename running the whole suite twice. With no
+	// count cap the budget stops it, and "not run" must name every file the
+	// budget never reached: the exit is 3, never green.
+	it("stops a 200-file diff at the budget and names every file it did not prove", () => {
+		const names = Array.from(
+			{ length: 200 },
+			(_, index) => `tests/f${String(index).padStart(3, "0")}.test.ts`,
+		);
+		const scratch = setupTestEnvironment("pi-lens-4456-budget-");
+		cleanups.push(scratch.cleanup);
+		fs.mkdirSync(path.join(scratch.tmpDir, "tests"));
+		for (const name of names)
+			fs.writeFileSync(path.join(scratch.tmpDir, name), "");
+		let clock = 0;
+		const exec = execBy({});
+		const timed: ExecVitest = (startRun, options) => {
+			clock += 50;
+			return exec(startRun, options);
+		};
+		const lines: string[] = [];
+		const code = run(["--cwd", scratch.tmpDir, "--files", names.join(",")], {
+			exec: timed,
+			now: () => clock,
+			budgetMs: 1000,
 			log: (line) => lines.push(line),
 		});
 		expect(code).toBe(3);
-		const shuffled = exec.starts[0];
-		expect(shuffled.filter((arg) => arg.endsWith(".test.ts"))).toHaveLength(
-			MAX_FILES,
-		);
-		expect(lines.join("\n")).toContain(
-			`not run (over ${MAX_FILES} files): ${names[MAX_FILES + 1]}`,
-		);
+		expect(exec.starts.length).toBeLessThanOrEqual(20);
+		const text = lines.join("\n");
+		const started = new Set(exec.starts.flat());
+		for (const name of names)
+			expect(started.has(name) || text.includes(`alone ${name}`)).toBe(true);
 	});
 
 	// Recurrence: the budget constant drifting above the job's cap. ci.yml's
@@ -445,10 +469,10 @@ describe("added files run first, and an unproven result names what it skipped (#
 
 	// Recurrence: PR #4491 run 38859068333. The PR's new witness test
 	// (tests/index-4484-...) sorted after twenty tests/clients and tests/config
-	// files it only modified, the MAX_FILES cut dropped it, and the step exited
+	// files it only modified, the 20-file cut dropped it, and the step exited
 	// 3 with "not run (over 20 files)" on a passing PR.
-	it("keeps an added test that sorts last inside the cap of a 21-file diff", () => {
-		const files = names(MAX_FILES + 1);
+	it("runs an added test that sorts last first in a 21-file diff", () => {
+		const files = names(21);
 		const addedLast = files[files.length - 1];
 		const cwd = scratchTree(files);
 		const exec = execBy({});
@@ -462,11 +486,9 @@ describe("added files run first, and an unproven result names what it skipped (#
 		expect(exec.starts).toContainEqual([addedLast]);
 		expect(exec.starts[0]).toEqual([addedLast]);
 		const text = lines.join("\n");
-		expect(text).not.toContain(`over ${MAX_FILES} files): ${addedLast}`);
-		// The file the cap cut is a modified one, and it is named.
-		expect(text).toContain(
-			`not run (over ${MAX_FILES} files): ${files[MAX_FILES - 1]}`,
-		);
+		// No count cap: the added test and every modified file got an alone start.
+		for (const file of files) expect(exec.starts).toContainEqual([file]);
+		expect(text).not.toContain("not run");
 	});
 
 	// Recurrence: PR #4500 run 38846199394 and PR #4411 run 38644123472. One

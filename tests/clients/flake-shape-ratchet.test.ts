@@ -692,7 +692,7 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 	"real-process-spawn:scripts/ci-shuffle-changed-tests-spawn.test.ts": {
 		detector: "real-process-spawn",
 		reason:
-			"the job's exit code is the contract; an injected exec restates the flags the script builds instead of proving real vitest reorders and reds a file that shares state",
+			"the job's exit code is the contract; an injected exec restates the flags the script builds instead of proving real vitest reorders and reds a file that shares state. Also one throwaway-repo case (#4456): the default diff and added lists are real `git diff --diff-filter=A` calls whose add/modify/rename meaning is git's, so a double would restate it",
 	},
 	// 2026-10-07 (#4072 review F2): the executable CLI's exit status is the
 	// contract; an in-process main() call cannot prove the entry-point boundary.

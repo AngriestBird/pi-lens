@@ -1,6 +1,9 @@
 export declare const SEEDS: readonly number[];
-export declare const MAX_FILES: number;
 export declare const BUDGET_MS: number;
+export interface GitOptions {
+	cwd?: string;
+	env?: NodeJS.ProcessEnv;
+}
 export interface ShuffleRun {
 	label: string;
 	files: string[];
@@ -48,7 +51,6 @@ export declare function runPlan(
 ): { results: RunResult[]; notRun: ShuffleRun[] };
 export declare function judge(state: {
 	files: string[];
-	over: string[];
 	results: RunResult[];
 	notRun: ShuffleRun[];
 }): { code: 0 | 1 | 3; kind: "clean" | "red" | "unproven"; lines: string[] };
@@ -62,8 +64,8 @@ export declare function run(
 	argv: string[],
 	io?: {
 		env?: NodeJS.ProcessEnv;
-		diff?: (range: string) => string[] | null;
-		added?: (range: string) => string[] | null;
+		diff?: (range: string, options: GitOptions) => string[] | null;
+		added?: (range: string, options: GitOptions) => string[] | null;
 		exec?: ExecVitest;
 		now?: () => number;
 		budgetMs?: number;
