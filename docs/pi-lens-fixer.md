@@ -198,8 +198,10 @@ rigor (#2599).
   was skipped means gh failed, so the section was not required, not that it
   passed (#4288). A non-bug PR either deletes the `## Detection` section or
   fills the three lines, and a `Shape:` or `Enforcer:` line it does write is
-  validated too; free text in between reds the local preflight. A red
-  `PR body (advisory)` check is a fix-before-review item.
+  validated too; free text in between reds the local preflight. A bug-closing
+  PR that writes `unknown` as a layer or as the `Gap: none:` reason is refused
+  (#4519); the layer words are `DETECTION_LAYERS`, `nightly:<workflow>`
+  included. A red `PR body (advisory)` check is a fix-before-review item.
   A changelog fragment is `---` /
   `section: <Added|Changed|Deprecated|Removed|Fixed|Security>` /
   `audience: <user|internal>` / `---` / blank / one `- ` bullet. New

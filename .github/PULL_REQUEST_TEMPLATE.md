@@ -86,7 +86,7 @@ candidates you do not delete here go to the corpus value ledger issue.
 
 ## Detection
 
-Optional unless this PR closes a bug-labelled issue: name `Caught by:` (one layer), `Should have been caught by:` (a layer or `this layer`), and `Gap:` (`#NNN`, `exists: <path of a test already on master>`, or `none: <reason>`; a test this PR adds does not count); a bug-closing PR also names `Shape:` (`#N`, an AGENTS.md "Recurring defect shapes" number, or `new: <name>`) and `Enforcer:` (the tree-wide test path on master that scans the shape's whole population, `#N` for an issue to build one, or `none: judgment-only, <reason>`; with `Shape: #N` the path must be one catalog entry N names).
+Optional unless this PR closes a bug-labelled issue: name `Caught by:` (one layer word from `DETECTION_LAYERS` in `scripts/check-pr-body.mjs`, among them `TLA+`, `mutation`, `pre-push` and `lint/type check`; `nightly:<workflow>` names the workflow; a bug-closing PR may not write `unknown`), `Should have been caught by:` (a layer or `this layer`), and `Gap:` (`#NNN`, `exists: <path of a test already on master>`, or `none: <reason>`; a test this PR adds does not count); a bug-closing PR also names `Shape:` (`#N`, an AGENTS.md "Recurring defect shapes" number, or `new: <name>`) and `Enforcer:` (the tree-wide test path on master that scans the shape's whole population, `#N` for an issue to build one, or `none: judgment-only, <reason>`; with `Shape: #N` the path must be one catalog entry N names).
 
 ## Blast radius
 

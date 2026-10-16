@@ -33,6 +33,7 @@ import {
 	resolveLivePrBody,
 	resolveTouchesTests,
 	DETECTION_LAYERS,
+	DETECTION_UNKNOWN_MESSAGE,
 	lintDetectionSection,
 	shapeCatalogReader,
 	resolveBugClosing,
@@ -5208,6 +5209,12 @@ describe("detection retrospective for bug-closing PRs (#4288)", () => {
 			// #4490: CodeQL code scanning found the escaping defect, and no layer
 			// named it; the body had to claim "CI unit" for a static analyser.
 			"static analysis",
+			// #4519: the 2026-10-16 retro could not record 43 TLA+ catches, nor any
+			// mutation, pre-push or type/lint catch.
+			"TLA+",
+			"mutation",
+			"pre-push",
+			"lint/type check",
 			"smoke",
 			"nightly",
 			"dogfood",
@@ -5226,6 +5233,107 @@ describe("detection retrospective for bug-closing PRs (#4288)", () => {
 		expect(doc).toContain("DETECTION_LAYERS");
 		for (const stale of ["CI job", "install/compat/tool smoke"])
 			expect(doc).not.toContain(stale);
+	});
+
+	// Recurrence: the 2026-10-16 detection retro (#4519) read 139 of 363 closed
+	// bugs as "unknown" and had no word for the 43 bugs TLA+ found, nor for
+	// mutation, the pre-push hook or the type/lint gate.
+	it.each(["TLA+", "mutation", "pre-push", "lint/type check"])(
+		"accepts %s as the catching and the should-have layer",
+		(layer) => {
+			expect(
+				lintPrBody(
+					withDetection(
+						`- Caught by: ${layer}\n` +
+							`- Should have been caught by: ${layer}\n` +
+							"- Gap: none: the layer saw it before merge\n" +
+							shapeLines,
+					),
+					{ bugClosing: true },
+				),
+			).toEqual({ valid: true, errors: [] });
+		},
+	);
+
+	it.each(["nightly:tool-smoke", "nightly: stryker-nightly.yml", "nightly"])(
+		"accepts %s as a nightly layer",
+		(layer) => {
+			expect(
+				lintPrBody(
+					withDetection(
+						`- Caught by: ${layer}\n` +
+							`- Should have been caught by: ${layer}\n` +
+							"- Gap: none: the nightly saw it first\n" +
+							shapeLines,
+					),
+					{ bugClosing: true },
+				),
+			).toEqual({ valid: true, errors: [] });
+		},
+	);
+
+	it.each(["nightly:../x", "nightly:two words", "nightlyish", "tla"])(
+		"refuses %s as a layer word",
+		(layer) => {
+			const result = lintPrBody(
+				withDetection(
+					`- Caught by: ${layer}\n` +
+						"- Should have been caught by: CI unit\n" +
+						"- Gap: #1\n" +
+						shapeLines,
+				),
+				{ bugClosing: true },
+			);
+			expect(result.valid).toBe(false);
+			expect(result.errors.join(" ")).toContain('"## Detection"');
+		},
+	);
+
+	// Recurrence: 139 of 363 bugs carried no recorded layer; a bug-closing PR
+	// must not be able to write the same non-answer into its own record.
+	it.each([
+		["Caught by", "unknown", "CI unit", "none: a reason"],
+		["Should have been caught by", "smoke", "**Unknown**", "none: a reason"],
+		["Gap", "smoke", "CI unit", "none: unknown."],
+	])(
+		"refuses unknown in %s of a bug-closing PR",
+		(_field, caught, should, gap) => {
+			const result = lintPrBody(
+				withDetection(
+					`- Caught by: ${caught}\n` +
+						`- Should have been caught by: ${should}\n` +
+						`- Gap: ${gap}\n` +
+						shapeLines,
+				),
+				{ bugClosing: true },
+			);
+			expect(result.valid).toBe(false);
+			expect(result.errors).toEqual([DETECTION_UNKNOWN_MESSAGE]);
+		},
+	);
+
+	it("leaves a non-bug section that says unknown on the generic refusal", () => {
+		// The unknown-specific message belongs to the bug-closing seam only; a
+		// non-bug PR that fills the section badly still reds as it did before.
+		const result = lintDetectionSection(
+			"## Detection\n- Caught by: unknown\n- Should have been caught by: CI unit\n- Gap: #1\n",
+		);
+		expect(result).toEqual([expect.stringContaining("five lines")]);
+		expect(result).not.toContain(DETECTION_UNKNOWN_MESSAGE);
+	});
+
+	it("keeps unknown reasons that merely contain the word", () => {
+		expect(
+			lintPrBody(
+				withDetection(
+					"- Caught by: smoke\n" +
+						"- Should have been caught by: CI unit\n" +
+						"- Gap: none: unknown tools were never probed\n" +
+						shapeLines,
+				),
+				{ bugClosing: true },
+			),
+		).toEqual({ valid: true, errors: [] });
 	});
 
 	it("fails a bug-closing body without the section", () => {
