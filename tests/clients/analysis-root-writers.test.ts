@@ -39,7 +39,7 @@ function registeredProjectRoot(prefix: string): string {
 // marked workspace (a package.json above it), which makes the root "adopted".
 function registeredUnmarkedRoot(): string {
 	const root = fs.mkdtempSync(
-		path.join(os.tmpdir(), ".analysis-root-unmarked-"),
+		path.join(os.tmpdir(), "pi-lens-analysis-root-unmarked-"),
 	);
 	registerTmpRoot(getTmpRootRegistry(), root, "registered");
 	environments.push({
