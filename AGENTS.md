@@ -841,7 +841,9 @@ file-scoped worklist and receives no project-wide scanner output.
   to `scripts/lib/assert-evaluated.mjs` (one pure count function per producer,
   called by the script and by its test); the nightly's floor step fails below
   each measured floor and when a matrix cell classified at HEAD turned
-  `unknown` (`tests/config/nightly-evaluated-floors.test.ts`). Every other
+  `unknown` without a HEAD `firstMissed` stamp at least
+  `FIRST_PUBLISH_EXPIRY_DAYS` old (`tests/config/nightly-evaluated-floors.test.ts`).
+  Every other
   `continue-on-error` producer either calls the same helper (`--count
   <producer>=<n> --floor <m>` from a workflow step; `--min-pass`, the
   complexity file count and the shuffle census's missing starts already do) or
