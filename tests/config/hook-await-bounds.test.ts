@@ -2265,7 +2265,11 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// carries its own 1000 ms deadline as an argument (the client resolves it
 	// on timeout); a bounded() race around it would add a second timer for the
 	// same deadline.
-	"clients/dispatch/integration.ts": 21,
+	// 21 -> 22 (#4483): `capturePreEditLinterFindings` awaits its linter-only
+	// `dispatchForFile`; its only hook caller, the tool_call capture, holds it
+	// under bounded() with ctx.signal and PRE_EDIT_CAPTURE_BUDGET_MS, so a
+	// second bound here would add a timer for the same deadline.
+	"clients/dispatch/integration.ts": 22,
 	// 2 → 3 (#4484 review F5): `settlePendingRunnerFindingsForTests` awaits
 	// the store's runs so a test joins a collect-later settle without polling.
 	// Only tests call it; no hook handler reaches it.
@@ -2722,6 +2726,12 @@ const BOUNDED_CALL_SITES: Readonly<Record<string, string>> = {
 	"call:clients/runtime-agent-end.ts#handleAgentEnd:fc644b89~93eae0ad":
 		"The deferred formatter drain receives AgentEndDeps.signal, or the " +
 		"ambient signal in a standalone harness; agent_settled bounds the wait.",
+	"call:clients/runtime-tool-call.ts#handleToolCallImpl:2dc2d1e2~ce33f035":
+		"The pre-edit linter capture (#4483) uses the tool_call's ctx.signal, " +
+		"absent only in a harness. #2523 gives tool_call no budget of its own, " +
+		"so the capture carries PRE_EDIT_CAPTURE_BUDGET_MS (2000 ms, measured " +
+		"in the PR); that wall bound is always live, and a capture it abandons " +
+		"installs nothing once the host has written.",
 	"call:clients/runtime-tool-call.ts#handleToolCallImpl:c06d5cf4~a6535d16":
 		"The HEAD-move look before a tool runs (#4493) uses the tool_call's " +
 		"ctx.signal, absent only in a harness. #2523 gives tool_call no budget " +

@@ -203,6 +203,14 @@ export interface DispatchResult {
 	 */
 	heldBackBlockers?: Diagnostic[];
 	/**
+	 * #4483: blocking linter findings the file already held before its first
+	 * edit this session (the pre-edit seed, clients/dispatch/pre-edit-seed.ts).
+	 * They are in neither `blockers` nor `heldBackBlockers`: they never STOP,
+	 * never enter the inline-blocker record or the commit gate, and the write
+	 * reports them on one line. Absent when there are none.
+	 */
+	preExisting?: Diagnostic[];
+	/**
 	 * #4484 round 2: findings this observation still holds that neither
 	 * deliver nor enter the record on their own: a blocking finding an
 	 * edit-range gate withheld because the edit did not touch its lines, and an
@@ -520,6 +528,12 @@ export interface DispatchContext {
 	 * while it had no verdict is in range when it next answers.
 	 */
 	readonly owedRanges?: ReadonlyMap<string, readonly ModifiedRange[]>;
+	/**
+	 * #4483: this dispatch is the `tool_call` capture of a file's bytes before
+	 * its first edit (`capturePreEditLinterFindings`). Its runner counts never
+	 * reach the widget, and its log rows say so.
+	 */
+	readonly preEditCapture?: true;
 	/** Ordered per-file pipeline token used by widget reconciliation (#1198). */
 	readonly writeIndex?: number;
 	/**

@@ -81,6 +81,7 @@ import {
 	resolveToolCallCorrelationId,
 } from "./tool-event.js";
 import { getSharedTreeSitterClient } from "./tree-sitter-shared.js";
+import { loadDispatchIntegration } from "./dispatch/lazy.js";
 
 const LSP_TOOLCALL_NAV_TOUCH_BUDGET_MS = Math.max(
 	0,
@@ -1878,4 +1879,95 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 			}
 		}
 	}
+
+	// #4483: last, so only a call every pi-lens guard allowed pays for it.
+	// The bound abandons the capture, never cancels it: a capture that settles
+	// after the host wrote installs nothing (`capturePreEditLinterFindings`).
+	if (isWriteOrEdit && !isExternalOrVendor) {
+		const started = Date.now();
+		const outcome = await bounded(capturePreEditSeed(filePath, deps), {
+			ms: PRE_EDIT_CAPTURE_BUDGET_MS,
+			signal: deps.ctx.signal,
+			hook: "tool_call",
+			label: "pre-edit-linter-capture",
+		});
+		recordPreEditCapture(filePath, outcome, Date.now() - started);
+	}
+}
+
+/**
+ * #4483: how long a `tool_call` waits for the pre-edit linter capture.
+ * `tool_call` has no wall budget of its own (clients/hook-budgets.ts); this
+ * is the per-await bound. Measured in PR #4483's body.
+ */
+export const PRE_EDIT_CAPTURE_BUDGET_MS = 2000;
+
+type PreEditCaptureResult =
+	| Awaited<
+			ReturnType<
+				Awaited<
+					ReturnType<typeof loadDispatchIntegration>
+				>["capturePreEditLinterFindings"]
+			>
+	  >
+	| { outcome: "failed"; failure: string };
+
+/**
+ * #4483: before the host first replaces an existing file's bytes this
+ * session, run its linters over those bytes and seed the file's delta, so
+ * the write's dispatch reports their old errors as pre-existing instead of
+ * as blockers (`capturePreEditLinterFindings`). Never rejects.
+ */
+function capturePreEditSeed(
+	filePath: string,
+	deps: ToolCallDeps,
+): Promise<PreEditCaptureResult> {
+	const session = deps.runtime.captureSessionGeneration();
+	const workspaceRoot = deps.runtime.projectRoot || process.cwd();
+	const pi = { getFlag: (flag: string) => deps.getFlag(flag) };
+	return loadDispatchIntegration()
+		.then(({ capturePreEditLinterFindings }) =>
+			capturePreEditLinterFindings(filePath, workspaceRoot, pi, session),
+		)
+		.catch((cause: unknown): PreEditCaptureResult => {
+			const failure = cause instanceof Error ? cause.message : String(cause);
+			return { outcome: "failed", failure: failure.slice(0, 200) };
+		});
+}
+
+/**
+ * #4483: one latency row per capture that ran (`undefined` = the bound gave
+ * up first, `abandoned`). A file already dispatched this session, a file
+ * whose abandoned capture is still running, or a session with `--no-delta`
+ * writes none, so a long session pays one row per file, not one per write.
+ */
+function recordPreEditCapture(
+	filePath: string,
+	outcome: PreEditCaptureResult | undefined,
+	durationMs: number,
+): void {
+	if (
+		outcome?.outcome === "skipped" &&
+		(outcome.reason === "already-dispatched" ||
+			outcome.reason === "no-delta" ||
+			outcome.reason === "in-flight")
+	)
+		return;
+	logLatency({
+		type: "phase",
+		phase: "pre_edit_capture",
+		filePath,
+		durationMs,
+		result: outcome?.outcome ?? "abandoned",
+		metadata: {
+			...(outcome?.outcome === "seeded" && {
+				seeded: outcome.seeded,
+				runners: outcome.runners.join(","),
+			}),
+			...((outcome?.outcome === "skipped" ||
+				outcome?.outcome === "discarded") && { reason: outcome.reason }),
+			...(outcome?.outcome === "failed" && { failure: outcome.failure }),
+			budgetMs: PRE_EDIT_CAPTURE_BUDGET_MS,
+		},
+	});
 }

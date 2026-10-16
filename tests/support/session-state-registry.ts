@@ -554,11 +554,12 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 	{
 		id: "dispatch-integration:sessionCaches",
 		module: "dispatch/integration.ts",
-		state: "primaryFilesThisTurn, sessionSlopRuleCounts, sessionFacts",
+		state:
+			"primaryFilesThisTurn, sessionSlopRuleCounts, sessionFacts, preEditCaptureFacts",
 		policy: "session_start",
 		resetName: "resetDispatchBaselines",
 		reason:
-			"Every one of these is a claim about the tree as this session found it; `sessionFacts` is cleared by a method call inside this same reset, so the reset is the registered seam.",
+			"Every one of these is a claim about the tree as this session found it; `sessionFacts` and `preEditCaptureFacts` (#4483) are cleared by a method call inside this same reset, so the reset is the registered seam.",
 	},
 	{
 		id: "dispatcher:coverageNoticeSeen",
@@ -1658,7 +1659,13 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// file's other constant lookups above — SWEEP_HEURISTIC_LIMITS item 5.
 	// #4485: the recently-clean neighbour cache is deleted (11 -> 10); the
 	// pending record in cascade-format.ts replaces it.
-	"dispatch/integration.ts": 10,
+	// #4483 (10 -> 12): `preEditCaptureFacts`, the pre-edit capture's file
+	// facts, cleared by `resetDispatchBaselines` (the sessionCaches entry); and
+	// `preEditCapturesInFlight`, which holds an entry only while that file's
+	// capture runs and is emptied by each capture itself, so it is not session
+	// state: a capture still running across a session_start keeps its file out
+	// of a second capture until it settles.
+	"dispatch/integration.ts": 12,
 	// #3968: the runner-id identity leaf beside the dispatcher — one Set fed
 	// by `RunnerRegistry.register` and re-derived at every process start
 	// (registration state, not session state); see the file-level exemption

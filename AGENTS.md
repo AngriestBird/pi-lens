@@ -1002,6 +1002,21 @@ file-scoped worklist and receives no project-wide scanner output.
   and nothing that holds an entry awaits the restore. Do not add a second
   whole-package fixer without it, and do not await a queue entry while holding
   another.
+- A file's first write in a session blocks on the linter delta, not on every
+  linter error. The `tool_call` of the first classified write or edit
+  runs the file's inline linters (`PRE_EDIT_SEED_RUNNER_IDS`, tied to the
+  edit-scope census's LINTER lanes) over the bytes still on disk, under
+  `bounded()` with `PRE_EDIT_CAPTURE_BUDGET_MS`, and installs their blocking
+  findings as `session.preEdit.<file>` beside the delta baseline. The capture
+  only creates that record, and only while no baseline, tombstone or seed
+  exists, the bytes are the ones it read, and its session is current; each
+  dispatch only shrinks it (`classifyPreExisting`, identity plus line text,
+  one current finding per entry). A matched finding is reported as
+  pre-existing, never as a blocker, unless the inline record already holds
+  it. Language servers, type checkers, gated runners and scanners are never
+  seeded (maintainer scope, 2026-10-15). Collect-later linters and the MCP
+  route have no seed. Proven by
+  `tests/index-4483-first-write-seed-witness.test.ts`.
 - `clients/dispatch/runners/runner-spawn-cwd-sweep.test.ts` is the population
   guard for child cwd derivation. Add a reasoned migration row instead of a
   pin-only update.
@@ -1184,8 +1199,9 @@ The four primary host hooks are:
 
 - `session_start`: reset session state, rehydrate snapshots, start bounded
   background work, and defer config/LSP discovery.
-- `tool_call`: classify mutations, apply read-guard preflight, and register
-  reads or pending writes before the host tool runs.
+- `tool_call`: classify mutations, apply read-guard preflight, register
+  reads or pending writes, and capture a file's pre-edit linter seed (below)
+  before the host tool runs.
 - `tool_result`: record observed mutations through
   `RuntimeCoordinator.recordProjectMutation`, then run format, autofix, LSP,
   dispatch, and bounded deferred work.
