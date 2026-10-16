@@ -1574,9 +1574,9 @@ describe(
 			});
 
 			try {
-				// At least once: the startup madge scan and the deferred madge probe
-				// both ensure madge today, which the probe's own comment says it should not.
-				await vi.waitFor(() => expect(depEnsure).toHaveBeenCalled(), {
+				// Exactly once: the startup madge scan ensures madge; a deferred madge
+				// probe on top of it was the duplicate this test exists to catch.
+				await vi.waitFor(() => expect(depEnsure).toHaveBeenCalledTimes(1), {
 					timeout: HEAVY_IO_TIMEOUT_MS,
 				});
 				await vi.waitFor(() => expect(astGrepEnsure).toHaveBeenCalledTimes(1), {
