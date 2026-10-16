@@ -240,11 +240,24 @@ describe("checkDocs: the refresh PR refuses a degraded regeneration (#4514)", ()
 		return root;
 	};
 
-	it("passes a regeneration that holds its counts", () => {
+	it("passes a regeneration that holds its counts, and judges all three docs", () => {
+		const root = stage({
+			...head,
+			"docs/servercapabilities.md": serverCapsDoc(38),
+			"docs/lsp-idle-eviction.md": idleDoc(31, 3),
+			"docs/lsp-capability-matrix.md": matrixDoc(Array(29).fill("direct")),
+		});
+		const records = checkDocs(root, (p) => head[p] ?? null);
+		expect(records).toHaveLength(3);
+		expect(records.every((r) => r.ok)).toBe(true);
+	});
+
+	// A promotion-only night overlays no docs: the working tree still holds
+	// HEAD's, which an earlier degraded refresh may already have merged. That
+	// doc carries nothing into a PR, so it must not hold the promotion PR.
+	it("does not judge a doc the regeneration left identical to HEAD", () => {
 		const root = stage(head);
-		expect(checkDocs(root, (p) => head[p] ?? null).every((r) => r.ok)).toBe(
-			true,
-		);
+		expect(checkDocs(root, (p) => head[p] ?? null)).toEqual([]);
 	});
 
 	it("fails the 2026-10-11 shape: 41 captured at HEAD, 16 regenerated", () => {

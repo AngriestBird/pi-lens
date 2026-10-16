@@ -57,7 +57,12 @@ export function checkRecords(dir, headText = gitHeadText) {
 	});
 }
 
-/** Docs mode: one record per committed doc a refresh PR would carry. */
+/**
+ * Docs mode: one record per committed doc the refresh PR would carry. A doc
+ * the regeneration left byte-identical to HEAD carries nothing, so it is not
+ * judged: a promotion-only night must not be held by a doc an earlier degraded
+ * refresh already merged.
+ */
 export function checkDocs(root = ".", headText = gitHeadText) {
 	return Object.entries(EVALUATED_PRODUCERS)
 		.filter(([, spec]) => spec.doc)
@@ -69,6 +74,7 @@ export function checkDocs(root = ".", headText = gitHeadText) {
 			} catch {
 				// An absent doc reads as no record below.
 			}
+			if (text !== null && text === headText(doc.path)) return null;
 			const evaluated = text === null ? null : doc.count(text);
 			if (evaluated === null)
 				return missingRecord(`${producer}:${doc.path}`, doc.floor, previous);
@@ -78,7 +84,8 @@ export function checkDocs(root = ".", headText = gitHeadText) {
 				expectedAtLeast: doc.floor,
 				previous,
 			});
-		});
+		})
+		.filter((record) => record !== null);
 }
 
 export function main(argv) {
