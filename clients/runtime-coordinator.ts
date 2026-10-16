@@ -13,6 +13,10 @@ import {
 } from "./project-changes.js";
 import type { CodeQualityWarningRecord } from "./code-quality-warnings.js";
 import type { Diagnostic } from "./dispatch/types.js";
+import {
+	foldedFindingIdentity,
+	retainRecordedFindings,
+} from "./finding-identity.js";
 import { formatDiagnostics } from "./dispatch/utils/format-utils.js";
 import {
 	inlineBlockerLines,
@@ -22,6 +26,7 @@ import type { MutationKind } from "./mutating-tool.js";
 import { normalizeMapKey, pathsEqual } from "./path-utils.js";
 import { PathKeyedMap } from "./path-keyed-map.js";
 import { BoundedFifoMap, BoundedLruCache } from "./bounded-cache.js";
+import { type AnalysisAnchor, owedByContentOnly } from "./line-alignment.js";
 import { PartialApplyRecordStore } from "./partial-edit-apply.js";
 import { ReadGuard } from "./read-guard.js";
 import type { RuleScanResult } from "./rules-scanner.js";
@@ -364,6 +369,15 @@ export interface InlineBlockerRecord {
 	 * of the session.
 	 */
 	staleDeliveryCount?: number;
+	/**
+	 * #4484 round 4: what the verdict behind this record analysed (line
+	 * hashes, owed lines), set by `setAnalysisAnchor` right after the record
+	 * verb. It lives exactly as long as the record. At most 4 bytes per line
+	 * up to `MAX_ALIGNMENT_LINES` (400 KB), plus `MAX_OWED_RANGES` ranges per
+	 * owing runner. Absent on a record a collect-later settle started: the
+	 * next write then has no alignment and matches on identity alone.
+	 */
+	analysisAnchor?: AnalysisAnchor;
 }
 
 /**
@@ -372,6 +386,13 @@ export interface InlineBlockerRecord {
  * retires more than this in one turn says "… and N more".
  */
 const MAX_RESOLVED_BLOCKER_FILES = 10;
+
+/**
+ * #4484 round 5: files with no blocker record whose whole analysis anchor is
+ * kept (`_owedAnchors`), at most 400 KB each. Past it the oldest file's owed
+ * lines are matched by content, a superset that fails closed.
+ */
+export const MAX_OWED_ANCHORS = 16;
 
 /**
  * #3218 criterion 2: one file whose inline blocker a fresh clean verdict
@@ -648,6 +669,31 @@ export class RuntimeCoordinator {
 	private readonly _pendingInlineBlockers =
 		new PathKeyedMap<InlineBlockerRecord>(normalizeMapKey);
 	/**
+	 * #4484 round 4: per file, what its last applied inline verdict left owed
+	 * (`setAnalysisAnchor`), for a file whose record is gone or has no anchor.
+	 * The positions live on the blocker record
+	 * (`InlineBlockerRecord.analysisAnchor`). Round 5: this keeps each owing
+	 * runner's owed line texts (`owedByContentOnly`, at most
+	 * `MAX_OWED_LINE_TEXTS` hashes per runner, 16 KB), not only its id, so
+	 * the next write owes it only the lines with those texts, never the whole
+	 * file for a skip. Replaced by every applied verdict of the file and
+	 * cleared per session.
+	 */
+	private readonly _owedRunners = new PathKeyedMap<AnalysisAnchor>(
+		normalizeMapKey,
+	);
+	/**
+	 * #4484 round 5: for a file with no blocker record, its last verdict's
+	 * whole anchor (line hashes too), so the next write still remaps owed
+	 * positions exactly (verify probe P23). At most `MAX_OWED_ANCHORS` files,
+	 * 400 KB each; an evicted file falls back to `_owedRunners`' owed line
+	 * texts, a superset. Cleared per session.
+	 */
+	private readonly _owedAnchors = new PathKeyedMap<AnalysisAnchor>(
+		normalizeMapKey,
+		MAX_OWED_ANCHORS,
+	);
+	/**
 	 * #3507: one per-path order for BOTH verbs on `_pendingInlineBlockers`,
 	 * the widget store's guard shape (`widget-state.ts` diagnosticsWriteGuard).
 	 * Pipelines of two same-file edits overlap under pi's parallel tools, so
@@ -747,6 +793,8 @@ export class RuntimeCoordinator {
 		this._readWidenings.clear();
 		this._lspReadWarmState.clear();
 		this._pendingInlineBlockers.clear();
+		this._owedRunners.clear();
+		this._owedAnchors.clear();
 		this._inlineBlockerWriteOrder.clear();
 		this._resolvedBlockerFilesThisTurn.clear();
 		this._resolvedBlockerFilesDropped = 0;
@@ -1645,8 +1693,11 @@ export class RuntimeCoordinator {
 		const key = path.resolve(filePath);
 		const existing = this._pendingInlineBlockers.get(key);
 		if (existing && !existing.diagnostics) return 0;
+		// #4484 round 5 (K3): not the id. A carry that moves a blocker's line
+		// keeps its line-bound id (`lsp:<code>:<line>`), so the settled copy at
+		// the same line has another one.
 		const identity = (d: Diagnostic) =>
-			JSON.stringify([d.tool, d.id, d.line, d.message]);
+			JSON.stringify([foldedFindingIdentity(d), d.line, d.column]);
 		const known = new Set((existing?.diagnostics ?? []).map(identity));
 		const added = blocking.flatMap((d) => (known.has(identity(d)) ? [] : [d]));
 		if (added.length === 0) return 0;
@@ -1682,6 +1733,127 @@ export class RuntimeCoordinator {
 			policySuppressed: false,
 		});
 		return added.length;
+	}
+
+	/**
+	 * #4484 round 2: the file's recorded blocking diagnostics, which the next
+	 * write's pipeline carries forward unless a conclusive observation from
+	 * their own source shows them gone. Undefined when nothing is recorded or
+	 * the record holds text only.
+	 */
+	getInlineBlockerDiagnostics(
+		filePath: string,
+	): readonly Diagnostic[] | undefined {
+		return this._pendingInlineBlockers.get(path.resolve(filePath))?.diagnostics;
+	}
+
+	/**
+	 * #4484 round 3: the anchor the next write's pipeline aligns to: the line
+	 * hashes of the bytes the file's blocker record is about, and the lines
+	 * still owed. Round 4: it is the record's own anchor. A file without one
+	 * (no record, or a record a collect-later settle started) gets no hashes,
+	 * so the pipeline cannot align. Round 5: it gets the owed line texts.
+	 */
+	getAnalysisAnchor(filePath: string): AnalysisAnchor | undefined {
+		return (
+			this._pendingInlineBlockers.get(filePath)?.analysisAnchor ??
+			this._owedAnchors.get(filePath) ??
+			this._owedRunners.get(filePath)
+		);
+	}
+
+	/**
+	 * #4484 round 3: store the anchor of an inline verdict that just applied
+	 * (`recordInlineBlockers` or `clearInlineBlockers` returned applied), so it
+	 * always describes the bytes the record is about. Round 4: it goes on the
+	 * record, and lives as long as the record; what is owed goes apart
+	 * (`_owedRunners`, by content since round 5), so it outlives a record that
+	 * a later retire drops. Round 5: a file with no record keeps its whole
+	 * anchor too (`_owedAnchors`, bounded).
+	 */
+	setAnalysisAnchor(
+		filePath: string,
+		anchor: AnalysisAnchor | undefined,
+	): void {
+		const existing = this._pendingInlineBlockers.get(filePath);
+		if (existing) {
+			// The display key every record writer uses.
+			const key = path.resolve(filePath);
+			const { analysisAnchor: _dropped, ...rest } = existing;
+			this._pendingInlineBlockers.set(
+				key,
+				anchor ? { ...rest, analysisAnchor: anchor } : rest,
+			);
+		}
+		const owed = owedByContentOnly(anchor);
+		if (owed) this._owedRunners.set(filePath, owed);
+		else this._owedRunners.delete(filePath);
+		if (owed && anchor?.lineHashes && !existing)
+			this._owedAnchors.set(filePath, anchor);
+		else this._owedAnchors.delete(filePath);
+	}
+
+	/**
+	 * #4484 round 2: a settled collect-later run is the observation that can
+	 * retire the blockers its runner left pending while it was in flight. Its
+	 * runner's recorded blockers that the run no longer observes leave the
+	 * record; blockers from other runners, and from a server the run left
+	 * unconfirmed, stay. A blocker is still observed only at its own line, in
+	 * range or withheld by the run's edit-range gate (#4484 round 3). The run
+	 * must be about the recorded bytes: marked after
+	 * they were read (`recordedAtMs`), with the file still holding them
+	 * (`recordedHash`). An emptied record is deleted and its file is noted
+	 * Resolved for turn end, as a clean write's clear does.
+	 *
+	 * @returns how many recorded blockers the run retired.
+	 */
+	retireUnobservedRunnerBlockers(
+		filePath: string,
+		run: {
+			runnerId: string;
+			observed: readonly Diagnostic[];
+			markedAtMs: number;
+			sha256: string | undefined;
+			unconfirmedServerIds?: readonly string[];
+		},
+	): number {
+		const key = path.resolve(filePath);
+		const existing = this._pendingInlineBlockers.get(key);
+		if (
+			!existing?.diagnostics ||
+			run.sha256 === undefined ||
+			existing.recordedHash !== run.sha256 ||
+			existing.recordedAtMs === undefined ||
+			run.markedAtMs < existing.recordedAtMs
+		)
+			return 0;
+		const unconfirmed = new Set(run.unconfirmedServerIds);
+		// #4484 round 3: the run is about the recorded bytes, so a recorded
+		// blocker's position is its own line.
+		const { kept, retired } = retainRecordedFindings(
+			existing.diagnostics,
+			run.observed,
+			{
+				positionOf: (d) => d.line,
+				keepUnobserved: (d) =>
+					d.runnerId !== run.runnerId ||
+					(d.serverId !== undefined && unconfirmed.has(d.serverId)),
+			},
+		);
+		if (retired.length === 0) return 0;
+		if (kept.length === 0) {
+			this.noteResolvedBlockerFile(existing, undefined, false);
+			this._pendingInlineBlockers.delete(key);
+			return retired.length;
+		}
+		this._pendingInlineBlockers.set(key, {
+			...existing,
+			summary: formatDiagnostics(kept, "blocking").trim(),
+			diagnostics: kept,
+			sources: inlineBlockerSources(kept),
+			lines: inlineBlockerLines(kept, existing.filePath),
+		});
+		return retired.length;
 	}
 
 	/**
@@ -1732,14 +1904,32 @@ export class RuntimeCoordinator {
 	 * counted as `blocker-clear-refused` per file key. A record with no
 	 * `recordedHash` (#2982: the file was unreadable or over the baseline cap at
 	 * record time) cannot be matched and is cleared as before.
+	 *
+	 * #4484: a blocker is pending until a fresh observation no longer holds it,
+	 * so a run whose own observation still holds `analysis.blocking` blockers
+	 * never clears the record, whatever its authorship or its delta said; it
+	 * is refused and counted the same way.
 	 */
 	clearInlineBlockers(
 		filePath: string,
 		writeIndex?: number,
 		orderTurn = this._writeOrderTurn,
-		analysis?: { authored: boolean; sha256: string | undefined },
+		analysis?: {
+			authored: boolean;
+			sha256: string | undefined;
+			blocking?: number;
+		},
 	): boolean {
 		const existing = this._pendingInlineBlockers.get(path.resolve(filePath));
+		if (existing && (analysis?.blocking ?? 0) > 0) {
+			incrementDegradationCount({
+				kind: "blocker-clear-refused",
+				subject: normalizeMapKey(filePath),
+				reason:
+					"the clearing run still observed a blocker on the file; the record stays until an observation holds none (#4484)",
+			});
+			return false;
+		}
 		if (
 			existing &&
 			analysis &&

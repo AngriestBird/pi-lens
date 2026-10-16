@@ -2266,7 +2266,10 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// on timeout); a bounded() race around it would add a second timer for the
 	// same deadline.
 	"clients/dispatch/integration.ts": 21,
-	"clients/dispatch/pending-runner-findings.ts": 2,
+	// 2 → 3 (#4484 review F5): `settlePendingRunnerFindingsForTests` awaits
+	// the store's runs so a test joins a collect-later settle without polling.
+	// Only tests call it; no hook handler reaches it.
+	"clients/dispatch/pending-runner-findings.ts": 3,
 	"clients/dispatch/runners/psscriptanalyzer.ts": 7,
 	"clients/dispatch/runners/utils/lazy-installer.ts": 2,
 	// 32 → 37 (#2140): the probe resolver now asks the installer for a

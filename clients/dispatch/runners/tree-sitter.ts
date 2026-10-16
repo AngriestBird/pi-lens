@@ -548,6 +548,8 @@ const treeSitterRunner: RunnerDefinition = {
 		// results stay grouped in rule order. The post-match gating below (modified
 		// ranges, severity mapping) is unchanged.
 		const diagnostics: Diagnostic[] = [];
+		const withheld: Diagnostic[] = [];
+		let queryRunFailed = false;
 		try {
 			const found = await client.runQueriesOnFile(
 				effectiveQueries,
@@ -572,13 +574,13 @@ const treeSitterRunner: RunnerDefinition = {
 				// first capture's text is the node's exact source, so its line
 				// breaks give the end line.
 				const endLine = line + (match.matchedText.match(/\n/g)?.length ?? 0);
-				if (
+				// #4484 r2: the gate decides delivery only. A withheld match is
+				// still an observation, so it rides out as `outOfEditScope` for
+				// the recorded-blocker carry instead of being dropped.
+				const outOfScope =
 					ctx.blockingOnly &&
 					isSeverityBlocking &&
-					!spanOverlapsModifiedRanges(line, endLine, ctx.modifiedRanges)
-				) {
-					continue;
-				}
+					!spanOverlapsModifiedRanges(line, endLine, ctx.modifiedRanges);
 
 				// Map severity to semantic
 				const semantic =
@@ -598,7 +600,7 @@ const treeSitterRunner: RunnerDefinition = {
 							: undefined;
 
 				const hasSuggestedFix = !!query.has_fix;
-				diagnostics.push({
+				(outOfScope ? withheld : diagnostics).push({
 					id: `tree-sitter:${query.id}:${line}`,
 					message: query.message.replace(
 						/\{\{(\w+)\}\}/g,
@@ -624,6 +626,7 @@ const treeSitterRunner: RunnerDefinition = {
 			}
 		} catch (err) {
 			// pi-lens-ignore: missing-error-propagation — per-dispatch resilience, intentional
+			queryRunFailed = true;
 			const msg = err instanceof Error ? err.message : String(err);
 			// Emscripten abort() corrupts the entire module-level wasm heap.
 			// Poison the singleton so no further queries attempt to use the dead runtime.
@@ -716,6 +719,13 @@ const treeSitterRunner: RunnerDefinition = {
 			}
 		}
 
+		// #4484 r2: what the edit-range gate withheld, and whether the query run
+		// broke part way, travel with the verdict for the recorded-blocker carry.
+		const observationExtras = {
+			...(withheld.length > 0 && { outOfEditScope: withheld }),
+			...(queryRunFailed && { inconclusive: true }),
+		};
+
 		if (diagnostics.length === 0) {
 			// #3409: zero diagnostics because the language's GRAMMAR never loaded is
 			// not a clean file, and `runQueriesOnFile` returns [] for both. The
@@ -738,7 +748,11 @@ const treeSitterRunner: RunnerDefinition = {
 					reason: "grammar_unavailable",
 					status: "skipped",
 				});
-				return { status: "skipped", diagnostics: [], semantic: "none" };
+				return {
+					status: "skipped",
+					diagnostics: [],
+					semantic: "none",
+				};
 			}
 			logTreeSitter({
 				phase: "runner_complete",
@@ -750,7 +764,12 @@ const treeSitterRunner: RunnerDefinition = {
 				queryCount: languageQueries.length,
 				effectiveQueryCount: effectiveQueries.length,
 			});
-			return { status: "succeeded", diagnostics: [], semantic: "none" };
+			return {
+				status: "succeeded",
+				diagnostics: [],
+				semantic: "none",
+				...observationExtras,
+			};
 		}
 
 		// Check if any blocking issues
@@ -770,10 +789,13 @@ const treeSitterRunner: RunnerDefinition = {
 			effectiveQueryCount: effectiveQueries.length,
 		});
 
-		return findingsResult(diagnostics, {
-			status: hasBlocking ? "failed" : "succeeded",
-			semantic: hasBlocking ? "blocking" : "warning",
-		});
+		return {
+			...findingsResult(diagnostics, {
+				status: hasBlocking ? "failed" : "succeeded",
+				semantic: hasBlocking ? "blocking" : "warning",
+			}),
+			...observationExtras,
+		};
 	},
 };
 

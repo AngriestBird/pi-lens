@@ -317,6 +317,15 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			reason:
 				"the native addon's load is the host boundary; its sync loader is the only seam to make it fail",
 		},
+	// 2026-10-15 (#4484): the host witness keeps every pi-lens module on the
+	// write-to-turn-end chain real; only the language-server process behind the
+	// LSP capability adapter is stood in for, answering from the bytes it gets.
+	"in-process-mock:index-4484-unfixed-blocker-witness.test.ts::clients/lsp/capabilities":
+		{
+			detector: "in-process-mock",
+			reason:
+				"the language-server process is the boundary; the capability adapter is where every host witness stands in for it",
+		},
 	"never-settling-wait:scripts/mutate-fixture.test.ts": {
 		detector: "never-settling-wait",
 		reason:

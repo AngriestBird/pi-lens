@@ -1744,6 +1744,46 @@ describe("parallel bash calls (#4137)", () => {
 		expect(runtime.hasResolvedBlockerFiles()).toBe(true);
 	});
 
+	// #4484: the same changed bytes, but the opaque run's own observation
+	// still holds the blocker (its channel is withheld, #3226, so it reports
+	// the count, not the blocker). Before #4484 the record was cleared and
+	// turn end said "Resolved" for a blocker still on the file.
+	it("keeps an authored blocker when an opaque run of changed bytes still observes it (#4484)", async () => {
+		(await pipelineMock()).mockImplementation(async (ctx) => {
+			const inlineBlockerFileContent = analysedBytes(String(ctx.filePath));
+			return ctx.allowAutonomousWriters === false
+				? { ...NO_BLOCKERS, inlineBlockerFileContent, currentBlockerCount: 1 }
+				: { ...BLOCKED, inlineBlockerFileContent };
+		});
+		const runtime = newRuntime("changed-bytes-still-blocked");
+		const recognized = "echo 'debugger;' >> par-a.ts";
+		await runHandlerExpectingNoThrow(() =>
+			handleToolCall(callDeps(runtime, recognized, "recognized")),
+		);
+		await runHandlerExpectingNoThrow(() =>
+			handleToolCall(callDeps(runtime, opaqueCommand(), "opaque")),
+		);
+		append("par-a.ts", "debugger;\n");
+		await handleToolResult(resultDeps(runtime, recognized, "recognized"));
+		append("par-a.ts", "export const y = 2;\n");
+		await handleToolResult(resultDeps(runtime, opaqueCommand(), "opaque"));
+		expect(await dispatchLog()).toEqual([
+			["par-a.ts", true],
+			["par-a.ts", false],
+		]);
+		expect(blockerFiles(runtime)).toEqual(["par-a.ts"]);
+		expect(resolvedFiles(runtime)).toEqual([]);
+		expect(
+			getDegradationSummary().find((g) => g.kind === "blocker-clear-refused")
+				?.latestReasons,
+		).toEqual([
+			{
+				subject: keyOf("par-a.ts"),
+				reason: expect.stringContaining("still observed a blocker"),
+			},
+		]);
+	});
+
 	// VERIFY_4159 N2: the other half of the in-flight rank. An opaque claim
 	// that arrives while an authored run of the same bytes is in flight joins
 	// it. Running beside it would analyse bytes the agent authored a second

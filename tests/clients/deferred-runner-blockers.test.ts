@@ -9,6 +9,7 @@
  */
 
 import * as fs from "node:fs";
+import { createHash } from "node:crypto";
 import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../../clients/cache-manager.js";
@@ -19,6 +20,7 @@ import {
 import {
 	absorbSettledRunnerBlockers,
 	judgeDeferredRunnerFindings,
+	retireSettledRunnerBlockers,
 } from "../../clients/deferred-runner-blockers.js";
 import {
 	deferRunnerFindings,
@@ -35,6 +37,7 @@ import {
 	flushLatencyLog,
 	getLatencyLogPath,
 } from "../../clients/latency-logger.js";
+import { lineHashOf } from "../../clients/line-alignment.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
@@ -391,6 +394,27 @@ describe("deferred blocker recording (#3814)", () => {
 		}
 	});
 
+	it("stamps a settled blocker with its own line's text from the settled bytes", async () => {
+		// Recurrence (#4484 round 5, K1's settle path): a record a settle starts
+		// has no anchor, so the next write cannot align. Without the entry's own
+		// line text it matched by identity alone, and a same-rule finding on a
+		// line with other text could take over the record and pin.
+		const env = setupTestEnvironment("pi-lens-4484-settle-text-");
+		try {
+			const filePath = path.join(env.tmpDir, "app.ts");
+			fs.writeFileSync(filePath, "alpha();\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			await settledAnswer(filePath, env.tmpDir);
+			expect(absorbSettledRunnerBlockers(runtime, env.tmpDir).recorded).toBe(1);
+			expect(runtime.getInlineBlockerDiagnostics(filePath)?.[0]?.lineHash).toBe(
+				lineHashOf("alpha();"),
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("drops a retired producer's settled answer from the gate (staleReject)", async () => {
 		// #3758/#3814: the gate's non-draining peek applies the same owned
 		// admission the turn-end drain does. A commit in the gap before the next
@@ -451,6 +475,107 @@ describe("deferred blocker recording (#3814)", () => {
 			expect(
 				evaluateGitGuard(runtime, new CacheManager(false), env.tmpDir).block,
 			).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// #4484 round 3 (R3): a settled run's edit-range gate withholds a match on
+	// a line the edit did not touch; the match is still observed at its line.
+	// Recurrence: the settled retire read only the delivered findings, so a
+	// collect-later range-gated runner retired a blocker that was still there.
+	it("keeps a recorded blocker that a settled run withheld as out of range", () => {
+		const env = setupTestEnvironment("pi-lens-4484-settle-");
+		try {
+			const filePath = path.join(env.tmpDir, "app.ts");
+			fs.writeFileSync(filePath, "alpha();\n");
+			const sha256 = createHash("sha256")
+				.update(fs.readFileSync(filePath))
+				.digest("hex");
+			const runtime = new RuntimeCoordinator();
+			const recorded = { ...blocking(filePath), runnerId: RUNNER_ID };
+			runtime.recordInlineBlockers(
+				filePath,
+				"🔴 STOP",
+				1,
+				undefined,
+				[1],
+				{ size: 9, sha256 },
+				[recorded],
+				undefined,
+				1_000,
+			);
+			const retired = retireSettledRunnerBlockers(
+				runtime,
+				{
+					filePath,
+					cwd: env.tmpDir,
+					projectRoot: env.tmpDir,
+					runnerId: RUNNER_ID,
+					markedAtMs: 2_000,
+					result: {
+						status: "succeeded",
+						diagnostics: [],
+						semantic: "blocking",
+						outOfEditScope: [blocking(filePath)],
+					},
+				},
+				{ kept: [] },
+			);
+			expect(retired).toBe(0);
+			expect(runtime.getInlineBlockerDiagnostics(filePath)).toEqual([recorded]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// #4484 round 7 (verify probe P34): napi's collect-later Gate B skip
+	// settled as covered by the ast-grep server. The settle read it as a
+	// file-wide verdict and retired an unfixed blocker outside the edit.
+	it("retires nothing on a settled skip that defers to a covering lane", () => {
+		const env = setupTestEnvironment("pi-lens-4484-settle-cover-");
+		try {
+			const filePath = path.join(env.tmpDir, "app.ts");
+			fs.writeFileSync(filePath, "alpha();\n");
+			const sha256 = createHash("sha256")
+				.update(fs.readFileSync(filePath))
+				.digest("hex");
+			const runtime = new RuntimeCoordinator();
+			const recorded = { ...blocking(filePath), runnerId: RUNNER_ID };
+			runtime.recordInlineBlockers(
+				filePath,
+				"🔴 STOP",
+				1,
+				undefined,
+				[1],
+				{ size: 9, sha256 },
+				[recorded],
+				undefined,
+				1_000,
+			);
+			const settled = (coveredBy?: { runnerId: string; serverId: string }) =>
+				retireSettledRunnerBlockers(
+					runtime,
+					{
+						filePath,
+						cwd: env.tmpDir,
+						projectRoot: env.tmpDir,
+						runnerId: RUNNER_ID,
+						markedAtMs: 2_000,
+						result: {
+							status: "skipped",
+							diagnostics: [],
+							semantic: "none",
+							skipReason: "covered-by-primary",
+							...(coveredBy ? { coveredBy } : {}),
+						},
+					},
+					{ kept: [] },
+				);
+			expect(settled({ runnerId: "lsp", serverId: "ast-grep" })).toBe(0);
+			expect(runtime.getInlineBlockerDiagnostics(filePath)).toEqual([recorded]);
+			// Control: the same skip without a lane is a file-wide verdict.
+			expect(settled()).toBe(1);
 		} finally {
 			env.cleanup();
 		}

@@ -359,6 +359,9 @@ const lspRunner: RunnerDefinition = {
 			// With no answered diagnostics, report "skipped" so the coverage notice
 			// flags the gap instead of reading this as a confirmed clean result (#570).
 			// #4403: when no primary answered at all, the result says why.
+			// #4484: a skip without a stated reason reaches no verdict
+			// (`reachedNoVerdict`), so this empty result never retires a recorded
+			// blocker.
 			return {
 				status: "skipped",
 				diagnostics: [],
@@ -517,20 +520,24 @@ const lspRunner: RunnerDefinition = {
 		// drop theirs. Language-server diagnostics (tool "lsp") and every other
 		// auxiliary stay unscoped by design: an edit can cause a type error or a
 		// finding at a line it never touched.
-		const keptDiagnostics = ctx.blockingOnly
-			? retaggedDiagnostics.filter((d) => {
-					if (d.tool !== "ast-grep" || d.semantic !== "blocking") return true;
-					const range = rawRangeByDiagnostic.get(d);
-					return (
-						range === undefined ||
-						spanOverlapsModifiedRanges(
-							range.start.line + 1,
-							(range.end?.line ?? range.start.line) + 1,
-							ctx.modifiedRanges,
-						)
-					);
-				})
-			: retaggedDiagnostics;
+		// #4484 r2: the gate decides delivery only; what it withholds rides out
+		// as `outOfEditScope`, still observed, for the recorded-blocker carry.
+		const keptDiagnostics: Diagnostic[] = [];
+		const outOfEditScope: Diagnostic[] = [];
+		for (const d of retaggedDiagnostics) {
+			const range =
+				ctx.blockingOnly && d.tool === "ast-grep" && d.semantic === "blocking"
+					? rawRangeByDiagnostic.get(d)
+					: undefined;
+			const inScope =
+				range === undefined ||
+				spanOverlapsModifiedRanges(
+					range.start.line + 1,
+					(range.end?.line ?? range.start.line) + 1,
+					ctx.modifiedRanges,
+				);
+			(inScope ? keptDiagnostics : outOfEditScope).push(d);
+		}
 
 		const hasErrors = keptDiagnostics.some((d) => d.semantic === "blocking");
 		const resultSemantic = hasErrors
@@ -556,6 +563,7 @@ const lspRunner: RunnerDefinition = {
 			...(deferredServerIds.length > 0 && {
 				deferredServerIds: [...deferredServerIds],
 			}),
+			...(outOfEditScope.length > 0 && { outOfEditScope }),
 		};
 	},
 };

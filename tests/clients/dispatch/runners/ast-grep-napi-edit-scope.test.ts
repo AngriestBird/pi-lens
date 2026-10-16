@@ -101,6 +101,48 @@ function napiFindings(
 	);
 }
 
+// #4484 round 2: the edit-range gate decides delivery only, so what it
+// withholds rides out as `stillObserved`, bounded like delivered matches.
+describe("ast-grep-napi withheld matches (#4484 round 2)", () => {
+	// Recurrence: the gate dropped what it withheld, so the record lost a
+	// blocker an unrelated edit left in place (the witness's row 7).
+	it("hands the withheld blocker on as still observed, stamped with its runner", async () => {
+		const { filePath } = env.addFile("withheld-one.ts", SOURCE);
+
+		const result = await session(PER_EDIT_FLAGS)(filePath, [
+			{ start: CONSTANT_LINE, end: CONSTANT_LINE },
+		]);
+
+		expect(napiFindings(result.stillObserved ?? [])).toEqual([
+			expect.objectContaining({
+				rule: RULE,
+				line: FINDING_LINE,
+				runnerId: "ast-grep-napi",
+			}),
+		]);
+	}, 30_000);
+
+	// Recurrence: an unbounded withheld list on a file full of old findings
+	// grows with the file, not with the edit.
+	it("keeps at most the per-rule cap of withheld matches", async () => {
+		const many = Array.from(
+			{ length: 15 },
+			(_, i) =>
+				`export function dig${i}(obj: Record<string, string>, key: string): unknown {\n\treturn obj[key];\n}`,
+		).join("\n");
+		const { filePath } = env.addFile(
+			"withheld-many.ts",
+			`export const CLIENT_VERSION = "1.0.50";\n${many}\n`,
+		);
+
+		const result = await session(PER_EDIT_FLAGS)(filePath, [
+			{ start: CONSTANT_LINE, end: CONSTANT_LINE },
+		]);
+
+		expect(napiFindings(result.stillObserved ?? [])).toHaveLength(10);
+	}, 30_000);
+});
+
 describe.each([
 	["per-edit floor", PER_EDIT_FLAGS],
 	["LSP substitute", SUBSTITUTE_FLAGS],
