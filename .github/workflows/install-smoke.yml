@@ -156,7 +156,7 @@ env:
   # minor line from 0.86 onward; 0.81-0.83 are in-window without a dedicated
   # host. The ratchet also records 0.80, 0.84, and 0.85, so an unrun minor
   # cannot be silently admitted by a higher ceiling.
-  PI_HOST_SUPPORTED_RANGE: ">=0.80.10 <1.2.0"
+  PI_HOST_SUPPORTED_RANGE: ">=0.80.10 <1.4.0"
 
 jobs:
   # #4291: classify the diff once. `smoke` is true when a pull request touches

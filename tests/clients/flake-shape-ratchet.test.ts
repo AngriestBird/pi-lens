@@ -603,6 +603,16 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"two concurrent real pi children must share one project root and one PI_LENS_HOME; the cross-session stores are keyed by that pair",
 	},
+	// 2026-10-16 (#4513): 3 -> 4. pi 1.3 restores a resumed session's active tools
+	// from the transcript while pi-lens re-plans its lazy-tool set at
+	// session_start; which of the two decides, and whether the first request after
+	// a `--continue` restart advertises the same roster, is observable only on a
+	// real second pi process reading the first one's session file and sidecar.
+	"real-process-spawn:real-harness/lifecycle.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the first request after a real pi restart on a persisted session must advertise the lazy-tool roster pi restored and pi-lens planned; no in-process double runs the host's restore",
+	},
 	"real-process-spawn:real-harness/negative.test.ts": {
 		detector: "real-process-spawn",
 		reason:

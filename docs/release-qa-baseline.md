@@ -161,7 +161,7 @@ admitted lines explicitly.
 
 ### Verified hosts
 
-The certified policy is `>=0.80.10 <1.2.0`. Each listed minor line has a
+The certified policy is `>=0.80.10 <1.4.0`. Each listed minor line has a
 release-QA witness; the workflow ceiling and `tests/packaging.test.ts` list are
 updated together.
 

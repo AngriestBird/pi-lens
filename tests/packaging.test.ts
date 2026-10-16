@@ -434,6 +434,8 @@ describe("host-provided peers are open; the supported window lives in install-sm
 		"0.99.2",
 		"1.0.4",
 		"1.1.0",
+		"1.2.0",
+		"1.3.0",
 	];
 	const VERIFIED_MINOR_LINES = [
 		"0.80",
@@ -444,6 +446,8 @@ describe("host-provided peers are open; the supported window lives in install-sm
 		"0.99",
 		"1.0",
 		"1.1",
+		"1.2",
+		"1.3",
 	];
 
 	it("declares a window at all", () => {
@@ -478,8 +482,8 @@ describe("host-provided peers are open; the supported window lives in install-sm
 		).toBe(false);
 	});
 
-	it("keeps the next unverified host out (1.2.0 stays out)", () => {
-		expect(semver.satisfies("1.2.0", window)).toBe(false);
+	it("keeps the next unverified host out (1.4.0 stays out)", () => {
+		expect(semver.satisfies("1.4.0", window)).toBe(false);
 	});
 
 	it("has a release-qa verified host on every certified minor line", () => {
