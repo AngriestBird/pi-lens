@@ -405,9 +405,15 @@ describe("tool-state matrix (#4522)", () => {
 						vi.resetModules();
 						const { resetGoAvailability } =
 							await import("../../../clients/go-client.js");
+						const { resetSpawnTimeoutCooldowns } =
+							await import("../../../clients/spawn-timeout-cooldown.js");
 						// Go availability is process-scoped; reset the singleton before
 						// loading the runner graph so every import shares this instance.
 						resetGoAvailability();
+						// The timeout cooldown is also process-scoped on globalThis. The
+						// probe-timeout cell immediately before a clean/dirty cell must
+						// not make the next fresh module graph skip its work spawn.
+						resetSpawnTimeoutCooldowns();
 						const dispatcher =
 							await import("../../../clients/dispatch/dispatcher.js");
 						const { registerDefaultRunners } =
