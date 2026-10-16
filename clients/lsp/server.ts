@@ -1029,8 +1029,12 @@ export async function resolveAndLaunch(
 		);
 		trackRuntimeFailure(failure.err);
 	}
+	// #4515: a project-local candidate refused by trust is repairable too: the
+	// managed install lives outside the project, so it needs no trust.
 	const hasOnlyRepairableCandidateFailures = candidateFailures.every(
-		(failure) => hasSpawnFailureKind(failure.err, "tool-not-found"),
+		(failure) =>
+			hasSpawnFailureKind(failure.err, "tool-not-found") ||
+			hasSpawnFailureKind(failure.err, "trust-refused"),
 	);
 	if (!hasOnlyRepairableCandidateFailures) {
 		if (lastRuntimeFailure) throw lastRuntimeFailure;
@@ -1052,6 +1056,8 @@ export async function resolveAndLaunch(
 				globalInstallDisabled: isLspInstallDisabled(),
 			},
 		});
+		// A trust refusal is not tool-not-found: keep surfacing it.
+		if (lastRuntimeFailure) throw lastRuntimeFailure;
 		return undefined;
 	}
 

@@ -50,6 +50,7 @@ export type SpawnFailureType =
 	| "cwd-unresolvable"
 	| "permission-denied"
 	| "spawn-failed"
+	| "trust-refused"
 	| "timeout"
 	| "killed";
 
