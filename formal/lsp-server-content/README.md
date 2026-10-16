@@ -8,6 +8,7 @@ job (`node scripts/check-tla-models.mjs`) checks every config against it.
 
 Issues: #3480 (the debounce fingerprint), #3481 (the stale cascade touch),
 #4493 (the HEAD-move resync, `HeadMoveResync.tla` and `HeadMoveHookBound.tla`,
+below), #4507 (the order of one bash command's writes, `BashWriteOrder.tla`,
 below).
 
 ## What the model covers
@@ -354,3 +355,22 @@ TLC 1.7.4, one worker.
 the look; the look sends `P d1` and stalls at `X d1`; the bound returns E;
 E reads the primary with `d2` stale. This is the live F1 run.
 
+## The order of one bash command's writes (#4507)
+
+`BashWriteOrder.tla`: a command rewrites a held dependency `z` and a held
+dependent `a` that imports a name the command adds to `z`. The tool_result
+dispatches each written file in turn, in either order; a dispatch sends its
+file and reads the primary's check of it, which reads every held view.
+`WritesPrimaryFirst` TRUE is the fix: every written held document whose sent
+bytes differ goes to the primary first, awaited (`sendToHeldPrimaries`). The
+primary phase is assumed to fit in the hook bound; a cut phase is disclosed
+by the `bash_write_primary_resync` row.
+
+- `NoPhantomFinding`: no dispatch checks a file against a held document's old
+  bytes.
+- `SettledFresh`: once the result is done, the primary holds the disk bytes.
+
+| Config | Expect | TLC | States |
+|---|---|---|---|
+| `BashWriteFix` | pass | pass | 9 |
+| `BashWritePreFix` | violated NoPhantomFinding (before #4507) | violated | 4 |

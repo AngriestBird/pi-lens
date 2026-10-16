@@ -3375,6 +3375,36 @@ export class LSPService {
 	}
 
 	/**
+	 * #4476: deliver changes pi-lens found on disk by looking (a declaration
+	 * file created, edited or deleted outside it) to every live client of the
+	 * files' servers, as exact-URI watched-files events, and send them now
+	 * rather than after the debounce window: the look runs right before the
+	 * next check. A server that registered client watchers (TypeScript 7's
+	 * native server registers `<root>/**\/*`) re-reads a closed file only on
+	 * such an event. Never spawns.
+	 */
+	notifyOutOfBandFileChanges(
+		changes: ReadonlyArray<{ filePath: string; type: number }>,
+	): void {
+		if (this.checkDestroyed() || changes.length === 0) return;
+		for (const { filePath, type } of changes)
+			for (const server of getServersForFileWithConfig(filePath))
+				this.notifyLiveClientsForServer(server.id, filePath, type, "", true);
+		for (const client of this.state.clients.values())
+			if (client.isAlive()) client.notify.flushWatched?.();
+	}
+
+	/**
+	 * #4476: restart the live primary clients whose root overlaps `root` after
+	 * a dependency install there (see `ClientRegistry.restartPrimaryClientsUnder`).
+	 * Answers how many.
+	 */
+	async restartPrimaryClientsUnder(root: string): Promise<number> {
+		if (this.checkDestroyed()) return 0;
+		return (await this.clientRegistry.restartPrimaryClientsUnder(root)).length;
+	}
+
+	/**
 	 * #4320: before a batch serves any cached answer, tell every live client the
 	 * batch's files that are new to its server and not yet announced to it, and
 	 * send each client's waiting Created now (`notify.announceCreated`). Without

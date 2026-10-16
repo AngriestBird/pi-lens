@@ -127,6 +127,7 @@ import {
 } from "./session-scope.js";
 import { requestBootstrapClients } from "./bootstrap.js";
 import { bounded } from "./deadline-utils.js";
+import { lookForOutOfBandChanges } from "./out-of-band-changes.js";
 import { HOOK_WALL_BUDGET_MS } from "./hook-budgets.js";
 import {
 	incrementDegradationCount,
@@ -219,6 +220,53 @@ const HEAD_MOVE_RESYNC_MAX_PASSES = 16;
 const HEAD_MOVE_PRIMARY_CAP = 64;
 
 /**
+ * #4493, #4507: send the disk bytes of `candidates` to the PRIMARY servers
+ * that hold them, awaited, and to no auxiliary: that is the view the next
+ * read or edit's dispatch reads, and primaries are not paced. The caller runs
+ * the full resync (every holding server, held importers, drift records)
+ * detached after it.
+ *
+ * A queued target is resent unconditionally, and most HEAD moves (every
+ * `git commit`, an amend) leave the held bytes current: only a document
+ * whose last-sent bytes differ from the disk is a target. An unreadable one
+ * is one too, so the resync reports it vanished. A candidate no server holds
+ * is skipped: opening it is its dispatch's job. Never spawns, and creates no
+ * service.
+ */
+async function sendToHeldPrimaries(
+	root: string,
+	candidates: readonly string[],
+): Promise<{ targets: string[]; primary: number; failed: boolean }> {
+	const service = peekLSPService();
+	if (!service || candidates.length === 0)
+		return { targets: [], primary: 0, failed: false };
+	const held = new Set(service.getOpenDocumentPaths(root));
+	const targets = (
+		await Promise.all(
+			candidates.map(async (filePath) => {
+				if (!held.has(filePath)) return undefined;
+				const sent = service.getTrackedContent(filePath, root)?.hash;
+				try {
+					const disk = await nodeFs.promises.readFile(filePath, "utf8");
+					return sent === hashDiagnosticContent(disk) ? undefined : filePath;
+				} catch {
+					return filePath;
+				}
+			}),
+		)
+	).filter((filePath): filePath is string => filePath !== undefined);
+	if (targets.length === 0) return { targets, primary: 0, failed: false };
+	try {
+		const { sent } = await service.resyncHeldPrimaries(
+			targets.slice(0, HEAD_MOVE_PRIMARY_CAP),
+		);
+		return { targets, primary: sent, failed: false };
+	} catch {
+		return { targets, primary: 0, failed: true };
+	}
+}
+
+/**
  * #4493: when HEAD moved since this session last looked, resync the held
  * documents in `git diff <old> <new>`.
  *
@@ -231,9 +279,20 @@ const HEAD_MOVE_PRIMARY_CAP = 64;
  *
  * The returned promise settles once the PRIMARY servers hold the new bytes;
  * the auxiliaries catch up after it (see {@link lookAtHead}).
+ *
+ * #4476: the same look first checks the root for a dependency install or a
+ * declaration file changed outside pi-lens (`out-of-band-changes.ts`), in a
+ * git checkout or not, so a restart lands before the resync and both before
+ * the next check.
  */
 export function resyncHeadMove(args: HeadLook): Promise<void> {
-	return serializeHeadLook(args.key, () => lookAtHead(args));
+	return serializeHeadLook(args.key, async () => {
+		try {
+			await lookForOutOfBandChanges(args.root, args.trigger);
+		} finally {
+			await lookAtHead(args);
+		}
+	});
 }
 
 interface HeadLook {
@@ -275,36 +334,11 @@ async function lookAtHead(args: HeadLook): Promise<void> {
 		delta === undefined
 			? heldPaths
 			: delta.filter((filePath) => held.has(filePath));
-	// A queued target is resent unconditionally, and most HEAD moves (every
-	// `git commit`, an amend) leave the held bytes current: only a document
-	// whose last-sent bytes differ from the disk is resent. An unreadable one
-	// goes too, so the resync reports it vanished.
-	const targets = (
-		await Promise.all(
-			inDelta.map(async (filePath) => {
-				const sent = service?.getTrackedContent(filePath, args.root)?.hash;
-				try {
-					const disk = await nodeFs.promises.readFile(filePath, "utf8");
-					return sent === hashDiagnosticContent(disk) ? undefined : filePath;
-				} catch {
-					return filePath;
-				}
-			}),
-		)
-	).filter((filePath): filePath is string => filePath !== undefined);
-	let primary = 0;
-	let resyncFailed = false;
-	if (service && targets.length > 0) {
-		try {
-			primary = (
-				await service.resyncHeldPrimaries(
-					targets.slice(0, HEAD_MOVE_PRIMARY_CAP),
-				)
-			).sent;
-		} catch {
-			resyncFailed = true;
-		}
-	}
+	const {
+		targets,
+		primary,
+		failed: resyncFailed,
+	} = await sendToHeldPrimaries(args.root, inDelta);
 	const primaryMs = Date.now() - started;
 	const report = (
 		dispositions: ReadonlyMap<string, string> | undefined,
@@ -1948,9 +1982,6 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 					durationMs: Date.now() - started,
 					result: `changed:${opaquePaths.length}`,
 				});
-				void resyncGitChangedFiles(opaquePaths).catch((err) => {
-					dbg(`git-change LSP resync failed: ${err}`);
-				});
 			}
 		}
 		// #4493: a command that moved HEAD resyncs the held documents it
@@ -1979,6 +2010,48 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		// set must hold those exact strings - no re-resolution.
 		const opaqueSet = new Set(opaquePaths);
 		const written = [...recognizedWritten, ...opaquePaths];
+		// #4507: every file the command wrote reaches the primary servers that
+		// hold it before this result returns and before the synthetic dispatches
+		// below. They run one file at a time, so without this a dependent
+		// dispatched ahead of its dependency was checked against the
+		// dependency's old bytes (a phantom STOP). The full resync of the opaque
+		// paths (auxiliaries, held importers, drift records) follows the primary
+		// phase, detached; a phase cut at the bound still hands it over.
+		if (workspaceRoot && written.length > 0) {
+			const primaryStarted = Date.now();
+			const primaryPhase = sendToHeldPrimaries(workspaceRoot, written);
+			if (opaquePaths.length > 0)
+				void primaryPhase
+					.then(() => resyncGitChangedFiles(opaquePaths))
+					.catch((err) => {
+						dbg(`git-change LSP resync failed: ${err}`);
+					});
+			// A name of its own: the HEAD look above bounds with the same signal.
+			const primarySignal = deps.signal ?? undefined;
+			const sent = await bounded(primaryPhase, {
+				ms: HOOK_WALL_BUDGET_MS.tool_result_read_only,
+				signal: primarySignal,
+				hook: "tool_result_read_only",
+				label: "bash-write-primary-resync",
+			});
+			// One row per bash result that had held documents to resend, or whose
+			// phase failed or was cut ("cut": the bound ended the wait, and its
+			// hook-await-exceeded row names it).
+			if (sent === undefined || sent.failed || sent.targets.length > 0)
+				logLatency({
+					type: "phase",
+					phase: "bash_write_primary_resync",
+					filePath: written.slice(0, 5).join(","),
+					durationMs: Date.now() - primaryStarted,
+					result: sent === undefined ? "cut" : sent.failed ? "failed" : "sent",
+					metadata: {
+						written: written.length,
+						opaque: opaquePaths.length,
+						targets: sent?.targets.length ?? -1,
+						primary: sent?.primary ?? 0,
+					},
+				});
+		}
 		const recognizedAuthoredSet = new Set(recognizedAuthored);
 		bashAuthorshipConfirmed = recognizedAuthored.length > 0;
 		for (const wp of written) {

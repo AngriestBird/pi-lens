@@ -1200,6 +1200,11 @@
 					"value": "TRUE",
 					"test": "tests/clients/head-move-resync-4493.test.ts",
 					"title": "holds a parallel tool_call until the running look has sent the move's bytes"
+				},
+				"WritesPrimaryFirst": {
+					"value": "TRUE",
+					"test": "tests/clients/head-move-resync-4493.test.ts",
+					"title": "checks a dependent the command rewrote against its rewritten dependency"
 				}
 			},
 			"notCodeChoice": [
