@@ -1,8 +1,12 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
+	forgetCascadePendingNeighbor,
 	formatCascadeNeighborDiagnostics,
+	listCascadePendingNeighbors,
 	markCascadeUnansweredPrimariesDelivered,
+	recordDeliveredCascadeNeighbor,
 	renderCascadeResult,
+	resetCascadePendingNeighbors,
 	resetCascadeUnansweredPrimariesDelivered,
 	splitCascadeUnansweredPrimaries,
 } from "../../clients/cascade-format.js";
@@ -10,6 +14,11 @@ import type {
 	CascadeNeighborResult,
 	CascadeResult,
 } from "../../clients/cascade-types.js";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
+import type { Diagnostic } from "../../clients/dispatch/types.js";
 
 describe("formatCascadeNeighborDiagnostics", () => {
 	it("renders an explicit marker for an inconclusive empty neighbor (#1444)", () => {
@@ -116,5 +125,62 @@ describe("the cascade's unanswered-primary line, per server (#4403 V1)", () => {
 			{ text: "body", lines: [], serverIds: [] },
 			{ text: "body", lines: [line("typescript")], serverIds: ["typescript"] },
 		]);
+	});
+});
+
+/**
+ * #4487: the pending record of delivered cascade neighbour errors, on the
+ * module's own state.
+ */
+describe("the cascade's pending neighbour-error record (#4487)", () => {
+	afterEach(() => {
+		resetCascadePendingNeighbors();
+		resetDegradationLedger();
+	});
+
+	const error = (filePath: string): Diagnostic => ({
+		id: "typescript:2322",
+		message: "Type 'string' is not assignable to type 'number'.",
+		filePath,
+		line: 2,
+		column: 14,
+		severity: "error",
+		semantic: "blocking",
+		tool: "lsp",
+		rule: "typescript:2322",
+	});
+	const paths = () => listCascadePendingNeighbors().map((e) => e.filePath);
+
+	// Recurrence: a clean answer published BEFORE an error was delivered (a
+	// late quiet-window answer to an older touch) erased the newer error.
+	it("forgets an entry only for a clean observation newer than the error it holds", () => {
+		recordDeliveredCascadeNeighbor(
+			"/repo/b.ts",
+			[error("/repo/b.ts")],
+			1,
+			1_000,
+		);
+		forgetCascadePendingNeighbor("/repo/b.ts", 1_000);
+		forgetCascadePendingNeighbor("/repo/b.ts", 999);
+		expect(paths()).toEqual(["/repo/b.ts"]);
+		forgetCascadePendingNeighbor("/repo/b.ts", 1_001);
+		expect(paths()).toEqual([]);
+	});
+
+	// Recurrence: a session-long store keyed by neighbour path with no cap
+	// (the bounded-container rule); the oldest entry goes, once recorded.
+	it("keeps at most 256 neighbours, evicting the oldest with one degradation record", () => {
+		for (let i = 0; i <= 256; i++) {
+			const file = `/repo/n${i}.ts`;
+			recordDeliveredCascadeNeighbor(file, [error(file)], 1, i);
+		}
+		const kept = paths();
+		expect(kept).toHaveLength(256);
+		expect(kept[0]).toBe("/repo/n1.ts");
+		expect(
+			getDegradationSummary().filter(
+				(row) => row.kind === "cascade-pending-neighbors-evicted",
+			),
+		).toHaveLength(1);
 	});
 });

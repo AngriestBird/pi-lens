@@ -29,6 +29,7 @@ import { describe, expect, it } from "vitest";
 import {
 	auditRegistry,
 	bindTagsToSeams,
+	escapeRegExp,
 	findSeams,
 	listSourceFiles,
 	matchingCloseIndex,
@@ -81,6 +82,8 @@ const EXPECTED_SURFACE_IDS = [
 	"runtime-turn:late-auxiliary-findings",
 	"runtime-turn:late-runner-findings",
 	"runtime-turn:cascade-blocker",
+	// #4487: earlier-turn cascade errors not re-checked this turn.
+	"runtime-turn:cascade-pending-errors",
 	"runtime-turn:cascade-coverage-advisory",
 	// #3102: the cold-neighbour cascade run's own build-time lane, a turn
 	// earlier than the runtime-turn render that carries it.
@@ -272,6 +275,8 @@ describe("finding-delivery-gate render-seam scan (#1634 review F2, #3165)", () =
 		expect(filesOf("cascade neighbour render")).toEqual([
 			"clients/cascade-format.ts",
 			"clients/dispatch/integration.ts",
+			// #4487: the turn_end re-render of a partly-owned or labeled section.
+			"clients/runtime-turn.ts",
 		]);
 	});
 
@@ -531,9 +536,7 @@ function textConstantTypes(kept: string, blanked: string): boolean {
 	for (const [, name] of kept.matchAll(
 		/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=;]*)?=\s*"text"/g,
 	)) {
-		if (
-			new RegExp(`\\btype:\\s*${name.replace(/\$/g, "\\$")}\\b`).test(blanked)
-		) {
+		if (new RegExp(`\\btype:\\s*${escapeRegExp(name)}\\b`).test(blanked)) {
 			return true;
 		}
 	}
@@ -726,12 +729,12 @@ function renamedBindings(text: string): Map<string, string> {
 	return renames;
 }
 
-const escapeIdent = (name: string) => name.replace(/\$/g, "\\$");
-
 /** `region` plus the original name of every rename it references. */
 function withOriginalNames(region: string, renames: Map<string, string>) {
 	const originals = [...renames]
-		.filter(([local]) => new RegExp(`\\b${escapeIdent(local)}\\b`).test(region))
+		.filter(([local]) =>
+			new RegExp(`\\b${escapeRegExp(local)}\\b`).test(region),
+		)
 		.map(([, original]) => original);
 	return originals.length ? `${region}\n${originals.join(" ")}` : region;
 }
@@ -785,7 +788,7 @@ function withSameFileHelpers(text: string, body: string): string {
 		const added = helpers.filter(
 			(d) =>
 				!taken.has(d.name) &&
-				new RegExp(`\\b${escapeIdent(d.name)}\\b`).test(frontier),
+				new RegExp(`\\b${escapeRegExp(d.name)}\\b`).test(frontier),
 		);
 		if (added.length === 0) return region;
 		for (const d of added) taken.add(d.name);

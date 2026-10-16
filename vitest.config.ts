@@ -312,6 +312,10 @@ const timingSensitiveInclude = [
 // silently goes stale.
 const lspSpawnHeavyInclude = [
 	"tests/clients/ast-grep-rule-precedence-followups.test.ts",
+	// #1712/#4485: the cascade's live twin over a real classic TypeScript
+	// server (opt-in, PI_LENS_INTEGRATION=1); three cascades each wait on
+	// the wrapper's tsserver answers.
+	"tests/clients/cascade-classic-ts-live.test.ts",
 	// #4403 round 4: the cascade line through pi's turn path. Real fake-LSP
 	// children (typescript, typos, Opengrep stand-ins) behind project command
 	// overrides, one of them held 8 s before it answers; same contention

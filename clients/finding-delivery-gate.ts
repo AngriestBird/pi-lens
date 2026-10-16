@@ -588,6 +588,22 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 		["cascadeCarrySuffix("],
 		{ evidenceMin: 1 },
 	),
+	// #4487: cascade neighbour errors a cascade showed in an EARLIER turn and
+	// no later cascade or edit has shown gone. A cached claim, not a fresh
+	// observation, so each entry passes the freshness gate against its own
+	// read bound (`checkedAt`) before it renders (#4495 review F1, round 3):
+	// a deleted neighbour is forgotten; one written after the check by
+	// something pi never saw is named once as changed and not re-checked.
+	// Survivors carry the `(scanned Xm ago)` age of that read. The evidence is
+	// the two RENDERED lists, so the binding chain walks each back to the gate
+	// call's own arms (a render of the ungated candidates reds, #4495 r2
+	// verify census note).
+	"runtime-turn:cascade-pending-errors": gated(
+		RUNTIME_TURN_FILE,
+		"Turn-end 📐 list of cascade neighbour errors shown in an earlier turn and not re-checked since.",
+		["gateFindingsByPathFreshness"],
+		["unresolvedNeighbors", "changedShown"],
+	),
 	"runtime-turn:cascade-coverage-advisory": labeled(
 		RUNTIME_TURN_FILE,
 		"Turn-end cascade-coverage-gap advisories (graph/binding/budget).",

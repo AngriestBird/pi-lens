@@ -529,11 +529,12 @@ function partitionOneSource<T>(
 		cwd: string;
 		citedPath: (finding: T) => string | undefined;
 		scannedAt?: string | number;
+		scannedAtOf?: (finding: T) => string | number | undefined;
 		onMissing?: FindingMissingPolicy;
 	},
 	memo: PathFactsMemo,
 ): FindingPathPartition<T> {
-	const scannedAtMs = parseScannedAtMs(args.scannedAt);
+	const storeScannedAtMs = parseScannedAtMs(args.scannedAt);
 	const onMissing = args.onMissing ?? "drop";
 	// Two dedup layers, cheapest first. `rawVerdicts` collapses findings that
 	// cite the IDENTICAL string with zero filesystem work — the dominant case
@@ -564,7 +565,13 @@ function partitionOneSource<T>(
 			live.push(finding);
 			continue;
 		}
-		let verdict = rawVerdicts.get(cited);
+		const scannedAtMs = args.scannedAtOf
+			? parseScannedAtMs(args.scannedAtOf(finding))
+			: storeScannedAtMs;
+		// A per-finding scan time is part of the verdict's identity: the same
+		// path observed at two times can be live for one and stale for the other.
+		const verdictKey = args.scannedAtOf ? `${cited}\0${scannedAtMs}` : cited;
+		let verdict = rawVerdicts.get(verdictKey);
 		if (verdict === undefined) {
 			// Ancestor-tolerant, same as `toRunnerDisplayPath`'s resolution in
 			// runtime-turn.ts — a bare `path.resolve` here would decide the drop
@@ -601,7 +608,7 @@ function partitionOneSource<T>(
 				if (verdict === "missing") deadPaths.push(resolved);
 				else if (verdict === "stale") stalePaths.push(resolved);
 			}
-			rawVerdicts.set(cited, verdict);
+			rawVerdicts.set(verdictKey, verdict);
 		}
 		if (verdict === "missing") dropped.push(finding);
 		else if (verdict === "stale") stale.push(finding);
@@ -667,6 +674,13 @@ export interface FindingFreshnessSource<T> {
 	 * to `any` and taking the citedPath callbacks with it.
 	 */
 	scannedAt?: string | number | undefined;
+	/**
+	 * A per-finding scan timestamp, for a store whose findings were observed
+	 * at different times (the cascade's pending neighbour record, #4487: one
+	 * observation per neighbour). When given it decides each finding instead
+	 * of `scannedAt`; absent/unparseable for a finding disables its demotion.
+	 */
+	scannedAtOf?: ((finding: T) => string | number | undefined) | undefined;
 	/** Defaults to `"drop"`, matching #1460's secrets behaviour. */
 	onMissing?: FindingMissingPolicy | undefined;
 }
@@ -735,7 +749,9 @@ export function gateFindingsByPathFreshness<
 		gates[name] = { live: partition.live, stale: partition.stale };
 		if (partition.dropped.length > 0) dropped[name] = partition.dropped.length;
 		if (partition.stale.length > 0) demoted[name] = partition.stale.length;
-		if (source.scannedAt !== undefined) {
+		if (source.scannedAtOf !== undefined) {
+			scannedAtByStore[name] = "per-finding";
+		} else if (source.scannedAt !== undefined) {
 			scannedAtByStore[name] = String(source.scannedAt);
 		}
 		merged.live.push(...partition.live);

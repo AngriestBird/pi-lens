@@ -28,7 +28,8 @@
     "turn-end-delivery-holds",
     "turn-end-late-scan",
     "lsp-ephemeral-data-dir",
-    "blocker-pending"
+    "blocker-pending",
+    "cascade-delivery"
   ],
   "map": {
     "clients/read-guard.ts": [
@@ -136,10 +137,15 @@
       "pending-runner-store"
     ],
     "clients/quiet-window.ts": [
-      "session-straddle"
+      "session-straddle",
+      "cascade-delivery"
     ],
     "clients/lsp/cascade-tier.ts": [
-      "session-straddle"
+      "session-straddle",
+      "cascade-delivery"
+    ],
+    "clients/cascade-format.ts": [
+      "cascade-delivery"
     ],
     "clients/dispatch/integration.ts": [
       "session-straddle",
@@ -427,7 +433,8 @@
     "clients/memory-sampler.ts": "Sampling cadence and heap-growth tightening are observability state, but no formal family models their session reset and timer-free turn state; keep it visible as unmodelled.",
     "tools/ast-grep-replace.ts": "`ast_grep_replace` captures the coordinator's session at `execute` entry and hands it to the apply, which sends it as the bridge entry's lineage (#3763 item 4, #3824). Modelled as session-lifecycle's `bridge` writer (`BridgeLineage`).",
     "clients/turn-summary.ts": "The run's turn summary collector: a session-scoped store `resetForSession` clears, written by `handleToolResult` and the deferred-format drain behind the handle each captured at entry (#3759 row 14). Modelled as the `summary` kind of session-lifecycle's `stateW` and `debounce` writers (`StateWLate`, `Pre3759StateWUncaptured`); the collector's content is not.",
-    "clients/runtime-turn.ts": "`handleTurnEnd`'s drains and the park of a cut advisory: modelled by session-lifecycle's `TurnEnd` (a turn_end drains only its own scope's work: `SecondaryTurnEnd` is master's open half of #3613 and #3758, `SecondaryTurnEndScoped` the proposed shape) and `park`/`ParkTake` (`ParkMerged`, `Pre4112ParkNoSessionKey`, `Mut4112ParkNoResetClear`, `MutParkNoFence`; the key and fence are also turn-end-delivery-holds'). The row is deliberately not given session-lifecycle: a fourth family would make it a hub and silence its gate (#3878).",
+    "clients/dispatch/integration.ts": "The in-lane cascade (`computeCascadeForFile`: the passive snapshot's post-edit gate, the tier branch, the bounded silent-push wait, the fallbacks, the unconfirmed marker) is modelled by cascade-delivery's `Compute`. The row stays at three families: a fourth would make it a hub and silence its gate (#3878).",
+    "clients/runtime-turn.ts": "`handleTurnEnd`'s drains and the park of a cut advisory: modelled by session-lifecycle's `TurnEnd` (a turn_end drains only its own scope's work: `SecondaryTurnEnd` is master's open half of #3613 and #3758, `SecondaryTurnEndScoped` the proposed shape) and `park`/`ParkTake` (`ParkMerged`, `Pre4112ParkNoSessionKey`, `Mut4112ParkNoResetClear`, `MutParkNoFence`; the key and fence are also turn-end-delivery-holds'). The row is deliberately not given session-lifecycle: a fourth family would make it a hub and silence its gate (#3878). Its cascade sections (the registry peek, the pending and unresolved lines, the pending record) are cascade-delivery's `TurnEnd`, left off the row for the same reason.",
     "index.ts": "The hook handlers in index.ts: an edit inside one (session_start, session_shutdown, session_tree, turn_start, turn_end, agent_end, agent_settled, tool_call, tool_result, context) gates on that hook's families only, found by `findHookRanges` in scripts/lib/tla-coverage.mjs from the post-image the diff names (#3878). An edit outside every handler (activation setup, helpers) prints a note and never gates."
   }
 }

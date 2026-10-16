@@ -378,6 +378,15 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 			"#4403: the primaries whose cascade 'no language server answered' line reached this session's agent; the next session's agent has not been told.",
 	},
 	{
+		id: "cascade-format:pendingNeighbors",
+		module: "cascade-format.ts",
+		state: "pendingNeighbors",
+		policy: "session_start",
+		resetName: "resetCascadePendingNeighbors",
+		reason:
+			"#4487: cascade neighbour errors this session's agent was shown and no later observation cleared; the next session's agent was never shown them, and the tree may have changed between sessions.",
+	},
+	{
 		id: "cascade-tier:outstandingTouches",
 		module: "lsp/cascade-tier.ts",
 		state:
@@ -545,8 +554,7 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 	{
 		id: "dispatch-integration:sessionCaches",
 		module: "dispatch/integration.ts",
-		state:
-			"recentlyCleanNeighborCache, primaryFilesThisTurn, sessionSlopRuleCounts, sessionFacts",
+		state: "primaryFilesThisTurn, sessionSlopRuleCounts, sessionFacts",
 		policy: "session_start",
 		resetName: "resetDispatchBaselines",
 		reason:
@@ -1595,7 +1603,9 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"cache-observability.ts": 2,
 	// #4403 round 5 (V1): the primaries whose cascade line was delivered,
 	// registered above and reset by resetDispatchBaselines.
-	"cascade-format.ts": 1,
+	// #4487: the cascade pending-error record (1 -> 2), registered above and
+	// reset by resetDispatchBaselines.
+	"cascade-format.ts": 2,
 	// #2418: the one warn-once latch behind all three config loaders, moved
 	// here out of lens-config.ts and project-lens-config.ts.
 	// #2426: 1 -> 2. The second symbol is `DEPRECATION_NOUN_BY_CODE`, an
@@ -1645,7 +1655,9 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// prefix, so `CASCADE_GRAPH_KINDS` (an exported module-level `new Set`) is
 	// counted (10 -> 11). Import-time frozen vocabulary, same class as this
 	// file's other constant lookups above — SWEEP_HEURISTIC_LIMITS item 5.
-	"dispatch/integration.ts": 11,
+	// #4485: the recently-clean neighbour cache is deleted (11 -> 10); the
+	// pending record in cascade-format.ts replaces it.
+	"dispatch/integration.ts": 10,
 	// #3968: the runner-id identity leaf beside the dispatcher — one Set fed
 	// by `RunnerRegistry.register` and re-derived at every process start
 	// (registration state, not session state); see the file-level exemption

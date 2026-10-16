@@ -182,6 +182,8 @@ export type DegradationKind =
 	| "cascade-budget-override-disarmed"
 	/** Deferred cascade admission reached its bounded in-memory queue. */
 	| "cascade-pending-cap"
+	/** #4487: the pending neighbour-error record reached its cap. */
+	| "cascade-pending-neighbors-evicted"
 	| "cascade-tier3-backlog-evicted"
 	/**
 	 * #3511: the change-log lock stayed held past its bounded wait (or its

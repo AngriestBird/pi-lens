@@ -84,6 +84,7 @@ import {
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { gitExecFileSync } from "./lib/git-fixture-env.mjs";
+import { escapeMarkdownCell } from "./lib/markdown-cell.mjs";
 import {
 	execVitest,
 	planRuns,
@@ -570,7 +571,7 @@ export function issueBody(verdict, { runUrl = "" } = {}) {
 		);
 		for (const row of verdict.members)
 			out.push(
-				`| \`${row.file}\` | ${row.kind} | ${row.seed} | ${row.test.replace(/\|/g, "\\|")} | ${row.firstError.replace(/\|/g, "\\|")} |`,
+				`| \`${row.file}\` | ${row.kind} | ${row.seed} | ${escapeMarkdownCell(row.test)} | ${escapeMarkdownCell(row.firstError)} |`,
 			);
 		out.push(
 			"",
