@@ -382,6 +382,12 @@ export interface LSPClientInfo {
 		 */
 		watchedFileChange(filePath: string, type: number): void;
 		/**
+		 * #4476: send the queued watched-files changes now, so a check that
+		 * follows is answered by a server that has re-read the files. Optional
+		 * for test doubles.
+		 */
+		flushWatched?(): void;
+		/**
 		 * #4320: queue Created for each existing path that is new to this server
 		 * and not yet announced to it, then send any waiting Created now. A read
 		 * that follows is then answered by a server that has heard of the path.
@@ -6438,6 +6444,9 @@ export async function createLSPClient(options: {
 			},
 			watchedFileChange(filePath, type) {
 				handleNotifyExternalChange(state, filePath, type);
+			},
+			flushWatched() {
+				if (isClientAlive(state)) state.watchQueue.flush();
 			},
 			announceCreated(entries) {
 				handleAnnounceCreated(state, entries);

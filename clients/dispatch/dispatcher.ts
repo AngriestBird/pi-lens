@@ -80,6 +80,7 @@ import {
 	rulePolicyMapFromConfig,
 } from "./rule-policy.js";
 import { getToolProfile } from "./tool-profile.js";
+import { classifyPreExisting, preEditSeedFactKey } from "./pre-edit-seed.js";
 import {
 	hasUsableResult,
 	isRunnerClaimSource,
@@ -438,6 +439,15 @@ export function createDispatchContext(
 }
 
 // --- Delta Mode Logic ---
+
+/**
+ * The session fact holding a file's delta baseline (absolute, normalized
+ * path; the #2489 note in `dispatchForFile`). The #4483 pre-edit capture reads
+ * it to tell a file's first dispatch from a later one.
+ */
+export function deltaBaselineFactKey(filePath: string): string {
+	return `session.baseline.${filePath}`;
+}
 
 /**
  * Filter diagnostics to only show NEW issues (delta mode)
@@ -1319,14 +1329,17 @@ async function runGroup(
 					? { skipReason, ...(claimSource !== undefined && { claimSource }) }
 					: undefined),
 		});
-		recordRunner(
-			ctx.filePath,
-			runnerId,
-			result.status,
-			result.diagnostics.length,
-			duration,
-			ctx.writeIndex,
-		);
+		// #4483: a pre-edit capture reads bytes the host is about to replace,
+		// so its counts never reach the widget's runner state.
+		if (!ctx.preEditCapture)
+			recordRunner(
+				ctx.filePath,
+				runnerId,
+				result.status,
+				result.diagnostics.length,
+				duration,
+				ctx.writeIndex,
+			);
 
 		// #4484 r2: every finding names the runner that observed it, so a
 		// recorded blocker is retired only by a conclusive run of its own source.
@@ -1488,6 +1501,7 @@ export async function dispatchForFile(
 			groupCount: groups.length,
 			kind: ctx.kind,
 			runners: allRunnerIds.join(","),
+			...(ctx.preEditCapture && { preEditCapture: true }),
 		},
 	});
 
@@ -1538,7 +1552,7 @@ export async function dispatchForFile(
 				"dispatchForFile requires an absolute ctx.filePath to key the delta baseline (refs #2489)",
 		});
 	}
-	const baselineAbsKey = `session.baseline.${ctx.filePath}`;
+	const baselineAbsKey = deltaBaselineFactKey(ctx.filePath);
 	const previousBaseline =
 		ctx.deltaMode && baselinePathSafe
 			? ctx.facts.getBoundedSessionFact<Diagnostic[]>(baselineAbsKey)
@@ -1727,6 +1741,42 @@ export async function dispatchForFile(
 		resolvedCount = filtered.fixed.length;
 	}
 
+	// #4483: a blocking linter finding the file held before its first edit
+	// this session (the seed `tool_call` captured) is pre-existing: not a
+	// blocker, not held back, reported on its own. Matched by identity and
+	// line text, so it stays pre-existing when lines move; the seed shrinks to
+	// what this run still observes, or keeps entries of runners with no verdict.
+	const seedKey = preEditSeedFactKey(ctx.filePath);
+	const preEditSeed =
+		ctx.deltaMode && baselinePathSafe
+			? ctx.facts.getBoundedSessionFact<Diagnostic[]>(seedKey)
+			: undefined;
+	const seedContent = ctx.facts.getFileFact<string>(
+		ctx.filePath,
+		"file.content",
+	);
+	let preExisting: Diagnostic[] = [];
+	if (preEditSeed && seedContent !== undefined) {
+		const classified = classifyPreExisting(
+			preEditSeed,
+			[
+				...visibleDiagnostics.filter((d) => d.semantic === "blocking"),
+				...heldBackBlockers,
+			],
+			seedContent,
+			new Set(
+				[...answeredRunnerIds].filter((id) => !inconclusiveRunnerIds.has(id)),
+			),
+		);
+		if (classified.preExisting.length > 0) {
+			const held = new Set(classified.preExisting);
+			visibleDiagnostics = visibleDiagnostics.filter((d) => !held.has(d));
+			heldBackBlockers = heldBackBlockers.filter((d) => !held.has(d));
+			preExisting = classified.preExisting;
+		}
+		ctx.facts.setBoundedSessionFact(seedKey, classified.nextSeed);
+	}
+
 	// Persist full current snapshot for next run (not delta-filtered subset).
 	// Gated on `baselinePathSafe` too: a non-absolute `ctx.filePath` already
 	// skipped the read above (the degradation record fired there), and writing
@@ -1845,6 +1895,11 @@ export async function dispatchForFile(
 			baselineWarningCount,
 			// #4484: blockers still observed that the delta did not call new.
 			heldBackBlockers: heldBackBlockers.length,
+			// #4483: whether a pre-edit seed was read, and the blocking linter
+			// findings it reported as pre-existing.
+			preEditSeed: preEditSeed !== undefined,
+			preExisting: preExisting.length,
+			...(ctx.preEditCapture && { preEditCapture: true }),
 			// #4484 r2: findings that only keep a recorded blocker pending, and
 			// the sources whose silence is no evidence.
 			stillObserved: stillObserved.length,
@@ -1865,6 +1920,7 @@ export async function dispatchForFile(
 		blockerOutput,
 		hasBlockers: blockers.length > 0,
 		...(heldBackBlockers.length > 0 && { heldBackBlockers }),
+		...(preExisting.length > 0 && { preExisting }),
 		...(stillObserved.length > 0 && { stillObserved }),
 		...(editScopedRunnerIds.some((id) => !voidedCovers.has(id)) && {
 			editScopedRunnerIds: editScopedRunnerIds.flatMap((id) =>

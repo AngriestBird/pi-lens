@@ -3414,6 +3414,36 @@ export class LSPService {
 	}
 
 	/**
+	 * #4476: deliver changes pi-lens found on disk by looking (a declaration
+	 * file created, edited or deleted outside it) to every live client of the
+	 * files' servers, as exact-URI watched-files events, and send them now
+	 * rather than after the debounce window: the look runs right before the
+	 * next check. A server that registered client watchers (TypeScript 7's
+	 * native server registers `<root>/**\/*`) re-reads a closed file only on
+	 * such an event. Never spawns.
+	 */
+	notifyOutOfBandFileChanges(
+		changes: ReadonlyArray<{ filePath: string; type: number }>,
+	): void {
+		if (this.checkDestroyed() || changes.length === 0) return;
+		for (const { filePath, type } of changes)
+			for (const server of getServersForFileWithConfig(filePath))
+				this.notifyLiveClientsForServer(server.id, filePath, type, "", true);
+		for (const client of this.state.clients.values())
+			if (client.isAlive()) client.notify.flushWatched?.();
+	}
+
+	/**
+	 * #4476: restart the live primary clients whose root overlaps `root` after
+	 * a dependency install there (see `ClientRegistry.restartPrimaryClientsUnder`).
+	 * Answers how many.
+	 */
+	async restartPrimaryClientsUnder(root: string): Promise<number> {
+		if (this.checkDestroyed()) return 0;
+		return (await this.clientRegistry.restartPrimaryClientsUnder(root)).length;
+	}
+
+	/**
 	 * #4320: before a batch serves any cached answer, tell every live client the
 	 * batch's files that are new to its server and not yet announced to it, and
 	 * send each client's waiting Created now (`notify.announceCreated`). Without
@@ -3462,11 +3492,26 @@ export class LSPService {
 	 * auxiliaries, the importers and the drift records are left to
 	 * {@link resyncGitChangedFiles}, which the caller runs after this. Never
 	 * spawns: a server not holding the document is excluded.
+	 *
+	 * #4528 r1 F1: each client that took a send then answers one request (its
+	 * liveness probe, waited up to `drainMs`). The writes resolve once the
+	 * bytes are in the pipe, not once the server read them; a server still
+	 * working through earlier changes kept publishing checks computed against
+	 * a dependency's old bytes, and a check read right after the sends took
+	 * one. A reply proves every send before it was processed
+	 * (for a server whose replies are `threaded` it proves only liveness).
+	 * `drained` requires measured single-task ordering and a successful probe;
+	 * threaded/unmeasured servers and timeouts are undrained.
 	 */
 	async resyncHeldPrimaries(
 		filePaths: readonly string[],
-	): Promise<{ sent: number }> {
+		drainMs: number,
+	): Promise<{ sent: number; drained: boolean }> {
 		let sent = 0;
+		const sentTo = new Map<
+			string,
+			{ client: LSPClientInfo; ordered: boolean }
+		>();
 		for (const filePath of filePaths) {
 			if (this.checkDestroyed()) break;
 			const servers = getServersForFileWithConfig(filePath);
@@ -3488,8 +3533,35 @@ export class LSPService {
 				excludeServerIds: exclude,
 			});
 			sent += 1;
+			for (const server of servers) {
+				if (exclude.has(server.id)) continue;
+				const root = await this.clientRegistry.resolveServerRoot(
+					server,
+					filePath,
+				);
+				const key = root ? `${server.id}:${normalizeMapKey(root)}` : undefined;
+				const client = key ? this.state.clients.get(key) : undefined;
+				if (key && client)
+					sentTo.set(key, {
+						client,
+						ordered:
+							serverTraits(server).replyOrdering === "single-task-ordered",
+					});
+			}
 		}
-		return { sent };
+		if (sentTo.size === 0) return { sent, drained: true };
+		const answers = await Promise.all(
+			[...sentTo.values()].map(async ({ client, ordered }) => {
+				// #4528 r2: a threaded or unmeasured reply proves only liveness.
+				if (!ordered) return false;
+				try {
+					return (await client.pingLiveness?.(drainMs)) ?? true;
+				} catch {
+					return false;
+				}
+			}),
+		);
+		return { sent, drained: answers.every(Boolean) };
 	}
 
 	/**
