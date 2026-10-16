@@ -768,6 +768,13 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the real pinned npm child is required to reproduce lockfile optional-binding rewrites; a process double cannot validate npm behavior",
 	},
+	// 2026-10-16 (#4510): the killed-runner witness ends its own vitest
+	// launcher from outside the worker (the kill guard refuses process.kill).
+	"real-process-spawn:scripts/mutate-fixture.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the fixture kills its parent vitest launcher through kill(1), because the kill guard refuses process.kill on a pid the file does not own; no in-process call ends the runner",
+	},
 	// 2026-09-26 (#3531): the CLI smoke test spawns a real node child to prove
 	// scripts/mutation-report.mjs's own argv parsing (--report/--out) and
 	// file I/O; an in-process call would just re-exercise the exported render
