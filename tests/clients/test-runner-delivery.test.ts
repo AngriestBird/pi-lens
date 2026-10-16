@@ -8,6 +8,7 @@ vi.mock("../../clients/latency-logger.js", async (importOriginal) => ({
 	logLatency,
 }));
 import { snapshotAdvisoryProvenance } from "../../clients/advisory-provenance.js";
+import { resetBoundedTelemetry } from "../../clients/bounded-telemetry.js";
 import { CacheManager } from "../../clients/cache-manager.js";
 import {
 	getDegradationSummary,
@@ -27,9 +28,21 @@ import { setupTestEnvironment } from "./test-utils.js";
 describe("automatic test-runner delivery (#2366)", () => {
 	afterEach(() => {
 		_resetTestRunnerDeliveryForTests();
+		resetBoundedTelemetry();
 		resetDegradationLedger();
 		logLatency.mockReset();
 	});
+
+	/** Each `test_runner_delivery` record the module emitted, oldest first. */
+	function deliveryRecords(): Array<Record<string, unknown>> {
+		return logLatency.mock.calls
+			.map(([entry]) => entry)
+			.filter((entry) => entry.phase === "test_runner_delivery")
+			.map((entry) => entry.metadata);
+	}
+
+	const deliveryOutcomes = (): unknown[] =>
+		deliveryRecords().map((record) => record.outcome);
 
 	function setup() {
 		const env = setupTestEnvironment("pi-lens-test-delivery-");
@@ -567,19 +580,27 @@ describe("automatic test-runner delivery (#2366)", () => {
 				targetCount: 1,
 				hasFindings: true,
 			});
-			deliverTestRunnerFindings({
-				ctx: { cwd: env.tmpDir, isIdle: () => idle },
-				cacheManager: cache,
-				runtime,
-				sessionId: "session-a",
-			});
+			const deliver = () =>
+				deliverTestRunnerFindings({
+					ctx: { cwd: env.tmpDir, isIdle: () => idle },
+					cacheManager: cache,
+					runtime,
+					sessionId: "session-a",
+				});
+			const consume = () =>
+				consumeStagedTestRunnerFindings({
+					cwd: env.tmpDir,
+					sessionId: "session-a",
+					cacheManager: cache,
+					runtime,
+				});
+			deliver();
+			expect(deliveryOutcomes()).toEqual(["staged", "carried"]);
+			expect(consume()).toBeUndefined();
 			idle = true;
-			deliverTestRunnerFindings({
-				ctx: { cwd: env.tmpDir, isIdle: () => idle },
-				cacheManager: cache,
-				runtime,
-				sessionId: "session-a",
-			});
+			deliver();
+			expect(deliveryOutcomes()).toEqual(["staged", "carried", "eligible"]);
+			expect(consume()?.messages[0]?.content).toContain("FAIL");
 		} finally {
 			env.cleanup();
 		}
@@ -654,6 +675,8 @@ describe("automatic test-runner delivery (#2366)", () => {
 				{ content: "", testRunGeneration: 2 },
 				env.tmpDir,
 			);
+			// Staging the clean result drops generation 1's pending delivery, so
+			// delivery finds nothing left to supersede: one "superseded" record.
 			stageTestRunnerDelivery({
 				cwd: env.tmpDir,
 				sessionId: "session-a",
@@ -667,6 +690,21 @@ describe("automatic test-runner delivery (#2366)", () => {
 				runtime,
 				sessionId: "session-a",
 			});
+			expect(deliveryOutcomes()).toEqual(["staged", "superseded"]);
+			expect(
+				cache.readCache<{ deliveryEligible?: unknown }>(
+					"test-runner-findings",
+					env.tmpDir,
+				)?.data.deliveryEligible,
+			).toBeUndefined();
+			expect(
+				consumeStagedTestRunnerFindings({
+					cwd: env.tmpDir,
+					sessionId: "session-a",
+					cacheManager: cache,
+					runtime,
+				}),
+			).toBeUndefined();
 		} finally {
 			env.cleanup();
 		}
@@ -738,16 +776,39 @@ describe("automatic test-runner delivery (#2366)", () => {
 				owner: secondaryOwner,
 			});
 
+			const marker = () =>
+				cache.readCache<{
+					deliveryEligible?: { sessionId: string };
+				}>("test-runner-findings", env.tmpDir)?.data.deliveryEligible
+					?.sessionId;
+			// A session staged by one activation is not delivered by another.
+			deliverStagedTestRunnerFindings({
+				cwd: env.tmpDir,
+				sessionId: "session-b",
+				ownerId: "activation-primary",
+			});
+			expect(marker()).toBeUndefined();
+
 			deliverStagedTestRunnerFindings({
 				cwd: env.tmpDir,
 				sessionId: "session-a",
 				ownerId: "activation-primary",
 			});
+			expect(marker()).toBe("session-a");
 			deliverStagedTestRunnerFindings({
 				cwd: env.tmpDir,
 				sessionId: "session-b",
 				ownerId: "activation-secondary",
 			});
+			expect(marker()).toBe("session-b");
+			expect(
+				deliveryRecords()
+					.filter((record) => record.outcome === "eligible")
+					.map((record) => [record.sessionId, record.targetCount]),
+			).toEqual([
+				["session-a", 11],
+				["session-b", 22],
+			]);
 		} finally {
 			env.cleanup();
 		}
@@ -784,6 +845,21 @@ describe("automatic test-runner delivery (#2366)", () => {
 				runtime,
 				sessionId: "session-a",
 			});
+			expect(deliveryOutcomes()).toEqual(["staged", "superseded"]);
+			expect(
+				cache.readCache<{ deliveryEligible?: unknown }>(
+					"test-runner-findings",
+					env.tmpDir,
+				)?.data.deliveryEligible,
+			).toBeUndefined();
+			expect(
+				consumeStagedTestRunnerFindings({
+					cwd: env.tmpDir,
+					sessionId: "session-a",
+					cacheManager: cache,
+					runtime,
+				}),
+			).toBeUndefined();
 		} finally {
 			env.cleanup();
 		}
