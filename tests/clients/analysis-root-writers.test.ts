@@ -65,7 +65,7 @@ describe("analysis-root seam", () => {
 		expect(canWriteAnalysisRoot("adopted")).toBe(false);
 	});
 
-	it("refuses symlinked protected roots and keeps linked-worktree vendors out", () => {
+	it("refuses symlinked protected roots and keeps linked-worktree vendors out", (ctx) => {
 		// Recurrence: #4257 F3/F7 must not create a second identity through a
 		// symlink or re-admit vendor content before the linked-worktree guard.
 		const env = setupTestEnvironment("pi-lens-analysis-root-links-");
@@ -76,9 +76,8 @@ describe("analysis-root seam", () => {
 		fs.writeFileSync(path.join(protectedRoot, "package.json"), "{}\n");
 		try {
 			fs.symlinkSync(protectedRoot, link, "dir");
-		} catch {
-			expect(true).toBe(true);
-			return;
+		} catch (error) {
+			ctx.skip(`symlinks are unavailable here: ${String(error)}`);
 		}
 		expect(resolveAnalysisRoot(path.join(link, "a.ts"), env.tmpDir)).toBe(
 			"session",
