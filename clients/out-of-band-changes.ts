@@ -49,23 +49,26 @@ import { createSingleFlight } from "./single-flight.js";
  * `node_modules` directory itself is not one: a tool's cache directory under
  * it would restart the servers.
  */
-const INSTALL_STAMP_FILES = [
+const INSTALL_LOCKFILES = [
 	"package-lock.json",
 	"npm-shrinkwrap.json",
 	"pnpm-lock.yaml",
 	"yarn.lock",
 	"bun.lock",
 	"bun.lockb",
-	"node_modules/.package-lock.json",
-	"node_modules/.modules.yaml",
-	"node_modules/.yarn-state.yml",
-	"node_modules/.yarn-integrity",
 	"uv.lock",
 	"poetry.lock",
 	"Pipfile.lock",
 	"pdm.lock",
 	"go.sum",
 	"Cargo.lock",
+];
+/** The install markers, under `node_modules`. */
+const INSTALL_MARKERS = [
+	".package-lock.json",
+	".modules.yaml",
+	".yarn-state.yml",
+	".yarn-integrity",
 ];
 
 /** Directories one declaration walk reads before it stops (degraded). */
@@ -106,13 +109,29 @@ const fingerprint = (stat: {
 	mtimeMs: number;
 }): string => `${stat.ino}:${stat.size}:${stat.mtimeMs}`;
 
+/**
+ * The root's install stamp: one listing of the root, then a stat of each
+ * lockfile it holds and, when it holds `node_modules`, of each install marker
+ * (a tool call pays a listing and a few stats, not one stat per name). A name
+ * that appears, changes or goes away changes the stamp.
+ */
 async function readInstallStamp(root: string): Promise<string> {
+	let listed: Set<string>;
+	try {
+		listed = new Set(await fsp.readdir(root));
+	} catch {
+		return "-";
+	}
+	const names: string[] = [];
+	for (const name of INSTALL_LOCKFILES) if (listed.has(name)) names.push(name);
+	if (listed.has("node_modules"))
+		for (const marker of INSTALL_MARKERS) names.push(`node_modules/${marker}`);
 	const parts = await Promise.all(
-		INSTALL_STAMP_FILES.map(async (name) => {
+		names.map(async (name) => {
 			try {
-				return fingerprint(await fsp.stat(join(root, name)));
+				return `${name}=${fingerprint(await fsp.stat(join(root, name)))}`;
 			} catch {
-				return "-";
+				return `${name}=-`;
 			}
 		}),
 	);

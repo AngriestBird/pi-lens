@@ -1,5 +1,5 @@
 // flake-shape: real-process-spawn — a clean-tree HEAD move exists only in a real repository that git checks out, rebases or resets; a stubbed git could not rewrite the files the language server holds.
-// flake-shape: in-process-mock — a project lsp.json cannot declare an auxiliary server (its role is reserved and inert), so the catalog lookup adds the auxiliary fake for the repositories registered here; every server is still a real child process on a real stdio wire
+// flake-shape: in-process-mock — a project lsp.json cannot declare an auxiliary server (its role is reserved and inert), so the catalog lookup adds the auxiliary fake for the repositories registered here, and the role lookup (getServerById) answers for it too (#4476); every server is still a real child process on a real stdio wire
 /**
  * #4493: a clean-tree HEAD move left held documents stale on the server.
  *

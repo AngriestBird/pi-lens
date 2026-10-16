@@ -2527,11 +2527,12 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// in listGitHeadDelta, each with its own spawn timeout; both run inside
 	// the HEAD look its hook callers bound with bounded().
 	"clients/opaque-mutation-scan.ts": 12,
-	// #4476: new to the one-hop set. The out-of-band look: the stat of each
-	// install stamp, the declaration walk's directory reads and stats, the
-	// per-root chain, and the restart of a root's primary clients. It runs
-	// only inside the HEAD look, which both hook callers bound with bounded().
-	"clients/out-of-band-changes.ts": 8,
+	// #4476: new to the one-hop set. The out-of-band look: the root listing
+	// and the stat of each install stamp it holds, the declaration walk's
+	// directory reads and stats, the per-root chain, and the restart of a
+	// root's primary clients. It runs only inside the HEAD look, which both
+	// hook callers bound with bounded().
+	"clients/out-of-band-changes.ts": 9,
 	"clients/package-manager.ts": 8,
 	"clients/partial-edit-apply.ts": 2,
 	"clients/performance-report.ts": 8,

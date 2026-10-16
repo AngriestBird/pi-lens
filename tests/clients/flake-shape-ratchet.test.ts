@@ -290,6 +290,14 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"a project lsp.json cannot declare an auxiliary server, so the catalog lookup adds the auxiliary fake; every server is still a real child process",
 	},
+	// 2026-10-16 (#4476): the same fake auxiliary, seen from the role lookup
+	// the registry's dependency restart asks; getServerById knows only the
+	// built-in catalog, so the auxiliary added above answers there too.
+	"in-process-mock:clients/head-move-resync-4493.test.ts::clients/lsp/server": {
+		detector: "in-process-mock",
+		reason:
+			"getServerById reads only the built-in catalog, so the auxiliary fake the config lookup adds is answered there too; the restart then keeps it, and every server is still a real child process",
+	},
 	// 2026-10-15 (#4449): the registry's skip and respawn records go to
 	// logLatency. Its in-process ring drops the fields the test asserts, and
 	// test mode never reaches the file sink, so the captured call is the seam.
