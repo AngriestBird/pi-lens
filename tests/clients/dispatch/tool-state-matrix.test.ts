@@ -65,6 +65,18 @@ vi.mock("../../../clients/safe-spawn.js", async (importOriginal) => ({
 	safeSpawnAsync,
 }));
 
+// The installer's `isSpawnableCommand` is a PATH walk: whether the host has the
+// tool on disk. It decides whether a probe is spawned at all, so left real, a
+// cell's probe state depends on the machine (oxlint is on PATH under `npm`/`npx`
+// and absent under a bare `vitest`; the first 4522 mutation run read `clean`
+// from the oxlint probe cells for that reason). A cell models the tool's
+// presence through the spawn answers alone, so the host-state walk is pinned to
+// "on disk"; `missing` is the ENOENT spawn failure.
+vi.mock("../../../clients/installer/index.js", async (importOriginal) => ({
+	...(await importOriginal<Record<string, unknown>>()),
+	isSpawnableCommand: async () => true,
+}));
+
 const repoRoot = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
 	"../../..",
@@ -297,7 +309,9 @@ function verdictOf(
 		return "no-verdict";
 	}
 	if (dispatched.diagnostics.length > 0) return "findings";
-	return outcome.status === "succeeded" ? "clean" : "no-verdict";
+	// No status fallback: a skipped or failed run that the dispatcher's own rule
+	// does not call "no verdict" is read as clean here, so a weakened rule shows.
+	return "clean";
 }
 
 /**
