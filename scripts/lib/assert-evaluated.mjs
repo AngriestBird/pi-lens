@@ -15,10 +15,10 @@
 // the docs and fails a dedicated step that is NOT continue-on-error.
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { MEASURED_CLEAN_BEHAVIORS } from "./clean-signal.mjs";
 import {
 	elapsedDays,
 	FIRST_PUBLISH_EXPIRY_DAYS,
+	MEASURED_CLEAN_BEHAVIORS,
 	parseRefreshState,
 	parseTable,
 } from "./md-matrix.mjs";

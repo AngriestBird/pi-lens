@@ -136,6 +136,9 @@ The principles' delegation contract applies. pi-lens adds:
   these rules.
 - Every regroup, merged bug fix, second round on one shape, and incident runs
   the retrospective in `docs/pi-lens-retro.md`.
+- Three open issues on one mechanism, in any seam groups, open a consolidation
+  audit across every consumer of that mechanism before the next one is filed
+  (history: `HISTORY.md`, 2026-10-16).
 - The per-PR loop (review, verify, auto-merge on green), round routing, the
   merge gate and the Common mistakes table live in `docs/pi-lens-merge-policy.md`.
 - Read CI with `node scripts/ci-verdict.mjs <pr|sha>` (exact head, all pages).
@@ -352,7 +355,13 @@ file-scoped worklist and receives no project-wide scanner output.
     never widened to the file. A skip that defers to another source's
     evidence answers only for what that evidence sees, and only when that
     source answered: an edit-gated primary sees the edit, so a recorded
-    finding outside it stays, and a silent primary sees nothing.
+    finding outside it stays, and a silent primary sees nothing. A recorded
+    finding is judged only by a run of its own runner: one that would defer
+    to a source whose copy has another identity runs while it holds a
+    recorded finding there, or nothing could retire one it cannot place. A
+    kept entry with no place in a write's bytes is recorded as such
+    (`positionStale`), never inferred later from one line's hash, and a line
+    with no word character owes nothing by its text.
     Enforced by `tests/clients/dispatch/runners/run-outcome-ratchet.test.ts`,
     `tests/clients/dispatch/runners/parsed-nothing-sweep.test.ts` and
     `tests/clients/delivery-surface-ratchet.test.ts` (partial: no detector
@@ -692,6 +701,13 @@ file-scoped worklist and receives no project-wide scanner output.
     for a join, list the writers that can store the row between the join and
     the next scan, and show the finding survives each.
 
+71. **One signal wired consumer by consumer:** a detector or notifier added on
+    one consumer's seam, while other consumers derive state from the same
+    files. Each detector then picks its own subset, and two tools disagree
+    about one file. Screen: for a new detector, notifier or staleness marker,
+    list every consumer that holds state derived from the same content, and
+    show each one receives the change or record why not.
+
 **Expired successor hand-off:** an expired successor marker may authorize
     its named interrupted successor only for the fixed retention window in
     `clients/session-lifecycle.ts`; the shared slot retires at that boundary
@@ -827,6 +843,14 @@ file-scoped worklist and receives no project-wide scanner output.
   each measured floor and when a matrix cell classified at HEAD turned
   `unknown` without a HEAD `firstMissed` stamp at least
   `FIRST_PUBLISH_EXPIRY_DAYS` old (`tests/config/nightly-evaluated-floors.test.ts`).
+  Every other
+  `continue-on-error` producer either calls the same helper (`--count
+  <producer>=<n> --floor <m>` from a workflow step; `--min-pass`, the
+  complexity file count and the shuffle census's missing starts already do) or
+  carries a `# No floor (<issue>): <reason>` header above its job; a floor comes
+  from a run recorded in `tests/fixtures/nightly-floors/measurements.json`.
+  The helper must stay importable without `dist/` (the refresh-PR job runs it
+  on a fresh checkout).
 - LSP service generations, workspace-sweep holds, and repair latches use
   versioned process singletons. Reset tears down the old generation before a
   replacement can spawn. Idle eviction is lease-guarded and clears ownership

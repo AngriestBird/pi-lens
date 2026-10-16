@@ -171,3 +171,6 @@ export function refreshCapabilityMatrix(
 
 /** Whole UTC days since a real YYYY-MM-DD stamp; null for an invalid stamp. */
 export function elapsedDays(from: unknown, to: string): number | null;
+
+/** The `clean-behavior` values that are a measurement of anything (#3401). */
+export const MEASURED_CLEAN_BEHAVIORS: Set<string>;
