@@ -263,7 +263,13 @@ describe("smoke-tools created-module witness (#4320/#4346)", () => {
 			(fixture as { createdModuleWitness?: unknown }).createdModuleWitness,
 	);
 
-	async function witness(reports: (call: number, name: string) => boolean) {
+	// A short deadline keeps a red case fast; the phase's real one is 20 s.
+	const POLL = { deadlineMs: 400, intervalMs: 2 };
+
+	async function witness(
+		reports: (call: number, name: string) => boolean,
+		seen: (name: string, moduleExists: boolean) => void = () => undefined,
+	) {
 		const workspace = fs.mkdtempSync(
 			path.join(os.tmpdir(), "pi-lens-created-witness-"),
 		);
@@ -273,6 +279,10 @@ describe("smoke-tools created-module witness (#4320/#4346)", () => {
 			const source = fs.readFileSync(params.path, "utf8");
 			const name = /import (\w+)/.exec(source)?.[1] ?? "";
 			calls.push(name);
+			seen(
+				name,
+				fs.existsSync(path.join(path.dirname(params.path), `${name}.py`)),
+			);
 			const missing = reports(
 				calls.filter((entry) => entry === name).length,
 				name,
@@ -288,11 +298,12 @@ describe("smoke-tools created-module witness (#4320/#4346)", () => {
 			workspace,
 			execute,
 			getLSPService: () => makeLspServiceDouble({ touchFile }),
+			...POLL,
 		});
 		return { rows, touchFile, workspace };
 	}
 
-	it("passes both cases when the missing import clears on the next call", async () => {
+	it("passes both cases when the missing import clears on the first call after creation", async () => {
 		const { rows, touchFile } = await witness((call) => call === 1);
 		expect(rows.map((row) => row.state)).toEqual(["pass", "pass"]);
 		// The pi write case syncs the module through the service; the outside
@@ -350,11 +361,65 @@ describe("smoke-tools created-module witness (#4320/#4346)", () => {
 				createLspDiagnosticsTool: () => ({ execute }),
 				adoptProjectTrustFromContext: vi.fn(),
 				getLSPService: () => makeLspServiceDouble(),
+				createdModulePoll: { deadlineMs: 30, intervalMs: 2 },
 			},
 		});
 
 		expect(output.join("\n")).toContain("LSP created-module witness");
 		expect(failures).toBe(2);
+	});
+
+	// Recurrence: the one-call witness red-flaked locally (2 of 5 pyright runs
+	// on 2026-10-16: the outside case cleared on the second call, 2.4 s after
+	// creation). A verdict that changes late must pass; a verdict
+	// that never changes still reds (the next test).
+	it("passes a case whose missing import clears only on a later poll", async () => {
+		const { rows } = await witness((call) => call < 4);
+		expect(rows.map((row) => row.state)).toEqual(["pass", "pass"]);
+		// call 1 is the ready gate; creation follows; the post-creation polls are
+		// calls 2 and 3 (still stale) and 4 (cleared): its third poll
+		expect(rows[0].detail).toContain("cleared on call 3");
+	});
+
+	it("reds a case that is still stale at the deadline, naming how many calls it polled", async () => {
+		const { rows } = await witness(() => true);
+		for (const row of rows) {
+			const polled = Number(
+				/after (\d+) calls over/.exec(String(row.detail))?.[1],
+			);
+			// more than one call: the verdict is polled to the deadline, not read once
+			expect(polled).toBeGreaterThan(1);
+		}
+	});
+
+	// Recurrence: a server that has not yet answered for the importer (cold
+	// index) read as "not reported", so the witness red-flaked with a
+	// precondition failure on pre-fix trees (2 of 3 pyright runs). The module
+	// must not exist until the server has reported the missing import.
+	it("creates the module only after the server reports the importer's missing import", async () => {
+		const moduleExistedAt: boolean[] = [];
+		const { rows } = await witness(
+			(call) => call === 3,
+			(_name, moduleExists) => moduleExistedAt.push(moduleExists),
+		);
+		// calls 1 and 2 are not-yet-ready answers and call 3 reports the missing
+		// import: the module is absent for all three, and exists for call 4, the
+		// first poll after creation
+		expect(moduleExistedAt.slice(0, 4)).toEqual([false, false, false, true]);
+		expect(rows.map((row) => row.state)).toEqual(["pass", "pass"]);
+	});
+
+	it("never creates the module when the server never reports the missing import", async () => {
+		const names = new Set<string>();
+		const { rows, touchFile, workspace } = await witness(
+			() => false,
+			(name) => names.add(name),
+		);
+		expect(rows.map((row) => row.state)).toEqual(["fail", "fail"]);
+		expect(touchFile).not.toHaveBeenCalled();
+		expect(names.size).toBe(2);
+		for (const name of names)
+			expect(fs.existsSync(path.join(workspace, `${name}.py`))).toBe(false);
 	});
 
 	it("reds a case whose missing import was never reported first", async () => {

@@ -2394,19 +2394,53 @@ export function report(rows, title, { failOnSkipOnly = false } = {}) {
 }
 
 /**
- * Created-module witness (recurrence: #4320, where a module created after the
- * language server started stayed unresolved in its importer for the server's
- * life; #4346 found the same for a module created outside pi-lens). Once the
- * fixture's server is up, a new module is created twice: through pi-lens's
- * write path (written, then synced by the LSP service as the post-write
- * pipeline does) and from outside pi-lens (copied in, no tool call). Each
- * importer is diagnosed alone before and after; the missing import must be
- * reported first (else the row proves nothing) and must clear on the next
- * call. One row per case, reported apart from the clean gate's census.
+ * Born-after-start phase deadline and cadence (#4521). A language server
+ * answers a file that did not exist at start on its own schedule (index
+ * latency, a debounced push), so the phase polls to a deadline instead of
+ * sleeping a fixed time or trusting one call: a single call red-flaked the
+ * witness (2 of 5 local pyright runs) while the same defect never clears at
+ * all, which only a deadline tells apart.
+ */
+export const BORN_AFTER_START_DEADLINE_MS = 20_000;
+export const BORN_AFTER_START_POLL_MS = 500;
+
+/** Call `probe` until it returns true or `deadlineMs` passes. */
+async function pollUntil(probe, { deadlineMs, intervalMs }) {
+	const startedAt = Date.now();
+	let polls = 0;
+	for (;;) {
+		polls += 1;
+		if (await probe()) {
+			return { ok: true, polls, elapsedMs: Date.now() - startedAt };
+		}
+		if (Date.now() - startedAt + intervalMs > deadlineMs) {
+			return { ok: false, polls, elapsedMs: Date.now() - startedAt };
+		}
+		await sleep(intervalMs);
+	}
+}
+
+/**
+ * Born-after-start phase for a module (recurrence: #4320, where a module
+ * created after the language server started stayed unresolved in its importer
+ * for the server's life; #4346 found the same for a module created outside
+ * pi-lens; #4521 made the phase poll). Once the fixture's server is up, the
+ * importer is written and polled until the server reports its missing import
+ * (the server is ready for this file, else the row proves nothing). Only then
+ * is the module created, twice: through pi-lens's write path (written, then
+ * synced by the LSP service as the post-write pipeline does) and from outside
+ * pi-lens (copied in, no tool call). The missing import must clear within the
+ * deadline. One row per case, reported apart from the clean gate's census.
  */
 export async function runCreatedModuleWitness(
 	fx,
-	{ workspace, execute, getLSPService },
+	{
+		workspace,
+		execute,
+		getLSPService,
+		deadlineMs = BORN_AFTER_START_DEADLINE_MS,
+		intervalMs = BORN_AFTER_START_POLL_MS,
+	},
 ) {
 	const witness = fx.createdModuleWitness;
 	const tag = `${process.pid}_${Date.now().toString(36)}`;
@@ -2452,26 +2486,33 @@ export async function runCreatedModuleWitness(
 		const runner = `${fx.serverHint} created (${created.label})`;
 		try {
 			fs.writeFileSync(importer, witness.importerText(name));
-			if (!witness.reportsMissing(await diagnose(importer), name)) {
+			const ready = await pollUntil(
+				async () => witness.reportsMissing(await diagnose(importer), name),
+				{ deadlineMs, intervalMs },
+			);
+			if (!ready.ok) {
 				rows.push({
 					lang: fx.lang,
 					runner,
 					state: "fail",
-					detail: `precondition: the missing import of ${name} was not reported before it was created`,
+					detail: `precondition: the missing import of ${name} was not reported in ${ready.polls} calls over ${ready.elapsedMs} ms before it was created`,
 					diags: 0,
 				});
 				continue;
 			}
 			await created.create(modulePath);
-			const stale = witness.reportsMissing(await diagnose(importer), name);
+			const cleared = await pollUntil(
+				async () => !witness.reportsMissing(await diagnose(importer), name),
+				{ deadlineMs, intervalMs },
+			);
 			rows.push({
 				lang: fx.lang,
 				runner,
-				state: stale ? "fail" : "pass",
-				detail: stale
-					? `the importer still reports ${name} missing after it was created (#4320/#4346)`
-					: "the importer's missing import cleared on the next call",
-				diags: stale ? 1 : 0,
+				state: cleared.ok ? "pass" : "fail",
+				detail: cleared.ok
+					? `the importer's missing import cleared on call ${cleared.polls} (${cleared.elapsedMs} ms after the module was created)`
+					: `the importer still reports ${name} missing after ${cleared.polls} calls over ${cleared.elapsedMs} ms (#4320/#4346)`,
+				diags: cleared.ok ? 0 : 1,
 			});
 		} catch (err) {
 			rows.push({
@@ -2650,6 +2691,7 @@ export async function runLspGate({ langs = [], install, verbose, deps } = {}) {
 						workspace,
 						execute: (...args) => createLspDiagnosticsTool().execute(...args),
 						getLSPService,
+						...deps?.createdModulePoll,
 					})),
 				);
 			}

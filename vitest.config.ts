@@ -369,6 +369,11 @@ const lspSpawnHeavyInclude = [
 	"tests/mcp/analyze-cli.test.ts",
 	// #4300: the MCP witness crosses Lean's real initialize handshake.
 	"tests/mcp/server.smoke.test.ts",
+	// #4521: the nightly born-after-start phase run through the production
+	// lsp_diagnostics handler and LSPService over real stdio fake-server
+	// children (two project custom servers); waits on real handshakes and
+	// polls to a deadline like #4320's and #4346's.
+	"tests/scripts/smoke-tools-born-after-start.test.ts",
 	// #4403: the LSP scripts' touch reading over the production
 	// LSPService, with fake-server children for the official Docker server and
 	// typos; waits on real handshakes like its lane siblings.
