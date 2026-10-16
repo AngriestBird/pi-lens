@@ -8,8 +8,7 @@
  * - CLAUDE.md        — Claude Code project context
  * - AGENTS.md        — Generic agent context
  *
- * These are surfaced in the system prompt so the agent knows
- * to read them when relevant.
+ * session_start logs the count and the project snapshot caches the result.
  */
 
 import * as fs from "node:fs";
