@@ -1,4 +1,5 @@
 // flake-shape: never-settling-wait — the interrupt witness must keep a real child alive until the CLI sends SIGINT.
+import { execFileSync } from "node:child_process";
 import { appendFileSync, writeFileSync } from "node:fs";
 import { expect, it } from "vitest";
 
@@ -34,16 +35,21 @@ it("mutation fixture can hold an interrupting run", async () => {
 		// #4510: vitest killed from outside after it printed a passing summary.
 		console.log("Tests  1 passed (1)");
 		await new Promise((resolve) => setTimeout(resolve, 1500));
-		process.kill(process.ppid, "SIGKILL");
-		await new Promise(() => {});
+		// The kill guard refuses process.kill on a pid this file does not own.
+		execFileSync("kill", ["-KILL", String(process.ppid)]);
+		await new Promise((resolve) => setTimeout(resolve, 30_000));
 	}
 	if (!process.env.PI_LENS_MUTATION_RUN) {
 		expect(true).toBe(true);
 		return;
 	}
 	// #4510: lets the CLI test check that this worker dies with the run.
-	if (process.env.PI_LENS_MUTATION_PIDFILE)
+	if (process.env.PI_LENS_MUTATION_PIDFILE) {
 		writeFileSync(process.env.PI_LENS_MUTATION_PIDFILE, String(process.pid));
+		// Bounded: a worker the run failed to kill still ends by itself.
+		await new Promise((resolve) => setTimeout(resolve, 30_000));
+		return;
+	}
 	await new Promise(() => {});
 });
 

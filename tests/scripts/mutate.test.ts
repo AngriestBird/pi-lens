@@ -537,12 +537,6 @@ it.each(["SIGINT", "SIGTERM", "SIGHUP"] as const)(
 			expect(digest()).toBe(before);
 		} finally {
 			child.kill("SIGKILL");
-			if (worker > 0)
-				try {
-					process.kill(worker, "SIGKILL");
-				} catch {
-					// already gone
-				}
 			rmSync(dir, { recursive: true, force: true });
 		}
 	},
