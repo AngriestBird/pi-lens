@@ -485,8 +485,10 @@ export function refuseUntrustedLspExecution(
 
 	if (request.kind === "project-code-server")
 		recordUntrustedLspExecution(request, trust);
+	// #4515: a refused project-local candidate is skipped, not terminal: the
+	// resolver still owes the managed and global candidates their turn.
 	throw new SpawnFailureError(
-		"spawn-failed",
+		request.kind === "project-local-binary" ? "trust-refused" : "spawn-failed",
 		`LSP ${request.kind === "project-code-server" ? "project-code server" : "project-local binary"} refused: project trust is ${trust}`,
 		new Error(`project trust is ${trust}`),
 	);

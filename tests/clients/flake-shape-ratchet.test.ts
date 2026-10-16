@@ -325,6 +325,15 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			reason:
 				"the native addon's load is the host boundary; its sync loader is the only seam to make it fail",
 		},
+	// 2026-10-16 (#4515): the fixture proves a trust-refused project-local
+	// candidate no longer ends the launch. The refusal, the installer and the
+	// candidate loop are real; only a store binary's launch is doubled.
+	"in-process-mock:clients/lsp/managed-fallback-after-trust-refusal-4515.test.ts::clients/lsp/launch":
+		{
+			detector: "in-process-mock",
+			reason:
+				"spawning the managed language server is the process boundary; the wrapper delegates every other command, the refused project-local candidate included, to the real launchLSP",
+		},
 	// 2026-10-15 (#4484): the host witness keeps every pi-lens module on the
 	// write-to-turn-end chain real; only the language-server process behind the
 	// LSP capability adapter is stood in for, answering from the bytes it gets.
@@ -719,7 +728,7 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 	"real-process-spawn:scripts/ci-shuffle-changed-tests-spawn.test.ts": {
 		detector: "real-process-spawn",
 		reason:
-			"the job's exit code is the contract; an injected exec restates the flags the script builds instead of proving real vitest reorders and reds a file that shares state",
+			"the job's exit code is the contract; an injected exec restates the flags the script builds instead of proving real vitest reorders and reds a file that shares state. Also one throwaway-repo case (#4456): the default diff and added lists are real `git diff --diff-filter=A` calls whose add/modify/rename meaning is git's, so a double would restate it",
 	},
 	// 2026-10-07 (#4072 review F2): the executable CLI's exit status is the
 	// contract; an in-process main() call cannot prove the entry-point boundary.

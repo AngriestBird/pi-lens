@@ -776,10 +776,10 @@ describe("targeted advisory workflow contract (#3215)", () => {
 		);
 		// A red selector must not skip it, and a cancelled run must.
 		expect(step.if).toBe("${{ !cancelled() }}");
-		// The script's own budget sits under the step cap, the step cap under
-		// the job's (15 min).
+		// The script's own budget sits a minute under the step cap (the kill and
+		// the summary, #4456), the step cap under the job's (15 min).
 		const stepCap = step["timeout-minutes"] ?? Infinity;
-		expect(stepCap * 60_000).toBeGreaterThan(BUDGET_MS);
+		expect(stepCap * 60_000).toBeGreaterThanOrEqual(BUDGET_MS + 60_000);
 		expect(stepCap).toBeLessThan(job?.["timeout-minutes"] ?? 0);
 		// pull_request, never pull_request_target: the step runs the PR's code.
 		expect(Object.keys(workflow.on)).toContain("pull_request");

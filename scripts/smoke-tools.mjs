@@ -57,6 +57,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { gitExecFileSync } from "./lib/git-fixture-env.mjs";
 import {
+	adoptFixtureProjectTrust,
 	bootstrapFixtureWorkspace,
 	withScratchHome,
 } from "./lib/lsp-fixture-workspace.mjs";
@@ -2521,15 +2522,14 @@ export async function runLspGate({ langs = [], install, verbose, deps } = {}) {
 		));
 		({ initLSPConfig } = await import(pathToFileURL(configEntry).href));
 	}
-	const trustEntry = path.join(repoRoot, "dist", "clients", "project-trust.js");
-	const { adoptProjectTrustFromContext } = deps?.adoptProjectTrustFromContext
-		? deps
-		: await import(pathToFileURL(trustEntry).href);
 	// The nightly harness is a standalone host, not pi itself. Its copied
 	// fixtures intentionally represent a trusted project, so the real
 	// lsp_diagnostics path must consume the same host trust seam as the
 	// handshake layer before resolving project-local server configuration.
-	adoptProjectTrustFromContext({ isProjectTrusted: () => true });
+	await adoptFixtureProjectTrust({
+		repoRoot,
+		adopt: deps?.adoptProjectTrustFromContext,
+	});
 	let ensureTool;
 	let getInstallAttempt;
 	if (deps) {
@@ -2878,7 +2878,7 @@ export async function runLensFull({ langs = [], install, verbose, deps } = {}) {
  * lsp runner uses) per fixture, then asserts the handshake via
  * `getDiagnosticsHealth` (serverCountReady > 0). Returns the failure count.
  */
-async function runLspHandshake({ langs, install, verbose }) {
+async function runLspHandshake({ langs, install, verbose, minPass = null }) {
 	const lspEntry = path.join(repoRoot, "dist", "clients", "lsp", "index.js");
 	if (!fs.existsSync(lspEntry)) {
 		console.error(
@@ -2887,16 +2887,12 @@ async function runLspHandshake({ langs, install, verbose }) {
 		process.exit(2);
 	}
 	const { getLSPService } = await import(pathToFileURL(lspEntry).href);
-	const trustEntry = path.join(repoRoot, "dist", "clients", "project-trust.js");
-	const { adoptProjectTrustFromContext } = await import(
-		pathToFileURL(trustEntry).href
-	);
 	// The nightly harness is a standalone host, not pi itself. Its copied
 	// fixtures intentionally represent a trusted project so rows that exercise
 	// project-local executables (custom servers and TS7's local `tsc`) measure
 	// their production behavior. This goes through the same host accessor seam
 	// pi uses; it does not add a pi-lens trust policy or bypass the LSP gate.
-	adoptProjectTrustFromContext({ isProjectTrusted: () => true });
+	await adoptFixtureProjectTrust({ repoRoot });
 	const configEntry = path.join(
 		repoRoot,
 		"dist",
@@ -3297,7 +3293,13 @@ async function runLspHandshake({ langs, install, verbose }) {
 			),
 		);
 	}
-	return report(rows, "LSP handshake (install → spawn → initialize)");
+	const failures = report(rows, "LSP handshake (install → spawn → initialize)");
+	// #4514: an unavailable server reports a warning, never a failure, so a run
+	// where every install failed would exit 0 having proved nothing. The same
+	// `--min-pass` floor the tier-1 parser lane carries (parser-smoke.yml).
+	const floorBreach = passFloorBreach(rows, minPass);
+	if (floorBreach) console.error(floorBreach);
+	return failures + (floorBreach ? 1 : 0);
 }
 
 /**
@@ -3587,16 +3589,7 @@ export async function runResolutionSmoke({ verbose, deps } = {}) {
 		// #4300/#4301: like the handshake and diagnostics layers, this harness is a
 		// standalone host, not pi, and its fixtures represent a trusted project.
 		// Without this the #4268 gate refuses every project-local resolver rung.
-		const trustEntry = path.join(
-			repoRoot,
-			"dist",
-			"clients",
-			"project-trust.js",
-		);
-		const { adoptProjectTrustFromContext } = await import(
-			pathToFileURL(trustEntry).href
-		);
-		adoptProjectTrustFromContext({ isProjectTrusted: () => true });
+		await adoptFixtureProjectTrust({ repoRoot });
 		const formattersEntry = path.join(
 			repoRoot,
 			"dist",
@@ -3799,7 +3792,7 @@ async function main() {
 
 	if (lsp) {
 		process.exit(
-			(await runLspHandshake({ langs, install, verbose })) > 0 ? 1 : 0,
+			(await runLspHandshake({ langs, install, verbose, minPass })) > 0 ? 1 : 0,
 		);
 	}
 

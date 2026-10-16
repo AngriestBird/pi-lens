@@ -718,6 +718,7 @@ export class SgRunner {
 			case "cwd-unresolvable":
 			case "permission-denied":
 			case "spawn-failed":
+			case "trust-refused":
 			case undefined:
 				return result.error ? "cli-failure" : undefined;
 		}

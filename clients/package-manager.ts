@@ -626,6 +626,25 @@ export function isProjectLocalBinPath(
 	return false;
 }
 
+/**
+ * #4515: whether a bare command spawned with this process's PATH can resolve
+ * into the project at `cwd`. An entry counts when it is a project-local bin dir
+ * (the classifier above), lies at or under `cwd`, or is relative: a relative
+ * entry follows each spawn's cwd, and on POSIX an empty entry is the cwd.
+ */
+export function commandSearchReachesProject(cwd: string): boolean {
+	const posix = process.platform !== "win32";
+	return (process.env.PATH ?? "")
+		.split(path.delimiter)
+		.some((entry) =>
+			entry === ""
+				? posix
+				: !path.isAbsolute(entry) ||
+					isUnderDir(entry, cwd) ||
+					isProjectLocalBinPath(entry, cwd),
+		);
+}
+
 /** Tuning for {@link findLocalBinUpwards}. */
 export interface LocalBinWalkOptions {
 	/**

@@ -31,7 +31,10 @@ export function resolveDiffRange(input?: string): string[] | null;
 
 export function changesProductionFile(file: string): boolean;
 
-export function changedFiles(range: string): string[] | null;
+export function changedFiles(
+	range: string,
+	options?: { diffFilter?: string; cwd?: string; env?: NodeJS.ProcessEnv },
+): string[] | null;
 
 /** Uncommitted tracked edits plus untracked, non-ignored files (#4047). */
 export function worktreeChangedFiles(): string[] | null;
