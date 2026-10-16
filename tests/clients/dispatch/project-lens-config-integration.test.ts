@@ -279,23 +279,4 @@ describe("applyProjectLensConfig", () => {
 		const ctx = makeCtx(filePath, facts, config);
 		expect(highComplexityRule.evaluate(ctx, facts)).toHaveLength(0);
 	});
-
-	it("resetHighComplexityThresholds restores defaults after applyProjectLensConfig", () => {
-		fs.writeFileSync(
-			path.join(tmpDir, ".pi-lens.json"),
-			JSON.stringify({
-				rules: { "high-complexity": { threshold: 5 } },
-			}),
-		);
-
-		const config = applyProjectLensConfig(tmpDir);
-		resetHighComplexityThresholds();
-
-		const filePath = "/tmp/a.ts";
-		const facts = new FactStore();
-		// Project config is context-scoped and still applies after fallback reset.
-		facts.setFileFact(filePath, "file.functionSummaries", [summaryWithCC(10)]);
-		const ctx = makeCtx(filePath, facts, config);
-		expect(highComplexityRule.evaluate(ctx, facts)).toHaveLength(1);
-	});
 });

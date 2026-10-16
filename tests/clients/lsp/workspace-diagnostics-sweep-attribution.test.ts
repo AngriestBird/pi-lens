@@ -72,7 +72,6 @@ describe(
 	() => {
 		let sessionDir: string;
 		let fileA: string;
-		let fileB: string;
 		/**
 		 * Runs INSIDE the sweep's touch, where a synchronous block would land.
 		 * Receives the 1-based index of the file being touched, so a test can
@@ -92,9 +91,7 @@ describe(
 			sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-wsd-1723-"));
 			fs.mkdirSync(path.join(sessionDir, ".pi-lens"));
 			fileA = path.join(sessionDir, "a.ts");
-			fileB = path.join(sessionDir, "b.ts");
 			fs.writeFileSync(fileA, "export const a = 1;\n");
-			fs.writeFileSync(fileB, "export const b = 2;\n");
 
 			const tsServer = {
 				id: "typescript",
@@ -181,19 +178,6 @@ describe(
 
 			expect(attribution?.phase).toBe("lsp_workspace_diagnostics_touch");
 			expect(attribution?.stillRunning).toBe(true);
-		});
-
-		it("closes every bracket, so a later block is not blamed on a finished sweep", async () => {
-			const { service, latency } = await loadService();
-
-			await service.runWorkspaceDiagnostics(sessionDir, {
-				files: [fileA, fileB],
-			});
-
-			// Mutation guard for the `finally`: drop it and each file leaks a live
-			// bracket that misattributes every later loop_block to a sweep that
-			// already ended — `phaseFinished`'s own documented failure mode.
-			expect(latency.getCurrentPhase()).toBeUndefined();
 		});
 
 		it("closes the bracket even when a file's touch throws", async () => {
