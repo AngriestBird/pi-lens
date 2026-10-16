@@ -830,6 +830,88 @@ describe("handleNotifyOpen", () => {
 		});
 	});
 
+	// #2066 round 2: `scanSentContent` has a native `indexOf` fast path for
+	// documents with no `\r` and a per-character loop for the rest. Recurrence
+	// this guards: the fast path drifting from the loop's conventions (a `\r`
+	// slipping into the LF-only branch, an off-by-one on where the last line
+	// starts) — the wrong `contentLineCount` and the wrong didChange range end
+	// that follow are silent. The reference below is independent of the
+	// implementation: a regex split, which is exactly what the pre-#2066 code
+	// ran. Edits splice at random offsets, so a CR and an LF are routinely
+	// separated and rejoined into a CRLF across a step.
+	it("#2066: the sent line count and last-line position equal an independent split over random edit sequences", async () => {
+		let seed = 0x2066;
+		const random = (): number => {
+			// mulberry32: deterministic, so a red names a reproducible document.
+			seed = (seed + 0x6d2b79f5) | 0;
+			let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+			t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+			return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+		};
+		const pick = <T>(items: readonly T[]): T =>
+			items[Math.floor(random() * items.length)];
+		const POOLS: readonly (readonly string[])[] = [
+			["ab", "é", "x y", "\n"], // LF-only
+			["ab", "🙂", "\r\n"], // CRLF-only
+			["ab", "\r", "c"], // lone CR
+			["a", "\n", "\r", "\r\n", "🙂", ""], // mixed
+		];
+		const randomText = (pool: readonly string[]): string => {
+			const pieces = Math.floor(random() * 12);
+			let text = "";
+			for (let i = 0; i < pieces; i++) text += pick(pool);
+			return text;
+		};
+
+		let documentsChecked = 0;
+		let fastPathDocuments = 0;
+		let loopDocuments = 0;
+		for (let sequence = 0; sequence < 60; sequence++) {
+			const pool = POOLS[sequence % POOLS.length];
+			const state = createMockState({ syncKind: 2 });
+			let doc = sequence % 5 === 0 ? "" : randomText(pool);
+			for (let step = 0; step < 25; step++) {
+				logLatencyMock.mockClear();
+				await handleNotifyChange(state, TEST_FILE, doc);
+
+				const lines = doc.split(/\r\n|\r|\n/);
+				const lastLineLength = lines[lines.length - 1].length;
+				const lfCount = doc.split("\n").length - 1;
+				const sendCall = logLatencyMock.mock.calls.find(
+					(c) => c[0]?.phase === "lsp_document_send",
+				);
+				const label = JSON.stringify(doc);
+				expect(sendCall?.[0].metadata.contentLineCount, label).toBe(
+					lfCount + 1,
+				);
+				expect(
+					state.documentContentHashes.get(TEST_KEY)?.lastLine,
+					label,
+				).toEqual({
+					index: lines.length - 1,
+					start: doc.length - lastLineLength,
+				});
+				documentsChecked++;
+				if (doc.includes("\r")) loopDocuments++;
+				else fastPathDocuments++;
+
+				// The next document: splice a random span out and random text in
+				// (deletes, inserts, and replacements across line boundaries).
+				const from = Math.floor(random() * (doc.length + 1));
+				const to = Math.min(
+					doc.length,
+					from + (random() < 0.5 ? 0 : Math.floor(random() * 6)),
+				);
+				doc = `${doc.slice(0, from)}${randomText(random() < 0.15 ? pick(POOLS) : pool)}${doc.slice(to)}`;
+			}
+		}
+		// Positive control: both branches were driven, so a scan that always took
+		// one of them could not satisfy this test by construction.
+		expect(documentsChecked).toBe(60 * 25);
+		expect(fastPathDocuments).toBeGreaterThan(150);
+		expect(loopDocuments).toBeGreaterThan(150);
+	});
+
 	it("detaches the classic TypeScript projectInfo probe after didOpen", async () => {
 		const state = createMockState({
 			serverId: "typescript",
