@@ -109,6 +109,15 @@ The seam:
       discharges them; an unauthored run delivers nothing, so it discharges
       none. FALSE withheld a blocker first written while its runner had no
       verdict on every later run.
+  - Round 4 environment: `MayUnalign` lets a write have no line alignment (an
+    edit past the edit cap, a record without an anchor, bytes past the size or
+    line caps). It matters only when lines moved (`shift`).
+  - Round 4 (#4484, pinned TRUE; PR #4491's round-4 table).
+    - `UnalignedIdentity`: with no alignment a recorded blocker matches its
+      identity anywhere. A withheld `"a"` stays, and a withheld `"p"` may stand
+      in for a fixed `"a"`: a false block, the fail-closed cost. FALSE is the
+      round-3 code. It read the stale line number, found nothing, and retired
+      a withheld `"a"` still in the bytes.
 
 ## Invariants
 
@@ -127,7 +136,11 @@ The seam:
   or misreads. With `MayFail` and `MaySkip` FALSE nothing is owed, so it is
   round 2's `GateSound`.
 - `RecordedReported`: the record holds only findings some run delivered (the
-  ghost `reported`), so no observation stands in for a recorded blocker.
+  ghost `reported`), so no observation stands in for a recorded blocker. The
+  one exception is a finding a write with no alignment kept by identity (the
+  ghost `held`), which is the fail-closed cost.
+- `UnalignedKept`: a write with no alignment never retires a recorded blocker
+  its bytes still hold (the ghost `lost`).
 - `RecordedKept`: every blocker a run delivered stays in the record until a
   conclusive observation from its own source shows it gone (the ghost
   `owed`). It is the `GateSound` of a run that can fail, or of a value that
@@ -164,6 +177,8 @@ States are as TLC reported them with `-workers 1` (generated / distinct).
 | `MutSkipVerdict` | violated `GateSound` | 13 / 6 | The round-2 code (`SkipNoVerdict` FALSE). A skip past a size or line cap clears the record while the blocker is in the bytes (review F2, probes P1 to P3). |
 | `CarryOwed` | pass | 20394 / 1602 | The round-3 fix (R4). A blocker first written while its range-gated runner fails or skips is delivered and recorded by the next authored verdict, an unauthored write between them included. |
 | `MutOwedRanges` | violated `GateSound` | 65 / 26 | The round-2 code (`OwedRanges` FALSE). Every later run withholds that blocker, so it is never recorded (residual a). |
+| `CarryUnaligned` | pass | 132079 / 4364 | The round-4 fix. Across three writes that may each lack an alignment, an unauthored write, a turn end and a line shift, no recorded blocker the bytes still hold is retired. |
+| `MutUnaligned` | violated `UnalignedKept` | 93 / 19 | The round-3 code (`UnalignedIdentity` FALSE). A write with no alignment after a line moved retires a withheld blocker still in the bytes (verify probes P11c, P11d, P18). |
 
 The `MutDeltaClear` trace is write, ignore, write:
 
@@ -198,6 +213,10 @@ Each switch has a config that flips when it is turned:
 - `OwedRanges`: `CarryOwed` to `MutOwedRanges`. The discharge rule for an
   unauthored run is checked by hand: with `OpaqueStep` setting `owe' = {}` on
   a verdict, `CarryOwed` is red on `GateSound` (134 / 33).
+- `UnalignedIdentity`: `CarryUnaligned` to `MutUnaligned`. `CarryUnaligned`
+  with the switch FALSE is red on `GateSound` (285 / 60). With
+  `RecordedReported` read strictly (no `held`), `CarryUnaligned` is red on it
+  (288 / 62): a twin stand-in is the price of failing closed.
 
 ## Residuals TLC shows
 
@@ -228,9 +247,11 @@ observes only outside the edit, on lines no run owes, is still never recorded
   content hash and read time (`retireUnobservedRunnerBlockers`).
 - Line alignment. The model's findings keep their atoms across writes, so a
   recorded blocker's position is exact. The code aligns lines by content hash
-  (`alignLines`, bounded by `MAX_ALIGNMENT_EDITS`); a rewrite past that bound
-  falls back to the recorded line number, counted as
-  `blocker-position-unaligned`.
+  (`alignLines`, bounded by `MAX_ALIGNMENT_EDITS`). The model reduces that to
+  one choice per write, `MayUnalign`: with no alignment the code matches by
+  identity alone, counted as `blocker-position-unaligned`, and owed lines
+  widen to the whole file. The model's owed set is per finding, so that
+  widening is a superset it does not need to show.
 - Per-runner owed lines. The model has one fast runner group; the code keeps
   owed lines per runner and widens only that runner's range.
 

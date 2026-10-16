@@ -93,6 +93,19 @@ table, rules R1 to R4). Each fix switch is pinned TRUE:
    they join the next run's range (`DispatchContext.owedRanges`). FALSE is
    the round-2 code: the next run withheld a blocker first written then.
 
+The round-4 environment and fix switches (#4484 round 4; PR #4491's round-4
+state table). The fix switch is pinned TRUE:
+ - MayUnalign (environment): a write may have no line alignment to the
+   bytes the record is about (an edit past the 1000-edit cap, a record with
+   no anchor, bytes past the 2 MiB or 100000-line caps). It matters only
+   when lines moved (`shift`): otherwise a recorded line is still right;
+ - UnalignedIdentity (round 4): with no alignment a recorded blocker matches
+   its identity anywhere, so a withheld "a" stays and a withheld "p" may
+   stand in for a fixed "a" (a false block; the record keeps the observed
+   copy). FALSE is the round-3 code: it read the recorded line number as it
+   was, found nothing there, and retired a withheld "a" still in the bytes
+   (verify probes P11c, P11d, P18).
+
 Invariants:
  - GateHonest: the commit gate is open only when no completed observation of
    the current bytes holds a blocker;
@@ -109,7 +122,11 @@ Invariants:
    stronger than GateHonest, it also catches a blocker a runner withholds or
    misreads. With MayFail and MaySkip FALSE nothing is ever owed;
  - RecordedReported: the record holds only findings some run delivered (the
-   ghost `reported`): no observation stands in for a recorded blocker;
+   ghost `reported`): no observation stands in for a recorded blocker, except
+   one a write with no alignment matched by identity (the ghost `held`, the
+   fail-closed cost);
+ - UnalignedKept: a write with no alignment never retires a recorded blocker
+   its bytes still hold (the ghost `lost`);
  - RecordedKept: every blocker a run delivered stays in the record until a
    conclusive observation from its own source shows it gone (the ghost
    `owed`). It is the GateSound of a run that can fail or a value that blocks
@@ -141,7 +158,9 @@ CONSTANTS
     MaySkip,           \* round 3: a fast run may skip without reading the bytes
     CarryByPosition,   \* round 3 (R2, R3): keep a recorded blocker only at its own line
     SkipNoVerdict,     \* round 3 (R1): a skip without a stated reason has no verdict
-    OwedRanges         \* round 3 (R4): a no-verdict write's lines join the next range
+    OwedRanges,        \* round 3 (R4): a no-verdict write's lines join the next range
+    MayUnalign,        \* round 4: a write may have no line alignment
+    UnalignedIdentity  \* round 4: with no alignment, match a recorded blocker by identity
 
 Fast == {"a", "b"}
 U == IF Unused THEN {"u"} ELSE {}
@@ -186,15 +205,18 @@ VARIABLES
     cleanOk,    \* ghost: when the latest write said clean, nothing was owed
     owe,        \* the lines (their findings) a run with no verdict covered, still owed
     reported,   \* ghost: every finding some run delivered
+    lost,       \* ghost: recorded blockers still in the bytes a write with no alignment retired
+    held,       \* ghost: findings a write with no alignment kept by identity, undelivered
     nW, nO, nT
 
 vars == <<disk, ln, base, hasBase, rec, obsF, wobs, dState, toolClean, noted,
           cleared, clearOk, claim, claimSet, claimOk, owed, cleanOk, owe,
-          reported, nW, nO, nT>>
+          reported, lost, held, nW, nO, nT>>
 
 TypeOK ==
     /\ disk \subseteq AllF /\ rec \subseteq AllF /\ obsF \subseteq Inline
     /\ owed \subseteq AllF /\ owe \subseteq Lined /\ reported \subseteq AllF
+    /\ lost \subseteq AllF /\ held \subseteq AllF
     /\ dState \in {"idle", "flight", "settled", "failed"}
 
 Init ==
@@ -206,6 +228,7 @@ Init ==
     /\ claim = FALSE /\ claimSet = {} /\ claimOk = TRUE
     /\ owed = {} /\ cleanOk = TRUE
     /\ owe = {} /\ reported = {}
+    /\ lost = {} /\ held = {}
     /\ nW = 0 /\ nO = 0 /\ nT = 0
 
 \* What the fast runners deliver as blocking for bytes `new` when the write
@@ -227,17 +250,22 @@ UBlock(new, fail, l) ==
       THEN {f \in USeen(new, fail) : Id(f, {}, l) \notin base}
       ELSE {}
 \* The recorded blockers the run keeps although it did not deliver them.
-\* Without CarryByPosition the carry matches by identity alone: a withheld
-\* "p" keeps a fixed, recorded "a" as its own observed copy.
-StandIn(new, touched, fail) ==
-    IF Twin /\ ~CarryByPosition /\ ScopeDeliveryOnly /\ "a" \in rec
+\* `blind`: the write has no alignment and lines moved. Without
+\* CarryByPosition the carry matches by identity alone: a withheld "p"
+\* keeps a fixed, recorded "a" as its own observed copy. With it, a blind
+\* write matches by identity too under UnalignedIdentity; without that, it
+\* reads the stale line, finds nothing, and keeps no withheld blocker.
+ByIdentity(blind) == ~CarryByPosition \/ (blind /\ UnalignedIdentity)
+Positional(blind) == ~(CarryByPosition /\ blind /\ ~UnalignedIdentity)
+StandIn(new, touched, fail, blind) ==
+    IF Twin /\ ByIdentity(blind) /\ ScopeDeliveryOnly /\ "a" \in rec
        /\ "a" \notin Full(new, fail)
        /\ "p" \in Full(new, fail) \ Deliv(new, touched, fail)
       THEN {"p"} ELSE {}
-Carried(new, touched, fail, l) ==
-    (IF ScopeDeliveryOnly
+Carried(new, touched, fail, l, blind) ==
+    (IF ScopeDeliveryOnly /\ Positional(blind)
        THEN rec \cap (Full(new, fail) \ Deliv(new, touched, fail)) ELSE {})
-    \cup StandIn(new, touched, fail)
+    \cup StandIn(new, touched, fail, blind)
     \cup (IF CarryPromoted
        THEN rec \cap (USeen(new, fail) \ UBlock(new, fail, l)) ELSE {})
     \cup (IF CarryInconclusive /\ fail THEN rec \cap Inline ELSE {})
@@ -268,8 +296,9 @@ RecordVerb(set, gone) ==
 \* owed; an authored verdict discharges them.
 Covers(touched) == touched \cup (IF OwedRanges THEN owe ELSE {})
 
-Write(bytes, shift, edited, o) ==
+Write(bytes, shift, edited, o, al) ==
     LET new == Seen(bytes, o)
+        blind == ~al /\ shift
         fail == Failed(o)
         touched == Covers(edited)
         l == IF shift THEN [f \in AllF |-> ln[f] + 1] ELSE ln
@@ -279,7 +308,7 @@ Write(bytes, shift, edited, o) ==
         newIds == IF Delta /\ hasBase THEN ids \ base ELSE ids
         deltaSet == {f \in obs : Id(f, obs, l) \in newIds}
         delivered == IF ClearOnCurrent THEN obs \cup ub ELSE deltaSet \cup ub
-        current == delivered \cup Carried(new, touched, fail, l)
+        current == delivered \cup Carried(new, touched, fail, l, blind)
     IN /\ disk' = bytes /\ ln' = l
        /\ base' = ids /\ hasBase' = TRUE
        /\ obsF' = obs \cup ub /\ wobs' = obs \cup ub
@@ -289,16 +318,19 @@ Write(bytes, shift, edited, o) ==
        /\ cleanOk' = (current = {} => OwedAfter(new, fail) \cup delivered = {})
        /\ owe' = IF fail THEN owe \cup touched ELSE {}
        /\ reported' = reported \cup delivered
+       /\ lost' = IF blind THEN (rec \ current) \cap bytes \cap Lined ELSE {}
+       /\ held' = held \cup (IF blind
+                    THEN StandIn(new, touched, fail, blind) \ delivered ELSE {})
        /\ dState' = IF Deferred THEN "flight" ELSE "idle"
        /\ claim' = FALSE
 
 WriteStep ==
     /\ nW < Writes
     /\ \E new \in SUBSET AllF, shift \in BOOLEAN, touched \in SUBSET Lined,
-          o \in Outcomes :
+          o \in Outcomes, al \in (IF MayUnalign THEN BOOLEAN ELSE {TRUE}) :
         /\ ((new \ disk) \cup (disk \ new)) \cap Lined \subseteq touched
         /\ (shift => \A f \in AllF : ln[f] < MaxShift)
-        /\ Write(new, shift, touched, o)
+        /\ Write(new, shift, touched, o, al)
     /\ nW' = nW + 1
     /\ UNCHANGED <<claimSet, claimOk, nO, nT>>
 
@@ -314,8 +346,8 @@ OpaqueStep ==
             touched == Covers((disk \ bytes) \cap Lined)
             obs == Deliv(new, touched, fail)
             ub == UBlock(new, fail, ln)
-            held == obs \cup ub \cup Carried(new, touched, fail, ln)
-            clears == IF OpaqueKeep THEN held = {} ELSE TRUE
+            keep == obs \cup ub \cup Carried(new, touched, fail, ln, FALSE)
+            clears == IF OpaqueKeep THEN keep = {} ELSE TRUE
         IN /\ disk' = bytes
            /\ base' = IdsOf(obs, ln) \cup IdsOf(USeen(new, fail), ln)
            /\ hasBase' = TRUE
@@ -328,7 +360,7 @@ OpaqueStep ==
     /\ nO' = nO + 1
     /\ claim' = FALSE
     /\ UNCHANGED <<ln, wobs, toolClean, claimSet, claimOk, cleanOk, reported,
-                   nW, nT>>
+                   lost, held, nW, nT>>
 
 \* The collect-later run of the current bytes settles. A conclusive run's
 \* blocker joins the record (recordDeferredInlineBlockers merges and leaves
@@ -358,7 +390,8 @@ SettleStep ==
         /\ clearOk' = IF Retires(ok) THEN TRUE ELSE clearOk
         /\ reported' = reported \cup (SettledRec(ok) \ rec)
     /\ UNCHANGED <<disk, ln, base, hasBase, obsF, wobs, toolClean,
-                   claim, claimSet, claimOk, cleanOk, owe, nW, nO, nT>>
+                   claim, claimSet, claimOk, cleanOk, owe, lost, held,
+                   nW, nO, nT>>
 
 TurnEndStep ==
     /\ nT < Turns
@@ -381,7 +414,7 @@ TurnEndStep ==
            /\ reported' = reported \cup (r \ rec)
     /\ nT' = nT + 1
     /\ UNCHANGED <<disk, ln, base, hasBase, obsF, wobs, toolClean, cleanOk,
-                   owe, nW, nO>>
+                   owe, lost, held, nW, nO>>
 
 Next == WriteStep \/ OpaqueStep \/ SettleStep \/ TurnEndStep
 
@@ -395,6 +428,7 @@ CleanHonest == toolClean => wobs = {}
 ResolvedHonest == claim => claimOk
 GateSound == rec = {} => disk \cap Fast \subseteq owe
 RecordedKept == owed \subseteq rec
-RecordedReported == rec \subseteq reported
+RecordedReported == rec \subseteq reported \cup held
+UnalignedKept == lost = {}
 CleanSound == cleanOk
 =============================================================================

@@ -661,25 +661,64 @@ describe("RuntimeCoordinator", () => {
 	// #4484 round 3: the anchor follows the record. Recurrence: a new
 	// session's first write aligned its recorded lines (none) to a dead
 	// session's bytes, or an owed range outlived the session that owed it.
-	describe("analysis anchor (#4484 round 3)", () => {
+	// Round 4 (G1, G3): the anchor lived in a 256-entry cache apart from the
+	// record, so writes to other files evicted a live record's anchor and the
+	// next edit retired its blocker with nothing to align (verify probe P18).
+	describe("analysis anchor (#4484 rounds 3 and 4)", () => {
 		const anchor = {
-			lineHashes: ["a", "b"],
+			lineHashes: Uint32Array.of(1, 2),
 			owedRanges: new Map([["ast-grep-napi", [{ start: 2, end: 2 }]]]),
 		};
 
-		it("hands back the anchor stored for a file, under any spelling of its path", () => {
+		it("keeps the anchor on the file's record, under any spelling of its path", () => {
 			const runtime = new RuntimeCoordinator();
+			runtime.recordInlineBlockers("/p/src/a.ts", "blocker A");
 			runtime.setAnalysisAnchor("/p/src/../src/a.ts", anchor);
 			expect(runtime.getAnalysisAnchor("/p/src/a.ts")).toBe(anchor);
-			runtime.setAnalysisAnchor("/p/src/a.ts", undefined);
-			expect(runtime.getAnalysisAnchor("/p/src/a.ts")).toBeUndefined();
 		});
 
-		it("drops every anchor at a session reset", () => {
+		it("keeps a record's anchor however many other files take anchors", () => {
+			const runtime = new RuntimeCoordinator();
+			runtime.recordInlineBlockers("/p/a.ts", "blocker A");
+			runtime.setAnalysisAnchor("/p/a.ts", anchor);
+			for (let i = 0; i < 300; i += 1)
+				runtime.setAnalysisAnchor(`/p/other-${i}.ts`, {
+					lineHashes: Uint32Array.of(i),
+					owedRanges: new Map(),
+				});
+			expect(runtime.getAnalysisAnchor("/p/a.ts")).toBe(anchor);
+		});
+
+		it("drops the hashes with the record and keeps the owing runners", () => {
+			const runtime = new RuntimeCoordinator();
+			runtime.recordInlineBlockers("/p/a.ts", "blocker A");
+			runtime.setAnalysisAnchor("/p/a.ts", anchor);
+			runtime.clearInlineBlockers("/p/a.ts");
+			expect(runtime.getAnalysisAnchor("/p/a.ts")).toEqual({
+				lineHashes: undefined,
+				owedRanges: new Map([["ast-grep-napi", []]]),
+			});
+		});
+
+		it("stores no hashes for a file without a record", () => {
 			const runtime = new RuntimeCoordinator();
 			runtime.setAnalysisAnchor("/p/a.ts", anchor);
+			expect(runtime.getAnalysisAnchor("/p/a.ts")?.lineHashes).toBeUndefined();
+			runtime.setAnalysisAnchor("/p/a.ts", {
+				lineHashes: Uint32Array.of(1),
+				owedRanges: new Map(),
+			});
+			expect(runtime.getAnalysisAnchor("/p/a.ts")).toBeUndefined();
+		});
+
+		it("drops every anchor and owing runner at a session reset", () => {
+			const runtime = new RuntimeCoordinator();
+			runtime.recordInlineBlockers("/p/a.ts", "blocker A");
+			runtime.setAnalysisAnchor("/p/a.ts", anchor);
+			runtime.setAnalysisAnchor("/p/b.ts", anchor);
 			runtime.resetForSession();
 			expect(runtime.getAnalysisAnchor("/p/a.ts")).toBeUndefined();
+			expect(runtime.getAnalysisAnchor("/p/b.ts")).toBeUndefined();
 		});
 	});
 

@@ -12,6 +12,8 @@ import {
 	alignLines,
 	lineHashesOf,
 	linesOfRanges,
+	MAX_ALIGNMENT_LINES,
+	MAX_OWED_RANGES,
 	owedRangesAfterDispatch,
 	rangesOfLines,
 } from "../../clients/line-alignment.js";
@@ -83,6 +85,16 @@ describe("alignLines", () => {
 	});
 });
 
+// Round 4 (G3): the anchor lived in a cache bounded by count only. It now
+// sits on the blocker record; this pins its size per record.
+describe("anchor size", () => {
+	it("keeps 4 bytes per line, and nothing past the line cap", () => {
+		const text = "x\n".repeat(MAX_ALIGNMENT_LINES - 1);
+		expect(lineHashesOf(text)?.byteLength).toBe(4 * MAX_ALIGNMENT_LINES);
+		expect(lineHashesOf(`${text}x\n`)).toBeUndefined();
+	});
+});
+
 describe("ranges and lines", () => {
 	it("round-trips owed lines through merged ranges", () => {
 		const ranges = rangesOfLines([7, 3, 4, 9, 8, 3]);
@@ -144,5 +156,26 @@ describe("owedRangesAfterDispatch", () => {
 		expect(run({ delivers: false }).get("ast-grep-napi")).toEqual([
 			{ start: 9, end: 9 },
 		]);
+	});
+
+	// Round 4 (G3): owed ranges grew with every write that lacked a verdict.
+	it("owes the whole file once a runner's owed ranges pass the cap", () => {
+		const scattered = Array.from({ length: MAX_OWED_RANGES + 1 }, (_, i) => ({
+			start: 2 * i + 1,
+			end: 2 * i + 1,
+		}));
+		expect(
+			run({
+				noVerdict: ["eslint"],
+				modifiedRanges: scattered,
+				lineCount: () => 500,
+			}).get("eslint"),
+		).toEqual([{ start: 1, end: 500 }]);
+		expect(
+			run({
+				noVerdict: ["eslint"],
+				modifiedRanges: scattered.slice(0, MAX_OWED_RANGES),
+			}).get("eslint"),
+		).toHaveLength(MAX_OWED_RANGES);
 	});
 });

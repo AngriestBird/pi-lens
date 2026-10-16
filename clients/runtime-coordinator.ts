@@ -67,8 +67,6 @@ function nextTelemetrySessionId(): string {
  * oldest is evicted past it, and the eviction is counted by the caller.
  */
 export const MAX_CUT_ADVISORY_LANES = 16;
-/** #4484 round 3: files whose last inline verdict's anchor is kept. */
-export const MAX_ANALYSIS_ANCHORS = 256;
 
 /**
  * Every background startup scan name. `session_start` starts scans under these
@@ -368,6 +366,15 @@ export interface InlineBlockerRecord {
 	 * of the session.
 	 */
 	staleDeliveryCount?: number;
+	/**
+	 * #4484 round 4: what the verdict behind this record analysed (line
+	 * hashes, owed lines), set by `setAnalysisAnchor` right after the record
+	 * verb. It lives exactly as long as the record. At most 4 bytes per line
+	 * up to `MAX_ALIGNMENT_LINES` (400 KB), plus `MAX_OWED_RANGES` ranges per
+	 * owing runner. Absent on a record a collect-later settle started: the
+	 * next write then has no alignment and matches on identity alone.
+	 */
+	analysisAnchor?: AnalysisAnchor;
 }
 
 /**
@@ -652,14 +659,16 @@ export class RuntimeCoordinator {
 	private readonly _pendingInlineBlockers =
 		new PathKeyedMap<InlineBlockerRecord>(normalizeMapKey);
 	/**
-	 * #4484 round 3: per file, the anchor of its last applied inline verdict
-	 * (`setAnalysisAnchor`). Bounded LRU: an evicted file's next write takes
-	 * recorded lines as they are, counted as `blocker-position-unaligned`.
+	 * #4484 round 4: per file, the runners its last applied inline verdict
+	 * left owing lines (`setAnalysisAnchor`). The positions themselves live on
+	 * the blocker record (`InlineBlockerRecord.analysisAnchor`); this keeps
+	 * only the runner ids, at most one per runner, so a file whose record is
+	 * gone still has each such runner owe its whole file on the next write.
+	 * Replaced by every applied verdict of the file and cleared per session.
 	 */
-	private readonly _analysisAnchors = new BoundedLruCache<
-		string,
-		AnalysisAnchor
-	>(MAX_ANALYSIS_ANCHORS);
+	private readonly _owedRunners = new PathKeyedMap<readonly string[]>(
+		normalizeMapKey,
+	);
 	/**
 	 * #3507: one per-path order for BOTH verbs on `_pendingInlineBlockers`,
 	 * the widget store's guard shape (`widget-state.ts` diagnosticsWriteGuard).
@@ -760,7 +769,7 @@ export class RuntimeCoordinator {
 		this._readWidenings.clear();
 		this._lspReadWarmState.clear();
 		this._pendingInlineBlockers.clear();
-		this._analysisAnchors.clear();
+		this._owedRunners.clear();
 		this._inlineBlockerWriteOrder.clear();
 		this._resolvedBlockerFilesThisTurn.clear();
 		this._resolvedBlockerFilesDropped = 0;
@@ -1711,27 +1720,49 @@ export class RuntimeCoordinator {
 	}
 
 	/**
-	 * #4484 round 3: the anchor of the file's last applied inline verdict: the
-	 * line hashes of the bytes it analysed, which its recorded blockers' lines
-	 * refer to, and the lines it still owes. The next write's pipeline aligns
-	 * to it.
+	 * #4484 round 3: the anchor the next write's pipeline aligns to: the line
+	 * hashes of the bytes the file's blocker record is about, and the lines
+	 * still owed. Round 4: it is the record's own anchor. A file without one
+	 * (no record, or a record a collect-later settle started) gets only the
+	 * runners that owe lines, with no hashes, so the pipeline cannot align and
+	 * fails closed.
 	 */
 	getAnalysisAnchor(filePath: string): AnalysisAnchor | undefined {
-		return this._analysisAnchors.get(normalizeMapKey(filePath));
+		const anchor = this._pendingInlineBlockers.get(filePath)?.analysisAnchor;
+		if (anchor) return anchor;
+		const owing = this._owedRunners.get(filePath);
+		return owing
+			? {
+					lineHashes: undefined,
+					owedRanges: new Map(owing.map((runnerId) => [runnerId, []])),
+				}
+			: undefined;
 	}
 
 	/**
 	 * #4484 round 3: store the anchor of an inline verdict that just applied
 	 * (`recordInlineBlockers` or `clearInlineBlockers` returned applied), so it
-	 * always describes the bytes the record is about. Undefined drops it.
+	 * always describes the bytes the record is about. Round 4: it goes on the
+	 * record, and lives as long as the record; the owing runner ids go apart
+	 * (`_owedRunners`), so they outlive a record that a later retire drops.
 	 */
 	setAnalysisAnchor(
 		filePath: string,
 		anchor: AnalysisAnchor | undefined,
 	): void {
-		const key = normalizeMapKey(filePath);
-		if (anchor) this._analysisAnchors.set(key, anchor);
-		else this._analysisAnchors.delete(key);
+		const existing = this._pendingInlineBlockers.get(filePath);
+		if (existing) {
+			// The display key every record writer uses.
+			const key = path.resolve(filePath);
+			const { analysisAnchor: _dropped, ...rest } = existing;
+			this._pendingInlineBlockers.set(
+				key,
+				anchor ? { ...rest, analysisAnchor: anchor } : rest,
+			);
+		}
+		const owing = [...(anchor?.owedRanges.keys() ?? [])];
+		if (owing.length > 0) this._owedRunners.set(filePath, owing);
+		else this._owedRunners.delete(filePath);
 	}
 
 	/**

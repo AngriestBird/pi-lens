@@ -15,8 +15,17 @@
  */
 import { lineContentHash } from "./read-guard.js";
 
-/** Lines beyond which no alignment is attempted (the whole-file hash cap is 2 MiB). */
+/**
+ * Lines beyond which no alignment is attempted (the whole-file hash cap is
+ * 2 MiB). One 4-byte hash per line, so an anchor's hashes stay at or under
+ * 400 KB.
+ */
 export const MAX_ALIGNMENT_LINES = 100_000;
+/**
+ * #4484 round 4: owed ranges per runner beyond which the runner owes the
+ * whole file, so an anchor's owed lines stay bounded too.
+ */
+export const MAX_OWED_RANGES = 64;
 /** Insertions plus deletions beyond which a change has no alignment. */
 export const MAX_ALIGNMENT_EDITS = 1_000;
 
@@ -24,10 +33,13 @@ export const MAX_ALIGNMENT_EDITS = 1_000;
  * What a file's last applied inline verdict analysed (#4484 round 3): the
  * per-line hashes of its bytes, which the recorded blockers' lines refer to,
  * and per runner that reached no verdict, the lines still owed to it (R4),
- * in those bytes.
+ * in those bytes. Round 4: it is a field of the file's blocker record, so it
+ * lives exactly as long as the record. Undefined hashes mean no alignment:
+ * a recorded blocker then matches its identity anywhere, and an owed runner
+ * owes the whole file. An empty range list means the whole file too.
  */
 export interface AnalysisAnchor {
-	readonly lineHashes: readonly string[] | undefined;
+	readonly lineHashes: Uint32Array | undefined;
 	/** Per runner id, the lines owed to it. */
 	readonly owedRanges: ReadonlyMap<
 		string,
@@ -38,11 +50,16 @@ export interface AnalysisAnchor {
 /** 1-based line in the old version to 1-based line in the new one, or undefined when edited or deleted. */
 export type LineMap = (line: number) => number | undefined;
 
-/** Per-line hashes of `text`, the same whitespace-stripped hash the read guard stores. */
-export function lineHashesOf(text: string): string[] | undefined {
+/**
+ * Per-line hashes of `text`, the same whitespace-stripped hash the read guard
+ * stores, packed 4 bytes per line. Undefined past {@link MAX_ALIGNMENT_LINES}.
+ */
+export function lineHashesOf(text: string): Uint32Array | undefined {
 	const lines = text.split(/\r?\n/);
 	if (lines.length > MAX_ALIGNMENT_LINES) return undefined;
-	return lines.map((line) => lineContentHash(line));
+	return Uint32Array.from(lines, (line) =>
+		Number.parseInt(lineContentHash(line), 16),
+	);
 }
 
 /**
@@ -50,8 +67,8 @@ export function lineHashesOf(text: string): string[] | undefined {
  * change exceeds `maxEdits` insertions plus deletions.
  */
 export function alignLines(
-	before: readonly string[],
-	after: readonly string[],
+	before: Uint32Array,
+	after: Uint32Array,
 	maxEdits: number = MAX_ALIGNMENT_EDITS,
 ): LineMap | undefined {
 	const n = before.length;
@@ -85,8 +102,8 @@ export function alignLines(
  * script, or -1. Undefined when more than `maxEdits` edits are needed.
  */
 function myersMatches(
-	a: readonly string[],
-	b: readonly string[],
+	a: Uint32Array,
+	b: Uint32Array,
 	maxEdits: number,
 ): Int32Array | undefined {
 	const n = a.length;
@@ -181,7 +198,8 @@ export function rangesOfLines(
  * the whole file when the dispatch had no range. An in-flight runner settles
  * on its own, and a runner with a verdict is owed nothing. A run that may not
  * deliver (`delivers: false`, an unauthored run, #3226) discharges nothing:
- * every earlier owed line stays owed.
+ * every earlier owed line stays owed. A runner owed more than
+ * {@link MAX_OWED_RANGES} ranges owes the whole file (round 4).
  */
 export function owedRangesAfterDispatch(input: {
 	noVerdict: readonly string[];
@@ -217,5 +235,9 @@ export function owedRangesAfterDispatch(input: {
 			);
 		}
 	}
+	// Round 4: past the cap the runner owes the whole file, a superset.
+	for (const [runnerId, ranges] of owedRanges)
+		if (ranges.length > MAX_OWED_RANGES)
+			owedRanges.set(runnerId, [{ start: 1, end: input.lineCount() }]);
 	return owedRanges;
 }

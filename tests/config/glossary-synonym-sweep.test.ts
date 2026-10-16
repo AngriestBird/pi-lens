@@ -1093,7 +1093,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 29 -> 30 (#4213): the lifecycle identity lookup uses the same map key.
 		// 30 -> 32 (#4484 r2): the record read for the carry and the settled-run
 		// retire derive the same map key.
-		"clients/runtime-coordinator.ts": 32,
+		// 32 -> 33 (#4484 round 4): the anchor moves onto its record, re-set
+		// under the display key every record writer uses; its reads route
+		// through the keyed map.
+		"clients/runtime-coordinator.ts": 33,
 		"clients/runtime-session.ts": 15,
 		// 22 -> 21 (#4137): the baseline slot's `path.resolve` moved into
 		// `opaqueBaselineSlot` (clients/opaque-mutation-scan.ts).

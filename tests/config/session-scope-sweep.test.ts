@@ -144,7 +144,6 @@ const ACTIVATION_STATE: Readonly<Record<string, string>> = {
  */
 const COORDINATOR_FIELDS: Readonly<Record<string, "reset" | string>> = {
 	_actionableWarningsThisTurn: "reset",
-	_analysisAnchors: "reset",
 	_autofixDemotedThisTurn: "reset",
 	_cachedExports: "reset",
 	_cascadeRuns: "reset",
@@ -175,6 +174,7 @@ const COORDINATOR_FIELDS: Readonly<Record<string, "reset" | string>> = {
 	_mutationReceipts: "reset",
 	_nextCascadeSettleToken:
 		"kept: a monotonic token source; restarting it would let an old settle's token match a new one",
+	_owedRunners: "reset",
 	_pendingCascadeRuns: "reset",
 	_pendingDeferredMutations: "reset",
 	_pendingInlineBlockers: "reset",

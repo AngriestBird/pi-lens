@@ -7,7 +7,10 @@
  * the agent never touched (review F1, TLC MutTwinIdentity).
  */
 import { describe, expect, it } from "vitest";
-import { retainRecordedFindings } from "../../clients/finding-identity.js";
+import {
+	ANY_POSITION,
+	retainRecordedFindings,
+} from "../../clients/finding-identity.js";
 
 type F = { tool: string; rule: string; message: string; line: number };
 const f = (line: number, message = "returns unknown"): F => ({
@@ -80,5 +83,47 @@ describe("retainRecordedFindings", () => {
 			{ positionOf: (d) => d.line, keepUnobserved: never },
 		);
 		expect(kept).toEqual([]);
+	});
+
+	// Round 4 (G1, verify probes P11c, P11d, P18): with no alignment the carry
+	// read the recorded line number as it was, found nothing there, and
+	// retired a blocker still on disk. Without a position it matches its
+	// identity anywhere instead, which fails closed.
+	it("matches an unaligned finding by its identity at any line", () => {
+		const recorded = f(3);
+		const moved = f(1103);
+		const { kept, retired } = retainRecordedFindings([recorded], [moved], {
+			positionOf: () => ANY_POSITION,
+			keepUnobserved: never,
+		});
+		expect(kept).toEqual([moved]);
+		expect(retired).toEqual([]);
+	});
+
+	it("retires an unaligned finding whose identity nothing observes", () => {
+		const recorded = f(3);
+		const { kept, retired } = retainRecordedFindings(
+			[recorded],
+			[f(9, "returns any")],
+			{ positionOf: () => ANY_POSITION, keepUnobserved: never },
+		);
+		expect(kept).toEqual([]);
+		expect(retired).toEqual([recorded]);
+	});
+
+	it("lets a positioned finding take its own match before an unaligned one", () => {
+		const positioned = f(6);
+		const unaligned = f(2);
+		const atSix = f(6);
+		const { kept, retired } = retainRecordedFindings(
+			[unaligned, positioned],
+			[atSix],
+			{
+				positionOf: (d) => (d === unaligned ? ANY_POSITION : d.line),
+				keepUnobserved: never,
+			},
+		);
+		expect(kept).toEqual([atSix]);
+		expect(retired).toEqual([unaligned]);
 	});
 });

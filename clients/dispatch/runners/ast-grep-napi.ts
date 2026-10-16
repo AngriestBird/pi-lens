@@ -1403,7 +1403,15 @@ const astGrepNapiRunner: RunnerDefinition = {
 					reason: `Gate B skipped napi: pending late-auxiliary pair from an EARLIER touch remains undelivered while prior publication satisfies per-file gate (file: ${ctx.filePath})`,
 				});
 			}
-			return { status: "skipped", diagnostics: [], semantic: "none" };
+			// #4484 round 4: the ast-grep server answers for this file, so the
+			// skip states why; a bare skip would read as no verdict and keep
+			// napi's recorded blockers after they are fixed.
+			return {
+				status: "skipped",
+				diagnostics: [],
+				semantic: "none",
+				skipReason: "covered-by-primary",
+			};
 		}
 
 		const sgModule = await loadSg();

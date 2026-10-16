@@ -42,7 +42,7 @@ import {
 import { writeOrderToken } from "./write-ordering-guard.js";
 import { getDiagnosticLogger } from "./diagnostic-logger.js";
 import { getDiagnosticTracker } from "./diagnostic-tracker.js";
-import { retainRecordedFindings } from "./finding-identity.js";
+import { ANY_POSITION, retainRecordedFindings } from "./finding-identity.js";
 import {
 	type AnalysisAnchor,
 	alignLines,
@@ -1905,7 +1905,7 @@ function carryRecordedBlockers(
 	observed: readonly Diagnostic[],
 	dispatchResult: Pick<DispatchResult, "stillObserved" | "inconclusiveSources">,
 	filePath: string,
-	positionOf: (d: Diagnostic) => number | undefined,
+	positionOf: (d: Diagnostic) => number | undefined | typeof ANY_POSITION,
 ): { carried: Diagnostic[]; matched: ReadonlySet<Diagnostic> } {
 	if (prior.length === 0) return { carried: [], matched: new Set() };
 	const runnerIds = new Set(dispatchResult.inconclusiveSources?.runnerIds);
@@ -1927,7 +1927,7 @@ function carryRecordedBlockers(
 		if (observedNow.has(d)) return [];
 		if (!recorded.has(d)) return [d];
 		const at = positionOf(d);
-		return [at === undefined || at === d.line ? d : { ...d, line: at }];
+		return [typeof at !== "number" || at === d.line ? d : { ...d, line: at }];
 	});
 	if (carried.some((d) => !dispatchResult.stillObserved?.includes(d))) {
 		incrementDegradationCount({
@@ -1941,17 +1941,18 @@ function carryRecordedBlockers(
 }
 
 /**
- * #4484 round 3: this run's bytes against the anchor of the file's last
- * applied inline verdict. `positionOf` maps a line of the anchor's bytes to
- * this run's (R2): undefined when the line was edited or deleted, and the
- * line itself, counted once per file, when there is no alignment. `owed` is
- * the anchor's owed lines per runner, in this run's bytes (R4). `next` is the
- * anchor this run's verdict hands on: its own line hashes, and for each runner
- * that reached no verdict and is not still in flight (a collect-later run
- * settles on its own), the lines it analysed for that runner; a run without
- * authorship keeps every earlier owed line too. It is handed on
- * for every verdict, so a record a collect-later answer starts later is
- * anchored too.
+ * #4484 round 3: this run's bytes against the anchor of the file's blocker
+ * record. `positionOf` maps a line of the anchor's bytes to this run's (R2):
+ * undefined when the line was edited or deleted. Round 4: with no alignment
+ * (no anchor, an anchor without hashes, bytes past the caps, or a change past
+ * the edit cap) it is {@link ANY_POSITION}, so a recorded blocker matches its
+ * identity anywhere and fails closed; that is counted once per file. `owed`
+ * is the anchor's owed lines per runner, in this run's bytes (R4); with no
+ * alignment each owing runner owes the whole file. `next` is the anchor this
+ * run's verdict hands on: its own line hashes, and for each runner that
+ * reached no verdict and is not still in flight (a collect-later run settles
+ * on its own), the lines it analysed for that runner; a run without
+ * authorship keeps every earlier owed line too.
  */
 function anchorToPriorAnalysis(
 	prior: AnalysisAnchor | undefined,
@@ -1959,8 +1960,8 @@ function anchorToPriorAnalysis(
 	fileBytes: Buffer | undefined,
 	filePath: string,
 ) {
-	let hashes: string[] | undefined | null = null;
-	const currentHashes = (): string[] | undefined => {
+	let hashes: Uint32Array | undefined | null = null;
+	const currentHashes = (): Uint32Array | undefined => {
 		// The inline blocker baseline's own cap.
 		hashes ??=
 			fileContent !== undefined &&
@@ -1970,31 +1971,45 @@ function anchorToPriorAnalysis(
 				: undefined;
 		return hashes ?? undefined;
 	};
+	const lineCount = () =>
+		currentHashes()?.length ?? fileContent?.split(/\r?\n/).length ?? 0;
 	let lineMap: LineMap | undefined | null = null;
-	const positionOf = (line: number): number | undefined => {
+	const alignment = (): LineMap | undefined => {
 		if (lineMap === null) {
 			const now = currentHashes();
 			lineMap =
 				prior?.lineHashes && now
 					? alignLines(prior.lineHashes, now)
 					: undefined;
+			if (lineMap === undefined)
+				recordDegradationOnce({
+					kind: "blocker-position-unaligned",
+					subject: normalizeMapKey(filePath),
+					reason:
+						"the write's bytes could not be aligned to the bytes its recorded blockers were read from; they are matched on identity alone and owed lines widen to the whole file (#4484)",
+				});
 		}
-		if (lineMap) return lineMap(line);
-		recordDegradationOnce({
-			kind: "blocker-position-unaligned",
-			subject: normalizeMapKey(filePath),
-			reason:
-				"the write's bytes could not be aligned to the bytes its recorded blockers were read from; recorded line numbers are used as they are (#4484)",
-		});
-		return line;
+		return lineMap;
+	};
+	const positionOf = (
+		line: number,
+	): number | undefined | typeof ANY_POSITION => {
+		const map = alignment();
+		return map ? map(line) : ANY_POSITION;
 	};
 	const owed = new Map<string, { start: number; end: number }[]>();
 	for (const [runnerId, ranges] of prior?.owedRanges ?? []) {
-		const lines = linesOfRanges(ranges).flatMap((line) => {
-			const at = positionOf(line);
-			return at === undefined ? [] : [at];
-		});
-		if (lines.length > 0) owed.set(runnerId, rangesOfLines(lines));
+		const map = alignment();
+		const lines = map
+			? linesOfRanges(ranges).flatMap((line) => {
+					const at = map(line);
+					return at === undefined ? [] : [at];
+				})
+			: undefined;
+		if (lines === undefined) {
+			const count = lineCount();
+			if (count > 0) owed.set(runnerId, [{ start: 1, end: count }]);
+		} else if (lines.length > 0) owed.set(runnerId, rangesOfLines(lines));
 	}
 	return {
 		positionOf,
@@ -2011,8 +2026,7 @@ function anchorToPriorAnalysis(
 				collectLater: sources?.collectLaterRunnerIds ?? [],
 				modifiedRanges,
 				owed,
-				lineCount: () =>
-					lineHashes?.length ?? fileContent?.split(/\r?\n/).length ?? 0,
+				lineCount,
 			});
 			if (lineHashes === undefined && owedRanges.size === 0) return undefined;
 			return { lineHashes, owedRanges };

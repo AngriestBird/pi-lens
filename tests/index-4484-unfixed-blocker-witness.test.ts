@@ -312,6 +312,21 @@ async function openSession(
 			)) as { content?: Array<{ text?: string }> } | undefined;
 			return scrub((r?.content ?? []).map((p) => p.text ?? "").join("\n"));
 		},
+		/** Round 4 (P18): a host `write` of another file in the same session. */
+		async writeOther(file: string, content: string): Promise<void> {
+			const other = path.join(tmpDir, file);
+			fs.mkdirSync(path.dirname(other), { recursive: true });
+			fs.writeFileSync(other, content);
+			await pi.emit(
+				"tool_result",
+				{
+					toolName: "write",
+					input: { path: other, content },
+					content: [{ type: "text", text: "wrote" }],
+				},
+				ctx(),
+			);
+		},
 		/** A host `edit` that changed `lines` (1-based), as its diff names them. */
 		async edit(content: string, lines: number[]): Promise<string> {
 			fs.writeFileSync(target, content);
@@ -1010,5 +1025,118 @@ describe("#4484 witness, round 3: position, verdict and owed lines", () => {
 		expect(w2).not.toMatch(/Still unfixed/);
 		expect(await s.commitBlocked()).toBe(true);
 		await fixAndDrain(s);
+	}, 120_000);
+});
+
+describe("#4484 witness, round 4: no alignment fails closed", () => {
+	const SCOPED = { "no-lsp": true, "no-ast-grep": true };
+	const AG_PRE = [
+		'export const CLIENT_VERSION = "1.0.50";',
+		"export const plain = CLIENT_VERSION;",
+		"export function dig(obj: Record<string, string>, key: string): unknown {",
+		"\treturn obj[key];",
+		"}",
+		"",
+	].join("\n");
+	const AG_FIXED = AG_PRE.replace("): unknown {", "): string {");
+	const TS_PRE =
+		"export function run(): void {\n\tdebugger;\n}\nexport const a = 1;\n";
+	const TS_FIXED = TS_PRE.replace("\tdebugger;\n", "\treturn;\n");
+	// 1100 distinct lines above and a new last line: no common prefix, and a
+	// middle past the 1000-edit cap, so the write has no alignment.
+	const PAD = Array.from({ length: 1100 }, (_, i) => `// pad ${i}`).join("\n");
+	const padRange = Array.from({ length: 1100 }, (_, i) => i + 1);
+
+	// Recurrence (G1, verify probe P11c): with no alignment the carry read the
+	// recorded line number as it was, found nothing there, and retired an
+	// ast-grep blocker still on disk: `✓ clean`, the gate open, and "Resolved"
+	// at turn end (TLC MutUnaligned).
+	it("keeps an ast-grep blocker pending when the write cannot be aligned (row 4, P11c)", async () => {
+		const s = await openSession("uc", "src/unaligned-ag.ts", AG_FIXED, SCOPED);
+		await s.write(AG_FIXED);
+		expect(await s.edit(AG_PRE, [3])).toContain("🔴 STOP");
+		const big = `${PAD}\n${AG_PRE}export const tail = 1;\n`;
+		const w2 = await s.edit(big, [...padRange, 1106]);
+		expect(w2).not.toMatch(/✓ .*clean/);
+		expect(w2).toMatch(/Still unfixed: 1 blocker reported earlier \(L1103\)/);
+		expect(await s.commitBlocked()).toBe(true);
+		expect(await s.endTurn()).not.toContain("Resolved this turn");
+		await fixAndDrain(s);
+	}, 120_000);
+
+	// Recurrence (G1, verify probe P11d): the same through tree-sitter.
+	it("keeps a tree-sitter blocker pending when the write cannot be aligned (row 4, P11d)", async () => {
+		const s = await openSession("ud", "src/unaligned-ts.ts", TS_FIXED, SCOPED);
+		await s.write(TS_FIXED);
+		expect(await s.edit(TS_PRE, [2])).toContain("🔴 STOP");
+		const big = `${PAD}\n${TS_PRE}export const tail = 1;\n`;
+		const w2 = await s.edit(big, [...padRange, 1105]);
+		expect(w2).not.toMatch(/✓ .*clean/);
+		expect(w2).toMatch(/Still unfixed: 1 blocker reported earlier \(L1102\)/);
+		expect(await s.commitBlocked()).toBe(true);
+		expect(await s.endTurn()).not.toContain("Resolved this turn");
+		await fixAndDrain(s);
+	}, 120_000);
+
+	// Recurrence (G1 and G3, verify probe P18): the anchor lived in a
+	// 256-entry cache apart from the record. Writes to 260 other files evicted
+	// it, and the next edit above the blocker retired it with nothing to align.
+	it("keeps a tree-sitter blocker's anchor across writes to 260 other files (row 10, P18)", async () => {
+		const s = await openSession("ue", "src/evicted-ts.ts", TS_FIXED, SCOPED);
+		await s.write(TS_FIXED);
+		expect(await s.edit(TS_PRE, [2])).toContain("🔴 STOP");
+		for (let i = 0; i < 260; i += 1)
+			await s.writeOther(
+				`src/p18/other-${i}.ts`,
+				`export const v${i} = ${i};\n`,
+			);
+		const w2 = await s.edit(`// header\n${TS_PRE}`, [1]);
+		expect(w2).not.toMatch(/✓ .*clean/);
+		expect(w2).toMatch(/Still unfixed: 1 blocker reported earlier \(L3\)/);
+		expect(await s.commitBlocked()).toBe(true);
+		await fixAndDrain(s);
+	}, 120_000);
+
+	// G1's third path (round-4 brief item 4): past the blocker baseline's
+	// 2 MiB cap the write's bytes get no line hashes, so it has no alignment.
+	it("keeps a tree-sitter blocker pending when the file outgrows the 2 MiB hash cap (row 4)", async () => {
+		const s = await openSession("ug", "src/hashcap-ts.ts", TS_FIXED, SCOPED);
+		await s.write(TS_FIXED);
+		expect(await s.edit(TS_PRE, [2])).toContain("🔴 STOP");
+		const wide = Array.from(
+			{ length: 2100 },
+			(_, i) => `// ${String(i).padStart(4, "0")} ${"x".repeat(1000)}`,
+		).join("\n");
+		const w2 = await s.edit(
+			`${wide}\n${TS_PRE}`,
+			Array.from({ length: 2100 }, (_, i) => i + 1),
+		);
+		expect(w2).not.toMatch(/✓ .*clean/);
+		expect(w2).toMatch(/Still unfixed: 1 blocker reported earlier/);
+		expect(await s.commitBlocked()).toBe(true);
+		await fixAndDrain(s);
+	}, 120_000);
+
+	// Recurrence (G2, verify probe P20): the agent deletes the line its own
+	// blocker was on, and an untouched match of the same rule slides onto that
+	// number. A deleted line has no position, so nothing stands in for it
+	// (mutation X17 read the stale number and kept a false "Still unfixed").
+	it("retires a deleted blocker although an untouched match slides onto its line number (row 3, P20)", async () => {
+		const OLD = "export function old(): void {\n\tdebugger; // old\n}\n";
+		const NEU = "export function neu(): void {\n\tdebugger;\n}\n";
+		const FIXED = OLD.replace("\tdebugger; // old\n", "\treturn;\n");
+		// The untouched match is on disk before the session, so no write
+		// delivers or records it (#4481).
+		fs.mkdirSync(path.join(tmpDir, "src"), { recursive: true });
+		fs.writeFileSync(path.join(tmpDir, "src/slide-ts.ts"), OLD);
+		const s = await openSession("uf", "src/slide-ts.ts", FIXED, SCOPED);
+		const w1 = await s.edit(`${NEU}${OLD}`, [1, 2, 3]);
+		expect(w1).toContain("🔴 STOP");
+		expect(w1).toContain("L2:");
+		expect(w1).not.toContain("L5:");
+		const w2 = await s.edit(OLD, [1]);
+		expect(w2).not.toMatch(/Still unfixed/);
+		expect(await s.commitBlocked()).toBe(false);
+		pendingCleanup = undefined;
 	}, 120_000);
 });

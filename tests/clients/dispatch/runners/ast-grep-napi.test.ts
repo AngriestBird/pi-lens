@@ -458,6 +458,32 @@ describe("ast-grep-napi runner — aux-runner-findings-lost degradation (#2324 R
 		mockAuxiliaryLspPublished.mockResolvedValue(false);
 	});
 
+	// Recurrence (#4484 round 4, verify note on Gate B): the skip carried no
+	// reason, so `reachedNoVerdict` read it as no verdict, and a napi blocker
+	// recorded before the ast-grep server first published stayed recorded
+	// after the agent fixed it.
+	it("states why Gate B skips, so the skip is a verdict (#4484 round 4)", async () => {
+		const env = setupTestEnvironment("pi-lens-ast-grep-gate-b-");
+		try {
+			const filePath = path.join(env.tmpDir, "file.ts");
+			fs.writeFileSync(filePath, "const x = 1;\n");
+			mockAuxiliaryLspPublished.mockResolvedValue(true);
+			mockWorkingSgLoad();
+			const mod =
+				await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
+			const { reachedNoVerdict } =
+				await import("../../../../clients/dispatch/types.js");
+			const result = await mod.default.run(
+				createCtx(filePath, { hasTool: async () => false }) as any,
+			);
+			expect(result.status).toBe("skipped");
+			expect(result.skipReason).toBe("covered-by-primary");
+			expect(reachedNoVerdict(result)).toBe(false);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("records the loss when Gate B skips on a leftover pending pair", async () => {
 		const env = setupTestEnvironment("pi-lens-ast-grep-loss-");
 		try {
