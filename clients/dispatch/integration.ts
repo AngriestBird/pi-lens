@@ -30,6 +30,7 @@ import {
 	RunnerRegistry,
 	type RunnerResultSink,
 } from "./dispatcher.js";
+import { spawnAbortScope } from "../safe-spawn.js";
 import { recordDegradationOnce } from "../degradation-ledger.js";
 import { FactStore, setFactStoreEvictionReporter } from "./fact-store.js";
 import { resolveAnalysisRoot } from "../analysis-root.js";
@@ -233,14 +234,9 @@ const sessionFacts = new FactStore("dispatch");
  * Cleared with them at `session_start`.
  */
 const preEditCaptureFacts = new FactStore("pre-edit-capture");
-/**
- * #4483: files with a pre-edit capture still running (dispatch key paths). A
- * capture the `tool_call` bound abandoned keeps running until its linters
- * answer; the next write to the file must not start a second one beside it
- * and wait out the bound again. Each capture removes its own entry when it
- * settles, so the set holds at most one entry per running capture.
- */
-const preEditCapturesInFlight = new Set<string>();
+/** #4543: retain live slots through teardown, including across session reset. */
+const preEditCapturesInFlight = new Map<string, AbortController>();
+const MAX_PRE_EDIT_CAPTURES = 4;
 
 // #2243 item 4: wire the fact-store's capacity-eviction telemetry to the
 // ledger from HERE, not from fact-store.ts. fact-store stays an import leaf so
@@ -564,6 +560,7 @@ export function resetDispatchBaselines(cwd?: string): void {
 	resetTreeSitterClientLoadState();
 	sessionFacts.clearAll();
 	// #4483: the pre-edit capture's file facts and availability go with them.
+	for (const controller of preEditCapturesInFlight.values()) controller.abort();
 	preEditCaptureFacts.clearAll();
 	resetSessionSlopScore();
 	clearCoverageNoticeState();
@@ -3230,6 +3227,7 @@ export type PreEditCaptureSkip =
 	| "already-dispatched"
 	/** A capture of the file is still running (one the bound abandoned). */
 	| "in-flight"
+	| "capacity"
 	| "no-kind"
 	| "generated"
 	| "no-linter"
@@ -3249,7 +3247,11 @@ export type PreEditCaptureOutcome =
 			/** The runs finished but their findings no longer describe the file
 			 *  as it is before its first dispatch, so nothing was installed. */
 			outcome: "discarded";
-			reason: "bytes-changed" | "already-dispatched" | "session-replaced";
+			reason:
+				| "bytes-changed"
+				| "already-dispatched"
+				| "session-replaced"
+				| "aborted";
 	  };
 
 /**
@@ -3271,6 +3273,7 @@ export async function capturePreEditLinterFindings(
 	workspaceRoot: string,
 	pi: PiAgentAPI,
 	session: { isCurrent(): boolean },
+	signal?: AbortSignal,
 ): Promise<PreEditCaptureOutcome> {
 	if (pi.getFlag("no-delta")) return { outcome: "skipped", reason: "no-delta" };
 	const analysisRootMode = resolveAnalysisRoot(filePath, workspaceRoot);
@@ -3290,6 +3293,14 @@ export async function capturePreEditLinterFindings(
 	if (dispatched()) return { outcome: "skipped", reason: "already-dispatched" };
 	if (preEditCapturesInFlight.has(keyPath))
 		return { outcome: "skipped", reason: "in-flight" };
+	if (preEditCapturesInFlight.size >= MAX_PRE_EDIT_CAPTURES) {
+		recordDegradationOnce({
+			kind: "pre-edit-capture-incomplete",
+			subject: "pre-edit",
+			reason: "capacity",
+		});
+		return { outcome: "skipped", reason: "capacity" };
+	}
 	const created = createDispatchContext(
 		filePath,
 		dispatchCwd,
@@ -3335,17 +3346,21 @@ export async function capturePreEditLinterFindings(
 		return { outcome: "skipped", reason: "unreadable" };
 	}
 	const content = before.toString("utf8");
-	preEditCapturesInFlight.add(keyPath);
+	const controller = new AbortController();
+	const captureSignal = signal
+		? AbortSignal.any([signal, controller.signal])
+		: controller.signal;
+	preEditCapturesInFlight.set(keyPath, controller);
 	preEditCaptureFacts.clearFileFactsFor(ctx.filePath);
 	preEditCaptureFacts.setFileFact(ctx.filePath, "file.content", content);
 	try {
-		const result = await dispatchForFile(
-			ctx,
-			groups,
-			sessionRunnerRegistry,
-			undefined,
-			{ dedupeCoverageNotice: false },
+		const result = await spawnAbortScope.run(captureSignal, () =>
+			dispatchForFile(ctx, groups, sessionRunnerRegistry, undefined, {
+				dedupeCoverageNotice: false,
+			}),
 		);
+		if (captureSignal.aborted)
+			return { outcome: "discarded", reason: "aborted" };
 		if (!session.isCurrent())
 			return { outcome: "discarded", reason: "session-replaced" };
 		if (dispatched())

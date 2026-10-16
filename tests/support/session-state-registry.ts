@@ -1662,9 +1662,8 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// #4483 (10 -> 12): `preEditCaptureFacts`, the pre-edit capture's file
 	// facts, cleared by `resetDispatchBaselines` (the sessionCaches entry); and
 	// `preEditCapturesInFlight`, which holds an entry only while that file's
-	// capture runs and is emptied by each capture itself, so it is not session
-	// state: a capture still running across a session_start keeps its file out
-	// of a second capture until it settles.
+	// capture runs (at most four); reset aborts each controller and each capture
+	// releases its slot after teardown, preventing overlap across resets.
 	"dispatch/integration.ts": 12,
 	// #3968: the runner-id identity leaf beside the dispatcher — one Set fed
 	// by `RunnerRegistry.register` and re-derived at every process start

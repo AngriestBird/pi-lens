@@ -183,6 +183,7 @@ vi.mock("../clients/lsp/capabilities.js", async (importOriginal) => {
 });
 
 import extension from "../index.js";
+import { resetDegradationLedger } from "../clients/degradation-ledger.js";
 import {
 	capturePreEditLinterFindings,
 	dispatchLintWithResult,
@@ -306,6 +307,21 @@ async function openSession(
 	};
 	return {
 		target,
+		async preflight() {
+			await read();
+			return pi.emit(
+				"tool_call",
+				{
+					toolName: "edit",
+					toolCallId: `${name}-preflight-${++call}`,
+					input: {
+						path: target,
+						edits: [{ oldText: "echo a", newText: "echo b" }],
+					},
+				},
+				ctx(),
+			);
+		},
 		/** A host `write` of the whole file: tool_call, the write, tool_result. */
 		async write(content: string): Promise<string> {
 			await read();
@@ -605,6 +621,190 @@ describe("#4483 witness: a linter blocks on the delta at a file's first write", 
 			resetObservedRunnerLatency();
 			await s.end();
 		}
+	});
+
+	it("abandons at 500 ms and aborts its capture signal", async () => {
+		// #4543: foreground bounds must cancel the actual runner work.
+		resetDegradationLedger();
+		await flushLatencyLog();
+		const priorRecords = fs.existsSync(getLatencyLogPath())
+			? fs
+					.readFileSync(getLatencyLogPath(), "utf8")
+					.split("\n")
+					.filter((line) => line.includes('"pre-edit-capture-incomplete"'))
+					.length
+			: 0;
+		const s = await openSession(
+			"deadline-r2",
+			"scripts/deadline-r2.sh",
+			OLD_ERROR,
+		);
+		const { spawnAbortScope } = await import("../clients/safe-spawn.js");
+		let signal: AbortSignal | undefined;
+		let release: (() => void) | undefined;
+		let entered!: () => void;
+		const started = new Promise<void>((resolve) => {
+			entered = resolve;
+		});
+		boundary.sh.settle = () =>
+			new Promise<void>((resolve) => {
+				release = resolve;
+				signal = spawnAbortScope.getStore();
+				signal?.addEventListener("abort", () => resolve(), { once: true });
+				entered();
+			});
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		try {
+			let finished = false;
+			const call = s.preflight().then(() => {
+				finished = true;
+			});
+			await started;
+			await vi.advanceTimersByTimeAsync(499);
+			expect(finished).toBe(false);
+			await vi.advanceTimersByTimeAsync(1);
+			await call;
+			expect(signal?.aborted).toBe(true);
+		} finally {
+			release?.();
+			vi.useRealTimers();
+		}
+		const [capture] = await rows(s.target, "pre_edit_capture");
+		expect(capture?.result).toBe("abandoned");
+		expect(
+			fs
+				.readFileSync(getLatencyLogPath(), "utf8")
+				.split("\n")
+				.filter((line) => line.includes('"pre-edit-capture-incomplete"')),
+		).toHaveLength(priorRecords + 1);
+		// Pin the raw measuring run behind this budget (12/14 seeded).
+		const measured = JSON.parse(
+			fs.readFileSync(
+				new URL("./fixtures/pre-edit-capture/500ms.json", import.meta.url),
+				"utf8",
+			),
+		);
+		expect(
+			measured.filter(
+				(row: { capture: { result: string } }) =>
+					row.capture.result === "seeded",
+			),
+		).toHaveLength(12);
+		expect(
+			new Set(
+				measured.map(
+					(row: { capture: { budgetMs: number } }) => row.capture.budgetMs,
+				),
+			),
+		).toEqual(new Set([capture?.metadata?.budgetMs]));
+		await s.end();
+	});
+
+	it("bounds distinct captures and refuses a seed after cancellation", async () => {
+		// #4543 M1: distinct abandoned files must not retain unlimited children.
+		resetDegradationLedger();
+		await flushLatencyLog();
+		const priorRecords = fs.existsSync(getLatencyLogPath())
+			? fs
+					.readFileSync(getLatencyLogPath(), "utf8")
+					.split("\n")
+					.filter((line) => line.includes('"pre-edit-capture-incomplete"'))
+					.length
+			: 0;
+		const s = await openSession("r2", "scripts/r2.sh", OLD_ERROR);
+		const releases: (() => void)[] = [];
+		const pending: Promise<unknown>[] = [];
+		const controllers: AbortController[] = [];
+		try {
+			for (let i = 0; i < 4; i++) {
+				const file = path.join(tmpDir, `r2-${i}.sh`);
+				fs.writeFileSync(file, OLD_ERROR);
+				let entered!: () => void;
+				const started = new Promise<void>((resolve) => {
+					entered = resolve;
+				});
+				boundary.sh.settle = () =>
+					new Promise<void>((resolve) => {
+						releases.push(resolve);
+						entered();
+					});
+				const controller = new AbortController();
+				controllers.push(controller);
+				pending.push(
+					capturePreEditLinterFindings(
+						file,
+						tmpDir,
+						{ getFlag: () => undefined },
+						{ isCurrent: () => true },
+						controller.signal,
+					),
+				);
+				await started;
+			}
+			const fifth = await capturePreEditLinterFindings(
+				s.target,
+				tmpDir,
+				{ getFlag: () => undefined },
+				{ isCurrent: () => true },
+			);
+			expect(fifth).toEqual({ outcome: "skipped", reason: "capacity" });
+			await capturePreEditLinterFindings(
+				s.target,
+				tmpDir,
+				{ getFlag: () => undefined },
+				{ isCurrent: () => true },
+			);
+			await flushLatencyLog();
+			const records = fs
+				.readFileSync(getLatencyLogPath(), "utf8")
+				.split("\n")
+				.filter((line) => line.includes('"pre-edit-capture-incomplete"'));
+			expect(records).toHaveLength(priorRecords + 1);
+			controllers.forEach((c) => c.abort());
+		} finally {
+			releases.forEach((release) => release());
+		}
+		expect(await Promise.all(pending)).toEqual(
+			Array.from({ length: 4 }, () => ({
+				outcome: "discarded",
+				reason: "aborted",
+			})),
+		);
+		await s.end();
+	});
+
+	it("session reset cancels held captures before their unchanged bytes can seed", async () => {
+		// #4543: clearing the facts alone let old work install into the new session.
+		const s = await openSession("reset-r2", "scripts/reset-r2.sh", OLD_ERROR);
+		let release!: () => void;
+		let entered!: () => void;
+		const started = new Promise<void>((resolve) => {
+			entered = resolve;
+		});
+		boundary.sh.settle = () =>
+			new Promise<void>((resolve) => {
+				release = resolve;
+				entered();
+			});
+		const capture = capturePreEditLinterFindings(
+			s.target,
+			tmpDir,
+			{ getFlag: () => undefined },
+			{ isCurrent: () => true },
+		);
+		await started;
+		resetDispatchBaselines();
+		release();
+		expect(await capture).toEqual({ outcome: "discarded", reason: "aborted" });
+		expect(
+			await capturePreEditLinterFindings(
+				s.target,
+				tmpDir,
+				{ getFlag: () => undefined },
+				{ isCurrent: () => true },
+			),
+		).toMatchObject({ outcome: "seeded", seeded: 1 });
+		await s.end();
 	});
 
 	it("starts no second capture of a file while one is still running", async () => {

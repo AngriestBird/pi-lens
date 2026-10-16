@@ -1881,16 +1881,25 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 	}
 
 	// #4483: last, so only a call every pi-lens guard allowed pays for it.
-	// The bound abandons the capture, never cancels it: a capture that settles
-	// after the host wrote installs nothing (`capturePreEditLinterFindings`).
 	if (isWriteOrEdit && !isExternalOrVendor) {
 		const started = Date.now();
-		const outcome = await bounded(capturePreEditSeed(filePath, deps), {
+		const controller = new AbortController();
+		const signal = deps.ctx.signal
+			? AbortSignal.any([deps.ctx.signal, controller.signal])
+			: controller.signal;
+		const outcome = await bounded(capturePreEditSeed(filePath, deps, signal), {
 			ms: PRE_EDIT_CAPTURE_BUDGET_MS,
 			signal: deps.ctx.signal,
 			hook: "tool_call",
 			label: "pre-edit-linter-capture",
 		});
+		controller.abort();
+		if (!outcome || outcome.outcome === "failed")
+			recordDegradationOnce({
+				kind: "pre-edit-capture-incomplete",
+				subject: "pre-edit",
+				reason: outcome?.outcome ?? "abandoned",
+			});
 		recordPreEditCapture(filePath, outcome, Date.now() - started);
 	}
 }
@@ -1900,7 +1909,7 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
  * `tool_call` has no wall budget of its own (clients/hook-budgets.ts); this
  * is the per-await bound. Measured in PR #4483's body.
  */
-export const PRE_EDIT_CAPTURE_BUDGET_MS = 2000;
+export const PRE_EDIT_CAPTURE_BUDGET_MS = 500;
 
 type PreEditCaptureResult =
 	| Awaited<
@@ -1921,13 +1930,20 @@ type PreEditCaptureResult =
 function capturePreEditSeed(
 	filePath: string,
 	deps: ToolCallDeps,
+	signal: AbortSignal,
 ): Promise<PreEditCaptureResult> {
 	const session = deps.runtime.captureSessionGeneration();
 	const workspaceRoot = deps.runtime.projectRoot || process.cwd();
 	const pi = { getFlag: (flag: string) => deps.getFlag(flag) };
 	return loadDispatchIntegration()
 		.then(({ capturePreEditLinterFindings }) =>
-			capturePreEditLinterFindings(filePath, workspaceRoot, pi, session),
+			capturePreEditLinterFindings(
+				filePath,
+				workspaceRoot,
+				pi,
+				session,
+				signal,
+			),
 		)
 		.catch((cause: unknown): PreEditCaptureResult => {
 			const failure = cause instanceof Error ? cause.message : String(cause);

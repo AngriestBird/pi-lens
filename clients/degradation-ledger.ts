@@ -1073,6 +1073,8 @@ export type DegradationKind =
 	 * itself already landed; only the hash is missing. Subject is the file path.
 	 */
 	| "pipeline-post-write-hash-unavailable"
+	/** #4543: first-write capture exceeded its deadline or capacity (once/session). */
+	| "pre-edit-capture-incomplete"
 	/** A mounted process bridge refused calls during a primary-session gap. */
 	| "process-bridge-unavailable"
 	/**

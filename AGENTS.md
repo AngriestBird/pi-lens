@@ -1033,8 +1033,10 @@ file-scoped worklist and receives no project-wide scanner output.
   linter error. The `tool_call` of the first classified write or edit
   runs the file's inline linters (`PRE_EDIT_SEED_RUNNER_IDS`, tied to the
   edit-scope census's LINTER lanes) over the bytes still on disk, under
-  `bounded()` with `PRE_EDIT_CAPTURE_BUDGET_MS`, and installs their blocking
+  `bounded()` with `PRE_EDIT_CAPTURE_BUDGET_MS` (500 ms), and installs their blocking
   findings as `session.preEdit.<file>` beside the delta baseline. The capture
+  admits at most four active captures, aborts their process groups on abandonment
+  or session reset, and retains slots until teardown settles. It
   only creates that record, and only while no baseline, tombstone or seed
   exists, the bytes are the ones it read, and its session is current; each
   dispatch only shrinks it (`classifyPreExisting`, identity plus line text,

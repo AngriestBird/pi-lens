@@ -2729,7 +2729,7 @@ const BOUNDED_CALL_SITES: Readonly<Record<string, string>> = {
 	"call:clients/runtime-tool-call.ts#handleToolCallImpl:2dc2d1e2~ce33f035":
 		"The pre-edit linter capture (#4483) uses the tool_call's ctx.signal, " +
 		"absent only in a harness. #2523 gives tool_call no budget of its own, " +
-		"so the capture carries PRE_EDIT_CAPTURE_BUDGET_MS (2000 ms, measured " +
+		"so the capture carries PRE_EDIT_CAPTURE_BUDGET_MS (500 ms, measured " +
 		"in the PR); that wall bound is always live, and a capture it abandons " +
 		"installs nothing once the host has written.",
 	"call:clients/runtime-tool-call.ts#handleToolCallImpl:c06d5cf4~a6535d16":
