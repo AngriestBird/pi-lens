@@ -202,10 +202,6 @@ describe("read-bridge", () => {
 
 	// ── Bridge metadata ──────────────────────────────────────────────────────
 
-	it("bridge is defined after registration", () => {
-		expect((globalThis as any)[READ_BRIDGE_KEY]).toBeDefined();
-	});
-
 	it("bridge.version is 1", () => {
 		const bridge: ReadBridge = (globalThis as any)[READ_BRIDGE_KEY];
 		expect(bridge.version).toBe(1);
