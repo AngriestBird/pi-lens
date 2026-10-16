@@ -870,6 +870,11 @@ function handle(raw) {
 	}
 	if (data.method === "textDocument/didChange") {
 		const text = data.params?.contentChanges?.at(-1)?.text;
+		// #4528 r1 F1: a server that dies on reading one change (after the
+		// trace line), so a request queued behind it can never be answered.
+		const exitMarker = process.env.FAKE_LSP_EXIT_ON_CHANGE_TEXT;
+		if (exitMarker && typeof text === "string" && text.includes(exitMarker))
+			process.exit(0);
 		if (typeof text === "string") {
 			openDocuments.set(data.params?.textDocument?.uri, text);
 		}
@@ -1160,13 +1165,18 @@ function handle(raw) {
 				return;
 			}
 			const uri = process.env.FAKE_LSP_WORKSPACE_DIAGNOSTIC_URI;
-			send({
-				jsonrpc: "2.0",
-				id: data.id,
-				result: {
-					items: uri ? [{ uri, kind: "full", items: [] }] : [],
-				},
-			});
+			// #4528 r1 F3: the closed-file-cache profile answers a project-wide
+			// pull from the views it holds, one full report per open document.
+			const items = CLOSED_FILE_CACHE
+				? [...openDocuments.keys()].map((open) => ({
+						uri: open,
+						kind: "full",
+						items: checkerDiagnostics(open),
+					}))
+				: uri
+					? [{ uri, kind: "full", items: [] }]
+					: [];
+			send({ jsonrpc: "2.0", id: data.id, result: { items } });
 		};
 		const delay = Number.parseInt(
 			process.env.FAKE_LSP_WORKSPACE_DIAGNOSTIC_DELAY_MS ?? "0",

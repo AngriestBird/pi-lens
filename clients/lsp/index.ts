@@ -3492,11 +3492,23 @@ export class LSPService {
 	 * auxiliaries, the importers and the drift records are left to
 	 * {@link resyncGitChangedFiles}, which the caller runs after this. Never
 	 * spawns: a server not holding the document is excluded.
+	 *
+	 * #4528 r1 F1: each client that took a send then answers one request (its
+	 * liveness probe, waited up to `drainMs`). The writes resolve once the
+	 * bytes are in the pipe, not once the server read them; a server still
+	 * working through earlier changes kept publishing checks computed against
+	 * a dependency's old bytes, and a check read right after the sends took
+	 * one. A reply proves every send before it was processed
+	 * (for a server whose replies are `threaded` it proves only liveness).
+	 * `drained` is false when a probe failed (a server that died) or ran out
+	 * of time.
 	 */
 	async resyncHeldPrimaries(
 		filePaths: readonly string[],
-	): Promise<{ sent: number }> {
+		drainMs: number,
+	): Promise<{ sent: number; drained: boolean }> {
 		let sent = 0;
+		const sentTo = new Map<string, LSPClientInfo>();
 		for (const filePath of filePaths) {
 			if (this.checkDestroyed()) break;
 			const servers = getServersForFileWithConfig(filePath);
@@ -3518,8 +3530,28 @@ export class LSPService {
 				excludeServerIds: exclude,
 			});
 			sent += 1;
+			for (const server of servers) {
+				if (exclude.has(server.id)) continue;
+				const root = await this.clientRegistry.resolveServerRoot(
+					server,
+					filePath,
+				);
+				const key = root ? `${server.id}:${normalizeMapKey(root)}` : undefined;
+				const client = key ? this.state.clients.get(key) : undefined;
+				if (key && client) sentTo.set(key, client);
+			}
 		}
-		return { sent };
+		if (sentTo.size === 0) return { sent, drained: true };
+		const answers = await Promise.all(
+			[...sentTo.values()].map(async (client) => {
+				try {
+					return (await client.pingLiveness?.(drainMs)) ?? true;
+				} catch {
+					return false;
+				}
+			}),
+		);
+		return { sent, drained: answers.every(Boolean) };
 	}
 
 	/**

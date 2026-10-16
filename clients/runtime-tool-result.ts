@@ -236,10 +236,16 @@ const HEAD_MOVE_PRIMARY_CAP = 64;
 async function sendToHeldPrimaries(
 	root: string,
 	candidates: readonly string[],
-): Promise<{ targets: string[]; primary: number; failed: boolean }> {
+	drainMs: number,
+): Promise<{
+	targets: string[];
+	primary: number;
+	failed: boolean;
+	drained: boolean;
+}> {
 	const service = peekLSPService();
 	if (!service || candidates.length === 0)
-		return { targets: [], primary: 0, failed: false };
+		return { targets: [], primary: 0, failed: false, drained: true };
 	const held = new Set(service.getOpenDocumentPaths(root));
 	const targets = (
 		await Promise.all(
@@ -255,14 +261,16 @@ async function sendToHeldPrimaries(
 			}),
 		)
 	).filter((filePath): filePath is string => filePath !== undefined);
-	if (targets.length === 0) return { targets, primary: 0, failed: false };
+	if (targets.length === 0)
+		return { targets, primary: 0, failed: false, drained: true };
 	try {
-		const { sent } = await service.resyncHeldPrimaries(
+		const { sent, drained } = await service.resyncHeldPrimaries(
 			targets.slice(0, HEAD_MOVE_PRIMARY_CAP),
+			drainMs,
 		);
-		return { targets, primary: sent, failed: false };
+		return { targets, primary: sent, failed: false, drained };
 	} catch {
-		return { targets, primary: 0, failed: true };
+		return { targets, primary: 0, failed: true, drained: false };
 	}
 }
 
@@ -338,7 +346,13 @@ async function lookAtHead(args: HeadLook): Promise<void> {
 		targets,
 		primary,
 		failed: resyncFailed,
-	} = await sendToHeldPrimaries(args.root, inDelta);
+		drained,
+	} = await sendToHeldPrimaries(
+		args.root,
+		inDelta,
+		// The tool_call bound around the look; past it the wait is cut anyway.
+		HOOK_WALL_BUDGET_MS.tool_result_read_only,
+	);
 	const primaryMs = Date.now() - started;
 	const report = (
 		dispositions: ReadonlyMap<string, string> | undefined,
@@ -366,6 +380,7 @@ async function lookAtHead(args: HeadLook): Promise<void> {
 				current: inDelta.length - targets.length,
 				primary,
 				primaryMs,
+				drained,
 				resynced: count("resynced"),
 				deferred: count("deferred"),
 				failed: count("failed"),
@@ -2016,15 +2031,27 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		const opaqueSet = new Set(opaquePaths);
 		const written = [...recognizedWritten, ...opaquePaths];
 		// #4507: every file the command wrote reaches the primary servers that
-		// hold it before this result returns and before the synthetic dispatches
-		// below. They run one file at a time, so without this a dependent
-		// dispatched ahead of its dependency was checked against the
-		// dependency's old bytes (a phantom STOP). The full resync of the opaque
-		// paths (auxiliaries, held importers, drift records) follows the primary
-		// phase, detached; a phase cut at the bound still hands it over.
+		// hold it before the synthetic dispatches below. They run one file at a
+		// time, so without this a dependent dispatched ahead of its dependency
+		// was checked against the dependency's old bytes (a phantom STOP). The
+		// full resync of the opaque paths (auxiliaries, held importers, drift
+		// records) follows the primary phase, detached.
+		//
+		// #4528 r1 F1: the dispatch loop waits for the phase itself, under the
+		// edit budget its dispatches already run under, not the 500 ms read-only
+		// bound: under load the phase outlasted 500 ms, the cut let a.ts be
+		// checked while z.ts was still unsent, and the phantom STOP came back.
+		// A live primary takes the capped sends far inside the budget; one that
+		// does not answers the dispatches after it no better (no verdict).
 		if (workspaceRoot && written.length > 0) {
 			const primaryStarted = Date.now();
-			const primaryPhase = sendToHeldPrimaries(workspaceRoot, written);
+			// The servers must also have READ the sends before a dispatch reads a
+			// check (#4528 r1 F1): resyncHeldPrimaries' drain barrier.
+			const primaryPhase = sendToHeldPrimaries(
+				workspaceRoot,
+				written,
+				HOOK_WALL_BUDGET_MS.tool_result_edit,
+			);
 			if (opaquePaths.length > 0)
 				void primaryPhase
 					.then(() => resyncGitChangedFiles(opaquePaths))
@@ -2034,21 +2061,29 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			// A name of its own: the HEAD look above bounds with the same signal.
 			const primarySignal = deps.signal ?? undefined;
 			const sent = await bounded(primaryPhase, {
-				ms: HOOK_WALL_BUDGET_MS.tool_result_read_only,
+				ms: HOOK_WALL_BUDGET_MS.tool_result_edit,
 				signal: primarySignal,
-				hook: "tool_result_read_only",
+				hook: "tool_result_edit",
 				label: "bash-write-primary-resync",
 			});
 			// One row per bash result that had held documents to resend, or whose
 			// phase failed or was cut ("cut": the bound ended the wait, and its
-			// hook-await-exceeded row names it).
+			// hook-await-exceeded row names it; "undrained": a server did not
+			// answer the drain barrier in time, so a check may predate the sends).
 			if (sent === undefined || sent.failed || sent.targets.length > 0)
 				logLatency({
 					type: "phase",
 					phase: "bash_write_primary_resync",
 					filePath: written.slice(0, 5).join(","),
 					durationMs: Date.now() - primaryStarted,
-					result: sent === undefined ? "cut" : sent.failed ? "failed" : "sent",
+					result:
+						sent === undefined
+							? "cut"
+							: sent.failed
+								? "failed"
+								: sent.drained
+									? "sent"
+									: "undrained",
 					metadata: {
 						written: written.length,
 						opaque: opaquePaths.length,

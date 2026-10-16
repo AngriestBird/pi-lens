@@ -1205,6 +1205,11 @@
 					"value": "TRUE",
 					"test": "tests/clients/head-move-resync-4493.test.ts",
 					"title": "checks a dependent the command rewrote against its rewritten dependency"
+				},
+				"DispatchWaitsPhase": {
+					"value": "TRUE",
+					"test": "tests/clients/head-move-resync-4493.test.ts",
+					"title": "checks a dependent against its rewritten dependency when the primary phase outlasts the read-only bound (%s diagnostics)"
 				}
 			},
 			"notCodeChoice": [

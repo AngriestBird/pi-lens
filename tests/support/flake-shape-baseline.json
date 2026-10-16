@@ -299,6 +299,7 @@
 		"clients/dispatch/runners/helm-lint.test.ts": 1,
 		"clients/dispatch/runners/helm-render.test.ts": 1,
 		"clients/dispatch/runners/runner-helpers.test.ts": 5,
+		"clients/head-move-resync-4493.test.ts": 3,
 		"clients/lazy-import.test.ts": 1,
 		"clients/lsp/client-crash-logging.test.ts": 1,
 		"clients/lsp/client-exit-cause-ledger.test.ts": 1,

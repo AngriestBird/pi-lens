@@ -1039,6 +1039,14 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 	// 2026-09-26 (#3511 review round 3): the quick-mode warmup witness must
 	// run the real warmup timer and background word-index save, which no
 	// test hook awaits.
+	// 2026-10-16 (#4528 r1 F3): the spawn-gate window of a dependency restart
+	// exists only between real server processes, and the tool_call hook bounds
+	// its look, so the restart finishes after the hook returns.
+	"ungoverned-wait-for:clients/head-move-resync-4493.test.ts": {
+		detector: "ungoverned-wait-for",
+		reason:
+			"the restart's spawn-gate window is between real server processes: one server's shutdown, the cache clock, and a restart that ends after the bounded tool_call hook returns expose no awaitable, so vi.waitFor joins them",
+	},
 	"ungoverned-wait-for:clients/word-index-lifecycle.test.ts": {
 		detector: "ungoverned-wait-for",
 		reason:

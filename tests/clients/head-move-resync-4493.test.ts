@@ -1,5 +1,6 @@
 // flake-shape: real-process-spawn — a clean-tree HEAD move exists only in a real repository that git checks out, rebases or resets; a stubbed git could not rewrite the files the language server holds.
 // flake-shape: in-process-mock — a project lsp.json cannot declare an auxiliary server (its role is reserved and inert), so the catalog lookup adds the auxiliary fake for the repositories registered here, and the role lookup (getServerById) answers for it too (#4476); every server is still a real child process on a real stdio wire
+// flake-shape: ungoverned-wait-for — #4528 r1 F3 joins a dependency restart that runs between real server processes and ends after the bounded tool_call hook returns; nothing in it is awaitable.
 /**
  * #4493: a clean-tree HEAD move left held documents stale on the server.
  *
@@ -32,6 +33,7 @@ import {
 } from "vitest";
 import { CacheManager } from "../../clients/cache-manager.js";
 import { hashDiagnosticContent } from "../../clients/lsp/diagnostic-binding.js";
+import { workspaceFileCreatedAtFor } from "../../clients/lsp/workspace-diagnostics-session.js";
 import { flushLatencyLog } from "../../clients/latency-logger.js";
 import { getGlobalPiLensLogDir } from "../../clients/probe-home-state.js";
 import {
@@ -327,14 +329,28 @@ function resultText(
  * index.ts one module-level RuntimeCoordinator serves the primary and every
  * concurrent secondary session, so they share its `sessionGeneration`.
  */
-function session(repo: Repo, sessionId: string, shared?: RuntimeCoordinator) {
+/**
+ * A session's hooks. `parent` makes every call nested under that tool call,
+ * as a codemode script's bash is (`parentToolCallId` on both events).
+ */
+function session(
+	repo: Repo,
+	sessionId: string,
+	shared?: RuntimeCoordinator,
+	parent?: string,
+) {
 	const runtime = shared ?? new RuntimeCoordinator();
 	runtime.projectRoot = repo.dir;
 	if (!shared) runtime.setTelemetryIdentity({ sessionId });
 	let n = 0;
 	const callDeps = (toolName: string, input: unknown, toolCallId: string) =>
 		({
-			event: { toolName, toolCallId, input },
+			event: {
+				toolName,
+				toolCallId,
+				input,
+				...(parent !== undefined && { parentToolCallId: parent }),
+			},
 			ctx: { cwd: repo.dir },
 			lensEnabled: true,
 			getFlag: () => false,
@@ -353,6 +369,7 @@ function session(repo: Repo, sessionId: string, shared?: RuntimeCoordinator) {
 				toolCallId,
 				input: { command },
 				content: [{ type: "text", text: "ok" }],
+				...(parent !== undefined && { parentToolCallId: parent }),
 			},
 			getFlag: () => false,
 			dbg: () => {},
@@ -1190,6 +1207,156 @@ describe("a bash command's writes reach the primaries before its dispatches (#45
 		]);
 	}, 60_000);
 
+	// Recurrence: #4528 r1 F2. A codemode script's bash is a nested call
+	// (parentToolCallId on both events); nothing may key the primary phase on
+	// a top-level call, or a nested sed brings the phantom STOP back.
+	it("checks a dependent a nested bash rewrote against its rewritten dependency", async () => {
+		const repo = await makeRepo(
+			{ "z.ts": TYPES_A, "a.ts": A0, ...NOTES_A },
+			NOTES_B,
+			[],
+			CHECKER,
+		);
+		await hold(repo, ["z.ts", "a.ts"]);
+		const s = session(repo, "s-4528-nested", undefined, "codemode-1");
+
+		const text = await s.bash("sed -i s/a/b/ a.ts z.ts", () => {
+			fs.writeFileSync(repo.file("a.ts"), A1);
+			fs.writeFileSync(repo.file("z.ts"), TYPES_B);
+		});
+
+		expect(text).not.toContain("no exported member");
+		expect(await primaryResyncRows(repo)).toMatchObject([
+			{ result: "sent", metadata: { written: 2, targets: 2, primary: 2 } },
+		]);
+	}, 60_000);
+
+	// Recurrence: #4528 r1 F1. The 500 ms bound cut the primary phase while it
+	// was still sending, and the dispatch loop then checked a.ts before z.ts's
+	// new bytes were on the wire: the #4507 phantom STOP under load. Here the
+	// primary reads its input slowly (each didChange of a 120 KB filler costs
+	// it 120 ms), so the phase outlasts 500 ms on any host.
+	it.each([
+		["push", {}],
+		["pull", { FAKE_LSP_NO_DIAGNOSTIC_PROVIDER: "0" }],
+	] as const)(
+		"checks a dependent against its rewritten dependency when the primary phase outlasts the read-only bound (%s diagnostics)",
+		async (mode, diagnostics) => {
+			const fillers = Array.from(
+				{ length: 10 },
+				(_, i) => `f${String(i).padStart(2, "0")}.ts`,
+			);
+			const big = (tag: string) =>
+				`export const s = ${JSON.stringify(tag.repeat(120 * 1024))};\n`;
+			const repo = await makeRepo(
+				{
+					"z.ts": TYPES_A,
+					"a.ts": A0,
+					...Object.fromEntries(fillers.map((name) => [name, big("a")])),
+					...NOTES_A,
+				},
+				NOTES_B,
+				[],
+				{ ...CHECKER, FAKE_LSP_CHANGE_COST_MS: "120", ...diagnostics },
+			);
+			const order = ["a.ts", ...fillers, "z.ts"];
+			await hold(repo, order);
+			const s = session(repo, `s-4528-cut-${mode}`);
+			const mark = traceLines(repo).length;
+
+			const text = await s.bash(`sed -i s/a/b/ ${order.join(" ")}`, () => {
+				fs.writeFileSync(repo.file("a.ts"), A1);
+				for (const name of fillers) fs.writeFileSync(repo.file(name), big("b"));
+				fs.writeFileSync(repo.file("z.ts"), TYPES_B);
+			});
+
+			expect(text).not.toContain("no exported member");
+			if (mode === "pull") {
+				// The wire: a.ts's first pull came after z.ts's new bytes.
+				const after = (await wire(repo, "z.ts")).slice(mark);
+				const zSent = after.indexOf(textLine(repo, "z.ts"));
+				const aPull = `recv textDocument/diagnostic ${pathToFileURL(repo.file("a.ts")).href}`;
+				expect(zSent).toBeGreaterThanOrEqual(0);
+				expect(after.indexOf(aPull)).toBeGreaterThan(zSent);
+			}
+			expect(await primaryResyncRows(repo)).toMatchObject([
+				{ result: "sent", metadata: { targets: 12, primary: 12 } },
+			]);
+		},
+		120_000,
+	);
+
+	// Recurrence: #4528 r1 F1, the second half. A send resolves once its bytes
+	// are in the pipe, not once the server read them. This primary reads its
+	// input at once and works through it slowly (150 ms a change), republishing
+	// every open document after each change, so right after the sends it is
+	// still publishing a.ts checked against z.ts's old bytes. The phase ends
+	// with a request each server answers only after the sends before it.
+	it("checks a dependent against its rewritten dependency while the primary is still working through the command's sends", async () => {
+		const fillers = Array.from(
+			{ length: 8 },
+			(_, i) => `g${String(i).padStart(2, "0")}.ts`,
+		);
+		const repo = await makeRepo(
+			{
+				"z.ts": TYPES_A,
+				"a.ts": A0,
+				...Object.fromEntries(
+					fillers.map((name) => [name, "export const v = 0;\n"]),
+				),
+				...NOTES_A,
+			},
+			NOTES_B,
+			[],
+			{
+				...CHECKER,
+				FAKE_LSP_NOTIFY_BACKLOG_WEDGE: "100000",
+				FAKE_LSP_NOTIFY_COST_MS: "0",
+				FAKE_LSP_CHANGE_COST_MS: "150",
+			},
+		);
+		const order = ["a.ts", ...fillers, "z.ts"];
+		await hold(repo, order);
+		const s = session(repo, "s-4528-backlog");
+
+		const text = await s.bash(`sed -i s/0/1/ ${order.join(" ")}`, () => {
+			fs.writeFileSync(repo.file("a.ts"), A1);
+			for (const name of fillers)
+				fs.writeFileSync(repo.file(name), "export const v = 1;\n");
+			fs.writeFileSync(repo.file("z.ts"), TYPES_B);
+		});
+
+		expect(text).not.toContain("no exported member");
+		expect(await primaryResyncRows(repo)).toMatchObject([
+			{ result: "sent", metadata: { targets: 10, primary: 10 } },
+		]);
+	}, 120_000);
+
+	// Recurrence: the degraded half of #4528 r1 F1. A primary that never
+	// answers the drain request (here it dies on reading the first new bytes) may
+	// still be serving checks from before the sends; that must be on record,
+	// and no check may read clean.
+	it("records an undrained phase and reads nothing clean when the primary dies before answering the drain request", async () => {
+		const repo = await makeRepo(
+			{ "z.ts": TYPES_A, "a.ts": A0, ...NOTES_A },
+			NOTES_B,
+			[],
+			{ ...CHECKER, FAKE_LSP_EXIT_ON_CHANGE_TEXT: "isChatModelConfig" },
+		);
+		await hold(repo, ["a.ts", "z.ts"]);
+		const s = session(repo, "s-4528-undrained");
+
+		const text = await s.bash("sed -i s/a/b/ a.ts z.ts", () => {
+			fs.writeFileSync(repo.file("a.ts"), A1);
+			fs.writeFileSync(repo.file("z.ts"), TYPES_B);
+		});
+
+		expect(await primaryResyncRows(repo)).toMatchObject([
+			{ result: "undrained", metadata: { targets: 2 } },
+		]);
+		expect(text).not.toContain("JavaScript/TypeScript clean");
+	}, 60_000);
+
 	// Recurrence: #4507's opaque half. An unrecognized command's dirty paths
 	// were resent to the servers detached, after the dispatch loop had already
 	// checked them one at a time.
@@ -1532,6 +1699,47 @@ describe("a change pi-lens sees only on disk reaches the servers and the cache (
 		}
 	}, 60_000);
 
+	// Recurrence: #4528 r1 F2. A codemode script's `npm install` is a nested
+	// bash (parentToolCallId on both events); its result must look for the
+	// install like a top-level one.
+	it("restarts the server after a dependency install a nested bash ran", async () => {
+		const repo = await makeRepo(
+			{
+				...IGNORE,
+				"a.ts": USES_DEP,
+				"node_modules/dep/index.d.ts": "export type Cfg = { a: string };\n",
+				"node_modules/.package-lock.json": '{"v":1}\n',
+				...NOTES[0],
+			},
+			NOTES[1],
+			[],
+			CHECKER,
+		);
+		const s = session(repo, "s-4528-nested-install", undefined, "codemode-2");
+		expect(await diagnose(repo, repo.file("a.ts"))).toContain(
+			"has no exported member 'Cfg2'",
+		);
+		await s.bash("ls", () => {});
+
+		await s.bash("npm install dep@2", () => {
+			fs.writeFileSync(
+				repo.file("node_modules/dep/index.d.ts"),
+				"export type Cfg2 = { b: number };\n",
+			);
+			fs.writeFileSync(
+				repo.file("node_modules/.package-lock.json"),
+				'{"v":2}\n',
+			);
+		});
+
+		expect(await diagnose(repo, repo.file("a.ts"))).not.toContain(
+			"no exported member",
+		);
+		expect(await outOfBandRows(repo)).toMatchObject([
+			{ result: "install", metadata: { trigger: "tool_result", restarted: 1 } },
+		]);
+	}, 60_000);
+
 	// Recurrence: #4476 F5/F12. An install made outside pi is seen at the next
 	// tool_call, and two sessions on one root share the server: the install
 	// restarts it once, not once per session.
@@ -1572,6 +1780,107 @@ describe("a change pi-lens sees only on disk reaches the servers and the cache (
 		expect(await outOfBandRows(repo)).toMatchObject([
 			{ result: "install", metadata: { trigger: "tool_call", restarted: 1 } },
 		]);
+	}, 60_000);
+
+	// Recurrence: #4528 r1 F3, refuted and pinned. The install moves the cache
+	// clock, then the restart waits on the spawn gate (here behind another
+	// root's restart, whose server ignores shutdown). A project-wide pull
+	// started in that wait reads the old server's view, with a stamp newer
+	// than the clock; the read after the restart must still not serve it.
+	// (lsp_diagnostics' own per-file pulls take their leases through the same
+	// gate, behind the restart, so they get the new server.)
+	it("refuses an entry the old server answered while the restart waited for the spawn gate", async () => {
+		const previousPull = process.env.PI_LENS_LSP_WORKSPACE_PULL;
+		process.env.PI_LENS_LSP_WORKSPACE_PULL = "1";
+		try {
+			const slow = await makeRepo(
+				{
+					...IGNORE,
+					"b.ts": "export {};\n",
+					"pnpm-lock.yaml": "v: 1\n",
+					...NOTES[0],
+				},
+				NOTES[1],
+				[],
+				{ FAKE_LSP_IGNORE_SHUTDOWN: "1" },
+			);
+			const repo = await makeRepo(
+				{
+					...IGNORE,
+					"a.ts": USES_DEP,
+					"node_modules/dep/index.d.ts": "export type Cfg = { a: string };\n",
+					"node_modules/.package-lock.json": '{"v":1}\n',
+					...NOTES[0],
+				},
+				NOTES[1],
+				[],
+				{
+					...CHECKER,
+					FAKE_LSP_NO_DIAGNOSTIC_PROVIDER: "0",
+					FAKE_LSP_WORKSPACE_DIAGNOSTICS: "1",
+				},
+			);
+			await hold(slow, ["b.ts"]);
+			const first = session(slow, "s-4528-f3-slow");
+			const second = session(repo, "s-4528-f3");
+			expect(await diagnose(repo, repo.file("a.ts"))).toContain(
+				"has no exported member 'Cfg2'",
+			);
+			await first.read(slow.file("b.ts"));
+			await second.read(repo.file("a.ts"));
+
+			fs.writeFileSync(slow.file("pnpm-lock.yaml"), "v: 2\n");
+			fs.writeFileSync(
+				repo.file("node_modules/dep/index.d.ts"),
+				"export type Cfg2 = { b: number };\n",
+			);
+			fs.writeFileSync(
+				repo.file("node_modules/.package-lock.json"),
+				'{"v":2}\n',
+			);
+			// The slow root's restart holds the spawn gate through its shutdown.
+			const slowLook = first.read(slow.file("b.ts"));
+			await vi.waitFor(() =>
+				expect(traceLines(slow)).toContain("recv shutdown"),
+			);
+			const clock = () =>
+				workspaceFileCreatedAtFor(
+					() => false,
+					() => false,
+				);
+			const before = clock();
+			const look = second.read(repo.file("a.ts"));
+			await vi.waitFor(() => expect(clock()).toBeGreaterThan(before));
+			// The install is noted; the restart waits behind the slow one.
+			const service = await lspService();
+			const sweep = async () =>
+				JSON.stringify(
+					(
+						await service.runWorkspaceDiagnostics(repo.dir, {
+							files: [repo.file("a.ts")],
+						})
+					).map((result) => result.diagnostics.map((d) => d.message)),
+				);
+			const during = await sweep();
+			await Promise.all([slowLook, look]);
+			// The hooks bound their looks; the restarts finish after them.
+			await vi.waitFor(
+				async () =>
+					expect(await outOfBandRows(repo)).toMatchObject([
+						{ result: "install", metadata: { restarted: 1 } },
+					]),
+				{ timeout: 15_000 },
+			);
+
+			expect(during).toContain("no exported member");
+			expect(await diagnose(repo, repo.file("a.ts"))).not.toContain(
+				"no exported member",
+			);
+		} finally {
+			if (previousPull === undefined)
+				delete process.env.PI_LENS_LSP_WORKSPACE_PULL;
+			else process.env.PI_LENS_LSP_WORKSPACE_PULL = previousPull;
+		}
 	}, 60_000);
 
 	// Recurrence: the walk's cost at every tool_call. Within the interval a

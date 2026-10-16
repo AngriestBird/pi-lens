@@ -361,16 +361,23 @@ E reads the primary with `d2` stale. This is the live F1 run.
 dependent `a` that imports a name the command adds to `z`. The tool_result
 dispatches each written file in turn, in either order; a dispatch sends its
 file and reads the primary's check of it, which reads every held view.
-`WritesPrimaryFirst` TRUE is the fix: every written held document whose sent
-bytes differ goes to the primary first, awaited (`sendToHeldPrimaries`). The
-primary phase is assumed to fit in the hook bound; a cut phase is disclosed
-by the `bash_write_primary_resync` row.
+`WritesPrimaryFirst` TRUE is the #4507 fix: the written held documents go to
+the primary first, one at a time (`sendToHeldPrimaries`). `DispatchWaitsPhase`
+TRUE is the #4528 r1 F1 fix: the dispatch loop waits for that phase under the
+edit budget. FALSE is round 1, where a 500 ms bound could end the wait
+(`PhaseCut`) while the phase still sent, and the dependent was checked before
+the dependency's new bytes went out. A primary may wedge at any time (`Wedge`):
+its views stop changing and it answers no check. Under `DispatchWaitsPhase`
+only a wedged primary outlasts the wait (`EditCut`); the model assumes a live
+primary takes the capped sends inside the edit budget.
 
 - `NoPhantomFinding`: no dispatch checks a file against a held document's old
   bytes.
-- `SettledFresh`: once the result is done, the primary holds the disk bytes.
+- `SettledFresh`: once the result is done, a live primary holds the disk
+  bytes.
 
 | Config | Expect | TLC | States |
 |---|---|---|---|
-| `BashWriteFix` | pass | pass | 9 |
-| `BashWritePreFix` | violated NoPhantomFinding (before #4507) | violated | 4 |
+| `BashWriteFix` | pass | pass | 62 |
+| `BashWritePreFix` | violated NoPhantomFinding (before #4507) | violated | 6 |
+| `BashWritePhaseCut` | violated NoPhantomFinding (#4528 r1, the 500 ms cut) | violated | 15 |
