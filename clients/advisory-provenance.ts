@@ -319,12 +319,6 @@ const MAX_LOGGED_DEAD_PATHS = 3;
 export type FindingPathFreshness = "live" | "stale" | "missing" | "unknown";
 
 /**
- * Existence-only verdict, kept as the name #1460's callers and tests use. It is
- * the subset of `FindingPathFreshness` that carries no staleness arm.
- */
-export type FindingPathExistence = "live" | "missing" | "unknown";
-
-/**
  * What a store means by "the cited file is gone".
  *
  * `drop` is right when the finding IS the file's content: a secret in a deleted
@@ -413,13 +407,6 @@ function freshnessFromFacts(
 	}).verdict === "stale"
 		? "stale"
 		: "live";
-}
-
-/** Existence-only probe. Retained for callers that have no scan timestamp. */
-export function findingPathExistence(
-	resolvedPath: string,
-): FindingPathExistence {
-	return findingPathFreshness(resolvedPath) as FindingPathExistence;
 }
 
 /**
