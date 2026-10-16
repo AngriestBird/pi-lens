@@ -31,6 +31,7 @@ import {
 import { getProjectDataDir } from "../../../clients/file-utils.js";
 import { MTIME_DRIFT_TOLERANCE_MS } from "../../../clients/blocker-freshness.js";
 import { hashDiagnosticContent } from "../../../clients/lsp/diagnostic-binding.js";
+import { hashFileBytes } from "../../../clients/content-stamp.js";
 import {
 	PROJECT_SNAPSHOT_VERSION,
 	saveProjectSnapshot,
@@ -86,6 +87,42 @@ describe("loadWorkspaceDiagnosticsCache / saveWorkspaceDiagnosticsCache (#671)",
 		});
 		const loaded = loadWorkspaceDiagnosticsCache(tmp);
 		expect(loaded?.entries["/a.ts"]).toEqual(entry);
+	});
+
+	it("parses and compares a current-version cache fixture from master", () => {
+		const filePath = path.join(tmp, "a.ts");
+		fs.writeFileSync(filePath, "const a = 1;\n");
+		const stat = fs.statSync(filePath);
+		const key = cacheKeyFor(filePath);
+		const cachePath = path.join(
+			getProjectDataDir(tmp),
+			"cache",
+			"lsp-workspace-diagnostics.json",
+		);
+		fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+		// Literal v4 record shape from master: no content stamp was required.
+		fs.writeFileSync(
+			cachePath,
+			JSON.stringify({
+				version: WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
+				entries: {
+					[key]: {
+						diagnostics: [],
+						count: 0,
+						mtimeMs: stat.mtimeMs,
+						scannedAt: Date.now(),
+						scopeKey: "all|",
+						depIndexAtScan: false,
+						sizeBytes: stat.size,
+					},
+				},
+			}),
+		);
+
+		const loaded = loadWorkspaceDiagnosticsCache(tmp);
+		const entry = loaded?.entries[key];
+		expect(entry).toBeDefined();
+		expect(isEntryFresh(filePath, entry!, () => undefined)).toBe(true);
 	});
 
 	it("records content and scan freshness without duplicate provenance", () => {
@@ -264,6 +301,22 @@ describe("isEntryFresh (#671)", () => {
 			sizeBytes: stat.size,
 			scannedAt: Date.now(),
 		});
+		expect(isEntryFresh(filePath, entry, () => undefined)).toBe(true);
+	});
+
+	// #4541: a confirmed cache entry whose bytes are stamped must survive an
+	// external touch; strict mtime equality used to discard unchanged content.
+	it("stays fresh when touch changes only mtime and stamped content is unchanged", () => {
+		const original = fs.statSync(filePath);
+		const entry = makeEntry({
+			mtimeMs: original.mtimeMs,
+			sizeBytes: original.size,
+			contentHash: hashFileBytes(filePath),
+			scannedAt: Date.now(),
+		});
+		const touchedAt = original.mtimeMs + 1000;
+		fs.utimesSync(filePath, new Date(touchedAt), new Date(touchedAt));
+
 		expect(isEntryFresh(filePath, entry, () => undefined)).toBe(true);
 	});
 
@@ -455,6 +508,26 @@ describe("WorkspaceDiagnosticsCacheContext (#671)", () => {
 		expect(fs.statSync(filePath).size).not.toBe(stat.size);
 
 		expect(ctx.lookup(filePath, "all|")).toBeUndefined();
+	});
+
+	it("does not discard a stamped cache entry when touch changes only mtime", () => {
+		const filePath = path.join(tmp, "a.ts");
+		fs.writeFileSync(filePath, "const a = 1;\n");
+		const original = fs.statSync(filePath);
+		const ctx = createWorkspaceDiagnosticsCacheContext(tmp);
+		ctx.record(
+			filePath,
+			"all|",
+			[],
+			original.mtimeMs,
+			hashFileBytes(filePath),
+			original.size,
+		);
+
+		const touchedAt = original.mtimeMs + 1000;
+		fs.utimesSync(filePath, new Date(touchedAt), new Date(touchedAt));
+
+		expect(ctx.lookup(filePath, "all|")).toBeDefined();
 	});
 
 	it("a lookup under a DIFFERENT scopeKey never sees an entry recorded under another scope", () => {
