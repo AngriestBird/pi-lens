@@ -50,6 +50,23 @@ import {
 	resetDegradationLedger,
 } from "../../../clients/degradation-ledger.js";
 
+// F-4551-5: observe reads at the host boundary instead of through atime. A
+// noatime mount and Windows (NTFS last-access updates off by default) leave
+// atimeMs unchanged after a real read, so the old control read reddened a
+// correct no-read path. `node:fs` is the process/host boundary the counting
+// wrapper stands on; the target path and counter live in `vi.hoisted` because
+// the `vi.mock` factory is hoisted above this module's imports.
+const contentReads = vi.hoisted(() => ({ target: "", count: 0 }));
+
+vi.mock("node:fs", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:fs")>();
+	const readFileSync = ((...args: Parameters<typeof actual.readFileSync>) => {
+		if (String(args[0]) === contentReads.target) contentReads.count += 1;
+		return actual.readFileSync(...args);
+	}) as typeof actual.readFileSync;
+	return { ...actual, readFileSync };
+});
+
 let tmp: string;
 
 beforeEach(() => {
@@ -345,14 +362,18 @@ describe("isEntryFresh (#671)", () => {
 			contentHash: hashFileBytes(filePath),
 			scannedAt: Date.now(),
 		});
-		// An ancient access time makes an actual read observable under relatime.
+		// A stamped touch: mtime moved, size over the hash budget. The budget
+		// guard must refuse without hashing the bytes.
 		fs.utimesSync(filePath, 1, (original.mtimeMs + 1000) / 1000);
-		const accessBefore = fs.statSync(filePath).atimeMs;
+		contentReads.target = filePath;
+		contentReads.count = 0;
 		const fresh = isEntryFresh(filePath, entry, () => undefined);
-		expect(fs.statSync(filePath).atimeMs).toBe(accessBefore);
+		expect(contentReads.count).toBe(0);
 		expect(fresh).toBe(false);
+		// Control: the counter observes a real read of the same path.
 		fs.readFileSync(filePath);
-		expect(fs.statSync(filePath).atimeMs).not.toBe(accessBefore);
+		expect(contentReads.count).toBe(1);
+		contentReads.target = "";
 	});
 
 	it("keeps failing OPEN to mtime-only for a legacy entry with no sizeBytes field at all", () => {

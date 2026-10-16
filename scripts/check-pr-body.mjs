@@ -1814,9 +1814,17 @@ function lintBehaviorEquivalence(body, headings, title) {
 			!/^\s*\|?(?:\s*:?-+:?\s*\|)+\s*$/.test(sectionLines[index + 1])
 		)
 			continue;
-		for (const rowLine of sectionLines.slice(index + 2)) {
-			const row = behaviorTableCells(rowLine);
-			if (!row || row.length < headers.length) continue;
+		// The table ends at the first line that is not a table row: a blank line,
+		// prose, or the next section. Scanning past it would read a later,
+		// unrelated table's cells (even its header) as this table's data row.
+		for (
+			let rowIndex = index + 2;
+			rowIndex < sectionLines.length;
+			rowIndex += 1
+		) {
+			const row = behaviorTableCells(sectionLines[rowIndex]);
+			if (!row) break;
+			if (row.length < headers.length) continue;
 			if (
 				![site, before, after].some((column) =>
 					isBehaviorEquivalencePlaceholder(row[column]),

@@ -3109,6 +3109,30 @@ describe("PR body lint (#1844)", () => {
 		).toEqual({ valid: true, errors: [] });
 	});
 
+	// F-4551-4: the row scan ran to the end of the section instead of stopping
+	// at the table's edge, so an empty equivalence table passed when a later,
+	// unrelated table happened to have three filled cells (its header line
+	// counted as a data row too).
+	it("rejects an empty Behavior equivalence table with a filled table later in the section", () => {
+		const result = lintPrBody(
+			`${body}\n\n## Behavior equivalence\n\n| Site | Before | After |\n| --- | --- | --- |\n\nSome prose.\n\n| Step | Input | Output |\n| --- | --- | --- |\n| build | source | bundle |`,
+			{ title: "refactor(freshness): fold stamps" },
+		);
+		expect(result.valid).toBe(false);
+		expect(result.errors.join(" ")).toContain(
+			'"## Behavior equivalence" must contain a markdown table',
+		);
+	});
+
+	it("still accepts a filled Behavior equivalence table followed by prose and another table", () => {
+		expect(
+			lintPrBody(
+				`${body}\n\n## Behavior equivalence\n\n| Site | Before | After |\n| --- | --- | --- |\n| cache | mtime > stamp | freshnessFromMtime(..., 0) |\n\nSome prose.\n\n| Step | Input | Output |\n| --- | --- | --- |\n| build | source | bundle |`,
+				{ title: "refactor(freshness): fold stamps" },
+			),
+		).toEqual({ valid: true, errors: [] });
+	});
+
 	it("does not require Behavior equivalence for a fix title", () => {
 		expect(
 			lintPrBody(body, { title: "fix(freshness): preserve stamps" }),
