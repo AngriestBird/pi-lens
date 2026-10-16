@@ -352,7 +352,13 @@ file-scoped worklist and receives no project-wide scanner output.
     never widened to the file. A skip that defers to another source's
     evidence answers only for what that evidence sees, and only when that
     source answered: an edit-gated primary sees the edit, so a recorded
-    finding outside it stays, and a silent primary sees nothing.
+    finding outside it stays, and a silent primary sees nothing. A recorded
+    finding is judged only by a run of its own runner: one that would defer
+    to a source whose copy has another identity runs while it holds a
+    recorded finding there, or nothing could retire one it cannot place. A
+    kept entry with no place in a write's bytes is recorded as such
+    (`positionStale`), never inferred later from one line's hash, and a line
+    with no word character owes nothing by its text.
     Enforced by `tests/clients/dispatch/runners/run-outcome-ratchet.test.ts`,
     `tests/clients/dispatch/runners/parsed-nothing-sweep.test.ts` and
     `tests/clients/delivery-surface-ratchet.test.ts` (partial: no detector
