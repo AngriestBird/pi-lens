@@ -235,7 +235,13 @@ describe("ci.yml Windows subset floor, executed (#4518)", () => {
 		["below the floor", `      Tests  ${floor - 1} passed (${floor - 1})\n`],
 		["no log at all", null],
 	])("reds a green outcome when the log shows: %s", (_label, log) => {
-		expect(leg("success", log).status).toBe(1);
+		const result = leg("success", log);
+		expect(result.status).toBe(1);
+		// The named reason must survive: dropping `|| true` aborts the assignment
+		// under `bash -e` with the same status but no floor annotation.
+		expect(result.stderr).toContain(
+			"::error title=nightly evaluated floor::windows-vitest:",
+		);
 	});
 
 	it("passes a green outcome that executed at least the floor", () => {
