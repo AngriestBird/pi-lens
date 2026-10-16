@@ -385,6 +385,11 @@ describe("tool-state matrix (#4522)", () => {
 							: cell.name;
 					it(`${label} reads ${cell.expect}`, { timeout: 30000 }, async () => {
 						vi.resetModules();
+						const { resetGoAvailability } =
+							await import("../../../clients/go-client.js");
+						// Go availability is process-scoped; reset the singleton before
+						// loading the runner graph so every import shares this instance.
+						resetGoAvailability();
 						const dispatcher =
 							await import("../../../clients/dispatch/dispatcher.js");
 						const { registerDefaultRunners } =
