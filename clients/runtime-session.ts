@@ -1924,7 +1924,6 @@ function scheduleDeferredToolProbes(
 	deps: SessionStartDeps,
 	languageProfile: ReturnType<typeof detectProjectLanguageProfile>,
 	startupDefaults: string[],
-	startupScansWillRun: boolean,
 	dbg: SessionStartDeps["dbg"],
 ): void {
 	// #2467: same deferral as `scheduleStartupScans` — the probes were already
@@ -1943,7 +1942,6 @@ function scheduleDeferredToolProbes(
 			resolved,
 			languageProfile,
 			startupDefaults,
-			startupScansWillRun,
 			dbg,
 		);
 	})();
@@ -1954,10 +1952,9 @@ function scheduleDeferredToolProbesWithClients(
 	deps: BootstrapResolvedDeps,
 	languageProfile: ReturnType<typeof detectProjectLanguageProfile>,
 	startupDefaults: string[],
-	startupScansWillRun: boolean,
 	dbg: SessionStartDeps["dbg"],
 ): void {
-	const { biomeClient, ruffClient, depChecker } = deps;
+	const { biomeClient, ruffClient } = deps;
 	const defaultTools = new Set(startupDefaults);
 	const probes: Array<[name: string, run: () => Promise<boolean>]> = [];
 
@@ -1969,9 +1966,6 @@ function scheduleDeferredToolProbesWithClients(
 	}
 	if (languageProfile.present.python && !defaultTools.has("ruff")) {
 		probes.push(["ruff", () => ruffClient.ensureAvailable()]);
-	}
-	if (startupScansWillRun) {
-		probes.push(["madge", () => depChecker.ensureAvailable()]);
 	}
 
 	if (probes.length === 0) {
@@ -3210,18 +3204,8 @@ export async function handleSessionStart(
 		deps.projectConfig?.startup?.scans?.enabled ??
 		deps.globalConfig?.startup?.scans?.enabled ??
 		true;
-	const startupScansWillRun =
-		allowBootstrapTasks && startupScan.canWarmCaches && startupScansEnabled;
-	const jstsHeavyScansWillRun =
-		startupScansWillRun && canRunStartupHeavyScans(languageProfile, "jsts");
 	if (allowBootstrapTasks) {
-		scheduleDeferredToolProbes(
-			deps,
-			languageProfile,
-			startupDefaults,
-			jstsHeavyScansWillRun,
-			dbg,
-		);
+		scheduleDeferredToolProbes(deps, languageProfile, startupDefaults, dbg);
 		scheduleManagedToolRefresh(dbg);
 	}
 

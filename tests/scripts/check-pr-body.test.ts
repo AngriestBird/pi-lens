@@ -526,7 +526,6 @@ describe("head-tree citations", () => {
 });
 
 describe("test-reference shape and placement", () => {
-	it("A01", () => {});
 	const clean = (extra: string) => lintPrBody(`${body}\n${extra}`);
 	const missing = (result: ReturnType<typeof lintPrBody>, value: string) => {
 		expect(result.valid).toBe(false);
