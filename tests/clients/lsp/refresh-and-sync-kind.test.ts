@@ -799,27 +799,55 @@ describe("#2066 one JS document pass per send", () => {
 		expect(evicted?.lastLine).toBeUndefined();
 	});
 
-	it("walks the document once per didChange, not twice, and builds no per-line array", async () => {
-		const previous =
-			"const value = 1; // padding for a realistic line\n".repeat(4000);
-		const next = `${previous}const tail = 2;\n`;
+	// Recurrence this guards: the pre-fix pair of full-document JS passes (a
+	// newline loop plus a regex `.split` that built one substring per line).
+	// A `\r`-free document now skips the per-character loop entirely (native
+	// `indexOf`, round 2), so its `charCodeAt` visits are ~0 BY DESIGN; the
+	// property that must hold for every document is "no split, no line array".
+	// A document with a `\r` still takes the loop and must stay at one pass.
+	async function probeSend(
+		previous: string,
+		next: string,
+	): Promise<{ passes: number; probe: DocumentScanProbe }> {
 		const state = createMockState({ syncKind: 2 });
 		await handleNotifyChange(state, TEST_FILE, previous);
-
 		const probe = await measureDocumentScans(1024, async () => {
 			await handleNotifyChange(state, TEST_FILE, next);
 		});
+		return {
+			passes: (probe.charCodeAtVisits + probe.splitReceiverChars) / next.length,
+			probe,
+		};
+	}
 
-		// Positive control: the instrument really did observe the one scan.
-		// Without it every bound below passes for free on a no-op.
-		expect(probe.charCodeAtVisits).toBeGreaterThanOrEqual(next.length);
-		// Characters visited by JS, in units of the document. The sha256 (#1095)
-		// is native and outside this count by design. Pre-fix: 2 (newline loop +
-		// regex split). Post-fix: 1.
-		const documentPasses =
-			(probe.charCodeAtVisits + probe.splitReceiverChars) / next.length;
-		expect(documentPasses).toBeLessThan(1.5);
-		// Pre-fix this was one substring per line to read a single line's text.
+	it("builds no split and no per-line array for an LF document, and does not walk it per character", async () => {
+		const previous =
+			"const value = 1; // padding for a realistic line\n".repeat(4000);
+		const { passes, probe } = await probeSend(
+			previous,
+			`${previous}const tail = 2;\n`,
+		);
+		// Pre-fix: 2 JS passes (loop + split). The `indexOf` fast path: ~0.
+		expect(passes).toBeLessThan(0.05);
+		expect(probe.splitReceiverChars).toBe(0);
+		expect(probe.maxSplitResultLength).toBeLessThanOrEqual(1);
+	});
+
+	it("still walks a CRLF document exactly once, with no split and no line array", async () => {
+		const previous =
+			"const value = 1; // padding for a realistic line\r\n".repeat(4000);
+		const { passes, probe } = await probeSend(
+			previous,
+			`${previous}const tail = 2;\r\n`,
+		);
+		// Positive control: the instrument really observes the per-character
+		// loop when it runs. Without it the LF test's ~0 passes would also hold
+		// for an instrument that observes nothing.
+		expect(probe.charCodeAtVisits).toBeGreaterThanOrEqual(
+			previous.length + "const tail = 2;\r\n".length,
+		);
+		expect(passes).toBeLessThan(1.5);
+		expect(probe.splitReceiverChars).toBe(0);
 		expect(probe.maxSplitResultLength).toBeLessThanOrEqual(1);
 	});
 });
