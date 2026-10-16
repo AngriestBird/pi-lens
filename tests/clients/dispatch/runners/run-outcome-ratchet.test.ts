@@ -40,7 +40,6 @@ const NOT_YET_ON_PRIMITIVE: Record<string, string> = {
 	"helm-render.ts": "reads its own exit status; #1737 strangler",
 	"psscriptanalyzer.ts": "reads its own exit status; #1737 strangler",
 	"rust-clippy.ts": "reads its own exit status; #1737 strangler",
-	"shfmt.ts": "reads its own exit status; #1737 strangler",
 	"spotbugs.ts": "reads its own exit status; #1737 strangler",
 };
 

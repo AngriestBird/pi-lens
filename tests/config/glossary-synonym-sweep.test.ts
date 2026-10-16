@@ -1333,7 +1333,8 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/eslint.ts": 3,
 		"clients/dispatch/runners/fact-rules.ts": 2,
 		// #4309: folded unavailable/absent-command exits remove one status use.
-		"clients/dispatch/runners/fish-indent.ts": 5,
+		// 5 -> 6 (#4522): the exitless-run guard reads the exit status once.
+		"clients/dispatch/runners/fish-indent.ts": 6,
 		"clients/dispatch/runners/gleam-check.ts": 7,
 		"clients/dispatch/runners/go-vet.ts": 5,
 		"clients/dispatch/runners/golangci-lint.ts": 4,
