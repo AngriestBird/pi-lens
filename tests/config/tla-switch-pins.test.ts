@@ -73,6 +73,7 @@ const FULLY_PINNED = [
 	"read-guard",
 	"format-drain",
 	"dispatch-pipeline",
+	"blocker-pending",
 	"cascade-delivery",
 ];
 /**
@@ -83,7 +84,7 @@ const FULLY_PINNED = [
  * `DEFERRED_COUNT` as pins land, and a reviewer judges every rise of either.
  */
 const DEFERRED_COUNT = 136;
-const NOT_CODE_CHOICE_COUNT = 216;
+const NOT_CODE_CHOICE_COUNT = 231;
 
 interface PinTest {
 	test: string;

@@ -550,7 +550,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/diagnostic-tracker.ts": 1,
 		"clients/diagnostics-publish.ts": 2,
 		"clients/dispatch/auxiliary-lsp.ts": 3,
-		"clients/dispatch/dispatcher.ts": 16,
+		// 16 -> 17 (#4484): `heldBackBlockers` keeps the blocking findings the
+		// delta calls not new, an `Array.prototype.filter` call, not a delivery
+		// filter.
+		"clients/dispatch/dispatcher.ts": 17,
 		"clients/dispatch/fact-runner.ts": 1,
 		"clients/dispatch/fact-scheduler.ts": 2,
 		"clients/dispatch/facts/function-facts.ts": 2,
@@ -576,9 +579,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/golangci-lint.ts": 1,
 		"clients/dispatch/runners/helm-lint.ts": 1,
 		"clients/dispatch/runners/helm-render.ts": 3,
-		// 4 -> 5 (#4481): the per-edit pass drops an ast-grep LSP blocker on a
-		// line the write did not change (a runner-side scope, not a delivery gate).
-		"clients/dispatch/runners/lsp.ts": 5,
+		// 4 -> 5 (#4481), 5 -> 4 (#4484 r2): the per-edit pass partitions an
+		// ast-grep LSP blocker on an unchanged line into `outOfEditScope` instead
+		// of dropping it, so the scope decides delivery only.
+		"clients/dispatch/runners/lsp.ts": 4,
 		"clients/dispatch/runners/oxlint.ts": 1,
 		"clients/dispatch/runners/prisma-validate.ts": 3,
 		"clients/dispatch/runners/psscriptanalyzer.ts": 1,
@@ -667,7 +671,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/opengrep-client.ts": 2,
 		"clients/path-utils.ts": 1,
 		"clients/persistent-reverify.ts": 4,
-		"clients/pipeline.ts": 4,
+		// 4 -> 6 (#4484): `liveBlockers.filter` and `recordBlockers.filter` split the
+		// live blocking set into the delta's and the held-back ones, two
+		// `Array.prototype.filter` calls, not a delivery filter.
+		"clients/pipeline.ts": 6,
 		"clients/process-snapshot.ts": 5,
 		"clients/project-changes.ts": 3,
 		"clients/project-diagnostics/cache.ts": 2,
@@ -1099,7 +1106,12 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 28 -> 29 (#3814): the deferred-blocker merge derives the map key with
 		// `path.resolve(filePath)`, the expression every sibling method uses.
 		// 29 -> 30 (#4213): the lifecycle identity lookup uses the same map key.
-		"clients/runtime-coordinator.ts": 30,
+		// 30 -> 32 (#4484 r2): the record read for the carry and the settled-run
+		// retire derive the same map key.
+		// 32 -> 33 (#4484 round 4): the anchor moves onto its record, re-set
+		// under the display key every record writer uses; its reads route
+		// through the keyed map.
+		"clients/runtime-coordinator.ts": 33,
 		"clients/runtime-session.ts": 15,
 		// 22 -> 21 (#4137): the baseline slot's `path.resolve` moved into
 		// `opaqueBaselineSlot` (clients/opaque-mutation-scan.ts).
@@ -1136,7 +1148,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/slow-fs.ts": 4,
 		"clients/smells-rollup.ts": 3,
 		"clients/source-filter.ts": 11,
-		"clients/source-walker.ts": 3,
+		// 3 -> 4 (#1979): `DirectoryListing.mayContain` takes the final segment of
+		// the target with `path.basename`, the same call every walker path uses.
+		"clients/source-walker.ts": 4,
 		"clients/spawn-timeout-cooldown.ts": 3,
 		"clients/startup-scan.ts": 11,
 		// 61 -> 66: filesystem ownership/discovery operations plus the alias
@@ -1364,7 +1378,8 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/vale.ts": 4,
 		"clients/dispatch/runners/yamllint.ts": 2,
 		"clients/dispatch/runners/zig-check.ts": 3,
-		"clients/dispatch/types.ts": 5,
+		// 5 -> 6 (#4484 r2): `reachedNoVerdict` reads the runner result's status.
+		"clients/dispatch/types.ts": 6,
 		"clients/file-utils.ts": 2,
 		"clients/finding-delivery-gate.ts": 3,
 		"clients/formatters.ts": 8,

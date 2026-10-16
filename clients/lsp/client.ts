@@ -2178,7 +2178,8 @@ interface SentContentScan {
  * `lsp_document_send` line count, and a `.split(/\r\n|\r|\n/)` in
  * `buildContentChanges` that materialized one substring per line to read the
  * last one. The #1095 sha256 is a third walk and stays; it is native, and it
- * is load-bearing.
+ * is load-bearing. A document with no `\r` is walked natively (`indexOf`)
+ * instead of per character (#2066).
  *
  * The two counts here are deliberately NOT the same number and must not be
  * collapsed into one. `lfNewlineCount` counts `\n` only, because its consumer
@@ -2190,6 +2191,24 @@ interface SentContentScan {
  * terminators went uncounted computes a range ending mid-document.
  */
 function scanSentContent(content: string): SentContentScan {
+	// A document with no `\r` (the common case) has exactly one terminator
+	// kind, so `\n` count == terminator count and the last line starts after
+	// the last `\n`. `indexOf` is native and walks ~10x faster than the
+	// per-character loop below (0.30 vs 3.0 ms on a 1.96 MB document). Any `\r`
+	// falls through to the loop, which owns the `\r\n`/lone-`\r` rules.
+	if (content.indexOf("\r") === -1) {
+		let lfNewlineCount = 0;
+		let start = 0;
+		for (
+			let i = content.indexOf("\n");
+			i !== -1;
+			i = content.indexOf("\n", i + 1)
+		) {
+			lfNewlineCount++;
+			start = i + 1;
+		}
+		return { lfNewlineCount, lastLine: { index: lfNewlineCount, start } };
+	}
 	let lfNewlineCount = 0;
 	let index = 0;
 	let start = 0;

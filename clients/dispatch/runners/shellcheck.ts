@@ -269,6 +269,9 @@ const shellcheckRunner: RunnerDefinition = {
 				// WHO claimed (#3968 F2): declared (the row's own covers, gated
 				// on the custom row's own command) or builtin-fact.
 				claimSource: cover.claimSource,
+				// #4484 round 8: the skip is a verdict only when that server's
+				// lane answers; the dispatcher voids it otherwise.
+				coveredBy: { runnerId: "lsp", serverId: cover.serverId },
 			};
 		}
 
