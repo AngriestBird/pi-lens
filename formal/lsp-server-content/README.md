@@ -7,7 +7,8 @@ the same format `formal/file-locks/README.md` uses, and the `TLA+ models` CI
 job (`node scripts/check-tla-models.mjs`) checks every config against it.
 
 Issues: #3480 (the debounce fingerprint), #3481 (the stale cascade touch),
-#4493 (the HEAD-move resync, `HeadMoveResync.tla`, below).
+#4493 (the HEAD-move resync, `HeadMoveResync.tla` and `HeadMoveHookBound.tla`,
+below).
 
 ## What the model covers
 
@@ -237,24 +238,25 @@ and the server kept the pre-move bytes of every held document.
 - **Moves.** A call's command may check out (the held documents' bytes
   change), commit (HEAD moves, the bytes stay), or do neither. An outside
   move (a terminal, an IDE) does either with no tool event.
-- **Looks** (`resyncHeadMove`, at every bash `tool_call` and `tool_result`).
-  A look has three steps, with each `await` a boundary:
-  1. `Read` takes HEAD (`git rev-parse`, awaited).
+- **Looks** (`resyncHeadMove`, at every `tool_call` and every bash
+  `tool_result`). A look has three steps, with each `await` a boundary:
+  1. `Read` takes HEAD. Since round 2 that is a file read with no await
+     before `Cas`, and `git rev-parse` (awaited) only when the files cannot
+     answer (a reftable ref store); the model keeps the await, a superset.
   2. `Cas` is `observeGitHead`, a synchronous compare-and-set on the
      session's record.
-  3. `Resync` runs only when `Cas` reported a move. It is
-     `resyncGitChangedFiles` with forced passes. It resends the held
+  3. `Resync` runs only when `Cas` reported a move. It resends the held
      documents in the delta whose sent bytes differ from the disk, up to
-     `Cap`, reading the disk as it is at that moment. Then it writes the one
-     `opaque_mutation_head_moved` row.
+     `Cap`, reading the disk as it is at that moment, and writes the one
+     `opaque_mutation_head_moved` row. In the code that is two phases (the
+     primary servers inside the look, then `resyncGitChangedFiles` with
+     forced passes after it, which writes the row); this model collapses
+     them into one step, and `HeadMoveHookBound.tla` splits them.
 - **Serialization.** Looks of one key run one at a time (`Serial`): the code
   runs them under a coalescing `createSingleFlight` per key.
 
-The model does not cover the first-tool-call-per-turn look of a non-bash
-tool. That look is the same look gated by a per-turn flag, and the
-outside-pi test pins it. Nor does it cover the 500 ms hook bound: a bound
-that fires returns the hook while the resync continues, and its row still
-lands.
+The model does not cover the 500 ms hook bound, primary versus auxiliary
+servers, or a non-bash tool reading the view; `HeadMoveHookBound.tla` does.
 
 ### Invariants
 
@@ -301,3 +303,54 @@ row stream is wrong, though, and the record disagrees with HEAD.
 first look is recorded as the session's first HEAD, not as a move. A
 document opened before that first look keeps the pre-move bytes until the
 drift heartbeat. The #4493 PR names this residual.
+
+## HeadMoveHookBound: what the next tool sees when a hook is cut (#4493 r2)
+
+Review r1 F1 found the reported STOP still firing after a 13-file checkout on
+the default stack (typescript plus the ast-grep auxiliary): the tool_result
+returned at its 500 ms bound with `lib/types.ts` stale on the primary.
+`HeadMoveResync.tla` checked freshness only once every look had returned,
+so it had no state where a hook is cut while its look runs on.
+
+### What the model covers
+
+- **One session, two parallel tool calls** of one message: bash `B`, whose
+  command checks out the other branch (both held documents change), and `E`,
+  a read or edit whose dispatch reads the primary's view.
+- **Two views per document**: the primary `P` and an auxiliary scanner `X`.
+- **The look** reads HEAD and compares in one step, then owes sends:
+  `lookQ`, which the waiting hooks wait for, and `tailQ`, detached after it.
+  `PrimaryFirst = TRUE` is the fix (`resyncHeldPrimaries` in the look, then
+  `resyncGitChangedFiles` detached); `FALSE` is round 1 (every server per
+  document inside the look, the drift resync's `clientScope: "all"`).
+- **The bound.** An auxiliary send can stall (the #1714 pacing barrier, up
+  to 2 s); a primary send cannot. A hook waiting on a look may return at its
+  bound only while the look's next send is auxiliary. Assumption: one look's
+  primary sends fit in the bound; a longer primary phase is disclosed by the
+  `hook-await-exceeded` row and the head_moved counts, and is not modelled.
+- **Joining.** `Join = TRUE` is the fix: every tool_call looks, joins a look
+  in flight and reads HEAD again when it ends. `FALSE` is round 1: a
+  non-bash tool_call skipped the look once the turn was marked.
+
+### Invariants
+
+- `EditSeesFreshPrimary`: a tool call that began after the move never reads
+  a stale primary.
+- `SettledFresh`: once every send has run and the move was observed, both
+  servers hold the disk bytes.
+
+### Results
+
+TLC 1.7.4, one worker.
+
+| Config | Expect | TLC | Distinct states |
+|---|---|---|---|
+| `HookBoundFix` | pass | pass | 82 |
+| `HookBoundPreFix` (`PrimaryFirst = Join = FALSE`) | violated EditSeesFreshPrimary | violated | 13 |
+| `HookBoundMutInterleaved` (`PrimaryFirst = FALSE`) | violated EditSeesFreshPrimary | violated | 28 |
+| `HookBoundMutNoJoin` (`Join = FALSE`) | violated EditSeesFreshPrimary | violated | 13 |
+
+**`HookBoundMutInterleaved`**: B's command moves HEAD; E's tool_call starts
+the look; the look sends `P d1` and stalls at `X d1`; the bound returns E;
+E reads the primary with `d2` stale. This is the live F1 run.
+

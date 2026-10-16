@@ -955,6 +955,7 @@ const NON_ENTRY_MEMBERS: Record<string, string> = {
 	notifyExternalFileChange: SYNC,
 	announceCreatedFiles: SYNC,
 	resyncGitChangedFiles: SYNC,
+	resyncHeldPrimaries: SYNC,
 	sweepDocumentDrift: SYNC,
 	_driftTrackedCountForTests: STATUS,
 	openFile: SYNC,

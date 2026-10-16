@@ -1,4 +1,5 @@
 // flake-shape: real-process-spawn — a clean-tree HEAD move exists only in a real repository that git checks out, rebases or resets; a stubbed git could not rewrite the files the language server holds.
+// flake-shape: in-process-mock — a project lsp.json cannot declare an auxiliary server (its role is reserved and inert), so the catalog lookup adds the auxiliary fake for the repositories registered here; every server is still a real child process on a real stdio wire
 /**
  * #4493: a clean-tree HEAD move left held documents stale on the server.
  *
@@ -20,7 +21,15 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import {
+	afterAll,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	vi,
+} from "vitest";
 import { CacheManager } from "../../clients/cache-manager.js";
 import { hashDiagnosticContent } from "../../clients/lsp/diagnostic-binding.js";
 import { flushLatencyLog } from "../../clients/latency-logger.js";
@@ -28,8 +37,10 @@ import { getGlobalPiLensLogDir } from "../../clients/probe-home-state.js";
 import {
 	headRecordKey,
 	observeGitHead,
+	recoverOpaqueChangesViaGit,
 	resetOpaqueMutationState,
 } from "../../clients/opaque-mutation-scan.js";
+import { normalizeMapKey } from "../../clients/path-utils.js";
 import { getProjectChangeLogPath } from "../../clients/project-changes.js";
 import {
 	resetProjectTrust,
@@ -47,6 +58,30 @@ import {
 	cleanupTestEnvironmentsDrained,
 	setupTestEnvironment,
 } from "./test-utils.js";
+
+/**
+ * #4493 r2: the auxiliary scanner a repository's `.ts` files also go to (the
+ * ast-grep slot of the default stack). A project `lsp.json` cannot declare an
+ * auxiliary (its `role` is reserved and inert, clients/lsp/config.ts), so the
+ * catalog lookup adds it for the repositories registered here, the pattern the
+ * #1714 real-stream suites use; every other lookup is the real one.
+ */
+const auxiliaries = vi.hoisted(() => new Map<string, unknown>());
+vi.mock("../../clients/lsp/config.js", async (importOriginal) => {
+	const actual =
+		await importOriginal<typeof import("../../clients/lsp/config.js")>();
+	const { sep } = await import("node:path");
+	return {
+		...actual,
+		getServersForFileWithConfig: (filePath: string) => {
+			const servers = actual.getServersForFileWithConfig(filePath);
+			for (const [dir, aux] of auxiliaries)
+				if (filePath.startsWith(`${dir}${sep}`))
+					return [...servers, aux as (typeof servers)[number]];
+			return servers;
+		},
+	};
+});
 
 const fakeServer = fileURLToPath(
 	new URL("../fixtures/fake-lsp-server.mjs", import.meta.url),
@@ -66,6 +101,23 @@ interface Repo {
 
 let repoCount = 0;
 
+/** Real git in `cwd`, with a fixed identity; its trimmed stdout. */
+function runGit(cwd: string, args: string[]): string {
+	return String(
+		execFileSync("git", args, {
+			cwd,
+			encoding: "utf8",
+			env: {
+				...process.env,
+				GIT_AUTHOR_NAME: "t",
+				GIT_AUTHOR_EMAIL: "t@t.local",
+				GIT_COMMITTER_NAME: "t",
+				GIT_COMMITTER_EMAIL: "t@t.local",
+			},
+		}),
+	).trim();
+}
+
 /**
  * A repository on branch `A` whose branch `B` rewrites `changed`. Both
  * servers are the fake, one for `.ts` and one for `.py` (the non-TypeScript
@@ -74,6 +126,7 @@ let repoCount = 0;
 async function makeRepo(
 	base: Record<string, string>,
 	changed: Record<string, string>,
+	initArgs: string[] = [],
 ): Promise<Repo> {
 	const dir = path.join(env.tmpDir, `repo-${++repoCount}`);
 	const trace = path.join(env.tmpDir, `repo-${repoCount}.trace`);
@@ -123,21 +176,8 @@ async function makeRepo(
 			],
 		}),
 	);
-	const git = (...args: string[]) =>
-		String(
-			execFileSync("git", args, {
-				cwd: dir,
-				encoding: "utf8",
-				env: {
-					...process.env,
-					GIT_AUTHOR_NAME: "t",
-					GIT_AUTHOR_EMAIL: "t@t.local",
-					GIT_COMMITTER_NAME: "t",
-					GIT_COMMITTER_EMAIL: "t@t.local",
-				},
-			}),
-		).trim();
-	git("init", "-q", "-b", "A");
+	const git = (...args: string[]) => runGit(dir, args);
+	git("init", "-q", "-b", "A", ...initArgs);
 	git("add", "-A");
 	git("commit", "-qm", "base");
 	git("branch", "B");
@@ -164,6 +204,45 @@ async function hold(repo: Repo, names: string[]): Promise<void> {
 		await service.touchFile(file, fs.readFileSync(file, "utf8"), {
 			diagnostics: "none",
 			clientScope: "primary",
+			source: "lsp_sync",
+		});
+	}
+}
+
+/**
+ * Give `repo`'s `.ts` files an auxiliary scanner that spends `changeCostMs` of
+ * synchronous work on each didChange, and open `names` on both servers.
+ */
+async function holdWithAuxiliary(
+	repo: Repo,
+	names: string[],
+	changeCostMs: number,
+): Promise<void> {
+	const { spawnFakeLspServer } = await import("../support/fake-lsp-server.js");
+	auxiliaries.set(repo.dir, {
+		id: `fake-aux-${path.basename(repo.dir)}`,
+		name: "fake-aux",
+		role: "auxiliary",
+		extensions: [".ts"],
+		idleEviction: "resident",
+		root: async () => repo.dir,
+		spawn: async () => ({
+			process: await spawnFakeLspServer({
+				cwd: repo.dir,
+				env: {
+					...process.env,
+					FAKE_LSP_CHANGE_COST_MS: String(changeCostMs),
+				},
+			}),
+			source: "test" as const,
+		}),
+	});
+	const service = await lspService();
+	for (const name of names) {
+		const file = repo.file(name);
+		await service.touchFile(file, fs.readFileSync(file, "utf8"), {
+			diagnostics: "none",
+			clientScope: "all",
 			source: "lsp_sync",
 		});
 	}
@@ -315,6 +394,41 @@ async function headMovedRows(
 		.filter((row) => row.metadata.to === to);
 }
 
+/**
+ * The head_moved rows once `count` have landed. The row is written when the
+ * resync's detached second phase (every holding server, the drift records)
+ * ends, after the hook returned.
+ */
+async function settledHeadMovedRows(repo: Repo, count: number, ref = "B") {
+	await expect
+		.poll(async () => (await headMovedRows(repo, ref)).length, {
+			timeout: 30_000,
+			interval: 100,
+		})
+		.toBe(count);
+	return headMovedRows(repo, ref);
+}
+
+/** Every `phase` row in the real latency sink. */
+async function phaseRows(
+	phase: string,
+): Promise<Array<{ filePath: string; metadata: Record<string, unknown> }>> {
+	await flushLatencyLog();
+	const log = path.join(getGlobalPiLensLogDir(), "latency.log");
+	if (!fs.existsSync(log)) return [];
+	return fs
+		.readFileSync(log, "utf8")
+		.split("\n")
+		.filter((line) => line.includes(`"${phase}"`))
+		.map(
+			(line) =>
+				JSON.parse(line) as {
+					filePath: string;
+					metadata: Record<string, unknown>;
+				},
+		);
+}
+
 const TYPES_A =
 	"export function isChatModel(x: unknown): boolean { return !!x; }\n";
 const TYPES_B = `${TYPES_A}export function isChatModelConfig(x: unknown): boolean { return !!x; }\n`;
@@ -380,7 +494,7 @@ describe("a clean-tree HEAD move resyncs held documents (#4493)", () => {
 		// The delta is incoming content: no fileSeq bump, no change-log entry.
 		expect(s.runtime.getFileSeq(repo.file("lib/types.ts"))).toBe(0);
 		expect(fs.existsSync(getProjectChangeLogPath(repo.dir))).toBe(false);
-		const rows = await headMovedRows(repo);
+		const rows = await settledHeadMovedRows(repo, 1);
 		expect(rows).toHaveLength(1);
 		expect(rows[0]).toMatchObject({
 			// The unheld file is in the delta but not resynced: only a held
@@ -395,6 +509,37 @@ describe("a clean-tree HEAD move resyncs held documents (#4493)", () => {
 				failed: 0,
 			},
 		});
+	}, 30_000);
+
+	// Recurrence: review r1 F4's named output reads HEAD from the files git
+	// keeps. A reftable ref store (git 2.45+) keeps no loose or packed ref, so
+	// that read cannot answer; without the `git rev-parse` fallback the
+	// feature would be silently off there. Skipped only where this git cannot
+	// create a reftable repository.
+	const reftable = (() => {
+		try {
+			const probe = path.join(env.tmpDir, "reftable-probe");
+			fs.mkdirSync(probe, { recursive: true });
+			runGit(probe, ["init", "-q", "--ref-format=reftable"]);
+			return true;
+		} catch {
+			return false;
+		}
+	})();
+	it("sends the new bytes before the tool_result in a repository whose refs are a reftable", async (ctx) => {
+		ctx.skip(!reftable, "this git cannot create a reftable repository");
+		const repo = await makeRepo(
+			{ "lib/types.ts": TYPES_A, "main.ts": MAIN },
+			{ "lib/types.ts": TYPES_B },
+			["--ref-format=reftable"],
+		);
+		await hold(repo, ["lib/types.ts", "main.ts"]);
+		const s = session(repo, "s-reftable");
+		const service = await lspService();
+
+		await s.bash("git checkout B", () => repo.git("checkout", "-q", "B"));
+
+		expect(sentDiskBytes(service, repo, "lib/types.ts")).toBe(true);
 	}, 30_000);
 
 	// Recurrence: the probe's rows 3 and 4 plus the reset sibling. Each
@@ -490,7 +635,7 @@ describe("a clean-tree HEAD move resyncs held documents (#4493)", () => {
 		expect(await textSince(repo, mark, "main.ts")).toContain(
 			textLine(repo, "lib/types.ts"),
 		);
-		const rows = await headMovedRows(repo);
+		const rows = await settledHeadMovedRows(repo, 1);
 		expect(rows).toHaveLength(1);
 		expect(rows[0]).toMatchObject({
 			metadata: { trigger: "tool_call", resynced: 1 },
@@ -520,11 +665,168 @@ describe("a clean-tree HEAD move resyncs held documents (#4493)", () => {
 		);
 		const received = await textSince(repo, mark, names[0]!);
 		for (const name of names) expect(received).toContain(textLine(repo, name));
-		const rows = await headMovedRows(repo);
+		const rows = await settledHeadMovedRows(repo, 1);
 		expect(rows[0]).toMatchObject({
 			metadata: { held: 12, resynced: 12, deferred: 0 },
 		});
 	}, 60_000);
+
+	// Recurrence: review r1 F1, the reported STOP on the default stack. The
+	// resync touched each held document on every holding server in turn, so
+	// the auxiliary's #1714 pacing barrier, waiting out a scanner busy with the
+	// earlier didChanges, held back the PRIMARY's later didChanges past the
+	// hook bound: the tool_result returned with documents stale on the primary
+	// and the next edit STOPped on TS2305 (13 held files, 2 of 2 live runs).
+	it("sends every changed held document to the primary before the tool_result returns, however slow the auxiliary", async () => {
+		const names = Array.from(
+			{ length: 12 },
+			(_, i) => `lib/s${String(i).padStart(2, "0")}.ts`,
+		);
+		const repo = await makeRepo(
+			Object.fromEntries(names.map((name) => [name, `export const v = 0;\n`])),
+			Object.fromEntries(names.map((name) => [name, `export const v = 1;\n`])),
+		);
+		try {
+			await holdWithAuxiliary(repo, names, 250);
+			const s = session(repo, "s-slow-aux");
+			const service = await lspService();
+
+			await s.bash("git checkout B", () => repo.git("checkout", "-q", "B"));
+
+			expect(
+				names.filter((name) => !sentDiskBytes(service, repo, name)),
+			).toEqual([]);
+			// The auxiliary catches up after the look; the one row lands then.
+			await expect
+				.poll(async () => (await headMovedRows(repo)).length, {
+					timeout: 30_000,
+					interval: 200,
+				})
+				.toBe(1);
+			expect((await headMovedRows(repo))[0]).toMatchObject({
+				metadata: { held: 12, primary: 12, deferred: 0 },
+			});
+		} finally {
+			auxiliaries.delete(repo.dir);
+		}
+	}, 90_000);
+
+	// Recurrence: review r1 F1, part 2. pi runs one message's tool calls in
+	// parallel, so a read's tool_call can arrive while the bash's tool_result
+	// look is still resending. The turn was already marked looked, so the
+	// tool_call skipped the look and the read ran against the stale primary.
+	it("holds a parallel tool_call until the running look has sent the move's bytes", async () => {
+		const repo = await makeRepo(
+			{ "lib/types.ts": TYPES_A, "main.ts": MAIN },
+			{ "lib/types.ts": TYPES_B },
+		);
+		await hold(repo, ["lib/types.ts", "main.ts"]);
+		const s = session(repo, "s-join");
+		s.runtime.beginTurn("s-join");
+		const service = await lspService();
+		const result = await s.bashCall("git checkout B");
+		repo.git("checkout", "-q", "B");
+
+		const looking = result();
+		await s.read(repo.file("main.ts"));
+		const sentAtRead = sentDiskBytes(service, repo, "lib/types.ts");
+		await looking;
+
+		expect(sentAtRead).toBe(true);
+		expect(await settledHeadMovedRows(repo, 1)).toHaveLength(1);
+	}, 30_000);
+
+	// Recurrence: review r1 F2 (#1687's shape). A look that joins a running
+	// look must see a move made after that look read HEAD; the single-flight's
+	// trailing pass is what reads it again. The shim holds the running look in
+	// its `git diff` so the second move lands mid-flight.
+	it("a look that joins a running look sees a move made after that look read HEAD", async (ctx) => {
+		ctx.skip(
+			process.platform === "win32",
+			"the git shim that stalls the running look is a POSIX shell script",
+		);
+		// C changes a file B does not, so only a look that reads HEAD after
+		// the move to C (the trailing pass) resends it: the running look's
+		// delta is A..B.
+		const repo = await makeRepo(
+			{ "lib/types.ts": TYPES_A, "lib/other.ts": "export const o = 0;\n" },
+			{ "lib/types.ts": TYPES_B },
+		);
+		repo.git("checkout", "-q", "B");
+		fs.writeFileSync(repo.file("lib/other.ts"), "export const o = 1;\n");
+		repo.git("commit", "-qam", "C");
+		repo.git("branch", "C");
+		repo.git("reset", "-q", "--hard", "HEAD~1");
+		repo.git("checkout", "-q", "A");
+		await hold(repo, ["lib/types.ts", "lib/other.ts"]);
+		const service = await lspService();
+		// Host boundary: a `git` on PATH that stalls `diff` while a marker
+		// exists, then runs the real git.
+		const realGit = (process.env.PATH ?? "")
+			.split(path.delimiter)
+			.map((dir) => path.join(dir, "git"))
+			.find((candidate) => fs.existsSync(candidate));
+		if (!realGit) throw new Error("git is not on PATH");
+		const shimDir = path.join(env.tmpDir, `git-shim-${repoCount}`);
+		const slow = path.join(shimDir, "slow");
+		const started = path.join(shimDir, "started");
+		fs.mkdirSync(shimDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(shimDir, "git"),
+			[
+				"#!/bin/sh",
+				`if [ "$1" = "diff" ] && [ -e ${JSON.stringify(slow)} ]; then : > ${JSON.stringify(started)}; sleep 0.4; fi`,
+				`exec ${JSON.stringify(realGit)} "$@"`,
+				"",
+			].join("\n"),
+			{ mode: 0o755 },
+		);
+		const previousPath = process.env.PATH;
+		process.env.PATH = `${shimDir}${path.delimiter}${previousPath ?? ""}`;
+		try {
+			const look = {
+				root: repo.dir,
+				key: headRecordKey("trailing", "s-trailing"),
+				trigger: "tool_result" as const,
+				label: "git checkout",
+			};
+			await resyncHeadMove(look);
+			repo.git("checkout", "-q", "B");
+			fs.writeFileSync(slow, "");
+			const running = resyncHeadMove(look);
+			await expect.poll(() => fs.existsSync(started)).toBe(true);
+			repo.git("checkout", "-q", "C");
+			fs.rmSync(slow);
+
+			await resyncHeadMove(look);
+
+			expect(sentDiskBytes(service, repo, "lib/other.ts")).toBe(true);
+			await running;
+		} finally {
+			process.env.PATH = previousPath;
+		}
+	}, 30_000);
+
+	// Recurrence: review r1 F3. The forced passes stop as soon as no queued
+	// document is waiting; without that exit every move runs all 16 passes.
+	it("runs one forced pass for a one-document move", async () => {
+		const repo = await makeRepo(
+			{ "lib/types.ts": TYPES_A, "main.ts": MAIN },
+			{ "lib/types.ts": TYPES_B },
+		);
+		await hold(repo, ["lib/types.ts"]);
+		const s = session(repo, "s-passes");
+
+		await s.bash("git checkout B", () => repo.git("checkout", "-q", "B"));
+
+		const file = normalizeMapKey(repo.file("lib/types.ts"));
+		const rowFor = async () =>
+			(await phaseRows("lsp_external_change_resync")).find(
+				(row) => normalizeMapKey(row.filePath) === file,
+			);
+		await expect.poll(rowFor, { timeout: 10_000 }).toBeDefined();
+		expect((await rowFor())?.metadata.passes).toBe(1);
+	}, 30_000);
 
 	// Recurrence: the 512-record drift-tracker eviction dropped the record of
 	// a document the server still held, so a resync driven by the records
@@ -558,7 +860,7 @@ describe("a clean-tree HEAD move resyncs held documents (#4493)", () => {
 		expect(await textSince(repo, mark, held[0]!)).toContain(
 			textLine(repo, held[0]!),
 		);
-		const rows = await headMovedRows(repo);
+		const rows = await settledHeadMovedRows(repo, 1);
 		expect(rows).toHaveLength(1);
 		expect(rows[0]).toMatchObject({
 			metadata: { changed: 20, held: 20, resynced: 20, deferred: 0 },
@@ -581,7 +883,6 @@ describe("a clean-tree HEAD move resyncs held documents (#4493)", () => {
 		const move = {
 			root: repo.dir,
 			key: headRecordKey("cap", "s-cap"),
-			turnKey: undefined,
 			trigger: "tool_result" as const,
 			label: "git checkout B",
 		};
@@ -590,11 +891,17 @@ describe("a clean-tree HEAD move resyncs held documents (#4493)", () => {
 		repo.git("checkout", "-q", "B");
 		await resyncHeadMove(move);
 
-		const rows = await headMovedRows(repo);
+		const rows = await settledHeadMovedRows(repo, 1);
 		expect(rows).toHaveLength(1);
 		expect(rows[0]).toMatchObject({
 			result: "changed:70",
-			metadata: { changed: 70, held: 70, resynced: 64, deferred: 6 },
+			metadata: {
+				changed: 70,
+				held: 70,
+				primary: 64,
+				resynced: 64,
+				deferred: 6,
+			},
 		});
 	}, 120_000);
 
@@ -616,7 +923,7 @@ describe("a clean-tree HEAD move resyncs held documents (#4493)", () => {
 		);
 
 		expect(await textSince(repo, mark, "main.ts")).toEqual([]);
-		const rows = await headMovedRows(repo, "HEAD");
+		const rows = await settledHeadMovedRows(repo, 1, "HEAD");
 		expect(rows).toHaveLength(1);
 		expect(rows[0]).toMatchObject({
 			result: "changed:1",
@@ -639,7 +946,6 @@ describe("a clean-tree HEAD move resyncs held documents (#4493)", () => {
 		const look = {
 			root: repo.dir,
 			key: headRecordKey("race", "s-race"),
-			turnKey: undefined,
 			trigger: "tool_result" as const,
 			label: "git checkout B",
 		};
@@ -656,14 +962,14 @@ describe("a clean-tree HEAD move resyncs held documents (#4493)", () => {
 		]);
 
 		expect(first).toBe(true);
-		expect(await headMovedRows(repo)).toHaveLength(1);
+		expect(await settledHeadMovedRows(repo, 1)).toHaveLength(1);
 	}, 30_000);
 
 	// Recurrence: a failed or truncated `git diff` read as an empty delta would
 	// report "nothing changed" for a move whose documents stayed stale. The
 	// row says the delta is unknown instead (an old HEAD a gc pruned, here a
 	// commit id the repository never had).
-	it("states delta-unknown when the old HEAD cannot be diffed", async () => {
+	it("states delta-unknown and resends the held documents that differ from disk when the old HEAD cannot be diffed", async () => {
 		const repo = await makeRepo(
 			{ "lib/types.ts": TYPES_A },
 			{ "lib/types.ts": TYPES_B },
@@ -672,20 +978,23 @@ describe("a clean-tree HEAD move resyncs held documents (#4493)", () => {
 		const move = {
 			root: repo.dir,
 			key: headRecordKey("gone", "s-gone"),
-			turnKey: undefined,
 			trigger: "tool_call" as const,
 			label: "read",
 		};
-		observeGitHead(move.key, "c".repeat(40), undefined);
+		observeGitHead(move.key, "c".repeat(40));
 		repo.git("checkout", "-q", "B");
+
+		const service = await lspService();
 
 		await resyncHeadMove(move);
 
-		const rows = await headMovedRows(repo);
-		expect(rows).toHaveLength(1);
-		expect(rows[0]).toMatchObject({
+		// Review r1 F6 (shape 48): the delta is unknown but the held set is
+		// not, so the held documents whose bytes differ from disk are resent.
+		expect(sentDiskBytes(service, repo, "lib/types.ts")).toBe(true);
+		await expect.poll(async () => (await headMovedRows(repo)).length).toBe(1);
+		expect((await headMovedRows(repo))[0]).toMatchObject({
 			result: "delta-unknown",
-			metadata: { changed: -1, held: 0 },
+			metadata: { changed: -1, held: 1 },
 		});
 	}, 30_000);
 
@@ -704,9 +1013,9 @@ describe("a clean-tree HEAD move resyncs held documents (#4493)", () => {
 		await secondary.bash("true", () => {});
 
 		await primary.bash("git checkout B", () => repo.git("checkout", "-q", "B"));
-		await secondary.bash("true", () => {});
+		await secondary.read(repo.file("main.ts"));
 
-		const rows = await headMovedRows(repo);
+		const rows = await settledHeadMovedRows(repo, 2);
 		expect(rows.map((row) => row.metadata.trigger)).toEqual([
 			"tool_result",
 			"tool_call",
@@ -729,7 +1038,7 @@ describe("a clean-tree HEAD move resyncs held documents (#4493)", () => {
 		await first();
 		await second();
 
-		expect(await headMovedRows(repo)).toHaveLength(1);
+		expect(await settledHeadMovedRows(repo, 1)).toHaveLength(1);
 	}, 30_000);
 });
 
@@ -741,13 +1050,35 @@ describe("the per-session HEAD records (#4493)", () => {
 	// session a long-lived process sees; the store is capped at 64, and a
 	// session that keeps looking keeps its record while idle ones age out.
 	it("keeps 64 records, refreshing the one a session observes again", () => {
-		for (let i = 0; i < 64; i++) observeGitHead(`k${i}`, A, undefined);
-		observeGitHead("k0", A, undefined);
-		observeGitHead("k64", A, undefined);
+		for (let i = 0; i < 64; i++) observeGitHead(`k${i}`, A);
+		observeGitHead("k0", A);
+		observeGitHead("k64", A);
 
 		// k0 was refreshed, so it still reports the move; k1 was the oldest and
 		// went, so its next look is a first sight, not a move.
-		expect(observeGitHead("k0", B, undefined)).toBe(A);
-		expect(observeGitHead("k1", B, undefined)).toBeUndefined();
+		expect(observeGitHead("k0", B)).toBe(A);
+		expect(observeGitHead("k1", B)).toBeUndefined();
 	});
+});
+
+describe("opaque recovery from a subdirectory (#4493 residual 3)", () => {
+	// Recurrence: `git status --porcelain` prints paths relative to the
+	// repository root, and recovery resolved them against the session's cwd:
+	// from a subdirectory every dirty path pointed below itself and was
+	// dropped as vanished, so an opaque write there resynced nothing.
+	it("recovers a dirty path when the cwd is a subdirectory of the repository", async () => {
+		const repo = await makeRepo(
+			{ "sub/x.ts": "export const x = 0;\n" },
+			{ "sub/x.ts": "export const x = 1;\n" },
+		);
+		const startedAt = Date.now();
+		fs.writeFileSync(repo.file("sub/x.ts"), "export const x = 2;\n");
+
+		const outcome = await recoverOpaqueChangesViaGit(
+			repo.file("sub"),
+			startedAt,
+		);
+
+		expect(outcome.paths).toEqual([normalizeMapKey(repo.file("sub/x.ts"))]);
+	}, 30_000);
 });

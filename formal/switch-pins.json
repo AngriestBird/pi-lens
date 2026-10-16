@@ -1047,6 +1047,16 @@
 					"value": "TRUE",
 					"test": "tests/clients/head-move-resync-4493.test.ts",
 					"title": "returns no concurrent look of a session before the move's resync is sent"
+				},
+				"PrimaryFirst": {
+					"value": "TRUE",
+					"test": "tests/clients/head-move-resync-4493.test.ts",
+					"title": "sends every changed held document to the primary before the tool_result returns, however slow the auxiliary"
+				},
+				"Join": {
+					"value": "TRUE",
+					"test": "tests/clients/head-move-resync-4493.test.ts",
+					"title": "holds a parallel tool_call until the running look has sent the move's bytes"
 				}
 			},
 			"notCodeChoice": [

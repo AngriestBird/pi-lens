@@ -37,6 +37,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
+import {
+	resolveGitCheckout,
+	resolveGitIdentity,
+} from "./review-graph/git-identity.js";
 import { collectSourceFilesWithBudgetAsync } from "./source-filter.js";
 import { createHash } from "node:crypto";
 
@@ -432,15 +436,11 @@ export function resetOpaqueMutationState(): void {
  * move (checkout, reset --hard, a completed rebase or cherry-pick, or one made
  * outside pi) is seen at all: `git status` is empty after one. Keyed by
  * {@link headRecordKey}, so one session never reads or writes another's.
- * `turnKey` is the turn of the last observation (`RuntimeCoordinator.turnKey`).
  * Cleared with the rest of this module at the session boundary, where the LSP
  * service resets too, so no held document outlives its record.
  */
 const HEAD_RECORD_CAP = 64;
-const headRecords = new BoundedFifoMap<
-	string,
-	{ head: string; turnKey: number | undefined }
->(HEAD_RECORD_CAP);
+const headRecords = new BoundedFifoMap<string, string>(HEAD_RECORD_CAP);
 
 /** One session's HEAD record key in a scan slot ({@link opaqueBaselineSlot}). */
 export function headRecordKey(
@@ -453,27 +453,24 @@ export function headRecordKey(
 /**
  * Record `head` for `key` and return the HEAD it replaces when that differs:
  * the move to resync. A first observation returns `undefined`. Synchronous, so
- * two calls that each awaited their own `rev-parse` cannot both claim a move;
- * {@link serializeHeadLook} keeps such reads of one key in order.
+ * two looks cannot both claim a move; {@link serializeHeadLook} keeps the
+ * looks of one key in order.
  */
-export function observeGitHead(
-	key: string,
-	head: string,
-	turnKey: number | undefined,
-): string | undefined {
-	const previous = headRecords.get(key)?.head;
+export function observeGitHead(key: string, head: string): string | undefined {
+	const previous = headRecords.get(key);
 	headRecords.delete(key);
-	headRecords.set(key, { head, turnKey });
+	headRecords.set(key, head);
 	return previous !== undefined && previous !== head ? previous : undefined;
 }
 
 /**
- * #4493: one HEAD look per record key at a time. A session's parallel bash
- * calls look concurrently; two looks reading HEAD on either side of a move
- * could set the record in the other order, regressing it, so a later look
- * reported the same move again. A look that arrives mid-flight waits and gets
- * one trailing look of its own (it reads HEAD after the flight), and returns
- * only once the flight's resync is done. An entry lives while its flight runs.
+ * #4493: one HEAD look per record key at a time. A session's parallel tool
+ * calls look concurrently. A look that arrives mid-flight joins it: it returns
+ * only once the flight has sent the move's bytes to the primary servers, so a
+ * parallel read or edit never runs against the stale view (review r1 F1). It
+ * also gets one trailing look of its own, which reads HEAD after the flight,
+ * so a move made after the flight read HEAD is seen before it returns (review
+ * r1 F2, #1687's shape). An entry lives while its flight runs.
  */
 const headLooks = createSingleFlight<void>({ coalesceTrailing: true });
 
@@ -485,17 +482,18 @@ export function serializeHeadLook(
 	return headLooks.run(key, look);
 }
 
-/** Whether `key` was observed during `turnKey` already. */
-export function headObservedInTurn(
-	key: string,
-	turnKey: number | undefined,
-): boolean {
-	const entry = headRecords.get(key);
-	return entry !== undefined && entry.turnKey === turnKey;
-}
+const COMMIT_ID = /^[0-9a-f]{40,64}$/;
 
-/** HEAD's commit id, or `undefined` for an unborn HEAD or a failed read. */
+/**
+ * HEAD's commit id, or `undefined` for an unborn HEAD or a failed read. Every
+ * non-bash tool_call looks, so the common case reads the files git keeps
+ * (`resolveGitIdentity`: HEAD, the loose ref, packed-refs; about 0.05 ms)
+ * and spawns `git rev-parse` only when those cannot answer: a reftable ref
+ * store, a SHA-256 detached HEAD, or anything else they do not resolve.
+ */
 export async function readGitHead(root: string): Promise<string | undefined> {
+	const fromFiles = resolveGitIdentity(root)?.headCommit;
+	if (fromFiles && COMMIT_ID.test(fromFiles)) return fromFiles;
 	const result = await safeSpawnAsync(
 		"git",
 		["rev-parse", "--verify", "-q", "HEAD"],
@@ -503,14 +501,23 @@ export async function readGitHead(root: string): Promise<string | undefined> {
 	);
 	const head =
 		!result.error && result.status === 0 ? result.stdout?.trim() : undefined;
-	return head && /^[0-9a-f]{40,64}$/.test(head) ? head : undefined;
+	return head && COMMIT_ID.test(head) ? head : undefined;
 }
 
 /**
- * The files that differ between commits `from` and `to`, as map keys under
- * `root`, or `undefined` when git failed or the listing was cut. `--relative`
- * keeps the paths under `root` in its own spelling (git's toplevel is a real
- * path); `--no-renames` lists both sides of a rename.
+ * The directory git prints porcelain and diff paths relative to: the top of
+ * the checkout `root` is in, in `root`'s own spelling (git's own toplevel is
+ * a real path). Read from files; `root` itself when that cannot answer.
+ */
+function gitPathBase(root: string): string {
+	return resolveGitCheckout(root)?.spelledRoot ?? root;
+}
+
+/**
+ * The files that differ between commits `from` and `to`, as map keys, or
+ * `undefined` when git failed or the listing was cut. The whole checkout's
+ * delta, so a held document outside a subdirectory cwd is in it too;
+ * `--no-renames` lists both sides of a rename.
  */
 export async function listGitHeadDelta(
 	root: string,
@@ -519,15 +526,16 @@ export async function listGitHeadDelta(
 ): Promise<string[] | undefined> {
 	const result = await safeSpawnAsync(
 		"git",
-		["diff", "--name-only", "--no-renames", "--relative", "-z", from, to],
+		["diff", "--name-only", "--no-renames", "-z", from, to],
 		{ cwd: root, timeout: 5000, maxOutputBytes: MAX_GIT_STATUS_OUTPUT_BYTES },
 	);
 	if (truncatedByOutputCap(result) || result.error || result.status !== 0)
 		return undefined;
+	const base = gitPathBase(root);
 	return (result.stdout ?? "")
 		.split("\0")
 		.filter(Boolean)
-		.map((relPath) => normalizeMapKey(path.resolve(root, relPath)));
+		.map((relPath) => normalizeMapKey(path.resolve(base, relPath)));
 }
 
 /** Cached git-worktree probe (repos don't stop being git mid-session). */
@@ -754,6 +762,9 @@ export async function recoverOpaqueChangesViaGit(
 			scannedCount: 0,
 		};
 	}
+	// Porcelain paths are relative to the top of the checkout, not to `root`
+	// (#4493 residual 3): from a subdirectory each one pointed below itself.
+	const base = gitPathBase(root);
 	const entries: GitStatusEntry[] = [];
 	let unknownStatusCount = 0;
 	let skipNext = false; // rename's OLD path follows its NEW path
@@ -784,7 +795,7 @@ export async function recoverOpaqueChangesViaGit(
 		}
 		if (!isKnownPorcelainStatus(status)) unknownStatusCount += 1;
 		if (status.includes("R") || status.includes("C")) skipNext = true;
-		entries.push({ status, absPath: path.resolve(root, relPath) });
+		entries.push({ status, absPath: path.resolve(base, relPath) });
 	}
 	if (skipNext) {
 		return {

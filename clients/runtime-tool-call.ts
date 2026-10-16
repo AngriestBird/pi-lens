@@ -13,7 +13,6 @@ import { toPosix } from "./path-utils.js";
 import {
 	captureFileStats,
 	getOpaqueBaselineStore,
-	headObservedInTurn,
 	headRecordKey,
 	isGitWorktree,
 	opaqueBaselineSlot,
@@ -615,34 +614,33 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 			},
 		});
 	if (!lensEnabled) return;
-	// #4493: a HEAD move this session has not seen (made outside pi, between
-	// turns or between two bash calls) resyncs the held documents it rewrote
-	// before this tool runs. Every bash call looks, since it may move HEAD
-	// itself; any other tool looks once per turn (turn_start may not await).
+	// #4493: before every tool, a HEAD move this session has not seen (made
+	// outside pi, or by a bash call still in its tool_result) resyncs the held
+	// documents it rewrote, and a look already running for this session is
+	// joined, so a parallel read or edit never runs against the stale primary
+	// (review r1 F1). A bash call's look also records the HEAD its command
+	// starts from, without which the first move of a session would read as a
+	// first sight at its tool_result. Reading HEAD is a file read; the bound
+	// ends the wait, and a cut look writes a `hook-await-exceeded` row.
 	const headRoot = ctx.cwd ?? runtime.projectRoot;
-	if (headRoot) {
-		const headKey = headRecordKey(
-			opaqueBaselineSlot(headRoot, runtime.sessionGeneration),
-			deps.sessionId,
+	if (headRoot)
+		await bounded(
+			resyncHeadMove({
+				root: headRoot,
+				key: headRecordKey(
+					opaqueBaselineSlot(headRoot, runtime.sessionGeneration),
+					deps.sessionId,
+				),
+				trigger: "tool_call",
+				label: toolName,
+			}),
+			{
+				ms: HOOK_WALL_BUDGET_MS.tool_result_read_only,
+				signal: ctx.signal,
+				hook: "tool_call",
+				label: "head-move-resync",
+			},
 		);
-		const headTurn = runtime.turnKey(deps.sessionId);
-		if (toolName === "bash" || !headObservedInTurn(headKey, headTurn))
-			await bounded(
-				resyncHeadMove({
-					root: headRoot,
-					key: headKey,
-					turnKey: headTurn,
-					trigger: "tool_call",
-					label: toolName,
-				}),
-				{
-					ms: HOOK_WALL_BUDGET_MS.tool_result_read_only,
-					signal: ctx.signal,
-					hook: "tool_call",
-					label: "head-move-resync",
-				},
-			);
-	}
 	// #2000 phase 2: opaque-command pre-snapshot. A bash command whose writes
 	// the extractor will not recognize gets a bounded stat snapshot of the
 	// project source universe BEFORE it runs; the tool_result side diffs it.

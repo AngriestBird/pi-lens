@@ -1385,7 +1385,7 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"rather than a change.",
 		owner: "#2523 slice 2",
 	},
-	"clients/runtime-tool-result.ts#lookAtHead:04717176~abf959c3": {
+	"clients/runtime-tool-result.ts#lookAtHead:04717176~5f0a37aa": {
 		family: "hook-await",
 		site: "tool_result_read_only",
 		reason:
@@ -1396,7 +1396,7 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"line-granular scan cannot see a caller's bound.",
 		owner: "#4493",
 	},
-	"clients/runtime-tool-result.ts#lookAtHead:71a561f8~f807d95e": {
+	"clients/runtime-tool-result.ts#lookAtHead:5dd0ee41~1af701ab": {
 		family: "hook-await",
 		site: "tool_result_read_only",
 		reason:

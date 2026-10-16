@@ -213,9 +213,10 @@ export function isFailedGitIntegrationCommand(
 /**
  * #4493: forced drift passes a HEAD move's resync may run before it reports
  * the rest deferred: 16 passes of `DRIFT_RESYNC_BATCH` (4) cover 64 held
- * documents.
+ * documents. The primary phase sends to the same cap.
  */
 const HEAD_MOVE_RESYNC_MAX_PASSES = 16;
+const HEAD_MOVE_PRIMARY_CAP = 64;
 
 /**
  * #4493: when HEAD moved since this session last looked, resync the held
@@ -227,6 +228,9 @@ const HEAD_MOVE_RESYNC_MAX_PASSES = 16;
  * incoming content, not the agent's: it reaches the LSP resync only, never
  * mutation bookkeeping, authorship or dispatch. One `opaque_mutation_head_moved`
  * row per move, none when HEAD did not move.
+ *
+ * The returned promise settles once the PRIMARY servers hold the new bytes;
+ * the auxiliaries catch up after it (see {@link lookAtHead}).
  */
 export function resyncHeadMove(args: HeadLook): Promise<void> {
 	return serializeHeadLook(args.key, () => lookAtHead(args));
@@ -235,7 +239,6 @@ export function resyncHeadMove(args: HeadLook): Promise<void> {
 interface HeadLook {
 	root: string;
 	key: string;
-	turnKey: number | undefined;
 	trigger: "tool_call" | "tool_result";
 	label: string;
 }
@@ -244,20 +247,34 @@ interface HeadLook {
  * One look, the only one of its key in flight. A look that joined a flight is
  * answered by the flight's trailing look, which carries the first caller's
  * `trigger` and `label` in its row.
+ *
+ * Two phases (review r1 F1). Inside the look, the changed held documents go to
+ * the primary servers only: that is the view the next read or edit's dispatch
+ * reads, and primaries are not paced. After the look, detached, the drift
+ * resync sends them to every holding server (the paced auxiliaries), adds held
+ * importers and stamps the drift records; its end writes the row. The hooks and
+ * every joined look wait for the first phase only, so an auxiliary's pacing
+ * barrier no longer holds back the primary or the next tool call.
  */
 async function lookAtHead(args: HeadLook): Promise<void> {
 	if (!(await isGitWorktree(args.root))) return;
 	const head = await readGitHead(args.root);
 	if (!head) return;
-	const from = observeGitHead(args.key, head, args.turnKey);
+	const from = observeGitHead(args.key, head);
 	if (!from) return;
 	const started = Date.now();
 	const delta = await listGitHeadDelta(args.root, from, head);
+	const service = peekLSPService();
+	const heldPaths = service?.getOpenDocumentPaths(args.root) ?? [];
+	const held = new Set(heldPaths);
 	// Only a held document can be stale, and the reverse-import lookup inside
 	// the resync costs one index build per path, so a large delta is cut here.
-	const service = peekLSPService();
-	const held = new Set(service?.getOpenDocumentPaths(args.root));
-	const inDelta = (delta ?? []).filter((filePath) => held.has(filePath));
+	// An unknown delta (git failed, or the listing was cut) leaves the held set
+	// as the candidates: the stale views are the harm (shape 48, review r1 F6).
+	const inDelta =
+		delta === undefined
+			? heldPaths
+			: delta.filter((filePath) => held.has(filePath));
 	// A queued target is resent unconditionally, and most HEAD moves (every
 	// `git commit`, an amend) leave the held bytes current: only a document
 	// whose last-sent bytes differ from the disk is resent. An unreadable one
@@ -275,42 +292,62 @@ async function lookAtHead(args: HeadLook): Promise<void> {
 			}),
 		)
 	).filter((filePath): filePath is string => filePath !== undefined);
-	let dispositions: ReadonlyMap<string, string> | undefined;
+	let primary = 0;
 	let resyncFailed = false;
-	if (targets.length > 0) {
+	if (service && targets.length > 0) {
 		try {
-			dispositions = await resyncGitChangedFiles(targets, {
-				maxPasses: HEAD_MOVE_RESYNC_MAX_PASSES,
-			});
+			primary = (
+				await service.resyncHeldPrimaries(
+					targets.slice(0, HEAD_MOVE_PRIMARY_CAP),
+				)
+			).sent;
 		} catch {
 			resyncFailed = true;
 		}
 	}
-	const outcomes = [...(dispositions?.values() ?? [])];
-	const count = (kind: string) =>
-		outcomes.filter((outcome) => outcome === kind).length;
-	logLatency({
-		type: "phase",
-		phase: "opaque_mutation_head_moved",
-		filePath: args.label.slice(0, 80),
-		durationMs: Date.now() - started,
-		result: resyncFailed
-			? "resync-failed"
-			: delta === undefined
-				? "delta-unknown"
-				: `changed:${delta.length}`,
-		metadata: {
-			trigger: args.trigger,
-			from: from.slice(0, 12),
-			to: head.slice(0, 12),
-			changed: delta?.length ?? -1,
-			held: inDelta.length,
-			current: inDelta.length - targets.length,
-			resynced: count("resynced"),
-			deferred: count("deferred"),
-			failed: count("failed"),
-		},
-	});
+	const primaryMs = Date.now() - started;
+	const report = (
+		dispositions: ReadonlyMap<string, string> | undefined,
+		failed: boolean,
+	): void => {
+		const outcomes = [...(dispositions?.values() ?? [])];
+		const count = (kind: string) =>
+			outcomes.filter((outcome) => outcome === kind).length;
+		logLatency({
+			type: "phase",
+			phase: "opaque_mutation_head_moved",
+			filePath: args.label.slice(0, 80),
+			durationMs: Date.now() - started,
+			result: failed
+				? "resync-failed"
+				: delta === undefined
+					? "delta-unknown"
+					: `changed:${delta.length}`,
+			metadata: {
+				trigger: args.trigger,
+				from: from.slice(0, 12),
+				to: head.slice(0, 12),
+				changed: delta?.length ?? -1,
+				held: inDelta.length,
+				current: inDelta.length - targets.length,
+				primary,
+				primaryMs,
+				resynced: count("resynced"),
+				deferred: count("deferred"),
+				failed: count("failed"),
+			},
+		});
+	};
+	if (targets.length === 0 || resyncFailed) {
+		report(undefined, resyncFailed);
+		return;
+	}
+	void resyncGitChangedFiles(targets, {
+		maxPasses: HEAD_MOVE_RESYNC_MAX_PASSES,
+	}).then(
+		(dispositions) => report(dispositions, false),
+		() => report(undefined, true),
+	);
 }
 
 /**
@@ -1927,7 +1964,6 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 						opaqueBaselineSlot(workspaceRoot, runtime.sessionGeneration),
 						deps.sessionId,
 					),
-					turnKey: runtime.turnKey(deps.sessionId),
 					trigger: "tool_result",
 					label: command,
 				}),

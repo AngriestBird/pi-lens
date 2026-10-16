@@ -749,6 +749,11 @@ function handle(raw) {
 		}
 		publishSequenceFor(data.params?.textDocument?.uri);
 		if (STALE_MODULE_LOOKUP) publishModuleLookups(data.params?.textDocument?.uri);
+		// #4493 r2: a scanner that re-parses on every change (ast-grep's live
+		// shape). Synchronous, so a request queued behind the changes is answered
+		// only after all of them: what the #1714 aux pacing barrier waits on.
+		const changeCostMs = Number(process.env.FAKE_LSP_CHANGE_COST_MS ?? "");
+		if (Number.isFinite(changeCostMs) && changeCostMs > 0) burnCpu(changeCostMs);
 		// #1669 review F5: echo the received contentChanges back so a real-init
 		// integration test can assert the ON-THE-WIRE shape (ranged vs
 		// whole-document) that the client actually sent, proving
