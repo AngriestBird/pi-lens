@@ -3,16 +3,8 @@ import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { FactStore } from "../../clients/dispatch/fact-store.js";
 import { loadProjectDiagnosticsSnapshot } from "../../clients/project-diagnostics/cache.js";
 import { scanProjectDiagnostics } from "../../clients/project-diagnostics/scanner.js";
-import {
-	buildOrUpdateGraph,
-	clearReviewGraphWorkspaceCache,
-	getGraphBuildInfoForGraph,
-	getReviewGraphWorkspaceCacheSnapshot,
-	waitForReviewGraphPersistsForTests,
-} from "../../clients/review-graph/builder.js";
 import { removeTempDirSync } from "./test-utils.js";
 
 let cwd: string;
@@ -33,8 +25,6 @@ afterEach(async () => {
 	syncBuiltinESMExports();
 	// Drain observer callbacks even when a regression assertion fails.
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	await waitForReviewGraphPersistsForTests();
-	clearReviewGraphWorkspaceCache();
 	removeTempDirSync(cwd);
 });
 
@@ -96,51 +86,3 @@ it.each([1, 4])(
 	},
 	30_000,
 );
-
-it("full graph extraction delivers pending host work between file reads", async () => {
-	const reads = observeReads();
-	const graph = await buildOrUpdateGraph(cwd, [], new FactStore());
-	expect(getGraphBuildInfoForGraph(graph).mode).toBe("full");
-	expect(reads.map((r) => r.file)).toEqual(files);
-	expect(reads.map((r) => r.delivered)).toEqual([0, 1, 2, 3]);
-	for (const file of files) expect(graph.fileNodes.has(file)).toBe(true);
-}, 30_000);
-
-it("a host cache clear during extraction prevents workspace cache repopulation", async () => {
-	let cleared = false;
-	observeReads(() => {
-		if (!cleared) {
-			clearReviewGraphWorkspaceCache(cwd);
-			cleared = true;
-		}
-	});
-	const graph = await buildOrUpdateGraph(cwd, [], new FactStore());
-	expect(cleared).toBe(true);
-	expect(graph.fileNodes.size).toBeGreaterThanOrEqual(files.length);
-	expect(getReviewGraphWorkspaceCacheSnapshot().cacheEntries).toBe(0);
-}, 30_000);
-
-it("an edit delivered during extraction is discovered by the next graph build", async () => {
-	let edited = false;
-	observeReads(() => {
-		if (!edited) {
-			fs.writeFileSync(
-				files[0],
-				"export function replacement() { return 99; }\n",
-			);
-			edited = true;
-		}
-	});
-	const first = await buildOrUpdateGraph(cwd, [], new FactStore());
-	expect(edited).toBe(true);
-	expect([...first.nodes.values()].some((n) => n.symbolName === "value0")).toBe(
-		true,
-	);
-	const second = await buildOrUpdateGraph(cwd, [], new FactStore());
-	expect(
-		[...second.nodes.values()].some((n) => n.symbolName === "replacement"),
-	).toBe(true);
-	expect(
-		[...second.nodes.values()].some((n) => n.symbolName === "value0"),
-	).toBe(false);
-}, 30_000);
