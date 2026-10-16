@@ -7,8 +7,6 @@ import { applyProjectLensConfig } from "../../../clients/dispatch/integration.js
 import { FactStore } from "../../../clients/dispatch/fact-store.js";
 import { highComplexityRule } from "../../../clients/dispatch/rules/high-complexity.js";
 import { highFanOutRule } from "../../../clients/dispatch/rules/high-fan-out.js";
-import { resetHighComplexityThresholds } from "../../../clients/dispatch/rules/high-complexity.js";
-import { resetHighFanOutThreshold } from "../../../clients/dispatch/rules/high-fan-out.js";
 import {
 	resetProjectLensConfigCache,
 	type PiLensProjectConfig,
@@ -78,15 +76,11 @@ let tmpDir: string;
 
 beforeEach(() => {
 	tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-apply-cfg-"));
-	resetHighComplexityThresholds();
-	resetHighFanOutThreshold();
 	resetProjectLensConfigCache();
 });
 
 afterEach(() => {
 	removeTempDirSync(tmpDir);
-	resetHighComplexityThresholds();
-	resetHighFanOutThreshold();
 	resetProjectLensConfigCache();
 });
 
