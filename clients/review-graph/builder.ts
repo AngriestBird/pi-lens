@@ -1608,7 +1608,10 @@ interface GraphSourceFilesResult {
 	entryBudgetExceeded: boolean;
 	/** Directory entries the source walk touched (#1979); absent when not counted. */
 	entriesVisited: number | undefined;
-	/** Wall time of the source walk (#1979). */
+	/**
+	 * Wall time of the source collection (#1979): the tracked-file index prime and
+	 * ignore-config build plus the directory walk, not the walk alone.
+	 */
 	walkMs: number;
 }
 
