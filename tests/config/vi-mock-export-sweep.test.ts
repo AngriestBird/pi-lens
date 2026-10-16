@@ -49,20 +49,29 @@ const BASELINE: Record<string, number> = JSON.parse(
  * ended: a 1,973 MB peak beside an 84 MB heap locally, and 2,026-2,049 MB over
  * 18 CI runs against the 2,048 MB per-worker budget (red at 2,049 MB). One
  * turn per file measured 930-996 MB, with the same findings and wall time.
+ *
+ * Both detectors run in the same pass: the generic and latency sweeps share
+ * one population, so the walk and the reads happen once.
  */
 async function detectAcrossFiles(
 	files: string[],
-	detect: (file: string, source: string) => ViMockExportFinding[],
-): Promise<ViMockExportFinding[]> {
-	const findings: ViMockExportFinding[] = [];
+): Promise<{ gaps: ViMockExportFinding[]; latency: ViMockExportFinding[] }> {
+	const gaps: ViMockExportFinding[] = [];
+	const latency: ViMockExportFinding[] = [];
+	// readWalkedFiles: a path that vanished between the walk and the read is
+	// out of the population, not a finding (#3082).
 	for (const { file, source } of readWalkedFiles(files)) {
-		findings.push(...detect(file, source));
+		gaps.push(...findViMockExportGaps(file, source));
+		latency.push(...findLatencyLoggerGapsForFile(file, source));
 		await new Promise<void>((resolve) => setImmediate(resolve));
 	}
-	return findings;
+	return { gaps, latency };
 }
 
-function scan(): Promise<ViMockExportFinding[]> {
+let sweepPromise: ReturnType<typeof detectAcrossFiles> | undefined;
+
+function sweepOnce(): ReturnType<typeof detectAcrossFiles> {
+	if (sweepPromise) return sweepPromise;
 	const files = listSourceFiles(TESTS_ROOT, {
 		extensions: [".ts"],
 		exclude: (relative) => relative.startsWith("fixtures/"),
@@ -73,26 +82,21 @@ function scan(): Promise<ViMockExportFinding[]> {
 	// which routine processes (e.g. the 4.1.4 `.changelog/` roll that consumed
 	// 151 fragments) never delete, so the floor cannot be swept away with it.
 	assertNonEmptyScan("#2281 vi.mock export sweep", files.length, 900);
-	// readWalkedFiles: a path that vanished between the walk and the read is
-	// out of the population, not a finding (#3082).
-	return detectAcrossFiles(files, (file, source) =>
-		findViMockExportGaps(file, source),
-	);
-}
-
-function scanLatencyLoggerSurface(): Promise<ViMockExportFinding[]> {
-	const files = listSourceFiles(TESTS_ROOT, {
-		extensions: [".ts"],
-		exclude: (relative) => relative.startsWith("fixtures/"),
-	});
-	// Same 1,152-file population and 900 floor as `scan()` above; see that
-	// comment for calibration. Selection lives in
+	// Same population and floor for the latency surface. Selection lives in
 	// `findLatencyLoggerGapsForFile` (which itself consumes
 	// `isLatencyLoggerSpecifier`), tested in both directions below — the sweep
 	// holds no inline predicate to delete.
 	assertNonEmptyScan("#2281 latency-logger mock surface", files.length, 900);
-	// readWalkedFiles: see `scan()` above (#3082).
-	return detectAcrossFiles(files, findLatencyLoggerGapsForFile);
+	sweepPromise = detectAcrossFiles(files);
+	return sweepPromise;
+}
+
+async function scan(): Promise<ViMockExportFinding[]> {
+	return (await sweepOnce()).gaps;
+}
+
+async function scanLatencyLoggerSurface(): Promise<ViMockExportFinding[]> {
+	return (await sweepOnce()).latency;
 }
 
 /**
