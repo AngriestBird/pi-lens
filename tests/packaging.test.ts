@@ -9,6 +9,7 @@ import {
 	HOST_PROVIDED_TYPE_ONLY_PACKAGES,
 	LAZY_NATIVE_PACKAGES,
 } from "../scripts/lib/host-provided-deps.mjs";
+import { readLockedToolVersion } from "../scripts/lib/exec-isolation.mjs";
 import yaml from "../clients/deps/js-yaml.js";
 import { stripSource } from "./support/sweep-kit.js";
 import { USER_PROFILE_PATH_RE } from "./support/user-profile-path-pattern.js";
@@ -541,6 +542,23 @@ describe("host-provided peers are open; the supported window lives in install-sm
 			).toBe(true);
 		}
 	});
+});
+
+// Recurrence prevented (#4513): `build:dist` reads the esbuild and tsc versions
+// out of package-lock.json. esbuild was in the lock only because pi 1.1's
+// `@earendil-works/chord` pulled it in; pi 1.2 dropped chord, the regenerated
+// lock lost esbuild, and bundle-dist threw "needs an exact locked version".
+// A tool whose version a build script reads from the lock is a direct
+// devDependency, so no host release can remove it by accident.
+describe("build tools read from the lock are direct dev dependencies (#4513)", () => {
+	for (const tool of ["esbuild", "typescript"]) {
+		it(`declares ${tool} and locks an exact version`, () => {
+			expect(pkg.devDependencies?.[tool]).toBeDefined();
+			expect(() =>
+				readLockedToolVersion({ root, packageName: tool }),
+			).not.toThrow();
+		});
+	}
 });
 
 // Guards the #335 bundle CONTRACT against the built entry: pi's Bun-compiled
