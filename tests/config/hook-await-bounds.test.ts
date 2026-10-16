@@ -2775,17 +2775,17 @@ const BOUNDED_CALL_SITES: Readonly<Record<string, string>> = {
 	"call:clients/runtime-tool-result.ts#handleToolResult:19412575~b4f8a98d":
 		"Observed tool analysis uses ToolResultDeps.signal and the edit budget; " +
 		"a missing signal is an explicit standalone-harness case.",
-	"call:clients/runtime-tool-result.ts#handleToolResult:19412575~c3186ef7":
-		"The HEAD-move look on a bash tool_result (#4493) uses " +
-		"ToolResultDeps.signal and the read-only budget, which index.ts gives " +
-		"a tool_result that names no written file; a missing signal is an " +
-		"explicit standalone-harness case.",
 	"call:clients/runtime-tool-result.ts#handleToolResult:2b57f8b9~b4f8a98d":
 		"The classified bootstrap demand uses ToolResultDeps.signal and the " +
 		"edit budget; a missing signal is an explicit harness case.",
 	"call:clients/runtime-tool-result.ts#handleToolResult:464d2ad3~b4f8a98d":
 		"Observed duplicate-claim joins use the same ToolResultDeps.signal and " +
 		"edit budget; the local alias keeps this call site distinct for the sweep.",
+	"call:clients/runtime-tool-result.ts#handleToolResult:861069ce~b4f8a98d":
+		"The HEAD-move look on a bash tool_result (#4493) uses " +
+		"ToolResultDeps.signal and the edit budget, as the bash-write primary " +
+		"phase does (#4528 r4: the read-only bound cut a slow primary " +
+		"mid-send); a missing signal is an explicit standalone-harness case.",
 	"call:clients/runtime-tool-result.ts#handleToolResult:8f7626bd~b4f8a98d":
 		"Each observed changed-file analysis uses ToolResultDeps.signal and the " +
 		"edit budget; the local alias keeps this call site distinct for the sweep.",

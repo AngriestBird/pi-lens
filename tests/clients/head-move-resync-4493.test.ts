@@ -924,6 +924,47 @@ describe("a clean-tree HEAD move resyncs held documents (#4493)", () => {
 		});
 	}, 120_000);
 
+	// Recurrence: #4528 r4. The HEAD-move resync ran under the 500 ms
+	// read-only bound, so a primary that read the move's changes slowly was
+	// cut and the tool_result returned before the moved bytes were sent. CI's
+	// shuffle seed 202 hit it with 24 live clients; here the primary pays
+	// 120 ms a change on 120 KB fillers, so the phase outlasts 500 ms on any
+	// host, and the move must still be on the wire when the result returns.
+	it("sends every moved held document before the tool_result returns when the primary phase outlasts the read-only bound", async () => {
+		const fillers = Array.from(
+			{ length: 10 },
+			(_, i) => `lib/h${String(i).padStart(2, "0")}.ts`,
+		);
+		const big = (tag: string) =>
+			`export const s = ${JSON.stringify(tag.repeat(120 * 1024))};\n`;
+		const repo = await makeRepo(
+			{
+				"lib/types.ts": TYPES_A,
+				...Object.fromEntries(fillers.map((name) => [name, big("a")])),
+			},
+			{
+				"lib/types.ts": TYPES_B,
+				...Object.fromEntries(fillers.map((name) => [name, big("b")])),
+			},
+			[],
+			{ FAKE_LSP_CHANGE_COST_MS: "120" },
+		);
+		const moved = [...fillers, "lib/types.ts"];
+		await hold(repo, moved);
+		const service = await lspService();
+		const s = session(repo, "s-4528-r4-cut");
+
+		await s.bash("git checkout B", () => repo.git("checkout", "-q", "B"));
+
+		expect(moved.filter((name) => !sentDiskBytes(service, repo, name))).toEqual(
+			[],
+		);
+		const rows = await settledHeadMovedRows(repo, 1);
+		expect(rows[0]).toMatchObject({
+			metadata: { changed: 11, resynced: 11, deferred: 0, drained: true },
+		});
+	}, 120_000);
+
 	// Recurrence: an unbounded drain would hold the hook for a branch hop of
 	// any size. The forced passes stop at 64 documents, and the one row
 	// states how many the drain left to the paced heartbeat.

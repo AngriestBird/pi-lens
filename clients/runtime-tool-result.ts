@@ -2006,8 +2006,11 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		}
 		// #4493: a command that moved HEAD resyncs the held documents it
 		// rewrote before this result returns, ahead of the synthetic dispatches
-		// below, so their diagnostics read the new dependencies.
+		// below, so their diagnostics read the new dependencies. It has the edit
+		// budget, as the bash-write primary phase does: a move is a write, and
+		// the 500 ms read-only bound cut a slow primary mid-send (#4528 r4).
 		if (workspaceRoot) {
+			const headMoveSignal = deps.signal ?? undefined;
 			await bounded(
 				resyncHeadMove({
 					root: workspaceRoot,
@@ -2019,9 +2022,9 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 					label: command,
 				}),
 				{
-					ms: HOOK_WALL_BUDGET_MS.tool_result_read_only,
-					signal: deps.signal ?? undefined,
-					hook: "tool_result_read_only",
+					ms: HOOK_WALL_BUDGET_MS.tool_result_edit,
+					signal: headMoveSignal,
+					hook: "tool_result_edit",
 					label: "head-move-resync",
 				},
 			);
