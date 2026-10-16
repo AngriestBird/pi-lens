@@ -1046,7 +1046,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/opaque-mutation-scan.ts": 9,
 		"clients/opengrep-client.ts": 8,
 		"clients/opengrep-config.ts": 3,
-		"clients/package-manager.ts": 21,
+		// 21 -> 23 (#4515 r2): commandSearchReachesProject splits PATH on
+		// `path.delimiter` and tests each entry with `path.isAbsolute`.
+		"clients/package-manager.ts": 23,
 		"clients/package-root.ts": 5,
 		"clients/path-keyed-map.ts": 11,
 		// 30 -> 34: findNearestMarkerRootDetailed (#3691) adds its own marker/root
