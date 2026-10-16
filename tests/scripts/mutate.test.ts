@@ -37,24 +37,6 @@ function invoke(testFile: string, ...extra: string[]) {
 	);
 }
 
-function invokeNoop() {
-	return execFileAsync(
-		process.execPath,
-		[
-			cli,
-			"--file",
-			target,
-			"--find",
-			"missing",
-			"--replace",
-			"changed",
-			"--tests",
-			target,
-		],
-		{ cwd: root },
-	);
-}
-
 it("restores the source after a successful test run and reports SURVIVED", async () => {
 	const before = digest();
 	const { stdout } = await invoke(target);
@@ -108,7 +90,7 @@ it("restores the source after a failing test run and reports RED with a title", 
 	).rejects.toMatchObject({
 		code: 1,
 		stdout: expect.stringMatching(
-			/mutation fixture remains original[\s\S]*RED/,
+			/mutation fixture remains original[\s\S]*\nRED\n[\s\S]*\| 1 \| RED \|/,
 		),
 	});
 	expect(digest()).toBe(before);
@@ -210,11 +192,81 @@ it("restores after a mutation throw", async () => {
 	expect(digest()).toBe(before);
 });
 
-it("refuses a no-op and leaves the source untouched", async () => {
+// Recurrence (#4510): the catch around edit, build and test printed every
+// thrown error as RED, so a mutation that never ran read as a test that
+// catches it (PR #4491 rounds 4 to 6). Each stage prints its own status line.
+it("refuses a no-op and leaves the source untouched, printing REFUSED (#4510)", async () => {
 	const before = digest();
-	await expect(invokeNoop()).rejects.toMatchObject({ code: 1 });
+	const result = await run([
+		cli,
+		"--file",
+		target,
+		"--find",
+		"missing",
+		"--replace",
+		"changed",
+		"--tests",
+		target,
+	]);
+	expect(result.code).toBe(1);
+	expect(result.stdout).toMatch(/\nREFUSED\n/);
+	expect(result.stdout).not.toMatch(/\nRED\n/);
+	expect(result.stdout).toContain(
+		"mutation-table: | tests/scripts/mutate-fixture.test.ts | 1 | REFUSED |",
+	);
 	expect(digest()).toBe(before);
 });
+
+it("prints ERROR, not RED, when the run fails before any edit (#4510)", async () => {
+	// A directory passes the existence and git-clean checks and then fails to
+	// read: a failure that is neither a refused edit nor a failed build.
+	const result = await run([
+		cli,
+		"--file",
+		"scripts/lib",
+		"--find",
+		"x",
+		"--replace",
+		"y",
+		"--tests",
+		target,
+	]);
+	expect(result.code).toBe(1);
+	expect(result.stdout).toMatch(/\nERROR\n/);
+	expect(result.stdout).not.toMatch(/\n(RED|REFUSED|BROKEN)\n/);
+});
+
+it("prints BROKEN, exits 1 and restores source and twin when the build fails (#4510)", async () => {
+	// A leaf client stands in for any built source (see the --restore twin case).
+	const source = "clients/freshness-cadence.ts";
+	const twin = "clients/freshness-cadence.js";
+	const sourceOriginal = readFileSync(source);
+	const twinOriginal = readFileSync(twin);
+	try {
+		const result = await run([
+			cli,
+			"--file",
+			source,
+			"--find",
+			"2_000",
+			"--replace",
+			"2_000 )",
+			"--tests",
+			target,
+		]);
+		expect(result.code).toBe(1);
+		expect(result.stdout).toMatch(/\nBROKEN\n/);
+		expect(result.stdout).not.toMatch(/\nRED\n/);
+		expect(result.stdout).toContain(
+			"mutation-table: | clients/freshness-cadence.ts | 1 | BROKEN |",
+		);
+		expect(readFileSync(source).equals(sourceOriginal)).toBe(true);
+		expect(readFileSync(twin).equals(twinOriginal)).toBe(true);
+	} finally {
+		forceRestore(source, sourceOriginal);
+		forceRestore(twin, twinOriginal);
+	}
+}, 120_000);
 
 it("restores on SIGINT", async () => {
 	const before = digest();

@@ -29,7 +29,8 @@ function usage(message) {
 	if (message) console.error(`mutate.mjs: ${message}`);
 	console.error(
 		"usage: scripts/mutate.mjs --file <path> --find <text|/regex/> --replace <text> --tests <files…> [--built] [--table] [--allow-comment]\n       scripts/mutate.mjs --restore [--file <path>]\n" +
-			"exit codes: 0 or the test runner's code, 1 refused or failed, 2 usage, 4 the run could not restore its file (a journal remains)",
+			"exit codes: 0 or the test runner's code, 1 refused or failed, 2 usage, 4 the run could not restore its file (a journal remains)\n" +
+			"status line: SURVIVED (tests passed), RED (a test failed), REFUSED (no edit applied), BROKEN (build failed), ERROR (no verdict)",
 	);
 	process.exitCode = 2;
 }
@@ -432,7 +433,11 @@ async function main() {
 	}
 	// Files whose journal this run created, in creation order.
 	const owned = [];
-	let result = { code: 2, failed: [], status: "RED" };
+	// Every status but RED means no test run failed the mutation (#4510):
+	// REFUSED (the edit was not applied), BROKEN (the build failed), ERROR (no
+	// verdict). `stage` says which step a thrown error came from.
+	let result = { code: 2, failed: [], status: "ERROR" };
+	let stage = "setup";
 	let interrupted = false;
 	let handlingSignal = false;
 	const restoreOwned = () => {
@@ -472,6 +477,7 @@ async function main() {
 		const original = originals.get(target);
 		const lexer = lexerLanguage(target) ? await import("@ast-grep/napi") : null;
 		const text = original.toString("utf8");
+		stage = "edit";
 		const mutated = Buffer.from(
 			mutationFor(
 				text,
@@ -482,6 +488,7 @@ async function main() {
 			),
 			"utf8",
 		);
+		stage = "setup";
 		writeJournal(target, journalOf(target, original, mutated));
 		owned.push(target);
 		writeFileSync(target, mutated);
@@ -492,6 +499,7 @@ async function main() {
 			writeJournal(twin, journalOf(twin, twinBytes, twinBytes));
 			owned.push(twin);
 			try {
+				stage = "build";
 				build();
 			} finally {
 				// Nothing else runs between the build and this record, so the
@@ -499,8 +507,11 @@ async function main() {
 				replaceJournal(twin, journalOf(twin, twinBytes, readFileSync(twin)));
 			}
 		}
+		stage = "test";
+		// An interrupted run reached no verdict on the mutation: ERROR, as for
+		// a run that loaded no tests, never RED.
 		if (interrupted)
-			result = { code: 130, failed: ["interrupted"], status: "RED" };
+			result = { code: 130, failed: ["interrupted"], status: "ERROR" };
 		else {
 			const testRun = await runTests(options.tests, () => {
 				interrupted = true;
@@ -512,7 +523,8 @@ async function main() {
 			};
 		}
 	} catch (error) {
-		result = { code: 1, failed: [error.message], status: "RED" };
+		const status = { edit: "REFUSED", build: "BROKEN" }[stage] ?? "ERROR";
+		result = { code: 1, failed: [error.message], status };
 	}
 	const refusals = restoreOwned();
 	for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"])
