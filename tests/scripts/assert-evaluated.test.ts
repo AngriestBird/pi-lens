@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	checkDocs,
 	checkRecords,
+	gitHeadText,
 	main,
 } from "../../scripts/assert-evaluated.mjs";
 import {
@@ -138,7 +139,10 @@ describe("producer records (#4514)", () => {
 		const dir = tmp();
 		process.env[EVALUATED_DIR_ENV] = path.join(dir, "nested");
 		const log = vi.spyOn(console, "error").mockImplementation(() => {});
-		writeEvaluatedRecord({ producer: "characterize-lsp", evaluated: 46 });
+		writeEvaluatedRecord({
+			producer: "characterize-lsp",
+			input: Array.from({ length: 46 }, () => ({ mode: "push-only" })),
+		});
 		expect(
 			readEvaluatedRecord(path.join(dir, "nested"), "characterize-lsp"),
 		).toBe(46);
@@ -149,7 +153,10 @@ describe("producer records (#4514)", () => {
 	it("leaves no file behind on a local run (no directory named)", () => {
 		const dir = tmp();
 		vi.spyOn(console, "error").mockImplementation(() => {});
-		writeEvaluatedRecord({ producer: "characterize-lsp", evaluated: 3 });
+		writeEvaluatedRecord({
+			producer: "characterize-lsp",
+			input: Array.from({ length: 3 }, () => ({ mode: "push-only" })),
+		});
 		expect(readEvaluatedRecord(dir, "characterize-lsp")).toBeNull();
 	});
 
@@ -248,7 +255,13 @@ describe("checkDocs: the refresh PR refuses a degraded regeneration (#4514)", ()
 			"docs/lsp-capability-matrix.md": matrixDoc(Array(29).fill("direct")),
 		});
 		const records = checkDocs(root, (p) => head[p] ?? null);
-		expect(records).toHaveLength(3);
+		// Three docs; the matrix also carries its per-cell record.
+		expect(records.map((r) => r.producer)).toEqual([
+			"probe-clean-signal:docs/lsp-capability-matrix.md",
+			"probe-clean-signal:docs/lsp-capability-matrix.md#cells",
+			"server-capabilities:docs/servercapabilities.md",
+			"measure-lsp-idle-eviction:docs/lsp-idle-eviction.md",
+		]);
 		expect(records.every((r) => r.ok)).toBe(true);
 	});
 
@@ -272,7 +285,34 @@ describe("checkDocs: the refresh PR refuses a degraded regeneration (#4514)", ()
 		expect(failed[0].prevEvaluated).toBe(41);
 	});
 
-	it("fails the #4338 shape: five classified matrix cells flipped to unknown", () => {
+	// Recurrence #4338 (retro P2): five classified matrix cells (python, yaml,
+	// shell, dockerfile, prisma) read `unknown`. Five of 28 is 17.9%, inside the
+	// 20% count margin, so only the cell-by-cell comparison holds the PR.
+	it("fails the #4338 shape: exactly five of 28 classified matrix cells flipped to unknown", () => {
+		const headMatrix = matrixDoc(Array(28).fill("direct"));
+		const flipped = matrixDoc([
+			...Array(23).fill("direct"),
+			...Array(5).fill("unknown"),
+		]);
+		const root = stage({ ...head, "docs/lsp-capability-matrix.md": flipped });
+		const records = checkDocs(root, (p) =>
+			p === "docs/lsp-capability-matrix.md" ? headMatrix : (head[p] ?? null),
+		);
+		const count = records.find(
+			(r) => r.producer === "probe-clean-signal:docs/lsp-capability-matrix.md",
+		);
+		// The count margin alone passes it: this is the gap the cells close.
+		expect(count).toMatchObject({ evaluated: 23, prevEvaluated: 28, ok: true });
+		const failed = records.filter((r) => !r.ok);
+		expect(failed.map((r) => r.producer)).toEqual([
+			"probe-clean-signal:docs/lsp-capability-matrix.md#cells",
+		]);
+		expect(failed[0].reason).toBe(
+			"5 cell(s) classified at HEAD turned unknown: l23|s, l24|s, l25|s, l26|s, l27|s",
+		);
+	});
+
+	it("fails a larger flip on the count and on the cells", () => {
 		const flipped = matrixDoc([
 			...Array(20).fill("direct"),
 			...Array(10).fill("unknown"),
@@ -281,7 +321,21 @@ describe("checkDocs: the refresh PR refuses a degraded regeneration (#4514)", ()
 		const failed = checkDocs(root, (p) => head[p] ?? null).filter((r) => !r.ok);
 		expect(failed.map((r) => r.producer)).toEqual([
 			"probe-clean-signal:docs/lsp-capability-matrix.md",
+			"probe-clean-signal:docs/lsp-capability-matrix.md#cells",
 		]);
+	});
+
+	it("does not hold a cell the regeneration measured differently, or a row it dropped", () => {
+		const root = stage({
+			...head,
+			"docs/lsp-capability-matrix.md": matrixDoc([
+				"empty-first",
+				...Array(28).fill("direct"),
+			]),
+		});
+		expect(
+			checkDocs(root, (p) => head[p] ?? null).filter((r) => !r.ok),
+		).toEqual([]);
 	});
 
 	it("fails a doc the regeneration did not produce", () => {
@@ -340,6 +394,64 @@ describe("checkRecords and main: the dedicated floor step (#4514)", () => {
 		writeAll(dir, rest);
 		const failed = checkRecords(dir, headText).filter((r) => !r.ok);
 		expect(failed.map((r) => r.producer)).toEqual(["characterize-lsp"]);
+	});
+
+	// Recurrence (review r1 of #4514): the probe record counts measured rows (43
+	// live) and the matrix counts first-publish cells (<= 29); comparing the two
+	// made that drop check unable to fire and printed a misleading "at HEAD 28".
+	it("does not compare probe-clean-signal's rows with HEAD's matrix cells", () => {
+		const dir = tmp();
+		writeAll(dir, { ...healthy, "probe-clean-signal": 32 });
+		const record = checkRecords(dir, (p) =>
+			p === "docs/lsp-capability-matrix.md"
+				? matrixDoc(Array(45).fill("direct"))
+				: null,
+		).find((r) => r.producer === "probe-clean-signal");
+		expect(record).toMatchObject({ prevEvaluated: null, ok: true });
+	});
+
+	// Recurrence (review r1 of #4514): gitHeadText returned null on any git
+	// failure, so a broken checkout turned the drop guard off and the night
+	// passed. Only "HEAD has no such file" is a missing baseline.
+	it("gitHeadText: null for a file HEAD lacks, text for one it has, throws when git cannot read HEAD", () => {
+		expect(gitHeadText("docs/no-such-doc-4514.md")).toBeNull();
+		expect(gitHeadText("package.json")).toContain('"name"');
+		expect(() => gitHeadText("package.json", tmp())).toThrow(
+			/git could not read HEAD for package.json/,
+		);
+	});
+
+	it("main fails closed, naming why, when HEAD cannot be read", () => {
+		const out = vi.spyOn(console, "log").mockImplementation(() => {});
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		const dir = tmp();
+		writeAll(dir, healthy);
+		const unreadable = () => {
+			throw new Error("git could not read HEAD for docs/x.md: not a repo");
+		};
+		expect(main(["--records", dir], unreadable)).toBe(1);
+		expect(out).toHaveBeenCalledWith(
+			"✗  assert-evaluated  evaluated floor  0  git could not read HEAD for docs/x.md: not a repo",
+		);
+	});
+
+	it("main --records --docs judges the producers' records and the regenerated docs in one pass", () => {
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		const dir = tmp();
+		writeAll(dir, healthy);
+		// Records are healthy and HEAD agrees with them; the regenerated caps doc
+		// holds 16 of HEAD's 41 servers, so only the --docs half can fail this.
+		const root = tmp();
+		fs.mkdirSync(path.join(root, "docs"));
+		fs.writeFileSync(
+			path.join(root, "docs/servercapabilities.md"),
+			serverCapsDoc(16),
+		);
+		const head41 = (p: string) =>
+			p === "docs/servercapabilities.md" ? serverCapsDoc(41) : null;
+		expect(main(["--records", dir], head41, root)).toBe(0);
+		expect(main(["--records", dir, "--docs"], head41, root)).toBe(1);
 	});
 
 	it("main exits 0 when everything holds, 1 below a floor, 2 on a usage error", () => {

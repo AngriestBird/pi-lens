@@ -121,7 +121,7 @@ console.log(
 	`  push-only (needs re-publish-empty, else silent → budget-bound): ${push}`,
 );
 // #4514: the step exits 0 by design, so the nightly's floor step reads this.
-writeEvaluatedRecord({ producer: "characterize-lsp", evaluated: pull + push });
+writeEvaluatedRecord({ producer: "characterize-lsp", input: rows });
 
 // Merge the measured `mode` (and derived tier for pull servers) into
 // docs/lsp-capability-matrix.md — MERGE, don't overwrite: a row we couldn't

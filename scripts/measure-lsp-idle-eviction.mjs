@@ -273,7 +273,7 @@ if (serverFilter.length === 0) {
 // exit is a declared-versus-measured veto, so the floor step reads this.
 writeEvaluatedRecord({
 	producer: "measure-lsp-idle-eviction",
-	evaluated: counts.total - counts.unavailable,
+	input: counts,
 });
 console.error(
 	`${counts.total} registry servers: ${counts.eligible} eligible, ${counts.vetoed} vetoed, ${counts.inconclusive} inconclusive, ${counts.unavailable} unavailable (${counts.budget} not reached: budget).`,

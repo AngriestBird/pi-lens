@@ -654,8 +654,12 @@ jobs:
       # leaves `{producer, evaluated}` in $PI_LENS_EVALUATED_DIR; this step,
       # which is NOT continue-on-error, fails when a count is under its floor
       # or has dropped more than 20% against the doc at HEAD
-      # (scripts/lib/assert-evaluated.mjs). It runs after the last layer, so a
-      # degraded night still reports every layer; notify-tool-smoke-red.mjs
+      # (scripts/lib/assert-evaluated.mjs). `--docs` also judges the docs the
+      # producers just regenerated (a classified matrix cell gone `unknown`,
+      # which no count margin sees), so a doc-only loss reds this step, which
+      # the notifier reads, and not only the refresh job. It runs after the
+      # last layer, so a degraded night still reports every layer;
+      # notify-tool-smoke-red.mjs
       # reads its outcome. Skipped only when the producers themselves never
       # ran (an earlier gating layer failed): that night is already red.
       - name: LSP evaluated floor (characterize, clean-signal, capabilities, idle-eviction)
@@ -664,7 +668,7 @@ jobs:
         timeout-minutes: 2
         run: |
           set -o pipefail
-          node scripts/assert-evaluated.mjs --records "$PI_LENS_EVALUATED_DIR" 2>&1 | tee "$RUNNER_TEMP/tool-smoke-evaluated-floor.log"
+          node scripts/assert-evaluated.mjs --records "$PI_LENS_EVALUATED_DIR" --docs 2>&1 | tee "$RUNNER_TEMP/tool-smoke-evaluated-floor.log"
 
       # #4358: save the tool tree once every `--install` layer above has run.
       # The key is first-wins for the week, so a tree saved after an early red

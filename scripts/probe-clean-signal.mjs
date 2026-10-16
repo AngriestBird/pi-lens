@@ -362,13 +362,7 @@ console.log(
 console.log("  n/a (pull) rows are Tier 1 by protocol (#240), not probed.\n");
 // #4514: the step exits 0 by design, so the nightly's floor step reads this.
 // A pull row is answered by protocol; a push row is answered when classified.
-writeEvaluatedRecord({
-	producer: "probe-clean-signal",
-	evaluated: rows.filter(
-		(r) =>
-			MEASURED_CLEAN_BEHAVIORS.has(r.behavior) || r.behavior === "n/a (pull)",
-	).length,
-});
+writeEvaluatedRecord({ producer: "probe-clean-signal", input: rows });
 // #3310 first-publish census: which push servers answer didOpen with an EMPTY
 // set before their real one. `emptyFirstPublish: "indexing"` in
 // wait-policy/strategies.ts is derived from THIS measurement, and

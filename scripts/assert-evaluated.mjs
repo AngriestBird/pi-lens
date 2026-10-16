@@ -4,36 +4,52 @@
  * best-effort LSP producers (scripts/lib/assert-evaluated.mjs has the why and
  * the record shape).
  *
- *   node scripts/assert-evaluated.mjs --records <dir>
+ *   node scripts/assert-evaluated.mjs --records <dir> [--docs]
  *       tool-smoke job: each producer's `<dir>/<producer>.json` against its
  *       floor, and against the count in HEAD's committed doc where it has one.
+ *       With --docs the same step also judges the docs the producers just
+ *       regenerated, so a doc-only loss (five matrix cells gone `unknown`)
+ *       reds the job the tracking-issue notifier already reads.
  *   node scripts/assert-evaluated.mjs --docs
  *       tool-smoke-prs job: the regenerated docs in the working tree against
  *       HEAD's, before any refresh PR opens.
  *
- * Exit 0 when every record is ok, 1 when any is not, 2 on a usage error.
+ * Exit 0 when every record is ok, 1 when any is not (or HEAD cannot be read: a
+ * guard that cannot compare must not read green), 2 on a usage error.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { gitExecFileSync } from "./lib/git-fixture-env.mjs";
 import {
 	assertEvaluated,
 	EVALUATED_PRODUCERS,
+	lostClassifiedCells,
+	matrixCells,
 	missingRecord,
 	readEvaluatedRecord,
 } from "./lib/assert-evaluated.mjs";
+import { gitExecFileSync } from "./lib/git-fixture-env.mjs";
 
-/** HEAD's committed text of a doc, or null when HEAD has none (the test seam). */
-export function gitHeadText(docPath) {
+/**
+ * HEAD's committed text of a doc, or null when HEAD has no such file. A git
+ * failure (no repository, an unreadable object store) THROWS: reading it as
+ * "no baseline" would turn the drop guard off and let the night pass.
+ */
+export function gitHeadText(docPath, cwd = process.cwd()) {
+	const opts = { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] };
+	let listed;
 	try {
-		return gitExecFileSync(["show", `HEAD:${docPath}`], {
-			encoding: "utf8",
-			stdio: ["ignore", "pipe", "ignore"],
-		});
-	} catch {
-		return null;
+		listed = gitExecFileSync(
+			["ls-tree", "--name-only", "HEAD", "--", docPath],
+			opts,
+		);
+	} catch (e) {
+		throw new Error(
+			`git could not read HEAD for ${docPath}: ${String(e?.stderr ?? e?.message ?? e).trim()}`,
+		);
 	}
+	if (listed.trim() === "") return null;
+	return gitExecFileSync(["show", `HEAD:${docPath}`], opts);
 }
 
 function headCount(doc, headText) {
@@ -44,7 +60,11 @@ function headCount(doc, headText) {
 /** Records mode: one record per producer. */
 export function checkRecords(dir, headText = gitHeadText) {
 	return Object.entries(EVALUATED_PRODUCERS).map(([producer, spec]) => {
-		const previous = spec.doc ? headCount(spec.doc, headText) : null;
+		// A doc counted in another unit than the record is no baseline for it.
+		const previous =
+			spec.doc && spec.doc.comparableToRecord !== false
+				? headCount(spec.doc, headText)
+				: null;
 		const evaluated = readEvaluatedRecord(dir, producer);
 		if (evaluated === null)
 			return missingRecord(producer, spec.floor, previous);
@@ -58,6 +78,30 @@ export function checkRecords(dir, headText = gitHeadText) {
 }
 
 /**
+ * The per-cell check of a doc whose count margin is too coarse to see a
+ * handful of cells go `unknown`: every cell classified at HEAD must still be.
+ * Same record shape: `evaluated` is how many of HEAD's classified cells held.
+ */
+function cellRecord(producer, doc, head, text) {
+	const atHead = [...(matrixCells(head) ?? [])].filter(
+		([, cell]) => cell !== "" && cell !== "unknown",
+	).length;
+	if (atHead === 0) return null;
+	const lost = lostClassifiedCells(head, text);
+	const record = assertEvaluated({
+		producer: `${producer}:${doc.path}#cells`,
+		evaluated: atHead - lost.length,
+		expectedAtLeast: atHead,
+	});
+	if (lost.length === 0) return record;
+	const named = lost.slice(0, 8).join(", ");
+	return {
+		...record,
+		reason: `${lost.length} cell(s) classified at HEAD turned unknown: ${named}${lost.length > 8 ? ", ..." : ""}`,
+	};
+}
+
+/**
  * Docs mode: one record per committed doc the refresh PR would carry. A doc
  * the regeneration left byte-identical to HEAD carries nothing, so it is not
  * judged: a promotion-only night must not be held by a doc an earlier degraded
@@ -66,41 +110,56 @@ export function checkRecords(dir, headText = gitHeadText) {
 export function checkDocs(root = ".", headText = gitHeadText) {
 	return Object.entries(EVALUATED_PRODUCERS)
 		.filter(([, spec]) => spec.doc)
-		.map(([producer, { doc }]) => {
-			const previous = headCount(doc, headText);
+		.flatMap(([producer, { doc }]) => {
+			const head = headText(doc.path);
+			const previous = head === null ? null : doc.count(head);
 			let text = null;
 			try {
 				text = fs.readFileSync(path.resolve(root, doc.path), "utf8");
 			} catch {
 				// An absent doc reads as no record below.
 			}
-			if (text !== null && text === headText(doc.path)) return null;
+			if (text !== null && text === head) return [];
 			const evaluated = text === null ? null : doc.count(text);
 			if (evaluated === null)
-				return missingRecord(`${producer}:${doc.path}`, doc.floor, previous);
-			return assertEvaluated({
-				producer: `${producer}:${doc.path}`,
-				evaluated,
-				expectedAtLeast: doc.floor,
-				previous,
-			});
-		})
-		.filter((record) => record !== null);
+				return [missingRecord(`${producer}:${doc.path}`, doc.floor, previous)];
+			const records = [
+				assertEvaluated({
+					producer: `${producer}:${doc.path}`,
+					evaluated,
+					expectedAtLeast: doc.floor,
+					previous,
+				}),
+			];
+			const cells =
+				doc.cells && head !== null && cellRecord(producer, doc, head, text);
+			if (cells) records.push(cells);
+			return records;
+		});
 }
 
-export function main(argv) {
+export function main(argv, headText = gitHeadText, root = ".") {
 	const recordsAt = argv.indexOf("--records");
-	const records =
-		recordsAt >= 0 && argv[recordsAt + 1]
-			? checkRecords(argv[recordsAt + 1])
-			: argv.includes("--docs")
-				? checkDocs()
-				: null;
-	if (!records) {
+	const wantRecords = recordsAt >= 0 && Boolean(argv[recordsAt + 1]);
+	const wantDocs = argv.includes("--docs");
+	if (!wantRecords && !wantDocs) {
 		console.error(
-			"usage: assert-evaluated.mjs --records <dir> | --docs (exit 0 ok, 1 below a floor, 2 usage)",
+			"usage: assert-evaluated.mjs --records <dir> [--docs] | --docs (exit 0 ok, 1 below a floor, 2 usage)",
 		);
 		return 2;
+	}
+	let records;
+	try {
+		records = [
+			...(wantRecords ? checkRecords(argv[recordsAt + 1], headText) : []),
+			...(wantDocs ? checkDocs(root, headText) : []),
+		];
+	} catch (e) {
+		// Fail closed: with no HEAD to compare against, the drop guard is off.
+		const reason = String(e?.message ?? e);
+		console.error(`::error title=nightly evaluated floor::${reason}`);
+		console.log(`✗  assert-evaluated  evaluated floor  0  ${reason}`);
+		return 1;
 	}
 	for (const r of records) console.log(JSON.stringify(r));
 	const failed = records.filter((r) => !r.ok);

@@ -172,10 +172,7 @@ console.error(
 	`\nWrote docs/servercapabilities.md (${rows.length} servers captured this run, ${unavailable.size} unavailable).`,
 );
 // #4514: the step exits 0 by design, so the nightly's floor step reads this.
-writeEvaluatedRecord({
-	producer: "server-capabilities",
-	evaluated: rows.length,
-});
+writeEvaluatedRecord({ producer: "server-capabilities", input: rows });
 
 try {
 	await resetLSPService?.({ fast: true });

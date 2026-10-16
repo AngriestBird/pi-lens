@@ -12,7 +12,13 @@ export interface EvaluatedRecord {
 
 export interface EvaluatedProducer {
 	floor: number;
-	doc?: { path: string; floor: number; count(text: string): number | null };
+	doc?: {
+		path: string;
+		floor: number;
+		count(text: string): number | null;
+		comparableToRecord?: boolean;
+		cells?: boolean;
+	};
 }
 
 export const EVALUATED_PRODUCERS: Record<string, EvaluatedProducer>;
@@ -30,9 +36,17 @@ export function missingRecord(
 	previous?: number | null,
 ): EvaluatedRecord;
 
+export const EVALUATED_COUNTS: Record<string, (input: any) => number>;
+
+export function countEvaluated(producer: string, input: unknown): number;
+
+export function matrixCells(text: string): Map<string, string> | null;
+
+export function lostClassifiedCells(headText: string, text: string): string[];
+
 export function writeEvaluatedRecord(input: {
 	producer: string;
-	evaluated: number;
+	input: unknown;
 }): void;
 
 export function readEvaluatedRecord(

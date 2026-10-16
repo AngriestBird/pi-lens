@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import yaml from "../../clients/deps/js-yaml.js";
 import {
+	countEvaluated,
 	EVALUATED_DIR_ENV,
 	EVALUATED_PRODUCERS,
 } from "../../scripts/lib/assert-evaluated.mjs";
@@ -34,17 +35,51 @@ const measurements = JSON.parse(
 };
 
 const lastInt = (line: string) => Number(/(\d+)\s*$/.exec(line)?.[1]);
-/** How each producer's own log lines add up to the count it records. */
-const EXTRACT: Record<string, (lines: string[]) => number> = {
-	"characterize-lsp": (lines) => lines.map(lastInt).reduce((a, b) => a + b, 0),
-	"probe-clean-signal": (lines) =>
-		lines.map(lastInt).reduce((a, b) => a + b, 0),
+const many = <T>(n: number, row: T) => Array.from({ length: n }, () => row);
+/**
+ * The value each script hands writeEvaluatedRecord, rebuilt from the raw log
+ * lines of a real night, plus rows the count must NOT include (a refused or
+ * unclassified row). The count itself is EVALUATED_COUNTS, the one function the
+ * script also calls, so a mutation of a count expression reds the derivation
+ * below (the idle count read as `counts.total`, probe-clean-signal dropping its
+ * `n/a (pull)` arm, characterize-lsp counting refused rows).
+ */
+const INPUT: Record<string, (lines: string[]) => unknown> = {
+	"characterize-lsp": (lines) => [
+		...many(lastInt(lines[0]), { mode: "pull" }),
+		...many(lastInt(lines[1]), { mode: "push-only" }),
+		...many(3, { mode: "unknown" }),
+		...many(2, { mode: "refused: project trust is unknown" }),
+	],
+	"probe-clean-signal": (lines) => [
+		...many(lastInt(lines[0]), { behavior: "publishes-versioned" }),
+		...many(lastInt(lines[1]), { behavior: "publishes-unversioned" }),
+		...many(lastInt(lines[2]), { behavior: "silent" }),
+		...many(lastInt(lines[3]), { behavior: "n/a (pull)" }),
+		...many(4, { behavior: "unknown" }),
+	],
 	"server-capabilities": ([line]) =>
-		Number(/\((\d+) servers captured/.exec(line)?.[1]),
+		many(Number(/\((\d+) servers captured/.exec(line)?.[1]), {}),
 	"measure-lsp-idle-eviction": ([line]) => {
-		const m = /(\d+) registry servers: .*?(\d+) unavailable/.exec(line);
-		return Number(m?.[1]) - Number(m?.[2]);
+		const m =
+			/(\d+) registry servers: (\d+) eligible, (\d+) vetoed, (\d+) inconclusive, (\d+) unavailable/.exec(
+				line,
+			);
+		return {
+			total: Number(m?.[1]),
+			eligible: Number(m?.[2]),
+			vetoed: Number(m?.[3]),
+			inconclusive: Number(m?.[4]),
+			unavailable: Number(m?.[5]),
+		};
 	},
+};
+/** The identifier each script passes as `input`, pinned so it cannot pass a slice. */
+const SCRIPT_INPUT: Record<string, string> = {
+	"characterize-lsp": "rows",
+	"probe-clean-signal": "rows",
+	"server-capabilities": "rows",
+	"measure-lsp-idle-eviction": "counts",
 };
 
 describe("nightly evaluated floors are measured, not guessed (#4514)", () => {
@@ -52,7 +87,7 @@ describe("nightly evaluated floors are measured, not guessed (#4514)", () => {
 		expect(Object.keys(EVALUATED_PRODUCERS).sort()).toEqual(
 			Object.keys(measurements.producers).sort(),
 		);
-		expect(Object.keys(EXTRACT).sort()).toEqual(
+		expect(Object.keys(INPUT).sort()).toEqual(
 			Object.keys(EVALUATED_PRODUCERS).sort(),
 		);
 	});
@@ -62,8 +97,12 @@ describe("nightly evaluated floors are measured, not guessed (#4514)", () => {
 		const { healthy, degraded } = measurements.producers[producer];
 
 		it("derives each measurement's count from its raw log lines", () => {
-			expect(EXTRACT[producer](healthy.lines)).toBe(healthy.evaluated);
-			expect(EXTRACT[producer](degraded.lines)).toBe(degraded.evaluated);
+			expect(countEvaluated(producer, INPUT[producer](healthy.lines))).toBe(
+				healthy.evaluated,
+			);
+			expect(countEvaluated(producer, INPUT[producer](degraded.lines))).toBe(
+				degraded.evaluated,
+			);
 		});
 
 		it("sits above the degraded night and at or below the healthy one", () => {
@@ -85,8 +124,12 @@ describe("nightly evaluated floors are measured, not guessed (#4514)", () => {
 			const code = stripSource(read(`scripts/${producer}.mjs`), {
 				strings: "keep",
 			});
+			// The script hands over its rows, never a count of its own: the one
+			// count function (EVALUATED_COUNTS) is what the test above derives.
 			expect(code).toMatch(
-				new RegExp(`writeEvaluatedRecord\\(\\{\\s*producer:\\s*"${producer}"`),
+				new RegExp(
+					`writeEvaluatedRecord\\(\\{\\s*producer:\\s*"${producer}",\\s*input:\\s*${SCRIPT_INPUT[producer]},?\\s*\\}\\)`,
+				),
 			);
 		});
 	});
@@ -124,6 +167,9 @@ describe("the floor step and the refresh guard are wired and gating (#4514)", ()
 		expect(floor["continue-on-error"]).toBeUndefined();
 		expect(floor.id).toBe("evaluated_floor");
 		expect(floor.run).toContain("scripts/assert-evaluated.mjs --records");
+		// A doc-only loss (a matrix cell gone `unknown`) must red the step the
+		// notifier reads, not only the refresh job that no tracker watches.
+		expect(floor.run).toMatch(/--records "\$\w+" --docs\b/);
 		expect(floor.run).toMatch(/^\s*set -o pipefail\s*$/m);
 		const at = (name: string) => steps.indexOf(step(smoke, name));
 		for (const earlier of [

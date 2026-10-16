@@ -15,6 +15,7 @@
 // the docs and fails a dedicated step that is NOT continue-on-error.
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { MEASURED_CLEAN_BEHAVIORS } from "./clean-signal.mjs";
 import { parseTable } from "./md-matrix.mjs";
 
 /**
@@ -31,17 +32,43 @@ const SERVERS_CAPTURED_RE = /(\d+) servers captured/;
 const IDLE_COUNTS_RE =
 	/(\d+) eligible, (\d+) vetoed, (\d+) inconclusive, \d+ unavailable/;
 
+const isClassified = (cell) =>
+	cell !== undefined && cell !== "" && cell !== "unknown";
+
 /**
  * The matrix doc is merged, never blanked, so its only honest per-run signal is
  * the `first-publish` column the 5-day expiry turns to `unknown` (the #4338
- * shape: five false `unknown` cells). Count the classified cells.
+ * shape: five false `unknown` cells). `matrixCells` reads that column keyed by
+ * `lang|server`; `matrixClassifiedCount` counts the classified ones.
  */
-function matrixClassifiedCount(text) {
+export function matrixCells(text) {
 	const table = parseTable(text, "| lang | server |");
 	const col = table?.header.indexOf("first-publish") ?? -1;
 	if (!table || col < 0) return null;
-	return table.rows.filter((cells) => cells[col] && cells[col] !== "unknown")
-		.length;
+	return new Map(
+		table.rows.map((cells) => [`${cells[0]}|${cells[1]}`, cells[col]]),
+	);
+}
+
+function matrixClassifiedCount(text) {
+	const cells = matrixCells(text);
+	return cells ? [...cells.values()].filter(isClassified).length : null;
+}
+
+/**
+ * Cells classified at HEAD that the regeneration turned `unknown`, as
+ * `lang|server` keys. A 20% margin on the count lets five of 28 cells flip
+ * (17.9%), exactly the #4338 shape, so the matrix is compared cell by cell.
+ * A row absent from the regeneration is the count floor's business, not a lost
+ * measurement of its own.
+ */
+export function lostClassifiedCells(headText, text) {
+	const head = matrixCells(headText);
+	const now = matrixCells(text);
+	if (!head || !now) return [];
+	return [...head]
+		.filter(([key, cell]) => isClassified(cell) && now.get(key) === "unknown")
+		.map(([key]) => key);
 }
 
 /**
@@ -59,6 +86,12 @@ export const EVALUATED_PRODUCERS = {
 			path: "docs/lsp-capability-matrix.md",
 			floor: 1,
 			count: matrixClassifiedCount,
+			// The record counts measured rows (43 live); the doc counts first-publish
+			// cells (<= 29). Different units: the doc's HEAD count is no baseline for
+			// the record, so records mode does not compare them.
+			comparableToRecord: false,
+			// Compared cell by cell against HEAD (lostClassifiedCells).
+			cells: true,
 		},
 	},
 	"server-capabilities": {
@@ -84,6 +117,35 @@ export const EVALUATED_PRODUCERS = {
 		},
 	},
 };
+
+/**
+ * What each producer counts as "evaluated", from the value its script already
+ * holds: one pure function per producer, called by the script (through
+ * writeEvaluatedRecord) and by the test that feeds it a nightly's log lines, so
+ * neither can drift from the other (tests/config/nightly-evaluated-floors.test.ts).
+ *   characterize-lsp          rows with a measured mode
+ *   probe-clean-signal        classified rows plus pull rows (answered by protocol)
+ *   server-capabilities       rows captured
+ *   measure-lsp-idle-eviction summarizeRows() counts: spawned, not unavailable
+ */
+export const EVALUATED_COUNTS = {
+	"characterize-lsp": (rows) =>
+		rows.filter((r) => r.mode === "pull" || r.mode === "push-only").length,
+	"probe-clean-signal": (rows) =>
+		rows.filter(
+			(r) =>
+				MEASURED_CLEAN_BEHAVIORS.has(r.behavior) || r.behavior === "n/a (pull)",
+		).length,
+	"server-capabilities": (rows) => rows.length,
+	"measure-lsp-idle-eviction": (counts) => counts.total - counts.unavailable,
+};
+
+export function countEvaluated(producer, input) {
+	const count = EVALUATED_COUNTS[producer];
+	if (!count)
+		throw new TypeError(`countEvaluated: unknown producer ${producer}`);
+	return count(input);
+}
 
 const isCount = (n) => Number.isInteger(n) && n >= 0;
 
@@ -149,7 +211,8 @@ export function missingRecord(producer, floor, previous = null) {
  * Producer side. One log line per run (not per row), and a record file only
  * when the workflow names a directory, so a local run leaves nothing behind.
  */
-export function writeEvaluatedRecord({ producer, evaluated }) {
+export function writeEvaluatedRecord({ producer, input }) {
+	const evaluated = countEvaluated(producer, input);
 	console.error(`[evaluated] ${producer}: ${evaluated}`);
 	const dir = process.env[EVALUATED_DIR_ENV];
 	if (!dir) return;
