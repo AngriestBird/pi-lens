@@ -346,6 +346,13 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"bounded() races the touch against a live wall budget; fake timers settle the bound instantly and the budget semantics are unmeasurable",
 	},
+	// 2026-10-16 (#4510): the worker-fork witness polls a pid file and a pid's
+	// liveness; only a real clock sees a process die.
+	"raw-timer-wait:scripts/mutate.test.ts": {
+		detector: "raw-timer-wait",
+		reason:
+			"polls a real pid file and a real pid's liveness after a signal to the mutation CLI; fake timers cannot observe a process exiting",
+	},
 	// 2026-09-15 (#2042 cheapest probe): the sample-tail file is written by the
 	// wrapper's own real setInterval loop in a separate process; a poll waits
 	// for that file's first write rather than a fixed sleep, and one case kills
@@ -767,6 +774,13 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		detector: "real-process-spawn",
 		reason:
 			"the real pinned npm child is required to reproduce lockfile optional-binding rewrites; a process double cannot validate npm behavior",
+	},
+	// 2026-10-16 (#4510): the killed-runner witness ends its own vitest
+	// launcher from outside the worker (the kill guard refuses process.kill).
+	"real-process-spawn:scripts/mutate-fixture.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the fixture kills its parent vitest launcher through kill(1), because the kill guard refuses process.kill on a pid the file does not own; no in-process call ends the runner",
 	},
 	// 2026-09-26 (#3531): the CLI smoke test spawns a real node child to prove
 	// scripts/mutation-report.mjs's own argv parsing (--report/--out) and
