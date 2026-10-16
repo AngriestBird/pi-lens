@@ -317,6 +317,15 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			reason:
 				"the native addon's load is the host boundary; its sync loader is the only seam to make it fail",
 		},
+	// 2026-10-16 (#4515): the fixture proves a trust-refused project-local
+	// candidate no longer ends the launch. The refusal, the installer and the
+	// candidate loop are real; only a store binary's launch is doubled.
+	"in-process-mock:clients/lsp/managed-fallback-after-trust-refusal-4515.test.ts::clients/lsp/launch":
+		{
+			detector: "in-process-mock",
+			reason:
+				"spawning the managed language server is the process boundary; the wrapper delegates every other command, the refused project-local candidate included, to the real launchLSP",
+		},
 	// 2026-10-15 (#4484): the host witness keeps every pi-lens module on the
 	// write-to-turn-end chain real; only the language-server process behind the
 	// LSP capability adapter is stood in for, answering from the bytes it gets.

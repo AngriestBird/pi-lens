@@ -781,6 +781,7 @@
 		"clients/lsp/lua-tree-binary.test.ts::clients/lsp/launch": 1,
 		"clients/lsp/managed-bin-fastpath.test.ts::clients/installer/index": 1,
 		"clients/lsp/managed-bin-fastpath.test.ts::clients/lsp/launch": 1,
+		"clients/lsp/managed-fallback-after-trust-refusal-4515.test.ts::clients/lsp/launch": 1,
 		"clients/lsp/nav-request-timeout-telemetry.test.ts::clients/latency-logger": 1,
 		"clients/lsp/notify-read-order.test.ts::clients/latency-logger": 1,
 		"clients/lsp/notify-read-order.test.ts::clients/lsp/client": 1,

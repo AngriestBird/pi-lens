@@ -3207,12 +3207,22 @@ export function wasLastResolveTransient(toolId: string): boolean {
 	return lastResolveTransient.get(toolId) ?? false;
 }
 
-export async function getToolPath(toolId: string): Promise<string | undefined> {
+export async function getToolPath(
+	toolId: string,
+	opts?: {
+		/** #4515: read only pi-lens's own store; spawn nothing found on PATH. */
+		storeOnly?: boolean;
+	},
+): Promise<string | undefined> {
 	let sawTransient = false;
 	const markTransient = (): void => {
 		sawTransient = true;
 	};
-	const result = await getToolPathResolved(toolId, markTransient);
+	const result = await getToolPathResolved(
+		toolId,
+		markTransient,
+		opts?.storeOnly === true,
+	);
 	lastResolveTransient.set(toolId, sawTransient);
 	return result;
 }
@@ -3220,6 +3230,7 @@ export async function getToolPath(toolId: string): Promise<string | undefined> {
 async function getToolPathResolved(
 	toolId: string,
 	onTransient: () => void,
+	storeOnly: boolean,
 ): Promise<string | undefined> {
 	const tool = TOOLS.find((t) => t.id === toolId);
 	if (!tool) return undefined;
@@ -3365,6 +3376,21 @@ async function getToolPathResolved(
 	) {
 		const githubPath = await findGitHubToolPath(tool.binaryName || tool.id);
 		if (githubPath) return githubPath;
+	}
+
+	// #4515: the store ends here, save pi-lens's own pip prefixes. Every other
+	// rung below spawns what a bare-name lookup resolves (`<cmd> --version`,
+	// `npm prefix -g`, `python -m site`).
+	if (storeOnly) {
+		return tool.installStrategy === "pip"
+			? findPipUserToolPath(
+					tool.binaryName || tool.id,
+					onTransient,
+					tool.checkArgs,
+					getToolVerificationTimeout(tool),
+					true,
+				)
+			: undefined;
 	}
 
 	// Check if global. `isCommandAvailable` is a PATH walk plus a stat — it
@@ -3621,12 +3647,14 @@ async function findPipUserToolPath(
 	onTransient?: () => void,
 	verificationArgs: string[] = ["--version"],
 	verificationTimeoutMs = 10_000,
+	/** #4515: skip the Python user base, which takes a PATH-resolved spawn. */
+	piLensPrefixesOnly = false,
 ): Promise<string | undefined> {
 	const isWindows = installerPlatform() === "win32";
 	const userBaseCandidates = [
 		path.join(getGlobalPiLensDir(), "pip-tools"),
 		path.join(getGlobalPiLensDir(), "pip-user"),
-		...(await getPythonUserBaseCandidates()),
+		...(piLensPrefixesOnly ? [] : await getPythonUserBaseCandidates()),
 	];
 
 	for (const userBase of userBaseCandidates) {
