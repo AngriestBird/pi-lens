@@ -359,6 +359,9 @@ const lspSpawnHeavyInclude = [
 	// project unless it is explicitly phased here. `test:integration` still
 	// selects the same file positionally, while `test:unit` excludes it below.
 	"tests/clients/lsp/workspace-diagnostics-sweep-attribution.integration.test.ts",
+	// #4534: the read-guard-off recovery witness drives the real LSP service
+	// on the shared fake-server child to observe the recovered bytes arrive.
+	"tests/clients/opaque-mutation-scan.test.ts",
 	// #3961: the `--lsp` cold-path witness spawns the real bin, which spawns
 	// real LSP children (deno `lsp`, opengrep `lsp`, typos-lsp, ast-grep `lsp`)
 	// for the file. The indirect spawn is invisible to this lane's marker census

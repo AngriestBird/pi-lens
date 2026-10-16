@@ -604,7 +604,7 @@ describe("#4483 witness: a linter blocks on the delta at a file's first write", 
 	});
 
 	it("captures nothing with --no-delta, where every finding is reported anyway", async () => {
-		const s = await openSession("nd", "scripts/nd.sh", OLD_ERROR, {
+		const s = await openSession("no-delta", "scripts/no-delta.sh", OLD_ERROR, {
 			"no-delta": true,
 		});
 		const out = await s.edit("echo a", "echo b");
