@@ -91,6 +91,22 @@ vi.mock("node:fs", async (importOriginal) => {
 	};
 });
 
+// Installer probe-cache answers were produced by a real --version spawn before
+// this process. Hide that durable answer so each cell exercises its mocked
+// probe instead of inheriting a cache hit from the test harness.
+vi.mock("node:fs/promises", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:fs/promises")>();
+	return {
+		...actual,
+		readFile: async (...args: Parameters<typeof actual.readFile>) => {
+			const [file] = args;
+			return String(file).endsWith("probe-cache.json")
+				? "{}"
+				: actual.readFile(...args);
+		},
+	};
+});
+
 const repoRoot = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
 	"../../..",
@@ -423,6 +439,11 @@ describe("tool-state matrix (#4522)", () => {
 						const { reachedNoVerdict } =
 							await import("../../../clients/dispatch/types.js");
 						const spawn = await import("../../../clients/safe-spawn.js");
+						const installer =
+							await import("../../../clients/installer/index.js");
+						installer.resetPathWalkMemo();
+						installer.resetResolvedPathCache();
+						installer.resetProbeCacheStateForTesting();
 						const env = setupTestEnvironment("pi-lens-tool-state-");
 						try {
 							fs.cpSync(
