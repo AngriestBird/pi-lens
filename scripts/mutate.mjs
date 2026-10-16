@@ -303,7 +303,18 @@ function failedTitles(output) {
 }
 
 function classifyTestRun(testRun) {
-	if (parseVitestSummary(testRun.output).noTests) return "ERROR";
+	// Only a finished run that printed its `Tests` summary reached a verdict.
+	// A signal close (vitest killed from outside) or a missing summary (a bad
+	// --tests path prints "No test files found") is ERROR, never RED (#4510).
+	if (testRun.signal) return "ERROR";
+	const summary = parseVitestSummary(testRun.output);
+	if (
+		summary.noTests ||
+		(summary.testsPassed === null &&
+			summary.testsFailed === null &&
+			summary.testsSkipped === null)
+	)
+		return "ERROR";
 	return testRun.code === 0 ? "SURVIVED" : "RED";
 }
 
@@ -317,6 +328,9 @@ function runTests(files) {
 				cwd: root,
 				env: process.env,
 				stdio: ["ignore", "pipe", "pipe"],
+				// Its own process group, so a signal can end the launcher and its
+				// worker forks together (#4510).
+				detached: process.platform !== "win32",
 			},
 		);
 		activeChild = child;
@@ -343,6 +357,17 @@ function runTests(files) {
 }
 
 let activeChild = null;
+
+/** SIGKILLs the running vitest's whole process group; the launcher alone leaves its worker fork spinning. */
+function killActiveRun() {
+	if (!activeChild) return;
+	try {
+		if (process.platform === "win32") activeChild.kill("SIGKILL");
+		else process.kill(-activeChild.pid, "SIGKILL");
+	} catch {
+		// Already gone; the journals are still restored.
+	}
+}
 
 function build() {
 	const result = spawnSync(
@@ -445,7 +470,7 @@ async function main() {
 		if (handlingSignal) return;
 		handlingSignal = true;
 		try {
-			if (activeChild) activeChild.kill("SIGKILL");
+			killActiveRun();
 			for (const refusal of restoreOwned())
 				console.error(`mutate.mjs: ${refusal}`);
 		} finally {

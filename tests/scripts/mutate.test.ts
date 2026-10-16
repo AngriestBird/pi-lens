@@ -1,7 +1,15 @@
 // flake-shape: real-process-spawn — the mutation CLI's child Vitest process and SIGINT restoration are the process boundary under test.
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { expect, it, vi } from "vitest";
 
@@ -428,6 +436,115 @@ it.each([
 			stdout: expect.stringContaining("\nERROR\n"),
 		});
 		expect(digest()).toBe(before);
+	},
+	60_000,
+);
+
+// Recurrence (#4510 review F1): a test-stage run with no verdict printed RED,
+// so "only a failed test run prints RED" was false for a bad --tests path and
+// for a vitest killed from outside.
+it("prints ERROR, not RED, when --tests names no test file (#4510)", async () => {
+	const before = digest();
+	const result = await run([
+		cli,
+		"--file",
+		target,
+		"--find",
+		find,
+		"--replace",
+		replace,
+		"--tests",
+		"tests/scripts/does-not-exist-4510.test.ts",
+	]);
+	expect(result.code).toBe(1);
+	expect(result.stdout).toMatch(/\nERROR\n/);
+	expect(result.stdout).not.toMatch(/\nRED\n/);
+	expect(digest()).toBe(before);
+});
+
+it("prints ERROR, not RED, when vitest is killed from outside after a summary line (#4510)", async () => {
+	const before = digest();
+	const result = await run(
+		[
+			cli,
+			"--file",
+			target,
+			"--find",
+			find,
+			"--replace",
+			replace,
+			"--tests",
+			target,
+		],
+		{ PI_LENS_MUTATION_KILL_RUNNER: "1" },
+	);
+	expect(result.code).toBe(130);
+	expect(result.stdout).toMatch(/\nERROR\n/);
+	expect(result.stdout).not.toMatch(/\nRED\n/);
+	expect(digest()).toBe(before);
+});
+
+// Recurrence (#4510 review F2): a signal SIGKILLed only the vitest launcher and
+// its worker fork ran on until its test ended (two 99% CPU orphans, 4 h).
+it.each(["SIGINT", "SIGTERM", "SIGHUP"] as const)(
+	"%s to the run kills the vitest worker fork too (#4510)",
+	async (signal) => {
+		const before = digest();
+		const dir = mkdtempSync(join(tmpdir(), "pi-lens-mutate-pid-"));
+		const pidFile = join(dir, "worker.pid");
+		const child = spawn(
+			process.execPath,
+			[
+				cli,
+				"--file",
+				target,
+				"--find",
+				find,
+				"--replace",
+				replace,
+				"--tests",
+				target,
+			],
+			{
+				cwd: root,
+				env: {
+					...process.env,
+					PI_LENS_MUTATION_RUN: "1",
+					PI_LENS_MUTATION_PIDFILE: pidFile,
+				},
+				stdio: ["ignore", "ignore", "ignore"],
+			},
+		);
+		const closed = new Promise((resolve) => child.once("close", resolve));
+		let worker = 0;
+		try {
+			for (let at = 0; at < 600 && !existsSync(pidFile); at += 1)
+				await new Promise((resolve) => setTimeout(resolve, 100));
+			worker = Number(readFileSync(pidFile, "utf8"));
+			expect(worker).toBeGreaterThan(0);
+			child.kill(signal);
+			await closed;
+			let alive = true;
+			for (let at = 0; at < 50 && alive; at += 1) {
+				try {
+					process.kill(worker, 0);
+					await new Promise((resolve) => setTimeout(resolve, 100));
+				} catch {
+					alive = false;
+				}
+			}
+			expect(alive).toBe(false);
+			expect(digest()).toBe(before);
+		} finally {
+			child.kill("SIGKILL");
+			if (worker > 0)
+				try {
+					process.kill(worker, "SIGKILL");
+				} catch {
+					// already gone
+				}
+			rmSync(dir, { recursive: true, force: true });
+		}
 	},
 	60_000,
 );
