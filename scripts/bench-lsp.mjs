@@ -24,6 +24,7 @@ import * as path from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
+	adoptFixtureProjectTrust,
 	bootstrapFixtureWorkspace,
 	withScratchHome,
 } from "./lib/lsp-fixture-workspace.mjs";
@@ -58,6 +59,10 @@ const {
 	getServersForFileWithConfig,
 	resetLSPConfigStateForTests,
 } = await imp("dist/clients/lsp/config.js");
+// #4514: this script is a standalone host, not pi. Adopt project trust before
+// the first touch, or the launch gate refuses project-local and project-code
+// servers and the rows read as unavailable.
+await adoptFixtureProjectTrust({ repoRoot });
 let ensureTool;
 if (install) {
 	({ ensureTool } = await imp("dist/clients/installer/index.js"));

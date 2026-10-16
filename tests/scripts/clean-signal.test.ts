@@ -33,6 +33,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createProbeFixture } from "../../scripts/lib/probe-fixture.mjs";
+import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 import {
 	mergeRows,
 	mergeSrc,
@@ -228,6 +229,69 @@ describe("classifyCleanBehavior (phase-aware 4-way)", () => {
 			fs.rmSync(dst, { recursive: true, force: true });
 		}
 	});
+	// Recurrence #4514 (acceptance 2): trust kept the server from launching, no
+	// publish ever arrived, and the row read "no publish observed (server
+	// slow/absent)" for six nights. Drives the production row construction with
+	// a server that publishes nothing, and varies only the trust refusal.
+	describe.each([
+		["trust refused", "refused: project trust is unknown", true],
+		["trust adopted", undefined, false],
+	])(
+		"probeFixture with a silent server, %s (#4514)",
+		(_name, refusal, refused) => {
+			it("names the refusal in the row instead of 'no publish observed'", async () => {
+				const dst = fs.mkdtempSync(
+					path.join(os.tmpdir(), "pi-lens-probe-refusal-"),
+				);
+				try {
+					const absFile = path.join(dst, "sample.yaml");
+					fs.writeFileSync(absFile, "a: 1\n");
+					const probeFixture = createProbeFixture({
+						// The shared double (an inline literal would be a second hand-rolled
+						// service in this file, flake-shape service-double): a silent server.
+						lsp: makeLspServiceDouble({
+							supportsLSP: () => true,
+							touchFile: async () => undefined,
+							getWorkspaceDiagnosticsSupport: async () => ({}),
+						}) as never,
+						repoRoot: process.cwd(),
+						install: false,
+						initLSPConfig: undefined,
+						getServersForFileWithConfig: () => [{ id: "yaml" }],
+						bootstrapFixtureWorkspace: async () => ({ absFile }),
+						trustRefusal: async () => refusal,
+						drainPublishTrace: Object.assign(() => undefined, {
+							reset: () => undefined,
+						}),
+						pubLogSize: () => 0,
+						sleep: async () => undefined,
+					});
+					const row = {
+						lang: "yaml",
+						serverId: undefined as string | undefined,
+						behavior: "unknown",
+						tier: 0,
+						tierLabel: "",
+						mode: "?",
+						detail: "",
+						firstPublish: "unknown",
+						cleanFixture: false,
+					};
+					await probeFixture({ lang: "yaml", file: "sample.yaml" }, dst, row);
+					expect(row.behavior).toBe("unknown");
+					if (refused) {
+						expect(row.detail).toBe("refused: project trust is unknown");
+						expect(row.mode).toBe("refused: project trust is unknown");
+					} else {
+						expect(row.detail).toContain("no publish observed");
+						expect(row.mode).toBe("unknown");
+					}
+				} finally {
+					fs.rmSync(dst, { recursive: true, force: true });
+				}
+			});
+		},
+	);
 	it("classifies a versioned clean-transition publisher as publishes-versioned (tier 2)", () => {
 		// ast-grep-shaped: re-publishes WITH a version on a clean transition.
 		const v = classifyCleanBehavior({

@@ -47,7 +47,8 @@ function commentFor(file) {
 /**
  * @param {object} deps the script's live collaborators: `lsp`, `repoRoot`,
  *   `install`, `ensureTool`, `initLSPConfig`, `getServersForFileWithConfig`,
- *   `bootstrapFixtureWorkspace`, `drainPublishTrace`, `pubLogSize`, `sleep`.
+ *   `bootstrapFixtureWorkspace`, `trustRefusal`, `drainPublishTrace`,
+ *   `pubLogSize`, `sleep`.
  */
 export function createProbeFixture(deps) {
 	const {
@@ -58,6 +59,7 @@ export function createProbeFixture(deps) {
 		initLSPConfig,
 		getServersForFileWithConfig,
 		bootstrapFixtureWorkspace,
+		trustRefusal,
 		drainPublishTrace,
 		pubLogSize,
 		sleep,
@@ -156,6 +158,18 @@ export function createProbeFixture(deps) {
 		const dirtyDiagCount =
 			touchAnsweredDiagnostics(dirtyResult, touchOptions, lsp)?.length ?? 0;
 		const verdict = classifyCleanBehavior(obs);
+		// #4514: a server trust kept from launching published nothing, which reads
+		// exactly like a slow one. Name the refusal instead of "no publish
+		// observed"; the row stays `unknown`, so the matrix merge never writes it.
+		const refused =
+			obs.dirtyPublishes === 0 && obs.cleanTransitionPublishes === 0
+				? await trustRefusal?.()
+				: undefined;
+		if (refused) {
+			if (row.mode === "unknown") row.mode = refused;
+			row.detail = refused;
+			return;
+		}
 		// #3310: the first-publish class comes from the dirty phase's publish ORDER,
 		// which this trace already holds — no extra touch, no extra server time.
 		const firstPublishVerdict = classifyFirstPublish(dirtyPubs);
