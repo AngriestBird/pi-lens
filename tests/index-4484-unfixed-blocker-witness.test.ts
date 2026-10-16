@@ -45,8 +45,15 @@ const boundary = vi.hoisted(() => {
 	 *  Gate B skips; with `diag`, the server reports `no-unknown-returns` on
 	 *  each `): unknown {` line, as its catalog would. Round 7 (P33): with
 	 *  `cutoff`, the server does not answer the touch: unconfirmed, and none
-	 *  of its diagnostics. */
-	const ag = { published: false, diag: false, cutoff: false };
+	 *  of its diagnostics. #4529 review (P45): with `other` instead, it
+	 *  reports another rule on those lines, at that LSP severity, as a team
+	 *  sgconfig's catalog would. */
+	const ag = {
+		published: false,
+		diag: false,
+		cutoff: false,
+		other: 0 as 0 | 1 | 2,
+	};
 	/** Round 8 (P39): with `silent`, the bash server does not answer a
 	 *  `.sh` touch; `runs` counts shellcheck's CLI scans. */
 	const sh = { silent: false, runs: 0 };
@@ -59,6 +66,20 @@ const boundary = vi.hoisted(() => {
 					start: { line: i, character: 0 },
 					end: { line: i, character: 8 },
 				};
+				if (ag.other !== 0 && line.includes("): unknown {"))
+					return [
+						{
+							severity: ag.other,
+							message: "Prefer an options object over positional parameters",
+							code: "other-rule",
+							source: "ast-grep",
+							serverId: "ast-grep",
+							range: {
+								start: { line: i, character: 0 },
+								end: { line: i, character: 10 },
+							},
+						},
+					];
 				if (ag.diag && line.includes("): unknown {"))
 					return [
 						{
@@ -339,6 +360,7 @@ beforeEach(() => {
 	boundary.ag.published = false;
 	boundary.ag.diag = false;
 	boundary.ag.cutoff = false;
+	boundary.ag.other = 0;
 	boundary.sh.silent = false;
 });
 afterEach(async () => {
@@ -354,6 +376,7 @@ afterEach(async () => {
 	boundary.ag.published = false;
 	boundary.ag.diag = false;
 	boundary.ag.cutoff = false;
+	boundary.ag.other = 0;
 	boundary.sh.silent = false;
 	resetPendingRunnerFindings();
 	if (originalTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
@@ -1977,15 +2000,33 @@ describe("#4509 witness: a recorded blocker is judged by a run of its own runner
 			AG_PRE.replace("CLIENT_VERSION;", "CLIENT_VERSION; // x"),
 			[2],
 		);
-		await held;
-		// napi has already skipped as covered; the gate now absorbs its blocker.
-		expect(await s.commitBlocked()).toBe(true);
-		for (const release of boundary.lsp.held.splice(0)) release();
-		boundary.lsp.mode = "answer";
-		const w2 = await edit;
+		let w2 = "";
+		try {
+			await held;
+			// The absorb reads napi's answer about the earlier bytes as current
+			// only while the file's mtime is within the drift tolerance of
+			// napi's mark (`freshnessFromMtime`), as on a coarse-mtime
+			// filesystem. A warm run wrote this edit inside it by luck and a
+			// lone run did not (#4529 review R2), so the race is pinned here.
+			const markedAt = new Date(peekSettledRunnerFindings()[0]!.markedAtMs);
+			fs.utimesSync(s.target, markedAt, markedAt);
+			// napi has already skipped as covered; the gate now absorbs its
+			// blocker.
+			expect(await s.commitBlocked()).toBe(true);
+		} finally {
+			// A red above still lets the held dispatch finish in this cell.
+			for (const release of boundary.lsp.held.splice(0)) release();
+			boundary.lsp.mode = "answer";
+			w2 = await edit;
+		}
 		expect(w2).not.toMatch(/✓ .*clean/);
 		expect(w2).toMatch(/Still unfixed: 1 blocker reported earlier \(L3\)/);
 		expect(await s.commitBlocked()).toBe(true);
+		// The turn end drains napi's settled answer, as it would; left in the
+		// store, the next consult would judge it against the fix's bytes, and
+		// a fix written within the tolerance would absorb it again.
+		expect(await s.endTurn()).toMatch(/STOP[^]*L3/);
+		expect(peekSettledRunnerFindings()).toHaveLength(0);
 		await fixAndDrain(s);
 	}, 180_000);
 	// Recurrence (#4509 N3, at the settle): a write napi deferred could not
@@ -2012,6 +2053,55 @@ describe("#4509 witness: a recorded blocker is judged by a run of its own runner
 		const turnEnd = await s.endTurn();
 		expect(turnEnd).not.toContain("Resolved this turn");
 		expect(turnEnd).toContain("STOP");
+		resetObservedRunnerLatency();
+		await fixAndDrain(s);
+	}, 180_000);
+
+	// Recurrence (#4529 review R1, probe P45): napi's finding dropped on every
+	// line the ast-grep server flagged, whatever the rule. A team sgconfig's
+	// server flagged another rule on napi's blocker line, and the agent edited
+	// that line leaving the violation. At warning, the write read `✓ clean`,
+	// the gate opened and turn end said "Resolved". At error, napi's blocker
+	// was swapped for the other rule.
+	for (const [severity, label] of [
+		[2, "warning"],
+		[1, "error"],
+	] as const) {
+		it(`keeps napi's blocker where the ast-grep server flags another rule at ${label} on its line (row 40, P45)`, async () => {
+			const s = await primedUnderGateB(`p45-${label}`);
+			boundary.ag.diag = false;
+			boundary.ag.other = severity;
+			const w2 = await s.edit(K2(AG_PRE), [3, 4]);
+			expect(w2).not.toMatch(/✓ .*clean/);
+			expect(w2).toMatch(/🔴 STOP[^]*L3: [^\n]*Function returns 'unknown'/);
+			expect(await s.commitBlocked()).toBe(true);
+			const turnEnd = await s.endTurn();
+			expect(turnEnd).not.toContain("Resolved this turn");
+			expect(turnEnd).toMatch(/STOP[^]*Function returns 'unknown'/);
+			if (severity === 1)
+				expect(turnEnd).toMatch(/STOP[^]*Prefer an options object/);
+			await fixAndDrain(s);
+		}, 180_000);
+	}
+
+	// Recurrence (#4529 review R3, probe P46): napi's run on an edit of its
+	// blocker's line was slow. The ast-grep server's copy was recorded on the
+	// write and napi's at the settle, so turn end listed one violation twice.
+	it("lists a violation once when napi's slow run settles beside the ast-grep server's copy (row 41, P46)", async () => {
+		const s = await primedUnderGateB("p46");
+		observeRunnerLatency({
+			projectRoot: tmpDir,
+			runnerId: "ast-grep-napi",
+			durationMs: 6_000,
+		});
+		await s.edit(K2(AG_PRE), [3, 4]);
+		await settlePendingRunnerFindingsForTests();
+		expect(peekSettledRunnerFindings().length).toBeGreaterThanOrEqual(1);
+		expect(await s.commitBlocked()).toBe(true);
+		const turnEnd = await s.endTurn();
+		expect(turnEnd).toMatch(/STOP — 1 issue\(s\)/);
+		expect(turnEnd.match(/Function returns 'unknown'/g)).toHaveLength(1);
+		expect(await s.commitBlocked()).toBe(true);
 		resetObservedRunnerLatency();
 		await fixAndDrain(s);
 	}, 180_000);

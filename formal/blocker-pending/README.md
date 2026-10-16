@@ -49,9 +49,11 @@ The seam:
   `retireSettledRunnerBlockers` retires nothing on a settled covered skip.
 - #4509: napi skips as covered only while it holds no recorded blocker on
   the file (`DispatchContext.recordedRunnerIds`); otherwise it runs, and its
-  run names the lane too. The dispatcher lets the lane's copy stand for the
-  run's finding on each line the lane flagged, and the settle retires as for
-  any run. A kept entry with no place in the write's bytes is marked
+  run names the lane too. Where the lane flagged the same rule on the same
+  line, at least as severely, the lane's copy stands for the run's finding
+  (`laneCopyStandsFor`): the dispatcher drops the run's copy, and the settle
+  neither records nor observes it. Otherwise the settle retires as for any
+  run. A kept entry with no place in the write's bytes is marked
   `Diagnostic.positionStale` instead of being inferred from one line's hash
   later, and `linesOwedByContent` skips lines with no word character.
 
@@ -177,9 +179,9 @@ The seam:
     failed write kept an entry whose line it edited without a position (P42;
     a write with no alignment the same, P38), and the edit-scoped keep, which
     never shows an unplaced entry inside the edit, kept it after its fix for
-    the session. The model abstracts the lane's copy on a line the lane
-    flagged as the run's own delivery: both block, under another identity in
-    the code. With it, the round-6 and round-7 switches act only on a file
+    the session. The model abstracts the lane's copy of the run's finding
+    (same rule, same line, at least as severe) as the run's own delivery:
+    both block, under another identity in the code. With it, the round-6 and round-7 switches act only on a file
     with no gated record (`LaneVoids` still owes the edit there) and on a
     race the model does not have: a settle absorbed between the dispatch's
     snapshot of the record and its carry (witness row 38).

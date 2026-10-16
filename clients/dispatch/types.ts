@@ -154,9 +154,11 @@ export interface Diagnostic {
 	/**
 	 * #4509 (N3): a recorded blocker a write kept without placing it in that
 	 * write's bytes (no alignment, or its own line edited). Its `line` is from
-	 * older bytes, so nothing reads it as a position: the carry and the settle
-	 * match it by identity (and `lineHash`) anywhere, and the record cites no
-	 * line for it. An observed copy replaces it. Never part of identity.
+	 * older bytes, so nothing reads it as a position. The carry matches it by
+	 * identity on any line holding its `lineHash` text; the settle matches it
+	 * by identity alone, anywhere in the file, with no line check (it fails
+	 * closed). The record cites no line for it. An observed copy replaces it.
+	 * Never part of identity.
 	 */
 	positionStale?: true;
 }

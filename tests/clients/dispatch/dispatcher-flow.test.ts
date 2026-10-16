@@ -1260,7 +1260,11 @@ describe("Dispatch Flow", () => {
 	// #4509: napi runs under Gate B while it holds a recorded blocker, beside
 	// the ast-grep server whose copies carry another identity.
 	describe("covered runs (#4509)", () => {
-		const finding = (line: number, serverId?: string): Diagnostic => ({
+		const finding = (
+			line: number,
+			serverId?: string,
+			over: Partial<Diagnostic> = {},
+		): Diagnostic => ({
 			id: `f-${line}`,
 			message: "Function returns 'unknown'",
 			filePath: "test.ts",
@@ -1268,13 +1272,14 @@ describe("Dispatch Flow", () => {
 			severity: "error",
 			semantic: "blocking",
 			tool: serverId ? "lsp" : "ast-grep-napi",
-			// The two copies' rule keys differ, so the overlap dedupe keeps both.
-			rule: serverId
-				? "no-unknown-returns"
-				: "pi-lens-self-scan/no-unknown-returns",
+			// The spellings each runner gives one rule: the server's LSP copy
+			// carries its source, napi's the rule id. The two keys differ, so
+			// the overlap dedupe keeps both.
+			rule: serverId ? "ast-grep:no-unknown-returns" : "no-unknown-returns",
 			...(serverId && { serverId }),
+			...over,
 		});
-		const register = (laneAnswers: boolean) => {
+		const register = (laneAnswers: boolean, lane: Partial<Diagnostic> = {}) => {
 			registerRunner({
 				id: "lane",
 				appliesTo: ["jsts"],
@@ -1282,7 +1287,7 @@ describe("Dispatch Flow", () => {
 				run: async () => ({
 					status: "succeeded",
 					// A silent server delivers none of its copies.
-					diagnostics: laneAnswers ? [finding(3, "srv")] : [],
+					diagnostics: laneAnswers ? [finding(3, "srv", lane)] : [],
 					semantic: "blocking",
 					...(!laneAnswers && { unconfirmedServerIds: ["srv"] }),
 				}),
@@ -1326,6 +1331,50 @@ describe("Dispatch Flow", () => {
 		it("delivers a covered run's findings when its lane is silent", async () => {
 			register(false);
 			expect(await run()).toEqual(["peer@3", "peer@5"]);
+		});
+
+		// Recurrence (#4529 review R1, probe P45): the drop keyed by line
+		// alone, so a team sgconfig's server flagging another rule on napi's
+		// blocker line swapped napi's blocker out, or at warning left `✓ clean`.
+		it("keeps a covered run's finding where its lane flagged another rule on the line", async () => {
+			register(true, { rule: "ast-grep:other-rule" });
+			expect(await run()).toEqual(["lane@3", "peer@3", "peer@5"]);
+		});
+
+		// Recurrence (#4529 review R1): a team sgconfig can downgrade the same
+		// rule, and the server's warning copy then stood for napi's blocker,
+		// so nothing blocked.
+		it("keeps a covered run's blocker where its lane's copy of the rule is weaker", async () => {
+			register(true, { severity: "warning", semantic: "warning" });
+			expect(await run()).toEqual(["lane@3", "peer@3", "peer@5"]);
+		});
+
+		// A cover may name a runner and no server (`coveredBy.serverId` is
+		// optional). Reading every finding as that lane's copy would drop the
+		// run's own findings that no lane delivers.
+		it("reads only the lane runner's copies when the cover names no server", async () => {
+			registerRunner({
+				id: "lane",
+				appliesTo: ["jsts"],
+				priority: 1,
+				run: async () => ({
+					status: "succeeded",
+					diagnostics: [finding(3)],
+					semantic: "blocking",
+				}),
+			});
+			registerRunner({
+				id: "peer",
+				appliesTo: ["jsts"],
+				priority: 2,
+				run: async () => ({
+					status: "succeeded",
+					diagnostics: [finding(3), finding(5)],
+					semantic: "blocking",
+					coveredBy: { runnerId: "lane" },
+				}),
+			});
+			expect(await run()).toEqual(["lane@3", "peer@5"]);
 		});
 	});
 
