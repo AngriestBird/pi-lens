@@ -15,8 +15,7 @@
 // the docs and fails a dedicated step that is NOT continue-on-error.
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { MEASURED_CLEAN_BEHAVIORS } from "./clean-signal.mjs";
-import { parseTable } from "./md-matrix.mjs";
+import { MEASURED_CLEAN_BEHAVIORS, parseTable } from "./md-matrix.mjs";
 
 /**
  * A run may fall this far below HEAD's count before the delta check fails. It

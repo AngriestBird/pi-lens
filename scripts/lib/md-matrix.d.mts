@@ -168,3 +168,6 @@ export function refreshCapabilityMatrix(
 	pendingLangs: string[];
 	committedLangs: string[];
 };
+
+/** The `clean-behavior` values that are a measurement of anything (#3401). */
+export const MEASURED_CLEAN_BEHAVIORS: Set<string>;
