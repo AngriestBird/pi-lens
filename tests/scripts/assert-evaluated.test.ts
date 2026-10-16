@@ -550,17 +550,20 @@ describe("--count: a workflow step's own count against a floor (#4518)", () => {
 // a degraded night. A static import walk, not a spawn, so it needs no admission.
 describe("the helper loads on a checkout with no dist/ (#4518)", () => {
 	const root = path.resolve(import.meta.dirname, "../..");
+	const inDist = (file: string) => file.includes(`${path.sep}dist${path.sep}`);
+	/** Every module reachable through a relative specifier (a dist/ one is listed, not read). */
 	const closure = (entry: string) => {
 		const seen = new Set<string>();
 		const visit = (file: string) => {
 			if (seen.has(file)) return;
 			seen.add(file);
+			if (inDist(file)) return;
 			const code = stripSource(fs.readFileSync(file, "utf8"), {
 				strings: "keep",
 			});
-			for (const m of code.matchAll(
-				/(?:^|\n)\s*(?:import|export)\b[^;]*?from\s+"(\.[^"]+)"/g,
-			))
+			// Every relative module specifier, whatever carries it: a named or
+			// aliased import, a side-effect import, a re-export, a dynamic import().
+			for (const m of code.matchAll(/"(\.{1,2}\/[^"]+\.(?:mjs|js|ts|mts))"/g))
 				visit(path.resolve(path.dirname(file), m[1]));
 		};
 		visit(path.resolve(root, entry));
@@ -574,16 +577,9 @@ describe("the helper loads on a checkout with no dist/ (#4518)", () => {
 		]) {
 			const files = closure(entry);
 			expect(files.length, entry).toBeGreaterThanOrEqual(2);
-			const code = files
-				.map((f) =>
-					stripSource(fs.readFileSync(f, "utf8"), { strings: "keep" }),
-				)
-				.join("\n");
-			expect(code, entry).not.toMatch(/from\s+"[^"]*\/dist\//);
-			expect(
-				files.map((f) => path.relative(root, f)),
-				entry,
-			).not.toContain("scripts/lib/clean-signal.mjs");
+			expect(files.filter(inDist).map((f) => path.relative(root, f))).toEqual(
+				[],
+			);
 		}
 	});
 });
