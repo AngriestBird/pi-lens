@@ -158,22 +158,6 @@ vi.mock("node:fs", async (importOriginal) => {
 	};
 });
 
-// Installer probe-cache answers were produced by a real --version spawn before
-// this process. Hide that durable answer so each cell exercises its mocked
-// probe instead of inheriting a cache hit from the test harness.
-vi.mock("node:fs/promises", async (importOriginal) => {
-	const actual = await importOriginal<typeof import("node:fs/promises")>();
-	return {
-		...actual,
-		readFile: async (...args: Parameters<typeof actual.readFile>) => {
-			const [file] = args;
-			return String(file).endsWith("probe-cache.json")
-				? "{}"
-				: actual.readFile(...args);
-		},
-	};
-});
-
 const repoRoot = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
 	"../../..",
@@ -487,8 +471,38 @@ describe("tool-state matrix (#4522)", () => {
 					it(`${label} reads ${cell.expect}`, { timeout: 30000 }, async () => {
 						childProcessWindow.begin();
 						let env: ReturnType<typeof setupTestEnvironment> | undefined;
+						const workerHome = process.env.PI_LENS_HOME;
+						const previousHome = workerHome;
 						try {
 							vi.resetModules();
+							env = setupTestEnvironment("pi-lens-tool-state-");
+							// Keep every module graph's delayed probe-cache flush inside
+							// this cell. A later vi.resetModules() must never read a
+							// durable answer written by an earlier graph.
+							process.env.PI_LENS_HOME = path.join(env.tmpDir, "probe-home");
+							if (
+								runnerId === "biome-check-json" &&
+								cell.name === "unanswered (probe exhausts its budget)"
+							) {
+								// A valid durable answer in the inherited worker home is
+								// deliberately not visible from this cell's private home.
+								// This pins the cache-hit regression without mocking fs.
+								const binary = "/bin/true";
+								const stat = fs.statSync(binary);
+								if (!workerHome) throw new Error("missing worker PI_LENS_HOME");
+								fs.mkdirSync(workerHome, { recursive: true });
+								fs.writeFileSync(
+									path.join(workerHome, "probe-cache.json"),
+									JSON.stringify({
+										biome: {
+											path: binary,
+											mtimeMs: stat.mtimeMs,
+											sizeBytes: stat.size,
+											cachedAt: Date.now(),
+										},
+									}),
+								);
+							}
 							const { resetGoAvailability } =
 								await import("../../../clients/go-client.js");
 							const { resetSpawnTimeoutCooldowns } =
@@ -514,7 +528,6 @@ describe("tool-state matrix (#4522)", () => {
 							installer.resetPathWalkMemo();
 							installer.resetResolvedPathCache();
 							installer.resetProbeCacheStateForTesting();
-							env = setupTestEnvironment("pi-lens-tool-state-");
 							fs.cpSync(
 								path.join(repoRoot, fixture.provenance.workspace),
 								env.tmpDir,
@@ -585,6 +598,8 @@ describe("tool-state matrix (#4522)", () => {
 							}
 							expect(verdict, context).toBe(cell.expect);
 						} finally {
+							if (previousHome === undefined) delete process.env.PI_LENS_HOME;
+							else process.env.PI_LENS_HOME = previousHome;
 							childProcessWindow.end();
 							env?.cleanup();
 						}
