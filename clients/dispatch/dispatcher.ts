@@ -944,9 +944,11 @@ interface GroupResult {
 	editScopedRunnerIds: string[];
 	/** #4484 round 7: runners that reached a verdict, and the lanes covered skips defer to. */
 	answeredRunnerIds: string[];
+	/** #4509: `ran` marks a covered run (it read the bytes), not a covered skip. */
 	coveredRunners: {
 		runnerId: string;
 		lane: { runnerId: string; serverId?: string };
+		ran: boolean;
 	}[];
 }
 
@@ -1344,7 +1346,11 @@ async function runGroup(
 		else {
 			answeredRunnerIds.push(runnerId);
 			if (result.coveredBy)
-				coveredRunners.push({ runnerId, lane: result.coveredBy });
+				coveredRunners.push({
+					runnerId,
+					lane: result.coveredBy,
+					ran: result.skipReason !== "covered-by-primary",
+				});
 			if (result.editScopedVerdict === true) editScopedRunnerIds.push(runnerId);
 		}
 		inconclusiveServerIds.push(
@@ -1582,19 +1588,47 @@ export async function dispatchForFile(
 	}
 	// #4484 round 7: a covered skip is a verdict only when the lane it defers
 	// to answered: its runner reached a verdict, and its server confirmed.
+	// #4509: a covered run read the bytes, so its verdict stands either way.
+	// Where its answering lane flagged a line, the lane's copy stands for it,
+	// as hadolint's does for trivy's (`suppressTrivyConfigDockerOverlap`);
+	// the run's finding there drops, so the one finding is listed once.
 	const voidedCovers = new Set<string>();
-	for (const { runnerId, lane } of coveredRunners) {
+	const laneLinesByRunner = new Map<string, Set<number>>();
+	for (const { runnerId, lane, ran } of coveredRunners) {
 		const silent =
 			!answeredRunnerIds.has(lane.runnerId) ||
 			(lane.serverId !== undefined && inconclusiveServerIds.has(lane.serverId));
+		if (ran) {
+			if (silent) continue;
+			const laneLines = new Set<number>();
+			for (const d of allDiagnostics)
+				if (
+					d.runnerId === lane.runnerId &&
+					(lane.serverId === undefined || d.serverId === lane.serverId)
+				)
+					laneLines.add(d.line ?? 1);
+			laneLinesByRunner.set(runnerId, laneLines);
+			continue;
+		}
 		if (!silent) continue;
 		voidedCovers.add(runnerId);
 		inconclusiveRunnerIds.add(runnerId);
 	}
+	let deliveredDiagnostics = allDiagnostics;
+	if (laneLinesByRunner.size > 0) {
+		deliveredDiagnostics = [];
+		for (const d of allDiagnostics) {
+			const laneLines =
+				d.runnerId === undefined
+					? undefined
+					: laneLinesByRunner.get(d.runnerId);
+			if (!laneLines?.has(d.line ?? 1)) deliveredDiagnostics.push(d);
+		}
+	}
 
 	// Apply delta mode ONCE across the full diagnostic set.
 	// This avoids partial-baseline corruption when processing multiple groups.
-	const dedupedDiagnostics = dedupeOverlappingDiagnostics(allDiagnostics);
+	const dedupedDiagnostics = dedupeOverlappingDiagnostics(deliveredDiagnostics);
 	const fileContent =
 		ctx.facts.getFileFact<string>(ctx.filePath, "file.content") ?? "";
 	// Project rule policy (`.pi-lens.json` `rules.<id>.disable`/`select`).

@@ -121,6 +121,8 @@ const boundary = vi.hoisted(() => {
 		mode: "answer" as "answer" | "inconclusive" | "partial" | "throw" | "hold",
 		/** Pending held answers; `release(true)` fails the touch instead. */
 		held: [] as Array<(fail?: boolean) => void>,
+		/** #4509: called once a touch is held, so a test can act mid-dispatch. */
+		onHold: undefined as (() => void) | undefined,
 		/**
 		 * The double's touchFile. It lives here, not in the `vi.mock` factory:
 		 * `tests/config/vi-mock-export-sweep.test.ts` reads a factory's export
@@ -184,6 +186,7 @@ const boundary = vi.hoisted(() => {
 								)
 							: resolve({ diags: lsp.diagnose(content) }),
 					);
+					lsp.onHold?.();
 				});
 			return { diags: lsp.diagnose(content) };
 		},
@@ -344,6 +347,7 @@ afterEach(async () => {
 	const cleanup = pendingCleanup;
 	pendingCleanup = undefined;
 	boundary.lsp.mode = "answer";
+	boundary.lsp.onHold = undefined;
 	for (const release of boundary.lsp.held.splice(0)) release();
 	resetObservedRunnerLatency();
 	if (cleanup) await cleanup().catch(() => {});
@@ -1535,13 +1539,13 @@ describe("#4484 witness, round 6: Gate B answers only for what its server sees",
 			),
 			[3, 4],
 		);
-		expect(w2).toMatch(/Still unfixed: 1 blocker reported earlier \(L3\)/);
+		// #4509: napi runs while it holds the recorded blocker, and with the
+		// server silent its own finding delivers, so the edit gets a STOP.
+		expect(w2).toMatch(/🔴 STOP[^]*L3:/);
 		expect(await s.commitBlocked()).toBe(true);
 		const turnEnd = await s.endTurn();
 		expect(turnEnd).toContain("STOP");
 		expect(turnEnd).not.toContain("Resolved this turn");
-		// The kept entry's line lost its text, so Gate B cannot place it; it
-		// retires once napi itself answers again (residual, #4509).
 		boundary.ag.cutoff = false;
 		boundary.ag.published = false;
 		await fixAndDrain(s);
@@ -1598,7 +1602,7 @@ describe("#4484 witness, round 6: Gate B answers only for what its server sees",
 		);
 		// The lane's runner reached a verdict; only its server was silent.
 		expect((await lastRunnerRows("src/p43.ts")).lsp?.status).toBe("succeeded");
-		expect(w2).toMatch(/Still unfixed: 1 blocker reported earlier \(L3\)/);
+		expect(w2).toMatch(/🔴 STOP[^]*L3:/);
 		expect(await s.commitBlocked()).toBe(true);
 		const turnEnd = await s.endTurn();
 		expect(turnEnd).toContain("STOP");
@@ -1699,5 +1703,281 @@ describe("#4484 witness, round 8: a covered skip counts only when its lane answe
 		} finally {
 			process.env.PATH = originalPath;
 		}
+	}, 180_000);
+});
+
+describe("#4509 witness: a recorded blocker is judged by a run of its own runner", () => {
+	const SCOPED = { "no-lsp": true, "no-ast-grep": true };
+	const AG_PRE = [
+		'export const CLIENT_VERSION = "1.0.50";',
+		"export const plain = CLIENT_VERSION;",
+		"export function dig(obj: Record<string, string>, key: string): unknown {",
+		"\treturn obj[key];",
+		"}",
+		"",
+	].join("\n");
+	const AG_FIXED = AG_PRE.replace("): unknown {", "): string {");
+	const K2 = (src: string) =>
+		src
+			.replace("key: string): unknown", "k2: string): unknown")
+			.replace("obj[key]", "obj[k2]");
+	const PAD = Array.from({ length: 1100 }, (_, i) => `// pad ${i}`).join("\n");
+	const padRange = Array.from({ length: 1100 }, (_, i) => i + 1);
+	const OVER_CAP = `// ${"x".repeat(1_100_000)}`;
+
+	/** napi records the blocker at L3; then the ast-grep server publishes. */
+	async function primedUnderGateB(name: string) {
+		boundary.lsp.enabled = true;
+		const s = await openSession(name, `src/${name}.ts`, AG_FIXED);
+		await s.write(AG_FIXED);
+		expect(await s.edit(AG_PRE, [3])).toContain("🔴 STOP");
+		boundary.ag.published = true;
+		boundary.ag.diag = true;
+		return s;
+	}
+
+	// Recurrence (#4491 round-7 verify, probe P42): the aux lane was cut off
+	// during an edit on the blocker's line, so napi's entry kept the old line
+	// text and no write could place it. The agent then fixed the line: the
+	// fixed blocker read "Still unfixed" for the session, the commit gate
+	// stayed shut, and only a napi run (the server gone) cleared it.
+	it("retires a napi blocker fixed after an edit on its line that the ast-grep server missed (row 31, P42)", async () => {
+		const s = await primedUnderGateB("p42");
+		boundary.ag.cutoff = true;
+		const cutOff = await s.edit(K2(AG_PRE), [3, 4]);
+		expect(cutOff).not.toMatch(/✓ .*clean/);
+		expect(await s.commitBlocked()).toBe(true);
+		boundary.ag.cutoff = false;
+		boundary.ag.diag = false;
+		const fix = await s.edit(K2(AG_FIXED), [3]);
+		expect(fix).not.toMatch(/Still unfixed/);
+		expect(fix).not.toContain("STOP");
+		expect(await s.commitBlocked()).toBe(false);
+		expect(await s.endTurn()).toMatch(/Resolved this turn: src\/p42\.ts/);
+		expect(
+			await s.write(
+				K2(AG_FIXED).replace("CLIENT_VERSION;", "CLIENT_VERSION; // w"),
+			),
+		).not.toMatch(/Still unfixed/);
+		expect(await s.commitBlocked()).toBe(false);
+		// The cut-off edit's own result: napi, the server silent, delivers its
+		// copy with the line's current text.
+		expect(cutOff).toMatch(/🔴 STOP[^]*L3:/);
+		pendingCleanup = undefined;
+	}, 180_000);
+
+	// Recurrence (#4491 round-6 review O3, probe P38): an unaligned write
+	// while the ast-grep server covered the file left napi's entry with no
+	// place, and the server's copy has another identity, so the fix on the
+	// blocker's line never retired it: pinned for the session.
+	it("retires a napi blocker fixed after an unaligned write while the ast-grep server covers the file (row 33, P38)", async () => {
+		const s = await primedUnderGateB("p38");
+		const big = `${PAD}\n${AG_PRE}export const tail = 1;\n`;
+		const w2 = await s.edit(big, [...padRange, 1106]);
+		expect(w2).toMatch(/Still unfixed: 1 blocker reported earlier/);
+		expect(await s.commitBlocked()).toBe(true);
+		const fixed = big.replace("): unknown {", "): string {");
+		const fix = await s.edit(fixed, [1103]);
+		expect(fix).not.toMatch(/Still unfixed/);
+		expect(fix).not.toContain("STOP");
+		expect(await s.commitBlocked()).toBe(false);
+		expect(await s.endTurn()).toMatch(/Resolved this turn: src\/p38\.ts/);
+		// napi's withheld copy placed the kept blocker at its current line.
+		expect(w2).toMatch(/Still unfixed: 1 blocker reported earlier \(L1103\)/);
+		pendingCleanup = undefined;
+	}, 180_000);
+
+	// Recurrence (#4509 N3, probe P29): a no-verdict unaligned write kept the
+	// blocker with its old line number and line hash; the next, aligned write
+	// read that hash at the old number, found a block comment holding the
+	// same text, placed the blocker there and retired it: `✓ clean`, an open
+	// gate and "Resolved" with the violation on disk at L1103.
+	it("keeps a blocker carried without a place although its old line number now holds its text (row 34, P29)", async () => {
+		const padc = Array.from({ length: 1100 }, (_, i) => `// pad ${i}`);
+		padc[0] = "/*";
+		padc[2] = AG_PRE.split("\n")[2] ?? "";
+		padc[1099] = "*/";
+		const PADC = padc.join("\n");
+		const s = await openSession("p29", "src/p29.ts", AG_FIXED, SCOPED);
+		await s.write(AG_FIXED);
+		expect(await s.edit(AG_PRE, [3])).toContain("🔴 STOP");
+		// Unaligned, and past napi's size cap: no verdict, and no place.
+		const w2 = await s.edit(`${PADC}\n${AG_PRE}${OVER_CAP}\n`, [
+			...padRange,
+			1106,
+		]);
+		expect(w2).toMatch(/Still unfixed: 1 blocker reported earlier/);
+		const w3 = await s.edit(`${PADC}\n${AG_PRE}`, [1106]);
+		expect(w3).not.toMatch(/✓ .*clean/);
+		expect(w3).toMatch(/Still unfixed: 1 blocker reported earlier \(L1103\)/);
+		expect(await s.commitBlocked()).toBe(true);
+		expect(await s.endTurn()).not.toContain("Resolved this turn");
+		// Kept without a place, the blocker cites no line from older bytes.
+		expect(w2).toMatch(/Still unfixed: 1 blocker reported earlier\./);
+		await fixAndDrain(s);
+	}, 180_000);
+
+	// Recurrence (#4509 N3, at the turn end's past-EOF sweep): a blocker
+	// carried without a place kept its old line number, past the new end of
+	// the file, so the sweep read the whole record as stale and retired it
+	// with the violation on disk.
+	it("keeps a blocker carried without a place when its old line number is past the end of the file (row 35)", async () => {
+		const s = await openSession("eof", "src/stale-eof.ts", AG_FIXED, SCOPED);
+		const big = `${PAD}\n${AG_FIXED}`;
+		await s.write(big);
+		expect(await s.edit(`${PAD}\n${AG_PRE}`, [1103])).toContain("🔴 STOP");
+		// The padding goes, past napi's size cap: no verdict, and no place.
+		const w2 = await s.edit(
+			`${AG_PRE}export const tail = 1;\n${OVER_CAP}\n`,
+			[1, 2, 3, 4, 5, 6, 7, 8],
+		);
+		expect(w2).toMatch(/Still unfixed: 1 blocker reported earlier/);
+		expect(await s.commitBlocked()).toBe(true);
+		const turnEnd = await s.endTurn();
+		expect(turnEnd).not.toContain("line no longer exists");
+		expect(turnEnd).not.toContain("Retired after this delivery");
+		expect(turnEnd).toMatch(
+			/STOP[^]*no-unknown-returns|STOP[^]*Function returns 'unknown'/,
+		);
+		expect(await s.commitBlocked()).toBe(true);
+		expect(
+			await s.edit(`${AG_PRE}export const tail = 2;\n${OVER_CAP}\n`, [7]),
+		).toMatch(/Still unfixed: 1 blocker reported earlier/);
+		expect(w2).toMatch(/Still unfixed: 1 blocker reported earlier\./);
+		await fixAndDrain(s);
+	}, 180_000);
+
+	// Recurrence (#4509 N2, probe P31b): a write napi skipped owed it the
+	// lines of a clean block by content, `}` among them; once the next write
+	// could not be aligned, every `}` in the file was owed, so an older,
+	// untouched constant condition whose span ends on one became the agent's
+	// STOP and pinned the gate.
+	it("does not owe an older finding a write never touched through a line with no word character (row 36, P31b)", async () => {
+		const Q =
+			"export function q(): number {\n\tif (true) {\n\t\treturn 1;\n\t}\n\treturn 0;\n}\n";
+		const BASE = `${Q}export const k = 1;\n`;
+		fs.mkdirSync(path.join(tmpDir, "src"), { recursive: true });
+		fs.writeFileSync(path.join(tmpDir, "src/p31b.ts"), BASE);
+		const s = await openSession(
+			"p31b",
+			"src/p31b.ts",
+			Q.replace("if (true)", "if (Math.random() > 2)"),
+			SCOPED,
+		);
+		const W0 = BASE.replace("k = 1", "k = 2");
+		expect(await s.edit(W0, [7])).not.toContain("STOP");
+		const ADD = 'export function z(): string {\n\treturn "z";\n}';
+		expect(
+			await s.edit(`${W0}${ADD}\n${OVER_CAP}\n`, [8, 9, 10, 11]),
+		).not.toContain("STOP");
+		const w2src = `${PAD}\n${W0}${ADD}\nexport const tail = 1;\n`;
+		const n = w2src.split("\n").length;
+		const w2 = await s.edit(w2src, [...padRange, n - 1]);
+		expect(w2).not.toContain("STOP");
+		expect(w2).not.toMatch(/Still unfixed/);
+		expect(await s.commitBlocked()).toBe(false);
+		expect(
+			await s.edit(w2src.replace("tail = 1", "tail = 2"), [n - 1]),
+		).not.toMatch(/STOP|Still unfixed/);
+		expect(await s.commitBlocked()).toBe(false);
+		expect(await s.endTurn()).not.toContain("STOP");
+		pendingCleanup = undefined;
+	}, 180_000);
+	// Recurrence (#4484 round 7, LaneVoids, kept by #4509 for a file with no
+	// napi blocker recorded): napi skipped as covered while the ast-grep
+	// server was cut off, and the skip counted as napi's verdict, so the
+	// violation written on that edit was never owed to napi; once the server
+	// stopped covering, napi's next run read only its own edit and the
+	// blocker never blocked.
+	it("keeps napi owed an edit its covered skip saw while the ast-grep server was silent (row 37)", async () => {
+		boundary.lsp.enabled = true;
+		boundary.ag.published = true;
+		const s = await openSession("lanevoid", "src/lane-void.ts", AG_FIXED);
+		await s.write(AG_FIXED);
+		boundary.ag.cutoff = true;
+		const w1 = await s.edit(AG_PRE, [3]);
+		expect(w1).not.toMatch(/✓ .*clean/);
+		expect(
+			(await lastRunnerRows("src/lane-void.ts"))["ast-grep-napi"]?.status,
+		).toBe("skipped");
+		boundary.ag.cutoff = false;
+		// The server stops covering the file; napi runs on the next edit.
+		boundary.ag.published = false;
+		const w2 = await s.edit(
+			AG_PRE.replace("CLIENT_VERSION;", "CLIENT_VERSION; // x"),
+			[2],
+		);
+		expect(w2).toMatch(/🔴 STOP[^]*L3:/);
+		expect(await s.commitBlocked()).toBe(true);
+		await fixAndDrain(s);
+	}, 180_000);
+
+	// Recurrence (#4484 round 6, EditScopedKeep, kept by #4509 for a race):
+	// napi decides to skip as covered from the record it sees when the
+	// dispatch starts. A commit-gate consult during the dispatch absorbed a
+	// settled napi blocker into the record; the covered skip then counted as
+	// napi's verdict over the whole file and retired that blocker, outside
+	// the edit, with the violation on disk.
+	it("keeps a napi blocker absorbed during a covered skip's dispatch when it lies outside the edit (row 38)", async () => {
+		boundary.lsp.enabled = true;
+		const s = await openSession("race", "src/race.ts", AG_FIXED);
+		await s.write(AG_FIXED);
+		// napi is slow: its run on this edit settles later, unabsorbed.
+		observeRunnerLatency({
+			projectRoot: tmpDir,
+			runnerId: "ast-grep-napi",
+			durationMs: 6_000,
+		});
+		await s.edit(AG_PRE, [3]);
+		await settlePendingRunnerFindingsForTests();
+		expect(peekSettledRunnerFindings().length).toBeGreaterThanOrEqual(1);
+		resetObservedRunnerLatency();
+		boundary.ag.published = true;
+		boundary.ag.diag = true;
+		boundary.lsp.mode = "hold";
+		const held = new Promise<void>((resolve) => {
+			boundary.lsp.onHold = resolve;
+		});
+		const edit = s.edit(
+			AG_PRE.replace("CLIENT_VERSION;", "CLIENT_VERSION; // x"),
+			[2],
+		);
+		await held;
+		// napi has already skipped as covered; the gate now absorbs its blocker.
+		expect(await s.commitBlocked()).toBe(true);
+		for (const release of boundary.lsp.held.splice(0)) release();
+		boundary.lsp.mode = "answer";
+		const w2 = await edit;
+		expect(w2).not.toMatch(/✓ .*clean/);
+		expect(w2).toMatch(/Still unfixed: 1 blocker reported earlier \(L3\)/);
+		expect(await s.commitBlocked()).toBe(true);
+		await fixAndDrain(s);
+	}, 180_000);
+	// Recurrence (#4509 N3, at the settle): a write napi deferred could not
+	// be aligned, so the blocker was kept with its old line number. The
+	// settled run found the violation at its new line, but the settle read
+	// the old number as the blocker's position, saw nothing there and retired
+	// it: an open gate and "Resolved" with the violation on disk.
+	it("keeps a blocker carried without a place when its runner's deferred run settles (row 39)", async () => {
+		const s = await openSession("stl", "src/stale-settle.ts", AG_FIXED, SCOPED);
+		await s.write(AG_FIXED);
+		expect(await s.edit(AG_PRE, [3])).toContain("🔴 STOP");
+		observeRunnerLatency({
+			projectRoot: tmpDir,
+			runnerId: "ast-grep-napi",
+			durationMs: 6_000,
+		});
+		const big = `${PAD}\n${AG_PRE}export const tail = 1;\n`;
+		expect(await s.edit(big, [...padRange, 1106])).toMatch(
+			/Still unfixed: 1 blocker reported earlier/,
+		);
+		await settlePendingRunnerFindingsForTests();
+		expect(peekSettledRunnerFindings().length).toBeGreaterThanOrEqual(1);
+		expect(await s.commitBlocked()).toBe(true);
+		const turnEnd = await s.endTurn();
+		expect(turnEnd).not.toContain("Resolved this turn");
+		expect(turnEnd).toContain("STOP");
+		resetObservedRunnerLatency();
+		await fixAndDrain(s);
 	}, 180_000);
 });
