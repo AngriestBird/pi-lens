@@ -508,8 +508,9 @@ async function main() {
 			}
 		}
 		stage = "test";
-		// An interrupted run reached no verdict on the mutation: ERROR, as for
-		// a run that loaded no tests, never RED.
+		// No verdict on the mutation: ERROR, as for a run that loaded no tests,
+		// never RED. (The signal handler ends the process before a test could
+		// reach this branch, so no test drives it.)
 		if (interrupted)
 			result = { code: 130, failed: ["interrupted"], status: "ERROR" };
 		else {
