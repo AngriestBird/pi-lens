@@ -798,6 +798,17 @@ file-scoped worklist and receives no project-wide scanner output.
   startup through `setProjectTrustState`: workspace trust belongs to their
   calling client, and pi trust is not consulted.
   `tests/mcp/server.smoke.test.ts` and `tests/mcp/analyze-cli.test.ts` pin it.
+  The standalone harness scripts that drive the built `dist/clients/lsp/`
+  service (`scripts/characterize-lsp.mjs`, `probe-clean-signal.mjs`,
+  `server-capabilities.mjs`, `measure-lsp-idle-eviction.mjs`, `bench-lsp.mjs`,
+  `smoke-tools.mjs`) are the same kind of entry point: each adopts trust once
+  through `adoptFixtureProjectTrust` (`scripts/lib/lsp-fixture-workspace.mjs`),
+  because a script that leaves trust `unknown` measures every refused server as
+  absent. `tests/config/lsp-script-trust-census.test.ts` fails a
+  `scripts/*.mjs` that reaches `dist/clients/lsp/` without it. The four nightly
+  producers that run under `continue-on-error` also report what they evaluated
+  to `scripts/lib/assert-evaluated.mjs`; the nightly's floor step fails below
+  each measured floor (`tests/config/nightly-evaluated-floors.test.ts`).
 - LSP service generations, workspace-sweep holds, and repair latches use
   versioned process singletons. Reset tears down the old generation before a
   replacement can spawn. Idle eviction is lease-guarded and clears ownership

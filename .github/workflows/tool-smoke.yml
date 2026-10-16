@@ -248,6 +248,7 @@ jobs:
       lens_full: ${{ steps.lens_full.outcome }}
       format_layer: ${{ steps.format_layer.outcome }}
       resolution_layer: ${{ steps.resolution_layer.outcome }}
+      evaluated_floor: ${{ steps.evaluated_floor.outcome }}
       docs_changed: ${{ steps.docs_diff.outputs.changed }}
       promoted: ${{ steps.idle_promote.outputs.promoted }}
       census: ${{ steps.lsp_census.outcome }}
@@ -281,6 +282,10 @@ jobs:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       PI_LENS_HOME: /tmp/pi-lens-home
       PILENS_DATA_DIR: /tmp/pi-lens-home
+      # #4514: where the four best-effort LSP producers leave how much each
+      # evaluated, for the `evaluated_floor` step below. Bare /tmp for the same
+      # reason as the two pins above (the `runner` context is unavailable here).
+      PI_LENS_EVALUATED_DIR: /tmp/pi-lens-evaluated
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -407,11 +412,17 @@ jobs:
           set -o pipefail
           node scripts/smoke-tools.mjs --install --verbose 2>&1 | tee "$RUNNER_TEMP/tool-smoke-tool-layer.log"
 
+      # --min-pass is the floor that keeps a green handshake honest (#4514): an
+      # unavailable server reports a warning, never a failure, so a run where
+      # every install failed would exit 0 having proved nothing. 46 passed on
+      # both 2026-10-09 and 2026-10-15 (tests/fixtures/nightly-floors/
+      # measurements.json); the floor sits below that by the runner's usual
+      # toolchain wobble.
       - name: LSP handshake layer (install + spawn + initialize each server)
         id: lsp_handshake
         run: |
           set -o pipefail
-          node scripts/smoke-tools.mjs --lsp --install --verbose 2>&1 | tee "$RUNNER_TEMP/tool-smoke-lsp-handshake.log"
+          node scripts/smoke-tools.mjs --lsp --install --verbose --min-pass=40 2>&1 | tee "$RUNNER_TEMP/tool-smoke-lsp-handshake.log"
 
       # Gating diagnostic layer (#2780, recurrence #2776): the handshake above
       # proves initialize only. This row family drives the real lsp_diagnostics
@@ -636,6 +647,25 @@ jobs:
           set -o pipefail
           node scripts/smoke-tools.mjs --resolution --verbose 2>&1 | tee "$RUNNER_TEMP/tool-smoke-resolution-layer.log"
 
+      # #4514: the four LSP producers above (characterize, clean-signal,
+      # capabilities, idle-eviction) exit 0 by design under continue-on-error,
+      # so a night that evaluated almost nothing read green for six days
+      # (41 servers captured fell to 16; ~54 classified rows to ~24). Each
+      # leaves `{producer, evaluated}` in $PI_LENS_EVALUATED_DIR; this step,
+      # which is NOT continue-on-error, fails when a count is under its floor
+      # or has dropped more than 20% against the doc at HEAD
+      # (scripts/lib/assert-evaluated.mjs). It runs after the last layer, so a
+      # degraded night still reports every layer; notify-tool-smoke-red.mjs
+      # reads its outcome. Skipped only when the producers themselves never
+      # ran (an earlier gating layer failed): that night is already red.
+      - name: LSP evaluated floor (characterize, clean-signal, capabilities, idle-eviction)
+        id: evaluated_floor
+        if: ${{ !cancelled() && steps.lsp_matrix.outcome != 'skipped' }}
+        timeout-minutes: 2
+        run: |
+          set -o pipefail
+          node scripts/assert-evaluated.mjs --records "$PI_LENS_EVALUATED_DIR" 2>&1 | tee "$RUNNER_TEMP/tool-smoke-evaluated-floor.log"
+
       # #4358: save the tool tree once every `--install` layer above has run.
       # The key is first-wins for the week, so a tree saved after an early red
       # layer (the later layers skipped, their tools never installed) would be
@@ -720,6 +750,20 @@ jobs:
           path: ${{ runner.temp }}/pr-inputs
       - name: Overlay the regenerated files
         run: cp -r "$RUNNER_TEMP/pr-inputs/files/." .
+
+      # #4514: a refresh that only records a degraded night (41 servers
+      # captured fell to 16, five classified cells flipped to `unknown`) must
+      # not open as a PR a maintainer can merge. Compares each regenerated doc's
+      # count against HEAD's and fails the job on a drop of more than 20% or a
+      # count under the floor; the create-pull-request steps below then do not
+      # run. A failed guard also holds the promotion PR: both read this night's
+      # measurement.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+      - name: Refuse a degraded refresh (regenerated docs against HEAD)
+        id: refresh_guard
+        run: node scripts/assert-evaluated.mjs --docs
 
       # Commit-back (#390 item 2): the three steps above regenerate the LSP docs
       # in-place. master has required checks the schedule's GITHUB_TOKEN can't
@@ -883,6 +927,8 @@ jobs:
           FORMAT_LAYER_LOG: ${{ runner.temp }}/tool-smoke-format-layer.log
           RESOLUTION_LAYER_OUTCOME: ${{ needs.tool-smoke.outputs.resolution_layer }}
           RESOLUTION_LAYER_LOG: ${{ runner.temp }}/tool-smoke-resolution-layer.log
+          EVALUATED_FLOOR_OUTCOME: ${{ needs.tool-smoke.outputs.evaluated_floor }}
+          EVALUATED_FLOOR_LOG: ${{ runner.temp }}/tool-smoke-evaluated-floor.log
           # #2723 review F3: a job failure BEFORE the six tracked layers
           # even start (checkout, a best-effort setup action, npm install,
           # build:dist — twelve steps, none of which set an *_OUTCOME above)
