@@ -110,6 +110,13 @@ describe.skipIf(!realPiAvailable)("real pi lifecycle witness", () => {
 				expect(resumedSessionFile).toBe(beforeResumeSessionFile);
 				await expect.poll(() => deadWeightRows(pi)).toHaveLength(2);
 				expect(deadWeightTools(pi, 1)).toEqual(situationalTools);
+				// The resumed process restarts the script, so its first turn
+				// activates ast_grep_search again; the fork below adopts that.
+				// Wait for the activation to run: a clone sent while the tool
+				// call is still in its hooks drops it (#4493's HEAD look made
+				// that window a git spawn wide).
+				await pi.awaitToolResult("pi_lens_activate_tools");
+				await pi.awaitAssistantTurn();
 
 				await pi.clone();
 				await turn(pi, "after fork", activatedRoster);

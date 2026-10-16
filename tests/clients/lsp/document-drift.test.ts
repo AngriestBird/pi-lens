@@ -204,6 +204,51 @@ describe("DocumentDriftTracker (#1783)", () => {
 		expect(stamp).toBeLessThan(readStartedAt);
 	});
 
+	// #4493: a held document whose record was evicted (past DRIFT_TRACK_CAP)
+	// or never stamped is still queued by a HEAD-move resync. With no record
+	// at all, the empty check returned SKIPPED and dropped the queued target,
+	// so the server kept the pre-move bytes.
+	it("resyncs a queued target when the tracker holds no record", async () => {
+		const files = new Map<string, FakeFile>([
+			[k("/repo/moved.ts"), { content: "v2\n", mtimeMs: SYNCED_AT }],
+		]);
+		const tracker = new DocumentDriftTracker();
+		tracker.enqueueResync([k("/repo/moved.ts")]);
+		const { deps, resynced } = makeDeps(files, now);
+
+		const result = await tracker.sweep(deps, { force: true });
+
+		expect(result.queued.get(k("/repo/moved.ts"))).toBe("resynced");
+		expect(resynced).toEqual([
+			{ filePath: k("/repo/moved.ts"), content: "v2\n" },
+		]);
+	});
+
+	// #4493: that queue-only pass ran its window over zero records, and
+	// `% 0` left the cursor NaN, so every later pass checked no record at all
+	// and a drifted document stayed stale for the session.
+	it("still checks records stamped after a pass that held none", async () => {
+		const files = new Map<string, FakeFile>([
+			[k("/repo/moved.ts"), { content: "v2\n", mtimeMs: SYNCED_AT }],
+			[k("/repo/later.ts"), { content: "v1\n", mtimeMs: SYNCED_AT - 10 }],
+		]);
+		const tracker = new DocumentDriftTracker();
+		tracker.enqueueResync([k("/repo/moved.ts")]);
+		const { deps, resynced } = makeDeps(files, now);
+		await tracker.sweep(deps, { force: true });
+		tracker.recordSynced(k("/repo/later.ts"), "v1\n", SYNCED_AT);
+		files.set(k("/repo/later.ts"), { content: "v2\n", mtimeMs: SYNCED_AT + 5 });
+		clock = SYNCED_AT + 1_000;
+
+		const result = await tracker.sweep(deps, { force: true });
+
+		expect(result.resynced).toBe(1);
+		expect(resynced.at(-1)).toEqual({
+			filePath: k("/repo/later.ts"),
+			content: "v2\n",
+		});
+	});
+
 	it("re-stamps a touched-but-identical long file without resyncing it", async () => {
 		const same = `// ${"h".repeat(60)}\nconst x = 1;\n// ${"t".repeat(60)}\n`;
 		const files = new Map<string, FakeFile>([

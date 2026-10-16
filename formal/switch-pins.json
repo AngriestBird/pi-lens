@@ -1160,6 +1160,48 @@
 			]
 		},
 		"lsp-server-content": {
+			"pins": {
+				"Track": {
+					"value": "TRUE",
+					"test": "tests/clients/head-move-resync-4493.test.ts",
+					"title": "sends a held document's new bytes before the checkout's tool_result returns, and records no mutation"
+				},
+				"Keying": {
+					"value": "\"session\"",
+					"test": "tests/clients/head-move-resync-4493.test.ts",
+					"title": "keeps one HEAD record per session: a second session sees the move at its own call"
+				},
+				"Compare": {
+					"value": "TRUE",
+					"test": "tests/clients/head-move-resync-4493.test.ts",
+					"title": "records one move once when parallel bash calls share it"
+				},
+				"CurrentOnly": {
+					"value": "TRUE",
+					"test": "tests/clients/head-move-resync-4493.test.ts",
+					"title": "resends nothing when the move leaves the held bytes current, as a commit does"
+				},
+				"ReportDeferred": {
+					"value": "TRUE",
+					"test": "tests/clients/head-move-resync-4493.test.ts",
+					"title": "states in the one row how many held documents the drain cap deferred"
+				},
+				"Serial": {
+					"value": "TRUE",
+					"test": "tests/clients/head-move-resync-4493.test.ts",
+					"title": "returns no concurrent look of a session before the move's resync is sent"
+				},
+				"PrimaryFirst": {
+					"value": "TRUE",
+					"test": "tests/clients/head-move-resync-4493.test.ts",
+					"title": "sends every changed held document to the primary before the tool_result returns, however slow the auxiliary"
+				},
+				"Join": {
+					"value": "TRUE",
+					"test": "tests/clients/head-move-resync-4493.test.ts",
+					"title": "holds a parallel tool_call until the running look has sent the move's bytes"
+				}
+			},
 			"notCodeChoice": [
 				{
 					"reason": "Scenario bound or actor set: it sizes the state space or picks which actors, inputs and steps TLC explores; no code branch reads it.",
@@ -1170,13 +1212,22 @@
 						"LossyFp",
 						"RecentA",
 						"MidSweeps",
-						"PriorInFlight"
+						"PriorInFlight",
+						"MaxMoves",
+						"InitRec"
 					]
 				},
 				{
 					"reason": "Environment: a host, OS, server or scheduling behaviour the code must tolerate, not a choice the code makes.",
 					"constants": [
-						"FifoLanding"
+						"FifoLanding",
+						"Outside"
+					]
+				},
+				{
+					"reason": "A code constant at model scale (a retry count, a cap, a tolerance or a budget in ticks): the model shrinks it to bound the state space, so its value is not the code's.",
+					"constants": [
+						"Cap"
 					]
 				}
 			],

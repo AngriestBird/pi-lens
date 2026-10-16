@@ -1,6 +1,7 @@
 // Minimal JSON-RPC 2.0 LSP fake server over stdio
 // Used for integration tests — speaks real LSP protocol without actual language smarts
 
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -424,6 +425,20 @@ function handle(raw) {
 		trace(
 			`recv ${data.method ?? "<response>"} ${data.params?.textDocument?.uri ?? ""}`.trim(),
 		);
+		// #4493: which bytes each didOpen/didChange carried, as a short sha256,
+		// so a test reads what the server holds from the wire. Off by default.
+		if (process.env.FAKE_LSP_TRACE_TEXT === "1") {
+			const text =
+				data.method === "textDocument/didOpen"
+					? data.params?.textDocument?.text
+					: data.method === "textDocument/didChange"
+						? data.params?.contentChanges?.at(-1)?.text
+						: undefined;
+			if (typeof text === "string")
+				trace(
+					`text ${data.params?.textDocument?.uri} ${createHash("sha256").update(text).digest("hex").slice(0, 12)}`,
+				);
+		}
 		// #4320 r3: which watched-files changes reached this server.
 		if (data.method === "workspace/didChangeWatchedFiles") {
 			for (const change of data.params?.changes ?? []) {
@@ -734,6 +749,11 @@ function handle(raw) {
 		}
 		publishSequenceFor(data.params?.textDocument?.uri);
 		if (STALE_MODULE_LOOKUP) publishModuleLookups(data.params?.textDocument?.uri);
+		// #4493 r2: a scanner that re-parses on every change (ast-grep's live
+		// shape). Synchronous, so a request queued behind the changes is answered
+		// only after all of them: what the #1714 aux pacing barrier waits on.
+		const changeCostMs = Number(process.env.FAKE_LSP_CHANGE_COST_MS ?? "");
+		if (Number.isFinite(changeCostMs) && changeCostMs > 0) burnCpu(changeCostMs);
 		// #1669 review F5: echo the received contentChanges back so a real-init
 		// integration test can assert the ON-THE-WIRE shape (ranged vs
 		// whole-document) that the client actually sent, proving

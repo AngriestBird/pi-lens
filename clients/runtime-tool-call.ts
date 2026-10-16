@@ -13,10 +13,13 @@ import { toPosix } from "./path-utils.js";
 import {
 	captureFileStats,
 	getOpaqueBaselineStore,
+	headRecordKey,
 	isGitWorktree,
 	opaqueBaselineSlot,
 	type PendingOpaqueBaseline,
 } from "./opaque-mutation-scan.js";
+import { bounded } from "./deadline-utils.js";
+import { HOOK_WALL_BUDGET_MS } from "./hook-budgets.js";
 import { normalizeForGuardMatch } from "./host-edit-normalize.js";
 import { retargetReplacementIndentation } from "./indent-retarget.js";
 import {
@@ -72,7 +75,7 @@ import {
 	tryCorrectIndentationMismatchFromContent,
 } from "./read-guard-tool-lines.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
-import { handleToolResult } from "./runtime-tool-result.js";
+import { handleToolResult, resyncHeadMove } from "./runtime-tool-result.js";
 import {
 	resolveReadEvidenceCorrelationId,
 	resolveToolCallCorrelationId,
@@ -611,6 +614,33 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 			},
 		});
 	if (!lensEnabled) return;
+	// #4493: before every tool, a HEAD move this session has not seen (made
+	// outside pi, or by a bash call still in its tool_result) resyncs the held
+	// documents it rewrote, and a look already running for this session is
+	// joined, so a parallel read or edit never runs against the stale primary
+	// (review r1 F1). A bash call's look also records the HEAD its command
+	// starts from, without which the first move of a session would read as a
+	// first sight at its tool_result. Reading HEAD is a file read; the bound
+	// ends the wait, and a cut look writes a `hook-await-exceeded` row.
+	const headRoot = ctx.cwd ?? runtime.projectRoot;
+	if (headRoot)
+		await bounded(
+			resyncHeadMove({
+				root: headRoot,
+				key: headRecordKey(
+					opaqueBaselineSlot(headRoot, runtime.sessionGeneration),
+					deps.sessionId,
+				),
+				trigger: "tool_call",
+				label: toolName,
+			}),
+			{
+				ms: HOOK_WALL_BUDGET_MS.tool_result_read_only,
+				signal: ctx.signal,
+				hook: "tool_call",
+				label: "head-move-resync",
+			},
+		);
 	// #2000 phase 2: opaque-command pre-snapshot. A bash command whose writes
 	// the extractor will not recognize gets a bounded stat snapshot of the
 	// project source universe BEFORE it runs; the tool_result side diffs it.
