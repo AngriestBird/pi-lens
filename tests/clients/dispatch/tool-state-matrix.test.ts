@@ -45,7 +45,15 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	afterAll,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	vi,
+} from "vitest";
 import type {
 	DispatchResult,
 	RunnerResult,
@@ -63,18 +71,6 @@ const { safeSpawnAsync } = vi.hoisted(() => ({ safeSpawnAsync: vi.fn() }));
 vi.mock("../../../clients/safe-spawn.js", async (importOriginal) => ({
 	...(await importOriginal<Record<string, unknown>>()),
 	safeSpawnAsync,
-}));
-
-// The installer's `isSpawnableCommand` is a PATH walk: whether the host has the
-// tool on disk. It decides whether a probe is spawned at all, so left real, a
-// cell's probe state depends on the machine (oxlint is on PATH under `npm`/`npx`
-// and absent under a bare `vitest`; the first 4522 mutation run read `clean`
-// from the oxlint probe cells for that reason). A cell models the tool's
-// presence through the spawn answers alone, so the host-state walk is pinned to
-// "on disk"; `missing` is the ENOENT spawn failure.
-vi.mock("../../../clients/installer/index.js", async (importOriginal) => ({
-	...(await importOriginal<Record<string, unknown>>()),
-	isSpawnableCommand: async () => true,
 }));
 
 const repoRoot = path.resolve(
@@ -327,7 +323,35 @@ const NOT_APPLICABLE: Readonly<Record<string, string>> = {
 const CAPTURES = listCapturedOutputs();
 const RUNNER_IDS = [...new Set(CAPTURES.map((c) => c.provenance.runner))];
 
+/**
+ * Commands the dispatcher's generic `hasTool` check probes only when the host
+ * has them on disk (a PATH walk, `isSpawnableCommand`): oxlint is on PATH under
+ * `npm`/`npx` and absent under a bare `vitest`, and the first 4522 mutation run
+ * read `clean` from its probe cells for that reason. A cell models the tool's
+ * presence through its spawn answers alone, so each name gets an empty stub on a
+ * PATH directory of its own; the stub is never executed (the spawn is mocked).
+ */
+const HOST_PRESENCE_STUBS = ["oxlint"];
+
 describe("tool-state matrix (#4522)", () => {
+	const originalPath = process.env.PATH;
+	const stubHost = setupTestEnvironment("pi-lens-tool-state-bin-");
+
+	beforeAll(() => {
+		for (const name of HOST_PRESENCE_STUBS) {
+			fs.writeFileSync(path.join(stubHost.tmpDir, name), "#!/bin/sh\n", {
+				mode: 0o755,
+			});
+		}
+		process.env.PATH = `${stubHost.tmpDir}${path.delimiter}${originalPath ?? ""}`;
+	});
+
+	afterAll(() => {
+		if (originalPath === undefined) delete process.env.PATH;
+		else process.env.PATH = originalPath;
+		stubHost.cleanup();
+	});
+
 	beforeEach(() => {
 		safeSpawnAsync.mockReset();
 	});
