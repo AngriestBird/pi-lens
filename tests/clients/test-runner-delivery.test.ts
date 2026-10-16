@@ -1,12 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-const logLatency = vi.hoisted(() => vi.fn());
-vi.mock("../../clients/latency-logger.js", async (importOriginal) => ({
-	...(await importOriginal<typeof import("../../clients/latency-logger.js")>()),
-	logLatency,
-}));
 import { snapshotAdvisoryProvenance } from "../../clients/advisory-provenance.js";
 import { resetBoundedTelemetry } from "../../clients/bounded-telemetry.js";
 import { CacheManager } from "../../clients/cache-manager.js";
@@ -14,6 +9,11 @@ import {
 	getDegradationSummary,
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
+import {
+	clearLatencyLog,
+	flushLatencyLog,
+	getLatencyLogPath,
+} from "../../clients/latency-logger.js";
 import {
 	_resetTestRunnerDeliveryForTests,
 	consumeStagedTestRunnerFindings,
@@ -26,23 +26,53 @@ import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
 describe("automatic test-runner delivery (#2366)", () => {
-	afterEach(() => {
+	// Records are read back from the real latency sink (AGENTS.md: flush and
+	// read the real sink), so a logger that drops them reds these cells.
+	// PI_LENS_TEST_MODE=0 is the sanctioned opt-out that lets the logger write;
+	// the harness's per-worker PI_LENS_HOME keeps the sink private to this file.
+	let previousTestMode: string | undefined;
+	beforeEach(async () => {
+		previousTestMode = process.env.PI_LENS_TEST_MODE;
+		process.env.PI_LENS_TEST_MODE = "0";
+		clearLatencyLog();
+		await flushLatencyLog();
+	});
+
+	afterEach(async () => {
 		_resetTestRunnerDeliveryForTests();
 		resetBoundedTelemetry();
 		resetDegradationLedger();
-		logLatency.mockReset();
+		clearLatencyLog();
+		await flushLatencyLog();
+		if (previousTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
+		else process.env.PI_LENS_TEST_MODE = previousTestMode;
 	});
 
-	/** Each `test_runner_delivery` record the module emitted, oldest first. */
-	function deliveryRecords(): Array<Record<string, unknown>> {
-		return logLatency.mock.calls
-			.map(([entry]) => entry)
-			.filter((entry) => entry.phase === "test_runner_delivery")
-			.map((entry) => entry.metadata);
+	/** Metadata of each `phase` record on the real latency log, oldest first. */
+	async function latencyMetadata(
+		phase: string,
+	): Promise<Array<Record<string, unknown>>> {
+		await flushLatencyLog();
+		const file = getLatencyLogPath();
+		const text = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
+		return text
+			.split(/\r?\n/)
+			.filter(Boolean)
+			.map(
+				(line) =>
+					JSON.parse(line) as {
+						phase?: string;
+						metadata?: Record<string, unknown>;
+					},
+			)
+			.filter((entry) => entry.phase === phase)
+			.map((entry) => entry.metadata ?? {});
 	}
 
-	const deliveryOutcomes = (): unknown[] =>
-		deliveryRecords().map((record) => record.outcome);
+	const deliveryRecords = () => latencyMetadata("test_runner_delivery");
+
+	const deliveryOutcomes = async (): Promise<unknown[]> =>
+		(await deliveryRecords()).map((record) => record.outcome);
 
 	function setup() {
 		const env = setupTestEnvironment("pi-lens-test-delivery-");
@@ -122,7 +152,7 @@ describe("automatic test-runner delivery (#2366)", () => {
 		}
 	});
 
-	it("records the run-for and delivery file sequences for each delivered verdict (#2542)", () => {
+	it("records the run-for and delivery file sequences for each delivered verdict (#2542)", async () => {
 		const { env, cache, runtime } = setup();
 		try {
 			const sourceFile = path.join(env.tmpDir, "src/app.ts");
@@ -169,15 +199,14 @@ describe("automatic test-runner delivery (#2366)", () => {
 				runtime,
 			});
 
-			expect(logLatency).toHaveBeenCalledWith(
+			expect(
+				await latencyMetadata("test_runner_verdict_delivery"),
+			).toContainEqual(
 				expect.objectContaining({
-					phase: "test_runner_verdict_delivery",
-					metadata: expect.objectContaining({
-						sessionId: "session-a",
-						verdictCount: 1,
-						staleCount: 1,
-						unknownCount: 0,
-					}),
+					sessionId: "session-a",
+					verdictCount: 1,
+					staleCount: 1,
+					unknownCount: 0,
 				}),
 			);
 		} finally {
@@ -185,7 +214,7 @@ describe("automatic test-runner delivery (#2366)", () => {
 		}
 	});
 
-	it("delivers a stale verdict with its edit gap and re-queues a run for the current file (#2542)", () => {
+	it("delivers a stale verdict with its edit gap and re-queues a run for the current file (#2542)", async () => {
 		const { env, cache, runtime } = setup();
 		try {
 			const sourceFile = path.join(env.tmpDir, "src/app.ts");
@@ -258,14 +287,13 @@ describe("automatic test-runner delivery (#2366)", () => {
 					sessionId: "session-a",
 				}),
 			]);
-			expect(logLatency).toHaveBeenCalledWith(
+			expect(
+				await latencyMetadata("test_runner_verdict_delivery"),
+			).toContainEqual(
 				expect.objectContaining({
-					phase: "test_runner_verdict_delivery",
-					metadata: expect.objectContaining({
-						staleCount: 1,
-						staleGaps: [2],
-						rerunQueued: 1,
-					}),
+					staleCount: 1,
+					staleGaps: [2],
+					rerunQueued: 1,
 				}),
 			);
 		} finally {
@@ -273,7 +301,7 @@ describe("automatic test-runner delivery (#2366)", () => {
 		}
 	});
 
-	it("delivers a current verdict unchanged and queues nothing (#2542)", () => {
+	it("delivers a current verdict unchanged and queues nothing (#2542)", async () => {
 		const { env, cache, runtime } = setup();
 		try {
 			const sourceFile = path.join(env.tmpDir, "src/fresh.ts");
@@ -327,13 +355,12 @@ describe("automatic test-runner delivery (#2366)", () => {
 					env.tmpDir,
 				)?.data.deferredTargets,
 			).toBeUndefined();
-			expect(logLatency).toHaveBeenCalledWith(
+			expect(
+				await latencyMetadata("test_runner_verdict_delivery"),
+			).toContainEqual(
 				expect.objectContaining({
-					phase: "test_runner_verdict_delivery",
-					metadata: expect.objectContaining({
-						staleCount: 0,
-						rerunQueued: 0,
-					}),
+					staleCount: 0,
+					rerunQueued: 0,
 				}),
 			);
 		} finally {
@@ -341,7 +368,7 @@ describe("automatic test-runner delivery (#2366)", () => {
 		}
 	});
 
-	it("delivers an unknown-sequence verdict unchanged and queues nothing (#2542)", () => {
+	it("delivers an unknown-sequence verdict unchanged and queues nothing (#2542)", async () => {
 		const { env, cache, runtime } = setup();
 		try {
 			const sourceFile = path.join(env.tmpDir, "src/legacy.ts");
@@ -394,14 +421,13 @@ describe("automatic test-runner delivery (#2366)", () => {
 					env.tmpDir,
 				)?.data.deferredTargets,
 			).toBeUndefined();
-			expect(logLatency).toHaveBeenCalledWith(
+			expect(
+				await latencyMetadata("test_runner_verdict_delivery"),
+			).toContainEqual(
 				expect.objectContaining({
-					phase: "test_runner_verdict_delivery",
-					metadata: expect.objectContaining({
-						staleCount: 0,
-						unknownCount: 1,
-						rerunQueued: 0,
-					}),
+					staleCount: 0,
+					unknownCount: 1,
+					rerunQueued: 0,
 				}),
 			);
 		} finally {
@@ -409,7 +435,7 @@ describe("automatic test-runner delivery (#2366)", () => {
 		}
 	});
 
-	it("legacy verdict without file sequence is delivered as unknown through the real idle path", () => {
+	it("legacy verdict without file sequence is delivered as unknown through the real idle path", async () => {
 		const { env, cache, runtime } = setup();
 		try {
 			const sourceFile = path.join(env.tmpDir, "src/legacy.ts");
@@ -450,14 +476,13 @@ describe("automatic test-runner delivery (#2366)", () => {
 			});
 
 			expect(findings?.messages).toHaveLength(1);
-			expect(logLatency).toHaveBeenCalledWith(
+			expect(
+				await latencyMetadata("test_runner_verdict_delivery"),
+			).toContainEqual(
 				expect.objectContaining({
-					phase: "test_runner_verdict_delivery",
-					metadata: expect.objectContaining({
-						verdictCount: 0,
-						staleCount: 0,
-						unknownCount: 2,
-					}),
+					verdictCount: 0,
+					staleCount: 0,
+					unknownCount: 2,
 				}),
 			);
 			const ledger = getDegradationSummary().find(
@@ -569,7 +594,7 @@ describe("automatic test-runner delivery (#2366)", () => {
 		}
 	});
 
-	it("carries a result when a prompt makes the immediate idle check fail", () => {
+	it("carries a result when a prompt makes the immediate idle check fail", async () => {
 		const { env, cache, runtime } = setup();
 		try {
 			let idle = false;
@@ -595,11 +620,15 @@ describe("automatic test-runner delivery (#2366)", () => {
 					runtime,
 				});
 			deliver();
-			expect(deliveryOutcomes()).toEqual(["staged", "carried"]);
+			expect(await deliveryOutcomes()).toEqual(["staged", "carried"]);
 			expect(consume()).toBeUndefined();
 			idle = true;
 			deliver();
-			expect(deliveryOutcomes()).toEqual(["staged", "carried", "eligible"]);
+			expect(await deliveryOutcomes()).toEqual([
+				"staged",
+				"carried",
+				"eligible",
+			]);
 			expect(consume()?.messages[0]?.content).toContain("FAIL");
 		} finally {
 			env.cleanup();
@@ -660,7 +689,7 @@ describe("automatic test-runner delivery (#2366)", () => {
 		}
 	});
 
-	it("does not resurrect an older generation after a clean result supersedes it", () => {
+	it("does not resurrect an older generation after a clean result supersedes it", async () => {
 		const { env, cache, runtime } = setup();
 		try {
 			stageTestRunnerDelivery({
@@ -690,7 +719,7 @@ describe("automatic test-runner delivery (#2366)", () => {
 				runtime,
 				sessionId: "session-a",
 			});
-			expect(deliveryOutcomes()).toEqual(["staged", "superseded"]);
+			expect(await deliveryOutcomes()).toEqual(["staged", "superseded"]);
 			expect(
 				cache.readCache<{ deliveryEligible?: unknown }>(
 					"test-runner-findings",
@@ -742,7 +771,7 @@ describe("automatic test-runner delivery (#2366)", () => {
 		}
 	});
 
-	it("delivers each activation's staged result through its own owner", () => {
+	it("delivers each activation's staged result through its own owner", async () => {
 		const { env, cache, runtime } = setup();
 		try {
 			const secondaryRuntime = new RuntimeCoordinator();
@@ -802,7 +831,7 @@ describe("automatic test-runner delivery (#2366)", () => {
 			});
 			expect(marker()).toBe("session-b");
 			expect(
-				deliveryRecords()
+				(await deliveryRecords())
 					.filter((record) => record.outcome === "eligible")
 					.map((record) => [record.sessionId, record.targetCount]),
 			).toEqual([
@@ -814,7 +843,7 @@ describe("automatic test-runner delivery (#2366)", () => {
 		}
 	});
 
-	it("honors the authoritative provenance suppression decision", () => {
+	it("honors the authoritative provenance suppression decision", async () => {
 		const { env, cache, runtime } = setup();
 		try {
 			const file = path.join(env.tmpDir, "src", "app.ts");
@@ -845,7 +874,7 @@ describe("automatic test-runner delivery (#2366)", () => {
 				runtime,
 				sessionId: "session-a",
 			});
-			expect(deliveryOutcomes()).toEqual(["staged", "superseded"]);
+			expect(await deliveryOutcomes()).toEqual(["staged", "superseded"]);
 			expect(
 				cache.readCache<{ deliveryEligible?: unknown }>(
 					"test-runner-findings",

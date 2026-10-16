@@ -1176,7 +1176,6 @@
 		"clients/store-freshness-formal.test.ts::clients/lsp/capabilities": 1,
 		"clients/store-freshness-formal.test.ts::clients/recent-touches": 1,
 		"clients/test-runner-client.test.ts::clients/package-manager": 1,
-		"clients/test-runner-delivery.test.ts::clients/latency-logger": 1,
 		"clients/test-runner-pytest-summary.test.ts::clients/package-manager": 1,
 		"clients/test-runner-python-environment.test.ts::clients/package-manager": 1,
 		"clients/test-runner-python-environment.test.ts::node:path": 1,
