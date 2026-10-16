@@ -1215,13 +1215,10 @@ describe("#4484 witness, round 5: a fallback holds only what its evidence names"
 		const s = await openSession("owpre", "src/owed-pre.ts", AG_FIXED, SCOPED);
 		const W0 = BASE.replace("k = 1", "k = 2");
 		expect(await s.edit(W0, [6])).toMatch(/✓ .*clean/);
-		// The skipped lines include a closing brace, the same text as the last
-		// line of the pre-existing finding's function: owed positions must be
-		// remapped, not matched by text.
-		const w1 = await s.edit(
-			`${W0}export function z(): void {\n}\n${OVER_CAP}\n`,
-			[7, 8, 9],
-		);
+		// The skipped lines hold a copy of the pre-existing finding's own line,
+		// so owed positions must be remapped, not matched by text.
+		const COPY = AG_PRE.split("\n").slice(2, 5).join("\n");
+		const w1 = await s.edit(`${W0}${COPY}\n${OVER_CAP}\n`, [7, 8, 9, 10]);
 		expect(w1).toMatch(/✓ .*clean/);
 		const w2 = await s.edit(W0, [6]);
 		expect(w2).not.toContain("STOP");
