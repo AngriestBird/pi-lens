@@ -301,11 +301,24 @@ export function resolveDiffRange(input = readStdin()) {
 	return ["origin/master...HEAD"];
 }
 
-export function changedFiles(range) {
+/**
+ * @param {string} range
+ * @param {{ diffFilter?: string, cwd?: string, env?: NodeJS.ProcessEnv }} [options]
+ *   `diffFilter: "A"` lists only the files the range adds (the changed-test
+ *   shuffle step runs them first, #4456)
+ */
+export function changedFiles(range, { diffFilter, cwd, env } = {}) {
 	try {
-		const out = execFileSync("git", ["diff", "--name-only", range], {
-			encoding: "utf8",
-		});
+		const out = execFileSync(
+			"git",
+			[
+				"diff",
+				"--name-only",
+				...(diffFilter ? [`--diff-filter=${diffFilter}`] : []),
+				range,
+			],
+			{ encoding: "utf8", cwd, env },
+		);
 		return out
 			.split("\n")
 			.map((line) => line.trim())

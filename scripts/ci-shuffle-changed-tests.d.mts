@@ -24,11 +24,12 @@ export interface RunResult {
 export declare function selectChangedTestFiles(
 	paths: string[],
 	exists?: (file: string) => boolean,
+	added?: readonly string[],
 ): string[];
 export declare function planRuns(
 	files: string[],
 	seeds?: readonly number[],
-	options?: { alone?: boolean },
+	options?: { alone?: boolean; added?: readonly string[] },
 ): ShuffleRun[];
 export declare function reproCommand(run: {
 	files: string[];
@@ -62,6 +63,7 @@ export declare function run(
 	io?: {
 		env?: NodeJS.ProcessEnv;
 		diff?: (range: string) => string[] | null;
+		added?: (range: string) => string[] | null;
 		exec?: ExecVitest;
 		now?: () => number;
 		budgetMs?: number;

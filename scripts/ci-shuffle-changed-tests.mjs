@@ -15,12 +15,16 @@
  *
  * Scope is bounded to the test files the PR adds or changes
  * (`git diff --name-only <base>...<head>`, the pre-push selector's
- * `changedFiles`), at most MAX_FILES of them. Per set it runs
+ * `changedFiles`), at most MAX_FILES of them. Files the PR ADDS come before
+ * files it only modifies (`--diff-filter=A`, #4456): the added file is what the
+ * PR exists to prove, and it sorted past the cap and the budget when the order
+ * was alphabetical. Per set it runs, in this order,
  *
+ *   - every ADDED file alone,
  *   - the whole set under `--sequence.shuffle` once per fixed seed in SEEDS
  *     (a cross-file dependence only shows when the files run together), and
- *   - every file alone, in file order (a dependence on an UNCHANGED sibling's
- *     side effect only shows when that sibling is absent).
+ *   - every modified file alone, in file order (a dependence on an UNCHANGED
+ *     sibling's side effect only shows when that sibling is absent).
  *
  * It does not run per-test (`-t`) isolation: one vitest start per case costs
  * a start per case. Lane settings are not copied here: the file paths go to
@@ -29,8 +33,9 @@
  *
  * Time budget: BUDGET_MS in all, each vitest start bounded by what is left. A
  * start that does not finish, a file over the cap and an unreadable diff are
- * UNPROVEN (exit 3), never green. So is a start that vitest answers with "No
- * test files found": it ran nothing. Exit codes: 0 clean (or no test file in
+ * UNPROVEN (exit 3), never green, and each line names the files it did not
+ * prove. So is a start that vitest answers with "No test files found": it ran
+ * nothing. Exit codes: 0 clean (or no test file in
  * the diff), 1 an order-dependent file or one that fails alone, 2 usage, 3
  * unproven.
  */
@@ -46,8 +51,17 @@ import { changedFiles } from "./pre-push-targeted-tests.mjs";
 export const SEEDS = Object.freeze([202, 424]);
 /** Test files run per PR; the rest are listed as not run. */
 export const MAX_FILES = 20;
-/** Total wall time. ci.yml's job cap is 15 min and its targeted run ~4 min. */
-export const BUDGET_MS = 6 * 60_000;
+/**
+ * Total wall time: the step's `timeout-minutes: 8` less a 60 s margin for the
+ * kill and the summary. Measured, not guessed (#4456): a PR that touches
+ * `tests/tools/diagnostics-route-switch-matrix.test.ts` costs the plan about
+ * 365 to 385 s, because that one ~60 s file is paid in both shuffled starts
+ * and alone. `tests/support/shuffle-changed-budget-measurements.json` keeps
+ * the raw CI lines and `tests/scripts/ci-shuffle-changed-tests.test.ts` pins
+ * the budget over them. The job cap is 15 min and the steps before this one
+ * take ~5.5 min, so 7 min still leaves ~2.5 min.
+ */
+export const BUDGET_MS = 7 * 60_000;
 const OUTPUT_TAIL_LINES = 60;
 
 /**
@@ -57,9 +71,11 @@ const OUTPUT_TAIL_LINES = 60;
  *
  * @param {string[]} paths
  * @param {(file: string) => boolean} [exists]
- * @returns {string[]} sorted, unique
+ * @param {readonly string[]} [added] paths the diff adds; they come first, so
+ *   the cap and the budget drop a modified file before an added one (#4456)
+ * @returns {string[]} unique; added files first, each group sorted
  */
-export function selectChangedTestFiles(paths, exists = existsSync) {
+export function selectChangedTestFiles(paths, exists = existsSync, added = []) {
 	const picked = new Set();
 	for (const raw of paths) {
 		const file = raw.split(path.sep).join("/");
@@ -67,21 +83,27 @@ export function selectChangedTestFiles(paths, exists = existsSync) {
 		if (file.startsWith("tests/fixtures/")) continue;
 		if (exists(file)) picked.add(file);
 	}
-	return [...picked].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+	const isAdded = new Set(added.map((raw) => raw.split(path.sep).join("/")));
+	const rank = (file) => (isAdded.has(file) ? 0 : 1);
+	return [...picked].sort(
+		(a, b) => rank(a) - rank(b) || (a < b ? -1 : a > b ? 1 : 0),
+	);
 }
 
 /**
  * @param {string[]} files
  * @param {readonly number[]} [seeds]
- * @param {{ alone?: boolean }} [options] `alone: false` plans the shuffled
- *   starts only (the census plans its alone starts over the whole tree and its
- *   shuffled starts per chunk, #4405)
+ * @param {{ alone?: boolean, added?: readonly string[] }} [options] `alone:
+ *   false` plans the shuffled starts only (the census plans its alone starts
+ *   over the whole tree and its shuffled starts per chunk, #4405). `added`
+ *   names the files the PR adds: their alone starts run first, ahead of the
+ *   shuffled starts, so a slow file in the set cannot starve them (#4456).
  * @returns {Array<{ label: string, files: string[], flags: string[] }>}
  */
 export function planRuns(
 	files,
 	seeds = SEEDS,
-	{ alone: withAlone = true } = {},
+	{ alone: withAlone = true, added = [] } = {},
 ) {
 	const shuffled = seeds.map((seed) => ({
 		label: `shuffle seed ${seed}`,
@@ -95,7 +117,12 @@ export function planRuns(
 				flags: [],
 			}))
 		: [];
-	return [...shuffled, ...alone];
+	const isAdded = (entry) => added.includes(entry.files[0]);
+	return [
+		...alone.filter(isAdded),
+		...shuffled,
+		...alone.filter((entry) => !isAdded(entry)),
+	];
 }
 
 /** The line a reader pastes to reproduce one red. */
@@ -190,6 +217,13 @@ export function runPlan(plan, options) {
 	return { results, notRun };
 }
 
+/** A start's label, plus the files of a multi-file start: "not run" names them. */
+function describeRun(run) {
+	return run.files.length > 1
+		? `${run.label} (${run.files.join(", ")})`
+		: run.label;
+}
+
 /**
  * @param {{ files: string[], over: string[], results: ReturnType<typeof runPlan>["results"], notRun: ReturnType<typeof runPlan>["notRun"] }} state
  * @returns {{ code: 0 | 1 | 3, kind: "clean" | "red" | "unproven", lines: string[] }}
@@ -209,10 +243,11 @@ export function judge({ files, over, results, notRun }) {
 		lines.push(`${kind}: ${entry.run.label} (${reproCommand(entry.run)})`);
 	}
 	for (const entry of timedOut)
-		lines.push(`did not finish in the budget: ${entry.run.label}`);
+		lines.push(`did not finish in the budget: ${describeRun(entry.run)}`);
 	for (const entry of uncollected)
-		lines.push(`not run (no project collects it): ${entry.run.label}`);
-	for (const run of notRun) lines.push(`not run (budget spent): ${run.label}`);
+		lines.push(`not run (no project collects it): ${describeRun(entry.run)}`);
+	for (const run of notRun)
+		lines.push(`not run (budget spent): ${describeRun(run)}`);
 	for (const file of over)
 		lines.push(`not run (over ${MAX_FILES} files): ${file}`);
 	if (red.length > 0) return { code: 1, kind: "red", lines };
@@ -253,6 +288,7 @@ export function parseArgs(argv) {
  * @param {{
  *   env?: NodeJS.ProcessEnv,
  *   diff?: (range: string) => string[] | null,
+ *   added?: (range: string) => string[] | null,
  *   exec?: typeof execVitest,
  *   now?: () => number,
  *   budgetMs?: number,
@@ -264,6 +300,7 @@ export function run(argv, io = {}) {
 	const {
 		env = process.env,
 		diff = changedFiles,
+		added: addedOf = (range) => changedFiles(range, { diffFilter: "A" }),
 		exec = execVitest,
 		now,
 		budgetMs,
@@ -297,8 +334,22 @@ export function run(argv, io = {}) {
 				lines: ["the changed-file list is unreadable"],
 			});
 	}
-	const found = selectChangedTestFiles(paths, (file) =>
-		existsSync(path.join(options.cwd, file)),
+	let added = [];
+	if (options.files === null) {
+		const range = `${options.base}...${options.head}`;
+		const answer = addedOf(range);
+		// The added list only orders the plan; the diff above already answered,
+		// so an unreadable list falls back to path order, once, in the log.
+		if (answer === null)
+			log(
+				"[shuffle-changed] the added-file list is unreadable; files run in path order",
+			);
+		else added = answer;
+	}
+	const found = selectChangedTestFiles(
+		paths,
+		(file) => existsSync(path.join(options.cwd, file)),
+		added,
 	);
 	if (found.length === 0)
 		return finish({
@@ -311,7 +362,7 @@ export function run(argv, io = {}) {
 	log(
 		`[shuffle-changed] ${files.length} file(s), seeds ${SEEDS.join(", ")}, budget ${BUDGET_MS / 1000}s`,
 	);
-	const { results, notRun } = runPlan(planRuns(files), {
+	const { results, notRun } = runPlan(planRuns(files, SEEDS, { added }), {
 		cwd: options.cwd,
 		budgetMs,
 		exec,

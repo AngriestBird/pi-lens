@@ -21,6 +21,18 @@ import {
 } from "../../scripts/ci-shuffle-changed-tests.mjs";
 import { setupTestEnvironment } from "../clients/test-utils.js";
 
+interface BudgetRow {
+	seedSeconds: number[];
+	aloneSeconds: number[];
+	unfinished: Array<{ start: string; atLeastSeconds: number }>;
+}
+const budgetMeasurements = JSON.parse(
+	fs.readFileSync(
+		path.resolve("tests/support/shuffle-changed-budget-measurements.json"),
+		"utf8",
+	),
+) as { runs: BudgetRow[] };
+
 const OK: ExecOutcome = { status: 0, output: "", timedOut: false };
 const RED: ExecOutcome = { status: 1, output: "FAIL x", timedOut: false };
 
@@ -372,8 +384,159 @@ describe("judge and run: exit codes", () => {
 
 	// Recurrence: the budget constant drifting above the job's cap. ci.yml's
 	// job cap is 15 min and its targeted run takes ~4 min.
-	it("keeps the budget under the step cap of 8 minutes", () => {
-		expect(BUDGET_MS).toBeLessThanOrEqual(6 * 60_000);
+	it("keeps the budget a minute under the step cap of 8 minutes", () => {
+		expect(BUDGET_MS).toBeLessThanOrEqual(7 * 60_000);
+	});
+});
+
+describe("added files run first, and an unproven result names what it skipped (#4456)", () => {
+	const names = (count: number) =>
+		Array.from(
+			{ length: count },
+			(_, index) => `tests/f${String(index).padStart(2, "0")}.test.ts`,
+		);
+
+	function scratchTree(files: string[]): string {
+		const scratch = setupTestEnvironment("pi-lens-4456-");
+		cleanups.push(scratch.cleanup);
+		fs.mkdirSync(path.join(scratch.tmpDir, "tests"));
+		for (const name of files)
+			fs.writeFileSync(path.join(scratch.tmpDir, name), "");
+		return scratch.tmpDir;
+	}
+
+	// Recurrence: the plan put the added file's alone start after the shuffled
+	// starts and in path order, so a slow sibling could spend the budget first.
+	it("selectChangedTestFiles puts added files first, each group sorted", () => {
+		expect(
+			selectChangedTestFiles(
+				[
+					"tests/b.test.ts",
+					"tests/z.test.ts",
+					"tests/a.test.ts",
+					"tests/y.test.ts",
+				],
+				() => true,
+				["tests/z.test.ts", "tests/y.test.ts"],
+			),
+		).toEqual([
+			"tests/y.test.ts",
+			"tests/z.test.ts",
+			"tests/a.test.ts",
+			"tests/b.test.ts",
+		]);
+	});
+
+	it("planRuns runs added files alone, then the shuffles, then modified files alone", () => {
+		const plan = planRuns(
+			["tests/z.test.ts", "tests/a.test.ts", "tests/b.test.ts"],
+			SEEDS,
+			{ added: ["tests/z.test.ts"] },
+		);
+		expect(plan.map((entry) => entry.label)).toEqual([
+			"alone tests/z.test.ts",
+			"shuffle seed 202",
+			"shuffle seed 424",
+			"alone tests/a.test.ts",
+			"alone tests/b.test.ts",
+		]);
+	});
+
+	// Recurrence: PR #4491 run 38859068333. The PR's new witness test
+	// (tests/index-4484-...) sorted after twenty tests/clients and tests/config
+	// files it only modified, the MAX_FILES cut dropped it, and the step exited
+	// 3 with "not run (over 20 files)" on a passing PR.
+	it("keeps an added test that sorts last inside the cap of a 21-file diff", () => {
+		const files = names(MAX_FILES + 1);
+		const addedLast = files[files.length - 1];
+		const cwd = scratchTree(files);
+		const exec = execBy({});
+		const lines: string[] = [];
+		run(["--cwd", cwd, "--base", "abc1234", "--head", "def5678"], {
+			diff: () => files,
+			added: () => [addedLast],
+			exec,
+			log: (line) => lines.push(line),
+		});
+		expect(exec.starts).toContainEqual([addedLast]);
+		expect(exec.starts[0]).toEqual([addedLast]);
+		const text = lines.join("\n");
+		expect(text).not.toContain(`over ${MAX_FILES} files): ${addedLast}`);
+		// The file the cap cut is a modified one, and it is named.
+		expect(text).toContain(
+			`not run (over ${MAX_FILES} files): ${files[MAX_FILES - 1]}`,
+		);
+	});
+
+	// Recurrence: PR #4500 run 38846199394 and PR #4411 run 38644123472. One
+	// slow modified file in the shuffled set spent the budget before the added
+	// file's alone start began, and the result named only "shuffle seed 424",
+	// not the files that start would have proven.
+	it("runs the added file alone before a slow modified file spends the budget, and names every skipped file", () => {
+		const files = ["tests/a-slow.test.ts", "tests/z-added.test.ts"];
+		const cwd = scratchTree(files);
+		let clock = 0;
+		const starts: string[][] = [];
+		const exec: ExecVitest = (startRun) => {
+			starts.push([...startRun.files, ...startRun.flags]);
+			clock += startRun.files.includes("tests/a-slow.test.ts") ? 1000 : 1;
+			return OK;
+		};
+		const lines: string[] = [];
+		const code = run(["--cwd", cwd, "--base", "abc1234", "--head", "def5678"], {
+			diff: () => files,
+			added: () => ["tests/z-added.test.ts"],
+			exec,
+			now: () => clock,
+			budgetMs: 500,
+			log: (line) => lines.push(line),
+		});
+		expect(starts[0]).toEqual(["tests/z-added.test.ts"]);
+		const text = lines.join("\n");
+		expect(text).toContain("alone tests/z-added.test.ts: ok");
+		expect(code).toBe(3);
+		// Every skipped start names its files, a shuffled start's included.
+		expect(text).toContain(
+			"not run (budget spent): shuffle seed 424 (tests/z-added.test.ts, tests/a-slow.test.ts)",
+		);
+		expect(text).toContain(
+			"not run (budget spent): alone tests/a-slow.test.ts",
+		);
+	});
+
+	// Recurrence: an unreadable added list silently dropping the order that
+	// protects the added file. The diff answered, so the run goes on in path
+	// order and says so once.
+	it("falls back to path order and says so when the added list is unreadable", () => {
+		const files = ["tests/a.test.ts", "tests/b.test.ts"];
+		const cwd = scratchTree(files);
+		const exec = execBy({});
+		const lines: string[] = [];
+		run(["--cwd", cwd, "--base", "abc1234", "--head", "def5678"], {
+			diff: () => files,
+			added: () => null,
+			exec,
+			log: (line) => lines.push(line),
+		});
+		expect(
+			lines.filter((line) => line.includes("added-file list is unreadable")),
+		).toHaveLength(1);
+		expect(exec.starts.at(-1)).toEqual(["tests/b.test.ts"]);
+	});
+});
+
+describe("BUDGET_MS is pinned over measured CI plans (#4456)", () => {
+	// Recurrence: a 360 s budget that a plan paying the ~60 s route-switch
+	// matrix three times (two shuffled starts and alone) could not fit, on
+	// PR #4411 and PR #4500. The figures are tests/support/
+	// shuffle-changed-budget-measurements.json, copied from those step logs.
+	it("leaves 10% headroom over the largest measured plan", () => {
+		const cost = (row: BudgetRow) =>
+			[...row.seedSeconds, ...row.aloneSeconds].reduce((a, b) => a + b, 0) +
+			row.unfinished.reduce((sum, entry) => sum + entry.atLeastSeconds, 0);
+		const largest = Math.max(...budgetMeasurements.runs.map(cost));
+		expect(largest).toBeGreaterThan(300);
+		expect(BUDGET_MS / 1000).toBeGreaterThanOrEqual(largest * 1.1);
 	});
 });
 

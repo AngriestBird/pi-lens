@@ -4,13 +4,17 @@
 // reads. An injected exec would restate the flags the script builds instead of
 // proving vitest reorders the cases and reds the file that shares state.
 // lane: wall-clock-budget (serialized); no wall-clock assertion, three short
-// vitest starts over two-file fixtures.
+// vitest starts over two-file fixtures, and one real `git diff --diff-filter=A`
+// over a throwaway repo (#4456: the flag's meaning is git's, so a double would
+// restate it).
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { execVitest } from "../../scripts/ci-shuffle-changed-tests.mjs";
+import { changedFiles } from "../../scripts/pre-push-targeted-tests.mjs";
 import { setupTestEnvironment } from "../clients/test-utils.js";
+import { gitExecFileSync, gitFixtureEnv } from "../support/git-fixture-env.js";
 
 const SCRIPT = path.resolve("scripts/ci-shuffle-changed-tests.mjs");
 const env = setupTestEnvironment("pi-lens-4397-fixture-");
@@ -113,5 +117,56 @@ describe("the changed-test shuffle job over a real vitest (#4397)", () => {
 		);
 		expect(outcome.timedOut).toBe(true);
 		expect(outcome.status).toBeNull();
+	}, 60_000);
+
+	// Recurrence (#4456): the added-first order is only as good as the git
+	// call behind it. `--diff-filter=A` must list a file the range adds, not one
+	// it modifies or renames (a rename is not new content), or the PR's new
+	// witness test sorts with the rest again.
+	it("lists only the files a real git range adds", () => {
+		const repo = path.join(env.tmpDir, "repo");
+		fs.mkdirSync(path.join(repo, "tests"), { recursive: true });
+		const git = (...args: string[]) =>
+			gitExecFileSync(
+				"git",
+				[
+					"-c",
+					"user.name=fixture",
+					"-c",
+					"user.email=fixture@example.invalid",
+					"-c",
+					"commit.gpgsign=false",
+					...args,
+				],
+				{ cwd: repo, encoding: "utf8", stdio: "pipe" },
+			);
+		const write = (name: string, text: string) =>
+			fs.writeFileSync(path.join(repo, "tests", name), text);
+		git("init", "-q", "-b", "main");
+		write("mod.test.ts", "// one\n".repeat(20));
+		write("old.test.ts", "// renamed content\n".repeat(20));
+		git("add", "-A");
+		git("commit", "-q", "-m", "base");
+		const base = git("rev-parse", "HEAD").trim();
+		write("mod.test.ts", "// one\n".repeat(20) + "// edited\n");
+		write("new.test.ts", "// brand new\n".repeat(20));
+		git("mv", "tests/old.test.ts", "tests/renamed.test.ts");
+		git("add", "-A");
+		git("commit", "-q", "-m", "head");
+		const head = git("rev-parse", "HEAD").trim();
+		expect(
+			changedFiles(`${base}...${head}`, {
+				diffFilter: "A",
+				cwd: repo,
+				env: gitFixtureEnv(repo),
+			}),
+		).toEqual(["tests/new.test.ts"]);
+		expect(
+			changedFiles("not-a-ref...HEAD", {
+				diffFilter: "A",
+				cwd: repo,
+				env: gitFixtureEnv(repo),
+			}),
+		).toBeNull();
 	}, 60_000);
 });
