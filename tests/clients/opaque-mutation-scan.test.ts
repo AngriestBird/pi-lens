@@ -38,16 +38,6 @@ vi.mock("../../clients/opaque-mutation-scan.js", async (importOriginal) => {
 	};
 });
 
-const resyncGitChangedFiles = vi.hoisted(() =>
-	vi.fn(async () => new Map<string, string>()),
-);
-vi.mock("../../clients/lsp/capabilities.js", async (importOriginal) => ({
-	...(await importOriginal<
-		typeof import("../../clients/lsp/capabilities.js")
-	>()),
-	resyncGitChangedFiles,
-}));
-
 import { handleToolCall } from "../../clients/runtime-tool-call.js";
 import {
 	clearLastAnalyzedStateCache,
@@ -81,6 +71,12 @@ import {
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
 import { runHandlerExpectingNoThrow } from "../support/handler-verdict.js";
+import { FAKE_LSP_SERVER_PATH } from "../support/fake-lsp-server.js";
+import { hashDiagnosticContent } from "../../clients/lsp/diagnostic-binding.js";
+import {
+	setProjectTrustState,
+	resetProjectTrust,
+} from "../../clients/project-trust.js";
 
 let tmpDir = "";
 
@@ -585,14 +581,40 @@ describe("recoverOpaqueChangesViaGit (real git repo)", () => {
 			runtime.projectRoot = repoDir;
 			runtime.setTelemetryIdentity({ sessionId: "opaque-no-read-guard" });
 			const target = path.join(repoDir, "src", "no-read-guard.ts");
-			const command = nodeScriptFile(
-				`require('fs').writeFileSync(${JSON.stringify(target)}, 'recovered\\n');`,
-			);
+			const command = "opaque-codemod --rewrite-source";
 			const noReadGuard = () => true;
-			resyncGitChangedFiles.mockClear();
 			const { runPipeline } = await import("../../clients/pipeline.js");
 			vi.mocked(runPipeline).mockClear();
+			const { initLSPConfig } = await import("../../clients/lsp/config.js");
+			const lsp = await import("../../clients/lsp/index.js");
+			setProjectTrustState("trusted");
+			fs.mkdirSync(path.join(repoDir, ".pi-lens"), { recursive: true });
+			fs.writeFileSync(path.join(repoDir, "package.json"), "{}\n", "utf8");
+			fs.writeFileSync(
+				path.join(repoDir, ".pi-lens", "lsp.json"),
+				JSON.stringify({
+					servers: {
+						fake: {
+							name: "fake",
+							extensions: [".ts"],
+							command: process.execPath,
+							args: [FAKE_LSP_SERVER_PATH],
+							rootMarkers: ["package.json"],
+						},
+					},
+					disabledServers: ["typescript", "deno", "ast-grep", "typos"],
+				}),
+				"utf8",
+			);
+			await initLSPConfig(repoDir);
+			const service = lsp.getLSPService();
 			try {
+				fs.writeFileSync(target, "before recovery\n", "utf8");
+				await service.touchFile(target, fs.readFileSync(target, "utf8"), {
+					diagnostics: "none",
+					clientScope: "primary",
+					source: "lsp_sync",
+				});
 				await runHandlerExpectingNoThrow(() =>
 					handleToolCall({
 						event: {
@@ -611,7 +633,7 @@ describe("recoverOpaqueChangesViaGit (real git repo)", () => {
 						resetLSPService: () => {},
 					} as Parameters<typeof handleToolCall>[0]),
 				);
-				execSync(`node "${command}"`, { cwd: repoDir });
+				fs.writeFileSync(target, "recovered\n", "utf8");
 				await handleToolResult({
 					event: {
 						toolName: "bash",
@@ -640,16 +662,16 @@ describe("recoverOpaqueChangesViaGit (real git repo)", () => {
 							String(ctx?.filePath).endsWith("no-read-guard.ts"),
 						),
 				).toBe(true);
-				await vi.waitFor(() =>
-					expect(resyncGitChangedFiles).toHaveBeenCalledWith(
-						expect.arrayContaining([normalizeMapKey(target)]),
-					),
+				await service.documentSymbol(target);
+				expect(service.getTrackedContent(target, repoDir)?.hash).toBe(
+					hashDiagnosticContent("recovered\n"),
 				);
 				expect(runtime.readGuard.exportAuthorship().written).not.toContain(
 					normalizeFilePath(target),
 				);
 			} finally {
-				fs.rmSync(command, { force: true });
+				await service.shutdown();
+				resetProjectTrust();
 				if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 				else process.env.PILENS_DATA_DIR = previousDataDir;
 			}
