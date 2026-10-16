@@ -1161,7 +1161,7 @@ describe("#4484 witness, round 5: a fallback holds only what its evidence names"
 	// the agent's fixed `debugger` by identity alone, so an untouched,
 	// never-delivered `debugger` with other text took over the record and
 	// blocked through every later write and turn end (TLC MutUnalignedText).
-	it("retires a fixed blocker on an unaligned write although a pre-existing match with other text stays (row 4b, P22)", async () => {
+	it("retires a fixed blocker on an unaligned write although an older match with other text stays (row 4b, P22)", async () => {
 		const OLD = "export function old(): void {\n\tdebugger; // old\n}\n";
 		const NEU = "export function neu(): void {\n\tdebugger;\n}\n";
 		const FIXED = OLD.replace("\tdebugger; // old\n", "\treturn;\n");

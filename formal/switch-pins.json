@@ -2113,7 +2113,7 @@
 				"UnalignedText": {
 					"value": "TRUE",
 					"test": "tests/index-4484-unfixed-blocker-witness.test.ts",
-					"title": "retires a fixed blocker on an unaligned write although a pre-existing match with other text stays (row 4b, P22)",
+					"title": "retires a fixed blocker on an unaligned write although an older match with other text stays (row 4b, P22)",
 					"also": [
 						{
 							"test": "tests/clients/finding-identity-retain.test.ts",
