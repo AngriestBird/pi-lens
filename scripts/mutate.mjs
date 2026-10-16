@@ -307,7 +307,7 @@ function classifyTestRun(testRun) {
 	return testRun.code === 0 ? "SURVIVED" : "RED";
 }
 
-function runTests(files, onSignal) {
+function runTests(files) {
 	return new Promise((resolve) => {
 		const command = path.join(root, "node_modules", ".bin", "vitest");
 		const child = spawn(
@@ -329,14 +329,8 @@ function runTests(files, onSignal) {
 			output += chunk;
 			process.stderr.write(chunk);
 		});
-		const stop = () => {
-			child.kill("SIGINT");
-			onSignal();
-		};
-		process.once("SIGINT", stop);
 		child.once("close", (code, signal) => {
 			activeChild = null;
-			process.removeListener("SIGINT", stop);
 			// The shared Vitest parser strips colour for the classification;
 			// report the same plain text in the table.
 			resolve({
@@ -438,7 +432,6 @@ async function main() {
 	// verdict). `stage` says which step a thrown error came from.
 	let result = { code: 2, failed: [], status: "ERROR" };
 	let stage = "setup";
-	let interrupted = false;
 	let handlingSignal = false;
 	const restoreOwned = () => {
 		const refusals = [];
@@ -451,7 +444,6 @@ async function main() {
 	const signalHandler = (signal) => {
 		if (handlingSignal) return;
 		handlingSignal = true;
-		interrupted = true;
 		try {
 			if (activeChild) activeChild.kill("SIGKILL");
 			for (const refusal of restoreOwned())
@@ -508,21 +500,12 @@ async function main() {
 			}
 		}
 		stage = "test";
-		// No verdict on the mutation: ERROR, as for a run that loaded no tests,
-		// never RED. (The signal handler ends the process before a test could
-		// reach this branch, so no test drives it.)
-		if (interrupted)
-			result = { code: 130, failed: ["interrupted"], status: "ERROR" };
-		else {
-			const testRun = await runTests(options.tests, () => {
-				interrupted = true;
-			});
-			result = {
-				code: testRun.code,
-				failed: failedTitles(testRun.output),
-				status: classifyTestRun(testRun),
-			};
-		}
+		const testRun = await runTests(options.tests);
+		result = {
+			code: testRun.code,
+			failed: failedTitles(testRun.output),
+			status: classifyTestRun(testRun),
+		};
 	} catch (error) {
 		const status = { edit: "REFUSED", build: "BROKEN" }[stage] ?? "ERROR";
 		result = { code: 1, failed: [error.message], status };
