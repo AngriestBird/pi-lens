@@ -1437,6 +1437,11 @@ describe("per-edit blocker scope (#4481)", () => {
 		const result = await dispatchLsp([lspDiag(1, "ast-grep")]);
 
 		expect(result.blockers.filter((d) => d.tool === "ast-grep")).toEqual([]);
+		// #4484 round 2: withheld from delivery, still observed. Recurrence: the
+		// lane dropped it, so the record lost a blocker an edit elsewhere left.
+		expect(result.stillObserved).toEqual([
+			expect.objectContaining({ tool: "ast-grep", line: 1, runnerId: "lsp" }),
+		]);
 	});
 
 	// Recurrence: #4482 review r1 F1 — the real ast-grep LSP reports

@@ -1606,6 +1606,13 @@ interface GraphSourceFilesResult {
 	/** Per-build file cap captured before the asynchronous walk begins. */
 	maxFileCount: number;
 	entryBudgetExceeded: boolean;
+	/** Directory entries the source walk touched (#1979); absent when not counted. */
+	entriesVisited: number | undefined;
+	/**
+	 * Wall time of the source collection (#1979): the tracked-file index prime and
+	 * ignore-config build plus the directory walk, not the walk alone.
+	 */
+	walkMs: number;
 }
 
 // Test-only override so the entry-budget propagation contract can be exercised
@@ -1642,19 +1649,24 @@ export async function getGraphSourceFiles(
 	// tree with few source files among a huge pile of non-source files can trip the
 	// entry budget first. That result is a useful partial graph, but its lower-bound
 	// count MUST travel with the graph and persistence metadata; it is never clean.
-	const { files: collected, entryBudgetExceeded } =
-		await collectProjectSourceFilesWithBudgetAsync(cwd, {
-			// Only walk graph-relevant extensions so the cap counts what the graph
-			// keeps (post-filter), not JSON/YAML/MD noise it would discard anyway.
-			extensions: MAIN_KIND_EXTENSIONS,
-			maxFiles: maxGraphFiles + 1,
-			...(_reviewGraphEntryBudgetForTests === undefined
-				? {}
-				: { maxScanEntries: _reviewGraphEntryBudgetForTests }),
-			...(_reviewGraphEntryCounterForTests === undefined
-				? {}
-				: { onEntryVisited: _reviewGraphEntryCounterForTests }),
-		});
+	const walkStartedAt = Date.now();
+	const {
+		files: collected,
+		entryBudgetExceeded,
+		entriesVisited,
+	} = await collectProjectSourceFilesWithBudgetAsync(cwd, {
+		// Only walk graph-relevant extensions so the cap counts what the graph
+		// keeps (post-filter), not JSON/YAML/MD noise it would discard anyway.
+		extensions: MAIN_KIND_EXTENSIONS,
+		maxFiles: maxGraphFiles + 1,
+		...(_reviewGraphEntryBudgetForTests === undefined
+			? {}
+			: { maxScanEntries: _reviewGraphEntryBudgetForTests }),
+		...(_reviewGraphEntryCounterForTests === undefined
+			? {}
+			: { onEntryVisited: _reviewGraphEntryCounterForTests }),
+	});
+	const walkMs = Date.now() - walkStartedAt;
 	if (entryBudgetExceeded) {
 		logLatency({
 			type: "phase",
@@ -1674,6 +1686,8 @@ export async function getGraphSourceFiles(
 			sourceFileCount: collected.length,
 			maxFileCount: maxGraphFiles,
 			entryBudgetExceeded,
+			entriesVisited,
+			walkMs,
 		};
 	}
 	const result: string[] = [];
@@ -1705,6 +1719,8 @@ export async function getGraphSourceFiles(
 		sourceFileCount: result.length,
 		maxFileCount: maxGraphFiles,
 		entryBudgetExceeded,
+		entriesVisited,
+		walkMs,
 	};
 }
 
@@ -5778,6 +5794,10 @@ async function _doBuildGraph(
 				maxFileCount: maxGraphFiles,
 				sourceFileCountLabel: `more than ${maxGraphFiles} files`,
 				sourceFileCountTruncated: true,
+				// #1979: the walk's interior, so a slow over-cap first build reads as
+				// many ms per entry (cold filesystem) or many entries (big tree).
+				entriesVisited: sourceCollection.entriesVisited,
+				walkMs: sourceCollection.walkMs,
 			},
 		});
 		if (isReviewGraphSizeNearMiss(sourceFileCount, maxGraphFiles)) {

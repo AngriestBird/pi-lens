@@ -12,7 +12,7 @@ import { normalizeEphemeralMapKey, normalizeMapKey } from "./path-utils.js";
 import { fitLine } from "./tui-fit.js";
 import { WriteOrderingGuard } from "./write-ordering-guard.js";
 import { collectForwardImportMtimes } from "./blocker-freshness.js";
-import { normalizeMessage } from "./finding-identity.js";
+import { findingIdentity } from "./finding-identity.js";
 import { freshnessFromMtime } from "./freshness.js";
 import { PAST_EOF_STALE_MARKER } from "./diagnostic-line-freshness.js";
 import { STALE_LINE_MARKER } from "./stale-marker.js";
@@ -991,13 +991,7 @@ function normalizeDiagnostics(
  * finding. That test, not this one, is what keeps the round-2 F2 case above
  * closed — the marked line's TEXT moved, so its span still matches.
  */
-function retentionIdentity(d: WidgetDiagnostic): string {
-	return JSON.stringify([
-		d.tool ?? "",
-		d.rule ?? "",
-		normalizeMessage(d.message),
-	]);
-}
+const retentionIdentity: (d: WidgetDiagnostic) => string = findingIdentity;
 
 /** `filePath`'s current content, or `undefined` when it cannot be read. */
 function readContentOrUndefined(filePath: string): string | undefined {
