@@ -7,7 +7,7 @@ import { createGenerationMap } from "../generation-guard.js";
 import { isUnderDir, normalizeMapKey } from "../path-utils.js";
 import { loadReverseDependencyIndexFromSnapshot } from "../reverse-deps.js";
 import { freshnessFromMtime } from "../freshness.js";
-import { hashFileBytes } from "../content-stamp.js";
+import { CONTENT_HASH_MAX_BYTES, hashFileBytes } from "../content-stamp.js";
 import { logLatency } from "../latency-logger.js";
 import { recordDegradationOnce } from "../degradation-ledger.js";
 import { compareOrdinal } from "../string-utils.js";
@@ -538,7 +538,11 @@ export function isEntryFresh(
 	if (ownStat.mtimeMs !== entry.mtimeMs) {
 		// #4541: current-version entries with a raw-byte stamp survive a touch;
 		// legacy entries without one retain the strict mtime contract.
-		if (entry.contentHash === undefined) return false;
+		if (
+			entry.contentHash === undefined ||
+			ownStat.size > CONTENT_HASH_MAX_BYTES
+		)
+			return false;
 		try {
 			if (hashFileBytes(filePath) !== entry.contentHash) return false;
 		} catch {

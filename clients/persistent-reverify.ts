@@ -131,7 +131,8 @@ export function selectPersistentReverifyFiles(
 			continue;
 		}
 		if (
-			freshnessFromMtime({ mtimeMs, referenceMs: stamp }).verdict === "stale"
+			freshnessFromMtime({ mtimeMs, referenceMs: stamp, toleranceMs: 0 })
+				.verdict === "stale"
 		) {
 			skippedChanged += 1;
 			continue;

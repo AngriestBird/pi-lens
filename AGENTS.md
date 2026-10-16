@@ -1050,6 +1050,10 @@ file-scoped worklist and receives no project-wide scanner output.
 - Every cache states its freshness axes, bound, eviction axis, and invalidation
   source. A bounded entry count does not excuse unbounded bytes, timers, WASM
   objects, or persisted evidence.
+- Workspace diagnostics cache mtime-drift hashing is limited by
+  `CONTENT_HASH_MAX_BYTES` in `clients/content-stamp.ts`; larger entries retain
+  strict mtime invalidation. Persistent reverify keeps zero mtime tolerance;
+  session-state restore keeps its 1 ms tolerance.
 - Tree-sitter's `queryBatchCache` is invalidated by `clearWasmInput` when a
   trapped query heals, because an in-flight batch may have cached a result that
   omitted the healed rule (#3834).

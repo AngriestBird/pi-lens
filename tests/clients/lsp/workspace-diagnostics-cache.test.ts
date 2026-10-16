@@ -31,7 +31,10 @@ import {
 import { getProjectDataDir } from "../../../clients/file-utils.js";
 import { MTIME_DRIFT_TOLERANCE_MS } from "../../../clients/blocker-freshness.js";
 import { hashDiagnosticContent } from "../../../clients/lsp/diagnostic-binding.js";
-import { hashFileBytes } from "../../../clients/content-stamp.js";
+import {
+	CONTENT_HASH_MAX_BYTES,
+	hashFileBytes,
+} from "../../../clients/content-stamp.js";
 import {
 	PROJECT_SNAPSHOT_VERSION,
 	saveProjectSnapshot,
@@ -318,6 +321,38 @@ describe("isEntryFresh (#671)", () => {
 		fs.utimesSync(filePath, new Date(touchedAt), new Date(touchedAt));
 
 		expect(isEntryFresh(filePath, entry, () => undefined)).toBe(true);
+	});
+
+	it("admits matching stamped touch exactly at the shared hash budget", () => {
+		fs.writeFileSync(filePath, Buffer.alloc(CONTENT_HASH_MAX_BYTES, 97));
+		const stat = fs.statSync(filePath);
+		const entry = makeEntry({
+			mtimeMs: stat.mtimeMs,
+			sizeBytes: stat.size,
+			contentHash: hashFileBytes(filePath),
+			scannedAt: Date.now(),
+		});
+		fs.utimesSync(filePath, 1, (stat.mtimeMs + 1000) / 1000);
+		expect(isEntryFresh(filePath, entry, () => undefined)).toBe(true);
+	});
+
+	it("rejects over-budget stamped touch without reading the file", () => {
+		fs.writeFileSync(filePath, Buffer.alloc(CONTENT_HASH_MAX_BYTES + 1, 97));
+		const original = fs.statSync(filePath);
+		const entry = makeEntry({
+			mtimeMs: original.mtimeMs,
+			sizeBytes: original.size,
+			contentHash: hashFileBytes(filePath),
+			scannedAt: Date.now(),
+		});
+		// An ancient access time makes an actual read observable under relatime.
+		fs.utimesSync(filePath, 1, (original.mtimeMs + 1000) / 1000);
+		const accessBefore = fs.statSync(filePath).atimeMs;
+		const fresh = isEntryFresh(filePath, entry, () => undefined);
+		expect(fs.statSync(filePath).atimeMs).toBe(accessBefore);
+		expect(fresh).toBe(false);
+		fs.readFileSync(filePath);
+		expect(fs.statSync(filePath).atimeMs).not.toBe(accessBefore);
 	});
 
 	it("keeps failing OPEN to mtime-only for a legacy entry with no sizeBytes field at all", () => {

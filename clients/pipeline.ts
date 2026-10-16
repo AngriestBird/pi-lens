@@ -2408,15 +2408,16 @@ async function analysePipeline(
 	// promise can yield to another writer. The blocker evidence below belongs to
 	// this analysis input, not to whatever happens to be on disk when the whole
 	// pipeline returns.
-	const inlineBlockerFileContent = fileBytes?.byteLength
-		? (() => {
-				const content = fileBytes;
-				const stamp = stampContentBytes(content, 0);
-				return stamp.sha256
-					? { size: stamp.size, sha256: stamp.sha256 }
-					: undefined;
-			})()
-		: undefined;
+	const inlineBlockerFileContent =
+		fileBytes?.byteLength && fileBytes.byteLength <= 2 * 1024 * 1024
+			? (() => {
+					const content = fileBytes;
+					const stamp = stampContentBytes(content, 0);
+					return stamp.sha256
+						? { size: stamp.size, sha256: stamp.sha256 }
+						: undefined;
+				})()
+			: undefined;
 	// #4484 round 3 (R2, R4): place the last verdict's lines in these bytes,
 	// and hand each runner the lines an earlier write owes it.
 	const anchoring = anchorToPriorAnalysis(

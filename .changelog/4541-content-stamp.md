@@ -1,6 +1,6 @@
 ---
 section: Changed
-audience: internal
+audience: user
 ---
 
-- Fold repeated content hashing and raw freshness comparisons onto shared seams.
+- **Preserve unchanged findings across file touches.** Share bounded content stamps while retaining strict report timestamps and existing pipeline byte limits (#4541).

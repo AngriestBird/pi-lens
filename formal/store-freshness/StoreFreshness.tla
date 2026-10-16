@@ -47,6 +47,8 @@ CONSTANTS
                    \* "eq":        workspace-cache own file: recorded stat must
                    \*              equal the current stat (mtime [, size])
                    \* "eqTouch": eq, allowing mtime drift only with a matching bound hash
+                   \* Touch configs model files within CONTENT_HASH_MAX_BYTES.
+                   \* Above that budget the implementation uses strict eq (no hash read).
     ForceHash,     \* "sizeMtime": skip the mtime fast path, always hash
     SizeOnly,      \* "content": compare size only (mutant: no hash tier)
     StatAt,        \* "eq": "before" or "after" the read: when the recorded stat is taken
