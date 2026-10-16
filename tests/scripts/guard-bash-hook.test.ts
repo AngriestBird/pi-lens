@@ -521,18 +521,11 @@ const ALLOW_CASES: string[] = [
 	"npm run lint ; npm run build",
 ];
 
-// Round-2 survey harness retained as a regression fixture for #2705. The
-// synthetic 2026-09-07 corpus is above; the real transcript corpus below is
+// The real transcript corpus (#2705) is
 // `tests/fixtures/guard-bash/transcript-corpus-2026-09-08.json`, extracted
 // from this project's Claude Code session transcripts on 2026-09-06..08 with
 // secrets and the maintainer's email scrubbed. The fixture is data under
 // tests/fixtures, so test-file sweeps do not walk it as executable code.
-const SURVEY_CORPUS_DATE = "2026-09-07";
-const SURVEY_CORPUS = [
-	...DENY_CASES.map(([command]) => ({ command, expected: "deny" as const })),
-	...ALLOW_CASES.map((command) => ({ command, expected: "allow" as const })),
-];
-
 const TRANSCRIPT_CORPUS = JSON.parse(
 	readFileSync(
 		join(
@@ -2648,24 +2641,6 @@ describe("scripts/hooks/guard-bash.mjs -- ambient PI_LENS_HOME (#2699)", () => {
 		});
 		expect(result.status).toBe(0);
 	});
-});
-
-describe("scripts/hooks/guard-bash.mjs -- round-2 survey corpus (#2705)", () => {
-	it.each(SURVEY_CORPUS)(
-		`keeps the ${SURVEY_CORPUS_DATE} corpus free of non-rule denies: $command`,
-		({ command, expected }) => {
-			const result = runHook(command);
-			if (expected === "allow") {
-				expect(result.status, command).toBe(0);
-				expect(result.stderr, command).toBe("");
-			} else {
-				expect(result.status, command).toBe(2);
-				expect(result.stderr.toLowerCase(), command).toMatch(
-					/stash|reset|worktree|probe|tmpdir|tmp|pkill|chained|ci-verdict|force|rebase/,
-				);
-			}
-		},
-	);
 });
 
 describe(`scripts/hooks/guard-bash.mjs -- transcript corpus ${TRANSCRIPT_CORPUS_DATE} (#2705)`, () => {
