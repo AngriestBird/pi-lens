@@ -193,6 +193,7 @@ import {
 	flushLatencyLog,
 	getLatencyLogPath,
 } from "../clients/latency-logger.js";
+import { CacheManager } from "../clients/cache-manager.js";
 import { exportWidgetState } from "../clients/widget-state.js";
 import {
 	observeRunnerLatency,
@@ -213,6 +214,11 @@ beforeAll(() => {
 afterAll(() => removeTempDirSync(tmpDir));
 beforeEach(() => {
 	process.env.PI_LENS_TEST_MODE = "0";
+	// Each cell is a separate session but shares this temporary project. A
+	// blocker intentionally left by one cell must not become the next cell's
+	// cross-session `turn-end-findings` record and make its commit probe fail
+	// closed; production keeps that record until fresh evidence replaces it.
+	new CacheManager(false).clearCache("turn-end-findings", tmpDir);
 	boundary.lsp.enabled = false;
 	boundary.sh.runs = [];
 	boundary.sh.onRun = undefined;
@@ -391,6 +397,14 @@ async function openSession(
 		},
 		async end(): Promise<void> {
 			await pi.emit("turn_end", {}, ctx());
+			// Cells are independent host sessions. Shut this one down so a cell
+			// that intentionally leaves a blocker cannot keep the shared runtime's
+			// commit-gate latch armed for the next shuffled cell.
+			await pi.emit(
+				"session_shutdown",
+				{ type: "session_shutdown", reason: "quit" },
+				ctx(),
+			);
 		},
 	};
 }
