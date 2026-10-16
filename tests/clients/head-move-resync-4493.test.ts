@@ -1081,4 +1081,27 @@ describe("opaque recovery from a subdirectory (#4493 residual 3)", () => {
 
 		expect(outcome.paths).toEqual([normalizeMapKey(repo.file("sub/x.ts"))]);
 	}, 30_000);
+
+	// Recurrence: a linked worktree's `.git` is a file, not a directory with a
+	// HEAD; a path base that read only the directory form put every linked
+	// worktree back on the cwd and dropped its subdirectory paths again.
+	it("recovers a dirty path when the cwd is a subdirectory of a linked worktree", async () => {
+		const repo = await makeRepo(
+			{ "sub/x.ts": "export const x = 0;\n" },
+			{ "sub/x.ts": "export const x = 1;\n" },
+		);
+		const linked = `${repo.dir}-linked`;
+		repo.git("worktree", "add", "-q", linked, "B");
+		const startedAt = Date.now();
+		fs.writeFileSync(path.join(linked, "sub/x.ts"), "export const x = 2;\n");
+
+		const outcome = await recoverOpaqueChangesViaGit(
+			path.join(linked, "sub"),
+			startedAt,
+		);
+
+		expect(outcome.paths).toEqual([
+			normalizeMapKey(path.join(linked, "sub/x.ts")),
+		]);
+	}, 30_000);
 });

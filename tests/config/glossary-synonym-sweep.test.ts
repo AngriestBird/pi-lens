@@ -1038,7 +1038,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/observed-mutation.ts": 6,
 		// 6 -> 7 (#4493): listGitHeadDelta resolves git's relative names with
 		// the OS `path` namespace; the keys still go through normalizeMapKey.
-		"clients/opaque-mutation-scan.ts": 7,
+		// 7 -> 9 (#4493 r2): gitPathBase joins the `.git` entry and its HEAD
+		// with the same namespace to check the walk found a repository.
+		"clients/opaque-mutation-scan.ts": 9,
 		"clients/opengrep-client.ts": 8,
 		"clients/opengrep-config.ts": 3,
 		"clients/package-manager.ts": 21,
