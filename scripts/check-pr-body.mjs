@@ -1689,7 +1689,14 @@ export const DETECTION_LAYERS = Object.freeze([
 	"governance sweep",
 	// #4490: CodeQL code scanning caught a defect no other layer names.
 	"static analysis",
+	// #4519: the retro (2026-10-16) found 43 TLA+ catches and no word for them,
+	// nor for mutation, the pre-push hook or the type/lint gate.
+	"TLA+",
+	"mutation",
+	"pre-push",
+	"lint/type check",
 	"smoke",
+	// `nightly` may carry its workflow as `nightly:<workflow>` (#4519).
 	"nightly",
 	"dogfood",
 	"release gate",
@@ -1697,9 +1704,17 @@ export const DETECTION_LAYERS = Object.freeze([
 const DETECTION_LAYER_SET = new Set(
 	DETECTION_LAYERS.map((layer) => layer.toLowerCase()),
 );
+// `nightly:<workflow>` is a layer word too; the workflow is a file stem or name.
+const NIGHTLY_WORKFLOW_LAYER = /^nightly:\s*[a-z0-9][a-z0-9._-]*$/;
+const isDetectionLayer = (normalized) =>
+	DETECTION_LAYER_SET.has(normalized) ||
+	NIGHTLY_WORKFLOW_LAYER.test(normalized);
 // "This layer caught it in time" is a valid detection lesson (issue #4288,
 // "Valid verdicts"): the gate must not demand new tests for every bug.
-const DETECTION_SHOULD_SET = new Set([...DETECTION_LAYER_SET, "this layer"]);
+const isDetectionShouldLayer = (normalized) =>
+	normalized === "this layer" || isDetectionLayer(normalized);
+
+const DETECTION_LAYER_HINT = `Layers: ${DETECTION_LAYERS.join(", ")}; "nightly:<workflow>" names the workflow. See ${TEMPLATE_PATH}.`;
 
 export const DETECTION_MESSAGE =
 	'PR body "## Detection" must state the bug-detection lesson in five lines: ' +
@@ -1707,7 +1722,13 @@ export const DETECTION_MESSAGE =
 	'"Gap: <issue ref> | exists: <path of a test already on master> | none: <reason>", ' +
 	'"Shape: #N (an AGENTS.md Recurring defect shapes number) | new: <name>", ' +
 	'and "Enforcer: <tree-wide test path on master> | #N (an issue to build one) | none: judgment-only, <reason>". ' +
-	`Layers: ${DETECTION_LAYERS.join(", ")}. See ${TEMPLATE_PATH}.`;
+	DETECTION_LAYER_HINT;
+
+// #4519: the retro read 139 of 363 closed bugs as "unknown". A bug-closing PR
+// owes a layer word and a reason; "unknown", "n/a", "tbd" and "?" are neither.
+export const DETECTION_UNKNOWN_MESSAGE =
+	'PR body "## Detection" answers "unknown", "n/a", "tbd" or "?" (or a reason that starts with "unknown"), which is not a detection lesson: a bug-closing PR names the layer that caught the bug (and the layer that should have), a real reason after "Gap: none:", the shape name, and the enforcer reason. ' +
+	DETECTION_LAYER_HINT;
 
 // A field value is found by its line prefix, never a sentence mention: a
 // prose line that merely contains "caught by" is not the field. Leading list
@@ -1733,6 +1754,13 @@ function normalizeDetectionLayer(value) {
 		.replace(/\s+/g, " ")
 		.trim()
 		.toLowerCase();
+}
+
+// A placeholder answer: "unknown" opening the text, or a bare "n/a", "tbd" or
+// "?". Only free-text answers of a bug-closing PR are screened (#4519).
+function isPlaceholderAnswer(value) {
+	const text = normalizeDetectionLayer(value);
+	return /^unknown\b/.test(text) || /^(?:n\/a|tbd|\?+)$/.test(text);
 }
 
 // `Gap:` names a follow-up issue, an existing test that now covers the bug, or
@@ -1806,15 +1834,21 @@ function isDetectionTestPath(testPath) {
 	);
 }
 
+// The reason after `none:` in a `Gap:` value, or null when it is not a `none:`.
+function noneReason(value) {
+	const none = /^none\s*:\s*(.+)$/i.exec(String(value ?? "").trim());
+	return none ? none[1] : null;
+}
+
 function validDetectionGap(value) {
 	const text = String(value ?? "").trim();
 	if (/(?:^|\s|[(])#\d+\b/.test(text)) return true;
 	const testPath = existsGapPath(text);
 	if (testPath !== null) return isDetectionTestPath(testPath);
-	const none = /^none\s*:\s*(.+)$/i.exec(text);
+	const reason = noneReason(text);
 	// A one-word reason ("none: oversight") is legitimate; the shape only
 	// requires a reason to be present (#4288 R5).
-	if (none) return wordCount(none[1]) >= 1;
+	if (reason !== null) return wordCount(reason) >= 1;
 	return false;
 }
 
@@ -1854,7 +1888,8 @@ function detectionEnforcer(value) {
 	const none = /^none\s*:\s*(?:judgment|judgement)-only\s*,\s*(.+)$/i.exec(
 		text,
 	);
-	if (none) return wordCount(none[1]) >= 3 ? { none: true } : null;
+	if (none)
+		return wordCount(none[1]) >= 3 ? { none: true, reason: none[1] } : null;
 	const path = /^\S+/.exec(text)?.[0].replace(/[.,;]+$/, "");
 	return path && isDetectionTestPath(path) ? { path } : null;
 }
@@ -1874,6 +1909,12 @@ function lintShapeAndEnforcer(content, options) {
 	const shape = detectionShape(detectionFieldValue(content, "shape"));
 	const enforcer = detectionEnforcer(detectionFieldValue(content, "enforcer"));
 	if (!shape || !enforcer) return [DETECTION_MESSAGE];
+	// #4519: the free text of the record, on the bug-closing seam only.
+	if (
+		options.requireShape &&
+		[shape.name, enforcer.reason].some(isPlaceholderAnswer)
+	)
+		return [DETECTION_UNKNOWN_MESSAGE];
 	let catalog;
 	if (
 		shape.number !== undefined &&
@@ -1979,14 +2020,18 @@ export function lintDetectionSection(body = "", options = {}) {
 	const caughtBy = detectionFieldValue(content, "caught by");
 	const shouldBy = detectionFieldValue(content, "should have been caught by");
 	const gap = detectionFieldValue(content, "gap");
+	// #4519: only the bug-closing seam (`requireShape`) names "unknown"; a
+	// non-bug section that says it stays on the generic refusal below.
 	if (
-		caughtBy === null ||
-		!DETECTION_LAYER_SET.has(normalizeDetectionLayer(caughtBy))
+		options.requireShape &&
+		[caughtBy, shouldBy, noneReason(gap)].some(isPlaceholderAnswer)
 	)
+		return [DETECTION_UNKNOWN_MESSAGE];
+	if (caughtBy === null || !isDetectionLayer(normalizeDetectionLayer(caughtBy)))
 		return [DETECTION_MESSAGE];
 	if (
 		shouldBy === null ||
-		!DETECTION_SHOULD_SET.has(normalizeDetectionLayer(shouldBy))
+		!isDetectionShouldLayer(normalizeDetectionLayer(shouldBy))
 	)
 		return [DETECTION_MESSAGE];
 	if (gap === null || !validDetectionGap(gap)) return [DETECTION_MESSAGE];

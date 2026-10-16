@@ -137,9 +137,11 @@ async function readNewDiagnosticRows(
 	await getDiagnosticLogger().flush();
 	const file = diagnosticLogPath();
 	if (!fs.existsSync(file)) return [];
+	// `offset` is a byte count: slice the bytes, then decode (#4484 review F3).
 	return fs
-		.readFileSync(file, "utf8")
-		.slice(offset)
+		.readFileSync(file)
+		.subarray(offset)
+		.toString("utf8")
 		.trim()
 		.split("\n")
 		.filter(Boolean)

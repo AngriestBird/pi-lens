@@ -68,7 +68,7 @@ exports change.
 
 ## Evidence
 
-- Use `scripts/mutate.mjs` for bounded hand mutations; it restores the target automatically, but only while the file still holds the mutated bytes. A leftover journal (`<file>.mutate-backup`) blocks the next run on that file; recover with `--restore`, which refuses and prints the three hashes when the file was edited since. If a crash left the file already at its original bytes, `--restore` also refuses; check the printed hashes and delete the journal by hand. `--restore` is crash recovery only: run against a live `mutate.mjs` run on the same file, it pulls that run's mutation, and that run then reports ERROR (exit 4).
+- Use `scripts/mutate.mjs` for bounded hand mutations; it restores the target automatically, but only while the file still holds the mutated bytes. A leftover journal (`<file>.mutate-backup`) blocks the next run on that file; recover with `--restore`, which refuses and prints the three hashes when the file was edited since. If a crash left the file already at its original bytes, `--restore` also refuses; check the printed hashes and delete the journal by hand. `--restore` is crash recovery only: run against a live `mutate.mjs` run on the same file, it pulls that run's mutation, and that run then reports ERROR (exit 4). The transcript's status line is `SURVIVED` (tests passed), `RED` (a test run failed), `REFUSED` (the edit was not applied), `BROKEN` (the build failed) or `ERROR` (no verdict); only `RED` proves a test catches the mutation (#4510).
 
 - Witness rule (ADR 0007): #1605 owns the witness lanes, and their fixtures
   live under `tests/fixtures/witness/<slice>/`.
@@ -198,8 +198,11 @@ rigor (#2599).
   was skipped means gh failed, so the section was not required, not that it
   passed (#4288). A non-bug PR either deletes the `## Detection` section or
   fills the three lines, and a `Shape:` or `Enforcer:` line it does write is
-  validated too; free text in between reds the local preflight. A red
-  `PR body (advisory)` check is a fix-before-review item.
+  validated too; free text in between reds the local preflight. A bug-closing
+  PR that answers a layer, the `Gap: none:` reason, the `Shape: new:` name or
+  the `Enforcer: none:` reason with `unknown`, `n/a`, `tbd` or `?` is refused
+  (#4519); the layer words are `DETECTION_LAYERS`, `nightly:<workflow>`
+  included. A red `PR body (advisory)` check is a fix-before-review item.
   A changelog fragment is `---` /
   `section: <Added|Changed|Deprecated|Removed|Fixed|Security>` /
   `audience: <user|internal>` / `---` / blank / one `- ` bullet. New

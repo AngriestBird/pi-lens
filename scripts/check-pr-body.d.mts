@@ -45,6 +45,7 @@ export declare function lintClassSweep(
 ): string[];
 export declare const DETECTION_LAYERS: readonly string[];
 export declare const DETECTION_MESSAGE: string;
+export declare const DETECTION_UNKNOWN_MESSAGE: string;
 export declare function lintDetectionSection(
 	body?: string,
 	options?: {
