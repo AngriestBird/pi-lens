@@ -346,13 +346,6 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"bounded() races the touch against a live wall budget; fake timers settle the bound instantly and the budget semantics are unmeasurable",
 	},
-	// 2026-10-16 (#4510): the worker-fork witness polls a pid file and a pid's
-	// liveness; only a real clock sees a process die.
-	"raw-timer-wait:scripts/mutate.test.ts": {
-		detector: "raw-timer-wait",
-		reason:
-			"polls a real pid file and a real pid's liveness after a signal to the mutation CLI; fake timers cannot observe a process exiting",
-	},
 	// 2026-09-15 (#2042 cheapest probe): the sample-tail file is written by the
 	// wrapper's own real setInterval loop in a separate process; a poll waits
 	// for that file's first write rather than a fixed sleep, and one case kills

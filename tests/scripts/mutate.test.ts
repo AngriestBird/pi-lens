@@ -1,4 +1,3 @@
-// flake-shape: raw-timer-wait — the worker-fork witness polls a pid file and a pid's liveness in the real OS; fake timers cannot observe a process.
 // flake-shape: real-process-spawn — the mutation CLI's child Vitest process and SIGINT restoration are the process boundary under test.
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -13,6 +12,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { expect, it, vi } from "vitest";
+import { waitFor } from "../clients/interleaving-kit.js";
+import { isProcessAlive } from "../support/process-tree.js";
 
 // Every case spawns a real Vitest child; a shared CI runner needs more than the
 // 5 s default (the round-2 orphan-journal test timed out there).
@@ -485,15 +486,6 @@ it("prints ERROR, not RED, when vitest is killed from outside after a summary li
 	expect(digest()).toBe(before);
 });
 
-/** True once `done()` holds, polling every 100 ms for at most `tries` polls. */
-async function pollUntil(done: () => boolean, tries: number) {
-	for (let at = 0; at < tries; at += 1) {
-		if (done()) return true;
-		await new Promise((resolve) => setTimeout(resolve, 100));
-	}
-	return done();
-}
-
 // Recurrence (#4510 review F2): a signal SIGKILLed only the vitest launcher and
 // its worker fork ran on until its test ended (two 99% CPU orphans, 4 h).
 it.each(["SIGINT", "SIGTERM", "SIGHUP"] as const)(
@@ -527,20 +519,20 @@ it.each(["SIGINT", "SIGTERM", "SIGHUP"] as const)(
 		);
 		const closed = new Promise((resolve) => child.once("close", resolve));
 		try {
-			expect(await pollUntil(() => existsSync(pidFile), 600)).toBe(true);
+			await waitFor(
+				() => existsSync(pidFile),
+				(found) => found,
+				{ timeoutMs: 60_000, intervalMs: 100 },
+			);
 			const worker = Number(readFileSync(pidFile, "utf8"));
 			expect(worker).toBeGreaterThan(0);
 			child.kill(signal);
 			await closed;
-			const gone = await pollUntil(() => {
-				try {
-					process.kill(worker, 0);
-					return false;
-				} catch {
-					return true;
-				}
-			}, 50);
-			expect(gone).toBe(true);
+			await waitFor(
+				() => isProcessAlive(worker),
+				(alive) => !alive,
+				{ timeoutMs: 5_000, intervalMs: 100 },
+			);
 			expect(digest()).toBe(before);
 		} finally {
 			child.kill("SIGKILL");

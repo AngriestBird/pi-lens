@@ -4,6 +4,10 @@
  *
  * The file is deliberately a small process boundary: callers can use it from
  * a shell or a test without importing the test runner or the project build.
+ *
+ * Vitest runs in its own process group, so SIGINT, SIGTERM and SIGHUP to this
+ * process kill that whole group, but a group SIGKILL of this process
+ * (`kill -KILL -<pgid>`) does not reach vitest (#4510).
  */
 import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
