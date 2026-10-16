@@ -773,6 +773,49 @@ describe("#4483 witness: a linter blocks on the delta at a file's first write", 
 		await s.end();
 	});
 
+	it("discards a late completion after the first-write capture signal aborts", async () => {
+		// #4543 recurrence: `if (captureSignal.aborted)` -> `if (false)` survived
+		// because the abandonment witness only proved that the caller stopped
+		// waiting; it did not let a signal-ignoring runner complete and inspect
+		// the real store after that completion.
+		const s = await openSession(
+			"late-abort-r3",
+			"scripts/late-abort-r3.sh",
+			OLD_ERROR,
+		);
+		const controller = new AbortController();
+		let release!: () => void;
+		let entered!: () => void;
+		const started = new Promise<void>((resolve) => {
+			entered = resolve;
+		});
+		boundary.sh.settle = () =>
+			new Promise<void>((resolve) => {
+				release = resolve;
+				entered();
+			});
+
+		const capture = capturePreEditLinterFindings(
+			s.target,
+			tmpDir,
+			{ getFlag: () => undefined },
+			{ isCurrent: () => true },
+			controller.signal,
+		);
+		await started;
+		controller.abort();
+		release();
+		expect(await capture).toEqual({ outcome: "discarded", reason: "aborted" });
+
+		// Observe the production FactStore through dispatch: an installed seed
+		// would turn this old blocker into pre-existing and leave no blocker.
+		const result = await dispatchLintWithResult(s.target, tmpDir, {
+			getFlag: () => undefined,
+		});
+		expect(result.blockers).toHaveLength(1);
+		await s.end();
+	});
+
 	it("session reset cancels held captures before their unchanged bytes can seed", async () => {
 		// #4543: clearing the facts alone let old work install into the new session.
 		const s = await openSession("reset-r2", "scripts/reset-r2.sh", OLD_ERROR);
