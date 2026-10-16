@@ -317,6 +317,21 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			reason:
 				"the native addon's load is the host boundary; its sync loader is the only seam to make it fail",
 		},
+	// 2026-10-16 (#4515): the fixture proves a trust-refused project-local
+	// candidate no longer ends the launch. The refusal is the real launchLSP;
+	// only the managed binary's launch and the tool install are doubled.
+	"in-process-mock:clients/lsp/managed-fallback-after-trust-refusal-4515.test.ts::clients/installer/index":
+		{
+			detector: "in-process-mock",
+			reason:
+				"tool installation is the host boundary (npm); the stub hands resolveAndLaunch the managed binary path it would have installed",
+		},
+	"in-process-mock:clients/lsp/managed-fallback-after-trust-refusal-4515.test.ts::clients/lsp/launch":
+		{
+			detector: "in-process-mock",
+			reason:
+				"spawning the managed language server is the process boundary; the wrapper delegates every other command, the refused project-local candidate included, to the real launchLSP",
+		},
 	"never-settling-wait:scripts/mutate-fixture.test.ts": {
 		detector: "never-settling-wait",
 		reason:

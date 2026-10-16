@@ -1,3 +1,4 @@
+// flake-shape: in-process-mock — #4515: the managed binary launch and the tool install are the host boundary (spawning a language server, running npm); every other step, including the trust refusal of the project-local candidate, runs through the real launchLSP and resolveAndLaunch
 /**
  * #4515: under project trust "unknown" (or "untrusted"), `launchLSP` refuses the
  * project-local candidate `<root>/node_modules/.bin/<cmd>` by path shape, and
