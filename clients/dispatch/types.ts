@@ -210,6 +210,11 @@ export interface DispatchResult {
 	 * keeps a recorded blocker of the same identity pending. Absent when none.
 	 */
 	stillObserved?: Diagnostic[];
+	/**
+	 * #4484 round 6: runners whose verdict covers only the edit's ranges
+	 * (`RunnerResult.editScopedVerdict`). Absent when none.
+	 */
+	editScopedRunnerIds?: string[];
 	/** #4484 round 2: the runners and servers that reached no verdict. */
 	inconclusiveSources?: InconclusiveSources;
 	/**
@@ -321,6 +326,13 @@ export interface RunnerResult {
 	 * the rest of that set has no delivery path and reads as silent.
 	 */
 	deferredServerIds?: readonly string[];
+	/**
+	 * #4484 round 6: the verdict covers only the edit's ranges. napi's Gate B
+	 * skip sets it: the ast-grep server answers for the file, but its gate
+	 * withholds a blocking finding outside the edit (`outOfEditScope`) under
+	 * another identity, so it says nothing about napi's findings there.
+	 */
+	editScopedVerdict?: boolean;
 	/**
 	 * #4403: why no primary language server answered, when the runner knows:
 	 * the operator disabled it, it could not be started (or was still

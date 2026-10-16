@@ -73,10 +73,11 @@ import {
 	resolveToolCommandWithInstallFallback,
 } from "./dispatch/runners/utils/runner-helpers.js";
 import { findDetektConfig } from "./dispatch/runners/detekt.js";
-import type {
-	Diagnostic,
-	InconclusiveSources,
-	PiAgentAPI,
+import {
+	type Diagnostic,
+	type InconclusiveSources,
+	type PiAgentAPI,
+	spanOverlapsModifiedRanges,
 } from "./dispatch/types.js";
 import {
 	formatDiagnostics,
@@ -1903,19 +1904,34 @@ function buildEnrichedBlockerOutput(
  * observed copies matched this way are returned as `matched`. One matched only
  * by `stillObserved` stays as its observed copy. One no finding matches stays,
  * at its position when it has one, only when its runner or server reached no
- * verdict; that carry is counted per file.
+ * verdict; that carry is counted per file. Round 6: a runner whose verdict
+ * covers only the edit (`editScopedRunnerIds`) answers only for a blocker
+ * inside it: its line was edited or deleted, or its line now lies in
+ * `editRanges`. One outside, or unplaced, stays as for no verdict.
  */
 function carryRecordedBlockers(
 	prior: readonly Diagnostic[],
 	observed: readonly Diagnostic[],
-	dispatchResult: Pick<DispatchResult, "stillObserved" | "inconclusiveSources">,
+	dispatchResult: Pick<
+		DispatchResult,
+		"stillObserved" | "inconclusiveSources" | "editScopedRunnerIds"
+	>,
 	filePath: string,
 	positionOf: (d: Diagnostic) => number | undefined | typeof ANY_POSITION,
 	matchesAnywhere: (prior: Diagnostic, observed: Diagnostic) => boolean,
+	editRanges: readonly { start: number; end: number }[] | undefined,
 ): { carried: Diagnostic[]; matched: ReadonlySet<Diagnostic> } {
 	if (prior.length === 0) return { carried: [], matched: new Set() };
 	const runnerIds = new Set(dispatchResult.inconclusiveSources?.runnerIds);
 	const serverIds = new Set(dispatchResult.inconclusiveSources?.serverIds);
+	const editScoped = new Set(dispatchResult.editScopedRunnerIds);
+	const insideEdit = (d: Diagnostic) => {
+		const at = d.line === undefined ? ANY_POSITION : positionOf(d);
+		return (
+			at === undefined ||
+			(typeof at === "number" && spanOverlapsModifiedRanges(at, at, editRanges))
+		);
+	};
 	const observedNow = new Set(observed);
 	const recorded = new Set(prior);
 	const { kept } = retainRecordedFindings(
@@ -1926,7 +1942,10 @@ function carryRecordedBlockers(
 			matchesAnywhere,
 			keepUnobserved: (d) =>
 				(d.runnerId !== undefined && runnerIds.has(d.runnerId)) ||
-				(d.serverId !== undefined && serverIds.has(d.serverId)),
+				(d.serverId !== undefined && serverIds.has(d.serverId)) ||
+				(d.runnerId !== undefined &&
+					editScoped.has(d.runnerId) &&
+					!insideEdit(d)),
 		},
 	);
 	const matched = new Set(kept.flatMap((d) => (observedNow.has(d) ? [d] : [])));
@@ -2067,11 +2086,13 @@ function anchorToPriorAnalysis(
 			sources: InconclusiveSources | undefined,
 			modifiedRanges: { start: number; end: number }[] | undefined,
 			delivers: boolean,
+			editScoped: readonly string[] | undefined,
 		): AnalysisAnchor | undefined {
 			const lineHashes = currentHashes();
 			const owedRanges = owedRangesAfterDispatch({
 				delivers,
 				noVerdict: sources?.runnerIds ?? [],
+				editScoped,
 				collectLater: sources?.collectLaterRunnerIds ?? [],
 				modifiedRanges,
 				owed,
@@ -2438,6 +2459,7 @@ async function analysePipeline(
 					? d.line
 					: anchoring.positionOf({ line: d.line, lineHash: d.lineHash }),
 			anchoring.matchesAnywhere,
+			ctx.modifiedRanges,
 		);
 	// #4484 round 3 (F4): a held-back blocker no recorded blocker matched was
 	// never delivered (a new error that took a fixed one's line-bound id), so
@@ -2814,6 +2836,7 @@ async function analysePipeline(
 			dispatchResult.inconclusiveSources,
 			ctx.modifiedRanges,
 			allowAutonomousWriters,
+			dispatchResult.editScopedRunnerIds,
 		),
 		// #3246: the very array `blockerOutput` above was rendered from, so the
 		// turn-end policy filter and its re-render can never disagree with the

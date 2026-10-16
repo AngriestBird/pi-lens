@@ -1412,11 +1412,16 @@ const astGrepNapiRunner: RunnerDefinition = {
 			// napi's recorded blockers after they are fixed. Round 5: only when
 			// no earlier touch's coverage is pending. Then the server is silent
 			// for these bytes, nothing read them, and the skip is no verdict.
+			// Round 6: with a ranged dispatch the server's gate withholds what
+			// lies outside the edit, so the verdict covers only the edit.
 			return {
 				status: "skipped",
 				diagnostics: [],
 				semantic: "none",
 				...(coveragePending ? {} : { skipReason: "covered-by-primary" }),
+				...(ctx.blockingOnly && ctx.modifiedRanges?.length
+					? { editScopedVerdict: true }
+					: {}),
 			};
 		}
 

@@ -41,15 +41,34 @@ import {
 } from "vitest";
 
 const boundary = vi.hoisted(() => {
+	/** Round 6 (P27): the ast-grep auxiliary server. Once `published`, napi's
+	 *  Gate B skips; with `diag`, the server reports `no-unknown-returns` on
+	 *  each `): unknown {` line, as its catalog would. */
+	const ag = { published: false, diag: false };
 	const lsp = {
 		/** The fake language server: error 2304 on each `BAD_CALL` line, and
 		 *  warning 6133 on each `unusedVar` line (round 2, row 16). */
 		diagnose: (content: string): unknown[] =>
-			content.split("\n").flatMap((line, i) => {
+			content.split("\n").flatMap((line, i): unknown[] => {
 				const range = {
 					start: { line: i, character: 0 },
 					end: { line: i, character: 8 },
 				};
+				if (ag.diag && line.includes("): unknown {"))
+					return [
+						{
+							severity: 1,
+							message:
+								"Function returns 'unknown' — parse the value at its boundary and return a named domain type",
+							code: "no-unknown-returns",
+							source: "ast-grep",
+							serverId: "ast-grep",
+							range: {
+								start: { line: i, character: 0 },
+								end: { line: i, character: 10 },
+							},
+						},
+					];
 				if (line.includes("BAD_CALL"))
 					return [
 						{
@@ -177,7 +196,7 @@ const boundary = vi.hoisted(() => {
 			status: 0,
 		};
 	}
-	return { lsp, helm, isHelm, run };
+	return { lsp, helm, isHelm, run, ag };
 });
 
 vi.mock("../clients/safe-spawn.js", async (importOriginal) => ({
@@ -204,6 +223,8 @@ vi.mock("../clients/lsp/capabilities.js", async (importOriginal) => {
 	});
 	return {
 		...original,
+		hasAuxiliaryLspPublishedForRoot: async (serverId: string) =>
+			serverId === "ast-grep" && boundary.ag.published,
 		getLSPService: () =>
 			boundary.lsp.enabled
 				? (double as unknown as ReturnType<typeof original.getLSPService>)
@@ -248,6 +269,8 @@ beforeEach(() => {
 	boundary.lsp.mode = "answer";
 	boundary.helm.stdout = "";
 	boundary.helm.lintCalls = 0;
+	boundary.ag.published = false;
+	boundary.ag.diag = false;
 });
 afterEach(async () => {
 	// A cell that failed before its own fix still leaves no record, gate
@@ -258,6 +281,8 @@ afterEach(async () => {
 	for (const release of boundary.lsp.held.splice(0)) release();
 	resetObservedRunnerLatency();
 	if (cleanup) await cleanup().catch(() => {});
+	boundary.ag.published = false;
+	boundary.ag.diag = false;
 	resetPendingRunnerFindings();
 	if (originalTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
 	else process.env.PI_LENS_TEST_MODE = originalTestMode;
@@ -1279,4 +1304,130 @@ describe("#4484 witness, round 5: a fallback holds only what its evidence names"
 		await s.endTurn();
 		pendingCleanup = undefined;
 	}, 120_000);
+});
+
+describe("#4484 witness, round 6: Gate B answers only for what its server sees", () => {
+	const AG_PRE = [
+		'export const CLIENT_VERSION = "1.0.50";',
+		"export const plain = CLIENT_VERSION;",
+		"export function dig(obj: Record<string, string>, key: string): unknown {",
+		"\treturn obj[key];",
+		"}",
+		"",
+	].join("\n");
+	const AG_FIXED = AG_PRE.replace("): unknown {", "): string {");
+	const AG_TWO = `${AG_PRE}export function dig2(obj: Record<string, string>, key: string): unknown {\n\treturn obj[key];\n}\n`;
+	const AG_TWO_FIXED = AG_TWO.replaceAll("): unknown {", "): string {");
+	// The ast-grep server publishes from here on, so napi takes Gate B.
+	const serverCovers = () => {
+		boundary.ag.published = true;
+		boundary.ag.diag = true;
+	};
+
+	// Recurrence (N1, verify probe P27): napi recorded a blocker before the
+	// ast-grep server first published. An edit elsewhere made napi skip as
+	// covered by the server, which counted as a verdict, but the server's gate
+	// withholds an out-of-span copy, and its copy has another identity. The
+	// write said `✓ clean`, opened the gate and reported the blocker resolved
+	// while it was still on disk.
+	it("keeps a napi blocker recorded before the ast-grep server publishes after an edit elsewhere (row 17, P27)", async () => {
+		boundary.lsp.enabled = true;
+		const s = await openSession("p27", "src/p27.ts", AG_FIXED);
+		await s.write(AG_FIXED);
+		expect(await s.edit(AG_PRE, [3])).toContain("🔴 STOP");
+		serverCovers();
+		const w2 = await s.edit(
+			AG_PRE.replace("CLIENT_VERSION;", "CLIENT_VERSION; // x"),
+			[2],
+		);
+		expect(w2).not.toMatch(/✓ .*clean/);
+		expect(w2).toMatch(/Still unfixed: 1 blocker reported earlier \(L3\)/);
+		expect(await s.commitBlocked()).toBe(true);
+		const turnEnd = await s.endTurn();
+		expect(turnEnd).toContain("STOP");
+		expect(turnEnd).not.toContain("Resolved this turn");
+		await fixAndDrain(s);
+	}, 180_000);
+
+	// Recurrence (the attack on a bare Gate B skip while a napi blocker is
+	// recorded): napi never answers while the server covers the file, so the
+	// fix on the blocker's own line would never retire it, and the gate would
+	// stay shut for the session.
+	it("retires a napi blocker fixed on its own line while the ast-grep server covers the file (row 18)", async () => {
+		boundary.lsp.enabled = true;
+		const s = await openSession("gbfix", "src/gate-b-fix.ts", AG_FIXED);
+		await s.write(AG_FIXED);
+		expect(await s.edit(AG_PRE, [3])).toContain("🔴 STOP");
+		serverCovers();
+		const w2 = await s.edit(AG_FIXED, [3]);
+		expect(w2).not.toMatch(/Still unfixed/);
+		expect(w2).not.toContain("STOP");
+		expect(await s.commitBlocked()).toBe(false);
+		expect(await s.endTurn()).not.toContain("STOP");
+		pendingCleanup = undefined;
+	}, 180_000);
+
+	// Recurrence (the keep's range bound): an edit whose range covers a napi
+	// blocker's unchanged line lets the server see it, so its copy blocks.
+	// Keeping napi's entry too would list the one finding twice.
+	it("lists a napi blocker once when the edit names its unchanged line under Gate B (row 18b)", async () => {
+		boundary.lsp.enabled = true;
+		const s = await openSession("gbsame", "src/gate-b-same.ts", AG_FIXED);
+		await s.write(AG_FIXED);
+		expect(await s.edit(AG_PRE, [3])).toContain("🔴 STOP");
+		serverCovers();
+		const w2 = await s.edit(
+			AG_PRE.replace("CLIENT_VERSION;", "CLIENT_VERSION; // x"),
+			[2, 3],
+		);
+		expect(w2).toContain("🔴 STOP");
+		expect(w2).not.toMatch(/Still unfixed/);
+		expect(await s.commitBlocked()).toBe(true);
+		await fixAndDrain(s);
+	}, 180_000);
+
+	// Recurrence (row 23): Gate B's verdict discharged the lines napi owed
+	// from a skip, so once the server stopped covering the file napi's next
+	// run read only the edit, and the blocker written during the skip never
+	// blocked.
+	it("keeps napi owed the lines it skipped across Gate B until it runs again (row 23)", async () => {
+		boundary.lsp.enabled = true;
+		const OVER_CAP = `// ${"x".repeat(1_100_000)}`;
+		const s = await openSession("gbowed", "src/gate-b-owed.ts", AG_FIXED);
+		await s.write(`${AG_FIXED}${OVER_CAP}\n`);
+		// Past napi's size cap: it skips without reading and owes line 3.
+		const w1 = await s.edit(`${AG_PRE}${OVER_CAP}\n`, [3]);
+		expect(w1).not.toContain("no-unknown-returns");
+		serverCovers();
+		boundary.ag.diag = false;
+		await s.edit(
+			`${AG_PRE.replace("CLIENT_VERSION;", "CLIENT_VERSION; // x")}${OVER_CAP}\n`,
+			[2],
+		);
+		// The server stops covering the file; napi runs on the next edit.
+		boundary.ag.published = false;
+		const w3 = await s.edit(
+			AG_PRE.replace("CLIENT_VERSION;", "CLIENT_VERSION; // y"),
+			[2, 7],
+		);
+		expect(w3).toContain("🔴 STOP");
+		expect(w3).toContain("L3:");
+		await fixAndDrain(s);
+	}, 180_000);
+
+	// Recurrence (N1 per entry): one write fixed a napi blocker inside the
+	// edit and left another outside it. Gate B's skip retired both; a
+	// runner-wide bare skip would keep both, and the fixed one, its text
+	// gone, could never be placed again.
+	it("retires the fixed napi blocker and keeps the one outside the edit under Gate B (row 19)", async () => {
+		boundary.lsp.enabled = true;
+		const s = await openSession("gbtwo", "src/gate-b-two.ts", AG_TWO_FIXED);
+		await s.write(AG_TWO_FIXED);
+		expect(await s.edit(AG_TWO, [3, 6])).toContain("🔴 STOP — 2 issue(s)");
+		serverCovers();
+		const w2 = await s.edit(AG_TWO.replace("): unknown {", "): string {"), [3]);
+		expect(w2).toMatch(/Still unfixed: 1 blocker reported earlier \(L6\)/);
+		expect(await s.commitBlocked()).toBe(true);
+		await fixAndDrain(s);
+	}, 180_000);
 });

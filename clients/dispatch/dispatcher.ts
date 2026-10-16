@@ -940,6 +940,8 @@ interface GroupResult {
 	inconclusiveServerIds: string[];
 	/** #4484 round 3: the inconclusive runners still in flight (collect-later). */
 	collectLaterRunnerIds: string[];
+	/** #4484 round 6: runners whose verdict covers only the edit's ranges. */
+	editScopedRunnerIds: string[];
 }
 
 /**
@@ -986,6 +988,7 @@ async function runGroup(
 	const inconclusiveRunnerIds: string[] = [];
 	const inconclusiveServerIds: string[] = [];
 	const collectLaterRunnerIds: string[] = [];
+	const editScopedRunnerIds: string[] = [];
 
 	// Filter runners by kind if specified
 	const runnerIds = group.filterKinds
@@ -1330,6 +1333,8 @@ async function runGroup(
 			outOfEditScope.push(d);
 		}
 		if (reachedNoVerdict(result)) inconclusiveRunnerIds.push(runnerId);
+		else if (result.editScopedVerdict === true)
+			editScopedRunnerIds.push(runnerId);
 		inconclusiveServerIds.push(
 			...(result.unconfirmedServerIds ?? []),
 			...(result.deferredServerIds ?? []),
@@ -1358,6 +1363,7 @@ async function runGroup(
 		inconclusiveRunnerIds,
 		inconclusiveServerIds,
 		collectLaterRunnerIds,
+		editScopedRunnerIds,
 	};
 }
 
@@ -1533,6 +1539,7 @@ export async function dispatchForFile(
 	const inconclusiveRunnerIds = new Set<string>();
 	const inconclusiveServerIds = new Set<string>();
 	const collectLaterRunnerIds = new Set<string>();
+	const editScopedRunnerIds: string[] = [];
 	for (const {
 		diagnostics: groupDiags,
 		latencies,
@@ -1541,12 +1548,14 @@ export async function dispatchForFile(
 		inconclusiveRunnerIds: groupRunnerIds,
 		inconclusiveServerIds: groupServerIds,
 		collectLaterRunnerIds: groupCollectLater,
+		editScopedRunnerIds: groupEditScoped,
 	} of groupResults) {
 		runnerLatencies.push(...latencies);
 		outOfEditScope.push(...groupOutOfScope);
 		for (const id of groupRunnerIds) inconclusiveRunnerIds.add(id);
 		for (const id of groupServerIds) inconclusiveServerIds.add(id);
 		for (const id of groupCollectLater) collectLaterRunnerIds.add(id);
+		editScopedRunnerIds.push(...groupEditScoped);
 
 		allDiagnostics.push(...groupDiags);
 		if (hadBlocker) stopped = true;
@@ -1801,6 +1810,7 @@ export async function dispatchForFile(
 		hasBlockers: blockers.length > 0,
 		...(heldBackBlockers.length > 0 && { heldBackBlockers }),
 		...(stillObserved.length > 0 && { stillObserved }),
+		...(editScopedRunnerIds.length > 0 && { editScopedRunnerIds }),
 		...((inconclusiveRunnerIds.size > 0 || inconclusiveServerIds.size > 0) && {
 			inconclusiveSources: {
 				runnerIds: [...inconclusiveRunnerIds],

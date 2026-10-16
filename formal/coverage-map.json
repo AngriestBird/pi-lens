@@ -354,6 +354,9 @@
     "clients/line-alignment.ts": [
       "blocker-pending"
     ],
+    "clients/dispatch/runners/ast-grep-napi.ts": [
+      "blocker-pending"
+    ],
     "clients/finding-delivery-gate.ts": "unmodelled",
     "clients/git-guard.ts": "unmodelled",
     "clients/advisory-provenance.ts": [

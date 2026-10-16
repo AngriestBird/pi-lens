@@ -164,6 +164,31 @@ describe("owedRangesAfterDispatch", () => {
 			{ start: 9, end: 9 },
 		]);
 	});
+
+	// Recurrence (#4484 round 6): napi's Gate B verdict discharged the lines
+	// an earlier skip owed napi, though the ast-grep server's gate sees only
+	// the edit. A blocker first written during that skip would never reach
+	// napi's range when it next runs.
+	it("keeps a runner whose verdict covers only the edit owed its earlier lines outside the edit", () => {
+		const scoped = new Map([
+			[
+				"ast-grep-napi",
+				[
+					{ start: 3, end: 3 },
+					{ start: 9, end: 9 },
+				],
+			],
+		]);
+		expect(
+			run({ editScoped: ["ast-grep-napi"], owed: scoped }).get("ast-grep-napi"),
+		).toEqual([{ start: 9, end: 9 }]);
+		expect(
+			run({
+				editScoped: ["ast-grep-napi"],
+				owed: new Map([["ast-grep-napi", [{ start: 4, end: 4 }]]]),
+			}).size,
+		).toBe(0);
+	});
 });
 
 // Round 5. Recurrences: a file with no record kept only an owing runner's id,

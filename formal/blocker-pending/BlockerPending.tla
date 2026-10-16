@@ -124,6 +124,22 @@ state table). Each fix switch is pinned TRUE:
    owed line. FALSE is the round-4 code: it was owed the whole file, so a
    pre-existing "p" no write had reached became a new STOP (verify probe P23).
 
+The round-6 environment and fix switches (#4484 round 6; PR #4491's round-6
+rows). Each fix switch is pinned TRUE:
+ - GateB (environment): the range-gated runner may skip because a primary
+   answers for the file (napi's Gate B, `covered-by-primary`, outcome
+   "cover"). The primary's own gate sees only the lines the write edited
+   (not the runner's owed lines), and its copy has another identity, so it
+   neither delivers nor keeps a recorded "a" or "p" outside the edit;
+ - EditScopedKeep (round 6, N1): that verdict covers only the edit, so a
+   recorded gated blocker outside it stays (`editScopedVerdict`,
+   `DispatchResult.editScopedRunnerIds`, carryRecordedBlockers). FALSE is the
+   round-5 code: the skip retired it while the bytes still held it (verify
+   probe P27);
+ - EditScopedOwed (round 6): the runner stays owed its earlier lines outside
+   the edit (owedRangesAfterDispatch). FALSE discharges them, so a blocker
+   first written while it had no verdict never reaches its range again.
+
 Invariants:
  - GateHonest: the commit gate is open only when no completed observation of
    the current bytes holds a blocker;
@@ -185,7 +201,10 @@ CONSTANTS
     TwinSameText,      \* round 5: "p"'s line has "a"'s text
     UnalignedText,     \* round 5 (K1): an identity match anywhere needs the entry's own text
     StaleAnywhere,     \* round 5: an entry kept without a position is matched anywhere later
-    OwedByContent      \* round 5 (K2): without alignment, owe the lines with an owed line's text
+    OwedByContent,     \* round 5 (K2): without alignment, owe the lines with an owed line's text
+    GateB,             \* round 6: the gated runner may skip as covered by an edit-gated primary
+    EditScopedKeep,    \* round 6 (N1): that skip keeps recorded gated blockers outside the edit
+    EditScopedOwed     \* round 6: that skip keeps the runner's owed lines outside the edit
 
 Fast == {"a", "b"}
 U == IF Unused THEN {"u"} ELSE {}
@@ -200,6 +219,7 @@ Gated == IF RangeGated THEN {"a"} \cup Tw ELSE {}
 \* A fast run's outcomes: a verdict, a failure, a skip that read nothing.
 Outcomes == {"ok"} \cup (IF MayFail THEN {"fail"} ELSE {})
                    \cup (IF MaySkip THEN {"skip"} ELSE {})
+                   \cup (IF GateB THEN {"cover"} ELSE {})
 
 \* The id the delta keys on, for finding f in observation obs at line offsets l.
 \* "u" is an LSP finding, so its id is line-bound whatever Ordinal says.
@@ -297,17 +317,20 @@ ByIdentity(blind) ==
 Located(e, blind) ==
     \/ ~CarryByPosition
     \/ IF blind THEN UnalignedIdentity ELSE e \notin unpos \/ StaleAnywhere
-StandIn(new, touched, fail, blind) ==
+\* `hid`: what the run's evidence cannot see under the recorded identity (a
+\* primary's copy outside its gate, round 6).
+StandIn(new, touched, fail, blind, hid) ==
     IF Twin /\ ByIdentity(blind) /\ ScopeDeliveryOnly /\ "a" \in rec
        /\ "a" \notin Full(new, fail)
-       /\ "p" \in Full(new, fail) \ Deliv(new, touched, fail)
+       /\ "p" \in (Full(new, fail) \ hid) \ Deliv(new, touched, fail)
       THEN {"p"} ELSE {}
-Carried(new, touched, fail, l, blind) ==
+Carried(new, touched, fail, l, blind, hid) ==
     (IF ScopeDeliveryOnly
-       THEN {e \in rec \cap (Full(new, fail) \ Deliv(new, touched, fail)) :
+       THEN {e \in rec \cap ((Full(new, fail) \ hid) \ Deliv(new, touched, fail)) :
                Located(e, blind)}
        ELSE {})
-    \cup StandIn(new, touched, fail, blind)
+    \cup StandIn(new, touched, fail, blind, hid)
+    \cup (IF EditScopedKeep THEN rec \cap hid ELSE {})
     \cup (IF CarryPromoted
        THEN rec \cap (USeen(new, fail) \ UBlock(new, fail, l)) ELSE {})
     \cup (IF CarryInconclusive /\ fail THEN rec \cap Inline ELSE {})
@@ -353,7 +376,10 @@ Write(bytes, shift, edited, o, al) ==
     LET new == Seen(bytes, o)
         blind == ~al /\ shift
         fail == Failed(o)
-        touched == Covers(edited, al)
+        cover == o = "cover"
+        \* A primary's gate sees the edited lines only, not the owed ones.
+        touched == IF cover THEN edited ELSE Covers(edited, al)
+        hid == IF cover THEN Gated \ edited ELSE {}
         l == IF shift THEN [f \in AllF |-> ln[f] + 1] ELSE ln
         obs == Deliv(new, touched, fail)
         ub == UBlock(new, fail, l)
@@ -361,25 +387,26 @@ Write(bytes, shift, edited, o, al) ==
         newIds == IF Delta /\ hasBase THEN ids \ base ELSE ids
         deltaSet == {f \in obs : Id(f, obs, l) \in newIds}
         delivered == IF ClearOnCurrent THEN obs \cup ub ELSE deltaSet \cup ub
-        current == delivered \cup Carried(new, touched, fail, l, blind)
+        current == delivered \cup Carried(new, touched, fail, l, blind, hid)
     IN /\ disk' = bytes /\ ln' = l
        /\ base' = ids /\ hasBase' = TRUE
        /\ obsF' = obs \cup ub /\ wobs' = obs \cup ub
-       /\ RecordVerb(current, Gone(new, fail))
+       /\ RecordVerb(current, Gone(new, fail) \ hid)
        /\ toolClean' = (current = {})
        /\ owed' = OwedAfter(new, fail) \cup delivered
        /\ cleanOk' = (current = {} => OwedAfter(new, fail) \cup delivered = {})
-       /\ owe' = IF fail THEN owe \cup touched ELSE {}
+       /\ owe' = IF fail THEN owe \cup touched
+                 ELSE IF cover /\ EditScopedOwed THEN owe \ edited ELSE {}
        /\ reported' = reported \cup delivered
        /\ lost' = IF blind THEN (rec \ current) \cap bytes \cap Lined ELSE {}
        /\ held' = held \cup (IF AnyMatch(blind)
-                    THEN StandIn(new, touched, fail, blind) \ delivered ELSE {})
+                    THEN StandIn(new, touched, fail, blind, hid) \ delivered ELSE {})
        /\ unpos' = IF fail /\ CarryInconclusive
                      THEN ((IF blind THEN rec ELSE unpos) \cap Lined \cap current)
                           \ delivered
                      ELSE {}
        /\ adopted' = adopted \cup
-                    (((delivered \cup StandIn(new, touched, fail, blind))
+                    (((delivered \cup StandIn(new, touched, fail, blind, hid))
                         \cap Tw \cap Gated) \ Reach(edited))
        /\ dState' = IF Deferred THEN "flight" ELSE "idle"
        /\ claim' = FALSE
@@ -406,7 +433,7 @@ OpaqueStep ==
             touched == Covers((disk \ bytes) \cap Lined, TRUE)
             obs == Deliv(new, touched, fail)
             ub == UBlock(new, fail, ln)
-            keep == obs \cup ub \cup Carried(new, touched, fail, ln, FALSE)
+            keep == obs \cup ub \cup Carried(new, touched, fail, ln, FALSE, {})
             clears == IF OpaqueKeep THEN keep = {} ELSE TRUE
         IN /\ disk' = bytes
            /\ base' = IdsOf(obs, ln) \cup IdsOf(USeen(new, fail), ln)

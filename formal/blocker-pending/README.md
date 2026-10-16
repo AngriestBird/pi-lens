@@ -39,6 +39,11 @@ The seam:
   carry matches it only on a line with that text, and owed lines are matched
   by content (`linesOwedByContent`, `owedByContentOnly` in
   `clients/line-alignment.ts`).
+- Round 6: napi's Gate B skip (`clients/dispatch/runners/ast-grep-napi.ts`)
+  says its verdict covers only the edit (`RunnerResult.editScopedVerdict`,
+  `DispatchResult.editScopedRunnerIds`). The carry keeps such a runner's
+  recorded blocker outside the edit, and `owedRangesAfterDispatch` keeps its
+  owed lines outside the edit.
 
 ## What the model covers
 
@@ -138,6 +143,16 @@ The seam:
       is owed the lines whose text matches an owed line. FALSE owed the whole
       file, so a pre-existing `"p"` no write reached became a new STOP
       (verify probe P23).
+  - Round 6 environment: `GateB` lets the range-gated runner skip as covered
+    by a primary (outcome `"cover"`). The primary's gate sees only the edited
+    lines, not the runner's owed ones, and its copy has another identity.
+  - Round 6 (#4484, each pinned TRUE; PR #4491's round-6 rows). FALSE is the
+    round-5 code.
+    - `EditScopedKeep` (N1): a recorded gated blocker outside the edit stays.
+      FALSE retired it while the bytes held it (verify probe P27).
+    - `EditScopedOwed`: the runner stays owed its earlier lines outside the
+      edit. FALSE discharged them, so a blocker first written while it had no
+      verdict never reached its range again.
 
 ## Invariants
 
@@ -208,6 +223,10 @@ States are as TLC reported them with `-workers 1` (generated / distinct).
 | `MutUnalignedText` | violated `TwinNotAdopted` | 276 / 53 | The round-4 code (`UnalignedText` FALSE). A pre-existing twin with other text takes over a fixed blocker (verify probe P22). |
 | `MutOwedByContent` | violated `TwinNotAdopted` | 326 / 154 | The round-4 code (`OwedByContent` FALSE). A file with no record owes the whole file after a skip, and a pre-existing twin becomes a STOP (verify probe P23). |
 | `CarryTwinText` | pass | 135649 / 3379 | The #4481 residual. A same-text twin may stand in (`held`); every other invariant holds. |
+| `CarryGateB` | pass | 30837 / 1916 | The round-6 fix. The gated runner may fail, skip or take Gate B: a recorded blocker outside the edit stays, and its owed lines stay owed. |
+| `CarryGateBTwin` | pass | 31672 / 1479 | The round-6 fix with a pre-existing twin: the keep holds only recorded blockers, so no twin is adopted. |
+| `MutEditScopedKeep` | violated `RecordedKept` | 38 / 10 | The round-5 code (`EditScopedKeep` FALSE). Gate B's skip on an edit elsewhere retires a recorded blocker the bytes still hold (verify probe P27). |
+| `MutEditScopedOwed` | violated `GateSound` | 92 / 26 | `EditScopedOwed` FALSE. Gate B's skip discharges the lines a failed write owed, and the blocker written then stays undelivered with no line owed. |
 
 The `MutDeltaClear` trace is write, ignore, write:
 
@@ -251,6 +270,9 @@ Each switch has a config that flips when it is turned:
 - `OwedByContent`: `CarryStale` to `MutOwedByContent`.
 - `TwinSameText`: `CarryStale` to `CarryTwinText` (both pass; the same-text
   twin is exempt from `TwinNotAdopted` and held under `RecordedReported`).
+- `GateB`: `CarryOwed` to `CarryGateB` (both pass).
+- `EditScopedKeep`: `CarryGateB` to `MutEditScopedKeep`.
+- `EditScopedOwed`: `CarryGateB` to `MutEditScopedOwed`.
 
 ## Residuals TLC shows
 
@@ -289,6 +311,10 @@ observes only outside the edit, on lines no run owes, is still never recorded
   superset the model does not show.
 - Per-runner owed lines. The model has one fast runner group; the code keeps
   owed lines per runner and widens only that runner's range.
+- Gate B's positions. The model keeps a recorded gated blocker outside the
+  lines the primary sees. The code keeps one outside the edit's ranges, or
+  one it cannot place, so it keeps a superset; the primary also sees the
+  language server runner's own owed lines, which the model leaves out.
 
 ## Replay on the real code
 
@@ -303,6 +329,9 @@ service and the process spawn are doubled at their host boundary. Its cells:
 - K: the `--no-delta` differential.
 - F and H: helm, before and after a line shift.
 - R: helm renumbering.
+- Round 6 (rows of PR #4491's round-6 table): 17 (P27, a napi blocker
+  outside the edit under Gate B), 18 (one fixed on its own line retires) and
+  19 (one fixed, one kept).
 - Round 5 (rows of PR #4491's round-5 table): 4b (P22, a twin with other
   text), 6b (a stale entry), 9 (P23, owed by content) and 13 (P25, one entry
   after a settle).

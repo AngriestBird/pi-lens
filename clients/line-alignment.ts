@@ -241,10 +241,13 @@ export function rangesOfLines(
  * on its own, and a runner with a verdict is owed nothing. A run that may not
  * deliver (`delivers: false`, an unauthored run, #3226) discharges nothing:
  * every earlier owed line stays owed. A runner owed more than
- * {@link MAX_OWED_RANGES} ranges owes the whole file (round 4).
+ * {@link MAX_OWED_RANGES} ranges owes the whole file (round 4). Round 6: a
+ * runner whose verdict covers only the edit (`editScoped`) stays owed its
+ * earlier lines outside the edit.
  */
 export function owedRangesAfterDispatch(input: {
 	noVerdict: readonly string[];
+	editScoped?: readonly string[] | undefined;
 	collectLater: readonly string[];
 	modifiedRanges: ReadonlyArray<{ start: number; end: number }> | undefined;
 	owed: ReadonlyMap<string, ReadonlyArray<{ start: number; end: number }>>;
@@ -264,6 +267,15 @@ export function owedRangesAfterDispatch(input: {
 			: lineCount > 0
 				? [{ start: 1, end: lineCount }]
 				: [];
+		if (ranges.length > 0) owedRanges.set(runnerId, ranges);
+	}
+	for (const runnerId of input.editScoped ?? []) {
+		const edited = new Set(linesOfRanges(input.modifiedRanges ?? []));
+		const ranges = rangesOfLines(
+			linesOfRanges(input.owed.get(runnerId) ?? []).flatMap((line) =>
+				edited.has(line) ? [] : [line],
+			),
+		);
 		if (ranges.length > 0) owedRanges.set(runnerId, ranges);
 	}
 	if (!input.delivers) {

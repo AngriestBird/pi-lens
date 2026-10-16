@@ -515,6 +515,41 @@ describe("ast-grep-napi runner — aux-runner-findings-lost degradation (#2324 R
 		}
 	});
 
+	// Recurrence (#4484 round 6, verify probe P27): Gate B's verdict counted
+	// for napi's whole record, but on a ranged edit the server's gate withholds
+	// a blocking finding outside the edit, under another identity. A napi
+	// blocker outside the edit retired while still on disk.
+	it("says Gate B's verdict covers only the edit on a ranged dispatch, and the whole file otherwise (#4484 round 6)", async () => {
+		const env = setupTestEnvironment("pi-lens-ast-grep-gate-b-scope-");
+		try {
+			const filePath = path.join(env.tmpDir, "file.ts");
+			fs.writeFileSync(filePath, "const x = 1;\nconst y = 2;\n");
+			mockAuxiliaryLspPublished.mockResolvedValue(true);
+			mockWorkingSgLoad();
+			const mod =
+				await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
+			const ranged = await mod.default.run(
+				createCtx(filePath, {
+					hasTool: async () => false,
+					blockingOnly: true,
+					modifiedRanges: [{ start: 2, end: 2 }],
+				}) as any,
+			);
+			expect(ranged.skipReason).toBe("covered-by-primary");
+			expect(ranged.editScopedVerdict).toBe(true);
+			const whole = await mod.default.run(
+				createCtx(filePath, {
+					hasTool: async () => false,
+					blockingOnly: true,
+				}) as any,
+			);
+			expect(whole.skipReason).toBe("covered-by-primary");
+			expect(whole.editScopedVerdict).toBeUndefined();
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("records the loss when Gate B skips on a leftover pending pair", async () => {
 		const env = setupTestEnvironment("pi-lens-ast-grep-loss-");
 		try {
