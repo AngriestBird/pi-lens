@@ -2265,6 +2265,14 @@ describe("publishDiagnostics handler — superseded push guard (cache-poisoning 
 
 		it("marks a settle with no server-reported version as push-unversioned, never null", async () => {
 			const { state, emitPublishDiagnostics } = createCapturingState();
+			// Recurrence this guards: shuffled order (seeds 202 and 424, advisory job
+			// 116856635842). A publish for a typescript server arms a real debounce
+			// timer (50-150 ms). These two tests end at once, so it fired into the
+			// module-level `pullSequenceEvents` during whichever test ran next, and
+			// the quiet-window test found THEIR settled record (elapsed 0, no
+			// documentOpenedAt) instead of its own. Fake timers plus the clear at
+			// the end keep the timer inside the test that armed it.
+			vi.useFakeTimers();
 			Object.defineProperty(state, "serverId", { value: "typescript" });
 
 			pullSequenceEvents.length = 0;
@@ -2280,10 +2288,13 @@ describe("publishDiagnostics handler — superseded push guard (cache-poisoning 
 				unknown
 			>;
 			expect(metadata.version).toBe("push-unversioned");
+			vi.clearAllTimers();
+			vi.useRealTimers();
 		});
 
 		it("keeps the real server-reported version when present", async () => {
 			const { state, emitPublishDiagnostics } = createCapturingState();
+			vi.useFakeTimers();
 			Object.defineProperty(state, "serverId", { value: "typescript" });
 
 			pullSequenceEvents.length = 0;
@@ -2299,6 +2310,8 @@ describe("publishDiagnostics handler — superseded push guard (cache-poisoning 
 				unknown
 			>;
 			expect(metadata.version).toBe(7);
+			vi.clearAllTimers();
+			vi.useRealTimers();
 		});
 	});
 });
