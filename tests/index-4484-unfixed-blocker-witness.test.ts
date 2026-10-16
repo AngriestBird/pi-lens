@@ -1082,7 +1082,7 @@ describe("#4484 witness, round 4: no alignment fails closed", () => {
 	// 256-entry cache apart from the record. Writes to 260 other files evicted
 	// it, and the next edit above the blocker retired it with nothing to align.
 	it("keeps a tree-sitter blocker's anchor across writes to 260 other files (row 10, P18)", async () => {
-		const s = await openSession("ue", "src/evicted-ts.ts", TS_FIXED, SCOPED);
+		const s = await openSession("evict", "src/evicted-ts.ts", TS_FIXED, SCOPED);
 		await s.write(TS_FIXED);
 		expect(await s.edit(TS_PRE, [2])).toContain("🔴 STOP");
 		for (let i = 0; i < 260; i += 1)
@@ -1137,6 +1137,149 @@ describe("#4484 witness, round 4: no alignment fails closed", () => {
 		const w2 = await s.edit(OLD, [1]);
 		expect(w2).not.toMatch(/Still unfixed/);
 		expect(await s.commitBlocked()).toBe(false);
+		pendingCleanup = undefined;
+	}, 120_000);
+});
+
+describe("#4484 witness, round 5: a fallback holds only what its evidence names", () => {
+	const SCOPED = { "no-lsp": true, "no-ast-grep": true };
+	const AG_PRE = [
+		'export const CLIENT_VERSION = "1.0.50";',
+		"export const plain = CLIENT_VERSION;",
+		"export function dig(obj: Record<string, string>, key: string): unknown {",
+		"\treturn obj[key];",
+		"}",
+		"",
+	].join("\n");
+	const AG_FIXED = AG_PRE.replace("): unknown {", "): string {");
+	const PAD = Array.from({ length: 1100 }, (_, i) => `// pad ${i}`).join("\n");
+	const padRange = Array.from({ length: 1100 }, (_, i) => i + 1);
+	// Past the ast-grep runner's 1 MiB cap: it skips without reading the file.
+	const OVER_CAP = `// ${"x".repeat(1_100_000)}`;
+
+	// Recurrence (K1, verify probe P22): with no alignment the carry matched
+	// the agent's fixed `debugger` by identity alone, so an untouched,
+	// never-delivered `debugger` with other text took over the record and
+	// blocked through every later write and turn end (TLC MutUnalignedText).
+	it("retires a fixed blocker on an unaligned write although a pre-existing match with other text stays (row 4b, P22)", async () => {
+		const OLD = "export function old(): void {\n\tdebugger; // old\n}\n";
+		const NEU = "export function neu(): void {\n\tdebugger;\n}\n";
+		const FIXED = OLD.replace("\tdebugger; // old\n", "\treturn;\n");
+		fs.mkdirSync(path.join(tmpDir, "src"), { recursive: true });
+		fs.writeFileSync(path.join(tmpDir, "src/adopt-ts.ts"), OLD);
+		const s = await openSession("adopt", "src/adopt-ts.ts", FIXED, SCOPED);
+		const w1 = await s.edit(`${NEU}${OLD}`, [1, 2, 3]);
+		expect(w1).toContain("🔴 STOP");
+		expect(w1).toContain("L2:");
+		// No common prefix and a middle past the edit cap: no alignment.
+		const w2 = await s.edit(`${PAD}\n${OLD}export const tail = 1;\n`, [
+			...padRange,
+			1104,
+		]);
+		expect(w2).not.toMatch(/Still unfixed/);
+		expect(await s.commitBlocked()).toBe(false);
+		expect(await s.endTurn()).not.toContain("STOP");
+		pendingCleanup = undefined;
+	}, 120_000);
+
+	// Recurrence (K1's stale line): a write with no alignment kept a blocker
+	// its runner gave no verdict on at its old line number. The next write
+	// aligned that stale number to another line, found nothing there, and
+	// retired the blocker while it was still on disk.
+	it("keeps a blocker its runner skipped on an unaligned write once the next write aligns (row 6b)", async () => {
+		const s = await openSession("stale", "src/stale-ag.ts", AG_FIXED, SCOPED);
+		await s.write(AG_FIXED);
+		expect(await s.edit(AG_PRE, [3])).toContain("🔴 STOP");
+		// Unaligned, and past the runner's size cap: no verdict, no position.
+		const w2 = await s.edit(`${PAD}\n${AG_PRE}${OVER_CAP}\n`, [
+			...padRange,
+			1106,
+		]);
+		expect(w2).toMatch(/Still unfixed: 1 blocker reported earlier/);
+		// Dropping the padding line aligns, and the runner reads the file again.
+		const w3 = await s.edit(`${PAD}\n${AG_PRE}`, [1106]);
+		expect(w3).not.toMatch(/✓ .*clean/);
+		expect(w3).toMatch(/Still unfixed: 1 blocker reported earlier \(L1103\)/);
+		expect(await s.commitBlocked()).toBe(true);
+		await fixAndDrain(s);
+	}, 120_000);
+
+	// Recurrence (K2, verify probe P23): a file with no blocker record kept
+	// only the id of a runner that skipped it, so the next write owed that
+	// runner the whole file, and an untouched, pre-existing finding became a
+	// new STOP (TLC MutOwedByContent).
+	it("owes a runner that skipped a file with no record only the lines it skipped (row 9, P23)", async () => {
+		const BASE = `${AG_PRE}export const k = 1;\n`;
+		fs.mkdirSync(path.join(tmpDir, "src"), { recursive: true });
+		fs.writeFileSync(path.join(tmpDir, "src/owed-pre.ts"), BASE);
+		const s = await openSession("owpre", "src/owed-pre.ts", AG_FIXED, SCOPED);
+		const W0 = BASE.replace("k = 1", "k = 2");
+		expect(await s.edit(W0, [6])).toMatch(/✓ .*clean/);
+		// The skipped lines include a closing brace, the same text as the last
+		// line of the pre-existing finding's function: owed positions must be
+		// remapped, not matched by text.
+		const w1 = await s.edit(
+			`${W0}export function z(): void {\n}\n${OVER_CAP}\n`,
+			[7, 8, 9],
+		);
+		expect(w1).toMatch(/✓ .*clean/);
+		const w2 = await s.edit(W0, [6]);
+		expect(w2).not.toContain("STOP");
+		expect(w2).toMatch(/✓ .*clean/);
+		expect(await s.commitBlocked()).toBe(false);
+		pendingCleanup = undefined;
+	}, 120_000);
+
+	// Recurrence (K2's sibling, row 12): an unaligned write to a file with a
+	// record owed a runner that had skipped the whole file, so a pre-existing,
+	// never-delivered finding became a new STOP. Owed lines follow their text.
+	it("owes a runner that skipped only its skipped lines on an unaligned write to a recorded file (row 12)", async () => {
+		const TS_BAD = "debugger; // top\n";
+		const TS_OK = "// top\n";
+		fs.mkdirSync(path.join(tmpDir, "src"), { recursive: true });
+		fs.writeFileSync(path.join(tmpDir, "src/owed-rec.ts"), AG_PRE);
+		const s = await openSession("owrec", "src/owed-rec.ts", AG_PRE, SCOPED);
+		// The debugger blocks (tree-sitter, recorded); the ast-grep runner skips
+		// the file past its size cap and owes the edit's lines.
+		const w1 = await s.edit(`${TS_BAD}${AG_PRE}${OVER_CAP}\n`, [1, 7]);
+		expect(w1).toContain("🔴 STOP");
+		expect(w1).not.toContain("no-unknown-returns");
+		// Unaligned, and back under the cap: the owed lines moved by 1100.
+		const w2 = await s.edit(`${PAD}\n${TS_BAD}${AG_PRE}`, padRange);
+		expect(w2).toMatch(/Still unfixed: 1 blocker reported earlier \(L1101\)/);
+		expect(w2).not.toContain("unknown");
+		pendingCleanup = async () => {
+			await s.write(`${TS_OK}${AG_FIXED}`);
+			await s.endTurn();
+		};
+		await fixAndDrain(s);
+	}, 120_000);
+
+	// Recurrence (K3, verify probe P25): a carry moved a blocker's line but
+	// kept its line-bound id, so the settled re-check's copy at the same line
+	// joined the record beside it, and the turn end listed it twice.
+	it("lists a carried blocker once after its collect-later re-check settles (row 13, P25)", async () => {
+		boundary.lsp.enabled = true;
+		const s = await openSession("dup", "src/carry-dup.ts", V_FIXED);
+		expect(await s.write(V1)).toContain("🔴 STOP");
+		observeRunnerLatency({
+			projectRoot: tmpDir,
+			runnerId: "lsp",
+			durationMs: 6_000,
+		});
+		boundary.lsp.mode = "hold";
+		const w2 = await s.write(`BAD_OTHER();\nconst z = 0;\n${V1}`);
+		expect(w2.match(STILL_UNFIXED)?.[1]).toBe("4");
+		for (const release of boundary.lsp.held.splice(0)) release();
+		await settlePendingRunnerFindingsForTests();
+		const turnEnd = await s.endTurn();
+		expect(turnEnd).toContain("STOP — 2 issue(s)");
+		expect(turnEnd.match(/L4:/g)?.length).toBe(1);
+		expect(turnEnd).toContain("L1:");
+		boundary.lsp.mode = "answer";
+		await s.write(V_FIXED);
+		await settlePendingRunnerFindingsForTests();
+		await s.endTurn();
 		pendingCleanup = undefined;
 	}, 120_000);
 });

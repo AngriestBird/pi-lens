@@ -3,7 +3,10 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Diagnostic } from "../../clients/dispatch/types.js";
-import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
+import {
+	MAX_OWED_ANCHORS,
+	RuntimeCoordinator,
+} from "../../clients/runtime-coordinator.js";
 import {
 	getDegradationSummary,
 	resetDegradationLedger,
@@ -664,7 +667,7 @@ describe("RuntimeCoordinator", () => {
 	// Round 4 (G1, G3): the anchor lived in a 256-entry cache apart from the
 	// record, so writes to other files evicted a live record's anchor and the
 	// next edit retired its blocker with nothing to align (verify probe P18).
-	describe("analysis anchor (#4484 rounds 3 and 4)", () => {
+	describe("analysis anchor (#4484 rounds 3 to 5)", () => {
 		const anchor = {
 			lineHashes: Uint32Array.of(1, 2),
 			owedRanges: new Map([["ast-grep-napi", [{ start: 2, end: 2 }]]]),
@@ -689,26 +692,73 @@ describe("RuntimeCoordinator", () => {
 			expect(runtime.getAnalysisAnchor("/p/a.ts")).toBe(anchor);
 		});
 
-		it("drops the hashes with the record and keeps the owing runners", () => {
+		// Round 5 (K2, verify probe P23): only the runner id stayed, so the
+		// next write owed it the whole file. The owed lines' texts stay.
+		it("drops the hashes with the record and keeps the owed line texts", () => {
 			const runtime = new RuntimeCoordinator();
 			runtime.recordInlineBlockers("/p/a.ts", "blocker A");
 			runtime.setAnalysisAnchor("/p/a.ts", anchor);
 			runtime.clearInlineBlockers("/p/a.ts");
 			expect(runtime.getAnalysisAnchor("/p/a.ts")).toEqual({
 				lineHashes: undefined,
-				owedRanges: new Map([["ast-grep-napi", []]]),
+				owedRanges: new Map(),
+				owedContent: new Map([["ast-grep-napi", Uint32Array.of(2)]]),
 			});
 		});
 
-		it("stores no hashes for a file without a record", () => {
+		// Round 5 (K2, verify probe P23): a file with no record kept only the
+		// owing runner's id. It keeps its whole anchor now, bounded; an evicted
+		// file falls back to owed line texts, never the whole file.
+		it("keeps a record-less file's whole anchor while a runner owes lines, then its owed texts", () => {
 			const runtime = new RuntimeCoordinator();
 			runtime.setAnalysisAnchor("/p/a.ts", anchor);
-			expect(runtime.getAnalysisAnchor("/p/a.ts")?.lineHashes).toBeUndefined();
+			expect(runtime.getAnalysisAnchor("/p/a.ts")).toBe(anchor);
+			for (let i = 0; i < MAX_OWED_ANCHORS; i += 1)
+				runtime.setAnalysisAnchor(`/p/other-${i}.ts`, anchor);
+			expect(runtime.getAnalysisAnchor("/p/a.ts")).toEqual({
+				lineHashes: undefined,
+				owedRanges: new Map(),
+				owedContent: new Map([["ast-grep-napi", Uint32Array.of(2)]]),
+			});
 			runtime.setAnalysisAnchor("/p/a.ts", {
 				lineHashes: Uint32Array.of(1),
 				owedRanges: new Map(),
 			});
 			expect(runtime.getAnalysisAnchor("/p/a.ts")).toBeUndefined();
+		});
+
+		// Round 5 (K3, verify probe P25): a carry moved a blocker's line but kept
+		// its line-bound id, so the settled copy at the same line joined the
+		// record beside it and the turn end listed it twice.
+		it("merges a settled copy of a carried blocker whose id names its old line", () => {
+			const runtime = new RuntimeCoordinator();
+			const carried = {
+				id: "lsp:2304:2",
+				message: "Cannot find name 'BAD_CALL'.",
+				filePath: "/p/a.ts",
+				line: 4,
+				column: 1,
+				severity: "error" as const,
+				semantic: "blocking" as const,
+				tool: "lsp",
+				rule: "ts:2304",
+			};
+			expect(
+				runtime.recordDeferredInlineBlockers("/p/a.ts", [carried], {
+					recordedAtMs: 1,
+				}),
+			).toBe(1);
+			expect(
+				runtime.recordDeferredInlineBlockers(
+					"/p/a.ts",
+					[
+						{ ...carried, id: "lsp:2304:4" },
+						{ ...carried, line: 5, id: "lsp:2304:5" },
+					],
+					{ recordedAtMs: 2 },
+				),
+			).toBe(1);
+			expect(runtime.getInlineBlockerDiagnostics("/p/a.ts")).toHaveLength(2);
 		});
 
 		it("drops every anchor and owing runner at a session reset", () => {

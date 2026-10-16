@@ -10,12 +10,19 @@
 import { describe, expect, it } from "vitest";
 import {
 	alignLines,
+	boundedAnchor,
 	lineHashesOf,
+	lineHashOf,
 	linesOfRanges,
+	linesOwedByContent,
 	MAX_ALIGNMENT_LINES,
+	MAX_OWED_LINE_TEXTS,
 	MAX_OWED_RANGES,
+	owedByContentOnly,
+	owedContentOf,
 	owedRangesAfterDispatch,
 	rangesOfLines,
+	stampLineHashes,
 } from "../../clients/line-alignment.js";
 
 const hashes = (text: string) => {
@@ -157,25 +164,109 @@ describe("owedRangesAfterDispatch", () => {
 			{ start: 9, end: 9 },
 		]);
 	});
+});
 
-	// Round 4 (G3): owed ranges grew with every write that lacked a verdict.
-	it("owes the whole file once a runner's owed ranges pass the cap", () => {
-		const scattered = Array.from({ length: MAX_OWED_RANGES + 1 }, (_, i) => ({
-			start: 2 * i + 1,
-			end: 2 * i + 1,
-		}));
+// Round 5. Recurrences: a file with no record kept only an owing runner's id,
+// so the next write owed it the whole file and an untouched, pre-existing
+// finding became a new STOP (K2, verify probe P23); past 64 owed ranges the
+// same widening followed; and owed lines without alignment were the whole
+// file too.
+describe("owed lines by content", () => {
+	const text = "a\nb\nc\nb\nd\n";
+	const scattered = Array.from({ length: MAX_OWED_RANGES + 1 }, (_, i) => ({
+		start: 2 * i + 1,
+		end: 2 * i + 1,
+	}));
+
+	it("owes the lines whose text matches an owed line, wherever they moved", () => {
+		const owed = owedContentOf([{ start: 2, end: 2 }], hashes(text));
+		expect(owed).toEqual(Uint32Array.from([lineHashOf("b")]));
+		expect(linesOwedByContent(owed, hashes(`x\n${text}`), 7)).toEqual([
+			{ start: 3, end: 3 },
+			{ start: 5, end: 5 },
+		]);
+		expect(linesOwedByContent(owed, hashes("a\nc\n"), 3)).toEqual([]);
+	});
+
+	it("owes the whole file when the content is unknown or past the cap", () => {
+		expect(owedContentOf([{ start: 1, end: 2 }], undefined)).toBe("whole-file");
+		const many = Array.from(
+			{ length: MAX_OWED_LINE_TEXTS + 1 },
+			(_, i) => `l${i}`,
+		).join("\n");
 		expect(
-			run({
-				noVerdict: ["eslint"],
-				modifiedRanges: scattered,
-				lineCount: () => 500,
-			}).get("eslint"),
-		).toEqual([{ start: 1, end: 500 }]);
+			owedContentOf([{ start: 1, end: MAX_OWED_LINE_TEXTS + 1 }], hashes(many)),
+		).toBe("whole-file");
+		expect(linesOwedByContent("whole-file", hashes(text), 6)).toEqual([
+			{ start: 1, end: 6 },
+		]);
 		expect(
-			run({
-				noVerdict: ["eslint"],
-				modifiedRanges: scattered.slice(0, MAX_OWED_RANGES),
-			}).get("eslint"),
-		).toHaveLength(MAX_OWED_RANGES);
+			linesOwedByContent(Uint32Array.from([lineHashOf("b")]), undefined, 6),
+		).toEqual([{ start: 1, end: 6 }]);
+	});
+
+	it("owes a runner past the range cap the content of its ranges, not the whole file", () => {
+		const lines = Array.from({ length: 200 }, (_, i) => `line ${i}`).join("\n");
+		const anchor = boundedAnchor(
+			hashes(lines),
+			new Map([["eslint", scattered]]),
+		);
+		expect(anchor.owedRanges.has("eslint")).toBe(false);
+		const content = anchor.owedContent?.get("eslint");
+		expect(content).toBeInstanceOf(Uint32Array);
+		expect((content as Uint32Array).length).toBe(MAX_OWED_RANGES + 1);
+		const kept = boundedAnchor(
+			hashes(lines),
+			new Map([["eslint", scattered.slice(0, MAX_OWED_RANGES)]]),
+		);
+		expect(kept.owedRanges.get("eslint")).toHaveLength(MAX_OWED_RANGES);
+		expect(kept.owedContent).toBeUndefined();
+	});
+
+	it("keeps only owed content once a file's hashes may go", () => {
+		const anchor = boundedAnchor(
+			hashes(text),
+			new Map([["ast-grep-napi", [{ start: 4, end: 5 }]]]),
+		);
+		expect(owedByContentOnly(anchor)).toEqual({
+			lineHashes: undefined,
+			owedRanges: new Map(),
+			owedContent: new Map([
+				[
+					"ast-grep-napi",
+					Uint32Array.from([lineHashOf("b"), lineHashOf("d")]).sort(),
+				],
+			]),
+		});
+		expect(
+			owedByContentOnly(boundedAnchor(hashes(text), new Map())),
+		).toBeUndefined();
+	});
+});
+
+// Round 5 (K1): a recorded blocker carries its own line's text, so a write
+// with no position for it matches only a line with that text.
+describe("stampLineHashes", () => {
+	it("stamps each own finding with its line's hash and keeps an existing one", () => {
+		const findings = [
+			{ line: 2, filePath: "a.ts" },
+			{ line: 1, filePath: "a.ts", lineHash: 7 },
+			{ line: 1, filePath: "b.ts" },
+			{ line: 9, filePath: "a.ts" },
+		];
+		const stamped = stampLineHashes(
+			findings,
+			"x\n  y;\n",
+			(d) => d.filePath === "a.ts",
+		);
+		expect(stamped[0]).toEqual({
+			line: 2,
+			filePath: "a.ts",
+			lineHash: lineHashOf("y;"),
+		});
+		expect(stamped[1]).toBe(findings[1]);
+		expect(stamped[2]).toBe(findings[2]);
+		expect(stamped[3]).toBe(findings[3]);
+		expect(findings[0]).not.toHaveProperty("lineHash");
 	});
 });

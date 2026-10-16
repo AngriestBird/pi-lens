@@ -484,6 +484,37 @@ describe("ast-grep-napi runner — aux-runner-findings-lost degradation (#2324 R
 		}
 	});
 
+	// Recurrence (#4484 round 5, verify note on Gate B): with an earlier
+	// touch's coverage still pending, the server is silent for these bytes,
+	// yet the skip stated `covered-by-primary`. That verdict retired napi's
+	// recorded blockers while nothing had read the current bytes.
+	it("states no reason when Gate B skips on pending coverage, so the skip is no verdict (#4484 round 5)", async () => {
+		const env = setupTestEnvironment("pi-lens-ast-grep-gate-b-pending-");
+		try {
+			const filePath = path.join(env.tmpDir, "file.ts");
+			fs.writeFileSync(filePath, "const x = 1;\n");
+			const pendingAux =
+				await import("../../../../clients/lsp/pending-aux-coverage.js");
+			pendingAux.resetPendingAuxiliaryCoverage();
+			pendingAux.markPendingAuxiliaryCoverage(filePath, ["ast-grep"]);
+			mockAuxiliaryLspPublished.mockResolvedValue(true);
+			mockWorkingSgLoad();
+			const mod =
+				await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
+			const { reachedNoVerdict } =
+				await import("../../../../clients/dispatch/types.js");
+			const result = await mod.default.run(
+				createCtx(filePath, { hasTool: async () => false }) as any,
+			);
+			expect(result.status).toBe("skipped");
+			expect(result.skipReason).toBeUndefined();
+			expect(reachedNoVerdict(result)).toBe(true);
+			pendingAux.resetPendingAuxiliaryCoverage();
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("records the loss when Gate B skips on a leftover pending pair", async () => {
 		const env = setupTestEnvironment("pi-lens-ast-grep-loss-");
 		try {

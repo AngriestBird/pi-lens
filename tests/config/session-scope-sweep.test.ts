@@ -174,6 +174,7 @@ const COORDINATOR_FIELDS: Readonly<Record<string, "reset" | string>> = {
 	_mutationReceipts: "reset",
 	_nextCascadeSettleToken:
 		"kept: a monotonic token source; restarting it would let an old settle's token match a new one",
+	_owedAnchors: "reset",
 	_owedRunners: "reset",
 	_pendingCascadeRuns: "reset",
 	_pendingDeferredMutations: "reset",

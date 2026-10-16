@@ -1394,7 +1394,11 @@ const astGrepNapiRunner: RunnerDefinition = {
 			// synchronous Gate-B check returns, so it cannot have marked
 			// anything yet. Re-running napi here would risk the F3 duplicate
 			// this fix closes, so the loss is made observable instead.
-			if (hasPendingAuxiliaryCoverage(ctx.filePath, "ast-grep")) {
+			const coveragePending = hasPendingAuxiliaryCoverage(
+				ctx.filePath,
+				"ast-grep",
+			);
+			if (coveragePending) {
 				incrementDegradationCount({
 					kind: "aux-runner-findings-lost",
 					subject: "ast-grep",
@@ -1405,12 +1409,14 @@ const astGrepNapiRunner: RunnerDefinition = {
 			}
 			// #4484 round 4: the ast-grep server answers for this file, so the
 			// skip states why; a bare skip would read as no verdict and keep
-			// napi's recorded blockers after they are fixed.
+			// napi's recorded blockers after they are fixed. Round 5: only when
+			// no earlier touch's coverage is pending. Then the server is silent
+			// for these bytes, nothing read them, and the skip is no verdict.
 			return {
 				status: "skipped",
 				diagnostics: [],
 				semantic: "none",
-				skipReason: "covered-by-primary",
+				...(coveragePending ? {} : { skipReason: "covered-by-primary" }),
 			};
 		}
 

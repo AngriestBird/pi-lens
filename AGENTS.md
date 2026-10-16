@@ -346,7 +346,10 @@ file-scoped worklist and receives no project-wide scanner output.
     (`RUNNER_SKIP_REASONS`). A recorded blocker is still observed only at its
     own line, aligned to the current bytes: another occurrence of the same
     rule is not it. A fallback for missing evidence narrows what retires:
-    with no alignment, its identity anywhere keeps it.
+    with no alignment, its identity anywhere keeps it. It stays a per-write
+    hold and never widens what counts as the same finding: the match still
+    needs the entry's own line text, and owed lines are matched by content,
+    never widened to the file.
     Enforced by `tests/clients/dispatch/runners/run-outcome-ratchet.test.ts`,
     `tests/clients/dispatch/runners/parsed-nothing-sweep.test.ts` and
     `tests/clients/delivery-surface-ratchet.test.ts` (partial: no detector

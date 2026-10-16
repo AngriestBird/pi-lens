@@ -34,6 +34,11 @@ The seam:
   without a stated reason reaches no verdict (`reachedNoVerdict`). The lines a
   runner with no verdict covered join its next range
   (`DispatchContext.owedRanges`, `owedRangesAfterDispatch`).
+- Round 5: each recorded entry carries its own line's text
+  (`Diagnostic.lineHash`, `stampLineHashes`). With no usable position the
+  carry matches it only on a line with that text, and owed lines are matched
+  by content (`linesOwedByContent`, `owedByContentOnly` in
+  `clients/line-alignment.ts`).
 
 ## What the model covers
 
@@ -118,6 +123,21 @@ The seam:
       in for a fixed `"a"`: a false block, the fail-closed cost. FALSE is the
       round-3 code. It read the stale line number, found nothing, and retired
       a withheld `"a"` still in the bytes.
+  - Round 5 environment: `TwinSameText` gives `"p"`'s line `"a"`'s text, so
+    no line-content evidence tells them apart (#4481).
+  - Round 5 (#4484, each pinned TRUE; PR #4491's round-5 table). FALSE is the
+    round-4 code.
+    - `UnalignedText` (K1): a match anywhere also needs the entry's own line
+      text. FALSE matched by identity alone, so a pre-existing `"p"` with
+      other text took over a fixed `"a"` and pinned (verify probe P22).
+    - `StaleAnywhere`: an entry kept unmatched through a write with no
+      alignment has no position (the variable `unpos`); a later aligned write
+      matches it anywhere. FALSE aligned its stale line number, found nothing,
+      and retired it while the bytes held it.
+    - `OwedByContent` (K2): without an alignment to a record's bytes, a runner
+      is owed the lines whose text matches an owed line. FALSE owed the whole
+      file, so a pre-existing `"p"` no write reached became a new STOP
+      (verify probe P23).
 
 ## Invariants
 
@@ -141,6 +161,10 @@ The seam:
   ghost `held`), which is the fail-closed cost.
 - `UnalignedKept`: a write with no alignment never retires a recorded blocker
   its bytes still hold (the ghost `lost`).
+- `TwinNotAdopted`: a pre-existing, range-gated twin is never delivered or
+  stood in by a write that did not reach its line (edited or owed) (the ghost
+  `adopted`). A same-text twin (`TwinSameText`) is exempt: it is the #4481
+  residual.
 - `RecordedKept`: every blocker a run delivered stays in the record until a
   conclusive observation from its own source shows it gone (the ghost
   `owed`). It is the `GateSound` of a run that can fail, or of a value that
@@ -177,8 +201,13 @@ States are as TLC reported them with `-workers 1` (generated / distinct).
 | `MutSkipVerdict` | violated `GateSound` | 13 / 6 | The round-2 code (`SkipNoVerdict` FALSE). A skip past a size or line cap clears the record while the blocker is in the bytes (review F2, probes P1 to P3). |
 | `CarryOwed` | pass | 20394 / 1602 | The round-3 fix (R4). A blocker first written while its range-gated runner fails or skips is delivered and recorded by the next authored verdict, an unauthored write between them included. |
 | `MutOwedRanges` | violated `GateSound` | 65 / 26 | The round-2 code (`OwedRanges` FALSE). Every later run withholds that blocker, so it is never recorded (residual a). |
-| `CarryUnaligned` | pass | 132079 / 4364 | The round-4 fix. Across three writes that may each lack an alignment, an unauthored write, a turn end and a line shift, no recorded blocker the bytes still hold is retired. |
+| `CarryUnaligned` | pass | 128805 / 3926 | The round-4 fix, with round 5's. Across three writes that may each lack an alignment, an unauthored write, a turn end and a line shift, no recorded blocker the bytes still hold is retired, and no twin is adopted. |
 | `MutUnaligned` | violated `UnalignedKept` | 93 / 19 | The round-3 code (`UnalignedIdentity` FALSE). A write with no alignment after a line moved retires a withheld blocker still in the bytes (verify probes P11c, P11d, P18). |
+| `CarryStale` | pass | 135001 / 3183 | The round-5 fix. Writes may fail and lack an alignment: an entry kept without a position stays until a run shows it gone, and no twin is adopted. |
+| `MutStaleAnywhere` | violated `RecordedKept` | 2747 / 264 | The round-4 code (`StaleAnywhere` FALSE). An aligned write after a failed write with no alignment retires the blocker while the bytes hold it. |
+| `MutUnalignedText` | violated `TwinNotAdopted` | 276 / 53 | The round-4 code (`UnalignedText` FALSE). A pre-existing twin with other text takes over a fixed blocker (verify probe P22). |
+| `MutOwedByContent` | violated `TwinNotAdopted` | 326 / 154 | The round-4 code (`OwedByContent` FALSE). A file with no record owes the whole file after a skip, and a pre-existing twin becomes a STOP (verify probe P23). |
+| `CarryTwinText` | pass | 135649 / 3379 | The #4481 residual. A same-text twin may stand in (`held`); every other invariant holds. |
 
 The `MutDeltaClear` trace is write, ignore, write:
 
@@ -217,6 +246,11 @@ Each switch has a config that flips when it is turned:
   with the switch FALSE is red on `GateSound` (285 / 60). With
   `RecordedReported` read strictly (no `held`), `CarryUnaligned` is red on it
   (288 / 62): a twin stand-in is the price of failing closed.
+- `UnalignedText`: `CarryUnaligned` to `MutUnalignedText`.
+- `StaleAnywhere`: `CarryStale` to `MutStaleAnywhere`.
+- `OwedByContent`: `CarryStale` to `MutOwedByContent`.
+- `TwinSameText`: `CarryStale` to `CarryTwinText` (both pass; the same-text
+  twin is exempt from `TwinNotAdopted` and held under `RecordedReported`).
 
 ## Residuals TLC shows
 
@@ -249,9 +283,10 @@ observes only outside the edit, on lines no run owes, is still never recorded
   recorded blocker's position is exact. The code aligns lines by content hash
   (`alignLines`, bounded by `MAX_ALIGNMENT_EDITS`). The model reduces that to
   one choice per write, `MayUnalign`: with no alignment the code matches by
-  identity alone, counted as `blocker-position-unaligned`, and owed lines
-  widen to the whole file. The model's owed set is per finding, so that
-  widening is a superset it does not need to show.
+  identity and line text, counted as `blocker-position-unaligned`, and owed
+  lines are matched by content. Text is one bit per twin (`TwinSameText`).
+  Past `MAX_OWED_LINE_TEXTS` the code still owes the whole file, a bounded
+  superset the model does not show.
 - Per-runner owed lines. The model has one fast runner group; the code keeps
   owed lines per runner and widens only that runner's range.
 
@@ -268,6 +303,10 @@ service and the process spawn are doubled at their host boundary. Its cells:
 - K: the `--no-delta` differential.
 - F and H: helm, before and after a line shift.
 - R: helm renumbering.
+- Round 5 (rows of PR #4491's round-5 table): 4b (P22, a twin with other
+  text), 6b (a stale entry), 9 (P23, owed by content) and 13 (P25, one entry
+  after a settle).
+- Round 4: rows 4 (P11c, P11d, the 2 MiB cap), 10 (P18) and 3 (P20).
 - Round 3 (rows of PR #4491's state table): rows 6 (twins, ast-grep and
   tree-sitter), 7 (a moved blocker beside its twin), 11 (an LSP sync-limit
   skip, an ast-grep size-cap skip), 12 (a carried blocker moves with its

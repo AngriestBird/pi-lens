@@ -64,8 +64,23 @@ export function findingIdentity(d: {
 }
 
 /**
- * #4484 round 4: the position a carry reads when the write has no line
- * alignment. The recorded finding then matches its identity anywhere.
+ * #4484 round 3: {@link findingIdentity} with digit runs folded, so a message
+ * that cites its own line (helm-lint's `deploy.yaml:4: …`) keeps it when the
+ * line moves. The recorded-blocker carry matches on it, and round 5's record
+ * merge dedupes on it.
+ */
+export function foldedFindingIdentity(d: {
+	tool?: string | undefined;
+	rule?: string | undefined;
+	message: string;
+}): string {
+	return findingIdentity({ ...d, message: d.message.replace(/\d+/g, "#") });
+}
+
+/**
+ * #4484 round 4: the position a carry reads when a recorded finding has no
+ * usable position (no alignment, or round 5's stale line). The finding then
+ * matches its identity anywhere `matchesAnywhere` allows.
  */
 export const ANY_POSITION = "anywhere";
 
@@ -80,9 +95,11 @@ export const ANY_POSITION = "anywhere";
  * folded, so a message that cites its own line (helm-lint's
  * `deploy.yaml:4: …`) still matches after the line moves. A prior finding
  * with no position (its line was edited or deleted) is matched by nothing.
- * Round 4: a prior finding at {@link ANY_POSITION} (the write has no
- * alignment) is matched by its identity at any line, after every positioned
- * prior finding took its match; that fails closed. An unmatched prior entry
+ * Round 4: a prior finding at {@link ANY_POSITION} (no usable position) is
+ * matched by its identity at any line, after every positioned prior finding
+ * took its match; that fails closed. Round 5: only by an observed finding
+ * `matchesAnywhere` accepts (its line holds the prior finding's text), so a
+ * same-rule finding on another line's text never stands in. An unmatched prior entry
  * survives only when `keepUnobserved` says its source gave no verdict;
  * otherwise the observation retired it. Observed findings no prior entry
  * matched are not returned: an observation keeps a recorded finding, it never
@@ -101,10 +118,10 @@ export function retainRecordedFindings<
 	options: {
 		positionOf: (finding: T) => number | undefined | typeof ANY_POSITION;
 		keepUnobserved: (finding: T) => boolean;
+		matchesAnywhere?: (prior: T, observed: T) => boolean;
 	},
 ): { kept: T[]; retired: T[] } {
-	const identity = (d: T) =>
-		findingIdentity({ ...d, message: d.message.replace(/\d+/g, "#") });
+	const identity = foldedFindingIdentity;
 	const byPlace = new Map<string, T[]>();
 	const byIdentity = new Map<string, T[]>();
 	const file = (map: Map<string, T[]>, key: string, d: T) => {
@@ -117,8 +134,11 @@ export function retainRecordedFindings<
 		if (d.line !== undefined) file(byPlace, `${identity(d)}@${d.line}`, d);
 	}
 	const taken = new Set<T>();
-	const take = (bucket: T[] | undefined): T | undefined => {
-		const match = bucket?.find((d) => !taken.has(d));
+	const take = (
+		bucket: T[] | undefined,
+		accepts: (d: T) => boolean = () => true,
+	): T | undefined => {
+		const match = bucket?.find((d) => !taken.has(d) && accepts(d));
 		if (match !== undefined) taken.add(match);
 		return match;
 	};
@@ -131,7 +151,10 @@ export function retainRecordedFindings<
 	});
 	prior.forEach((d, i) => {
 		if (positions[i] === ANY_POSITION)
-			matches[i] = take(byIdentity.get(identity(d)));
+			matches[i] = take(
+				byIdentity.get(identity(d)),
+				(o) => options.matchesAnywhere?.(d, o) ?? true,
+			);
 	});
 	const kept: T[] = [];
 	const retired: T[] = [];

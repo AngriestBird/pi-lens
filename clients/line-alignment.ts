@@ -10,8 +10,9 @@
  *
  * The alignment is a Myers shortest edit script over the lines between the
  * common prefix and suffix, bounded by {@link MAX_ALIGNMENT_EDITS}. A rewrite
- * larger than that has no alignment, and the caller falls back to the
- * recorded line number.
+ * larger than that has no alignment. Round 5: a recorded blocker then
+ * matches its identity on a line with its own text (`Diagnostic.lineHash`),
+ * and an owed runner is owed the lines whose text matches an owed line.
  */
 import { lineContentHash } from "./read-guard.js";
 
@@ -28,23 +29,38 @@ export const MAX_ALIGNMENT_LINES = 100_000;
 export const MAX_OWED_RANGES = 64;
 /** Insertions plus deletions beyond which a change has no alignment. */
 export const MAX_ALIGNMENT_EDITS = 1_000;
+/**
+ * #4484 round 5: distinct owed line texts per runner beyond which the runner
+ * owes the whole file. 4 bytes each, so at most 16 KB per owing runner.
+ */
+export const MAX_OWED_LINE_TEXTS = 4_096;
+
+/**
+ * #4484 round 5: lines owed to a runner by their content, not their
+ * position: the sorted, distinct hashes of the owed lines, or the whole file.
+ * Used where positions cannot be remapped (no alignment, a file without a
+ * blocker record, or more than {@link MAX_OWED_RANGES} ranges).
+ */
+export type OwedContent = Uint32Array | "whole-file";
 
 /**
  * What a file's last applied inline verdict analysed (#4484 round 3): the
  * per-line hashes of its bytes, which the recorded blockers' lines refer to,
  * and per runner that reached no verdict, the lines still owed to it (R4),
  * in those bytes. Round 4: it is a field of the file's blocker record, so it
- * lives exactly as long as the record. Undefined hashes mean no alignment:
- * a recorded blocker then matches its identity anywhere, and an owed runner
- * owes the whole file. An empty range list means the whole file too.
+ * lives exactly as long as the record. Undefined hashes mean no alignment.
+ * Round 5: a runner is owed either ranges of these bytes (`owedRanges`,
+ * never empty) or line content (`owedContent`), never both.
  */
 export interface AnalysisAnchor {
 	readonly lineHashes: Uint32Array | undefined;
-	/** Per runner id, the lines owed to it. */
+	/** Per runner id, the lines owed to it, in these bytes. */
 	readonly owedRanges: ReadonlyMap<
 		string,
 		ReadonlyArray<{ start: number; end: number }>
 	>;
+	/** Per runner id, the lines owed to it by content (round 5). */
+	readonly owedContent?: ReadonlyMap<string, OwedContent>;
 }
 
 /** 1-based line in the old version to 1-based line in the new one, or undefined when edited or deleted. */
@@ -57,9 +73,35 @@ export type LineMap = (line: number) => number | undefined;
 export function lineHashesOf(text: string): Uint32Array | undefined {
 	const lines = text.split(/\r?\n/);
 	if (lines.length > MAX_ALIGNMENT_LINES) return undefined;
-	return Uint32Array.from(lines, (line) =>
-		Number.parseInt(lineContentHash(line), 16),
-	);
+	return Uint32Array.from(lines, lineHashOf);
+}
+
+/** One line's hash, as {@link lineHashesOf} packs it. */
+export function lineHashOf(line: string): number {
+	return Number.parseInt(lineContentHash(line), 16);
+}
+
+/**
+ * #4484 round 5: each finding of `content` (`isOwn`) without a line hash,
+ * copied with the hash of its own line, so a later write can tell it from a
+ * same-rule finding on a line with other text. A finding that has one keeps
+ * it: a carried copy's line number may be from older bytes.
+ */
+export function stampLineHashes<
+	T extends { line?: number | undefined; lineHash?: number | undefined },
+>(
+	findings: readonly T[],
+	content: string | undefined,
+	isOwn: (d: T) => boolean,
+): T[] {
+	if (content === undefined) return [...findings];
+	let lines: string[] | undefined;
+	return findings.map((d) => {
+		if (d.lineHash !== undefined || d.line === undefined || !isOwn(d)) return d;
+		lines ??= content.split(/\r?\n/);
+		const text = lines[d.line - 1];
+		return text === undefined ? d : { ...d, lineHash: lineHashOf(text) };
+	});
 }
 
 /**
@@ -235,9 +277,86 @@ export function owedRangesAfterDispatch(input: {
 			);
 		}
 	}
-	// Round 4: past the cap the runner owes the whole file, a superset.
-	for (const [runnerId, ranges] of owedRanges)
-		if (ranges.length > MAX_OWED_RANGES)
-			owedRanges.set(runnerId, [{ start: 1, end: input.lineCount() }]);
 	return owedRanges;
+}
+
+/**
+ * #4484 round 5: the content of the lines `ranges` cover in bytes with
+ * `lineHashes`. The whole file when the bytes have no hashes, or past
+ * {@link MAX_OWED_LINE_TEXTS} distinct texts.
+ */
+export function owedContentOf(
+	ranges: ReadonlyArray<{ start: number; end: number }>,
+	lineHashes: Uint32Array | undefined,
+): OwedContent {
+	if (lineHashes === undefined) return "whole-file";
+	const texts = new Set<number>();
+	for (const line of linesOfRanges(ranges)) {
+		const hash = lineHashes[line - 1];
+		if (hash !== undefined) texts.add(hash);
+		if (texts.size > MAX_OWED_LINE_TEXTS) return "whole-file";
+	}
+	return Uint32Array.from(texts).sort();
+}
+
+/**
+ * #4484 round 5: the lines of bytes with `lineHashes` that `owed` names: each
+ * line whose text matches an owed line's. A line the write changed is in its
+ * edit range anyway, so this covers every place an owed line can be. The
+ * whole file when the content is, or the bytes have no hashes.
+ */
+export function linesOwedByContent(
+	owed: OwedContent,
+	lineHashes: Uint32Array | undefined,
+	lineCount: number,
+): { start: number; end: number }[] {
+	if (owed === "whole-file" || lineHashes === undefined)
+		return lineCount > 0 ? [{ start: 1, end: lineCount }] : [];
+	const texts = new Set(owed);
+	const lines: number[] = [];
+	lineHashes.forEach((hash, i) => {
+		if (texts.has(hash)) lines.push(i + 1);
+	});
+	return rangesOfLines(lines);
+}
+
+/**
+ * #4484 round 5: the anchor a verdict hands on, bounded: a runner owed more
+ * than {@link MAX_OWED_RANGES} ranges is owed their content instead.
+ */
+export function boundedAnchor(
+	lineHashes: Uint32Array | undefined,
+	owed: ReadonlyMap<string, ReadonlyArray<{ start: number; end: number }>>,
+): AnalysisAnchor {
+	const owedRanges = new Map<
+		string,
+		ReadonlyArray<{ start: number; end: number }>
+	>();
+	const owedContent = new Map<string, OwedContent>();
+	for (const [runnerId, ranges] of owed) {
+		if (ranges.length > MAX_OWED_RANGES)
+			owedContent.set(runnerId, owedContentOf(ranges, lineHashes));
+		else owedRanges.set(runnerId, ranges);
+	}
+	return {
+		lineHashes,
+		owedRanges,
+		...(owedContent.size > 0 ? { owedContent } : {}),
+	};
+}
+
+/**
+ * #4484 round 5: what a file keeps owed once its record (and the hashes on
+ * it) may be gone: every owing runner by content. Undefined when nothing is
+ * owed.
+ */
+export function owedByContentOnly(
+	anchor: AnalysisAnchor | undefined,
+): AnalysisAnchor | undefined {
+	const owedContent = new Map(anchor?.owedContent ?? []);
+	for (const [runnerId, ranges] of anchor?.owedRanges ?? [])
+		owedContent.set(runnerId, owedContentOf(ranges, anchor?.lineHashes));
+	return owedContent.size > 0
+		? { lineHashes: undefined, owedRanges: new Map(), owedContent }
+		: undefined;
 }

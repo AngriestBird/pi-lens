@@ -34,6 +34,7 @@
 
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
+import { resolve } from "node:path";
 import { gateFindingsByPathFreshness } from "./advisory-provenance.js";
 import {
 	peekSettledRunnerFindings,
@@ -41,6 +42,7 @@ import {
 } from "./dispatch/pending-runner-findings.js";
 import { applyPushedFindingPolicy } from "./dispatch/finding-policy.js";
 import { type Diagnostic, reachedNoVerdict } from "./dispatch/types.js";
+import { stampLineHashes } from "./line-alignment.js";
 import { logLatency } from "./latency-logger.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 
@@ -136,10 +138,16 @@ export function recordDeferredRunnerBlockers(
 ): number {
 	// #4484 r2: stamped with the runner, as the dispatcher stamps its own, so
 	// the next write carries the blocker while this runner is in flight again.
-	const blocking = survivors.flatMap((d) =>
-		d.semantic === "blocking"
-			? [{ ...d, runnerId: d.runnerId ?? pending.runnerId }]
-			: [],
+	// Round 5: and with its line's text in the settled bytes, as the pipeline
+	// stamps its record (`stampLineHashes`).
+	const blocking = stampLineHashes(
+		survivors.flatMap((d) =>
+			d.semantic === "blocking"
+				? [{ ...d, runnerId: d.runnerId ?? pending.runnerId }]
+				: [],
+		),
+		bytes?.toString("utf-8"),
+		(d) => !d.filePath || resolve(d.filePath) === resolve(pending.filePath),
 	);
 	if (blocking.length === 0) return 0;
 	const recorded = runtime.recordDeferredInlineBlockers(

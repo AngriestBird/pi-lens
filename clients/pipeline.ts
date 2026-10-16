@@ -46,11 +46,16 @@ import { ANY_POSITION, retainRecordedFindings } from "./finding-identity.js";
 import {
 	type AnalysisAnchor,
 	alignLines,
+	boundedAnchor,
 	type LineMap,
 	lineHashesOf,
+	lineHashOf,
 	linesOfRanges,
+	linesOwedByContent,
+	owedContentOf,
 	owedRangesAfterDispatch,
 	rangesOfLines,
+	stampLineHashes,
 } from "./line-alignment.js";
 import { loadDispatchIntegration } from "./dispatch/lazy.js";
 import { toRunnerDisplayPath } from "./dispatch/runner-context.js";
@@ -1906,6 +1911,7 @@ function carryRecordedBlockers(
 	dispatchResult: Pick<DispatchResult, "stillObserved" | "inconclusiveSources">,
 	filePath: string,
 	positionOf: (d: Diagnostic) => number | undefined | typeof ANY_POSITION,
+	matchesAnywhere: (prior: Diagnostic, observed: Diagnostic) => boolean,
 ): { carried: Diagnostic[]; matched: ReadonlySet<Diagnostic> } {
 	if (prior.length === 0) return { carried: [], matched: new Set() };
 	const runnerIds = new Set(dispatchResult.inconclusiveSources?.runnerIds);
@@ -1917,6 +1923,7 @@ function carryRecordedBlockers(
 		[...observed, ...(dispatchResult.stillObserved ?? [])],
 		{
 			positionOf,
+			matchesAnywhere,
 			keepUnobserved: (d) =>
 				(d.runnerId !== undefined && runnerIds.has(d.runnerId)) ||
 				(d.serverId !== undefined && serverIds.has(d.serverId)),
@@ -1942,17 +1949,20 @@ function carryRecordedBlockers(
 
 /**
  * #4484 round 3: this run's bytes against the anchor of the file's blocker
- * record. `positionOf` maps a line of the anchor's bytes to this run's (R2):
- * undefined when the line was edited or deleted. Round 4: with no alignment
- * (no anchor, an anchor without hashes, bytes past the caps, or a change past
- * the edit cap) it is {@link ANY_POSITION}, so a recorded blocker matches its
- * identity anywhere and fails closed; that is counted once per file. `owed`
- * is the anchor's owed lines per runner, in this run's bytes (R4); with no
- * alignment each owing runner owes the whole file. `next` is the anchor this
- * run's verdict hands on: its own line hashes, and for each runner that
- * reached no verdict and is not still in flight (a collect-later run settles
- * on its own), the lines it analysed for that runner; a run without
- * authorship keeps every earlier owed line too.
+ * record. `positionOf` maps a recorded blocker's line of the anchor's bytes
+ * to this run's (R2): undefined when the line was edited or deleted. Round 4:
+ * with no alignment (no anchor, an anchor without hashes, bytes past the
+ * caps, or a change past the edit cap) it is {@link ANY_POSITION}, counted
+ * once per file. Round 5: so is a blocker whose line no longer holds its own
+ * text in the anchor's bytes (`lineHash`: an earlier write without alignment
+ * kept it at an older line number). `matchesAnywhere` then admits only an
+ * observed finding on a line with the blocker's text. `owed` is the anchor's
+ * owed lines per runner, in this run's bytes (R4): remapped ranges with an
+ * alignment, otherwise the lines whose text matches an owed line. `next` is
+ * the anchor this run's verdict hands on: its own line hashes, and for each
+ * runner that reached no verdict and is not still in flight (a collect-later
+ * run settles on its own), the lines it analysed for that runner; a run
+ * without authorship keeps every earlier owed line too.
  */
 function anchorToPriorAnalysis(
 	prior: AnalysisAnchor | undefined,
@@ -1971,8 +1981,18 @@ function anchorToPriorAnalysis(
 				: undefined;
 		return hashes ?? undefined;
 	};
+	let lines: string[] | undefined;
 	const lineCount = () =>
 		currentHashes()?.length ?? fileContent?.split(/\r?\n/).length ?? 0;
+	// One line's hash in these bytes, also past the caps (undefined: unread).
+	const hashAt = (line: number): number | undefined => {
+		const all = currentHashes();
+		if (all) return all[line - 1];
+		if (fileContent === undefined) return undefined;
+		lines ??= fileContent.split(/\r?\n/);
+		const text = lines[line - 1];
+		return text === undefined ? undefined : lineHashOf(text);
+	};
 	let lineMap: LineMap | undefined | null = null;
 	const alignment = (): LineMap | undefined => {
 		if (lineMap === null) {
@@ -1981,38 +2001,67 @@ function anchorToPriorAnalysis(
 				prior?.lineHashes && now
 					? alignLines(prior.lineHashes, now)
 					: undefined;
-			if (lineMap === undefined)
-				recordDegradationOnce({
-					kind: "blocker-position-unaligned",
-					subject: normalizeMapKey(filePath),
-					reason:
-						"the write's bytes could not be aligned to the bytes its recorded blockers were read from; they are matched on identity alone and owed lines widen to the whole file (#4484)",
-				});
 		}
 		return lineMap;
 	};
-	const positionOf = (
-		line: number,
-	): number | undefined | typeof ANY_POSITION => {
+	const unplaced = () =>
+		recordDegradationOnce({
+			kind: "blocker-position-unaligned",
+			subject: normalizeMapKey(filePath),
+			reason:
+				"a recorded blocker could not be placed in the write's bytes (no alignment, or its line no longer holds its text); it matches its identity only on a line with its own text, and owed lines are matched by content (#4484)",
+		});
+	const positionOf = (d: {
+		line: number;
+		lineHash?: number | undefined;
+	}): number | undefined | typeof ANY_POSITION => {
 		const map = alignment();
-		return map ? map(line) : ANY_POSITION;
+		const placed =
+			d.lineHash === undefined ||
+			prior?.lineHashes?.[d.line - 1] === d.lineHash;
+		if (map && placed) return map(d.line);
+		unplaced();
+		return ANY_POSITION;
+	};
+	const matchesAnywhere = (prior: Diagnostic, observed: Diagnostic) => {
+		if (prior.lineHash === undefined || observed.line === undefined)
+			return true;
+		const text = hashAt(observed.line);
+		return text === undefined || text === prior.lineHash;
 	};
 	const owed = new Map<string, { start: number; end: number }[]>();
+	const owe = (runnerId: string, ranges: { start: number; end: number }[]) => {
+		if (ranges.length > 0) owed.set(runnerId, ranges);
+	};
 	for (const [runnerId, ranges] of prior?.owedRanges ?? []) {
 		const map = alignment();
-		const lines = map
-			? linesOfRanges(ranges).flatMap((line) => {
+		if (!map) {
+			unplaced();
+			owe(
+				runnerId,
+				linesOwedByContent(
+					owedContentOf(ranges, prior?.lineHashes),
+					currentHashes(),
+					lineCount(),
+				),
+			);
+			continue;
+		}
+		owe(
+			runnerId,
+			rangesOfLines(
+				linesOfRanges(ranges).flatMap((line) => {
 					const at = map(line);
 					return at === undefined ? [] : [at];
-				})
-			: undefined;
-		if (lines === undefined) {
-			const count = lineCount();
-			if (count > 0) owed.set(runnerId, [{ start: 1, end: count }]);
-		} else if (lines.length > 0) owed.set(runnerId, rangesOfLines(lines));
+				}),
+			),
+		);
 	}
+	for (const [runnerId, content] of prior?.owedContent ?? [])
+		owe(runnerId, linesOwedByContent(content, currentHashes(), lineCount()));
 	return {
 		positionOf,
+		matchesAnywhere,
 		owed,
 		next(
 			sources: InconclusiveSources | undefined,
@@ -2029,7 +2078,7 @@ function anchorToPriorAnalysis(
 				lineCount,
 			});
 			if (lineHashes === undefined && owedRanges.size === 0) return undefined;
-			return { lineHashes, owedRanges };
+			return boundedAnchor(lineHashes, owedRanges);
 		},
 	};
 }
@@ -2387,7 +2436,8 @@ async function analysePipeline(
 				d.line === undefined ||
 				(d.filePath && normalizeEphemeralMapKey(d.filePath) !== ownFile)
 					? d.line
-					: anchoring.positionOf(d.line),
+					: anchoring.positionOf({ line: d.line, lineHash: d.lineHash }),
+			anchoring.matchesAnywhere,
 		);
 	// #4484 round 3 (F4): a held-back blocker no recorded blocker matched was
 	// never delivered (a new error that took a fixed one's line-bound id), so
@@ -2769,8 +2819,17 @@ async function analysePipeline(
 		// turn-end policy filter and its re-render can never disagree with the
 		// text they guard — the same provenance argument `inlineBlockerSources`
 		// makes one field up.
+		// #4484 round 5: each entry carries its own line's text, so a later write
+		// with no position for it matches only a line with that text.
 		inlineBlockerDiagnostics:
-			recordBlockers.length > 0 ? recordBlockers : undefined,
+			recordBlockers.length > 0
+				? stampLineHashes(
+						recordBlockers,
+						fileContent,
+						(d) =>
+							!d.filePath || normalizeEphemeralMapKey(d.filePath) === ownFile,
+					)
+				: undefined,
 		// #4484: what a clear must find empty, whatever the authorship.
 		currentBlockerCount: liveBlockers.length,
 	};

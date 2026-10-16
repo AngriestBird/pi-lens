@@ -143,6 +143,14 @@ export interface Diagnostic {
 	 * keeps that server's recorded blockers. Never part of identity.
 	 */
 	serverId?: string;
+	/**
+	 * #4484 round 5: the content hash (`lineContentHash`, as a number) of this
+	 * finding's own line in the bytes it was observed in, stamped when it
+	 * enters the inline-blocker record (`stampLineHashes`). A write with no
+	 * usable position matches a recorded blocker only on a line with this
+	 * text. Never part of identity, dedup or suppression.
+	 */
+	lineHash?: number;
 }
 
 /**

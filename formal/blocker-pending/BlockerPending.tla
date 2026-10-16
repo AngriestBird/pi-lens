@@ -106,6 +106,24 @@ state table). The fix switch is pinned TRUE:
    was, found nothing there, and retired a withheld "a" still in the bytes
    (verify probes P11c, P11d, P18).
 
+The round-5 environment and fix switches (#4484 round 5; PR #4491's round-5
+state table). Each fix switch is pinned TRUE:
+ - TwinSameText (environment): "p"'s line has "a"'s text, so no line-content
+   evidence tells them apart (#4481). FALSE is a twin with other text (P22);
+ - UnalignedText (round 5, K1): a match by identity anywhere also needs the
+   recorded entry's own line text (`Diagnostic.lineHash`), so a "p" with other
+   text never stands in. FALSE is the round-4 code: identity alone, so a
+   pre-existing "p" took over a fixed "a" and pinned (verify probe P22);
+ - StaleAnywhere (round 5): an entry a write with no alignment kept without a
+   match (its runner had no verdict) has no position afterwards (`unpos`); a
+   later aligned write matches it anywhere by identity and text. FALSE is the
+   round-4 code: the later write aligned its stale line number, found nothing
+   there, and retired it while the bytes still held it;
+ - OwedByContent (round 5, K2): without a positional alignment (no record, or
+   a write with no alignment) a runner is owed the lines whose text matches an
+   owed line. FALSE is the round-4 code: it was owed the whole file, so a
+   pre-existing "p" no write had reached became a new STOP (verify probe P23).
+
 Invariants:
  - GateHonest: the commit gate is open only when no completed observation of
    the current bytes holds a blocker;
@@ -127,6 +145,9 @@ Invariants:
    fail-closed cost);
  - UnalignedKept: a write with no alignment never retires a recorded blocker
    its bytes still hold (the ghost `lost`);
+ - TwinNotAdopted: a pre-existing twin with other text is never delivered or
+   stood in by a write that did not reach its line (its line edited or owed)
+   (the ghost `adopted`). A same-text twin is the #4481 residual;
  - RecordedKept: every blocker a run delivered stays in the record until a
    conclusive observation from its own source shows it gone (the ghost
    `owed`). It is the GateSound of a run that can fail or a value that blocks
@@ -160,7 +181,11 @@ CONSTANTS
     SkipNoVerdict,     \* round 3 (R1): a skip without a stated reason has no verdict
     OwedRanges,        \* round 3 (R4): a no-verdict write's lines join the next range
     MayUnalign,        \* round 4: a write may have no line alignment
-    UnalignedIdentity  \* round 4: with no alignment, match a recorded blocker by identity
+    UnalignedIdentity, \* round 4: with no alignment, match a recorded blocker by identity
+    TwinSameText,      \* round 5: "p"'s line has "a"'s text
+    UnalignedText,     \* round 5 (K1): an identity match anywhere needs the entry's own text
+    StaleAnywhere,     \* round 5: an entry kept without a position is matched anywhere later
+    OwedByContent      \* round 5 (K2): without alignment, owe the lines with an owed line's text
 
 Fast == {"a", "b"}
 U == IF Unused THEN {"u"} ELSE {}
@@ -207,16 +232,19 @@ VARIABLES
     reported,   \* ghost: every finding some run delivered
     lost,       \* ghost: recorded blockers still in the bytes a write with no alignment retired
     held,       \* ghost: findings a write with no alignment kept by identity, undelivered
+    unpos,      \* recorded entries with no position (kept unmatched by a write with no alignment)
+    adopted,    \* ghost: pre-existing twins delivered or stood in by a write that did not reach them
     nW, nO, nT
 
 vars == <<disk, ln, base, hasBase, rec, obsF, wobs, dState, toolClean, noted,
           cleared, clearOk, claim, claimSet, claimOk, owed, cleanOk, owe,
-          reported, lost, held, nW, nO, nT>>
+          reported, lost, held, unpos, adopted, nW, nO, nT>>
 
 TypeOK ==
     /\ disk \subseteq AllF /\ rec \subseteq AllF /\ obsF \subseteq Inline
     /\ owed \subseteq AllF /\ owe \subseteq Lined /\ reported \subseteq AllF
     /\ lost \subseteq AllF /\ held \subseteq AllF
+    /\ unpos \subseteq Lined /\ adopted \subseteq Tw
     /\ dState \in {"idle", "flight", "settled", "failed"}
 
 Init ==
@@ -229,6 +257,7 @@ Init ==
     /\ owed = {} /\ cleanOk = TRUE
     /\ owe = {} /\ reported = {}
     /\ lost = {} /\ held = {}
+    /\ unpos = {} /\ adopted = {}
     /\ nW = 0 /\ nO = 0 /\ nT = 0
 
 \* What the fast runners deliver as blocking for bytes `new` when the write
@@ -254,17 +283,30 @@ UBlock(new, fail, l) ==
 \* CarryByPosition the carry matches by identity alone: a withheld "p"
 \* keeps a fixed, recorded "a" as its own observed copy. With it, a blind
 \* write matches by identity too under UnalignedIdentity; without that, it
-\* reads the stale line, finds nothing, and keeps no withheld blocker.
-ByIdentity(blind) == ~CarryByPosition \/ (blind /\ UnalignedIdentity)
-Positional(blind) == ~(CarryByPosition /\ blind /\ ~UnalignedIdentity)
+\* reads the stale line, finds nothing, and keeps no withheld blocker. An
+\* entry with no position (`unpos`) on an aligned write is matched anywhere
+\* under StaleAnywhere; without it, its stale line finds nothing. A match
+\* anywhere lets "p" stand in only when the text cannot tell them apart
+\* (TwinSameText) or the code does not compare it (~UnalignedText).
+AnyMatch(blind) ==
+    \/ blind /\ UnalignedIdentity
+    \/ ~blind /\ "a" \in unpos /\ StaleAnywhere
+ByIdentity(blind) ==
+    \/ ~CarryByPosition
+    \/ AnyMatch(blind) /\ (TwinSameText \/ ~UnalignedText)
+Located(e, blind) ==
+    \/ ~CarryByPosition
+    \/ IF blind THEN UnalignedIdentity ELSE e \notin unpos \/ StaleAnywhere
 StandIn(new, touched, fail, blind) ==
     IF Twin /\ ByIdentity(blind) /\ ScopeDeliveryOnly /\ "a" \in rec
        /\ "a" \notin Full(new, fail)
        /\ "p" \in Full(new, fail) \ Deliv(new, touched, fail)
       THEN {"p"} ELSE {}
 Carried(new, touched, fail, l, blind) ==
-    (IF ScopeDeliveryOnly /\ Positional(blind)
-       THEN rec \cap (Full(new, fail) \ Deliv(new, touched, fail)) ELSE {})
+    (IF ScopeDeliveryOnly
+       THEN {e \in rec \cap (Full(new, fail) \ Deliv(new, touched, fail)) :
+               Located(e, blind)}
+       ELSE {})
     \cup StandIn(new, touched, fail, blind)
     \cup (IF CarryPromoted
        THEN rec \cap (USeen(new, fail) \ UBlock(new, fail, l)) ELSE {})
@@ -293,14 +335,25 @@ RecordVerb(set, gone) ==
 
 \* The lines a run covers: the write's own, and under OwedRanges the lines a
 \* run with no verdict still owes. A run with no verdict leaves all of them
-\* owed; an authored verdict discharges them.
-Covers(touched) == touched \cup (IF OwedRanges THEN owe ELSE {})
+\* owed; an authored verdict discharges them. Owed positions remap only
+\* through an alignment to a record's bytes (`al`, a record). Otherwise
+\* OwedByContent owes the lines with an owed line's text, which reaches "p"
+\* only when it has "a"'s text; without it the whole file is owed.
+Owing(al) ==
+    IF ~OwedRanges \/ owe = {} THEN {}
+    ELSE IF al /\ rec # {} THEN owe
+    ELSE IF OwedByContent
+      THEN owe \cup (IF TwinSameText /\ "a" \in owe THEN Tw ELSE {})
+    ELSE Lined
+Covers(touched, al) == touched \cup Owing(al)
+\* What a write may legitimately reach: its own lines and its owed lines.
+Reach(edited) == edited \cup owe \cup (IF TwinSameText THEN Tw ELSE {})
 
 Write(bytes, shift, edited, o, al) ==
     LET new == Seen(bytes, o)
         blind == ~al /\ shift
         fail == Failed(o)
-        touched == Covers(edited)
+        touched == Covers(edited, al)
         l == IF shift THEN [f \in AllF |-> ln[f] + 1] ELSE ln
         obs == Deliv(new, touched, fail)
         ub == UBlock(new, fail, l)
@@ -319,8 +372,15 @@ Write(bytes, shift, edited, o, al) ==
        /\ owe' = IF fail THEN owe \cup touched ELSE {}
        /\ reported' = reported \cup delivered
        /\ lost' = IF blind THEN (rec \ current) \cap bytes \cap Lined ELSE {}
-       /\ held' = held \cup (IF blind
+       /\ held' = held \cup (IF AnyMatch(blind)
                     THEN StandIn(new, touched, fail, blind) \ delivered ELSE {})
+       /\ unpos' = IF fail /\ CarryInconclusive
+                     THEN ((IF blind THEN rec ELSE unpos) \cap Lined \cap current)
+                          \ delivered
+                     ELSE {}
+       /\ adopted' = adopted \cup
+                    (((delivered \cup StandIn(new, touched, fail, blind))
+                        \cap Tw \cap Gated) \ Reach(edited))
        /\ dState' = IF Deferred THEN "flight" ELSE "idle"
        /\ claim' = FALSE
 
@@ -343,7 +403,7 @@ OpaqueStep ==
     /\ \E bytes \in SUBSET disk, o \in Outcomes :
         LET new == Seen(bytes, o)
             fail == Failed(o)
-            touched == Covers((disk \ bytes) \cap Lined)
+            touched == Covers((disk \ bytes) \cap Lined, TRUE)
             obs == Deliv(new, touched, fail)
             ub == UBlock(new, fail, ln)
             keep == obs \cup ub \cup Carried(new, touched, fail, ln, FALSE)
@@ -354,13 +414,14 @@ OpaqueStep ==
            /\ obsF' = obs \cup ub
            /\ IF clears THEN RecordVerb({}, Gone(new, fail))
                         ELSE UNCHANGED <<rec, noted, cleared, clearOk>>
+           /\ unpos' = IF clears THEN {} ELSE unpos
            /\ owed' = OwedAfter(new, fail)
            /\ owe' = IF fail THEN owe \cup touched ELSE owe
            /\ dState' = IF Deferred THEN "flight" ELSE "idle"
     /\ nO' = nO + 1
     /\ claim' = FALSE
     /\ UNCHANGED <<ln, wobs, toolClean, claimSet, claimOk, cleanOk, reported,
-                   lost, held, nW, nT>>
+                   lost, held, adopted, nW, nT>>
 
 \* The collect-later run of the current bytes settles. A conclusive run's
 \* blocker joins the record (recordDeferredInlineBlockers merges and leaves
@@ -391,7 +452,7 @@ SettleStep ==
         /\ reported' = reported \cup (SettledRec(ok) \ rec)
     /\ UNCHANGED <<disk, ln, base, hasBase, obsF, wobs, toolClean,
                    claim, claimSet, claimOk, cleanOk, owe, lost, held,
-                   nW, nO, nT>>
+                   unpos, adopted, nW, nO, nT>>
 
 TurnEndStep ==
     /\ nT < Turns
@@ -414,7 +475,7 @@ TurnEndStep ==
            /\ reported' = reported \cup (r \ rec)
     /\ nT' = nT + 1
     /\ UNCHANGED <<disk, ln, base, hasBase, obsF, wobs, toolClean, cleanOk,
-                   owe, lost, held, nW, nO>>
+                   owe, lost, held, unpos, adopted, nW, nO>>
 
 Next == WriteStep \/ OpaqueStep \/ SettleStep \/ TurnEndStep
 
@@ -430,5 +491,6 @@ GateSound == rec = {} => disk \cap Fast \subseteq owe
 RecordedKept == owed \subseteq rec
 RecordedReported == rec \subseteq reported \cup held
 UnalignedKept == lost = {}
+TwinNotAdopted == adopted = {}
 CleanSound == cleanOk
 =============================================================================

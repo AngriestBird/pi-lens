@@ -126,4 +126,30 @@ describe("retainRecordedFindings", () => {
 		expect(kept).toEqual([atSix]);
 		expect(retired).toEqual([unaligned]);
 	});
+	// Round 5 (K1, verify probe P22): identity anywhere let an untouched,
+	// never-delivered occurrence with other text take over a fixed blocker.
+	// Only an observed finding `matchesAnywhere` admits (its line holds the
+	// recorded text) stands in.
+	it("matches an unplaced finding only where its own text is", () => {
+		const recorded = f(2);
+		const otherText = f(5);
+		const sameText = f(9);
+		const { kept, retired } = retainRecordedFindings(
+			[recorded],
+			[otherText, sameText],
+			{
+				positionOf: () => ANY_POSITION,
+				keepUnobserved: never,
+				matchesAnywhere: (_prior, observed) => observed !== otherText,
+			},
+		);
+		expect(kept).toEqual([sameText]);
+		expect(retired).toEqual([]);
+		const alone = retainRecordedFindings([recorded], [otherText], {
+			positionOf: () => ANY_POSITION,
+			keepUnobserved: never,
+			matchesAnywhere: (_prior, observed) => observed !== otherText,
+		});
+		expect(alone.retired).toEqual([recorded]);
+	});
 });

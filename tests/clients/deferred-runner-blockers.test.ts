@@ -37,6 +37,7 @@ import {
 	flushLatencyLog,
 	getLatencyLogPath,
 } from "../../clients/latency-logger.js";
+import { lineHashOf } from "../../clients/line-alignment.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
@@ -387,6 +388,27 @@ describe("deferred blocker recording (#3814)", () => {
 
 			expect(runtime.getInlineBlockersSnapshot()[0]?.recordedAtMs).toBe(
 				markedAtMs,
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("stamps a settled blocker with its own line's text from the settled bytes", async () => {
+		// Recurrence (#4484 round 5, K1's settle path): a record a settle starts
+		// has no anchor, so the next write cannot align. Without the entry's own
+		// line text it matched by identity alone, and a same-rule finding on a
+		// line with other text could take over the record and pin.
+		const env = setupTestEnvironment("pi-lens-4484-settle-text-");
+		try {
+			const filePath = path.join(env.tmpDir, "app.ts");
+			fs.writeFileSync(filePath, "alpha();\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			await settledAnswer(filePath, env.tmpDir);
+			expect(absorbSettledRunnerBlockers(runtime, env.tmpDir).recorded).toBe(1);
+			expect(runtime.getInlineBlockerDiagnostics(filePath)?.[0]?.lineHash).toBe(
+				lineHashOf("alpha();"),
 			);
 		} finally {
 			env.cleanup();
