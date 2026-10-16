@@ -3040,6 +3040,45 @@ describe("PR body lint (#1844)", () => {
 		expect(lintPrBody(body)).toEqual({ valid: true, errors: [] });
 	});
 
+	it("rejects a refactor title without Behavior equivalence", () => {
+		const result = lintPrBody(body, {
+			title: "refactor(freshness): fold stamps",
+		});
+		expect(result.valid).toBe(false);
+		expect(result.errors.join(" ")).toContain(
+			'"## Behavior equivalence" must contain a markdown table',
+		);
+	});
+
+	it("rejects a placeholder-only Behavior equivalence table", () => {
+		const result = lintPrBody(
+			`${body}\n\n## Behavior equivalence\n\n| Site | Before | After |\n| --- | --- | --- |\n| n/a | none | tbd |`,
+			{ title: "refactor(freshness): fold stamps" },
+		);
+		expect(result.valid).toBe(false);
+		expect(result.errors.join(" ")).toContain(
+			'"## Behavior equivalence" must contain a markdown table',
+		);
+	});
+
+	it("accepts a real Behavior equivalence row for a refactor", () => {
+		expect(
+			lintPrBody(
+				`${body}\n\n## Behavior equivalence\n\n| Site | Before | After |\n| --- | --- | --- |\n| cache | mtime > stamp | freshnessFromMtime(..., 0) |`,
+				{ title: "refactor(freshness): fold stamps" },
+			),
+		).toEqual({ valid: true, errors: [] });
+	});
+
+	it("does not require Behavior equivalence for a fix title", () => {
+		expect(
+			lintPrBody(body, { title: "fix(freshness): preserve stamps" }),
+		).toEqual({
+			valid: true,
+			errors: [],
+		});
+	});
+
 	it("rejects two sentences in Why but accepts one", () => {
 		const rejected = lintPrBody(
 			body.replace(

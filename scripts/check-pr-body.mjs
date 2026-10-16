@@ -100,6 +100,7 @@ const SECTION_SYNONYMS = new Map([
 	["verification", "tests"],
 	["blast radius", "blast radius"],
 	["class sweep", "class sweep"],
+	["behavior equivalence", "behavior equivalence"],
 	["observability", "observability"],
 	["test assessment", "test assessment"],
 	// #4288: required only when the PR closes a bug-labelled issue, so it stays
@@ -1763,6 +1764,70 @@ function isPlaceholderAnswer(value) {
 	return /^unknown\b/.test(text) || /^(?:n\/a|tbd|\?+)$/.test(text);
 }
 
+const BEHAVIOR_EQUIVALENCE_MESSAGE =
+	'PR body "## Behavior equivalence" must contain a markdown table with Site, Before, and After columns and at least one non-placeholder data row.';
+
+function isBehaviorEquivalencePlaceholder(value) {
+	const normalized = normalizeDetectionLayer(value);
+	return (
+		!normalized ||
+		isPlaceholderAnswer(normalized) ||
+		/^(?:-|—|–|empty)$/.test(normalized)
+	);
+}
+
+function behaviorTableCells(line) {
+	if (!/^\s*\|.*\|\s*$/.test(line)) return null;
+	return line
+		.trim()
+		.slice(1, -1)
+		.split("|")
+		.map((cell) => cell.trim());
+}
+
+function lintBehaviorEquivalence(body, headings, title) {
+	if (!/^\s*refactor(?:\([^)]*\))?!?:/i.test(String(title ?? ""))) return [];
+	const heading = headings.find((candidate) =>
+		hasSection(candidate, "behavior equivalence"),
+	);
+	if (!heading) return [BEHAVIOR_EQUIVALENCE_MESSAGE];
+	const lines = sourceWithoutFencedBlocks(body).split(/\r?\n/);
+	const nextHeading = headings.find(
+		(candidate) =>
+			candidate.index > heading.index && candidate.level <= heading.level,
+	);
+	const sectionLines = lines.slice(
+		heading.index + 1,
+		nextHeading?.index ?? lines.length,
+	);
+	for (let index = 0; index + 1 < sectionLines.length; index += 1) {
+		const headers = behaviorTableCells(sectionLines[index]);
+		if (!headers) continue;
+		const normalizedHeaders = headers.map((header) => header.toLowerCase());
+		const site = normalizedHeaders.indexOf("site");
+		const before = normalizedHeaders.indexOf("before");
+		const after = normalizedHeaders.indexOf("after");
+		if (
+			site < 0 ||
+			before < 0 ||
+			after < 0 ||
+			!/^\s*\|?(?:\s*:?-+:?\s*\|)+\s*$/.test(sectionLines[index + 1])
+		)
+			continue;
+		for (const rowLine of sectionLines.slice(index + 2)) {
+			const row = behaviorTableCells(rowLine);
+			if (!row || row.length < headers.length) continue;
+			if (
+				![site, before, after].some((column) =>
+					isBehaviorEquivalencePlaceholder(row[column]),
+				)
+			)
+				return [];
+		}
+	}
+	return [BEHAVIOR_EQUIVALENCE_MESSAGE];
+}
+
 // `Gap:` names a follow-up issue, an existing test that now covers the bug, or
 // a reasoned `none:`. `exists:` must name a test path (under tests/ or a test
 // extension), so "exists: TBD" is refused. When the caller supplies
@@ -2320,6 +2385,7 @@ export function lintPrBody(body = "", options = {}) {
 				requireShape: true,
 			}),
 		);
+	errors.push(...lintBehaviorEquivalence(body, headings, options.title));
 	if (options.diff)
 		errors.push(
 			...lintRuntimeObservability(lines, headings, options.diff, options),
@@ -2554,6 +2620,7 @@ export async function lintPullRequestEvent(
 		// Existing open bodies were authored before #4280. Set PI_LENS_PROSE_GRACE=1
 		// for the transition job; local preflight remains blocking by default.
 		proseMode: process.env.PI_LENS_PROSE_GRACE === "1" ? "warn" : "block",
+		title: pullRequest.title,
 	});
 	const classSweep = lintClassSweep(body, { diff });
 	if (classSweep.length) {
@@ -2772,6 +2839,7 @@ export function lintLocalPrBody(
 		ref: options.ref,
 		headFiles: options.headFiles,
 		proseMode: options.proseMode,
+		title: options.title,
 	});
 	// #4288: a present section is validated whatever the label, so a prose-form
 	// answer reds here instead of at CI. `lintPrBody` already did it for a
