@@ -144,7 +144,12 @@
 		"typescript-language-server",
 		// The packaging workflow reads this pinned devDependency to install
 		// publint in its production-only job, then invokes its binary directly.
-		"publint"
+		"publint",
+		// #4513: scripts/bundle-dist.mjs reads this devDependency's locked
+		// version and spawns it through `npm exec --package esbuild@<version>`,
+		// never an import, so knip cannot credit it. It is a direct dependency
+		// because pi 1.2 dropped the host package that carried it into the lock.
+		"esbuild"
 	],
 	"ignoreBinaries": [
 		// .github/workflows/lint.yml installs this with `--no-save`

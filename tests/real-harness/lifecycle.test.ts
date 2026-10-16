@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { readFileSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { expect, describe, it } from "vitest";
 import { TOOL_REGISTRY } from "../../clients/tool-config.js";
@@ -7,7 +8,7 @@ import { type RealPi, withRealPi } from "../support/real-pi-harness.js";
 const realPiAvailable =
 	spawnSync("pi", ["--version"], { stdio: "ignore" }).status === 0;
 
-const situationalTools = TOOL_REGISTRY.flatMap((tool) =>
+const situationalTools: string[] = TOOL_REGISTRY.flatMap((tool) =>
 	"situational" in tool && tool.situational && tool.piName ? [tool.piName] : [],
 ).sort();
 
@@ -20,6 +21,72 @@ function roster(pi: RealPi): string[] {
 				: [],
 		)
 		.sort();
+}
+
+/** Tool names, in wire order, of the provider request at `index`. */
+function wireTools(pi: RealPi, index: number): string[] {
+	const tools = pi.providerObservations()[index]?.tools;
+	return (Array.isArray(tools) ? tools : []).flatMap((tool) =>
+		typeof (tool as { name?: unknown }).name === "string"
+			? [(tool as { name: string }).name]
+			: [],
+	);
+}
+
+/** The session sidecars that carry a lazy-tool memory. */
+function lazyMemorySidecars(pi: RealPi): string[] {
+	return pi.lens.sessionSidecars().filter((file) => {
+		try {
+			return readFileSync(file, "utf8").includes('"lazy-tool-memory":["');
+		} catch {
+			return false;
+		}
+	});
+}
+
+/**
+ * Activate a lazy tool, then restart pi on the same session (`--continue`) and
+ * return the roster before and on the first request after the restart. The
+ * scripted provider restarts its script in the new process, so that first
+ * request is sent before any tool ran: it shows the loadout pi and pi-lens
+ * agreed on, not an activation the new process made itself.
+ */
+async function activateThenResume(
+	forgetMemory: boolean,
+): Promise<{ activated: string[]; resumed: string[] }> {
+	return withRealPi(
+		{
+			fixture: "lifecycle",
+			script: "script.json",
+			persistedSession: true,
+			env: { PI_LENS_TEST_MODE: "0" },
+		},
+		async (pi) => {
+			await pi.prompt("startup");
+			await pi.awaitAssistantTurn();
+			await pi.awaitToolResult("pi_lens_activate_tools");
+			await pi.awaitAssistantTurn();
+			const activated = wireTools(pi, pi.providerObservations().length - 1);
+			expect(activated).toContain("ast_grep_search");
+			expect(
+				activated.filter((name) => situationalTools.includes(name)),
+			).toEqual(["ast_grep_search"]);
+			// The sidecar is a fire-and-forget write at turn_end; restarting
+			// before it lands would test that race, not the loadout.
+			await expect.poll(() => lazyMemorySidecars(pi)).not.toHaveLength(0);
+			if (forgetMemory)
+				for (const file of lazyMemorySidecars(pi))
+					rmSync(file, { force: true });
+
+			await pi.resume();
+			const before = pi.providerObservations().length;
+			await pi.prompt("after resume");
+			await expect
+				.poll(() => pi.providerObservations().length)
+				.toBeGreaterThan(before);
+			return { activated, resumed: wireTools(pi, before) };
+		},
+	);
 }
 
 function lifecycleRows(pi: RealPi) {
@@ -152,6 +219,26 @@ describe.skipIf(!realPiAvailable)("real pi lifecycle witness", () => {
 					}),
 				).toEqual(expectedTransitions);
 			},
+		);
+	}, 60_000);
+
+	// Recurrence prevented (#4513): pi 1.3 restores a resumed session's active
+	// tools from the transcript while pi-lens re-plans the set at
+	// `session_start`. A host that restores after that handler, or a plan that
+	// disagrees with the restore, would change the advertised tool list (and the
+	// prompt-cache prefix) on every resume.
+	it("keeps the activated lazy tool, and only it, when pi-lens remembers the activation across a resume", async () => {
+		const { activated, resumed } = await activateThenResume(false);
+		expect(resumed).toEqual(activated);
+	}, 60_000);
+
+	// pi 1.3 restores the transcript's loadout (ast_grep_search stays active);
+	// older hosts activate every registered tool. Either way pi-lens's plan
+	// decides: with no remembered activation the lazy tools go back to inactive.
+	it("deactivates the lazy tools the host restored or re-activated when pi-lens has no memory of them", async () => {
+		const { activated, resumed } = await activateThenResume(true);
+		expect(resumed).toEqual(
+			activated.filter((name) => !situationalTools.includes(name)),
 		);
 	}, 60_000);
 });
