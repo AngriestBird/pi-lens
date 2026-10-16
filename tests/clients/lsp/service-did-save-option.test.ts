@@ -167,8 +167,12 @@ async function touchSameBytes(
 	createLSPClient.mockResolvedValue(client);
 	const file = `${ROOT}/saved.ts`;
 	await service.getClientsForFile(file);
-	for (const options of touches)
-		await service.touchFile(file, "const x = 1;\n", options);
+	for (const options of touches) {
+		const { content = "const x = 1;\n", ...rest } = options as {
+			content?: string;
+		};
+		await service.touchFile(file, content, rest);
+	}
 	return { opens: open.mock.calls, saves: save.mock.calls };
 }
 
@@ -236,6 +240,59 @@ describe("#3405 — a save is not debounced away with the push it rides on", () 
 			[
 				{ ...POST_WRITE_TOUCH, saved: true },
 				{ ...POST_WRITE_TOUCH, saved: true },
+			],
+			{ includeText: false },
+		);
+		expect(opens).toHaveLength(1);
+		expect(opens[0]?.[5]).toBe(true);
+		expect(saves).toEqual([]);
+	});
+
+	it("sends no save for an unsaved touch over an unsaved push of the same bytes", async () => {
+		// #3405 r2 (review F2a): only a caller that declared a save is owed one.
+		// A warm-up or cascade touch debounced over another unsaved push must
+		// stay silent: Expert schedules a whole-project compile per didSave.
+		const { opens, saves } = await touchSameBytes(
+			[{ ...POST_WRITE_TOUCH }, { ...POST_WRITE_TOUCH }],
+			{ includeText: false },
+		);
+		expect(opens).toHaveLength(1);
+		expect(saves).toEqual([]);
+	});
+
+	it("sends one save for a saved touch of new bytes after an unsaved push of old bytes", async () => {
+		// #3405 r2 (review F2b): the save-alone path is for a server whose push
+		// was skipped. A server that gets the new bytes carries the save on that
+		// push; a second, separate save for the same write would make Expert
+		// compile twice.
+		const { opens, saves } = await touchSameBytes(
+			[
+				{ ...POST_WRITE_TOUCH },
+				{ ...POST_WRITE_TOUCH, saved: true, content: "const x = 2;\n" },
+			],
+			{ includeText: false },
+		);
+		expect(opens).toHaveLength(2);
+		expect(opens[1]?.[5]).toBe(true);
+		expect(saves).toEqual([]);
+	});
+
+	it("debounces a with-auxiliary touch over a primary push of the same bytes", async () => {
+		// #3405 r2 (review F1): the post-write sync and the MCP analysis push
+		// with scope "primary", then the dispatch runner touches the same bytes
+		// with scope "with-auxiliary" (on by default). The debounce key carried
+		// the scope, so the runner re-pushed the primary server the bytes it
+		// held, clearing the finding a save-only server had published for the
+		// save. The entry is per server; the scope says nothing about what that
+		// server holds.
+		const { opens, saves } = await touchSameBytes(
+			[
+				{ ...POST_WRITE_TOUCH, saved: true },
+				{
+					...POST_WRITE_TOUCH,
+					clientScope: "with-auxiliary",
+					source: "dispatch-lsp-runner",
+				},
 			],
 			{ includeText: false },
 		);

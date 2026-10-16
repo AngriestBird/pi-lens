@@ -1595,41 +1595,40 @@ describe("a save-triggered server through MCP (#3405)", { retry: 2 }, () => {
 		);
 		const file = path.join(env.tmpDir, "probe.lua");
 		fs.writeFileSync(file, "local value = 1\n");
-		const saves = () =>
+		/** Every document notification the server received, by method. */
+		const wire = () =>
 			fs.existsSync(trace)
 				? fs
 						.readFileSync(trace, "utf8")
 						.split("\n")
-						.filter((line) => line.startsWith("recv textDocument/didSave "))
+						.flatMap(
+							(line) =>
+								/^recv textDocument\/(did\w+) /.exec(line)?.slice(1, 2) ?? [],
+						)
 				: [];
-		return { env, file, saves };
+		const saves = () => wire().filter((method) => method === "didSave");
+		return { env, file, saves, wire };
 	}
 
 	it("pilens_analyze returns the finding a save-only server publishes", async () => {
-		const { env, file, saves } = saveOnlyWorkspace("pi-lens-mcp-save-analyze-");
+		const { env, file, wire } = saveOnlyWorkspace("pi-lens-mcp-save-analyze-");
 		const child = new McpHarness({ cwd: env.tmpDir });
 		try {
-			// Auxiliaries off: with one on, the dispatch runner touches under the
-			// "with-auxiliary" debounce key, re-pushes the primary the same bytes
-			// and clears the save's finding before this server (silent on a
-			// change) can answer again. That re-push is not about saves; it is
-			// the residual named in the #3405 PR.
+			// Default flags, so the auxiliary profiles stay on and the dispatch
+			// runner touches with scope "with-auxiliary" after the analysis's
+			// "primary" push. #3405 r2: the debounce key carried the scope, so the
+			// runner re-pushed the same bytes after the save and cleared the
+			// finding this server (silent on a change) had published.
 			const res = await child.request(3405, "tools/call", {
 				name: "pilens_analyze",
-				arguments: {
-					file,
-					mode: "warm",
-					flags: {
-						"no-opengrep": true,
-						"no-ast-grep": true,
-						"no-zizmor": true,
-						"no-typos": true,
-					},
-				},
+				arguments: { file, mode: "warm" },
 			});
 			const text = (res.result as { content: { text: string }[] }).content[0]
 				.text;
-			expect(saves(), "the server heard a save").toHaveLength(1);
+			expect(wire(), "one push, one save, no re-push").toEqual([
+				"didOpen",
+				"didSave",
+			]);
 			expect(text).toContain(SAVE_ONLY_MESSAGE);
 		} finally {
 			child.dispose();

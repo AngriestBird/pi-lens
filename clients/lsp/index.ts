@@ -1233,7 +1233,7 @@ export class LSPService {
 	>();
 	/**
 	 * Touch-debounce record of "this server already has this content", keyed
-	 * "normalizedFilePath:clientScope:serverId".
+	 * "normalizedFilePath:serverId".
 	 *
 	 * #743/#1253: the serverId component is load-bearing. #1253 requires that a
 	 * server whose notify write never landed does NOT get an entry (otherwise the
@@ -1250,6 +1250,12 @@ export class LSPService {
 	 * so it marks no entry.)
 	 * Weak, so an entry never pins a retired client's state.
 	 *
+	 * #3405 r2: no client-scope component. What a server holds does not depend
+	 * on which scope pushed it, and the scope in the key (a leftover from the
+	 * file-level key #1253 replaced) let the dispatch runner's "with-auxiliary"
+	 * touch re-push the bytes the post-write sync or the MCP analysis had just
+	 * pushed as "primary", clearing the diagnostics of every edit.
+	 *
 	 * #3405: `saved` records whether that landed push carried a save. A save
 	 * rides on its push, so an entry without one does not cover a later saved
 	 * touch of the same bytes (see `saveDebouncedPush`).
@@ -1259,7 +1265,6 @@ export class LSPService {
 		{
 			fingerprint: string;
 			touchedAt: number;
-			clientScope: LSPTouchClientScope;
 			client: WeakRef<LSPClientInfo>;
 			saved: boolean;
 		}
@@ -1565,7 +1570,6 @@ export class LSPService {
 	private shouldSkipTouch(
 		filePath: string,
 		contentFingerprint: () => string,
-		clientScope: LSPTouchClientScope,
 		waitForDiagnostics: boolean,
 		spawned: readonly SpawnedServer[],
 	): boolean {
@@ -1578,7 +1582,6 @@ export class LSPService {
 			this.shouldSkipNotify(
 				filePath,
 				contentFingerprint,
-				clientScope,
 				entry.info.id,
 				entry.client,
 			),
@@ -1604,13 +1607,12 @@ export class LSPService {
 	private shouldSkipNotify(
 		filePath: string,
 		contentFingerprint: () => string,
-		clientScope: LSPTouchClientScope,
 		serverId: string,
 		client: LSPClientInfo,
 	): boolean {
 		if (TOUCH_DEBOUNCE_MS <= 0) return false;
 		const previous = this.recentTouches.get(
-			this.recentTouchKey(filePath, clientScope, serverId),
+			this.recentTouchKey(filePath, serverId),
 		);
 		if (!previous) return false;
 		const now = Date.now();
@@ -1647,13 +1649,12 @@ export class LSPService {
 	 */
 	private saveDebouncedPush(
 		filePath: string,
-		clientScope: LSPTouchClientScope,
 		entry: SpawnedServer,
 		saved: boolean,
 	): string | undefined {
 		if (!saved) return undefined;
 		const previous = this.recentTouches.get(
-			this.recentTouchKey(filePath, clientScope, entry.info.id),
+			this.recentTouchKey(filePath, entry.info.id),
 		);
 		if (!previous || previous.saved) return undefined;
 		if (entry.client.getSaveOptions?.() === undefined) return undefined;
@@ -1665,28 +1666,22 @@ export class LSPService {
 		return entry.info.id;
 	}
 
-	private recentTouchKey(
-		filePath: string,
-		clientScope: LSPTouchClientScope,
-		serverId: string,
-	): string {
-		return `${normalizeMapKey(filePath)}:${clientScope}:${serverId}`;
+	private recentTouchKey(filePath: string, serverId: string): string {
+		return `${normalizeMapKey(filePath)}:${serverId}`;
 	}
 
 	private markTouched(
 		filePath: string,
 		contentFingerprint: string,
-		clientScope: LSPTouchClientScope,
 		serverId: string,
 		client: LSPClientInfo,
 		saved: boolean,
 	): void {
-		const key = this.recentTouchKey(filePath, clientScope, serverId);
+		const key = this.recentTouchKey(filePath, serverId);
 		const now = Date.now();
 		this.recentTouches.set(key, {
 			fingerprint: contentFingerprint,
 			touchedAt: now,
-			clientScope,
 			client: new WeakRef(client),
 			saved,
 		});
@@ -4107,19 +4102,14 @@ export class LSPService {
 				this.shouldSkipTouch(
 					filePath,
 					contentFingerprint,
-					clientScope,
 					diagnosticsMode !== "none",
 					spawned,
 				)
 			) {
 				const savedServerIds = spawned.flatMap(
 					(entry) =>
-						this.saveDebouncedPush(
-							filePath,
-							clientScope,
-							entry,
-							options.saved === true,
-						) ?? [],
+						this.saveDebouncedPush(filePath, entry, options.saved === true) ??
+						[],
 				);
 				logLatency({
 					type: "phase",
@@ -4161,7 +4151,6 @@ export class LSPService {
 						this.shouldSkipNotify(
 							filePath,
 							contentFingerprint,
-							clientScope,
 							entry.info.id,
 							entry.client,
 						),
@@ -4174,12 +4163,8 @@ export class LSPService {
 			// goes alone (`saveDebouncedPush`).
 			const savedServerIds = spawned.flatMap((entry) =>
 				notifySkippedServerIds.has(entry.info.id)
-					? (this.saveDebouncedPush(
-							filePath,
-							clientScope,
-							entry,
-							options.saved === true,
-						) ?? [])
+					? (this.saveDebouncedPush(filePath, entry, options.saved === true) ??
+						[])
 					: [],
 			);
 			// #1531: the pre-notify diagnostics baseline for THIS file on each client.
@@ -4511,7 +4496,6 @@ export class LSPService {
 							this.markTouched(
 								filePath,
 								contentFingerprint(),
-								clientScope,
 								entry.info.id,
 								entry.client,
 								options.saved === true,
