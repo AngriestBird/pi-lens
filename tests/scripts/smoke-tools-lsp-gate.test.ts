@@ -269,6 +269,10 @@ describe("smoke-tools created-module witness (#4320/#4346)", () => {
 	async function witness(
 		reports: (call: number, name: string) => boolean,
 		seen: (name: string, moduleExists: boolean) => void = () => undefined,
+		// The phase's own poll settings when `{}` is passed.
+		poll: { deadlineMs?: number; intervalMs?: number } = POLL,
+		// A call whose answer is not a verdict at all (a timed-out check).
+		inconclusive: (call: number) => boolean = () => false,
 	) {
 		const workspace = fs.mkdtempSync(
 			path.join(os.tmpdir(), "pi-lens-created-witness-"),
@@ -283,10 +287,16 @@ describe("smoke-tools created-module witness (#4320/#4346)", () => {
 				name,
 				fs.existsSync(path.join(path.dirname(params.path), `${name}.py`)),
 			);
-			const missing = reports(
-				calls.filter((entry) => entry === name).length,
-				name,
-			);
+			const call = calls.filter((entry) => entry === name).length;
+			if (inconclusive(call))
+				return {
+					content: [
+						{
+							text: "Primary LSP: check timed out - NOT the same as 0 diagnostics; the file may still have errors",
+						},
+					],
+				};
+			const missing = reports(call, name);
 			return {
 				content: [
 					{ text: missing ? `Import "${name}" could not be resolved` : "ok" },
@@ -298,7 +308,7 @@ describe("smoke-tools created-module witness (#4320/#4346)", () => {
 			workspace,
 			execute,
 			getLSPService: () => makeLspServiceDouble({ touchFile }),
-			...POLL,
+			...poll,
 		});
 		return { rows, touchFile, workspace };
 	}
@@ -407,6 +417,30 @@ describe("smoke-tools created-module witness (#4320/#4346)", () => {
 		// first poll after creation
 		expect(moduleExistedAt.slice(0, 4)).toEqual([false, false, false, true]);
 		expect(rows.map((row) => row.state)).toEqual(["pass", "pass"]);
+	});
+
+	// Recurrence: review r1 of #4533 (F1). A timed-out check prints no finding,
+	// so "the finding is absent" read as clean and one slow answer in 33 polls
+	// turned a regressed product green.
+	it("does not read a timed-out check as a cleared import", async () => {
+		const { rows } = await witness(
+			() => true,
+			undefined,
+			POLL,
+			(call) => call === 3,
+		);
+		expect(rows.map((row) => row.state)).toEqual(["fail", "fail"]);
+		expect(rows[0].detail).toContain("answers inconclusively");
+	});
+
+	// Recurrence: review r1 of #4533 (F2). Every other case overrides the poll
+	// settings, so a default deadline of 0 or an interval of a minute reverted
+	// the nightly to the one-call witness with nothing red. Call 2 is stale, so
+	// the second post-creation call must be reached under the defaults.
+	it("polls under its default settings until the import clears", async () => {
+		const { rows } = await witness((call) => call < 3, undefined, {});
+		expect(rows.map((row) => row.state)).toEqual(["pass", "pass"]);
+		expect(rows[0].detail).toContain("cleared on call 2");
 	});
 
 	it("never creates the module when the server never reports the missing import", async () => {

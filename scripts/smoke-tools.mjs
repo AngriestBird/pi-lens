@@ -2404,6 +2404,9 @@ export function report(rows, title, { failOnSkipOnly = false } = {}) {
 export const BORN_AFTER_START_DEADLINE_MS = 20_000;
 export const BORN_AFTER_START_POLL_MS = 500;
 
+/** The marker the diagnostics tool prints when a check could not vouch for the file. */
+const INCONCLUSIVE_ANSWER = /NOT the same as 0 diagnostics/;
+
 /** Call `probe` until it returns true or `deadlineMs` passes. */
 async function pollUntil(probe, { deadlineMs, intervalMs }) {
 	const startedAt = Date.now();
@@ -2502,7 +2505,15 @@ export async function runCreatedModuleWitness(
 			}
 			await created.create(modulePath);
 			const cleared = await pollUntil(
-				async () => !witness.reportsMissing(await diagnose(importer), name),
+				async () => {
+					const text = await diagnose(importer);
+					// An unanswered check is not a clean answer: the tool says so in
+					// every rendering that cannot vouch for the file (#4533 review).
+					return (
+						!INCONCLUSIVE_ANSWER.test(text) &&
+						!witness.reportsMissing(text, name)
+					);
+				},
 				{ deadlineMs, intervalMs },
 			);
 			rows.push({
@@ -2511,7 +2522,7 @@ export async function runCreatedModuleWitness(
 				state: cleared.ok ? "pass" : "fail",
 				detail: cleared.ok
 					? `the importer's missing import cleared on call ${cleared.polls} (${cleared.elapsedMs} ms after the module was created)`
-					: `the importer still reports ${name} missing after ${cleared.polls} calls over ${cleared.elapsedMs} ms (#4320/#4346)`,
+					: `the importer still reports ${name} missing, or answers inconclusively, after ${cleared.polls} calls over ${cleared.elapsedMs} ms (#4320/#4346)`,
 				diags: cleared.ok ? 0 : 1,
 			});
 		} catch (err) {

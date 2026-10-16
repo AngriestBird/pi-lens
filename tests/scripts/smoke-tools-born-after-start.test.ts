@@ -57,6 +57,19 @@ const staleLookupFixture = {
 
 // Resolves the module to a name the witness never creates, so the importer's
 // finding can never clear: a server that never picks the file up.
+// Answers each importer once, then goes silent: the module is genuinely
+// unresolvable and every later check of it times out (review r1 of #4533, F1).
+const silentAfterReportFixture = {
+	lang: "silent",
+	serverHint: "silent-after-report fake",
+	createdModuleWitness: {
+		ext: ".sl",
+		importerText,
+		moduleText: "return {}\n",
+		reportsMissing,
+	},
+};
+
 const neverPicksUpFixture = {
 	lang: "teal",
 	serverHint: "never-picks-up fake",
@@ -78,7 +91,11 @@ describe("the born-after-start phase over a real language-server wire (#4521)", 
 		// Host-boundary stub: a project-configured server in a project pi has
 		// trusted (#4248 refuses it otherwise).
 		setProjectTrustState("trusted");
-		const shim = (name: string, vars: Record<string, string>) => {
+		const shim = (
+			name: string,
+			vars: Record<string, string>,
+			prelude: string[] = [],
+		) => {
 			const file = path.join(workspace, name);
 			fs.writeFileSync(
 				file,
@@ -86,6 +103,7 @@ describe("the born-after-start phase over a real language-server wire (#4521)", 
 					...Object.entries(vars).map(
 						([key, value]) => `process.env.${key} = ${JSON.stringify(value)};`,
 					),
+					...prelude,
 					`import(${JSON.stringify(pathToFileURL(fakeServer).href)});`,
 					"",
 				].join("\n"),
@@ -102,6 +120,28 @@ describe("the born-after-start phase over a real language-server wire (#4521)", 
 			FAKE_LSP_STALE_MODULE_LOOKUP: "1",
 			FAKE_LSP_STALE_MODULE_EXT: ".never-created",
 		});
+		const silent = shim(
+			"silent-after-report-server.mjs",
+			{
+				FAKE_LSP_NO_DIAGNOSTIC_PROVIDER: "1",
+				FAKE_LSP_STALE_MODULE_LOOKUP: "1",
+				FAKE_LSP_STALE_MODULE_EXT: ".never-created",
+			},
+			[
+				// Drop every publish after the first one for a document.
+				"const published = new Set();",
+				"const write = process.stdout.write.bind(process.stdout);",
+				"process.stdout.write = (chunk, ...rest) => {",
+				"  const text = String(chunk);",
+				'  if (text.includes("textDocument/publishDiagnostics")) {',
+				'    const uri = /"uri":"([^"]+)"/.exec(text)?.[1] ?? text;',
+				"    if (published.has(uri)) return true;",
+				"    published.add(uri);",
+				"  }",
+				"  return write(chunk, ...rest);",
+				"};",
+			],
+		);
 		fs.writeFileSync(
 			path.join(workspace, "package.json"),
 			'{"name":"born-after-start","version":"0.0.0"}\n',
@@ -116,6 +156,13 @@ describe("the born-after-start phase over a real language-server wire (#4521)", 
 						extensions: [".ts"],
 						command: process.execPath,
 						args: [stale],
+						rootMarkers: ["package.json"],
+					},
+					"silent-fake": {
+						name: "silent after report",
+						extensions: [".sl"],
+						command: process.execPath,
+						args: [silent],
 						rootMarkers: ["package.json"],
 					},
 					"never-fake": {
@@ -211,5 +258,19 @@ describe("the born-after-start phase over a real language-server wire (#4521)", 
 			expect(calls).toBeGreaterThan(3);
 			expect(row.detail).toMatch(/still reports .* missing/);
 		}
+	}, 60_000);
+
+	// Recurrence: review r1 of #4533 (F1). A server that reports the missing
+	// import once and then never answers makes the tool print "check timed out
+	// - NOT the same as 0 diagnostics", which carries no finding. The poll read
+	// that as cleared, so a regressed product on a slow runner went green.
+	it("reds when the server goes silent after it reports the missing import", async () => {
+		const rows = await phase(silentAfterReportFixture, {
+			deadlineMs: 3_000,
+			intervalMs: 100,
+		});
+		expect(rows.map((row) => row.state)).toEqual(["fail", "fail"]);
+		for (const row of rows)
+			expect(row.detail).toContain("answers inconclusively");
 	}, 60_000);
 });
