@@ -489,7 +489,6 @@ describe("#2981 long-lived containers are bounded or admitted", () => {
 		"clients/dispatch/auxiliary-lsp.ts#isEnabledByConfiguration:dd3e2650",
 		"clients/dispatch/collect-later-tier.ts#COLLECT_LATER_THRESHOLD_MS:6c0d1b78",
 		"clients/dispatch/dispatcher.ts#latencyReports:4e5c8069",
-		"clients/dispatch/integration.ts#getCascadeSessionStats:0753e302",
 		"clients/dispatch/integration.ts#isConfirmedTouch:0876b7da",
 		"clients/dispatch/runners/biome-check.ts#parseBiomeJson:753add48",
 		"clients/dispatch/runners/eslint.ts#makeEslintProbe:a15d1054",
