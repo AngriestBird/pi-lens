@@ -486,6 +486,51 @@ describe("host-provided peers are open; the supported window lives in install-sm
 		expect(semver.satisfies("1.4.0", window)).toBe(false);
 	});
 
+	// Recurrence prevented (#4513): the ceiling moved from <1.2.0 to <1.4.0 while
+	// the real-pi compat smoke stayed on the 0.80.10 floor, so nothing exercised
+	// the new top of the window. The floor is install-smoke's job; compat-smoke
+	// carries the newest verified host.
+	it("pins compat-smoke to the newest release-qa verified host", () => {
+		const compat = yaml.load(
+			fs.readFileSync(
+				path.join(root, ".github", "workflows", "compat-smoke.yml"),
+				"utf8",
+			),
+		) as {
+			jobs: Record<string, { steps?: Array<{ name?: string; run?: string }> }>;
+		};
+		const runs = Object.values(compat.jobs)
+			.flatMap((job) => job.steps ?? [])
+			.filter((step) => step.name === "Install pi")
+			.map((step) => step.run ?? "");
+		expect(runs).toHaveLength(1);
+		// Shell comment lines are prose, not the install command.
+		const command = (runs[0] as string)
+			.split("\n")
+			.filter((line) => !line.trimStart().startsWith("#"))
+			.join("\n");
+		const pinned = command.match(
+			/@earendil-works\/pi-coding-agent@(\d+\.\d+\.\d+)/,
+		)?.[1];
+		const newest = [...RELEASE_QA_VERIFIED_HOSTS].sort(semver.compare).at(-1);
+		expect(pinned).toBe(newest);
+	});
+
+	// Recurrence prevented (#4513): a dependency bump to pi 1.4 would put the
+	// test host past the window before release-qa has run on it.
+	it("keeps the locked dev host inside the supported window", () => {
+		const lock = JSON.parse(
+			fs.readFileSync(path.join(root, "package-lock.json"), "utf8"),
+		) as { packages: Record<string, { version?: string }> };
+		const locked =
+			lock.packages["node_modules/@earendil-works/pi-coding-agent"]?.version ??
+			"";
+		expect(
+			semver.satisfies(locked, window),
+			`locked pi-coding-agent ${locked} vs PI_HOST_SUPPORTED_RANGE (${window})`,
+		).toBe(true);
+	});
+
 	it("has a release-qa verified host on every certified minor line", () => {
 		for (const minorLine of VERIFIED_MINOR_LINES) {
 			expect(
