@@ -42,6 +42,7 @@ import type {
 	RunnerResult,
 } from "../types.js";
 import { findingsResult, spanOverlapsModifiedRanges } from "../types.js";
+import { ruleCanMatchText } from "./ast-grep-literal-anchors.js";
 import {
 	calculateRuleComplexity,
 	isOverlyBroadPattern,
@@ -569,7 +570,8 @@ export interface AstGrepEvaluateOptions {
 	 * parsed as JavaScript and `language: JavaScript` rules run against those
 	 * bodies, mirroring the ast-grep CLI/LSP (ast-grep 0.45.1 injects every
 	 * script body regardless of `type`/`src`; verified by direct CLI repro).
-	 * Absent on a non-HTML file this is unused and irrelevant.
+	 * The literal prefilter (#4496) reads it on every file, so it must be the
+	 * exact text `rootNode` was parsed from.
 	 */
 	content?: string;
 	/** Loaded addon, required with `content` to parse script bodies (#2347). */
@@ -1174,6 +1176,13 @@ export function evaluateAstGrepRules(
 			}
 
 			if (!rule.rule) continue;
+			// #4496: the file lacks a literal every match needs.
+			if (
+				options.content !== undefined &&
+				!ruleCanMatchText(rule, options.content)
+			) {
+				continue;
+			}
 
 			try {
 				// A `language: JavaScript` rule on an HTML file with inline
