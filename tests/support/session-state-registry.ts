@@ -869,11 +869,11 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 	{
 		id: "lsp-workspace-diagnostics-cache:fileCreatedAt",
 		module: "lsp/workspace-diagnostics-session.ts",
-		state: "_fileCreations; _evictedCreatedAt",
+		state: "_fileCreations; _allFilesChangedAt",
 		policy: "session_start",
 		resetName: "resetWorkspaceDiagnosticsCacheSession",
 		reason:
-			"#4320, #4346: each client's latest Created send per path refuses older cached entries whose dependency scope holds that path, under that client's root, and `_evictedCreatedAt` holds what the bound evicted; kept across sessions they would refuse every later session's entries.",
+			"#4320, #4346: each client's latest Created send per path refuses older cached entries whose dependency scope holds that path, under that client's root (#4476: or a declaration file pi-lens saw change on disk, for any server), and `_allFilesChangedAt` holds what the bound evicted and the last dependency install; kept across sessions they would refuse every later session's entries.",
 		probe: {
 			arm: () =>
 				noteWorkspaceFileCreated("probe-server", "/", ["/probe-created.ts"], 1),
@@ -1765,7 +1765,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// scan cannot tell from state (1 -> 2). Exempted above, never written.
 	"lsp/workspace-diagnostics-cache.ts": 2,
 	// #4320 r2: `_fileCreations`, the bounded Created markers (per server,
-	// root and path since #4346), registered above with `_evictedCreatedAt`.
+	// root and path since #4346), registered above with `_allFilesChangedAt`.
 	"lsp/workspace-diagnostics-session.ts": 1,
 	"lsp/workspace-sweep-hold.ts": 0,
 	// #2455 fix round 2: `warmGraphFacts` (`new FactStore("mcp-analyze")`) is now
