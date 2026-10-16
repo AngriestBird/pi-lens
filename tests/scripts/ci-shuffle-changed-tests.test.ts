@@ -336,6 +336,7 @@ describe("judge and run: exit codes", () => {
 		const exec = execBy({});
 		const code = run(["--base", "abc1234", "--head", "def5678"], {
 			diff: () => ["clients/x.ts", "docs/a.md"],
+			added: () => [],
 			exec,
 			log: (line) => lines.push(line),
 		});
