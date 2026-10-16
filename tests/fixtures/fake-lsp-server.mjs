@@ -514,6 +514,12 @@ process.stdin.on("data", (chunk) => {
 		return;
 	}
 	for (const m of messages) {
+        // #4528 r3: a separate request task can reply before queued notifications.
+        if (process.env.FAKE_LSP_PING_OVERTAKES === "1" &&
+            JSON.parse(m).method === "textDocument/documentSymbol") {
+            handle(m);
+            continue;
+        }
 		if (workQueue.length >= NOTIFY_BACKLOG_WEDGE) {
 			// More work outstanding than this server can hold. It stops reading and
 			// never comes back.

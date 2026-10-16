@@ -30,14 +30,16 @@
 (*                                                                         *)
 (* A send here is one the primary has READ. A write resolves once its      *)
 (* bytes are in the pipe; resyncHeldPrimaries' drain barrier (one request  *)
-(* answered per client after its sends) is what makes the phase's end mean *)
-(* read, and a barrier that times out is recorded ("undrained"), not       *)
-(* modelled.                                                               *)
+(* answered per client after its sends) proves read only with measured     *)
+(* single-task ordering. Threaded/unmeasured replies may overtake the reads; *)
+(* RequireOrderedDrain makes those phases undrained. Dispatch still runs:   *)
+(* the threaded configs assert DrainProven, not NoPhantomFinding.           *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
 CONSTANTS
     WritesPrimaryFirst,  \* TRUE: written held documents reach the primary first
+    RequireOrderedDrain, ReplyOrdering,
     DispatchWaitsPhase   \* TRUE: the loop waits for the phase (no 500 ms cut)
 
 Docs == {"a", "z"}
@@ -50,9 +52,10 @@ VARIABLES
     i,        \* the next dispatch
     j,        \* the phase's next send (Len(order) + 1 once it has sent all)
     wedged,   \* the primary stopped reading its input
+    drained,  \* the phase claimed its queued sends were read
     phantom   \* a check read a held document's old bytes
 
-vars == <<disk, P, order, pc, i, j, wedged, phantom>>
+vars == <<disk, P, order, pc, i, j, wedged, drained, phantom>>
 
 Init ==
     /\ disk = [d \in Docs |-> 0]
@@ -62,6 +65,7 @@ Init ==
     /\ i = 1
     /\ j = 1
     /\ wedged = FALSE
+    /\ drained = FALSE
     /\ phantom = FALSE
 
 PhaseRunning == WritesPrimaryFirst /\ pc # "run" /\ j <= Len(order)
@@ -72,19 +76,20 @@ Run ==
     /\ disk' = [d \in Docs |-> 1]
     /\ \E o \in {<<"a", "z">>, <<"z", "a">>} : order' = o
     /\ pc' = IF WritesPrimaryFirst THEN "primary" ELSE "dispatch"
-    /\ UNCHANGED <<P, i, j, wedged, phantom>>
+    /\ UNCHANGED <<P, i, j, wedged, drained, phantom>>
 
 (* One phase send. It keeps running after a cut, beside the dispatches. *)
 PrimarySend ==
     /\ PhaseRunning
     /\ P' = IF wedged THEN P ELSE [P EXCEPT ![order[j]] = disk[order[j]]]
     /\ j' = j + 1
-    /\ UNCHANGED <<disk, order, pc, i, wedged, phantom>>
+    /\ UNCHANGED <<disk, order, pc, i, wedged, drained, phantom>>
 
-(* The wait ends when the phase has sent everything. *)
+(* A threaded/unmeasured reply can arrive before the queued reads finish. *)
 PrimaryDone ==
     /\ pc = "primary"
-    /\ j > Len(order)
+    /\ (j > Len(order) \/ ReplyOrdering # "single-task-ordered")
+    /\ drained' = (~RequireOrderedDrain \/ ReplyOrdering = "single-task-ordered")
     /\ pc' = "dispatch"
     /\ UNCHANGED <<disk, P, order, i, j, wedged, phantom>>
 
@@ -94,7 +99,7 @@ PhaseCut ==
     /\ pc = "primary"
     /\ j <= Len(order)
     /\ pc' = "dispatch"
-    /\ UNCHANGED <<disk, P, order, i, j, wedged, phantom>>
+    /\ UNCHANGED <<disk, P, order, i, j, wedged, drained, phantom>>
 
 (* The edit-budget bound ends the wait, which only a wedged primary outlasts. *)
 EditCut ==
@@ -102,13 +107,13 @@ EditCut ==
     /\ pc = "primary"
     /\ wedged
     /\ pc' = "dispatch"
-    /\ UNCHANGED <<disk, P, order, i, j, wedged, phantom>>
+    /\ UNCHANGED <<disk, P, order, i, j, wedged, drained, phantom>>
 
 Wedge ==
     /\ ~wedged
     /\ pc # "done"
     /\ wedged' = TRUE
-    /\ UNCHANGED <<disk, P, order, pc, i, j, phantom>>
+    /\ UNCHANGED <<disk, P, order, pc, i, j, drained, phantom>>
 
 (* One dispatch: send the file, then read the check, which reads every view. *)
 (* A wedged primary takes no send and answers no check.                     *)
@@ -120,7 +125,7 @@ Dispatch ==
           /\ phantom' = (phantom \/ (~wedged /\ \E d \in Docs : sent[d] # disk[d]))
     /\ i' = i + 1
     /\ pc' = IF i = Len(order) THEN "done" ELSE "dispatch"
-    /\ UNCHANGED <<disk, order, j, wedged>>
+    /\ UNCHANGED <<disk, order, j, wedged, drained>>
 
 Next ==
     Run \/ PrimarySend \/ PrimaryDone \/ PhaseCut \/ EditCut \/ Wedge \/ Dispatch
@@ -134,6 +139,8 @@ TypeOK ==
     /\ wedged \in BOOLEAN
 
 (* No dispatch checks a file against a held document's old bytes. *)
+DrainProven == drained => (j > Len(order))
+
 NoPhantomFinding == ~phantom
 
 (* Once the result is done, a live primary holds the disk bytes. *)

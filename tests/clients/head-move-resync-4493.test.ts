@@ -68,6 +68,9 @@ import {
  * catalog lookup adds it for the repositories registered here, the pattern the
  * #1714 real-stream suites use; every other lookup is the real one.
  */
+const primaryOrdering = vi.hoisted(
+	() => new Map<string, "single-task-ordered" | "threaded" | "unmeasured">(),
+);
 const auxiliaries = vi.hoisted(() => new Map<string, unknown>());
 vi.mock("../../clients/lsp/config.js", async (importOriginal) => {
 	const actual =
@@ -76,7 +79,14 @@ vi.mock("../../clients/lsp/config.js", async (importOriginal) => {
 	return {
 		...actual,
 		getServersForFileWithConfig: (filePath: string) => {
-			const servers = actual.getServersForFileWithConfig(filePath);
+			const servers = actual
+				.getServersForFileWithConfig(filePath)
+				.map((server) => {
+					for (const [dir, ordering] of primaryOrdering)
+						if (filePath.startsWith(`${dir}${sep}`))
+							return { ...server, replyOrdering: ordering };
+					return server;
+				});
 			for (const [dir, aux] of auxiliaries)
 				if (filePath.startsWith(`${dir}${sep}`))
 					return [...servers, aux as (typeof servers)[number]];
@@ -147,6 +157,7 @@ async function makeRepo(
 ): Promise<Repo> {
 	const dir = path.join(env.tmpDir, `repo-${++repoCount}`);
 	const trace = path.join(env.tmpDir, `repo-${repoCount}.trace`);
+	primaryOrdering.set(dir, "single-task-ordered");
 	fs.mkdirSync(path.join(dir, ".pi-lens"), { recursive: true });
 	const shim = path.join(env.tmpDir, `repo-${repoCount}-server.mjs`);
 	fs.writeFileSync(
@@ -1331,6 +1342,35 @@ describe("a bash command's writes reach the primaries before its dispatches (#45
 			{ result: "sent", metadata: { targets: 10, primary: 10 } },
 		]);
 	}, 120_000);
+
+	// Recurrence: #4528 r2, a ping overtakes didChange on a threaded primary.
+	it.each(["threaded", "unmeasured"] as const)(
+		"records undrained when %s replies overtake queued changes",
+		async (ordering) => {
+			const repo = await makeRepo(
+				{ "z.ts": TYPES_A, "a.ts": A0, ...NOTES_A },
+				NOTES_B,
+				[],
+				{
+					...CHECKER,
+					FAKE_LSP_NOTIFY_BACKLOG_WEDGE: "100000",
+					FAKE_LSP_NOTIFY_COST_MS: "0",
+					FAKE_LSP_PING_OVERTAKES: "1",
+				},
+			);
+			primaryOrdering.set(repo.dir, ordering);
+			await hold(repo, ["a.ts", "z.ts"]);
+			const s = session(repo, `s-4528-${ordering}`);
+			await s.bash("sed -i s/a/b/ a.ts z.ts", () => {
+				fs.writeFileSync(repo.file("a.ts"), A1);
+				fs.writeFileSync(repo.file("z.ts"), TYPES_B);
+			});
+			expect(await primaryResyncRows(repo)).toMatchObject([
+				{ result: "undrained", metadata: { targets: 2 } },
+			]);
+		},
+		60_000,
+	);
 
 	// Recurrence: the degraded half of #4528 r1 F1. A primary that never
 	// answers the drain request (here it dies on reading the first new bytes) may

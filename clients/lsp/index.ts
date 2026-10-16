@@ -3500,15 +3500,18 @@ export class LSPService {
 	 * a dependency's old bytes, and a check read right after the sends took
 	 * one. A reply proves every send before it was processed
 	 * (for a server whose replies are `threaded` it proves only liveness).
-	 * `drained` is false when a probe failed (a server that died) or ran out
-	 * of time.
+	 * `drained` requires measured single-task ordering and a successful probe;
+	 * threaded/unmeasured servers and timeouts are undrained.
 	 */
 	async resyncHeldPrimaries(
 		filePaths: readonly string[],
 		drainMs: number,
 	): Promise<{ sent: number; drained: boolean }> {
 		let sent = 0;
-		const sentTo = new Map<string, LSPClientInfo>();
+		const sentTo = new Map<
+			string,
+			{ client: LSPClientInfo; ordered: boolean }
+		>();
 		for (const filePath of filePaths) {
 			if (this.checkDestroyed()) break;
 			const servers = getServersForFileWithConfig(filePath);
@@ -3538,12 +3541,19 @@ export class LSPService {
 				);
 				const key = root ? `${server.id}:${normalizeMapKey(root)}` : undefined;
 				const client = key ? this.state.clients.get(key) : undefined;
-				if (key && client) sentTo.set(key, client);
+				if (key && client)
+					sentTo.set(key, {
+						client,
+						ordered:
+							serverTraits(server).replyOrdering === "single-task-ordered",
+					});
 			}
 		}
 		if (sentTo.size === 0) return { sent, drained: true };
 		const answers = await Promise.all(
-			[...sentTo.values()].map(async (client) => {
+			[...sentTo.values()].map(async ({ client, ordered }) => {
+				// #4528 r2: a threaded or unmeasured reply proves only liveness.
+				if (!ordered) return false;
 				try {
 					return (await client.pingLiveness?.(drainMs)) ?? true;
 				} catch {

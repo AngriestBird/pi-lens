@@ -381,3 +381,12 @@ primary takes the capped sends inside the edit budget.
 | `BashWriteFix` | pass | pass | 62 |
 | `BashWritePreFix` | violated NoPhantomFinding (before #4507) | violated | 6 |
 | `BashWritePhaseCut` | violated NoPhantomFinding (#4528 r1, the 500 ms cut) | violated | 15 |
+
+Round 3 (#4528): `ReplyOrdering` distinguishes measured single-task replies
+from replies that may overtake queued didChanges. `RequireOrderedDrain` keeps
+the latter phases undrained; `DrainProven` requires every claimed drain to
+follow the reads. `BashWriteThreaded` checks that invariant;
+`BashWriteThreadedPreFix` disables the guard and expects a violation.
+Dispatch still runs after an undrained phase, so those configs do not claim
+`NoPhantomFinding`. TLC was not run locally in round 3 (java unavailable);
+the previous state counts above have not been remeasured.

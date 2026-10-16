@@ -1210,6 +1210,11 @@
 					"value": "TRUE",
 					"test": "tests/clients/head-move-resync-4493.test.ts",
 					"title": "checks a dependent against its rewritten dependency when the primary phase outlasts the read-only bound (%s diagnostics)"
+				},
+				"RequireOrderedDrain": {
+					"value": "TRUE",
+					"test": "tests/clients/head-move-resync-4493.test.ts",
+					"title": "records undrained when %s replies overtake queued changes"
 				}
 			},
 			"notCodeChoice": [
@@ -1231,7 +1236,8 @@
 					"reason": "Environment: a host, OS, server or scheduling behaviour the code must tolerate, not a choice the code makes.",
 					"constants": [
 						"FifoLanding",
-						"Outside"
+						"Outside",
+						"ReplyOrdering"
 					]
 				},
 				{
