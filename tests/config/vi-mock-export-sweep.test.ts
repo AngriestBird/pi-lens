@@ -17,7 +17,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import {
 	assertNonEmptyScan,
 	listSourceFiles,
@@ -221,6 +221,12 @@ function compareAgainstBaseline(
 }
 
 describe("#2281 whole-module vi.mock export ratchet", () => {
+	// The shared pass walks ~1,150 files once for both detectors, so whichever
+	// test ran first paid for both and crossed its 60 s budget on the Windows
+	// advisory lane (#4549 run 38954829528). Pay it here, under its own budget,
+	// so test order (including the shuffle census) cannot move the cost.
+	beforeAll(() => sweepOnce(), 120_000);
+
 	it("keeps every latency-logger mock on the real export surface", async () => {
 		// Recurrence guard for #2272 and #2281: a whole-module factory mock can
 		// stay green until an untested production call reaches a newly added export.
