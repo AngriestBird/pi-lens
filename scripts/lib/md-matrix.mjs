@@ -607,7 +607,7 @@ function isUtcDay(value) {
 }
 
 /** Whole UTC days from `from` to `to` (both `YYYY-MM-DD`); `null` if `from` is not a real date. */
-function elapsedDays(from, to) {
+export function elapsedDays(from, to) {
 	if (!isUtcDay(from)) return null;
 	return Math.round(
 		(Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) /

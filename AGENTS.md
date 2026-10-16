@@ -841,7 +841,9 @@ file-scoped worklist and receives no project-wide scanner output.
   to `scripts/lib/assert-evaluated.mjs` (one pure count function per producer,
   called by the script and by its test); the nightly's floor step fails below
   each measured floor and when a matrix cell classified at HEAD turned
-  `unknown` (`tests/config/nightly-evaluated-floors.test.ts`). Every other
+  `unknown` without a HEAD `firstMissed` stamp at least
+  `FIRST_PUBLISH_EXPIRY_DAYS` old (`tests/config/nightly-evaluated-floors.test.ts`).
+  Every other
   `continue-on-error` producer either calls the same helper (`--count
   <producer>=<n> --floor <m>` from a workflow step; `--min-pass`, the
   complexity file count and the shuffle census's missing starts already do) or
@@ -1029,6 +1031,23 @@ file-scoped worklist and receives no project-wide scanner output.
   and nothing that holds an entry awaits the restore. Do not add a second
   whole-package fixer without it, and do not await a queue entry while holding
   another.
+- A file's first write in a session blocks on the linter delta, not on every
+  linter error. The `tool_call` of the first classified write or edit
+  runs the file's inline linters (`PRE_EDIT_SEED_RUNNER_IDS`, tied to the
+  edit-scope census's LINTER lanes) over the bytes still on disk, under
+  `bounded()` with `PRE_EDIT_CAPTURE_BUDGET_MS` (500 ms), and installs their blocking
+  findings as `session.preEdit.<file>` beside the delta baseline. The capture
+  admits at most four active captures, aborts their process groups on abandonment
+  or session reset, and retains slots until teardown settles. It
+  only creates that record, and only while no baseline, tombstone or seed
+  exists, the bytes are the ones it read, and its session is current; each
+  dispatch only shrinks it (`classifyPreExisting`, identity plus line text,
+  one current finding per entry). A matched finding is reported as
+  pre-existing, never as a blocker, unless the inline record already holds
+  it. Language servers, type checkers, gated runners and scanners are never
+  seeded (maintainer scope, 2026-10-15). Collect-later linters and the MCP
+  route have no seed. Proven by
+  `tests/index-4483-first-write-seed-witness.test.ts`.
 - `clients/dispatch/runners/runner-spawn-cwd-sweep.test.ts` is the population
   guard for child cwd derivation. Add a reasoned migration row instead of a
   pin-only update.
@@ -1211,8 +1230,9 @@ The four primary host hooks are:
 
 - `session_start`: reset session state, rehydrate snapshots, start bounded
   background work, and defer config/LSP discovery.
-- `tool_call`: classify mutations, apply read-guard preflight, and register
-  reads or pending writes before the host tool runs.
+- `tool_call`: classify mutations, apply read-guard preflight, register
+  reads or pending writes, and capture a file's pre-edit linter seed (below)
+  before the host tool runs.
 - `tool_result`: record observed mutations through
   `RuntimeCoordinator.recordProjectMutation`, then run format, autofix, LSP,
   dispatch, and bounded deferred work.
