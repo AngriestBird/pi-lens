@@ -189,7 +189,13 @@ export function retireSettledRunnerBlockers(
 	// #4484 round 7: a settled skip that defers to a covering lane retires
 	// nothing. That lane's answer for these bytes is not known here, and its
 	// evidence may cover only the edit; the next inline write judges.
-	if (!result || reachedNoVerdict(result) || result.coveredBy !== undefined)
+	// #4509: a covered run read the bytes itself, so it retires as any run.
+	if (
+		!result ||
+		reachedNoVerdict(result) ||
+		(result.coveredBy !== undefined &&
+			result.skipReason === "covered-by-primary")
+	)
 		return 0;
 	const bytes = readBytes(pending.filePath);
 	const retired = runtime.retireUnobservedRunnerBlockers(pending.filePath, {

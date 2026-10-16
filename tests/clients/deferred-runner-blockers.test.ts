@@ -574,6 +574,37 @@ describe("deferred blocker recording (#3814)", () => {
 				);
 			expect(settled({ runnerId: "lsp", serverId: "ast-grep" })).toBe(0);
 			expect(runtime.getInlineBlockerDiagnostics(filePath)).toEqual([recorded]);
+			// #4509 (row 31c): a run that names its covering lane read the
+			// bytes itself, so it retires what it no longer observes.
+			const ran = retireSettledRunnerBlockers(
+				runtime,
+				{
+					filePath,
+					cwd: env.tmpDir,
+					projectRoot: env.tmpDir,
+					runnerId: RUNNER_ID,
+					markedAtMs: 2_000,
+					result: {
+						status: "succeeded",
+						diagnostics: [],
+						semantic: "none",
+						coveredBy: { runnerId: "lsp", serverId: "ast-grep" },
+					},
+				},
+				{ kept: [] },
+			);
+			expect(ran).toBe(1);
+			runtime.recordInlineBlockers(
+				filePath,
+				"🔴 STOP",
+				1,
+				undefined,
+				[1],
+				{ size: 9, sha256 },
+				[recorded],
+				undefined,
+				1_000,
+			);
 			// Control: the same skip without a lane is a file-wide verdict.
 			expect(settled()).toBe(1);
 		} finally {

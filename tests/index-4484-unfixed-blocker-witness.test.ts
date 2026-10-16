@@ -1766,6 +1766,41 @@ describe("#4509 witness: a recorded blocker is judged by a run of its own runner
 		pendingCleanup = undefined;
 	}, 180_000);
 
+	// Recurrence (the void a covered skip gets when its lane is silent,
+	// applied to napi's run): napi read the fixed bytes while the ast-grep
+	// server was cut off, yet its verdict was thrown away, so the fixed
+	// blocker read "Still unfixed" with nothing on disk.
+	it("retires a napi blocker fixed while the ast-grep server is cut off (row 31b)", async () => {
+		const s = await primedUnderGateB("p42b");
+		boundary.ag.cutoff = true;
+		const fix = await s.edit(AG_FIXED, [3]);
+		expect(fix).not.toMatch(/Still unfixed/);
+		expect(fix).not.toContain("STOP");
+		expect(await s.commitBlocked()).toBe(false);
+		pendingCleanup = undefined;
+	}, 180_000);
+
+	// Recurrence (#4509, the settle's cover guard on napi's own run): napi
+	// was slow, so its run on the fix settled later; the settle read any
+	// result naming a covering lane as a skip and retired nothing, so the
+	// fixed blocker held the commit gate shut while napi stayed slow.
+	it("retires a napi blocker when napi's slow run on the fix settles under Gate B (row 31c)", async () => {
+		const s = await primedUnderGateB("p42c");
+		observeRunnerLatency({
+			projectRoot: tmpDir,
+			runnerId: "ast-grep-napi",
+			durationMs: 6_000,
+		});
+		boundary.ag.diag = false;
+		await s.edit(AG_FIXED, [3]);
+		await settlePendingRunnerFindingsForTests();
+		expect(peekSettledRunnerFindings().length).toBeGreaterThanOrEqual(1);
+		expect(await s.commitBlocked()).toBe(false);
+		expect(await s.endTurn()).toMatch(/Resolved this turn: src\/p42c\.ts/);
+		resetObservedRunnerLatency();
+		pendingCleanup = undefined;
+	}, 180_000);
+
 	// Recurrence (#4491 round-6 review O3, probe P38): an unaligned write
 	// while the ast-grep server covered the file left napi's entry with no
 	// place, and the server's copy has another identity, so the fix on the
