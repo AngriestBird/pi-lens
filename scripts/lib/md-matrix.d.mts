@@ -168,3 +168,6 @@ export function refreshCapabilityMatrix(
 	pendingLangs: string[];
 	committedLangs: string[];
 };
+
+/** Whole UTC days since a real YYYY-MM-DD stamp; null for an invalid stamp. */
+export function elapsedDays(from: unknown, to: string): number | null;
