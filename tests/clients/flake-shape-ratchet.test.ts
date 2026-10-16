@@ -749,6 +749,14 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"a real gh child is required to prove transient API failure recovery, persistent failure, and a ZIP over the default spawn buffer at the process boundary",
 	},
+	// #4518: the evaluated-floor steps of grammar-health.yml, ci.yml and lint.yml
+	// are shell text; the exit-code mapping, `set +e`, a step output read by the
+	// next step and `| tee` under pipefail are observable only by running bash.
+	"real-process-spawn:scripts/floor-steps-executed.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the evaluated-floor steps are shell text from the workflows; only a real bash running the extracted run: shows that a swallowed status, a renamed step id or a pipe without pipefail reds or lies on the nightly",
+	},
 	"real-process-spawn:scripts/git-fixture-env.test.ts": {
 		detector: "real-process-spawn",
 		reason:

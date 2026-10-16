@@ -369,6 +369,11 @@ const lspSpawnHeavyInclude = [
 	"tests/mcp/analyze-cli.test.ts",
 	// #4300: the MCP witness crosses Lean's real initialize handshake.
 	"tests/mcp/server.smoke.test.ts",
+	// #4521: the nightly born-after-start phase run through the production
+	// lsp_diagnostics handler and LSPService over real stdio fake-server
+	// children (two project custom servers); waits on real handshakes and
+	// polls to a deadline like #4320's and #4346's.
+	"tests/scripts/smoke-tools-born-after-start.test.ts",
 	// #4403: the LSP scripts' touch reading over the production
 	// LSPService, with fake-server children for the official Docker server and
 	// typos; waits on real handshakes like its lane siblings.
@@ -645,6 +650,9 @@ export const wallClockBudgetInclude = [
 	// #4030: the real `gh` process boundary is the subject of the retry test;
 	// serialize it with other child-process admissions.
 	"tests/scripts/download-test-history-artifacts.test.ts",
+	// #4518: the evaluated-floor steps are shell text; only a real bash running
+	// the extracted `run:` shows the exit-code mapping, `set +e` and pipefail.
+	"tests/scripts/floor-steps-executed.test.ts",
 	"tests/scripts/git-fixture-env.test.ts",
 	// #2699: the subject is the guard's own stdin/exit-code/stderr contract --
 	// what Claude Code actually invokes for a PreToolUse hook. No in-process

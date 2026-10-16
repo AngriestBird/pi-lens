@@ -3125,6 +3125,8 @@ export async function dispatchLintWithResult(
 		dedupeCoverageNotice?: boolean;
 		/** #4484 round 3: `DispatchContext.owedRanges`. */
 		owedRanges?: ReadonlyMap<string, readonly ModifiedRange[]>;
+		/** #4509: `DispatchContext.recordedRunnerIds`. */
+		recordedRunnerIds?: ReadonlySet<string>;
 	},
 ): Promise<DispatchResult> {
 	// Default true preserves the per-edit fast path (errors only). Callers that
@@ -3145,9 +3147,16 @@ export async function dispatchLintWithResult(
 		options?.sessionId,
 		options?.analysisRootMode,
 	);
-	const ctx: DispatchContext = options?.owedRanges?.size
-		? { ...created, owedRanges: options.owedRanges }
-		: created;
+	const ctx: DispatchContext =
+		options?.owedRanges?.size || options?.recordedRunnerIds?.size
+			? {
+					...created,
+					...(options.owedRanges?.size && { owedRanges: options.owedRanges }),
+					...(options.recordedRunnerIds?.size && {
+						recordedRunnerIds: options.recordedRunnerIds,
+					}),
+				}
+			: created;
 	sessionFacts.clearFileFactsFor(ctx.filePath);
 	// #2243 item 2: release the pin when the dispatch settles.
 	try {

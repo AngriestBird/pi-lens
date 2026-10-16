@@ -151,6 +151,16 @@ export interface Diagnostic {
 	 * text. Never part of identity, dedup or suppression.
 	 */
 	lineHash?: number;
+	/**
+	 * #4509 (N3): a recorded blocker a write kept without placing it in that
+	 * write's bytes (no alignment, or its own line edited). Its `line` is from
+	 * older bytes, so nothing reads it as a position. The carry matches it by
+	 * identity on any line holding its `lineHash` text; the settle matches it
+	 * by identity alone, anywhere in the file, with no line check (it fails
+	 * closed). The record cites no line for it. An observed copy replaces it.
+	 * Never part of identity.
+	 */
+	positionStale?: true;
 }
 
 /**
@@ -345,7 +355,10 @@ export interface RunnerResult {
 	 * #4484 round 7: the lane a `covered-by-primary` skip defers to. The skip
 	 * is a verdict only when that runner reached one and that server (when
 	 * named) confirmed; otherwise the dispatcher reads it as no verdict, and a
-	 * settled skip retires nothing.
+	 * settled skip retires nothing. #4509: a run that read the bytes while
+	 * that lane covers the file names it too. Its verdict is its own; when the
+	 * lane answered, the lane's copy stands for the run's finding on each line
+	 * the lane flagged, and the run's other findings deliver.
 	 */
 	coveredBy?: { runnerId: string; serverId?: string };
 	/**
@@ -534,6 +547,13 @@ export interface DispatchContext {
 	 * reach the widget, and its log rows say so.
 	 */
 	readonly preEditCapture?: true;
+	/**
+	 * #4509: the runners that hold a recorded blocker on this file when the
+	 * dispatch starts. A recorded blocker is judged only by a run of its own
+	 * runner, so a runner that would defer to a covering lane runs instead
+	 * (napi's Gate B).
+	 */
+	readonly recordedRunnerIds?: ReadonlySet<string>;
 	/** Ordered per-file pipeline token used by widget reconciliation (#1198). */
 	readonly writeIndex?: number;
 	/**
