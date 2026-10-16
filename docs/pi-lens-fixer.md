@@ -199,7 +199,8 @@ rigor (#2599).
   passed (#4288). A non-bug PR either deletes the `## Detection` section or
   fills the three lines, and a `Shape:` or `Enforcer:` line it does write is
   validated too; free text in between reds the local preflight. A bug-closing
-  PR that writes `unknown` as a layer or as the `Gap: none:` reason is refused
+  PR that answers a layer, the `Gap: none:` reason, the `Shape: new:` name or
+  the `Enforcer: none:` reason with `unknown`, `n/a`, `tbd` or `?` is refused
   (#4519); the layer words are `DETECTION_LAYERS`, `nightly:<workflow>`
   included. A red `PR body (advisory)` check is a fix-before-review item.
   A changelog fragment is `---` /

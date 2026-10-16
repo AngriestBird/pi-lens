@@ -5272,22 +5272,25 @@ describe("detection retrospective for bug-closing PRs (#4288)", () => {
 		},
 	);
 
-	it.each(["nightly:../x", "nightly:two words", "nightlyish", "tla"])(
-		"refuses %s as a layer word",
-		(layer) => {
-			const result = lintPrBody(
-				withDetection(
-					`- Caught by: ${layer}\n` +
-						"- Should have been caught by: CI unit\n" +
-						"- Gap: #1\n" +
-						shapeLines,
-				),
-				{ bugClosing: true },
-			);
-			expect(result.valid).toBe(false);
-			expect(result.errors.join(" ")).toContain('"## Detection"');
-		},
-	);
+	it.each([
+		"nightly:../x",
+		"nightly:two words",
+		"nightlyish",
+		"tla",
+		"prenightly:tool-smoke",
+	])("refuses %s as a layer word", (layer) => {
+		const result = lintPrBody(
+			withDetection(
+				`- Caught by: ${layer}\n` +
+					"- Should have been caught by: CI unit\n" +
+					"- Gap: #1\n" +
+					shapeLines,
+			),
+			{ bugClosing: true },
+		);
+		expect(result.valid).toBe(false);
+		expect(result.errors.join(" ")).toContain('"## Detection"');
+	});
 
 	// Recurrence: 139 of 363 bugs carried no recorded layer; a bug-closing PR
 	// must not be able to write the same non-answer into its own record.
@@ -5312,6 +5315,57 @@ describe("detection retrospective for bug-closing PRs (#4288)", () => {
 		},
 	);
 
+	// Recurrence: the exact-match refusal let "none: unknown reason", "n/a",
+	// "tbd" and "?" through as a Gap reason (review r1 of #4524, F1).
+	it.each([
+		"none: unknown reason",
+		"none: Unknown (not investigated)",
+		"none: n/a",
+		"none: tbd",
+		"none: ?",
+	])("refuses the placeholder Gap reason %s of a bug-closing PR", (gap) => {
+		const result = lintPrBody(
+			withDetection(
+				"- Caught by: smoke\n" +
+					"- Should have been caught by: CI unit\n" +
+					`- Gap: ${gap}\n` +
+					shapeLines,
+			),
+			{ bugClosing: true },
+		);
+		expect(result.errors).toEqual([DETECTION_UNKNOWN_MESSAGE]);
+	});
+
+	// Recurrence: F2 of the same review; the Shape name and the Enforcer reason
+	// are free text too, and "unknown" there recorded the retro's non-answer.
+	it.each([
+		["new: unknown", "none: judgment-only, no tree-wide scan exists yet"],
+		["new: TBD", "none: judgment-only, no tree-wide scan exists yet"],
+		["new: stale mirror", "none: judgment-only, unknown for now"],
+	])("refuses a placeholder in Shape %s / Enforcer %s", (shape, enforcer) => {
+		const result = lintPrBody(
+			withDetection(
+				"- Caught by: smoke\n" +
+					"- Should have been caught by: CI unit\n" +
+					"- Gap: none: a reason\n" +
+					`- Shape: ${shape}\n` +
+					`- Enforcer: ${enforcer}\n`,
+			),
+			{ bugClosing: true },
+		);
+		expect(result.errors).toEqual([DETECTION_UNKNOWN_MESSAGE]);
+	});
+
+	it("leaves a non-bug Shape and Enforcer placeholder alone", () => {
+		// Like the layer fields, the placeholder refusal rides the bug-closing seam.
+		expect(
+			lintDetectionSection(
+				"## Detection\n- Caught by: smoke\n- Should have been caught by: CI unit\n- Gap: #1\n" +
+					"- Shape: new: unknown\n- Enforcer: none: judgment-only, unknown for now\n",
+			),
+		).toEqual([]);
+	});
+
 	it("leaves a non-bug section that says unknown on the generic refusal", () => {
 		// The unknown-specific message belongs to the bug-closing seam only; a
 		// non-bug PR that fills the section badly still reds as it did before.
@@ -5328,7 +5382,7 @@ describe("detection retrospective for bug-closing PRs (#4288)", () => {
 				withDetection(
 					"- Caught by: smoke\n" +
 						"- Should have been caught by: CI unit\n" +
-						"- Gap: none: unknown tools were never probed\n" +
+						"- Gap: none: tools were never probed, status unknown\n" +
 						shapeLines,
 				),
 				{ bugClosing: true },
@@ -5457,7 +5511,7 @@ describe("detection retrospective for bug-closing PRs (#4288)", () => {
 				withDetection(
 					"- Caught by: smoke\n" +
 						"- Should have been caught by: CI unit\n" +
-						"- Gap: none: n/a\n" +
+						"- Gap: none: oversight\n" +
 						shapeLines,
 				),
 				{ bugClosing: true },

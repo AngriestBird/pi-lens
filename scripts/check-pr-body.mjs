@@ -1725,9 +1725,9 @@ export const DETECTION_MESSAGE =
 	DETECTION_LAYER_HINT;
 
 // #4519: the retro read 139 of 363 closed bugs as "unknown". A bug-closing PR
-// owes a layer word and a reason; "unknown" is neither.
+// owes a layer word and a reason; "unknown", "n/a", "tbd" and "?" are neither.
 export const DETECTION_UNKNOWN_MESSAGE =
-	'PR body "## Detection" says "unknown", which is not a detection lesson: a bug-closing PR names the layer that caught the bug (and the layer that should have), and gives a reason after "Gap: none:". ' +
+	'PR body "## Detection" answers "unknown", "n/a", "tbd" or "?" (or a reason that starts with "unknown"), which is not a detection lesson: a bug-closing PR names the layer that caught the bug (and the layer that should have), a real reason after "Gap: none:", the shape name, and the enforcer reason. ' +
 	DETECTION_LAYER_HINT;
 
 // A field value is found by its line prefix, never a sentence mention: a
@@ -1754,6 +1754,13 @@ function normalizeDetectionLayer(value) {
 		.replace(/\s+/g, " ")
 		.trim()
 		.toLowerCase();
+}
+
+// A placeholder answer: "unknown" opening the text, or a bare "n/a", "tbd" or
+// "?". Only free-text answers of a bug-closing PR are screened (#4519).
+function isPlaceholderAnswer(value) {
+	const text = normalizeDetectionLayer(value);
+	return /^unknown\b/.test(text) || /^(?:n\/a|tbd|\?+)$/.test(text);
 }
 
 // `Gap:` names a follow-up issue, an existing test that now covers the bug, or
@@ -1881,7 +1888,8 @@ function detectionEnforcer(value) {
 	const none = /^none\s*:\s*(?:judgment|judgement)-only\s*,\s*(.+)$/i.exec(
 		text,
 	);
-	if (none) return wordCount(none[1]) >= 3 ? { none: true } : null;
+	if (none)
+		return wordCount(none[1]) >= 3 ? { none: true, reason: none[1] } : null;
 	const path = /^\S+/.exec(text)?.[0].replace(/[.,;]+$/, "");
 	return path && isDetectionTestPath(path) ? { path } : null;
 }
@@ -1901,6 +1909,12 @@ function lintShapeAndEnforcer(content, options) {
 	const shape = detectionShape(detectionFieldValue(content, "shape"));
 	const enforcer = detectionEnforcer(detectionFieldValue(content, "enforcer"));
 	if (!shape || !enforcer) return [DETECTION_MESSAGE];
+	// #4519: the free text of the record, on the bug-closing seam only.
+	if (
+		options.requireShape &&
+		[shape.name, enforcer.reason].some(isPlaceholderAnswer)
+	)
+		return [DETECTION_UNKNOWN_MESSAGE];
 	let catalog;
 	if (
 		shape.number !== undefined &&
@@ -2010,9 +2024,7 @@ export function lintDetectionSection(body = "", options = {}) {
 	// non-bug section that says it stays on the generic refusal below.
 	if (
 		options.requireShape &&
-		[caughtBy, shouldBy, noneReason(gap)].some(
-			(value) => normalizeDetectionLayer(value) === "unknown",
-		)
+		[caughtBy, shouldBy, noneReason(gap)].some(isPlaceholderAnswer)
 	)
 		return [DETECTION_UNKNOWN_MESSAGE];
 	if (caughtBy === null || !isDetectionLayer(normalizeDetectionLayer(caughtBy)))
