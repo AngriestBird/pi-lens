@@ -282,6 +282,14 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			reason:
 				"the freshness gate writes its rows through logLatency; turn_end logs more phases after the gate than the five the getRecentLoggedPhases ring keeps, and test mode skips the file sink, so a passed-through spy is the only reader",
 		},
+	// 2026-10-16 (#4493 r2): the auxiliary half of the default stack. A
+	// project lsp.json cannot declare an auxiliary (role is reserved and
+	// inert), so the catalog lookup adds one; the servers stay real children.
+	"in-process-mock:clients/head-move-resync-4493.test.ts::clients/lsp/config": {
+		detector: "in-process-mock",
+		reason:
+			"a project lsp.json cannot declare an auxiliary server, so the catalog lookup adds the auxiliary fake; every server is still a real child process",
+	},
 	// 2026-10-15 (#4449): the registry's skip and respawn records go to
 	// logLatency. Its in-process ring drops the fields the test asserts, and
 	// test mode never reaches the file sink, so the captured call is the seam.
@@ -411,6 +419,11 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		detector: "real-process-spawn",
 		reason:
 			"real git children decide tracked-versus-ignored files from index state no stub reproduces",
+	},
+	"real-process-spawn:clients/head-move-resync-4493.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"a clean-tree HEAD move only exists in a real repository that git checks out, rebases or resets; a stubbed git cannot rewrite the files the server holds",
 	},
 	"real-process-spawn:clients/installer/pip-pep668.test.ts": {
 		detector: "real-process-spawn",

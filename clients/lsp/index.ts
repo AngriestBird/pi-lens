@@ -3413,6 +3413,47 @@ export class LSPService {
 	}
 
 	/**
+	 * #4493 r2: push the disk bytes of `filePaths` to the PRIMARY servers that
+	 * already hold them, and to no auxiliary. A HEAD move's resync runs this
+	 * first: the primary's view is the one the next read or edit's dispatch
+	 * reads, and an auxiliary's #1714 pacing barrier, waiting out a scanner
+	 * still busy with earlier changes, held the primary's later didChanges back
+	 * past the hook bound when every server went per file (review r1 F1).
+	 * Primaries are not gated, so this costs one write per document. The
+	 * auxiliaries, the importers and the drift records are left to
+	 * {@link resyncGitChangedFiles}, which the caller runs after this. Never
+	 * spawns: a server not holding the document is excluded.
+	 */
+	async resyncHeldPrimaries(
+		filePaths: readonly string[],
+	): Promise<{ sent: number }> {
+		let sent = 0;
+		for (const filePath of filePaths) {
+			if (this.checkDestroyed()) break;
+			const servers = getServersForFileWithConfig(filePath);
+			const exclude = await this.serverIdsNotHoldingDocument(filePath);
+			for (const server of servers)
+				if (isAuxiliary(server)) exclude.add(server.id);
+			if (servers.every((server) => exclude.has(server.id))) continue;
+			let content: string;
+			try {
+				content = await fs.readFile(filePath, "utf8");
+			} catch {
+				// Gone or unreadable: the drift resync after this reports it vanished.
+				continue;
+			}
+			await this.touchFile(filePath, content, {
+				diagnostics: "none",
+				source: "head_move_primary",
+				clientScope: "all",
+				excludeServerIds: exclude,
+			});
+			sent += 1;
+		}
+		return { sent };
+	}
+
+	/**
 	 * Re-sync the open views affected by one recovered Git tree change. The
 	 * recovery seam already owns the changed-path set, so this deliberately
 	 * reads only the cached reverse-import index and never runs another diff.
@@ -3425,7 +3466,13 @@ export class LSPService {
 	 */
 	async resyncGitChangedFiles(
 		changedPaths: readonly string[],
-		options: { saved?: boolean } = {},
+		/**
+		 * #4493 `maxPasses`: forced passes this call may run, serially, while a
+		 * target it queued is still waiting; each pass keeps the per-pass cap. A
+		 * HEAD move passes more than one so its held documents heal before its
+		 * tool_result returns; the default is the one paced pass (#2817 r2 F1).
+		 */
+		options: { saved?: boolean; maxPasses?: number } = {},
 	): Promise<ReadonlyMap<string, DriftDisposition>> {
 		const dispositions = new Map<string, DriftDisposition>();
 		if (this.checkDestroyed() || changedPaths.length === 0) {
@@ -3463,7 +3510,21 @@ export class LSPService {
 			openTargets.filter((filePath) => written.has(filePath)),
 			{ saved: options.saved === true },
 		);
-		const pass = await this.sweepDocumentDrift({ force: true });
+		let pass: DriftSweepResult | undefined;
+		let passes = 0;
+		/** What the passes did to each queued target, the latest pass winning. */
+		const reached = new Map<string, DriftDisposition>();
+		const waiting = (filePath: string): boolean => {
+			const disposition = reached.get(normalizeMapKey(filePath));
+			return disposition === undefined || disposition === "deferred";
+		};
+		for (let n = 0; n < Math.max(1, options.maxPasses ?? 1); n++) {
+			pass = await this.sweepDocumentDrift({ force: true });
+			passes += 1;
+			for (const [key, disposition] of pass?.queued ?? [])
+				reached.set(key, disposition);
+			if (!pass || !openTargets.some(waiting)) break;
+		}
 		logLatency({
 			type: "phase",
 			phase: "lsp_external_change_resync",
@@ -3473,13 +3534,16 @@ export class LSPService {
 				changedCount: changedPaths.length,
 				enqueued: openTargets.length,
 				deferred: pass?.deferred ?? this.documentDrift.pendingResyncCount,
+				// #4493 r2 F3: the forced passes this call ran (it stops once no
+				// queued target is waiting).
+				passes,
 			},
 		});
 		for (const [changedPath, resolved] of changed) {
 			dispositions.set(
 				changedPath,
 				openTargets.includes(resolved)
-					? (pass?.queued.get(normalizeMapKey(resolved)) ?? "deferred")
+					? (reached.get(normalizeMapKey(resolved)) ?? "deferred")
 					: "unheld",
 			);
 		}
