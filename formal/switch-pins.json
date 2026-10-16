@@ -2215,6 +2215,28 @@
 					"value": "TRUE",
 					"test": "tests/clients/line-alignment.test.ts",
 					"title": "keeps a runner whose verdict covers only the edit owed its earlier lines outside the edit"
+				},
+				"LaneVoids": {
+					"value": "TRUE",
+					"test": "tests/index-4484-unfixed-blocker-witness.test.ts",
+					"title": "keeps a napi blocker edited but still violating while the ast-grep server does not answer (row 26, P33)",
+					"also": [
+						{
+							"test": "tests/clients/dispatch/runners/ast-grep-napi.test.ts",
+							"title": "states why Gate B skips, so the skip is a verdict (#4484 round 4)"
+						}
+					]
+				},
+				"SettleCoverKeep": {
+					"value": "TRUE",
+					"test": "tests/index-4484-unfixed-blocker-witness.test.ts",
+					"title": "keeps a napi blocker when its collect-later Gate B skip settles (row 24, P34)",
+					"also": [
+						{
+							"test": "tests/clients/deferred-runner-blockers.test.ts",
+							"title": "retires nothing on a settled skip that defers to a covering lane"
+						}
+					]
 				}
 			},
 			"notCodeChoice": [

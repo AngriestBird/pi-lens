@@ -942,6 +942,12 @@ interface GroupResult {
 	collectLaterRunnerIds: string[];
 	/** #4484 round 6: runners whose verdict covers only the edit's ranges. */
 	editScopedRunnerIds: string[];
+	/** #4484 round 7: runners that reached a verdict, and the lanes covered skips defer to. */
+	answeredRunnerIds: string[];
+	coveredRunners: {
+		runnerId: string;
+		lane: { runnerId: string; serverId?: string };
+	}[];
 }
 
 /**
@@ -989,6 +995,8 @@ async function runGroup(
 	const inconclusiveServerIds: string[] = [];
 	const collectLaterRunnerIds: string[] = [];
 	const editScopedRunnerIds: string[] = [];
+	const answeredRunnerIds: string[] = [];
+	const coveredRunners: GroupResult["coveredRunners"] = [];
 
 	// Filter runners by kind if specified
 	const runnerIds = group.filterKinds
@@ -1333,8 +1341,12 @@ async function runGroup(
 			outOfEditScope.push(d);
 		}
 		if (reachedNoVerdict(result)) inconclusiveRunnerIds.push(runnerId);
-		else if (result.editScopedVerdict === true)
-			editScopedRunnerIds.push(runnerId);
+		else {
+			answeredRunnerIds.push(runnerId);
+			if (result.coveredBy)
+				coveredRunners.push({ runnerId, lane: result.coveredBy });
+			if (result.editScopedVerdict === true) editScopedRunnerIds.push(runnerId);
+		}
 		inconclusiveServerIds.push(
 			...(result.unconfirmedServerIds ?? []),
 			...(result.deferredServerIds ?? []),
@@ -1364,6 +1376,8 @@ async function runGroup(
 		inconclusiveServerIds,
 		collectLaterRunnerIds,
 		editScopedRunnerIds,
+		answeredRunnerIds,
+		coveredRunners,
 	};
 }
 
@@ -1540,6 +1554,8 @@ export async function dispatchForFile(
 	const inconclusiveServerIds = new Set<string>();
 	const collectLaterRunnerIds = new Set<string>();
 	const editScopedRunnerIds: string[] = [];
+	const answeredRunnerIds = new Set<string>();
+	const coveredRunners: GroupResult["coveredRunners"] = [];
 	for (const {
 		diagnostics: groupDiags,
 		latencies,
@@ -1549,6 +1565,8 @@ export async function dispatchForFile(
 		inconclusiveServerIds: groupServerIds,
 		collectLaterRunnerIds: groupCollectLater,
 		editScopedRunnerIds: groupEditScoped,
+		answeredRunnerIds: groupAnswered,
+		coveredRunners: groupCovered,
 	} of groupResults) {
 		runnerLatencies.push(...latencies);
 		outOfEditScope.push(...groupOutOfScope);
@@ -1556,9 +1574,22 @@ export async function dispatchForFile(
 		for (const id of groupServerIds) inconclusiveServerIds.add(id);
 		for (const id of groupCollectLater) collectLaterRunnerIds.add(id);
 		editScopedRunnerIds.push(...groupEditScoped);
+		for (const id of groupAnswered) answeredRunnerIds.add(id);
+		coveredRunners.push(...groupCovered);
 
 		allDiagnostics.push(...groupDiags);
 		if (hadBlocker) stopped = true;
+	}
+	// #4484 round 7: a covered skip is a verdict only when the lane it defers
+	// to answered: its runner reached a verdict, and its server confirmed.
+	const voidedCovers = new Set<string>();
+	for (const { runnerId, lane } of coveredRunners) {
+		const silent =
+			!answeredRunnerIds.has(lane.runnerId) ||
+			(lane.serverId !== undefined && inconclusiveServerIds.has(lane.serverId));
+		if (!silent) continue;
+		voidedCovers.add(runnerId);
+		inconclusiveRunnerIds.add(runnerId);
 	}
 
 	// Apply delta mode ONCE across the full diagnostic set.
@@ -1810,7 +1841,11 @@ export async function dispatchForFile(
 		hasBlockers: blockers.length > 0,
 		...(heldBackBlockers.length > 0 && { heldBackBlockers }),
 		...(stillObserved.length > 0 && { stillObserved }),
-		...(editScopedRunnerIds.length > 0 && { editScopedRunnerIds }),
+		...(editScopedRunnerIds.some((id) => !voidedCovers.has(id)) && {
+			editScopedRunnerIds: editScopedRunnerIds.flatMap((id) =>
+				voidedCovers.has(id) ? [] : [id],
+			),
+		}),
 		...((inconclusiveRunnerIds.size > 0 || inconclusiveServerIds.size > 0) && {
 			inconclusiveSources: {
 				runnerIds: [...inconclusiveRunnerIds],

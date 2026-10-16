@@ -186,7 +186,11 @@ export function retireSettledRunnerBlockers(
 	verdict: Pick<DeferredRunnerVerdict, "kept">,
 ): number {
 	const result = pending.result;
-	if (!result || reachedNoVerdict(result)) return 0;
+	// #4484 round 7: a settled skip that defers to a covering lane retires
+	// nothing. That lane's answer for these bytes is not known here, and its
+	// evidence may cover only the edit; the next inline write judges.
+	if (!result || reachedNoVerdict(result) || result.coveredBy !== undefined)
+		return 0;
 	const bytes = readBytes(pending.filePath);
 	const retired = runtime.retireUnobservedRunnerBlockers(pending.filePath, {
 		runnerId: pending.runnerId,

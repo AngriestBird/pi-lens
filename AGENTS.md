@@ -350,8 +350,9 @@ file-scoped worklist and receives no project-wide scanner output.
     hold and never widens what counts as the same finding: the match still
     needs the entry's own line text, and owed lines are matched by content,
     never widened to the file. A skip that defers to another source's
-    evidence answers only for what that evidence sees: an edit-gated primary
-    sees the edit, so a recorded finding outside it stays.
+    evidence answers only for what that evidence sees, and only when that
+    source answered: an edit-gated primary sees the edit, so a recorded
+    finding outside it stays, and a silent primary sees nothing.
     Enforced by `tests/clients/dispatch/runners/run-outcome-ratchet.test.ts`,
     `tests/clients/dispatch/runners/parsed-nothing-sweep.test.ts` and
     `tests/clients/delivery-surface-ratchet.test.ts` (partial: no detector

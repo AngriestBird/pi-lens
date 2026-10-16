@@ -140,6 +140,19 @@ rows). Each fix switch is pinned TRUE:
    the edit (owedRangesAfterDispatch). FALSE discharges them, so a blocker
    first written while it had no verdict never reaches its range again.
 
+The round-7 fix switches (#4484 round 7; PR #4491's round-7 rows), each
+pinned TRUE. They need no new environment: a Gate B skip may meet a silent
+covering lane (outcome "silent", under GateB and MayFail), and a collect-
+later Gate B skip may settle (under GateB and Deferred):
+ - LaneVoids (O2): a covered skip whose lane (the `lsp` runner, the
+   `ast-grep` server) gave no answer is no verdict (`coveredBy`, the
+   dispatcher's void). FALSE is the round-6 code: the edit-scoped verdict
+   stood, so a recorded blocker on an edited line retired while the bytes
+   still held it (verify probe P33);
+ - SettleCoverKeep (O1): a settled covered skip retires nothing
+   (`retireSettledRunnerBlockers`). FALSE is the round-6 code: it retired
+   a recorded collect-later blocker the skip never saw (verify probe P34).
+
 Invariants:
  - GateHonest: the commit gate is open only when no completed observation of
    the current bytes holds a blocker;
@@ -204,7 +217,9 @@ CONSTANTS
     OwedByContent,     \* round 5 (K2): without alignment, owe the lines with an owed line's text
     GateB,             \* round 6: the gated runner may skip as covered by an edit-gated primary
     EditScopedKeep,    \* round 6 (N1): that skip keeps recorded gated blockers outside the edit
-    EditScopedOwed     \* round 6: that skip keeps the runner's owed lines outside the edit
+    EditScopedOwed,    \* round 6: that skip keeps the runner's owed lines outside the edit
+    LaneVoids,         \* round 7 (O2): a covered skip with a silent lane is no verdict
+    SettleCoverKeep    \* round 7 (O1): a settled covered skip retires nothing
 
 Fast == {"a", "b"}
 U == IF Unused THEN {"u"} ELSE {}
@@ -220,6 +235,7 @@ Gated == IF RangeGated THEN {"a"} \cup Tw ELSE {}
 Outcomes == {"ok"} \cup (IF MayFail THEN {"fail"} ELSE {})
                    \cup (IF MaySkip THEN {"skip"} ELSE {})
                    \cup (IF GateB THEN {"cover"} ELSE {})
+                   \cup (IF GateB /\ MayFail THEN {"silent"} ELSE {})
 
 \* The id the delta keys on, for finding f in observation obs at line offsets l.
 \* "u" is an LSP finding, so its id is line-bound whatever Ordinal says.
@@ -324,13 +340,13 @@ StandIn(new, touched, fail, blind, hid) ==
        /\ "a" \notin Full(new, fail)
        /\ "p" \in (Full(new, fail) \ hid) \ Deliv(new, touched, fail)
       THEN {"p"} ELSE {}
-Carried(new, touched, fail, l, blind, hid) ==
+Carried(new, touched, fail, l, blind, hid, ks) ==
     (IF ScopeDeliveryOnly
        THEN {e \in rec \cap ((Full(new, fail) \ hid) \ Deliv(new, touched, fail)) :
                Located(e, blind)}
        ELSE {})
     \cup StandIn(new, touched, fail, blind, hid)
-    \cup (IF EditScopedKeep THEN rec \cap hid ELSE {})
+    \cup (rec \cap ks)
     \cup (IF CarryPromoted
        THEN rec \cap (USeen(new, fail) \ UBlock(new, fail, l)) ELSE {})
     \cup (IF CarryInconclusive /\ fail THEN rec \cap Inline ELSE {})
@@ -375,11 +391,18 @@ Reach(edited) == edited \cup owe \cup (IF TwinSameText THEN Tw ELSE {})
 Write(bytes, shift, edited, o, al) ==
     LET new == Seen(bytes, o)
         blind == ~al /\ shift
-        fail == Failed(o)
-        cover == o = "cover"
-        \* A primary's gate sees the edited lines only, not the owed ones.
-        touched == IF cover THEN edited ELSE Covers(edited, al)
-        hid == IF cover THEN Gated \ edited ELSE {}
+        silent == o = "silent"
+        fail == Failed(o) \/ (silent /\ LaneVoids)
+        \* A covered skip whose verdict stands (an answered lane, or the
+        \* round-6 code's silent one).
+        cover == o = "cover" \/ (silent /\ ~LaneVoids)
+        \* A primary's gate sees the edited lines only, not the owed ones;
+        \* a silent primary sees none.
+        sees == IF silent THEN {} ELSE edited
+        touched == IF cover THEN sees ELSE Covers(edited, al)
+        hid == IF cover THEN Gated \ sees ELSE {}
+        \* What the edit-scoped keep holds: the gated entries outside the edit.
+        ks == IF cover /\ EditScopedKeep THEN Gated \ edited ELSE {}
         l == IF shift THEN [f \in AllF |-> ln[f] + 1] ELSE ln
         obs == Deliv(new, touched, fail)
         ub == UBlock(new, fail, l)
@@ -387,7 +410,7 @@ Write(bytes, shift, edited, o, al) ==
         newIds == IF Delta /\ hasBase THEN ids \ base ELSE ids
         deltaSet == {f \in obs : Id(f, obs, l) \in newIds}
         delivered == IF ClearOnCurrent THEN obs \cup ub ELSE deltaSet \cup ub
-        current == delivered \cup Carried(new, touched, fail, l, blind, hid)
+        current == delivered \cup Carried(new, touched, fail, l, blind, hid, ks)
     IN /\ disk' = bytes /\ ln' = l
        /\ base' = ids /\ hasBase' = TRUE
        /\ obsF' = obs \cup ub /\ wobs' = obs \cup ub
@@ -433,7 +456,7 @@ OpaqueStep ==
             touched == Covers((disk \ bytes) \cap Lined, TRUE)
             obs == Deliv(new, touched, fail)
             ub == UBlock(new, fail, ln)
-            keep == obs \cup ub \cup Carried(new, touched, fail, ln, FALSE, {})
+            keep == obs \cup ub \cup Carried(new, touched, fail, ln, FALSE, {}, {})
             clears == IF OpaqueKeep THEN keep = {} ELSE TRUE
         IN /\ disk' = bytes
            /\ base' = IdsOf(obs, ln) \cup IdsOf(USeen(new, fail), ln)
@@ -467,16 +490,22 @@ SettledOwed(ok) ==
 \* The settle's retire empties the record: F is noted Resolved with what it held.
 Retires(ok) == rec # {} /\ SettledRec(ok) = {}
 
+\* A settled covered skip (round 7, `cv`): it observes nothing. Under
+\* SettleCoverKeep it retires nothing; FALSE retires d file-wide.
+CoverRec == IF SettleCoverKeep THEN rec ELSE rec \ {"d"}
 SettleStep ==
     /\ dState = "flight"
-    /\ \E ok \in (IF MayFail THEN BOOLEAN ELSE {TRUE}) :
-        /\ dState' = IF ok THEN "settled" ELSE "failed"
-        /\ rec' = SettledRec(ok)
-        /\ owed' = SettledOwed(ok)
-        /\ noted' = (noted \/ Retires(ok))
-        /\ cleared' = IF Retires(ok) THEN rec ELSE cleared
-        /\ clearOk' = IF Retires(ok) THEN TRUE ELSE clearOk
-        /\ reported' = reported \cup (SettledRec(ok) \ rec)
+    /\ \E ok \in (IF MayFail THEN BOOLEAN ELSE {TRUE}),
+          cv \in (IF GateB THEN BOOLEAN ELSE {FALSE}) :
+        LET next == IF cv THEN CoverRec ELSE SettledRec(ok)
+            retires == rec # {} /\ next = {}
+        IN /\ dState' = IF ok /\ ~cv THEN "settled" ELSE "failed"
+           /\ rec' = next
+           /\ owed' = IF cv THEN owed ELSE SettledOwed(ok)
+           /\ noted' = (noted \/ retires)
+           /\ cleared' = IF retires THEN rec ELSE cleared
+           /\ clearOk' = IF retires THEN ~cv ELSE clearOk
+           /\ reported' = reported \cup (next \ rec)
     /\ UNCHANGED <<disk, ln, base, hasBase, obsF, wobs, toolClean,
                    claim, claimSet, claimOk, cleanOk, owe, lost, held,
                    unpos, adopted, nW, nO, nT>>

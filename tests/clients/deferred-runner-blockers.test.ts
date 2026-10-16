@@ -528,4 +528,56 @@ describe("deferred blocker recording (#3814)", () => {
 			env.cleanup();
 		}
 	});
+
+	// #4484 round 7 (verify probe P34): napi's collect-later Gate B skip
+	// settled as covered by the ast-grep server. The settle read it as a
+	// file-wide verdict and retired an unfixed blocker outside the edit.
+	it("retires nothing on a settled skip that defers to a covering lane", () => {
+		const env = setupTestEnvironment("pi-lens-4484-settle-cover-");
+		try {
+			const filePath = path.join(env.tmpDir, "app.ts");
+			fs.writeFileSync(filePath, "alpha();\n");
+			const sha256 = createHash("sha256")
+				.update(fs.readFileSync(filePath))
+				.digest("hex");
+			const runtime = new RuntimeCoordinator();
+			const recorded = { ...blocking(filePath), runnerId: RUNNER_ID };
+			runtime.recordInlineBlockers(
+				filePath,
+				"🔴 STOP",
+				1,
+				undefined,
+				[1],
+				{ size: 9, sha256 },
+				[recorded],
+				undefined,
+				1_000,
+			);
+			const settled = (coveredBy?: { runnerId: string; serverId: string }) =>
+				retireSettledRunnerBlockers(
+					runtime,
+					{
+						filePath,
+						cwd: env.tmpDir,
+						projectRoot: env.tmpDir,
+						runnerId: RUNNER_ID,
+						markedAtMs: 2_000,
+						result: {
+							status: "skipped",
+							diagnostics: [],
+							semantic: "none",
+							skipReason: "covered-by-primary",
+							...(coveredBy ? { coveredBy } : {}),
+						},
+					},
+					{ kept: [] },
+				);
+			expect(settled({ runnerId: "lsp", serverId: "ast-grep" })).toBe(0);
+			expect(runtime.getInlineBlockerDiagnostics(filePath)).toEqual([recorded]);
+			// Control: the same skip without a lane is a file-wide verdict.
+			expect(settled()).toBe(1);
+		} finally {
+			env.cleanup();
+		}
+	});
 });

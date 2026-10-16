@@ -43,8 +43,10 @@ import {
 const boundary = vi.hoisted(() => {
 	/** Round 6 (P27): the ast-grep auxiliary server. Once `published`, napi's
 	 *  Gate B skips; with `diag`, the server reports `no-unknown-returns` on
-	 *  each `): unknown {` line, as its catalog would. */
-	const ag = { published: false, diag: false };
+	 *  each `): unknown {` line, as its catalog would. Round 7 (P33): with
+	 *  `cutoff`, the server does not answer the touch: unconfirmed, and none
+	 *  of its diagnostics. */
+	const ag = { published: false, diag: false, cutoff: false };
 	const lsp = {
 		/** The fake language server: error 2304 on each `BAD_CALL` line, and
 		 *  warning 6133 on each `unusedVar` line (round 2, row 16). */
@@ -127,6 +129,14 @@ const boundary = vi.hoisted(() => {
 			options?: { source?: string },
 		) => {
 			lsp.touches += 1;
+			if (ag.cutoff)
+				return {
+					diags: (lsp.diagnose(content) as Array<{ serverId?: string }>).filter(
+						(d) => d.serverId !== "ast-grep",
+					),
+					inconclusive: true,
+					inconclusiveServerIds: ["ast-grep"],
+				};
 			if (lsp.mode === "inconclusive")
 				return {
 					diags: [],
@@ -271,6 +281,7 @@ beforeEach(() => {
 	boundary.helm.lintCalls = 0;
 	boundary.ag.published = false;
 	boundary.ag.diag = false;
+	boundary.ag.cutoff = false;
 });
 afterEach(async () => {
 	// A cell that failed before its own fix still leaves no record, gate
@@ -283,6 +294,7 @@ afterEach(async () => {
 	if (cleanup) await cleanup().catch(() => {});
 	boundary.ag.published = false;
 	boundary.ag.diag = false;
+	boundary.ag.cutoff = false;
 	resetPendingRunnerFindings();
 	if (originalTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
 	else process.env.PI_LENS_TEST_MODE = originalTestMode;
@@ -1412,6 +1424,64 @@ describe("#4484 witness, round 6: Gate B answers only for what its server sees",
 		);
 		expect(w3).toContain("🔴 STOP");
 		expect(w3).toContain("L3:");
+		await fixAndDrain(s);
+	}, 180_000);
+
+	// Recurrence (O2, verify probe P33): the agent edited the blocker's line
+	// and left the violation while the ast-grep server did not answer. Gate
+	// B's skip still counted for the edit, so the blocker retired: an open
+	// gate and "Resolved" with the violation on disk.
+	it("keeps a napi blocker edited but still violating while the ast-grep server does not answer (row 26, P33)", async () => {
+		boundary.lsp.enabled = true;
+		const s = await openSession("p33", "src/p33.ts", AG_FIXED);
+		await s.write(AG_FIXED);
+		expect(await s.edit(AG_PRE, [3])).toContain("🔴 STOP");
+		serverCovers();
+		boundary.ag.cutoff = true;
+		const w2 = await s.edit(
+			AG_PRE.replace("key: string): unknown", "k2: string): unknown").replace(
+				"obj[key]",
+				"obj[k2]",
+			),
+			[3, 4],
+		);
+		expect(w2).toMatch(/Still unfixed: 1 blocker reported earlier \(L3\)/);
+		expect(await s.commitBlocked()).toBe(true);
+		const turnEnd = await s.endTurn();
+		expect(turnEnd).toContain("STOP");
+		expect(turnEnd).not.toContain("Resolved this turn");
+		// The kept entry's line lost its text, so Gate B cannot place it; it
+		// retires once napi itself answers again (residual, #4509).
+		boundary.ag.cutoff = false;
+		boundary.ag.published = false;
+		await fixAndDrain(s);
+	}, 180_000);
+
+	// Recurrence (O1, verify probe P34): napi turned collect-later after it
+	// recorded a blocker. Its Gate B skip on an edit elsewhere settled as
+	// covered by the server, and the settle retired the blocker file-wide:
+	// the gate opened and turn end said "Resolved".
+	it("keeps a napi blocker when its collect-later Gate B skip settles (row 24, P34)", async () => {
+		boundary.lsp.enabled = true;
+		const s = await openSession("p34", "src/p34.ts", AG_FIXED);
+		await s.write(AG_FIXED);
+		expect(await s.edit(AG_PRE, [3])).toContain("🔴 STOP");
+		serverCovers();
+		observeRunnerLatency({
+			projectRoot: tmpDir,
+			runnerId: "ast-grep-napi",
+			durationMs: 6_000,
+		});
+		await s.edit(
+			AG_PRE.replace("CLIENT_VERSION;", "CLIENT_VERSION; // x"),
+			[2],
+		);
+		await settlePendingRunnerFindingsForTests();
+		expect(await s.commitBlocked()).toBe(true);
+		const turnEnd = await s.endTurn();
+		expect(turnEnd).toContain("STOP");
+		expect(turnEnd).not.toContain("Resolved this turn");
+		resetObservedRunnerLatency();
 		await fixAndDrain(s);
 	}, 180_000);
 

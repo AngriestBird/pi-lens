@@ -334,6 +334,13 @@ export interface RunnerResult {
 	 */
 	editScopedVerdict?: boolean;
 	/**
+	 * #4484 round 7: the lane a `covered-by-primary` skip defers to. The skip
+	 * is a verdict only when that runner reached one and that server (when
+	 * named) confirmed; otherwise the dispatcher reads it as no verdict, and a
+	 * settled skip retires nothing.
+	 */
+	coveredBy?: { runnerId: string; serverId?: string };
+	/**
 	 * #4403: why no primary language server answered, when the runner knows:
 	 * the operator disabled it, it could not be started (or was still
 	 * starting), or both. The coverage notice and the status line name it.

@@ -1418,7 +1418,13 @@ const astGrepNapiRunner: RunnerDefinition = {
 				status: "skipped",
 				diagnostics: [],
 				semantic: "none",
-				...(coveragePending ? {} : { skipReason: "covered-by-primary" }),
+				// Round 7: the verdict holds only if the server's host answered.
+				...(coveragePending
+					? {}
+					: {
+							skipReason: "covered-by-primary",
+							coveredBy: { runnerId: "lsp", serverId: "ast-grep" },
+						}),
 				...(ctx.blockingOnly && ctx.modifiedRanges?.length
 					? { editScopedVerdict: true }
 					: {}),

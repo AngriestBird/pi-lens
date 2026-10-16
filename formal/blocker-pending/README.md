@@ -44,6 +44,9 @@ The seam:
   `DispatchResult.editScopedRunnerIds`). The carry keeps such a runner's
   recorded blocker outside the edit, and `owedRangesAfterDispatch` keeps its
   owed lines outside the edit.
+- Round 7: the skip names its covering lane (`RunnerResult.coveredBy`). The
+  dispatcher reads it as no verdict when that lane did not answer, and
+  `retireSettledRunnerBlockers` retires nothing on a settled covered skip.
 
 ## What the model covers
 
@@ -153,6 +156,13 @@ The seam:
     - `EditScopedOwed`: the runner stays owed its earlier lines outside the
       edit. FALSE discharged them, so a blocker first written while it had no
       verdict never reached its range again.
+  - Round 7 (#4484, each pinned TRUE; no new environment). The outcome
+    `"silent"` (under `GateB` and `MayFail`) is a Gate B skip whose lane did
+    not answer, and a collect-later Gate B skip may settle (`cv`).
+    - `LaneVoids` (O2): a covered skip with a silent lane is no verdict. FALSE
+      let the edit-scoped verdict stand (verify probe P33).
+    - `SettleCoverKeep` (O1): a settled covered skip retires nothing. FALSE
+      retired the collect-later blocker file-wide (verify probe P34).
 
 ## Invariants
 
@@ -223,10 +233,13 @@ States are as TLC reported them with `-workers 1` (generated / distinct).
 | `MutUnalignedText` | violated `TwinNotAdopted` | 276 / 53 | The round-4 code (`UnalignedText` FALSE). A pre-existing twin with other text takes over a fixed blocker (verify probe P22). |
 | `MutOwedByContent` | violated `TwinNotAdopted` | 326 / 154 | The round-4 code (`OwedByContent` FALSE). A file with no record owes the whole file after a skip, and a pre-existing twin becomes a STOP (verify probe P23). |
 | `CarryTwinText` | pass | 135649 / 3379 | The #4481 residual. A same-text twin may stand in (`held`); every other invariant holds. |
-| `CarryGateB` | pass | 30837 / 1916 | The round-6 fix. The gated runner may fail, skip or take Gate B: a recorded blocker outside the edit stays, and its owed lines stay owed. |
-| `CarryGateBTwin` | pass | 31672 / 1479 | The round-6 fix with a pre-existing twin: the keep holds only recorded blockers, so no twin is adopted. |
+| `CarryGateB` | pass | 37829 / 1916 | The round-6 fix. The gated runner may fail, skip or take Gate B: a recorded blocker outside the edit stays, and its owed lines stay owed. |
+| `CarryGateBTwin` | pass | 42229 / 1479 | The round-6 fix with a pre-existing twin: the keep holds only recorded blockers, so no twin is adopted. |
 | `MutEditScopedKeep` | violated `RecordedKept` | 38 / 10 | The round-5 code (`EditScopedKeep` FALSE). Gate B's skip on an edit elsewhere retires a recorded blocker the bytes still hold (verify probe P27). |
-| `MutEditScopedOwed` | violated `GateSound` | 92 / 26 | `EditScopedOwed` FALSE. Gate B's skip discharges the lines a failed write owed, and the blocker written then stays undelivered with no line owed. |
+| `MutEditScopedOwed` | violated `GateSound` | 128 / 26 | `EditScopedOwed` FALSE. Gate B's skip discharges the lines a failed write owed, and the blocker written then stays undelivered with no line owed. |
+| `CarryGateBSettle` | pass | 17725 / 1366 | The round-7 fix. A collect-later Gate B skip may settle, and the gated runner's lane may stay silent: nothing retires without a run that read the bytes. |
+| `MutSettleCover` | violated `RecordedKept` | 967 / 123 | The round-6 code (`SettleCoverKeep` FALSE). A settled Gate B skip retires a collect-later blocker the bytes still hold (verify probe P34). |
+| `MutLaneVoids` | violated `RecordedKept` | 481 / 65 | The round-6 code (`LaneVoids` FALSE). With the server's host silent, the edit-scoped verdict retires a blocker on an edited line that still holds it (verify probe P33). |
 
 The `MutDeltaClear` trace is write, ignore, write:
 
@@ -273,6 +286,8 @@ Each switch has a config that flips when it is turned:
 - `GateB`: `CarryOwed` to `CarryGateB` (both pass).
 - `EditScopedKeep`: `CarryGateB` to `MutEditScopedKeep`.
 - `EditScopedOwed`: `CarryGateB` to `MutEditScopedOwed`.
+- `LaneVoids`: `CarryGateB` to `MutLaneVoids`.
+- `SettleCoverKeep`: `CarryGateBSettle` to `MutSettleCover`.
 
 ## Residuals TLC shows
 
@@ -331,7 +346,8 @@ service and the process spawn are doubled at their host boundary. Its cells:
 - R: helm renumbering.
 - Round 6 (rows of PR #4491's round-6 table): 17 (P27, a napi blocker
   outside the edit under Gate B), 18 (one fixed on its own line retires) and
-  19 (one fixed, one kept).
+  19 (one fixed, one kept). Round 7: 26 (P33, a silent lane) and 24 (P34,
+  a settled collect-later skip).
 - Round 5 (rows of PR #4491's round-5 table): 4b (P22, a twin with other
   text), 6b (a stale entry), 9 (P23, owed by content) and 13 (P25, one entry
   after a settle).

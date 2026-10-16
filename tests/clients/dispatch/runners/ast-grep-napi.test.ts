@@ -479,6 +479,11 @@ describe("ast-grep-napi runner — aux-runner-findings-lost degradation (#2324 R
 			expect(result.status).toBe("skipped");
 			expect(result.skipReason).toBe("covered-by-primary");
 			expect(reachedNoVerdict(result)).toBe(false);
+			// Round 7 (P33): the verdict names the lane it relies on.
+			expect(result.coveredBy).toEqual({
+				runnerId: "lsp",
+				serverId: "ast-grep",
+			});
 		} finally {
 			env.cleanup();
 		}
@@ -508,6 +513,7 @@ describe("ast-grep-napi runner — aux-runner-findings-lost degradation (#2324 R
 			);
 			expect(result.status).toBe("skipped");
 			expect(result.skipReason).toBeUndefined();
+			expect(result.coveredBy).toBeUndefined();
 			expect(reachedNoVerdict(result)).toBe(true);
 			pendingAux.resetPendingAuxiliaryCoverage();
 		} finally {
