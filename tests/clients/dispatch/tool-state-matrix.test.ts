@@ -111,10 +111,10 @@ const childProcessWindow = vi.hoisted(() => {
 	function wrap(actual: typeof import("node:child_process")) {
 		const wrapped = { ...actual };
 		for (const method of methods) {
-			const original = actual[method];
+			const original = actual[method] as (...args: unknown[]) => unknown;
 			wrapped[method] = function (this: unknown, ...args: unknown[]) {
 				assertNoRealCall(method, args);
-				return Reflect.apply(original, this, args) as never;
+				return original.apply(this, args);
 			} as never;
 		}
 		return wrapped;
