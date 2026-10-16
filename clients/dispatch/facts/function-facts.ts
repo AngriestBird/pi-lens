@@ -276,6 +276,37 @@ function parameterReceiverTypes(params: TsNode[]): Record<string, string> {
 	return types;
 }
 
+/** `return await call()`, the shape `hasReturnAwaitCall` reports. */
+function returnsAwaitedCall(stmt: TsNode): boolean {
+	const ret = firstNamedChild(stmt);
+	return (
+		ret?.type === "await_expression" &&
+		firstNamedChild(ret)?.type === "call_expression"
+	);
+}
+
+function addCallFacts(
+	callee: TsNode,
+	calls: Set<string>,
+	memberCallSites: MemberCallSite[],
+): void {
+	const calleeText = callee?.text ?? "";
+	if (calleeText.length < 80) calls.add(calleeText);
+	const site = memberCallSite(callee);
+	if (site) memberCallSites.push(site);
+}
+
+/** `x = new Ctor()` makes `Ctor` the receiver type of `x`. */
+function addNewReceiverType(
+	children: TsNode[],
+	receiverTypes: Record<string, string>,
+): void {
+	const id = children.find((c: TsNode) => c?.type === "identifier");
+	const value = children.find((c: TsNode) => c?.type === "new_expression");
+	const ctor = value ? firstNamedChild(value) : undefined;
+	if (id && ctor?.type === "identifier") receiverTypes[id.text] = ctor.text;
+}
+
 type BodySummary = Pick<
 	FunctionSummary,
 	| "hasAwait"
@@ -307,24 +338,11 @@ function summarizeBody(body: TsNode, params: TsNode[]): BodySummary {
 		if (type === "await_expression") {
 			hasAwait = true;
 		} else if (type === "return_statement") {
-			const ret = firstNamedChild(node);
-			if (
-				ret?.type === "await_expression" &&
-				firstNamedChild(ret)?.type === "call_expression"
-			) {
-				hasReturnAwaitCall = true;
-			}
+			if (returnsAwaitedCall(node)) hasReturnAwaitCall = true;
 		} else if (type === "call_expression") {
-			const callee = children[0];
-			const calleeText = callee?.text ?? "";
-			if (calleeText.length < 80) calls.add(calleeText);
-			const site = memberCallSite(callee);
-			if (site) memberCallSites.push(site);
+			addCallFacts(children[0], calls, memberCallSites);
 		} else if (type === "variable_declarator") {
-			const id = children.find((c: TsNode) => c && c.type === "identifier");
-			const value = children.find((c: TsNode) => c?.type === "new_expression");
-			const ctor = value ? firstNamedChild(value) : undefined;
-			if (id && ctor?.type === "identifier") receiverTypes[id.text] = ctor.text;
+			addNewReceiverType(children, receiverTypes);
 		}
 		// Depth counts nesting structures between the body and the node.
 		const next = NESTING_TYPES.has(type) ? depth + 1 : depth;
