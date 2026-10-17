@@ -978,6 +978,12 @@ file-scoped worklist and receives no project-wide scanner output.
   pi-lens writes and before LSP or dispatch awaits. `fileModified` also covers
   side-effect files, so `postWriteStateHash` is the ownership discriminator;
   an absent hash must not stamp the target with later disk bytes (#2499).
+- The opaque prescan resolves its root once, through `opaquePrescanRoot`
+  (`clients/opaque-mutation-scan.ts`), at both hooks. A session whose cwd is
+  not the coordinator's `projectRoot` — a concurrent secondary session, which
+  the host's session-start guard declines before any `session_start` body runs
+  — otherwise records its baseline under one root and takes it under another,
+  reporting `no-pending-snapshot` for a command that did write.
 - `RUNNERS` declarations include file kinds. Runner selection is gated by file
   kind and anchored at the file's language root, not by dispatch-root config or
   declaration order. Runner children use `resolveToolCwd` with launcher markers.

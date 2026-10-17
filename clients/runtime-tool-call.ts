@@ -16,6 +16,7 @@ import {
 	headRecordKey,
 	isGitWorktree,
 	opaqueBaselineSlot,
+	opaquePrescanRoot,
 	shouldRunOpaqueRecovery,
 	type PendingOpaqueBaseline,
 } from "./opaque-mutation-scan.js";
@@ -662,7 +663,10 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 			))
 				runtime.readGuard?.retireChangedAuthorship?.(target);
 		if (typeof commandInput?.command === "string" && commandInput.command) {
-			const scanRoot = ctx.cwd ?? runtime.projectRoot;
+			// #4504: the record and the take resolve their root through one
+			// owner, so a session whose cwd is not the coordinator's project root
+			// (a concurrent secondary, #473) cannot key the two lookups apart.
+			const scanRoot = opaquePrescanRoot(ctx.cwd, runtime.projectRoot);
 			if (scanRoot && shouldRunOpaqueRecovery(toolName, scanRoot)) {
 				const started = Date.now();
 				const baselineSlot = opaqueBaselineSlot(

@@ -14,6 +14,7 @@ import {
 	listGitHeadDelta,
 	observeGitHead,
 	opaqueBaselineSlot,
+	opaquePrescanRoot,
 	readGitHead,
 	recoverOpaqueChangesViaGit,
 	serializeHeadLook,
@@ -462,6 +463,16 @@ interface ToolResultDeps {
 	sessionId?: string;
 	/** Role of the activation that owns this write. */
 	sessionRole?: "primary" | "secondary";
+	/**
+	 * The host ctx's `cwd` for THIS tool_result — the same per-session field the
+	 * `tool_call` hook reads. The opaque prescan resolves its root through
+	 * `opaquePrescanRoot(deps.cwd, …)` (#4504): a session whose cwd is not the
+	 * coordinator's `projectRoot` (a concurrent secondary in a linked worktree,
+	 * #473/#2129) otherwise wrote its baseline under one root and looked it up
+	 * under another. Absent means the host offered none, and the prescan falls
+	 * back to the same `projectRoot` the `tool_call` side falls back to.
+	 */
+	cwd?: string;
 	/**
 	 * Internal: set when the debounce timer fires to skip re-scheduling.
 	 * Do not pass from external callers.
@@ -1889,7 +1900,11 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		// close that gap, subtracting already-recognized paths so nothing
 		// double-dispatches.
 		if (shouldRunOpaqueRecovery(event.toolName, workspaceRoot)) {
-			const scanRoot = workspaceRoot;
+			// #4504: one root for the record and the take. The coordinator's
+			// `projectRoot` is the LIVE PRIMARY's for a concurrent secondary (#473),
+			// so this side has to ask the host's own cwd, exactly as the `tool_call`
+			// side does — never the root it happens to be dispatching against.
+			const scanRoot = opaquePrescanRoot(deps.cwd, workspaceRoot);
 			const started = Date.now();
 			const pending = getOpaqueBaselineStore().take(
 				opaqueBaselineSlot(scanRoot, runtime.sessionGeneration),
