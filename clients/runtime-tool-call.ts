@@ -581,7 +581,10 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 	// starts from, without which the first move of a session would read as a
 	// first sight at its tool_result. Reading HEAD is a file read; the bound
 	// ends the wait, and a cut look writes a `hook-await-exceeded` row.
-	const headRoot = ctx.cwd ?? runtime.projectRoot;
+	// #4504 r1: the head-move record resolves its root through the same owner as
+	// the opaque baseline slot, so a concurrent secondary's (#473) `tool_result`
+	// take finds the look this hook recorded.
+	const headRoot = opaquePrescanRoot(ctx.cwd, runtime.projectRoot);
 	if (headRoot)
 		await bounded(
 			resyncHeadMove({

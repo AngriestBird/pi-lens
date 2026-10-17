@@ -229,4 +229,88 @@ describe("the opaque prescan's two looks resolve one root per session (#4504)", 
 			}).toEqual({ recovered: ["changed:1"], verdicts: [] });
 		},
 	);
+
+	// Residual 1 of the same shape (#4493's head-move resync): its record and
+	// its take also split the root, so a secondary saw a first sight at its own
+	// `tool_result`, and a HEAD move made between the two hooks resynced
+	// nothing. Both halves now ask `opaquePrescanRoot`.
+	it(
+		"resyncs a HEAD move its own tool_call recorded, in the linked worktree",
+		{ timeout: 120_000 },
+		async () => {
+			const headMain = path.join(env!.tmpDir, "head-main");
+			const headWorktree = path.join(env!.tmpDir, "head-worktree");
+			initRepo(headMain);
+			git(["worktree", "add", "-q", headWorktree, "HEAD"], headMain);
+			// The command label is the row's `filePath`, so it names this case.
+			const command = "node scripts/gen-head.mjs";
+
+			const primary = createPiMock();
+			extension(primary.asExtensionAPI());
+			const primaryCtx = makeCtx({
+				cwd: headMain,
+				sessionId: "4504r1-primary",
+			});
+			await primary.emit("session_start", makeSessionStartEvent(), primaryCtx);
+			await primary.emit("turn_start", {}, primaryCtx);
+
+			const secondary = createPiMock();
+			extension(secondary.asExtensionAPI());
+			const secondaryCtx = makeCtx({
+				cwd: headWorktree,
+				sessionId: "4504r1-secondary",
+			});
+			await secondary.emit(
+				"session_start",
+				makeSessionStartEvent(),
+				secondaryCtx,
+			);
+			expect(getSecondarySessionCount()).toBe(1);
+			await secondary.emit("turn_start", {}, secondaryCtx);
+
+			process.env.PI_LENS_TEST_MODE = "0";
+			const toolCallId = "4504-r1-call-1";
+			const input = { command };
+			try {
+				// The hook that records the HEAD the command starts from.
+				await secondary.emit(
+					"tool_call",
+					{ toolName: "bash", toolCallId, input },
+					secondaryCtx,
+				);
+				// A clean-tree HEAD move between the two hooks: only the head look
+				// can see it, and only under the key its own tool_call recorded.
+				fs.writeFileSync(
+					path.join(headWorktree, "moved.ts"),
+					"export const moved = 1;\n",
+				);
+				git(["add", "-A"], headWorktree);
+				git(["commit", "-qm", "move head"], headWorktree);
+				await secondary.emit(
+					"tool_result",
+					{
+						toolName: "bash",
+						toolCallId,
+						input,
+						isError: false,
+						content: [{ type: "text", text: "ok" }],
+					},
+					secondaryCtx,
+				);
+			} finally {
+				if (originalTestMode === undefined)
+					delete process.env.PI_LENS_TEST_MODE;
+				else process.env.PI_LENS_TEST_MODE = originalTestMode;
+			}
+
+			// One row per move, written by the look that found it. A split root
+			// reads the coordinator's checkout, whose HEAD this session never
+			// recorded, so the move is a first sight and no row appears.
+			expect(
+				(await rowsNaming(command))
+					.filter((row) => row.phase === "opaque_mutation_head_moved")
+					.map((row) => row.result),
+			).toEqual(["changed:1"]);
+		},
+	);
 });

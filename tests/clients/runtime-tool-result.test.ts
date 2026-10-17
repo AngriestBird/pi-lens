@@ -6,7 +6,7 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../../clients/cache-manager.js";
 import {
 	_resetAgentNudgeForTests,
@@ -43,8 +43,16 @@ import {
 } from "../../clients/file-utils.js";
 import {
 	normalizeFilePath,
+	normalizeMapKey,
 	resolveHostToolPath,
 } from "../../clients/path-utils.js";
+import {
+	captureFileStats,
+	getOpaqueBaselineStore,
+	opaqueBaselineSlot,
+	resetOpaqueMutationState,
+} from "../../clients/opaque-mutation-scan.js";
+import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 import { pinTestHome } from "./test-utils.js";
 import { runPipeline } from "../../clients/pipeline.js";
 import { resolveAnalysisRoot } from "../../clients/analysis-root.js";
@@ -99,11 +107,19 @@ vi.mock("../../clients/pipeline.js", () => ({
 }));
 
 const notifyExternalFileChange = vi.hoisted(() => vi.fn(async () => undefined));
+/**
+ * #4504 r1: the service `peekLSPService` answers for while a case installs one.
+ * Absent by default, so every other case sees the module's real answer.
+ */
+const lspServiceHolder = vi.hoisted(() => ({
+	current: undefined as unknown,
+}));
 vi.mock("../../clients/lsp/capabilities.js", async (importOriginal) => ({
 	...(await importOriginal<
 		typeof import("../../clients/lsp/capabilities.js")
 	>()),
 	notifyExternalFileChange,
+	peekLSPService: () => lspServiceHolder.current,
 }));
 
 const readdirMock = vi.mocked(fsp.readdir);
@@ -6060,6 +6076,177 @@ describe("host tool path resolution on the tool_result side (#4576)", () => {
 			expect(dispatchedPaths()).toContain(writtenFile);
 			expect(dispatchedPaths()).not.toContain(foldedFile);
 		} finally {
+			env.cleanup();
+		}
+	});
+});
+
+/**
+ * #4504 r1: the root the prescan takes its baseline under is also the root the
+ * rest of the bash path must use. Two bot findings on the #4504 fix pinned this:
+ * a recognized write into another checkout was dropped, and a recovered write
+ * was offered to the servers of a subtree that does not hold it.
+ */
+describe("the prescan root reaches the send and the recognized set (#4504 r1)", () => {
+	/** The deps `index.ts` hands the `tool_result` hook, with the session's cwd. */
+	function splitDeps(runtime: RuntimeCoordinator, event: unknown, cwd: string) {
+		return {
+			event,
+			cwd,
+			getFlag: () => false,
+			dbg: () => {},
+			runtime,
+			cacheManager: new CacheManager(false),
+			biomeClient: {},
+			ruffClient: {},
+			metricsClient: {},
+			resetLSPService: () => {},
+			readGuard: runtime.readGuard,
+			agentBehaviorRecord: () => [],
+			formatBehaviorWarnings: () => "",
+		} as never;
+	}
+	/**
+	 * The two roots a concurrent-secondary session splits: the coordinator's
+	 * `projectRoot` (the primary's checkout) and the session's own `cwd`. Plain
+	 * directories are enough - the seam under test is which root each half
+	 * derives, and the pending baseline is a real stat diff, not git's status.
+	 */
+	function splitDirs(
+		env: ReturnType<typeof setupTestEnvironment>,
+		tag: string,
+	): { mainRoot: string; worktreeRoot: string } {
+		const mainRoot = path.join(env.tmpDir, `${tag}-main`);
+		const worktreeRoot = path.join(env.tmpDir, `${tag}-session`);
+		fs.mkdirSync(mainRoot, { recursive: true });
+		fs.mkdirSync(worktreeRoot, { recursive: true });
+		return { mainRoot, worktreeRoot };
+	}
+	/** The real pre-write stat snapshot a `stat-diff` baseline holds. */
+	async function baselineSnapshot(root: string) {
+		const outcome = await captureFileStats(root, { withHashes: true });
+		expect(outcome.unknownReason).toBeUndefined();
+		return outcome.snapshot!;
+	}
+	/** The `filePath` every dispatch was handed, in call order. */
+	function dispatchedPaths(): string[] {
+		return vi
+			.mocked(runPipeline)
+			.mock.calls.map(([ctx]) => (ctx as { filePath?: string }).filePath ?? "");
+	}
+	beforeEach(() => {
+		const runPipelineMock = vi.mocked(runPipeline);
+		runPipelineMock.mockReset();
+		runPipelineMock.mockResolvedValue({
+			output: "",
+			hasBlockers: false,
+			isError: false,
+			fileModified: false,
+		} as never);
+		lspServiceHolder.current = undefined;
+	});
+	afterEach(() => {
+		lspServiceHolder.current = undefined;
+		resetOpaqueMutationState();
+	});
+
+	// Greptile P1 on #4594: the scan of the secondary's own checkout cleared a
+	// recognized write that landed in the primary's, so `out.ts` got no
+	// dispatch and no mutation record. A scan may only judge the tree it ran in.
+	it("keeps a recognized write that lands in the other checkout", async () => {
+		const env = setupTestEnvironment("pi-lens-4504-r1-cross-");
+		const { mainRoot, worktreeRoot } = splitDirs(env, "cross");
+		try {
+			const mainOut = path.join(mainRoot, "out.ts");
+			fs.writeFileSync(mainOut, "export const out = 1;\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = mainRoot;
+			const toolCallId = "4504-r1-cross";
+			getOpaqueBaselineStore().record(
+				opaqueBaselineSlot(worktreeRoot, runtime.sessionGeneration),
+				toolCallId,
+				{
+					startedAt: Date.now(),
+					strategy: "stat-diff",
+					stats: await baselineSnapshot(worktreeRoot),
+				},
+			);
+			const input = { command: `printf x > ${mainOut}` };
+			// The test runs the command's effect itself, as pi's bash tool would.
+			fs.writeFileSync(mainOut, "export const out = 2;\n");
+
+			await handleToolResult(
+				splitDeps(
+					runtime,
+					{
+						toolName: "bash",
+						toolCallId,
+						input,
+						isError: false,
+						content: [{ type: "text", text: "ok" }],
+					},
+					worktreeRoot,
+				),
+			);
+
+			expect(dispatchedPaths()).toContain(mainOut);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// Greptile P1 on #4594: the recovered files reach the servers that hold
+	// them by root, so asking the coordinator's root found no holder in the
+	// secondary's checkout and sent nothing before the dispatches read a check.
+	it("sends a recovered worktree write to the servers that root it", async () => {
+		const env = setupTestEnvironment("pi-lens-4504-r1-send-");
+		const { mainRoot, worktreeRoot } = splitDirs(env, "send");
+		const resync = vi.fn(async () => ({ sent: 1, drained: true }));
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = mainRoot;
+			const held = path.join(worktreeRoot, "held.ts");
+			const toolCallId = "4504-r1-send";
+			getOpaqueBaselineStore().record(
+				opaqueBaselineSlot(worktreeRoot, runtime.sessionGeneration),
+				toolCallId,
+				{
+					startedAt: Date.now(),
+					strategy: "stat-diff",
+					stats: await baselineSnapshot(worktreeRoot),
+				},
+			);
+			// The opaque command's own write, in the secondary's checkout.
+			fs.writeFileSync(held, "export const held = 2;\n");
+			lspServiceHolder.current = makeLspServiceDouble({
+				getOpenDocumentPaths: (root: string) =>
+					normalizeMapKey(root) === normalizeMapKey(worktreeRoot)
+						? [normalizeMapKey(held)]
+						: [],
+				getTrackedContent: () => ({ hash: "held-before-the-write" }),
+				resyncHeldPrimaries: resync,
+			});
+
+			await handleToolResult(
+				splitDeps(
+					runtime,
+					{
+						toolName: "bash",
+						toolCallId,
+						input: { command: "node scripts/gen-held.mjs" },
+						isError: false,
+						content: [{ type: "text", text: "ok" }],
+					},
+					worktreeRoot,
+				),
+			);
+
+			expect(resync).toHaveBeenCalledWith(
+				[normalizeMapKey(held)],
+				expect.any(Number),
+			);
+		} finally {
+			lspServiceHolder.current = undefined;
 			env.cleanup();
 		}
 	});
