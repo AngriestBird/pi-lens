@@ -1048,7 +1048,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/workspace-diagnostics-session.ts": 2,
 		// 6 -> 5 (#3643): removed the obsolete ring path-comparison branch;
 		// dispatch identity now arrives on DispatchResult.
-		"clients/mcp/analyze.ts": 5,
+		// 5 -> 6 (#4583): the adopted warm entry keys its map lookup through
+		// `path.resolve(cwd)`, the same sense (a path operation) the entry's own
+		// creation site already uses.
+		"clients/mcp/analyze.ts": 6,
 		// 4 -> 7 (#4376): OS path namespace calls build the pid-first endpoint
 		// name and the stale-socket owner marker. No path-key owner changes.
 		"clients/mcp/ipc.ts": 7,

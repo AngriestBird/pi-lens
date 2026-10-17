@@ -16,11 +16,25 @@ import {
 } from "../../clients/project-snapshot.js";
 import {
 	buildWordIndex,
+	notifyWordIndexPublished,
 	searchWordIndex,
 	serializeWordIndex,
 } from "../../clients/word-index.js";
 import { suspendAt } from "./interleaving-kit.js";
 import { setupTestEnvironment } from "./test-utils.js";
+
+// Leases the warm entry (creating it on first use) and hands back what a query
+// would see, so a case reads the cache exactly the way `symbolSearch` does.
+function warmIndexFor(
+	cwd: string,
+): ReturnType<typeof acquireWarmWordIndex>["index"] {
+	const lease = acquireWarmWordIndex(cwd);
+	try {
+		return lease.index;
+	} finally {
+		lease.release();
+	}
+}
 
 function persistIndex(cwd: string, symbol: string): void {
 	const index = buildWordIndex([
@@ -65,6 +79,55 @@ describe("MCP warm word-index lifecycle (#1370)", () => {
 		vi.useRealTimers();
 		vi.restoreAllMocks();
 		cleanup?.();
+	});
+
+	it("adopts a published index into an empty entry for that root only (#4583)", () => {
+		const cwd = path.join(process.env.PILENS_DATA_DIR!, "adopting-project");
+		const other = path.join(process.env.PILENS_DATA_DIR!, "other-project");
+		const cold = acquireWarmWordIndex(cwd);
+		expect(cold.index).toBeUndefined();
+		cold.release();
+		const index = buildWordIndex([
+			{
+				path: path.join(cwd, "src", "adopted.ts"),
+				content: "export const adoptedSymbol = true;",
+			},
+		]);
+
+		// A publish for a sibling root never fills this root's entry.
+		notifyWordIndexPublished(other, index, "cold_query");
+		expect(warmIndexFor(cwd)).toBeUndefined();
+		// Nor does an index without the forward map the cache requires.
+		notifyWordIndexPublished(
+			cwd,
+			{ ...index, forward: undefined as never },
+			"cold_query",
+		);
+		expect(warmIndexFor(cwd)).toBeUndefined();
+		// The publishing root's own empty entry adopts the live object (no re-parse).
+		notifyWordIndexPublished(cwd, index, "cold_query");
+		expect(warmIndexFor(cwd)).toBe(index);
+	});
+
+	it("keeps the live in-place index when a build publishes for the same root (#4583)", () => {
+		const cwd = path.join(process.env.PILENS_DATA_DIR!, "live-project");
+		persistIndex(cwd, "liveSymbol");
+		const liveLease = acquireWarmWordIndex(cwd);
+		const liveIndex = liveLease.index!;
+		liveLease.release();
+
+		const published = buildWordIndex([
+			{
+				path: path.join(cwd, "src", "other.ts"),
+				content: "export const otherSymbol = true;",
+			},
+		]);
+		notifyWordIndexPublished(cwd, published, "session_start");
+
+		// The entry stays the copy every `pilens_analyze` edit is applied to in
+		// place, so an unpersisted edit cannot be dropped by a publish.
+		expect(warmIndexFor(cwd)).toBe(liveIndex);
+		expect(searchWordIndex(warmIndexFor(cwd)!, "live symbol")).toHaveLength(1);
 	});
 
 	it("idle-evicts and performs a real deserialize rebuild on the next query", async () => {

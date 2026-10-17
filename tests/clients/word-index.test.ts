@@ -1,3 +1,4 @@
+// flake-shape: ungoverned-wait-for — the cold build is fire-and-forget (triggerBackgroundWordIndexBuild exposes no awaitable), so a real-time vi.waitFor is the only join on the snapshot it publishes.
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -31,6 +32,10 @@ import {
 } from "../../clients/word-index-store.js";
 import { KIND_EXTENSIONS } from "../../clients/file-kinds.js";
 import { loadProjectSnapshot } from "../../clients/project-snapshot.js";
+import {
+	_resetWarmWordIndexCacheForTests,
+	acquireWarmWordIndex,
+} from "../../clients/mcp/analyze.js";
 import {
 	getDegradationSummary,
 	resetDegradationLedger,
@@ -697,6 +702,41 @@ describe("triggerBackgroundWordIndexBuild (#348 cold-query stampede guard)", () 
 			expect(results.length).toBeGreaterThan(0);
 			expect(path.basename(results[0].file)).toBe("auth.ts");
 		} finally {
+			env.cleanup();
+		}
+	}, 10_000);
+
+	it("adopts the built index into the warm entry created during the build (#4583)", async () => {
+		const env = setupTestEnvironment("pi-lens-wordindex-warm-adopt-");
+		try {
+			createTempFile(
+				env.tmpDir,
+				"src/auth.ts",
+				"export function authenticateUser(id) { return id; }",
+			);
+			// A query that arrives before the build caches "checked, nothing usable"
+			// for this root (`acquireWarmWordIndex`) and then triggers the build.
+			const cold = acquireWarmWordIndex(env.tmpDir);
+			expect(cold.index).toBeUndefined();
+			cold.release();
+			triggerBackgroundWordIndexBuild(env.tmpDir);
+			await vi.waitFor(
+				() => {
+					expect(loadProjectSnapshot(env.tmpDir)?.wordIndex).toBeDefined();
+				},
+				{ timeout: 5000 },
+			);
+			const warm = acquireWarmWordIndex(env.tmpDir);
+			try {
+				expect(warm.index).toBeDefined();
+				expect(searchWordIndex(warm.index!, "authenticate user").length).toBe(
+					1,
+				);
+			} finally {
+				warm.release();
+			}
+		} finally {
+			_resetWarmWordIndexCacheForTests();
 			env.cleanup();
 		}
 	}, 10_000);
