@@ -768,7 +768,7 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 	"real-process-spawn:scripts/git-fixture-env.test.ts": {
 		detector: "real-process-spawn",
 		reason:
-			"real git children prove the script-side fixture env resolves repository metadata (HEAD, root) from a sanitized process.env",
+			"real git children prove both fixture envs resolve repository metadata (HEAD, root) from a sanitized process.env and, since #4552, fork no detached auto-maintenance child: the .mjs commit and the TypeScript-twin commit are the two witnesses, and a relocated copy of the .mjs helper must refuse to run without its policy file",
 	},
 	// 2026-09-07 (#2699): the PreToolUse guard's own stdin/exit-code/stderr
 	// contract is the subject under test; an in-process call to the exported
