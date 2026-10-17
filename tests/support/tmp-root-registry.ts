@@ -268,8 +268,24 @@ export function installTmpRootInterposer(
 	};
 	// A fixture SIBLING (any name) is the #4560 population; `mkdtemp`'s
 	// namespace rule above stays as it was.
-	const noteSibling = (dir: unknown): void => {
-		if (isDirectTmpChild(dir)) registerTmpSibling(registry, dir, createdBy?.());
+	//
+	// Judge what the call CREATED, not what it requested (#4560 F3). A recursive
+	// `mkdir(<tmp>/name/src)` creates `name` at the tmp root, and its return value
+	// is the first directory it created -- or nothing at all when it created none,
+	// so a re-mkdir of a directory another process made is never blamed on this
+	// test. A plain call returns nothing, and its requested path is what it made.
+	const isRecursive = (options: unknown): boolean =>
+		typeof options === "object" &&
+		options !== null &&
+		(options as { recursive?: unknown }).recursive === true;
+	const noteSibling = (
+		requested: unknown,
+		created: unknown,
+		recursive: boolean,
+	): void => {
+		const made = recursive ? created : requested;
+		if (isDirectTmpChild(made))
+			registerTmpSibling(registry, made, createdBy?.());
 	};
 	const sync = target.mkdtempSync as (...args: unknown[]) => unknown;
 	target.mkdtempSync = function (this: unknown, ...args: unknown[]) {
@@ -299,16 +315,19 @@ export function installTmpRootInterposer(
 	const mkdirSync = target.mkdirSync as (...args: unknown[]) => unknown;
 	target.mkdirSync = function (this: unknown, ...args: unknown[]) {
 		const dir = mkdirSync.apply(this, args);
-		noteSibling(args[0]);
+		noteSibling(args[0], dir, isRecursive(args[1]));
 		return dir;
 	} as MkdtempTarget["mkdirSync"];
+	// The callback form reports no created path, so only its plain shape is
+	// judged: a recursive callback mkdir at the tmp root is the stated residual,
+	// never recorded as a guess.
 	const mkdirCallback = target.mkdir as (...args: unknown[]) => unknown;
 	target.mkdir = function (this: unknown, ...args: unknown[]) {
 		const last = args.length - 1;
 		const done = args[last];
 		if (typeof done === "function")
 			args[last] = (error: unknown, ...rest: unknown[]) => {
-				if (!error) noteSibling(args[0]);
+				if (!error) noteSibling(args[0], undefined, isRecursive(args[1]));
 				(done as (...cbArgs: unknown[]) => void)(error, ...rest);
 			};
 		return mkdirCallback.apply(this, args);
@@ -318,7 +337,7 @@ export function installTmpRootInterposer(
 	) => Promise<unknown>;
 	target.promises.mkdir = async function (this: unknown, ...args: unknown[]) {
 		const dir = await promisedMkdir.apply(this, args);
-		noteSibling(args[0]);
+		noteSibling(args[0], dir, isRecursive(args[1]));
 		return dir;
 	} as MkdtempTarget["promises"]["mkdir"];
 }

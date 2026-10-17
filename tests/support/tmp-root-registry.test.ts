@@ -240,6 +240,63 @@ describe("tmp-root interposer (#2912)", () => {
 		).toBe("/var/tmp/pi-lens-r-AAAAAA");
 	});
 
+	// #4560 F3, both directions over REAL filesystem calls: the census used to
+	// judge the REQUESTED path, so the ancestor a recursive `mkdir` created at
+	// the tmp root was observed and never judged, and a recursive re-mkdir of a
+	// directory another process made was blamed on this test. `fs.mkdirSync`
+	// returns the FIRST directory it created, and nothing when it created none.
+	it("judges the ancestor a recursive mkdir created, and records nothing when it created none (#4560)", async () => {
+		const root = fs.realpathSync(
+			mkdtempSync(path.join(os.tmpdir(), "pi-lens-4560-rec-")),
+		);
+		const registry = createTmpRootRegistry();
+		const target = {
+			mkdtempSync: fs.mkdtempSync,
+			mkdtemp: fs.mkdtemp,
+			mkdirSync: fs.mkdirSync,
+			mkdir: fs.mkdir,
+			promises: { mkdtemp: fsp.mkdtemp, mkdir: fsp.mkdir },
+		} as unknown as MkdtempTarget;
+		installTmpRootInterposer(registry, target, root, () => "recursive.test.ts");
+		const mkdirSync = target.mkdirSync as (
+			dir: string,
+			options?: { recursive?: boolean },
+		) => string | undefined;
+		try {
+			// The requested path is `<root>/rec/src`; what the call CREATED at the
+			// tmp root is `rec`, and that is the entry the census must judge.
+			expect(
+				mkdirSync(path.join(root, "rec", "src"), { recursive: true }),
+			).toBe(path.join(root, "rec"));
+			expect(recordedTmpRootCreators(registry)).toEqual(
+				new Map([["rec", "recursive.test.ts"]]),
+			);
+			// A recursive re-mkdir of an existing child creates nothing, so it is a
+			// no-op. A directory that was already there and this call did not make —
+			// another writer's, or one the run's baseline already held — is never
+			// attributed to this file (#4560 F3, second direction).
+			fs.mkdirSync(path.join(root, "foreign"));
+			mkdirSync(path.join(root, "rec"), { recursive: true });
+			mkdirSync(path.join(root, "foreign"), { recursive: true });
+			expect(recordedTmpRootCreators(registry).has("foreign")).toBe(false);
+			// The promise form reports the same first-created path.
+			await (
+				target.promises.mkdir as (
+					dir: string,
+					options?: { recursive?: boolean },
+				) => Promise<string | undefined>
+			)(path.join(root, "promised", "nested"), { recursive: true });
+			expect(recordedTmpRootCreators(registry)).toEqual(
+				new Map([
+					["rec", "recursive.test.ts"],
+					["promised", "recursive.test.ts"],
+				]),
+			);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("records the test file running when each entry appeared, one record per entry", () => {
 		const registry = createTmpRootRegistry();
 		const { target } = fakeTarget();

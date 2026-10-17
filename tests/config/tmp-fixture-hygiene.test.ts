@@ -30,7 +30,6 @@ import {
 	formatTmpHygieneOwnerSummary,
 	realTmpHygieneProcessProbe,
 	resetTmpHygieneHeartbeatThrottle,
-	strayTmpRootMarkers,
 	tmpHygieneTmpRootWrites,
 	touchTmpHygieneOwnerMarker,
 	TMP_HYGIENE_HOME,
@@ -444,6 +443,19 @@ function repoRootEntryCandidates(entry: string): string[] {
 	return hits;
 }
 
+/** Every creator this process can name at census time: the run-scoped persisted
+ *  record PLUS this process's in-memory registry. The persisted record is
+ *  written by the shared setup's `afterAll`, which runs AFTER this file's own,
+ *  and `cleanupTmpHygiene` then closes and deletes it — so without the merge
+ *  this file's own creations are unreadable at its own census and leak green
+ *  (#4560 F4). The in-memory side wins: it is the newer observation. */
+function censusTmpRootCreators(): Map<string, string> {
+	return new Map([
+		...tmpHygieneCreators(),
+		...recordedTmpRootCreators(getTmpRootRegistry()),
+	]);
+}
+
 /** The widened census's JUDGMENT (#4560): of the new entries at the tmp root,
  *  the ones a TEST PROCESS created (the shared interposer recorded a creator).
  *  A child process's own tmp cache (`jiti` and friends) has no creator on
@@ -451,7 +463,7 @@ function repoRootEntryCandidates(entry: string): string[] {
  *  direction that keeps an innocent file out of the report. */
 function judgedTmpRootWrites(
 	entries: readonly string[],
-	creators: ReadonlyMap<string, string> = tmpHygieneCreators(),
+	creators: ReadonlyMap<string, string> = censusTmpRootCreators(),
 ): string[] {
 	return entries.filter((entry) => creators.has(entry));
 }
@@ -464,7 +476,7 @@ describe("tmp-fixture-hygiene", () => {
 		const scan = await tmpHygieneWaitForOwnerDrain();
 		const liveOwners = scan.live;
 		const { testFile, leftovers } = tmpHygieneLeakReport();
-		const creators = tmpHygieneCreators();
+		const creators = censusTmpRootCreators();
 		// #3314: entries whose every candidate owner is a file no worker of THIS
 		// run id loaded belong to another vitest invocation sharing this TMPDIR.
 		// They are dropped before attribution AND spared by the sweep below.
@@ -497,7 +509,9 @@ describe("tmp-fixture-hygiene", () => {
 			);
 		// #4560: a write at the tmp root (`path.join(<fixture>, "..")`) is now in
 		// the census, not only `pi-lens-` names. A host process's tmp file is not
-		// asserted; it is counted on the census line instead.
+		// asserted; it is counted on the census line (`observed`) beside the judged
+		// count, so an observed-but-unjudged entry is never reported as a clean
+		// zero.
 		const tmpRootWrites = tmpHygieneTmpRootWrites();
 		const tmpRootWriteLeaks = judgedTmpRootWrites(
 			tmpRootWrites ?? [],
@@ -536,7 +550,7 @@ describe("tmp-fixture-hygiene", () => {
 			// hygiene run, not one record per marker or per entry, so a suppressed,
 			// ignored, attributed, or reaped entry is explicable from this run.
 			process.stderr.write(
-				`${formatTmpHygieneOwnerSummary(scan, otherInvocation.size, reaped, tmpRootWrites === undefined ? "unknown" : tmpRootWriteLeaks.length)}\n`,
+				`${formatTmpHygieneOwnerSummary(scan, otherInvocation.size, reaped, tmpRootWrites === undefined ? "unknown" : { judged: tmpRootWriteLeaks.length, observed: tmpRootWrites.length })}\n`,
 			);
 		}
 	});
@@ -1125,16 +1139,29 @@ describe("tmp-fixture-hygiene", () => {
 		}
 	});
 
-	it("names the project-root marker a directory carries, so a stray tmp root refuses the run (#4560)", () => {
-		const env = setupTestEnvironment("pi-lens-4560-stray-marker-");
-		const stray = path.join(env.tmpDir, "stray-root");
+	// #4560 F4: the persisted creators record is written by the shared setup's
+	// `afterAll`, which runs after THIS file's own, and `cleanupTmpHygiene` then
+	// closes and deletes it — so at this file's own census only the in-process
+	// registry can name what this file created. The default judge input merges
+	// it; without the merge the sibling below is observed, unjudged, and left on
+	// the host with `tmpRootWrites=0/1`.
+	it("judges a sibling THIS file created, from the process's own creator record (#4560)", () => {
+		const sibling = path.join(
+			os.tmpdir(),
+			`4560-own-file-sibling-${process.pid}`,
+		);
+		fs.rmSync(sibling, { recursive: true, force: true });
 		try {
-			fs.mkdirSync(stray);
-			expect(strayTmpRootMarkers(stray)).toEqual([]);
-			fs.writeFileSync(path.join(stray, "package.json"), "{}\n");
-			expect(strayTmpRootMarkers(stray)).toEqual(["package.json"]);
+			// A real filesystem call through the shared interposer, not a stub.
+			fs.mkdirSync(sibling);
+			expect(censusTmpRootCreators().get(path.basename(sibling))).toBe(
+				"config/tmp-fixture-hygiene.test.ts",
+			);
+			expect(judgedTmpRootWrites([path.basename(sibling)])).toEqual([
+				path.basename(sibling),
+			]);
 		} finally {
-			env.cleanup();
+			fs.rmSync(sibling, { recursive: true, force: true });
 		}
 	});
 
@@ -1493,7 +1520,37 @@ describe("tmp-fixture-hygiene", () => {
 					},
 				}),
 			).toBe(
-				"[tmp-hygiene-owners] live=1 orphaned=2 malformed=3 foreign=4 self=1 otherInvocationEntries=0 reaped=0 tmpRootWrites=0",
+				"[tmp-hygiene-owners] live=1 orphaned=2 malformed=3 foreign=4 self=1 otherInvocationEntries=0 reaped=0 tmpRootWrites=0/0",
+			);
+			// #4560 F6: the line carries what the census OBSERVED beside what it
+			// JUDGED, so an entry a host process made is visible as counted, never
+			// as a clean zero. And a run whose baseline predates the widened census
+			// says `unknown`, not 0.
+			expect(
+				formatTmpHygieneOwnerSummary(
+					{
+						live: new Set<string>(),
+						counts: { live: 0, orphaned: 0, malformed: 0, foreign: 0, self: 1 },
+					},
+					0,
+					0,
+					{ judged: 0, observed: 2 },
+				),
+			).toBe(
+				"[tmp-hygiene-owners] live=0 orphaned=0 malformed=0 foreign=0 self=1 otherInvocationEntries=0 reaped=0 tmpRootWrites=0/2",
+			);
+			expect(
+				formatTmpHygieneOwnerSummary(
+					{
+						live: new Set<string>(),
+						counts: { live: 0, orphaned: 0, malformed: 0, foreign: 0, self: 1 },
+					},
+					0,
+					0,
+					"unknown",
+				),
+			).toBe(
+				"[tmp-hygiene-owners] live=0 orphaned=0 malformed=0 foreign=0 self=1 otherInvocationEntries=0 reaped=0 tmpRootWrites=unknown",
 			);
 			// #3314's field is part of the same ONE line, not a second record: the
 			// entries this run ignored as another invocation's are explicable from
@@ -1513,7 +1570,7 @@ describe("tmp-fixture-hygiene", () => {
 					3,
 				),
 			).toBe(
-				"[tmp-hygiene-owners] live=0 orphaned=0 malformed=0 foreign=2 self=1 otherInvocationEntries=3 reaped=0 tmpRootWrites=0",
+				"[tmp-hygiene-owners] live=0 orphaned=0 malformed=0 foreign=2 self=1 otherInvocationEntries=3 reaped=0 tmpRootWrites=0/0",
 			);
 		});
 

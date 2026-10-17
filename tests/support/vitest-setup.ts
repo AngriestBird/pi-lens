@@ -23,7 +23,6 @@ import {
 // before every test file's `vi.mock`, so whatever it imports is cached before
 // the mock registers (#3703 round 1: 56 files red).
 import { _settleRegistryMutationsForTests } from "../../clients/instance-registry-tail.js";
-import { PROJECT_ROOT_MARKERS } from "../../clients/project-root-markers.js";
 import {
 	SWEEP_ANY_AGE,
 	sweepScratchDirs,
@@ -85,29 +84,6 @@ delete process.env.PI_LENS_STARTUP_MODE;
 // the serialized owner removes entries after its assertion.
 const tmpHygieneRealTmp = os.tmpdir();
 
-/** Markers the tmp root itself carries when a stray ancestor root is in place
- *  (#4560). Pure, so the rule is executable on a fixture directory without a
- *  second TMPDIR: the module-load refusal below is this function over the real
- *  tmp root. */
-export function strayTmpRootMarkers(
-	dir: string,
-	entries: readonly string[] = readTmpDirEntries(dir),
-): string[] {
-	return PROJECT_ROOT_MARKERS.filter((marker) => entries.includes(marker));
-}
-
-// #4560, recurrence #4546 / #4559: a project-root marker at the tmp root (a
-// stray `/tmp/.git` on the dev host) captured every bare fixture below it, so
-// `findNearestProjectRoot` returned the tmp root and a cell's own snapshot was
-// never read. `setupTestEnvironment` now plants its own marker, but a host in
-// this state still hides which cells would fail the walk, so the run refuses
-// loudly at suite start instead of letting a host marker decide a verdict.
-const strayTmpRoot = strayTmpRootMarkers(tmpHygieneRealTmp);
-if (strayTmpRoot.length > 0) {
-	const message = `[tmp-hygiene] ${tmpHygieneRealTmp} holds a project-root marker (${strayTmpRoot.join(", ")}); every bare temp fixture would resolve its project root to it (#4546, #4559, #4560). Remove it before running the suite.`;
-	process.stderr.write(`${message}\n`);
-	throw new Error(message);
-}
 const tmpHygieneHome = process.env.PI_LENS_HOME
 	? path.resolve(process.env.PI_LENS_HOME)
 	: path.join(process.cwd(), ".probe-home");
@@ -1388,12 +1364,23 @@ export function formatTmpHygieneOwnerSummary(
 	scan: TmpHygieneOwnerScan,
 	otherInvocationEntries = 0,
 	reaped = 0,
-	/** #4560: judged fixture siblings at the tmp root, or `unknown` when the
-	 *  run's baseline predates the widened census. */
-	tmpRootWrites: number | "unknown" = 0,
+	/** #4560: fixture siblings at the tmp root, `judged` (a test process created
+	 *  it, so it is asserted) over `observed` (the widened census saw it at all),
+	 *  or `unknown` when the run's baseline predates the widened census. Both
+	 *  numbers: a judged zero over an observed entry is exactly the shape a
+	 *  closed report hides (AGENTS: a child's own tmp cache is counted, not
+	 *  asserted). */
+	tmpRootWrites: { judged: number; observed: number } | "unknown" = {
+		judged: 0,
+		observed: 0,
+	},
 ): string {
 	const { counts } = scan;
-	return `[tmp-hygiene-owners] live=${counts.live} orphaned=${counts.orphaned} malformed=${counts.malformed} foreign=${counts.foreign} self=${counts.self} otherInvocationEntries=${otherInvocationEntries} reaped=${reaped} tmpRootWrites=${tmpRootWrites}`;
+	const tmpRootWriteCount =
+		tmpRootWrites === "unknown"
+			? "unknown"
+			: `${tmpRootWrites.judged}/${tmpRootWrites.observed}`;
+	return `[tmp-hygiene-owners] live=${counts.live} orphaned=${counts.orphaned} malformed=${counts.malformed} foreign=${counts.foreign} self=${counts.self} otherInvocationEntries=${otherInvocationEntries} reaped=${reaped} tmpRootWrites=${tmpRootWriteCount}`;
 }
 
 /** Reclaim abandoned owner records at the serialized census. A run id is the

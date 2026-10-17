@@ -3,6 +3,7 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, vi } from "vitest";
+import { PROJECT_ROOT_MARKERS } from "../../clients/project-root-markers.js";
 import {
 	getTmpRootRegistry,
 	registerTmpRoot,
@@ -68,11 +69,14 @@ export function removeTempDirSync(dir: string): void {
  *  (`makeProject`, `makeWarmableProject`, `writeSourceFiles`), so the shared
  *  default replaces those copies instead of adding a second vocabulary.
  *  An EMPTY directory is not a real Git marker (`isRealGitMarker` requires a
- *  `HEAD`), so the subsystems that ask for a real repo (formatter cwd,
- *  ephemeral-checkout classification) keep answering "not a repo", while
- *  `findNearestProjectRoot` (existence only) sees the fixture as its own root.
- *  It is also invisible to the tree walks (`.git` is in `EXCLUDED_DIRS`), so no
- *  fixture file count moves.
+ *  `HEAD`), so the callers of that predicate (`resolveToolCwd`'s formatter cwd,
+ *  `ephemeral-root`'s checkout classification) keep answering "not a repo",
+ *  while `findNearestProjectRoot` (existence only) sees the fixture as its own
+ *  root. `gitleaks-client`'s `hasGitRepo` is a bare existence check, so a
+ *  `mode=full` scan now finds a repo in a fixture; the cells that pin that gate
+ *  are part of this change.
+ *  The directory is also invisible to the tree walks (`.git` is in
+ *  `EXCLUDED_DIRS`), so no fixture file count moves.
  *
  *  Recurrence (#4546 / #4559): a bare fixture under `os.tmpdir()` resolved its
  *  project root by walking UP past the fixture. A stray empty `/tmp/.git` on
@@ -81,7 +85,8 @@ export function removeTempDirSync(dir: string): void {
  *  redded with `expected undefined`. Planting the marker here makes every
  *  fixture its own root. A cell that asserts marker-less resolution passes
  *  `{ rootMarker: false }` and says why. */
-export const TEST_FIXTURE_ROOT_MARKER = ".git";
+export const TEST_FIXTURE_ROOT_MARKER =
+	".git" satisfies (typeof PROJECT_ROOT_MARKERS)[number];
 
 export function setupTestEnvironment(
 	prefix = "pi-lens-test-",
