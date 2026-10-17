@@ -2493,7 +2493,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 						// Full admission supersedes the previous primary, even when
 						// its stale host never delivered session_shutdown (#4554 r5).
 						for (let i = liveSessionMembers.length - 1; i >= 0; i--) {
-							if (liveSessionMembers[i].role === "primary")
+							if (liveSessionMembers[i]!.role === "primary")
 								liveSessionMembers.splice(i, 1);
 						}
 					}
