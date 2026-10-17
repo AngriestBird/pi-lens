@@ -1123,7 +1123,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 32 -> 33 (#4484 round 4): the anchor moves onto its record, re-set
 		// under the display key every record writer uses; its reads route
 		// through the keyed map.
-		"clients/runtime-coordinator.ts": 33,
+		// 33 -> 34 (#4535): the bulk mutation writer resolves each path into the
+		// durable change-log entry, the same `path.resolve` the single writer
+		// uses, so the log's spelling does not depend on which form recorded it.
+		"clients/runtime-coordinator.ts": 34,
 		"clients/runtime-session.ts": 15,
 		// 22 -> 21 (#4137): the baseline slot's `path.resolve` moved into
 		// `opaqueBaselineSlot` (clients/opaque-mutation-scan.ts).

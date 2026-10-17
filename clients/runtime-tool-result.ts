@@ -127,6 +127,7 @@ import {
 } from "./session-scope.js";
 import { requestBootstrapClients } from "./bootstrap.js";
 import { bounded } from "./deadline-utils.js";
+import type { DiskChangeRuntime } from "./disk-changes.js";
 import { lookForOutOfBandChanges } from "./out-of-band-changes.js";
 import { HOOK_WALL_BUDGET_MS } from "./hook-budgets.js";
 import {
@@ -298,7 +299,7 @@ async function sendToHeldPrimaries(
 export function resyncHeadMove(args: HeadLook): Promise<void> {
 	return serializeHeadLook(args.key, async () => {
 		try {
-			await lookForOutOfBandChanges(args.root, args.trigger);
+			await lookForOutOfBandChanges(args.root, args.trigger, args.runtime);
 		} finally {
 			await lookAtHead(args);
 		}
@@ -310,6 +311,12 @@ interface HeadLook {
 	key: string;
 	trigger: "tool_call" | "tool_result";
 	label: string;
+	/**
+	 * The bulk mutation seam the out-of-band look's publish allocates the
+	 * existing project sequence through (#4535). Optional: a look driven
+	 * without a runtime still publishes, it just allocates no sequence.
+	 */
+	runtime?: DiskChangeRuntime;
 }
 
 /**
@@ -2021,6 +2028,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 					),
 					trigger: "tool_result",
 					label: command,
+					runtime,
 				}),
 				{
 					ms: HOOK_WALL_BUDGET_MS.tool_result_edit,
