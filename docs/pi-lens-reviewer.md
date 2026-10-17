@@ -50,6 +50,37 @@ a brief supplies only `lane=<name>`, scope, and the grant.
 7. Clean up: revert mutations, delete probes, and leave
    `git status --porcelain` empty.
 
+## Compliance pass
+
+Run this over the merge-base diff at step 2, before the adversarial probes in
+step 4. Each row is a rule a bot can decide from what the diff touches; the
+probes still prove behaviour. Quote the named evidence in the review, and name
+the anchor in the finding so the fixer can route it. A row with no recurrence
+does not ship.
+
+| Diff touches | Check | Evidence to quote | Recurrence |
+| --- | --- | --- | --- |
+| A new `it(` or `test(` title, or a case added to a table test | Red first: the case fails on the pre-fix source, with the failure the defect names (principles §2 "Red first") | The pre-fix transcript, with its `Tests N failed` line naming the new titles | #4577 (Greptile, 2026-10-17: round-4 cases shipped with no red) |
+| A new guard, branch, filter, cap or fallback | Mutation red on that predicate, both directions, in a compile-valid change (principles §2 "Mutation output is quoted") | The `scripts/mutate.mjs` transcript and its `RED` status line, with the one test it reds | #4575 (Greptile r4304045025: no mutation red for the saveOnly rule) |
+| A file under `clients/lsp/`, `formal/`, or any path `formal/switch-pins.json` names | The model moves with the code: a `.tla`/`.cfg` hunk and its TLC verdict, or a `TLA+ unaffected:` line; a flipped constant flips its config and its pin (AGENTS shape 68) | The line, or the model diff plus the verdict, and the pin's test name for a flipped constant | #4575 (Greptile r4304045020: the model did not move with the code), #4387, #4393 |
+| A spawn, shell or path seam: `clients/package-manager.ts`, `clients/lsp/launch.ts`, `clients/path-utils.ts`, `clients/safe-spawn.ts`, or any `trySpawn` caller | Read the Windows lane, and keep a shim cell that asserts the platform command (AGENTS "Test requirements"; "Dispatch, runners, formatters, and installers") | The `Unit tests Windows (advisory)` row on the head, or the shim cell's platform assertion | #4566 (Greptile r4304149666: the `.cmd` cells), #4356, #4263 |
+| A new shared helper | Net-count rule: delete a same-shape sibling in this change (principles §1 "Net-count rule for shared helpers") | The deleted sibling in `Change outline`, or the unsafe-to-fold reason with its follow-up link | #2585 r1, #2617 r1 (an existing override and scan set bypassed or recopied), #3064, #3065, #3066, #3068 (a fold's newly sole predicate left untested) |
+| A second writer, reader or mirror of one shared record | Design shared state once, with a reason or kind discriminator per writer (principles §1 "Design shared state once"; AGENTS shape 24) | The writers-by-axis table, and the discriminator each writer carries | #1631/#1641 (the `stale` collision that was green alone), #1633, #1703 |
+| A durable record whose shape changes, or a new version of one | Keep the fixture corpus: every version that produced the record still parses (principles §2 "Keep fixture corpora") | The fixture path and the parser test that replays it | #3594 R2-F1 (AGENTS shape 57) |
+| A test-side source scan, census, ratchet or detector | Detectors match code, not prose, and fail closed on an unlisted spelling (principles §2 "Detectors match code"; AGENTS shape 69) | The blanked-source read, and three plants the author did not design for: an alias, an indirect call, a value through another binding | #2693 (a ratchet counted four sites where six existed), #4439 |
+| A workflow, action or job | The edited lane runs on a pull request, or a branch run is quoted with its run id (AGENTS "Commands and gates") | `gh workflow run <file> --ref <branch>` with its run id, or the PR-eligible cell's name | #3043, #3085 |
+| A `continue-on-error` producer or a nightly floor | The producer reports to `scripts/assert-evaluated.mjs`, and its floor reds below the measured count (AGENTS "LSP, trust, and process execution") | The floor value beside the run's evaluated count | #4518 |
+| A path a host tool was given (a `~`, an `@` prefix, a `file://` URL), or a path re-resolved after it left disk | Resolve by provenance, one seam per provenance; a generated or recovered path is never re-resolved (AGENTS shape 74) | The resolver the caller uses, and the path form it accepts, before and after | #4576, #4577 (a bash operand resolved on the host-argument ladder, then an absolute spelling rewritten) |
+| A path-keyed map, normalizer or path comparison | Normalize on write, read, delete and rehydrate, and test Windows separators and casing (AGENTS shape 1) | The writer and reader table, with the normalizer each one calls | #3178 (four rounds, two inverted arms, one unmeasured swap) |
+| A session, lifecycle, generation or turn-end seam | Capture the generation before the await, and key the state by the session that owns it (AGENTS shapes 21 and 22; "Session, telemetry, and delivery") | The captured scope or generation the write checks, and the test that races it | #4258 (a stale activation rebinding a held bridge), #4154 |
+| A delivery surface, or a bound on findings that reach the model | A bound discloses its truncation on the rendered surface, and a skipped or unavailable result is not clean (AGENTS shape 10) | The rendered truncation line, or the skip reason from `RUNNER_SKIP_REASONS` | #3166 r2 (an 80-finding input bound zeroed a neighbour's errors) |
+| A relaxed or rewritten existing assertion | Mutate the behaviour the test is named for; a rewrite that stays green is a deleted test (AGENTS "Issue and PR design contract"; principles §2) | The red on the new assertion, with that behaviour broken | #4390 (the eviction smoke's rewrite passed with root re-registration broken) |
+| A new decision branch on a session, lifecycle or delivery seam | Name its record, sink plus kind, and read it back through the real seam (AGENTS "Session, telemetry, and delivery"; shape 31) | The record literal, and the test that reads it back | #3873 (a fix that could not be shown to fire live), #3875 |
+
+Rows 1 to 4 are mechanical from #4585: `scripts/check-pr-body.mjs` will red a
+body that omits their evidence. Until that lint lands, check them by hand; once
+it lands, confirm the lint passed on the head and spend this pass on the rest.
+
 ## Verification
 
 For each new or changed `vi.mock` or hand-built double of a `clients/` module,
