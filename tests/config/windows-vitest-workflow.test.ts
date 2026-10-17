@@ -177,18 +177,25 @@ describe("Windows Vitest workflow contract (#2536)", () => {
 		expect(code).toContain(
 			'const WINDOWS_QUARANTINE = process.platform === "win32";',
 		);
-		expect(code).toContain(
-			'describe.skipIf(WINDOWS_QUARANTINE)("tmp-fixture-hygiene"',
+		// #4592 review, Greptile P2 "Windows cleanup stops running": the file is
+		// NOT skipped, only its verdict is. A suite-level skip was measured to run
+		// no hook at all (Vitest reports `Test Files 1 skipped (1)`), which took
+		// the run's only `cleanupTmpHygiene` call with it, so a re-added suite
+		// skip reds here.
+		expect(code).toContain('describe("tmp-fixture-hygiene"');
+		expect(code).not.toContain("describe.skipIf(WINDOWS_QUARANTINE)");
+		expect(code).toContain("if (!WINDOWS_QUARANTINE) {");
+		// The three census assertions sit inside the guard, and the sweep sits in
+		// the `finally` that follows it, so the sweep reaps on win32 too.
+		const guard = code.indexOf("if (!WINDOWS_QUARANTINE) {");
+		const swept = code.indexOf(
+			"const reaped = cleanupTmpHygiene(otherInvocation);",
 		);
-		// #4592 review, Greptile P2 "Windows cleanup stops running": a skipped
-		// suite runs no hooks, and that file holds this run's only
-		// `cleanupTmpHygiene` call, so the teardown is declared at file scope.
-		expect(code.indexOf("afterAll(")).toBeGreaterThan(-1);
-		expect(code.indexOf("afterAll(")).toBeLessThan(
-			code.indexOf("describe.skipIf(WINDOWS_QUARANTINE)"),
+		expect(swept).toBeGreaterThan(guard);
+		expect(code.slice(guard, swept)).toContain("} finally {");
+		expect(raw).toMatch(
+			/#4591:\s*the census VERDICT is declined on the Windows lane/,
 		);
-		expect(code).toContain("cleanupTmpHygiene(otherInvocation)");
-		expect(raw).toMatch(/#4591:\s*quarantined on the Windows lane/);
 	});
 
 	it("pins the sibling action revisions and the isolated home", () => {

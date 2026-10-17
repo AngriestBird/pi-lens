@@ -484,22 +484,25 @@ function writeCensusSummary(
 	);
 }
 
-// #4591: quarantined on the Windows lane. The census reds there about 1 run in
-// 10 on a root that did not exist at its file's teardown (`registered=1
-// failed=0` in the sweep record, the leaked entry observed nine seconds later),
-// and #4518 promoted that lane to gating, so this verdict is declined on win32
-// until the producer is named. The lane that runs it, and the guard that keeps
-// it, is every non-Windows run: the required `Unit tests` shards and macOS. The
-// file's other cases are platform-neutral but share this suite, so they skip
-// with it on Windows; remove both this gate and the #4591 reference in the
-// change that fixes the producer.
+// #4591: the census VERDICT is declined on the Windows lane, not the file. It
+// reds there about 1 run in 10 on a root that did not exist at its file's
+// teardown (`registered=1 failed=0` in the sweep record, the leaked entry
+// observed nine seconds later), and #4518 promoted that lane to gating, so the
+// three assertions below are skipped on win32 until the producer is named. The
+// cases themselves are platform-neutral and keep running there, and the lane
+// that runs the verdict is every non-Windows run: the required `Unit tests`
+// shards and macOS. Remove this constant, its guard and the #4591 reference in
+// the change that fixes the producer.
 const WINDOWS_QUARANTINE = process.platform === "win32";
 
-// #4591 review P2: the sweep is not part of the quarantined verdict. A skipped
-// suite runs no hooks, and `cleanupTmpHygiene` is this run's only caller, so the
-// teardown stays at file scope and reaps on every lane; only the three census
-// assertions it carries are what #4591 declines on win32. Everything above the
-// guard still runs, because the sweep needs the foreign-run set to spare a
+// #4591 review P2 (Greptile "Windows cleanup stops running"): the sweep is not
+// part of the verdict, and it is this run's only `cleanupTmpHygiene` caller. A
+// skipped suite runs no hooks at all -- measured here: with every case skipped,
+// Vitest reported `Test Files 1 skipped (1)` and this hook never ran, whatever
+// its scope (the setup's own note at `tmpHygieneWaitForOwnerDrain` says the
+// same) -- so the quarantine declines the three assertions instead of the
+// suite, and the teardown reaps on every lane. Everything above the guard still
+// runs off win32 too, because the sweep needs the foreign-run set to spare a
 // sibling invocation's roots (#3314).
 afterAll(async () => {
 	const scan = await tmpHygieneWaitForOwnerDrain();
@@ -587,7 +590,7 @@ afterAll(async () => {
 	}
 });
 
-describe.skipIf(WINDOWS_QUARANTINE)("tmp-fixture-hygiene", () => {
+describe("tmp-fixture-hygiene", () => {
 	it("reports an unknown baseline through the census caller (#4560)", async () => {
 		// N2/S: formatting unknown directly misses the caller converting it to 0/N.
 		const output = vi
