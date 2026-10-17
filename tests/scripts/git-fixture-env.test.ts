@@ -2,12 +2,16 @@ import { afterEach, describe, expect, it } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import {
 	envFor,
 	gitExecFileSync,
 	gitExecSync,
 } from "../../scripts/lib/git-fixture-env.mjs";
-import { gitFixtureEnv } from "../support/git-fixture-env.js";
+import {
+	gitExecFileSync as tsGitExecFileSync,
+	gitFixtureEnv,
+} from "../support/git-fixture-env.js";
 
 describe("JavaScript Git fixture environment", () => {
 	const scratch: string[] = [];
@@ -15,6 +19,69 @@ describe("JavaScript Git fixture environment", () => {
 		for (const dir of scratch.splice(0))
 			fs.rmSync(dir, { recursive: true, force: true });
 	});
+
+	const policyFile = path.resolve(
+		import.meta.dirname,
+		"../fixtures/git-fixture-global.gitconfig",
+	);
+
+	/**
+	 * Commit in a fresh throwaway repo through `run`, with git's trace2 stream
+	 * on. The trace records the parent's `child_start` before it forks, so a
+	 * DETACHED maintenance child is still named in the file (#4552).
+	 */
+	function commitFixture(
+		run: (args: string[], cwd: string, trace: string) => void,
+	): string {
+		const repo = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-git-maintenance-"),
+		);
+		scratch.push(repo);
+		const trace = path.join(repo, "trace2.json");
+		run(["init", "-q", "--initial-branch=main"], repo, trace);
+		run(
+			[
+				"-C",
+				repo,
+				"-c",
+				"user.name=pi-lens-test",
+				"-c",
+				"user.email=pi-lens-test@example.com",
+				"commit",
+				"-q",
+				"--allow-empty",
+				"-m",
+				"fixture",
+			],
+			repo,
+			trace,
+		);
+		return fs.readFileSync(trace, "utf8");
+	}
+
+	/** Background-maintenance children the trace2 stream names. */
+	function maintenanceChildStarts(events: string): string[] {
+		// Positive control: without it, an empty or unrelated trace would satisfy
+		// the empty-list assertion below.
+		expect(events).toContain('"name":"commit"');
+		return events
+			.split("\n")
+			.filter((line) => line.includes('"child_start"'))
+			.filter((line) => line.includes("maintenance"));
+	}
+
+	const jsRun = (args: string[], cwd: string, trace: string) =>
+		gitExecFileSync(args, {
+			cwd,
+			stdio: "ignore",
+			env: { GIT_TRACE2_EVENT: trace },
+		});
+	const tsRun = (args: string[], cwd: string, trace: string) =>
+		tsGitExecFileSync("git", args, {
+			cwd,
+			stdio: "ignore",
+			env: { GIT_TRACE2_EVENT: trace },
+		});
 
 	it("scrubs inherited Git state and config injection", () => {
 		const repo = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-mjs-git-env-"));
@@ -58,49 +125,63 @@ describe("JavaScript Git fixture environment", () => {
 	// config the helper hands every fixture Git process is the checked-in policy
 	// that turns it off.
 	it("forks no detached auto-maintenance child from a fixture commit (#4552)", () => {
-		const repo = fs.mkdtempSync(
-			path.join(os.tmpdir(), "pi-lens-mjs-git-maintenance-"),
-		);
-		scratch.push(repo);
-		const trace = path.join(repo, "trace2.json");
-		const commit = () =>
-			gitExecFileSync(
-				[
-					"-C",
-					repo,
-					"-c",
-					"user.name=pi-lens-test",
-					"-c",
-					"user.email=pi-lens-test@example.com",
-					"commit",
-					"-q",
-					"--allow-empty",
-					"-m",
-					"fixture",
-				],
-				{ cwd: repo, stdio: "ignore", env: { GIT_TRACE2_EVENT: trace } },
-			);
-		gitExecFileSync(["init", "-q", "--initial-branch=main"], {
-			cwd: repo,
-			stdio: "ignore",
-			env: { GIT_TRACE2_EVENT: trace },
-		});
-		commit();
-		const events = fs.readFileSync(trace, "utf8");
-		// The trace must have captured this commit, or the assertion below would
-		// pass on an empty or unrelated trace.
-		expect(events).toContain('"name":"commit"');
-		// `child_start` is written by the parent before the fork, so it is in the
-		// file even though the child is detached.
-		const maintenance = events
-			.split("\n")
-			.filter((line) => line.includes('"child_start"'))
-			.filter((line) => line.includes("maintenance"));
-		expect(maintenance).toEqual([]);
+		expect(maintenanceChildStarts(commitFixture(jsRun))).toEqual([]);
 	});
 
 	// The TypeScript twin carries the same policy (#4552): a fixture that ran
-	// through only one of the two helpers would still fork the detached child.
+	// through only one of the two helpers would still fork the detached child,
+	// so the twin needs a behavioural witness, not only a path-string check.
+	// Review R3: the string parity case below could not have caught a twin that
+	// kept the policy path but lost it from the environment it hands git.
+	it("forks no detached auto-maintenance child through the TypeScript twin (#4552)", () => {
+		expect(maintenanceChildStarts(commitFixture(tsRun))).toEqual([]);
+	});
+
+	// Recurrence: #4552 review R2. `scripts/lib/git-fixture-env.mjs` resolves the
+	// policy file relative to ITS OWN module, and four fixtures copy it into a
+	// clone or throwaway tree. A copy that forgot the policy silently gave its
+	// Git spawns the DEFAULT config, so `git maintenance run --auto` forked the
+	// detached child again -- the exact teardown race this PR closes. A relocated
+	// copy must fail loudly instead.
+	it("refuses to build an environment when a relocated copy has no policy file (#4552)", async () => {
+		const relocated = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-git-relocated-"),
+		);
+		scratch.push(relocated);
+		const copy = path.join(relocated, "scripts", "lib", "git-fixture-env.mjs");
+		fs.mkdirSync(path.dirname(copy), { recursive: true });
+		fs.copyFileSync(
+			path.resolve(
+				import.meta.dirname,
+				"../../scripts/lib/git-fixture-env.mjs",
+			),
+			copy,
+		);
+		const relocatedHelper = (await import(pathToFileURL(copy).href)) as {
+			envFor: (
+				cwd: string,
+				overrides?: Record<string, string>,
+			) => Record<string, string>;
+		};
+		expect(() => relocatedHelper.envFor("C:/tmp", {})).toThrow(
+			/fixture Git policy missing/,
+		);
+		// The absent FILE is the only difference: copying it makes the same module
+		// build a policed environment, so the refusal is about the policy, not the
+		// relocation.
+		const policyCopy = path.join(
+			relocated,
+			"tests",
+			"fixtures",
+			"git-fixture-global.gitconfig",
+		);
+		fs.mkdirSync(path.dirname(policyCopy), { recursive: true });
+		fs.copyFileSync(policyFile, policyCopy);
+		expect(relocatedHelper.envFor("C:/tmp", {}).GIT_CONFIG_GLOBAL).toBe(
+			policyCopy,
+		);
+	});
+
 	it("carries the same no-background-maintenance policy in the TypeScript twin", () => {
 		const jsEnv = envFor("C:/tmp", {});
 		const tsEnv = gitFixtureEnv("C:/tmp");

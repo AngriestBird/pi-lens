@@ -1,4 +1,5 @@
 import { execFileSync, execSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const SCRUBBED = [
@@ -33,6 +34,24 @@ const FIXTURE_GIT_CONFIG = fileURLToPath(
 );
 
 /**
+ * The policy path, or a throw when the file is not there (#4552 review R2).
+ *
+ * The path is resolved from THIS module, so four fixtures that copy the helper
+ * into a clone or throwaway tree (tests/support/fixture-git-copy.ts) must copy
+ * the policy beside it. Without this check they silently gave their Git spawns
+ * git's DEFAULT config, which restores `maintenance.auto` and forks the
+ * detached child again: the failure this PR exists to remove, now invisible
+ * because the fixture still passes. Refusing is the honest state.
+ */
+function fixtureGitConfig() {
+	if (!existsSync(FIXTURE_GIT_CONFIG))
+		throw new Error(
+			`fixture Git policy missing at ${FIXTURE_GIT_CONFIG}: copy it with the helper (tests/support/fixture-git-copy.ts), or fixture Git forks background maintenance that outlives the cell (#4552).`,
+		);
+	return FIXTURE_GIT_CONFIG;
+}
+
+/**
  * Build the only environment a fixture Git process may see.
  *
  * The working directory no longer selects the global config: it is the
@@ -46,7 +65,7 @@ export function envFor(_cwd, overrides) {
 	for (const name of SCRUBBED) delete env[name];
 	for (const key of Object.keys(env))
 		if (CONFIG_KV_PATTERN.test(key)) delete env[key];
-	env.GIT_CONFIG_GLOBAL = FIXTURE_GIT_CONFIG;
+	env.GIT_CONFIG_GLOBAL = fixtureGitConfig();
 	env.GIT_CONFIG_NOSYSTEM = "1";
 	return env;
 }
