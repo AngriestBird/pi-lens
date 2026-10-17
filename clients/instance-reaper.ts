@@ -1157,7 +1157,18 @@ export async function sweepUntrackedOrphans(
 	options: BackstopSweepOptions = {},
 ): Promise<BackstopSweepOutcome> {
 	const startedAt = Date.now();
+	// #4581 review (thread 4303835287): a sweep is not complete until its
+	// `finally` has released the backstop lock, so the `onComplete` seam — the
+	// one a test awaits instead of polling or sleeping — must fire from there.
+	// Firing inside the body handed such a test a sweep that still held the
+	// lock, and the next case's fresh lock files raced that release.
+	let completed: BackstopSweepOutcome | undefined;
+	const recordComplete = (outcome: BackstopSweepOutcome) => {
+		completed = outcome;
+	};
 	if (!isInstanceRegistryEnabled()) {
+		// No lock is taken on this path, so the caller's own observer already
+		// runs at the settle point.
 		return logBackstopOutcome("disabled", startedAt, {}, options.onComplete);
 	}
 	const cooldownMs = Math.max(0, options.cooldownMs ?? BACKSTOP_COOLDOWN_MS);
@@ -1176,12 +1187,7 @@ export async function sweepUntrackedOrphans(
 			// Another process holds the sweep right now. Not an error, and not a
 			// cooldown either — a distinct record, because "somebody else is
 			// sweeping" and "we swept recently" have different causes.
-			return logBackstopOutcome(
-				"concurrent",
-				startedAt,
-				{},
-				options.onComplete,
-			);
+			return logBackstopOutcome("concurrent", startedAt, {}, recordComplete);
 		}
 
 		const throttled = await isWithinCooldown(Date.now(), cooldownMs, options);
@@ -1192,7 +1198,7 @@ export async function sweepUntrackedOrphans(
 				{
 					sinceLastMs: throttled,
 				},
-				options.onComplete,
+				recordComplete,
 			);
 		}
 
@@ -1225,7 +1231,7 @@ export async function sweepUntrackedOrphans(
 					scannerKill: scan.timeoutKill,
 					scanned: scan.processes.length,
 				},
-				options.onComplete,
+				recordComplete,
 			);
 		}
 
@@ -1340,7 +1346,7 @@ export async function sweepUntrackedOrphans(
 				unverifiedProcesses: unverified.slice(0, BACKSTOP_IDENTITY_LOG_LIMIT),
 				graceRetryInMs: retryAt,
 			},
-			options.onComplete,
+			recordComplete,
 		);
 	} catch (error) {
 		// The sweep must never throw out of session_start — but "threw" is now
@@ -1354,13 +1360,20 @@ export async function sweepUntrackedOrphans(
 			"error",
 			startedAt,
 			{ threw: true },
-			options.onComplete,
+			recordComplete,
 		);
 	} finally {
 		if (release) {
 			await release().catch(() => {
 				// A lock we cannot release goes stale on its own timer.
 			});
+		}
+		if (completed !== undefined) {
+			try {
+				options.onComplete?.(completed);
+			} catch {
+				// Test observers must not alter the best-effort sweep outcome.
+			}
 		}
 	}
 }

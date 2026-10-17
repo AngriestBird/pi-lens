@@ -294,6 +294,18 @@ function backstopMetadata(): Record<string, unknown> {
 	return backstopMetadataForSweep(sweepIndex);
 }
 
+/** Every sweep-lock entry this file's private home holds right now — the
+ *  canonical `orphan-backstop.lock` directory (clients/bounded-pid-file-lock.ts)
+ *  and any `.quarantine-*` name its release renames it through. A settled
+ *  sweep leaves neither behind; the `<store>.locks` generation directory is
+ *  the lock's own bookkeeping and legitimately outlives every sweep. */
+function backstopLockEntries(): string[] {
+	const lockPath = "orphan-backstop.lock";
+	return fs
+		.readdirSync(process.env.PI_LENS_HOME ?? "")
+		.filter((name) => name === lockPath || name.startsWith(`${lockPath}.`));
+}
+
 const ORPHAN_COMMAND = isWindows
 	? "C:\\tools\\opengrep.exe --lsp"
 	: "/opt/tools/opengrep --lsp";
@@ -759,6 +771,11 @@ describe("#1864 review F2: a grace-spared candidate is re-examined", () => {
 
 			expect(completions).toBe(2);
 			expect(h.state.scannerPids).toHaveLength(2);
+			// #4581 review (thread 4303835287): the retry's own lock release is
+			// part of its completion. `onComplete` used to fire from inside the
+			// sweep body, so awaiting it alone ended this case with the release
+			// still in flight and the next case's fresh lock files raced it.
+			expect(backstopLockEntries()).toEqual([]);
 		} finally {
 			vi.restoreAllMocks();
 		}
