@@ -17,7 +17,7 @@ import {
 	installTmpRootInterposer,
 	sampleTmpRoots,
 	sweepTmpRoots,
-	type MkdtempTarget,
+	type TmpRootFsTarget,
 } from "./tmp-root-registry.js";
 // The tail's dependency leaf, never `instance-registry.js`: this file loads
 // before every test file's `vi.mock`, so whatever it imports is cached before
@@ -391,7 +391,7 @@ afterEach(() => touchTmpHygieneOwnerMarker());
 const tmpRootRegistry = getTmpRootRegistry();
 installTmpRootInterposer(
 	tmpRootRegistry,
-	nodeFs as unknown as MkdtempTarget,
+	nodeFs as unknown as TmpRootFsTarget,
 	tmpHygieneRealTmp,
 	() => tmpHygieneOwnFile,
 );

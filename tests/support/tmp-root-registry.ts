@@ -36,6 +36,7 @@
  * remove a root it created itself — never a sibling's live one.
  */
 import * as path from "node:path";
+import { isWindowsPath, pathsEqual } from "../../clients/path-utils.js";
 
 export type TmpRootKind = "registered" | "observed";
 
@@ -219,7 +220,7 @@ export function formatTmpRootSweep(
 
 /** The slice of `node:fs` the interposer wraps. Typed loosely on purpose: the
  *  real module's members are read-only in its declaration. */
-export interface MkdtempTarget {
+export interface TmpRootFsTarget {
 	mkdtempSync: (...args: never[]) => unknown;
 	mkdtemp: (...args: never[]) => unknown;
 	mkdirSync: (...args: never[]) => unknown;
@@ -246,18 +247,19 @@ export interface MkdtempTarget {
  */
 export function installTmpRootInterposer(
 	registry: TmpRootRegistry,
-	target: MkdtempTarget,
+	target: TmpRootFsTarget,
 	realTmp: string,
 	/** The test file running when a directory appears. The shared setup passes
 	 *  the process's own file, so an entry a test created is attributed to it
 	 *  rather than to whatever file declares the name's prefix. */
 	createdBy?: () => string,
 ): void {
-	const tmpRoot = path.resolve(realTmp);
+	const pathApi = isWindowsPath(realTmp) ? path.win32 : path.posix;
+	const tmpRoot = pathApi.resolve(realTmp);
 	const isDirectTmpChild = (dir: unknown): dir is string => {
 		if (typeof dir !== "string") return false;
-		const resolved = path.resolve(dir);
-		return path.dirname(resolved) === tmpRoot;
+		const resolved = pathApi.resolve(dir);
+		return pathsEqual(pathApi.dirname(resolved), tmpRoot);
 	};
 	const note = (dir: unknown): void => {
 		if (
@@ -292,7 +294,7 @@ export function installTmpRootInterposer(
 		const dir = sync.apply(this, args);
 		note(dir);
 		return dir;
-	} as MkdtempTarget["mkdtempSync"];
+	} as TmpRootFsTarget["mkdtempSync"];
 	const callback = target.mkdtemp as (...args: unknown[]) => unknown;
 	target.mkdtemp = function (this: unknown, ...args: unknown[]) {
 		const last = args.length - 1;
@@ -303,7 +305,7 @@ export function installTmpRootInterposer(
 				(done as (...cbArgs: unknown[]) => void)(error, dir);
 			};
 		return callback.apply(this, args);
-	} as MkdtempTarget["mkdtemp"];
+	} as TmpRootFsTarget["mkdtemp"];
 	const promised = target.promises.mkdtemp as (
 		...args: unknown[]
 	) => Promise<unknown>;
@@ -311,27 +313,26 @@ export function installTmpRootInterposer(
 		const dir = await promised.apply(this, args);
 		note(dir);
 		return dir;
-	} as MkdtempTarget["promises"]["mkdtemp"];
+	} as TmpRootFsTarget["promises"]["mkdtemp"];
 	const mkdirSync = target.mkdirSync as (...args: unknown[]) => unknown;
 	target.mkdirSync = function (this: unknown, ...args: unknown[]) {
 		const dir = mkdirSync.apply(this, args);
 		noteSibling(args[0], dir, isRecursive(args[1]));
 		return dir;
-	} as MkdtempTarget["mkdirSync"];
-	// The callback form reports no created path, so only its plain shape is
-	// judged: a recursive callback mkdir at the tmp root is the stated residual,
-	// never recorded as a guess.
+	} as TmpRootFsTarget["mkdirSync"];
+	// The callback form supplies the same first-created path as its second
+	// callback argument; forward it through the common judgment.
 	const mkdirCallback = target.mkdir as (...args: unknown[]) => unknown;
 	target.mkdir = function (this: unknown, ...args: unknown[]) {
 		const last = args.length - 1;
 		const done = args[last];
 		if (typeof done === "function")
 			args[last] = (error: unknown, ...rest: unknown[]) => {
-				if (!error) noteSibling(args[0], undefined, isRecursive(args[1]));
+				if (!error) noteSibling(args[0], rest[0], isRecursive(args[1]));
 				(done as (...cbArgs: unknown[]) => void)(error, ...rest);
 			};
 		return mkdirCallback.apply(this, args);
-	} as MkdtempTarget["mkdir"];
+	} as TmpRootFsTarget["mkdir"];
 	const promisedMkdir = target.promises.mkdir as (
 		...args: unknown[]
 	) => Promise<unknown>;
@@ -339,5 +340,5 @@ export function installTmpRootInterposer(
 		const dir = await promisedMkdir.apply(this, args);
 		noteSibling(args[0], dir, isRecursive(args[1]));
 		return dir;
-	} as MkdtempTarget["promises"]["mkdir"];
+	} as TmpRootFsTarget["promises"]["mkdir"];
 }
