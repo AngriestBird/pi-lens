@@ -281,32 +281,35 @@ describe("#4532 gap 9 — the touch debounce reads the client's content record",
 	it("pushes a document again after it was closed and reopened", async () => {
 		const svc = await service();
 		const file = pathFor("reopened");
-		await svc.touchFile(file, HELD, TOUCH);
-		const entry = await svc.getClientForFile(file);
-		expect(
-			entry?.client,
-			"the case needs the file's live client",
-		).toBeDefined();
-		const mark = await fence(file);
-
-		// F5: hold the clock INSIDE the window for the skip decision, so the case
-		// keeps reding the pre-#4532 gate. Without this a worker pause longer than
-		// the window makes the old gate push normally and the guard passes on the
-		// code it exists to catch.
-		vi.useFakeTimers({ toFake: ["Date"], now: Date.now() + 1 });
+		// F5: freeze `Date` BEFORE the first touch, so the elapsed time the
+		// pre-#4532 gate reads is the fake one, not the wall clock. Frozen only
+		// at the reopen, a worker pause longer than the window between the two
+		// touches puts the reopen outside it, and the case then passes on the very
+		// gate it exists to catch (Greptile, round 5).
+		vi.useFakeTimers({ toFake: ["Date"], now: Date.now() });
 		try {
+			await svc.touchFile(file, HELD, TOUCH);
+			const entry = await svc.getClientForFile(file);
+			expect(
+				entry?.client,
+				"the case needs the file's live client",
+			).toBeDefined();
+			const mark = await fence(file);
+
+			// 1 ms later: still inside the window the old gate consulted.
+			vi.setSystemTime(Date.now() + 1);
 			await entry!.client.closeDocument(file);
 			await svc.touchFile(file, HELD, TOUCH);
+
+			await fence(file);
+			const lines = traceLines().slice(mark);
+			expect(documents(lines)).toEqual([
+				`recv textDocument/didClose ${uri(file)}`,
+				`recv textDocument/didOpen ${uri(file)}`,
+			]);
+			expect(texts(lines)).toEqual([textLine(file, HELD)]);
 		} finally {
 			vi.useRealTimers();
 		}
-
-		await fence(file);
-		const lines = traceLines().slice(mark);
-		expect(documents(lines)).toEqual([
-			`recv textDocument/didClose ${uri(file)}`,
-			`recv textDocument/didOpen ${uri(file)}`,
-		]);
-		expect(texts(lines)).toEqual([textLine(file, HELD)]);
 	});
 });

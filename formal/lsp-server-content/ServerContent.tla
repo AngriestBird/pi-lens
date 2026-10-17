@@ -42,7 +42,14 @@
 (*  - the per-path notify queue (lsp/client.ts enqueueDocumentNotify) an   *)
 (*    unstarted entry is REPLACED by the last enqueued one (its waiters    *)
 (*    ride along); the runner sends one entry at a time. The check and the *)
-(*    send are one step (vscode-jsonrpc orders at send time);              *)
+(*    send are one step (vscode-jsonrpc orders at send time). #4532 gap 9  *)
+(*    round 4: an entry has a KIND. `saveOnly` is `handleNotifySave`'s own  *)
+(*    run (`sendDidSaveForHeldDocument`), which sends no content and       *)
+(*    closes nothing, so it cannot change what the server holds and the    *)
+(*    skip gate (`hasNotifyInFlight`) does not count it; a `didClose` is    *)
+(*    NOT save-only. Round 5: a save's notification can FAIL                *)
+(*    (`SaveSendFails`), and the mark the skip took is withdrawn with one   *)
+(*    retry queued (`SaveRetryOnFailure`);                                  *)
 (*  - the drift sweep (lsp/document-drift.ts runSweep): stat, a candidate  *)
 (*    when size differs or floor(mtime) > syncedAt; read; equal fingerprint*)
 (*    -> re-stamp only ("unchanged"), else resync through touchFile (source*)
@@ -88,10 +95,17 @@ CONSTANTS
                   \*   runner do, #3405); FALSE: no touch carries a save
     OpenFilePushes, \* TRUE: a second writer pushes content outside the touch path
                   \*   (`LSPService.openFile`, the resync-on-past-EOF route); FALSE: none
-    Revert        \* TRUE: the second writer's bytes are the INITIAL content again, so
+    Revert,       \* TRUE: the second writer's bytes are the INITIAL content again, so
                   \*   disk reverts to what the server was sent before. It is what makes
                   \*   F1's lost update harmful: the skipped touch read the bytes disk
                   \*   has NOW, and an in-flight send of older bytes replaces them.
+    SaveRetryOnFailure, \* TRUE (code since #4532 gap 9 round 5, F3): a standalone
+                  \*   save whose notification FAILS withdraws the mark the skip took
+                  \*   and re-queues ONE save. FALSE (the code before): the failure
+                  \*   lands nowhere, the mark still names the bytes, so no later
+                  \*   saved touch owes one and the server never hears a didSave.
+    SaveSendFails  \* how many standalone saves may fail in this schedule (a fault
+                  \*   budget: 0 in every config that does not inject the F3 failure)
 
 Writers == {"w1", "w2"}
 Procs == {"w1", "w2", "cas", "res"}
@@ -104,8 +118,19 @@ Max(a, b) == IF a > b THEN a ELSE b
 \* `saved` rides the entry (a push carries its save, #3405); `sent`/`recorded`
 \* separate the wire write from the record write, in the code's own order
 \* (recordSentContent runs after the send lands and before the waiters resolve).
+\* `saveOnly` is the entry's KIND (#4532 gap 9 round 4): a run of
+\* `sendDidSaveForHeldDocument` alone, which sends no content and closes nothing,
+\* so it cannot change what the server holds. It belongs to the run an entry
+\* RETAINS, never to the caller that arrived last (round 4's defect shape).
 NoEntry == [waiters |-> {}, content |-> "none", seq |-> 0, saved |-> FALSE,
-            sent |-> FALSE, recorded |-> TRUE]
+            sent |-> FALSE, recorded |-> TRUE, saveOnly |-> FALSE]
+
+\* #4532 gap 9 round 4: a standalone save (`handleNotifySave`), the save a skip
+\* owes. Its run is `sendDidSaveForHeldDocument`, so it has nothing to record
+\* (`sent`/`recorded` are final at creation) and carries no read stamp, which is
+\* why the runner's stale-read drop (`TakeAndSend`) never reaches it.
+SaveOnlyEntry == [waiters |-> {}, content |-> "none", seq |-> 0, saved |-> TRUE,
+                  sent |-> TRUE, recorded |-> TRUE, saveOnly |-> TRUE]
 
 VARIABLES
     clock,
@@ -122,11 +147,13 @@ VARIABLES
     skipped,              \* the content a skip certified, or "none" (F1's history)
     serverSaved,          \* the content the server holds a didSave FOR (F2)
     touchedSaved,         \* the content the most recent saved touch named (F2)
-    sweep, sweepMtime, sweepContent, sweepsLeft, clean
+    sweep, sweepMtime, sweepContent, sweepsLeft, clean,
+    failsLeft             \* the SaveSendFails budget still unspent
 
 vars == <<clock, disk, mtime, server, sentRec, lastSentSeq, staleSend, pc, content,
           readAt, startAt, enqAt, pending, running, record, recent, skipped,
-          serverSaved, touchedSaved, sweep, sweepMtime, sweepContent, sweepsLeft, clean>>
+          serverSaved, touchedSaved, sweep, sweepMtime, sweepContent, sweepsLeft, clean,
+          failsLeft>>
 
 Init ==
     /\ clock = 0
@@ -144,13 +171,14 @@ Init ==
     /\ pending = NoEntry
     /\ running = IF PriorInFlight
                     THEN [waiters |-> {}, content |-> "A", seq |-> 0, saved |-> FALSE,
-                          sent |-> TRUE, recorded |-> FALSE]
+                          sent |-> TRUE, recorded |-> FALSE, saveOnly |-> FALSE]
                     ELSE NoEntry
     /\ record = [size |-> Size("A"), fp |-> Fp("A"), at |-> 0]
     /\ recent = [fp |-> Fp("A"), fresh |-> RecentA, savedHash |-> "none"]
     /\ skipped = "none" /\ serverSaved = "none" /\ touchedSaved = "none"
     /\ sweep = "idle" /\ sweepMtime = 0 /\ sweepContent = "none"
     /\ sweepsLeft = MidSweeps /\ clean = FALSE
+    /\ failsLeft = SaveSendFails
 
 Tick == clock' = clock + 1
 
@@ -159,7 +187,7 @@ Write(p) ==
     /\ pc[p] = "write"
     /\ Tick /\ disk' = WriteOf[p] /\ mtime' = clock + 1
     /\ pc' = [pc EXCEPT ![p] = "read"]
-    /\ UNCHANGED <<enqAt, server, sentRec, lastSentSeq, staleSend, content, readAt, startAt, pending,
+    /\ UNCHANGED <<failsLeft, enqAt, server, sentRec, lastSentSeq, staleSend, content, readAt, startAt, pending,
                    running, record, recent, skipped, serverSaved, touchedSaved, sweep,
                    sweepMtime, sweepContent, sweepsLeft, clean>>
 
@@ -170,7 +198,7 @@ Read(p) ==
     /\ content' = [content EXCEPT ![p] = disk]
     /\ readAt' = [readAt EXCEPT ![p] = clock + 1]
     /\ pc' = [pc EXCEPT ![p] = "start"]
-    /\ UNCHANGED <<enqAt, disk, mtime, server, sentRec, lastSentSeq, staleSend, startAt, pending, running,
+    /\ UNCHANGED <<failsLeft, enqAt, disk, mtime, server, sentRec, lastSentSeq, staleSend, startAt, pending, running,
                    record, recent, skipped, serverSaved, touchedSaved, sweep, sweepMtime,
                    sweepContent, sweepsLeft, clean>>
 
@@ -180,7 +208,7 @@ Start(p) ==
     /\ Tick
     /\ startAt' = [startAt EXCEPT ![p] = clock + 1]
     /\ pc' = [pc EXCEPT ![p] = "check"]
-    /\ UNCHANGED <<enqAt, disk, mtime, server, sentRec, lastSentSeq, staleSend, content, readAt, pending,
+    /\ UNCHANGED <<failsLeft, enqAt, disk, mtime, server, sentRec, lastSentSeq, staleSend, content, readAt, pending,
                    running, record, recent, skipped, serverSaved, touchedSaved, sweep,
                    sweepMtime, sweepContent, sweepsLeft, clean>>
 
@@ -208,13 +236,29 @@ SkipEvidence(p) ==
 (***************************************************************************)
 (* #4532 gap 9 round 3 F1. The record reports what LANDED; the path's      *)
 (* notify queue holds what is still to come. A skip decides on the record, *)
-(* so it may only be taken when nothing is left to send: ClipQueueIdle.    *)
-(* SkipNeedsIdle = FALSE is the code before this round, where a send in    *)
+(* so it may only be taken when nothing CONTENT-BEARING is left to send.   *)
+(* SkipNeedsIdle = FALSE is the code before that round, where a send in    *)
 (* flight landed after the skip and installed the touch's older read.      *)
+(*                                                                         *)
+(* #4532 gap 9 round 4: "nothing left to send" counts content sends only.  *)
+(* A save-only entry (`saveOnly`, round 4) writes no content and closes    *)
+(* nothing, so the record is already the server's final state while one    *)
+(* runs, and the code's `hasNotifyInFlightFor` answers FALSE for it.       *)
+(* Counting it is the harm round 4 removed: a slow standalone `didSave`    *)
+(* made the next identical touch re-push, and that `didChange` cleared the *)
+(* cached diagnostics the skip exists to keep. A didClose is NOT save-only.*)
+(*                                                                         *)
 (* F2 rides the same action: a skip sends no content, so it owes the save  *)
-(* its own content identity requires, and marks the entry for THOSE bytes. *)
+(* its own content identity requires, and the save goes out as a QUEUED    *)
+(* entry (round 4), not at this instant: `sendDidSaveForHeldDocument`      *)
+(* waits behind whatever the path's runner is doing. Round 5: the mark it  *)
+(* takes is written by the send that lands (`SaveMarkOnLanding`).          *)
 (***************************************************************************)
-QueueIdle == pending = NoEntry /\ running = NoEntry
+NoContentInFlight ==
+    /\ (pending = NoEntry \/ pending.saveOnly)
+    /\ (running = NoEntry \/ running.saveOnly)
+
+QueueIdle == NoContentInFlight
 
 SkipNow(p) ==
     /\ Debounce /\ p # "res"
@@ -231,6 +275,13 @@ OwesSave(p) ==
 
 \* shouldSkipTouch / notifySkippedServerIds: a skip sends and records nothing.
 \* The drift resync uses scope "all", a different debounce key: never skipped here.
+\*
+\* #4532 gap 9 round 4/5: the save a skip owes is ENQUEUED, not sent here. The
+\* client's `notify.save` puts a save-only entry on the path's queue (behind a
+\* send already running, or merged into an unstarted one, which keeps that
+\* entry's run and with it that run's kind), and `RunFinish` records the save
+\* when it lands. Round 5 writes the mark THERE (`SaveMarkOnLanding`), so a
+\* save that fails leaves the bytes owing one.
 Check(p) ==
     /\ pc[p] = "check"
     /\ pc' = [pc EXCEPT ![p] = IF SkipNow(p) THEN "done" ELSE "enqueue"]
@@ -239,11 +290,14 @@ Check(p) ==
                           THEN content[p]
                           ELSE touchedSaved
     /\ IF SkipNow(p) /\ OwesSave(p)
-         THEN /\ serverSaved' = content[p]
-              /\ recent' = [recent EXCEPT !.savedHash = content[p]]
-         ELSE UNCHANGED <<serverSaved, recent>>
-    /\ UNCHANGED <<enqAt, clock, disk, mtime, server, sentRec, lastSentSeq, staleSend, content, readAt,
-                   startAt, pending, running, record, sweep, sweepMtime,
+         THEN /\ recent' = [recent EXCEPT !.savedHash = content[p]]
+              /\ pending' = IF pending # NoEntry
+                               THEN [pending EXCEPT !.saved = TRUE]
+                               ELSE SaveOnlyEntry
+              /\ UNCHANGED serverSaved
+         ELSE /\ UNCHANGED <<serverSaved, recent, pending>>
+    /\ UNCHANGED <<failsLeft, enqAt, clock, disk, mtime, server, sentRec, lastSentSeq, staleSend, content, readAt,
+                   startAt, running, record, sweep, sweepMtime,
                    sweepContent, sweepsLeft, clean>>
 
 \* notify.open -> enqueueDocumentNotify: last enqueued wins, waiters carried.
@@ -259,12 +313,13 @@ Enqueue(p) ==
        IN pending' = [waiters |-> pending.waiters \cup {p},
                       content |-> IF keepOld THEN pending.content ELSE content[p],
                       seq     |-> IF keepOld THEN pending.seq ELSE readAt[p],
-                      saved   |-> SavedTouches,
+                      saved   |-> SavedTouches \/ (pending # NoEntry /\ pending.saved),
                       sent    |-> FALSE,
-                      recorded |-> FALSE]
+                      recorded |-> FALSE,
+                      saveOnly |-> IF keepOld THEN pending.saveOnly ELSE FALSE]
     /\ pc' = [pc EXCEPT ![p] = "wait"]
     /\ skipped' = "none"
-    /\ UNCHANGED <<disk, mtime, server, sentRec, lastSentSeq, staleSend, content, readAt,
+    /\ UNCHANGED <<failsLeft, disk, mtime, server, sentRec, lastSentSeq, staleSend, content, readAt,
                    startAt, running, record, recent, serverSaved, touchedSaved,
                    sweep, sweepMtime, sweepContent, sweepsLeft, clean>>
 
@@ -272,22 +327,30 @@ Enqueue(p) ==
 \* `sent` is false for an entry the runner drops (#3481): nothing goes on the
 \* wire, so nothing is recorded. A saved push carries its didSave, so the
 \* server's save follows the content it wrote (#3405).
+\*
+\* #4532 gap 9 round 4: a save-only entry has nothing to record and no read
+\* stamp, so it is never dropped and it writes no content: the server, the
+\* record and the last-sent stamp are untouched, and `RunFinish` lands its save.
 TakeAndSend ==
-    /\ LET dropped == FixDrop /\ pending.seq < lastSentSeq
-       IN /\ running' = [pending EXCEPT !.sent = ~dropped, !.recorded = dropped]
-          /\ pending' = NoEntry
-          /\ IF dropped
-               THEN UNCHANGED <<server, lastSentSeq, staleSend, serverSaved>>
-               ELSE /\ server' = pending.content
-                    /\ lastSentSeq' = pending.seq
-                    /\ staleSend' = (staleSend \/ (pending.seq < lastSentSeq /\ pending.content # server))
-                    /\ serverSaved' = IF pending.saved THEN pending.content ELSE serverSaved
+    IF pending.saveOnly
+      THEN /\ running' = pending
+           /\ pending' = NoEntry
+           /\ UNCHANGED <<failsLeft, server, lastSentSeq, staleSend, serverSaved>>
+      ELSE /\ LET dropped == FixDrop /\ pending.seq < lastSentSeq
+              IN /\ running' = [pending EXCEPT !.sent = ~dropped, !.recorded = dropped]
+                 /\ pending' = NoEntry
+                 /\ IF dropped
+                      THEN UNCHANGED <<failsLeft, server, lastSentSeq, staleSend, serverSaved>>
+                      ELSE /\ server' = pending.content
+                           /\ lastSentSeq' = pending.seq
+                           /\ staleSend' = (staleSend \/ (pending.seq < lastSentSeq /\ pending.content # server))
+                           /\ serverSaved' = IF pending.saved THEN pending.content ELSE serverSaved
 
 \* The runner's first iteration (microtask after the first enqueue).
 RunStart ==
     /\ running = NoEntry /\ pending # NoEntry
     /\ TakeAndSend
-    /\ UNCHANGED <<clock, disk, mtime, pc, content, readAt, startAt, enqAt, record, recent,
+    /\ UNCHANGED <<failsLeft, clock, disk, mtime, pc, content, readAt, startAt, enqAt, record, recent,
                    sentRec, skipped, touchedSaved, sweep, sweepMtime, sweepContent,
                    sweepsLeft, clean>>
 
@@ -296,16 +359,51 @@ RunStart ==
 \* `running.recorded` is the code's order: recordSentContent runs inside the
 \* send's own continuation, so the queue is never idle with the record behind
 \* it (RunFinish would otherwise clear `running` before Record fired).
+\*
+\* #4532 gap 9 round 4/5: a save-only run lands as `didSave` for the document
+\* the server HOLDS, so it covers whatever content is there when it lands. The
+\* mark is written here (`SaveMarkOnLanding`), by the send that landed; that is
+\* what makes a failed one (`SaveFail`) leave the bytes owing a save.
 RunFinish ==
-    /\ running # NoEntry /\ running.recorded
+    \/ /\ running # NoEntry /\ running.recorded /\ running.saveOnly
+       /\ running' = NoEntry
+       /\ pc' = [p \in Procs |-> IF p \in running.waiters THEN "landed" ELSE pc[p]]
+       /\ serverSaved' = IF server = "none" THEN serverSaved ELSE server
+       /\ UNCHANGED <<failsLeft, pending, server, sentRec, lastSentSeq, staleSend, clock, disk,
+                      mtime, content, readAt, startAt, enqAt, record, recent, skipped,
+                      touchedSaved, sweep, sweepMtime, sweepContent, sweepsLeft, clean>>
+    \/ /\ running # NoEntry /\ running.recorded /\ ~running.saveOnly
+       /\ pc' = [p \in Procs |-> IF p \in running.waiters THEN "landed" ELSE pc[p]]
+       /\ IF pending # NoEntry
+            THEN TakeAndSend
+            ELSE /\ running' = NoEntry
+                 /\ UNCHANGED <<failsLeft, pending, server, sentRec, lastSentSeq, staleSend, serverSaved>>
+       /\ UNCHANGED <<failsLeft, clock, disk, mtime, content, readAt, startAt, enqAt, record, recent,
+                      sentRec, skipped, touchedSaved, sweep, sweepMtime, sweepContent, sweepsLeft,
+                      clean>>
+
+\* #4532 gap 9 round 5 F3: the standalone save's notification FAILS (a rejected
+\* write, or a stream error the client survives). Nothing landed. The skip that
+\* queued it took the mark BEFORE sending, so the recovery is the caller's:
+\* `saveDebouncedPush` withdraws the mark and re-queues ONE save
+\* (`SaveRetryOnFailure`, the code after round 5). Under FALSE the mark keeps
+\* naming bytes no didSave ever covered, every later saved touch of them owes
+\* nothing, and the server never hears the save it was owed.
+SaveFail ==
+    /\ failsLeft > 0
+    /\ running # NoEntry /\ running.saveOnly
+    /\ failsLeft' = failsLeft - 1
+    /\ running' = NoEntry
     /\ pc' = [p \in Procs |-> IF p \in running.waiters THEN "landed" ELSE pc[p]]
-    /\ IF pending # NoEntry
-         THEN TakeAndSend
-         ELSE /\ running' = NoEntry
-              /\ UNCHANGED <<pending, server, sentRec, lastSentSeq, staleSend, serverSaved>>
-    /\ UNCHANGED <<clock, disk, mtime, content, readAt, startAt, enqAt, record, recent,
-                   sentRec, skipped, touchedSaved, sweep, sweepMtime, sweepContent,
-                   sweepsLeft, clean>>
+    /\ IF SaveRetryOnFailure
+         THEN /\ recent' = [recent EXCEPT !.savedHash = "none"]
+              /\ pending' = IF pending # NoEntry
+                               THEN [pending EXCEPT !.saved = TRUE]
+                               ELSE SaveOnlyEntry
+         ELSE /\ UNCHANGED <<recent, pending>>
+    /\ UNCHANGED <<server, sentRec, lastSentSeq, staleSend, clock, disk, mtime,
+                   content, readAt, startAt, enqAt, record, skipped, touchedSaved,
+                   serverSaved, sweep, sweepMtime, sweepContent, sweepsLeft, clean>>
 
 \* recordSentContent runs in the SEND's own continuation (client.ts
 \* enqueueDocumentNotify: `await next.run(...)`, and the run records after its
@@ -316,7 +414,7 @@ Record ==
     /\ running # NoEntry /\ running.sent /\ ~running.recorded
     /\ sentRec' = running.content
     /\ running' = [running EXCEPT !.recorded = TRUE]
-    /\ UNCHANGED <<clock, disk, mtime, server, lastSentSeq, staleSend, pc, content,
+    /\ UNCHANGED <<failsLeft, clock, disk, mtime, server, lastSentSeq, staleSend, pc, content,
                    readAt, startAt, enqAt, pending, record, recent, skipped,
                    serverSaved, touchedSaved, sweep, sweepMtime, sweepContent,
                    sweepsLeft, clean>>
@@ -338,7 +436,7 @@ CloseDoc ==
     /\ \E p \in {"w1", "w2", "cas"} : pc[p] \in {"read", "start", "check"}
     /\ server' = "none" /\ sentRec' = "none"
     /\ skipped' = "none"
-    /\ UNCHANGED <<clock, disk, mtime, lastSentSeq, staleSend, pc, content, readAt,
+    /\ UNCHANGED <<failsLeft, clock, disk, mtime, lastSentSeq, staleSend, pc, content, readAt,
                    startAt, enqAt, pending, running, record, recent, serverSaved,
                    touchedSaved, sweep, sweepMtime, sweepContent, sweepsLeft, clean>>
 
@@ -353,7 +451,7 @@ Finish(p) ==
          ELSE [fp |-> Fp(content[p]), fresh |-> TRUE,
                savedHash |-> IF SavedTouches THEN content[p] ELSE "none"]
     /\ pc' = [pc EXCEPT ![p] = "done"]
-    /\ UNCHANGED <<enqAt, clock, disk, mtime, server, sentRec, lastSentSeq, staleSend, content, readAt,
+    /\ UNCHANGED <<failsLeft, enqAt, clock, disk, mtime, server, sentRec, lastSentSeq, staleSend, content, readAt,
                    startAt, pending, running, skipped, serverSaved, touchedSaved, sweep,
                    sweepMtime, sweepContent, sweepsLeft, clean>>
 
@@ -379,7 +477,7 @@ OpenFilePush ==
     /\ server' = disk /\ sentRec' = disk
     /\ record' = [size |-> Size(disk), fp |-> Fp(disk), at |-> clock + 1]
     /\ skipped' = "none"
-    /\ UNCHANGED <<disk, mtime, lastSentSeq, staleSend, pc, content, readAt, startAt, enqAt,
+    /\ UNCHANGED <<failsLeft, disk, mtime, lastSentSeq, staleSend, pc, content, readAt, startAt, enqAt,
                    pending, running, recent, serverSaved, touchedSaved, sweep,
                    sweepMtime, sweepContent, sweepsLeft, clean>>
 
@@ -387,7 +485,7 @@ OpenFilePush ==
 Expire ==
     /\ recent.fresh
     /\ recent' = [recent EXCEPT !.fresh = FALSE]
-    /\ UNCHANGED <<enqAt, clock, disk, mtime, server, sentRec, lastSentSeq, staleSend, pc, content, readAt,
+    /\ UNCHANGED <<failsLeft, enqAt, clock, disk, mtime, server, sentRec, lastSentSeq, staleSend, pc, content, readAt,
                    startAt, pending, running, record, skipped, serverSaved, touchedSaved,
                    sweep, sweepMtime, sweepContent, sweepsLeft, clean>>
 
@@ -405,9 +503,9 @@ SweepStat ==
            mtimeMoved == SweepKey # "size" /\ mtime > record.at
        IN IF sizeMoved \/ mtimeMoved
             THEN /\ sweep' = "read" /\ sweepMtime' = mtime /\ clean' = FALSE
-            ELSE /\ clean' = OthersDone /\ UNCHANGED <<sweep, sweepMtime>>
+            ELSE /\ clean' = OthersDone /\ UNCHANGED <<failsLeft, sweep, sweepMtime>>
     /\ sweepsLeft' = IF OthersDone THEN sweepsLeft ELSE sweepsLeft - 1
-    /\ UNCHANGED <<enqAt, clock, disk, mtime, server, sentRec, lastSentSeq, staleSend, pc, content, readAt,
+    /\ UNCHANGED <<failsLeft, enqAt, clock, disk, mtime, server, sentRec, lastSentSeq, staleSend, pc, content, readAt,
                    startAt, pending, running, record, recent, skipped, serverSaved,
                    touchedSaved, sweepContent>>
 
@@ -418,14 +516,14 @@ SweepRead ==
     /\ IF Fp(disk) = record.fp
          THEN /\ record' = [size |-> Size(disk), fp |-> Fp(disk), at |-> Max(clock + 1, sweepMtime)]
               /\ sweep' = "idle"
-              /\ UNCHANGED <<pc, content, readAt, sweepContent>>
+              /\ UNCHANGED <<failsLeft, pc, content, readAt, sweepContent>>
          ELSE /\ sweep' = "resync"
               /\ sweepContent' = disk
               /\ content' = [content EXCEPT !["res"] = disk]
               /\ readAt' = [readAt EXCEPT !["res"] = clock + 1]
               /\ pc' = [pc EXCEPT !["res"] = "start"]
-              /\ UNCHANGED record
-    /\ UNCHANGED <<enqAt, disk, mtime, server, sentRec, lastSentSeq, staleSend, startAt, pending, running,
+              /\ UNCHANGED <<record, failsLeft>>
+    /\ UNCHANGED <<failsLeft, enqAt, disk, mtime, server, sentRec, lastSentSeq, staleSend, startAt, pending, running,
                    recent, skipped, serverSaved, touchedSaved, sweepMtime, sweepsLeft, clean>>
 
 \* After the resync touch: stamp authoritatively if the record advanced to it.
@@ -437,14 +535,14 @@ SweepSettle ==
                          at |-> Max(clock + 1, sweepMtime)]
                    ELSE record
     /\ sweep' = "idle"
-    /\ UNCHANGED <<enqAt, disk, mtime, server, sentRec, lastSentSeq, staleSend, pc, content, readAt,
+    /\ UNCHANGED <<failsLeft, enqAt, disk, mtime, server, sentRec, lastSentSeq, staleSend, pc, content, readAt,
                    startAt, pending, running, recent, skipped, serverSaved, touchedSaved,
                    sweepMtime, sweepContent, sweepsLeft, clean>>
 
 Next ==
     \/ \E p \in Writers : Write(p)
     \/ \E p \in Procs : Read(p) \/ Start(p) \/ Check(p) \/ Enqueue(p) \/ Finish(p)
-    \/ RunStart \/ RunFinish \/ Expire \/ Record \/ CloseDoc \/ OpenFilePush
+    \/ RunStart \/ RunFinish \/ SaveFail \/ Expire \/ Record \/ CloseDoc \/ OpenFilePush
     \/ SweepStat \/ SweepRead \/ SweepSettle
 
 Spec == Init /\ [][Next]_vars

@@ -1725,12 +1725,21 @@ export class LSPService {
 	 * push carried none and the server declared `save`. Not awaited: a
 	 * notification has no answer, and the path's queue may hold a running push.
 	 * Returns the server id when a save was queued.
+	 *
+	 * #4532 gap 9 round 5 F3: `retryOnFailure` bounds the recovery, not the
+	 * caller. The mark is taken before the send so a second saved touch of these
+	 * bytes owes none; a notification that resolves `false` withdraws it and
+	 * issues ONE retry, because nothing else would: the saved touch that arrived
+	 * while this send was on the wire skipped (round 4) and took no mark of its
+	 * own, so without the retry a failed standalone save leaves bytes the server
+	 * never heard a save for, and a save-triggered server answers nothing.
 	 */
 	private saveDebouncedPush(
 		filePath: string,
 		entry: SpawnedServer,
 		saved: boolean,
 		sentContentHash: string,
+		retryOnFailure = true,
 	): string | undefined {
 		if (!saved) return undefined;
 		const previous = this.recentTouches.get(
@@ -1745,7 +1754,17 @@ export class LSPService {
 		if (!save) return undefined;
 		// Marked before the send: a second saved touch of these bytes owes none.
 		previous.savedHash = sentContentHash;
-		void save.call(entry.client.notify, filePath).catch(() => {});
+		const withdraw = () => {
+			// `false` is "no save left this process for these bytes": the write
+			// failed, the client is gone, or a later entry superseded this one.
+			// None of those delivered a save, so the mark cannot stand.
+			if (previous.savedHash === sentContentHash) delete previous.savedHash;
+			if (retryOnFailure)
+				this.saveDebouncedPush(filePath, entry, true, sentContentHash, false);
+		};
+		void save.call(entry.client.notify, filePath).then((sent) => {
+			if (sent === false) withdraw();
+		}, withdraw);
 		return entry.info.id;
 	}
 

@@ -1011,7 +1011,11 @@ file-scoped worklist and receives no project-wide scanner output.
   remove the document, so it leaves the record final, while a didClose always
   counts. A client that cannot answer either question is
   pushed, never skipped: the elapsed window that used to decide there is gone
-  (`formal/lsp-server-content` `GateWindowReopen` is why).
+  (`formal/lsp-server-content` `GateWindowReopen` is why). The save a skip owes
+  is its own queue entry, and the mark it takes is withdrawn with one retry
+  when that notification fails: a save no touch would re-send otherwise leaves
+  the server never told the bytes are saved (`GateSaveRetry`,
+  `MutGateSaveNoRetry`).
 - `touchFile` freezes content-bound auxiliary coverage at merge time. A later
   publication cannot undo a finding drop. Auxiliary gaps narrow coverage and
   never turn a primary answer inconclusive. When a primary touch is

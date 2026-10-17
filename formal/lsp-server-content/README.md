@@ -334,8 +334,8 @@ New configs, and the two invariants they carry:
 |---|---|---|---|
 | `GateSentIdleSkip` | pass | 1,287,264 | The as-built gate on the revert schedule: the queue is not idle, so the revert is pushed and the server ends on disk's bytes |
 | `MutGateSkipDuringSend` | violated `SkippedContentHeld` | 6,679 | The pre-round-3 rule: the skip reads the record alone, so the send in flight lands over the bytes it certified |
-| `GateSentSavedOpenFile` | pass | 2,682,392 | The as-built save binding on the mixed-writer schedule: the debounced saved touch still sends its `didSave`, bound to its own content |
-| `MutGateSaveMark` | violated `SaveFollowsSavedTouch` | 197,400 | The pre-round-3 rule: a boolean mark, so a save recorded for other bytes suppresses the one owed and the server holds bytes it never heard a save for |
+| `GateSentSavedOpenFile` | pass | The as-built save binding on the mixed-writer schedule: the debounced saved touch still sends its `didSave`, bound to its own content |
+| `MutGateSaveMark` | violated `SaveFollowsSavedTouch` | The pre-round-3 rule: a boolean mark, so a save recorded for other bytes suppresses the one owed and the server holds bytes it never heard a save for |
 
 `SkippedContentHeld` is harm-exact: a skip of bytes disk has already moved past
 owes nothing, and a decision taken AFTER the skip (an `Enqueue`, an
@@ -358,13 +358,17 @@ Two new model findings, neither caused by this round's code:
   cap. Both bounds are content/mark based and prune only schedules in which no
   save is in play.
 
-Verdict table for all 26 `ServerContent.tla` configs (`-workers 1`, `-Xmx6g`,
+Verdict table for all 28 `ServerContent.tla` configs (`-workers 1`, `-Xmx6g`,
 one `-metadir` per run, `timeout 1200`); expect and actual agree in every row.
 The round-2 counts moved because `RunFinish` now waits for `Record`, a schedule
-the model previously admitted and the code never runs.
+the model previously admitted and the code never runs. Round 4 changed two
+counts (`MutGateSaveMark`, `GateSentSavedOpenFile`): the queue gained an entry
+kind and a save now rides it, so more schedules reach the same verdicts.
 
 | Config | Expect | Actual | Distinct states |
 |---|---|---|---|
+| `MutGateSaveNoRetry` | violated `SaveFollowsSavedTouch` | violated | 16 |
+| `GateSaveRetry` | pass | pass | 22 |
 | `GateWindowReopen` | violated `ServerMatchesDisk` | violated | 36 |
 | `MutLossyFp` | violated `ServerMatchesDisk` | violated | 52 |
 | `GateSentReopen` | pass | pass | 60 |
@@ -378,19 +382,69 @@ the model previously admitted and the code never runs.
 | `MutFixNoCoalesce` | violated `ServerMatchesDisk` | violated | 95,749 |
 | `ArtifactCascadeResizedAnyLanding` | violated `ServerMatchesDisk` | violated | 101,248 |
 | `MutFixNoDrop` | violated `ServerMatchesDisk` | violated | 178,724 |
-| `MutGateSaveMark` | violated `SaveFollowsSavedTouch` | violated | 197,400 |
 | `CascadeEqualLength` | pass | pass | 313,147 |
 | `CascadeSendOrder` | pass | pass | 326,699 |
 | `CascadeResized` | pass | pass | 352,201 |
 | `FixCascadeEqualLength` | pass | pass | 403,828 |
 | `GateWindowRepush` | pass | pass | 460,750 |
+| `MutGateSaveMark` | violated `SaveFollowsSavedTouch` | violated | 470,730 |
 | `GateSentOneWrite` | pass | pass | 596,920 |
 | `FixAllActors` | pass | pass | 968,072 |
 | `GateSentIdleSkip` | pass | pass | 1,287,264 |
 | `TwoWritesEqualLength` | pass | pass | 1,972,476 |
 | `TwoWritesResized` | pass | pass | 2,242,972 |
 | `FixTwoWritesEqualLength` | pass | pass | 2,249,292 |
-| `GateSentSavedOpenFile` | pass | pass | 2,682,392 |
+| `GateSentSavedOpenFile` | pass | pass | 3,140,796 |
+
+### Round 4: a save-only entry is not a content send
+
+The round-3 gate read the queue as "idle or not", so a standalone `didSave`
+waiting on the wire made the next touch of byte-identical content look
+uncovered. It re-pushed, and that redundant `didChange` cleared the cached
+diagnostics the skip exists to keep — the same harm the sent-content gate was
+built for. The code now answers `hasNotifyInFlight` from the KIND of the entry
+(`PendingDocumentNotify.saveOnly`), not from its existence, and it counts a
+content send and a `didClose` only.
+
+The model carries the kind as `saveOnly` on each entry, and `QueueIdle` is
+`NoContentInFlight`: a save-only entry running or queued leaves the record the
+server's final state, so a skip is still allowed. A save-only entry has no read
+stamp and nothing to record, so `TakeAndSend` sends it without touching the
+server, the record or the last-sent stamp, and `RunFinish` lands its save for
+the document the server HOLDS. The kind belongs to the RUN an entry retains:
+`Enqueue` keeps `pending.saveOnly` when it keeps `pending.run`, and a content
+caller's own run is never save-only. That is the defect shape the code's tests
+pin in both coalescing orders (`tests/clients/lsp/touch-debounce-fingerprint.test.ts`).
+
+Round 4 also made F3 reachable, which is why the failure enters here: the
+standalone save a skip owes is now a QUEUE entry, and a save-only entry no
+longer blocks the skip that used to re-push and carry its own save.
+
+### Round 5: a failed standalone save keeps a recovery
+
+`saveDebouncedPush` takes the save mark BEFORE the send, so a second saved
+touch of the same bytes owes none. When that send FAILS (a rejected write, or a
+stream error the client survives) nothing has landed, and round 4's rule means
+no later touch re-pushes the bytes that used to carry the save: the server keeps
+content it was never told is saved, and a save-triggered server answers nothing
+for it.
+
+The recovery is the caller's own continuation: `saveDebouncedPush` withdraws the
+mark when its notification resolves `false` and re-queues ONE save
+(`SaveRetryOnFailure`), and the withdrawal is what makes the NEXT saved touch owe
+the save again when even that retry fails. In the model, `SaveFail` spends the
+`SaveSendFails` fault budget: it settles the save-only entry with nothing landed,
+withdraws the mark and queues the retry, which no further failure can reach.
+
+| Config | Expect | Distinct states | What it pins |
+|---|---|---|---|
+| `GateSaveRetry` | pass | 22 | The as-built recovery: the skip queues its save, the send fails, the retry lands, and the bytes carry a `didSave` at quiescence |
+| `MutGateSaveNoRetry` | violated `SaveFollowsSavedTouch` | 16 | The code before round 5: the mark stands over bytes no save covered, and nothing asks again |
+
+The two configs differ in one constant, so the pair is the model's own statement
+of F3: with the mark standing and no retry, quiescence leaves `serverSaved`
+behind the bytes the server holds; with the retry, it cannot.
+
 
 ## HeadMoveResync: held documents across a HEAD move (#4493)
 

@@ -1250,6 +1250,17 @@
 					"value": "TRUE",
 					"test": "tests/clients/lsp/touch-debounce-content-gate.test.ts",
 					"title": "sends the save a skipped touch still owes after another writer advanced the record"
+				},
+				"SaveRetryOnFailure": {
+					"value": "TRUE",
+					"test": "tests/clients/lsp/touch-debounce-fingerprint.test.ts",
+					"title": "retries a standalone save whose notification failed",
+					"also": [
+						{
+							"test": "tests/clients/lsp/touch-debounce-fingerprint.test.ts",
+							"title": "owes the save again after the retry failed too"
+						}
+					]
 				}
 			},
 			"notCodeChoice": [
@@ -1268,6 +1279,7 @@
 						"RecentA",
 						"Revert",
 						"SavedTouches",
+						"SaveSendFails",
 						"Writes"
 					]
 				},

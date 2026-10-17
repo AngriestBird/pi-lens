@@ -4406,13 +4406,34 @@ function handleAnnounceCreated(
 /** #3482: a didSave to a `rescansOnSave` server (opengrep) brings one more
  * publication that answers no send, so the path expects it. Raised before the
  * save is written, so the rescan can never land first and be absorbed by the
- * cap. A save that fails to leave does so because the connection is gone,
- * and a dead client's backlog no longer binds (`captureAuxPublicationBacklog`),
- * so nothing is given back. */
+ * cap. */
 function expectSaveRescan(state: LSPClientState, normalizedPath: string): void {
 	if (!getStrategy(state.serverId, state.launchVariant).rescansOnSave) return;
 	const beyond = state.expectedPublicationsBeyondSends;
 	beyond?.set(normalizedPath, (beyond.get(normalizedPath) ?? 0) + 1);
+}
+
+/**
+ * #4532 gap 9 round 5: a standalone save whose notification did not leave gives
+ * its rescan expectation back.
+ *
+ * Before round 5 the expectation was never given back, because a save that
+ * failed to leave did so on a dead connection and a dead client's backlog no
+ * longer binds (`captureAuxPublicationBacklog`). That is no longer the only
+ * failure: `saveDebouncedPush` retries a save the client survived, and the retry
+ * raises its own expectation. Keeping the failed attempt's leaves a SURPLUS,
+ * which binds the path to one more publication than arrives and withholds the
+ * one the retry does produce (#3482's surplus shape, `late-auxiliary-findings`
+ * `REPLAY-SAVE-RESCAN`).
+ */
+function giveBackSaveRescan(
+	state: LSPClientState,
+	normalizedPath: string,
+): void {
+	const beyond = state.expectedPublicationsBeyondSends;
+	const current = beyond?.get(normalizedPath);
+	if (beyond && current !== undefined && current > 0)
+		beyond.set(normalizedPath, current - 1);
 }
 
 /**
@@ -4492,13 +4513,16 @@ async function sendDidSaveForHeldDocument(
 	if (uri === undefined) return false;
 	expectSaveRescan(state, normalizedPath);
 	try {
-		return await safeSendNotification(
+		const sent = await safeSendNotification(
 			state.connection,
 			"textDocument/didSave",
 			{ textDocument: { uri } },
 		);
+		if (!sent) giveBackSaveRescan(state, normalizedPath);
+		return sent;
 	} catch {
 		// A failed save notify must not stop the queue runner.
+		giveBackSaveRescan(state, normalizedPath);
 		return false;
 	}
 }

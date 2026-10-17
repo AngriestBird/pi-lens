@@ -441,4 +441,148 @@ describe("#4532 gap 9 — a skip needs the path's notify queue idle", () => {
 		await service.touchFile(file(1), A, touch);
 		expect(texts()).toHaveLength(overflow + 1);
 	});
+
+	// R4 F4: a didClose is NOT save-only. Removing the document is the
+	// strongest change a send can make to it, so a skip may never be taken
+	// while one is queued. The harm is unreachable today — a touch enqueued
+	// behind a close resolves `false` (`queue.closing`), so skipping and
+	// pushing leave the same server state — which is why only this reader can
+	// pin the claim.
+	it("counts a queued close as content-bearing", async () => {
+		const { state } = await setup();
+		await clientModule.handleNotifyOpen(state, FILE, A, "typescript");
+		await queueDrained(state);
+		expect(clientModule.hasNotifyInFlightFor(state, FILE)).toBe(false);
+
+		let release!: () => void;
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		vi.mocked(state.connection.sendNotification).mockImplementation(
+			async (method: string) => {
+				if (String(method) === "textDocument/didClose") await held;
+				return undefined;
+			},
+		);
+		const closing = clientModule.closeDocument(state, FILE);
+		await waitFor(
+			() =>
+				vi
+					.mocked(state.connection.sendNotification)
+					.mock.calls.some(
+						([method]) => String(method) === "textDocument/didClose",
+					),
+			(seen) => seen,
+			{ timeoutMs: 2_000, yieldControl: tick },
+		);
+		expect(clientModule.hasNotifyInFlightFor(state, FILE)).toBe(true);
+		release();
+		await closing;
+		await queueDrained(state);
+	});
+
+	// R5 F3: the standalone save a skip owes can fail. The mark the queue takes
+	// before sending then covers bytes the server never heard a save for, and a
+	// saved touch that arrived during the flight marked nothing of its own, so
+	// the failure leaves no didSave at all — the server answers nothing for a
+	// save-triggered project. A failed send withdraws the mark and one bounded
+	// retry re-queues the save.
+	it("retries a standalone save whose notification failed", async () => {
+		const { service, texts, state } = await setup();
+		const touch = { diagnostics: "none" as const, source: "test" };
+		await service.touchFile(FILE, A, touch);
+		expect(texts()).toEqual([`didOpen:${A}`]);
+
+		const attempts: string[] = [];
+		let release!: () => void;
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		vi.mocked(state.connection.sendNotification).mockImplementation(
+			async (method: string) => {
+				if (String(method) !== "textDocument/didSave") return undefined;
+				attempts.push(String(method));
+				// The first attempt hangs, then fails the way a rejected write does.
+				if (attempts.length === 1) {
+					await held;
+					throw new Error("stream write failed");
+				}
+				return undefined;
+			},
+		);
+		vi.stubEnv("PI_LENS_LSP_NOTIFY_BUDGET_MS", "50");
+		try {
+			// The skipped saved touch queues the standalone save it owes.
+			await service.touchFile(FILE, A, { ...touch, saved: true });
+			await waitFor(
+				() => attempts.length,
+				(sent) => sent >= 1,
+				{
+					timeoutMs: 2_000,
+					yieldControl: tick,
+				},
+			);
+			// A second saved touch of the same bytes arrives while that save is
+			// still on the wire: it skips, and owes a save of its own only if the
+			// mark stops covering a save the server never received.
+			await service.touchFile(FILE, A, { ...touch, saved: true });
+			release();
+			await waitFor(
+				() => attempts.length,
+				(sent) => sent >= 2,
+				{
+					timeoutMs: 2_000,
+					yieldControl: tick,
+				},
+			);
+		} finally {
+			release();
+			await queueDrained(state);
+		}
+		// The recovery is a save, never the redundant content push round 3 sent.
+		expect(texts()).toEqual([`didOpen:${A}`]);
+		expect(attempts).toHaveLength(2);
+	});
+
+	// R5 F3, second half: the one retry can fail too. The mark must not outlive
+	// either failure, or the next saved touch of these bytes owes nothing and
+	// the server never hears a save for content it holds.
+	it("owes the save again after the retry failed too", async () => {
+		const { service, texts, state } = await setup();
+		const touch = { diagnostics: "none" as const, source: "test" };
+		await service.touchFile(FILE, A, touch);
+		const attempts: string[] = [];
+		vi.mocked(state.connection.sendNotification).mockImplementation(
+			async (method: string) => {
+				if (String(method) !== "textDocument/didSave") return undefined;
+				attempts.push(String(method));
+				// The send and its one retry fail; the next saved touch's lands.
+				if (attempts.length < 3) throw new Error("stream write failed");
+				return undefined;
+			},
+		);
+		await service.touchFile(FILE, A, { ...touch, saved: true });
+		await waitFor(
+			() => attempts.length,
+			(sent) => sent >= 2,
+			{
+				timeoutMs: 2_000,
+				yieldControl: tick,
+			},
+		);
+		await queueDrained(state);
+		// Two failed saves left no mark, so this touch owes the save again.
+		await service.touchFile(FILE, A, { ...touch, saved: true });
+		await waitFor(
+			() => attempts.length,
+			(sent) => sent >= 3,
+			{
+				timeoutMs: 2_000,
+				yieldControl: tick,
+			},
+		);
+		await queueDrained(state);
+		expect(texts()).toEqual([`didOpen:${A}`]);
+		expect(attempts).toHaveLength(3);
+	});
 });
