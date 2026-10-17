@@ -1,5 +1,52 @@
 # HISTORY
 
+## 2026-10-17 — one session identity per field; fixtures that adopt an ancestor root
+
+Shape 72 ("Process-global last-write-wins session field") and shape 73 ("Fixture
+adopts an ancestor root") entered the catalog here.
+
+**The last-write-wins fields.** One pi-lens activation serves several live
+sessions. #4554 kept the stored role of the last writer and asked that role for
+the shared teardown. A headless `pi -p` run that had started in-process
+sub-agents then printed its answer and never exited: 7 of 13 runs on
+2026-10-16/17. #4563 answers from live membership instead, so the teardown
+belongs to the last member that leaves. #4564 is the formatter's copy of the
+same field: one process-global `FormatService` and one `currentSessionID`
+replace each other on every alternating call, and each replacement drops the
+other session's `FileTime` record. No guard scans for the shape yet.
+
+**The ancestor root behind #4546.** #4546 asked for one session-scoped reset
+export for fresh-module seams, and #4559 delivered it. Its pre-push then redded
+three times on the quick-mode cell with `expected undefined`. That cell saved a
+snapshot under its fixture and planted no marker, so an empty `/tmp/.git` on the
+dev host became the project root and the snapshot was read from the tmp root. A
+`TMPDIR` holding only that `.git` reproduced the red; a clean one passed. #4559
+planted `package.json` in that cell. #4560 swept the class: 91 real
+`handleSessionStart` invocations, 38 candidate cells, three private marker
+planters, and writes at the tmp root that nothing removes.
+
+**The daemon died at 10:48.** `systemd-oomd` killed the plegma daemon with four
+heavy lanes inside its cgroup, #4554's round 3 among them. Those rounds
+restarted in fresh trees, and no work was lost: a lane's tree keeps uncommitted
+work.
+
+**Two bot reviews went unanswered.** #4548 and #4558 landed with open Greptile
+threads. #4558's thread was answered "accepted and disclosed" only after the
+merge, when the land could no longer wait on it. `docs/pi-lens-merge-policy.md`
+now requires a disposition reply on every bot thread and its resolution before
+the merge, with a Common mistakes row for both PRs.
+
+**A trust fix shipped without an advisory.** #4530 describes a lookup class and
+states no attack path, so the maintainer decided it ships as an ordinary public
+PR with no security advisory. Its wording stays at class level.
+
+**The principles digest.** Greptile's custom context carried a pasted copy of
+`docs/engineering-principles.md`, so its comments cited rules the repo file had
+reworded. AGENTS.md "How to use this file" now carries a 12-line digest, each
+line linking its section of the vendored file, and
+`tests/config/principles-digest.test.ts` reds on an anchor the vendored file
+lacks.
+
 ## 2026-10-16 — one signal wired consumer by consumer (shape 71)
 
 A read-only audit (#4535) found five push detectors for disk changes pi-lens

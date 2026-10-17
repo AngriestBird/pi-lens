@@ -30,7 +30,9 @@ moved lines; include only structural views that changed.
 1. **Review.** Spawn `pi-lens-reviewer` (worktree isolation) with the PR
    number, a one-paragraph summary of the claim, and any PR-specific attack
    angles. Self-authored and small PRs get reviewed too — the depth follows
-   the review tier below, never the priority label.
+   the review tier below, never the priority label. Bots review the PR as well:
+   every bot thread (Greptile and others) gets a disposition reply, `fixed in
+   <sha>`, `accepted and disclosed`, or `rejected because <reason>`.
 2. **Fix rounds.** Send findings back to the PR's original author agent when
    its worktree survives (SendMessage — cheapest context); otherwise spawn
    `pi-lens-fixer` on the branch with the findings inlined.
@@ -75,7 +77,8 @@ moved lines; include only structural views that changed.
    sweeps is not green — run the sweep on the merge before merging. Apply
    AGENTS.md's one mutation layer (#4005): new-guard proof and demonstrated
    correctness gaps gate the merge. `ci-verdict` prints no mutation line, and
-   the nightly Stryker report is not a merge input.
+   the nightly Stryker report is not a merge input. Every bot review thread
+   carries its disposition reply and is resolved before the merge.
 5. **Merge.** `gh pr merge <N> --merge` (merge commit, repo convention).
    If "not up to date", `gh api -X PUT .../pulls/<N>/update-branch`, wait for
    CI, re-gate, merge. On GitHub 503s: retry with backoff, never switch to
@@ -802,3 +805,4 @@ Each row cost a lane at least once; the prose above carries the record.
 | Importing `dist/` from a script a workflow runs before any build | #4525's `scripts/assert-evaluated.mjs` reached `dist/` through `lib/clean-signal.mjs`, so `tool-smoke-prs` would fail on every refresh PR. #4531 pins the import graph with a test and plants |
 | Pinning workflow step shell as text instead of running it | #4531 r1: four mutations of the Swift, APFS and handshake shell survived, including deleting `set +e`. Run the extracted step shell against stubs in a test |
 | Filing gap after gap on one mechanism without an audit | Eleven freshness gaps went into #4532 before anyone asked why there were eleven; the cause was one missing fan-out (#4535). Three issues on one mechanism open a consolidation audit (`AGENTS.md` "Orchestration and delegated work") |
+| Landing with an unresolved bot review thread | #4548 and #4558 merged with open Greptile threads (2026-10-17); each one's disposition arrived or never did, and nothing held the land. Every bot thread gets a disposition reply and is resolved before the merge (step 1 and step 4 of "The loop, per PR") |
