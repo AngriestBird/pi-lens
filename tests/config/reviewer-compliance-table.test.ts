@@ -120,9 +120,12 @@ describe("reviewer compliance pass (#4585)", () => {
 		expect(header).toEqual(COLUMNS);
 	});
 
-	it("carries between twelve and eighteen rows", () => {
-		expect(rows.length).toBeGreaterThanOrEqual(12);
-		expect(rows.length).toBeLessThanOrEqual(18);
+	// Recurrence: the 2026-10-17 Greptile audit added seven judgement rows (lifecycle
+	// axes, path provenance, the executing rung, the cache key, the failure-path
+	// record, the model plus monitoring doc, and the whole-diff habit), so the
+	// count is pinned rather than ranged: a trimmed row is a lost rule.
+	it("pins the audited row population", () => {
+		expect(rows.length).toBe(23);
 	});
 
 	it("gives every row a diff trigger, a rule anchor, evidence and a recurrence", () => {
