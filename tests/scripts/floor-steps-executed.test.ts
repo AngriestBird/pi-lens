@@ -311,7 +311,7 @@ describe("stryker-pertest candidates floor, executed (#4518)", () => {
 	// The report shape Stryker's mutation-test-report helper writes. Two killed
 	// mutants is a run that evaluated something; `{"files":{}}` is what an empty
 	// mutant list becomes (`reportAll([])` -> `files: {}`), which Stryker reaches
-	// on exit 0 when the mutated range holds no mutatable code.
+	// on exit 0 when the mutated range holds nothing to mutate.
 	const evaluated = JSON.stringify({
 		files: {
 			"clients/run-duration.js": {
@@ -370,7 +370,7 @@ describe("stryker-pertest candidates floor, executed (#4518)", () => {
 
 	// Recurrence (#4518): a producer under `continue-on-error` that evaluated
 	// nothing read green. The report's PRESENCE is not the population: Stryker
-	// writes `{"files":{}}` and exits 0 for a range with no mutatable code, and
+	// writes `{"files":{}}` and exits 0 for a range with nothing to mutate, and
 	// the candidates file then says every test killed a mutant.
 	it.each([
 		["no report at all", null],
