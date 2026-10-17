@@ -1817,9 +1817,15 @@ export function createLspNavigationTool(
 								"__BADINPUT__ newFilePath parameter required for rename_file",
 							);
 						}
-						const resolvedNewFilePath = path.isAbsolute(newFilePath)
-							? newFilePath
-							: path.resolve(ctx.cwd || ".", newFilePath);
+						// #4578: the destination is a WRITE target, so it resolves through
+						// the same host-path seam pi's own write tool uses — `~` expands to
+						// `$HOME`, a leading `@` mention prefix drops, and pi's unicode
+						// space class folds (defect shape 74: a bare `path.resolve(cwd,
+						// `~/x`)` names `<cwd>/~/x`, a path that cannot exist).
+						const resolvedNewFilePath = resolveHostToolPath(
+							newFilePath,
+							ctx.cwd || ".",
+						);
 						const result = await lspService.renameFile(
 							filePath,
 							resolvedNewFilePath,

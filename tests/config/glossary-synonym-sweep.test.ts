@@ -1221,10 +1221,12 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"tools/lsp-diagnostics.ts": 8,
 		// 14 -> 15 (#4403 round 5): `noServerAnsweredText` names the file by
 		// its `path.basename`, beside the install hint's own.
-		// 15 -> 13 (#4577 M2): the navigation `path` argument folds onto
-		// `resolveHostToolPath`; `rename_file`'s destination keeps its pair
-		// (#4578).
-		"tools/lsp-navigation.ts": 13,
+		// 15 -> 11: both concurrent folds land here. #4578 takes the `rename_file`
+		// destination, #4577 M2 the navigation `path` argument, so each pair of
+		// `path.isAbsolute`/`path.resolve` calls goes and the merged file keeps
+		// path OPERATIONS only (`path.basename`, `path.resolve` of a read target),
+		// the sense the glossary does not retire.
+		"tools/lsp-navigation.ts": 11,
 		// 29 -> 27 (#4577 M2): `resolveFile` folds onto `resolveHostToolPath`,
 		// dropping the `path.isAbsolute`/`path.resolve` pair.
 		"tools/module-report.ts": 27,
