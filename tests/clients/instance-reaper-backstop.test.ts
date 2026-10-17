@@ -1043,14 +1043,22 @@ describe("#1857: cost containment", () => {
 		h.state.stdout = "";
 		await sweepUntrackedOrphans({ ...FAST, force: true });
 		const spawnsAfterFirst = h.spawns.length;
+		let completions = 0;
 
 		const outcome = await sweepUntrackedOrphans({
 			verifyAttempts: 1,
 			verifyIntervalMs: 0,
 			cooldownMs: 60_000,
+			onComplete: () => {
+				completions += 1;
+			},
 		});
 
 		expect(outcome).toBe("cooldown");
+		// #4581 review: the reordered seam still reports a NON-clean branch, once
+		// — it holds the lock on this path, so it is the branch whose report the
+		// `finally` has to carry.
+		expect(completions).toBe(1);
 		expect(backstopMetadata().outcome).toBe("cooldown");
 		expect(h.spawns).toHaveLength(spawnsAfterFirst);
 	});
