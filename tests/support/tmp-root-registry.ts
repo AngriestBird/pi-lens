@@ -132,16 +132,17 @@ export function registerTmpSibling(
 export function formatTmpRootCreators(
 	registry: TmpRootRegistry,
 ): string | undefined {
-	const lines: string[] = [];
+	// A Set, not an array: a path can be a mkdtemp root AND later recreated by
+	// mkdir (a straggler fixture), and one entry carries one creator line.
+	const lines = new Set<string>();
 	for (const [dir, entry] of registry.roots)
 		if (entry.createdBy !== undefined)
-			lines.push(`${path.basename(dir)}\t${entry.createdBy}`);
+			lines.add(`${path.basename(dir)}\t${entry.createdBy}`);
 	for (const [dir, entry] of registry.siblings)
 		if (entry.createdBy !== undefined)
-			lines.push(`${path.basename(dir)}\t${entry.createdBy}`);
-	if (lines.length === 0) return undefined;
-	lines.sort();
-	return `${lines.join("\n")}\n`;
+			lines.add(`${path.basename(dir)}\t${entry.createdBy}`);
+	if (lines.size === 0) return undefined;
+	return `${[...lines].sort().join("\n")}\n`;
 }
 
 /** The observed creator of each recorded entry, keyed by entry name. The
