@@ -5844,4 +5844,39 @@ describe("lens_diagnostics scalar path resolution (#4577 M2)", () => {
 			removeTempDirSync(cwd);
 		}
 	});
+
+	// The batch route resolves its entries through `expandPathsToFiles`, a
+	// second site with the same bare join — and the one the scalar case above
+	// does NOT reach (mode=full filters through `resolvePathsScope` instead).
+	it("resolves a ~ entry of the batch paths argument to $HOME", async () => {
+		const cwd = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-diag-batch-tilde-"),
+		);
+		const home = path.join(cwd, "home");
+		const realFile = path.join(home, "proj", "tilde.ts");
+		fs.mkdirSync(path.dirname(realFile), { recursive: true });
+		fs.writeFileSync(realFile, "export const a = 1;\n");
+		const restoreHome = pinTestHome(home);
+		const getDiagnostics = vi.fn(async (_filePath: string) => []);
+		const service = {
+			announceCreatedFiles: vi.fn(),
+			touchFile: vi.fn(async () => undefined),
+			getDiagnostics,
+			getCapabilitySnapshots: vi.fn(async () => []),
+		};
+		try {
+			expect(os.homedir()).toBe(home);
+			const tool = makeTool({}, service);
+			const result = await run(
+				tool,
+				{ source: "lsp", paths: ["~/proj/tilde.ts"] },
+				cwd,
+			);
+			expect((result as { isError?: boolean }).isError).toBeFalsy();
+			expect(getDiagnostics.mock.calls[0]?.[0]).toBe(realFile);
+		} finally {
+			restoreHome();
+			removeTempDirSync(cwd);
+		}
+	});
 });
