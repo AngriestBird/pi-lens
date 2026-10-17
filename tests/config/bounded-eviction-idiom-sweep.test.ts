@@ -226,14 +226,19 @@ const BOUND_NEXT_BINDING =
 	/(?<![\w$.])([\w$]+)\s*(?::[^=;\n]+)?=(?!=)\s*[^;{}=]*?\.next\s*\(\s*\)/g;
 
 /**
- * Spelling 5 (#4580 review F3): iterator destructuring — `const [oldest] =
+ * Spelling 5 (#4580 review F3): array destructuring — `const [oldest] =
  * m.keys(); … m.delete(oldest);` — the key itself is the victim, so the window
  * gate is a `.delete(` plus a use of the destructured name, not a `.value`
  * read. The tree's one spread-destructure is a peek (`fieldCounts.size !== 1`,
  * no removal), which fails both gates.
+ *
+ * The right-hand side is ANY expression, not one of the three accessor calls:
+ * requiring a literal accessor is the shape-69 mistake again, and
+ * `const [oldest] = iteratorOf(m)` (an accessor behind a helper) is the same
+ * eviction. The bound-victim gates carry the precision instead.
  */
 const DESTRUCTURED_ITERATOR_BINDING =
-	/\b(?:const|let|var)\s*\[\s*([\w$]+)(?:\s*,\s*[\w$]+)?\s*\]\s*=(?!=)\s*[^;{}=]*?\.\s*(?:keys|values|entries)\s*\(\s*\)/g;
+	/\b(?:const|let|var)\s*\[\s*([\w$]+)(?:\s*,\s*[\w$]+)?\s*\]\s*=(?!=)\s*[^;{}=]*?/g;
 
 /**
  * Spelling 6 (#4580 round 2, audit item 4): an eviction whose victim is picked
@@ -905,6 +910,19 @@ describe("#2442 no new hand-rolled evict-oldest idiom outside bounded-cache.ts",
 				].join("\n"),
 			),
 		).toEqual([2]);
+		// An accessor behind a helper is the same destructured victim (#4580
+		// round 2 review: naming the three accessors left this one green).
+		expect(
+			findEvictionLines(
+				[
+					"const iteratorOf = (container) => container.keys();",
+					"while (m.size > CAP) {",
+					"  const [oldest] = iteratorOf(m);",
+					"  m.delete(oldest);",
+					"}",
+				].join("\n"),
+			),
+		).toEqual([3]);
 		// The tree's one spread-destructure is a peek with no cap loop and no
 		// removal (`fieldCounts.size !== 1`), so it stays out of the family.
 		expect(
