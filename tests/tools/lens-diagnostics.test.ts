@@ -23,7 +23,7 @@ import {
 	resetOncePerSessionPhases,
 } from "../../clients/latency-logger.js";
 import { resetProjectLensConfigCache } from "../../clients/project-lens-config.js";
-import { removeTempDirSync } from "../clients/test-utils.js";
+import { pinTestHome, removeTempDirSync } from "../clients/test-utils.js";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 
 const projectDiagnosticsMocks = vi.hoisted(() => ({
@@ -4685,14 +4685,11 @@ describe("lens_diagnostics paths", () => {
 		const cwd = fs.mkdtempSync(
 			path.join(os.tmpdir(), "pi-lens-diag-tilde-4576-"),
 		);
-		const previousHome = process.env.HOME;
-		const previousUserProfile = process.env.USERPROFILE;
 		const home = path.join(cwd, "home");
 		const realFile = path.join(home, "proj", "src", "tilde.ts");
 		fs.mkdirSync(path.dirname(realFile), { recursive: true });
 		fs.writeFileSync(realFile, "export const a = 1;\n");
-		process.env.HOME = home;
-		process.env.USERPROFILE = home;
+		const restoreHome = pinTestHome(home);
 		try {
 			expect(os.homedir()).toBe(home);
 			const lspService = {
@@ -4731,10 +4728,7 @@ describe("lens_diagnostics paths", () => {
 				projectDiagnosticsMocks.scanProjectDiagnostics,
 			).toHaveBeenCalledWith(expect.objectContaining({ files: [realFile] }));
 		} finally {
-			if (previousHome === undefined) delete process.env.HOME;
-			else process.env.HOME = previousHome;
-			if (previousUserProfile === undefined) delete process.env.USERPROFILE;
-			else process.env.USERPROFILE = previousUserProfile;
+			restoreHome();
 			removeTempDirSync(cwd);
 		}
 	});
@@ -5805,6 +5799,48 @@ describe("lens_diagnostics mode=delta — per-entry freshness on a merged report
 			expect(rows.some((line) => line.includes("older.ts"))).toBe(true);
 			expect(rows.some((line) => line.includes("newer.ts"))).toBe(true);
 		} finally {
+			removeTempDirSync(cwd);
+		}
+	});
+});
+
+/**
+ * #4577 M2: the scalar `path` argument is a host-supplied tool path, so it
+ * resolves through the shared host resolver. A bare `path.resolve(cwd, path)`
+ * turned `~/x` into `<cwd>/~/x`, the tool answered "Path not found" for a file
+ * that exists, and the diagnostic never reached the server.
+ */
+describe("lens_diagnostics scalar path resolution (#4577 M2)", () => {
+	it("resolves a ~ path to $HOME, not under the session cwd", async () => {
+		const cwd = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-diag-scalar-tilde-"),
+		);
+		const home = path.join(cwd, "home");
+		const realFile = path.join(home, "proj", "tilde.ts");
+		fs.mkdirSync(path.dirname(realFile), { recursive: true });
+		fs.writeFileSync(realFile, "export const a = 1;\n");
+		const restoreHome = pinTestHome(home);
+		const getDiagnostics = vi.fn(async (_filePath: string) => []);
+		const service = {
+			announceCreatedFiles: vi.fn(),
+			touchFile: vi.fn(async () => undefined),
+			getDiagnostics,
+			getCapabilitySnapshots: vi.fn(async () => []),
+		};
+		try {
+			expect(os.homedir()).toBe(home);
+			const tool = makeTool({}, service);
+			const result = await run(
+				tool,
+				{ source: "lsp", path: "~/proj/tilde.ts" },
+				cwd,
+			);
+			expect((result as { isError?: boolean }).isError).toBeFalsy();
+			// The server was asked about the expanded file — the pre-fix spelling
+			// named `<cwd>/~/proj/tilde.ts`, which does not exist.
+			expect(getDiagnostics.mock.calls[0]?.[0]).toBe(realFile);
+		} finally {
+			restoreHome();
 			removeTempDirSync(cwd);
 		}
 	});

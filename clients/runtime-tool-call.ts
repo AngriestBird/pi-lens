@@ -9,7 +9,6 @@ import { evaluateGitGuard, isGitCommitOrPushAttempt } from "./git-guard.js";
 import { dropHashlineAnchorMemo } from "./hashline-anchor.js";
 import { evaluateSharedCheckoutGuard } from "./shared-checkout-guard.js";
 import { logLatency } from "./latency-logger.js";
-import { toPosix } from "./path-utils.js";
 import {
 	captureFileStats,
 	getOpaqueBaselineStore,
@@ -53,6 +52,7 @@ import { applyPartiallyApplicableEdits } from "./partial-edit-apply.js";
 import {
 	isExternalOrVendorFile,
 	resolveToolCallFilePath,
+	toPosix,
 } from "./path-utils.js";
 import {
 	EXPANSION_BUDGET_MS,

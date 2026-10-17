@@ -12,13 +12,12 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { resolveRunnerPath } from "../../../clients/dispatch/runner-context.js";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
-import { removeTempDirSync } from "../test-utils.js";
+import { pinTestHome, removeTempDirSync } from "../test-utils.js";
 
 let tmp: string;
 let cwd: string;
 let home: string;
-let previousHome: string | undefined;
-let previousUserProfile: string | undefined;
+let restoreHome: () => void;
 
 beforeEach(() => {
 	tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-runner-context-4576-"));
@@ -26,17 +25,11 @@ beforeEach(() => {
 	home = path.join(tmp, "home");
 	fs.mkdirSync(cwd, { recursive: true });
 	fs.mkdirSync(path.join(home, "proj"), { recursive: true });
-	previousHome = process.env.HOME;
-	previousUserProfile = process.env.USERPROFILE;
-	process.env.HOME = home;
-	process.env.USERPROFILE = home;
+	restoreHome = pinTestHome(home);
 });
 
 afterEach(() => {
-	if (previousHome === undefined) delete process.env.HOME;
-	else process.env.HOME = previousHome;
-	if (previousUserProfile === undefined) delete process.env.USERPROFILE;
-	else process.env.USERPROFILE = previousUserProfile;
+	restoreHome();
 	removeTempDirSync(tmp);
 });
 

@@ -17,7 +17,7 @@
 import * as nodeFs from "node:fs";
 import * as path from "node:path";
 import { isReadableSourceFile } from "./file-kinds.js";
-import { resolveHostToolPath } from "./path-utils.js";
+import { normalizeHostToolPath } from "./path-utils.js";
 import { classifyMutatingTool } from "./mutating-tool.js";
 import { countFileLines } from "./read-guard-tool-lines.js";
 import type { SearchReadLocation } from "./search-read-registration.js";
@@ -55,6 +55,20 @@ export interface ShellCommandSegment {
 	 * them.
 	 */
 	terminator?: "pipe";
+	/**
+	 * Word texts whose LEADING `~` bash saw quoted or escaped (`'~/x'`,
+	 * `"~/x"`, `\~/x`), so bash leaves it literal instead of expanding it to
+	 * the home directory (#4577 M1). Empty or absent when every word's tilde
+	 * was bare.
+	 *
+	 * Keyed by text because the operand consumers that resolve these words
+	 * (`formatterFileArgs`, the `cp`/`mv` destination pick) lose token
+	 * positions. When one command spells the same text both ways
+	 * (`cat '~/x' ~/x`), the literal reading wins everywhere: that
+	 * under-credits a path no file exists at, where expanding would credit a
+	 * read of a file the shell never opened.
+	 */
+	literalTilde?: ReadonlySet<string>;
 }
 
 interface PendingHeredoc {
@@ -183,20 +197,41 @@ export function tokenizeShellCommand(command: string): ShellCommandSegment[] {
 	const pendingHeredocs: PendingHeredoc[] = [];
 	let tokens: string[] = [];
 	let word = "";
+	/**
+	 * True when the word's FIRST character came out of quotes or an escape, so
+	 * a tilde there is literal to bash (`'~/x'`, `"~/x"`, `\~/x`) rather than
+	 * a home prefix (#4577 M1). Reset with the word.
+	 */
+	let wordFirstCharQuoted = false;
+	let literalTilde = new Set<string>();
 	let quote: "single" | "double" | undefined;
 	let escaped = false;
 	let unsupported = false;
 	let atTokenStart = true;
+	const appendChar = (ch: string, quoted: boolean) => {
+		if (word === "") wordFirstCharQuoted = quoted;
+		word += ch;
+	};
 	const flushWord = () => {
-		if (word) tokens.push(word);
+		if (word) {
+			if (wordFirstCharQuoted && word.startsWith("~")) literalTilde.add(word);
+			tokens.push(word);
+		}
 		word = "";
+		wordFirstCharQuoted = false;
 		atTokenStart = true;
 	};
 	const flushSegment = (terminator?: "pipe") => {
 		flushWord();
 		if (tokens.length > 0 || unsupported)
-			segments.push({ tokens, unsupported, terminator });
+			segments.push({
+				tokens,
+				unsupported,
+				terminator,
+				...(literalTilde.size > 0 ? { literalTilde } : {}),
+			});
 		tokens = [];
+		literalTilde = new Set();
 		unsupported = false;
 		atTokenStart = true;
 	};
@@ -205,23 +240,23 @@ export function tokenizeShellCommand(command: string): ShellCommandSegment[] {
 		const next = command[i + 1];
 		if (quote === "single") {
 			if (ch === "'") quote = undefined;
-			else word += ch;
+			else appendChar(ch, true);
 			continue;
 		}
 		if (quote === "double") {
 			if (escaped) {
-				word += ch;
+				appendChar(ch, true);
 				escaped = false;
 			} else if (ch === "\\") escaped = true;
 			else if (ch === '"') quote = undefined;
-			else word += ch;
+			else appendChar(ch, true);
 			continue;
 		}
 		if (escaped) {
 			// A backslash-newline is a shell line continuation, not part of the
 			// command argument. Keeping the newline here makes a continued git command
 			// visible to command guards.
-			if (ch !== "\n") word += ch;
+			if (ch !== "\n") appendChar(ch, true);
 			escaped = false;
 			atTokenStart = false;
 			continue;
@@ -234,7 +269,7 @@ export function tokenizeShellCommand(command: string): ShellCommandSegment[] {
 			if (next === "\n" || /[\s\\'";$|&<>]/.test(next ?? "")) {
 				escaped = true;
 			} else {
-				word += ch;
+				appendChar(ch, false);
 				atTokenStart = false;
 			}
 			atTokenStart = false;
@@ -296,7 +331,7 @@ export function tokenizeShellCommand(command: string): ShellCommandSegment[] {
 			unsupported = true;
 			continue;
 		}
-		word += ch;
+		appendChar(ch, false);
 		atTokenStart = false;
 	}
 	if (quote || escaped) unsupported = true;
@@ -304,17 +339,43 @@ export function tokenizeShellCommand(command: string): ShellCommandSegment[] {
 	return segments;
 }
 
-/** Resolve a token to an absolute path if it looks like a source file. */
-function resolveCandidate(token: string, cwd: string): string | null {
+/**
+ * Resolve a bash operand to the file the SHELL opened.
+ *
+ * A shell word follows shell rules, not host-tool-argument rules (#4577 M1):
+ * bash expands a bare leading `~`/`~/` itself and leaves a quoted or escaped
+ * one literal, and none of the host resolver's other stages apply — a shell
+ * reads the file literally named `@foo.ts`, `file://x` or `a\u202Fb.ts`, so
+ * applying the `@` strip, the `file://` conversion or the unicode-space fold
+ * here credited a file the command never touched. `~user/x` stays relative:
+ * bash would expand it to that user's home, which is not knowable here, and
+ * the pre-fix seam left it under the cwd.
+ */
+function resolveCandidate(
+	token: string,
+	cwd: string,
+	literalTilde?: ReadonlySet<string>,
+): string | null {
 	const cleaned = stripQuotes(token);
 	if (!cleaned || cleaned.startsWith("-") || !isReadableSourceFile(cleaned)) {
 		return null;
 	}
-	// #4576: a bash operand is a host-supplied tool path too. Expanding `~`
-	// here (through the same resolver the host tool seams use) keeps a
-	// `> ~/x.ts` write out of the phantom `<cwd>/~/x.ts` bucket, which then
-	// reached runner dispatch as a file that never existed.
-	return resolveHostToolPath(cleaned, cwd);
+	// A redirect target reaches here still spelled with its quotes
+	// (`> "~/x.ts"`); a lexed word lost them, so the segment carries the bit.
+	const tildeIsLiteral =
+		/^['"]/.test(token) || literalTilde?.has(cleaned) === true;
+	// `\~/x` survives the lexer backslash-first (it keeps native Windows
+	// path separators), and bash reads that tilde literally: drop the escape
+	// instead of crediting the phantom `<cwd>/\~/x`.
+	const operand =
+		cleaned.startsWith("~") && !tildeIsLiteral
+			? normalizeHostToolPath(cleaned)
+			: cleaned.startsWith("\\~")
+				? cleaned.slice(1)
+				: cleaned;
+	return path.isAbsolute(operand)
+		? path.resolve(operand)
+		: path.resolve(cwd, operand);
 }
 
 /** Parse a count flag value like `-20`, `-n20`, or the `20` following `-n`. */
@@ -323,10 +384,6 @@ function parseCountFlag(token: string): number | undefined {
 	if (!digits) return undefined;
 	const n = Number.parseInt(digits, 10);
 	return Number.isFinite(n) && n > 0 ? n : undefined;
-}
-
-function commandSegments(command: string): string[][] {
-	return tokenizeShellCommand(command).map((segment) => segment.tokens);
 }
 
 /** Unwrap the common agent-authored `npx <tool>` launcher form. */
@@ -435,11 +492,15 @@ export function extractReadPathsFromCommand(
 	const spans: ReadSpan[] = [];
 	const seen = new Set<string>();
 	const totals = new Map<string, number>();
+	// The shell-rule bit for the segment being read (#4577 M1). Re-bound at the
+	// top of the loop below, so every operand in one segment resolves with that
+	// segment's quoting.
+	let literalTilde: ReadonlySet<string> | undefined;
 
 	const resolveFile = (
 		token: string,
 	): { abs: string; total: number } | null => {
-		const abs = resolveCandidate(token, cwd);
+		const abs = resolveCandidate(token, cwd, literalTilde);
 		if (!abs) return null;
 		try {
 			if (!nodeFs.statSync(abs).isFile()) return null;
@@ -467,7 +528,9 @@ export function extractReadPathsFromCommand(
 		spans.push({ filePath: file.abs, offset, limit });
 	};
 
-	for (const tokens of commandSegments(command)) {
+	for (const segment of tokenizeShellCommand(command)) {
+		literalTilde = segment.literalTilde;
+		const tokens = segment.tokens;
 		if (tokens.length === 0) continue;
 		const verb = path.basename(tokens[0] ?? "");
 		const args = tokens.slice(1);
@@ -877,13 +940,17 @@ export function extractWrittenPathsFromCommand(
 	cwd: string,
 ): string[] {
 	const out = new Set<string>();
+	// The shell-rule bit for the segment being read (#4577 M1); re-bound at the
+	// top of each loop below.
+	let literalTilde: ReadonlySet<string> | undefined;
 	const add = (token: string) => {
-		const abs = resolveCandidate(token, cwd);
+		const abs = resolveCandidate(token, cwd, literalTilde);
 		if (abs) out.add(abs);
 	};
 
-	for (const tokens of commandSegments(command)) {
-		if (tokens.length === 0) continue;
+	for (const segment of tokenizeShellCommand(command)) {
+		literalTilde = segment.literalTilde;
+		if (segment.tokens.length === 0) continue;
 
 		// Redirect targets are collected by a quote-aware scanner. The shared
 		// tokenizer supplies the normalized command arguments; it deliberately
@@ -894,7 +961,9 @@ export function extractWrittenPathsFromCommand(
 		// needlessly rescanned.
 		break;
 	}
-	for (const tokens of commandSegments(command)) {
+	for (const segment of tokenizeShellCommand(command)) {
+		literalTilde = segment.literalTilde;
+		const tokens = segment.tokens;
 		if (tokens.length === 0) continue;
 		const { verb, args } = unwrapCommand(tokens);
 
@@ -1052,8 +1121,11 @@ export function extractDeletedPathsFromCommand(
 	cwd: string,
 ): string[] {
 	const out = new Set<string>();
+	// The shell-rule bit for the segment being read (#4577 M1); re-bound at the
+	// top of the loop below.
+	let literalTilde: ReadonlySet<string> | undefined;
 	const add = (token: string) => {
-		const abs = resolveCandidate(token, cwd);
+		const abs = resolveCandidate(token, cwd, literalTilde);
 		if (abs) out.add(abs);
 	};
 	// mv SRC... DEST / git mv SRC... DEST — every argument except the last is
@@ -1068,7 +1140,9 @@ export function extractDeletedPathsFromCommand(
 		}
 	};
 
-	for (const tokens of commandSegments(command)) {
+	for (const segment of tokenizeShellCommand(command)) {
+		literalTilde = segment.literalTilde;
+		const tokens = segment.tokens;
 		if (tokens.length === 0) continue;
 		const verb = path.basename(tokens[0] ?? "");
 		const args = tokens.slice(1);
