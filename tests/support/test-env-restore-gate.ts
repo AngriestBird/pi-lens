@@ -776,6 +776,8 @@ interface LocalFunction {
 function localFunctions(scan: Scan): Map<string, LocalFunction> {
 	const { stripped } = scan;
 	const found = new Map<string, LocalFunction>();
+	/** Two declarations of one name in different scopes: only one body can run. */
+	const ambiguous = new Set<string>();
 	const patterns = [
 		/(?<![\w$.])(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/g,
 		/(?<![\w$.])(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=;]*)?=\s*(?:async\s*)?\(/g,
@@ -783,7 +785,12 @@ function localFunctions(scan: Scan): Map<string, LocalFunction> {
 	for (const pattern of patterns) {
 		for (const match of stripped.matchAll(pattern)) {
 			const name = match[1];
-			if (name === undefined || found.has(name)) continue;
+			if (name === undefined || ambiguous.has(name)) continue;
+			if (found.has(name)) {
+				found.delete(name);
+				ambiguous.add(name);
+				continue;
+			}
 			const paren = (match.index ?? 0) + match[0].length - 1;
 			const close = matchingCloseIndex(stripped, paren, "(", ")");
 			if (close < 0) continue;
@@ -992,6 +999,47 @@ function loopIterableKeys(scan: Scan, at: number, variable: string): string[] {
 	return [];
 }
 
+/** Offset of a declaration's initializer, or undefined when it has none. */
+function declarationValue(stripped: string, from: number): number | undefined {
+	let i = from;
+	while (i < stripped.length && stripped[i] !== "=" && stripped[i] !== ";") i++;
+	if (stripped[i] !== "=") return undefined;
+	return nextNonSpace(stripped, i + 1);
+}
+
+/** End offset of the expression starting at `from` (its `;` or enclosing `}`). */
+function expressionEnd(stripped: string, from: number): number {
+	let depth = 0;
+	for (let i = from; i < stripped.length; i++) {
+		const ch = stripped[i];
+		if (ch === "(" || ch === "[" || ch === "{") depth++;
+		else if (ch === ")" || ch === "]" || ch === "}") {
+			if (depth === 0) return i;
+			depth--;
+		} else if (ch === ";" && depth === 0) return i;
+	}
+	return stripped.length;
+}
+
+/**
+ * Does the initializer at `init` read the environment? A literal does not: a
+ * fixed default (`const DEFAULT = "0"`) restores nothing when a teardown
+ * assigns it back, so it is not a saved value.
+ */
+function savedInitializer(
+	scan: Scan,
+	init: number,
+	region: readonly Range[],
+	seen: Set<string>,
+): boolean {
+	const { stripped } = scan;
+	const text = stripped.slice(init, expressionEnd(stripped, init));
+	if ([...text.matchAll(SEAM)].length > 0) return true;
+	const name = /^[A-Za-z_$][\w$]*/.exec(text)?.[0];
+	if (name === undefined) return false;
+	return name !== "process" && isSavedName(scan, name, region, seen);
+}
+
 /** Does a name resolve to a value saved OUTSIDE the restore region? */
 function isSavedName(
 	scan: Scan,
@@ -1009,11 +1057,14 @@ function isSavedName(
 			stripped.slice(afterKeyword),
 		)?.[0];
 		if (declared !== name) continue;
-		// A value declared INSIDE the teardown or finally was never saved. One
-		// declared outside it was, whether or not it has an initializer here:
-		// `let originalFlag;` filled from `process.env` in a `beforeEach` is
-		// the file's saved value.
-		if (!inside(region, declAt)) return true;
+		// A value declared INSIDE the teardown or finally was never saved.
+		if (inside(region, declAt)) continue;
+		// Declared outside cleanup: saved only when it reads the environment
+		// (or another saved value). `let originalFlag;` has no initializer and
+		// is filled from `process.env` later, so it stays a saved value.
+		const init = declarationValue(stripped, afterKeyword + declared.length);
+		if (init === undefined) return true;
+		if (savedInitializer(scan, init, region, seen)) return true;
 	}
 	// A loop binding: `for (const [key, value] of Object.entries(saved))`. The
 	// bound value is saved when the record it destructures is.
@@ -1043,37 +1094,47 @@ function loopBody(stripped: string, headEnd: number): Range {
 }
 
 /**
- * The loop bindings that ENCLOSE a write outside any restore region: a test
- * that iterates a declared key list writes `process.env[key]` for each of its
- * literals, and a teardown loop over the same list restores them by name.
+ * The loop bindings whose loops ENCLOSE `site`: a test that iterates a
+ * declared key list writes `process.env[key]` for each of its literals, and a
+ * teardown loop over the same list restores them by name. The binding is
+ * resolved at its own loop head, so a sibling loop or an outer variable of the
+ * same name cannot rename another site's key.
  */
-function enclosingLoopBindings(scan: Scan, site: Site): Map<string, string[]> {
-	const bindings = new Map<string, string[]>();
+function bindingsAt(scan: Scan, site: Site): Map<string, string[]> {
+	const binds = new Map<string, { at: number; keys: string[] }>();
+	const set = (name: string, at: number, keys: string[]): void => {
+		// The INNERMOST enclosing loop wins: an outer loop of the same name is
+		// shadowed at this site.
+		const previous = binds.get(name);
+		if (previous !== undefined && previous.at > at) return;
+		binds.set(name, { at, keys });
+	};
 	const { stripped } = scan;
 	for (const match of stripped.matchAll(KEY_LIST_LOOP)) {
 		const variable = match[1];
-		if (variable === undefined || variable !== site.keyExpr) continue;
+		if (variable === undefined) continue;
 		const at = match.index ?? 0;
 		const headEnd = matchingCloseIndex(stripped, at, "(", ")");
 		if (headEnd < 0) continue;
 		if (!inside([loopBody(stripped, headEnd + 1)], site.start)) continue;
-		bindings.set(variable, valueKeys(scan, at, at + match[0].length));
+		set(variable, at, valueKeys(scan, at, at + match[0].length));
 	}
 	for (const loop of recordLoops(stripped)) {
-		if (!loop.names.includes(site.keyExpr)) continue;
 		const headEnd = matchingCloseIndex(stripped, loop.at, "(", ")");
 		if (headEnd < 0) continue;
 		if (!inside([loopBody(stripped, headEnd + 1)], site.start)) continue;
-		for (const name of loop.names)
-			bindings.set(name, recordKeys(scan, loop.at, loop.record));
+		const keys = recordKeys(scan, loop.at, loop.record);
+		for (const name of loop.names) set(name, loop.at, keys);
 	}
-	return bindings;
+	return new Map([...binds].map(([name, bind]) => [name, bind.keys]));
 }
 
 /** The keys a write names, with the loop it sits in resolved. */
 function siteKeys(scan: Scan, site: Site): string[] {
 	if (site.keyExpr === "") return [site.key];
-	const bindings = enclosingLoopBindings(scan, site);
+	const bindings = new Map<string, string[]>();
+	for (const [name, keys] of bindingsAt(scan, site))
+		if (name === site.keyExpr) bindings.set(name, keys);
 	if (bindings.size === 0) return [site.key];
 	const keys = resolveKeyExpr(site.keyExpr, new Map(), bindings);
 	return keys.length > 0 ? [...new Set(keys)] : [site.key];
@@ -1095,27 +1156,6 @@ function hasSavedValue(
 	// saved value.
 	if (root === "process") return false;
 	return isSavedName(scan, root, region);
-}
-
-/** Loop bindings visible inside one region piece. */
-function loopBindings(
-	scan: Scan,
-	at: number,
-	range: Range,
-): Map<string, string[]> {
-	const bindings = new Map<string, string[]>();
-	const text = scan.stripped.slice(range.start, range.end);
-	for (const match of text.matchAll(KEY_LIST_LOOP)) {
-		const variable = match[1];
-		if (variable === undefined) continue;
-		const pos = range.start + (match.index ?? 0);
-		bindings.set(variable, valueKeys(scan, at, pos + match[0].length));
-	}
-	for (const loop of recordLoops(text)) {
-		const keys = recordKeys(scan, at, loop.record);
-		for (const name of loop.names) bindings.set(name, keys);
-	}
-	return bindings;
 }
 
 /** The keys a write's key expression names, once the region's bindings apply. */
@@ -1245,6 +1285,13 @@ function inlinedPieces(
 	for (const match of text.matchAll(CALL_SITE)) {
 		const name = match[1];
 		if (name === undefined) continue;
+		// Only a BARE call reaches a file-local function. `logger.restore()`
+		// calls a method on another object, whose body this file cannot see.
+		const nameAt =
+			range.start + (match.index ?? 0) + match[0].lastIndexOf(name);
+		let before = nameAt - 1;
+		while (before >= 0 && /\s/.test(scan.stripped[before])) before--;
+		if (scan.stripped[before] === ".") continue;
 		const fn = functions.get(name);
 		if (fn === undefined) continue;
 		const paren = range.start + (match.index ?? 0) + match[0].length - 1;
@@ -1277,21 +1324,22 @@ function regionHits(
 	region: RestoreRegion,
 ): RestoreHit[] {
 	const hits: RestoreHit[] = [];
+	const pieceRanges = region.pieces.map((p) => p.range);
 	for (const piece of region.pieces) {
-		const bindings = loopBindings(scan, piece.range.start, piece.range);
 		for (const site of sites) {
 			if (site.start <= piece.range.start || site.start >= piece.range.end)
 				continue;
-			if (
-				!restoreShaped(
-					scan,
-					site,
-					piece.params,
-					region.pieces.map((p) => p.range),
-				)
-			)
-				continue;
-			for (const key of resolveKeyExpr(site.keyExpr, piece.params, bindings))
+			// A write inside a function DECLARED in the cleanup may never run:
+			// `afterEach(() => { const unused = () => { delete process.env.K; }; })`
+			// deletes nothing. Only a checked call reaches a body, and that body
+			// is its own piece.
+			if (insideNestedFunction(scan, piece.range, site.start)) continue;
+			if (!restoreShaped(scan, site, piece.params, pieceRanges)) continue;
+			for (const key of resolveKeyExpr(
+				site.keyExpr,
+				piece.params,
+				bindingsAt(scan, site),
+			))
 				hits.push({ key, pos: site.start, scope: region.scope });
 		}
 		for (const match of scan.stripped
@@ -1304,6 +1352,21 @@ function regionHits(
 			});
 	}
 	return hits;
+}
+
+/** Is `index` inside a function body declared strictly within `range`? */
+function insideNestedFunction(
+	scan: Scan,
+	range: Range,
+	index: number,
+): boolean {
+	return scan.bodies.some(
+		(body) =>
+			body.start > range.start &&
+			body.end < range.end &&
+			index > body.start &&
+			index < body.end,
+	);
 }
 
 /** Every teardown and `finally` region in the file, one hop expanded. */
@@ -1341,17 +1404,25 @@ function restoreRegions(
 	return regions;
 }
 
-/** Does `scope` run for `site`? */
+/** Does `scope` run for `site`, once the restoring `hit` has run? */
 function scopeCovers(
 	scope: RestoreScope,
 	site: Site,
+	hitPos: number,
 	scan: Scan,
 	describes: readonly Range[],
 ): boolean {
 	if (scope.kind === "teardown")
 		return chainCovers(scope.chain, describeChain(describes, site.start));
 	const owner = ownerOf(scan.stripped, scan.bodies, site.start);
-	return owner.start === scope.owner.start && owner.end === scope.owner.end;
+	// A finally runs when its `try` finishes, so it cannot put back a write
+	// made after it (`try {} finally { delete K } K = "leak"`); source order
+	// inside one function is the whole ordering a finally body has.
+	return (
+		hitPos > site.start &&
+		owner.start === scope.owner.start &&
+		owner.end === scope.owner.end
+	);
 }
 
 /**
@@ -1393,7 +1464,7 @@ export function findUnrestoredEnvWrites(
 					(hit.key === wanted ||
 						(site.kind !== "stub" && hit.key === WHOLE_ENV)) &&
 					hit.pos !== site.start &&
-					scopeCovers(hit.scope, site, scan, describes),
+					scopeCovers(hit.scope, site, hit.pos, scan, describes),
 			);
 			if (covered || restoring.has(site.start)) continue;
 			findings.push({

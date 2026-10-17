@@ -778,6 +778,101 @@ describe("#4589 test-env-restore detector — the shapes that must red and green
 		).toEqual([]);
 	});
 
+	it("reds on a teardown that reassigns a FIXED DEFAULT", () => {
+		// A name declared outside cleanup is only saved when it READ the
+		// environment. A constant default restores nothing.
+		expect(
+			detect(
+				[
+					'const DEFAULT_MODE = "0";',
+					"afterEach(() => { process.env.PI_LENS_TEST_MODE = DEFAULT_MODE; });",
+					'it("a", () => { process.env.PI_LENS_TEST_MODE = "1"; });',
+				].join("\n"),
+			).map((finding) => finding.key),
+		).toContain("PI_LENS_TEST_MODE");
+		// The whole-environment twin: a literal record is a default too.
+		expect(
+			detect(
+				[
+					'const DEFAULTS = { PI_LENS_TEST_MODE: "0" };',
+					"afterEach(() => { process.env = { ...DEFAULTS }; });",
+					'it("a", () => { process.env.PI_LENS_TEST_MODE = "1"; });',
+				].join("\n"),
+			).map((finding) => finding.key),
+		).toContain("PI_LENS_TEST_MODE");
+	});
+
+	it("reds when a member call shares a file-local helper's name", () => {
+		// `logger.restore()` calls a method on another object; the file-local
+		// `restore` is not the callee, so its delete restores nothing.
+		const source = [
+			"function restore(): void { delete process.env.PROBE_T2_ONE; }",
+			"const logger = { restore() {} };",
+			'it("a", () => { process.env.PROBE_T2_ONE = "1"; });',
+			"afterEach(() => { logger.restore(); });",
+		].join("\n");
+		expect(detect(source).map((finding) => finding.key)).toContain(
+			"PROBE_T2_ONE",
+		);
+	});
+
+	it("reds when a helper name is declared in two scopes", () => {
+		// Two `restore` bodies exist; only one can run at this call, so the
+		// detector refuses to inline either and keeps the write as a finding.
+		const source = [
+			'describe("A", () => {',
+			"\tfunction restore(): void { delete process.env.PROBE_T2_TWO; }",
+			"\tafterEach(() => { restore(); });",
+			'\tit("a", () => { process.env.PROBE_T2_TWO = "1"; });',
+			"});",
+			'describe("B", () => {',
+			"\tfunction restore(): void {}",
+			"});",
+		].join("\n");
+		expect(detect(source).map((finding) => finding.key)).toContain(
+			"PROBE_T2_TWO",
+		);
+	});
+
+	it("reds on a nested function declared in cleanup but never called", () => {
+		// Declaring `unused` never performs its delete.
+		const source = [
+			'it("a", () => { process.env.PROBE_T3 = "1"; });',
+			"afterEach(() => {",
+			"\tconst unused = () => { delete process.env.PROBE_T3; };",
+			"\tvoid unused;",
+			"});",
+		].join("\n");
+		expect(detect(source).map((finding) => finding.key)).toContain("PROBE_T3");
+	});
+
+	it("reds on a write that runs after its finally", () => {
+		// The finally has already run when the write happens.
+		const source = [
+			'it("case", () => {',
+			"\ttry {} finally { delete process.env.PROBE_T4; }",
+			'\tprocess.env.PROBE_T4 = "leak";',
+			"});",
+		].join("\n");
+		expect(detect(source).map((finding) => finding.key)).toContain("PROBE_T4");
+	});
+
+	it("binds a cleanup loop to the loop that encloses the delete", () => {
+		// The delete sits outside the loop, so it deletes whatever `key` holds
+		// (an outer binding), not the loop's literal.
+		const source = [
+			'const key = "PROBE_T5_OUTER";',
+			"afterEach(() => {",
+			'\tfor (const key of ["PROBE_T5_LOOP"]) { void key; }',
+			"\tdelete process.env[key];",
+			"});",
+			'it("a", () => { process.env.PROBE_T5_LOOP = "1"; });',
+		].join("\n");
+		expect(detect(source).map((finding) => finding.key)).toContain(
+			"PROBE_T5_LOOP",
+		);
+	});
+
 	it("reds when a baseline row vanishes from the tree", () => {
 		const live = detect(
 			[
