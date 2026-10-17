@@ -1480,6 +1480,19 @@ New user-facing fragments begin with a bold lead of at most 100 characters
 </important>
 ## Test requirements
 
+- `setupTestEnvironment` plants the shared `.git` project-root marker on every
+  fixture, so a fixture cannot adopt a project marker above the tmp root.
+  `{ rootMarker: false }` is the named opt-out for a cell that asserts
+  marker-less resolution, and says why. No cell plants a second marker at a
+  fixture root: the shared one already supplies it, and a non-recursive
+  `mkdirSync` there throws `EEXIST` in `beforeAll`. The hygiene owner also judges
+  new non-`pi-lens-` entries at the tmp root (`path.join(fixture, "..")`) that a
+  test process created, and prints the observed count beside the judged one; a
+  child's own tmp cache is counted, not asserted. The bound is the hygiene
+  owner's own `afterAll`: a sibling a file leaves after that boundary is out of
+  scope for the census (the next run's baseline absorbs it), so fix the producer
+  rather than reading the line as clean.
+
 Every logic change has relevant tests. New tests use fake clocks and
 `tests/clients/interleaving-kit.ts` before real time, raw sleeps, or real child
 processes. Real elapsed-time assertions belong in the serialized

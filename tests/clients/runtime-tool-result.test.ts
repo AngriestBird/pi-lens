@@ -114,10 +114,19 @@ beforeEach(() => {
 it("notices once when an edit is outside the session root (#4218)", async () => {
 	resetDegradationLedger();
 	const env = setupTestEnvironment("pi-lens-4218-outside-root-");
+	// #4560: the sibling must stay a DIRECT child of the tmp root — a
+	// `pi-lens-`-prefixed fixture under it would be classified as pi-owned
+	// scratch (`isPiOwnedTempPath`) and never notify. It is removed here, so
+	// the widened tmp-root census never sees a leftover.
+	const captureRoot = path.join(
+		env.tmpDir,
+		"..",
+		`capture-4218-${process.pid}`,
+	);
 	try {
 		const runtime = new RuntimeCoordinator();
 		runtime.projectRoot = env.tmpDir;
-		const outsidePath = path.join(env.tmpDir, "..", "capture", "outside.ts");
+		const outsidePath = path.join(captureRoot, "outside.ts");
 		fs.mkdirSync(path.dirname(outsidePath), { recursive: true });
 		fs.writeFileSync(outsidePath, "export const value = 1;\n");
 
@@ -153,6 +162,7 @@ it("notices once when an edit is outside the session root (#4218)", async () => 
 		expect(consumeAgentNudge(undefined, runtime.sessionScope)).toBeUndefined();
 	} finally {
 		env.cleanup();
+		fs.rmSync(captureRoot, { recursive: true, force: true });
 	}
 });
 
