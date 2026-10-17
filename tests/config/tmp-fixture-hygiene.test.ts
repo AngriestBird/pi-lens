@@ -495,53 +495,56 @@ function writeCensusSummary(
 // change that fixes the producer.
 const WINDOWS_QUARANTINE = process.platform === "win32";
 
-describe.skipIf(WINDOWS_QUARANTINE)("tmp-fixture-hygiene", () => {
-	afterAll(async () => {
-		const scan = await tmpHygieneWaitForOwnerDrain();
-		const liveOwners = scan.live;
-		const { testFile, leftovers } = tmpHygieneLeakReport();
-		const creators = censusTmpRootCreators();
-		// #3314: entries whose every candidate owner is a file no worker of THIS
-		// run id loaded belong to another vitest invocation sharing this TMPDIR.
-		// They are dropped before attribution AND spared by the sweep below.
-		// #4354: an entry a file of this run is on record as creating never is.
-		const otherInvocation = new Set(
-			tmpHygieneForeignRunEntries(
-				leftovers,
-				ownersForTmpEntry,
-				tmpHygieneRunFiles(),
-				creators,
-			),
-		);
-		const attributable = tmpHygieneExcludeLiveOwnerEntries(
-			leftovers.filter((entry) => !otherInvocation.has(entry)),
-			ownerForTmpEntry,
-			liveOwners,
-		);
-		const described = attributable.map((entry) =>
-			formatTmpHygieneLeakEntry(
-				entry,
-				ownerForTmpEntry(entry),
-				creators.get(entry),
-			),
-		);
-		// #3715: the repo root is a second namespace the tmp census does not see.
-		const rootCensus = unadmittedRepoRootEntries(repoRootBaseline());
-		if (rootCensus.unknown)
-			process.stderr.write(
-				`[tmp-hygiene] repo-root census could not run: ${rootCensus.unknown}\n`,
-			);
-		// #4560: a write at the tmp root (`path.join(<fixture>, "..")`) is now in
-		// the census, not only `pi-lens-` names. A host process's tmp file is not
-		// asserted; it is counted on the census line (`observed`) beside the judged
-		// count, so an observed-but-unjudged entry is never reported as a clean
-		// zero.
-		const tmpRootWrites = tmpHygieneTmpRootWrites();
-		const tmpRootWriteLeaks = judgedTmpRootWrites(
-			tmpRootWrites ?? [],
+// #4591 review P2: the sweep is not part of the quarantined verdict. A skipped
+// suite runs no hooks, and `cleanupTmpHygiene` is this run's only caller, so the
+// teardown stays at file scope and reaps on every lane; only the three census
+// assertions it carries are what #4591 declines on win32. Everything above the
+// guard still runs, because the sweep needs the foreign-run set to spare a
+// sibling invocation's roots (#3314).
+afterAll(async () => {
+	const scan = await tmpHygieneWaitForOwnerDrain();
+	const liveOwners = scan.live;
+	const { testFile, leftovers } = tmpHygieneLeakReport();
+	const creators = censusTmpRootCreators();
+	// #3314: entries whose every candidate owner is a file no worker of THIS
+	// run id loaded belong to another vitest invocation sharing this TMPDIR.
+	// They are dropped before attribution AND spared by the sweep below.
+	// #4354: an entry a file of this run is on record as creating never is.
+	const otherInvocation = new Set(
+		tmpHygieneForeignRunEntries(
+			leftovers,
+			ownersForTmpEntry,
+			tmpHygieneRunFiles(),
 			creators,
+		),
+	);
+	const attributable = tmpHygieneExcludeLiveOwnerEntries(
+		leftovers.filter((entry) => !otherInvocation.has(entry)),
+		ownerForTmpEntry,
+		liveOwners,
+	);
+	const described = attributable.map((entry) =>
+		formatTmpHygieneLeakEntry(
+			entry,
+			ownerForTmpEntry(entry),
+			creators.get(entry),
+		),
+	);
+	// #3715: the repo root is a second namespace the tmp census does not see.
+	const rootCensus = unadmittedRepoRootEntries(repoRootBaseline());
+	if (rootCensus.unknown)
+		process.stderr.write(
+			`[tmp-hygiene] repo-root census could not run: ${rootCensus.unknown}\n`,
 		);
-		try {
+	// #4560: a write at the tmp root (`path.join(<fixture>, "..")`) is now in
+	// the census, not only `pi-lens-` names. A host process's tmp file is not
+	// asserted; it is counted on the census line (`observed`) beside the judged
+	// count, so an observed-but-unjudged entry is never reported as a clean
+	// zero.
+	const tmpRootWrites = tmpHygieneTmpRootWrites();
+	const tmpRootWriteLeaks = judgedTmpRootWrites(tmpRootWrites ?? [], creators);
+	try {
+		if (!WINDOWS_QUARANTINE) {
 			expect(
 				attributable,
 				`[tmp-hygiene] tests/${testFile} leaked ${attributable.length} top-level entries: ${described.join(",")}; live owners: ${[...liveOwners].join(",") || "none"}`,
@@ -568,21 +571,23 @@ describe.skipIf(WINDOWS_QUARANTINE)("tmp-fixture-hygiene", () => {
 						"; ",
 					)}. Remove them and fix the producer: a fixture belongs under os.tmpdir() or in a directory the file removes.`,
 			).toEqual([]);
-		} finally {
-			const reaped = cleanupTmpHygiene(otherInvocation);
-			// Bounded observability (#3186, extended by #3314): ONE census line per
-			// hygiene run, not one record per marker or per entry, so a suppressed,
-			// ignored, attributed, or reaped entry is explicable from this run.
-			writeCensusSummary(
-				scan,
-				otherInvocation.size,
-				reaped,
-				tmpRootWrites,
-				tmpRootWriteLeaks.length,
-			);
 		}
-	});
+	} finally {
+		const reaped = cleanupTmpHygiene(otherInvocation);
+		// Bounded observability (#3186, extended by #3314): ONE census line per
+		// hygiene run, not one record per marker or per entry, so a suppressed,
+		// ignored, attributed, or reaped entry is explicable from this run.
+		writeCensusSummary(
+			scan,
+			otherInvocation.size,
+			reaped,
+			tmpRootWrites,
+			tmpRootWriteLeaks.length,
+		);
+	}
+});
 
+describe.skipIf(WINDOWS_QUARANTINE)("tmp-fixture-hygiene", () => {
 	it("reports an unknown baseline through the census caller (#4560)", async () => {
 		// N2/S: formatting unknown directly misses the caller converting it to 0/N.
 		const output = vi

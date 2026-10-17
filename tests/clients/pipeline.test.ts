@@ -87,16 +87,13 @@ vi.mock("../../clients/lsp/capabilities.js", () => ({
 }));
 
 import { getLSPService } from "../../clients/lsp/capabilities.js";
+import { scaledTestTimeout } from "../support/test-timeout-scale.js";
 
 // #4019: the Windows lane declares PI_LENS_TEST_TIMEOUT_SCALE=3 because a
 // native path-canonicalization syscall per pipeline run makes a population
-// test cost several times its Linux time. Same parse, same guard as
-// tests/clients/bounded-pid-file-lock.test.ts, tests/clients/instance-registry-lock.test.ts
-// and tests/mcp/harness.ts; 1 everywhere else, so no POSIX budget moves.
-const testTimeoutScale = (() => {
-	const parsed = Number(process.env.PI_LENS_TEST_TIMEOUT_SCALE ?? "1");
-	return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
-})();
+// test cost several times its Linux time; the factor is the lane's, and
+// `scaledTestTimeout` is its one home (#4592 review F5 fold). 1 everywhere
+// else, so no POSIX budget moves.
 
 describe("Pipeline", () => {
 	let tmpDir: string;
@@ -913,7 +910,7 @@ describe("Pipeline", () => {
 				// is the margin (180 s on Windows, unchanged on POSIX) rather than a
 				// second magic constant.
 			},
-			60_000 * testTimeoutScale,
+			scaledTestTimeout(60_000),
 		);
 
 		it("surfaces formatter failures instead of plain clean output", async () => {

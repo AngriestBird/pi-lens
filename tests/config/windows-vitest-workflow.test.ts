@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import yaml from "../../clients/deps/js-yaml.js";
 import { siblingPin } from "../support/sibling-pin.js";
+import { stripSource } from "../support/sweep-kit.js";
 
 const ROOT = resolve(import.meta.dirname, "../..");
 const WORKFLOW_PATH = resolve(ROOT, ".github/workflows/ci.yml");
@@ -159,19 +160,35 @@ describe("Windows Vitest workflow contract (#2536)", () => {
 	// #4591: the one governance file declined on this lane. The census reds ~1 run
 	// in 10 there on a root its own file's teardown had already removed, and the
 	// lane gates now, so that verdict is postponed until the producer is named.
+	// Read with comments blanked (#4592 review, Greptile P2 "Quarantine test
+	// misses actual skip"): a commented-out copy of the declaration cannot satisfy
+	// this, and the arm covers the suite's own registration rather than only the
+	// constant, so moving the gate off `win32` or dropping `skipIf` reds here.
 	// A source read, not a tests/-tree sweep: this pins the ONE condition (a
 	// platform test, never a constant, so it cannot be widened to every lane
 	// silently) and the issue that retires it. A second quarantined file is a
 	// reviewed change, not a population this case can enumerate.
 	it("keeps the tmp-fixture census quarantine on win32, named to its issue (#4591)", () => {
-		const quarantined = readFileSync(
+		const raw = readFileSync(
 			resolve(ROOT, "tests/config/tmp-fixture-hygiene.test.ts"),
 			"utf8",
 		);
-		expect(quarantined).toContain(
+		const code = stripSource(raw, { strings: "keep" });
+		expect(code).toContain(
 			'const WINDOWS_QUARANTINE = process.platform === "win32";',
 		);
-		expect(quarantined).toMatch(/#4591:\s*quarantined on the Windows lane/);
+		expect(code).toContain(
+			'describe.skipIf(WINDOWS_QUARANTINE)("tmp-fixture-hygiene"',
+		);
+		// #4592 review, Greptile P2 "Windows cleanup stops running": a skipped
+		// suite runs no hooks, and that file holds this run's only
+		// `cleanupTmpHygiene` call, so the teardown is declared at file scope.
+		expect(code.indexOf("afterAll(")).toBeGreaterThan(-1);
+		expect(code.indexOf("afterAll(")).toBeLessThan(
+			code.indexOf("describe.skipIf(WINDOWS_QUARANTINE)"),
+		);
+		expect(code).toContain("cleanupTmpHygiene(otherInvocation)");
+		expect(raw).toMatch(/#4591:\s*quarantined on the Windows lane/);
 	});
 
 	it("pins the sibling action revisions and the isolated home", () => {

@@ -22,7 +22,7 @@ jobs:
   # #3801: classify the diff once. `code` is false ONLY for a pull_request whose
   # every changed path is on the strict docs allowlist (root *.md, docs/**,
   # .changelog/**; scripts/ci-changed-files.mjs), and then the HEAVY ADVISORY
-  # jobs (CodeQL, the Windows run) do not start. The Unit shards, the Install
+  # job (CodeQL) does not start. The Unit shards, the Install
   # tests and every other test job still run for a docs-only diff: a docs edit
   # can red tests/clients and tests/scripts (docs/public-api-stability.md,
   # docs/*_rules_catalog.md are read by them), so the suite is never skipped.
@@ -729,7 +729,8 @@ jobs:
       - unit-tests
       - install-test
     # #3801: only a code diff starts the heavy jobs: a docs-only pull request
-    # runs every test job but not CodeQL or the Windows run. Every
+    # runs every test job but not CodeQL, the one heavy job left behind this
+    # gate (#4518 promoted the Windows unit leg out of it). Every
     # needed job must have succeeded (the implicit `success()`), so a red or
     # skipped one skips the gate.
     if: needs.changes.outputs.code == 'true'
