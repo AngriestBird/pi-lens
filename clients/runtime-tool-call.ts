@@ -635,6 +635,7 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 				),
 				trigger: "tool_call",
 				label: toolName,
+				runtime,
 			}),
 			{
 				ms: HOOK_WALL_BUDGET_MS.tool_result_read_only,
