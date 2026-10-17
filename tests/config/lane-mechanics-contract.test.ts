@@ -161,6 +161,19 @@ describe("bot review threads and code-scanning alerts (#4566/#4575)", () => {
 		expect(text).toContain("#4575");
 	});
 
+	// Recurrence: #4587 round 1. Both commands stopped at page one, so a
+	// finding past it was never read, and the reviewer reuses the same text.
+	it("follows both commands to their last page and says so", () => {
+		const text = rule("pi-lens-fixer.md");
+		expect(text).toContain("gh api graphql --paginate");
+		expect(text).toContain(
+			'gh api --paginate "repos/{owner}/{repo}/code-scanning/alerts',
+		);
+		// The truncation itself is disclosed: one page never reads as the list.
+		expect(text).toMatch(/clear only after that page prints/i);
+		expect(text).toMatch(/one page is never read as the whole list/i);
+	});
+
 	it("refuses a merge-ready verdict over an undisposed thread or alert", () => {
 		const text = rule("pi-lens-reviewer.md");
 		expect(text).toMatch(
@@ -174,11 +187,13 @@ describe("bot review threads and code-scanning alerts (#4566/#4575)", () => {
 		expect(text).toContain("code-scanning");
 		// Each item is rated, so an unprobed one cannot read as cleared.
 		expect(text).toMatch(/refuted/);
-		// The verdict word is tied to the threads and alerts, not merely present.
-		const verdictSentences = text.match(/[^.]*`merge-ready`[^.]*\./g) ?? [];
-		expect(
-			verdictSentences.some((sentence) => /thread|alert/.test(sentence)),
-		).toBe(true);
+		// The prohibition itself is the gate: dropping the negation, not only the
+		// verdict word, must red this pin (mutation: delete "No" from
+		// docs/pi-lens-reviewer.md). Round 1 of #4587: the old sentence-scoped
+		// match stayed green with the gate reversed.
+		expect(text).toMatch(
+			/no `merge-ready` verdict while any thread or alert stays undisposed/i,
+		);
 		expect(text).toContain("#4566");
 		expect(text).toContain("#4575");
 	});

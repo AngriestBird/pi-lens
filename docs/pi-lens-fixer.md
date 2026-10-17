@@ -157,10 +157,12 @@ exports change.
 
 - When bot threads or code-scanning alerts exist, read and dispose of each
   one. A missing bot review is never evidence of anything: it never blocks the
-  round and never becomes something to wait for. The threads:
-  `gh api graphql -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{id isResolved isOutdated path line comments(first:1){nodes{author{login} body}}}}}}}' -F owner="$(gh repo view --json owner --jq .owner.login)" -F name="$(gh repo view --json name --jq .name)" -F number=<N> --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false) | "\(.id) \(.path):\(.line) \(.comments.nodes[0].author.login): \(.comments.nodes[0].body)"'`,
+  round and never becomes something to wait for. The threads, every page:
+  `gh api graphql --paginate -f query='query($owner:String!,$name:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$endCursor){pageInfo{hasNextPage endCursor} nodes{id isResolved isOutdated path line comments(first:1){nodes{author{login} body}}}}}}}' -F owner="$(gh repo view --json owner --jq .owner.login)" -F name="$(gh repo view --json name --jq .name)" -F number=<N> --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false) | "\(.id) \(.path):\(.line) \(.comments.nodes[0].author.login): \(.comments.nodes[0].body)"'`,
   and the alerts:
-  `gh api "repos/{owner}/{repo}/code-scanning/alerts?ref=refs/heads/<branch>&state=open" --jq '.[] | "\(.number) \(.rule.id) \(.most_recent_instance.location.path):\(.most_recent_instance.location.start_line)"'`.
+  `gh api --paginate "repos/{owner}/{repo}/code-scanning/alerts?ref=refs/heads/<branch>&state=open" --jq '.[] | "\(.number) \(.rule.id) \(.most_recent_instance.location.path):\(.most_recent_instance.location.start_line)"'`.
+  Both commands follow their cursor to the last page, so the list is clear
+  only after that page prints: one page is never read as the whole list.
   An alert on another branch is not this round's; read the head you pushed.
   Before the hand-back, reply to and resolve every thread this round fixes, and
   name every other open thread and alert in the PR body with its disposition.
