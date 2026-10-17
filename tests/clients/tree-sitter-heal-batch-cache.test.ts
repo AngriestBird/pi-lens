@@ -2,9 +2,12 @@
  * #3834: a clean compile that heals a rule must not leave a cached batch that
  * was built while that rule was charged and skipped.
  */
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadWebTreeSitter } from "../../clients/deps/web-tree-sitter.js";
-import { getDegradationSummary } from "../../clients/degradation-ledger.js";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
 import {
 	TreeSitterClient,
 	wasmQueryInput,
@@ -85,6 +88,13 @@ const defs = (client: TreeSitterClient) =>
 afterEach(() => {
 	vi.restoreAllMocks();
 	delete process.env.PI_LENS_TREE_SITTER_QUERY_BATCH_CACHE_CAP;
+});
+
+// Recurrence (#4561, shuffle seed 202): the cases share the module-scope
+// degradation ledger, and one case's deferred-disposal rows were then counted
+// by the next case's absolute `toBe(1)`. Each case starts from a fresh ledger.
+beforeEach(() => {
+	resetDegradationLedger();
 });
 
 describe("tree-sitter batch cache healing (#3834)", () => {
@@ -258,7 +268,7 @@ describe("tree-sitter batch cache healing (#3834)", () => {
 		).toBe(1);
 		expect(
 			getDegradationSummary().find((group) => group.kind === "wasm-trap")
-				?.count,
+				?.count ?? 0,
 		).toBe(trapsBefore);
 
 		release();

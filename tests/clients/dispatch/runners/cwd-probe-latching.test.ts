@@ -257,7 +257,7 @@ describe("createCwdCachedProbe latch policy (#1494)", () => {
 				(entry) =>
 					entry.subject ===
 					`timeout-widget:${path.resolve("/tmp/timeout-project")}`,
-			),
+			) ?? false,
 		).toBe(false);
 	});
 

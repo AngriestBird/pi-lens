@@ -91,6 +91,12 @@ describe("#2992 read bridge lifecycle", () => {
 		const readBridge = (globalThis as Record<symbol, unknown>)[
 			Symbol.for("pi-lens:read-bridge")
 		] as { recordRead(entry: unknown): void };
+		const { getDegradationSummary, resetDegradationLedger } =
+			await import("../clients/degradation-ledger.js");
+		// Recurrence (#4561, shuffle seed 202): a sibling case records the same
+		// `extension-ctx-stale` kind into the module-scope ledger, so this case's
+		// absolute count observed its rows too. Start from a fresh session ledger.
+		resetDegradationLedger();
 		for (let i = 0; i < 100; i++) {
 			readBridge.recordRead({
 				filePath,
@@ -99,8 +105,6 @@ describe("#2992 read bridge lifecycle", () => {
 			});
 		}
 
-		const { getDegradationSummary, resetDegradationLedger } =
-			await import("../clients/degradation-ledger.js");
 		const staleRows = getDegradationSummary().find(
 			(group) => group.kind === "extension-ctx-stale",
 		);

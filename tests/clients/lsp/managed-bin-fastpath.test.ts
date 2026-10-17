@@ -194,6 +194,13 @@ describe("resolveAndLaunch — managed-bin availability telemetry (#2140)", () =
 		findManagedToolBinary.mockReset();
 		findManagedToolBinary.mockResolvedValue(undefined);
 		ensureTool.mockReset();
+		// Recurrence (#4561, shuffle seed 202): the case that overwrites the
+		// installer's last attempt leaves `getInstallAttempt` answering with its
+		// "failed" record, and the sibling describe's cases then read that
+		// verdict as this launch's evidence. Reset to the succeeded default the
+		// first describe installs.
+		getInstallAttempt.mockReset();
+		getInstallAttempt.mockReturnValue({ outcome: "succeeded", at: Date.now() });
 		clearLatencyLog();
 		await flushLatencyLog();
 	});
