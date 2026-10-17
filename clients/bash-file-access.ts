@@ -870,13 +870,13 @@ function collectGrepCommandFiles(
 					after: Math.min(context.after, segmentContext.after),
 				}
 			: segmentContext;
-		for (const word of segments[i].literalTilde ?? []) {
+		for (const word of segments[i]?.literalTilde ?? []) {
 			literalTilde.add(word);
 		}
 		for (const file of extractGrepSearchFiles(
 			args,
 			cwd,
-			segments[i].literalTilde,
+			segments[i]?.literalTilde,
 		)) {
 			files.add(file);
 		}

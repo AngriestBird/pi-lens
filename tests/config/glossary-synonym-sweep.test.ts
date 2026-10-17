@@ -1227,6 +1227,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// dropping the `path.isAbsolute`/`path.resolve` pair.
 		"tools/module-report.ts": 27,
 		"tools/render-compact.ts": 3,
+		// 0 -> 2 (#4577 R2-2): the defaulted (no `paths`) target is now built by
+		// `path.resolve(base)` alone instead of going through
+		// `resolveHostToolPath`, because that generated path is pi-lens's own and
+		// must keep its bytes.
+		"tools/shared.ts": 2,
 		"tools/symbol-search.ts": 5,
 		"mcp/analyze-cli.ts": 4,
 		"mcp/cli.ts": 2,
