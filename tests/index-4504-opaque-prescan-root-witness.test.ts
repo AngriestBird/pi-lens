@@ -54,6 +54,7 @@ import {
 	_resetSessionLifecycleForTests,
 	getSecondarySessionCount,
 } from "../clients/session-lifecycle.js";
+import { resetSessionScopedState } from "../clients/runtime-session.js";
 import { setupTestEnvironment } from "./clients/test-utils.js";
 import { execFileSync } from "./support/git-fixture-env.js";
 import { makeSessionStartEvent } from "./support/host-event-factory.js";
@@ -97,6 +98,12 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	// The shared per-session reset, not a hand-picked subset: it clears the
+	// opaque baseline and HEAD records these cases write (through
+	// `resetOpaqueMutationState`) beside every other owner-held store, and the
+	// lifecycle admission fields stay separate because they are the guard, not
+	// session state.
+	resetSessionScopedState();
 	_resetSessionLifecycleForTests();
 });
 
