@@ -1376,8 +1376,8 @@ node scripts/guard-bash-probe.mjs <matrix.jsonl> [--head <ref|file>] [--base <re
                                         prints only the rows that changed head vs base
 ```
 
-CI cost gates (#3801). The heavy advisory jobs (`CodeQL (<language>) (advisory)`,
-`Unit tests Windows (advisory)`) start only after every required check passed on the
+CI cost gates (#3801). The heavy advisory jobs (`CodeQL (<language>) (advisory)`)
+start only after every required check passed on the
 head (`heavy-gate` in ci.yml; it is red when a lint.yml required check was red
 or unfinished at its deadline). ci-verdict lists them with their real state
 (PENDING, or NOT RUN with the gate's reason) before and after the verdict turns
@@ -1389,6 +1389,19 @@ other test job always run, because a docs edit can red tests outside tests/confi
 model-checks only when `formal/` (or its checker or ci.yml) changed. A REQUIRED
 job never skips at job level: ci-verdict and the merge train demand a literal
 `success`, so `TLA+ models` starts and skips its steps.
+
+The Windows unit leg (`Unit tests Windows`, job key `unit-tests-windows`) GATES
+by maintainer decision on 2026-10-17: it runs the real `win32` gates, and
+advisory reds were waved through, so the PR body and HISTORY.md carry the
+incidents. It therefore starts on every event like the Unit shards and is never behind
+`heavy-gate`, whose docs-only skip would leave a required row absent. Its name
+carries no `(advisory)` suffix, so ci-verdict gates every row it reports; until
+the maintainer adds `Unit tests Windows` to master's required status checks,
+ci-verdict is the only enforcement. Its population is every
+`tests/config/*` file, every `process.platform` Windows gate, and the
+shrink-only `WINDOWS_LANE_ADMISSIONS` rows
+(`scripts/lib/win32-gate-population.mjs`); a failed or under-executed subset
+reds the job, and no step of it is `continue-on-error`.
 The same script's `smoke` output (`PR_SMOKE_PATHS`: RPC, install, LSP launch,
 trust) makes `install-smoke.yml` run all four pi-load cells and an advisory LSP
 handshake job on a pull request; any other PR that reaches that workflow keeps

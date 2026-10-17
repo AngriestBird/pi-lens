@@ -205,7 +205,7 @@ describe("ci.yml Windows subset floor, executed (#4518)", () => {
 	const step = stepNamed(
 		workflow("ci.yml"),
 		"unit-tests-windows",
-		"Fail Windows advisory",
+		"under-executed",
 	);
 	const floor = Number(/--floor (\d+)/.exec(step.run ?? "")?.[1]);
 
@@ -259,7 +259,7 @@ describe("ci.yml Windows subset floor, executed (#4518)", () => {
 			"      Tests  3 failed | 2516 passed (2519)\n",
 		);
 		expect(result.status).toBe(1);
-		expect(result.stdout).toContain("::error title=Windows advisory::3");
+		expect(result.stdout).toContain("::error title=Windows Vitest subset::3");
 	});
 });
 

@@ -484,7 +484,18 @@ function writeCensusSummary(
 	);
 }
 
-describe("tmp-fixture-hygiene", () => {
+// #4591: quarantined on the Windows lane. The census reds there about 1 run in
+// 10 on a root that did not exist at its file's teardown (`registered=1
+// failed=0` in the sweep record, the leaked entry observed nine seconds later),
+// and #4518 promoted that lane to gating, so this verdict is declined on win32
+// until the producer is named. The lane that runs it, and the guard that keeps
+// it, is every non-Windows run: the required `Unit tests` shards and macOS. The
+// file's other cases are platform-neutral but share this suite, so they skip
+// with it on Windows; remove both this gate and the #4591 reference in the
+// change that fixes the producer.
+const WINDOWS_QUARANTINE = process.platform === "win32";
+
+describe.skipIf(WINDOWS_QUARANTINE)("tmp-fixture-hygiene", () => {
 	afterAll(async () => {
 		const scan = await tmpHygieneWaitForOwnerDrain();
 		const liveOwners = scan.live;

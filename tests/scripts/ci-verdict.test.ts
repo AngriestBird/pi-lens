@@ -1414,7 +1414,6 @@ describe("isAdvisoryCheck — every job name from a PR-triggered workflow is cla
 	const EXTERNAL_ADVISORY_NAMES = ["CodeQL", "SonarCloud Code Analysis"];
 
 	const EXPECTED_ADVISORY = new Set([
-		"Unit tests Windows (advisory)",
 		// #3801: the job that releases the heavy advisory jobs after the required
 		// checks pass; it reports ready=false rather than failing, and must never
 		// gate a merge whatever it concludes.
@@ -1511,6 +1510,9 @@ describe("isAdvisoryCheck — every job name from a PR-triggered workflow is cla
 			"Install test (windows-latest)",
 			"Install test (macos-latest)",
 			"Production install build (--omit=dev, from source)",
+			// #4518: the promoted Windows unit leg. It carries no `(advisory)`
+			// suffix and is not on the allowlist, so ci-verdict gates its rows.
+			"Unit tests Windows",
 			"oxfmt format check",
 			"knip",
 		]) {
