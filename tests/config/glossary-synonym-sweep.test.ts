@@ -1206,7 +1206,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"tools/lsp-diagnostics.ts": 10,
 		// 14 -> 15 (#4403 round 5): `noServerAnsweredText` names the file by
 		// its `path.basename`, beside the install hint's own.
-		"tools/lsp-navigation.ts": 15,
+		// 15 -> 13 (#4578): the `rename_file` destination folds onto the shared
+		// `resolveHostToolPath` seam, dropping its `path.isAbsolute`/`path.resolve`
+		// pair. Remaining uses are path OPERATIONS (`path.basename`, `path.resolve`
+		// of the read target), the sense the glossary does not retire.
+		"tools/lsp-navigation.ts": 13,
 		"tools/module-report.ts": 29,
 		"tools/render-compact.ts": 3,
 		"tools/symbol-search.ts": 5,
