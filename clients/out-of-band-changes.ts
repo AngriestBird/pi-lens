@@ -30,7 +30,10 @@
 import { promises as fsp } from "node:fs";
 import { join } from "node:path";
 import { BoundedFifoMap } from "./bounded-cache.js";
-import { recordDegradationOnce } from "./degradation-ledger.js";
+import {
+	incrementDegradationCount,
+	recordDegradationOnce,
+} from "./degradation-ledger.js";
 import {
 	type DiskChangeInput,
 	type DiskChangeRuntime,
@@ -42,7 +45,7 @@ import {
 } from "./disk-change-subscribers.js";
 import { isExcludedDirName } from "./file-utils.js";
 import { logLatency } from "./latency-logger.js";
-import { normalizeMapKey } from "./path-utils.js";
+import { isUnderDir, normalizeMapKey } from "./path-utils.js";
 import { createSingleFlight } from "./single-flight.js";
 
 /**
@@ -143,14 +146,33 @@ async function readInstallStamp(root: string): Promise<string> {
 }
 
 /**
+ * One walk's answer: the declaration files under `root`, and the directories
+ * the walk could not read.
+ */
+interface DeclarationWalk {
+	declarations: Map<string, string>;
+	/** Directories whose listing failed, bounded by `DECLARATION_WALK_MAX_DIRS`. */
+	unreadable: string[];
+}
+
+/**
  * The declaration files under `root`, outside the shared excluded directories
  * (gitignored ones included: codegen writes there), in a deterministic order;
  * `undefined` when the walk hit a cap.
+ *
+ * #4596: a directory that cannot be listed is REPORTED, not skipped. Skipping
+ * it left the walk's map looking complete, so the diff below read every
+ * declaration file under it as deleted (`lsp_out_of_band_change` said
+ * `deleted: 1` for a file that still existed), and a consumer acted on that
+ * row. The map the caller diffs keeps the previous fingerprint of a file under
+ * an unreadable directory instead, so an unreadable subtree reads as
+ * "unchanged, as far as this walk could tell" rather than as a deletion.
  */
 async function walkDeclarations(
 	root: string,
-): Promise<Map<string, string> | undefined> {
+): Promise<DeclarationWalk | undefined> {
 	const found: string[] = [];
+	const unreadable: string[] = [];
 	const queue = [root];
 	let next = 0;
 	let capped = false;
@@ -165,6 +187,7 @@ async function walkDeclarations(
 			try {
 				entries = await fsp.readdir(dir, { withFileTypes: true });
 			} catch {
+				unreadable.push(dir);
 				continue;
 			}
 			for (const entry of entries) {
@@ -186,16 +209,46 @@ async function walkDeclarations(
 	if (capped) return undefined;
 	found.sort();
 	const declarations = new Map<string, string>();
-	await Promise.all(
-		found.map(async (filePath) => {
+	// Parallel stats, then one pass into the map: the callback returns its pair
+	// so a failed stat is an explicit `undefined` rather than a swallowed
+	// statement.
+	const prints = await Promise.all(
+		found.map(async (filePath): Promise<[string, string] | undefined> => {
 			try {
-				declarations.set(filePath, fingerprint(await fsp.stat(filePath)));
+				return [filePath, fingerprint(await fsp.stat(filePath))];
 			} catch {
-				// Gone between the listing and the stat: absent.
+				// none: gone between the listing and the stat, which is absence,
+				// not a failure reading the subtree (the walk's own listing above
+				// is what reports an unreadable directory).
+				return undefined;
 			}
 		}),
 	);
-	return declarations;
+	for (const print of prints)
+		if (print !== undefined) declarations.set(print[0], print[1]);
+	return { declarations, unreadable };
+}
+
+/**
+ * Keep the previous fingerprint of every declaration file that sits under a
+ * directory `walk` could not read, so the diff sees it as unchanged rather
+ * than absent. Returns how many files were carried (#4596).
+ */
+function carryUnreadable(
+	declarations: Map<string, string> | undefined,
+	previous: ReadonlyMap<string, string> | undefined,
+	walk: DeclarationWalk | undefined,
+): number {
+	if (!declarations || !previous || !walk || walk.unreadable.length === 0)
+		return 0;
+	let carried = 0;
+	for (const [filePath, print] of previous) {
+		if (declarations.has(filePath)) continue;
+		if (!walk.unreadable.some((dir) => isUnderDir(filePath, dir))) continue;
+		declarations.set(filePath, print);
+		carried++;
+	}
+	return carried;
 }
 
 function diffDeclarations(
@@ -294,7 +347,13 @@ async function lookOnce(
 		readInstallStamp(root),
 		walkDue ? walkDeclarations(root) : Promise.resolve(undefined),
 	]);
-	const declarations = walkDue ? walked : prior?.declarations;
+	const observed = walkDue ? walked : undefined;
+	const declarations = observed?.declarations ?? prior?.declarations;
+	// #4596: a file under a directory this walk could not read keeps the
+	// fingerprint the previous walk gave it. The diff then cannot call it
+	// deleted, and a real change under that subtree is reported by the first
+	// walk that can read it again — deferred, never invented and never lost.
+	const heldBack = carryUnreadable(declarations, prior?.declarations, observed);
 	records.set(key, {
 		stamp,
 		declarations,
@@ -306,11 +365,22 @@ async function lookOnce(
 			subject: key,
 			reason: `the declaration-file walk passed ${DECLARATION_WALK_MAX_DIRS} directories or ${DECLARATION_WALK_MAX_FILES} files; declaration files created, edited or deleted outside pi-lens under this root reach no language server and no diagnostics-cache entry is refused for them`,
 		});
+	if (observed && observed.unreadable.length > 0)
+		incrementDegradationCount({
+			kind: "lsp-declaration-walk-unreadable",
+			subject: key,
+			reason: `${observed.unreadable.length} unreadable dir(s) under this root, first \`${observed.unreadable[0]}\`; ${heldBack} declaration file(s) kept their previous fingerprint, so a change there is not read as a deletion`,
+			metadata: {
+				unreadableDirs: observed.unreadable.length,
+				firstUnreadableDir: observed.unreadable[0] as string,
+				heldBackDeclarations: heldBack,
+			},
+		});
 	if (prior === undefined) return;
 	const installed = stamp !== prior.stamp;
 	const changes =
-		walkDue && walked && prior.declarations
-			? diffDeclarations(prior.declarations, walked)
+		walkDue && declarations && prior.declarations
+			? diffDeclarations(prior.declarations, declarations)
 			: [];
 	if (!installed && changes.length === 0) return;
 	const at = Date.now();
