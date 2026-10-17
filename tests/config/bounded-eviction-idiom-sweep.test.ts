@@ -28,7 +28,23 @@
  *    `keys`/`values`/`entries`/bare — the Set-shaped sites use `.values()` or
  *    the bare form; the bare form is additionally gated on a `.size`
  *    comparison in the surrounding loop, since a bare `for...of` is common for
+ *    reasons that have nothing to do with eviction. A fifth spelling — the
+ *    iterator RESULT bound to a name, with `.value` read on a LATER line
+ *    (`const oldest = map.keys().next(); …; map.delete(oldest.value);`) — was
+ *    invisible to all four, because spelling 1 matches `.next().value` on ONE
+ *    line: the two whole-word spellings are the same two steps (#4570, the
+ *    residual #4503's fixer filed). The pre-#4503 drift cap used it, so the
+ *    sweep stayed green on the exact defect it exists to catch. All five are
+ *    matched now, across `keys`/`values`/`entries`/bare/assigned — the
+ *    Set-shaped sites use `.values()` or the bare form; the bare and assigned
+ *    forms are additionally gated on a `.size` comparison in the surrounding
+ *    loop, since a bare `for...of` and a bare `.next()` are both common for
  *    reasons that have nothing to do with eviction.
+ *    The fifth spelling is matched on the SEMANTIC (any `.next()` result whose
+ *    own `.value` is deleted under a size cap), not on the accessor call,
+ *    because requiring `.keys()/values()/entries()` was the shape-69 mistake
+ *    again: an aliased container and an indirectly called accessor are the
+ *    same eviction and both passed an accessor-anchored draft (#4570).
  * 2. **Per-OCCURRENCE, not per-FILE.** Exemptions used to name a file, so a
  *    NEW hand-rolled eviction appended to an already-exempted file passed
  *    silently — the exemption laundered it. Every flagged item is now keyed
@@ -146,6 +162,56 @@ const BARE_FOR_OF_ITERATOR =
 const SIZE_LOOP_WINDOW = 6;
 const SIZE_COMPARISON = /\.size\s*>=?/;
 
+/**
+ * Spelling 4 (#4570, residual of #4503): the iterator RESULT bound to a name,
+ * with `.value` read on a LATER line —
+ * `const oldest = m.keys().next(); … m.delete(oldest.value);`.
+ *
+ * This is the spelling the pre-#4503 drift cap used, and it hid from all
+ * three spellings above (#4503's fixer probed that file against them and got
+ * zero hits): spelling 1 matches `.next().value` on ONE line, and splitting
+ * the same two steps across two statements put it out of reach. The issue and
+ * the drift cap both call this "spelling 4"; {@link ITERATOR_HEAD} keeps its
+ * own docs' "spelling 1" name so the two are not confused.
+ *
+ * It is matched on the SEMANTIC, not on `.keys()`/`.values()`/`.entries()`:
+ * the receiver of `.next()` is any expression ({@link ASSIGNED_NEXT_BINDING}),
+ * because requiring one of the three accessor names is itself a spelling
+ * enumeration — an aliased container (`const byCall = this.byCall;`) and an
+ * indirect accessor (`iteratorOf(m).next()`) are the same eviction and were
+ * both green under an accessor-anchored draft (shape 69). The gates that keep
+ * it from over-matching are the same two the bare spelling uses: a `.size`
+ * COMPARISON in the {@link SIZE_LOOP_WINDOW} lines above (the bounded loop),
+ * and, inside {@link FOR_OF_WINDOW} lines below, BOTH a `.delete(` and a read
+ * of the bound name's own `.value` — so a peek that never evicts
+ * (`clients/latency-logger.ts` `getCurrentPhase`) and a bounded loop that
+ * deletes an unrelated key are not members. `.value` is required as the bound
+ * name's OWN property, not as the delete's argument, so a value reached
+ * through a second binding (`const victim = oldest.value; m.delete(victim)`) —
+ * the third shape-69 plant — still flags.
+ */
+const ASSIGNED_NEXT_BINDING =
+	/\b(?:const|let|var)\s+([\w$]+)\s*(?::[^=;]+)?=\s*[^=;]+?\.next\(\)/;
+
+function flagsAssignedEviction(
+	lines: readonly string[],
+	index: number,
+	boundName: string,
+): boolean {
+	const window = lines.slice(index + 1, index + 1 + FOR_OF_WINDOW).join("\n");
+	if (!/\.delete\(/.test(window)) return false;
+	const precedingWindow = lines
+		.slice(Math.max(0, index - SIZE_LOOP_WINDOW), index)
+		.join("\n");
+	if (!SIZE_COMPARISON.test(precedingWindow)) return false;
+	// A JS identifier is `[\w$]+`, so `$` is the only regex-special character
+	// that can appear in `boundName`.
+	const valueRead = new RegExp(
+		`\\b${boundName.replace(/\$/g, "\\$")}\\.value\\b`,
+	);
+	return valueRead.test(window);
+}
+
 /** The one file allowed to spell the idiom: the canonical implementation. */
 const DEFINITION_FILE = "clients/bounded-cache.ts";
 
@@ -225,6 +291,12 @@ export function findEvictionLines(stripped: string): number[] {
 			) {
 				hits.add(i + 1);
 			}
+			continue;
+		}
+
+		const assigned = ASSIGNED_NEXT_BINDING.exec(line);
+		if (assigned && flagsAssignedEviction(lines, i, assigned[1] ?? "")) {
+			hits.add(i + 1);
 		}
 	}
 	return [...hits].sort((a, b) => a - b);
@@ -265,11 +337,13 @@ describe("#2442 no new hand-rolled evict-oldest idiom outside bounded-cache.ts",
 	const flagged = occurrences.map((o) => o.key);
 
 	it("actually finds the family (a dead scan must not read as clean)", () => {
-		// Vacuity guard on the DETECTOR: as of #2449's review round 4, five
-		// occurrences remain (four Set-shaped, one protected-prefix policy). If
-		// this drops to zero, EITHER every exemption's site was migrated (update
-		// the sweep) OR the regexes broke (fix the sweep) — never assume the
-		// former without checking.
+		// Vacuity guard on the DETECTOR: as of #4570 two occurrences remain (both
+		// skip-policy walks: the drift cap and the debug-handles protected
+		// prefix). Before #4570 five more were flagged by the newly matched
+		// assigned spelling and migrated to `BoundedFifoMap`. If this drops to
+		// zero, EITHER every exemption's site was migrated (update the sweep) OR
+		// the regexes broke (fix the sweep) — never assume the former without
+		// checking.
 		expect(flagged.length).toBeGreaterThanOrEqual(1);
 	});
 
@@ -437,6 +511,121 @@ describe("#2442 no new hand-rolled evict-oldest idiom outside bounded-cache.ts",
 					"    set.delete(item);",
 					"    break;",
 					"  }",
+					"}",
+				].join("\n"),
+			),
+		).toEqual([]);
+	});
+
+	// (#4570, residual of #4503) The fifth spelling: the iterator RESULT bound to
+	// a name, with `.value` read on a LATER line. This is the shape #4503's
+	// pre-fix drift cap used — `while (this.synced.size > DRIFT_TRACK_CAP) {
+	// const oldest = this.synced.keys().next(); if (oldest.done) break;
+	// this.synced.delete(oldest.value); }` — and a probe of that file against
+	// the three spellings above returned ZERO hits, so the sweep stayed green
+	// on the exact defect it exists to catch. `.next().value` on ONE line is
+	// spelling 1; splitting it across two statements is what hid it.
+
+	it("detects the assigned `.next()` spelling the pre-#4503 drift cap used (#4570)", () => {
+		expect(
+			findEvictionLines(
+				[
+					"while (m.size > CAP) {",
+					"  const oldest = m.keys().next();",
+					"  if (oldest.done) break;",
+					"  m.delete(oldest.value);",
+					"}",
+				].join("\n"),
+			),
+		).toEqual([2]);
+		// All three accessors, and a `.done`-guarded `return` rather than
+		// `break` (clients/test-runner-delivery.ts's prunePending).
+		for (const accessor of ["keys", "values", "entries"]) {
+			expect(
+				findEvictionLines(
+					[
+						"while (s.size > CAP) {",
+						`  const head = s.${accessor}().next();`,
+						"  if (head.done) return;",
+						"  s.delete(head.value);",
+						"}",
+					].join("\n"),
+				),
+				`accessor ${accessor}`,
+			).toEqual([2]);
+		}
+	});
+
+	// Shape-69 detector plants (#4570): an alias, an indirect call, and a value
+	// reached through another binding. Each is a spelling nobody wrote the
+	// matcher against, and each must flag through the real detector.
+	it("assigned spelling flags a value reached through another binding (shape 69 plant)", () => {
+		expect(
+			findEvictionLines(
+				[
+					"while (m.size > CAP) {",
+					"  const oldest = m.keys().next();",
+					"  if (oldest.done) break;",
+					"  const victim = oldest.value;",
+					"  m.delete(victim);",
+					"}",
+				].join("\n"),
+			),
+		).toEqual([2]);
+	});
+
+	it("assigned spelling flags an aliased container and an indirectly called next() (shape 69 plants)", () => {
+		// Alias: the iterator is taken off a local binding, not the field.
+		expect(
+			findEvictionLines(
+				[
+					"const byCall = this.checkedPathsByCall;",
+					"while (byCall.size > CAP) {",
+					"  const oldest = byCall.keys().next();",
+					"  if (oldest.done) break;",
+					"  byCall.delete(oldest.value);",
+					"}",
+				].join("\n"),
+			),
+		).toEqual([3]);
+		// Indirect call: the accessor is behind a helper, so the receiver of
+		// `.next()` is a call expression, not `<container>.keys()`.
+		expect(
+			findEvictionLines(
+				[
+					"const iteratorOf = (container) => container.keys();",
+					"while (m.size > CAP) {",
+					"  const oldest = iteratorOf(m).next();",
+					"  if (oldest.done) break;",
+					"  m.delete(oldest.value);",
+					"}",
+				].join("\n"),
+			),
+		).toEqual([3]);
+	});
+
+	it("assigned spelling does NOT flag a peek that never deletes (clients/latency-logger.ts getCurrentPhase)", () => {
+		// The real non-member: `getCurrentPhase` reads the oldest live bracket to
+		// answer "which phase is open" — no cap loop, no delete.
+		expect(
+			findEvictionLines(
+				[
+					"export function getCurrentPhase(): PhaseToken | undefined {",
+					"  const oldest = liveBrackets.keys().next();",
+					"  return oldest.done ? undefined : oldest.value;",
+					"}",
+				].join("\n"),
+			),
+		).toEqual([]);
+		// A bounded loop that peeks but deletes only an unrelated key is a
+		// peek-and-clean, not an eviction of the first-inserted entry.
+		expect(
+			findEvictionLines(
+				[
+					"while (m.size > CAP) {",
+					"  const oldest = m.keys().next();",
+					"  if (oldest.done) break;",
+					"  m.delete(other.key);",
 					"}",
 				].join("\n"),
 			),
