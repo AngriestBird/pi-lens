@@ -1,5 +1,27 @@
 # HISTORY
 
+## 2026-10-17 — split host-path resolution (shape 74)
+
+Shape 74 ("Split host-path resolution") entered the catalog here.
+
+An external report, #4576, showed 46 ghost diagnostics in one day across biome,
+pyright, ruff and shellcheck, all on `<projectRoot>/~/…` paths that cannot
+exist. The `tool_call` seam expanded `~` through `resolveHostToolPath`; the
+`tool_result` seam joined the raw path onto the project root. #4577 routed the
+result side through the same resolver, and its review rounds found the rest of
+the class one provenance at a time. Round 1 applied the host-argument stages
+(`@` strip, unicode fold) to bash operands, so `cat @foo.ts` credited a read of
+`foo.ts`. Round 2 split by provenance: host argument, shell operand, recovered
+from disk. Round 3 added the fourth class, a path pi-lens generates itself (the
+cwd `lens_diagnostics` injects for a workspace scan), which the fold had
+re-resolved. A Greptile thread then found the shell quoting bit keyed by word
+text, so a quoted pattern and an unquoted filename with the same text shared
+one verdict. The rename destination stays out as #4578.
+
+The same session added a fixer contract line: a new shape is a PR-body
+proposal, because #4577's fixer wrote shape 74 into `AGENTS.md` unasked and
+redded the governance suites.
+
 ## 2026-10-17 — one session identity per field; fixtures that adopt an ancestor root
 
 Shape 72 ("Process-global last-write-wins session field") and shape 73 ("Fixture
