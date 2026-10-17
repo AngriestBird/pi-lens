@@ -450,6 +450,7 @@ describe("selectTargetedTests — path-mirror pass", () => {
 			"tests/config/sink-read-drain-sweep.test.ts",
 			"tests/config/module-instance-coverage.test.ts",
 			"tests/config/tmp-fixture-hygiene.test.ts",
+			"tests/config/tmp-hygiene-leak-origin.test.ts",
 			"tests/config/vacuous-skip-coverage.test.ts",
 			"tests/support/host-event-shape-scan.test.ts",
 		];

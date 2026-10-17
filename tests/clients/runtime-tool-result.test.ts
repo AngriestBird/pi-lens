@@ -45,7 +45,7 @@ import {
 	normalizeFilePath,
 	resolveHostToolPath,
 } from "../../clients/path-utils.js";
-import { pinTestHome } from "./test-utils.js";
+import { pinFixtureHome } from "./test-utils.js";
 import { runPipeline } from "../../clients/pipeline.js";
 import { resolveAnalysisRoot } from "../../clients/analysis-root.js";
 import {
@@ -5917,24 +5917,21 @@ describe("host tool path resolution on the tool_result side (#4576)", () => {
 
 	it("dispatches the expanded home path, never the phantom <root>/~/ path", async () => {
 		const env = setupTestEnvironment("pi-lens-4576-tilde-");
-		// The fixture HOME needs a location `isPiOwnedTempPath` does not claim: it
-		// owns every `<tmp>/pi-*` root and every direct `<tmp>/` child, and pi-lens
-		// would then skip the file for a reason unrelated to the path this test
-		// pins. A generic-prefixed tmp root with the home nested one level down
-		// matches neither, and the harness owns the root, so an early throw cannot
-		// leave it behind (the repo-rooted one did: #4577 R4-2).
-		let homeEnv: ReturnType<typeof setupTestEnvironment> | undefined;
-		let restoreHome: (() => void) | undefined;
+		// The fixture HOME lives outside the fixture root (#4591): the write path
+		// spawns children that inherit HOME and `cwd`, and one of them writing after
+		// this file's teardown sweep re-created a root the harness had just removed.
+		// `pinFixtureHome` also keeps the home clear of `isPiOwnedTempPath`, which
+		// claims every `<tmp>/pi-*` root and every direct `<tmp>/` child.
+		let fixtureHome: ReturnType<typeof pinFixtureHome> | undefined;
 		try {
-			homeEnv = setupTestEnvironment("4576-tilde-home-");
-			const home = path.join(homeEnv.tmpDir, "home");
+			fixtureHome = pinFixtureHome("4576-tilde-home");
+			const home = fixtureHome.home;
 			const projectRoot = path.join(env.tmpDir, "workspace");
 			const realFile = path.join(home, "proj", "src", "tilde.ts");
 			fs.mkdirSync(path.dirname(realFile), { recursive: true });
 			fs.mkdirSync(projectRoot, { recursive: true });
 			fs.writeFileSync(path.join(home, "proj", "package.json"), "{}\n");
 			fs.writeFileSync(realFile, "export const value = 1;\n");
-			restoreHome = pinTestHome(home);
 			const runPipelineMock = vi.mocked(runPipeline);
 			runPipelineMock.mockReset();
 			runPipelineMock.mockResolvedValue({
@@ -5965,8 +5962,7 @@ describe("host tool path resolution on the tool_result side (#4576)", () => {
 				dispatchedPaths().some((p) => p.includes(`${path.sep}~${path.sep}`)),
 			).toBe(false);
 		} finally {
-			restoreHome?.();
-			homeEnv?.cleanup();
+			fixtureHome?.restore();
 			env.cleanup();
 		}
 	});
@@ -5979,13 +5975,11 @@ describe("host tool path resolution on the tool_result side (#4576)", () => {
 	// defect #4576 fixed.
 	it("leaves a ~user path resolved against the base, as the tool_call seam does", async () => {
 		const env = setupTestEnvironment("pi-lens-4577-resolver-");
-		const home = path.join(env.tmpDir, "home");
+		const { home, restore } = pinFixtureHome("4577-resolver-user");
 		const projectRoot = path.join(env.tmpDir, "workspace");
 		const userFile = path.join(projectRoot, "~user", "proj", "a.ts");
-		fs.mkdirSync(home, { recursive: true });
 		fs.mkdirSync(path.dirname(userFile), { recursive: true });
 		fs.writeFileSync(userFile, "export const a = 1;\n");
-		const restoreHome = pinTestHome(home);
 		const runPipelineMock = vi.mocked(runPipeline);
 		runPipelineMock.mockReset();
 		runPipelineMock.mockResolvedValue({
@@ -6001,7 +5995,7 @@ describe("host tool path resolution on the tool_result side (#4576)", () => {
 			await writeThroughRealSeams(runtime, "call-4577-user", "~user/proj/a.ts");
 			expect(dispatchedPaths()[0]).toBe(userFile);
 		} finally {
-			restoreHome();
+			restore();
 			env.cleanup();
 		}
 	});
@@ -6011,16 +6005,14 @@ describe("host tool path resolution on the tool_result side (#4576)", () => {
 	// The pin keeps the resolver's third spelling from drifting silently.
 	it("pins ~ resolving to the home directory itself", () => {
 		const env = setupTestEnvironment("pi-lens-4577-resolver-");
-		const home = path.join(env.tmpDir, "home");
+		const { home, restore } = pinFixtureHome("4577-resolver-bare");
 		const cwd = path.join(env.tmpDir, "workspace");
-		fs.mkdirSync(home, { recursive: true });
 		fs.mkdirSync(cwd, { recursive: true });
-		const restoreHome = pinTestHome(home);
 		try {
 			expect(os.homedir()).toBe(home);
 			expect(resolveHostToolPath("~", cwd)).toBe(home);
 		} finally {
-			restoreHome();
+			restore();
 			env.cleanup();
 		}
 	});

@@ -9,7 +9,7 @@ import {
 } from "../../tools/module-report.js";
 import {
 	createTempFile,
-	pinTestHome,
+	pinFixtureHome,
 	setupTestEnvironment,
 } from "../clients/test-utils.js";
 
@@ -567,13 +567,14 @@ describe("read_symbol tool", () => {
 describe("module_report path resolution (#4577 M2)", () => {
 	it("resolves a ~ path to $HOME, not under the cwd", async () => {
 		const env = setupTestEnvironment("pi-lens-modreport-tilde-");
-		const home = path.join(env.tmpDir, "home");
+		// #4591: the fixture HOME lives outside the fixture root the harness
+		// deletes, so a straggler write cannot re-create that root.
+		const { home, restore } = pinFixtureHome("modreport-tilde");
 		const homeFile = createTempFile(
 			home,
 			path.join("proj", "sample.ts"),
 			"export function fromHome(a: number): number {\n  return a;\n}\n",
 		);
-		const restoreHome = pinTestHome(home);
 		try {
 			expect(os.homedir()).toBe(home);
 			const tool = createModuleReportTool(() => env.tmpDir);
@@ -595,12 +596,12 @@ describe("module_report path resolution (#4577 M2)", () => {
 			expect(report.api.map((entry: { name: string }) => entry.name)).toContain(
 				"fromHome",
 			);
-			// Display path is project-relative: the home directory really sits
-			// under the project root here, and the pre-fix spelling would have
-			// carried the literal `~` component instead.
-			expect(report.path).toBe("home/proj/sample.ts");
+			// The home is outside the project root, so the display path is
+			// absolute rather than project-relative; the pre-fix spelling carried
+			// the literal `~` component instead of the home the shell expands.
+			expect(report.path).toBe(path.resolve(homeFile));
 		} finally {
-			restoreHome();
+			restore();
 			env.cleanup();
 		}
 	});

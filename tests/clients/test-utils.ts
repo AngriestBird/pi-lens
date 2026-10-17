@@ -348,15 +348,74 @@ export function createTempFile(
 }
 
 /**
- * Point `os.homedir()` at `home` for the rest of the test and return the undo.
+ * The worker-owned parent of every pinned fixture HOME (#4591): outside every
+ * root the harness deletes, outside the OS tmp root the census watches, and
+ * beside the worker's own home rather than inside it.
+ *
+ * `vitest-setup.ts` publishes the run-shared home on
+ * `PI_LENS_TMP_HYGIENE_HOME` before any test module loads, and removes this
+ * directory at its teardown; the name carries the worker-home prefix so the
+ * run's dead-worker sweep reclaims a killed run's copy too. It is a SIBLING of
+ * the worker home on purpose: production classifies a path under
+ * `PI_LENS_HOME` as pi-lens's own housekeeping (`isPiLensInternalPath`) and
+ * refuses to adopt it as a project, so a fixture HOME there would silently
+ * change what the write path does with the files under it.
+ */
+export function fixtureHomeRoot(): string {
+	const sharedHome =
+		process.env.PI_LENS_TMP_HYGIENE_HOME?.trim() ||
+		path.join(process.cwd(), ".probe-home");
+	const runId = process.env.PI_LENS_TMP_HYGIENE_RUN_ID ?? "local";
+	return path.join(
+		path.resolve(sharedHome),
+		`worker-home-${runId}-${process.pid}-fixtures`,
+	);
+}
+
+/**
+ * Point `os.homedir()` at a fresh fixture HOME and return it with its undo.
  *
  * `homedir()` reads `HOME` (Windows: `USERPROFILE`) on every call, so pinning
- * both is what makes a `~` path expand inside a temp root instead of the
+ * both is what makes a `~` path expand into this directory instead of the
  * maintainer's real home. The caller restores in a `finally`: a failing
- * assertion must not leave the process pointed at a temp directory that the
+ * assertion must not leave the process pointed at a fixture directory that the
  * next test then reads.
+ *
+ * The home deliberately does NOT live inside the fixture root (#4591). A child
+ * the test never awaits inherits HOME and `cwd`, and a write it lands after the
+ * file's teardown sweep re-creates a root the harness already removed: on
+ * Windows `pi-lens-4577-resolver-cqF0yk` was still there three minutes later,
+ * `registered=0 stragglers=0 failed=0` at its own sweep, for the census to red.
+ * No sweep can remove a root a foreign process re-creates, so the home is
+ * placed where nothing deletes it out from under a straggler and where the
+ * tmp-root census never looks. Create the files the test needs under the
+ * returned `home`.
+ *
+ * `slug` only names the directory, so a leftover is attributable to its file.
  */
-export function pinTestHome(home: string): () => void {
+export function pinFixtureHome(slug: string): {
+	home: string;
+	restore: () => void;
+} {
+	const base = fixtureHomeRoot();
+	fs.mkdirSync(base, { recursive: true });
+	// A counted name, not `mkdtempSync`: the census sweep over `mkdtemp` parents
+	// (`tests/config/tmp-fixture-hygiene.test.ts`) admits tmpdir-, repo- and
+	// scratch-rooted parents only, and this one is the worker's own scratch,
+	// removed by the setup's teardown. The run id and pid in `base` already
+	// separate workers, so a per-process count is all the uniqueness needed.
+	fixtureHomeSeq += 1;
+	const home = path.join(base, `${slug}-${process.pid}-${fixtureHomeSeq}`);
+	fs.mkdirSync(home, { recursive: true });
+	return { home, restore: pinHome(home) };
+}
+
+/** One counter per worker process; `fixtureHomeRoot()` separates runs. */
+let fixtureHomeSeq = 0;
+
+/** The raw environment pin `pinFixtureHome` returns; not exported, so no call
+ *  site can pin a home inside a root its own teardown deletes (#4591). */
+function pinHome(home: string): () => void {
 	const previousHome = process.env.HOME;
 	const previousUserProfile = process.env.USERPROFILE;
 	process.env.HOME = home;

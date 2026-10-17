@@ -9,7 +9,7 @@ import { afterAll, afterEach, beforeEach, expect, vi } from "vitest";
 import { installGitFixtureEnv } from "./git-fixture-env.js";
 import { installKillGuard, killGuardReport } from "./kill-guard.js";
 import { reportPeakRss } from "./worker-peak-rss.js";
-import { removeTempDirSync } from "../clients/test-utils.js";
+import { fixtureHomeRoot, removeTempDirSync } from "../clients/test-utils.js";
 import {
 	formatTmpRootCreators,
 	formatTmpRootSweep,
@@ -547,6 +547,10 @@ try {
 	}
 }
 process.env.PI_LENS_HOME = TMP_HYGIENE_WORKER_HOME;
+// #4591: `pinFixtureHome` places a pinned fixture HOME beside this worker's own
+// home, and needs the run-shared home to name that place. Published before any
+// test module loads, so every call site reads one value.
+process.env.PI_LENS_TMP_HYGIENE_HOME = tmpHygieneHome;
 // #2651: scripts/warm-loader-cache.mjs appends to PI_LENS_INSTALL_LOG before
 // it falls back to PI_LENS_HOME/install.log, so an ambient value (a
 // developer's shell pointing it at the real ~/.pi-lens/install.log) would
@@ -1464,6 +1468,60 @@ export function tmpHygieneExcludeLiveOwnerEntries(
 	});
 }
 
+/** How many first-level children a leak-origin line names. Bounded: a leaked
+ *  root can hold a whole npm cache, and one record per entry is the contract. */
+const TMP_HYGIENE_ORIGIN_CHILD_LIMIT = 4;
+
+/**
+ * #4591: what a leaked census entry holds and when it was created, one line per
+ * leaked entry, printed by the destructive owner BEFORE it removes the entry.
+ *
+ * The census reds on a leaked root but says nothing about its origin, so the
+ * `pi-lens-4577-resolver-*` root that reappeared after its file's sweep could
+ * not be attributed: a birth time after the owning file's
+ * `[tmp-hygiene-sweep]` line with a `home/…` child is an out-of-process HOME
+ * writer, `workspace/…` is a `cwd` writer, and a birth BEFORE that line means
+ * the sweep removed a different root and this one was invisible to it. NTFS
+ * keeps a real creation time; a filesystem that reports none says so instead of
+ * printing a fabricated zero.
+ */
+export function formatTmpHygieneLeakOrigin(
+	dir: string,
+	now: number = Date.now(),
+): string {
+	const name = path.basename(dir);
+	let birthtimeMs: number | undefined;
+	let children: string[] | undefined;
+	try {
+		birthtimeMs = fs.statSync(dir).birthtimeMs;
+	} catch {
+		birthtimeMs = undefined;
+	}
+	try {
+		// Sorted so one directory always produces one line: `readdir` order is
+		// filesystem-dependent, and two runs of the same leak must compare.
+		children = fs.readdirSync(dir).sort();
+	} catch {
+		children = undefined;
+	}
+	const listed =
+		children === undefined
+			? "first-level children unavailable"
+			: children.length === 0
+				? "first-level children: none"
+				: `first-level children: ${children
+						.slice(0, TMP_HYGIENE_ORIGIN_CHILD_LIMIT)
+						.join(",")}${
+						children.length > TMP_HYGIENE_ORIGIN_CHILD_LIMIT
+							? ` (+${children.length - TMP_HYGIENE_ORIGIN_CHILD_LIMIT} more)`
+							: ""
+					}`;
+	if (birthtimeMs === undefined || !(birthtimeMs > 0))
+		return `[tmp-hygiene-origin] ${name} birth time unavailable (${listed})\n`;
+	const ageMs = Math.max(0, Math.round(now - birthtimeMs));
+	return `[tmp-hygiene-origin] ${name} born ${ageMs}ms before this line (created at ${new Date(birthtimeMs).toISOString()}; ${listed})\n`;
+}
+
 export function writeTmpHygieneLeakNotice(
 	tmpRoot: string,
 	leakedCount: number,
@@ -1604,6 +1662,9 @@ afterAll(async () => {
 		} finally {
 			tmpHygieneAfterAllProbeForTests = undefined;
 			removeTmpHygieneOwnerMarker();
+			// #4591: the pinned fixture HOMEs are this worker's scratch, beside its
+			// own home, so they go when it does.
+			removeTempDirSync(fixtureHomeRoot());
 			removeTempDirSync(TMP_HYGIENE_WORKER_HOME);
 		}
 	}
@@ -1640,7 +1701,11 @@ export function cleanupTmpHygiene(
 		tmpHygieneBefore,
 		spare,
 	)) {
-		removeTempDirSync(path.join(tmpHygieneRealTmp, name));
+		const entryDir = path.join(tmpHygieneRealTmp, name);
+		// #4591: record the origin before the entry is gone, so a leak that
+		// reappeared after its file's own sweep can be attributed to HOME or cwd.
+		process.stderr.write(formatTmpHygieneLeakOrigin(entryDir));
+		removeTempDirSync(entryDir);
 	}
 	removeRunBackstopDirs();
 	const reaped = reapStaleTmpHygieneRecords();
