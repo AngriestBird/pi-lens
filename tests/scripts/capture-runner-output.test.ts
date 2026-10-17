@@ -7,10 +7,15 @@
  * argument must survive cmd.exe intact.
  */
 
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+	buildAvailability,
 	expandWorkspaceArgs,
 	extractVersion,
+	mergeRecords,
 	needsShell,
 	quoteForShell,
 	redactWorkspace,
@@ -203,5 +208,96 @@ describe("quoteForShell", () => {
 			const commandLine = argv.map(quoteForShell).join(" ");
 			expect(parseWindowsCommandLine(commandLine), commandLine).toEqual(argv);
 		}
+	});
+});
+
+// #4473: the capture records the real tool's answer to the probe its runner
+// sends, because the replay runs the real checker against that record. helm 4
+// rejects `--version`; a record that dropped the exit status would let the
+// replay read a rejected probe as installed.
+describe("buildAvailability", () => {
+	it("keeps the argv the checker sends and the real exit status", () => {
+		expect(
+			buildAvailability("helm", ["version", "--short"], "4.3.0", {
+				status: 1,
+				stdout: "",
+				stderr: "Error: unknown flag: --short\n",
+			}),
+		).toEqual({
+			command: "helm",
+			argv: ["version", "--short"],
+			version: "4.3.0",
+			exitCode: 1,
+			stdout: "",
+			stderr: "Error: unknown flag: --short\n",
+		});
+	});
+
+	it("records a spawn with no exit status as null, never as success", () => {
+		const record = buildAvailability("helm", ["--version"], "4.3.0", {
+			status: undefined,
+			stdout: "",
+			stderr: "spawn helm ENOENT",
+		});
+		expect(record.exitCode).toBeNull();
+	});
+
+	it("copies the argv so a later edit cannot rewrite the record", () => {
+		const argv = ["--version"];
+		const record = buildAvailability("yamllint", argv, "1.38.0", {
+			status: 0,
+		});
+		argv.push("--debug");
+		expect(record.argv).toEqual(["--version"]);
+	});
+});
+
+// The retrofit path: fixtures captured before #4473 gain the records without
+// re-recording their work bytes from a newer build (which would silently
+// retarget the parser evidence).
+describe("mergeRecords", () => {
+	it("adds the availability and clean records and keeps the work bytes", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-merge-"));
+		const dest = path.join(dir, "real.captured.json");
+		const original = {
+			provenance: { runner: "helm-lint", tool: "helm", version: "4.3.0" },
+			file: "Chart.yaml",
+			exitCode: 0,
+			stdout: "captured findings",
+			stderr: "",
+		};
+		fs.writeFileSync(dest, JSON.stringify(original));
+		const merged = mergeRecords(dest, {
+			availability: [
+				{
+					command: "helm",
+					argv: ["version", "--short"],
+					version: "4.3.0",
+					exitCode: 0,
+					stdout: "v4.3.0",
+					stderr: "",
+				},
+			],
+			clean: {
+				workspace: "tests/fixtures/runner-output-clean/helm-lint",
+				file: "Chart.yaml",
+				argv: ["version", "--short"],
+				version: "4.3.0",
+				exitCode: 0,
+				stdout: "",
+				stderr: "",
+			},
+			versionArgv: ["version", "--short"],
+		});
+		expect(merged.stdout).toBe("captured findings");
+		expect(merged.exitCode).toBe(0);
+		expect(merged.availability).toHaveLength(1);
+		expect((merged.provenance as Record<string, unknown>).versionArgv).toEqual([
+			"version",
+			"--short",
+		]);
+		const onDisk = JSON.parse(fs.readFileSync(dest, "utf8"));
+		expect(onDisk.clean.exitCode).toBe(0);
+		fs.rmSync(dir, { recursive: true, force: true });
 	});
 });

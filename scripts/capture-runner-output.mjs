@@ -22,6 +22,8 @@
  *   node scripts/capture-runner-output.mjs \
  *     --runner actionlint --tool actionlint --bin /path/to/actionlint \
  *     --cwd /tmp/workspace --file .github/workflows/ci.yml \
+ *     --probe '["--version"]' \
+ *     --clean-content 'on: push\n' \
  *     --case workflow-violations \
  *     -- -format "{{json .}}" .github/workflows/ci.yml
  *
@@ -33,6 +35,17 @@
  *   --file          workspace-relative path the runner was pointed at (required)
  *   --case          fixture basename (default: "real")
  *   --version-args  argv that prints the version (default: --version)
+ *   --probe         JSON array: the argv the runner's availability checker
+ *                   sends. Repeatable. REQUIRED: the replay answers that exact
+ *                   spawn from this record, so a fixture without one cannot be
+ *                   replayed against the real checker (#4473).
+ *   --clean-content the bytes of a clean input for this invocation
+ *   --clean-file    workspace-relative path to write them to (default:
+ *                   "clean" plus the analysed file's extension)
+ *   --merge-into    existing fixture envelope: merge the availability and clean
+ *                   records into it instead of writing a new capture. This is
+ *                   the retrofit path for fixtures captured before #4473, and it
+ *                   never touches the recorded work bytes.
  *   --note          free-text note stored alongside the provenance
  *   --out-dir       fixture root (default: tests/fixtures/runner-output)
  *
@@ -41,6 +54,7 @@
 
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -115,6 +129,19 @@ export function redactWorkspace(text, workspace) {
 		out = out.split(spelling).join(WORKSPACE_TOKEN);
 	}
 	return out;
+}
+
+/**
+ * `text` with the capture host's home directory collapsed to `~`.
+ *
+ * A tool's probe output can name its own install path (swiftlint reports the
+ * shim it loaded, and that path is under this host's home). The record keeps the
+ * tool's answer but never a maintainer's absolute path.
+ */
+export function redactHomePath(text) {
+	const home = os.homedir();
+	if (!text || !home) return text ?? "";
+	return text.split(home).join("~");
 }
 
 /**
@@ -199,6 +226,49 @@ export function shellBinPath(bin) {
 	return quoteForShell(String(bin).replace(/\\/g, "/"));
 }
 
+/**
+ * One availability record: the argv the runner's checker sends, the binary that
+ * answered, and the REAL exit status with its streams.
+ *
+ * The exit status is the load-bearing field. helm 4 rejects `--version` and
+ * exits 1; a record that dropped the status would let the replay assume a
+ * rejected probe succeeded, which is the class #4473 names.
+ */
+export function buildAvailability(command, argv, version, run) {
+	return {
+		command,
+		argv: [...argv],
+		version: version ?? "",
+		exitCode: typeof run?.status === "number" ? run.status : null,
+		stdout: redactHomePath(run?.stdout ?? ""),
+		stderr: redactHomePath(run?.stderr ?? ""),
+	};
+}
+
+/**
+ * Merge the availability and clean records into an existing fixture envelope.
+ *
+ * The work bytes, provenance, file and exit code stay byte-identical: those were
+ * captured from the version the fixture names, and re-recording them from a
+ * newer build would silently retarget the parser evidence. Only the records the
+ * old capture could not produce are added.
+ */
+export function mergeRecords(dest, patch) {
+	const envelope = JSON.parse(fs.readFileSync(dest, "utf8"));
+	if (patch.availability) envelope.availability = patch.availability;
+	if (patch.clean) envelope.clean = patch.clean;
+	if (patch.cleanUnavailable)
+		envelope.cleanUnavailable = patch.cleanUnavailable;
+	if (patch.versionArgv) {
+		envelope.provenance = {
+			...envelope.provenance,
+			versionArgv: patch.versionArgv,
+		};
+	}
+	fs.writeFileSync(dest, `${JSON.stringify(envelope, null, "\t")}\n`, "utf8");
+	return envelope;
+}
+
 function spawnCaptured(bin, args, cwd, shellOverride) {
 	const shell = shellOverride ?? needsShell(bin);
 	return spawnSync(
@@ -229,9 +299,48 @@ function main() {
 	const outDir = path.resolve(
 		opts["out-dir"] ?? path.join(repoRoot, "tests/fixtures/runner-output"),
 	);
-
 	const shellOverride =
 		opts.shell === undefined ? undefined : opts.shell === "true";
+
+	// The probe set is required, not defaulted: the replay answers the checker's
+	// exact spawn from this record, so a capture that omits it writes a fixture
+	// nothing can replay against a real checker (#4473).
+	// A probe is either the bare argv (`["--version"]`, command = --tool) or
+	// `{command, argv}` when the checker spawns something other than the tool
+	// (markdownlint's checker is `markdownlint-cli2`).
+	const probes = [];
+	for (let i = 0; i < process.argv.length; i++) {
+		if (process.argv[i] !== "--probe") continue;
+		let parsed;
+		try {
+			parsed = JSON.parse(process.argv[i + 1]);
+		} catch {
+			console.error("--probe needs JSON, e.g. --probe '[\"--version\"]'");
+			process.exit(2);
+		}
+		const probe = Array.isArray(parsed)
+			? { command: tool, argv: parsed }
+			: { command: parsed?.command ?? tool, argv: parsed?.argv };
+		if (
+			typeof probe.command !== "string" ||
+			probe.command.length === 0 ||
+			!Array.isArray(probe.argv) ||
+			probe.argv.some((token) => typeof token !== "string")
+		) {
+			console.error(
+				"--probe needs either a JSON array of strings or {command, argv}",
+			);
+			process.exit(2);
+		}
+		probes.push(probe);
+	}
+	if (probes.length === 0) {
+		console.error(
+			"--probe is required: the capture records the real tool's answer to the availability probe its runner sends (#4473)",
+		);
+		process.exit(2);
+	}
+
 	const versionRun = spawnCaptured(bin, versionArgs, cwd, shellOverride);
 	const version = extractVersion(
 		`${versionRun.stdout ?? ""}${versionRun.stderr ?? ""}`,
@@ -241,6 +350,93 @@ function main() {
 			`could not read a version from \`${bin} ${versionArgs.join(" ")}\` — refusing to write a fixture with no provenance`,
 		);
 		process.exit(2);
+	}
+
+	const availability = probes.map((probe) =>
+		buildAvailability(
+			probe.command,
+			probe.argv,
+			version,
+			spawnCaptured(bin, probe.argv, cwd, shellOverride),
+		),
+	);
+
+	// The clean run: the SAME invocation in a workspace where the analysed
+	// input is clean. The argv is not rewritten — it is the invocation the
+	// fixture records — only the directory it runs in changes, so the bytes are
+	// evidence about this runner asking this tool for this file's verdict.
+	let clean;
+	let cleanUnavailable;
+	if (opts["clean-unavailable"]) {
+		if (opts["clean-cwd"]) {
+			console.error("--clean-unavailable and --clean-cwd are exclusive");
+			process.exit(2);
+		}
+		cleanUnavailable = String(opts["clean-unavailable"]);
+		if (cleanUnavailable.trim().length < 20) {
+			console.error(
+				"--clean-unavailable needs a fact about the tool, not a placeholder",
+			);
+			process.exit(2);
+		}
+	} else if (opts["clean-cwd"]) {
+		const cleanCwd = path.resolve(opts["clean-cwd"]);
+		const cleanFile = opts["clean-file"] ?? file;
+		const cleanRun = spawnCaptured(
+			bin,
+			expandWorkspaceArgs(rest, cleanCwd),
+			cleanCwd,
+			shellOverride,
+		);
+		if (cleanRun.error) {
+			console.error(`clean spawn failed: ${cleanRun.error.message}`);
+			process.exit(2);
+		}
+		if (cleanRun.status !== 0) {
+			console.error(
+				`the clean run exited ${cleanRun.status}, so it is not clean — refusing to record it. Output:\n${cleanRun.stdout ?? ""}${cleanRun.stderr ?? ""}`,
+			);
+			process.exit(2);
+		}
+		clean = {
+			workspace: (
+				opts["clean-workspace"] ?? path.relative(repoRoot, cleanCwd)
+			).replace(/\\/g, "/"),
+			file: cleanFile,
+			argv: rest,
+			version,
+			exitCode: cleanRun.status,
+			stdout: redactHomePath(
+				redactWorkspace(redactWorkspace(cleanRun.stdout ?? "", cwd), cleanCwd),
+			),
+			stderr: redactHomePath(
+				redactWorkspace(redactWorkspace(cleanRun.stderr ?? "", cwd), cleanCwd),
+			),
+		};
+	} else if (opts["clean-file"] !== undefined) {
+		console.error("--clean-file needs --clean-cwd");
+		process.exit(2);
+	}
+
+	const records = {
+		availability,
+		...(clean ? { clean } : {}),
+		...(cleanUnavailable ? { cleanUnavailable } : {}),
+		versionArgv: versionArgs,
+	};
+
+	if (opts["merge-into"]) {
+		const dest = path.resolve(opts["merge-into"]);
+		const merged = mergeRecords(dest, records);
+		console.log(
+			`merged ${availability.length} availability record(s)${clean ? " and the clean run" : ""} into ${path.relative(repoRoot, dest)}`,
+		);
+		for (const record of merged.availability) {
+			console.log(
+				`  ${record.command} ${JSON.stringify(record.argv)} → exit ${record.exitCode} (${record.version})`,
+			);
+		}
+		return;
 	}
 
 	const run = spawnCaptured(
@@ -266,6 +462,7 @@ function main() {
 			// runners/captured-real-output.test.ts needs the exact tokens in
 			// the exact order to notice a runner's invocation drifting.
 			argv: rest,
+			versionArgv: versionArgs,
 			workspace: path
 				.relative(repoRoot, opts.workspace ? path.resolve(opts.workspace) : cwd)
 				.replace(/\\/g, "/"),
@@ -273,6 +470,9 @@ function main() {
 			capturedAt: new Date().toISOString().slice(0, 10),
 			...(opts.note ? { note: opts.note } : {}),
 		},
+		availability,
+		...(clean ? { clean } : {}),
+		...(cleanUnavailable ? { cleanUnavailable } : {}),
 		file,
 		exitCode: run.status,
 		stdout: redactWorkspace(run.stdout ?? "", cwd),

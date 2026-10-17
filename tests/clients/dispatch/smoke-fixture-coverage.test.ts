@@ -45,7 +45,9 @@ import {
 	tier1Fixtures,
 } from "../../../scripts/smoke-tools.mjs";
 import {
+	availabilityProblems,
 	CAPTURED_OUTPUT_DIR,
+	cleanProblems,
 	listCapturedOutputs,
 	provenanceProblems,
 } from "../../helpers/captured-runner-output.js";
@@ -154,10 +156,6 @@ const EXEMPT = new Map<string, string>([
 	[
 		"psscriptanalyzer",
 		"pending: #1937 ubuntu-latest ships PowerShell 7 and the module installs from the PowerShell Gallery; the runner writes a per-pid temp script into its argv, which the replay argv tie does not model",
-	],
-	[
-		"trivy-config",
-		"opt-in: trivy.enabled is off by default, and running it needs trivy plus an explicit opt-in",
 	],
 	[
 		"helm-render",
@@ -572,6 +570,41 @@ describe("captured real-bytes fixture provenance", () => {
 		expect(
 			problems,
 			`captured fixture(s) with an incomplete provenance header. Re-capture with scripts/capture-runner-output.mjs rather than editing the header by hand:\n${problems.join("\n")}`,
+		).toEqual([]);
+	});
+
+	// #4473: the replay answers the availability checker's own spawn from this
+	// record. Without one it must mock the checker, and a mocked checker cannot
+	// see a tool that rejects its probe (helm 4 rejects `--version`).
+	it("every captured fixture records the availability probe its runner sends", () => {
+		const problems = captured.flatMap(availabilityProblems);
+		expect(
+			problems,
+			`captured fixture(s) with no complete availability record. The replay runs the REAL checker against this record, so a fixture without one cannot be replayed honestly:\n${problems.join("\n")}`,
+		).toEqual([]);
+	});
+
+	// #4522: the tool-state matrix's clean cell replays this run. A fixture with
+	// no clean record leaves that cell modelling bytes the tool never printed.
+	it("every captured fixture records a real clean run", () => {
+		const problems = captured.flatMap(cleanProblems);
+		expect(
+			problems,
+			`captured fixture(s) whose clean cell would model invented bytes. Re-capture with scripts/capture-runner-fixtures.mjs --records-only, or record why the tool can never print a clean run:\n${problems.join("\n")}`,
+		).toEqual([]);
+	});
+
+	it("every captured clean run's workspace still exists", () => {
+		const missing = captured
+			.filter(
+				(fixture) =>
+					fixture.clean &&
+					!fs.existsSync(path.join(repoRoot, fixture.clean.workspace)),
+			)
+			.map((fixture) => `${fixture.relPath} → ${fixture.clean?.workspace}`);
+		expect(
+			missing,
+			`captured clean workspace(s) that no longer exist — the clean run cannot be reproduced: ${missing.join(", ")}`,
 		).toEqual([]);
 	});
 

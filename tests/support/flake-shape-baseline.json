@@ -519,7 +519,6 @@
 		"clients/dispatch/runners/availability-latching.test.ts::clients/latency-logger": 1,
 		"clients/dispatch/runners/availability-latching.test.ts::clients/sessionstart-logger": 1,
 		"clients/dispatch/runners/biome-check-runner.test.ts::clients/dispatch/runners/utils/runner-helpers": 1,
-		"clients/dispatch/runners/captured-real-output.test.ts::clients/dispatch/runners/utils/runner-helpers": 1,
 		"clients/dispatch/runners/captured-real-output.test.ts::clients/tool-policy": 1,
 		"clients/dispatch/runners/compiler-outcome-runners-javac-dotnet.test.ts::clients/dispatch/runners/utils/runner-helpers": 1,
 		"clients/dispatch/runners/compiler-outcome-runners-javac-dotnet.test.ts::clients/tool-probe": 1,

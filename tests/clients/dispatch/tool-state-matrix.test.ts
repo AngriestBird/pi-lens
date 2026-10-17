@@ -37,9 +37,16 @@
  * with no captured bytes (in-process, LSP-relayed, or exempt there with a
  * category), which have no real output to put in the `dirty` cell.
  *
- * Capture-side availability provenance (#4473: each capture recording the real
- * tool's own answer to the probe) stays its own lane; the matrix probes the
- * real checker against the probe answers modelled below.
+ * The `clean` cell replays the fixture's CAPTURED clean run (#4522). It used to
+ * model `""` for every runner but biome, whose empty report was edited out of
+ * the dirty bytes here; for the runners that print a clean report that model
+ * replayed bytes the tool never emits. A fixture with no clean run carries the
+ * tool fact that makes one unreachable (`cleanUnavailable`), and that cell is a
+ * visible skip naming the fact — never invented bytes.
+ *
+ * The probe answers a "tool present" cell gives are the fixture's recorded
+ * availability records (#4473), so the checker is exercised over the real
+ * binary's answer instead of a hand-written "tool 1.2.3".
  */
 
 import * as fs from "node:fs";
@@ -186,26 +193,54 @@ interface Cell {
 	answer(call: Call, cmd: string, ctx: AnswerContext): Promise<SpawnAnswer>;
 }
 
-const ok = (stdout = "tool 1.2.3\n"): SpawnAnswer => ({
-	error: null,
-	status: 0,
-	stdout,
-	stderr: "",
-});
-
-/** What a tool prints on a clean run; biome's JSON report needs its empty form. */
-function cleanBytes(fixture: CapturedOutput): string {
-	if (fixture.provenance.runner !== "biome-check-json") return "";
-	// Derived from the captured real report: the same document with its
-	// findings removed, not an invented shape.
-	const report = JSON.parse(fixture.stdout) as {
-		summary: Record<string, number>;
-		diagnostics: unknown[];
+/**
+ * The tool's own clean run, captured from the real binary (#4522).
+ *
+ * This used to be `""` for every runner but biome, whose empty report was edited
+ * out of the dirty bytes here. Both were models of a clean run, and for the
+ * runners that PRINT a clean report (biome's JSON, eslint's `[]`, pyright's
+ * summary) the cell replayed bytes the tool never emits, so the clean half of
+ * the parser was never exercised. A fixture without a clean record is a real
+ * gap: the cell throws rather than modelling one.
+ */
+function cleanRun(fixture: CapturedOutput): SpawnAnswer {
+	const clean = fixture.clean;
+	if (!clean) {
+		throw new Error(
+			`${fixture.relPath} records no clean run, so the clean cell would model bytes the tool never printed. Re-capture with scripts/capture-runner-fixtures.mjs --records-only ${fixture.provenance.runner}.`,
+		);
+	}
+	return {
+		error: null,
+		status: clean.exitCode,
+		stdout: clean.stdout,
+		stderr: clean.stderr,
 	};
-	report.diagnostics = [];
-	report.summary.warnings = 0;
-	report.summary.errors = 0;
-	return JSON.stringify(report);
+}
+
+/**
+ * The tool's recorded answer to the probe its runner sends. A cell that models
+ * a present, answering tool answers the probe with what the real binary said,
+ * so the availability checker is exercised over evidence rather than a
+ * hand-written "tool 1.2.3".
+ */
+function probeOk(fixture: CapturedOutput): SpawnAnswer {
+	// A runner may probe several candidates (cpp-check walks its compilers), and
+	// only the one that ANSWERED stands for a present tool in this cell.
+	const record =
+		fixture.availability.find((entry) => entry.exitCode === 0) ??
+		fixture.availability[0];
+	if (!record) {
+		throw new Error(
+			`${fixture.relPath} records no availability probe, so the cell would invent one. Re-capture with scripts/capture-runner-fixtures.mjs --records-only ${fixture.provenance.runner}.`,
+		);
+	}
+	return {
+		error: null,
+		status: record.exitCode,
+		stdout: record.stdout,
+		stderr: record.stderr,
+	};
 }
 
 async function enoent(cmd: string, ctx: AnswerContext): Promise<SpawnAnswer> {
@@ -268,14 +303,16 @@ const CELLS: Cell[] = [
 		name: "clean",
 		expect: "clean",
 		async answer(call, _cmd, ctx) {
-			return call === "probe" ? ok() : ok(cleanBytes(ctx.fixture));
+			return call === "probe" ? probeOk(ctx.fixture) : cleanRun(ctx.fixture);
 		},
 	},
 	{
 		name: "dirty",
 		expect: "findings",
 		async answer(call, _cmd, ctx) {
-			return call === "probe" ? ok() : materialize(ctx.fixture, ctx.workspace);
+			return call === "probe"
+				? probeOk(ctx.fixture)
+				: materialize(ctx.fixture, ctx.workspace);
 		},
 	},
 	{
@@ -287,15 +324,15 @@ const CELLS: Cell[] = [
 		name: "crashed (killed by SIGSEGV)",
 		expect: "no-verdict",
 		async answer(call, _cmd, ctx) {
-			return call === "probe" ? ok() : signalDeath(ctx);
+			return call === "probe" ? probeOk(ctx.fixture) : signalDeath(ctx);
 		},
 	},
 	{
 		name: "crashed (panic, exit 101)",
 		expect: "not-clean",
-		async answer(call) {
+		async answer(call, _cmd, ctx) {
 			return call === "probe"
-				? ok()
+				? probeOk(ctx.fixture)
 				: {
 						error: null,
 						status: 101,
@@ -313,7 +350,7 @@ const CELLS: Cell[] = [
 		name: "wrong version (probe rejected)",
 		expect: "no-verdict",
 		async answer(call, _cmd, ctx) {
-			return call === "probe" ? rejectedFlag : ok(cleanBytes(ctx.fixture));
+			return call === "probe" ? rejectedFlag : cleanRun(ctx.fixture);
 		},
 	},
 	{
@@ -327,16 +364,14 @@ const CELLS: Cell[] = [
 		name: "unanswered (run exhausts its budget)",
 		expect: "no-verdict",
 		async answer(call, _cmd, ctx) {
-			return call === "probe" ? ok() : timedOut(ctx, 15000);
+			return call === "probe" ? probeOk(ctx.fixture) : timedOut(ctx, 15000);
 		},
 	},
 	{
 		name: "unanswered (probe exhausts its budget)",
 		expect: "no-verdict",
 		async answer(call, _cmd, ctx) {
-			return call === "probe"
-				? timedOut(ctx, 5000)
-				: ok(cleanBytes(ctx.fixture));
+			return call === "probe" ? timedOut(ctx, 5000) : cleanRun(ctx.fixture);
 		},
 	},
 ];
@@ -468,6 +503,16 @@ describe("tool-state matrix (#4522)", () => {
 						cell.name === "dirty"
 							? `${cell.name} (${fixture.caseName})`
 							: cell.name;
+					// A runner with no captured clean run cannot prove its remaining
+					// cells against invented bytes. The skip carries the fixture's own
+					// stated fact, so the gap is visible in the run and in the fixture
+					// rather than modelled as emptiness (#4522).
+					if (cell.name === "clean" && !fixture.clean) {
+						it.skip(
+							`${label} reads ${cell.expect} — no clean capture: ${fixture.cleanUnavailable ?? "none recorded"}`,
+						);
+						continue;
+					}
 					it(`${label} reads ${cell.expect}`, { timeout: 30000 }, async () => {
 						childProcessWindow.begin();
 						let env: ReturnType<typeof setupTestEnvironment> | undefined;
