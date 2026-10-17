@@ -55,20 +55,8 @@ export interface ShellCommandSegment {
 	 * them.
 	 */
 	terminator?: "pipe";
-	/**
-	 * Word texts whose LEADING `~` bash saw quoted or escaped (`'~/x'`,
-	 * `"~/x"`, `\~/x`), so bash leaves it literal instead of expanding it to
-	 * the home directory (#4577 M1). Empty or absent when every word's tilde
-	 * was bare.
-	 *
-	 * Keyed by text because the operand consumers that resolve these words
-	 * (`formatterFileArgs`, the `cp`/`mv` destination pick) lose token
-	 * positions. When one command spells the same text both ways
-	 * (`cat '~/x' ~/x`), the literal reading wins everywhere: that
-	 * under-credits a path no file exists at, where expanding would credit a
-	 * read of a file the shell never opened.
-	 */
-	literalTilde?: ReadonlySet<string>;
+	/** Quoted-leading-tilde facts indexed by the token they came from. */
+	quotedTilde?: readonly boolean[];
 }
 
 interface PendingHeredoc {
@@ -192,6 +180,18 @@ function consumeHeredocBodies(
 	return { end: cursor - 1, substitutions };
 }
 
+interface ShellOperand {
+	text: string;
+	quotedTilde: boolean;
+}
+
+function shellOperands(segment: ShellCommandSegment): ShellOperand[] {
+	return segment.tokens.map((text, index) => ({
+		text,
+		quotedTilde: segment.quotedTilde?.[index] === true,
+	}));
+}
+
 export function tokenizeShellCommand(command: string): ShellCommandSegment[] {
 	const segments: ShellCommandSegment[] = [];
 	const pendingHeredocs: PendingHeredoc[] = [];
@@ -203,7 +203,7 @@ export function tokenizeShellCommand(command: string): ShellCommandSegment[] {
 	 * a home prefix (#4577 M1). Reset with the word.
 	 */
 	let wordFirstCharQuoted = false;
-	let literalTilde = new Set<string>();
+	let quotedTilde: boolean[] = [];
 	let quote: "single" | "double" | undefined;
 	let escaped = false;
 	let unsupported = false;
@@ -214,7 +214,7 @@ export function tokenizeShellCommand(command: string): ShellCommandSegment[] {
 	};
 	const flushWord = () => {
 		if (word) {
-			if (wordFirstCharQuoted && word.startsWith("~")) literalTilde.add(word);
+			quotedTilde.push(wordFirstCharQuoted && word.startsWith("~"));
 			tokens.push(word);
 		}
 		word = "";
@@ -228,10 +228,10 @@ export function tokenizeShellCommand(command: string): ShellCommandSegment[] {
 				tokens,
 				unsupported,
 				terminator,
-				...(literalTilde.size > 0 ? { literalTilde } : {}),
+				...(quotedTilde.some(Boolean) ? { quotedTilde } : {}),
 			});
 		tokens = [];
-		literalTilde = new Set();
+		quotedTilde = [];
 		unsupported = false;
 		atTokenStart = true;
 	};
@@ -351,19 +351,14 @@ export function tokenizeShellCommand(command: string): ShellCommandSegment[] {
  * bash would expand it to that user's home, which is not knowable here, and
  * the pre-fix seam left it under the cwd.
  */
-function resolveCandidate(
-	token: string,
-	cwd: string,
-	literalTilde?: ReadonlySet<string>,
-): string | null {
-	const cleaned = stripQuotes(token);
+function resolveCandidate(token: ShellOperand, cwd: string): string | null {
+	const cleaned = stripQuotes(token.text);
 	if (!cleaned || cleaned.startsWith("-") || !isReadableSourceFile(cleaned)) {
 		return null;
 	}
 	// A redirect target reaches here still spelled with its quotes
 	// (`> "~/x.ts"`); a lexed word lost them, so the segment carries the bit.
-	const tildeIsLiteral =
-		/^['"]/.test(token) || literalTilde?.has(cleaned) === true;
+	const tildeIsLiteral = token.quotedTilde;
 	// `\~/x` survives the lexer backslash-first (it keeps native Windows
 	// path separators), and bash reads that tilde literally: drop the escape
 	// instead of crediting the phantom `<cwd>/\~/x`.
@@ -387,12 +382,16 @@ function parseCountFlag(token: string): number | undefined {
 }
 
 /** Unwrap the common agent-authored `npx <tool>` launcher form. */
-function unwrapCommand(tokens: string[]): { verb: string; args: string[] } {
-	let verb = path.basename(tokens[0] ?? "");
+function unwrapCommand(tokens: ShellOperand[]): {
+	verb: string;
+	args: ShellOperand[];
+} {
+	let verb = path.basename(tokens[0]?.text ?? "");
 	let args = tokens.slice(1);
 	if (verb === "npx") {
-		while (args[0] === "-y" || args[0] === "--yes") args = args.slice(1);
-		verb = path.basename(args[0] ?? "");
+		while (args[0]?.text === "-y" || args[0]?.text === "--yes")
+			args = args.slice(1);
+		verb = path.basename(args[0]?.text ?? "");
 		args = args.slice(1);
 	}
 	return { verb, args };
@@ -404,19 +403,21 @@ function unwrapCommand(tokens: string[]): { verb: string; args: string[] } {
  * options whose values can themselves look like source files belong here.
  */
 function formatterFileArgs(
-	args: string[],
+	args: ShellOperand[],
 	start = 0,
 	valueOptions: ReadonlySet<string> = new Set(),
-): string[] {
-	const files: string[] = [];
+): ShellOperand[] {
+	const files: ShellOperand[] = [];
 	for (let i = start; i < args.length; i += 1) {
-		const arg = args[i] ?? "";
+		const operand = args[i];
+		if (!operand) continue;
+		const arg = operand.text;
 		if (valueOptions.has(arg)) {
 			i += 1;
 			continue;
 		}
 		if (arg === "--" || arg.startsWith("-")) continue;
-		files.push(arg);
+		files.push(operand);
 	}
 	return files;
 }
@@ -492,15 +493,11 @@ export function extractReadPathsFromCommand(
 	const spans: ReadSpan[] = [];
 	const seen = new Set<string>();
 	const totals = new Map<string, number>();
-	// The shell-rule bit for the segment being read (#4577 M1). Re-bound at the
-	// top of the loop below, so every operand in one segment resolves with that
-	// segment's quoting.
-	let literalTilde: ReadonlySet<string> | undefined;
 
 	const resolveFile = (
-		token: string,
+		token: ShellOperand,
 	): { abs: string; total: number } | null => {
-		const abs = resolveCandidate(token, cwd, literalTilde);
+		const abs = resolveCandidate(token, cwd);
 		if (!abs) return null;
 		try {
 			if (!nodeFs.statSync(abs).isFile()) return null;
@@ -516,7 +513,7 @@ export function extractReadPathsFromCommand(
 		return { abs, total };
 	};
 
-	const addSpan = (token: string, start: number, count: number) => {
+	const addSpan = (token: ShellOperand, start: number, count: number) => {
 		const file = resolveFile(token);
 		if (!file) return;
 		const offset = Math.min(Math.max(1, start), file.total);
@@ -529,28 +526,27 @@ export function extractReadPathsFromCommand(
 	};
 
 	for (const segment of tokenizeShellCommand(command)) {
-		literalTilde = segment.literalTilde;
-		const tokens = segment.tokens;
+		const tokens = shellOperands(segment);
 		if (tokens.length === 0) continue;
-		const verb = path.basename(tokens[0] ?? "");
+		const verb = path.basename(tokens[0]?.text ?? "");
 		const args = tokens.slice(1);
 
 		if (["cat", "bat", "less", "more", "nl"].includes(verb)) {
 			for (const a of args) addSpan(a, 1, Number.MAX_SAFE_INTEGER);
 		} else if (verb === "head" || verb === "tail") {
 			let count: number | undefined;
-			const files: string[] = [];
+			const files: ShellOperand[] = [];
 			for (let i = 0; i < args.length; i++) {
 				const a = args[i];
-				if (a === "-n" || a === "-c") {
+				if (a?.text === "-n" || a?.text === "-c") {
 					const next = args[i + 1];
 					if (next !== undefined) {
-						count = parseCountFlag(next) ?? count;
+						count = parseCountFlag(next.text) ?? count;
 						i++;
 					}
-				} else if (/^-n?\d+$/.test(a)) {
-					count = parseCountFlag(a) ?? count;
-				} else if (!a.startsWith("-")) {
+				} else if (/^-n?\d+$/.test(a.text)) {
+					count = parseCountFlag(a.text) ?? count;
+				} else if (!a.text.startsWith("-")) {
 					files.push(a);
 				}
 			}
@@ -562,10 +558,10 @@ export function extractReadPathsFromCommand(
 				else addSpan(f, file.total - n + 1, n); // tail: last n lines
 			}
 		} else if (verb === "sed") {
-			if (args.includes("-i")) continue; // sed -i writes, not reads
+			if (args.some((arg) => arg.text === "-i")) continue; // sed -i writes, not reads
 			let range: { start: number; end: number } | undefined;
 			for (const a of args) {
-				const m = stripQuotes(a).match(/^(\d+),(\d+)p$/);
+				const m = stripQuotes(a.text).match(/^(\d+),(\d+)p$/);
 				if (m) {
 					range = {
 						start: Number.parseInt(m[1], 10),
@@ -681,16 +677,14 @@ export function parseGrepContextLines(args: string[]): GrepContextLines {
 	return { before, after };
 }
 
-function extractGrepSearchFiles(
-	args: string[],
-	cwd: string,
-	literalTilde?: ReadonlySet<string>,
-): string[] {
+function extractGrepSearchFiles(args: ShellOperand[], cwd: string): string[] {
 	const files: string[] = [];
 	let patternSeen = false;
 	let endOfOptions = false;
 	for (let i = 0; i < args.length; i++) {
-		const token = stripQuotes(args[i]);
+		const operand = args[i];
+		if (!operand) continue;
+		const token = stripQuotes(operand.text);
 		if (!endOfOptions && token === "--") {
 			endOfOptions = true;
 			continue;
@@ -705,10 +699,7 @@ function extractGrepSearchFiles(
 			patternSeen = true;
 			continue;
 		}
-		// #4577 R2-1: the segment's quoting bit. `args` are already
-		// `stripQuotes`d, so the raw-text branch in `resolveCandidate` cannot
-		// see the quotes and this set is the only evidence left.
-		const abs = resolveCandidate(token, cwd, literalTilde);
+		const abs = resolveCandidate(operand, cwd);
 		if (!abs) continue;
 		try {
 			if (!nodeFs.statSync(abs).isFile()) continue;
@@ -723,15 +714,14 @@ function extractGrepSearchFiles(
 function parseGrepLineWithFile(
 	line: string,
 	cwd: string,
-	literalTilde?: ReadonlySet<string>,
 ): SearchReadLocation | undefined {
 	const match = /^(.*?):(\d+):/.exec(stripAnsi(line));
 	if (!match) return undefined;
 	const lineNumber = Number.parseInt(match[2], 10);
 	if (!Number.isFinite(lineNumber) || lineNumber < 1) return undefined;
-	// #4577 R2-1: same quoting bit as `extractGrepSearchFiles` — a
-	// multi-file hit names the operand as grep printed it.
-	const abs = resolveCandidate(match[1], cwd, literalTilde);
+	// Grep prints shell-expanded filenames. A leading tilde in OUTPUT is
+	// literal bytes, not an operand whose quoting can be recovered.
+	const abs = resolveCandidate({ text: match[1], quotedTilde: true }, cwd);
 	if (!abs) return undefined;
 	try {
 		if (!nodeFs.statSync(abs).isFile()) return undefined;
@@ -836,15 +826,9 @@ function collectGrepCommandFiles(
 	hasLineNumberGrep: boolean;
 	files: Set<string>;
 	context: GrepContextLines;
-	literalTilde: ReadonlySet<string>;
 } {
 	const files = new Set<string>();
 	let hasLineNumberGrep = false;
-	// #4577 R2-1: the quoting bit for the words of every contributing grep
-	// segment. The parsed hits carry no segment identity, so the union is the
-	// same "the literal reading wins everywhere" rule `literalTilde`'s own
-	// docblock states for one command that spells a text both ways.
-	const literalTilde = new Set<string>();
 	// A command can chain several greps whose output all reaches the model, but
 	// the parsed hits carry no segment identity. Credit the SMALLEST context any
 	// contributing grep printed, so no line is credited that a hit from the
@@ -870,13 +854,9 @@ function collectGrepCommandFiles(
 					after: Math.min(context.after, segmentContext.after),
 				}
 			: segmentContext;
-		for (const word of segments[i]?.literalTilde ?? []) {
-			literalTilde.add(word);
-		}
 		for (const file of extractGrepSearchFiles(
-			args,
+			shellOperands(segments[i]!).slice(1),
 			cwd,
-			segments[i]?.literalTilde,
 		)) {
 			files.add(file);
 		}
@@ -888,7 +868,6 @@ function collectGrepCommandFiles(
 		context: truncated
 			? { before: 0, after: 0 }
 			: (context ?? { before: 0, after: 0 }),
-		literalTilde,
 	};
 }
 
@@ -908,17 +887,12 @@ function parseGrepOutputSearchReads(
 	output: string,
 	cwd: string,
 	singleFile?: string,
-	literalTilde?: ReadonlySet<string>,
 ): SearchReadLocation[] {
 	const out: SearchReadLocation[] = [];
 	const seen = new Set<string>();
 	for (const rawLine of output.split(/\r?\n/)) {
 		if (!rawLine) continue;
-		dedupePushSearchRead(
-			out,
-			seen,
-			parseGrepLineWithFile(rawLine, cwd, literalTilde),
-		);
+		dedupePushSearchRead(out, seen, parseGrepLineWithFile(rawLine, cwd));
 		if (singleFile) {
 			dedupePushSearchRead(
 				out,
@@ -940,16 +914,13 @@ export function extractGrepSearchReadsFromOutput(
 	cwd: string,
 	output: string,
 ): SearchReadLocation[] {
-	const { hasLineNumberGrep, files, context, literalTilde } =
-		collectGrepCommandFiles(command, cwd);
+	const { hasLineNumberGrep, files, context } = collectGrepCommandFiles(
+		command,
+		cwd,
+	);
 	if (!hasLineNumberGrep) return [];
 	const singleFile = files.size === 1 ? [...files][0] : undefined;
-	const locations = parseGrepOutputSearchReads(
-		output,
-		cwd,
-		singleFile,
-		literalTilde,
-	);
+	const locations = parseGrepOutputSearchReads(output, cwd, singleFile);
 	// Only the printed context lines were delivered to the model, so only they
 	// are credited. A bare grep credits its match line alone (#1904 item 2).
 	for (const loc of locations) {
@@ -974,36 +945,32 @@ export function extractWrittenPathsFromCommand(
 	cwd: string,
 ): string[] {
 	const out = new Set<string>();
-	// The shell-rule bit for the segment being read (#4577 M1); re-bound at the
-	// top of each loop below.
-	let literalTilde: ReadonlySet<string> | undefined;
-	const add = (token: string) => {
-		const abs = resolveCandidate(token, cwd, literalTilde);
+	const add = (token: ShellOperand) => {
+		const abs = resolveCandidate(token, cwd);
 		if (abs) out.add(abs);
 	};
 
 	for (const segment of tokenizeShellCommand(command)) {
-		literalTilde = segment.literalTilde;
 		if (segment.tokens.length === 0) continue;
 
 		// Redirect targets are collected by a quote-aware scanner. The shared
 		// tokenizer supplies the normalized command arguments; it deliberately
 		// does not expose shell redirection operators as arguments.
-		for (const target of extractRedirectTargets(command)) add(target);
+		for (const target of extractRedirectTargets(command))
+			add({ text: target, quotedTilde: /^['"]/.test(target) });
 		// A command may contain multiple segments; only the first pass should
 		// attach redirects, otherwise targets would be duplicated harmlessly but
 		// needlessly rescanned.
 		break;
 	}
 	for (const segment of tokenizeShellCommand(command)) {
-		literalTilde = segment.literalTilde;
-		const tokens = segment.tokens;
+		const tokens = shellOperands(segment);
 		if (tokens.length === 0) continue;
 		const { verb, args } = unwrapCommand(tokens);
 
 		if (verb === "tee" || verb === "touch") {
-			for (const a of args) if (!a.startsWith("-")) add(a);
-		} else if (verb === "sed" && args.includes("-i")) {
+			for (const a of args) if (!a.text.startsWith("-")) add(a);
+		} else if (verb === "sed" && args.some((arg) => arg.text === "-i")) {
 			for (const a of args) add(a);
 		} else if (verb === "cp" || verb === "mv" || verb === "install") {
 			// Known miss (#1668 review F3): the GNU `-t DEST`/`--target-directory`
@@ -1014,11 +981,14 @@ export function extractWrittenPathsFromCommand(
 			// rather than fixed, since correctly parsing `-t` means recognizing it
 			// takes a value while telling it apart from every other single-letter
 			// flag this same branch already ignores.
-			const files = args.filter((a) => !a.startsWith("-"));
+			const files = args.filter((a) => !a.text.startsWith("-"));
 			if (files.length >= 1) add(files[files.length - 1]); // destination
 		} else if (verb === "biome") {
-			const sub = args[0];
-			if ((sub === "format" || sub === "check") && args.includes("--write")) {
+			const sub = args[0]?.text;
+			if (
+				(sub === "format" || sub === "check") &&
+				args.some((arg) => arg.text === "--write")
+			) {
 				for (const file of formatterFileArgs(
 					args,
 					1,
@@ -1026,14 +996,17 @@ export function extractWrittenPathsFromCommand(
 				))
 					add(file);
 			}
-		} else if (verb === "prettier" && args.includes("--write")) {
+		} else if (
+			verb === "prettier" &&
+			args.some((arg) => arg.text === "--write")
+		) {
 			for (const file of formatterFileArgs(
 				args,
 				0,
 				new Set(["--config", "--ignore-path", "--parser", "--plugin"]),
 			))
 				add(file);
-		} else if (verb === "eslint" && args.includes("--fix")) {
+		} else if (verb === "eslint" && args.some((arg) => arg.text === "--fix")) {
 			for (const file of formatterFileArgs(
 				args,
 				0,
@@ -1041,8 +1014,8 @@ export function extractWrittenPathsFromCommand(
 			))
 				add(file);
 		} else if (verb === "ruff") {
-			const sub = args[0];
-			if (sub === "format" || args.includes("--fix")) {
+			const sub = args[0]?.text;
+			if (sub === "format" || args.some((arg) => arg.text === "--fix")) {
 				const start = sub === "format" || sub === "check" ? 1 : 0;
 				for (const file of formatterFileArgs(
 					args,
@@ -1051,12 +1024,12 @@ export function extractWrittenPathsFromCommand(
 				))
 					add(file);
 			}
-		} else if (verb === "gofmt" && args.includes("-w")) {
+		} else if (verb === "gofmt" && args.some((arg) => arg.text === "-w")) {
 			for (const file of formatterFileArgs(args)) add(file);
-		} else if (verb === "cargo" && args[0] === "fmt") {
+		} else if (verb === "cargo" && args[0]?.text === "fmt") {
 			// Bare cargo fmt is project-scoped and cannot be enumerated without a
 			// filesystem walk. Only explicit rustfmt operands after `--` are safe.
-			const separator = args.indexOf("--");
+			const separator = args.findIndex((arg) => arg.text === "--");
 			if (separator >= 0) {
 				for (const file of formatterFileArgs(
 					args,
@@ -1085,25 +1058,29 @@ export function extractWrittenPathsFromCommand(
 				]),
 			))
 				add(file);
-		} else if (verb === "clang-format" && args.includes("-i")) {
+		} else if (
+			verb === "clang-format" &&
+			args.some((arg) => arg.text === "-i")
+		) {
 			for (const file of formatterFileArgs(
 				args,
 				0,
 				new Set(["--style", "--fallback-style", "--assume-filename"]),
 			))
 				add(file);
-		} else if (verb === "dotnet" && args[0] === "format") {
+		} else if (verb === "dotnet" && args[0]?.text === "format") {
 			// dotnet format is normally solution-scoped. `--include` is the one
 			// invocation form that provides attributable source paths.
 			for (let i = 1; i < args.length; i += 1) {
-				if (args[i] === "--include" && args[i + 1]) {
-					for (const file of (args[i + 1] ?? "").split(",")) add(file);
+				if (args[i]?.text === "--include" && args[i + 1]) {
+					for (const file of (args[i + 1]?.text ?? "").split(","))
+						add({ text: file, quotedTilde: args[i + 1]?.quotedTilde === true });
 					i += 1;
-				} else if (args[i]?.startsWith("--include=")) {
-					for (const file of (args[i] ?? "")
+				} else if (args[i]?.text.startsWith("--include=")) {
+					for (const file of (args[i]?.text ?? "")
 						.slice("--include=".length)
 						.split(","))
-						add(file);
+						add({ text: file, quotedTilde: args[i]?.quotedTilde === true });
 				}
 			}
 		} else if (verb === "git") {
@@ -1113,21 +1090,21 @@ export function extractWrittenPathsFromCommand(
 			// this pi-lens keeps stale diagnostics/fileSeq for the restored file.
 			// Whole-tree ops (reset --hard, stash pop, revert, merge, rebase, pull,
 			// or `git checkout <branch>`) don't name files and aren't handled here.
-			const sub = args[0];
+			const sub = args[0]?.text;
 			if (sub === "checkout" || sub === "restore") {
-				const dashDash = args.indexOf("--");
+				const dashDash = args.findIndex((arg) => arg.text === "--");
 				const fileArgs =
 					dashDash >= 0
 						? args.slice(dashDash + 1)
 						: sub === "restore"
-							? args.slice(1).filter((a) => !a.startsWith("-"))
+							? args.slice(1).filter((a) => !a.text.startsWith("-"))
 							: []; // `git checkout` without `--` is ambiguous (ref vs path)
 				for (const a of fileArgs) add(a);
 			} else if (sub === "mv") {
 				// git mv SRC... DEST — the destination is a write, exactly like
 				// plain `mv` above (#1668 review F2). The source side is a delete,
 				// handled by extractDeletedPathsFromCommand.
-				const files = args.slice(1).filter((a) => !a.startsWith("-"));
+				const files = args.slice(1).filter((a) => !a.text.startsWith("-"));
 				if (files.length >= 1) add(files[files.length - 1]);
 			}
 		}
@@ -1155,11 +1132,8 @@ export function extractDeletedPathsFromCommand(
 	cwd: string,
 ): string[] {
 	const out = new Set<string>();
-	// The shell-rule bit for the segment being read (#4577 M1); re-bound at the
-	// top of the loop below.
-	let literalTilde: ReadonlySet<string> | undefined;
-	const add = (token: string) => {
-		const abs = resolveCandidate(token, cwd, literalTilde);
+	const add = (token: ShellOperand) => {
+		const abs = resolveCandidate(token, cwd);
 		if (abs) out.add(abs);
 	};
 	// mv SRC... DEST / git mv SRC... DEST — every argument except the last is
@@ -1167,31 +1141,30 @@ export function extractDeletedPathsFromCommand(
 	// Known miss (#1668 review F3): the same `-t DEST`/`--target-directory`
 	// form documented in `extractWrittenPathsFromCommand` misreads here too —
 	// this assumes source-before-destination order.
-	const addMoveSources = (args: string[]) => {
-		const files = args.filter((a) => !a.startsWith("-"));
+	const addMoveSources = (args: ShellOperand[]) => {
+		const files = args.filter((a) => !a.text.startsWith("-"));
 		if (files.length >= 2) {
 			for (const src of files.slice(0, -1)) add(src);
 		}
 	};
 
 	for (const segment of tokenizeShellCommand(command)) {
-		literalTilde = segment.literalTilde;
-		const tokens = segment.tokens;
+		const tokens = shellOperands(segment);
 		if (tokens.length === 0) continue;
-		const verb = path.basename(tokens[0] ?? "");
+		const verb = path.basename(tokens[0]?.text ?? "");
 		const args = tokens.slice(1);
 
 		if (verb === "rm") {
-			for (const a of args) if (!a.startsWith("-")) add(a);
-		} else if (verb === "git" && args[0] === "rm") {
+			for (const a of args) if (!a.text.startsWith("-")) add(a);
+		} else if (verb === "git" && args[0]?.text === "rm") {
 			const rmArgs = args.slice(1);
-			const dashDash = rmArgs.indexOf("--");
+			const dashDash = rmArgs.findIndex((arg) => arg.text === "--");
 			const fileArgs =
 				dashDash >= 0
 					? rmArgs.slice(dashDash + 1)
-					: rmArgs.filter((a) => !a.startsWith("-"));
+					: rmArgs.filter((a) => !a.text.startsWith("-"));
 			for (const a of fileArgs) add(a);
-		} else if (verb === "git" && args[0] === "mv") {
+		} else if (verb === "git" && args[0]?.text === "mv") {
 			addMoveSources(args.slice(1));
 		} else if (verb === "mv") {
 			addMoveSources(args);

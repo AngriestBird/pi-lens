@@ -12,6 +12,8 @@ import {
 	tokenizeShellCommand,
 	type ReadSpan,
 } from "../../clients/bash-file-access.js";
+import { ReadGuard } from "../../clients/read-guard.js";
+import { registerSearchReads } from "../../clients/search-read-registration.js";
 import { pinTestHome, removeTempDirSync } from "./test-utils.js";
 
 let tmp: string;
@@ -470,6 +472,86 @@ describe("extractGrepSearchReadsFromOutput", () => {
 			{ file: a, startLine: 9, endLine: 9, contextBefore: 2, contextAfter: 2 },
 		]);
 	});
+
+	it.each([
+		[
+			"quoted pattern and bare filename",
+			"grep -n '~/proj/x.ts' ~/proj/x.ts",
+			"home",
+		],
+		[
+			"bare pattern and quoted filename",
+			"grep -n ~/proj/x.ts '~/proj/x.ts'",
+			"~",
+		],
+	])(
+		"binds quoting to the filename token: %s (#4577 R4)",
+		(_label, command, selected) => {
+			const home = path.join(tmp, "home");
+			fs.mkdirSync(path.join(tmp, ".git"));
+			for (const dir of ["home", "~"]) {
+				const file = touchLines(path.join(dir, "proj", "x.ts"));
+				fs.writeFileSync(file, "~/proj/x.ts\n");
+			}
+			fs.writeFileSync(
+				path.join(tmp, "~", "proj", "x.ts"),
+				`${home}/proj/x.ts\n`,
+			);
+			const restoreHome = pinTestHome(home);
+			try {
+				const guard = new ReadGuard("r4-collision");
+				// Real bash probe's single-file output. In the mirror, bash expands
+				// the PATTERN; the literal file can contain that pattern too.
+				const output =
+					selected === "home" ? "1:~/proj/x.ts" : `1:${home}/proj/x.ts`;
+				const locations = extractGrepSearchReadsFromOutput(
+					command,
+					tmp,
+					output,
+				);
+				registerSearchReads(guard, locations, {
+					projectRoot: tmp,
+					turnIndex: 1,
+					writeIndex: 0,
+				});
+				const expected = path.join(tmp, selected, "proj", "x.ts");
+				const unseen = path.join(
+					tmp,
+					selected === "home" ? "~" : "home",
+					"proj",
+					"x.ts",
+				);
+				expect(guard.getReadHistory(expected)).toHaveLength(1);
+				expect(guard.getReadHistory(unseen)).toHaveLength(0);
+			} finally {
+				restoreHome();
+			}
+		},
+	);
+
+	it.each(["cat", "touch", "rm"])(
+		"keeps identical %s operands distinct by quoting (#4577 R4)",
+		(verb) => {
+			const home = path.join(tmp, "home");
+			const homeFile = touchLines(path.join("home", "proj", "x.ts"));
+			const literalFile = touchLines(path.join("~", "proj", "x.ts"));
+			const restoreHome = pinTestHome(home);
+			try {
+				const command = `${verb} '~/proj/x.ts' ~/proj/x.ts`;
+				const actual =
+					verb === "cat"
+						? extractReadPathsFromCommand(command, tmp).map(
+								(span) => span.filePath,
+							)
+						: verb === "touch"
+							? extractWrittenPathsFromCommand(command, tmp)
+							: extractDeletedPathsFromCommand(command, tmp);
+				expect(actual).toEqual([literalFile, homeFile]);
+			} finally {
+				restoreHome();
+			}
+		},
+	);
 
 	// #4577 R2-1: the two grep paths that resolve an operand must receive the
 	// segment's quoting bit like the three other `resolveCandidate` callers. `args`
