@@ -1425,6 +1425,15 @@ export interface BackstopSweepOptions {
 	onComplete?: (outcome: BackstopSweepOutcome) => void;
 	/** Test seam: observe each armed grace retry. */
 	onGraceRetryScheduled?: (delayMs: number) => void;
+	/**
+	 * Test seam: replace the wall-clock arming of the one follow-up sweep, so a
+	 * test can run the composed retry itself instead of racing its timer
+	 * (#4488). Defaults to {@link scheduleUntrackedOrphanSweep}.
+	 */
+	graceRetryScheduler?: (
+		delayMs: number,
+		options: BackstopSweepOptions,
+	) => unknown;
 }
 
 /**
@@ -1509,11 +1518,15 @@ function scheduleGraceRetryIfNeeded(
 		0,
 		options.graceRetryDelayMs ?? graceMs + BACKSTOP_GRACE_RETRY_MARGIN_MS,
 	);
-	scheduleUntrackedOrphanSweep(delayMs, {
-		...options,
+	// The one-retry budget rides with the options, never with the scheduler, so
+	// a test that runs the follow-up itself still sweeps the real retry shape.
+	const { graceRetryScheduler, ...retryBase } = options;
+	const retryOptions: BackstopSweepOptions = {
+		...retryBase,
 		force: true,
 		allowGraceRetry: false,
-	});
+	};
+	(graceRetryScheduler ?? scheduleUntrackedOrphanSweep)(delayMs, retryOptions);
 	options.onGraceRetryScheduled?.(delayMs);
 	return delayMs;
 }

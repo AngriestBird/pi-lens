@@ -248,8 +248,8 @@ function reasonsFor(kind: string): Array<{ subject: string; reason: string }> {
 	);
 }
 
-// #2669: a sweep that spares a candidate on the grace arms a follow-up sweep
-// on a real timer (as little as a few ms — tests pin `graceRetryDelayMs`).
+// #2669/#4488: a sweep that spares a candidate on the grace arms a follow-up
+// sweep on a real timer (as little as a few ms — tests pin `graceRetryDelayMs`).
 // That retry appends its OWN `orphan_backstop_reaped` row asynchronously,
 // with no `graceRetryInMs` (it always runs with `allowGraceRetry: false`).
 // Reading "the LAST such row" is therefore reading the wrong sweep's
@@ -259,6 +259,13 @@ function reasonsFor(kind: string): Array<{ subject: string; reason: string }> {
 // recently INVOKED sweep, so the lookup always resolves to the row THAT
 // sweep logged (the first `orphan_backstop_reaped` row at or after the
 // watermark), never a later retry's.
+//
+// The second half of the same defect (#4488 recurrence): a case that waits
+// for that retry does not own its timer either. #2669's fix made the
+// metadata lookup immune, but the "arms one follow-up" case still raced a
+// wall-clock watchdog against a 5ms timer, and a slow runner rejected the
+// wait while the retry kept running into the next case. The cases below now
+// take the `graceRetryScheduler` boundary and run the follow-up themselves.
 let sweepIndex = 0;
 
 function sweepUntrackedOrphans(
@@ -650,17 +657,23 @@ describe("#1864 review F2: a grace-spared candidate is re-examined", () => {
 		});
 		let completions = 0;
 		let scheduledRetries = 0;
-		let resolveRetry: ((outcome: string) => void) | undefined;
-		const retryCompleted = new Promise<string>((resolve) => {
-			resolveRetry = resolve;
-		});
+		let armedDelayMs: number | undefined;
+		let runRetry:
+			| (() => ReturnType<typeof sweepUntrackedOrphansImpl>)
+			| undefined;
 
 		const outcome = await sweepUntrackedOrphans({
 			...FAST,
 			graceRetryDelayMs: 5,
-			onComplete: (completedOutcome) => {
+			// #4488: own the follow-up instead of racing its wall-clock timer.
+			// Production hands its composed retry options to this scheduler; the
+			// case runs them itself, after the direct sweep released the lock.
+			graceRetryScheduler: (delayMs, options) => {
+				armedDelayMs = delayMs;
+				runRetry = () => sweepUntrackedOrphansImpl(options);
+			},
+			onComplete: () => {
 				completions += 1;
-				if (completions === 2) resolveRetry?.(completedOutcome);
 			},
 			onGraceRetryScheduled: () => {
 				scheduledRetries += 1;
@@ -669,21 +682,18 @@ describe("#1864 review F2: a grace-spared candidate is re-examined", () => {
 		const directSweepStart = sweepIndex;
 
 		expect(outcome).toBe("clean");
+		expect(completions).toBe(1);
+		expect(scheduledRetries).toBe(1);
+		expect(armedDelayMs).toBe(5);
+		// The re-arm forces past the cooldown stamp this very sweep wrote, and
+		// bounds the chain at one. Both facts travel in the options, so running
+		// them here proves the retry cannot be throttled.
+		expect(runRetry).toBeDefined();
+		const retryOutcome = await runRetry?.();
 
-		// Await the retry's completion signal instead of racing its unref'd timer.
-		const retryOutcome = await Promise.race([
-			retryCompleted,
-			new Promise<string>((_, reject) =>
-				setTimeout(
-					() => reject(new Error("grace retry did not complete")),
-					100,
-				),
-			),
-		]);
 		expect(retryOutcome).toBe("clean");
 		expect(completions).toBe(2);
-		expect(scheduledRetries).toBe(1);
-		expect(h.state.scannerPids.length).toBeGreaterThanOrEqual(2);
+		expect(h.state.scannerPids).toHaveLength(2);
 
 		expect(backstopMetadataForSweep(directSweepStart).tooFresh).toBe(1);
 		expect(backstopMetadataForSweep(directSweepStart).graceRetryInMs).toBe(5);
@@ -691,15 +701,19 @@ describe("#1864 review F2: a grace-spared candidate is re-examined", () => {
 
 	it("does not arm a follow-up when nothing was spared", async () => {
 		h.state.stdout = "";
+		let schedulerCalls = 0;
 
 		const outcome = await sweepUntrackedOrphans({
 			...FAST,
 			graceRetryDelayMs: 5,
+			graceRetryScheduler: () => {
+				schedulerCalls += 1;
+			},
 		});
 
 		expect(outcome).toBe("clean");
 		expect(backstopMetadata().graceRetryInMs).toBeUndefined();
-		await new Promise((resolve) => setTimeout(resolve, 80));
+		expect(schedulerCalls).toBe(0);
 		expect(h.state.scannerPids).toHaveLength(1);
 	});
 
@@ -928,7 +942,12 @@ describe("#1857 item 4: spawn-grace guard", () => {
 			command: ORPHAN_COMMAND,
 		});
 
-		const outcome = await sweepUntrackedOrphans(FAST);
+		const outcome = await sweepUntrackedOrphans({
+			...FAST,
+			// #4488: this case tests the grace partition, not the follow-up. Take
+			// the scheduler boundary so no 90s wall-clock retry outlives it.
+			graceRetryScheduler: () => {},
+		});
 
 		expect(outcome).toBe("clean");
 		expect(backstopMetadata().tooFresh).toBe(1);
