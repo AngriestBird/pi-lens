@@ -178,6 +178,34 @@ async function teardownRowsIn(
 	) as Array<{ metadata?: unknown }>;
 }
 
+/**
+ * Read a session sidecar once its fire-and-forget write lands. The writer is
+ * `saveSessionState` (unowned by any drained writer registry), so the wait is a
+ * bounded run of event-loop turns, never a wall-clock sleep.
+ */
+async function sidecarFor(
+	cwd: string,
+	sessionId: string,
+): Promise<Awaited<ReturnType<typeof loadSessionState>>> {
+	const { loadSessionState } =
+		await import("../clients/session-state-store.js");
+	for (let turn = 0; turn < 50; turn += 1) {
+		const state = await loadSessionState(cwd, sessionId);
+		if (state !== undefined) return state;
+		await new Promise<void>((resolve) => setImmediate(resolve));
+	}
+	return undefined;
+}
+
+/** The rows that record a departing scope being retired at a shutdown. */
+async function shutdownScopeRows(sink: LatencySink): Promise<unknown[]> {
+	return (await sinkRows(sink)).filter(
+		(row) =>
+			row.phase === "session_scope_transition" &&
+			(row.metadata as { transition?: string })?.transition === "shutdown",
+	);
+}
+
 /** The roots this process's registry entry currently holds. */
 async function rootsForThisPid(): Promise<string[]> {
 	const entry = (await readInstanceRegistry()).find(
@@ -614,12 +642,7 @@ describe("#4554 one activation, four live sessions", () => {
 
 		// #3611's scope retires once, at the LAST member's leave: a non-last
 		// leave leaves it current for the members behind it.
-		const shutdownScopeRows = (await sinkRows(sink)).filter(
-			(row) =>
-				row.phase === "session_scope_transition" &&
-				(row.metadata as { transition?: string })?.transition === "shutdown",
-		);
-		expect(shutdownScopeRows).toHaveLength(1);
+		expect(await shutdownScopeRows(sink)).toHaveLength(1);
 	}, 45_000);
 
 	it("counts a re-delivered session_start as one member, not two", async () => {
@@ -690,5 +713,144 @@ describe("#4554 one activation, four live sessions", () => {
 			sessionRole: "primary",
 			usageRecords: 1,
 		});
+	}, 45_000);
+
+	it("r6 a superseded primary's delayed shutdown never tears down its replacement", async () => {
+		// #4554 r6: r5's admission reconciliation removes the superseded primary
+		// from membership, so its later shutdown is UNMATCHED — and the unmatched
+		// branch answered `isLast: true` even with the replacement still live. The
+		// owner test then passed for the REPLACEMENT's context, so the shared LSP
+		// fleet and the registry entry were torn down under a live session, and
+		// the `finally` retired that live session's scope.
+		process.env.PI_LENS_TEST_MODE = "0";
+		const { pi, resetLSPService } = await bootActivation();
+		const sink = await latencySink();
+		sink.clear();
+		await sink.flush();
+		const primary = makeCtx({ cwd: project, sessionId: "old" });
+		await start(pi, primary);
+		// pi disposes the replaced ctx before it delivers that ctx's delayed
+		// shutdown, which is what makes the replacement a full admission.
+		Object.defineProperty(primary, "isIdle", {
+			get() {
+				throw new Error(STALE_CTX_MESSAGE);
+			},
+		});
+		const replacement = makeCtx({ cwd: project, sessionId: "replacement" });
+		await start(pi, replacement, "new");
+		expect(getActiveSessionId()).toBe("replacement");
+		await settleRegistryWrites();
+
+		await shutdown(pi, primary, { type: "session_shutdown", reason: "reload" });
+
+		// No shared teardown: the replacement is still a live member.
+		expect(teardownResets(resetLSPService)).toHaveLength(0);
+		expect(getActiveSessionId()).toBe("replacement");
+		await settleRegistryWrites();
+		expect(await rootsForThisPid()).toContain(project);
+		// The replacement's own live scope is not retired by its predecessor.
+		await sink.flush();
+		expect(await shutdownScopeRows(sink)).toHaveLength(0);
+		// A leave this activation cannot place has no scope of its own, so it
+		// writes no sidecar for the id it arrived with.
+		expect(await sidecarFor(project, "old")).toBeUndefined();
+
+		// The replacement still owns the teardown when it really is the last leave.
+		await shutdown(pi, replacement, {
+			type: "session_shutdown",
+			reason: "quit",
+		});
+		expect(teardownResets(resetLSPService)).toHaveLength(1);
+		expect(getActiveSessionId()).toBeUndefined();
+		await settleRegistryWrites();
+		expect(await rootsForThisPid()).not.toContain(project);
+	}, 45_000);
+
+	it("r6 an unknown-id shutdown leaves a live member's activation alone", async () => {
+		// The same derivation from the other side: a shutdown this activation
+		// never recorded (an unreadable or foreign id) is not the LAST leave while
+		// a member it did record is still live, so it must not tear the shared
+		// infra down on the fail-safe path.
+		process.env.PI_LENS_TEST_MODE = "0";
+		const { pi, resetLSPService } = await bootActivation();
+		const sink = await latencySink();
+		sink.clear();
+		await sink.flush();
+		const primary = makeCtx({ cwd: project, sessionId: "m-primary" });
+		await start(pi, primary);
+		await settleRegistryWrites();
+
+		const ghost = makeCtx({ cwd: project, sessionId: "ghost" });
+		await shutdown(pi, ghost);
+
+		expect(teardownResets(resetLSPService)).toHaveLength(0);
+		expect(getActiveSessionId()).toBe("m-primary");
+		await settleRegistryWrites();
+		expect(await rootsForThisPid()).toContain(project);
+		await sink.flush();
+		expect(await shutdownScopeRows(sink)).toHaveLength(0);
+
+		await shutdown(pi, primary);
+		expect(teardownResets(resetLSPService)).toHaveLength(1);
+		expect(getActiveSessionId()).toBeUndefined();
+	}, 45_000);
+
+	it("r6 a departing primary's sidecar is saved under its own id, not the replacement's", async () => {
+		// Greptile #4563 r6 F2: r5 made the primary handoff run for a NON-LAST
+		// leave, and that branch saved the departing scope under
+		// `runtime.telemetrySessionId` — the module-level coordinator's identity,
+		// which a second activation's full admission had already renamed to its
+		// replacement. The departing primary's stores landed in the replacement's
+		// sidecar file.
+		const { defineSessionStore } = await import("../clients/session-scope.js");
+		defineSessionStore({
+			name: "r6-sidecar-witness",
+			policy: {
+				startup: "none",
+				new: "none",
+				resume: "none",
+				fork: "none",
+				reload: "none",
+			},
+			snapshot: (scope) => scope.role,
+			restore() {},
+			reason: "Name the scope a shutdown sidecar was written from.",
+		});
+		const a = await bootActivation();
+		const primary = makeCtx({ cwd: project, sessionId: "m" });
+		const sibling = makeCtx({ cwd: project, sessionId: "s" });
+		await start(a.pi, primary);
+		await start(a.pi, sibling);
+		// pi disposes the old ctx before the host admits its replacement.
+		Object.defineProperty(primary, "isIdle", {
+			get() {
+				throw new Error(STALE_CTX_MESSAGE);
+			},
+		});
+		// A second activation in the SAME module instance: `index.ts`'s `runtime`
+		// is module scope, so its telemetry identity is process-wide and this
+		// start renames it.
+		const b = await bootActivation();
+		const replacement = makeCtx({ cwd: project, sessionId: "r" });
+		await start(b.pi, replacement, "new");
+		expect(getActiveSessionId()).toBe("r");
+
+		await shutdown(a.pi, primary, {
+			type: "session_shutdown",
+			reason: "reload",
+		});
+
+		// The live secondary still holds the activation open: no shared teardown.
+		expect(teardownResets(a.resetLSPService)).toHaveLength(0);
+		expect(getActiveSessionId()).toBe("r");
+		// The replacement's file was never named by this leave...
+		expect(await sidecarFor(project, "r")).toBeUndefined();
+		// ...and the departing primary's own sidecar carries its own scope.
+		const own = await sidecarFor(project, "m");
+		expect(own?.sessionId).toBe("m");
+		expect(own?.stores["r6-sidecar-witness"]).toBe("primary");
+		// The sibling can still leave normally afterwards.
+		await shutdown(a.pi, sibling);
+		expect(teardownResets(a.resetLSPService)).toHaveLength(0);
 	}, 45_000);
 });

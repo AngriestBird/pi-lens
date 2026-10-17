@@ -1638,6 +1638,11 @@
 							"title": "runs the shared teardown when the primary is the last session to leave"
 						}
 					]
+				},
+				"UnmatchedLeaveIsLast": {
+					"value": "FALSE",
+					"test": "tests/index-4554-last-member-teardown.test.ts",
+					"title": "r6 a superseded primary's delayed shutdown never tears down its replacement"
 				}
 			},
 			"notCodeChoice": [

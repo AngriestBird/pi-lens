@@ -1127,3 +1127,13 @@ teardown (`OwnScopeAndCleanup`); a separate departed set requires cleanup
 for every actual leave. Three starts and three leaves bound the state
 space without a time abstraction. The handler witness tests the real stores,
 registration, LSP boundary, and runtime turn keys; this slice models identities.
+
+Round 6 (Greptile F1) adds the DELAYED unmatched leave and the constant it
+switches. `LateLeave` is the superseded primary's shutdown arriving after the
+replacement's full admission retired its membership record: a live member
+remains and the registration belongs to the replacement, so the leave may only
+run its own cleanup. `UnmatchedLeaveIsLast = FALSE` is as-built (last means no
+live member remains); `= TRUE` is the pre-fix reading, and
+`Mut4554r6UnmatchedLeaveLast` registers its violation of `NoEarlyTeardown`.
+The round-5 handoff save already keys `saved` by the departing context, which
+is the as-built identity Greptile F2 restored in `index.ts`.

@@ -850,11 +850,13 @@ function activateExtension(hostPi: ExtensionAPI) {
 	 * (#4554).
 	 *
 	 * An unmatched leave — a shutdown whose id is unreadable, or one whose start
-	 * this activation never recorded — cannot prove a live sibling, so it answers
-	 * `isLast: true` with no role, and the caller falls back to the shared
-	 * classifier: skipping the teardown is the #472 orphan class (a leaked LSP
-	 * fleet and registry entry), and this module's fail-safe direction has always
-	 * been to tear down on uncertainty.
+	 * this activation never recorded or already retired — is not the last leave
+	 * while a member this activation DID record is still live (#4554 r6). It
+	 * answers `isLast` only when no live member remains, and no role: the caller
+	 * falls back to the shared classifier for its own labelling. When membership
+	 * is empty the fail-safe direction still holds — skipping the teardown is the
+	 * #472 orphan class (a leaked LSP fleet and registry entry), so an unmatched
+	 * leave with nothing left is treated as the last one.
 	 */
 	const leaveLiveSession = (
 		sessionId: string | undefined,
@@ -872,7 +874,14 @@ function activateExtension(hostPi: ExtensionAPI) {
 				? liveSessionMembers.splice(memberIndex, 1)[0]
 				: undefined;
 		return {
-			isLast: memberIndex < 0 || liveSessionMembers.length === 0,
+			// Last means NO live member remains, matched or not. A leave this
+			// activation cannot place is still not the last leave while a member it
+			// did record is live: the superseded primary's delayed shutdown is
+			// exactly that leave (its record left at the replacement's full
+			// admission), and reading it as last reset the shared LSP fleet and the
+			// registry entry under the live replacement, and retired that
+			// replacement's scope in the `finally` (#4554 r6).
+			isLast: liveSessionMembers.length === 0,
 			role: member?.role,
 			scope: member?.scope,
 			matched: member !== undefined,
@@ -4104,11 +4113,20 @@ function activateExtension(hostPi: ExtensionAPI) {
 						// the session manager pi hands it.
 						sessionManager: getSessionManager(ctx),
 					}) &&
-					runtime.hasStableSessionId
+					// #4554 r6: the DEPARTING member's identity names its sidecar.
+					// `runtime` is this module's process-wide coordinator, so its
+					// telemetry identity is last-write-wins: once another activation
+					// admitted a replacement it named THAT session, and this leave's
+					// stores were written into the replacement's file. A leave this
+					// activation recorded is the only one with a scope of its own to
+					// save, which is the same membership identity the shared-teardown
+					// decision uses.
+					stableSessionId !== undefined &&
+					leave.matched
 				) {
 					persistScope(
 						shutdownCwd ?? process.cwd(),
-						runtime.telemetrySessionId,
+						stableSessionId,
 						shutdownScope,
 					);
 				}
