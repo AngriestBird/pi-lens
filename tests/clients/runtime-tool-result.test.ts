@@ -22,6 +22,7 @@ import {
 	registerPrimarySession,
 	releasePrimarySession,
 } from "../../clients/session-lifecycle.js";
+import { resetSessionScopedState } from "../../clients/runtime-session.js";
 import {
 	getDegradationSummary,
 	resetDegradationLedger,
@@ -50,7 +51,6 @@ import {
 	captureFileStats,
 	getOpaqueBaselineStore,
 	opaqueBaselineSlot,
-	resetOpaqueMutationState,
 } from "../../clients/opaque-mutation-scan.js";
 import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 import { pinTestHome } from "./test-utils.js";
@@ -6147,7 +6147,10 @@ describe("the prescan root reaches the send and the recognized set (#4504 r1)", 
 	});
 	afterEach(() => {
 		lspServiceHolder.current = undefined;
-		resetOpaqueMutationState();
+		// The shared per-session reset, not a hand-picked subset: `handleToolResult`
+		// touches stores beyond the opaque baseline these cases write, and
+		// `resetSessionScopedState` clears them all (the opaque store included).
+		resetSessionScopedState();
 	});
 
 	// Greptile P1 on #4594: the scan of the secondary's own checkout cleared a
