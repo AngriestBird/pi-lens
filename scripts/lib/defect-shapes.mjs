@@ -64,17 +64,38 @@ export function sourceWithoutFencedBlocks(source, options = {}) {
 	return output.join("\n");
 }
 
+// The HTML spec's four comment ends, all of which GitHub renders
+// (13.2.5.43-46): `-->` closes a comment (comment end state), `--!>` closes it
+// too (comment end bang state), and `<!-->` and `<!--->` are complete empty
+// comments closed abruptly (comment start, and comment start dash, states).
+// Only a comment with none of them runs to the end of the text. Recurrence:
+// this rule knew `-->` alone, so a body writing `<!-- note --!>` or `<!-->`
+// blanked every line after it even though the reader sees that text, and a
+// gating rule then read a visible answer as absent (CodeQL js/bad-tag-filter
+// alert #70 flagged this class on a test fixture).
+const HTML_COMMENT = /<!--(?:>|->|[\s\S]*?(?:--!?>|$))/g;
+
+/**
+ * Blank HTML comments, keeping every line's length so line numbers and offsets
+ * still match the raw source (LF text). The one spelling of the comment-end
+ * rule: a second copy in a consumer is how a renderer's spelling goes missing.
+ */
+export function blankHtmlComments(text) {
+	return String(text ?? "").replace(HTML_COMMENT, (comment) =>
+		comment.replace(/[^\n]/g, " "),
+	);
+}
+
 /**
  * Blank fenced and indented code blocks (see `sourceWithoutFencedBlocks`) and
- * HTML comments, keeping line numbers. An unterminated `<!--` runs to the end
- * of the text, as GitHub renders it. A reference or heading quoted in an
- * example or a comment never counts as real content. Fences go first: a
- * `<!--` inside a fence is literal text.
+ * HTML comments (see `blankHtmlComments`), keeping line numbers. An
+ * unterminated `<!--` runs to the end of the text, as GitHub renders it. A
+ * reference or heading quoted in an example or a comment never counts as real
+ * content. Fences go first: a `<!--` inside a fence is literal text.
  */
 export function blankMarkdown(text, options = {}) {
-	return sourceWithoutFencedBlocks(String(text ?? ""), options).replace(
-		/<!--[\s\S]*?(?:-->|$)/g,
-		(comment) => comment.replace(/[^\n]/g, " "),
+	return blankHtmlComments(
+		sourceWithoutFencedBlocks(String(text ?? ""), options),
 	);
 }
 
