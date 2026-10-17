@@ -681,7 +681,11 @@ export function parseGrepContextLines(args: string[]): GrepContextLines {
 	return { before, after };
 }
 
-function extractGrepSearchFiles(args: string[], cwd: string): string[] {
+function extractGrepSearchFiles(
+	args: string[],
+	cwd: string,
+	literalTilde?: ReadonlySet<string>,
+): string[] {
 	const files: string[] = [];
 	let patternSeen = false;
 	let endOfOptions = false;
@@ -701,7 +705,10 @@ function extractGrepSearchFiles(args: string[], cwd: string): string[] {
 			patternSeen = true;
 			continue;
 		}
-		const abs = resolveCandidate(token, cwd);
+		// #4577 R2-1: the segment's quoting bit. `args` are already
+		// `stripQuotes`d, so the raw-text branch in `resolveCandidate` cannot
+		// see the quotes and this set is the only evidence left.
+		const abs = resolveCandidate(token, cwd, literalTilde);
 		if (!abs) continue;
 		try {
 			if (!nodeFs.statSync(abs).isFile()) continue;
@@ -716,12 +723,15 @@ function extractGrepSearchFiles(args: string[], cwd: string): string[] {
 function parseGrepLineWithFile(
 	line: string,
 	cwd: string,
+	literalTilde?: ReadonlySet<string>,
 ): SearchReadLocation | undefined {
 	const match = /^(.*?):(\d+):/.exec(stripAnsi(line));
 	if (!match) return undefined;
 	const lineNumber = Number.parseInt(match[2], 10);
 	if (!Number.isFinite(lineNumber) || lineNumber < 1) return undefined;
-	const abs = resolveCandidate(match[1], cwd);
+	// #4577 R2-1: same quoting bit as `extractGrepSearchFiles` — a
+	// multi-file hit names the operand as grep printed it.
+	const abs = resolveCandidate(match[1], cwd, literalTilde);
 	if (!abs) return undefined;
 	try {
 		if (!nodeFs.statSync(abs).isFile()) return undefined;
@@ -826,9 +836,15 @@ function collectGrepCommandFiles(
 	hasLineNumberGrep: boolean;
 	files: Set<string>;
 	context: GrepContextLines;
+	literalTilde: ReadonlySet<string>;
 } {
 	const files = new Set<string>();
 	let hasLineNumberGrep = false;
+	// #4577 R2-1: the quoting bit for the words of every contributing grep
+	// segment. The parsed hits carry no segment identity, so the union is the
+	// same "the literal reading wins everywhere" rule `literalTilde`'s own
+	// docblock states for one command that spells a text both ways.
+	const literalTilde = new Set<string>();
 	// A command can chain several greps whose output all reaches the model, but
 	// the parsed hits carry no segment identity. Credit the SMALLEST context any
 	// contributing grep printed, so no line is credited that a hit from the
@@ -854,7 +870,16 @@ function collectGrepCommandFiles(
 					after: Math.min(context.after, segmentContext.after),
 				}
 			: segmentContext;
-		for (const file of extractGrepSearchFiles(args, cwd)) files.add(file);
+		for (const word of segments[i].literalTilde ?? []) {
+			literalTilde.add(word);
+		}
+		for (const file of extractGrepSearchFiles(
+			args,
+			cwd,
+			segments[i].literalTilde,
+		)) {
+			files.add(file);
+		}
 		if (grepPipesIntoTruncatingTail(segments, i)) truncated = true;
 	}
 	return {
@@ -863,6 +888,7 @@ function collectGrepCommandFiles(
 		context: truncated
 			? { before: 0, after: 0 }
 			: (context ?? { before: 0, after: 0 }),
+		literalTilde,
 	};
 }
 
@@ -882,12 +908,17 @@ function parseGrepOutputSearchReads(
 	output: string,
 	cwd: string,
 	singleFile?: string,
+	literalTilde?: ReadonlySet<string>,
 ): SearchReadLocation[] {
 	const out: SearchReadLocation[] = [];
 	const seen = new Set<string>();
 	for (const rawLine of output.split(/\r?\n/)) {
 		if (!rawLine) continue;
-		dedupePushSearchRead(out, seen, parseGrepLineWithFile(rawLine, cwd));
+		dedupePushSearchRead(
+			out,
+			seen,
+			parseGrepLineWithFile(rawLine, cwd, literalTilde),
+		);
 		if (singleFile) {
 			dedupePushSearchRead(
 				out,
@@ -909,13 +940,16 @@ export function extractGrepSearchReadsFromOutput(
 	cwd: string,
 	output: string,
 ): SearchReadLocation[] {
-	const { hasLineNumberGrep, files, context } = collectGrepCommandFiles(
-		command,
-		cwd,
-	);
+	const { hasLineNumberGrep, files, context, literalTilde } =
+		collectGrepCommandFiles(command, cwd);
 	if (!hasLineNumberGrep) return [];
 	const singleFile = files.size === 1 ? [...files][0] : undefined;
-	const locations = parseGrepOutputSearchReads(output, cwd, singleFile);
+	const locations = parseGrepOutputSearchReads(
+		output,
+		cwd,
+		singleFile,
+		literalTilde,
+	);
 	// Only the printed context lines were delivered to the model, so only they
 	// are credited. A bare grep credits its match line alone (#1904 item 2).
 	for (const loc of locations) {

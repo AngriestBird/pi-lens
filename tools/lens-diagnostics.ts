@@ -605,6 +605,15 @@ export function createLensDiagnosticsTool(
 					Array.isArray(lspParams.paths) && lspParams.paths.length > 0;
 				if (scope === "workspace" && !hasExplicitPath && !hasExplicitPaths) {
 					lspParams.path = cwd;
+					// #4577 R2-2: this path is pi-lens's own, not the model's. It comes
+					// from `ctx.cwd` already absolute, so the probe must NOT put it
+					// through the host-argument stages again: a cwd holding a
+					// host-unicode space (a no-break space in a directory name) was
+					// folded to its U+0020 sibling, and the whole workspace scan then
+					// failed with `Path not found`. The flag states the provenance at
+					// the injection point, exactly as `_pathAlreadyResolved` does for
+					// a recovered write on the `tool_result` seam.
+					lspParams.pathAlreadyResolved = true;
 				}
 				const lspStart = Date.now();
 				const result = (await lspProbe.execute(

@@ -470,6 +470,57 @@ describe("extractGrepSearchReadsFromOutput", () => {
 			{ file: a, startLine: 9, endLine: 9, contextBefore: 2, contextAfter: 2 },
 		]);
 	});
+
+	// #4577 R2-1: the two grep paths that resolve an operand must receive the
+	// segment's quoting bit like the three other `resolveCandidate` callers. `args`
+	// arrive already `stripQuotes`d, so a quoted `~` here lost its only evidence
+	// and was expanded to `$HOME` — a file grep never opened (bash reads
+	// `<cwd>/~/…`). `$HOME` and the literal file both exist with different bytes,
+	// so a wrong resolver answer is distinguishable from a missing file.
+	it("credits a quoted ~ operand to the literal file, not the home file (#4577 R2-1)", () => {
+		const home = path.join(tmp, "home");
+		fs.mkdirSync(path.join(home, "proj"), { recursive: true });
+		fs.writeFileSync(path.join(home, "proj", "x.ts"), "home line\n");
+		const literalFile = touchLines(path.join("~", "proj", "x.ts"), 40);
+		const restoreHome = pinTestHome(home);
+		try {
+			expect(os.homedir()).toBe(home);
+			// Single-operand spelling: grep prints `line:text`, so the credited
+			// path comes from `extractGrepSearchFiles` (the operand extraction).
+			expect(
+				extractGrepSearchReadsFromOutput(
+					"grep -n bad '~/proj/x.ts'",
+					tmp,
+					"2:const bad = 9;",
+				).map((loc) => loc.file),
+			).toEqual([literalFile]);
+		} finally {
+			restoreHome();
+		}
+	});
+
+	it("credits a multi-file hit's quoted ~ operand to the literal file (#4577 R2-1)", () => {
+		const home = path.join(tmp, "home");
+		fs.mkdirSync(path.join(home, "proj"), { recursive: true });
+		fs.writeFileSync(path.join(home, "proj", "x.ts"), "home line\n");
+		const literalFile = touchLines(path.join("~", "proj", "x.ts"), 40);
+		const restoreHome = pinTestHome(home);
+		try {
+			expect(os.homedir()).toBe(home);
+			// Multi-file spelling: grep prefixes each hit with the file it printed,
+			// so this credited path comes from `parseGrepLineWithFile`, the other
+			// site that had lost the bit.
+			expect(
+				extractGrepSearchReadsFromOutput(
+					"grep -n bad '~/proj/x.ts' other.ts",
+					tmp,
+					"~/proj/x.ts:2:const bad = 9;",
+				).map((loc) => loc.file),
+			).toEqual([literalFile]);
+		} finally {
+			restoreHome();
+		}
+	});
 });
 
 describe("parseGrepContextLines", () => {

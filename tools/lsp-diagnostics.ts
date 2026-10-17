@@ -468,6 +468,9 @@ export function createLspDiagnosticsTool(
 				concurrency?: number;
 				waitMs?: number;
 				serverScope?: string;
+				// #4577 R2-2: internal provenance, set only by
+				// `tools/lens-diagnostics.ts` when it injects its own cwd default.
+				pathAlreadyResolved?: boolean;
 			};
 			const severity = (typedParams.severity ?? "all") as string;
 			const cwd = ctx.cwd ?? process.cwd();
@@ -608,7 +611,16 @@ export function createLspDiagnosticsTool(
 			// (clients/pipeline.ts's ctx.filePath) does. A bare `path.resolve(cwd,
 			// rawPath)` pinned `~/x` under the session cwd, a path that cannot
 			// exist (#4576).
-			const absPath = normalizeMapKey(resolveHostToolPath(rawPath, cwd));
+			// #4577 R2-2: an internally generated default (`scope=workspace`'s
+			// injected cwd) is already an absolute identity, so it skips the
+			// resolver: folding its bytes named a sibling that does not exist and
+			// failed the whole scan. `normalizeMapKey` still applies — it folds no
+			// unicode spaces, only separators, dot segments and on-disk casing.
+			const absPath = normalizeMapKey(
+				typedParams.pathAlreadyResolved === true
+					? rawPath
+					: resolveHostToolPath(rawPath, cwd),
+			);
 
 			let stat: fs.Stats;
 			try {

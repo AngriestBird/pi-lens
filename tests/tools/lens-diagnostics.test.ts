@@ -5806,6 +5806,48 @@ describe("lens_diagnostics mode=delta — per-entry freshness on a merged report
 });
 
 /**
+ * #4577 R2-2: `scope=workspace` with no explicit `path`/`paths` injects the
+ * session cwd as the scan target (`tools/lens-diagnostics.ts`). That path is
+ * pi-lens's own — it came from `ctx.cwd`, already absolute — so the probe must
+ * not put it through the host-argument stages again. The unicode-space fold
+ * rewrote a cwd holding U+00A0 into its U+0020 sibling and the whole workspace
+ * scan failed with `Path not found`: a caller that asked for the workspace got
+ * no scan at all. Nothing about this class is model-typed, so the fix states
+ * the provenance at the injection point.
+ */
+describe("lens_diagnostics injected workspace default (#4577 R2-2)", () => {
+	it("scans a cwd holding a host-unicode space instead of a folded sibling", async () => {
+		const parent = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-diag-ws-nbsp-"),
+		);
+		const cwd = path.join(parent, "proj\u00A0x");
+		fs.mkdirSync(cwd);
+		const file = path.join(cwd, "a.ts");
+		fs.writeFileSync(file, "export const a = 1;\n");
+		// `touchFile` answers nothing, so the batch collector falls through to
+		// `getDiagnostics`; the file it names proves which directory was scanned.
+		const getDiagnostics = vi.fn(async (_filePath: string) => []);
+		const service = makeLspServiceDouble({
+			touchFile: vi.fn(async (_filePath: string) => undefined),
+			getDiagnostics,
+		});
+		try {
+			const tool = makeTool({}, service);
+			const result = (await run(
+				tool,
+				{ source: "lsp", scope: "workspace" },
+				cwd,
+			)) as { isError?: boolean };
+			// Pre-fix: isError true, text `Path not found: …/proj x`.
+			expect(result.isError).toBeFalsy();
+			expect(getDiagnostics.mock.calls.map((call) => call[0])).toContain(file);
+		} finally {
+			removeTempDirSync(parent);
+		}
+	});
+});
+
+/**
  * #4577 M2: the scalar `path` argument is a host-supplied tool path, so it
  * resolves through the shared host resolver. A bare `path.resolve(cwd, path)`
  * turned `~/x` into `<cwd>/~/x`, the tool answered "Path not found" for a file
