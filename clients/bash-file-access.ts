@@ -208,9 +208,9 @@ export function tokenizeShellCommand(command: string): ShellCommandSegment[] {
 	let escaped = false;
 	let unsupported = false;
 	let atTokenStart = true;
-	const appendChar = (ch: string, quoted: boolean) => {
+	const appendChar = (ch: string | undefined, quoted: boolean) => {
 		if (word === "") wordFirstCharQuoted = quoted;
-		word += ch;
+		word += ch ?? "";
 	};
 	const flushWord = () => {
 		if (word) {

@@ -24,6 +24,7 @@ import {
 } from "../../clients/latency-logger.js";
 import { resetProjectLensConfigCache } from "../../clients/project-lens-config.js";
 import { pinTestHome, removeTempDirSync } from "../clients/test-utils.js";
+import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 
 const projectDiagnosticsMocks = vi.hoisted(() => ({
@@ -5820,13 +5821,11 @@ describe("lens_diagnostics scalar path resolution (#4577 M2)", () => {
 		fs.mkdirSync(path.dirname(realFile), { recursive: true });
 		fs.writeFileSync(realFile, "export const a = 1;\n");
 		const restoreHome = pinTestHome(home);
+		// No `touchFile` answer, so the route falls through to `getDiagnostics`;
+		// the path the tool touched is what proves which file it resolved.
+		const touchFile = vi.fn(async (_filePath: string) => undefined);
 		const getDiagnostics = vi.fn(async (_filePath: string) => []);
-		const service = {
-			announceCreatedFiles: vi.fn(),
-			touchFile: vi.fn(async () => undefined),
-			getDiagnostics,
-			getCapabilitySnapshots: vi.fn(async () => []),
-		};
+		const service = makeLspServiceDouble({ touchFile, getDiagnostics });
 		try {
 			expect(os.homedir()).toBe(home);
 			const tool = makeTool({}, service);
@@ -5838,6 +5837,7 @@ describe("lens_diagnostics scalar path resolution (#4577 M2)", () => {
 			expect((result as { isError?: boolean }).isError).toBeFalsy();
 			// The server was asked about the expanded file — the pre-fix spelling
 			// named `<cwd>/~/proj/tilde.ts`, which does not exist.
+			expect(touchFile.mock.calls[0]?.[0]).toBe(realFile);
 			expect(getDiagnostics.mock.calls[0]?.[0]).toBe(realFile);
 		} finally {
 			restoreHome();
@@ -5857,13 +5857,11 @@ describe("lens_diagnostics scalar path resolution (#4577 M2)", () => {
 		fs.mkdirSync(path.dirname(realFile), { recursive: true });
 		fs.writeFileSync(realFile, "export const a = 1;\n");
 		const restoreHome = pinTestHome(home);
+		// No `touchFile` answer, so the route falls through to `getDiagnostics`;
+		// the path the tool touched is what proves which file it resolved.
+		const touchFile = vi.fn(async (_filePath: string) => undefined);
 		const getDiagnostics = vi.fn(async (_filePath: string) => []);
-		const service = {
-			announceCreatedFiles: vi.fn(),
-			touchFile: vi.fn(async () => undefined),
-			getDiagnostics,
-			getCapabilitySnapshots: vi.fn(async () => []),
-		};
+		const service = makeLspServiceDouble({ touchFile, getDiagnostics });
 		try {
 			expect(os.homedir()).toBe(home);
 			const tool = makeTool({}, service);
@@ -5873,7 +5871,11 @@ describe("lens_diagnostics scalar path resolution (#4577 M2)", () => {
 				cwd,
 			);
 			expect((result as { isError?: boolean }).isError).toBeFalsy();
-			expect(getDiagnostics.mock.calls[0]?.[0]).toBe(realFile);
+			expect(
+				[...touchFile.mock.calls, ...getDiagnostics.mock.calls].map(
+					(call) => call[0],
+				),
+			).toContain(realFile);
 		} finally {
 			restoreHome();
 			removeTempDirSync(cwd);
