@@ -1318,10 +1318,13 @@ export function createLspNavigationTool(
 				);
 			}
 
+			// #4577 M2: `path` is a host-supplied tool path, so it resolves
+			// through the shared host resolver (`~`/`~/` expansion, `file://`,
+			// `@` prefix, unicode spaces). The bare join pinned `~/x` under the
+			// cwd — a path that cannot exist — and the LSP then answered for a
+			// document nothing had opened (#4576).
 			const filePath = rawPath
-				? path.isAbsolute(rawPath)
-					? rawPath
-					: path.resolve(ctx.cwd || ".", rawPath)
+				? resolveHostToolPath(rawPath, ctx.cwd || ".")
 				: "";
 
 			let filePathIsDirectory = false;

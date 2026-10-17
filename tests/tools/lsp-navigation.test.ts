@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+	pinTestHome,
 	removeTempDirSync,
 	setupTestEnvironment,
 } from "../clients/test-utils.js";
@@ -1700,21 +1701,6 @@ describe("lsp_navigation tool", () => {
 	// rewrite are the production ones.
 	describe("rename_file destination resolution (#4578)", () => {
 		/**
-		 * Point the host's HOME at `home` and prove the pin TOOK. A rename writes
-		 * at the resolved destination, so a pin that silently fell through to the
-		 * developer's real home would put a test file in it.
-		 */
-		const pinHome = (home: string): void => {
-			vi.stubEnv("HOME", home);
-			vi.stubEnv("USERPROFILE", home);
-			expect(os.homedir(), "the fixture HOME did not take effect").toBe(home);
-		};
-
-		afterEach(() => {
-			vi.unstubAllEnvs();
-		});
-
-		/**
 		 * A real `LSPService` rename behind the factory-seeded service double.
 		 *
 		 * `renameFile` is the PRODUCTION implementation on a real service, so the
@@ -1825,7 +1811,13 @@ describe("lsp_navigation tool", () => {
 				},
 			});
 			addRenameClient(harness.realService, "typescript", env.tmpDir, client);
-			pinHome(env.tmpDir);
+			// Pin the host homes at the fixture and prove the pin TOOK: the rename
+			// writes at the resolved destination, so a pin that silently fell through
+			// would put a test file in the developer's real home.
+			const restoreHome = pinTestHome(env.tmpDir);
+			expect(os.homedir(), "the fixture HOME did not take effect").toBe(
+				env.tmpDir,
+			);
 
 			try {
 				const result = await renameThroughTool(
@@ -1856,6 +1848,7 @@ describe("lsp_navigation tool", () => {
 				expectNoServerStarted(harness, ["typescript"]);
 				expect(harness.touchFile).toHaveBeenCalled();
 			} finally {
+				restoreHome();
 				await harness.stop();
 				env.cleanup();
 			}
@@ -1867,7 +1860,10 @@ describe("lsp_navigation tool", () => {
 			const oldPath = path.join(project.tmpDir, "old.ts");
 			fs.writeFileSync(oldPath, "export const value = 1;\n");
 			const harness = makeRenameHarness();
-			pinHome(home.tmpDir);
+			const restoreHome = pinTestHome(home.tmpDir);
+			expect(os.homedir(), "the fixture HOME did not take effect").toBe(
+				home.tmpDir,
+			);
 
 			try {
 				const result = await renameThroughTool(
@@ -1891,6 +1887,7 @@ describe("lsp_navigation tool", () => {
 				expect(fs.existsSync(path.join(home.tmpDir, "renamed.ts"))).toBe(false);
 				expectNoServerStarted(harness, []);
 			} finally {
+				restoreHome();
 				await harness.stop();
 				project.cleanup();
 				home.cleanup();
@@ -2143,5 +2140,46 @@ describe("lsp_navigation workspaceDiagnostics delivery gate (#1634)", () => {
 				toolName: "lsp_navigation",
 			}),
 		);
+	});
+});
+
+/**
+ * #4577 M2: `path` is a host-supplied tool path, so it resolves through the
+ * shared host resolver. A bare `path.resolve(ctx.cwd, path)` turned `~/x` into
+ * `<cwd>/~/x`, so the server was asked about a document nothing had opened.
+ * The `rename_file` destination (`newFilePath`) keeps its bare join: it is a
+ * mutation target, filed as #4578.
+ */
+describe("lsp_navigation path resolution (#4577 M2)", () => {
+	it("resolves a ~ path to $HOME, not under the cwd", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-nav-tilde-"));
+		const home = path.join(root, "home");
+		const filePath = path.join(home, "proj", "refs.ts");
+		fs.mkdirSync(path.dirname(filePath), { recursive: true });
+		fs.writeFileSync(filePath, "const a = normalizeMapKey('x');\n");
+		const restoreHome = pinTestHome(home);
+		try {
+			expect(os.homedir()).toBe(home);
+			const tool = createLspNavigationTool((flag) => flag === "lens-lsp");
+			await tool.execute(
+				"refs-tilde",
+				{
+					operation: "references",
+					path: "~/proj/refs.ts",
+					line: 1,
+					character: 12,
+				},
+				new AbortController().signal,
+				null,
+				{ cwd: path.join(home, "proj") },
+			);
+			const references = (
+				mocked.service as { references: ReturnType<typeof vi.fn> }
+			).references;
+			expect(references.mock.calls[0]?.[0]).toBe(filePath);
+		} finally {
+			restoreHome();
+			removeTempDirSync(root);
+		}
 	});
 });
