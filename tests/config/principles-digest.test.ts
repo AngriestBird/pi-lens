@@ -20,7 +20,7 @@
  * The digest's structure comes from the block's shape, not from one bullet
  * spelling (#4571 F-1): a list item at any indentation, written with `-`, `*`,
  * `+`, `1.` or `1)`, is an entry, and a non-blank line that is neither an item,
- * a continuation of one, nor one of the block's two intro sentences is an
+ * a continuation of one, nor one of the block's two framing sentences is an
  * offender, so a principle cannot hide as a plain paragraph.
  */
 
@@ -43,6 +43,18 @@ const DIGEST_INTRO = "The principles, one line each";
 
 /** The statement that makes the vendored copy authoritative. */
 const VENDORED_WINS = "vendored file wins on any difference";
+
+/**
+ * The digest's two framing sentences, matched whole and never as a phrase
+ * (#4571 round 4, PRRT_kwDORt8rec6tfuKa). Phrase containment classified any
+ * line carrying one of the phrases as framing, so a list item that merely
+ * quoted a phrase was exempt from the entry rule and from the structure rule;
+ * both rules skip a framing line.
+ */
+const DIGEST_FRAMES = new Set([
+	`${DIGEST_INTRO}, linked to their section of the vendored file.`,
+	`The ${VENDORED_WINS} from this digest.`,
+]);
 
 /** A digest link to a heading of the vendored principles file. */
 const PRINCIPLES_LINK =
@@ -110,10 +122,11 @@ type DigestLineKind = "item" | "continuation" | "intro" | "blank" | "stray";
 
 /**
  * Classify every line of `block` once, so the entry rule and the structure
- * rule cannot drift apart: a list item in any spelling or indentation starts
- * an entry, an indented line after the first item continues one, a blank line
- * separates, the block's two intro sentences frame it, and anything else is
- * stray (#4571 F-1).
+ * rule cannot drift apart (#4571 F-1). The order is the contract: a list item
+ * in any spelling or indentation starts an entry and outranks the framing text,
+ * a line that equals one of the block's two framing sentences frames it,
+ * a blank line separates, an indented line after the first item continues one,
+ * and anything else is stray (#4571 round 4).
  */
 function classifyDigestLines(
 	block: string,
@@ -122,9 +135,8 @@ function classifyDigestLines(
 	return block.split(/\r?\n/).map((line) => {
 		let kind: DigestLineKind;
 		if (line.trim() === "") kind = "blank";
-		else if (line.includes(DIGEST_INTRO) || line.includes(VENDORED_WINS))
-			kind = "intro";
 		else if (LIST_ITEM.test(line)) kind = "item";
+		else if (DIGEST_FRAMES.has(line.trim())) kind = "intro";
 		else if (seenItem && /^[ \t]/.test(line)) kind = "continuation";
 		else kind = "stray";
 		if (kind === "item") seenItem = true;
@@ -152,7 +164,7 @@ export function digestEntries(block: string): string[] {
 
 /**
  * Digest lines that carry no digest structure (#4571 F-1): neither a list item,
- * nor a continuation of one, nor one of the block's two intro sentences. A
+ * nor a continuation of one, nor one of the block's two framing sentences. A
  * principle hidden as a plain paragraph carries no link, so the per-entry rule
  * cannot see it; the block is checked for stray lines as well.
  */
@@ -255,6 +267,7 @@ describe("AGENTS.md principles digest (#4565)", () => {
 		["a star bullet", "* Starred entry: no principles link."],
 		["a plus bullet", "+ Plussed entry: no principles link."],
 		["an ordered marker", "1. Numbered entry: no principles link."],
+		["a parenthesized marker", "1) Numbered entry: no principles link."],
 		["an indented bullet", "  - Indented entry: no principles link."],
 	])("counts a list item written as %s as an entry", (_name, spelling) => {
 		// Recurrence: F-1 on #4571. `digestEntries` read only column-0 `- `
@@ -290,8 +303,13 @@ describe("AGENTS.md principles digest (#4565)", () => {
 			"- Quoted `[§2](docs/engineering-principles.md#gone)`",
 			"",
 		].join("\n");
-		expect(principlesLinks(digestBlock(quoted))).toEqual([
+		const block = digestBlock(quoted);
+		expect(principlesLinks(block)).toEqual([
 			{ text: "§1", anchor: "1-building" },
+		]);
+		// The quoting item is still an entry, and its blanked link does not count.
+		expect(digestLinkOffenders(block)).toEqual([
+			"- Quoted -> 0 principles link(s)",
 		]);
 	});
 
@@ -301,7 +319,7 @@ describe("AGENTS.md principles digest (#4565)", () => {
 		// the guard it replaced never looked at those lines either.
 		expect(digestStructureOffenders(digestBlock(agents))).toEqual([]);
 		const hidden = [
-			`${DIGEST_INTRO}, linked.`,
+			`${DIGEST_INTRO}, linked to their section of the vendored file.`,
 			`The ${VENDORED_WINS} from this digest.`,
 			"",
 			"- Linked entry ([§1](docs/engineering-principles.md#1-building)).",
@@ -314,6 +332,79 @@ describe("AGENTS.md principles digest (#4565)", () => {
 		expect(digestLinkOffenders(block)).toEqual([]);
 		expect(digestStructureOffenders(block)).toEqual([
 			"A principle that hides as a plain paragraph. -> neither a list item, a continuation, nor an intro sentence",
+		]);
+	});
+
+	it.each([
+		[
+			"the vendored-wins phrase",
+			"- Ensure the vendored file wins on any difference.",
+		],
+		["the intro phrase", "- The principles, one line each, are linked below."],
+	])("reads a list item carrying %s as an entry", (_name, item) => {
+		// Recurrence: PRRT_kwDORt8rec6tfuKa. The classifier tested the two
+		// framing phrases before the list marker, so a bullet added after the
+		// twelve entries read as `intro`. Both rules skip `intro`, so an
+		// unlinked principle passed the link rule and the structure rule, and
+		// the 12-entry floors still held because it was never counted.
+		const block = digestBlock(
+			[
+				`${DIGEST_INTRO}, linked to their section of the vendored file.`,
+				`The ${VENDORED_WINS} from this digest.`,
+				"",
+				"- Linked entry ([§1](docs/engineering-principles.md#1-building)).",
+				item,
+				"",
+			].join("\n"),
+		);
+		// The marker outranks the phrase: an entry, not framing text.
+		expect(digestStructureOffenders(block)).toEqual([]);
+		expect(digestLinkOffenders(block)).toEqual([
+			`${item} -> 0 principles link(s)`,
+		]);
+	});
+
+	it("matches the two framing sentences whole, never by phrase", () => {
+		// Recurrence: PRRT_kwDORt8rec6tfuKa in the other direction. Containment
+		// exempted any line carrying the phrase, so a reworded or padded framing
+		// line stayed invisible instead of reding as drift.
+		const reworded =
+			"The vendored file wins on any difference from this digest, mostly.";
+		const block = digestBlock(
+			[
+				`${DIGEST_INTRO}, linked to their section of the vendored file.`,
+				`The ${VENDORED_WINS} from this digest.`,
+				"",
+				"- Linked entry ([§1](docs/engineering-principles.md#1-building)).",
+				"",
+				reworded,
+				"",
+			].join("\n"),
+		);
+		expect(digestLinkOffenders(block)).toEqual([]);
+		expect(digestStructureOffenders(block)).toEqual([
+			`${reworded} -> neither a list item, a continuation, nor an intro sentence`,
+		]);
+	});
+
+	it("refuses a heading inside the digest block", () => {
+		// Table row: a heading is neither an item, a continuation nor a framing
+		// sentence, so a principle promoted to a heading reds rather than
+		// escaping both rules.
+		const block = digestBlock(
+			[
+				`${DIGEST_INTRO}, linked to their section of the vendored file.`,
+				`The ${VENDORED_WINS} from this digest.`,
+				"",
+				"- Linked entry ([§1](docs/engineering-principles.md#1-building)).",
+				"",
+				"### 2. Testing",
+				"",
+			].join("\n"),
+		);
+		expect(digestLinkOffenders(block)).toEqual([]);
+		expect(digestStructureOffenders(block)).toEqual([
+			"### 2. Testing -> neither a list item, a continuation, nor an intro sentence",
 		]);
 	});
 });
