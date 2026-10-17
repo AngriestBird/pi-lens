@@ -1483,6 +1483,11 @@ Test authoring screens:
   must be deleted.
   A `vi.doMock` is undone in the file's top-level `afterEach`, not in the
   case that mocks it: a shuffle runs the next case on the leaked mock.
+  `vi.resetModules()` does not clear `globalThis` or pre-reset singletons.
+  Per-case session cleanup calls `resetSessionScopedState` from
+  `clients/runtime-session.ts`, rather than a hand-picked subset of resets.
+  A test that proves a reset owner's own contract keeps the owner call and
+  states why.
   After `vi.resetModules()`
   every `await import(...)` is a second module copy; import statically what
   the tool under test also reads.
