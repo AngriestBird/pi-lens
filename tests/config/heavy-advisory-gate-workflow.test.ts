@@ -33,9 +33,10 @@ import { DEFAULT_DEADLINE_SECONDS } from "../../scripts/ci-heavy-gate.mjs";
 
 const byCodeUnit = (a = "", b = "") => (a < b ? -1 : a > b ? 1 : 0);
 
-// #3801: the heavy advisory jobs (CodeQL, the Windows Vitest subset) start
-// only after the required checks passed on the same head. Each case names the
-// regression it keeps out; the real YAML is loaded, never a source regex.
+// #3801: the heavy advisory jobs (CodeQL) start only after the required checks
+// passed on the same head. Each case names the regression it keeps out; the real
+// YAML is loaded, never a source regex. #4518 promoted the Windows Vitest subset
+// out of this gate, so it has its own contract in windows-vitest-workflow.test.ts.
 
 const ROOT = resolve(import.meta.dirname, "../..");
 
@@ -507,8 +508,7 @@ describe("#3801 heavy advisory jobs wait for the required checks", () => {
 	});
 
 	// Recurrence (#3801 docs-only scope): a gate that starts on a docs-only diff
-	// would launch CodeQL and the Windows run for a change the maintainer wants
-	// spared them. And a status function in the gate's `if` (always(),
+	// would launch CodeQL for a change the maintainer wants spared it. And a status function in the gate's `if` (always(),
 	// cancelled(), failure()) would replace the implicit success() over its
 	// needs, releasing the heavy jobs on a head whose required job is red.
 	it("starts only for a code diff, and only when every needed job succeeded", () => {
