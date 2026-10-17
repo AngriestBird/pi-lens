@@ -9,11 +9,13 @@
  * one line and links the vendored file's own heading, so a renamed heading
  * reds here instead of leaving every link dead.
  *
- * The scan reads comment-and-code-blanked markdown: a link quoted in an HTML
- * comment, a fence or an inline code span is an example, not a digest entry.
- * `stripSource` does not apply to markdown (no string literals), so the
- * comment half of the detector rule is `blankMarkdown` and inline code spans
- * are blanked here.
+ * The scan reads comment-blanked markdown. Digest entries and their links are
+ * read with inline code blanked as well: a link quoted in an HTML comment, a
+ * fence or an inline code span is an example, not a digest entry. Heading text
+ * keeps its inline code, because GitHub slugs that content into the anchor, so
+ * a heading's code span is a live title rather than an example. `stripSource`
+ * does not apply to markdown (no string literals), so the comment half of the
+ * detector rule is `blankMarkdown`.
  */
 
 import * as fs from "node:fs";
@@ -53,9 +55,13 @@ export function headingSlug(heading: string): string {
 		.replace(/\s+/g, "-");
 }
 
-/** Anchors of every ATX heading in `markdown`, read code-blanked. */
+/**
+ * Anchors of every ATX heading in `markdown`, read comment- and fence-blanked
+ * but with inline code kept: GitHub slugs a heading's code span into its
+ * anchor, so `` `TLA+` and config `` is `tla-and-config`.
+ */
 export function headingAnchors(markdown: string): Set<string> {
-	const blanked = blankInlineCode(blankMarkdown(markdown));
+	const blanked = blankMarkdown(markdown);
 	return new Set(
 		[...blanked.matchAll(/^#{1,6}[ \t]+(?<text>.+?)[ \t]*$/gm)].map((match) =>
 			headingSlug(match.groups?.text ?? ""),
@@ -86,6 +92,27 @@ export function digestBlock(agentsMarkdown: string): string {
 	return end < 0 ? rest : rest.slice(0, end);
 }
 
+/**
+ * The digest entries of `block`: each `- ` bullet plus its indented
+ * continuation lines, ended by the next bullet or an unindented line. A link
+ * on a continuation line belongs to the entry above it.
+ */
+export function digestEntries(block: string): string[] {
+	const entries: string[][] = [];
+	let current: string[] | null = null;
+	for (const line of block.split(/\r?\n/)) {
+		if (/^- /.test(line)) {
+			current = [line];
+			entries.push(current);
+		} else if (current && (line.trim() === "" || /^\s/.test(line))) {
+			current.push(line);
+		} else {
+			current = null;
+		}
+	}
+	return entries.map((lines) => lines.join("\n"));
+}
+
 /** Every principle link in `block`: its label and the anchor it targets. */
 export function principlesLinks(
 	block: string,
@@ -94,6 +121,21 @@ export function principlesLinks(
 		text: match.groups?.text ?? "",
 		anchor: match.groups?.anchor ?? "",
 	}));
+}
+
+/**
+ * Digest entries that do not carry exactly one principles link (#4565 R2).
+ * Moving one entry's link onto another keeps the block's totals, so the rule
+ * is per entry, never "as many links as bullets".
+ */
+export function digestLinkOffenders(block: string): string[] {
+	return digestEntries(block)
+		.map((entry) => ({ entry, links: principlesLinks(entry) }))
+		.filter(({ links }) => links.length !== 1)
+		.map(
+			({ entry, links }) =>
+				`${entry.split("\n")[0]} -> ${links.length} principles link(s)`,
+		);
 }
 
 const agents = fs.readFileSync(AGENTS_PATH, "utf8");
@@ -118,11 +160,39 @@ describe("AGENTS.md principles digest (#4565)", () => {
 		expect(links.length).toBeGreaterThanOrEqual(12);
 	});
 
-	it("gives every digest line one principles link", () => {
+	it("gives every digest entry exactly one principles link", () => {
 		const block = digestBlock(agents);
-		const bullets = [...block.matchAll(/^- /gm)].length;
-		expect(bullets).toBeGreaterThanOrEqual(12);
-		expect(principlesLinks(block)).toHaveLength(bullets);
+		const entries = digestEntries(block);
+		expect(entries.length).toBeGreaterThanOrEqual(12);
+		const offenders = digestLinkOffenders(block);
+		expect(
+			offenders,
+			`digest entries without exactly one principles link: ${offenders.join("; ")}`,
+		).toEqual([]);
+	});
+
+	it("reads the one-link rule per entry, not per block", () => {
+		// Recurrence: comparing total bullets with total links let one entry's
+		// link move onto another, so an unlinked principle still passed
+		// (PRRT_kwDORt8rec6tfaHk).
+		const mixed = [
+			"The principles, one line each.",
+			"- Unlinked entry: no principles link here.",
+			"- Double-linked entry ([§1](docs/engineering-principles.md#1-building))",
+			"  ([§2](docs/engineering-principles.md#2-testing)).",
+			"- Single-linked entry",
+			"  ([§1](docs/engineering-principles.md#1-building)).",
+			"",
+		].join("\n");
+		const block = digestBlock(mixed);
+		const entries = digestEntries(block);
+		expect(entries).toHaveLength(3);
+		// The count comparison this guard replaced cannot see the defect.
+		expect(principlesLinks(block)).toHaveLength(entries.length);
+		expect(digestLinkOffenders(block)).toEqual([
+			"- Unlinked entry: no principles link here. -> 0 principles link(s)",
+			"- Double-linked entry ([§1](docs/engineering-principles.md#1-building)) -> 2 principles link(s)",
+		]);
 	});
 
 	it("states that the vendored file wins on any difference", () => {
@@ -161,6 +231,15 @@ describe("headingSlug (#4565)", () => {
 		["Fixture adopts an ancestor root", "fixture-adopts-an-ancestor-root"],
 	])("slugs %s as %s", (heading, slug) => {
 		expect(headingSlug(heading)).toBe(slug);
+	});
+
+	it("slugs a heading's inline code through the real scan", () => {
+		// Recurrence: blanking inline code before slugging turned
+		// `## `TLA+` and config` into `and-config`, so a heading whose live
+		// anchor GitHub publishes read dead here (PRRT_kwDORt8rec6tfaHl).
+		const anchors = headingAnchors("## What it is\n\n## `TLA+` and config\n");
+		expect(anchors.has("tla-and-config")).toBe(true);
+		expect(anchors.has("and-config")).toBe(false);
 	});
 
 	it("reads anchors from the vendored file's real headings", () => {
