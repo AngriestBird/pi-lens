@@ -78,14 +78,19 @@ const COMMENT_END = /--!?>/;
 /**
  * Index just past the end of the HTML comment whose `<!--` ends at `from`, or
  * -1 when it does not close in `text`. The two abrupt ends close inside the
- * opener, in the `>` or `->` the start already left behind. The one spelling
- * of the comment-end rule: a consumer with its own copy is how a renderer's
- * spelling goes missing.
+ * opener, in the `>` or `->` the start already left behind, so they answer
+ * only at the opener itself: a continuation line mid-comment starts in comment
+ * state, where `->` is body data (13.2.5.43: `-` to comment end dash, `>`
+ * appends `-` and reconsumes in comment state) and only `--!?>` closes it. The
+ * one spelling of the comment-end rule: a consumer with its own copy is how a
+ * renderer's spelling goes missing.
  */
 export function htmlCommentEnd(text, from) {
-	const rest = String(text ?? "").slice(from);
-	if (rest.startsWith(">")) return from + 1;
-	if (rest.startsWith("->")) return from + 2;
+	const source = String(text ?? "");
+	const rest = source.slice(from);
+	const atOpener = source.slice(Math.max(0, from - 4), from) === "<!--";
+	if (atOpener && rest.startsWith(">")) return from + 1;
+	if (atOpener && rest.startsWith("->")) return from + 2;
 	const end = COMMENT_END.exec(rest);
 	return end === null ? -1 : from + end.index + end[0].length;
 }

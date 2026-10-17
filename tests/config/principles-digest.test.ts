@@ -367,7 +367,7 @@ describe("AGENTS.md principles digest (#4565)", () => {
 	it("matches the two framing sentences whole, never by phrase", () => {
 		// Recurrence: PRRT_kwDORt8rec6tfuKa in the other direction. Containment
 		// exempted any line carrying the phrase, so a reworded or padded framing
-		// line stayed invisible instead of reding as drift.
+		// line stayed invisible instead of reading as drift.
 		const reworded =
 			"The vendored file wins on any difference from this digest, mostly.";
 		const block = digestBlock(
