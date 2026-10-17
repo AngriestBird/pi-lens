@@ -5907,31 +5907,32 @@ describe("host tool path resolution on the tool_result side (#4576)", () => {
 
 	it("dispatches the expanded home path, never the phantom <root>/~/ path", async () => {
 		const env = setupTestEnvironment("pi-lens-4576-tilde-");
-		// The fixture HOME sits under the checkout, not under os.tmpdir():
-		// `isPiOwnedTempPath` treats every `<tmp>/pi-*` root as pi-lens
-		// internal, and pi-lens would then skip the file for a reason unrelated
-		// to the path this test pins. `process.cwd()` is the repo root, which
-		// the mkdtemp-parent census exempts.
-		const homeRoot = fs.mkdtempSync(
-			path.join(process.cwd(), ".probe-4576-home-"),
-		);
-		const home = path.join(homeRoot, "home");
-		const projectRoot = path.join(env.tmpDir, "workspace");
-		const realFile = path.join(home, "proj", "src", "tilde.ts");
-		fs.mkdirSync(path.dirname(realFile), { recursive: true });
-		fs.mkdirSync(projectRoot, { recursive: true });
-		fs.writeFileSync(path.join(home, "proj", "package.json"), "{}\n");
-		fs.writeFileSync(realFile, "export const value = 1;\n");
-		const restoreHome = pinTestHome(home);
-		const runPipelineMock = vi.mocked(runPipeline);
-		runPipelineMock.mockReset();
-		runPipelineMock.mockResolvedValue({
-			output: "",
-			hasBlockers: false,
-			isError: false,
-			fileModified: false,
-		} as never);
+		// The fixture HOME needs a location `isPiOwnedTempPath` does not claim: it
+		// owns every `<tmp>/pi-*` root and every direct `<tmp>/` child, and pi-lens
+		// would then skip the file for a reason unrelated to the path this test
+		// pins. A generic-prefixed tmp root with the home nested one level down
+		// matches neither, and the harness owns the root, so an early throw cannot
+		// leave it behind (the repo-rooted one did: #4577 R4-2).
+		let homeEnv: ReturnType<typeof setupTestEnvironment> | undefined;
+		let restoreHome: (() => void) | undefined;
 		try {
+			homeEnv = setupTestEnvironment("4576-tilde-home-");
+			const home = path.join(homeEnv.tmpDir, "home");
+			const projectRoot = path.join(env.tmpDir, "workspace");
+			const realFile = path.join(home, "proj", "src", "tilde.ts");
+			fs.mkdirSync(path.dirname(realFile), { recursive: true });
+			fs.mkdirSync(projectRoot, { recursive: true });
+			fs.writeFileSync(path.join(home, "proj", "package.json"), "{}\n");
+			fs.writeFileSync(realFile, "export const value = 1;\n");
+			restoreHome = pinTestHome(home);
+			const runPipelineMock = vi.mocked(runPipeline);
+			runPipelineMock.mockReset();
+			runPipelineMock.mockResolvedValue({
+				output: "",
+				hasBlockers: false,
+				isError: false,
+				fileModified: false,
+			} as never);
 			// The pin is live before the handler runs: a stale HOME would make
 			// every assertion below pass against the wrong directory.
 			expect(os.homedir()).toBe(home);
@@ -5954,8 +5955,8 @@ describe("host tool path resolution on the tool_result side (#4576)", () => {
 				dispatchedPaths().some((p) => p.includes(`${path.sep}~${path.sep}`)),
 			).toBe(false);
 		} finally {
-			restoreHome();
-			removeTempDirSync(homeRoot);
+			restoreHome?.();
+			homeEnv?.cleanup();
 			env.cleanup();
 		}
 	});

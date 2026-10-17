@@ -12,6 +12,7 @@ import {
 	tokenizeShellCommand,
 	type ReadSpan,
 } from "../../clients/bash-file-access.js";
+import { toPosix } from "../../clients/path-utils.js";
 import { ReadGuard } from "../../clients/read-guard.js";
 import { registerSearchReads } from "../../clients/search-read-registration.js";
 import { pinTestHome, removeTempDirSync } from "./test-utils.js";
@@ -163,6 +164,22 @@ describe("extractReadPathsFromCommand — full-file viewers", () => {
 				limit: 2,
 			},
 		);
+	});
+
+	// #4577 R4: an absolute operand names the file the shell opened under the
+	// spelling the command carried, and re-resolving it rewrites that spelling —
+	// on win32 `C:/Users/…/large.ts` became `C:\Users\…` and redded the bash-cap
+	// case that pins the reported path (#4019). A dot segment is the same rewrite
+	// on every platform, and the posix spelling is what a Windows operand looks
+	// like, so this pins the rule on both.
+	it("keeps an absolute operand's spelling instead of re-resolving it (#4577 R4)", () => {
+		const f = touchLines("sub/c.ts", 2);
+		const spelled = toPosix(
+			`${path.dirname(f)}${path.sep}.${path.sep}${path.basename(f)}`,
+		);
+		expect(extractReadPathsFromCommand(`cat ${spelled}`, tmp)).toEqual([
+			{ filePath: spelled, offset: 1, limit: 2 },
+		]);
 	});
 
 	it("registers each file across && / ; segments and dedupes", () => {

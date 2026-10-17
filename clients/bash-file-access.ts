@@ -368,9 +368,10 @@ function resolveCandidate(token: ShellOperand, cwd: string): string | null {
 			: cleaned.startsWith("\\~")
 				? cleaned.slice(1)
 				: cleaned;
-	return path.isAbsolute(operand)
-		? path.resolve(operand)
-		: path.resolve(cwd, operand);
+	// An already-absolute operand keeps the spelling the command carried: a
+	// re-resolve rewrites it (`C:/x/large.ts` -> `C:\x\large.ts` on win32) and
+	// the read guard records that spelling (#4019, #4577 R4).
+	return path.isAbsolute(operand) ? operand : path.resolve(cwd, operand);
 }
 
 /** Parse a count flag value like `-20`, `-n20`, or the `20` following `-n`. */

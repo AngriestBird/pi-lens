@@ -866,7 +866,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// (bash expands `~` itself), so it keeps its own `path.isAbsolute` /
 		// `path.resolve` pair instead of the host-tool resolver, which applied
 		// host-argument stages a shell word never sees.
-		"clients/bash-file-access.ts": 10,
+		// 10 -> 9 (#4577 R4): an absolute operand keeps the spelling the command
+		// carried, so the re-resolving `path.resolve(operand)` is gone.
+		"clients/bash-file-access.ts": 9,
 		// 10 -> 7 (#4268): the hand-built `path.join` candidate list folds onto the
 		// shared `findLocalBinAt` trust seam, one construction site for the shim.
 		"clients/biome-client.ts": 7,
