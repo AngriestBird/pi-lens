@@ -169,6 +169,12 @@ describe("bot review threads and code-scanning alerts (#4566/#4575)", () => {
 		expect(text).toContain(
 			'gh api --paginate "repos/{owner}/{repo}/code-scanning/alerts',
 		);
+		// Round 2 of #4587: `--paginate` pages nothing on its own. The query
+		// pages through its cursor, so every cursor field the doc spells is
+		// pinned; deleting one leaves a query that reads page one for ever.
+		expect(text).toContain("$endCursor:String");
+		expect(text).toContain("after:$endCursor");
+		expect(text).toContain("pageInfo{hasNextPage endCursor}");
 		// The truncation itself is disclosed: one page never reads as the list.
 		expect(text).toMatch(/clear only after that page prints/i);
 		expect(text).toMatch(/one page is never read as the whole list/i);
