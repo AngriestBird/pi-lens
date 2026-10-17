@@ -73,17 +73,45 @@ export function sourceWithoutFencedBlocks(source, options = {}) {
 // blanked every line after it even though the reader sees that text, and a
 // gating rule then read a visible answer as absent (CodeQL js/bad-tag-filter
 // alert #70 flagged this class on a test fixture).
-const HTML_COMMENT = /<!--(?:>|->|[\s\S]*?(?:--!?>|$))/g;
+const COMMENT_END = /--!?>/;
+
+/**
+ * Index just past the end of the HTML comment whose `<!--` ends at `from`, or
+ * -1 when it does not close in `text`. The two abrupt ends close inside the
+ * opener, in the `>` or `->` the start already left behind. The one spelling
+ * of the comment-end rule: a consumer with its own copy is how a renderer's
+ * spelling goes missing.
+ */
+export function htmlCommentEnd(text, from) {
+	const rest = String(text ?? "").slice(from);
+	if (rest.startsWith(">")) return from + 1;
+	if (rest.startsWith("->")) return from + 2;
+	const end = COMMENT_END.exec(rest);
+	return end === null ? -1 : from + end.index + end[0].length;
+}
 
 /**
  * Blank HTML comments, keeping every line's length so line numbers and offsets
- * still match the raw source (LF text). The one spelling of the comment-end
- * rule: a second copy in a consumer is how a renderer's spelling goes missing.
+ * still match the raw source (LF text). A consumer that masks one line at a
+ * time asks `htmlCommentEnd` rather than carrying its own end rule.
  */
 export function blankHtmlComments(text) {
-	return String(text ?? "").replace(HTML_COMMENT, (comment) =>
-		comment.replace(/[^\n]/g, " "),
-	);
+	const source = String(text ?? "");
+	let output = "";
+	let index = 0;
+	while (index < source.length) {
+		const start = source.indexOf("<!--", index);
+		if (start === -1) {
+			output += source.slice(index);
+			break;
+		}
+		output += source.slice(index, start);
+		const end = htmlCommentEnd(source, start + 4);
+		const stop = end === -1 ? source.length : end;
+		output += source.slice(start, stop).replace(/[^\n]/g, " ");
+		index = stop;
+	}
+	return output;
 }
 
 /**

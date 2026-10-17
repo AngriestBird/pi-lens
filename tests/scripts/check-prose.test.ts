@@ -84,6 +84,31 @@ describe("checkProse", () => {
 		expect(result.warnings.join(" ")).toContain("filler");
 	});
 
+	const longAfterEnd =
+		"This deliberately long sentence sits after a comment close and contains enough ordinary words in one unbroken unit to exceed the prose limit that the checker enforces on every submitted body because the guard must never miss visible text.";
+	// Recurrence (#4565): this masker ended an HTML comment at `-->` alone,
+	// so text GitHub renders after `--!>`, `<!-->` or `<!--->` was masked,
+	// and a gating rule read visible prose as absent. Each row names one of
+	// the four ends the HTML spec gives a comment (13.2.5.43-46).
+	const commentEnds: Array<[string, string]> = [
+		["`-->`", `<!-- note --> ${longAfterEnd}`],
+		["`--!>`", `<!-- note --!> ${longAfterEnd}`],
+		["`<!-->`", `<!--> ${longAfterEnd}`],
+		["`<!--->`", `<!---> ${longAfterEnd}`],
+	];
+	for (const [end, text] of commentEnds)
+		it(`counts a long sentence after the ${end} end`, () => {
+			expect(checkProse(text).errors.join(" ")).toContain("sentence-length");
+		});
+
+	it("still hides a long sentence inside a comment", () => {
+		const hidden =
+			"This comment body sits inside the comment and carries enough ordinary words in one unbroken unit to exceed the prose limit that the checker enforces on every submitted body because the guard must never count hidden text as prose.";
+		expect(
+			checkProse(`<!-- ${hidden} --> Run the test.`).errors.join(" "),
+		).not.toContain("sentence-length");
+	});
+
 	it("applies the checker to PR prose sections only", () => {
 		const long =
 			"This sentence has enough ordinary words to exceed the prose limit and should fail when it appears in a Summary section because the PR body gate checks that section during every local and CI validation run.";
