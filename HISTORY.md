@@ -21,7 +21,7 @@ three times on the quick-mode cell with `expected undefined`. That cell saved a
 snapshot under its fixture and planted no marker, so an empty `/tmp/.git` on the
 dev host became the project root and the snapshot was read from the tmp root. A
 `TMPDIR` holding only that `.git` reproduced the red; a clean one passed. #4559
-planted `package.json` in that cell. #4560 swept the class: 91 real
+planted `package.json` in that cell. #4560 tracks the class: 91 real
 `handleSessionStart` invocations, 38 candidate cells, three private marker
 planters, and writes at the tmp root that nothing removes.
 
@@ -41,8 +41,8 @@ states no attack path, so the maintainer decided it ships as an ordinary public
 PR with no security advisory. Its wording stays at class level.
 
 **The principles digest.** Greptile's custom context carried a pasted copy of
-`docs/engineering-principles.md`, so its comments cited rules the repo file had
-reworded. AGENTS.md "How to use this file" now carries a 12-line digest, each
+`docs/engineering-principles.md`, a third copy that could drift from the repo
+file unnoticed. The maintainer replaced it with a pointer to the repo files. AGENTS.md "How to use this file" now carries a 12-line digest, each
 line linking its section of the vendored file, and
 `tests/config/principles-digest.test.ts` reds on an anchor the vendored file
 lacks.
