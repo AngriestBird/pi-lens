@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { gitExecFileSync } from "./lib/git-fixture-env.mjs";
 import {
 	blankMarkdown,
+	blankHtmlComments,
 	HEADING,
 	parseDefectShapes,
 	sourceWithoutFencedBlocks,
@@ -53,6 +54,9 @@ const FLATTENED_BODY_MAX_NEWLINES = 2;
 // One post-image read bound, shared by the git and working-tree branches of
 // `headFileSource`: a file-count bound alone is not a byte bound.
 const MAX_SOURCE_BYTES = 16 * 1024 * 1024;
+// The unclassifiable-post-image notice names at most this many files, then the
+// remainder as a count (#4585 row classification is an agent-facing surface).
+const UNCLASSIFIED_REPORT_LIMIT = 5;
 const REPAIR_HEADINGS = [
 	"Why",
 	"Notes for the reviewer",
@@ -1118,6 +1122,31 @@ function sourceQuoteAfter(lines, bodyLine) {
 	if (end === -1) return null;
 	const text = lines.slice(index + 1, end).filter((row) => row.trim());
 	return { end, info: opener[2].trim(), text };
+}
+
+// A transcript fence is tagged with one of the output info strings or left
+// bare: an author who pastes a red into an untagged fence has still quoted it,
+// and requiring a tag is an enumerated detector that misses the next spelling.
+// A named language (`typescript`, `json`) marks an example, not a run.
+const TRANSCRIPT_INFO = /^(?:(?:text|console|shell|sh|bash|output))?$/i;
+// #4585 row 1: what makes a fence a red. A Vitest failure list (`× title`, with
+// or without a run prefix) and a count (`2 failed`) are as much a quoted red as
+// `FAIL` or an assertion dump.
+const FAILURE_MARKER =
+	/\b(?:[1-9]\d* failed|AssertionError|failed test titles|error TS\d+)\b|^\s*FAIL\b|[×✗✕]\s+\S/m;
+// A red a body quotes inline, in a backticked span (a mutation table's cell).
+const BACKTICKED_RED =
+	/`[^`]*(?:[×✗✕]\s+\S|[1-9]\d* failed|AssertionError|failed test titles|error TS\d+)[^`]*`/;
+
+/** One visible fence that quotes a failing run of its own. */
+function isFailureQuote(quote) {
+	const text = quote.text.join("\n");
+	if (!TRANSCRIPT_INFO.test(quote.info)) return false;
+	// A declared exit code decides the verdict: a green mutation run quotes no
+	// red, whatever its titles still print.
+	const exit = /exit code: (\d+)/.exec(text);
+	if (exit?.[1] === "0") return false;
+	return FAILURE_MARKER.test(text);
 }
 
 function isTranscriptQuote(quote) {
@@ -2297,7 +2326,241 @@ export function lintClassSweep(body = "", { diff } = {}) {
 	return [CLASS_SWEEP_MESSAGE];
 }
 
+/**
+ * A quoted transcript vouches for a test title when the title's static
+ * segments appear in order on one of its lines. A declaration's own `%s`
+ * specifier is a gap the expanded transcript fills (`reds the step for %s`
+ * accepts `reds the step for an empty report`), and an unrelated red never
+ * satisfies every segment.
+ */
+function titleInTranscript(title, quote) {
+	const segments = String(title)
+		.split(/%[sdifjo#]/)
+		.filter(Boolean);
+	return quote.split("\n").some((line) => {
+		let at = 0;
+		for (const segment of segments) {
+			const found = line.indexOf(segment, at);
+			if (found < 0) return false;
+			at = found + segment.length;
+		}
+		return true;
+	});
+}
+
 /** Check the structural PR-body contract, including answered sections. */
+// #4585: body evidence answers the changed code, not a generic checklist.
+// Row 3 (model fidelity) remains reviewer judgement per issuecomment 6241755363.
+function lintDiffCompliance(body, options) {
+	const errors = [];
+	const visible = blankMarkdown(body);
+	// A literal `<!--` inside a fence or an inline code span is quoted text, not
+	// a comment opener: the body of a PR that documents comment ends reads it as
+	// text, and blanking from it would hide every fence below (#4585 row 1 hit
+	// exactly that). A fence reads as a backticked span here, so one pass covers
+	// both, and the restore below keeps a fence that sits inside a real comment
+	// hidden.
+	const source = String(body);
+	const quotedSpans = codeSpanMasked(source);
+	const guarded = source.replace(/<!--/g, (marker, offset) =>
+		quotedSpans.startsWith("    ", offset) ? "    " : marker,
+	);
+	const rawRows = blankHtmlComments(guarded).split(/\r?\n/);
+	const fences = markdownBlocks(body).filter((block) => block.fence);
+	for (const block of fences)
+		if (rawRows[block.start].trim())
+			rawRows.splice(block.start, block.lines.length, ...block.lines);
+	const visibleRows = visible.split(/\r?\n/);
+	const transcripts = [];
+	for (let index = 0; index < rawRows.length; index++) {
+		// Only a real, visible fence can introduce evidence. Examples in HTML
+		// comments and unterminated fences cannot vouch for a run.
+		if (!/^\s*```/.test(rawRows[index])) continue;
+		const quote = sourceQuoteAfter(rawRows, index - 1);
+		if (!quote) break;
+		if (isFailureQuote(quote))
+			transcripts.push({ text: quote.text.join("\n"), line: index });
+		index = quote.end;
+	}
+	let mutationSection = false;
+	const mutationRows = [];
+	const mutationLines = new Set();
+	for (const [index, row] of visibleRows.entries()) {
+		const heading = HEADING.exec(row);
+		if (heading) mutationSection = /\bmutations?\b/i.test(heading[1]);
+		else if (/^\s*(?:\*\*)?(?:Hand[- ]mutation|Mutations?)\b/i.test(row))
+			mutationSection = true;
+		if (mutationSection) {
+			mutationLines.add(index);
+			mutationRows.push(rawRows[index]);
+		}
+	}
+	let windows = false;
+	for (const row of visibleRows) {
+		if (!/\bWindows\b/i.test(row)) continue;
+		windows ||=
+			/\b(?:cannot differ|platform.independent|platform.neutral)\b.*\bbecause\b\s+\S.+/i.test(
+				row,
+			) ||
+			(/\b(?:advisory|lane)\b/i.test(row) &&
+				/\b(?:passed|failed|success|failure|cancelled)\b/i.test(row) &&
+				/\b\d{5,}\b/.test(row));
+	}
+	const unclassified = [];
+	for (const file of parseRuntimeHunks(options.diff)) {
+		const windowsPath = [file.pre, file.post].some((name) =>
+			/^clients\/(?:package-manager\.|lsp\/launch|path-utils\.)/.test(name),
+		);
+		if (windowsPath && !windows)
+			errors.push(
+				`PR body compliance row 4: ${file.post} needs a Windows advisory-lane result with run id, or a reason it cannot differ (Windows: cannot differ because ...).`,
+			);
+		const tests = /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(file.post);
+		const production =
+			/\.[cm]?[jt]sx?$/.test(file.post) &&
+			!/\.d\.[cm]?ts$/.test(file.post) &&
+			(isRuntimeObservabilityPath(file.post) ||
+				file.post.startsWith("scripts/"));
+		if ((!tests && !production) || !file.added.size) continue;
+		const source = headFileSource(file.post, {
+			...options,
+			postBlob: file.postBlob,
+		});
+		const rows = typeof source === "string" ? sourceLines(source) : [];
+		// The post-image identity is what the alias closure and the byte-mapped
+		// line numbers need. Without it the added lines still decide row 2 and
+		// row 4, and row 1 reads the added lines alone; a declaration that opens
+		// there but whose title sits on an unchanged line cannot be classified,
+		// so it is refused rather than passed.
+		// Every added line must sit at its own line number in the post-image; an
+		// unreadable source has no rows, so it fails here without a second guard.
+		const exact = [...file.added].every(
+			([line, text]) => rows[line - 1] === text,
+		);
+		const { text, strings } = exact
+			? blankCommentsAndStrings(source)
+			: { text: [...file.added.values()].join("\n"), strings: [] };
+		const addedCode = exact
+			? (() => {
+					const codeRows = text.split("\n");
+					return [...file.added.keys()]
+						.map((line) => codeRows[line - 1] ?? "")
+						.join("\n");
+				})()
+			: text;
+		const unclassifiable =
+			tests && /(?<![\w$.])(?:it|test)\b[^\n;]*?\(/.test(addedCode);
+		if (!exact && (unclassifiable || production)) unclassified.push(file.post);
+		if (tests && exact) {
+			const names = new Set(["it", "test"]);
+			for (const match of text.matchAll(/\b(?:it|test)\s+as\s+(\w+)/g))
+				names.add(match[1]);
+			// Follow local aliases to a fixed point. This also covers a value
+			// reached through another binding without scanning string contents.
+			let changed = true;
+			while (changed) {
+				changed = false;
+				for (const match of text.matchAll(
+					/\b(?:const|let|var)\s+(\w+)\s*=\s*(\w+)\b/g,
+				)) {
+					if (names.has(match[2]) && !names.has(match[1])) {
+						names.add(match[1]);
+						changed = true;
+					}
+				}
+			}
+			const bindings = new Map();
+			for (const string of strings) {
+				const binding = /\b(?:const|let|var)\s+(\w+)\s*=\s*$/.exec(
+					string.prefix,
+				);
+				if (binding) bindings.set(binding[1], string.text);
+			}
+			const calls = new RegExp(
+				`(?<![\\w$.])(?:${[...names].join("|")})(?:\\s*\\.\\s*(?:only|skip|todo|concurrent|sequential|fails|each))*\\s*(?:\\))?\\s*\\(`,
+				"g",
+			);
+			for (const call of text.matchAll(calls)) {
+				let from = call.index + call[0].length;
+				if (/\.\s*each\s*\($/.test(call[0])) {
+					const close = closeParenIndex(text, from - 1);
+					const next = /^\s*\(/.exec(text.slice(close + 1));
+					if (close >= 0 && next) from = close + 1 + next[0].length;
+				}
+				const string = strings.find(
+					(value) =>
+						value.start >= from && !text.slice(from, value.start).trim(),
+				);
+				const binding = /^\s*(\w+)\s*,/.exec(text.slice(from));
+				const title = string?.text ?? bindings.get(binding?.[1]);
+				const end = string?.end ?? from + (binding?.[0].length ?? 0);
+				const titleChanged = [...file.added.keys()].some(
+					(line) =>
+						line >= lineAt(source, call.index) && line <= lineAt(source, end),
+				);
+				if (!titleChanged) continue;
+				const control =
+					title &&
+					visibleRows.some(
+						(row) =>
+							row.includes(title) &&
+							/\bcontrol\b/i.test(row) &&
+							/(?:—|:|because)\s*[A-Za-z0-9].+/.test(
+								row.slice(row.indexOf(title) + title.length),
+							),
+					);
+				if (
+					!control &&
+					(!title ||
+						!transcripts.some((quote) => titleInTranscript(title, quote.text)))
+				)
+					errors.push(
+						`PR body compliance row 1: ${file.post}: ${title ?? "unresolved test title"} needs a quoted red-first transcript or a named Control with a reason.`,
+					);
+			}
+		}
+		if (
+			production &&
+			/\b(?:if|else|catch|switch|throw)\b|\?(?![.?:])|&&|\|\||\.(?:filter|slice)\s*\(|\bMath\.(?:min|max)\s*\(/.test(
+				addedCode,
+			)
+		) {
+			// #4575: a mutation row, or the tool's own `mutation:` transcript,
+			// names the file it proves. A row that only claims a result is not
+			// evidence, so the red must be quoted (backticked or fenced).
+			const names = (text) =>
+				[file.post, file.post.replace(/\.[cm]?ts$/, ".js")].some((name) =>
+					text.includes(name),
+				);
+			const rowProves =
+				mutationRows.some(names) &&
+				(mutationRows.some((row) => BACKTICKED_RED.test(row)) ||
+					transcripts.some((quote) => mutationLines.has(quote.line)));
+			const transcriptProves = transcripts.some(
+				(quote) =>
+					/^\s*(?:\$\s*)?mutation:/m.test(quote.text) && names(quote.text),
+			);
+			if (!rowProves && !transcriptProves)
+				errors.push(
+					`PR body compliance row 2: ${file.post} needs a Mutation section naming that file and a quoted failing mutation transcript.`,
+				);
+		}
+		if (production && !windowsPath && /\btrySpawn\b/.test(text) && !windows)
+			errors.push(
+				`PR body compliance row 4: ${file.post} needs a Windows advisory-lane result with run id, or a reason it cannot differ (Windows: cannot differ because ...).`,
+			);
+	}
+	// A post-image the diff names but cannot be read or matched classifies no
+	// row, so the body owes the rows it may still hold. One bounded line names
+	// them: an unbounded per-file notice grows with the diff, and a silent skip
+	// would read as a clean body.
+	if (unclassified.length)
+		errors.push(
+			`PR body compliance: cannot classify rows 1, 2 and 4 for ${unclassified.length} changed file(s) whose post-image is missing, unreadable, or does not match the diff: ${unclassified.slice(0, UNCLASSIFIED_REPORT_LIMIT).join(", ")}${unclassified.length > UNCLASSIFIED_REPORT_LIMIT ? ` (+${unclassified.length - UNCLASSIFIED_REPORT_LIMIT} more)` : ""}.`,
+		);
+	return errors;
+}
+
 export function lintPrBody(body = "", options = {}) {
 	const rawLines = String(body ?? "").split(/\r?\n/);
 	const lines = sourceWithoutFencedBlocks(body).split(/\r?\n/);
@@ -2313,7 +2576,7 @@ export function lintPrBody(body = "", options = {}) {
 			});
 	}
 	const placeholders = templatePlaceholderLines();
-	const errors = [];
+	const errors = options.diff ? lintDiffCompliance(body, options) : [];
 	const summary = headings.find((heading) => hasSection(heading, "summary"));
 	const firstHeading = headings[0]?.index ?? lines.length;
 	const nextSectionHeading = (heading) =>
@@ -2522,17 +2785,22 @@ export async function resolveBugClosingViaGh(
 	cwd = process.cwd(),
 	exec = execFileSync,
 ) {
-	return anyIssueLabelledBug(parseCloseKeywords(body).issues, (number) =>
-		JSON.parse(
-			exec("gh", ["api", `repos/{owner}/{repo}/issues/${number}`], {
-				cwd,
-				encoding: "utf8",
-				timeout: 10_000,
-				killSignal: "SIGKILL",
-				stdio: ["ignore", "pipe", "pipe"],
-			}),
-		),
-	);
+	return anyIssueLabelledBug(parseCloseKeywords(body).issues, (number) => {
+		const raw = exec("gh", ["api", `repos/{owner}/{repo}/issues/${number}`], {
+			cwd,
+			encoding: "utf8",
+			timeout: 10_000,
+			killSignal: "SIGKILL",
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		// gh output that is not JSON is unreadable label evidence, the same
+		// verdict a thrown exec already gets from anyIssueLabelledBug.
+		try {
+			return JSON.parse(raw);
+		} catch {
+			return null;
+		}
+	});
 }
 
 // The one label reader both transports share: `readIssue(number)` returns the
@@ -2611,12 +2879,8 @@ export async function lintPullRequestEvent(
 	try {
 		diff = diffImpl();
 	} catch (error) {
-		if (process.env.GITHUB_ACTIONS) {
-			const reason = error instanceof Error ? error.message : String(error);
-			throw new Error(`diff unavailable: ${reason}`);
-		}
-		// Local callers may not have an upstream ref. Preserve structural lint
-		// outside CI rather than inventing a runtime scope.
+		const reason = error instanceof Error ? error.message : String(error);
+		throw new Error(`diff unavailable: ${reason}`);
 	}
 	const result = lintPrBody(body, {
 		requireTestAssessment,
@@ -2652,9 +2916,12 @@ export async function lintPullRequestEvent(
 }
 
 export function localDiff(cwd = process.cwd(), git = gitExecFileSync) {
+	// The same byte ceiling as a post-image read: a diff keyed to a large change
+	// (a captured fixture corpus, a generated file) must not fail as unavailable.
 	return git(["diff", "--unified=0", "--no-color", "origin/master...HEAD"], {
 		cwd,
 		encoding: "utf8",
+		maxBuffer: MAX_SOURCE_BYTES,
 	});
 }
 
@@ -2807,19 +3074,41 @@ export function localTouchesTests(cwd = process.cwd(), git = gitExecFileSync) {
 	return names.split(/\r?\n/).some((name) => name.startsWith("tests/"));
 }
 
+/**
+ * True when the checkout has no `origin/master` at all (a shallow or uncloned
+ * base). The diff cannot be read there for a reason the #4404 hint names, and
+ * the diff-keyed rows stay unattempted rather than failing the whole preflight.
+ */
+function missingBaseRef(cwd, git = gitExecFileSync) {
+	try {
+		git(["rev-parse", "--verify", "origin/master"], {
+			cwd,
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "ignore"],
+		});
+		return false;
+	} catch {
+		return true;
+	}
+}
+
 export function lintLocalPrBody(
 	body,
 	cwd = process.cwd(),
 	git = gitExecFileSync,
 	options = {},
 ) {
-	let diff;
+	let diff = "";
+	// #4585: a local preflight must judge the same range as CI. An unavailable
+	// diff cannot classify the diff-keyed rows, so it fails closed; the rest of
+	// the lint still runs, because its own base-resolution message names what to
+	// fetch. A clone with no base ref at all keeps the #4404 hint instead: there
+	// is no diff to read, and the missing base is what the reader must fix.
+	let diffUnavailable = false;
 	try {
 		diff = localDiff(cwd, git);
 	} catch {
-		// A local preflight must use the same range as CI. If the caller has no
-		// upstream ref, retain structural lint rather than inventing scope.
-		diff = "";
+		diffUnavailable = !missingBaseRef(cwd, git);
 	}
 	// #4288: an explicit tri-state (the CLI resolves it through gh before this
 	// call) or an injected resolver (tests) wins; otherwise the label is unknown
@@ -2888,6 +3177,12 @@ export function lintLocalPrBody(
 		result.valid = false;
 		result.errors.push(
 			closeKeywordPlacementMessage(placement.missingBodyIssues),
+		);
+	}
+	if (diffUnavailable) {
+		result.valid = false;
+		result.errors.push(
+			"PR body compliance: diff unavailable; cannot classify rows 1, 2 and 4.",
 		);
 	}
 	return result;

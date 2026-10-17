@@ -40,7 +40,7 @@ import {
 } from "../../scripts/check-pr-body.mjs";
 import { blankCommentsAndStrings } from "../../scripts/check-pr-body.mjs";
 
-const body = `## Why\nThe body gate makes review intent explicit.\n\n## Notes for the reviewer\nNone.\n\n## Change outline\n- caller\n  + changed symbol\n    + callee\n\n## Summary\nOpening context.\n\n## Tests\nTargeted tests pass.\n\n## Blast radius\nNo runtime module touched.\n\n## Class sweep\nDefect shape: a body section answered with generic text. Search: \`rg -n "whole-tree grep" scripts\`. Verdict: none outside this fixture.\n\n## Observability\nThe advisory check run is the record.`;
+const body = `## Why\nThe body gate makes review intent explicit.\n\n## Notes for the reviewer\nNone.\n\n## Change outline\n- caller\n  + changed symbol\n    + callee\n\n## Summary\nOpening context.\n\n## Tests\nTargeted tests pass.\n\n## Blast radius\nNo runtime module touched.\n\n## Class sweep\nDefect shape: a body section answered with generic text. Search: \`rg -n "whole-tree grep" scripts\`. Verdict: none outside this fixture.\n\n## Observability\nThe advisory check run is the record.\n\n## Mutations\n| File | Mutation | Transcript |\n| --- | --- | --- |\n| index.ts | drop the emit guard | \`Tests 1 failed\` |\n| clients/session-scope.ts | invert the reset branch | \`Tests 1 failed\` |\n| clients/new-path.ts | drop the catch | \`Tests 1 failed\` |\n| clients/lsp/server.ts | drop the ordering branch | \`Tests 1 failed\` |\n| clients/example.ts | drop the record guard | \`Tests 1 failed\` |\n| clients/agent-nudge.ts | drop the cap | \`Tests 1 failed\` |\n\n`;
 // A synthetic runtime file: `rows` is the whole post-image and `added` lists
 // the 1-based post-image lines the diff adds. The harvest reads `rows`, so a
 // test that needs the block-comment opener passes real rows — a bare hunk
@@ -667,7 +667,13 @@ describe("test-reference shape and placement", () => {
 				{ cwd: repositoryRoot },
 			);
 			const direct = lintPrBody(fixture).errors.join(" ");
-			const local = lintLocalPrBody(fixture, fixtureRepo).errors.join(" ");
+			// #4585: the local preflight now refuses an unavailable diff instead of
+			// linting structure alone, and this single-commit fixture repo has no
+			// upstream ref. An empty diff is the range it really has, and a stubbed
+			// git keeps this case on the body's own test references.
+			const local = lintLocalPrBody(fixture, fixtureRepo, () => "").errors.join(
+				" ",
+			);
 			for (const id of ["Z10", "P01", "P30"]) {
 				expect(direct).toContain(id);
 				expect(local).toContain(id);
@@ -3425,7 +3431,12 @@ describe("dispatcher seam row (#3906 AC2)", () => {
 		);
 		const result = lintPrBody(honest, { diff, headFiles });
 		expect(result.errors.join(" ")).not.toContain("decision branch");
-		expect(result.valid).toBe(true);
+		// #4585 row 1: the archived body quotes a red for the behaviour, not for
+		// each of the seven new test titles, so the diff-keyed row still asks per
+		// title. Its Observability answer is accepted and no other rule fires.
+		const rowOne = result.errors.filter((error) => error.includes("row 1"));
+		expect(rowOne).toHaveLength(7);
+		expect(result.errors).toEqual(rowOne);
 	});
 });
 
@@ -4430,8 +4441,12 @@ describe("local lint parity", () => {
 			return "tests/scripts/example.test.ts\n";
 		});
 		expect(result.valid).toBe(false);
+		// #4585: the diff-keyed rows need the range itself, so the failed diff is
+		// reported rather than replaced by an empty one; the test-detection
+		// fallback still resolves whether tests changed.
 		expect(ranges).toEqual([
 			["diff", "--unified=0", "--no-color", "origin/master...HEAD"],
+			["rev-parse", "--verify", "origin/master"],
 			["diff", "--name-only", "origin/master...HEAD"],
 			["diff", "--name-only", "HEAD~1"],
 		]);
@@ -5008,6 +5023,7 @@ describe("post-image mutation witnesses (#3945 survivors)", () => {
 			]),
 		});
 		expect(result.errors).toEqual([
+			`PR body compliance: cannot classify rows 1, 2 and 4 for 1 changed file(s) whose post-image is missing, unreadable, or does not match the diff: clients/render.ts.`,
 			"PR body Observability could not classify the added lines of clients/render.ts:2: the post-image is missing, could not be read, or does not match the diff, so a record or a decision branch cannot be confirmed. Re-run with the changed files present, or name the record on a line the diff adds.",
 		]);
 	});
@@ -5032,6 +5048,7 @@ describe("post-image mutation witnesses (#3945 survivors)", () => {
 			.map((file) => `${file}:1`)
 			.join(", ");
 		expect(result.errors).toEqual([
+			`PR body compliance: cannot classify rows 1, 2 and 4 for 6 changed file(s) whose post-image is missing, unreadable, or does not match the diff: ${files.slice(0, 5).join(", ")} (+1 more).`,
 			`PR body Observability could not classify the added lines of ${shown} (+1 more): the post-image is missing, could not be read, or does not match the diff, so a record or a decision branch cannot be confirmed. Re-run with the changed files present, or name the record on a line the diff adds.`,
 		]);
 	});
@@ -5046,10 +5063,16 @@ describe("post-image mutation witnesses (#3945 survivors)", () => {
 			mkdirSync(join(root, "clients"), { recursive: true });
 			writeFileSync(join(root, "clients", "existing-record.ts"), `${source}\n`);
 			process.chdir(root);
+			// #4585 row 2: the diff adds a `catch`, so the body owes file-scoped
+			// mutation evidence. Keep it here so this test still isolates the
+			// existing-record citation.
+			const mutationEvidence =
+				"\n\n## Mutations\n| File | Mutation | Transcript |\n|---|---|---|\n" +
+				"| `clients/new-path.ts` | drop the catch | `Tests 1 failed` |";
 			const result = lintPrBody(
 				withObservability(
 					"covered by existing record `tool-cwd-resolution` at `clients/existing-record.ts:1`",
-				),
+				) + mutationEvidence,
 				{
 					diff: NEW_PATH_RUNTIME_DIFF,
 					headFiles: NEW_PATH_HEAD_FILES,
