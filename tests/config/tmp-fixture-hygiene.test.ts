@@ -472,6 +472,12 @@ function tmpRootWriteCandidates(entry: string): string[] {
 		.map(({ file }) => file);
 }
 
+/** The widened census's JUDGMENT: of the new entries at the tmp root, the ones
+ *  a test source names. The rest are counted, never asserted. */
+function judgedTmpRootWrites(entries: readonly string[]): string[] {
+	return entries.filter((entry) => tmpRootWriteCandidates(entry).length > 0);
+}
+
 /** The pre-#4354 shape of the foreign-run cases: no creator on record. */
 const NO_CREATORS: ReadonlyMap<string, string> = new Map();
 
@@ -515,9 +521,7 @@ describe("tmp-fixture-hygiene", () => {
 		// the census, not only `pi-lens-` names. A host process's tmp file is not
 		// asserted; it is counted on the census line instead.
 		const tmpRootWrites = tmpHygieneTmpRootWrites();
-		const tmpRootWriteLeaks = (tmpRootWrites ?? []).filter(
-			(entry) => tmpRootWriteCandidates(entry).length > 0,
-		);
+		const tmpRootWriteLeaks = judgedTmpRootWrites(tmpRootWrites ?? []);
 		try {
 			expect(
 				attributable,
@@ -1090,6 +1094,9 @@ describe("tmp-fixture-hygiene", () => {
 		// absent: a literal here would make the scan its own candidate.
 		const unrelated = ["host", "tool", "scratch", process.pid].join("-");
 		expect(tmpRootWriteCandidates(unrelated)).toEqual([]);
+		// The owner's red predicate: a named fixture sibling is judged, an
+		// unrelated host entry is only counted in the census line.
+		expect(judgedTmpRootWrites(["capture", unrelated])).toEqual(["capture"]);
 	});
 
 	it("sees a new entry written at the tmp root, not only pi-lens-prefixed ones (#4560)", () => {
