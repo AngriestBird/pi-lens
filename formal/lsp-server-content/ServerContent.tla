@@ -100,12 +100,18 @@ CONSTANTS
                   \*   F1's lost update harmful: the skipped touch read the bytes disk
                   \*   has NOW, and an in-flight send of older bytes replaces them.
     SaveRetryOnFailure, \* TRUE (code since #4532 gap 9 round 5, F3): a standalone
-                  \*   save whose notification FAILS withdraws the mark the skip took
-                  \*   and re-queues ONE save. FALSE (the code before): the failure
-                  \*   lands nowhere, the mark still names the bytes, so no later
-                  \*   saved touch owes one and the server never hears a didSave.
-    SaveSendFails  \* how many standalone saves may fail in this schedule (a fault
+                  \*   save whose notification FAILS re-queues ONE save. FALSE (the
+                  \*   code before): the failure lands nowhere, and under
+                  \*   SaveMarkOnLanding = FALSE the pre-send mark still names the
+                  \*   bytes, so no later saved touch owes one and the server never
+                  \*   hears a didSave.
+    SaveSendFails, \* how many standalone saves may fail in this schedule (a fault
                   \*   budget: 0 in every config that does not inject the F3 failure)
+    SaveMarkOnLanding \* TRUE (code since #4532 gap 9 round 6, F2): the save mark is
+                  \*   written by the send that LANDS, naming the content the server
+                  \*   holds at that moment. FALSE (the code before): `Check` takes the
+                  \*   mark before the send, naming the content the SKIP read, and a
+                  \*   failure withdraws it before the one retry re-marks it.
 
 Writers == {"w1", "w2"}
 Procs == {"w1", "w2", "cas", "res"}
@@ -251,8 +257,9 @@ SkipEvidence(p) ==
 (* F2 rides the same action: a skip sends no content, so it owes the save  *)
 (* its own content identity requires, and the save goes out as a QUEUED    *)
 (* entry (round 4), not at this instant: `sendDidSaveForHeldDocument`      *)
-(* waits behind whatever the path's runner is doing. Round 5: the mark it  *)
-(* takes is written by the send that lands (`SaveMarkOnLanding`).          *)
+(* waits behind whatever the path's runner is doing. Round 6 (F2): no mark *)
+(* is taken here at all. The mark names the content the save LANDED for,   *)
+(* and only the landing writes it (`SaveMarkOnLanding`, `RunFinish`).      *)
 (***************************************************************************)
 NoContentInFlight ==
     /\ (pending = NoEntry \/ pending.saveOnly)
@@ -280,8 +287,9 @@ OwesSave(p) ==
 \* client's `notify.save` puts a save-only entry on the path's queue (behind a
 \* send already running, or merged into an unstarted one, which keeps that
 \* entry's run and with it that run's kind), and `RunFinish` records the save
-\* when it lands. Round 5 writes the mark THERE (`SaveMarkOnLanding`), so a
-\* save that fails leaves the bytes owing one.
+\* when it lands. Round 6 writes the mark THERE (`SaveMarkOnLanding`), where
+\* the send landed, so a save that fails leaves the bytes owing one; under
+\* FALSE (the code before) this action takes the mark before the send.
 Check(p) ==
     /\ pc[p] = "check"
     /\ pc' = [pc EXCEPT ![p] = IF SkipNow(p) THEN "done" ELSE "enqueue"]
@@ -290,7 +298,9 @@ Check(p) ==
                           THEN content[p]
                           ELSE touchedSaved
     /\ IF SkipNow(p) /\ OwesSave(p)
-         THEN /\ recent' = [recent EXCEPT !.savedHash = content[p]]
+         THEN /\ recent' = IF SaveMarkOnLanding
+                              THEN recent
+                              ELSE [recent EXCEPT !.savedHash = content[p]]
               /\ pending' = IF pending # NoEntry
                                THEN [pending EXCEPT !.saved = TRUE]
                                ELSE SaveOnlyEntry
@@ -369,8 +379,13 @@ RunFinish ==
        /\ running' = NoEntry
        /\ pc' = [p \in Procs |-> IF p \in running.waiters THEN "landed" ELSE pc[p]]
        /\ serverSaved' = IF server = "none" THEN serverSaved ELSE server
+       \* Round 6: the landing is the ONLY writer of the mark, and it names the
+       \* content the save covered (whatever the server holds now).
+       /\ recent' = IF SaveMarkOnLanding /\ server # "none"
+                        THEN [recent EXCEPT !.savedHash = server]
+                        ELSE recent
        /\ UNCHANGED <<failsLeft, pending, server, sentRec, lastSentSeq, staleSend, clock, disk,
-                      mtime, content, readAt, startAt, enqAt, record, recent, skipped,
+                      mtime, content, readAt, startAt, enqAt, record, skipped,
                       touchedSaved, sweep, sweepMtime, sweepContent, sweepsLeft, clean>>
     \/ /\ running # NoEntry /\ running.recorded /\ ~running.saveOnly
        /\ pc' = [p \in Procs |-> IF p \in running.waiters THEN "landed" ELSE pc[p]]
@@ -383,12 +398,16 @@ RunFinish ==
                       clean>>
 
 \* #4532 gap 9 round 5 F3: the standalone save's notification FAILS (a rejected
-\* write, or a stream error the client survives). Nothing landed. The skip that
-\* queued it took the mark BEFORE sending, so the recovery is the caller's:
-\* `saveDebouncedPush` withdraws the mark and re-queues ONE save
-\* (`SaveRetryOnFailure`, the code after round 5). Under FALSE the mark keeps
-\* naming bytes no didSave ever covered, every later saved touch of them owes
-\* nothing, and the server never hears the save it was owed.
+\* write, or a stream error the client survives). Nothing landed, so the
+\* recovery is the caller's: `saveDebouncedPush` re-queues ONE save
+\* (`SaveRetryOnFailure`, the code after round 5). Round 6 changed what the mark
+\* does here: under `SaveMarkOnLanding` nothing was marked, so nothing needs
+\* withdrawing; under FALSE the round-5 code withdraws the pre-send mark and its
+\* retry re-marks the content the SKIP named (modelled as `touchedSaved`), which
+\* is the F2 defect — the retry can land for other bytes. Under
+\* `SaveRetryOnFailure = FALSE` (the code before round 5) the pre-send mark keeps
+\* naming bytes no didSave covered, so no later saved touch of them owes one and
+\* the server never hears the save it was owed.
 SaveFail ==
     /\ failsLeft > 0
     /\ running # NoEntry /\ running.saveOnly
@@ -396,7 +415,9 @@ SaveFail ==
     /\ running' = NoEntry
     /\ pc' = [p \in Procs |-> IF p \in running.waiters THEN "landed" ELSE pc[p]]
     /\ IF SaveRetryOnFailure
-         THEN /\ recent' = [recent EXCEPT !.savedHash = "none"]
+         THEN /\ recent' = IF SaveMarkOnLanding
+                              THEN recent
+                              ELSE [recent EXCEPT !.savedHash = touchedSaved]
               /\ pending' = IF pending # NoEntry
                                THEN [pending EXCEPT !.saved = TRUE]
                                ELSE SaveOnlyEntry

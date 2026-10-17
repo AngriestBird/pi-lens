@@ -334,8 +334,8 @@ New configs, and the two invariants they carry:
 |---|---|---|---|
 | `GateSentIdleSkip` | pass | 1,287,264 | The as-built gate on the revert schedule: the queue is not idle, so the revert is pushed and the server ends on disk's bytes |
 | `MutGateSkipDuringSend` | violated `SkippedContentHeld` | 6,679 | The pre-round-3 rule: the skip reads the record alone, so the send in flight lands over the bytes it certified |
-| `GateSentSavedOpenFile` | pass | The as-built save binding on the mixed-writer schedule: the debounced saved touch still sends its `didSave`, bound to its own content |
-| `MutGateSaveMark` | violated `SaveFollowsSavedTouch` | The pre-round-3 rule: a boolean mark, so a save recorded for other bytes suppresses the one owed and the server holds bytes it never heard a save for |
+| `GateSentSavedOpenFile` | pass | 322,214 | The as-built save binding on the mixed-writer schedule: the debounced saved touch still sends its `didSave`, bound to its own content |
+| `MutGateSaveMark` | violated `SaveFollowsSavedTouch` | 301,241 | The pre-round-3 rule: a boolean mark, so a save recorded for other bytes suppresses the one owed and the server holds bytes it never heard a save for |
 
 `SkippedContentHeld` is harm-exact: a skip of bytes disk has already moved past
 owes nothing, and a decision taken AFTER the skip (an `Enqueue`, an
@@ -363,7 +363,10 @@ one `-metadir` per run, `timeout 1200`); expect and actual agree in every row.
 The round-2 counts moved because `RunFinish` now waits for `Record`, a schedule
 the model previously admitted and the code never runs. Round 4 changed two
 counts (`MutGateSaveMark`, `GateSentSavedOpenFile`): the queue gained an entry
-kind and a save now rides it, so more schedules reach the same verdicts.
+kind and a save now rides it, so more schedules reach the same verdicts. Round 6
+moved every count that reaches a save: the mark is no longer written before the
+send, so the intermediate state "mark set, save still queued" is gone and the
+same schedules are explored over fewer states. No verdict moved.
 
 | Config | Expect | Actual | Distinct states |
 |---|---|---|---|
@@ -382,19 +385,19 @@ kind and a save now rides it, so more schedules reach the same verdicts.
 | `MutFixNoCoalesce` | violated `ServerMatchesDisk` | violated | 95,749 |
 | `ArtifactCascadeResizedAnyLanding` | violated `ServerMatchesDisk` | violated | 101,248 |
 | `MutFixNoDrop` | violated `ServerMatchesDisk` | violated | 178,724 |
-| `CascadeEqualLength` | pass | pass | 313,147 |
-| `CascadeSendOrder` | pass | pass | 326,699 |
-| `CascadeResized` | pass | pass | 352,201 |
-| `FixCascadeEqualLength` | pass | pass | 403,828 |
-| `GateWindowRepush` | pass | pass | 460,750 |
-| `MutGateSaveMark` | violated `SaveFollowsSavedTouch` | violated | 470,730 |
-| `GateSentOneWrite` | pass | pass | 596,920 |
-| `FixAllActors` | pass | pass | 968,072 |
-| `GateSentIdleSkip` | pass | pass | 1,287,264 |
-| `TwoWritesEqualLength` | pass | pass | 1,972,476 |
-| `TwoWritesResized` | pass | pass | 2,242,972 |
-| `FixTwoWritesEqualLength` | pass | pass | 2,249,292 |
-| `GateSentSavedOpenFile` | pass | pass | 3,140,796 |
+| `CascadeEqualLength` | pass | pass | 311,792 |
+| `CascadeSendOrder` | pass | pass | 311,785 |
+| `CascadeResized` | pass | pass | 316,764 |
+| `FixCascadeEqualLength` | pass | pass | 332,429 |
+| `GateWindowRepush` | pass | pass | 274,596 |
+| `MutGateSaveMark` | violated `SaveFollowsSavedTouch` | violated | 301,241 |
+| `GateSentOneWrite` | pass | pass | 315,756 |
+| `FixAllActors` | pass | pass | 358,060 |
+| `GateSentIdleSkip` | pass | pass | 359,466 |
+| `TwoWritesEqualLength` | pass | pass | 367,725 |
+| `FixTwoWritesEqualLength` | pass | pass | 366,734 |
+| `TwoWritesResized` | pass | pass | 380,116 |
+| `GateSentSavedOpenFile` | pass | pass | 322,214 |
 
 ### Round 4: a save-only entry is not a content send
 
@@ -444,6 +447,44 @@ withdraws the mark and queues the retry, which no further failure can reach.
 The two configs differ in one constant, so the pair is the model's own statement
 of F3: with the mark standing and no retry, quiescence leaves `serverSaved`
 behind the bytes the server holds; with the retry, it cannot.
+
+
+### Round 6: the mark names what the save LANDED for
+
+Round 5 still took the mark before the send. That names the content the SKIP
+read, and the send covers whatever document the client holds when its queue
+entry runs: a content push queued behind the failed save is coalesced with the
+retry (`enqueueDocumentNotify` keeps its run and carries `saved`), so the retry
+can save B while the mark says A. The next saved touch of A then owes nothing
+and a save-triggered server keeps answering from a document it was never told is
+saved (`MutGateSaveMark` is that class).
+
+One rule now fills every cell: **the mark names the content a `didSave` landed
+for, and only the landing writes it.**
+
+- `Check` writes no mark. The save it queues marks nothing.
+- `RunFinish`'s save-only branch is the writer: `savedHash` becomes the content
+  the server holds at that instant (`server`), which is what the `didSave`
+  covered.
+- `SaveFail` has nothing to withdraw: nothing was marked. `SaveRetryOnFailure`
+  still re-queues the one save.
+
+`SaveMarkOnLanding` is the as-built switch (TRUE). FALSE is the code before
+round 6: `Check` takes the mark from the skip's content, `SaveFail` withdraws it
+and the one retry re-marks the same bytes (`touchedSaved`) before sending —
+which is where a retry that lands for other bytes loses the save.
+
+No mutant config carries FALSE. The model cannot express the harm: its runner
+always takes a pending save-only entry before any new content entry
+(`Enqueue` is blocked while a pending entry waits on an idle runner), so a
+save-only send in this model always lands for the content its skip named. The
+one writer that can interleave — a content push replacing a pending save-only
+entry — is `OpenFilePush`, which the model keeps at "queue idle" because an
+unbounded version multiplied the pass config's state space from 2.7M to 39M
+distinct states (round 3's note). The rule is therefore pinned where the code
+runs: `formal/switch-pins.json` pins `SaveMarkOnLanding` to the round-6 wire
+tests, and a pre-send mark reds `sends the save a failed save's retry did not
+cover` (mutation R6-2).
 
 
 ## HeadMoveResync: held documents across a HEAD move (#4493)

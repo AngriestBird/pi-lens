@@ -998,24 +998,22 @@ file-scoped worklist and receives no project-wide scanner output.
   the touch a save — the post-write sync, the explicit `lsp_diagnostics` query
   and the MCP analysis's first touch (`analyzeFile`, the MCP hosts' post-write
   route), never a sweep warm-up, cascade or sweep touch. The touch debounce
-  never drops a save: a saved touch whose push it skipped sends the save alone
-  (`notify.save`), and the mark it reads names the content its `didSave` went
-  out for, not merely that some save did. Its key is (path, server): the client
-  scope never re-pushes bytes a server holds.
-- The touch debounce reads one rule: skip only when the bytes the server will
-  hold once the path's notify queue drains are this touch's content. The
-  evidence is the client's own sent-content record (`getSentContent`) AND
-  `hasNotifyInFlight`, because that record reports what landed and a send still
-  running lands after a skip. `hasNotifyInFlight` counts a content send only: a
-  save-only send (`sendDidSaveForHeldDocument`) cannot change the bytes or
-  remove the document, so it leaves the record final, while a didClose always
-  counts. A client that cannot answer either question is
-  pushed, never skipped: the elapsed window that used to decide there is gone
-  (`formal/lsp-server-content` `GateWindowReopen` is why). The save a skip owes
-  is its own queue entry, and the mark it takes is withdrawn with one retry
-  when that notification fails: a save no touch would re-send otherwise leaves
-  the server never told the bytes are saved (`GateSaveRetry`,
-  `MutGateSaveNoRetry`).
+  reads one rule: skip only when the bytes the server will hold once the path's
+  notify queue drains are this touch's content. The evidence is the client's
+  own sent-content record (`getSentContent`) AND `hasNotifyInFlight`, because
+  that record reports what landed and a send still running lands after a skip.
+  `hasNotifyInFlight` counts a content send only: a save-only send
+  (`sendDidSaveForHeldDocument`) cannot change the bytes or remove the document,
+  so it leaves the record final, while a didClose always counts. A client that
+  cannot answer either question is pushed, never skipped: the elapsed window
+  that used to decide there is gone (`formal/lsp-server-content`
+  `GateWindowReopen` is why). Its key is (path, server): the client scope never
+  re-pushes bytes a server holds. The debounce never drops a save: a saved touch
+  whose push it skipped sends the save alone (`notify.save`), and the save mark
+  names the content a `didSave` LANDED for, written by that landing and never
+  before the send, so a failed save is withdrawn with one bounded retry
+  (`GateSaveRetry`, `MutGateSaveNoRetry`) and a retry that lands for other bytes
+  cannot suppress the save the next saved touch owes.
 - `touchFile` freezes content-bound auxiliary coverage at merge time. A later
   publication cannot undo a finding drop. Auxiliary gaps narrow coverage and
   never turn a primary answer inconclusive. When a primary touch is

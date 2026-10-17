@@ -648,6 +648,9 @@ describe("#4532 gap 9 — a skip needs the path's notify queue idle", () => {
 				async (method: string) => {
 					if (String(method) !== "textDocument/didSave") return undefined;
 					attempts.push(String(method));
+					// Two failures, then anything else the bound lets through lands,
+					// so an unbounded retry terminates and reports its real count.
+					if (attempts.length > 2) return undefined;
 					throw new Error("stream write failed");
 				},
 			);
@@ -800,5 +803,50 @@ describe("#4532 gap 9 — a skip needs the path's notify queue idle", () => {
 			`didChange:${A}`,
 		]);
 		expect(saves).toHaveLength(3);
+	});
+
+	// R6: the provisional mark is what keeps a SECOND saved touch, arriving while
+	// the first save is still on the wire, from queueing a second save. The queue
+	// merges only entries that are both unstarted; once the first save runs, the
+	// second is a new pending entry and would send again for bytes the server is
+	// already being told about.
+	it("queues no second save for a saved touch that arrives mid-send", async () => {
+		const { service, texts, state } = await setup();
+		const touch = { diagnostics: "none" as const, source: "test" };
+		const saved = { ...touch, saved: true };
+		await service.touchFile(FILE, A, touch);
+		const saves: string[] = [];
+		let release!: () => void;
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		vi.mocked(state.connection.sendNotification).mockImplementation(
+			async (method: string) => {
+				if (String(method) !== "textDocument/didSave") return undefined;
+				saves.push(String(method));
+				// The first save stays on the wire for the whole case.
+				await held;
+				return undefined;
+			},
+		);
+		vi.stubEnv("PI_LENS_LSP_NOTIFY_BUDGET_MS", "50");
+		try {
+			await service.touchFile(FILE, A, saved);
+			await waitFor(
+				() => saves.length,
+				(sent) => sent >= 1,
+				{ timeoutMs: 2_000, yieldControl: tick },
+			);
+			// The same saved touch again, while that save is still in flight.
+			await service.touchFile(FILE, A, saved);
+		} finally {
+			release();
+			await queueDrained(state);
+		}
+		expect(texts()).toEqual([`didOpen:${A}`]);
+		expect(
+			saves,
+			"a second save went out for bytes already being saved",
+		).toHaveLength(1);
 	});
 });
