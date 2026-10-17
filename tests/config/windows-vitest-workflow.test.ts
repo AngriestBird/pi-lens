@@ -193,6 +193,12 @@ describe("Windows Vitest workflow contract (#2536)", () => {
 		);
 		expect(swept).toBeGreaterThan(guard);
 		expect(code.slice(guard, swept)).toContain("} finally {");
+		// The teardown belongs to the suite's hook list, not the root list the
+		// shared setup registers on: a red census must not abort the setup's own
+		// teardown (Greptile's second P2 on this round).
+		expect(code.indexOf("afterAll(")).toBeGreaterThan(
+			code.indexOf('describe("tmp-fixture-hygiene"'),
+		);
 		expect(raw).toMatch(
 			/#4591:\s*the census VERDICT is declined on the Windows lane/,
 		);
