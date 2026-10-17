@@ -14,9 +14,11 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as clientModule from "../../../clients/lsp/client.js";
+import { hashDiagnosticContent } from "../../../clients/lsp/diagnostic-binding.js";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
 import { fingerprintDocumentContent } from "../../../clients/lsp/document-drift.js";
 import { LSPService } from "../../../clients/lsp/index.js";
+import { waitFor } from "../interleaving-kit.js";
 import { createMockState } from "./mock-client-state.js";
 
 const { getServersForFileWithConfig, createLSPClient } = vi.hoisted(() => ({
@@ -54,6 +56,22 @@ const A = `${HEAD}const x = 1;\n${TAIL}`;
 const B = `${HEAD}const x = 2;\n${TAIL}`;
 
 /**
+ * One event-loop tick. The notify queue advances on this loop's microtask
+ * chain once a held send is released, which is the safe custom yield
+ * `tests/clients/interleaving-kit.ts` documents for `waitFor` (never a worker
+ * or child process, which `setImmediate` cannot observe).
+ */
+const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+/** Wait for a path's notify queue to drain through its promise chain. */
+const queueDrained = (state: ReturnType<typeof createMockState>) =>
+	waitFor(
+		() => state.notifyChangeQueues.size,
+		(size) => size === 0,
+		{ timeoutMs: 2_000, yieldControl: tick },
+	);
+
+/**
  * `reportRecord: false` builds the client shape #4532 gap 9 F3 is about: one
  * that cannot say what it holds. `reportQueue: false` is the other unanswerable
  * question — a record but no word on whether a send for the path is still to
@@ -64,6 +82,9 @@ async function setup(
 	options: { reportRecord?: boolean; reportQueue?: boolean } = {},
 ) {
 	const state = createMockState({ root: ROOT, serverId: "typescript" });
+	// The server declared `save`, so a standalone `notify.save` reaches the wire
+	// and the save mark means something (#3405).
+	state.saveOptions = { includeText: false };
 	const client = {
 		serverId: "typescript",
 		root: ROOT,
@@ -76,6 +97,7 @@ async function setup(
 			diagnosticProviderKind: "none",
 		}),
 		getOperationSupport: () => ({}),
+		getSaveOptions: () => ({ includeText: false }),
 		getAdvertisedCommands: () => [],
 		getRawCapabilityKeys: () => [],
 		getLaunchVariant: () => undefined,
@@ -109,6 +131,8 @@ async function setup(
 				}),
 		notify: {
 			announceCreated: () => undefined,
+			save: (filePath: string) =>
+				clientModule.handleNotifySave(state, filePath),
 			open: (
 				filePath: string,
 				content: string,
@@ -147,7 +171,9 @@ async function setup(
 	const texts = () =>
 		vi
 			.mocked(state.connection.sendNotification)
-			.mock.calls.filter(([method]) => /didOpen|didChange/.test(String(method)))
+			.mock.calls.filter(([method]) =>
+				/^textDocument\/(didOpen|didChange)$/.test(String(method)),
+			)
 			.map(([method, params]) => {
 				const p = params as {
 					textDocument?: { text?: string };
@@ -254,12 +280,15 @@ describe("#4532 gap 9 — a skip needs the path's notify queue idle", () => {
 		await service.touchFile(FILE, A, touch);
 		expect(texts()).toEqual([`didOpen:${A}`]);
 
-		// Every didChange write waits at the transport, so the send of B stays in
+		// Only B waits at the transport, so its send stays in
 		// flight for as long as the case needs it to.
 		const held: Array<() => void> = [];
 		vi.mocked(state.connection.sendNotification).mockImplementation(
-			async (method: string) => {
-				if (String(method) === "textDocument/didChange") {
+			async (method: string, params: unknown) => {
+				if (
+					String(method) === "textDocument/didChange" &&
+					JSON.stringify(params).includes("const x = 2;")
+				) {
 					await new Promise<void>((resolve) => {
 						held.push(resolve);
 					});
@@ -275,15 +304,141 @@ describe("#4532 gap 9 — a skip needs the path's notify queue idle", () => {
 			entry?.client,
 			"the case needs the file's live client",
 		).toBeDefined();
-		void entry!.client.notify.open(FILE, B, "typescript", undefined, true);
+		const sendingB = entry!.client.notify.open(
+			FILE,
+			B,
+			"typescript",
+			undefined,
+			true,
+		);
 
 		await service.touchFile(FILE, A, touch);
 
 		for (const resolve of held.splice(0)) resolve();
-		await new Promise<void>((resolve) => setImmediate(resolve));
+		await sendingB;
+		await queueDrained(state);
 
 		// The queue is idle and the server holds the bytes the last touch named.
 		expect(texts().at(-1)).toBe(`didChange:${A}`);
-		expect(state.documentContentHashes.get(FILE)?.hash).toBeDefined();
+		expect(state.documentContentHashes.get(FILE)?.hash).toBe(
+			hashDiagnosticContent(A),
+		);
+		expect(held).toHaveLength(0);
+	});
+
+	// R4 P1: a standalone save must preserve the cached content and diagnostics.
+	it("skips identical content while a save-only send is slow", async () => {
+		const { service, texts, state } = await setup();
+		const touch = { diagnostics: "none" as const, source: "test" };
+		await service.touchFile(FILE, A, touch);
+		state.pushDiagnostics.set(FILE, []);
+		vi.stubEnv("PI_LENS_LSP_NOTIFY_BUDGET_MS", "50");
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		vi.mocked(state.connection.sendNotification).mockImplementation(
+			async (method: string) => {
+				if (method === "textDocument/didSave") await gate;
+			},
+		);
+		try {
+			await service.touchFile(FILE, A, { ...touch, saved: true });
+			await waitFor(
+				() =>
+					vi
+						.mocked(state.connection.sendNotification)
+						.mock.calls.some(([method]) => method === "textDocument/didSave"),
+				(sent) => sent,
+				{ timeoutMs: 2_000, yieldControl: tick },
+			);
+			await service.touchFile(FILE, A, touch);
+		} finally {
+			release();
+			await queueDrained(state);
+		}
+		expect(texts()).toEqual([`didOpen:${A}`]);
+		expect(state.pushDiagnostics.has(FILE)).toBe(true);
+	});
+
+	// R4: the kind belongs to the run an entry RETAINS, not to the caller that
+	// arrived last. A save coalesced onto a content entry still carries that
+	// entry's content (the server ends on those bytes); a content entry
+	// coalesced onto a save carries content too. Only a run that sends the save
+	// alone leaves the landed record final.
+	const pendingWork = async (
+		order: "save" | "content-save" | "save-content",
+	) => {
+		const { service, state, texts } = await setup();
+		const touch = { diagnostics: "none" as const, source: "test" };
+		await service.touchFile(FILE, A, touch);
+		const sends: Promise<boolean>[] = [];
+		for (const kind of order.split("-")) {
+			sends.push(
+				kind === "save"
+					? clientModule.handleNotifySave(state, FILE)
+					: clientModule.handleNotifyOpen(
+							state,
+							FILE,
+							B,
+							"typescript",
+							undefined,
+							true,
+						),
+			);
+		}
+		// Read before the runner starts, which is the state the gate reads a
+		// pending entry in.
+		const contentBearing = clientModule.hasNotifyInFlightFor(state, FILE);
+		await service.touchFile(FILE, A, touch);
+		await Promise.all(sends);
+		await queueDrained(state);
+		return {
+			contentBearing,
+			hash: state.documentContentHashes.get(FILE)?.hash,
+			last: texts().at(-1),
+		};
+	};
+
+	it("reports a pending save as not content-bearing", async () => {
+		const observed = await pendingWork("save");
+		expect(observed.contentBearing).toBe(false);
+		expect(observed.hash).toBe(hashDiagnosticContent(A));
+		expect(observed.last).toBe(`didOpen:${A}`);
+	});
+
+	it("reports a save merged onto content as content-bearing", async () => {
+		const observed = await pendingWork("content-save");
+		expect(observed.contentBearing).toBe(true);
+		expect(observed.hash).toBe(hashDiagnosticContent(A));
+		expect(observed.last).toBe(`didChange:${A}`);
+	});
+
+	it("reports content merged onto a save as content-bearing", async () => {
+		const observed = await pendingWork("save-content");
+		expect(observed.contentBearing).toBe(true);
+		expect(observed.hash).toBe(hashDiagnosticContent(A));
+		expect(observed.last).toBe(`didChange:${A}`);
+	});
+
+	// R4 P3: overflow removes oldest evidence; re-pushing refreshes its order.
+	it("bounds touch evidence at 800 and evicts the oldest unrefreshed entry", async () => {
+		const { service, texts } = await setup();
+		const touch = { diagnostics: "none" as const, source: "test" };
+		const file = (n: number) => `/repo/cap-${n}.ts`;
+		for (let n = 0; n < 800; n++) await service.touchFile(file(n), A, touch);
+		const count = texts().length;
+		await service.touchFile(file(0), A, touch);
+		await service.touchFile(file(799), A, touch);
+		expect(texts()).toHaveLength(count);
+		// A changed push refreshes 0 without changing the population.
+		await service.touchFile(file(0), B, touch);
+		await service.touchFile(file(800), A, touch);
+		const overflow = texts().length;
+		await service.touchFile(file(0), B, touch);
+		await service.touchFile(file(2), A, touch);
+		expect(texts()).toHaveLength(overflow);
+		await service.touchFile(file(1), A, touch);
+		expect(texts()).toHaveLength(overflow + 1);
 	});
 });

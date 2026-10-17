@@ -1655,10 +1655,13 @@ export class LSPService {
 	 *   document with no record (never opened, closed since, or a replacement
 	 *   instance) holds nothing, so it is always pushed;
 	 * - the path's notify queue (`hasNotifyInFlight`). The record reports what
-	 *   LANDED; while a send for this path is running or queued, that send is
-	 *   what the server ends on, so the record is not yet the answer. A skip
-	 *   taken then loses the race and leaves the server holding the other
-	 *   bytes (F1);
+	 *   LANDED; while a CONTENT send for this path is running or queued, that
+	 *   send is what the server ends on, so the record is not yet the answer. A
+	 *   skip taken then loses the race and leaves the server holding the other
+	 *   bytes (F1). A save-only send (round 4) writes no content and closes
+	 *   nothing, so it is not one of these: the record is already the final
+	 *   state, and counting the save would re-push identical bytes and clear the
+	 *   cached diagnostics;
 	 * - the save mark (`recentTouches.savedHash`), read by `saveDebouncedPush`
 	 *   rather than here: a skip sends no content, so it owes the save its own
 	 *   content identity requires (F2).
@@ -1703,8 +1706,10 @@ export class LSPService {
 		if (sentContent === undefined || sentContent.hash !== sentContentHash) {
 			return false;
 		}
-		// F1: the record is final only with nothing left to send. Absent
+		// F1: the record is final only with no content send left to come. Absent
 		// `hasNotifyInFlight` is not "idle" — it is an unanswerable question.
+		// Round 4: that answer counts content sends only; a running save leaves
+		// the record final, so it still skips here.
 		return client.hasNotifyInFlight?.(filePath) === false;
 	}
 

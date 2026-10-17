@@ -994,7 +994,10 @@ file-scoped worklist and receives no project-wide scanner output.
   hold once the path's notify queue drains are this touch's content. The
   evidence is the client's own sent-content record (`getSentContent`) AND
   `hasNotifyInFlight`, because that record reports what landed and a send still
-  running lands after a skip. A client that cannot answer either question is
+  running lands after a skip. `hasNotifyInFlight` counts a content send only: a
+  save-only send (`sendDidSaveForHeldDocument`) cannot change the bytes or
+  remove the document, so it leaves the record final, while a didClose always
+  counts. A client that cannot answer either question is
   pushed, never skipped: the elapsed window that used to decide there is gone
   (`formal/lsp-server-content` `GateWindowReopen` is why).
 - `touchFile` freezes content-bound auxiliary coverage at merge time. A later

@@ -594,12 +594,16 @@ export interface LSPClientInfo {
 		  }
 		| undefined;
 	/**
-	 * #4532 gap 9 F1: true while a content send for this document is running or
-	 * queued on the path's notify queue. `getSentContent` reports what LANDED,
-	 * so its answer is not the server's final state while a send is still to
-	 * come: that send writes the bytes the server ends on. Optional for the same
-	 * reason `getSentContent` is; a client that cannot answer fails closed in
-	 * the touch gate, never open (`clients/lsp/index.ts` `shouldSkipNotify`).
+	 * #4532 gap 9 F1: true while a send that can change this document is running
+	 * or queued on the path's notify queue. `getSentContent` reports what
+	 * LANDED, so its answer is not the server's final state while such a send is
+	 * still to come: that send writes the bytes the server ends on, and a close
+	 * removes the document altogether. A SAVE-ONLY send is not one of these
+	 * (round 4): it sends no content and closes nothing, so it cannot change the
+	 * answer and must not cost the cached diagnostics a redundant re-push clears.
+	 * Optional for the same reason `getSentContent` is; a client that cannot
+	 * answer fails closed in the touch gate, never open (`clients/lsp/index.ts`
+	 * `shouldSkipNotify`).
 	 */
 	hasNotifyInFlight?(filePath: string): boolean;
 	/** Whether this client currently has an LSP request in flight. */
@@ -667,6 +671,14 @@ export interface LSPClientInfo {
  * document state waits behind it and supersedes only the still-pending entry.
  */
 interface PendingDocumentNotify {
+	/**
+	 * #4532 gap 9 round 4: this run is `sendDidSaveForHeldDocument` alone, so it
+	 * can neither change the document's bytes nor remove it. It must stay paired
+	 * with `run`: a stale save retains the run it coalesces onto, and with it
+	 * that run's kind, so a save-only flag can never describe a content send.
+	 * The touch gate reads it through `hasNotifyInFlightFor`.
+	 */
+	saveOnly: boolean;
 	/** Resolves `false` when it sent nothing for the path (#3477). */
 	run: (coalescedCount: number, saved: boolean) => Promise<boolean | void>;
 	waiters: Array<{
@@ -711,6 +723,15 @@ interface DiagnosticFence {
 }
 
 interface DocumentNotifyQueue {
+	/**
+	 * The entry whose `run` is on the wire now. Held separately from `pending`
+	 * because the gate needs the KIND of the send still to come, not only that
+	 * one exists: a running save never blocks a skip, a running content send
+	 * does. Cleared only after the run settles. Required with an `undefined`
+	 * member (not optional): the settle path assigns `undefined`, and
+	 * `exactOptionalPropertyTypes` refuses that on an optional field.
+	 */
+	active: PendingDocumentNotify | undefined;
 	pending?: PendingDocumentNotify;
 	running: boolean;
 	/**
@@ -4690,7 +4711,7 @@ function enqueueDocumentNotify(
 ): Promise<boolean> {
 	let queue = state.notifyChangeQueues.get(normalizedPath);
 	if (!queue) {
-		queue = { running: false };
+		queue = { running: false, active: undefined };
 		state.notifyChangeQueues.set(normalizedPath, queue);
 	}
 	return new Promise<boolean>((resolve, reject) => {
@@ -4730,6 +4751,7 @@ function enqueueDocumentNotify(
 		waiters.push({ resolve, reject, stale });
 		queue!.pending = {
 			run: stale ? previous!.run : run,
+			saveOnly: stale ? previous!.saveOnly : saveOnly,
 			waiters,
 			// A save-only entry coalesces no content send.
 			coalescedCount:
@@ -4755,6 +4777,7 @@ function enqueueDocumentNotify(
 					const next = queue!.pending;
 					if (!next) break;
 					queue!.pending = undefined;
+					queue!.active = next;
 					// #3481: an entry read before the content this path last sent
 					// would replace newer bytes with older ones. Drop it; its
 					// callers resolve without claiming a send.
@@ -4784,6 +4807,7 @@ function enqueueDocumentNotify(
 					}
 				}
 			} finally {
+				queue!.active = undefined;
 				queue!.running = false;
 				if (
 					!queue!.pending &&
@@ -6007,13 +6031,23 @@ export function sentContentFor(
  * enqueued for the same path, so while this is true the record is not the
  * server's final state: the send still running, or the entry behind it, is
  * what the server ends on. Same export reason as `sentContentFor`.
+ *
+ * #4532 gap 9 round 4: a save-only entry is `sendDidSaveForHeldDocument`,
+ * which writes no content and closes nothing, so it leaves the record as the
+ * server's final state and does not answer here. Counting it did exactly the
+ * harm this gate exists to prevent: a slow `didSave` made the next identical
+ * touch look uncovered, and its redundant `didChange` cleared the cached
+ * diagnostics. A didClose is NOT save-only: removing the document is the
+ * strongest change to it, so it always answers true.
  */
 export function hasNotifyInFlightFor(
 	state: LSPClientState,
 	filePath: string,
 ): boolean {
 	const queue = state.notifyChangeQueues.get(normalizeMapKey(filePath));
-	return queue !== undefined && (queue.running || queue.pending !== undefined);
+	return (
+		queue?.active?.saveOnly === false || queue?.pending?.saveOnly === false
+	);
 }
 
 export async function createLSPClient(options: {
