@@ -41,7 +41,11 @@ import {
 	getProjectDataDir,
 	getProjectIgnoreMatcher,
 } from "../../clients/file-utils.js";
-import { normalizeFilePath } from "../../clients/path-utils.js";
+import {
+	normalizeFilePath,
+	resolveHostToolPath,
+} from "../../clients/path-utils.js";
+import { runPipeline } from "../../clients/pipeline.js";
 import { resolveAnalysisRoot } from "../../clients/analysis-root.js";
 import {
 	getVerifiedPathAttributionGuessCount,
@@ -5825,6 +5829,160 @@ describe("path attribution across tool_call/tool_result (#1642)", () => {
 			} else {
 				process.env.PILENS_DATA_DIR = previousDataDir;
 			}
+			env.cleanup();
+		}
+	});
+});
+
+/**
+ * #4576: `~` on a host-supplied tool path. The tool_call seam
+ * (`resolveToolCallFilePath` -> `resolveHostToolPath`) expands it, but the
+ * tool_result seam used a bare `path.resolve`, so `~/proj/a.ts` became
+ * `<projectRoot>/~/proj/a.ts` — a path that never existed — and that phantom
+ * reached runner dispatch (biome `internalError/io`, then a synthetic
+ * `coverage-unavailable` notice for a file the agent never touched).
+ *
+ * HOME/USERPROFILE are pinned to a directory below the test tmp root so
+ * `os.homedir()` points there: the real maintainer home is never read or
+ * written.
+ */
+describe("host tool path resolution on the tool_result side (#4576)", () => {
+	function callDeps(runtime: RuntimeCoordinator, event: unknown) {
+		return {
+			event,
+			ctx: { cwd: runtime.projectRoot },
+			lensEnabled: true,
+			getFlag: (name: string) => name === "no-lsp" || name === "no-complexity",
+			dbg: () => {},
+			runtime,
+			cacheManager: new CacheManager(false),
+			ensureLSPConfigInitialized: async () => {},
+			updateLspStatus: () => {},
+			resetLSPService: () => {},
+		} as never;
+	}
+	function resultDeps(runtime: RuntimeCoordinator, event: unknown) {
+		return {
+			event,
+			getFlag: (name: string) => name === "no-lsp" || name === "no-complexity",
+			dbg: () => {},
+			runtime,
+			cacheManager: new CacheManager(false),
+			biomeClient: {},
+			ruffClient: {},
+			metricsClient: {},
+			resetLSPService: () => {},
+			readGuard: runtime.readGuard,
+			agentBehaviorRecord: () => [],
+			formatBehaviorWarnings: () => "",
+		} as never;
+	}
+	async function writeThroughRealSeams(
+		runtime: RuntimeCoordinator,
+		toolCallId: string,
+		spelling: string,
+	) {
+		const input = { path: spelling, content: "export const value = 1;\n" };
+		await runHandlerExpectingNoThrow(() =>
+			handleToolCall(
+				callDeps(runtime, { toolName: "write", toolCallId, input }),
+			),
+		);
+		await handleToolResult(
+			resultDeps(runtime, {
+				toolName: "write",
+				toolCallId,
+				input,
+				content: [{ type: "text", text: "ok" }],
+			}),
+		);
+	}
+	/** The `filePath` every runner dispatch was handed, in call order. */
+	function dispatchedPaths(): string[] {
+		return vi
+			.mocked(runPipeline)
+			.mock.calls.map(([ctx]) => (ctx as { filePath?: string }).filePath ?? "");
+	}
+
+	it("dispatches the expanded home path, never the phantom <root>/~/ path", async () => {
+		const env = setupTestEnvironment("probe-4576-tilde-");
+		const previousHome = process.env.HOME;
+		const previousUserProfile = process.env.USERPROFILE;
+		const home = path.join(env.tmpDir, "home");
+		const projectRoot = path.join(env.tmpDir, "workspace");
+		const realFile = path.join(home, "proj", "src", "tilde.ts");
+		fs.mkdirSync(path.dirname(realFile), { recursive: true });
+		fs.mkdirSync(projectRoot, { recursive: true });
+		fs.writeFileSync(path.join(home, "proj", "package.json"), "{}\n");
+		fs.writeFileSync(realFile, "export const value = 1;\n");
+		process.env.HOME = home;
+		process.env.USERPROFILE = home;
+		const runPipelineMock = vi.mocked(runPipeline);
+		runPipelineMock.mockReset();
+		runPipelineMock.mockResolvedValue({
+			output: "",
+			hasBlockers: false,
+			isError: false,
+			fileModified: false,
+		} as never);
+		try {
+			// The pin is live before the handler runs: a stale HOME would make
+			// every assertion below pass against the wrong directory.
+			expect(os.homedir()).toBe(home);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = projectRoot;
+			const phantom = path.join(projectRoot, "~", "proj", "src", "tilde.ts");
+
+			await writeThroughRealSeams(
+				runtime,
+				"call-4576-tilde",
+				"~/proj/src/tilde.ts",
+			);
+
+			expect(dispatchedPaths()[0]).toBe(realFile);
+			// The phantom path is where the pre-fix resolver landed. No runner
+			// may ever be dispatched for it: it is what produced the ghost
+			// biome `internalError/io` and the synthetic coverage notice.
+			expect(dispatchedPaths()).not.toContain(phantom);
+			expect(
+				dispatchedPaths().some((p) => p.includes(`${path.sep}~${path.sep}`)),
+			).toBe(false);
+		} finally {
+			if (previousHome === undefined) delete process.env.HOME;
+			else process.env.HOME = previousHome;
+			if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+			else process.env.USERPROFILE = previousUserProfile;
+			env.cleanup();
+		}
+	});
+
+	// `~` alone and `~/x` expand to the home directory; `~user/x` does NOT
+	// (pi's `normalizePath` expands only `~` and `~/`, and the tool_call seam
+	// has always left a named-user tilde to resolve against the base). The
+	// tool_result side now delegates to that same resolver, so it must agree
+	// on all three spellings rather than growing a second expander.
+	it.each([
+		["~", () => os.homedir()],
+		["~/proj/a.ts", () => path.join(os.homedir(), "proj", "a.ts")],
+		["~user/proj/a.ts", (cwd: string) => path.resolve(cwd, "~user/proj/a.ts")],
+	])("resolves %s exactly as the tool_call seam does", (spelling, expected) => {
+		const env = setupTestEnvironment("probe-4576-resolver-");
+		const previousHome = process.env.HOME;
+		const previousUserProfile = process.env.USERPROFILE;
+		const home = path.join(env.tmpDir, "home");
+		const cwd = path.join(env.tmpDir, "workspace");
+		fs.mkdirSync(home, { recursive: true });
+		fs.mkdirSync(cwd, { recursive: true });
+		process.env.HOME = home;
+		process.env.USERPROFILE = home;
+		try {
+			expect(os.homedir()).toBe(home);
+			expect(resolveHostToolPath(spelling, cwd)).toBe(expected(cwd));
+		} finally {
+			if (previousHome === undefined) delete process.env.HOME;
+			else process.env.HOME = previousHome;
+			if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+			else process.env.USERPROFILE = previousUserProfile;
 			env.cleanup();
 		}
 	});

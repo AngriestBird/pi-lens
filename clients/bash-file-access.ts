@@ -17,6 +17,7 @@
 import * as nodeFs from "node:fs";
 import * as path from "node:path";
 import { isReadableSourceFile } from "./file-kinds.js";
+import { resolveHostToolPath } from "./path-utils.js";
 import { classifyMutatingTool } from "./mutating-tool.js";
 import { countFileLines } from "./read-guard-tool-lines.js";
 import type { SearchReadLocation } from "./search-read-registration.js";
@@ -309,7 +310,11 @@ function resolveCandidate(token: string, cwd: string): string | null {
 	if (!cleaned || cleaned.startsWith("-") || !isReadableSourceFile(cleaned)) {
 		return null;
 	}
-	return path.isAbsolute(cleaned) ? cleaned : path.resolve(cwd, cleaned);
+	// #4576: a bash operand is a host-supplied tool path too. Expanding `~`
+	// here (through the same resolver the host tool seams use) keeps a
+	// `> ~/x.ts` write out of the phantom `<cwd>/~/x.ts` bucket, which then
+	// reached runner dispatch as a file that never existed.
+	return resolveHostToolPath(cleaned, cwd);
 }
 
 /** Parse a count flag value like `-20`, `-n20`, or the `20` following `-n`. */

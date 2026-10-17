@@ -597,6 +597,38 @@ describe("extractWrittenPathsFromCommand — bash writes", () => {
 		});
 	}
 
+	// #4576: a bash operand is a host-supplied tool path. `~` used to be
+	// resolved against the cwd (`<cwd>/~/proj/a.ts`), a path that cannot
+	// exist, and the phantom then reached runner dispatch as a ghost file.
+	it("expands a ~ operand to $HOME instead of pinning it under the cwd (#4576)", () => {
+		const previousHome = process.env.HOME;
+		const previousUserProfile = process.env.USERPROFILE;
+		const home = path.join(tmp, "home");
+		fs.mkdirSync(path.join(home, "proj"), { recursive: true });
+		process.env.HOME = home;
+		process.env.USERPROFILE = home;
+		try {
+			expect(os.homedir()).toBe(home);
+			expect(
+				extractWrittenPathsFromCommand("echo x > ~/proj/a.ts", tmp),
+			).toEqual([path.join(home, "proj", "a.ts")]);
+			fs.writeFileSync(path.join(home, "proj", "a.ts"), "line1\n");
+			expect(
+				extractReadPathsFromCommand("cat ~/proj/a.ts", tmp)[0]?.filePath,
+			).toBe(path.join(home, "proj", "a.ts"));
+			// `~user` is not a spelling pi expands; it stays relative to the
+			// cwd, exactly as the host tool resolver leaves it.
+			expect(
+				extractWrittenPathsFromCommand("echo x > ~user/proj/a.ts", tmp),
+			).toEqual([path.join(tmp, "~user", "proj", "a.ts")]);
+		} finally {
+			if (previousHome === undefined) delete process.env.HOME;
+			else process.env.HOME = previousHome;
+			if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+			else process.env.USERPROFILE = previousUserProfile;
+		}
+	});
+
 	it("cp source is NOT registered as a write (only the destination)", () => {
 		const dst = pathIn("dst.ts");
 		const r = extractWrittenPathsFromCommand(`cp /other/src.ts ${dst}`, tmp);

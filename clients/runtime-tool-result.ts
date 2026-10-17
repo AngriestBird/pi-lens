@@ -19,7 +19,7 @@ import {
 	serializeHeadLook,
 	shouldRunOpaqueRecovery,
 } from "./opaque-mutation-scan.js";
-import { normalizeMapKey } from "./path-utils.js";
+import { normalizeMapKey, resolveToolCallFilePath } from "./path-utils.js";
 import { detectFileKind } from "./file-kinds.js";
 import {
 	extractReadPathsFromCommand,
@@ -1809,11 +1809,16 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		// not a regression introduced by it.
 		resolutionBasis = workspaceRoot;
 	}
-	const filePath = rawFilePath
-		? path.isAbsolute(rawFilePath)
-			? rawFilePath
-			: path.resolve(resolutionBasis, rawFilePath)
-		: rawFilePath;
+	// #4576: one host-path resolver for both sides of a call. The `tool_call`
+	// seam already expanded `~`, `file://`, an `@` prefix and the variant
+	// ladder through this exact function; resolving the result's authoritative
+	// path with a bare `path.resolve` turned `~/x` into `<root>/~/x`, a path
+	// that cannot exist, and dispatched runners and analyzers against it.
+	const filePath = resolveToolCallFilePath(
+		rawFilePath,
+		resolutionBasis,
+		workspaceRoot,
+	)?.path;
 	const analysisRootMode = resolveAnalysisRoot(filePath ?? "", workspaceRoot);
 	if (filePath) {
 		invalidateProjectIgnoreMatcherForPath(filePath);

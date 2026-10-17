@@ -251,6 +251,15 @@ the surface they bite; each block loads only when its trigger applies.
 39. **Walk-up result used as eligibility:** return ownership and start-directory
     identity separately; enumerate root-position by ambient-input cells.
 
+74. **Split host-path resolution:** every seam that resolves a path a host tool
+    was given — the `tool_call`/`tool_result` pair, a bash operand, a
+    runner-reported file, a pi-lens tool's own path argument — uses
+    `resolveHostToolPath` / `resolveToolCallFilePath`, never a bare
+    `path.resolve(base, raw)`. The bare join turns `~` into `<base>/~/…`, a
+    path that cannot exist, and dispatch then reports ghost findings for it
+    (#4576: four runners across two session roots). The population census is
+    the gap; the class sweep in that PR lists the members.
+
 64. **Named path vs written set:** a guard keyed on the path a tool NAMES must
     hold for every path the tool WRITES; enumerate the written set (a rename's
     importers, an `ast_grep_replace` folder or its project default, a
@@ -822,6 +831,12 @@ file-scoped worklist and receives no project-wide scanner output.
 - Windows-shaped paths use `path.win32` functions. Use `toPosix`,
   `splitPathSegments`, `isUnderDir`, `isSameOrWithin`, and
   `isAtOrAboveHomeDir` instead of inline separator or containment logic.
+- A path a host tool was given resolves through `resolveHostToolPath` (the
+  base expansion) or `resolveToolCallFilePath` (base plus pi's variant
+  ladder); `tool_call` and `tool_result` share the latter, and bash operand
+  extraction, runner-reported paths, and `lens_diagnostics` `paths` use the
+  same seam. A bare `path.resolve(base, raw)` turns `~` into `<base>/~/…`, a
+  path that cannot exist (#4576).
 - Data and log locations follow **Data directories and logs**; never hardcode
   `.pi-lens` paths in writes or user-facing text.
 - Probes and child processes pin `PI_LENS_HOME`, `PILENS_DATA_DIR`, `HOME`, and

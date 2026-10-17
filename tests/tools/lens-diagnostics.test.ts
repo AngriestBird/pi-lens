@@ -4677,6 +4677,66 @@ describe("lens_diagnostics paths", () => {
 		}
 	});
 
+	// #4576: `paths` is a host-supplied tool input, so a `~` spelling must be
+	// expanded by the shared host resolver. A bare `path.resolve(cwd, entry)`
+	// pinned it under the session cwd and scanned a file that never existed.
+	it("mode=full: a ~ path resolves to $HOME, not under the session cwd (#4576)", async () => {
+		mockSummaries.length = 0;
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "probe-4576-diag-"));
+		const previousHome = process.env.HOME;
+		const previousUserProfile = process.env.USERPROFILE;
+		const home = path.join(cwd, "home");
+		const realFile = path.join(home, "proj", "src", "tilde.ts");
+		fs.mkdirSync(path.dirname(realFile), { recursive: true });
+		fs.writeFileSync(realFile, "export const a = 1;\n");
+		process.env.HOME = home;
+		process.env.USERPROFILE = home;
+		try {
+			expect(os.homedir()).toBe(home);
+			const lspService = {
+				runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]),
+			};
+			projectDiagnosticsMocks.scanProjectDiagnostics.mockResolvedValue({
+				version: 1,
+				cwd,
+				tier: "cheap",
+				scannedAt: "2026-01-01T00:00:00.000Z",
+				filesScanned: 1,
+				runners: ["tree-sitter", "fact-rules", "ast-grep-napi"],
+				diagnostics: [],
+			});
+			const tool = createLensDiagnosticsTool(
+				makeCacheManager({}) as any,
+				() => cwd,
+				() => lspService as any,
+			);
+			await tool.execute(
+				"1",
+				{
+					mode: "full",
+					refreshRunners: "cheap",
+					paths: ["~/proj/src/tilde.ts"],
+				},
+				new AbortController().signal,
+				null,
+				{ cwd },
+			);
+			expect(lspService.runWorkspaceDiagnostics).toHaveBeenCalledWith(
+				cwd,
+				expect.objectContaining({ files: [realFile] }),
+			);
+			expect(
+				projectDiagnosticsMocks.scanProjectDiagnostics,
+			).toHaveBeenCalledWith(expect.objectContaining({ files: [realFile] }));
+		} finally {
+			if (previousHome === undefined) delete process.env.HOME;
+			else process.env.HOME = previousHome;
+			if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+			else process.env.USERPROFILE = previousUserProfile;
+			removeTempDirSync(cwd);
+		}
+	});
+
 	it("mode=full: an explicitly named ignored file remains visible to an audit", async () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-diag-audit-"));
 		try {

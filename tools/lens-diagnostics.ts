@@ -53,6 +53,7 @@ import {
 	normalizeFilePath,
 	normalizeMapKey,
 	realpathOrResolve,
+	resolveHostToolPath,
 } from "../clients/path-utils.js";
 import { getLSPService } from "../clients/lsp/capabilities.js";
 import { retireInlineBlockerAndResyncGuard } from "../clients/git-guard.js";
@@ -1444,9 +1445,11 @@ function resolvePathsScope(
 			(entry): entry is string =>
 				typeof entry === "string" && entry.trim().length > 0,
 		)
-		.map((entry) =>
-			path.resolve(path.isAbsolute(entry) ? entry : path.resolve(cwd, entry)),
-		);
+		// #4576: `paths` is a host-supplied tool input like any other, so it
+		// goes through the same resolver (`~`, `file://`, `@` prefix, unicode
+		// spaces) instead of a bare `path.resolve` that pinned a literal `~`
+		// under the session cwd.
+		.map((entry) => resolveHostToolPath(entry, cwd));
 
 	const missing: string[] = [];
 	const fileEntries: string[] = [];
