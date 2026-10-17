@@ -179,6 +179,17 @@ async function teardownRowsIn(
 }
 
 /**
+ * The sidecar record `saveSessionState` writes. Declared from an import TYPE,
+ * never from the body's dynamic import: a signature cannot see a name that
+ * exists only inside the function body (Greptile #4563 r6).
+ */
+type SessionSidecar = Awaited<
+	ReturnType<
+		typeof import("../clients/session-state-store.js").loadSessionState
+	>
+>;
+
+/**
  * Read a session sidecar once its fire-and-forget write lands. The writer is
  * `saveSessionState` (unowned by any drained writer registry), so the wait is a
  * bounded run of event-loop turns, never a wall-clock sleep.
@@ -186,7 +197,7 @@ async function teardownRowsIn(
 async function sidecarFor(
 	cwd: string,
 	sessionId: string,
-): Promise<Awaited<ReturnType<typeof loadSessionState>>> {
+): Promise<SessionSidecar> {
 	const { loadSessionState } =
 		await import("../clients/session-state-store.js");
 	for (let turn = 0; turn < 50; turn += 1) {
