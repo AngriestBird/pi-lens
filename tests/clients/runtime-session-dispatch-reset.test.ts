@@ -14,6 +14,7 @@
 import { withResidentBootstrap } from "../support/bootstrap-access.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleSessionStart } from "../../clients/runtime-session.js";
+import { safeSpawnAsync } from "../../clients/safe-spawn.js";
 import { removeTempDirSync, setupTestEnvironment } from "./test-utils.js";
 import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 
@@ -114,6 +115,11 @@ describe("dispatch availability suppression is reset at session start (#1266)", 
 
 	beforeEach(() => {
 		vi.clearAllMocks();
+		// Recurrence (#4561, shuffle seed 424): `clearAllMocks()` clears calls,
+		// not implementations, so a case's stubbed probe answers (and its send
+		// owner) were still installed for every later case. `mockReset()` puts
+		// back the factory's original implementation.
+		vi.mocked(safeSpawnAsync).mockReset();
 		tmpDir = setupTestEnvironment("pi-lens-dispatch-reset-").tmpDir;
 	});
 
