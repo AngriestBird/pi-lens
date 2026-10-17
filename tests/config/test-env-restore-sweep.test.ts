@@ -33,18 +33,16 @@ import {
 	readWalkedFile,
 	readWalkedFiles,
 	relativePosix,
-	stripSource,
 } from "../support/sweep-kit.js";
 import {
 	type EnvRestoreFinding,
+	type EnvRestoreMechanism,
 	envRestoreKey,
+	envRestoreMechanisms,
 	escapeRowKey,
 	findUnrestoredEnvWrites,
 } from "../support/test-env-restore-gate.js";
-import {
-	TEST_ENV_RESTORE_ADMISSIONS,
-	type EnvRestoreMechanism,
-} from "../support/test-env-restore-admissions.js";
+import { TEST_ENV_RESTORE_ADMISSIONS } from "../support/test-env-restore-admissions.js";
 import { TEST_ENV_RESTORE_BASELINE } from "../support/test-env-restore-baseline.js";
 
 const REPO_ROOT = path.resolve(__dirname, "../..");
@@ -610,6 +608,176 @@ describe("#4589 test-env-restore detector — the shapes that must red and green
 		).toMatchObject([{ kind: "unclassified" }]);
 	});
 
+	it("fail-closed: an optional chain, non-null assertion or cast is still a write", () => {
+		// The role decides, not the spelling: each of these continues the member
+		// chain of the same seam, so the assignment writes the environment.
+		const cases: Array<{ name: string; source: string; key: string }> = [
+			{
+				name: "optional chaining",
+				source: 'it("a", () => { process.env?.PROBE_OPT = "1"; });',
+				key: "PROBE_OPT",
+			},
+			{
+				name: "optional index",
+				source: 'it("a", () => { process.env?.["PROBE_OIDX"] = "1"; });',
+				key: "PROBE_OIDX",
+			},
+			{
+				name: "non-null assertion",
+				source: 'it("a", () => { process.env!.PROBE_NN = "1"; });',
+				key: "PROBE_NN",
+			},
+			{
+				name: "grouped reference",
+				source: 'it("a", () => { (process.env).PROBE_GRP = "1"; });',
+				key: "PROBE_GRP",
+			},
+			{
+				name: "cast target",
+				source: 'it("a", () => { (process.env as any).PROBE_CAST = "1"; });',
+				key: "PROBE_CAST",
+			},
+			{
+				name: "satisfies target",
+				source:
+					'it("a", () => { (process.env satisfies unknown as any).PROBE_SAT = "1"; });',
+				key: "PROBE_SAT",
+			},
+			{
+				name: "optional chain on an alias",
+				source: [
+					'it("a", () => {',
+					"\tconst env = process.env;",
+					'\tenv?.PROBE_AO = "1";',
+					"});",
+				].join("\n"),
+				key: "PROBE_AO",
+			},
+			{
+				name: "Object.assign on an alias",
+				source: [
+					'it("a", () => {',
+					"\tconst env = process.env;",
+					'\tObject.assign(env, { PROBE_AM: "1" });',
+					"});",
+				].join("\n"),
+				key: "<process.env>",
+			},
+			{
+				name: "Reflect.set on an alias",
+				source: [
+					'it("a", () => {',
+					"\tconst env = process.env;",
+					'\tReflect.set(env, "PROBE_AR", "1");',
+					"});",
+				].join("\n"),
+				key: "<process.env>",
+			},
+		];
+		for (const probe of cases) {
+			const findings = detect(probe.source);
+			expect(
+				findings.map((finding) => finding.key),
+				`${probe.name} must be a finding`,
+			).toContain(probe.key);
+			for (const finding of findings)
+				expect(
+					ROW_RE.test(envRestoreKey(finding)),
+					`${probe.name}: ${envRestoreKey(finding)} must pass the row guard`,
+				).toBe(true);
+		}
+	});
+
+	it("keeps a cast or grouped reference used as a VALUE a read", () => {
+		// The same wrapper: the role after it decides. No assignment target, no
+		// finding, or every `expect(process.env)` would red.
+		expect(
+			detect('const e = (process.env as any); it("a", () => { void e; });'),
+		).toEqual([]);
+		expect(
+			detect('it("a", () => { expect(process.env).toBeTruthy(); });'),
+		).toEqual([]);
+	});
+
+	it("fail-closed: an unrecognised follower is unclassified, not a read", () => {
+		// The last-resort classification: the seam was reached in a role the
+		// enumerator cannot place, so it reports instead of staying silent.
+		expect(detect('it("a", () => { process.env(); });')).toMatchObject([
+			{ key: "<process.env>", kind: "unclassified" },
+		]);
+		expect(detect('it("a", () => { process.env`x`; });')).toMatchObject([
+			{ key: "<process.env>", kind: "unclassified" },
+		]);
+	});
+
+	it("reds on a teardown that reassigns the environment from live state", () => {
+		// A whole-environment assignment restores only from a saved copy. The
+		// live environment, a fresh literal, and a live copy plus one key put
+		// nothing back, so the case still leaks its key.
+		for (const value of [
+			"{ ...process.env }",
+			'{ OTHER_KEY: "1" }',
+			'{ ...process.env, EXTRA: "1" }',
+		]) {
+			const findings = detect(
+				[
+					`afterEach(() => { process.env = ${value}; });`,
+					'it("a", () => { process.env.PROBE_WHOLE = "1"; });',
+				].join("\n"),
+			);
+			expect(
+				findings.map((finding) => finding.key),
+				value,
+			).toContain("PROBE_WHOLE");
+		}
+	});
+
+	it("reds on a whole-environment copy saved INSIDE the teardown", () => {
+		// Only a value captured before the write is saved. A copy taken in the
+		// teardown copies whatever the case leaked, so it restores nothing.
+		const findings = detect(
+			[
+				"afterEach(() => {",
+				"\tconst live = { ...process.env };",
+				"\tprocess.env = { ...live };",
+				"});",
+				'it("a", () => { process.env.PROBE_IN = "1"; });',
+			].join("\n"),
+		);
+		expect(findings.map((finding) => finding.key)).toContain("PROBE_IN");
+	});
+
+	it("greens on a whole-environment restore from a saved copy", () => {
+		expect(
+			detect(
+				[
+					"const saved = { ...process.env };",
+					"afterEach(() => { process.env = { ...saved }; });",
+					'it("a", () => { process.env.PROBE_WHOLE_OK = "1"; });',
+				].join("\n"),
+			),
+		).toEqual([]);
+	});
+
+	it("greens on Object.assign(process.env, saved) in a finally", () => {
+		// A mutator copies a saved record back: the value argument is the
+		// restore, exactly as an assignment's right side is.
+		expect(
+			detect(
+				[
+					"const saved = { ...process.env };",
+					'it("a", () => {',
+					"\ttry {",
+					'\t\tprocess.env.PROBE_OA = "1";',
+					"\t} finally {",
+					"\t\tObject.assign(process.env, saved);",
+					"\t}",
+					"});",
+				].join("\n"),
+			),
+		).toEqual([]);
+	});
+
 	it("reds when a baseline row vanishes from the tree", () => {
 		const live = detect(
 			[
@@ -731,11 +899,11 @@ describe("#4589 test-env-restore admission guard", () => {
 			).toBeGreaterThan(40);
 	});
 
-	it("re-checks every admission against the file it names", () => {
-		// The reason's mechanism is a claim about the file's source. It is
-		// checked here, so a row cannot be admitted under a mechanism the file
-		// does not have, and a `none` admission (a REAL leak) cannot survive a
-		// restore landing in that file.
+	it("re-checks every admission's mechanism against the file it names", () => {
+		// The reason's mechanism is a claim about the file's source, re-derived
+		// here by the detector's own classifier (#4589 review round 1). A
+		// `teardown` claim needs a teardown hook, and a `vi.hoisted` or
+		// module-scope write cannot be `teardown`: no hook runs before the suite.
 		const findingsByFile = new Map<string, EnvRestoreFinding[]>();
 		for (const finding of sweepOnce()) {
 			const list = findingsByFile.get(finding.file) ?? [];
@@ -751,59 +919,45 @@ describe("#4589 test-env-restore admission guard", () => {
 				problems.push(`${file}: admission names a file the walk skips`);
 				continue;
 			}
-			// The mechanism is read from BLANKED source, so a hook quoted in a
-			// comment or a docstring cannot carry an admission (§2).
-			const code = stripSource(source, { strings: "blank" });
-			const findings = findingsByFile.get(file) ?? [];
-			const hasTeardown = /after(Each|All)\s*\(/.test(code);
-			const hasFinally = /finally\s*\{/.test(code);
-			const hasHelper =
-				/return\s*\(\s*\)\s*=>|withEnv\s*\(|pinTestHome\s*\(/.test(code);
-			const hasHoisted = /vi\s*\.\s*hoisted\s*\(/.test(code);
-			const hasUnstub = /unstubAllEnvs/.test(code);
-			const moduleScope = findings.some((finding) => {
-				const line = source.split("\n")[finding.line - 1] ?? "";
-				return line.length > 0 && !/^\s/.test(line);
-			});
-			const stubRows = findings.filter((finding) => finding.kind === "stub");
-			const mechanism: EnvRestoreMechanism = admission.mechanism;
-			const holds =
-				mechanism === "teardown"
-					? hasTeardown && (stubRows.length === 0 || hasUnstub)
-					: mechanism === "finally"
-						? hasFinally
-						: mechanism === "helper"
-							? hasHelper
-							: mechanism === "module-pin"
-								? moduleScope || hasHoisted
-								: // `none` is the strong claim: nothing restores the key. For
-									// a stub that means no `vi.unstubAllEnvs` anywhere.
-									stubRows.length > 0
-									? !hasUnstub
-									: !hasTeardown && !hasFinally && !hasHelper;
-			if (!holds)
+			const mechanisms: EnvRestoreMechanism[] = envRestoreMechanisms(
+				source,
+				findingsByFile.get(file) ?? [],
+			);
+			if (!mechanisms.includes(admission.mechanism))
 				problems.push(
-					`${file}: admitted as ${mechanism} but the file does not show it`,
+					`${file}: admitted as ${admission.mechanism}, but the file shows [${mechanisms.join(", ")}]`,
 				);
 		}
 		expect(problems, problems.join("\n")).toEqual([]);
 	});
 
-	it("crosses the boundary: an unreasoned row and a false reason both red", () => {
-		// The guard's own seam, driven directly: this is the fixture that
-		// proves the check above can fail (a governance test with no failing
-		// arm would pass on any input).
-		const rows = ["tests/config/case.test.ts:PI_LENS_HOME"];
-		const filesOf = (list: readonly string[]) =>
-			list.map((row) => row.slice(0, row.indexOf(":")));
-		const admitted = new Set<string>();
-		expect(filesOf(rows).filter((file) => !admitted.has(file))).toEqual([
-			"tests/config/case.test.ts",
+	it("crosses the boundary: a hoisted write cannot be admitted as teardown", () => {
+		// The guard's own seam, driven through the production classifier: the
+		// file has a teardown hook AND a `vi.hoisted` pin, and the true class is
+		// `module-pin`. Presence alone would accept `teardown`, which is the
+		// wrong record this check exists to red.
+		const source = [
+			'import { afterEach, vi } from "vitest";',
+			"vi.hoisted(() => {",
+			'\tprocess.env.PI_LENS_PROBE_MODE = "0";',
+			"});",
+			"afterEach(() => { delete process.env.OTHER_KEY; });",
+		].join("\n");
+		const findings = findUnrestoredEnvWrites(
+			"tests/config/probe.test.ts",
+			source,
+		);
+		expect(findings.map((finding) => finding.key)).toEqual([
+			"PI_LENS_PROBE_MODE",
 		]);
-		const source = 'it("a", () => { process.env.PI_LENS_HOME = "/tmp"; });';
-		const code = stripSource(source, { strings: "blank" });
-		expect(/after(Each|All)\s*\(/.test(code)).toBe(false);
-		expect(/finally\s*\{/.test(code)).toBe(false);
-		expect(/return\s*\(\s*\)\s*=>|withEnv\s*\(/.test(code)).toBe(false);
+		expect(envRestoreMechanisms(source, findings)).toEqual(["module-pin"]);
+		// The plain module-scope write is the same class.
+		const moduleScope = 'process.env.PROBE_PIN = "1";';
+		expect(
+			envRestoreMechanisms(
+				moduleScope,
+				findUnrestoredEnvWrites("tests/config/probe.test.ts", moduleScope),
+			),
+		).toEqual(["module-pin"]);
 	});
 });

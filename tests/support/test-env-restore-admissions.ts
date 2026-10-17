@@ -19,20 +19,19 @@
  *   function than the write's;
  * - `helper`: the file returns a restore closure (or builds one with
  *   `withEnv`) that its caller must invoke;
- * - `module-pin`: a module-scope assignment set before a dynamic import, which
- *   the suite never restores;
+ * - `module-pin`: a module-scope or `vi.hoisted` assignment set before a
+ *   dynamic import, which no per-case hook can restore;
  * - `none`: nothing in the file restores this key. These rows are REAL leaks
  *   the ratchet holds until a fix restores them, and the check is falsifiable:
- *   the file must contain no restore mechanism at all.
+ *   a stub row needs no `vi.unstubAllEnvs` anywhere, and a plain write no
+ *   hook, `finally`, or returned restore closure at all.
+ *
+ * A file's admitted mechanism must be one the sweep re-derives from its
+ * source by the detector's own classifier (`envRestoreMechanisms`), so a
+ * module-pinned write cannot be recorded as `teardown`.
  */
 
-/** How the file can restore the key without the detector attributing it. */
-export type EnvRestoreMechanism =
-	| "teardown"
-	| "finally"
-	| "helper"
-	| "module-pin"
-	| "none";
+import type { EnvRestoreMechanism } from "./test-env-restore-gate.js";
 
 /** Why one admitted file's rows sit in the baseline. */
 export interface EnvRestoreAdmission {
@@ -101,9 +100,9 @@ export const TEST_ENV_RESTORE_ADMISSIONS: Readonly<
 		reason: "JAVA_HOME is set per case and only some cases put it back",
 	},
 	"tests/clients/installer/install-lock.test.ts": {
-		mechanism: "teardown",
+		mechanism: "module-pin",
 		reason:
-			"the hook removes the fixture directory, not the variable that points at it",
+			"vi.hoisted sets PI_LENS_HOME before the installer modules load, and no hook restores it",
 	},
 	"tests/clients/installer/managed-tool-refresh-strategies.test.ts": {
 		mechanism: "teardown",
@@ -148,17 +147,18 @@ export const TEST_ENV_RESTORE_ADMISSIONS: Readonly<
 			"the beforeEach deletes it, which resets the next case but does not undo the last one",
 	},
 	"tests/clients/lsp/integration.test.ts": {
-		mechanism: "teardown",
-		reason: "the timeout is set per case and deleted by that case's own body",
+		mechanism: "module-pin",
+		reason:
+			"vi.hoisted sets the shutdown timeout before the imports evaluate, and no hook restores it",
 	},
 	"tests/clients/lsp/managed-bin-fastpath.test.ts": {
 		mechanism: "module-pin",
 		reason: "set before the dynamic import and never restored",
 	},
 	"tests/clients/lsp/managed-fallback-after-trust-refusal-4515.test.ts": {
-		mechanism: "teardown",
+		mechanism: "module-pin",
 		reason:
-			"set in a case body; the file's hooks reset modules and never name the variable",
+			"vi.hoisted sets PI_LENS_TEST_MODE before the imports evaluate, and no hook restores it",
 	},
 	"tests/clients/lsp/rename-notify-wedged.test.ts": {
 		mechanism: "module-pin",
@@ -182,8 +182,9 @@ export const TEST_ENV_RESTORE_ADMISSIONS: Readonly<
 		reason: "set before the dynamic import and never restored",
 	},
 	"tests/clients/lsp/service-notify-cpu-liveness.test.ts": {
-		mechanism: "teardown",
-		reason: "set in a case body and no hook puts it back",
+		mechanism: "module-pin",
+		reason:
+			"vi.hoisted sets PI_LENS_TEST_MODE before the imports evaluate, and no hook restores it",
 	},
 	"tests/clients/lsp/service-notify-inflight-throttle-real-stream.test.ts": {
 		mechanism: "teardown",
@@ -331,11 +332,6 @@ export const TEST_ENV_RESTORE_ADMISSIONS: Readonly<
 		mechanism: "none",
 		reason:
 			"vi.stubEnv in a case body, and no unstubAllEnvs anywhere in the file",
-	},
-	"tests/scripts/guard-bash-hook.test.ts": {
-		mechanism: "teardown",
-		reason:
-			"Object.assign(process.env, saved) restores in the afterAll, and a loop variable write stays unresolvable",
 	},
 	"tests/scripts/test-history-rollup.test.ts": {
 		mechanism: "none",

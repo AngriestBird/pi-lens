@@ -97,8 +97,6 @@ export const TEST_ENV_RESTORE_BASELINE: readonly string[] = [
 	"tests/index-lsp-idle-reset.test.ts:PI_SUBAGENT_CHILD_AGENT",
 	"tests/index-lsp-idle-reset.test.ts:PI_SUBAGENT_PARENT_PID",
 	"tests/index-process-bridge-rebind-real-factory.test.ts:PI_LENS_TEST_SCANNER_TMPDIR",
-	"tests/scripts/guard-bash-hook.test.ts:<process.env>",
-	"tests/scripts/guard-bash-hook.test.ts:key",
 	"tests/scripts/test-history-rollup.test.ts:GITHUB_STEP_SUMMARY",
 	"tests/support/fault-injection.test.ts:PI_LENS_FAULT_KIT_PROBE",
 	"tests/support/fault-injection.ts:envVar",

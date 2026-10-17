@@ -19,14 +19,19 @@
  * than from a list of operators. Each `process.env` reference is classified
  * from the token that follows it:
  *
- * - `.KEY` or `[expr]` followed by an assignment operator of ANY spelling is
- *   a write (`=`, `+=`, `&&=`, `||=`, `??=`, and a `=` on a later line);
+ * - `.KEY`, `[expr]`, `?.KEY`, `?.[expr]`, `!.KEY` and `![expr]` followed by
+ *   an assignment operator of ANY spelling is a write (`=`, `+=`, `&&=`,
+ *   `||=`, `??=`, and a `=` on a later line); the optional-chain and non-null
+ *   postfix operators continue the same member chain, and so does a grouping
+ *   or cast the reference is the whole of (`(process.env).K`,
+ *   `(process.env as T).K`, `(process.env satisfies T)[K]`);
  * - `delete` before it is a delete;
  * - `process.env = …` is a whole-environment write;
  * - `Object.assign(process.env, …)`, `Object.defineProperty(process.env, …)`
  *   and their `Reflect` twins are writes;
  * - a local alias bound from `process.env` (`const env = process.env`) is the
- *   same seam, so `env.KEY = …` is a write;
+ *   same seam, so `env.KEY = …`, `env?.KEY = …`, and a mutator whose subject
+ *   it is (`Object.assign(env, …)`) are writes;
  * - `globalThis.process.env`, `window.process.env`, `self.process.env` and
  *   `global.process.env` are the same seam;
  * - a VALUE read is the closed set of followers in `READ_FOLLOW` (`;`, `,`,
@@ -57,7 +62,13 @@
  *    bound to the call's arguments — `restore("K", previous.k)` where the
  *    file's own `restore` deletes or re-assigns `process.env[name]`;
  * 5. a `finally` block in the SAME enclosing function as the write, under
- *    rules 2 and 3.
+ *    rules 2 and 3;
+ * 6. a whole-environment assignment whose right side is a SINGLE spread of a
+ *    name saved outside the region (`process.env = { ...saved }`); a copy of
+ *    the live environment (`{ ...process.env }`) and a fresh literal restore
+ *    nothing;
+ * 7. a teardown `Object.assign(process.env, saved)` whose value argument is a
+ *    name saved outside the region.
  *
  * `vi.stubEnv(...)` is restored only by `vi.unstubAllEnvs()` in a covering
  * teardown or finally. A write inside a teardown body is reported unless the
@@ -116,6 +127,10 @@ interface Site extends EnvWriteSite {
 	keyExpr: string;
 	/** Offset just past the key; the assignment operator follows it. */
 	keyEnd: number;
+	/** The syntactic role that produced the site. */
+	form: "member" | "whole" | "mutator" | "stub";
+	/** A mutator call's value argument, raw. */
+	valueExpr?: string;
 }
 
 /** One restorable thing a region puts back, and the region that does it. */
@@ -170,6 +185,7 @@ const STUB_ENV = /(?<![\w$.])vi\s*\.\s*stubEnv\s*\(/g;
 const UNSTUB_ENV = /(?<![\w$.])vi\s*\.\s*unstubAllEnvs\s*\(/g;
 const TEARDOWN = /(?<![\w$.])(?:afterEach|afterAll)(?![\w$])/g;
 const DESCRIBE = /(?<![\w$.])describe(?![\w$])/g;
+const HOISTED = /(?<![\w$.])vi\s*\.\s*hoisted\s*\(/g;
 const KEY_LIST_LOOP =
 	/(?<![\w$.])for\s*\(\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s+of\s+/g;
 /**
@@ -305,29 +321,99 @@ function aliasNames(stripped: string): Map<string, number> {
 }
 
 /**
- * Every `process.env` reference in the file, including each alias of it. The
- * declaration that CREATES an alias is not a reference: it is followed by `=`
- * and would otherwise read as a whole-environment write of the alias.
+ * Where a member chain continues after the expression ending at `end`, or
+ * undefined when the next token does not access a member. The optional-chain
+ * and non-null postfix operators are the same chain, so `env?.K`, `env!.K`,
+ * `env?.[k]` and `env![k]` all reach the member or the index below.
  */
-function seamRefs(stripped: string): Array<{ at: number; end: number }> {
-	const refs: Array<{ at: number; end: number }> = [];
+function memberAccessAt(
+	stripped: string,
+	end: number,
+): { at: number; kind: "dot" | "bracket" } | undefined {
+	switch (stripped[afterGap(stripped, end)]) {
+		case "?": {
+			const at = afterGap(stripped, end);
+			if (stripped[at + 1] !== ".") return undefined;
+			const name = afterGap(stripped, at + 2);
+			return stripped[name] === "["
+				? { at: name, kind: "bracket" }
+				: { at: at + 1, kind: "dot" };
+		}
+		case "!": {
+			const at = afterGap(stripped, afterGap(stripped, end) + 1);
+			if (stripped[at] === "." || stripped[at] === "[")
+				return {
+					at,
+					kind: stripped[at] === "[" ? "bracket" : "dot",
+				};
+			return stripped[at] === "?" && stripped[at + 1] === "."
+				? memberAccessAt(stripped, at)
+				: undefined;
+		}
+		case ".":
+			return { at: afterGap(stripped, end), kind: "dot" };
+		case "[":
+			return { at: afterGap(stripped, end), kind: "bracket" };
+		default:
+			return undefined;
+	}
+}
+
+/**
+ * The grouping or cast that WRAPS only this reference (`(process.env)`,
+ * `(process.env as T)`, `(process.env satisfies T)`), or undefined. A call's
+ * `(` is not a grouping, so `expect(process.env)` stays a value read.
+ */
+function wrapperEnd(
+	stripped: string,
+	start: number,
+	end: number,
+): { open: number; end: number } | undefined {
+	let open = start - 1;
+	while (open >= 0 && /\s/.test(stripped[open])) open--;
+	if (open < 0 || stripped[open] !== "(") return undefined;
+	const before = stripped[open - 1];
+	if (before !== undefined && /[\w$)\]]/.test(before)) return undefined;
+	const close = matchingCloseIndex(stripped, open, "(", ")");
+	if (close < end) return undefined;
+	const inner = stripped.slice(end, close).trim();
+	// Bare grouping or a cast, never a larger expression whose role we would
+	// be guessing at.
+	if (inner !== "" && !/^(?:as|satisfies)\s/.test(inner)) return undefined;
+	return { open, end: close + 1 };
+}
+
+/**
+ * Every `process.env` reference in the file, including each alias of it, and
+ * every position where the env OBJECT itself starts (which a mutator call's
+ * first argument must be). The declaration that CREATES an alias is not a
+ * reference: it is followed by `=` and would otherwise read as a
+ * whole-environment write of the alias.
+ */
+function seamRefs(stripped: string): {
+	members: Array<{ at: number; end: number }>;
+	objects: Map<number, number>;
+} {
+	const members: Array<{ at: number; end: number }> = [];
+	const objects = new Map<number, number>();
 	for (const match of stripped.matchAll(SEAM)) {
 		const at = match.index ?? 0;
-		refs.push({ at, end: at + match[0].length });
+		members.push({ at, end: at + match[0].length });
+		objects.set(at, at + match[0].length);
 	}
 	for (const [name, declAt] of aliasNames(stripped)) {
 		const uses = new RegExp(`(?<![\\w$.])${name}(?![\\w$])`, "g");
 		for (const match of stripped.matchAll(uses)) {
 			const at = match.index ?? 0;
 			if (at === declAt) continue;
-			// An alias is mutated only through a member or an index; any other
-			// use (`pass(env)`, `{ ...env }`) reads the object.
-			const j = afterGap(stripped, at + name.length);
-			if (stripped[j] !== "." && stripped[j] !== "[") continue;
-			refs.push({ at, end: at + name.length });
+			objects.set(at, at + name.length);
+			// An alias is mutated only through a member, an index or a mutator
+			// call; any other use (`pass(env)`, `{ ...env }`) reads the object.
+			if (memberAccessAt(stripped, at + name.length) === undefined) continue;
+			members.push({ at, end: at + name.length });
 		}
 	}
-	return refs;
+	return { members, objects };
 }
 
 /** The raw text of a call's `index`-th argument (0-based). */
@@ -353,8 +439,34 @@ function argumentAt(
 	return index === seen ? scan.raw.slice(start, close) : "";
 }
 
+/**
+ * End offset of the env object expression starting at `at`, or -1. A grouping
+ * or cast around it (`(process.env as T)`) is the same object.
+ */
+function envObjectEnd(
+	scan: Scan,
+	objects: ReadonlyMap<number, number>,
+	at: number,
+): number {
+	const { stripped } = scan;
+	const start = nextNonSpace(stripped, at);
+	if (stripped[start] === "(") {
+		const close = matchingCloseIndex(stripped, start, "(", ")");
+		if (close < 0) return -1;
+		const inner = envObjectEnd(scan, objects, start + 1);
+		if (inner < 0) return -1;
+		const rest = stripped.slice(inner, close).trim();
+		if (rest !== "" && !/^(?:as|satisfies)\s/.test(rest)) return -1;
+		return close + 1;
+	}
+	return objects.get(start) ?? -1;
+}
+
 /** One `Object.*` / `Reflect.*` call whose first argument is the env object. */
-function mutatorSites(scan: Scan, refs: ReadonlyArray<{ at: number }>): Site[] {
+function mutatorSites(
+	scan: Scan,
+	objects: ReadonlyMap<number, number>,
+): Site[] {
 	const sites: Site[] = [];
 	for (const match of scan.stripped.matchAll(MUTATOR)) {
 		const at = match.index ?? 0;
@@ -362,7 +474,11 @@ function mutatorSites(scan: Scan, refs: ReadonlyArray<{ at: number }>): Site[] {
 		const close = matchingCloseIndex(scan.stripped, paren, "(", ")");
 		if (close < 0) continue;
 		const first = nextNonSpace(scan.stripped, paren + 1);
-		if (!refs.some((ref) => ref.at === first)) continue;
+		const objectEnd = envObjectEnd(scan, objects, first);
+		if (objectEnd < 0) continue;
+		// The env object must BE the first argument: `Object.assign(env.PATH, …)`
+		// writes a member's object, and a one-argument call writes nothing.
+		if (scan.stripped[afterGap(scan.stripped, objectEnd)] !== ",") continue;
 		// A descriptor is not a saved value, and the key it defines is the
 		// second argument: report that key, never accept the call as a restore.
 		const descriptor =
@@ -371,11 +487,8 @@ function mutatorSites(scan: Scan, refs: ReadonlyArray<{ at: number }>): Site[] {
 		const assign =
 			/^assign$/.test(match[1] ?? "") || /^set$/.test(match[2] ?? "");
 		const whole = /deleteProperty$/.test(match[2] ?? "");
-		const keyExpr = descriptor
-			? argumentAt(scan, paren, close, 1)
-			: whole
-				? argumentAt(scan, paren, close, 1)
-				: "";
+		const valueExpr = argumentAt(scan, paren, close, 1);
+		const keyExpr = descriptor || whole ? valueExpr : "";
 		sites.push({
 			key: descriptor || whole ? normalizeKey(keyExpr) : WHOLE_ENV,
 			kind: assign && !descriptor ? "assign" : "unclassified",
@@ -383,6 +496,8 @@ function mutatorSites(scan: Scan, refs: ReadonlyArray<{ at: number }>): Site[] {
 			start: at,
 			keyExpr,
 			keyEnd: close,
+			form: "mutator",
+			valueExpr: assign && !descriptor ? valueExpr : undefined,
 		});
 	}
 	return sites;
@@ -396,12 +511,24 @@ function mutatorSites(scan: Scan, refs: ReadonlyArray<{ at: number }>): Site[] {
 function siteFromRef(scan: Scan, at: number, end: number): Site | undefined {
 	const { stripped } = scan;
 	const deleted = precedingWord(stripped, at) === "delete";
-	const j = afterGap(stripped, end);
+	// A grouping or cast around the reference (`(process.env).K`,
+	// `(process.env as T)[K]`) is the same object, so its chain starts after
+	// the wrapper rather than at the reference itself.
+	let exprStart = at;
+	let exprEnd = end;
+	for (;;) {
+		const wrapper = wrapperEnd(stripped, exprStart, exprEnd);
+		if (wrapper === undefined) break;
+		exprStart = wrapper.open;
+		exprEnd = wrapper.end;
+	}
+	const j = afterGap(stripped, exprEnd);
 	const site = (
 		key: string,
 		keyExpr: string,
 		kind: EnvWriteKind,
 		keyEnd: number,
+		form: Site["form"] = "member",
 	): Site => ({
 		key,
 		kind,
@@ -409,11 +536,14 @@ function siteFromRef(scan: Scan, at: number, end: number): Site | undefined {
 		start: at,
 		keyExpr,
 		keyEnd,
+		form,
 	});
-	if (stripped[j] === ".") {
-		const nameAt = nextNonSpace(stripped, j + 1);
+	const access = memberAccessAt(stripped, exprEnd);
+	if (access?.kind === "dot") {
+		const nameAt = nextNonSpace(stripped, access.at + 1);
 		const name = /^[A-Za-z_$][\w$]*/.exec(stripped.slice(nameAt))?.[0];
-		if (name === undefined) return site(WHOLE_ENV, "", "unclassified", j);
+		if (name === undefined)
+			return site(WHOLE_ENV, "", "unclassified", access.at, "whole");
 		const after = nextNonSpace(stripped, nameAt + name.length);
 		if (deleted) return site(name, name, "delete", after);
 		if (assignmentAt(stripped, after) >= 0)
@@ -424,10 +554,11 @@ function siteFromRef(scan: Scan, at: number, end: number): Site | undefined {
 			? site(name, name, "unclassified", after)
 			: undefined;
 	}
-	if (stripped[j] === "[") {
-		const close = matchingCloseIndex(stripped, j, "[", "]");
-		if (close < 0) return site(WHOLE_ENV, "", "unclassified", j);
-		const keyExpr = scan.raw.slice(j + 1, close).trim();
+	if (access?.kind === "bracket") {
+		const close = matchingCloseIndex(stripped, access.at, "[", "]");
+		if (close < 0)
+			return site(WHOLE_ENV, "", "unclassified", access.at, "whole");
+		const keyExpr = scan.raw.slice(access.at + 1, close).trim();
 		const key = normalizeKey(keyExpr);
 		if (deleted) return site(key, keyExpr, "delete", close + 1);
 		if (assignmentAt(stripped, close + 1) >= 0)
@@ -436,13 +567,14 @@ function siteFromRef(scan: Scan, at: number, end: number): Site | undefined {
 			? site(key, keyExpr, "unclassified", close + 1)
 			: undefined;
 	}
-	if (deleted) return site(WHOLE_ENV, "", "delete", j);
-	if (assignmentAt(stripped, j) >= 0) return site(WHOLE_ENV, "", "assign", j);
+	if (deleted) return site(WHOLE_ENV, "", "delete", j, "whole");
+	if (assignmentAt(stripped, j) >= 0)
+		return site(WHOLE_ENV, "", "assign", j, "whole");
 	const after = stripped[j];
 	if (after === undefined || after === "=" || READ_FOLLOW.has(after))
 		return undefined;
 	if (READ_KEYWORD.test(stripped.slice(j))) return undefined;
-	return site(WHOLE_ENV, "", "unclassified", j);
+	return site(WHOLE_ENV, "", "unclassified", j, "whole");
 }
 
 /**
@@ -451,9 +583,9 @@ function siteFromRef(scan: Scan, at: number, end: number): Site | undefined {
  */
 function envWriteSites(scan: Scan): Site[] {
 	const { stripped } = scan;
-	const refs = seamRefs(stripped);
+	const { members, objects } = seamRefs(stripped);
 	const sites: Site[] = [];
-	for (const ref of refs) {
+	for (const ref of members) {
 		const site = siteFromRef(scan, ref.at, ref.end);
 		if (site !== undefined) sites.push(site);
 	}
@@ -470,9 +602,10 @@ function envWriteSites(scan: Scan): Site[] {
 			start: at,
 			keyExpr,
 			keyEnd: close,
+			form: "stub",
 		});
 	}
-	sites.push(...mutatorSites(scan, refs));
+	sites.push(...mutatorSites(scan, objects));
 	return sites.sort((a, b) => a.start - b.start);
 }
 
@@ -1002,6 +1135,46 @@ function resolveKeyExpr(
 	return loop ?? [normalizeKey(expr)];
 }
 
+/**
+ * A whole-environment assignment restores only when its source is a value this
+ * file saved OUTSIDE the region. `process.env = { ...process.env }` copies the
+ * live environment back, and a fresh literal (`{ OTHER: "1" }`) is a write.
+ */
+function wholeEnvRestore(
+	scan: Scan,
+	site: Site,
+	operator: number,
+	region: readonly Range[],
+): boolean {
+	const init = nextNonSpace(scan.stripped, operator + 1);
+	if (scan.stripped[init] !== "{") {
+		const name = /^[A-Za-z_$][\w$]*/.exec(scan.stripped.slice(init))?.[0];
+		if (name === undefined || !isSavedName(scan, name, region)) return false;
+		const decl = declarationInitializer(scan.stripped, site.start, name);
+		if (decl < 0) return false;
+		return spreadAll(scan, nextNonSpace(scan.stripped, decl));
+	}
+	return savedSpreadOnly(scan, init, region);
+}
+
+/**
+ * Does the object literal at `open` consist of ONE spread of a name saved
+ * outside the region (`{ ...saved }`)? An extra property makes the literal a
+ * write of its own, and a spread of a live expression copies live state.
+ */
+function savedSpreadOnly(
+	scan: Scan,
+	open: number,
+	region: readonly Range[],
+): boolean {
+	const close = matchingCloseIndex(scan.stripped, open, "{", "}");
+	if (close < 0) return false;
+	const inner = stripSource(scan.raw.slice(open + 1, close)).trim();
+	const spread = /^\.\.\.\s*([A-Za-z_$][\w$]*)$/.exec(inner);
+	if (spread?.[1] === undefined) return false;
+	return isSavedName(scan, spread[1], region);
+}
+
 /** Does this write put a saved value back, rather than leak one? */
 function restoreShaped(
 	scan: Scan,
@@ -1011,20 +1184,16 @@ function restoreShaped(
 ): boolean {
 	if (site.kind === "delete") return true;
 	if (site.kind !== "assign") return false;
+	if (site.form === "mutator") {
+		// A mutator copies a saved record back; a live read or a fresh literal
+		// is not a restore.
+		const value = site.valueExpr?.trim() ?? "";
+		return value !== "" && argIsSaved(scan, value, region);
+	}
 	const operator = assignmentAt(scan.stripped, site.keyEnd);
 	if (operator < 0) return false;
 	if (site.keyExpr !== "") return hasSavedValue(scan, operator, region, params);
-	// `process.env = { … }`: a whole-environment restore only when the value
-	// names keys this file can read, or copies the whole environment.
-	const init = nextNonSpace(scan.stripped, operator + 1);
-	if (scan.stripped[init] !== "{") {
-		const name = /^[A-Za-z_$][\w$]*/.exec(scan.stripped.slice(init))?.[0];
-		if (name === undefined) return false;
-		const decl = declarationInitializer(scan.stripped, site.start, name);
-		if (decl < 0) return false;
-		return spreadAll(scan, nextNonSpace(scan.stripped, decl));
-	}
-	return spreadAll(scan, init) || objectKeysAt(scan, init).length > 0;
+	return wholeEnvRestore(scan, site, operator, region);
 }
 
 /** One call's arguments, split at top level, as raw text. */
@@ -1237,6 +1406,90 @@ export function findUnrestoredEnvWrites(
 		}
 	}
 	return findings;
+}
+
+/** Ranges of the callbacks passed to `vi.hoisted(...)`, read at module load. */
+function hoistedBodies(stripped: string): Range[] {
+	const ranges: Range[] = [];
+	for (const match of stripped.matchAll(HOISTED)) {
+		const paren = (match.index ?? 0) + match[0].length - 1;
+		const close = matchingCloseIndex(stripped, paren, "(", ")");
+		if (close < 0) continue;
+		const brace = callbackBodyBrace(stripped, paren, close);
+		if (brace < 0) continue;
+		const end = matchingCloseIndex(stripped, brace, "{", "}");
+		if (end < 0) continue;
+		ranges.push({ start: brace + 1, end });
+	}
+	return ranges;
+}
+
+/** A write no per-case hook can reach: module scope, or a `vi.hoisted` body. */
+function modulePinned(
+	scan: Scan,
+	hoisted: readonly Range[],
+	index: number,
+): boolean {
+	// A write inside any group runs when that group's code runs; only a write
+	// at module scope (outside every `{}`, `()` and `[]`) or in a `vi.hoisted`
+	// callback is pinned before the suite starts.
+	return (
+		inside(hoisted, index) || innermostScope(scan.stripped, index).start === 0
+	);
+}
+
+/** How a file can restore a key without the detector crediting the write. */
+export type EnvRestoreMechanism =
+	| "teardown"
+	| "finally"
+	| "helper"
+	| "module-pin"
+	| "none";
+
+/**
+ * The admission mechanisms `source` supports for `findings`, derived from the
+ * same structure the detector reads. `module-pin` covers a write no per-case
+ * hook can reach (module scope, or a `vi.hoisted` callback), so such a write
+ * cannot be admitted as `teardown`, `finally` or `helper`. `none` is offered
+ * only when the file declares no restore mechanism at all, which is the strong
+ * claim a real leak makes.
+ */
+export function envRestoreMechanisms(
+	source: string,
+	findings: readonly EnvRestoreFinding[],
+): EnvRestoreMechanism[] {
+	const scan: Scan = {
+		raw: source,
+		stripped: stripSource(source, { strings: "blank" }),
+		bodies: [],
+	};
+	scan.bodies = functionBodies(scan.stripped);
+	const hoisted = hoistedBodies(scan.stripped);
+	const pinned = findings.filter((finding) =>
+		modulePinned(scan, hoisted, finding.start),
+	).length;
+	const inFunction = findings.length - pinned;
+	const { stripped } = scan;
+	const hasTeardown = /after(Each|All)\s*\(/.test(stripped);
+	const hasFinally = /finally\s*\{/.test(stripped);
+	const hasHelper = /return\s*\(\s*\)\s*=>|withEnv\s*\(|pinTestHome\s*\(/.test(
+		stripped,
+	);
+	const hasUnstub = /unstubAllEnvs/.test(stripped);
+	const hasStub = findings.some((finding) => finding.kind === "stub");
+	const mechanisms: EnvRestoreMechanism[] = [];
+	if (pinned > 0) mechanisms.push("module-pin");
+	if (inFunction > 0) {
+		if (hasTeardown && (!hasStub || hasUnstub)) mechanisms.push("teardown");
+		if (hasFinally) mechanisms.push("finally");
+		if (hasHelper) mechanisms.push("helper");
+		// `none` is the strong claim that nothing puts this key back: a stub
+		// needs no `vi.unstubAllEnvs` anywhere, a plain write no hook, finally,
+		// or returned restore closure at all.
+		if (hasStub ? !hasUnstub : !hasTeardown && !hasFinally && !hasHelper)
+			mechanisms.push("none");
+	}
+	return mechanisms;
 }
 
 /**
