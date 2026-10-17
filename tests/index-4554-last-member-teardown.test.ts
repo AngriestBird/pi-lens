@@ -47,7 +47,7 @@ import {
 	readInstanceRegistry,
 } from "../clients/instance-registry.js";
 import { _resetProcessSingletonsForTests } from "../clients/process-singletons.js";
-import { createPiMock, makeCtx } from "./support/pi-mock.js";
+import { createPiMock, makeCtx, STALE_CTX_MESSAGE } from "./support/pi-mock.js";
 import { aliveServerHolder } from "./support/lsp-status-repaint.js";
 import {
 	cleanupTestEnvironmentsDrained,
@@ -78,6 +78,7 @@ let project: string;
 let previousStartupMode: string | undefined;
 let previousDataDir: string | undefined;
 let previousHome: string | undefined;
+let previousTestMode: string | undefined;
 
 /**
  * Boot one extension activation against a fresh pi mock. `resetLSPService` is
@@ -198,6 +199,7 @@ beforeEach(async () => {
 	root = env.tmpDir;
 	project = path.join(root, "project");
 	fs.mkdirSync(path.join(project, ".git"), { recursive: true });
+	previousTestMode = process.env.PI_LENS_TEST_MODE;
 	previousStartupMode = process.env.PI_LENS_STARTUP_MODE;
 	process.env.PI_LENS_STARTUP_MODE = "quick";
 	previousDataDir = process.env.PILENS_DATA_DIR;
@@ -224,6 +226,8 @@ afterEach(async () => {
 		vi.doUnmock("../clients/lsp/capabilities.js");
 		vi.restoreAllMocks();
 		_resetSessionLifecycleForTests();
+		if (previousTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
+		else process.env.PI_LENS_TEST_MODE = previousTestMode;
 		if (previousStartupMode === undefined)
 			delete process.env.PI_LENS_STARTUP_MODE;
 		else process.env.PI_LENS_STARTUP_MODE = previousStartupMode;
@@ -240,6 +244,163 @@ afterAll(async () => {
 });
 
 describe("#4554 one activation, four live sessions", () => {
+	it("r5 reconciles the superseded primary on sequential admission", async () => {
+		// Greptile F1: a stale primary without a delivered shutdown stranded the replacement.
+		const { pi, resetLSPService } = await bootActivation();
+		const first = makeCtx({ cwd: project, sessionId: "old" });
+		await start(pi, first);
+		Object.defineProperty(first, "isIdle", {
+			get() {
+				throw new Error(STALE_CTX_MESSAGE);
+			},
+		});
+		const replacement = makeCtx({ cwd: project, sessionId: "replacement" });
+		await start(pi, replacement, "new");
+		expect(getActiveSessionId()).toBe("replacement");
+		await shutdown(pi, replacement);
+		expect(teardownResets(resetLSPService)).toHaveLength(1);
+		expect(getActiveSessionId()).toBeUndefined();
+	}, 45_000);
+
+	it("r5 old activation cannot tear down a reloaded primary with the same id", async () => {
+		// Greptile F2: past ownership in A must not destroy B's servers/registration.
+		const a = await bootActivation();
+		const primary = makeCtx({ cwd: project, sessionId: "m" });
+		const sibling = makeCtx({ cwd: project, sessionId: "s" });
+		await start(a.pi, primary);
+		await start(a.pi, sibling);
+		await shutdown(a.pi, primary, { reason: "reload" });
+		vi.resetModules();
+		const b = await bootActivation();
+		const reloaded = makeCtx({ cwd: project, sessionId: "m" });
+		await start(b.pi, reloaded, "reload");
+		await shutdown(a.pi, sibling);
+		expect(teardownResets(a.resetLSPService)).toHaveLength(0);
+		expect(getActiveSessionId()).toBe("m");
+		await settleRegistryWrites();
+		expect(await rootsForThisPid()).toContain(project);
+		await shutdown(b.pi, reloaded);
+		expect(teardownResets(b.resetLSPService)).toHaveLength(1);
+	}, 45_000);
+
+	it.each([true, false])(
+		"r5 reload hands off the departing primary scope (secondary leaves first: %s)",
+		async (secondaryLeavesFirst) => {
+			// Greptile F3: the last-started secondary scope replaced M's reload snapshot.
+			const { pi } = await bootActivation();
+			const { defineSessionStore, takeHandoff, startKey } =
+				await import("../clients/session-scope.js");
+			defineSessionStore({
+				name: "r5-scope-witness",
+				policy: {
+					startup: "none",
+					new: "none",
+					resume: "none",
+					fork: "adopt",
+					reload: "adopt",
+				},
+				snapshot: (scope) => scope.role,
+				restore() {},
+				reason: "Distinguish the real scope snapshotted by shutdown.",
+			});
+			const primary = makeCtx({ cwd: project, sessionId: "m" });
+			const sibling = makeCtx({ cwd: project, sessionId: "s" });
+			await start(pi, primary);
+			await start(pi, sibling);
+			if (secondaryLeavesFirst) await shutdown(pi, sibling);
+			await shutdown(pi, primary, { reason: "reload" });
+			const stores = takeHandoff(
+				"reload",
+				startKey(undefined, primary.sessionManager),
+			);
+			expect(stores?.["r5-scope-witness"]).toBe("primary");
+			if (!secondaryLeavesFirst) await shutdown(pi, sibling);
+		},
+		45_000,
+	);
+
+	it("r5 retires the departing scope when its handoff snapshot throws", async () => {
+		// #3611 finally must still cover the F3 handoff moved for per-member scope selection.
+		const { pi } = await bootActivation();
+		const { defineSessionStore } = await import("../clients/session-scope.js");
+		let snapshotScope:
+			| import("../clients/session-scope.js").SessionScope
+			| undefined;
+		defineSessionStore({
+			name: "r5-throwing-snapshot",
+			policy: {
+				startup: "none",
+				new: "none",
+				resume: "none",
+				fork: "adopt",
+				reload: "adopt",
+			},
+			snapshot(scope) {
+				snapshotScope = scope;
+				throw new Error("r5 snapshot fault");
+			},
+			restore() {},
+			reason: "Pin retirement around the moved primary handoff.",
+		});
+		const primary = makeCtx({ cwd: project, sessionId: "throwing-primary" });
+		await start(pi, primary);
+		await expect(shutdown(pi, primary, { reason: "reload" })).rejects.toThrow(
+			"r5 snapshot fault",
+		);
+		expect(snapshotScope?.retiredBy()).toBe("reload");
+	}, 45_000);
+
+	it("r5 last secondary clears its turn partition and retains its cache label", async () => {
+		// Greptile F4: shared teardown used to bypass the last member's own cleanup.
+		process.env.PI_LENS_TEST_MODE = "0";
+		const { pi } = await bootActivation();
+		const { CacheManager } = await import("../clients/cache-manager.js");
+		const { RuntimeCoordinator } =
+			await import("../clients/runtime-coordinator.js");
+		const turnSpy = vi.spyOn(RuntimeCoordinator.prototype, "beginTurn");
+		const { logCacheUsage } = await import("../clients/cache-observability.js");
+		const sink = await latencySink();
+		const primary = makeCtx({ cwd: project, sessionId: "m" });
+		const sibling = makeCtx({ cwd: project, sessionId: "s" });
+		await start(pi, primary);
+		await start(pi, sibling);
+		await shutdown(pi, primary);
+		// The secondary does work after the primary leaves: its partition must
+		// be removed by its OWN shutdown, not by the earlier primary reset.
+		await pi.emit("turn_start", { type: "turn_start" }, sibling);
+		const coordinator = turnSpy.mock.contexts[0];
+		if (!(coordinator instanceof RuntimeCoordinator))
+			throw new Error("turn_start did not reach the real coordinator");
+		const key = coordinator.turnKey("s");
+		expect(coordinator.isLiveTurnKey(key)).toBe(true);
+		const manager = new CacheManager();
+		manager.ensureSecondaryTurnStatePartition(project, "s");
+		expect(manager.readTurnState(project, "s").sessionId).toBe("s");
+		logCacheUsage(
+			{
+				role: "assistant",
+				provider: "anthropic",
+				model: "claude-opus-4",
+				usage: { input: 100, output: 10, cacheRead: 800, cacheWrite: 0 },
+				stopReason: "stop",
+				timestamp: 0,
+			},
+			undefined,
+			{ sessionId: "s", sessionRole: "concurrent-secondary", turnIndex: 0 },
+		);
+		await shutdown(pi, sibling);
+		expect(manager.readTurnState(project).sessions?.s).toBeUndefined();
+		expect(coordinator.isLiveTurnKey(key)).toBe(false);
+		const summaries = (await sinkRows(sink)).filter(
+			(row) => row.phase === "cache_usage_summary",
+		);
+		expect(summaries).toHaveLength(1);
+		expect(summaries[0]?.metadata).toMatchObject({
+			sessionRole: "concurrent-secondary",
+			usageRecords: 1,
+		});
+	}, 45_000);
+
 	it("runs the shared teardown when the primary is the last session to leave", async () => {
 		const { pi, resetLSPService } = await bootActivation();
 		const primary = makeCtx({ cwd: project, sessionId: "m-primary" });
@@ -459,7 +620,6 @@ describe("#4554 one activation, four live sessions", () => {
 				(row.metadata as { transition?: string })?.transition === "shutdown",
 		);
 		expect(shutdownScopeRows).toHaveLength(1);
-		delete process.env.PI_LENS_TEST_MODE;
 	}, 45_000);
 
 	it("counts a re-delivered session_start as one member, not two", async () => {
@@ -471,10 +631,15 @@ describe("#4554 one activation, four live sessions", () => {
 		const primary = makeCtx({ cwd: project, sessionId: "m-primary" });
 		await start(pi, primary);
 		await start(pi, primary);
+		const sibling = makeCtx({ cwd: project, sessionId: "s-duplicate" });
+		await start(pi, sibling);
+		await start(pi, sibling);
 		await settleRegistryWrites();
 		expect(await rootsForThisPid()).toContain(project);
 
 		await shutdown(pi, primary);
+		expect(teardownResets(resetLSPService)).toHaveLength(0);
+		await shutdown(pi, sibling);
 
 		expect(teardownResets(resetLSPService)).toHaveLength(1);
 		expect(getActiveSessionId()).toBeUndefined();
@@ -525,6 +690,5 @@ describe("#4554 one activation, four live sessions", () => {
 			sessionRole: "primary",
 			usageRecords: 1,
 		});
-		delete process.env.PI_LENS_TEST_MODE;
 	}, 45_000);
 });

@@ -242,6 +242,7 @@ import {
 	decideSessionStart,
 	decrementSecondarySessionCount,
 	getActivePrimaryRoot,
+	isPrimarySessionOwner,
 	namedSuccessorReason,
 	expiredSuccessorReason,
 	noteSessionShutdown,
@@ -817,16 +818,15 @@ function activateExtension(hostPi: ExtensionAPI) {
 	const liveSessionMembers: Array<{
 		sessionId: string | undefined;
 		role: "primary" | "concurrent-secondary";
+		scope?: SessionScope;
 	}> = [];
-	// True once this activation ran a FULL session_start, i.e. once it took the
-	// process's shared infra (LSP fleet, registry entry, primary registration).
-	// An activation whose every start was declined is a pure secondary and keeps
-	// its local-only teardown exactly as before (#473).
-	let ownsSharedInfra = false;
+	// The admitted primary context is the ownership identity, not its stable
+	// session id: a reload can re-register that id in another activation.
+	let sharedInfraOwner: unknown;
 	const enterLiveSession = (
 		sessionId: string | undefined,
 		role: "primary" | "concurrent-secondary",
-	): void => {
+	): (typeof liveSessionMembers)[number] => {
 		// A session re-announcing its own id in one activation is one member, not
 		// two: its single shutdown must still be able to be the last leave.
 		const known = liveSessionMembers.find(
@@ -834,9 +834,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 		);
 		if (known) {
 			known.role = role;
-			return;
+			return known;
 		}
-		liveSessionMembers.push({ sessionId, role });
+		const member = { sessionId, role };
+		liveSessionMembers.push(member);
+		return member;
 	};
 	/**
 	 * End this leave's membership, answering whether it was the activation's
@@ -859,6 +861,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 	): {
 		isLast: boolean;
 		role: "primary" | "concurrent-secondary" | undefined;
+		scope: SessionScope | undefined;
+		matched: boolean;
 	} => {
 		const memberIndex = liveSessionMembers.findIndex(
 			(member) => member.sessionId === sessionId,
@@ -870,11 +874,12 @@ function activateExtension(hostPi: ExtensionAPI) {
 		return {
 			isLast: memberIndex < 0 || liveSessionMembers.length === 0,
 			role: member?.role,
+			scope: member?.scope,
+			matched: member !== undefined,
 		};
 	};
-	// #3611: the session scope THIS activation serves, set once at its
-	// session_start and retired at its session_shutdown. Activation equals
-	// session (pi re-runs this factory on every transition except /tree).
+	// Most recent event scope for existing delivery handlers. Shutdown reads
+	// the departing member's scope, since an activation can serve siblings.
 	let scope: SessionScope | undefined;
 	// #3613: turn_end can deliver after another in-process activation has
 	// started its next session and changed the live coordinator scope. Keep the
@@ -2483,8 +2488,19 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// #4554: every start of this activation is one live member, declined
 					// or not; the full start is also what makes the shared teardown this
 					// activation's to run.
-					if (sessionStartDecision.runFullSessionStart) ownsSharedInfra = true;
-					enterLiveSession(stableSessionId, ownedSessionRole);
+					if (sessionStartDecision.runFullSessionStart) {
+						sharedInfraOwner = ctx;
+						// Full admission supersedes the previous primary, even when
+						// its stale host never delivered session_shutdown (#4554 r5).
+						for (let i = liveSessionMembers.length - 1; i >= 0; i--) {
+							if (liveSessionMembers[i].role === "primary")
+								liveSessionMembers.splice(i, 1);
+						}
+					}
+					const startingMember = enterLiveSession(
+						stableSessionId,
+						ownedSessionRole,
+					);
 					if (!sessionStartDecision.runFullSessionStart) {
 						dbg(
 							`session_start: ${sessionStartDecision.classification} detected (count=${sessionStartDecision.secondaryCount}, sameRoot=${sessionStartDecision.sameRoot}) — skipping handleSessionStart`,
@@ -2538,6 +2554,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 						// #3611: a secondary's own scope. The coordinator, and so the
 						// primary's generation, stays untouched (#473).
 						scope = beginScope({ role: "secondary" });
+						startingMember.scope = scope;
 						logScopeTransition(scope, {
 							transition: "start",
 							reason: sessionReason,
@@ -2759,6 +2776,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// scope before its first await. Take it now (#3612): a throw later
 					// in the handler must not leave this activation without its scope.
 					scope = runtime.sessionScope;
+					startingMember.scope = scope;
 					registerPrimaryBridges(scope);
 					_turnSummaryEmitCtxGetter = rebindableProcessBridgeDeps(
 						"turn-summary-emit-context",
@@ -3976,12 +3994,13 @@ function activateExtension(hostPi: ExtensionAPI) {
 	const retireOwnScope = (
 		reason: string | undefined,
 		sessionId: string | undefined,
+		endingScope = scope,
 	): void => {
-		if (!scope) return;
-		retireScope(scope, reason);
-		logScopeTransition(scope, {
+		if (!endingScope) return;
+		retireScope(endingScope, reason);
+		logScopeTransition(endingScope, {
 			transition: "shutdown",
-			reason: scope.retiredBy(),
+			reason: endingScope.retiredBy(),
 			sessionId,
 			cwd: runtime.projectRoot,
 		});
@@ -4024,6 +4043,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 		// infra.
 		const leave = leaveLiveSession(stableSessionId);
 		const isLastLiveMember = leave.isLast;
+		const shutdownScope = leave.matched ? leave.scope : scope;
 		// The member's own recorded role wins: the one this activation's start
 		// classified IT as, not the last start's. The classifier's answer stands
 		// for a leave this activation never recorded (a gap shutdown, #4106).
@@ -4033,12 +4053,67 @@ function activateExtension(hostPi: ExtensionAPI) {
 				: leave.role === "primary"
 					? "primary"
 					: "secondary";
-		const runsSharedTeardown =
-			isLastLiveMember &&
-			// A pure-secondary activation owns none of it; its local-only teardown
-			// is the whole of its answer (#473).
-			(ownsSharedInfra || shutdownClassification === "primary");
-		if (!runsSharedTeardown) {
+		const ownsCurrentSharedInfra =
+			sharedInfraOwner === undefined
+				? shutdownClassification === "primary"
+				: isPrimarySessionOwner(sharedInfraOwner);
+		const runsSharedTeardown = isLastLiveMember && ownsCurrentSharedInfra;
+
+		const shutdownEvent = event as
+			| { reason?: string; targetSessionFile?: string }
+			| undefined;
+		const shutdownReason = shutdownEvent?.reason;
+		// #3611/#4554 r5: handoff and member cleanup share the teardown's
+		// existing retirement boundary, including a throwing store snapshot.
+		try {
+			// #3612 (D3): hand this scope's stores to the successor that
+			// continues its conversation (`/reload`, `/fork`, `/clone`), before
+			// any teardown below. This portion stays synchronous; the hook returns
+			// its bounded writer-drain promise after teardown. The
+			// slot's sidecar save is its fallback (a fork's parent sidecar).
+			// #3881: a start still in flight never adopted; the slot left for it
+			// is the conversation's state, so hand that on instead.
+			// #4113: a start interrupted before pi-lens's handler ran has no mark
+			// and no scope. Its shutdown is primary only with the gap's named key
+			// (#4106), so the gap's name is the start reason it never saw. A
+			// started activation holds its scope and stashes it, even in a gap
+			// it does not own (a same-file second primary, R2: verify X1).
+			// Handoff belongs to the departing primary, even with live siblings.
+			// Handoff remains per activation even after shared ownership transfers.
+			if (shutdownClassification === "primary") {
+				const unstartedReason =
+					startInFlight || shutdownScope !== undefined
+						? undefined
+						: (namedSuccessorReason() ?? expiredSuccessorReason());
+				if (startInFlight || unstartedReason !== undefined) {
+					if (startInFlight) startInFlight.shutDown = true;
+					forwardHandoff({
+						startReason: startInFlight ? startInFlight.reason : unstartedReason,
+						reason: shutdownReason,
+						sessionFile: getSessionFile(ctx),
+						targetSessionFile: shutdownEvent?.targetSessionFile,
+						sessionManager: getSessionManager(ctx),
+					});
+				} else if (
+					shutdownScope &&
+					stashHandoff(shutdownScope, {
+						reason: shutdownReason,
+						sessionFile: getSessionFile(ctx),
+						targetSessionFile: shutdownEvent?.targetSessionFile,
+						// #3819: a file-less successor finds this slot's ticket through
+						// the session manager pi hands it.
+						sessionManager: getSessionManager(ctx),
+					}) &&
+					runtime.hasStableSessionId
+				) {
+					persistScope(
+						shutdownCwd ?? process.cwd(),
+						runtime.telemetrySessionId,
+						shutdownScope,
+					);
+				}
+			}
+
 			// `primary` here means this session really was the primary — it left
 			// while a sibling it never tore down was still live — so its own cache
 			// records are labelled for what it was, never as a secondary's.
@@ -4046,7 +4121,13 @@ function activateExtension(hostPi: ExtensionAPI) {
 				shutdownClassification === "secondary"
 					? "concurrent-secondary"
 					: "primary";
-			if (stableSessionId !== undefined && shutdownCwd !== undefined) {
+			// A shared primary leaves its persisted work for successor replay;
+			// only local leaves and secondaries clear their turn partition (#3676).
+			if (
+				stableSessionId !== undefined &&
+				shutdownCwd !== undefined &&
+				(!runsSharedTeardown || shutdownClassification === "secondary")
+			) {
 				cacheManager.clearTurnState(
 					shutdownCwd,
 					{
@@ -4064,120 +4145,63 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// secondary departure.
 			if (shutdownClassification === "secondary")
 				decrementSecondarySessionCount();
-			// #2130: scoped deregistration. A secondary's shutdown must never run
-			// `deregisterInstance()` — the process lives on and the primary still
-			// owns the entry. End only THIS activation's own hold (#3849): the
-			// root leaves the entry only when no other holder, the host's
-			// primary record included, still lists it. A secondary in the
-			// primary's own directory added nothing and removes nothing, and a
-			// hold the registry already ended is a documented no-op inside
-			// `deregisterInstanceRoot`.
-			//
-			// #2130 round 2: the call is now QUEUED, so it lands behind this
-			// session's own `void registerInstanceRoot(cwd)` from the declined
-			// start above rather than racing ahead of it and leaving the temp
-			// root behind. Fire and forget is still correct — the tail owns the
-			// ordering, and teardown must not block on a registry write.
-			if (
-				ownedSecondaryRoot !== undefined &&
-				shutdownClassification === "secondary"
-			) {
-				void deregisterInstanceRoot(
-					ownedSecondaryRoot,
-					secondaryRootHolder,
-				).catch(() => {
-					// best-effort bookkeeping — never fail teardown
+			if (!runsSharedTeardown) {
+				// #2130: scoped deregistration. A secondary's shutdown must never run
+				// `deregisterInstance()` — the process lives on and the primary still
+				// owns the entry. End only THIS activation's own hold (#3849): the
+				// root leaves the entry only when no other holder, the host's
+				// primary record included, still lists it. A secondary in the
+				// primary's own directory added nothing and removes nothing, and a
+				// hold the registry already ended is a documented no-op inside
+				// `deregisterInstanceRoot`.
+				//
+				// #2130 round 2: the call is now QUEUED, so it lands behind this
+				// session's own `void registerInstanceRoot(cwd)` from the declined
+				// start above rather than racing ahead of it and leaving the temp
+				// root behind. Fire and forget is still correct — the tail owns the
+				// ordering, and teardown must not block on a registry write.
+				if (
+					ownedSecondaryRoot !== undefined &&
+					shutdownClassification === "secondary"
+				) {
+					void deregisterInstanceRoot(
+						ownedSecondaryRoot,
+						secondaryRootHolder,
+					).catch(() => {
+						// best-effort bookkeeping — never fail teardown
+					});
+				}
+				dbg(
+					shutdownClassification === "secondary"
+						? "session_shutdown: concurrent secondary — skipping shared-infra teardown"
+						: "session_shutdown: not the last live session — skipping shared-infra teardown",
+				);
+				return;
+			}
+			if (shutdownClassification === "secondary") {
+				// #4554: the last member is a session classified secondary, so the
+				// shared teardown runs on its behalf. One bounded record names that
+				// (the shared branch's own records describe the PRIMARY's infra).
+				logSharedTeardownForSecondarySession({
+					sessionId: stableSessionId,
+					cwd: shutdownCwd ?? runtime.projectRoot,
 				});
 			}
-			// #3611/#4554: the activation's scope retires when its last member
-			// leaves — a non-last leave leaves it current for the members behind it.
-			if (isLastLiveMember)
-				retireOwnScope(
-					(event as { reason?: string } | undefined)?.reason,
-					stableSessionId,
-				);
-			dbg(
-				shutdownClassification === "secondary"
-					? "session_shutdown: concurrent secondary — skipping shared-infra teardown"
-					: "session_shutdown: not the last live session — skipping shared-infra teardown",
-			);
-			return;
-		}
-		if (shutdownClassification === "secondary") {
-			// #4554: the last member is a session classified secondary, so the
-			// shared teardown runs on its behalf. One bounded record names that
-			// (the shared branch's own records describe the PRIMARY's infra).
-			logSharedTeardownForSecondarySession({
-				sessionId: stableSessionId,
-				cwd: shutdownCwd ?? runtime.projectRoot,
+			const shutdownBudgetKey =
+				shutdownReason === "quit"
+					? "session_shutdown_quit"
+					: "session_shutdown";
+			// Start this before synchronous teardown so writes emitted by the teardown
+			// itself join the same serialized writer drain. Returning the promise keeps
+			// pi's awaited shutdown boundary without delaying synchronous lifecycle work
+			// for existing embedders that call handlers directly.
+			const ndjsonDrain = bounded(flushAllNdjsonWriters(), {
+				ms: HOOK_WALL_BUDGET_MS[shutdownBudgetKey],
+				signal: undefined,
+				hook: "session_shutdown",
+				label: "ndjson-writers",
 			});
-		}
-		const shutdownEvent = event as
-			| { reason?: string; targetSessionFile?: string }
-			| undefined;
-		const shutdownReason = shutdownEvent?.reason;
-		const shutdownBudgetKey =
-			shutdownReason === "quit" ? "session_shutdown_quit" : "session_shutdown";
-		// Start this before synchronous teardown so writes emitted by the teardown
-		// itself join the same serialized writer drain. Returning the promise keeps
-		// pi's awaited shutdown boundary without delaying synchronous lifecycle work
-		// for existing embedders that call handlers directly.
-		const ndjsonDrain = bounded(flushAllNdjsonWriters(), {
-			ms: HOOK_WALL_BUDGET_MS[shutdownBudgetKey],
-			signal: undefined,
-			hook: "session_shutdown",
-			label: "ndjson-writers",
-		});
-		// #3611 r2: the retire runs in `finally`. After a /reload that
-		// re-evaluated the entry nothing else ever ends this scope, so a throw
-		// from a teardown step below must not skip it.
-		try {
-			// Graceful quit or replacement is awaited by pi before it closes the
-			// process/stdin. The returned drain promise keeps the at-exit replay from
-			// seeing an in-flight batch (#935). Hard exits skip this hook.
-			// #3612 (D3): hand this scope's stores to the successor that
-			// continues its conversation (`/reload`, `/fork`, `/clone`), before
-			// any teardown below. This portion stays synchronous; the hook returns
-			// its bounded writer-drain promise after teardown. The
-			// slot's sidecar save is its fallback (a fork's parent sidecar).
-			// #3881: a start still in flight never adopted; the slot left for it
-			// is the conversation's state, so hand that on instead.
-			// #4113: a start interrupted before pi-lens's handler ran has no mark
-			// and no scope. Its shutdown is primary only with the gap's named key
-			// (#4106), so the gap's name is the start reason it never saw. A
-			// started activation holds its scope and stashes it, even in a gap
-			// it does not own (a same-file second primary, R2: verify X1).
-			const unstartedReason =
-				startInFlight || scope !== undefined
-					? undefined
-					: (namedSuccessorReason() ?? expiredSuccessorReason());
-			if (startInFlight || unstartedReason !== undefined) {
-				if (startInFlight) startInFlight.shutDown = true;
-				forwardHandoff({
-					startReason: startInFlight ? startInFlight.reason : unstartedReason,
-					reason: shutdownReason,
-					sessionFile: getSessionFile(ctx),
-					targetSessionFile: shutdownEvent?.targetSessionFile,
-					sessionManager: getSessionManager(ctx),
-				});
-			} else if (
-				scope &&
-				stashHandoff(scope, {
-					reason: shutdownReason,
-					sessionFile: getSessionFile(ctx),
-					targetSessionFile: shutdownEvent?.targetSessionFile,
-					// #3819: a file-less successor finds this slot's ticket through
-					// the session manager pi hands it.
-					sessionManager: getSessionManager(ctx),
-				}) &&
-				runtime.hasStableSessionId
-			) {
-				persistScope(
-					shutdownCwd ?? process.cwd(),
-					runtime.telemetrySessionId,
-					scope,
-				);
-			}
+
 			const switchesSessionFile =
 				typeof shutdownEvent?.targetSessionFile === "string" &&
 				shutdownEvent.targetSessionFile.length > 0;
@@ -4188,12 +4212,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 			) {
 				endSituationalToolTelemetry();
 			}
-
-			// #1018/#1996: emit the bounded primary cache summary, then drop this
-			// session's prefix/attribution state. The secondary path did the same for
-			// its role-local bucket before returning above.
-			emitCacheUsageSummaryAtSessionEnd(stableSessionId, "primary");
-			clearCachePrefixSession(stableSessionId, "primary");
 
 			cancelLSPIdleReset();
 			// #449 slice 1: SYNC-only deregistration (no child spawns — see the
@@ -4258,12 +4276,12 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// process from exiting (the #1097 lesson: what survives IS the leak).
 			// No-op unless PI_LENS_DEBUG_HANDLES=1.
 			dumpActiveHandles("session_shutdown");
+			return ndjsonDrain;
 		} finally {
-			// #3611: last, so nothing above runs under a retired scope. Every
-			// handle this session issued stops being current (design §3.4).
-			retireOwnScope(shutdownReason, stableSessionId);
+			// A non-last leave keeps the activation current for its siblings.
+			if (isLastLiveMember)
+				retireOwnScope(shutdownReason, stableSessionId, shutdownScope);
 		}
-		return ndjsonDrain;
 	});
 
 	// --- Prompt-cache response-side usage observability (#1018) ---

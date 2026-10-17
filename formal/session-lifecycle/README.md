@@ -1112,3 +1112,18 @@ Not modelled:
   rows.
 - **Time**, the cwd-changing resume's re-evaluation, the MCP host, the
   advisory cap, and more than one subagent.
+
+### LastMemberOwnership (#4554 review round 5)
+
+`LastMemberOwnership` adds the activation identity the larger model omits.
+M and its reloaded context R share a stable session id. R can supersede M
+inside A without M's shutdown, or start in B while S remains in A. Full
+admission reconciles A's superseded primary; only the activation whose
+admitted context is the current registration may tear down shared resources.
+`NoForeignTeardown` and `NoStrandedOwner` check both directions;
+`NoSupersededMembers` directly checks replacement reconciliation. Each leave
+saves its own scope role and records member cleanup independently of shared
+teardown (`OwnScopeAndCleanup`); a separate departed set requires cleanup
+for every actual leave. Three starts and three leaves bound the state
+space without a time abstraction. The handler witness tests the real stores,
+registration, LSP boundary, and runtime turn keys; this slice models identities.
