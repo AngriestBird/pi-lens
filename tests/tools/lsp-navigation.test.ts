@@ -1715,16 +1715,58 @@ describe("lsp_navigation tool", () => {
 		});
 
 		/**
-		 * Run one `rename_file` through the real tool over a real `LSPService`,
-		 * with `cwd` as the call's cwd and the relative-destination shape.
+		 * A real `LSPService` rename behind the factory-seeded service double.
+		 *
+		 * `renameFile` is the PRODUCTION implementation on a real service, so the
+		 * destination resolution, the workspace confinement and the importer
+		 * rewrite are the shipped ones. Every other member is the double's `vi.fn`,
+		 * which is what keeps a language server from starting: the tool resyncs the
+		 * renamed file through `openFileBestEffort` -> `touchFile`, and a bare real
+		 * service SPAWNS for that call (measured here: `touchFile` on a `.ts` file
+		 * left `deno` running, `getAliveClientCount()` 1). This suite is not the
+		 * `lsp-spawn-heavy` lane and must start no server.
 		 */
+		const makeRenameHarness = () => {
+			const realService = new LSPService();
+			const service = makeLspServiceDouble({
+				// The tool's own dispatch gate: a file operation is only reached
+				// when the service reports a server for the file (tools/lsp-navigation.ts
+				// `supportsLSP` gate). This is the double saying "yes", not a server.
+				supportsLSP: vi.fn(() => true),
+				hasLSP: vi.fn(async () => true),
+				renameFile: (
+					oldFilePath: string,
+					newFilePath: string,
+					options: Parameters<LSPService["renameFile"]>[2],
+				) => realService.renameFile(oldFilePath, newFilePath, options),
+			});
+			return {
+				realService,
+				service,
+				touchFile: service.touchFile as ReturnType<typeof vi.fn>,
+				/**
+				 * The real service's own `touchFile` is the only call that can
+				 * discover and spawn a server, so instrument it (the spy keeps the
+				 * implementation) and assert it is never reached.
+				 */
+				realTouchFile: vi.spyOn(realService, "touchFile"),
+				/** Nothing the case started may outlive it, before its fixture goes. */
+				stop: async (): Promise<void> => {
+					await realService.shutdown();
+				},
+			};
+		};
+
+		type RenameHarness = ReturnType<typeof makeRenameHarness>;
+
 		const renameThroughTool = async (
+			harness: RenameHarness,
 			cwd: string,
 			callId: string,
 			sourcePath: string,
 			newFilePath: string,
 		) => {
-			mocked.service = new LSPService();
+			mocked.service = harness.service;
 			const tool = createLspNavigationTool((flag) => flag === "lens-lsp");
 			return tool.execute(
 				callId,
@@ -1740,6 +1782,21 @@ describe("lsp_navigation tool", () => {
 			);
 		};
 
+		/**
+		 * No language server was started. Two arms, same claim: the real service
+		 * never reached its spawn-capable `touchFile`, and its live clients are
+		 * exactly the fixture's — a real spawn adds a `serverId` entry.
+		 */
+		const expectNoServerStarted = (
+			harness: RenameHarness,
+			registeredServerIds: string[],
+		): void => {
+			expect(harness.realTouchFile).not.toHaveBeenCalled();
+			expect(
+				harness.realService.getStatus().map((entry) => entry.serverId),
+			).toEqual(registeredServerIds);
+		};
+
 		it("expands a ~ destination to $HOME and rewrites the importer there, never a ~ directory under the cwd", async () => {
 			const env = setupTestEnvironment("pi-lens-lsp-nav-4578-home-");
 			const oldPath = path.join(env.tmpDir, "old.ts");
@@ -1753,7 +1810,7 @@ describe("lsp_navigation tool", () => {
 			const past = new Date(Date.now() - 60_000);
 			fs.utimesSync(importPath, past, past);
 
-			const service = new LSPService();
+			const harness = makeRenameHarness();
 			const client = makeRenameClient(env.tmpDir, {
 				changes: {
 					[pathToFileURL(importPath).href]: [
@@ -1767,23 +1824,16 @@ describe("lsp_navigation tool", () => {
 					],
 				},
 			});
-			addRenameClient(service, "typescript", env.tmpDir, client);
+			addRenameClient(harness.realService, "typescript", env.tmpDir, client);
 			pinHome(env.tmpDir);
 
 			try {
-				mocked.service = service;
-				const tool = createLspNavigationTool((flag) => flag === "lens-lsp");
-				const result = await tool.execute(
+				const result = await renameThroughTool(
+					harness,
+					env.tmpDir,
 					"rename-file-tilde-home",
-					{
-						operation: "rename_file",
-						path: oldPath,
-						newFilePath: "~/renamed.ts",
-						apply: true,
-					},
-					new AbortController().signal,
-					null,
-					{ cwd: env.tmpDir },
+					oldPath,
+					"~/renamed.ts",
 				);
 
 				expect(result.isError).toBeUndefined();
@@ -1802,7 +1852,11 @@ describe("lsp_navigation tool", () => {
 				expect(fs.readFileSync(importPath, "utf-8")).toBe(
 					"import { value } from './renamed';\n",
 				);
+				// The post-rename resync ran, and it reached the double only.
+				expectNoServerStarted(harness, ["typescript"]);
+				expect(harness.touchFile).toHaveBeenCalled();
 			} finally {
+				await harness.stop();
 				env.cleanup();
 			}
 		});
@@ -1812,22 +1866,16 @@ describe("lsp_navigation tool", () => {
 			const project = setupTestEnvironment("pi-lens-lsp-nav-4578-project-");
 			const oldPath = path.join(project.tmpDir, "old.ts");
 			fs.writeFileSync(oldPath, "export const value = 1;\n");
+			const harness = makeRenameHarness();
 			pinHome(home.tmpDir);
 
 			try {
-				mocked.service = new LSPService();
-				const tool = createLspNavigationTool((flag) => flag === "lens-lsp");
-				const result = await tool.execute(
+				const result = await renameThroughTool(
+					harness,
+					project.tmpDir,
 					"rename-file-tilde-outside",
-					{
-						operation: "rename_file",
-						path: oldPath,
-						newFilePath: "~/renamed.ts",
-						apply: true,
-					},
-					new AbortController().signal,
-					null,
-					{ cwd: project.tmpDir },
+					oldPath,
+					"~/renamed.ts",
 				);
 
 				// The existing rename confinement refuses a destination outside the
@@ -1841,7 +1889,9 @@ describe("lsp_navigation tool", () => {
 				expect(fs.existsSync(oldPath)).toBe(true);
 				expect(fs.existsSync(path.join(project.tmpDir, "~"))).toBe(false);
 				expect(fs.existsSync(path.join(home.tmpDir, "renamed.ts"))).toBe(false);
+				expectNoServerStarted(harness, []);
 			} finally {
+				await harness.stop();
 				project.cleanup();
 				home.cleanup();
 			}
@@ -1851,6 +1901,7 @@ describe("lsp_navigation tool", () => {
 			const env = setupTestEnvironment("pi-lens-lsp-nav-4578-at-prefix-");
 			const oldPath = path.join(env.tmpDir, "old.ts");
 			fs.writeFileSync(oldPath, "export const value = 1;\n");
+			const harness = makeRenameHarness();
 
 			try {
 				// pi's `normalizePath` drops ONE leading `@` (its file-mention prefix),
@@ -1858,6 +1909,7 @@ describe("lsp_navigation tool", () => {
 				// A file genuinely called `@renamed.ts` stays reachable as
 				// `./@renamed.ts`, exactly as it does for pi's own write tool.
 				const result = await renameThroughTool(
+					harness,
 					env.tmpDir,
 					"rename-file-at-prefix",
 					oldPath,
@@ -1867,7 +1919,10 @@ describe("lsp_navigation tool", () => {
 				expect(result.isError).toBeUndefined();
 				expect(fs.existsSync(path.join(env.tmpDir, "renamed.ts"))).toBe(true);
 				expect(fs.existsSync(path.join(env.tmpDir, "@renamed.ts"))).toBe(false);
+				expectNoServerStarted(harness, []);
+				expect(harness.touchFile).toHaveBeenCalled();
 			} finally {
+				await harness.stop();
 				env.cleanup();
 			}
 		});
@@ -1877,11 +1932,13 @@ describe("lsp_navigation tool", () => {
 			const oldPath = path.join(env.tmpDir, "old.ts");
 			fs.writeFileSync(oldPath, "export const value = 1;\n");
 			const foldedPath = path.join(env.tmpDir, "renamed a.ts");
+			const harness = makeRenameHarness();
 
 			try {
 				// U+00A0 is in pi's unicode space class, which folds to U+0020 before
 				// resolution, so a destination typed with it names the plain-space file.
 				const result = await renameThroughTool(
+					harness,
 					env.tmpDir,
 					"rename-file-unicode-space",
 					oldPath,
@@ -1895,7 +1952,10 @@ describe("lsp_navigation tool", () => {
 						path.join(env.tmpDir, `renamed${String.fromCharCode(0x00a0)}a.ts`),
 					),
 				).toBe(false);
+				expectNoServerStarted(harness, []);
+				expect(harness.touchFile).toHaveBeenCalled();
 			} finally {
+				await harness.stop();
 				env.cleanup();
 			}
 		});
