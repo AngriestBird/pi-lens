@@ -90,6 +90,10 @@ const documents = (lines: readonly string[]) =>
 		/^recv textDocument\/did(Open|Change|Save|Close) /.test(line),
 	);
 
+/** The didSave notifications only. */
+const saves = (lines: readonly string[]) =>
+	lines.filter((line) => line.startsWith("recv textDocument/didSave "));
+
 /** What each didOpen/didChange carried, as the fake server's 12-hex sha. */
 const texts = (lines: readonly string[]) =>
 	lines.filter((line) => line.startsWith("text "));
@@ -130,7 +134,14 @@ describe("#4532 gap 9 — the touch debounce reads the client's content record",
 		// announces it as Changed rather than Created. A Created this client sent
 		// since the push legitimately re-pushes the same bytes (#4320), and those
 		// cases are separate; this file is about the content gate alone.
-		for (const tag of ["warm", "identical", "changed", "reopened"])
+		for (const tag of [
+			"warm",
+			"identical",
+			"changed",
+			"reopened",
+			"race",
+			"saved",
+		])
 			fs.writeFileSync(pathFor(tag), HELD);
 		traceFile = path.join(env.tmpDir, "wire.trace");
 		const shim = path.join(env.tmpDir, "server.mjs");
@@ -139,6 +150,9 @@ describe("#4532 gap 9 — the touch debounce reads the client's content record",
 			[
 				'process.env.FAKE_LSP_NO_DIAGNOSTIC_PROVIDER = "1";',
 				'process.env.FAKE_LSP_TRACE_TEXT = "1";',
+				// A save-triggered server (#3405): declares textDocumentSync.save, so
+				// `notify.save` reaches the wire and the trace can witness it.
+				'process.env.FAKE_LSP_SAVE = "true";',
 				`process.env.FAKE_LSP_TRACE_FILE = ${JSON.stringify(traceFile)};`,
 				`import(${JSON.stringify(pathToFileURL(fakeServer).href)});`,
 				"",
@@ -235,6 +249,32 @@ describe("#4532 gap 9 — the touch debounce reads the client's content record",
 		);
 	});
 
+	// #4532 gap 9 F2: the save mark belongs to the bytes its didSave went out
+	// for. `openFile` is the second writer of the client's record (the
+	// resync-on-past-EOF route), and it marks no touch, so the record advances
+	// while the save mark still describes the older bytes. A saved touch of the
+	// new bytes is debounced, and its save must still reach the wire.
+	it("sends the save a skipped touch still owes after another writer advanced the record", async () => {
+		const svc = await service();
+		const file = pathFor("saved");
+		const saved = { ...TOUCH, saved: true };
+		await svc.touchFile(file, HELD, saved);
+		const mark = await fence(file);
+		expect(saves(traceLines().slice(0, mark))).toEqual([
+			`recv textDocument/didSave ${uri(file)}`,
+		]);
+
+		// The resync route pushes directly: no `markTouched`, so the save mark
+		// still names HELD while the record now names CHANGED.
+		await svc.openFile(file, CHANGED);
+		await fence(file);
+		await pastWindow(() => svc.touchFile(file, CHANGED, saved));
+
+		await fence(file);
+		const lines = traceLines().slice(mark);
+		expect(saves(lines)).toEqual([`recv textDocument/didSave ${uri(file)}`]);
+	});
+
 	// A document closed and reopened inside the window: didClose drops the
 	// client's record, so nothing proves the server still holds the bytes and
 	// the reopen must push.
@@ -249,8 +289,17 @@ describe("#4532 gap 9 — the touch debounce reads the client's content record",
 		).toBeDefined();
 		const mark = await fence(file);
 
-		await entry!.client.closeDocument(file);
-		await svc.touchFile(file, HELD, TOUCH);
+		// F5: hold the clock INSIDE the window for the skip decision, so the case
+		// keeps reding the pre-#4532 gate. Without this a worker pause longer than
+		// the window makes the old gate push normally and the guard passes on the
+		// code it exists to catch.
+		vi.useFakeTimers({ toFake: ["Date"], now: Date.now() + 1 });
+		try {
+			await entry!.client.closeDocument(file);
+			await svc.touchFile(file, HELD, TOUCH);
+		} finally {
+			vi.useRealTimers();
+		}
 
 		await fence(file);
 		const lines = traceLines().slice(mark);

@@ -987,8 +987,16 @@ file-scoped worklist and receives no project-wide scanner output.
   and the MCP analysis's first touch (`analyzeFile`, the MCP hosts' post-write
   route), never a sweep warm-up, cascade or sweep touch. The touch debounce
   never drops a save: a saved touch whose push it skipped sends the save alone
-  (`notify.save`). Its key is (path, server): the client scope never re-pushes
-  bytes a server holds.
+  (`notify.save`), and the mark it reads names the content its `didSave` went
+  out for, not merely that some save did. Its key is (path, server): the client
+  scope never re-pushes bytes a server holds.
+- The touch debounce reads one rule: skip only when the bytes the server will
+  hold once the path's notify queue drains are this touch's content. The
+  evidence is the client's own sent-content record (`getSentContent`) AND
+  `hasNotifyInFlight`, because that record reports what landed and a send still
+  running lands after a skip. A client that cannot answer either question is
+  pushed, never skipped: the elapsed window that used to decide there is gone
+  (`formal/lsp-server-content` `GateWindowReopen` is why).
 - `touchFile` freezes content-bound auxiliary coverage at merge time. A later
   publication cannot undo a finding drop. Auxiliary gaps narrow coverage and
   never turn a primary answer inconclusive. When a primary touch is

@@ -244,7 +244,9 @@ read. `DebounceFullFp` and the flipped `DebounceLossyFp` pass.
   reopen configs use `Writes = 0` so it cannot arise there.
 - The per-server `recentTouches` entry is always present after the first
   landed touch; the code's 800-entry trim can remove one, which makes the
-  gate push (the safe direction).
+  gate push (the safe direction, at the cost of one redundant `didChange`).
+  Since round 3 the trim drops the OLDEST entries by count: an entry's age no
+  longer decides whether it is still evidence.
 - The gate's record write lag is modelled (`Record`), but the send's own
   wire write and its record are the only two ordering steps: a second
   touch landing between them re-pushes identical bytes. Both gates do this
@@ -264,7 +266,8 @@ was also wrong in the other direction: a document closed and reopened inside
 the window was skipped, because the window was consulted before the record.
 
 The gate now reads the client's own record of the payload it last sent
-(`getSentContent`) and compares it with the touch's content exactly. The model
+(`getSentContent`) and compares it with the touch's content exactly. Since round
+3 that record is not the only writer of the answer (below). The model
 carries that record as `sentRec`, written by `Record` in the send's own
 continuation — after the wire write, before the waiters resolve — so every
 schedule below is checked with the record lagging the wire by one await. A
@@ -295,6 +298,99 @@ Two things the model says plainly:
 sent-content gate a stale touch whose bytes are the ones already sent is
 skipped before it can replace a pending entry, so #3481's coalescing half is no
 longer load-bearing in this model for that schedule.
+
+### Round 3: one record, two writers it cannot settle alone
+
+`ContentGate = "sent"` compares what LANDED. Two facts outside that record can
+still change the answer, and the round-2 model could not see either.
+
+- **The path's notify queue.** `Record` writes the record in the send's own
+  continuation, so while a send is running (or queued) the record still
+  describes the bytes before it. A skip taken then certifies bytes the send
+  replaces. The gate now reads `hasNotifyInFlight` and skips only when the queue
+  is idle: `SkipNeedsIdle`, and `SkipNow(p)` requires `QueueIdle`. `Requested`
+  order is also the code's: `Record` must fire before `RunFinish` can clear
+  `running` (the `sent` / `recorded` entry fields), because `recordSentContent`
+  runs inside the send's continuation. `NoEntry` therefore never leaves a queue
+  idle with its record behind it.
+- **The save mark.** A skip sends no content, so it owes the `didSave` its own
+  content identity requires. `recent.savedHash` carries that identity, and
+  `OwesSave(p)` compares it with the touch's content (`SaveBoundToContent`).
+  `OpenFilePush` is the writer that makes the mark stale: `LSPService.openFile`
+  (the resync-on-past-EOF route) pushes bytes and marks no touch, so the record
+  moves while `savedHash` keeps naming the older bytes.
+
+New constants: `SkipNeedsIdle`, `SaveBoundToContent` (the two as-built switches;
+a config sets either FALSE to run the pre-round-3 rule), and the scenario
+constants `SavedTouches`, `OpenFilePushes` and `Revert`. `Revert` makes the
+second writer's bytes the INITIAL content again, which is what makes F1's lost
+update harmful: the skipped touch read the bytes disk holds NOW, and an in-flight
+send of older bytes replaces them. Without a revert, a skipped stale touch is
+harmless and the invariant correctly ignores it.
+
+New configs, and the two invariants they carry:
+
+| Config | Expect | Distinct states | What it pins |
+|---|---|---|---|
+| `GateSentIdleSkip` | pass | 1,287,264 | The as-built gate on the revert schedule: the queue is not idle, so the revert is pushed and the server ends on disk's bytes |
+| `MutGateSkipDuringSend` | violated `SkippedContentHeld` | 6,679 | The pre-round-3 rule: the skip reads the record alone, so the send in flight lands over the bytes it certified |
+| `GateSentSavedOpenFile` | pass | 2,682,392 | The as-built save binding on the mixed-writer schedule: the debounced saved touch still sends its `didSave`, bound to its own content |
+| `MutGateSaveMark` | violated `SaveFollowsSavedTouch` | 197,400 | The pre-round-3 rule: a boolean mark, so a save recorded for other bytes suppresses the one owed and the server holds bytes it never heard a save for |
+
+`SkippedContentHeld` is harm-exact: a skip of bytes disk has already moved past
+owes nothing, and a decision taken AFTER the skip (an `Enqueue`, an
+`OpenFilePush`, a `CloseDoc`) supersedes the certificate. `SaveFollowsSavedTouch`
+is judged at quiescence and excludes the drift resync's own save flag (`p #
+"res"`), whose content is disk rather than a caller's touch.
+
+Two new model findings, neither caused by this round's code:
+
+- **With `Revert`/`OpenFilePushes` the model can now express the read-to-touch
+  gap `recordFullyCoveredSync` documents as a KNOWN narrowing.** A touch that
+  read B starts after disk moved to C, so its own start-time stamp (`at`) hides
+  the stale send from the drift sweep and `ServerMatchesDisk` reds on the
+  AS-BUILT gate. It is the `#1783` start-time anchor, in code this PR does not
+  change; `GateSentSavedOpenFile` therefore does not list `ServerMatchesDisk`,
+  and the hazard is a residual in the PR body rather than a config expectation.
+- **`OpenFilePush` needed two scenario bounds** (`Fp(disk) # record.fp` and
+  `recent.savedHash # "none"`): unbounded, it multiplied the pass config's state
+  space from 2.7M to 39M distinct states, past the `tla-shards` job's 12-minute
+  cap. Both bounds are content/mark based and prune only schedules in which no
+  save is in play.
+
+Verdict table for all 26 `ServerContent.tla` configs (`-workers 1`, `-Xmx6g`,
+one `-metadir` per run, `timeout 1200`); expect and actual agree in every row.
+The round-2 counts moved because `RunFinish` now waits for `Record`, a schedule
+the model previously admitted and the code never runs.
+
+| Config | Expect | Actual | Distinct states |
+|---|---|---|---|
+| `GateWindowReopen` | violated `ServerMatchesDisk` | violated | 36 |
+| `MutLossyFp` | violated `ServerMatchesDisk` | violated | 52 |
+| `GateSentReopen` | pass | pass | 60 |
+| `SingleWrite` | pass | pass | 951 |
+| `DebounceFullFp` | pass | pass | 1,560 |
+| `DebounceLossyFp` | pass | pass | 1,560 |
+| `MutGateSkipDuringSend` | violated `SkippedContentHeld` | violated | 6,679 |
+| `MutGateLossyFp` | violated `ServerMatchesDisk` | violated | 9,844 |
+| `GateSentLossyFp` | pass | pass | 26,000 |
+| `MutCascadeResizedMtimeKey` | violated `ServerMatchesDisk` | violated | 94,362 |
+| `MutFixNoCoalesce` | violated `ServerMatchesDisk` | violated | 95,749 |
+| `ArtifactCascadeResizedAnyLanding` | violated `ServerMatchesDisk` | violated | 101,248 |
+| `MutFixNoDrop` | violated `ServerMatchesDisk` | violated | 178,724 |
+| `MutGateSaveMark` | violated `SaveFollowsSavedTouch` | violated | 197,400 |
+| `CascadeEqualLength` | pass | pass | 313,147 |
+| `CascadeSendOrder` | pass | pass | 326,699 |
+| `CascadeResized` | pass | pass | 352,201 |
+| `FixCascadeEqualLength` | pass | pass | 403,828 |
+| `GateWindowRepush` | pass | pass | 460,750 |
+| `GateSentOneWrite` | pass | pass | 596,920 |
+| `FixAllActors` | pass | pass | 968,072 |
+| `GateSentIdleSkip` | pass | pass | 1,287,264 |
+| `TwoWritesEqualLength` | pass | pass | 1,972,476 |
+| `TwoWritesResized` | pass | pass | 2,242,972 |
+| `FixTwoWritesEqualLength` | pass | pass | 2,249,292 |
+| `GateSentSavedOpenFile` | pass | pass | 2,682,392 |
 
 ## HeadMoveResync: held documents across a HEAD move (#4493)
 

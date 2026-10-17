@@ -14,6 +14,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as clientModule from "../../../clients/lsp/client.js";
+import { normalizeMapKey } from "../../../clients/path-utils.js";
 import { fingerprintDocumentContent } from "../../../clients/lsp/document-drift.js";
 import { LSPService } from "../../../clients/lsp/index.js";
 import { createMockState } from "./mock-client-state.js";
@@ -52,7 +53,16 @@ const TAIL = `// ${"t".repeat(60)}\n`;
 const A = `${HEAD}const x = 1;\n${TAIL}`;
 const B = `${HEAD}const x = 2;\n${TAIL}`;
 
-async function setup() {
+/**
+ * `reportRecord: false` builds the client shape #4532 gap 9 F3 is about: one
+ * that cannot say what it holds. `reportQueue: false` is the other unanswerable
+ * question — a record but no word on whether a send for the path is still to
+ * come. Production has neither, so a double is the only way to reach either
+ * branch, and the gate must fail CLOSED on both.
+ */
+async function setup(
+	options: { reportRecord?: boolean; reportQueue?: boolean } = {},
+) {
 	const state = createMockState({ root: ROOT, serverId: "typescript" });
 	const client = {
 		serverId: "typescript",
@@ -74,6 +84,29 @@ async function setup() {
 		getDiagnostics: vi.fn(() => []),
 		getAllDiagnostics: vi.fn(() => new Map()),
 		getDiagnosticBinding: vi.fn(() => undefined),
+		// #4532: the real readers over this double's real state, so the gate's
+		// evidence is the queue and record the fixture actually drives. Omitting
+		// both is the F3 shape: a client that cannot report a record.
+		...(options.reportRecord === false
+			? {}
+			: {
+					getSentContent: (filePath: string) => {
+						// Read over the fixture's REAL state — `recordSentContent` writes this
+						// map, and `clientModule.sentContentFor` is the same read. Spelled
+						// here instead of imported so this fixture also runs against the code
+						// before that reader existed, which the F1 red-first proof needs.
+						const sent = state.documentContentHashes.get(
+							normalizeMapKey(filePath),
+						);
+						return sent && { hash: sent.hash };
+					},
+				}),
+		...(options.reportQueue === false
+			? {}
+			: {
+					hasNotifyInFlight: (filePath: string) =>
+						clientModule.hasNotifyInFlightFor(state, filePath),
+				}),
 		notify: {
 			announceCreated: () => undefined,
 			open: (
@@ -124,7 +157,7 @@ async function setup() {
 					p.textDocument?.text ?? p.contentChanges?.at(-1)?.text
 				}`;
 			});
-	return { service, texts };
+	return { service, texts, state, client };
 }
 
 describe("#3480 — touch debounce fingerprint covers the whole document", () => {
@@ -167,5 +200,90 @@ describe("#3480 — touch debounce fingerprint covers the whole document", () =>
 		await service.touchFile(FILE, A, { diagnostics: "none", source: "test" });
 
 		expect(texts()).toEqual([`didOpen:${A}`]);
+	});
+
+	// #4532 gap 9 F3: a client that cannot report its record has an UNKNOWN
+	// final state, and the pre-#4532 window gate that used to decide for it is
+	// the one `GateWindowReopen` proves can leave a server holding no document
+	// at all (`formal/lsp-server-content`). So it pushes, every time.
+	it("always pushes a client that cannot report the record it holds", async () => {
+		const { service, texts } = await setup({ reportRecord: false });
+
+		await service.touchFile(FILE, A, { diagnostics: "none", source: "test" });
+		await service.touchFile(FILE, A, { diagnostics: "none", source: "test" });
+
+		expect(texts()).toEqual([`didOpen:${A}`, `didChange:${A}`]);
+	});
+
+	// The queue half of the same rule: a record answers what LANDED, and an
+	// unknown queue is unknown finality, so it cannot license a skip either.
+	it("pushes when a client can report its record but not its queue", async () => {
+		const { service, texts } = await setup({ reportQueue: false });
+
+		await service.touchFile(FILE, A, { diagnostics: "none", source: "test" });
+		await service.touchFile(FILE, A, { diagnostics: "none", source: "test" });
+
+		expect(texts()).toEqual([`didOpen:${A}`, `didChange:${A}`]);
+	});
+});
+
+/**
+ * #4532 gap 9 F1: the record reports what LANDED. A send of other bytes that
+ * the path's queue is still writing lands after a skip, so the server ends on
+ * bytes the touch never named — off disk, until the next drift sweep.
+ *
+ * A real stdio wire cannot be paused, so the transport here is the mock
+ * connection (a process boundary) and everything above it is real: the real
+ * `LSPService.touchFile`, the real per-document queue, the real notify path.
+ * The hold makes "in flight" a fact at the instant the gate reads it, which no
+ * socket-based case can promise.
+ */
+describe("#4532 gap 9 — a skip needs the path's notify queue idle", () => {
+	beforeEach(() => {
+		getServersForFileWithConfig.mockReset();
+		createLSPClient.mockReset();
+	});
+	afterEach(() => {
+		vi.unstubAllEnvs();
+		vi.restoreAllMocks();
+	});
+
+	it("pushes a touch while a send of other bytes is still in flight", async () => {
+		const { service, texts, state } = await setup();
+		const touch = { diagnostics: "none" as const, source: "test" };
+		await service.touchFile(FILE, A, touch);
+		expect(texts()).toEqual([`didOpen:${A}`]);
+
+		// Every didChange write waits at the transport, so the send of B stays in
+		// flight for as long as the case needs it to.
+		const held: Array<() => void> = [];
+		vi.mocked(state.connection.sendNotification).mockImplementation(
+			async (method: string) => {
+				if (String(method) === "textDocument/didChange") {
+					await new Promise<void>((resolve) => {
+						held.push(resolve);
+					});
+				}
+				return undefined;
+			},
+		);
+		// The touch that follows waits on the queue behind B; a short write budget
+		// keeps that wait bounded (its own verdict is not what this case asserts).
+		vi.stubEnv("PI_LENS_LSP_NOTIFY_BUDGET_MS", "50");
+		const entry = await service.getClientForFile(FILE);
+		expect(
+			entry?.client,
+			"the case needs the file's live client",
+		).toBeDefined();
+		void entry!.client.notify.open(FILE, B, "typescript", undefined, true);
+
+		await service.touchFile(FILE, A, touch);
+
+		for (const resolve of held.splice(0)) resolve();
+		await new Promise<void>((resolve) => setImmediate(resolve));
+
+		// The queue is idle and the server holds the bytes the last touch named.
+		expect(texts().at(-1)).toBe(`didChange:${A}`);
+		expect(state.documentContentHashes.get(FILE)?.hash).toBeDefined();
 	});
 });

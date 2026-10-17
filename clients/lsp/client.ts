@@ -593,6 +593,15 @@ export interface LSPClientInfo {
 				clientStartedAtMs?: number | undefined;
 		  }
 		| undefined;
+	/**
+	 * #4532 gap 9 F1: true while a content send for this document is running or
+	 * queued on the path's notify queue. `getSentContent` reports what LANDED,
+	 * so its answer is not the server's final state while a send is still to
+	 * come: that send writes the bytes the server ends on. Optional for the same
+	 * reason `getSentContent` is; a client that cannot answer fails closed in
+	 * the touch gate, never open (`clients/lsp/index.ts` `shouldSkipNotify`).
+	 */
+	hasNotifyInFlight?(filePath: string): boolean;
 	/** Whether this client currently has an LSP request in flight. */
 	isBusy?(): boolean;
 	/** URI spelling used when this document was opened. */
@@ -5960,6 +5969,53 @@ async function resolveCodeActionBestEffort(
 
 // --- Client Factory ---
 
+/**
+ * #4532 gap 9: the client's record of the payload it last sent for a document
+ * (`LSPClient.getSentContent`), read from state. Exported because a client
+ * double built on a real `LSPClientState` must answer the touch gate with this
+ * reader rather than a hand-rolled copy of the rule.
+ */
+export function sentContentFor(
+	state: LSPClientState,
+	filePath: string,
+):
+	| {
+			hash: string;
+			changedAtMs?: number | undefined;
+			openedAtMs?: number | undefined;
+			openedHash?: string | undefined;
+			clientStartedAtMs?: number | undefined;
+	  }
+	| undefined {
+	const sent = state.documentContentHashes.get(normalizeMapKey(filePath));
+	return (
+		sent && {
+			hash: sent.hash,
+			changedAtMs: sent.changedAtMs,
+			openedAtMs: sent.openedAtMs,
+			openedHash: sent.openedHash,
+			clientStartedAtMs: state.startedAtMs,
+		}
+	);
+}
+
+/**
+ * #4532 gap 9 F1: is a content send for this document running or queued?
+ *
+ * `sentContentFor` says what the server has LANDED. `enqueueDocumentNotify`
+ * works one entry at a time and coalesces an unstarted entry with the last one
+ * enqueued for the same path, so while this is true the record is not the
+ * server's final state: the send still running, or the entry behind it, is
+ * what the server ends on. Same export reason as `sentContentFor`.
+ */
+export function hasNotifyInFlightFor(
+	state: LSPClientState,
+	filePath: string,
+): boolean {
+	const queue = state.notifyChangeQueues.get(normalizeMapKey(filePath));
+	return queue !== undefined && (queue.running || queue.pending !== undefined);
+}
+
 export async function createLSPClient(options: {
 	serverId: string;
 	process: LSPProcess;
@@ -6684,16 +6740,11 @@ export async function createLSPClient(options: {
 		},
 
 		getSentContent(filePath) {
-			const sent = state.documentContentHashes.get(normalizeMapKey(filePath));
-			return (
-				sent && {
-					hash: sent.hash,
-					changedAtMs: sent.changedAtMs,
-					openedAtMs: sent.openedAtMs,
-					openedHash: sent.openedHash,
-					clientStartedAtMs: state.startedAtMs,
-				}
-			);
+			return sentContentFor(state, filePath);
+		},
+
+		hasNotifyInFlight(filePath) {
+			return hasNotifyInFlightFor(state, filePath);
 		},
 
 		isBusy() {
