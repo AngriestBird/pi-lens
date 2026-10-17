@@ -45,14 +45,20 @@ const WATCHED_FILE_TYPE: Record<DiskPathChangeEvent["type"], number> = {
  * with no client involved) refuses the entries whose dependency scope holds
  * it. Both use the publish's one `at`, so the record's clock and the record's
  * sequence name the same event.
+ *
+ * A look can hold both, and an unknown population is never read as an empty
+ * one: `"unknown"` is either a dependency install (which cannot be enumerated)
+ * or a publish over the recorded cap, and in both cases refusing everything
+ * scanned before `at` is the only direction that cannot serve a stale entry.
+ * Naming the recorded 64 of 70 changed declarations would refuse strictly less
+ * than the detector's full list did before #4535 (catalog shape 10).
  */
 function diagnosticsCacheSubscriber(change: DiskChange): void {
 	if (change.origin !== "out-of-band") return;
-	if (change.sources.includes("install")) {
+	if (change.sources.includes("install") || change.paths === "unknown")
 		noteWorkspaceDependenciesChanged(change.at);
-		return;
-	}
-	if (change.paths === "unknown" || change.paths.length === 0) return;
+	if (change.paths === "unknown") return;
+	if (change.paths.length === 0) return;
 	noteWorkspaceFilesChangedOnDisk(change.root, change.paths, change.at);
 }
 
@@ -61,8 +67,11 @@ function diagnosticsCacheSubscriber(change: DiskChange): void {
  * server that registered client watchers re-reads a closed file only on an
  * exact-URI event or a restart), and a declaration file changed outside
  * pi-lens goes out as that exact-URI watched-files event now, not after the
- * debounce window. Returns the restart count so the detector's own row keeps
- * reporting it.
+ * debounce window. A look can hold both, and both are delivered: the install
+ * restarts the clients of that root, while a live client of the same server
+ * outside the restarted root re-reads a closed declaration only on its event
+ * (the pre-#4535 detector ran both halves for one look, and so does this).
+ * Returns the restart count so the detector's own row keeps reporting it.
  */
 async function lspSubscriber(
 	change: DiskChange,
@@ -70,19 +79,18 @@ async function lspSubscriber(
 	if (change.origin !== "out-of-band") return { restarted: 0 };
 	const service = peekLSPService();
 	if (!service) return { restarted: 0 };
+	let restarted = 0;
 	if (change.sources.includes("install"))
-		return {
-			restarted: (await service.restartPrimaryClientsUnder(change.root)) ?? 0,
-		};
+		restarted = (await service.restartPrimaryClientsUnder(change.root)) ?? 0;
 	const events = change.pathChanges ?? [];
-	if (events.length === 0) return { restarted: 0 };
+	if (events.length === 0) return { restarted };
 	service.notifyOutOfBandFileChanges(
 		events.map((event) => ({
 			filePath: event.filePath,
 			type: WATCHED_FILE_TYPE[event.type],
 		})),
 	);
-	return { restarted: 0 };
+	return { restarted };
 }
 
 /** Consumer id of the diagnostics-cache subscriber (census + tests). */

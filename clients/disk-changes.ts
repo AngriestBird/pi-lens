@@ -7,8 +7,11 @@
  * consumers, so the review graph, the word index, the project snapshot and the
  * diagnostics cache only learned about a change if that particular detector
  * happened to know about them — after a HEAD move or an external edit they
- * served old bytes while LSP resynced, and `projectSeq` never moved, so
- * `isProjectSnapshotFresh` read the stale snapshot as fresh.
+ * served old bytes while LSP resynced, and an enumerable external change moved
+ * no `projectSeq`, so `isProjectSnapshotFresh` read the stale snapshot as
+ * fresh. (A change no detector can enumerate — a dependency install — still
+ * moves no sequence: what a snapshot stamp means for one is #4535 slices 2 and
+ * 3, not this module.)
  *
  * A detector now calls {@link publishDiskChange} with what it saw. The
  * publisher:
@@ -41,7 +44,10 @@
  * consumer id; publishing grows nothing).
  */
 import type { ContentStamp } from "./content-stamp.js";
-import { recordDegradationOnce } from "./degradation-ledger.js";
+import {
+	incrementDegradationCount,
+	recordDegradationOnce,
+} from "./degradation-ledger.js";
 import { logLatency } from "./latency-logger.js";
 import { normalizeMapKey } from "./path-utils.js";
 import { getProcessSingleton } from "./process-singletons.js";
@@ -152,7 +158,8 @@ export interface DiskChangePublishResult {
  * Paths one publish allocates a sequence for. A longer population (a HEAD
  * move's delta, a settled sweep) records the first 64 and reports the rest as
  * unenumerable with one bounded record: the conservative direction for every
- * subscriber, never a false clean.
+ * subscriber, never a false clean. The cap counts the detector's own spellings
+ * ({@link recordedPopulation}), so it also bounds the normalization work.
  */
 export const DISK_CHANGE_MAX_RECORDED_PATHS = 64;
 
@@ -194,8 +201,9 @@ function publishFailure(cause: unknown): string {
 /**
  * Publish one disk change: allocate the existing sequence for the recorded
  * population, then fan out. Never throws for a subscriber's failure and never
- * throws for an append failure (`recordProjectMutations` routes that to
- * `onAppendError`); a caller that needs the failure passes the callback.
+ * throws for an append failure: `recordProjectMutations` routes that to
+ * `onAppendError`, and the publisher records one bounded
+ * `disk-change-append-failed` row before calling a caller's own callback.
  */
 export async function publishDiskChange(
 	input: DiskChangeInput,
@@ -204,16 +212,15 @@ export async function publishDiskChange(
 ): Promise<DiskChangePublishResult> {
 	const at = input.at ?? Date.now();
 	const root = normalizeMapKey(input.root);
-	const normalized = input.paths === "unknown" ? [] : uniquePaths(input.paths);
-	const truncated =
-		input.paths !== "unknown" &&
-		normalized.length > DISK_CHANGE_MAX_RECORDED_PATHS;
-	const recorded = normalized.slice(0, DISK_CHANGE_MAX_RECORDED_PATHS);
+	const { recorded, truncated } =
+		input.paths === "unknown"
+			? { recorded: [] as string[], truncated: false }
+			: recordedPopulation(input.paths);
 	const { seq, fileSeqs } = allocateSequence(
 		recorded,
 		input,
 		runtime,
-		onAppendError,
+		appendFailureHandler(root, onAppendError),
 	);
 	if (truncated) {
 		recordDegradationOnce({
@@ -258,17 +265,61 @@ export async function publishDiskChange(
 	return { change, results };
 }
 
-/** The recorded population, de-duplicated in the map key's spelling. */
-function uniquePaths(paths: readonly string[]): string[] {
-	const seen = new Set<string>();
-	const normalized: string[] = [];
+/**
+ * The recorded population: the cap and the de-duplication both happen in the
+ * detector's own spelling, BEFORE `normalizeMapKey` costs one realpath lookup
+ * per path (~200 µs on Windows, `clients/path-utils.ts`). A 2048-path HEAD
+ * delta therefore normalizes 64 paths, not 2048. The normalized pass still
+ * collapses two spellings of one file, which can only shrink the population,
+ * and the cap is decided on what the detector named.
+ */
+function recordedPopulation(paths: readonly string[]): {
+	recorded: string[];
+	truncated: boolean;
+} {
+	const named = new Set<string>();
+	const raw: string[] = [];
+	let truncated = false;
 	for (const filePath of paths) {
+		if (named.has(filePath)) continue;
+		if (raw.length === DISK_CHANGE_MAX_RECORDED_PATHS) {
+			truncated = true;
+			break;
+		}
+		named.add(filePath);
+		raw.push(filePath);
+	}
+	const seen = new Set<string>();
+	const recorded: string[] = [];
+	for (const filePath of raw) {
 		const key = normalizeMapKey(filePath);
 		if (seen.has(key)) continue;
 		seen.add(key);
-		normalized.push(key);
+		recorded.push(key);
 	}
-	return normalized;
+	return { recorded, truncated };
+}
+
+/**
+ * The append failure the caller never sees otherwise: `allocateSequence`
+ * routes it to `onAppendError`, so a publisher with no handler would hand its
+ * subscribers a sequence the change log does not hold and record nothing
+ * anywhere. One bounded row per root per session (the count carries the
+ * repeat, as `change-log-lock-unavailable` does for the same log), then the
+ * caller's own callback.
+ */
+function appendFailureHandler(
+	root: string,
+	onAppendError: ((err: unknown) => void) | undefined,
+): (err: unknown) => void {
+	return (err) => {
+		incrementDegradationCount({
+			kind: "disk-change-append-failed",
+			subject: root,
+			reason: `the change log did not record this publish: ${publishFailure(err)}`,
+		});
+		onAppendError?.(err);
+	};
 }
 
 /**
@@ -280,14 +331,14 @@ function allocateSequence(
 	recorded: readonly string[],
 	input: DiskChangeInput,
 	runtime: DiskChangeRuntime | undefined,
-	onAppendError: ((err: unknown) => void) | undefined,
+	onAppendError: (err: unknown) => void,
 ): { seq: number; fileSeqs: ReadonlyMap<string, number> } {
 	if (recorded.length === 0) return { seq: 0, fileSeqs: new Map() };
 	const allocated = runtime?.recordProjectMutations?.({
 		paths: recorded,
 		source: "external",
 		cwd: input.root,
-		...(onAppendError ? { onAppendError } : {}),
+		onAppendError,
 	});
 	return {
 		seq: allocated?.projectSeq ?? 0,

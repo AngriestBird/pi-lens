@@ -39,13 +39,13 @@ function subscribe(id: string, handler: (change: DiskChange) => unknown): void {
 	cleanups.push(subscribeDiskChange(id, handler));
 }
 
-function changeLogLines(): Array<{
+function changeLogLines(root: string = tmp): Array<{
 	seq: number;
 	source: string;
 	filePath: string;
 	fileSeq: number;
 }> {
-	const logPath = getProjectChangeLogPath(tmp);
+	const logPath = getProjectChangeLogPath(root);
 	if (!fs.existsSync(logPath)) return [];
 	return fs
 		.readFileSync(logPath, "utf8")
@@ -165,6 +165,85 @@ describe("publishDiskChange — the existing sequence, allocated before fan-out"
 		expect(records).toHaveLength(1);
 		expect(records[0].latestReasons[0].subject).toBe(normalizeMapKey(tmp));
 	});
+
+	it("caps the population in the detector's spelling, before normalizing it", async () => {
+		// Two spellings of each of 33 files: 66 named paths, 33 normalized keys.
+		// The cap counts what the detector named (that is the normalization work
+		// the cap exists to bound), so the population is over it even though the
+		// normalized set is not — the conservative direction.
+		const paths: string[] = [];
+		for (let index = 0; index < 33; index += 1) {
+			const filePath = path.join(tmp, "src", `f${index}.ts`);
+			fs.writeFileSync(filePath, "");
+			paths.push(
+				filePath,
+				`${path.join(tmp, "src")}${path.sep}.${path.sep}f${index}.ts`,
+			);
+		}
+		const seen: DiskChange[] = [];
+		subscribe("observes-raw-cap", (change) => {
+			seen.push(change);
+		});
+		await publishDiskChange({ root: tmp, origin: "head-move", paths }, runtime);
+		// The first 64 spellings are 32 files, so 32 sequences are allocated.
+		expect(changeLogLines()).toHaveLength(32);
+		expect(seen[0].seq).toBe(32);
+		expect(seen[0].paths).toBe("unknown");
+		expect(
+			getDegradationSummary().filter(
+				(group) => group.kind === "disk-change-paths-truncated",
+			),
+		).toHaveLength(1);
+	});
+
+	it("records one bounded append failure instead of publishing an unlogged sequence", async () => {
+		const root = path.join(tmp, "broken-log");
+		fs.mkdirSync(path.join(root, "src"), { recursive: true });
+		const logPath = getProjectChangeLogPath(root);
+		fs.mkdirSync(path.dirname(path.dirname(logPath)), { recursive: true });
+		// The change log's own directory is a file: every append fails.
+		fs.writeFileSync(path.dirname(logPath), "not a directory");
+		const coordinator = new RuntimeCoordinator();
+		coordinator.projectRoot = root;
+		const seen: Array<{ seq: number; lines: number }> = [];
+		subscribe("observes-append-failure", (change) => {
+			seen.push({ seq: change.seq, lines: changeLogLines(root).length });
+		});
+		let callerCallbacks = 0;
+		const recorded = () =>
+			getDegradationSummary().filter(
+				(group) => group.kind === "disk-change-append-failed",
+			);
+		await publishDiskChange(
+			{
+				root,
+				origin: "out-of-band",
+				paths: [path.join(root, "src", "a.ts")],
+			},
+			coordinator,
+			() => {
+				callerCallbacks += 1;
+			},
+		);
+		// The subscriber still hears the publish; the log holds nothing, and the
+		// publisher says so once rather than swallowing it.
+		expect(seen).toEqual([{ seq: 1, lines: 0 }]);
+		expect(callerCallbacks).toBe(1);
+		expect(recorded()).toHaveLength(1);
+		expect(recorded()[0].count).toBe(1);
+		expect(recorded()[0].latestReasons[0].subject).toBe(normalizeMapKey(root));
+		await publishDiskChange(
+			{
+				root,
+				origin: "out-of-band",
+				paths: [path.join(root, "src", "b.ts")],
+			},
+			coordinator,
+		);
+		// Bounded: one row per root per session, the count carries the repeat.
+		expect(recorded()).toHaveLength(1);
+		expect(recorded()[0].count).toBe(2);
+	});
 });
 
 describe("publishDiskChange — bounded, isolated observability", () => {
@@ -200,7 +279,9 @@ describe("publishDiskChange — bounded, isolated observability", () => {
 		expect(failures).toHaveLength(1);
 		expect(failures[0].count).toBe(2);
 		expect(
-			failures[0].latestReasons.map((entry) => entry.subject).sort(),
+			failures[0].latestReasons
+				.map((entry) => entry.subject)
+				.sort((a, b) => a.localeCompare(b)),
 		).toEqual([
 			`rejects-async:${normalizeMapKey(tmp)}`,
 			`throws-sync:${normalizeMapKey(tmp)}`,

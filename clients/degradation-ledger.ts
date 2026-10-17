@@ -280,6 +280,15 @@ export type DegradationKind =
 	| "demoted-finding-retired"
 	| "diagnostic-retained-unreconciled"
 	/**
+	 * #4535: the change-log append a publish allocated its sequence through
+	 * failed, so the subscribers hold a `seq` the durable log does not
+	 * (clients/disk-changes.ts). Before this record the publish swallowed the
+	 * failure and the whole fan-out proceeded on a sequence nothing could
+	 * replay. Subject: the normalized project root; one row per root per
+	 * session, the count carrying the repeat.
+	 */
+	| "disk-change-append-failed"
+	/**
 	 * #4535: one publish carried more paths than
 	 * `DISK_CHANGE_MAX_RECORDED_PATHS`, so the tail got no sequence and the
 	 * record is reported as unenumerable (clients/disk-changes.ts). Once per
