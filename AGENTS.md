@@ -9,6 +9,34 @@ hand-edited), then this file, then the role contract for the task. This file
 holds only what is specific to pi-lens and wins on conflict. Dated incidents and
 closed decisions live in `HISTORY.md`.
 
+The principles, one line each, linked to their section of the vendored file.
+The vendored file wins on any difference from this digest.
+
+- Premise first: reproduce the defect through the production call path before
+  the fix ([§1 Building](docs/engineering-principles.md#1-building)).
+- Climb the minimalism ladder: reuse an existing seam before adding a line
+  ([§1 Building](docs/engineering-principles.md#1-building)).
+- Net-count rule: a new shared helper deletes a same-shape sibling in the same
+  change ([§1 Building](docs/engineering-principles.md#1-building)).
+- Sweep the pattern, not the instance, and record the consolidation verdict
+  ([§1 Building](docs/engineering-principles.md#1-building)).
+- Design shared state once, before a second writer joins
+  ([§1 Building](docs/engineering-principles.md#1-building)).
+- Give every new failure path one bounded, observable record
+  ([§1 Building](docs/engineering-principles.md#1-building)).
+- Diff the blast radius as a call tree, with `+`/`-` on moved lines
+  ([§1 Building](docs/engineering-principles.md#1-building)).
+- Red first, and paste the failing transcript
+  ([§2 Testing](docs/engineering-principles.md#2-testing)).
+- Ship the tests in the same commit as the code
+  ([§2 Testing](docs/engineering-principles.md#2-testing)).
+- Quote each mutation's red; a ticked box with no transcript is false
+  ([§2 Testing](docs/engineering-principles.md#2-testing)).
+- No tautological test: assert an independent effect through the real seam
+  ([§2 Testing](docs/engineering-principles.md#2-testing)).
+- Close only when every criterion is met; otherwise `Refs` and post the
+  remainder ([§4 Honesty and records](docs/engineering-principles.md#4-honesty-and-records)).
+
 <important if="a code change, subsystem-specific change, delegated work, or pi documentation work">
 
 Task routing:
@@ -105,9 +133,13 @@ The principles govern building, testing, and closes-versus-refs. pi-lens adds:
 
 The principles' delegation contract applies. pi-lens adds:
 
-- A worker without Git authority hands off through `PR_BODY.md` and
-  `COMMIT_MSG.txt`. Prove a worker has its own registered worktree before it
-  touches Git. The warden is read-only.
+- Plegma fix lanes publish themselves: `publishRefs` covers a new lane's own
+  branch, `fixFor` covers its rounds, and `gh` passthrough comes with either.
+  A worker still proves its own registered worktree before it touches Git. A
+  worker without that authority hands off through `PR_BODY.md` and
+  `COMMIT_MSG.txt`; the warden is read-only. Anyone who moves a hand-back tree
+  ports the diff onto the lane base and never copies whole files over a newer
+  base (#4504's copy reverted 5 AGENTS.md lines).
 - Route to the strongest available fixer, whatever the priority label: a brief
   that adds or edits a `tests/support/sweep-kit.ts` registered-or-fail sweep,
   and a path-key or normalizer change on a shared map (#3178). A cheap model
@@ -630,6 +662,12 @@ file-scoped worklist and receives no project-wide scanner output.
     alias, an indirect call and a value reached through another binding,
     and quote each result; every green plant is fixed or named as a residual.
 
+73. **Fixture adopts an ancestor root:** a fixture created with no project
+    marker inherits whatever root sits above it, so one stray `.git` at the tmp
+    root became the project root and #4559's quick-mode cell failed three
+    pre-push runs. Plant the fixture's own marker, or assert the root it
+    resolved before the case runs. Guard: planned in #4560, not yet running.
+
 </important>
 
 <important if="session, turn or generation lifecycle">
@@ -707,6 +745,12 @@ file-scoped worklist and receives no project-wide scanner output.
     about one file. Screen: for a new detector, notifier or staleness marker,
     list every consumer that holds state derived from the same content, and
     show each one receives the change or record why not.
+
+72. **Process-global last-write-wins session field:** a field that holds one
+    session's value for the whole process answers for whichever session wrote
+    last, so a second live session overwrites what another one read. Key the
+    state by session identity, or decide from live membership. Instances:
+    #4554 (fixed by #4563, still open) and #4564. No guard yet: not scanned.
 
 **Expired successor hand-off:** an expired successor marker may authorize
     its named interrupted successor only for the fixed retention window in

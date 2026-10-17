@@ -1429,7 +1429,7 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"line-granular scan cannot see a caller's bound.",
 		owner: "#4493",
 	},
-	"clients/runtime-tool-result.ts#resyncHeadMove:13eb8d0a~539bb4dc": {
+	"clients/runtime-tool-result.ts#resyncHeadMove:301d8f0a~1bf32683": {
 		family: "hook-await",
 		site: "tool_result_read_only",
 		reason:
@@ -1440,12 +1440,12 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"see a caller's bound.",
 		owner: "#4476",
 	},
-	"clients/runtime-tool-result.ts#resyncHeadMove:301d8f0a~1bf32683": {
+	"clients/runtime-tool-result.ts#resyncHeadMove:53bad99d~539bb4dc": {
 		family: "hook-await",
 		site: "tool_result_read_only",
 		reason:
-			"The body of `resyncHeadMove` (#4476, #4493): both callers (the " +
-			"bash tool_result and the tool_call look) await it under bounded() " +
+			"The body of `resyncHeadMove` (#4476, #4493, #4535): both callers " +
+			"(the bash tool_result and the tool_call look) await it under bounded() " +
 			"with the read-only tool_result budget and the hook's signal, so " +
 			"this await is bounded one frame up; the line-granular scan cannot " +
 			"see a caller's bound.",
