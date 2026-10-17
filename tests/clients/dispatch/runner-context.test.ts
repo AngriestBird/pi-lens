@@ -21,7 +21,7 @@ let previousHome: string | undefined;
 let previousUserProfile: string | undefined;
 
 beforeEach(() => {
-	tmp = fs.mkdtempSync(path.join(os.tmpdir(), "probe-4576-runner-"));
+	tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-runner-context-4576-"));
 	cwd = path.join(tmp, "workspace");
 	home = path.join(tmp, "home");
 	fs.mkdirSync(cwd, { recursive: true });

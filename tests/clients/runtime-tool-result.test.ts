@@ -5905,10 +5905,18 @@ describe("host tool path resolution on the tool_result side (#4576)", () => {
 	}
 
 	it("dispatches the expanded home path, never the phantom <root>/~/ path", async () => {
-		const env = setupTestEnvironment("probe-4576-tilde-");
+		const env = setupTestEnvironment("pi-lens-4576-tilde-");
+		// The fixture HOME sits under the checkout, not under os.tmpdir():
+		// `isPiOwnedTempPath` treats every `<tmp>/pi-*` root as pi-lens
+		// internal, and pi-lens would then skip the file for a reason unrelated
+		// to the path this test pins. `process.cwd()` is the repo root, which
+		// the mkdtemp-parent census exempts.
+		const homeRoot = fs.mkdtempSync(
+			path.join(process.cwd(), ".probe-4576-home-"),
+		);
 		const previousHome = process.env.HOME;
 		const previousUserProfile = process.env.USERPROFILE;
-		const home = path.join(env.tmpDir, "home");
+		const home = path.join(homeRoot, "home");
 		const projectRoot = path.join(env.tmpDir, "workspace");
 		const realFile = path.join(home, "proj", "src", "tilde.ts");
 		fs.mkdirSync(path.dirname(realFile), { recursive: true });
@@ -5952,6 +5960,7 @@ describe("host tool path resolution on the tool_result side (#4576)", () => {
 			else process.env.HOME = previousHome;
 			if (previousUserProfile === undefined) delete process.env.USERPROFILE;
 			else process.env.USERPROFILE = previousUserProfile;
+			removeTempDirSync(homeRoot);
 			env.cleanup();
 		}
 	});
@@ -5966,7 +5975,7 @@ describe("host tool path resolution on the tool_result side (#4576)", () => {
 		["~/proj/a.ts", () => path.join(os.homedir(), "proj", "a.ts")],
 		["~user/proj/a.ts", (cwd: string) => path.resolve(cwd, "~user/proj/a.ts")],
 	])("resolves %s exactly as the tool_call seam does", (spelling, expected) => {
-		const env = setupTestEnvironment("probe-4576-resolver-");
+		const env = setupTestEnvironment("pi-lens-4576-resolver-");
 		const previousHome = process.env.HOME;
 		const previousUserProfile = process.env.USERPROFILE;
 		const home = path.join(env.tmpDir, "home");

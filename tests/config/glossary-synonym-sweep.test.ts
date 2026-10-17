@@ -862,7 +862,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/ast-grep-rule-manager.ts": 4,
 		"clients/ast-grep-tool-logger.ts": 3,
 		"clients/atomic-write-staging.ts": 2,
-		"clients/bash-file-access.ts": 9,
+		// 9 -> 7 (#4576): `resolveCandidate` folds onto the shared
+		// `resolveHostToolPath`, dropping both `path.*` calls.
+		"clients/bash-file-access.ts": 7,
 		// 10 -> 7 (#4268): the hand-built `path.join` candidate list folds onto the
 		// shared `findLocalBinAt` trust seam, one construction site for the shim.
 		"clients/biome-client.ts": 7,
@@ -1137,7 +1139,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/runtime-tool-call.ts": 22,
 		// 22 -> 20 (#3650): the tool_result path read is routed through
 		// readToolResultPathField; the open-coded input.path cast is gone.
-		"clients/runtime-tool-result.ts": 19,
+		// 19 -> 18 (#4576): the tool_result path resolves through
+		// `resolveToolCallFilePath`, dropping the bare `path.*` pair.
+		"clients/runtime-tool-result.ts": 18,
 		// 25 -> 27 (#3218): the resolved-blocker filter keys both the current
 		// blocker set and each resolved entry with `path.resolve`.
 		// 27 -> 26 (#2542 ask 3): `deferralEntryKey` moved to
@@ -1202,7 +1206,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"tools/ast-grep-search.ts": 2,
 		"tools/effective-config.ts": 2,
 		"tools/lens-diagnostic-mark.ts": 6,
-		"tools/lens-diagnostics.ts": 30,
+		// 30 -> 27 (#4576): `resolvePathsScope` folds onto
+		// `resolveHostToolPath`, dropping three `path.*` calls.
+		"tools/lens-diagnostics.ts": 27,
 		"tools/lsp-diagnostics.ts": 10,
 		// 14 -> 15 (#4403 round 5): `noServerAnsweredText` names the file by
 		// its `path.basename`, beside the install hint's own.

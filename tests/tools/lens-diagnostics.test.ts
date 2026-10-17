@@ -4682,7 +4682,9 @@ describe("lens_diagnostics paths", () => {
 	// pinned it under the session cwd and scanned a file that never existed.
 	it("mode=full: a ~ path resolves to $HOME, not under the session cwd (#4576)", async () => {
 		mockSummaries.length = 0;
-		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "probe-4576-diag-"));
+		const cwd = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-diag-tilde-4576-"),
+		);
 		const previousHome = process.env.HOME;
 		const previousUserProfile = process.env.USERPROFILE;
 		const home = path.join(cwd, "home");
