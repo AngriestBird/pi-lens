@@ -200,6 +200,8 @@ export const TEST_TREE_GOVERNANCE_TESTS = [
 	"tests/config/handler-verdict-sweep.test.ts",
 	// #4381: walks tests/ for log-sink reads with no drain of that sink first.
 	"tests/config/sink-read-drain-sweep.test.ts",
+	// #4590: walks clients/, scripts/ and tests/ for env PATH-key compositions.
+	"tests/config/env-path-key-composition-sweep.test.ts",
 	// #3472: the tests-tree scanners the census finds through tests/support.
 	"tests/config/module-instance-coverage.test.ts",
 	"tests/config/tmp-fixture-hygiene.test.ts",
