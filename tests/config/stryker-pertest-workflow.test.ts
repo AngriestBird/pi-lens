@@ -145,3 +145,18 @@ describe("stryker-pertest workflow facade inputs (#4449)", () => {
 		expect(mutate?.run).not.toContain("${{");
 	});
 });
+
+describe("stryker-pertest workflow report floor (#4518)", () => {
+	// Recurrence (#4518): Stryker exited 0 without writing a report, the
+	// candidates step only printed ::error::, and the job concluded green with
+	// nothing evaluated. The missing-report branch fails the step.
+	it("fails the candidates step when no mutation report was written", () => {
+		const candidates = job.steps.find((step) =>
+			step.run?.includes("stryker-pertest.mjs candidates"),
+		);
+		const run = candidates?.run ?? "";
+		const missing = run.slice(run.lastIndexOf("else"), run.lastIndexOf("fi"));
+		expect(missing).toContain("no mutation report was written");
+		expect(missing).toMatch(/^\s*exit 1\s*$/m);
+	});
+});
