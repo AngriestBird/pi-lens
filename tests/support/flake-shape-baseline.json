@@ -1424,7 +1424,6 @@
 		"clients/lsp/service-notify-per-server.test.ts::LSPClientInfo": 3,
 		"clients/lsp/service-project-trust.test.ts::LSPClientInfo": 2,
 		"clients/lsp/service-race.test.ts::LSPClientInfo": 4,
-		"clients/lsp/service-rename-file.test.ts::LSPClientInfo": 1,
 		"clients/lsp/service-runtime-exit-breaker.test.ts::LSPClientInfo": 1,
 		"clients/lsp/service-scanner-coverage-gap.test.ts::LSPClientInfo": 4,
 		"clients/lsp/service-shutdown-concurrency.test.ts::LSPClientInfo": 1,
