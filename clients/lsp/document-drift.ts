@@ -398,7 +398,8 @@ export class DocumentDriftTracker {
 	 * document, which the pass below discovers and drops. A document may close
 	 * and go unnoticed between passes, so the memo re-arms after
 	 * {@link DRIFT_TRACK_CAP} skipped inserts: the set then stands at most one
-	 * cap above the held-document count instead of following churn upward.
+	 * cap above the held-document count the last walk saw (not the current
+	 * one, which may since have dropped) instead of following churn upward.
 	 */
 	private evictPastCap(): void {
 		if (this.synced.size <= DRIFT_TRACK_CAP) return;
