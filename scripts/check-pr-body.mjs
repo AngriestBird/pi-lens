@@ -1505,6 +1505,229 @@ function hasNoRecordReason(content, files) {
 	);
 }
 
+// --- #4597: a named record must be read back by a test ---------------------
+//
+// `docs/pi-lens-fixer.md:117` requires every record the `## Observability`
+// section names to be asserted by a test, and nothing checked it: the audit of
+// the 53 `fix` PRs merged 2026-10-11..2026-10-18 found 3 of 29 record-naming
+// bodies whose record no test reads (`cascade_pending_rendered`,
+// `blocker-position-unaligned`, and #4527's `savedServerIds` claim). The rule
+// is its own function with one call site, beside `lintRuntimeObservability`
+// (which asks whether a record was named at all), so the diff-keyed rules of
+// #4585 land next to it without either change touching the other.
+//
+// Which spans count as a record literal: a backticked span of the section whose
+// text has a record's shape, AND which the runtime actually emits as a record
+// value. A camelCase symbol, a path, a command and a bare word fail the shape;
+// a record whose kind is computed rather than written as a literal is outside
+// the harvest, so it is outside this rule (the two live misses are literal).
+const RECORD_LITERAL_SPAN = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)+$/;
+// Where "a test reads it" is looked for. A comment never counts (the source is
+// blanked), and a string counts only where the code around it asserts or
+// matches a record: a matcher or assert call, a comparison against a record
+// key, a record key in an expected row, a `case` label, or a value handed to a
+// call or a collection. The sibling record `cascade_pending_gated` is read as
+// `e.phase === "cascade_pending_gated"` and `pre_edit_capture` as
+// `rows(target, "pre_edit_capture")`, so a matcher-only list would have called
+// both real read-backs absent. A record literal's shape (a lowercase compound
+// word the runtime emits) is what keeps a path or a command out of this arm.
+const RECORD_ASSERTED_BEFORE = new RegExp(
+	[
+		"\\.\\s*(?:not\\s*\\.\\s*)?(?:to[A-Z]\\w*|resolves|rejects)\\s*\\(\\s*$",
+		"\\bassert(?:\\.\\w+)?\\s*\\(\\s*$",
+		"\\b(?:strictEqual|deepStrictEqual|deepEqual|equal)\\s*\\(\\s*$",
+		"\\.\\s*(?:phase|event|eventName|kind|name|runnerId|store|trigger|source)\\s*[!=]==?\\s*$",
+		"\\b(?:phase|event|eventName|kind)\\s*:\\s*$",
+		"\\bcase\\s*$",
+		"\\.\\s*(?:includes|contains|some|filter|find|match|startsWith|endsWith|has|indexOf)\\s*\\(\\s*$",
+		"[([,]\\s*$",
+	].join("|"),
+);
+// The trees `recordLocationsFromRuntimeSource` harvests from (AGENTS.md's
+// runtime observability paths; `scripts/` records are CI annotations, not
+// ledger or NDJSON rows, so they carry no harvestable literal).
+const RUNTIME_OBSERVABILITY_ROOTS = ["clients", "tools", "mcp", "index.ts"];
+// A test source. `tests/fixtures/ci-pr-bodies/*.md` are bodies under test, not
+// evidence, and a non-source file cannot be lexed as one.
+const TEST_SOURCE_FILE = /\.(?:[cm]?[jt]sx?)$/;
+
+/** The backticked spans of a section that have a record literal's shape. */
+function recordLiteralSpans(content) {
+	const spans = new Set();
+	for (const match of String(content ?? "").matchAll(/`([^`\n]+)`/g)) {
+		const span = match[1].trim();
+		if (RECORD_LITERAL_SPAN.test(span)) spans.add(span);
+	}
+	return [...spans];
+}
+
+/**
+ * `git grep -l` for several fixed strings at once: the file list, `[]` for no
+ * match (git exits 1, which is not a failure), or `null` when the probe could
+ * not run at all. A null is reported, never read as an empty tree.
+ */
+function grepLiteralFiles(patterns, pathspecs, options = {}) {
+	if (!patterns.length) return [];
+	let output;
+	try {
+		output = (options.git ?? gitExecFileSync)(
+			[
+				"grep",
+				"-l",
+				// The long form on purpose: the writer-script census reads a bare
+				// "-F" as a `gh` field flag (tests/config/workflow-writers-governance).
+				"--fixed-strings",
+				...patterns.flatMap((pattern) => ["-e", pattern]),
+				"--",
+				...pathspecs,
+			],
+			{
+				cwd: options.cwd ?? process.cwd(),
+				encoding: "utf8",
+				maxBuffer: MAX_SOURCE_BYTES,
+			},
+		);
+	} catch (error) {
+		if (error?.status === 1) return [];
+		return null;
+	}
+	return String(output ?? "")
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.filter(Boolean);
+}
+
+/**
+ * The record literals the head tree's runtime code emits, restricted to the
+ * candidate spans. One grep for every candidate, then one lex per file that
+ * mentions any of them: reading the whole runtime tree to answer a handful of
+ * needles is the cost this avoids.
+ */
+function emittedRecordLiterals(candidates, options = {}) {
+	const files = grepLiteralFiles(
+		candidates,
+		RUNTIME_OBSERVABILITY_ROOTS,
+		options,
+	);
+	// `null` is "the probe could not run", never "the tree holds nothing":
+	// the caller refuses on it rather than reading absense as proof.
+	if (files === null) return null;
+	const literals = new Set();
+	for (const file of files) {
+		if (!isRuntimeObservabilityPath(file)) continue;
+		const source = headFileSource(file, {
+			headFiles: options.headFiles,
+			workingTree: true,
+			cwd: options.cwd,
+			git: options.git,
+		});
+		if (typeof source !== "string") continue;
+		for (const record of recordLocationsFromRuntimeSource(source))
+			literals.add(record.value);
+	}
+	return literals;
+}
+
+// A record literal can reach a test through a binding (`const PHASE = "x"`,
+// then `row.phase === PHASE`), which is still the test reading the record back:
+// the binding is one indirection, not a bare mention. The binding counts only
+// where an assertion compares it or hands it to a matcher; `notice(PHASE)` is a
+// mention, not a read-back.
+const LITERAL_BINDING_BEFORE =
+	/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*$/;
+
+function identifierAssertedIn(code, identifier) {
+	const id = identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	return new RegExp(
+		[
+			`[!=]==?\\s*${id}\\b`,
+			`\\b${id}\\b\\s*[!=]==?`,
+			`\\.(?:to[A-Z]\\w*|resolves|rejects)\\s*\\(\\s*[\\[{]?\\s*${id}\\b`,
+			`\\bassert(?:\\.\\w+)?\\s*\\([^)]*\\b${id}\\b`,
+		].join("|"),
+	).test(code);
+}
+
+/**
+ * The literals a test reads back: in code (an identifier spelled like the
+ * literal), in a string the code around it asserts or matches (which covers
+ * asserting on a raw NDJSON line, `line.includes('"x"')`), or through a
+ * binding the file compares as a record key. Every arm comes from one
+ * `blankCommentsAndStrings` lex, so a comment that quotes the literal is
+ * blanked and never counts.
+ */
+function testedRecordLiterals(literals, options = {}) {
+	const files = grepLiteralFiles(literals, ["tests"], options);
+	if (files === null) return null;
+	const tested = new Set();
+	for (const file of files) {
+		if (!TEST_SOURCE_FILE.test(file)) continue;
+		const source = headFileSource(file, {
+			headFiles: options.headFiles,
+			workingTree: true,
+			cwd: options.cwd,
+			git: options.git,
+		});
+		if (typeof source !== "string") continue;
+		const lexed = blankCommentsAndStrings(source);
+		const assertedStrings = [];
+		const bindings = new Map();
+		for (const string of lexed.strings) {
+			if (RECORD_ASSERTED_BEFORE.test(string.prefix))
+				assertedStrings.push(string.text);
+			const identifier = LITERAL_BINDING_BEFORE.exec(string.prefix)?.[1];
+			if (!identifier) continue;
+			const bound = bindings.get(string.text) ?? [];
+			bound.push(identifier);
+			bindings.set(string.text, bound);
+		}
+		const assertedText = assertedStrings.join("\u0000");
+		for (const literal of literals) {
+			if (tested.has(literal)) continue;
+			const read =
+				assertedText.includes(literal) ||
+				lexed.text.includes(literal) ||
+				(bindings.get(literal) ?? []).some((identifier) =>
+					identifierAssertedIn(lexed.text, identifier),
+				);
+			if (read) tested.add(literal);
+		}
+	}
+	return tested;
+}
+
+/**
+ * #4597: every record literal the `## Observability` section names must appear
+ * in a test under `tests/` in the head tree. `none: <reason>` needs no special
+ * case: a body that names no record literal owes no read-back, and the record
+ * checks above already refuse an empty answer where the diff adds a failure
+ * path. A probe that cannot run refuses rather than passing silently. It runs
+ * only when a diff was resolved, like the record-naming rule beside it, so the
+ * local preflight without an upstream ref keeps structural lint alone.
+ */
+function lintObservabilityRecordsTested(lines, headings, options = {}) {
+	const content = observabilitySectionContent(lines, headings);
+	const spans = recordLiteralSpans(content);
+	if (!spans.length) return [];
+	const emitted = emittedRecordLiterals(spans, options);
+	if (emitted === null)
+		return [
+			`PR body Observability names ${spans.map((span) => `\`${span}\``).join(", ")}, and the runtime record harvest could not run (git grep failed), so no record literal could be confirmed (#4597).`,
+		];
+	const named = spans.filter((span) => emitted.has(span));
+	if (!named.length) return [];
+	const tested = testedRecordLiterals(named, options);
+	if (tested === null)
+		return [
+			`PR body Observability names ${named.map((name) => `\`${name}\``).join(", ")}, and the tests/ search could not run (git grep failed), so no read-back could be confirmed (#4597).`,
+		];
+	const missing = named.filter((name) => !tested.has(name));
+	if (!missing.length) return [];
+	return [
+		`PR body Observability names ${missing.map((name) => `\`${name}\``).join(", ")}, which no test under tests/ reads: put each named record literal in a test in code, in an assertion, or in a comparison against the record's key, because docs/pi-lens-fixer.md:117 requires the record the section names to be asserted by a test (#4597).`,
+	];
+}
+
 /** Detect the high-confidence shape produced when a worker flattens a body. */
 export function detectFlattenedBody(body = "") {
 	const source = String(body ?? "");
@@ -2398,6 +2621,11 @@ export function lintPrBody(body = "", options = {}) {
 		errors.push(
 			...lintRuntimeObservability(lines, headings, options.diff, options),
 		);
+	// #4597: its own rule with its own call site, beside the record-naming
+	// check, so a later diff-keyed rule (issue #4585) merges without touching
+	// either function.
+	if (options.diff)
+		errors.push(...lintObservabilityRecordsTested(lines, headings, options));
 	errors.push(...lintCodeCitations(body, options));
 	errors.push(...lintTestReferences(body, options));
 	errors.push(...lintMasterClaims(body));

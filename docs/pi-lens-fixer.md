@@ -115,7 +115,10 @@ exports change.
   deletion it proposes lands only with the covering test named and the
   reviewer's agreement test by test.
 - Every record the `Observability` section names is asserted by a test in the
-  diff and quoted in the body (#2642, #2647, #2649, #2654).
+  diff and quoted in the body (#2642, #2647, #2649, #2654). The body lint
+  refuses a named record literal no test under `tests/` reads
+  (`scripts/check-pr-body.mjs`, #4597), so a record the section names without a
+  read-back cannot merge; `none: <reason>` still answers a diff with no record.
 - Every behavioural sentence (a docstring invariant, a memo, a registry
   justification) maps to a test or a probe, or is deleted (#2643, #2654).
 - Name where new state sits in its ladder and what happens to it at
