@@ -16,6 +16,12 @@
  * a heading's code span is a live title rather than an example. `stripSource`
  * does not apply to markdown (no string literals), so the comment half of the
  * detector rule is `blankMarkdown`.
+ *
+ * The digest's structure comes from the block's shape, not from one bullet
+ * spelling (#4571 F-1): a list item at any indentation, written with `-`, `*`,
+ * `+`, `1.` or `1)`, is an entry, and a non-blank line that is neither an item,
+ * a continuation of one, nor one of the block's two intro sentences is an
+ * offender, so a principle cannot hide as a plain paragraph.
  */
 
 import * as fs from "node:fs";
@@ -93,24 +99,70 @@ export function digestBlock(agentsMarkdown: string): string {
 }
 
 /**
- * The digest entries of `block`: each `- ` bullet plus its indented
- * continuation lines, ended by the next bullet or an unindented line. A link
- * on a continuation line belongs to the entry above it.
+ * A digest list item (#4571 F-1): any indentation, and any of `-`, `*`, `+`,
+ * `1.` or `1)`. Column-0 `- ` alone left every other spelling, and every
+ * nested item, invisible to the one-link rule.
+ */
+const LIST_ITEM = /^[ \t]*(?:[-*+]|\d+[.)])[ \t]+/;
+
+/** How one line of the digest block participates in its structure. */
+type DigestLineKind = "item" | "continuation" | "intro" | "blank" | "stray";
+
+/**
+ * Classify every line of `block` once, so the entry rule and the structure
+ * rule cannot drift apart: a list item in any spelling or indentation starts
+ * an entry, an indented line after the first item continues one, a blank line
+ * separates, the block's two intro sentences frame it, and anything else is
+ * stray (#4571 F-1).
+ */
+function classifyDigestLines(
+	block: string,
+): Array<{ kind: DigestLineKind; line: string }> {
+	let seenItem = false;
+	return block.split(/\r?\n/).map((line) => {
+		let kind: DigestLineKind;
+		if (line.trim() === "") kind = "blank";
+		else if (line.includes(DIGEST_INTRO) || line.includes(VENDORED_WINS))
+			kind = "intro";
+		else if (LIST_ITEM.test(line)) kind = "item";
+		else if (seenItem && /^[ \t]/.test(line)) kind = "continuation";
+		else kind = "stray";
+		if (kind === "item") seenItem = true;
+		return { kind, line };
+	});
+}
+
+/**
+ * The digest entries of `block`: every list item, whatever its spelling or
+ * indentation, plus its continuation lines. A link on a continuation line
+ * belongs to the entry above it.
  */
 export function digestEntries(block: string): string[] {
 	const entries: string[][] = [];
-	let current: string[] | null = null;
-	for (const line of block.split(/\r?\n/)) {
-		if (/^- /.test(line)) {
-			current = [line];
-			entries.push(current);
-		} else if (current && (line.trim() === "" || /^\s/.test(line))) {
-			current.push(line);
-		} else {
-			current = null;
-		}
+	for (const { kind, line } of classifyDigestLines(block)) {
+		if (kind === "item") entries.push([line]);
+		else if (
+			entries.length > 0 &&
+			(kind === "continuation" || kind === "blank")
+		)
+			entries[entries.length - 1].push(line);
 	}
 	return entries.map((lines) => lines.join("\n"));
+}
+
+/**
+ * Digest lines that carry no digest structure (#4571 F-1): neither a list item,
+ * nor a continuation of one, nor one of the block's two intro sentences. A
+ * principle hidden as a plain paragraph carries no link, so the per-entry rule
+ * cannot see it; the block is checked for stray lines as well.
+ */
+export function digestStructureOffenders(block: string): string[] {
+	return classifyDigestLines(block)
+		.filter(({ kind }) => kind === "stray")
+		.map(
+			({ line }) =>
+				`${line.trim()} -> neither a list item, a continuation, nor an intro sentence`,
+		);
 }
 
 /** Every principle link in `block`: its label and the anchor it targets. */
@@ -134,7 +186,7 @@ export function digestLinkOffenders(block: string): string[] {
 		.filter(({ links }) => links.length !== 1)
 		.map(
 			({ entry, links }) =>
-				`${entry.split("\n")[0]} -> ${links.length} principles link(s)`,
+				`${entry.split("\n")[0].trim()} -> ${links.length} principles link(s)`,
 		);
 }
 
@@ -199,6 +251,32 @@ describe("AGENTS.md principles digest (#4565)", () => {
 		expect(digestBlock(agents)).toContain(VENDORED_WINS);
 	});
 
+	it.each([
+		["a star bullet", "* Starred entry: no principles link."],
+		["a plus bullet", "+ Plussed entry: no principles link."],
+		["an ordered marker", "1. Numbered entry: no principles link."],
+		["an indented bullet", "  - Indented entry: no principles link."],
+	])("counts a list item written as %s as an entry", (_name, spelling) => {
+		// Recurrence: F-1 on #4571. `digestEntries` read only column-0 `- `
+		// bullets, so an unlinked principle written any other way was
+		// invisible to the one-link rule; the guard it replaced counted
+		// /^- /gm too.
+		const fixture = [
+			`${DIGEST_INTRO}, linked.`,
+			`The ${VENDORED_WINS} from this digest.`,
+			"",
+			"- Linked entry ([§1](docs/engineering-principles.md#1-building)).",
+			spelling,
+			"",
+		].join("\n");
+		const block = digestBlock(fixture);
+		const offenders = digestLinkOffenders(block);
+		expect(
+			offenders,
+			`digest entries without exactly one principles link: ${offenders.join("; ")}`,
+		).toEqual([`${spelling.trim()} -> 0 principles link(s)`]);
+	});
+
 	it("ignores a link quoted in a comment or an inline code span", () => {
 		// Recurrence: the self-excuse direction. A pasted example must never
 		// satisfy the digest.
@@ -214,6 +292,28 @@ describe("AGENTS.md principles digest (#4565)", () => {
 		].join("\n");
 		expect(principlesLinks(digestBlock(quoted))).toEqual([
 			{ text: "§1", anchor: "1-building" },
+		]);
+	});
+
+	it("refuses a digest line that is neither an item, a continuation nor the intro", () => {
+		// Recurrence: F-1 on #4571. A principle written as a plain paragraph
+		// carries no link, so the per-entry rule reads it as nothing at all and
+		// the guard it replaced never looked at those lines either.
+		expect(digestStructureOffenders(digestBlock(agents))).toEqual([]);
+		const hidden = [
+			`${DIGEST_INTRO}, linked.`,
+			`The ${VENDORED_WINS} from this digest.`,
+			"",
+			"- Linked entry ([§1](docs/engineering-principles.md#1-building)).",
+			"",
+			"A principle that hides as a plain paragraph.",
+			"",
+		].join("\n");
+		const block = digestBlock(hidden);
+		// Clean by the link rule, blocked only by this one.
+		expect(digestLinkOffenders(block)).toEqual([]);
+		expect(digestStructureOffenders(block)).toEqual([
+			"A principle that hides as a plain paragraph. -> neither a list item, a continuation, nor an intro sentence",
 		]);
 	});
 });
