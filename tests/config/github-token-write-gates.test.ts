@@ -8,9 +8,16 @@ import { stripSource } from "../support/sweep-kit.js";
 const ROOT = resolve(import.meta.dirname, "../..");
 const WORKFLOWS = resolve(ROOT, ".github/workflows");
 
-type Job = { name?: string; if?: string };
+type Step = { uses?: unknown; run?: unknown };
+type Job = {
+	name?: string;
+	if?: string;
+	env?: unknown;
+	steps?: unknown;
+};
 type Workflow = {
 	on?: { pull_request?: unknown; pull_request_target?: unknown };
+	env?: unknown;
 	jobs?: Record<string, Job>;
 };
 
@@ -143,5 +150,126 @@ describe("fork-capped workflow token writes (#2993)", () => {
 			resolve(WORKFLOWS, "close-keyword-verification.yml"),
 		);
 		expect(workflow.on?.pull_request_target).toBeDefined();
+	});
+});
+
+// A `gh` call resolves its repository from one of three sources: `GH_REPO`, the
+// checkout's git remote, or an explicit `-R`/`--repo`. A job that offers none
+// dies where it writes, with `failed to run git: fatal: not a git repository`.
+//
+// #4382 named that on the push lane, where the fix removed the wrong PR number.
+// Its PR-lane sibling stayed: `finalize-rerun` has no checkout and no `GH_REPO`,
+// so run 38956598286 (2026-10-16, attempt 2 green) failed in "Swap terminal
+// rerun labels" and the terminal verdict label was never swapped. Six of six
+// runs that reached that write failed the same way, the first on 2026-10-10
+// (run 38459454960), so the defect predates #4386 and is not a regression of it.
+const GH_CALL =
+	/(^|[\s;&|(`])gh\s+(?:pr|issue|api|run|workflow|release|label|repo)\b/;
+const REPO_OPERAND = /(^|[\s;&|(`])(?:-R|--repo)[\s=]/;
+// `gh api --method POST /repos/<repo>/…` names its repository in the path.
+const API_REPO_PATH =
+	/\/repos\/(?:\$GITHUB_REPOSITORY|\$\{\{\s*github\.repository\s*\}\}|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\//;
+
+function runLines(job: Job): string[] {
+	const lines: string[] = [];
+	for (const step of (job.steps ?? []) as Step[]) {
+		if (typeof step.run !== "string") continue;
+		for (const line of step.run.split("\n")) {
+			// A shell comment cannot issue a call; without this, documentation
+			// inside a step would red a job that writes nothing.
+			if (/^\s*#/.test(line)) continue;
+			lines.push(line);
+		}
+	}
+	return lines;
+}
+
+function ghCalls(job: Job): string[] {
+	return runLines(job).filter((line) => GH_CALL.test(line));
+}
+
+function hasRepositorySource(workflow: Workflow, job: Job): boolean {
+	const env = (scope: unknown): Record<string, unknown> =>
+		typeof scope === "object" && scope !== null
+			? (scope as Record<string, unknown>)
+			: {};
+	if (String(env(job.env).GH_REPO ?? env(workflow.env).GH_REPO ?? "").trim()) {
+		return true;
+	}
+	const steps = (job.steps ?? []) as Step[];
+	if (steps.some((step) => /^actions\/checkout@/.test(String(step.uses)))) {
+		return true;
+	}
+	const calls = ghCalls(job);
+	return calls.some(
+		(line) =>
+			REPO_OPERAND.test(line) ||
+			(/\bgh\s+api\b/.test(line) && API_REPO_PATH.test(line)),
+	);
+}
+
+function jobsWithoutRepositorySource(workflow: Workflow): string[] {
+	const missing: string[] = [];
+	for (const [key, job] of Object.entries(workflow.jobs ?? {})) {
+		if (ghCalls(job).length === 0) continue;
+		if (!hasRepositorySource(workflow, job)) missing.push(key);
+	}
+	return missing;
+}
+
+describe("workflow gh calls resolve a repository (#4382)", () => {
+	it("gives every gh-invoking job of every workflow a repository source", () => {
+		const findings: string[] = [];
+		for (const name of readdirSync(WORKFLOWS).sort()) {
+			if (!name.endsWith(".yml") && !name.endsWith(".yaml")) continue;
+			const { workflow } = load(resolve(WORKFLOWS, name));
+			for (const key of jobsWithoutRepositorySource(workflow)) {
+				findings.push(`${name}:${key}`);
+			}
+		}
+		expect(
+			findings,
+			"a gh call with no GH_REPO, checkout, or -R dies on repo resolution",
+		).toEqual([]);
+	});
+
+	it("flags the pre-fix finalize-rerun job shape, naming the job", () => {
+		// Reject twin: the nearest wrong shape -- a gh write with no repository
+		// source -- must stay visible, and the record must name the job.
+		const workflow = yaml.load(
+			[
+				"on: {workflow_run: null}",
+				"jobs:",
+				"  finalize-rerun:",
+				"    runs-on: ubuntu-latest",
+				"    env:",
+				"      GH_TOKEN: secret",
+				"    steps:",
+				"      - run: |",
+				"          gh pr edit 4550 --add-label ci:real",
+				"  classify:",
+				"    runs-on: ubuntu-latest",
+				"    steps:",
+				"      - uses: actions/checkout@v7",
+				"      - run: gh pr edit 4550 --add-label ci:real",
+			].join("\n"),
+		) as Workflow;
+		expect(jobsWithoutRepositorySource(workflow)).toEqual(["finalize-rerun"]);
+	});
+
+	it("does not read a commented-out gh call as one", () => {
+		const workflow = yaml.load(
+			[
+				"on: {workflow_run: null}",
+				"jobs:",
+				"  docs:",
+				"    runs-on: ubuntu-latest",
+				"    steps:",
+				"      - run: |",
+				"          # gh pr edit 4550 --add-label ci:real",
+				"          echo hello",
+			].join("\n"),
+		) as Workflow;
+		expect(jobsWithoutRepositorySource(workflow)).toEqual([]);
 	});
 });
