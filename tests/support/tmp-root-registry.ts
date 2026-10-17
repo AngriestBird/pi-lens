@@ -256,6 +256,19 @@ export function installTmpRootInterposer(
 ): void {
 	// #3703: shared setup runs before test mocks. Import only node builtins
 	// and tests/support modules here, never clients/ (which would cache real fs).
+	//
+	// The production owner of the Windows-shape predicate is
+	// `clients/path-utils.ts` (`isWindowsPath`, and `toPosix` for the separator
+	// fold, AGENTS.md "A core-domain rule lives in its owning module"). It cannot
+	// be shared here: the shared setup is evaluated before a test file's
+	// `vi.mock("node:fs")`, so importing `clients/path-utils.ts` would bind real
+	// fs ahead of the mock (#3703). Named deferral, review round 5 (N4-2): this
+	// spelling stays local and differs from the owner's on two shapes --
+	// `C:temp` (owner true, this false: the owner accepts a bare drive prefix)
+	// and `\Temp` (owner true, this false: the owner accepts one rooted
+	// backslash, this needs a full UNC `\\`). Neither shape is producible from
+	// `os.tmpdir()`. The separator fold below is byte-identical to the owner's
+	// `toPosix`.
 	const windows = /^(?:[a-zA-Z]:[\\/]|[\\/]{2})/.test(realTmp);
 	const pathApi = windows ? path.win32 : path.posix;
 	const canonicalParent = (parent: string): string => {
