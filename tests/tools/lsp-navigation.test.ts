@@ -1916,6 +1916,21 @@ describe("lsp_navigation tool", () => {
 				expect(result.isError).toBeUndefined();
 				expect(fs.existsSync(path.join(env.tmpDir, "renamed.ts"))).toBe(true);
 				expect(fs.existsSync(path.join(env.tmpDir, "@renamed.ts"))).toBe(false);
+
+				// Only a LEADING `@` is pi's mention prefix, so the `./@…` spelling keeps
+				// the character: a file genuinely called `@kept.ts` stays reachable,
+				// exactly as it does for pi's own write tool.
+				const literal = await renameThroughTool(
+					harness,
+					env.tmpDir,
+					"rename-file-at-literal",
+					path.join(env.tmpDir, "renamed.ts"),
+					"./@kept.ts",
+				);
+
+				expect(literal.isError).toBeUndefined();
+				expect(fs.existsSync(path.join(env.tmpDir, "@kept.ts"))).toBe(true);
+				expect(fs.existsSync(path.join(env.tmpDir, "kept.ts"))).toBe(false);
 				expectNoServerStarted(harness, []);
 				expect(harness.touchFile).toHaveBeenCalled();
 			} finally {
