@@ -256,9 +256,6 @@ describe("tree-sitter batch cache healing (#3834)", () => {
 			content,
 		);
 		await Promise.resolve();
-		const trapsBefore =
-			getDegradationSummary().find((group) => group.kind === "wasm-trap")
-				?.count ?? 0;
 		state.clearWasmInput(batchInput);
 		expect(deleteQuery).not.toHaveBeenCalled();
 		expect(
@@ -266,10 +263,12 @@ describe("tree-sitter batch cache healing (#3834)", () => {
 				(group) => group.kind === "wasm-query-batch-disposal-deferred",
 			)?.count,
 		).toBe(1);
+		// The per-case ledger reset makes `trapsBefore` deterministically 0, so
+		// assert the literal: deferring disposal must charge no wasm-trap.
 		expect(
 			getDegradationSummary().find((group) => group.kind === "wasm-trap")
 				?.count ?? 0,
-		).toBe(trapsBefore);
+		).toBe(0);
 
 		release();
 		expect((await pending).map(({ queryDef }) => queryDef.id)).toEqual([
