@@ -123,3 +123,74 @@ describe("orchestrator lane mechanics contract (#4007)", () => {
 		);
 	});
 });
+
+// Recurrence: 2026-10-17. Greptile posted a P1 on #4566 and two P2s on #4575
+// at the heads the fixers had just pushed. Neither worker read them; the
+// threads reached the next round only because the orchestrator relayed them.
+// docs/pi-lens-merge-policy.md:34 and :81 make a disposition reply and a
+// resolved thread a merge condition, but neither role contract told a worker
+// to look. These pins hold the read-at-round-start rule and the verdict gate.
+describe("bot review threads and code-scanning alerts (#4566/#4575)", () => {
+	// A rule quoted in a fence or an HTML comment is an example, not the rule
+	// (#4248), so presence is read from blanked text: a command block copied
+	// into a doc cannot satisfy a pin its own sentences do not carry.
+	const rule = (name: string): string => flat(blankMarkdown(doc(name)));
+
+	it("sends the fixer to the unresolved threads and the open alerts", () => {
+		const text = rule("pi-lens-fixer.md");
+		// Conditional by construction: a bot review that never arrives is not a
+		// gate, so the rule must not read as a prerequisite the round waits on.
+		expect(text).toMatch(
+			/when bot threads or code-scanning alerts exist, read and dispose of each one/i,
+		);
+		expect(text).toMatch(/missing bot review is never evidence/i);
+		expect(text).toContain("reviewThreads");
+		expect(text).toContain("isResolved == false");
+		expect(text).toContain("code-scanning/alerts");
+		expect(text).toContain("state=open");
+		// The alert query is per branch: an alert on master is not this round's.
+		expect(text).toContain("refs/heads/<branch>");
+	});
+
+	it("disposes of every thread before the fixer hands back", () => {
+		const text = rule("pi-lens-fixer.md");
+		expect(text).toMatch(/reply to and resolve/);
+		expect(text).toMatch(/disposition/);
+		// A rule without its recurrence loses its argument at the next edit.
+		expect(text).toContain("#4566");
+		expect(text).toContain("#4575");
+	});
+
+	it("refuses a merge-ready verdict over an undisposed thread or alert", () => {
+		const text = rule("pi-lens-reviewer.md");
+		expect(text).toMatch(
+			/when bot threads or code-scanning alerts exist, read and dispose of each one/i,
+		);
+		// The reviewer's own pass stands alone: no bot pre-pass, no waiting.
+		expect(text).toMatch(/missing bot review is never evidence/i);
+		expect(text).toMatch(/never wait/i);
+		expect(text).toMatch(/stand alone/i);
+		expect(text).toContain("reviewThreads");
+		expect(text).toContain("code-scanning");
+		// Each item is rated, so an unprobed one cannot read as cleared.
+		expect(text).toMatch(/refuted/);
+		// The verdict word is tied to the threads and alerts, not merely present.
+		const verdictSentences = text.match(/[^.]*`merge-ready`[^.]*\./g) ?? [];
+		expect(
+			verdictSentences.some((sentence) => /thread|alert/.test(sentence)),
+		).toBe(true);
+		expect(text).toContain("#4566");
+		expect(text).toContain("#4575");
+	});
+
+	// Both contracts cite the merge policy's own lines instead of carrying a
+	// copy of the disposition vocabulary, which would drift from its owner.
+	it.each(["pi-lens-fixer.md", "pi-lens-reviewer.md"])(
+		"points %s at the merge-policy rule instead of restating it",
+		(name) => {
+			expect(rule(name)).toContain(
+				`\`docs/pi-lens-merge-policy.md\` "The loop, per PR"`,
+			);
+		},
+	);
+});

@@ -258,6 +258,19 @@ merge-order interactions with other open PRs, plus:
 - `Disposition table`: each prior finding as `fixed`, `not fixed`,
   `new defect`, or `withdrawn (reason)`.
 - Cleared categories (one compact list) and exact-head identity.
+- **Bot threads and code-scanning alerts.** When bot threads or code-scanning
+  alerts exist, read and dispose of each one: list every unresolved review
+  thread on the PR (`reviewThreads`, `isResolved == false`) and every open
+  code-scanning alert on the branch, both read at the exact head with the
+  commands in `docs/pi-lens-fixer.md` "Fix rounds". Rate each one as a
+  finding with its probe, or `refuted` with the probe that refutes it, so an
+  item nobody probed cannot read as cleared. A missing bot review is never
+  evidence of anything: never wait for one, never read its absence as a clear
+  signal, and let your own pass stand alone. No `merge-ready` verdict while
+  any thread or alert stays undisposed; the merge condition is
+  `docs/pi-lens-merge-policy.md` "The loop, per PR" step 1 and step 4
+  (`:34`, `:81`). Recurrence: #4566 and #4575 (2026-10-17), where the threads
+  outlived the rounds that should have read them.
 
 Use short, active, plain prose.
 
