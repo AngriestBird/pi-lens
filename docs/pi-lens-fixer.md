@@ -229,6 +229,12 @@ rigor (#2599).
   enforcer must be one catalog entry N names. The fix's own one-bug test is its
   regression test, not the closed gap. The body lint enforces both lines
   (#4439).
+- A `Shape: new: <name>` is a proposal, not a catalog entry: write the
+  proposed shape text in the PR body under "Proposed contract change
+  (maintainer decision)" and never edit `AGENTS.md`. Catalog shapes and rule
+  changes are the maintainer's decision; the orchestrator lands an approved
+  one in its own change (#4577's fixer added shape 74 unasked, and the
+  governance suites redded).
 - Every code fact in the PR body is a `` `path:line` `` citation the check
   verifies: the file must be in the committed tree (never an untracked or
   git-ignored path, which CI cannot read), and a fenced quote after it must
