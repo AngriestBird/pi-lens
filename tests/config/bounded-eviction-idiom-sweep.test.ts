@@ -116,8 +116,18 @@ const REPO_ROOT = path.resolve(
  * the first entry out of an insertion-ordered container. `.values()` is the
  * `Set` form, `.entries()` the form used when the eviction needs the VALUE
  * too (a compiled query to free, a WASM tree to retire).
+ *
+ * Matched over the WHOLE blanked source with `\s*` between the chain's tokens,
+ * never one line at a time: a formatter wraps a long chain (`x` /
+ * `  .values()` / `  .next().value`), and a line-anchored match fails open on
+ * the wrapped form — the exact shape-69 hole #4580's first round left, with two
+ * live members (`clients/dispatch/fact-store.ts`'s tombstone trim and
+ * `clients/lsp/client.ts`'s incremental-text skip policy). `stripSource`
+ * preserves layout, so a whole-source match maps back to the line a human
+ * reads through {@link lineIndexAt}.
  */
-const ITERATOR_HEAD = /\.(?:keys|values|entries)\(\)\.next\(\)\.value/;
+const ITERATOR_HEAD =
+	/\.\s*(?:keys|values|entries)\s*\(\s*\)\s*\.\s*next\s*\(\s*\)\s*\.\s*value\b/g;
 
 /**
  * Spelling 2: a `for (const k of container.keys())` walk that breaks out
@@ -129,7 +139,6 @@ const ITERATOR_HEAD = /\.(?:keys|values|entries)\(\)\.next\(\)\.value/;
 const FOR_OF_ITERATOR =
 	/\bfor\s*\(\s*(?:const|let|var)\s+[\w$]+\s+of\s+[\w$.[\]]+\.(?:keys|values|entries)\(\)\s*\)/;
 const FOR_OF_WINDOW = 12;
-
 /**
  * Spelling 3 (#2460 review S1): a BARE `for (const x of container)` — no
  * `.keys()/.values()/.entries()` call at all, because iterating a `Set`
@@ -189,27 +198,148 @@ const SIZE_COMPARISON = /\.size\s*>=?/;
  * name's OWN property, not as the delete's argument, so a value reached
  * through a second binding (`const victim = oldest.value; m.delete(victim)`) —
  * the third shape-69 plant — still flags.
+ *
+ * Matched over the whole blanked source (#4580 review F3): the binding may be
+ * declared ABOVE the loop and re-assigned inside it ({@link
+ * REASSIGNED_NEXT_BINDING}), and a formatter may break the line right after
+ * `=`, so the receiver stretch cannot exclude newlines. `[^;{}=]` keeps the
+ * receiver inside one statement, and refuses an `=` so an arrow function's
+ * body is not swallowed as the receiver.
  */
-const ASSIGNED_NEXT_BINDING =
-	/\b(?:const|let|var)\s+([\w$]+)\s*(?::[^=;]+)?=\s*[^=;]+?\.next\(\)/;
+/**
+ * Spelling 4 covers a binding DECLARED on the same line, RE-ASSIGNED inside
+ * the loop after a declaration above, and one whose declaration carries a type
+ * annotation (#4580 review F3). One pattern serves all three: anchoring on
+ * `const|let|var` missed the re-assignment, and keeping a declaration family
+ * beside a re-assignment family left the plain form double-covered — a
+ * mutation that neutered one family left every case green through the other.
+ * The name is any JS identifier (`[\w$]+`, so `$`-initial names are in the
+ * population), and the lookbehind refuses a property or index target
+ * (`this.oldest = …`, `arr[oldest] = …`).
+ *
+ * Matched over the whole blanked source (#4580 review F3): the receiver
+ * stretch is `[^;{}=]`, which crosses a formatter's line break (the
+ * multi-line binding) but stays inside one statement and refuses an `=`, so an
+ * arrow function's body is not read as the receiver.
+ */
+const BOUND_NEXT_BINDING =
+	/(?<![\w$.])([\w$]+)\s*(?::[^=;\n]+)?=(?!=)\s*[^;{}=]*?\.next\s*\(\s*\)/g;
+
+/**
+ * Spelling 5 (#4580 review F3): iterator destructuring — `const [oldest] =
+ * m.keys(); … m.delete(oldest);` — the key itself is the victim, so the window
+ * gate is a `.delete(` plus a use of the destructured name, not a `.value`
+ * read. The tree's one spread-destructure is a peek (`fieldCounts.size !== 1`,
+ * no removal), which fails both gates.
+ */
+const DESTRUCTURED_ITERATOR_BINDING =
+	/\b(?:const|let|var)\s*\[\s*([\w$]+)(?:\s*,\s*[\w$]+)?\s*\]\s*=(?!=)\s*[^;{}=]*?\.\s*(?:keys|values|entries)\s*\(\s*\)/g;
+
+/**
+ * Spelling 6 (#4580 round 2, audit item 4): an eviction whose victim is picked
+ * by ORDERING the spread accessor with `.sort(...)` instead of taking its head
+ * — `const victim = [...m.entries()].sort(([, a], [, b]) => a.at - b.at)[0];`
+ * — which is the same evict-oldest intent under a comparator.
+ *
+ * Two gates keep it from reading a ranking as an eviction: the sorted array is
+ * indexed at `[0]` (the single lowest-ranked element is the victim, where a
+ * truncation keeps the whole list — `clients/lens-map.ts`'s degree-ranked
+ * `keepIds` is the live shape that distinction excludes), and the bounded
+ * `.size` COMPARISON sits in the lines above. Unlike the other bound-victim
+ * families this one cannot also require `.delete(`: all five live members
+ * evict through a helper (`evictWorkspaceGraph`, `deleteReverseDepsEntry`,
+ * `deleteAuthoritativeSnapshot`, `deleteDirMarker`, `deleteWalk`), and
+ * requiring that spelling would be the enumeration mistake one row down. The
+ * use of the bound name below stands in its place, which is the loud
+ * over-match direction (a reviewer's exemption) rather than a silent miss.
+ */
+const SORTED_SPREAD_BINDING =
+	/\b(?:const|let|var)\s+([\w$]+)\s*(?::[^=;\n]+)?=(?!=)\s*\[\s*\.\.\.[^;{}=]*?\.\s*(?:keys|values|entries)\s*\(\s*\)\s*\]\s*\.\s*sort\s*\([\s\S]{0,400}?\)\s*\[\s*0\s*\]/g;
+
+/** 0-based start offset of every line, for offset→line mapping. */
+function lineStartOffsets(source: string): number[] {
+	const starts = [0];
+	for (let i = 0; i < source.length; i++) {
+		if (source[i] === "\n") starts.push(i + 1);
+	}
+	return starts;
+}
+
+/** The 0-based line index holding `offset`, by binary search over `starts`. */
+function lineIndexAt(starts: readonly number[], offset: number): number {
+	let low = 0;
+	let high = starts.length - 1;
+	while (low < high) {
+		const mid = (low + high + 1) >> 1;
+		if ((starts[mid] ?? 0) <= offset) low = mid;
+		else high = mid - 1;
+	}
+	return low;
+}
+
+/** The stripped source {@link FOR_OF_WINDOW} lines below `index`. */
+function windowBelow(lines: readonly string[], index: number): string {
+	return lines.slice(index + 1, index + 1 + FOR_OF_WINDOW).join("\n");
+}
+
+/** The stripped source {@link SIZE_LOOP_WINDOW} lines above `index`. */
+function windowAbove(lines: readonly string[], index: number): string {
+	return lines.slice(Math.max(0, index - SIZE_LOOP_WINDOW), index).join("\n");
+}
+
+const IDENTIFIER_TOKEN = /[\w$]+/g;
+const VALUE_READ = /([\w$]+)\s*\??\.\s*value\b/g;
+
+/** True when `text` uses `name` as a whole identifier. */
+function mentionsIdentifier(text: string, name: string): boolean {
+	for (const token of text.matchAll(IDENTIFIER_TOKEN)) {
+		if (token[0] === name) return true;
+	}
+	return false;
+}
+
+/**
+ * True when `text` reads `name`'s own `.value`. The read is compared by NAME
+ * against the binding it belongs to (#4580 review F2, Greptile P2): splicing
+ * the name into a `\b`-anchored regex both failed open on a `$`-initial name —
+ * `\b` cannot precede `$` — and left a backslash-escaping path CodeQL flagged.
+ */
+function readsOwnValue(text: string, name: string): boolean {
+	for (const read of text.matchAll(VALUE_READ)) {
+		if (read[1] === name) return true;
+	}
+	return false;
+}
 
 function flagsAssignedEviction(
 	lines: readonly string[],
 	index: number,
 	boundName: string,
 ): boolean {
-	const window = lines.slice(index + 1, index + 1 + FOR_OF_WINDOW).join("\n");
-	if (!/\.delete\(/.test(window)) return false;
-	const precedingWindow = lines
-		.slice(Math.max(0, index - SIZE_LOOP_WINDOW), index)
-		.join("\n");
-	if (!SIZE_COMPARISON.test(precedingWindow)) return false;
-	// A JS identifier is `[\w$]+`, so `$` is the only regex-special character
-	// that can appear in `boundName`.
-	const valueRead = new RegExp(
-		`\\b${boundName.replace(/\$/g, "\\$")}\\.value\\b`,
-	);
-	return valueRead.test(window);
+	const below = windowBelow(lines, index);
+	if (!/\.delete\(/.test(below)) return false;
+	if (!SIZE_COMPARISON.test(windowAbove(lines, index))) return false;
+	return readsOwnValue(below, boundName);
+}
+
+function flagsDestructuredEviction(
+	lines: readonly string[],
+	index: number,
+	boundName: string,
+): boolean {
+	const below = windowBelow(lines, index);
+	if (!/\.delete\(/.test(below)) return false;
+	if (!SIZE_COMPARISON.test(windowAbove(lines, index))) return false;
+	return mentionsIdentifier(below, boundName);
+}
+
+function flagsSortedSpreadEviction(
+	lines: readonly string[],
+	index: number,
+	victimName: string,
+): boolean {
+	if (!SIZE_COMPARISON.test(windowAbove(lines, index))) return false;
+	return mentionsIdentifier(windowBelow(lines, index), victimName);
 }
 
 /** The one file allowed to spell the idiom: the canonical implementation. */
@@ -250,6 +380,50 @@ const EXEMPT_SITES: Readonly<Record<string, string>> = {
 		"dropped. A protected prefix is a policy neither BoundedFifoMap nor " +
 		"BoundedLruCache expresses, and encoding it into a shared primitive " +
 		"for one debug-only caller is not worth the surface.",
+	"clients/lsp/client.ts#recordSentContent:05851f19":
+		"Not evict-OLDEST (#4580 round 2, family 1 with the accessor chain " +
+		"wrapped across lines): the loop is bounded on TWO axes at once " +
+		"(retained entries and retained bytes) and SKIPS every path whose " +
+		"binding no longer carries text before either counter moves, so it drops " +
+		"the oldest TEXT-BEARING path. Neither bounded class holds a second axis " +
+		"or a skip policy, and growing BoundedFifoMap one to serve this single " +
+		"caller is the trade the two entries above already declined.",
+	"clients/review-graph/builder.ts#setWorkspaceGraph:7a28b568":
+		"Not a bounded class's recency (#4580 round 2, comparator family): the " +
+		"victim is the oldest by an explicitly maintained `lastUsedAt`, and the " +
+		"eviction clears the entry's armed idle timer. `BoundedLruCache` promotes " +
+		"on `get`, which these caches do NOT do through their equality-checking " +
+		"reads, so adopting it would change which entry is evicted under a " +
+		"read-only workload; no bounded class carries an external recency stamp " +
+		"or a per-entry timer.",
+	"clients/dispatch/integration.ts#setReverseDepsEntry:93afc4e6":
+		"Not a bounded class's recency (#4580 round 2, comparator family): the " +
+		"victim is the oldest by the explicitly maintained `lastUsedAt` that " +
+		"`touchReverseDepsEntry` stamps, and the eviction clears the entry's " +
+		"armed idle timer. `BoundedLruCache`'s `get` would promote on the " +
+		"equality-checking reads this cache makes, changing eviction order; no " +
+		"bounded class carries an external recency stamp or a per-entry timer.",
+	"clients/project-snapshot.ts#enforceAuthoritativeSnapshotCap:4742430c":
+		"Not a bounded class's recency (#4580 round 2, comparator family): the " +
+		"victim is the oldest by the explicitly maintained `lastUsedAt`, and the " +
+		"eviction must clear the single timer `scheduleAuthoritativeSnapshotEviction` " +
+		"armed for it. `BoundedLruCache` would promote on `get`, which this " +
+		"cache's equality-checking reads must not do; no bounded class carries an " +
+		"external recency stamp or a per-entry timer.",
+	"clients/workspace-topology.ts#getDirectoryMarkers:db302a5f":
+		"Not a bounded class's recency (#4580 round 2, comparator family): the " +
+		"victim is the oldest by the `lastUsedAt` that `touchDirMarker` stamps, " +
+		"and `deleteDirMarker` must clear that entry's idle timer. " +
+		"`BoundedLruCache`'s `get` would promote on reads this cache makes without " +
+		"touching the stamp, changing eviction order; no bounded class carries an " +
+		"external recency stamp or a per-entry timer.",
+	"clients/workspace-topology.ts#walkToNearestMatch:754f935f":
+		"Not a bounded class's recency (#4580 round 2, comparator family): the " +
+		"victim is the oldest by the `lastUsedAt` that `touchWalk` stamps, and " +
+		"`deleteWalk` must clear that entry's idle timer. `BoundedLruCache`'s " +
+		"`get` would promote on reads this cache makes without touching the " +
+		"stamp, changing eviction order; no bounded class carries an external " +
+		"recency stamp or a per-entry timer.",
 };
 
 function shippedSourceFiles(): string[] {
@@ -267,10 +441,35 @@ function shippedSourceFiles(): string[] {
 /** Every hand-rolled eviction in one file, as 1-based line numbers. */
 export function findEvictionLines(stripped: string): number[] {
 	const lines = stripped.split("\n");
+	const starts = lineStartOffsets(stripped);
 	const hits = new Set<number>();
+
+	// The accessor-chain and bound-victim families are matched over the WHOLE
+	// blanked source, so a formatter's line break inside the chain, after `=`, or
+	// between the statement and its `.value` cannot hide the eviction (#4580
+	// review F1/F3). Each match maps back to the line it starts on.
+	for (const match of stripped.matchAll(ITERATOR_HEAD)) {
+		hits.add(lineIndexAt(starts, match.index ?? 0) + 1);
+	}
+	const boundVictimFamilies = [
+		{ pattern: BOUND_NEXT_BINDING, flags: flagsAssignedEviction },
+		{
+			pattern: DESTRUCTURED_ITERATOR_BINDING,
+			flags: flagsDestructuredEviction,
+		},
+		{ pattern: SORTED_SPREAD_BINDING, flags: flagsSortedSpreadEviction },
+	];
+	for (const { pattern, flags } of boundVictimFamilies) {
+		for (const match of stripped.matchAll(pattern)) {
+			const index = lineIndexAt(starts, match.index ?? 0);
+			if (flags(lines, index, match[1] ?? "")) hits.add(index + 1);
+		}
+	}
+
+	// The two `for…of` families stay line-anchored: their `for` header is one
+	// line by construction and each is gated on its own window.
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i] ?? "";
-		if (ITERATOR_HEAD.test(line)) hits.add(i + 1);
 
 		if (FOR_OF_ITERATOR.test(line)) {
 			const window = lines.slice(i + 1, i + 1 + FOR_OF_WINDOW).join("\n");
@@ -291,12 +490,6 @@ export function findEvictionLines(stripped: string): number[] {
 			) {
 				hits.add(i + 1);
 			}
-			continue;
-		}
-
-		const assigned = ASSIGNED_NEXT_BINDING.exec(line);
-		if (assigned && flagsAssignedEviction(lines, i, assigned[1] ?? "")) {
-			hits.add(i + 1);
 		}
 	}
 	return [...hits].sort((a, b) => a - b);
@@ -337,13 +530,15 @@ describe("#2442 no new hand-rolled evict-oldest idiom outside bounded-cache.ts",
 	const flagged = occurrences.map((o) => o.key);
 
 	it("actually finds the family (a dead scan must not read as clean)", () => {
-		// Vacuity guard on the DETECTOR: as of #4570 two occurrences remain (both
-		// skip-policy walks: the drift cap and the debug-handles protected
-		// prefix). Before #4570 five more were flagged by the newly matched
-		// assigned spelling and migrated to `BoundedFifoMap`. If this drops to
-		// zero, EITHER every exemption's site was migrated (update the sweep) OR
-		// the regexes broke (fix the sweep) — never assume the former without
-		// checking.
+		// Vacuity guard on the DETECTOR: as of #4580 round 2 eight occurrences
+		// remain — three skip-policy / two-axis walks (the drift cap, the
+		// debug-handles protected prefix, the LSP incremental-text skip policy)
+		// and five comparator-ordered LRU-by-`lastUsedAt` caches, all admitted
+		// above. Before #4570 five more were flagged by the newly matched assigned
+		// spelling and migrated to `BoundedFifoMap`; #4580 round 2 migrated the
+		// session-fact tombstone trim to `BoundedSet`. If this drops to zero,
+		// EITHER every exemption's site was migrated (update the sweep) OR the
+		// regexes broke (fix the sweep) — never assume the former without checking.
 		expect(flagged.length).toBeGreaterThanOrEqual(1);
 	});
 
@@ -630,6 +825,206 @@ describe("#2442 no new hand-rolled evict-oldest idiom outside bounded-cache.ts",
 				].join("\n"),
 			),
 		).toEqual([]);
+	});
+
+	// (#4580 review F1) The accessor chain is matched over the WHOLE blanked
+	// source, so a formatter that wraps it cannot hide the eviction. Two live
+	// members were invisible to the line-anchored matcher: the session-fact
+	// tombstone trim and the LSP incremental-text skip policy.
+	it("flags an accessor chain the formatter wrapped across lines, #4580 review F1", () => {
+		expect(
+			findEvictionLines(
+				[
+					"const oldestTombstone = this.evictedSessionFactKeys",
+					"  .values()",
+					"  .next().value;",
+				].join("\n"),
+			),
+		).toEqual([2]);
+		// The LSP member wraps after an optional-chain receiver.
+		expect(
+			findEvictionLines(
+				[
+					"const oldestPath = state.incrementalTextBearingPaths",
+					"  ?.values()",
+					"  .next().value;",
+				].join("\n"),
+			),
+		).toEqual([2]);
+	});
+
+	// (#4580 review F2, Greptile P2) A JS identifier may start with `$`, so the
+	// value read is compared by name against the binding it belongs to instead
+	// of being spliced into a `\b`-anchored regex, where `\b` cannot precede `$`.
+	it("flags a `$`-initial binding name, #4580 review F2", () => {
+		expect(
+			findEvictionLines(
+				[
+					"while (m.size > CAP) {",
+					"  const $oldest = m.keys().next();",
+					"  if ($oldest.done) break;",
+					"  m.delete($oldest.value);",
+					"}",
+				].join("\n"),
+			),
+		).toEqual([2]);
+		// A defensive optional chain on the value read is the same eviction.
+		expect(
+			findEvictionLines(
+				[
+					"while (m.size > CAP) {",
+					"  const oldest = m.keys().next();",
+					"  if (oldest.done) break;",
+					"  m.delete(oldest?.value);",
+					"}",
+				].join("\n"),
+			),
+		).toEqual([2]);
+	});
+
+	// (#4580 review F3) Iterator destructuring: the victim is the destructured
+	// binding itself, so the window needs a `.delete(` and a use of that name.
+	it("flags iterator destructuring, #4580 review F3", () => {
+		expect(
+			findEvictionLines(
+				[
+					"while (m.size > CAP) {",
+					"  const [oldest] = m.keys();",
+					"  m.delete(oldest);",
+					"}",
+				].join("\n"),
+			),
+		).toEqual([2]);
+		expect(
+			findEvictionLines(
+				[
+					"while (m.size > CAP) {",
+					"  const [key, value] = m.entries();",
+					"  m.delete(key);",
+					"}",
+				].join("\n"),
+			),
+		).toEqual([2]);
+		// The tree's one spread-destructure is a peek with no cap loop and no
+		// removal (`fieldCounts.size !== 1`), so it stays out of the family.
+		expect(
+			findEvictionLines("const [delegateField] = [...fieldCounts.keys()];"),
+		).toEqual([]);
+	});
+
+	// (#4580 review F3) The victim may be assigned to a binding declared above
+	// the bounded loop, so the family cannot require `const`/`let`/`var` on the
+	// same line as the `.next()`.
+	it("flags a re-assigned iterator binding, #4580 review F3", () => {
+		expect(
+			findEvictionLines(
+				[
+					"let oldest;",
+					"while (m.size > CAP) {",
+					"  oldest = m.keys().next();",
+					"  if (oldest.done) break;",
+					"  m.delete(oldest.value);",
+					"}",
+				].join("\n"),
+			),
+		).toEqual([3]);
+		// A type annotation on the declaration must not hide it either.
+		expect(
+			findEvictionLines(
+				[
+					"while (m.size > CAP) {",
+					"  const oldest: IteratorResult<[string, number]> = m.entries().next();",
+					"  if (oldest.done) break;",
+					"  m.delete(oldest.value[0]);",
+					"}",
+				].join("\n"),
+			),
+		).toEqual([2]);
+	});
+
+	// (#4580 review F3) A formatter may break the line right after `=`, which a
+	// single-line binding pattern cannot cross.
+	it("flags a binding the formatter wrapped after `=`, #4580 review F3", () => {
+		expect(
+			findEvictionLines(
+				[
+					"while (m.size > CAP) {",
+					"  const oldest =",
+					"    m.keys().next();",
+					"  if (oldest.done) break;",
+					"  m.delete(oldest.value);",
+					"}",
+				].join("\n"),
+			),
+		).toEqual([2]);
+	});
+
+	// (#4580 round 2, audit item 4) An eviction ordered by a COMPARATOR picks its
+	// victim by sorting the spread accessor instead of taking its head. Three
+	// live members sort by an explicitly maintained `lastUsedAt` inside a
+	// `.size > CAP` loop and evict through a helper; the family is gated on the
+	// bounded loop above and a use of the bound name below. A comparator read
+	// with no cap loop is not an eviction.
+	it("flags an eviction ordered by a comparator over a spread accessor, #4580 round 2", () => {
+		expect(
+			findEvictionLines(
+				[
+					"while (m.size > CAP) {",
+					"  const victim = [...m.entries()].sort(",
+					"    ([, a], [, b]) => a.lastUsedAt - b.lastUsedAt,",
+					"  )[0];",
+					"  if (!victim) break;",
+					"  m.delete(victim[0]);",
+					"}",
+				].join("\n"),
+			),
+		).toEqual([2]);
+		expect(
+			findEvictionLines(
+				[
+					"while (m.size > CAP) {",
+					"  const victim = [...m.entries()].sort(cmp)[0];",
+					"  m.delete(victim[0]);",
+					"}",
+				].join("\n"),
+			),
+		).toEqual([2]);
+		// A truncation keeps the whole ranking instead of picking one victim, so
+		// it carries no `[0]` and stays out of the family
+		// (`clients/lens-map.ts`'s degree-ranked `keepIds` is that live shape).
+		expect(
+			findEvictionLines(
+				[
+					"if (files.size > maxNodes) {",
+					"  const ranked = [...files.keys()].sort((a, b) => b.degree - a.degree);",
+					"  keepIds = new Set(ranked.slice(0, maxNodes));",
+					"  use(keepIds);",
+					"}",
+				].join("\n"),
+			),
+		).toEqual([]);
+		// A ranking read outside a bounded cap loop is not an eviction.
+		expect(
+			findEvictionLines(
+				[
+					"const ranked = [...m.entries()].sort(cmp);",
+					"return ranked[0];",
+				].join("\n"),
+			),
+		).toEqual([]);
+	});
+
+	it("does not count a comment or a string that quotes any spelling, #4580 round 2", () => {
+		const source = [
+			"// const [oldest] = m.keys(); m.delete(oldest);",
+			"/* while (m.size > CAP) { const victim = [...m.entries()].sort(cmp)[0];",
+			"   m.delete(victim[0]); } */",
+			'const note = "const $oldest = m.keys().next(); m.delete($oldest.value);";',
+			"// x.values()",
+			"//   .next().value",
+			"const unrelated = 1;",
+		].join("\n");
+		expect(findEvictionLines(stripSource(source))).toEqual([]);
 	});
 
 	it("flags per OCCURRENCE, so an exemption cannot launder a new sibling", () => {
