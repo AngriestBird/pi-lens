@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
 	assertNonEmptyScan,
 	listSourceFiles,
@@ -471,6 +471,19 @@ function judgedTmpRootWrites(
 /** The pre-#4354 shape of the foreign-run cases: no creator on record. */
 const NO_CREATORS: ReadonlyMap<string, string> = new Map();
 
+// #4560 N2/S: keep the caller's compatibility decision on the real sink seam.
+function writeCensusSummary(
+	scan: Parameters<typeof formatTmpHygieneOwnerSummary>[0],
+	otherInvocation: number,
+	reaped: number,
+	tmpRootWrites: string[] | undefined,
+	judged: number,
+): void {
+	process.stderr.write(
+		`${formatTmpHygieneOwnerSummary(scan, otherInvocation, reaped, tmpRootWrites === undefined ? "unknown" : { judged, observed: tmpRootWrites.length })}\n`,
+	);
+}
+
 describe("tmp-fixture-hygiene", () => {
 	afterAll(async () => {
 		const scan = await tmpHygieneWaitForOwnerDrain();
@@ -549,9 +562,38 @@ describe("tmp-fixture-hygiene", () => {
 			// Bounded observability (#3186, extended by #3314): ONE census line per
 			// hygiene run, not one record per marker or per entry, so a suppressed,
 			// ignored, attributed, or reaped entry is explicable from this run.
-			process.stderr.write(
-				`${formatTmpHygieneOwnerSummary(scan, otherInvocation.size, reaped, tmpRootWrites === undefined ? "unknown" : { judged: tmpRootWriteLeaks.length, observed: tmpRootWrites.length })}\n`,
+			writeCensusSummary(
+				scan,
+				otherInvocation.size,
+				reaped,
+				tmpRootWrites,
+				tmpRootWriteLeaks.length,
 			);
+		}
+	});
+
+	it("reports an unknown baseline through the census caller (#4560)", async () => {
+		// N2/S: formatting unknown directly misses the caller converting it to 0/N.
+		const output = vi
+			.spyOn(process.stderr, "write")
+			.mockImplementation(() => true);
+		try {
+			const readOldBaseline = () => undefined;
+			writeCensusSummary(
+				{
+					live: new Set<string>(),
+					counts: { live: 0, orphaned: 0, malformed: 0, foreign: 0, self: 1 },
+				},
+				0,
+				0,
+				readOldBaseline(),
+				0,
+			);
+			expect(output.mock.calls.flat().join("")).toContain(
+				"tmpRootWrites=unknown",
+			);
+		} finally {
+			output.mockRestore();
 		}
 	});
 

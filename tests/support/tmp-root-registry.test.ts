@@ -274,6 +274,26 @@ describe("tmp-root interposer (#2912)", () => {
 		]);
 	});
 
+	it("judges canonical parent aliases through setup-owned fs (#3703)", () => {
+		// V1: retain realpath alias equivalence without preloading clients/path-utils.
+		const env = setupTestEnvironment("pi-lens-4560-alias-");
+		try {
+			const real = path.join(env.tmpDir, "real");
+			const alias = path.join(env.tmpDir, "alias");
+			fs.mkdirSync(real);
+			fs.symlinkSync(real, alias, "junction");
+			const registry = createTmpRootRegistry();
+			const { target } = fakeTarget();
+			installTmpRootInterposer(registry, target, alias, () => "alias.test.ts");
+			(target.mkdirSync as (p: string) => unknown)(path.join(real, "made"));
+			expect([...registry.siblings.values()]).toEqual([
+				{ createdBy: "alias.test.ts" },
+			]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("returns exactly what the wrapped function returned", () => {
 		const registry = createTmpRootRegistry();
 		const { target } = fakeTarget();

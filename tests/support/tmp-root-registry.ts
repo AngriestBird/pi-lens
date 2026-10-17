@@ -36,7 +36,7 @@
  * remove a root it created itself — never a sibling's live one.
  */
 import * as path from "node:path";
-import { isWindowsPath, pathsEqual } from "../../clients/path-utils.js";
+import { realpathSync } from "node:fs";
 
 export type TmpRootKind = "registered" | "observed";
 
@@ -254,12 +254,28 @@ export function installTmpRootInterposer(
 	 *  rather than to whatever file declares the name's prefix. */
 	createdBy?: () => string,
 ): void {
-	const pathApi = isWindowsPath(realTmp) ? path.win32 : path.posix;
+	// #3703: shared setup runs before test mocks. Import only node builtins
+	// and tests/support modules here, never clients/ (which would cache real fs).
+	const windows = /^(?:[a-zA-Z]:[\\/]|[\\/]{2})/.test(realTmp);
+	const pathApi = windows ? path.win32 : path.posix;
+	const canonicalParent = (parent: string): string => {
+		let canonical = parent;
+		try {
+			canonical = realpathSync.native(parent);
+		} catch {
+			// Synthetic or unavailable parents retain their platform spelling.
+		}
+		return windows
+			? path.win32.resolve(canonical).replace(/\\/g, "/").toLowerCase()
+			: path.posix.resolve(canonical);
+	};
 	const tmpRoot = pathApi.resolve(realTmp);
 	const isDirectTmpChild = (dir: unknown): dir is string => {
 		if (typeof dir !== "string") return false;
 		const resolved = pathApi.resolve(dir);
-		return pathsEqual(pathApi.dirname(resolved), tmpRoot);
+		return (
+			canonicalParent(pathApi.dirname(resolved)) === canonicalParent(tmpRoot)
+		);
 	};
 	const note = (dir: unknown): void => {
 		if (
