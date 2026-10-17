@@ -68,7 +68,10 @@ function makeClient(
 	// — with the record of the payloads its own `notify.open` took — and queues
 	// nothing. Without the record the gate fails closed and every touch pushes,
 	// which is not the seam these cases pin.
-	const sent = new Map<string, { hash: string }>();
+	const sent = new Map<
+		string,
+		{ hash: string; savedHash?: string | undefined }
+	>();
 	// Every argument is forwarded: these cases pin the sixth one (`saved`).
 	const recorded = vi.fn(
 		async (filePath: string, content: string, ...rest: unknown[]) => {
@@ -76,7 +79,14 @@ function makeClient(
 				open as unknown as (...args: unknown[]) => Promise<unknown>
 			)(filePath, content, ...rest);
 			if (result !== false) {
-				sent.set(filePath, { hash: hashDiagnosticContent(content) });
+				const hash = hashDiagnosticContent(content);
+				sent.set(filePath, {
+					hash,
+					savedHash:
+						rest[3] === true && saveOptions
+							? hash
+							: sent.get(filePath)?.savedHash,
+				});
 			}
 			return result;
 		},
@@ -179,7 +189,11 @@ async function touchSameBytes(
 	const service = new LSPService();
 	const open = vi.fn(async () => {});
 	const client = makeClient("typescript", open, saveOptions);
-	const save = vi.fn(async (_filePath: string) => true);
+	const save = vi.fn(async (filePath: string, _onlyIfOwed?: boolean) => {
+		const record = client.getSentContent(filePath);
+		if (record) record.savedHash = record.hash;
+		return true;
+	});
 	Object.assign(client.notify, { save });
 	getServersForFileWithConfig.mockReturnValue([
 		makeServer("typescript", ".ts"),
@@ -237,7 +251,7 @@ describe("#3405 — a save is not debounced away with the push it rides on", () 
 			);
 			expect(opens).toHaveLength(1);
 			expect(opens[0]?.[5]).toBe(false);
-			expect(saves).toEqual([[file]]);
+			expect(saves).toEqual([[file, true]]);
 		},
 	);
 
@@ -330,6 +344,6 @@ describe("#3405 — a save is not debounced away with the push it rides on", () 
 			],
 			{ includeText: false },
 		);
-		expect(saves).toEqual([[file]]);
+		expect(saves).toEqual([[file, true]]);
 	});
 });

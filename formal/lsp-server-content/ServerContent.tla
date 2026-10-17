@@ -48,8 +48,8 @@
 (*    closes nothing, so it cannot change what the server holds and the    *)
 (*    skip gate (`hasNotifyInFlight`) does not count it; a `didClose` is    *)
 (*    NOT save-only. Round 5: a save's notification can FAIL                *)
-(*    (`SaveSendFails`), and the mark the skip took is withdrawn with one   *)
-(*    retry queued (`SaveRetryOnFailure`);                                  *)
+(*    (`SaveSendFails`), with one retry queued for a failed standalone save *)
+(*    (`SaveRetryOnFailure`); no provisional mark exists in the live rule.  *)
 (*  - the drift sweep (lsp/document-drift.ts runSweep): stat, a candidate  *)
 (*    when size differs or floor(mtime) > syncedAt; read; equal fingerprint*)
 (*    -> re-stamp only ("unchanged"), else resync through touchFile (source*)
@@ -107,7 +107,7 @@ CONSTANTS
                   \*   hears a didSave.
     SaveSendFails, \* how many standalone saves may fail in this schedule (a fault
                   \*   budget: 0 in every config that does not inject the F3 failure)
-    SaveMarkOnLanding \* TRUE (code since #4532 gap 9 round 6, F2): the save mark is
+    SaveMarkOnLanding \* TRUE (code since #4532 gap 9 round 7): the save mark is
                   \*   written by the send that LANDS, naming the content the server
                   \*   holds at that moment. FALSE (the code before): `Check` takes the
                   \*   mark before the send, naming the content the SKIP read, and a
@@ -345,22 +345,22 @@ TakeAndSend ==
     IF pending.saveOnly
       THEN /\ running' = pending
            /\ pending' = NoEntry
-           /\ UNCHANGED <<failsLeft, server, lastSentSeq, staleSend, serverSaved>>
+           /\ UNCHANGED <<server, lastSentSeq, staleSend>>
       ELSE /\ LET dropped == FixDrop /\ pending.seq < lastSentSeq
               IN /\ running' = [pending EXCEPT !.sent = ~dropped, !.recorded = dropped]
                  /\ pending' = NoEntry
                  /\ IF dropped
-                      THEN UNCHANGED <<failsLeft, server, lastSentSeq, staleSend, serverSaved>>
+                      THEN UNCHANGED <<server, lastSentSeq, staleSend>>
                       ELSE /\ server' = pending.content
                            /\ lastSentSeq' = pending.seq
                            /\ staleSend' = (staleSend \/ (pending.seq < lastSentSeq /\ pending.content # server))
-                           /\ serverSaved' = IF pending.saved THEN pending.content ELSE serverSaved
+
 
 \* The runner's first iteration (microtask after the first enqueue).
 RunStart ==
     /\ running = NoEntry /\ pending # NoEntry
     /\ TakeAndSend
-    /\ UNCHANGED <<failsLeft, clock, disk, mtime, pc, content, readAt, startAt, enqAt, record, recent,
+    /\ UNCHANGED <<failsLeft, serverSaved, clock, disk, mtime, pc, content, readAt, startAt, enqAt, record, recent,
                    sentRec, skipped, touchedSaved, sweep, sweepMtime, sweepContent,
                    sweepsLeft, clean>>
 
@@ -379,7 +379,7 @@ RunFinish ==
        /\ running' = NoEntry
        /\ pc' = [p \in Procs |-> IF p \in running.waiters THEN "landed" ELSE pc[p]]
        /\ serverSaved' = IF server = "none" THEN serverSaved ELSE server
-       \* Round 6: the landing is the ONLY writer of the mark, and it names the
+       \* The save landing writes the mark, and it names the
        \* content the save covered (whatever the server holds now).
        /\ recent' = IF SaveMarkOnLanding /\ server # "none"
                         THEN [recent EXCEPT !.savedHash = server]
@@ -389,11 +389,19 @@ RunFinish ==
                       touchedSaved, sweep, sweepMtime, sweepContent, sweepsLeft, clean>>
     \/ /\ running # NoEntry /\ running.recorded /\ ~running.saveOnly
        /\ pc' = [p \in Procs |-> IF p \in running.waiters THEN "landed" ELSE pc[p]]
+       \* R7: a carried save can fail independently of its landed content.
+       /\ LET saving == running.saved /\ running.sent
+              landed == saving /\ failsLeft = 0
+          IN /\ serverSaved' = IF landed THEN running.content ELSE serverSaved
+             /\ recent' = IF SaveMarkOnLanding /\ landed
+                              THEN [recent EXCEPT !.savedHash = running.content]
+                              ELSE recent
+             /\ failsLeft' = IF saving /\ failsLeft > 0 THEN failsLeft - 1 ELSE failsLeft
        /\ IF pending # NoEntry
             THEN TakeAndSend
             ELSE /\ running' = NoEntry
-                 /\ UNCHANGED <<failsLeft, pending, server, sentRec, lastSentSeq, staleSend, serverSaved>>
-       /\ UNCHANGED <<failsLeft, clock, disk, mtime, content, readAt, startAt, enqAt, record, recent,
+                 /\ UNCHANGED <<pending, server, sentRec, lastSentSeq, staleSend>>
+       /\ UNCHANGED <<clock, disk, mtime, content, readAt, startAt, enqAt, record,
                       sentRec, skipped, touchedSaved, sweep, sweepMtime, sweepContent, sweepsLeft,
                       clean>>
 
@@ -456,9 +464,11 @@ CloseDoc ==
     /\ pending = NoEntry /\ running = NoEntry /\ server # "none"
     /\ \E p \in {"w1", "w2", "cas"} : pc[p] \in {"read", "start", "check"}
     /\ server' = "none" /\ sentRec' = "none"
+    /\ serverSaved' = "none"
+    /\ recent' = [recent EXCEPT !.savedHash = "none"]
     /\ skipped' = "none"
     /\ UNCHANGED <<failsLeft, clock, disk, mtime, lastSentSeq, staleSend, pc, content, readAt,
-                   startAt, enqAt, pending, running, record, recent, serverSaved,
+                   startAt, enqAt, pending, running, record,
                    touchedSaved, sweep, sweepMtime, sweepContent, sweepsLeft, clean>>
 
 \* touchFile after its write landed: markTouched (primary scope) and the drift
@@ -470,7 +480,8 @@ Finish(p) ==
     /\ recent' = IF p = "res"
          THEN recent
          ELSE [fp |-> Fp(content[p]), fresh |-> TRUE,
-               savedHash |-> IF SavedTouches THEN content[p] ELSE "none"]
+               savedHash |-> IF SaveMarkOnLanding THEN recent.savedHash
+                            ELSE IF SavedTouches THEN content[p] ELSE "none"]
     /\ pc' = [pc EXCEPT ![p] = "done"]
     /\ UNCHANGED <<failsLeft, enqAt, clock, disk, mtime, server, sentRec, lastSentSeq, staleSend, content, readAt,
                    startAt, pending, running, skipped, serverSaved, touchedSaved, sweep,
@@ -597,6 +608,9 @@ SkippedContentHeld ==
 \* still holds them, carry a didSave (`savedHash` bound to its own content).
 \* The drift resync's own saved flag is out of scope: its content is disk, not
 \* a caller's touch (`p # "res"`).
+SaveEvidenceLanded ==
+    recent.savedHash = "none" \/ recent.savedHash = serverSaved
+
 SaveFollowsSavedTouch ==
     Quiescent =>
         (touchedSaved = "none" \/ server # touchedSaved \/ serverSaved = touchedSaved)

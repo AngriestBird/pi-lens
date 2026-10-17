@@ -14,6 +14,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
+import fc from "fast-check";
 import path from "node:path";
 import * as clientModule from "../../../clients/lsp/client.js";
 import { hashDiagnosticContent } from "../../../clients/lsp/diagnostic-binding.js";
@@ -117,17 +118,24 @@ async function durableDegradations(): Promise<string[]> {
  * branch, and the gate must fail CLOSED on both.
  */
 async function setup(
-	options: { reportRecord?: boolean; reportQueue?: boolean } = {},
+	options: {
+		reportRecord?: boolean;
+		reportQueue?: boolean;
+		serverId?: string;
+	} = {},
 ) {
-	const state = createMockState({ root: ROOT, serverId: "typescript" });
+	const serverId = options.serverId ?? "typescript";
+	const state = createMockState({ root: ROOT, serverId });
 	// The server declared `save`, so a standalone `notify.save` reaches the wire
 	// and the save mark means something (#3405).
 	state.saveOptions = { includeText: false };
 	const client = {
-		serverId: "typescript",
+		serverId,
 		root: ROOT,
 		customServer: false,
 		isAlive: () => true,
+		wasShutdownIntentional: () => true,
+		getExitedAt: () => undefined,
 		shutdown: async () => {},
 		getWorkspaceDiagnosticsSupport: () => ({
 			advertised: false,
@@ -151,14 +159,8 @@ async function setup(
 			? {}
 			: {
 					getSentContent: (filePath: string) => {
-						// Read over the fixture's REAL state — `recordSentContent` writes this
-						// map, and `clientModule.sentContentFor` is the same read. Spelled
-						// here instead of imported so this fixture also runs against the code
-						// before that reader existed, which the F1 red-first proof needs.
-						const sent = state.documentContentHashes.get(
-							normalizeMapKey(filePath),
-						);
-						return sent && { hash: sent.hash };
+						// Use the client's own reader over the fixture's real state.
+						return clientModule.sentContentFor(state, filePath);
 					},
 				}),
 		...(options.reportQueue === false
@@ -169,8 +171,8 @@ async function setup(
 				}),
 		notify: {
 			announceCreated: () => undefined,
-			save: (filePath: string) =>
-				clientModule.handleNotifySave(state, filePath),
+			save: (filePath: string, onlyIfOwed?: boolean) =>
+				clientModule.handleNotifySave(state, filePath, onlyIfOwed),
 			open: (
 				filePath: string,
 				content: string,
@@ -196,7 +198,7 @@ async function setup(
 	};
 	getServersForFileWithConfig.mockReturnValue([
 		{
-			id: "typescript",
+			id: serverId,
 			name: "typescript",
 			extensions: [".ts"],
 			idleEviction: "resident",
@@ -523,8 +525,8 @@ describe("#4532 gap 9 — a skip needs the path's notify queue idle", () => {
 	// before sending then covers bytes the server never heard a save for, and a
 	// saved touch that arrived during the flight marked nothing of its own, so
 	// the failure leaves no didSave at all — the server answers nothing for a
-	// save-triggered project. A failed send withdraws the mark and one bounded
-	// retry re-queues the save.
+	// save-triggered project. A failed send leaves no landed mark, and one
+	// bounded retry re-queues the save.
 	it("retries a standalone save whose notification failed", async () => {
 		const { service, texts, state } = await setup();
 		const touch = { diagnostics: "none" as const, source: "test" };
@@ -672,7 +674,7 @@ describe("#4532 gap 9 — a skip needs the path's notify queue idle", () => {
 			);
 			const durable = await durableDegradations();
 			expect(durable, "the failed attempt never reached the sink").toContain(
-				"typescript:lsp-did-save-send-failed",
+				`${state.serverId}:lsp-did-save-send-failed`,
 			);
 			expect(
 				durable,
@@ -805,11 +807,8 @@ describe("#4532 gap 9 — a skip needs the path's notify queue idle", () => {
 		expect(saves).toHaveLength(3);
 	});
 
-	// R6: the provisional mark is what keeps a SECOND saved touch, arriving while
-	// the first save is still on the wire, from queueing a second save. The queue
-	// merges only entries that are both unstarted; once the first save runs, the
-	// second is a new pending entry and would send again for bytes the server is
-	// already being told about.
+	// R7: a second saved touch can queue while the first runs. Its run checks
+	// landed evidence and sends nothing if the first succeeded.
 	it("queues no second save for a saved touch that arrives mid-send", async () => {
 		const { service, texts, state } = await setup();
 		const touch = { diagnostics: "none" as const, source: "test" };
@@ -847,6 +846,186 @@ describe("#4532 gap 9 — a skip needs the path's notify queue idle", () => {
 		expect(
 			saves,
 			"a second save went out for bytes already being saved",
+		).toHaveLength(1);
+	});
+	// R7 P6 / shape 31: carried saves fail independently of their content push.
+	it.each(["stream write failed", "unexpected connection failure"])(
+		"owes a carried save after %s and records its failure",
+		async (message) => {
+			const { service, state } = await setup({ serverId: "opengrep" });
+			vi.stubEnv("PI_LENS_TEST_MODE", "0");
+			const touch = { diagnostics: "none" as const, source: "test" };
+			await service.touchFile(FILE, A, touch);
+			resetDegradationLedger();
+			const durableStart = (await durableDegradations()).length;
+			let saves = 0;
+			vi.mocked(state.connection.sendNotification).mockImplementation(
+				async (method: string) => {
+					if (method === "textDocument/didSave" && ++saves === 1)
+						throw new Error(message);
+				},
+			);
+			await service.touchFile(FILE, B, { ...touch, saved: true });
+			await queueDrained(state);
+			expect(
+				getDegradationSummary().map((row) => row.kind),
+				"carried failure left no record",
+			).toContain("lsp-did-save-send-failed");
+			expect((await durableDegradations()).slice(durableStart)).toContain(
+				`${state.serverId}:lsp-did-save-send-failed`,
+			);
+			expect(
+				state.expectedPublicationsBeyondSends?.get(FILE) ?? 0,
+				"failed save must give back its rescan expectation",
+			).toBe(0);
+			await service.touchFile(FILE, B, { ...touch, saved: true });
+			await queueDrained(state);
+			expect(
+				saves,
+				"a carried save that failed still owes the next saved touch",
+			).toBe(2);
+		},
+	);
+
+	// R7 P5: a waiter's own input need not be what its replacement saved.
+	it("saves the bytes skipped by a coalesced saved content push", async () => {
+		const { service, state } = await setup();
+		const touch = { diagnostics: "none" as const, source: "test" };
+		let release!: () => void;
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let opened = false;
+		let saves = 0;
+		vi.mocked(state.connection.sendNotification).mockImplementation(
+			async (method: string) => {
+				if (method === "textDocument/didOpen") {
+					opened = true;
+					await held;
+				}
+				if (method === "textDocument/didSave") saves++;
+			},
+		);
+		const opening = service.openFile(FILE, A);
+		await waitFor(() => opened, Boolean, {
+			timeoutMs: 2_000,
+			yieldControl: tick,
+		});
+		const savedTouch = service.touchFile(FILE, A, { ...touch, saved: true });
+		await waitFor(
+			() => state.notifyChangeQueues.get(FILE)?.pending?.saved === true,
+			Boolean,
+			{ timeoutMs: 2_000, yieldControl: tick },
+		);
+		const replacement = service.openFile(FILE, B);
+		await waitFor(
+			() => state.notifyChangeQueues.get(FILE)?.pending?.coalescedCount ?? 0,
+			(n) => n > 0,
+			{ timeoutMs: 2_000, yieldControl: tick },
+		);
+		release();
+		await Promise.all([opening, savedTouch, replacement]);
+		await queueDrained(state);
+		expect(saves).toBe(1);
+		await service.openFile(FILE, A);
+		await service.touchFile(FILE, A, { ...touch, saved: true });
+		await queueDrained(state);
+		expect(saves, "the replacement saved B, so A still owes its save").toBe(2);
+	});
+
+	// Greptile 4304576861: a late old-client save must not touch new evidence.
+	it("keeps an old client's late save out of its replacement", async () => {
+		const { service, state, client } = await setup();
+		const touch = { diagnostics: "none" as const, source: "test" };
+		await service.touchFile(FILE, A, touch);
+		let release!: () => void;
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let saving = false;
+		vi.mocked(state.connection.sendNotification).mockImplementation(
+			async (method: string) => {
+				if (method === "textDocument/didSave") {
+					saving = true;
+					await held;
+				}
+			},
+		);
+		await service.touchFile(FILE, A, { ...touch, saved: true });
+		await waitFor(() => saving, Boolean, {
+			timeoutMs: 2_000,
+			yieldControl: tick,
+		});
+		vi.spyOn(client, "isAlive").mockReturnValue(false);
+		const replacement = await setup();
+		await service.touchFile(FILE, B, touch);
+		release();
+		await queueDrained(state);
+		await service.openFile(FILE, A);
+		await service.touchFile(FILE, A, { ...touch, saved: true });
+		await queueDrained(replacement.state);
+		expect(
+			vi
+				.mocked(replacement.state.connection.sendNotification)
+				.mock.calls.filter(([method]) => method === "textDocument/didSave"),
+		).toHaveLength(1);
+	});
+
+	// R7: explore coalescing and save completion order instead of one replay.
+	it("keeps save evidence aligned with wire bytes under scheduled pushes", async () => {
+		await fc.assert(
+			fc.asyncProperty(fc.scheduler(), async (scheduler) => {
+				const { service, state, client } = await setup();
+				const touch = { diagnostics: "none" as const, source: "test" };
+				await service.touchFile(FILE, A, touch);
+				let wireContent = A;
+				let savedContent: string | undefined;
+				vi.mocked(state.connection.sendNotification).mockImplementation(
+					async (method: string, params: unknown) => {
+						await scheduler.schedule(Promise.resolve(), method);
+						const p = params as { contentChanges?: Array<{ text: string }> };
+						if (method === "textDocument/didChange")
+							wireContent = p.contentChanges!.at(-1)!.text;
+						if (method === "textDocument/didSave") savedContent = wireContent;
+					},
+				);
+				await scheduler.waitFor(
+					Promise.all([
+						service.touchFile(FILE, A, { ...touch, saved: true }),
+						service.openFile(FILE, B),
+						service.touchFile(FILE, B, { ...touch, saved: true }),
+					]),
+				);
+				await scheduler.waitFor(queueDrained(state));
+				await scheduler.waitFor(service.openFile(FILE, A));
+				await scheduler.waitFor(
+					service.touchFile(FILE, A, { ...touch, saved: true }),
+				);
+				await scheduler.waitFor(queueDrained(state));
+				expect(
+					savedContent,
+					"the final saved touch must reach the wire for A",
+				).toBe(A);
+				expect(
+					client.getSentContent?.(FILE)?.savedHash,
+					"save evidence must name the wire save's bytes",
+				).toBe(hashDiagnosticContent(savedContent!));
+			}),
+			{ seed: 4532, numRuns: 40 },
+		);
+	});
+	// R7 writer census: record replacement carries existing save evidence.
+	it("keeps a landed save across an unsaved push of the same bytes", async () => {
+		const { service, state } = await setup();
+		const touch = { diagnostics: "none" as const, source: "test", saved: true };
+		await service.touchFile(FILE, A, touch);
+		await service.openFile(FILE, A);
+		await service.touchFile(FILE, A, touch);
+		await queueDrained(state);
+		expect(
+			vi
+				.mocked(state.connection.sendNotification)
+				.mock.calls.filter(([method]) => method === "textDocument/didSave"),
 		).toHaveLength(1);
 	});
 });

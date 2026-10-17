@@ -1265,7 +1265,7 @@
 				"SaveMarkOnLanding": {
 					"value": "TRUE",
 					"test": "tests/clients/lsp/touch-debounce-fingerprint.test.ts",
-					"title": "sends the save a failed save's retry did not cover",
+					"title": "saves the bytes skipped by a coalesced saved content push",
 					"also": [
 						{
 							"test": "tests/clients/lsp/touch-debounce-content-gate.test.ts",

@@ -39,6 +39,7 @@ import {
 	handleNotifyChange,
 	handleNotifyOpen,
 	handleNotifySave,
+	sentContentFor,
 	type LSPClientState,
 } from "../../../clients/lsp/client.js";
 import { stopLSP } from "../../../clients/lsp/launch.js";
@@ -459,6 +460,33 @@ describe("a save with no content push (#3405 r1)", () => {
 			textDocument: { uri: TEST_URI },
 		});
 	});
+
+	// R7: an unsuccessful open leaves no landed-content record to mark. A
+	// later explicit save retains its boolean outcome without inventing content.
+	it("does not forge content evidence after an unsuccessful open", async () => {
+		vi.mocked(state.connection.sendNotification).mockRejectedValueOnce(
+			new Error("stream write failed"),
+		);
+		await expect(openUnsaved()).resolves.toBe(false);
+		await expect(handleNotifySave(state, TEST_FILE)).resolves.toBe(true);
+		expect(sentContentFor(state, TEST_FILE)).toBeUndefined();
+	});
+
+	// R7: debt-only duplicate suppression must never consume an explicit save.
+	it.each(["owed-first", "explicit-first"])(
+		"keeps an explicit save when coalescing %s",
+		async (order) => {
+			await openUnsaved();
+			await handleNotifySave(state, TEST_FILE);
+			vi.mocked(state.connection.sendNotification).mockClear();
+			const debt = order === "owed-first";
+			await Promise.all([
+				handleNotifySave(state, TEST_FILE, debt),
+				handleNotifySave(state, TEST_FILE, !debt),
+			]);
+			expect(sentMethods(state)).toEqual(["textDocument/didSave"]);
+		},
+	);
 
 	it("hands its save to an unsent push instead of replacing it", async () => {
 		await openUnsaved();

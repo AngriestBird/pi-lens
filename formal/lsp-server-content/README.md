@@ -65,7 +65,7 @@ equal.
 - `SendsMonotone` (per send): the runner never replaces the server's content
   with *different* content that was read earlier than what it last sent.
 
-## Results
+## Results before the touch-gate model
 
 | Config | Expect | TLC | States | s |
 |---|---|---|---|---|
@@ -334,8 +334,8 @@ New configs, and the two invariants they carry:
 |---|---|---|---|
 | `GateSentIdleSkip` | pass | 1,287,264 | The as-built gate on the revert schedule: the queue is not idle, so the revert is pushed and the server ends on disk's bytes |
 | `MutGateSkipDuringSend` | violated `SkippedContentHeld` | 6,679 | The pre-round-3 rule: the skip reads the record alone, so the send in flight lands over the bytes it certified |
-| `GateSentSavedOpenFile` | pass | 322,214 | The as-built save binding on the mixed-writer schedule: the debounced saved touch still sends its `didSave`, bound to its own content |
-| `MutGateSaveMark` | violated `SaveFollowsSavedTouch` | 301,241 | The pre-round-3 rule: a boolean mark, so a save recorded for other bytes suppresses the one owed and the server holds bytes it never heard a save for |
+| `GateSentSavedOpenFile` | pass | 6,764,992 | The as-built save binding on the mixed-writer schedule: the debounced saved touch still sends its `didSave`, bound to its own content |
+| `MutGateSaveMark` | violated `SaveFollowsSavedTouch` | 565,654 | The pre-round-3 rule: a boolean mark, so a save recorded for other bytes suppresses the one owed and the server holds bytes it never heard a save for |
 
 `SkippedContentHeld` is harm-exact: a skip of bytes disk has already moved past
 owes nothing, and a decision taken AFTER the skip (an `Enqueue`, an
@@ -358,46 +358,49 @@ Two new model findings, neither caused by this round's code:
   cap. Both bounds are content/mark based and prune only schedules in which no
   save is in play.
 
-Verdict table for all 28 `ServerContent.tla` configs (`-workers 1`, `-Xmx6g`,
-one `-metadir` per run, `timeout 1200`); expect and actual agree in every row.
-The round-2 counts moved because `RunFinish` now waits for `Record`, a schedule
-the model previously admitted and the code never runs. Round 4 changed two
-counts (`MutGateSaveMark`, `GateSentSavedOpenFile`): the queue gained an entry
-kind and a save now rides it, so more schedules reach the same verdicts. Round 6
-moved every count that reaches a save: the mark is no longer written before the
-send, so the intermediate state "mark set, save still queued" is gone and the
-same schedules are explored over fewer states. No verdict moved.
+Verdict table for all 30 `ServerContent.tla` configs (round 7, TLC 1.7.4,
+`-workers 1`, `-Xmx6g`, pinned jar SHA-256
+`936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`,
+one fresh `-metadir` per run). Each verdict agrees with its config header.
+
+Round 6's published counts were incorrect. Re-running its unchanged model
+with one worker reproduces 3,130,444 states for `GateSentSavedOpenFile` and
+470,730 for `MutGateSaveMark`. Round 7 changes the save rules: a content run's
+save can fail independently, and a touch waiter never writes save evidence.
+The following counts come from the updated model.
 
 | Config | Expect | Actual | Distinct states |
 |---|---|---|---|
-| `MutGateSaveNoRetry` | violated `SaveFollowsSavedTouch` | violated | 16 |
-| `GateSaveRetry` | pass | pass | 22 |
-| `GateWindowReopen` | violated `ServerMatchesDisk` | violated | 36 |
-| `MutLossyFp` | violated `ServerMatchesDisk` | violated | 52 |
-| `GateSentReopen` | pass | pass | 60 |
-| `SingleWrite` | pass | pass | 951 |
+| `ArtifactCascadeResizedAnyLanding` | violated `ServerMatchesDisk` | violated | 101,248 |
+| `CascadeEqualLength` | pass | pass | 313,147 |
+| `CascadeResized` | pass | pass | 352,201 |
+| `CascadeSendOrder` | pass | pass | 326,699 |
 | `DebounceFullFp` | pass | pass | 1,560 |
 | `DebounceLossyFp` | pass | pass | 1,560 |
-| `MutGateSkipDuringSend` | violated `SkippedContentHeld` | violated | 6,679 |
-| `MutGateLossyFp` | violated `ServerMatchesDisk` | violated | 9,844 |
+| `FixAllActors` | pass | pass | 968,072 |
+| `FixCascadeEqualLength` | pass | pass | 403,828 |
+| `FixTwoWritesEqualLength` | pass | pass | 2,249,292 |
+| `GateSaveRetry` | pass | pass | 22 |
+| `GateSentIdleSkip` | pass | pass | 1,287,264 |
 | `GateSentLossyFp` | pass | pass | 26,000 |
+| `GateSentOneWrite` | pass | pass | 596,920 |
+| `GateSentReopen` | pass | pass | 60 |
+| `GateSentSavedOpenFile` | pass | pass | 6,764,992 |
+| `GateWindowReopen` | violated `ServerMatchesDisk` | violated | 36 |
+| `GateWindowRepush` | pass | pass | 460,750 |
 | `MutCascadeResizedMtimeKey` | violated `ServerMatchesDisk` | violated | 94,362 |
 | `MutFixNoCoalesce` | violated `ServerMatchesDisk` | violated | 95,749 |
-| `ArtifactCascadeResizedAnyLanding` | violated `ServerMatchesDisk` | violated | 101,248 |
 | `MutFixNoDrop` | violated `ServerMatchesDisk` | violated | 178,724 |
-| `CascadeEqualLength` | pass | pass | 311,792 |
-| `CascadeSendOrder` | pass | pass | 311,785 |
-| `CascadeResized` | pass | pass | 316,764 |
-| `FixCascadeEqualLength` | pass | pass | 332,429 |
-| `GateWindowRepush` | pass | pass | 274,596 |
-| `MutGateSaveMark` | violated `SaveFollowsSavedTouch` | violated | 301,241 |
-| `GateSentOneWrite` | pass | pass | 315,756 |
-| `FixAllActors` | pass | pass | 358,060 |
-| `GateSentIdleSkip` | pass | pass | 359,466 |
-| `TwoWritesEqualLength` | pass | pass | 367,725 |
-| `FixTwoWritesEqualLength` | pass | pass | 366,734 |
-| `TwoWritesResized` | pass | pass | 380,116 |
-| `GateSentSavedOpenFile` | pass | pass | 322,214 |
+| `MutGateLossyFp` | violated `ServerMatchesDisk` | violated | 9,844 |
+| `MutGateSaveMark` | violated `SaveFollowsSavedTouch` | violated | 565,654 |
+| `MutGateSaveNoRetry` | violated `SaveFollowsSavedTouch` | violated | 16 |
+| `MutGateSkipDuringSend` | violated `SkippedContentHeld` | violated | 6,679 |
+| `MutLossyFp` | violated `ServerMatchesDisk` | violated | 52 |
+| `SingleWrite` | pass | pass | 951 |
+| `TwoWritesEqualLength` | pass | pass | 1,972,476 |
+| `TwoWritesResized` | pass | pass | 2,242,972 |
+| `GateCarriedSaveEvidence` | pass | pass | 2,284 |
+| `MutCarriedSaveEvidence` | violated `SaveEvidenceLanded` | violated | 21 |
 
 ### Round 4: a save-only entry is not a content send
 
@@ -449,42 +452,37 @@ of F3: with the mark standing and no retry, quiescence leaves `serverSaved`
 behind the bytes the server holds; with the retry, it cannot.
 
 
-### Round 6: the mark names what the save LANDED for
+### Round 7: save evidence belongs to the client's landed record
 
-Round 5 still took the mark before the send. That names the content the SKIP
-read, and the send covers whatever document the client holds when its queue
-entry runs: a content push queued behind the failed save is coalesced with the
-retry (`enqueueDocumentNotify` keeps its run and carries `saved`), so the retry
-can save B while the mark says A. The next saved touch of A then owes nothing
-and a save-triggered server keeps answering from a document it was never told is
-saved (`MutGateSaveMark` is that class).
+Round 6 still had a provisional service mark and a content-waiter writer.
+The latter marked a touch's input even when the replacement run saved other
+bytes, or when its content landed but its save failed. Those writers no longer
+exist in production.
 
-One rule now fills every cell: **the mark names the content a `didSave` landed
-for, and only the landing writes it.**
+The client writes save evidence in the save notification's continuation,
+using the content record captured before the send. A later content record
+carries the previous save identity; a close drops both. A replacement client
+owns separate records. The service keeps recency only.
 
-- `Check` writes no mark. The save it queues marks nothing.
-- `RunFinish`'s save-only branch is the writer: `savedHash` becomes the content
-  the server holds at that instant (`server`), which is what the `didSave`
-  covered.
-- `SaveFail` has nothing to withdraw: nothing was marked. `SaveRetryOnFailure`
-  still re-queues the one save.
+The model represents that client-owned evidence as `recent.savedHash`:
 
-`SaveMarkOnLanding` is the as-built switch (TRUE). FALSE is the code before
-round 6: `Check` takes the mark from the skip's content, `SaveFail` withdraws it
-and the one retry re-marks the same bytes (`touchedSaved`) before sending —
-which is where a retry that lands for other bytes loses the save.
+- `Check` queues a save without publishing evidence. Duplicate saved touches
+  may queue while the first save runs. Production checks landed evidence at
+  execution to avoid sending the duplicate.
+- Both `RunFinish` branches record successful saves and their covered bytes.
+  A carried save can fail after its content landed, consuming `failsLeft`
+  without advancing either save evidence or `serverSaved`.
+- `Finish` updates touch recency while preserving the client's save evidence.
+- `SaveFail` leaves evidence unchanged and retains the bounded recovery model.
+- `CloseDoc` retires the document's save evidence with its content record.
 
-No mutant config carries FALSE. The model cannot express the harm: its runner
-always takes a pending save-only entry before any new content entry
-(`Enqueue` is blocked while a pending entry waits on an idle runner), so a
-save-only send in this model always lands for the content its skip named. The
-one writer that can interleave — a content push replacing a pending save-only
-entry — is `OpenFilePush`, which the model keeps at "queue idle" because an
-unbounded version multiplied the pass config's state space from 2.7M to 39M
-distinct states (round 3's note). The rule is therefore pinned where the code
-runs: `formal/switch-pins.json` pins `SaveMarkOnLanding` to the round-6 wire
-tests, and a pre-send mark reds `sends the save a failed save's retry did not
-cover` (mutation R6-2).
+`SaveMarkOnLanding = TRUE` is the as-built rule. FALSE retains the old
+pre-send and waiter-input writers. `GateCarriedSaveEvidence` checks
+`SaveEvidenceLanded`: every nonempty mark names the last successful save.
+It passes in 2,284 distinct states. The same assertion on the pre-round-7
+model fails in 988 states. `MutCarriedSaveEvidence` exercises FALSE and
+fails in 21 states. The new wire tests also cover replacement clients, which
+this single-client model does not represent.
 
 
 ## HeadMoveResync: held documents across a HEAD move (#4493)

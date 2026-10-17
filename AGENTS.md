@@ -1010,8 +1010,9 @@ file-scoped worklist and receives no project-wide scanner output.
   `GateWindowReopen` is why). Its key is (path, server): the client scope never
   re-pushes bytes a server holds. The debounce never drops a save: a saved touch
   whose push it skipped sends the save alone (`notify.save`), and the save mark
-  names the content a `didSave` LANDED for, written by that landing and never
-  before the send, so a failed save is withdrawn with one bounded retry
+  names the content a `didSave` LANDED for, owned by the client's document
+  record and written only by the send continuation. A failed carried save
+  leaves the save owed; a failed standalone save gets one bounded retry
   (`GateSaveRetry`, `MutGateSaveNoRetry`) and a retry that lands for other bytes
   cannot suppress the save the next saved touch owes.
 - `touchFile` freezes content-bound auxiliary coverage at merge time. A later

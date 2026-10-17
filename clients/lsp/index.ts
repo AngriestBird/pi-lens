@@ -1289,10 +1289,6 @@ export class LSPService {
 	 * touch re-push the bytes the post-write sync or the MCP analysis had just
 	 * pushed as "primary", clearing the diagnostics of every edit.
 	 *
-	 * #3405: `savedHash` records the content whose save that push carried. A
-	 * save rides on its bytes, so an entry marked for other content does not
-	 * cover a later saved touch of these (see `saveDebouncedPush`).
-	 *
 	 * #4532 gap 9: an entry is EVIDENCE the gate keeps using, whatever its age
 	 * — the verdict reads the client's record, not the clock. Trimming one
 	 * therefore costs a redundant didChange (no entry means the gate pushes),
@@ -1303,14 +1299,6 @@ export class LSPService {
 		{
 			touchedAt: number;
 			client: WeakRef<LSPClientInfo>;
-			/**
-			 * #3405/#4532 gap 9 F2: the content hash whose `didSave` went out for
-			 * this server, `undefined` when the landed push carried none. Bound to
-			 * the content it was set for, because another writer advances the
-			 * client's record without a touch (`openFile`, the resync route), so
-			 * "a save went out at some point" is not evidence these bytes had one.
-			 */
-			savedHash?: string;
 		}
 	>();
 	/**
@@ -1662,7 +1650,7 @@ export class LSPService {
 	 *   nothing, so it is not one of these: the record is already the final
 	 *   state, and counting the save would re-push identical bytes and clear the
 	 *   cached diagnostics;
-	 * - the save mark (`recentTouches.savedHash`), read by `saveDebouncedPush`
+	 * - the save mark (`getSentContent().savedHash`), read by `saveDebouncedPush`
 	 *   rather than here: a skip sends no content, so it owes the save its own
 	 *   content identity requires (F2).
 	 *
@@ -1726,21 +1714,9 @@ export class LSPService {
 	 * notification has no answer, and the path's queue may hold a running push.
 	 * Returns the server id when a save was queued.
 	 *
-	 * #4532 gap 9 round 5 F3: `retryOnFailure` bounds the recovery, not the
-	 * caller. A notification that resolves `false` withdraws the mark and issues
-	 * ONE retry, because nothing else would: the saved touch that arrived while
-	 * this send was on the wire skipped (round 4) and took no mark of its own, so
-	 * without the retry a failed standalone save leaves bytes the server never
-	 * heard a save for, and a save-triggered server answers nothing.
-	 *
-	 * #4532 gap 9 round 6 F2: the mark is PROVISIONAL until a save lands, and the
-	 * landing is what binds it. Taken before the send, it names the content the
-	 * skip read; the send itself covers whatever document the client holds when
-	 * its queue entry runs, which a content push queued behind the failure can
-	 * advance (the retry then saves those newer bytes). So the landing re-binds
-	 * the mark to the content the client records at that moment: a mark naming
-	 * bytes no `didSave` covered would suppress the save the next saved touch
-	 * owes, which is exactly the harm #3405 exists to prevent.
+	 * #4532 gap 9 round 7: only the client's send continuation records a landed
+	 * save. Pending saves carry no evidence; queued duplicates check that same
+	 * record when they run. A failed standalone save gets one bounded retry.
 	 */
 	private saveDebouncedPush(
 		filePath: string,
@@ -1756,20 +1732,15 @@ export class LSPService {
 		// F2: the mark names the content its save went out for. A save the server
 		// already received for THESE bytes owes none; a save it received for
 		// other bytes does not count, whichever writer advanced the record.
-		if (!previous || previous.savedHash === sentContentHash) return undefined;
+		if (
+			!previous ||
+			entry.client.getSentContent?.(filePath)?.savedHash === sentContentHash
+		)
+			return undefined;
 		if (entry.client.getSaveOptions?.() === undefined) return undefined;
 		const save = entry.client.notify.save;
 		if (!save) return undefined;
-		const key = this.recentTouchKey(filePath, entry.info.id);
-		// Provisional, so a second saved touch of these bytes owes none while this
-		// one is on the wire. The landing below is what makes it evidence.
-		previous.savedHash = sentContentHash;
-		const withdraw = () => {
-			// `false` is "no save left this process for these bytes": the write
-			// failed, the client is gone, or a later entry superseded this one.
-			// None of those delivered a save, so the mark cannot stand.
-			const live = this.recentTouches.get(key);
-			if (live?.savedHash === sentContentHash) delete live.savedHash;
+		const recover = () => {
 			if (retryOnFailure) {
 				this.saveDebouncedPush(filePath, entry, true, sentContentHash, false);
 				return;
@@ -1783,20 +1754,9 @@ export class LSPService {
 				metadata: { filePath },
 			});
 		};
-		void save.call(entry.client.notify, filePath).then((sent) => {
-			if (sent === false) {
-				withdraw();
-				return;
-			}
-			// The landing binds the mark: whatever content the client records now is
-			// what this save covered. A merge into another entry's run lands for that
-			// entry's bytes, never for the ones this caller read.
-			const covered = entry.client.getSentContent?.(filePath)?.hash;
-			if (covered === undefined) return;
-			// Re-read: `markTouched` replaces the entry object (delete + set).
-			const live = this.recentTouches.get(key);
-			if (live) live.savedHash = covered;
-		}, withdraw);
+		void save.call(entry.client.notify, filePath, true).then((sent) => {
+			if (sent === false) recover();
+		}, recover);
 		return entry.info.id;
 	}
 
@@ -1806,10 +1766,8 @@ export class LSPService {
 
 	private markTouched(
 		filePath: string,
-		sentContentHash: string,
 		serverId: string,
 		client: LSPClientInfo,
-		saved: boolean,
 	): void {
 		const key = this.recentTouchKey(filePath, serverId);
 		// Re-inserted, so Map order is recency order and the trim below is
@@ -1819,7 +1777,6 @@ export class LSPService {
 		this.recentTouches.set(key, {
 			touchedAt: Date.now(),
 			client: new WeakRef(client),
-			...(saved && { savedHash: sentContentHash }),
 		});
 		// F4: trim by COUNT, oldest first. Age decides nothing about whether an
 		// entry is useful now, and a trimmed entry costs exactly one redundant
@@ -4707,13 +4664,7 @@ export class LSPService {
 							// re-pushes it instead of laundering the failure into a later
 							// touch that looks fully delivered (which the silent-clean gates
 							// would then read as a confirmed clean).
-							this.markTouched(
-								filePath,
-								contentHash,
-								entry.info.id,
-								entry.client,
-								options.saved === true,
-							);
+							this.markTouched(filePath, entry.info.id, entry.client);
 						} else if (wrote === false) {
 							// #3481: the server does not hold `content` (a later read, a
 							// closing/closed path, or a dead client, #3543), so no debounce

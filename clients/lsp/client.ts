@@ -371,7 +371,8 @@ export interface LSPClientInfo {
 		 * nothing left for this entry. Optional so client doubles need not
 		 * implement it.
 		 */
-		save?(filePath: string): Promise<boolean>;
+		/** The touch gate sets onlyIfOwed to reuse landed save evidence. */
+		save?(filePath: string, onlyIfOwed?: boolean): Promise<boolean>;
 		/**
 		 * #1668: queue a `workspace/didChangeWatchedFiles` entry for a disk
 		 * change this client did not learn about through didOpen/didChange —
@@ -587,6 +588,7 @@ export interface LSPClientInfo {
 	getSentContent?(filePath: string):
 		| {
 				hash: string;
+				savedHash?: string | undefined;
 				changedAtMs?: number | undefined;
 				openedAtMs?: number | undefined;
 				openedHash?: string | undefined;
@@ -680,7 +682,12 @@ interface PendingDocumentNotify {
 	 */
 	saveOnly: boolean;
 	/** Resolves `false` when it sent nothing for the path (#3477). */
-	run: (coalescedCount: number, saved: boolean) => Promise<boolean | void>;
+	onlyIfOwed?: boolean;
+	run: (
+		coalescedCount: number,
+		saved: boolean,
+		onlyIfOwed?: boolean,
+	) => Promise<boolean | void>;
 	waiters: Array<{
 		/**
 		 * `false`: this caller's content was not sent, because a later read
@@ -1127,6 +1134,8 @@ export interface LSPClientState {
 		{
 			version: number;
 			hash: string;
+			/** Last successful didSave, owned by this document lifetime. */
+			savedHash?: string | undefined;
 			/** #3601: `Date.now()` when a send last CHANGED this document's bytes
 			 *  on the server (a re-send of the same bytes keeps it), so a caller
 			 *  can tell whether the server's copy changed after a request it made. */
@@ -2323,6 +2332,7 @@ function recordSentContent(
 	state.documentContentHashes.set(normalizedPath, {
 		version,
 		hash,
+		savedHash: previous?.savedHash,
 		changedAtMs: previous?.hash === hash ? previous.changedAtMs : Date.now(),
 		openedAtMs: previous?.openedAtMs ?? Date.now(),
 		openedHash: previous === undefined ? hash : previous.openedHash,
@@ -4461,11 +4471,15 @@ async function sendDidSave(
 	state: LSPClientState,
 	normalizedPath: string,
 	uri: string,
-	content: string,
-): Promise<void> {
+	content?: string,
+	onlyIfOwed = false,
+): Promise<boolean> {
 	const save = state.saveOptions;
-	if (!save) return;
-	if (!isClientAlive(state)) return;
+	if (!save || !isClientAlive(state)) return false;
+	// A standalone caller can follow an unsuccessful open, which has no record.
+	const covered = state.documentContentHashes.get(normalizedPath);
+	// R7: a queued duplicate is satisfied only by an already landed save.
+	if (onlyIfOwed && covered && covered.savedHash === covered.hash) return true;
 	expectSaveRescan(state, normalizedPath);
 	// #3405 r2 (M3406-1): `text` is a SECOND full copy of bytes the server was
 	// just handed, so it is the one payload here that can be file-sized. The
@@ -4482,9 +4496,10 @@ async function sendDidSave(
 	// and pi-lens only ever sends this after a landed didOpen/didChange for the
 	// same document, so the server has these bytes either way. Skipping the save
 	// outright would instead drop the diagnose trigger this PR exists to restore.
-	const limit = save.includeText
-		? exceedsLspSyncLimits(content)
-		: { tooLarge: false, reason: "" };
+	const limit =
+		save.includeText && content !== undefined
+			? exceedsLspSyncLimits(content)
+			: { tooLarge: false, reason: "" };
 	if (limit.tooLarge) {
 		recordDegradationOnce({
 			kind: "lsp-did-save-text-omitted",
@@ -4492,10 +4507,30 @@ async function sendDidSave(
 			reason: limit.reason,
 		});
 	}
-	await safeSendNotification(state.connection, "textDocument/didSave", {
-		textDocument: { uri },
-		...(save.includeText && !limit.tooLarge ? { text: content } : {}),
-	});
+	let sent = false;
+	try {
+		sent = await safeSendNotification(
+			state.connection,
+			"textDocument/didSave",
+			{
+				textDocument: { uri },
+				...(save.includeText && content !== undefined && !limit.tooLarge
+					? { text: content }
+					: {}),
+			},
+		);
+	} catch {
+		// Non-stream failures use the same give-back and bounded record below.
+	}
+	if (!sent) {
+		giveBackSaveRescan(state, normalizedPath);
+		recordDidSaveSendFailed(state, normalizedPath);
+	} else if (covered) {
+		// The sole evidence writer: this save's document, never a waiter's input
+		// or the record that happens to exist after its queue callback settles.
+		covered.savedHash = covered.hash;
+	}
+	return sent;
 }
 
 /**
@@ -4506,29 +4541,13 @@ async function sendDidSave(
 async function sendDidSaveForHeldDocument(
 	state: LSPClientState,
 	normalizedPath: string,
+	onlyIfOwed = false,
 ): Promise<boolean> {
 	if (!state.saveOptions || !isClientAlive(state)) return false;
 	if (!state.openDocuments.has(normalizedPath)) return false;
 	const uri = state.openDocumentUris?.get(normalizedPath);
 	if (uri === undefined) return false;
-	expectSaveRescan(state, normalizedPath);
-	try {
-		const sent = await safeSendNotification(
-			state.connection,
-			"textDocument/didSave",
-			{ textDocument: { uri } },
-		);
-		if (!sent) {
-			giveBackSaveRescan(state, normalizedPath);
-			recordDidSaveSendFailed(state, normalizedPath);
-		}
-		return sent;
-	} catch {
-		// A failed save notify must not stop the queue runner.
-		giveBackSaveRescan(state, normalizedPath);
-		recordDidSaveSendFailed(state, normalizedPath);
-		return false;
-	}
+	return sendDidSave(state, normalizedPath, uri, undefined, onlyIfOwed);
 }
 
 /**
@@ -4750,7 +4769,11 @@ async function handleNotifyOpenOnce(
 function enqueueDocumentNotify(
 	state: LSPClientState,
 	normalizedPath: string,
-	run: (coalescedCount: number, saved: boolean) => Promise<boolean | void>,
+	run: (
+		coalescedCount: number,
+		saved: boolean,
+		onlyIfOwed?: boolean,
+	) => Promise<boolean | void>,
 	saved = false,
 	readStamp?: number,
 	close = false,
@@ -4761,6 +4784,7 @@ function enqueueDocumentNotify(
 	 * cannot change.
 	 */
 	saveOnly = false,
+	onlyIfOwed = false,
 ): Promise<boolean> {
 	let queue = state.notifyChangeQueues.get(normalizedPath);
 	if (!queue) {
@@ -4810,6 +4834,9 @@ function enqueueDocumentNotify(
 			coalescedCount:
 				(previous?.coalescedCount ?? 0) + (previous && !saveOnly ? 1 : 0),
 			saved: saved || previous?.saved === true,
+			// An explicit save in either entry keeps its notification request.
+			onlyIfOwed:
+				onlyIfOwed && (previous === undefined || previous.onlyIfOwed === true),
 			// An unstamped replacement cannot say how old its bytes are; keeping the
 			// pending stamp keeps an older read arriving next out (#3481 round 1).
 			// A close carries no content, so it never inherits a stamp: the
@@ -4852,7 +4879,11 @@ function enqueueDocumentNotify(
 					if (next.readStamp !== undefined)
 						state.sentReadStamps.set(normalizedPath, next.readStamp);
 					try {
-						const sent = await next.run(next.coalescedCount, next.saved);
+						const sent = await next.run(
+							next.coalescedCount,
+							next.saved,
+							next.onlyIfOwed,
+						);
 						for (const waiter of next.waiters)
 							waiter.resolve(sent !== false && !waiter.stale);
 					} catch (error) {
@@ -4892,16 +4923,19 @@ function cancelDocumentNotifyQueues(state: LSPClientState): void {
 export function handleNotifySave(
 	state: LSPClientState,
 	filePath: string,
+	onlyIfOwed = false,
 ): Promise<boolean> {
 	const normalizedPath = normalizeMapKey(filePath);
 	return enqueueDocumentNotify(
 		state,
 		normalizedPath,
-		() => sendDidSaveForHeldDocument(state, normalizedPath),
+		(_count, _saved, debtOnly) =>
+			sendDidSaveForHeldDocument(state, normalizedPath, debtOnly),
 		true,
 		undefined,
 		false,
 		true,
+		onlyIfOwed,
 	);
 }
 
@@ -6058,6 +6092,7 @@ export function sentContentFor(
 ):
 	| {
 			hash: string;
+			savedHash?: string | undefined;
 			changedAtMs?: number | undefined;
 			openedAtMs?: number | undefined;
 			openedHash?: string | undefined;
@@ -6068,6 +6103,7 @@ export function sentContentFor(
 	return (
 		sent && {
 			hash: sent.hash,
+			savedHash: sent.savedHash,
 			changedAtMs: sent.changedAtMs,
 			openedAtMs: sent.openedAtMs,
 			openedHash: sent.openedHash,
@@ -6582,8 +6618,8 @@ export async function createLSPClient(options: {
 			async change(filePath, content) {
 				return handleNotifyChange(state, filePath, content);
 			},
-			save(filePath) {
-				return handleNotifySave(state, filePath);
+			save(filePath, onlyIfOwed) {
+				return handleNotifySave(state, filePath, onlyIfOwed);
 			},
 			watchedFileChange(filePath, type) {
 				handleNotifyExternalChange(state, filePath, type);
