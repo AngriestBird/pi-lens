@@ -1662,8 +1662,8 @@ afterAll(async () => {
 		} finally {
 			tmpHygieneAfterAllProbeForTests = undefined;
 			removeTmpHygieneOwnerMarker();
-			// #4591: the pinned fixture HOMEs are this worker's scratch, beside its
-			// own home, so they go when it does.
+			// #4591: the pinned fixture HOME directories are this worker's scratch,
+			// beside its own home, so they go when it does.
 			removeTempDirSync(fixtureHomeRoot());
 			removeTempDirSync(TMP_HYGIENE_WORKER_HOME);
 		}
