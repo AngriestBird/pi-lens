@@ -347,7 +347,7 @@ describe("#2442 no new hand-rolled evict-oldest idiom outside bounded-cache.ts",
 		expect(flagged.length).toBeGreaterThanOrEqual(1);
 	});
 
-	it("detects all four spellings, not just `.keys().next().value`", () => {
+	it("detects all four earlier spellings, not just `.keys().next().value`", () => {
 		// Mutation guard on the DETECTOR itself (#2442 review F5): the first
 		// draft matched one spelling and silently missed the other two. Each
 		// fixture below is a real shape found in this tree.
@@ -526,7 +526,7 @@ describe("#2442 no new hand-rolled evict-oldest idiom outside bounded-cache.ts",
 	// on the exact defect it exists to catch. `.next().value` on ONE line is
 	// spelling 1; splitting it across two statements is what hid it.
 
-	it("detects the assigned `.next()` spelling the pre-#4503 drift cap used (#4570)", () => {
+	it("detects the assigned `.next()` spelling the pre-#4503 drift cap used, #4570", () => {
 		expect(
 			findEvictionLines(
 				[
@@ -559,7 +559,7 @@ describe("#2442 no new hand-rolled evict-oldest idiom outside bounded-cache.ts",
 	// Shape-69 detector plants (#4570): an alias, an indirect call, and a value
 	// reached through another binding. Each is a spelling nobody wrote the
 	// matcher against, and each must flag through the real detector.
-	it("assigned spelling flags a value reached through another binding (shape 69 plant)", () => {
+	it("flags a value reached through another binding, the #4570 shape-69 plant", () => {
 		expect(
 			findEvictionLines(
 				[
@@ -574,7 +574,7 @@ describe("#2442 no new hand-rolled evict-oldest idiom outside bounded-cache.ts",
 		).toEqual([2]);
 	});
 
-	it("assigned spelling flags an aliased container and an indirectly called next() (shape 69 plants)", () => {
+	it("flags an aliased container and an indirectly called next(), the #4570 shape-69 plants", () => {
 		// Alias: the iterator is taken off a local binding, not the field.
 		expect(
 			findEvictionLines(
@@ -604,7 +604,7 @@ describe("#2442 no new hand-rolled evict-oldest idiom outside bounded-cache.ts",
 		).toEqual([3]);
 	});
 
-	it("assigned spelling does NOT flag a peek that never deletes (clients/latency-logger.ts getCurrentPhase)", () => {
+	it("does NOT flag a peek that never deletes, the getCurrentPhase case", () => {
 		// The real non-member: `getCurrentPhase` reads the oldest live bracket to
 		// answer "which phase is open" — no cap loop, no delete.
 		expect(
