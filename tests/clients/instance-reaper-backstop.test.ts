@@ -664,6 +664,10 @@ describe("#1864 review F2: a grace-spared candidate is re-examined", () => {
 
 		const outcome = await sweepUntrackedOrphans({
 			...FAST,
+			// The direct sweep must NOT bypass the cooldown, or the retry's own
+			// `force` would be indistinguishable from the caller's and the
+			// throttle assertion below would guard nothing (#4488 review).
+			force: false,
 			graceRetryDelayMs: 5,
 			// #4488: own the follow-up instead of racing its wall-clock timer.
 			// Production hands its composed retry options to this scheduler; the
@@ -693,6 +697,9 @@ describe("#1864 review F2: a grace-spared candidate is re-examined", () => {
 
 		expect(retryOutcome).toBe("clean");
 		expect(completions).toBe(2);
+		// The retry carries the one-retry budget: re-running it must not arm a
+		// third sweep.
+		expect(scheduledRetries).toBe(1);
 		expect(h.state.scannerPids).toHaveLength(2);
 
 		expect(backstopMetadataForSweep(directSweepStart).tooFresh).toBe(1);
