@@ -137,3 +137,7 @@ export function logWordIndex(entry: WordIndexLogEntry): void {
 		cwd: normalizeFilePath(entry.cwd),
 	});
 }
+
+export function getWordIndexLogPath(): string {
+	return WORD_INDEX_LOG_FILE;
+}

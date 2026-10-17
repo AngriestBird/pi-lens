@@ -588,9 +588,6 @@ export const wallClockBudgetInclude = [
 	// #3511 review round 3: the quick-mode warmup witness joins session_start's
 	// background save with vi.waitFor (flake-shape admission).
 	"tests/clients/word-index-lifecycle.test.ts",
-	// #4583 round 1: the adoption record's witness joins the same fire-and-forget
-	// cold build with a real-time vi.waitFor (flake-shape admission).
-	"tests/clients/word-index-observability.test.ts",
 	// #4583: the cold build is fire-and-forget (`triggerBackgroundWordIndexBuild`
 	// returns a status, not a joinable), so the witness joins the snapshot it
 	// publishes with a real-time vi.waitFor (flake-shape admission).

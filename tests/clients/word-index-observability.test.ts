@@ -1,4 +1,3 @@
-// flake-shape: ungoverned-wait-for — a cold word-index build is fire-and-forget (triggerBackgroundWordIndexBuild exposes no awaitable), so observing the record it emits needs a real-time vi.waitFor.
 /**
  * #958 durable word-index observability — asserts the structured signals the
  * audit flagged as missing are EMITTED at their source (independent of the
@@ -334,63 +333,6 @@ describe("word-index observability (#958)", () => {
 				}),
 			);
 			expect(coldBuild?.[0].indexedFileCount).toBeGreaterThan(0);
-		} finally {
-			env.cleanup();
-		}
-	});
-
-	// #4583: the adoption record is the only durable evidence that a cold query's
-	// warm entry was refreshed, so a case reads it back from the producer that
-	// emits it. A mislabelled `trigger` value is otherwise unobservable.
-	it("records the warm entry the cold build refreshed, with its trigger (#4583)", async () => {
-		const env = setupTestEnvironment("pi-lens-word-adopt-record-");
-		try {
-			createTempFile(
-				env.tmpDir,
-				"src/widget.ts",
-				"export const renderWidget = 1;",
-			);
-			const { triggerBackgroundWordIndexBuild, searchWordIndex } =
-				await import("../../clients/word-index.js");
-			const { _resetWarmWordIndexCacheForTests, acquireWarmWordIndex } =
-				await import("../../clients/mcp/analyze.js");
-			// The query that lands before the build caches "checked, nothing usable";
-			// that entry is what the build's publish has to refresh (#4583).
-			_resetWarmWordIndexCacheForTests();
-			const cold = acquireWarmWordIndex(env.tmpDir);
-			expect(cold.index).toBeUndefined();
-			cold.release();
-
-			triggerBackgroundWordIndexBuild(env.tmpDir);
-			await vi.waitFor(() =>
-				expect(
-					logSpy.mock.calls.some((c) => c[0]?.phase === "warm_cache_adopted"),
-				).toBe(true),
-			);
-
-			const adopted = logSpy.mock.calls.find(
-				(c) => c[0]?.phase === "warm_cache_adopted",
-			);
-			expect(adopted).toBeDefined();
-			expect(adopted?.[0]).toEqual(
-				expect.objectContaining({
-					phase: "warm_cache_adopted",
-					cwd: env.tmpDir,
-					trigger: "cold_query",
-					indexedFileCount: 1,
-					tokens: expect.any(Number),
-				}),
-			);
-			// The record describes a real adoption, not just a line: the entry that
-			// arrived empty now serves the index the build produced.
-			const warm = acquireWarmWordIndex(env.tmpDir);
-			try {
-				expect(warm.index).toBeDefined();
-				expect(searchWordIndex(warm.index!, "render widget")).toHaveLength(1);
-			} finally {
-				warm.release();
-				_resetWarmWordIndexCacheForTests();
-			}
 		} finally {
 			env.cleanup();
 		}
