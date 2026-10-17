@@ -142,10 +142,10 @@
  * with this module is the one number both caps retire against,
  * `DEPENDENCY_DRIFT_MAX_DELIVERIES`, rather than inventing a second one.
  */
-import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as nodePath from "node:path";
 import { BoundedLruCache } from "./bounded-cache.js";
+import { hashContentBytes } from "./content-stamp.js";
 import { bounded } from "./deadline-utils.js";
 import { recordDegradationOnce } from "./degradation-ledger.js";
 import { HOOK_WALL_BUDGET_MS } from "./hook-budgets.js";
@@ -899,7 +899,7 @@ async function detectSelfDrift(args: {
 	if (content === undefined)
 		return { verdict: "unverifiable", unverifiableReason: "hash-unavailable" };
 	args.budget.bytesLeft -= content.byteLength;
-	const hash = createHash("sha256").update(content).digest("hex");
+	const hash = hashContentBytes(content);
 	return { verdict: hash === args.recordedHash ? "unchanged" : "drift" };
 }
 
