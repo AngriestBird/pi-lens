@@ -23,6 +23,7 @@ import {
 // before every test file's `vi.mock`, so whatever it imports is cached before
 // the mock registers (#3703 round 1: 56 files red).
 import { _settleRegistryMutationsForTests } from "../../clients/instance-registry-tail.js";
+import { PROJECT_ROOT_MARKERS } from "../../clients/project-root-markers.js";
 import {
 	SWEEP_ANY_AGE,
 	sweepScratchDirs,
@@ -83,6 +84,30 @@ delete process.env.PI_LENS_STARTUP_MODE;
 // owner observes the same namespace as production. Workers report additions;
 // the serialized owner removes entries after its assertion.
 const tmpHygieneRealTmp = os.tmpdir();
+
+/** Markers the tmp root itself carries when a stray ancestor root is in place
+ *  (#4560). Pure, so the rule is executable on a fixture directory without a
+ *  second TMPDIR: the module-load refusal below is this function over the real
+ *  tmp root. */
+export function strayTmpRootMarkers(
+	dir: string,
+	entries: readonly string[] = readTmpDirEntries(dir),
+): string[] {
+	return PROJECT_ROOT_MARKERS.filter((marker) => entries.includes(marker));
+}
+
+// #4560, recurrence #4546 / #4559: a project-root marker at the tmp root (a
+// stray `/tmp/.git` on the dev host) captured every bare fixture below it, so
+// `findNearestProjectRoot` returned the tmp root and a cell's own snapshot was
+// never read. `setupTestEnvironment` now plants its own marker, but a host in
+// this state still hides which cells would fail the walk, so the run refuses
+// loudly at suite start instead of letting a host marker decide a verdict.
+const strayTmpRoot = strayTmpRootMarkers(tmpHygieneRealTmp);
+if (strayTmpRoot.length > 0) {
+	const message = `[tmp-hygiene] ${tmpHygieneRealTmp} holds a project-root marker (${strayTmpRoot.join(", ")}); every bare temp fixture would resolve its project root to it (#4546, #4559, #4560). Remove it before running the suite.`;
+	process.stderr.write(`${message}\n`);
+	throw new Error(message);
+}
 const tmpHygieneHome = process.env.PI_LENS_HOME
 	? path.resolve(process.env.PI_LENS_HOME)
 	: path.join(process.cwd(), ".probe-home");
@@ -486,16 +511,27 @@ interface TmpHygieneBaseline {
 	 *  written by a run of an older checkout has none, and the census then says
 	 *  so instead of guessing. */
 	repoRoot?: string[];
+	/** Non-`pi-lens-` entries at the real tmp root at run start (#4560), so a
+	 *  write at the tmp root — a sibling of the fixtures,
+	 *  `path.join(<fixture>, "..")` — is judged against what the host already
+	 *  had. Optional: a record written by an older checkout has none, and the
+	 *  widened census then reports `unknown` instead of a clean zero. */
+	tmpRootWrites?: string[];
 }
 
 let tmpHygieneBefore: Set<string>;
 let backstopRootBefore: Record<string, number>;
 let repoRootBefore: readonly string[] | undefined;
+let tmpRootWritesBefore: ReadonlySet<string> | undefined;
 
 function adoptBaseline(baseline: TmpHygieneBaseline): void {
 	tmpHygieneBefore = new Set(baseline.tmp);
 	backstopRootBefore = baseline.backstopRoot;
 	repoRootBefore = baseline.repoRoot;
+	tmpRootWritesBefore =
+		baseline.tmpRootWrites === undefined
+			? undefined
+			: new Set(baseline.tmpRootWrites);
 }
 
 try {
@@ -509,6 +545,9 @@ try {
 		tmp: snapshotTmpPiLensEntries(readTmpDirEntries(tmpHygieneRealTmp)),
 		backstopRoot: rootBackstopSnapshot(),
 		repoRoot: readTmpDirEntries(process.cwd()),
+		tmpRootWrites: readTmpDirEntries(tmpHygieneRealTmp).filter(
+			(name) => !name.startsWith("pi-lens-"),
+		),
 	};
 	try {
 		const fd = fs.openSync(tmpHygieneBaselinePath, "wx");
@@ -1110,6 +1149,19 @@ export function tmpHygieneObservedEntries(): string[] {
 	);
 }
 
+/** New non-`pi-lens-` entries at the real tmp root (#4560): a fixture sibling
+ *  written at `path.join(<fixture>, "..")`, which the `pi-lens-`-only census
+ *  never saw. Observation only — the destructive sweep stays on the pi-lens
+ *  census, so an entry another host process wrote is reported, never removed.
+ *  `undefined` when the run's baseline predates this census, so the owner can
+ *  say `unknown` rather than a clean zero. */
+export function tmpHygieneTmpRootWrites(): string[] | undefined {
+	if (tmpRootWritesBefore === undefined) return undefined;
+	return readTmpDirEntries(tmpHygieneRealTmp).filter(
+		(name) => !name.startsWith("pi-lens-") && !tmpRootWritesBefore?.has(name),
+	);
+}
+
 export function tmpHygieneLeakReport(): {
 	testFile: string;
 	leftovers: string[];
@@ -1336,9 +1388,12 @@ export function formatTmpHygieneOwnerSummary(
 	scan: TmpHygieneOwnerScan,
 	otherInvocationEntries = 0,
 	reaped = 0,
+	/** #4560: judged fixture siblings at the tmp root, or `unknown` when the
+	 *  run's baseline predates the widened census. */
+	tmpRootWrites: number | "unknown" = 0,
 ): string {
 	const { counts } = scan;
-	return `[tmp-hygiene-owners] live=${counts.live} orphaned=${counts.orphaned} malformed=${counts.malformed} foreign=${counts.foreign} self=${counts.self} otherInvocationEntries=${otherInvocationEntries} reaped=${reaped}`;
+	return `[tmp-hygiene-owners] live=${counts.live} orphaned=${counts.orphaned} malformed=${counts.malformed} foreign=${counts.foreign} self=${counts.self} otherInvocationEntries=${otherInvocationEntries} reaped=${reaped} tmpRootWrites=${tmpRootWrites}`;
 }
 
 /** Reclaim abandoned owner records at the serialized census. A run id is the

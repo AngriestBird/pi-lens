@@ -119,6 +119,9 @@ describe("dispatch availability suppression is reset at session start (#1266)", 
 
 	afterEach(() => {
 		removeTempDirSync(tmpDir);
+		// #4560: the formatter-reprobe cell creates `${tmpDir}-next` at the tmp
+		// root; a sibling the file made is the file's to remove.
+		removeTempDirSync(`${tmpDir}-next`);
 	});
 
 	it("retries a suppressed tool's install after handleSessionStart, not just after calling the reset helper directly", async () => {

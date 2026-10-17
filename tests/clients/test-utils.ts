@@ -62,11 +62,40 @@ export function removeTempDirSync(dir: string): void {
 	}
 }
 
-export function setupTestEnvironment(prefix = "pi-lens-test-"): {
+/** The project-root marker every `setupTestEnvironment` root carries unless a
+ *  cell opts out (#4560). `.git` is honoured by `findNearestProjectRoot` and is
+ *  the marker this suite's own project fixtures already plant
+ *  (`makeProject`, `makeWarmableProject`, `writeSourceFiles`), so the shared
+ *  default replaces those copies instead of adding a second vocabulary.
+ *  An EMPTY directory is not a real Git marker (`isRealGitMarker` requires a
+ *  `HEAD`), so the subsystems that ask for a real repo (formatter cwd,
+ *  ephemeral-checkout classification) keep answering "not a repo", while
+ *  `findNearestProjectRoot` (existence only) sees the fixture as its own root.
+ *  It is also invisible to the tree walks (`.git` is in `EXCLUDED_DIRS`), so no
+ *  fixture file count moves.
+ *
+ *  Recurrence (#4546 / #4559): a bare fixture under `os.tmpdir()` resolved its
+ *  project root by walking UP past the fixture. A stray empty `/tmp/.git` on
+ *  the dev host made `findNearestProjectRoot` return `/tmp`, so a cell that
+ *  saved and read a project snapshot under its fixture saw an empty one and
+ *  redded with `expected undefined`. Planting the marker here makes every
+ *  fixture its own root. A cell that asserts marker-less resolution passes
+ *  `{ rootMarker: false }` and says why. */
+export const TEST_FIXTURE_ROOT_MARKER = ".git";
+
+export function setupTestEnvironment(
+	prefix = "pi-lens-test-",
+	options: { rootMarker?: boolean } = {},
+): {
 	tmpDir: string;
 	cleanup: () => void;
 } {
 	const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+	if (options.rootMarker !== false) {
+		fs.mkdirSync(path.join(tmpDir, TEST_FIXTURE_ROOT_MARKER), {
+			recursive: true,
+		});
+	}
 	activeTestEnvironments.add(tmpDir);
 	// #2912: the shared setup removes this root at file teardown and on SIGTERM,
 	// so a timeout or a failed assertion before `cleanup()` cannot leak it.
