@@ -57,6 +57,17 @@ describe("waitFor budget scaling (#4437)", () => {
 		expect(error?.message).not.toMatch(/at \S*interleaving-kit\.ts:/);
 	});
 
+	it("reports the measured elapsed time, which can overshoot the budget", async () => {
+		vi.useFakeTimers();
+		vi.stubEnv("PI_LENS_TEST_TIMEOUT_SCALE", "3");
+		const error = await settle(
+			waitFor(() => false, Boolean, { timeoutMs: 100, intervalMs: 70 }),
+			1000,
+		);
+		expect(error?.message).toMatch(/^waitFor exhausted after 350ms /);
+		expect(error?.message).toContain("budget 300ms = 100ms x");
+	});
+
 	it("keeps the unscaled budget when the knob is unset", async () => {
 		vi.useFakeTimers();
 		vi.stubEnv("PI_LENS_TEST_TIMEOUT_SCALE", undefined);
