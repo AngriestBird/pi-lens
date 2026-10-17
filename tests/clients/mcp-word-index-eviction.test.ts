@@ -19,6 +19,7 @@ import {
 	notifyWordIndexPublished,
 	searchWordIndex,
 	serializeWordIndex,
+	updateWordIndexDocumentForEdit,
 } from "../../clients/word-index.js";
 import { suspendAt } from "./interleaving-kit.js";
 import { setupTestEnvironment } from "./test-utils.js";
@@ -128,6 +129,44 @@ describe("MCP warm word-index lifecycle (#1370)", () => {
 		// place, so an unpersisted edit cannot be dropped by a publish.
 		expect(warmIndexFor(cwd)).toBe(liveIndex);
 		expect(searchWordIndex(warmIndexFor(cwd)!, "live symbol")).toHaveLength(1);
+	});
+
+	// The reason the guard is "keep an entry that holds ANY index", not "keep the
+	// larger one": the live copy carries edits the debounced persist has not
+	// written yet, and a published index can easily hold more documents.
+	it("keeps unpersisted in-place edits when a larger index is published (#4583)", async () => {
+		const cwd = path.join(process.env.PILENS_DATA_DIR!, "edited-project");
+		persistIndex(cwd, "edited");
+		const liveLease = acquireWarmWordIndex(cwd);
+		const liveIndex = liveLease.index!;
+		liveLease.release();
+		// The per-edit seam `pilens_analyze` uses mutates this copy in place; the
+		// debounced persist has not landed, so this document exists only here.
+		expect(
+			await updateWordIndexDocumentForEdit(liveIndex, {
+				path: path.join(cwd, "src", "edited.ts"),
+				content: "export const pendingEdit = true;",
+			}),
+		).toBe(true);
+		expect(liveIndex.docCount).toBe(1);
+
+		const published = buildWordIndex([
+			{
+				path: path.join(cwd, "src", "other.ts"),
+				content: "export const otherSymbol = true;",
+			},
+			{
+				path: path.join(cwd, "src", "third.ts"),
+				content: "export const thirdSymbol = true;",
+			},
+		]);
+		// The build that publishes holds MORE documents than the live entry, which
+		// is exactly the shape a "keep the larger index" widening would replace.
+		expect(published.docCount).toBeGreaterThan(liveIndex.docCount);
+		notifyWordIndexPublished(cwd, published, "session_start");
+
+		expect(warmIndexFor(cwd)).toBe(liveIndex);
+		expect(searchWordIndex(warmIndexFor(cwd)!, "pending edit")).toHaveLength(1);
 	});
 
 	it("idle-evicts and performs a real deserialize rebuild on the next query", async () => {

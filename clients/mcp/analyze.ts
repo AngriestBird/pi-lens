@@ -38,6 +38,7 @@ import {
 	updateWordIndexDocumentForEdit,
 	WORD_INDEX_MAX_BYTES,
 	type WordIndex,
+	type WordIndexPublishTrigger,
 } from "../word-index.js";
 import { logWordIndex } from "../word-index-logger.js";
 import { createMcpHost } from "./host-shim.js";
@@ -217,7 +218,7 @@ export function acquireWarmWordIndex(cwd: string): WarmWordIndexLease {
 function adoptPublishedWarmWordIndex(
 	cwd: string,
 	published: WordIndex,
-	trigger: "cold_query" | "session_start",
+	trigger: WordIndexPublishTrigger,
 ): void {
 	const index = usableWarmWordIndex(published);
 	if (!index) return;

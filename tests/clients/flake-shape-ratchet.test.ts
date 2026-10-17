@@ -1082,6 +1082,14 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 	// 2026-10-18 (#4583): a cold word-index build is fire-and-forget (its
 	// `triggerBackgroundWordIndexBuild` status is not joinable), so a witness
 	// that must observe the published snapshot has only vi.waitFor.
+	// 2026-10-18 (#4583 round 1): the adoption record's own witness joins the
+	// same fire-and-forget cold build, and the record is only observable after it
+	// publishes.
+	"ungoverned-wait-for:clients/word-index-observability.test.ts": {
+		detector: "ungoverned-wait-for",
+		reason:
+			"the cold build's completion exposes no awaitable, so the record witness joins the publish it emits with vi.waitFor",
+	},
 	"ungoverned-wait-for:clients/word-index.test.ts": {
 		detector: "ungoverned-wait-for",
 		reason:
