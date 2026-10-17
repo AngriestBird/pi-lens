@@ -1429,12 +1429,13 @@ New user-facing fragments begin with a bold lead of at most 100 characters
 ## Test requirements
 
 - `setupTestEnvironment` plants the shared `.git` project-root marker on every
-  fixture, so a fixture cannot adopt a project marker above the tmp root
-  (#4560, recurrence #4546/#4559). `{ rootMarker: false }` is the named opt-out
-  for a cell that asserts marker-less resolution, and says why. A tmp root that
-  itself carries a marker from `PROJECT_ROOT_MARKERS` fails the run at setup
-  instead of letting the host decide a fixture's root. The hygiene owner also
-  judges new non-`pi-lens-` entries at the tmp root (`path.join(fixture, "..")`).
+  fixture, so a fixture cannot adopt a project marker above the tmp root.
+  `{ rootMarker: false }` is the named opt-out for a cell that asserts
+  marker-less resolution, and says why. A tmp root that itself carries a marker
+  from `PROJECT_ROOT_MARKERS` fails the run at setup instead of letting the host
+  decide a fixture's root. The hygiene owner also judges new non-`pi-lens-`
+  entries at the tmp root (`path.join(fixture, "..")`) that a test process
+  created; a child's own tmp cache is counted, not asserted.
 Every logic change has relevant tests. New tests use fake clocks and
 `tests/clients/interleaving-kit.ts` before real time, raw sleeps, or real child
 processes. Real elapsed-time assertions belong in the serialized

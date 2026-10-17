@@ -444,38 +444,16 @@ function repoRootEntryCandidates(entry: string): string[] {
 	return hits;
 }
 
-/** #4560: the `tests/` files whose source names a fixture sibling written at
- *  the tmp root (`path.join(<fixture>, "..")`). A widened tmp-root entry is
- *  only judged when a test source names it: the host, and the children a run
- *  spawns, also write at the tmp root, and naming an innocent file is the
- *  direction #4307-4 fixed. An entry no source names is counted in the census
- *  line, never asserted. The scan runs once per hygiene owner. */
-let tmpRootWriteSourceScan: Array<{ file: string; source: string }> | undefined;
-function tmpRootWriteCandidates(entry: string): string[] {
-	tmpRootWriteSourceScan ??= readWalkedFiles(
-		listSourceFiles(path.join(REPO_ROOT, "tests"), {
-			extensions: [".ts", ".mjs"],
-		}),
-	).map(({ file, source }) => ({
-		file: path.relative(REPO_ROOT, file).replace(/\\/g, "/"),
-		// Comments blanked: a docblock naming the entry is not a producer.
-		source: stripSource(source, { strings: "keep" }),
-	}));
-	// A fixture root's name is a literal; a raw `mkdtemp` head loses six random
-	// characters. Either spelling counts, and a head under three characters
-	// would match everything.
-	const heads = [entry, entry.length > 6 ? entry.slice(0, -6) : entry].filter(
-		(head) => head.length >= 3,
-	);
-	return tmpRootWriteSourceScan
-		.filter(({ source }) => heads.some((head) => source.includes(head)))
-		.map(({ file }) => file);
-}
-
-/** The widened census's JUDGMENT: of the new entries at the tmp root, the ones
- *  a test source names. The rest are counted, never asserted. */
-function judgedTmpRootWrites(entries: readonly string[]): string[] {
-	return entries.filter((entry) => tmpRootWriteCandidates(entry).length > 0);
+/** The widened census's JUDGMENT (#4560): of the new entries at the tmp root,
+ *  the ones a TEST PROCESS created (the shared interposer recorded a creator).
+ *  A child process's own tmp cache (`jiti` and friends) has no creator on
+ *  record, so it is counted on the census line, never asserted — the #4307-4
+ *  direction that keeps an innocent file out of the report. */
+function judgedTmpRootWrites(
+	entries: readonly string[],
+	creators: ReadonlyMap<string, string> = tmpHygieneCreators(),
+): string[] {
+	return entries.filter((entry) => creators.has(entry));
 }
 
 /** The pre-#4354 shape of the foreign-run cases: no creator on record. */
@@ -521,7 +499,10 @@ describe("tmp-fixture-hygiene", () => {
 		// the census, not only `pi-lens-` names. A host process's tmp file is not
 		// asserted; it is counted on the census line instead.
 		const tmpRootWrites = tmpHygieneTmpRootWrites();
-		const tmpRootWriteLeaks = judgedTmpRootWrites(tmpRootWrites ?? []);
+		const tmpRootWriteLeaks = judgedTmpRootWrites(
+			tmpRootWrites ?? [],
+			creators,
+		);
 		try {
 			expect(
 				attributable,
@@ -532,7 +513,7 @@ describe("tmp-fixture-hygiene", () => {
 				`[tmp-hygiene] tests/${testFile} left ${tmpRootWriteLeaks.length} fixture sibling(s) at the tmp root: ${tmpRootWriteLeaks
 					.map(
 						(entry) =>
-							`${entry} (candidate owners: ${tmpRootWriteCandidates(entry).join(", ")})`,
+							`${entry} (created by tests/${creators.get(entry) ?? "unknown"})`,
 					)
 					.join(
 						"; ",
@@ -1086,17 +1067,27 @@ describe("tmp-fixture-hygiene", () => {
 	// sibling written at `path.join(<fixture>, "..")` went unseen and stayed on
 	// the host. These cases pin the widened population and both directions of
 	// its attribution.
-	it("names the test source that writes a tmp-root sibling, and stays silent on an unrelated host entry (#4560)", () => {
-		expect(tmpRootWriteCandidates("capture")).toContain(
-			"tests/clients/runtime-tool-result.test.ts",
-		);
+	it("judges a fixture sibling the test process created, and only counts an entry no test created (#4560)", () => {
+		const env = setupTestEnvironment("pi-lens-4560-sibling-judgment-");
 		// Assembled so this file's own source does not spell the name it asserts
-		// absent: a literal here would make the scan its own candidate.
+		// absent: a literal here would make the source a candidate on any host.
 		const unrelated = ["host", "tool", "scratch", process.pid].join("-");
-		expect(tmpRootWriteCandidates(unrelated)).toEqual([]);
-		// The owner's red predicate: a named fixture sibling is judged, an
-		// unrelated host entry is only counted in the census line.
-		expect(judgedTmpRootWrites(["capture", unrelated])).toEqual(["capture"]);
+		const sibling = path.join(os.tmpdir(), `4560-sibling-${process.pid}`);
+		try {
+			fs.mkdirSync(sibling, { recursive: true });
+			const creators = recordedTmpRootCreators(getTmpRootRegistry());
+			expect(creators.get(path.basename(sibling))).toBe(
+				"config/tmp-fixture-hygiene.test.ts",
+			);
+			expect(
+				judgedTmpRootWrites([path.basename(sibling), unrelated], creators),
+			).toEqual([path.basename(sibling)]);
+			// A child process's tmp cache has no creator on record.
+			expect(judgedTmpRootWrites(["jiti"], creators)).toEqual([]);
+		} finally {
+			fs.rmSync(sibling, { recursive: true, force: true });
+			env.cleanup();
+		}
 	});
 
 	it("sees a new entry written at the tmp root, not only pi-lens-prefixed ones (#4560)", () => {

@@ -166,7 +166,10 @@ describe("tmp-root interposer (#2912)", () => {
 			},
 			promises: {
 				mkdtemp: async (prefix: string) => `${prefix}CCCCCC`,
+				mkdir: async (dir: string) => dir,
 			},
+			mkdirSync: (dir: string) => dir,
+			mkdir: (_dir: string, done: (error: Error | null) => void) => done(null),
 		};
 		return { target: target as unknown as MkdtempTarget, made };
 	}
@@ -208,6 +211,24 @@ describe("tmp-root interposer (#2912)", () => {
 			() => {},
 		);
 		expect(registry.roots.size).toBe(0);
+	});
+
+	it("records a fixture sibling of ANY name created by mkdir, and only a direct tmp child (#4560)", () => {
+		const registry = createTmpRootRegistry();
+		const { target } = fakeTarget();
+		installTmpRootInterposer(
+			registry,
+			target,
+			"/var/tmp",
+			() => "leaking.test.ts",
+		);
+		const mkdir = target.mkdirSync as (dir: string) => string;
+		mkdir("/var/tmp/capture");
+		mkdir("/var/tmp/capture/nested");
+		mkdir("/home/user/elsewhere");
+		expect(recordedTmpRootCreators(registry)).toEqual(
+			new Map([["capture", "leaking.test.ts"]]),
+		);
 	});
 
 	it("returns exactly what the wrapped function returned", () => {

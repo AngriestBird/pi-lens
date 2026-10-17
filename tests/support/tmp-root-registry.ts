@@ -51,6 +51,11 @@ interface TmpRootEntry {
 
 export interface TmpRootRegistry {
 	roots: Map<string, TmpRootEntry>;
+	/** Direct tmp-root directories a TEST PROCESS created with `mkdir` (#4560),
+	 *  keyed by resolved path. Creator attribution only: they are never sweep
+	 *  members, because the #2912 rule that a directory made by `mkdirSync` is
+	 *  never touched still holds. Bounded by the same cap as `roots`. */
+	siblings: Map<string, { createdBy?: string }>;
 	/** Roots not recorded because the registry was full. */
 	dropped: number;
 }
@@ -63,11 +68,15 @@ const REGISTRY_KEY = Symbol.for("pi-lens.tests.tmp-root-registry");
 
 export function getTmpRootRegistry(): TmpRootRegistry {
 	const holder = globalThis as { [REGISTRY_KEY]?: TmpRootRegistry };
-	return (holder[REGISTRY_KEY] ??= { roots: new Map(), dropped: 0 });
+	return (holder[REGISTRY_KEY] ??= {
+		roots: new Map(),
+		siblings: new Map(),
+		dropped: 0,
+	});
 }
 
 export function createTmpRootRegistry(): TmpRootRegistry {
-	return { roots: new Map(), dropped: 0 };
+	return { roots: new Map(), siblings: new Map(), dropped: 0 };
 }
 
 export function registerTmpRoot(
@@ -94,6 +103,27 @@ export function registerTmpRoot(
 	registry.roots.set(dir, { kind, sawAbsent: false, createdBy });
 }
 
+/** Record a directory a TEST PROCESS made at the tmp root with `mkdir`, for
+ *  creator attribution only (never a sweep member, #4560). */
+export function registerTmpSibling(
+	registry: TmpRootRegistry,
+	dir: string,
+	createdBy?: string,
+): void {
+	const resolved = path.resolve(dir);
+	const existing = registry.siblings.get(resolved);
+	if (existing) {
+		if (existing.createdBy === undefined && createdBy !== undefined)
+			existing.createdBy = createdBy;
+		return;
+	}
+	if (registry.roots.size + registry.siblings.size >= MAX_TMP_ROOTS) {
+		registry.dropped += 1;
+		return;
+	}
+	registry.siblings.set(resolved, { createdBy });
+}
+
 /** One `entry<TAB>file` line per recorded entry whose creation this worker
  *  observed, sorted so the record is deterministic. `undefined` when there is
  *  nothing to say. Deliberately NOT one line per mkdtemp call: the registry
@@ -104,6 +134,9 @@ export function formatTmpRootCreators(
 ): string | undefined {
 	const lines: string[] = [];
 	for (const [dir, entry] of registry.roots)
+		if (entry.createdBy !== undefined)
+			lines.push(`${path.basename(dir)}\t${entry.createdBy}`);
+	for (const [dir, entry] of registry.siblings)
 		if (entry.createdBy !== undefined)
 			lines.push(`${path.basename(dir)}\t${entry.createdBy}`);
 	if (lines.length === 0) return undefined;
@@ -118,6 +151,9 @@ export function recordedTmpRootCreators(
 ): Map<string, string> {
 	const creators = new Map<string, string>();
 	for (const [dir, entry] of registry.roots)
+		if (entry.createdBy !== undefined)
+			creators.set(path.basename(dir), entry.createdBy);
+	for (const [dir, entry] of registry.siblings)
 		if (entry.createdBy !== undefined)
 			creators.set(path.basename(dir), entry.createdBy);
 	return creators;
@@ -185,15 +221,27 @@ export function formatTmpRootSweep(
 export interface MkdtempTarget {
 	mkdtempSync: (...args: never[]) => unknown;
 	mkdtemp: (...args: never[]) => unknown;
-	promises: { mkdtemp: (...args: never[]) => unknown };
+	mkdirSync: (...args: never[]) => unknown;
+	mkdir: (...args: never[]) => unknown;
+	promises: {
+		mkdtemp: (...args: never[]) => unknown;
+		mkdir: (...args: never[]) => unknown;
+	};
 }
 
 /**
- * Record every `pi-lens-*` directory `mkdtemp` creates directly under the real
- * tmpdir, whoever calls it (a test file, a `vi.hoisted` block, production
- * code): 454 test files spell a raw `mkdtempSync`, and no shared helper sits
- * between them and `fs`. The caller re-publishes the patched members to ESM
- * importers with `syncBuiltinESMExports()`.
+ * Record directories created directly under the real tmpdir, whoever calls it
+ * (a test file, a `vi.hoisted` block, production code): 454 test files spell a
+ * raw `mkdtempSync`, and no shared helper sits between them and `fs`.
+ *
+ * `mkdtemp` records only the `pi-lens-` namespace, because that is the family
+ * the census observes and sweeps (#2912). `mkdir` records ANY name: a fixture
+ * sibling written at the tmp root — `path.join(<fixture>, "..")` — is the
+ * pattern-class leak of #4560, and its name is not namespaced. A directory a
+ * CHILD process creates is not observed here, which is what keeps a tool's own
+ * tmp cache (`jiti`) out of the fixture-sibling population. The caller
+ * re-publishes the patched members to ESM importers with
+ * `syncBuiltinESMExports()`.
  */
 export function installTmpRootInterposer(
 	registry: TmpRootRegistry,
@@ -205,14 +253,22 @@ export function installTmpRootInterposer(
 	createdBy?: () => string,
 ): void {
 	const tmpRoot = path.resolve(realTmp);
-	const note = (dir: unknown): void => {
-		if (typeof dir !== "string") return;
+	const isDirectTmpChild = (dir: unknown): dir is string => {
+		if (typeof dir !== "string") return false;
 		const resolved = path.resolve(dir);
+		return path.dirname(resolved) === tmpRoot;
+	};
+	const note = (dir: unknown): void => {
 		if (
-			path.dirname(resolved) === tmpRoot &&
-			path.basename(resolved).startsWith("pi-lens-")
+			isDirectTmpChild(dir) &&
+			path.basename(path.resolve(dir)).startsWith("pi-lens-")
 		)
 			registerTmpRoot(registry, dir, "observed", createdBy?.());
+	};
+	// A fixture SIBLING (any name) is the #4560 population; `mkdtemp`'s
+	// namespace rule above stays as it was.
+	const noteSibling = (dir: unknown): void => {
+		if (isDirectTmpChild(dir)) registerTmpSibling(registry, dir, createdBy?.());
 	};
 	const sync = target.mkdtempSync as (...args: unknown[]) => unknown;
 	target.mkdtempSync = function (this: unknown, ...args: unknown[]) {
@@ -239,4 +295,29 @@ export function installTmpRootInterposer(
 		note(dir);
 		return dir;
 	} as MkdtempTarget["promises"]["mkdtemp"];
+	const mkdirSync = target.mkdirSync as (...args: unknown[]) => unknown;
+	target.mkdirSync = function (this: unknown, ...args: unknown[]) {
+		const dir = mkdirSync.apply(this, args);
+		noteSibling(args[0]);
+		return dir;
+	} as MkdtempTarget["mkdirSync"];
+	const mkdirCallback = target.mkdir as (...args: unknown[]) => unknown;
+	target.mkdir = function (this: unknown, ...args: unknown[]) {
+		const last = args.length - 1;
+		const done = args[last];
+		if (typeof done === "function")
+			args[last] = (error: unknown, ...rest: unknown[]) => {
+				if (!error) noteSibling(args[0]);
+				(done as (...cbArgs: unknown[]) => void)(error, ...rest);
+			};
+		return mkdirCallback.apply(this, args);
+	} as MkdtempTarget["mkdir"];
+	const promisedMkdir = target.promises.mkdir as (
+		...args: unknown[]
+	) => Promise<unknown>;
+	target.promises.mkdir = async function (this: unknown, ...args: unknown[]) {
+		const dir = await promisedMkdir.apply(this, args);
+		noteSibling(args[0]);
+		return dir;
+	} as MkdtempTarget["promises"]["mkdir"];
 }
