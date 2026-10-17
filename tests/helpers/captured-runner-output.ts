@@ -368,17 +368,6 @@ export function probeAnswer(
 	);
 }
 
-/** The captured clean bytes, shaped like a `safeSpawnAsync` result. */
-export function materializeClean(fixture: CapturedOutput): {
-	stdout: string;
-	stderr: string;
-	status: number | null;
-} | null {
-	const clean = fixture.clean;
-	if (!clean) return null;
-	return { stdout: clean.stdout, stderr: clean.stderr, status: clean.exitCode };
-}
-
 /**
  * The captured bytes with `__WORKSPACE__` replaced by `workspace`, shaped like
  * a `safeSpawnAsync` result so a test can hand it straight to the mock.
