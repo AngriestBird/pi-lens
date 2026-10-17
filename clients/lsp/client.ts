@@ -4518,13 +4518,42 @@ async function sendDidSaveForHeldDocument(
 			"textDocument/didSave",
 			{ textDocument: { uri } },
 		);
-		if (!sent) giveBackSaveRescan(state, normalizedPath);
+		if (!sent) {
+			giveBackSaveRescan(state, normalizedPath);
+			recordDidSaveSendFailed(state, normalizedPath);
+		}
 		return sent;
 	} catch {
 		// A failed save notify must not stop the queue runner.
 		giveBackSaveRescan(state, normalizedPath);
+		recordDidSaveSendFailed(state, normalizedPath);
 		return false;
 	}
+}
+
+/**
+ * #4532 gap 9 round 6 F4 (shape 31): a standalone save that never left, and
+ * the recovery's own last attempt, used to vanish into the queue runner, and
+ * `lsp_touch_file` is written BEFORE the save finishes, so no row said "this
+ * save never reached the server" — the reader chasing missing save-triggered
+ * findings had nothing to find.
+ *
+ * One bounded row per server per session, exactly like the sibling
+ * `lsp-did-save-text-omitted`: the FILE rides `metadata`, because a per-save row
+ * on a save-triggered project is one row per edit. The service records the
+ * other half (`lsp-did-save-recovery-exhausted`, `clients/lsp/index.ts`),
+ * which is the only side that knows the retry bound is spent.
+ */
+function recordDidSaveSendFailed(
+	state: LSPClientState,
+	normalizedPath: string,
+): void {
+	recordDegradationOnce({
+		kind: "lsp-did-save-send-failed",
+		subject: state.serverId,
+		reason: "textDocument/didSave did not leave the process",
+		metadata: { filePath: normalizedPath },
+	});
 }
 
 /**

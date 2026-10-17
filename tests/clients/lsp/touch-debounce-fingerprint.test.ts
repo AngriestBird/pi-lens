@@ -13,11 +13,19 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
 import * as clientModule from "../../../clients/lsp/client.js";
 import { hashDiagnosticContent } from "../../../clients/lsp/diagnostic-binding.js";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
 import { fingerprintDocumentContent } from "../../../clients/lsp/document-drift.js";
 import { LSPService } from "../../../clients/lsp/index.js";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../../clients/degradation-ledger.js";
+import { flushAllNdjsonWriters } from "../../../clients/ndjson-logger.js";
+import { getGlobalPiLensLogDir } from "../../../clients/probe-home-state.js";
 import { waitFor } from "../interleaving-kit.js";
 import { createMockState } from "./mock-client-state.js";
 
@@ -70,6 +78,36 @@ const queueDrained = (state: ReturnType<typeof createMockState>) =>
 		(size) => size === 0,
 		{ timeoutMs: 2_000, yieldControl: tick },
 	);
+
+/**
+ * The DURABLE half of a degradation record (#4532 gap 9 round 6 F4). The ledger
+ * writes through `logLatency`, so the row reaches `latency.log` only after a
+ * flush: reading the sink while one of its writes is queued counts late bytes
+ * on the wrong side of the window (shape 67).
+ */
+async function durableDegradations(): Promise<string[]> {
+	await flushAllNdjsonWriters();
+	const log = path.join(getGlobalPiLensLogDir(), "latency.log");
+	if (!fs.existsSync(log)) return [];
+	return fs
+		.readFileSync(log, "utf8")
+		.split("\n")
+		.filter(Boolean)
+		.flatMap((line) => {
+			try {
+				const row = JSON.parse(line) as {
+					metadata?: { kind?: unknown; subject?: unknown };
+				};
+				const kind = row.metadata?.kind;
+				const subject = row.metadata?.subject;
+				return typeof kind === "string" && typeof subject === "string"
+					? [`${subject}:${kind}`]
+					: [];
+			} catch {
+				return [];
+			}
+		});
+}
 
 /**
  * `reportRecord: false` builds the client shape #4532 gap 9 F3 is about: one
@@ -584,5 +622,183 @@ describe("#4532 gap 9 — a skip needs the path's notify queue idle", () => {
 		await queueDrained(state);
 		expect(texts()).toEqual([`didOpen:${A}`]);
 		expect(attempts).toHaveLength(3);
+	});
+
+	// R6 F4 (Greptile 4304348418, shape 31): a failed standalone save and the
+	// recovery's own last attempt each leave one bounded record, once per server
+	// per session. `lsp_touch_file` is written BEFORE the save finishes, so
+	// without these rows "the save was queued" and "the save never landed" read
+	// the same, and a save-triggered server's silence has no trace at all.
+	// `PI_LENS_TEST_MODE=0` is the only way to read the DURABLE half: the log
+	// sink drops every write in test mode, and this case asserts the sink.
+	it("records a failed save and the recovery it exhausted", async () => {
+		const previousTestMode = process.env.PI_LENS_TEST_MODE;
+		process.env.PI_LENS_TEST_MODE = "0";
+		// The ledger's once-per-kind latch is SESSION state, and the cases above
+		// already spent it for these two kinds (in test mode, so without a durable
+		// row). Start a session, through the seam `session_start` calls, so the
+		// rows this case reads are the ones it drove.
+		resetDegradationLedger();
+		try {
+			const { service, texts, state } = await setup();
+			const touch = { diagnostics: "none" as const, source: "test" };
+			await service.touchFile(FILE, A, touch);
+			const attempts: string[] = [];
+			vi.mocked(state.connection.sendNotification).mockImplementation(
+				async (method: string) => {
+					if (String(method) !== "textDocument/didSave") return undefined;
+					attempts.push(String(method));
+					throw new Error("stream write failed");
+				},
+			);
+			await service.touchFile(FILE, A, { ...touch, saved: true });
+			await waitFor(
+				() => attempts.length,
+				(sent) => sent >= 2,
+				{ timeoutMs: 2_000, yieldControl: tick },
+			);
+			await queueDrained(state);
+			expect(texts()).toEqual([`didOpen:${A}`]);
+			expect(attempts).toHaveLength(2);
+			const kinds = getDegradationSummary().map((group) => group.kind);
+			expect(kinds, "the failed attempt left no record").toContain(
+				"lsp-did-save-send-failed",
+			);
+			expect(kinds, "the exhausted recovery left no record").toContain(
+				"lsp-did-save-recovery-exhausted",
+			);
+			const durable = await durableDegradations();
+			expect(durable, "the failed attempt never reached the sink").toContain(
+				"typescript:lsp-did-save-send-failed",
+			);
+			expect(
+				durable,
+				"the exhausted-recovery record never reached the sink",
+			).toContain("typescript:lsp-did-save-recovery-exhausted");
+		} finally {
+			if (previousTestMode === undefined) {
+				delete process.env.PI_LENS_TEST_MODE;
+			} else {
+				process.env.PI_LENS_TEST_MODE = previousTestMode;
+			}
+		}
+	});
+
+	// R6 F3 (Greptile 4304348416): the recovery is ONE retry. The bound is the
+	// last argument `saveDebouncedPush` passes to its own recursion; without it
+	// every failure re-queues the next save inside one microtask chain, so the
+	// bytes still get no save and nothing else on the event loop runs. The mock
+	// lands the sixtieth attempt so this case TERMINATES either way: an unbounded
+	// retry reaches it and reports 60 attempts instead of the test hanging.
+	it(
+		"stops after one retry on a persistently failing save",
+		{ timeout: 20_000 },
+		async () => {
+			const { service, texts, state } = await setup();
+			const touch = { diagnostics: "none" as const, source: "test" };
+			await service.touchFile(FILE, A, touch);
+			const attempts: string[] = [];
+			vi.mocked(state.connection.sendNotification).mockImplementation(
+				async (method: string) => {
+					if (String(method) !== "textDocument/didSave") return undefined;
+					attempts.push(String(method));
+					// A macrotask between attempts, so a runaway retry yields to the
+					// event loop instead of starving this test's own timer.
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					if (attempts.length < 60) throw new Error("stream write failed");
+					return undefined;
+				},
+			);
+			await service.touchFile(FILE, A, { ...touch, saved: true });
+			await waitFor(
+				() => attempts.length,
+				(sent) => sent >= 2,
+				{ timeoutMs: 3_000, yieldControl: tick },
+			);
+			await queueDrained(state);
+			expect(texts()).toEqual([`didOpen:${A}`]);
+			expect(attempts, "the recovery retried more than once").toHaveLength(2);
+		},
+	);
+
+	// R6 F2 (Greptile 4304348412): a failed save's retry sends for whatever the
+	// client holds when its queue entry runs, and a content push queued behind
+	// the failure advances that document. The mark must therefore name the
+	// content the send COVERED; when it named the bytes the skip read, the retry
+	// saved B under a mark saying A, and the saved touch A needs sent nothing.
+	it("sends the save a failed save's retry did not cover", async () => {
+		const { service, texts, state } = await setup();
+		const touch = { diagnostics: "none" as const, source: "test" };
+		const saved = { ...touch, saved: true };
+		await service.touchFile(FILE, A, touch);
+		expect(texts()).toEqual([`didOpen:${A}`]);
+
+		const saves: string[] = [];
+		let release!: () => void;
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		vi.mocked(state.connection.sendNotification).mockImplementation(
+			async (method: string) => {
+				if (String(method) !== "textDocument/didSave") return undefined;
+				saves.push(String(method));
+				// The first attempt hangs at the transport, then fails the way a
+				// rejected write does. Anything after it lands.
+				if (saves.length === 1) {
+					await held;
+					throw new Error("stream write failed");
+				}
+				return undefined;
+			},
+		);
+		vi.stubEnv("PI_LENS_LSP_NOTIFY_BUDGET_MS", "50");
+		try {
+			// The skipped saved touch queues the standalone save it owes.
+			await service.touchFile(FILE, A, saved);
+			await waitFor(
+				() => saves.length,
+				(sent) => sent >= 1,
+				{ timeoutMs: 2_000, yieldControl: tick },
+			);
+			// A content push of OTHER bytes sits behind that save. It lands while the
+			// failure's retry is still to come, so the retry saves THESE bytes.
+			const pushing = service.openFile(FILE, B);
+			await waitFor(
+				() => state.notifyChangeQueues.get(normalizeMapKey(FILE))?.pending,
+				(queued) => queued !== undefined,
+				{ timeoutMs: 2_000, yieldControl: tick },
+			);
+			release();
+			await pushing;
+			await waitFor(
+				() => saves.length,
+				(sent) => sent >= 2,
+				{ timeoutMs: 2_000, yieldControl: tick },
+			);
+			await queueDrained(state);
+			// A second writer (the resync route) advances the record back to A
+			// without marking a touch, exactly as the resync does in production.
+			await service.openFile(FILE, A);
+			await queueDrained(state);
+		} finally {
+			release();
+		}
+		const before = saves.length;
+		// The saved touch A needs: the server holds A and no didSave covered it.
+		await service.touchFile(FILE, A, saved);
+		await waitFor(
+			() => saves.length,
+			(sent) => sent > before,
+			{ timeoutMs: 2_000, yieldControl: tick },
+		);
+		await queueDrained(state);
+		// The content the two `openFile` pushes carried, and no re-push of A: the
+		// recovery is a save, never the redundant content push round 3 sent.
+		expect(texts()).toEqual([
+			`didOpen:${A}`,
+			`didChange:${B}`,
+			`didChange:${A}`,
+		]);
+		expect(saves).toHaveLength(3);
 	});
 });
