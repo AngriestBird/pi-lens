@@ -282,8 +282,10 @@ the rate they remove them.
 
 ## Findings and verdict
 
-Classify every finding as **fold** or **file** with a one-word reason
-(`docs/pi-lens-subagent.md` "Follow-ups"). Order findings `CRITICAL`, `HIGH`,
+Classify every finding as **fold**, **accepted residual** or **file** with a
+one-word reason and its live population (`docs/pi-lens-subagent.md`
+"Follow-ups"; the merge bar is in `docs/pi-lens-merge-policy.md` "Filing
+issues"). Order findings `CRITICAL`, `HIGH`,
 `MEDIUM`, `LOW`, `NITPICK`. Each carries a stable id, a file or symbol anchor,
 the reproduction command or probe output, expected and observed behaviour, the
 root cause, cost, and a concrete remedy, and whether it is an
