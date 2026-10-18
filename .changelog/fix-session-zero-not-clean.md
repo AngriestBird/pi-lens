@@ -1,0 +1,6 @@
+---
+section: Fixed
+audience: user
+---
+
+- **Session diagnostics disclose incomplete evidence (closes #4620)** — `lens_diagnostics` session results and compact summaries no longer show a ✓ or "clean" for a pending, stale or never-diagnosed file. Only a final snapshot with no matching findings reads clean; every other zero-finding result says `inconclusive` or `unverified`, and names a next check scoped to the requested paths with the pi or MCP tool name. Session reads still run no validation.

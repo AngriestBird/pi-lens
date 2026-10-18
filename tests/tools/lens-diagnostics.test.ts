@@ -114,7 +114,11 @@ vi.mock("../../clients/widget-state.js", async (importOriginal) => {
 	return {
 		...actual,
 		getFileDiagnosticSummaries: () => mockSummaries,
-		reconcileStaleWidgetFiles: async () => mockStaleDropped,
+		reconcileStaleWidgetFiles: async (onStaleFile?: (file: string) => void) => {
+			for (let i = 0; i < mockStaleDropped; i++)
+				onStaleFile?.(`/proj/stale-${i}.ts`);
+			return mockStaleDropped;
+		},
 		reconcileStaleWidgetDependencyBlockers: async () => mockDependencyDemoted,
 		reconcileScanDiagnostics: (...args: unknown[]) =>
 			reconcileScanDiagnosticsMock(...args),
@@ -1703,6 +1707,22 @@ function sum(
 }
 
 describe("lens_diagnostics mode=full", () => {
+	it("keeps active-scan outcomes outside the session evidence verdict", async () => {
+		// The session cache disclosure must not overwrite the established
+		// full-scan coverage taxonomy with a second aggregate verdict.
+		const result = await run(
+			makeTool({}, { runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]) }),
+			{ mode: "full" },
+		);
+		expect(result.details).toMatchObject({
+			mode: "full",
+			lspFilesConfirmed: 0,
+			lspFilesUnconfirmed: 0,
+		});
+		expect(result.details).not.toHaveProperty("validationStatus");
+		expect(String(result.content[0].text)).not.toContain("Session cache");
+	});
+
 	it("retires only the analysed runner's retained row", async () => {
 		// Both directions: the analysed runner's row goes (R), and a row from a
 		// runner that did NOT analyse this call survives (O). #2154 round 3
@@ -4022,13 +4042,14 @@ describe("lens_diagnostics mode=all", () => {
 		expect(flush).toHaveBeenCalledOnce();
 	});
 
-	it("notes stale files dropped by reconciliation (use mode=full)", async () => {
+	it("notes stale files dropped by reconciliation with a targeted active-check recipe", async () => {
 		mockStaleDropped = 2;
 		mockSummaries.length = 0;
 		const result = await run(makeTool(), { mode: "all" });
 		const text = String(result.content[0].text);
 		expect(text).toContain("2 changed files omitted as stale");
-		expect(text).toContain("mode=full");
+		expect(text).toContain("source=lsp scope=paths");
+		expect(text).not.toContain("✓");
 		expect(result.details).toMatchObject({ staleDropped: 2 });
 	});
 

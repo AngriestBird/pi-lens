@@ -1532,7 +1532,11 @@ describe("reconcileScanDiagnostics observation timestamp — cache-hit replays m
 			const past = new Date(Date.now() - 10_000);
 			await fs.utimes(filePath, past, past);
 
-			expect(await reconcileStaleWidgetFiles()).toBe(0);
+			const changed: string[] = [];
+			expect(
+				await reconcileStaleWidgetFiles((file) => changed.push(file)),
+			).toBe(0);
+			expect(changed).toEqual([]);
 			expect(getFileDiagnostics(filePath)).toHaveLength(1);
 		} finally {
 			await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
@@ -1775,7 +1779,13 @@ describe("per-entry observation timestamps — the stale gate drops entries, not
 			// SURVIVES, and the record is kept. Pre-fix (per-RECORD gate, whole record
 			// stamped at staleTs) the ENTIRE record was dropped, losing the biome
 			// finding — the #1186 over-clearing defect.
-			expect(await reconcileStaleWidgetFiles()).toBe(1);
+			// The session tool needs the display path even when the record is only
+			// pruned; a number alone cannot scope its incomplete-evidence verdict.
+			const changed: string[] = [];
+			expect(
+				await reconcileStaleWidgetFiles((file) => changed.push(file)),
+			).toBe(1);
+			expect(changed).toEqual([filePath]);
 			const survivors = getFileDiagnostics(filePath);
 			expect(survivors).toHaveLength(1);
 			expect(survivors?.[0]?.tool).toBe("biome");
@@ -1809,8 +1819,13 @@ describe("per-entry observation timestamps — the stale gate drops entries, not
 			const newer = new Date(oldTs + 100_000);
 			await fs.utimes(filePath, newer, newer);
 
-			// Every entry stale → the whole record drops (survivors empty).
-			expect(await reconcileStaleWidgetFiles()).toBe(1);
+			// Every entry stale → the whole record drops (survivors empty), but
+			// its path remains available to the caller's scoped disclosure.
+			const changed: string[] = [];
+			expect(
+				await reconcileStaleWidgetFiles((file) => changed.push(file)),
+			).toBe(1);
+			expect(changed).toEqual([filePath]);
 			expect(getFileDiagnostics(filePath)).toBeUndefined();
 		} finally {
 			await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});

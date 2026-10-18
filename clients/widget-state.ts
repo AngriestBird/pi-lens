@@ -1462,9 +1462,13 @@ export function reconcileCorrelatedScanDiagnostics(
  * invalidated). Async with concurrent stats — call on read, never on the typing
  * path. Returns how many entries were dropped (so callers can tell the agent
  * those files changed and need a `mode=full` rescan rather than reading as
- * clean).
+ * clean). `onStaleFile` receives each dropped OR pruned display path, so
+ * request-scoped callers can disclose the affected files without re-deriving
+ * this store's freshness rule. The numeric return remains session-wide.
  */
-export async function reconcileStaleWidgetFiles(): Promise<number> {
+export async function reconcileStaleWidgetFiles(
+	onStaleFile?: (filePath: string) => void,
+): Promise<number> {
 	const entries = [...files.entries()];
 	const verdicts = await Promise.all(
 		// `mapKey` is the normalized `files` key (used for deletion); stat the
@@ -1537,6 +1541,8 @@ export async function reconcileStaleWidgetFiles(): Promise<number> {
 	let dropped = 0;
 	for (const v of verdicts) {
 		if (v.action === "keep") continue;
+		const rec = files.get(v.mapKey);
+		if (rec) onStaleFile?.(rec.filePath);
 		if (v.action === "drop") {
 			files.delete(v.mapKey);
 			dropped += 1;
@@ -1545,7 +1551,6 @@ export async function reconcileStaleWidgetFiles(): Promise<number> {
 		// prune: the file changed and shed its stale entries but retains fresher
 		// ones — keep the record, recompute counts/cap from the survivors, and
 		// still count it as a changed file so the agent is told to rescan.
-		const rec = files.get(v.mapKey);
 		if (rec) {
 			rec.allDiagnostics = v.survivors;
 			rec.diagnostics = capStoredDiagnostics(v.survivors);
