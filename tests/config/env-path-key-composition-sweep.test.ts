@@ -88,6 +88,27 @@
  * is gone with them: a key inside a comment or a string is not an object key,
  * so no blanker is needed to tell them apart.
  *
+ * ## Source text is not a value, and prose is not code
+ *
+ * Parsing is necessary and, on its own, not sufficient: the two rounds after
+ * the rewrite showed that the detector still read SOURCE where it needed a
+ * VALUE or a STRUCTURE (#4600 R4-1/R4-2):
+ *
+ * - a key's spelling is its cooked value, not its source text. `"Pa\x74h"` and
+ *   `"\u0050ATH"` are `Path` and `PATH` at runtime, and a `property_identifier`
+ *   written `\u0050ATH` is the same name as `PATH`. Comparing raw text passed
+ *   every spelling the source could not print, which is AGENTS.md shape 69 in
+ *   its purest form. `cookedString` / `cookedIdentifier` decode the escapes,
+ *   the parse query admits an escaped key node, and a string the reader cannot
+ *   decode (a legacy octal escape) fails CLOSED as `unclassified-spelling`.
+ * - the population witness (limit 3) is code, not prose. It used to regex a
+ *   node's raw text for a quoted spelling, so an unrelated comment that
+ *   mentioned a quoted path spelling (`const K = choose(<comment> "HOME")`)
+ *   made `K` path-about and reported a finding whose only cause was the comment
+ *   (AGENTS.md shape 43). `codeText` blanks every comment node before the
+ *   witness reads, and an escaped string is witnessed by its cooked value, so
+ *   a real spelling still admits the key.
+ *
  * ## SWEEP_HEURISTIC_LIMITS
  *
  * 1. A lone `path:` (all-lowercase) key write is NOT flagged unless the
@@ -122,15 +143,15 @@
  *
  *    That arm answers for the VARIABLE's keys, not for every computed key: an
  *    unproved key is a candidate only when the file shows it is about the
- *    variable, by its own text or by a binding it mentions (a path-naming
- *    name, initializer or assignment, or a `const` chain that proves a
- *    spelling). A blanket arm over every computed key was measured at 37
- *    unrelated sites — the composer's own `merged[key] = value` fold
- *    (`clients/safe-spawn.ts`) and 27 test env-restore loops — and those are
- *    env COPIES, which re-write whichever spellings the base already held.
- *    A key whose text names nothing this file can read (`[key]` from a loop,
- *    `[buildKey()]`, an imported constant) therefore stays outside the
- *    population, which is the residual this limit admits.
+ *    variable, by its own cooked name or text or by a binding it mentions (a
+ *    path-naming name, a comment-blanked initializer or assignment, or a
+ *    `const` chain that proves a spelling). A blanket arm over every computed
+ *    key was measured at 37 unrelated sites — the composer's own
+ *    `merged[key] = value` fold (`clients/safe-spawn.ts`) and 27 test env-restore
+ *    loops — and those are env COPIES, which re-write whichever spellings the
+ *    base already held. A key whose text names nothing this file can read
+ *    (`[key]` from a loop, `[buildKey()]`, an imported constant) therefore
+ *    stays outside the population, which is the residual this limit admits.
  * 4. The READ side is out of scope. `base.PATH ?? base.Path` and
  *    `Path`-before-`PATH` read order are the round-9 defect's shape, but a read
  *    chain is legal in both orders and this sweep does not have a verdict to
@@ -278,11 +299,17 @@ const SCOPE_KINDS = new Set([...FUNCTION_KINDS, "program", "statement_block"]);
 /** A binding owner that is not a scope: the unresolved-base fallback. */
 const OWNER_KINDS = new Set([...FUNCTION_KINDS, "program"]);
 
-/** One spelling of the variable, as a Rust regex over a key node's text. */
-const PATH_SPELLING = "^[Pp][Aa][Tt][Hh]$";
+/**
+ * A key node this sweep must READ: a spelling in source, or any key whose
+ * source carries a backslash, because a string's or identifier's VALUE is its
+ * COOKED text and `"Pa\x74h"` / `\u0050ATH` are spellings no source pattern
+ * sees (#4600 R4-1, AGENTS.md shape 69). The regex only admits the node; the
+ * cooked value decides.
+ */
+const PATH_SPELLING = "^(?:[Pp][Aa][Tt][Hh]|.*\\\\.*)$";
 
-/** A quoted spelling of the variable, quotes included. */
-const PATH_STRING_KEY = "^[\"'`][Pp][Aa][Tt][Hh][\"'`]$";
+/** A quoted spelling of the variable, quotes included, or an escaped string key. */
+const PATH_STRING_KEY = `^(?:["'\`][Pp][Aa][Tt][Hh]["'\`]|.*\\\\.*)$`;
 
 /**
  * A quoted spelling of the variable ANYWHERE in a node's text: the population
@@ -311,17 +338,140 @@ function shapeOfSpelling(text: string): SpellingShape {
 	return text === "path" ? "lowercase" : "case-variant";
 }
 
-/** `"PATH"` → `PATH`; other text unchanged. */
-function unquote(text: string): string {
-	const first = text[0];
-	if (
-		(first === '"' || first === "'" || first === "`") &&
-		text.length >= 2 &&
-		text.endsWith(first)
-	) {
-		return text.slice(1, -1);
+/** The simple one-character escapes a string literal can carry. */
+const SIMPLE_ESCAPES: Readonly<Record<string, string>> = {
+	"0": "\0",
+	b: "\b",
+	f: "\f",
+	n: "\n",
+	r: "\r",
+	t: "\t",
+	v: "\v",
+	"\\": "\\",
+	"'": "'",
+	'"': '"',
+	"`": "`",
+};
+
+/** A hex escape body as its character, or `undefined` when it is not one. */
+function fromHex(hex: string, maxLength: number): string | undefined {
+	if (hex.length === 0 || hex.length > maxLength) return undefined;
+	if (!/^[0-9a-fA-F]+$/.test(hex)) return undefined;
+	const value = Number.parseInt(hex, 16);
+	return value > 0x10ffff ? undefined : String.fromCodePoint(value);
+}
+
+/**
+ * The COOKED value of a string literal: what the program holds at runtime, not
+ * what the source spells. `"Pa\x74h"` is `Path` and `"\u0050ATH"` is `PATH`,
+ * so reading the source text instead passes every value the detector cannot
+ * see (AGENTS.md shape 69; #4600 R4-1).
+ *
+ * `undefined` means "not decodable with certainty": an unterminated token, a
+ * legacy octal escape, `\8`, `\9`, or an escape this reader does not know. A
+ * caller must fail CLOSED on it, never read it as a proven non-path value.
+ */
+function cookedString(text: string): string | undefined {
+	const quote = text[0];
+	if (quote !== '"' && quote !== "'" && quote !== "`") return undefined;
+	if (text.length < 2 || !text.endsWith(quote)) return undefined;
+	const body = text.slice(1, -1);
+	let cooked = "";
+	for (let i = 0; i < body.length; i++) {
+		const char = body[i] as string;
+		if (char !== "\\") {
+			cooked += char;
+			continue;
+		}
+		const escape = body[i + 1];
+		if (escape === undefined) return undefined;
+		i += 1;
+		// A line continuation contributes no character.
+		if (escape === "\n") continue;
+		if (escape === "\r") {
+			if (body[i + 1] === "\n") i += 1;
+			continue;
+		}
+		if (escape === "x" || escape === "u") {
+			let hex: string;
+			if (escape === "u" && body[i + 1] === "{") {
+				const close = body.indexOf("}", i + 2);
+				if (close < 0) return undefined;
+				hex = body.slice(i + 2, close);
+				i = close;
+			} else {
+				const width = escape === "x" ? 2 : 4;
+				hex = body.slice(i + 1, i + 1 + width);
+				if (hex.length !== width) return undefined;
+				i += width;
+			}
+			const decoded = fromHex(hex, 6);
+			if (decoded === undefined) return undefined;
+			cooked += decoded;
+			continue;
+		}
+		const simple = SIMPLE_ESCAPES[escape];
+		// `\0` before a digit is a legacy octal escape, which is not decoded here.
+		if (
+			simple === undefined ||
+			(escape === "0" && /\d/.test(body[i + 1] ?? ""))
+		)
+			return undefined;
+		cooked += simple;
 	}
-	return text;
+	return cooked;
+}
+
+/**
+ * An identifier's cooked NAME: `\u0050ATH` is `PATH`. A JavaScript identifier
+ * carries non-ASCII characters only as `\u` escapes, so any other backslash
+ * leaves the name as written, which matches no spelling.
+ */
+function cookedIdentifier(text: string): string {
+	if (!text.includes("\\")) return text;
+	let cooked = "";
+	for (let i = 0; i < text.length; i++) {
+		const char = text[i] as string;
+		if (char !== "\\" || text[i + 1] !== "u") {
+			cooked += char;
+			continue;
+		}
+		let hex: string;
+		if (text[i + 2] === "{") {
+			const close = text.indexOf("}", i + 3);
+			if (close < 0) return text;
+			hex = text.slice(i + 3, close);
+			i = close;
+		} else {
+			hex = text.slice(i + 2, i + 6);
+			if (hex.length !== 4) return text;
+			i += 5;
+		}
+		const decoded = fromHex(hex, 6);
+		if (decoded === undefined) return text;
+		cooked += decoded;
+	}
+	return cooked;
+}
+
+/** A comment marker in a node's source: the cheap pre-test for blanking. */
+const COMMENT_HINT = /\/[/*]/;
+
+/**
+ * A node's source with every COMMENT blanked, so prose never decides a
+ * structural question (AGENTS.md shape 43; #4600 R4-2). A quoted spelling
+ * inside a STRING survives on purpose: that is the population witness. The
+ * replacement is textual because `range()` reports byte offsets while `text()`
+ * reports UTF-16 indices, and mixing the two slices a non-ASCII file wrong.
+ */
+function codeText(node: SgNode): string {
+	const text = node.text();
+	if (!COMMENT_HINT.test(text)) return text;
+	let code = text;
+	for (const comment of node.findAll({ rule: { kind: "comment" } })) {
+		code = code.split(comment.text()).join(" ".repeat(comment.text().length));
+	}
+	return code;
 }
 
 /** The named children of a node, memoised for one scan. */
@@ -394,7 +544,9 @@ function proveChain(
 		visited.add(declaration.index);
 		cursor = initializer;
 	}
-	return kindName(cursor) === "string" ? unquote(cursor.text()) : undefined;
+	return kindName(cursor) === "string"
+		? cookedString(cursor.text())
+		: undefined;
 }
 
 /**
@@ -513,7 +665,7 @@ function buildContext(root: SgNode): ScanContext {
 				const initializer = declaration.initializer;
 				if (initializer === undefined) continue;
 				if (
-					QUOTED_PATH.test(initializer.text()) ||
+					mentionsPathSpelling(initializer) ||
 					foldsToPath(
 						proveChain(initializer, (reference) =>
 							lookup(reference, reference.text()),
@@ -534,7 +686,7 @@ function buildContext(root: SgNode): ScanContext {
 			const left = assignment.field("left");
 			const right = assignment.field("right");
 			if (left?.kind() === "identifier" && right !== null) {
-				if (QUOTED_PATH.test(right.text())) pathAbout.add(left.text());
+				if (mentionsPathSpelling(right)) pathAbout.add(left.text());
 			}
 		}
 		return { byScope, byName, pathAbout };
@@ -568,21 +720,27 @@ function buildContext(root: SgNode): ScanContext {
  * The path-folded key `node` writes, if it writes one.
  *
  * `pair` keys, shorthand entries and `fromEntries` tuple heads all reach here.
- * A string key's text is unquoted; a computed key is resolved through a
- * literal-const alias, and otherwise fails closed only when it NAMES the
- * variable (limit 2/3).
+ * A string key is read by its COOKED value and an identifier key by its cooked
+ * name, because the source spelling is not the runtime value (#4600 R4-1). A
+ * computed key is resolved through a literal-const alias, and otherwise fails
+ * closed only when it NAMES the variable (limit 2/3).
  */
 function literalKeyRef(node: SgNode, context: ScanContext): KeyRef | undefined {
 	const line = node.range().start.line + 1;
 	switch (node.kind()) {
 		case "property_identifier":
 		case "shorthand_property_identifier": {
-			const text = node.text();
+			const text = cookedIdentifier(node.text());
 			if (!foldsToPath(text)) return undefined;
 			return { spelling: text, shape: shapeOfSpelling(text), line };
 		}
 		case "string": {
-			const text = unquote(node.text());
+			const text = cookedString(node.text());
+			// A string this reader cannot decode is not proof of some other key:
+			// name it by its source and let the fail-closed arm answer.
+			if (text === undefined) {
+				return { spelling: node.text(), shape: "expression", line };
+			}
 			if (!foldsToPath(text)) return undefined;
 			return { spelling: text, shape: shapeOfSpelling(text), line };
 		}
@@ -628,26 +786,64 @@ function expressionKeyRef(
 		if (!foldsToPath(proved)) return undefined;
 		return { spelling: proved, shape: shapeOfSpelling(proved), line };
 	}
+	// A string this reader cannot decode proves no value, so it must not read as
+	// some other key: fail closed on the key's own source (#4600 R4-1).
+	if (kindName(node) === "string") {
+		return { spelling: node.text(), shape: "expression", line };
+	}
 	if (!keyNamesTheVariable(node, context)) return undefined;
 	return { spelling: node.text(), shape: "expression", line };
 }
 
 /**
  * Is this unproved key a candidate for the variable at all (limit 3)? Its own
- * text names the variable, or it mentions a name the file shows is about the
- * variable. A key that names nothing readable here (`[key]` from a loop,
- * `[buildKey()]`, an imported constant) stays outside the population: a
+ * name or text names the variable, or it mentions a binding the file shows is
+ * about the variable. A key that names nothing readable here (`[key]` from a
+ * loop, `[buildKey()]`, an imported constant) stays outside the population: a
  * blanket arm over every computed key measured 37 unrelated sites — the
  * composer's own `merged[key] = value` fold and 27 test env-restore loops — and
  * a generic env copy is not a PATH composition, because it re-writes the
  * spellings the base already held.
+ *
+ * Prose is not a name: comments are blanked before the text test, so
+ * `[buildKey(<comment>)]` is not a candidate (#4600 R4-2).
  */
 function keyNamesTheVariable(node: SgNode, context: ScanContext): boolean {
-	if (/path/i.test(node.text())) return true;
+	if (/path/i.test(codeText(node))) return true;
+	// `[\u0050ATH]` names the variable through an escape, which no text test sees.
+	if (
+		kindName(node) === "identifier" &&
+		/path/i.test(cookedIdentifier(node.text()))
+	) {
+		return true;
+	}
 	for (const identifier of node.findAll({
 		rule: { kind: "identifier" },
 	})) {
 		if (context.pathAbout(identifier.text())) return true;
+	}
+	return false;
+}
+
+/**
+ * Does this expression show the path variable (the population witness, limit
+ * 3)? A quoted spelling in its CODE, or — when the source carries an escape —
+ * a string node whose COOKED value is a spelling, or one this reader cannot
+ * decode (fail closed on the population too, so an undecodable chain hop still
+ * reaches the verdict). Never a bare `path` word, which every `path.join(…)`
+ * meets, and never prose (#4600 R4-2).
+ */
+function mentionsPathSpelling(node: SgNode): boolean {
+	const code = codeText(node);
+	if (QUOTED_PATH.test(code)) return true;
+	if (!code.includes("\\")) return false;
+	const literals =
+		kindName(node) === "string"
+			? [node]
+			: node.findAll({ rule: { kind: "string" } });
+	for (const literal of literals) {
+		const cooked = cookedString(literal.text());
+		if (cooked === undefined || foldsToPath(cooked)) return true;
 	}
 	return false;
 }
@@ -2038,6 +2234,149 @@ describe("#4590 env PATH composition", () => {
 				"const env = { ...process.env, [`PATH`]: next };",
 			).map((f) => f.reason),
 		).toEqual(["unclassified-spelling"]);
+	});
+
+	/**
+	 * #4600 R4-1: a key's spelling is its COOKED value, not its source text —
+	 * `"Pa\x74h"` is `Path` and `"\u0050ATH"` is `PATH` at runtime — and an
+	 * identifier's cooked name is what it spells too. Comparing source text is
+	 * AGENTS.md shape 69 in its purest form: the detector knows the spellings it
+	 * can print and passes every value it cannot. Every row below returned `[]`
+	 * before this round, including the direct key and the `fromEntries` tuple.
+	 */
+	it("reads a key's cooked value instead of its source spelling", () => {
+		const plants: ReadonlyArray<{
+			label: string;
+			source: string;
+			expected: Array<[string, PathKeyReason]>;
+		}> = [
+			{
+				label: "a const chain through \\x74",
+				source:
+					'const PATH_KEY = "Pa\\x74h"; const env = { ...process.env, [PATH_KEY]: next };',
+				expected: [["Path", "spread-override"]],
+			},
+			{
+				label: "a const chain through \\u0050",
+				source:
+					'const PATH_KEY = "\\u0050ATH"; const env = { ...process.env, [PATH_KEY]: next };',
+				expected: [["PATH", "spread-override"]],
+			},
+			{
+				label: "a quoted key through \\x74",
+				source: 'const env = { ...process.env, "Pa\\x74h": next };',
+				expected: [["Path", "spread-override"]],
+			},
+			{
+				label: "a computed quoted key through \\x74",
+				source: 'const env = { ...process.env, ["Pa\\x74h"]: next };',
+				expected: [["Path", "spread-override"]],
+			},
+			{
+				label: "a quoted key through \\u0050",
+				source: 'const env = { ...process.env, "\\u0050ATH": next };',
+				expected: [["PATH", "spread-override"]],
+			},
+			{
+				label: "a property identifier written with \\u0050",
+				source: "const env = { ...process.env, \\u0050ATH: next };",
+				expected: [["PATH", "spread-override"]],
+			},
+			{
+				label: "an alias through \\x50",
+				source:
+					'const k = "\\x50ATH"; const env = { ...process.env, [k]: next };',
+				expected: [["PATH", "spread-override"]],
+			},
+			{
+				label: "a subscript write through \\x74",
+				source: 'process.env["Pa\\x74h"] = next;',
+				expected: [["Path", "live-process-env"]],
+			},
+			{
+				label: "an Object.assign source through \\x74",
+				source:
+					'const env = Object.assign({}, process.env, { "Pa\\x74h": next });',
+				expected: [["Path", "spread-override"]],
+			},
+			{
+				label: "a fromEntries tuple through \\x74",
+				source:
+					'Object.fromEntries([...Object.entries(process.env), ["Pa\\x74h", next]]);',
+				expected: [["Path", "spread-override"]],
+			},
+			{
+				label: "a ProcessEnv-annotated composition through \\x74",
+				source:
+					'const PATH_KEY = "Pa\\x74h"; const env: ProcessEnv = { ...base, [PATH_KEY]: next };',
+				expected: [["Path", "spread-override"]],
+			},
+		];
+		expect(
+			plants.map(({ label, source }) => [
+				label,
+				findPathKeyFindings(source).map((f) => [f.spelling, f.reason]),
+			]),
+		).toEqual(plants.map(({ label, expected }) => [label, expected]));
+		// The escaped key is the SECOND spelling of the variable, not an unnamed
+		// write: `PATH` and `Pa\x74h` in one composition is the defect itself.
+		expect(
+			findPathKeyFindings(
+				'const env = { ...process.env, PATH: a, "Pa\\x74h": b };',
+			).map((f) => [f.line, f.spelling, f.reason]),
+		).toEqual([
+			[1, "PATH", "dual-spelling"],
+			[1, "Path", "dual-spelling"],
+		]);
+	});
+
+	// The other direction of the same rule: a string this reader cannot decode
+	// proves no value, so it fails CLOSED as unproved rather than reading as some
+	// other key. `\164` is a legacy octal escape, valid to the parser and not
+	// decoded here on purpose.
+	it("reports a string it cannot decode as unproved instead of silence", () => {
+		expect(
+			findPathKeyFindings(
+				'const env: ProcessEnv = { ...base, "Pa\\164h": next };',
+			).map((f) => [f.spelling, f.reason]),
+		).toEqual([['"Pa\\164h"', "unclassified-spelling"]]);
+		expect(
+			findPathKeyFindings(
+				'const k = "Pa\\164h"; const env = { ...process.env, [k]: next };',
+			).map((f) => [f.spelling, f.reason]),
+		).toEqual([["k", "unclassified-spelling"]]);
+	});
+
+	/**
+	 * #4600 R4-2: the population witness is CODE. It used to regex a node's raw
+	 * text for a quoted spelling, so a comment made a name path-about and the
+	 * fail-closed arm reported a finding whose only cause was prose (AGENTS.md
+	 * shape 43). Every plant below was clean before this round except where
+	 * noted, and the control proves the comment is the only difference.
+	 */
+	it("does not read a comment as a population witness", () => {
+		for (const source of [
+			'const K = choose(/* "PATH" */ "HOME"); const env = { ...process.env, [K]: next };',
+			'const K = choose(/* "Path" */ "HOME"); const env = { ...process.env, [K]: next };',
+			'let K = "other"; K = choose(/* "PATH" */ "HOME"); const env = { ...process.env, [K]: next };',
+			'const K = build(// "PATH"\n"HOME"); const env = { ...process.env, [K]: next };',
+			"const env = { ...process.env, [buildKey(/* PATH */)]: next };",
+			'const K = choose("HOME"); const env = { ...process.env, [K]: next };',
+		]) {
+			expect(findPathKeyFindings(source), source).toEqual([]);
+		}
+		// The witness still admits a real spelling, in all three forms it reads: a
+		// call argument, an assignment, and a string whose cooked value is one.
+		for (const source of [
+			'const K = pick("PATH"); const env = { ...process.env, [K]: next };',
+			'let K = "other"; K = pick("Path"); const env = { ...process.env, [K]: next };',
+			'const K = pick("\\u0050ATH"); const env = { ...process.env, [K]: next };',
+		]) {
+			expect(
+				findPathKeyFindings(source).map((f) => [f.spelling, f.reason]),
+				source,
+			).toEqual([["K", "unclassified-spelling"]]);
+		}
 	});
 
 	// Limit 2's other direction: an unproved key in a composition this sweep

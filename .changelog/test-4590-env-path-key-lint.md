@@ -20,4 +20,7 @@ audience: internal
   proved — a quoted string, or a `const` chain of them — or reported: a cast, a
   template, a concatenation, a call, a non-null or comma key, a mutable
   binding, a cycle or a wrapper is `unclassified-spelling`, never a silent
-  pass.
+  pass. A key is read by its cooked value, so `"Pa\x74h"` is `Path` and
+  `\u0050ATH` is `PATH` whatever the source spells; a string the reader cannot
+  decode (a legacy octal escape) reports rather than passing, and a comment
+  never decides that a name is about the variable.
