@@ -2374,10 +2374,14 @@ function recordSentContent(
 			state.incrementalTextBearingPaths.delete(oldestPath);
 			if (!binding || binding.text === undefined) continue;
 			// #2066: `lastLine` is dropped here with the text it describes. The
-			// #1095 version/hash binding is what must survive the strip.
+			// #1095 version/hash binding is what must survive the strip, and with
+			// it the save evidence (#4532 round 8 N1, shape 55): a landed save is
+			// not part of the payload, so a rebuild without `savedHash` made the
+			// next saved touch of the same bytes send a second didSave.
 			state.documentContentHashes.set(oldestPath, {
 				version: binding.version,
 				hash: binding.hash,
+				savedHash: binding.savedHash,
 				changedAtMs: binding.changedAtMs,
 				openedAtMs: binding.openedAtMs,
 				openedHash: binding.openedHash,

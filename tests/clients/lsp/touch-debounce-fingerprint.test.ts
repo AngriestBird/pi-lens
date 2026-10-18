@@ -25,6 +25,7 @@ import {
 	getDegradationSummary,
 	resetDegradationLedger,
 } from "../../../clients/degradation-ledger.js";
+import { TEXT_DOCUMENT_SYNC_KIND_INCREMENTAL } from "../../../clients/lsp/sync-kind.js";
 import { flushAllNdjsonWriters } from "../../../clients/ndjson-logger.js";
 import { getGlobalPiLensLogDir } from "../../../clients/probe-home-state.js";
 import { waitFor } from "../interleaving-kit.js";
@@ -1027,5 +1028,109 @@ describe("#4532 gap 9 — a skip needs the path's notify queue idle", () => {
 				.mocked(state.connection.sendNotification)
 				.mock.calls.filter(([method]) => method === "textDocument/didSave"),
 		).toHaveLength(1);
+	});
+
+	// R8 N1 (Greptile 4304769101, shape 55): Incremental's text budget strips a
+	// record's payload by REBUILDING it, and the rebuild used to write a fresh
+	// entry without `savedHash`. After 128 text-bearing documents the record no
+	// longer said the save landed, so the next saved touch of the same bytes
+	// sent a second didSave — on a save-triggered whole-project server, another
+	// project check for bytes already saved.
+	it("keeps a landed save's evidence when text eviction strips the record", async () => {
+		const { service, state } = await setup();
+		state.syncKind = TEXT_DOCUMENT_SYNC_KIND_INCREMENTAL;
+		const touch = { diagnostics: "none" as const, source: "test" };
+		const saved = { ...touch, saved: true };
+		const saves = () =>
+			vi
+				.mocked(state.connection.sendNotification)
+				.mock.calls.filter(([method]) => method === "textDocument/didSave");
+		await service.touchFile(FILE, A, saved);
+		await queueDrained(state);
+		expect(saves(), "the first saved touch must save once").toHaveLength(1);
+		// Other documents fill the text budget; the oldest (FILE) is what the
+		// eviction rebuild strips.
+		for (
+			let index = 0;
+			index < clientModule.MAX_INCREMENTAL_TEXT_RETAINED_ENTRIES;
+			index++
+		) {
+			await service.openFile(`/repo/evict-${index}.ts`, `text-${index}`);
+		}
+		const stripped = state.documentContentHashes.get(normalizeMapKey(FILE));
+		expect(
+			stripped?.text,
+			"the fixture must have stripped the payload",
+		).toBeUndefined();
+		expect(
+			stripped?.savedHash,
+			"the rebuilt record must carry the save evidence the record held",
+		).toBe(hashDiagnosticContent(A));
+		await service.touchFile(FILE, A, saved);
+		await queueDrained(state);
+		expect(
+			saves(),
+			"a stripped record must not owe a second save for bytes already saved",
+		).toHaveLength(1);
+	});
+
+	// R8 N2 (shape 55): the save mark belongs to the record the send COVERED,
+	// never to whatever the map holds when the send settles. Another path's push
+	// evicting this record mid-flight installs a fresh entry; stamping THAT one
+	// would claim a save for bytes no didSave covered and suppress the save they
+	// still owe.
+	it("keeps a save that lands late out of the record that replaced it", async () => {
+		const { service, state } = await setup();
+		state.syncKind = TEXT_DOCUMENT_SYNC_KIND_INCREMENTAL;
+		const touch = { diagnostics: "none" as const, source: "test" };
+		const key = normalizeMapKey(FILE);
+		await service.touchFile(FILE, A, touch);
+		let release!: () => void;
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let saving = false;
+		vi.mocked(state.connection.sendNotification).mockImplementation(
+			async (method: string) => {
+				if (method === "textDocument/didSave") {
+					saving = true;
+					await held;
+				}
+			},
+		);
+		const savedTouch = service.touchFile(FILE, A, { ...touch, saved: true });
+		await waitFor(() => saving, Boolean, {
+			timeoutMs: 2_000,
+			yieldControl: tick,
+		});
+		// A different path's send runs on its own queue, so it evicts FILE's
+		// record while FILE's save is still on the wire.
+		for (
+			let index = 0;
+			index < clientModule.MAX_INCREMENTAL_TEXT_RETAINED_ENTRIES;
+			index++
+		) {
+			await service.openFile(`/repo/evict-late-${index}.ts`, `text-${index}`);
+		}
+		const replacement = state.documentContentHashes.get(key);
+		expect(
+			replacement?.hash,
+			"the replacement must still name this document's bytes",
+		).toBe(hashDiagnosticContent(A));
+		expect(
+			replacement?.text,
+			"the eviction must have rebuilt the record mid-flight",
+		).toBeUndefined();
+		release();
+		await savedTouch;
+		await queueDrained(state);
+		const after = state.documentContentHashes.get(key);
+		expect(after, "the record must survive the save's completion").toBe(
+			replacement,
+		);
+		expect(
+			after?.savedHash,
+			"the late completion stamped the replacement record",
+		).toBeUndefined();
 	});
 });
