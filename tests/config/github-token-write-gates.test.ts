@@ -204,8 +204,7 @@ describe("fork-capped workflow token writes (#2993)", () => {
 // undeclared variable still expands to nothing.
 //
 // Stated limits of a source census: a shell that runs a FILE (`bash ci.sh`) or
-// remote input (`curl … | sh`) is not read, a heredoc handed to a NON-shell
-// interpreter (`node <<'NODE'`, `python3 - <<'PY'`) is not read, an inline
+// remote input (`curl … | sh`) is not read, an inline
 // `-c`/`-e` payload that does not itself name a `gh` call is not reported (and a
 // matcher pattern that does, `grep -e 'gh …'`, IS reported: the census cannot
 // tell a pattern from a program), and an earlier `echo GH_REPO=… >> $GITHUB_ENV`
@@ -217,11 +216,27 @@ describe("fork-capped workflow token writes (#2993)", () => {
 
 /** Shell interpreters whose `-c` argument is itself a script bash runs. */
 const SHELL_COMMANDS = new Set(["bash", "sh", "dash", "zsh", "ksh"]);
+/** Interpreters whose stdin can carry a program the census cannot read. */
+const STDIN_INTERPRETERS = new Set([
+	...SHELL_COMMANDS,
+	"python3",
+	"node",
+	"pwsh",
+]);
+/** Prefix commands whose later argument may be the stdin-fed interpreter. */
+const STDIN_WRAPPERS = new Set([
+	"command",
+	"env",
+	"exec",
+	"nice",
+	"sudo",
+	"timeout",
+]);
 /** Flags through which a non-shell executor is handed its program as a string. */
 const SCRIPT_FLAGS = new Set(["-c", "-e", "-p", "--eval", "--print"]);
 /**
  * Words that open or close a context this census does not model: a conditional,
- * a loop, a case, a function or group body, or `eval`. An admitted
+ * a loop, a case, a function or group body. An admitted
  * `export GH_REPO` survives none of them (STATE_TABLE.md row 13).
  */
 const CONTEXT_WORDS = new Set([
@@ -241,7 +256,6 @@ const CONTEXT_WORDS = new Set([
 	"esac",
 	"select",
 	"function",
-	"eval",
 ]);
 /**
  * `gh api` flags that consume the next word as their value (gh 2.100.0
@@ -266,17 +280,6 @@ const API_OPTION_VALUES = new Set([
 	"-t",
 	"--template",
 ]);
-/**
- * A heredoc operator as the segment's LAST token, however the delimiter is
- * spelled (`<<EOF`, `<< EOF`, `<<-EOF`, `<<- 'EOF'`). `scannableRegions`
- * subtracts a heredoc body, so a real redirection ends its command line; a
- * `<<` inside argument text (`printf '%s\n' 'bash<<EOF'`) is followed by more
- * of the word and is not one. A herestring (`<<<`, stdin from a string) is a
- * different operator and is reported by its own arm. A stated limit: an
- * operator line that continues with another redirection (`bash <<EOF 2>&1`) is
- * not recognised.
- */
-const HEREDOC_AT_END = /(?<!<)<<(?!<)-?\s*(?:'[^']*'|"[^"]*"|[^\s'"|;&]+)\s*$/;
 /** One variable reference as a whole word: `$GH_BIN`, `${GH_BIN}`. */
 const VARIABLE_WORD = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/;
 /**
@@ -429,7 +432,9 @@ function variableValue(
 	if (rebound.has(name)) return undefined;
 	const declared = env[name];
 	if (declared !== undefined) return declared;
-	return RUNNER_PROVIDED_VARIABLE.test(name) ? "runner-provided" : undefined;
+	return RUNNER_PROVIDED_VARIABLE.test(name)
+		? "__RUNNER_REPOSITORY__"
+		: undefined;
 }
 
 /**
@@ -538,15 +543,17 @@ function isRepoValue(
 	const expanded = expandReferences(text, env, rebound).trim();
 	// Two expansion forms are modelled above; any other `$` or backtick left in
 	// the operand (`${VAR:-}`, `$1`, `${ARR[0]}`) is text the census cannot read,
-	// so it is no source. A `${{ … }}` workflow expression is a declared value.
+	// so it is no source. Only the two repository workflow expressions below are
+	// declared values.
 	const residual = expanded.replace(/\$\{\{[\s\S]*?\}\}/g, "");
-	return (
-		expanded !== "" &&
-		expanded !== "${{ '' }}" &&
-		!expanded.startsWith("-") &&
-		!expanded.includes(scannableRegions("$(true)")[0]) &&
-		!/[$`]/.test(residual)
-	);
+	if (expanded === "__RUNNER_REPOSITORY__") return true;
+	if (/^\$\{\{\s*github\.repository\s*\}\}$/.test(expanded)) return true;
+	if (/^\$\{\{\s*env\.GH_REPO\s*\}\}$/.test(expanded)) {
+		return isRepoValue(env.GH_REPO, env, literal, rebound);
+	}
+	if (expanded === "" || expanded.startsWith("-") || /[$`]/.test(residual))
+		return false;
+	return /^(?:[^/\s]+\/)?[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(expanded);
 }
 
 /** `-R owner/repo`, `-Rowner/repo`, `--repo owner/repo`, `--repo=owner/repo`. */
@@ -571,33 +578,46 @@ function hasRepoOperand(
 }
 
 /**
- * The shell a heredoc body is handed to, if any. The body is subtracted from
- * the regions, so a `gh` call inside it is invisible to the segment scan; the
- * census reports that shape instead of reading it. An attached redirection
- * (`bash<<EOF`) and a wrapper (`timeout 30 bash <<EOF`) name the same shell a
- * spaced one does, and a heredoc handed to any other command is data
- * (`cat > f <<EOF`), which is not a script at all.
+ * Return the stdin-fed interpreter in a command, if any. Redirections may be
+ * leading, trailing, attached to the command, or followed by another
+ * redirection. Only the explicitly listed wrappers are traversed; a quoted
+ * example such as `printf 'bash<<EOF'` remains an ordinary printf argument.
  */
-function heredocShell(
+function stdinFedInterpreter(
 	words: string[],
 	env: Record<string, string>,
 ): string | undefined {
-	// The operator's own word may carry the command (`bash<<EOF`), even behind a
-	// wrapper (`timeout 30 bash<<EOF`), so the text before each `<<` is a
-	// candidate beside the words themselves. A shell spelled as an argument is
-	// counted too: that reports, and never silently misses a body it hands on.
-	const candidates = [
-		...words
-			.map((word) =>
-				word.includes("<<") ? word.slice(0, word.indexOf("<<")) : "",
-			)
-			.filter((word) => word !== ""),
-		...words,
-	];
-	for (const candidate of candidates) {
-		if (SHELL_COMMANDS.has(resolveCommand(candidate, env).command)) {
-			return candidate;
+	let index = 0;
+	let hasStdin = false;
+	let throughWrapper = false;
+	while (index < words.length) {
+		const word = words[index];
+		if (["|", ";", "&&", "||"].includes(word)) return undefined;
+		const attached = /^(.*?)(<<<|<<-?)/.exec(word);
+		if (attached) {
+			hasStdin = true;
+			if (attached[1] !== "") {
+				const resolved = resolveCommand(attached[1], env).command;
+				return STDIN_INTERPRETERS.has(resolved) ? attached[1] : undefined;
+			}
+			index++;
+			continue;
 		}
+		if (/^\d*[<>]/.test(word)) {
+			if (/^\d*<<<|^\d*<<-?/.test(word)) hasStdin = true;
+			index++;
+			continue;
+		}
+		const resolved = resolveCommand(word, env).command;
+		if (STDIN_INTERPRETERS.has(resolved)) {
+			const laterStdin = words
+				.slice(index + 1)
+				.some((candidate) => /^\d*(?:<<<|<<-?)/.test(candidate));
+			return hasStdin || laterStdin ? word : undefined;
+		}
+		if (!throughWrapper && !STDIN_WRAPPERS.has(resolved)) return undefined;
+		throughWrapper = true;
+		index++;
 	}
 	return undefined;
 }
@@ -740,17 +760,14 @@ function classifySegment(
 		return;
 	}
 	const command = resolved.command;
-	// A heredoc body is subtracted from the regions before the census sees it, so
-	// a command that hands that body to a shell hides an unreadable script
-	// (`bash <<EOF`, `bash<<EOF`, `timeout 30 bash <<EOF`). A heredoc handed to
-	// anything else is data (`cat > f <<EOF`), which is not a script at all.
-	const handedToShell = HEREDOC_AT_END.test(text.trim())
-		? heredocShell(rest, scope)
-		: undefined;
-	if (handedToShell !== undefined && regionNamesGhCall) {
+	// Stdin redirections are unreadable program input. The lexer subtracts a
+	// heredoc body before this scan, while a herestring stays in the segment;
+	// both must report when their interpreter's input names a gh call.
+	const stdinInterpreter = stdinFedInterpreter(rest, scope);
+	if (stdinInterpreter !== undefined && regionNamesGhCall) {
 		census.unclassified.push({
 			step,
-			detail: `\`${handedToShell}\` reads its script from a heredoc body this census does not read`,
+			detail: `\`${stdinInterpreter}\` reads a stdin-fed program this census does not read`,
 		});
 		return;
 	}
@@ -770,19 +787,6 @@ function classifySegment(
 			}
 			return;
 		}
-		// A herestring is stdin from a string: the same unreadable script a
-		// heredoc body is, one operator over (`bash <<< '<gh call>'`).
-		if (
-			rest.slice(1).some((word) => word.startsWith("<<<")) &&
-			regionNamesGhCall
-		) {
-			census.unclassified.push({
-				step,
-				detail: `\`${rest[0]}\` reads its script from a herestring, which names a \`gh\` call`,
-			});
-			return;
-		}
-		if (rest.slice(1).some((word) => word.startsWith("<<<"))) return;
 		// `bash ci.sh` runs a FILE: a stated limit, not a body the census misses.
 		if (
 			rest.slice(1).some((word) => !word.startsWith("-") && !/^[<>]/.test(word))
@@ -1279,9 +1283,11 @@ describe("workflow gh calls resolve a repository (#4382)", () => {
 	});
 
 	it("applies exports at the script level they were written in", () => {
-		// F3: a substitution is a subshell, so an export outside it does not
-		// reach the call inside (row 13), and a later export cannot satisfy an
-		// earlier substitution either. Both directions report.
+		// F3/F20: the census does not model an exported value crossing into a
+		// command substitution, so an export outside it does not certify the call
+		// inside. A later export cannot satisfy an earlier substitution either.
+		// Both directions report; this is a conservative model limit, not a claim
+		// that Bash fails to inherit exported variables in a subshell.
 		for (const body of [
 			`$(${BARE_GH_WRITE})`,
 			"`" + BARE_GH_WRITE + "`",
@@ -1596,6 +1602,33 @@ describe("workflow gh calls resolve a repository (#4382)", () => {
 		expect(
 			probe({ run: `${BARE_GH_WRITE} --repo "\${{ github.repository }}"` })
 				.findings,
+		).toEqual([]);
+	});
+
+	it("requires repository operands to be provable slugs", () => {
+		// F18: non-empty text is not a repository source; live gh rejects these
+		// values during repository resolution.
+		for (const run of [
+			`${BARE_GH_WRITE} --repo not-a-slug`,
+			`${BARE_GH_WRITE} --repo /`,
+			`${BARE_GH_WRITE} --repo owner`,
+			`${BARE_GH_WRITE} --repo .`,
+			`${BARE_GH_WRITE} --repo "\${{ inputs.missing }}"`,
+			`GH_REPO=not-a-slug ${BARE_GH_WRITE}`,
+		]) {
+			expect(
+				probe({ run }).findings.map((found) => found.kind),
+				run,
+			).toEqual(["missing-source"]);
+		}
+		expect(
+			probe({ run: `${BARE_GH_WRITE} --repo owner/repo` }).findings,
+		).toEqual([]);
+		expect(
+			probe({
+				run: `${BARE_GH_WRITE} --repo "\${{ env.GH_REPO }}"`,
+				workflowEnv: { GH_REPO: "owner/repo" },
+			}).findings,
 		).toEqual([]);
 	});
 
@@ -1963,6 +1996,24 @@ describe("the census's admitted source list (#4382 r6)", () => {
 		// Boundary: a herestring with no call in it is silent, like any other
 		// readable-looking payload with nothing to read.
 		expect(probe({ run: `bash <<< 'echo hello'` }).findings).toEqual([]);
+	});
+
+	it("rejects every unread stdin-fed interpreter spelling", () => {
+		// Round 7 plants: attached, leading, trailing, wrapped, and non-shell
+		// interpreter stdin forms must not pass after their payload is subtracted.
+		for (const run of [
+			`bash <<EOF 2>&1\n${BARE_GH_WRITE}\nEOF`,
+			`bash<<<'${BARE_GH_WRITE}'`,
+			`<<EOF bash\n${BARE_GH_WRITE}\nEOF`,
+			`timeout 30 bash <<EOF | cat\n${BARE_GH_WRITE}\nEOF`,
+			`python3 - <<PY\n${BARE_GH_WRITE}\nPY`,
+			`node <<'JS'\n${BARE_GH_WRITE}\nJS`,
+		]) {
+			expect(
+				probe({ run }).findings.map((found) => found.kind),
+				run,
+			).toEqual(["unclassified"]);
+		}
 	});
 
 	it("reports a nested shell program instead of reading it", () => {
