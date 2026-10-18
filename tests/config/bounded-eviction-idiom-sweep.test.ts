@@ -249,7 +249,6 @@ const DESTRUCTURED_ITERATOR_BINDING =
 const ORDERED_BINDING =
 	/\b(?:const|let|var)\s+([\w$]+)\s*(?::[^=;\n]+)?=(?!=)\s*/g;
 const ORDER_CALL = /\.\s*(?:sort|toSorted)\s*\(/g;
-const SINGLE_SELECTION = /^\s*(?:\[\s*0\s*\]|\.\s*(?:find|at)\s*\()/;
 // A cap may be expressed positively, on length, or by its early-return
 // complement (occupied < ceiling). This is lexical evidence, not data flow.
 const CAP_COMPARISON =
@@ -270,11 +269,38 @@ function balancedEnd(source: string, start: number, call = false): number {
 	return source.length;
 }
 
-/** A separate selection binding still consumes the ordered sequence. */
+/** Follow local ordered-sequence provenance through transforms and aliases. */
 function selectsBinding(text: string, name: string): boolean {
-	const selections = /([\w$]+)\s*(?:\[\s*0\s*\]|\.\s*(?:find|at)\s*\()/g;
-	for (const match of text.matchAll(selections)) {
-		if (match[1] === name) return true;
+	const sequences = new Set([name]);
+	// Initializers are visited in source order, so a derived binding can itself
+	// feed the next alias. Cross-function and reassigned aliases remain residual.
+	for (const binding of text.matchAll(ORDERED_BINDING)) {
+		const start = (binding.index ?? 0) + binding[0].length;
+		const receiver = /^([\w$]+)\s*(?=\.|;|$)/.exec(text.slice(start));
+		if (receiver && sequences.has(receiver[1] ?? ""))
+			sequences.add(binding[1] ?? "");
+	}
+	for (const token of text.matchAll(IDENTIFIER_TOKEN)) {
+		if (!sequences.has(token[0])) continue;
+		let cursor = (token.index ?? 0) + token[0].length;
+		// Skip balanced transform calls instead of requiring selection adjacent
+		// to sorting: filter/map callbacks may contain nested calls or semicolons.
+		while (cursor < text.length) {
+			const tail = text.slice(cursor);
+			if (/^\s*\[/.test(tail)) return true;
+			const method = /^\s*\.\s*([\w$]+)\s*\(/.exec(tail);
+			if (!method) break;
+			if (/^(?:find|at|shift|pop)$/.test(method[1] ?? "")) return true;
+			cursor = balancedEnd(text, cursor + method[0].length, true);
+		}
+	}
+	for (const loop of text.matchAll(
+		/\bfor\s*\([^;]*?\bof\s+([\w$]+)\s*\)\s*\{/g,
+	)) {
+		if (!sequences.has(loop[1] ?? "")) continue;
+		const start = (loop.index ?? 0) + loop[0].length;
+		const body = text.slice(start, balancedEnd(text, start, true));
+		if (/\.\s*(?:delete|splice)\s*\(/.test(body)) return true;
 	}
 	return false;
 }
@@ -378,6 +404,21 @@ const DEFINITION_FILE = "clients/bounded-cache.ts";
  * paste it in.
  */
 const EXEMPT_SITES: Readonly<Record<string, string>> = {
+	"clients/widget-state.ts#pruneInactiveFileRecords:15adad3b":
+		"Only inactive files with no live diagnostic qualify; touchedAt orders " +
+		"multiple victims until the soft cap is met. Neither bounded class " +
+		"expresses eligibility partition plus external recency (document-drift class).",
+	"clients/lsp/index.ts#LSPService:2676aced":
+		"Frozen LSP source (#4580 r4): markTouched maintains write recency by " +
+		"delete/set and trims oldest-first; reads must not promote. BoundedFifoMap " +
+		"fits this count cap, but migration is deferred under the explicit LSP freeze.",
+	"clients/slow-fs.ts#median:c93fd2b8":
+		"Non-member: sorted sample indices calculate a median without removing " +
+		"any source entry. The lexical cap/selection census deliberately overmatches.",
+	"scripts/bench-word-index-replacement.mjs#run:c93fd2b8":
+		"Non-member: sorted benchmark samples calculate percentiles; no source " +
+		"entry is evicted. A nearby comparison is lexical evidence only.",
+
 	"clients/lsp/document-drift.ts#DocumentDriftTracker:add9342e":
 		"Not evict-OLDEST (#4503): the walk SKIPS every record whose document a " +
 		"live server still holds and evicts the oldest one nobody holds, because " +
@@ -535,7 +576,10 @@ export function findEvictionLines(stripped: string): number[] {
 				true,
 			);
 			if (
-				SINGLE_SELECTION.test(expression.slice(close)) ||
+				selectsBinding(
+					`const ${name} = __ordered${expression.slice(close)};`,
+					"__ordered",
+				) ||
 				selectsBinding(below, name)
 			) {
 				hits.add(index + 1);
@@ -1125,6 +1169,78 @@ describe("#2442 no new hand-rolled evict-oldest idiom outside bounded-cache.ts",
 }`;
 			expect(findEvictionLines(stripSource(source)), transform).toEqual([2]);
 		}
+	});
+
+	it.each([
+		".filter(eligible)[0]",
+		".shift()",
+		".pop()",
+		"[index]",
+		".filter(eligible).at(-1)",
+		".filter((value) => { inspect(value); return eligible(value); })[0]",
+	])("flags derived ordered element consumer %s, #4580 r4 F1", (selector) => {
+		// Shape 69: transforms and removal APIs must not hide selection.
+		expect(
+			findEvictionLines(
+				stripSource(`if (m.size <= CAP) return;
+ const victim = sequence.sort(cmp)${selector};
+ m.delete(victim);`),
+			),
+		).toEqual([2]);
+	});
+
+	it("flags aliases of ordered sequences, #4580 r4 F1", () => {
+		// Greptile's alias and a second derived binding retain ordered provenance.
+		expect(
+			findEvictionLines(`if (m.size <= CAP) return;
+ const ranked = sequence.sort(cmp);
+ const alias = ranked;
+ const derived = alias.filter(eligible);
+ m.delete(derived[0]);`),
+		).toEqual([2]);
+	});
+
+	it("flags ordered multi-victim removal, #4580 r4 F1", () => {
+		// Real production source, not a rewritten widget-state approximation.
+		const source = fs.readFileSync(
+			path.join(REPO_ROOT, "clients/widget-state.ts"),
+			"utf8",
+		);
+		const start = source.indexOf("function pruneInactiveFileRecords(");
+		const end = source.indexOf("function maybePruneInactiveFileRecords", start);
+		expect(findEvictionLines(stripSource(source.slice(start, end)))).toEqual([
+			3,
+		]);
+	});
+
+	it("rejects unconsumed ordered aliases, #4580 r4", () => {
+		// A derived sequence is not an element, and an unrelated loop is not its consumer.
+		expect(
+			findEvictionLines(`if (m.size <= CAP) return;
+ const ranked = sequence.sort(cmp);
+ const alias = ranked.filter(eligible);
+ for (const key of other) m.delete(key);
+ consume(alias);`),
+		).toEqual([]);
+	});
+
+	it("rejects ordered iteration without removal, #4580 r4", () => {
+		// Iteration alone is ranking, not eviction, even under a cap.
+		expect(
+			findEvictionLines(`if (m.size <= CAP) return;
+ const ranked = sequence.sort(cmp);
+ for (const key of ranked) { consume(key); }`),
+		).toEqual([]);
+	});
+
+	it("records indirect selection as residual #4606, #4580 r4", () => {
+		// Shape 69 indirect-call plant: no interprocedural element provenance claim.
+		expect(
+			findEvictionLines(`if (m.size <= CAP) return;
+ const ranked = sequence.sort(cmp);
+ const victim = selectVictim(ranked);
+ m.delete(victim);`),
+		).toEqual([]);
 	});
 
 	it("flags comparator source and ordering axes, #4580 r3", () => {
