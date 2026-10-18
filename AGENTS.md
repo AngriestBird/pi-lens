@@ -1716,7 +1716,11 @@ one. History: `HISTORY.md`, 2026-10-15. A detector that decides a test exists co
 declarations (`testDeclarations` in `tests/support/sweep-kit.ts`) in files
 vitest collects (`tests/support/vitest-collection.ts`): a skipped, todo,
 conditional (`skipIf`/`runIf`, an options key, a body skip) or uncalled test
-is absent. New mock
+is absent. A governance question with a data-flow answer is asked structurally,
+not by extending a spelling list: `tests/support/eviction-programs.ts` owns the
+eviction question over the S0 census seam's AST, admits four tabled forms, and
+refuses everything else, with the live sites it still refuses tabled beside
+them. New mock
 exports, fixture shapes, path rules, spawn lanes, and durable fields must
 update their registered-or-fail coverage tests.
 

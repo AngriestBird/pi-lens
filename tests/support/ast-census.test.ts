@@ -80,6 +80,7 @@ const CONSUMERS = [
 	"tests/clients/socket-error-listener-sweep.test.ts",
 	"tests/config/bounded-container-guard.test.ts",
 	"tests/config/bounded-eviction-idiom-sweep.test.ts",
+	"tests/support/eviction-programs.ts",
 	"tests/support/silent-catch-scan.ts",
 	"tests/support/worker-message-scan.ts",
 ];
@@ -250,6 +251,13 @@ const ADMITTED_ACCESSOR_SITES: readonly AccessorAdmission[] = [
 		text: 'const args = node.field("arguments")?.namedChildren() ?? [];',
 		count: 1,
 		reason: "reads a call's argument list; nothing is visited",
+	},
+	{
+		file: "tests/support/eviction-programs.ts",
+		text: "return argumentsNode.namedChildren();",
+		count: 1,
+		reason:
+			"#4606 S1: reads ONE call's argument list by index (the count of a truncation); nothing is visited",
 	},
 	{
 		file: "tests/support/silent-catch-scan.ts",
