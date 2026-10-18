@@ -29,7 +29,17 @@
  * nearest enclosing function that is a declaration, a method, or a test/hook
  * callback; inline callbacks (`.map(...)`, `withHome(() => ...)`) are
  * transparent. A read inside a local helper with no drain of its own is
- * drained when every call site of the helper is.
+ * drained when every call site of the helper is — but only while the helper
+ * runs to the read without suspending: an `await` inside the helper lets the
+ * code under test enqueue more bytes after the caller's drain, so the read is
+ * judged undrained. A read a helper drains itself is credited at the read,
+ * whatever its callers do.
+ *
+ * A sink path that reaches a read through a SAME-FILE helper's parameter is
+ * attributed at every parameter position: the parameter's name, a destructured
+ * member of it, a local alias of it, and the parameter's own default when the
+ * caller omits the argument. The read is judged where it runs (`rowsFor`),
+ * and the callers' drains are consulted through the helper.
  *
  * Detectors match code, not prose (#4381 acceptance; principles §2):
  * - The DRAIN needles run over `stripSource` text with strings and comments
@@ -56,6 +66,10 @@
  *   whose path parameter is read is attributed to its call sites' arguments
  *   (see below), so `rows(getLatencyLogPath())` is a sink read of the caller's
  *   drain order.
+ * - A parameter passed THROUGH a second helper (`outer(file)` calls
+ *   `inner(file)`) is not followed: the inner read has no call site naming the
+ *   sink. The parameter rule is one hop wide, and the read's own helper must
+ *   be the one declared in this file.
  * - Path shapes the needles do not see: a shell read (`wc -l ${file}`), a
  *   template or concatenated path (`${dir}/latency.log`, `dir +
  *   "/latency.log"`), a basename held in a variable, a root held in any
@@ -582,16 +596,90 @@ function scanUndrainedSinkReads(
 		if (!scope || !helper || depth >= CALLER_DEPTH) return [line];
 		const sites = callsTo(helper, scope);
 		if (sites.length === 0) return [line];
+		// A caller's drain dominates the read only while the helper runs to the
+		// read without suspending: an `await` inside the helper lets the code
+		// under test enqueue more bytes after the caller's drain (shape 67).
+		if (suspendsBefore(scope, node)) return [line];
 		return sites.flatMap((site) => undrainedAt(site, owner, depth + 1));
+	};
+
+	/** Does `scope` suspend (await) between its entry and `node`? */
+	const suspendsBefore = (scope: SgNode, node: SgNode): boolean =>
+		/\bawait\b/.test(
+			blanked.slice(scope.range().start.index, node.range().start.index),
+		);
+
+	/** The names a parameter pattern introduces (object, array, alias, default). */
+	const patternNames = (node: SgNode | undefined): string[] => {
+		if (!node) return [];
+		const kind = String(node.kind());
+		if (
+			kind === "identifier" ||
+			kind === "shorthand_property_identifier_pattern"
+		)
+			return [node.text()];
+		if (kind === "required_parameter" || kind === "optional_parameter")
+			return patternNames(node.field("pattern") ?? undefined);
+		if (
+			kind === "object_pattern" ||
+			kind === "array_pattern" ||
+			kind === "pair_pattern" ||
+			kind === "rest_pattern" ||
+			kind === "assignment_pattern"
+		)
+			return node.namedChildren().flatMap((child) => patternNames(child));
+		return [];
+	};
+
+	/** The default expression a parameter falls back to, if it has one. */
+	const defaultValue = (param: SgNode | undefined): SgNode | undefined => {
+		if (!param) return undefined;
+		const value = param.field("value");
+		if (value) return value;
+		return String(param.kind()) === "assignment_pattern"
+			? param.namedChildren().at(-1)
+			: undefined;
+	};
+
+	/**
+	 * The parameter positions the read's path names: the parameter itself, a
+	 * destructured member of it, or a local alias of it. A read of parameter 2
+	 * is attributed to argument 2 (F3).
+	 */
+	const parameterIndices = (fn: SgNode, pathText: string): number[] => {
+		const params = fn.field("parameters")?.namedChildren() ?? [];
+		const owners = new Map<string, number>();
+		params.forEach((param, index) => {
+			for (const name of patternNames(param)) owners.set(name, index);
+		});
+		// Local aliases of a parameter: `const p = f;`.
+		const declarators = fn.findAll({ rule: { kind: "variable_declarator" } });
+		for (let pass = 0; pass < 3; pass++) {
+			for (const decl of declarators) {
+				const name = decl.field("name");
+				const value = decl.field("value");
+				if (name?.kind() !== "identifier" || value?.kind() !== "identifier")
+					continue;
+				const index = owners.get(value.text());
+				if (index !== undefined) owners.set(name.text(), index);
+			}
+		}
+		const indices = new Set<number>();
+		for (const [name, index] of owners) {
+			if (nameNeedle(name, false).test(pathText)) indices.add(index);
+		}
+		return [...indices].sort((left, right) => left - right);
 	};
 
 	const hits: UndrainedRead[] = [];
 	const lines = source.split("\n");
 	/**
 	 * A read whose path argument is a parameter of a same-file helper: the
-	 * sink is named at each call site, so the CALLER's order decides (#4589).
-	 * The value decides, not a spelling: the parameter may sit inside a
-	 * `path.join(...)` argument.
+	 * sink is named at each call site, so the VALUE decides (#4589 F3). The
+	 * parameter may sit inside a `path.join(...)` argument, be destructured,
+	 * be aliased, or be omitted in favour of its own default. The read is
+	 * judged where it runs; the callers' drains are reached through the
+	 * helper's own suspension points (F2).
 	 */
 	const parameterReads = (
 		call: SgNode,
@@ -602,29 +690,24 @@ function scanUndrainedSinkReads(
 		const name = declaredName(fn);
 		if (!name) return [];
 		const params = fn.field("parameters")?.namedChildren() ?? [];
-		const argumentText = blanked.slice(
+		const pathText = blanked.slice(
 			first.range().start.index,
 			first.range().end.index,
 		);
-		const index = params.findIndex((param) => {
-			// A typed parameter is a `required_parameter` wrapping the pattern.
-			const pattern =
-				param.kind() === "identifier"
-					? param
-					: (param.field("pattern") ?? param.namedChildren()[0]);
-			return (
-				pattern?.kind() === "identifier" &&
-				nameNeedle(pattern.text(), false).test(argumentText)
-			);
-		});
-		if (index < 0) return [];
+		const indices = parameterIndices(fn, pathText);
+		if (indices.length === 0) return [];
 		const out: Array<{ owner: string; at: SgNode }> = [];
 		for (const site of callsTo(name, fn)) {
-			const argument = site.field("arguments")?.namedChildren()[index];
-			if (!argument) continue;
-			const range = argument.range();
-			for (const owner of sinksIn(range.start.index, range.end.index)) {
-				out.push({ owner, at: site });
+			const args = site.field("arguments")?.namedChildren() ?? [];
+			for (const index of indices) {
+				// The value read is the positional argument, or the parameter's own
+				// default when the caller omits it.
+				const value = args[index] ?? defaultValue(params[index]);
+				if (!value) continue;
+				const range = value.range();
+				for (const owner of sinksIn(range.start.index, range.end.index)) {
+					out.push({ owner, at: call });
+				}
 			}
 		}
 		return out;
@@ -1191,6 +1274,130 @@ describe("sink reads drain first (#4381)", () => {
 				].join("\n"),
 			);
 			expect(hits.map((hit) => hit.line)).toEqual([5, 6]);
+		});
+
+		it("a helper's own await voids the caller's drain (F2)", () => {
+			// The helper suspends before its read: any bytes the code under test
+			// enqueues after the caller's drain land before the read.
+			const hits = scanFixture(
+				[
+					"async function rowsFor(file: string): Promise<string> {",
+					"\tawait tick();",
+					'\treturn fs.readFileSync(file, "utf8");',
+					"}",
+					'it("x", async () => {',
+					"\tawait flushLatencyLog();",
+					"\tconst text = await rowsFor(getLatencyLogPath());",
+					"});",
+				].join("\n"),
+			);
+			expect(hits.map((hit) => [hit.line, hit.undrainedCallers])).toEqual([
+				[3, []],
+			]);
+		});
+
+		it("a helper that drains its own sink before its read is clean (F2)", () => {
+			// The caller does not drain, and does not have to: the helper's own
+			// drain precedes its read with no await in between.
+			const reader = [
+				"async function rowsFor(file: string): Promise<string> {",
+				"\tawait flushLatencyLog();",
+				'\treturn fs.readFileSync(file, "utf8");',
+				"}",
+			];
+			expect(
+				scanFixture(
+					[
+						...reader,
+						'it("x", async () => {',
+						"\tconst text = await rowsFor(getLatencyLogPath());",
+						"});",
+					].join("\n"),
+				),
+			).toEqual([]);
+		});
+
+		it("a sink param at any position, destructured, aliased or defaulted is read (F3)", () => {
+			const cases: Array<[string, string[], number]> = [
+				[
+					"second parameter, inside path.join",
+					[
+						"function rowsFor(fallback: string, file: string): string {",
+						'\treturn fs.readFileSync(path.join(fallback, file), "utf8");',
+						"}",
+						'it("x", async () => {',
+						'\tconst text = rowsFor("notes", getLatencyLogPath());',
+						"});",
+					],
+					2,
+				],
+				[
+					"destructured parameter",
+					[
+						"function rowsFor({ file }: { file: string }): string {",
+						'\treturn fs.readFileSync(file, "utf8");',
+						"}",
+						'it("x", async () => {',
+						"\tconst text = rowsFor({ file: getLatencyLogPath() });",
+						"});",
+					],
+					2,
+				],
+				[
+					"aliased parameter",
+					[
+						"function rowsFor(f: string): string {",
+						"\tconst p = f;",
+						'\treturn fs.readFileSync(p, "utf8");',
+						"}",
+						'it("x", async () => {',
+						"\tconst text = rowsFor(getLatencyLogPath());",
+						"});",
+					],
+					3,
+				],
+				[
+					"defaulted parameter, argument omitted",
+					[
+						"function rowsFor(file: string = getLatencyLogPath()): string {",
+						'\treturn fs.readFileSync(file, "utf8");',
+						"}",
+						'it("x", async () => {',
+						"\tconst text = rowsFor();",
+						"});",
+					],
+					2,
+				],
+			];
+			for (const [label, source, line] of cases) {
+				const hits = scanFixture(source.join("\n"));
+				expect(
+					hits.map((hit) => [hit.line, hit.sinks, hit.undrainedCallers]),
+					label,
+				).toEqual([[line, ["clients/latency-logger.ts"], [line + 3]]]);
+			}
+		});
+
+		it("a helper's own await voids the caller's drain through the alias path (F2)", () => {
+			// The pre-existing same-file alias route (`const file =
+			// getLatencyLogPath()`) inherits the same rule: the helper's `await`
+			// sits between the caller's drain and the read.
+			const hits = scanFixture(
+				[
+					"async function rowsFor(): Promise<string> {",
+					"\tconst file = getLatencyLogPath();",
+					"\tawait tick();",
+					'\treturn fs.readFileSync(file, "utf8");',
+					"}",
+					'it("x", async () => {',
+					"\tawait flushLatencyLog();",
+					"\tconst text = await rowsFor();",
+					"});",
+				].join("\n"),
+			);
+			expect(hits.map((hit) => [hit.line, hit.undrainedCallers])).toEqual([
+				[4, []],
+			]);
 		});
 	});
 });

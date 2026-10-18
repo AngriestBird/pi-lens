@@ -8,34 +8,57 @@
  * held. Rule A (`test-env-restore-gate.ts`) covers unrestored environment
  * writes; this module covers the listener.
  *
- * ## The start population is derived, and it fails closed (shape 69)
+ * ## The start population is hatched, and it fails closed (shape 69)
  *
- * A start is any `.listen(...)` call: that is the act that binds the handle,
- * whatever the receiver was built from, and the receiver may be an identifier,
- * a chain, or an optional chain. The detector resolves the receiver to a
- * binding set; every server construction the file contains (`createServer`,
+ * A start is a start VERB on a handle the scan can read, or any `.listen(...)`
+ * call whatever its receiver was built from:
+ *
+ * - `listen` counts on any receiver. The receiver may be an identifier, a
+ *   chain, or an optional chain; an identifier is resolved to a binding set.
+ * - `bind` counts on a receiver the scan can read as a socket or server
+ *   handle (`dgram.createSocket(...)`, `new WebSocketServer(...)`, a
+ *   `create*Server` call), inline or through a variable. `Function.prototype
+ *   .bind` is the same spelling on a value that is not a handle, so a `bind`
+ *   whose receiver the scan cannot read is a declared gap below, not a
+ *   report.
+ * - `serve` counts on a runtime global (`Bun.serve`, `Deno.serve`), which
+ *   binds a port with no handle the detector can follow.
+ *
+ * Every server CONSTRUCTION the file contains (`createServer`,
  * `net.createServer`, `http.createServer`, `new WebSocketServer`, ... — any
  * call or constructor whose name ends in `Server`) must either be one of those
- * resolved bindings or be reported. A construction the detector did not
- * classify therefore reds instead of passing, and a new spelling of "start a
- * server" cannot slip through as clean.
+ * resolved bindings or be reported, and a start whose receiver or construction
+ * the scan cannot attribute is reported as `unresolvable`. A new spelling of
+ * "start a server" therefore reds instead of passing when it is one of the
+ * three verbs, and a server construction with no attributed start always
+ * reds.
  *
  * The seeds and the close are matched through AST identity, not through a list
  * of spellings: the receiver is an identifier; `C.push(receiver)` links it to
  * an array container whose elements are closed in a loop or callback; a
  * `let server; server = local` alias joins the same binding set; a `finally`,
  * an `afterEach`/`afterAll` callback, or the start's own function are the
- * accepted teardown placements.
+ * accepted teardown placements, and a teardown hook that holds a same-file
+ * function BY REFERENCE (`afterEach(closeServer)`) invokes and awaits it.
  *
- * ## Awaiting is structural, not proximity
+ * ## Settling is a proof about the awaited value, not proximity
  *
- * A close settled by an `await` ancestor counts. A close inside a
- * `new Promise(executor)` counts only when that promise expression is settled
- * in turn: an `await` above it, or a callback whose invocation is awaited
- * (`await Promise.all(C.map((server) => new Promise(...)))`), or a file-local
- * helper whose every call site is. A close reached through a returned `close`
- * closure is reported as `helper` rather than credited: the detector does not
- * follow a handle across a function's return value.
+ * A close inside a `new Promise(executor)` is settled when the awaited VALUE
+ * is that promise: `await new Promise(...)`, `await Promise.all([...])`,
+ * `await Promise.all(xs.map(...))`, a hook that returns the promise
+ * (`afterEach(() => new Promise(...))`), a teardown hook that holds a helper
+ * by reference (`afterEach(closeServer)`), and a variable bound to the promise
+ * whose every reference settles (`const closed = ...; await closed;`).
+ * `await x.forEach(...)` and `await x.map(...)` settle nothing: `forEach`
+ * discards its callback's value and awaiting an array of promises awaits
+ * nothing. `Promise.race`/`any` can settle on another value, so they are not
+ * credited. A helper settles only when it RETURNS the promise and every caller
+ * settles the call: a helper that creates the promise and drops it settles
+ * nothing. A close reached through a returned `close` closure is reported as
+ * `helper` rather than credited: the detector does not follow a handle across
+ * a function's return value. `await server.close()` is not credited either:
+ * `net.Server#close` returns the server, so awaiting the call waits for
+ * nothing.
  *
  * ## Declared gaps (fail-open directions, each named)
  *
@@ -49,6 +72,14 @@
  * - **Cross-file helpers.** A start or a close inside an imported helper is
  *   invisible; a `tests/support/` helper that closes its own listener is a
  *   start and a close in the same function, so it is clean.
+ * - **`bind`/`serve` on an unreadable receiver.** A socket factory whose name
+ *   the scan cannot read (`const s = mkSock(); s.bind(0)`) is treated as
+ *   `Function.prototype.bind` and not followed: the population is the handle
+ *   creation plus the verb. `new Worker(...)`, `net.connect` and a client
+ *   socket that never binds are outside it by design.
+ * - **Then-chains and multi-binding variables.** A promise consumed through
+ *   `.then(...)`, and a variable with one reference that settles and another
+ *   that does not, are reported rather than reasoned about.
  * - **Timers.** This gate decides listeners only. `setInterval`/`setTimeout`
  *   ownership is a different seam with its own ownership rules.
  */
@@ -116,8 +147,8 @@ const TEARDOWN_HOOKS = new Set(["afterEach", "afterAll"]);
 
 /** Two wrappers over the same AST node (ast-grep returns a new object each). */
 const sameNode = (
-	left: SgNode | undefined,
-	right: SgNode | undefined,
+	left: SgNode | null | undefined,
+	right: SgNode | null | undefined,
 ): boolean => {
 	if (!left || !right) return false;
 	const a = left.range();
@@ -278,6 +309,18 @@ interface Binding {
 	value: SgNode;
 }
 
+/** Verbs that bind a started handle to a port, path, or socket. */
+const START_VERBS = new Set(["listen", "bind", "serve"]);
+
+/** Runtime globals whose `serve(...)` binds a port with no readable handle. */
+const RUNTIME_BIND_OBJECTS = new Set(["Bun", "Deno"]);
+
+/** Promise combinators that settle only when every input does. */
+const PROMISE_ALL = new Set(["all", "allSettled"]);
+
+/** Callback-driven calls that carry their callback's value into an array. */
+const PROMISE_CALLBACK_METHODS = new Set(["map", "flatMap"]);
+
 /** The construction forms a start may be built from (a morphological rule). */
 function isServerConstruction(node: SgNode): boolean {
 	if (node.kind() === "call_expression") {
@@ -297,6 +340,23 @@ function isServerConstruction(node: SgNode): boolean {
 	return false;
 }
 
+/**
+ * A socket handle (`dgram.createSocket`, `new dgram.Socket`, ...): the same
+ * morphological rule as a server construction, on the `Socket` noun.
+ */
+function isSocketConstruction(node: SgNode): boolean {
+	let name: string | undefined;
+	if (node.kind() === "call_expression") name = calleeName(node);
+	else if (node.kind() === "new_expression") {
+		const ctor = node.field("constructor");
+		name =
+			ctor?.kind() === "identifier"
+				? ctor.text()
+				: ctor?.field("property")?.text();
+	}
+	return name !== undefined && /Socket$/.test(name);
+}
+
 /** The callee text of a construction, for a report that names it. */
 function constructionName(node: SgNode): string {
 	if (node.kind() === "call_expression") return calleeName(node) ?? node.text();
@@ -304,11 +364,14 @@ function constructionName(node: SgNode): string {
 	return ctor?.text().replace(/\s+/g, "") ?? node.text().replace(/\s+/g, "");
 }
 
+/**
+ * A settled close: the promise that wraps it is awaited as a value before its
+ * hook or case completes. Placement (where the close sits) is decided
+ * separately, by `placementsOf`.
+ */
 interface CloseEvidence {
 	node: SgNode;
 	settled: boolean;
-	/** The close lives in a returned closure (a handle the detector cannot follow). */
-	helper: boolean;
 	placements: Set<
 		"teardown" | "finally" | "same-function" | "helper" | "other"
 	>;
@@ -337,8 +400,12 @@ export function findUnclosedServerStarts(
 	source: string,
 ): ServerTeardownFinding[] {
 	const blanked = stripSource(source);
-	// Cheap admission: no listener and no construction means nothing to parse.
-	if (!/\blisten\b/.test(blanked) && !/\b\w*Server\s*\(/.test(blanked)) {
+	// Cheap admission: no start verb and no handle construction means nothing
+	// to parse.
+	if (
+		!/\b(?:listen|bind|serve)\b/.test(blanked) &&
+		!/\b\w*(?:Server|Socket)\s*\(/.test(blanked)
+	) {
 		return [];
 	}
 
@@ -367,13 +434,39 @@ export function findUnclosedServerStarts(
 		}
 	}
 
+	/** A construction whose value is a handle the scan can read. */
+	const isHandleConstruction = (node: SgNode): boolean =>
+		isServerConstruction(node) || isSocketConstruction(node);
+
+	/** Is this receiver a socket/server handle the scan can read? */
+	const bindsOnHandle = (receiver: SgNode): boolean => {
+		if (receiver.kind() !== "identifier") return isHandleConstruction(receiver);
+		const names = identityNames(receiver.text(), bindings);
+		return bindings.some(
+			(binding) =>
+				names.includes(binding.name) && isHandleConstruction(binding.value),
+		);
+	};
+
 	const starts: Array<{ receiver: SgNode; node: SgNode }> = [];
 	for (const call of calls) {
 		const fn = call.field("function");
 		if (fn?.kind() !== "member_expression") continue;
-		if (fn.field("property")?.text() !== "listen") continue;
+		const verb = fn.field("property")?.text();
+		if (!verb || !START_VERBS.has(verb)) continue;
 		const receiver = fn.field("object");
-		if (receiver) starts.push({ receiver, node: call });
+		if (!receiver) continue;
+		// `listen` binds whatever its receiver is. `bind`/`serve` share their
+		// spelling with `Function.prototype.bind` and with plain helper calls,
+		// so they count only on a receiver this scan can read as a socket or
+		// server handle, or on a runtime global whose `serve` binds a port
+		// (`Bun.serve`). A receiver the scan cannot read is a declared gap, not
+		// a report: the tree has 59 `Function.prototype.bind` calls.
+		const runtimeBind =
+			receiver.kind() === "identifier" &&
+			RUNTIME_BIND_OBJECTS.has(receiver.text());
+		if (verb === "listen" || runtimeBind || bindsOnHandle(receiver))
+			starts.push({ receiver, node: call });
 	}
 	const constructions = [...calls, ...news].filter(isServerConstruction);
 
@@ -452,51 +545,159 @@ export function findUnclosedServerStarts(
 		return containers;
 	}
 
+	/** The name a call invokes, when the callee is a plain identifier. */
+	const calleeIdentifier = (call: SgNode): string | undefined => {
+		const fn = call.field("function");
+		return fn?.kind() === "identifier" ? fn.text() : undefined;
+	};
+
+	/** `Promise.all(...)`, `Promise.allSettled(...)`: settles iff all do. */
+	const isCombinator = (call: SgNode): boolean => {
+		const fn = call.field("function");
+		if (fn?.kind() !== "member_expression") return false;
+		const object = fn.field("object");
+		if (object?.kind() !== "identifier" || object.text() !== "Promise")
+			return false;
+		return PROMISE_ALL.has(fn.field("property")?.text() ?? "");
+	};
+
+	/** Every identifier naming `name` outside the node that declares it. */
+	function referencesTo(name: string, exclude: SgNode): SgNode[] {
+		const start = exclude.range().start.index;
+		const end = exclude.range().end.index;
+		return root.findAll({ rule: { kind: "identifier" } }).filter((node) => {
+			if (node.text() !== name) return false;
+			const at = node.range().start.index;
+			return !(start <= at && at < end);
+		});
+	}
+
+	/**
+	 * A teardown hook that holds this function BY REFERENCE: `afterEach(fn)`
+	 * invokes `fn` and awaits the value it returns, so its promise settles.
+	 */
+	function teardownHolding(name: string, owner: SgNode): string | undefined {
+		for (const reference of referencesTo(name, owner)) {
+			const parent = reference.parent();
+			if (parent?.kind() !== "arguments") continue;
+			const call = parent.parent();
+			if (call?.kind() !== "call_expression") continue;
+			const hook = calleeName(call);
+			if (hook && TEARDOWN_HOOKS.has(hook)) return hook;
+		}
+		return undefined;
+	}
+
+	/** The value a named binding or assignment holds, settled at every read. */
+	function settleBinding(
+		binding: SgNode,
+		depth: number,
+		collection: boolean,
+	): boolean {
+		const name = binding.field("name") ?? binding.field("left");
+		if (name?.kind() !== "identifier") return false;
+		if (depth >= 3) return false;
+		const refs = referencesTo(name.text(), name);
+		if (refs.length === 0) return false;
+		return refs.every((ref) => settleFrom(ref, depth + 1, collection));
+	}
+
+	/** The value a function returns, settled by whoever consumes the function. */
+	function settleFunctionReturn(
+		fn: SgNode,
+		depth: number,
+		collection: boolean,
+	): boolean {
+		const call = invokingCall(fn);
+		if (call) {
+			if (call.kind() === "new_expression") return false;
+			const name = calleeName(call);
+			// A test or hook callback: vitest awaits what it returns.
+			if (name && HOOK_CALLEES.has(name)) return !collection;
+			if (name && PROMISE_CALLBACK_METHODS.has(name))
+				return settleFrom(call, depth + 1, true);
+			// `forEach` and every other callee discard the callback's value.
+			return false;
+		}
+		const name = functionName(fn);
+		if (!name || depth >= 2) return false;
+		if (teardownHolding(name, fn)) return true;
+		const sites = calls.filter(
+			(site) => calleeIdentifier(site) === name && !within(site, fn),
+		);
+		if (sites.length === 0) return false;
+		return sites.every((site) => settleFrom(site, depth + 1, false));
+	}
+
+	/**
+	 * Does the value at `node` settle before its hook or case completes?
+	 *
+	 * Only an await whose VALUE is the promise settles it (F1): awaiting a
+	 * `forEach` result (undefined) or a `.map` result (an array) awaits nothing.
+	 * `collection` follows a value that has become a collection of promises on
+	 * the way up, so `await [promise]` is not credited and
+	 * `await Promise.all([promise])` is.
+	 */
 	function settleFrom(
 		node: SgNode,
 		depth: number,
-	): { settled: boolean; helper: boolean } {
+		collection = false,
+	): boolean {
 		let current = node;
 		for (;;) {
 			const parent = current.parent();
-			if (!parent) return { settled: false, helper: false };
-			if (parent.kind() === "await_expression")
-				return { settled: true, helper: false };
-			if (isFunction(parent)) {
-				const call = invokingCall(parent);
-				if (call) {
-					current = call;
-					continue;
-				}
-				if (propertyKey(parent)) return { settled: false, helper: true };
-				const name = functionName(parent);
-				if (!name) return { settled: false, helper: false };
-				if (depth >= 2) return { settled: false, helper: false };
-				const sites = calls.filter((call) => {
-					const fn = call.field("function");
-					return (
-						fn?.kind() === "identifier" &&
-						fn.text() === name &&
-						!within(call, parent)
-					);
-				});
-				if (sites.length === 0) return { settled: false, helper: false };
-				return {
-					settled: sites.every((site) => settleFrom(site, depth + 1).settled),
-					helper: false,
-				};
+			if (!parent) return false;
+			const kind = String(parent.kind());
+			if (
+				kind === "parenthesized_expression" ||
+				kind === "as_expression" ||
+				kind === "satisfies_expression" ||
+				kind === "non_null_expression"
+			) {
+				current = parent;
+				continue;
 			}
-			current = parent;
+			if (kind === "await_expression") return !collection;
+			if (kind === "array") {
+				collection = true;
+				current = parent;
+				continue;
+			}
+			if (kind === "arguments") {
+				const call = parent.parent();
+				if (call?.kind() !== "call_expression") return false;
+				if (!isCombinator(call)) return false;
+				collection = false;
+				current = call;
+				continue;
+			}
+			if (kind === "variable_declarator")
+				return (
+					sameNode(current, parent.field("value")) &&
+					settleBinding(parent, depth, collection)
+				);
+			if (kind === "assignment_expression")
+				return (
+					sameNode(current, parent.field("right")) &&
+					settleBinding(parent, depth, collection)
+				);
+			if (kind === "return_statement") {
+				let owner = parent.parent();
+				while (owner && !isFunction(owner)) owner = owner.parent();
+				return owner ? settleFunctionReturn(owner, depth, collection) : false;
+			}
+			if (isFunction(parent) && sameNode(current, parent.field("body")))
+				return settleFunctionReturn(parent, depth, collection);
+			// A promise created and dropped in a body, a member access, or an
+			// expression statement settles nothing.
+			return false;
 		}
 	}
 
-	function settlementsOf(
-		node: SgNode,
-		depth: number,
-	): { settled: boolean; helper: boolean } {
+	function settlementsOf(node: SgNode, depth: number): boolean {
 		const promise = enclosingPromise(node);
-		if (!promise) return { settled: false, helper: false };
-		return settleFrom(promise, depth);
+		if (!promise) return false;
+		return settleFrom(promise, depth, false);
 	}
 
 	function placementsOf(
@@ -559,6 +760,12 @@ export function findUnclosedServerStarts(
 						placements.add(placement);
 				}
 				if (placements.size > 0) return placements;
+				// A teardown hook that holds the function BY REFERENCE
+				// (`afterEach(closeServer)`) invokes it and awaits its value.
+				if (teardownHolding(name, parent)) {
+					placements.add("teardown");
+					return placements;
+				}
 			}
 			placements.add("other");
 			return placements;
@@ -580,14 +787,14 @@ export function findUnclosedServerStarts(
 				verdict: "unresolvable",
 				mechanism: "none",
 				text,
-				reason: `the listener's receiver is not a plain identifier (${receiver.text().replace(/\s+/g, " ")}), so no close can be attributed to it`,
+				reason: `the start's receiver is not a plain identifier (${receiver.text().replace(/\s+/g, " ")}), so no close can be attributed to it`,
 			});
 			continue;
 		}
 		const names = identityNames(receiver.text(), bindings);
 		const built = bindings.filter(
 			(binding) =>
-				names.includes(binding.name) && isServerConstruction(binding.value),
+				names.includes(binding.name) && isHandleConstruction(binding.value),
 		);
 		if (built.length === 0) {
 			findings.push({
@@ -602,7 +809,7 @@ export function findUnclosedServerStarts(
 						.find((binding) => binding.name === receiver.text())
 						?.value.text()
 						.replace(/\s+/g, " ") ?? "nothing declared here"
-				}, which this detector cannot read as a server construction`,
+				}, which this detector cannot read as a server or socket construction`,
 			});
 			continue;
 		}
@@ -614,7 +821,8 @@ export function findUnclosedServerStarts(
 		);
 		const receivers = new Set([...names, ...elements]);
 		const startOwner = ownerFunction(start.node);
-		const candidates: CloseEvidence[] = closeCalls
+		const stray: CloseEvidence[] = [];
+		const evidence: CloseEvidence[] = closeCalls
 			.filter((call) => {
 				const fn = call.field("function");
 				if (fn?.kind() !== "member_expression") return false;
@@ -623,25 +831,30 @@ export function findUnclosedServerStarts(
 			})
 			.map((call) => ({
 				node: call,
-				...settlementsOf(call, 0),
+				settled: settlementsOf(call, 0),
 				placements: placementsOf(call, startOwner, 0),
-			}))
-			.filter((evidence) => {
-				// A close is this start's evidence when it is a teardown/finally (it
-				// applies to the whole file or describe), when a helper chain reaches
-				// it from the start's own function, or when it lives in that function.
-				// A closure inside an unrelated named function closes THAT function's
-				// server, not this one, even when the binding name is the same.
-				if (
-					evidence.placements.has("teardown") ||
-					evidence.placements.has("finally") ||
-					evidence.placements.has("same-function")
-				)
-					return true;
-				const evidenceOwner = ownerFunction(evidence.node);
-				if (!evidenceOwner || !functionName(evidenceOwner)) return true;
-				return sameNode(evidenceOwner, startOwner);
-			});
+			}));
+		const candidates: CloseEvidence[] = evidence.filter((candidate) => {
+			// A close is this start's evidence when it is a teardown/finally (it
+			// applies to the whole file or describe), when a helper chain reaches
+			// it from the start's own function, or when it lives in that function.
+			// A closure inside an unrelated named function closes THAT function's
+			// server, not this one, even when the binding name is the same.
+			if (
+				candidate.placements.has("teardown") ||
+				candidate.placements.has("finally") ||
+				candidate.placements.has("same-function")
+			)
+				return true;
+			const evidenceOwner = ownerFunction(candidate.node);
+			if (!evidenceOwner || !functionName(evidenceOwner)) return true;
+			if (sameNode(evidenceOwner, startOwner)) return true;
+			// A close this file runs in another function is not credited, but it is
+			// not silent either: a start whose only close lives there reports that
+			// close rather than "no close reaches it" (F1).
+			stray.push(candidate);
+			return false;
+		});
 
 		const acceptedPlacement = (evidence: CloseEvidence): boolean =>
 			evidence.placements.has("teardown") ||
@@ -659,21 +872,26 @@ export function findUnclosedServerStarts(
 			return "none";
 		};
 		const settledElsewhere = candidates.find((evidence) => evidence.settled);
-		const helper = candidates.find(
-			(evidence) => evidence.helper || evidence.placements.has("helper"),
+		const helper = candidates.find((evidence) =>
+			evidence.placements.has("helper"),
 		);
+		// A close that runs in another function of this file: not credited, but
+		// not "nothing reaches it" either.
+		const escaped = stray[0];
 		const mechanism = helper
 			? mechanismOf(helper)
 			: settledElsewhere
 				? mechanismOf(settledElsewhere)
 				: candidates.length > 0
 					? mechanismOf(candidates[0])
-					: "none";
+					: escaped
+						? mechanismOf(escaped)
+						: "none";
 		const verdict: ServerTeardownVerdict = helper
 			? "helper"
 			: settledElsewhere
 				? "misplaced"
-				: candidates.length > 0
+				: candidates.length > 0 || escaped
 					? "unawaited"
 					: "unclosed";
 		const reason =
@@ -682,7 +900,9 @@ export function findUnclosedServerStarts(
 				: verdict === "misplaced"
 					? `\`${receiver.text()}.close()\` is settled, but not in a teardown hook, a \`finally\`, the start's own function, or a helper every call site settles`
 					: verdict === "unawaited"
-						? `\`${receiver.text()}.close()\` runs, but its promise is never awaited, so the handle can outlive the case`
+						? escaped && candidates.length === 0
+							? `\`${receiver.text()}.close()\` runs in \`${functionName(ownerFunction(escaped.node) ?? escaped.node) ?? "another function"}\`, which is not this start's function and is not a teardown placement, so nothing here settles this start`
+							: `\`${receiver.text()}.close()\` runs, but its promise is never awaited, so the handle can outlive the case`
 						: `no \`close\` call reaches \`${receiver.text()}\``;
 		findings.push({
 			file,

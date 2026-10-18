@@ -14,7 +14,7 @@
  * `finally`, the start's own function, or a local helper every call site
  * settles) and the declared gaps.
  *
- * The state table the sweep decides from, one row per form in the tree:
+ * The state table the sweep decides from, one row per form:
  *
  * | start form | teardown form | verdict |
  * |---|---|---|
@@ -22,10 +22,23 @@
  * | `const s = net.createServer(...)`, pushed to a describe's array | `afterEach` awaits `new Promise(r => s.close(r))` per element | closed |
  * | `const s = http.createServer(...)`, assigned to `server` | `afterEach` awaits `new Promise(r => server.close(r))` | closed |
  * | `const s = net.createServer(...)`, `.listen` and close in one helper | `await new Promise(r => s.close(r))` in the same function | closed |
+ * | `const s = net.createServer(...)` | `afterEach(() => new Promise(r => s.close(r)))` (the hook returns it) | closed |
+ * | `const s = net.createServer(...)` | `afterEach(closeServer)`, a same-file function that awaits the close | closed |
+ * | `const s = net.createServer(...)` | `const closed = new Promise(...); await closed;` | closed |
  * | `let s; s = net.createServer(...)` at file scope | `afterEach` calls `s.close()`, unawaited | unawaited (baseline) |
  * | `const s = net.createServer(...)` | `finally { s.closeAllConnections?.(); s.close(); }`, unawaited | unawaited (baseline) |
  * | a helper returns `{ close: () => new Promise(d => s.close(d)) }` | caller awaits `handle.close()` | helper (baseline) |
  * | `new WebSocketServer({ port })` | none | unresolvable — always reported |
+ * | `Bun.serve({ port })` | none | unresolvable — the handle is not readable |
+ * | `dgram.createSocket("udp4").bind(0)` | none | unresolvable — a start verb on a socket handle |
+ *
+ * Settlement is proven on the awaited VALUE, never on proximity (F1):
+ * `await xs.forEach(...)` and `await xs.map(...)` await undefined and an array,
+ * `Promise.race` can settle on another value, and a helper that creates the
+ * promise without returning it settles nothing — all report. A `bind`/`serve`
+ * on a receiver that is not a socket or server handle is
+ * `Function.prototype.bind`, not a start, and that reading is declared in the
+ * detector's docstring.
  *
  * A `.listen` receiver that is not a plain identifier, and a server
  * construction the binding scan cannot attribute to a start, are reported as
@@ -239,6 +252,22 @@ describe("#4589 server-teardown detector — the shapes that must red and green"
 		).toEqual([]);
 	});
 
+	it("greens on Promise.all over an array of close promises", () => {
+		// The awaited value is the combinator's promise, and the array holds the
+		// close promises themselves (not a callback's return values).
+		expect(
+			scanListen([
+				"const server = net.createServer(() => {});",
+				"await new Promise((resolve) => server.listen(0, resolve));",
+				"afterEach(async () => {",
+				"\tawait Promise.all([",
+				"\t\tnew Promise((resolve) => server.close(() => resolve())),",
+				"\t]);",
+				"});",
+			]),
+		).toEqual([]);
+	});
+
 	it("follows a `let server; server = local` alias, and a close in the start's function", () => {
 		expect(
 			scanListen([
@@ -310,6 +339,187 @@ describe("#4589 server-teardown detector — the shapes that must red and green"
 				"});",
 			]),
 		).toEqual([["server", "unawaited"]]);
+	});
+
+	it("settles only when the awaited value is the close promise (F1, escapes)", () => {
+		// A `.listen` start pushed to a module array, closed inside `afterEach`.
+		const arrayTeardown = (body: string[]): string[] => [
+			"const servers = [];",
+			"afterEach(async () => {",
+			...body,
+			"});",
+			"async function start() {",
+			"\tconst server = net.createServer(() => {});",
+			"\tservers.push(server);",
+			"\tawait new Promise((resolve) => server.listen(0, resolve));",
+			"}",
+		];
+		const escapes: Array<[string, string[]]> = [
+			[
+				"forEach discards the callback's value",
+				[
+					"\tawait servers.forEach((server) =>",
+					"\t\tnew Promise((resolve) => server.close(() => resolve())),",
+					"\t);",
+				],
+			],
+			[
+				"map without Promise.all awaits an array",
+				[
+					"\tawait servers.map((server) =>",
+					"\t\tnew Promise((resolve) => server.close(() => resolve())),",
+					"\t);",
+				],
+			],
+			[
+				"Promise.race can settle on another value",
+				[
+					"\tawait Promise.race([",
+					"\t\tnew Promise((resolve) => server.close(() => resolve())),",
+					"\t\ttimeout,",
+					"\t]);",
+				],
+			],
+			[
+				"awaiting an array of promises settles none of them",
+				["\tawait [new Promise((resolve) => server.close(() => resolve()))];"],
+			],
+			[
+				"a stored promise whose reference nothing settles",
+				[
+					"\tconst closed = new Promise((resolve) =>",
+					"\t\tserver.close(() => resolve()),",
+					"\t);",
+					"\tvoid closed;",
+				],
+			],
+			[
+				"a stored promise nothing awaits at all",
+				[
+					"\tconst closed = new Promise((resolve) =>",
+					"\t\tserver.close(() => resolve()),",
+					"\t);",
+				],
+			],
+		];
+		for (const [label, body] of escapes) {
+			const findings = detect(arrayTeardown(body).join("\n"));
+			expect(
+				findings.map((finding) => [
+					finding.server,
+					finding.verdict,
+					finding.mechanism,
+				]),
+				label,
+			).toEqual([["server", "unawaited", "teardown"]]);
+		}
+	});
+
+	it("reports a helper that creates the close promise and drops it (F1)", () => {
+		expect(
+			scanListen([
+				"const server = net.createServer(() => {});",
+				"await new Promise((resolve) => server.listen(endpoint, resolve));",
+				"function stop() {",
+				"\tnew Promise((resolve) => server.close(() => resolve()));",
+				"}",
+				"await stop();",
+			]),
+		).toEqual([["server", "unawaited"]]);
+	});
+
+	it("reports a settlement form nobody listed (a derived promise)", () => {
+		// The close promise is consumed through `.then(...)`, whose own promise
+		// nobody awaits. The detector does not reason about a derived promise,
+		// so the row reports instead of passing (shape 69, fail closed).
+		expect(
+			scanListen([
+				"it('a', async () => {",
+				"\tconst server = net.createServer(() => {});",
+				"\tawait new Promise((resolve) => server.listen(endpoint, resolve));",
+				"\tawait new Promise((resolve) => server.close(() => resolve())).then(",
+				"\t\t() => undefined,",
+				"\t);",
+				"});",
+			]),
+		).toEqual([["server", "unawaited"]]);
+	});
+
+	it("greens on the teardown forms vitest awaits (F1, false positives)", () => {
+		const forms: Array<[string, string[]]> = [
+			[
+				"the hook returns the promise",
+				[
+					"const server = net.createServer(() => {});",
+					"await new Promise((resolve) => server.listen(endpoint, resolve));",
+					"afterEach(() =>",
+					"\tnew Promise((resolve) => server.close(() => resolve())),",
+					");",
+				],
+			],
+			[
+				"the hook is handed the function by reference",
+				[
+					"const server = net.createServer(() => {});",
+					"await new Promise((resolve) => server.listen(endpoint, resolve));",
+					"async function closeServer() {",
+					"\tawait new Promise((resolve) => server.close(() => resolve()));",
+					"}",
+					"afterEach(closeServer);",
+				],
+			],
+			[
+				"the hook is handed a function that returns the promise",
+				[
+					"const server = net.createServer(() => {});",
+					"await new Promise((resolve) => server.listen(endpoint, resolve));",
+					"function closeServer() {",
+					"\treturn new Promise((resolve) => server.close(() => resolve()));",
+					"}",
+					"afterEach(closeServer);",
+				],
+			],
+			[
+				"the promise is stored and awaited later",
+				[
+					"it('a', async () => {",
+					"\tconst server = net.createServer(() => {});",
+					"\tawait new Promise((resolve) => server.listen(endpoint, resolve));",
+					"\tconst closed = new Promise((resolve) =>",
+					"\t\tserver.close(() => resolve()),",
+					"\t);",
+					"\tawait closed;",
+					"});",
+				],
+			],
+		];
+		for (const [label, form] of forms) {
+			expect(detect(form.join("\n")), label).toEqual([]);
+		}
+	});
+
+	it("reports a start verb on a handle the scan cannot follow (F4)", () => {
+		// `Bun.serve` binds a port with no handle the detector can read.
+		expect(
+			scanListen([
+				"const handle = Bun.serve({ port: 0, fetch: () => new Response() });",
+			]),
+		).toEqual([["Bun", "unresolvable"]]);
+		// A socket `bind` is a start: inline, and through a readable variable.
+		expect(scanListen(['dgram.createSocket("udp4").bind(0);'])).toEqual([
+			['dgram.createSocket("udp4")', "unresolvable"],
+		]);
+		expect(
+			scanListen([
+				'const socket = dgram.createSocket("udp4");',
+				"socket.bind(0);",
+			]),
+		).toEqual([["socket", "unclosed"]]);
+		// `Function.prototype.bind` on a value that is not a handle is not a
+		// start (the tree has 59 of them).
+		expect(
+			scanListen(["const fn = () => {};", "const bound = fn.bind(null);"]),
+		).toEqual([]);
 	});
 
 	it("reports a non-identifier receiver and an unclassified construction (fail closed)", () => {
