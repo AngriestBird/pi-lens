@@ -112,9 +112,9 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { censusSourceFiles } from "../support/ast-census.js";
 import {
 	auditRegistry,
-	listSourceFiles,
 	relativePosix,
 	stableOccurrenceKey,
 	stripSource,
@@ -705,25 +705,18 @@ function liveAnchorLines(source: string, anchor: string): number[] {
 		.flatMap((line, index) => (line.includes(anchor) ? [index + 1] : []));
 }
 
+/**
+ * This sweep's own roots. The enumeration (and the `.js`-twin rule) lives in
+ * `tests/support/ast-census.ts`; the container guard keeps its own root list
+ * and the two populations never merge (#4606 S0).
+ */
 function shippedSourceFiles(): string[] {
-	const files = ["clients", "tools", "mcp", "scripts", "tests/support"].flatMap(
-		(dir) => {
-			const abs = path.join(REPO_ROOT, dir);
-			return fs.existsSync(abs)
-				? listSourceFiles(abs, {
-						extensions: [".ts", ".mjs", ".js"],
-						skipTests: true,
-					}).filter(
-						(file) =>
-							!file.endsWith(".js") ||
-							!fs.existsSync(file.slice(0, -3) + ".ts"),
-					)
-				: [];
-		},
+	return censusSourceFiles(
+		["clients", "tools", "mcp", "scripts", "tests/support", "index.ts"].map(
+			(root) => path.join(REPO_ROOT, root),
+		),
+		{ extensions: [".ts", ".mjs", ".js"], skipTests: true },
 	);
-	const indexTs = path.join(REPO_ROOT, "index.ts");
-	if (fs.existsSync(indexTs)) files.push(indexTs);
-	return files;
 }
 
 /** Every hand-rolled eviction in one file, as 1-based line numbers. */

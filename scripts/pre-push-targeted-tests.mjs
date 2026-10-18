@@ -226,6 +226,9 @@ export const TEST_TREE_GOVERNANCE_TESTS = [
 	// #4561 D1: walks tests/ for `describe` shuffle opt-outs and checks the
 	// by-design registry in both directions.
 	"tests/scripts/ci-shuffle-census.test.ts",
+	// #4606: reads both AST sweeps' sources and censuses the tests/support
+	// tree, so a tests-tree change must arm it.
+	"tests/support/ast-census.test.ts",
 	"tests/support/host-event-shape-scan.test.ts",
 	// #4522: walks both captured-fixture trees (and asks git which inputs are
 	// ignored), so a fixture change must arm it; neither pass above selects it
