@@ -351,16 +351,29 @@ export function probeAnswer(
 	command: string,
 	argv: readonly string[],
 ): CapturedAvailability | undefined {
-	// The runner may spawn an absolute path it resolved (`/…/.cargo/bin/cargo`)
-	// where the capture recorded the bare tool name; the identity is the binary,
-	// so the basename decides.
-	const name = command.split(/[\\/]/).pop() ?? command;
+	// The runner may spawn an absolute path it resolved
+	// (`/…/.cargo/bin/cargo`, `C:\Users\…\.cargo\bin\cargo.exe`) where the
+	// capture recorded the bare tool name; the identity is the binary, so the
+	// basename decides. Windows executable suffixes are part of the platform's
+	// naming, not the binary's: rust-clippy resolves `cargo.exe` there and the
+	// fixture records `cargo`, which failed every Rust cell on that lane (#4522
+	// review). The suffix set is Windows' own executable family, the same one
+	// `clients/safe-spawn.ts` resolves; the ARGUMENTS stay exact.
+	const identity = probeBinaryIdentity(command);
 	return fixture.availability.find(
 		(record) =>
-			(record.command === command || record.command === name) &&
+			(record.command === command ||
+				probeBinaryIdentity(record.command) === identity) &&
 			record.argv.length === argv.length &&
 			record.argv.every((token, index) => token === argv[index]),
 	);
+}
+
+/** A command's binary identity: its basename, case-folded, without a Windows
+ * executable suffix (`.exe`/`.com`/`.cmd`/`.bat`). */
+function probeBinaryIdentity(command: string): string {
+	const base = command.split(/[\\/]/).pop() ?? command;
+	return base.replace(/\.(?:exe|com|cmd|bat)$/i, "").toLowerCase();
 }
 
 /**
@@ -377,13 +390,28 @@ export function materialize(
 	fixture: CapturedOutput,
 	workspace: string,
 ): { stdout: string; stderr: string; status: number | null } {
+	return substituteWorkspace(fixture, workspace);
+}
+
+/**
+ * One captured spawn's bytes, with `__WORKSPACE__` replaced by `workspace`.
+ *
+ * The work half and the clean half differ only in WHICH record they read, so
+ * the substitution lives here once: a path fix copied into one replay and not
+ * the other would let the two drift (#4522 NEW review, "Clean paths repeat
+ * shared code").
+ */
+function substituteWorkspace(
+	record: Pick<CapturedOutput, "stdout" | "stderr" | "exitCode">,
+	workspace: string,
+): { stdout: string; stderr: string; status: number | null } {
 	const posixWorkspace = workspace.replace(/\\/g, "/");
 	const substitute = (text: string) =>
 		text.split(WORKSPACE_TOKEN).join(posixWorkspace);
 	return {
-		stdout: substitute(fixture.stdout),
-		stderr: substitute(fixture.stderr),
-		status: fixture.exitCode,
+		stdout: substitute(record.stdout),
+		stderr: substitute(record.stderr),
+		status: record.exitCode,
 	};
 }
 
@@ -405,14 +433,7 @@ export function materializeClean(
 			`${fixture.relPath}: no clean run to materialize — the census requires one`,
 		);
 	}
-	const posixWorkspace = workspace.replace(/\\/g, "/");
-	const substitute = (text: string) =>
-		text.split(WORKSPACE_TOKEN).join(posixWorkspace);
-	return {
-		stdout: substitute(clean.stdout),
-		stderr: substitute(clean.stderr),
-		status: clean.exitCode,
-	};
+	return substituteWorkspace(clean, workspace);
 }
 
 /**

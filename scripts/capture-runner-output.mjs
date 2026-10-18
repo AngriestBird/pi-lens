@@ -52,8 +52,6 @@
  *                   the clean workspace mirrors the analysed file's own name)
  *   --clean-workspace  repo-relative path recorded for the clean run (default:
  *                   --clean-cwd relative to the repo root)
- *   --clean-unavailable  a tool fact that makes a clean run unreachable, instead
- *                   of --clean-cwd
  *   --merge-into    existing fixture envelope: merge the availability and clean
  *                   records into it instead of writing a new capture. This is
  *                   the retrofit path for fixtures captured before #4473, and it
@@ -63,6 +61,11 @@
  *   --out-dir       fixture root (default: tests/fixtures/runner-output)
  *
  * Everything after `--` is the argv passed to the binary.
+ *
+ * There is no flag for "this tool has no clean run": `--clean-unavailable`
+ * took a prose fact and is refused, because the two facts it ever held were
+ * false and any runner could silence its clean cell with a sentence (#4522
+ * F8). A clean run is recorded from `--clean-cwd`, or not at all.
  */
 
 import { spawnSync } from "node:child_process";
@@ -118,6 +121,14 @@ const VERSION_TOKEN = /\d+\.\d+(?:\.\d+)?(?:[-+][\w.]+)?/;
  * the first token in the whole output is erts' version, not Mix's (#4522 F10).
  * The line is preferred, not the token, because a banner can name its runtime
  * before itself and its own version after (`go version go1.27.2 linux/amd64`).
+ *
+ * Without such a line, only the answer's LEADING BLOCK is eligible — its first
+ * lines up to the next blank line, the shape a version banner has. A probe is
+ * not always a version probe: biome's availability checker also sends
+ * `explain noUnusedVariables`, whose answer is a rule page and whose line
+ * "Available from version: 1.0.0" is the RULE's version, not the binary's
+ * (#4522 NEW-4). The block keeps that page out, and returns "" so the record
+ * says what answered it and nothing about a version (#4522 F10's shape).
  */
 export function extractVersion(banner, command) {
 	const text = banner ?? "";
@@ -134,8 +145,27 @@ export function extractVersion(banner, command) {
 			if (match) return match[0];
 		}
 	}
-	const match = text.match(VERSION_TOKEN);
+	const match = leadingBlock(text).match(VERSION_TOKEN);
 	return match ? match[0] : "";
+}
+
+/**
+ * An answer's banner block: its first non-blank lines, up to the next blank one.
+ *
+ * A tool that prints a blank line before its banner (`swiftlint --version` on
+ * some shells) still has one, so leading blank lines are skipped rather than
+ * treated as an empty block.
+ */
+function leadingBlock(text) {
+	const lines = text.split("\n");
+	let i = 0;
+	while (i < lines.length && lines[i].trim() === "") i++;
+	const block = [];
+	for (; i < lines.length; i++) {
+		if (lines[i].trim() === "") break;
+		block.push(lines[i]);
+	}
+	return block.join("\n");
 }
 
 /**
@@ -317,9 +347,10 @@ export function shellBinPath(bin) {
  * rejected probe succeeded, which is the class #4473 names.
  *
  * `version` is read from THIS probe's own answer, so a record cannot carry the
- * work binary's banner under another binary's name (#4522 F2). A probe that
- * printed no version shape records "" and an `error` when the spawn itself
- * failed; neither is a claim that something answered.
+ * work binary's banner under another binary's name (#4522 F2). A probe whose
+ * answer is not a version banner — biome's `explain` answer is a rule page —
+ * records "" rather than the rule's own version (#4522 NEW-4), and a probe
+ * that never spawned records "" with an `error`.
  */
 export function buildAvailability(command, argv, run) {
 	const record = {
@@ -347,9 +378,13 @@ export function buildAvailability(command, argv, run) {
  * One seam, three ties, checked before a record is written and again by the
  * fixture census over every committed fixture (#4522):
  *
- *  - binary: a recorded `version` must be one this probe's own answer printed,
- *    so the work binary's banner cannot answer for another program. A "" with an
- *    `error` records a probe that never ran, which claims nothing.
+ *  - binary: a recorded `version` must be EXACTLY what this probe's own answer
+ *    yields (`extractVersion`), so the work binary's banner cannot answer for
+ *    another program, and a rule page cannot contribute the rule's version. A
+ *    "" records a probe whose answer prints no version in its leading block.
+ *    The tie is content, not provenance: an answer that is another binary's
+ *    banner carrying the SAME version string still passes, and capture-time
+ *    resolution of each probe's own binary is what actually prevents it.
  *  - invocation: the clean run must be this fixture's own argv. `--records-only`
  *    once replayed the last manifest entry's clean run into every case of its
  *    runner, so fish-indent's formatter fixture replayed a `fish --no-execute`
@@ -369,16 +404,17 @@ export function recordProblems(records) {
 				);
 			continue;
 		}
-		if (!record?.version) {
+		// Recomputed from the answer the record carries, so the field cannot
+		// assert a version its own bytes do not yield — including a version that
+		// merely APPEARS somewhere in a long answer (#4522 NEW-4).
+		const expected = extractVersion(answer, record?.command);
+		if (record?.version !== expected) {
 			problems.push(
-				`${label}: no version in its own answer — a record must name the binary that answered it, or record the spawn error`,
+				record?.version
+					? `${label}: version "${record.version}" is not the one its own answer yields ("${expected}") — another binary answered this probe`
+					: `${label}: no version in its own answer, though its leading block yields "${expected}" — a record must name the binary that answered it, or record the spawn error`,
 			);
-			continue;
 		}
-		if (!answer.includes(record.version))
-			problems.push(
-				`${label}: version "${record.version}" is not in the answer it was recorded with — another binary answered this probe`,
-			);
 	}
 	const clean = records?.clean;
 	if (clean) {

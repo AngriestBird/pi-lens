@@ -58,6 +58,24 @@ describe("extractVersion", () => {
 		).toBe("21.1.6");
 	});
 
+	it("takes only the leading block of an answer that is not a banner", () => {
+		// biome's `explain` answer: a rule page, not a banner. Its "Available from
+		// version" is the rule's, and the binary's own version is nowhere in it.
+		const rulePage =
+			"Summary\n\n- Name: noUnusedVariables\n- Default severity: warn\n- Available from version: 1.0.0\n";
+		expect(extractVersion(rulePage, "biome")).toBe("");
+		// The same tool's real banner still answers, blank separator and all.
+		expect(extractVersion("Version: 2.5.15\n\n", "biome")).toBe("2.5.15");
+		// A banner whose version sits on its second leading line is inside the
+		// block, so it is not lost with the rule page.
+		expect(
+			extractVersion(
+				"ShellCheck - shell script analysis tool\nversion: 0.11.0\nlicense: GPLv3\n",
+				"shellcheck",
+			),
+		).toBe("0.11.0");
+	});
+
 	it("returns empty for a banner with no version token", () => {
 		expect(extractVersion("")).toBe("");
 		expect(extractVersion("this program cannot be run")).toBe("");
@@ -391,11 +409,10 @@ describe("recordProblems", () => {
 				},
 			],
 		};
-		// 15.2.7 IS in the answer (inside erts-15.2.7.4), so the version tie alone
-		// cannot see the mislabel: what a capture records is decided by
-		// extractVersion's line preference (#4522 F10). A version from another
-		// binary's banner is the tie's own case.
-		expect(recordProblems(borrowed)).toEqual([]);
+		// 15.2.7 IS in the answer (inside erts-15.2.7.4), so a substring tie could
+		// not see the mislabel. The tie is exact — the version must be the token
+		// `extractVersion` yields from these very bytes — so it does.
+		expect(recordProblems(borrowed).join("\n")).toContain("another binary");
 		const foreign = {
 			...fixture,
 			availability: [
@@ -409,6 +426,34 @@ describe("recordProblems", () => {
 		expect(recordProblems(foreign).join("\n")).toContain("another binary");
 	});
 
+	// #4522 NEW-4: biome's availability checker also sends `explain
+	// noUnusedVariables`, and that answer is a rule page whose "Available from
+	// version: 1.0.0" is the RULE's version. A record that copied it claimed
+	// 1.0.0 for a 2.5.15 binary. The record now carries "" and says so.
+	it("reds a rule's version copied out of a non-banner answer", () => {
+		const rulePage = {
+			...fixture,
+			availability: [
+				{
+					command: "biome",
+					argv: ["explain", "noUnusedVariables"],
+					version: "1.0.0",
+					exitCode: 0,
+					stdout:
+						"Summary\n\n- Name: noUnusedVariables\n- Fix: unsafe\n- Available from version: 1.0.0\n",
+					stderr: "",
+				},
+			],
+		};
+		expect(recordProblems(rulePage).join("\n")).toContain("another binary");
+		expect(
+			recordProblems({
+				...rulePage,
+				availability: [{ ...rulePage.availability[0], version: "" }],
+			}),
+		).toEqual([]);
+	});
+
 	it("reds a clean run that is not this fixture's invocation", () => {
 		const mismatched = {
 			...fixture,
@@ -420,6 +465,29 @@ describe("recordProblems", () => {
 		expect(recordProblems(mismatched).join("\n")).toContain(
 			"is not this fixture's own invocation",
 		);
+	});
+
+	// #4522 NEW review, "Rejected probes cannot be saved": the point of the
+	// record is that helm 4 REJECTS `--version` (exit 1, an error on stderr, no
+	// version). A gate that demanded a non-empty version could not save it, so
+	// the failure stayed unrecorded. "" here says what the answer is: no version
+	// banner — and the exit status plus the bytes are the record.
+	it("accepts a rejected probe with no version in its answer", () => {
+		expect(
+			recordProblems({
+				...fixture,
+				availability: [
+					{
+						command: "helm",
+						argv: ["--version", "--short"],
+						version: "",
+						exitCode: 1,
+						stdout: "",
+						stderr: "Error: unknown flag: --version\n",
+					},
+				],
+			}),
+		).toEqual([]);
 	});
 
 	it("accepts a probe that never ran, and no free-form reason", () => {

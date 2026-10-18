@@ -391,6 +391,46 @@ describe("captured real-binary output", () => {
 		).toEqual([]);
 	});
 
+	// #4522 review, "Windows Rust tests fail": rust-clippy resolves cargo
+	// through `findCargoPathAsync`, which on Windows answers an absolute
+	// `…\cargo.exe`, while the capture records the bare `cargo`. The lookup is
+	// by BINARY identity — basename, case-folded, without the platform's own
+	// executable suffix — so the same record answers on both lanes; the
+	// arguments stay exact, which is what keeps a neighbour's probe out.
+	it("matches a probe by binary identity across the platform's exe spelling", () => {
+		const rust = FIXTURES.find((f) => f.provenance.runner === "rust-clippy");
+		expect(rust, "rust-clippy's captured fixture is missing").toBeTruthy();
+		const argv = ["clippy", "--version"];
+		for (const spelling of [
+			"cargo",
+			"CARGO.EXE",
+			"C:\\Users\\dev\\.cargo\\bin\\cargo.exe",
+			"/home/dev/.cargo/bin/cargo",
+		]) {
+			expect(
+				probeAnswer(rust as never, spelling, argv),
+				`${spelling} names the binary the record was captured from`,
+			).toBeTruthy();
+		}
+		// A different binary that merely ends in ".exe" is not this record's.
+		expect(
+			probeAnswer(
+				rust as never,
+				"C:\\Users\\dev\\.cargo\\bin\\cargo-nextest.exe",
+				argv,
+			),
+		).toBeUndefined();
+		// The arguments are still exact: identity never widens the probe. This
+		// argv is nobody's recorded probe (the fixture holds `--version` and
+		// `clippy --version`), so a match here would mean the tie had loosened.
+		expect(
+			probeAnswer(rust as never, "C:\\Users\\dev\\.cargo\\bin\\cargo.exe", [
+				"--version",
+				"--short",
+			]),
+		).toBeUndefined();
+	});
+
 	/**
 	 * Commands the runners resolve by PRESENCE before they spawn anything
 	 * (`verifyOrInstallCommand` → `isSpawnableCommand`, a PATH walk). The capture
