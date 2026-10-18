@@ -1048,7 +1048,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/workspace-diagnostics-session.ts": 2,
 		// 6 -> 5 (#3643): removed the obsolete ring path-comparison branch;
 		// dispatch identity now arrives on DispatchResult.
-		"clients/mcp/analyze.ts": 5,
+		// 5 -> 6 (#4583): the adopted warm entry keys its map lookup through
+		// `path.resolve(cwd)`, the same sense (a path operation) the entry's own
+		// creation site already uses.
+		"clients/mcp/analyze.ts": 6,
 		// 4 -> 7 (#4376): OS path namespace calls build the pid-first endpoint
 		// name and the stale-socket owner marker. No path-key owner changes.
 		"clients/mcp/ipc.ts": 7,
@@ -1145,7 +1148,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// readToolResultPathField; the open-coded input.path cast is gone.
 		// 19 -> 18 (#4576): the tool_result path resolves through
 		// `resolveToolCallFilePath`, dropping the bare `path.*` pair.
-		"clients/runtime-tool-result.ts": 18,
+		// 18 -> 20 (#4504 r1): the recognized set is partitioned by the checkout
+		// the scan ran in, and the held-primary send groups the written set by
+		// the root that holds each file; three `path.resolve` reads where there
+		// were one, no new delivery path.
+		"clients/runtime-tool-result.ts": 20,
 		// 25 -> 27 (#3218): the resolved-blocker filter keys both the current
 		// blocker set and each resolved entry with `path.resolve`.
 		// 27 -> 26 (#2542 ask 3): `deferralEntryKey` moved to

@@ -998,9 +998,25 @@ file-scoped worklist and receives no project-wide scanner output.
   the touch a save — the post-write sync, the explicit `lsp_diagnostics` query
   and the MCP analysis's first touch (`analyzeFile`, the MCP hosts' post-write
   route), never a sweep warm-up, cascade or sweep touch. The touch debounce
-  never drops a save: a saved touch whose push it skipped sends the save alone
-  (`notify.save`). Its key is (path, server): the client scope never re-pushes
-  bytes a server holds.
+  reads one rule: skip only when the bytes the server will hold once the path's
+  notify queue drains are this touch's content. The evidence is the client's
+  own sent-content record (`getSentContent`) AND `hasNotifyInFlight`, because
+  that record reports what landed and a send still running lands after a skip.
+  `hasNotifyInFlight` counts a content send only: a save-only send
+  (`sendDidSaveForHeldDocument`) cannot change the bytes or remove the document,
+  so it leaves the record final, while a didClose always counts. A client that
+  cannot answer either question is pushed, never skipped: the elapsed window
+  that used to decide there is gone (`formal/lsp-server-content`
+  `GateWindowReopen` is why). Its key is (path, server): the client scope never
+  re-pushes bytes a server holds. The debounce never drops a save: a saved touch
+  whose push it skipped sends the save alone (`notify.save`), and the save mark
+  names the content a `didSave` LANDED for, owned by the client's document
+  record and written only by the send continuation. Every rebuild of that
+  record carries the mark with the rest of the binding: Incremental's
+  text-budget eviction strips the payload, never the save evidence. A failed
+  carried save leaves the save owed; a failed standalone save gets one bounded
+  retry (`GateSaveRetry`, `MutGateSaveNoRetry`) and a retry that lands for
+  other bytes cannot suppress the save the next saved touch owes.
 - `touchFile` freezes content-bound auxiliary coverage at merge time. A later
   publication cannot undo a finding drop. Auxiliary gaps narrow coverage and
   never turn a primary answer inconclusive. When a primary touch is
@@ -1034,6 +1050,17 @@ file-scoped worklist and receives no project-wide scanner output.
   pi-lens writes and before LSP or dispatch awaits. `fileModified` also covers
   side-effect files, so `postWriteStateHash` is the ownership discriminator;
   an absent hash must not stamp the target with later disk bytes (#2499).
+- The opaque prescan resolves its root once, through `opaquePrescanRoot`
+  (`clients/opaque-mutation-scan.ts`), and every consumer of that session root
+  asks the same owner: the baseline record and take, the head-move record and
+  take, and the root each held-primary send is scoped by. A
+  session whose cwd is not the coordinator's `projectRoot` — a concurrent
+  secondary session, which the host's session-start guard declines before any
+  `session_start` body runs — otherwise records its baseline and its HEAD under
+  one root and takes them under another, reporting `no-pending-snapshot` for a
+  command that did write. Scan evidence is scoped to the checkout it ran in: a
+  recognized write outside that root is kept (never cleared by a scan that
+  could not see it) and earns no authorship the scan cannot confirm.
 - `RUNNERS` declarations include file kinds. Runner selection is gated by file
   kind and anchored at the file's language root, not by dispatch-root config or
   declaration order. Runner children use `resolveToolCwd` with launcher markers.
