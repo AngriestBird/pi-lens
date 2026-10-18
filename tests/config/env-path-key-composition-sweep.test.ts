@@ -1392,14 +1392,38 @@ export function findPathKeyFindings(
 			},
 		},
 	});
-	// Bare or aliased writers have no callee spelling to admit. Restrict the
-	// fallback query to files that can identify an environment, then let the
-	// visitor's structural env-argument check decide the result.
-	if (/\bprocess\s*\.\s*env\b|\bProcessEnv\b/.test(source)) {
-		const seen = new Set(callNodes.map((node) => node.range().start.index));
-		for (const node of root.findAll({ rule: { kind: "call_expression" } })) {
-			if (!seen.has(node.range().start.index)) callNodes.push(node);
-		}
+	// Bare or aliased writers have no callee spelling to admit. Add only calls
+	// whose arguments structurally contain the ambient env or a declaration-
+	// proven ProcessEnv alias; the old all-call fallback materialised 173,642
+	// unrelated nodes and breached the worker budget.
+	const aliases = [
+		...source.matchAll(
+			/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*:\s*(?:NodeJS\.)?ProcessEnv\b/g,
+		),
+	].map((match) => match[1]);
+	const aliasPattern = aliases.length > 0 ? `^(?:${aliases.join("|")})$` : "^$";
+	const seen = new Set(callNodes.map((node) => node.range().start.index));
+	for (const node of root.findAll({
+		rule: {
+			kind: "call_expression",
+			has: {
+				kind: "arguments",
+				has: {
+					any: [
+						{
+							kind: "member_expression",
+							has: {
+								kind: "property_identifier",
+								regex: "^env$",
+							},
+						},
+						{ kind: "identifier", regex: aliasPattern },
+					],
+				},
+			},
+		},
+	})) {
+		if (!seen.has(node.range().start.index)) callNodes.push(node);
 	}
 
 	// One parser pass over the node kinds that can WRITE a path key: the four
