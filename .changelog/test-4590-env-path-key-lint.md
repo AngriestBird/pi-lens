@@ -14,5 +14,10 @@ audience: internal
   resolves — not from key spellings, so a formatted multi-line literal or an
   indirect write cannot slip past it. The 68 current sites (13 shipped, 55 in
   test fixtures) are seeded as debt with their reason; a new site, a stale row
-  or a changed reason reds. Commented env members, later constants, mutable
-  aliases, and identity wrappers retain their path-key evidence.
+  or a changed reason reds. Commented env members and later constants keep
+  their evidence, and a spread of a parenthesised, asserted, satisfied or
+  non-null `process.env` is still the ambient block. A computed key is either
+  proved — a quoted string, or a `const` chain of them — or reported: a cast, a
+  template, a concatenation, a call, a non-null or comma key, a mutable
+  binding, a cycle or a wrapper is `unclassified-spelling`, never a silent
+  pass.

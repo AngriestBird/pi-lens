@@ -108,16 +108,29 @@
  *    "this key is an env PATH" is exactly what it cannot see. An env assembled
  *    by a helper in another module is out of the population for the same
  *    reason.
- * 3. A key computed at run time from a value this file does not hold
- *    (`env[await pathKey()] = …`) is not resolved; when its text names the
- *    variable it reaches the fail-closed arm instead of passing. A key that
- *    names nothing this file can read (`[buildKey()]`, `` [`P${x}TH`] ``) is not
- *    even identifiable as the path key, so it stays outside the population
- *    (limit 2) — the arm cannot fail closed on a key it cannot recognise as the
- *    variable. A literal-const alias IS resolved through the scope chain, in
- *    the form the tree actually uses: a bare string, `as const`/`satisfies`, or
- *    an expression-free template literal, at the nearest enclosing declaration
- *    (so a same-named constant in another function cannot rewrite it).
+ * 3. A computed key resolves through two PROVABLE forms only: a quoted string,
+ *    or an identifier chain of `const` bindings that ends in one, at the
+ *    nearest enclosing scope, in this file, with every declaration visited
+ *    once (so a cycle proves nothing). Every other computed form in an
+ *    env-identified composition is `unclassified-spelling`: a cast, `as`,
+ *    `satisfies`, an assertion, parentheses, non-null, a comma expression, a
+ *    template, a concatenation, a call (`String(K)` included), a member read,
+ *    and a `let`/`var` binding, whatever it holds. The wrapper is spelling;
+ *    only the proof decides (AGENTS.md shape 69). A chain this file proves
+ *    holds a string that is not the variable is not a participant, and neither
+ *    is a computed key in a composition limit 2 cannot identify as an env.
+ *
+ *    That arm answers for the VARIABLE's keys, not for every computed key: an
+ *    unproved key is a candidate only when the file shows it is about the
+ *    variable, by its own text or by a binding it mentions (a path-naming
+ *    name, initializer or assignment, or a `const` chain that proves a
+ *    spelling). A blanket arm over every computed key was measured at 37
+ *    unrelated sites — the composer's own `merged[key] = value` fold
+ *    (`clients/safe-spawn.ts`) and 27 test env-restore loops — and those are
+ *    env COPIES, which re-write whichever spellings the base already held.
+ *    A key whose text names nothing this file can read (`[key]` from a loop,
+ *    `[buildKey()]`, an imported constant) therefore stays outside the
+ *    population, which is the residual this limit admits.
  * 4. The READ side is out of scope. `base.PATH ?? base.Path` and
  *    `Path`-before-`PATH` read order are the round-9 defect's shape, but a read
  *    chain is legal in both orders and this sweep does not have a verdict to
@@ -271,6 +284,15 @@ const PATH_SPELLING = "^[Pp][Aa][Tt][Hh]$";
 /** A quoted spelling of the variable, quotes included. */
 const PATH_STRING_KEY = "^[\"'`][Pp][Aa][Tt][Hh][\"'`]$";
 
+/**
+ * A quoted spelling of the variable ANYWHERE in a node's text: the population
+ * witness for a binding (`const K = "Path" as const`, `` `Path` ``,
+ * `pathKeyFor("PATH")`). Read as a witness, never as a verdict: it only asks
+ * whether the sweep must decide this binding, and a bare `path` word is not it
+ * (`const drive = path.parse(…)` is a filesystem path, not the variable).
+ */
+const QUOTED_PATH = /["'`][Pp][Aa][Tt][Hh]["'`]/;
+
 const PARAMETER_KINDS = new Set(["required_parameter", "optional_parameter"]);
 
 /** A case-insensitive match for the variable name itself. */
@@ -318,54 +340,6 @@ function annotatedAsEnv(node: SgNode | undefined): boolean {
 	return annotation !== undefined && /ProcessEnv/.test(annotation.text());
 }
 
-/**
- * A literal string this file can read: a `string`, or a `template_string` with
- * no `${…}` in it. A template that interpolates holds a value only the program
- * knows, so it is not a key or an alias this sweep can resolve.
- */
-function holdsLiteral(node: SgNode): boolean {
-	const kind = kindName(node);
-	if (kind === "string") return true;
-	return (
-		kind === "template_string" &&
-		!childrenOf(node).some(
-			(child) => kindName(child) === "template_substitution",
-		)
-	);
-}
-
-/**
- * The path spelling a binding holds, when its initializer is a literal.
- *
- * `const KEY = "Path"`, `const KEY = "Path" as const`, `"Path" satisfies
- * string`, a parenthesized or asserted literal, and an expression-free
- * `` `Path` `` all hold one spelling this file can read. A call, a
- * concatenation and a template with a substitution hold a value it cannot, so
- * they resolve to nothing and the write reports as unexpressed instead of
- * silently clean (#4600 R4).
- */
-function aliasSpelling(node: SgNode | undefined): string | undefined {
-	let cursor = node;
-	for (let step = 0; step < 4 && cursor !== undefined; step++) {
-		const kind = kindName(cursor);
-		if (kind === "string" || kind === "template_string") {
-			if (!holdsLiteral(cursor)) return undefined;
-			const text = unquote(cursor.text());
-			return foldsToPath(text) ? text : undefined;
-		}
-		if (!WRAPPER_KINDS.has(kind)) return undefined;
-		// `as`/`satisfies`/assertion/parentheses put the expression beside a type
-		// node: take the literal or the nested wrapper, never the type.
-		cursor = childrenOf(cursor).find(
-			(child) =>
-				kindName(child) === "string" ||
-				kindName(child) === "template_string" ||
-				WRAPPER_KINDS.has(kindName(child)),
-		);
-	}
-	return undefined;
-}
-
 // ── binding resolution ──────────────────────────────────────────────────
 
 interface Declaration {
@@ -374,10 +348,10 @@ interface Declaration {
 	index: number;
 	/** The name is declared as a `ProcessEnv` (annotation on the declarator). */
 	envTyped: boolean;
-	/** The path spelling this binding holds, when its initializer is a literal. */
-	alias?: string;
-	/** Mutable path-valued bindings retain evidence, never a proven spelling. */
-	mutablePath?: boolean;
+	/** The node the binding is initialized to, when it has one. */
+	initializer?: SgNode;
+	/** The binding cannot be rebound (`const`), so its initializer is a proof. */
+	immutable?: boolean;
 }
 
 interface ScanContext {
@@ -385,6 +359,42 @@ interface ScanContext {
 	resolve(reference: SgNode, name: string): Declaration | undefined;
 	/** Offset of the nearest enclosing function, for an unresolved base. */
 	ownerStart(reference: SgNode): number;
+	/**
+	 * The file shows this name holds, or is meant to hold, the path variable:
+	 * its own name names the variable, an initializer or assignment of it does,
+	 * or its `const` chain proves a spelling. This is the POPULATION test
+	 * (limit 3), never a verdict: a key that mentions such a name is one this
+	 * sweep must decide, and an unproved one fails closed.
+	 */
+	pathAbout(name: string): boolean;
+}
+
+/**
+ * The string a `const` chain of `resolve`d declarations ends in, or `undefined`
+ * when the chain proves nothing (a mutable, uninitialized, non-literal or
+ * cyclic binding). Each hop consumes a declaration the walk has not visited,
+ * so the walk is bounded by the file's own declarations without a numeric cap.
+ */
+function proveChain(
+	start: SgNode,
+	resolve: (reference: SgNode) => Declaration | undefined,
+): string | undefined {
+	let cursor = start;
+	const visited = new Set<number>();
+	while (kindName(cursor) === "identifier") {
+		const declaration = resolve(cursor);
+		const initializer = declaration?.initializer;
+		if (
+			declaration === undefined ||
+			declaration.immutable !== true ||
+			initializer === undefined ||
+			visited.has(declaration.index)
+		)
+			return undefined;
+		visited.add(declaration.index);
+		cursor = initializer;
+	}
+	return kindName(cursor) === "string" ? unquote(cursor.text()) : undefined;
 }
 
 /**
@@ -398,24 +408,24 @@ interface ScanContext {
  * (#4600 F3).
  */
 function buildContext(root: SgNode): ScanContext {
-	let tables:
-		| {
-				byScope: ReadonlyMap<number, ReadonlyMap<string, Declaration[]>>;
-		  }
-		| undefined;
-
-	const load = (): {
+	type Tables = {
 		byScope: ReadonlyMap<number, ReadonlyMap<string, Declaration[]>>;
-	} => {
+		byName: ReadonlyMap<string, Declaration[]>;
+		pathAbout: ReadonlySet<string>;
+	};
+	let tables: Tables | undefined;
+
+	const load = (): Tables => {
 		const byScope = new Map<number, Map<string, Declaration[]>>();
+		const byName = new Map<string, Declaration[]>();
 
 		const declare = (
 			name: string,
 			named: SgNode,
 			owner: SgNode,
 			envTyped: boolean,
-			alias?: string,
-			mutablePath = false,
+			initializer?: SgNode,
+			immutable = false,
 		): void => {
 			const scope =
 				nearestIn(chainOf(owner), SCOPE_KINDS)?.range().start.index ?? 0;
@@ -426,14 +436,17 @@ function buildContext(root: SgNode): ScanContext {
 				index: named.range().start.index,
 				envTyped,
 			};
-			// The alias lives on the DECLARATION, not in a file-wide name table: a
-			// same-named constant in another scope must not rewrite how a
+			// The initializer lives on the DECLARATION, not in a file-wide name
+			// table: a same-named constant in another scope must not rewrite how a
 			// reference here resolves (#4600 R2).
-			if (alias !== undefined) declaration.alias = alias;
-			declaration.mutablePath = mutablePath;
+			declaration.initializer = initializer;
+			declaration.immutable = immutable;
 			list.push(declaration);
 			scoped.set(name, list);
 			byScope.set(scope, scoped);
+			const namedList = byName.get(name) ?? [];
+			namedList.push(declaration);
+			byName.set(name, namedList);
 		};
 
 		for (const declarator of root.findAll({
@@ -441,14 +454,7 @@ function buildContext(root: SgNode): ScanContext {
 		})) {
 			const nameNode = firstOfKind(declarator, "identifier");
 			if (nameNode === undefined) continue;
-			const value = declarator
-				.namedChildren()
-				.filter(
-					(child) =>
-						child.kind() !== "identifier" && child.kind() !== "type_annotation",
-				)
-				.at(-1);
-			const spelling = aliasSpelling(value);
+			const value = declarator.field("value") ?? undefined;
 			const immutable =
 				declarator
 					.parent()
@@ -459,8 +465,8 @@ function buildContext(root: SgNode): ScanContext {
 				nameNode,
 				declarator,
 				annotatedAsEnv(declarator),
-				immutable ? spelling : undefined,
-				!immutable && spelling !== undefined,
+				value,
+				immutable,
 			);
 		}
 		for (const kind of PARAMETER_KINDS) {
@@ -475,7 +481,63 @@ function buildContext(root: SgNode): ScanContext {
 				);
 			}
 		}
-		return { byScope };
+		const lookup = (reference: SgNode, name: string) => {
+			for (const ancestor of chainOf(reference)) {
+				if (!SCOPE_KINDS.has(kindName(ancestor))) continue;
+				const list = byScope.get(ancestor.range().start.index)?.get(name);
+				let chosen: Declaration | undefined;
+				for (const entry of list ?? []) {
+					chosen = entry;
+				}
+				if (chosen !== undefined) return chosen;
+			}
+			return undefined;
+		};
+
+		// The population (limit 3): names this file shows are about the variable.
+		// A positive witness is enough, and it is read FILE-WIDE (every
+		// declaration of the name, the initializer's own scope) because the
+		// question is "could this key be PATH", not "what does it hold here".
+		// The verdict stays scope-resolved; only the population over-includes.
+		// The witnesses are a path-naming NAME, a `const` chain that PROVES a
+		// spelling, and a QUOTED path spelling in an initializer or an
+		// assignment — never the bare word `path`, which every `path.join(…)`
+		// meets.
+		const pathAbout = new Set<string>();
+		for (const [name, declarations] of byName) {
+			if (/path/i.test(name)) {
+				pathAbout.add(name);
+				continue;
+			}
+			for (const declaration of declarations) {
+				const initializer = declaration.initializer;
+				if (initializer === undefined) continue;
+				if (
+					QUOTED_PATH.test(initializer.text()) ||
+					foldsToPath(
+						proveChain(initializer, (reference) =>
+							lookup(reference, reference.text()),
+						) ?? "",
+					)
+				) {
+					pathAbout.add(name);
+					break;
+				}
+			}
+		}
+		// A mutable binding carries no proof, but an assignment that writes a
+		// quoted path spelling is still evidence this name may be the variable
+		// (#4600 F4: `let K = "other"; K = "Path"`).
+		for (const assignment of root.findAll({
+			rule: { kind: "assignment_expression" },
+		})) {
+			const left = assignment.field("left");
+			const right = assignment.field("right");
+			if (left?.kind() === "identifier" && right !== null) {
+				if (QUOTED_PATH.test(right.text())) pathAbout.add(left.text());
+			}
+		}
+		return { byScope, byName, pathAbout };
 	};
 
 	return {
@@ -492,6 +554,7 @@ function buildContext(root: SgNode): ScanContext {
 			}
 			return undefined;
 		},
+		pathAbout: (name) => (tables ??= load()).pathAbout.has(name),
 		ownerStart: (reference) => {
 			const owner = nearestIn(chainOf(reference), OWNER_KINDS);
 			return owner === undefined ? 0 : owner.range().start.index;
@@ -533,58 +596,60 @@ function literalKeyRef(node: SgNode, context: ScanContext): KeyRef | undefined {
 }
 
 /**
- * A computed or subscript key: an alias resolved through the scope chain, a
- * literal (quoted or an expression-free template), or a path-naming expression.
+ * A computed or subscript key. Two forms are admitted, and only those:
+ *
+ * - a quoted string, whose value this file reads;
+ * - an identifier whose `const` chain ends in one, at the nearest enclosing
+ *   scope, in this file.
+ *
+ * Everything else is UNPROVED and reaches the fail-closed arm, whatever it
+ * spells: a cast, `satisfies`, an assertion, parentheses, non-null, a comma
+ * expression, a template, a concatenation, a call (`String(K)` included), a
+ * member read, a `let`/`var`, or a name this file does not declare. The
+ * wrapper spelling decides no verdict, only the proof does (#4600 F1/F4,
+ * AGENTS.md shape 69).
+ *
+ * A hop is admitted only through the `immutable` flag (a `const`), so a mutable
+ * binding proves nothing wherever it is declared, and a declaration already
+ * visited ends the walk: `const A = B; const B = A` proves nothing. A chain
+ * that DOES resolve to a string is read: when the string is not the variable
+ * the key is not a participant at all, so the fail-closed arm answers only for
+ * keys this file cannot prove.
  */
 function expressionKeyRef(
 	node: SgNode,
 	context: ScanContext,
 ): KeyRef | undefined {
 	const line = node.range().start.line + 1;
-	const kind = kindName(node);
-	if (kind === "identifier") {
-		const declaration = context.resolve(node, node.text());
-		if (declaration?.mutablePath)
-			return { spelling: node.text(), shape: "expression", line };
-		const alias = declaration?.alias;
-		if (alias !== undefined) {
-			return { spelling: alias, shape: shapeOfSpelling(alias), line };
-		}
+	const proved = proveChain(node, (reference) =>
+		context.resolve(reference, reference.text()),
+	);
+	if (proved !== undefined) {
+		if (!foldsToPath(proved)) return undefined;
+		return { spelling: proved, shape: shapeOfSpelling(proved), line };
 	}
-	// #4600 V4: fold only identity wrappers; other expressions retain evidence.
-	if (kind === "parenthesized_expression") {
-		const inner = childrenOf(node)[0];
-		if (inner !== undefined) return expressionKeyRef(inner, context);
+	if (!keyNamesTheVariable(node, context)) return undefined;
+	return { spelling: node.text(), shape: "expression", line };
+}
+
+/**
+ * Is this unproved key a candidate for the variable at all (limit 3)? Its own
+ * text names the variable, or it mentions a name the file shows is about the
+ * variable. A key that names nothing readable here (`[key]` from a loop,
+ * `[buildKey()]`, an imported constant) stays outside the population: a
+ * blanket arm over every computed key measured 37 unrelated sites — the
+ * composer's own `merged[key] = value` fold and 27 test env-restore loops — and
+ * a generic env copy is not a PATH composition, because it re-writes the
+ * spellings the base already held.
+ */
+function keyNamesTheVariable(node: SgNode, context: ScanContext): boolean {
+	if (/path/i.test(node.text())) return true;
+	for (const identifier of node.findAll({
+		rule: { kind: "identifier" },
+	})) {
+		if (context.pathAbout(identifier.text())) return true;
 	}
-	if (kind === "binary_expression") {
-		const left = node.field("left");
-		const right = node.field("right");
-		const operator = node.field("operator");
-		if (
-			operator?.text() === "+" &&
-			right?.kind() === "string" &&
-			unquote(right.text()) === "" &&
-			left !== null
-		) {
-			return expressionKeyRef(left, context);
-		}
-	}
-	if (kind === "call_expression" && childrenOf(node)[0]?.text() === "String") {
-		const args = firstOfKind(node, "arguments");
-		const values = args === undefined ? [] : childrenOf(args);
-		if (values.length === 1 && values[0] !== undefined)
-			return expressionKeyRef(values[0], context);
-	}
-	const literal = kind === "string" || holdsLiteral(node);
-	if (literal) {
-		const text = unquote(node.text());
-		if (foldsToPath(text)) {
-			return { spelling: text, shape: shapeOfSpelling(text), line };
-		}
-	}
-	const text = literal ? unquote(node.text()) : node.text();
-	if (!/path/i.test(text)) return undefined;
-	return { spelling: text, shape: "expression", line };
+	return false;
 }
 
 // ── composition context ─────────────────────────────────────────────────
@@ -623,16 +688,35 @@ function nearestIn(
 }
 
 /**
+ * The expression a wrapper holds. These kinds declare no `expression` field in
+ * the shipped grammar, and an angle-bracket assertion (`<T>x`) puts its type
+ * arguments FIRST, so the value side is read by layout rather than guessed for
+ * every kind by position.
+ */
+function wrappedExpression(node: SgNode): SgNode | undefined {
+	const named = childrenOf(node);
+	return kindName(node) === "type_assertion" ? named.at(-1) : named[0];
+}
+
+/**
  * `process.env` itself: asked of the member expression's two children, not of a
  * text that happens to spell it, because the same function decides whether a
  * `spread_element` inherits the ambient block and a spread's text starts with
- * `...` (#4600 R1).
+ * `...` (#4600 R1). The owner is unwrapped first, so `(process.env)`,
+ * `process.env as X`, `process.env satisfies X`, `<X>process.env` and
+ * `process.env!` are one ambient block (#4600 F2): the wrapper is spelling, the
+ * member is the fact.
  */
 function isProcessEnvNode(node: SgNode | undefined): boolean {
-	if (node === undefined || kindName(node) !== "member_expression") {
+	let cursor = node;
+	for (let step = 0; step < 4 && cursor !== undefined; step++) {
+		if (!WRAPPER_KINDS.has(kindName(cursor))) break;
+		cursor = wrappedExpression(cursor);
+	}
+	if (cursor === undefined || kindName(cursor) !== "member_expression") {
 		return false;
 	}
-	const children = childrenOf(node);
+	const children = childrenOf(cursor);
 	return (
 		children.length === 2 &&
 		children[0]?.text() === "process" &&
@@ -683,6 +767,7 @@ const WRAPPER_KINDS = new Set([
 	"satisfies_expression",
 	"parenthesized_expression",
 	"type_assertion",
+	"non_null_expression",
 ]);
 
 function unwrapExpression(node: SgNode): SgNode {
@@ -1785,15 +1870,102 @@ describe("#4590 env PATH composition", () => {
 		}
 	});
 
-	// #4600 r3 V4: identity wrappers must retain the alias's path evidence.
-	it("resolves aliases inside identity expression wrappers", () => {
-		for (const key of ['K + ""', "String(K)", '(K + "")', 'String(K + "")']) {
+	// #4600 r3 V4 / r4 F1: the identity-wrapper fold is DELETED, not extended.
+	// A computed key this file cannot prove is a finding, never a clean env,
+	// whatever wrapper it wears (AGENTS.md shape 69; the round's own finding).
+	it.each([
+		'K + ""',
+		"String(K)",
+		'(K + "")',
+		'String(K + "")',
+		"K as string",
+		"K as any",
+		"`${K}`",
+		"String(K) as string",
+		'"" + K',
+		"K!",
+		"(0, K)",
+		"(K)",
+	] as const)(
+		"reports the unproved computed key %s instead of a clean env",
+		(key) => {
 			expect(
 				findPathKeyFindings(
 					`const K = "Path"; const env = { ...process.env, [${key}]: next };`,
 				).map((f) => [f.spelling, f.reason]),
-			).toEqual([["Path", "spread-override"]]);
+			).toEqual([[key, "unclassified-spelling"]]);
+		},
+	);
+
+	// Greptile P1 on this round's head: a resolved `String(...)` call trusted a
+	// user function's name. No call is evaluated, so the shadowing is moot.
+	it("never reads a call, not even a shadowed String", () => {
+		expect(
+			findPathKeyFindings(
+				'const String = () => "Path"; const K = "other"; const env = { ...process.env, [String(K)]: next };',
+			).map((f) => [f.spelling, f.reason]),
+		).toEqual([["String(K)", "unclassified-spelling"]]);
+	});
+
+	// #4600 r4 F2: the ambient block is the member, wherever a wrapper sits
+	// between it and the spread, the assign source or the entries tuple.
+	it.each([
+		"(process.env)",
+		"process.env as NodeJS.ProcessEnv",
+		"process.env satisfies NodeJS.ProcessEnv",
+		"<NodeJS.ProcessEnv>process.env",
+		"process.env!",
+	])("unwraps the env owner %s at every spread consumer", (base) => {
+		for (const source of [
+			`const env = { ...(${base}), path: next };`,
+			`Object.assign({}, (${base}), { path: next })`,
+			`Object.fromEntries([...(${base}), ["path", next]])`,
+		]) {
+			expect(findPathKeyFindings(source).map((f) => f.reason)).toEqual([
+				"unclassified-spelling",
+			]);
 		}
+	});
+
+	// #4600 r4 F4: a `const` chain resolves to any finite depth and stops at a
+	// cycle; a chain this file PROVES is not the variable is not a participant.
+	it("resolves const alias chains to any depth and stops at a cycle", () => {
+		const chain = Array.from(
+			{ length: 80 },
+			(_, i) => `const K${i} = ${i === 0 ? '"Path"' : `K${i - 1}`};`,
+		).join(" ");
+		expect(
+			findPathKeyFindings(
+				`${chain} const env = { ...process.env, [K79]: next };`,
+			).map((f) => [f.spelling, f.reason]),
+		).toEqual([["Path", "spread-override"]]);
+		for (const cyclic of [
+			"const PATH_A = PATH_B; const PATH_B = PATH_A; const env = { ...process.env, [PATH_A]: next };",
+			"const PATH_A = PATH_A; const env = { ...process.env, [PATH_A]: next };",
+		]) {
+			expect(findPathKeyFindings(cyclic).map((f) => f.reason)).toEqual([
+				"unclassified-spelling",
+			]);
+		}
+		expect(
+			findPathKeyFindings(
+				'const W = K; const K = "other"; const env = { ...process.env, [W]: next };',
+			),
+		).toEqual([]);
+	});
+
+	// #4600 r4 F3/F4: the `immutable` gate is what stops a mutable binding from
+	// proving a key. The first row is the F3 pin: without the gate it resolves
+	// `"Path"` and reports spread-override instead of unproved.
+	it.each([
+		'let K = "Path"; const env = { ...process.env, [K]: next };',
+		'var K = "Path"; const env = { ...process.env, [K]: next };',
+		'function f(){ { var K = "Path"; } return { ...process.env, [K]: next }; }',
+		'let K = "other"; K = "Path"; const env = { ...process.env, [K]: next };',
+	])("reports the mutable or hoisted key in %s as unproved", (source) => {
+		expect(findPathKeyFindings(source).map((f) => f.reason)).toEqual([
+			"unclassified-spelling",
+		]);
 	});
 
 	it("identifies an env from the spread's member, not from its text", () => {
@@ -1841,49 +2013,63 @@ describe("#4590 env PATH composition", () => {
 		]);
 	});
 
+	// #4600 r4: the const initializer obeys the same proof as the key. The
+	// wrapper forms the tree writes (`as const`, `satisfies`) and a template name
+	// the variable but prove no spelling, so they report unclassified rather than
+	// a spelling this file cannot read.
+	it.each([
+		'"Path" as const',
+		'"Path" satisfies string',
+		"`Path`",
+		'pathKeyFor("PATH")',
+	])("reports the unproved const initializer %s", (value) => {
+		expect(
+			findPathKeyFindings(
+				`const K = ${value}; const env: ProcessEnv = { ...base, [K]: next };`,
+			).map((f) => f.reason),
+		).toEqual(["unclassified-spelling"]);
+	});
+
+	// A template literal has no substitution and still is not a string node the
+	// proof admits: the key reports unproved rather than resolving.
+	it("reports a template-literal key as unproved", () => {
+		expect(
+			findPathKeyFindings(
+				"const env = { ...process.env, [`PATH`]: next };",
+			).map((f) => f.reason),
+		).toEqual(["unclassified-spelling"]);
+	});
+
+	// Limit 2's other direction: an unproved key in a composition this sweep
+	// cannot identify as an env stays outside the population.
+	it("leaves an unproved key outside an unidentified env alone", () => {
+		expect(
+			findPathKeyFindings("const env = { ...base, [buildKey()]: next };"),
+		).toEqual([]);
+	});
+
 	/**
-	 * #4600 R4: the alias forms the tree actually writes. `as const` is the
-	 * idiomatic constant, and a template literal with no substitution is the same
-	 * literal as a quoted key.
+	 * Limit 3: the population is the variable's, not every computed key's. A
+	 * generic env copy re-writes whichever spellings its base already held, so it
+	 * introduces no second name; a blanket arm measured 37 such sites in this
+	 * tree, the composer's own fold included (#4600 r4, F2/F3 review). The same
+	 * rule keeps a binding that never names the variable out of the population.
 	 */
-	it("resolves an as-const or template-literal key", () => {
-		const asConst = findPathKeyFindings(
+	it("leaves a generic env copy outside the population", () => {
+		for (const source of [
 			[
-				'const K = "Path" as const;',
-				"const env = { ...base, [K]: next };",
+				"function merge(base: NodeJS.ProcessEnv) {",
+				"\tconst merged: NodeJS.ProcessEnv = {};",
+				"\tfor (const [key, value] of Object.entries(base)) merged[key] = value;",
+				"\treturn merged;",
+				"}",
 			].join("\n"),
-		);
-		expect(asConst.map((f) => [f.line, f.spelling, f.reason])).toEqual([
-			[2, "Path", "spread-override"],
-		]);
-		const satisfies = findPathKeyFindings(
-			[
-				'const K = "Path" satisfies string;',
-				"const env = { ...base, [K]: next };",
-			].join("\n"),
-		);
-		expect(satisfies.map((f) => [f.line, f.spelling, f.reason])).toEqual([
-			[2, "Path", "spread-override"],
-		]);
-		const templateKey = findPathKeyFindings(
-			"const env = { ...base, [`PATH`]: next };",
-		);
-		expect(templateKey.map((f) => [f.line, f.spelling, f.reason])).toEqual([
-			[1, "PATH", "spread-override"],
-		]);
-		const templateAlias = findPathKeyFindings(
-			["const K = `Path`;", "const env = { ...base, [K]: next };"].join("\n"),
-		);
-		expect(templateAlias.map((f) => [f.line, f.spelling, f.reason])).toEqual([
-			[2, "Path", "spread-override"],
-		]);
-		// A key whose text never names the variable cannot be read as the path key
-		// at all, so it is outside the population (limit 2): the fail-closed arm
-		// answers only for a key it CAN read as the variable.
-		const opaque = findPathKeyFindings(
-			"const env: NodeJS.ProcessEnv = { ...base, [buildKey()]: next };",
-		);
-		expect(opaque).toEqual([]);
+			"function apply(key: string, value: string) { process.env[key] = value; }",
+			"const env = { ...process.env, [buildKey()]: next };",
+			"const K = buildKey(); const env: ProcessEnv = { ...base, [K]: next };",
+		]) {
+			expect(findPathKeyFindings(source)).toEqual([]);
+		}
 	});
 
 	/**
