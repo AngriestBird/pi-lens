@@ -577,6 +577,8 @@ function hasRepoOperand(
 	let explicit: boolean | undefined;
 	for (let index = 1; index < words.length; index++) {
 		const word = words[index];
+		// `--` ends the options, so nothing after it is a source.
+		if (word === "--") break;
 		if (word === "-R" || word === "--repo") {
 			explicit = isRepoValue(words[index + 1], env, literal, rebound);
 			index++;
@@ -593,6 +595,10 @@ function hasRepoOperand(
 		}
 		if (word.startsWith("-R") && word.length > 2)
 			explicit = isRepoValue(word.slice(2), env, literal, rebound);
+		// An option's VALUE is not an option: `--body '--repo=not-a-slug'` names a
+		// body, so a valid `--repo` earlier is not replaced by it (Greptile
+		// r4307901275). A word carrying `=` holds its own value.
+		else if (word.startsWith("-") && !word.includes("=")) index++;
 	}
 	return explicit;
 }
@@ -1707,6 +1713,34 @@ describe("workflow gh calls resolve a repository (#4382)", () => {
 		}
 	});
 
+	it("reads an option's value as data, not as a repository option", () => {
+		// Greptile r4307901275: `--body '--repo=not-a-slug'` is a body whose text
+		// looks like an option, so a valid `--repo` before it still answers, and a
+		// word after `--` never does.
+		expect(
+			probe({
+				run: `${BARE_GH_WRITE} --repo owner/repo --body '--repo=not-a-slug'`,
+			}).findings,
+		).toEqual([]);
+		expect(
+			probe({
+				run: `${BARE_GH_WRITE} --repo owner/repo --body '--repo not-a-slug'`,
+			}).findings,
+		).toEqual([]);
+		// Nothing after `--` is an option, so an operand list cannot clear or
+		// replace the declared repository.
+		expect(
+			probe({
+				run: `GH_REPO=owner/repo ${BARE_GH_WRITE} -- data --repo=not-a-slug`,
+			}).findings,
+		).toEqual([]);
+		expect(
+			probe({ run: `${BARE_GH_WRITE} -- --repo=not-a-slug` }).findings.map(
+				(found) => found.kind,
+			),
+		).toEqual(["missing-source"]);
+	});
+
 	it("refuses cyclic env repository expressions without throwing", () => {
 		const workflowEnvs: Array<Record<string, string>> = [
 			{ GH_REPO: "${{ env.GH_REPO }}" },
@@ -2069,6 +2103,16 @@ describe("the census's admitted source list (#4382 r6)", () => {
 		).toEqual([]);
 	});
 
+	it("reads a heredoc after a single-quoted backslash", () => {
+		// Greptile r4307901268: inside single quotes a backslash escapes nothing,
+		// so `'x\'` closes at the quote and the heredoc after it is live.
+		expect(
+			probe({
+				run: `python3 - 'x\\' <<EOF\n${BARE_GH_WRITE}\nEOF`,
+			}).findings.map((found) => found.kind),
+		).toEqual(["unclassified"]);
+	});
+
 	it("reads a quoted heredoc operator as argument text", () => {
 		// Greptile 10:51 (`Printed examples fail CI`): `printf` prints a
 		// string that happens to contain `<<`; no body was subtracted, so no
@@ -2176,6 +2220,10 @@ describe("the census's admitted source list (#4382 r6)", () => {
 			'awk -f /dev/stdin <<EOF\nBEGIN{system("gh pr edit 4550 --add-label x")}\nEOF',
 		],
 		["grep short file", "grep -qf - <<EOF\ngh pr edit 4550 --add-label x\nEOF"],
+		[
+			"inline sed over a herestring",
+			"sed -e '1e gh pr edit 4550 --add-label x' <<< data",
+		],
 	])("refuses stdin program: %s", (_name, run) => {
 		expect(
 			probe({ run }).findings.map((found) => found.kind),

@@ -1016,12 +1016,14 @@ export function hasLiveStdinRedirect(segment) {
 	let quote;
 	for (let index = 0; index < segment.length; index++) {
 		const char = segment[index];
-		if (char === "\\") {
-			index++;
-			continue;
-		}
+		// A single-quoted span escapes nothing: `'x\'` closes at the `'`, so the
+		// redirection after it is live (#4595 Greptile r4307901268).
 		if (quote === "single") {
 			if (char === "'") quote = undefined;
+			continue;
+		}
+		if (char === "\\") {
+			index++;
 			continue;
 		}
 		if (quote === "double") {
