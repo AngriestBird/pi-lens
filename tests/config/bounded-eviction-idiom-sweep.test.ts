@@ -1219,7 +1219,7 @@ describe("#2442 no new hand-rolled evict-oldest idiom outside bounded-cache.ts",
 			findEvictionLines(`if (m.size <= CAP) return;
  const ranked = sequence.sort(cmp);
  const alias = ranked.filter(eligible);
- for (const key of other) m.delete(key);
+ for (const key of other) { m.delete(key); }
  consume(alias);`),
 		).toEqual([]);
 	});
