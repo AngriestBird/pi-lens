@@ -15,14 +15,20 @@
  *
  * - `listen` counts on any receiver. The receiver may be an identifier, a
  *   chain, or an optional chain; an identifier is resolved to a binding set.
+ *   A computed member (`server["listen"](0)`) is the same verb (shape 34).
  * - `bind` counts on a receiver the scan can read as a socket or server
  *   handle (`dgram.createSocket(...)`, `new WebSocketServer(...)`, a
  *   `create*Server` call), inline or through a variable. `Function.prototype
  *   .bind` is the same spelling on a value that is not a handle, so a `bind`
  *   whose receiver the scan cannot read is a declared gap below, not a
- *   report.
- * - `serve` counts on a runtime global (`Bun.serve`, `Deno.serve`), which
- *   binds a port with no handle the detector can follow.
+ *   report. The computed spelling is the same verb; a computed key the scan
+ *   cannot read, on a handle it can, reports rather than passing.
+ * - `serve` counts on a runtime global (`Bun.serve`, `Deno.serve`) and on any
+ *   name bound to one (`const runtime = Bun; runtime.serve(...)`, the
+ *   destructured `const { serve } = Bun; serve(...)`, a renamed
+ *   `const { serve: start } = Bun; start(...)`, or a bare `serve(...)` in a
+ *   file that declares no `serve` of its own), which binds a port with no
+ *   handle the detector can follow.
  *
  * Every server CONSTRUCTION the file contains (`createServer`,
  * `net.createServer`, `http.createServer`, `new WebSocketServer`, ... — any
@@ -41,7 +47,7 @@
  * accepted teardown placements, and a teardown hook that holds a same-file
  * function BY REFERENCE (`afterEach(closeServer)`) invokes and awaits it.
  *
- * ## Settling is a proof about the awaited value, not proximity
+ * ## Settling is a proof about the awaited value, where that await runs
  *
  * A close inside a `new Promise(executor)` is settled when the awaited VALUE
  * is that promise: `await new Promise(...)`, `await Promise.all([...])`,
@@ -60,6 +66,14 @@
  * `net.Server#close` returns the server, so awaiting the call waits for
  * nothing.
  *
+ * Reachability is part of the proof (shape 43): an `await` credits settlement
+ * only where it runs on the hook's or helper's own straight-line path, under
+ * branches that also enclose the close, and, inside a nested function, only
+ * when that function's own completion is settled (the same proof a returned
+ * promise gets). An `await` in a function nobody calls, in a callback the hook
+ * does not await, or under a branch that may never run waits for nothing, so
+ * the row reports instead of passing.
+ *
  * ## Declared gaps (fail-open directions, each named)
  *
  * - **Name-based identity.** Two bindings that share a name in different
@@ -72,11 +86,19 @@
  * - **Cross-file helpers.** A start or a close inside an imported helper is
  *   invisible; a `tests/support/` helper that closes its own listener is a
  *   start and a close in the same function, so it is clean.
- * - **`bind`/`serve` on an unreadable receiver.** A socket factory whose name
- *   the scan cannot read (`const s = mkSock(); s.bind(0)`) is treated as
- *   `Function.prototype.bind` and not followed: the population is the handle
- *   creation plus the verb. `new Worker(...)`, `net.connect` and a client
- *   socket that never binds are outside it by design.
+ * - **`bind`/`serve` on a dot-form unreadable receiver.** A socket factory
+ *   whose name the scan cannot read (`const s = mkSock(); s.bind(0)`) is
+ *   treated as `Function.prototype.bind` and not followed: the population is
+ *   the handle creation plus the verb. The tree holds dozens of those
+ *   spellings, and the sweep's `bind` census case measures that population
+ *   rather than pinning a hand-written number. `new Worker(...)`,
+ *   `net.connect` and a client socket that never binds are outside it by
+ *   design. The computed spelling does not widen this gap: on a handle the
+ *   scan reads, it reports.
+ * - **Indirect invocation.** A start verb reached through `.apply`/`.call`
+ *   (`socket.bind.apply(socket, [0])`) is outside the population: the scan
+ *   reads a verb from a member call, not from a function value handed to
+ *   another function.
  * - **Then-chains and multi-binding variables.** A promise consumed through
  *   `.then(...)`, and a variable with one reference that settles and another
  *   that does not, are reported rather than reasoned about.
@@ -304,6 +326,96 @@ function insideFinally(node: SgNode): boolean {
 	return false;
 }
 
+/** The nearest enclosing function of any kind. */
+function nearestFunction(node: SgNode): SgNode | undefined {
+	let current = node.parent();
+	while (current && !isFunction(current)) current = current.parent();
+	return current ?? undefined;
+}
+
+/** Is `node` on `owner`'s own path (no nested function in between)? */
+function onOwnPath(node: SgNode, owner: SgNode): boolean {
+	let current: SgNode | null = node;
+	while (current) {
+		if (sameNode(current, owner)) return true;
+		if (isFunction(current)) return false;
+		current = current.parent();
+	}
+	return false;
+}
+
+/**
+ * Constructs under which the code below runs only sometimes (N1, shape 43).
+ * A `finally` is absent on purpose: it runs however its `try` exits.
+ */
+const CONDITIONAL_STEPS = new Set([
+	"if_statement",
+	"else_clause",
+	"ternary_expression",
+	"switch_case",
+	"switch_default",
+	"for_statement",
+	"for_in_statement",
+	"while_statement",
+	"do_statement",
+	"catch_clause",
+]);
+
+/**
+ * Does every branch above `node` also enclose `pair`? Both halves of a
+ * settlement have to sit under the same guards: the accepted
+ * `if (server) await new Promise(...)` holds both under one `if`, while
+ * `const closed = ...; if (flag) await closed;` holds the await under a guard
+ * the close is not in, so that await may never run.
+ */
+function runsWhenever(node: SgNode, pair: SgNode): boolean {
+	let current = node;
+	for (;;) {
+		const parent = current.parent();
+		if (!parent || isFunction(parent)) return true;
+		const kind = String(parent.kind());
+		if (kind === "binary_expression") {
+			const operator = parent.field("operator")?.text() ?? "";
+			if (/^(?:&&|\|\||\?\?)$/.test(operator) && !within(pair, parent))
+				return false;
+		} else if (kind === "if_statement" || kind === "ternary_expression") {
+			const condition = parent.field("condition");
+			// The condition itself always runs.
+			const isCondition =
+				condition !== undefined && sameNode(current, condition);
+			if (!isCondition && !within(pair, parent)) return false;
+		} else if (CONDITIONAL_STEPS.has(kind) && !within(pair, parent))
+			return false;
+		current = parent;
+	}
+}
+
+/** The names an object pattern binds: `{ serve }`, `{ serve: s }`. */
+function patternMembers(node: SgNode | undefined): string[] {
+	if (!node || node.kind() !== "object_pattern") return [];
+	return node.namedChildren().flatMap((child) => {
+		if (child.kind() === "shorthand_property_identifier_pattern")
+			return [child.text()];
+		if (child.kind() === "pair_pattern") {
+			const value = child.field("value");
+			return value?.kind() === "identifier" ? [value.text()] : [];
+		}
+		return [];
+	});
+}
+/** Does an expression name a runtime global that binds a port itself? */
+function namesRuntimeGlobal(node: SgNode): boolean {
+	if (node.kind() === "identifier")
+		return RUNTIME_BIND_OBJECTS.has(node.text());
+	if (node.kind() === "member_expression") {
+		const object = node.field("object");
+		return (
+			object?.kind() === "identifier" && RUNTIME_BIND_OBJECTS.has(object.text())
+		);
+	}
+	return false;
+}
+
 interface Binding {
 	name: string;
 	value: SgNode;
@@ -448,25 +560,104 @@ export function findUnclosedServerStarts(
 		);
 	};
 
-	const starts: Array<{ receiver: SgNode; node: SgNode }> = [];
+	const starts: Array<{
+		receiver: SgNode;
+		node: SgNode;
+		unreadableVerb?: boolean;
+	}> = [];
+
+	/** Names bound to a runtime global: `const { serve } = Bun`, `= Bun`. */
+	const runtimeNames = new Set<string>(RUNTIME_BIND_OBJECTS);
+	/** Functions and values this file declares, so a bare `serve()` is local. */
+	const localNames = new Set<string>();
+	for (const declarator of root.findAll({
+		rule: { kind: "variable_declarator" },
+	})) {
+		const value = declarator.field("value");
+		const name = declarator.field("name");
+		if (!name) continue;
+		if (value && namesRuntimeGlobal(value)) {
+			if (name.kind() === "identifier")
+				for (const alias of identityNames(name.text(), bindings))
+					runtimeNames.add(alias);
+			for (const member of patternMembers(name)) runtimeNames.add(member);
+			continue;
+		}
+		if (name.kind() === "identifier") localNames.add(name.text());
+	}
+	for (const fn of root.findAll({
+		rule: { any: [...FUNCTION_KINDS].map((kind) => ({ kind })) },
+	})) {
+		const name = functionName(fn);
+		if (name) localNames.add(name);
+	}
+
+	/**
+	 * The receiver and the verb a call site starts with (N3, shape 34). A
+	 * computed member (`socket["bind"](0)`) is that same verb; `verb` is
+	 * undefined when the scan cannot read the key, and `computed` records it so
+	 * a start spelling nobody can read reports instead of passing.
+	 */
+	const callTarget = (
+		call: SgNode,
+	): { receiver: SgNode; verb?: string; computed: boolean } | undefined => {
+		const fn = call.field("function");
+		if (fn?.kind() === "member_expression") {
+			const receiver = fn.field("object");
+			const property = fn.field("property");
+			if (!receiver || !property) return undefined;
+			return { receiver, verb: property.text(), computed: false };
+		}
+		if (fn?.kind() === "subscript_expression") {
+			const receiver = fn.field("object");
+			if (!receiver) return undefined;
+			const index = fn.field("index");
+			const verb =
+				index?.kind() === "string" ? index.text().slice(1, -1) : undefined;
+			return { receiver, verb, computed: true };
+		}
+		return undefined;
+	};
+
 	for (const call of calls) {
 		const fn = call.field("function");
-		if (fn?.kind() !== "member_expression") continue;
-		const verb = fn.field("property")?.text();
-		if (!verb || !START_VERBS.has(verb)) continue;
-		const receiver = fn.field("object");
-		if (!receiver) continue;
+		// A runtime global's own `serve`, on an identifier the scan cannot read
+		// through: destructured (`const { serve } = Bun`), renamed
+		// (`const { serve: startServer } = Bun`), or an alias of the global. A
+		// file that declares its own function of that name is a helper, not a
+		// start.
+		if (
+			fn?.kind() === "identifier" &&
+			(fn.text() === "serve" || runtimeNames.has(fn.text())) &&
+			!localNames.has(fn.text())
+		) {
+			starts.push({ receiver: fn, node: call });
+			continue;
+		}
+		const target = callTarget(call);
+		if (!target) continue;
+		const { receiver, verb, computed } = target;
 		// `listen` binds whatever its receiver is. `bind`/`serve` share their
 		// spelling with `Function.prototype.bind` and with plain helper calls,
 		// so they count only on a receiver this scan can read as a socket or
 		// server handle, or on a runtime global whose `serve` binds a port
-		// (`Bun.serve`). A receiver the scan cannot read is a declared gap, not
-		// a report: the tree has 59 `Function.prototype.bind` calls.
+		// (`Bun.serve`, `runtime.serve`). A dot-form receiver the scan cannot
+		// read is the declared gap: the tree holds dozens of
+		// `Function.prototype.bind` calls, and the sweep's `bind` census case
+		// measures that population rather than pinning a hand-written number.
 		const runtimeBind =
-			receiver.kind() === "identifier" &&
-			RUNTIME_BIND_OBJECTS.has(receiver.text());
-		if (verb === "listen" || runtimeBind || bindsOnHandle(receiver))
-			starts.push({ receiver, node: call });
+			receiver.kind() === "identifier" && runtimeNames.has(receiver.text());
+		const readable = bindsOnHandle(receiver);
+		if (verb !== undefined && START_VERBS.has(verb)) {
+			if (verb === "listen" || runtimeBind || readable)
+				starts.push({ receiver, node: call });
+			continue;
+		}
+		// A computed key the scan cannot read, on a handle the scan can: the
+		// start spelling is unreadable, so it reports (shape 69). A readable
+		// key that is not a start verb (`server["close"]()`) is not one.
+		if (computed && verb === undefined && (readable || runtimeBind))
+			starts.push({ receiver, node: call, unreadableVerb: true });
 	}
 	const constructions = [...calls, ...news].filter(isServerConstruction);
 
@@ -597,9 +788,37 @@ export function findUnclosedServerStarts(
 		const name = binding.field("name") ?? binding.field("left");
 		if (name?.kind() !== "identifier") return false;
 		if (depth >= 3) return false;
+		const value = binding.field("value") ?? binding.field("right") ?? undefined;
 		const refs = referencesTo(name.text(), name);
 		if (refs.length === 0) return false;
-		return refs.every((ref) => settleFrom(ref, depth + 1, collection));
+		return refs.every((ref) => settleFrom(ref, depth + 1, collection, value));
+	}
+
+	/**
+	 * An `await` credits settlement only where the hook or helper actually runs
+	 * it (N1, shape 43): on the owner's own straight-line path, under branches
+	 * that also enclose the close, and, inside a nested function, only when that
+	 * function's own completion is settled. A nested function nobody calls, a
+	 * callback the hook does not await, and a branch that may never run all
+	 * wait for nothing.
+	 */
+	function creditedAwait(
+		awaitNode: SgNode,
+		close: SgNode,
+		depth: number,
+	): boolean {
+		if (!runsWhenever(awaitNode, close)) return false;
+		const owner = nearestFunction(awaitNode);
+		// Module scope: a top-level await runs straight-line; only its placement
+		// is judged, by `placementsOf`.
+		if (!owner) return true;
+		const hook = enclosingHook(awaitNode);
+		// Nothing the test runs encloses this await: a module-level helper that
+		// closes what it starts proves the wait where it runs, and a caller in
+		// another file is the declared cross-file gap.
+		if (!hook) return true;
+		if (onOwnPath(awaitNode, hook)) return true;
+		return settleFunctionReturn(owner, depth, false);
 	}
 
 	/** The value a function returns, settled by whoever consumes the function. */
@@ -636,13 +855,17 @@ export function findUnclosedServerStarts(
 	 * `forEach` result (undefined) or a `.map` result (an array) awaits nothing.
 	 * `collection` follows a value that has become a collection of promises on
 	 * the way up, so `await [promise]` is not credited and
-	 * `await Promise.all([promise])` is.
+	 * `await Promise.all([promise])` is. `close` is the node whose settlement is
+	 * being proven, so an await under a branch that does not also enclose it is
+	 * not credited (N1).
 	 */
 	function settleFrom(
 		node: SgNode,
 		depth: number,
 		collection = false,
+		close: SgNode | undefined = undefined,
 	): boolean {
+		const origin = close ?? node;
 		let current = node;
 		for (;;) {
 			const parent = current.parent();
@@ -657,7 +880,8 @@ export function findUnclosedServerStarts(
 				current = parent;
 				continue;
 			}
-			if (kind === "await_expression") return !collection;
+			if (kind === "await_expression")
+				return !collection && creditedAwait(parent, origin, depth);
 			if (kind === "array") {
 				collection = true;
 				current = parent;
@@ -776,6 +1000,18 @@ export function findUnclosedServerStarts(
 		const receiver = start.receiver;
 		const line = start.node.range().start.line + 1;
 		const text = lines[line - 1]?.trim() ?? "";
+		if (start.unreadableVerb) {
+			findings.push({
+				file,
+				server: receiver.text().replace(/\s+/g, ""),
+				line,
+				verdict: "unresolvable",
+				mechanism: "none",
+				text,
+				reason: `the start verb on \`${receiver.text().replace(/\s+/g, " ")}\` is a computed key this scan cannot read, so the call cannot be attributed`,
+			});
+			continue;
+		}
 		if (receiver.kind() !== "identifier") {
 			// The receiver itself is reported, and any construction it wraps is
 			// part of that same report (no second row for one defect).

@@ -17,11 +17,12 @@
  * The rule, per read: every `stat` / `statSync` / `lstat` / `lstatSync` /
  * `open` / `openSync` / `readFileSync` / `readFile` / `createReadStream` call
  * in `tests/**` whose first argument names an in-process sink needs a drain
- * OF THAT SINK before it, with no other `await` between the drain and the
- * read (an await lets the code under test enqueue more). A drain is the sink
- * module's own `flush*` export (awaited, or a `*Sync` variant),
- * `flushAllNdjsonWriters()`, or an awaited call to a local helper whose body
- * ends drained. A drain counts only where it DOMINATES the read: it must run
+ * OF THAT SINK before it, with no other `await` on the read's own scope's
+ * straight-line path between the drain and the read (an await lets the code
+ * under test enqueue more). A drain is the sink module's own `flush*` export
+ * (awaited, or a `*Sync` variant), `flushAllNdjsonWriters()`, or an awaited
+ * call to a local helper whose body ends drained. A drain counts only where it
+ * DOMINATES the read: it must run
  * unconditionally in a block that encloses the read and lies inside the
  * read's scope. A drain under an `if`, a ternary, a `&&`/`||`/`??` operand, a
  * loop, a `catch`, or an inner function does not count; one in a `try` body
@@ -30,16 +31,20 @@
  * callback; inline callbacks (`.map(...)`, `withHome(() => ...)`) are
  * transparent. A read inside a local helper with no drain of its own is
  * drained when every call site of the helper is — but only while the helper
- * runs to the read without suspending: an `await` inside the helper lets the
- * code under test enqueue more bytes after the caller's drain, so the read is
- * judged undrained. A read a helper drains itself is credited at the read,
- * whatever its callers do.
+ * runs to the read without suspending: an `await` ON THE HELPER'S OWN PATH
+ * lets the code under test enqueue more bytes after the caller's drain, so the
+ * read is judged undrained. An `await` inside a function the helper never
+ * calls, in a callback nothing waits on, or under a branch the read is not in
+ * runs never (shape 43), so it is no suspension. A read a helper drains
+ * itself is credited at the read, whatever its callers do.
  *
  * A sink path that reaches a read through a SAME-FILE helper's parameter is
  * attributed at every parameter position: the parameter's name, a destructured
  * member of it, a local alias of it, and the parameter's own default when the
  * caller omits the argument. The read is judged where it runs (`rowsFor`),
- * and the callers' drains are consulted through the helper.
+ * and the drain that decides it is the one at the call site that SUPPLIED the
+ * sink (shape 58): a caller that passed another path is never blamed for this
+ * read.
  *
  * Detectors match code, not prose (#4381 acceptance; principles §2):
  * - The DRAIN needles run over `stripSource` text with strings and comments
@@ -92,6 +97,15 @@
  *   and a test that depends on it reds every run.
  * - A reader helper passed by reference (not called) has no call sites to
  *   check, so it is judged on its own body.
+ * - A read invoked through an alias of the function (`const read =
+ *   fs.readFileSync; read(sink)`) names no read callee, so the population
+ *   does not see it. Probed: clean (a stated residual, not a silent pass the
+ *   new reachability rule causes).
+ * - A conditional `await` that does not also enclose the read is not counted
+ *   as a suspension: the branch may not run, so it cannot be shown to
+ *   enqueue bytes. A read after `if (flag) await tick();` is judged clean
+ *   (the reachability rule, shape 43; the alternative reds every correct
+ *   ordered read behind an optional setup step).
  * - Drain forms the matcher does not credit (loud false positives, not
  *   silent passes): `Promise.all([flush...()])`, a dynamic-import flush, and
  *   two drains in sequence before a read of the first sink (the second's
@@ -386,6 +400,37 @@ const within = (inner: SgNode, outer: SgNode): boolean =>
 	outer.range().start.index <= inner.range().start.index &&
 	inner.range().end.index <= outer.range().end.index;
 
+const sameRange = (left: SgNode, right: SgNode): boolean =>
+	left.range().start.index === right.range().start.index &&
+	left.range().end.index === right.range().end.index;
+
+/**
+ * Does every branch above `node` also enclose `pair`? An `await` under a guard
+ * the read is not in may never run, so it cannot let bytes onto disk, and must
+ * not void the caller's drain (N1, shape 43).
+ */
+function guardedAlike(node: SgNode, pair: SgNode): boolean {
+	let current = node;
+	for (;;) {
+		const parent = current.parent();
+		if (!parent || isFunction(parent)) return true;
+		const kind = String(parent.kind());
+		if (kind === "binary_expression") {
+			if (
+				SHORT_CIRCUIT.test(parent.field("operator")?.text() ?? "") &&
+				!within(pair, parent)
+			)
+				return false;
+		} else if (kind === "if_statement" || kind === "ternary_expression") {
+			const condition = parent.field("condition");
+			const isCondition = condition != null && sameRange(current, condition);
+			if (!isCondition && !within(pair, parent)) return false;
+		} else if (CONDITIONAL_KINDS.has(kind) && !within(pair, parent))
+			return false;
+		current = parent;
+	}
+}
+
 const nameNeedle = (name: string, member: boolean): RegExp =>
 	new RegExp(`${member ? "\\b" : "(?<![\\w$.])"}${escapeRegExp(name)}\\b`);
 
@@ -515,6 +560,7 @@ function scanUndrainedSinkReads(
 		drainNames.set(sink.module, [...sink.flushSymbols, ...GLOBAL_DRAINS]);
 	}
 	const calls = root.findAll({ rule: { kind: "call_expression" } });
+	const awaits = root.findAll({ rule: { kind: "await_expression" } });
 	const drains = drainCalls(calls);
 	const bodies: Array<{ name: string; start: number; end: number }> = [];
 	for (const fn of root.findAll({
@@ -563,16 +609,18 @@ function scanUndrainedSinkReads(
 
 	/**
 	 * Drained at `node` for `owner`: the last credited drain of that sink
-	 * precedes it with no other `await` in between (any await lets the code
+	 * precedes it with no other await in between (any await lets the code
 	 * under test enqueue more). A drain is credited when the block it runs in
 	 * unconditionally encloses `node` and lies inside `node`'s scope (state
 	 * table D1, D2). With no credited drain, a local helper is drained when
-	 * every call site of it is (D13).
+	 * every call site it reads the sink at is (D13); `suppliers` narrows that
+	 * to the call sites that passed a sink for a parameter read (N2).
 	 */
 	const undrainedAt = (
 		node: SgNode,
 		owner: string,
 		depth: number,
+		suppliers?: readonly SgNode[],
 	): number[] => {
 		const scope = scopeOf(node);
 		const names = drainNames.get(owner) ?? GLOBAL_DRAINS;
@@ -588,26 +636,44 @@ function scanUndrainedSinkReads(
 					(scope === undefined || within(block, scope)),
 			)
 			.at(-1);
-		if (last) {
-			const gap = blanked.slice(last.end, at).replace(/\bawait\s*$/, "");
-			return /\bawait\b/.test(gap) ? [line] : [];
-		}
+		if (last) return suspendsBetween(scope, node, last.end) ? [line] : [];
 		const helper = scope ? declaredName(scope) : undefined;
-		if (!scope || !helper || depth >= CALLER_DEPTH) return [line];
-		const sites = callsTo(helper, scope);
-		if (sites.length === 0) return [line];
+		const sites = suppliers ?? (scope && helper ? callsTo(helper, scope) : []);
+		if (!scope || depth >= CALLER_DEPTH || sites.length === 0) return [line];
 		// A caller's drain dominates the read only while the helper runs to the
-		// read without suspending: an `await` inside the helper lets the code
-		// under test enqueue more bytes after the caller's drain (shape 67).
+		// read without suspending (shape 67).
 		if (suspendsBefore(scope, node)) return [line];
 		return sites.flatMap((site) => undrainedAt(site, owner, depth + 1));
 	};
 
+	/**
+	 * Does `scope` run an `await` between `from` and `node`? Only an await on
+	 * the scope's own path, under branches that also hold the read, voids a
+	 * caller's drain (N1, shape 43): one inside a function the scope never
+	 * calls, a callback nothing waits on, or a dead branch runs never, and the
+	 * code under test cannot enqueue bytes through it.
+	 */
+	const suspendsBetween = (
+		scope: SgNode | undefined,
+		node: SgNode,
+		from = scope?.range().start.index ?? 0,
+	): boolean => {
+		if (!scope) return false;
+		const at = node.range().start.index;
+		return awaits.some((awaitNode) => {
+			const start = awaitNode.range().start.index;
+			if (start < from || start >= at) return false;
+			// The read's own await is not a suspension before the read.
+			if (within(node, awaitNode)) return false;
+			const owner = lexicalScopeOf(awaitNode);
+			if (!owner || !sameRange(owner, scope)) return false;
+			return guardedAlike(awaitNode, node);
+		});
+	};
+
 	/** Does `scope` suspend (await) between its entry and `node`? */
 	const suspendsBefore = (scope: SgNode, node: SgNode): boolean =>
-		/\bawait\b/.test(
-			blanked.slice(scope.range().start.index, node.range().start.index),
-		);
+		suspendsBetween(scope, node);
 
 	/** The names a parameter pattern introduces (object, array, alias, default). */
 	const patternNames = (node: SgNode | undefined): string[] => {
@@ -678,13 +744,14 @@ function scanUndrainedSinkReads(
 	 * sink is named at each call site, so the VALUE decides (#4589 F3). The
 	 * parameter may sit inside a `path.join(...)` argument, be destructured,
 	 * be aliased, or be omitted in favour of its own default. The read is
-	 * judged where it runs; the callers' drains are reached through the
-	 * helper's own suspension points (F2).
+	 * judged where it runs; the call site that SUPPLIED the sink is the one
+	 * whose drain decides (N2, shape 58), so a caller passing another path is
+	 * never blamed for this sink.
 	 */
 	const parameterReads = (
 		call: SgNode,
 		first: SgNode,
-	): Array<{ owner: string; at: SgNode }> => {
+	): Array<{ owner: string; at: SgNode; site: SgNode }> => {
 		const fn = scopeOf(call);
 		if (!fn) return [];
 		const name = declaredName(fn);
@@ -696,7 +763,8 @@ function scanUndrainedSinkReads(
 		);
 		const indices = parameterIndices(fn, pathText);
 		if (indices.length === 0) return [];
-		const out: Array<{ owner: string; at: SgNode }> = [];
+		const out: Array<{ owner: string; at: SgNode; site: SgNode }> = [];
+		const seen = new Set<string>();
 		for (const site of callsTo(name, fn)) {
 			const args = site.field("arguments")?.namedChildren() ?? [];
 			for (const index of indices) {
@@ -706,7 +774,10 @@ function scanUndrainedSinkReads(
 				if (!value) continue;
 				const range = value.range();
 				for (const owner of sinksIn(range.start.index, range.end.index)) {
-					out.push({ owner, at: call });
+					const key = `${owner}@${site.range().start.index}`;
+					if (seen.has(key)) continue;
+					seen.add(key);
+					out.push({ owner, at: call, site });
 				}
 			}
 		}
@@ -720,24 +791,24 @@ function scanUndrainedSinkReads(
 		const owners = sinksIn(first.range().start.index, first.range().end.index);
 		// Sink named at the read, or named by the callers of a helper whose
 		// parameter is the path it reads.
-		const reads: Array<{ owner: string; at: SgNode }> =
+		const reads: Array<{ owner: string; at: SgNode; site?: SgNode }> =
 			owners.size > 0
 				? [...owners].map((owner) => ({ owner, at: call }))
 				: parameterReads(call, first);
 		const undrained: string[] = [];
 		const callers = new Set<number>();
 		const line = call.range().start.line + 1;
-		for (const { owner, at: readAt } of reads) {
-			const at = undrainedAt(readAt, owner, 0);
+		for (const { owner, at: readAt, site } of reads) {
+			const at = undrainedAt(readAt, owner, 0, site ? [site] : undefined);
 			if (at.length === 0) continue;
 			undrained.push(owner);
-			for (const site of at) if (site !== line) callers.add(site);
+			for (const siteLine of at) if (siteLine !== line) callers.add(siteLine);
 		}
 		if (undrained.length === 0) continue;
 		hits.push({
 			line,
 			callee,
-			sinks: undrained.sort(),
+			sinks: [...new Set(undrained)].sort(),
 			text: lines[line - 1]?.trim() ?? "",
 			undrainedCallers: [...callers].sort((a, b) => a - b),
 		});
@@ -1376,6 +1447,165 @@ describe("sink reads drain first (#4381)", () => {
 					label,
 				).toEqual([[line, ["clients/latency-logger.ts"], [line + 3]]]);
 			}
+		});
+
+		it("an await the helper never runs does not void a caller's drain (N1, shape 43)", () => {
+			// Suspension is a property of the helper's own straight-line path. An
+			// `await` inside a function the helper does not call, inside a callback
+			// nothing waits on, or under a branch the read does not sit in lets no
+			// bytes onto disk, so the caller's drain still covers the read.
+			const cases: Array<[string, string[]]> = [
+				[
+					"uncalled nested function",
+					["\tconst later = async () => { await tick(); };", "\tvoid later;"],
+				],
+				["dead branch", ["\tif (process.env.NEVER_SET) await tick();"]],
+				[
+					"short-circuit operand",
+					["\tprocess.env.NEVER_SET && (await tick());"],
+				],
+				[
+					"callback nothing awaits",
+					["\tsetTimeout(async () => { await tick(); }, 0);"],
+				],
+			];
+			for (const [label, body] of cases) {
+				const hits = scanFixture(
+					[
+						"function rowsFor(file: string): string {",
+						...body,
+						'\treturn fs.readFileSync(file, "utf8");',
+						"}",
+						'it("x", async () => {',
+						"\tawait flushLatencyLog();",
+						"\tconst text = rowsFor(getLatencyLogPath());",
+						"\tvoid text;",
+						"});",
+					].join("\n"),
+				);
+				expect(
+					hits.map((hit) => hit.line),
+					label,
+				).toEqual([]);
+			}
+			// The same rule on the helper's own-drain path: an uncalled `await`
+			// between the helper's drain and its read does not void that drain.
+			expect(
+				scanFixture(
+					[
+						"async function rowsFor(file: string): Promise<string> {",
+						"\tawait flushLatencyLog();",
+						"\tconst later = async () => { await tick(); };",
+						"\tvoid later;",
+						'\treturn fs.readFileSync(file, "utf8");',
+						"}",
+						'it("x", async () => {',
+						"\tconst text = await rowsFor(getLatencyLogPath());",
+						"\tvoid text;",
+						"});",
+					].join("\n"),
+				),
+			).toEqual([]);
+			// An await the helper DOES run still voids the drain, including one in
+			// the branch the read sits in (a plant nobody listed).
+			const guarded = scanFixture(
+				[
+					"async function rowsFor(file: string): Promise<string> {",
+					"\tif (flag) {",
+					"\t\tawait tick();",
+					'\t\treturn fs.readFileSync(file, "utf8");',
+					"\t}",
+					'\treturn fs.readFileSync(file, "utf8");',
+					"}",
+					'it("x", async () => {',
+					"\tawait flushLatencyLog();",
+					"\tconst text = await rowsFor(getLatencyLogPath());",
+					"\tvoid text;",
+					"});",
+				].join("\n"),
+			);
+			expect(guarded.map((hit) => [hit.line, hit.undrainedCallers])).toEqual([
+				[4, []],
+			]);
+		});
+
+		it("attributes a helper read to the call site that supplied the sink (N2, shape 58)", () => {
+			const reader = [
+				"function rowsFor(file: string): string {",
+				'\treturn fs.readFileSync(file, "utf8");',
+				"}",
+			];
+			// The caller that passes a non-sink path is never blamed for another
+			// caller's sink read, in either order.
+			expect(
+				scanFixture(
+					[
+						...reader,
+						'it("x", async () => {',
+						"\tawait flushLatencyLog();",
+						"\tconst text = rowsFor(getLatencyLogPath());",
+						"\tvoid text;",
+						"});",
+						'it("y", async () => {',
+						'\tconst text = rowsFor("notes.txt");',
+						"\tvoid text;",
+						"});",
+					].join("\n"),
+				),
+			).toEqual([]);
+			expect(
+				scanFixture(
+					[
+						...reader,
+						'it("y", async () => {',
+						'\tconst text = rowsFor("notes.txt");',
+						"\tvoid text;",
+						"});",
+						'it("x", async () => {',
+						"\tawait flushLatencyLog();",
+						"\tconst text = rowsFor(getLatencyLogPath());",
+						"\tvoid text;",
+						"});",
+					].join("\n"),
+				),
+			).toEqual([]);
+			// Two callers that DO pass the sink: only the undrained one is named,
+			// and the owner appears once per read.
+			const hits = scanFixture(
+				[
+					...reader,
+					'it("x", async () => {',
+					"\tawait flushLatencyLog();",
+					"\tconst text = rowsFor(getLatencyLogPath());",
+					"\tvoid text;",
+					"});",
+					'it("y", async () => {',
+					"\tconst text = rowsFor(getLatencyLogPath());",
+					"\tvoid text;",
+					"});",
+				].join("\n"),
+			);
+			expect(
+				hits.map((hit) => [hit.line, hit.sinks, hit.undrainedCallers]),
+			).toEqual([[2, ["clients/latency-logger.ts"], [10]]]);
+			// Two undrained callers of the same parameter: the read reports once
+			// and names the owner once (the review's duplicate-owner row, N2).
+			const both = scanFixture(
+				[
+					...reader,
+					'it("x", async () => {',
+					"\tconst text = rowsFor(getLatencyLogPath());",
+					"\tvoid text;",
+					"});",
+					'it("y", async () => {',
+					"\tconst text = rowsFor(getLatencyLogPath());",
+					"\tvoid text;",
+					"});",
+				].join("\n"),
+			);
+			expect(
+				both.map((hit) => [hit.line, hit.sinks, hit.undrainedCallers]),
+			).toEqual([[2, ["clients/latency-logger.ts"], [5, 9]]]);
 		});
 
 		it("a helper's own await voids the caller's drain through the alias path (F2)", () => {

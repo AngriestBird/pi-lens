@@ -25,14 +25,22 @@
  * | `const s = net.createServer(...)` | `afterEach(() => new Promise(r => s.close(r)))` (the hook returns it) | closed |
  * | `const s = net.createServer(...)` | `afterEach(closeServer)`, a same-file function that awaits the close | closed |
  * | `const s = net.createServer(...)` | `const closed = new Promise(...); await closed;` | closed |
+ * | `const s = net.createServer(...)` | `if (NEVER) await closed;`, the close outside that branch | unawaited — the await may never run |
+ * | `const s = net.createServer(...)` | `async function unused(){ await closed; }`, nobody calls it | unawaited |
+ * | `const s = net.createServer(...)` | `setTimeout(async () => { await p; }, 0)`, a callback the hook does not await | unawaited |
  * | `let s; s = net.createServer(...)` at file scope | `afterEach` calls `s.close()`, unawaited | unawaited (baseline) |
  * | `const s = net.createServer(...)` | `finally { s.closeAllConnections?.(); s.close(); }`, unawaited | unawaited (baseline) |
  * | a helper returns `{ close: () => new Promise(d => s.close(d)) }` | caller awaits `handle.close()` | helper (baseline) |
  * | `new WebSocketServer({ port })` | none | unresolvable — always reported |
  * | `Bun.serve({ port })` | none | unresolvable — the handle is not readable |
+ * | `const { serve } = Bun; serve({ port })` | none | unresolvable — a runtime global's own function |
  * | `dgram.createSocket("udp4").bind(0)` | none | unresolvable — a start verb on a socket handle |
+ * | `socket["bind"](0)`, a computed start verb | none | unclosed — the computed spelling is the same start |
+ * | `socket[verb](0)`, a computed key nobody can read | none | unresolvable — never clean |
  *
- * Settlement is proven on the awaited VALUE, never on proximity (F1):
+ * Settlement is proven on the awaited VALUE, never on proximity (F1), and only
+ * where that `await` runs on the hook's or helper's own straight-line path
+ * (N1, shape 43):
  * `await xs.forEach(...)` and `await xs.map(...)` await undefined and an array,
  * `Promise.race` can settle on another value, and a helper that creates the
  * promise without returning it settles nothing — all report. A `bind`/`serve`
@@ -40,10 +48,11 @@
  * `Function.prototype.bind`, not a start, and that reading is declared in the
  * detector's docstring.
  *
- * A `.listen` receiver that is not a plain identifier, and a server
- * construction the binding scan cannot attribute to a start, are reported as
- * `unresolvable` rather than counted clean (AGENTS.md shape 69): the detector
- * fails closed on a start spelling it does not know.
+ * A `.listen` receiver that is not a plain identifier, a computed start verb
+ * whose key or receiver the scan cannot read, and a server construction the
+ * binding scan cannot attribute to a start, are reported as `unresolvable`
+ * rather than counted clean (AGENTS.md shape 69): the detector fails closed on
+ * a start spelling it does not know.
  *
  * The baseline (`tests/support/test-server-teardown-baseline.ts`) admits the
  * starts already unproven on master, so this lands as a ratchet instead of a
@@ -63,6 +72,7 @@ import {
 	readWalkedFile,
 	readWalkedFiles,
 	relativePosix,
+	stripSource,
 } from "../support/sweep-kit.js";
 import { TEST_SERVER_TEARDOWN_ADMISSIONS } from "../support/test-server-teardown-admissions.js";
 import { TEST_SERVER_TEARDOWN_BASELINE } from "../support/test-server-teardown-baseline.js";
@@ -498,6 +508,93 @@ describe("#4589 server-teardown detector — the shapes that must red and green"
 		}
 	});
 
+	it("credits an await only where the hook or helper actually runs it (N1, shape 43)", () => {
+		// The close promise exists, and an `await` on it exists, but the hook
+		// returns before that await runs: the listener can outlive the case. Each
+		// row is inside an accepted teardown placement, so a green row is a
+		// silent pass.
+		const teardown = (body: string[]): string[] => [
+			"const server = net.createServer(() => {});",
+			"await new Promise((resolve) => server.listen(endpoint, resolve));",
+			"afterEach(async () => {",
+			...body,
+			"});",
+		];
+		const unproven: Array<[string, string[]]> = [
+			[
+				"a nested function nobody calls",
+				[
+					"\tconst closed = new Promise((resolve) =>\n\t\tserver.close(() => resolve())\n\t);",
+					"\tasync function unused() { await closed; }",
+				],
+			],
+			[
+				"a callback the hook does not await",
+				[
+					"\tsetTimeout(async () => { await new Promise((resolve) => server.close(() => resolve())); }, 0);",
+				],
+			],
+			[
+				"a dead branch",
+				[
+					"\tconst closed = new Promise((resolve) =>\n\t\tserver.close(() => resolve())\n\t);",
+					"\tif (process.env.NEVER_SET) await closed;",
+				],
+			],
+			// A plant nobody listed: the same unreachability through a
+			// short-circuit operand, which is not a branch statement at all.
+			[
+				"a short-circuit operand",
+				[
+					"\tconst closed = new Promise((resolve) =>\n\t\tserver.close(() => resolve())\n\t);",
+					"\tprocess.env.NEVER_SET && (await closed);",
+				],
+			],
+			[
+				"a map callback nothing collects",
+				[
+					"\t[server].map(async () => { await new Promise((resolve) => server.close(() => resolve())); });",
+				],
+			],
+		];
+		for (const [label, body] of unproven) {
+			expect(
+				detect(teardown(body).join("\n")).map((finding) => [
+					finding.server,
+					finding.verdict,
+				]),
+				label,
+			).toEqual([["server", "unawaited"]]);
+		}
+		// The forms that do run the await: a guard enclosing BOTH the close and
+		// its await, and a callback whose returned promise a combinator settles.
+		const proven: Array<[string, string[]]> = [
+			[
+				"a guard that encloses the close and its await",
+				[
+					"\tif (server) await new Promise((resolve) => server.close(() => resolve()));",
+				],
+			],
+			[
+				"a combinator over the callbacks' promises",
+				[
+					"\tawait Promise.all([server].map(async () => { await new Promise((resolve) => server.close(() => resolve())); }));",
+				],
+			],
+			[
+				"a nested helper the hook awaits",
+				[
+					"\tconst closed = new Promise((resolve) =>\n\t\tserver.close(() => resolve())\n\t);",
+					"\tasync function settle() { await closed; }",
+					"\tawait settle();",
+				],
+			],
+		];
+		for (const [label, body] of proven) {
+			expect(detect(teardown(body).join("\n")), label).toEqual([]);
+		}
+	});
+
 	it("reports a start verb on a handle the scan cannot follow (F4)", () => {
 		// `Bun.serve` binds a port with no handle the detector can read.
 		expect(
@@ -516,9 +613,70 @@ describe("#4589 server-teardown detector — the shapes that must red and green"
 			]),
 		).toEqual([["socket", "unclosed"]]);
 		// `Function.prototype.bind` on a value that is not a handle is not a
-		// start (the tree has 59 of them).
+		// start: it is the declared gap, and the "bind census" case below counts
+		// that population from the same parser.
 		expect(
 			scanListen(["const fn = () => {};", "const bound = fn.bind(null);"]),
+		).toEqual([]);
+	});
+
+	it("reports a computed or indirect start verb on a readable handle (N3, shape 34)", () => {
+		// A computed member is the same start as the dot spelling (shape 34).
+		expect(
+			scanListen([
+				'const socket = dgram.createSocket("udp4");',
+				'socket["bind"](0);',
+			]),
+		).toEqual([["socket", "unclosed"]]);
+		expect(scanListen(['dgram.createSocket("udp4")["bind"](0);'])).toEqual([
+			['dgram.createSocket("udp4")', "unresolvable"],
+		]);
+		// A computed `listen` on a readable server is that server's start, not an
+		// anonymous construction row.
+		expect(
+			scanListen([
+				"const server = net.createServer(() => {});",
+				"await new Promise((resolve) => server['listen']?.(0, resolve));",
+			]),
+		).toEqual([["server", "unclosed"]]);
+		// A computed verb the scan cannot read is reported, never clean, even
+		// when the handle is provably closed and awaited.
+		expect(
+			scanListen([
+				'const socket = dgram.createSocket("udp4");',
+				'const verb = "bind";',
+				"socket[verb](1);",
+				"afterEach(async () => {",
+				"\tawait new Promise((resolve) => socket.close(() => resolve()));",
+				"});",
+			]),
+		).toEqual([["socket", "unresolvable"]]);
+		// A start verb reached through a runtime global's own function, or an
+		// alias of one: `serve` is a start the handle scan cannot see through.
+		expect(
+			scanListen(["const { serve } = Bun;", "serve({ port: 0 });"]),
+		).toEqual([["serve", "unresolvable"]]);
+		expect(
+			scanListen(["const runtime = Bun;", "runtime.serve({ port: 0 });"]),
+		).toEqual([["runtime", "unresolvable"]]);
+		expect(scanListen(["serve({ port: 0 });"])).toEqual([
+			["serve", "unresolvable"],
+		]);
+		// A renamed destructured member is the same start: the file bound it from
+		// the global, so the scan cannot read what the name calls.
+		expect(
+			scanListen([
+				"const { serve: startServer } = Bun;",
+				"startServer({ port: 0 });",
+			]),
+		).toEqual([["startServer", "unresolvable"]]);
+		// Not starts: a computed `Function.prototype.bind`, and a file's own
+		// function named `serve`.
+		expect(scanListen(["const fn = () => {};", 'fn["bind"](null);'])).toEqual(
+			[],
+		);
+		expect(
+			scanListen(["async function serve() { return 1; }", "await serve();"]),
 		).toEqual([]);
 	});
 
@@ -571,10 +729,10 @@ describe("#4589 server-teardown detector — the shapes that must red and green"
 				"await new Promise((resolve) => server['listen']?.(0, resolve));",
 			].join("\n"),
 		);
-		// `server['listen']` is not a `.listen` member call this detector reads:
-		// the construction is reported rather than the start (fail closed).
+		// A computed `listen` on a readable receiver is that receiver's start
+		// (N3, shape 34), so the row names the server, not the construction.
 		expect(findings.map((finding) => serverTeardownKey(finding))).toEqual([
-			"tests/config/case.test.ts:createServer",
+			"tests/config/case.test.ts:server",
 		]);
 		expect(escapeRowKey("a b%c")).toBe("a%20b%25c");
 		for (const finding of findings)
@@ -631,6 +789,25 @@ describe("#4589 server-teardown ratchet", () => {
 			return source !== undefined && /\.listen\s*\(/.test(source);
 		});
 		assertNonEmptyScan("test files starting a listener", listeners.length, 6);
+	}, 60_000);
+
+	it("counts the Function.prototype.bind population the start rule leaves alone", () => {
+		// The `bind` rule is `bind` on a handle the scan can read; every other
+		// `bind` is `Function.prototype.bind`. The docstring states that population
+		// is large, and this case measures it from the tree instead of pinning a
+		// hand-written number that goes stale (#4589 review r2 NITPICK).
+		const files = listSourceFiles(TESTS_ROOT, { extensions: [".ts"] });
+		let sites = 0;
+		for (const { source } of readWalkedFiles(files)) {
+			const code = stripSource(source);
+			sites += [
+				...code.matchAll(/\.\s*bind\s*\(|\[\s*["'`]bind["'`]\s*\]\s*\(/g),
+			].length;
+		}
+		process.stderr.write(
+			`server-teardown-sweep: ${sites} Function.prototype.bind spelling(s) in tests/**\n`,
+		);
+		assertNonEmptyScan("Function.prototype.bind sites", sites, 30);
 	}, 60_000);
 
 	it.skipIf(!process.env.TEST_SERVER_TEARDOWN_REGEN)(
