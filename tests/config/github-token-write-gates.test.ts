@@ -226,15 +226,15 @@ const STDIN_WRAPPERS = new Set([
 	"sudo",
 	"timeout",
 ]);
-/** Commands whose stdin is data, not an unread program. */
-const STDIN_DATA_CONSUMERS = new Set([
-	"cat",
-	"tee",
-	"jq",
-	"grep",
-	"sed",
-	"awk",
-]);
+/** Enumerated data-stdin forms; every unlisted flag refuses (STATE_TABLE.md). */
+const STDIN_DATA_CONSUMERS: Record<string, readonly string[]> = {
+	cat: [],
+	tee: [],
+	jq: [],
+	grep: ["-q", "--"],
+	sed: ["-n"],
+	awk: [],
+};
 /** Flags through which a non-shell executor is handed its program as a string. */
 const SCRIPT_FLAGS = new Set(["-c", "-e", "-p", "--eval", "--print"]);
 /**
@@ -609,6 +609,29 @@ function stdinFedInterpreter(
 	text: string,
 ): string | undefined {
 	if (!hasLiveStdinRedirect(text)) return undefined;
+	// Round 9 (STATE_TABLE.md): the admitted flag set is enumerated per program,
+	// so an unlisted flag refuses instead of passing as data.
+	const admitsData = (command: string, start: number): boolean => {
+		const allowed = STDIN_DATA_CONSUMERS[command];
+		if (!allowed) return false;
+		// Every flag-position word is judged, wherever the redirection sits: a
+		// flag after the redirection (`sed <<EOF -f -`) still reads the heredoc
+		// as the program. A redirection token, a bare `-` (the stdin operand),
+		// any operand, and everything after `--` are not flags.
+		let endOptions = false;
+		for (let index = start; index < words.length; index++) {
+			const word = words[index];
+			if (word === "--") {
+				endOptions = true;
+				continue;
+			}
+			if (endOptions || word === "-" || !word.startsWith("-")) continue;
+			// No admitted form names an external script (`-f`, `--file`), so the
+			// enumerated set alone refuses it, in any position.
+			if (!allowed.includes(word)) return false;
+		}
+		return true;
+	};
 	let index = 0;
 	let wrapper: string | undefined;
 	while (index < words.length) {
@@ -618,7 +641,7 @@ function stdinFedInterpreter(
 		if (attached) {
 			if (attached[1] !== "") {
 				const resolved = resolveCommand(attached[1], env).command;
-				return STDIN_DATA_CONSUMERS.has(resolved) ? "" : attached[1];
+				return admitsData(resolved, index + 1) ? "" : attached[1];
 			}
 			index++;
 			continue;
@@ -649,7 +672,7 @@ function stdinFedInterpreter(
 			index++;
 			continue;
 		}
-		return STDIN_DATA_CONSUMERS.has(resolved) ? "" : word;
+		return admitsData(resolved, index + 1) ? "" : word;
 	}
 	return undefined;
 }
@@ -794,7 +817,9 @@ function classifySegment(
 	const command = resolved.command;
 	// Stdin redirections are unreadable program input. The lexer subtracts a
 	// heredoc body before this scan, while a herestring stays in the segment;
-	// both must report when their interpreter's input names a gh call.
+	// both must report when their interpreter's input names a gh call. The
+	// admitted set carries no script flag (`-c`/`-e`/`-p`/`--eval`/`--print`),
+	// so an admitted data heredoc never runs code (STATE_TABLE.md round 9).
 	const stdinInterpreter = stdinFedInterpreter(rest, scope, text);
 	if (stdinInterpreter !== undefined && regionNamesGhCall) {
 		if (stdinInterpreter !== "") {
@@ -1810,6 +1835,10 @@ describe("workflow gh calls resolve a repository (#4382)", () => {
 			`grep gh <<EOF\n${BARE_GH_WRITE}\nEOF`,
 			`sed -n 1p <<EOF\n${BARE_GH_WRITE}\nEOF`,
 			`awk '{print}' <<EOF\n${BARE_GH_WRITE}\nEOF`,
+			// A bare `-` is the stdin operand, not a flag, and `--` ends options,
+			// so a dash-led PATTERN after it is data (STATE_TABLE.md round 9).
+			`cat - <<EOF\n${BARE_GH_WRITE}\nEOF`,
+			`grep -q -- '-dash-led pattern' <<EOF\n${BARE_GH_WRITE}\nEOF`,
 		]) {
 			expect(probe({ run }).findings, run).toEqual([]);
 		}
@@ -2114,6 +2143,44 @@ describe("the census's admitted source list (#4382 r6)", () => {
 		// Boundary: a herestring with no call in it is silent, like any other
 		// readable-looking payload with nothing to read.
 		expect(probe({ run: `bash <<< 'echo hello'` }).findings).toEqual([]);
+	});
+
+	// Round 9 NEW-1/NEW-2: stdin must not hide executable program inputs. The
+	// admitted forms are an enumerated set per program, so every external-program
+	// flag refuses wherever it stands, and so does an unlisted flag.
+	it.each([
+		["inline sed", "sed -e 'e gh pr edit 4550 --add-label x' <<EOF\nhi\nEOF"],
+		["sed short file", "sed -f - <<EOF\n1e gh pr edit 4550 --add-label x\nEOF"],
+		[
+			"sed long file",
+			"sed --file=- <<EOF\n1e gh pr edit 4550 --add-label x\nEOF",
+		],
+		[
+			"sed device",
+			"sed -f /dev/stdin <<EOF\n1e gh pr edit 4550 --add-label x\nEOF",
+		],
+		[
+			"sed file flag after the redirection",
+			"sed <<EOF -f -\n1e gh pr edit 4550 --add-label x\nEOF",
+		],
+		[
+			"sed unlisted flag",
+			"sed -i 's/a/b/' <<EOF\n1e gh pr edit 4550 --add-label x\nEOF",
+		],
+		[
+			"awk short file",
+			'awk -f - <<EOF\nBEGIN{system("gh pr edit 4550 --add-label x")}\nEOF',
+		],
+		[
+			"awk device",
+			'awk -f /dev/stdin <<EOF\nBEGIN{system("gh pr edit 4550 --add-label x")}\nEOF',
+		],
+		["grep short file", "grep -qf - <<EOF\ngh pr edit 4550 --add-label x\nEOF"],
+	])("refuses stdin program: %s", (_name, run) => {
+		expect(
+			probe({ run }).findings.map((found) => found.kind),
+			run,
+		).toEqual(["unclassified"]);
 	});
 
 	it("rejects every unread stdin-fed interpreter spelling", () => {
