@@ -449,6 +449,7 @@ describe("selectTargetedTests — path-mirror pass", () => {
 			"tests/real-harness/tools-enabled.test.ts",
 			"tests/config/handler-verdict-sweep.test.ts",
 			"tests/config/sink-read-drain-sweep.test.ts",
+			"tests/config/test-env-restore-sweep.test.ts",
 			"tests/config/module-instance-coverage.test.ts",
 			"tests/config/tmp-fixture-hygiene.test.ts",
 			"tests/config/tmp-hygiene-leak-origin.test.ts",
