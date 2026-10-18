@@ -235,8 +235,16 @@ function initFixtureRepo(fixtureRepo: string) {
 function createOriginMasterFixture(
 	mappedFile?: string,
 	postImage?: RuntimePostImageFixture,
+	baseFile?: { path: string; rows: string[] },
 ) {
 	const directory = mkdtempSync(join(repositoryRoot, ".tmp-pr-body-origin-"));
+	// `baseFile` commits a file the fixture needs as pre-existing evidence (the
+	// #4597 read-back witness), so the diff under test does not name it: a test
+	// file the diff adds would owe row 1 a red-first transcript this fixture is
+	// not about.
+	const baseExtra = baseFile
+		? `mkdir -p '${directory}/${dirname(baseFile.path)}' && printf '%s\\n' ${shellRows(baseFile.rows)} > '${directory}/${baseFile.path}' && git -C '${directory}' add '${baseFile.path}' && `
+		: "";
 	// `mappedFile` (#3802 F3) commits one extra repo-relative file in the same
 	// shell command, so a mapped-path diff costs no additional git spawn.
 	const mapped = mappedFile
@@ -272,7 +280,7 @@ function createOriginMasterFixture(
 	// repository the commit chain moves. A caller already inside another fixture
 	// repo made that fixture's branch the HEAD-moving target of this chain.
 	gitExecSync(
-		`git init --quiet --initial-branch=main '${directory}' && ${preImage}git -C '${directory}' -c user.name=pi-lens-test -c user.email=pi-lens-test@example.com commit --quiet --allow-empty -m fixture-base && git -C '${directory}' update-ref refs/remotes/origin/master HEAD && printf 'fixture change\n' > '${directory}/fixture.md' && git -C '${directory}' add fixture.md && git -C '${directory}' -c user.name=pi-lens-test -c user.email=pi-lens-test@example.com commit --quiet -m fixture-head${mapped}${postImageSegment}`,
+		`git init --quiet --initial-branch=main '${directory}' && ${preImage}${baseExtra}git -C '${directory}' -c user.name=pi-lens-test -c user.email=pi-lens-test@example.com commit --quiet --allow-empty -m fixture-base && git -C '${directory}' update-ref refs/remotes/origin/master HEAD && printf 'fixture change\n' > '${directory}/fixture.md' && git -C '${directory}' add fixture.md && git -C '${directory}' -c user.name=pi-lens-test -c user.email=pi-lens-test@example.com commit --quiet -m fixture-head${mapped}${postImageSegment}`,
 		{ cwd: repositoryRoot },
 	);
 	return directory;
@@ -1976,32 +1984,41 @@ describe("PR body lint (#1844)", () => {
 		});
 
 		it("reads a committed post-image blob over Node's default buffer", () => {
-			const fixtureCwd = createOriginMasterFixture(undefined, {
-				path: "clients/mid-ceiling.ts",
-				pre: ["export let x = 0;"],
-				post: [
-					"export let x = 0;",
-					'recordDegradationOnce({ kind: "mid-kind" });',
-				],
-				dirty: [
-					"export let x = 0;",
-					'recordDegradationOnce({ kind: "mid-kind" });',
-				],
-				padLines: 299_592,
-			});
+			const fixtureCwd = createOriginMasterFixture(
+				undefined,
+				{
+					path: "clients/mid-ceiling.ts",
+					pre: ["export let x = 0;"],
+					post: [
+						"export let x = 0;",
+						'recordDegradationOnce({ kind: "mid-kind" });',
+					],
+					dirty: [
+						"export let x = 0;",
+						'recordDegradationOnce({ kind: "mid-kind" });',
+					],
+					padLines: 299_592,
+				},
+				// #4597 round 3: this body names a record, so the fixture owes the
+				// read-back the rule demands — the rule applies to the fixture's own
+				// tree too, and the bare spelling is no longer exempt. It sits on the
+				// base commit, so it is pre-existing evidence rather than a test file
+				// this diff changes (#4605 row 1).
+				{
+					path: "tests/record.test.ts",
+					rows: [
+						'it("reads the kind", () => {',
+						'\texpect(row.kind).toBe("mid-kind");',
+						"});",
+					],
+				},
+			);
 			try {
 				const bytes = statSync(
 					join(fixtureCwd, "clients", "mid-ceiling.ts"),
 				).size;
 				expect(bytes).toBeGreaterThan(1024 * 1024);
 				expect(bytes).toBeLessThan(16 * 1024 * 1024);
-				// #4597 round 3: this body names a record, so the fixture owes the
-				// read-back the rule demands — the rule applies to the fixture's own
-				// tree too, and the bare spelling is no longer exempt.
-				gitExecSync(
-					`mkdir -p '${fixtureCwd}/tests' && printf '%s\\n' 'it("reads the kind", () => {' '\texpect(row.kind).toBe("mid-kind");' '});' > '${fixtureCwd}/tests/record.test.ts' && git -C '${fixtureCwd}' add tests/record.test.ts && git -C '${fixtureCwd}' -c user.name=pi-lens-test -c user.email=pi-lens-test@example.com commit --quiet -m fixture-read-back`,
-					{ cwd: repositoryRoot },
-				);
 				const diff = localDiff(fixtureCwd);
 				expect(diff).toContain("index ");
 				expect(
