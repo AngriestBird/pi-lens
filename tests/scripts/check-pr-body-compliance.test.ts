@@ -66,7 +66,7 @@ describe("diff-keyed compliance (#4585)", () => {
 			`it(\n"fails for stale bytes", () => {});\ntest.only("fresh control", () => {});\n// it("comment", () => {});`,
 		);
 		const body =
-			"Control: `fresh control` — proves fresh bytes still pass.\n\n```text\nFAIL tests/a.test.ts > fails for stale bytes\nTests 1 failed\n```";
+			"Control: `fresh control` in `tests/a.test.ts` — proves fresh bytes still pass.\n\n```text\nFAIL tests/a.test.ts > fails for stale bytes\nTests 1 failed\n```";
 		expect(errors(body, diff, headFiles)).toEqual([]);
 		expect(
 			errors(
@@ -80,21 +80,26 @@ describe("diff-keyed compliance (#4585)", () => {
 		).toEqual([]);
 		expect(
 			errors(`<!--\n${body}\n-->`, diff, headFiles).some((row) =>
-				row.includes("fails for stale bytes"),
+				row.includes("row 1"),
 			),
 		).toBe(true);
 		expect(
-			errors(body.replace("```text", "```typescript"), diff, headFiles).join(),
-		).toContain("fails for stale bytes");
+			errors(
+				body.replace(/^Control:.*\n\n/, "").replace("```text", "```typescript"),
+				diff,
+				headFiles,
+			).join(),
+		).toContain("row 1");
 		expect(
 			errors(
 				body
+					.replace(/^Control:.*\n\n/, "")
 					.replace("Tests 1 failed", "Tests 1 passed")
 					.replace("FAIL", "PASS"),
 				diff,
 				headFiles,
 			).join(),
-		).toContain("fails for stale bytes");
+		).toContain("row 1");
 	});
 	it("accepts a bare fence around a real transcript (#4585 bare fence)", () => {
 		const { diff, headFiles } = image(
@@ -116,6 +121,7 @@ describe("diff-keyed compliance (#4585)", () => {
 		);
 		const body = [
 			"```text",
+			" FAIL  |default| tests/a.test.ts",
 			" × glyph case 807ms",
 			" × another known red 9ms",
 			"```",
@@ -257,11 +263,11 @@ describe("diff-keyed compliance (#4585)", () => {
 	// A title the parser cannot resolve is refused by its own name, and a red
 	// that happens to spell `undefined` does not fabricate a proof for it
 	// (#4605 unresolved title).
-	it("refuses a title-less each declaration even when a red spells undefined (#4605 unresolved title)", () => {
+	it("refuses a declaration whose file no red names (#4605 unresolved title)", () => {
 		const { diff, headFiles } = image("tests/a.test.ts", "it.each(cases)();");
 		expect(
 			errors("```text\n× undefined thing 3ms\n```", diff, headFiles).join(),
-		).toContain("tests/a.test.ts:1: unresolved test title");
+		).toContain("tests/a.test.ts adds or edits test declarations");
 	});
 	it("does not use green mutation output or an unrelated red as proof", () => {
 		const { diff, headFiles } = image(
@@ -351,7 +357,7 @@ describe("diff-keyed compliance (#4585)", () => {
 		const prose = image("clients/other-launch.ts", "// trySpawn(command)");
 		expect(errors("", prose.diff, prose.headFiles)).toEqual([]);
 	});
-	it("accepts expanded table titles from the red transcript (#4584 dry run)", () => {
+	it("accepts one red naming the file whatever its title (#4584 dry run)", () => {
 		const { diff, headFiles } = image(
 			"tests/a.test.ts",
 			'it.each([["an empty report"]])("reds the step for %s ($5)", () => {});',
@@ -359,13 +365,15 @@ describe("diff-keyed compliance (#4585)", () => {
 		const body =
 			"```text\nFAIL tests/a.test.ts > reds the step for an empty report ($5)\nTests 1 failed\n```";
 		expect(errors(body, diff, headFiles)).toEqual([]);
+		// Row 1 is file-level: the title is not read, so another title from the
+		// same file is still that file's failure.
 		expect(
 			errors(
 				body.replace("reds the step for", "other case for"),
 				diff,
 				headFiles,
-			).join(),
-		).toContain("row 1");
+			),
+		).toEqual([]);
 	});
 	it("reads a local diff under the shared byte ceiling (#4585 large diff)", () => {
 		const calls: Array<[string[], unknown]> = [];
@@ -432,25 +440,6 @@ describe("diff-keyed compliance (#4585)", () => {
 		expect(errors("", catchOnly.diff, catchOnly.headFiles).join()).toContain(
 			"row 2",
 		);
-	});
-	it("matches a table title's static segments in order (#4585 title order)", () => {
-		const { diff, headFiles } = image(
-			"tests/a.test.ts",
-			'it.each([["x"]]) ("first %s last", () => {});'.replace(" ", ""),
-		);
-		const transcript = (title: string) =>
-			[
-				"```text",
-				`FAIL tests/a.test.ts > ${title}`,
-				"Tests 1 failed",
-				"```",
-			].join("\n");
-		expect(errors(transcript("first x last"), diff, headFiles)).toEqual([]);
-		// Reversed segments name a different title, not this declaration's
-		// expansion, so they cannot vouch for it.
-		expect(
-			errors(transcript("last first x"), diff, headFiles).join(),
-		).toContain("row 1");
 	});
 	it("requires mutation proof for a guard added to a shipped script (#4585 script row)", () => {
 		const { diff, headFiles } = image(
@@ -577,10 +566,7 @@ describe("diff-keyed compliance (#4585)", () => {
 			'it.runIf(true)("runIf case", () => {});\ntest.skipIf(false)("skipIf case", () => {});',
 		);
 		expect(errors("", modifiers.diff, modifiers.headFiles).join()).toContain(
-			"runIf case",
-		);
-		expect(errors("", modifiers.diff, modifiers.headFiles).join()).toContain(
-			"skipIf case",
+			"tests/a.test.ts adds or edits test declarations",
 		);
 		// A namespace import declares a test through `v.test(...)`; the binding
 		// comes from the import, not from the callee's spelling (Greptile P1).
@@ -589,7 +575,7 @@ describe("diff-keyed compliance (#4585)", () => {
 			'import * as v from "vitest";\nv.test("namespace case", () => {});',
 		);
 		expect(errors("", namespaced.diff, namespaced.headFiles).join()).toContain(
-			"namespace case",
+			"tests/b.test.ts adds or edits test declarations",
 		);
 		const after = [
 			"const cases = [",
@@ -608,14 +594,15 @@ describe("diff-keyed compliance (#4585)", () => {
 			' it.each(cases)("handles %s", () => {});',
 		].join("\n");
 		const headFiles = new Map([["tests/a.test.ts", after]]);
-		// The unchanged row's red is not the new case's proof.
+		// A changed table row is not a changed declaration under the file-level
+		// rule, and the file's own red still proves the file either way.
 		expect(
 			errors(
 				"```text\nFAIL tests/a.test.ts > handles old case\nTests 1 failed\n```",
 				diff,
 				headFiles,
-			).join(),
-		).toContain("handles new case");
+			),
+		).toEqual([]);
 		expect(
 			errors(
 				"```text\nFAIL tests/a.test.ts > handles new case\nTests 1 failed\n```",
@@ -750,7 +737,7 @@ describe("diff-keyed compliance (#4585)", () => {
 					"| --- | --- |",
 					"| `<!--` | literal opener |",
 					"",
-					"Control: `control case` — proves the old path still passes.",
+					"Control: `control case` in `tests/a.test.ts` — proves the old path still passes.",
 				].join("\n"),
 				opener.diff,
 				opener.headFiles,
@@ -779,207 +766,6 @@ describe("diff-keyed compliance (#4585)", () => {
 				windows.headFiles,
 			),
 		).toEqual([]);
-	});
-
-	// #4605 F6: a `$field` title resolves from its row, and a placeholder-only
-	// title resolves only to its own expansion, never to any red.
-	it("resolves $field titles and refuses a placeholder-only title (#4605 table titles)", () => {
-		const field = image(
-			"tests/a.test.ts",
-			'it.each([{kind:"missing"}])("handles $kind", () => {});',
-		);
-		expect(
-			errors(
-				"```text\nFAIL tests/a.test.ts > handles missing\nTests 1 failed\n```",
-				field.diff,
-				field.headFiles,
-			),
-		).toEqual([]);
-		expect(
-			errors(
-				"```text\nFAIL tests/a.test.ts > handles present\nTests 1 failed\n```",
-				field.diff,
-				field.headFiles,
-			).join(),
-		).toContain("handles missing");
-		const placeholder = image(
-			"tests/a.test.ts",
-			'it.each([["x"]])("%s", () => {});',
-		);
-		expect(
-			errors(
-				"```text\n× totally unrelated case 9ms\n```",
-				placeholder.diff,
-				placeholder.headFiles,
-			).join(),
-		).toContain("row 1");
-		expect(
-			errors("```text\n× x 9ms\n```", placeholder.diff, placeholder.headFiles),
-		).toEqual([]);
-		// A placeholder-only table whose rows do not resolve cannot be proved by
-		// any title, so it fails closed.
-		const external = image(
-			"tests/a.test.ts",
-			'it.each(getCases())("%s", () => {});',
-		);
-		expect(errors("", external.diff, external.headFiles).join()).toContain(
-			"row 1",
-		);
-	});
-
-	// #4605 F1: a table the lint cannot read is refused, never matched by a
-	// static-segment pattern that lets a sibling row's red prove this one.
-	it("refuses a table it cannot expand instead of matching a sibling row (#4605 unresolved table)", () => {
-		const computed = image(
-			"tests/a.test.ts",
-			'it.each(Object.entries(DRIVERS))("reports %s as failed", () => {});',
-		);
-		const sibling =
-			"```text\nFAIL tests/a.test.ts > reports alpha as failed\nTests 1 failed\n```";
-		expect(errors(sibling, computed.diff, computed.headFiles).join()).toContain(
-			"reports %s as failed needs a table row it can expand",
-		);
-		const imported = image(
-			"tests/a.test.ts",
-			'import { ROWS } from "./rows.js";\nit.each(ROWS)("handles %s", () => {});',
-		);
-		expect(
-			errors(
-				"```text\nFAIL tests/a.test.ts > handles something else entirely\nTests 1 failed\n```",
-				imported.diff,
-				imported.headFiles,
-			).join(),
-		).toContain("tests/a.test.ts:2");
-		// A typed binding resolves to its own rows: its row's red proves it and a
-		// sibling's does not.
-		const typed = image(
-			"tests/b.test.ts",
-			'const rows: Cell[] = [["one"]];\nit.each(rows)("handles %s", () => {});',
-		);
-		expect(
-			errors(
-				"```text\nFAIL tests/b.test.ts > handles one\nTests 1 failed\n```",
-				typed.diff,
-				typed.headFiles,
-			),
-		).toEqual([]);
-		expect(
-			errors(
-				"```text\nFAIL tests/b.test.ts > handles two\nTests 1 failed\n```",
-				typed.diff,
-				typed.headFiles,
-			).join(),
-		).toContain("handles one");
-		// A template with no placeholder prints one title for every row, so its
-		// exact title is readable even when the table is not.
-		const stable = image(
-			"tests/c.test.ts",
-			'it.each(getCases())("always the same title", () => {});',
-		);
-		expect(
-			errors(
-				"```text\nFAIL tests/c.test.ts > always the same title\nTests 1 failed\n```",
-				stable.diff,
-				stable.headFiles,
-			),
-		).toEqual([]);
-		expect(
-			errors(
-				"```text\nFAIL tests/c.test.ts > another title\nTests 1 failed\n```",
-				stable.diff,
-				stable.headFiles,
-			).join(),
-		).toContain("always the same title");
-		// A Control cannot name an expansion the lint cannot compute.
-		expect(
-			errors(
-				"Control: `handles alpha` — a pre-existing case.",
-				imported.diff,
-				imported.headFiles,
-			).join(),
-		).toContain("tests/a.test.ts:2");
-		// A row whose own values cannot fill its placeholders leaves the
-		// declaration unproven: its sibling's expansion cannot stand in.
-		const mixed = image(
-			"tests/d.test.ts",
-			'it.each([{ kind: "missing" }, { other: 1 }])("handles $kind", () => {});',
-		);
-		expect(
-			errors(
-				"```text\nFAIL tests/d.test.ts > handles missing\nTests 1 failed\n```",
-				mixed.diff,
-				mixed.headFiles,
-			).join(),
-		).toContain("needs a table row it can expand");
-	});
-
-	// #4605 F2: `test.for` is the sibling API of `test.each`, so its rows
-	// expand the same way and a title it never prints proves nothing.
-	it("accepts it.for table expansions like it.each (#4605 table for)", () => {
-		const table = image(
-			"tests/a.test.ts",
-			'it.for([["a"], ["b"]]) ("reads %s from the report", () => {});'.replace(
-				" ",
-				"",
-			),
-		);
-		const both =
-			"```text\nFAIL tests/a.test.ts > reads a from the report\nFAIL tests/a.test.ts > reads b from the report\nTests 2 failed\n```";
-		expect(errors(both, table.diff, table.headFiles)).toEqual([]);
-		expect(
-			errors(
-				"```text\nFAIL tests/a.test.ts > reads c from the report\nTests 1 failed\n```",
-				table.diff,
-				table.headFiles,
-			).join(),
-		).toContain("reads a from the report");
-		const field = image(
-			"tests/b.test.ts",
-			'it.for([{ kind: "missing" }])("handles $kind", () => {});',
-		);
-		expect(
-			errors(
-				"```text\nFAIL tests/b.test.ts > handles missing\nTests 1 failed\n```",
-				field.diff,
-				field.headFiles,
-			),
-		).toEqual([]);
-	});
-
-	// #4605 F7: the title may contain the suite separator, so the line is
-	// matched at the declared title's full length, not at its last segment.
-	it("keeps a title that contains the suite separator (#4605 title separator)", () => {
-		const direct = image("tests/a.test.ts", 'it("blocking > 0", () => {});');
-		expect(
-			errors(
-				"```text\nFAIL tests/a.test.ts > blocking > 0\nTests 1 failed\n```",
-				direct.diff,
-				direct.headFiles,
-			),
-		).toEqual([]);
-		expect(
-			errors("```text\n× blocking > 0 9ms\n```", direct.diff, direct.headFiles),
-		).toEqual([]);
-		const chained = image(
-			"tests/b.test.ts",
-			'describe("suite", () => {\n\tit("blocking > 0", () => {});\n});',
-		);
-		expect(
-			errors(
-				"```text\nFAIL tests/b.test.ts > suite > blocking > 0\nTests 1 failed\n```",
-				chained.diff,
-				chained.headFiles,
-			),
-		).toEqual([]);
-		// Only the title's own full length proves it: the line's last segment is
-		// a different title, not a suffix match.
-		expect(
-			errors(
-				"```text\nFAIL tests/b.test.ts > suite > 0\nTests 1 failed\n```",
-				chained.diff,
-				chained.headFiles,
-			).join(),
-		).toContain("blocking > 0");
 	});
 
 	// #4605 F8: a Windows row that names a path is evidence about that path, so
@@ -1083,7 +869,7 @@ describe("diff-keyed compliance (#4585)", () => {
 					],
 				]),
 			).join(),
-		).toContain("moved to another name");
+		).toContain("tests/a.test.ts adds or edits test declarations");
 	});
 
 	// #4605 F5: a `mutation:` continuation that says the run did not happen
@@ -1109,7 +895,7 @@ describe("diff-keyed compliance (#4585)", () => {
 		expect(
 			errors(
 				fence([
-					"mutation: scripts/probe-a.mjs guard removed",
+					"mutation: scripts/probe-a.mjs (guard -> gone)",
 					"FAIL tests/a.test.ts > unrelated",
 					"Tests 1 failed",
 				]),
@@ -1142,5 +928,227 @@ describe("diff-keyed compliance (#4585)", () => {
 		// An unreadable post-image cannot say whether it calls trySpawn, so it is
 		// refused as unclassified rather than passed.
 		expect(errors("", diff, new Map()).join()).toContain("cannot classify");
+	});
+
+	// #4605 V2: a whole-file deletion has no post-image, so it owes no row. The
+	// diff states the state explicitly; it is not an unreadable post-image.
+	it("owes no row for a whole-file deletion (#4605 deleted file)", () => {
+		const production = [
+			"diff --git a/clients/obsolete.ts b/clients/obsolete.ts",
+			"deleted file mode 100644",
+			"index 1234567..0000000",
+			"--- a/clients/obsolete.ts",
+			"+++ /dev/null",
+			"@@ -1,2 +0,0 @@",
+			"-export const child = trySpawn(command);",
+			"-export const gone = true;",
+		].join("\n");
+		expect(errors("", production, new Map())).toEqual([]);
+		const tests = [
+			"diff --git a/tests/obsolete.test.ts b/tests/obsolete.test.ts",
+			"deleted file mode 100644",
+			"--- a/tests/obsolete.test.ts",
+			"+++ /dev/null",
+			"@@ -1 +0,0 @@",
+			'-it("gone", () => {});',
+		].join("\n");
+		expect(errors("", tests, new Map())).toEqual([]);
+	});
+
+	// #4605 V3: a removal credits one addition, so a move is free and an extra
+	// copy of the same opener is new content.
+	it("counts a removal once for each added copy (#4605 duplicate opener)", () => {
+		const copy = [
+			"diff --git a/tests/a.test.ts b/tests/a.test.ts",
+			"@@ -1,3 +1,6 @@",
+			' describe("old", () => {',
+			'-\tit("keeps the bytes", () => {});',
+			'+\tit("keeps the bytes", () => {});',
+			" });",
+			'+describe("copy", () => {',
+			'+\tit("keeps the bytes", () => {});',
+			"+});",
+		].join("\n");
+		const copied = new Map([
+			[
+				"tests/a.test.ts",
+				[
+					'describe("old", () => {',
+					'\tit("keeps the bytes", () => {});',
+					"});",
+					'describe("copy", () => {',
+					'\tit("keeps the bytes", () => {});',
+					"});",
+				].join("\n"),
+			],
+		]);
+		expect(errors("", copy, copied).join()).toContain(
+			"tests/a.test.ts adds or edits test declarations",
+		);
+		const move = [
+			"diff --git a/tests/b.test.ts b/tests/b.test.ts",
+			"@@ -1,3 +1,5 @@",
+			' describe("old", () => {',
+			'-\tit("keeps the bytes", () => {});',
+			" });",
+			'+describe("copy", () => {',
+			'+\tit("keeps the bytes", () => {});',
+			"+});",
+		].join("\n");
+		const moved = new Map([
+			[
+				"tests/b.test.ts",
+				[
+					'describe("old", () => {',
+					"});",
+					'describe("copy", () => {',
+					'\tit("keeps the bytes", () => {});',
+					"});",
+				].join("\n"),
+			],
+		]);
+		expect(errors("", move, moved)).toEqual([]);
+	});
+
+	// #4605 V4: a `mutation:` record proves only when it states the run's own
+	// result. No list of `did not run` spellings; the default is inverted.
+	it("refuses a mutation fence that states no result (#4605 not run)", () => {
+		const { diff, headFiles } = image(
+			"scripts/probe-a.mjs",
+			"if (ready) return value;",
+		);
+		const fence = (lines: string[]) => ["```text", ...lines, "```"].join("\n");
+		for (const continuation of [
+			"mutation: unable to run",
+			"mutation: n/a - the harness could not be run",
+			"mutation: did not execute",
+		]) {
+			expect(
+				errors(
+					fence([
+						"mutation: scripts/probe-a.mjs (guard -> gone)",
+						continuation,
+						"FAIL tests/a.test.ts > unrelated",
+						"Tests 1 failed",
+					]),
+					diff,
+					headFiles,
+				).join(),
+			).toContain("row 2");
+		}
+		// A continuation that states the result is part of the same record.
+		expect(
+			errors(
+				fence([
+					"mutation: scripts/probe-a.mjs (guard -> gone)",
+					"mutation: RED (Tests 1 failed)",
+					"FAIL tests/a.test.ts > unrelated",
+					"Tests 1 failed",
+				]),
+				diff,
+				headFiles,
+			),
+		).toEqual([]);
+		// The header cannot claim the run did not happen either.
+		expect(
+			errors(
+				fence([
+					"mutation: scripts/probe-a.mjs — could not execute",
+					"Tests 1 failed",
+				]),
+				diff,
+				headFiles,
+			).join(),
+		).toContain("row 2");
+	});
+
+	// #4605 V5: a bare basename that ends in a source extension names a file, so
+	// it is evidence about that path rather than a generic read.
+	it("refuses a bare basename Windows row as a generic read (#4605 row 4 basename)", () => {
+		const one = image("clients/lsp/launch.ts", "const a = 1;");
+		expect(
+			errors(
+				"`path-utils.ts` Windows: cannot differ because only string joins change.",
+				one.diff,
+				one.headFiles,
+			).join(),
+		).toContain("row 4");
+		expect(
+			errors(
+				"Windows: cannot differ because only string joins change.",
+				one.diff,
+				one.headFiles,
+			),
+		).toEqual([]);
+	});
+
+	// #4585 as amended (issuecomment-6252599595): row 1 is file-level. One red
+	// that names the file proves it; a red naming another file, or prose, does
+	// not.
+	it("proves a changed test file by one red naming it (#4585 file-level row 1)", () => {
+		const { diff, headFiles } = image(
+			"tests/a.test.ts",
+			'it("first case", () => {});\nit("second case", () => {});',
+		);
+		expect(
+			errors(
+				"```text\nFAIL tests/a.test.ts > first case\nTests 1 failed\n```",
+				diff,
+				headFiles,
+			),
+		).toEqual([]);
+		// A failure from the same file, with a title the diff never touched, is
+		// still this file's evidence.
+		expect(
+			errors(
+				"```text\nFAIL tests/a.test.ts > second case\nTests 1 failed\n```",
+				diff,
+				headFiles,
+			),
+		).toEqual([]);
+		// Another file's red proves nothing here.
+		expect(
+			errors(
+				"```text\nFAIL tests/other.test.ts > first case\nTests 1 failed\n```",
+				diff,
+				headFiles,
+			).join(),
+		).toContain("row 1");
+		// A fence that merely mentions this file, then quotes another file's
+		// failure, is not this file's red.
+		expect(
+			errors(
+				"```text\nRunning tests/a.test.ts\nFAIL tests/other.test.ts > first case\nTests 1 failed\n```",
+				diff,
+				headFiles,
+			).join(),
+		).toContain("row 1");
+		// Prose names the title and the file but quotes no failure.
+		expect(
+			errors(
+				"The new `first case` in `tests/a.test.ts` reds before the fix.",
+				diff,
+				headFiles,
+			).join(),
+		).toContain("row 1");
+		// A Controls row naming the file with a reason proves it.
+		expect(
+			errors(
+				"| Control | File | Reason |\n|---|---|---|\n| pre-existing | `tests/a.test.ts` | the case predates this diff |",
+				diff,
+				headFiles,
+			),
+		).toEqual([]);
+		// A Controls row with no reason, or naming no file, proves nothing.
+		expect(
+			errors("Control: `tests/a.test.ts` —", diff, headFiles).join(),
+		).toContain("row 1");
+		expect(
+			errors(
+				"Control: `first case` — the case predates this diff.",
+				diff,
+				headFiles,
+			).join(),
+		).toContain("row 1");
 	});
 });

@@ -442,6 +442,10 @@ export function parseRuntimeHunks(diff) {
 				added: new Map(),
 				deletedAfter: new Set(),
 				removed: [],
+				// The diff states a whole-file removal explicitly. It is the one
+				// post-image state that needs no read: there is nothing to classify
+				// (#4605 V2).
+				deletedFile: false,
 			};
 			files.push(current);
 			inHunk = false;
@@ -449,6 +453,8 @@ export function parseRuntimeHunks(diff) {
 		}
 		if (!current) continue;
 		if (!inHunk) {
+			if (line.startsWith("deleted file mode ") || line === "+++ /dev/null")
+				current.deletedFile = true;
 			const rename = /^rename to (.+)$/.exec(line);
 			if (rename) {
 				current.post = unquoteGitPath(rename[1]);
@@ -600,20 +606,6 @@ function observabilitySectionContent(lines, headings) {
 
 function lineAt(source, index) {
 	return source.slice(0, index).split("\n").length;
-}
-
-// Index of the `]` closing the `[` at `open`, over comment- and
-// string-blanked text; -1 when the array runs past the end of the source.
-function closeBracketIndex(blanked, open) {
-	let depth = 0;
-	for (let index = open; index < blanked.length; index++) {
-		const char = blanked[index];
-		if (char === "[" || char === "(" || char === "{") depth++;
-		else if (char === "]" || char === ")" || char === "}") {
-			if (--depth === 0) return index;
-		}
-	}
-	return -1;
 }
 
 // Index of the `)` closing the `(` at `open`, over comment- and
@@ -2391,29 +2383,67 @@ function failingEntry(marker, body) {
 	return { file: file && !UNKNOWN_FILE.test(file) ? file : null, titles };
 }
 
-const TITLE_PLACEHOLDER_SOURCE = String.raw`%[sdifjo#]|\$[A-Za-z_]\w*`;
-const TITLE_PLACEHOLDER = new RegExp(TITLE_PLACEHOLDER_SOURCE, "g");
-const HAS_TITLE_PLACEHOLDER = new RegExp(TITLE_PLACEHOLDER_SOURCE);
-
 function samePath(left, right) {
 	return left.replace(/^\.\//, "") === right.replace(/^\.\//, "");
 }
 
-// A proof is the title the runner prints, exactly. Every admitted form resolves
-// to one printed title (a literal, a table row's expansion, a Control), so no
-// proof is ever a pattern or a substring (#4605 F1 and F3).
-function titleProofMatches(proof, entry, file) {
-	if (entry.file && !samePath(entry.file, file)) return false;
-	return entry.titles.includes(proof);
+// Row 1 is file-level (#4585 as amended by issuecomment-6252599595): a changed
+// test file owes one red-first transcript that names it and shows a failure from
+// it, or a Controls row naming it with a reason. Titles, table rows and suite
+// chains are not read, so the per-title matcher does not exist.
+function transcriptNamesFile(fence, file) {
+	if (!fence.failure) return false;
+	if (!fence.lines.some((line) => namesFile(line, file))) return false;
+	return failingEntries(fence.lines.join("\n")).some(
+		(entry) => !entry.file || samePath(entry.file, file),
+	);
 }
 
-function controlEntry(row) {
-	if (!/\bcontrol\b/i.test(row)) return null;
-	const span = /`([^`\n]+)`/.exec(row);
-	if (!span) return null;
-	const after = row.slice(span.index + span[0].length);
-	if (!/(?:—|:|because)\s*[A-Za-z0-9].+/.test(after)) return null;
-	return { file: null, titles: [span[1].trim()] };
+// A Controls row names the file it covers and gives a reason: a `Control: ...`
+// line, or a row of a Controls table. A row that names no file, or gives no
+// reason, proves nothing.
+function controlRows(visibleRows) {
+	let inSection = false;
+	let controlTable = false;
+	const rows = [];
+	for (const row of visibleRows) {
+		const heading = HEADING.exec(row);
+		if (heading) {
+			inSection = /\bcontrols?\b/i.test(heading[1]);
+			controlTable = false;
+			continue;
+		}
+		if (/^\s*(?:\*\*)?Controls?\b/i.test(row)) inSection = true;
+		if (!row.trim()) {
+			controlTable = false;
+			continue;
+		}
+		if (/^\s*\|/.test(row)) {
+			// A table whose own header names the column is a Controls table,
+			// wherever it sits.
+			if (/\bcontrols?\b/i.test(row)) controlTable = true;
+			if (inSection || controlTable) rows.push(row);
+			continue;
+		}
+		controlTable = false;
+		if (inSection || /\bcontrols?\b/i.test(row)) rows.push(row);
+	}
+	return rows;
+}
+
+function controlsNameFile(rows, file) {
+	return rows.some((row) => {
+		if (!namesFile(row, file)) return false;
+		if (/^\s*\|/.test(row)) {
+			const cells = row
+				.split("|")
+				.slice(1, -1)
+				.map((cell) => cell.trim())
+				.filter(Boolean);
+			return cells.length >= 2 && wordCount(cells.join(" ")) >= 2;
+		}
+		return /(?:—|:|because)\s+[A-Za-z0-9].+/.test(row);
+	});
 }
 
 // A path token, or a bare filename for a root-level changed file (`index.ts`).
@@ -2434,11 +2464,16 @@ function namesFile(text, file) {
 }
 
 // A row that names a file path is evidence about that path, whichever path it
-// is, so it can never stand in for a generic Windows read (#4605 F8). A URL is
-// a link to the run, not a path in this repository.
+// is, so it can never stand in for a generic Windows read (#4605 F8). A bare
+// basename that ends in a source extension names a file too, so it is evidence
+// about that path rather than a generic read (#4605 V5). A URL is a link to the
+// run, not a path in this repository.
+const SOURCE_FILE_TOKEN =
+	/^[A-Za-z0-9_][A-Za-z0-9_.-]*\.(?:[cm]?[jt]sx?|mjs|cjs|json|md|ya?ml|toml|py|go|rs|sh)$/i;
+
 function namesAnyPath(text) {
-	return pathTokens(String(text ?? "").replace(URL_SPAN, " ")).some((token) =>
-		token.includes("/"),
+	return pathTokens(String(text ?? "").replace(URL_SPAN, " ")).some(
+		(token) => token.includes("/") || SOURCE_FILE_TOKEN.test(token),
 	);
 }
 
@@ -2451,167 +2486,31 @@ function namedChangedFiles(text, changedPaths) {
 	return found;
 }
 
-function splitTopLevel(blanked, start, end) {
-	const parts = [];
-	let depth = 0;
-	let last = start;
-	for (let index = start; index < end; index += 1) {
-		const char = blanked[index];
-		if (char === "[" || char === "(" || char === "{") depth += 1;
-		else if (char === "]" || char === ")" || char === "}") depth -= 1;
-		else if (char === "," && depth === 0) {
-			parts.push([last, index]);
-			last = index + 1;
-		}
-	}
-	parts.push([last, end]);
-	return parts.filter(([from, to]) => blanked.slice(from, to).trim());
-}
+// A `mutation:` record proves only when it states the run's own result: an
+// explicit RED/FAIL line. Round 2 listed the words that mean "did not run", so
+// every unlisted spelling (`unable to run`, `n/a`, `did not execute`) passed
+// (#4605 V4). The default is inverted: a `mutation:` continuation that carries
+// no result word refuses the fence, and the fence must hold a result line.
+const MUTATION_RESULT =
+	/\bRED\b|\bFAIL(?:ED|URE)?\b|\b[1-9]\d*\s+failed\b|[×✗✕]\s+\S/;
 
-function rowValues(blanked, strings, start, end) {
-	const values = [];
-	const fields = new Map();
-	for (const string of strings) {
-		if (string.start < start || string.end > end) continue;
-		const field = /([A-Za-z_$][\w$]*)\s*:\s*$/.exec(
-			blanked.slice(start, string.start),
-		);
-		if (field) fields.set(field[1], string.text);
-		values.push(string.text);
-	}
-	return { values, fields };
-}
-
-function arrayRows(source, blanked, strings, open) {
-	const close = closeBracketIndex(blanked, open);
-	if (close < 0) return null;
-	return splitTopLevel(blanked, open + 1, close).map(([start, end]) => ({
-		startLine: lineAt(source, start),
-		endLine: lineAt(source, end),
-		...rowValues(blanked, strings, start, end),
-	}));
-}
-
-// The `each`/`for` argument names a table held in a local binding: resolve
-// that binding's own initializer, so a row added there is a new case (#4605
-// F2). A type annotation may sit between the name and the `=`.
-function boundArrayOpen(blanked, identifier) {
-	for (const keyword of ["const", "let", "var"]) {
-		const needle = `${keyword} ${identifier}`;
-		for (
-			let at = blanked.indexOf(needle);
-			at >= 0;
-			at = blanked.indexOf(needle, at + 1)
-		) {
-			if (/[\w$]/.test(blanked[at - 1] ?? "")) continue;
-			const assignment = /^\s*(?::[^=\n]+)?=\s*\[/.exec(
-				blanked.slice(at + needle.length),
-			);
-			if (assignment)
-				return at + needle.length + assignment[0].lastIndexOf("[");
-		}
-	}
-	return -1;
-}
-
-// The table argument of `each`/`for`: a literal, or an identifier bound to one.
-// An imported, computed or otherwise unresolved argument returns null, and the
-// caller refuses the declaration rather than matching a static-segment pattern
-// (#4605 F1).
-function eachRows(source, blanked, strings, open, close) {
-	const argument = blanked.slice(open + 1, close);
-	const literal = /^\s*\[/.exec(argument);
-	if (literal) {
-		const bracket = open + 1 + argument.indexOf("[");
-		return arrayRows(source, blanked, strings, bracket);
-	}
-	const identifier = /^\s*([A-Za-z_$][\w$]*)\s*$/.exec(argument);
-	if (!identifier) return null;
-	const bracket = boundArrayOpen(blanked, identifier[1]);
-	return bracket < 0 ? null : arrayRows(source, blanked, strings, bracket);
-}
-
-function expandedTitle(template, row) {
-	let cursor = 0;
-	let resolved = true;
-	const text = String(template).replace(TITLE_PLACEHOLDER, (placeholder) => {
-		if (placeholder[0] === "$") {
-			const value = row.fields.get(placeholder.slice(1));
-			if (value === undefined) resolved = false;
-			return value ?? placeholder;
-		}
-		const value = row.values[cursor];
-		cursor += 1;
-		if (value === undefined) resolved = false;
-		return value ?? placeholder;
-	});
-	return resolved ? text : null;
-}
-
-// A declaration is the identifier plus any `.modifier` or `.modifier(args)`
-// chain and then the title call: `it`, `it.each(rows)`, `it.for(rows)`,
-// `it.runIf(flag)`, `it.concurrent.only`. The chain is consumed structure, not
-// a list of known modifiers, so a form the author never saw is still
-// discovered (#4605 F2).
-// A `vitest` namespace import (`import * as v from "vitest"`) declares a test
-// through `v.test(...)`, so the binding is read from the source, not guessed
-// from the callee's spelling.
-const VITEST_NAMESPACE_IMPORT =
-	/import\s+\*\s+as\s+([A-Za-z_$][\w$]*)\s+from\s+["']vitest["']/g;
-
-function vitestNamespaces(source) {
-	return [...String(source ?? "").matchAll(VITEST_NAMESPACE_IMPORT)].map(
-		(match) => match[1],
+// The tool prints `mutation: <file> (<find> -> <replace>)`; a hand-written
+// header may name the file alone. Any other tail is a claim about the run, so
+// it must state a result. That refuses `not run`, `unable to run`, `n/a` and
+// every spelling a bad-word list would miss (#4605 V4).
+function mutationHeaderProves(header, file) {
+	const remaining = String(header)
+		.replace(/^(?:\$\s+)?mutation:/i, "")
+		.replace(URL_SPAN, " ")
+		.split(/\s+/)
+		.filter(Boolean)
+		.filter((token) => !namesFile(token, file))
+		.join(" ");
+	return (
+		remaining === "" ||
+		/^\(.*->.*\)$/.test(remaining) ||
+		MUTATION_RESULT.test(remaining)
 	);
-}
-
-function declarationCalls(blanked, names, namespaces = []) {
-	const found = [];
-	const callees = [
-		...[...names].map((name) => `${name}`),
-		...namespaces.map((name) => `${name}\\s*\\.\\s*(?:it|test)`),
-	];
-	const identifier = new RegExp(
-		`(?<![\\w$.])(?:${callees.join("|")})(?![\\w$])`,
-		"g",
-	);
-	for (const match of blanked.matchAll(identifier)) {
-		let index = (match.index ?? 0) + match[0].length;
-		let paren = -1;
-		let table = null;
-		for (;;) {
-			while (/\s/.test(blanked[index] ?? "")) index += 1;
-			// `(0, test)(...)` wraps the identifier in a comma expression; the
-			// declaration call is the outer one (#4605 F2 indirect call).
-			while (blanked[index] === ")") {
-				index += 1;
-				while (/\s/.test(blanked[index] ?? "")) index += 1;
-			}
-			if (blanked[index] === ".") {
-				const property = /^[.]\s*([A-Za-z_$][\w$]*)/.exec(blanked.slice(index));
-				if (!property) break;
-				index += property[0].length;
-				while (/\s/.test(blanked[index] ?? "")) index += 1;
-				if (blanked[index] === "(") {
-					const close = closeParenIndex(blanked, index);
-					if (close < 0) break;
-					// `test.for` is `test.each`'s sibling API: the same table argument and
-					// the same title expansion (#4605 F2).
-					if (property[1] === "each" || property[1] === "for")
-						table = { open: index, close };
-					index = close + 1;
-				}
-				continue;
-			}
-			if (blanked[index] === "(") paren = index;
-			break;
-		}
-		if (paren < 0) continue;
-		const close = closeParenIndex(blanked, paren);
-		if (close < 0) continue;
-		found.push({ start: match.index ?? 0, paren, close, table });
-	}
-	return found;
 }
 
 // A table row in the mutation section may name its file in the row, or sit
@@ -2729,6 +2628,12 @@ function lintDiffCompliance(body, options) {
 	const rowFour = [];
 	const unclassified = [];
 	for (const file of changedFiles) {
+		// A whole-file deletion has no post-image: no added declaration, no
+		// post-image call to classify. Reading it as an unreadable post-image reded
+		// every deleted `clients/` or `scripts/` file with a notice no body
+		// evidence could clear (#4605 V2). A hunk that only deletes from a file
+		// that still exists is not this state.
+		if (file.deletedFile) continue;
 		const windowsPath = [file.pre, file.post].some((name) =>
 			/^clients\/(?:package-manager\.|lsp\/launch|path-utils\.|safe-spawn\.)/.test(
 				name,
@@ -2769,9 +2674,9 @@ function lintDiffCompliance(body, options) {
 		// A deletion-only file has no added line to compare, so `exact` alone
 		// cannot say the post-image was read; the source itself must be a string.
 		const readable = typeof source === "string" && exact;
-		const { text, strings } = readable
+		const { text } = readable
 			? blankCommentsAndStrings(source)
-			: { text: [...file.added.values()].join("\n"), strings: [] };
+			: { text: [...file.added.values()].join("\n") };
 		const addedCode = readable
 			? (() => {
 					const codeRows = text.split("\n");
@@ -2785,11 +2690,39 @@ function lintDiffCompliance(body, options) {
 		if (!readable && (unclassifiable || production))
 			unclassified.push(file.post);
 		if (tests && readable) {
+			// Per-occurrence accounting (#4605 V3): a removal credits one addition
+			// of the same trimmed line, so a re-indent or a move is not new content
+			// while a second identical copy is (#4605 F4, V3).
+			const removedCounts = new Map();
+			for (const line of file.removed) {
+				const trimmed = line.trim();
+				if (trimmed)
+					removedCounts.set(trimmed, (removedCounts.get(trimmed) ?? 0) + 1);
+			}
+			const newAddedLine = new Map();
+			for (const [line, value] of file.added) {
+				const trimmed = value.trim();
+				const left = trimmed ? (removedCounts.get(trimmed) ?? 0) : 0;
+				if (!trimmed) newAddedLine.set(line, false);
+				else if (left > 0) {
+					removedCounts.set(trimmed, left - 1);
+					newAddedLine.set(line, false);
+				} else newAddedLine.set(line, true);
+			}
+			// Row 1 is file-level (#4585 as amended by issuecomment-6252599595):
+			// a changed test file owes one fenced red-first transcript naming it
+			// that shows a failure from it, or a Controls row naming it with a
+			// reason. A declaration opener on a genuinely new line is what makes
+			// the file owe; its title, table and chain are not read. The callees
+			// are read from the source: the `it`/`test` names, an alias, and a
+			// `vitest` namespace import.
 			const names = new Set(["it", "test"]);
 			for (const match of text.matchAll(/\b(?:it|test)\s+as\s+(\w+)/g))
 				names.add(match[1]);
-			// Follow local aliases to a fixed point. This also covers a value
-			// reached through another binding without scanning string contents.
+			for (const match of source.matchAll(
+				/import\s+\*\s+as\s+([A-Za-z_$][\w$]*)\s+from\s+["']vitest["']/g,
+			))
+				names.add(`${match[1]}\\s*\\.\\s*(?:it|test)`);
 			let changed = true;
 			while (changed) {
 				changed = false;
@@ -2802,130 +2735,25 @@ function lintDiffCompliance(body, options) {
 					}
 				}
 			}
-			const bindings = new Map();
-			for (const string of strings) {
-				const binding = /\b(?:const|let|var)\s+(\w+)\s*=\s*$/.exec(
-					string.prefix,
-				);
-				if (binding) bindings.set(binding[1], string);
-			}
-			const added = [...file.added.keys()];
-			const addedIn = (from, to) =>
-				added.some((line) => line >= from && line <= to);
-			// A declaration counts as added only when at least one of its own
-			// lines is new content: a re-indent or a move removes the same line
-			// elsewhere in the file, so a whitespace-only change owes no red
-			// (#4605 F4).
-			const removedLines = new Set(
-				file.removed.map((line) => line.trim()).filter(Boolean),
+			const declarationOpener = new RegExp(
+				`(?<![\\w$.])(?:${[...names].join("|")})\\b[^\\n;]*?\\(`,
 			);
-			const addedDeclarationLines = (from, to) =>
-				[...file.added.entries()]
-					.filter(([line]) => line >= from && line <= to)
-					.map(([, text]) => text.trim())
-					.filter(Boolean);
-			// A line the diff also removes (a re-indent or a move) is not new
-			// content, so it owes no red (#4605 F4).
-			const newLinesIn = (from, to) =>
-				addedDeclarationLines(from, to).filter(
-					(line) => !removedLines.has(line),
+			const codeRows = text.split("\n");
+			const newCode = [...newAddedLine.entries()]
+				.filter(
+					([line, isNew]) => isNew && line >= 1 && line <= codeRows.length,
+				)
+				.map(([line]) => codeRows[line - 1] ?? "")
+				.join("\n");
+			if (declarationOpener.test(newCode)) {
+				const proved = transcripts.some((fence) =>
+					transcriptNamesFile(fence, file.post),
 				);
-			const namespaces = vitestNamespaces(source);
-			for (const declaration of declarationCalls(text, names, namespaces)) {
-				const callLine = lineAt(source, declaration.start);
-				// A declaration is added, renamed or re-tabled by the lines that
-				// spell it: its identifier, its modifier chain and its title. The
-				// callback below is not part of the declaration, so an edit inside
-				// a test body never asks the author for a red-first transcript
-				// (#4605 F2: the round's own edits reded 22 untouched titles).
-				const declarationAdded =
-					newLinesIn(callLine, lineAt(source, declaration.paren)).length > 0;
-				const string = strings.find(
-					(value) =>
-						value.start > declaration.paren &&
-						!text.slice(declaration.paren + 1, value.start).trim(),
-				);
-				const binding = /^\s*(\w+)\s*,/.exec(text.slice(declaration.paren + 1));
-				const bound = string ? null : bindings.get(binding?.[1]);
-				const title = string?.text ?? bound?.text;
-				const titleSpan = string
-					? [lineAt(source, string.start), lineAt(source, string.end)]
-					: bound
-						? [lineAt(source, bound.start), lineAt(source, bound.end)]
-						: null;
-				const titleChanged = titleSpan
-					? newLinesIn(...titleSpan).length > 0
-					: false;
-				const tableRows = declaration.table
-					? eachRows(
-							source,
-							text,
-							strings,
-							declaration.table.open,
-							declaration.table.close,
-						)
-					: null;
-				const changedRows = tableRows?.filter((row) =>
-					addedIn(row.startLine, row.endLine),
-				);
-				if (!declarationAdded && !titleChanged && !changedRows?.length)
-					continue;
-				const proofs = new Set();
-				if (!title) {
-					// The declaration's own line is the identity the author can act
-					// on; a title it cannot read is refused with that line, never
-					// with a fabricated expansion (#4605 unresolved title).
+				const control = controlsNameFile(controlRows(visibleRows), file.post);
+				if (!proved && !control)
 					errors.push(
-						`PR body compliance row 1: ${file.post}:${callLine}: unresolved test title needs a quoted red-first transcript or a named Control with a reason.`,
+						`PR body compliance row 1: ${file.post} adds or edits test declarations; the body needs one fenced red-first transcript naming that file with a failure from it, or a Controls row naming it with a reason.`,
 					);
-					continue;
-				}
-				if (!declaration.table) {
-					proofs.add(title);
-				} else if (tableRows) {
-					// A new declaration, a renamed template, or a changed table row
-					// owes the expansion of each row it touches, exactly as Vitest
-					// prints it (#4605 F2 and F6). A row whose own values cannot fill
-					// its placeholders has no printed title, so it leaves the
-					// declaration unproven rather than letting a sibling row stand in.
-					const chosen =
-						declarationAdded || titleChanged ? tableRows : (changedRows ?? []);
-					let unexpandable = !chosen.length;
-					for (const row of chosen) {
-						const expanded = expandedTitle(title, row);
-						if (expanded) proofs.add(expanded);
-						else unexpandable = true;
-					}
-					if (unexpandable) proofs.clear();
-				} else if (!HAS_TITLE_PLACEHOLDER.test(title)) {
-					// A template with no placeholder prints the same title for every
-					// row, so its exact title is readable even when the table is not.
-					proofs.add(title);
-				}
-				if (!proofs.size) {
-					// A table the lint cannot read, or a row it cannot expand, is
-					// refused by its own line: a static-segment match would let a
-					// sibling row's red prove this one (#4605 F1).
-					errors.push(
-						`PR body compliance row 1: ${file.post}:${callLine}: ${title} needs a table row it can expand; an unreadable table or row is refused, never proved by a sibling row's red.`,
-					);
-					continue;
-				}
-				for (const proof of proofs) {
-					const proved = transcripts.some((fence) =>
-						failingEntries(fence.lines.join("\n")).some((entry) =>
-							titleProofMatches(proof, entry, file.post),
-						),
-					);
-					const control = visibleRows.some((row) => {
-						const entry = controlEntry(row);
-						return entry ? titleProofMatches(proof, entry, file.post) : false;
-					});
-					if (!proved && !control)
-						errors.push(
-							`PR body compliance row 1: ${file.post}: ${proof} needs a quoted red-first transcript or a named Control with a reason.`,
-						);
-				}
 			}
 		}
 		if (
@@ -2938,22 +2766,21 @@ function lintDiffCompliance(body, options) {
 			// names the file it proves. One file, one red (#4605 F1): a table row
 			// binds to the file it names (or to the one-file opener above it),
 			// and its red must be in that row or in a labelled failing fence. A
-			// `mutation:` fence must open with this file and be a failing run; any
-			// `mutation:` line in it that says the run did not happen refuses it,
-			// so a header and its continuation are one record (#4605 F5).
-			const transcriptProves = transcriptFences.some(
-				(fence) =>
-					fence.failure &&
-					/^(?:\$\s+)?mutation:/i.test(fence.header) &&
-					!fence.lines.some(
-						(line) =>
-							/^(?:\$\s+)?mutation:/i.test(line) &&
-							/\b(?:not run|did not run|could not run|skipped|unavailable)\b/i.test(
-								line,
-							),
-					) &&
-					namesFile(fence.header, file.post),
-			);
+			// `mutation:` fence proves only when it states the mutation's own
+			// result: an explicit RED/FAIL line, with every continuation
+			// `mutation:` line stating one too (#4605 V4).
+			const transcriptProves = transcriptFences.some((fence) => {
+				if (!fence.failure) return false;
+				if (!/^(?:\$\s+)?mutation:/i.test(fence.header)) return false;
+				if (!namesFile(fence.header, file.post)) return false;
+				if (!mutationHeaderProves(fence.header, file.post)) return false;
+				if (!fence.lines.some((line) => MUTATION_RESULT.test(line)))
+					return false;
+				return fence.lines
+					.filter((line) => /^(?:\$\s+)?mutation:/i.test(line))
+					.slice(1)
+					.every((line) => MUTATION_RESULT.test(line));
+			});
 			const rowProves = mutationRows.some((row) => {
 				if (!namesFile(row.text, file.post)) {
 					const scoped = namedChangedFiles(row.scope, changedPaths);
