@@ -40,6 +40,7 @@ import {
 	repoRootBaseline,
 	unadmittedRepoRootEntries,
 	untrackedUnignoredEntries,
+	type TmpHygieneCensusVerdict,
 	type TmpHygieneProcessProbe,
 } from "../support/vitest-setup.js";
 import { setupTestEnvironment } from "../clients/test-utils.js";
@@ -480,7 +481,7 @@ function writeCensusSummary(
 	judged: number,
 ): void {
 	process.stderr.write(
-		`${formatTmpHygieneOwnerSummary(scan, otherInvocation, reaped, tmpRootWrites === undefined ? "unknown" : { judged, observed: tmpRootWrites.length })}\n`,
+		`${formatTmpHygieneOwnerSummary(scan, otherInvocation, reaped, tmpRootWrites === undefined ? "unknown" : { judged, observed: tmpRootWrites.length }, censusVerdict)}\n`,
 	);
 }
 
@@ -494,6 +495,14 @@ function writeCensusSummary(
 // shards and macOS. Remove this constant, its guard and the #4591 reference in
 // the change that fixes the producer.
 const WINDOWS_QUARANTINE = process.platform === "win32";
+
+// #4592 review F4: the census line states which verdict this run reached. The
+// quarantine used to leave no record at all, so the win32 lane's line was
+// identical to an asserting lane's and the declined verdict read as a pass
+// (shapes 10 and 31). Derived from the guard, not a second switch.
+const censusVerdict: TmpHygieneCensusVerdict = WINDOWS_QUARANTINE
+	? "declined"
+	: "asserted";
 
 // #4591 review P2 (Greptile): the sweep is not part of the verdict, and it is
 // this run's only `cleanupTmpHygiene` caller. A skipped suite runs no hooks at
@@ -1576,18 +1585,24 @@ describe("tmp-fixture-hygiene", () => {
 			// Bounded observability: the record the afterAll writes is this exact
 			// line, and it is a census, so N markers never produce N records.
 			expect(
-				formatTmpHygieneOwnerSummary({
-					live: new Set(["clients/alpha.test.ts"]),
-					counts: {
-						live: 1,
-						orphaned: 2,
-						malformed: 3,
-						foreign: 4,
-						self: 1,
+				formatTmpHygieneOwnerSummary(
+					{
+						live: new Set(["clients/alpha.test.ts"]),
+						counts: {
+							live: 1,
+							orphaned: 2,
+							malformed: 3,
+							foreign: 4,
+							self: 1,
+						},
 					},
-				}),
+					0,
+					0,
+					{ judged: 0, observed: 0 },
+					"asserted",
+				),
 			).toBe(
-				"[tmp-hygiene-owners] live=1 orphaned=2 malformed=3 foreign=4 self=1 otherInvocationEntries=0 reaped=0 tmpRootWrites=0/0",
+				"[tmp-hygiene-owners] live=1 orphaned=2 malformed=3 foreign=4 self=1 otherInvocationEntries=0 reaped=0 tmpRootWrites=0/0 verdict=asserted",
 			);
 			// #4560 F6: the line carries what the census OBSERVED beside what it
 			// JUDGED, so an entry a host process made is visible as counted, never
@@ -1602,9 +1617,10 @@ describe("tmp-fixture-hygiene", () => {
 					0,
 					0,
 					{ judged: 0, observed: 2 },
+					"asserted",
 				),
 			).toBe(
-				"[tmp-hygiene-owners] live=0 orphaned=0 malformed=0 foreign=0 self=1 otherInvocationEntries=0 reaped=0 tmpRootWrites=0/2",
+				"[tmp-hygiene-owners] live=0 orphaned=0 malformed=0 foreign=0 self=1 otherInvocationEntries=0 reaped=0 tmpRootWrites=0/2 verdict=asserted",
 			);
 			expect(
 				formatTmpHygieneOwnerSummary(
@@ -1615,9 +1631,10 @@ describe("tmp-fixture-hygiene", () => {
 					0,
 					0,
 					"unknown",
+					"asserted",
 				),
 			).toBe(
-				"[tmp-hygiene-owners] live=0 orphaned=0 malformed=0 foreign=0 self=1 otherInvocationEntries=0 reaped=0 tmpRootWrites=unknown",
+				"[tmp-hygiene-owners] live=0 orphaned=0 malformed=0 foreign=0 self=1 otherInvocationEntries=0 reaped=0 tmpRootWrites=unknown verdict=asserted",
 			);
 			// #3314's field is part of the same ONE line, not a second record: the
 			// entries this run ignored as another invocation's are explicable from
@@ -1635,9 +1652,29 @@ describe("tmp-fixture-hygiene", () => {
 						},
 					},
 					3,
+					0,
+					{ judged: 0, observed: 0 },
+					"asserted",
 				),
 			).toBe(
-				"[tmp-hygiene-owners] live=0 orphaned=0 malformed=0 foreign=2 self=1 otherInvocationEntries=3 reaped=0 tmpRootWrites=0/0",
+				"[tmp-hygiene-owners] live=0 orphaned=0 malformed=0 foreign=2 self=1 otherInvocationEntries=3 reaped=0 tmpRootWrites=0/0 verdict=asserted",
+			);
+			// #4592 review F4: the Windows lane's declined verdict is ON the same
+			// line, so a run whose census asserted and one whose census declined
+			// never print an identical record (shapes 10 and 31).
+			expect(
+				formatTmpHygieneOwnerSummary(
+					{
+						live: new Set<string>(),
+						counts: { live: 0, orphaned: 0, malformed: 0, foreign: 0, self: 1 },
+					},
+					0,
+					0,
+					{ judged: 0, observed: 5 },
+					"declined",
+				),
+			).toBe(
+				"[tmp-hygiene-owners] live=0 orphaned=0 malformed=0 foreign=0 self=1 otherInvocationEntries=0 reaped=0 tmpRootWrites=0/5 verdict=declined",
 			);
 		});
 

@@ -188,11 +188,36 @@ describe("Windows Vitest workflow contract (#2536)", () => {
 		// The three census assertions sit inside the guard, and the sweep sits in
 		// the `finally` that follows it, so the sweep reaps on win32 too.
 		const guard = code.indexOf("if (!WINDOWS_QUARANTINE) {");
+		const finallyIndex = code.indexOf("} finally {", guard);
 		const swept = code.indexOf(
 			"const reaped = cleanupTmpHygiene(otherInvocation);",
 		);
 		expect(swept).toBeGreaterThan(guard);
 		expect(code.slice(guard, swept)).toContain("} finally {");
+		// #4592 review F1: the three assertions must be LIVE inside the guard.
+		// Without this arm the block could be emptied and the quarantine would read
+		// as "declined on every lane" with no red (shape 33: the pin covered the
+		// bracket, not the property; measured -- the emptied guard passed 59/59).
+		// Each assertion's subject is named, and the count is pinned, so a fourth
+		// one is a reviewed change rather than a silent widening.
+		const deferred = code.slice(guard, finallyIndex);
+		expect(deferred).toContain("attributable,");
+		expect(deferred).toContain("tmpRootWriteLeaks,");
+		expect(deferred).toContain("rootCensus.leaked,");
+		expect(deferred.match(/\.toEqual\(\[\]\)/g) ?? []).toHaveLength(3);
+		// #4592 review F4: a declined verdict leaves its own record. The census
+		// line carries which verdict ran, derived from this same guard, so the
+		// win32 lane prints `verdict=declined` instead of a counting line
+		// identical to an asserting lane's (shapes 10 and 31).
+		expect(code).toMatch(
+			/const censusVerdict: TmpHygieneCensusVerdict = WINDOWS_QUARANTINE\s*\?\s*"declined"\s*:\s*"asserted";/,
+		);
+		// Why this is a source read and not a runtime probe (shape 33): the
+		// property is "on a lane that is not win32 the census asserts", and one
+		// process cannot observe both arms -- `process.platform` is read once at
+		// module load, the gating lane is win32, and this pin runs where the guard
+		// is armed. The runtime behaviour of the asserting arm is already the
+		// suite plus the census cases below; only its SHAPE is unreachable here.
 		// The teardown belongs to the suite's hook list, not the root list the
 		// shared setup registers on: a red census must not abort the setup's own
 		// teardown (Greptile's second P2 on this round).
