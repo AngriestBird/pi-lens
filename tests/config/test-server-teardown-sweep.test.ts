@@ -915,7 +915,17 @@ describe("#4589 server-teardown detector — the shapes that must red and green"
 			expect(scanListen(lines), label).toEqual([]);
 		// The other directions still report: a receiver the scan cannot place at
 		// all, and an invocation that supplies no receiver (the caller's own
-		// `this` names no handle).
+		// `this` names no handle). A name with one plain and one unreadable
+		// binding is not proven plain either: `fn` may hold whatever
+		// `makeHandle()` returned by the time the call runs.
+		expect(
+			scanListen([
+				'const socket = dgram.createSocket("udp4");',
+				"let fn: unknown = () => {};",
+				"fn = makeHandle();",
+				"socket.bind.call(fn, 0);",
+			]),
+		).toEqual([["fn", "unresolvable"]]);
 		expect(
 			scanListen([
 				'const socket = dgram.createSocket("udp4");',
