@@ -224,7 +224,7 @@ import {
 	assertNonEmptyScan,
 	auditRegistry,
 	listSourceFiles,
-	readWalkedFiles,
+	readWalkedFile,
 	relativePosix,
 	stableOccurrenceKey,
 } from "../support/sweep-kit.js";
@@ -284,6 +284,9 @@ interface KeyRef {
 	/** 1-based line of the key token. */
 	line: number;
 }
+
+const PROVED_OTHER = Symbol("proved-other");
+type KeyRefResult = KeyRef | typeof PROVED_OTHER | undefined;
 
 const FUNCTION_KINDS = new Set([
 	"function_declaration",
@@ -469,29 +472,11 @@ function codeText(node: SgNode): string {
 	if (!COMMENT_HINT.test(text)) return text;
 	let code = text;
 	for (const comment of node.findAll({ rule: { kind: "comment" } })) {
-		const start = utf16OffsetAtByte(
-			text,
-			comment.range().start.index - node.range().start.index,
-		);
-		const end = utf16OffsetAtByte(
-			text,
-			comment.range().end.index - node.range().start.index,
-		);
+		const start = comment.range().start.index - node.range().start.index;
+		const end = comment.range().end.index - node.range().start.index;
 		code = `${code.slice(0, start)}${" ".repeat(end - start)}${code.slice(end)}`;
 	}
 	return code;
-}
-
-/** Convert a parser byte offset relative to `text` into a JS string offset. */
-function utf16OffsetAtByte(text: string, byteOffset: number): number {
-	let low = 0;
-	let high = text.length;
-	while (low < high) {
-		const middle = Math.ceil((low + high) / 2);
-		if (Buffer.byteLength(text.slice(0, middle)) <= byteOffset) low = middle;
-		else high = middle - 1;
-	}
-	return low;
 }
 
 /** The named children of a node, memoised for one scan. */
@@ -755,7 +740,7 @@ function buildContext(root: SgNode): ScanContext {
  * computed key is resolved through a literal-const alias, and otherwise fails
  * closed only when it NAMES the variable (limit 2/3).
  */
-function literalKeyRef(node: SgNode, context: ScanContext): KeyRef | undefined {
+function literalKeyRef(node: SgNode, context: ScanContext): KeyRefResult {
 	const line = node.range().start.line + 1;
 	switch (node.kind()) {
 		case "property_identifier":
@@ -813,16 +798,13 @@ function literalKeyRef(node: SgNode, context: ScanContext): KeyRef | undefined {
  * the key is not a participant at all, so the fail-closed arm answers only for
  * keys this file cannot prove.
  */
-function expressionKeyRef(
-	node: SgNode,
-	context: ScanContext,
-): KeyRef | undefined {
+function expressionKeyRef(node: SgNode, context: ScanContext): KeyRefResult {
 	const line = node.range().start.line + 1;
 	const proved = proveChain(node, (reference) =>
 		context.resolve(reference, reference.text()),
 	);
 	if (proved !== undefined) {
-		if (!foldsToPath(proved)) return undefined;
+		if (!foldsToPath(proved)) return PROVED_OTHER;
 		return { spelling: proved, shape: shapeOfSpelling(proved), line };
 	}
 	// A string this reader cannot decode proves no value, so it must not read as
@@ -1218,7 +1200,7 @@ function collectKeyNode(
 	const keyNode = node.kind() === "pair" ? childrenOf(node)[0] : node;
 	if (keyNode === undefined) return;
 	const key = literalKeyRef(keyNode, context);
-	if (key === undefined) return;
+	if (key === undefined || key === PROVED_OTHER) return;
 	let literal: SgNode | null = node;
 	while (literal !== null && literal.kind() !== "object") {
 		literal = literal.parent();
@@ -1246,7 +1228,7 @@ function collectMemberWrite(
 	const left = childrenOf(node)[0];
 	if (left === undefined) return;
 	let base: SgNode | undefined;
-	let ref: KeyRef | undefined;
+	let ref: KeyRefResult;
 	if (left.kind() === "member_expression") {
 		base = childrenOf(left)[0];
 		const property = childrenOf(left).at(-1);
@@ -1256,7 +1238,7 @@ function collectMemberWrite(
 		const index = childrenOf(left)[1];
 		ref = index === undefined ? undefined : expressionKeyRef(index, context);
 	}
-	if (base === undefined || ref === undefined) return;
+	if (base === undefined || ref === undefined || ref === PROVED_OTHER) return;
 	const baseText = base.text().replace(/\s+/g, "");
 	out.push({
 		line: ref.line,
@@ -1292,7 +1274,7 @@ function collectFromEntries(
 		const head = childrenOf(element)[0];
 		if (head === undefined) continue;
 		const ref = expressionKeyRef(head, context);
-		if (ref !== undefined) keys.push(ref);
+		if (ref !== undefined && ref !== PROVED_OTHER) keys.push(ref);
 	}
 	if (keys.length === 0) return;
 	const envIdentified = spreads.some((spread) => {
@@ -1326,7 +1308,15 @@ function collectEnvCall(
 	out: RawWrite[],
 ): void {
 	const name = calleeName(node);
-	if (name === "assign" || name === "fromEntries") return;
+	if (
+		name === "assign" ||
+		name === "fromEntries" ||
+		/^(?:keys|entries|values|hasOwn)$/.test(name ?? "") ||
+		/^(?:mergeWindowsEnvironment|getWindowsEnvironmentValue|getPathExts)$/.test(
+			name ?? "",
+		)
+	)
+		return;
 	const args = firstOfKind(node, "arguments");
 	if (args === undefined) return;
 	const argumentsList = childrenOf(args);
@@ -1337,13 +1327,10 @@ function collectEnvCall(
 	);
 	if (envIndex < 0) return;
 	const envBase = argumentsList[envIndex] as SgNode;
-	const writeLike = /^(?:set|write|define|assign|update|mutate)/i.test(
-		name ?? "",
-	);
-	if (!writeLike) return;
 	const keyNode = argumentsList[envIndex + 1];
 	const ref =
 		keyNode === undefined ? undefined : expressionKeyRef(keyNode, context);
+	if (ref === PROVED_OTHER) return;
 	const fallback =
 		ref === undefined &&
 		keyNode !== undefined &&
@@ -1392,6 +1379,28 @@ export function findPathKeyFindings(
 	const root = parse(Lang.TypeScript, source).root();
 	const context = buildContext(root);
 	const writes: RawWrite[] = [];
+	const callNodes = root.findAll({
+		rule: {
+			kind: "call_expression",
+			has: {
+				kind: "member_expression",
+				has: {
+					kind: "property_identifier",
+					regex:
+						"^(?:fromEntries|set|write|define|assign|update|mutate|keys|entries|values|hasOwn)$",
+				},
+			},
+		},
+	});
+	// Bare or aliased writers have no callee spelling to admit. Restrict the
+	// fallback query to files that can identify an environment, then let the
+	// visitor's structural env-argument check decide the result.
+	if (/\bprocess\s*\.\s*env\b|\bProcessEnv\b/.test(source)) {
+		const seen = new Set(callNodes.map((node) => node.range().start.index));
+		for (const node of root.findAll({ rule: { kind: "call_expression" } })) {
+			if (!seen.has(node.range().start.index)) callNodes.push(node);
+		}
+	}
 
 	// One parser pass over the node kinds that can WRITE a path key: the four
 	// key forms an object literal has, a member write (dotted or subscript), and
@@ -1405,10 +1414,7 @@ export function findPathKeyFindings(
 					kind: "pair",
 					has: { kind: "property_identifier", regex: PATH_SPELLING },
 				},
-				{
-					kind: "pair",
-					has: { kind: "string", regex: PATH_STRING_KEY },
-				},
+				{ kind: "pair", has: { kind: "string", regex: PATH_STRING_KEY } },
 				{ kind: "pair", has: { kind: "computed_property_name" } },
 				{ kind: "shorthand_property_identifier", regex: PATH_SPELLING },
 				{
@@ -1422,13 +1428,6 @@ export function findPathKeyFindings(
 					kind: "assignment_expression",
 					has: { kind: "subscript_expression" },
 				},
-				{
-					kind: "call_expression",
-					has: {
-						kind: "member_expression",
-						has: { kind: "property_identifier" },
-					},
-				},
 			],
 		},
 	})) {
@@ -1441,6 +1440,10 @@ export function findPathKeyFindings(
 		} else {
 			collectKeyNode(node, context, writes);
 		}
+	}
+	for (const node of callNodes) {
+		collectFromEntries(node, context, writes);
+		collectEnvCall(node, context, writes);
 	}
 
 	const groups = new Map<string, RawWrite[]>();
@@ -1545,7 +1548,9 @@ export function censusPathKeyFiles(files: readonly string[]): {
 	const identities = new Map<string, PathKeyReason>();
 	const occurrences = new Map<string, number>();
 	const findings: PathKeyFinding[] = [];
-	for (const { file, source } of readWalkedFiles(files)) {
+	for (const file of files) {
+		const source = readWalkedFile(file);
+		if (source === undefined) continue;
 		const rel = relativePosix(REPO_ROOT, file);
 		const lines = source.split("\n");
 		for (const finding of findPathKeyFindings(source, {
@@ -2395,6 +2400,34 @@ describe("#4590 env PATH composition", () => {
 			[["PATH", "unclassified-spelling"]],
 			[["Path", "unclassified-spelling"]],
 		]);
+	});
+
+	it("refuses aliased and unlisted environment writers", () => {
+		const sources = [
+			'const put = Reflect.set; put(process.env, "PATH", next);',
+			'envWrite(process.env, "PATH", next);',
+		];
+		expect(
+			sources.map((source) =>
+				findPathKeyFindings(source).map((f) => [f.spelling, f.reason]),
+			),
+		).toEqual([[["PATH", "live-process-env"]], [["PATH", "live-process-env"]]]);
+	});
+
+	it("does not report a proven non-path call key", () => {
+		expect(
+			findPathKeyFindings('Reflect.set(process.env, "PYTHONPATH", next);').map(
+				(f) => [f.spelling, f.reason],
+			),
+		).toEqual([]);
+	});
+
+	it("keeps non-ASCII comment offsets aligned", () => {
+		const source =
+			'const K = choose("éééééééé", "PATH" /* c */); const env = { ...process.env, [K]: next };';
+		expect(
+			findPathKeyFindings(source).map((f) => [f.spelling, f.reason]),
+		).toEqual([["K", "unclassified-spelling"]]);
 	});
 
 	/**
