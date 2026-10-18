@@ -420,6 +420,11 @@ file-scoped worklist and receives no project-wide scanner output.
     or says `none: <reason>` naming each file (`check-pr-body` prompts for it);
     a test reads a record back, and a reason is judged by the reviewer
     (#3875; recurrence #3873: the S2/S3 fixes could not be shown to fire live).
+    A new or changed `catch` handler in `clients/`, `mcp/`, `tools/` or
+    `index.ts` is judged by `tests/config/silent-catch-sweep.test.ts`: a record
+    seam on every path, an unconditional `throw`, or a `none: <reason>` marker,
+    and the file's pinned set re-pinned in the same change (`PI_LENS_PRINT_PINS=1`
+    prints the rows). `scripts/` and `tests/` stay outside its scope.
 
 75. **Swallowed failure recorded as a different event:** a `catch` that drops a
     failure and lets the normal path continue makes the log report success or
@@ -677,6 +682,10 @@ file-scoped worklist and receives no project-wide scanner output.
     the sink) and fail closed on an unrecognised form. Screen: plant an
     alias, an indirect call and a value reached through another binding,
     and quote each result; every green plant is fixed or named as a residual.
+    On 2026-10-18 five detector PRs took two to six rounds each because
+    every verify found one more spelling. A detector's first round therefore lists its admitted forms
+    and refuses everything else; a residual names an admitted form that is
+    too broad, never a spelling the detector does not read.
 
 73. **Fixture adopts an ancestor root:** a fixture created with no project
     marker inherits whatever root sits above it, so one stray `.git` at the tmp
@@ -1633,6 +1642,17 @@ Test authoring screens:
   members sit in `scripts/shuffle-census-ratchet.json`, keyed by file, which
   only shrinks: a new member reds, and an entry clean two nights running
   must be deleted.
+  A file whose subject IS the order its cases run in (a backstop that reaps
+  the previous case's process, a drain the next case observes) cannot be
+  fixed by restoring state: that `describe` opts out with `{ shuffle: false }`
+  and a header saying why order is the behaviour under test, never the whole
+  file, and is registered in the ratchet's `byDesign` rows, which
+  `tests/scripts/ci-shuffle-census.test.ts` checks both ways. The reader
+  (`tests/support/shuffle-opt-out-scan.ts`) admits only the minimal marker:
+  an options object is read as a SEQUENCE, so a spread or a computed key it
+  cannot name refuses even beside a readable `shuffle` and the last key wins;
+  and a callee resolves through any number of aliases, a binding it cannot
+  follow refusing when the call passes an options object.
   A `vi.doMock` is undone in the file's top-level `afterEach`, not in the
   case that mocks it: a shuffle runs the next case on the leaked mock.
   `vi.resetModules()` does not clear `globalThis` or pre-reset singletons.
