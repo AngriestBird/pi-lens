@@ -198,10 +198,12 @@ describe("#4589 test-env-restore detector — the shapes that must red and green
 			}
 		}
 		expect(
-			detect(
-				'const saved = { K: process.env.K }; afterEach(() => { Object.assign(process.env, saved); }); it("a", () => { process.env.K = "x"; });',
+			keys(
+				detect(
+					'const saved = { K: process.env.K }; afterEach(() => { Object.assign(process.env, saved); }); it("a", () => { process.env.K = "x"; });',
+				),
 			),
-		).toEqual([]);
+		).toContain("K");
 	});
 
 	it("r3 delete-all must execute for every current key (#4593 F2)", () => {

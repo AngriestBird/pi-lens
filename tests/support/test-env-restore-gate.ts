@@ -48,7 +48,7 @@
  *    the live environment (`{ ...process.env }`) and a fresh literal restore
  *    nothing;
  * 7. a teardown `Object.assign(process.env, saved)` whose value argument is a
- *    name saved outside the region, covering only its statically known keys.
+ *    name saved outside the region; companion deletes provide key coverage.
  *
  * `vi.stubEnv(...)` is restored only by `vi.unstubAllEnvs()` in a covering
  * teardown or finally. A write inside a teardown body is reported unless the
@@ -1261,15 +1261,14 @@ function regionHits(
 			// is its own piece.
 			if (insideNestedFunction(scan, piece.range, site.start)) continue;
 			if (!restoreShaped(scan, site, piece.params, pieceRanges)) continue;
-			// Assign cannot remove keys missing from the saved record. Unknown
-			// snapshot keys prove no coverage; the call itself is still put-back.
+			// Even an explicit saved property may hold undefined: assigning it
+			// creates an env key rather than restoring absence. The call itself
+			// is put-back, but only companion deletes prove key coverage.
 			const keys =
 				site.form === "mutator"
-					? recordKeys(scan, site.start, site.valueExpr?.trim() ?? "").filter(
-							(key) => key !== WHOLE_ENV,
-						)
+					? [""]
 					: resolveKeyExpr(site.keyExpr, piece.params, bindingsAt(scan, site));
-			for (const key of keys.length || site.form !== "mutator" ? keys : [""])
+			for (const key of keys)
 				hits.push({ key, pos: site.start, scope: region.scope });
 		}
 		for (const match of scan.stripped
