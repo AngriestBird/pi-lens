@@ -1385,17 +1385,6 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"rather than a change.",
 		owner: "#2523 slice 2",
 	},
-	"clients/runtime-tool-result.ts#lookAtHead:04062605~45cd3f56": {
-		family: "hook-await",
-		site: "tool_result_read_only",
-		reason:
-			"Inside `lookAtHead`, the publish of a HEAD move's delta (#4535 " +
-			"slice 2). Both callers await the whole look under bounded() with " +
-			"the read-only tool_result budget and the hook's signal (the bash " +
-			"tool_result and the tool_call look), so this await is bounded one " +
-			"frame up; the line-granular scan cannot see a caller's bound.",
-		owner: "#4535",
-	},
 	"clients/runtime-tool-result.ts#lookAtHead:04717176~8dd6e0a0": {
 		family: "hook-await",
 		site: "tool_result_read_only",
@@ -1406,6 +1395,17 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"tool_call look), so this await is bounded one frame up; the " +
 			"line-granular scan cannot see a caller's bound.",
 		owner: "#4493",
+	},
+	"clients/runtime-tool-result.ts#lookAtHead:b8e44daf~45cd3f56": {
+		family: "hook-await",
+		site: "tool_result_read_only",
+		reason:
+			"Inside `lookAtHead`, the publish of a HEAD move's delta (#4535 " +
+			"slice 2). Both callers await the whole look under bounded() with " +
+			"the read-only tool_result budget and the hook's signal (the bash " +
+			"tool_result and the tool_call look), so this await is bounded one " +
+			"frame up; the line-granular scan cannot see a caller's bound.",
+		owner: "#4535",
 	},
 	"clients/runtime-tool-result.ts#lookAtHead:ba45e194~865d8f07": {
 		family: "hook-await",
@@ -1428,6 +1428,30 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"tool_call look), so this await is bounded one frame up; the " +
 			"line-granular scan cannot see a caller's bound.",
 		owner: "#4493",
+	},
+	"clients/runtime-tool-result.ts#publishRecoveredDrift:2231ec46~2fe97775": {
+		family: "hook-await",
+		site: "tool_result_edit",
+		reason:
+			"Inside `publishRecoveredDrift` (#4535 slice 2, review round 2 F2): " +
+			"the bash tool_result hands the recovered set to this chain with " +
+			"`void`, after its own bounded primary phase, exactly as the base " +
+			"branch `void`ed the detached `resyncGitChangedFiles` pass. Nothing " +
+			"awaits the chain, so it holds no hook and must not be cut by a hook " +
+			"budget or signal (the auxiliaries heal after the hook returns); the " +
+			"hook's own awaits are the `bounded()` primary phase it does await.",
+		owner: "#4535",
+	},
+	"clients/runtime-tool-result.ts#publishRecoveredDrift:832d990f~1ac0c20f": {
+		family: "hook-await",
+		site: "tool_result_edit",
+		reason:
+			"Inside `publishRecoveredDrift` (#4535 slice 2, review round 2 F2): " +
+			"the same detached chain, awaiting one chunk's drift pass before " +
+			"publishing the next chunk, so the chunks resync in order instead of " +
+			"racing each other. Detached for the same reason as the publish " +
+			"above.",
+		owner: "#4535",
 	},
 	"clients/runtime-tool-result.ts#resyncHeadMove:301d8f0a~1bf32683": {
 		family: "hook-await",

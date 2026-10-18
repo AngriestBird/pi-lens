@@ -50,7 +50,7 @@
  *
  * ## The baseline
  *
- * The population this rule finds today predates it: 1,188 handlers across 246
+ * The population this rule finds today predates it: 1,188 handlers across 247
  * files swallow by design or by history, and rewriting them is not this
  * change. Each file's silent count AND the content identity of its admitted
  * handler set are pinned together, so a NEW silent handler reds even when an
@@ -132,7 +132,7 @@ const SHARP_HOST =
 
 /**
  * The population on the merge of `origin/master` (`d7f85d909`) and this change,
- * one row per file: 1,188 silent handlers in 246 files, each row pinned by
+ * one row per file: 1,188 silent handlers in 247 files, each row pinned by
  * count and by the content identity of its admitted set. Shrink only.
  */
 const BASELINE: Readonly<Record<string, Admission>> = {
@@ -351,6 +351,12 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 		identities: "809dfcb662f6df93",
 		reason: PRE_RULE,
 	}, // :239, :254, :343, :363, :400
+	"clients/disk-change-subscribers.ts": {
+		silent: 2,
+		identities: "c7b556989b96b5f2",
+		reason:
+			"#4535 slice 2 moved both here verbatim from `clients/runtime-tool-result.ts`'s held-primary pass, and they are the same two best-effort reads they were there: a document whose disk bytes cannot be read is still a held document whose server view may be stale (the caller reports it as a target), and a primary send that throws is reported to the detector as `failed: true`, which is the row that surfaces it (`bash_write_primary_resync`, `opaque_mutation_head_moved`). Neither is a dropped failure: the first arms the delivery, the second is a classification the caller reads.",
+	}, // :193, :207
 	"clients/dispatch/dispatcher.ts": {
 		silent: 7,
 		identities: "fc89485966eea956",
@@ -1112,10 +1118,10 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 		reason: PRE_RULE,
 	}, // :286, :461, :485, :799, :960, :966, :1133, :1356, :1705, :1813, :1906
 	"clients/runtime-tool-result.ts": {
-		silent: 12,
-		identities: "6048a226db485dea",
+		silent: 10,
+		identities: "2cd24d38d0b1e880",
 		reason: SHARP_TOOL_RESULT,
-	}, // :266, :280, :410, :860, :955, :1150, :1602, :2152, :2385, :2819, :3397, :3621
+	}, // :353, :844, :939, :1134, :1586, :2149, :2387, :2821, :3399, :3623
 	"clients/runtime-turn.ts": {
 		silent: 20,
 		identities: "4baf397dfa7d293d",

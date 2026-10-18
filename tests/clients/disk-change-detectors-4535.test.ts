@@ -17,7 +17,15 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+	afterAll,
+	afterEach,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	it,
+} from "vitest";
 import { CacheManager } from "../../clients/cache-manager.js";
 import { hashContentBytes } from "../../clients/content-stamp.js";
 import {
@@ -26,6 +34,7 @@ import {
 } from "../../clients/degradation-ledger.js";
 import {
 	type DiskChange,
+	publishDiskChange,
 	subscribeDiskChange,
 } from "../../clients/disk-changes.js";
 import {
@@ -39,14 +48,13 @@ import {
 	resetLSPService,
 } from "../../clients/lsp/capabilities.js";
 import { configureLspServiceLifecycle } from "../../clients/lsp/service-singleton.js";
-import { resetWorkspaceDiagnosticsCacheSession } from "../../clients/lsp/workspace-diagnostics-session.js";
 import { HOOK_WALL_BUDGET_MS } from "../../clients/hook-budgets.js";
-import {
-	observeGitHead,
-	resetOpaqueMutationState,
-} from "../../clients/opaque-mutation-scan.js";
+import { flushLatencyLog } from "../../clients/latency-logger.js";
+import { getGlobalPiLensLogDir } from "../../clients/probe-home-state.js";
+import { observeGitHead } from "../../clients/opaque-mutation-scan.js";
 import { normalizeMapKey } from "../../clients/path-utils.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
+import { resetSessionScopedState } from "../../clients/runtime-session.js";
 import { handleToolCall } from "../../clients/runtime-tool-call.js";
 import {
 	handleToolResult,
@@ -55,6 +63,7 @@ import {
 import { execFileSync } from "../support/git-fixture-env.js";
 import { runHandlerExpectingNoThrow } from "../support/handler-verdict.js";
 import { makeLspServiceDouble } from "../support/lsp-service-double.js";
+import { setupTestEnvironment } from "./test-utils.js";
 
 interface ServiceCalls {
 	primaries: Array<{ paths: string[]; drainMs: number }>;
@@ -101,12 +110,15 @@ function harness(name: string, held: string[]): Harness {
 	const runtime = new RuntimeCoordinator();
 	runtime.projectRoot = root;
 	resetDegradationLedger();
-	resetOpaqueMutationState();
-	resetWorkspaceDiagnosticsCacheSession(0);
+	// The sanctioned per-case session reset, not a hand-picked subset: it owns
+	// the opaque baselines, the workspace diagnostics cache and the session
+	// caches these cases would otherwise inherit from the one before them.
+	resetSessionScopedState(root);
 	const publishes: DiskChange[] = [];
 	const calls: ServiceCalls = { primaries: [], drift: [] };
-	const cleanups: Array<() => void> = [];
-	cleanups.push(
+	const caseCleanups: Array<() => void> = [];
+	cleanups = caseCleanups;
+	caseCleanups.push(
 		subscribeDiskChange("slice2-observes-publish", (change) => {
 			publishes.push(change);
 		}),
@@ -133,20 +145,53 @@ function harness(name: string, held: string[]): Harness {
 		destroy: async () => undefined,
 	});
 	getLSPService();
-	return { root, runtime, publishes, calls, cleanups };
+	return { root, runtime, publishes, calls, cleanups: caseCleanups };
 }
 
+let previousTestMode: string | undefined;
+
+/**
+ * Every case's undo, run in `afterEach` in reverse order. The publisher's
+ * registry is process-wide and a worker may run several files, so an observer
+ * that outlives its case would keep recording into a dead case's array and
+ * answer the next file's publishes (review round 2, Greptile
+ * "test observer survives teardown").
+ */
+let cleanups: Array<() => void> = [];
+
+beforeAll(() => {
+	// latency.log writes are off under PI_LENS_TEST_MODE (#1742); the
+	// `opaque_mutation_head_moved` row is read back from the real sink.
+	previousTestMode = process.env.PI_LENS_TEST_MODE;
+	process.env.PI_LENS_TEST_MODE = "0";
+});
+
+afterAll(() => {
+	if (previousTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
+	else process.env.PI_LENS_TEST_MODE = previousTestMode;
+});
+
 beforeEach(() => {
-	// The checkout, not the harness tmpdir: a worker sandbox allows real Git
-	// writes only inside its own worktree. The prefix is this file's own (the
-	// #4552 fixture convention), every case removes its root, and the fixture
-	// repo carries its own `.git` so no project-root walk escapes it.
-	tmp = fs.mkdtempSync(path.join(process.cwd(), ".probe-home-4535-slice2-"));
+	// A harness-owned root under the worker's TMPDIR, registered with
+	// `tests/support/tmp-root-registry.ts` so `vitest-setup` removes it at file
+	// teardown and on SIGTERM. Before this the root was hand rolled inside the
+	// checkout, which bypassed the registry and the sweep: a killed worker left
+	// an untracked directory in the tree (review round 2, F8).
+	//
+	// `rootMarker: false` because every case below builds its own repository or
+	// asserts on a directory that has none, and the shared marker would plant an
+	// empty `.git` at the PARENT of every case: the project-root walk from
+	// `tmp/<case>` then stops at the parent, and a case with no repository is
+	// graded against a fake one instead of against its own directory.
+	tmp = setupTestEnvironment("pi-lens-4535-slice2-", {
+		rootMarker: false,
+	}).tmpDir;
 });
 
 afterEach(() => {
 	resetLSPService();
-	fs.rmSync(tmp, { recursive: true, force: true });
+	for (const cleanup of cleanups.reverse()) cleanup();
+	cleanups = [];
 });
 
 const headKey = (h: Harness) => `slice2|${h.root}`;
@@ -174,6 +219,9 @@ async function repoAfterMove(h: Harness): Promise<string> {
 	const dir = h.root;
 	fs.writeFileSync(path.join(dir, "lib.ts"), "export const v = 1;\n");
 	fs.writeFileSync(path.join(dir, "notes.md"), "# notes\n");
+	// Commit ids stay unique per case so this file can pick its own row out of
+	// the shared latency sink without matching a sibling case's move.
+	fs.writeFileSync(path.join(dir, "repo-id.txt"), `${path.basename(dir)}\n`);
 	git(dir, "init", "-q", "-b", "A");
 	git(dir, "add", "-A");
 	git(dir, "commit", "-qm", "base");
@@ -186,6 +234,32 @@ async function repoAfterMove(h: Harness): Promise<string> {
 	await look(h);
 	git(dir, "checkout", "-q", "B");
 	return dir;
+}
+
+/**
+ * The `opaque_mutation_head_moved` rows this case's repository wrote. Each
+ * fixture commits a `repo-id.txt` naming its own directory, so the commit ids
+ * unique to it are the filter and no sibling case's row can match.
+ */
+async function headMovedRows(
+	h: Harness,
+): Promise<Array<{ result: string; metadata: Record<string, unknown> }>> {
+	await flushLatencyLog();
+	const to = git(h.root, "rev-parse", "B").slice(0, 12);
+	const log = path.join(getGlobalPiLensLogDir(), "latency.log");
+	if (!fs.existsSync(log)) return [];
+	return fs
+		.readFileSync(log, "utf8")
+		.split("\n")
+		.filter((line) => line.includes('"opaque_mutation_head_moved"'))
+		.map(
+			(line) =>
+				JSON.parse(line) as {
+					result: string;
+					metadata: Record<string, unknown>;
+				},
+		)
+		.filter((row) => row.metadata.to === to);
 }
 
 describe("the HEAD look publishes instead of calling the LSP consumer", () => {
@@ -240,6 +314,11 @@ describe("the HEAD look publishes instead of calling the LSP consumer", () => {
 		expect(h.calls.primaries.map((call) => call.paths)).toEqual([
 			[normalizeMapKey(lib)],
 		]);
+		// `held` counts a different population on this branch, and the row says
+		// which one it counted (review F5).
+		const rows = await headMovedRows(h);
+		expect(rows).toHaveLength(1);
+		expect(rows[0]?.metadata.heldPopulation).toBe("all-held");
 	}, 30_000);
 
 	it("sends nothing and starts no drift pass when the move leaves held bytes current", async () => {
@@ -261,7 +340,20 @@ describe("the HEAD look publishes instead of calling the LSP consumer", () => {
 						h.calls.primaries.push({ paths: [...paths], drainMs: 0 });
 						return { sent: paths.length, drained: true };
 					},
-					resyncGitChangedFiles: async () => new Map(),
+					// Recorded by the REPLACEMENT too, so the "no drift pass" case
+					// below asserts an effect it can see rather than an empty array no
+					// double ever filled (review round 2, Greptile "drift calls go
+					// unobserved").
+					resyncGitChangedFiles: async (
+						paths: readonly string[],
+						options: { maxPasses?: number } = {},
+					) => {
+						h.calls.drift.push({
+							paths: [...paths],
+							maxPasses: options.maxPasses,
+						});
+						return new Map();
+					},
 				}),
 			beforeReset: () => undefined,
 			destroy: async () => undefined,
@@ -276,6 +368,47 @@ describe("the HEAD look publishes instead of calling the LSP consumer", () => {
 		).toHaveLength(1);
 		expect(h.calls.primaries).toEqual([]);
 		expect(h.calls.drift).toEqual([]);
+	}, 30_000);
+
+	it("reports a throwing LSP consumer as failed, never as a clean zero", async () => {
+		const dir = path.join(tmp, "head-move-threw");
+		const lib = path.join(dir, "lib.ts");
+		const h = harness("head-move-threw", [normalizeMapKey(lib)]);
+		await repoAfterMove(h);
+		// The consumer itself throws. `getOpenDocumentPaths` is the first call it
+		// makes, and before this round `fanOut` left the consumer out of the
+		// results map, which read as "no LSP consumer" — a clean zero for
+		// documents that were never looked at.
+		configureLspServiceLifecycle<Record<string, unknown>>({
+			create: () =>
+				makeLspServiceDouble({
+					getOpenDocumentPaths: () => {
+						throw new Error("consumer exploded");
+					},
+					getTrackedContent: () => ({ hash: "the-bytes-the-server-holds" }),
+					resyncHeldPrimaries: async () => ({ sent: 0, drained: true }),
+					resyncGitChangedFiles: async () => new Map(),
+				}),
+			beforeReset: () => undefined,
+			destroy: async () => undefined,
+		});
+		resetLSPService();
+		getLSPService();
+		resetDegradationLedger();
+
+		await look(h, "tool_result");
+
+		const rows = await headMovedRows(h);
+		expect(rows).toHaveLength(1);
+		expect(rows[0]).toMatchObject({
+			result: "resync-failed",
+			// `-1`: the documents were never checked, so this is not a count.
+			metadata: { held: -1, failed: expect.any(Number) },
+		});
+		const kinds = getDegradationSummary().map((group) => group.kind);
+		expect(kinds).toContain("disk-change-subscriber-failed");
+		// The registry case's row must not answer for a consumer that did answer.
+		expect(kinds).not.toContain("disk-change-lsp-consumer-missing");
 	}, 30_000);
 });
 
@@ -389,14 +522,46 @@ describe("a bash command's written documents publish instead of calling the LSP 
 		await expect.poll(() => h.calls.drift.length, { timeout: 5000 }).toBe(1);
 		expect(h.calls.drift[0]?.paths).toEqual([file]);
 	}, 30_000);
+
+	it("still resyncs the whole recovered set when it is over the publisher's path cap", async () => {
+		const dir = path.join(tmp, "bash-recovery-capped");
+		fs.mkdirSync(dir, { recursive: true });
+		const files = Array.from({ length: 65 }, (_, i) =>
+			path.join(dir, `m${i}.ts`),
+		);
+		for (const file of files) fs.writeFileSync(file, "export const v = 1;\n");
+		const h = harness("bash-recovery-capped", []);
+
+		await sessionFor(h)("node codemod.mjs", () => {
+			for (const file of files) {
+				fs.writeFileSync(file, "export const v = 2;\n");
+			}
+		});
+
+		const drift = h.publishes.filter((change) =>
+			change.sources.includes(BASH_RECOVERY_DRIFT_SOURCE),
+		);
+		// Every recovered publish stays inside the cap, so none of them is
+		// reported as unenumerable and the drift pass has a population to run on.
+		expect(drift.length).toBeGreaterThan(0);
+		expect(drift.filter((change) => change.paths === "unknown")).toEqual([]);
+		await expect
+			.poll(() => h.calls.drift.flatMap((call) => call.paths).length, {
+				timeout: 30_000,
+			})
+			.toBe(files.length);
+		expect(new Set(h.calls.drift.flatMap((call) => call.paths))).toEqual(
+			new Set(files.map(normalizeMapKey)),
+		);
+	}, 60_000);
 });
 
 describe("a publish that reaches no LSP consumer", () => {
 	it("records one bounded row per root instead of reading as no held document", () => {
 		const root = normalizeMapKey(path.join(tmp, "no-consumer"));
-		const first = readHeldDocumentsAnswer(new Map(), root);
+		const first = readHeldDocumentsAnswer(new Map(), root, new Set());
 		expect(first).toMatchObject({ held: 0, targets: [] });
-		const second = readHeldDocumentsAnswer(new Map(), root);
+		const second = readHeldDocumentsAnswer(new Map(), root, new Set());
 		expect(second).toMatchObject({ held: 0, targets: [] });
 		expect(
 			getDegradationSummary().filter(
@@ -416,7 +581,56 @@ describe("a publish that reaches no LSP consumer", () => {
 			drained: true,
 		};
 		expect(
-			readHeldDocumentsAnswer(new Map([[LSP_CONSUMER, answer]]), "/x"),
+			readHeldDocumentsAnswer(
+				new Map([[LSP_CONSUMER, answer]]),
+				"/x",
+				new Set(),
+			),
 		).toBe(answer);
+	});
+});
+
+describe("a publish whose LSP consumer threw", () => {
+	it("answers failed and unchecked, never as no held document", () => {
+		const root = normalizeMapKey(path.join(tmp, "threw"));
+		resetDegradationLedger();
+		const answer = readHeldDocumentsAnswer(
+			new Map(),
+			root,
+			new Set([LSP_CONSUMER]),
+		);
+		expect(answer).toMatchObject({
+			held: -1,
+			targets: [],
+			primary: 0,
+			failed: true,
+			drained: false,
+		});
+		// "the consumer threw" and "no consumer answered" are opposite facts, and
+		// only the second one is what `disk-change-lsp-consumer-missing` means.
+		expect(
+			getDegradationSummary().filter(
+				(group) => group.kind === "disk-change-lsp-consumer-missing",
+			),
+		).toEqual([]);
+	});
+});
+
+describe("a publish over the recorded path cap", () => {
+	it("names what it kept and says no sequence was allocated without a runtime", async () => {
+		const root = normalizeMapKey(path.join(tmp, "truncated"));
+		resetDegradationLedger();
+		const { change } = await publishDiskChange({
+			root,
+			origin: "bash-recovery",
+			kind: "inferred",
+			paths: Array.from({ length: 65 }, (_, i) => path.join(root, `c${i}.ts`)),
+		});
+		expect(change.paths).toBe("unknown");
+		const [row] = getDegradationSummary().filter(
+			(group) => group.kind === "disk-change-paths-truncated",
+		);
+		expect(row?.latestReasons[0]?.reason).toContain("are named");
+		expect(row?.latestReasons[0]?.reason).toContain("no runtime");
 	});
 });

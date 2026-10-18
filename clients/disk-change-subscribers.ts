@@ -108,7 +108,15 @@ const HEAD_MOVE_RESYNC_MAX_PASSES = 16;
  * phases stay observable without either detector knowing the service.
  */
 export interface HeldDocumentsAnswer {
-	/** The publish's population that a live client actually holds. */
+	/**
+	 * Candidates the consumer considered. With an enumerable population this is
+	 * "the publish's paths a live client holds"; with `paths: "unknown"` it is
+	 * EVERY held document of the root, which is a superset of the change, not an
+	 * intersection with it — so a row reading `held` on a capped-or-unlistable
+	 * population is reporting a different population than on a listed one (review
+	 * round 2, F5). `-1` says the consumer never answered (it threw), so no
+	 * document was checked at all.
+	 */
 	held: number;
 	/** Held documents whose disk bytes differ from the server's copy. */
 	targets: string[];
@@ -131,6 +139,19 @@ const NO_HELD_DOCUMENTS: HeldDocumentsAnswer = {
 	primary: 0,
 	failed: false,
 	drained: true,
+};
+
+/**
+ * The LSP consumer threw: no document was looked at, so the answer says
+ * `failed` and carries `held: -1` rather than the `0` a clean look would report
+ * (review round 2, F3).
+ */
+const UNCHECKED_HELD_DOCUMENTS: HeldDocumentsAnswer = {
+	held: -1,
+	targets: [],
+	primary: 0,
+	failed: true,
+	drained: false,
 };
 
 /**
@@ -238,14 +259,25 @@ async function resyncHeldDocuments(
  * (the paced auxiliaries), the held importers, and the drift records. Never
  * awaited by a hook, and never a primary phase: the write path's primary sends
  * already ran under `bash-write`.
+ *
+ * An unenumerable population takes every held document, the same conservative
+ * direction `resyncHeldDocuments` takes (shape 48): the stale views are the
+ * harm. The detector publishes in `DISK_CHANGE_MAX_RECORDED_PATHS` chunks, so
+ * the publisher's cap never lands here; this branch answers a publish made
+ * from somewhere else, and dropping it would be the silent no-op review round
+ * 2 filed as F2.
  */
 function driftRecoveredFiles(change: DiskChange): HeldDocumentsAnswer {
 	const service = peekLSPService();
-	if (!service || change.paths === "unknown" || change.paths.length === 0)
-		return NO_HELD_DOCUMENTS;
+	if (!service) return NO_HELD_DOCUMENTS;
+	const population =
+		change.paths === "unknown"
+			? service.getOpenDocumentPaths(change.root)
+			: change.paths;
+	if (population.length === 0) return NO_HELD_DOCUMENTS;
 	return {
 		...NO_HELD_DOCUMENTS,
-		drift: service.resyncGitChangedFiles(change.paths),
+		drift: service.resyncGitChangedFiles(population),
 	};
 }
 
@@ -321,19 +353,28 @@ export const LSP_CONSUMER = "lsp";
  * The LSP consumer's answer for one publish, as a detector reads it.
  *
  * A detector that drove these phases itself used to hold the whole answer
- * directly, so the one way this can still go wrong — the publish reaching no
- * LSP consumer at all, because the registry was never seeded or a second
- * module copy owns it — would read as "no held document was stale": the exact
- * shape that leaves a stale view in place. It is recorded once per root per
- * session, and the caller gets the no-documents answer either way so a
- * detector can still report what it observed.
+ * directly, so the ways this can still go wrong would otherwise read as "no
+ * held document was stale": the exact shape that leaves a stale view in place.
+ * They are two different failures and the detector's own row must tell them
+ * apart (review round 2, F3):
+ *
+ * - `failedSubscribers` holds this consumer, so it answered and threw. The
+ *   answer is {@link UNCHECKED_HELD_DOCUMENTS}: `failed`, `held: -1`, never
+ *   checked, never a clean zero. `fanOut` already recorded
+ *   `disk-change-subscriber-failed`.
+ * - Neither, so the publish reached no LSP consumer at all: the registry was
+ *   never seeded or a second module copy owns it. That is recorded once per
+ *   root per session, and only that case is
+ *   `disk-change-lsp-consumer-missing` (F7).
  */
 export function readHeldDocumentsAnswer(
 	results: ReadonlyMap<string, unknown>,
 	root: string,
+	failedSubscribers: ReadonlySet<string>,
 ): HeldDocumentsAnswer {
 	const answer = results.get(LSP_CONSUMER) as HeldDocumentsAnswer | undefined;
 	if (answer !== undefined) return answer;
+	if (failedSubscribers.has(LSP_CONSUMER)) return UNCHECKED_HELD_DOCUMENTS;
 	recordDegradationOnce({
 		kind: "disk-change-lsp-consumer-missing",
 		subject: root,
