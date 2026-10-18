@@ -431,6 +431,8 @@ describe("selectTargetedTests — path-mirror pass", () => {
 			"tests/config/project-trust-seam-ratchet.test.ts",
 			"tests/config/pr-smoke-paths.test.ts",
 			"tests/tools/diagnostics-route-switch-matrix.test.ts",
+			// #4590: walks both trees, so both change kinds must arm it.
+			"tests/config/env-path-key-composition-sweep.test.ts",
 		];
 		const testScanners = [
 			"tests/clients/flake-shape-ratchet.test.ts",

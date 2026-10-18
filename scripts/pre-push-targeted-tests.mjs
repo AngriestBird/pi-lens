@@ -172,6 +172,10 @@ export const TREE_SCANNING_GOVERNANCE_TESTS = [
 	// reads and maps each to a matrix route; a new route must arm it. The whole
 	// file, matrix included, measured ~28 s alone (2026-10-14).
 	"tests/tools/diagnostics-route-switch-matrix.test.ts",
+	// #4590: the one scanner that walks BOTH trees (clients/, scripts/ AND
+	// tests/), so it is registered in both lists: a production change arms it
+	// here, a tests/ change through TEST_TREE_GOVERNANCE_TESTS below.
+	"tests/config/env-path-key-composition-sweep.test.ts",
 ];
 
 // Suites that scan the TESTS tree for a test shape (a real spawn, a raw timer
@@ -200,7 +204,9 @@ export const TEST_TREE_GOVERNANCE_TESTS = [
 	"tests/config/handler-verdict-sweep.test.ts",
 	// #4381: walks tests/ for log-sink reads with no drain of that sink first.
 	"tests/config/sink-read-drain-sweep.test.ts",
-	// #4590: walks clients/, scripts/ and tests/ for env PATH-key compositions.
+	// #4590: the tests/ half of the env PATH-key composition sweep; its
+	// production half is the same file, registered in
+	// TREE_SCANNING_GOVERNANCE_TESTS above (a both-tree scanner).
 	"tests/config/env-path-key-composition-sweep.test.ts",
 	// #3472: the tests-tree scanners the census finds through tests/support.
 	"tests/config/module-instance-coverage.test.ts",
