@@ -135,7 +135,7 @@
  *    once (so a cycle proves nothing). Every other computed form in an
  *    env-identified composition is `unclassified-spelling`: a cast, `as`,
  *    `satisfies`, an assertion, parentheses, non-null, a comma expression, a
- *    template, a concatenation, a call (`String(K)` included), a member read,
+ *    a substituted template, a concatenation, a call (`String(K)` included), a member read,
  *    and a `let`/`var` binding, whatever it holds. The wrapper is spelling;
  *    only the proof decides (AGENTS.md shape 69). A chain this file proves
  *    holds a string that is not the variable is not a participant, and neither
@@ -460,18 +460,38 @@ const COMMENT_HINT = /\/[/*]/;
 /**
  * A node's source with every COMMENT blanked, so prose never decides a
  * structural question (AGENTS.md shape 43; #4600 R4-2). A quoted spelling
- * inside a STRING survives on purpose: that is the population witness. The
- * replacement is textual because `range()` reports byte offsets while `text()`
- * reports UTF-16 indices, and mixing the two slices a non-ASCII file wrong.
+ * inside a STRING survives on purpose: that is the population witness. Each
+ * parsed comment range is blanked independently; matching text in executable
+ * strings is never replaced.
  */
 function codeText(node: SgNode): string {
 	const text = node.text();
 	if (!COMMENT_HINT.test(text)) return text;
 	let code = text;
 	for (const comment of node.findAll({ rule: { kind: "comment" } })) {
-		code = code.split(comment.text()).join(" ".repeat(comment.text().length));
+		const start = utf16OffsetAtByte(
+			text,
+			comment.range().start.index - node.range().start.index,
+		);
+		const end = utf16OffsetAtByte(
+			text,
+			comment.range().end.index - node.range().start.index,
+		);
+		code = `${code.slice(0, start)}${" ".repeat(end - start)}${code.slice(end)}`;
 	}
 	return code;
+}
+
+/** Convert a parser byte offset relative to `text` into a JS string offset. */
+function utf16OffsetAtByte(text: string, byteOffset: number): number {
+	let low = 0;
+	let high = text.length;
+	while (low < high) {
+		const middle = Math.ceil((low + high) / 2);
+		if (Buffer.byteLength(text.slice(0, middle)) <= byteOffset) low = middle;
+		else high = middle - 1;
+	}
+	return low;
 }
 
 /** The named children of a node, memoised for one scan. */
@@ -544,9 +564,19 @@ function proveChain(
 		visited.add(declaration.index);
 		cursor = initializer;
 	}
-	return kindName(cursor) === "string"
-		? cookedString(cursor.text())
-		: undefined;
+	if (kindName(cursor) === "string") return cookedString(cursor.text());
+	if (kindName(cursor) === "template_string" && isStaticTemplate(cursor)) {
+		return cookedString(cursor.text());
+	}
+	return undefined;
+}
+
+/** A template is readable only when its value has no substitution. */
+function isStaticTemplate(node: SgNode): boolean {
+	return (
+		kindName(node) === "template_string" &&
+		!node.findAll({ rule: { kind: "template_substitution" } }).some(() => true)
+	);
 }
 
 /**
@@ -744,6 +774,15 @@ function literalKeyRef(node: SgNode, context: ScanContext): KeyRef | undefined {
 			if (!foldsToPath(text)) return undefined;
 			return { spelling: text, shape: shapeOfSpelling(text), line };
 		}
+		case "template_string": {
+			if (!isStaticTemplate(node)) return undefined;
+			const text = cookedString(node.text());
+			if (text === undefined) {
+				return { spelling: node.text(), shape: "expression", line };
+			}
+			if (!foldsToPath(text)) return undefined;
+			return { spelling: text, shape: shapeOfSpelling(text), line };
+		}
 		case "computed_property_name": {
 			const inner = childrenOf(node)[0];
 			return inner === undefined ? undefined : expressionKeyRef(inner, context);
@@ -756,13 +795,13 @@ function literalKeyRef(node: SgNode, context: ScanContext): KeyRef | undefined {
 /**
  * A computed or subscript key. Two forms are admitted, and only those:
  *
- * - a quoted string, whose value this file reads;
+ * - a quoted string or substitution-free template, whose value this file reads;
  * - an identifier whose `const` chain ends in one, at the nearest enclosing
  *   scope, in this file.
  *
  * Everything else is UNPROVED and reaches the fail-closed arm, whatever it
  * spells: a cast, `satisfies`, an assertion, parentheses, non-null, a comma
- * expression, a template, a concatenation, a call (`String(K)` included), a
+ * expression, a substituted template, a concatenation, a call (`String(K)` included), a
  * member read, a `let`/`var`, or a name this file does not declare. The
  * wrapper spelling decides no verdict, only the proof does (#4600 F1/F4,
  * AGENTS.md shape 69).
@@ -788,7 +827,7 @@ function expressionKeyRef(
 	}
 	// A string this reader cannot decode proves no value, so it must not read as
 	// some other key: fail closed on the key's own source (#4600 R4-1).
-	if (kindName(node) === "string") {
+	if (kindName(node) === "string" || isStaticTemplate(node)) {
 		return { spelling: node.text(), shape: "expression", line };
 	}
 	if (!keyNamesTheVariable(node, context)) return undefined;
@@ -809,6 +848,16 @@ function expressionKeyRef(
  * `[buildKey(<comment>)]` is not a candidate (#4600 R4-2).
  */
 function keyNamesTheVariable(node: SgNode, context: ScanContext): boolean {
+	// These are never readable by the allowlist. Their presence in an
+	// env-identified composition must therefore reach the fail-closed arm even
+	// when their source text does not itself contain the word PATH.
+	if (
+		(kindName(node) === "template_string" ||
+			kindName(node) === "binary_expression") &&
+		/path/i.test(codeText(node).replace(/[^A-Za-z]/g, ""))
+	) {
+		return true;
+	}
 	if (/path/i.test(codeText(node))) return true;
 	// `[\u0050ATH]` names the variable through an escape, which no text test sees.
 	if (
@@ -836,6 +885,13 @@ function keyNamesTheVariable(node: SgNode, context: ScanContext): boolean {
 function mentionsPathSpelling(node: SgNode): boolean {
 	const code = codeText(node);
 	if (QUOTED_PATH.test(code)) return true;
+	if (
+		(kindName(node) === "template_string" ||
+			kindName(node) === "binary_expression") &&
+		/path/i.test(code.replace(/[^A-Za-z]/g, ""))
+	) {
+		return true;
+	}
 	if (!code.includes("\\")) return false;
 	const literals =
 		kindName(node) === "string"
@@ -1263,6 +1319,56 @@ function collectFromEntries(
 	}
 }
 
+/** Record a call whose arguments include an environment object and a key. */
+function collectEnvCall(
+	node: SgNode,
+	context: ScanContext,
+	out: RawWrite[],
+): void {
+	const name = calleeName(node);
+	if (name === "assign" || name === "fromEntries") return;
+	const args = firstOfKind(node, "arguments");
+	if (args === undefined) return;
+	const argumentsList = childrenOf(args);
+	const envIndex = argumentsList.findIndex(
+		(argument) =>
+			isProcessEnvNode(argument) ||
+			(argument.kind() === "identifier" && baseIsEnv(argument, context)),
+	);
+	if (envIndex < 0) return;
+	const envBase = argumentsList[envIndex] as SgNode;
+	const writeLike = /^(?:set|write|define|assign|update|mutate)/i.test(
+		name ?? "",
+	);
+	if (!writeLike) return;
+	const keyNode = argumentsList[envIndex + 1];
+	const ref =
+		keyNode === undefined ? undefined : expressionKeyRef(keyNode, context);
+	const fallback =
+		ref === undefined &&
+		keyNode !== undefined &&
+		keyNamesTheVariable(keyNode, context)
+			? {
+					line: keyNode.range().start.line + 1,
+					spelling: codeText(keyNode),
+					shape: "expression" as const,
+				}
+			: ref;
+	if (fallback === undefined) return;
+	const live = isProcessEnvNode(envBase);
+	out.push({
+		line: fallback.line,
+		spelling: fallback.spelling,
+		shape: fallback.shape,
+		kind: "member",
+		group: groupForBase(envBase, context),
+		site: `${name ?? "call"}@${node.range().start.line + 1}`,
+		inheritsBase: false,
+		envIdentified: true,
+		live,
+	});
+}
+
 /**
  * Every path-variable env write in `source` with the reason it is not the
  * sanctioned fresh single-spelling literal. An empty array means the file
@@ -1320,9 +1426,10 @@ export function findPathKeyFindings(
 					kind: "call_expression",
 					has: {
 						kind: "member_expression",
-						has: { kind: "property_identifier", regex: "^fromEntries$" },
+						has: { kind: "property_identifier" },
 					},
 				},
+				{ kind: "call_expression" },
 			],
 		},
 	})) {
@@ -1331,6 +1438,7 @@ export function findPathKeyFindings(
 			collectMemberWrite(node, context, writes);
 		} else if (kind === "call_expression") {
 			collectFromEntries(node, context, writes);
+			collectEnvCall(node, context, writes);
 		} else {
 			collectKeyNode(node, context, writes);
 		}
@@ -2216,7 +2324,7 @@ describe("#4590 env PATH composition", () => {
 	it.each([
 		'"Path" as const',
 		'"Path" satisfies string',
-		"`Path`",
+		'`Path${""}`',
 		'pathKeyFor("PATH")',
 	])("reports the unproved const initializer %s", (value) => {
 		expect(
@@ -2226,14 +2334,68 @@ describe("#4590 env PATH composition", () => {
 		).toEqual(["unclassified-spelling"]);
 	});
 
-	// A template literal has no substitution and still is not a string node the
-	// proof admits: the key reports unproved rather than resolving.
-	it("reports a template-literal key as unproved", () => {
+	// A substitution-free template is one of the reader's four allowlisted forms.
+	it("reads a substitution-free template-literal key", () => {
 		expect(
 			findPathKeyFindings(
 				"const env = { ...process.env, [`PATH`]: next };",
 			).map((f) => f.reason),
-		).toEqual(["unclassified-spelling"]);
+		).toEqual(["spread-override"]);
+	});
+
+	// #4590 r6 red-first plants: the reader must admit a substitution-free
+	// template, and must refuse templates with substitutions and concatenation.
+	it("reads only allowlisted key forms and refuses composed keys", () => {
+		const plants: ReadonlyArray<{
+			source: string;
+			expected: Array<[string, PathKeyReason]>;
+		}> = [
+			{
+				source: "const env = { ...process.env, [`\\x50ATH`]: next };",
+				expected: [["PATH", "spread-override"]],
+			},
+			{
+				source: "process.env[`\\x50ATH`] = next;",
+				expected: [["PATH", "live-process-env"]],
+			},
+			{
+				source: 'const env = { ...process.env, [`PA${"TH"}`]: next };',
+				expected: [['`PA${"TH"}`', "unclassified-spelling"]],
+			},
+			{
+				source: 'const env = { ...process.env, ["PA" + "TH"]: next };',
+				expected: [['"PA" + "TH"', "unclassified-spelling"]],
+			},
+			{
+				source:
+					'const K = "PA" + "TH"; const env = { ...process.env, [K]: next };',
+				expected: [["K", "unclassified-spelling"]],
+			},
+		];
+		expect(
+			plants.map(({ source }) =>
+				findPathKeyFindings(source).map((f) => [f.spelling, f.reason]),
+			),
+		).toEqual(plants.map(({ expected }) => expected));
+	});
+
+	it("treats env-receiving calls as writes", () => {
+		const sources = [
+			'Reflect.set(process.env, "PATH", next);',
+			'Object.defineProperty(process.env, "Path", { value: next });',
+			'const env: ProcessEnv = process.env; Reflect.set(env, "PATH", next);',
+			'const env: ProcessEnv = process.env; writeEnv(env, "Path", next);',
+		];
+		expect(
+			sources.map((source) =>
+				findPathKeyFindings(source).map((f) => [f.spelling, f.reason]),
+			),
+		).toEqual([
+			[["PATH", "live-process-env"]],
+			[["Path", "live-process-env"]],
+			[["PATH", "unclassified-spelling"]],
+			[["Path", "unclassified-spelling"]],
+		]);
 	});
 
 	/**
@@ -2377,6 +2539,16 @@ describe("#4590 env PATH composition", () => {
 				source,
 			).toEqual([["K", "unclassified-spelling"]]);
 		}
+	});
+
+	it("does not blank executable strings with comment text", () => {
+		const source = [
+			'const K = (() => { /* "PATH" */ return \'/* "PATH" */\'.slice(4, 8); })();',
+			"const env = { ...process.env, [K]: next };",
+		].join("\n");
+		expect(findPathKeyFindings(source).map((f) => f.reason)).toEqual([
+			"unclassified-spelling",
+		]);
 	});
 
 	// Limit 2's other direction: an unproved key in a composition this sweep

@@ -17,8 +17,9 @@ audience: internal
   or a changed reason reds. Commented env members and later constants keep
   their evidence, and a spread of a parenthesised, asserted, satisfied or
   non-null `process.env` is still the ambient block. A computed key is either
-  proved — a quoted string, or a `const` chain of them — or reported: a cast, a
-  template, a concatenation, a call, a non-null or comma key, a mutable
+  proved — a quoted string, a substitution-free template, or a `const` chain
+  of those literals — or reported: a cast, a substituted template, a
+  concatenation, a call, a non-null or comma key, a mutable
   binding, a cycle or a wrapper is `unclassified-spelling`, never a silent
   pass. A key is read by its cooked value, so `"Pa\x74h"` is `Path` and
   `\u0050ATH` is `PATH` whatever the source spells; a string the reader cannot
