@@ -1371,34 +1371,44 @@ describe("the ratchet file", () => {
 	// instead of passing unclassified (AGENTS.md shape 69). #4611 review r1 M2:
 	// the first version read a fixed spelling set off blanked source, so a
 	// quoted key, a computed key, an options object bound in a non-test module,
-	// and a spread each passed; the audit now fails closed on all four.
-	it("registers every describe that opts out of shuffle, and reads every other spelling as a finding", () => {
-		const registered = new Set(
-			parsed.byDesign.map((row) => `${row.file}::${row.describe}`),
-		);
-		const files = listTrackedFiles(ROOT, ["tests"]).filter((file) =>
-			file.endsWith(".ts"),
-		);
-		assertNonEmptyScan(
-			"tracked TypeScript files under tests/ scanned for shuffle opt-outs",
-			files.length,
-			1000,
-		);
-		const census = censusShuffleOptOuts(
-			files.map((file) => ({
-				file,
-				source: fs.readFileSync(path.join(ROOT, file), "utf8"),
-			})),
-		);
-		expect(judgeShuffleOptOuts(census, registered)).toEqual([]);
-	});
+	// and a spread each passed. Review r2 (#4616) replaced that text census with
+	// a parsed-AST read, which costs a full parse of the tracked tests tree on
+	// every run: measured 3.9–5.4 s over 1,648 files / 24 MB, so the case carries
+	// a budget of its own instead of the 5 s default.
+	it(
+		"registers every describe that opts out of shuffle, and reads every other spelling as a finding",
+		{ timeout: 60_000 },
+		() => {
+			const registered = new Set(
+				parsed.byDesign.map((row) => `${row.file}::${row.describe}`),
+			);
+			const files = listTrackedFiles(ROOT, ["tests"]).filter((file) =>
+				file.endsWith(".ts"),
+			);
+			assertNonEmptyScan(
+				"tracked TypeScript files under tests/ scanned for shuffle opt-outs",
+				files.length,
+				1000,
+			);
+			const census = censusShuffleOptOuts(
+				files.map((file) => ({
+					file,
+					source: fs.readFileSync(path.join(ROOT, file), "utf8"),
+				})),
+			);
+			expect(judgeShuffleOptOuts(census, registered)).toEqual([]);
+		},
+	);
 
-	// #4611 review r1 M2/M3: the gate's population branch had no failing witness
-	// (deleting its count assertion left the suite green), and three spellings
-	// vitest honours passed it. Each plant is a source the same census and
-	// judgement read; a plant that stops reding means the branch that should
-	// have caught it is gone.
-	describe("planted spellings of the shuffle option (#4611 review r1)", () => {
+	// #4611 review r1 M2/M3, r2 M-a/M-b: the gate's population branch had no
+	// failing witness (deleting its count assertion left the suite green), three
+	// spellings vitest honours passed it, and the text census behind it read
+	// string contents and types as code. Each plant is a source the same census
+	// and judgement read; a plant that stops red means the branch that should
+	// have caught it is gone, and the no-finding controls (a harmless string, a
+	// type literal, a readable opt-in) keep a text census from coming back.
+	// The state table in PR #4611 lists every admitted form.
+	describe("planted spellings of the shuffle option (#4611 review r1, r2)", () => {
 		const plants = (
 			JSON.parse(
 				fs.readFileSync(
@@ -1419,14 +1429,20 @@ describe("the ratchet file", () => {
 		const censusOf = (source: string) =>
 			censusShuffleOptOuts([{ file: "plant.ts", source }]);
 
-		it("covers the admitted spelling and every refused one", () => {
+		it("covers the admitted spellings and every refused one", () => {
 			expect(
 				plants
 					.filter((plant) => plant.measuredAs === "pass")
 					.map((plant) => plant.name),
-			).toEqual(["accepted"]);
+			).toEqual([
+				"accepted",
+				"harmless-string",
+				"type-literal",
+				"literal-true-opt-in",
+				"opt-in-elsewhere",
+			]);
 			expect(plants.filter((plant) => plant.measuredAs === "red")).toHaveLength(
-				8,
+				18,
 			);
 			expect(
 				plants.every((plant) => plant.why.length >= 40),

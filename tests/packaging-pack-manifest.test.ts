@@ -302,67 +302,123 @@ describe("published manifest carries no devDependencies", () => {
 		liveBefore: ReturnType<typeof liveCheckoutState>;
 		realInstallLogBefore: Buffer | null;
 	};
-	let packed: PackedTarball | undefined;
 
-	function packTarballOnce(): PackedTarball {
-		if (packed !== undefined) return packed;
-		const liveBefore = liveCheckoutState();
-		const packRoot = path.join(tmp, "pack-src");
-		// #4561 review r1 LOW: `copyPackSource` is not idempotent, and the memo is
-		// set only after a successful pack, so a FAILED pack left `pack-src`
-		// half-built and every later case reported `EEXIST: symlink node_modules`
-		// instead of the pack's own error. Clearing it first makes a retry report
-		// the real failure. `rmSync` removes the copy's `node_modules` SYMLINK
-		// entry and never follows it into the live checkout's install.
-		fs.rmSync(packRoot, { recursive: true, force: true });
-		copyPackSource(packRoot);
-		const manifestBefore = fs.readFileSync(
-			path.join(packRoot, "package.json"),
-			"utf8",
-		);
-		const lockBefore = fs.readFileSync(
-			path.join(packRoot, "package-lock.json"),
-			"utf8",
-		);
-		// #2634: this `npm pack` runs OUR `prepare`, whose last step
-		// (`scripts/warm-loader-cache.mjs`) appends to `PI_LENS_INSTALL_LOG` or,
-		// failing that, `os.homedir()/.pi-lens/install.log` — with no `env:`
-		// pin the child inherited the ambient environment and every run of this
-		// suite wrote one record into the DEVELOPER'S REAL install log. Read the
-		// real sink (not a stand-in) BEFORE the pack so the assertion below is
-		// checking the exact file the bug wrote into, the same way
-		// `tests/scripts/release-qa.test.ts`'s hermeticity canary does for
-		// `scratchEnv`'s own child probe.
-		const realInstallLog = path.join(os.homedir(), ".pi-lens", "install.log");
-		const realInstallLogBefore = fs.existsSync(realInstallLog)
-			? fs.readFileSync(realInstallLog)
-			: null;
+	/** The pack itself, injectable so the retry case can force a failure. */
+	type PackStep = (copy: string, destination: string) => void;
+
+	function realPack(copy: string, destination: string): void {
 		// Not `--json`: `prepare` also runs on pack and its scripts write to stdout
 		// (setup-git-hooks on a fresh CI checkout), which corrupts the JSON payload.
-		execFileSync(npx, pinnedPackArgs(["--pack-destination", tmp]), {
-			cwd: packRoot,
+		execFileSync(npx, pinnedPackArgs(["--pack-destination", destination]), {
+			cwd: copy,
 			encoding: "utf8",
 			shell: process.platform === "win32",
 			timeout: 180_000,
 			stdio: ["ignore", "ignore", "inherit"],
 			// scratchEnv pins PI_LENS_INSTALL_LOG (and HOME, PILENS_DATA_DIR,
-			// npm_config_cache) inside `tmp` — every writer this child's
+			// npm_config_cache) inside `destination` — every writer this child's
 			// `prepare` lifecycle can reach lands in the scratch root, never in
 			// the real developer home (#2619 review F1, reused for #2634).
-			env: scratchEnv(tmp),
+			env: scratchEnv(destination),
 		});
-		const filename = fs.readdirSync(tmp).find((f) => f.endsWith(".tgz"));
-		if (!filename) throw new Error("npm pack produced no tarball");
-		packed = {
-			filename,
-			packRoot,
-			manifestBefore,
-			lockBefore,
-			liveBefore,
-			realInstallLogBefore,
-		};
-		return packed;
 	}
+
+	/**
+	 * One real pack per root, shared by the cases below. The pack step is a
+	 * parameter so the retry case can drive a failure through this same function
+	 * (#4561 review r2).
+	 */
+	function createTarballMemo(
+		root: string,
+		pack: PackStep = realPack,
+	): () => PackedTarball {
+		let packed: PackedTarball | undefined;
+		return () => {
+			if (packed !== undefined) return packed;
+			const liveBefore = liveCheckoutState();
+			const packRoot = path.join(root, "pack-src");
+			// #4561 review r1 LOW: `copyPackSource` is not idempotent, and the memo
+			// is set only after a successful pack, so a FAILED pack left `pack-src`
+			// half-built and every later attempt reported `EEXIST: symlink
+			// node_modules` instead of the pack's own error. Clearing it first makes
+			// a retry report the real failure; the case below is the witness.
+			// `rmSync` removes the copy's `node_modules` SYMLINK entry and never
+			// follows it into the live checkout's install.
+			fs.rmSync(packRoot, { recursive: true, force: true });
+			copyPackSource(packRoot);
+			const manifestBefore = fs.readFileSync(
+				path.join(packRoot, "package.json"),
+				"utf8",
+			);
+			const lockBefore = fs.readFileSync(
+				path.join(packRoot, "package-lock.json"),
+				"utf8",
+			);
+			// #2634: this `npm pack` runs OUR `prepare`, whose last step
+			// (`scripts/warm-loader-cache.mjs`) appends to `PI_LENS_INSTALL_LOG` or,
+			// failing that, `os.homedir()/.pi-lens/install.log` — with no `env:`
+			// pin the child inherited the ambient environment and every run of this
+			// suite wrote one record into the DEVELOPER'S REAL install log. Read the
+			// real sink (not a stand-in) BEFORE the pack so the assertion below is
+			// checking the exact file the bug wrote into, the same way
+			// `tests/scripts/release-qa.test.ts`'s hermeticity canary does for
+			// `scratchEnv`'s own child probe.
+			const realInstallLog = path.join(os.homedir(), ".pi-lens", "install.log");
+			const realInstallLogBefore = fs.existsSync(realInstallLog)
+				? fs.readFileSync(realInstallLog)
+				: null;
+			pack(packRoot, root);
+			const filename = fs.readdirSync(root).find((f) => f.endsWith(".tgz"));
+			if (!filename) throw new Error("npm pack produced no tarball");
+			packed = {
+				filename,
+				packRoot,
+				manifestBefore,
+				lockBefore,
+				liveBefore,
+				realInstallLogBefore,
+			};
+			return packed;
+		};
+	}
+
+	const packTarballOnce = createTarballMemo(tmp);
+
+	// #4561 review r2 (Greptile P2 on LOW-6): the retry branch had no failing
+	// witness — with and without the `rmSync` the suite reported the same
+	// counts, and only the error text differed. This drives the failure through
+	// the same memo with the pack step injected: the first attempt throws after
+	// the copy exists, the second must rebuild that copy. Deleting the `rmSync`
+	// in `createTarballMemo` reds this case with `EEXIST: symlink node_modules`.
+	it("a failed pack's retry rebuilds its copy instead of reusing a half-built one (#4561 review r2)", () => {
+		const retryRoot = path.join(tmp, "retry");
+		fs.mkdirSync(retryRoot, { recursive: true });
+		const halfBuilt = path.join(retryRoot, "pack-src", "half-built.marker");
+		let attempts = 0;
+		const packTarball = createTarballMemo(retryRoot, (copy, destination) => {
+			attempts += 1;
+			if (attempts === 1) {
+				// The shape a real failed pack leaves behind: the copy exists, the
+				// pack dies, and the memo is never set.
+				fs.writeFileSync(halfBuilt, "first attempt");
+				throw new Error("pack forced to fail (#4561 review r2)");
+			}
+			expect(
+				fs.existsSync(halfBuilt),
+				"the retry reused the half-built copy instead of rebuilding it",
+			).toBe(false);
+			expect(fs.readFileSync(path.join(copy, "package.json"), "utf8")).toBe(
+				fs.readFileSync(path.join(root, "package.json"), "utf8"),
+			);
+			fs.writeFileSync(path.join(destination, "retry-1.0.0.tgz"), "tarball");
+		});
+		expect(() => packTarball()).toThrow("pack forced to fail");
+		expect(fs.existsSync(halfBuilt), "the first attempt built the copy").toBe(
+			true,
+		);
+		expect(packTarball().filename).toBe("retry-1.0.0.tgz");
+		expect(attempts, "one failed attempt and one retry").toBe(2);
+	});
 
 	it(
 		"the real `npm pack` tarball's package.json has no devDependencies, and the working manifest is restored",
