@@ -16,6 +16,7 @@ import {
 	_resetAgentNudgeForTests,
 	consumeAgentNudge,
 } from "../../clients/agent-nudge.js";
+import { PI_LENS_SYNTHETIC_MUTATION_FIELD } from "../../clients/mutating-tool.js";
 import { readChangesSince } from "../../clients/project-changes.js";
 import {
 	MAX_PENDING_CASCADE_RUNS,
@@ -3628,6 +3629,65 @@ describe("runtime-tool-result inline behavior warnings", () => {
 					if (index === 2) expect(text).toContain("BLIND WRITE");
 					if (index === 5) expect(text).toContain("THRASHING");
 				}
+			} finally {
+				env.cleanup();
+			}
+		},
+	);
+
+	// #4623: the guard asks `mutating-tool.ts` which results are bash replays, and
+	// only the exact marker keeps a result out of the behavior history. A
+	// look-alike marker is still the host call it is: all three writes below
+	// are recorded, so the third one warns BLIND WRITE.
+	it.each<[string, unknown, boolean]>([
+		["the exact bash value", "bash", false],
+		["another case", "BASH", true],
+		["another replay source", "opaque-script", true],
+		["a boolean", true, true],
+	])(
+		"counts a write result carrying %s as a host call only when it is not the bash marker",
+		async (_label, marker, isRecorded) => {
+			const env = setupTestEnvironment("pi-lens-replay-marker-behavior-");
+			try {
+				vi.mocked(runPipeline).mockResolvedValue({
+					output: "diagnostics complete",
+					hasBlockers: false,
+					isError: false,
+					fileModified: false,
+				});
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				const behavior = new AgentBehaviorClient();
+				let text: string | undefined;
+				for (let index = 0; index < 3; index++) {
+					const filePath = createTempFile(
+						env.tmpDir,
+						`marked-${index}.ts`,
+						"export {};\n",
+					);
+					const returned = await handleToolResult({
+						getFlag: () => false,
+						dbg: () => {},
+						runtime,
+						cacheManager: new CacheManager(false),
+						resetLSPService: () => {},
+						agentBehaviorRecord: (name, recordedPath) =>
+							behavior.recordToolCall(name, recordedPath),
+						formatBehaviorWarnings: (warnings) =>
+							behavior.formatWarnings(warnings as BehaviorWarning[]),
+						event: {
+							toolName: "write",
+							input: { path: filePath },
+							content: [],
+							[PI_LENS_SYNTHETIC_MUTATION_FIELD]: marker,
+						},
+					});
+					text = returned?.content.map((part) => part.text).join("\n");
+				}
+				// The diagnostics still render for every marker: only the history differs.
+				expect(text).toContain("diagnostics complete");
+				if (isRecorded) expect(text).toContain("BLIND WRITE");
+				else expect(text).not.toContain("BLIND WRITE");
 			} finally {
 				env.cleanup();
 			}
