@@ -1489,6 +1489,35 @@ export function tmpHygieneExcludeLiveOwnerEntries(
  *  root can hold a whole npm cache, and one record per entry is the contract. */
 const TMP_HYGIENE_ORIGIN_CHILD_LIMIT = 4;
 
+/** What one census entry reports about itself; an `undefined` field is the
+ *  unreadable arm. */
+export interface TmpHygieneLeakOriginFacts {
+	birthtimeMs?: number;
+	children?: string[];
+}
+
+/** The shipped reader. The parameter exists so a test can drive the arm this
+ *  host's filesystems never produce — a stat that succeeds with a zero birth
+ *  time — instead of leaving it unproven; `unadmittedRootBackstopEntries` and
+ *  `removeRunBackstopDirs` take their inputs the same way. */
+function readTmpHygieneLeakOrigin(dir: string): TmpHygieneLeakOriginFacts {
+	let birthtimeMs: number | undefined;
+	let children: string[] | undefined;
+	try {
+		birthtimeMs = fs.statSync(dir).birthtimeMs;
+	} catch {
+		birthtimeMs = undefined;
+	}
+	try {
+		// Sorted so one directory always produces one line: `readdir` order is
+		// filesystem-dependent, and two runs of the same leak must compare.
+		children = fs.readdirSync(dir).sort();
+	} catch {
+		children = undefined;
+	}
+	return { birthtimeMs, children };
+}
+
 /**
  * #4591: what a leaked census entry holds and when it was created, one line per
  * leaked entry, printed by the destructive owner BEFORE it removes the entry.
@@ -1505,22 +1534,10 @@ const TMP_HYGIENE_ORIGIN_CHILD_LIMIT = 4;
 export function formatTmpHygieneLeakOrigin(
 	dir: string,
 	now: number = Date.now(),
+	facts: TmpHygieneLeakOriginFacts = readTmpHygieneLeakOrigin(dir),
 ): string {
 	const name = path.basename(dir);
-	let birthtimeMs: number | undefined;
-	let children: string[] | undefined;
-	try {
-		birthtimeMs = fs.statSync(dir).birthtimeMs;
-	} catch {
-		birthtimeMs = undefined;
-	}
-	try {
-		// Sorted so one directory always produces one line: `readdir` order is
-		// filesystem-dependent, and two runs of the same leak must compare.
-		children = fs.readdirSync(dir).sort();
-	} catch {
-		children = undefined;
-	}
+	const { birthtimeMs, children } = facts;
 	const listed =
 		children === undefined
 			? "first-level children unavailable"

@@ -59,6 +59,39 @@ describe("tmp-hygiene leak origin record (#4591)", () => {
 		}
 	});
 
+	it("names an empty entry as holding nothing and floors a future birth time at zero", () => {
+		const env = setupTestEnvironment("pi-lens-4591-origin-empty-");
+		const empty = path.join(env.tmpDir, "empty-entry");
+		try {
+			fs.mkdirSync(empty);
+			const born = fs.statSync(empty).birthtimeMs;
+			expect(formatTmpHygieneLeakOrigin(empty)).toContain(
+				"first-level children: none",
+			);
+			// A filesystem timestamp microseconds ahead of the process clock is a
+			// negative age, which reads as `born 0ms`, never as a negative one.
+			const line = formatTmpHygieneLeakOrigin(empty, born - 5_000);
+			expect(line).toContain("born 0ms before this line");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("reports a zero birth time as unavailable, never as 1970", () => {
+		// The arm a filesystem that keeps no creation time takes: `stat` answered,
+		// and the birth time it answered with is 0. No filesystem on this host
+		// produces it, so the facts are injected — the same explicit-input shape
+		// `removeRunBackstopDirs(home)` and `unadmittedRootBackstopEntries(before)`
+		// take for their own unreachable-on-this-host arms.
+		const line = formatTmpHygieneLeakOrigin("/nowhere/zero-born", 1_000, {
+			birthtimeMs: 0,
+			children: ["home"],
+		});
+		expect(line).toBe(
+			"[tmp-hygiene-origin] zero-born birth time unavailable (first-level children: home)\n",
+		);
+	});
+
 	it("reports an entry that cannot be read instead of a fabricated birth time", () => {
 		const env = setupTestEnvironment("pi-lens-4591-origin-gone-");
 		const gone = path.join(env.tmpDir, "already-removed");
