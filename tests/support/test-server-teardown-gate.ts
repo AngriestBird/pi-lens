@@ -127,8 +127,8 @@
  *   `.call`/`.apply` MEMBER (`a.bind.call(...)`, `Reflect.apply(...)`). A
  *   computed key never enters that walk, so `a.bind["call"](b, 0)`,
  *   `a["bind"]["call"](b, 0)`, `Reflect["apply"](a.bind, b, [0])`,
- *   `globalThis.Reflect.apply(...)`, `call.call(a.bind, b, 0)` and
- *   `(0, a.bind)(0)` read clean (silent, pre-existing; no live member in
+ *   `globalThis.Reflect.apply(a.bind, b, [0])` and a comma invocation
+ *   (`(0, a.bind)(0)`) read clean (silent, pre-existing; no live member in
  *   `tests/**`, so the population is the admitted-form census, not a report).
  * - **Then-chains and multi-binding variables.** A promise consumed through a
  *   rejected or rejected-only branch (`.catch`, a second `.then` argument)
