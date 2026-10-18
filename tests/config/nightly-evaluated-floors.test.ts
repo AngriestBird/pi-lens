@@ -25,6 +25,7 @@ import type {
 	CoEStatus,
 } from "../support/continue-on-error-census.js";
 import {
+	classifyProducerFile,
 	floorProblems,
 	liveRunText,
 	readProducerCensus,
@@ -83,8 +84,11 @@ const governedByTestProblems = (
 	const absolute = resolve(root, relative);
 	if (!existsSync(absolute) || !statSync(absolute).isFile())
 		return [`${key}: ${test} is not a file`];
+	// A `describe`/`suite` wrapper declares no test of its own: AGENTS says the
+	// live tests that own the site, so a file whose tests were deleted and whose
+	// wrapper remains proves nothing (#4609 r3 LOW-2).
 	const declared = testDeclarations(readFileSync(absolute, "utf8")).filter(
-		(entry) => entry.live,
+		(entry) => entry.live && (entry.callee === "it" || entry.callee === "test"),
 	);
 	if (declared.length === 0) return [`${key}: ${test} declares no live test`];
 	if (!vitestCollects(relative))
@@ -712,6 +716,39 @@ runs:
 		expect(found.problems[0]).toContain("does not classify");
 	});
 
+	it("classifies an action file by its exact name, so a misnamed copy refuses", () => {
+		// LOW-1: `file.startsWith("action.")` read `action.backup.yml` as a
+		// composite action GitHub never runs, which would then demand a registry
+		// row for it.
+		expect(
+			[
+				".github/actions/probe/action.backup.yml",
+				".github/actions/probe/action.yml.bak",
+				".github/actions/action.yml",
+				".github/workflows/nested/a.yml",
+				".github/actions/probe/action.yml",
+				".github/actions/probe/action.yaml",
+				".github/workflows/a.yml",
+			].map((path) => classifyProducerFile(path)),
+		).toEqual([null, null, null, null, "composite", "composite", "workflow"]);
+		const root = tree({
+			".github/actions/probe/action.backup.yml": `name: probe
+runs:
+  using: composite
+  steps:
+    - name: stray
+      shell: bash
+      continue-on-error: true
+      run: echo hi
+`,
+		});
+		const found = readProducerCensus(root);
+		expect(found.sites).toEqual([]);
+		expect(found.problems).toEqual([
+			expect.stringContaining(".github/actions/probe/action.backup.yml:"),
+		]);
+	});
+
 	it("reds on a directory named like a producer file instead of walking past it", () => {
 		const root = tree({
 			".github/workflows/real.yml": `${PROBE}    steps: []
@@ -804,7 +841,10 @@ runs:
 	// F2 plants: a floored row is satisfied only by a live line of a step the
 	// runner executes.
 	const KEY = ".github/workflows/floor.yml#probe#best effort";
-	const flooredStep = (floor: string): string[] => {
+	const flooredStep = (
+		floor: string,
+		evidence = '--count "probe=',
+	): string[] => {
 		const root = tree({
 			".github/workflows/floor.yml": `${PROBE}    steps:
       - name: best effort
@@ -821,10 +861,14 @@ ${floor}`,
 		return floorProblems(site as CoESite, {
 			status: "floored",
 			floorStep: "evaluated floor",
-			evidence: '--count "probe=',
+			evidence,
 			reason: "A fixture row; the reason only has to clear the length floor.",
 		});
 	};
+
+	/** The one refusal every uncredited floor gets. */
+	const NOT_EXECUTABLE = (evidence: string) =>
+		`${KEY}: "${evidence}" is not on an executable line of that step's run text`;
 
 	it("accepts a floor the runner reaches and reads as a command", () => {
 		expect(
@@ -883,18 +927,18 @@ ${floor}`,
 		}
 	});
 
-	it("accepts an if: that names a context or a status function the runner evaluates", () => {
-		// The admitted list is deliberately short and fail-closed elsewhere: a
-		// context the runner fills in cannot be proven false at rest, so it stays
-		// live; everything else is unproven (#4609 r2 F-B, Greptile r4306472964).
+	it("accepts only the if: forms that always run", () => {
+		// An allowlist (#4609 r3 MEDIUM-1): the absent condition and the short
+		// always-running forms below. Nothing else is credited, so the predicate
+		// is a statement about whether the step always runs, not about whether
+		// its text mentions a context root.
 		for (const source of [
 			"${{ !cancelled() }}",
 			"${{ always() }}",
 			"${{ success() }}",
 			"always()",
 			"${{ !cancelled() && matrix.os == 'macos-latest' }}",
-			"${{ github.event_name == 'push' }}",
-			"${{ needs.scope.outputs.smoke == 'true' }}",
+			"${{ !cancelled() && needs.scope.outputs.smoke == 'true' }}",
 			"true",
 		]) {
 			expect(
@@ -904,6 +948,43 @@ ${floor}`,
 `),
 				source,
 			).toEqual([]);
+		}
+		// No `if:` at all is the common case and stays admitted.
+		expect(
+			flooredStep(`      - name: evaluated floor
+        run: node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
+`),
+		).toEqual([]);
+	});
+
+	it("reds on every if: outside the allowlist, including a textually plausible one", () => {
+		// Each source names a context root or a status function, which the round-2
+		// predicate read as proof of liveness. None of them is one of the admitted
+		// forms, so none credits the floor (r3 MEDIUM-1: a name is not proof).
+		for (const source of [
+			"${{ !always() }}",
+			"${{ github.event_name == 'never' }}",
+			"${{ success() && failure() }}",
+			"${{ 'github.event_name' == 'never' }}",
+			"${{ env.NEVER_SET }}",
+			"${{ matrix.os == 'never-os' }}",
+			"${{ !cancelled() && always() }}",
+			"${{ !cancelled() && github.event_name == 'never' && matrix.os == 'x' }}",
+			"${{ false && always() }}",
+			"${{ always() && false }}",
+			// LOW-3, stated behaviour: a trivially true literal is still an
+			// expression this reader does not evaluate.
+			"${{ 2 > 1 }}",
+		] as const) {
+			expect(
+				flooredStep(`      - name: evaluated floor
+        if: ${source}
+        run: node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
+`),
+				source,
+			).toContain(
+				`${KEY}: its floor step may never run (if: ${source} is not a condition known to run), so the floor is unproven`,
+			);
 		}
 	});
 
@@ -930,16 +1011,178 @@ ${floor}`,
           node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
 `,
 			],
+			// r3 MEDIUM-2: an exit behind an operator or a block still ends the
+			// script, and one inside a subshell or an `if` may.
+			[
+				"an exit behind &&",
+				`          false && exit 0
+          node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
+`,
+			],
+			[
+				"an exit in a subshell",
+				`          ( exit 0 )
+          node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
+`,
+			],
+			[
+				"an exit in an if body",
+				`          if [ -n "$SKIP" ]; then exit 0; fi
+          node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
+`,
+			],
 		] as const) {
 			expect(
 				flooredStep(`      - name: evaluated floor
         run: |
 ${body}`),
 				shape,
-			).toEqual([
-				`${KEY}: "--count "probe=" is not on an executable line of that step's run text`,
-			]);
+			).toEqual([NOT_EXECUTABLE('--count "probe=')]);
 		}
+	});
+
+	it("credits floor evidence only in the argument list of a measuring invocation", () => {
+		// r3 MEDIUM-2: the round-2 rule rejected four data regions and credited
+		// every other unquoted match, so a printed command and a never-reached
+		// shell region both satisfied the floor. The allowlist admits only a
+		// floor flag on a top-level measuring invocation.
+		for (const [shape, body] of [
+			[
+				"an echo in argument position",
+				`          echo --count "probe=$count"
+`,
+			],
+			[
+				"an echo of the whole command",
+				`          echo node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
+`,
+			],
+			[
+				"a printf of the whole command",
+				`          printf '%s\\n' node scripts/assert-evaluated.mjs --count "probe=$count"
+`,
+			],
+			[
+				"an uncalled function",
+				`          probe() {
+            node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
+          }
+`,
+			],
+			[
+				"an if false branch",
+				`          if false; then
+            node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
+          fi
+`,
+			],
+			[
+				"an if true branch",
+				`          if true; then
+            node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
+          fi
+`,
+			],
+			[
+				"a case branch",
+				`          case "$MODE" in
+            probe) node scripts/assert-evaluated.mjs --count "probe=$count" ;;
+          esac
+`,
+			],
+			[
+				"a subshell",
+				`          ( node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3 )
+`,
+			],
+			[
+				"a second command on the line",
+				`          true; node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
+`,
+			],
+			[
+				"a chained command",
+				`          true && node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
+`,
+			],
+			[
+				"a one-line if body",
+				`          if true; then node scripts/assert-evaluated.mjs --count "probe=$count"; fi
+`,
+			],
+			[
+				"a second command on the line that prints the flag",
+				`          node scripts/assert-evaluated.mjs --count "other=$other" ; echo --count "probe=$count"
+`,
+			],
+			[
+				"a different program",
+				`          npm run probe -- --count "probe=$count"
+`,
+			],
+		] as const) {
+			expect(
+				flooredStep(`      - name: evaluated floor
+        run: |
+${body}`),
+				shape,
+			).toEqual([NOT_EXECUTABLE('--count "probe=')]);
+		}
+		// A trailing pipeline or handler after the invocation is credited: the
+		// command has already run when the handler sees its status. Both live
+		// workflows depend on this (`| tee …` and `|| floor=$?`).
+		for (const body of [
+			`          set -o pipefail
+          node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3 2>&1 | tee "$RUNNER_TEMP/x.log"
+`,
+			`          node scripts/assert-evaluated.mjs --count "probe=$count" --floor 1 || floor=$?
+`,
+		] as const)
+			expect(
+				flooredStep(`      - name: evaluated floor
+        run: |
+${body}`),
+				body,
+			).toEqual([]);
+	});
+
+	it("credits a floor the script argument itself proves, only for a measuring script", () => {
+		// `lint.yml`'s complexity floor is the script path, not a flag: it is
+		// credited on the invocation that runs it and refused on anything that
+		// merely prints the path.
+		expect(
+			flooredStep(
+				`      - name: evaluated floor
+        run: |
+          set -o pipefail
+          node scripts/complexity-report.mjs | tee complexity-report.txt
+`,
+				"scripts/complexity-report.mjs",
+			),
+		).toEqual([]);
+		for (const body of [
+			"          ls scripts/complexity-report.mjs\n",
+			"          cat scripts/complexity-report.mjs\n",
+			"          echo scripts/complexity-report.mjs\n",
+		] as const)
+			expect(
+				flooredStep(
+					`      - name: evaluated floor
+        run: |\n${body}`,
+					"scripts/complexity-report.mjs",
+				),
+				body,
+			).toEqual([NOT_EXECUTABLE("scripts/complexity-report.mjs")]);
+		// Evidence that names the program, not an argument, proves nothing: the
+		// match has to start at or after the invocation's script argument.
+		expect(
+			flooredStep(
+				`      - name: evaluated floor
+        run: node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
+`,
+				"node",
+			),
+		).toEqual([NOT_EXECUTABLE("node")]);
 	});
 
 	it("reds when the floor step is itself continue-on-error", () => {
@@ -1015,6 +1258,12 @@ ${body}`),
 				'import { it } from "vitest";\nit("runs", () => {});\n',
 			"tests/config/skipped.test.ts":
 				'import { it } from "vitest";\nit.skip("never runs", () => {});\n',
+			// LOW-2: a wrapper with no test of its own proves nothing.
+			"tests/config/describe-only.test.ts":
+				'import { describe } from "vitest";\ndescribe("wrapper", () => {});\n',
+			// The `test` spelling of a live declaration is admitted beside `it`.
+			"tests/config/test-call.test.ts":
+				'import { test } from "vitest";\ntest("runs", () => {});\n',
 			"tests/support/helpers.ts": "export const helper = 1;\n",
 			// A collected tree's excluded sibling: vitest never runs it (#4393).
 			"tests/fixtures/probe.test.ts": 'it("fixture suite", () => {});\n',
@@ -1035,6 +1284,12 @@ ${body}`),
 		expect(
 			governedByTestProblems(root, "k", "tests/config/skipped.test.ts"),
 		).toEqual(["k: tests/config/skipped.test.ts declares no live test"]);
+		expect(
+			governedByTestProblems(root, "k", "tests/config/describe-only.test.ts"),
+		).toEqual(["k: tests/config/describe-only.test.ts declares no live test"]);
+		expect(
+			governedByTestProblems(root, "k", "tests/config/test-call.test.ts"),
+		).toEqual([]);
 		expect(
 			governedByTestProblems(root, "k", "tests/fixtures/probe.test.ts"),
 		).toEqual(["k: vitest does not collect tests/fixtures/probe.test.ts"]);
