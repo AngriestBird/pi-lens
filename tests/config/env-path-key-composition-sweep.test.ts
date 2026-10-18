@@ -1574,6 +1574,20 @@ describe("#4590 env PATH composition", () => {
 		expect(lowercaseInEnv.map((f) => [f.line, f.spelling, f.reason])).toEqual([
 			[1, "path", "unclassified-spelling"],
 		]);
+		// The other two ways a composition proves it is an env: it sits in an
+		// `env:` position, and the member write's base is a `ProcessEnv`.
+		const envPosition = findPathKeyFindings(
+			"const spawn = { env: { path: next } };",
+		);
+		expect(envPosition.map((f) => [f.line, f.spelling, f.reason])).toEqual([
+			[1, "path", "unclassified-spelling"],
+		]);
+		const typedBase = findPathKeyFindings(
+			"function apply(env: NodeJS.ProcessEnv) { env.path = next; }",
+		);
+		expect(typedBase.map((f) => [f.line, f.spelling, f.reason])).toEqual([
+			[1, "path", "unclassified-spelling"],
+		]);
 	});
 
 	/**
