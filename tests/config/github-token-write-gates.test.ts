@@ -4,6 +4,8 @@ import { describe, expect, it } from "vitest";
 import yaml from "../../clients/deps/js-yaml.js";
 import { isAdvisoryCheck } from "../../scripts/lib/ci-checks.mjs";
 import {
+	commandBasename,
+	stripCommandGroupAndRunnerPrefixes,
 	scannableRegions,
 	splitSegments,
 	splitWords,
@@ -196,15 +198,12 @@ const SHELL_COMMANDS = new Set(["bash", "sh", "dash", "zsh", "ksh"]);
 const EVAL_COMMAND = "eval";
 /** One variable reference as a whole word: `$GH_BIN`, `${GH_BIN}`. */
 const VARIABLE_WORD = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/;
-/** `gh api` names its repository in the request path. */
-const API_REPO_PATH =
-	/(?:^|[\s/])repos\/(?:\$GITHUB_REPOSITORY|\$\{\{\s*github\.repository\s*\}\}|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\//;
-
 type GhInvocation = {
 	/** 0-based index of the step whose `run:` script holds the call. */
 	step: number;
 	/** The simple command that runs `gh`, quotes and comments stripped. */
 	words: string[];
+	env: Record<string, string>;
 };
 
 type Census = {
@@ -218,12 +217,6 @@ type Finding = {
 	kind: "missing-source" | "unclassified";
 	detail: string;
 };
-
-/** The final path segment of a word, so `/usr/bin/gh` reads as `gh`. */
-function commandName(word: string): string {
-	const cut = Math.max(word.lastIndexOf("/"), word.lastIndexOf("\\"));
-	return cut === -1 ? word : word.slice(cut + 1);
-}
 
 function declaredEnv(...scopes: unknown[]): Record<string, string> {
 	const env: Record<string, string> = {};
@@ -239,13 +232,6 @@ function declaredEnv(...scopes: unknown[]): Record<string, string> {
 	return env;
 }
 
-/** A `GH_REPO` that holds a value; `GH_REPO: ""` is no source. */
-function declaredGhRepo(scope: unknown): string {
-	if (typeof scope !== "object" || scope === null) return "";
-	const value = (scope as Record<string, unknown>).GH_REPO;
-	return value === undefined || value === null ? "" : String(value).trim();
-}
-
 /**
  * Resolve a command word to `gh`, to another command, or to "cannot read it"
  * -- an undeclared alias, or an alias whose value is a runtime expression.
@@ -254,14 +240,15 @@ function resolveCommand(
 	word: string,
 	env: Record<string, string>,
 ): "gh" | "other" | "unresolved" {
-	if (commandName(word) === "gh") return "gh";
+	if (commandBasename(word) === "gh") return "gh";
 	const variable = VARIABLE_WORD.exec(word);
-	if (!variable) return "other";
+	if (!variable)
+		return commandBasename(word).includes("$") ? "unresolved" : "other";
 	const value = env[variable[1]]?.trim();
 	if (value === undefined || value === "") return "unresolved";
 	const [first] = value.split(/\s+/);
 	if (first === undefined || first.includes("${{")) return "unresolved";
-	return commandName(first) === "gh" ? "gh" : "other";
+	return commandBasename(first) === "gh" ? "gh" : "other";
 }
 
 function isCheckoutStep(step: Step): boolean {
@@ -286,27 +273,44 @@ function needsRepository(words: string[]): boolean {
 	const subcommand = words.slice(1).find((word) => !word.startsWith("-"));
 	if (subcommand === undefined || subcommand === "auth") return false;
 	if (subcommand === "api") {
-		return !API_REPO_PATH.test(words.slice(1).join(" "));
+		const endpoint = words[2] ?? "";
+		return !(
+			endpoint === "graphql" ||
+			/^\/?repos\/(?:\$GITHUB_REPOSITORY|\$\{\{\s*github\.repository\s*\}\}|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)(?:\/|$)/.test(
+				endpoint,
+			)
+		);
 	}
 	return true;
 }
 
 /** Is this a repository operand a live `gh` accepts? `""` is not. */
-function isRepoValue(value: string | undefined): boolean {
-	return value !== undefined && value !== "" && !value.startsWith("-");
+function isRepoValue(
+	value: string | undefined,
+	env: Record<string, string>,
+): boolean {
+	const expanded = (value ?? "")
+		.replace(
+			/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g,
+			(_, braced, bare) => env[braced ?? bare] ?? "",
+		)
+		.trim();
+	return (
+		expanded !== "" && expanded !== "${{ '' }}" && !expanded.startsWith("-")
+	);
 }
 
 /** `-R owner/repo`, `-Rowner/repo`, `--repo owner/repo`, `--repo=owner/repo`. */
-function hasRepoOperand(words: string[]): boolean {
+function hasRepoOperand(words: string[], env: Record<string, string>): boolean {
 	for (let index = 1; index < words.length; index++) {
 		const word = words[index];
 		if (word === "-R" || word === "--repo")
-			return isRepoValue(words[index + 1]);
+			return isRepoValue(words[index + 1], env);
 		if (word.startsWith("--repo=")) {
-			return isRepoValue(word.slice("--repo=".length));
+			return isRepoValue(word.slice("--repo=".length), env);
 		}
 		if (word.startsWith("-R") && word.length > 2) {
-			return isRepoValue(word.slice(2));
+			return isRepoValue(word.slice(2), env);
 		}
 	}
 	return false;
@@ -333,10 +337,12 @@ function classifySegment(
 	env: Record<string, string>,
 	census: Census,
 ): void {
-	const { env: assigned, rest } = stripEnvAssignments(rawWords);
+	const { env: assigned, rest } = stripEnvAssignments(
+		stripCommandGroupAndRunnerPrefixes(rawWords),
+	);
 	if (rest.length === 0) return;
 	const scope = { ...env, ...assigned };
-	const command = commandName(rest[0]);
+	const command = commandBasename(rest[0]);
 	if (SHELL_COMMANDS.has(command)) {
 		const flag = rest.findIndex(
 			(word, index) => index > 0 && /^-[A-Za-z]*c[A-Za-z]*$/.test(word),
@@ -367,10 +373,10 @@ function classifySegment(
 		return;
 	}
 	if (resolution === "gh") {
-		census.invocations.push({ step, words: rest });
+		census.invocations.push({ step, words: rest, env: scope });
 		return;
 	}
-	if (rest.slice(1).some((word) => commandName(word) === "gh")) {
+	if (rest.slice(1).some((word) => commandBasename(word) === "gh")) {
 		census.unclassified.push({
 			step,
 			detail: `\`gh\` is an argument of \`${rest[0]}\`, not the command`,
@@ -394,12 +400,6 @@ function censusWorkflow(workflow: Workflow): {
 		for (let index = 0; index < steps.length; index++) {
 			const step = steps[index];
 			const env = { ...workflowEnv, ...jobEnv, ...declaredEnv(step.env) };
-			// `GH_REPO` in step scope counts (the placement cache-prune.yml
-			// already uses); a checkout counts only from a step BEFORE this one.
-			const sourced =
-				[workflow.env, job.env, step.env].some(
-					(scope) => declaredGhRepo(scope) !== "",
-				) || checkoutBefore;
 			if (typeof step.run === "string") {
 				const calls = census.invocations.length;
 				const problems = census.unclassified.length;
@@ -407,7 +407,12 @@ function censusWorkflow(workflow: Workflow): {
 				for (const invocation of census.invocations.slice(calls)) {
 					named = true;
 					if (!needsRepository(invocation.words)) continue;
-					if (sourced || hasRepoOperand(invocation.words)) continue;
+					if (
+						checkoutBefore ||
+						isRepoValue(invocation.env.GH_REPO, invocation.env) ||
+						hasRepoOperand(invocation.words, invocation.env)
+					)
+						continue;
 					findings.push({
 						job: key,
 						kind: "missing-source",
@@ -756,6 +761,107 @@ describe("workflow gh calls resolve a repository (#4382)", () => {
 		// They are still in the population: the census read them, it just found
 		// nothing to require.
 		expect(probe({ run: "gh auth status" }).population).toEqual(["probe"]);
+	});
+
+	it("judges shared command positions instead of rejecting valid shell", () => {
+		// R1: command position belongs to guard-bash, including keywords.
+		for (const prefix of [
+			"if",
+			"do",
+			"{",
+			"!",
+			"exec",
+			"env GH_TOKEN=x",
+			"command",
+			"sudo",
+			"then",
+			"time",
+		]) {
+			expect(
+				probe({ run: `${prefix} ${BARE_GH_WRITE} -R owner/repo` }).findings,
+				prefix,
+			).toEqual([]);
+			expect(
+				probe({ run: `${prefix} ${BARE_GH_WRITE}` }).findings.map(
+					(f) => f.kind,
+				),
+				prefix,
+			).toEqual(["missing-source"]);
+		}
+		for (const run of [
+			`for x in 1; do ${BARE_GH_WRITE} -R o/r; done`,
+			`if ${BARE_GH_WRITE} -R o/r; then echo ok; fi`,
+			`(${BARE_GH_WRITE} -R o/r)`,
+			...["&&", "||", ";", "|"].map(
+				(op) => `echo x ${op} ${BARE_GH_WRITE} -R o/r`,
+			),
+		]) {
+			expect(probe({ run }).findings, run).toEqual([]);
+		}
+	});
+
+	it("uses effective environment for each invocation", () => {
+		// R2/R5: inline sources work; nearer empty bindings clear outer ones.
+		for (const run of [
+			`GH_REPO=owner/repo ${BARE_GH_WRITE}`,
+			`bash -c 'GH_REPO=owner/repo ${BARE_GH_WRITE}'`,
+			`env GH_REPO=owner/repo ${BARE_GH_WRITE}`,
+		]) {
+			expect(probe({ run }).findings, run).toEqual([]);
+		}
+	});
+
+	it("honors nearer empty repository bindings", () => {
+		// R5: an empty override removes the farther source.
+		for (const options of [
+			{ jobEnv: { GH_REPO: "" } },
+			{ stepEnv: { GH_REPO: "" } },
+			{ stepEnv: { GH_REPO: "${{ '' }}" } },
+			{ run: `GH_REPO="" ${BARE_GH_WRITE}` },
+		]) {
+			expect(
+				probe({
+					run: BARE_GH_WRITE,
+					workflowEnv: { GH_REPO: "owner/repo" },
+					...options,
+				}).findings.map((f) => f.kind),
+			).toEqual(["missing-source"]);
+		}
+	});
+
+	it("requires bound repository operands", () => {
+		// R4: an unset shell operand is empty at the live gh boundary.
+		const run = `${BARE_GH_WRITE} --repo "$PATCH_REPO"`;
+		expect(probe({ run }).findings.map((f) => f.kind)).toEqual([
+			"missing-source",
+		]);
+		expect(
+			probe({ run, stepEnv: { PATCH_REPO: "owner/repo" } }).findings,
+		).toEqual([]);
+	});
+
+	it("judges API endpoint shapes and placeholder requirements", () => {
+		// R3: an endpoint root and GraphQL do not need cwd resolution.
+		for (const run of [
+			"gh api graphql -f query='{viewer{login}}'",
+			"gh api repos/owner/repo --method PATCH -f x=y",
+		]) {
+			expect(probe({ run }).findings, run).toEqual([]);
+		}
+		expect(
+			probe({ run: "gh api repos/{owner}/{repo}/issues/1" }).findings.map(
+				(f) => f.kind,
+			),
+		).toEqual(["missing-source"]);
+	});
+
+	it("reports unsupported default command expansion", () => {
+		// R6: a runtime fallback must not silently leave the population.
+		expect(
+			probe({ run: "${GH_BIN:-gh} pr edit 4550 --add-label x" }).findings.map(
+				(f) => f.kind,
+			),
+		).toEqual(["unclassified"]);
 	});
 
 	it("keeps a job with no gh call out of the population", () => {

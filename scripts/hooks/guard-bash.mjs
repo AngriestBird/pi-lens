@@ -2621,7 +2621,7 @@ const COPROC_NAMED_BODY_WORDS = new Set(["{", "if", "while", "until"]);
  * @param {string[]} words
  * @returns {string[]}
  */
-function stripCommandGroupAndRunnerPrefixes(words) {
+export function stripCommandGroupAndRunnerPrefixes(words) {
 	let i = 0;
 	while (i < words.length) {
 		if (words[i] === "coproc") {
@@ -2659,7 +2659,7 @@ function stripCommandGroupAndRunnerPrefixes(words) {
  * @param {string} cmd
  * @returns {string}
  */
-function commandBasename(cmd) {
+export function commandBasename(cmd) {
 	const idx = Math.max(cmd.lastIndexOf("/"), cmd.lastIndexOf("\\"));
 	return idx === -1 ? cmd : cmd.slice(idx + 1);
 }
