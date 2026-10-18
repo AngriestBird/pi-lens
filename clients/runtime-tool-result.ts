@@ -71,6 +71,7 @@ import { resolveLanguageRootForFile } from "./language-profile.js";
 import { logLatency } from "./latency-logger.js";
 import {
 	classifyMutatingTool,
+	isBashDerivedReplay,
 	readToolResultPathField,
 	PI_LENS_SYNTHETIC_MUTATION_FIELD,
 	type MutatingToolClassification,
@@ -1885,10 +1886,9 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	}
 	// The parent bash call is already recorded. Its per-file diagnostic replays
 	// must not push that real call out of the BLIND WRITE knowledge window.
-	const behaviorWarnings =
-		event[PI_LENS_SYNTHETIC_MUTATION_FIELD] === "bash"
-			? []
-			: agentBehaviorRecord(event.toolName, filePath);
+	const behaviorWarnings = isBashDerivedReplay(event)
+		? []
+		: agentBehaviorRecord(event.toolName, filePath);
 	const syntheticWriteContent: Array<{ type: string; text?: string }> = [];
 	// #1590: one shared authoritative-content budget for every path this bash
 	// command wrote. It is handed DOWN to each synthetic call so the single
