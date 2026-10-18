@@ -3433,10 +3433,11 @@ describe("archived post-image corpus (#3945)", () => {
 
 // #3906 AC2: the #3799 pull-coverage decision in clients/dispatch/dispatcher.ts
 // must be visible to the seam record rule. The corpus is the exact published
-// #3799 body + diff and the three post-image sources the diff names, pinned by
-// each source's git blob oid. CI's shallow checkout does not carry the 2026
-// #3799 objects, so the explicit `headFiles` seam supplies the immutable
-// post-image and the source hash proves the fixture is that exact object.
+// #3799 body + diff and every post-image the rows read, pinned by each source's
+// git blob oid: the three production sources and the five changed test files
+// row 1 classifies. CI's shallow checkout does not carry the 2026 #3799
+// objects, so the explicit `headFiles` seam supplies the immutable post-image
+// and the source hash proves the fixture is that exact object.
 describe("dispatcher seam row (#3906 AC2)", () => {
 	const corpusDir = join(repositoryRoot, "tests", "fixtures", "ci-pr-bodies");
 	const provenance = JSON.parse(
@@ -3484,24 +3485,27 @@ describe("dispatcher seam row (#3906 AC2)", () => {
 		);
 		const result = lintPrBody(honest, { diff, headFiles });
 		expect(result.errors.join(" ")).not.toContain("decision branch");
-		// #4585 row 1: the archived body quotes a red for the behaviour, not for
-		// each new test title, so the diff-keyed row still asks per title. Its
-		// Observability answer is accepted and no other rule fires. How many
-		// titles resolve depends on the archived post-images a checkout holds
-		// (a shallow CI clone keeps fewer), so the row is pinned, not the count.
-		const rowOne = result.errors.filter((error) => error.includes("row 1"));
-		expect(rowOne.length).toBeGreaterThan(0);
-		// A shallow clone can also carry the bounded post-image notice for the
-		// archived files it cannot read. The archived body predates a per-file
-		// mutation row, so row 2 fires here as a true positive; this case isolates
-		// the Observability rule and the row-2 binding is pinned by
-		// check-pr-body-compliance.test.ts.
+		// #4585 row 1 is file-level (issuecomment-6252599595): a changed test file
+		// owes one fenced red-first transcript naming it. The archived body quotes
+		// a red naming dispatcher-flow, runner-status-semantics and the smoke test,
+		// and none naming integration.test.ts or analyze-cli.test.ts, so exactly
+		// those two owe. Every post-image the rows read is vendored and pinned by
+		// blob oid, so the verdict does not depend on which git objects a checkout
+		// holds: a shallow CI clone decides it exactly as a full clone does.
+		const rowOneFiles = result.errors
+			.filter((error) => error.includes("row 1"))
+			.map((error) => /^PR body compliance row 1: (\S+)/.exec(error)?.[1]);
+		expect(rowOneFiles).toEqual([
+			"tests/clients/dispatch/integration.test.ts",
+			"tests/mcp/analyze-cli.test.ts",
+		]);
+		// The archived body predates a per-file mutation row, so row 2 fires here
+		// as a true positive; this case isolates the Observability rule and the
+		// row-2 binding is pinned by check-pr-body-compliance.test.ts. No other
+		// rule fires, and no file is unclassifiable.
 		expect(
 			result.errors.filter(
-				(error) =>
-					!error.includes("row 1") &&
-					!error.includes("row 2") &&
-					!error.startsWith("PR body compliance: cannot classify"),
+				(error) => !error.includes("row 1") && !error.includes("row 2"),
 			),
 		).toEqual([]);
 	});

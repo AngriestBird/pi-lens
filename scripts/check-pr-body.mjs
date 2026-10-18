@@ -2491,8 +2491,11 @@ function namedChangedFiles(text, changedPaths) {
 // every unlisted spelling (`unable to run`, `n/a`, `did not execute`) passed
 // (#4605 V4). The default is inverted: a `mutation:` continuation that carries
 // no result word refuses the fence, and the fence must hold a result line.
+// The three spellings are listed whole: an optional `(?:ED|…)?` suffix splits
+// the tail off as a bare three-letter fragment, which the advisory
+// spellchecker reads as a misspelling.
 const MUTATION_RESULT =
-	/\bRED\b|\bFAIL(?:ED|URE)?\b|\b[1-9]\d*\s+failed\b|[×✗✕]\s+\S/;
+	/\bRED\b|\b(?:FAIL|FAILED|FAILURE)\b|\b[1-9]\d*\s+failed\b|[×✗✕]\s+\S/;
 
 // The tool prints `mutation: <file> (<find> -> <replace>)`; a hand-written
 // header may name the file alone. Any other tail is a claim about the run, so
