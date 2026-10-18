@@ -575,7 +575,7 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 		silent: 2,
 		identities: "c27b672b48b38606",
 		reason: PRE_RULE,
-	}, // :104, :141, :187, :202
+	}, // :104, :141
 	"clients/file-time.ts": {
 		silent: 2,
 		identities: "cef7af043e4732be",
@@ -795,7 +795,7 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 		silent: 42,
 		identities: "ed45c04b6c34030f",
 		reason: SHARP_DID_SAVE,
-	}, // :235, :352, :381, :1157, :1757, :2014, :2312, :2346, :2582, :2735, :2839, :3555, :3615, :3649, :4082, :4614, :4646, :4896, :5025, :5088, :5099, :5145, :5234, :5259, :5284, :5569, :5632, :5983, :6007, :6172, :6249, :6268, :7781, :8348, :8580, :8648, :8770, :8864, :8924, :9142, :9269, :9642, :9693
+	}, // :235, :352, :381, :1157, :1757, :2014, :2312, :2346, :2582, :2735, :2839, :3555, :3615, :3649, :4082, :4646, :4896, :5025, :5088, :5099, :5145, :5234, :5259, :5284, :5569, :5632, :5983, :6007, :6172, :6249, :6268, :7781, :8348, :8580, :8648, :8770, :8864, :8924, :9142, :9269, :9642, :9693
 	"clients/lsp/jvm-runtime.ts": {
 		silent: 1,
 		identities: "53f0ed4e5a760b9e",
@@ -865,7 +865,7 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 		silent: 1,
 		identities: "7a22e287f518528b",
 		reason: PRE_RULE,
-	}, // :280, :320
+	}, // :320
 	"clients/memory-sampler.ts": {
 		silent: 2,
 		identities: "f46e7245193d13fa",
@@ -1115,7 +1115,7 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 		silent: 12,
 		identities: "6048a226db485dea",
 		reason: SHARP_TOOL_RESULT,
-	}, // :261, :275, :405, :837, :845, :876, :899, :940, :1135, :1587, :2089, :2322, :2756, :3334, :3558
+	}, // :266, :280, :410, :860, :955, :1150, :1602, :2152, :2385, :2819, :3397, :3621
 	"clients/runtime-turn.ts": {
 		silent: 20,
 		identities: "4baf397dfa7d293d",
