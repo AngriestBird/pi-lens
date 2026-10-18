@@ -266,6 +266,14 @@ const API_OPTION_VALUES = new Set([
 	"-t",
 	"--template",
 ]);
+/**
+ * A heredoc operator as the segment's LAST token. `scannableRegions` subtracts
+ * a heredoc body, so a real redirection ends its command line; a `<<` inside
+ * argument text (`printf '%s\n' 'bash<<EOF'`) is followed by more of the
+ * word and is not one. A stated limit: an operator line that continues with
+ * another redirection (`bash <<EOF 2>&1`) is not recognised.
+ */
+const HEREDOC_AT_END = /<<-?(?:'[^']*'|"[^"]*"|[^\s'"|;&]+)$/;
 /** One variable reference as a whole word: `$GH_BIN`, `${GH_BIN}`. */
 const VARIABLE_WORD = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/;
 /**
@@ -296,11 +304,13 @@ type GhInvocation = {
 };
 
 /**
- * The one script fact the census carries forward: an admitted
- * `export GH_REPO=<provable>` is in force at this position. No other binding,
- * value, or scope is tracked (STATE_TABLE.md, "Deleted machinery").
+ * The two script facts the census carries forward, both fail-closed: an
+ * admitted `export GH_REPO=<provable>` is in force at this position, and every
+ * name the script REBINDS (standalone assignment, `export`, `unset`,
+ * `export -n`) no longer answers for its declared value. No value, and no
+ * scope, is tracked (STATE_TABLE.md, "Deleted machinery").
  */
-type ScriptState = { exportedRepo: boolean };
+type ScriptState = { exportedRepo: boolean; rebound: Set<string> };
 
 type Census = {
 	invocations: GhInvocation[];
@@ -337,13 +347,14 @@ function declaredEnv(...scopes: unknown[]): Record<string, string> {
 function resolveCommand(
 	word: string,
 	env: Record<string, string>,
+	rebound: Set<string> = new Set<string>(),
 ): { command: string; unresolved: boolean } {
 	const variable = VARIABLE_WORD.exec(word);
 	if (!variable) {
 		const command = commandBasename(word);
 		return { command, unresolved: command.includes("$") };
 	}
-	const value = env[variable[1]]?.trim();
+	const value = rebound.has(variable[1]) ? undefined : env[variable[1]]?.trim();
 	if (value === undefined || value === "") {
 		return { command: word, unresolved: true };
 	}
@@ -366,12 +377,19 @@ function resolveCommand(
  */
 function namesGhCall(text: string, env: Record<string, string>): boolean {
 	if (GH_COMMAND_WORD.test(text)) return true;
-	for (const word of splitWords(text)) {
-		// The lexer hands back a quoted argument as one opaque word, so a script
-		// argument's own command word is the first token of that word.
-		for (const candidate of [word, word.split(/\s+/)[0] ?? ""]) {
-			if (candidate !== "" && resolveCommand(candidate, env).command === "gh") {
-				return true;
+	// A payload keeps its own separators (`true;$GH_BIN pr edit …`), so ask
+	// each simple command in it, not only its first word.
+	for (const { text: segment } of splitSegmentsWithSeparators(text)) {
+		for (const word of splitWords(segment)) {
+			// The lexer hands back a quoted argument as one opaque word, so a
+			// script argument's own command word is the first token of that word.
+			for (const candidate of [word, word.split(/\s+/)[0] ?? ""]) {
+				if (
+					candidate !== "" &&
+					resolveCommand(candidate, env).command === "gh"
+				) {
+					return true;
+				}
 			}
 		}
 	}
@@ -402,7 +420,10 @@ function namesGhCommand(step: Step, env: Record<string, string>): boolean {
 function variableValue(
 	name: string,
 	env: Record<string, string>,
+	rebound: Set<string> = new Set<string>(),
 ): string | undefined {
+	// A name the script rebinds no longer holds its declared value.
+	if (rebound.has(name)) return undefined;
 	const declared = env[name];
 	if (declared !== undefined) return declared;
 	return RUNNER_PROVIDED_VARIABLE.test(name) ? "runner-provided" : undefined;
@@ -469,12 +490,16 @@ function needsRepository(words: string[]): boolean {
  * reference (`REPO: $GITHUB_REPOSITORY`) resolves the way the shell chain
  * would. Any other `$` form is left standing for its caller to refuse.
  */
-function expandReferences(value: string, env: Record<string, string>): string {
+function expandReferences(
+	value: string,
+	env: Record<string, string>,
+	rebound: Set<string> = new Set<string>(),
+): string {
 	let expanded = value;
 	for (let pass = 0; pass < 8; pass++) {
 		const next = expanded.replace(
 			/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g,
-			(_, braced, bare) => variableValue(braced ?? bare, env) ?? "",
+			(_, braced, bare) => variableValue(braced ?? bare, env, rebound) ?? "",
 		);
 		if (next === expanded) return expanded;
 		expanded = next;
@@ -502,11 +527,12 @@ function isRepoValue(
 	value: string | undefined,
 	env: Record<string, string>,
 	literal: Set<string>,
+	rebound: Set<string> = new Set<string>(),
 ): boolean {
 	const text = (value ?? "").trim();
 	// A single-quoted `$` value is literal text: never a slug, never a reference.
 	if (literal.has(text)) return false;
-	const expanded = expandReferences(text, env).trim();
+	const expanded = expandReferences(text, env, rebound).trim();
 	// Two expansion forms are modelled above; any other `$` or backtick left in
 	// the operand (`${VAR:-}`, `$1`, `${ARR[0]}`) is text the census cannot read,
 	// so it is no source. A `${{ … }}` workflow expression is a declared value.
@@ -525,16 +551,17 @@ function hasRepoOperand(
 	words: string[],
 	env: Record<string, string>,
 	literal: Set<string>,
+	rebound: Set<string> = new Set<string>(),
 ): boolean {
 	for (let index = 1; index < words.length; index++) {
 		const word = words[index];
 		if (word === "-R" || word === "--repo")
-			return isRepoValue(words[index + 1], env, literal);
+			return isRepoValue(words[index + 1], env, literal, rebound);
 		if (word.startsWith("--repo=")) {
-			return isRepoValue(word.slice("--repo=".length), env, literal);
+			return isRepoValue(word.slice("--repo=".length), env, literal, rebound);
 		}
 		if (word.startsWith("-R") && word.length > 2) {
-			return isRepoValue(word.slice(2), env, literal);
+			return isRepoValue(word.slice(2), env, literal, rebound);
 		}
 	}
 	return false;
@@ -552,19 +579,14 @@ function heredocShell(
 	words: string[],
 	env: Record<string, string>,
 ): string | undefined {
-	for (let index = 0; index < words.length; index++) {
-		const heredoc = words[index].indexOf("<<");
-		if (heredoc < 0) continue;
-		const attached = words[index].slice(0, heredoc);
-		const candidates = attached
-			? [attached, ...words.slice(0, index)]
-			: words.slice(0, index);
-		for (const candidate of candidates) {
-			if (SHELL_COMMANDS.has(resolveCommand(candidate, env).command)) {
-				return candidate;
-			}
+	const command = words[0]?.includes("<<")
+		? words[0].slice(0, words[0].indexOf("<<"))
+		: "";
+	const candidates = command ? [command] : words;
+	for (const candidate of candidates) {
+		if (SHELL_COMMANDS.has(resolveCommand(candidate, env).command)) {
+			return candidate;
 		}
-		return undefined;
 	}
 	return undefined;
 }
@@ -589,7 +611,10 @@ function scanScript(
 	}
 	const witness = namesGhCall(script, env);
 	const visit = (region: Region): void => {
-		const state: ScriptState = { exportedRepo: false };
+		const state: ScriptState = {
+			exportedRepo: false,
+			rebound: new Set<string>(),
+		};
 		const subshells: boolean[] = [];
 		let child = 0;
 		for (const { text, sep } of splitSegmentsWithSeparators(region.text)) {
@@ -649,7 +674,13 @@ function classifySegment(
 	const { env: assigned, rest } = stripEnvAssignments(
 		stripCommandGroupAndRunnerPrefixes(rawWords),
 	);
-	if (rest.length === 0) return;
+	if (rest.length === 0) {
+		// A standalone assignment rebinds the name for every later expansion of
+		// this script. Its VALUE is not followed, so the declared value must not
+		// answer either (Greptile 10:51: `GH_BIN=gh` over `GH_BIN: echo`).
+		for (const name of Object.keys(assigned)) state.rebound.add(name);
+		return;
+	}
 	if (rest[0] === "export") {
 		// The one script binding the census admits: `export GH_REPO=<provable>`.
 		// `export -n NAME` removes that attribute (and `export -n NAME=value`
@@ -657,6 +688,8 @@ function classifySegment(
 		// value this census does not follow: in all three `stripEnvAssignments`
 		// finds no `GH_REPO` value, so the binding is no source.
 		const words = rest.slice(1);
+		for (const word of words)
+			if (!word.startsWith("-")) state.rebound.add(word.split("=")[0]);
 		if (
 			!words.some((word) => word === "GH_REPO" || word.startsWith("GH_REPO="))
 		)
@@ -665,10 +698,13 @@ function classifySegment(
 			stripEnvAssignments(words).env.GH_REPO,
 			declared,
 			literal,
+			state.rebound,
 		);
 		return;
 	}
 	if (rest[0] === "unset") {
+		for (const name of rest.slice(1))
+			if (!name.startsWith("-")) state.rebound.add(name);
 		if (rest.slice(1).includes("GH_REPO")) state.exportedRepo = false;
 		return;
 	}
@@ -677,7 +713,7 @@ function classifySegment(
 	const scope = { ...declared, ...assigned };
 	// One resolution for every arm, so an alias cannot be a shell in one spelling
 	// and a stranger in another (AGENTS.md shape 69).
-	const resolved = resolveCommand(rest[0], scope);
+	const resolved = resolveCommand(rest[0], scope, state.rebound);
 	if (resolved.unresolved) {
 		// A lone unresolvable word is not a call the census can judge: every
 		// repository-needing `gh` verb carries at least its subject, and the
@@ -697,7 +733,9 @@ function classifySegment(
 	// a command that hands that body to a shell hides an unreadable script
 	// (`bash <<EOF`, `bash<<EOF`, `timeout 30 bash <<EOF`). A heredoc handed to
 	// anything else is data (`cat > f <<EOF`), which is not a script at all.
-	const handedToShell = heredocShell(rest, scope);
+	const handedToShell = HEREDOC_AT_END.test(text.trim())
+		? heredocShell(rest, scope)
+		: undefined;
 	if (handedToShell !== undefined && regionNamesGhCall) {
 		census.unclassified.push({
 			step,
@@ -760,8 +798,8 @@ function classifySegment(
 			// so an operand is resolved against the declared env alone.
 			hasSource:
 				state.exportedRepo ||
-				isRepoValue(scope.GH_REPO, declared, literal) ||
-				hasRepoOperand(rest, declared, literal),
+				isRepoValue(scope.GH_REPO, declared, literal, state.rebound) ||
+				hasRepoOperand(rest, declared, literal, state.rebound),
 		});
 		return;
 	}
@@ -1803,6 +1841,83 @@ describe("the census's admitted source list (#4382 r6)", () => {
 				probe({ run }).findings.map((found) => found.kind),
 				run,
 			).toEqual(["missing-source"]);
+		}
+	});
+
+	it("drops a declared value the script rebinds", () => {
+		// Greptile 10:51 (`Overwritten commands disappear`): a standalone
+		// assignment replaces the declared value for every later expansion in
+		// the same script, so the declared value no longer answers for it.
+		// The census does not follow the new value, so both shapes report.
+		expect(
+			probe({
+				run: `GH_BIN=gh\n$GH_BIN pr edit 4550 --add-label x`,
+				stepEnv: { GH_BIN: "echo" },
+			}).findings.map((found) => found.kind),
+		).toEqual(["unclassified"]);
+		expect(
+			probe({
+				run: `PATCH_REPO=not-a-slug\n${BARE_GH_WRITE} --repo "$PATCH_REPO"`,
+				stepEnv: { PATCH_REPO: "owner/repo" },
+			}).findings.map((found) => found.kind),
+		).toEqual(["missing-source"]);
+		// The other two writers rebind too: an `export` sets a new value, and
+		// `unset` removes the declared one.
+		expect(
+			probe({
+				run: `export GH_BIN=gh\n$GH_BIN pr edit 4550 --add-label x`,
+				stepEnv: { GH_BIN: "echo" },
+			}).findings.map((found) => found.kind),
+		).toEqual(["unclassified"]);
+		expect(
+			probe({
+				run: `unset PATCH_REPO\n${BARE_GH_WRITE} --repo "$PATCH_REPO"`,
+				stepEnv: { PATCH_REPO: "owner/repo" },
+			}).findings.map((found) => found.kind),
+		).toEqual(["missing-source"]);
+		// Boundary: a same-command prefix is scoped to its own command and
+		// changes no expansion, so the declared value still answers.
+		expect(
+			probe({
+				run: `PATCH_REPO=not-a-slug ${BARE_GH_WRITE} --repo "$PATCH_REPO"`,
+				stepEnv: { PATCH_REPO: "owner/repo" },
+			}).findings,
+		).toEqual([]);
+	});
+
+	it("reads a quoted heredoc operator as argument text", () => {
+		// Greptile 10:51 (`Printed examples fail CI`): `printf` prints a
+		// string that happens to contain `<<`; no body was subtracted, so no
+		// heredoc was handed to a shell and the call is judged normally.
+		expect(
+			probe({ run: `printf '%s\\n' 'bash<<EOF'; gh api user` }).findings,
+		).toEqual([]);
+		expect(probe({ run: `echo 'bash <<EOF'\ngh api user` }).findings).toEqual(
+			[],
+		);
+		// Boundary: the same spelling as a real redirection is still reported.
+		expect(
+			probe({ run: `bash <<'EOF'\ngh api user\nEOF` }).findings.map(
+				(found) => found.kind,
+			),
+		).toEqual(["unclassified"]);
+	});
+
+	it("reads the command word on each side of a payload separator", () => {
+		// Greptile 10:51 (`Nested calls disappear`): a quoted payload keeps its
+		// own `;`/`|` separators, so the witness asks every simple command in
+		// it, not only its first word.
+		for (const payload of [
+			"true;$GH_BIN pr edit 4550 --add-label x",
+			"true && $GH_BIN pr edit 4550 --add-label x",
+		]) {
+			expect(
+				probe({
+					run: `bash -c '${payload}'`,
+					stepEnv: { GH_BIN: "gh" },
+				}).findings.map((found) => found.kind),
+				payload,
+			).toEqual(["unclassified"]);
 		}
 	});
 
