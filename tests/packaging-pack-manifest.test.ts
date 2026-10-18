@@ -307,7 +307,15 @@ describe("published manifest carries no devDependencies", () => {
 	function packTarballOnce(): PackedTarball {
 		if (packed !== undefined) return packed;
 		const liveBefore = liveCheckoutState();
-		const packRoot = copyPackSource(path.join(tmp, "pack-src"));
+		const packRoot = path.join(tmp, "pack-src");
+		// #4561 review r1 LOW: `copyPackSource` is not idempotent, and the memo is
+		// set only after a successful pack, so a FAILED pack left `pack-src`
+		// half-built and every later case reported `EEXIST: symlink node_modules`
+		// instead of the pack's own error. Clearing it first makes a retry report
+		// the real failure. `rmSync` removes the copy's `node_modules` SYMLINK
+		// entry and never follows it into the live checkout's install.
+		fs.rmSync(packRoot, { recursive: true, force: true });
+		copyPackSource(packRoot);
 		const manifestBefore = fs.readFileSync(
 			path.join(packRoot, "package.json"),
 			"utf8",

@@ -1,0 +1,77 @@
+{
+	"about": "Permanent plants for tests/support/shuffle-opt-out-scan.ts (#4611 review r1). Each entry is a source the gate reads; `accepted` must be admitted and produce no finding, every other entry is a spelling of vitest's shuffle suite option that the gate cannot attribute and must red. Data, not a test file: the census scans the tracked tests tree for the option, so a plant written as a .ts file here would red the gate that reads it (and tests/fixtures/** is not collected by vitest either). Keep `expectedFindings` exact: lowering a gate branch without deleting a plant reds the mismatch.",
+	"plants": [
+		{
+			"name": "accepted",
+			"why": "the one admitted spelling: a literal options object holding only the bare shuffle key, set to false, passed directly to a live describe",
+			"measuredAs": "pass",
+			"expectedFindings": 0,
+			"expectedOptOuts": 1,
+			"source": "import { describe, it } from \"vitest\";\n\ndescribe(\"plant accepted\", { shuffle: false }, () => {\n\tit(\"a\", () => {});\n});\n"
+		},
+		{
+			"name": "quoted-key",
+			"why": "a quoted key is honoured by vitest and invisible to a scanner that blanks string contents (#4611 review r1 M2)",
+			"measuredAs": "red",
+			"expectedFindings": 1,
+			"expectedOptOuts": 0,
+			"source": "import { describe } from \"vitest\";\n\ndescribe(\"plant quoted\", { \"shuffle\": false }, () => {});\n"
+		},
+		{
+			"name": "computed-key",
+			"why": "a computed key is honoured by vitest, and reads as no key at all to a text-only scanner (#4611 review r1 M2)",
+			"measuredAs": "red",
+			"expectedFindings": 1,
+			"expectedOptOuts": 0,
+			"source": "import { describe } from \"vitest\";\n\ndescribe(\"plant computed\", { [\"shuffle\"]: false }, () => {});\n"
+		},
+		{
+			"name": "computed-key-from-variable",
+			"why": "a computed key whose name is a value: no property-position text spells the option, so only the structural read can see it",
+			"measuredAs": "red",
+			"expectedFindings": 1,
+			"expectedOptOuts": 0,
+			"source": "import { describe } from \"vitest\";\n\nconst OPTION = \"shuffle\";\n\ndescribe(\"plant variable key\", { [OPTION]: false }, () => {});\n"
+		},
+		{
+			"name": "bound-in-support-module",
+			"why": "an options object bound in a non-test module was never read at all: scanning .test.ts files only left it green (#4611 review r1 M2)",
+			"measuredAs": "red",
+			"expectedFindings": 1,
+			"expectedOptOuts": 0,
+			"source": "/** A shared suite-options object, as a support module might export one. */\nexport const SUITE_OPTIONS = { shuffle: false };\n"
+		},
+		{
+			"name": "options-imported",
+			"why": "the use site names the options through an identifier, so a per-file text scan of the describe call sees nothing (#4611 review r1 M2)",
+			"measuredAs": "red",
+			"expectedFindings": 1,
+			"expectedOptOuts": 0,
+			"source": "import { describe } from \"vitest\";\nimport { SUITE_OPTIONS } from \"./suite-options.js\";\n\ndescribe(\"plant imported\", SUITE_OPTIONS, () => {});\n"
+		},
+		{
+			"name": "spread-options",
+			"why": "a describe that spreads another object can carry the opt-out from anywhere; neither the spread site nor its source is attributable",
+			"measuredAs": "red",
+			"expectedFindings": 1,
+			"expectedOptOuts": 0,
+			"source": "import { describe } from \"vitest\";\n\nconst BASE = {};\n\ndescribe(\"plant spread\", { ...BASE }, () => {});\n"
+		},
+		{
+			"name": "other-options-beside",
+			"why": "the gate admits one literal object holding the shuffle key alone; a second option means a reader must reason about which properties vitest honours",
+			"measuredAs": "red",
+			"expectedFindings": 1,
+			"expectedOptOuts": 0,
+			"source": "import { describe } from \"vitest\";\n\ndescribe(\"plant extra options\", { timeout: 5000, shuffle: false }, () => {});\n"
+		},
+		{
+			"name": "wrapped-in-skip",
+			"why": "a registered describe inside a skipped suite keeps its registry row valid while the run includes none of it (#4611 review r1 LOW-4)",
+			"measuredAs": "red",
+			"expectedFindings": 1,
+			"expectedOptOuts": 0,
+			"source": "import { describe, it } from \"vitest\";\n\ndescribe.skip(\"wrapper\", () => {\n\tdescribe(\"plant wrapped\", { shuffle: false }, () => {\n\t\tit(\"a\", () => {});\n\t});\n});\n"
+		}
+	]
+}

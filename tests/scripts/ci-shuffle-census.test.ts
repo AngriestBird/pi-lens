@@ -35,12 +35,16 @@ import {
 	selectChangedTestFiles,
 } from "../../scripts/ci-shuffle-changed-tests.mjs";
 import { setupTestEnvironment } from "../clients/test-utils.js";
+import { assertNonEmptyScan } from "../support/sweep-kit.js";
 import {
-	assertNonEmptyScan,
-	matchingCloseIndex,
-	stripSource,
-} from "../support/sweep-kit.js";
-import { vitestCollector } from "../support/vitest-collection.js";
+	auditShuffleOptOuts,
+	censusShuffleOptOuts,
+	judgeShuffleOptOuts,
+} from "../support/shuffle-opt-out-scan.js";
+import {
+	vitestCollector,
+	vitestCollects,
+} from "../support/vitest-collection.js";
 
 const cleanups: Array<() => void> = [];
 afterAll(() => {
@@ -1240,39 +1244,6 @@ describe("run (report and arguments)", () => {
 	});
 });
 
-/**
- * The `describe` titles in one test file whose options object sets
- * `shuffle: false` (#4561 D1). Structure comes from `stripSource`-blanked text
- * so a title or option key inside a comment cannot register an opt-out that
- * never runs; titles are read from the raw source at the same offsets, which
- * stripping preserves.
- */
-function shuffleOptOutsIn(
-	source: string,
-	stripped = stripSource(source),
-): string[] {
-	const titles: string[] = [];
-	for (const match of stripped.matchAll(/describe\s*\(\s*(["'`])/g)) {
-		const quote = match[1] as string;
-		const quoteAt = (match.index ?? 0) + match[0].length - 1;
-		const closeAt = stripped.indexOf(quote, quoteAt + 1);
-		if (closeAt < 0) continue;
-		const comma = stripped.indexOf(",", closeAt + 1);
-		if (comma < 0) continue;
-		const brace = stripped.indexOf("{", comma + 1);
-		if (brace < 0) continue;
-		// Between the title, the comma and the options object: whitespace only.
-		if (stripped.slice(closeAt + 1, comma).trim() !== "") continue;
-		if (stripped.slice(comma + 1, brace).trim() !== "") continue;
-		const end = matchingCloseIndex(stripped, brace, "{", "}");
-		if (end < 0) continue;
-		const options = stripped.slice(brace + 1, end);
-		if (!/\bshuffle\s*:\s*false\b/.test(options)) continue;
-		titles.push(source.slice(quoteAt + 1, closeAt));
-	}
-	return titles;
-}
-
 describe("the ratchet file", () => {
 	const ROOT = path.resolve(import.meta.dirname, "../..");
 	const parsed = JSON.parse(
@@ -1359,9 +1330,14 @@ describe("the ratchet file", () => {
 	});
 
 	// #4561 D1: a `describe` whose subject IS the order its cases run in opts
-	// out with `{ shuffle: false }` and is registered here — never a whole file,
-	// and never an unregistered opt-out a later reader cannot see the reason for.
-	it("holds exactly the pinned number of by-design exemptions, each a real describe that opts out", () => {
+	// out with the one admitted spelling — a literal options object holding only
+	// that key, set to literal false — and is registered here: never a whole
+	// file, and never an unregistered opt-out a later reader cannot see the
+	// reason for. A row is only worth keeping while the describe it names still
+	// runs, so the audit reads liveness too (#4611 review r1 LOW-4: a registered
+	// suite wrapped in `describe.skip` kept its row valid while the run included
+	// none of it).
+	it("holds exactly the pinned number of by-design exemptions, each a live describe that opts out", () => {
 		expect(parsed.byDesign).toHaveLength(PINNED_BY_DESIGN);
 		const members = new Set(parsed.members.map((item) => item.file));
 		const seen = new Set<string>();
@@ -1374,42 +1350,119 @@ describe("the ratchet file", () => {
 			expect(members.has(row.file), `${key} also a ratchet member`).toBe(false);
 			const file = path.join(ROOT, row.file);
 			expect(fs.existsSync(file), row.file).toBe(true);
+			expect(
+				vitestCollects(row.file),
+				`${key} is collected by a vitest project`,
+			).toBe(true);
 			expect(row.reason.length, `${key} reason`).toBeGreaterThanOrEqual(40);
-			expect(shuffleOptOutsIn(fs.readFileSync(file, "utf8")), key).toContain(
+			const audit = auditShuffleOptOuts(fs.readFileSync(file, "utf8"));
+			expect(audit.admitted, `${key} opts out from a live describe`).toContain(
 				row.describe,
 			);
+			expect(
+				audit.findings.map((finding) => finding.message),
+				`${key} raises no finding`,
+			).toEqual([]);
 		}
 	});
 
 	// The other direction, and the reason this is a sweep rather than a list: an
-	// unregistered opt-out, or a `shuffle:` key outside a describe's options,
-	// reds instead of passing unclassified (AGENTS.md shape 69).
-	it("registers every describe that opts out of shuffle, and nothing else sets the option", () => {
+	// unregistered opt-out, or an option key the audit cannot attribute, reds
+	// instead of passing unclassified (AGENTS.md shape 69). #4611 review r1 M2:
+	// the first version read a fixed spelling set off blanked source, so a
+	// quoted key, a computed key, an options object bound in a non-test module,
+	// and a spread each passed; the audit now fails closed on all four.
+	it("registers every describe that opts out of shuffle, and reads every other spelling as a finding", () => {
 		const registered = new Set(
 			parsed.byDesign.map((row) => `${row.file}::${row.describe}`),
 		);
 		const files = listTrackedFiles(ROOT, ["tests"]).filter((file) =>
-			file.endsWith(".test.ts"),
+			file.endsWith(".ts"),
 		);
 		assertNonEmptyScan(
-			"test files scanned for shuffle opt-outs",
+			"tracked TypeScript files under tests/ scanned for shuffle opt-outs",
 			files.length,
-			500,
+			1000,
 		);
-		const found = new Set<string>();
-		for (const file of files) {
-			const raw = fs.readFileSync(path.join(ROOT, file), "utf8");
-			const stripped = stripSource(raw);
-			const optOuts = shuffleOptOutsIn(raw, stripped);
-			for (const title of optOuts) found.add(`${file}::${title}`);
-			const occurrences = stripped.match(/\bshuffle\s*:/g)?.length ?? 0;
+		const census = censusShuffleOptOuts(
+			files.map((file) => ({
+				file,
+				source: fs.readFileSync(path.join(ROOT, file), "utf8"),
+			})),
+		);
+		expect(judgeShuffleOptOuts(census, registered)).toEqual([]);
+	});
+
+	// #4611 review r1 M2/M3: the gate's population branch had no failing witness
+	// (deleting its count assertion left the suite green), and three spellings
+	// vitest honours passed it. Each plant is a source the same census and
+	// judgement read; a plant that stops reding means the branch that should
+	// have caught it is gone.
+	describe("planted spellings of the shuffle option (#4611 review r1)", () => {
+		const plants = (
+			JSON.parse(
+				fs.readFileSync(
+					path.join(ROOT, "tests/fixtures/shuffle-opt-out-plants.json"),
+					"utf8",
+				),
+			) as {
+				plants: Array<{
+					name: string;
+					why: string;
+					measuredAs: "pass" | "red";
+					expectedFindings: number;
+					expectedOptOuts: number;
+					source: string;
+				}>;
+			}
+		).plants;
+		const censusOf = (source: string) =>
+			censusShuffleOptOuts([{ file: "plant.ts", source }]);
+
+		it("covers the admitted spelling and every refused one", () => {
 			expect(
-				optOuts.length,
-				`${file}: ${occurrences} \`shuffle:\` option key(s) in code, ${optOuts.length} matched to a describe's \`{ shuffle: false }\``,
-			).toBe(occurrences);
+				plants
+					.filter((plant) => plant.measuredAs === "pass")
+					.map((plant) => plant.name),
+			).toEqual(["accepted"]);
+			expect(plants.filter((plant) => plant.measuredAs === "red")).toHaveLength(
+				8,
+			);
+			expect(
+				plants.every((plant) => plant.why.length >= 40),
+				"every plant says why the gate must see it",
+			).toBe(true);
+		});
+
+		for (const plant of plants) {
+			it(`reads ${plant.name} as ${plant.measuredAs}: ${plant.why}`, () => {
+				const census = censusOf(plant.source);
+				expect(census.findings, plant.name).toHaveLength(
+					plant.expectedFindings,
+				);
+				expect(census.optedOut.size, plant.name).toBe(plant.expectedOptOuts);
+				const registered = plant.measuredAs === "pass" ? census.optedOut : [];
+				expect(
+					judgeShuffleOptOuts(census, registered),
+					`${plant.name}: the judgement reds exactly what the audit found`,
+				).toHaveLength(plant.expectedFindings);
+			});
 		}
-		expect([...found].filter((key) => !registered.has(key))).toEqual([]);
-		expect([...registered].filter((key) => !found.has(key))).toEqual([]);
+
+		it("names both registry directions, so a row that outlives its describe reds", () => {
+			const census = censusOf(
+				plants.find((plant) => plant.name === "accepted")?.source ?? "",
+			);
+			const key = [...census.optedOut][0] as string;
+			expect(judgeShuffleOptOuts(census, [])).toEqual([
+				`${key}: opts out of shuffle but is not registered`,
+			]);
+			expect(
+				judgeShuffleOptOuts(census, [key, "tests/gone.test.ts::gone"]),
+			).toEqual([
+				"tests/gone.test.ts::gone: registered, but no live describe in that file opts out",
+			]);
+		});
 	});
 });
 
