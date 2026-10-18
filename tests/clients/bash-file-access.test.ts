@@ -537,6 +537,9 @@ describe("extractGrepSearchReadsFromOutput", () => {
 				// `registerSearchReads` credits project-internal files only, and
 				// #4591 puts the fixture HOME outside the project, so the credit is
 				// observable on the in-project branch and the exclusion on the other.
+				// Coverage this cell gives up (named in the PR body): a `~` that expands
+				// to a project-INTERNAL home being credited. The pin cannot place HOME
+				// inside a swept root any more, and no cell pins a raw in-project HOME.
 				if (expected === literalFile)
 					expect(guard.getReadHistory(literalFile)).toHaveLength(1);
 				expect(guard.getReadHistory(unseen)).toHaveLength(0);

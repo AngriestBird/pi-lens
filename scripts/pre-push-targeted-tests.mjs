@@ -182,6 +182,9 @@ export const TREE_SCANNING_GOVERNANCE_TESTS = [
 // tests. Measured locally at ~17-23 s alone, inside the 120 s budget.
 export const TEST_TREE_GOVERNANCE_TESTS = [
 	"tests/clients/flake-shape-ratchet.test.ts",
+	// #4591: reads tests/support/vitest-setup.ts to pin the harness's
+	// fixture-home drain and teardown wiring.
+	"tests/clients/fixture-home-teardown.test.ts",
 	// #2891: real-pi harness suites own their child-process and timeout census;
 	// keep every admitted real-harness file armed when the tests tree changes.
 	"tests/real-harness/bridge-reload-ts.test.ts",

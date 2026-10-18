@@ -434,6 +434,7 @@ describe("selectTargetedTests — path-mirror pass", () => {
 		];
 		const testScanners = [
 			"tests/clients/flake-shape-ratchet.test.ts",
+			"tests/clients/fixture-home-teardown.test.ts",
 			"tests/real-harness/bridge-reload-ts.test.ts",
 			"tests/real-harness/bridge-reload.test.ts",
 			"tests/real-harness/child-exit.test.ts",

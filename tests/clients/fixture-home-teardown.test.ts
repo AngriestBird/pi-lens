@@ -7,7 +7,6 @@ import { isUnderDir } from "../../clients/path-utils.js";
 import {
 	fixtureHomeRoot,
 	pinFixtureHome,
-	removeTempDirSync,
 	restorePinnedFixtureHomes,
 	setupTestEnvironment,
 } from "./test-utils.js";
@@ -97,22 +96,44 @@ describe("a pinned fixture HOME after teardown (#4591)", () => {
 		expect(os.homedir()).toBe(before);
 	});
 
+	it("keeps one fixture-root identity across an in-process run-id change", () => {
+		// The census suite mutates `PI_LENS_TMP_HYGIENE_RUN_ID` in-process. Deriving
+		// the root again from it would move the directory the teardown removes, and
+		// the homes a case created would be left to the six-hour sweep arm (#4591
+		// F7).
+		const before = fixtureHomeRoot();
+		const saved = process.env.PI_LENS_TMP_HYGIENE_RUN_ID;
+		try {
+			process.env.PI_LENS_TMP_HYGIENE_RUN_ID = "4591-mutated-run-id";
+			expect(fixtureHomeRoot()).toBe(before);
+		} finally {
+			if (saved === undefined) delete process.env.PI_LENS_TMP_HYGIENE_RUN_ID;
+			else process.env.PI_LENS_TMP_HYGIENE_RUN_ID = saved;
+		}
+	});
+
 	it("reclaims this run's fixture-home directory family on the backstop sweep", () => {
-		const home = fs.mkdtempSync(path.join(fixtureHomeRoot(), "sweep-guard-"));
+		const env = setupTestEnvironment("pi-lens-4591-family-");
 		// The name comes from the real seam, not a literal: the sweep matches this
 		// run's `worker-home-<run>-` prefix, so renaming the directory family
 		// reds here instead of silently leaving a killed worker's copy behind.
-		const familyMember = path.join(home, path.basename(fixtureHomeRoot()));
+		const familyMember = path.join(
+			env.tmpDir,
+			path.basename(fixtureHomeRoot()),
+		);
 		// A live sibling invocation's copy is not this run's to remove.
-		const liveForeign = path.join(home, "worker-home-0000000000-7-fixtures");
+		const liveForeign = path.join(
+			env.tmpDir,
+			"worker-home-0000000000-7-fixtures",
+		);
 		for (const dir of [familyMember, liveForeign])
 			fs.mkdirSync(path.join(dir, "home"), { recursive: true });
 		try {
-			removeRunBackstopDirs(home, home);
+			removeRunBackstopDirs(env.tmpDir, env.tmpDir);
 			expect(fs.existsSync(familyMember)).toBe(false);
 			expect(fs.existsSync(liveForeign)).toBe(true);
 		} finally {
-			removeTempDirSync(home);
+			env.cleanup();
 		}
 	});
 
