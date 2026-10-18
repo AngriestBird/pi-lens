@@ -212,6 +212,9 @@ export const TEST_TREE_GOVERNANCE_TESTS = [
 	// record's write-before-remove wiring.
 	"tests/config/tmp-hygiene-leak-origin.test.ts",
 	"tests/config/vacuous-skip-coverage.test.ts",
+	// #4561 D1: walks tests/ for `describe` shuffle opt-outs and checks the
+	// by-design registry in both directions.
+	"tests/scripts/ci-shuffle-census.test.ts",
 	"tests/support/host-event-shape-scan.test.ts",
 ];
 

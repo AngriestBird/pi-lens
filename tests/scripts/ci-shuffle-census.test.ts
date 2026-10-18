@@ -35,6 +35,11 @@ import {
 	selectChangedTestFiles,
 } from "../../scripts/ci-shuffle-changed-tests.mjs";
 import { setupTestEnvironment } from "../clients/test-utils.js";
+import {
+	assertNonEmptyScan,
+	matchingCloseIndex,
+	stripSource,
+} from "../support/sweep-kit.js";
 import { vitestCollector } from "../support/vitest-collection.js";
 
 const cleanups: Array<() => void> = [];
@@ -1235,6 +1240,39 @@ describe("run (report and arguments)", () => {
 	});
 });
 
+/**
+ * The `describe` titles in one test file whose options object sets
+ * `shuffle: false` (#4561 D1). Structure comes from `stripSource`-blanked text
+ * so a title or option key inside a comment cannot register an opt-out that
+ * never runs; titles are read from the raw source at the same offsets, which
+ * stripping preserves.
+ */
+function shuffleOptOutsIn(
+	source: string,
+	stripped = stripSource(source),
+): string[] {
+	const titles: string[] = [];
+	for (const match of stripped.matchAll(/describe\s*\(\s*(["'`])/g)) {
+		const quote = match[1] as string;
+		const quoteAt = (match.index ?? 0) + match[0].length - 1;
+		const closeAt = stripped.indexOf(quote, quoteAt + 1);
+		if (closeAt < 0) continue;
+		const comma = stripped.indexOf(",", closeAt + 1);
+		if (comma < 0) continue;
+		const brace = stripped.indexOf("{", comma + 1);
+		if (brace < 0) continue;
+		// Between the title, the comma and the options object: whitespace only.
+		if (stripped.slice(closeAt + 1, comma).trim() !== "") continue;
+		if (stripped.slice(comma + 1, brace).trim() !== "") continue;
+		const end = matchingCloseIndex(stripped, brace, "{", "}");
+		if (end < 0) continue;
+		const options = stripped.slice(brace + 1, end);
+		if (!/\bshuffle\s*:\s*false\b/.test(options)) continue;
+		titles.push(source.slice(quoteAt + 1, closeAt));
+	}
+	return titles;
+}
+
 describe("the ratchet file", () => {
 	const ROOT = path.resolve(import.meta.dirname, "../..");
 	const parsed = JSON.parse(
@@ -1244,6 +1282,7 @@ describe("the ratchet file", () => {
 		),
 	) as {
 		members: Array<{ file: string; seam: string; seed: number; test: string }>;
+		byDesign: Array<{ file: string; describe: string; reason: string }>;
 	};
 	const SEAMS = new Set([
 		"declaration-order",
@@ -1258,7 +1297,10 @@ describe("the ratchet file", () => {
 	// sees a new order-dependent file admitted), fixing one lowers it. Lower
 	// this number in the PR that fixes a file; never raise it to admit a new
 	// one without a named seam and an issue.
-	const PINNED_FILES = 19;
+	const PINNED_FILES = 13;
+	// The by-design exemptions (#4561 D1), pinned the same way: a new one is a
+	// reviewable admission, never a quiet opt-out.
+	const PINNED_BY_DESIGN = 3;
 
 	// Recurrence: a ratchet that grows silently (the point of #4405 is that it
 	// can only shrink).
@@ -1304,6 +1346,70 @@ describe("the ratchet file", () => {
 				"tests/clients/dispatch/runners/tree-sitter-runner.test.ts",
 			),
 		).toBe(false);
+		// #4561: the three L8 files fixed at their cause. The three by-design
+		// files are covered below, where the registry refuses a row that is also
+		// a ratchet member (their paths stay out of this file: the lsp-spawn-heavy
+		// census reads a fixture-name marker out of strings).
+		for (const file of [
+			"tests/clients/io-bridge.test.ts",
+			"tests/index-process-bridge-registration.test.ts",
+			"tests/packaging-pack-manifest.test.ts",
+		])
+			expect(listedFiles.has(file), file).toBe(false);
+	});
+
+	// #4561 D1: a `describe` whose subject IS the order its cases run in opts
+	// out with `{ shuffle: false }` and is registered here — never a whole file,
+	// and never an unregistered opt-out a later reader cannot see the reason for.
+	it("holds exactly the pinned number of by-design exemptions, each a real describe that opts out", () => {
+		expect(parsed.byDesign).toHaveLength(PINNED_BY_DESIGN);
+		const members = new Set(parsed.members.map((item) => item.file));
+		const seen = new Set<string>();
+		for (const row of parsed.byDesign) {
+			const key = `${row.file}::${row.describe}`;
+			expect(seen.has(key), `duplicate ${key}`).toBe(false);
+			seen.add(key);
+			// A registered exemption is clean by construction; listing it in the
+			// ratchet as well would ask the nightly for a fix that is not one.
+			expect(members.has(row.file), `${key} also a ratchet member`).toBe(false);
+			const file = path.join(ROOT, row.file);
+			expect(fs.existsSync(file), row.file).toBe(true);
+			expect(row.reason.length, `${key} reason`).toBeGreaterThanOrEqual(40);
+			expect(shuffleOptOutsIn(fs.readFileSync(file, "utf8")), key).toContain(
+				row.describe,
+			);
+		}
+	});
+
+	// The other direction, and the reason this is a sweep rather than a list: an
+	// unregistered opt-out, or a `shuffle:` key outside a describe's options,
+	// reds instead of passing unclassified (AGENTS.md shape 69).
+	it("registers every describe that opts out of shuffle, and nothing else sets the option", () => {
+		const registered = new Set(
+			parsed.byDesign.map((row) => `${row.file}::${row.describe}`),
+		);
+		const files = listTrackedFiles(ROOT, ["tests"]).filter((file) =>
+			file.endsWith(".test.ts"),
+		);
+		assertNonEmptyScan(
+			"test files scanned for shuffle opt-outs",
+			files.length,
+			500,
+		);
+		const found = new Set<string>();
+		for (const file of files) {
+			const raw = fs.readFileSync(path.join(ROOT, file), "utf8");
+			const stripped = stripSource(raw);
+			const optOuts = shuffleOptOutsIn(raw, stripped);
+			for (const title of optOuts) found.add(`${file}::${title}`);
+			const occurrences = stripped.match(/\bshuffle\s*:/g)?.length ?? 0;
+			expect(
+				optOuts.length,
+				`${file}: ${occurrences} \`shuffle:\` option key(s) in code, ${optOuts.length} matched to a describe's \`{ shuffle: false }\``,
+			).toBe(occurrences);
+		}
+		expect([...found].filter((key) => !registered.has(key))).toEqual([]);
+		expect([...registered].filter((key) => !found.has(key))).toEqual([]);
 	});
 });
 

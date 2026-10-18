@@ -285,47 +285,90 @@ describe("published manifest carries no devDependencies", () => {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-pack-"));
 	afterAll(() => fs.rmSync(tmp, { recursive: true, force: true }));
 
+	/**
+	 * #4561 (shuffle seed 424): both cases below observe the SAME tarball, and one
+	 * `npm pack` per run (it builds the copy's `dist/` through `prepare`) is what
+	 * keeps them affordable. Sharing it through a memo instead of "the case above
+	 * packed it" keeps the order free: whichever case a shuffle runs first packs,
+	 * the other reuses. The pre-fix #3219 case threw
+	 * "no tarball: the preceding real `npm pack` case must run first" whenever it
+	 * ran first.
+	 */
+	type PackedTarball = {
+		filename: string;
+		packRoot: string;
+		manifestBefore: string;
+		lockBefore: string;
+		liveBefore: ReturnType<typeof liveCheckoutState>;
+		realInstallLogBefore: Buffer | null;
+	};
+	let packed: PackedTarball | undefined;
+
+	function packTarballOnce(): PackedTarball {
+		if (packed !== undefined) return packed;
+		const liveBefore = liveCheckoutState();
+		const packRoot = copyPackSource(path.join(tmp, "pack-src"));
+		const manifestBefore = fs.readFileSync(
+			path.join(packRoot, "package.json"),
+			"utf8",
+		);
+		const lockBefore = fs.readFileSync(
+			path.join(packRoot, "package-lock.json"),
+			"utf8",
+		);
+		// #2634: this `npm pack` runs OUR `prepare`, whose last step
+		// (`scripts/warm-loader-cache.mjs`) appends to `PI_LENS_INSTALL_LOG` or,
+		// failing that, `os.homedir()/.pi-lens/install.log` — with no `env:`
+		// pin the child inherited the ambient environment and every run of this
+		// suite wrote one record into the DEVELOPER'S REAL install log. Read the
+		// real sink (not a stand-in) BEFORE the pack so the assertion below is
+		// checking the exact file the bug wrote into, the same way
+		// `tests/scripts/release-qa.test.ts`'s hermeticity canary does for
+		// `scratchEnv`'s own child probe.
+		const realInstallLog = path.join(os.homedir(), ".pi-lens", "install.log");
+		const realInstallLogBefore = fs.existsSync(realInstallLog)
+			? fs.readFileSync(realInstallLog)
+			: null;
+		// Not `--json`: `prepare` also runs on pack and its scripts write to stdout
+		// (setup-git-hooks on a fresh CI checkout), which corrupts the JSON payload.
+		execFileSync(npx, pinnedPackArgs(["--pack-destination", tmp]), {
+			cwd: packRoot,
+			encoding: "utf8",
+			shell: process.platform === "win32",
+			timeout: 180_000,
+			stdio: ["ignore", "ignore", "inherit"],
+			// scratchEnv pins PI_LENS_INSTALL_LOG (and HOME, PILENS_DATA_DIR,
+			// npm_config_cache) inside `tmp` — every writer this child's
+			// `prepare` lifecycle can reach lands in the scratch root, never in
+			// the real developer home (#2619 review F1, reused for #2634).
+			env: scratchEnv(tmp),
+		});
+		const filename = fs.readdirSync(tmp).find((f) => f.endsWith(".tgz"));
+		if (!filename) throw new Error("npm pack produced no tarball");
+		packed = {
+			filename,
+			packRoot,
+			manifestBefore,
+			lockBefore,
+			liveBefore,
+			realInstallLogBefore,
+		};
+		return packed;
+	}
+
 	it(
 		"the real `npm pack` tarball's package.json has no devDependencies, and the working manifest is restored",
 		{ timeout: 180_000 },
 		() => {
-			const live = liveCheckoutState();
-			const packRoot = copyPackSource(path.join(tmp, "pack-src"));
-			const before = fs.readFileSync(
-				path.join(packRoot, "package.json"),
-				"utf8",
-			);
-			const lockBefore = fs.readFileSync(
-				path.join(packRoot, "package-lock.json"),
-				"utf8",
-			);
-			// #2634: this `npm pack` runs OUR `prepare`, whose last step
-			// (`scripts/warm-loader-cache.mjs`) appends to `PI_LENS_INSTALL_LOG` or,
-			// failing that, `os.homedir()/.pi-lens/install.log` — with no `env:`
-			// pin the child inherited the ambient environment and every run of this
-			// suite wrote one record into the DEVELOPER'S REAL install log. Read the
-			// real sink (not a stand-in) BEFORE the pack so the assertion below is
-			// checking the exact file the bug wrote into, the same way
-			// `tests/scripts/release-qa.test.ts`'s hermeticity canary does for
-			// `scratchEnv`'s own child probe.
+			const {
+				filename,
+				packRoot,
+				manifestBefore,
+				lockBefore,
+				liveBefore,
+				realInstallLogBefore,
+			} = packTarballOnce();
 			const realInstallLog = path.join(os.homedir(), ".pi-lens", "install.log");
-			const realInstallLogBefore = fs.existsSync(realInstallLog)
-				? fs.readFileSync(realInstallLog)
-				: null;
-			// Not `--json`: `prepare` also runs on pack and its scripts write to stdout
-			// (setup-git-hooks on a fresh CI checkout), which corrupts the JSON payload.
-			execFileSync(npx, pinnedPackArgs(["--pack-destination", tmp]), {
-				cwd: packRoot,
-				encoding: "utf8",
-				shell: process.platform === "win32",
-				timeout: 180_000,
-				stdio: ["ignore", "ignore", "inherit"],
-				// scratchEnv pins PI_LENS_INSTALL_LOG (and HOME, PILENS_DATA_DIR,
-				// npm_config_cache) inside `tmp` — every writer this child's
-				// `prepare` lifecycle can reach lands in the scratch root, never in
-				// the real developer home (#2619 review F1, reused for #2634).
-				env: scratchEnv(tmp),
-			});
 			expect(
 				fs.existsSync(realInstallLog) ? fs.readFileSync(realInstallLog) : null,
 				"npm pack must not write into the real ~/.pi-lens/install.log (#2634), " +
@@ -343,8 +386,6 @@ describe("published manifest carries no devDependencies", () => {
 					"utf8",
 				),
 			).toContain("warm_loader_cache");
-			const filename = fs.readdirSync(tmp).find((f) => f.endsWith(".tgz"));
-			if (!filename) throw new Error("npm pack produced no tarball");
 			// tar with cwd + a relative path: GNU/bsd tar misread `C:...` as a remote host spec.
 			const manifest = execFileSync(
 				"tar",
@@ -361,7 +402,7 @@ describe("published manifest carries no devDependencies", () => {
 			expect(packed.dependencies).toEqual(pkg.dependencies);
 			// postpack put the packed copy's manifest back, byte for byte.
 			expect(fs.readFileSync(path.join(packRoot, "package.json"), "utf8")).toBe(
-				before,
+				manifestBefore,
 			);
 			expect(fs.existsSync(path.join(packRoot, ".pack-backup"))).toBe(false);
 			// npm re-syncs the lock from the stripped manifest during pack; postpack must put it back too.
@@ -370,65 +411,69 @@ describe("published manifest carries no devDependencies", () => {
 			).toBe(lockBefore);
 			// #4003: the live checkout saw none of it -- manifest, lock, no
 			// .pack-backup/, and no dist/ written by the pack's `prepare`.
-			expectLiveCheckoutUntouched(live);
+			expectLiveCheckoutUntouched(liveBefore);
 		},
 	);
 
 	// #3219: the invariant "everything in the published package loads from the
 	// bundled tree", checked on the SAME real tarball the case above packed
-	// (one `npm pack` per run, in an isolated copy; it builds that copy's dist/ through `prepare`). Red on the
-	// pre-#3219 layout: the tarball carried 477 files under dist/clients/ and
-	// dist/tools/, which the bins and both persist workers loaded from.
-	it("ships only the bundled tree, and both persist workers start from it (#3219)", async () => {
-		const filename = fs.readdirSync(tmp).find((f) => f.endsWith(".tgz"));
-		if (!filename)
-			throw new Error(
-				"no tarball: the preceding real `npm pack` case must run first",
-			);
-		const unpacked = path.join(tmp, "unpacked");
-		fs.mkdirSync(unpacked, { recursive: true });
-		execFileSync("tar", ["-xzf", filename, "-C", "unpacked"], { cwd: tmp });
-		const pkgRoot = path.join(unpacked, "package");
-		const packedPaths = (
-			fs.readdirSync(pkgRoot, { recursive: true }) as string[]
-		)
-			.map((entry) => entry.split(path.sep).join("/"))
-			.filter((entry) => fs.statSync(path.join(pkgRoot, entry)).isFile());
-		// Dead-sweep floor (AGENTS.md shape 10): 1184 files packed on 2026-09-25;
-		// half, rounded down.
-		assertNonEmptyScan("packed files", packedPaths.length, 592);
-		expect(
-			packedLayoutViolations(packedPaths, (entry) =>
-				fs.readFileSync(path.join(pkgRoot, entry), "utf8"),
-			),
-		).toEqual([]);
-		for (const entry of [
-			"dist/index.js",
-			"dist/mcp/cli.js",
-			"dist/mcp/server.js",
-			"dist/mcp/analyze-cli.js",
-			"dist/mcp/worker.js",
-			"dist/workers/project-snapshot-persist-worker.js",
-			"dist/workers/review-graph-persist-worker.js",
-		])
-			expect(packedPaths, entry).toContain(entry);
-		// The worker bundles import only node builtins and their own chunks, so
-		// the unpacked package starts them with no node_modules at all.
-		for (const name of [
-			"project-snapshot-persist-worker",
-			"review-graph-persist-worker",
-		]) {
-			const worker = new Worker(
-				path.join(pkgRoot, "dist", "workers", `${name}.js`),
-			);
-			try {
-				await new Promise<void>((resolve, reject) => {
-					worker.once("online", () => resolve());
-					worker.once("error", reject);
-				});
-			} finally {
-				await worker.terminate();
+	// (one `npm pack` per run through `packTarballOnce`, in an isolated copy; it
+	// builds that copy's dist/ through `prepare`). Red on the pre-#3219 layout:
+	// the tarball carried 477 files under dist/clients/ and dist/tools/, which
+	// the bins and both persist workers loaded from.
+	// 180 s like the case above: whichever case a shuffle runs first pays the
+	// real `npm pack` through `packTarballOnce`, and a 5 s default would time
+	// that one out (seed 424 did).
+	it(
+		"ships only the bundled tree, and both persist workers start from it (#3219)",
+		{ timeout: 180_000 },
+		async () => {
+			const { filename } = packTarballOnce();
+			const unpacked = path.join(tmp, "unpacked");
+			fs.mkdirSync(unpacked, { recursive: true });
+			execFileSync("tar", ["-xzf", filename, "-C", "unpacked"], { cwd: tmp });
+			const pkgRoot = path.join(unpacked, "package");
+			const packedPaths = (
+				fs.readdirSync(pkgRoot, { recursive: true }) as string[]
+			)
+				.map((entry) => entry.split(path.sep).join("/"))
+				.filter((entry) => fs.statSync(path.join(pkgRoot, entry)).isFile());
+			// Dead-sweep floor (AGENTS.md shape 10): 1184 files packed on 2026-09-25;
+			// half, rounded down.
+			assertNonEmptyScan("packed files", packedPaths.length, 592);
+			expect(
+				packedLayoutViolations(packedPaths, (entry) =>
+					fs.readFileSync(path.join(pkgRoot, entry), "utf8"),
+				),
+			).toEqual([]);
+			for (const entry of [
+				"dist/index.js",
+				"dist/mcp/cli.js",
+				"dist/mcp/server.js",
+				"dist/mcp/analyze-cli.js",
+				"dist/mcp/worker.js",
+				"dist/workers/project-snapshot-persist-worker.js",
+				"dist/workers/review-graph-persist-worker.js",
+			])
+				expect(packedPaths, entry).toContain(entry);
+			// The worker bundles import only node builtins and their own chunks, so
+			// the unpacked package starts them with no node_modules at all.
+			for (const name of [
+				"project-snapshot-persist-worker",
+				"review-graph-persist-worker",
+			]) {
+				const worker = new Worker(
+					path.join(pkgRoot, "dist", "workers", `${name}.js`),
+				);
+				try {
+					await new Promise<void>((resolve, reject) => {
+						worker.once("online", () => resolve());
+						worker.once("error", reject);
+					});
+				} finally {
+					await worker.terminate();
+				}
 			}
-		}
-	});
+		},
+	);
 });

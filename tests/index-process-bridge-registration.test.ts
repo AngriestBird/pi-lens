@@ -21,12 +21,16 @@ import { READ_BRIDGE_KEY } from "../clients/read-bridge.js";
 import extension from "../index.js";
 import { createPiMock } from "./support/pi-mock.js";
 
-// Runs before the describe below activates the extension — each test FILE
-// gets a fresh child process (vitest forks pool, `isolate: true`), so
-// `globalThis` here has never seen either bridge key yet.
+// Read at module load, before any hook runs, so the assertion holds in any test
+// order (the #4549 read-bridge idiom). Reading the global inside the test redded
+// whenever the describe's first case activated the extension first (#4561,
+// shuffle seed 424).
+const bridgesPresentAtLoad = {
+	read: READ_BRIDGE_KEY in (globalThis as object),
+	mutation: MUTATION_BRIDGE_KEY in (globalThis as object),
+};
 it("neither bridge is mounted before the extension activates", () => {
-	expect(READ_BRIDGE_KEY in (globalThis as object)).toBe(false);
-	expect(MUTATION_BRIDGE_KEY in (globalThis as object)).toBe(false);
+	expect(bridgesPresentAtLoad).toEqual({ read: false, mutation: false });
 });
 
 describe("process-bridge registration through the real extension factory (#2437)", () => {

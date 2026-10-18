@@ -1616,6 +1616,12 @@ Test authoring screens:
   members sit in `scripts/shuffle-census-ratchet.json`, keyed by file, which
   only shrinks: a new member reds, and an entry clean two nights running
   must be deleted.
+  A file whose subject IS the order its cases run in (a backstop that reaps
+  the previous case's process, a drain the next case observes) cannot be
+  fixed by restoring state: that `describe` opts out with `{ shuffle: false }`
+  and a header saying why order is the behaviour under test, never the whole
+  file, and is registered in the ratchet's `byDesign` rows, which
+  `tests/scripts/ci-shuffle-census.test.ts` checks both ways.
   A `vi.doMock` is undone in the file's top-level `afterEach`, not in the
   case that mocks it: a shuffle runs the next case on the leaked mock.
   `vi.resetModules()` does not clear `globalThis` or pre-reset singletons.
