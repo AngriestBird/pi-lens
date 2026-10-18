@@ -27,12 +27,14 @@ import {
 	recordDegradationOnce,
 } from "./degradation-ledger.js";
 import { BoundedFifoMap } from "./bounded-cache.js";
+import { withTimeout } from "./deadline-utils.js";
 import { loadWebTreeSitter } from "./deps/web-tree-sitter.js";
 import { transientRetryDelayMs } from "./dispatch/runners/utils/availability-policy.js";
 import { getProjectIgnoreMatcher, isExcludedDirName } from "./file-utils.js";
 import {
 	downloadGrammarDetailed,
 	fileHasWasmMagic,
+	GRAMMAR_LOAD_TIMEOUT_MS,
 	GRAMMAR_STALL_MS,
 	grammarBlockReason,
 	grammarFileSha256,
@@ -1902,7 +1904,15 @@ export class TreeSitterClient {
 				return null;
 			}
 			this.dbg(`Calling Language.load...`);
-			const language = await this.LanguageLoader.load(grammarPath);
+			// #4224: a load that never settles would hold every caller for this
+			// language, and the in-flight batch build later callers join. The
+			// timeout takes the failure path below, so the build settles, its record
+			// clears, and the grammar's cooldown keeps the next call from waiting
+			// out the bound again.
+			const language = await withTimeout<TreeSitterLanguage>(
+				this.LanguageLoader.load(grammarPath),
+				GRAMMAR_LOAD_TIMEOUT_MS,
+			);
 			this.dbg(`Language loaded: ${language?.name || "unknown"}`);
 			if (language) {
 				this.languages.set(languageId, language);
