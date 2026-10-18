@@ -591,9 +591,15 @@ describe("selectTargetedTests — path-mirror pass", () => {
 		const allTests = collectTestFiles("tests");
 		expect(changesTestTreeFile("clients/foo/bar.ts")).toBe(false);
 		expect(changesTestTreeFile("docs/tests/x.md")).toBe(false);
+		// #4590: a scanner that walks BOTH trees is registered in both lists, so a
+		// production change arms it through TREE_SCANNING_GOVERNANCE_TESTS. Every
+		// tests-ONLY scanner stays out of a push that touches no test file.
+		const bothTreeScanners = TEST_TREE_GOVERNANCE_TESTS.filter((test) =>
+			TREE_SCANNING_GOVERNANCE_TESTS.includes(test),
+		);
 		expect(
 			selectTargetedTests(["clients/foo/bar.ts"], allTests).selected,
-		).toEqual([]);
+		).toEqual(bothTreeScanners);
 		expect(selectTargetedTests(["docs/tests/x.md"], allTests).selected).toEqual(
 			[],
 		);
@@ -817,9 +823,13 @@ describe("selectTargetedTests — the >25-file cap (F1)", () => {
 		);
 
 		expect(result.capped).toBe(true);
+		// Deduped: the #4590 sweep walks both trees and sits in both registries, so
+		// the union counts it once (a Set is what the selection itself uses).
 		const registries = [
-			...TREE_SCANNING_GOVERNANCE_TESTS,
-			...TEST_TREE_GOVERNANCE_TESTS,
+			...new Set([
+				...TREE_SCANNING_GOVERNANCE_TESTS,
+				...TEST_TREE_GOVERNANCE_TESTS,
+			]),
 		];
 		for (const registry of registries)
 			expect(result.selected).toContain(registry);
