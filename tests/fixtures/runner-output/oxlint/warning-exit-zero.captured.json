@@ -26,9 +26,9 @@
 			"argv": [
 				"--version"
 			],
-			"version": "1.88.0",
+			"version": "1.86.0",
 			"exitCode": 0,
-			"stdout": "Version: 1.88.0\n\n",
+			"stdout": "Version: 1.86.0\n\n",
 			"stderr": ""
 		}
 	],
@@ -40,9 +40,9 @@
 			"json",
 			"bad.js"
 		],
-		"version": "1.88.0",
+		"version": "1.86.0",
 		"exitCode": 0,
-		"stdout": "{ \"diagnostics\": [],\n              \"number_of_files\": 1,\n              \"number_of_rules\": 96,\n              \"threads_count\": 32,\n              \"start_time\": 0.029894002\n            }\n            ",
+		"stdout": "{ \"diagnostics\": [],\n              \"number_of_files\": 1,\n              \"number_of_rules\": 96,\n              \"threads_count\": 32,\n              \"start_time\": 0.024232642\n            }\n            ",
 		"stderr": ""
 	}
 }

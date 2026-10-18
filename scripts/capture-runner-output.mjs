@@ -21,31 +21,44 @@
  * Usage:
  *   node scripts/capture-runner-output.mjs \
  *     --runner actionlint --tool actionlint --bin /path/to/actionlint \
- *     --cwd /tmp/workspace --file .github/workflows/ci.yml \
+ *     --cwd /tmp/workspace --workspace tests/fixtures/tool-smoke/actionlint \
+ *     --file .github/workflows/ci.yml \
  *     --probe '["--version"]' \
- *     --clean-content 'on: push\n' \
+ *     --clean-cwd /tmp/clean-workspace \
+ *     --clean-workspace tests/fixtures/runner-output-clean/actionlint \
  *     --case workflow-violations \
  *     -- -format "{{json .}}" .github/workflows/ci.yml
  *
  * Flags:
  *   --runner        registered dispatch runner id the bytes belong to (required)
  *   --tool          binary name as humans know it (default: --runner)
- *   --bin           path/name of the executable to spawn (default: --tool)
+ *   --bin           path/name of the work executable to spawn (default: --tool)
+ *   --bin-dir       directory searched for each PROBE's own binary, before
+ *                   pi-lens's tool dirs and PATH (default: none)
  *   --cwd           working directory for the spawn (default: process.cwd())
+ *   --workspace     repo-relative path recorded as the capture workspace
+ *                   (default: --cwd relative to the repo root)
  *   --file          workspace-relative path the runner was pointed at (required)
  *   --case          fixture basename (default: "real")
  *   --version-args  argv that prints the version (default: --version)
  *   --probe         JSON array: the argv the runner's availability checker
  *                   sends. Repeatable. REQUIRED: the replay answers that exact
  *                   spawn from this record, so a fixture without one cannot be
- *                   replayed against the real checker (#4473).
- *   --clean-content the bytes of a clean input for this invocation
- *   --clean-file    workspace-relative path to write them to (default:
- *                   "clean" plus the analysed file's extension)
+ *                   replayed against the real checker (#4473). Each probe runs
+ *                   ITS OWN command, never `--bin`.
+ *   --clean-cwd     a copy of a clean workspace: the SAME argv runs there, so
+ *                   the bytes are this runner asking this tool about clean input
+ *   --clean-file    workspace-relative clean input (default: --file, because
+ *                   the clean workspace mirrors the analysed file's own name)
+ *   --clean-workspace  repo-relative path recorded for the clean run (default:
+ *                   --clean-cwd relative to the repo root)
+ *   --clean-unavailable  a tool fact that makes a clean run unreachable, instead
+ *                   of --clean-cwd
  *   --merge-into    existing fixture envelope: merge the availability and clean
  *                   records into it instead of writing a new capture. This is
  *                   the retrofit path for fixtures captured before #4473, and it
- *                   never touches the recorded work bytes.
+ *                   never touches the recorded work bytes. A clean run whose
+ *                   invocation is NOT the fixture's own is refused (#4522).
  *   --note          free-text note stored alongside the provenance
  *   --out-dir       fixture root (default: tests/fixtures/runner-output)
  *
@@ -87,6 +100,9 @@ function parseArgs(argv) {
 	return { opts, rest };
 }
 
+/** `major.minor[.patch][-suffix]` — the version shape every banner prints. */
+const VERSION_TOKEN = /\d+\.\d+(?:\.\d+)?(?:[-+][\w.]+)?/;
+
 /**
  * First version-shaped token in a `--version` banner, e.g. "1.7.12" from
  * "actionlint 1.7.12\ninstalled by ...".
@@ -96,10 +112,76 @@ function parseArgs(argv) {
  * let a failed spawn's error text become the recorded version — a Windows
  * "not compatible with the version of Windows you're running" message did
  * exactly that during this script's own bring-up.
+ *
+ * When `command` is given, a line that leads with that command's own name wins:
+ * `mix --version` prints the Erlang runtime's banner first and Mix's second, so
+ * the first token in the whole output is erts' version, not Mix's (#4522 F10).
+ * The line is preferred, not the token, because a banner can name its runtime
+ * before itself and its own version after (`go version go1.27.2 linux/amd64`).
  */
-export function extractVersion(banner) {
-	const match = (banner ?? "").match(/\d+\.\d+(?:\.\d+)?(?:[-+][\w.]+)?/);
+export function extractVersion(banner, command) {
+	const text = banner ?? "";
+	const name = command ? basenameOf(command).toLowerCase() : "";
+	if (name) {
+		for (const line of text.split("\n")) {
+			const lead =
+				line
+					.trim()
+					.split(/[\s,:]+/)[0]
+					?.toLowerCase() ?? "";
+			if (lead !== name) continue;
+			const match = line.match(VERSION_TOKEN);
+			if (match) return match[0];
+		}
+	}
+	const match = text.match(VERSION_TOKEN);
 	return match ? match[0] : "";
+}
+
+/**
+ * The binary name to resolve for a probe: the command the checker spawns, as a
+ * bare name. An absolute or relative path is used as given, because the checker
+ * resolved it itself.
+ */
+export function probeBinaryName(command) {
+	return /[\\/]/.test(command) ? command : basenameOf(command);
+}
+
+/** The last segment of a path spelled with either separator. */
+function basenameOf(value) {
+	const segments = String(value).split(/[\\/]/);
+	return segments[segments.length - 1] ?? String(value);
+}
+
+/**
+ * Directories searched for a tool binary, in order: the caller's `--bin-dir`,
+ * pi-lens's managed tool dirs, then PATH via the bare name.
+ */
+function candidateDirs(binDir) {
+	const home = os.homedir();
+	return [
+		binDir,
+		path.join(home, ".pi-lens", "bin"),
+		path.join(home, ".pi-lens", "tools", "node_modules", ".bin"),
+	].filter(Boolean);
+}
+
+/**
+ * Absolute path to `name`'s binary, or the bare name to fall back to PATH.
+ *
+ * Every spawn this script makes — the work run, the version run, and each
+ * probe — resolves through here, so a probe is answered by the binary it names
+ * and not by the work binary wearing that name (#4522 F2).
+ */
+export function resolveBin(name, binDir) {
+	if (/[\\/]/.test(name)) return name;
+	for (const dir of candidateDirs(binDir)) {
+		for (const suffix of [".exe", ".bat", ".cmd", ""]) {
+			const candidate = path.join(dir, `${name}${suffix}`);
+			if (fs.existsSync(candidate)) return candidate;
+		}
+	}
+	return name;
 }
 
 /**
@@ -233,16 +315,82 @@ export function shellBinPath(bin) {
  * The exit status is the load-bearing field. helm 4 rejects `--version` and
  * exits 1; a record that dropped the status would let the replay assume a
  * rejected probe succeeded, which is the class #4473 names.
+ *
+ * `version` is read from THIS probe's own answer, so a record cannot carry the
+ * work binary's banner under another binary's name (#4522 F2). A probe that
+ * printed no version shape records "" and an `error` when the spawn itself
+ * failed; neither is a claim that something answered.
  */
-export function buildAvailability(command, argv, version, run) {
-	return {
+export function buildAvailability(command, argv, run) {
+	const record = {
 		command,
 		argv: [...argv],
-		version: version ?? "",
+		version: extractVersion(
+			`${run?.stdout ?? ""}${run?.stderr ?? ""}`,
+			command,
+		),
 		exitCode: typeof run?.status === "number" ? run.status : null,
 		stdout: redactHomePath(run?.stdout ?? ""),
 		stderr: redactHomePath(run?.stderr ?? ""),
 	};
+	if (run?.error) {
+		record.error = `${command} could not be spawned: ${run.error.message}`;
+		record.exitCode = null;
+	}
+	return record;
+}
+
+/**
+ * Everything wrong with a set of records about one fixture, as human-readable
+ * strings. Empty means the records are evidence about THIS fixture.
+ *
+ * One seam, three ties, checked before a record is written and again by the
+ * fixture census over every committed fixture (#4522):
+ *
+ *  - binary: a recorded `version` must be one this probe's own answer printed,
+ *    so the work binary's banner cannot answer for another program. A "" with an
+ *    `error` records a probe that never ran, which claims nothing.
+ *  - invocation: the clean run must be this fixture's own argv. `--records-only`
+ *    once replayed the last manifest entry's clean run into every case of its
+ *    runner, so fish-indent's formatter fixture replayed a `fish --no-execute`
+ *    syntax check as its clean half.
+ *  - workspace: a clean run must name the workspace it ran in, and nothing else.
+ */
+export function recordProblems(records) {
+	const problems = [];
+	const where = records?.provenance?.runner ?? "fixture";
+	for (const record of records?.availability ?? []) {
+		const label = `${where}: availability for ${record?.command} ${JSON.stringify(record?.argv)}`;
+		const answer = `${record?.stdout ?? ""}${record?.stderr ?? ""}`;
+		if (record?.error) {
+			if (record.version)
+				problems.push(
+					`${label}: records version "${record.version}" for a probe that could not be spawned`,
+				);
+			continue;
+		}
+		if (!record?.version) {
+			problems.push(
+				`${label}: no version in its own answer — a record must name the binary that answered it, or record the spawn error`,
+			);
+			continue;
+		}
+		if (!answer.includes(record.version))
+			problems.push(
+				`${label}: version "${record.version}" is not in the answer it was recorded with — another binary answered this probe`,
+			);
+	}
+	const clean = records?.clean;
+	if (clean) {
+		const own = records?.provenance?.argv ?? [];
+		if (JSON.stringify(clean.argv) !== JSON.stringify(own))
+			problems.push(
+				`${where}: clean run argv ${JSON.stringify(clean.argv)} is not this fixture's own invocation ${JSON.stringify(own)} — a clean run is evidence only for the command it ran`,
+			);
+		if (!clean.workspace)
+			problems.push(`${where}: clean run names no workspace`);
+	}
+	return problems;
 }
 
 /**
@@ -252,21 +400,53 @@ export function buildAvailability(command, argv, version, run) {
  * captured from the version the fixture names, and re-recording them from a
  * newer build would silently retarget the parser evidence. Only the records the
  * old capture could not produce are added.
+ *
+ * Refuses to write when `recordProblems` finds the records describe a different
+ * invocation or a different binary than this fixture: a retrofit that overwrites
+ * a neighbour's clean run is worse than no record.
  */
 export function mergeRecords(dest, patch) {
-	const envelope = JSON.parse(fs.readFileSync(dest, "utf8"));
+	let envelope;
+	try {
+		envelope = JSON.parse(fs.readFileSync(dest, "utf8"));
+	} catch (err) {
+		// A corrupt fixture is a named refusal, not a SyntaxError from deep in the
+		// retrofit: this path rewrites a committed file, so it says which one and why.
+		throw new Error(
+			`refusing to merge into ${path.relative(repoRoot, dest)}: it is not readable JSON (${err?.message ?? err})`,
+		);
+	}
 	if (patch.availability) envelope.availability = patch.availability;
 	if (patch.clean) envelope.clean = patch.clean;
-	if (patch.cleanUnavailable)
-		envelope.cleanUnavailable = patch.cleanUnavailable;
 	if (patch.versionArgv) {
 		envelope.provenance = {
 			...envelope.provenance,
 			versionArgv: patch.versionArgv,
 		};
 	}
+	const problems = recordProblems(envelope);
+	if (problems.length > 0) {
+		throw new Error(
+			`refusing to write ${path.relative(repoRoot, dest)}:\n  ${problems.join("\n  ")}`,
+		);
+	}
 	fs.writeFileSync(dest, `${JSON.stringify(envelope, null, "\t")}\n`, "utf8");
 	return envelope;
+}
+
+/**
+ * Why a clean run cannot be recorded, or null when it can.
+ *
+ * A clean run that exited non-zero is not a clean run: recording it would put
+ * the dirty verdict in the fixture's clean half, and the matrix's clean cell
+ * would then assert the opposite of what it replayed. The reason names the
+ * output, because the common cause is a clean workspace that is not clean.
+ */
+export function cleanRunRejection(run) {
+	if (run?.error) return `clean spawn failed: ${run.error.message}`;
+	if (run?.status !== 0)
+		return `the clean run exited ${run.status}, so it is not clean — refusing to record it. Output:\n${run?.stdout ?? ""}${run?.stderr ?? ""}`;
+	return null;
 }
 
 function spawnCaptured(bin, args, cwd, shellOverride) {
@@ -292,7 +472,7 @@ function main() {
 		process.exit(2);
 	}
 	const tool = opts.tool ?? runner;
-	const bin = opts.bin ?? tool;
+	const bin = resolveBin(opts.bin ?? tool, opts["bin-dir"]);
 	const cwd = path.resolve(opts.cwd ?? process.cwd());
 	const caseName = opts.case ?? "real";
 	const versionArgs = (opts["version-args"] ?? "--version").split(/\s+/);
@@ -344,6 +524,7 @@ function main() {
 	const versionRun = spawnCaptured(bin, versionArgs, cwd, shellOverride);
 	const version = extractVersion(
 		`${versionRun.stdout ?? ""}${versionRun.stderr ?? ""}`,
+		tool,
 	);
 	if (!version) {
 		console.error(
@@ -352,50 +533,62 @@ function main() {
 		process.exit(2);
 	}
 
-	const availability = probes.map((probe) =>
-		buildAvailability(
+	// Each probe runs its OWN command: a checker that probes `cargo --version`
+	// before `cargo clippy` must not be answered by the work binary wearing the
+	// other program's name (#4522 F2). `--bin` still wins for the tool's own
+	// probe, because it names the executable the checker resolves for `--tool`
+	// (markdownlint's bin is `markdownlint-cli2`).
+	const availability = probes.map((probe) => {
+		const probeBin =
+			probe.command === tool || probe.command === opts.bin
+				? bin
+				: resolveBin(probeBinaryName(probe.command), opts["bin-dir"]);
+		return buildAvailability(
 			probe.command,
 			probe.argv,
-			version,
-			spawnCaptured(bin, probe.argv, cwd, shellOverride),
-		),
-	);
+			spawnCaptured(probeBin, probe.argv, cwd, shellOverride),
+		);
+	});
 
 	// The clean run: the SAME invocation in a workspace where the analysed
 	// input is clean. The argv is not rewritten — it is the invocation the
 	// fixture records — only the directory it runs in changes, so the bytes are
 	// evidence about this runner asking this tool for this file's verdict.
+	//
+	// There is no "no clean run exists" escape hatch. It used to take a prose
+	// fact of 20 characters or more, so any runner could silence its clean cell
+	// with a sentence, and the two facts it ever held were both false: swiftlint
+	// lints a formatted file and trivy finds nothing in a manifest with no
+	// kubernetes resources (#4522 F8). A tool that cannot analyse a file at all
+	// has no runner to capture for.
 	let clean;
-	let cleanUnavailable;
-	if (opts["clean-unavailable"]) {
-		if (opts["clean-cwd"]) {
-			console.error("--clean-unavailable and --clean-cwd are exclusive");
-			process.exit(2);
-		}
-		cleanUnavailable = String(opts["clean-unavailable"]);
-		if (cleanUnavailable.trim().length < 20) {
-			console.error(
-				"--clean-unavailable needs a fact about the tool, not a placeholder",
-			);
-			process.exit(2);
-		}
+	if (opts["clean-unavailable"] !== undefined) {
+		console.error(
+			"--clean-unavailable is gone: capture a real clean run with --clean-cwd/--clean-workspace instead of stating why none exists (#4522 F8)",
+		);
+		process.exit(2);
 	} else if (opts["clean-cwd"]) {
 		const cleanCwd = path.resolve(opts["clean-cwd"]);
 		const cleanFile = opts["clean-file"] ?? file;
+		// A clean run is evidence about clean INPUT: if the workspace does not hold
+		// the analysed path, the tool either fails (which the exit check catches)
+		// or silently reports nothing about a file that does not exist, and the
+		// matrix's clean cell replays bytes nothing examined (#4522 F4).
+		if (!fs.existsSync(path.join(cleanCwd, cleanFile))) {
+			console.error(
+				`the clean workspace ${cleanCwd} holds no ${cleanFile}, so a clean run would analyse nothing — refusing to record it`,
+			);
+			process.exit(2);
+		}
 		const cleanRun = spawnCaptured(
 			bin,
 			expandWorkspaceArgs(rest, cleanCwd),
 			cleanCwd,
 			shellOverride,
 		);
-		if (cleanRun.error) {
-			console.error(`clean spawn failed: ${cleanRun.error.message}`);
-			process.exit(2);
-		}
-		if (cleanRun.status !== 0) {
-			console.error(
-				`the clean run exited ${cleanRun.status}, so it is not clean — refusing to record it. Output:\n${cleanRun.stdout ?? ""}${cleanRun.stderr ?? ""}`,
-			);
+		const rejection = cleanRunRejection(cleanRun);
+		if (rejection) {
+			console.error(rejection);
 			process.exit(2);
 		}
 		clean = {
@@ -421,7 +614,6 @@ function main() {
 	const records = {
 		availability,
 		...(clean ? { clean } : {}),
-		...(cleanUnavailable ? { cleanUnavailable } : {}),
 		versionArgv: versionArgs,
 	};
 
@@ -472,7 +664,6 @@ function main() {
 		},
 		availability,
 		...(clean ? { clean } : {}),
-		...(cleanUnavailable ? { cleanUnavailable } : {}),
 		file,
 		exitCode: run.status,
 		stdout: redactWorkspace(run.stdout ?? "", cwd),
@@ -480,6 +671,15 @@ function main() {
 	};
 
 	const dest = path.join(outDir, runner, `${caseName}.captured.json`);
+	// The same gate the retrofit path uses: a record must be about this binary,
+	// this invocation, and this workspace before it becomes evidence.
+	const problems = recordProblems(envelope);
+	if (problems.length > 0) {
+		console.error(
+			`refusing to write ${path.relative(repoRoot, dest)}:\n  ${problems.join("\n  ")}`,
+		);
+		process.exit(2);
+	}
 	fs.mkdirSync(path.dirname(dest), { recursive: true });
 	fs.writeFileSync(dest, `${JSON.stringify(envelope, null, "\t")}\n`, "utf8");
 	console.log(

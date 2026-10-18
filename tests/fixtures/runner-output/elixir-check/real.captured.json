@@ -25,7 +25,7 @@
 			"argv": [
 				"--version"
 			],
-			"version": "15.2.7",
+			"version": "1.18.3",
 			"exitCode": 0,
 			"stdout": "Erlang/OTP 27 [erts-15.2.7.4] [source] [64-bit] [smp:32:32] [ds:32:32:10] [async-threads:1] [jit:ns]\n\nMix 1.18.3 (compiled with Erlang/OTP 27)\n",
 			"stderr": ""

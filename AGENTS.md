@@ -1109,13 +1109,19 @@ file-scoped worklist and receives no project-wide scanner output.
   pin-only update.
 - Each real-bytes fixture under `tests/fixtures/runner-output/` records the
   availability probe its runner sends (`availability`: the argv, the binary
-  that answered, and the real exit status) and a real clean run (`clean`, or a
-  `cleanUnavailable` fact about a tool that cannot analyse a file at all).
+  that answered from its own banner, and the real exit status) and a real clean
+  run (`clean`; there is no prose alternative). The clean record is the
+  fixture's own invocation run in `tests/fixtures/runner-output-clean/<runner>`,
+  whose inputs are un-ignored by `.gitignore` on purpose. One gate,
+  `recordProblems` in `scripts/capture-runner-output.mjs`, refuses a record whose
+  version its own answer never printed, and a clean run whose argv is not this
+  fixture's; the capture and the census both call it.
   `captured-real-output.test.ts` runs the REAL checker against that record
   instead of mocking it, so a tool that rejects its own probe — helm 4 rejects
   `--version` — reaches the replay; the clean bytes are what the matrix's clean
-  cell replays. `scripts/capture-runner-fixtures.mjs --records-only` retrofits
-  those records onto an existing fixture without touching its work bytes.
+  cell replays, in the clean workspace. `scripts/capture-runner-fixtures.mjs
+  --records-only` retrofits those records onto an existing fixture without
+  touching its work bytes, keyed on the fixture's own case.
   Enforced by `tests/clients/dispatch/smoke-fixture-coverage.test.ts` and
   `tests/clients/dispatch/tool-state-matrix.test.ts`.
 - Every `parseToolRun` runner documents its nonzero-exit table; the documented

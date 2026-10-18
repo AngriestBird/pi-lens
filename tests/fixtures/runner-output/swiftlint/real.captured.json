@@ -29,8 +29,21 @@
 			"version": "0.65.1",
 			"exitCode": 0,
 			"stdout": "0.65.1\n",
-			"stderr": "~/.local/share/pi-lens-orchestrator/tmp/4522/tools/bin/swiftlint: ~/.local/share/pi-lens-orchestrator/tmp/4522/tools/root/usr/lib/x86_64-linux-gnu/libxml2.so.2: no version information available (required by ~/.local/share/pi-lens-orchestrator/tmp/4522/tools/bin/swiftlint)\n~/.local/share/pi-lens-orchestrator/tmp/4522/tools/bin/swiftlint: ~/.local/share/pi-lens-orchestrator/tmp/4522/tools/root/usr/lib/x86_64-linux-gnu/libxml2.so.2: no version information available (required by ~/.local/share/pi-lens-orchestrator/tmp/4522/tools/bin/swiftlint)\n~/.local/share/pi-lens-orchestrator/tmp/4522/tools/bin/swiftlint: ~/.local/share/pi-lens-orchestrator/tmp/4522/tools/root/usr/lib/x86_64-linux-gnu/libxml2.so.2: no version information available (required by ~/.local/share/pi-lens-orchestrator/tmp/4522/tools/bin/swiftlint)\n~/.local/share/pi-lens-orchestrator/tmp/4522/tools/bin/swiftlint: ~/.local/share/pi-lens-orchestrator/tmp/4522/tools/root/usr/lib/x86_64-linux-gnu/libxml2.so.2: no version information available (required by ~/.local/share/pi-lens-orchestrator/tmp/4522/tools/bin/swiftlint)\n~/.local/share/pi-lens-orchestrator/tmp/4522/tools/bin/swiftlint: ~/.local/share/pi-lens-orchestrator/tmp/4522/tools/root/usr/lib/x86_64-linux-gnu/libxml2.so.2: no version information available (required by ~/.local/share/pi-lens-orchestrator/tmp/4522/tools/bin/swiftlint)\n~/.local/share/pi-lens-orchestrator/tmp/4522/tools/bin/swiftlint: ~/.local/share/pi-lens-orchestrator/tmp/4522/tools/root/usr/lib/x86_64-linux-gnu/libxml2.so.2: no version information available (required by ~/.local/share/pi-lens-orchestrator/tmp/4522/tools/bin/swiftlint)\n~/.local/share/pi-lens-orchestrator/tmp/4522/tools/bin/swiftlint: ~/.local/share/pi-lens-orchestrator/tmp/4522/tools/root/usr/lib/x86_64-linux-gnu/libxml2.so.2: no version information available (required by ~/.local/share/pi-lens-orchestrator/tmp/4522/tools/bin/swiftlint)\n~/.local/share/pi-lens-orchestrator/tmp/4522/tools/bin/swiftlint: ~/.local/share/pi-lens-orchestrator/tmp/4522/tools/root/usr/lib/x86_64-linux-gnu/libxml2.so.2: no version information available (required by ~/.local/share/pi-lens-orchestrator/tmp/4522/tools/bin/swiftlint)\n~/.local/share/pi-lens-orchestrator/tmp/4522/tools/bin/swiftlint: ~/.local/share/pi-lens-orchestrator/tmp/4522/tools/root/usr/lib/x86_64-linux-gnu/libxml2.so.2: no version information available (required by ~/.local/share/pi-lens-orchestrator/tmp/4522/tools/bin/swiftlint)\n~/.local/share/pi-lens-orchestrator/tmp/4522/tools/bin/swiftlint: ~/.local/share/pi-lens-orchestrator/tmp/4522/tools/root/usr/lib/x86_64-linux-gnu/libxml2.so.2: no version information available (required by ~/.local/share/pi-lens-orchestrator/tmp/4522/tools/bin/swiftlint)\n"
+			"stderr": ""
 		}
 	],
-	"cleanUnavailable": "the shipped swiftlint Linux binary loads libsourcekitdInProc.so from a Swift toolchain and aborts on any file without one, so no clean run exists to capture on a host without Swift"
+	"cleanUnavailable": "the shipped swiftlint Linux binary loads libsourcekitdInProc.so from a Swift toolchain and aborts on any file without one, so no clean run exists to capture on a host without Swift",
+	"clean": {
+		"workspace": "tests/fixtures/runner-output-clean/swiftlint",
+		"file": "bad.swift",
+		"argv": [
+			"--reporter",
+			"json",
+			"bad.swift"
+		],
+		"version": "0.65.1",
+		"exitCode": 0,
+		"stdout": "[\n\n]\n",
+		"stderr": "Linting Swift files at paths bad.swift\nLinting 'bad.swift' (1/1)\nwarning: Skipping enabled rule 'statement_position' because it requires SourceKit and SourceKit access is prohibited.\nDone linting! Found 0 violations, 0 serious in 1 file.\n"
+	}
 }

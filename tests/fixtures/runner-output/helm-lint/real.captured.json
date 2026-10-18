@@ -35,7 +35,7 @@
 	],
 	"clean": {
 		"workspace": "tests/fixtures/runner-output-clean/helm-lint",
-		"file": "templates/my file.yaml",
+		"file": "templates/bad.yaml",
 		"argv": [
 			"lint",
 			"__WORKSPACE__"

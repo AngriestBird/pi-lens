@@ -42,7 +42,9 @@ import { FactStore } from "../../../../clients/dispatch/fact-store.js";
 import {
 	listCapturedOutputs,
 	materialize,
+	materializeClean,
 	probeAnswer,
+	probeCommandNames,
 	WORKSPACE_TOKEN,
 } from "../../../helpers/captured-runner-output.js";
 import { setupTestEnvironment } from "../../test-utils.js";
@@ -396,23 +398,20 @@ describe("captured real-binary output", () => {
 	 * fixtures name gets a non-empty stub on a PATH of this suite's own; the stub
 	 * is never executed because `safeSpawnAsync` is the mocked seam.
 	 *
-	 * Appended, not prepended: a host that really has the tool keeps its own.
+	 * Prepended, so the answer is the same on a host that has the tool and on one
+	 * that does not: a cell models presence through its spawn answers alone, and
+	 * both replay suites resolve it the same way (`probeCommandNames`, #4522 F12).
 	 */
 	const presenceStub = setupTestEnvironment("pi-lens-captured-bin-");
 	const originalPath = process.env.PATH;
 
 	beforeAll(() => {
-		const names = new Set<string>();
-		for (const fixture of FIXTURES) {
-			names.add(fixture.provenance.tool);
-			for (const record of fixture.availability) names.add(record.command);
-		}
-		for (const name of names) {
+		for (const name of probeCommandNames(FIXTURES)) {
 			fs.writeFileSync(path.join(presenceStub.tmpDir, name), "#!/bin/sh\n", {
 				mode: 0o755,
 			});
 		}
-		process.env.PATH = `${originalPath ?? ""}${path.delimiter}${presenceStub.tmpDir}`;
+		process.env.PATH = `${presenceStub.tmpDir}${path.delimiter}${originalPath ?? ""}`;
 	});
 
 	afterAll(() => {
@@ -724,17 +723,33 @@ describe("captured real-binary output", () => {
 					relPath: `${fixture.relPath} clean`,
 					file: clean.file,
 					argv: clean.argv,
-					payload: () => ({
-						stdout: clean.stdout,
-						stderr: clean.stderr,
-						status: clean.exitCode,
-					}),
+					// The clean bytes' own paths must name the workspace they replay in,
+					// or the runner attributes a finding to a path that does not exist,
+					// drops it, and this case passes whatever the bytes say (#4522 F4).
+					payload: (workspace) => materializeClean(fixture, workspace),
 				});
 				try {
+					// The clean bytes must name the workspace they replay in. An
+					// unresolved `__WORKSPACE__/bad.js` is a path no parser can
+					// attribute, so a clean run that DID report something would read
+					// clean (#4522 F4). Pinned on the helper, because the fixture
+					// below is the only other place the token is spent.
+					const spelled = materializeClean(fixture, "/clean-probe");
+					expect(
+						`${spelled.stdout}${spelled.stderr}`,
+						`${fixture.relPath}: the clean run's bytes still carry ${WORKSPACE_TOKEN}, so its paths name no file on the replay host`,
+					).not.toContain(WORKSPACE_TOKEN);
 					expect(
 						unrecorded,
 						`${runnerId} (${fixture.caseName}) clean replay spawned probe(s) the capture did not record: ${unrecorded.join("; ")}`,
 					).toEqual([]);
+					// The clean input is the whole point of the run: without it the
+					// captured bytes are a report about nothing, and no parser can be
+					// wrong about them (#4522 F4).
+					expect(
+						fs.existsSync(path.join(env.tmpDir, clean.file)),
+						`${fixture.relPath}: the clean workspace ${clean.workspace} holds no ${clean.file}, so the clean run analysed nothing`,
+					).toBe(true);
 					const tokens = fileTokens(clean.file);
 					const recorded = recordedInvocation(clean.argv, tokens, env.tmpDir);
 					expect(

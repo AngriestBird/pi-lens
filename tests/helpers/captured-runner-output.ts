@@ -75,6 +75,11 @@ export interface CapturedAvailability {
 	exitCode: number | null;
 	stdout: string;
 	stderr: string;
+	/**
+	 * Set when the probe's own binary could not be spawned at all on the capture
+	 * host. It records an absence, never a claim that something answered.
+	 */
+	error?: string;
 }
 
 /**
@@ -109,10 +114,8 @@ export interface CapturedOutput {
 	stderr: string;
 	/** Every probe answer the capture recorded; missing means the fixture is stale. */
 	availability: CapturedAvailability[];
-	/** The captured clean run, when this fixture records one. */
+	/** The captured clean run. Every fixture has one: there is no prose escape. */
 	clean?: CapturedClean;
-	/** Why no clean run can exist, for a tool that cannot analyse a file at all. */
-	cleanUnavailable?: string;
 }
 
 function isNonEmptyString(value: unknown): value is string {
@@ -238,9 +241,6 @@ export function listCapturedOutputs(): CapturedOutput[] {
 					? parsed.availability
 					: [],
 				...(parsed.clean ? { clean: parsed.clean } : {}),
-				...(typeof parsed.cleanUnavailable === "string"
-					? { cleanUnavailable: parsed.cleanUnavailable }
-					: {}),
 			});
 		}
 	}
@@ -274,12 +274,11 @@ export function availabilityProblems(fixture: CapturedOutput): string[] {
 		) {
 			problems.push(`${where}: argv must be an array of strings`);
 		}
-		if (!isNonEmptyString(record?.version)) {
-			problems.push(
-				`${where}: version is missing — a record must name the binary that answered it`,
-			);
-		}
-		if (typeof record?.exitCode !== "number") {
+		// The version tie is `recordProblems` in scripts/capture-runner-output.mjs:
+		// one rule, shared by the capture gate and this census. A record with no
+		// version is only complete when it says its spawn failed, which that rule
+		// also decides.
+		if (typeof record?.exitCode !== "number" && !record?.error) {
 			problems.push(
 				`${where}: exitCode must be the real exit status — a record that drops it cannot tell a rejected probe from an accepted one`,
 			);
@@ -296,22 +295,18 @@ export function availabilityProblems(fixture: CapturedOutput): string[] {
 
 /**
  * Why a fixture's captured clean run does not count as one, if it records any.
- * A fixture with no `clean` record returns no problems here; the matrix's clean
- * cell names its own gap, because that is where the bytes are spent.
+ * A fixture with no clean record returns its own problem here, because the
+ * matrix's clean cell and this census both refuse to model one.
+ *
+ * The version, invocation and workspace ties live in `recordProblems`
+ * (`scripts/capture-runner-output.mjs`), which the capture refuses to write
+ * past; these are the shape checks a hand-edited fixture can still break.
  */
 export function cleanProblems(fixture: CapturedOutput): string[] {
 	const clean = fixture.clean as unknown as Record<string, unknown> | undefined;
 	if (!clean) {
-		if (typeof fixture.cleanUnavailable === "string") {
-			// A stated tool fact stands in for the run; the census requires it.
-			return fixture.cleanUnavailable.trim().length < 20
-				? [
-						`${fixture.relPath}: cleanUnavailable "${fixture.cleanUnavailable}" is too short to be a fact about the tool`,
-					]
-				: [];
-		}
 		return [
-			`${fixture.relPath}: no clean run and no cleanUnavailable fact — capture one with scripts/capture-runner-fixtures.mjs --records-only`,
+			`${fixture.relPath}: no clean run — capture one with scripts/capture-runner-fixtures.mjs --records-only. A prose reason is not a substitute: it let any runner silence its clean cell (#4522 F8)`,
 		];
 	}
 	const problems: string[] = [];
@@ -390,4 +385,55 @@ export function materialize(
 		stderr: substitute(fixture.stderr),
 		status: fixture.exitCode,
 	};
+}
+
+/**
+ * The captured CLEAN run's bytes, with `__WORKSPACE__` replaced by `workspace`.
+ *
+ * The clean half is only evidence once its paths name the workspace it replays
+ * in. An unresolvable `__WORKSPACE__/bad.js` names no file on the replay host,
+ * so a parser that drops a finding for a path outside the cwd drops every
+ * finding, and the clean cell passes whatever the bytes say (#4522 F4).
+ */
+export function materializeClean(
+	fixture: CapturedOutput,
+	workspace: string,
+): { stdout: string; stderr: string; status: number | null } {
+	const clean = fixture.clean;
+	if (!clean) {
+		throw new Error(
+			`${fixture.relPath}: no clean run to materialize — the census requires one`,
+		);
+	}
+	const posixWorkspace = workspace.replace(/\\/g, "/");
+	const substitute = (text: string) =>
+		text.split(WORKSPACE_TOKEN).join(posixWorkspace);
+	return {
+		stdout: substitute(clean.stdout),
+		stderr: substitute(clean.stderr),
+		status: clean.exitCode,
+	};
+}
+
+/**
+ * Every command the fixtures name as a probe answer, plus the work binary of
+ * each. Both replay suites stub these on a PATH of their own, because
+ * `verifyOrInstallCommand` short-circuits on filesystem presence and a host that
+ * has one of them must not change which spawns reach the mocked seam.
+ *
+ * Derived from the fixtures, never listed: a hand-written list (`oxlint` was the
+ * one observed spelling) models presence for exactly the tools that already
+ * broke, and passes every tool added later (#4522 F12).
+ */
+export function probeCommandNames(
+	fixtures: readonly CapturedOutput[],
+): string[] {
+	const names = new Set<string>();
+	for (const fixture of fixtures) {
+		names.add(fixture.provenance.tool);
+		for (const record of fixture.availability) {
+			names.add(record.command.split(/[\\/]/).pop() ?? record.command);
+		}
+	}
+	return [...names].sort();
 }

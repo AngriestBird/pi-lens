@@ -35,11 +35,12 @@
 	],
 	"clean": {
 		"workspace": "tests/fixtures/runner-output-clean/phpstan",
-		"file": "clean.php",
+		"file": "bad.php",
 		"argv": [
 			"analyse",
 			"--error-format=json",
-			"--no-progress"
+			"--no-progress",
+			"bad.php"
 		],
 		"version": "2.2.8",
 		"exitCode": 0,

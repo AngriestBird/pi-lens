@@ -24,10 +24,20 @@
 		{
 			"command": "cargo",
 			"argv": [
-				"clippy",
 				"--version"
 			],
 			"version": "1.99.0",
+			"exitCode": 0,
+			"stdout": "cargo 1.99.0 (5f94df478 2026-08-27)\n",
+			"stderr": ""
+		},
+		{
+			"command": "cargo",
+			"argv": [
+				"clippy",
+				"--version"
+			],
+			"version": "0.1.99",
 			"exitCode": 0,
 			"stdout": "clippy 0.1.99 (b940084d7e 2026-09-28)\n",
 			"stderr": ""
@@ -43,7 +53,7 @@
 		],
 		"version": "1.99.0",
 		"exitCode": 0,
-		"stdout": "{\"reason\":\"compiler-artifact\",\"package_id\":\"path+file://__WORKSPACE__#smoke@0.1.0\",\"manifest_path\":\"__WORKSPACE__/Cargo.toml\",\"target\":{\"kind\":[\"bin\"],\"crate_types\":[\"bin\"],\"name\":\"smoke\",\"src_path\":\"__WORKSPACE__/src/main.rs\",\"edition\":\"2021\",\"doc\":true,\"doctest\":false,\"test\":true},\"profile\":{\"opt_level\":\"0\",\"debuginfo\":2,\"debug_assertions\":true,\"overflow_checks\":true,\"test\":false},\"features\":[],\"filenames\":[\"__WORKSPACE__/target/debug/deps/libsmoke-8b5b19433940b84c.rmeta\"],\"executable\":null,\"fresh\":false}\n{\"reason\":\"build-finished\",\"success\":true}\n",
+		"stdout": "{\"reason\":\"compiler-artifact\",\"package_id\":\"path+file://__WORKSPACE__#smoke@0.1.0\",\"manifest_path\":\"__WORKSPACE__/Cargo.toml\",\"target\":{\"kind\":[\"bin\"],\"crate_types\":[\"bin\"],\"name\":\"smoke\",\"src_path\":\"__WORKSPACE__/src/main.rs\",\"edition\":\"2021\",\"doc\":true,\"doctest\":false,\"test\":true},\"profile\":{\"opt_level\":\"0\",\"debuginfo\":2,\"debug_assertions\":true,\"overflow_checks\":true,\"test\":false},\"features\":[],\"filenames\":[\"__WORKSPACE__/target/debug/deps/libsmoke-4584a4ab8dda12e6.rmeta\"],\"executable\":null,\"fresh\":false}\n{\"reason\":\"build-finished\",\"success\":true}\n",
 		"stderr": ""
 	}
 }

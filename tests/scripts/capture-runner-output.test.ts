@@ -13,12 +13,16 @@ import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
 	buildAvailability,
+	cleanRunRejection,
 	expandWorkspaceArgs,
 	extractVersion,
 	mergeRecords,
 	needsShell,
+	probeBinaryName,
 	quoteForShell,
+	recordProblems,
 	redactWorkspace,
+	resolveBin,
 	WORKSPACE_TOKEN,
 } from "../../scripts/capture-runner-output.mjs";
 
@@ -34,6 +38,26 @@ describe("extractVersion", () => {
 	// The capture refuses to write a fixture when this returns "". Falling back
 	// to "the first line" once recorded a Windows "not compatible with the
 	// version of Windows you're running" error AS the tool version.
+	// #4522 F10: `mix --version` prints the Erlang runtime's banner first and
+	// Mix's second, so the first token in the whole output is erts' version. The
+	// record is documented as "the binary that answered", and 15.2.7 is not Mix.
+	it("takes the line that leads with the command's own name", () => {
+		const banner =
+			"Erlang/OTP 27 [erts-15.2.7.4] [source] [64-bit]\n\nMix 1.18.3 (compiled with Erlang/OTP 27)\n";
+		expect(extractVersion(banner, "mix")).toBe("1.18.3");
+		// Trailing punctuation on the name is part of the banner, not the name.
+		expect(extractVersion("fish_indent, version 4.2.1\n", "fish_indent")).toBe(
+			"4.2.1",
+		);
+		// Without a line naming the command, the first token still answers: a
+		// banner may name its runtime before itself, and refusing that would
+		// reject most tools.
+		expect(extractVersion(banner)).toBe("15.2.7");
+		expect(
+			extractVersion("Ubuntu clang version 21.1.6 (6ubuntu1)", "clang++"),
+		).toBe("21.1.6");
+	});
+
 	it("returns empty for a banner with no version token", () => {
 		expect(extractVersion("")).toBe("");
 		expect(extractVersion("this program cannot be run")).toBe("");
@@ -218,7 +242,7 @@ describe("quoteForShell", () => {
 describe("buildAvailability", () => {
 	it("keeps the argv the checker sends and the real exit status", () => {
 		expect(
-			buildAvailability("helm", ["version", "--short"], "4.3.0", {
+			buildAvailability("helm", ["version", "--short"], {
 				status: 1,
 				stdout: "",
 				stderr: "Error: unknown flag: --short\n",
@@ -226,15 +250,37 @@ describe("buildAvailability", () => {
 		).toEqual({
 			command: "helm",
 			argv: ["version", "--short"],
-			version: "4.3.0",
+			// No version in a rejection: the probe was not answered, so the record
+			// says so rather than borrowing the work binary's banner (#4522 F2).
+			version: "",
 			exitCode: 1,
 			stdout: "",
 			stderr: "Error: unknown flag: --short\n",
 		});
 	});
 
+	// #4522 F2: the version is read from THIS probe's own answer. The capture
+	// spawned the work binary for every probe, so cpp-check recorded g++'s
+	// banner under clang++'s, clang's, gcc's, cc's, c++'s and cl's names.
+	it("reads the version out of its own answer, never the caller's", () => {
+		expect(
+			buildAvailability("cargo", ["--version"], {
+				status: 0,
+				stdout: "cargo 1.99.0 (5f94df478 2026-08-27)\n",
+				stderr: "",
+			}).version,
+		).toBe("1.99.0");
+		expect(
+			buildAvailability("biome", ["explain", "noUnusedVariables"], {
+				status: 0,
+				stdout: "Summary\n\n- Name: noUnusedVariables\n",
+				stderr: "",
+			}).version,
+		).toBe("");
+	});
+
 	it("records a spawn with no exit status as null, never as success", () => {
-		const record = buildAvailability("helm", ["--version"], "4.3.0", {
+		const record = buildAvailability("helm", ["--version"], {
 			status: undefined,
 			stdout: "",
 			stderr: "spawn helm ENOENT",
@@ -242,13 +288,185 @@ describe("buildAvailability", () => {
 		expect(record.exitCode).toBeNull();
 	});
 
+	// A probe whose own binary is absent answered nothing. The record says that
+	// instead of an empty claim that reads like a rejection.
+	it("records a spawn that never happened as an error, not as a version", () => {
+		const record = buildAvailability("clang++", ["--version"], {
+			status: null,
+			stdout: "",
+			stderr: "",
+			error: new Error("spawnSync clang++ ENOENT"),
+		});
+		expect(record.exitCode).toBeNull();
+		expect(record.version).toBe("");
+		expect(record.error).toContain("clang++");
+	});
+
 	it("copies the argv so a later edit cannot rewrite the record", () => {
 		const argv = ["--version"];
-		const record = buildAvailability("yamllint", argv, "1.38.0", {
+		const record = buildAvailability("yamllint", argv, {
 			status: 0,
+			stdout: "yamllint 1.38.0",
+			stderr: "",
 		});
 		argv.push("--debug");
 		expect(record.argv).toEqual(["--version"]);
+	});
+});
+
+// #4522 F6: the clean run's exit status decides whether the bytes are a clean
+// run at all. Disabling this guard wrote a dirty verdict into a fixture's clean
+// half while every test stayed green.
+describe("cleanRunRejection", () => {
+	it("accepts an exit 0 run", () => {
+		expect(
+			cleanRunRejection({ status: 0, stdout: "[]", stderr: "" }),
+		).toBeNull();
+	});
+
+	it("refuses a non-zero exit and names the output", () => {
+		const reason = cleanRunRejection({
+			status: 1,
+			stdout: "found 1 issue in bad.fake\n",
+			stderr: "",
+		});
+		expect(reason).toContain("exited 1");
+		expect(reason).toContain("found 1 issue");
+	});
+
+	it("refuses a spawn that never ran", () => {
+		expect(
+			cleanRunRejection({
+				status: null,
+				stdout: "",
+				stderr: "",
+				error: new Error("spawnSync x ENOENT"),
+			}),
+		).toContain("spawn failed");
+	});
+});
+
+// #4522 F2/F3/F10: one gate decides whether a set of records is evidence about
+// THIS fixture. The capture refuses to write past it; the fixture census
+// re-runs it over every committed fixture.
+describe("recordProblems", () => {
+	const fixture = {
+		provenance: {
+			runner: "elixir-check",
+			argv: ["compile", "--warnings-as-errors"],
+		},
+		availability: [
+			{
+				command: "mix",
+				argv: ["--version"],
+				version: "1.18.3",
+				exitCode: 0,
+				stdout: "Erlang/OTP 27 [erts-15.2.7.4]\n\nMix 1.18.3\n",
+				stderr: "",
+			},
+		],
+		clean: {
+			workspace: "tests/fixtures/runner-output-clean/elixir-check",
+			file: "lib/bad.ex",
+			argv: ["compile", "--warnings-as-errors"],
+			version: "1.18.3",
+			exitCode: 0,
+			stdout: "",
+			stderr: "",
+		},
+	};
+
+	it("passes a record about this binary and this invocation", () => {
+		expect(recordProblems(fixture)).toEqual([]);
+	});
+
+	it("reds a version its own answer never printed", () => {
+		const borrowed = {
+			...fixture,
+			availability: [
+				{
+					...fixture.availability[0],
+					// The Erlang runtime's version under Mix's name: the mislabel F10.
+					version: "15.2.7",
+				},
+			],
+		};
+		// 15.2.7 IS in the answer (inside erts-15.2.7.4), so the version tie alone
+		// cannot see the mislabel: what a capture records is decided by
+		// extractVersion's line preference (#4522 F10). A version from another
+		// binary's banner is the tie's own case.
+		expect(recordProblems(borrowed)).toEqual([]);
+		const foreign = {
+			...fixture,
+			availability: [
+				{
+					...fixture.availability[0],
+					version: "15.2.0-16ubuntu1",
+					stdout: "clippy 0.1.99\n",
+				},
+			],
+		};
+		expect(recordProblems(foreign).join("\n")).toContain("another binary");
+	});
+
+	it("reds a clean run that is not this fixture's invocation", () => {
+		const mismatched = {
+			...fixture,
+			clean: {
+				...fixture.clean,
+				argv: ["--no-config", "--no-execute", "bad.fish"],
+			},
+		};
+		expect(recordProblems(mismatched).join("\n")).toContain(
+			"is not this fixture's own invocation",
+		);
+	});
+
+	it("accepts a probe that never ran, and no free-form reason", () => {
+		expect(
+			recordProblems({
+				...fixture,
+				availability: [
+					{
+						command: "clang++",
+						argv: ["--version"],
+						version: "",
+						exitCode: null,
+						stdout: "",
+						stderr: "",
+						error: "clang++ could not be spawned: ENOENT",
+					},
+				],
+			}),
+		).toEqual([]);
+		expect(
+			recordProblems({
+				...fixture,
+				availability: [
+					{ ...fixture.availability[0], version: "", error: undefined },
+				],
+			}).join("\n"),
+		).toContain("no version in its own answer");
+	});
+});
+
+// #4522 F2: every probe resolves the binary it names, so a checker probing
+// `cargo --version` cannot be answered by the work binary wearing that name.
+describe("probeBinaryName and resolveBin", () => {
+	it("resolves a probe's own command from the bin dir", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-probe-bin-"));
+		fs.writeFileSync(path.join(dir, "cargo"), "#!/bin/sh\n", { mode: 0o755 });
+		try {
+			expect(probeBinaryName("cargo")).toBe("cargo");
+			expect(probeBinaryName("/usr/bin/cargo")).toBe("/usr/bin/cargo");
+			expect(resolveBin("cargo", dir)).toBe(path.join(dir, "cargo"));
+			// An absolute path is the checker's own resolution, not a name to look up.
+			expect(resolveBin("/opt/x/cargo", dir)).toBe("/opt/x/cargo");
+			// Nothing found: the bare name, so PATH and the child's error decide.
+			expect(resolveBin("clang++", dir)).toBe("clang++");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });
 
@@ -260,7 +478,12 @@ describe("mergeRecords", () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-merge-"));
 		const dest = path.join(dir, "real.captured.json");
 		const original = {
-			provenance: { runner: "helm-lint", tool: "helm", version: "4.3.0" },
+			provenance: {
+				runner: "helm-lint",
+				tool: "helm",
+				version: "4.3.0",
+				argv: ["lint", WORKSPACE_TOKEN],
+			},
 			file: "Chart.yaml",
 			exitCode: 0,
 			stdout: "captured findings",
@@ -281,7 +504,7 @@ describe("mergeRecords", () => {
 			clean: {
 				workspace: "tests/fixtures/runner-output-clean/helm-lint",
 				file: "Chart.yaml",
-				argv: ["version", "--short"],
+				argv: ["lint", WORKSPACE_TOKEN],
 				version: "4.3.0",
 				exitCode: 0,
 				stdout: "",
@@ -289,6 +512,7 @@ describe("mergeRecords", () => {
 			},
 			versionArgv: ["version", "--short"],
 		});
+
 		expect(merged.stdout).toBe("captured findings");
 		expect(merged.exitCode).toBe(0);
 		expect(merged.availability).toHaveLength(1);
@@ -298,6 +522,47 @@ describe("mergeRecords", () => {
 		]);
 		const onDisk = JSON.parse(fs.readFileSync(dest, "utf8"));
 		expect(onDisk.clean.exitCode).toBe(0);
+		fs.rmSync(dir, { recursive: true, force: true });
+	});
+
+	// #4522 F3: the retrofit merged the LAST manifest entry's clean run into
+	// every fixture of its runner, so fish-indent's formatter fixture replayed a
+	// `fish --no-execute` syntax check as its clean half. The write is refused
+	// now, and the fixture is left byte-identical.
+	it("refuses a clean run that belongs to another case", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-merge-"));
+		const dest = path.join(dir, "real.captured.json");
+		fs.writeFileSync(
+			dest,
+			JSON.stringify({
+				provenance: {
+					runner: "fish-indent",
+					tool: "fish_indent",
+					version: "4.9.3",
+					argv: ["--check", "unformatted.fish"],
+				},
+				file: "unformatted.fish",
+				exitCode: 1,
+				stdout: "",
+				stderr: "unformatted.fish\n",
+			}),
+		);
+		const before = fs.readFileSync(dest, "utf8");
+		expect(() =>
+			mergeRecords(dest, {
+				availability: [],
+				clean: {
+					workspace: "tests/fixtures/runner-output-clean/fish-indent",
+					file: "bad.fish",
+					argv: ["--no-config", "--no-execute", "bad.fish"],
+					version: "4.2.1",
+					exitCode: 0,
+					stdout: "",
+					stderr: "",
+				},
+			}),
+		).toThrow(/not this fixture's own invocation/);
+		expect(fs.readFileSync(dest, "utf8")).toBe(before);
 		fs.rmSync(dir, { recursive: true, force: true });
 	});
 });

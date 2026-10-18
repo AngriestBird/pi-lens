@@ -27,7 +27,7 @@
 			],
 			"version": "4.2.1",
 			"exitCode": 0,
-			"stdout": "fish, version 4.2.1\n",
+			"stdout": "fish_indent, version 4.2.1\n",
 			"stderr": ""
 		},
 		{
@@ -45,8 +45,7 @@
 		"workspace": "tests/fixtures/runner-output-clean/fish-indent",
 		"file": "bad.fish",
 		"argv": [
-			"--no-config",
-			"--no-execute",
+			"--check",
 			"bad.fish"
 		],
 		"version": "4.2.1",

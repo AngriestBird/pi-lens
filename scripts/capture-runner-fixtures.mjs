@@ -34,6 +34,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveBin } from "./capture-runner-output.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
@@ -61,7 +62,14 @@ const PROBE_OVERRIDES = {
 	"cue-vet": [{ command: "cue", argv: ["version"] }],
 	"go-vet": [{ command: "go", argv: ["version"] }],
 	"zig-check": [{ command: "zig", argv: ["version"] }],
-	"rust-clippy": [{ command: "cargo", argv: ["clippy", "--version"] }],
+	"rust-clippy": [
+		// The runner resolves the PATH candidate by spawning `cargo --version`
+		// before it asks clippy anything (clients/rust-client.ts), and a host
+		// without a Rust toolchain reds the replay when that probe is unrecorded
+		// (#4522 F7). Both probes are recorded, each answered by its own command.
+		{ command: "cargo", argv: ["--version"] },
+		{ command: "cargo", argv: ["clippy", "--version"] },
+	],
 	"helm-lint": [{ command: "helm", argv: ["version", "--short"] }],
 	markdownlint: [{ command: "markdownlint-cli2", argv: ["--no-globs", "-"] }],
 	// fish-indent probes the formatter for every case, and `fish` itself for the
@@ -346,12 +354,10 @@ export const CAPTURES = [
 		// The static build: the dynamic `swiftlint` needs libxml2 and SourceKit.
 		runner: "swiftlint",
 		tool: "swiftlint",
-		// The shipped Linux swiftlint binary loads libsourcekitdInProc.so from a
-		// Swift toolchain before it reads a single file, so no clean run of
-		// `swiftlint --reporter json <file>` can be captured on a host without
-		// Swift. Its availability probe still answers, and it is recorded.
-		cleanUnavailable:
-			"the shipped swiftlint Linux binary loads libsourcekitdInProc.so from a Swift toolchain and aborts on any file without one, so no clean run exists to capture on a host without Swift",
+		// A clean run exists: the binary lints a formatted file and reports `[]`,
+		// warning only that one SourceKit-gated rule was skipped (#4522 F8
+		// measured it; the earlier `cleanUnavailable` fact claimed it aborts on
+		// any file, which its own dirty capture contradicts).
 		workspace: smoke("swiftlint"),
 		file: "bad.swift",
 		argv: ["--reporter", "json", "bad.swift"],
@@ -534,11 +540,10 @@ export const CAPTURES = [
 			"HIGH,CRITICAL",
 			"bad.yaml",
 		],
-		// trivy's built-in k8s ruleset fails three checks even on a fully
-		// hardened pod (measured), so no clean manifest exists to capture; the
-		// dirty bytes are what the parser needs anyway.
-		cleanUnavailable:
-			"trivy's built-in kubernetes ruleset reports failures even on a fully hardened pod (three checks measured), so no clean manifest exists to capture",
+		// A clean run exists: a manifest with no kubernetes resources gives the
+		// ruleset nothing to check, and trivy exits 0 with no results (#4522 F8
+		// measured it; the earlier `cleanUnavailable` fact claimed no clean
+		// manifest exists at all).
 	},
 	{
 		runner: "tflint",
@@ -570,27 +575,6 @@ export const CAPTURES = [
 		argv: ["build-exe", "bad.zig", "-fno-emit-bin"],
 	},
 ];
-
-/** Directories searched for a tool binary, in order. */
-function candidateDirs(binDir) {
-	const home = os.homedir();
-	return [
-		binDir,
-		path.join(home, ".pi-lens", "bin"),
-		path.join(home, ".pi-lens", "tools", "node_modules", ".bin"),
-	].filter(Boolean);
-}
-
-/** Absolute path to `name`'s binary, or the bare name to fall back to PATH. */
-export function resolveBin(name, binDir) {
-	for (const dir of candidateDirs(binDir)) {
-		for (const suffix of [".exe", ".bat", ".cmd", ""]) {
-			const candidate = path.join(dir, `${name}${suffix}`);
-			if (fs.existsSync(candidate)) return candidate;
-		}
-	}
-	return name;
-}
 
 function main() {
 	const argv = process.argv.slice(2);
@@ -634,6 +618,7 @@ function main() {
 			const recordArgs = [
 				...(entry.versionArgs ? ["--version-args", entry.versionArgs] : []),
 				...(entry.shell ? ["--shell", entry.shell] : []),
+				...(binDir ? ["--bin-dir", binDir] : []),
 				...probes.flatMap((probe) => [
 					"--probe",
 					JSON.stringify({ command: probe.command, argv: probe.argv }),
@@ -641,69 +626,62 @@ function main() {
 			];
 
 			if (recordsOnly) {
-				const dir = path.join(
+				// Key on the entry's OWN case. Iterating the directory instead merged
+				// one entry's clean run into every fixture of its runner, so
+				// fish-indent's formatter fixture replayed an entry that ran
+				// `fish --no-execute`, and the clean half of six fixtures was
+				// evidence about an invocation they never send (#4522 F3).
+				const caseName = entry.case ?? "real";
+				const dest = path.join(
 					repoRoot,
 					"tests/fixtures/runner-output",
 					entry.runner,
+					`${caseName}.captured.json`,
 				);
-				if (!fs.existsSync(dir)) {
-					skipped.push(`${entry.runner}: no fixture to merge into`);
+				if (!fs.existsSync(dest)) {
+					skipped.push(`${entry.runner}/${caseName}: no fixture to merge into`);
 					continue;
 				}
-				const cases = fs
-					.readdirSync(dir)
-					.filter((name) => name.endsWith(".captured.json"))
-					.sort();
-				for (const name of cases) {
-					const workspace = tempWorkspace(entry.workspace, "dirty").dir;
-					const clean = entry.cleanUnavailable
-						? null
-						: tempWorkspace(cleanWorkspace, "clean").dir;
-					try {
-						execFileSync(
-							process.execPath,
-							[
-								path.join(__dirname, "capture-runner-output.mjs"),
-								"--runner",
-								entry.runner,
-								"--tool",
-								entry.tool,
-								"--bin",
-								bin,
-								"--cwd",
-								workspace,
-								"--file",
-								entry.file,
-								"--merge-into",
-								path.join(dir, name),
-								...(entry.cleanUnavailable
-									? ["--clean-unavailable", entry.cleanUnavailable]
-									: [
-											"--clean-cwd",
-											clean,
-											"--clean-workspace",
-											cleanWorkspace,
-											"--clean-file",
-											entry.file,
-										]),
-								...recordArgs,
-								"--",
-								...entry.argv,
-							],
-							{ stdio: "inherit" },
-						);
-						captured++;
-					} catch (err) {
-						skipped.push(`${entry.runner}/${name}: ${err?.message ?? err}`);
-					}
+				const workspace = tempWorkspace(entry.workspace, "dirty").dir;
+				const clean = tempWorkspace(cleanWorkspace, "clean").dir;
+				try {
+					execFileSync(
+						process.execPath,
+						[
+							path.join(__dirname, "capture-runner-output.mjs"),
+							"--runner",
+							entry.runner,
+							"--tool",
+							entry.tool,
+							"--bin",
+							bin,
+							"--cwd",
+							workspace,
+							"--file",
+							entry.file,
+							"--merge-into",
+							dest,
+							"--clean-cwd",
+							clean,
+							"--clean-workspace",
+							cleanWorkspace,
+							"--clean-file",
+							entry.file,
+							...recordArgs,
+							"--",
+							...entry.argv,
+						],
+						{ stdio: "inherit" },
+					);
+					captured++;
+				} catch (err) {
+					skipped.push(`${entry.runner}/${caseName}: ${err?.message ?? err}`);
 				}
 				continue;
 			}
 
 			const workspace = tempWorkspace(entry.workspace, "dirty").dir;
-			const clean = entry.cleanUnavailable
-				? null
-				: tempWorkspace(cleanWorkspace, "clean").dir;
+			const clean = tempWorkspace(cleanWorkspace, "clean").dir;
 			try {
 				execFileSync(
 					process.execPath,
@@ -724,16 +702,12 @@ function main() {
 						"--case",
 						entry.case ?? "real",
 						...(entry.note ? ["--note", entry.note] : []),
-						...(entry.cleanUnavailable
-							? ["--clean-unavailable", entry.cleanUnavailable]
-							: [
-									"--clean-cwd",
-									clean,
-									"--clean-workspace",
-									cleanWorkspace,
-									"--clean-file",
-									entry.file,
-								]),
+						"--clean-cwd",
+						clean,
+						"--clean-workspace",
+						cleanWorkspace,
+						"--clean-file",
+						entry.file,
 						...recordArgs,
 						"--",
 						...entry.argv,
