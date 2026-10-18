@@ -61,6 +61,29 @@
  * than a silent pass (AGENTS.md shape 69). A baseline row therefore means
  * "this write is not provably restored here", and it shrinks when the file is
  * made readable.
+ *
+ * ## Declared gaps (legal shapes this bounded model cannot place)
+ *
+ * Each of these typechecks, and each is fail-open: it can hide a write. None
+ * had a live member in the swept tree when it was recorded, so the classifier
+ * declines them rather than guessing (#4593 round 4):
+ *
+ * - a binding assigned `process.env` after its declaration
+ *   (`let env: NodeJS.ProcessEnv; env = process.env;`) — `isEnv` follows a
+ *   declaration initializer only, and a parameter has none;
+ * - a `for (process.env.K of …)` / `for (process.env.K in …)` loop target —
+ *   `astWrites` classifies assignment, delete and update targets, not a loop
+ *   left side;
+ * - a conditional put-back inside a teardown or `finally`
+ *   (`if (c) delete process.env.K;`) — a region hit is credited whether or not
+ *   its branch runs;
+ * - a write through a helper parameter
+ *   (`function f(env: NodeJS.ProcessEnv) { env.K = "x"; }`) — the write
+ *   resolves against the parameter, which binds no initializer.
+ *
+ * A sequence-expression object is the same shape, but the plain spelling
+ * (`(0, process.env).K = "x"`) is `error TS2695`; only a side-effecting head
+ * operand compiles.
  */
 
 import { parseSync, visitorKeys, type Node } from "oxc-parser";
