@@ -1133,6 +1133,17 @@ describe("workflow gh calls resolve a repository (#4382)", () => {
 		}
 	});
 
+	it("keeps a shell file operand inside the stated limit", () => {
+		// The limit has a boundary: `bash ci.sh` is not read, and it is not
+		// reported either, even when the same region names a `gh` call. Reporting
+		// it is the false positive a real workflow with no checkout would hit.
+		expect(
+			probe({
+				run: `printf '%s\\n' '${BARE_GH_WRITE}' > ci.sh\nbash ci.sh`,
+			}).findings,
+		).toEqual([]);
+	});
+
 	it("keeps a job with no gh call out of the population", () => {
 		expect(probe({ run: "echo hello" })).toEqual({
 			findings: [],
