@@ -2805,8 +2805,15 @@ function lintDiffCompliance(body, options) {
 			const namespaces = vitestNamespaces(source);
 			for (const declaration of declarationCalls(text, names, namespaces)) {
 				const callLine = lineAt(source, declaration.start);
-				const callEndLine = lineAt(source, declaration.close);
-				const declarationAdded = addedIn(callLine, callEndLine);
+				// A declaration is added, renamed or re-tabled by the lines that
+				// spell it: its identifier, its modifier chain and its title. The
+				// callback below is not part of the declaration, so an edit inside
+				// a test body never asks the author for a red-first transcript
+				// (#4605 F2: the round's own edits reded 22 untouched titles).
+				const declarationAdded = addedIn(
+					callLine,
+					lineAt(source, declaration.paren),
+				);
 				const string = strings.find(
 					(value) =>
 						value.start > declaration.paren &&

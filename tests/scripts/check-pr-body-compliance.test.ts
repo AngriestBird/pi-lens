@@ -733,6 +733,15 @@ describe("diff-keyed compliance (#4585)", () => {
 				tilde.headFiles,
 			),
 		).toEqual([]);
+		// A tilde fence reads like any other fence: it proves only its own title
+		// in its own file.
+		expect(
+			errors(
+				"~~~text\nFAIL tests/other.test.ts > tilde case\nTests 1 failed\n~~~",
+				tilde.diff,
+				tilde.headFiles,
+			).join(),
+		).toContain("row 1");
 		const opener = image("tests/a.test.ts", 'test("control case", () => {});');
 		expect(
 			errors(
