@@ -867,6 +867,50 @@ describe("#4589 server-teardown detector — the shapes that must red and green"
 		).toEqual([["makeHandle()", "unresolvable"]]);
 	});
 
+	it("admits a bind-through-call on a value the scan reads as no handle (F2, shape 69)", () => {
+		// `Function.prototype.bind.call(fn, null)` is `fn.bind(null)`: the verb
+		// came from a function value's own `bind`, and the receiver the call
+		// SUPPLIES is a plain function, so no port is bound and no listener
+		// starts. Applying `bind` to anything the scan can read as no handle
+		// would turn every `.call`/`.apply` on a function value into a start
+		// (Greptile, gate:769).
+		const noListener: Array<[string, string[]]> = [
+			[
+				"Function.prototype.bind on a plain function",
+				["const fn = () => {};", "Function.prototype.bind.call(fn, null);"],
+			],
+			[
+				"a handle's own verb with a plain function as the receiver",
+				[
+					'const socket = dgram.createSocket("udp4");',
+					"const fn = () => {};",
+					"socket.bind.call(fn, 0);",
+				],
+			],
+			[
+				"a preload hook bound the same way",
+				[
+					"const hook = async () => {};",
+					"Promise.resolve().then(Function.prototype.bind.call(hook, null, 1));",
+				],
+			],
+		];
+		for (const [label, lines] of noListener)
+			expect(scanListen(lines), label).toEqual([]);
+		// The other directions still report: a receiver the scan cannot place at
+		// all, and an invocation that supplies no receiver (the caller's own
+		// `this` names no handle).
+		expect(
+			scanListen([
+				'const socket = dgram.createSocket("udp4");',
+				"socket.bind.call(makeHandle(), 0);",
+			]),
+		).toEqual([["makeHandle()", "unresolvable"]]);
+		expect(
+			scanListen(['const a = dgram.createSocket("udp4");', "a.bind.call();"]),
+		).toEqual([["a.bind.call()", "unresolvable"]]);
+	});
+
 	it("reports a non-identifier receiver and an unclassified construction (fail closed)", () => {
 		expect(
 			scanListen([

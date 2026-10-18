@@ -613,6 +613,26 @@ export function findUnclosedServerStarts(
 		);
 	};
 
+	/**
+	 * A supplied receiver the scan can READ as a value that binds no port: a
+	 * literal, a function, or an identifier whose bindings this file declares and
+	 * none of which is a handle construction. `Function.prototype.bind.call(fn,
+	 * null)` and `socket.bind.call(fn, 0)` are `fn.bind(...)` -- a bind on a value
+	 * that is not a handle -- so neither starts a listener (F2, shape 69). Saying
+	 * "indirect, therefore a start" made every `.call`/`.apply` on a function
+	 * value report, which the dot form does not.
+	 */
+	const bindsOnPlainValue = (receiver: SgNode): boolean => {
+		const kind = String(receiver.kind());
+		if (kind === "null" || kind === "undefined" || kind === "class")
+			return true;
+		if (isFunction(receiver)) return true;
+		if (kind !== "identifier") return false;
+		const names = identityNames(receiver.text(), bindings);
+		const own = bindings.filter((binding) => names.includes(binding.name));
+		return own.length > 0 && !own.some((b) => isHandleConstruction(b.value));
+	};
+
 	const starts: Array<{
 		receiver: SgNode;
 		node: SgNode;
@@ -762,10 +782,17 @@ export function findUnclosedServerStarts(
 			receiver.kind() === "identifier" && runtimeNames.has(receiver.text());
 		const readable = bindsOnHandle(receiver);
 		if (verb !== undefined && START_VERBS.has(verb)) {
-			// An INDIRECT invocation always reports: its verb came from a function
-			// value, so a supplied receiver the scan cannot read as a handle has
-			// nothing else to attribute the start to (R2, shape 69).
-			if (verb === "listen" || runtimeBind || readable || indirectVerb)
+			// `listen` always reports. `bind`/`serve` report on a runtime global, on a
+			// receiver the scan reads as a handle, or -- for an INDIRECT invocation --
+			// on a supplied receiver it cannot place at all; a receiver it can read as
+			// no handle is the same `Function.prototype.bind` the dot form admits
+			// (F2, shape 69).
+			if (
+				verb === "listen" ||
+				runtimeBind ||
+				readable ||
+				(indirectVerb && !bindsOnPlainValue(receiver))
+			)
 				starts.push({ receiver, node: call });
 			continue;
 		}
