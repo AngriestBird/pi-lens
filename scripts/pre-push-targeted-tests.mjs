@@ -207,6 +207,9 @@ export const TEST_TREE_GOVERNANCE_TESTS = [
 	"tests/config/test-env-restore-sweep.test.ts",
 	// #3472: the tests-tree scanners the census finds through tests/support.
 	"tests/config/module-instance-coverage.test.ts",
+	// #4518: walks .github/ producer files through
+	// tests/support/continue-on-error-census.ts.
+	"tests/config/nightly-evaluated-floors.test.ts",
 	"tests/config/tmp-fixture-hygiene.test.ts",
 	// #4591: reads tests/support/vitest-setup.ts to pin the leak-origin
 	// record's write-before-remove wiring.

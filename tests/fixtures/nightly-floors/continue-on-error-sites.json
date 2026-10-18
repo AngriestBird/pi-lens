@@ -1,129 +1,251 @@
 {
-	"_comment": "Every `continue-on-error` site in .github/workflows/, minus the LSP nightly (tool-smoke.yml), with the reason it may read green without proving it evaluated anything (#4518). A `floored` row names the step in the same job that carries the floor and the exact text proving it there; the floor step must NOT be continue-on-error, or the floor gates nothing. A `no-floor` row states the reader that makes an empty result visible instead. tests/config/nightly-evaluated-floors.test.ts derives the population from the YAML and fails closed on a site this file does not name, and on a workflow's raw `continue-on-error` key count disagreeing with the parsed one. Measured floors behind the `floored` rows live in measurements.json (nonLspFloors) where a run measured them.",
-	"lspNightly": {
-		"workflow": "tool-smoke.yml",
-		"reason": "The LSP nightly. #4514 floors its four best-effort producers in one gating step (tool-smoke job, 'LSP evaluated floor') that reads their records and the committed docs, and tests/config/nightly-evaluated-floors.test.ts pins that step, its position after every producer, and the four producers' continue-on-error. Its other continue-on-error sites (setup actions, the notify jobs, the refresh-PR steps) are the same shapes as the rows here but sit in the workflow this issue excluded, so #4514's tests own them."
-	},
+	"_comment": "Every `continue-on-error` site under .github/workflows/ (*.yml and *.yaml) and .github/actions/**/action.{yml,yaml}, with the reason it may read green without proving it evaluated anything (#4518). Nothing is excluded by file: a `floored` row names the step in the site's own job that carries the floor and the exact text proving it on a live, uncommented line; the floor step must NOT be continue-on-error and must be one the runner executes. A `no-floor` row states the reader that makes an empty result visible instead. A `governed-by` row names the issue and the tests that own the site. tests/config/nightly-evaluated-floors.test.ts derives the population from the parsed files (a deep walk of the document, so a `continue-on-error` inside a `run:` heredoc is text, not a key) and fails closed on: an unregistered site, a registered row with no site, a continue-on-error key at a location the reader does not classify, a producer file the reader does not classify, and an unparseable producer file. Measured floors behind the `floored` rows live in measurements.json (nonLspFloors) where a run measured them.",
 	"sites": {
-		"ci.yml#targeted-tests-advisory": {
-			"status": "no-floor",
-			"reason": "A pull request that touches no test-covered source legitimately matches zero test files, so a count floor would red a docs-only PR. scripts/pre-push-targeted-tests.mjs logs every file it matched nothing for ('[pre-push] no tests matched <file>'), the job is advisory by its name suffix, and a job-level continue-on-error still lets its check row read failure."
-		},
-		"ci.yml#install-test#POSIX case-insensitive anchors (APFS)": {
+		".github/workflows/ci.yml#install-test#POSIX case-insensitive anchors (APFS)": {
 			"status": "floored",
 			"floorStep": "APFS anchors evaluated floor",
 			"evidence": "--count \"apfs-anchors=",
 			"reason": "The anchors stay advisory about test RESULTS, and the non-continue-on-error floor step below them reds the leg when fewer than 100 tests executed (223 on the measured macOS leg; measurements.json nonLspFloors)."
 		},
-		"ci.yml#install-test#Rule catalog report (non-blocking)": {
+		".github/workflows/ci.yml#install-test#Rule catalog report (non-blocking)": {
 			"status": "no-floor",
 			"reason": "The reporter runs scripts/validate-rule-catalog.mjs over rules/rule-catalog.json and the rule trees, both checked in, and exits non-zero on drift. tests/scripts/rule-language-case.test.ts spawns the same script on fixture repos and asserts its findings in the gating Unit lane, so a validator that stopped reporting cannot pass unnoticed."
 		},
-		"compat-smoke.yml#compat-smoke#Layer A — pinned-contract verification (no pi, no LLM)": {
+		".github/workflows/ci.yml#targeted-tests-advisory": {
+			"status": "no-floor",
+			"reason": "A pull request that touches no test-covered source legitimately matches zero test files, so a count floor would red a docs-only PR. scripts/pre-push-targeted-tests.mjs logs every file it matched nothing for ('[pre-push] no tests matched <file>'), the job is advisory by its name suffix, and a job-level continue-on-error still lets its check row read failure."
+		},
+		".github/workflows/compat-smoke.yml#compat-smoke#Layer A — pinned-contract verification (no pi, no LLM)": {
 			"status": "no-floor",
 			"reason": "The alert job reads its step outcome. Any non-success (contract drift, an infra failure, or a crash before it verified anything) files or refreshes ONE tracking issue by fixed title, and a green run closes that issue, so an empty layer is never silent."
 		},
-		"compat-smoke.yml#compat-smoke#Layer B — real-pi behavioral smoke (no LLM turns)": {
+		".github/workflows/compat-smoke.yml#compat-smoke#Layer B — real-pi behavioral smoke (no LLM turns)": {
 			"status": "no-floor",
 			"reason": "The alert job reads its step outcome the same way as Layer A: a crash, a failed install or a wrong light-mode decision files or refreshes the tracking issue, and a clean run closes it."
 		},
-		"compat-smoke.yml#compat-smoke-alert#Alert on contract drift or infra failure (create-or-update tracking issue)": {
+		".github/workflows/compat-smoke.yml#compat-smoke-alert#Alert on contract drift or infra failure (create-or-update tracking issue)": {
 			"status": "no-floor",
 			"reason": "Tracker maintenance. Gating the notifier would let an issue-upsert failure mask the smoke's own verdict, which the job outputs already carry; a failed upsert shows as this step's outcome in the run log."
 		},
-		"install-smoke.yml#scope": {
+		".github/workflows/install-smoke.yml#host-latest-notify#Notify install drift (file/refresh on failure, close on green)": {
 			"status": "no-floor",
-			"reason": "A fail-open classifier, not a producer. A failed job leaves outputs.smoke empty, and pi-load reads empty as 'not false', so the full matrix runs: the green path cannot skip the work this job scopes."
+			"reason": "Tracker maintenance. The notifier reads all eight host-latest-smoke step outcomes, files or refreshes the tracker on any failure and closes it on green; gating the gh upsert itself would mask the lane's verdict."
 		},
-		"install-smoke.yml#lsp-handshake": {
+		".github/workflows/install-smoke.yml#host-latest-smoke#Build dist": {
+			"status": "no-floor",
+			"reason": "Its step outcome reaches host-latest-notify through the job outputs. A failed dist build files or refreshes the tracker issue by fixed title, and a clean run closes it."
+		},
+		".github/workflows/install-smoke.yml#host-latest-smoke#Download grammars (files[] contract, not build:dist's concern)": {
+			"status": "no-floor",
+			"reason": "Its step outcome reaches host-latest-notify through the job outputs. A failed grammar download files or refreshes the tracker issue by fixed title, and a clean run closes it."
+		},
+		".github/workflows/install-smoke.yml#host-latest-smoke#Install deps (ci, scripts off)": {
+			"status": "no-floor",
+			"reason": "Its step outcome reaches host-latest-notify through the job outputs. A failed install files or refreshes the tracker issue by fixed title, and a clean run closes it."
+		},
+		".github/workflows/install-smoke.yml#host-latest-smoke#Install tarball into a clean project": {
+			"status": "no-floor",
+			"reason": "Its step outcome reaches host-latest-notify through the job outputs. A failed tarball install files or refreshes the tracker issue by fixed title, and a clean run closes it."
+		},
+		".github/workflows/install-smoke.yml#host-latest-smoke#Pack the current repo": {
+			"status": "no-floor",
+			"reason": "Its step outcome reaches host-latest-notify through the job outputs. A failed npm pack files or refreshes the tracker issue by fixed title, and a clean run closes it."
+		},
+		".github/workflows/install-smoke.yml#host-latest-smoke#Pin devDependency to @latest (no-save, scripts off)": {
+			"status": "no-floor",
+			"reason": "Its step outcome reaches host-latest-notify through the job outputs. A failed pin files or refreshes the tracker issue by fixed title, and a clean run closes it."
+		},
+		".github/workflows/install-smoke.yml#host-latest-smoke#Resolve @latest": {
+			"status": "no-floor",
+			"reason": "Its step outcome reaches host-latest-notify through the job outputs. A resolve failure files or refreshes the tracker issue by fixed title, and a clean run closes it."
+		},
+		".github/workflows/install-smoke.yml#host-latest-smoke#Selftest under bun (strictest resolver)": {
+			"status": "no-floor",
+			"reason": "Its step outcome reaches host-latest-notify through the job outputs. A failed bun selftest files or refreshes the tracker issue by fixed title, and a clean run closes it."
+		},
+		".github/workflows/install-smoke.yml#lsp-handshake": {
 			"status": "floored",
 			"floorStep": "LSP handshake layer (install + spawn + initialize each server)",
 			"evidence": "--min-pass=35",
 			"reason": "The job stays advisory (continue-on-error plus its name suffix), and its one graded step carries --min-pass=35: an unavailable server reports a skipped row, never a failure, so a run where every toolchain install failed would exit 0 having proved nothing. 35 sits under both measured PR runs (41 and 40; measurements.json nonLspFloors)."
 		},
-		"install-smoke.yml#lsp-handshake#erlef/setup-beam": {
+		".github/workflows/install-smoke.yml#lsp-handshake#erlef/setup-beam": {
 			"status": "no-floor",
 			"reason": "A toolchain install. An absent Elixir reports skipped handshake rows (run 38641583432), which the --min-pass=35 floor counts, so gating the install would red a PR for a runner-image change rather than for pi-lens."
 		},
-		"install-smoke.yml#mise-repro": {
+		".github/workflows/install-smoke.yml#mise-repro": {
 			"status": "no-floor",
-			"reason": "A leg either runs the whole pi session through scripts/rpc-load-check.mjs or its step exits non-zero, so 'evaluated nothing' has no green spelling: a leg that installed nothing has no pi for the last step to drive. The header above the job in install-smoke.yml states this, and the failing leg's check row is the signal."
+			"reason": "A leg either runs the whole pi session through scripts/rpc-load-check.mjs or its step exits non-zero, so 'evaluated nothing' has no green spelling: a leg that installed nothing has no pi for the last step to drive. The header above the job in install-smoke.yml states this, and the failing leg's check row is the signal.",
+			"header": true
 		},
-		"install-smoke.yml#host-latest-smoke#Resolve @latest": {
+		".github/workflows/install-smoke.yml#scope": {
 			"status": "no-floor",
-			"reason": "Its step outcome reaches host-latest-notify through the job outputs. A resolve failure files or refreshes the tracker issue by fixed title, and a clean run closes it."
+			"reason": "A fail-open classifier, not a producer. A failed job leaves outputs.smoke empty, and pi-load reads empty as 'not false', so the full matrix runs: the green path cannot skip the work this job scopes."
 		},
-		"install-smoke.yml#host-latest-smoke#Install deps (ci, scripts off)": {
-			"status": "no-floor",
-			"reason": "Its step outcome reaches host-latest-notify through the job outputs. A failed install files or refreshes the tracker issue by fixed title, and a clean run closes it."
-		},
-		"install-smoke.yml#host-latest-smoke#Pin devDependency to @latest (no-save, scripts off)": {
-			"status": "no-floor",
-			"reason": "Its step outcome reaches host-latest-notify through the job outputs. A failed pin files or refreshes the tracker issue by fixed title, and a clean run closes it."
-		},
-		"install-smoke.yml#host-latest-smoke#Download grammars (files[] contract, not build:dist's concern)": {
-			"status": "no-floor",
-			"reason": "Its step outcome reaches host-latest-notify through the job outputs. A failed grammar download files or refreshes the tracker issue by fixed title, and a clean run closes it."
-		},
-		"install-smoke.yml#host-latest-smoke#Build dist": {
-			"status": "no-floor",
-			"reason": "Its step outcome reaches host-latest-notify through the job outputs. A failed dist build files or refreshes the tracker issue by fixed title, and a clean run closes it."
-		},
-		"install-smoke.yml#host-latest-smoke#Pack the current repo": {
-			"status": "no-floor",
-			"reason": "Its step outcome reaches host-latest-notify through the job outputs. A failed npm pack files or refreshes the tracker issue by fixed title, and a clean run closes it."
-		},
-		"install-smoke.yml#host-latest-smoke#Install tarball into a clean project": {
-			"status": "no-floor",
-			"reason": "Its step outcome reaches host-latest-notify through the job outputs. A failed tarball install files or refreshes the tracker issue by fixed title, and a clean run closes it."
-		},
-		"install-smoke.yml#host-latest-smoke#Selftest under bun (strictest resolver)": {
-			"status": "no-floor",
-			"reason": "Its step outcome reaches host-latest-notify through the job outputs. A failed bun selftest files or refreshes the tracker issue by fixed title, and a clean run closes it."
-		},
-		"install-smoke.yml#host-latest-notify#Notify install drift (file/refresh on failure, close on green)": {
-			"status": "no-floor",
-			"reason": "Tracker maintenance. The notifier reads all eight host-latest-smoke step outcomes, files or refreshes the tracker on any failure and closes it on green; gating the gh upsert itself would mask the lane's verdict."
-		},
-		"lint.yml#jscpd": {
-			"status": "no-floor",
-			"reason": "jscpd's exit code is the whole verdict (threshold 1) over four fixed in-repo paths: a missing path exits 1, and only a .jscpd.json format or ignore edit can empty the scan. The header above the job in lint.yml states this."
-		},
-		"lint.yml#complexity": {
+		".github/workflows/lint.yml#complexity": {
 			"status": "floored",
 			"floorStep": "Generate complexity report",
 			"evidence": "scripts/complexity-report.mjs",
 			"reason": "scripts/complexity-report.mjs calls the shared assertEvaluated with COMPLEXITY_ANALYZED_FILES_FLOOR, so a run that analyses too few source files exits non-zero and the graded step reds; set -o pipefail keeps a crash behind the pipe from reading green."
 		},
-		"lint.yml#strictness": {
+		".github/workflows/lint.yml#jscpd": {
 			"status": "no-floor",
-			"reason": "The job only publishes the two tsc counts. The gating tests/config/strictness-ratchet.test.ts runs the same two configurations and reds on exit 0, zero diagnostics or any drift, so a tsc that evaluated nothing reds the Unit lane. The header above the job states this."
+			"reason": "jscpd's exit code is the whole verdict (threshold 1) over four fixed in-repo paths: a missing path exits 1, and only a .jscpd.json format or ignore edit can empty the scan. The header above the job in lint.yml states this.",
+			"header": true
 		},
-		"lint.yml#yamllint": {
+		".github/workflows/lint.yml#strictness": {
 			"status": "no-floor",
-			"reason": "The file list is git ls-files of the checkout, and yamllint with an empty list exits 2 (usage), so an empty population reds the row instead of reading clean. The header above the job states this."
+			"reason": "The job only publishes the two tsc counts. The gating tests/config/strictness-ratchet.test.ts runs the same two configurations and reds on exit 0, zero diagnostics or any drift, so a tsc that evaluated nothing reds the Unit lane. The header above the job states this.",
+			"header": true
 		},
-		"lint.yml#typos": {
+		".github/workflows/lint.yml#taplo": {
 			"status": "no-floor",
-			"reason": "crate-ci/typos walks the checkout and exits non-zero on any finding or error; the population is the repo itself and cannot be empty. The header above the job states this."
+			"reason": "npm run taplo feeds git ls-files '*.toml' to taplo, which exits non-zero on a parse error or format drift; only a pathspec edit can empty the match. The header above the job states this.",
+			"header": true
 		},
-		"lint.yml#taplo": {
+		".github/workflows/lint.yml#typos": {
 			"status": "no-floor",
-			"reason": "npm run taplo feeds git ls-files '*.toml' to taplo, which exits non-zero on a parse error or format drift; only a pathspec edit can empty the match. The header above the job states this."
+			"reason": "crate-ci/typos walks the checkout and exits non-zero on any finding or error; the population is the repo itself and cannot be empty. The header above the job states this.",
+			"header": true
 		},
-		"parser-smoke.yml#parser-smoke#Save the managed tool tree": {
+		".github/workflows/lint.yml#yamllint": {
+			"status": "no-floor",
+			"reason": "The file list is git ls-files of the checkout, and yamllint with an empty list exits 2 (usage), so an empty population reds the row instead of reading clean. The header above the job states this.",
+			"header": true
+		},
+		".github/workflows/parser-smoke.yml#parser-smoke#Save the managed tool tree": {
 			"status": "no-floor",
 			"reason": "A cache-write step (mode: save). The graded step above it carries --min-pass=11, and losing the cache costs a cold install on the next run, not a verdict."
 		},
-		"stryker-nightly.yml#mutate#Mutate this shard's half of the deterministic 24-file population": {
+		".github/workflows/stryker-nightly.yml#mutate#Mutate this shard's half of the deterministic 24-file population": {
 			"status": "no-floor",
 			"reason": "Exploratory by design and gates nothing (#4005). The gating 'Fail the shard when the driver failed' step turns a failed shard red, and scripts/stryker-nightly.mjs combine classifies a shard with no report, another shard's report or an unreadable report as failed and lists every incomplete range in the tracking-issue body."
 		},
-		"stryker-pertest.yml#mutate#Mutate the module": {
+		".github/workflows/stryker-pertest.yml#mutate#Mutate the module": {
 			"status": "floored",
 			"floorStep": "List tests that kill no mutant",
 			"evidence": "--count \"stryker-pertest=",
 			"reason": "The mutant count is the verdict, not the report's presence: Stryker writes {\"files\":{}} and exits 0 for a range with nothing to mutate, so the always() candidates step judges the count through assert-evaluated.mjs --floor 1 and its exit status reds the run. Pinned by tests/scripts/floor-steps-executed.test.ts."
+		},
+		".github/workflows/tool-smoke.yml#snapshot-persist-notify": {
+			"status": "no-floor",
+			"reason": "Tracker maintenance, not a producer: snapshot-persist-bench's own step outcome and drift state are the verdict, and this job only files, refreshes or closes the tracking issue by fixed title."
+		},
+		".github/workflows/tool-smoke.yml#snapshot-persist-notify#Notify on snapshot-persist drift (file/update/close tracking issue)": {
+			"status": "no-floor",
+			"reason": "Tracker maintenance over the bench's drift state: the bench step carries the verdict, and a missing state file leaves the issue untouched rather than reading clean."
+		},
+		".github/workflows/tool-smoke.yml#test-history-notify": {
+			"status": "no-floor",
+			"reason": "Tracker maintenance, not a producer: the test-history rollup and publish steps' own outcomes are the verdict, and this job only files or refreshes the #4030 tracking issue. Gating the issue upsert here would mask the rollup's failure instead of reporting it."
+		},
+		".github/workflows/tool-smoke.yml#tool-smoke#LSP capability census (gate refresh PR)": {
+			"status": "no-floor",
+			"reason": "Its step outcome gates the refresh PR through needs.tool-smoke.outputs.census (the PR step runs only on 'success'), and 'Notify on LSP capability census' files one tracking issue on any failure, so a red census is visible even though it cannot fail the nightly."
+		},
+		".github/workflows/tool-smoke.yml#tool-smoke#LSP capability matrix (characterize diagnostic mode per server)": {
+			"status": "governed-by",
+			"governedBy": "#4514",
+			"tests": [
+				"tests/config/nightly-evaluated-floors.test.ts",
+				"tests/config/lsp-capability-refresh-workflow.test.ts",
+				"tests/config/lsp-idle-eviction-measurement.test.ts"
+			],
+			"reason": "One of the four best-effort LSP producers #4514 floors together: the gating step \"LSP evaluated floor\" in the same job reads their {producer, evaluated} records and the committed docs, and nightly-evaluated-floors pins that step, its position after this producer, and this step's continue-on-error."
+		},
+		".github/workflows/tool-smoke.yml#tool-smoke#LSP clean-signal probe (Tier 2 vs 3 among push servers) + silentOnClean drift check": {
+			"status": "governed-by",
+			"governedBy": "#4514",
+			"tests": [
+				"tests/config/nightly-evaluated-floors.test.ts",
+				"tests/config/lsp-capability-refresh-workflow.test.ts",
+				"tests/config/lsp-idle-eviction-measurement.test.ts"
+			],
+			"reason": "One of the four best-effort LSP producers #4514 floors together: the gating step \"LSP evaluated floor\" in the same job reads their {producer, evaluated} records and the committed docs, and nightly-evaluated-floors pins that step, its position after this producer, and this step's continue-on-error."
+		},
+		".github/workflows/tool-smoke.yml#tool-smoke#LSP idle-eviction measurement (regenerate docs/lsp-idle-eviction.md)": {
+			"status": "governed-by",
+			"governedBy": "#4514",
+			"tests": [
+				"tests/config/nightly-evaluated-floors.test.ts",
+				"tests/config/lsp-capability-refresh-workflow.test.ts",
+				"tests/config/lsp-idle-eviction-measurement.test.ts"
+			],
+			"reason": "One of the four best-effort LSP producers #4514 floors together: the gating step \"LSP evaluated floor\" in the same job reads their {producer, evaluated} records and the committed docs, and nightly-evaluated-floors pins that step, its position after this producer, and this step's continue-on-error."
+		},
+		".github/workflows/tool-smoke.yml#tool-smoke#LSP server capability inventory (regenerate docs/servercapabilities.md)": {
+			"status": "governed-by",
+			"governedBy": "#4514",
+			"tests": [
+				"tests/config/nightly-evaluated-floors.test.ts",
+				"tests/config/lsp-capability-refresh-workflow.test.ts",
+				"tests/config/lsp-idle-eviction-measurement.test.ts"
+			],
+			"reason": "One of the four best-effort LSP producers #4514 floors together: the gating step \"LSP evaluated floor\" in the same job reads their {producer, evaluated} records and the committed docs, and nightly-evaluated-floors pins that step, its position after this producer, and this step's continue-on-error."
+		},
+		".github/workflows/tool-smoke.yml#tool-smoke#Promote idle-eviction candidates (night memory + working-tree edit)": {
+			"status": "no-floor",
+			"reason": "A working-tree edit only the promotion PR below commits: a missing measurement summary clears the night memory and promotes nothing, and the idle-eviction measurement and its registry test read the tree this step would have changed."
+		},
+		".github/workflows/tool-smoke.yml#tool-smoke#Save the managed tool tree": {
+			"status": "no-floor",
+			"reason": "A cache-write step (mode: save), the same shape as the cache save in parser-smoke.yml: the graded layers above it carry the verdict, and losing the cache costs a cold install on the next night."
+		},
+		".github/workflows/tool-smoke.yml#tool-smoke#Seed the capability matrix from the last unmerged refresh": {
+			"status": "no-floor",
+			"reason": "Fail-open doc bookkeeping: any error leaves master's capability matrix untouched and the step exits 0. Its loss is a stale bookkeeping row, never an unproven verdict, and the refresh guard above the PR writer reads the regenerated docs."
+		},
+		".github/workflows/tool-smoke.yml#tool-smoke#actions/setup-java": {
+			"status": "no-floor",
+			"reason": "Java toolchain install, not a producer: an absent toolchain reports its servers as unavailable, which the #4514 \"LSP evaluated floor\" step in the same job counts, so an install that silently did nothing cannot read green."
+		},
+		".github/workflows/tool-smoke.yml#tool-smoke#dart-lang/setup-dart": {
+			"status": "no-floor",
+			"reason": "Dart toolchain install, not a producer: an absent toolchain reports its servers as unavailable, which the #4514 \"LSP evaluated floor\" step in the same job counts, so an install that silently did nothing cannot read green."
+		},
+		".github/workflows/tool-smoke.yml#tool-smoke#erlef/setup-beam": {
+			"status": "no-floor",
+			"reason": "Elixir/Gleam toolchain install, not a producer: an absent toolchain reports its servers as unavailable, which the #4514 \"LSP evaluated floor\" step in the same job counts, so an install that silently did nothing cannot read green."
+		},
+		".github/workflows/tool-smoke.yml#tool-smoke#mlugg/setup-zig": {
+			"status": "no-floor",
+			"reason": "Zig toolchain install, not a producer: an absent toolchain reports its servers as unavailable, which the #4514 \"LSP evaluated floor\" step in the same job counts, so an install that silently did nothing cannot read green."
+		},
+		".github/workflows/tool-smoke.yml#tool-smoke#ruby/setup-ruby": {
+			"status": "no-floor",
+			"reason": "Ruby toolchain install, not a producer: an absent toolchain reports its servers as unavailable, which the #4514 \"LSP evaluated floor\" step in the same job counts, so an install that silently did nothing cannot read green."
+		},
+		".github/workflows/tool-smoke.yml#tool-smoke#shivammathur/setup-php": {
+			"status": "no-floor",
+			"reason": "PHP toolchain install, not a producer: an absent toolchain reports its servers as unavailable, which the #4514 \"LSP evaluated floor\" step in the same job counts, so an install that silently did nothing cannot read green."
+		},
+		".github/workflows/tool-smoke.yml#tool-smoke-notify": {
+			"status": "no-floor",
+			"reason": "Tracker maintenance: issue upserts must never change the nightly's own conclusion. Each notifier reads a producer's staged outcome and log, so a failed producer is reported rather than gated here."
+		},
+		".github/workflows/tool-smoke.yml#tool-smoke-notify#Notify on LSP capability census (file/update/close tracking issue)": {
+			"status": "no-floor",
+			"reason": "Tracker maintenance over the census outcome and job status (#4277): it reports the failure any of the inspected LSP steps produced, and gating the notifier would mask the census it exists to report."
+		},
+		".github/workflows/tool-smoke.yml#tool-smoke-notify#Notify on idle-eviction drift (file/update/close tracking issue)": {
+			"status": "no-floor",
+			"reason": "Tracker maintenance over the measurement's drift state: the measurement and its registry test carry the verdict, and a missing state file leaves the issue as it is rather than reading clean."
+		},
+		".github/workflows/tool-smoke.yml#tool-smoke-notify#Notify on silentOnClean drift (file/update/close tracking issue)": {
+			"status": "no-floor",
+			"reason": "Tracker maintenance over the clean-signal probe's summary: the probe's own continue-on-error outcome and the #4514 evaluated floor carry the verdict; this step only files, refreshes or closes the #594 issue."
+		},
+		".github/workflows/tool-smoke.yml#tool-smoke-notify#Notify on tool-smoke red (file/update/close tracking issue)": {
+			"status": "no-floor",
+			"reason": "Tracker maintenance over the six gating layer outcomes (#2723): it reports a red the non-continue-on-error layers already produced, so gating the notifier itself would only hide that verdict."
+		},
+		".github/workflows/tool-smoke.yml#tool-smoke-prs#Open/update LSP-docs refresh PR": {
+			"status": "no-floor",
+			"reason": "PR plumbing, not a producer: 'Refuse a degraded refresh (regenerated docs against HEAD)' above it is the gate and is not continue-on-error, so a degraded night never reaches this writer, and a copy failure shows as this step's own outcome."
+		},
+		".github/workflows/tool-smoke.yml#tool-smoke-prs#Open/update idle-eviction promotion PR": {
+			"status": "no-floor",
+			"reason": "PR plumbing, not a producer: it opens only for a promotion the measurement step proposed, and the same job's non-continue-on-error refresh guard reads the docs the measurement wrote before either PR step runs."
 		}
 	}
 }

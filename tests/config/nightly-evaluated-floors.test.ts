@@ -1,6 +1,14 @@
-import { readdirSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { afterAll, describe, expect, it } from "vitest";
 import yaml from "../../clients/deps/js-yaml.js";
 import { COMPLEXITY_ANALYZED_FILES_FLOOR } from "../../scripts/complexity-report.mjs";
 import {
@@ -8,7 +16,20 @@ import {
 	EVALUATED_DIR_ENV,
 	EVALUATED_PRODUCERS,
 } from "../../scripts/lib/assert-evaluated.mjs";
-import { stripSource } from "../support/sweep-kit.js";
+import type {
+	CoERow,
+	CoESite,
+	CoEStatus,
+} from "../support/continue-on-error-census.js";
+import {
+	floorProblems,
+	liveRunText,
+	readProducerCensus,
+	rowProblems,
+	stepIdentity,
+	stripShellComments,
+} from "../support/continue-on-error-census.js";
+import { auditRegistry, stripSource } from "../support/sweep-kit.js";
 
 // Recurrence #4514 (retro P2): the four best-effort LSP producers exit 0 under
 // continue-on-error, so the nightly read green while 41 captured servers fell
@@ -168,11 +189,12 @@ describe("the floor step and the refresh guard are wired and gating (#4514)", ()
 		const floor = step(smoke, "LSP evaluated floor");
 		expect(floor["continue-on-error"]).toBeUndefined();
 		expect(floor.id).toBe("evaluated_floor");
-		expect(floor.run).toContain("scripts/assert-evaluated.mjs --records");
+		const run = liveRunText(floor);
+		expect(run).toContain("scripts/assert-evaluated.mjs --records");
 		// A doc-only loss (a matrix cell gone `unknown`) must red the step the
 		// notifier reads, not only the refresh job that no tracker watches.
-		expect(floor.run).toMatch(/--records "\$\w+" --docs\b/);
-		expect(floor.run).toMatch(/^\s*set -o pipefail\s*$/m);
+		expect(run).toMatch(/--records "\$\w+" --docs\b/);
+		expect(run).toMatch(/^\s*set -o pipefail\s*$/m);
 		const at = (name: string) => steps.indexOf(step(smoke, name));
 		for (const earlier of [
 			"LSP capability matrix",
@@ -187,7 +209,7 @@ describe("the floor step and the refresh guard are wired and gating (#4514)", ()
 	it("names the records directory once, in the job env the producers and the floor step share", () => {
 		const dir = smoke.env?.[EVALUATED_DIR_ENV];
 		expect(dir).toBeTruthy();
-		expect(step(smoke, "LSP evaluated floor").run).toContain(
+		expect(liveRunText(step(smoke, "LSP evaluated floor"))).toContain(
 			`"$${EVALUATED_DIR_ENV}"`,
 		);
 	});
@@ -203,10 +225,9 @@ describe("the floor step and the refresh guard are wired and gating (#4514)", ()
 	});
 
 	it("gives the LSP handshake a --min-pass at or below what a healthy and a degraded night both passed", () => {
-		const floor = Number(
-			/--min-pass=(\d+)/.exec(
-				step(smoke, "LSP handshake layer").run ?? "",
-			)?.[1],
+		const floor = floorOf(
+			liveRunText(step(smoke, "LSP handshake layer")),
+			/--min-pass=(\d+)/,
 		);
 		expect(floor).toBeGreaterThan(0);
 		for (const night of ["healthy", "degraded"] as const)
@@ -232,7 +253,7 @@ describe("the floor step and the refresh guard are wired and gating (#4514)", ()
 		const steps = prs.steps ?? [];
 		const guard = step(prs, "Refuse a degraded refresh");
 		expect(guard["continue-on-error"]).toBeUndefined();
-		expect(guard.run).toContain("scripts/assert-evaluated.mjs --docs");
+		expect(liveRunText(guard)).toContain("scripts/assert-evaluated.mjs --docs");
 		const guardAt = steps.indexOf(guard);
 		expect(guardAt).toBeGreaterThan(steps.indexOf(step(prs, "Overlay")));
 		for (const open of [
@@ -292,14 +313,15 @@ describe("the floors outside the LSP nightly are measured and wired (#4518)", ()
 		expect(anchors.run).toContain(
 			'--reporter=json --outputFile.json="$RUNNER_TEMP/apfs-anchors.json"',
 		);
-		expect(floor.run).toContain('"$RUNNER_TEMP/apfs-anchors.json"');
-		expect(floor.run).toContain("j.numPassedTests+j.numFailedTests");
-		expect(floor.run).toMatch(/--count "apfs-anchors=\$\{count\}"/);
+		const floorRun = liveRunText(floor);
+		expect(floorRun).toContain('"$RUNNER_TEMP/apfs-anchors.json"');
+		expect(floorRun).toContain("j.numPassedTests+j.numFailedTests");
+		expect(floorRun).toMatch(/--count "apfs-anchors=\$\{count\}"/);
 		// 100 of the measured 223 is a decision (review r1 F5): the leg is
 		// required, the step exists to catch a run that executed nothing, and a
 		// 10% margin would red it on a legitimate removal of 24 tests.
 		withinMeasured(
-			floorOf(floor.run, /--floor (\d+)/),
+			floorOf(floorRun, /--floor (\d+)/),
 			nonLsp["apfs-anchors"].healthy.evaluated,
 			0.4,
 		);
@@ -329,11 +351,11 @@ describe("the floors outside the LSP nightly are measured and wired (#4518)", ()
 		expect((floor as { env?: Record<string, string> }).env?.EVALUATED).toBe(
 			"${{ steps.swift.outputs.evaluated }}",
 		);
-		expect(floor.run).toContain(
+		expect(liveRunText(floor)).toContain(
 			'--count "swift-crash-watch=${EVALUATED}" --floor',
 		);
 		withinMeasured(
-			floorOf(floor.run, /--floor (\d+)/),
+			floorOf(liveRunText(floor), /--floor (\d+)/),
 			nonLsp["swift-crash-watch"].healthy.evaluated,
 		);
 	});
@@ -341,7 +363,7 @@ describe("the floors outside the LSP nightly are measured and wired (#4518)", ()
 	it("gives the PR-time LSP handshake a --min-pass at or below both measured PR runs", () => {
 		const job = loadWorkflow("install-smoke.yml").jobs["lsp-handshake"];
 		const floor = floorOf(
-			step(job, "LSP handshake layer").run,
+			liveRunText(step(job, "LSP handshake layer")),
 			/--min-pass=(\d+)/,
 		);
 		const passes = nonLsp["install-smoke-lsp-handshake"].healthy.map(
@@ -363,9 +385,11 @@ describe("the floors outside the LSP nightly are measured and wired (#4518)", ()
 		const job = loadWorkflow("ci.yml").jobs["unit-tests-windows"];
 		const failStep = step(job, "under-executed");
 		expect(failStep["continue-on-error"]).toBeUndefined();
-		expect(failStep.run).toContain('--count "windows-vitest=${executed}"');
+		expect(liveRunText(failStep)).toContain(
+			'--count "windows-vitest=${executed}"',
+		);
 		withinMeasured(
-			floorOf(failStep.run, /--floor (\d+)/),
+			floorOf(liveRunText(failStep), /--floor (\d+)/),
 			nonLsp["windows-vitest"].healthy.evaluated,
 		);
 		expect(nonLsp["windows-vitest"].healthy.line).toContain(
@@ -413,130 +437,412 @@ describe("the floors outside the LSP nightly are measured and wired (#4518)", ()
 
 // #4518's remainder: the r1 floors covered the sites the issue listed, and a
 // sweep found the rest of the tree. A `continue-on-error` producer that
-// evaluates nothing reads green, so every such site OUTSIDE the LSP nightly is
-// registered in tests/fixtures/nightly-floors/continue-on-error-sites.json as
-// floored (naming the gating step whose text carries the floor) or excluded
-// (with a reason). The population is DERIVED from the YAML, so a new site, and
-// a site the parser stops seeing, both red here instead of joining silently.
-// Only tool-smoke.yml is outside the population: #4514 floors its four LSP
-// producers in one gating step (pinned above), and the wiring around them is
-// pinned by tests/config/lsp-capability-refresh-workflow.test.ts and
-// lsp-idle-eviction-measurement.test.ts.
+// evaluates nothing reads green, so every such site is registered in
+// tests/fixtures/nightly-floors/continue-on-error-sites.json as `floored`
+// (naming the gating step whose LIVE text carries the floor), `no-floor`
+// (naming the reader that makes an empty result visible), or `governed-by`
+// (naming the issue and the tests that own it). The population is DERIVED from
+// the parsed files, so a new site, a site the parser stops seeing, and a file
+// form the reader does not classify all red here instead of joining silently.
+// Review r1 (#4609) found three holes this file now closes: the population
+// stopped at `.github/workflows/*.yml` (F1), the floor check matched prose, so
+// a comment or an `if: false` step satisfied it (F2), and `tool-smoke.yml` was
+// excluded as a FILE, so a new non-LSP site in it was invisible (F4).
 const COE_REGISTRY =
 	"tests/fixtures/nightly-floors/continue-on-error-sites.json";
-const LSP_NIGHTLY_WORKFLOW = "tool-smoke.yml";
-type CoERow = {
-	status: "floored" | "no-floor";
-	floorStep?: string;
-	evidence?: string;
-	reason: string;
-};
 const coeRegistry = JSON.parse(read(COE_REGISTRY)) as {
-	lspNightly: { workflow: string; reason: string };
 	sites: Record<string, CoERow>;
 };
-const isCoe = (value: unknown) => value !== undefined && value !== false;
-type CoESite = {
-	key: string;
-	file: string;
-	job: string;
-	jobDef: Job;
-	step?: Step;
-};
-const stepIdentity = (s: Step) =>
-	s.name ?? s.uses?.split("@")[0] ?? "(unnamed step)";
-const workflowsDir = resolve(ROOT, ".github/workflows");
-const workflowFiles = readdirSync(workflowsDir)
-	.filter((f) => f.endsWith(".yml"))
-	.sort();
-const sitesIn = (file: string): CoESite[] => {
-	const wf = loadWorkflow(file);
-	return Object.entries(wf.jobs ?? {}).flatMap(([jobId, jobDef]) => {
-		const sites: CoESite[] = [];
-		if (isCoe(jobDef["continue-on-error"]))
-			sites.push({ key: `${file}#${jobId}`, file, job: jobId, jobDef });
-		for (const step of jobDef.steps ?? [])
-			if (isCoe(step["continue-on-error"]))
-				sites.push({
-					key: `${file}#${jobId}#${stepIdentity(step)}`,
-					file,
-					job: jobId,
-					jobDef,
-					step,
-				});
-		return sites;
-	});
-};
-const population = workflowFiles
-	.filter((f) => f !== LSP_NIGHTLY_WORKFLOW)
-	.flatMap(sitesIn);
+const coeKeys = Object.keys(coeRegistry.sites).sort();
+const census = readProducerCensus(ROOT);
 
-describe("every continue-on-error site outside the LSP nightly is floored or excluded (#4518)", () => {
-	it("names the excluded workflow and the floors that govern it, so the exclusion is a fact", () => {
-		expect(workflowFiles).toContain(LSP_NIGHTLY_WORKFLOW);
-		expect(coeRegistry.lspNightly.workflow).toBe(LSP_NIGHTLY_WORKFLOW);
-		expect(coeRegistry.lspNightly.reason).toContain("#4514");
-		const nightly = sitesIn(LSP_NIGHTLY_WORKFLOW);
+describe("every continue-on-error site in the workflow and action tree is registered (#4518)", () => {
+	it("reads every file under the producer roots, and classifies every form it finds", () => {
+		// A reader that silently skips a file form is a guard with a hole in it
+		// (#4609 r1 F1: a `.yaml` workflow and a composite action were both
+		// outside the population and outside the old raw-key guard).
+		expect(census.unclassified).toEqual([]);
+		expect(census.problems).toEqual([]);
+		const files = census.files.map((file) => file.path);
+		expect(files).toEqual(
+			expect.arrayContaining([
+				".github/workflows/ci.yml",
+				".github/workflows/tool-smoke.yml",
+				".github/actions/tool-tree-cache/action.yml",
+			]),
+		);
+		expect(census.files.length).toBeGreaterThanOrEqual(26);
+	});
+
+	it("accounts for every site as a floor, a stated reader, or a named owner", () => {
+		const audit = auditRegistry({
+			sweepName: "continue-on-error census",
+			// A `no-floor` row is an admitted exemption with its own reason, so
+			// the kit's stale-entry and reason-length checks cover it too.
+			flagged: census.sites.map((site) => ({
+				key: site.key,
+				detail: `${site.file}:${site.scope}${site.step ? ` (${stepIdentity(site.step)})` : ""}`,
+			})),
+			registered: coeKeys.filter(
+				(key) => coeRegistry.sites[key]?.status !== "no-floor",
+			),
+			exemptions: Object.fromEntries(
+				coeKeys
+					.filter((key) => coeRegistry.sites[key]?.status === "no-floor")
+					.map((key) => [key, coeRegistry.sites[key]?.reason ?? ""]),
+			),
+			minFlagged: 52,
+			scannedCount: census.files.length,
+			minScanned: 26,
+			remediation:
+				"Register the site in tests/fixtures/nightly-floors/continue-on-error-sites.json: floored (a gating step whose live run text carries the floor), no-floor (the reader that makes an empty result visible), or governed-by (the issue and tests that own it).",
+		});
+		expect(audit.problems).toEqual([]);
+	});
+
+	it("registers exactly the sites the census reads, so an unregistered site and a stale row both red", () => {
+		expect(census.sites.map((site) => site.key).sort()).toEqual(coeKeys);
+	});
+
+	it("gives every row a usable record, and names tests that exist", () => {
+		expect(
+			coeKeys.flatMap((key) => rowProblems(key, coeRegistry.sites[key])),
+		).toEqual([]);
+		for (const key of coeKeys) {
+			const row = coeRegistry.sites[key];
+			if (row.status !== "governed-by") continue;
+			expect(row.tests?.length, key).toBeGreaterThan(0);
+			for (const test of row.tests ?? [])
+				expect(existsSync(resolve(ROOT, test)), `${key}: ${test}`).toBe(true);
+		}
+	});
+
+	it("gives every floored site a live gating step, after the site, whose run text carries its floor", () => {
+		expect(
+			census.sites.flatMap((site) =>
+				floorProblems(
+					site,
+					coeRegistry.sites[site.key] ?? { status: "no-floor", reason: "" },
+				),
+			),
+		).toEqual([]);
+	});
+
+	it("pins the six job headers the registry marks as human-facing copy", () => {
+		const headered = coeKeys.filter((key) => coeRegistry.sites[key].header);
+		expect(headered.length).toBe(6);
+		const lint = read(".github/workflows/lint.yml");
+		for (const job of ["jscpd", "strictness", "yamllint", "typos", "taplo"]) {
+			const at = lint.indexOf(`\n  ${job}:\n`);
+			expect(at, job).toBeGreaterThan(0);
+			expect(lint.slice(Math.max(0, at - 700), at), job).toMatch(
+				/# No floor \(#4518\): /,
+			);
+		}
+		const install = read(".github/workflows/install-smoke.yml");
+		const miseAt = install.indexOf("\n  mise-repro:\n");
+		expect(miseAt).toBeGreaterThan(0);
+		expect(install.slice(miseAt, miseAt + 1500)).toMatch(
+			/# No floor \(#4518\): /,
+		);
+		// One header per marked row, in the file that row lives in: an orphan
+		// header (no row) and a row with no header both red.
+		for (const file of new Set(headered.map((key) => key.split("#")[0]))) {
+			const text = read(file);
+			expect(text.match(/# No floor \(#4518\): /g)?.length ?? 0, file).toBe(
+				headered.filter((key) => key.startsWith(`${file}#`)).length,
+			);
+		}
+	});
+
+	it("registers the four producers #4514 floors one by one, so a new site in the LSP nightly reds", () => {
+		const nightly = census.sites.filter(
+			(site) => site.file === ".github/workflows/tool-smoke.yml",
+		);
 		for (const name of [
-			"LSP capability matrix",
-			"LSP clean-signal probe",
+			"LSP capability matrix (characterize diagnostic mode per server)",
+			"LSP clean-signal probe (Tier 2 vs 3 among push servers)",
 			"LSP server capability inventory",
 			"LSP idle-eviction measurement",
-		])
-			expect(
-				nightly.some((site) => site.step?.name?.includes(name)),
-				name,
-			).toBe(true);
+		]) {
+			const site = nightly.find((entry) => entry.step?.name?.includes(name));
+			expect(site, name).toBeDefined();
+			const row = site ? coeRegistry.sites[site.key] : undefined;
+			expect(row?.status, name).toBe("governed-by");
+			expect(row?.governedBy, name).toBe("#4514");
+		}
 	});
+});
 
-	it("registers exactly the sites the YAML declares, so an unregistered one fails closed", () => {
-		// A parser that found nothing is not a clean tree.
-		expect(population.length).toBeGreaterThan(20);
-		expect(population.map((site) => site.key).sort()).toEqual(
-			Object.keys(coeRegistry.sites).sort(),
+// #4609 r1 F3: every fail-closed path above needs a checked-in plant a future
+// edit cannot delete by accident. The trees are built per case, so a broken
+// fixture never sits in the repository (where yamllint and the workflow sweeps
+// would read it) and each plant names the one shape it exercises.
+describe("the census fails closed on every producer surface and floor shape", () => {
+	const roots: string[] = [];
+	afterAll(() => {
+		for (const root of roots) rmSync(root, { recursive: true, force: true });
+	});
+	const tree = (files: Record<string, string>): string => {
+		const root = mkdtempSync(join(tmpdir(), "pi-lens-coe-census-"));
+		roots.push(root);
+		for (const [rel, body] of Object.entries(files)) {
+			mkdirSync(dirname(join(root, rel)), { recursive: true });
+			writeFileSync(join(root, rel), body);
+		}
+		return root;
+	};
+	const PROBE = `"on": push
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+`;
+
+	it("reads a .yaml workflow and a composite action step, and finds them unaccounted without a row", () => {
+		const root = tree({
+			".github/workflows/zz-probe.yaml": `${PROBE}    continue-on-error: true
+    steps:
+      - name: best effort
+        continue-on-error: true
+        run: echo hi
+`,
+			".github/actions/probe/action.yaml": `name: probe
+runs:
+  using: composite
+  steps:
+    - name: composite best effort
+      shell: bash
+      continue-on-error: true
+      run: echo hi
+`,
+		});
+		const found = readProducerCensus(root);
+		expect(found.problems).toEqual([]);
+		expect(found.files.map((file) => file.kind).sort()).toEqual([
+			"composite",
+			"workflow",
+		]);
+		expect(found.sites.map((site) => site.key).sort()).toEqual([
+			".github/actions/probe/action.yaml#composite best effort",
+			".github/workflows/zz-probe.yaml#probe",
+			".github/workflows/zz-probe.yaml#probe#best effort",
+		]);
+		const audit = auditRegistry({
+			sweepName: "fixture",
+			flagged: found.sites.map((site) => site.key),
+			registered: [],
+		});
+		expect(audit.unaccounted.sort()).toEqual(
+			found.sites.map((site) => site.key).sort(),
 		);
 	});
 
-	it("sees every `continue-on-error` key in the raw text of each workflow it judges", () => {
-		for (const file of workflowFiles.filter(
-			(f) => f !== LSP_NIGHTLY_WORKFLOW,
-		)) {
-			const raw =
-				read(`.github/workflows/${file}`).match(/^\s*continue-on-error:/gm)
-					?.length ?? 0;
-			expect(sitesIn(file).length, file).toBe(raw);
-		}
+	it("reds on a file under a producer root that it does not classify", () => {
+		const root = tree({
+			".github/workflows/README.md": "# notes\n",
+			".github/workflows/zz-probe.yml": `${PROBE}    steps: []
+`,
+			".github/actions/probe.yml": "name: stray\n",
+			".github/actions/probe/README.md": "# notes\n",
+		});
+		const found = readProducerCensus(root);
+		expect(found.files.map((file) => file.path)).toEqual([
+			".github/workflows/zz-probe.yml",
+		]);
+		expect(found.problems.map((problem) => problem.split(":")[0])).toEqual([
+			".github/workflows/README.md",
+			".github/actions/probe.yml",
+			".github/actions/probe/README.md",
+		]);
+		expect(found.problems[0]).toContain("does not classify");
 	});
 
-	it("gives every floored site a gating step whose text carries its floor", () => {
-		for (const site of population) {
-			const row = coeRegistry.sites[site.key];
-			if (row?.status !== "floored") continue;
-			expect(row.floorStep, site.key).toBeTruthy();
-			expect(row.evidence, site.key).toBeTruthy();
-			const floor = (site.jobDef.steps ?? []).find((s) =>
-				stepIdentity(s).includes(row.floorStep ?? "\u0000"),
+	it("reds on an unparseable producer file instead of reading it as site-free", () => {
+		const root = tree({
+			".github/workflows/broken.yml":
+				"jobs:\n  a:\n     steps:\n   - name: bad indentation\n",
+		});
+		expect(readProducerCensus(root).problems).toEqual([
+			expect.stringContaining("unparseable producer file"),
+		]);
+	});
+
+	it("reads a flow-style key and ignores the key spelled in a comment or a run heredoc", () => {
+		const root = tree({
+			".github/workflows/parser-smoke.yml": `${PROBE}    steps:
+      # continue-on-error: true
+      - {name: Flow-style unregistered producer, continue-on-error: true, run: echo hi}
+      - name: Writes an example workflow
+        run: |
+          cat > example.yml <<'YAML'
+          jobs:
+            demo:
+              continue-on-error: true
+          YAML
+      - name: Mentions the key in a comment
+        run: |
+          # continue-on-error: true
+          echo hi
+`,
+		});
+		const found = readProducerCensus(root);
+		expect(found.problems).toEqual([]);
+		expect(found.sites.map((site) => site.key)).toEqual([
+			".github/workflows/parser-smoke.yml#probe#Flow-style unregistered producer",
+		]);
+	});
+
+	it("reds on a continue-on-error key at a location that is not a job or a step", () => {
+		const root = tree({
+			".github/workflows/odd.yml": `${PROBE}    services:
+      cache:
+        image: redis
+        continue-on-error: true
+    steps: []
+`,
+		});
+		const found = readProducerCensus(root);
+		expect(found.sites).toEqual([]);
+		expect(found.problems).toEqual([
+			".github/workflows/odd.yml: continue-on-error at an unclassified location: jobs.probe.services.cache.continue-on-error",
+		]);
+	});
+
+	// F2 plants: a floored row is satisfied only by a live line of a step the
+	// runner executes.
+	const KEY = ".github/workflows/floor.yml#probe#best effort";
+	const flooredStep = (floor: string): string[] => {
+		const root = tree({
+			".github/workflows/floor.yml": `${PROBE}    steps:
+      - name: best effort
+        continue-on-error: true
+        run: node scripts/producer.mjs
+${floor}`,
+		});
+		const found = readProducerCensus(root);
+		expect(found.problems).toEqual([]);
+		const site = found.sites.find(
+			(entry) => entry.step?.name === "best effort",
+		);
+		expect(site).toBeDefined();
+		return floorProblems(site as CoESite, {
+			status: "floored",
+			floorStep: "evaluated floor",
+			evidence: '--count "probe=',
+			reason: "A fixture row; the reason only has to clear the length floor.",
+		});
+	};
+
+	it("accepts a floor the runner reaches and reads as a command", () => {
+		expect(
+			flooredStep(`      - name: evaluated floor
+        run: |
+          set -o pipefail
+          node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
+`),
+		).toEqual([]);
+	});
+
+	it("reds when the only occurrence of the floor sits in a shell comment", () => {
+		expect(
+			flooredStep(`      - name: evaluated floor
+        run: |
+          # node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
+          echo "handshake layer disabled in this probe"
+`),
+		).toEqual([
+			`${KEY}: "--count "probe=" is not on a live line of that step's run text`,
+		]);
+	});
+
+	it("reds when the runner skips the floor step", () => {
+		// YAML source vs. the value the parser returns: `"!true"` needs its
+		// quotes here, because a bare `!true` is a YAML tag, not a condition.
+		for (const [source, value] of [
+			["false", "false"],
+			["${{ false }}", "${{ false }}"],
+			['"!true"', "!true"],
+		] as const) {
+			const problems = flooredStep(`      - name: evaluated floor
+        if: ${source}
+        run: node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
+`);
+			expect(problems, source).toContain(
+				`${KEY}: its floor step never runs (if: ${value}), so the floor gates nothing`,
 			);
-			expect(
-				floor,
-				`${site.key}: no step named like "${row.floorStep}"`,
-			).toBeDefined();
-			expect(
-				floor?.["continue-on-error"],
-				`${site.key}: its floor step is continue-on-error, so the floor gates nothing`,
-			).not.toBe(true);
-			expect(
-				floor?.run,
-				`${site.key}: "${row.evidence}" is not in that step's run text`,
-			).toContain(row.evidence);
 		}
 	});
 
-	it("gives every excluded site a reason and no hollow status", () => {
-		for (const [key, row] of Object.entries(coeRegistry.sites)) {
-			expect(["floored", "no-floor"], key).toContain(row.status);
-			expect(row.reason.length, key).toBeGreaterThan(40);
-			if (row.status === "no-floor") expect(row.floorStep, key).toBeUndefined();
-		}
+	it("reds when the floor step is itself continue-on-error", () => {
+		expect(
+			flooredStep(`      - name: evaluated floor
+        continue-on-error: true
+        run: node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
+`),
+		).toContain(
+			`${KEY}: its floor step is continue-on-error, so the floor gates nothing`,
+		);
+	});
+
+	it("reds when the floor step runs before the site it is meant to gate", () => {
+		const root = tree({
+			".github/workflows/floor.yml": `${PROBE}    steps:
+      - name: evaluated floor
+        run: node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
+      - name: best effort
+        continue-on-error: true
+        run: node scripts/producer.mjs
+`,
+		});
+		const found = readProducerCensus(root);
+		const site = found.sites.find(
+			(entry) => entry.step?.name === "best effort",
+		);
+		expect(site).toBeDefined();
+		expect(
+			floorProblems(site as CoESite, {
+				status: "floored",
+				floorStep: "evaluated floor",
+				evidence: '--count "probe=',
+				reason: "A fixture row; the reason only has to clear the length floor.",
+			}),
+		).toEqual([
+			`${KEY}: its floor step runs before the site it is meant to gate`,
+		]);
+	});
+
+	it("reds on a registry row whose fields do not match its status", () => {
+		const reason = "A fixture reason, long enough to clear the length floor.";
+		expect([
+			...rowProblems("floored-x", { status: "floored", reason }),
+			...rowProblems("governed-x", {
+				status: "governed-by",
+				governedBy: "4514",
+				tests: [],
+				reason,
+			}),
+			...rowProblems("no-floor-x", {
+				status: "no-floor",
+				floorStep: "a floor",
+				reason,
+			}),
+			...rowProblems("status-x", {
+				status: "waived" as CoEStatus,
+				reason,
+			}),
+		]).toEqual([
+			"floored-x: a floored row needs floorStep",
+			"floored-x: a floored row needs evidence",
+			"governed-x: a governed-by row needs tests",
+			'governed-x: governed-by rows name an issue as "#<n>"',
+			"no-floor-x: a no-floor row does not carry floorStep",
+			'status-x: unknown status "waived"',
+		]);
+	});
+
+	it("keeps a # that is an expansion or a quoted value when it strips comments", () => {
+		expect(stripShellComments('echo "${v#p}" $# "a # b" # tail\n')).toBe(
+			'echo "${v#p}" $# "a # b" \n',
+		);
 	});
 });

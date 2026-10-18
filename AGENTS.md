@@ -910,16 +910,23 @@ file-scoped worklist and receives no project-wide scanner output.
   `continue-on-error` producer either calls the same helper (`--count
   <producer>=<n> --floor <m>` from a workflow step; `--min-pass`, the
   complexity file count and the shuffle census's missing starts already do) or
-  needs none, and one census decides that: every `continue-on-error` site
-  outside the LSP nightly is registered in
+  needs none, and one census decides that: every `continue-on-error` site in a
+  `.github/workflows/*.yml` or `*.yaml` file and in a composite
+  `.github/actions/**/action.yml` or `action.yaml` is registered in
   `tests/fixtures/nightly-floors/continue-on-error-sites.json` as `floored`
-  (naming the gating step and the text that proves the floor there) or
-  `no-floor` (with the reader that makes an empty result visible). The census
-  derives its population from the workflows and fails closed on a site the
-  registry does not name, and a floor comes from a run recorded in
-  `tests/fixtures/nightly-floors/measurements.json`; a
-  `# No floor (<issue>): <reason>` header above a job is the human-facing copy
-  where one exists, not the record.
+  (naming the gating step and the text that proves the floor on a live,
+  uncommented line of a step the runner executes), `no-floor` (with the reader
+  that makes an empty result visible), or `governed-by` (naming the issue and
+  the tests that own the site). The reader derives the population from the
+  parsed files, so it fails closed on a site the registry does not name, on a
+  producer file it does not classify, on a `continue-on-error` key in a
+  location that is not a job or a step, and on a floor that only a comment or a
+  disabled step carries; a floor comes from a run recorded in
+  `tests/fixtures/nightly-floors/measurements.json`. A
+  `# No floor (<issue>): <reason>` header above a job is human-facing copy
+  where one exists, not the record: six sites keep one (the five `lint.yml`
+  jobs and `install-smoke.yml`'s `mise-repro`), and the registry row the
+  census requires is the record.
   The helper must stay importable without `dist/` (the refresh-PR job runs it
   on a fresh checkout).
 - LSP service generations, workspace-sweep holds, and repair latches use
