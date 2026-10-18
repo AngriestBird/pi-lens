@@ -100,7 +100,10 @@
  * - A same-file alias of a read callee (`const read = fs.readFileSync;
  *   read(sink)`, `import { readFileSync as read }`) is a read: the alias is
  *   read from its own binding, so a named spelling of the call is not a
- *   silent pass (shape 69).
+ *   silent pass (shape 69). The alias is visible only in the scope that
+ *   DECLARES it, and an inner declaration of the same name (a local
+ *   `const read = (file) => file` helper, a parameter, a function name)
+ *   shadows an outer alias (R3, shape 69). An import has one module scope.
  * - Suspension is judged FAIL-CLOSED (shape 69). An `await` that can run
  *   between the drain and the read lets the code under test enqueue more
  *   bytes, so it suspends the read wherever it sits: a loop body (a loop
@@ -108,8 +111,12 @@
  *   exits), a nested function that also holds the read, an awaited
  *   callback's body, and any spelling the walk cannot place. Only a PROVEN
  *   unreachable await is skipped: one under an `if`/ternary/short-circuit
- *   whose branch does not hold the read, one in a function this file never
- *   calls, and one in a callback nothing awaits (`setTimeout`, `forEach`).
+ *   whose branch does not hold the read, one in a `switch` case, default or
+ *   `catch` block the read is not in (those kinds stay skipped; a `case`
+ *   that falls through into the read's own case is not proven either way,
+ *   and a throw after the drain can take a `catch` whose await then runs
+ *   first), one in a function this file never calls, and one in a callback
+ *   nothing awaits (`setTimeout`, `forEach`).
  *   A read after `if (flag) await tick();` is judged clean (the conditional
  *   rule, shape 43; the alternative reds every correct ordered read behind
  *   an optional setup step).
@@ -412,11 +419,14 @@ const sameRange = (left: SgNode, right: SgNode): boolean =>
 	left.range().end.index === right.range().end.index;
 
 /**
- * Kinds above an `await` under which it may never run, so it cannot suspend a
- * read the same guard does not hold (the conditional rule, shape 43). A loop
- * body runs when the loop is iterated and a `finally` runs however its `try`
- * exits, so neither is here (E1, shape 69). `drainBlock` keeps them in
- * `CONDITIONAL_KINDS`, because for a DRAIN they decide whether it ran at all.
+ * Kinds above an `await` or a drain under which it may never run, so it cannot
+ * suspend a read the same guard does not hold (the conditional rule, shape
+ * 43). A loop body runs when the loop is iterated and a `finally` runs however
+ * its `try` exits, so neither is here (E1, shape 69). `drainBlock` keeps them
+ * in `CONDITIONAL_KINDS`, because for a DRAIN they decide whether it ran at
+ * all. A `switch_case` that falls through into the read's case and a `catch`
+ * that swallows a throw from after the drain are NOT proven unreachable; both
+ * are skipped today, and the module docstring names that residue.
  */
 const MAY_NOT_RUN_KINDS = new Set([
 	"if_statement",
@@ -504,26 +514,95 @@ function scanUndrainedSinkReads(
 	const root = parse(Lang.TypeScript, source).root();
 	// Read callees this file binds: `import { readFileSync as read }`,
 	// `const read = fs.readFileSync`, `const { readFileSync: read } = fs`. A
-	// named spelling of a read is the same read (shape 69).
-	const readAliases = new Set<string>(READ_CALLEES);
+	// named spelling of a read is the same read (shape 69). An IMPORT has one
+	// module scope; a declarator, function name or parameter is visible only in
+	// the scope that declares it, and an inner declaration of the same name
+	// SHADOWS an outer alias, so another test's `const read = (file) => file`
+	// helper is not a sink read (R3).
+	const importReadAliases = new Set<string>(READ_CALLEES);
 	for (const specifier of root.findAll({
 		rule: { kind: "import_specifier" },
 	})) {
 		const imported = specifier.field("name")?.text();
 		const local = specifier.field("alias")?.text() ?? imported;
-		if (imported && local && READ_CALLEES.has(imported)) readAliases.add(local);
+		if (imported && local && READ_CALLEES.has(imported))
+			importReadAliases.add(local);
 	}
+	interface ReadAliasDecl {
+		name: string;
+		start: number;
+		end: number;
+		read: boolean;
+	}
+	const readAliasDecls: ReadAliasDecl[] = [];
+	const scopeSpan = (at: SgNode): { start: number; end: number } => {
+		const scope = lexicalScopeOf(at);
+		return {
+			start: scope?.range().start.index ?? 0,
+			end: scope?.range().end.index ?? source.length,
+		};
+	};
+	/** The declaration that decides `name` at `at`: the innermost one. */
+	const readAliasAt = (name: string, at: SgNode): ReadAliasDecl | undefined => {
+		const start = at.range().start.index;
+		const end = at.range().end.index;
+		let best: ReadAliasDecl | undefined;
+		for (const decl of readAliasDecls) {
+			if (decl.name !== name) continue;
+			if (decl.start > start || end > decl.end) continue;
+			if (!best || decl.end - decl.start < best.end - best.start) best = decl;
+		}
+		return best;
+	};
+	const isReadCallee = (name: string, at: SgNode): boolean =>
+		importReadAliases.has(name) || (readAliasAt(name, at)?.read ?? false);
 	for (const declarator of root.findAll({
 		rule: { kind: "variable_declarator" },
 	})) {
 		const name = declarator.field("name");
-		const value = declarator.field("value");
-		if (name?.kind() !== "identifier" || !value) continue;
+		const value = declarator.field("value") ?? undefined;
+		if (name?.kind() !== "identifier") continue;
 		const callee =
-			value.kind() === "identifier" && readAliases.has(value.text())
-				? value.text()
-				: readCalleeOf(value);
-		if (callee !== undefined) readAliases.add(name.text());
+			value === undefined
+				? undefined
+				: value.kind() === "identifier"
+					? isReadCallee(value.text(), value)
+						? value.text()
+						: undefined
+					: readCalleeOf(value);
+		readAliasDecls.push({
+			name: name.text(),
+			...scopeSpan(declarator),
+			read: callee !== undefined,
+		});
+	}
+	// A same-named function or parameter hides an outer read alias.
+	for (const fn of root.findAll({
+		rule: {
+			any: [
+				{ kind: "function_declaration" },
+				{ kind: "function_expression" },
+				{ kind: "arrow_function" },
+				{ kind: "method_definition" },
+			],
+		},
+	})) {
+		const name = fn.field("name");
+		if (name?.kind() === "identifier")
+			readAliasDecls.push({
+				name: name.text(),
+				...scopeSpan(fn),
+				read: false,
+			});
+		for (const parameter of fn.field("parameters")?.namedChildren() ?? []) {
+			const pattern = parameter.field("pattern") ?? parameter;
+			if (pattern.kind() !== "identifier") continue;
+			readAliasDecls.push({
+				name: pattern.text(),
+				...scopeSpan(parameter),
+				read: false,
+			});
+		}
 	}
 	const sinkAliases: Binding[] = [];
 	const rootAliases: Binding[] = [];
@@ -886,7 +965,7 @@ function scanUndrainedSinkReads(
 	};
 	for (const call of calls) {
 		const callee = calleeName(call);
-		if (!callee || !readAliases.has(callee)) continue;
+		if (!callee || !isReadCallee(callee, call)) continue;
 		const first = call.field("arguments")?.namedChildren()[0];
 		if (!first) continue;
 		const owners = sinksIn(first.range().start.index, first.range().end.index);
@@ -1715,6 +1794,58 @@ describe("sink reads drain first (#4381)", () => {
 				["bound alias", [[3, ["clients/latency-logger.ts"]]]],
 				["import alias", [[3, ["clients/latency-logger.ts"]]]],
 			]);
+		});
+
+		it("a declarator read alias is visible only in the scope that declares it (R3, shape 69)", () => {
+			// Two cases, one declaration in the first test and an unrelated local
+			// helper of the same name in the second. Only the aliased call is a read:
+			// the file-wide set made every `read(...)` in the file a sink read, and
+			// the helper's own definition was blamed at its call site.
+			const aliased = [
+				'it("one", async () => {',
+				"\tconst read = fs.readFileSync;",
+				'\tconst text = read(getLatencyLogPath(), "utf8");',
+				"\tvoid text;",
+				"});",
+			];
+			const helper = [
+				'it("two", () => {',
+				"\tconst read = (file: string) => file;",
+				"\tvoid read(getLatencyLogPath());",
+				"});",
+			];
+			expect(
+				scanFixture([...aliased, ...helper].join("\n")).map((hit) => [
+					hit.line,
+					hit.callee,
+				]),
+			).toEqual([[3, "read"]]);
+			expect(
+				scanFixture([...helper, ...aliased].join("\n")).map((hit) => [
+					hit.line,
+					hit.callee,
+				]),
+			).toEqual([[7, "read"]]);
+			// The helper alone is not a read callee in any scope.
+			expect(scanFixture(helper.join("\n"))).toEqual([]);
+			// A module-scope alias IS visible in every scope, except where a nearer
+			// declaration of the same name shadows it.
+			expect(
+				scanFixture(["const read = fs.readFileSync;", ...helper].join("\n")),
+			).toEqual([]);
+			// An alias of an alias resolves through the same declarations.
+			expect(
+				scanFixture(
+					[
+						'it("x", async () => {',
+						"\tconst read = fs.readFileSync;",
+						"\tconst load = read;",
+						'\tconst text = load(getLatencyLogPath(), "utf8");',
+						"\tvoid text;",
+						"});",
+					].join("\n"),
+				).map((hit) => [hit.line, hit.callee]),
+			).toEqual([[4, "load"]]);
 		});
 
 		it("attributes a helper read to the call site that supplied the sink (N2, shape 58)", () => {

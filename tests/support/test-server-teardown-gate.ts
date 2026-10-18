@@ -34,9 +34,12 @@
  * - An indirect invocation is the same start: `<handle>.bind.apply(handle, [0])`,
  *   `<handle>.listen.call(handle, 0)`, `Reflect.apply(handle.bind, handle, [0])`,
  *   and a verb held in a local first (`const bind = socket["bind"];
- *   bind.apply(socket, [0])`) all read the verb from the member value. An
- *   indirect call the walk cannot place, on a handle it CAN read, reports as
- *   `unresolvable` rather than passing.
+ *   bind.apply(socket, [0])`) all read the verb from the member value. The
+ *   HANDLE is the receiver the call supplies (`call`/`apply` argument 0,
+ *   `Reflect.apply` argument 1), never the object the verb was read from, so
+ *   `a.bind.call(b, 0)` is a start on `b` (R2, shape 69). An indirect call the
+ *   walk cannot place, or whose supplied receiver it cannot read as a handle,
+ *   reports as `unresolvable` rather than passing.
  *
  * Every server CONSTRUCTION the file contains (`createServer`,
  * `net.createServer`, `http.createServer`, `new WebSocketServer`, ... — any
@@ -59,9 +62,11 @@
  *
  * A close inside a `new Promise(executor)` is settled when the awaited VALUE
  * is that promise: `await new Promise(...)`, `await Promise.all([...])`,
- * `await Promise.all(xs.map(...))`, `await p.then(cb)` (the callback's value
- * chains into the awaited promise), `await (async () => { ... })()` (the call
- * IS the function), a hook that returns the promise
+ * `await Promise.all(xs.map(...))`, `await p.then(cb)` (the FULFILLMENT
+ * callback's value chains into the awaited promise, and `p.finally(cb)`
+ * likewise; a second `.then` argument or a `.catch` callback runs only on
+ * rejection and settles nothing, R1), `await (async () => { ... })()` (the
+ * call IS the function), a hook that returns the promise
  * (`afterEach(() => new Promise(...))`), a teardown hook that holds a helper
  * by reference (`afterEach(closeServer)`), and a variable bound to the promise
  * whose every reference settles (`const closed = ...; await closed;`, with a
@@ -112,9 +117,10 @@
  *   handle-receiver form reports `unresolvable`; this residue is a plain
  *   function value handed to `.call` (`vi.doMock.apply(...)`), which starts no
  *   listener.
- * - **Then-chains and multi-binding variables.** A promise consumed through
- *   `.then(...)`, and a variable with one reference that settles and another
- *   that does not, are reported rather than reasoned about.
+ * - **Then-chains and multi-binding variables.** A promise consumed through a
+ *   rejected or rejected-only branch (`.catch`, a second `.then` argument)
+ *   settles nothing, and a variable with one reference that settles and
+ *   another that does not is reported rather than reasoned about.
  * - **Timers.** This gate decides listeners only. `setInterval`/`setTimeout`
  *   ownership is a different seam with its own ownership rules.
  */
@@ -236,6 +242,14 @@ function isOwnCallee(call: SgNode, fn: SgNode): boolean {
 	while (callee?.kind() === "parenthesized_expression")
 		callee = callee.namedChildren()[0];
 	return callee !== undefined && sameNode(callee, fn);
+}
+
+/** The expression an argument node holds, through parentheses. */
+function argumentValue(node: SgNode | undefined): SgNode | undefined {
+	let current = node;
+	while (current?.kind() === "parenthesized_expression")
+		current = current.namedChildren()[0];
+	return current;
 }
 
 /** The nearest call whose callee is `name` (a member call counts). */
@@ -665,21 +679,37 @@ export function findUnclosedServerStarts(
 	};
 
 	/**
-	 * The start an `.apply`/`.call` invocation reaches (shape 69): the verb there
-	 * is a member VALUE, not a member call, so `socket.bind.apply(socket, [0])`
-	 * and `Reflect.apply(socket.bind, socket, [0])` are the same start as
-	 * `socket.bind(0)`. `undefined` when the scan cannot place the verb.
+	 * The start an `.apply`/`.call` invocation reaches (shape 69, R2): the start
+	 * VERB comes from the function value (`socket.bind`), and the HANDLE is the
+	 * receiver the call SUPPLIES -- `Function.prototype.call`'s first argument,
+	 * `Reflect.apply`'s second -- never the object the verb was read from.
+	 * `a.bind.call(b, 0)` invokes `a`'s verb with `b` bound, so the start is on
+	 * `b`; the object `a` is closed only when it is the supplied receiver.
+	 * `undefined` when the scan cannot place the verb at all.
 	 */
 	const indirectTarget = (call: SgNode) => {
 		const fn = call.field("function");
-		const object =
-			fn?.kind() === "member_expression"
-				? (fn.field("object") ?? undefined)
-				: undefined;
-		const direct = targetOf(object) ?? boundTarget(object);
-		if (direct) return direct;
-		const first = call.field("arguments")?.namedChildren()[0] ?? undefined;
-		return targetOf(first) ?? boundTarget(first);
+		if (fn?.kind() !== "member_expression") return undefined;
+		const object = fn.field("object") ?? undefined;
+		const args = call.field("arguments")?.namedChildren() ?? [];
+		// `Reflect.apply(fnValue, thisArg, args)`: the function value is
+		// argument 0 and the supplied receiver argument 1. `.call`/`.apply` on
+		// the function value itself read the verb from it and take the receiver
+		// as argument 0.
+		const reflect =
+			object?.kind() === "identifier" && object.text() === "Reflect";
+		const verbTarget =
+			targetOf(reflect ? args[0] : object) ??
+			boundTarget(reflect ? args[0] : object);
+		if (!verbTarget) return undefined;
+		// A call that supplies no receiver (`fn.call()`) binds the caller's own
+		// `this`, which no handle here names: the call node reports instead.
+		const supplied = reflect ? args[1] : args[0];
+		return {
+			receiver: supplied ?? call,
+			verb: verbTarget.verb,
+			computed: verbTarget.computed,
+		};
 	};
 
 	/** The handle an indirect invocation is handed, when the scan can read one. */
@@ -732,7 +762,10 @@ export function findUnclosedServerStarts(
 			receiver.kind() === "identifier" && runtimeNames.has(receiver.text());
 		const readable = bindsOnHandle(receiver);
 		if (verb !== undefined && START_VERBS.has(verb)) {
-			if (verb === "listen" || runtimeBind || readable)
+			// An INDIRECT invocation always reports: its verb came from a function
+			// value, so a supplied receiver the scan cannot read as a handle has
+			// nothing else to attribute the start to (R2, shape 69).
+			if (verb === "listen" || runtimeBind || readable || indirectVerb)
 				starts.push({ receiver, node: call });
 			continue;
 		}
@@ -918,9 +951,19 @@ export function findUnclosedServerStarts(
 			if (name && HOOK_CALLEES.has(name)) return !collection;
 			if (name && PROMISE_CALLBACK_METHODS.has(name))
 				return settleFrom(call, depth + 1, true);
-			// `p.then(cb)`: the callback's value chains into the promise the call
-			// returns, so awaiting the call awaits the callback (E3).
-			if (name === "then") return settleFrom(call, depth + 1, false);
+			// `p.then(cb)` credits only its FULFILLMENT callback: that value chains
+			// into the promise the call returns, so awaiting the call awaits it
+			// (E3). A SECOND `.then` argument and a `.catch` callback run only on
+			// rejection, so neither pays for a close that may never be awaited
+			// (R1). `p.finally(cb)` always runs and chains the same way.
+			if (name === "then" || name === "finally") {
+				const first = call.field("arguments")?.namedChildren()[0];
+				return (
+					sameNode(argumentValue(first), fn) &&
+					settleFrom(call, depth + 1, false)
+				);
+			}
+			if (name === "catch") return false;
 			// An IIFE: the call IS this function, so awaiting it awaits the function.
 			if (isOwnCallee(call, fn)) return settleFrom(call, depth + 1, false);
 			// `forEach` and every other callee discard the callback's value.

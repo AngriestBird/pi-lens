@@ -455,6 +455,51 @@ describe("#4589 server-teardown detector — the shapes that must red and green"
 		).toEqual([["server", "unawaited"]]);
 	});
 
+	it("credits only the fulfillment callback of a then-chain (R1, shape 69)", () => {
+		// `then`'s SECOND argument and a `catch` callback run only on rejection,
+		// so neither proves the close was awaited on the hook's own path. Only
+		// the fulfillment callback chains into the promise the call returns; a
+		// `finally` callback always runs and is credited for the same reason.
+		const holdClose = [
+			"it('a', async () => {",
+			"\tconst server = net.createServer(() => {});",
+			"\tawait new Promise((resolve) => server.listen(endpoint, resolve));",
+			"\tconst closed = new Promise((resolve) => server.close(() => resolve()));",
+		];
+		const rejected: Array<[string, string]> = [
+			[
+				"a second then argument",
+				"\tawait Promise.resolve().then(undefined, async () => { await closed; });",
+			],
+			[
+				"a fulfillment callback that does not wait, next to a rejection one",
+				"\tawait Promise.resolve().then(\n\t\t() => undefined,\n\t\tasync () => { await closed; },\n\t);",
+			],
+			[
+				"a catch callback",
+				"\tawait Promise.resolve().catch(async () => { await closed; });",
+			],
+		];
+		for (const [label, tail] of rejected) {
+			expect(scanListen([...holdClose, tail, "});"]), label).toEqual([
+				["server", "unawaited"],
+			]);
+		}
+		// The legitimately credited forms, same close.
+		for (const [label, tail] of [
+			[
+				"the fulfillment callback",
+				"\tawait Promise.resolve().then(async () => { await closed; });",
+			],
+			[
+				"the finally callback",
+				"\tawait Promise.resolve().finally(async () => { await closed; });",
+			],
+		] as Array<[string, string]>) {
+			expect(scanListen([...holdClose, tail, "});"]), label).toEqual([]);
+		}
+	});
+
 	it("greens on the teardown forms vitest awaits (F1, false positives)", () => {
 		const forms: Array<[string, string[]]> = [
 			[
@@ -785,6 +830,41 @@ describe("#4589 server-teardown detector — the shapes that must red and green"
 				"void go;",
 			]),
 		).toEqual([["socket", "unresolvable"]]);
+	});
+
+	it("binds the SUPPLIED receiver of .call or .apply (R2, shape 69)", () => {
+		// `a.bind.call(b, 0)` invokes `a`'s verb with `b` as its receiver, so the
+		// start is on `b`. The method's object is not the bound handle, and a
+		// close of it is no evidence for this start.
+		const pair = [
+			'const a = dgram.createSocket("udp4");',
+			'const b = dgram.createSocket("udp4");',
+		];
+		const closeOf = (handle: string) => [
+			"afterEach(async () => {",
+			`\tawait new Promise((resolve) => ${handle}.close(() => resolve()));`,
+			"});",
+		];
+		for (const [label, start] of [
+			["call", "a.bind.call(b, 0);"],
+			["apply", "a.bind.apply(b, [0]);"],
+			["Reflect.apply", "Reflect.apply(a.bind, b, [0]);"],
+		] as Array<[string, string]>) {
+			// The unbound `a` is closed: the real leak on `b` is still reported.
+			expect(scanListen([...pair, start, ...closeOf("a")]), label).toEqual([
+				["b", "unclosed"],
+			]);
+			// The supplied receiver is the one closed: clean.
+			expect(scanListen([...pair, start, ...closeOf("b")]), label).toEqual([]);
+		}
+		// A supplied receiver the scan cannot read as a handle reports instead of
+		// falling back to the method's object.
+		expect(
+			scanListen([
+				'const socket = dgram.createSocket("udp4");',
+				"socket.bind.call(makeHandle(), 0);",
+			]),
+		).toEqual([["makeHandle()", "unresolvable"]]);
 	});
 
 	it("reports a non-identifier receiver and an unclassified construction (fail closed)", () => {
