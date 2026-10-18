@@ -2009,6 +2009,18 @@ describe("sink reads drain first (#4381)", () => {
 					[],
 				],
 				[
+					"a block-local alias does not reach a read outside its block",
+					[
+						'it("x", () => {',
+						"\t{",
+						"\t\tconst read = fs.readFileSync;",
+						"\t}",
+						"\tvoid read(getLatencyLogPath());",
+						"});",
+					],
+					[],
+				],
+				[
 					"`var` hoists, so a block-level `var` alias binds the function",
 					[
 						'it("x", () => {',
