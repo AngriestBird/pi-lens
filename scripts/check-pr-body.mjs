@@ -600,13 +600,17 @@ function lineAt(source, index) {
 
 // Index of the `)` closing the `(` at `open`, over comment- and
 // string-blanked text; -1 when the call runs past the end of the source.
-function closeParenIndex(blanked, open) {
+function closeBracketIndex(blanked, open, opener = "(", closer = ")") {
 	let depth = 0;
 	for (let index = open; index < blanked.length; index++) {
-		if (blanked[index] === "(") depth++;
-		else if (blanked[index] === ")" && --depth === 0) return index;
+		if (blanked[index] === opener) depth++;
+		else if (blanked[index] === closer && --depth === 0) return index;
 	}
 	return -1;
+}
+
+function closeParenIndex(blanked, open) {
+	return closeBracketIndex(blanked, open);
 }
 
 function recordLocationsFromRuntimeSource(source, blankedText) {
@@ -616,9 +620,10 @@ function recordLocationsFromRuntimeSource(source, blankedText) {
 	// source itself, so a record's span still maps back to the diff's added
 	// POST-image lines.
 	const blanked = blankedText ?? blankCommentsAndStrings(source).text;
-	const push = (value, valueIndex, start, end) =>
+	const push = (value, valueIndex, start, end, field) =>
 		records.push({
 			value,
+			field,
 			line: lineAt(source, valueIndex),
 			startLine: lineAt(source, start),
 			endLine: lineAt(source, end),
@@ -668,6 +673,7 @@ function recordLocationsFromRuntimeSource(source, blankedText) {
 						match.index + fieldMatch.index + fieldMatch[0].indexOf(value),
 						match.index,
 						match.index + match[0].length,
+						field,
 					);
 			}
 		}
@@ -688,6 +694,7 @@ function recordLocationsFromRuntimeSource(source, blankedText) {
 				open + 1 + phase.index + phase[0].indexOf(phase[2]),
 				match.index,
 				end,
+				"phase",
 			);
 		const ledgerKind = /\bledgerKind\s*:\s*["']([^"']+)["']/.exec(call);
 		if (ledgerKind)
@@ -696,6 +703,7 @@ function recordLocationsFromRuntimeSource(source, blankedText) {
 				open + 1 + ledgerKind.index + ledgerKind[0].indexOf(ledgerKind[1]),
 				match.index,
 				end,
+				"kind",
 			);
 	}
 	return records;
@@ -1503,6 +1511,1076 @@ function hasNoRecordReason(content, files) {
 			return new RegExp(`(?<![\\w.-])${base}(?!\\w)`).test(text);
 		})
 	);
+}
+
+// --- #4597: a named record must be read back by a test ---------------------
+//
+// `docs/pi-lens-fixer.md:117` requires every record the `## Observability`
+// section names to be asserted by a test, and nothing checked it: the audit of
+// the 53 `fix` PRs merged 2026-10-11..2026-10-18 found 3 of 29 record-naming
+// bodies whose record no test reads (`cascade_pending_rendered`,
+// `blocker-position-unaligned`, and #4527's `savedServerIds` claim). The rule
+// is its own function with one call site, beside `lintRuntimeObservability`
+// (which asks whether a record was named at all), so the diff-keyed rules of
+// #4585 land next to it without either change touching the other.
+//
+// What counts as naming a record: a token of the section with a record's shape
+// that the runtime actually emits as a record value, whatever its font — a
+// backticked span, a bare word, or the text of a link (F-4597-R2-2). A
+// camelCase symbol, a path, a command and a one-word value fail the shape. The
+// registry, not the body's formatting, decides: the harvest reads the call
+// sites `recordLocationsFromRuntimeSource` names (the
+// `logLatency`/`logCascade`/`logBusEvent`/`emitBounded` object forms, the
+// ledger's Once/Count/`recordDegradation` kinds, and `summary.push`), so a
+// record written through another wrapper — `logReviewGraph`, `logTreeSitter`,
+// the `logActionableWarningsEvent` NDJSON row — is outside this rule until that
+// wrapper joins the harvest (#3168's `logCascade` precedent). A one-word record
+// value (a bare `autofix`) fails the two-segment shape on purpose, so it stays
+// outside the rule even where a sink emits it.
+const RECORD_LITERAL_SPAN = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)+$/;
+// A bare mention is read against the fields that identify a record, because a
+// bare two-segment compound is also ordinary prose: `ast-grep`, `project-trust`
+// and `file-mutation-queue` are `subsystem`/`message` values, not record
+// identities. A backticked span is an explicit naming and is read against every
+// harvested field, as it was in round 2.
+const RECORD_IDENTITY_FIELDS = new Set([
+	"phase",
+	"kind",
+	"event",
+	"eventName",
+	"outcome",
+]);
+// The bare spelling's token: the same shape, as its own word of the section.
+const RECORD_TOKEN = /(?<![\w$])[a-z][a-z0-9]*(?:[._-][a-z0-9]+)+(?![\w$])/g;
+// One lint sends at most this many needles to `git grep`. A section that
+// exceeds it is disclosed (`::warning::`) rather than silently half-checked.
+const MAX_RECORD_MENTIONS = 400;
+// Where a read-back may live (#4597 review round 1: F1, F2, F3; round 2:
+// F-4597-R2-1). The rule names the ONE form it admits and refuses everything
+// else, so it never enumerates the bypasses it rejects (shape 69):
+//
+//   an exact occurrence of the literal — as a string inside an assertion
+//   expression, an equality operand, a `case` label, a record-keyed object
+//   literal, or a containment predicate's argument, or as the identifier the
+//   test spells — in the body of a declaration vitest collects and runs.
+//
+// A test or suite title is not a body position, any other call argument is a
+// mention, and a declaration whose modifier the rule cannot prove runs
+// (`.skip`, `.todo`, `.skipIf`, a plugin's extension) contributes nothing. A
+// position no declaration encloses is not a read position either: "this file
+// holds a live test somewhere" was a guess that admitted a dead body.
+
+const COMPARISON_BEFORE = /(?:===|!==|==|!=)\s*$/;
+const COMPARISON_AFTER = /^\s*(?:===|!==|==|!=)/;
+const CASE_LABEL_BEFORE = /\bcase\s+$/;
+// The record key a caller writes: the discriminators the harvest reads at its
+// call sites (`phase`, `event`, `eventName`, `kind`, `outcome`).
+const RECORD_KEY_BEFORE = /\b(?:phase|event|eventName|kind|outcome)\s*:\s*$/;
+const CONTAINMENT_CALL_BEFORE =
+	/\.\s*(?:includes|contains|match|matchAll|startsWith|endsWith|indexOf|lastIndexOf|has|some|every|filter|find)\s*\(\s*$/;
+
+// The trees `recordLocationsFromRuntimeSource` harvests from (AGENTS.md's
+// runtime observability paths; `scripts/` records are CI annotations, not
+// ledger or NDJSON rows, so they carry no harvestable literal).
+const RUNTIME_OBSERVABILITY_ROOTS = ["clients", "tools", "mcp", "index.ts"];
+// A test source. `tests/fixtures/ci-pr-bodies/*.md` are bodies under test, not
+// evidence, and a non-source file cannot be lexed as one.
+const TEST_SOURCE_FILE = /\.(?:[cm]?[jt]sx?)$/;
+
+/**
+ * The span of the call chain that starts at the identifier at `index`:
+ * `expect(...)`, `expect.soft(...).toBe(...)`, `assert.equal(...)`,
+ * `it.each([...])("title", fn)`, `it["only"]("title", fn)`. Blanked text has
+ * no string or comment bracket, so every paren read here is code, and a `[...]`
+ * link resolves through the lexer's own string spans. `null` when the chain
+ * reaches no argument list (a bare identifier, `expect.only`, `it.todo`).
+ * `unproven` reports a link this reader cannot resolve (`it[modifier]`): the
+ * declaration rule refuses that form whole instead of guessing.
+ */
+function callChainAt(code, index, strings = []) {
+	if (!/[A-Za-z_$]/.test(code[index] ?? "")) return null;
+	let cursor = index;
+	while (/[$\w]/.test(code[cursor] ?? "")) cursor += 1;
+	const links = [];
+	let calls = 0;
+	let lastOpen = -1;
+	let lastClose = -1;
+	let unproven = false;
+	for (;;) {
+		const at = skipSpaces(code, cursor);
+		if (code[at] === ".") {
+			MEMBER_LINK.lastIndex = at;
+			const link = MEMBER_LINK.exec(code);
+			if (!link) break;
+			links.push(link[1]);
+			cursor = at + link[0].length;
+			continue;
+		}
+		if (code[at] === "[") {
+			const link = bracketLinkAt(code, at, strings);
+			if (link) {
+				links.push(link.name);
+				cursor = link.end;
+				continue;
+			}
+			// An index this reader cannot resolve (`it[modifier]`) is a declaration
+			// it cannot follow only when the chain goes on to a call; `test[key] !==`
+			// is a value, not a declaration form.
+			const close = closeBracketIndex(code, at, "[", "]");
+			if (
+				close !== -1 &&
+				/[.([<]/.test(code[skipSpaces(code, close + 1)] ?? "")
+			)
+				unproven = true;
+			break;
+		}
+		if (code[at] === "<") {
+			// A generic argument list (`it.each<NodeJS.Platform>([...])`) is part
+			// of the chain; one this reader cannot close is an unmodelled form.
+			const close = angleSpanEnd(code, at);
+			if (close === -1) {
+				unproven = true;
+				break;
+			}
+			cursor = close + 1;
+			continue;
+		}
+		if (code[at] !== "(") break;
+		const close = closeParenIndex(code, at);
+		// A call this reader cannot close (an unbalanced file) is not a
+		// declaration form it misread: the chain simply ends here.
+		if (close === -1) break;
+		lastOpen = at;
+		lastClose = close;
+		calls += 1;
+		cursor = close + 1;
+	}
+	if (!calls && !unproven) return null;
+	return {
+		start: index,
+		end: lastClose + 1,
+		links,
+		lastOpen,
+		lastClose,
+		calls,
+		unproven,
+	};
+}
+
+/**
+ * Whether the text after a declaration name begins a declaration this reader
+ * cannot parse at all: an optional call (`it?.(…)`, `it!.(…)`). Every other
+ * attempt (`it[...]`, `it <T>`, `it(…)`) is resolved by `callChainAt`, and a
+ * value (`test:`, `test,`, `test?.name`, `describe.skip`) holds no body.
+ */
+function declarationAttemptAt(code, from) {
+	const at = skipSpaces(code, from);
+	const char = code[at] ?? "";
+	if ((char === "?" || char === "!") && code[at + 1] === ".")
+		return code[skipSpaces(code, at + 2)] === "(";
+	return false;
+}
+
+/**
+ * The member link a `[...]` holds: `it["skip"]`, `it['each']`, `` it[`for`] ``.
+ * The blanker replaces every string with spaces, so the link's name comes from
+ * the lexer's own span and an index that is anything else (a variable, an
+ * expression, a template with a hole) resolves to nothing.
+ */
+function bracketLinkAt(code, open, strings) {
+	const close = closeBracketIndex(code, open, "[", "]");
+	if (close === -1) return null;
+	if (code.slice(open + 1, close).trim() !== "") return null;
+	const string = strings.find((one) => one.start > open && one.end <= close);
+	const name = string?.text.trim() ?? "";
+	if (!/^[A-Za-z_$][\w$]*$/.test(name)) return null;
+	return { name, end: close + 1 };
+}
+
+const MEMBER_LINK = /\.[ \t\r\n]*([A-Za-z_$][\w$]*)/y;
+
+/** The index of the `>` closing the `<` at `open`, or -1 when there is none. */
+function angleSpanEnd(code, open) {
+	let depth = 0;
+	for (let index = open; index < code.length; index += 1) {
+		const char = code[index];
+		// A function type's arrow is not a closing angle (`<(a) => void>`).
+		if (char === "=" && code[index + 1] === ">") {
+			index += 1;
+			continue;
+		}
+		if (char === "<") depth += 1;
+		else if (char === ">") {
+			if (--depth === 0) return index;
+		} else if (char === ";" || char === "{" || char === "}") return -1;
+	}
+	return -1;
+}
+
+function skipSpaces(code, index) {
+	let cursor = index;
+	while (cursor < code.length && /\s/.test(code[cursor])) cursor += 1;
+	return cursor;
+}
+
+/// The declarations whose body vitest runs, and the links that keep them live.
+// `LIVE_TEST_LINKS` is an allowlist: a link it does not name (`.skip`,
+// `.todo`, `.skipIf`, `.runIf`, a plugin extension) is a declaration the rule
+// cannot prove runs, so its assertions are refused. A hook takes no link.
+// A `[...]` link (`it["only"]`) is a member link like any other, and a name
+// bound to a declaration (`const t = it`, `const d = it.skipIf(cond)`) is an
+// alias that carries the links its chain already applied.
+const TEST_HOOKS = new Set([
+	"beforeEach",
+	"beforeAll",
+	"afterEach",
+	"afterAll",
+]);
+const DECLARATION_NAMES = new Set([
+	"describe",
+	"suite",
+	"it",
+	"test",
+	...TEST_HOOKS,
+]);
+const LIVE_TEST_LINKS = new Set([
+	"only",
+	"concurrent",
+	"sequential",
+	"each",
+	"for",
+	"fails",
+	"live",
+]);
+
+// The two vocabulary patterns below escape their own names inline: a named or
+// arrow-body helper here would be a second copy of `escapeRegExp`, which
+// `tests/config/escape-regexp-fold-sweep.test.ts` forbids outside
+// `clients/string-utils.ts` (and this script cannot import, because it runs
+// with no build). The sweep's header allows the inline expression.
+
+/**
+ * The ranges of `import` statements. An import specifier names the declaration
+ * without starting one (`import { it } from "vitest"`), so the declaration scan
+ * skips it; a dynamic `import(...)` is an expression and is left alone.
+ */
+function importStatementRanges(code) {
+	const ranges = [];
+	for (const match of code.matchAll(/\bimport\b/g)) {
+		const before = code[match.index - 1] ?? " ";
+		if (before === "." || /[$\w]/.test(before)) continue;
+		const at = skipSpaces(code, match.index + match[0].length);
+		if (code[at] === "(" || code[at] === ".") continue;
+		let depth = 0;
+		for (let index = at; index < code.length; index += 1) {
+			const char = code[index];
+			if (char === "(" || char === "[" || char === "{") depth += 1;
+			else if (char === ")" || char === "]" || char === "}") depth -= 1;
+			else if ((char === ";" || char === "\n") && depth <= 0) {
+				ranges.push([match.index, index]);
+				break;
+			}
+		}
+	}
+	return ranges;
+}
+
+// A binding of a declaration name to another name, and the name it binds.
+const BINDING_BEFORE = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*$/;
+// The alias's own declaration site (`const t = it`): a name being bound, not a
+// declaration used as a value.
+const BINDING_TARGET_BEFORE = /\b(?:const|let|var)\s+$/;
+// A declaration name destructured into other bindings (`const { skip } = it`)
+// hides a declaration behind a binding this reader cannot follow.
+const DESTRUCTURE_BEFORE = /\b(?:const|let|var)\s*\{[^{}]*\}\s*=\s*$/;
+
+/**
+ * The names that alias a test declaration, with the links the alias already
+ * carries (`const d = it.skipIf(cond)` binds `.skipIf`). A bare alias
+ * (`const t = it`) is resolved once its own target is known, so an alias of an
+ * alias lands too. A binding this reader cannot follow is reported `unproven`.
+ */
+function declarationAliases(code, strings) {
+	const aliases = new Map();
+	let unproven = false;
+	const bindings = [
+		...code.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*/g),
+	].map((match) => ({
+		name: match[1],
+		at: match.index + match[0].length,
+	}));
+	for (let changed = true; changed;) {
+		changed = false;
+		for (const { name, at } of bindings) {
+			if (DECLARATION_NAMES.has(name) || aliases.has(name)) continue;
+			const target = /^([A-Za-z_$][\w$]*)/.exec(code.slice(at))?.[1];
+			const carried = DECLARATION_NAMES.has(target ?? "")
+				? []
+				: aliases.get(target ?? "")?.links;
+			if (carried === undefined) continue;
+			const chain = callChainAt(code, at, strings);
+			if (chain?.unproven) {
+				unproven = true;
+				continue;
+			}
+			aliases.set(name, {
+				links: [...carried, ...(chain?.links ?? [])],
+			});
+			changed = true;
+		}
+	}
+	return { aliases, unproven };
+}
+
+/**
+ * Every test-family declaration in a lexed file, with the span its body lives
+ * in. The title and the callee chain sit before `bodyStart`, so nothing there
+ * can ever read as a read-back: `it("<record>", …)` is a name, not an
+ * assertion. `unproven` says the file writes a declaration in a form this
+ * reader cannot classify, which makes the whole file contribute nothing
+ * (F-4597-R2-1): the rule never falls back to guessing.
+ */
+function declarationScopes(code, strings = []) {
+	const { aliases, unproven: aliasUnproven } = declarationAliases(
+		code,
+		strings,
+	);
+	const alternatives = [];
+	for (const name of [...DECLARATION_NAMES, ...aliases.keys()])
+		alternatives.push(name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+	const declarationName = new RegExp(
+		`\\b(?:${alternatives.join("|")})\\b`,
+		"g",
+	);
+	const imports = importStatementRanges(code);
+	const scopes = [];
+	let unproven = aliasUnproven;
+	for (const match of code.matchAll(declarationName)) {
+		const before = code[match.index - 1] ?? " ";
+		if (before === "." || /[$\w]/.test(before)) continue;
+		if (
+			imports.some(([start, end]) => match.index > start && match.index < end)
+		)
+			continue;
+		const name = match[0];
+		const chain = callChainAt(code, match.index, strings);
+		if (!chain) {
+			// A declaration name bound to another name is the alias pass's business
+			// and a bare value (`test:`, `test,`, `describe.skip` as a value) holds
+			// no declaration body, so neither can hide one. A name followed by a
+			// declaration bracket, a generic list or an optional call IS an attempt
+			// this reader cannot resolve: the file is unprovable (F-4597-R2-1).
+			const before = code.slice(Math.max(0, match.index - 96), match.index);
+			if (
+				BINDING_BEFORE.test(before) ||
+				BINDING_TARGET_BEFORE.test(before.slice(-32))
+			)
+				continue;
+			if (declarationAttemptAt(code, match.index + name.length))
+				unproven = true;
+			if (DESTRUCTURE_BEFORE.test(before)) unproven = true;
+			continue;
+		}
+		if (chain.unproven) {
+			unproven = true;
+			continue;
+		}
+		const links = [...(aliases.get(name)?.links ?? []), ...chain.links];
+		const hook = TEST_HOOKS.has(name);
+		const live = hook
+			? links.length === 0
+			: links.every((link) => LIVE_TEST_LINKS.has(link));
+		scopes.push({
+			start: chain.start,
+			end: chain.end,
+			kind: hook
+				? "hook"
+				: name === "describe" || name === "suite"
+					? "suite"
+					: "test",
+			live,
+			bodyStart: hook
+				? chain.lastOpen
+				: firstArgumentEnd(code, chain.lastOpen, chain.lastClose),
+			bodyEnd: chain.lastClose,
+		});
+	}
+	return { scopes, unproven };
+}
+
+/** Index of the first top-level `,` inside a call's arguments, or `null`. */
+function firstArgumentEnd(code, open, close) {
+	let depth = 0;
+	for (let index = open + 1; index < close; index++) {
+		const char = code[index];
+		if (char === "(" || char === "[" || char === "{") depth += 1;
+		else if (char === ")" || char === "]" || char === "}") depth -= 1;
+		else if (char === "," && depth === 0) return index;
+	}
+	return null;
+}
+
+/**
+ * Whether a position is where this file's tests can read a record: in the body
+ * of a declaration vitest runs, never in the callee chain or the title of one
+ * (a title is a name, not an assertion), and never inside a declaration the
+ * rule cannot prove runs — a `describe.skip` refuses everything under it. A
+ * position no declaration encloses is not a read position: the rule reads
+ * positions, not dataflow, and "the file holds a live test" admitted a dead
+ * helper's body (F-4597-R2-1).
+ */
+function isReadPosition(scopes, position) {
+	let inBody = false;
+	let inDead = false;
+	for (const scope of scopes) {
+		if (position < scope.start || position >= scope.end) continue;
+		if (!scope.live) {
+			inDead = true;
+			continue;
+		}
+		if (
+			scope.bodyStart !== null &&
+			position > scope.bodyStart &&
+			position < scope.bodyEnd
+		)
+			inBody = true;
+	}
+	return inBody && !inDead;
+}
+
+/** The index of the `;` that ends the statement starting at `from`, or -1. */
+function statementEnd(code, from) {
+	let depth = 0;
+	for (let index = from; index < code.length; index += 1) {
+		const char = code[index];
+		if (char === "(" || char === "[" || char === "{") depth += 1;
+		else if (char === ")" || char === "]" || char === "}") {
+			if (depth === 0) return -1;
+			depth -= 1;
+		} else if (char === ";" && depth === 0) return index;
+	}
+	return -1;
+}
+
+/**
+ * The name of the module-scope function that encloses `position`, or null:
+ * `function NAME(…) { … }`, `const NAME = (…) => { … }`, `const NAME =
+ * function (…) { … }`, and a concise arrow (`const NAME = () => rows(…);`),
+ * whose statement is the body. A declaration whose brace comes after its own
+ * `;` is not a helper this reader can name.
+ */
+function enclosingHelperName(code, position) {
+	const candidates = [];
+	const add = (name, from) => {
+		const brace = code.indexOf("{", from);
+		if (
+			brace !== -1 &&
+			brace < position &&
+			!code.slice(from, brace).includes(";")
+		) {
+			const close = closeBracketIndex(code, brace, "{", "}");
+			if (close >= position) {
+				candidates.push({ name, at: from });
+				return;
+			}
+		}
+		const end = statementEnd(code, from);
+		if (end >= position) candidates.push({ name, at: from });
+	};
+	for (const match of code.matchAll(
+		/(?<![.$\w])function\s+([A-Za-z_$][\w$]*)\s*\(/g,
+	))
+		add(match[1], match.index);
+	for (const match of code.matchAll(
+		/(?<![.$\w])(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^()]*\)\s*=>|function\b|[A-Za-z_$][\w$]*\s*=>)/g,
+	))
+		add(match[1], match.index);
+	if (!candidates.length) return null;
+	// The innermost helper is the one whose body holds the position.
+	candidates.sort((left, right) => right.at - left.at);
+	return candidates[0].name;
+}
+
+/**
+ * Whether a position no declaration encloses is still a read-back: it sits in a
+ * named module-scope helper that a live declaration calls. That is the shape
+ * most of this repository's read-backs use (`function availabilityRows() { …
+ * phase === "<record>" }`, called from a test body), and it is evidence, not
+ * the round-2 guess "this file holds a live test somewhere": the helper's own
+ * name has to appear as a call in a live body (F-4597-R2-1).
+ */
+function helperReadPosition(code, scopes, position) {
+	if (scopes.some((scope) => position >= scope.start && position < scope.end))
+		return false;
+	const name = enclosingHelperName(code, position);
+	if (!name) return false;
+	const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	const call = new RegExp(`(?<![\\w$])${escaped}\\s*\\(`, "g");
+	for (const match of code.matchAll(call))
+		if (isReadPosition(scopes, match.index)) return true;
+	return false;
+}
+
+/** Whether a position is where this file's tests can read a record. */
+function readPosition(code, scopes, position) {
+	return (
+		isReadPosition(scopes, position) ||
+		helperReadPosition(code, scopes, position)
+	);
+}
+
+/** The spans of the file's assertion expressions (`expect(...)` chains, `assert*(...)`). */
+function assertionSpans(code, strings = []) {
+	const spans = [];
+	for (const match of code.matchAll(/\b(?:expect|assert)\b/g)) {
+		const before = code[match.index - 1] ?? " ";
+		if (before === "." || /[$\w]/.test(before)) continue;
+		const chain = callChainAt(code, match.index, strings);
+		if (chain) spans.push([chain.start, chain.end]);
+	}
+	return spans;
+}
+
+function withinSpans(spans, position) {
+	return spans.some(([start, end]) => position >= start && position < end);
+}
+
+/**
+ * The full name, not a prefix: `lsp_document_drift` never matches a test that
+ * reads `lsp_document_drift_cap` (the shape the sibling rule's file-name match
+ * already fixed, #3905 r2).
+ */
+function exactTokenPattern(value) {
+	const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	return new RegExp(`(?<![\\w.$-])${escaped}(?![\\w$-])`);
+}
+
+/** Whether the position is an operand of an equality comparison. */
+function comparisonAt(code, start, end) {
+	const before = code.slice(Math.max(0, start - 8), start);
+	const after = code.slice(end, end + 8);
+	return COMPARISON_BEFORE.test(before) || COMPARISON_AFTER.test(after);
+}
+
+/** Whether a string sits where a test asserts, compares or keys on a record. */
+function stringIsRead(code, assertions, string) {
+	if (withinSpans(assertions, string.start)) return true;
+	const before = code.slice(Math.max(0, string.start - 40), string.start);
+	return (
+		COMPARISON_BEFORE.test(before) ||
+		comparisonAt(code, string.start, string.end) ||
+		CASE_LABEL_BEFORE.test(before) ||
+		RECORD_KEY_BEFORE.test(before) ||
+		CONTAINMENT_CALL_BEFORE.test(before)
+	);
+}
+
+/** Whether an identifier the test spells is read where a record is decided. */
+function identifierIsRead(code, scopes, assertions, identifier) {
+	const pattern = new RegExp(
+		`(?<![\\w$])${identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w$])`,
+		"g",
+	);
+	for (const match of code.matchAll(pattern)) {
+		if (!readPosition(code, scopes, match.index)) continue;
+		if (withinSpans(assertions, match.index)) return true;
+		if (comparisonAt(code, match.index, match.index + match[0].length))
+			return true;
+	}
+	return false;
+}
+
+// Vitest's own default `include` (`configDefaults.include` in `vitest/config`),
+// which is what the projects that declare no `include` collect — the default
+// project here. The lint cannot import it (`lintPrBody` is synchronous, and the
+// script runs in lanes with no `npm install`), so the value is pinned against
+// the real `configDefaults.include` by the #4597 test file: a vitest upgrade
+// that moves the default reds there, and this constant moves with it.
+const VITEST_DEFAULT_INCLUDE = ["**/*.{test,spec}.?(c|m)[jt]s?(x)"];
+const VITEST_CONFIG = "vitest.config.ts";
+// A conditional list's own choice (`process.env.npm_lifecycle_event ===
+// "test:unit" ? A : B`), read the way the config module reads it when it
+// loads: the lint sees the lists the run sees. `undefined` is "this reader
+// cannot decide", and the caller unions both branches.
+const ENV_COMPARISON =
+	/process\.env(?:\.([A-Za-z_$][\w$]*)|\s*\[\s*["'`]([^"'`]+)["'`]\s*\])\s*(===|==|!==|!=)\s*["'`]([^"'`]*)["'`]/;
+
+function conditionalBranch(condition) {
+	const match = ENV_COMPARISON.exec(String(condition ?? ""));
+	if (!match) return undefined;
+	const actual = process.env[match[1] ?? match[2]] ?? "";
+	const equal = actual === match[4];
+	return match[3] === "===" || match[3] === "==" ? equal : !equal;
+}
+
+/**
+ * Whether a repo-relative POSIX path is a file vitest collects, read from the
+ * repository's own `vitest.config.ts`: each project's `include`/`exclude` lists
+ * (the root `test` block's merge into every project), resolved through the
+ * `const` arrays they name or spread. `null` when the config is absent,
+ * unreadable, or holds a list this reader cannot resolve, because a guessed
+ * answer would either refuse every body or admit every file.
+ */
+function vitestCollectedPaths(cwd = REPO_ROOT) {
+	let source;
+	try {
+		source = readFileSync(resolve(cwd, VITEST_CONFIG), "utf8");
+	} catch {
+		return null;
+	}
+	if (source.length > MAX_SOURCE_BYTES) return null;
+	const lexed = blankCommentsAndStrings(source);
+	const code = lexed.text;
+	// Every `const/let/var NAME = …` initializer, so a list can be named.
+	const declarations = new Map();
+	for (const match of code.matchAll(
+		/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*/g,
+	))
+		declarations.set(match[1], match.index + match[0].length);
+	// The blanked text carries no string, so a list's patterns are read from the
+	// lexer's own string spans. A negation (`!pattern`) changes what the list
+	// means in a way this reader does not model, so it makes the config
+	// unreadable rather than silently absent.
+	const elementsOf = (open, close, depth) => {
+		if (open === -1 || close === -1 || depth > 12) return null;
+		const found = [];
+		for (const string of lexed.strings) {
+			if (string.start <= open || string.end > close) continue;
+			if (string.text.startsWith("!")) return null;
+			found.push(string.text);
+		}
+		const inner = code.slice(open + 1, close);
+		for (const match of inner.matchAll(
+			/\.\.\.\s*([A-Za-z_$][\w$]*)|([^\s,])/g,
+		)) {
+			if (match[1] !== undefined) {
+				const span = declarations.get(match[1]);
+				const spread = span === undefined ? null : resolveList(span, depth + 1);
+				if (spread === null) return null;
+				found.push(...spread);
+				continue;
+			}
+			// Blanked text holds no strings, so anything else inside the array is an
+			// element this reader does not model (an expression, a call, a number).
+			if (match[2] !== undefined) return null;
+		}
+		return found;
+	};
+	/** `\`?\`` or `\`:\`` at depth 0 before the statement's `;`, or `-1`. */
+	const separatorAt = (start, separator) => {
+		let depth = 0;
+		for (let index = start; index < code.length; index++) {
+			const char = code[index];
+			if (char === "(" || char === "[" || char === "{") depth += 1;
+			else if (char === ")" || char === "]" || char === "}") depth -= 1;
+			else if (char === ";" && depth === 0) return -1;
+			else if (char === separator && depth === 0) return index;
+		}
+		return -1;
+	};
+	// A list is an array literal, a name bound to one, or a conditional over two
+	// of them (`process.env.npm_lifecycle_event === "test:unit" ? A : []`). A
+	// conditional that compares an environment variable is decided the way the
+	// config module decides it when loaded, so the lint sees the lists the run
+	// sees; any other condition unions both branches, which errs toward refusing
+	// a file rather than admitting one the suite may not run.
+	const resolveList = (start, depth) => {
+		if (depth > 12) return null;
+		const at = skipSpaces(code, start);
+		if (code[at] === "[")
+			return elementsOf(at, closeBracketIndex(code, at, "[", "]"), depth);
+		const question = separatorAt(at, "?");
+		if (question !== -1) {
+			const colon = separatorAt(question + 1, ":");
+			if (colon === -1) return null;
+			const whenTrue = () => resolveList(question + 1, depth + 1);
+			const whenFalse = () => resolveList(colon + 1, depth + 1);
+			const branch = conditionalBranch(source.slice(at, question));
+			const first = branch === false ? whenFalse() : whenTrue();
+			if (branch !== undefined) return first;
+			const second = whenFalse();
+			if (first === null || second === null) return null;
+			return [...first, ...second];
+		}
+		const name = /^([A-Za-z_$][\w$]*)/.exec(code.slice(at))?.[1];
+		const init = name === undefined ? undefined : declarations.get(name);
+		if (init === undefined) return null;
+		return resolveList(init, depth + 1);
+	};
+	const patterns = (kind, open, close) => {
+		if (open === -1 || close === -1) return null;
+		const found = [];
+		const key = new RegExp(`\\b${kind}\\s*:\\s*`, "y");
+		let depth = 0;
+		for (let index = open + 1; index < close; index++) {
+			const char = code[index];
+			if (char === "(" || char === "[" || char === "{") depth += 1;
+			else if (char === ")" || char === "]" || char === "}") depth -= 1;
+			if (depth !== 0) continue;
+			key.lastIndex = index;
+			const match = key.exec(code);
+			if (!match) continue;
+			const resolved = resolveList(match.index + match[0].length, 0);
+			if (resolved === null) return null;
+			found.push(...resolved);
+			index = match.index + match[0].length - 1;
+		}
+		return found;
+	};
+	// A vitest config collects a file through ONE project: each project's
+	// `include` and `exclude` list, plus the root `test` block's, which apply to
+	// every project (`tests/support/vitest-collection.ts` reads the same merge).
+	// A project that declares neither `include` nor an inherited one collects
+	// vitest's default include. This is the twice-verified part of the config: a
+	// dedicated project's own files are excluded from the default project
+	// (`wallClockBudgetInclude` here), so a union over every exclude list would
+	// answer "not collected" for files the suite really runs.
+	const blocks = [];
+	for (const match of code.matchAll(/\btest\s*:\s*\{/g)) {
+		const open = match.index + match[0].length - 1;
+		const close = closeBracketIndex(code, open, "{", "}");
+		if (close === -1) return null;
+		blocks.push({ open, close });
+	}
+	const root = blocks.find((block) =>
+		/\bprojects\s*:/.test(code.slice(block.open, block.close)),
+	);
+	if (!root) return null;
+	const rootLists = {
+		include: patterns("include", root.open, root.close),
+		exclude: patterns("exclude", root.open, root.close),
+	};
+	if (rootLists.include === null || rootLists.exclude === null) return null;
+	const projects = blocks
+		.filter(
+			(block) =>
+				block !== root && block.open > root.open && block.close < root.close,
+		)
+		.map((block) => ({
+			include: patterns("include", block.open, block.close),
+			exclude: patterns("exclude", block.open, block.close),
+		}));
+	if (!projects.length) projects.push({ include: [], exclude: [] });
+	const compiled = [];
+	for (const project of projects) {
+		if (project.include === null || project.exclude === null) return null;
+		const include = [...rootLists.include, ...project.include];
+		const exclude = [...rootLists.exclude, ...project.exclude];
+		compiled.push({
+			include: (include.length ? include : VITEST_DEFAULT_INCLUDE).map(
+				(pattern) => globToRegExp(pattern, { directory: false }),
+			),
+			exclude: exclude.map((pattern) =>
+				globToRegExp(pattern, { directory: true }),
+			),
+		});
+	}
+	return (path) =>
+		compiled.some(
+			(project) =>
+				project.include.some((matcher) => matcher.test(path)) &&
+				!project.exclude.some((matcher) => matcher.test(path)),
+		);
+}
+
+/** A glob as vitest reads it: `**`, `*`, `?`, `{a,b}`, `?(a|b)`, `[abc]`. */
+function globToRegExp(pattern, { directory }) {
+	if (!/[*?[\]{}()]/.test(pattern)) {
+		const escaped = pattern
+			.replace(/\/+$/, "")
+			.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		return directory
+			? new RegExp(`^(?:${escaped}(?:/.*)?)$`)
+			: new RegExp(`^${escaped}$`);
+	}
+	let out = "^";
+	for (let index = 0; index < pattern.length; index++) {
+		const char = pattern[index];
+		if (char === "*") {
+			if (pattern[index + 1] === "*") {
+				index += 1;
+				if (pattern[index + 1] === "/") {
+					index += 1;
+					out += "(?:[^/]+/)*";
+				} else out += ".*";
+			} else out += "[^/]*";
+			continue;
+		}
+		if (char === "?") {
+			const group = /^\?\(([^)]*)\)/.exec(pattern.slice(index));
+			if (group) {
+				out += `(?:${group[1]})?`;
+				index += group[0].length - 1;
+			} else out += "[^/]";
+			continue;
+		}
+		if (char === "{") {
+			const end = pattern.indexOf("}", index);
+			if (end !== -1) {
+				// One-off call-site escapes, the shape this sweep's header allows for a
+				// `scripts/*.mjs` that runs with no `npm install`: no escaping helper.
+				const alternatives = [];
+				for (const one of pattern.slice(index + 1, end).split(","))
+					alternatives.push(one.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+				out += `(?:${alternatives.join("|")})`;
+				index = end;
+				continue;
+			}
+		}
+		if (char === "[") {
+			const end = pattern.indexOf("]", index);
+			if (end !== -1) {
+				out += pattern.slice(index, end + 1);
+				index = end;
+				continue;
+			}
+		}
+		out += char.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	}
+	return new RegExp(`${out}$`);
+}
+
+/** The record-shaped mentions of a section, in the order the body makes them. */
+function recordMentions(content) {
+	const source = String(content ?? "");
+	const mentioned = new Map();
+	for (const match of source.matchAll(/`([^`\n]+)`/g)) {
+		const span = match[1].trim();
+		if (RECORD_LITERAL_SPAN.test(span)) mentioned.set(span, true);
+	}
+	for (const match of source.matchAll(RECORD_TOKEN))
+		if (!mentioned.has(match[0])) mentioned.set(match[0], false);
+	const entries = [...mentioned];
+	if (entries.length <= MAX_RECORD_MENTIONS)
+		return { mentions: entries, truncated: false };
+	return {
+		mentions: entries.slice(0, MAX_RECORD_MENTIONS),
+		truncated: true,
+	};
+}
+
+/**
+ * `git grep -l` for several fixed strings at once: the file list, `[]` for no
+ * match (git exits 1, which is not a failure), or `null` when the probe could
+ * not run at all. A null is reported, never read as an empty tree.
+ */
+function grepLiteralFiles(patterns, pathspecs, options = {}) {
+	if (!patterns.length) return [];
+	let output;
+	try {
+		output = (options.git ?? gitExecFileSync)(
+			[
+				"grep",
+				"-l",
+				// The long form on purpose: the writer-script census reads a bare
+				// "-F" as a `gh` field flag (tests/config/workflow-writers-governance).
+				"--fixed-strings",
+				...patterns.flatMap((pattern) => ["-e", pattern]),
+				"--",
+				...pathspecs,
+			],
+			{
+				cwd: options.cwd ?? process.cwd(),
+				encoding: "utf8",
+				maxBuffer: MAX_SOURCE_BYTES,
+			},
+		);
+	} catch (error) {
+		if (error?.status === 1) return [];
+		return null;
+	}
+	return String(output ?? "")
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.filter(Boolean);
+}
+
+/**
+ * The record values the head tree's runtime code emits among the candidates,
+ * split by the field they were harvested from: `values` is every record value,
+ * `identity` only the ones read from a record-identity field. One grep for
+ * every candidate, then one lex per file that mentions any of them: reading the
+ * whole runtime tree to answer a handful of needles is the cost this avoids.
+ */
+function emittedRecordLiterals(candidates, options = {}) {
+	const files = grepLiteralFiles(
+		candidates,
+		RUNTIME_OBSERVABILITY_ROOTS,
+		options,
+	);
+	// `null` is "the probe could not run", never "the tree holds nothing":
+	// the caller reports it rather than reading the empty answer as proof.
+	if (files === null) return null;
+	const values = new Set();
+	const identity = new Set();
+	for (const file of files) {
+		if (!isRuntimeObservabilityPath(file)) continue;
+		const source = headFileSource(file, {
+			headFiles: options.headFiles,
+			workingTree: true,
+			cwd: options.cwd,
+			git: options.git,
+		});
+		if (typeof source !== "string") continue;
+		for (const record of recordLocationsFromRuntimeSource(source)) {
+			values.add(record.value);
+			if (RECORD_IDENTITY_FIELDS.has(record.field)) identity.add(record.value);
+		}
+	}
+	return { values, identity };
+}
+
+// A record literal can reach a test through a binding (`const PHASE = "x"`,
+// then `row.phase === PHASE`), which is still the test reading the record back:
+// the binding is one indirection, not a bare mention. The binding counts only
+// where an assertion compares it or hands it to a matcher; `notice(PHASE)` is a
+// mention, not a read-back.
+const LITERAL_BINDING_BEFORE =
+	/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*$/;
+
+/**
+ * The literals a test reads back, under the two rules above: a position inside a
+ * declaration vitest collects and runs, and a string or identifier the test
+ * asserts, compares or keys on. One lex per file, so a comment that quotes the
+ * literal never counts; one `vitest.config.ts` read per call, so a file the
+ * suite never runs never counts either. A probe that cannot run answers
+ * `{ skipped }`, never an empty set.
+ */
+function testedRecordLiterals(literals, options = {}) {
+	const files = grepLiteralFiles(literals, ["tests"], options);
+	if (files === null)
+		return { skipped: "the tests/ search", reason: "git grep failed" };
+	const collects = vitestCollectedPaths();
+	if (collects === null)
+		return {
+			skipped: "the vitest config read",
+			reason: `${VITEST_CONFIG} could not be read`,
+		};
+	const tested = new Set();
+	const unprovable = [];
+	for (const file of files) {
+		if (!TEST_SOURCE_FILE.test(file)) continue;
+		if (!collects(file)) continue;
+		const source = headFileSource(file, {
+			headFiles: options.headFiles,
+			workingTree: true,
+			cwd: options.cwd,
+			git: options.git,
+		});
+		if (typeof source !== "string") continue;
+		const lexed = blankCommentsAndStrings(source);
+		const code = lexed.text;
+		const { scopes, unproven: cannotProve } = declarationScopes(
+			code,
+			lexed.strings,
+		);
+		// A declaration this reader cannot classify makes the file unprovable: it
+		// contributes no read-back rather than admitting a position on the strength
+		// of some other live test (F-4597-R2-1).
+		if (cannotProve) {
+			unprovable.push(file);
+			continue;
+		}
+		const assertions = assertionSpans(code, lexed.strings);
+		const bindings = new Map();
+		for (const string of lexed.strings) {
+			const identifier = LITERAL_BINDING_BEFORE.exec(string.prefix)?.[1];
+			if (!identifier) continue;
+			const bound = bindings.get(string.text) ?? [];
+			bound.push(identifier);
+			bindings.set(string.text, bound);
+		}
+		for (const literal of literals) {
+			if (tested.has(literal)) continue;
+			const token = exactTokenPattern(literal);
+			const read =
+				lexed.strings.some(
+					(string) =>
+						token.test(string.text) &&
+						readPosition(code, scopes, string.start) &&
+						stringIsRead(code, assertions, string),
+				) ||
+				identifierIsRead(code, scopes, assertions, literal) ||
+				(bindings.get(literal) ?? []).some((identifier) =>
+					identifierIsRead(code, scopes, assertions, identifier),
+				);
+			if (read) tested.add(literal);
+		}
+	}
+	return { tested, unprovable };
+}
+
+/**
+ * #4597: every record literal the `## Observability` section names must appear
+ * in a test under `tests/` in the head tree, in a declaration vitest collects
+ * and runs. `none: <reason>` needs no special case: a body that names no record
+ * literal owes no read-back, and the record checks above already refuse an
+ * empty answer where the diff adds a failure path. A probe that cannot run is a
+ * skipped check and says so (`warnRecordReadBackSkipped`), never silence and
+ * never a refusal the author cannot act on. It runs only when a diff was
+ * resolved, like the record-naming rule beside it, so the local preflight
+ * without an upstream ref keeps structural lint alone.
+ */
+/**
+ * A probe that cannot run is a skipped check, and a skipped check says so: a
+ * caller that copied a body outside a checkout must not read the silence as a
+ * clean result (shape 10), and refusing would answer a body under test with an
+ * error the author cannot act on. The record is the CI annotation below.
+ */
+function warnRecordReadBackSkipped(step, names, reason = "git grep failed") {
+	console.warn(
+		`::warning::PR body Observability names ${names
+			.map((name) => `\`${name}\``)
+			.join(
+				", ",
+			)}, but ${step} could not run (${reason}), so the #4597 read-back check was skipped for them.`,
+	);
+}
+
+function lintObservabilityRecordsTested(lines, headings, options = {}) {
+	const content = observabilitySectionContent(lines, headings);
+	const { mentions, truncated } = recordMentions(content);
+	if (!mentions.length) return [];
+	if (truncated)
+		console.warn(
+			`::warning::PR body Observability names more than ${MAX_RECORD_MENTIONS} record-shaped tokens, so the #4597 read-back check read the first ${MAX_RECORD_MENTIONS} and did not check the rest.`,
+		);
+	const candidates = mentions.map(([name]) => name);
+	const emitted = emittedRecordLiterals(candidates, options);
+	if (emitted === null) {
+		warnRecordReadBackSkipped("the runtime record harvest", candidates);
+		return [];
+	}
+	// A backticked span is an explicit naming and is read against every
+	// harvested field; a bare token or link text must be a record identity,
+	// because a bare two-segment compound is also ordinary prose
+	// (F-4597-R2-2).
+	const named = mentions
+		.filter(
+			([name, quoted]) =>
+				emitted.values.has(name) && (quoted || emitted.identity.has(name)),
+		)
+		.map(([name]) => name);
+	if (!named.length) return [];
+	const result = testedRecordLiterals(named, options);
+	if (result.skipped) {
+		warnRecordReadBackSkipped(result.skipped, named, result.reason);
+		return [];
+	}
+	const missing = named.filter((name) => !result.tested.has(name));
+	if (!missing.length) return [];
+	const unprovable = result.unprovable ?? [];
+	const shown = unprovable.slice(0, 3);
+	const extra =
+		unprovable.length > shown.length
+			? ` (+${unprovable.length - shown.length} more)`
+			: "";
+	const unprovableNote = shown.length
+		? ` A tests/ file whose declarations this rule cannot prove runs contributes nothing, so name the record in a form it reads: ${shown.join(", ")}${extra}.`
+		: "";
+	return [
+		`PR body Observability names ${missing.map((name) => `\`${name}\``).join(", ")}, which no test under tests/ reads: admit one proven form — the record's full name in an assertion inside a test vitest collects and runs, or where that test compares the observed value with it — because docs/pi-lens-fixer.md:117 requires the record the section names to be asserted by a test (#4597).${unprovableNote}`,
+	];
 }
 
 /** Detect the high-confidence shape produced when a worker flattens a body. */
@@ -2398,6 +3476,11 @@ export function lintPrBody(body = "", options = {}) {
 		errors.push(
 			...lintRuntimeObservability(lines, headings, options.diff, options),
 		);
+	// #4597: its own rule with its own call site, beside the record-naming
+	// check, so a later diff-keyed rule (issue #4585) merges without touching
+	// either function.
+	if (options.diff)
+		errors.push(...lintObservabilityRecordsTested(lines, headings, options));
 	errors.push(...lintCodeCitations(body, options));
 	errors.push(...lintTestReferences(body, options));
 	errors.push(...lintMasterClaims(body));
