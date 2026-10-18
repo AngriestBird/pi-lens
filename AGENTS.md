@@ -682,6 +682,10 @@ file-scoped worklist and receives no project-wide scanner output.
     the sink) and fail closed on an unrecognised form. Screen: plant an
     alias, an indirect call and a value reached through another binding,
     and quote each result; every green plant is fixed or named as a residual.
+    On 2026-10-18 five detector PRs took two to six rounds each because
+    every verify found one more spelling. A detector's first round therefore lists its admitted forms
+    and refuses everything else; a residual names an admitted form that is
+    too broad, never a spelling the detector does not read.
 
 73. **Fixture adopts an ancestor root:** a fixture created with no project
     marker inherits whatever root sits above it, so one stray `.git` at the tmp
