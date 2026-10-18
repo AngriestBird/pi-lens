@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { gitExecFileSync } from "./lib/git-fixture-env.mjs";
 import {
 	blankMarkdown,
+	blankHtmlComments,
 	HEADING,
 	parseDefectShapes,
 	sourceWithoutFencedBlocks,
@@ -53,6 +54,9 @@ const FLATTENED_BODY_MAX_NEWLINES = 2;
 // One post-image read bound, shared by the git and working-tree branches of
 // `headFileSource`: a file-count bound alone is not a byte bound.
 const MAX_SOURCE_BYTES = 16 * 1024 * 1024;
+// The unclassifiable-post-image notice names at most this many files, then the
+// remainder as a count (#4585 row classification is an agent-facing surface).
+const UNCLASSIFIED_REPORT_LIMIT = 5;
 const REPAIR_HEADINGS = [
 	"Why",
 	"Notes for the reviewer",
@@ -438,6 +442,10 @@ export function parseRuntimeHunks(diff) {
 				added: new Map(),
 				deletedAfter: new Set(),
 				removed: [],
+				// The diff states a whole-file removal explicitly. It is the one
+				// post-image state that needs no read: there is nothing to classify
+				// (#4605 V2).
+				deletedFile: false,
 			};
 			files.push(current);
 			inHunk = false;
@@ -445,6 +453,8 @@ export function parseRuntimeHunks(diff) {
 		}
 		if (!current) continue;
 		if (!inHunk) {
+			if (line.startsWith("deleted file mode ") || line === "+++ /dev/null")
+				current.deletedFile = true;
 			const rename = /^rename to (.+)$/.exec(line);
 			if (rename) {
 				current.post = unquoteGitPath(rename[1]);
@@ -936,24 +946,34 @@ export function testCorpus(options = {}) {
 	return corpus;
 }
 
-function markdownBlocks(body) {
+// `tilde` reads CommonMark's `~~~` fences too. The citation and test-reference
+// lints keep the backtick-only view on purpose (master's behavior, pinned by
+// the "nested bullets and tilde fences" case), while the diff-keyed compliance
+// rows read every fence a reader sees (#4605 F5).
+function markdownBlocks(body, { tilde = false } = {}) {
 	const lines = String(body ?? "").split(/\r?\n/);
 	const blocks = [];
 	let current = null;
 	let fence = null;
+	const fenceMarker = tilde ? /^\s*(`{3,}|~{3,})/ : /^\s*(`{3,})/;
 	const flush = () => {
 		if (current?.lines.length) blocks.push(current);
 		current = null;
 	};
 	for (let index = 0; index < lines.length; index += 1) {
 		const line = lines[index];
-		const marker = line.match(/^\s*(```+)/)?.[1];
+		const marker = fenceMarker.exec(line)?.[1];
 		if (marker || fence) {
 			if (marker && !fence && current && current.lines.length) flush();
 			if (!current) current = { lines: [], start: index, fence: true };
 			current.lines.push(line);
 			if (marker && !fence) fence = marker;
-			else if (fence && marker && marker.length >= fence.length) {
+			else if (
+				fence &&
+				marker &&
+				marker[0] === fence[0] &&
+				marker.length >= fence.length
+			) {
 				fence = null;
 				flush();
 			}
@@ -1126,6 +1146,31 @@ function sourceQuoteAfter(lines, bodyLine) {
 	if (end === -1) return null;
 	const text = lines.slice(index + 1, end).filter((row) => row.trim());
 	return { end, info: opener[2].trim(), text };
+}
+
+// A transcript fence is tagged with one of the output info strings or left
+// bare: an author who pastes a red into an untagged fence has still quoted it,
+// and requiring a tag is an enumerated detector that misses the next spelling.
+// A named language (`typescript`, `json`) marks an example, not a run.
+const TRANSCRIPT_INFO = /^(?:(?:text|console|shell|sh|bash|output))?$/i;
+// #4585 row 1: what makes a fence a red. A Vitest failure list (`× title`, with
+// or without a run prefix) and a count (`2 failed`) are as much a quoted red as
+// `FAIL` or an assertion dump.
+const FAILURE_MARKER =
+	/\b(?:[1-9]\d* failed|AssertionError|failed test titles|error TS\d+)\b|^\s*FAIL\b|[×✗✕]\s+\S/m;
+// A red a body quotes inline, in a backticked span (a mutation table's cell).
+const BACKTICKED_RED =
+	/`[^`]*(?:[×✗✕]\s+\S|[1-9]\d* failed|AssertionError|failed test titles|error TS\d+)[^`]*`/;
+
+/** One visible fence that quotes a failing run of its own. */
+function isFailureQuote(quote) {
+	const text = quote.text.join("\n");
+	if (!TRANSCRIPT_INFO.test(quote.info)) return false;
+	// A declared exit code decides the verdict: a green mutation run quotes no
+	// red, whatever its titles still print.
+	const exit = /exit code: (\d+)/.exec(text);
+	if (exit?.[1] === "0") return false;
+	return FAILURE_MARKER.test(text);
 }
 
 function isTranscriptQuote(quote) {
@@ -3375,7 +3420,499 @@ export function lintClassSweep(body = "", { diff } = {}) {
 	return [CLASS_SWEEP_MESSAGE];
 }
 
+// A failing-test line names its own title: a `FAIL`/`❯` line carries a runner
+// tag, a file and zero or more suite segments before the title, and a glyph
+// line carries the title alone. Vitest appends a duration, which is not part
+// of the title. #4585 row 1 matches this line's own title, never a substring of
+// another test's evidence (#4605 F3).
+const FAILING_ENTRY = /(?:^|\s)(FAIL|❯|[×✗✕])\s+/g;
+const RUNNER_TAG = /^\|[^|]*\|\s*/;
+const VITEST_DURATION = /\s+\d+(?:\.\d+)?\s*m?s\s*$/;
+const UNKNOWN_FILE = /^(?:\.{3}|…)$/;
+
+function failingEntries(quote) {
+	const entries = [];
+	for (const row of String(quote ?? "").split("\n")) {
+		const markers = [...row.matchAll(FAILING_ENTRY)];
+		for (const [index, marker] of markers.entries()) {
+			const start = (marker.index ?? 0) + marker[0].length;
+			const end = markers[index + 1]?.index ?? row.length;
+			const body = row.slice(start, end).replace(/[;\s]+$/, "");
+			entries.push(failingEntry(marker[1], body));
+		}
+	}
+	return entries;
+}
+
+function failingEntry(marker, body) {
+	const title = String(body).replace(VITEST_DURATION, "").trim();
+	if (marker !== "FAIL" && marker !== "❯")
+		return { file: null, titles: [title] };
+	const parts = title.replace(RUNNER_TAG, "").split(/\s+>\s+/);
+	if (parts.length < 2) return { file: null, titles: [title] };
+	// The line carries a file, zero or more suite segments and its own title,
+	// and the title itself may contain the ` > ` separator (`blocking > 0`).
+	// Offer every suffix of the chain, longest first, so a suite chain still
+	// resolves and a title that carries the separator matches at its full
+	// length against the declaration's exact title (#4605 F7).
+	const segments = parts.slice(1);
+	const titles = segments.map((_, start) => segments.slice(start).join(" > "));
+	const file = parts[0].trim().replace(/^\.\//, "");
+	return { file: file && !UNKNOWN_FILE.test(file) ? file : null, titles };
+}
+
+function samePath(left, right) {
+	return left.replace(/^\.\//, "") === right.replace(/^\.\//, "");
+}
+
+// Row 1 is file-level (#4585 as amended by issuecomment-6252599595): a changed
+// test file owes one red-first transcript that names it and shows a failure from
+// it, or a Controls row naming it with a reason. Titles, table rows and suite
+// chains are not read, so the per-title matcher does not exist.
+function transcriptNamesFile(fence, file) {
+	if (!fence.failure) return false;
+	if (!fence.lines.some((line) => namesFile(line, file))) return false;
+	return failingEntries(fence.lines.join("\n")).some(
+		(entry) => !entry.file || samePath(entry.file, file),
+	);
+}
+
+// A Controls row names the file it covers and gives a reason: a `Control: ...`
+// line, or a row of a Controls table. A row that names no file, or gives no
+// reason, proves nothing.
+function controlRows(visibleRows) {
+	let inSection = false;
+	let controlTable = false;
+	const rows = [];
+	for (const row of visibleRows) {
+		const heading = HEADING.exec(row);
+		if (heading) {
+			inSection = /\bcontrols?\b/i.test(heading[1]);
+			controlTable = false;
+			continue;
+		}
+		if (/^\s*(?:\*\*)?Controls?\b/i.test(row)) inSection = true;
+		if (!row.trim()) {
+			controlTable = false;
+			continue;
+		}
+		if (/^\s*\|/.test(row)) {
+			// A table whose own header names the column is a Controls table,
+			// wherever it sits.
+			if (/\bcontrols?\b/i.test(row)) controlTable = true;
+			if (inSection || controlTable) rows.push(row);
+			continue;
+		}
+		controlTable = false;
+		if (inSection || /\bcontrols?\b/i.test(row)) rows.push(row);
+	}
+	return rows;
+}
+
+function controlsNameFile(rows, file) {
+	return rows.some((row) => {
+		if (!namesFile(row, file)) return false;
+		if (/^\s*\|/.test(row)) {
+			const cells = row
+				.split("|")
+				.slice(1, -1)
+				.map((cell) => cell.trim())
+				.filter(Boolean);
+			return cells.length >= 2 && wordCount(cells.join(" ")) >= 2;
+		}
+		return /(?:—|:|because)\s+[A-Za-z0-9].+/.test(row);
+	});
+}
+
+// A path token, or a bare filename for a root-level changed file (`index.ts`).
+// A bare name never stands in for a nested path: `launch.ts` does not name
+// `clients/lsp/launch.ts` (#4605 F4).
+const PATH_TOKEN = /[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*/g;
+const URL_SPAN = /[a-z][a-z0-9+.-]*:\/\/\S+/gi;
+
+function pathTokens(text) {
+	return [...String(text ?? "").matchAll(PATH_TOKEN)].map((match) => match[0]);
+}
+
+function namesFile(text, file) {
+	const candidates = new Set([file, file.replace(/\.[cm]?ts$/, ".js")]);
+	return pathTokens(text).some((token) =>
+		candidates.has(token.replace(/^\.\//, "")),
+	);
+}
+
+// A row that names a file path is evidence about that path, whichever path it
+// is, so it can never stand in for a generic Windows read (#4605 F8). A bare
+// basename that ends in a source extension names a file too, so it is evidence
+// about that path rather than a generic read (#4605 V5). A URL is a link to the
+// run, not a path in this repository.
+const SOURCE_FILE_TOKEN =
+	/^[A-Za-z0-9_][A-Za-z0-9_.-]*\.(?:[cm]?[jt]sx?|mjs|cjs|json|md|ya?ml|toml|py|go|rs|sh)$/i;
+
+function namesAnyPath(text) {
+	return pathTokens(String(text ?? "").replace(URL_SPAN, " ")).some(
+		(token) => token.includes("/") || SOURCE_FILE_TOKEN.test(token),
+	);
+}
+
+function namedChangedFiles(text, changedPaths) {
+	const found = new Set();
+	for (const token of pathTokens(text)) {
+		const path = token.replace(/^\.\//, "");
+		if (changedPaths.has(path)) found.add(path);
+	}
+	return found;
+}
+
+// A `mutation:` record proves only when it states the run's own result: an
+// explicit RED/FAIL line. Round 2 listed the words that mean "did not run", so
+// every unlisted spelling (`unable to run`, `n/a`, `did not execute`) passed
+// (#4605 V4). The default is inverted: a `mutation:` continuation that carries
+// no result word refuses the fence, and the fence must hold a result line.
+// The three spellings are listed whole: an optional `(?:ED|…)?` suffix splits
+// the tail off as a bare three-letter fragment, which the advisory
+// spellchecker reads as a misspelling.
+const MUTATION_RESULT =
+	/\bRED\b|\b(?:FAIL|FAILED|FAILURE)\b|\b[1-9]\d*\s+failed\b|[×✗✕]\s+\S/;
+
+// The tool prints `mutation: <file> (<find> -> <replace>)`; a hand-written
+// header may name the file alone. Any other tail is a claim about the run, so
+// it must state a result. That refuses `not run`, `unable to run`, `n/a` and
+// every spelling a bad-word list would miss (#4605 V4).
+function mutationHeaderProves(header, file) {
+	const remaining = String(header)
+		.replace(/^(?:\$\s+)?mutation:/i, "")
+		.replace(URL_SPAN, " ")
+		.split(/\s+/)
+		.filter(Boolean)
+		.filter((token) => !namesFile(token, file))
+		.join(" ");
+	return (
+		remaining === "" ||
+		/^\(.*->.*\)$/.test(remaining) ||
+		MUTATION_RESULT.test(remaining)
+	);
+}
+
+// A table row in the mutation section may name its file in the row, or sit
+// under a one-file opener. The label on the last cell lets a row point at a
+// failing fence below it, the shape `scripts/mutate.mjs` writes.
+function mutationTableRows(visibleRows) {
+	let mutationSection = false;
+	let mutationScope = "";
+	const rows = [];
+	for (const row of visibleRows) {
+		const heading = HEADING.exec(row);
+		if (heading) {
+			mutationSection = /\bmutations?\b/i.test(heading[1]);
+			mutationScope = "";
+			continue;
+		}
+		if (/^\s*(?:\*\*)?(?:Hand[- ]mutation|Mutations?)\b/i.test(row)) {
+			mutationSection = true;
+			mutationScope = row;
+			continue;
+		}
+		if (!mutationSection || !row.trim()) continue;
+		if (/^\s*\|/.test(row)) {
+			if (/^\s*\|[\s:|-]+\|?\s*$/.test(row)) continue;
+			const cells = row
+				.split("|")
+				.slice(1, -1)
+				.map((cell) => cell.trim());
+			const label = (cells.at(-1) ?? "").replace(/`/g, "").trim();
+			rows.push({
+				text: row,
+				scope: mutationScope,
+				label: /^[A-Za-z]*\d+$/.test(label) ? label : null,
+			});
+			continue;
+		}
+		mutationScope = row;
+	}
+	return rows;
+}
+
 /** Check the structural PR-body contract, including answered sections. */
+// #4585: body evidence answers the changed code, not a generic checklist.
+// Row 3 (model fidelity) remains reviewer judgement per issuecomment 6241755363.
+function lintDiffCompliance(body, options) {
+	const errors = [];
+	// A literal `<!--` inside a fence or an inline code span is quoted text, not
+	// a comment opener: the body of a PR that documents comment ends reads it as
+	// text, and blanking from it would hide every fence below (#4585 row 1 hit
+	// exactly that). Both a backticked span and a fence restore their literal
+	// `<!--`, and a real comment still hides what it contains.
+	const source = String(body);
+	const quotedSpans = codeSpanMasked(source);
+	const fencedSpans = sourceWithoutFencedBlocks(source, {
+		indentedCode: false,
+	});
+	const guarded = source.replace(/<!--/g, (marker, offset) =>
+		quotedSpans[offset] === " " || fencedSpans[offset] === " "
+			? "    "
+			: marker,
+	);
+	// `visibleRows` hides fenced examples (a quoted heading, control or table
+	// is an example, not a claim). `evidenceRows` keeps fence content, because
+	// an honest body quotes the Windows advisory row in a fence (#4605 F5).
+	const rawRows = blankHtmlComments(guarded).split(/\r?\n/);
+	const visibleRows = blankMarkdown(guarded).split(/\r?\n/);
+	const evidenceRows = rawRows;
+	const transcriptFences = [];
+	for (const block of markdownBlocks(body, { tilde: true })) {
+		if (!block.fence || !rawRows[block.start]?.trim()) continue;
+		const opener = /^\s*(`{3,}|~{3,})(.*)$/.exec(block.lines[0]);
+		const closer = /^\s*(`{3,}|~{3,})\s*$/.exec(block.lines.at(-1));
+		if (!opener || !closer || block.lines.length < 2) continue;
+		if (closer[1][0] !== opener[1][0] || closer[1].length < opener[1].length)
+			continue;
+		const lines = block.lines.slice(1, -1).filter((line) => line.trim());
+		if (!lines.length) continue;
+		transcriptFences.push({
+			start: block.start,
+			header: lines[0].trim(),
+			lines,
+			failure: isFailureQuote({ info: opener[2].trim(), text: lines }),
+		});
+	}
+	// Only a failing fence can vouch for a run, and a fence inside a real
+	// comment was removed above.
+	const transcripts = transcriptFences.filter((fence) => fence.failure);
+	const mutationRows = mutationTableRows(visibleRows);
+	const windowsReads = [];
+	for (const row of evidenceRows) {
+		if (!/\bWindows\b/i.test(row)) continue;
+		const reason =
+			/\b(?:cannot differ|platform.independent|platform.neutral)\b.*\bbecause\b\s+\S.+/i.test(
+				row,
+			);
+		const run =
+			/\b(?:advisory|lane|job)\b/i.test(row) &&
+			/\b(?:passed|failed|success|failure)\b/i.test(row) &&
+			/\b\d{5,}\b/.test(row) &&
+			!/\b(?:cancelled|canceled|skipped|pending|queued|not run|did not run)\b/i.test(
+				row,
+			);
+		if (reason || run) windowsReads.push(row);
+	}
+	const changedFiles = parseRuntimeHunks(options.diff);
+	const changedPaths = new Set();
+	for (const file of changedFiles) {
+		if (file.pre) changedPaths.add(file.pre);
+		if (file.post) changedPaths.add(file.post);
+	}
+	// A changed `.ts` file also answers to the `.js` specifier a body cites.
+	const namedPaths = new Set(changedPaths);
+	for (const path of changedPaths)
+		namedPaths.add(path.replace(/\.[cm]?ts$/, ".js"));
+	const rowFour = [];
+	const unclassified = [];
+	for (const file of changedFiles) {
+		// A whole-file deletion has no post-image: no added declaration, no
+		// post-image call to classify. Reading it as an unreadable post-image reded
+		// every deleted `clients/` or `scripts/` file with a notice no body
+		// evidence could clear (#4605 V2). A hunk that only deletes from a file
+		// that still exists is not this state.
+		if (file.deletedFile) continue;
+		const windowsPath = [file.pre, file.post].some((name) =>
+			/^clients\/(?:package-manager\.|lsp\/launch|path-utils\.|safe-spawn\.)/.test(
+				name,
+			),
+		);
+		const tests = /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(file.post);
+		const production =
+			/\.[cm]?[jt]sx?$/.test(file.post) &&
+			!/\.d\.[cm]?ts$/.test(file.post) &&
+			(isRuntimeObservabilityPath(file.post) ||
+				file.post.startsWith("scripts/"));
+		// A `trySpawn` caller owes row 4 for any hunk it changes, a deletion
+		// included, so its post-image is read even when the diff adds nothing to
+		// it (#4605 F6). A seam file named by path needs no post-image for row 4.
+		const seamCaller = production && !windowsPath;
+		if (windowsPath)
+			rowFour.push({
+				file: file.post,
+				read: windowsReads.some((row) => namesFile(row, file.post)),
+			});
+		if (!tests && !production) continue;
+		if (!file.added.size && !seamCaller) continue;
+		const source = headFileSource(file.post, {
+			...options,
+			postBlob: file.postBlob,
+		});
+		const rows = typeof source === "string" ? sourceLines(source) : [];
+		// The post-image identity is what the alias closure and the byte-mapped
+		// line numbers need. Without it the added lines still decide row 2 and
+		// row 4, and row 1 reads the added lines alone; a declaration that opens
+		// there but whose title sits on an unchanged line cannot be classified,
+		// so it is refused rather than passed.
+		// Every added line must sit at its own line number in the post-image; an
+		// unreadable source has no rows, so it fails here without a second guard.
+		const exact = [...file.added].every(
+			([line, text]) => rows[line - 1] === text,
+		);
+		// A deletion-only file has no added line to compare, so `exact` alone
+		// cannot say the post-image was read; the source itself must be a string.
+		const readable = typeof source === "string" && exact;
+		const { text } = readable
+			? blankCommentsAndStrings(source)
+			: { text: [...file.added.values()].join("\n") };
+		const addedCode = readable
+			? (() => {
+					const codeRows = text.split("\n");
+					return [...file.added.keys()]
+						.map((line) => codeRows[line - 1] ?? "")
+						.join("\n");
+				})()
+			: text;
+		const unclassifiable =
+			tests && /(?<![\w$.])(?:it|test)\b[^\n;]*?\(/.test(addedCode);
+		if (!readable && (unclassifiable || production))
+			unclassified.push(file.post);
+		if (tests && readable) {
+			// Per-occurrence accounting (#4605 V3): a removal credits one addition
+			// of the same trimmed line, so a re-indent or a move is not new content
+			// while a second identical copy is (#4605 F4, V3).
+			const removedCounts = new Map();
+			for (const line of file.removed) {
+				const trimmed = line.trim();
+				if (trimmed)
+					removedCounts.set(trimmed, (removedCounts.get(trimmed) ?? 0) + 1);
+			}
+			const newAddedLine = new Map();
+			for (const [line, value] of file.added) {
+				const trimmed = value.trim();
+				const left = trimmed ? (removedCounts.get(trimmed) ?? 0) : 0;
+				if (!trimmed) newAddedLine.set(line, false);
+				else if (left > 0) {
+					removedCounts.set(trimmed, left - 1);
+					newAddedLine.set(line, false);
+				} else newAddedLine.set(line, true);
+			}
+			// Row 1 is file-level (#4585 as amended by issuecomment-6252599595):
+			// a changed test file owes one fenced red-first transcript naming it
+			// that shows a failure from it, or a Controls row naming it with a
+			// reason. A declaration opener on a genuinely new line is what makes
+			// the file owe; its title, table and chain are not read. The callees
+			// are read from the source: the `it`/`test` names, an alias, and a
+			// `vitest` namespace import.
+			const names = new Set(["it", "test"]);
+			for (const match of text.matchAll(/\b(?:it|test)\s+as\s+(\w+)/g))
+				names.add(match[1]);
+			for (const match of source.matchAll(
+				/import\s+\*\s+as\s+([A-Za-z_$][\w$]*)\s+from\s+["']vitest["']/g,
+			))
+				names.add(`${match[1]}\\s*\\.\\s*(?:it|test)`);
+			let changed = true;
+			while (changed) {
+				changed = false;
+				for (const match of text.matchAll(
+					/\b(?:const|let|var)\s+(\w+)\s*=\s*(\w+)\b/g,
+				)) {
+					if (names.has(match[2]) && !names.has(match[1])) {
+						names.add(match[1]);
+						changed = true;
+					}
+				}
+			}
+			const declarationOpener = new RegExp(
+				`(?<![\\w$.])(?:${[...names].join("|")})\\b[^\\n;]*?\\(`,
+			);
+			const codeRows = text.split("\n");
+			const newCode = [...newAddedLine.entries()]
+				.filter(
+					([line, isNew]) => isNew && line >= 1 && line <= codeRows.length,
+				)
+				.map(([line]) => codeRows[line - 1] ?? "")
+				.join("\n");
+			if (declarationOpener.test(newCode)) {
+				const proved = transcripts.some((fence) =>
+					transcriptNamesFile(fence, file.post),
+				);
+				const control = controlsNameFile(controlRows(visibleRows), file.post);
+				if (!proved && !control)
+					errors.push(
+						`PR body compliance row 1: ${file.post} adds or edits test declarations; the body needs one fenced red-first transcript naming that file with a failure from it, or a Controls row naming it with a reason.`,
+					);
+			}
+		}
+		if (
+			production &&
+			/\b(?:if|else|catch|switch|throw)\b|\?(?![.?:])|&&|\|\||\.(?:filter|slice)\s*\(|\bMath\.(?:min|max)\s*\(/.test(
+				addedCode,
+			)
+		) {
+			// #4575: a mutation row, or the tool's own `mutation:` transcript,
+			// names the file it proves. One file, one red (#4605 F1): a table row
+			// binds to the file it names (or to the one-file opener above it),
+			// and its red must be in that row or in a labelled failing fence. A
+			// `mutation:` fence proves only when it states the mutation's own
+			// result: an explicit RED/FAIL line, with every continuation
+			// `mutation:` line stating one too (#4605 V4).
+			const transcriptProves = transcriptFences.some((fence) => {
+				if (!fence.failure) return false;
+				if (!/^(?:\$\s+)?mutation:/i.test(fence.header)) return false;
+				if (!namesFile(fence.header, file.post)) return false;
+				if (!mutationHeaderProves(fence.header, file.post)) return false;
+				if (!fence.lines.some((line) => MUTATION_RESULT.test(line)))
+					return false;
+				return fence.lines
+					.filter((line) => /^(?:\$\s+)?mutation:/i.test(line))
+					.slice(1)
+					.every((line) => MUTATION_RESULT.test(line));
+			});
+			const rowProves = mutationRows.some((row) => {
+				if (!namesFile(row.text, file.post)) {
+					const scoped = namedChangedFiles(row.scope, changedPaths);
+					if (scoped.size !== 1 || !scoped.has(file.post)) return false;
+				}
+				if (BACKTICKED_RED.test(row.text)) return true;
+				if (!row.label) return false;
+				return transcriptFences.some(
+					(fence) =>
+						fence.failure &&
+						namesFile(fence.header, file.post) &&
+						new RegExp(`\\b${row.label}\\b`).test(fence.header),
+				);
+			});
+			if (!rowProves && !transcriptProves)
+				errors.push(
+					`PR body compliance row 2: ${file.post} needs a Mutation section naming that file and a quoted failing mutation transcript.`,
+				);
+		}
+		if (seamCaller && /\btrySpawn\b/.test(text))
+			rowFour.push({
+				file: file.post,
+				read: windowsReads.some((row) => namesFile(row, file.post)),
+			});
+	}
+	// #4605 F4: row 4 is per file. A Windows line that names the file covers it;
+	// a generic line covers a diff with exactly one seam file, where it cannot
+	// be ambiguous. A row that names any file path is evidence about that path,
+	// not a generic read (#4605 F8). A cancelled, skipped or pending run is not
+	// a read.
+	const genericRead = windowsReads.some(
+		(row) =>
+			!namesAnyPath(row) && namedChangedFiles(row, namedPaths).size === 0,
+	);
+	for (const seam of rowFour) {
+		if (seam.read || (rowFour.length === 1 && genericRead)) continue;
+		errors.push(
+			`PR body compliance row 4: ${seam.file} needs a Windows advisory-lane result with run id, or a reason it cannot differ (Windows: cannot differ because ...).`,
+		);
+	}
+	// A post-image the diff names but cannot be read or matched classifies no
+	// row, so the body owes the rows it may still hold. One bounded line names
+	// them: an unbounded per-file notice grows with the diff, and a silent skip
+	// would read as a clean body.
+	if (unclassified.length)
+		errors.push(
+			`PR body compliance: cannot classify rows 1, 2 and 4 for ${unclassified.length} changed file(s) whose post-image is missing, unreadable, or does not match the diff: ${unclassified.slice(0, UNCLASSIFIED_REPORT_LIMIT).join(", ")}${unclassified.length > UNCLASSIFIED_REPORT_LIMIT ? ` (+${unclassified.length - UNCLASSIFIED_REPORT_LIMIT} more)` : ""}.`,
+		);
+	return errors;
+}
+
 export function lintPrBody(body = "", options = {}) {
 	const rawLines = String(body ?? "").split(/\r?\n/);
 	const lines = sourceWithoutFencedBlocks(body).split(/\r?\n/);
@@ -3391,7 +3928,7 @@ export function lintPrBody(body = "", options = {}) {
 			});
 	}
 	const placeholders = templatePlaceholderLines();
-	const errors = [];
+	const errors = options.diff ? lintDiffCompliance(body, options) : [];
 	const summary = headings.find((heading) => hasSection(heading, "summary"));
 	const firstHeading = headings[0]?.index ?? lines.length;
 	const nextSectionHeading = (heading) =>
@@ -3605,17 +4142,22 @@ export async function resolveBugClosingViaGh(
 	cwd = process.cwd(),
 	exec = execFileSync,
 ) {
-	return anyIssueLabelledBug(parseCloseKeywords(body).issues, (number) =>
-		JSON.parse(
-			exec("gh", ["api", `repos/{owner}/{repo}/issues/${number}`], {
-				cwd,
-				encoding: "utf8",
-				timeout: 10_000,
-				killSignal: "SIGKILL",
-				stdio: ["ignore", "pipe", "pipe"],
-			}),
-		),
-	);
+	return anyIssueLabelledBug(parseCloseKeywords(body).issues, (number) => {
+		const raw = exec("gh", ["api", `repos/{owner}/{repo}/issues/${number}`], {
+			cwd,
+			encoding: "utf8",
+			timeout: 10_000,
+			killSignal: "SIGKILL",
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		// gh output that is not JSON is unreadable label evidence, the same
+		// verdict a thrown exec already gets from anyIssueLabelledBug.
+		try {
+			return JSON.parse(raw);
+		} catch {
+			return null;
+		}
+	});
 }
 
 // The one label reader both transports share: `readIssue(number)` returns the
@@ -3694,12 +4236,8 @@ export async function lintPullRequestEvent(
 	try {
 		diff = diffImpl();
 	} catch (error) {
-		if (process.env.GITHUB_ACTIONS) {
-			const reason = error instanceof Error ? error.message : String(error);
-			throw new Error(`diff unavailable: ${reason}`);
-		}
-		// Local callers may not have an upstream ref. Preserve structural lint
-		// outside CI rather than inventing a runtime scope.
+		const reason = error instanceof Error ? error.message : String(error);
+		throw new Error(`diff unavailable: ${reason}`);
 	}
 	const result = lintPrBody(body, {
 		requireTestAssessment,
@@ -3735,9 +4273,12 @@ export async function lintPullRequestEvent(
 }
 
 export function localDiff(cwd = process.cwd(), git = gitExecFileSync) {
+	// The same byte ceiling as a post-image read: a diff keyed to a large change
+	// (a captured fixture corpus, a generated file) must not fail as unavailable.
 	return git(["diff", "--unified=0", "--no-color", "origin/master...HEAD"], {
 		cwd,
 		encoding: "utf8",
+		maxBuffer: MAX_SOURCE_BYTES,
 	});
 }
 
@@ -3890,19 +4431,41 @@ export function localTouchesTests(cwd = process.cwd(), git = gitExecFileSync) {
 	return names.split(/\r?\n/).some((name) => name.startsWith("tests/"));
 }
 
+/**
+ * True when the checkout has no `origin/master` at all (a shallow or uncloned
+ * base). The diff cannot be read there for a reason the #4404 hint names, and
+ * the diff-keyed rows stay unattempted rather than failing the whole preflight.
+ */
+function missingBaseRef(cwd, git = gitExecFileSync) {
+	try {
+		git(["rev-parse", "--verify", "origin/master"], {
+			cwd,
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "ignore"],
+		});
+		return false;
+	} catch {
+		return true;
+	}
+}
+
 export function lintLocalPrBody(
 	body,
 	cwd = process.cwd(),
 	git = gitExecFileSync,
 	options = {},
 ) {
-	let diff;
+	let diff = "";
+	// #4585: a local preflight must judge the same range as CI. An unavailable
+	// diff cannot classify the diff-keyed rows, so it fails closed; the rest of
+	// the lint still runs, because its own base-resolution message names what to
+	// fetch. A clone with no base ref at all keeps the #4404 hint instead: there
+	// is no diff to read, and the missing base is what the reader must fix.
+	let diffUnavailable = false;
 	try {
 		diff = localDiff(cwd, git);
 	} catch {
-		// A local preflight must use the same range as CI. If the caller has no
-		// upstream ref, retain structural lint rather than inventing scope.
-		diff = "";
+		diffUnavailable = !missingBaseRef(cwd, git);
 	}
 	// #4288: an explicit tri-state (the CLI resolves it through gh before this
 	// call) or an injected resolver (tests) wins; otherwise the label is unknown
@@ -3971,6 +4534,12 @@ export function lintLocalPrBody(
 		result.valid = false;
 		result.errors.push(
 			closeKeywordPlacementMessage(placement.missingBodyIssues),
+		);
+	}
+	if (diffUnavailable) {
+		result.valid = false;
+		result.errors.push(
+			"PR body compliance: diff unavailable; cannot classify rows 1, 2 and 4.",
 		);
 	}
 	return result;
