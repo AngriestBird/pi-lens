@@ -974,12 +974,12 @@ function groupReason(
 			// No data key in the scanned trees uses a mixed-case spelling, and a
 			// case-variant env write is exactly the defect: fail closed.
 			return "unclassified-spelling";
-		case "expression":
-			// Limits 2 and 3: a computed key only names the variable, so the
-			// composition has to prove it is an env.
-			return envIdentified ? "unclassified-spelling" : undefined;
 		case "canonical":
 			break;
+		default:
+			// A composition of nothing but expressions (`[pathKeyFor("PATH")]`)
+			// never reaches here: the expression arm above answers it.
+			return undefined;
 	}
 	if (group.some((write) => write.live)) {
 		return ambientStubAllowed ? undefined : "live-process-env";
