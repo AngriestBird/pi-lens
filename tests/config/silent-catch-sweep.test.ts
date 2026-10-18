@@ -38,7 +38,7 @@
  * The sweep scans `clients/`, `mcp/`, `tools/` and `index.ts`: 529 files and
  * 1,334 `catch` handlers, the shipped runtime. Two populations are outside it
  * by decision: `scripts/` (the repo's own gates, ~515 silent handlers in 184
- * files, its own baseline and its own round: #4609) and `tests/` (fixtures and
+ * files, its own baseline and its own round: #4607) and `tests/` (fixtures and
  * doubles, where a swallow is the fixture's job). A new scope is a new row in
  * this table, never a silent widening.
  *
