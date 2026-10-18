@@ -4,12 +4,15 @@ import {
 	mkdtempSync,
 	readFileSync,
 	rmSync,
+	statSync,
+	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import yaml from "../../clients/deps/js-yaml.js";
+import { toPosix } from "../../clients/path-utils.js";
 import { COMPLEXITY_ANALYZED_FILES_FLOOR } from "../../scripts/complexity-report.mjs";
 import {
 	countEvaluated,
@@ -29,7 +32,12 @@ import {
 	stepIdentity,
 	stripShellComments,
 } from "../support/continue-on-error-census.js";
-import { auditRegistry, stripSource } from "../support/sweep-kit.js";
+import {
+	auditRegistry,
+	stripSource,
+	testDeclarations,
+} from "../support/sweep-kit.js";
+import { vitestCollects } from "../support/vitest-collection.js";
 
 // Recurrence #4514 (retro P2): the four best-effort LSP producers exit 0 under
 // continue-on-error, so the nightly read green while 41 captured servers fell
@@ -58,6 +66,50 @@ const measurements = JSON.parse(
 
 const lastInt = (line: string) => Number(/(\d+)\s*$/.exec(line)?.[1]);
 const many = <T>(n: number, row: T) => Array.from({ length: n }, () => row);
+
+/**
+ * Why a `governed-by` row's named test proves nothing, or `[]` when it does.
+ * AGENTS "Test requirements": a detector that decides a test exists counts live
+ * declarations (`testDeclarations`) in a file vitest collects
+ * (`vitestCollects`), never a path that merely exists (#4609 r2 F-1,
+ * Greptile r4306428644: a directory and a declaration-free file both passed).
+ */
+const governedByTestProblems = (
+	root: string,
+	key: string,
+	test: string,
+): string[] => {
+	const relative = toPosix(test);
+	const absolute = resolve(root, relative);
+	if (!existsSync(absolute) || !statSync(absolute).isFile())
+		return [`${key}: ${test} is not a file`];
+	const declared = testDeclarations(readFileSync(absolute, "utf8")).filter(
+		(entry) => entry.live,
+	);
+	if (declared.length === 0) return [`${key}: ${test} declares no live test`];
+	if (!vitestCollects(relative))
+		return [`${key}: vitest does not collect ${test}`];
+	return [];
+};
+
+/**
+ * Whether this host can create a symlink. The Windows leg runs this file under
+ * a runner without the privilege, so the symlink plant skips there; the
+ * directory plant beside it covers the non-file branch on every platform.
+ */
+const symlinkSupported = (() => {
+	const probe = mkdtempSync(join(tmpdir(), "pi-lens-coe-symlink-"));
+	try {
+		writeFileSync(join(probe, "target.yml"), "jobs: {}\n");
+		symlinkSync("target.yml", join(probe, "link.yml"));
+		return true;
+	} catch {
+		return false;
+	} finally {
+		rmSync(probe, { recursive: true, force: true });
+	}
+})();
+
 /**
  * The value each script hands writeEvaluatedRecord, rebuilt from the raw log
  * lines of a real night, plus rows the count must NOT include (a refused or
@@ -508,13 +560,16 @@ describe("every continue-on-error site in the workflow and action tree is regist
 		expect(
 			coeKeys.flatMap((key) => rowProblems(key, coeRegistry.sites[key])),
 		).toEqual([]);
-		for (const key of coeKeys) {
-			const row = coeRegistry.sites[key];
-			if (row.status !== "governed-by") continue;
-			expect(row.tests?.length, key).toBeGreaterThan(0);
-			for (const test of row.tests ?? [])
-				expect(existsSync(resolve(ROOT, test)), `${key}: ${test}`).toBe(true);
-		}
+		expect(
+			coeKeys.flatMap((key) => {
+				const row = coeRegistry.sites[key];
+				if (row.status !== "governed-by") return [];
+				expect(row.tests?.length, key).toBeGreaterThan(0);
+				return (row.tests ?? []).flatMap((test) =>
+					governedByTestProblems(ROOT, key, test),
+				);
+			}),
+		).toEqual([]);
 	});
 
 	it("gives every floored site a live gating step, after the site, whose run text carries its floor", () => {
@@ -657,6 +712,44 @@ runs:
 		expect(found.problems[0]).toContain("does not classify");
 	});
 
+	it("reds on a directory named like a producer file instead of walking past it", () => {
+		const root = tree({
+			".github/workflows/real.yml": `${PROBE}    steps: []
+`,
+			".github/workflows/zz-dir.yml/notes.txt": "a nested file\n",
+		});
+		const found = readProducerCensus(root);
+		expect(found.files.map((file) => file.path)).toEqual([
+			".github/workflows/real.yml",
+		]);
+		expect(found.problems).toEqual([
+			expect.stringContaining(".github/workflows/zz-dir.yml:"),
+		]);
+	});
+
+	it.skipIf(!symlinkSupported)(
+		"reds on a symlinked producer file instead of following it",
+		() => {
+			const root = tree({
+				".github/workflows/real.yml": `${PROBE}    steps: []
+`,
+			});
+			symlinkSync(
+				join(root, ".github/workflows/real.yml"),
+				join(root, ".github/workflows/link.yml"),
+			);
+			const found = readProducerCensus(root);
+			// GitHub runs no symlinked workflow, and following the link could read
+			// bytes outside the producer roots, so it is reported, never parsed.
+			expect(found.files.map((file) => file.path)).toEqual([
+				".github/workflows/real.yml",
+			]);
+			expect(found.problems).toEqual([
+				expect.stringContaining(".github/workflows/link.yml:"),
+			]);
+		},
+	);
+
 	it("reds on an unparseable producer file instead of reading it as site-free", () => {
 		const root = tree({
 			".github/workflows/broken.yml":
@@ -741,6 +834,17 @@ ${floor}`,
           node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
 `),
 		).toEqual([]);
+		// A heredoc earlier in the same step hides only its own body: the command
+		// after the terminator is still the floor (the plant beside this case).
+		expect(
+			flooredStep(`      - name: evaluated floor
+        run: |
+          cat <<'EOF' > notes.txt
+          a note that mentions --count "probe=$count"
+          EOF
+          node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
+`),
+		).toEqual([]);
 	});
 
 	it("reds when the only occurrence of the floor sits in a shell comment", () => {
@@ -751,7 +855,7 @@ ${floor}`,
           echo "handshake layer disabled in this probe"
 `),
 		).toEqual([
-			`${KEY}: "--count "probe=" is not on a live line of that step's run text`,
+			`${KEY}: "--count "probe=" is not on an executable line of that step's run text`,
 		]);
 	});
 
@@ -762,14 +866,79 @@ ${floor}`,
 			["false", "false"],
 			["${{ false }}", "${{ false }}"],
 			['"!true"', "!true"],
+			["${{ 1 > 2 }}", "${{ 1 > 2 }}"],
+			["${{ 0 == 1 }}", "${{ 0 == 1 }}"],
+			["${{ false && true }}", "${{ false && true }}"],
+			// A live status function does not excuse a constant-false conjunct:
+			// `always()` is true, so the runner still never reaches the step.
+			["${{ always() && 1 > 2 }}", "${{ always() && 1 > 2 }}"],
 		] as const) {
 			const problems = flooredStep(`      - name: evaluated floor
         if: ${source}
         run: node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
 `);
 			expect(problems, source).toContain(
-				`${KEY}: its floor step never runs (if: ${value}), so the floor gates nothing`,
+				`${KEY}: its floor step may never run (if: ${value} is not a condition known to run), so the floor is unproven`,
 			);
+		}
+	});
+
+	it("accepts an if: that names a context or a status function the runner evaluates", () => {
+		// The admitted list is deliberately short and fail-closed elsewhere: a
+		// context the runner fills in cannot be proven false at rest, so it stays
+		// live; everything else is unproven (#4609 r2 F-B, Greptile r4306472964).
+		for (const source of [
+			"${{ !cancelled() }}",
+			"${{ always() }}",
+			"${{ success() }}",
+			"always()",
+			"${{ !cancelled() && matrix.os == 'macos-latest' }}",
+			"${{ github.event_name == 'push' }}",
+			"${{ needs.scope.outputs.smoke == 'true' }}",
+			"true",
+		]) {
+			expect(
+				flooredStep(`      - name: evaluated floor
+        if: ${source}
+        run: node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
+`),
+				source,
+			).toEqual([]);
+		}
+	});
+
+	it("reds when the floor evidence is shell data the runner never executes", () => {
+		// The text is present, but the shell reads it as data (a heredoc body, a
+		// quoted argument) or never reaches it (an unconditional `exit` above).
+		// Each of these read [] before #4609 r2.
+		for (const [shape, body] of [
+			[
+				"a heredoc body",
+				`          cat <<'EOF' > /dev/null
+          node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
+          EOF
+`,
+			],
+			[
+				"a quoted echo",
+				`          echo 'node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3'
+`,
+			],
+			[
+				"an early exit",
+				`          exit 0
+          node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
+`,
+			],
+		] as const) {
+			expect(
+				flooredStep(`      - name: evaluated floor
+        run: |
+${body}`),
+				shape,
+			).toEqual([
+				`${KEY}: "--count "probe=" is not on an executable line of that step's run text`,
+			]);
 		}
 	});
 
@@ -838,6 +1007,37 @@ ${floor}`,
 			"no-floor-x: a no-floor row does not carry floorStep",
 			'status-x: unknown status "waived"',
 		]);
+	});
+
+	it("reds when a governed-by test is a path with no live test vitest collects", () => {
+		const root = tree({
+			"tests/config/live.test.ts":
+				'import { it } from "vitest";\nit("runs", () => {});\n',
+			"tests/config/skipped.test.ts":
+				'import { it } from "vitest";\nit.skip("never runs", () => {});\n',
+			"tests/support/helpers.ts": "export const helper = 1;\n",
+			// A collected tree's excluded sibling: vitest never runs it (#4393).
+			"tests/fixtures/probe.test.ts": 'it("fixture suite", () => {});\n',
+		});
+		// The only accepted proof: a live declaration in a file vitest collects.
+		expect(
+			governedByTestProblems(root, "k", "tests/config/live.test.ts"),
+		).toEqual([]);
+		expect(governedByTestProblems(root, "k", "tests/config")).toEqual([
+			"k: tests/config is not a file",
+		]);
+		expect(
+			governedByTestProblems(root, "k", "tests/config/missing.test.ts"),
+		).toEqual(["k: tests/config/missing.test.ts is not a file"]);
+		expect(
+			governedByTestProblems(root, "k", "tests/support/helpers.ts"),
+		).toEqual(["k: tests/support/helpers.ts declares no live test"]);
+		expect(
+			governedByTestProblems(root, "k", "tests/config/skipped.test.ts"),
+		).toEqual(["k: tests/config/skipped.test.ts declares no live test"]);
+		expect(
+			governedByTestProblems(root, "k", "tests/fixtures/probe.test.ts"),
+		).toEqual(["k: vitest does not collect tests/fixtures/probe.test.ts"]);
 	});
 
 	it("keeps a # that is an expansion or a quoted value when it strips comments", () => {

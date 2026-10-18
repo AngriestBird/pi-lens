@@ -15,7 +15,20 @@
  *   reader parses or a problem that reds the census.
  * - F2: the floor check matched text anywhere in a step's `run:`, so a
  *   commented-out command and an `if: false` step both satisfied it. A floor
- *   now counts only on a live line of a step the runner does not disable.
+ *   now counts only on a line the shell executes, of a step whose `if:` names
+ *   a condition the runner evaluates.
+ *
+ * Review round 2 added three fail-closed rules (#4609 r2):
+ *
+ * - F-B: the `if:` check enumerated spellings of a constant false, so
+ *   `${{ 1 > 2 }}` credited a step the runner skips (shape 69). Every `if:`
+ *   that names no context or status function is unproven now; the spelling
+ *   list is gone.
+ * - F-2: the evidence matched inside a heredoc body, a quoted argument, or
+ *   after an unconditional `exit`. Those regions are data the shell never
+ *   executes (`evidenceIsExecutable`).
+ * - The producer walk reports a non-regular entry (a symlink, a directory
+ *   named `*.yml`) as unclassified instead of skipping it.
  *
  * The site enumeration is the parsed document itself (a deep walk), not a
  * regex: a `continue-on-error` key inside a `run:` heredoc or a comment is
@@ -120,62 +133,185 @@ export const stepIdentity = (step: CoeStep): string =>
  * code). A floor whose only occurrence sits in a comment is not a gate.
  */
 export function stripShellComments(text: string): string {
-	const lines: string[] = [];
-	for (const line of text.split("\n")) {
-		let quote: '"' | "'" | null = null;
-		let cut = line.length;
-		for (let i = 0; i < line.length; i++) {
-			const ch = line[i];
-			if (quote) {
-				if (ch === quote) quote = null;
-				else if (ch === "\\" && quote === '"') i++;
-				continue;
-			}
-			if (ch === '"' || ch === "'") {
-				quote = ch;
-				continue;
-			}
-			if (ch === "#" && (i === 0 || /[\s;]/.test(line[i - 1]))) {
-				cut = i;
-				break;
-			}
-		}
-		lines.push(line.slice(0, cut));
-	}
-	return lines.join("\n");
+	const { commentCut } = scanShell(text);
+	return text
+		.split("\n")
+		.map((line, index) => line.slice(0, commentCut[index]))
+		.join("\n");
 }
 
 /** A step's `run:` with comments removed: the text the runner will execute. */
 export const liveRunText = (step: CoeStep): string =>
 	stripShellComments(typeof step.run === "string" ? step.run : "");
 
+/** The context roots a workflow expression reads. */
+const CONDITION_SOURCE =
+	/\b(?:github|matrix|env|steps|needs|inputs|runner|job|vars|secrets)\s*[.[]/;
+
+/** The status functions that decide whether a step runs at all. */
+const STATUS_FUNCTION = /\b(?:always|success|failure|cancelled)\s*\(/;
+
+/** Split on `&&` outside quoted strings: each conjunct has to stand alone. */
+function conjuncts(expression: string): string[] {
+	const parts: string[] = [];
+	let quote: '"' | "'" | null = null;
+	let start = 0;
+	for (let i = 0; i < expression.length; i++) {
+		const ch = expression[i];
+		if (quote) {
+			if (ch === quote) quote = null;
+			else if (ch === "\\" && quote === '"') i++;
+			continue;
+		}
+		if (ch === '"' || ch === "'") {
+			quote = ch;
+			continue;
+		}
+		if (ch === "&" && expression[i + 1] === "&") {
+			parts.push(expression.slice(start, i));
+			i++;
+			start = i + 1;
+		}
+	}
+	parts.push(expression.slice(start));
+	return parts;
+}
+
 /**
- * A condition the runner evaluates as a constant false. Bounded on purpose: an
- * expression this does not resolve is treated as live, because guessing
- * "disabled" would excuse a step that does run.
+ * Why a floor step's `if:` may never run, or `undefined` when the step has no
+ * condition or names a context or status function the runner evaluates
+ * (#4609 r2 F-B, Greptile r4306472964). Fail-closed on purpose: the older check
+ * enumerated a few spellings of a constant false and treated everything else as
+ * live, so `${{ 1 > 2 }}` credited a step the runner skips (shape 69). A value
+ * the runner fills in from a context cannot be proven false at rest, so it stays
+ * live; every conjunct of an `&&` chain has to be such a value, because
+ * `always() && 1 > 2` still never runs.
  */
-export function constantFalse(condition: unknown): boolean {
-	if (condition === false) return true;
-	if (typeof condition !== "string") return false;
+export function unprovenCondition(condition: unknown): string | undefined {
+	const unproven = (value: unknown) =>
+		`if: ${String(value)} is not a condition known to run`;
+	if (condition === undefined || condition === null || condition === "")
+		return undefined;
+	// YAML `if: true` parses as a boolean; `if: false` is a constant false.
+	if (condition === true) return undefined;
+	if (typeof condition !== "string") return unproven(condition);
 	const expression = condition
 		.trim()
 		.replace(/^\$\{\{/, "")
 		.replace(/\}\}$/, "")
-		.trim()
-		.toLowerCase();
-	return (
-		expression === "false" ||
-		expression === "!true" ||
-		expression === "0" ||
-		expression === "null" ||
-		expression === "''" ||
-		expression === '""'
-	);
+		.trim();
+	if (!expression) return unproven(condition);
+	for (const conjunct of conjuncts(expression))
+		if (!CONDITION_SOURCE.test(conjunct) && !STATUS_FUNCTION.test(conjunct))
+			return unproven(condition);
+	return undefined;
 }
 
-/** Why the runner cannot execute this step, or `undefined` when it can. */
-export function disabledReason(step: CoeStep): string | undefined {
-	return constantFalse(step.if) ? `if: ${String(step.if)}` : undefined;
+interface ShellScan {
+	/** 1 at every offset the shell never reaches as a command. */
+	unreachable: Uint8Array;
+	/** 1 at every offset inside a quoted string, delimiters excluded. */
+	quoted: Uint8Array;
+	/** Per line, the offset of its trailing comment, or the line's length. */
+	commentCut: number[];
+}
+
+const HEREDOC = /^<<(-?)\s*(?:'([^']*)'|"([^"]*)"|([^\s;|&<>()]+))/;
+
+/**
+ * The one quote/comment/heredoc scanner for a `run:` body: which offsets the
+ * shell reads as inside a quoted string, and which it never executes (a
+ * comment, a heredoc body, or a line after an unconditional `exit`).
+ */
+function scanShell(text: string): ShellScan {
+	const unreachable = new Uint8Array(text.length);
+	const quoted = new Uint8Array(text.length);
+	const commentCut: number[] = [];
+	const heredocs: Array<{ delimiter: string; stripTabs: boolean }> = [];
+	let quote: '"' | "'" | null = null;
+	let terminated = false;
+	let offset = 0;
+	for (const line of text.split("\n")) {
+		const start = offset;
+		const end = offset + line.length;
+		offset = end + 1;
+		if (terminated) {
+			unreachable.fill(1, start, end + 1);
+			commentCut.push(line.length);
+			continue;
+		}
+		if (heredocs.length > 0) {
+			const top = heredocs[0];
+			const body = top.stripTabs ? line.replace(/^\t+/, "") : line;
+			unreachable.fill(1, start, end + 1);
+			commentCut.push(line.length);
+			if (body.trimEnd() === top.delimiter) heredocs.shift();
+			continue;
+		}
+		const openQuote = quote;
+		let cut = line.length;
+		for (let i = 0; i < line.length; i++) {
+			const ch = line[i] ?? "";
+			if (quote) {
+				quoted[start + i] = 1;
+				if (ch === quote) quote = null;
+				else if (ch === "\\" && quote === '"' && i + 1 < line.length) {
+					i++;
+					quoted[start + i] = 1;
+				}
+				continue;
+			}
+			if (ch === '"' || ch === "'") {
+				quote = ch;
+				continue;
+			}
+			if (ch === "\\" && i + 1 < line.length) {
+				i++;
+				continue;
+			}
+			if (ch === "#" && (i === 0 || /[\s;]/.test(line[i - 1] ?? ""))) {
+				cut = i;
+				unreachable.fill(1, start + i, end + 1);
+				break;
+			}
+			if (ch === "<" && line.startsWith("<<", i) && line[i + 2] !== "<") {
+				const here = HEREDOC.exec(line.slice(i));
+				const delimiter = here?.[2] ?? here?.[3] ?? here?.[4];
+				if (delimiter)
+					heredocs.push({ delimiter, stripTabs: here?.[1] === "-" });
+			}
+		}
+		commentCut.push(cut);
+		const code = line.slice(0, cut);
+		// Only an exit at the start of a top-level line ends the script: one
+		// inside an `if` body or a function is indented and stays live here.
+		if (
+			openQuote === null &&
+			code === code.trimStart() &&
+			/^exit(?:\s+\d+)?\s*$/.test(code.trim())
+		)
+			terminated = true;
+	}
+	return { unreachable, quoted, commentCut };
+}
+
+/**
+ * Whether `evidence` appears on text the shell executes: the match cannot start
+ * inside a quoted string, a comment, a heredoc body, or after an unconditional
+ * `exit`. `--count "probe=` is live in `node x --count "probe=$n"` because the
+ * match starts before the quote; the same text inside `echo '…'` or a heredoc
+ * body is data the runner never executes (#4609 r2 F-2, shape 43).
+ */
+export function evidenceIsExecutable(run: string, evidence: string): boolean {
+	if (!evidence) return false;
+	const scan = scanShell(run);
+	for (
+		let at = run.indexOf(evidence);
+		at >= 0;
+		at = run.indexOf(evidence, at + 1)
+	)
+		if (!scan.unreachable[at] && !scan.quoted[at]) return true;
+	return false;
 }
 
 /**
@@ -196,7 +332,13 @@ export function classifyProducerFile(path: string): ProducerKind | null {
 	return null;
 }
 
-const walkFiles = (root: string, rel: string): string[] => {
+/** One entry the walk found: a path, and whether it is a regular file. */
+interface WalkEntry {
+	path: string;
+	regularFile: boolean;
+}
+
+const walkEntries = (root: string, rel: string): WalkEntry[] => {
 	let entries: DirEnt[];
 	try {
 		entries = readdirSync(join(root, rel), { withFileTypes: true });
@@ -207,13 +349,19 @@ const walkFiles = (root: string, rel: string): string[] => {
 	}
 	return entries.flatMap((entry) => {
 		const next = `${rel}/${entry.name}`;
-		if (entry.isDirectory()) return walkFiles(root, next);
-		return entry.isFile() ? [next] : [];
+		if (entry.isDirectory())
+			return YAML_SUFFIXES.some((suffix) => entry.name.endsWith(suffix))
+				? [{ path: next, regularFile: false }]
+				: walkEntries(root, next);
+		// A symlink or any other non-file entry is reported, never parsed: a
+		// symlinked `*.yml` is not a workflow GitHub runs, and following it could
+		// read a file outside the producer roots (#4609 r2 nitpick).
+		return [{ path: next, regularFile: entry.isFile() }];
 	});
 };
 
 /**
- * Every file under the producer roots, split into the ones the reader parses
+ * Every entry under the producer roots, split into the ones the reader parses
  * and the ones it does not. The second list is the fail-closed surface: a
  * reader that silently ignores a file form is a guard with a hole in it.
  */
@@ -224,10 +372,12 @@ export function listProducerFiles(root: string): {
 	const files: ProducerFile[] = [];
 	const unclassified: string[] = [];
 	for (const dir of PRODUCER_ROOTS)
-		for (const rel of walkFiles(root, dir).sort()) {
-			const kind = classifyProducerFile(rel);
-			if (kind) files.push({ path: rel, kind });
-			else unclassified.push(rel);
+		for (const entry of walkEntries(root, dir).sort((a, b) =>
+			a.path < b.path ? -1 : a.path > b.path ? 1 : 0,
+		)) {
+			const kind = entry.regularFile ? classifyProducerFile(entry.path) : null;
+			if (kind) files.push({ path: entry.path, kind });
+			else unclassified.push(entry.path);
 		}
 	return { files, unclassified };
 }
@@ -339,7 +489,7 @@ export function readProducerCensus(root: string): ProducerCensus {
 	const sites: CoESite[] = [];
 	const problems: string[] = unclassified.map(
 		(file) =>
-			`${file}: a file under a producer root this reader does not classify (workflows are *.yml/*.yaml, actions are <dir>/action.yml|yaml)`,
+			`${file}: an entry under a producer root this reader does not classify: it is not a regular file, or not a file form it parses (workflows are *.yml/*.yaml, actions are <dir>/action.yml|yaml)`,
 	);
 	for (const file of files) {
 		let document: ProducerDocument;
@@ -363,9 +513,9 @@ const isGatingStep = (step: CoeStep): boolean =>
 
 /**
  * Why a `floored` row is not a gate, or `[]` when it is. The floor step must
- * exist in the site's own scope, cannot itself be `continue-on-error`, must be
- * one the runner executes, must come after the site, and must carry the
- * evidence on a live (uncommented) line of its `run:`.
+ * exist in the site's own scope, cannot itself be `continue-on-error`, must have
+ * an `if:` the runner can reach, must come after the site, and must carry the
+ * evidence on text the shell executes rather than on data.
  */
 export function floorProblems(site: CoESite, row: CoERow): string[] {
 	if (row.status !== "floored") return [];
@@ -382,10 +532,10 @@ export function floorProblems(site: CoESite, row: CoERow): string[] {
 		problems.push(
 			`${site.key}: its floor step is continue-on-error, so the floor gates nothing`,
 		);
-	const disabled = disabledReason(floor);
-	if (disabled)
+	const unproven = unprovenCondition(floor.if);
+	if (unproven)
 		problems.push(
-			`${site.key}: its floor step never runs (${disabled}), so the floor gates nothing`,
+			`${site.key}: its floor step may never run (${unproven}), so the floor is unproven`,
 		);
 	if (!site.step && site.index < 0 && index >= 0) {
 		// A job-level site is gated by a step inside it; nothing to order.
@@ -393,9 +543,14 @@ export function floorProblems(site: CoESite, row: CoERow): string[] {
 		problems.push(
 			`${site.key}: its floor step runs before the site it is meant to gate`,
 		);
-	if (!liveRunText(floor).includes(row.evidence ?? "\u0000"))
+	if (
+		!evidenceIsExecutable(
+			typeof floor.run === "string" ? floor.run : "",
+			row.evidence ?? "",
+		)
+	)
 		problems.push(
-			`${site.key}: "${row.evidence}" is not on a live line of that step's run text`,
+			`${site.key}: "${row.evidence}" is not on an executable line of that step's run text`,
 		);
 	return problems;
 }
