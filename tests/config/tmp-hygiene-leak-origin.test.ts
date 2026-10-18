@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { setupTestEnvironment } from "../clients/test-utils.js";
+import { stripSource } from "../support/sweep-kit.js";
 import { formatTmpHygieneLeakOrigin } from "../support/vitest-setup.js";
 
 const REPO_ROOT = path.resolve(
@@ -77,9 +78,14 @@ describe("tmp-hygiene leak origin record (#4591)", () => {
 		// would perform this run's own cleanup and delete a sibling worker's
 		// entries. The wiring is pinned as source, the shape the census suite
 		// already uses for the same function's backstop call.
-		const source = fs.readFileSync(
-			path.join(REPO_ROOT, "tests/support/vitest-setup.ts"),
-			"utf8",
+		// `stripSource` blanks comments and string literals first, so a comment
+		// naming the call can never satisfy this and a commented-out record reds
+		// (#4591 F1): the same idiom the census suite uses for the backstop call.
+		const source = stripSource(
+			fs.readFileSync(
+				path.join(REPO_ROOT, "tests/support/vitest-setup.ts"),
+				"utf8",
+			),
 		);
 		const body =
 			/export function cleanupTmpHygiene\([\s\S]*?\n\}/.exec(source)?.[0] ?? "";

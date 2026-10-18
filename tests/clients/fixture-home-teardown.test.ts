@@ -1,13 +1,23 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { isUnderDir } from "../../clients/path-utils.js";
 import {
 	fixtureHomeRoot,
 	pinFixtureHome,
+	removeTempDirSync,
+	restorePinnedFixtureHomes,
 	setupTestEnvironment,
 } from "./test-utils.js";
+import { stripSource } from "../support/sweep-kit.js";
+import { removeRunBackstopDirs } from "../support/vitest-setup.js";
+
+const REPO_ROOT = path.resolve(
+	path.dirname(fileURLToPath(import.meta.url)),
+	"../..",
+);
 
 /**
  * #4591: a child a test never awaits inherits the pinned HOME and its `cwd`,
@@ -68,5 +78,71 @@ describe("a pinned fixture HOME after teardown (#4591)", () => {
 		} finally {
 			restore();
 		}
+	});
+
+	it("restores the pinned home when setup throws between the pin and the fixture work", () => {
+		const before = os.homedir();
+		// The converted call sites pin first and create their fixtures second; a
+		// throw in that window never reaches the call site's own `finally`, so
+		// nothing would undo the pin (#4591 F3).
+		const setupThatThrows = () => {
+			pinFixtureHome("4591-setup-throw");
+			throw new Error("fixture setup failed");
+		};
+		expect(setupThatThrows).toThrow("fixture setup failed");
+		// This is the harness seam the setup's `afterEach` calls, at the moment it
+		// calls it: without it, the next case in this worker reads this case's
+		// fixture directory as HOME.
+		restorePinnedFixtureHomes();
+		expect(os.homedir()).toBe(before);
+	});
+
+	it("reclaims this run's fixture-home directory family on the backstop sweep", () => {
+		const home = fs.mkdtempSync(path.join(fixtureHomeRoot(), "sweep-guard-"));
+		// The name comes from the real seam, not a literal: the sweep matches this
+		// run's `worker-home-<run>-` prefix, so renaming the directory family
+		// reds here instead of silently leaving a killed worker's copy behind.
+		const familyMember = path.join(home, path.basename(fixtureHomeRoot()));
+		// A live sibling invocation's copy is not this run's to remove.
+		const liveForeign = path.join(home, "worker-home-0000000000-7-fixtures");
+		for (const dir of [familyMember, liveForeign])
+			fs.mkdirSync(path.join(dir, "home"), { recursive: true });
+		try {
+			removeRunBackstopDirs(home, home);
+			expect(fs.existsSync(familyMember)).toBe(false);
+			expect(fs.existsSync(liveForeign)).toBe(true);
+		} finally {
+			removeTempDirSync(home);
+		}
+	});
+
+	// The teardown itself has no behavioural observer: this file's own `afterAll`
+	// runs BEFORE the setup's, and the setup's removal runs after every check, so
+	// a guard on the live root would either read the directory too early or miss
+	// it entirely. The census suite pins the same class of wiring by source
+	// (`tmp-fixture-hygiene.test.ts`, the backstop call), over
+	// comment-and-string-blanked text so a comment naming the call cannot satisfy
+	// it; deleting either line reds here.
+	it("keeps the harness wired to the fixture-home lifecycle", () => {
+		const setup = stripSource(
+			fs.readFileSync(
+				path.join(REPO_ROOT, "tests/support/vitest-setup.ts"),
+				"utf8",
+			),
+		);
+		// #4591 F3: the pin's undo reaches the harness only through this hook.
+		expect(setup).toMatch(
+			/afterEach\(\(\)\s*=>\s*restorePinnedFixtureHomes\(\)\)/,
+		);
+		const afterAllBlock =
+			/afterAll\(async \(\) => \{[\s\S]*?\n\}\);/.exec(setup)?.[0] ?? "";
+		expect(
+			afterAllBlock,
+			"the worker teardown is no longer declared as expected",
+		).not.toBe("");
+		// #4591 F5: the worker's own scratch, removed when the worker goes. The
+		// run-level sweep arm is the backstop for a worker that never got here,
+		// and the family pin above is what keeps its needle on this name.
+		expect(afterAllBlock).toContain("removeTempDirSync(fixtureHomeRoot())");
 	});
 });

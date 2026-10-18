@@ -352,19 +352,32 @@ export function createTempFile(
  * root the harness deletes, outside the OS tmp root the census watches, and
  * beside the worker's own home rather than inside it.
  *
- * `vitest-setup.ts` publishes the run-shared home on
- * `PI_LENS_TMP_HYGIENE_HOME` before any test module loads, and removes this
- * directory at its teardown; the name carries the worker-home prefix so the
- * run's dead-worker sweep reclaims a killed run's copy too. It is a SIBLING of
- * the worker home on purpose: production classifies a path under
+ * `vitest-setup.ts` publishes the resolved path on
+ * `PI_LENS_TMP_HYGIENE_FIXTURE_HOME` before any test module loads and removes
+ * this directory at its teardown; the name carries the worker-home prefix so
+ * the run's dead-worker sweep reclaims a killed run's copy too. It is a SIBLING
+ * of the worker home on purpose: production classifies a path under
  * `PI_LENS_HOME` as pi-lens's own housekeeping (`isPiLensInternalPath`) and
  * refuses to adopt it as a project, so a fixture HOME there would silently
  * change what the write path does with the files under it.
+ *
+ * The published value is the identity the teardown removes (#4591). Deriving
+ * it again from `PI_LENS_TMP_HYGIENE_RUN_ID` at teardown time would answer with
+ * a different directory after any in-process mutation of that variable (the
+ * census suite mutates it on purpose), and the directories a case created would
+ * then be reclaimed only by the run's six-hour sweep arm. The fallback below
+ * exists for a harness that publishes the run-shared home only; with neither
+ * variable set there is no place to put a fixture home, and the caller hears it.
  */
 export function fixtureHomeRoot(): string {
-	const sharedHome =
-		process.env.PI_LENS_TMP_HYGIENE_HOME?.trim() ||
-		path.join(process.cwd(), ".probe-home");
+	const published = process.env.PI_LENS_TMP_HYGIENE_FIXTURE_HOME?.trim();
+	if (published) return path.resolve(published);
+	const sharedHome = process.env.PI_LENS_TMP_HYGIENE_HOME?.trim();
+	if (!sharedHome) {
+		throw new Error(
+			"fixtureHomeRoot() needs PI_LENS_TMP_HYGIENE_FIXTURE_HOME (or the run-shared PI_LENS_TMP_HYGIENE_HOME the vitest setup publishes) — a fixture home has no place to live outside the harness's own scratch root",
+		);
+	}
 	const runId = process.env.PI_LENS_TMP_HYGIENE_RUN_ID ?? "local";
 	return path.join(
 		path.resolve(sharedHome),
@@ -377,9 +390,11 @@ export function fixtureHomeRoot(): string {
  *
  * `homedir()` reads `HOME` (Windows: `USERPROFILE`) on every call, so pinning
  * both is what makes a `~` path expand into this directory instead of the
- * maintainer's real home. The caller restores in a `finally`: a failing
- * assertion must not leave the process pointed at a fixture directory that the
- * next test then reads.
+ * maintainer's real home. Every call site restores in its own `finally`, and
+ * the harness restores whatever is left at the end of the case
+ * ({@link restorePinnedFixtureHomes}, called by `vitest-setup.ts`'s
+ * `afterEach`): a setup step that throws between the pin and that `finally`
+ * would otherwise leave the next case reading a fixture directory (#4591).
  *
  * The home deliberately does NOT live inside the fixture root (#4591). A child
  * the test never awaits inherits HOME and `cwd`, and a write it lands after the
@@ -407,11 +422,39 @@ export function pinFixtureHome(slug: string): {
 	fixtureHomeSeq += 1;
 	const home = path.join(base, `${slug}-${process.pid}-${fixtureHomeSeq}`);
 	fs.mkdirSync(home, { recursive: true });
-	return { home, restore: pinHome(home) };
+	const undo = pinHome(home);
+	let restored = false;
+	const restore = () => {
+		if (restored) return;
+		restored = true;
+		const index = pendingFixtureHomeRestores.indexOf(restore);
+		if (index >= 0) pendingFixtureHomeRestores.splice(index, 1);
+		undo();
+	};
+	pendingFixtureHomeRestores.push(restore);
+	return { home, restore };
 }
 
 /** One counter per worker process; `fixtureHomeRoot()` separates runs. */
 let fixtureHomeSeq = 0;
+
+/** Pins this case has not undone yet, oldest first. */
+const pendingFixtureHomeRestores: Array<() => void> = [];
+
+/**
+ * Undo every {@link pinFixtureHome} pin still in effect, newest first. The
+ * harness calls this from its per-test `afterEach` (`vitest-setup.ts`), so a
+ * case that throws between the pin and its own fixture work cannot leave HOME
+ * pointed at a fixture directory for the next case: the call-site `finally`
+ * never ran, and the home outlives it. A pin a call site already restored has
+ * deregistered itself, so this is a no-op for the ordinary path.
+ */
+export function restorePinnedFixtureHomes(): void {
+	while (pendingFixtureHomeRestores.length > 0) {
+		const restore = pendingFixtureHomeRestores.pop();
+		restore?.();
+	}
+}
 
 /** The raw environment pin `pinFixtureHome` returns; not exported, so no call
  *  site can pin a home inside a root its own teardown deletes (#4591). */

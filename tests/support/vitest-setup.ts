@@ -9,7 +9,11 @@ import { afterAll, afterEach, beforeEach, expect, vi } from "vitest";
 import { installGitFixtureEnv } from "./git-fixture-env.js";
 import { installKillGuard, killGuardReport } from "./kill-guard.js";
 import { reportPeakRss } from "./worker-peak-rss.js";
-import { fixtureHomeRoot, removeTempDirSync } from "../clients/test-utils.js";
+import {
+	fixtureHomeRoot,
+	removeTempDirSync,
+	restorePinnedFixtureHomes,
+} from "../clients/test-utils.js";
 import {
 	formatTmpRootCreators,
 	formatTmpRootSweep,
@@ -404,6 +408,15 @@ const tmpRootIo = {
 const tmpRootExists = tmpRootIo.exists;
 afterEach(() => sampleTmpRoots(tmpRootRegistry, tmpRootExists));
 
+/**
+ * #4591: a case that throws between `pinFixtureHome` and its own fixture work
+ * never reaches the call site's `finally`, and HOME would stay pointed at that
+ * case's fixture directory for every case after it in this worker. The pin
+ * registers its undo with the harness seam, so this hook closes the window
+ * whether the case passed, failed, or threw during setup.
+ */
+afterEach(() => restorePinnedFixtureHomes());
+
 function sweepOwnTmpRoots(via: "afterAll" | "SIGTERM"): void {
 	// #2912 (2026-10-10): publish the creators record at every teardown, before
 	// the registry is gone with the fork, so the serialized owner can name the
@@ -549,8 +562,12 @@ try {
 process.env.PI_LENS_HOME = TMP_HYGIENE_WORKER_HOME;
 // #4591: `pinFixtureHome` places a pinned fixture HOME beside this worker's own
 // home, and needs the run-shared home to name that place. Published before any
-// test module loads, so every call site reads one value.
+// test module loads, so every call site reads one value, and the resolved root
+// is published beside it: the teardown below then removes the directory the
+// cases actually used, not one re-derived from an environment a test may have
+// changed in-process (the census suite mutates the run id on purpose).
 process.env.PI_LENS_TMP_HYGIENE_HOME = tmpHygieneHome;
+process.env.PI_LENS_TMP_HYGIENE_FIXTURE_HOME = fixtureHomeRoot();
 // #2651: scripts/warm-loader-cache.mjs appends to PI_LENS_INSTALL_LOG before
 // it falls back to PI_LENS_HOME/install.log, so an ambient value (a
 // developer's shell pointing it at the real ~/.pi-lens/install.log) would
