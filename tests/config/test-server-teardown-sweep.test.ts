@@ -896,6 +896,14 @@ describe("#4589 server-teardown detector — the shapes that must red and green"
 				],
 			],
 			[
+				"a function value written inline",
+				[
+					'const socket = dgram.createSocket("udp4");',
+					"socket.bind.call(() => {}, 0);",
+					"Reflect.apply(socket.bind, class {}, [0]);",
+				],
+			],
+			[
 				"a preload hook bound the same way",
 				[
 					"const hook = async () => {};",
