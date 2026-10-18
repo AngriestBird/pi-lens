@@ -218,6 +218,13 @@ MEDIUM with a live population. Before a final round, the brief says "final
 round" and names what it fixes; a residual of MEDIUM or below after it does not
 reopen the round.
 
+**Known gaps (user, 2026-10-19).** An open p3 issue is an accepted known gap,
+not backlog. The orchestrator closes it as not planned with the `known-gap`
+label and lists it under its seam on the pinned tracker #4626. When a PR
+merges, its `## Accepted residuals` lines join the same tracker under their
+seam. A known gap reopens as p2 when it turns material: a live wrong result,
+data loss, a hang, or a leak with no bound.
+
 Every reviewer **follow-up issue** generalization verdict that meets that bar is
 filed and assigned to a seam group on the tracking queue in the same turn. At each regroup, scan
 merged PRs for subset-shaped changes that lack a generalization verdict.
