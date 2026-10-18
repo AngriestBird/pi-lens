@@ -469,14 +469,11 @@ function scanScript(
 	// Substitutions in an unquoted heredoc have no retained marker. Their
 	// position is unavailable: judge against the incoming environment only,
 	// never against later exports (conservative missing-source is intentional).
-	if (pending.length > 1) {
-		// An orphaned heredoc expansion makes the flat association ambiguous.
-		// Recheck every body independently so no misplaced inherited export
-		// can hide a missing source.
-		for (const text of regions.slice(1))
-			visit({ text, children: [] }, env, new Set(Object.keys(env)));
-	}
-	for (const region of pending) visit(region, env, new Set(Object.keys(env)));
+	const roots =
+		pending.length === 1
+			? pending
+			: regions.map((text) => ({ text, children: [] }));
+	for (const region of roots) visit(region, env, new Set(Object.keys(env)));
 }
 
 /**
@@ -1135,6 +1132,17 @@ describe("workflow gh calls resolve a repository (#4382)", () => {
 			`export GH_REPO=old/repo; GH_REPO=owner/repo; ${BARE_GH_WRITE}`,
 		])
 			expect(probe({ run }).findings, run).toEqual([]);
+	});
+
+	it("fails closed when heredoc substitutions lose their position", () => {
+		// F3: an orphaned body cannot borrow an export through a misplaced marker.
+		const run = `export GH_REPO=owner/repo\necho "$(echo hello)"\ncat <<EOF\n$(${BARE_GH_WRITE})\nEOF`;
+		expect(probe({ run }).findings.map((f) => f.kind)).toEqual([
+			"missing-source",
+		]);
+		expect(probe({ run, jobEnv: { GH_REPO: "owner/repo" } }).findings).toEqual(
+			[],
+		);
 	});
 
 	it("ignores benign shell heredocs", () => {
