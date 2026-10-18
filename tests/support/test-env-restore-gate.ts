@@ -7,11 +7,9 @@
  * NEXT case in the same worker inherits the value.
  *
  * The detector is pure and takes one file's raw source. It reads the
- * comment- and string-BLANKED text (`stripSource`), so a needle quoted in a
- * comment or inside a fixture string is not a write (principles §2,
- * "detectors match code, not prose"), and reads VALUES back out of the raw
- * source at the offsets the blanked text reported, because `stripSource`
- * preserves length.
+ * TypeScript AST expression roles for writes and comment- and string-BLANKED
+ * text (`stripSource`) for cleanup regions, so quoted examples cannot satisfy
+ * either side of the check. Raw source supplies keys at the preserved offsets.
  *
  * ## The write enumerator fails closed (shape 69)
  *

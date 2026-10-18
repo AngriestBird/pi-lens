@@ -216,6 +216,11 @@ export const TEST_ENV_RESTORE_ADMISSIONS: Readonly<
 		mechanism: "module-pin",
 		reason: "set before the dynamic import and never restored",
 	},
+	"tests/clients/lsp/touch-debounce-content-gate.test.ts": {
+		mechanism: "module-pin",
+		reason:
+			"master's #4532 test pins the debounce before its dynamic imports in vi.hoisted; no hook restores the original value",
+	},
 	"tests/clients/lsp/workspace-diagnostics-per-server.test.ts": {
 		mechanism: "teardown",
 		reason: "one case restores in a finally; the rest set it in a case body",

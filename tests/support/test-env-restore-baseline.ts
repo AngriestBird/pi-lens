@@ -65,6 +65,7 @@ export const TEST_ENV_RESTORE_BASELINE: readonly string[] = [
 	"tests/clients/lsp/typescript-classic-repair.integration.test.ts:PI_LENS_HOME",
 	"tests/clients/lsp/typescript-root.test.ts:PI_LENS_TEST_MODE",
 	"tests/clients/lsp/typos-server-init.test.ts:PI_LENS_TEST_MODE",
+	"tests/clients/lsp/touch-debounce-content-gate.test.ts:PI_LENS_LSP_TOUCH_DEBOUNCE_MS",
 	"tests/clients/lsp/workspace-diagnostics-per-server.test.ts:PI_LENS_LSP_WORKSPACE_PULL",
 	"tests/clients/lsp/workspace-diagnostics-suppression.test.ts:PI_LENS_LSP_WORKSPACE_PULL",
 	"tests/clients/module-report-call-graph.test.ts:PILENS_DATA_DIR",
