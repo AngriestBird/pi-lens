@@ -919,6 +919,13 @@ describe("#4589 server-teardown detector — the shapes that must red and green"
 		expect(
 			scanListen([
 				'const socket = dgram.createSocket("udp4");',
+				"const b = makeHandle();",
+				"socket.bind.call(b, 0);",
+			]),
+		).toEqual([["b", "unresolvable"]]);
+		expect(
+			scanListen([
+				'const socket = dgram.createSocket("udp4");',
 				"socket.bind.call(makeHandle(), 0);",
 			]),
 		).toEqual([["makeHandle()", "unresolvable"]]);

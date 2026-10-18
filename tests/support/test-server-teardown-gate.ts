@@ -626,25 +626,42 @@ export function findUnclosedServerStarts(
 		);
 	};
 
+	/** A value this scan can read as PROVEN not a socket or server handle. */
+	const isPlainValue = (node: SgNode, depth = 0): boolean => {
+		const kind = String(node.kind());
+		if (
+			kind === "null" ||
+			kind === "undefined" ||
+			kind === "true" ||
+			kind === "false" ||
+			kind === "number" ||
+			kind === "string" ||
+			kind === "regex" ||
+			kind === "class"
+		)
+			return true;
+		if (isFunction(node)) return true;
+		if (kind !== "identifier" || depth >= 3) return false;
+		const names = identityNames(node.text(), bindings);
+		const own = bindings.filter((binding) => names.includes(binding.name));
+		// EVERY binding must be plain: one unknown value (`const b = makeHandle()`)
+		// may be a socket, and this walk may not assume otherwise (r6 P1).
+		return own.length > 0 && own.every((b) => isPlainValue(b.value, depth + 1));
+	};
+
 	/**
 	 * A supplied receiver the scan can READ as a value that binds no port: a
-	 * literal, a function, or an identifier whose bindings this file declares and
-	 * none of which is a handle construction. `Function.prototype.bind.call(fn,
-	 * null)` and `socket.bind.call(fn, 0)` are `fn.bind(...)` -- a bind on a value
-	 * that is not a handle -- so neither starts a listener (F2, shape 69). Saying
+	 * literal, a function, or an identifier whose every binding this file
+	 * declares is itself plain. `Function.prototype.bind.call(fn, null)` and
+	 * `socket.bind.call(fn, 0)` are `fn.bind(...)` -- a bind on a value that is
+	 * not a handle -- so neither starts a listener (F2, shape 69). Saying
 	 * "indirect, therefore a start" made every `.call`/`.apply` on a function
-	 * value report, which the dot form does not.
+	 * value report, which the dot form does not. A receiver the scan cannot read
+	 * stays reportable: an unknown factory may return a socket, so
+	 * `const b = makeHandle(); socket.bind.call(b, 0)` still reports (r6 P1).
 	 */
-	const bindsOnPlainValue = (receiver: SgNode): boolean => {
-		const kind = String(receiver.kind());
-		if (kind === "null" || kind === "undefined" || kind === "class")
-			return true;
-		if (isFunction(receiver)) return true;
-		if (kind !== "identifier") return false;
-		const names = identityNames(receiver.text(), bindings);
-		const own = bindings.filter((binding) => names.includes(binding.name));
-		return own.length > 0 && !own.some((b) => isHandleConstruction(b.value));
-	};
+	const bindsOnPlainValue = (receiver: SgNode): boolean =>
+		isPlainValue(receiver);
 
 	const starts: Array<{
 		receiver: SgNode;

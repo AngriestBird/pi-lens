@@ -549,8 +549,11 @@ function scanUndrainedSinkReads(
 	}
 	interface ReadAliasDecl {
 		name: string;
-		start: number;
-		end: number;
+		/** The declaration's own position; `at` is what decides before a read. */
+		declaredAt: number;
+		/** The scope the name binds in; see `bindingScopeSpan`. */
+		scopeStart: number;
+		scopeEnd: number;
 		read: boolean;
 	}
 	const readAliasDecls: ReadAliasDecl[] = [];
@@ -561,6 +564,11 @@ function scanUndrainedSinkReads(
 		const range = node?.range() ?? rootRange;
 		return { start: range.start.index, end: range.end.index };
 	};
+	/** A span under the field names a declaration record carries. */
+	const scopeFields = (span: { start: number; end: number }) => ({
+		scopeStart: span.start,
+		scopeEnd: span.end,
+	});
 	/**
 	 * The SCOPE a declarator binds in: `var` hoists to the enclosing function,
 	 * `let`/`const` bind in the nearest enclosing block, and the program binds
@@ -583,25 +591,28 @@ function scanUndrainedSinkReads(
 		return spanOf(current);
 	};
 	/**
-	 * The declaration that decides `name` at `at`: the innermost enclosing scope
-	 * that declares it. A declaration in a block the read is not inside is a
-	 * sibling's name, not a shadow.
+	 * The declaration that decides `name` at `at`: in the innermost enclosing
+	 * scope that declares it, the nearest declaration ABOVE the read. Two
+	 * positions decide, and they are different: the scope (a block or a
+	 * function, see `bindingScopeSpan`) says whether the name is in force at all,
+	 * and the declaration's own position says which of two same-named
+	 * declarations it is. A declaration in a block the read is not inside is a
+	 * sibling's name, and one that appears only AFTER the read has not run yet
+	 * (Greptile r6: a later `var read = helper` used to hide an earlier read).
 	 */
 	const readAliasAt = (name: string, at: SgNode): ReadAliasDecl | undefined => {
-		const start = at.range().start.index;
+		const position = at.range().start.index;
 		const candidates = readAliasDecls.filter(
-			(decl) => decl.name === name && decl.start <= start,
+			(decl) => decl.name === name && decl.declaredAt <= position,
 		);
 		if (candidates.length === 0) return undefined;
 		for (let current = at.parent(); current; current = current.parent()) {
 			const span = spanOf(current);
 			const here = candidates.filter(
-				(decl) => decl.start === span.start && decl.end === span.end,
+				(decl) => decl.scopeStart === span.start && decl.scopeEnd === span.end,
 			);
 			if (here.length === 0) continue;
-			// One scope, two declarations of one name: the nearest one above the
-			// read is the one JS binds last before it.
-			return here.reduce((a, b) => (b.start >= a.start ? b : a));
+			return here.reduce((a, b) => (b.declaredAt >= a.declaredAt ? b : a));
 		}
 		return undefined;
 	};
@@ -623,7 +634,8 @@ function scanUndrainedSinkReads(
 					: readCalleeOf(value);
 		readAliasDecls.push({
 			name: name.text(),
-			...bindingScopeSpan(declarator),
+			declaredAt: declarator.range().start.index,
+			...scopeFields(bindingScopeSpan(declarator)),
 			read: callee !== undefined,
 		});
 	}
@@ -642,7 +654,8 @@ function scanUndrainedSinkReads(
 		if (name?.kind() === "identifier")
 			readAliasDecls.push({
 				name: name.text(),
-				...spanOf(lexicalScopeOf(fn)),
+				declaredAt: fn.range().start.index,
+				...scopeFields(spanOf(lexicalScopeOf(fn))),
 				read: false,
 			});
 		for (const parameter of fn.field("parameters")?.namedChildren() ?? []) {
@@ -650,7 +663,8 @@ function scanUndrainedSinkReads(
 			if (pattern.kind() !== "identifier") continue;
 			readAliasDecls.push({
 				name: pattern.text(),
-				...spanOf(lexicalScopeOf(parameter)),
+				declaredAt: parameter.range().start.index,
+				...scopeFields(spanOf(lexicalScopeOf(parameter))),
 				read: false,
 			});
 		}
@@ -1971,6 +1985,28 @@ describe("sink reads drain first (#4381)", () => {
 						"});",
 					],
 					[[4, "read"]],
+				],
+				[
+					"a later re-declaration does not shadow an earlier read",
+					[
+						'it("x", () => {',
+						"\tvar read = fs.readFileSync;",
+						"\tvoid read(getLatencyLogPath());",
+						"\tvar read = (file: string) => file;",
+						"});",
+					],
+					[[3, "read"]],
+				],
+				[
+					"an earlier non-read helper is not displaced by a later alias",
+					[
+						'it("x", () => {',
+						"\tvar read = (file: string) => file;",
+						"\tvoid read(getLatencyLogPath());",
+						"\tvar read = fs.readFileSync;",
+						"});",
+					],
+					[],
 				],
 				[
 					"`var` hoists, so a block-level `var` alias binds the function",
