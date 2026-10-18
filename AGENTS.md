@@ -910,8 +910,16 @@ file-scoped worklist and receives no project-wide scanner output.
   `continue-on-error` producer either calls the same helper (`--count
   <producer>=<n> --floor <m>` from a workflow step; `--min-pass`, the
   complexity file count and the shuffle census's missing starts already do) or
-  carries a `# No floor (<issue>): <reason>` header above its job; a floor comes
-  from a run recorded in `tests/fixtures/nightly-floors/measurements.json`.
+  needs none, and one census decides that: every `continue-on-error` site
+  outside the LSP nightly is registered in
+  `tests/fixtures/nightly-floors/continue-on-error-sites.json` as `floored`
+  (naming the gating step and the text that proves the floor there) or
+  `no-floor` (with the reader that makes an empty result visible). The census
+  derives its population from the workflows and fails closed on a site the
+  registry does not name, and a floor comes from a run recorded in
+  `tests/fixtures/nightly-floors/measurements.json`; a
+  `# No floor (<issue>): <reason>` header above a job is the human-facing copy
+  where one exists, not the record.
   The helper must stay importable without `dist/` (the refresh-PR job runs it
   on a fresh checkout).
 - LSP service generations, workspace-sweep holds, and repair latches use

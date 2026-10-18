@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import yaml from "../../clients/deps/js-yaml.js";
@@ -149,6 +149,7 @@ type Job = {
 	env?: Record<string, string>;
 	steps?: Step[];
 	outputs?: Record<string, string>;
+	"continue-on-error"?: unknown;
 };
 const workflow = yaml.load(read(".github/workflows/tool-smoke.yml")) as {
 	jobs: Record<string, Job>;
@@ -407,5 +408,135 @@ describe("the floors outside the LSP nightly are measured and wired (#4518)", ()
 			strings: "blank",
 		});
 		expect(census).not.toMatch(/if\s*\(\s*missing\.length\s*>\s*0\s*\)/);
+	});
+});
+
+// #4518's remainder: the r1 floors covered the sites the issue listed, and a
+// sweep found the rest of the tree. A `continue-on-error` producer that
+// evaluates nothing reads green, so every such site OUTSIDE the LSP nightly is
+// registered in tests/fixtures/nightly-floors/continue-on-error-sites.json as
+// floored (naming the gating step whose text carries the floor) or excluded
+// (with a reason). The population is DERIVED from the YAML, so a new site, and
+// a site the parser stops seeing, both red here instead of joining silently.
+// Only tool-smoke.yml is outside the population: #4514 floors its four LSP
+// producers in one gating step (pinned above), and the wiring around them is
+// pinned by tests/config/lsp-capability-refresh-workflow.test.ts and
+// lsp-idle-eviction-measurement.test.ts.
+const COE_REGISTRY =
+	"tests/fixtures/nightly-floors/continue-on-error-sites.json";
+const LSP_NIGHTLY_WORKFLOW = "tool-smoke.yml";
+type CoERow = {
+	status: "floored" | "no-floor";
+	floorStep?: string;
+	evidence?: string;
+	reason: string;
+};
+const coeRegistry = JSON.parse(read(COE_REGISTRY)) as {
+	lspNightly: { workflow: string; reason: string };
+	sites: Record<string, CoERow>;
+};
+const isCoe = (value: unknown) => value !== undefined && value !== false;
+type CoESite = {
+	key: string;
+	file: string;
+	job: string;
+	jobDef: Job;
+	step?: Step;
+};
+const stepIdentity = (s: Step) =>
+	s.name ?? s.uses?.split("@")[0] ?? "(unnamed step)";
+const workflowsDir = resolve(ROOT, ".github/workflows");
+const workflowFiles = readdirSync(workflowsDir)
+	.filter((f) => f.endsWith(".yml"))
+	.sort();
+const sitesIn = (file: string): CoESite[] => {
+	const wf = loadWorkflow(file);
+	return Object.entries(wf.jobs ?? {}).flatMap(([jobId, jobDef]) => {
+		const sites: CoESite[] = [];
+		if (isCoe(jobDef["continue-on-error"]))
+			sites.push({ key: `${file}#${jobId}`, file, job: jobId, jobDef });
+		for (const step of jobDef.steps ?? [])
+			if (isCoe(step["continue-on-error"]))
+				sites.push({
+					key: `${file}#${jobId}#${stepIdentity(step)}`,
+					file,
+					job: jobId,
+					jobDef,
+					step,
+				});
+		return sites;
+	});
+};
+const population = workflowFiles
+	.filter((f) => f !== LSP_NIGHTLY_WORKFLOW)
+	.flatMap(sitesIn);
+
+describe("every continue-on-error site outside the LSP nightly is floored or excluded (#4518)", () => {
+	it("names the excluded workflow and the floors that govern it, so the exclusion is a fact", () => {
+		expect(workflowFiles).toContain(LSP_NIGHTLY_WORKFLOW);
+		expect(coeRegistry.lspNightly.workflow).toBe(LSP_NIGHTLY_WORKFLOW);
+		expect(coeRegistry.lspNightly.reason).toContain("#4514");
+		const nightly = sitesIn(LSP_NIGHTLY_WORKFLOW);
+		for (const name of [
+			"LSP capability matrix",
+			"LSP clean-signal probe",
+			"LSP server capability inventory",
+			"LSP idle-eviction measurement",
+		])
+			expect(
+				nightly.some((site) => site.step?.name?.includes(name)),
+				name,
+			).toBe(true);
+	});
+
+	it("registers exactly the sites the YAML declares, so an unregistered one fails closed", () => {
+		// A parser that found nothing is not a clean tree.
+		expect(population.length).toBeGreaterThan(20);
+		expect(population.map((site) => site.key).sort()).toEqual(
+			Object.keys(coeRegistry.sites).sort(),
+		);
+	});
+
+	it("sees every `continue-on-error` key in the raw text of each workflow it judges", () => {
+		for (const file of workflowFiles.filter(
+			(f) => f !== LSP_NIGHTLY_WORKFLOW,
+		)) {
+			const raw =
+				read(`.github/workflows/${file}`).match(/^\s*continue-on-error:/gm)
+					?.length ?? 0;
+			expect(sitesIn(file).length, file).toBe(raw);
+		}
+	});
+
+	it("gives every floored site a gating step whose text carries its floor", () => {
+		for (const site of population) {
+			const row = coeRegistry.sites[site.key];
+			if (row?.status !== "floored") continue;
+			expect(row.floorStep, site.key).toBeTruthy();
+			expect(row.evidence, site.key).toBeTruthy();
+			const floor = (site.jobDef.steps ?? []).find((s) =>
+				stepIdentity(s).includes(row.floorStep ?? "\u0000"),
+			);
+			expect(
+				floor,
+				`${site.key}: no step named like "${row.floorStep}"`,
+			).toBeDefined();
+			expect(
+				floor?.["continue-on-error"],
+				`${site.key}: its floor step is continue-on-error, so the floor gates nothing`,
+			).not.toBe(true);
+			expect(
+				floor?.run,
+				`${site.key}: "${row.evidence}" is not in that step's run text`,
+			).toContain(row.evidence);
+		}
+	});
+
+	it("gives every excluded site a reason and no hollow status", () => {
+		for (const [key, row] of Object.entries(coeRegistry.sites)) {
+			expect(["floored", "no-floor"], key).toContain(row.status);
+			expect(row.reason.length, key).toBeGreaterThan(40);
+			if (row.status === "no-floor") expect(row.floorStep, key).toBeUndefined();
+		}
 	});
 });
