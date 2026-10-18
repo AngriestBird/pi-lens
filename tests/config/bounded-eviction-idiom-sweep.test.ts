@@ -241,25 +241,43 @@ const DESTRUCTURED_ITERATOR_BINDING =
 	/\b(?:const|let|var)\s*\[\s*([\w$]+)(?:\s*,\s*[\w$]+)?\s*\]\s*=(?!=)\s*[^;{}=]*?/g;
 
 /**
- * Spelling 6 (#4580 round 2, audit item 4): an eviction whose victim is picked
- * by ORDERING the spread accessor with `.sort(...)` instead of taking its head
- * — `const victim = [...m.entries()].sort(([, a], [, b]) => a.at - b.at)[0];`
- * — which is the same evict-oldest intent under a comparator.
- *
- * Two gates keep it from reading a ranking as an eviction: the sorted array is
- * indexed at `[0]` (the single lowest-ranked element is the victim, where a
- * truncation keeps the whole list — `clients/lens-map.ts`'s degree-ranked
- * `keepIds` is the live shape that distinction excludes), and the bounded
- * `.size` COMPARISON sits in the lines above. Unlike the other bound-victim
- * families this one cannot also require `.delete(`: all five live members
- * evict through a helper (`evictWorkspaceGraph`, `deleteReverseDepsEntry`,
- * `deleteAuthoritativeSnapshot`, `deleteDirMarker`, `deleteWalk`), and
- * requiring that spelling would be the enumeration mistake one row down. The
- * use of the bound name below stands in its place, which is the loud
- * over-match direction (a reviewer's exemption) rather than a silent miss.
+ * Comparator ordering is independent of its receiver (#4580 r3, shape 69).
+ * Read a balanced initializer, rather than enumerating source/transform calls:
+ * spread, Array.from, aliases and filter/map/slice chains all reach the same
+ * sort/toSorted operation. Selection and cap evidence are separate stages.
  */
-const SORTED_SPREAD_BINDING =
-	/\b(?:const|let|var)\s+([\w$]+)\s*(?::[^=;\n]+)?=(?!=)\s*\[\s*\.\.\.[^;{}=]*?\.\s*(?:keys|values|entries)\s*\(\s*\)\s*\]\s*\.\s*sort\s*\([\s\S]{0,400}?\)\s*\[\s*0\s*\]/g;
+const ORDERED_BINDING =
+	/\b(?:const|let|var)\s+([\w$]+)\s*(?::[^=;\n]+)?=(?!=)\s*/g;
+const ORDER_CALL = /\.\s*(?:sort|toSorted)\s*\(/g;
+const SINGLE_SELECTION = /^\s*(?:\[\s*0\s*\]|\.\s*(?:find|at)\s*\()/;
+// A cap may be expressed positively, on length, or by its early-return
+// complement (occupied < ceiling). This is lexical evidence, not data flow.
+const CAP_COMPARISON =
+	/(?:\.(?:size|length)\s*[<>]=?|[\w$.]+\s*[<>]=?\s*[\w$.(])/;
+
+/** End of a balanced initializer or call in comment/string-blanked source. */
+function balancedEnd(source: string, start: number, call = false): number {
+	let depth = call ? 1 : 0;
+	for (let index = start; index < source.length; index++) {
+		const token = source[index];
+		if (token === ";" && depth === 0) return index;
+		if (token === "(" || token === "[" || token === "{") depth++;
+		if (token === ")" || token === "]" || token === "}") {
+			depth--;
+			if (depth < 0 || (call && depth === 0)) return index + 1;
+		}
+	}
+	return source.length;
+}
+
+/** A separate selection binding still consumes the ordered sequence. */
+function selectsBinding(text: string, name: string): boolean {
+	const selections = /([\w$]+)\s*(?:\[\s*0\s*\]|\.\s*(?:find|at)\s*\()/g;
+	for (const match of text.matchAll(selections)) {
+		if (match[1] === name) return true;
+	}
+	return false;
+}
 
 /** 0-based start offset of every line, for offset→line mapping. */
 function lineStartOffsets(source: string): number[] {
@@ -338,15 +356,6 @@ function flagsDestructuredEviction(
 	return mentionsIdentifier(below, boundName);
 }
 
-function flagsSortedSpreadEviction(
-	lines: readonly string[],
-	index: number,
-	victimName: string,
-): boolean {
-	if (!SIZE_COMPARISON.test(windowAbove(lines, index))) return false;
-	return mentionsIdentifier(windowBelow(lines, index), victimName);
-}
-
 /** The one file allowed to spell the idiom: the canonical implementation. */
 const DEFINITION_FILE = "clients/bounded-cache.ts";
 
@@ -393,7 +402,7 @@ const EXEMPT_SITES: Readonly<Record<string, string>> = {
 		"the oldest TEXT-BEARING path. Neither bounded class holds a second axis " +
 		"or a skip policy, and growing BoundedFifoMap one to serve this single " +
 		"caller is the trade the two entries above already declined.",
-	"clients/review-graph/builder.ts#setWorkspaceGraph:7a28b568":
+	"clients/review-graph/builder.ts#setWorkspaceGraph:5d6480b6":
 		"Not a bounded class's recency (#4580 round 2, comparator family): the " +
 		"victim is the oldest by an explicitly maintained `lastUsedAt`, and the " +
 		"eviction clears the entry's armed idle timer. `BoundedLruCache` promotes " +
@@ -401,43 +410,82 @@ const EXEMPT_SITES: Readonly<Record<string, string>> = {
 		"reads, so adopting it would change which entry is evicted under a " +
 		"read-only workload; no bounded class carries an external recency stamp " +
 		"or a per-entry timer.",
-	"clients/dispatch/integration.ts#setReverseDepsEntry:93afc4e6":
+	"clients/dispatch/integration.ts#setReverseDepsEntry:cfec6940":
 		"Not a bounded class's recency (#4580 round 2, comparator family): the " +
 		"victim is the oldest by the explicitly maintained `lastUsedAt` that " +
 		"`touchReverseDepsEntry` stamps, and the eviction clears the entry's " +
 		"armed idle timer. `BoundedLruCache`'s `get` would promote on the " +
 		"equality-checking reads this cache makes, changing eviction order; no " +
 		"bounded class carries an external recency stamp or a per-entry timer.",
-	"clients/project-snapshot.ts#enforceAuthoritativeSnapshotCap:4742430c":
+	"clients/project-snapshot.ts#enforceAuthoritativeSnapshotCap:c15ce8a2":
 		"Not a bounded class's recency (#4580 round 2, comparator family): the " +
 		"victim is the oldest by the explicitly maintained `lastUsedAt`, and the " +
 		"eviction must clear the single timer `scheduleAuthoritativeSnapshotEviction` " +
 		"armed for it. `BoundedLruCache` would promote on `get`, which this " +
 		"cache's equality-checking reads must not do; no bounded class carries an " +
 		"external recency stamp or a per-entry timer.",
-	"clients/workspace-topology.ts#getDirectoryMarkers:db302a5f":
+	"clients/workspace-topology.ts#getDirectoryMarkers:d43899c7":
 		"Not a bounded class's recency (#4580 round 2, comparator family): the " +
 		"victim is the oldest by the `lastUsedAt` that `touchDirMarker` stamps, " +
 		"and `deleteDirMarker` must clear that entry's idle timer. " +
 		"`BoundedLruCache`'s `get` would promote on reads this cache makes without " +
 		"touching the stamp, changing eviction order; no bounded class carries an " +
 		"external recency stamp or a per-entry timer.",
-	"clients/workspace-topology.ts#walkToNearestMatch:754f935f":
+	"clients/workspace-topology.ts#walkToNearestMatch:79da3cc7":
 		"Not a bounded class's recency (#4580 round 2, comparator family): the " +
 		"victim is the oldest by the `lastUsedAt` that `touchWalk` stamps, and " +
 		"`deleteWalk` must clear that entry's idle timer. `BoundedLruCache`'s " +
 		"`get` would promote on reads this cache makes without touching the " +
 		"stamp, changing eviction order; no bounded class carries an external " +
 		"recency stamp or a per-entry timer.",
+	"clients/read-guard.ts#ReadGuard:61e2665a":
+		"Consumed reads are evicted first, ordered by the separately maintained " +
+		"fileLastUsed stamp. evictFile removes read/authorship/last-used state. " +
+		"Neither bounded class expresses this eligibility partition plus external recency.",
+	"clients/read-guard.ts#ReadGuard:fe37c09d":
+		"Unconsumed reads are the second eligibility partition, ordered by " +
+		"fileLastUsed only after consumed eviction. evictFile clears associated " +
+		"read/authorship state; a single FIFO/LRU container cannot encode the two passes.",
+	"clients/mcp/analyze.ts#enforceWarmWordIndexLruCap:625c660e":
+		"Only unleased warm roots may be evicted; lastUsedAt orders eligible roots " +
+		"and evictWarmWordIndex performs retirement. Neither bounded class has " +
+		"lease eligibility plus explicitly maintained recency.",
+	"clients/lsp/client-registry.ts#ClientRegistry:4d17a873":
+		"Frozen LSP member: adopted roots are ordered by explicit recency, " +
+		"excluding the root just normalized. Eviction also retires that root's " +
+		"adopted clients. Neither bounded class expresses protected-root selection.",
+	"clients/lsp/client-registry.ts#ClientRegistry:4fd64a7c":
+		"Frozen LSP member: ceiling capacity counts live and in-flight clients. " +
+		"Only alive, idle, unleased clients other than the requested key qualify; " +
+		"the victim must be shut down asynchronously. A bounded map cannot own " +
+		"that eligibility or shutdown lifecycle.",
+
+	"scripts/check-pr-body.mjs#testCorpus:9825b2b8":
+		"Tooling-only FIFO corpus memo; importing the shipped clients container " +
+		"would cross the script/runtime dependency boundary. This admission names " +
+		"one pre-existing bounded script cache, not a shipped runtime policy.",
+	"scripts/lib/lockfile-completeness.mjs#firstKeyChange:09f44dde":
+		"Non-member: selects the first sorted set difference only to render a " +
+		"lockfile diagnostic. It never evicts or mutates the source collections. " +
+		"The lexical comparator gate deliberately overmatches this length check.",
 };
 
 function shippedSourceFiles(): string[] {
-	const files = ["clients", "tools", "mcp"].flatMap((dir) => {
-		const abs = path.join(REPO_ROOT, dir);
-		return fs.existsSync(abs)
-			? listSourceFiles(abs, { extensions: [".ts"], skipTests: true })
-			: [];
-	});
+	const files = ["clients", "tools", "mcp", "scripts", "tests/support"].flatMap(
+		(dir) => {
+			const abs = path.join(REPO_ROOT, dir);
+			return fs.existsSync(abs)
+				? listSourceFiles(abs, {
+						extensions: [".ts", ".mjs", ".js"],
+						skipTests: true,
+					}).filter(
+						(file) =>
+							!file.endsWith(".js") ||
+							!fs.existsSync(file.slice(0, -3) + ".ts"),
+					)
+				: [];
+		},
+	);
 	const indexTs = path.join(REPO_ROOT, "index.ts");
 	if (fs.existsSync(indexTs)) files.push(indexTs);
 	return files;
@@ -462,12 +510,36 @@ export function findEvictionLines(stripped: string): number[] {
 			pattern: DESTRUCTURED_ITERATOR_BINDING,
 			flags: flagsDestructuredEviction,
 		},
-		{ pattern: SORTED_SPREAD_BINDING, flags: flagsSortedSpreadEviction },
 	];
 	for (const { pattern, flags } of boundVictimFamilies) {
 		for (const match of stripped.matchAll(pattern)) {
 			const index = lineIndexAt(starts, match.index ?? 0);
 			if (flags(lines, index, match[1] ?? "")) hits.add(index + 1);
+		}
+	}
+
+	for (const binding of stripped.matchAll(ORDERED_BINDING)) {
+		const index = lineIndexAt(starts, binding.index ?? 0);
+		const name = binding[1] ?? "";
+		const start = (binding.index ?? 0) + binding[0].length;
+		const end = balancedEnd(stripped, start);
+		const expression = stripped.slice(start, end);
+		const endIndex = lineIndexAt(starts, end);
+		const below = windowBelow(lines, endIndex);
+		if (!CAP_COMPARISON.test(windowAbove(lines, index))) continue;
+		if (!mentionsIdentifier(below, name)) continue;
+		for (const order of expression.matchAll(ORDER_CALL)) {
+			const close = balancedEnd(
+				expression,
+				(order.index ?? 0) + order[0].length,
+				true,
+			);
+			if (
+				SINGLE_SELECTION.test(expression.slice(close)) ||
+				selectsBinding(below, name)
+			) {
+				hits.add(index + 1);
+			}
 		}
 	}
 
@@ -522,7 +594,20 @@ function findFlaggedOccurrences(): {
 		const lines = stripped.split("\n");
 		for (const line of findEvictionLines(stripped)) {
 			occurrences.push({
-				key: stableOccurrenceKey(rel, lines, line - 1),
+				key: stableOccurrenceKey(
+					rel,
+					lines.map((text, index) => {
+						// Same first line, different eligibility policy (#4580 r3):
+						// hash the complete declaration, not its formatter's first line.
+						if (index !== line - 1 || !/^\s*(?:const|let|var)\b/.test(text))
+							return text;
+						const start = lineStartOffsets(stripped)[index] ?? 0;
+						return stripped
+							.slice(start, balancedEnd(stripped, start))
+							.replace(/\s+/g, " ");
+					}),
+					line - 1,
+				),
 				detail: `${rel}:${line}`,
 			});
 		}
@@ -535,15 +620,9 @@ describe("#2442 no new hand-rolled evict-oldest idiom outside bounded-cache.ts",
 	const flagged = occurrences.map((o) => o.key);
 
 	it("actually finds the family (a dead scan must not read as clean)", () => {
-		// Vacuity guard on the DETECTOR: as of #4580 round 2 eight occurrences
-		// remain — three skip-policy / two-axis walks (the drift cap, the
-		// debug-handles protected prefix, the LSP incremental-text skip policy)
-		// and five comparator-ordered LRU-by-`lastUsedAt` caches, all admitted
-		// above. Before #4570 five more were flagged by the newly matched assigned
-		// spelling and migrated to `BoundedFifoMap`; #4580 round 2 migrated the
-		// session-fact tombstone trim to `BoundedSet`. If this drops to zero,
-		// EITHER every exemption's site was migrated (update the sweep) OR the
-		// regexes broke (fix the sweep) — never assume the former without checking.
+		// The registered population includes runtime eviction policies and two
+		// tooling matches. The registry audit below rejects missing/stale entries.
+
 		expect(flagged.length).toBeGreaterThanOrEqual(1);
 	});
 
@@ -1032,6 +1111,134 @@ describe("#2442 no new hand-rolled evict-oldest idiom outside bounded-cache.ts",
 		).toEqual([]);
 	});
 
+	it("flags filtered comparator chains, #4580 r3 F1", () => {
+		// Shape 69: a transparent transform must not hide ordered removal.
+		for (const transform of [
+			".filter(eligible)",
+			".map(identity)",
+			".slice(0)",
+			".filter(([, e]) => { return eligible(e); }).map(identity)",
+		]) {
+			const source = `while (m.size > CAP) {
+ const victim = [...m.entries()]${transform}.sort(cmp)[0];
+ evict(victim);
+}`;
+			expect(findEvictionLines(stripSource(source)), transform).toEqual([2]);
+		}
+	});
+
+	it("flags comparator source and ordering axes, #4580 r3", () => {
+		// Shape 69: the ordering operation owns recognition, not its receiver.
+		for (const source of [
+			"[...m.keys()]",
+			"[...m.values()]",
+			"Array.from(m.entries())",
+			"sequence",
+			"sequenceOf(m)",
+		]) {
+			for (const order of ["sort(cmp)", "sort()", "toSorted(cmp)"]) {
+				expect(
+					findEvictionLines(`while (m.size > CAP) {
+ const victim = ${source}.${order}[0];
+ alias.delete(victim);
+}`),
+					`${source}.${order}`,
+				).toEqual([2]);
+			}
+		}
+	});
+
+	it("flags comparator selection axes, #4580 r3 F2", () => {
+		// Shape 69: find and at select a victim as surely as index zero.
+		for (const selector of ["[0]", ".find(eligible)", ".at(0)"]) {
+			expect(
+				findEvictionLines(`if (m.size < CAP) return;
+ const victim = [...m.keys()].sort(cmp)${selector};
+ m.delete(victim);`),
+				selector,
+			).toEqual([2]);
+		}
+	});
+
+	it("flags a ceiling cap with selection in another binding, #4580 r3 F2", () => {
+		// client-registry's ceiling is checked before sorting eligible clients.
+		const source = `if (occupied < getCeiling()) return true;
+ const idle = [...m.entries()]
+ .filter(([, client]) => { return client.alive(); })
+ .sort(([, a], [, b]) => stamp(a) - stamp(b));
+ const victim = idle[0];
+ evict(victim);`;
+		expect(findEvictionLines(stripSource(source))).toEqual([2]);
+	});
+
+	it("flags length caps and removal consumers, #4580 r3", () => {
+		// Shape 69: collection APIs and removal APIs are independent axes.
+		for (const remove of [
+			"alias.delete(victim)",
+			"queue.splice(victim, 1)",
+			"consume(victim); queue.shift()",
+			"consume(victim); queue.pop()",
+		]) {
+			expect(
+				findEvictionLines(`while (queue.length >= CAP) {
+ const victim = sequence.sort(cmp)[0];
+ ${remove};
+}`),
+				remove,
+			).toEqual([2]);
+		}
+	});
+
+	it("keeps the filtered read-guard admissions distinct, #4580 r3", () => {
+		// Same declaration line, different eligibility policies must not share admission.
+		const reads = occurrences.filter((item) =>
+			item.detail.startsWith("clients/read-guard.ts:"),
+		);
+		expect(reads).toHaveLength(2);
+		expect(new Set(reads.map((item) => item.key)).size).toBe(2);
+	});
+
+	it("separates bound-victim gate predicates, #4580 r3 compliance F2", () => {
+		// Each negative removes exactly one prerequisite; gate mutations must red.
+		for (const [binding, read] of [
+			["const item = iterator.next();", "consume(item.value);"],
+			["const [item] = sequence;", "consume(item);"],
+		]) {
+			expect(
+				findEvictionLines(`while (m.size > CAP) {
+ ${binding}
+ ${read}
+}`),
+				"no removal",
+			).toEqual([]);
+			expect(
+				findEvictionLines(`{
+ ${binding}
+ m.delete(key); ${read}
+}`),
+				"no cap",
+			).toEqual([]);
+			expect(
+				findEvictionLines(`while (m.size > CAP) {
+ ${binding}
+ m.delete(key);
+}`),
+				"no own read",
+			).toEqual([]);
+		}
+		for (const [above, below] of [
+			["{", "evict(victim);"],
+			["while (m.size > CAP) {", "evict(other);"],
+		]) {
+			expect(
+				findEvictionLines(`${above}
+ const victim = [...m.keys()].sort(cmp)[0];
+ ${below}
+}`),
+			).toEqual([]);
+		}
+	});
+
 	it("does not count a comment or a string that quotes any spelling, #4580 round 2", () => {
 		const source = [
 			"// const [oldest] = m.keys(); m.delete(oldest);",
@@ -1051,7 +1258,9 @@ describe("#2442 no new hand-rolled evict-oldest idiom outside bounded-cache.ts",
 		// content-derived key (#2475: `path#symbol:hash` or `path#hash`, never a
 		// bare line number — see `stableOccurrenceKey`).
 		for (const item of flagged) {
-			expect(item).toMatch(/^[\w./-]+\.ts#(?:[A-Za-z_$][\w$]*:)?[0-9a-f]{8}$/);
+			expect(item).toMatch(
+				/^[\w./-]+\.(?:ts|mjs|js)#(?:[A-Za-z_$][\w$]*:)?[0-9a-f]{8}$/,
+			);
 		}
 		const exemptedFiles = new Set(
 			Object.keys(EXEMPT_SITES).map((k) => k.split("#")[0]),
@@ -1186,5 +1395,8 @@ describe("#2442 no new hand-rolled evict-oldest idiom outside bounded-cache.ts",
 				"legitimate exemption).",
 		});
 		expect(audit.problems, audit.problems.join("\n")).toEqual([]);
+		process.stdout.write(
+			`bounded-eviction population: ${flagged.length} flagged, ${audit.problems.length} problems, ${scanned} source files\n`,
+		);
 	});
 });
