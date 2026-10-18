@@ -1999,11 +1999,12 @@ function globToRegExp(pattern, { directory }) {
 		if (char === "{") {
 			const end = pattern.indexOf("}", index);
 			if (end !== -1) {
-				out += `(?:${pattern
-					.slice(index + 1, end)
-					.split(",")
-					.map((one) => one.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
-					.join("|")})`;
+				// One-off call-site escapes, the shape this sweep's header allows for a
+				// `scripts/*.mjs` that runs with no `npm install`: no escaping helper.
+				const alternatives = [];
+				for (const one of pattern.slice(index + 1, end).split(","))
+					alternatives.push(one.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+				out += `(?:${alternatives.join("|")})`;
 				index = end;
 				continue;
 			}
