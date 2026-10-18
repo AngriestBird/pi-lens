@@ -841,12 +841,26 @@ runs:
 	// F2 plants: a floored row is satisfied only by a live line of a step the
 	// runner executes.
 	const KEY = ".github/workflows/floor.yml#probe#best effort";
+	// The probe job's house with values the document DOES carry: two events and
+	// a two-leg matrix (#4609 r5 MEDIUM-1). `PROBE` above is the same job with
+	// one event and no matrix, which is itself a plant: a condition that reads
+	// `matrix` or another event has no value set there.
+	const FACTS = `"on": [push, pull_request]
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        arch: [x64]
+`;
 	const flooredStep = (
 		floor: string,
 		evidence = '--count "probe=',
+		house = PROBE,
 	): string[] => {
 		const root = tree({
-			".github/workflows/floor.yml": `${PROBE}    steps:
+			".github/workflows/floor.yml": `${house}    steps:
       - name: best effort
         continue-on-error: true
         run: node scripts/producer.mjs
@@ -927,25 +941,37 @@ ${floor}`,
 		}
 	});
 
-	it("accepts only the if: forms that always run", () => {
-		// An allowlist (#4609 r3 MEDIUM-1): the absent condition and the short
-		// always-running forms below. Nothing else is credited, so the predicate
-		// is a statement about whether the step always runs, not about whether
-		// its text mentions a context root.
+	it("accepts only the if: forms that always run, proven from the document", () => {
+		// An allowlist (#4609 r4 MEDIUM-1, r5 MEDIUM-1): the absent condition, the
+		// short always-running forms, and a comparison whose literal the parsed
+		// document lists. The round-4 door — `!cancelled() && <any context
+		// comparison>` — is gone: the second conjunct must be PROVEN, not named.
 		for (const source of [
 			"${{ !cancelled() }}",
 			"${{ always() }}",
 			"${{ success() }}",
 			"always()",
-			"${{ !cancelled() && matrix.os == 'macos-latest' }}",
-			"${{ !cancelled() && needs.scope.outputs.smoke == 'true' }}",
 			"true",
+			// Document-proven: `on: [push, pull_request]` and matrix.os has two legs.
+			"${{ !cancelled() && matrix.os == 'macos-latest' }}",
+			"${{ matrix.os == 'macos-latest' }}",
+			"${{ github.event_name == 'pull_request' }}",
+			"${{ !cancelled() && github.event_name == 'push' }}",
+			// `!=` needs one leg that differs: matrix.os has two, matrix.arch one.
+			"${{ matrix.os != 'macos-latest' }}",
+			// A conjunction of admitted atoms runs whenever the job runs: the
+			// guard and a status form are both decided true.
+			"${{ !cancelled() && always() }}",
 		]) {
 			expect(
-				flooredStep(`      - name: evaluated floor
+				flooredStep(
+					`      - name: evaluated floor
         if: ${source}
         run: node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
-`),
+`,
+					'--count "probe=',
+					FACTS,
+				),
 				source,
 			).toEqual([]);
 		}
@@ -957,35 +983,126 @@ ${floor}`,
 		).toEqual([]);
 	});
 
-	it("reds on every if: outside the allowlist, including a textually plausible one", () => {
+	it("reds on every if: outside the allowlist, including a comparison the document disproves", () => {
 		// Each source names a context root or a status function, which the round-2
-		// predicate read as proof of liveness. None of them is one of the admitted
-		// forms, so none credits the floor (r3 MEDIUM-1: a name is not proof).
-		for (const source of [
-			"${{ !always() }}",
-			"${{ github.event_name == 'never' }}",
-			"${{ success() && failure() }}",
-			"${{ 'github.event_name' == 'never' }}",
-			"${{ env.NEVER_SET }}",
-			"${{ matrix.os == 'never-os' }}",
-			"${{ !cancelled() && always() }}",
-			"${{ !cancelled() && github.event_name == 'never' && matrix.os == 'x' }}",
-			"${{ false && always() }}",
-			"${{ always() && false }}",
+		// predicate read as proof of liveness, and three of them are the round-4
+		// hole: a guarded context comparison is not a form that always runs, and
+		// `github.event_name`/`matrix.os` are decided by the same document
+		// (#4609 r5 MEDIUM-1). Two message shapes: `unplaceable` (the reader has
+		// no value set), and `disproved` (it has one, and the literal is not in it).
+		const NOT_KNOWN = "is not a condition known to run";
+		const DISPROVED = "is false for every run of this workflow";
+		for (const [source, reason] of [
+			["${{ !always() }}", NOT_KNOWN],
+			["${{ github.event_name == 'never' }}", DISPROVED],
+			["${{ success() && failure() }}", NOT_KNOWN],
+			["${{ 'github.event_name' == 'never' }}", NOT_KNOWN],
+			["${{ env.NEVER_SET }}", NOT_KNOWN],
+			["${{ matrix.os == 'never-os' }}", DISPROVED],
+			// The round-4 admitted forms, each with a value the document disproves.
+			["${{ !cancelled() && github.event_name == 'never' }}", DISPROVED],
+			["${{ !cancelled() && github.event_name == 'schedule' }}", DISPROVED],
+			["${{ !cancelled() && matrix.os == 'never-os' }}", DISPROVED],
+			["${{ matrix.arch != 'x64' }}", DISPROVED],
+			// A root the document carries no value set for: a name is not proof.
+			["${{ !cancelled() && needs.scope.outputs.smoke == 'true' }}", NOT_KNOWN],
+			["${{ !cancelled() && matrix.missing == 'x' }}", NOT_KNOWN],
+			["${{ !cancelled() || always() }}", NOT_KNOWN],
+			["${{ !(github.event_name == 'push') }}", NOT_KNOWN],
+			["${{ matrix.os == macos-latest }}", NOT_KNOWN],
+			["${{ false && always() }}", NOT_KNOWN],
+			["${{ always() && false }}", NOT_KNOWN],
 			// LOW-3, stated behaviour: a trivially true literal is still an
 			// expression this reader does not evaluate.
-			"${{ 2 > 1 }}",
+			["${{ 2 > 1 }}", NOT_KNOWN],
 		] as const) {
-			expect(
-				flooredStep(`      - name: evaluated floor
+			const problems = flooredStep(
+				`      - name: evaluated floor
         if: ${source}
         run: node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
-`),
-				source,
-			).toContain(
-				`${KEY}: its floor step may never run (if: ${source} is not a condition known to run), so the floor is unproven`,
+`,
+				'--count "probe=',
+				FACTS,
+			);
+			// The reason is the prefix; a disproved comparison appends the values
+			// the document allows, which the case beside this one pins exactly.
+			expect(problems.join("\n"), source).toContain(
+				`${KEY}: its floor step may never run (if: ${source} ${reason}`,
+			);
+			expect(problems.join("\n"), source).toContain(
+				"), so the floor is unproven",
 			);
 		}
+	});
+
+	it("names the values the document allows when it disproves a guarded comparison", () => {
+		// The reason is evidence, not a verdict: it prints the set the literal was
+		// measured against, so a reader can check the claim from the workflow.
+		const source = "${{ !cancelled() && matrix.os == 'never-os' }}";
+		expect(
+			flooredStep(
+				`      - name: evaluated floor
+        if: ${source}
+        run: node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
+`,
+				'--count "probe=',
+				FACTS,
+			),
+		).toEqual([
+			`${KEY}: its floor step may never run (if: ${source} is false for every run of this workflow: matrix.os is ubuntu-latest, macos-latest), so the floor is unproven`,
+		]);
+	});
+
+	it("reds on a job if: the document proves can never be true, and admits a legitimate one", () => {
+		// LOW-1: the enclosing job's `if:` gates every floor inside it and was
+		// never read. Its property is weaker than the step's (a false job
+		// condition skips the site too), so only a decided FALSE or an atom the
+		// reader cannot place refuses.
+		const withJob = (line: string): string[] =>
+			flooredStep(
+				`      - name: evaluated floor
+        run: node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
+`,
+				'--count "probe=',
+				`"on": [push, pull_request]\njobs:\n  probe:\n    runs-on: ubuntu-latest\n${line ? `    ${line}\n` : ""}`,
+			);
+		for (const [source, tail] of [
+			["false", "that is never true for this workflow"],
+			["${{ false }}", "that is never true for this workflow"],
+			[
+				"${{ github.event_name == 'never' }}",
+				"that is never true for this workflow",
+			],
+			[
+				"${{ github.event_name == 'schedule' }}",
+				"that is never true for this workflow",
+			],
+			[
+				"${{ github.event_name == 'never' || github.event_name == 'schedule' }}",
+				"that is never true for this workflow",
+			],
+			["${{ contains(github.ref, 'master') }}", "this reader cannot place"],
+			[
+				"${{ startsWith(github.ref, 'refs/heads/master') }}",
+				"this reader cannot place",
+			],
+		] as const) {
+			expect(withJob(`if: ${source}`), source).toContain(
+				`${KEY}: its job carries an if: ${source} ${tail}, so the floor is unproven`,
+			);
+		}
+		// The live shape (`install-smoke.yml#lsp-handshake`): an event the workflow
+		// declares, and a `needs` output the document does not decide. Both leave
+		// the job reachable, so the floor is not disarmed.
+		for (const source of [
+			"${{ github.event_name == 'pull_request' && needs.scope.outputs.smoke == 'true' }}",
+			"${{ github.event_name == 'push' }}",
+			"${{ needs.scope.outputs.smoke == 'true' }}",
+			"${{ inputs.lines != '' }}",
+			"${{ false || needs.scope.outputs.smoke == 'true' }}",
+			"true",
+		] as const)
+			expect(withJob(`if: ${source}`), source).toEqual([]);
 	});
 
 	it("reds when the floor evidence is shell data the runner never executes", () => {
@@ -1144,6 +1261,128 @@ ${body}`),
 ${body}`),
 				body,
 			).toEqual([]);
+	});
+
+	it("joins a shell line continuation before it decides which command the line is", () => {
+		// r4 MEDIUM-2: the scanner read every PHYSICAL line as a command, so a
+		// continued line's text was the previous command's argument list. The
+		// shell removes `\`+newline and keeps reading after `&&`/`||`/`|`, so the
+		// credited line's head is on the line before, and only a logical line that
+		// STARTS a measuring invocation is credited.
+		for (const [shape, body] of [
+			[
+				"an echo continued with a backslash",
+				`          echo \\
+          node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
+`,
+			],
+			[
+				"a test continued with a backslash",
+				`          [ "$MODE" = full ] \\
+          node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
+`,
+			],
+			[
+				"a false conjunct that needs the next line",
+				`          false &&
+          node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
+`,
+			],
+			[
+				"a printf continued with a backslash",
+				`          printf '%s\\n' \\
+          node scripts/assert-evaluated.mjs --count "probe=$count"
+`,
+			],
+			[
+				"an unfinished pipeline",
+				`          echo hi |
+          node scripts/assert-evaluated.mjs --count "probe=$count"
+`,
+			],
+			[
+				"a true conjunct that needs the next line",
+				`          true &&
+          node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
+`,
+			],
+		] as const) {
+			expect(
+				flooredStep(`      - name: evaluated floor
+        run: |
+${body}`),
+				shape,
+			).toEqual([NOT_EXECUTABLE('--count "probe=')]);
+		}
+		// The legitimate form the physical-line reader refused: the invocation is
+		// split across lines by its own continuation, so the join credits it.
+		for (const body of [
+			`          node scripts/assert-evaluated.mjs \\
+            --count "probe=$count" --floor 3
+`,
+			`          node scripts/complexity-report.mjs \\
+            | tee complexity-report.txt
+`,
+		]) {
+			expect(
+				flooredStep(
+					`      - name: evaluated floor
+        run: |
+${body}`,
+					body.includes("complexity-report")
+						? "scripts/complexity-report.mjs"
+						: '--count "probe=',
+				),
+				body,
+			).toEqual([]);
+		}
+	});
+
+	it("ends the script only on an exit in command position, not on the word exit", () => {
+		// Greptile P2 at 350729ded (shape 43, text read as structure): `sawExit`
+		// fired on any `exit` TOKEN, so `echo exit` and `grep -n exit f` ended the
+		// script and refused a floor the shell does run.
+		for (const body of [
+			`          echo exit
+          node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
+`,
+			`          grep -n exit file
+          node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
+`,
+			`          VAR=exit
+          node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
+`,
+			`          exit_code=1
+          node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
+`,
+		]) {
+			expect(
+				flooredStep(`      - name: evaluated floor
+        run: |
+${body}`),
+				body,
+			).toEqual([]);
+		}
+		// An exit the shell really runs still ends it, including behind a prefix
+		// word the reader must see through.
+		for (const body of [
+			`          command exit 0
+          node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
+`,
+			`          exec exit 0
+          node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
+`,
+			`          echo done; exit 0
+          node scripts/assert-evaluated.mjs --count "probe=$count" --floor 3
+`,
+		]) {
+			expect(
+				flooredStep(`      - name: evaluated floor
+        run: |
+${body}`),
+				body,
+			).toEqual([NOT_EXECUTABLE('--count "probe=')]);
+		}
 	});
 
 	it("credits a floor the script argument itself proves, only for a measuring script", () => {

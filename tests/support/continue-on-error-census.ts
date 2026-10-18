@@ -33,7 +33,7 @@
  * status function (so `!always()` and a root inside a quoted literal passed),
  * and the evidence rule admitted every unquoted match wherever it sat (so
  * `echo … --count "probe=` and a never-reached function body passed). Round 4
- * inverts both into ALLOWLISTS (shape 69, with 43 for text read as structure):
+ * inverted both into ALLOWLISTS (shape 69, with 43 for text read as structure):
  *
  * - `unprovenCondition` credits only an absent `if:` or one of
  *   {@link ALWAYS_RUNNING_FORMS}. Nothing else, so an expression the reader
@@ -43,8 +43,32 @@
  *   control operator. Every other shell form refuses; the appending of a new
  *   measuring program is a row in that table, never a new spelling to deny.
  *
+ * Round 5 showed the allowlists were allowlists in SHAPE only: two admitted
+ * forms still credited an input whose property they claimed to prove false
+ * (r5 MEDIUM-1 and MEDIUM-2), and two site-level gates were never read at all
+ * (LOW-1, LOW-2). The predicates now name the property each form proves:
+ *
+ * - `unprovenCondition` (the floor STEP) proves the step ALWAYS RUNS with its
+ *   job: a status form, or `github.event_name`/`matrix.<name>` compared with a
+ *   literal the parsed document lists (the workflow's `on:` keys, the job's
+ *   `strategy.matrix` list). The round-4 `!cancelled() && <any context
+ *   comparison>` door is gone: `github.event_name == 'never'` is now refused
+ *   with or without the guard, and every root the document does not carry
+ *   refuses.
+ * - `unprovenJobCondition` (the enclosing JOB) proves the weaker property the
+ *   document can carry: the job is not provably never true. A job `if:` skips
+ *   the site and the floor together, so only a decided FALSE (or an atom the
+ *   reader cannot place) disarms a floor; the undecided `needs`/`steps`/
+ *   `inputs` value is the stated residual (shape 48).
+ * - `evidenceIsExecutable` reads the LOGICAL line: a trailing `\` or an
+ *   unfinished `&&`/`||`/`|` joins the next physical line (a shell
+ *   continuation), so `echo \`, `[ … ] \` and `false &&` can no longer hand an
+ *   argument list to a measuring invocation, while `<script> \` + newline +
+ *   `<args>` is credited for the first time. An `exit` ends the script only in
+ *   COMMAND position, so `echo exit` no longer refuses a floor the shell runs.
+ *
  * The admitted forms for each predicate are tabulated in `STATE_TABLE.md` at
- * the repository root for #4609 round 4; the definitions below are the
+ * the repository root for #4609 round 5; the definitions below are the
  * normative copy.
  *
  * The site enumeration is the parsed document itself (a deep walk), not a
@@ -85,11 +109,16 @@ export interface CoeStep {
 export interface CoeJob {
 	steps?: CoeStep[];
 	"continue-on-error"?: unknown;
+	/** A job `if:` gates every floor step inside the job (#4609 r5 LOW-1). */
+	if?: unknown;
+	strategy?: { matrix?: unknown };
 }
 
 export interface ProducerDocument {
 	jobs?: Record<string, CoeJob>;
 	runs?: { using?: unknown; steps?: CoeStep[] };
+	/** A workflow's `on:` block, in any of its three YAML shapes. */
+	on?: unknown;
 }
 
 export type CoEStatus = "floored" | "no-floor" | "governed-by";
@@ -124,6 +153,10 @@ export interface CoESite {
 	steps: CoeStep[];
 	/** The site's index inside `steps`, or -1 when the site is the whole job. */
 	index: number;
+	/** The enclosing job's `if:`, read since #4609 r5 LOW-1. */
+	jobIf?: unknown;
+	/** The document facts a floor's `if:` is judged against (#4609 r5). */
+	facts?: ConditionFacts;
 }
 
 export interface ProducerCensus {
@@ -162,59 +195,212 @@ export const liveRunText = (step: CoeStep): string =>
 	stripShellComments(typeof step.run === "string" ? step.run : "");
 
 /**
- * The `if:` expressions known to run whenever the job runs, and the only ones
- * this census credits (#4609 r3 MEDIUM-1). An allowlist, not a deny list: the
- * round-3 rule admitted any expression that *mentioned* a context root or a
- * status function, so `${{ !always() }}`, `${{ success() && failure() }}` and
- * `${{ 'github.event_name' == 'never' }}` all credited a step that never runs
- * (shape 69, with 43 for the textual match). Every form here is either a
- * status function with a decided outcome or a context read that cannot be
- * proven false at rest.
+ * The `if:` atoms known to run whenever the job runs (#4609 r5 S3). An
+ * allowlist, not a deny list: the round-3 rule admitted any expression that
+ * *mentioned* a context root or a status function, so `${{ !always() }}`,
+ * `${{ success() && failure() }}` and `${{ 'github.event_name' == 'never' }}`
+ * all credited a step that never runs (shape 69, with 43 for the textual
+ * match).
  */
 const ALWAYS_RUNNING_FORMS: readonly RegExp[] = [
 	/^always\(\)$/,
 	/^success\(\)$/,
 	/^!cancelled\(\)$/,
+	/^true$/,
 ];
 
 /**
- * One runner-filled value compared with a literal, e.g.
- * `matrix.os == 'macos-latest'`. Not admitted on its own: a bare context
- * comparison (`github.event_name == 'never'`) is a condition the census cannot
- * place, so only the guarded form below reads it.
+ * The two context reads the census can settle from the parsed document: the
+ * workflow's `on:` block is the set `github.event_name` takes, and one job's
+ * `strategy.matrix` lists are the sets a `matrix.<name>` leg takes. Every
+ * other root refused, because no part of the document carries its values
+ * (#4609 r5 MEDIUM-1: a comparison the reader cannot decide is not proof).
  */
-const CONTEXT_PREDICATE =
-	/^(?:github|matrix|env|steps|needs|inputs|runner|job|vars|secrets)\.[A-Za-z_][\w.-]*\s*(?:==|!=)\s*(?:'[^']*'|"[^"]*"|[A-Za-z_][\w.-]*)$/;
-
-/** `!cancelled() && <one context predicate>`: runs unless the run was cancelled. */
-const GUARDED_CONTEXT_CONDITION = /^!cancelled\(\)\s*&&\s*(.+)$/;
+const DOCUMENT_COMPARISON =
+	/^(github\.event_name|matrix\.[A-Za-z_][\w-]*)\s*(==|!=)\s*(?:'([^']*)'|"([^"]*)")$/;
 
 /**
- * Why a floor step's `if:` may never run, or `undefined` when the step has no
- * condition or carries one of {@link ALWAYS_RUNNING_FORMS} (#4609 r3
- * MEDIUM-1). Fail-closed as an allowlist: every expression the census cannot
- * place refuses, including a literal that is trivially true (`${{ 2 > 1 }}`,
- * LOW-3: stated behaviour, because the predicate evaluates no expression).
+ * A comparison whose left side the document does not carry, but whose shape a
+ * job `if:` may still be decided as PLACEABLE (#4609 r5 J4): the job or step it
+ * reads exists, the value itself does not. Only the job rule admits these, and
+ * only as UNKNOWN, never as proof that the job runs.
  */
-export function unprovenCondition(condition: unknown): string | undefined {
+const VALUE_COMPARISON =
+	/^(?:needs\.[A-Za-z_][\w-]*\.outputs\.[A-Za-z_][\w-]*|steps\.[A-Za-z_][\w-]*\.outputs\.[A-Za-z_][\w-]*|inputs\.[A-Za-z_][\w-]*)\s*(?:==|!=)\s*(?:'[^']*'|"[^"]*")$/;
+
+/** The document facts a condition is judged against (#4609 r5). */
+export interface ConditionFacts {
+	/** The workflow's `on:` event names; absent for a composite action. */
+	triggers?: readonly string[];
+	/** One job's `strategy.matrix` scalar lists, by key. */
+	matrix?: Readonly<Record<string, readonly string[]>>;
+}
+
+/** Three-valued truth: the document decides an atom, or it does not. */
+type Truth = "true" | "false" | "unknown";
+
+/** An `if:` with GitHub's expression delimiters removed, or `null`. */
+function conditionExpression(condition: unknown): string | null {
+	if (typeof condition !== "string") return null;
+	return condition
+		.trim()
+		.replace(/^\$\{\{/, "")
+		.replace(/\}\}$/, "")
+		.trim();
+}
+
+/** Split on a top-level operator, ignoring occurrences inside a quoted literal. */
+function splitCondition(text: string, operator: "&&" | "||"): string[] {
+	const parts: string[] = [];
+	let quote: "'" | '"' | null = null;
+	let start = 0;
+	for (let i = 0; i < text.length; i++) {
+		const ch = text[i] ?? "";
+		if (quote) {
+			if (ch === quote) quote = null;
+			continue;
+		}
+		if (ch === "'" || ch === '"') {
+			quote = ch;
+			continue;
+		}
+		if (text.startsWith(operator, i)) {
+			parts.push(text.slice(start, i));
+			i += operator.length - 1;
+			start = i + 1;
+		}
+	}
+	parts.push(text.slice(start));
+	return parts;
+}
+
+/** The values the document says a comparison's left side takes. */
+function documentValues(
+	side: string,
+	facts: ConditionFacts,
+): readonly string[] | undefined {
+	if (side === "github.event_name") return facts.triggers;
+	const values = facts.matrix?.[side.slice("matrix.".length)];
+	return values && values.length > 0 ? values : undefined;
+}
+
+/**
+ * What one atom proves, or `undefined` when the reader cannot place it.
+ * `admitUnknownValue` is the job rule's wider door (J4): a `needs`/`steps`/
+ * `inputs` value is placeable but undecided, so it is UNKNOWN, never TRUE.
+ */
+function atomTruth(
+	atom: string,
+	facts: ConditionFacts,
+	admitUnknownValue: boolean,
+): Truth | undefined {
+	if (atom === "false") return "false";
+	if (ALWAYS_RUNNING_FORMS.some((form) => form.test(atom))) return "true";
+	const comparison = DOCUMENT_COMPARISON.exec(atom);
+	if (comparison) {
+		const values = documentValues(comparison[1] ?? "", facts);
+		if (!values) return undefined;
+		const literal = comparison[3] ?? comparison[4] ?? "";
+		// `==` needs the literal among the values; `!=` needs one that differs.
+		const holds =
+			comparison[2] === "=="
+				? values.includes(literal)
+				: values.some((value) => value !== literal);
+		return holds ? "true" : "false";
+	}
+	if (admitUnknownValue && VALUE_COMPARISON.test(atom)) return "unknown";
+	return undefined;
+}
+
+/** The values a disproved comparison was measured against, for its reason. */
+function disprovedReason(
+	condition: unknown,
+	atom: string,
+	facts: ConditionFacts,
+): string | undefined {
+	const comparison = DOCUMENT_COMPARISON.exec(atom);
+	// A bare `false` literal has no value set to print; the caller states the
+	// generic refusal for it instead of an empty list.
+	if (!comparison) return undefined;
+	const values = documentValues(comparison[1] ?? "", facts) ?? [];
+	return `if: ${String(condition)} is false for every run of this workflow: ${comparison[1]} is ${values.join(", ")}`;
+}
+
+/**
+ * Why a floor step's `if:` may never run, or `undefined` when every atom of it
+ * is one of {@link ALWAYS_RUNNING_FORMS} or a comparison the parsed document
+ * settles as true (#4609 r5 MEDIUM-1). Fail-closed as an allowlist: `||`, `!`,
+ * parentheses, an unplaceable root, and a literal the document disproves all
+ * refuse, so a literal that is trivially true (`${{ 2 > 1 }}`, LOW-3: stated
+ * behaviour, because the predicate evaluates no arithmetic) refuses too.
+ */
+export function unprovenCondition(
+	condition: unknown,
+	facts: ConditionFacts = {},
+): string | undefined {
 	const unproven = (value: unknown) =>
 		`if: ${String(value)} is not a condition known to run`;
 	if (condition === undefined || condition === null || condition === "")
 		return undefined;
 	// YAML `if: true` parses as a boolean: the constant true, no expression.
 	if (condition === true) return undefined;
-	if (typeof condition !== "string") return unproven(condition);
-	const expression = condition
-		.trim()
-		.replace(/^\$\{\{/, "")
-		.replace(/\}\}$/, "")
-		.trim();
-	if (ALWAYS_RUNNING_FORMS.some((form) => form.test(expression)))
+	const expression = conditionExpression(condition);
+	if (expression === null) return unproven(condition);
+	// A disjunction is not a form this allowlist proves: one true disjunct is
+	// enough to run, and the reader does not read `||` at all.
+	if (splitCondition(expression, "||").length > 1) return unproven(condition);
+	for (const atom of splitCondition(expression, "&&").map((part) =>
+		part.trim(),
+	)) {
+		const truth = atomTruth(atom, facts, false);
+		if (truth === "true") continue;
+		if (truth === "false")
+			return disprovedReason(condition, atom, facts) ?? unproven(condition);
+		return unproven(condition);
+	}
+	return undefined;
+}
+
+/**
+ * Why a floored site's job may never run, or `undefined` when it can (#4609 r5
+ * LOW-1: the job's own `if:` gated every floor inside it and was never read).
+ *
+ * The property differs from the floor step's on purpose. A step made
+ * conditional while its job keeps running is a false green: the site ran, the
+ * floor did not. A job made conditional skips the site and the floor together,
+ * so only a condition the document proves can never be true disarms a floor
+ * permanently. This predicate therefore refuses a decided FALSE (every
+ * disjunct false, some conjunction false) and an atom the reader cannot place,
+ * and admits an UNDECIDED value (`needs`/`steps`/`inputs`), stated as the
+ * residual in the module header and STATE_TABLE.md.
+ */
+export function unprovenJobCondition(
+	condition: unknown,
+	facts: ConditionFacts = {},
+): string | undefined {
+	if (condition === undefined || condition === null || condition === "")
 		return undefined;
-	const guarded = GUARDED_CONTEXT_CONDITION.exec(expression);
-	if (guarded && CONTEXT_PREDICATE.test((guarded[1] ?? "").trim()))
-		return undefined;
-	return unproven(condition);
+	if (condition === true) return undefined;
+	const unplaceable = `carries an if: ${String(condition)} this reader cannot place`;
+	const never = `carries an if: ${String(condition)} that is never true for this workflow`;
+	// YAML `if: false` parses as a boolean: a constant that never runs.
+	if (condition === false) return never;
+	const expression = conditionExpression(condition);
+	if (expression === null) return unplaceable;
+	for (const disjunct of splitCondition(expression, "||")) {
+		const truths: Truth[] = [];
+		for (const atom of splitCondition(disjunct, "&&").map((part) =>
+			part.trim(),
+		)) {
+			const truth = atomTruth(atom, facts, true);
+			if (truth === undefined) return unplaceable;
+			truths.push(truth);
+		}
+		if (truths.includes("false")) continue;
+		if (truths.every((truth) => truth === "true")) return undefined;
+		return undefined; // UNKNOWN: placeable, and the document does not decide it.
+	}
+	return never;
 }
 
 /** One line of a `run:` body, as the shell scanner read it. */
@@ -225,6 +411,10 @@ interface ShellLine {
 	code: string;
 	/** Enclosing block depth when the line began: 0 is a top-level line. */
 	depth: number;
+	/** The previous physical line left this command unfinished (#4609 r5). */
+	joinsPrevious: boolean;
+	/** How this physical line hands its command to the next one. */
+	continuation: "backslash" | "operator" | null;
 }
 
 interface ShellScan {
@@ -266,6 +456,26 @@ const BLOCK_CLOSERS: Record<string, ShellFrame> = {
 
 /** Reserved words that end a command, so the next word starts one. */
 const COMMAND_SEPARATOR_WORDS = new Set(["then", "do", "else", "elif", "in"]);
+
+/**
+ * Words that keep the command position open for the next word, so `command
+ * exit 0` and `exec \\\n exit 0` still end the script (#4609 r5 LOW-2).
+ */
+const COMMAND_PREFIX_WORDS = new Set([
+	"command",
+	"exec",
+	"builtin",
+	"nohup",
+	"setsid",
+	"time",
+]);
+
+/**
+ * A trailing operator that leaves the command unfinished, so the next physical
+ * line continues the same command (#4609 r5 MEDIUM-2). A lone `&` backgrounds
+ * and a `;` ends a command list, so neither continues.
+ */
+const CONTINUATION_OPERATORS = new Set(["&&", "||", "|", "|&"]);
 
 /** The unquoted characters the shell reads as operators. */
 const SHELL_OPERATOR = /[;|&()]/;
@@ -385,15 +595,21 @@ function scanShell(text: string): ShellScan {
 				atCommandStart = false;
 				continue;
 			}
-			// Any `exit` before the evidence can end the script, whatever
-			// operator or block it sits behind: fail closed on all of them.
-			if (token.text === "exit") sawExit = true;
-			atCommandStart = COMMAND_SEPARATOR_WORDS.has(token.text);
+			// An `exit` in COMMAND position ends the script. One in argument
+			// position is a word the command reads (`echo exit`, `grep -n exit f`)
+			// and used to end it too, which refused a floor the shell reaches
+			// (#4609 r5 LOW-2: shape 43, text read as structure).
+			if (atCommandStart && token.text === "exit") sawExit = true;
+			atCommandStart =
+				COMMAND_SEPARATOR_WORDS.has(token.text) ||
+				(atCommandStart && COMMAND_PREFIX_WORDS.has(token.text));
 		}
 		return sawExit;
 	};
 	let quote: '"' | "'" | null = null;
 	let terminated = false;
+	/** The previous physical line's continuation, so the next one reports it. */
+	let continues = false;
 	let offset = 0;
 	for (const line of text.split("\n")) {
 		const start = offset;
@@ -402,7 +618,14 @@ function scanShell(text: string): ShellScan {
 		if (terminated) {
 			unreachable.fill(1, start, end + 1);
 			commentCut.push(line.length);
-			lines.push({ start, code: "", depth: frames.length });
+			lines.push({
+				start,
+				code: "",
+				depth: frames.length,
+				joinsPrevious: continues,
+				continuation: null,
+			});
+			continues = false;
 			continue;
 		}
 		if (heredocs.length > 0) {
@@ -411,7 +634,14 @@ function scanShell(text: string): ShellScan {
 			unreachable.fill(1, start, end + 1);
 			commentCut.push(line.length);
 			if (body.trimEnd() === top?.delimiter) heredocs.shift();
-			lines.push({ start, code: "", depth: frames.length });
+			lines.push({
+				start,
+				code: "",
+				depth: frames.length,
+				joinsPrevious: continues,
+				continuation: null,
+			});
+			continues = false;
 			continue;
 		}
 		let cut = line.length;
@@ -448,10 +678,47 @@ function scanShell(text: string): ShellScan {
 		}
 		commentCut.push(cut);
 		const code = line.slice(0, cut);
-		lines.push({ start, code, depth: frames.length });
-		if (applyTokens(shellTokens(code, quoted, start))) terminated = true;
+		const tokens = shellTokens(code, quoted, start);
+		lines.push({
+			start,
+			code,
+			depth: frames.length,
+			joinsPrevious: continues,
+			continuation: continuationOf(code, start, quoted, tokens),
+		});
+		continues = lines.at(-1)?.continuation !== null;
+		if (applyTokens(tokens)) terminated = true;
 	}
 	return { unreachable, quoted, commentCut, lines };
+}
+
+/**
+ * How a physical line hands its command to the next one, or `null` when it
+ * ends it (#4609 r5 MEDIUM-2). The shell removes a trailing `\` and its
+ * newline, so `<cmd> \` + newline + `<args>` is one command, and it reads a
+ * trailing `&&`/`||`/`|` as needing the next command. Reading each physical
+ * line as a whole command credited an argument list of the PREVIOUS program
+ * (`echo \`, `[ … ] \`, `false &&`), which the shell never runs.
+ */
+function continuationOf(
+	code: string,
+	start: number,
+	quoted: Uint8Array,
+	tokens: readonly ShellToken[],
+): "backslash" | "operator" | null {
+	const trailing = /\\+$/.exec(code);
+	// An odd run outside quotes escapes the newline; an even run is a literal
+	// backslash before a real command boundary.
+	if (
+		trailing &&
+		trailing[0].length % 2 === 1 &&
+		!quoted[start + code.length - 1]
+	)
+		return "backslash";
+	const last = tokens.at(-1);
+	if (last?.kind === "op" && CONTINUATION_OPERATORS.has(last.text))
+		return "operator";
+	return null;
 }
 
 /**
@@ -483,19 +750,24 @@ const SHELL_CONTROL_BEFORE = /[;&|`(){}]/;
 /**
  * Whether `evidence` is a floor carried by a reached measuring command.
  *
- * Allowlist, fail-closed (#4609 r3 MEDIUM-2): the evidence must occur in the
- * argument list of one of {@link FLOOR_INVOCATIONS}, on a line that starts at
- * block depth 0, with no shell control operator between the line's start and
- * the match, and not in a comment, a quoted string, a heredoc body, or after an
- * `exit`. Everything else refuses: `echo … --count "probe=`, a `printf`, an
- * uncalled function body, an `if false` branch, a subshell, and a line after an
- * `exit` behind `&&` or an `if`. A trailing pipeline or handler (`| tee …`,
- * `|| floor=$?`) is allowed because the invocation has already run by then.
+ * Allowlist, fail-closed (#4609 r3 MEDIUM-2, r5 MEDIUM-2): the evidence must
+ * occur in the argument list of one of {@link FLOOR_INVOCATIONS}, on a command
+ * that starts at block depth 0, with no shell control operator between the
+ * command's start and the match, and not in a comment, a quoted string, a
+ * heredoc body, or after an `exit` in command position. Everything else
+ * refuses: `echo … --count "probe=`, a `printf`, an uncalled function body, an
+ * `if false` branch, a subshell, a line after an `exit` behind `&&` or an `if`,
+ * and an argument list the previous line owns (`echo \\`, `[ … ] \\`, `false &&`).
+ * The command is the LOGICAL line: a `\`-continued or operator-continued
+ * physical line joins the one before it, so `<script> \\` + newline + `<args>`
+ * is credited and only a line that starts a command after the join is.
+ * A trailing pipeline or handler (`| tee …`, `|| floor=$?`) is allowed because
+ * the invocation has already run by then.
  */
 export function evidenceIsExecutable(run: string, evidence: string): boolean {
 	if (!evidence) return false;
 	const scan = scanShell(run);
-	const lineAt = (offset: number): ShellLine | undefined => {
+	const lineIndexAt = (offset: number): number => {
 		let low = 0;
 		let high = scan.lines.length - 1;
 		while (low <= high) {
@@ -504,9 +776,27 @@ export function evidenceIsExecutable(run: string, evidence: string): boolean {
 			if (!line) break;
 			if (offset < line.start) high = middle - 1;
 			else if (offset > line.start + line.code.length) low = middle + 1;
-			else return line;
+			else return middle;
 		}
-		return undefined;
+		return -1;
+	};
+	/** The joined text of the physical lines before `index`, in this command. */
+	const commandHead = (index: number): string => {
+		let first = index;
+		while (first > 0 && scan.lines[first]?.joinsPrevious) first--;
+		let before = "";
+		for (let i = first; i < index; i++) {
+			const line = scan.lines[i];
+			if (!line) continue;
+			// The shell removes `\` and its newline; an operator keeps its space.
+			before +=
+				line.continuation === "backslash"
+					? line.code.replace(/\\+$/, "")
+					: line.continuation === "operator"
+						? `${line.code} `
+						: line.code;
+		}
+		return before;
 	};
 	for (
 		let at = run.indexOf(evidence);
@@ -514,18 +804,27 @@ export function evidenceIsExecutable(run: string, evidence: string): boolean {
 		at = run.indexOf(evidence, at + 1)
 	) {
 		if (scan.unreachable[at] || scan.quoted[at]) continue;
-		const line = lineAt(at);
+		const index = lineIndexAt(at);
+		const line = scan.lines[index];
 		if (!line || line.depth !== 0) continue;
-		const inLine = at - line.start;
-		if (SHELL_CONTROL_BEFORE.test(line.code.slice(0, inLine))) continue;
-		const prefix = INVOCATION_PREFIX.exec(line.code);
+		const before = commandHead(index);
+		const inCommand = before.length + (at - line.start);
+		// The whole logical command, so its program and script argument are read
+		// even when the evidence IS the script, as `lint.yml`'s floor is.
+		const command = before + line.code;
+		let first = index;
+		while (first > 0 && scan.lines[first]?.joinsPrevious) first--;
+		// A command that starts inside a block body is not a top-level command.
+		if ((scan.lines[first]?.depth ?? 1) !== 0) continue;
+		if (SHELL_CONTROL_BEFORE.test(command.slice(0, inCommand))) continue;
+		const prefix = INVOCATION_PREFIX.exec(command);
 		if (!prefix) continue;
 		const program = prefix[2] ?? "";
 		const script = prefix[4] ?? "";
 		if (!isFloorInvocation(program, script)) continue;
 		const scriptAt =
 			(prefix[1]?.length ?? 0) + program.length + (prefix[3]?.length ?? 0);
-		if (inLine >= scriptAt) return true;
+		if (inCommand >= scriptAt) return true;
 	}
 	return false;
 }
@@ -637,6 +936,48 @@ export function coeLocations(
 	return found;
 }
 
+/** The event names a workflow's `on:` block declares, in its three shapes. */
+export function workflowTriggers(
+	value: unknown,
+): readonly string[] | undefined {
+	if (typeof value === "string") return [value];
+	if (Array.isArray(value))
+		return value.filter((entry): entry is string => typeof entry === "string");
+	if (value && typeof value === "object")
+		return Object.keys(value).filter((key) => key.length > 0);
+	return undefined;
+}
+
+/**
+ * One job's `strategy.matrix` scalar lists. A key whose value is not a list of
+ * scalars (`include`, `exclude`, a nested object) carries no value set, so a
+ * comparison against it refuses instead of guessing a leg (#4609 r5 MEDIUM-1).
+ */
+export function jobMatrix(
+	job: CoeJob | undefined,
+): Readonly<Record<string, readonly string[]>> {
+	const matrix = job?.strategy?.matrix;
+	const lists: Record<string, readonly string[]> = {};
+	if (!matrix || typeof matrix !== "object" || Array.isArray(matrix))
+		return lists;
+	for (const [key, value] of Object.entries(
+		matrix as Record<string, unknown>,
+	)) {
+		if (!Array.isArray(value) || value.length === 0) continue;
+		if (
+			!value.every(
+				(entry) =>
+					typeof entry === "string" ||
+					typeof entry === "number" ||
+					typeof entry === "boolean",
+			)
+		)
+			continue;
+		lists[key] = value.map((entry) => String(entry));
+	}
+	return lists;
+}
+
 /** The site a key path describes, or `null` when the location is not one. */
 function siteForLocation(
 	file: string,
@@ -649,6 +990,13 @@ function siteForLocation(
 		const job = document.jobs?.[path[1]];
 		if (!job) return null;
 		const steps = job.steps ?? [];
+		// The job's own `if:` and matrix, and the workflow's events: the house
+		// the floor lives in, read since #4609 r5 (LOW-1 and MEDIUM-1).
+		const facts: ConditionFacts = {
+			triggers: workflowTriggers(document.on),
+			matrix: jobMatrix(job),
+		};
+		const jobIf = job.if;
 		if (path.length === 2)
 			return {
 				file,
@@ -656,11 +1004,15 @@ function siteForLocation(
 				scope: path[1],
 				steps,
 				index: -1,
+				jobIf,
+				facts,
 			};
 		if (path.length === 4 && path[2] === "steps") {
 			const index = Number(path[3]);
 			const step = steps[index];
-			return step ? { file, kind, scope: path[1], step, steps, index } : null;
+			return step
+				? { file, kind, scope: path[1], step, steps, index, jobIf, facts }
+				: null;
 		}
 		return null;
 	}
@@ -668,7 +1020,11 @@ function siteForLocation(
 	if (path.length === 3 && path[0] === "runs" && path[1] === "steps") {
 		const index = Number(path[2]);
 		const step = steps[index];
-		return step ? { file, kind, scope: "composite", step, steps, index } : null;
+		// A composite action has no `on:` and no matrix: every comparison in its
+		// `if:` is undecidable, so none credits a floor.
+		return step
+			? { file, kind, scope: "composite", step, steps, index, facts: {} }
+			: null;
 	}
 	return null;
 }
@@ -738,8 +1094,9 @@ const isGatingStep = (step: CoeStep): boolean =>
 /**
  * Why a `floored` row is not a gate, or `[]` when it is. The floor step must
  * exist in the site's own scope, cannot itself be `continue-on-error`, must have
- * an `if:` the runner can reach, must come after the site, and must carry the
- * evidence on text the shell executes rather than on data.
+ * an `if:` that always runs in its job, must come after the site, must carry the
+ * evidence on text the shell executes rather than on data, and its job must not
+ * carry an `if:` the document proves can never be true (#4609 r5 LOW-1).
  */
 export function floorProblems(site: CoESite, row: CoERow): string[] {
 	if (row.status !== "floored") return [];
@@ -756,10 +1113,19 @@ export function floorProblems(site: CoESite, row: CoERow): string[] {
 		problems.push(
 			`${site.key}: its floor step is continue-on-error, so the floor gates nothing`,
 		);
-	const unproven = unprovenCondition(floor.if);
+	const facts = site.facts ?? {};
+	const unproven = unprovenCondition(floor.if, facts);
 	if (unproven)
 		problems.push(
 			`${site.key}: its floor step may never run (${unproven}), so the floor is unproven`,
+		);
+	// The job gates the site and the floor alike, so its `if:` must not be
+	// provably never true; the step allowlist above would refuse a legitimate
+	// condition on a live job (#4609 r5 LOW-1, decided in STATE_TABLE.md).
+	const jobUnproven = unprovenJobCondition(site.jobIf, facts);
+	if (jobUnproven)
+		problems.push(
+			`${site.key}: its job ${jobUnproven}, so the floor is unproven`,
 		);
 	if (!site.step && site.index < 0 && index >= 0) {
 		// A job-level site is gated by a step inside it; nothing to order.
