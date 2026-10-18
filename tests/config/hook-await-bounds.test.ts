@@ -493,7 +493,7 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"but has no total bound.",
 		owner: "#2523 slice 2",
 	},
-	"clients/runtime-session.ts#buildOrRefreshWordIndex:9cf28eab~6a6b0649": {
+	"clients/runtime-session.ts#buildOrRefreshWordIndex:9cf28eab~131af13f": {
 		family: "hook-await",
 		site: "session_start",
 		reason:
@@ -503,7 +503,7 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"but has no total bound.",
 		owner: "#2523 slice 2",
 	},
-	"clients/runtime-session.ts#buildOrRefreshWordIndex:9cf28eab~7c40468a": {
+	"clients/runtime-session.ts#buildOrRefreshWordIndex:9cf28eab~ae5bd070": {
 		family: "hook-await",
 		site: "session_start",
 		reason:
