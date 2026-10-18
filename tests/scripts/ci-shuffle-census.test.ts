@@ -40,6 +40,7 @@ import {
 	auditShuffleOptOuts,
 	censusShuffleOptOuts,
 	judgeShuffleOptOuts,
+	shuffleCensusPopulation,
 } from "../support/shuffle-opt-out-scan.js";
 import {
 	vitestCollector,
@@ -1366,15 +1367,46 @@ describe("the ratchet file", () => {
 		}
 	});
 
+	// #4611 review r3 LOW-1: the population predicate itself is asserted, because
+	// a census that reads no `.test.tsx` is green while the opt-out ships. The
+	// witness is the path list, not a count: an extension this repo collects and
+	// one it does not, beside a support module vitest never loads.
+	it("reads the tracked files a vitest project collects, not one extension", () => {
+		expect(
+			shuffleCensusPopulation([
+				"tests/scripts/ci-shuffle-census.test.ts",
+				"tests/synthetic.test.tsx",
+				"tests/support/shuffle-opt-out-scan.ts",
+			]),
+		).toEqual([
+			"tests/scripts/ci-shuffle-census.test.ts",
+			"tests/synthetic.test.tsx",
+		]);
+	});
+
 	// The other direction, and the reason this is a sweep rather than a list: an
 	// unregistered opt-out, or an option key the audit cannot attribute, reds
 	// instead of passing unclassified (AGENTS.md shape 69). #4611 review r1 M2:
 	// the first version read a fixed spelling set off blanked source, so a
 	// quoted key, a computed key, an options object bound in a non-test module,
 	// and a spread each passed. Review r2 (#4616) replaced that text census with
-	// a parsed-AST read, which costs a full parse of the tracked tests tree on
-	// every run: measured 3.9–5.4 s over 1,648 files / 24 MB, so the case carries
-	// a budget of its own instead of the 5 s default.
+	// a parsed-AST read; review r3 closed its fail-open (an options object is a
+	// sequence, and a callee resolves through aliases).
+	//
+	// The population is every tracked file under `tests/` that a vitest project
+	// COLLECTS, asked of the shared collection owner rather than spelled as one
+	// extension (#4611 review r3 LOW-1: `endsWith(".ts")` drops `.mts`, `.cts`,
+	// `.tsx` and the JS extensions vitest collects, so a `.test.tsx` opt-out was
+	// invisible). No file of those extensions holds an opt-out today; the
+	// predicate keeps that from changing silently.
+	//
+	// The read costs a full parse of that tree on every run: measured 3.6-3.9 s
+	// over 1,520 collected files (~24 MB), so the case carries a budget of its
+	// own instead of the 5 s default. One line about the axis that grows:
+	// `oxc-parser.parseSync` retains ~500 MB of RSS per pass in one process
+	// (measured 575-660 MB for the single pass here), so a second whole-tree
+	// consumer must not share this process; the 60 s budget is ~9-15x the
+	// observed cost and a blow-up reds rather than passing.
 	it(
 		"registers every describe that opts out of shuffle, and reads every other spelling as a finding",
 		{ timeout: 60_000 },
@@ -1382,11 +1414,9 @@ describe("the ratchet file", () => {
 			const registered = new Set(
 				parsed.byDesign.map((row) => `${row.file}::${row.describe}`),
 			);
-			const files = listTrackedFiles(ROOT, ["tests"]).filter((file) =>
-				file.endsWith(".ts"),
-			);
+			const files = shuffleCensusPopulation(listTrackedFiles(ROOT, ["tests"]));
 			assertNonEmptyScan(
-				"tracked TypeScript files under tests/ scanned for shuffle opt-outs",
+				"tracked test files under tests/ that a vitest project collects, scanned for shuffle opt-outs",
 				files.length,
 				1000,
 			);
@@ -1400,15 +1430,19 @@ describe("the ratchet file", () => {
 		},
 	);
 
-	// #4611 review r1 M2/M3, r2 M-a/M-b: the gate's population branch had no
-	// failing witness (deleting its count assertion left the suite green), three
-	// spellings vitest honours passed it, and the text census behind it read
+	// #4611 review r1 M2/M3, r2 M-a/M-b, r3 MEDIUM-1: the gate's population branch
+	// had no failing witness (deleting its count assertion left the suite green),
+	// three spellings vitest honours passed it, and the text census behind it read
 	// string contents and types as code. Each plant is a source the same census
 	// and judgement read; a plant that stops red means the branch that should
 	// have caught it is gone, and the no-finding controls (a harmless string, a
 	// type literal, a readable opt-in) keep a text census from coming back.
+	// Every red plant also names a fragment of its finding's MESSAGE
+	// (`expectedReason`), because a count-only assertion let two branches that
+	// only reword a neighbour's finding be deleted with the suite still green
+	// (review r3 LOW-3: P4 shorthand and P10 accessor).
 	// The state table in PR #4611 lists every admitted form.
-	describe("planted spellings of the shuffle option (#4611 review r1, r2)", () => {
+	describe("planted spellings of the shuffle option (#4611 review r1, r2, r3)", () => {
 		const plants = (
 			JSON.parse(
 				fs.readFileSync(
@@ -1422,6 +1456,7 @@ describe("the ratchet file", () => {
 					measuredAs: "pass" | "red";
 					expectedFindings: number;
 					expectedOptOuts: number;
+					expectedReason?: string;
 					source: string;
 				}>;
 			}
@@ -1442,12 +1477,18 @@ describe("the ratchet file", () => {
 				"opt-in-elsewhere",
 			]);
 			expect(plants.filter((plant) => plant.measuredAs === "red")).toHaveLength(
-				18,
+				25,
 			);
 			expect(
 				plants.every((plant) => plant.why.length >= 40),
 				"every plant says why the gate must see it",
 			).toBe(true);
+			expect(
+				plants
+					.filter((plant) => plant.measuredAs === "red")
+					.filter((plant) => (plant.expectedReason ?? "").length < 20),
+				"every red plant pins the finding's reason, not only its count",
+			).toEqual([]);
 		});
 
 		for (const plant of plants) {
@@ -1457,6 +1498,13 @@ describe("the ratchet file", () => {
 					plant.expectedFindings,
 				);
 				expect(census.optedOut.size, plant.name).toBe(plant.expectedOptOuts);
+				if (plant.expectedReason !== undefined)
+					expect(
+						census.findings.some((finding) =>
+							finding.includes(plant.expectedReason as string),
+						),
+						`${plant.name}: the finding says why (${plant.expectedReason})`,
+					).toBe(true);
 				const registered = plant.measuredAs === "pass" ? census.optedOut : [];
 				expect(
 					judgeShuffleOptOuts(census, registered),

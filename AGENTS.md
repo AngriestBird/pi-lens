@@ -1638,7 +1638,12 @@ Test authoring screens:
   fixed by restoring state: that `describe` opts out with `{ shuffle: false }`
   and a header saying why order is the behaviour under test, never the whole
   file, and is registered in the ratchet's `byDesign` rows, which
-  `tests/scripts/ci-shuffle-census.test.ts` checks both ways.
+  `tests/scripts/ci-shuffle-census.test.ts` checks both ways. The reader
+  (`tests/support/shuffle-opt-out-scan.ts`) admits only the minimal marker:
+  an options object is read as a SEQUENCE, so a spread or a computed key it
+  cannot name refuses even beside a readable `shuffle` and the last key wins;
+  and a callee resolves through any number of aliases, a binding it cannot
+  follow refusing when the call passes an options object (#4611 r3).
   A `vi.doMock` is undone in the file's top-level `afterEach`, not in the
   case that mocks it: a shuffle runs the next case on the leaked mock.
   `vi.resetModules()` does not clear `globalThis` or pre-reset singletons.

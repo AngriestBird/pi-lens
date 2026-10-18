@@ -20,6 +20,23 @@
  * reader reads AST property nodes of object literals, so a string or a type
  * member is not a property and cannot be a finding.
  *
+ * Review r3 (#4611 MEDIUM-1, Greptile P2 r4307007027): an options object is a
+ * SEQUENCE, not a set. Vitest evaluates a literal left to right, so the value
+ * that wins is the LAST key naming `shuffle`, and any spread or unnameable
+ * computed key may override what the reader already read. The r2 reader
+ * stopped at the first readable `shuffle: true`, so `{ shuffle: true, ...{
+ * [KEY]: false } }` opted out invisibly. The one read below now refuses an
+ * options object holding ANY spread or ANY computed key it cannot name, even
+ * beside a readable `shuffle`, and takes the effective value last-key-wins:
+ * an object's effective shuffle value is readable only when no key can
+ * override it. Callee aliases are the second half of the same defect: a
+ * binding was recorded only when its initializer was already a test-callee
+ * NAME, so `const a = describe; const b = a` was dropped and the chain loop
+ * could never add an entry. Every callee-shaped binding is recorded now and
+ * resolved to a fixed point (any hop count, `const d = V.describe` included),
+ * and a binding the resolver cannot follow that is called with an options
+ * argument refuses instead of being ignored.
+ *
  * liveness (whether a run reaches the suite at all) stays owned by
  * `testDeclarations` in `sweep-kit.ts`, matched to the call by its opening
  * parenthesis: one owner answers "does vitest run this", and an opt-out this
@@ -33,6 +50,7 @@ import {
 	testDeclarations,
 	type TestDeclaration,
 } from "./sweep-kit.js";
+import { vitestCollects } from "./vitest-collection.js";
 
 export interface ShuffleOptOutFinding {
 	/** 1-based line in the source the finding was read from. */
@@ -61,12 +79,6 @@ type KeyName =
 	| { name: string; form: "bare" | "quoted" | "computed-literal" }
 	| { name: undefined; form: "computed-unresolved" };
 
-/** The resolved root of a callee chain, and whether a name in it was an alias. */
-interface ResolvedCallee {
-	root: string;
-	aliased: boolean;
-}
-
 const REASON_SPREAD =
 	"its options spread another object, so a shuffle opt-out carried in that object, and which object wins, is not readable here";
 const REASON_COMPUTED =
@@ -89,6 +101,8 @@ const REASON_OPTIONS_NOT_LITERAL =
 	"its options are not a plain object literal in this file (an identifier bound elsewhere, a cast, a call, or a conditional), so a shuffle opt-out in them is unattributable";
 const REASON_OUTSIDE =
 	"a shuffle option key outside any describe options object: a shared options object, a helper, or a config is not attributable, so this census cannot tell which suite it opts out";
+const REASON_UNCALLEABLE =
+	"its callee `%callee%` is a local binding this census cannot follow to a test callee (`describe`/`suite`), and the call passes an options argument, so whether it opts out of shuffle is unattributable";
 
 /** `node` as a plain field bag: oxc's `Node` union is narrower than its runtime shape. */
 function fields(node: Node): Record<string, unknown> {
@@ -104,10 +118,17 @@ function nodes(value: unknown): Node[] {
 	);
 }
 
+/** A field that holds a node, when it holds one (oxc writes `null` for absent). */
+function nodeField(value: unknown): Node | undefined {
+	return value !== null && typeof value === "object" && "type" in value
+		? (value as Node)
+		: undefined;
+}
+
 /** The property key `property` declares, or `undefined` for a non-member. */
 function keyName(property: Node): KeyName | undefined {
 	if (property.type !== "Property") return undefined;
-	const key = fields(property).key as Node | undefined;
+	const key = nodeField(fields(property).key);
 	if (key === undefined) return undefined;
 	if (fields(property).computed === true) {
 		const value = fields(key).value;
@@ -130,28 +151,73 @@ function booleanLiteral(node: Node | undefined): boolean | undefined {
 	return typeof value === "boolean" ? value : undefined;
 }
 
-/** The root callee name of a chain, with the alias names it passed through. */
+/**
+ * What the local bindings say about a call's callee, read once per file
+ * (STATE_TABLE C3-C6). Every binding is recorded by SHAPE, then resolved:
+ * a binding a call can reach through (`const b = a`, `const d = V.describe`)
+ * is an edge, and an edge that ends at a test-callee name resolves to it. A
+ * callee-shaped binding that does not (`const s = wrap(describe)`, `const b =
+ * q`) is `unresolved`, so a call through it with an options argument refuses
+ * rather than being ignored (r3 rule 2).
+ */
+interface CalleeBindings {
+	/** local name -> the name it stands for (`const b = a`, `const d = describe`). */
+	edges: Map<string, string>;
+	/** namespace imports of `vitest` (`import * as V from "vitest"`). */
+	namespaces: Set<string>;
+	/** local names a declarator binds, which therefore are not the global callee. */
+	shadowed: Set<string>;
+	/** local names bound to a callee-shaped value that resolves to no test callee. */
+	unresolved: Set<string>;
+	/** local name -> the object literal it is bound to (STATE_TABLE F2). */
+	literals: Map<string, Node>;
+}
+
+/** The name a chain of local bindings stands for, or `undefined` if it never
+ * reaches a test callee. A name a declarator BINDS is never the bare callee it
+ * spells, and a cycle never resolves: this reader cannot follow either. */
+function resolveName(
+	name: string,
+	bindings: CalleeBindings,
+): string | undefined {
+	const seen = new Set<string>();
+	let current = name;
+	while (!seen.has(current)) {
+		seen.add(current);
+		const next = bindings.edges.get(current);
+		if (next === undefined)
+			return !bindings.shadowed.has(current) && TEST_CALLEES.has(current)
+				? current
+				: undefined;
+		current = next;
+	}
+	return undefined;
+}
+
+/**
+ * The root callee name of a chain (`describe`, `suite`, or whatever a binding
+ * resolves to), following local aliases to a fixed point.
+ */
 function resolveCallee(
 	callee: Node | undefined,
-	aliases: ReadonlyMap<string, string>,
-): ResolvedCallee | undefined {
+	bindings: CalleeBindings,
+): string | undefined {
 	let current = callee;
-	let aliased = false;
 	for (let hops = 0; current !== undefined && hops < 64; hops++) {
 		const record = fields(current);
-		if (current.type === "Identifier") {
-			const name = String(record.name);
-			const target = aliases.get(name);
-			if (target !== undefined) aliased = true;
-			return { root: target ?? name, aliased };
-		}
+		if (current.type === "Identifier")
+			return resolveName(String(record.name), bindings);
 		if (current.type === "MemberExpression") {
 			const object = record.object as Node | undefined;
+			const property = record.property as Node | undefined;
+			// `V.describe(...)` through a vitest namespace import names the callee
+			// by its property; any other member chain is not this reader's to
+			// resolve (`V.suite` would otherwise attribute a foreign object).
 			if (
 				object?.type === "Identifier" &&
-				aliases.has(String(fields(object).name))
+				bindings.namespaces.has(String(fields(object).name))
 			)
-				aliased = true;
+				return memberName(property);
 			current = object;
 			continue;
 		}
@@ -164,54 +230,90 @@ function resolveCallee(
 	return undefined;
 }
 
+/** A member expression's static property name, when it has one. */
+function memberName(property: Node | undefined): string | undefined {
+	if (property === undefined) return undefined;
+	if (property.type === "Identifier") return String(fields(property).name);
+	const value = fields(property).value;
+	return typeof value === "string" ? value : undefined;
+}
+
 /**
- * Local names bound to a test callee: `import { describe as X } from "vitest"`
- * and `const X = describe`. A call through one that no declaration answers for
- * refuses (STATE_TABLE C3/D2): a per-file read cannot prove the suite is live or
- * give its registry row a stable identity.
+ * Every local binding a call could reach a test callee through, collected by
+ * the SHAPE of its initializer rather than by its name (`describe` itself was
+ * the r2 filter, which dropped `const b = a` before the chain loop could run).
  */
-function calleeAliases(bindings: readonly Node[]): Map<string, string> {
-	const aliases = new Map<string, string>();
-	const bind = (local: unknown, imported: unknown) => {
-		if (typeof local !== "string" || typeof imported !== "string") return;
-		// `import { describe } from "vitest"` binds the name to itself; only a
-		// RENAME is an alias this reader has to resolve.
-		if (local === imported) return;
-		if (TEST_CALLEES.has(imported)) aliases.set(local, imported);
+function calleeBindings(bindings: readonly Node[]): CalleeBindings {
+	const record: CalleeBindings = {
+		edges: new Map(),
+		namespaces: new Set(),
+		shadowed: new Set(),
+		unresolved: new Set(),
+		literals: new Map(),
 	};
 	for (const node of bindings) {
-		const record = fields(node);
+		const nodeFields = fields(node);
 		if (node.type === "ImportDeclaration") {
-			const source = record.source as Node | undefined;
+			const source = nodeFields.source as Node | undefined;
 			if (source === undefined || fields(source).value !== "vitest") continue;
-			for (const specifier of nodes(record.specifiers))
-				if (specifier.type === "ImportSpecifier") {
-					const specifierFields = fields(specifier);
-					bind(
-						fields(specifierFields.local as Node).name,
-						fields(specifierFields.imported as Node).name,
-					);
+			for (const specifier of nodes(nodeFields.specifiers)) {
+				const specifierFields = fields(specifier);
+				const local = fields(specifierFields.local as Node).name as string;
+				if (specifier.type === "ImportNamespaceSpecifier") {
+					record.namespaces.add(local);
+					continue;
 				}
+				if (specifier.type !== "ImportSpecifier") continue;
+				// `import { describe } from "vitest"` binds the name to itself; only a
+				// RENAME is an alias this reader has to resolve.
+				const imported = fields(specifierFields.imported as Node)
+					.name as string;
+				if (local !== imported) record.edges.set(local, imported);
+			}
 			continue;
 		}
-		if (node.type === "VariableDeclarator") {
-			const init = record.init as Node | undefined;
-			const id = record.id as Node | undefined;
-			if (init?.type !== "Identifier" || id?.type !== "Identifier") continue;
-			bind(fields(id).name, fields(init).name);
+		if (node.type !== "VariableDeclarator") continue;
+		const id = nodeField(nodeFields.id);
+		const init = nodeField(nodeFields.init);
+		if (id?.type !== "Identifier" || init === undefined) continue;
+		const local = String(fields(id).name);
+		record.shadowed.add(local);
+		// A local that SHADOWS a callee name is an edge like any other: if it
+		// resolves to a test callee the name keeps its meaning, and if it does
+		// not (`const suite = wrap(describe)`) the call refuses rather than
+		// reading as vitest's own `suite` (r3 rule 2).
+		if (init.type === "ObjectExpression") {
+			record.literals.set(local, init);
+			continue;
 		}
-	}
-	// Follow alias chains (`const a = describe; const b = a`).
-	for (const [local, target] of [...aliases]) {
-		let name = target;
-		const seen = new Set([local]);
-		while (aliases.has(name) && !seen.has(name)) {
-			seen.add(name);
-			name = aliases.get(name) as string;
+		if (init.type === "Identifier") {
+			record.edges.set(local, String(fields(init).name));
+			continue;
 		}
-		aliases.set(local, name);
+		if (init.type === "MemberExpression") {
+			const object = fields(init).object as Node | undefined;
+			const property = memberName(fields(init).property as Node | undefined);
+			if (
+				object?.type === "Identifier" &&
+				record.namespaces.has(String(fields(object).name)) &&
+				property !== undefined &&
+				TEST_CALLEES.has(property)
+			) {
+				record.edges.set(local, property);
+				continue;
+			}
+			record.unresolved.add(local);
+			continue;
+		}
+		if (init.type === "CallExpression" || init.type === "NewExpression")
+			record.unresolved.add(local);
 	}
-	return aliases;
+	// A name is unresolved when the fixed point of its chain is no test callee,
+	// whether the chain ends at a callee-shaped value or at a bare identifier.
+	for (const local of [...record.edges.keys(), ...record.unresolved]) {
+		if (resolveName(local, record) === undefined) record.unresolved.add(local);
+	}
+	return record;
 }
 
 /** The `(` that opens a call, from its callee's last token. */
@@ -231,10 +333,72 @@ function inside(span: Span, spans: readonly Span[]): boolean {
 	);
 }
 
+/** What one options object literal says, read once for both paths (row F3). */
+interface OptionsRead {
+	/** The first property this reader cannot attribute, in source order. */
+	problem?: { at: number; reason: string };
+	/** The LAST property naming `shuffle`: vitest evaluates the literal in order. */
+	shuffle?: { at: number; value: boolean | undefined; count: number };
+	/** How many properties the literal holds (row P9 needs exactly one). */
+	propertyCount: number;
+}
+
+/**
+ * Read one options object literal as a SEQUENCE (STATE_TABLE F3/P2-P12).
+ *
+ * An object's EFFECTIVE shuffle value is readable only when nothing in it can
+ * override it: no spread, no computed key this reader cannot name, and a
+ * `shuffle` value that is a literal. The effective value of several `shuffle`
+ * keys is the last one, so a readable `shuffle: true` early is not proof: a
+ * spread or an unnameable key after it may set `false`. That is why a problem
+ * is recorded even when a readable `shuffle` key is also present, and why the
+ * two paths (the describe options slot and the net) share this one read.
+ */
+function readOptions(properties: readonly Node[]): OptionsRead {
+	const read: OptionsRead = { propertyCount: properties.length };
+	const refuse = (at: number, reason: string) => {
+		read.problem ??= { at, reason };
+	};
+	for (const property of properties) {
+		if (property.type === "SpreadElement") {
+			refuse(property.start, REASON_SPREAD); // P8
+			continue;
+		}
+		const key = keyName(property);
+		if (key === undefined) continue; // P11
+		if (key.form === "computed-unresolved") {
+			refuse(property.start, REASON_COMPUTED); // P7
+			continue;
+		}
+		if (key.name !== "shuffle") continue; // P11
+		const propertyFields = fields(property);
+		const at = property.start;
+		const count = (read.shuffle?.count ?? 0) + 1;
+		if (propertyFields.kind !== "init") {
+			read.shuffle = { at, value: undefined, count };
+			refuse(at, REASON_ACCESSOR); // P10
+			continue;
+		}
+		if (propertyFields.shorthand === true) {
+			read.shuffle = { at, value: undefined, count };
+			refuse(at, REASON_SHORTHAND); // P4
+			continue;
+		}
+		const value = booleanLiteral(propertyFields.value as Node | undefined);
+		read.shuffle = { at, value, count };
+		if (value === undefined) {
+			refuse(at, REASON_UNREADABLE_VALUE); // P3
+			continue;
+		}
+		if (!value && key.form !== "bare") refuse(at, REASON_UNSPELLED); // P5, P6
+	}
+	return read;
+}
+
 /** What one file's audit accumulates while it walks the tree. */
 interface Audit {
 	source: string;
-	aliases: ReadonlyMap<string, string>;
+	bindings: CalleeBindings;
 	/** Options objects the structural read judged; the net adds nothing there. */
 	inspected: Span[];
 	admitted: string[];
@@ -252,8 +416,8 @@ interface Audit {
 function judgeSuiteCall(node: Node, audit: Audit): void {
 	const record = fields(node);
 	const callee = record.callee as Node | undefined;
-	const resolved = resolveCallee(callee, audit.aliases);
-	if (resolved === undefined || !SUITE_CALLEES.has(resolved.root)) return;
+	const resolved = resolveCallee(callee, audit.bindings);
+	if (resolved === undefined || !SUITE_CALLEES.has(resolved)) return;
 	const args = nodes(record.arguments);
 	// B1/B2: no options slot. A body passed by name is silent; an object
 	// literal in the body slot is judged by the net.
@@ -262,6 +426,13 @@ function judgeSuiteCall(node: Node, audit: Audit): void {
 	audit.inspected.push({ start: options.start, end: options.end });
 
 	if (options.type !== "ObjectExpression") {
+		// F2: an options binding this file gives an object literal is that
+		// literal's read, reported here once. The net must not report it again.
+		const bound = audit.bindings.literals.get(
+			options.type === "Identifier" ? String(fields(options).name) : "",
+		);
+		if (bound !== undefined)
+			audit.inspected.push({ start: bound.start, end: bound.end });
 		audit.report(
 			options.start,
 			`describe options: ${REASON_OPTIONS_NOT_LITERAL}`,
@@ -269,64 +440,31 @@ function judgeSuiteCall(node: Node, audit: Audit): void {
 		return;
 	}
 
-	const properties = nodes(fields(options).properties);
-	let optedOut: number | undefined;
-	let problem: string | undefined;
-	for (const property of properties) {
-		if (property.type === "SpreadElement") {
-			problem ??= REASON_SPREAD; // P8
-			continue;
-		}
-		const key = keyName(property);
-		if (key === undefined) continue;
-		if (key.form === "computed-unresolved") {
-			problem ??= REASON_COMPUTED; // P7
-			continue;
-		}
-		if (key.name !== "shuffle") continue; // P11
-		const propertyFields = fields(property);
-		if (propertyFields.kind !== "init") {
-			problem ??= REASON_ACCESSOR; // P10
-			continue;
-		}
-		if (propertyFields.shorthand === true) {
-			problem ??= REASON_SHORTHAND; // P4
-			continue;
-		}
-		const value = booleanLiteral(propertyFields.value as Node | undefined);
-		if (value === undefined) {
-			problem ??= REASON_UNREADABLE_VALUE; // P3
-			continue;
-		}
-		if (value) continue; // P2: a readable opt-in, no row needed
-		if (key.form !== "bare") {
-			problem ??= REASON_UNSPELLED; // P5, P6
-			continue;
-		}
-		optedOut ??= property.start;
-	}
-
+	const read = readOptions(nodes(fields(options).properties));
 	const declaration = () =>
 		audit.declarationOf(callParen(audit.source, callee));
-
-	if (problem !== undefined) {
+	if (read.problem !== undefined) {
 		audit.report(
 			options.start,
-			`describe "${declaration()?.title ?? "?"}": ${problem}`,
+			`describe "${declaration()?.title ?? "?"}": ${read.problem.reason}`,
 		);
 		return;
 	}
-	if (optedOut === undefined) return;
+	if (read.shuffle === undefined) return; // B2
+	if (read.shuffle.value === true) return; // P2: a readable opt-in, no row needed
 	const owner = declaration();
 	const title = owner?.title ?? "?";
-	if (properties.length > 1) {
-		audit.report(optedOut, `describe "${title}": ${REASON_EXTRA_OPTIONS}`); // P9
+	if (read.propertyCount > 1) {
+		audit.report(
+			read.shuffle.at,
+			`describe "${title}": ${REASON_EXTRA_OPTIONS}`,
+		); // P9
 		return;
 	}
 	if (owner === undefined) {
 		audit.report(
 			options.start,
-			`describe "${title}": ${REASON_ALIASED.replace("%callee%", resolved.root)}`,
+			`describe "${title}": ${REASON_ALIASED.replace("%callee%", resolved)}`,
 		); // D2
 		return;
 	}
@@ -335,6 +473,43 @@ function judgeSuiteCall(node: Node, audit: Audit): void {
 		return;
 	}
 	audit.admitted.push(title);
+}
+
+/**
+ * A call through a local binding the resolver cannot follow, with an options
+ * argument (STATE_TABLE C6). The binding may be the `describe` this census
+ * needs, or a helper that wraps one; either way the census cannot say, so the
+ * call refuses instead of passing as "not a describe" (r3 rule 2).
+ */
+function judgeUnresolvedCallee(node: Node, audit: Audit): void {
+	const record = fields(node);
+	const callee = record.callee as Node | undefined;
+	if (callee?.type !== "Identifier") return;
+	const name = String(fields(callee).name);
+	if (!audit.bindings.unresolved.has(name)) return;
+	const args = nodes(record.arguments);
+	// Three arguments is the suite shape; with two the second is the body.
+	if (args.length < 3) return;
+	const options = args[1] as Node;
+	// "Options-shaped" is an object literal, or a name this file binds to one: an
+	// identifier at the second position of any three-argument call is just an
+	// argument (`appendFile(file, data, options)`), and refusing those would red
+	// ordinary tests. A foreign module's options object stays out of reach here.
+	const literal =
+		options.type === "ObjectExpression"
+			? options
+			: options.type === "Identifier"
+				? audit.bindings.literals.get(String(fields(options).name))
+				: undefined;
+	if (literal === undefined) return;
+	audit.inspected.push({ start: options.start, end: options.end });
+	audit.inspected.push({ start: literal.start, end: literal.end });
+	// An options-shaped object with nothing to attribute (no `shuffle` key, no
+	// spread, no unnameable key) cannot be hiding an opt-out from this reader,
+	// so the unresolved callee alone is not a finding.
+	const read = readOptions(nodes(fields(literal).properties));
+	if (read.shuffle === undefined && read.problem === undefined) return;
+	audit.report(options.start, REASON_UNCALLEABLE.replace("%callee%", name));
 }
 
 /**
@@ -365,7 +540,13 @@ export function auditShuffleOptOuts(
 	let declarations: Map<number, TestDeclaration> | undefined;
 	const audit: Audit = {
 		source,
-		aliases: new Map(),
+		bindings: {
+			edges: new Map(),
+			namespaces: new Set(),
+			shadowed: new Set(),
+			unresolved: new Set(),
+			literals: new Map(),
+		},
 		inspected: [],
 		admitted,
 		findings,
@@ -392,24 +573,31 @@ export function auditShuffleOptOuts(
 		CallExpression: (node) => calls.push(node),
 		ObjectExpression: (node) => literals.push(node),
 	}).visit(parsed.program);
-	audit.aliases = calleeAliases(bindings);
+	audit.bindings = calleeBindings(bindings);
 
-	for (const call of calls) judgeSuiteCall(call, audit);
+	for (const call of calls) {
+		judgeSuiteCall(call, audit);
+		judgeUnresolvedCallee(call, audit);
+	}
 
 	// F1: the net. An object literal that names a `shuffle` key and is not an
 	// options slot the structural read judged is not attributable to a suite, so
-	// it reds instead of passing unclassified.
+	// it reds instead of passing unclassified. It reads the SAME options read as
+	// the slot (r3 rule 1): a literal with a spread or an unnameable key refuses
+	// even when a readable `shuffle: true` sits beside it, because the later key
+	// can override it.
 	for (const literal of literals) {
 		const span: Span = { start: literal.start, end: literal.end };
 		if (inside(span, audit.inspected)) continue;
-		for (const property of nodes(fields(literal).properties)) {
-			if (keyName(property)?.name !== "shuffle") continue;
-			// P2: a readable opt-in needs no row, here as at a describe.
-			if (booleanLiteral(fields(property).value as Node | undefined) === true)
-				break;
-			audit.report(property.start, REASON_OUTSIDE);
-			break;
+		const read = readOptions(nodes(fields(literal).properties));
+		if (read.shuffle === undefined) continue; // nothing names the option
+		if (read.problem !== undefined) {
+			audit.report(read.problem.at, read.problem.reason);
+			continue;
 		}
+		// P2: a readable opt-in needs no row, here as at a describe.
+		if (read.shuffle.value === true) continue;
+		audit.report(read.shuffle.at, REASON_OUTSIDE);
 	}
 
 	return { admitted, findings };
@@ -420,6 +608,17 @@ export interface ShuffleOptOutCensus {
 	optedOut: Set<string>;
 	/** `${file}:${line}: ${message}`, in the order the files were read. */
 	findings: string[];
+}
+
+/**
+ * The census population: every tracked file a vitest project collects
+ * (#4611 review r3 LOW-1). Which extensions a test file may have is the
+ * collection config's question, asked of its owner, never a list restated
+ * here: `endsWith(".ts")` dropped `.tsx`, `.mts`, `.cts` and the JS
+ * extensions vitest collects, so an opt-out in one of those was invisible.
+ */
+export function shuffleCensusPopulation(files: Iterable<string>): string[] {
+	return [...files].filter((file) => vitestCollects(file));
 }
 
 /**
