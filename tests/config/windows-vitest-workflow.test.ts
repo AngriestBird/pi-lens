@@ -173,7 +173,15 @@ describe("Windows Vitest workflow contract (#2536)", () => {
 			resolve(ROOT, "tests/config/tmp-fixture-hygiene.test.ts"),
 			"utf8",
 		);
+		// Two reads of one source, for two different questions (#4592 review V1):
+		// `code` keeps string contents because two needles below quote a literal
+		// (`process.platform === "win32"`, `describe("tmp-fixture-hygiene"`), and
+		// `stringsBlanked` is where liveness is judged -- reading the deferred slice
+		// from `code` let a quoted copy of the three assertions satisfy every needle
+		// (measured: the guard body replaced by one template literal holding their
+		// text passed 7/7, shape 69).
 		const code = stripSource(raw, { strings: "keep" });
+		const stringsBlanked = stripSource(raw);
 		expect(code).toContain(
 			'const WINDOWS_QUARANTINE = process.platform === "win32";',
 		);
@@ -200,7 +208,7 @@ describe("Windows Vitest workflow contract (#2536)", () => {
 		// bracket, not the property; measured -- the emptied guard passed 59/59).
 		// Each assertion's subject is named, and the count is pinned, so a fourth
 		// one is a reviewed change rather than a silent widening.
-		const deferred = code.slice(guard, finallyIndex);
+		const deferred = stringsBlanked.slice(guard, finallyIndex);
 		expect(deferred).toContain("attributable,");
 		expect(deferred).toContain("tmpRootWriteLeaks,");
 		expect(deferred).toContain("rootCensus.leaked,");
