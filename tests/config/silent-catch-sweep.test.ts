@@ -20,34 +20,55 @@
  *
  * ## The rule (tests/support/silent-catch-scan.ts)
  *
- * A `catch` clause of a `try`, and a `.catch(…)` handler, is `recorded` when
- * it calls a record seam (`record…`, `log…`, `increment…` — the repo's
- * logger convention), `rethrows` when it throws on every path, `declared-none`
- * when a comment inside it carries `none: <reason>`, `silent` otherwise, and
- * `unclassified` (a hard failure, never a skip) when a `.catch` handler is not
- * a form the scan can follow. The detector's own state table, one named case
+ * A `catch` clause of a `try`, a `.catch(…)` handler in any spelling
+ * (`.catch`, `["catch"]`, `` [`catch`] ``, and the second argument of `.then`),
+ * is judged on EVERY path the failure can take: `recorded` only when a record
+ * seam (`record…`, `log…`, `increment…` — the repo's logger convention) runs at
+ * the handler's top level and before any exit, `rethrows` only when a
+ * top-level `throw` runs with no `return`/`continue`/`break` anywhere in the
+ * handler, `declared-none` when a comment inside it carries `none: <reason>`,
+ * `silent` otherwise, and `unclassified` (a hard failure, never a skip) when a
+ * handler or a statically string-valued key is not a form the scan can follow.
+ * A conditional record or a conditional rethrow leaves the other path
+ * swallowing, so it is `silent`. The detector's own state table, one named case
  * per row, is `tests/support/silent-catch-scan.test.ts`.
+ *
+ * ## Scope
+ *
+ * The sweep scans `clients/`, `mcp/`, `tools/` and `index.ts`: 529 files and
+ * 1,334 `catch` handlers, the shipped runtime. Two populations are outside it
+ * by decision: `scripts/` (the repo's own gates, ~515 silent handlers in 184
+ * files, its own baseline and its own round: #4609) and `tests/` (fixtures and
+ * doubles, where a swallow is the fixture's job). A new scope is a new row in
+ * this table, never a silent widening.
  *
  * ## The baseline
  *
- * The population this rule finds today predates it: 1,146 handlers across 245
+ * The population this rule finds today predates it: 1,195 handlers across 246
  * files swallow by design or by history, and rewriting them is not this
- * change. Each file's silent count is pinned with the reason it is admitted,
- * so a NEW silent handler in an already-listed file reds the count, a silent
- * handler in a new file reds as unlisted, and converting one to a record (or a
- * `none:` line) reds as stale until the row is re-pinned.
+ * change. Each file's silent count AND the content identity of its admitted
+ * handler set are pinned together, so a NEW silent handler reds even when an
+ * old one was removed or spent on a `none:` line in the same file (AGENTS.md
+ * shape 36: count-based laundering), a silent handler in a new file reds as
+ * unlisted, and converting one to a record reds as stale until the row is
+ * re-pinned.
  *
  * `PRE_RULE` is the one honest admission for a file this change did not read
- * handler by handler: it says the count may not grow and claims nothing about
+ * handler by handler: it says the set may not change and claims nothing about
  * each handler. The four rows with their own text are files where a reader
  * knows better than the class. The registry only shrinks — this change deleted
  * `clients/lsp/implicit-scope.ts`'s row entirely (five records added), took one
- * from `index.ts` and one from `clients/out-of-band-changes.ts`, which also
- * turned one into a `none:` line — and `PINNED_TOTAL` moves only downward.
+ * from `index.ts` and one from `clients/out-of-band-changes.ts` (which also
+ * turned one into a `none:` line), retired `clients/atomic-write.ts`'s row
+ * (four `none:` lines), and re-pinned the population the stricter path rule
+ * found: a handler with a conditional record or a conditional `throw` is
+ * `silent`, not `recorded`/`rethrows` (#4603 review F1).
  *
  * Re-pin from this file's own census: `PI_LENS_PRINT_PINS=1` on this suite
  * prints the rows to paste, with each file's silent line numbers as a comment.
+ * Re-pin only downward; a row that must grow needs the reason stated here.
  */
+import { createHash } from "node:crypto";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -73,6 +94,13 @@ const SHIPPED_TREES = ["clients", "mcp", "tools"];
 interface Admission {
 	/** How many silent handlers this file is admitted to hold. */
 	silent: number;
+	/**
+	 * A content identity for the admitted set: 16 hex of the sorted
+	 * per-handler identities. A count alone could be kept level by adding one
+	 * silent handler and removing another (or spending a `none:` line on it),
+	 * so the set itself is pinned (AGENTS.md shape 36).
+	 */
+	identities: string;
 	/** Why those handlers need no record. */
 	reason: string;
 }
@@ -85,293 +113,1265 @@ const PRE_RULE =
 	"pre-#4596 population admitted at its pinned count; it may not grow, a shrink re-pins it, and this row makes no claim that each handler is harmless";
 
 const SHARP_INSTALL_STAMP =
-	"the install-stamp reads: an unreadable lockfile or a root that cannot be listed answers `-`, which the stamp reader takes as no install change; the walk's own unreadable subtree IS recorded (`lsp-declaration-walk-unreadable`), and the listing-to-stat race carries a `none:` line";
+	"the install-stamp reads: an unreadable lockfile or a root that cannot be listed answers `-`, which the stamp reader takes as no install change; the declaration walk's own unreadable subtree and unreadable file ARE recorded (`lsp-declaration-walk-unreadable`), and its absence races carry `none:` lines";
 
 const SHARP_DID_SAVE =
-	"the swallowed `didSave` in `saveDebouncedPush` (#4527) belongs to the open save-failure change (#4532), which deletes that site; that round re-pins this row";
+	"the residual `didSave` gaps after #4575 (which made the rejected save record and retry once) belong to the open save-failure change (#4532); that round re-pins this row";
 
 const SHARP_PRESCAN =
-	"owned by the open prescan change (#4504); that round re-pins this row";
+	"owned by the open prescan change (PR #4594, issue #4504); that round re-pins this row";
 
 const SHARP_HOST =
-	"the host adapter's best-effort shutdown and teardown arms; the one this change fixed (`deregisterInstanceRoot`'s `.catch`) now records through `recordRootDeregistrationFailure`";
+	"the host adapter's best-effort shutdown and teardown arms; the one this change fixed (`deregisterInstanceRoot`'s `.catch`) now records through `recordRootDeregistrationFailure`. Several others record through `surfaceHandlerCrash` or a stale-ctx rethrow plus `recordDegradationOnce`, which this scan cannot follow, so they are pinned here";
 
 /**
- * The population on master at #4596's base commit (`c44d201`), one row per
- * file, as the pinned census: 1,146 silent handlers in 245 files. Shrink only.
+ * The population on the merge of `origin/master` (`d7f85d909`) and this change,
+ * one row per file: 1,195 silent handlers in 246 files, each row pinned by
+ * count and by the content identity of its admitted set. Shrink only.
  */
 const BASELINE: Readonly<Record<string, Admission>> = {
-	"clients/actionable-warnings.ts": { silent: 6, reason: PRE_RULE },
-	"clients/advisory-provenance.ts": { silent: 4, reason: PRE_RULE },
-	"clients/agent-nudge.ts": { silent: 3, reason: PRE_RULE },
-	"clients/analysis-root.ts": { silent: 2, reason: PRE_RULE },
-	"clients/ast-grep-client.ts": { silent: 5, reason: PRE_RULE },
-	"clients/ast-grep-rule-manager.ts": { silent: 3, reason: PRE_RULE },
-	"clients/atomic-write-staging.ts": { silent: 4, reason: PRE_RULE },
-	"clients/atomic-write.ts": { silent: 2, reason: PRE_RULE },
-	"clients/bash-file-access.ts": { silent: 3, reason: PRE_RULE },
-	"clients/biome-client.ts": { silent: 1, reason: PRE_RULE },
-	"clients/blocker-freshness.ts": { silent: 13, reason: PRE_RULE },
-	"clients/blocker-past-eof.ts": { silent: 2, reason: PRE_RULE },
-	"clients/bootstrap.ts": { silent: 4, reason: PRE_RULE },
-	"clients/bounded-pid-file-lock.ts": { silent: 14, reason: PRE_RULE },
-	"clients/bounded-telemetry.ts": { silent: 2, reason: PRE_RULE },
-	"clients/build-identity.ts": { silent: 2, reason: PRE_RULE },
-	"clients/bundled-resource-health.ts": { silent: 1, reason: PRE_RULE },
-	"clients/bus-publish.ts": { silent: 1, reason: PRE_RULE },
-	"clients/cache-manager.ts": { silent: 6, reason: PRE_RULE },
-	"clients/cache-observability.ts": { silent: 10, reason: PRE_RULE },
-	"clients/cache/rule-cache.ts": { silent: 5, reason: PRE_RULE },
-	"clients/call-graph.ts": { silent: 2, reason: PRE_RULE },
-	"clients/cargo-manifest.ts": { silent: 1, reason: PRE_RULE },
-	"clients/child-unref.ts": { silent: 4, reason: PRE_RULE },
-	"clients/code-quality-warnings.ts": { silent: 1, reason: PRE_RULE },
-	"clients/codebase-model.ts": { silent: 2, reason: PRE_RULE },
-	"clients/collateral-test-role.ts": { silent: 1, reason: PRE_RULE },
-	"clients/complexity-client.ts": { silent: 2, reason: PRE_RULE },
-	"clients/config-core/normalize.ts": { silent: 1, reason: PRE_RULE },
-	"clients/config-core/resolve.ts": { silent: 2, reason: PRE_RULE },
-	"clients/config-core/schema.ts": { silent: 1, reason: PRE_RULE },
-	"clients/config-locations.ts": { silent: 2, reason: PRE_RULE },
-	"clients/config-resolve.ts": { silent: 2, reason: PRE_RULE },
-	"clients/dead-code-client.ts": { silent: 2, reason: PRE_RULE },
-	"clients/deadline-utils.ts": { silent: 4, reason: PRE_RULE },
-	"clients/debug-handles.ts": { silent: 1, reason: PRE_RULE },
-	"clients/debug-heap.ts": { silent: 5, reason: PRE_RULE },
-	"clients/deferred-runner-blockers.ts": { silent: 1, reason: PRE_RULE },
-	"clients/degradation-ledger.ts": { silent: 4, reason: PRE_RULE },
-	"clients/dependency-checker.ts": { silent: 3, reason: PRE_RULE },
-	"clients/deps/ast-grep-napi.ts": { silent: 2, reason: PRE_RULE },
-	"clients/deps/web-tree-sitter.ts": { silent: 1, reason: PRE_RULE },
-	"clients/diagnostic-dispositions.ts": { silent: 5, reason: PRE_RULE },
-	"clients/diagnostic-line-freshness.ts": { silent: 5, reason: PRE_RULE },
-	"clients/dispatch/dispatcher.ts": { silent: 7, reason: PRE_RULE },
-	"clients/dispatch/facts/file-content.ts": { silent: 1, reason: PRE_RULE },
-	"clients/dispatch/integration.ts": { silent: 7, reason: PRE_RULE },
-	"clients/dispatch/pending-runner-findings.ts": {
-		silent: 1,
+	"clients/actionable-warnings.ts": {
+		silent: 6,
+		identities: "e926d3cd1c334a07",
 		reason: PRE_RULE,
-	},
-	"clients/dispatch/rule-id-normalize.ts": { silent: 1, reason: PRE_RULE },
-	"clients/dispatch/runners/actionlint.ts": { silent: 2, reason: PRE_RULE },
-	"clients/dispatch/runners/ast-grep-napi.ts": { silent: 8, reason: PRE_RULE },
-	"clients/dispatch/runners/biome-check.ts": { silent: 2, reason: PRE_RULE },
-	"clients/dispatch/runners/cpp-check.ts": { silent: 1, reason: PRE_RULE },
-	"clients/dispatch/runners/credo.ts": { silent: 1, reason: PRE_RULE },
-	"clients/dispatch/runners/cue-vet.ts": { silent: 1, reason: PRE_RULE },
-	"clients/dispatch/runners/eslint.ts": { silent: 1, reason: PRE_RULE },
-	"clients/dispatch/runners/golangci-lint.ts": { silent: 1, reason: PRE_RULE },
-	"clients/dispatch/runners/hadolint.ts": { silent: 1, reason: PRE_RULE },
-	"clients/dispatch/runners/helm-render.ts": { silent: 6, reason: PRE_RULE },
-	"clients/dispatch/runners/ktlint.ts": { silent: 2, reason: PRE_RULE },
-	"clients/dispatch/runners/lsp.ts": { silent: 1, reason: PRE_RULE },
-	"clients/dispatch/runners/oxlint.ts": { silent: 2, reason: PRE_RULE },
-	"clients/dispatch/runners/phpstan.ts": { silent: 1, reason: PRE_RULE },
+	}, // :347, :360, :1169, :1340, :2061, :2272
+	"clients/advisory-provenance.ts": {
+		silent: 4,
+		identities: "4be1802a08b42400",
+		reason: PRE_RULE,
+	}, // :49, :70, :186, :384
+	"clients/agent-nudge.ts": {
+		silent: 3,
+		identities: "3009ae881ca29582",
+		reason: PRE_RULE,
+	}, // :427, :431, :615
+	"clients/analysis-root.ts": {
+		silent: 2,
+		identities: "1ba786260b8caf72",
+		reason: PRE_RULE,
+	}, // :43, :67
+	"clients/ast-grep-client.ts": {
+		silent: 5,
+		identities: "e0171caad3e9bf11",
+		reason: PRE_RULE,
+	}, // :486, :596, :632, :637, :684
+	"clients/ast-grep-rule-manager.ts": {
+		silent: 3,
+		identities: "2edc57365ab55761",
+		reason: PRE_RULE,
+	}, // :48, :59, :126
+	"clients/atomic-write-staging.ts": {
+		silent: 4,
+		identities: "e7ba54e54a59ce82",
+		reason: PRE_RULE,
+	}, // :50, :74, :79, :82
+	"clients/bash-file-access.ts": {
+		silent: 3,
+		identities: "c6cea2c7ab1fb7de",
+		reason: PRE_RULE,
+	}, // :505, :707, :729
+	"clients/biome-client.ts": {
+		silent: 1,
+		identities: "857a22d3715ba4a3",
+		reason: PRE_RULE,
+	}, // :429
+	"clients/blocker-freshness.ts": {
+		silent: 13,
+		identities: "a6bb69bf104bd14d",
+		reason: PRE_RULE,
+	}, // :347, :378, :510, :559, :571, :663, :683, :773, :782, :932, :1161, :1176, :1448
+	"clients/blocker-past-eof.ts": {
+		silent: 2,
+		identities: "a9196408101956b1",
+		reason: PRE_RULE,
+	}, // :125, :186
+	"clients/bootstrap.ts": {
+		silent: 4,
+		identities: "36bf6065827c8d53",
+		reason: PRE_RULE,
+	}, // :237, :263, :275, :654
+	"clients/bounded-pid-file-lock.ts": {
+		silent: 14,
+		identities: "0db0782e5dcad821",
+		reason: PRE_RULE,
+	}, // :58, :83, :99, :115, :149, :158, :161, :195, :211, :214, :336, :347, :358, :434
+	"clients/bounded-telemetry.ts": {
+		silent: 2,
+		identities: "4830315d8c37f502",
+		reason: PRE_RULE,
+	}, // :304, :337
+	"clients/build-identity.ts": {
+		silent: 2,
+		identities: "df9a2aab8aac44fa",
+		reason: PRE_RULE,
+	}, // :73, :81
+	"clients/bundled-resource-health.ts": {
+		silent: 1,
+		identities: "a05799527c99af28",
+		reason: PRE_RULE,
+	}, // :61
+	"clients/bus-publish.ts": {
+		silent: 1,
+		identities: "5942496acd59b074",
+		reason: PRE_RULE,
+	}, // :175
+	"clients/cache-manager.ts": {
+		silent: 6,
+		identities: "208b57147636760f",
+		reason: PRE_RULE,
+	}, // :299, :345, :362, :386, :400, :623
+	"clients/cache-observability.ts": {
+		silent: 10,
+		identities: "765e8cbdadc92783",
+		reason: PRE_RULE,
+	}, // :507, :837, :862, :882, :1176, :1186, :1239, :1264, :1427, :1587
+	"clients/cache/rule-cache.ts": {
+		silent: 5,
+		identities: "4332dc8628e97e3b",
+		reason: PRE_RULE,
+	}, // :160, :176, :191, :198, :210
+	"clients/call-graph.ts": {
+		silent: 2,
+		identities: "6d51c4997f27503e",
+		reason: PRE_RULE,
+	}, // :728, :1122
+	"clients/cargo-manifest.ts": {
+		silent: 1,
+		identities: "cf08efebeaedf178",
+		reason: PRE_RULE,
+	}, // :56
+	"clients/child-unref.ts": {
+		silent: 4,
+		identities: "66ddd3d8cdeab987",
+		reason: PRE_RULE,
+	}, // :50, :185, :200, :207
+	"clients/code-quality-warnings.ts": {
+		silent: 1,
+		identities: "e559edc3929478d1",
+		reason: PRE_RULE,
+	}, // :361
+	"clients/codebase-model.ts": {
+		silent: 2,
+		identities: "06ac97ea35710e74",
+		reason: PRE_RULE,
+	}, // :214, :244
+	"clients/collateral-test-role.ts": {
+		silent: 1,
+		identities: "7b52b635719a3045",
+		reason: PRE_RULE,
+	}, // :37
+	"clients/complexity-client.ts": {
+		silent: 2,
+		identities: "47ffa5a721924bd2",
+		reason: PRE_RULE,
+	}, // :524, :537
+	"clients/config-core/normalize.ts": {
+		silent: 1,
+		identities: "291bdd2b93d8b884",
+		reason: PRE_RULE,
+	}, // :144
+	"clients/config-core/resolve.ts": {
+		silent: 2,
+		identities: "5bad8c90626e84f4",
+		reason: PRE_RULE,
+	}, // :82, :108
+	"clients/config-core/schema.ts": {
+		silent: 1,
+		identities: "a37a1b3a1638df7c",
+		reason: PRE_RULE,
+	}, // :211
+	"clients/config-locations.ts": {
+		silent: 2,
+		identities: "d6cc1d93ed45eb10",
+		reason: PRE_RULE,
+	}, // :292, :379
+	"clients/config-resolve.ts": {
+		silent: 2,
+		identities: "55e0525579588ef3",
+		reason: PRE_RULE,
+	}, // :135, :143
+	"clients/dead-code-client.ts": {
+		silent: 2,
+		identities: "0274136cf710a333",
+		reason: PRE_RULE,
+	}, // :176, :490
+	"clients/deadline-utils.ts": {
+		silent: 4,
+		identities: "097565f30c5331a0",
+		reason: PRE_RULE,
+	}, // :95, :105, :106, :339
+	"clients/debug-handles.ts": {
+		silent: 1,
+		identities: "53f0ed4e5a760b9e",
+		reason: PRE_RULE,
+	}, // :184
+	"clients/debug-heap.ts": {
+		silent: 5,
+		identities: "e9f923841e24738f",
+		reason: PRE_RULE,
+	}, // :119, :132, :144, :172, :183
+	"clients/deferred-runner-blockers.ts": {
+		silent: 1,
+		identities: "cf08efebeaedf178",
+		reason: PRE_RULE,
+	}, // :248
+	"clients/degradation-ledger.ts": {
+		silent: 4,
+		identities: "2ca4fdb81f73c17e",
+		reason: PRE_RULE,
+	}, // :2018, :2037, :2088, :2389
+	"clients/dependency-checker.ts": {
+		silent: 3,
+		identities: "7769bbb29be70c33",
+		reason: PRE_RULE,
+	}, // :475, :822, :1161
+	"clients/deps/ast-grep-napi.ts": {
+		silent: 2,
+		identities: "81bebd9fa93a0354",
+		reason: PRE_RULE,
+	}, // :24, :38
+	"clients/deps/web-tree-sitter.ts": {
+		silent: 1,
+		identities: "93c689d87d20f296",
+		reason: PRE_RULE,
+	}, // :26
+	"clients/diagnostic-dispositions.ts": {
+		silent: 5,
+		identities: "7578e0c38034b277",
+		reason: PRE_RULE,
+	}, // :391, :421, :449, :564, :811
+	"clients/diagnostic-line-freshness.ts": {
+		silent: 5,
+		identities: "809dfcb662f6df93",
+		reason: PRE_RULE,
+	}, // :239, :254, :343, :363, :400
+	"clients/dispatch/dispatcher.ts": {
+		silent: 7,
+		identities: "fc89485966eea956",
+		reason: PRE_RULE,
+	}, // :316, :331, :337, :1102, :1807, :1815, :2039
+	"clients/dispatch/facts/file-content.ts": {
+		silent: 1,
+		identities: "f187250a34b04dec",
+		reason: PRE_RULE,
+	}, // :15
+	"clients/dispatch/integration.ts": {
+		silent: 7,
+		identities: "07e8090abd2c7f84",
+		reason: PRE_RULE,
+	}, // :323, :976, :1625, :1635, :2320, :3345, :3371
+	"clients/dispatch/pending-runner-findings.ts": {
+		silent: 2,
+		identities: "6376b0d0a47313f2",
+		reason: PRE_RULE,
+	}, // :93, :104
+	"clients/dispatch/rule-id-normalize.ts": {
+		silent: 1,
+		identities: "d1e59096f06aad20",
+		reason: PRE_RULE,
+	}, // :20
+	"clients/dispatch/runners/actionlint.ts": {
+		silent: 2,
+		identities: "63bbd1e86b73cec7",
+		reason: PRE_RULE,
+	}, // :80, :89
+	"clients/dispatch/runners/ast-grep-napi.ts": {
+		silent: 8,
+		identities: "dbd880cb0078760e",
+		reason: PRE_RULE,
+	}, // :730, :803, :1277, :1357, :1467, :1484, :1492, :1499
+	"clients/dispatch/runners/biome-check.ts": {
+		silent: 2,
+		identities: "b3e55177c465876f",
+		reason: PRE_RULE,
+	}, // :150, :335
+	"clients/dispatch/runners/cpp-check.ts": {
+		silent: 1,
+		identities: "7b52b635719a3045",
+		reason: PRE_RULE,
+	}, // :69
+	"clients/dispatch/runners/credo.ts": {
+		silent: 1,
+		identities: "53f0ed4e5a760b9e",
+		reason: PRE_RULE,
+	}, // :75
+	"clients/dispatch/runners/cue-vet.ts": {
+		silent: 1,
+		identities: "4d60a71a5a96d6c7",
+		reason: PRE_RULE,
+	}, // :395
+	"clients/dispatch/runners/eslint.ts": {
+		silent: 1,
+		identities: "549c430923722149",
+		reason: PRE_RULE,
+	}, // :122
+	"clients/dispatch/runners/golangci-lint.ts": {
+		silent: 1,
+		identities: "53f0ed4e5a760b9e",
+		reason: PRE_RULE,
+	}, // :142
+	"clients/dispatch/runners/hadolint.ts": {
+		silent: 1,
+		identities: "53f0ed4e5a760b9e",
+		reason: PRE_RULE,
+	}, // :62
+	"clients/dispatch/runners/helm-render.ts": {
+		silent: 6,
+		identities: "b3d28e0fde85e066",
+		reason: PRE_RULE,
+	}, // :176, :226, :240, :449, :621, :677
+	"clients/dispatch/runners/ktlint.ts": {
+		silent: 2,
+		identities: "053ebe0008169179",
+		reason: PRE_RULE,
+	}, // :68, :129
+	"clients/dispatch/runners/lsp.ts": {
+		silent: 2,
+		identities: "e86d72685f2857b2",
+		reason: PRE_RULE,
+	}, // :302, :486
+	"clients/dispatch/runners/oxlint.ts": {
+		silent: 2,
+		identities: "dde1c4039e54cc6c",
+		reason: PRE_RULE,
+	}, // :370, :462
+	"clients/dispatch/runners/phpstan.ts": {
+		silent: 1,
+		identities: "53f0ed4e5a760b9e",
+		reason: PRE_RULE,
+	}, // :119
 	"clients/dispatch/runners/psscriptanalyzer.ts": {
 		silent: 2,
+		identities: "c5d123c4d9fdb88e",
 		reason: PRE_RULE,
-	},
-	"clients/dispatch/runners/rubocop.ts": { silent: 1, reason: PRE_RULE },
-	"clients/dispatch/runners/ruff.ts": { silent: 1, reason: PRE_RULE },
-	"clients/dispatch/runners/rust-clippy.ts": { silent: 2, reason: PRE_RULE },
-	"clients/dispatch/runners/shellcheck.ts": { silent: 2, reason: PRE_RULE },
-	"clients/dispatch/runners/spellcheck.ts": { silent: 1, reason: PRE_RULE },
-	"clients/dispatch/runners/spotbugs.ts": { silent: 4, reason: PRE_RULE },
-	"clients/dispatch/runners/sqlfluff.ts": { silent: 1, reason: PRE_RULE },
-	"clients/dispatch/runners/stylelint.ts": { silent: 1, reason: PRE_RULE },
-	"clients/dispatch/runners/swiftlint.ts": { silent: 1, reason: PRE_RULE },
-	"clients/dispatch/runners/terragrunt.ts": { silent: 1, reason: PRE_RULE },
-	"clients/dispatch/runners/tflint.ts": { silent: 1, reason: PRE_RULE },
-	"clients/dispatch/runners/tree-sitter.ts": { silent: 2, reason: PRE_RULE },
-	"clients/dispatch/runners/trivy-config.ts": { silent: 2, reason: PRE_RULE },
-	"clients/dispatch/runners/utils.ts": { silent: 1, reason: PRE_RULE },
+	}, // :309, :522
+	"clients/dispatch/runners/rubocop.ts": {
+		silent: 1,
+		identities: "53f0ed4e5a760b9e",
+		reason: PRE_RULE,
+	}, // :98
+	"clients/dispatch/runners/ruff.ts": {
+		silent: 1,
+		identities: "53f0ed4e5a760b9e",
+		reason: PRE_RULE,
+	}, // :70
+	"clients/dispatch/runners/rust-clippy.ts": {
+		silent: 2,
+		identities: "54f10366e74186a5",
+		reason: PRE_RULE,
+	}, // :169, :374
+	"clients/dispatch/runners/shellcheck.ts": {
+		silent: 2,
+		identities: "a5a5bb709e878c67",
+		reason: PRE_RULE,
+	}, // :130, :243
+	"clients/dispatch/runners/spellcheck.ts": {
+		silent: 1,
+		identities: "42c395aa7aedc46b",
+		reason: PRE_RULE,
+	}, // :109
+	"clients/dispatch/runners/spotbugs.ts": {
+		silent: 4,
+		identities: "e4321d0e12805307",
+		reason: PRE_RULE,
+	}, // :60, :72, :269, :283
+	"clients/dispatch/runners/sqlfluff.ts": {
+		silent: 1,
+		identities: "53f0ed4e5a760b9e",
+		reason: PRE_RULE,
+	}, // :146
+	"clients/dispatch/runners/stylelint.ts": {
+		silent: 1,
+		identities: "53f0ed4e5a760b9e",
+		reason: PRE_RULE,
+	}, // :156
+	"clients/dispatch/runners/swiftlint.ts": {
+		silent: 1,
+		identities: "102fe3fe1a609dfd",
+		reason: PRE_RULE,
+	}, // :158
+	"clients/dispatch/runners/terragrunt.ts": {
+		silent: 1,
+		identities: "53f0ed4e5a760b9e",
+		reason: PRE_RULE,
+	}, // :78
+	"clients/dispatch/runners/tflint.ts": {
+		silent: 1,
+		identities: "53f0ed4e5a760b9e",
+		reason: PRE_RULE,
+	}, // :89
+	"clients/dispatch/runners/tree-sitter.ts": {
+		silent: 3,
+		identities: "f6b1fdb2bfb03582",
+		reason: PRE_RULE,
+	}, // :74, :627, :717
+	"clients/dispatch/runners/trivy-config.ts": {
+		silent: 2,
+		identities: "5b5e416ca6eb2754",
+		reason: PRE_RULE,
+	}, // :120, :196
+	"clients/dispatch/runners/utils.ts": {
+		silent: 1,
+		identities: "cf08efebeaedf178",
+		reason: PRE_RULE,
+	}, // :20
 	"clients/dispatch/runners/utils/candidate-probe.ts": {
 		silent: 1,
+		identities: "a044ae359f31afb8",
 		reason: PRE_RULE,
-	},
+	}, // :102
 	"clients/dispatch/runners/utils/lazy-installer.ts": {
 		silent: 1,
+		identities: "abe2d56914cef611",
 		reason: PRE_RULE,
-	},
+	}, // :239
 	"clients/dispatch/runners/utils/runner-helpers.ts": {
 		silent: 7,
+		identities: "711a4b4207c2affe",
 		reason: PRE_RULE,
-	},
-	"clients/dispatch/runners/vale.ts": { silent: 1, reason: PRE_RULE },
+	}, // :334, :382, :506, :545, :698, :1328, :1638
+	"clients/dispatch/runners/vale.ts": {
+		silent: 1,
+		identities: "ebc8ac6568c8a7ac",
+		reason: PRE_RULE,
+	}, // :134
 	"clients/dispatch/runners/yaml-rule-parser.ts": {
 		silent: 5,
+		identities: "eaafa0a2a75a5c2a",
 		reason: PRE_RULE,
-	},
-	"clients/durable-store.ts": { silent: 2, reason: PRE_RULE },
-	"clients/ephemeral-root.ts": { silent: 1, reason: PRE_RULE },
-	"clients/event-loop-hold.ts": { silent: 2, reason: PRE_RULE },
-	"clients/extension-log.ts": { silent: 3, reason: PRE_RULE },
-	"clients/extension-mode.ts": { silent: 1, reason: PRE_RULE },
-	"clients/file-mutation-queue.ts": { silent: 3, reason: PRE_RULE },
-	"clients/file-time.ts": { silent: 1, reason: PRE_RULE },
-	"clients/file-utils.ts": { silent: 11, reason: PRE_RULE },
-	"clients/fix-run-restore.ts": { silent: 10, reason: PRE_RULE },
-	"clients/fix-worklog.ts": { silent: 3, reason: PRE_RULE },
-	"clients/format-service.ts": { silent: 1, reason: PRE_RULE },
-	"clients/formatters.ts": { silent: 6, reason: PRE_RULE },
-	"clients/generated-artifacts.ts": { silent: 3, reason: PRE_RULE },
-	"clients/generation-lock.ts": { silent: 10, reason: PRE_RULE },
-	"clients/git-guard.ts": { silent: 3, reason: PRE_RULE },
-	"clients/git-tracked-ignore.ts": { silent: 2, reason: PRE_RULE },
-	"clients/gitleaks-client.ts": { silent: 9, reason: PRE_RULE },
-	"clients/govulncheck-client.ts": { silent: 5, reason: PRE_RULE },
-	"clients/grammar-source.ts": { silent: 5, reason: PRE_RULE },
-	"clients/gzip-stage-write.ts": { silent: 4, reason: PRE_RULE },
-	"clients/hashline-anchor.ts": { silent: 2, reason: PRE_RULE },
-	"clients/inline-blocker-dispositions.ts": { silent: 1, reason: PRE_RULE },
-	"clients/install-diagnostics.ts": { silent: 2, reason: PRE_RULE },
-	"clients/installer/index.ts": { silent: 55, reason: PRE_RULE },
-	"clients/installer/managed-tool-refresh.ts": { silent: 4, reason: PRE_RULE },
-	"clients/instance-reaper.ts": { silent: 18, reason: PRE_RULE },
-	"clients/instance-registry-lock.ts": { silent: 3, reason: PRE_RULE },
-	"clients/instance-registry-tail.ts": { silent: 1, reason: PRE_RULE },
-	"clients/instance-registry.ts": { silent: 3, reason: PRE_RULE },
-	"clients/io-bridge.ts": { silent: 5, reason: PRE_RULE },
-	"clients/jscpd-client.ts": { silent: 5, reason: PRE_RULE },
-	"clients/json-cache-read.ts": { silent: 4, reason: PRE_RULE },
-	"clients/knip-client.ts": { silent: 8, reason: PRE_RULE },
-	"clients/language-profile.ts": { silent: 2, reason: PRE_RULE },
-	"clients/ledger-bounds.ts": { silent: 1, reason: PRE_RULE },
-	"clients/lens-config.ts": { silent: 1, reason: PRE_RULE },
-	"clients/log-cleanup.ts": { silent: 6, reason: PRE_RULE },
-	"clients/lsp-budget.ts": { silent: 1, reason: PRE_RULE },
-	"clients/lsp-document-symbols.ts": { silent: 1, reason: PRE_RULE },
-	"clients/lsp-mutation.ts": { silent: 3, reason: PRE_RULE },
-	"clients/lsp/aggregation.ts": { silent: 1, reason: PRE_RULE },
-	"clients/lsp/cascade-tier.ts": { silent: 1, reason: PRE_RULE },
-	"clients/lsp/client-registry.ts": { silent: 8, reason: PRE_RULE },
-	"clients/lsp/client.ts": { silent: 30, reason: PRE_RULE },
-	"clients/lsp/config.ts": { silent: 1, reason: PRE_RULE },
-	"clients/lsp/created-import-targets.ts": { silent: 2, reason: PRE_RULE },
-	"clients/lsp/diagnostic-binding.ts": { silent: 2, reason: PRE_RULE },
-	"clients/lsp/document-drift.ts": { silent: 5, reason: PRE_RULE },
-	"clients/lsp/edits.ts": { silent: 2, reason: PRE_RULE },
-	"clients/lsp/index.ts": { silent: 40, reason: SHARP_DID_SAVE },
-	"clients/lsp/jvm-runtime.ts": { silent: 1, reason: PRE_RULE },
-	"clients/lsp/launch.ts": { silent: 10, reason: PRE_RULE },
-	"clients/lsp/lombok.ts": { silent: 6, reason: PRE_RULE },
-	"clients/lsp/ruby-drive-dirs.ts": { silent: 2, reason: PRE_RULE },
-	"clients/lsp/server.ts": { silent: 25, reason: PRE_RULE },
-	"clients/lsp/service-singleton.ts": { silent: 1, reason: PRE_RULE },
-	"clients/lsp/tsserver-sync.ts": { silent: 2, reason: PRE_RULE },
-	"clients/lsp/wait-policy/strategies.ts": { silent: 1, reason: PRE_RULE },
-	"clients/lsp/workspace-diagnostics-cache.ts": { silent: 5, reason: PRE_RULE },
-	"clients/lsp/workspace-sweep-hold.ts": { silent: 1, reason: PRE_RULE },
-	"clients/mcp/analyze.ts": { silent: 5, reason: PRE_RULE },
-	"clients/mcp/ipc.ts": { silent: 6, reason: PRE_RULE },
-	"clients/mcp/review.ts": { silent: 3, reason: PRE_RULE },
-	"clients/mcp/session.ts": { silent: 1, reason: PRE_RULE },
-	"clients/memory-sampler.ts": { silent: 2, reason: PRE_RULE },
-	"clients/metrics-history.ts": { silent: 2, reason: PRE_RULE },
-	"clients/module-report-lsp.ts": { silent: 3, reason: PRE_RULE },
-	"clients/module-report.ts": { silent: 5, reason: PRE_RULE },
-	"clients/mutation-attribution.ts": { silent: 2, reason: PRE_RULE },
-	"clients/mutation-bridge.ts": { silent: 2, reason: PRE_RULE },
-	"clients/ndjson-logger.ts": { silent: 12, reason: PRE_RULE },
-	"clients/observed-mutation-sources.ts": { silent: 4, reason: PRE_RULE },
-	"clients/observed-mutation.ts": { silent: 8, reason: PRE_RULE },
-	"clients/opaque-mutation-scan.ts": { silent: 3, reason: PRE_RULE },
-	"clients/opengrep-client.ts": { silent: 3, reason: PRE_RULE },
-	"clients/out-of-band-changes.ts": { silent: 3, reason: SHARP_INSTALL_STAMP },
-	"clients/package-manager.ts": { silent: 2, reason: PRE_RULE },
-	"clients/partial-edit-apply.ts": { silent: 2, reason: PRE_RULE },
-	"clients/path-birth.ts": { silent: 1, reason: PRE_RULE },
-	"clients/path-utils.ts": { silent: 9, reason: PRE_RULE },
-	"clients/performance-report.ts": { silent: 3, reason: PRE_RULE },
-	"clients/persistent-reverify.ts": { silent: 3, reason: PRE_RULE },
-	"clients/pipeline.ts": { silent: 10, reason: PRE_RULE },
-	"clients/probe-home-state.ts": { silent: 1, reason: PRE_RULE },
-	"clients/process-snapshot.ts": { silent: 1, reason: PRE_RULE },
-	"clients/project-changes.ts": { silent: 4, reason: PRE_RULE },
-	"clients/project-conventions.ts": { silent: 5, reason: PRE_RULE },
-	"clients/project-diagnostics/cache.ts": { silent: 2, reason: PRE_RULE },
-	"clients/project-diagnostics/fresh-fetch.ts": { silent: 1, reason: PRE_RULE },
-	"clients/project-diagnostics/scanner.ts": { silent: 6, reason: PRE_RULE },
-	"clients/project-lens-config.ts": { silent: 2, reason: PRE_RULE },
-	"clients/project-report.ts": { silent: 3, reason: PRE_RULE },
-	"clients/project-snapshot-persist-worker.ts": { silent: 1, reason: PRE_RULE },
-	"clients/project-snapshot.ts": { silent: 15, reason: PRE_RULE },
-	"clients/python-environment.ts": { silent: 2, reason: PRE_RULE },
-	"clients/quiet-window.ts": { silent: 2, reason: PRE_RULE },
-	"clients/read-expansion.ts": { silent: 1, reason: PRE_RULE },
-	"clients/read-guard-branch.ts": { silent: 3, reason: PRE_RULE },
-	"clients/read-guard-tool-lines.ts": { silent: 1, reason: PRE_RULE },
-	"clients/read-guard.ts": { silent: 11, reason: PRE_RULE },
-	"clients/recent-touches.ts": { silent: 6, reason: PRE_RULE },
-	"clients/resource-sampler.ts": { silent: 3, reason: PRE_RULE },
-	"clients/reverse-deps.ts": { silent: 2, reason: PRE_RULE },
-	"clients/review-graph/builder.ts": { silent: 18, reason: PRE_RULE },
-	"clients/review-graph/git-identity.ts": { silent: 10, reason: PRE_RULE },
-	"clients/review-graph/import-resolvers.ts": { silent: 5, reason: PRE_RULE },
-	"clients/review-graph/tsconfig-paths.ts": { silent: 6, reason: PRE_RULE },
-	"clients/review-graph/workspace-modules.ts": { silent: 11, reason: PRE_RULE },
-	"clients/ruff-client.ts": { silent: 2, reason: PRE_RULE },
-	"clients/runtime-agent-end.ts": { silent: 4, reason: PRE_RULE },
-	"clients/runtime-coordinator.ts": { silent: 4, reason: PRE_RULE },
-	"clients/runtime-session.ts": { silent: 24, reason: PRE_RULE },
-	"clients/runtime-tool-call.ts": { silent: 11, reason: PRE_RULE },
-	"clients/runtime-tool-result.ts": { silent: 11, reason: SHARP_PRESCAN },
-	"clients/runtime-turn.ts": { silent: 17, reason: PRE_RULE },
-	"clients/safe-spawn.ts": { silent: 18, reason: PRE_RULE },
-	"clients/search-read-registration.ts": { silent: 1, reason: PRE_RULE },
-	"clients/session-event-guard.ts": { silent: 5, reason: PRE_RULE },
-	"clients/session-lifecycle.ts": { silent: 2, reason: PRE_RULE },
-	"clients/session-state-store.ts": { silent: 2, reason: PRE_RULE },
-	"clients/sg-runner.ts": { silent: 5, reason: PRE_RULE },
-	"clients/sgconfig.ts": { silent: 9, reason: PRE_RULE },
-	"clients/slow-fs.ts": { silent: 2, reason: PRE_RULE },
-	"clients/smells-rollup.ts": { silent: 4, reason: PRE_RULE },
-	"clients/source-walker.ts": { silent: 2, reason: PRE_RULE },
-	"clients/test-runner-client.ts": { silent: 15, reason: PRE_RULE },
-	"clients/test-runner-delivery.ts": { silent: 2, reason: PRE_RULE },
-	"clients/todo-scanner.ts": { silent: 2, reason: PRE_RULE },
-	"clients/tool-agreement.ts": { silent: 5, reason: PRE_RULE },
-	"clients/tool-cwd.ts": { silent: 1, reason: PRE_RULE },
-	"clients/tool-policy.ts": { silent: 29, reason: PRE_RULE },
-	"clients/tool-render.ts": { silent: 2, reason: PRE_RULE },
-	"clients/tree-sitter-cache.ts": { silent: 2, reason: PRE_RULE },
-	"clients/tree-sitter-client.ts": { silent: 29, reason: PRE_RULE },
-	"clients/tree-sitter-query-loader.ts": { silent: 3, reason: PRE_RULE },
-	"clients/trivy-client.ts": { silent: 8, reason: PRE_RULE },
-	"clients/tui-fit.ts": { silent: 1, reason: PRE_RULE },
-	"clients/turn-end/delivery-holds.ts": { silent: 1, reason: PRE_RULE },
-	"clients/user-notify.ts": { silent: 1, reason: PRE_RULE },
-	"clients/vanished-instance-marker.ts": { silent: 1, reason: PRE_RULE },
-	"clients/warm-attach.ts": { silent: 2, reason: PRE_RULE },
-	"clients/widget-state.ts": { silent: 3, reason: PRE_RULE },
-	"clients/word-index.ts": { silent: 4, reason: PRE_RULE },
-	"clients/workspace-topology.ts": { silent: 4, reason: PRE_RULE },
-	"index.ts": { silent: 42, reason: SHARP_HOST },
-	"mcp/analyze-cli.ts": { silent: 1, reason: PRE_RULE },
-	"mcp/build-staleness.ts": { silent: 1, reason: PRE_RULE },
-	"mcp/cli.ts": { silent: 2, reason: PRE_RULE },
-	"mcp/server.ts": { silent: 9, reason: PRE_RULE },
-	"mcp/worker.ts": { silent: 2, reason: PRE_RULE },
-	"tools/ast-grep-outline.ts": { silent: 1, reason: PRE_RULE },
-	"tools/ast-grep-replace.ts": { silent: 1, reason: PRE_RULE },
-	"tools/ast-grep-search.ts": { silent: 2, reason: PRE_RULE },
-	"tools/lens-diagnostic-mark.ts": { silent: 6, reason: PRE_RULE },
-	"tools/lens-diagnostics.ts": { silent: 7, reason: PRE_RULE },
-	"tools/lsp-diagnostics.ts": { silent: 10, reason: PRE_RULE },
-	"tools/lsp-navigation.ts": { silent: 10, reason: PRE_RULE },
-	"tools/lsp-structured-output.ts": { silent: 3, reason: PRE_RULE },
-	"tools/module-report.ts": { silent: 3, reason: PRE_RULE },
-	"tools/project-report.ts": { silent: 1, reason: PRE_RULE },
-	"tools/render-compact.ts": { silent: 1, reason: PRE_RULE },
-	"tools/symbol-search.ts": { silent: 1, reason: PRE_RULE },
+	}, // :159, :183, :223, :261, :357
+	"clients/durable-store.ts": {
+		silent: 2,
+		identities: "d8fb5fd4d9ec3e87",
+		reason: PRE_RULE,
+	}, // :49, :103
+	"clients/ephemeral-root.ts": {
+		silent: 1,
+		identities: "e6a61419909e565c",
+		reason: PRE_RULE,
+	}, // :43
+	"clients/event-loop-hold.ts": {
+		silent: 2,
+		identities: "255f028624add8ac",
+		reason: PRE_RULE,
+	}, // :214, :240
+	"clients/extension-log.ts": {
+		silent: 3,
+		identities: "e34ce910fdd5a6f2",
+		reason: PRE_RULE,
+	}, // :399, :409, :491
+	"clients/extension-mode.ts": {
+		silent: 1,
+		identities: "ef68f1432659cf3b",
+		reason: PRE_RULE,
+	}, // :55
+	"clients/file-mutation-queue.ts": {
+		silent: 4,
+		identities: "cc6d3ed22867cf38",
+		reason: PRE_RULE,
+	}, // :104, :141, :187, :202
+	"clients/file-time.ts": {
+		silent: 2,
+		identities: "cef7af043e4732be",
+		reason: PRE_RULE,
+	}, // :148, :202
+	"clients/file-utils.ts": {
+		silent: 11,
+		identities: "282279822595e8b0",
+		reason: PRE_RULE,
+	}, // :141, :161, :179, :183, :186, :228, :299, :725, :1085, :1366, :1397
+	"clients/fix-run-restore.ts": {
+		silent: 10,
+		identities: "24b4689d533166d4",
+		reason: PRE_RULE,
+	}, // :286, :355, :628, :641, :707, :741, :752, :763, :813, :865
+	"clients/fix-worklog.ts": {
+		silent: 3,
+		identities: "ee7debb7350474e6",
+		reason: PRE_RULE,
+	}, // :94, :111, :115
+	"clients/format-service.ts": {
+		silent: 1,
+		identities: "f06cadecbefbe5c1",
+		reason: PRE_RULE,
+	}, // :245
+	"clients/formatters.ts": {
+		silent: 6,
+		identities: "d6645cb458688fe5",
+		reason: PRE_RULE,
+	}, // :241, :262, :399, :876, :1923, :2523
+	"clients/generated-artifacts.ts": {
+		silent: 3,
+		identities: "a7ec942c4a848e55",
+		reason: PRE_RULE,
+	}, // :312, :318, :345
+	"clients/generation-lock.ts": {
+		silent: 10,
+		identities: "d0111a1585665525",
+		reason: PRE_RULE,
+	}, // :47, :57, :73, :117, :152, :192, :215, :243, :282, :310
+	"clients/git-guard.ts": {
+		silent: 3,
+		identities: "20ed3070a07a59a4",
+		reason: PRE_RULE,
+	}, // :69, :908, :1432
+	"clients/git-tracked-ignore.ts": {
+		silent: 2,
+		identities: "e03578ef6c8bfb42",
+		reason: PRE_RULE,
+	}, // :108, :205
+	"clients/gitleaks-client.ts": {
+		silent: 9,
+		identities: "a84c4542ebcd6944",
+		reason: PRE_RULE,
+	}, // :158, :269, :287, :301, :323, :461, :470, :525, :592
+	"clients/govulncheck-client.ts": {
+		silent: 5,
+		identities: "e7742f12d2580226",
+		reason: PRE_RULE,
+	}, // :124, :382, :535, :663, :706
+	"clients/grammar-source.ts": {
+		silent: 5,
+		identities: "aad8433a62e60775",
+		reason: PRE_RULE,
+	}, // :312, :318, :407, :478, :605
+	"clients/gzip-stage-write.ts": {
+		silent: 4,
+		identities: "c936f6edb9b0e58b",
+		reason: PRE_RULE,
+	}, // :186, :299, :367, :371
+	"clients/hashline-anchor.ts": {
+		silent: 2,
+		identities: "516f1dcd20b2d537",
+		reason: PRE_RULE,
+	}, // :425, :443
+	"clients/inline-blocker-dispositions.ts": {
+		silent: 1,
+		identities: "2af25a7d151017a8",
+		reason: PRE_RULE,
+	}, // :92
+	"clients/install-diagnostics.ts": {
+		silent: 2,
+		identities: "077a81da84ea60c4",
+		reason: PRE_RULE,
+	}, // :63, :176
+	"clients/installer/index.ts": {
+		silent: 60,
+		identities: "b2e5789ab5826d04",
+		reason: PRE_RULE,
+	}, // :155, :192, :197, :207, :218, :231, :288, :2163, :2470, :2557, :2576, :2710, :2722, :2748, :3083, :3123, :3158, :3170, :3292, :3315, :3337, :3507, :3603, :3671, :3699, :3788, :3866, :3874, :3989, :4549, :4602, :4793, :4833, :5306, :5341, :5494, :5511, :5536, :5567, :5570, :5576, :5592, :5629, :5632, :5717, :5804, :5905, :5912, :6104, :6127, :6185, :6195, :6199, :6232, :6296, :6332, :6369, :6487, :6646, :6716
+	"clients/installer/managed-tool-refresh.ts": {
+		silent: 4,
+		identities: "dbbc0961e686ccc4",
+		reason: PRE_RULE,
+	}, // :226, :235, :261, :468
+	"clients/instance-reaper.ts": {
+		silent: 18,
+		identities: "89697257f4ce69e2",
+		reason: PRE_RULE,
+	}, // :364, :647, :653, :656, :679, :1367, :1374, :1494, :1567, :1626, :1631, :1655, :1671, :1775, :1798, :1819, :1822, :1852
+	"clients/instance-registry-lock.ts": {
+		silent: 3,
+		identities: "adf0229e77f6e200",
+		reason: PRE_RULE,
+	}, // :59, :70, :81
+	"clients/instance-registry-tail.ts": {
+		silent: 1,
+		identities: "8c6a80350bd7ac81",
+		reason: PRE_RULE,
+	}, // :58
+	"clients/instance-registry.ts": {
+		silent: 5,
+		identities: "7aaac59bf92966d2",
+		reason: PRE_RULE,
+	}, // :294, :313, :333, :365, :1509
+	"clients/io-bridge.ts": {
+		silent: 5,
+		identities: "3a48a5c9fd94e52d",
+		reason: PRE_RULE,
+	}, // :362, :477, :521, :528, :611
+	"clients/jscpd-client.ts": {
+		silent: 5,
+		identities: "3950a10dc006ea1a",
+		reason: PRE_RULE,
+	}, // :107, :118, :507, :513, :571
+	"clients/json-cache-read.ts": {
+		silent: 4,
+		identities: "83a11b3167dae771",
+		reason: PRE_RULE,
+	}, // :41, :44, :64, :67
+	"clients/knip-client.ts": {
+		silent: 8,
+		identities: "6481d65af921cbbb",
+		reason: PRE_RULE,
+	}, // :144, :204, :271, :631, :714, :880, :890, :1070
+	"clients/language-profile.ts": {
+		silent: 2,
+		identities: "c893d59f9960490a",
+		reason: PRE_RULE,
+	}, // :161, :219
+	"clients/ledger-bounds.ts": {
+		silent: 1,
+		identities: "4fc0d0d55f04d765",
+		reason: PRE_RULE,
+	}, // :42
+	"clients/lens-config.ts": {
+		silent: 1,
+		identities: "d1cd5dba9c378655",
+		reason: PRE_RULE,
+	}, // :500
+	"clients/log-cleanup.ts": {
+		silent: 6,
+		identities: "a96b760c3e0e1558",
+		reason: PRE_RULE,
+	}, // :73, :117, :126, :160, :165, :199
+	"clients/lsp-budget.ts": {
+		silent: 1,
+		identities: "288709348a380874",
+		reason: PRE_RULE,
+	}, // :264
+	"clients/lsp-document-symbols.ts": {
+		silent: 1,
+		identities: "cf08efebeaedf178",
+		reason: PRE_RULE,
+	}, // :62
+	"clients/lsp-mutation.ts": {
+		silent: 3,
+		identities: "49f289e5cda4ab92",
+		reason: PRE_RULE,
+	}, // :393, :482, :524
+	"clients/lsp/aggregation.ts": {
+		silent: 1,
+		identities: "6c214f59992042fc",
+		reason: PRE_RULE,
+	}, // :225
+	"clients/lsp/cascade-tier.ts": {
+		silent: 1,
+		identities: "88f5e75517393215",
+		reason: PRE_RULE,
+	}, // :342
+	"clients/lsp/client-registry.ts": {
+		silent: 8,
+		identities: "456576ded8218555",
+		reason: PRE_RULE,
+	}, // :483, :777, :767, :818, :1034, :1369, :1466, :1782
+	"clients/lsp/client.ts": {
+		silent: 35,
+		identities: "6d005aad696ad153",
+		reason: PRE_RULE,
+	}, // :1477, :1535, :1598, :1605, :1693, :3090, :3343, :3736, :3829, :3853, :3899, :4526, :4715, :4893, :5097, :5270, :5337, :5351, :5454, :5504, :5638, :5659, :5781, :5791, :5880, :5946, :6067, :7189, :7192, :7206, :7268, :7548, :7560, :7569, :7583
+	"clients/lsp/config.ts": {
+		silent: 1,
+		identities: "2d7a194222ea5fe3",
+		reason: PRE_RULE,
+	}, // :984
+	"clients/lsp/created-import-targets.ts": {
+		silent: 2,
+		identities: "48f09842fe4581c6",
+		reason: PRE_RULE,
+	}, // :118, :174
+	"clients/lsp/diagnostic-binding.ts": {
+		silent: 2,
+		identities: "543891de73d83525",
+		reason: PRE_RULE,
+	}, // :620, :634
+	"clients/lsp/document-drift.ts": {
+		silent: 5,
+		identities: "c63189f325c29fda",
+		reason: PRE_RULE,
+	}, // :537, :619, :634, :684, :712
+	"clients/lsp/edits.ts": {
+		silent: 3,
+		identities: "09a1a8f35510f0a5",
+		reason: PRE_RULE,
+	}, // :1023, :1055, :1103
+	"clients/lsp/index.ts": {
+		silent: 43,
+		identities: "b71b862163ebc5f9",
+		reason: SHARP_DID_SAVE,
+	}, // :235, :352, :381, :1157, :1757, :2014, :2312, :2346, :2582, :2735, :2839, :3555, :3615, :3649, :4082, :4614, :4646, :4896, :5025, :5088, :5099, :5145, :5234, :5259, :5284, :5569, :5632, :5983, :6007, :6172, :6249, :6268, :7781, :8348, :8580, :8648, :8770, :8864, :8924, :9142, :9269, :9642, :9693
+	"clients/lsp/jvm-runtime.ts": {
+		silent: 1,
+		identities: "53f0ed4e5a760b9e",
+		reason: PRE_RULE,
+	}, // :65
+	"clients/lsp/launch.ts": {
+		silent: 11,
+		identities: "679b905d4af5e7db",
+		reason: PRE_RULE,
+	}, // :97, :195, :294, :359, :392, :649, :655, :881, :1110, :1121, :1132
+	"clients/lsp/lombok.ts": {
+		silent: 6,
+		identities: "a076d98b1826881f",
+		reason: PRE_RULE,
+	}, // :18, :28, :81, :100, :124, :132
+	"clients/lsp/ruby-drive-dirs.ts": {
+		silent: 2,
+		identities: "143b096dfc935397",
+		reason: PRE_RULE,
+	}, // :57, :79
+	"clients/lsp/server.ts": {
+		silent: 28,
+		identities: "8d1137f64482cd05",
+		reason: PRE_RULE,
+	}, // :185, :335, :759, :790, :1019, :1219, :1352, :1484, :1673, :1754, :1776, :2086, :2165, :2180, :2194, :2211, :2229, :2261, :2288, :2301, :2379, :2391, :2412, :2433, :2625, :2633, :2663, :3201
+	"clients/lsp/service-singleton.ts": {
+		silent: 1,
+		identities: "f88b642322d541aa",
+		reason: PRE_RULE,
+	}, // :50
+	"clients/lsp/tsserver-sync.ts": {
+		silent: 2,
+		identities: "e03578ef6c8bfb42",
+		reason: PRE_RULE,
+	}, // :308, :446
+	"clients/lsp/wait-policy/strategies.ts": {
+		silent: 1,
+		identities: "cf08efebeaedf178",
+		reason: PRE_RULE,
+	}, // :73
+	"clients/lsp/workspace-diagnostics-cache.ts": {
+		silent: 5,
+		identities: "1ee0daee82463bab",
+		reason: PRE_RULE,
+	}, // :370, :531, :548, :565, :1119
+	"clients/lsp/workspace-sweep-hold.ts": {
+		silent: 1,
+		identities: "8e09f7f1ce000f9b",
+		reason: PRE_RULE,
+	}, // :79
+	"clients/mcp/analyze.ts": {
+		silent: 5,
+		identities: "ee5f67578ae6d3bb",
+		reason: PRE_RULE,
+	}, // :485, :503, :600, :618, :660
+	"clients/mcp/ipc.ts": {
+		silent: 6,
+		identities: "9306ee39e70c73ca",
+		reason: PRE_RULE,
+	}, // :207, :382, :630, :696, :743, :922
+	"clients/mcp/review.ts": {
+		silent: 3,
+		identities: "fd3a6c2269932b0b",
+		reason: PRE_RULE,
+	}, // :77, :124, :149
+	"clients/mcp/session.ts": {
+		silent: 2,
+		identities: "d4a62b98949576c4",
+		reason: PRE_RULE,
+	}, // :280, :320
+	"clients/memory-sampler.ts": {
+		silent: 2,
+		identities: "f46e7245193d13fa",
+		reason: PRE_RULE,
+	}, // :77, :387
+	"clients/metrics-history.ts": {
+		silent: 2,
+		identities: "b02d9c45b1a0e889",
+		reason: PRE_RULE,
+	}, // :95, :119
+	"clients/module-report-lsp.ts": {
+		silent: 3,
+		identities: "2482911206cf896e",
+		reason: PRE_RULE,
+	}, // :135, :184, :191
+	"clients/module-report.ts": {
+		silent: 5,
+		identities: "c5963dbdc097fc3c",
+		reason: PRE_RULE,
+	}, // :552, :1915, :1979, :2498, :2780
+	"clients/mutation-attribution.ts": {
+		silent: 2,
+		identities: "ea2c0a9a5c5916ae",
+		reason: PRE_RULE,
+	}, // :227, :442
+	"clients/mutation-bridge.ts": {
+		silent: 2,
+		identities: "f705c60981bbbd4f",
+		reason: PRE_RULE,
+	}, // :594, :624
+	"clients/ndjson-logger.ts": {
+		silent: 12,
+		identities: "6a046743eeec075d",
+		reason: PRE_RULE,
+	}, // :64, :479, :486, :605, :632, :675, :694, :822, :829, :880, :888, :1001
+	"clients/observed-mutation-sources.ts": {
+		silent: 4,
+		identities: "9a038c965abee7e9",
+		reason: PRE_RULE,
+	}, // :63, :68, :74, :99
+	"clients/observed-mutation.ts": {
+		silent: 8,
+		identities: "8146e349abd731ab",
+		reason: PRE_RULE,
+	}, // :459, :581, :633, :978, :1318, :1356, :1424, :1430
+	"clients/opaque-mutation-scan.ts": {
+		silent: 3,
+		identities: "4fe1dce4f3ce2aa7",
+		reason: PRE_RULE,
+	}, // :224, :257, :843
+	"clients/opengrep-client.ts": {
+		silent: 3,
+		identities: "2062917950cbdb52",
+		reason: PRE_RULE,
+	}, // :291, :328, :387
+	"clients/out-of-band-changes.ts": {
+		silent: 3,
+		identities: "7d466b1252af9e30",
+		reason: SHARP_INSTALL_STAMP,
+	}, // :129, :140, :189
+	"clients/package-manager.ts": {
+		silent: 2,
+		identities: "56b6f18636fed761",
+		reason: PRE_RULE,
+	}, // :113, :468
+	"clients/partial-edit-apply.ts": {
+		silent: 3,
+		identities: "9457f6c639682a54",
+		reason: PRE_RULE,
+	}, // :304, :457, :477
+	"clients/path-birth.ts": {
+		silent: 1,
+		identities: "b47f07ef1f3c61f0",
+		reason: PRE_RULE,
+	}, // :97
+	"clients/path-utils.ts": {
+		silent: 9,
+		identities: "9bb4a21080715db3",
+		reason: PRE_RULE,
+	}, // :286, :297, :303, :316, :410, :433, :702, :1215, :1471
+	"clients/performance-report.ts": {
+		silent: 3,
+		identities: "9285fe879a302231",
+		reason: PRE_RULE,
+	}, // :356, :372, :376
+	"clients/persistent-reverify.ts": {
+		silent: 3,
+		identities: "ece0384b1c5b417a",
+		reason: PRE_RULE,
+	}, // :130, :204, :233
+	"clients/pipeline.ts": {
+		silent: 10,
+		identities: "c6617487a0244394",
+		reason: PRE_RULE,
+	}, // :194, :216, :877, :1520, :1550, :1621, :1847, :2203, :2357, :2767
+	"clients/probe-home-state.ts": {
+		silent: 1,
+		identities: "0c038fd772637ccb",
+		reason: PRE_RULE,
+	}, // :281
+	"clients/process-snapshot.ts": {
+		silent: 1,
+		identities: "d86d2439be475af1",
+		reason: PRE_RULE,
+	}, // :107
+	"clients/project-changes.ts": {
+		silent: 4,
+		identities: "02163780b39ee183",
+		reason: PRE_RULE,
+	}, // :79, :120, :144, :334
+	"clients/project-conventions.ts": {
+		silent: 5,
+		identities: "a76659ea40c745ae",
+		reason: PRE_RULE,
+	}, // :36, :53, :63, :170, :181
+	"clients/project-diagnostics/cache.ts": {
+		silent: 2,
+		identities: "9b85b4f2c95abd54",
+		reason: PRE_RULE,
+	}, // :118, :137
+	"clients/project-diagnostics/fresh-fetch.ts": {
+		silent: 1,
+		identities: "20c1896f3065b063",
+		reason: PRE_RULE,
+	}, // :967
+	"clients/project-diagnostics/scanner.ts": {
+		silent: 6,
+		identities: "41c098710d199d8d",
+		reason: PRE_RULE,
+	}, // :243, :262, :290, :320, :344, :383
+	"clients/project-lens-config.ts": {
+		silent: 2,
+		identities: "f735901d17f7af70",
+		reason: PRE_RULE,
+	}, // :503, :511
+	"clients/project-report.ts": {
+		silent: 3,
+		identities: "7b7b4a6060f610aa",
+		reason: PRE_RULE,
+	}, // :795, :828, :840
+	"clients/project-snapshot-persist-worker.ts": {
+		silent: 1,
+		identities: "f21a4197b0781a28",
+		reason: PRE_RULE,
+	}, // :67
+	"clients/project-snapshot.ts": {
+		silent: 15,
+		identities: "8f598baa5563de5d",
+		reason: PRE_RULE,
+	}, // :520, :532, :573, :701, :1085, :1430, :1460, :1907, :1970, :2007, :2043, :2049, :2083, :2551, :2588
+	"clients/python-environment.ts": {
+		silent: 2,
+		identities: "dcac541cf34d63cd",
+		reason: PRE_RULE,
+	}, // :84, :336
+	"clients/quiet-window.ts": {
+		silent: 2,
+		identities: "2c704faa2d7cb264",
+		reason: PRE_RULE,
+	}, // :176, :305
+	"clients/read-expansion.ts": {
+		silent: 1,
+		identities: "cf08efebeaedf178",
+		reason: PRE_RULE,
+	}, // :345
+	"clients/read-guard-branch.ts": {
+		silent: 3,
+		identities: "2920b445679fa702",
+		reason: PRE_RULE,
+	}, // :76, :101, :104
+	"clients/read-guard-tool-lines.ts": {
+		silent: 1,
+		identities: "cf08efebeaedf178",
+		reason: PRE_RULE,
+	}, // :1085
+	"clients/read-guard.ts": {
+		silent: 11,
+		identities: "8047974a7b2f7154",
+		reason: PRE_RULE,
+	}, // :298, :370, :382, :552, :569, :847, :910, :1926, :2578, :2607, :2832
+	"clients/recent-touches.ts": {
+		silent: 6,
+		identities: "775f4885df22095e",
+		reason: PRE_RULE,
+	}, // :96, :111, :182, :225, :278, :308
+	"clients/resource-sampler.ts": {
+		silent: 5,
+		identities: "a6c6697ae310d788",
+		reason: PRE_RULE,
+	}, // :346, :503, :660, :713, :722
+	"clients/reverse-deps.ts": {
+		silent: 2,
+		identities: "9cf67dc750bc40cb",
+		reason: PRE_RULE,
+	}, // :306, :343
+	"clients/review-graph/builder.ts": {
+		silent: 19,
+		identities: "c13466bb5df2c24b",
+		reason: PRE_RULE,
+	}, // :1254, :1303, :1399, :1989, :2019, :2025, :2040, :2046, :2138, :2503, :2601, :2727, :2769, :3200, :4676, :5529, :5608, :6031, :6363
+	"clients/review-graph/git-identity.ts": {
+		silent: 10,
+		identities: "719b257b5989f9db",
+		reason: PRE_RULE,
+	}, // :67, :82, :107, :122, :137, :204, :217, :247, :261, :292
+	"clients/review-graph/import-resolvers.ts": {
+		silent: 5,
+		identities: "11acf9263a41f8fa",
+		reason: PRE_RULE,
+	}, // :49, :57, :79, :243, :448
+	"clients/review-graph/tsconfig-paths.ts": {
+		silent: 6,
+		identities: "66806015dc2b9e36",
+		reason: PRE_RULE,
+	}, // :84, :98, :139, :191, :230, :264
+	"clients/review-graph/workspace-modules.ts": {
+		silent: 11,
+		identities: "cdada467484d42e5",
+		reason: PRE_RULE,
+	}, // :73, :100, :144, :226, :252, :266, :287, :299, :463, :498, :509
+	"clients/ruff-client.ts": {
+		silent: 2,
+		identities: "bb937b302033da40",
+		reason: PRE_RULE,
+	}, // :182, :247
+	"clients/runtime-agent-end.ts": {
+		silent: 4,
+		identities: "38ca64e7de6ced49",
+		reason: PRE_RULE,
+	}, // :604, :864, :880, :1030
+	"clients/runtime-coordinator.ts": {
+		silent: 4,
+		identities: "4fdad997e8135617",
+		reason: PRE_RULE,
+	}, // :1027, :1085, :1531, :2909
+	"clients/runtime-session.ts": {
+		silent: 25,
+		identities: "a7ef9ab6e86045e5",
+		reason: PRE_RULE,
+	}, // :385, :755, :803, :810, :896, :923, :971, :1005, :1007, :1032, :1062, :1195, :1246, :1389, :1986, :2560, :2592, :2695, :2766, :2771, :2837, :3025, :3355, :3369, :3442
+	"clients/runtime-tool-call.ts": {
+		silent: 11,
+		identities: "9c12ec155c04701f",
+		reason: PRE_RULE,
+	}, // :286, :461, :485, :799, :960, :966, :1133, :1356, :1705, :1813, :1906
+	"clients/runtime-tool-result.ts": {
+		silent: 15,
+		identities: "c768149ea66bc1a5",
+		reason: SHARP_PRESCAN,
+	}, // :261, :275, :405, :837, :845, :876, :899, :940, :1135, :1587, :2089, :2322, :2756, :3334, :3558
+	"clients/runtime-turn.ts": {
+		silent: 20,
+		identities: "4baf397dfa7d293d",
+		reason: PRE_RULE,
+	}, // :393, :413, :438, :689, :738, :750, :817, :1043, :3319, :3325, :3331, :4697, :4524, :4645, :4678, :4899, :5032, :5352, :5393, :5648
+	"clients/safe-spawn.ts": {
+		silent: 18,
+		identities: "e64267868c7a0d5b",
+		reason: PRE_RULE,
+	}, // :192, :201, :229, :465, :511, :603, :660, :674, :677, :1157, :1397, :1866, :1936, :1966, :2012, :2045, :2192, :2249
+	"clients/search-read-registration.ts": {
+		silent: 1,
+		identities: "a37a1b3a1638df7c",
+		reason: PRE_RULE,
+	}, // :101
+	"clients/session-event-guard.ts": {
+		silent: 5,
+		identities: "ef873da4ad050442",
+		reason: PRE_RULE,
+	}, // :201, :249, :271, :293, :313
+	"clients/session-lifecycle.ts": {
+		silent: 2,
+		identities: "d671efebf03f8ddc",
+		reason: PRE_RULE,
+	}, // :344, :388
+	"clients/session-state-store.ts": {
+		silent: 2,
+		identities: "63f7bc4c66d21ffc",
+		reason: PRE_RULE,
+	}, // :104, :144
+	"clients/sg-runner.ts": {
+		silent: 5,
+		identities: "c770a964abd6f1bd",
+		reason: PRE_RULE,
+	}, // :171, :579, :608, :904, :1108
+	"clients/sgconfig.ts": {
+		silent: 9,
+		identities: "e709eb6e68b73320",
+		reason: PRE_RULE,
+	}, // :61, :144, :176, :212, :405, :424, :447, :476, :480
+	"clients/single-flight.ts": {
+		silent: 1,
+		identities: "9b712a522f01e05f",
+		reason: PRE_RULE,
+	}, // :218
+	"clients/slow-fs.ts": {
+		silent: 2,
+		identities: "9c38681ffe39b677",
+		reason: PRE_RULE,
+	}, // :87, :105
+	"clients/smells-rollup.ts": {
+		silent: 4,
+		identities: "8a0a16dbf3b7b2e5",
+		reason: PRE_RULE,
+	}, // :101, :115, :120, :137
+	"clients/source-walker.ts": {
+		silent: 2,
+		identities: "353a61a7a5f28c4e",
+		reason: PRE_RULE,
+	}, // :48, :73
+	"clients/test-runner-client.ts": {
+		silent: 16,
+		identities: "06aea9d4bef19d77",
+		reason: PRE_RULE,
+	}, // :325, :734, :749, :1046, :1096, :1112, :1156, :1185, :1230, :1334, :1535, :1914, :1991, :2233, :3368, :3377
+	"clients/test-runner-delivery.ts": {
+		silent: 2,
+		identities: "f4ada83f93d3b6b9",
+		reason: PRE_RULE,
+	}, // :319, :337
+	"clients/todo-scanner.ts": {
+		silent: 2,
+		identities: "353a61a7a5f28c4e",
+		reason: PRE_RULE,
+	}, // :123, :130
+	"clients/tool-agreement.ts": {
+		silent: 5,
+		identities: "18f6b0c1def027a3",
+		reason: PRE_RULE,
+	}, // :318, :498, :504, :571, :696
+	"clients/tool-cwd.ts": {
+		silent: 1,
+		identities: "59e54af7696610f7",
+		reason: PRE_RULE,
+	}, // :162
+	"clients/tool-policy.ts": {
+		silent: 29,
+		identities: "b5570d8af2930d78",
+		reason: PRE_RULE,
+	}, // :1969, :1985, :2009, :2047, :2099, :2111, :2127, :2142, :2149, :2163, :2180, :2194, :2201, :2219, :2226, :2240, :2260, :2273, :2284, :2301, :2822, :2878, :2904, :2924, :2960, :3019, :3036, :3055, :3063
+	"clients/tool-render.ts": {
+		silent: 2,
+		identities: "bf1a83100ccaa695",
+		reason: PRE_RULE,
+	}, // :103, :167
+	"clients/tree-sitter-cache.ts": {
+		silent: 2,
+		identities: "e5a49d8cff6be1f2",
+		reason: PRE_RULE,
+	}, // :238, :406
+	"clients/tree-sitter-client.ts": {
+		silent: 30,
+		identities: "b4c4b8bd525f5d57",
+		reason: PRE_RULE,
+	}, // :291, :306, :998, :1054, :1082, :1098, :1346, :1473, :1815, :1911, :2033, :2057, :2185, :2364, :2530, :2570, :2777, :2827, :3678, :3695, :3705, :3724, :3751, :3776, :3827, :3871, :3883, :3946, :5276, :5321
+	"clients/tree-sitter-query-loader.ts": {
+		silent: 3,
+		identities: "849c788bdb73aed7",
+		reason: PRE_RULE,
+	}, // :261, :269, :286
+	"clients/tree-sitter-symbol-extractor.ts": {
+		silent: 1,
+		identities: "415996e0098221e7",
+		reason: PRE_RULE,
+	}, // :848
+	"clients/trivy-client.ts": {
+		silent: 8,
+		identities: "184de0f9f29457b3",
+		reason: PRE_RULE,
+	}, // :165, :186, :220, :403, :412, :442, :496, :539
+	"clients/tui-fit.ts": {
+		silent: 1,
+		identities: "bdb9736abc0aae9d",
+		reason: PRE_RULE,
+	}, // :37
+	"clients/turn-end/delivery-holds.ts": {
+		silent: 1,
+		identities: "b28b485463e8a792",
+		reason: PRE_RULE,
+	}, // :141
+	"clients/user-notify.ts": {
+		silent: 1,
+		identities: "05db28b791950627",
+		reason: PRE_RULE,
+	}, // :79
+	"clients/vanished-instance-marker.ts": {
+		silent: 1,
+		identities: "785638035175ccc4",
+		reason: PRE_RULE,
+	}, // :74
+	"clients/warm-attach.ts": {
+		silent: 2,
+		identities: "67b382837dbc5a58",
+		reason: PRE_RULE,
+	}, // :115, :245
+	"clients/widget-state.ts": {
+		silent: 3,
+		identities: "e99ef23d332bc102",
+		reason: PRE_RULE,
+	}, // :1476, :1621, :1862
+	"clients/word-index.ts": {
+		silent: 5,
+		identities: "7d9f55557f569789",
+		reason: PRE_RULE,
+	}, // :846, :847, :1102, :1267, :1421
+	"clients/workspace-topology.ts": {
+		silent: 5,
+		identities: "24eaf0e56c4d43a3",
+		reason: PRE_RULE,
+	}, // :196, :204, :228, :333, :572
+	"index.ts": {
+		silent: 49,
+		identities: "f18d77c651d657a6",
+		reason: SHARP_HOST,
+	}, // :502, :653, :759, :763, :1061, :1084, :1390, :1540, :1697, :1716, :1725, :1768, :1835, :2079, :2090, :2123, :2174, :2204, :2310, :2362, :2452, :2480, :2552, :2653, :2665, :2722, :2728, :2850, :2874, :2941, :3103, :3190, :3316, :3348, :3424, :3597, :3618, :3695, :3800, :3833, :3920, :3957, :3972, :3999, :4034, :4045, :4363, :4370, :4588
+	"mcp/analyze-cli.ts": {
+		silent: 1,
+		identities: "e823b8d7883207bc",
+		reason: PRE_RULE,
+	}, // :122
+	"mcp/build-staleness.ts": {
+		silent: 1,
+		identities: "cf08efebeaedf178",
+		reason: PRE_RULE,
+	}, // :44
+	"mcp/cli.ts": {
+		silent: 2,
+		identities: "04f5bd7ee1066cf3",
+		reason: PRE_RULE,
+	}, // :59, :170
+	"mcp/server.ts": {
+		silent: 9,
+		identities: "e58e51e6b55e02fa",
+		reason: PRE_RULE,
+	}, // :210, :238, :293, :455, :490, :1629, :1632, :2057, :2100
+	"mcp/worker.ts": {
+		silent: 2,
+		identities: "5798817de4e32a58",
+		reason: PRE_RULE,
+	}, // :49, :62
+	"tools/ast-grep-outline.ts": {
+		silent: 1,
+		identities: "33a1990d59e82460",
+		reason: PRE_RULE,
+	}, // :158
+	"tools/ast-grep-replace.ts": {
+		silent: 1,
+		identities: "048676a5706298a4",
+		reason: PRE_RULE,
+	}, // :198
+	"tools/ast-grep-search.ts": {
+		silent: 2,
+		identities: "a2cf7c73ed7f3754",
+		reason: PRE_RULE,
+	}, // :517, :524
+	"tools/lens-diagnostic-mark.ts": {
+		silent: 6,
+		identities: "1af53558e8a5be76",
+		reason: PRE_RULE,
+	}, // :110, :188, :222, :337, :387, :412
+	"tools/lens-diagnostics.ts": {
+		silent: 7,
+		identities: "0939abd4809b0410",
+		reason: PRE_RULE,
+	}, // :254, :678, :879, :939, :1391, :1471, :2162
+	"tools/lsp-diagnostics.ts": {
+		silent: 10,
+		identities: "2e5c32f96dcee285",
+		reason: PRE_RULE,
+	}, // :371, :405, :628, :861, :1026, :1084, :1184, :1405, :1452, :2477
+	"tools/lsp-navigation.ts": {
+		silent: 10,
+		identities: "158733f8dbc9b754",
+		reason: PRE_RULE,
+	}, // :531, :741, :759, :824, :838, :1334, :1703, :1808, :1842, :2030
+	"tools/lsp-structured-output.ts": {
+		silent: 3,
+		identities: "0460d5b535aef4a2",
+		reason: PRE_RULE,
+	}, // :129, :299, :315
+	"tools/module-report.ts": {
+		silent: 3,
+		identities: "ab30e249637710b7",
+		reason: PRE_RULE,
+	}, // :146, :302, :462
+	"tools/project-report.ts": {
+		silent: 1,
+		identities: "1a38c8d15d7f5a2f",
+		reason: PRE_RULE,
+	}, // :94
+	"tools/render-compact.ts": {
+		silent: 1,
+		identities: "4a953c06bc009ed6",
+		reason: PRE_RULE,
+	}, // :489
+	"tools/symbol-search.ts": {
+		silent: 1,
+		identities: "17d3c06b8822a983",
+		reason: PRE_RULE,
+	}, // :92
 };
 
 /**
  * The total, pinned separately from the rows so a row cannot be swapped for
- * another row's growth. 1,155 at the base commit; this change's four records
- * and one `none:` line took it to 1,146.
+ * another row's growth. 1,155 at the base commit; this change's records and
+ * `none:` lines took it to 1,146. On the merge of `origin/master` (`d7f85d909`)
+ * the every-path rule (#4603 review F1) reclassified 20 conditional records and
+ * 7 conditional rethrows as `silent`, and reading `.then(ok, onRejected)` made
+ * 25 more silent sites visible, so the merged population is 1,195 (1,143 under
+ * the old rule on the same tree). It moves only downward from here.
  */
-const PINNED_TOTAL = 1146;
+const PINNED_TOTAL = 1195;
 
 interface Census {
 	byFile: Map<string, CatchSite[]>;
@@ -427,11 +1427,35 @@ function sortedByFile<T>(entries: Iterable<[string, T]>): Array<[string, T]> {
 	return [...entries].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
-/** One pasteable `"file": { silent: n, reason: … },` line per file. */
+/** The sorted per-handler identities, with `#2` for an identical repeat. */
+function identityList(sites: ReadonlyArray<CatchSite>): string[] {
+	const counts = new Map<string, number>();
+	for (const site of sites)
+		counts.set(site.identity, (counts.get(site.identity) ?? 0) + 1);
+	const listed: string[] = [];
+	for (const [identity, count] of [...counts].sort(([a], [b]) =>
+		a < b ? -1 : a > b ? 1 : 0,
+	)) {
+		listed.push(identity);
+		for (let repeat = 2; repeat <= count; repeat += 1)
+			listed.push(`${identity}#${repeat}`);
+	}
+	return listed.sort();
+}
+
+/** The admitted set's content identity: 16 hex over the sorted handler ids. */
+function identityDigest(sites: ReadonlyArray<CatchSite>): string {
+	return createHash("sha256")
+		.update(identityList(sites).join("\n"))
+		.digest("hex")
+		.slice(0, 16);
+}
+
+/** One pasteable `"file": { silent: n, identities: …, reason: … },` line. */
 function pins(c: Census): string[] {
 	return sortedByFile(c.byFile).map(([file, sites]) => {
-		const lines = sites.map((site) => site.line).join(", ");
-		return `\t"${file}": { silent: ${sites.length}, reason: PRE_RULE }, // ${lines}`;
+		const lines = sites.map((site) => `:${site.line}`).join(", ");
+		return `\t"${file}": { silent: ${sites.length}, identities: "${identityDigest(sites)}", reason: PRE_RULE }, // ${lines}`;
 	});
 }
 
@@ -460,10 +1484,14 @@ function auditSilentCatches(
 		const detail = sites
 			.map((site) => `:${site.line} ${site.snippet}`)
 			.join(" | ");
-		if (!allowed) unlisted.push(`${file}: ${sites.length} silent (${detail})`);
-		else if (allowed.silent !== sites.length)
+		if (!allowed) {
+			unlisted.push(`${file}: ${sites.length} silent (${detail})`);
+			continue;
+		}
+		const digest = identityDigest(sites);
+		if (allowed.silent !== sites.length || allowed.identities !== digest)
 			mismatched.push(
-				`${file}: pinned ${allowed.silent}, found ${sites.length} (${detail})`,
+				`${file}: pinned ${allowed.silent} [${allowed.identities}], found ${sites.length} [${digest}] (${detail})`,
 			);
 	}
 	return {
@@ -496,6 +1524,7 @@ function censusOf(
 				verdict: "silent" as const,
 				records: [],
 				snippet: "{}",
+				identity: `site${index + 1}`,
 			})),
 		);
 		silent += count;
@@ -511,7 +1540,19 @@ function censusOf(
 	};
 }
 
-const ADMITTED: Admission = { silent: 1, reason: PRE_RULE };
+/** The admission a one-handler fixture file gets, with its own identity. */
+function admitted(count = 1): Admission {
+	const sites = Array.from({ length: count }, (_, index) => ({
+		identity: `site${index + 1}`,
+	})) as CatchSite[];
+	return {
+		silent: count,
+		identities: identityDigest(sites),
+		reason: PRE_RULE,
+	};
+}
+
+const ADMITTED: Admission = admitted();
 
 describe("silent-catch sweep", () => {
 	it("scans the shipped trees", () => {
@@ -593,20 +1634,41 @@ describe("the audit's own branches", () => {
 			{ "clients/old.ts": ADMITTED },
 			100,
 		);
-		expect(audit.mismatched).toEqual([
-			"clients/old.ts: pinned 1, found 3 (:1 {} | :2 {} | :3 {})",
-		]);
+		expect(audit.mismatched).toHaveLength(1);
+		expect(audit.mismatched[0]).toContain("pinned 1 [");
+		expect(audit.mismatched[0]).toContain("found 3 [");
 	});
 
 	it("names a file whose silent count fell below its pin", () => {
 		const audit = auditSilentCatches(
 			censusOf({ "clients/old.ts": 1 }),
-			{ "clients/old.ts": { silent: 2, reason: PRE_RULE } },
+			{ "clients/old.ts": admitted(2) },
 			100,
 		);
-		expect(audit.mismatched).toEqual([
-			"clients/old.ts: pinned 2, found 1 (:1 {})",
-		]);
+		expect(audit.mismatched).toHaveLength(1);
+		expect(audit.mismatched[0]).toContain("pinned 2 [");
+		expect(audit.mismatched[0]).toContain("found 1 [");
+	});
+
+	it("names a file whose handlers were swapped under a level count", () => {
+		// #4603 F3: one new silent handler plus one removal (or the same count
+		// after a `none:` line) keeps the count level, so the identity set is
+		// the pin that reds. AGENTS.md shape 36: count-based laundering.
+		const audit = auditSilentCatches(
+			censusOf({ "clients/old.ts": 2 }),
+			{ "clients/old.ts": admitted(2) },
+			100,
+		);
+		expect(audit.mismatched).toEqual([]);
+
+		const swapped = auditSilentCatches(
+			censusWith({ "clients/old.ts": ["site1", "site3"] }),
+			{ "clients/old.ts": admitted(2) },
+			100,
+		);
+		expect(swapped.mismatched).toHaveLength(1);
+		expect(swapped.mismatched[0]).toContain("pinned 2 [");
+		expect(swapped.mismatched[0]).toContain("found 2 [");
 	});
 
 	it("names a pinned row with no silent handler left", () => {
@@ -620,7 +1682,7 @@ describe("the audit's own branches", () => {
 
 	it("names an admission with no stated reason", () => {
 		const audit = auditSilentCatches(censusOf({ "clients/x.ts": 1 }), {
-			"clients/x.ts": { silent: 1, reason: "because" },
+			"clients/x.ts": { ...admitted(), reason: "because" },
 		});
 		expect(audit.unreasoned).toEqual(["clients/x.ts"]);
 	});
@@ -630,10 +1692,39 @@ describe("the audit's own branches", () => {
 			auditSilentCatches(
 				censusOf({ "clients/x.ts": 2 }),
 				{
-					"clients/x.ts": { silent: 2, reason: PRE_RULE },
+					"clients/x.ts": admitted(2),
 				},
 				1,
 			).overTotal,
 		).toBe(true);
 	});
 });
+
+/** A census naming each site's identity directly, for the laundering case. */
+function censusWith(files: Record<string, string[]>): Census {
+	const byFile = new Map<string, CatchSite[]>();
+	let silent = 0;
+	for (const [file, identities] of Object.entries(files)) {
+		byFile.set(
+			file,
+			identities.map((identity, index) => ({
+				line: index + 1,
+				form: "catch-clause" as const,
+				verdict: "silent" as const,
+				records: [],
+				snippet: "{}",
+				identity,
+			})),
+		);
+		silent += identities.length;
+	}
+	return {
+		byFile,
+		recorded: 0,
+		rethrows: 0,
+		declaredNone: 0,
+		silent,
+		unclassified: [],
+		scannedFiles: 1,
+	};
+}

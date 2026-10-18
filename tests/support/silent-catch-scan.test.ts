@@ -204,3 +204,188 @@ describe("spellings the detector was not designed for", () => {
 		).toBe("silent");
 	});
 });
+
+/**
+ * #4603 review F1: a verdict is "every path through the handler", never "some
+ * path". Each case below is a handler that swallows on the path the failure
+ * actually takes while carrying a record seam or a `throw` on another path.
+ */
+describe("a handler is judged on every path, not on one", () => {
+	it("refuses a record seam behind a condition", () => {
+		expect(
+			only(
+				"try { go(); } catch (error) { if (DEBUG) logLatency({ type: 'phase', error }); }",
+			).verdict,
+		).toBe("silent");
+	});
+
+	it("refuses a record seam behind a short circuit", () => {
+		expect(
+			only(
+				"try { go(); } catch (error) { DEBUG && logLatency({ type: 'phase', error }); }",
+			).verdict,
+		).toBe("silent");
+	});
+
+	it("refuses a record seam inside a nested try", () => {
+		expect(
+			only("try { go(); } catch (error) { try { logLatency({}); } finally {} }")
+				.verdict,
+		).toBe("silent");
+	});
+
+	it("refuses a record seam after the handler already returned", () => {
+		expect(
+			only(
+				"try { go(); } catch (error) { if (done) return; logLatency({ type: 'phase' }); }",
+			).verdict,
+		).toBe("silent");
+	});
+
+	it("accepts a record seam that runs before a conditional return", () => {
+		expect(
+			only(
+				"try { go(); } catch (error) { logLatency({ type: 'phase' }); if (done) return; }",
+			).verdict,
+		).toBe("recorded");
+	});
+
+	it("refuses a throw behind a condition", () => {
+		expect(
+			only("try { go(); } catch (error) { if (fatal) throw error; }").verdict,
+		).toBe("silent");
+	});
+
+	it("refuses a throw in one branch of if/else", () => {
+		expect(
+			only(
+				"try { go(); } catch (error) { if (fatal) { throw error; } else { return; } }",
+			).verdict,
+		).toBe("silent");
+	});
+
+	it("refuses a throw inside a nested try that can swallow it", () => {
+		expect(
+			only("try { go(); } catch (error) { try { throw error; } finally {} }")
+				.verdict,
+		).toBe("silent");
+	});
+
+	it("accepts a throw that runs on every path", () => {
+		expect(
+			only("try { go(); } catch (error) { cleanup(); throw error; }").verdict,
+		).toBe("rethrows");
+	});
+});
+
+describe("a handler name resolves in the scope that declares it", () => {
+	it("judges the inner declaration, not an outer name it shadows", () => {
+		// The outer handler records; the inner one swallows. A name-only index
+		// read the outer function and called this site recorded.
+		const sites = scanSilentCatches(
+			[
+				"function handler(error) { logLatency({ type: 'phase', error }); }",
+				"function outer() {",
+				"\tfunction handler() {}",
+				"\tgo().catch(handler);",
+				"}",
+			].join("\n"),
+		);
+		expect(sites).toHaveLength(1);
+		expect(sites[0]?.verdict).toBe("silent");
+	});
+
+	it("judges the inner declaration carried by a var declarator", () => {
+		const sites = scanSilentCatches(
+			[
+				"function outer() {",
+				"\tconst handler = () => {};",
+				"\tgo().catch(handler);",
+				"}",
+				"const handler = (error) => logLatency({ error });",
+			].join("\n"),
+		);
+		expect(sites.map((site) => site.verdict)).toEqual(["silent"]);
+	});
+
+	it("refuses a name declared twice in one scope", () => {
+		const site = only(
+			"var handler = () => {};\nvar handler = () => { throw new Error('x'); };\ngo().catch(handler);",
+		);
+		expect(site.verdict).toBe("unclassified");
+		expect(site.problem).toContain("more than once");
+	});
+});
+
+describe("every spelling of a rejection handler is a site", () => {
+	it("reads a quoted subscript as a catch handler", () => {
+		expect(only('go()["catch"](() => {});').verdict).toBe("silent");
+	});
+
+	it("reads a literal template subscript as a catch handler", () => {
+		expect(only("go()[`catch`](() => {});").verdict).toBe("silent");
+	});
+
+	it("resolves a subscript key bound to a string constant", () => {
+		expect(
+			only("const method = 'catch';\ngo()[method](() => {});").verdict,
+		).toBe("silent");
+	});
+
+	it("refuses a computed subscript key it cannot resolve", () => {
+		const site = only("go()[`${prefix}atch`](() => {});");
+		expect(site.verdict).toBe("unclassified");
+		expect(site.problem).toContain("computed");
+	});
+
+	it("refuses a concatenated subscript key", () => {
+		const site = only('go()["ca" + "tch"](() => {});');
+		expect(site.verdict).toBe("unclassified");
+		expect(site.problem).toContain("concatenated");
+	});
+
+	it("does not read a variable index as a handler spelling", () => {
+		// `arr[i]()` is not evidence of a rejection handler; treating every
+		// indexed call as one would fail closed on the whole tree.
+		expect(scanSilentCatches("function run(arr, i) { arr[i](); }")).toEqual([]);
+	});
+
+	it("reads the second argument of `.then` as the rejection handler", () => {
+		const site = only("go().then(use, () => {});");
+		expect(site.form).toBe("promise-then");
+		expect(site.verdict).toBe("silent");
+		expect(
+			only("go().then(use, (error) => logCascade({ error }));").verdict,
+		).toBe("recorded");
+	});
+
+	it("does not read `.then` with one argument as a handler", () => {
+		expect(scanSilentCatches("go().then(use);")).toEqual([]);
+	});
+
+	it("does not read `.then(ok, undefined)` as a swallowing handler", () => {
+		// A rejection passes to the next link, so nothing is swallowed here.
+		expect(scanSilentCatches("go().then(use, undefined);")).toEqual([]);
+	});
+
+	it("reads the subscript spelling of `.then`", () => {
+		expect(only('go()["then"](use, () => {});').form).toBe("promise-then");
+	});
+});
+
+describe("a site's identity", () => {
+	it("distinguishes two different handlers in one file", () => {
+		const sites = scanSilentCatches(
+			"go().catch(() => {});\ngo().catch((error) => { void error; });",
+		);
+		expect(new Set(sites.map((site) => site.identity)).size).toBe(2);
+	});
+
+	it("gives two identical handlers two identities, never one", () => {
+		const sites = scanSilentCatches(
+			"go().catch(() => {});\ngo().catch(() => {});",
+		);
+		expect(sites[0]?.identity).toBe(sites[1]?.identity);
+		expect(sites).toHaveLength(2);
+	});
+});

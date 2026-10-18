@@ -12,22 +12,35 @@
  * still existed, and `failureKind: "success"` for a rejected save.
  *
  * What a site is:
- * - a `catch` clause of a `try` statement, and
- * - the handler of a `<expr>.catch(…)` call.
+ * - a `catch` clause of a `try` statement;
+ * - the handler of a `<expr>.catch(…)` call, written as `.catch` or as a
+ *   statically known subscript (`p["catch"](…)`, `` p[`catch`](…) ``);
+ * - the SECOND argument of `<expr>.then(onOk, onRejected)`, which is the
+ *   rejection handler an author reached for instead of `.catch`.
  *
  * The rule, derived and never a hand list:
- * - A handler that calls a record seam is `recorded`. A record seam is a call
- *   whose simple callee follows the repo's `record…`/`log…`/`increment…`
- *   naming convention (`recordDegradationOnce`, `incrementDegradationCount`,
- *   `logLatency`, `logCascade`, `logKnipRow`, and their siblings).
- * - A handler that throws is `rethrows`: the failure leaves it and reaches
- *   the caller, which is where the observable path already is.
+ * - A handler is `recorded` only when a record seam runs on the path the
+ *   failure takes: the call must sit at the handler's top level (no
+ *   conditional, loop, `try`, ternary or short-circuit between it and the
+ *   handler body) and before any unconditional exit. A record behind
+ *   `if (DEBUG)` publishes nothing on the path that swallows, so it is
+ *   `silent`. A record seam is a call whose simple callee follows the repo's
+ *   `record…`/`log…`/`increment…` naming convention.
+ * - A handler `rethrows` only when a `throw` runs on every path through it:
+ *   the `throw` must be unconditional in the same sense, and no `return`,
+ *   `continue` or `break` may exist anywhere in the handler. A `throw` inside
+ *   `if (fatal)` leaves the other branch swallowing, so the handler is
+ *   `silent`.
  * - Any other handler is `silent` unless a comment inside the site carries
  *   `none: <reason>`, which makes it `declared-none` and states why the
  *   failure needs no row (a deliberate skip, an idempotent teardown).
  * - A `.catch(…)` handler that is not a function this file defines and not a
  *   bare identifier (a call, a `new` expression) is `unclassified`, which
- *   fails loud in the ratchet and is never counted as recorded.
+ *   fails loud in the ratchet and is never counted as recorded. A statically
+ *   known subscript key that cannot be resolved (a template with a
+ *   substitution, a concatenation, a file-local binding to a non-constant
+ *   string) is `unclassified` too: the scan cannot rule out that it names a
+ *   rejection handler.
  *
  * The scan parses comment-and-string-blanked source (`stripSource`, the
  * default `strings: "blank"` policy): a `catch` written in a comment is blank
@@ -36,14 +49,23 @@
  * strippings blanked the character, so a marker inside a string or in code is
  * not a comment.
  *
+ * Handler names resolve in the scope the call sits in (the nearest enclosing
+ * block that declares the name), never by a bare name index across the file:
+ * an inner `function handler` shadowing an outer one is the inner one, and a
+ * name declared twice in one scope is `unclassified` rather than a guess.
+ *
  * Known limits, named: a record seam passed but never called
  * (`{ onError: logX }`) does not count, because only call expressions are
- * read; a handler that delegates to an identifier is followed to a
- * same-file function declaration or function-valued `const`, and a delegation
- * to an import is `silent` rather than `recorded`, so a delegation the scan
- * cannot follow always asks for a `none:` line.
+ * read; a handler that delegates to an identifier is followed to the
+ * declaration visible at the call, and a delegation to an import, a member
+ * expression or a parameter is `silent` rather than `recorded`, so a
+ * delegation the scan cannot follow always asks for a `none:` line; an
+ * indexed call whose key is a variable the file never binds (`arr[i]()`) is
+ * not matched, because it is not evidence of a rejection handler and calling
+ * every indexed call a handler would fail closed on the whole tree.
  */
 
+import { createHash } from "node:crypto";
 import { Lang, parse } from "@ast-grep/napi";
 import { stripSource } from "./sweep-kit.js";
 
@@ -72,10 +94,43 @@ const RECORD_SEAM = /^(?:record|log|increment)[A-Z]\w*$/;
 /** `// none: <reason>` or a block-comment `none: <reason>`. */
 const NONE_MARKER = /\/\/\s*none:\s*\S|\/\*\s*none:\s*\S/g;
 
+/**
+ * Nodes that can skip the code under them on some path. `binary_expression`
+ * joins them only for the short-circuit operators, handled in
+ * {@link isConditional}. A nested `try`/`catch` counts: its own `catch` can
+ * swallow a record seam's failure, and its body may not be reached at all.
+ */
+const CONDITIONAL_KINDS = new Set([
+	"if_statement",
+	"else_clause",
+	"switch_statement",
+	"switch_body",
+	"switch_case",
+	"switch_default",
+	"for_statement",
+	"for_in_statement",
+	"while_statement",
+	"do_statement",
+	"ternary_expression",
+	"try_statement",
+	"catch_clause",
+]);
+
+/** The operators that run their right side only on some values. */
+const SHORT_CIRCUIT = new Set(["&&", "||", "??"]);
+
+/** Statements that leave the handler (or the failure) behind. */
+const EXIT_KINDS = new Set([
+	"return_statement",
+	"continue_statement",
+	"break_statement",
+	"throw_statement",
+]);
+
 export type CatchVerdict =
-	/** The handler calls a record seam. */
+	/** A record seam runs on the path the failure takes. */
 	| "recorded"
-	/** The handler rethrows: the failure reaches the caller. */
+	/** The handler rethrows on every path: the failure reaches the caller. */
 	| "rethrows"
 	/** The handler carries a `none: <reason>` comment. */
 	| "declared-none"
@@ -87,12 +142,18 @@ export type CatchVerdict =
 export interface CatchSite {
 	/** 1-based line of the `catch` keyword or the `.catch` property. */
 	line: number;
-	form: "catch-clause" | "promise-catch";
+	form: "catch-clause" | "promise-catch" | "promise-then";
 	verdict: CatchVerdict;
 	/** Record-seam callees the handler calls, in source order. */
 	records: string[];
 	/** First line of the handler, for a census a reader can act on. */
 	snippet: string;
+	/**
+	 * Content identity of the handler: 8 hex of the whitespace-collapsed raw
+	 * handler text. The ratchet pins this per site, so one silent handler added
+	 * while another is removed cannot cancel out (AGENTS.md shape 36).
+	 */
+	identity: string;
 	/** Why the site is `unclassified`; absent otherwise. */
 	problem?: string;
 }
@@ -120,20 +181,90 @@ function calleeName(call: SgNode): string | undefined {
 }
 
 /**
+ * Whether two nodes are the same source span. The napi binding hands back a
+ * fresh wrapper on every field read, so identity is the range, not the object.
+ */
+function sameNode(a: SgNode, b: SgNode): boolean {
+	const left = a.range();
+	const right = b.range();
+	return (
+		left.start.index === right.start.index && left.end.index === right.end.index
+	);
+}
+
+function isConditional(node: SgNode): boolean {
+	if (CONDITIONAL_KINDS.has(node.kind())) return true;
+	if (node.kind() !== "binary_expression") return false;
+	const operator = node.field("operator")?.text();
+	return operator !== undefined && SHORT_CIRCUIT.has(operator);
+}
+
+/**
+ * Whether `node` runs on every path through `body`: no conditional, loop,
+ * `try` or short-circuit sits between them. An arrow handler whose body IS
+ * the expression (`(e) => logX(e)`) is unconditional by construction.
+ */
+function isUnconditional(body: SgNode, node: SgNode): boolean {
+	if (sameNode(node, body)) return true;
+	let cursor = node.parent();
+	while (cursor !== undefined && cursor !== null) {
+		if (sameNode(cursor, body)) return true;
+		if (isConditional(cursor)) return false;
+		cursor = cursor.parent();
+	}
+	return false;
+}
+
+/** The earliest statement that leaves the handler, conditional or not. */
+function firstExit(body: SgNode): number | undefined {
+	let earliest: number | undefined;
+	walkOwnBody(body, (node: SgNode) => {
+		if (!EXIT_KINDS.has(node.kind())) return;
+		const at = node.range().start.index;
+		if (earliest === undefined || at < earliest) earliest = at;
+	});
+	return earliest;
+}
+
+/** Record-seam calls that run on the path the failure takes. */
+function unconditionalRecords(body: SgNode): string[] {
+	const exits = firstExit(body);
+	const records: string[] = [];
+	const visitCall = (node: SgNode) => {
+		if (node.kind() !== "call_expression") return;
+		const name = calleeName(node);
+		if (name === undefined || !RECORD_SEAM.test(name)) return;
+		if (!isUnconditional(body, node)) return;
+		const at = node.range().start.index;
+		if (exits !== undefined && at > exits) return;
+		records.push(name);
+	};
+	visitCall(body);
+	walkOwnBody(body, visitCall);
+	return records;
+}
+
+/**
  * Whether this handler lets the failure out on every path its own body takes.
- * A `throw` beside a `return` or a `continue` is a PARTIAL rethrow: the other
- * branch swallows, so the handler is not judged by its throw. The approximate
- * clause rule is deliberate (this scan has no control-flow graph) and it errs
- * toward `silent`, which asks for a record or a `none:` line.
+ * The approximate clause rule is deliberate (this scan has no control-flow
+ * graph) and it errs toward `silent`: a `throw` behind a conditional, beside
+ * a `return`/`continue`/`break` anywhere, or inside a nested `try` is a
+ * partial rethrow, and a partial rethrow asks for a record or a `none:` line.
  */
 function rethrows(body: SgNode): boolean {
 	let throws = false;
 	let swallows = false;
 	walkOwnBody(body, (child: SgNode) => {
 		const kind = child.kind();
-		if (kind === "throw_statement") throws = true;
-		else if (kind === "return_statement") swallows = true;
-		else if (kind === "continue_statement" || kind === "break_statement")
+		if (kind === "throw_statement") {
+			if (isUnconditional(body, child)) throws = true;
+			return;
+		}
+		if (
+			kind === "return_statement" ||
+			kind === "continue_statement" ||
+			kind === "break_statement"
+		)
 			swallows = true;
 	});
 	return throws && !swallows;
@@ -169,66 +300,67 @@ interface Strippings {
 	stringsBlanked: string;
 }
 
-/** The same-file function an identifier handler names, when there is one. */
-function resolveHandler(
-	handler: SgNode,
-	index: ReadonlyMap<string, SgNode>,
-): SgNode | undefined {
-	if (handler.kind() !== "identifier") return undefined;
-	const declaration = index.get(handler.text());
-	if (!declaration) return undefined;
-	const value =
-		declaration.kind() === "variable_declarator"
-			? declaration.field("value")
-			: declaration;
+/**
+ * The declarations of `name` visible in `scope` itself: its direct statements,
+ * and its own function name when it is the declaration being named (a
+ * recursive reference). Declarations inside a nested function belong to that
+ * function's scope, so they are not collected here.
+ */
+function declaredIn(scope: SgNode, name: string): SgNode[] {
+	const found: SgNode[] = [];
+	const consider = (node: SgNode) => {
+		if (node.kind() === "function_declaration") {
+			if (node.field("name")?.text() === name) found.push(node);
+			return;
+		}
+		if (node.kind() !== "variable_declarator") return;
+		const id = node.field("name");
+		if (id?.kind() === "identifier" && id.text() === name) found.push(node);
+	};
+	consider(scope);
+	walkOwnBody(scope, consider);
+	return found;
+}
+
+/**
+ * The handler declaration visible where the call sits, as a scope-aware
+ * lookup: the nearest enclosing node that declares the name wins. More than
+ * one declaration in that scope is ambiguous, and the scan says so instead of
+ * picking one.
+ */
+function resolveHandlerIdentifier(
+	identifier: SgNode,
+	callSite: SgNode,
+): { declaration?: SgNode; ambiguous?: boolean } {
+	const name = identifier.text();
+	let cursor = callSite.parent();
+	while (cursor !== undefined && cursor !== null) {
+		const found = declaredIn(cursor, name);
+		if (found.length > 1) return { ambiguous: true };
+		if (found.length === 1) return { declaration: found[0] };
+		cursor = cursor.parent();
+	}
+	return {};
+}
+
+/** The function node a declaration introduces, when its value is one. */
+function declaredFunction(declaration: SgNode): SgNode | undefined {
+	if (declaration.kind() === "function_declaration") return declaration;
+	const value = declaration.field("value");
 	return value && FUNCTION_KINDS.has(value.kind()) ? value : undefined;
 }
 
-/** Every named function this file declares, by name. */
-function functionIndex(root: SgNode): Map<string, SgNode> {
-	const index = new Map<string, SgNode>();
-	walk(root, (node: SgNode) => {
-		if (node.kind() === "function_declaration") {
-			const name = node.field("name")?.text();
-			if (name !== undefined) index.set(name, node);
-		} else if (node.kind() === "variable_declarator") {
-			const name = node.field("name");
-			const value = node.field("value");
-			if (
-				name?.kind() === "identifier" &&
-				value &&
-				FUNCTION_KINDS.has(value.kind())
-			)
-				index.set(name.text(), node);
-		}
-	});
-	return index;
-}
-
-function firstLine(text: string): string {
-	return text.split("\n")[0].trim();
-}
-
-/** Judge one handler body over the raw span a `none:` marker may live in. */
+/** One handler body's verdict, over the raw span a `none:` marker may live in. */
 function judge(
 	body: SgNode | undefined,
 	span: { start: number; end: number },
 	strippings: Strippings,
 ): { verdict: CatchVerdict; records: string[] } {
-	const records: string[] = [];
 	if (body) {
-		const visitCall = (node: SgNode) => {
-			if (node.kind() !== "call_expression") return;
-			const name = calleeName(node);
-			if (name !== undefined && RECORD_SEAM.test(name)) records.push(name);
-		};
-		// An arrow handler's body may BE the expression (`(e) => logX(e)`), not a
-		// block holding it, so the body node is judged as well as its children.
-		visitCall(body);
-		walkOwnBody(body, visitCall);
+		const records = unconditionalRecords(body);
+		if (records.length > 0) return { verdict: "recorded", records };
+		if (rethrows(body)) return { verdict: "rethrows", records: [] };
 	}
-	if (records.length > 0) return { verdict: "recorded", records };
-	if (body && rethrows(body)) return { verdict: "rethrows", records };
 	if (
 		declaredNone(
 			strippings.raw,
@@ -238,8 +370,133 @@ function judge(
 			span.end,
 		)
 	)
-		return { verdict: "declared-none", records };
-	return { verdict: "silent", records };
+		return { verdict: "declared-none", records: [] };
+	return { verdict: "silent", records: [] };
+}
+
+function firstLine(text: string): string {
+	return text.split("\n")[0].trim();
+}
+
+/** 8 hex of the whitespace-collapsed raw handler text. */
+function handlerIdentity(raw: string, start: number, end: number): string {
+	const collapsed = raw.slice(start, end).replace(/\s+/g, " ").trim();
+	return createHash("sha256").update(collapsed).digest("hex").slice(0, 8);
+}
+
+/** A statically known string value, or why the scan cannot resolve one. */
+type StaticKey =
+	| { value: string }
+	/** Provably a string, but not one this scan can read. */
+	| { unresolved: string }
+	/** Not evidence of a property name at all (`arr[i]`, `map[0]`). */
+	| Record<string, never>;
+
+/** The raw source text a parsed node spans, as the unstripped file wrote it. */
+function rawText(raw: string, node: SgNode): string {
+	const range = node.range();
+	return raw.slice(range.start.index, range.end.index);
+}
+
+/** Unquote a string literal, or refuse one whose escapes hide its value. */
+function stringLiteralValue(text: string): StaticKey {
+	const body = text.slice(1, -1);
+	if (body.includes("\\"))
+		return {
+			unresolved: `string key ${text} carries an escape sequence the scan does not decode`,
+		};
+	return { value: body };
+}
+
+/** The static string a key expression yields, when it yields one. */
+function staticKey(
+	key: SgNode,
+	callSite: SgNode,
+	raw: string,
+	depth = 0,
+): StaticKey {
+	const kind = key.kind();
+	// The parse reads a STRING-BLANKED copy (`strings: "blank"`), so a quoted
+	// key parses as spaces. Its range still points at the raw text.
+	if (kind === "string") return stringLiteralValue(rawText(raw, key));
+	if (kind === "template_string") {
+		const text = rawText(raw, key);
+		if (text.includes("${"))
+			return {
+				unresolved: `template key ${text} is computed, so the scan cannot rule out a rejection handler`,
+			};
+		return stringLiteralValue(text);
+	}
+	if (kind === "binary_expression") {
+		const operator = key.field("operator")?.text();
+		if (operator !== "+") return {};
+		return {
+			unresolved: `concatenated key ${rawText(raw, key)} is a string the scan cannot resolve`,
+		};
+	}
+	if (kind !== "identifier" || depth > 2) return {};
+	const resolved = resolveHandlerIdentifier(key, callSite);
+	if (resolved.ambiguous)
+		return { unresolved: `key \`${key.text()}\` is declared twice here` };
+	const declaration = resolved.declaration;
+	if (!declaration) return {};
+	const value =
+		declaration.kind() === "variable_declarator"
+			? declaration.field("value")
+			: undefined;
+	if (!value) return {};
+	return staticKey(value, callSite, raw, depth + 1);
+}
+
+/**
+ * The rejection-handler call site this call_expression is, when it is one:
+ * `.catch`/`["catch"]`, or the second argument of `.then`/`["then"]`.
+ */
+function rejectionHandlerCall(
+	node: SgNode,
+	raw: string,
+):
+	| {
+			handler?: SgNode;
+			property?: string;
+			propertyNode?: SgNode;
+			problem?: string;
+	  }
+	| undefined {
+	const fn = node.field("function");
+	if (fn === undefined || fn === null) return undefined;
+	let property: string | undefined;
+	let propertyNode: SgNode | undefined;
+	let problem: string | undefined;
+	if (fn.kind() === "member_expression") {
+		property = fn.field("property")?.text();
+		propertyNode = fn.field("property");
+	} else if (fn.kind() === "subscript_expression") {
+		const key = fn.field("index");
+		if (key === undefined || key === null) return undefined;
+		propertyNode = key;
+		const statik = staticKey(key, node, raw);
+		if ("value" in statik && typeof statik.value === "string")
+			property = statik.value;
+		else if ("unresolved" in statik) {
+			problem = String(statik.unresolved);
+		}
+	} else return undefined;
+	if (property === undefined) {
+		if (problem !== undefined) return { problem, propertyNode };
+		return undefined;
+	}
+	if (property !== "catch" && property !== "then") return undefined;
+	const args = node.field("arguments")?.namedChildren() ?? [];
+	if (property === "catch") return { handler: args[0], property, propertyNode };
+	// `.then(onOk, onRejected)`: only the second argument is a rejection
+	// handler. A single argument leaves rejections to the next link, and an
+	// explicit `undefined`/`null` passes them along too.
+	if (args.length < 2) return undefined;
+	const second = args[1];
+	const text = second?.text();
+	if (text === "undefined" || text === "null") return undefined;
+	return { handler: second, property, propertyNode };
 }
 
 /** Every `catch` handler in one source text, with its derived verdict. */
@@ -247,7 +504,6 @@ export function scanSilentCatches(source: string): CatchSite[] {
 	const stringsBlanked = stripSource(source, { strings: "blank" });
 	const commentsBlanked = stripSource(source, { strings: "keep" });
 	const root = parse(Lang.TypeScript, stringsBlanked).root();
-	const index = functionIndex(root);
 	const strippings: Strippings = {
 		raw: source,
 		commentsBlanked,
@@ -257,42 +513,77 @@ export function scanSilentCatches(source: string): CatchSite[] {
 	walk(root, (node: SgNode) => {
 		if (node.kind() === "catch_clause") {
 			const body = node.field("body");
-			const judged = judge(
-				body,
-				{
-					start: node.range().start.index,
-					end: node.range().end.index,
-				},
-				strippings,
-			);
+			const span = {
+				start: node.range().start.index,
+				end: node.range().end.index,
+			};
 			sites.push({
 				line: node.range().start.line + 1,
 				form: "catch-clause",
-				...judged,
+				...judge(body, span, strippings),
 				snippet: firstLine(body?.text() ?? node.text()),
+				identity: handlerIdentity(source, span.start, span.end),
 			});
 			return;
 		}
 		if (node.kind() !== "call_expression") return;
-		const fn = node.field("function");
-		if (fn?.kind() !== "member_expression") return;
-		const property = fn.field("property");
-		if (property?.text() !== "catch") return;
-		const handler = node.field("arguments")?.namedChildren()[0];
-		const line = property.range().start.line + 1;
-		if (!handler) {
+		const call = rejectionHandlerCall(node, source);
+		if (call === undefined) return;
+		const property = node.field("function");
+		const line =
+			(call.propertyNode?.range().start.line ??
+				property?.range().start.line ??
+				node.range().start.line) + 1;
+		const span = {
+			start: property?.range().start.index ?? node.range().start.index,
+			end: node.range().end.index,
+		};
+		const form = call.property === "then" ? "promise-then" : "promise-catch";
+		if (call.problem !== undefined) {
 			sites.push({
 				line,
-				form: "promise-catch",
+				form,
 				verdict: "unclassified",
 				records: [],
 				snippet: firstLine(node.text()),
-				problem: "`.catch()` names no handler at all",
+				identity: handlerIdentity(source, span.start, span.end),
+				problem: call.problem,
 			});
 			return;
 		}
-		const resolved = resolveHandler(handler, index);
-		const target = resolved ?? handler;
+		const handler = call.handler;
+		if (handler === undefined || handler === null) {
+			sites.push({
+				line,
+				form,
+				verdict: "unclassified",
+				records: [],
+				snippet: firstLine(node.text()),
+				identity: handlerIdentity(source, span.start, span.end),
+				problem: `\`.${call.property}()\` names no handler at all`,
+			});
+			return;
+		}
+		let target = handler;
+		if (handler.kind() === "identifier") {
+			const resolved = resolveHandlerIdentifier(handler, node);
+			if (resolved.ambiguous) {
+				sites.push({
+					line,
+					form,
+					verdict: "unclassified",
+					records: [],
+					snippet: firstLine(handler.text()),
+					identity: handlerIdentity(source, span.start, span.end),
+					problem: `handler \`${handler.text()}\` is declared more than once in its scope, so the scan cannot tell which one runs`,
+				});
+				return;
+			}
+			const fn = resolved.declaration
+				? declaredFunction(resolved.declaration)
+				: undefined;
+			if (fn !== undefined) target = fn;
+		}
 		if (
 			!FUNCTION_KINDS.has(target.kind()) &&
 			target.kind() !== "identifier" &&
@@ -300,10 +591,11 @@ export function scanSilentCatches(source: string): CatchSite[] {
 		) {
 			sites.push({
 				line,
-				form: "promise-catch",
+				form,
 				verdict: "unclassified",
 				records: [],
-				snippet: firstLine(node.text()),
+				snippet: firstLine(handler.text()),
+				identity: handlerIdentity(source, span.start, span.end),
 				problem: `handler \`${firstLine(handler.text())}\` is not a function literal or a bare identifier the scan can follow`,
 			});
 			return;
@@ -311,16 +603,17 @@ export function scanSilentCatches(source: string): CatchSite[] {
 		const body = FUNCTION_KINDS.has(target.kind())
 			? target.field("body")
 			: undefined;
-		const judged = judge(
-			body,
-			{ start: property.range().start.index, end: node.range().end.index },
-			strippings,
-		);
+		const targetRange = target.range();
 		sites.push({
 			line,
-			form: "promise-catch",
-			...judged,
+			form,
+			...judge(body, span, strippings),
 			snippet: firstLine(handler.text()),
+			identity: handlerIdentity(
+				source,
+				targetRange.start.index,
+				targetRange.end.index,
+			),
 		});
 	});
 	return sites;

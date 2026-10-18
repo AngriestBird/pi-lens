@@ -1168,7 +1168,14 @@ export function recordRootDeregistrationFailure(
 		kind: "instance-registry-deregister-root-failed",
 		subject: projectRoot,
 		reason: `root \`${projectRoot}\` could not be released from the process-wide instance registry for holder \`${holder}\` (${err instanceof Error ? err.message : String(err)}); it stays listed until this process exits`,
-		metadata: { root: projectRoot, holder },
+		// `logDurableDegradation` persists this metadata but not the reason, so
+		// the error travels here too: a monitor reading `latency.log` must see
+		// WHY the root leaked, not only that it did (#4603 F6).
+		metadata: {
+			root: projectRoot,
+			holder,
+			err: err instanceof Error ? err.message : String(err),
+		},
 	});
 }
 

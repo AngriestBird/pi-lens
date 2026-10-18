@@ -25,7 +25,9 @@
  * | a second rejection, same root | the same group, count 2 (counted, not once-per-root) |
  * | a rejection for another root | a second subject |
  * | a non-Error rejection | recorded with its `String(...)` form, never dropped |
+ * | the flushed durable row | its metadata carries `root`, `holder` AND the error (`err`), because `logDurableDegradation` persists metadata but not the reason (#4603 F6) |
  */
+import fs from "node:fs";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import {
@@ -33,6 +35,11 @@ import {
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
 import { recordRootDeregistrationFailure } from "../../clients/instance-registry.js";
+import {
+	clearLatencyLog,
+	flushLatencyLog,
+	getLatencyLogPath,
+} from "../../clients/latency-logger.js";
 
 const ROOT = "/work/lane-root";
 const HOLDER = "secondary:11111111-1111-1111-1111-111111111111";
@@ -92,5 +99,48 @@ describe("a rejected root release", () => {
 		recordRootDeregistrationFailure(ROOT, HOLDER, "registry tail aborted");
 
 		expect(group()?.latestReasons[0].reason).toContain("registry tail aborted");
+	});
+
+	it("writes the root, the holder and the error into the durable row", async () => {
+		// The in-process summary carries the reason; only the durable row carries
+		// metadata, so a monitor reading `latency.log` sees the error here or not
+		// at all. `PI_LENS_TEST_MODE=0` is the sanctioned opt-out that lets the
+		// real sink write (the worker's own hermetic home), scoped to this case.
+		const previousMode = process.env.PI_LENS_TEST_MODE;
+		process.env.PI_LENS_TEST_MODE = "0";
+		clearLatencyLog();
+		await flushLatencyLog();
+		try {
+			recordRootDeregistrationFailure(
+				ROOT,
+				HOLDER,
+				new Error("EACCES: permission denied, instances.json"),
+			);
+			await flushLatencyLog();
+		} finally {
+			if (previousMode === undefined) delete process.env.PI_LENS_TEST_MODE;
+			else process.env.PI_LENS_TEST_MODE = previousMode;
+		}
+
+		const rows = fs
+			.readFileSync(getLatencyLogPath(), "utf-8")
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line) as Record<string, unknown>)
+			.filter(
+				(row) =>
+					row.filePath === ROOT &&
+					(row.metadata as Record<string, unknown> | undefined)?.kind ===
+						"instance-registry-deregister-root-failed" &&
+					String((row.metadata as Record<string, unknown>).err).includes(
+						"EACCES",
+					),
+			);
+		expect(rows).toHaveLength(1);
+		expect(rows[0].metadata).toMatchObject({
+			root: ROOT,
+			holder: HOLDER,
+			err: "EACCES: permission denied, instances.json",
+		});
 	});
 });

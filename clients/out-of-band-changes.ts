@@ -146,13 +146,16 @@ async function readInstallStamp(root: string): Promise<string> {
 }
 
 /**
- * One walk's answer: the declaration files under `root`, and the directories
- * the walk could not read.
+ * One walk's answer: the declaration files under `root`, the directories the
+ * walk could not read, and the files it listed but could not stat for a reason
+ * other than absence.
  */
 interface DeclarationWalk {
 	declarations: Map<string, string>;
 	/** Directories whose listing failed, bounded by `DECLARATION_WALK_MAX_DIRS`. */
 	unreadable: string[];
+	/** Files whose `stat` failed with an error that is not absence (#4603 F2). */
+	unreadableFiles: string[];
 }
 
 /**
@@ -167,12 +170,21 @@ interface DeclarationWalk {
  * row. The map the caller diffs keeps the previous fingerprint of a file under
  * an unreadable directory instead, so an unreadable subtree reads as
  * "unchanged, as far as this walk could tell" rather than as a deletion.
+ *
+ * #4603 F2: a file the walk listed but could not stat is the same question one
+ * level down. `ENOENT`/`ENOTDIR` mean the file went away between the listing
+ * and the stat, which is absence; `EACCES`, `EPERM`, `EIO`, `ESTALE` and
+ * `ENOMEM` mean the walk cannot tell, so the file joins `unreadableFiles` and
+ * keeps its previous fingerprint exactly as a subtree does. Reading every
+ * failure as absence published `deleted: 1` for a file that exists whenever a
+ * readable directory held an unreadable file.
  */
 async function walkDeclarations(
 	root: string,
 ): Promise<DeclarationWalk | undefined> {
 	const found: string[] = [];
 	const unreadable: string[] = [];
+	const unreadableFiles: string[] = [];
 	const queue = [root];
 	let next = 0;
 	let capped = false;
@@ -213,42 +225,81 @@ async function walkDeclarations(
 	// so a failed stat is an explicit `undefined` rather than a swallowed
 	// statement.
 	const prints = await Promise.all(
-		found.map(async (filePath): Promise<[string, string] | undefined> => {
-			try {
-				return [filePath, fingerprint(await fsp.stat(filePath))];
-			} catch {
-				// none: gone between the listing and the stat, which is absence,
-				// not a failure reading the subtree (the walk's own listing above
-				// is what reports an unreadable directory).
-				return undefined;
-			}
-		}),
+		found.map(
+			async (
+				filePath,
+			): Promise<[string, string] | [string, undefined] | undefined> => {
+				try {
+					return [filePath, fingerprint(await fsp.stat(filePath))];
+				} catch (err) {
+					const code = (err as NodeJS.ErrnoException | undefined)?.code;
+					if (code === "ENOENT" || code === "ENOTDIR") {
+						// none: gone between the listing and the stat, which is absence,
+						// not a failure reading the subtree (the walk's own listing above
+						// is what reports an unreadable directory).
+						return undefined;
+					}
+					// Unreadable is not absent: keep the file's identity and let
+					// `carryUnreadable` restore its previous fingerprint.
+					return [filePath, undefined];
+				}
+			},
+		),
 	);
-	for (const print of prints)
-		if (print !== undefined) declarations.set(print[0], print[1]);
-	return { declarations, unreadable };
+	for (const print of prints) {
+		if (print === undefined) continue;
+		if (print[1] === undefined) unreadableFiles.push(print[0]);
+		else declarations.set(print[0], print[1]);
+	}
+	return { declarations, unreadable, unreadableFiles };
 }
 
 /**
- * Keep the previous fingerprint of every declaration file that sits under a
- * directory `walk` could not read, so the diff sees it as unchanged rather
- * than absent. Returns how many files were carried (#4596).
+ * Keep the previous fingerprint of every declaration file the walk could not
+ * read — one under a directory it could not list, or one it listed and could
+ * not stat for a reason other than absence — so the diff sees it as unchanged
+ * rather than absent (#4596, #4603 F2).
+ *
+ * The carried set is bounded by the walk's own file cap: entries that would
+ * take the map past it are counted in `dropped` and not added, and the caller
+ * then keeps the previous map whole instead of storing a partial one (#4603
+ * F5). Neither the map nor the diff can exceed the cap, and no entry the diff
+ * would read as deleted leaves the record.
  */
 function carryUnreadable(
 	declarations: Map<string, string> | undefined,
 	previous: ReadonlyMap<string, string> | undefined,
 	walk: DeclarationWalk | undefined,
-): number {
-	if (!declarations || !previous || !walk || walk.unreadable.length === 0)
-		return 0;
-	let carried = 0;
-	for (const [filePath, print] of previous) {
+): { carried: number; dropped: number } {
+	if (
+		!declarations ||
+		!previous ||
+		!walk ||
+		(walk.unreadable.length === 0 && walk.unreadableFiles.length === 0)
+	)
+		return { carried: 0, dropped: 0 };
+	const unreadableFiles = new Set(walk.unreadableFiles);
+	const carried: string[] = [];
+	for (const filePath of previous.keys()) {
 		if (declarations.has(filePath)) continue;
-		if (!walk.unreadable.some((dir) => isUnderDir(filePath, dir))) continue;
-		declarations.set(filePath, print);
-		carried++;
+		const underUnreadableDir = walk.unreadable.some((dir) =>
+			isUnderDir(filePath, dir),
+		);
+		if (!underUnreadableDir && !unreadableFiles.has(filePath)) continue;
+		carried.push(filePath);
 	}
-	return carried;
+	// Deterministic order: the population that fits the cap must not depend on
+	// Map insertion order or on which parallel stat settled first.
+	carried.sort();
+	let dropped = 0;
+	for (const filePath of carried) {
+		if (declarations.size >= DECLARATION_WALK_MAX_FILES) {
+			dropped++;
+			continue;
+		}
+		declarations.set(filePath, previous.get(filePath) as string);
+	}
+	return { carried: carried.length - dropped, dropped };
 }
 
 function diffDeclarations(
@@ -348,16 +399,28 @@ async function lookOnce(
 		walkDue ? walkDeclarations(root) : Promise.resolve(undefined),
 	]);
 	const observed = walkDue ? walked : undefined;
-	const declarations = observed?.declarations ?? prior?.declarations;
-	// #4596: a file under a directory this walk could not read keeps the
-	// fingerprint the previous walk gave it. The diff then cannot call it
-	// deleted, and a real change under that subtree is reported by the first
-	// walk that can read it again — deferred, never invented and never lost.
-	const heldBack = carryUnreadable(declarations, prior?.declarations, observed);
+	// #4596: a file under a directory this walk could not read — or one it
+	// listed and could not stat — keeps the fingerprint the previous walk gave
+	// it. The diff then cannot call it deleted, and a real change there is
+	// reported by the first walk that can read it again: deferred, never
+	// invented and never lost.
+	const carry = carryUnreadable(
+		observed?.declarations,
+		prior?.declarations,
+		observed,
+	);
+	// #4603 F5: when the carried set does not fit the walk's own file cap, the
+	// walk is incomplete. Keep the previous map whole (it is at or below the cap
+	// by induction) so the stored snapshot can never grow past the cap and the
+	// diff cannot read a carried file as deleted.
+	const incomplete = carry.dropped > 0;
+	const declarations = incomplete
+		? prior?.declarations
+		: (observed?.declarations ?? prior?.declarations);
 	records.set(key, {
 		stamp,
 		declarations,
-		walkedAt: walkDue ? started : (prior?.walkedAt ?? started),
+		walkedAt: walkDue && !incomplete ? started : (prior?.walkedAt ?? started),
 	});
 	if (walkDue && walked === undefined)
 		recordDegradationOnce({
@@ -365,21 +428,32 @@ async function lookOnce(
 			subject: key,
 			reason: `the declaration-file walk passed ${DECLARATION_WALK_MAX_DIRS} directories or ${DECLARATION_WALK_MAX_FILES} files; declaration files created, edited or deleted outside pi-lens under this root reach no language server and no diagnostics-cache entry is refused for them`,
 		});
-	if (observed && observed.unreadable.length > 0)
+	const unreadableFiles = observed?.unreadableFiles ?? [];
+	if (
+		observed &&
+		(observed.unreadable.length > 0 || unreadableFiles.length > 0)
+	) {
+		const firstUnreadable = observed.unreadable[0] ?? unreadableFiles[0];
 		incrementDegradationCount({
 			kind: "lsp-declaration-walk-unreadable",
 			subject: key,
-			reason: `${observed.unreadable.length} unreadable dir(s) under this root, first \`${observed.unreadable[0]}\`; ${heldBack} declaration file(s) kept their previous fingerprint, so a change there is not read as a deletion`,
+			reason: `${incomplete ? `${carry.dropped} declaration file(s) could not be carried past the ${DECLARATION_WALK_MAX_FILES}-file cap, so the previous walk's map stands; ` : ""}${observed.unreadable.length} unreadable dir(s) and ${unreadableFiles.length} unreadable file(s) under this root, first \`${firstUnreadable}\`; ${carry.carried} declaration file(s) kept their previous fingerprint, so a change there is not read as a deletion`,
 			metadata: {
 				unreadableDirs: observed.unreadable.length,
-				firstUnreadableDir: observed.unreadable[0] as string,
-				heldBackDeclarations: heldBack,
+				firstUnreadableDir: observed.unreadable[0],
+				unreadableFiles: unreadableFiles.length,
+				firstUnreadableFile: unreadableFiles[0],
+				heldBackDeclarations: carry.carried,
+				carriedDropped: carry.dropped,
 			},
 		});
+	}
 	if (prior === undefined) return;
 	const installed = stamp !== prior.stamp;
+	// An incomplete walk (`incomplete`) leaves the record's own map in place, so
+	// there is nothing to diff this round.
 	const changes =
-		walkDue && declarations && prior.declarations
+		walkDue && !incomplete && declarations && prior.declarations
 			? diffDeclarations(prior.declarations, declarations)
 			: [];
 	if (!installed && changes.length === 0) return;
