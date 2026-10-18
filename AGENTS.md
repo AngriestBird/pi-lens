@@ -937,8 +937,10 @@ file-scoped worklist and receives no project-wide scanner output.
   A `\`-continued line and a line the previous one left unfinished with `&&`,
   `||` or `|` are one command, so the measuring invocation must start the
   joined command; an `exit` ends the script only in command position. A
-  `no-floor` row states the reader that makes an empty result visible, and a
-  population from the parsed files, so it fails closed on a site the registry
+  `no-floor` row states the reader that makes an empty result visible, or
+  `governed-by` (naming the issue and the live tests that own the site, in
+  files vitest collects). The reader derives the population from the parsed
+  files, so it fails closed on a site the registry
   does not name, on a producer file or a non-file entry it does not classify,
   on a `continue-on-error` key in a location that is not a job or a step, and
   on a floor whose evidence is not in the argument list of such an invocation
