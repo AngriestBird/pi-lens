@@ -267,13 +267,16 @@ const API_OPTION_VALUES = new Set([
 	"--template",
 ]);
 /**
- * A heredoc operator as the segment's LAST token. `scannableRegions` subtracts
- * a heredoc body, so a real redirection ends its command line; a `<<` inside
- * argument text (`printf '%s\n' 'bash<<EOF'`) is followed by more of the
- * word and is not one. A stated limit: an operator line that continues with
- * another redirection (`bash <<EOF 2>&1`) is not recognised.
+ * A heredoc operator as the segment's LAST token, however the delimiter is
+ * spelled (`<<EOF`, `<< EOF`, `<<-EOF`, `<<- 'EOF'`). `scannableRegions`
+ * subtracts a heredoc body, so a real redirection ends its command line; a
+ * `<<` inside argument text (`printf '%s\n' 'bash<<EOF'`) is followed by more
+ * of the word and is not one. A herestring (`<<<`, stdin from a string) is a
+ * different operator and is reported by its own arm. A stated limit: an
+ * operator line that continues with another redirection (`bash <<EOF 2>&1`) is
+ * not recognised.
  */
-const HEREDOC_AT_END = /<<-?(?:'[^']*'|"[^"]*"|[^\s'"|;&]+)$/;
+const HEREDOC_AT_END = /(?<!<)<<(?!<)-?\s*(?:'[^']*'|"[^"]*"|[^\s'"|;&]+)\s*$/;
 /** One variable reference as a whole word: `$GH_BIN`, `${GH_BIN}`. */
 const VARIABLE_WORD = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/;
 /**
@@ -579,10 +582,18 @@ function heredocShell(
 	words: string[],
 	env: Record<string, string>,
 ): string | undefined {
-	const command = words[0]?.includes("<<")
-		? words[0].slice(0, words[0].indexOf("<<"))
-		: "";
-	const candidates = command ? [command] : words;
+	// The operator's own word may carry the command (`bash<<EOF`), even behind a
+	// wrapper (`timeout 30 bash<<EOF`), so the text before each `<<` is a
+	// candidate beside the words themselves. A shell spelled as an argument is
+	// counted too: that reports, and never silently misses a body it hands on.
+	const candidates = [
+		...words
+			.map((word) =>
+				word.includes("<<") ? word.slice(0, word.indexOf("<<")) : "",
+			)
+			.filter((word) => word !== ""),
+		...words,
+	];
 	for (const candidate of candidates) {
 		if (SHELL_COMMANDS.has(resolveCommand(candidate, env).command)) {
 			return candidate;
@@ -759,6 +770,19 @@ function classifySegment(
 			}
 			return;
 		}
+		// A herestring is stdin from a string: the same unreadable script a
+		// heredoc body is, one operator over (`bash <<< '<gh call>'`).
+		if (
+			rest.slice(1).some((word) => word.startsWith("<<<")) &&
+			regionNamesGhCall
+		) {
+			census.unclassified.push({
+				step,
+				detail: `\`${rest[0]}\` reads its script from a herestring, which names a \`gh\` call`,
+			});
+			return;
+		}
+		if (rest.slice(1).some((word) => word.startsWith("<<<"))) return;
 		// `bash ci.sh` runs a FILE: a stated limit, not a body the census misses.
 		if (
 			rest.slice(1).some((word) => !word.startsWith("-") && !/^[<>]/.test(word))
@@ -1919,6 +1943,26 @@ describe("the census's admitted source list (#4382 r6)", () => {
 				payload,
 			).toEqual(["unclassified"]);
 		}
+	});
+
+	it("recognises a heredoc however its operator is spelled", () => {
+		// Greptile 11:15: a spaced delimiter (`bash << EOF`) and an attached one
+		// behind a wrapper (`timeout 30 bash<<'EOF'`) hand the same body to the
+		// same shell, so they report the same way.
+		for (const run of [
+			`bash << EOF\n${BARE_GH_WRITE}\nEOF`,
+			`sh <<-EOF\n${BARE_GH_WRITE}\nEOF`,
+			`timeout 30 bash<<'EOF'\n${BARE_GH_WRITE}\nEOF`,
+			`bash <<< '${BARE_GH_WRITE}'`,
+		]) {
+			expect(
+				probe({ run }).findings.map((found) => found.kind),
+				run,
+			).toEqual(["unclassified"]);
+		}
+		// Boundary: a herestring with no call in it is silent, like any other
+		// readable-looking payload with nothing to read.
+		expect(probe({ run: `bash <<< 'echo hello'` }).findings).toEqual([]);
 	});
 
 	it("reports a nested shell program instead of reading it", () => {
