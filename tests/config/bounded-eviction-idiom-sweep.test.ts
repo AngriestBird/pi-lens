@@ -1239,6 +1239,17 @@ describe("#2442 no new hand-rolled evict-oldest idiom outside bounded-cache.ts",
 		}
 	});
 
+	it("does not borrow a different sequence's selection, #4580 r3", () => {
+		// The ordered binding must own the later selection, not just occur nearby.
+		expect(
+			findEvictionLines(`while (m.size > CAP) {
+ const ranked = sequence.sort(cmp);
+ const victim = other[0];
+ consume(ranked); evict(victim);
+}`),
+		).toEqual([]);
+	});
+
 	it("does not count a comment or a string that quotes any spelling, #4580 round 2", () => {
 		const source = [
 			"// const [oldest] = m.keys(); m.delete(oldest);",
