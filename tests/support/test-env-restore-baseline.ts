@@ -122,6 +122,8 @@ export const TEST_ENV_RESTORE_BASELINE: readonly string[] = [
 	"tests/support/vitest-setup.ts:PI_LENS_INSTALL_LOG",
 	"tests/support/vitest-setup.ts:PI_LENS_MAX_LOG_SIZE_MB",
 	"tests/support/vitest-setup.ts:PI_LENS_STARTUP_MODE",
+	"tests/support/vitest-setup.ts:PI_LENS_TMP_HYGIENE_FIXTURE_HOME",
+	"tests/support/vitest-setup.ts:PI_LENS_TMP_HYGIENE_HOME",
 	"tests/support/vitest-setup.ts:PI_LENS_WORD_INDEX_PERSIST_DEBOUNCE_MS",
 	"tests/support/with-env.test.ts:KEY2",
 	"tests/support/with-env.ts:key",

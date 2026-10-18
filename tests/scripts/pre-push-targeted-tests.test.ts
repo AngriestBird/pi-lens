@@ -436,6 +436,7 @@ describe("selectTargetedTests — path-mirror pass", () => {
 		];
 		const testScanners = [
 			"tests/clients/flake-shape-ratchet.test.ts",
+			"tests/clients/fixture-home-teardown.test.ts",
 			"tests/real-harness/bridge-reload-ts.test.ts",
 			"tests/real-harness/bridge-reload.test.ts",
 			"tests/real-harness/child-exit.test.ts",
@@ -454,8 +455,11 @@ describe("selectTargetedTests — path-mirror pass", () => {
 			"tests/config/test-env-restore-sweep.test.ts",
 			"tests/config/module-instance-coverage.test.ts",
 			"tests/config/tmp-fixture-hygiene.test.ts",
+			"tests/config/tmp-hygiene-leak-origin.test.ts",
 			"tests/config/vacuous-skip-coverage.test.ts",
 			"tests/support/host-event-shape-scan.test.ts",
+			// #4522: walks both captured-fixture trees, so a fixture change arms it.
+			"tests/clients/dispatch/smoke-fixture-coverage.test.ts",
 		];
 		// Pin live scanner shapes behind the independent buckets: direct
 		// production walk, delegated tests/support walk, and the production walk
