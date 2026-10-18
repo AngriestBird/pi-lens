@@ -14,4 +14,5 @@ audience: internal
   resolves — not from key spellings, so a formatted multi-line literal or an
   indirect write cannot slip past it. The 68 current sites (13 shipped, 55 in
   test fixtures) are seeded as debt with their reason; a new site, a stale row
-  or a changed reason reds.
+  or a changed reason reds. Commented env members, later constants, mutable
+  aliases, and identity wrappers retain their path-key evidence.
