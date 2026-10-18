@@ -100,10 +100,18 @@
  * - A same-file alias of a read callee (`const read = fs.readFileSync;
  *   read(sink)`, `import { readFileSync as read }`) is a read: the alias is
  *   read from its own binding, so a named spelling of the call is not a
- *   silent pass (shape 69). The alias is visible only in the scope that
- *   DECLARES it, and an inner declaration of the same name (a local
- *   `const read = (file) => file` helper, a parameter, a function name)
- *   shadows an outer alias (R3, shape 69). An import has one module scope.
+ *   silent pass (shape 69). A declarator, function name or parameter is
+ *   visible only in the SCOPE that declares it — `var`'s enclosing function,
+ *   `let`/`const`'s enclosing block, the program for both — and an inner
+ *   declaration of the same name shadows an outer alias (R3, F1, shape 69).
+ *   Three limits stay, all pre-existing: an IMPORT alias has one module scope
+ *   and is matched before any declarator, so a local `function read` of the
+ *   same name does NOT shadow it (loud false positive only); a name that only
+ *   an ASSIGNMENT reaches (`var read; read = fs.readFileSync`) is not an
+ *   alias at all (silent), while the reverse spelling (`const read =
+ *   fs.readFileSync; read = (file) => file`) keeps the alias (loud); and a
+ *   DESTRUCTURED alias (`const { readFileSync: read } = fs`) binds no name,
+ *   because the walk records only identifier declarators (silent).
  * - Suspension is judged FAIL-CLOSED (shape 69). An `await` that can run
  *   between the drain and the read lets the code under test enqueue more
  *   bytes, so it suspends the read wherever it sits: a loop body (a loop
@@ -521,13 +529,15 @@ function scanUndrainedSinkReads(
 	}
 
 	const root = parse(Lang.TypeScript, source).root();
-	// Read callees this file binds: `import { readFileSync as read }`,
-	// `const read = fs.readFileSync`, `const { readFileSync: read } = fs`. A
-	// named spelling of a read is the same read (shape 69). An IMPORT has one
-	// module scope; a declarator, function name or parameter is visible only in
-	// the scope that declares it, and an inner declaration of the same name
-	// SHADOWS an outer alias, so another test's `const read = (file) => file`
-	// helper is not a sink read (R3).
+	// Read callees this file binds: `import { readFileSync as read }` and
+	// `const read = fs.readFileSync`. A named spelling of a read is the same read
+	// (shape 69). An IMPORT has one module scope and is matched before any
+	// declarator, so an inner declaration does not shadow it; a declarator,
+	// function name or parameter is visible only in the scope that declares it,
+	// and an inner declaration of the same name SHADOWS an outer alias, so
+	// another test's `const read = (file) => file` helper is not a sink read
+	// (R3, F1). A destructured declarator (`const { readFileSync: read } = fs`)
+	// binds no name: the walk records identifier declarators only.
 	const importReadAliases = new Set<string>(READ_CALLEES);
 	for (const specifier of root.findAll({
 		rule: { kind: "import_specifier" },

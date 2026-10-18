@@ -37,9 +37,15 @@
  *   bind.apply(socket, [0])`) all read the verb from the member value. The
  *   HANDLE is the receiver the call supplies (`call`/`apply` argument 0,
  *   `Reflect.apply` argument 1), never the object the verb was read from, so
- *   `a.bind.call(b, 0)` is a start on `b` (R2, shape 69). An indirect call the
- *   walk cannot place, or whose supplied receiver it cannot read as a handle,
- *   reports as `unresolvable` rather than passing.
+ *   `a.bind.call(b, 0)` is a start on `b` (R2, shape 69). An indirect
+ *   invocation whose verb the walk cannot place, or whose supplied receiver it
+ *   cannot read at all, reports as `unresolvable` rather than passing. A
+ *   supplied receiver the scan can read as NO handle — a function, a literal
+ *   (`null`, `undefined`), or an identifier whose every binding this file
+ *   declares and none of which is a construction — is `Function.prototype.bind`
+ *   on that value, not a start (F2): `socket.bind.call(fn, 0)` starts nothing,
+ *   even though `socket` is a handle, and `a.bind.call()` with no receiver at
+ *   all binds the caller's own `this`, which names no handle, so it reports.
  *
  * Every server CONSTRUCTION the file contains (`createServer`,
  * `net.createServer`, `http.createServer`, `new WebSocketServer`, ... — any
@@ -117,6 +123,13 @@
  *   handle-receiver form reports `unresolvable`; this residue is a plain
  *   function value handed to `.call` (`vi.doMock.apply(...)`), which starts no
  *   listener.
+ * - **Computed indirect invocations.** The indirect form is read from a
+ *   `.call`/`.apply` MEMBER (`a.bind.call(...)`, `Reflect.apply(...)`). A
+ *   computed key never enters that walk, so `a.bind["call"](b, 0)`,
+ *   `a["bind"]["call"](b, 0)`, `Reflect["apply"](a.bind, b, [0])`,
+ *   `globalThis.Reflect.apply(...)`, `call.call(a.bind, b, 0)` and
+ *   `(0, a.bind)(0)` read clean (silent, pre-existing; no live member in
+ *   `tests/**`, so the population is the admitted-form census, not a report).
  * - **Then-chains and multi-binding variables.** A promise consumed through a
  *   rejected or rejected-only branch (`.catch`, a second `.then` argument)
  *   settles nothing, and a variable with one reference that settles and
