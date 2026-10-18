@@ -1610,7 +1610,7 @@ function emittedRecordLiterals(candidates, options = {}) {
 		options,
 	);
 	// `null` is "the probe could not run", never "the tree holds nothing":
-	// the caller refuses on it rather than reading absense as proof.
+	// the caller reports it rather than reading the empty answer as proof.
 	if (files === null) return null;
 	const literals = new Set();
 	for (const file of files) {
