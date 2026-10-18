@@ -221,6 +221,29 @@ const SHELL_COMMANDS = new Set(["bash", "sh", "dash", "zsh", "ksh"]);
 const EVAL_COMMAND = "eval";
 /** Flags through which a non-shell executor is handed its program as a string. */
 const SCRIPT_FLAGS = new Set(["-c", "-e", "-p", "--eval", "--print"]);
+/**
+ * `gh api` flags that consume the next word as their value (gh 2.100.0
+ * `gh api --help`), so an option's value never stands in for the endpoint.
+ */
+const API_OPTION_VALUES = new Set([
+	"--cache",
+	"-F",
+	"--field",
+	"-H",
+	"--header",
+	"--hostname",
+	"--input",
+	"-q",
+	"--jq",
+	"-X",
+	"--method",
+	"-p",
+	"--preview",
+	"-f",
+	"--raw-field",
+	"-t",
+	"--template",
+]);
 /** One variable reference as a whole word: `$GH_BIN`, `${GH_BIN}`. */
 const VARIABLE_WORD = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/;
 /**
@@ -300,6 +323,25 @@ function resolveCommand(
 	return { command: commandBasename(first), unresolved: false };
 }
 
+/**
+ * A `gh` call inside text the census does not execute -- a heredoc body, an
+ * inline `-c` payload, a non-shell step's arguments. The witness is the
+ * census's own command resolution, so it names the same call whichever way
+ * the script spells it: the literal word, a path whose basename is `gh`
+ * (`/usr/bin/gh`), and a `$VAR`/`${VAR}` whose declared value resolves to
+ * `gh`. A literal-word test here reported only the first spelling and left
+ * the other two out of the population (AGENTS.md shape 69).
+ */
+function namesGhCall(text: string, env: Record<string, string>): boolean {
+	if (GH_COMMAND_WORD.test(text)) return true;
+	for (const word of text.split(/[\s"'`;&|()<>[\],]+/)) {
+		if (word !== "" && resolveCommand(word, env).command === "gh") {
+			return true;
+		}
+	}
+	return false;
+}
+
 function isCheckoutStep(step: Step): boolean {
 	return /^actions\/checkout@/.test(String(step.uses));
 }
@@ -309,8 +351,8 @@ function isCheckoutStep(step: Step): boolean {
  * github-script step). The census models shell scripts only, so it reports
  * that step instead of skipping it.
  */
-function namesGhCommand(step: Step): boolean {
-	return GH_COMMAND_WORD.test(JSON.stringify(step.with ?? ""));
+function namesGhCommand(step: Step, env: Record<string, string>): boolean {
+	return namesGhCall(JSON.stringify(step.with ?? ""), env);
 }
 
 /**
@@ -349,6 +391,23 @@ function ghVerbIndex(words: string[]): number {
 }
 
 /**
+ * The endpoint word of a `gh api` call: its first positional word after the
+ * verb. Options and their values (`-X POST`, `--input graphql`, `-f k=v`) sit
+ * in front of it, and an option's value is not an endpoint.
+ */
+function apiEndpoint(words: string[], verb: number): string | undefined {
+	for (let index = verb + 1; index < words.length; index++) {
+		const word = words[index];
+		if (word.startsWith("-")) {
+			if (API_OPTION_VALUES.has(word) && !word.includes("=")) index++;
+			continue;
+		}
+		return word;
+	}
+	return undefined;
+}
+
+/**
  * Does this `gh` command need a repository? `gh auth` and `gh --version` do
  * not; `gh api` names one in its request path. Every other verb does, including
  * the verbs no census enumerated (`gh variable set`, `gh secret set`).
@@ -357,13 +416,34 @@ function needsRepository(words: string[]): boolean {
 	const verb = ghVerbIndex(words);
 	if (verb < 0 || words[verb] === "auth") return false;
 	if (words[verb] !== "api") return true;
-	// The endpoint sits behind options and their values (`-X POST`, `-f k=v`,
-	// `--paginate`), so the census asks whether ANY word after the verb names a
-	// repository root or GraphQL instead of fixing a position.
+	// Only the endpoint carries the request path. gh options and their values
+	// (`--input graphql` is a filename) are not the endpoint, and an option's
+	// value cannot satisfy a placeholder the endpoint must still resolve.
+	const endpoint = apiEndpoint(words, verb);
 	return (
-		words.slice(verb + 1).some((word) => /\{(?:owner|repo)\}/.test(word)) &&
-		!words.slice(verb + 1).some((word) => API_REPOSITORY_ROOT.test(word))
+		endpoint !== undefined &&
+		/\{(?:owner|repo)\}/.test(endpoint) &&
+		!API_REPOSITORY_ROOT.test(endpoint)
 	);
+}
+
+/**
+ * Expand the two modelled reference forms (`$NAME`, `${NAME}`) through `env`
+ * until the text stops changing, so a declared value that is itself a
+ * reference (`REPO: $GITHUB_REPOSITORY`) resolves the way the shell chain
+ * would. Any other `$` form is left standing for its caller to refuse.
+ */
+function expandReferences(value: string, env: Record<string, string>): string {
+	let expanded = value;
+	for (let pass = 0; pass < 8; pass++) {
+		const next = expanded.replace(
+			/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g,
+			(_, braced, bare) => variableValue(braced ?? bare, env) ?? "",
+		);
+		if (next === expanded) return expanded;
+		expanded = next;
+	}
+	return expanded;
 }
 
 /** Is this a repository operand a live `gh` accepts? `""` is not. */
@@ -371,17 +451,17 @@ function isRepoValue(
 	value: string | undefined,
 	env: Record<string, string>,
 ): boolean {
-	const expanded = (value ?? "")
-		.replace(
-			/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g,
-			(_, braced, bare) => variableValue(braced ?? bare, env) ?? "",
-		)
-		.trim();
+	const expanded = expandReferences(value ?? "", env).trim();
+	// Two expansion forms are modelled above; any other `$` or backtick left in
+	// the operand (`${VAR:-}`, `$1`, `${ARR[0]}`) is text the census cannot read,
+	// so it is no source. A `${{ … }}` workflow expression is a declared value.
+	const residual = expanded.replace(/\$\{\{[\s\S]*?\}\}/g, "");
 	return (
 		expanded !== "" &&
 		expanded !== "${{ '' }}" &&
 		!expanded.startsWith("-") &&
-		!expanded.includes(scannableRegions("$(true)")[0])
+		!expanded.includes(scannableRegions("$(true)")[0]) &&
+		!/[$`]/.test(residual)
 	);
 }
 
@@ -431,19 +511,28 @@ function scanScript(
 		}> = [];
 		let child = 0;
 		const segments = splitSegmentsWithSeparators(region.text);
-		const regionNamesGhCall = GH_COMMAND_WORD.test(script);
 		for (const { text, sep } of segments) {
-			// Parentheses delimit subshells. A function definition's empty ()
-			// does not open a subshell; its body is scanned without exporting
-			// definition-time bindings back into the surrounding script.
-			if (sep?.includes(")") && !sep.includes("(")) {
-				const outer = scopes.pop();
-				if (outer) ({ shellEnv, exported } = outer);
+			// Parentheses delimit subshells, applied in the order they appear in
+			// the separator: `(export …); (gh …)` closes the first scope before
+			// the second opens, so one subshell's export never reaches the next.
+			// A function definition's empty `()` opens no subshell, but its
+			// body is not the caller's scope either.
+			const opensFunctionBody =
+				sep?.includes("()") && text.trimStart().startsWith("{");
+			const separators = opensFunctionBody
+				? (sep?.replace("()", "") ?? "")
+				: (sep ?? "");
+			for (const paren of separators) {
+				if (paren === ")") {
+					const outer = scopes.pop();
+					if (outer) ({ shellEnv, exported } = outer);
+				} else if (paren === "(") {
+					scopes.push({ shellEnv, exported });
+					shellEnv = { ...shellEnv };
+					exported = new Set(exported);
+				}
 			}
-			if (
-				(sep?.includes("(") && !sep.includes(")")) ||
-				(sep?.includes("()") && text.trimStart().startsWith("{"))
-			) {
+			if (opensFunctionBody) {
 				scopes.push({ shellEnv, exported });
 				shellEnv = { ...shellEnv };
 				exported = new Set(exported);
@@ -461,7 +550,7 @@ function scanScript(
 				step,
 				shellEnv,
 				census,
-				regionNamesGhCall,
+				namesGhCall(script, shellEnv),
 				exported,
 			);
 		}
@@ -605,7 +694,7 @@ function classifySegment(
 	const scriptFlag = rest.findIndex(
 		(word, index) => index > 0 && SCRIPT_FLAGS.has(word),
 	);
-	if (scriptFlag >= 0 && GH_COMMAND_WORD.test(rest[scriptFlag + 1] ?? "")) {
+	if (scriptFlag >= 0 && namesGhCall(rest[scriptFlag + 1] ?? "", scope)) {
 		census.unclassified.push({
 			step,
 			detail: `\`${rest[0]} ${rest[scriptFlag]}\` runs a script this census does not read, and it names a \`gh\` call`,
@@ -663,7 +752,7 @@ function censusWorkflow(workflow: Workflow): {
 						detail: `step ${index + 1}: ${problem.detail}`,
 					});
 				}
-			} else if (namesGhCommand(step)) {
+			} else if (namesGhCommand(step, env)) {
 				named = true;
 				findings.push({
 					job: key,
@@ -877,12 +966,20 @@ describe("workflow gh calls resolve a repository (#4382)", () => {
 					"        with:",
 					"          script: |",
 					`            exec.exec('${BARE_GH_WRITE}')`,
+					"  non-shell-separate:",
+					"    runs-on: ubuntu-latest",
+					"    steps:",
+					"      - uses: actions/github-script@v7",
+					"        with:",
+					"          script: |",
+					"            exec.exec('gh', ['pr', 'edit', '4550', '--add-label', 'ci:real'])",
 				),
 			),
 		).toEqual([
 			["undeclared-alias", "unclassified"],
 			["wrapped", "unclassified"],
 			["non-shell", "unclassified"],
+			["non-shell-separate", "unclassified"],
 		]);
 	});
 
@@ -986,7 +1083,7 @@ describe("workflow gh calls resolve a repository (#4382)", () => {
 	it("rejects unrelated runner variables as repository sources", () => {
 		// F1: a runner namespace is not a guaranteed repository value.
 		for (const name of [
-			"GITHUB_REPOSITOR",
+			"GITHUB_REPOSITOR", // spellchecker:disable-line
 			"GITHUB_SHA",
 			"GITHUB_REPOSITORY_OWNER",
 			"RUNNER_TEMP",
@@ -1077,6 +1174,23 @@ describe("workflow gh calls resolve a repository (#4382)", () => {
 				run: `(export GH_REPO=owner/repo; ${BARE_GH_WRITE})\n${BARE_GH_WRITE}`,
 			}).findings.map((f) => f.kind),
 		).toEqual(["missing-source"]);
+	});
+
+	it("closes each subshell before the next opens", () => {
+		// A separator carrying both `)` and `(` is one close and one open, in
+		// that order: the next subshell does not inherit the previous export.
+		for (const run of [
+			`(export GH_REPO=owner/repo); (${BARE_GH_WRITE})`,
+			`(export GH_REPO=owner/repo) && (${BARE_GH_WRITE})`,
+			`(export GH_REPO=owner/repo)\n(${BARE_GH_WRITE})`,
+		])
+			expect(
+				probe({ run }).findings.map((f) => f.kind),
+				run,
+			).toEqual(["missing-source"]);
+		expect(
+			probe({ run: `(export GH_REPO=owner/repo; ${BARE_GH_WRITE})` }).findings,
+		).toEqual([]);
 	});
 
 	it("keeps function bindings in their definition scope", () => {
@@ -1289,6 +1403,46 @@ describe("workflow gh calls resolve a repository (#4382)", () => {
 		).toEqual([]);
 	});
 
+	it("reads the api endpoint rather than an option's value", () => {
+		// `--input graphql` is a filename, not the endpoint: an option's value
+		// cannot satisfy a placeholder the endpoint still has to resolve.
+		for (const run of [
+			`gh api 'repos/{owner}/{repo}/issues' --input graphql`,
+			`gh api --input graphql 'repos/{owner}/{repo}/issues'`,
+			`gh api 'repos/{owner}/{repo}/issues' -F body=@graphql`,
+		])
+			expect(
+				probe({ run }).findings.map((f) => f.kind),
+				run,
+			).toEqual(["missing-source"]);
+		// Boundary: a literal endpoint with an input file needs no repository.
+		expect(
+			probe({ run: "gh api repos/owner/repo/issues --input body.json" })
+				.findings,
+		).toEqual([]);
+	});
+
+	it("refuses an operand expansion the census cannot read", () => {
+		// F8: only `$NAME`/`${NAME}` are modelled. Any other expansion
+		// (`${VAR:-}`, `$1`, `${ARR[0]}`) leaves text the census cannot read, so
+		// the operand is no source rather than a trusted non-empty value.
+		for (const run of [
+			`${BARE_GH_WRITE} --repo "\${PATCH_REPO:-}"`,
+			`${BARE_GH_WRITE} --repo "$1"`,
+			`${BARE_GH_WRITE} --repo "\${REPOS[0]}"`,
+		])
+			expect(
+				probe({ run }).findings.map((f) => f.kind),
+				run,
+			).toEqual(["missing-source"]);
+		// Boundary: a workflow expression is a declared source, not an
+		// expansion the census failed to read.
+		expect(
+			probe({ run: `${BARE_GH_WRITE} --repo "\${{ github.repository }}"` })
+				.findings,
+		).toEqual([]);
+	});
+
 	it("judges API endpoint shapes and placeholder requirements", () => {
 		// R3: an endpoint root and GraphQL do not need cwd resolution.
 		for (const run of [
@@ -1342,6 +1496,34 @@ describe("workflow gh calls resolve a repository (#4382)", () => {
 			expect(
 				probe({ run }).findings.map((f) => f.kind),
 				run,
+			).toEqual(["unclassified"]);
+		}
+	});
+
+	it("reports an unreadable script in every gh spelling the census resolves", () => {
+		// F7: the witness is the census's own command resolution, so a path
+		// (`/usr/bin/gh`) and a declared variable (`$GH_BIN`) name the same call
+		// a literal `gh` word does. A literal-word witness skipped both, and an
+		// empty population reads as a clean workflow.
+		for (const options of [
+			{ run: `bash <<'EOF'\n/usr/bin/gh pr edit 4550 --add-label x\nEOF` },
+			{
+				run: `bash <<'EOF'\n$GH_BIN pr edit 4550 --add-label x\nEOF`,
+				jobEnv: { GH_BIN: "gh" },
+			},
+			{
+				run: `printf '%s\\n' '$GH_BIN pr edit 4550 --add-label x' | bash`,
+				jobEnv: { GH_BIN: "gh" },
+			},
+			{ run: `su -c '/usr/bin/gh pr edit 4550 --add-label x'` },
+			{
+				run: `node -e "$GH_BIN pr edit 4550 --add-label x"`,
+				jobEnv: { GH_BIN: "gh" },
+			},
+		]) {
+			expect(
+				probe(options).findings.map((f) => f.kind),
+				JSON.stringify(options),
 			).toEqual(["unclassified"]);
 		}
 	});
