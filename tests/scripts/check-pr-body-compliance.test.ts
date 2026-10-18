@@ -252,6 +252,17 @@ describe("diff-keyed compliance (#4585)", () => {
 			expect(errors("", diff, headFiles).join()).toContain("row 1");
 		}
 	});
+	// A title the parser cannot resolve is refused by its own name, never by
+	// printing `undefined` into the author's face (#4605 unresolved title).
+	// A title the parser cannot resolve is refused by its own name, and a red
+	// that happens to spell `undefined` does not fabricate a proof for it
+	// (#4605 unresolved title).
+	it("refuses a title-less each declaration even when a red spells undefined (#4605 unresolved title)", () => {
+		const { diff, headFiles } = image("tests/a.test.ts", "it.each(cases)();");
+		expect(
+			errors("```text\n× undefined thing 3ms\n```", diff, headFiles).join(),
+		).toContain("tests/a.test.ts:1: unresolved test title");
+	});
 	it("does not use green mutation output or an unrelated red as proof", () => {
 		const { diff, headFiles } = image(
 			"clients/a.ts",

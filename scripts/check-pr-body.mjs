@@ -2837,8 +2837,11 @@ function lintDiffCompliance(body, options) {
 					continue;
 				const proofs = new Map();
 				if (!title) {
+					// The declaration's own line is the identity the author can act
+					// on; a title it cannot read is refused with that line, never
+					// with a fabricated expansion (#4605 unresolved title).
 					errors.push(
-						`PR body compliance row 1: ${file.post}: unresolved test title needs a quoted red-first transcript or a named Control with a reason.`,
+						`PR body compliance row 1: ${file.post}:${callLine}: unresolved test title needs a quoted red-first transcript or a named Control with a reason.`,
 					);
 					continue;
 				}
