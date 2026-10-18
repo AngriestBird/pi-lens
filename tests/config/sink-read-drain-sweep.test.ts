@@ -554,6 +554,8 @@ function scanUndrainedSinkReads(
 		/** The scope the name binds in; see `bindingScopeSpan`. */
 		scopeStart: number;
 		scopeEnd: number;
+		/** A `function` declaration binds at scope entry, before any read. */
+		hoisted: boolean;
 		read: boolean;
 	}
 	const readAliasDecls: ReadAliasDecl[] = [];
@@ -592,27 +594,35 @@ function scanUndrainedSinkReads(
 	};
 	/**
 	 * The declaration that decides `name` at `at`: in the innermost enclosing
-	 * scope that declares it, the nearest declaration ABOVE the read. Two
-	 * positions decide, and they are different: the scope (a block or a
-	 * function, see `bindingScopeSpan`) says whether the name is in force at all,
-	 * and the declaration's own position says which of two same-named
+	 * scope that declares it, the nearest declaration IN FORCE at the read. Two
+	 * questions decide, and they are different: the scope (a block or a
+	 * function, see `bindingScopeSpan`) says whether the name is in force at
+	 * all, and the execution path to the read says which of two same-named
 	 * declarations it is. A declaration in a block the read is not inside is a
-	 * sibling's name, and one that appears only AFTER the read has not run yet
+	 * sibling's name. Lexical position decides only on the declaring scope's own
+	 * straight line, where a declaration below the read has not run yet
 	 * (Greptile r6: a later `var read = helper` used to hide an earlier read).
+	 * A read inside a NESTED function runs when that function is called, which
+	 * is after the enclosing scope initialized, so position does not disqualify
+	 * a declaration there (Greptile r6 P1: a helper read went silent). A
+	 * `function` declaration is hoisted, so it shadows at any position.
 	 */
 	const readAliasAt = (name: string, at: SgNode): ReadAliasDecl | undefined => {
 		const position = at.range().start.index;
-		const candidates = readAliasDecls.filter(
-			(decl) => decl.name === name && decl.declaredAt <= position,
-		);
-		if (candidates.length === 0) return undefined;
+		let crossedFunction = false;
 		for (let current = at.parent(); current; current = current.parent()) {
 			const span = spanOf(current);
-			const here = candidates.filter(
-				(decl) => decl.scopeStart === span.start && decl.scopeEnd === span.end,
+			const here = readAliasDecls.filter(
+				(decl) =>
+					decl.name === name &&
+					decl.scopeStart === span.start &&
+					decl.scopeEnd === span.end &&
+					(crossedFunction || decl.hoisted || decl.declaredAt <= position),
 			);
-			if (here.length === 0) continue;
-			return here.reduce((a, b) => (b.declaredAt >= a.declaredAt ? b : a));
+			if (here.length > 0) {
+				return here.reduce((a, b) => (b.declaredAt >= a.declaredAt ? b : a));
+			}
+			if (isFunction(current)) crossedFunction = true;
 		}
 		return undefined;
 	};
@@ -636,6 +646,7 @@ function scanUndrainedSinkReads(
 			name: name.text(),
 			declaredAt: declarator.range().start.index,
 			...scopeFields(bindingScopeSpan(declarator)),
+			hoisted: false,
 			read: callee !== undefined,
 		});
 	}
@@ -656,6 +667,7 @@ function scanUndrainedSinkReads(
 				name: name.text(),
 				declaredAt: fn.range().start.index,
 				...scopeFields(spanOf(lexicalScopeOf(fn))),
+				hoisted: fn.kind() === "function_declaration",
 				read: false,
 			});
 		for (const parameter of fn.field("parameters")?.namedChildren() ?? []) {
@@ -665,6 +677,7 @@ function scanUndrainedSinkReads(
 				name: pattern.text(),
 				declaredAt: parameter.range().start.index,
 				...scopeFields(spanOf(lexicalScopeOf(parameter))),
+				hoisted: false,
 				read: false,
 			});
 		}
@@ -2031,6 +2044,55 @@ describe("sink reads drain first (#4381)", () => {
 						"});",
 					],
 					[[5, "read"]],
+				],
+			];
+			for (const [label, lines, expected] of cases) {
+				expect(
+					scanFixture(lines.join("\n")).map((hit): [number, string] => [
+						hit.line,
+						hit.callee,
+					]),
+					label,
+				).toEqual(expected);
+			}
+		});
+
+		it("resolves a read inside a nested function against an enclosing alias (r6 P1, shape 69)", () => {
+			// Lexical position decides on the declaring scope's own straight line
+			// only. A read inside a nested function runs when that function is
+			// called, after an enclosing declaration initialized, so a later alias
+			// is in force there: `393a92a34` reported `[[2, "read"]]` and the
+			// round-6 position filter silenced it (Greptile r6 P1, sink:606). A
+			// `function` declaration is hoisted, so it shadows either way.
+			const cases: Array<[string, string[], Array<[number, string]>]> = [
+				[
+					"a helper read resolved against an alias declared below it",
+					[
+						"function rows(): string {",
+						'\treturn read(getLatencyLogPath(), "utf8");',
+						"}",
+						"const read = fs.readFileSync;",
+						'it("x", () => { void rows(); });',
+					],
+					[[2, "read"]],
+				],
+				[
+					"a hoisted function declaration shadows an alias above it",
+					[
+						"const read = fs.readFileSync;",
+						'it("x", () => { void read(getLatencyLogPath()); });',
+						"function read(file: string): string { return file; }",
+					],
+					[],
+				],
+				[
+					"a hoisted function declaration shadows on the same straight line",
+					[
+						"const read = fs.readFileSync;",
+						"void read(getLatencyLogPath());",
+						"function read(file: string): string { return file; }",
+					],
+					[],
 				],
 			];
 			for (const [label, lines, expected] of cases) {
