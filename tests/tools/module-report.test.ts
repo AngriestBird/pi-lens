@@ -7,6 +7,7 @@ import {
 	createReadEnclosingTool,
 	createReadSymbolTool,
 } from "../../tools/module-report.js";
+import { toPosix } from "../../clients/path-utils.js";
 import {
 	createTempFile,
 	pinFixtureHome,
@@ -598,8 +599,12 @@ describe("module_report path resolution (#4577 M2)", () => {
 			);
 			// The home is outside the project root, so the display path is
 			// absolute rather than project-relative; the pre-fix spelling carried
-			// the literal `~` component instead of the home the shell expands.
-			expect(report.path).toBe(path.resolve(homeFile));
+			// the literal `~` component instead of the home the shell expands. An
+			// absolute display path is separator-folded (`toProjectRelativePath`),
+			// so the expected side takes the same fold: on Windows `path.resolve`
+			// spells it with backslashes and the correct report would fail (#4591
+			// Greptile P1).
+			expect(report.path).toBe(toPosix(path.resolve(homeFile)));
 		} finally {
 			restore();
 			env.cleanup();

@@ -64,13 +64,19 @@ describe("tmp-hygiene leak origin record (#4591)", () => {
 		const empty = path.join(env.tmpDir, "empty-entry");
 		try {
 			fs.mkdirSync(empty);
-			const born = fs.statSync(empty).birthtimeMs;
 			expect(formatTmpHygieneLeakOrigin(empty)).toContain(
 				"first-level children: none",
 			);
 			// A filesystem timestamp microseconds ahead of the process clock is a
-			// negative age, which reads as `born 0ms`, never as a negative one.
-			const line = formatTmpHygieneLeakOrigin(empty, born - 5_000);
+			// negative age, which reads as `born 0ms`, never as a negative one. The
+			// birth time is passed explicitly so this cell drives the floor on a
+			// filesystem that reports no creation time instead of reding the
+			// formatter's correct "unavailable" arm (the sibling cell above takes
+			// the same axis from `stat` and guards it).
+			const line = formatTmpHygieneLeakOrigin(empty, 1_000, {
+				birthtimeMs: 6_000,
+				children: [],
+			});
 			expect(line).toContain("born 0ms before this line");
 		} finally {
 			env.cleanup();

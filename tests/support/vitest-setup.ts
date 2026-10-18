@@ -11,6 +11,7 @@ import { installKillGuard, killGuardReport } from "./kill-guard.js";
 import { reportPeakRss } from "./worker-peak-rss.js";
 import {
 	fixtureHomeRoot,
+	fixtureHomeRootIn,
 	removeTempDirSync,
 	restorePinnedFixtureHomes,
 } from "../clients/test-utils.js";
@@ -566,8 +567,18 @@ process.env.PI_LENS_HOME = TMP_HYGIENE_WORKER_HOME;
 // is published beside it: the teardown below then removes the directory the
 // cases actually used, not one re-derived from an environment a test may have
 // changed in-process (the census suite mutates the run id on purpose).
+//
+// The published value is derived from THIS worker's identity, never read back
+// through `fixtureHomeRoot()` (#4591 V1): a nested Vitest child inherits this
+// whole environment, so reading the inherited value would make the child
+// publish its parent's root and remove it at its own teardown, with the HOMEs
+// a case had pinned inside it. Both derivations share `fixtureHomeRootIn`.
 process.env.PI_LENS_TMP_HYGIENE_HOME = tmpHygieneHome;
-process.env.PI_LENS_TMP_HYGIENE_FIXTURE_HOME = fixtureHomeRoot();
+process.env.PI_LENS_TMP_HYGIENE_FIXTURE_HOME = fixtureHomeRootIn(
+	tmpHygieneHome,
+	process.env.PI_LENS_TMP_HYGIENE_RUN_ID ?? "local",
+	process.pid,
+);
 // #2651: scripts/warm-loader-cache.mjs appends to PI_LENS_INSTALL_LOG before
 // it falls back to PI_LENS_HOME/install.log, so an ambient value (a
 // developer's shell pointing it at the real ~/.pi-lens/install.log) would

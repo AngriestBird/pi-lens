@@ -378,10 +378,34 @@ export function fixtureHomeRoot(): string {
 			"fixtureHomeRoot() needs PI_LENS_TMP_HYGIENE_FIXTURE_HOME (or the run-shared PI_LENS_TMP_HYGIENE_HOME the vitest setup publishes) — a fixture home has no place to live outside the harness's own scratch root",
 		);
 	}
-	const runId = process.env.PI_LENS_TMP_HYGIENE_RUN_ID ?? "local";
+	return fixtureHomeRootIn(
+		sharedHome,
+		process.env.PI_LENS_TMP_HYGIENE_RUN_ID ?? "local",
+		process.pid,
+	);
+}
+
+/**
+ * The ONE spelling of a worker's fixture-home root: `worker-home-<run>-<pid>-`
+ * then `-fixtures`, under the run-shared home. The run's dead-worker sweep
+ * matches the `worker-home-<run>-` family, so a killed worker's copy is
+ * reclaimed with its own worker home.
+ *
+ * `vitest-setup.ts` publishes the value it derives from THIS worker's own
+ * identity, never whatever the environment already holds (#4591 V1): a nested
+ * Vitest child inherits the parent's whole environment, and a child that
+ * published its parent's root removed that root — and every HOME pinned inside
+ * it — at its own teardown. `fixtureHomeRoot()`'s fallback derives the same
+ * name, so a worker with no inherited value still gets its own root.
+ */
+export function fixtureHomeRootIn(
+	sharedHome: string,
+	runId: string,
+	pid: number,
+): string {
 	return path.join(
 		path.resolve(sharedHome),
-		`worker-home-${runId}-${process.pid}-fixtures`,
+		`worker-home-${runId}-${pid}-fixtures`,
 	);
 }
 
