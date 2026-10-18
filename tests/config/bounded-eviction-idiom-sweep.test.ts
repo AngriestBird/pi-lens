@@ -32,11 +32,18 @@
  * | `ordered-scan` | `clients/debug-handles.ts`, `clients/lsp/document-drift.ts`, `clients/observed-mutation.ts`, `clients/resource-sampler.ts` |
  * | `count-truncation` | `clients/sgconfig.ts`, `clients/cache-manager.ts`, `clients/mutation-attribution.ts`, `clients/widget-state.ts` (retention cap), `clients/lens-map.ts`, `scripts/analyze-pi-lens-logs.mjs#pushTop` |
  *
+ * Selection is structural, not a spelling: an iterator's `.next()` head, an
+ * array-destructured head (`const [oldest] = m.keys()`), and a `for…of` head
+ * that breaks after its first victim are the same eviction, and a victim
+ * reached through a second binding or an alias is resolved before the removal
+ * test (#4606 r2 F1).
+ *
  * Everything outside those forms refuses. A shape the recognizer cannot place
  * is not silently clean: the refused LIVE programs are tabled below
  * (`REFUSED_PROGRAMS`) with the stage each lacks and the policy that owns it,
- * and the accounting test re-reads each anchor from the real file and proves
- * the site is still unflagged (#4580 r5's intake, kept).
+ * and the accounting test re-reads EVERY anchor from the real file and proves
+ * the site is still unflagged (#4580 r5's intake, kept; every anchor, not the
+ * first, since #4606 r2 F3).
  *
  * ## Properties this sweep learned the hard way
  *
@@ -250,13 +257,19 @@ const EXEMPT_SITES: Readonly<Record<string, string>> = {
  * Live programs the recognizer REFUSES, with the stage each lacks.
  *
  * The recognizer admits four forms; these are retention programs whose bound is
- * a runtime argument or whose order is plain insertion, so the stages they
- * share with a member do not prove an eviction. Each row is re-read from the
- * real file — the anchor must survive as CODE (`stripSource`, so a comment or
- * a string quoting it is prose) and the site must stay unflagged — so a row can
- * neither go stale nor claim a site that migrated, and a recognizer round that
- * starts catching one of these reds here instead of passing silently
- * (#4580 r5's intake, kept for the structural detector).
+ * a runtime argument, whose order is plain insertion, or whose victim is chosen
+ * by a reduction, so the stages they share with a member do not prove an
+ * eviction. Each row is re-read from the real file — EVERY anchor named must
+ * survive as CODE (`stripSource`, so a comment or a string quoting it is
+ * prose) and stay unflagged — so a row can neither go stale nor claim a site
+ * that migrated, and a recognizer round that starts catching one of these reds
+ * here instead of passing silently (#4580 r5's intake, kept for the structural
+ * detector; #4606 r2 F3 fixed the single-anchor check).
+ *
+ * Each anchor is the statement the owning form WOULD report if it learned this
+ * shape (`statementOf` the truncation, the declaration, the loop), not the
+ * guard above it: a row anchored on a line the form never reports cannot red
+ * (#4606 r2 F3, `clients/runtime-turn.ts`).
  */
 const REFUSED_PROGRAMS: Readonly<
 	Record<
@@ -282,7 +295,21 @@ const REFUSED_PROGRAMS: Readonly<
 	},
 	"line-window rendering, runtime line budget": {
 		file: "clients/runtime-turn.ts",
-		anchor: "if (lines.length > maxLines) {",
+		// The assignment that owns the slice, not the guard above it: a runtime
+		// recognizer would report `statementOf(sliceCall)`, which is this line.
+		// The string argument is left out of the anchor because `liveAnchorLines`
+		// reads comment/string-blanked source.
+		anchor: "kept = lines.slice(0, maxLines).join(",
+		count: 1,
+	},
+	"minimum reduction under a tracked-count cap": {
+		file: "clients/bounded-telemetry.ts",
+		anchor: "const oldestTrackedTurn = Math.min(...turnCounts.keys());",
+		count: 1,
+	},
+	"insertion-order suffix retention, runtime bound": {
+		file: "clients/deferred-test-targets.ts",
+		anchor: "return ordered.slice(-max);",
 		count: 1,
 	},
 };
@@ -316,6 +343,44 @@ function liveAnchorLines(source: string, anchor: string): number[] {
 	return stripSource(source)
 		.split("\n")
 		.flatMap((line, index) => (line.includes(anchor) ? [index + 1] : []));
+}
+
+/**
+ * Every refusal row that no longer holds: an anchor that stopped surviving as
+ * code, whose count moved, or that the REAL recognizer now flags.
+ *
+ * EVERY anchor is visited, not the first one: a row with two sites used to
+ * pass while its second started flagging (#4606 r2 F3, Greptile P2). Each
+ * anchor is also the statement the owning form would report, so the check can
+ * actually red.
+ */
+function refusalWitnesses(
+	rows: typeof REFUSED_PROGRAMS,
+	read: (file: string) => string,
+): { witnesses: string[]; anchorsChecked: number } {
+	const witnesses: string[] = [];
+	let anchorsChecked = 0;
+	for (const [spelling, row] of Object.entries(rows)) {
+		const source = read(row.file);
+		const anchors = liveAnchorLines(source, row.anchor);
+		if (anchors.length !== row.count) {
+			witnesses.push(
+				`${row.file}: ${spelling} anchor ${JSON.stringify(row.anchor)} matched ${anchors.length} lines`,
+			);
+			continue;
+		}
+		const findings = findEvictionPrograms(source).map(
+			(program) => program.line,
+		);
+		for (const anchor of anchors) {
+			anchorsChecked += 1;
+			if (findings.includes(anchor))
+				witnesses.push(
+					`${row.file}:${anchor}: ${JSON.stringify(row.anchor)} is now flagged — delete or migrate the row`,
+				);
+		}
+	}
+	return { witnesses, anchorsChecked };
 }
 
 /**
@@ -543,6 +608,148 @@ describe("#2442 no new hand-rolled evict-oldest program outside bounded-cache.ts
 				].join("\n"),
 			).map((program) => program.line),
 		).toEqual([2]);
+	});
+
+	it("resolves the head-selection spellings the lexical detector counted", () => {
+		// #4606 r2 F1: these five programs were passing cases of the lexical
+		// detector, and the structural round refused them untabled. Each selects
+		// the insertion-order head; only the selection spelling differs.
+		// Destructured from an accessor chain, including one behind a helper.
+		for (const [source, line] of [
+			["const [oldest] = m.keys();", 2],
+			["const [key, value] = m.entries();", 2],
+		] as const) {
+			expect(
+				findEvictionPrograms(
+					[
+						"while (m.size > CAP) {",
+						`  ${source}`,
+						"  m.delete(oldest ?? key);",
+						"}",
+					].join("\n"),
+				).map((program) => program.line),
+				source,
+			).toEqual([line]);
+		}
+		expect(
+			findEvictionPrograms(
+				[
+					"const iteratorOf = (container) => container.keys();",
+					"while (m.size > CAP) {",
+					"  const [oldest] = iteratorOf(m);",
+					"  m.delete(oldest);",
+					"}",
+				].join("\n"),
+			).map((program) => program.line),
+			"accessor behind a helper",
+		).toEqual([3]);
+		// A `for…of` head that breaks after the first victim. An accessor walk is
+		// its own order stage, so it needs no separate bound (the retired
+		// detector's `#2442` F5 case); a bare container does.
+		expect(
+			findEvictionPrograms(
+				["for (const k of m.keys()) {", "  m.delete(k);", "  break;", "}"].join(
+					"\n",
+				),
+			).map((program) => program.line),
+			"accessor loop, no bound",
+		).toEqual([1]);
+		for (const removal of [
+			"set.delete(oldest);",
+			"set.delete(oldest!);",
+			"set?.delete(oldest);",
+		]) {
+			expect(
+				findEvictionPrograms(
+					[
+						"while (set.size > cap) {",
+						"  for (const oldest of set) {",
+						`    ${removal}`,
+						"    break;",
+						"  }",
+						"}",
+					].join("\n"),
+				).map((program) => program.line),
+				removal,
+			).toEqual([2]);
+		}
+		// A victim reached through a second binding is the same eviction (#4570's
+		// shape-69 plant); the derived name is resolved before the removal test.
+		expect(
+			findEvictionPrograms(
+				[
+					"while (m.size > CAP) {",
+					"  const oldest = m.keys().next();",
+					"  if (oldest.done) break;",
+					"  const victim = oldest.value;",
+					"  m.delete(victim);",
+					"}",
+				].join("\n"),
+			).map((program) => program.line),
+			"value through another binding",
+		).toEqual([2]);
+	});
+
+	it("resolves an alias of the ordered sequence before testing selection", () => {
+		// #4606 r2 F1 (Greptile P1, T2b): selection used to be tested against the
+		// ordering's own names before aliases were followed, so a derived name's
+		// subscript was invisible.
+		expect(
+			findEvictionPrograms(
+				[
+					"if (m.size <= CAP) return;",
+					" const ranked = sequence.sort(cmp);",
+					" const alias = ranked;",
+					" const derived = alias.filter(eligible);",
+					" m.delete(derived[0]);",
+				].join("\n"),
+			).map((program) => program.line),
+		).toEqual([2]);
+	});
+
+	it("resolves a bounded program whose receiver is an alias", () => {
+		// #4606 r2 F5: this program is admitted ONLY by
+		// `governsOrderedProgram`'s enclosing-bounded-control arm — the cap's own
+		// subject (`cache`) is not the ranked receiver (`byCall`), so the
+		// subject-in-expression arm cannot carry it. The mutation that disables
+		// arm 1 reds here and nowhere else.
+		expect(
+			findEvictionPrograms(
+				[
+					"function trim(cache, CAP) {",
+					"  const byCall = cache;",
+					"  while (cache.size > CAP) {",
+					"    const victim = [...byCall.entries()].sort(cmp)[0];",
+					"    byCall.delete(victim[0]);",
+					"  }",
+					"}",
+				].join("\n"),
+			).map((program) => program.line),
+		).toEqual([4]);
+	});
+
+	it("does not let a string or a comment name the victim", () => {
+		// #4606 r2 F2 (Greptile P2): the recognizer reads raw source, so a
+		// reference must come from the AST's identifiers, never from the call's
+		// text (AGENTS.md shape 43).
+		for (const removal of [
+			'm.delete("oldest");',
+			"m.delete(/* oldest */ other);",
+			"m.delete(other.oldest);",
+		]) {
+			expect(
+				findEvictionPrograms(
+					[
+						"while (m.size > CAP) {",
+						"  const oldest = m.keys().next();",
+						"  if (oldest.done) break;",
+						`  ${removal}`,
+						"}",
+					].join("\n"),
+				),
+				removal,
+			).toEqual([]);
+		}
 	});
 
 	it("resolves a formatter wrap inside the accessor chain and after `=`", () => {
@@ -979,30 +1186,48 @@ describe("#2442 no new hand-rolled evict-oldest program outside bounded-cache.ts
 
 	it("accounts for the live programs the recognizer refuses", () => {
 		// The detector's population is not the tree's. Each refusal is proved a
-		// miss against the REAL recognizer and its anchor is re-read from the real
-		// file, so a row can neither go stale nor describe a site that migrated.
+		// miss against the REAL recognizer and EVERY anchor is re-read from the
+		// real file, so a row can neither go stale nor describe a site that
+		// migrated, and a row with two sites cannot hide the second flagging
+		// (#4606 r2 F3).
 		const rows = Object.entries(REFUSED_PROGRAMS);
-		expect(rows.length).toBeGreaterThanOrEqual(4);
-		const witnesses: string[] = [];
-		let anchorChecks = 0;
-		for (const [spelling, row] of rows) {
-			const source = fs.readFileSync(path.join(REPO_ROOT, row.file), "utf8");
-			const anchors = liveAnchorLines(source, row.anchor);
-			anchorChecks += 1;
-			if (anchors.length !== row.count) {
-				witnesses.push(
-					`${row.file}: ${spelling} anchor ${JSON.stringify(row.anchor)} matched ${anchors.length} lines`,
-				);
-				continue;
-			}
-			if (findEvictionPrograms(source).some((p) => p.line === anchors[0])) {
-				witnesses.push(
-					`${row.file}: ${JSON.stringify(row.anchor)} is now flagged — delete or migrate the row`,
-				);
-			}
-		}
-		expect(witnesses).toEqual([]);
-		expect(anchorChecks).toBe(rows.length);
+		expect(rows.length).toBeGreaterThanOrEqual(6);
+		const { witnesses, anchorsChecked } = refusalWitnesses(
+			REFUSED_PROGRAMS,
+			(file) => fs.readFileSync(path.join(REPO_ROOT, file), "utf8"),
+		);
+		expect(witnesses, witnesses.join("\n")).toEqual([]);
+		// Pin what the loop performed: an emptied row set, or a row whose anchor
+		// matched nothing, must not read as proof (#4580 r6 F3).
+		expect(anchorsChecked).toBe(
+			rows.reduce((total, [, row]) => total + row.count, 0),
+		);
+	});
+
+	it("ATTACK_REFUSAL_SECOND_ANCHOR: a row with two anchors reds when the SECOND one starts flagging", () => {
+		// #4606 r2 F3: `anchors[0]` was the only compared line, so the second of
+		// a row's two sites could start being flagged while the row stayed green.
+		// The first anchor here is a ranking read (refused); the second is the
+		// same statement inside a bounded loop that removes the victim (flagged).
+		const anchor = "const victim = [...m.entries()].sort(cmp)[0];";
+		const source = [
+			"function rank(m) {",
+			`  ${anchor}`,
+			"  return victim;",
+			"}",
+			"function trim(m, CAP) {",
+			"  while (m.size > CAP) {",
+			`    ${anchor}`,
+			"    m.delete(victim[0]);",
+			"  }",
+			"}",
+		].join("\n");
+		const { witnesses, anchorsChecked } = refusalWitnesses(
+			{ probe: { file: "probe.ts", anchor, count: 2 } },
+			() => source,
+		);
+		expect(anchorsChecked).toBe(2);
+		expect(witnesses.join("\n")).toContain("probe.ts:7");
 	});
 
 	it("every occurrence is the definition file, migrated, or exempted with a reason", () => {

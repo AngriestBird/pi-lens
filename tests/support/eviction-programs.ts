@@ -17,17 +17,28 @@
  *
  * | Stage | Structural evidence |
  * | --- | --- |
- * | **bound** | a cap comparison on a collection's size/length (`x.size > CAP`, the `x.size <= CAP` early-return complement, `occupied < getCeiling()`). The threshold must not be the literal `0`: `x.length > 0` is an emptiness check, not a cap. |
+ * | **bound** | a cap comparison on a collection's size/length (`x.size > CAP`, the `x.size <= CAP` early-return complement, `occupied < getCeiling()`). The threshold must not be the literal `0`: `x.length > 0` is an emptiness check, not a cap. An accessor-chain `for…of` head carries its order stage in the walk itself, so it needs no separate bound. |
  * | **order** | `sort`/`toSorted`, insertion order (`keys()`/`values()`/`entries()`, or a bare `for…of` walk), or an explicit min/max scan over the container |
- * | **selection** | `[i]`, `.at()`, `.find()`, `.shift()`, `.pop()`, a destructured element, an iterator's `.next()` head, or a count-bounded `slice`/`length = cap` truncation |
+ * | **selection** | `[i]`, `.at()`, `.find()`, `.shift()`, `.pop()`, a destructured element (including an array-destructured iterator head, `const [oldest] = m.keys()`), an iterator's `.next()` head, a `for…of` head that breaks after its first victim, or a count-bounded `slice`/`length = cap` truncation |
  * | **effect** | a container removal (`.delete`/`.splice`/`.shift`/`.pop`), a filesystem removal (`rmSync`/`unlinkSync`/`rm`), a durable write of the survivors, or an in-place `length = cap` |
  *
  * The four admitted forms — `iterator-head`, `ordered-victim`, `ordered-scan`,
- * `count-truncation` — are exactly the rows of `STATE_TABLE.md`, each with the
- * live member that needs it and an executable plant. Everything outside that
- * table refuses: there is no fallback arm and no "unknown shape" credit, so a
- * new member the table cannot describe is a miss this sweep must not silently
- * absorb (#4606's design, maintainer decision 2026-10-18, hybrid H1).
+ * `count-truncation` — are exactly the table below, each with the live member
+ * that needs it and an executable plant. The same table stands in
+ * `STATE_TABLE.md`, the worktree record written before the first edit, as in
+ * this repo's other state tables. Everything outside that table refuses:
+ * there is no fallback arm and no "unknown shape" credit, so a new member the
+ * table cannot describe is a miss this sweep must not silently absorb (#4606's
+ * design, maintainer decision 2026-10-18, hybrid H1). The same table ships in
+ * the sweep's `REFUSED_PROGRAMS` docblock for the refused side, and every
+ * r1 narrowing the #4606 r2 review found is closed here:
+ *
+ * | Form | Bound | Order | Selection | Effect |
+ * | --- | --- | --- | --- | --- |
+ * | `iterator-head` | the enclosing loop's own ceiling comparison, or none for an accessor-chain walk | `keys()`/`values()`/`entries()` (chained, aliased, indirect, wrapped, optional), or a bare container walk | `.next()` head, an array-destructured head, or a `for…of` head that `break`s | removal of the victim or of a name derived from it |
+ * | `ordered-victim` | a governing cap comparison | `sort`/`toSorted` over a spread, `Array.from`, a transform chain, an alias, or an in-place statement | `[i]`, `.at`, `.find`, `.shift`, `.pop`, destructuring, or a `for…of` over the ranking, each followed through aliases | removal, a hand-off to a retirement helper, or every victim removed |
+ * | `ordered-scan` | a cap comparison in the loop or function | `for…of` over a container (bare, accessor, destructured) | a victim cursor assigned in the body, distinct from the loop variable | removal of that cursor |
+ * | `count-truncation` | a guard cap, or a literal/derived count | `sort`/`toSorted`, or the truncation alone | `slice(0, N)`, `slice(-N)`, `x.length = N` | survivors persisted, rebuilt, iterated-and-removed, or a capped view |
  *
  * ## The parse, and why this asks the engine instead of walking
  *
@@ -44,7 +55,9 @@
  * Line anchoring is uniform: an occurrence is reported at the first line of the
  * STATEMENT that introduces the ordered sequence (the `const victim = …`
  * declaration, the `for…of`, the truncation). That is what the sweep keys its
- * registry on, and it is what a human reads.
+ * registry on, and it is what a human reads. A reference to a victim is read
+ * from the AST's identifiers, never from a node's raw text, so a string or a
+ * comment that spells a victim is not a reference to it (AGENTS.md shape 43).
  */
 
 import type { SgNode } from "@ast-grep/napi";
@@ -503,10 +516,26 @@ function boundNames(node: SgNode): string[] {
 	return names;
 }
 
-/** True when `text` uses any of `names` as a whole identifier. */
-function mentionsAny(text: string, names: ReadonlySet<string>): boolean {
-	for (const identifier of identifiers(text)) {
-		if (names.has(identifier)) return true;
+/**
+ * True when the node's EXECUTABLE text references any of `names`. Identifiers
+ * are read from the AST, never from `node.text()`: a string or a comment that
+ * spells a victim (`m.delete("oldest")`, a block comment naming `oldest` beside
+ * `other`) is not a reference to it (AGENTS.md shape 43), and a member
+ * expression's property (`other.oldest`) is a different name, not this
+ * program's victim.
+ */
+function referencesAny(node: SgNode, names: ReadonlySet<string>): boolean {
+	if (names.size === 0) return false;
+	for (const identifier of node.findAll({ rule: { kind: "identifier" } })) {
+		if (!names.has(identifier.text())) continue;
+		const parent = identifier.parent();
+		const property = parent?.field("property") ?? null;
+		if (
+			property !== null &&
+			property.range().start.index === identifier.range().start.index
+		)
+			continue;
+		return true;
 	}
 	return false;
 }
@@ -560,7 +589,7 @@ function removesVictim(
 		const name = invokedName(call);
 		if (name === undefined) return false;
 		if (!REMOVAL_METHODS.has(name) && !REMOVAL_CALLEES.has(name)) return false;
-		return mentionsAny(call.text(), victims);
+		return referencesAny(call, victims);
 	});
 }
 
@@ -584,7 +613,7 @@ function handsOffVictim(
 		if (!contains(region, call)) return false;
 		if (contains(call, ordering) || contains(orderingStatement, call))
 			return false;
-		return mentionsAny(call.text(), victims);
+		return referencesAny(call, victims);
 	});
 }
 
@@ -663,7 +692,35 @@ function orderedNames(sortCall: SgNode, facts: FileFacts): string[] {
 	return source === undefined ? [] : [source];
 }
 
-function recogniseIteratorHead(
+/**
+ * True when a loop walks an insertion-order accessor chain (`m.keys()`,
+ * `this.byCall.entries()`, `state.paths?.values()`). The walk is then its own
+ * order stage: the head of the chain is the first entry inserted. A loop over a
+ * bare container or a helper call has no such evidence and needs the enclosing
+ * cap instead, exactly as the retired lexical detector did.
+ */
+function accessorLoop(right: SgNode): boolean {
+	let current: SgNode | null = right;
+	for (let depth = 0; depth < 16 && current !== null; depth++) {
+		const kind = current.kind();
+		if (kind === "non_null_expression" || kind === "parenthesized_expression") {
+			current = current.field("expression") ?? current.field("value");
+			continue;
+		}
+		if (kind !== "call_expression") return false;
+		const name = invokedName(current);
+		return name === "keys" || name === "values" || name === "entries";
+	}
+	return false;
+}
+
+/** True when the body leaves its loop after the first removal. */
+function breaksOut(body: SgNode): boolean {
+	return body.findAll({ rule: { kind: "break_statement" } }).length > 0;
+}
+
+/** The iterator's `.next()` head, removed under the enclosing loop's ceiling. */
+function recogniseNextHead(
 	facts: FileFacts,
 	report: (program: EvictionProgram) => void,
 ): void {
@@ -680,12 +737,76 @@ function recogniseIteratorHead(
 				contains(removal, call) &&
 				REMOVAL_METHODS.has(calleeName(removal) ?? ""),
 		);
-		const names = new Set(boundNames(call));
+		const names = victimNames(boundNames(call), facts);
 		const removed =
 			inline || (names.size > 0 && removesVictim(body, names, facts));
 		if (!removed) continue;
 		report({ form: "iterator-head", line: lineOf(statement) });
 	}
+}
+
+/** An array-destructured head (`const [oldest] = m.keys()`), removed under a cap. */
+function recogniseDestructuredHead(
+	facts: FileFacts,
+	report: (program: EvictionProgram) => void,
+): void {
+	for (const declarator of facts.declarators) {
+		const pattern = declarator.field("name");
+		if (pattern === null || pattern.kind() !== "array_pattern") continue;
+		const control = enclosingCappedControl(declarator, facts);
+		if (control === undefined) continue;
+		const body = controlBody(control);
+		if (body === null) continue;
+		const victims = victimNames(identifiers(pattern.text()), facts);
+		if (victims.size === 0) continue;
+		if (!removesVictim(body, victims, facts)) continue;
+		report({ form: "iterator-head", line: lineOf(statementOf(declarator)) });
+	}
+}
+
+/**
+ * A `for…of` head that breaks after its first victim. An accessor walk is its
+ * own order stage; a bare container walk needs the enclosing cap.
+ */
+function recogniseForOfHead(
+	facts: FileFacts,
+	report: (program: EvictionProgram) => void,
+): void {
+	for (const loop of facts.forOfs) {
+		const right = loop.field("right");
+		const left = loop.field("left");
+		const body = loop.field("body");
+		if (right === null || left === null || body === null) continue;
+		const bounded = enclosingCappedControl(loop, facts);
+		if (bounded === undefined && !accessorLoop(right)) continue;
+		if (!breaksOut(body)) continue;
+		// The victim must be the loop bindings themselves, not a name they were
+		// assigned to: an assignment inside a guarded branch (`if (index >=
+		// PROTECTED) { victim = key; break; }`) is a scan that skips a prefix,
+		// which `ordered-scan` owns. Widening here would re-label that live
+		// member's policy as a head eviction.
+		const victims = new Set(identifiers(left.text()));
+		if (victims.size === 0) continue;
+		const region =
+			bounded === undefined ? body : (controlBody(bounded) ?? body);
+		if (!removesVictim(region, victims, facts)) continue;
+		report({ form: "iterator-head", line: lineOf(loop) });
+	}
+}
+
+/**
+ * The insertion-order head, selected three ways: the iterator's `.next()`
+ * result, an array-destructured accessor, or a `for…of` walk that breaks after
+ * the first victim. Every spelling resolves the victim through
+ * {@link victimNames}, so a second binding cannot hide it.
+ */
+function recogniseIteratorHead(
+	facts: FileFacts,
+	report: (program: EvictionProgram) => void,
+): void {
+	recogniseNextHead(facts, report);
+	recogniseDestructuredHead(facts, report);
+	recogniseForOfHead(facts, report);
 }
 
 /** The side of a cap comparison that measures a size or length. */
@@ -795,10 +916,7 @@ function orderedLoopRemoves(
 			(call) =>
 				contains(body, call) &&
 				REMOVAL_METHODS.has(invokedName(call) ?? "") &&
-				mentionsAny(
-					call.text(),
-					new Set(identifiers(nodeText(loop.field("left")))),
-				),
+				referencesAny(call, new Set(identifiers(nodeText(loop.field("left"))))),
 		);
 	});
 }
@@ -814,11 +932,14 @@ function recogniseOrderedVictim(
 		if (names.length === 0) continue;
 		if (!governsOrderedProgram(call, facts)) continue;
 		const scope = enclosingFunction(call);
-		const seeds = new Set(names);
-		const loopsRemove = orderedLoopRemoves(seeds, facts);
-		if (!loopsRemove && !selectsInPlace(call) && !selectsByName(seeds, facts))
-			continue;
+		// Derived names are resolved BEFORE selection: an alias of the ranking
+		// (`const alias = ranked; m.delete(alias[0])`) selects a victim as surely
+		// as the ranking itself, and a selection test against the seeds alone
+		// cannot see it.
 		const victims = victimNames(names, facts);
+		const loopsRemove = orderedLoopRemoves(victims, facts);
+		if (!loopsRemove && !selectsInPlace(call) && !selectsByName(victims, facts))
+			continue;
 		const handsOff =
 			containerDerived(orderedExpression(call, facts)) &&
 			handsOffVictim(scope, victims, facts, call);
@@ -881,7 +1002,7 @@ function persistsSurvivors(
 		if (!contains(region, call)) return false;
 		const name = invokedName(call);
 		if (name === undefined || !WRITE_CALLEES.has(name)) return false;
-		return mentionsAny(call.text(), retained);
+		return referencesAny(call, retained);
 	});
 }
 
