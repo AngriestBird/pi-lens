@@ -205,8 +205,10 @@ describe("fork-capped workflow token writes (#2993)", () => {
 // Stated limits of a source census: a shell that runs a FILE (`bash ci.sh`) or
 // remote input (`curl … | sh`) is not read, a heredoc handed to a NON-shell
 // interpreter (`node <<'NODE'`, `python3 - <<'PY'`) is not read, an inline
-// `-c`/`-e` payload that does not itself name a `gh` call is not reported, and
-// an earlier `echo GH_REPO=… >> $GITHUB_ENV` is not tracked.
+// `-c`/`-e` payload that does not itself name a `gh` call is not reported (and a
+// matcher pattern that does, `grep -e 'gh …'`, IS reported: the census cannot
+// tell a pattern from a program), and an earlier `echo GH_REPO=… >> $GITHUB_ENV`
+// is not tracked.
 
 /** Shell interpreters whose `-c` argument is itself a script bash runs. */
 const SHELL_COMMANDS = new Set(["bash", "sh", "dash", "zsh", "ksh"]);
