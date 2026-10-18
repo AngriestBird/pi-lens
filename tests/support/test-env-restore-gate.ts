@@ -17,35 +17,15 @@
  *
  * The population is every `process.env` write, derived from the seam rather
  * than from a list of operators. Each `process.env` reference is classified
- * from the token that follows it:
- *
- * - `.KEY`, `[expr]`, `?.KEY`, `?.[expr]`, `!.KEY` and `![expr]` followed by
- *   an assignment operator of ANY spelling is a write (`=`, `+=`, `&&=`,
- *   `||=`, `??=`, and a `=` on a later line); the optional-chain and non-null
- *   postfix operators continue the same member chain, and so does a grouping
- *   or cast the reference is the whole of (`(process.env).K`,
- *   `(process.env as T).K`, `(process.env satisfies T)[K]`);
- * - `delete` before it is a delete;
- * - `process.env = …` is a whole-environment write;
- * - `Object.assign(process.env, …)`, `Object.defineProperty(process.env, …)`
- *   and their `Reflect` twins are writes;
- * - a local alias bound from `process.env` (`const env = process.env`) is the
- *   same seam, so `env.KEY = …`, `env?.KEY = …`, and a mutator whose subject
- *   it is (`Object.assign(env, …)`) are writes;
- * - `globalThis.process.env`, `window.process.env`, `self.process.env` and
- *   `global.process.env` are the same seam;
- * - a VALUE read is the closed set of followers in `READ_FOLLOW` (`;`, `,`,
- *   `)`, `}`, `]`, `:`, `?`, a comparison or boolean operator, `as`,
- *   `satisfies`, `in`, `instanceof`).
- *
- * A reference that is none of those becomes an `unclassified` finding, and so
- * does a `process.env` member used as a destructuring assignment target. An
- * unrecognised spelling is therefore a red, never a silent pass, the
- * fail-closed direction AGENTS.md shape 69 requires.
+ * through its TypeScript AST role. Parentheses, type wrappers and non-null
+ * assertions preserve identity; aliases and destructured bindings resolve
+ * through their nearest visible declaration. Assignments, deletes and mutator
+ * calls write; ordinary value uses read. Calling or tagging the env object is
+ * reported as unclassified.
  *
  * ## The restore rule is structural, not shape-of-call
  *
- * An accepted restore is one of exactly five shapes, each decided from
+ * An accepted restore is one of the following shapes, each decided from
  * structure:
  *
  * 1. an `afterEach`/`afterAll` `delete` of the key, in a teardown whose
@@ -68,7 +48,7 @@
  *    the live environment (`{ ...process.env }`) and a fresh literal restore
  *    nothing;
  * 7. a teardown `Object.assign(process.env, saved)` whose value argument is a
- *    name saved outside the region.
+ *    name saved outside the region, covering only its statically known keys.
  *
  * `vi.stubEnv(...)` is restored only by `vi.unstubAllEnvs()` in a covering
  * teardown or finally. A write inside a teardown body is reported unless the
@@ -84,6 +64,8 @@
  * "this write is not provably restored here", and it shrinks when the file is
  * made readable.
  */
+
+import { parseSync, visitorKeys, type Node } from "oxc-parser";
 
 import {
 	callbackBodyBrace,
@@ -175,10 +157,7 @@ interface RestoreRegion {
 	pieces: Piece[];
 }
 
-const SEAM =
-	/(?<![\w$])(?:(?:globalThis|window|self|global)\s*\.\s*)?process\s*\.\s*env(?![\w$])/g;
-const ALIAS_DECL =
-	/(?<![\w$.])(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=;]*)?=\s*(?:(?:globalThis|window|self|global)\s*\.\s*)?process\s*\.\s*env(?![\w$])/g;
+const SEAM = /(?<![\w$])process\s*\.\s*env(?![\w$])/g;
 const MUTATOR =
 	/(?<![\w$])(?:Object\s*\.\s*(assign|defineProperty|defineProperties)|Reflect\s*\.\s*(set|deleteProperty|defineProperty))\s*\(/g;
 const STUB_ENV = /(?<![\w$.])vi\s*\.\s*stubEnv\s*\(/g;
@@ -231,14 +210,6 @@ function stringLiteral(text: string): string | undefined {
 	return body.replace(/\\(.)/g, "$1");
 }
 
-function precedingWord(stripped: string, index: number): string {
-	let i = index - 1;
-	while (i >= 0 && /\s/.test(stripped[i])) i--;
-	const end = i;
-	while (i >= 0 && /[\w$]/.test(stripped[i])) i--;
-	return stripped.slice(i + 1, end + 1);
-}
-
 /** Skip whitespace, newlines included, so a `=` on the next line still counts. */
 function afterGap(stripped: string, index: number): number {
 	let i = index;
@@ -258,162 +229,194 @@ function assignmentAt(stripped: string, from: number): number {
 	return ASSIGN_OPERATOR.test(stripped.slice(at, at + 5)) ? at : -1;
 }
 
-/**
- * The closed set of characters that may follow a `process.env` reference used
- * as a VALUE. Anything outside it, and outside the assignment forms above, is
- * an unrecognised spelling and becomes an `unclassified` finding.
- */
-const READ_FOLLOW = new Set([
-	",",
-	")",
-	";",
-	"}",
-	"]",
-	":",
-	"?",
-	"&",
-	"|",
-	"!",
-	"<",
-	">",
-	"+",
-	"-",
-	"*",
-	"/",
-	"%",
-	"^",
-]);
-const READ_KEYWORD = /^(?:as|satisfies|instanceof|in|of)\b/;
-
-/** Does the `process.env` reference run inside a destructuring assignment target? */
-function inAssignmentTarget(stripped: string, at: number): boolean {
-	let depth = 0;
-	for (let i = at - 1; i >= 0; i--) {
-		const ch = stripped[i];
-		if (ch === ")" || ch === "]" || ch === "}") {
-			depth++;
-			continue;
-		}
-		if (ch !== "(" && ch !== "[" && ch !== "{") continue;
-		if (depth > 0) {
-			depth--;
-			continue;
-		}
-		// Only a pattern can be a destructuring target: `[a, b] = …` or
-		// `({ a: b } = …)`. A `(` groups or calls, so it is not one.
-		if (ch === "(") return false;
-		const close = matchingCloseIndex(stripped, i, ch, ch === "[" ? "]" : "}");
-		if (close < 0) return false;
-		return assignmentAt(stripped, close + 1) >= 0;
-	}
-	return false;
+/** TypeScript value wrappers preserve the expression's identity. */
+function unwrapped(node: Node): Node {
+	while (
+		"expression" in node &&
+		(node.type === "ParenthesizedExpression" ||
+			node.type === "ChainExpression" ||
+			node.type === "TSAsExpression" ||
+			node.type === "TSSatisfiesExpression" ||
+			node.type === "TSTypeAssertion" ||
+			node.type === "TSNonNullExpression")
+	)
+		node = node.expression;
+	return node;
 }
 
-/** Names declared as `const NAME = process.env` anywhere in the file. */
-function aliasNames(stripped: string): Map<string, number> {
-	const aliases = new Map<string, number>();
-	for (const match of stripped.matchAll(ALIAS_DECL)) {
-		const name = match[1];
-		const at = match.index ?? 0;
-		if (name !== undefined) aliases.set(name, at + match[0].indexOf(name));
-	}
-	return aliases;
-}
-
-/**
- * Where a member chain continues after the expression ending at `end`, or
- * undefined when the next token does not access a member. The optional-chain
- * and non-null postfix operators are the same chain, so `env?.K`, `env!.K`,
- * `env?.[k]` and `env![k]` all reach the member or the index below.
- */
-function memberAccessAt(
-	stripped: string,
-	end: number,
-): { at: number; kind: "dot" | "bracket" } | undefined {
-	switch (stripped[afterGap(stripped, end)]) {
-		case "?": {
-			const at = afterGap(stripped, end);
-			if (stripped[at + 1] !== ".") return undefined;
-			const name = afterGap(stripped, at + 2);
-			return stripped[name] === "["
-				? { at: name, kind: "bracket" }
-				: { at: at + 1, kind: "dot" };
-		}
-		case "!": {
-			const at = afterGap(stripped, afterGap(stripped, end) + 1);
-			if (stripped[at] === "." || stripped[at] === "[")
-				return {
-					at,
-					kind: stripped[at] === "[" ? "bracket" : "dot",
-				};
-			return stripped[at] === "?" && stripped[at + 1] === "."
-				? memberAccessAt(stripped, at)
-				: undefined;
-		}
-		case ".":
-			return { at: afterGap(stripped, end), kind: "dot" };
-		case "[":
-			return { at: afterGap(stripped, end), kind: "bracket" };
-		default:
-			return undefined;
-	}
-}
-
-/**
- * The grouping or cast that WRAPS only this reference (`(process.env)`,
- * `(process.env as T)`, `(process.env satisfies T)`), or undefined. A call's
- * `(` is not a grouping, so `expect(process.env)` stays a value read.
- */
-function wrapperEnd(
-	stripped: string,
-	start: number,
-	end: number,
-): { open: number; end: number } | undefined {
-	let open = start - 1;
-	while (open >= 0 && /\s/.test(stripped[open])) open--;
-	if (open < 0 || stripped[open] !== "(") return undefined;
-	const before = stripped[open - 1];
-	if (before !== undefined && /[\w$)\]]/.test(before)) return undefined;
-	const close = matchingCloseIndex(stripped, open, "(", ")");
-	if (close < end) return undefined;
-	const inner = stripped.slice(end, close).trim();
-	// Bare grouping or a cast, never a larger expression whose role we would
-	// be guessing at.
-	if (inner !== "" && !/^(?:as|satisfies)\s/.test(inner)) return undefined;
-	return { open, end: close + 1 };
-}
-
-/**
- * Every `process.env` reference in the file, including each alias of it, and
- * every position where the env OBJECT itself starts (which a mutator call's
- * first argument must be). The declaration that CREATES an alias is not a
- * reference: it is followed by `=` and would otherwise read as a
- * whole-environment write of the alias.
- */
-function seamRefs(stripped: string): {
-	members: Array<{ at: number; end: number }>;
+/** AST enumeration owns expression identity; cleanup regions retain their offsets. */
+function astWrites(scan: Scan): {
+	sites: Site[];
 	objects: Map<number, number>;
 } {
-	const members: Array<{ at: number; end: number }> = [];
-	const objects = new Map<number, number>();
-	for (const match of stripped.matchAll(SEAM)) {
-		const at = match.index ?? 0;
-		members.push({ at, end: at + match[0].length });
-		objects.set(at, at + match[0].length);
-	}
-	for (const [name, declAt] of aliasNames(stripped)) {
-		const uses = new RegExp(`(?<![\\w$.])${name}(?![\\w$])`, "g");
-		for (const match of stripped.matchAll(uses)) {
-			const at = match.index ?? 0;
-			if (at === declAt) continue;
-			objects.set(at, at + name.length);
-			// An alias is mutated only through a member, an index or a mutator
-			// call; any other use (`pass(env)`, `{ ...env }`) reads the object.
-			if (memberAccessAt(stripped, at + name.length) === undefined) continue;
-			members.push({ at, end: at + name.length });
+	const program = parseSync("env-writes.ts", scan.raw, {
+		preserveParens: true,
+	}).program;
+	const nodes: Node[] = [];
+	const scopes = new Map<Node, Range>();
+	const visit = (node: Node, inherited: Range): void => {
+		const scope =
+			node.type === "Program" ||
+			node.type === "BlockStatement" ||
+			node.type === "ForOfStatement" ||
+			node.type === "ForStatement"
+				? { start: node.start - 1, end: node.end + 1 }
+				: inherited;
+		nodes.push(node);
+		if (node.type === "VariableDeclarator") scopes.set(node, scope);
+		const fields = node as unknown as Record<string, unknown>;
+		for (const key of visitorKeys[node.type] ?? []) {
+			const value = fields[key];
+			for (const child of Array.isArray(value) ? value : [value])
+				if (child && typeof child === "object" && "type" in child)
+					visit(child as Node, scope);
 		}
+	};
+	visit(program, { start: -1, end: scan.raw.length + 1 });
+	const declarations = nodes.filter((n) => n.type === "VariableDeclarator");
+	const scopeOf = (decl: Node): Range => scopes.get(decl)!;
+	const property = (node: Node): string | undefined => {
+		if (node.type === "Identifier") return node.name;
+		if (node.type === "Literal" && typeof node.value === "string")
+			return node.value;
+		return undefined;
+	};
+	const isProcess = (node: Node): boolean => {
+		node = unwrapped(node);
+		return (
+			(node.type === "Identifier" && node.name === "process") ||
+			(node.type === "MemberExpression" &&
+				property(node.property) === "process" &&
+				node.object.type === "Identifier" &&
+				["globalThis", "global", "window", "self"].includes(node.object.name))
+		);
+	};
+	const isEnv = (input: Node, seen = new Set<Node>()): boolean => {
+		const node = unwrapped(input);
+		if (seen.has(node)) return false;
+		seen.add(node);
+		if (node.type === "MemberExpression")
+			return property(node.property) === "env" && isProcess(node.object);
+		if (node.type !== "Identifier") return false;
+		// Resolve the nearest visible binding, so a shadow does not inherit an alias.
+		const candidates = declarations
+			.filter((decl) => {
+				const named =
+					decl.id.type === "Identifier"
+						? decl.id.name === node.name
+						: decl.id.type === "ObjectPattern" &&
+							decl.id.properties.some(
+								(p) =>
+									p.type === "Property" &&
+									p.value.type === "Identifier" &&
+									p.value.name === node.name,
+							);
+				if (!named) return false;
+				const scope = scopeOf(decl);
+				return node.start > scope.start && node.end < scope.end;
+			})
+			.sort((a, b) => scopeOf(b).start - scopeOf(a).start);
+		const decl = candidates[0];
+		if (!decl?.init) return false;
+		if (decl.id.type === "Identifier") return isEnv(decl.init, seen);
+		return (
+			decl.id.type === "ObjectPattern" &&
+			isProcess(decl.init) &&
+			decl.id.properties.some(
+				(p) =>
+					p.type === "Property" &&
+					property(p.key) === "env" &&
+					p.value.type === "Identifier" &&
+					p.value.name === node.name,
+			)
+		);
+	};
+	const sites: Site[] = [];
+	const objects = new Map<number, number>();
+	const target = (input: Node, kind: EnvWriteKind): void => {
+		const node = unwrapped(input);
+		const member = node.type === "MemberExpression" && isEnv(node.object);
+		if (member || isEnv(node)) {
+			let keyExpr = member
+				? scan.raw.slice(node.property.start, node.property.end)
+				: "";
+			// A delete-all loop answers for every key, including newly created ones.
+			if (
+				kind === "delete" &&
+				member &&
+				node.computed &&
+				node.property.type === "Identifier"
+			) {
+				const loop = nodes.find(
+					(n) =>
+						n.type === "ForOfStatement" &&
+						(n.body.type === "ExpressionStatement"
+							? n.body.expression.type === "UnaryExpression" &&
+								n.body.expression.argument.start === input.start
+							: n.body.type === "BlockStatement" &&
+								n.body.body.length === 1 &&
+								n.body.body[0]?.type === "ExpressionStatement" &&
+								n.body.body[0].expression.type === "UnaryExpression" &&
+								n.body.body[0].expression.argument.start === input.start) &&
+						n.left.type === "VariableDeclaration" &&
+						n.left.declarations[0]?.id.type === "Identifier" &&
+						n.left.declarations[0].id.name === property(node.property) &&
+						n.right.type === "CallExpression" &&
+						n.right.callee.type === "MemberExpression" &&
+						n.right.callee.object.type === "Identifier" &&
+						n.right.callee.object.name === "Object" &&
+						property(n.right.callee.property) === "keys" &&
+						n.right.arguments.length === 1 &&
+						isEnv(n.right.arguments[0]!) &&
+						!scan.bodies.some(
+							(b) =>
+								b.start > n.body.start &&
+								b.start < input.start &&
+								b.end > input.end,
+						),
+				);
+				if (loop) keyExpr = "";
+			}
+			sites.push({
+				key: keyExpr ? normalizeKey(keyExpr) : WHOLE_ENV,
+				keyExpr,
+				kind,
+				start: input.start,
+				keyEnd: input.end,
+				line: lineOf(scan.stripped, input.start),
+				form: keyExpr ? "member" : "whole",
+			});
+			return;
+		}
+		if (node.type === "ArrayPattern")
+			for (const item of node.elements) {
+				if (item) target(item, kind);
+			}
+		if (node.type === "ObjectPattern")
+			for (const item of node.properties) {
+				if (item.type === "Property") target(item.value, kind);
+			}
+		if (node.type === "AssignmentPattern") target(node.left, kind);
+	};
+	for (const node of nodes) {
+		if (
+			node.type === "CallExpression" &&
+			node.arguments[0] &&
+			isEnv(node.arguments[0])
+		) {
+			const arg = node.arguments[0];
+			objects.set(arg.start, arg.end);
+		}
+		if (node.type === "AssignmentExpression") target(node.left, "assign");
+		if (node.type === "UnaryExpression" && node.operator === "delete")
+			target(node.argument, "delete");
+		if (node.type === "UpdateExpression") target(node.argument, "unclassified");
+		if (node.type === "CallExpression" && isEnv(node.callee))
+			target(node.callee, "unclassified");
+		if (node.type === "TaggedTemplateExpression" && isEnv(node.tag))
+			target(node.tag, "unclassified");
 	}
-	return { members, objects };
+	return { sites, objects };
 }
 
 /** The raw text of a call's `index`-th argument (0-based). */
@@ -450,6 +453,8 @@ function envObjectEnd(
 ): number {
 	const { stripped } = scan;
 	const start = nextNonSpace(stripped, at);
+	const known = objects.get(start);
+	if (known !== undefined) return known;
 	if (stripped[start] === "(") {
 		const close = matchingCloseIndex(stripped, start, "(", ")");
 		if (close < 0) return -1;
@@ -504,91 +509,12 @@ function mutatorSites(
 }
 
 /**
- * One `process.env` reference's write, or undefined when it reads the
- * environment. An unrecognised follower is an `unclassified` write: the seam
- * was reached, so the enumerator must not stay silent about it.
- */
-function siteFromRef(scan: Scan, at: number, end: number): Site | undefined {
-	const { stripped } = scan;
-	const deleted = precedingWord(stripped, at) === "delete";
-	// A grouping or cast around the reference (`(process.env).K`,
-	// `(process.env as T)[K]`) is the same object, so its chain starts after
-	// the wrapper rather than at the reference itself.
-	let exprStart = at;
-	let exprEnd = end;
-	for (;;) {
-		const wrapper = wrapperEnd(stripped, exprStart, exprEnd);
-		if (wrapper === undefined) break;
-		exprStart = wrapper.open;
-		exprEnd = wrapper.end;
-	}
-	const j = afterGap(stripped, exprEnd);
-	const site = (
-		key: string,
-		keyExpr: string,
-		kind: EnvWriteKind,
-		keyEnd: number,
-		form: Site["form"] = "member",
-	): Site => ({
-		key,
-		kind,
-		line: lineOf(stripped, at),
-		start: at,
-		keyExpr,
-		keyEnd,
-		form,
-	});
-	const access = memberAccessAt(stripped, exprEnd);
-	if (access?.kind === "dot") {
-		const nameAt = nextNonSpace(stripped, access.at + 1);
-		const name = /^[A-Za-z_$][\w$]*/.exec(stripped.slice(nameAt))?.[0];
-		if (name === undefined)
-			return site(WHOLE_ENV, "", "unclassified", access.at, "whole");
-		const after = nextNonSpace(stripped, nameAt + name.length);
-		if (deleted) return site(name, name, "delete", after);
-		if (assignmentAt(stripped, after) >= 0)
-			return site(name, name, "assign", after);
-		// A property read — unless the whole member chain is an assignment
-		// target (`({ x: process.env.A } = …)`), which writes it.
-		return inAssignmentTarget(stripped, at)
-			? site(name, name, "unclassified", after)
-			: undefined;
-	}
-	if (access?.kind === "bracket") {
-		const close = matchingCloseIndex(stripped, access.at, "[", "]");
-		if (close < 0)
-			return site(WHOLE_ENV, "", "unclassified", access.at, "whole");
-		const keyExpr = scan.raw.slice(access.at + 1, close).trim();
-		const key = normalizeKey(keyExpr);
-		if (deleted) return site(key, keyExpr, "delete", close + 1);
-		if (assignmentAt(stripped, close + 1) >= 0)
-			return site(key, keyExpr, "assign", close + 1);
-		return inAssignmentTarget(stripped, at)
-			? site(key, keyExpr, "unclassified", close + 1)
-			: undefined;
-	}
-	if (deleted) return site(WHOLE_ENV, "", "delete", j, "whole");
-	if (assignmentAt(stripped, j) >= 0)
-		return site(WHOLE_ENV, "", "assign", j, "whole");
-	const after = stripped[j];
-	if (after === undefined || after === "=" || READ_FOLLOW.has(after))
-		return undefined;
-	if (READ_KEYWORD.test(stripped.slice(j))) return undefined;
-	return site(WHOLE_ENV, "", "unclassified", j, "whole");
-}
-
-/**
  * Every env write in one file's blanked source, INCLUDING the teardown writes
  * that restore them — the caller needs both to decide coverage.
  */
 function envWriteSites(scan: Scan): Site[] {
 	const { stripped } = scan;
-	const { members, objects } = seamRefs(stripped);
-	const sites: Site[] = [];
-	for (const ref of members) {
-		const site = siteFromRef(scan, ref.at, ref.end);
-		if (site !== undefined) sites.push(site);
-	}
+	const { sites, objects } = astWrites(scan);
 	for (const match of stripped.matchAll(STUB_ENV)) {
 		const at = match.index ?? 0;
 		const paren = at + match[0].length - 1;
@@ -1335,11 +1261,15 @@ function regionHits(
 			// is its own piece.
 			if (insideNestedFunction(scan, piece.range, site.start)) continue;
 			if (!restoreShaped(scan, site, piece.params, pieceRanges)) continue;
-			for (const key of resolveKeyExpr(
-				site.keyExpr,
-				piece.params,
-				bindingsAt(scan, site),
-			))
+			// Assign cannot remove keys missing from the saved record. Unknown
+			// snapshot keys prove no coverage; the call itself is still put-back.
+			const keys =
+				site.form === "mutator"
+					? recordKeys(scan, site.start, site.valueExpr?.trim() ?? "").filter(
+							(key) => key !== WHOLE_ENV,
+						)
+					: resolveKeyExpr(site.keyExpr, piece.params, bindingsAt(scan, site));
+			for (const key of keys.length || site.form !== "mutator" ? keys : [""])
 				hits.push({ key, pos: site.start, scope: region.scope });
 		}
 		for (const match of scan.stripped

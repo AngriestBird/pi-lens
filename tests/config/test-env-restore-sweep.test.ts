@@ -140,6 +140,91 @@ describe("#4589 test-env-restore detector — the shapes that must red and green
 	const keys = (findings: readonly EnvRestoreFinding[]) =>
 		findings.map((finding) => finding.key);
 
+	it("r3 expression matrix detects wrapped and rebound env writes (#4593 F1)", () => {
+		// Shape 69: identity follows AST expressions, not a wrapper spelling list.
+		const prefix =
+			"const env = process.env; const again = env; const { env: destructured } = process;";
+		for (const expression of [
+			"process.env.K!",
+			"process.env['K']!",
+			"(env).K",
+			"(env as NodeJS.ProcessEnv).K",
+			"(env!).K",
+			"(process?.env).K",
+			"process['env'].K",
+			"destructured.K",
+			"again.K",
+			"(<NodeJS.ProcessEnv>process.env).K",
+			"(env satisfies NodeJS.ProcessEnv).K",
+		]) {
+			expect(
+				keys(detect(`${prefix} ${expression} = "x";`)),
+				expression,
+			).toContain("K");
+		}
+		for (const object of [
+			"(env)",
+			"(env as NodeJS.ProcessEnv)",
+			"env!",
+			"process['env']",
+			"(process?.env)",
+			"destructured",
+			"again",
+			"(<NodeJS.ProcessEnv>env)",
+		]) {
+			expect(keys(detect(`${prefix} delete ${object}.K;`)), object).toContain(
+				"K",
+			);
+			expect(
+				keys(detect(`${prefix} Object.assign(${object}, {K: "x"});`)),
+				object,
+			).toContain("<process.env>");
+			expect(detect(`${prefix} void ${object}.K;`), object).toEqual([]);
+		}
+	});
+
+	it("r3 assign cannot delete new keys or restore a partial record's other key (#4593 F2)", () => {
+		for (const saved of [
+			"{ ...process.env }",
+			"{ OTHER: process.env.OTHER }",
+		]) {
+			for (const cleanup of [
+				"afterEach(() => { Object.assign(process.env, saved); });",
+				"",
+			]) {
+				const write = 'process.env.NEW_KEY = "x";';
+				const source = `const saved = ${saved}; ${cleanup} it("a", () => { ${cleanup ? write : `try { ${write} } finally { Object.assign(process.env, saved); }`} });`;
+				expect(keys(detect(source))).toContain("NEW_KEY");
+			}
+		}
+		expect(
+			detect(
+				'const saved = { K: process.env.K }; afterEach(() => { Object.assign(process.env, saved); }); it("a", () => { process.env.K = "x"; });',
+			),
+		).toEqual([]);
+	});
+
+	it("r3 delete-all must execute for every current key (#4593 F2)", () => {
+		for (const body of [
+			'if (key.startsWith("PREFIX")) delete process.env[key];',
+			"const unused = () => { delete process.env[key]; };",
+			"delete process.env.OTHER;",
+		]) {
+			const source = `const saved = { ...process.env }; it("a", () => { try { process.env.NEW_KEY = "x"; } finally { for (const key of Object.keys(process.env)) { ${body} } Object.assign(process.env, saved); } });`;
+			expect(keys(detect(source)), body).toContain("NEW_KEY");
+		}
+		for (const body of [
+			"delete process.env[key];",
+			"{ delete process.env[key]; }",
+		]) {
+			expect(
+				detect(
+					`const saved = { ...process.env }; it("a", () => { try { process.env.NEW_KEY = "x"; } finally { for (const key of Object.keys(process.env)) ${body} Object.assign(process.env, saved); } });`,
+				),
+			).toEqual([]);
+		}
+	});
+
 	it("reds on an env write with no restore anywhere (#4563)", () => {
 		expect(
 			detect(
@@ -614,12 +699,12 @@ describe("#4589 test-env-restore detector — the shapes that must red and green
 		const cases: Array<{ name: string; source: string; key: string }> = [
 			{
 				name: "optional chaining",
-				source: 'it("a", () => { process.env?.PROBE_OPT = "1"; });',
+				source: 'it("a", () => { (process?.env).PROBE_OPT = "1"; });',
 				key: "PROBE_OPT",
 			},
 			{
 				name: "optional index",
-				source: 'it("a", () => { process.env?.["PROBE_OIDX"] = "1"; });',
+				source: 'it("a", () => { (process?.env)["PROBE_OIDX"] = "1"; });',
 				key: "PROBE_OIDX",
 			},
 			{
@@ -648,7 +733,7 @@ describe("#4589 test-env-restore detector — the shapes that must red and green
 				source: [
 					'it("a", () => {',
 					"\tconst env = process.env;",
-					'\tenv?.PROBE_AO = "1";',
+					'\t(env!).PROBE_AO = "1";',
 					"});",
 				].join("\n"),
 				key: "PROBE_AO",
@@ -759,7 +844,7 @@ describe("#4589 test-env-restore detector — the shapes that must red and green
 		).toEqual([]);
 	});
 
-	it("greens on Object.assign(process.env, saved) in a finally", () => {
+	it("greens on delete-all then Object.assign(process.env, saved) in a finally", () => {
 		// A mutator copies a saved record back: the value argument is the
 		// restore, exactly as an assignment's right side is.
 		expect(
@@ -770,6 +855,7 @@ describe("#4589 test-env-restore detector — the shapes that must red and green
 					"\ttry {",
 					'\t\tprocess.env.PROBE_OA = "1";',
 					"\t} finally {",
+					"\t\tfor (const key of Object.keys(process.env)) delete process.env[key];",
 					"\t\tObject.assign(process.env, saved);",
 					"\t}",
 					"});",
