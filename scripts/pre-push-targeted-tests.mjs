@@ -207,11 +207,17 @@ export const TEST_TREE_GOVERNANCE_TESTS = [
 	"tests/config/test-env-restore-sweep.test.ts",
 	// #3472: the tests-tree scanners the census finds through tests/support.
 	"tests/config/module-instance-coverage.test.ts",
+	// #4518: walks .github/ producer files through
+	// tests/support/continue-on-error-census.ts.
+	"tests/config/nightly-evaluated-floors.test.ts",
 	"tests/config/tmp-fixture-hygiene.test.ts",
 	// #4591: reads tests/support/vitest-setup.ts to pin the leak-origin
 	// record's write-before-remove wiring.
 	"tests/config/tmp-hygiene-leak-origin.test.ts",
 	"tests/config/vacuous-skip-coverage.test.ts",
+	// #4561 D1: walks tests/ for `describe` shuffle opt-outs and checks the
+	// by-design registry in both directions.
+	"tests/scripts/ci-shuffle-census.test.ts",
 	"tests/support/host-event-shape-scan.test.ts",
 	// #4522: walks both captured-fixture trees (and asks git which inputs are
 	// ignored), so a fixture change must arm it; neither pass above selects it
