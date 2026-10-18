@@ -97,15 +97,22 @@
  *   and a test that depends on it reds every run.
  * - A reader helper passed by reference (not called) has no call sites to
  *   check, so it is judged on its own body.
- * - A read invoked through an alias of the function (`const read =
- *   fs.readFileSync; read(sink)`) names no read callee, so the population
- *   does not see it. Probed: clean (a stated residual, not a silent pass the
- *   new reachability rule causes).
- * - A conditional `await` that does not also enclose the read is not counted
- *   as a suspension: the branch may not run, so it cannot be shown to
- *   enqueue bytes. A read after `if (flag) await tick();` is judged clean
- *   (the reachability rule, shape 43; the alternative reds every correct
- *   ordered read behind an optional setup step).
+ * - A same-file alias of a read callee (`const read = fs.readFileSync;
+ *   read(sink)`, `import { readFileSync as read }`) is a read: the alias is
+ *   read from its own binding, so a named spelling of the call is not a
+ *   silent pass (shape 69).
+ * - Suspension is judged FAIL-CLOSED (shape 69). An `await` that can run
+ *   between the drain and the read lets the code under test enqueue more
+ *   bytes, so it suspends the read wherever it sits: a loop body (a loop
+ *   runs when it is iterated), a `finally` (it runs however its `try`
+ *   exits), a nested function that also holds the read, an awaited
+ *   callback's body, and any spelling the walk cannot place. Only a PROVEN
+ *   unreachable await is skipped: one under an `if`/ternary/short-circuit
+ *   whose branch does not hold the read, one in a function this file never
+ *   calls, and one in a callback nothing awaits (`setTimeout`, `forEach`).
+ *   A read after `if (flag) await tick();` is judged clean (the conditional
+ *   rule, shape 43; the alternative reds every correct ordered read behind
+ *   an optional setup step).
  * - Drain forms the matcher does not credit (loud false positives, not
  *   silent passes): `Promise.all([flush...()])`, a dynamic-import flush, and
  *   two drains in sequence before a read of the first sink (the second's
@@ -405,6 +412,37 @@ const sameRange = (left: SgNode, right: SgNode): boolean =>
 	left.range().end.index === right.range().end.index;
 
 /**
+ * Kinds above an `await` under which it may never run, so it cannot suspend a
+ * read the same guard does not hold (the conditional rule, shape 43). A loop
+ * body runs when the loop is iterated and a `finally` runs however its `try`
+ * exits, so neither is here (E1, shape 69). `drainBlock` keeps them in
+ * `CONDITIONAL_KINDS`, because for a DRAIN they decide whether it ran at all.
+ */
+const MAY_NOT_RUN_KINDS = new Set([
+	"if_statement",
+	"else_clause",
+	"ternary_expression",
+	"switch_case",
+	"switch_default",
+	"catch_clause",
+]);
+
+/** The read callee a value names: `fs.readFileSync`, `fs["readFileSync"]`. */
+function readCalleeOf(node: SgNode): string | undefined {
+	if (node.kind() === "member_expression") {
+		const name = node.field("property")?.text();
+		return name && READ_CALLEES.has(name) ? name : undefined;
+	}
+	if (node.kind() === "subscript_expression") {
+		const index = node.field("index");
+		if (index?.kind() !== "string") return undefined;
+		const name = index.text().slice(1, -1);
+		return READ_CALLEES.has(name) ? name : undefined;
+	}
+	return undefined;
+}
+
+/**
  * Does every branch above `node` also enclose `pair`? An `await` under a guard
  * the read is not in may never run, so it cannot let bytes onto disk, and must
  * not void the caller's drain (N1, shape 43).
@@ -425,7 +463,7 @@ function guardedAlike(node: SgNode, pair: SgNode): boolean {
 			const condition = parent.field("condition");
 			const isCondition = condition != null && sameRange(current, condition);
 			if (!isCondition && !within(pair, parent)) return false;
-		} else if (CONDITIONAL_KINDS.has(kind) && !within(pair, parent))
+		} else if (MAY_NOT_RUN_KINDS.has(kind) && !within(pair, parent))
 			return false;
 		current = parent;
 	}
@@ -464,6 +502,29 @@ function scanUndrainedSinkReads(
 	}
 
 	const root = parse(Lang.TypeScript, source).root();
+	// Read callees this file binds: `import { readFileSync as read }`,
+	// `const read = fs.readFileSync`, `const { readFileSync: read } = fs`. A
+	// named spelling of a read is the same read (shape 69).
+	const readAliases = new Set<string>(READ_CALLEES);
+	for (const specifier of root.findAll({
+		rule: { kind: "import_specifier" },
+	})) {
+		const imported = specifier.field("name")?.text();
+		const local = specifier.field("alias")?.text() ?? imported;
+		if (imported && local && READ_CALLEES.has(imported)) readAliases.add(local);
+	}
+	for (const declarator of root.findAll({
+		rule: { kind: "variable_declarator" },
+	})) {
+		const name = declarator.field("name");
+		const value = declarator.field("value");
+		if (name?.kind() !== "identifier" || !value) continue;
+		const callee =
+			value.kind() === "identifier" && readAliases.has(value.text())
+				? value.text()
+				: readCalleeOf(value);
+		if (callee !== undefined) readAliases.add(name.text());
+	}
 	const sinkAliases: Binding[] = [];
 	const rootAliases: Binding[] = [];
 	const visible = (
@@ -647,11 +708,11 @@ function scanUndrainedSinkReads(
 	};
 
 	/**
-	 * Does `scope` run an `await` between `from` and `node`? Only an await on
-	 * the scope's own path, under branches that also hold the read, voids a
-	 * caller's drain (N1, shape 43): one inside a function the scope never
-	 * calls, a callback nothing waits on, or a dead branch runs never, and the
-	 * code under test cannot enqueue bytes through it.
+	 * Does `scope` run an `await` between `from` and `node`? Fail-closed (shape
+	 * 69): an await that CAN run lets the code under test enqueue more bytes, so
+	 * it voids the drain wherever it sits — a loop body, a `finally`, an awaited
+	 * callback's interior (E1, E2). Only a proven-unreachable await and one under
+	 * a guard the read is not in are skipped (N1, shape 43).
 	 */
 	const suspendsBetween = (
 		scope: SgNode | undefined,
@@ -663,12 +724,52 @@ function scanUndrainedSinkReads(
 		return awaits.some((awaitNode) => {
 			const start = awaitNode.range().start.index;
 			if (start < from || start >= at) return false;
-			// The read's own await is not a suspension before the read.
+			// The read's own await settles after the read, not before it.
 			if (within(node, awaitNode)) return false;
-			const owner = lexicalScopeOf(awaitNode);
-			if (!owner || !sameRange(owner, scope)) return false;
+			if (!reachable(awaitNode, node)) return false;
 			return guardedAlike(awaitNode, node);
 		});
+	};
+
+	/**
+	 * Can `awaitNode` run before the read at all? A nested function's awaits run
+	 * only when something invokes it, so a function this file never calls and a
+	 * callback nothing awaits are the two shapes the walk may skip (N1). Every
+	 * other placement is treated as running (E1, E2, shape 69).
+	 */
+	const reachable = (awaitNode: SgNode, node: SgNode): boolean => {
+		let current: SgNode = awaitNode;
+		for (;;) {
+			const parent = current.parent();
+			if (!parent) return true;
+			// The read inside this function is on the await's own path (E2).
+			if (isFunction(parent) && !within(node, parent)) {
+				if (!invokedBefore(parent, node)) return false;
+			}
+			current = parent;
+		}
+	};
+
+	/**
+	 * Does the file run `fn` before `node`? A named helper counts when it has a
+	 * call site before the read; a callback counts when the call it is an
+	 * argument of is awaited before the read. A callback nothing awaits
+	 * (`setTimeout`, `forEach`, a dropped `.map`) never runs before the read, and
+	 * neither does a function with no call site.
+	 */
+	const invokedBefore = (fn: SgNode, node: SgNode): boolean => {
+		const at = node.range().start.index;
+		const name = declaredName(fn);
+		if (name)
+			return callsTo(name, fn).some((site) => site.range().start.index < at);
+		const parent = fn.parent();
+		if (parent?.kind() !== "arguments") return false;
+		const call = parent.parent();
+		if (call?.kind() !== "call_expression") return false;
+		return (
+			call.parent()?.kind() === "await_expression" &&
+			call.range().start.index < at
+		);
 	};
 
 	/** Does `scope` suspend (await) between its entry and `node`? */
@@ -785,7 +886,7 @@ function scanUndrainedSinkReads(
 	};
 	for (const call of calls) {
 		const callee = calleeName(call);
-		if (!callee || !READ_CALLEES.has(callee)) continue;
+		if (!callee || !readAliases.has(callee)) continue;
 		const first = call.field("arguments")?.namedChildren()[0];
 		if (!first) continue;
 		const owners = sinksIn(first.range().start.index, first.range().end.index);
@@ -1526,6 +1627,93 @@ describe("sink reads drain first (#4381)", () => {
 			);
 			expect(guarded.map((hit) => [hit.line, hit.undrainedCallers])).toEqual([
 				[4, []],
+			]);
+		});
+
+		it("suspends the read on a loop, a finally, or an awaited callback (E1, E2)", () => {
+			// Rule C is fail-closed: an await that CAN run between the drain and the
+			// read lets the code under test enqueue more bytes. A loop body runs when
+			// its iterable is non-empty, a `finally` runs however its `try` exits, and
+			// an awaited callback's awaits run while the read waits for it.
+			const between: Array<[string, string[]]> = [
+				["for-of loop", ["\tfor (const item of [1]) { await tick(); }"]],
+				["while loop", ["\tlet n = 1;", "\twhile (n-- > 0) await tick();"]],
+				["finally", ["\ttry { tick(); } finally { await tick(); }"]],
+			];
+			const observed: Array<[string, number[]]> = between.map(
+				([label, body]) => [
+					label,
+					scanFixture(
+						[
+							'it("x", async () => {',
+							"\tawait flushLatencyLog();",
+							...body,
+							'\tconst text = fs.readFileSync(getLatencyLogPath(), "utf8");',
+							"\tvoid text;",
+							"});",
+						].join("\n"),
+					).map((hit) => hit.line),
+				],
+			);
+			// The awaited callback (Greptile P1): the read sits INSIDE the callback,
+			// so the enclosing `await Promise.all(...)` is not "the read's own
+			// await", and the tick before the read is a real suspension.
+			observed.push([
+				"awaited callback",
+				scanFixture(
+					[
+						'it("x", async () => {',
+						"\tawait flushLatencyLog();",
+						"\tawait Promise.all([1].map(async (item) => {",
+						"\t\tawait tick();",
+						'\t\treturn fs.readFileSync(getLatencyLogPath(), "utf8");',
+						"\t}));",
+						"});",
+					].join("\n"),
+				).map((hit) => hit.line),
+			]);
+			expect(observed).toEqual([
+				["for-of loop", [4]],
+				["while loop", [5]],
+				["finally", [4]],
+				["awaited callback", [5]],
+			]);
+			// A callback nothing awaits still cannot suspend the read (N1's rule,
+			// kept): its promise is dropped, so no turn of it precedes the read.
+			expect(
+				scanFixture(
+					[
+						'it("x", async () => {',
+						"\tawait flushLatencyLog();",
+						"\t[1].forEach(async () => { await tick(); });",
+						'\tconst text = fs.readFileSync(getLatencyLogPath(), "utf8");',
+						"\tvoid text;",
+						"});",
+					].join("\n"),
+				),
+			).toEqual([]);
+		});
+
+		it("a read through a same-file alias of a read callee is a read (shape 69)", () => {
+			// The population is read CALLEES, so a binding of one is the same read.
+			const reads = [
+				["bound alias", "const read = fs.readFileSync;"],
+				["import alias", 'import { readFileSync as read } from "node:fs";'],
+			].map(([label, header]) => [
+				label,
+				scanFixture(
+					[
+						header,
+						'it("x", async () => {',
+						'\tconst text = read(getLatencyLogPath(), "utf8");',
+						"\tvoid text;",
+						"});",
+					].join("\n"),
+				).map((hit) => [hit.line, hit.sinks]),
+			]);
+			expect(reads).toEqual([
+				["bound alias", [[3, ["clients/latency-logger.ts"]]]],
+				["import alias", [[3, ["clients/latency-logger.ts"]]]],
 			]);
 		});
 

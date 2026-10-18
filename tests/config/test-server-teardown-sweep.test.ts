@@ -556,6 +556,24 @@ describe("#4589 server-teardown detector — the shapes that must red and green"
 					"\t[server].map(async () => { await new Promise((resolve) => server.close(() => resolve())); });",
 				],
 			],
+			// A logical assignment evaluates its right side only when its operator's
+			// condition holds, so the await may never run (E4).
+			[
+				"a logical assignment",
+				[
+					"\tconst closed = new Promise((resolve) =>\n\t\tserver.close(() => resolve())\n\t);",
+					"\tlet k = 1;",
+					"\tk ||= await closed;",
+				],
+			],
+			[
+				"an and-assignment",
+				[
+					"\tconst closed = new Promise((resolve) =>\n\t\tserver.close(() => resolve())\n\t);",
+					"\tlet k = 0;",
+					"\tk &&= await closed;",
+				],
+			],
 		];
 		for (const [label, body] of unproven) {
 			expect(
@@ -589,10 +607,26 @@ describe("#4589 server-teardown detector — the shapes that must red and green"
 					"\tawait settle();",
 				],
 			],
+			[
+				"an awaited IIFE",
+				[
+					"\tawait (async () => { await new Promise((resolve) => server.close(() => resolve())); })();",
+				],
+			],
+			[
+				"an awaited then callback",
+				[
+					"\tawait Promise.resolve().then(async () => { await new Promise((resolve) => server.close(() => resolve())); });",
+				],
+			],
 		];
+		const missed: string[] = [];
 		for (const [label, body] of proven) {
-			expect(detect(teardown(body).join("\n")), label).toEqual([]);
+			const found = detect(teardown(body).join("\n"));
+			if (found.length > 0)
+				missed.push(`${label}: ${found.map((f) => f.verdict).join()}`);
 		}
+		expect(missed).toEqual([]);
 	});
 
 	it("reports a start verb on a handle the scan cannot follow (F4)", () => {
@@ -678,6 +712,79 @@ describe("#4589 server-teardown detector — the shapes that must red and green"
 		expect(
 			scanListen(["async function serve() { return 1; }", "await serve();"]),
 		).toEqual([]);
+	});
+
+	it("reports only a START member destructured from a runtime global (P2, shape 69)", () => {
+		// A destructured helper (`sleep`, `write`) is an ordinary call: it binds no
+		// port, so it has no row of its own.
+		expect(
+			scanListen([
+				"const { serve, sleep } = Bun;",
+				"await sleep(10);",
+				"await serve({ port: 0 });",
+			]),
+		).toEqual([["serve", "unresolvable"]]);
+		expect(
+			scanListen([
+				"const { serve, write } = Bun;",
+				'await write("a", "b");',
+				"await serve({ port: 0 });",
+			]),
+		).toEqual([["serve", "unresolvable"]]);
+		// A renamed non-start member is not a start either: the KEY decides.
+		expect(
+			scanListen([
+				"const { serve, write: save } = Bun;",
+				'await save("a", "b");',
+				"await serve({ port: 0 });",
+			]),
+		).toEqual([["serve", "unresolvable"]]);
+		// A renamed START member is still the start (the filter keeps it), and an
+		// alias of the global is still a runtime receiver.
+		expect(
+			scanListen([
+				"const { serve: startServer, sleep } = Bun;",
+				"await sleep(1);",
+				"await startServer({ port: 0 });",
+			]),
+		).toEqual([["startServer", "unresolvable"]]);
+	});
+
+	it("reads a start verb reached through .apply or .call (shape 69)", () => {
+		// The verb is a member VALUE here, not a member call: the same handle the
+		// dot spelling names, so the same teardown rules apply. No residual.
+		expect(
+			scanListen([
+				'const socket = dgram.createSocket("udp4");',
+				"socket.bind.apply(socket, [0]);",
+				"afterEach(async () => {",
+				"\tawait new Promise((resolve) => socket.close(() => resolve()));",
+				"});",
+			]),
+		).toEqual([]);
+		expect(
+			scanListen([
+				'const socket = dgram.createSocket("udp4");',
+				"socket.bind.call(socket, 0);",
+			]),
+		).toEqual([["socket", "unclosed"]]);
+		// A handle-bound verb held in a local before it is invoked.
+		expect(
+			scanListen([
+				'const socket = dgram.createSocket("udp4");',
+				'const bind = socket["bind"];',
+				"bind.apply(socket, [0]);",
+			]),
+		).toEqual([["socket", "unclosed"]]);
+		// An indirect invocation the walk cannot place, on a handle it can read,
+		// reports instead of passing.
+		expect(
+			scanListen([
+				'const socket = dgram.createSocket("udp4");',
+				"function go(fn: () => void) { fn.apply(socket, [0]); }",
+				"void go;",
+			]),
+		).toEqual([["socket", "unresolvable"]]);
 	});
 
 	it("reports a non-identifier receiver and an unclassified construction (fail closed)", () => {
@@ -791,11 +898,12 @@ describe("#4589 server-teardown ratchet", () => {
 		assertNonEmptyScan("test files starting a listener", listeners.length, 6);
 	}, 60_000);
 
-	it("counts the Function.prototype.bind population the start rule leaves alone", () => {
+	it("counts the bind spellings under tests/** that the start rule leaves alone (E5)", () => {
 		// The `bind` rule is `bind` on a handle the scan can read; every other
-		// `bind` is `Function.prototype.bind`. The docstring states that population
-		// is large, and this case measures it from the tree instead of pinning a
-		// hand-written number that goes stale (#4589 review r2 NITPICK).
+		// `bind` is `Function.prototype.bind`. This counts every `bind` SPELLING
+		// over stripped source, so it is an upper bound on that population: a real
+		// `socket.bind(0)` start is counted here too. The floor guards against a
+		// dead scan, not against a moved count (#4589 review r3 E5).
 		const files = listSourceFiles(TESTS_ROOT, { extensions: [".ts"] });
 		let sites = 0;
 		for (const { source } of readWalkedFiles(files)) {
@@ -805,9 +913,9 @@ describe("#4589 server-teardown ratchet", () => {
 			].length;
 		}
 		process.stderr.write(
-			`server-teardown-sweep: ${sites} Function.prototype.bind spelling(s) in tests/**\n`,
+			`server-teardown-sweep: ${sites} bind spelling(s) in tests/**\n`,
 		);
-		assertNonEmptyScan("Function.prototype.bind sites", sites, 30);
+		assertNonEmptyScan("bind spellings under tests/**", sites, 30);
 	}, 60_000);
 
 	it.skipIf(!process.env.TEST_SERVER_TEARDOWN_REGEN)(

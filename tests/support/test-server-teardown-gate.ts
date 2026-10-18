@@ -28,7 +28,15 @@
  *   destructured `const { serve } = Bun; serve(...)`, a renamed
  *   `const { serve: start } = Bun; start(...)`, or a bare `serve(...)` in a
  *   file that declares no `serve` of its own), which binds a port with no
- *   handle the detector can follow.
+ *   handle the detector can follow. A destructured member is bound only when
+ *   its KEY is a start verb: `const { serve, sleep } = Bun` binds `serve`, and
+ *   `sleep(...)` is an ordinary call (P2, shape 69).
+ * - An indirect invocation is the same start: `<handle>.bind.apply(handle, [0])`,
+ *   `<handle>.listen.call(handle, 0)`, `Reflect.apply(handle.bind, handle, [0])`,
+ *   and a verb held in a local first (`const bind = socket["bind"];
+ *   bind.apply(socket, [0])`) all read the verb from the member value. An
+ *   indirect call the walk cannot place, on a handle it CAN read, reports as
+ *   `unresolvable` rather than passing.
  *
  * Every server CONSTRUCTION the file contains (`createServer`,
  * `net.createServer`, `http.createServer`, `new WebSocketServer`, ... — any
@@ -51,10 +59,13 @@
  *
  * A close inside a `new Promise(executor)` is settled when the awaited VALUE
  * is that promise: `await new Promise(...)`, `await Promise.all([...])`,
- * `await Promise.all(xs.map(...))`, a hook that returns the promise
+ * `await Promise.all(xs.map(...))`, `await p.then(cb)` (the callback's value
+ * chains into the awaited promise), `await (async () => { ... })()` (the call
+ * IS the function), a hook that returns the promise
  * (`afterEach(() => new Promise(...))`), a teardown hook that holds a helper
  * by reference (`afterEach(closeServer)`), and a variable bound to the promise
- * whose every reference settles (`const closed = ...; await closed;`).
+ * whose every reference settles (`const closed = ...; await closed;`, with a
+ * logical assignment counted as a conditional step).
  * `await x.forEach(...)` and `await x.map(...)` settle nothing: `forEach`
  * discards its callback's value and awaiting an array of promises awaits
  * nothing. `Promise.race`/`any` can settle on another value, so they are not
@@ -95,10 +106,12 @@
  *   `net.connect` and a client socket that never binds are outside it by
  *   design. The computed spelling does not widen this gap: on a handle the
  *   scan reads, it reports.
- * - **Indirect invocation.** A start verb reached through `.apply`/`.call`
- *   (`socket.bind.apply(socket, [0])`) is outside the population: the scan
- *   reads a verb from a member call, not from a function value handed to
- *   another function.
+ * - **Indirect invocation, unreadable verb.** `.apply`/`.call` on a function
+ *   value whose start verb the scan cannot read AND whose arguments name no
+ *   handle it can read: nothing attributes the call, and nothing can. The
+ *   handle-receiver form reports `unresolvable`; this residue is a plain
+ *   function value handed to `.call` (`vi.doMock.apply(...)`), which starts no
+ *   listener.
  * - **Then-chains and multi-binding variables.** A promise consumed through
  *   `.then(...)`, and a variable with one reference that settles and another
  *   that does not, are reported rather than reasoned about.
@@ -202,15 +215,27 @@ function isFunction(node: SgNode): boolean {
 
 /** The call a callback function is the argument of, if it is one. */
 function invokingCall(fn: SgNode): SgNode | undefined {
-	const parent = fn.parent();
-	if (parent?.kind() === "arguments") {
-		const owner = parent.parent();
-		if (owner?.kind() === "call_expression") return owner;
-		// `new Promise((resolve) => ...)`: the executor is invoked by the
-		// constructor, so the promise expression is the invocation site.
-		if (owner?.kind() === "new_expression") return owner;
-	}
+	// `(async () => {})()`: the callee is the parenthesized function (E3).
+	let callee: SgNode = fn;
+	while (callee.parent()?.kind() === "parenthesized_expression")
+		callee = callee.parent() as SgNode;
+	const parent = callee.parent();
+	if (parent?.kind() === "call_expression") return parent;
+	if (parent?.kind() !== "arguments") return undefined;
+	const owner = parent.parent();
+	if (owner?.kind() === "call_expression") return owner;
+	// `new Promise((resolve) => ...)`: the executor is invoked by the
+	// constructor, so the promise expression is the invocation site.
+	if (owner?.kind() === "new_expression") return owner;
 	return undefined;
+}
+
+/** Is `fn` the function this call invokes directly (`(async () => {})()`)? */
+function isOwnCallee(call: SgNode, fn: SgNode): boolean {
+	let callee = call.field("function");
+	while (callee?.kind() === "parenthesized_expression")
+		callee = callee.namedChildren()[0];
+	return callee !== undefined && sameNode(callee, fn);
 }
 
 /** The nearest call whose callee is `name` (a member call counts). */
@@ -384,21 +409,32 @@ function runsWhenever(node: SgNode, pair: SgNode): boolean {
 			const isCondition =
 				condition !== undefined && sameNode(current, condition);
 			if (!isCondition && !within(pair, parent)) return false;
+		} else if (kind === "augmented_assignment_expression") {
+			// `k ||= await closed`: a logical assignment evaluates its right side
+			// only when its operator's condition holds (E4, shape 69).
+			const operator = parent.field("operator")?.text() ?? "";
+			if (/^(?:&&=|\|\|=|\?\?=)$/.test(operator) && !within(pair, parent))
+				return false;
 		} else if (CONDITIONAL_STEPS.has(kind) && !within(pair, parent))
 			return false;
 		current = parent;
 	}
 }
 
-/** The names an object pattern binds: `{ serve }`, `{ serve: s }`. */
+/** The START members an object pattern binds: `{ serve }`, `{ serve: s }`. */
 function patternMembers(node: SgNode | undefined): string[] {
 	if (!node || node.kind() !== "object_pattern") return [];
 	return node.namedChildren().flatMap((child) => {
 		if (child.kind() === "shorthand_property_identifier_pattern")
-			return [child.text()];
+			return START_VERBS.has(child.text()) ? [child.text()] : [];
 		if (child.kind() === "pair_pattern") {
+			// The KEY decides: `{ serve: start }` binds a start, `{ write: save }`
+			// binds an ordinary helper (P2, shape 69).
+			const key = child.field("key")?.text() ?? "";
 			const value = child.field("value");
-			return value?.kind() === "identifier" ? [value.text()] : [];
+			return START_VERBS.has(key) && value?.kind() === "identifier"
+				? [value.text()]
+				: [];
 		}
 		return [];
 	});
@@ -423,6 +459,9 @@ interface Binding {
 
 /** Verbs that bind a started handle to a port, path, or socket. */
 const START_VERBS = new Set(["listen", "bind", "serve"]);
+
+/** Members that invoke a function VALUE: `socket.bind.apply(...)`, `.call(...)`. */
+const INDIRECT_INVOKE = new Set(["apply", "call"]);
 
 /** Runtime globals whose `serve(...)` binds a port with no readable handle. */
 const RUNTIME_BIND_OBJECTS = new Set(["Bun", "Deno"]);
@@ -593,31 +632,61 @@ export function findUnclosedServerStarts(
 	}
 
 	/**
-	 * The receiver and the verb a call site starts with (N3, shape 34). A
+	 * The receiver and the verb a member expression starts with (N3, shape 34). A
 	 * computed member (`socket["bind"](0)`) is that same verb; `verb` is
-	 * undefined when the scan cannot read the key, and `computed` records it so
-	 * a start spelling nobody can read reports instead of passing.
+	 * undefined when the scan cannot read the key, and `computed` records it so a
+	 * start spelling nobody can read reports instead of passing.
 	 */
-	const callTarget = (
-		call: SgNode,
+	const targetOf = (
+		node: SgNode | undefined,
 	): { receiver: SgNode; verb?: string; computed: boolean } | undefined => {
-		const fn = call.field("function");
-		if (fn?.kind() === "member_expression") {
-			const receiver = fn.field("object");
-			const property = fn.field("property");
+		if (node?.kind() === "member_expression") {
+			const receiver = node.field("object");
+			const property = node.field("property");
 			if (!receiver || !property) return undefined;
 			return { receiver, verb: property.text(), computed: false };
 		}
-		if (fn?.kind() === "subscript_expression") {
-			const receiver = fn.field("object");
+		if (node?.kind() === "subscript_expression") {
+			const receiver = node.field("object");
 			if (!receiver) return undefined;
-			const index = fn.field("index");
+			const index = node.field("index");
 			const verb =
 				index?.kind() === "string" ? index.text().slice(1, -1) : undefined;
 			return { receiver, verb, computed: true };
 		}
 		return undefined;
 	};
+
+	/** The member a local identifier holds, through `const bind = socket.bind`. */
+	const boundTarget = (node: SgNode | undefined) => {
+		if (node?.kind() !== "identifier") return undefined;
+		const binding = bindings.find((b) => b.name === node.text());
+		return binding ? targetOf(binding.value) : undefined;
+	};
+
+	/**
+	 * The start an `.apply`/`.call` invocation reaches (shape 69): the verb there
+	 * is a member VALUE, not a member call, so `socket.bind.apply(socket, [0])`
+	 * and `Reflect.apply(socket.bind, socket, [0])` are the same start as
+	 * `socket.bind(0)`. `undefined` when the scan cannot place the verb.
+	 */
+	const indirectTarget = (call: SgNode) => {
+		const fn = call.field("function");
+		const object =
+			fn?.kind() === "member_expression"
+				? (fn.field("object") ?? undefined)
+				: undefined;
+		const direct = targetOf(object) ?? boundTarget(object);
+		if (direct) return direct;
+		const first = call.field("arguments")?.namedChildren()[0] ?? undefined;
+		return targetOf(first) ?? boundTarget(first);
+	};
+
+	/** The handle an indirect invocation is handed, when the scan can read one. */
+	const indirectHandle = (call: SgNode): SgNode | undefined =>
+		(call.field("arguments")?.namedChildren() ?? []).find((argument) =>
+			bindsOnHandle(argument),
+		);
 
 	for (const call of calls) {
 		const fn = call.field("function");
@@ -634,8 +703,22 @@ export function findUnclosedServerStarts(
 			starts.push({ receiver: fn, node: call });
 			continue;
 		}
-		const target = callTarget(call);
-		if (!target) continue;
+		const indirectVerb = INDIRECT_INVOKE.has(
+			fn?.kind() === "member_expression"
+				? (fn.field("property")?.text() ?? "")
+				: "",
+		);
+		const target = indirectVerb
+			? indirectTarget(call)
+			: targetOf(fn ?? undefined);
+		if (!target) {
+			// An indirect invocation the walk cannot place, on a handle it can read:
+			// the start spelling is unreadable, so it reports (shape 69).
+			const handle = indirectVerb ? indirectHandle(call) : undefined;
+			if (handle)
+				starts.push({ receiver: handle, node: call, unreadableVerb: true });
+			continue;
+		}
 		const { receiver, verb, computed } = target;
 		// `listen` binds whatever its receiver is. `bind`/`serve` share their
 		// spelling with `Function.prototype.bind` and with plain helper calls,
@@ -835,6 +918,11 @@ export function findUnclosedServerStarts(
 			if (name && HOOK_CALLEES.has(name)) return !collection;
 			if (name && PROMISE_CALLBACK_METHODS.has(name))
 				return settleFrom(call, depth + 1, true);
+			// `p.then(cb)`: the callback's value chains into the promise the call
+			// returns, so awaiting the call awaits the callback (E3).
+			if (name === "then") return settleFrom(call, depth + 1, false);
+			// An IIFE: the call IS this function, so awaiting it awaits the function.
+			if (isOwnCallee(call, fn)) return settleFrom(call, depth + 1, false);
 			// `forEach` and every other callee discard the callback's value.
 			return false;
 		}
