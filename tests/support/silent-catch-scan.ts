@@ -43,8 +43,8 @@
  *   line immediately above a handler that starts its own line. A marker in a SIBLING argument
  *   (`then(ok, …)` with the comment on `ok`) or inside a nested function the
  *   failure can never reach is NOT this handler's reason (#4603 review N1).
- * - A `.catch(…)` handler that is not a function this file defines and not a
- *   bare identifier (a call, a `new` expression) is `unclassified`, which
+ * - A `.catch(…)` handler that is not a function this file can resolve
+ *   (including an unresolved identifier or member) is `unclassified`, which
  *   fails loud in the ratchet and is never counted as recorded. A statically
  *   known subscript key that cannot be resolved (a template with a
  *   substitution, a concatenation, a file-local binding to a non-constant
@@ -317,9 +317,8 @@ function nestedFunctionSpans(scope: SgNode): Array<[number, number]> {
 /**
  * The whole-line span immediately above `index`, when that line holds only a
  * comment or whitespace (`commentsBlanked` keeps the code and blanks the
- * comment, so a line with code survives the trim). This is where a `none:`
- * marker sits for a handler that is a bare identifier or an import: on the
- * line just above the handler, never on a sibling's line.
+ * comment, so a line with code survives the trim). The handler must itself
+ * start its line; a marker above an enclosing statement is not its reason.
  */
 function commentLineAbove(
 	strippings: Strippings,
@@ -798,7 +797,7 @@ export function scanSilentCatches(source: string): CatchSite[] {
 				records: [],
 				snippet: firstLine(handler.text()),
 				identity: handlerIdentity(source, span.start, span.end),
-				problem: `handler \`${firstLine(handler.text())}\` is not a function literal or a bare identifier the scan can follow`,
+				problem: `handler \`${firstLine(handler.text())}\` does not resolve to a function this scan can follow`,
 			});
 			return;
 		}
@@ -806,8 +805,7 @@ export function scanSilentCatches(source: string): CatchSite[] {
 			? target.field("body")
 			: undefined;
 		// The `none:` marker's scope is the handler actually judged: the
-		// resolved function, or the bare handler node the scan could not follow
-		// (whose marker sits on the line just above it).
+		// resolved function. Unresolved references returned unclassified above.
 		const markerScope = FUNCTION_KINDS.has(target.kind()) ? target : handler;
 		const targetRange = target.range();
 		sites.push({
