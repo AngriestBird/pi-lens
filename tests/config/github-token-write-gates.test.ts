@@ -5,6 +5,7 @@ import yaml from "../../clients/deps/js-yaml.js";
 import { isAdvisoryCheck } from "../../scripts/lib/ci-checks.mjs";
 import {
 	commandBasename,
+	hasLiveStdinRedirect,
 	stripCommandGroupAndRunnerPrefixes,
 	scannableRegions,
 	splitSegmentsWithSeparators,
@@ -216,13 +217,6 @@ describe("fork-capped workflow token writes (#2993)", () => {
 
 /** Shell interpreters whose `-c` argument is itself a script bash runs. */
 const SHELL_COMMANDS = new Set(["bash", "sh", "dash", "zsh", "ksh"]);
-/** Interpreters whose stdin can carry a program the census cannot read. */
-const STDIN_INTERPRETERS = new Set([
-	...SHELL_COMMANDS,
-	"python3",
-	"node",
-	"pwsh",
-]);
 /** Prefix commands whose later argument may be the stdin-fed interpreter. */
 const STDIN_WRAPPERS = new Set([
 	"command",
@@ -231,6 +225,15 @@ const STDIN_WRAPPERS = new Set([
 	"nice",
 	"sudo",
 	"timeout",
+]);
+/** Commands whose stdin is data, not an unread program. */
+const STDIN_DATA_CONSUMERS = new Set([
+	"cat",
+	"tee",
+	"jq",
+	"grep",
+	"sed",
+	"awk",
 ]);
 /** Flags through which a non-shell executor is handed its program as a string. */
 const SCRIPT_FLAGS = new Set(["-c", "-e", "-p", "--eval", "--print"]);
@@ -536,6 +539,7 @@ function isRepoValue(
 	env: Record<string, string>,
 	literal: Set<string>,
 	rebound: Set<string> = new Set<string>(),
+	seenEnv: Set<string> = new Set<string>(),
 ): boolean {
 	const text = (value ?? "").trim();
 	// A single-quoted `$` value is literal text: never a slug, never a reference.
@@ -548,8 +552,15 @@ function isRepoValue(
 	const residual = expanded.replace(/\$\{\{[\s\S]*?\}\}/g, "");
 	if (expanded === "__RUNNER_REPOSITORY__") return true;
 	if (/^\$\{\{\s*github\.repository\s*\}\}$/.test(expanded)) return true;
-	if (/^\$\{\{\s*env\.GH_REPO\s*\}\}$/.test(expanded)) {
-		return isRepoValue(env.GH_REPO, env, literal, rebound);
+	const envReference = /^\$\{\{\s*env\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}$/.exec(
+		expanded,
+	);
+	if (envReference) {
+		const name = envReference[1];
+		if (seenEnv.has(name)) return false;
+		const nextSeen = new Set(seenEnv);
+		nextSeen.add(name);
+		return isRepoValue(env[name], env, literal, rebound, nextSeen);
 	}
 	if (expanded === "" || expanded.startsWith("-") || /[$`]/.test(residual))
 		return false;
@@ -562,19 +573,28 @@ function hasRepoOperand(
 	env: Record<string, string>,
 	literal: Set<string>,
 	rebound: Set<string> = new Set<string>(),
-): boolean {
+): boolean | undefined {
+	let explicit: boolean | undefined;
 	for (let index = 1; index < words.length; index++) {
 		const word = words[index];
-		if (word === "-R" || word === "--repo")
-			return isRepoValue(words[index + 1], env, literal, rebound);
+		if (word === "-R" || word === "--repo") {
+			explicit = isRepoValue(words[index + 1], env, literal, rebound);
+			index++;
+			continue;
+		}
 		if (word.startsWith("--repo=")) {
-			return isRepoValue(word.slice("--repo=".length), env, literal, rebound);
+			explicit = isRepoValue(
+				word.slice("--repo=".length),
+				env,
+				literal,
+				rebound,
+			);
+			continue;
 		}
-		if (word.startsWith("-R") && word.length > 2) {
-			return isRepoValue(word.slice(2), env, literal, rebound);
-		}
+		if (word.startsWith("-R") && word.length > 2)
+			explicit = isRepoValue(word.slice(2), env, literal, rebound);
 	}
-	return false;
+	return explicit;
 }
 
 /**
@@ -586,38 +606,50 @@ function hasRepoOperand(
 function stdinFedInterpreter(
 	words: string[],
 	env: Record<string, string>,
+	text: string,
 ): string | undefined {
+	if (!hasLiveStdinRedirect(text)) return undefined;
 	let index = 0;
-	let hasStdin = false;
-	let throughWrapper = false;
+	let wrapper: string | undefined;
 	while (index < words.length) {
 		const word = words[index];
 		if (["|", ";", "&&", "||"].includes(word)) return undefined;
 		const attached = /^(.*?)(<<<|<<-?)/.exec(word);
 		if (attached) {
-			hasStdin = true;
 			if (attached[1] !== "") {
 				const resolved = resolveCommand(attached[1], env).command;
-				return STDIN_INTERPRETERS.has(resolved) ? attached[1] : undefined;
+				return STDIN_DATA_CONSUMERS.has(resolved) ? "" : attached[1];
 			}
 			index++;
 			continue;
 		}
 		if (/^\d*[<>]/.test(word)) {
-			if (/^\d*<<<|^\d*<<-?/.test(word)) hasStdin = true;
 			index++;
 			continue;
 		}
 		const resolved = resolveCommand(word, env).command;
-		if (STDIN_INTERPRETERS.has(resolved)) {
-			const laterStdin = words
-				.slice(index + 1)
-				.some((candidate) => /^\d*(?:<<<|<<-?)/.test(candidate));
-			return hasStdin || laterStdin ? word : undefined;
+		if (!wrapper && STDIN_WRAPPERS.has(resolved)) {
+			wrapper = resolved;
+			index++;
+			continue;
 		}
-		if (!throughWrapper && !STDIN_WRAPPERS.has(resolved)) return undefined;
-		throughWrapper = true;
-		index++;
+		if (wrapper === "env" && (word.startsWith("-") || word.includes("="))) {
+			index++;
+			continue;
+		}
+		if (wrapper === "timeout" && (/^-/.test(word) || /^\d/.test(word))) {
+			index++;
+			continue;
+		}
+		if (
+			wrapper !== undefined &&
+			["command", "exec", "nice", "sudo"].includes(wrapper) &&
+			word.startsWith("-")
+		) {
+			index++;
+			continue;
+		}
+		return STDIN_DATA_CONSUMERS.has(resolved) ? "" : word;
 	}
 	return undefined;
 }
@@ -763,12 +795,14 @@ function classifySegment(
 	// Stdin redirections are unreadable program input. The lexer subtracts a
 	// heredoc body before this scan, while a herestring stays in the segment;
 	// both must report when their interpreter's input names a gh call.
-	const stdinInterpreter = stdinFedInterpreter(rest, scope);
+	const stdinInterpreter = stdinFedInterpreter(rest, scope, text);
 	if (stdinInterpreter !== undefined && regionNamesGhCall) {
-		census.unclassified.push({
-			step,
-			detail: `\`${stdinInterpreter}\` reads a stdin-fed program this census does not read`,
-		});
+		if (stdinInterpreter !== "") {
+			census.unclassified.push({
+				step,
+				detail: `\`${stdinInterpreter}\` reads a stdin-fed program this census does not read`,
+			});
+		}
 		return;
 	}
 	if (SHELL_COMMANDS.has(command)) {
@@ -809,7 +843,9 @@ function classifySegment(
 		// provable: a payload export would have to travel back out, and an outer
 		// export into the payload is not something this census follows. Report it
 		// when it names a call, never resolve one through it (F10).
-		if (namesGhCall(rest.slice(1).join(" "), scope)) {
+		const payload = rest.slice(1).join(" ");
+		if (/\bGH_REPO\b/.test(payload)) state.exportedRepo = false;
+		if (namesGhCall(payload, scope)) {
 			census.unclassified.push({
 				step,
 				detail: `\`${rest[0]}\` runs a script this census does not read, and it names a \`gh\` call`,
@@ -818,6 +854,7 @@ function classifySegment(
 		return;
 	}
 	if (command === "gh") {
+		const explicitRepo = hasRepoOperand(rest, declared, literal, state.rebound);
 		census.invocations.push({
 			step,
 			words: rest,
@@ -825,9 +862,9 @@ function classifySegment(
 			// for `GH_REPO`; it is not visible to the shell's own word expansion,
 			// so an operand is resolved against the declared env alone.
 			hasSource:
-				state.exportedRepo ||
-				isRepoValue(scope.GH_REPO, declared, literal, state.rebound) ||
-				hasRepoOperand(rest, declared, literal, state.rebound),
+				explicitRepo ??
+				(state.exportedRepo ||
+					isRepoValue(scope.GH_REPO, declared, literal, state.rebound)),
 		});
 		return;
 	}
@@ -1632,6 +1669,35 @@ describe("workflow gh calls resolve a repository (#4382)", () => {
 		).toEqual([]);
 	});
 
+	it("does not let an explicit invalid repo operand be masked", () => {
+		for (const run of [
+			`${BARE_GH_WRITE} --repo owner/repo --repo not-a-slug`,
+			`${BARE_GH_WRITE} -R owner/repo -R /`,
+			`GH_REPO=owner/repo ${BARE_GH_WRITE} --repo not-a-slug`,
+			`${BARE_GH_WRITE} --repo not-a-slug --repo owner/repo`,
+		]) {
+			const kinds = probe({ run }).findings.map((found) => found.kind);
+			if (run.endsWith("owner/repo")) expect(kinds, run).toEqual([]);
+			else expect(kinds, run).toEqual(["missing-source"]);
+		}
+	});
+
+	it("refuses cyclic env repository expressions without throwing", () => {
+		const workflowEnvs: Array<Record<string, string>> = [
+			{ GH_REPO: "${{ env.GH_REPO }}" },
+			{ GH_REPO: "${{ env.OTHER }}", OTHER: "${{ env.GH_REPO }}" },
+		];
+		for (const workflowEnv of workflowEnvs) {
+			expect(
+				probe({
+					run: `${BARE_GH_WRITE} --repo "\${{ env.GH_REPO }}"`,
+					workflowEnv,
+				}).findings.map((found) => found.kind),
+				JSON.stringify(workflowEnv),
+			).toEqual(["missing-source"]);
+		}
+	});
+
 	it("judges API endpoint shapes and placeholder requirements", () => {
 		// R3: an endpoint root and GraphQL do not need cwd resolution.
 		for (const run of [
@@ -1714,6 +1780,38 @@ describe("workflow gh calls resolve a repository (#4382)", () => {
 				probe(options).findings.map((f) => f.kind),
 				JSON.stringify(options),
 			).toEqual(["unclassified"]);
+		}
+	});
+
+	it("refuses every unadmitted stdin-fed program", () => {
+		for (const options of [
+			{ run: `ruby <<EOF\n${BARE_GH_WRITE}\nEOF` },
+			{ run: `perl - <<EOF\n${BARE_GH_WRITE}\nEOF` },
+			{ run: `php <<'PHP'\n${BARE_GH_WRITE}\nPHP` },
+			{ run: `osascript <<'AS'\n${BARE_GH_WRITE}\nAS` },
+			{ run: `busybox sh <<EOF\n${BARE_GH_WRITE}\nEOF` },
+			{ run: `env ruby <<EOF\n${BARE_GH_WRITE}\nEOF` },
+			{ run: `exec ruby <<EOF\n${BARE_GH_WRITE}\nEOF` },
+			{ run: `timeout 30 ruby <<EOF\n${BARE_GH_WRITE}\nEOF` },
+			{ run: `$SH <<EOF\n${BARE_GH_WRITE}\nEOF`, stepEnv: { SH: "ruby" } },
+		]) {
+			expect(
+				probe(options).findings.map((found) => found.kind),
+				JSON.stringify(options),
+			).toEqual(["unclassified"]);
+		}
+	});
+
+	it("admits only data consumers for stdin-fed input", () => {
+		for (const run of [
+			`cat <<EOF\n${BARE_GH_WRITE}\nEOF`,
+			`tee <<EOF\n${BARE_GH_WRITE}\nEOF`,
+			`jq <<EOF\n${BARE_GH_WRITE}\nEOF`,
+			`grep gh <<EOF\n${BARE_GH_WRITE}\nEOF`,
+			`sed -n 1p <<EOF\n${BARE_GH_WRITE}\nEOF`,
+			`awk '{print}' <<EOF\n${BARE_GH_WRITE}\nEOF`,
+		]) {
+			expect(probe({ run }).findings, run).toEqual([]);
 		}
 	});
 
@@ -1952,12 +2050,32 @@ describe("the census's admitted source list (#4382 r6)", () => {
 		expect(probe({ run: `echo 'bash <<EOF'\ngh api user` }).findings).toEqual(
 			[],
 		);
+		expect(
+			probe({ run: `timeout 30 printf '%s\\n' 'bash<<EOF'; gh api user` })
+				.findings,
+		).toEqual([]);
 		// Boundary: the same spelling as a real redirection is still reported.
 		expect(
 			probe({ run: `bash <<'EOF'\ngh api user\nEOF` }).findings.map(
 				(found) => found.kind,
 			),
 		).toEqual(["unclassified"]);
+	});
+
+	it("invalidates an export when eval can rewrite GH_REPO", () => {
+		for (const payload of ["unset GH_REPO", "export -n GH_REPO", "GH_REPO="]) {
+			expect(
+				probe({
+					run: `export GH_REPO=owner/repo; eval '${payload}'; ${BARE_GH_WRITE}`,
+				}).findings.map((found) => found.kind),
+				payload,
+			).toEqual(["missing-source"]);
+		}
+		expect(
+			probe({
+				run: `export GH_REPO=owner/repo; eval 'echo hi'; ${BARE_GH_WRITE}`,
+			}).findings,
+		).toEqual([]);
 	});
 
 	it("reads the command word on each side of a payload separator", () => {

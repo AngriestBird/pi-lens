@@ -1003,6 +1003,40 @@ export function splitWords(segment) {
 	return words;
 }
 
+/**
+ * Whether a segment contains a live stdin redirection. Quote handling belongs
+ * here with the shared shell lexer so consumers do not reinterpret folded
+ * words such as `bash<<EOF` from quoted prose.
+ *
+ * @param {string} segment
+ * @returns {boolean}
+ */
+export function hasLiveStdinRedirect(segment) {
+	/** @type {"single" | "double" | undefined} */
+	let quote;
+	for (let index = 0; index < segment.length; index++) {
+		const char = segment[index];
+		if (char === "\\") {
+			index++;
+			continue;
+		}
+		if (quote === "single") {
+			if (char === "'") quote = undefined;
+			continue;
+		}
+		if (quote === "double") {
+			if (char === '"') quote = undefined;
+			continue;
+		}
+		if (char === "'" || char === '"') {
+			quote = char === "'" ? "single" : "double";
+			continue;
+		}
+		if (char === "<" && segment[index + 1] === "<") return true;
+	}
+	return false;
+}
+
 const ENV_ASSIGNMENT = /^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/;
 
 /**

@@ -43,6 +43,8 @@ export function splitSegmentsWithSeparators(
 
 export function splitWords(segment: string): string[];
 
+export function hasLiveStdinRedirect(segment: string): boolean;
+
 export function commandBasename(cmd: string): string;
 
 export function stripCommandGroupAndRunnerPrefixes(words: string[]): string[];
