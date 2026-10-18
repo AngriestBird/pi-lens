@@ -89,10 +89,13 @@ Rows 1, 2 and 4 are mechanical from #4585: `scripts/check-pr-body.mjs`
 their evidence, and it keys each item to the diff: a red belongs to the title
 its table names and to the file whose path it spells, and a Windows read
 belongs to the seam file it names or to a diff with exactly one seam file.
-Row 3 stays a reviewer judgement row; the lint never decides what a model
-means. Confirm the lint passed on the head, then spend this pass on the rest —
-a quoted mutation-table red is not a red-first transcript, and a body that
-names the right file is still yours to judge.
+The title is the one the runner prints: a `each`/`for` table expands from a
+literal or a local binding, and a table the lint cannot read (an import or a
+computed call) is refused by its own line rather than matched by a sibling
+row's red (#4605). Row 3 stays a reviewer judgement row; the lint never
+decides what a model means. Confirm the lint passed on the head, then spend
+this pass on the rest — a quoted mutation-table red is not a red-first
+transcript, and a body that names the right file is still yours to judge.
 
 ## Verification
 
