@@ -109,9 +109,15 @@
  *    by a helper in another module is out of the population for the same
  *    reason.
  * 3. A key computed at run time from a value this file does not hold
- *    (`env[await pathKey()] = …`) is not resolved; it reaches the fail-closed
- *    arm instead. A literal-const alias (`const KEY = "PATH"; env[KEY] = …`)
- *    IS resolved, because it is one binding away and costs nothing.
+ *    (`env[await pathKey()] = …`) is not resolved; when its text names the
+ *    variable it reaches the fail-closed arm instead of passing. A key that
+ *    names nothing this file can read (`[buildKey()]`, `` [`P${x}TH`] ``) is not
+ *    even identifiable as the path key, so it stays outside the population
+ *    (limit 2) — the arm cannot fail closed on a key it cannot recognise as the
+ *    variable. A literal-const alias IS resolved through the scope chain, in
+ *    the form the tree actually uses: a bare string, `as const`/`satisfies`, or
+ *    an expression-free template literal, at the nearest enclosing declaration
+ *    (so a same-named constant in another function cannot rewrite it).
  * 4. The READ side is out of scope. `base.PATH ?? base.Path` and
  *    `Path`-before-`PATH` read order are the round-9 defect's shape, but a read
  *    chain is legal in both orders and this sweep does not have a verdict to
@@ -130,19 +136,33 @@
  *    a data shape until the call that consumes it says otherwise, and only
  *    `fromEntries` / `assign` are recognized here.
  *
- * ## The walk and its admission filter
+ * ## The walk (no admission filter)
  *
- * Scanned trees are `clients/`, `scripts/`, `tests/` and `index.ts` (the
- * population is ~2,350 files, of which ~445 can contain a path key). Parsing
- * every walked file cost 2.2 s on the authoring box and timed this case out at
- * its 5 s default on the Windows lane (#4600 F3), so a file is parsed only
- * when its RAW text carries a path-folded key SHAPE
- * ({@link PATH_KEY_SHAPE}). The filter runs on raw text, so a comment or a
- * string can only ADMIT a file — never hide one — and it is a superset of
- * every key position this detector reads: literal key, shorthand, member,
- * subscript, computed key, and a `fromEntries` tuple. The admitted population
- * is asserted against a floor, so a filter that stops matching reds instead of
- * quietly shrinking the census.
+ * Scanned trees are `clients/`, `scripts/`, `tests/` and `index.ts` (~2,350
+ * files). EVERY walked file is parsed and scanned. Until round 2 a file
+ * reached the parser only when its raw text matched an enumerated list of key
+ * shapes, and that list hid exactly the writes it could not spell: a comment
+ * between the spread and the key (`{ ...base, <block comment> PATH: next }`) and a
+ * call-expression subscript (`process.env[getPathKey()] = next`) left the file
+ * unparsed, so a planted offender was invisible until an unrelated admitted
+ * line was appended to the same file. Deleting one arm at a time showed the
+ * floor only ever noticed the catastrophic case: the literal arm was worth 288
+ * unique files out of 444 (removing it left 156, the only count under the 200
+ * floor), the subscript arm 92 (444 → 352), and the alias arm ZERO — it
+ * matched 5 files, every one of which another arm already admitted, so deleting
+ * it moved no count the floor could see (#4600 R3).
+ *
+ * A filter drawn from the detector's own vocabulary can never be much more
+ * selective than that vocabulary: 2,001 of the 2,355 walked files already
+ * contain `path` in some case, and every finding this detector can report
+ * requires the key's own text to name the variable. So the filter bought one
+ * third of the walk in exchange for a fail-closed arm nothing could audit. It
+ * is gone. Measured on the authoring box (2,355 files, 36 MB): parsing alone
+ * 2.3 s, the whole census 5.7 s, against 3.4 s with the filter. The case keeps
+ * its 60 s ceiling because the Windows lane runs the same work about seven
+ * times slower — 23.9 s for the filtered census on the first head that carried
+ * it (#4600 F3), which is why the 5 s default timed out and why the ceiling,
+ * not the filter, is what bounds a pathological runner.
  *
  * The seeded baseline below is the debt at authoring time — shipped
  * `clients/` and `scripts/` code (every non-fresh composer in the tree:
@@ -159,11 +179,13 @@
  * ordinal of an identical line does not move.
  */
 
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Lang, parse } from "@ast-grep/napi";
 import { describe, expect, it } from "vitest";
 import type { SgNode } from "../../clients/deps/ast-grep-napi.js";
+import { setupTestEnvironment } from "../clients/test-utils.js";
 import {
 	assertNonEmptyScan,
 	auditRegistry,
@@ -296,6 +318,54 @@ function annotatedAsEnv(node: SgNode | undefined): boolean {
 	return annotation !== undefined && /ProcessEnv/.test(annotation.text());
 }
 
+/**
+ * A literal string this file can read: a `string`, or a `template_string` with
+ * no `${…}` in it. A template that interpolates holds a value only the program
+ * knows, so it is not a key or an alias this sweep can resolve.
+ */
+function holdsLiteral(node: SgNode): boolean {
+	const kind = kindName(node);
+	if (kind === "string") return true;
+	return (
+		kind === "template_string" &&
+		!childrenOf(node).some(
+			(child) => kindName(child) === "template_substitution",
+		)
+	);
+}
+
+/**
+ * The path spelling a binding holds, when its initializer is a literal.
+ *
+ * `const KEY = "Path"`, `const KEY = "Path" as const`, `"Path" satisfies
+ * string`, a parenthesized or asserted literal, and an expression-free
+ * `` `Path` `` all hold one spelling this file can read. A call, a
+ * concatenation and a template with a substitution hold a value it cannot, so
+ * they resolve to nothing and the write reports as unexpressed instead of
+ * silently clean (#4600 R4).
+ */
+function aliasSpelling(node: SgNode | undefined): string | undefined {
+	let cursor = node;
+	for (let step = 0; step < 4 && cursor !== undefined; step++) {
+		const kind = kindName(cursor);
+		if (kind === "string" || kind === "template_string") {
+			if (!holdsLiteral(cursor)) return undefined;
+			const text = unquote(cursor.text());
+			return foldsToPath(text) ? text : undefined;
+		}
+		if (!WRAPPER_KINDS.has(kind)) return undefined;
+		// `as`/`satisfies`/assertion/parentheses put the expression beside a type
+		// node: take the literal or the nested wrapper, never the type.
+		cursor = childrenOf(cursor).find(
+			(child) =>
+				kindName(child) === "string" ||
+				kindName(child) === "template_string" ||
+				WRAPPER_KINDS.has(kindName(child)),
+		);
+	}
+	return undefined;
+}
+
 // ── binding resolution ──────────────────────────────────────────────────
 
 interface Declaration {
@@ -304,11 +374,11 @@ interface Declaration {
 	index: number;
 	/** The name is declared as a `ProcessEnv` (annotation on the declarator). */
 	envTyped: boolean;
+	/** The path spelling this binding holds, when its initializer is a literal. */
+	alias?: string;
 }
 
 interface ScanContext {
-	/** `const KEY = "Path"` → `{ KEY: "Path" }`, built on first use. */
-	aliases(): ReadonlyMap<string, string>;
 	/** The declaration a name at `reference` resolves to, if this file has one. */
 	resolve(reference: SgNode, name: string): Declaration | undefined;
 	/** Offset of the nearest enclosing function, for an unresolved base. */
@@ -321,20 +391,20 @@ interface ScanContext {
  * block, a destructured name and a re-exported binding all fall through to
  * `undefined`, which the caller reports as an opaque base instead of guessing.
  *
- * The table is built on FIRST USE: 444 of the walked files are admitted to the
- * parser and most of them never resolve a name, so an eager pass over every
- * declarator would be the census's whole cost (#4600 F3).
+ * The table is built on FIRST USE: most admitted files never resolve a name,
+ * so an eager pass over every declarator would be the census's whole cost
+ * (#4600 F3).
  */
 function buildContext(root: SgNode): ScanContext {
 	let tables:
 		| {
-				aliases: ReadonlyMap<string, string>;
 				byScope: ReadonlyMap<number, ReadonlyMap<string, Declaration[]>>;
 		  }
 		| undefined;
 
-	const load = (): typeof tables & object => {
-		const aliases = new Map<string, string>();
+	const load = (): {
+		byScope: ReadonlyMap<number, ReadonlyMap<string, Declaration[]>>;
+	} => {
 		const byScope = new Map<number, Map<string, Declaration[]>>();
 
 		const declare = (
@@ -342,12 +412,22 @@ function buildContext(root: SgNode): ScanContext {
 			named: SgNode,
 			owner: SgNode,
 			envTyped: boolean,
+			alias?: string,
 		): void => {
 			const scope =
 				nearestIn(chainOf(owner), SCOPE_KINDS)?.range().start.index ?? 0;
 			const scoped = byScope.get(scope) ?? new Map<string, Declaration[]>();
 			const list = scoped.get(name) ?? [];
-			list.push({ name, index: named.range().start.index, envTyped });
+			const declaration: Declaration = {
+				name,
+				index: named.range().start.index,
+				envTyped,
+			};
+			// The alias lives on the DECLARATION, not in a file-wide name table: a
+			// same-named constant in another scope must not rewrite how a
+			// reference here resolves (#4600 R2).
+			if (alias !== undefined) declaration.alias = alias;
+			list.push(declaration);
 			scoped.set(name, list);
 			byScope.set(scope, scoped);
 		};
@@ -357,7 +437,6 @@ function buildContext(root: SgNode): ScanContext {
 		})) {
 			const nameNode = firstOfKind(declarator, "identifier");
 			if (nameNode === undefined) continue;
-			const name = nameNode.text();
 			const value = declarator
 				.namedChildren()
 				.filter(
@@ -365,11 +444,13 @@ function buildContext(root: SgNode): ScanContext {
 						child.kind() !== "identifier" && child.kind() !== "type_annotation",
 				)
 				.at(-1);
-			if (value !== undefined && value.kind() === "string") {
-				const literal = unquote(value.text());
-				if (foldsToPath(literal)) aliases.set(name, literal);
-			}
-			declare(name, nameNode, declarator, annotatedAsEnv(declarator));
+			declare(
+				nameNode.text(),
+				nameNode,
+				declarator,
+				annotatedAsEnv(declarator),
+				aliasSpelling(value),
+			);
 		}
 		for (const kind of PARAMETER_KINDS) {
 			for (const parameter of root.findAll({ rule: { kind } })) {
@@ -383,11 +464,10 @@ function buildContext(root: SgNode): ScanContext {
 				);
 			}
 		}
-		return { aliases, byScope };
+		return { byScope };
 	};
 
 	return {
-		aliases: () => (tables ??= load()).aliases,
 		resolve: (reference, name) => {
 			const { byScope } = (tables ??= load());
 			const at = reference.range().start.index;
@@ -419,10 +499,7 @@ function buildContext(root: SgNode): ScanContext {
  * literal-const alias, and otherwise fails closed only when it NAMES the
  * variable (limit 2/3).
  */
-function literalKeyRef(
-	node: SgNode,
-	aliases: ReadonlyMap<string, string>,
-): KeyRef | undefined {
+function literalKeyRef(node: SgNode, context: ScanContext): KeyRef | undefined {
 	const line = node.range().start.line + 1;
 	switch (node.kind()) {
 		case "property_identifier":
@@ -438,32 +515,37 @@ function literalKeyRef(
 		}
 		case "computed_property_name": {
 			const inner = childrenOf(node)[0];
-			return inner === undefined ? undefined : expressionKeyRef(inner, aliases);
+			return inner === undefined ? undefined : expressionKeyRef(inner, context);
 		}
 		default:
 			return undefined;
 	}
 }
 
-/** A computed or subscript key: an alias, a string, or a path-naming expression. */
+/**
+ * A computed or subscript key: an alias resolved through the scope chain, a
+ * literal (quoted or an expression-free template), or a path-naming expression.
+ */
 function expressionKeyRef(
 	node: SgNode,
-	aliases: ReadonlyMap<string, string>,
+	context: ScanContext,
 ): KeyRef | undefined {
 	const line = node.range().start.line + 1;
 	const kind = kindName(node);
 	if (kind === "identifier") {
-		const alias = aliases.get(node.text());
+		const alias = context.resolve(node, node.text())?.alias;
 		if (alias !== undefined) {
 			return { spelling: alias, shape: shapeOfSpelling(alias), line };
 		}
-	} else if (kind === "string") {
+	}
+	const literal = kind === "string" || holdsLiteral(node);
+	if (literal) {
 		const text = unquote(node.text());
 		if (foldsToPath(text)) {
 			return { spelling: text, shape: shapeOfSpelling(text), line };
 		}
 	}
-	const text = kind === "string" ? unquote(node.text()) : node.text();
+	const text = literal ? unquote(node.text()) : node.text();
 	if (!/path/i.test(text)) return undefined;
 	return { spelling: text, shape: "expression", line };
 }
@@ -503,9 +585,22 @@ function nearestIn(
 	return chain.find((node) => kinds.has(kindName(node)));
 }
 
+/**
+ * `process.env` itself: asked of the member expression's two children, not of a
+ * text that happens to spell it, because the same function decides whether a
+ * `spread_element` inherits the ambient block and a spread's text starts with
+ * `...` (#4600 R1).
+ */
 function isProcessEnvNode(node: SgNode | undefined): boolean {
-	if (node === undefined) return false;
-	return /^process\s*\.\s*env$/.test(node.text().replace(/\s+/g, ""));
+	if (node === undefined || kindName(node) !== "member_expression") {
+		return false;
+	}
+	const children = childrenOf(node);
+	return (
+		children.length === 2 &&
+		children[0]?.text() === "process" &&
+		children[1]?.text() === "env"
+	);
 }
 
 function isFreshObjectLiteral(node: SgNode | undefined): boolean {
@@ -582,14 +677,14 @@ function baseIsEnv(base: SgNode, context: ScanContext): boolean {
 
 /** Does the literal itself (or the position it sits in) say "this is an env"? */
 function literalIsEnv(literal: SgNode, context: ScanContext): boolean {
-	const spreads = childrenOf(literal).filter(
-		(child) => child.kind() === "spread_element",
+	// The spread's ARGUMENT is the object being copied in: `spread.text()` is
+	// `...process.env`, which no `process.env` test can match (#4600 R1).
+	const inheritsEnv = childrenOf(literal).some(
+		(child) =>
+			child.kind() === "spread_element" &&
+			isProcessEnvNode(childrenOf(child)[0]),
 	);
-	if (
-		spreads.some((spread) => /^\s*process\s*\.\s*env\b/.test(spread.text()))
-	) {
-		return true;
-	}
+	if (inheritsEnv) return true;
 
 	let cursor: SgNode = literal;
 	for (let step = 0; step < 12; step++) {
@@ -748,7 +843,7 @@ function collectKeyNode(
 ): void {
 	const keyNode = node.kind() === "pair" ? childrenOf(node)[0] : node;
 	if (keyNode === undefined) return;
-	const key = literalKeyRef(keyNode, context.aliases());
+	const key = literalKeyRef(keyNode, context);
 	if (key === undefined) return;
 	let literal: SgNode | null = node;
 	while (literal !== null && literal.kind() !== "object") {
@@ -781,17 +876,11 @@ function collectMemberWrite(
 	if (left.kind() === "member_expression") {
 		base = childrenOf(left)[0];
 		const property = childrenOf(left).at(-1);
-		ref =
-			property === undefined
-				? undefined
-				: literalKeyRef(property, context.aliases());
+		ref = property === undefined ? undefined : literalKeyRef(property, context);
 	} else if (left.kind() === "subscript_expression") {
 		base = childrenOf(left)[0];
 		const index = childrenOf(left)[1];
-		ref =
-			index === undefined
-				? undefined
-				: expressionKeyRef(index, context.aliases());
+		ref = index === undefined ? undefined : expressionKeyRef(index, context);
 	}
 	if (base === undefined || ref === undefined) return;
 	const baseText = base.text().replace(/\s+/g, "");
@@ -828,7 +917,7 @@ function collectFromEntries(
 		if (element.kind() !== "array") continue;
 		const head = childrenOf(element)[0];
 		if (head === undefined) continue;
-		const ref = expressionKeyRef(head, context.aliases());
+		const ref = expressionKeyRef(head, context);
 		if (ref !== undefined) keys.push(ref);
 	}
 	if (keys.length === 0) return;
@@ -1004,56 +1093,28 @@ const SCAN_ROOTS: ReadonlyArray<{
 	{ dir: "tests", extensions: [".ts", ".mjs"], floor: 600 },
 ];
 
-/**
- * Admission filter for the parse (see the docstring): a path-folded word in a
- * key position — after a literal opener, a `.`, a `[` or an `=` — or a quoted
- * path value (a `const KEY = "Path"` alias). It runs on RAW source, so a
- * comment or a string can only admit a file, never hide one.
- */
-const PATH_KEY_SHAPE = new RegExp(
-	[
-		// A path-folded word in literal-key, shorthand or member position.
-		"(?:[{,(]|\\.\\s*)\\s*[\"'`]?[Pp][Aa][Tt][Hh][\"'`]?\\s*(?::|[,}\\]]|=[^=])",
-		// A subscript or computed key that starts with a path-folded word.
-		"\\[\\s*[\"'`]?[Pp][Aa][Tt][Hh]",
-		// A quoted path value: the `const KEY = "Path"` alias form.
-		"=\\s*[\"'`][Pp][Aa][Tt][Hh][\"'`]",
-	].join("|"),
-	"m",
-);
-
-/** Files admitted by {@link PATH_KEY_SHAPE} at authoring time (445 of 2,356). */
-const ADMITTED_FILES_FLOOR = 200;
-
 export interface PathKeyCensus {
 	/** `file#declaration#spelling` → why it is a finding. */
 	identities: Map<string, PathKeyReason>;
 	findings: PathKeyFinding[];
-	/** Files the walk read (the census population). */
+	/** Files the walk read — every one of them is parsed (see the docstring). */
 	scanned: number;
-	/** Files the admission filter sent to the parser. */
-	admitted: number;
 }
 
-export function censusPathKeyCompositions(): PathKeyCensus {
-	const files: string[] = [];
-	for (const { dir, extensions, floor } of SCAN_ROOTS) {
-		const found = listSourceFiles(path.join(REPO_ROOT, dir), {
-			extensions,
-			skipDeclarations: true,
-		});
-		assertNonEmptyScan(`${dir}/`, found.length, floor);
-		files.push(...found);
-	}
-	files.push(path.join(REPO_ROOT, "index.ts"));
-
+/**
+ * The census's per-file loop: scan every file it is GIVEN, with no admission
+ * filter, and key each finding by its declaration and content. The census
+ * passes the walked population; a case passes one planted file to prove that
+ * what reaches this loop is scanned (#4600 R3).
+ */
+export function censusPathKeyFiles(files: readonly string[]): {
+	identities: Map<string, PathKeyReason>;
+	findings: PathKeyFinding[];
+} {
 	const identities = new Map<string, PathKeyReason>();
 	const occurrences = new Map<string, number>();
 	const findings: PathKeyFinding[] = [];
-	let admitted = 0;
 	for (const { file, source } of readWalkedFiles(files)) {
-		if (!PATH_KEY_SHAPE.test(source)) continue;
-		admitted++;
 		const rel = relativePosix(REPO_ROOT, file);
 		const lines = source.split("\n");
 		for (const finding of findPathKeyFindings(source, {
@@ -1072,7 +1133,21 @@ export function censusPathKeyCompositions(): PathKeyCensus {
 			findings.push(finding);
 		}
 	}
-	return { identities, findings, scanned: files.length, admitted };
+	return { identities, findings };
+}
+
+export function censusPathKeyCompositions(): PathKeyCensus {
+	const files: string[] = [];
+	for (const { dir, extensions, floor } of SCAN_ROOTS) {
+		const found = listSourceFiles(path.join(REPO_ROOT, dir), {
+			extensions,
+			skipDeclarations: true,
+		});
+		assertNonEmptyScan(`${dir}/`, found.length, floor);
+		files.push(...found);
+	}
+	files.push(path.join(REPO_ROOT, "index.ts"));
+	return { ...censusPathKeyFiles(files), scanned: files.length };
 }
 
 /**
@@ -1607,15 +1682,160 @@ describe("#4590 env PATH composition", () => {
 		]);
 	});
 
+	/**
+	 * #4600 R1: the literal's own `...process.env` member is what identifies it
+	 * as an env. The round-1 route tested a `spread_element`'s TEXT, which starts
+	 * with `...`, so that route matched nothing and a lowercase or computed key
+	 * over the ambient block reported clean.
+	 */
+	it("identifies an env from the spread's member, not from its text", () => {
+		const lowercase = findPathKeyFindings(
+			"const child = { ...process.env, path: next };",
+		);
+		expect(lowercase.map((f) => [f.line, f.spelling, f.reason])).toEqual([
+			[1, "path", "unclassified-spelling"],
+		]);
+		const computed = findPathKeyFindings(
+			"const child = { ...process.env, [pathKey()]: next };",
+		);
+		expect(computed.map((f) => [f.line, f.reason])).toEqual([
+			[1, "unclassified-spelling"],
+		]);
+		const override = findPathKeyFindings(
+			"const child = { ...process.env, Path: next };",
+		);
+		expect(override.map((f) => [f.line, f.spelling, f.reason])).toEqual([
+			[1, "Path", "spread-override"],
+		]);
+	});
+
+	/**
+	 * #4600 R2: an alias is a DECLARATION, not a name. The same-named constant in
+	 * another function must not rewrite how this scope's `[KEY]` resolves — the
+	 * F6 shape, on the table the composition fix did not reach.
+	 */
+	it("resolves an aliased key through its own scope", () => {
+		const shadowed = findPathKeyFindings(
+			[
+				"function a() {",
+				'\tconst KEY = "Path";',
+				'\treturn { PATH: "a", [KEY]: "b" };',
+				"}",
+				"function b() {",
+				'\tconst KEY = "PATH";',
+				'\treturn { [KEY]: "c" };',
+				"}",
+			].join("\n"),
+		);
+		expect(shadowed.map((f) => [f.line, f.spelling, f.reason])).toEqual([
+			[3, "PATH", "dual-spelling"],
+			[3, "Path", "dual-spelling"],
+		]);
+	});
+
+	/**
+	 * #4600 R4: the alias forms the tree actually writes. `as const` is the
+	 * idiomatic constant, and a template literal with no substitution is the same
+	 * literal as a quoted key.
+	 */
+	it("resolves an as-const or template-literal key", () => {
+		const asConst = findPathKeyFindings(
+			[
+				'const K = "Path" as const;',
+				"const env = { ...base, [K]: next };",
+			].join("\n"),
+		);
+		expect(asConst.map((f) => [f.line, f.spelling, f.reason])).toEqual([
+			[2, "Path", "spread-override"],
+		]);
+		const satisfies = findPathKeyFindings(
+			[
+				'const K = "Path" satisfies string;',
+				"const env = { ...base, [K]: next };",
+			].join("\n"),
+		);
+		expect(satisfies.map((f) => [f.line, f.spelling, f.reason])).toEqual([
+			[2, "Path", "spread-override"],
+		]);
+		const templateKey = findPathKeyFindings(
+			"const env = { ...base, [`PATH`]: next };",
+		);
+		expect(templateKey.map((f) => [f.line, f.spelling, f.reason])).toEqual([
+			[1, "PATH", "spread-override"],
+		]);
+		const templateAlias = findPathKeyFindings(
+			["const K = `Path`;", "const env = { ...base, [K]: next };"].join("\n"),
+		);
+		expect(templateAlias.map((f) => [f.line, f.spelling, f.reason])).toEqual([
+			[2, "Path", "spread-override"],
+		]);
+		// A key whose text never names the variable cannot be read as the path key
+		// at all, so it is outside the population (limit 2): the fail-closed arm
+		// answers only for a key it CAN read as the variable.
+		const opaque = findPathKeyFindings(
+			"const env: NodeJS.ProcessEnv = { ...base, [buildKey()]: next };",
+		);
+		expect(opaque).toEqual([]);
+	});
+
+	/**
+	 * Limit 6, the guard that keeps the `fromEntries` arm honest: an array of
+	 * path-key tuples handed to any other call is a data shape, not an env
+	 * composition. The query matches any call whose arguments mention
+	 * `fromEntries`, so `build([["PATH", v]])` reaches the visitor and must be
+	 * refused there (M11).
+	 */
+	it("leaves a path-key tuple outside fromEntries alone", () => {
+		const findings = findPathKeyFindings(
+			[
+				'const entries = build([...Object.entries(process.env), ["PATH", next]]);',
+				'const pairs = new Map([["Path", first]]);',
+				// The parse query matches every `X.fromEntries(…)` call, whatever
+				// `X` is; the visitor's guard is what limits the census to the
+				// `Object.fromEntries` the rule names.
+				'const viaHelper = Other.fromEntries([...Object.entries(process.env), ["PATH", next]]);',
+			].join("\n"),
+		);
+		expect(findings).toEqual([]);
+	});
+
+	/**
+	 * #4600 R3: the census admitted a file to the parser only when its raw text
+	 * matched an enumerated list of key shapes, so a comment between the spread
+	 * and the key, or a call-expression subscript, left the whole file unscanned.
+	 * The walk now parses what it walked; this case reaches the census through its
+	 * own file list so the layout is the one under test, and removing the scan
+	 * from the walk (rather than from `findPathKeyFindings`) reds it.
+	 */
+	it("scans a walked file whose layout no key filter could spell", () => {
+		const fixture = setupTestEnvironment("pi-lens-4590-census-");
+		try {
+			const file = path.join(fixture.tmpDir, "candidate.ts");
+			fs.writeFileSync(
+				file,
+				[
+					"export function withComment(base, next) {",
+					"\treturn { ...base, /* note */ PATH: next };",
+					"}",
+					"export function withCallKey(next) {",
+					"\tprocess.env[getPathKey()] = next;",
+					"}",
+				].join("\n"),
+			);
+			const rows = [...censusPathKeyFiles([file]).identities.keys()];
+			expect(rows.map((row) => row.split("#").at(-1))).toEqual([
+				"PATH",
+				"getPathKey()",
+			]);
+		} finally {
+			fixture.cleanup();
+		}
+	});
+
 	it(
 		"keeps the seeded baseline exact in both directions",
 		() => {
 			const census = censusPathKeyCompositions();
-			assertNonEmptyScan(
-				"env PATH composition candidates",
-				census.admitted,
-				ADMITTED_FILES_FLOOR,
-			);
 			const audit = auditRegistry({
 				sweepName: "env PATH composition",
 				flagged: [...census.identities].map(([key, reason]) => ({
@@ -1649,12 +1869,13 @@ describe("#4590 env PATH composition", () => {
 				"A seeded row changed its reason; re-read the site.",
 			).toEqual([]);
 		},
-		// The walk is the work: ~2,350 files read, 445 of them parsed and scanned
-		// by one structural query (~3 s on the authoring box; the same census as a
-		// full-tree text scan timed this case out at its 5 s default on the
-		// Windows lane, #4600 F3). This ceiling only bounds a pathological runner;
-		// the speed comes from the admission filter and the lazy binding table,
-		// not from the budget.
+		// The walk is the work: ~2,350 files read and parsed, each by one structural
+		// query (~5.7 s on the authoring box, of which 2.3 s is the parse; the
+		// filtered walk this replaced took 3.4 s). The ceiling is load-bearing, not
+		// decorative: the Windows lane runs the same work about seven times slower
+		// — 23.9 s for the FILTERED census of the first head that carried one
+		// (#4600 F3) — so the old 5 s default could not pass there and this 60 s
+		// bound is what a pathological runner hits instead of hanging the shard.
 		60_000,
 	);
 });
