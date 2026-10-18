@@ -217,10 +217,32 @@ describe("fork-capped workflow token writes (#2993)", () => {
 
 /** Shell interpreters whose `-c` argument is itself a script bash runs. */
 const SHELL_COMMANDS = new Set(["bash", "sh", "dash", "zsh", "ksh"]);
-/** `eval`'s arguments are a script too. */
-const EVAL_COMMAND = "eval";
 /** Flags through which a non-shell executor is handed its program as a string. */
 const SCRIPT_FLAGS = new Set(["-c", "-e", "-p", "--eval", "--print"]);
+/**
+ * Words that open or close a context this census does not model: a conditional,
+ * a loop, a case, a function or group body, or `eval`. An admitted
+ * `export GH_REPO` survives none of them (STATE_TABLE.md row 13).
+ */
+const CONTEXT_WORDS = new Set([
+	"{",
+	"}",
+	"if",
+	"then",
+	"elif",
+	"else",
+	"fi",
+	"for",
+	"while",
+	"until",
+	"do",
+	"done",
+	"case",
+	"esac",
+	"select",
+	"function",
+	"eval",
+]);
 /**
  * `gh api` flags that consume the next word as their value (gh 2.100.0
  * `gh api --help`), so an option's value never stands in for the endpoint.
@@ -249,9 +271,11 @@ const VARIABLE_WORD = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/;
 /**
  * A `gh` command word inside opaque text -- a script string, a JSON payload, a
  * quoted argument. `gh` alone is not one: a call carries its subject, so the
- * word boundary is what tells a call from the command word itself.
+ * word boundary is what tells a call from the command word itself. This is the
+ * half of the witness that reads a quoted payload the lexer keeps whole
+ * (`exec.exec('gh', [ … ])`); the other half is the shared lexer.
  */
-const GH_COMMAND_WORD = /(?:^|[\s"'`;&|(])gh\s/;
+const GH_COMMAND_WORD = /(?:^|[\s"'`;&|(])gh(?=[\s"'`;&|,)])/;
 /** A repository root as `gh api` names one, or the GraphQL endpoint. */
 const API_REPOSITORY_ROOT =
 	/^(?:graphql|\/?repos\/(?:\$GITHUB_REPOSITORY|\$\{\{\s*github\.repository\s*\}\}|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)(?:\/|$))/;
@@ -267,9 +291,16 @@ type GhInvocation = {
 	step: number;
 	/** The simple command that runs `gh`, quotes and comments stripped. */
 	words: string[];
-	env: Record<string, string>;
-	shellEnv: Record<string, string>;
+	/** This call carries a provable repository source of its own. */
+	hasSource: boolean;
 };
+
+/**
+ * The one script fact the census carries forward: an admitted
+ * `export GH_REPO=<provable>` is in force at this position. No other binding,
+ * value, or scope is tracked (STATE_TABLE.md, "Deleted machinery").
+ */
+type ScriptState = { exportedRepo: boolean };
 
 type Census = {
 	invocations: GhInvocation[];
@@ -325,18 +356,23 @@ function resolveCommand(
 
 /**
  * A `gh` call inside text the census does not execute -- a heredoc body, an
- * inline `-c` payload, a non-shell step's arguments. The witness is the
- * census's own command resolution, so it names the same call whichever way
- * the script spells it: the literal word, a path whose basename is `gh`
- * (`/usr/bin/gh`), and a `$VAR`/`${VAR}` whose declared value resolves to
- * `gh`. A literal-word test here reported only the first spelling and left
- * the other two out of the population (AGENTS.md shape 69).
+ * inline `-c` payload, a non-shell step's arguments. The witness is this
+ * census's own command resolution over the shared lexer's words, so it names
+ * the same call whichever way the script spells it: the literal word, a path
+ * whose basename is `gh` (`/usr/bin/gh`), a `$VAR`/`${VAR}` whose declared
+ * value resolves to `gh`, and the quoted spellings the lexer folds into `gh`
+ * (`"g"h`, `\gh`, `g''h`). A private splitter here missed exactly those, and
+ * an empty population reads as a clean workflow (AGENTS.md shape 69).
  */
 function namesGhCall(text: string, env: Record<string, string>): boolean {
 	if (GH_COMMAND_WORD.test(text)) return true;
-	for (const word of text.split(/[\s"'`;&|()<>[\],]+/)) {
-		if (word !== "" && resolveCommand(word, env).command === "gh") {
-			return true;
+	for (const word of splitWords(text)) {
+		// The lexer hands back a quoted argument as one opaque word, so a script
+		// argument's own command word is the first token of that word.
+		for (const candidate of [word, word.split(/\s+/)[0] ?? ""]) {
+			if (candidate !== "" && resolveCommand(candidate, env).command === "gh") {
+				return true;
+			}
 		}
 	}
 	return false;
@@ -446,12 +482,31 @@ function expandReferences(value: string, env: Record<string, string>): string {
 	return expanded;
 }
 
+/**
+ * The contents of single-quoted spans that hold a `$`. The shell never expands
+ * those, so the text is a literal gh receives verbatim, never a reference the
+ * census may resolve: `GH_REPO='$TARGET'` sends the five characters `$TARGET`
+ * (F12). Quote class is lost once the lexer folds a word, so it is read here,
+ * from the segment's own text.
+ */
+function literalDollarText(text: string): Set<string> {
+	const literal = new Set<string>();
+	for (const match of text.matchAll(/'([^']*)'/g)) {
+		if (match[1].includes("$")) literal.add(match[1]);
+	}
+	return literal;
+}
+
 /** Is this a repository operand a live `gh` accepts? `""` is not. */
 function isRepoValue(
 	value: string | undefined,
 	env: Record<string, string>,
+	literal: Set<string>,
 ): boolean {
-	const expanded = expandReferences(value ?? "", env).trim();
+	const text = (value ?? "").trim();
+	// A single-quoted `$` value is literal text: never a slug, never a reference.
+	if (literal.has(text)) return false;
+	const expanded = expandReferences(text, env).trim();
 	// Two expansion forms are modelled above; any other `$` or backtick left in
 	// the operand (`${VAR:-}`, `$1`, `${ARR[0]}`) is text the census cannot read,
 	// so it is no source. A `${{ … }}` workflow expression is a declared value.
@@ -466,19 +521,52 @@ function isRepoValue(
 }
 
 /** `-R owner/repo`, `-Rowner/repo`, `--repo owner/repo`, `--repo=owner/repo`. */
-function hasRepoOperand(words: string[], env: Record<string, string>): boolean {
+function hasRepoOperand(
+	words: string[],
+	env: Record<string, string>,
+	literal: Set<string>,
+): boolean {
 	for (let index = 1; index < words.length; index++) {
 		const word = words[index];
 		if (word === "-R" || word === "--repo")
-			return isRepoValue(words[index + 1], env);
+			return isRepoValue(words[index + 1], env, literal);
 		if (word.startsWith("--repo=")) {
-			return isRepoValue(word.slice("--repo=".length), env);
+			return isRepoValue(word.slice("--repo=".length), env, literal);
 		}
 		if (word.startsWith("-R") && word.length > 2) {
-			return isRepoValue(word.slice(2), env);
+			return isRepoValue(word.slice(2), env, literal);
 		}
 	}
 	return false;
+}
+
+/**
+ * The shell a heredoc body is handed to, if any. The body is subtracted from
+ * the regions, so a `gh` call inside it is invisible to the segment scan; the
+ * census reports that shape instead of reading it. An attached redirection
+ * (`bash<<EOF`) and a wrapper (`timeout 30 bash <<EOF`) name the same shell a
+ * spaced one does, and a heredoc handed to any other command is data
+ * (`cat > f <<EOF`), which is not a script at all.
+ */
+function heredocShell(
+	words: string[],
+	env: Record<string, string>,
+): string | undefined {
+	for (let index = 0; index < words.length; index++) {
+		const heredoc = words[index].indexOf("<<");
+		if (heredoc < 0) continue;
+		const attached = words[index].slice(0, heredoc);
+		const candidates = attached
+			? [attached, ...words.slice(0, index)]
+			: words.slice(0, index);
+		for (const candidate of candidates) {
+			if (SHELL_COMMANDS.has(resolveCommand(candidate, env).command)) {
+				return candidate;
+			}
+		}
+		return undefined;
+	}
+	return undefined;
 }
 
 function scanScript(
@@ -488,8 +576,9 @@ function scanScript(
 	census: Census,
 ): void {
 	// The lexer emits substitution bodies in postorder and leaves one marker
-	// per child. Rebuild that tree, then visit children before their containing
-	// command, with the environment at that command rather than the final one.
+	// per child. Rebuild that tree, then visit a child at the marker's position:
+	// a substitution is a subshell, so it starts clean and nothing it binds
+	// travels back.
 	const marker = scannableRegions("$(true)")[0];
 	type Region = { text: string; children: Region[] };
 	const regions = scannableRegions(script);
@@ -498,120 +587,94 @@ function scanScript(
 		const count = text.split(marker).length - 1;
 		pending.push({ text, children: count ? pending.splice(-count) : [] });
 	}
-	const visit = (
-		region: Region,
-		initial: Record<string, string>,
-		inherited: Set<string>,
-	): void => {
-		let shellEnv = { ...initial };
-		let exported = new Set(inherited);
-		const scopes: Array<{
-			shellEnv: Record<string, string>;
-			exported: Set<string>;
-		}> = [];
+	const witness = namesGhCall(script, env);
+	const visit = (region: Region): void => {
+		const state: ScriptState = { exportedRepo: false };
+		const subshells: boolean[] = [];
 		let child = 0;
-		const segments = splitSegmentsWithSeparators(region.text);
-		for (const { text, sep } of segments) {
-			// Parentheses delimit subshells, applied in the order they appear in
-			// the separator: `(export …); (gh …)` closes the first scope before
-			// the second opens, so one subshell's export never reaches the next.
-			// A function definition's empty `()` opens no subshell, but its
-			// body is not the caller's scope either.
-			const opensFunctionBody =
-				sep?.includes("()") && text.trimStart().startsWith("{");
-			const separators = opensFunctionBody
-				? (sep?.replace("()", "") ?? "")
-				: (sep ?? "");
-			for (const paren of separators) {
-				if (paren === ")") {
-					const outer = scopes.pop();
-					if (outer) ({ shellEnv, exported } = outer);
-				} else if (paren === "(") {
-					scopes.push({ shellEnv, exported });
-					shellEnv = { ...shellEnv };
-					exported = new Set(exported);
+		for (const { text, sep } of splitSegmentsWithSeparators(region.text)) {
+			// A separator is the boundary that PRECEDES this segment, applied in
+			// the order it appears: `);(` closes the first subshell before the
+			// second opens, so one subshell's export never reaches the next. A
+			// subshell or a pipeline starts clean (STATE_TABLE.md row 13): the
+			// census admits an export only at the script level it was written in.
+			for (const boundary of sep ?? "") {
+				if (boundary === "(") {
+					subshells.push(state.exportedRepo);
+					state.exportedRepo = false;
+				} else if (boundary === ")") {
+					state.exportedRepo = subshells.pop() ?? false;
 				}
 			}
-			if (opensFunctionBody) {
-				scopes.push({ shellEnv, exported });
-				shellEnv = { ...shellEnv };
-				exported = new Set(exported);
-			}
-			if (text.trim() === "}") {
-				const outer = scopes.pop();
-				if (outer) ({ shellEnv, exported } = outer);
+			if (sep !== null && sep.replaceAll("||", "").includes("|")) {
+				state.exportedRepo = false;
 			}
 			for (let n = 1; n < text.split(marker).length; n++) {
 				const nested = region.children[child++];
-				if (nested) visit(nested, shellEnv, exported);
+				if (nested) visit(nested);
 			}
-			classifySegment(
-				splitWords(text),
-				step,
-				shellEnv,
-				census,
-				namesGhCall(script, shellEnv),
-				exported,
-			);
+			classifySegment(text, step, env, census, state, witness);
 		}
 	};
-	// Substitutions in an unquoted heredoc have no retained marker. Their
-	// position is unavailable: judge against the incoming environment only,
-	// never against later exports (conservative missing-source is intentional).
+	// A substitution in an unquoted heredoc has no retained marker, so its
+	// position is unavailable: judge it as a top-level script, never against a
+	// later export (conservative missing-source is intentional).
 	const roots =
 		pending.length === 1
 			? pending
 			: regions.map((text) => ({ text, children: [] }));
-	for (const region of roots) visit(region, env, new Set(Object.keys(env)));
+	for (const region of roots) visit(region);
 }
 
 /**
  * The census owns this classifier: it COLLECTS invocations and unclassified
  * shapes into a `Census`. It is not the Bash guard's exported
  * `classifySegment`, which returns a `DenyRule`; the guard is asked for lexing
- * and command position, never for policy.
+ * and command position, never for policy. The only script state it carries is
+ * `state.exportedRepo` (STATE_TABLE.md).
  */
 function classifySegment(
-	rawWords: string[],
+	text: string,
 	step: number,
-	sharedEnv: Record<string, string>,
+	declared: Record<string, string>,
 	census: Census,
+	state: ScriptState,
 	regionNamesGhCall: boolean,
-	exported: Set<string>,
 ): void {
+	const literal = literalDollarText(text);
+	const rawWords = splitWords(text);
+	// A context word opens or closes a construct the census does not model, so
+	// no admitted export survives it (STATE_TABLE.md row 13).
+	if (CONTEXT_WORDS.has(rawWords[0] ?? "")) state.exportedRepo = false;
 	const { env: assigned, rest } = stripEnvAssignments(
 		stripCommandGroupAndRunnerPrefixes(rawWords),
 	);
-	const bindings =
-		rest[0] === "export"
-			? stripEnvAssignments(rest.slice(1))
-			: { env: assigned, rest: [] };
-	// Assignment RHS expansion happens now, against the preceding shell state.
-	for (const [name, value] of Object.entries(bindings.env)) {
-		bindings.env[name] = value.replace(
-			/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g,
-			(_, braced, bare) => variableValue(braced ?? bare, sharedEnv) ?? "",
-		);
-	}
-	if (rest.length === 0) {
-		// Standalone assignments persist for shell expansion; the exported
-		// attribute is unchanged, so new shell variables stay out of children.
-		Object.assign(sharedEnv, assigned);
-		return;
-	}
+	if (rest.length === 0) return;
 	if (rest[0] === "export") {
-		Object.assign(sharedEnv, bindings.env);
-		for (const name of [...Object.keys(bindings.env), ...bindings.rest])
-			exported.add(name);
+		// The one script binding the census admits: `export GH_REPO=<provable>`.
+		// `export -n NAME` removes that attribute (and `export -n NAME=value`
+		// sets a value WITHOUT exporting it), and a bare `export GH_REPO` marks a
+		// value this census does not follow: in all three `stripEnvAssignments`
+		// finds no `GH_REPO` value, so the binding is no source.
+		const words = rest.slice(1);
+		if (
+			!words.some((word) => word === "GH_REPO" || word.startsWith("GH_REPO="))
+		)
+			return;
+		state.exportedRepo = isRepoValue(
+			stripEnvAssignments(words).env.GH_REPO,
+			declared,
+			literal,
+		);
 		return;
 	}
-	const scope = { ...sharedEnv, ...assigned };
-	const processEnv = {
-		...Object.fromEntries(
-			[...exported].map((name) => [name, sharedEnv[name] ?? ""]),
-		),
-		...assigned,
-	};
+	if (rest[0] === "unset") {
+		if (rest.slice(1).includes("GH_REPO")) state.exportedRepo = false;
+		return;
+	}
+	// A same-command prefix belongs to its own command's environment (and to no
+	// other). Nothing else about a segment changes the environment.
+	const scope = { ...declared, ...assigned };
 	// One resolution for every arm, so an alias cannot be a shell in one spelling
 	// and a stranger in another (AGENTS.md shape 69).
 	const resolved = resolveCommand(rest[0], scope);
@@ -631,14 +694,10 @@ function classifySegment(
 	}
 	const command = resolved.command;
 	// A heredoc body is subtracted from the regions before the census sees it, so
-	// a segment that hands that body to a shell hides an unreadable script
-	// (`bash <<EOF`, `sh <<EOF`, `timeout 30 bash <<EOF`). A heredoc handed to
+	// a command that hands that body to a shell hides an unreadable script
+	// (`bash <<EOF`, `bash<<EOF`, `timeout 30 bash <<EOF`). A heredoc handed to
 	// anything else is data (`cat > f <<EOF`), which is not a script at all.
-	const handedToShell = rest.slice(1).some((word) => /^<<-?/.test(word))
-		? rest.find((word) =>
-				SHELL_COMMANDS.has(resolveCommand(word, scope).command),
-			)
-		: undefined;
+	const handedToShell = heredocShell(rest, scope);
 	if (handedToShell !== undefined && regionNamesGhCall) {
 		census.unclassified.push({
 			step,
@@ -652,12 +711,16 @@ function classifySegment(
 		);
 		const nested = flag < 0 ? undefined : rest[flag + 1];
 		if (nested !== undefined) {
-			// `bash -c '<script>'` runs a script the census can read.
-			scanScript(nested, step, processEnv, census);
+			// A `-c` payload is a second shell with its own argv, so the census
+			// reports it rather than resolving a call it does not read.
+			if (namesGhCall(nested, scope)) {
+				census.unclassified.push({
+					step,
+					detail: `\`${rest[0]} ${rest[flag]}\` runs a script this census does not read, and it names a \`gh\` call`,
+				});
+			}
 			return;
 		}
-		// Otherwise the script can only arrive from stdin: a pipe or a process
-		// substitution, whose text sits in this same region.
 		// `bash ci.sh` runs a FILE: a stated limit, not a body the census misses.
 		if (
 			rest.slice(1).some((word) => !word.startsWith("-") && !/^[<>]/.test(word))
@@ -675,16 +738,30 @@ function classifySegment(
 		}
 		return;
 	}
-	if (command === EVAL_COMMAND) {
-		scanScript(rest.slice(1).join(" "), step, scope, census);
+	if (command === "eval") {
+		// `eval` runs in the CALLER's shell, so neither direction of its effect is
+		// provable: a payload export would have to travel back out, and an outer
+		// export into the payload is not something this census follows. Report it
+		// when it names a call, never resolve one through it (F10).
+		if (namesGhCall(rest.slice(1).join(" "), scope)) {
+			census.unclassified.push({
+				step,
+				detail: `\`${rest[0]}\` runs a script this census does not read, and it names a \`gh\` call`,
+			});
+		}
 		return;
 	}
 	if (command === "gh") {
 		census.invocations.push({
 			step,
 			words: rest,
-			env: processEnv,
-			shellEnv: { ...sharedEnv },
+			// A prefix assignment reaches the CHILD's environment, so it is read
+			// for `GH_REPO`; it is not visible to the shell's own word expansion,
+			// so an operand is resolved against the declared env alone.
+			hasSource:
+				state.exportedRepo ||
+				isRepoValue(scope.GH_REPO, declared, literal) ||
+				hasRepoOperand(rest, declared, literal),
 		});
 		return;
 	}
@@ -732,12 +809,7 @@ function censusWorkflow(workflow: Workflow): {
 				for (const invocation of census.invocations.slice(calls)) {
 					named = true;
 					if (!needsRepository(invocation.words)) continue;
-					if (
-						checkoutBefore ||
-						isRepoValue(invocation.env.GH_REPO, invocation.env) ||
-						hasRepoOperand(invocation.words, invocation.shellEnv)
-					)
-						continue;
+					if (checkoutBefore || invocation.hasSource) continue;
 					findings.push({
 						job: key,
 						kind: "missing-source",
@@ -896,9 +968,10 @@ describe("workflow gh calls resolve a repository (#4382)", () => {
 		]);
 	});
 
-	it("classifies every gh invocation shape the shell offers", () => {
+	it("names every gh invocation shape the shell offers", () => {
 		// F2: the gate is green only if it sees EVERY spelling, so each plant
 		// here is a real call with no repository source and must be a finding.
+		// A call the census cannot read is `unclassified`, never resolved.
 		expect(
 			findingsOf(
 				loaded(
@@ -937,8 +1010,8 @@ describe("workflow gh calls resolve a repository (#4382)", () => {
 		).toEqual([
 			["alias", "missing-source"],
 			["absolute-path", "missing-source"],
-			["nested-shell", "missing-source"],
-			["evaluated", "missing-source"],
+			["nested-shell", "unclassified"],
+			["evaluated", "unclassified"],
 			["continued", "missing-source"],
 			["unlisted-verb", "missing-source"],
 		]);
@@ -1098,35 +1171,40 @@ describe("workflow gh calls resolve a repository (#4382)", () => {
 		}
 	});
 
-	it("tracks exported repository bindings", () => {
-		// F2: only exported bindings reach the child process.
-		for (const binding of [
-			"export GH_REPO=owner/repo",
-			"GH_REPO=owner/repo\nexport GH_REPO",
-		]) {
-			expect(
-				probe({ run: `${binding}\n${BARE_GH_WRITE}` }).findings,
-				binding,
-			).toEqual([]);
-		}
+	it("admits one exported literal and no export-marking state", () => {
+		// R6: an export with a provable value is the one script binding the
+		// census admits. `GH_REPO=owner/repo` then `export GH_REPO` marks a shell
+		// variable whose value the census does not follow, so it is no source
+		// (STATE_TABLE.md rows 12 and 17).
+		expect(
+			probe({ run: `export GH_REPO=owner/repo\n${BARE_GH_WRITE}` }).findings,
+		).toEqual([]);
+		expect(
+			probe({
+				run: `GH_REPO=owner/repo\nexport GH_REPO\n${BARE_GH_WRITE}`,
+			}).findings.map((found) => found.kind),
+		).toEqual(["missing-source"]);
 	});
 
 	it("distinguishes shell variables from child environment", () => {
 		// F2: shell expansion sees standalone variables; gh's environment does not.
+		// A script variable's value is not followed either way, so even the
+		// operand form is reported (STATE_TABLE.md rows 5 and 17).
 		expect(
 			probe({ run: `GH_REPO=owner/repo\n${BARE_GH_WRITE}` }).findings.map(
-				(f) => f.kind,
+				(found) => found.kind,
 			),
 		).toEqual(["missing-source"]);
 		expect(
-			probe({ run: `GH_REPO=owner/repo\n${BARE_GH_WRITE} -R "$GH_REPO"` })
-				.findings,
-		).toEqual([]);
+			probe({
+				run: `GH_REPO=owner/repo\n${BARE_GH_WRITE} -R "$GH_REPO"`,
+			}).findings.map((found) => found.kind),
+		).toEqual(["missing-source"]);
 		expect(
 			probe({
 				run: `GH_BIN=gh\n$GH_BIN pr edit 9999 --add-label x`,
-			}).findings.map((f) => f.kind),
-		).toEqual(["missing-source"]);
+			}).findings.map((found) => found.kind),
+		).toEqual(["unclassified"]);
 	});
 
 	it("confines command prefixes to their command", () => {
@@ -1138,24 +1216,29 @@ describe("workflow gh calls resolve a repository (#4382)", () => {
 		).toEqual(["missing-source"]);
 	});
 
-	it("applies exports at the substitution position", () => {
-		// F3: a later export cannot satisfy an earlier command substitution.
+	it("applies exports at the script level they were written in", () => {
+		// F3: a substitution is a subshell, so an export outside it does not
+		// reach the call inside (row 13), and a later export cannot satisfy an
+		// earlier substitution either. Both directions report.
 		for (const body of [
 			`$(${BARE_GH_WRITE})`,
 			"`" + BARE_GH_WRITE + "`",
 			`$(${BARE_GH_WRITE}; echo "$(${BARE_GH_WRITE})")`,
 		]) {
-			expect(
-				probe({
-					run: `echo "${body}"\nexport GH_REPO=owner/repo`,
-				}).findings.map((f) => f.kind),
-				body,
-			).toContain("missing-source");
-			expect(
-				probe({ run: `export GH_REPO=owner/repo\necho "${body}"` }).findings,
-				body,
-			).toEqual([]);
+			for (const run of [
+				`echo "${body}"\nexport GH_REPO=owner/repo`,
+				`export GH_REPO=owner/repo\necho "${body}"`,
+			]) {
+				expect(
+					probe({ run }).findings.map((found) => found.kind),
+					run,
+				).toContain("missing-source");
+			}
 		}
+		expect(
+			probe({ run: `echo "$(export GH_REPO=owner/repo; ${BARE_GH_WRITE})"` })
+				.findings,
+		).toEqual([]);
 	});
 
 	it("keeps substitution bindings local", () => {
@@ -1208,41 +1291,46 @@ describe("workflow gh calls resolve a repository (#4382)", () => {
 	});
 
 	it("expands assignments when they execute", () => {
-		// F2/F3: a later binding cannot retroactively change an earlier value.
+		// F2/F3: a later binding cannot retroactively change an earlier value,
+		// and a script assignment's value is never followed (row 5).
 		for (const run of [
 			`export GH_REPO=$TARGET\nexport TARGET=owner/repo\n${BARE_GH_WRITE}`,
 			`TARGET=owner/repo ${BARE_GH_WRITE} -R "$TARGET"`,
 			`export GH_REPO="$(echo owner/repo)"\n${BARE_GH_WRITE}`,
+			`TARGET=owner/repo\nexport GH_REPO=$TARGET\n${BARE_GH_WRITE}`,
 		]) {
 			expect(
-				probe({ run }).findings.map((f) => f.kind),
+				probe({ run }).findings.map((found) => found.kind),
 				run,
 			).toEqual(["missing-source"]);
 		}
-		expect(
-			probe({
-				run: `TARGET=owner/repo\nexport GH_REPO=$TARGET\n${BARE_GH_WRITE}`,
-			}).findings,
-		).toEqual([]);
 	});
 
 	it("judges bindings before and after each scoped call", () => {
-		// State-table witnesses for the before/same-command/after axes.
+		// State-table witnesses for the before/same-command/after axes. An export
+		// admits only calls at its own script level, so a subshell or a new shell
+		// between them leaves the call reported (row 13).
 		for (const run of [
 			`${BARE_GH_WRITE}\nGH_REPO=owner/repo`,
 			`${BARE_GH_WRITE}\nexport GH_REPO=owner/repo`,
 			`echo "$(GH_REPO=owner/repo; ${BARE_GH_WRITE})"`,
 			`(${BARE_GH_WRITE}); export GH_REPO=owner/repo`,
 			`(GH_REPO=owner/repo; ${BARE_GH_WRITE})`,
+			`export GH_REPO=owner/repo; (${BARE_GH_WRITE})`,
 		])
 			expect(
-				probe({ run }).findings.map((f) => f.kind),
+				probe({ run }).findings.map((found) => found.kind),
 				run,
 			).toEqual(["missing-source"]);
 		for (const run of [
-			`export GH_REPO=owner/repo; (${BARE_GH_WRITE})`,
+			`export GH_REPO=owner/repo; ${BARE_GH_WRITE}`,
 			`echo "$(GH_REPO=owner/repo ${BARE_GH_WRITE})"`,
 			`(GH_REPO=owner/repo ${BARE_GH_WRITE})`,
+			`(export GH_REPO=owner/repo; ${BARE_GH_WRITE})`,
+			// An unrelated export is not a boundary: it leaves GH_REPO alone.
+			`export GH_REPO=owner/repo; export PATH=/x; ${BARE_GH_WRITE}`,
+			// A later standalone assignment changes the value without removing
+			// the export attribute, which is what the rule reads.
 			`export GH_REPO=old/repo; GH_REPO=owner/repo; ${BARE_GH_WRITE}`,
 		])
 			expect(probe({ run }).findings, run).toEqual([]);
@@ -1364,14 +1452,20 @@ describe("workflow gh calls resolve a repository (#4382)", () => {
 	});
 
 	it("uses effective environment for each invocation", () => {
-		// R2/R5: inline sources work; nearer empty bindings clear outer ones.
+		// R2/R5: a prefix and an `env` wrapper are the same command's own
+		// environment, and a nearer empty binding clears an outer one. A `-c`
+		// payload is a second shell, so it is reported, not read (row 25).
 		for (const run of [
 			`GH_REPO=owner/repo ${BARE_GH_WRITE}`,
-			`bash -c 'GH_REPO=owner/repo ${BARE_GH_WRITE}'`,
 			`env GH_REPO=owner/repo ${BARE_GH_WRITE}`,
 		]) {
 			expect(probe({ run }).findings, run).toEqual([]);
 		}
+		expect(
+			probe({
+				run: `bash -c 'GH_REPO=owner/repo ${BARE_GH_WRITE}'`,
+			}).findings.map((found) => found.kind),
+		).toEqual(["unclassified"]);
 	});
 
 	it("honors nearer empty repository bindings", () => {
@@ -1590,5 +1684,140 @@ describe("workflow gh calls resolve a repository (#4382)", () => {
 			findings: [],
 			population: [],
 		});
+	});
+});
+
+describe("the census's admitted source list (#4382 r6)", () => {
+	it("reports eval instead of re-rooting the scan", () => {
+		// F10 / Greptile tpO7Y. `eval` runs in the CALLER's shell, so neither
+		// direction is provable: a payload export would have to travel back,
+		// and the caller's export into the payload is not followed either.
+		// Both are REPORTED, never resolved.
+		expect(
+			probe({
+				run: `export GH_REPO=owner/repo; eval '${BARE_GH_WRITE}'`,
+			}).findings.map((found) => found.kind),
+		).toEqual(["unclassified"]);
+		expect(
+			probe({
+				run: `eval 'export GH_REPO=owner/repo'; ${BARE_GH_WRITE}`,
+			}).findings.map((found) => found.kind),
+		).toEqual(["missing-source"]);
+		expect(
+			probe({ run: `eval '${BARE_GH_WRITE}'` }).findings.map(
+				(found) => found.kind,
+			),
+		).toEqual(["unclassified"]);
+	});
+
+	it("drops an export at every writer and boundary bash honours", () => {
+		// F11 / Greptile tpO7T and tpO7W. A pipeline's left side runs in a
+		// subshell, `unset` and `export -n` remove the child's environment, and
+		// a subshell or a conditional is not the script's top level.
+		for (const run of [
+			`export GH_REPO=owner/repo | cat\n${BARE_GH_WRITE}`,
+			`export GH_REPO=owner/repo\nunset GH_REPO\n${BARE_GH_WRITE}`,
+			`export GH_REPO=owner/repo\nunset -v GH_REPO\n${BARE_GH_WRITE}`,
+			`export GH_REPO=owner/repo\nexport -n GH_REPO\n${BARE_GH_WRITE}`,
+			`export GH_REPO=owner/repo\nexport -n GH_REPO=owner/repo\n${BARE_GH_WRITE}`,
+			`export GH_REPO=owner/repo; (${BARE_GH_WRITE})`,
+			`export GH_REPO=owner/repo; if true; then ${BARE_GH_WRITE}; fi`,
+			`export GH_REPO=owner/repo\nfor x in 1; do ${BARE_GH_WRITE}; done`,
+		]) {
+			expect(
+				probe({ run }).findings.map((found) => found.kind),
+				run,
+			).toEqual(["missing-source"]);
+		}
+	});
+
+	it("reads a single-quoted value as the literal text gh receives", () => {
+		// F12 / Greptile tpO7a. Single quotes suppress expansion, so `$TARGET`
+		// reaches gh as the five characters `$TARGET`, which is no repository --
+		// even when a declared variable of that name has a value.
+		expect(
+			probe({
+				run: `GH_REPO='$TARGET' ${BARE_GH_WRITE}`,
+				stepEnv: { TARGET: "owner/repo" },
+			}).findings.map((found) => found.kind),
+		).toEqual(["missing-source"]);
+		expect(
+			probe({
+				run: `TARGET=owner/repo; export GH_REPO='$TARGET'; ${BARE_GH_WRITE}`,
+			}).findings.map((found) => found.kind),
+		).toEqual(["missing-source"]);
+		expect(
+			probe({
+				run: `${BARE_GH_WRITE} --repo '$TARGET'`,
+				stepEnv: { TARGET: "owner/repo" },
+			}).findings.map((found) => found.kind),
+		).toEqual(["missing-source"]);
+		// Boundary: a double-quoted reference is still a reference.
+		expect(
+			probe({
+				run: `GH_REPO="$TARGET" ${BARE_GH_WRITE}`,
+				stepEnv: { TARGET: "owner/repo" },
+			}).findings,
+		).toEqual([]);
+		// Boundary: a single-quoted slug holds no `$`, so it is a literal source.
+		for (const run of [
+			`GH_REPO='owner/repo' ${BARE_GH_WRITE}`,
+			`${BARE_GH_WRITE} --repo 'owner/repo'`,
+		]) {
+			expect(probe({ run }).findings, run).toEqual([]);
+		}
+	});
+
+	it("asks the shared lexer for the heredoc witness", () => {
+		// F13: the census's own command resolution reads the quoted spellings
+		// `"g"h` and `\gh`, and an attached redirection (`bash<<EOF`) names the
+		// same shell a spaced one does.
+		for (const options of [
+			{ run: `bash <<'EOF'\n"g"h pr edit 4550 --add-label x\nEOF` },
+			{ run: `bash <<'EOF'\n\\gh pr edit 4550 --add-label x\nEOF` },
+			{ run: `bash<<'EOF'\n/usr/bin/gh pr edit 4550 --add-label x\nEOF` },
+		]) {
+			expect(
+				probe(options).findings.map((found) => found.kind),
+				JSON.stringify(options),
+			).toEqual(["unclassified"]);
+		}
+		// The same spelling as a command word is a call the census DOES read, so
+		// it carries its own (absent) source finding rather than a report.
+		expect(
+			probe({ run: `'g'h pr edit 4550 --add-label x` }).findings.map(
+				(found) => found.kind,
+			),
+		).toEqual(["missing-source"]);
+	});
+
+	it("reports a binding writer nobody listed", () => {
+		// The plant: a form outside every list the brief names. `declare -x`
+		// exports too, and this census does not model it, so the call is
+		// unresolved rather than resolved.
+		for (const run of [
+			`declare -x GH_REPO=owner/repo; ${BARE_GH_WRITE}`,
+			`source ./repo.env; ${BARE_GH_WRITE}`,
+		]) {
+			expect(
+				probe({ run }).findings.map((found) => found.kind),
+				run,
+			).toEqual(["missing-source"]);
+		}
+	});
+
+	it("reports a nested shell program instead of reading it", () => {
+		// Same shape 24 seam, one arm: a `-c` payload is a second shell with its
+		// own argv, so it is reported whatever it contains.
+		for (const options of [
+			{ run: `bash -c '${BARE_GH_WRITE}'` },
+			{ run: `bash -ec 'GH_REPO=owner/repo ${BARE_GH_WRITE}'` },
+			{ run: `sh -c "${BARE_GH_WRITE}"` },
+		]) {
+			expect(
+				probe(options).findings.map((found) => found.kind),
+				JSON.stringify(options),
+			).toEqual(["unclassified"]);
+		}
 	});
 });
