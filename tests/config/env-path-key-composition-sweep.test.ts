@@ -304,7 +304,7 @@ function unquote(text: string): string {
 
 /** The named children of a node, memoised for one scan. */
 function childrenOf(node: SgNode): SgNode[] {
-	return node.namedChildren();
+	return node.namedChildren().filter((child) => kindName(child) !== "comment");
 }
 
 function firstOfKind(node: SgNode, kind: string): SgNode | undefined {
@@ -376,6 +376,8 @@ interface Declaration {
 	envTyped: boolean;
 	/** The path spelling this binding holds, when its initializer is a literal. */
 	alias?: string;
+	/** Mutable path-valued bindings retain evidence, never a proven spelling. */
+	mutablePath?: boolean;
 }
 
 interface ScanContext {
@@ -386,7 +388,7 @@ interface ScanContext {
 }
 
 /**
- * Resolve a name to its nearest preceding declaration in the enclosing scope
+ * Resolve a name to its nearest declaration in the enclosing scope
  * chain. Lexical, one file, no type resolution: a `var` hoisted from a nested
  * block, a destructured name and a re-exported binding all fall through to
  * `undefined`, which the caller reports as an opaque base instead of guessing.
@@ -413,6 +415,7 @@ function buildContext(root: SgNode): ScanContext {
 			owner: SgNode,
 			envTyped: boolean,
 			alias?: string,
+			mutablePath = false,
 		): void => {
 			const scope =
 				nearestIn(chainOf(owner), SCOPE_KINDS)?.range().start.index ?? 0;
@@ -427,6 +430,7 @@ function buildContext(root: SgNode): ScanContext {
 			// same-named constant in another scope must not rewrite how a
 			// reference here resolves (#4600 R2).
 			if (alias !== undefined) declaration.alias = alias;
+			declaration.mutablePath = mutablePath;
 			list.push(declaration);
 			scoped.set(name, list);
 			byScope.set(scope, scoped);
@@ -444,12 +448,19 @@ function buildContext(root: SgNode): ScanContext {
 						child.kind() !== "identifier" && child.kind() !== "type_annotation",
 				)
 				.at(-1);
+			const spelling = aliasSpelling(value);
+			const immutable =
+				declarator
+					.parent()
+					?.children()
+					.some((child) => child.text() === "const") === true;
 			declare(
 				nameNode.text(),
 				nameNode,
 				declarator,
 				annotatedAsEnv(declarator),
-				aliasSpelling(value),
+				immutable ? spelling : undefined,
+				!immutable && spelling !== undefined,
 			);
 		}
 		for (const kind of PARAMETER_KINDS) {
@@ -470,13 +481,12 @@ function buildContext(root: SgNode): ScanContext {
 	return {
 		resolve: (reference, name) => {
 			const { byScope } = (tables ??= load());
-			const at = reference.range().start.index;
 			for (const ancestor of chainOf(reference)) {
 				if (!SCOPE_KINDS.has(kindName(ancestor))) continue;
 				const list = byScope.get(ancestor.range().start.index)?.get(name);
 				let chosen: Declaration | undefined;
 				for (const entry of list ?? []) {
-					if (entry.index <= at) chosen = entry;
+					chosen = entry;
 				}
 				if (chosen !== undefined) return chosen;
 			}
@@ -533,10 +543,37 @@ function expressionKeyRef(
 	const line = node.range().start.line + 1;
 	const kind = kindName(node);
 	if (kind === "identifier") {
-		const alias = context.resolve(node, node.text())?.alias;
+		const declaration = context.resolve(node, node.text());
+		if (declaration?.mutablePath)
+			return { spelling: node.text(), shape: "expression", line };
+		const alias = declaration?.alias;
 		if (alias !== undefined) {
 			return { spelling: alias, shape: shapeOfSpelling(alias), line };
 		}
+	}
+	// #4600 V4: fold only identity wrappers; other expressions retain evidence.
+	if (kind === "parenthesized_expression") {
+		const inner = childrenOf(node)[0];
+		if (inner !== undefined) return expressionKeyRef(inner, context);
+	}
+	if (kind === "binary_expression") {
+		const left = node.field("left");
+		const right = node.field("right");
+		const operator = node.field("operator");
+		if (
+			operator?.text() === "+" &&
+			right?.kind() === "string" &&
+			unquote(right.text()) === "" &&
+			left !== null
+		) {
+			return expressionKeyRef(left, context);
+		}
+	}
+	if (kind === "call_expression" && childrenOf(node)[0]?.text() === "String") {
+		const args = firstOfKind(node, "arguments");
+		const values = args === undefined ? [] : childrenOf(args);
+		if (values.length === 1 && values[0] !== undefined)
+			return expressionKeyRef(values[0], context);
 	}
 	const literal = kind === "string" || holdsLiteral(node);
 	if (literal) {
@@ -921,9 +958,15 @@ function collectFromEntries(
 		if (ref !== undefined) keys.push(ref);
 	}
 	if (keys.length === 0) return;
-	const envIdentified = spreads.some((spread) =>
-		/process\s*\.\s*(?:env|entries)\b/.test(spread.text()),
-	);
+	const envIdentified = spreads.some((spread) => {
+		const argument = childrenOf(spread)[0];
+		if (argument === undefined) return false;
+		if (baseIsEnv(argument, context)) return true;
+		if (!isObjectCall(argument, "entries")) return false;
+		const args = firstOfKind(argument, "arguments");
+		const base = args === undefined ? undefined : childrenOf(args)[0];
+		return base !== undefined && baseIsEnv(base, context);
+	});
 	for (const key of keys) {
 		out.push({
 			line: key.line,
@@ -1688,6 +1731,71 @@ describe("#4590 env PATH composition", () => {
 	 * with `...`, so that route matched nothing and a lowercase or computed key
 	 * over the ambient block reported clean.
 	 */
+	// #4600 r3 V1: comments must not change structural environment evidence.
+	it("identifies fromEntries environments structurally through comments", () => {
+		for (const base of [
+			"Object.entries(process /* note */ .env)",
+			"process /* note */ .env",
+		]) {
+			const source = `Object.fromEntries([...${base}, ["path", next]])`;
+			expect(findPathKeyFindings(source).map((f) => f.reason)).toEqual([
+				"unclassified-spelling",
+			]);
+		}
+		expect(
+			findPathKeyFindings(
+				'Object.fromEntries([...Object.entries(data), ["path", next]])',
+			),
+		).toEqual([]);
+		expect(
+			findPathKeyFindings(
+				'Object.fromEntries([...Object.entries("process.env"), ["path", next]])',
+			),
+		).toEqual([]);
+	});
+
+	// #4600 r3 V2: lexical binding is independent of function execution order.
+	it("resolves later constants across function boundaries", () => {
+		for (const source of [
+			'function build(){ return { ...process.env, [KEY]: next }; } const KEY = "Path"; build();',
+			'function outer(){ function inner(){ return { ...process.env, [K]: next }; } const K = "Path"; return inner; }',
+			'const K = "PATH"; function outer(){ function inner(){ return { ...process.env, [K]: next }; } const K = "Path"; return inner; }',
+		]) {
+			expect(
+				findPathKeyFindings(source).map((f) => [f.spelling, f.reason]),
+			).toEqual([["Path", "spread-override"]]);
+		}
+	});
+
+	// #4600 r3 V3: a mutable initializer cannot prove the later key's value.
+	it("reports mutable key bindings instead of trusting their initializer", () => {
+		for (const declaration of [
+			'let pathKey = "PATH"',
+			'var pathKey = "PATH"',
+			'let K = "PATH"',
+		]) {
+			const name = declaration.includes("pathKey") ? "pathKey" : "K";
+			const source = `${declaration}; ${name} = "Path"; const env: ProcessEnv = { PATH: first, [${name}]: second };`;
+			expect(
+				findPathKeyFindings(source).map((f) => [f.spelling, f.reason]),
+			).toEqual([
+				["PATH", "unclassified-spelling"],
+				[name, "unclassified-spelling"],
+			]);
+		}
+	});
+
+	// #4600 r3 V4: identity wrappers must retain the alias's path evidence.
+	it("resolves aliases inside identity expression wrappers", () => {
+		for (const key of ['K + ""', "String(K)", '(K + "")', 'String(K + "")']) {
+			expect(
+				findPathKeyFindings(
+					`const K = "Path"; const env = { ...process.env, [${key}]: next };`,
+				).map((f) => [f.spelling, f.reason]),
+			).toEqual([["Path", "spread-override"]]);
+		}
+	});
+
 	it("identifies an env from the spread's member, not from its text", () => {
 		const lowercase = findPathKeyFindings(
 			"const child = { ...process.env, path: next };",
