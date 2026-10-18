@@ -876,6 +876,66 @@ describe("#2442 no new hand-rolled evict-oldest program outside bounded-cache.ts
 				selector,
 			).toEqual([3]);
 		}
+		// The temporary has no root name, so a consuming selector must be read
+		// from the ordering call itself. Deleting the PLAIN key proves the
+		// selector is what reaches the effect, not a `victim[0]` on the removal
+		// (#4606 r2 review round 2).
+		for (const selector of [".shift()", ".pop()"]) {
+			expect(
+				findEvictionPrograms(
+					[
+						"function trim(m, CAP) {",
+						"  while (m.size > CAP) {",
+						`    const victim = [...m.keys()].sort(cmp)${selector};`,
+						"    m.delete(victim);",
+						"  }",
+						"}",
+					].join("\n"),
+				).map((program) => program.line),
+				`plain key through ${selector}`,
+			).toEqual([3]);
+		}
+	});
+
+	it("keeps ordering and size facts tied to their own binding", () => {
+		// A sibling function's `const history = rows.sort(cmp)` says nothing about
+		// a Map parameter named `history` here (#4606 r2 review round 2): the
+		// ordered-array fact used to be file-scoped, so this scan was skipped.
+		expect(
+			findEvictionPrograms(
+				[
+					"function rank(rows) {",
+					"  const history = rows.sort(cmp);",
+					"  return history;",
+					"}",
+					"function trim(history, CAP) {",
+					"  while (history.size > CAP) {",
+					"    let victim;",
+					"    for (const key of history) victim = key;",
+					"    history.delete(victim);",
+					"  }",
+					"}",
+				].join("\n"),
+			).map((program) => program.line),
+			"a sibling's ordered binding is not this loop's",
+		).toEqual([8]);
+		// A comment or string that spells `.sort(` is not an ordering call either
+		// (AGENTS.md shape 43).
+		expect(
+			findEvictionPrograms(
+				[
+					"function trim(rows, CAP) {",
+					'  const history = getRows(rows, ".sort(");',
+					"  while (history.size > CAP) {",
+					"    let victim;",
+					"    for (const key of history) victim = key;",
+					"    history.delete(victim);",
+					"  }",
+					"}",
+				].join("\n"),
+			).map((program) => program.line),
+			"a string naming `.sort(` is not an ordering call",
+		).toEqual([5]);
 	});
 
 	it("resolves the early-return complement, a ceiling call, and a length cap", () => {

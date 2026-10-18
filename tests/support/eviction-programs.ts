@@ -122,6 +122,9 @@ const REBUILD_CONSTRUCTORS = new Set(["Set", "Map", "Array"]);
 /** Element selectors over an ordered sequence. */
 const ELEMENT_METHODS = new Set(["at", "find"]);
 
+/** Selectors that CONSUME an end of the ordered sequence in place. */
+const END_SELECTORS = new Set(["shift", "pop"]);
+
 /** `sort` family: the order stage. */
 const ORDER_METHODS = new Set(["sort", "toSorted"]);
 
@@ -158,8 +161,15 @@ const STATEMENT_PARENTS: ReadonlySet<string | number> = new Set([
 ]);
 
 const IDENTIFIER = /[\w$]+/g;
-const NUMERIC_LITERAL = /^\d[\d_]*$/;
-const SIZE_OR_LENGTH = /\.\s*(?:size|length)\b/;
+
+/** The member names that read a collection's own count. */
+const LENGTH_PROPERTIES = new Set(["size", "length"]);
+
+/** Calls that hand back a collection's size or its entries. */
+const SIZE_SOURCE_CALLS = new Set(["keys", "values", "entries"]);
+
+/** `Math.min`/`Math.max`: a reduction over a key set. */
+const MATH_EXTREMUM_CALLS = new Set(["min", "max"]);
 
 /** Every whole identifier in `text`, deduplicated. */
 function identifiers(text: string): string[] {
@@ -266,14 +276,59 @@ interface FileFacts {
 	readonly capComparisons: SgNode[];
 	/** Ceiling comparisons of any counter: the bound of an iterator-head loop. */
 	readonly ceilingComparisons: SgNode[];
-	/** Declarator name → the value's own text, for bound resolution. */
-	readonly declaredValues: Map<string, string>;
+	/** Declarator name to the initializer node it was bound from. */
+	readonly initializers: Map<string, SgNode>;
 	/** Names declared with a numeric literal value (`const MAX = 16;`). */
 	readonly numericConstants: Set<string>;
-	/** Names whose value derives from a collection's size/length or iteration. */
-	readonly sizeDerived: Set<string>;
-	/** Names declared from a `sort`/`toSorted` result (an ordered array). */
-	readonly orderedArrays: Set<string>;
+	/** Memo for {@link isSizeDerived}, per name. */
+	readonly sizeDerivedMemo: Map<string, boolean>;
+}
+
+/** A call inside `node` (itself included) whose own name is one of `names`. */
+function callsAny(
+	node: SgNode,
+	names: ReadonlySet<string>,
+	filter?: (call: SgNode) => boolean,
+): boolean {
+	const test = (call: SgNode): boolean =>
+		names.has(invokedName(call) ?? "") && (filter?.(call) ?? true);
+	if (node.kind() === "call_expression" && test(node)) return true;
+	return node
+		.findAll({ rule: { kind: "call_expression" } })
+		.some((call) => test(call));
+}
+
+/** True when an initializer reads a collection size or an iteration result. */
+function readsSize(node: SgNode): boolean {
+	const readsLength = (member: SgNode): boolean =>
+		LENGTH_PROPERTIES.has(member.field("property")?.text() ?? "");
+	if (node.kind() === "member_expression" && readsLength(node)) return true;
+	if (
+		node
+			.findAll({ rule: { kind: "member_expression" } })
+			.some((member) => readsLength(member))
+	)
+		return true;
+	if (callsAny(node, SIZE_SOURCE_CALLS)) return true;
+	return callsAny(node, MATH_EXTREMUM_CALLS, (call) => {
+		const callee = call.field("function");
+		return callee !== null && callee.field("object")?.text() === "Math";
+	});
+}
+
+/** True when an initializer derives from an ordering call. */
+function readsOrdering(node: SgNode): boolean {
+	return callsAny(node, ORDER_METHODS);
+}
+
+/** A collection whose size the program reads, resolved through its binding. */
+function isSizeDerived(name: string, facts: FileFacts): boolean {
+	const cached = facts.sizeDerivedMemo.get(name);
+	if (cached !== undefined) return cached;
+	const initializer = facts.initializers.get(name);
+	const derived = initializer !== undefined && readsSize(initializer);
+	facts.sizeDerivedMemo.set(name, derived);
+	return derived;
 }
 
 function collectFacts(root: SgNode): FileFacts {
@@ -296,63 +351,60 @@ function collectFacts(root: SgNode): FileFacts {
 		else if (kind === "binary_expression") comparisons.push(node);
 	}
 
-	const declaredValues = new Map<string, string>();
+	// Facts are read from the initializer's NODES, never its text: a comment or
+	// a string that spells `.sort(` or `.size` is not evidence (AGENTS.md shape
+	// 43), and every name resolves through its own binding, so a sibling
+	// function's declaration cannot answer for this one (#4606 r2).
+	const initializers = new Map<string, SgNode>();
 	const numericConstants = new Set<string>();
-	const sizeDerived = new Set<string>();
-	const orderedArrays = new Set<string>();
 	for (const declarator of declarators) {
 		const name = nodeText(declarator.field("name"));
 		const value = declarator.field("value");
 		if (name.length === 0 || value === null || value === undefined) continue;
-		const valueText = value.text();
 		for (const identifier of identifiers(name)) {
-			declaredValues.set(identifier, valueText);
+			initializers.set(identifier, value);
 			if (
-				NUMERIC_LITERAL.test(valueText) &&
-				Number(valueText.replace(/_/g, "")) !== 0
+				value.kind() === "number" &&
+				Number(value.text().replace(/_/g, "")) !== 0
 			)
 				numericConstants.add(identifier);
-			if (
-				SIZE_OR_LENGTH.test(valueText) ||
-				/\b(?:keys|values|entries)\s*\(/.test(valueText) ||
-				/\bMath\s*\.\s*(?:min|max)\b/.test(valueText) ||
-				/\bObject\s*\.\s*(?:keys|entries)\s*\(/.test(valueText)
-			)
-				sizeDerived.add(identifier);
-			if (/\.\s*(?:sort|toSorted)\s*\(/.test(valueText))
-				orderedArrays.add(identifier);
 		}
 	}
 
-	const capComparisons = comparisons.filter((comparison) =>
-		isCapComparison(comparison, sizeDerived),
-	);
-	const ceilingComparisons = comparisons.filter(isCeilingComparison);
-	return {
+	const facts: FileFacts = {
 		calls,
 		declarators,
 		forOfs,
 		assignments,
 		subscripts,
-		capComparisons,
-		ceilingComparisons,
-		declaredValues,
+		capComparisons: [],
+		ceilingComparisons: [],
+		initializers,
 		numericConstants,
-		sizeDerived,
-		orderedArrays,
+		sizeDerivedMemo: new Map(),
 	};
+	for (const comparison of comparisons) {
+		if (isCapComparison(comparison, facts))
+			facts.capComparisons.push(comparison);
+		if (isCeilingComparison(comparison))
+			facts.ceilingComparisons.push(comparison);
+	}
+	return facts;
 }
 
-/** True when the expression's text reads a collection size or length. */
+/** True when the expression reads a collection size or length. */
 function sizeMention(
 	expression: SgNode | null | undefined,
 	facts: FileFacts,
 ): boolean {
 	if (expression === null || expression === undefined) return false;
-	const text = expression.text();
-	if (SIZE_OR_LENGTH.test(text)) return true;
+	if (
+		expression.kind() === "member_expression" &&
+		LENGTH_PROPERTIES.has(expression.field("property")?.text() ?? "")
+	)
+		return true;
 	const name = rootName(expression);
-	return name !== undefined && facts.sizeDerived.has(name);
+	return name !== undefined && isSizeDerived(name, facts);
 }
 
 /**
@@ -369,16 +421,12 @@ function isCapThreshold(expression: SgNode | null | undefined): boolean {
 }
 
 /** `x.size > CAP`, `x.length >= CAP`, `occupied < getCeiling()`, and complements. */
-function isCapComparison(
-	comparison: SgNode,
-	sizeDerived: Set<string>,
-): boolean {
+function isCapComparison(comparison: SgNode, facts: FileFacts): boolean {
 	const operator = comparison.field("operator")?.text();
 	if (operator === undefined || !CAP_OPERATORS.has(operator)) return false;
 	const left = comparison.field("left");
 	const right = comparison.field("right");
 	if (left === null || right === null) return false;
-	const facts = { sizeDerived } as FileFacts;
 	const pairs: Array<[SgNode, SgNode]> = [
 		[left, right],
 		[right, left],
@@ -642,7 +690,14 @@ function selectsInPlace(sortCall: SgNode): boolean {
 		}
 		if (kind === "call_expression") {
 			const name = calleeName(parent);
-			if (name !== undefined && ELEMENT_METHODS.has(name)) return true;
+			// `.shift()`/`.pop()` on the sorted temporary take an element as
+			// surely as `[0]`, and the temporary has no root name for
+			// `selectsByName` to follow (#4606 r2 review).
+			if (
+				name !== undefined &&
+				(ELEMENT_METHODS.has(name) || END_SELECTORS.has(name))
+			)
+				return true;
 		}
 		if (kind === "variable_declarator" || kind === "lexical_declaration") break;
 		current = parent;
@@ -663,8 +718,7 @@ function selectsByName(names: ReadonlySet<string>, facts: FileFacts): boolean {
 	for (const call of facts.calls) {
 		const name = calleeName(call);
 		if (name === undefined) continue;
-		if (!ELEMENT_METHODS.has(name) && name !== "shift" && name !== "pop")
-			continue;
+		if (!ELEMENT_METHODS.has(name) && !END_SELECTORS.has(name)) continue;
 		const callee = call.field("function");
 		if (callee === null) continue;
 		const source = rootName(callee.field("object"));
@@ -883,7 +937,7 @@ function governsOrderedProgram(sortCall: SgNode, facts: FileFacts): boolean {
 		if (/^[\w$.]+$/.test(subject) && expression.includes(subject)) return true;
 		const guard = guardOf(comparison);
 		if (guard === undefined || !returnsFromGuard(guard)) continue;
-		if (facts.sizeDerived.has(subject)) return true;
+		if (isSizeDerived(subject, facts)) return true;
 	}
 	return false;
 }
@@ -959,10 +1013,20 @@ function recogniseOrderedScan(
 		const left = loop.field("left");
 		if (right === null || body === null || left === null) continue;
 		const source = rootName(right);
+		const scope = enclosingFunction(loop);
 		// Iterating an ORDERED ARRAY is the ordered-victim form's consumer, not
 		// a container scan; counting it twice would split one program in two.
-		if (source !== undefined && facts.orderedArrays.has(source)) continue;
-		const scope = enclosingFunction(loop);
+		// The binding must live in THIS loop's scope: a sibling function's
+		// `const history = rows.sort(cmp)` says nothing about a Map parameter of
+		// the same name here (#4606 r2).
+		const ordered =
+			source === undefined ? undefined : facts.initializers.get(source);
+		if (
+			ordered !== undefined &&
+			contains(scope, ordered) &&
+			readsOrdering(ordered)
+		)
+			continue;
 		const bounded = enclosingBoundedControl(loop, facts);
 		const hasBound =
 			bounded !== undefined ||
@@ -1135,7 +1199,7 @@ function stringShaped(slice: SgNode): boolean {
 function isBoundingCount(count: string, facts: FileFacts): boolean {
 	const bare = count.trim().replace(/^-/, "").trim();
 	if (!/^[\w$]+$/.test(bare)) return false;
-	return facts.numericConstants.has(bare) || facts.sizeDerived.has(bare);
+	return facts.numericConstants.has(bare) || isSizeDerived(bare, facts);
 }
 
 function recogniseCountTruncation(
