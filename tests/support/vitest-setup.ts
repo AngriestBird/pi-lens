@@ -571,7 +571,7 @@ process.env.PI_LENS_HOME = TMP_HYGIENE_WORKER_HOME;
 // The published value is derived from THIS worker's identity, never read back
 // through `fixtureHomeRoot()` (#4591 V1): a nested Vitest child inherits this
 // whole environment, so reading the inherited value would make the child
-// publish its parent's root and remove it at its own teardown, with the HOMEs
+// publish its parent's root and remove it at its own teardown, with the home directories
 // a case had pinned inside it. Both derivations share `fixtureHomeRootIn`.
 process.env.PI_LENS_TMP_HYGIENE_HOME = tmpHygieneHome;
 process.env.PI_LENS_TMP_HYGIENE_FIXTURE_HOME = fixtureHomeRootIn(

@@ -70,7 +70,7 @@ describe("tmp-hygiene leak origin record (#4591)", () => {
 			// A filesystem timestamp microseconds ahead of the process clock is a
 			// negative age, which reads as `born 0ms`, never as a negative one. The
 			// birth time is passed explicitly so this cell drives the floor on a
-			// filesystem that reports no creation time instead of reding the
+			// filesystem that reports no creation time instead of failing the
 			// formatter's correct "unavailable" arm (the sibling cell above takes
 			// the same axis from `stat` and guards it).
 			const line = formatTmpHygieneLeakOrigin(empty, 1_000, {
