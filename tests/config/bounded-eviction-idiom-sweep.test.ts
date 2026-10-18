@@ -97,9 +97,10 @@
  *    delete)`) is invisible to every family below, and five such sites are
  *    LIVE today: four bounded evictions and one render view. `UNSEEN_SELECTION_RESIDUALS` names each spelling and each
  *    live site with its policy, and the test below asserts every anchor is
- *    still in the tree and still unflagged, so a row can neither go stale nor
- *    claim a site that migrated. Migration stays with the consolidated audit
- *    (#4606); a fifth spelling is not what ends this.
+ *    still in the CODE — read from `stripSource`, so a comment or a string
+ *    that quotes it is prose, not the site — and still unflagged, so a row can
+ *    neither go stale nor claim a site that migrated. Migration stays with the
+ *    consolidated audit (#4606); a fifth spelling is not what ends this.
  *
  * Built on tests/support/sweep-kit.ts, same as this repo's other
  * registered-or-fail sweeps. A NEW site this sweep flags must migrate to
@@ -551,7 +552,12 @@ const UNSEEN_SELECTION_RESIDUALS: Readonly<
 			readonly live: readonly {
 				readonly file: string;
 				readonly anchor: string;
-				/** Occurrences this sweep DOES flag elsewhere in the same file. */
+				/**
+				 * Count of occurrences this sweep DOES flag elsewhere in the same file.
+				 * Known limit (#4580 r6 F4): a total, not a set, so one new flagged
+				 * occurrence replacing an old one keeps this pin satisfied; the
+				 * exempted-key audit below is what rejects an unadmitted one.
+				 */
 				readonly detectedElsewhere: number;
 				readonly policy: string;
 			}[];
@@ -684,6 +690,20 @@ const UNSEEN_SELECTION_RESIDUALS: Readonly<
 		live: [],
 	},
 };
+
+/**
+ * 1-based line numbers where `anchor` survives as CODE in `source`.
+ *
+ * Stripped first, like every other read in this file: `stripSource` blanks
+ * comments, strings, and regex bodies while preserving layout, so the numbers
+ * still map to the raw file a human reads (#4580 r6 F1 — reading raw text let
+ * one comment quoting the anchor keep a stale row alive and green).
+ */
+function liveAnchorLines(source: string, anchor: string): number[] {
+	return stripSource(source)
+		.split("\n")
+		.flatMap((line, index) => (line.includes(anchor) ? [index + 1] : []));
+}
 
 function shippedSourceFiles(): string[] {
 	const files = ["clients", "tools", "mcp", "scripts", "tests/support"].flatMap(
@@ -1432,16 +1452,22 @@ describe("#2442 no new hand-rolled evict-oldest idiom outside bounded-cache.ts",
 		// Collect every witness before failing, so one drifted row does not hide
 		// the others.
 		const witnesses: string[] = [];
+		let plantChecks = 0;
+		let siteChecks = 0;
 		for (const [spelling, row] of Object.entries(UNSEEN_SELECTION_RESIDUALS)) {
-			if (findEvictionLines(stripSource(row.plant)).length > 0)
+			// Count only a plant whose scanned text reached the detector: an
+			// emptied input leaves the count short instead of reading as a miss
+			// proved (#4580 r6 F3).
+			const plantSource = stripSource(row.plant);
+			if (plantSource.trim().length > 0) plantChecks += 1;
+			if (findEvictionLines(plantSource).length > 0)
 				witnesses.push(`plant is now flagged: ${spelling}`);
 			for (const site of row.live) {
+				siteChecks += 1;
 				const source = fs.readFileSync(path.join(REPO_ROOT, site.file), "utf8");
-				const anchors = source
-					.split("\n")
-					.flatMap((line, index) =>
-						line.includes(site.anchor) ? [index + 1] : [],
-					);
+				// Code, not prose: a comment or a string quoting the anchor is not
+				// the site (#4580 r6 F1).
+				const anchors = liveAnchorLines(source, site.anchor);
 				const detected = findEvictionLines(stripSource(source));
 				if (anchors.length !== 1)
 					witnesses.push(
@@ -1460,6 +1486,38 @@ describe("#2442 no new hand-rolled evict-oldest idiom outside bounded-cache.ts",
 			}
 		}
 		expect(witnesses).toEqual([]);
+		// Every check above runs inside a loop, and both survivors of the r5
+		// accounting test were loops that visited nothing: an emptied per-site
+		// loop and a plant read of "" each left `witnesses` empty. Pin what the
+		// loop actually performed (#4580 r6 F3).
+		expect({ plantChecks, siteChecks }).toEqual({
+			plantChecks: Object.keys(UNSEEN_SELECTION_RESIDUALS).length,
+			siteChecks: liveSites.length,
+		});
+	});
+
+	it("does not let a comment or a string keep a residual row alive, #4580 r6 F1", () => {
+		// The content control for the accounting test: the anchor read is stripped
+		// first, so the same anchor quoted four ways matches zero lines.
+		const anchor = "for (const candidate of candidates.slice(0, over)) {";
+		expect(
+			liveAnchorLines(
+				[
+					"// Stale note kept from an older round:",
+					`// ${anchor}`,
+					`/* ${anchor} */`,
+					`const note = ${JSON.stringify(anchor)};`,
+					"for (let index = 0; index < over; index += 1) {",
+					"\tconst candidate = candidates[index];",
+					"}",
+				].join("\n"),
+				anchor,
+			),
+		).toEqual([]);
+		// The same anchor as code still matches, so this control cannot pass by
+		// matching nothing at all.
+		expect(liveAnchorLines(`\t${anchor}`, anchor)).toEqual([1]);
+		expect(liveAnchorLines(`\t${anchor}\n\t${anchor}`, anchor)).toEqual([1, 2]);
 	});
 
 	it("flags comparator source and ordering axes, #4580 r3", () => {
