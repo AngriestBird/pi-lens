@@ -1962,6 +1962,17 @@ describe("sink reads drain first (#4381)", () => {
 					[],
 				],
 				[
+					"two `var` declarations of one name in one function: the later wins",
+					[
+						'it("x", () => {',
+						"\tvar read;",
+						"\tvar read = fs.readFileSync;",
+						"\tvoid read(getLatencyLogPath());",
+						"});",
+					],
+					[[4, "read"]],
+				],
+				[
 					"`var` hoists, so a block-level `var` alias binds the function",
 					[
 						'it("x", () => {',

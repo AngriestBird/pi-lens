@@ -888,6 +888,14 @@ describe("#4589 server-teardown detector — the shapes that must red and green"
 				],
 			],
 			[
+				"a literal receiver binds the caller's own `this` or nothing",
+				[
+					'const socket = dgram.createSocket("udp4");',
+					"socket.bind.call(null, 0);",
+					"Reflect.apply(socket.bind, undefined, [0]);",
+				],
+			],
+			[
 				"a preload hook bound the same way",
 				[
 					"const hook = async () => {};",
