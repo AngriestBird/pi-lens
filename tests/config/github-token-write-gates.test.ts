@@ -1071,13 +1071,14 @@ describe("workflow gh calls resolve a repository (#4382)", () => {
 	it("reports an inline script the census cannot read", () => {
 		// R9: each of these hands a `gh` write to an executor whose script text this
 		// census cannot read. An empty population here reads as a clean workflow.
+		// The payload only has to NAME a call: the census never runs it.
 		for (const run of [
 			`bash <<'EOF'\n${BARE_GH_WRITE}\nEOF`,
 			`sh <<'EOF'\n${BARE_GH_WRITE}\nEOF`,
 			`printf '%s\\n' '${BARE_GH_WRITE}' | bash`,
 			`bash <(echo '${BARE_GH_WRITE}')`,
 			`su -c '${BARE_GH_WRITE}'`,
-			`node -e "require('node:child_process').execSync('${BARE_GH_WRITE}')"`,
+			`node -e "console.log('${BARE_GH_WRITE}')"`,
 			`python3 -c "import os; os.system('${BARE_GH_WRITE}')"`,
 		]) {
 			expect(
