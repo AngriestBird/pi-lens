@@ -431,6 +431,8 @@ describe("selectTargetedTests — path-mirror pass", () => {
 			"tests/config/project-trust-seam-ratchet.test.ts",
 			"tests/config/pr-smoke-paths.test.ts",
 			"tests/tools/diagnostics-route-switch-matrix.test.ts",
+			// #4590: walks both trees, so both change kinds must arm it.
+			"tests/config/env-path-key-composition-sweep.test.ts",
 		];
 		const testScanners = [
 			"tests/clients/flake-shape-ratchet.test.ts",
@@ -449,6 +451,7 @@ describe("selectTargetedTests — path-mirror pass", () => {
 			"tests/real-harness/tools-enabled.test.ts",
 			"tests/config/handler-verdict-sweep.test.ts",
 			"tests/config/sink-read-drain-sweep.test.ts",
+			"tests/config/env-path-key-composition-sweep.test.ts",
 			"tests/config/test-env-restore-sweep.test.ts",
 			"tests/config/module-instance-coverage.test.ts",
 			"tests/config/nightly-evaluated-floors.test.ts",
@@ -595,9 +598,15 @@ describe("selectTargetedTests — path-mirror pass", () => {
 		const allTests = collectTestFiles("tests");
 		expect(changesTestTreeFile("clients/foo/bar.ts")).toBe(false);
 		expect(changesTestTreeFile("docs/tests/x.md")).toBe(false);
+		// #4590: a scanner that walks BOTH trees is registered in both lists, so a
+		// production change arms it through TREE_SCANNING_GOVERNANCE_TESTS. Every
+		// tests-ONLY scanner stays out of a push that touches no test file.
+		const bothTreeScanners = TEST_TREE_GOVERNANCE_TESTS.filter((test) =>
+			TREE_SCANNING_GOVERNANCE_TESTS.includes(test),
+		);
 		expect(
 			selectTargetedTests(["clients/foo/bar.ts"], allTests).selected,
-		).toEqual([]);
+		).toEqual(bothTreeScanners);
 		expect(selectTargetedTests(["docs/tests/x.md"], allTests).selected).toEqual(
 			[],
 		);
@@ -821,9 +830,13 @@ describe("selectTargetedTests — the >25-file cap (F1)", () => {
 		);
 
 		expect(result.capped).toBe(true);
+		// Deduped: the #4590 sweep walks both trees and sits in both registries, so
+		// the union counts it once (a Set is what the selection itself uses).
 		const registries = [
-			...TREE_SCANNING_GOVERNANCE_TESTS,
-			...TEST_TREE_GOVERNANCE_TESTS,
+			...new Set([
+				...TREE_SCANNING_GOVERNANCE_TESTS,
+				...TEST_TREE_GOVERNANCE_TESTS,
+			]),
 		];
 		for (const registry of registries)
 			expect(result.selected).toContain(registry);
