@@ -605,7 +605,10 @@ function scanUndrainedSinkReads(
 	 * A read inside a NESTED function runs when that function is called, which
 	 * is after the enclosing scope initialized, so position does not disqualify
 	 * a declaration there (Greptile r6 P1: a helper read went silent). A
-	 * `function` declaration is hoisted, so it shadows at any position.
+	 * `function` declaration is installed at scope entry, so it is the binding's
+	 * STARTING value: it decides the read only when nothing else wrote before it,
+	 * because an earlier initializer overwrites it at that initializer's own
+	 * position (Greptile r7 P1: a `var` alias before the read was hidden).
 	 */
 	const readAliasAt = (name: string, at: SgNode): ReadAliasDecl | undefined => {
 		const position = at.range().start.index;
@@ -620,7 +623,9 @@ function scanUndrainedSinkReads(
 					(crossedFunction || decl.hoisted || decl.declaredAt <= position),
 			);
 			if (here.length > 0) {
-				return here.reduce((a, b) => (b.declaredAt >= a.declaredAt ? b : a));
+				const written = here.filter((decl) => !decl.hoisted);
+				const pool = written.length > 0 ? written : here;
+				return pool.reduce((a, b) => (b.declaredAt >= a.declaredAt ? b : a));
 			}
 			if (isFunction(current)) crossedFunction = true;
 		}
@@ -2059,11 +2064,16 @@ describe("sink reads drain first (#4381)", () => {
 
 		it("resolves a read inside a nested function against an enclosing alias (r6 P1, shape 69)", () => {
 			// Lexical position decides on the declaring scope's own straight line
-			// only. A read inside a nested function runs when that function is
-			// called, after an enclosing declaration initialized, so a later alias
-			// is in force there: `393a92a34` reported `[[2, "read"]]` and the
-			// round-6 position filter silenced it (Greptile r6 P1, sink:606). A
-			// `function` declaration is hoisted, so it shadows either way.
+			// only. A read inside a nested function runs at that function's call
+			// time, after an enclosing declaration initialized, so a later alias is
+			// in force there: `393a92a34` reported `[[2, "read"]]` and the round-6
+			// position filter silenced it (Greptile r6 P1, sink:606).
+			//
+			// A `function` declaration is the binding's STARTING value: it is
+			// installed at scope entry, so an initializer that runs before the read
+			// overwrites it (Greptile r7 P1, sink:620). Every row here is code the
+			// engine accepts: a `const` and a `function` of one name in one scope is
+			// a redeclaration error, so the hoisting rows use `var`.
 			const cases: Array<[string, string[], Array<[number, string]>]> = [
 				[
 					"a helper read resolved against an alias declared below it",
@@ -2077,20 +2087,24 @@ describe("sink reads drain first (#4381)", () => {
 					[[2, "read"]],
 				],
 				[
-					"a hoisted function declaration shadows an alias above it",
+					"a `var` initializer overwrites the hoisted function before the read",
 					[
-						"const read = fs.readFileSync;",
-						'it("x", () => { void read(getLatencyLogPath()); });',
-						"function read(file: string): string { return file; }",
+						"function rows(): void {",
+						"\tvar read = fs.readFileSync;",
+						"\tread(getLatencyLogPath());",
+						"\tfunction read(file: string): string { return file; }",
+						"}",
 					],
-					[],
+					[[3, "read"]],
 				],
 				[
-					"a hoisted function declaration shadows on the same straight line",
+					"a hoisted function hides the outer alias on its own straight line",
 					[
 						"const read = fs.readFileSync;",
-						"void read(getLatencyLogPath());",
-						"function read(file: string): string { return file; }",
+						"function shadowed(): void {",
+						"\tvoid read(getLatencyLogPath());",
+						"\tfunction read(file: string): string { return file; }",
+						"}",
 					],
 					[],
 				],
@@ -2104,6 +2118,18 @@ describe("sink reads drain first (#4381)", () => {
 					label,
 				).toEqual(expected);
 			}
+			// The hoisting row above is live, not vacuous: drop the declaration and
+			// the same call resolves to the outer sink alias.
+			expect(
+				scanFixture(
+					[
+						"const read = fs.readFileSync;",
+						"function shadowed(): void {",
+						"\tvoid read(getLatencyLogPath());",
+						"}",
+					].join("\n"),
+				).map((hit): [number, string] => [hit.line, hit.callee]),
+			).toEqual([[3, "read"]]);
 		});
 
 		it("attributes a helper read to the call site that supplied the sink (N2, shape 58)", () => {
