@@ -88,10 +88,23 @@
  *    was misread as the `while (set.size > cap)` shape (#2460 round-3 review
  *    F2) — now gated on `SIZE_COMPARISON` (`>`/`>=`).
  *
+ * 5. **Population is the DETECTOR's, not the tree's (#4580 r5, shape 69
+ *    intake).** `EXEMPT_SITES` is the full, reasoned list of every occurrence
+ *    this sweep FLAGS — not every hand-rolled retention in the tree. A
+ *    retention whose ordering runs as a statement of its own and whose
+ *    removal consumes a count-bounded prefix or suffix through an array API
+ *    (`.slice(0, n)`, `.slice(-n)`, `.length = cap`, `.slice(...).forEach(
+ *    delete)`) is invisible to every family below, and five such sites are
+ *    LIVE today: four bounded evictions and one render view. `UNSEEN_SELECTION_RESIDUALS` names each spelling and each
+ *    live site with its policy, and the test below asserts every anchor is
+ *    still in the tree and still unflagged, so a row can neither go stale nor
+ *    claim a site that migrated. Migration stays with the consolidated audit
+ *    (#4606); a fifth spelling is not what ends this.
+ *
  * Built on tests/support/sweep-kit.ts, same as this repo's other
- * registered-or-fail sweeps. `EXEMPT_SITES` below is the FULL, reasoned list
- * of every remaining occurrence. A NEW site must migrate to `BoundedLruCache`
- * or `BoundedFifoMap`, or be added here with a real reason.
+ * registered-or-fail sweeps. A NEW site this sweep flags must migrate to
+ * `BoundedLruCache` or `BoundedFifoMap`, or be added to `EXEMPT_SITES` with a
+ * real reason. A new site it cannot see joins `UNSEEN_SELECTION_RESIDUALS`.
  */
 
 import * as fs from "node:fs";
@@ -509,6 +522,167 @@ const EXEMPT_SITES: Readonly<Record<string, string>> = {
 		"Non-member: selects the first sorted set difference only to render a " +
 		"lockfile diagnostic. It never evicts or mutates the source collections. " +
 		"The lexical comparator gate deliberately overmatches this length check.",
+};
+
+/**
+ * The selection spellings `findEvictionLines` cannot see, and the live sites
+ * that use them (#4580 r5 F1/F2).
+ *
+ * This is the intake for shape 69 on this seam: the detector follows ordering
+ * that reaches an element, an iterator, a for-of loop, or a removal API. It
+ * does not follow ordering that finishes as a value and is then truncated by
+ * an array API in a later statement — that is the file header's stated
+ * in-place limit, and these are its live members. Each row carries an
+ * executable plant (the miss is asserted, not described) and every live site
+ * carries the policy that keeps it hand-rolled, plus an exact anchor the test
+ * below re-reads from the real file. A detector round that starts catching one
+ * of these spellings reds this table's assertions, which is the point: the row
+ * must then be deleted or migrated, never left as a stale claim of a miss.
+ */
+const UNSEEN_SELECTION_RESIDUALS: Readonly<
+	Record<
+		string,
+		{
+			/** Why this spelling is invisible, and what would have to change. */
+			readonly limit: string;
+			/** Executable witness of the miss, through the real detector. */
+			readonly plant: string;
+			/** Live sites, each re-read and re-probed by the accounting test. */
+			readonly live: readonly {
+				readonly file: string;
+				readonly anchor: string;
+				/** Occurrences this sweep DOES flag elsewhere in the same file. */
+				readonly detectedElsewhere: number;
+				readonly policy: string;
+			}[];
+		}
+	>
+> = {
+	"in-place sort, then a count prefix deleted one victim at a time": {
+		limit:
+			"`candidates.sort(cmp)` is one statement and the removal is the next, " +
+			"so no ordered binding reaches a selection the detector follows. The " +
+			"live sgconfig site is invisible twice over: its sort is not even in " +
+			"a binding, and its victims are `.slice(0, over)` entries of the " +
+			"sorted ARRAY, not of a container the sweep could re-derive.",
+		plant: `if (m.size <= CAP) return;
+ const ranked = sequence.sort(cmp);
+ for (const victim of ranked.slice(0, over)) {
+  m.delete(victim);
+ }`,
+		live: [
+			{
+				file: "clients/sgconfig.ts",
+				anchor: "for (const candidate of candidates.slice(0, over)) {",
+				detectedElsewhere: 0,
+				policy:
+					"Baseline artifacts on DISK, not map entries: eligibility is a " +
+					"keep-set plus mtime recency over directory entries, the victim is " +
+					"deleted with `rmSync`, and its cached baseline is retired. No " +
+					"bounded class owns a filesystem directory.",
+			},
+		],
+	},
+	"in-place sort, then a count prefix RETAINED and rebuilt": {
+		limit:
+			"The survivors are a count prefix of the sorted array, rebuilt into a " +
+			"fresh object, and the victims never appear in a selection " +
+			"expression. The live cache-manager site also sorts in place, outside " +
+			"any binding.",
+		plant: `if (m.size <= CAP) return;
+ const ranked = sequence.sort(cmp);
+ const kept = Object.fromEntries(ranked.slice(0, MAX_PARTITIONS));`,
+		live: [
+			{
+				file: "clients/cache-manager.ts",
+				anchor: "liveEntries.slice(0, MAX_TURN_SESSION_PARTITIONS),",
+				detectedElsewhere: 0,
+				policy:
+					"Persisted turn-state partitions: eligibility is the TTL filter, " +
+					"order is the stored `lastUpdated` stamp, and the survivors are " +
+					"rebuilt with `Object.fromEntries` and written back to a JSON " +
+					"cache. No bounded class owns a persisted record with external " +
+					"recency.",
+			},
+		],
+	},
+	"in-place sort, then a count SUFFIX retained": {
+		limit:
+			"The tail form truncates from the other end of the same sorted array, " +
+			"so it is the same two-statement shape and just as invisible.",
+		plant: `if (m.size <= CAP) return;
+ const ranked = sequence.sort(cmp);
+ const bounded = ranked.slice(-MAX_TOOLS);`,
+		live: [
+			{
+				file: "clients/mutation-attribution.ts",
+				anchor: "const bounded = tools.slice(-MUTATION_ATTRIBUTION_MAX_TOOLS);",
+				detectedElsewhere: 0,
+				policy:
+					"Persisted tool records: the cap keeps the freshest `lastSeen` " +
+					"tail of a JSON record and writes the survivors back to disk. No " +
+					"bounded class owns a persisted record keyed by an external " +
+					"recency stamp, and the file rewrite is the point of the block.",
+			},
+		],
+	},
+	"in-place sort, then `.length = cap`": {
+		limit:
+			"Truncating the sorted array in place has no selection expression at " +
+			"all, so there is nothing for the element, iterator, or removal stages " +
+			"to match after the ordering statement.",
+		plant: `if (m.size <= CAP) return;
+ const ranked = sequence.sort(cmp);
+ ranked.length = MAX_RETAINED;`,
+		live: [
+			{
+				file: "clients/widget-state.ts",
+				anchor: "retained.length = MAX_RETAINED_SUPPRESSED_PER_FILE;",
+				detectedElsewhere: 1,
+				policy:
+					"Per-file suppressed-row retention ordered by the stored " +
+					"`observedAt`, with one degradation record per capped file and " +
+					"re-emitted retained rows. External recency plus a degradation " +
+					"record no bounded class carries; the sibling policy in the same " +
+					"file is already an exemption.",
+			},
+		],
+	},
+	"`.slice(0, n)` over an inline-ordered sequence, kept as a capped view": {
+		limit:
+			"The selection is a retained VIEW of a ranked array, not a removal from " +
+			"a stored container, so it is a non-member of the family even though the " +
+			"shape is the same. It still needs a row: the next reader must not " +
+			"mistake a silent absence for the sweep having judged it.",
+		plant: `if (nodes.size <= CAP) return;
+ const ranked = [...nodes.keys()].sort(cmp);
+ const keep = new Set(ranked.slice(0, maxNodes));`,
+		live: [
+			{
+				file: "clients/lens-map.ts",
+				anchor: "keepIds = new Set(ranked.slice(0, maxNodes));",
+				detectedElsewhere: 0,
+				policy:
+					"Non-member: a degree-ranked render view capped for output " +
+					"(#679). Nothing is evicted from a stored container — the graph " +
+					"keeps every file — so no bounded class applies.",
+			},
+		],
+	},
+	"`.slice(...).forEach(delete)`": {
+		limit:
+			"Removing each victim through a `forEach` callback over the prefix is " +
+			"the same two-statement shape as the `for-of` row above; a callback is " +
+			"not a removal the loop stage follows.",
+		plant: `if (m.size <= CAP) return;
+ const ranked = sequence.sort(cmp);
+ ranked.slice(0, over).forEach((victim) => {
+  m.delete(victim);
+ });`,
+		// No live member as of #4580 r5; the row exists so the next one is
+		// recognised instead of rediscovered.
+		live: [],
+	},
 };
 
 function shippedSourceFiles(): string[] {
@@ -1243,6 +1417,51 @@ describe("#2442 no new hand-rolled evict-oldest idiom outside bounded-cache.ts",
 		).toEqual([]);
 	});
 
+	it("accounts for every live member the detector cannot see, #4580 r5 F1/F2", () => {
+		// The census describes the DETECTOR's population, not the tree's. Each
+		// spelling is proved a miss, and each live site is re-read from the real
+		// file: the anchor must still be there (nothing migrated or moved out from
+		// under the row) and must still be unflagged (the row never claims a site
+		// the sweep now catches).
+		const liveSites = Object.values(UNSEEN_SELECTION_RESIDUALS).flatMap(
+			(row) => row.live,
+		);
+		expect(Object.keys(UNSEEN_SELECTION_RESIDUALS)).toHaveLength(6);
+		expect(liveSites).toHaveLength(5);
+		expect(new Set(liveSites.map((site) => site.file)).size).toBe(5);
+		// Collect every witness before failing, so one drifted row does not hide
+		// the others.
+		const witnesses: string[] = [];
+		for (const [spelling, row] of Object.entries(UNSEEN_SELECTION_RESIDUALS)) {
+			if (findEvictionLines(stripSource(row.plant)).length > 0)
+				witnesses.push(`plant is now flagged: ${spelling}`);
+			for (const site of row.live) {
+				const source = fs.readFileSync(path.join(REPO_ROOT, site.file), "utf8");
+				const anchors = source
+					.split("\n")
+					.flatMap((line, index) =>
+						line.includes(site.anchor) ? [index + 1] : [],
+					);
+				const detected = findEvictionLines(stripSource(source));
+				if (anchors.length !== 1)
+					witnesses.push(
+						`${site.file}: anchor ${JSON.stringify(site.anchor)} matched ${anchors.length} lines`,
+					);
+				else if (detected.includes(anchors[0] ?? -1))
+					witnesses.push(
+						`${site.file}: ${site.anchor} is now flagged — delete or migrate the row`,
+					);
+				// A truncation-aware detector flags the sorted DECLARATION, not the
+				// consumption line, so the file's whole flagged count is the pin.
+				if (detected.length !== site.detectedElsewhere)
+					witnesses.push(
+						`${site.file}: sweep flags ${detected.length} occurrence(s), the row records ${site.detectedElsewhere} elsewhere`,
+					);
+			}
+		}
+		expect(witnesses).toEqual([]);
+	});
+
 	it("flags comparator source and ordering axes, #4580 r3", () => {
 		// Shape 69: the ordering operation owns recognition, not its receiver.
 		for (const source of [
@@ -1522,8 +1741,11 @@ describe("#2442 no new hand-rolled evict-oldest idiom outside bounded-cache.ts",
 				"legitimate exemption).",
 		});
 		expect(audit.problems, audit.problems.join("\n")).toEqual([]);
+		const unseenLiveSites = Object.values(UNSEEN_SELECTION_RESIDUALS).flatMap(
+			(row) => row.live,
+		);
 		process.stdout.write(
-			`bounded-eviction population: ${flagged.length} flagged, ${audit.problems.length} problems, ${scanned} source files\n`,
+			`bounded-eviction population: ${flagged.length} flagged, ${audit.problems.length} problems, ${unseenLiveSites.length} unseen live sites in ${Object.keys(UNSEEN_SELECTION_RESIDUALS).length} spellings, ${scanned} source files\n`,
 		);
 	});
 });
