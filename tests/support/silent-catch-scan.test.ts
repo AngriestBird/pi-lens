@@ -150,8 +150,8 @@ describe("promise-catch verdicts", () => {
 		).toBe("recorded");
 	});
 
-	it("calls a delegation to an import silent, so the author states why", () => {
-		expect(only("go().catch(handleImported);").verdict).toBe("silent");
+	it("calls an unresolved handler unclassified", () => {
+		expect(only("go().catch(handleImported);").verdict).toBe("unclassified");
 	});
 
 	it("refuses a handler it cannot follow, instead of passing it", () => {
@@ -451,7 +451,7 @@ describe("a `none:` marker belongs to the handler it judges", () => {
 		).toBe("declared-none");
 	});
 
-	it("accepts a marker on the line above an identifier handler", () => {
+	it("refuses to classify an unresolved identifier even with a marker", () => {
 		expect(
 			only(
 				[
@@ -459,7 +459,7 @@ describe("a `none:` marker belongs to the handler it judges", () => {
 					"go().catch(handleImported);",
 				].join("\n"),
 			).verdict,
-		).toBe("declared-none");
+		).toBe("unclassified");
 	});
 });
 
@@ -535,4 +535,122 @@ describe("a site's identity", () => {
 		expect(sites[0]?.identity).toBe(sites[1]?.identity);
 		expect(sites).toHaveLength(2);
 	});
+});
+
+// #4603 r3: lexical bindings and marker ownership must not invent a record.
+describe("round-three lexical and marker state table", () => {
+	it.each([
+		"function run(handler) { go().catch(handler); }",
+		"const run = handler => { go().catch(handler); };",
+		"const run = (handler = fallback) => { go().catch(handler); };",
+		"const run = ({ handler }) => { go().catch(handler); };",
+		"const run = (...handler) => { go().catch(handler); };",
+		"try {} catch (handler) { go().catch(handler); }",
+	])("lexical shadow matrix: %s", (inner) => {
+		const sites = scanSilentCatches(
+			"const handler = () => logLatency({});\n" + inner,
+		);
+		expect(sites.find((site) => site.form === "promise-catch")?.verdict).toBe(
+			"unclassified",
+		);
+	});
+	it.each([
+		"function run(c) { c(() => {}); }",
+		"const run = c => { c(() => {}); };",
+		"try {} catch (c) { c(() => {}); }",
+	])("bound member shadow matrix: %s", (inner) => {
+		expect(
+			scanSilentCatches("const c = go().catch;\n" + inner).filter(
+				(site) => site.form === "promise-catch",
+			),
+		).toEqual([]);
+	});
+	it("does not borrow a sibling block binding", () => {
+		expect(
+			only(
+				"function run(handler) { { const handler = () => logLatency({}); } go().catch(handler); }",
+			).verdict,
+		).toBe("unclassified");
+	});
+	it.each([
+		"go().catch(handler);",
+		"import { handler } from './helper.js'; go().catch(handler);",
+		"go().catch(sinks.handler);",
+		"const handler = other; go().catch(handler);",
+	])("unresolved reference matrix: %s", (source) => {
+		expect(only(source).verdict).toBe("unclassified");
+	});
+	it.each([
+		"function f() {\n// none: the read is best effort\ntry { read(); } catch (e) { swallow(e); }\n}",
+		"// none: teardown optional\na().catch(() => {}); b().catch(() => {});",
+	])("marker ownership matrix refuses enclosing statement: %s", (source) => {
+		expect(scanSilentCatches(source).map((site) => site.verdict)).toEqual(
+			source.includes("b()") ? ["silent", "silent"] : ["silent"],
+		);
+	});
+	it.each(["(go().catch)", "((go()['catch']))"])(
+		"parenthesised binding matrix: %s",
+		(value) => {
+			expect(only(`const c = ${value}; c(() => {});`).verdict).toBe(
+				"unclassified",
+			);
+		},
+	);
+});
+
+// #4603 r3: the cross-product exposes each marker/reference boundary.
+describe("reference by marker cross-product", () => {
+	const placements = [
+		"inside",
+		"above-handler",
+		"above-statement",
+		"shared-line",
+	] as const;
+	const forms = [
+		"inline",
+		"outer",
+		"parameter",
+		"shadow",
+		"local",
+		"bound",
+		"parenthesised",
+		"re-export",
+	] as const;
+	for (const form of forms) {
+		it.each(placements)(`${form} marker %s`, (placement) => {
+			const marker = "// none: optional teardown\n";
+			const body =
+				placement === "inside"
+					? "() => { /* none: optional teardown */ }"
+					: "() => {}";
+			let source: string;
+			if (form === "inline")
+				source =
+					placement === "above-handler"
+						? `go().catch(\n${marker}${body});`
+						: `${placement === "above-statement" || placement === "shared-line" ? marker : ""}go().catch(${body});`;
+			else if (["outer", "local", "shadow"].includes(form)) {
+				const declaration =
+					form === "outer"
+						? `function handler() { ${placement === "inside" ? "/* none: optional teardown */" : ""} }`
+						: `const handler = ${body};`;
+				source = `${placement === "above-handler" ? marker : ""}${declaration}\n${placement === "above-statement" || placement === "shared-line" ? marker : ""}go().catch(handler);`;
+				if (form === "shadow")
+					source = `const handler = () => logLatency({}); function run() { ${source} }`;
+			} else if (form === "bound" || form === "parenthesised")
+				source = `const c = ${form === "bound" ? "go().catch" : "(go().catch)"};\n${marker}c(${body});`;
+			else
+				source = `${form === "re-export" ? "import { handler } from './helper.js';" : "function run(handler) {"}\n${marker}go().catch(handler);${form === "parameter" ? "}" : ""}`;
+			const resolvable = ["inline", "outer", "local", "shadow"].includes(form);
+			// The shadow's definition shares the function opener's line; its above
+			// comment does not sit at the definition's first token.
+			const declared =
+				placement === "inside" ||
+				(placement === "above-handler" &&
+					(form === "outer" || form === "inline"));
+			expect(only(source).verdict).toBe(
+				resolvable ? (declared ? "declared-none" : "silent") : "unclassified",
+			);
+		});
+	}
 });

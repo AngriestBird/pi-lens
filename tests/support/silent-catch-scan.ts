@@ -40,7 +40,7 @@
  *   deliberate skip, an idempotent teardown). The marker counts only inside the
  *   handler actually judged — the `then` rejection argument for a `.then`, the
  *   handler for a `.catch`, the clause body for a `catch` — or on the comment
- *   line immediately above that handler. A marker in a SIBLING argument
+ *   line immediately above a handler that starts its own line. A marker in a SIBLING argument
  *   (`then(ok, …)` with the comment on `ok`) or inside a nested function the
  *   failure can never reach is NOT this handler's reason (#4603 review N1).
  * - A `.catch(…)` handler that is not a function this file defines and not a
@@ -67,8 +67,7 @@
  * (`{ onError: logX }`) does not count, because only call expressions are
  * read; a handler that delegates to an identifier is followed to the
  * declaration visible at the call, and a delegation to an import, a member
- * expression or a parameter is `silent` rather than `recorded`, so a
- * delegation the scan cannot follow always asks for a `none:` line; an
+ * expression or a parameter is `unclassified`, never `recorded`; an
  * indexed call whose key is a variable the file never binds (`arr[i]()`) is
  * not matched, because it is not evidence of a rejection handler and calling
  * every indexed call a handler would fail closed on the whole tree. An
@@ -77,7 +76,9 @@
  * guessed: the scan cannot tell which argument is the handler (#4603 review
  * N2). A member reached through a destructuring pattern (`const { catch: c } =
  * p`) or a later assignment to an existing binding is a residual the binding
- * pre-filter does not see; the declaration form (`const c = p.catch`) is.
+ * pre-filter does not see; composed values (`p.catch || fallback`, ternaries,
+ * `??`) and cross-file callee bindings/re-exports are residuals too (#4607).
+ * The declaration form (`const c = p.catch`), including parentheses, is seen.
  */
 
 import { createHash } from "node:crypto";
@@ -326,6 +327,7 @@ function commentLineAbove(
 ): [number, number] | undefined {
 	const lineStart = strippings.raw.lastIndexOf("\n", index - 1) + 1;
 	if (lineStart === 0) return undefined;
+	if (strippings.raw.slice(lineStart, index).trim() !== "") return undefined;
 	const previousStart = strippings.raw.lastIndexOf("\n", lineStart - 2) + 1;
 	const previousEnd = lineStart - 1;
 	if (previousEnd <= previousStart) return undefined;
@@ -379,17 +381,56 @@ function declaredNone(strippings: Strippings, scope: SgNode): boolean {
  */
 function declaredIn(scope: SgNode, name: string): SgNode[] {
 	const found: SgNode[] = [];
-	const consider = (node: SgNode) => {
+	const binding = (pattern: SgNode | undefined): boolean => {
+		if (!pattern) return false;
+		if (
+			["identifier", "shorthand_property_identifier_pattern"].includes(
+				pattern.kind(),
+			)
+		)
+			return pattern.text() === name;
+		if (["required_parameter", "optional_parameter"].includes(pattern.kind()))
+			return binding(pattern.field("pattern"));
+		if (pattern.kind() === "assignment_pattern")
+			return binding(pattern.field("left"));
+		if (pattern.kind() === "pair_pattern")
+			return binding(pattern.field("value"));
+		if (
+			[
+				"formal_parameters",
+				"object_pattern",
+				"array_pattern",
+				"rest_pattern",
+				"object_assignment_pattern",
+			].includes(pattern.kind())
+		)
+			return pattern.namedChildren().some((child: SgNode) => binding(child));
+		return false;
+	};
+	if (FUNCTION_KINDS.has(scope.kind()) || scope.kind() === "catch_clause") {
+		const parameters = scope.field("parameters") ?? scope.field("parameter");
+		if (parameters && binding(parameters)) found.push(parameters);
+		return found;
+	}
+	if (!["program", "statement_block"].includes(scope.kind())) return found;
+	const collect = (node: SgNode): void => {
 		if (node.kind() === "function_declaration") {
 			if (node.field("name")?.text() === name) found.push(node);
 			return;
 		}
-		if (node.kind() !== "variable_declarator") return;
-		const id = node.field("name");
-		if (id?.kind() === "identifier" && id.text() === name) found.push(node);
+		if (node.kind() === "variable_declarator") {
+			if (binding(node.field("name"))) found.push(node);
+			return;
+		}
+		if (
+			FUNCTION_KINDS.has(node.kind()) ||
+			node.kind() === "statement_block" ||
+			node.kind() === "catch_clause"
+		)
+			return;
+		for (const child of node.namedChildren()) collect(child);
 	};
-	consider(scope);
-	walkOwnBody(scope, consider);
+	for (const child of scope.namedChildren()) collect(child);
 	return found;
 }
 
@@ -526,6 +567,8 @@ function rejectionMemberOf(
 	callSite: SgNode,
 ): string | undefined {
 	if (node === undefined || node === null) return undefined;
+	if (node.kind() === "parenthesized_expression")
+		return rejectionMemberOf(node.namedChildren()[0], raw, callSite);
 	if (node.kind() === "member_expression") {
 		const property = node.field("property")?.text();
 		return property === "catch" || property === "then" ? property : undefined;
@@ -660,7 +703,9 @@ export function scanSilentCatches(source: string): CatchSite[] {
 		const name = node.field("name");
 		if (name === undefined || name === null || name.kind() !== "identifier")
 			return;
-		const value = node.field("value");
+		let value = node.field("value");
+		while (value?.kind() === "parenthesized_expression")
+			value = value.namedChildren()[0];
 		if (value === undefined || value === null) return;
 		if (value.kind() === "subscript_expression") {
 			boundRejectionNames.add(name.text());
@@ -745,11 +790,7 @@ export function scanSilentCatches(source: string): CatchSite[] {
 				: undefined;
 			if (fn !== undefined) target = fn;
 		}
-		if (
-			!FUNCTION_KINDS.has(target.kind()) &&
-			target.kind() !== "identifier" &&
-			target.kind() !== "member_expression"
-		) {
+		if (!FUNCTION_KINDS.has(target.kind())) {
 			sites.push({
 				line,
 				form,
