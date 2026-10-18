@@ -424,7 +424,7 @@ file-scoped worklist and receives no project-wide scanner output.
     `index.ts` is judged by `tests/config/silent-catch-sweep.test.ts`: a record
     seam on every path, an unconditional `throw`, or a `none: <reason>` marker,
     and the file's pinned set re-pinned in the same change (`PI_LENS_PRINT_PINS=1`
-    prints the rows). `scripts/` and `tests/` are outside its scope (#4609).
+    prints the rows). `scripts/` and `tests/` stay outside its scope.
 
 43. **Prose mistaken for executable structure:** define lexical states and
     reachability before scanning shell, workflow, or source text.
