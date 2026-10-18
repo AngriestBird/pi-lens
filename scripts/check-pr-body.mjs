@@ -620,9 +620,10 @@ function recordLocationsFromRuntimeSource(source, blankedText) {
 	// source itself, so a record's span still maps back to the diff's added
 	// POST-image lines.
 	const blanked = blankedText ?? blankCommentsAndStrings(source).text;
-	const push = (value, valueIndex, start, end) =>
+	const push = (value, valueIndex, start, end, field) =>
 		records.push({
 			value,
+			field,
 			line: lineAt(source, valueIndex),
 			startLine: lineAt(source, start),
 			endLine: lineAt(source, end),
@@ -672,6 +673,7 @@ function recordLocationsFromRuntimeSource(source, blankedText) {
 						match.index + fieldMatch.index + fieldMatch[0].indexOf(value),
 						match.index,
 						match.index + match[0].length,
+						field,
 					);
 			}
 		}
@@ -692,6 +694,7 @@ function recordLocationsFromRuntimeSource(source, blankedText) {
 				open + 1 + phase.index + phase[0].indexOf(phase[2]),
 				match.index,
 				end,
+				"phase",
 			);
 		const ledgerKind = /\bledgerKind\s*:\s*["']([^"']+)["']/.exec(call);
 		if (ledgerKind)
@@ -700,6 +703,7 @@ function recordLocationsFromRuntimeSource(source, blankedText) {
 				open + 1 + ledgerKind.index + ledgerKind[0].indexOf(ledgerKind[1]),
 				match.index,
 				end,
+				"kind",
 			);
 	}
 	return records;
@@ -1520,21 +1524,40 @@ function hasNoRecordReason(content, files) {
 // (which asks whether a record was named at all), so the diff-keyed rules of
 // #4585 land next to it without either change touching the other.
 //
-// Which spans count as a record literal: a backticked span of the section whose
-// text has a record's shape, AND which the runtime actually emits as a record
-// value. A camelCase symbol, a path, a command and a bare word fail the shape.
-// The harvest reads the call sites `recordLocationsFromRuntimeSource` names
-// (the `logLatency`/`logCascade`/`logBusEvent`/`emitBounded` object forms, the
+// What counts as naming a record: a token of the section with a record's shape
+// that the runtime actually emits as a record value, whatever its font — a
+// backticked span, a bare word, or the text of a link (F-4597-R2-2). A
+// camelCase symbol, a path, a command and a one-word value fail the shape. The
+// registry, not the body's formatting, decides: the harvest reads the call
+// sites `recordLocationsFromRuntimeSource` names (the
+// `logLatency`/`logCascade`/`logBusEvent`/`emitBounded` object forms, the
 // ledger's Once/Count/`recordDegradation` kinds, and `summary.push`), so a
-// record written through another wrapper — `logTreeSitter`, the
-// `logActionableWarningsEvent` NDJSON row — is outside this rule until that
+// record written through another wrapper — `logReviewGraph`, `logTreeSitter`,
+// the `logActionableWarningsEvent` NDJSON row — is outside this rule until that
 // wrapper joins the harvest (#3168's `logCascade` precedent). A one-word record
 // value (a bare `autofix`) fails the two-segment shape on purpose, so it stays
 // outside the rule even where a sink emits it.
 const RECORD_LITERAL_SPAN = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)+$/;
-// Where a read-back may live (#4597 review round 1: F1, F2, F3). The rule names
-// the ONE form it admits and refuses everything else, so it never enumerates
-// the bypasses it rejects (shape 69):
+// A bare mention is read against the fields that identify a record, because a
+// bare two-segment compound is also ordinary prose: `ast-grep`, `project-trust`
+// and `file-mutation-queue` are `subsystem`/`message` values, not record
+// identities. A backticked span is an explicit naming and is read against every
+// harvested field, as it was in round 2.
+const RECORD_IDENTITY_FIELDS = new Set([
+	"phase",
+	"kind",
+	"event",
+	"eventName",
+	"outcome",
+]);
+// The bare spelling's token: the same shape, as its own word of the section.
+const RECORD_TOKEN = /(?<![\w$])[a-z][a-z0-9]*(?:[._-][a-z0-9]+)+(?![\w$])/g;
+// One lint sends at most this many needles to `git grep`. A section that
+// exceeds it is disclosed (`::warning::`) rather than silently half-checked.
+const MAX_RECORD_MENTIONS = 400;
+// Where a read-back may live (#4597 review round 1: F1, F2, F3; round 2:
+// F-4597-R2-1). The rule names the ONE form it admits and refuses everything
+// else, so it never enumerates the bypasses it rejects (shape 69):
 //
 //   an exact occurrence of the literal — as a string inside an assertion
 //   expression, an equality operand, a `case` label, a record-keyed object
@@ -1543,7 +1566,10 @@ const RECORD_LITERAL_SPAN = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)+$/;
 //
 // A test or suite title is not a body position, any other call argument is a
 // mention, and a declaration whose modifier the rule cannot prove runs
-// (`.skip`, `.todo`, `.skipIf`, a plugin's extension) contributes nothing.
+// (`.skip`, `.todo`, `.skipIf`, a plugin's extension) contributes nothing. A
+// position no declaration encloses is not a read position either: "this file
+// holds a live test somewhere" was a guess that admitted a dead body.
+
 const COMPARISON_BEFORE = /(?:===|!==|==|!=)\s*$/;
 const COMPARISON_AFTER = /^\s*(?:===|!==|==|!=)/;
 const CASE_LABEL_BEFORE = /\bcase\s+$/;
@@ -1564,11 +1590,14 @@ const TEST_SOURCE_FILE = /\.(?:[cm]?[jt]sx?)$/;
 /**
  * The span of the call chain that starts at the identifier at `index`:
  * `expect(...)`, `expect.soft(...).toBe(...)`, `assert.equal(...)`,
- * `it.each([...])("title", fn)`. Blanked text has no string or comment `(`, so
- * every paren read here is code. `null` when the chain reaches no argument
- * list (a bare identifier, `expect.only`).
+ * `it.each([...])("title", fn)`, `it["only"]("title", fn)`. Blanked text has
+ * no string or comment bracket, so every paren read here is code, and a `[...]`
+ * link resolves through the lexer's own string spans. `null` when the chain
+ * reaches no argument list (a bare identifier, `expect.only`, `it.todo`).
+ * `unproven` reports a link this reader cannot resolve (`it[modifier]`): the
+ * declaration rule refuses that form whole instead of guessing.
  */
-function callChainAt(code, index) {
+function callChainAt(code, index, strings = []) {
 	if (!/[A-Za-z_$]/.test(code[index] ?? "")) return null;
 	let cursor = index;
 	while (/[$\w]/.test(code[cursor] ?? "")) cursor += 1;
@@ -1576,6 +1605,7 @@ function callChainAt(code, index) {
 	let calls = 0;
 	let lastOpen = -1;
 	let lastClose = -1;
+	let unproven = false;
 	for (;;) {
 		const at = skipSpaces(code, cursor);
 		if (code[at] === ".") {
@@ -1586,19 +1616,106 @@ function callChainAt(code, index) {
 			cursor = at + link[0].length;
 			continue;
 		}
+		if (code[at] === "[") {
+			const link = bracketLinkAt(code, at, strings);
+			if (link) {
+				links.push(link.name);
+				cursor = link.end;
+				continue;
+			}
+			// An index this reader cannot resolve (`it[modifier]`) is a declaration
+			// it cannot follow only when the chain goes on to a call; `test[key] !==`
+			// is a value, not a declaration form.
+			const close = closeBracketIndex(code, at, "[", "]");
+			if (
+				close !== -1 &&
+				/[.([<]/.test(code[skipSpaces(code, close + 1)] ?? "")
+			)
+				unproven = true;
+			break;
+		}
+		if (code[at] === "<") {
+			// A generic argument list (`it.each<NodeJS.Platform>([...])`) is part
+			// of the chain; one this reader cannot close is an unmodelled form.
+			const close = angleSpanEnd(code, at);
+			if (close === -1) {
+				unproven = true;
+				break;
+			}
+			cursor = close + 1;
+			continue;
+		}
 		if (code[at] !== "(") break;
 		const close = closeParenIndex(code, at);
+		// A call this reader cannot close (an unbalanced file) is not a
+		// declaration form it misread: the chain simply ends here.
 		if (close === -1) break;
 		lastOpen = at;
 		lastClose = close;
 		calls += 1;
 		cursor = close + 1;
 	}
-	if (!calls) return null;
-	return { start: index, end: lastClose + 1, links, lastOpen, lastClose };
+	if (!calls && !unproven) return null;
+	return {
+		start: index,
+		end: lastClose + 1,
+		links,
+		lastOpen,
+		lastClose,
+		calls,
+		unproven,
+	};
+}
+
+/**
+ * Whether the text after a declaration name begins a declaration this reader
+ * cannot parse at all: an optional call (`it?.(…)`, `it!.(…)`). Every other
+ * attempt (`it[...]`, `it <T>`, `it(…)`) is resolved by `callChainAt`, and a
+ * value (`test:`, `test,`, `test?.name`, `describe.skip`) holds no body.
+ */
+function declarationAttemptAt(code, from) {
+	const at = skipSpaces(code, from);
+	const char = code[at] ?? "";
+	if ((char === "?" || char === "!") && code[at + 1] === ".")
+		return code[skipSpaces(code, at + 2)] === "(";
+	return false;
+}
+
+/**
+ * The member link a `[...]` holds: `it["skip"]`, `it['each']`, `` it[`for`] ``.
+ * The blanker replaces every string with spaces, so the link's name comes from
+ * the lexer's own span and an index that is anything else (a variable, an
+ * expression, a template with a hole) resolves to nothing.
+ */
+function bracketLinkAt(code, open, strings) {
+	const close = closeBracketIndex(code, open, "[", "]");
+	if (close === -1) return null;
+	if (code.slice(open + 1, close).trim() !== "") return null;
+	const string = strings.find((one) => one.start > open && one.end <= close);
+	const name = string?.text.trim() ?? "";
+	if (!/^[A-Za-z_$][\w$]*$/.test(name)) return null;
+	return { name, end: close + 1 };
 }
 
 const MEMBER_LINK = /\.[ \t\r\n]*([A-Za-z_$][\w$]*)/y;
+
+/** The index of the `>` closing the `<` at `open`, or -1 when there is none. */
+function angleSpanEnd(code, open) {
+	let depth = 0;
+	for (let index = open; index < code.length; index += 1) {
+		const char = code[index];
+		// A function type's arrow is not a closing angle (`<(a) => void>`).
+		if (char === "=" && code[index + 1] === ">") {
+			index += 1;
+			continue;
+		}
+		if (char === "<") depth += 1;
+		else if (char === ">") {
+			if (--depth === 0) return index;
+		} else if (char === ";" || char === "{" || char === "}") return -1;
+	}
+	return -1;
+}
 
 function skipSpaces(code, index) {
 	let cursor = index;
@@ -1606,15 +1723,25 @@ function skipSpaces(code, index) {
 	return cursor;
 }
 
-// The declarations whose body vitest runs, and the links that keep them live.
+/// The declarations whose body vitest runs, and the links that keep them live.
 // `LIVE_TEST_LINKS` is an allowlist: a link it does not name (`.skip`,
 // `.todo`, `.skipIf`, `.runIf`, a plugin extension) is a declaration the rule
 // cannot prove runs, so its assertions are refused. A hook takes no link.
+// A `[...]` link (`it["only"]`) is a member link like any other, and a name
+// bound to a declaration (`const t = it`, `const d = it.skipIf(cond)`) is an
+// alias that carries the links its chain already applied.
 const TEST_HOOKS = new Set([
 	"beforeEach",
 	"beforeAll",
 	"afterEach",
 	"afterAll",
+]);
+const DECLARATION_NAMES = new Set([
+	"describe",
+	"suite",
+	"it",
+	"test",
+	...TEST_HOOKS,
 ]);
 const LIVE_TEST_LINKS = new Set([
 	"only",
@@ -1625,39 +1752,144 @@ const LIVE_TEST_LINKS = new Set([
 	"fails",
 	"live",
 ]);
-const DECLARATION_NAME =
-	/\b(?:describe|suite|it|test|beforeEach|beforeAll|afterEach|afterAll)\b/g;
 
-/** Index of the first top-level `,` inside a call's arguments, or `null`. */
-function firstArgumentEnd(code, open, close) {
-	let depth = 0;
-	for (let index = open + 1; index < close; index++) {
-		const char = code[index];
-		if (char === "(" || char === "[" || char === "{") depth += 1;
-		else if (char === ")" || char === "]" || char === "}") depth -= 1;
-		else if (char === "," && depth === 0) return index;
+// The two vocabulary patterns below escape their own names inline: a named or
+// arrow-body helper here would be a second copy of `escapeRegExp`, which
+// `tests/config/escape-regexp-fold-sweep.test.ts` forbids outside
+// `clients/string-utils.ts` (and this script cannot import, because it runs
+// with no build). The sweep's header allows the inline expression.
+
+/**
+ * The ranges of `import` statements. An import specifier names the declaration
+ * without starting one (`import { it } from "vitest"`), so the declaration scan
+ * skips it; a dynamic `import(...)` is an expression and is left alone.
+ */
+function importStatementRanges(code) {
+	const ranges = [];
+	for (const match of code.matchAll(/\bimport\b/g)) {
+		const before = code[match.index - 1] ?? " ";
+		if (before === "." || /[$\w]/.test(before)) continue;
+		const at = skipSpaces(code, match.index + match[0].length);
+		if (code[at] === "(" || code[at] === ".") continue;
+		let depth = 0;
+		for (let index = at; index < code.length; index += 1) {
+			const char = code[index];
+			if (char === "(" || char === "[" || char === "{") depth += 1;
+			else if (char === ")" || char === "]" || char === "}") depth -= 1;
+			else if ((char === ";" || char === "\n") && depth <= 0) {
+				ranges.push([match.index, index]);
+				break;
+			}
+		}
 	}
-	return null;
+	return ranges;
+}
+
+// A binding of a declaration name to another name, and the name it binds.
+const BINDING_BEFORE = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*$/;
+// The alias's own declaration site (`const t = it`): a name being bound, not a
+// declaration used as a value.
+const BINDING_TARGET_BEFORE = /\b(?:const|let|var)\s+$/;
+// A declaration name destructured into other bindings (`const { skip } = it`)
+// hides a declaration behind a binding this reader cannot follow.
+const DESTRUCTURE_BEFORE = /\b(?:const|let|var)\s*\{[^{}]*\}\s*=\s*$/;
+
+/**
+ * The names that alias a test declaration, with the links the alias already
+ * carries (`const d = it.skipIf(cond)` binds `.skipIf`). A bare alias
+ * (`const t = it`) is resolved once its own target is known, so an alias of an
+ * alias lands too. A binding this reader cannot follow is reported `unproven`.
+ */
+function declarationAliases(code, strings) {
+	const aliases = new Map();
+	let unproven = false;
+	const bindings = [
+		...code.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*/g),
+	].map((match) => ({
+		name: match[1],
+		at: match.index + match[0].length,
+	}));
+	for (let changed = true; changed;) {
+		changed = false;
+		for (const { name, at } of bindings) {
+			if (DECLARATION_NAMES.has(name) || aliases.has(name)) continue;
+			const target = /^([A-Za-z_$][\w$]*)/.exec(code.slice(at))?.[1];
+			const carried = DECLARATION_NAMES.has(target ?? "")
+				? []
+				: aliases.get(target ?? "")?.links;
+			if (carried === undefined) continue;
+			const chain = callChainAt(code, at, strings);
+			if (chain?.unproven) {
+				unproven = true;
+				continue;
+			}
+			aliases.set(name, {
+				links: [...carried, ...(chain?.links ?? [])],
+			});
+			changed = true;
+		}
+	}
+	return { aliases, unproven };
 }
 
 /**
  * Every test-family declaration in a lexed file, with the span its body lives
  * in. The title and the callee chain sit before `bodyStart`, so nothing there
  * can ever read as a read-back: `it("<record>", …)` is a name, not an
- * assertion.
+ * assertion. `unproven` says the file writes a declaration in a form this
+ * reader cannot classify, which makes the whole file contribute nothing
+ * (F-4597-R2-1): the rule never falls back to guessing.
  */
-function declarationScopes(code) {
+function declarationScopes(code, strings = []) {
+	const { aliases, unproven: aliasUnproven } = declarationAliases(
+		code,
+		strings,
+	);
+	const alternatives = [];
+	for (const name of [...DECLARATION_NAMES, ...aliases.keys()])
+		alternatives.push(name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+	const declarationName = new RegExp(
+		`\\b(?:${alternatives.join("|")})\\b`,
+		"g",
+	);
+	const imports = importStatementRanges(code);
 	const scopes = [];
-	for (const match of code.matchAll(new RegExp(DECLARATION_NAME.source, "g"))) {
+	let unproven = aliasUnproven;
+	for (const match of code.matchAll(declarationName)) {
 		const before = code[match.index - 1] ?? " ";
 		if (before === "." || /[$\w]/.test(before)) continue;
+		if (
+			imports.some(([start, end]) => match.index > start && match.index < end)
+		)
+			continue;
 		const name = match[0];
-		const chain = callChainAt(code, match.index);
-		if (!chain) continue;
+		const chain = callChainAt(code, match.index, strings);
+		if (!chain) {
+			// A declaration name bound to another name is the alias pass's business
+			// and a bare value (`test:`, `test,`, `describe.skip` as a value) holds
+			// no declaration body, so neither can hide one. A name followed by a
+			// declaration bracket, a generic list or an optional call IS an attempt
+			// this reader cannot resolve: the file is unprovable (F-4597-R2-1).
+			const before = code.slice(Math.max(0, match.index - 96), match.index);
+			if (
+				BINDING_BEFORE.test(before) ||
+				BINDING_TARGET_BEFORE.test(before.slice(-32))
+			)
+				continue;
+			if (declarationAttemptAt(code, match.index + name.length))
+				unproven = true;
+			if (DESTRUCTURE_BEFORE.test(before)) unproven = true;
+			continue;
+		}
+		if (chain.unproven) {
+			unproven = true;
+			continue;
+		}
+		const links = [...(aliases.get(name)?.links ?? []), ...chain.links];
 		const hook = TEST_HOOKS.has(name);
 		const live = hook
-			? chain.links.length === 0
-			: chain.links.every((link) => LIVE_TEST_LINKS.has(link));
+			? links.length === 0
+			: links.every((link) => LIVE_TEST_LINKS.has(link));
 		scopes.push({
 			start: chain.start,
 			end: chain.end,
@@ -1673,7 +1905,19 @@ function declarationScopes(code) {
 			bodyEnd: chain.lastClose,
 		});
 	}
-	return scopes;
+	return { scopes, unproven };
+}
+
+/** Index of the first top-level `,` inside a call's arguments, or `null`. */
+function firstArgumentEnd(code, open, close) {
+	let depth = 0;
+	for (let index = open + 1; index < close; index++) {
+		const char = code[index];
+		if (char === "(" || char === "[" || char === "{") depth += 1;
+		else if (char === ")" || char === "]" || char === "}") depth -= 1;
+		else if (char === "," && depth === 0) return index;
+	}
+	return null;
 }
 
 /**
@@ -1681,17 +1925,15 @@ function declarationScopes(code) {
  * of a declaration vitest runs, never in the callee chain or the title of one
  * (a title is a name, not an assertion), and never inside a declaration the
  * rule cannot prove runs — a `describe.skip` refuses everything under it. A
- * module-scope helper (`function dropped() { … kind === "<record>" }`) is read
- * only when the file holds a live test that can call it: the shape most of this
- * repository's read-backs use, refused by nothing else.
+ * position no declaration encloses is not a read position: the rule reads
+ * positions, not dataflow, and "the file holds a live test" admitted a dead
+ * helper's body (F-4597-R2-1).
  */
 function isReadPosition(scopes, position) {
 	let inBody = false;
 	let inDead = false;
-	let inDeclaration = false;
 	for (const scope of scopes) {
 		if (position < scope.start || position >= scope.end) continue;
-		inDeclaration = true;
 		if (!scope.live) {
 			inDead = true;
 			continue;
@@ -1703,21 +1945,97 @@ function isReadPosition(scopes, position) {
 		)
 			inBody = true;
 	}
-	if (inDead) return false;
-	if (inBody) return true;
-	if (inDeclaration) return false;
-	return scopes.some(
-		(scope) => scope.kind === "test" && scope.live && scope.bodyStart !== null,
+	return inBody && !inDead;
+}
+
+/** The index of the `;` that ends the statement starting at `from`, or -1. */
+function statementEnd(code, from) {
+	let depth = 0;
+	for (let index = from; index < code.length; index += 1) {
+		const char = code[index];
+		if (char === "(" || char === "[" || char === "{") depth += 1;
+		else if (char === ")" || char === "]" || char === "}") {
+			if (depth === 0) return -1;
+			depth -= 1;
+		} else if (char === ";" && depth === 0) return index;
+	}
+	return -1;
+}
+
+/**
+ * The name of the module-scope function that encloses `position`, or null:
+ * `function NAME(…) { … }`, `const NAME = (…) => { … }`, `const NAME =
+ * function (…) { … }`, and a concise arrow (`const NAME = () => rows(…);`),
+ * whose statement is the body. A declaration whose brace comes after its own
+ * `;` is not a helper this reader can name.
+ */
+function enclosingHelperName(code, position) {
+	const candidates = [];
+	const add = (name, from) => {
+		const brace = code.indexOf("{", from);
+		if (
+			brace !== -1 &&
+			brace < position &&
+			!code.slice(from, brace).includes(";")
+		) {
+			const close = closeBracketIndex(code, brace, "{", "}");
+			if (close >= position) {
+				candidates.push({ name, at: from });
+				return;
+			}
+		}
+		const end = statementEnd(code, from);
+		if (end >= position) candidates.push({ name, at: from });
+	};
+	for (const match of code.matchAll(
+		/(?<![.$\w])function\s+([A-Za-z_$][\w$]*)\s*\(/g,
+	))
+		add(match[1], match.index);
+	for (const match of code.matchAll(
+		/(?<![.$\w])(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^()]*\)\s*=>|function\b|[A-Za-z_$][\w$]*\s*=>)/g,
+	))
+		add(match[1], match.index);
+	if (!candidates.length) return null;
+	// The innermost helper is the one whose body holds the position.
+	candidates.sort((left, right) => right.at - left.at);
+	return candidates[0].name;
+}
+
+/**
+ * Whether a position no declaration encloses is still a read-back: it sits in a
+ * named module-scope helper that a live declaration calls. That is the shape
+ * most of this repository's read-backs use (`function availabilityRows() { …
+ * phase === "<record>" }`, called from a test body), and it is evidence, not
+ * the round-2 guess "this file holds a live test somewhere": the helper's own
+ * name has to appear as a call in a live body (F-4597-R2-1).
+ */
+function helperReadPosition(code, scopes, position) {
+	if (scopes.some((scope) => position >= scope.start && position < scope.end))
+		return false;
+	const name = enclosingHelperName(code, position);
+	if (!name) return false;
+	const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	const call = new RegExp(`(?<![\\w$])${escaped}\\s*\\(`, "g");
+	for (const match of code.matchAll(call))
+		if (isReadPosition(scopes, match.index)) return true;
+	return false;
+}
+
+/** Whether a position is where this file's tests can read a record. */
+function readPosition(code, scopes, position) {
+	return (
+		isReadPosition(scopes, position) ||
+		helperReadPosition(code, scopes, position)
 	);
 }
 
 /** The spans of the file's assertion expressions (`expect(...)` chains, `assert*(...)`). */
-function assertionSpans(code) {
+function assertionSpans(code, strings = []) {
 	const spans = [];
 	for (const match of code.matchAll(/\b(?:expect|assert)\b/g)) {
 		const before = code[match.index - 1] ?? " ";
 		if (before === "." || /[$\w]/.test(before)) continue;
-		const chain = callChainAt(code, match.index);
+		const chain = callChainAt(code, match.index, strings);
 		if (chain) spans.push([chain.start, chain.end]);
 	}
 	return spans;
@@ -1764,7 +2082,7 @@ function identifierIsRead(code, scopes, assertions, identifier) {
 		"g",
 	);
 	for (const match of code.matchAll(pattern)) {
-		if (!isReadPosition(scopes, match.index)) continue;
+		if (!readPosition(code, scopes, match.index)) continue;
 		if (withinSpans(assertions, match.index)) return true;
 		if (comparisonAt(code, match.index, match.index + match[0].length))
 			return true;
@@ -2022,14 +2340,23 @@ function globToRegExp(pattern, { directory }) {
 	return new RegExp(`${out}$`);
 }
 
-/** The backticked spans of a section that have a record literal's shape. */
-function recordLiteralSpans(content) {
-	const spans = new Set();
-	for (const match of String(content ?? "").matchAll(/`([^`\n]+)`/g)) {
+/** The record-shaped mentions of a section, in the order the body makes them. */
+function recordMentions(content) {
+	const source = String(content ?? "");
+	const mentioned = new Map();
+	for (const match of source.matchAll(/`([^`\n]+)`/g)) {
 		const span = match[1].trim();
-		if (RECORD_LITERAL_SPAN.test(span)) spans.add(span);
+		if (RECORD_LITERAL_SPAN.test(span)) mentioned.set(span, true);
 	}
-	return [...spans];
+	for (const match of source.matchAll(RECORD_TOKEN))
+		if (!mentioned.has(match[0])) mentioned.set(match[0], false);
+	const entries = [...mentioned];
+	if (entries.length <= MAX_RECORD_MENTIONS)
+		return { mentions: entries, truncated: false };
+	return {
+		mentions: entries.slice(0, MAX_RECORD_MENTIONS),
+		truncated: true,
+	};
 }
 
 /**
@@ -2069,10 +2396,11 @@ function grepLiteralFiles(patterns, pathspecs, options = {}) {
 }
 
 /**
- * The record literals the head tree's runtime code emits, restricted to the
- * candidate spans. One grep for every candidate, then one lex per file that
- * mentions any of them: reading the whole runtime tree to answer a handful of
- * needles is the cost this avoids.
+ * The record values the head tree's runtime code emits among the candidates,
+ * split by the field they were harvested from: `values` is every record value,
+ * `identity` only the ones read from a record-identity field. One grep for
+ * every candidate, then one lex per file that mentions any of them: reading the
+ * whole runtime tree to answer a handful of needles is the cost this avoids.
  */
 function emittedRecordLiterals(candidates, options = {}) {
 	const files = grepLiteralFiles(
@@ -2083,7 +2411,8 @@ function emittedRecordLiterals(candidates, options = {}) {
 	// `null` is "the probe could not run", never "the tree holds nothing":
 	// the caller reports it rather than reading the empty answer as proof.
 	if (files === null) return null;
-	const literals = new Set();
+	const values = new Set();
+	const identity = new Set();
 	for (const file of files) {
 		if (!isRuntimeObservabilityPath(file)) continue;
 		const source = headFileSource(file, {
@@ -2093,10 +2422,12 @@ function emittedRecordLiterals(candidates, options = {}) {
 			git: options.git,
 		});
 		if (typeof source !== "string") continue;
-		for (const record of recordLocationsFromRuntimeSource(source))
-			literals.add(record.value);
+		for (const record of recordLocationsFromRuntimeSource(source)) {
+			values.add(record.value);
+			if (RECORD_IDENTITY_FIELDS.has(record.field)) identity.add(record.value);
+		}
 	}
-	return literals;
+	return { values, identity };
 }
 
 // A record literal can reach a test through a binding (`const PHASE = "x"`,
@@ -2126,6 +2457,7 @@ function testedRecordLiterals(literals, options = {}) {
 			reason: `${VITEST_CONFIG} could not be read`,
 		};
 	const tested = new Set();
+	const unprovable = [];
 	for (const file of files) {
 		if (!TEST_SOURCE_FILE.test(file)) continue;
 		if (!collects(file)) continue;
@@ -2138,8 +2470,18 @@ function testedRecordLiterals(literals, options = {}) {
 		if (typeof source !== "string") continue;
 		const lexed = blankCommentsAndStrings(source);
 		const code = lexed.text;
-		const scopes = declarationScopes(code);
-		const assertions = assertionSpans(code);
+		const { scopes, unproven: cannotProve } = declarationScopes(
+			code,
+			lexed.strings,
+		);
+		// A declaration this reader cannot classify makes the file unprovable: it
+		// contributes no read-back rather than admitting a position on the strength
+		// of some other live test (F-4597-R2-1).
+		if (cannotProve) {
+			unprovable.push(file);
+			continue;
+		}
+		const assertions = assertionSpans(code, lexed.strings);
 		const bindings = new Map();
 		for (const string of lexed.strings) {
 			const identifier = LITERAL_BINDING_BEFORE.exec(string.prefix)?.[1];
@@ -2155,7 +2497,7 @@ function testedRecordLiterals(literals, options = {}) {
 				lexed.strings.some(
 					(string) =>
 						token.test(string.text) &&
-						isReadPosition(scopes, string.start) &&
+						readPosition(code, scopes, string.start) &&
 						stringIsRead(code, assertions, string),
 				) ||
 				identifierIsRead(code, scopes, assertions, literal) ||
@@ -2165,7 +2507,7 @@ function testedRecordLiterals(literals, options = {}) {
 			if (read) tested.add(literal);
 		}
 	}
-	return { tested };
+	return { tested, unprovable };
 }
 
 /**
@@ -2197,14 +2539,28 @@ function warnRecordReadBackSkipped(step, names, reason = "git grep failed") {
 
 function lintObservabilityRecordsTested(lines, headings, options = {}) {
 	const content = observabilitySectionContent(lines, headings);
-	const spans = recordLiteralSpans(content);
-	if (!spans.length) return [];
-	const emitted = emittedRecordLiterals(spans, options);
+	const { mentions, truncated } = recordMentions(content);
+	if (!mentions.length) return [];
+	if (truncated)
+		console.warn(
+			`::warning::PR body Observability names more than ${MAX_RECORD_MENTIONS} record-shaped tokens, so the #4597 read-back check read the first ${MAX_RECORD_MENTIONS} and did not check the rest.`,
+		);
+	const candidates = mentions.map(([name]) => name);
+	const emitted = emittedRecordLiterals(candidates, options);
 	if (emitted === null) {
-		warnRecordReadBackSkipped("the runtime record harvest", spans);
+		warnRecordReadBackSkipped("the runtime record harvest", candidates);
 		return [];
 	}
-	const named = spans.filter((span) => emitted.has(span));
+	// A backticked span is an explicit naming and is read against every
+	// harvested field; a bare token or link text must be a record identity,
+	// because a bare two-segment compound is also ordinary prose
+	// (F-4597-R2-2).
+	const named = mentions
+		.filter(
+			([name, quoted]) =>
+				emitted.values.has(name) && (quoted || emitted.identity.has(name)),
+		)
+		.map(([name]) => name);
 	if (!named.length) return [];
 	const result = testedRecordLiterals(named, options);
 	if (result.skipped) {
@@ -2213,8 +2569,17 @@ function lintObservabilityRecordsTested(lines, headings, options = {}) {
 	}
 	const missing = named.filter((name) => !result.tested.has(name));
 	if (!missing.length) return [];
+	const unprovable = result.unprovable ?? [];
+	const shown = unprovable.slice(0, 3);
+	const extra =
+		unprovable.length > shown.length
+			? ` (+${unprovable.length - shown.length} more)`
+			: "";
+	const unprovableNote = shown.length
+		? ` A tests/ file whose declarations this rule cannot prove runs contributes nothing, so name the record in a form it reads: ${shown.join(", ")}${extra}.`
+		: "";
 	return [
-		`PR body Observability names ${missing.map((name) => `\`${name}\``).join(", ")}, which no test under tests/ reads: admit one proven form — the record's full name in an assertion inside a test vitest collects and runs, or where that test compares the observed value with it — because docs/pi-lens-fixer.md:117 requires the record the section names to be asserted by a test (#4597).`,
+		`PR body Observability names ${missing.map((name) => `\`${name}\``).join(", ")}, which no test under tests/ reads: admit one proven form — the record's full name in an assertion inside a test vitest collects and runs, or where that test compares the observed value with it — because docs/pi-lens-fixer.md:117 requires the record the section names to be asserted by a test (#4597).${unprovableNote}`,
 	];
 }
 

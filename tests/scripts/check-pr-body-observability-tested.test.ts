@@ -60,6 +60,9 @@ function runtimeSource(records: readonly string[]): string {
 type Case = {
 	observability: string;
 	records?: readonly string[];
+	/** Runtime source in place of `records`' `logLatency` rows (a wrapper whose
+	 *  field is not a record identity, for instance). */
+	runtime?: string;
 	tests?: Readonly<Record<string, string>>;
 	/** Files the tests-side grep reports, in place of the real one. */
 	testHits?: readonly string[];
@@ -69,12 +72,14 @@ type Case = {
 function lint({
 	observability,
 	records = [],
+	runtime,
 	tests = {},
 	testHits = Object.keys(tests),
 	git,
 }: Case) {
 	const headFiles = new Map<string, string>();
-	if (records.length) headFiles.set(RUNTIME_FILE, runtimeSource(records));
+	if (runtime !== undefined) headFiles.set(RUNTIME_FILE, runtime);
+	else if (records.length) headFiles.set(RUNTIME_FILE, runtimeSource(records));
 	for (const [file, source] of Object.entries(tests))
 		headFiles.set(file, source);
 	return lintPrBody(body(observability), {
@@ -399,6 +404,170 @@ describe("#4597 a named observability record must be read by a test", () => {
 			},
 		});
 		expect(ruleErrors(result)).toHaveLength(1);
+	});
+
+	// F-4597-R2-1 (review round 2): the forms a live test can be written in are
+	// an allowlist. A form the reader cannot parse makes its file unprovable, and
+	// a form it proves dead contributes nothing; neither may fall back to "this
+	// file holds a live test somewhere", which is what admitted both plants.
+	it.each([
+		[
+			"a bracket-spelled skip",
+			'it["skip"]("reads the phase", () => {\n\texpect(row.phase).toBe("fixture_record_emitted");\n});\n\nit("trivial", () => {\n\texpect(1).toBe(1);\n});\n',
+		],
+		[
+			"an alias of `it` that skips",
+			'const t = it;\n\nt.skip("reads the phase", () => {\n\texpect(row.phase).toBe("fixture_record_emitted");\n});\n\nit("trivial", () => {\n\texpect(1).toBe(1);\n});\n',
+		],
+		[
+			"an alias of `it.skipIf`",
+			'const d = it.skipIf(process.platform === "win32");\n\nd("reads the phase", () => {\n\texpect(row.phase).toBe("fixture_record_emitted");\n});\n',
+		],
+		[
+			"a computed modifier index",
+			'const mod = "skip";\n\nit[mod]("reads the phase", () => {\n\texpect(row.phase).toBe("fixture_record_emitted");\n});\n\nit("trivial", () => {\n\texpect(1).toBe(1);\n});\n',
+		],
+		[
+			"a module-scope helper only a dead declaration calls",
+			'function dropped(phase) {\n\treturn phase === "fixture_record_emitted";\n}\n\nit.skip("trivial", () => {\n\texpect(dropped("x")).toBe(false);\n});\n',
+		],
+	])("does not count a read-back through %s", (_name, source) => {
+		const result = lint({
+			observability: "The record is `fixture_record_emitted`.",
+			records: ["fixture_record_emitted"],
+			tests: { [TEST_FILE]: source },
+		});
+		expect(ruleErrors(result)).toHaveLength(1);
+	});
+
+	it.each([
+		[
+			"a bracket-spelled `only`",
+			'it["only"]("reads the phase", () => {\n\texpect(row.phase).toBe("fixture_record_emitted");\n});\n',
+		],
+		[
+			"an alias of `it`",
+			'const t = it;\n\nt("reads the phase", () => {\n\texpect(row.phase).toBe("fixture_record_emitted");\n});\n',
+		],
+		[
+			"an imported `it`",
+			'import { describe, expect, it } from "vitest";\n\nit("reads the phase", () => {\n\texpect(row.phase).toBe("fixture_record_emitted");\n});\n',
+		],
+		[
+			"a bracket-spelled `each`",
+			'it["each"]([{ phase: "other_value" }])("reads the phase", () => {\n\texpect(row.phase).toBe("fixture_record_emitted");\n});\n',
+		],
+		[
+			"a module-scope helper a live test calls",
+			'function rowsOf(rows) {\n\treturn rows.filter((row) => row.phase === "fixture_record_emitted");\n}\n\nit("reads the phase", () => {\n\texpect(rowsOf(rows)).toHaveLength(1);\n});\n',
+		],
+		[
+			"a generic `each` table",
+			'it.each<[string, string]>([[\"other_value\", \"x\"]])("reads the phase", () => {\n\texpect(row.phase).toBe("fixture_record_emitted");\n});\n',
+		],
+	])("counts a read-back through %s", (_name, source) => {
+		const result = lint({
+			observability: "The record is `fixture_record_emitted`.",
+			records: ["fixture_record_emitted"],
+			tests: { [TEST_FILE]: source },
+		});
+		expect(ruleErrors(result)).toEqual([]);
+	});
+
+	it("names the file whose declaration form it cannot prove", () => {
+		const result = lint({
+			observability: "The record is `fixture_record_emitted`.",
+			records: ["fixture_record_emitted"],
+			tests: {
+				[TEST_FILE]:
+					'const mod = "skip";\n\nit[mod]("reads the phase", () => {\n\texpect(row.phase).toBe("fixture_record_emitted");\n});\n',
+			},
+		});
+		expect(ruleErrors(result)).toEqual([expect.stringContaining(TEST_FILE)]);
+	});
+
+	// F-4597-R2-2 (review round 2): the spelling of a mention no longer decides.
+	// The body's tokens are judged by the harvest, not by their backticks.
+	it("refuses a record named without backticks", () => {
+		const result = lint({
+			observability:
+				"The record is fixture_record_emitted, sent to latency.log.",
+			records: ["fixture_record_emitted"],
+			tests: {
+				[TEST_FILE]: 'it("keeps a note", () => {\n\texpect(1).toBe(1);\n});\n',
+			},
+		});
+		expect(ruleErrors(result)).toEqual([
+			expect.stringContaining(
+				"`fixture_record_emitted`, which no test under tests/ reads",
+			),
+		]);
+	});
+
+	it("refuses a record named in a link label", () => {
+		const result = lint({
+			observability:
+				"See [fixture_record_emitted](https://example.test/row) for the row.",
+			records: ["fixture_record_emitted"],
+		});
+		expect(ruleErrors(result)).toHaveLength(1);
+	});
+
+	it("counts a bare mention a test reads", () => {
+		const result = lint({
+			observability: "The record is fixture_record_emitted.",
+			records: ["fixture_record_emitted"],
+			tests: {
+				[TEST_FILE]:
+					'it("reads the phase", () => {\n\texpect(row.phase).toBe("fixture_record_emitted");\n});\n',
+			},
+		});
+		expect(ruleErrors(result)).toEqual([]);
+	});
+
+	it("leaves a bare token the runtime never emits alone", () => {
+		const result = lint({
+			observability:
+				"The row lands in latency.log, not no_runtime_emits_this_4597.",
+			records: ["fixture_record_emitted"],
+		});
+		expect(ruleErrors(result)).toEqual([]);
+	});
+
+	it("names the file whose declaration binding it cannot follow", () => {
+		const result = lint({
+			observability: "The record is `fixture_record_emitted`.",
+			records: ["fixture_record_emitted"],
+			tests: {
+				[TEST_FILE]:
+					'const { skip } = it;\n\nskip("reads the phase", () => {\n\texpect(row.phase).toBe("fixture_record_emitted");\n});\n',
+			},
+		});
+		expect(ruleErrors(result)).toEqual([expect.stringContaining(TEST_FILE)]);
+	});
+
+	// F-4597-R2-2's precision line: a bare mention is read against the fields
+	// that identify a record, so prose that reuses a `subsystem` value is not a
+	// named record; the backticked spelling still reads the whole harvest.
+	const SUBSYSTEM_RUNTIME =
+		'export function note() {\n\tlogExtension({ subsystem: "fixture_subsystem_value", message: "note" });\n}\n';
+
+	it("does not require a read-back for a bare subsystem value", () => {
+		const result = lint({
+			observability: "The fixture_subsystem_value path is unchanged.",
+			runtime: SUBSYSTEM_RUNTIME,
+		});
+		expect(ruleErrors(result)).toEqual([]);
+	});
+
+	it("still requires a read-back for a backticked subsystem value", () => {
+		const result = lint({
+			observability: "The record is `fixture_subsystem_value`.",
+			runtime: SUBSYSTEM_RUNTIME,
+		});
+		expect(ruleErrors(result)).toEqual([
+			expect.stringContaining("`fixture_subsystem_value`"),
+		]);
 	});
 
 	// Shape 10: a probe that cannot run is a skipped check, disclosed once, and

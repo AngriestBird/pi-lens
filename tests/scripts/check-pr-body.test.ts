@@ -1972,6 +1972,13 @@ describe("PR body lint (#1844)", () => {
 				).size;
 				expect(bytes).toBeGreaterThan(1024 * 1024);
 				expect(bytes).toBeLessThan(16 * 1024 * 1024);
+				// #4597 round 3: this body names a record, so the fixture owes the
+				// read-back the rule demands — the rule applies to the fixture's own
+				// tree too, and the bare spelling is no longer exempt.
+				gitExecSync(
+					`mkdir -p '${fixtureCwd}/tests' && printf '%s\\n' 'it("reads the kind", () => {' '\texpect(row.kind).toBe("mid-kind");' '});' > '${fixtureCwd}/tests/record.test.ts' && git -C '${fixtureCwd}' add tests/record.test.ts && git -C '${fixtureCwd}' -c user.name=pi-lens-test -c user.email=pi-lens-test@example.com commit --quiet -m fixture-read-back`,
+					{ cwd: repositoryRoot },
+				);
 				const diff = localDiff(fixtureCwd);
 				expect(diff).toContain("index ");
 				expect(
