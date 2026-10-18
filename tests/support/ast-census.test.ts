@@ -95,6 +95,13 @@ const CHILD_ACCESSOR =
 	/\.(?:child|children|childCount|namedChildren|descendants|nextAll|prevAll)\b/;
 
 /**
+ * The same family reached through a quoted subscript key, `node["child"](i)`.
+ * The family name is the same; the quoted key is the spelling.
+ */
+const SUBSCRIPT_ACCESSOR =
+	/\[\s*["'`](?:child|children|childCount|namedChildren|descendants|nextAll|prevAll)["'`]\s*\]/;
+
+/**
  * The same family reached without a member token: a destructured accessor
  * (`const { children } = node`), a bare name bound then called, or a name the
  * source never spells in one token (`Reflect.get(node, "children")`). Strings
@@ -106,16 +113,26 @@ const BARE_ACCESSOR =
 	/\b(?:children|childCount|namedChildren|descendants|nextAll|prevAll)\b/;
 
 /**
+ * `child` alone is an ordinary variable name in a traversal (`visit(child)`), so
+ * it needs its own forms: called as a bare name (`child(i)`) or destructured out
+ * of a node (`const { child } = node`). The member and quoted-key spellings are
+ * the two patterns above.
+ */
+const BARE_CHILD = /\bchild\s*\(|[{,]\s*child\s*[,}]/;
+
+/**
  * A call through a computed subscript key, `node[key]()`: the key is a runtime
  * value, so no needle can name the accessor. The bracket's first key byte is
- * not a quote (a quoted key is already a family name in {@link BARE_ACCESSOR}),
- * and the call form itself is the site (#4618 V3).
+ * not a quote (a quoted key is {@link SUBSCRIPT_ACCESSOR}), and the call form
+ * itself is the site (#4618 V3, #4619).
  */
 const COMPUTED_SUBSCRIPT_CALL = /\[\s*[^"'`\s\]]+[^\]]*\]\s*\(/;
 
 const ACCESSOR_PATTERNS = [
 	CHILD_ACCESSOR,
+	SUBSCRIPT_ACCESSOR,
 	BARE_ACCESSOR,
+	BARE_CHILD,
 	COMPUTED_SUBSCRIPT_CALL,
 ] as const;
 
@@ -422,8 +439,24 @@ function censusImportTargets(
 		if (callee === undefined || callee === null) continue;
 		if (callee.kind() !== "import" && callee.text() !== "require") continue;
 		const argument = node.field("arguments")?.namedChildren()[0];
-		if (argument === undefined || argument.kind() !== "string") continue;
-		add(unquote(argument.text()));
+		if (argument === undefined) continue;
+		const argumentKind = argument.kind();
+		// A string literal and a substitution-free template are both constants.
+		const specifier =
+			argumentKind === "string" ||
+			(argumentKind === "template_string" && !argument.text().includes("${"))
+				? unquote(argument.text())
+				: undefined;
+		if (specifier !== undefined) {
+			add(specifier);
+			continue;
+		}
+		// Fail closed: a load of THIS module that the census cannot read is an
+		// unclassified population member, not a file outside the census.
+		if (argument.text().includes("ast-census"))
+			throw new Error(
+				`${file}: unclassified census load form: ${argument.text()}`,
+			);
 	}
 	return [...targets];
 }
@@ -617,6 +650,24 @@ describe("one census seam for the AST sweeps (#4606 S0)", () => {
 				file,
 			),
 		).toEqual([]);
+		// A substitution-free template specifier is one constant (#4619).
+		expect(
+			censusImportTargets(
+				"const seam = await import(`./ast-census.js`);",
+				file,
+			),
+		).toEqual([SEAM_PATH]);
+		// A load the census cannot read is refused, not silently outside it.
+		expect(() =>
+			censusImportTargets(
+				"const seam = await import(`./ast-census.${extension}`);",
+				file,
+			),
+		).toThrow(/unclassified census load form/);
+		// A dynamic import of some other module stays outside this population.
+		expect(
+			censusImportTargets("const other = await import(specifier);", file),
+		).toEqual([]);
 	});
 
 	it("keeps one walk in the seam and no traversal of its own in a consumer", () => {
@@ -696,6 +747,10 @@ describe("one census seam for the AST sweeps (#4606 S0)", () => {
 			'const accessor = Reflect.get(node, "children");',
 			// #4618 V3: called through a key no token names.
 			"node[key]();",
+			// #4619: the quoted key and the `child` forms the family skipped.
+			'node["child"](index)',
+			"const { child } = node;",
+			"child(index)",
 		];
 		expect(
 			traversals.map((line) => accessorSitesIn(line, "plant.ts").length),
