@@ -353,6 +353,16 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			reason:
 				"the language-server process is the boundary; the capability adapter is where every host witness stands in for it",
 		},
+	// 2026-10-17 (#4504): the witness runs the real session_start / tool_call /
+	// tool_result handlers and only the per-file dispatch is stood in for, so
+	// the run observes what the opaque prescan recorded and recovered, not a
+	// linter's verdict.
+	"in-process-mock:index-4504-opaque-prescan-root-witness.test.ts::clients/pipeline":
+		{
+			detector: "in-process-mock",
+			reason:
+				"the synthetic dispatch of a recovered opaque write is not the subject; a resolved pipeline verdict keeps a linter child out of a witness about the prescan's own record",
+		},
 	// 2026-10-17 (#4554): the assertion is on the module-level
 	// `resetLSPService` CALL the shared teardown makes, and the shared service
 	// double does not expose that call as a spy; no server process is spawned.
@@ -600,6 +610,17 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		detector: "real-process-spawn",
 		reason:
 			"real git emits control bytes from its index, which a hand-built output cannot certify",
+	},
+	// 2026-10-17 (#4504): the first host-level witness admitted for a real
+	// spawn. The production state it reproduces is a concurrent secondary
+	// session whose cwd is a LINKED WORKTREE — a `.git` file, a shared object
+	// store, a worktree-local toplevel — and `git worktree add` is the only way
+	// to make one. The prescan's own recovery is git's `status --porcelain`, so
+	// a stubbed git would answer neither question.
+	"real-process-spawn:index-4504-opaque-prescan-root-witness.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"a linked worktree exists only when real git creates one, and the opaque prescan under test recovers through git's own status; a stub proves only that the stub answers",
 	},
 	// 2026-09-03: the published-manifest guard must run the real `npm pack`
 	// (prepack/postpack are npm lifecycle hooks); header on the file states why.
