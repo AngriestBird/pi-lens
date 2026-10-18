@@ -1389,6 +1389,12 @@ export async function tmpHygieneWaitForOwnerDrain(
 	return scan;
 }
 
+/** Which verdict a hygiene run's census reached: the three assertions ran, or
+ *  the win32 quarantine declined them (#4591, named where the guard lives). The
+ *  value carries no issue id: it is a log field, bounded and greppable, and the
+ *  issue identity belongs to the guard and its pin. */
+export type TmpHygieneCensusVerdict = "asserted" | "declined";
+
 /** ONE record per hygiene run (not one per marker): the owner-marker census the
  *  hygiene owner acted on, so a suppressed or attributed entry is explicable
  *  from the run's own output. */
@@ -1406,13 +1412,19 @@ export function formatTmpHygieneOwnerSummary(
 		judged: 0,
 		observed: 0,
 	},
+	/** #4592 review F4: WHICH verdict this run reached. A lane that declines the
+	 *  census must not print a line indistinguishable from an asserting lane's,
+	 *  or a skipped verdict reads as a clean one (shapes 10 and 31). Required, so
+	 *  a caller that forgets to state it is a compile error rather than a silent
+	 *  `asserted`. */
+	verdict: TmpHygieneCensusVerdict,
 ): string {
 	const { counts } = scan;
 	const tmpRootWriteCount =
 		tmpRootWrites === "unknown"
 			? "unknown"
 			: `${tmpRootWrites.judged}/${tmpRootWrites.observed}`;
-	return `[tmp-hygiene-owners] live=${counts.live} orphaned=${counts.orphaned} malformed=${counts.malformed} foreign=${counts.foreign} self=${counts.self} otherInvocationEntries=${otherInvocationEntries} reaped=${reaped} tmpRootWrites=${tmpRootWriteCount}`;
+	return `[tmp-hygiene-owners] live=${counts.live} orphaned=${counts.orphaned} malformed=${counts.malformed} foreign=${counts.foreign} self=${counts.self} otherInvocationEntries=${otherInvocationEntries} reaped=${reaped} tmpRootWrites=${tmpRootWriteCount} verdict=${verdict}`;
 }
 
 /** Reclaim abandoned owner records at the serialized census. A run id is the

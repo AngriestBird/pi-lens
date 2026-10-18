@@ -1,5 +1,31 @@
 # HISTORY
 
+## 2026-10-18 — the Windows unit leg becomes a gate
+
+The maintainer decided on 2026-10-17 that `Unit tests Windows` gates. The lane
+had run as `Unit tests Windows (advisory)` since #2833, behind `heavy-gate` and
+with `continue-on-error` on its Vitest step, so its reds were reported and
+waivable: #4566 r14's `.cmd` branch and #4551 were both waved through on a
+head whose Linux legs were green. The promotion (#4518, PR #4592) drops the
+suffix, the deferral and the `continue-on-error`, so the job starts on every
+event and a failing conclusion gates everywhere ci-verdict reads rows.
+
+Two tests kept the lane from being green on master, and the promotion had to
+answer for both rather than wave them through as it had the earlier reds. The
+10,000-path opaque-ownership population (#4373) took more than its fixed 60 s
+budget on a loaded Windows runner while running 36.8 s green on one head, so
+it takes the lane's own `PI_LENS_TEST_TIMEOUT_SCALE` (180 s on the Windows leg)
+through one shared parse. The tmp-fixture hygiene census reds about one
+Windows run in ten on a root its own file's teardown had already removed, so
+its verdict is declined on `win32` only, pinned to #4591: the suite still runs
+and its `cleanupTmpHygiene` sweep still reaps, because a suite-level skip was
+measured to run no hook at all.
+
+Enforcement is the row a run posts. Until the maintainer adds the name to
+master's required status checks, an absent or job-skipped Windows row reads
+green (shape 11), which is why the wording in `AGENTS.md` says so and why the
+class sweep covers both spellings of the name.
+
 ## 2026-10-17 — split host-path resolution (shape 74)
 
 Shape 74 ("Split host-path resolution") entered the catalog here.
