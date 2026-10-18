@@ -3438,7 +3438,15 @@ describe("dispatcher seam row (#3906 AC2)", () => {
 		// (a shallow CI clone keeps fewer), so the row is pinned, not the count.
 		const rowOne = result.errors.filter((error) => error.includes("row 1"));
 		expect(rowOne.length).toBeGreaterThan(0);
-		expect(result.errors).toEqual(rowOne);
+		// A shallow clone can also carry the bounded post-image notice for the
+		// archived files it cannot read; no other rule may fire.
+		expect(
+			result.errors.filter(
+				(error) =>
+					!error.includes("row 1") &&
+					!error.startsWith("PR body compliance: cannot classify"),
+			),
+		).toEqual([]);
 	});
 });
 
