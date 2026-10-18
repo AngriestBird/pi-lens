@@ -454,6 +454,7 @@ describe("selectTargetedTests — path-mirror pass", () => {
 			"tests/config/tmp-fixture-hygiene.test.ts",
 			"tests/config/tmp-hygiene-leak-origin.test.ts",
 			"tests/config/vacuous-skip-coverage.test.ts",
+			"tests/scripts/ci-shuffle-census.test.ts",
 			"tests/support/ast-census.test.ts",
 			"tests/support/host-event-shape-scan.test.ts",
 			// #4522: walks both captured-fixture trees, so a fixture change arms it.
