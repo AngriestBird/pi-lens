@@ -1,5 +1,37 @@
 # HISTORY
 
+## 2026-10-18 — swallowed failure recorded as a different event (shape 75)
+
+Shape 75 ("Swallowed failure recorded as a different event") entered the catalog
+here.
+
+The user asked whether the week's bug fixes were observable. An audit of the 53
+`fix` PRs merged from 2026-10-11 to 2026-10-18 drove each production entry point
+with pinned homes and read the real `latency.log`. Four runtime failure paths
+ended in a silent `catch`. In two the log did worse than miss the failure: the
+out-of-band change scan from #4528 caught an unreadable directory with
+`continue` and then reported `deleted: 1` for a file that still existed, and
+#4527's didSave path reported a rejected save the same way as a sent one. Shape
+31 asks for a record on new behavior; it did not catch these, because each path
+did write a record, just the wrong one. #4596 tracks the four fixes and the
+planned guard. The #4575 round 7 verify found a third member: `lsp_touch_file`
+answers `failureKind: "success"` after a rejected didSave.
+
+The same retro gave three orchestrator mistakes a guard in the orchestrator's
+own tooling rather than a rule: a watcher left down after a context compaction,
+a resumed round that lost its `gh` passthrough (plegma #762), and a push onto a
+PR branch while a fix round was queued against the old head (plegma #723). A
+fourth, resumed reviews whose inherited deliverable name did not match the
+brief, stays a screen in the merge-policy table. Shape 69 recurred on five PRs
+despite its screen; #4602 plans a `check-pr-body` row for it instead of a
+reworded screen.
+
+The compliance pass on this change found a fault in the history governance
+test itself: its heading detector read a prose line opening with `#4527` as a
+heading, and let "shape" and its number sit on two lines, so shape 31 counted
+as covered. The detector now needs a real heading on one line, and shape 31
+stays in the no-history baseline.
+
 ## 2026-10-18 — the Windows unit leg becomes a gate
 
 The maintainer decided on 2026-10-17 that `Unit tests Windows` gates. The lane

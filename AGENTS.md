@@ -421,6 +421,13 @@ file-scoped worklist and receives no project-wide scanner output.
     a test reads a record back, and a reason is judged by the reviewer
     (#3875; recurrence #3873: the S2/S3 fixes could not be shown to fire live).
 
+75. **Swallowed failure recorded as a different event:** a `catch` that drops a
+    failure and lets the normal path continue makes the log report success or
+    an event that never happened (an unreadable subtree counted as deleted, a
+    rejected save counted as sent). A catch on a runtime path records the
+    failure under its own kind, or says `none: <reason>`. Screen: force the
+    failure through the real entry point and read the record it wrote.
+
 43. **Prose mistaken for executable structure:** define lexical states and
     reachability before scanning shell, workflow, or source text.
 
