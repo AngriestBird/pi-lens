@@ -426,6 +426,13 @@ file-scoped worklist and receives no project-wide scanner output.
     and the file's pinned set re-pinned in the same change (`PI_LENS_PRINT_PINS=1`
     prints the rows). `scripts/` and `tests/` stay outside its scope.
 
+75. **Swallowed failure recorded as a different event:** a `catch` that drops a
+    failure and lets the normal path continue makes the log report success or
+    an event that never happened (an unreadable subtree counted as deleted, a
+    rejected save counted as sent). A catch on a runtime path records the
+    failure under its own kind, or says `none: <reason>`. Screen: force the
+    failure through the real entry point and read the record it wrote.
+
 43. **Prose mistaken for executable structure:** define lexical states and
     reachability before scanning shell, workflow, or source text.
 
@@ -1408,8 +1415,8 @@ node scripts/guard-bash-probe.mjs <matrix.jsonl> [--head <ref|file>] [--base <re
                                         prints only the rows that changed head vs base
 ```
 
-CI cost gates (#3801). The heavy advisory jobs (`CodeQL (<language>) (advisory)`,
-`Unit tests Windows (advisory)`) start only after every required check passed on the
+CI cost gates (#3801). The heavy advisory jobs (`CodeQL (<language>) (advisory)`)
+start only after every required check passed on the
 head (`heavy-gate` in ci.yml; it is red when a lint.yml required check was red
 or unfinished at its deadline). ci-verdict lists them with their real state
 (PENDING, or NOT RUN with the gate's reason) before and after the verdict turns
@@ -1421,6 +1428,26 @@ other test job always run, because a docs edit can red tests outside tests/confi
 model-checks only when `formal/` (or its checker or ci.yml) changed. A REQUIRED
 job never skips at job level: ci-verdict and the merge train demand a literal
 `success`, so `TLA+ models` starts and skips its steps.
+
+The Windows unit leg (`Unit tests Windows`, job key `unit-tests-windows`) GATES
+by maintainer decision on 2026-10-17: it runs the real `win32` gates, and
+advisory reds were waved through (the incidents are in `HISTORY.md`). It
+therefore starts on every event like the Unit shards and is never behind
+`heavy-gate`, whose docs-only skip would leave a required row absent. Its name
+carries no `(advisory)` suffix, so a row it reports with a failing conclusion
+gates. A row it does not report, or reports `skipped`, does not: until the
+maintainer adds `Unit tests Windows` to master's required status checks,
+ci-verdict is the only enforcement, and it judges only the rows that are
+posted, so an absent or job-skipped Windows row reads green (shape 11). Its
+population is every
+`tests/config/*` file, every `process.platform` Windows gate, and the
+shrink-only `WINDOWS_LANE_ADMISSIONS` rows
+(`scripts/lib/win32-gate-population.mjs`); a failed or under-executed subset
+reds the job, and no step of it is `continue-on-error`. A declined verdict
+still leaves a record: the tmp-fixture hygiene census is quarantined on
+`win32`, and its teardown prints `verdict=declined` where every other lane
+prints `verdict=asserted` (the issue that retires it is in `HISTORY.md`).
+
 The same script's `smoke` output (`PR_SMOKE_PATHS`: RPC, install, LSP launch,
 trust) makes `install-smoke.yml` run all four pi-load cells and an advisory LSP
 handshake job on a pull request; any other PR that reaches that workflow keeps
