@@ -28,8 +28,11 @@ function shapesWithoutHistory(agents: string, history: string): number[] {
 	const blanked = blankMarkdown(history);
 	const referenced = issueNumbers(blanked);
 	const headed = new Set(
-		[...blanked.matchAll(/^#{1,6}[^\n]*\bshape\s+(\d+)\b/gim)].map((match) =>
-			Number(match[1]),
+		// An ATX heading needs a space after its marks, and the number sits on the
+		// heading's own line: a prose line opening with an issue reference
+		// ("#4527's ... Shape" / "31") once counted as a heading naming shape 31.
+		[...blanked.matchAll(/^#{1,6}[ \t][^\n]*\bshape[ \t]+(\d+)\b/gim)].map(
+			(match) => Number(match[1]),
 		),
 	);
 	return [...parseDefectShapes(agents)]
@@ -62,8 +65,8 @@ function baselineViolations(
 // never add one. A new shape lands with its HISTORY.md entry.
 const NO_HISTORY_BASELINE: readonly number[] = [
 	2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23, 24,
-	25, 26, 27, 28, 29, 30, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44,
-	45, 46, 47, 48, 51, 54, 55, 57, 58, 59, 60, 61, 63, 64, 65, 66,
+	25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43,
+	44, 45, 46, 47, 48, 51, 54, 55, 57, 58, 59, 60, 61, 63, 64, 65, 66,
 ];
 
 describe("catalog shapes have a HISTORY.md entry (#4439)", () => {
@@ -231,6 +234,17 @@ describe("shapesWithoutHistory (#4439)", () => {
 		expect(shapesWithoutHistory(agents, "A relative of shape 7.\n")).toEqual([
 			7,
 		]);
+	});
+
+	// Recurrence (#4601 compliance F1): a prose line opening with an issue
+	// reference and wrapping before the number ("#4527's ... Shape" / "31")
+	// counted as a heading naming shape 31, so shape 31 left the baseline.
+	it.each([
+		["a line opening with an issue reference", "#4527's save. Shape 7 asks.\n"],
+		["a number wrapped onto the next line", "## Retro, see shape\n7 below\n"],
+	])("ignores %s as a heading naming the shape", (_name, history) => {
+		const agents = catalog(shape(7, "no issue number here."));
+		expect(shapesWithoutHistory(agents, history)).toEqual([7]);
 	});
 
 	it("is not satisfied by a reference or heading inside an HTML comment", () => {

@@ -17,13 +17,20 @@ did write a record, just the wrong one. #4596 tracks the four fixes and the
 planned guard. The #4575 round 7 verify found a third member: `lsp_touch_file`
 answers `failureKind: "success"` after a rejected didSave.
 
-The same retro mechanised four orchestrator mistakes rather than writing rules
-for them: a watcher left down after a context compaction, a resumed round that
-lost its `gh` passthrough (plegma #762), a push onto a PR branch while a fix
-round was queued against the old head (plegma #723), and resumed reviews whose
-inherited deliverable name did not match the brief. Shape 69 recurred on five
-PRs despite its screen; the response is a `check-pr-body` row, not a reworded
-screen.
+The same retro gave three orchestrator mistakes a guard in the orchestrator's
+own tooling rather than a rule: a watcher left down after a context compaction,
+a resumed round that lost its `gh` passthrough (plegma #762), and a push onto a
+PR branch while a fix round was queued against the old head (plegma #723). A
+fourth, resumed reviews whose inherited deliverable name did not match the
+brief, stays a screen in the merge-policy table. Shape 69 recurred on five PRs
+despite its screen; #4602 plans a `check-pr-body` row for it instead of a
+reworded screen.
+
+The compliance pass on this change found a fault in the history governance
+test itself: its heading detector read a prose line opening with `#4527` as a
+heading, and let "shape" and its number sit on two lines, so shape 31 counted
+as covered. The detector now needs a real heading on one line, and shape 31
+stays in the no-history baseline.
 
 ## 2026-10-17 — split host-path resolution (shape 74)
 
