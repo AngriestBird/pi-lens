@@ -82,7 +82,7 @@
 		"scripts/changelog.test.ts": 3,
 		"scripts/check-allow-scripts.test.ts": 3,
 		"scripts/check-lockfile-sync.test.ts": 2,
-		"scripts/check-pr-body.test.ts": 11,
+		"scripts/check-pr-body.test.ts": 12,
 		"scripts/ci-shuffle-changed-tests-spawn.test.ts": 3,
 		"scripts/ci-test-diff.test.ts": 2,
 		"scripts/ci-verdict.test.ts": 4,
