@@ -50,7 +50,8 @@ import {
 	cleanupTestEnvironmentsDrained,
 	setupTestEnvironment,
 } from "../clients/test-utils.js";
-import { McpHarness, testTimeoutScale } from "../mcp/harness.js";
+import { McpHarness } from "../mcp/harness.js";
+import { scaledTestTimeout } from "../support/test-timeout-scale.js";
 import { makeSessionStartEvent } from "../support/host-event-factory.js";
 import { createPiMock, makeCtx } from "../support/pi-mock.js";
 import {
@@ -596,8 +597,8 @@ function makeFixture(column: Column): Fixture {
 		path.join(workspace, "package.json"),
 		'{"name":"synthetic-4403-fixture","private":true}\n',
 	);
-	// typos and Opengrep root at the nearest `.git` (clients/lsp/server.ts).
-	fs.mkdirSync(path.join(workspace, ".git"));
+	// typos and Opengrep root at the nearest `.git` (clients/lsp/server.ts);
+	// #4560: the fixture root already carries the shared marker.
 	fs.mkdirSync(path.join(workspace, ".pi-lens"), { recursive: true });
 	const language = languageOf(column);
 	fs.writeFileSync(
@@ -894,7 +895,7 @@ async function runMcpCell(fx: Fixture): Promise<Cell> {
 					waitMs: 3000,
 				},
 			},
-			60_000 * testTimeoutScale,
+			scaledTestTimeout(60_000),
 		);
 		const result = response.result as { content: Array<{ text: string }> };
 		const text = result.content[0]?.text ?? "";
@@ -1550,7 +1551,6 @@ describe("the primary-unavailable note's cause (#4403)", () => {
 			const env = setupTestEnvironment(PREFIX);
 			const workspace = fs.realpathSync(env.tmpDir);
 			fs.writeFileSync(path.join(workspace, "package.json"), "{}\n");
-			fs.mkdirSync(path.join(workspace, ".git"));
 			fs.mkdirSync(path.join(workspace, ".pi-lens"));
 			fs.writeFileSync(
 				path.join(workspace, ".pi-lens", "lsp.json"),
@@ -1715,7 +1715,7 @@ describe("navigation operations on a file no primary answers for (#4403 N4, V5)"
 				"hover ok=false status=no_server: No LSP server available for notes.unserved. Check that the language server is installed.",
 			]);
 		},
-		120_000 * testTimeoutScale,
+		scaledTestTimeout(120_000),
 	);
 
 	const CASES: ReadonlyArray<[ColumnId, string[]]> = [
@@ -1730,7 +1730,7 @@ describe("navigation operations on a file no primary answers for (#4403 N4, V5)"
 			async () => {
 				expect(await navOps(columnId)).toEqual(expected);
 			},
-			120_000 * testTimeoutScale,
+			scaledTestTimeout(120_000),
 		);
 	}
 
@@ -1744,7 +1744,7 @@ describe("navigation operations on a file no primary answers for (#4403 N4, V5)"
 				"findSymbol ok=true status=empty: No results for findSymbol at a.json:1:2",
 			]);
 		},
-		120_000 * testTimeoutScale,
+		scaledTestTimeout(120_000),
 	);
 });
 
@@ -1765,7 +1765,7 @@ describe("every diagnostics route under every server-selecting switch (#4403)", 
 
 				expect(observed).toEqual(expectedRow(column));
 			},
-			180_000 * testTimeoutScale,
+			scaledTestTimeout(180_000),
 		);
 	}
 

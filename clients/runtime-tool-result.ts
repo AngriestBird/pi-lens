@@ -1,4 +1,3 @@
-import * as nodeCrypto from "node:crypto";
 import * as nodeFs from "node:fs";
 import * as path from "node:path";
 import {
@@ -15,12 +14,17 @@ import {
 	listGitHeadDelta,
 	observeGitHead,
 	opaqueBaselineSlot,
+	opaquePrescanRoot,
 	readGitHead,
 	recoverOpaqueChangesViaGit,
 	serializeHeadLook,
 	shouldRunOpaqueRecovery,
 } from "./opaque-mutation-scan.js";
-import { normalizeMapKey } from "./path-utils.js";
+import {
+	isUnderDir,
+	normalizeMapKey,
+	resolveToolCallFilePath,
+} from "./path-utils.js";
 import { detectFileKind } from "./file-kinds.js";
 import {
 	extractReadPathsFromCommand,
@@ -117,10 +121,10 @@ import type {
 } from "./runtime-coordinator.js";
 import { EXPANSION_LIMIT_LINES } from "./read-expansion.js";
 import { syncGitGuardRecord } from "./git-guard.js";
+import { hashContentBytes, hashFileBytes } from "./content-stamp.js";
 import { scheduleWordIndexPersist } from "./word-index.js";
 import { RUNTIME_CONFIG } from "./runtime-config.js";
 import { getActiveSessionId } from "./session-lifecycle.js";
-import { hashDiagnosticContent } from "./lsp/diagnostic-binding.js";
 import {
 	type LineageHandle,
 	recordDroppedRead,
@@ -128,6 +132,7 @@ import {
 } from "./session-scope.js";
 import { requestBootstrapClients } from "./bootstrap.js";
 import { bounded } from "./deadline-utils.js";
+import type { DiskChangeRuntime } from "./disk-changes.js";
 import { lookForOutOfBandChanges } from "./out-of-band-changes.js";
 import { HOOK_WALL_BUDGET_MS } from "./hook-budgets.js";
 import {
@@ -255,7 +260,9 @@ async function sendToHeldPrimaries(
 				const sent = service.getTrackedContent(filePath, root)?.hash;
 				try {
 					const disk = await nodeFs.promises.readFile(filePath, "utf8");
-					return sent === hashDiagnosticContent(disk) ? undefined : filePath;
+					return sent === hashContentBytes(Buffer.from(disk, "utf8"))
+						? undefined
+						: filePath;
 				} catch {
 					return filePath;
 				}
@@ -297,7 +304,7 @@ async function sendToHeldPrimaries(
 export function resyncHeadMove(args: HeadLook): Promise<void> {
 	return serializeHeadLook(args.key, async () => {
 		try {
-			await lookForOutOfBandChanges(args.root, args.trigger);
+			await lookForOutOfBandChanges(args.root, args.trigger, args.runtime);
 		} finally {
 			await lookAtHead(args);
 		}
@@ -309,6 +316,12 @@ interface HeadLook {
 	key: string;
 	trigger: "tool_call" | "tool_result";
 	label: string;
+	/**
+	 * The bulk mutation seam the out-of-band look's publish allocates the
+	 * existing project sequence through (#4535). Optional: a look driven
+	 * without a runtime still publishes, it just allocates no sequence.
+	 */
+	runtime?: DiskChangeRuntime;
 }
 
 /**
@@ -462,6 +475,16 @@ interface ToolResultDeps {
 	/** Role of the activation that owns this write. */
 	sessionRole?: "primary" | "secondary";
 	/**
+	 * The host ctx's `cwd` for THIS tool_result — the same per-session field the
+	 * `tool_call` hook reads. The opaque prescan resolves its root through
+	 * `opaquePrescanRoot(deps.cwd, …)` (#4504): a session whose cwd is not the
+	 * coordinator's `projectRoot` (a concurrent secondary in a linked worktree,
+	 * #473/#2129) otherwise wrote its baseline under one root and looked it up
+	 * under another. Absent means the host offered none, and the prescan falls
+	 * back to the same `projectRoot` the `tool_call` side falls back to.
+	 */
+	cwd?: string;
+	/**
 	 * Internal: set when the debounce timer fires to skip re-scheduling.
 	 * Do not pass from external callers.
 	 */
@@ -494,6 +517,17 @@ interface ToolResultDeps {
 	_sessionGeneration?: LineageHandle;
 	/** Internal (#3525): the debounce re-entry keeps its call's stamp decision. */
 	_ownWriteStamp?: OwnWriteStamp;
+	/**
+	 * Internal (#4577): this event's path is ALREADY the file's identity — a
+	 * bash-derived or opaque-recovered absolute path read back from disk — so
+	 * it must not go through the host-tool resolver again. The resolver applies
+	 * host-argument rules (unicode-space fold, `@` strip, the variant ladder) to
+	 * a spelling the model typed; re-running a name that came FROM the
+	 * filesystem rewrites its bytes (`a\u202Fb.ts` folded to `a b.ts`) and
+	 * dispatches a path that does not exist. The recovery caller knows the
+	 * provenance, so it states it here instead of the handler re-detecting it.
+	 */
+	_pathAlreadyResolved?: boolean;
 }
 
 /** How the agent's own write/edit moves the read guard (#3524, #3525). */
@@ -917,8 +951,7 @@ function lastByteIsNewline(filePath: string): boolean {
 
 function getFileStateHash(filePath: string): string {
 	try {
-		const content = nodeFs.readFileSync(filePath);
-		return nodeCrypto.createHash("sha256").update(content).digest("hex");
+		return hashFileBytes(filePath);
 	} catch (err) {
 		const code = (err as { code?: string }).code ?? "unknown";
 		return `unreadable:${code}`;
@@ -1802,11 +1835,19 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		// not a regression introduced by it.
 		resolutionBasis = workspaceRoot;
 	}
-	const filePath = rawFilePath
-		? path.isAbsolute(rawFilePath)
+	// #4576: one host-path resolver for both sides of a call. The `tool_call`
+	// seam already expanded `~`, `file://`, an `@` prefix and the variant
+	// ladder through this exact function; resolving the result's authoritative
+	// path with a bare `path.resolve` turned `~/x` into `<root>/~/x`, a path
+	// that cannot exist, and dispatched runners and analyzers against it.
+	// #4577: a path recovered from disk is already an identity, not a spelling
+	// the model typed — `_pathAlreadyResolved` carries that provenance from the
+	// recovery caller instead of this handler guessing it from the string.
+	const filePath =
+		rawFilePath && deps._pathAlreadyResolved
 			? rawFilePath
-			: path.resolve(resolutionBasis, rawFilePath)
-		: rawFilePath;
+			: resolveToolCallFilePath(rawFilePath, resolutionBasis, workspaceRoot)
+					?.path;
 	const analysisRootMode = resolveAnalysisRoot(filePath ?? "", workspaceRoot);
 	if (filePath) {
 		invalidateProjectIgnoreMatcherForPath(filePath);
@@ -1888,8 +1929,12 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		// with zero telemetry; git-first recovery is cheap enough (~60ms) to
 		// close that gap, subtracting already-recognized paths so nothing
 		// double-dispatches.
+		// #4504: one root for the record and the take. The coordinator's
+		// `projectRoot` is the LIVE PRIMARY's for a concurrent secondary (#473),
+		// so this side has to ask the host's own cwd, exactly as the `tool_call`
+		// side does — never the root it happens to be dispatching against.
+		const scanRoot = opaquePrescanRoot(deps.cwd, workspaceRoot);
 		if (shouldRunOpaqueRecovery(event.toolName, workspaceRoot)) {
-			const scanRoot = workspaceRoot;
 			const started = Date.now();
 			const pending = getOpaqueBaselineStore().take(
 				opaqueBaselineSlot(scanRoot, runtime.sessionGeneration),
@@ -1977,10 +2022,23 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			}
 			hadOpaqueRecovery = opaquePaths.length > 0;
 			if (observedChangedKeys) {
-				recognizedAuthored = recognizedWritten.filter((file) =>
+				// The scan speaks only for the checkout it ran in (#4504 r1). A
+				// recognized write OUTSIDE `scanRoot` — a secondary session naming a
+				// path in the primary's checkout — is neither observed nor disproven
+				// by it, so it stays a dispatched write (shape 54: a scan may not drop
+				// the only fresh answer it cannot see) and earns no authorship it
+				// cannot confirm (shape 65).
+				const scanned: string[] = [];
+				const unscanned: string[] = [];
+				for (const file of recognizedWritten)
+					(isUnderDir(path.resolve(file), scanRoot) ? scanned : unscanned).push(
+						file,
+					);
+				recognizedAuthored = scanned.filter((file) =>
 					observedChangedKeys!.has(normalizeMapKey(path.resolve(file))),
 				);
-				if (recognizedAuthored.length === 0) recognizedWritten = [];
+				if (recognizedAuthored.length === 0 && unscanned.length === 0)
+					recognizedWritten = [];
 			} else if (unknownReason) {
 				recognizedAuthored = [];
 				// The bounded opaque_mutation_coverage_unknown record below remains
@@ -2010,17 +2068,22 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		// below, so their diagnostics read the new dependencies. It has the edit
 		// budget, as the bash-write primary phase does: a move is a write, and
 		// the 500 ms read-only bound cut a slow primary mid-send (#4528 r4).
-		if (workspaceRoot) {
+		// #4504 r1: the head-move record and take resolve their root through the
+		// same owner as the baseline slot, so a concurrent secondary (#473) joins
+		// the look its own `tool_call` recorded, not the live primary's.
+		const headScanRoot = opaquePrescanRoot(deps.cwd, workspaceRoot);
+		if (headScanRoot) {
 			const headMoveSignal = deps.signal ?? undefined;
 			await bounded(
 				resyncHeadMove({
-					root: workspaceRoot,
+					root: headScanRoot,
 					key: headRecordKey(
-						opaqueBaselineSlot(workspaceRoot, runtime.sessionGeneration),
+						opaqueBaselineSlot(headScanRoot, runtime.sessionGeneration),
 						deps.sessionId,
 					),
 					trigger: "tool_result",
 					label: command,
+					runtime,
 				}),
 				{
 					ms: HOOK_WALL_BUDGET_MS.tool_result_edit,
@@ -2051,11 +2114,38 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			const primaryStarted = Date.now();
 			// The servers must also have READ the sends before a dispatch reads a
 			// check (#4528 r1 F1): resyncHeldPrimaries' drain barrier.
-			const primaryPhase = sendToHeldPrimaries(
-				workspaceRoot,
-				written,
-				HOOK_WALL_BUDGET_MS.tool_result_edit,
-			);
+			//
+			// #4504 r1: a server answers for the checkout that roots it, so the
+			// phase runs one send per root `written` spans. A concurrent
+			// secondary's recovered files belong to its own checkout; looking them
+			// up under the coordinator's root found no holder, so the awaited send
+			// skipped every document and a dispatch could read the stale bytes.
+			const sendsByRoot = new Map<string, string[]>();
+			for (const file of written) {
+				const owner = isUnderDir(path.resolve(file), scanRoot)
+					? scanRoot
+					: workspaceRoot;
+				const bucket = sendsByRoot.get(owner);
+				if (bucket) bucket.push(file);
+				else sendsByRoot.set(owner, [file]);
+			}
+			const primaryPhase = Promise.all(
+				[...sendsByRoot].map(([root, files]) =>
+					sendToHeldPrimaries(
+						root,
+						files,
+						HOOK_WALL_BUDGET_MS.tool_result_edit,
+					),
+				),
+			).then((outcomes) => ({
+				targets: outcomes.flatMap((outcome) => outcome.targets),
+				primary: outcomes.reduce(
+					(count, outcome) => count + outcome.primary,
+					0,
+				),
+				failed: outcomes.some((outcome) => outcome.failed),
+				drained: outcomes.every((outcome) => outcome.drained),
+			}));
 			if (opaquePaths.length > 0)
 				void primaryPhase
 					.then(() => resyncGitChangedFiles(opaquePaths))
@@ -2149,6 +2239,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				_attachmentBudget: syntheticAttachmentBudget,
 				_mutationSourceOverride: isOpaque ? "opaque-script" : undefined,
 				_readGuardAuthorship: recognizedAuthoredSet.has(wp),
+				_pathAlreadyResolved: true,
 				_ownWriteStamp: {
 					stampFileTime: false,
 					...(toolCallId !== undefined && { toolCallId }),

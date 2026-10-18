@@ -210,6 +210,7 @@ describe("folded walkers keep their populations (#4104)", () => {
 		}
 	});
 
+	// lane: Linux Unit tests; Windows symlink creation requires privilege.
 	it.skipIf(process.platform === "win32")(
 		"the win32 gate population skips a symlink named like a test file",
 		() => {
