@@ -411,6 +411,12 @@ function scanScript(
 	}
 }
 
+/**
+ * The census owns this classifier: it COLLECTS invocations and unclassified
+ * shapes into a `Census`. It is not the Bash guard's exported
+ * `classifySegment`, which returns a `DenyRule`; the guard is asked for lexing
+ * and command position, never for policy.
+ */
 function classifySegment(
 	rawWords: string[],
 	step: number,
