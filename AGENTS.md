@@ -919,8 +919,40 @@ file-scoped worklist and receives no project-wide scanner output.
   `continue-on-error` producer either calls the same helper (`--count
   <producer>=<n> --floor <m>` from a workflow step; `--min-pass`, the
   complexity file count and the shuffle census's missing starts already do) or
-  carries a `# No floor (<issue>): <reason>` header above its job; a floor comes
-  from a run recorded in `tests/fixtures/nightly-floors/measurements.json`.
+  needs none, and one census decides that: every `continue-on-error` site in a
+  `.github/workflows/*.yml` or `*.yaml` file and in a composite
+  `.github/actions/**/action.yml` or `action.yaml` is registered in
+  `tests/fixtures/nightly-floors/continue-on-error-sites.json` as `floored`
+  (naming the gating step and the floor text, which must sit in the argument
+  list of a named measuring invocation — `scripts/assert-evaluated.mjs`,
+  `scripts/smoke-tools.mjs`, `scripts/complexity-report.mjs` — on a top-level
+  line the shell executes, of a step whose `if:` is absent or a conjunction of
+  `always()`, `success()`, `!cancelled()` and one `github.event_name` or
+  `matrix.<name>` comparison the parsed document settles (the workflow's `on:`
+  keys, that job's `strategy.matrix` list), so
+  `!cancelled() && matrix.os == 'macos-latest'` counts only where the matrix
+  declares that leg; every other `if:` expression, including a trivially true
+  literal and a comparison no declared value satisfies, leaves the floor
+  unproven, and so does a job whose own `if:` the document proves never true).
+  A `\`-continued line and a line the previous one left unfinished with `&&`,
+  `||` or `|` are one command, so the measuring invocation must start the
+  joined command; an `exit` ends the script only in command position. A
+  `no-floor` row states the reader that makes an empty result visible, or
+  `governed-by` (naming the issue and the live tests that own the site, in
+  files vitest collects). The reader derives the population from the parsed
+  files, so it fails closed on a site the registry
+  does not name, on a producer file or a non-file entry it does not classify,
+  on a `continue-on-error` key in a location that is not a job or a step, and
+  on a floor whose evidence is not in the argument list of such an invocation
+  on a top-level command (a comment, a quoted command, a heredoc body, a
+  printed command, a function or block body, a subshell, a chained command, or
+  a line after an `exit`), or that names a step whose `if:` is outside that
+  allowlist; a floor comes from a run recorded in
+  `tests/fixtures/nightly-floors/measurements.json`. A
+  `# No floor (<issue>): <reason>` header above a job is human-facing copy
+  where one exists, not the record: six sites keep one (the five `lint.yml`
+  jobs and `install-smoke.yml`'s `mise-repro`), and the registry row the
+  census requires is the record.
   The helper must stay importable without `dist/` (the refresh-PR job runs it
   on a fresh checkout).
 - LSP service generations, workspace-sweep holds, and repair latches use
