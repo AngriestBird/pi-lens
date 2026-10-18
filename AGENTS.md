@@ -1055,6 +1055,17 @@ file-scoped worklist and receives no project-wide scanner output.
   pi-lens writes and before LSP or dispatch awaits. `fileModified` also covers
   side-effect files, so `postWriteStateHash` is the ownership discriminator;
   an absent hash must not stamp the target with later disk bytes (#2499).
+- The opaque prescan resolves its root once, through `opaquePrescanRoot`
+  (`clients/opaque-mutation-scan.ts`), and every consumer of that session root
+  asks the same owner: the baseline record and take, the head-move record and
+  take, and the root each held-primary send is scoped by. A
+  session whose cwd is not the coordinator's `projectRoot` — a concurrent
+  secondary session, which the host's session-start guard declines before any
+  `session_start` body runs — otherwise records its baseline and its HEAD under
+  one root and takes them under another, reporting `no-pending-snapshot` for a
+  command that did write. Scan evidence is scoped to the checkout it ran in: a
+  recognized write outside that root is kept (never cleared by a scan that
+  could not see it) and earns no authorship the scan cannot confirm.
 - `RUNNERS` declarations include file kinds. Runner selection is gated by file
   kind and anchored at the file's language root, not by dispatch-root config or
   declaration order. Runner children use `resolveToolCwd` with launcher markers.
@@ -1517,6 +1528,18 @@ New user-facing fragments begin with a bold lead of at most 100 characters
   owner's own `afterAll`: a sibling a file leaves after that boundary is out of
   scope for the census (the next run's baseline absorbs it), so fix the producer
   rather than reading the line as clean.
+- A test that pins `HOME`/`USERPROFILE` uses `pinFixtureHome`
+  (`tests/clients/test-utils.ts`): the home lives in the worker's scratch root
+  beside its worker home, never inside a fixture root the harness deletes and
+  never under `PI_LENS_HOME`, which production treats as its own housekeeping. A
+  child the test never awaits writes to its inherited HOME after teardown, and a
+  home inside the deleted root re-creates it after the file's sweep; no sweep
+  can remove that (`tests/clients/fixture-home-teardown.test.ts`). A
+  raw `process.env.HOME = …` pin in new test code is that shape. The pin
+  registers its undo with the harness, and the setup restores whatever is left
+  at the end of the case (`restorePinnedFixtureHomes` in its `afterEach`), so a
+  setup step that throws before the call site's `finally` cannot hand the next
+  case a fixture directory.
 
 Every logic change has relevant tests. New tests use fake clocks and
 `tests/clients/interleaving-kit.ts` before real time, raw sleeps, or real child

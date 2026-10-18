@@ -616,6 +616,10 @@ export const wallClockBudgetInclude = [
 	"tests/config/strictness-ratchet.test.ts",
 	"tests/config/tracked-control-bytes.test.ts",
 	"tests/config/workflow-writers-governance.test.ts",
+	// #4504: a real linked worktree (`git worktree add`) and the real
+	// tool_call/tool_result seams that key the opaque prescan (flake-shape
+	// admission); the git children ride along in the serialized lane.
+	"tests/index-4504-opaque-prescan-root-witness.test.ts",
 	"tests/mcp/session-end.smoke.test.ts",
 	// published-manifest guard runs the real `npm pack` (flake-shape admission).
 	"tests/packaging-pack-manifest.test.ts",

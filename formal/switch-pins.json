@@ -1331,6 +1331,13 @@
 			]
 		},
 		"opaque-baseline-slot": {
+			"pins": {
+				"Root": {
+					"value": "\"one\"",
+					"test": "tests/index-4504-opaque-prescan-root-witness.test.ts",
+					"title": "recovers the linked-worktree session's own opaque write at its tool_result"
+				}
+			},
 			"notCodeChoice": [
 				{
 					"reason": "Scenario bound or actor set: it sizes the state space or picks which actors, inputs and steps TLC explores; no code branch reads it.",
