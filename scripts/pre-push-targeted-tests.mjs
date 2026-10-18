@@ -200,6 +200,8 @@ export const TEST_TREE_GOVERNANCE_TESTS = [
 	"tests/config/handler-verdict-sweep.test.ts",
 	// #4381: walks tests/ for log-sink reads with no drain of that sink first.
 	"tests/config/sink-read-drain-sweep.test.ts",
+	// #4589: walks tests/ for env writes with no restore in the same file.
+	"tests/config/test-env-restore-sweep.test.ts",
 	// #3472: the tests-tree scanners the census finds through tests/support.
 	"tests/config/module-instance-coverage.test.ts",
 	"tests/config/tmp-fixture-hygiene.test.ts",
