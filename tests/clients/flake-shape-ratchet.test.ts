@@ -465,6 +465,14 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"a real ast-grep child applies ignore rules through its own file matcher",
 	},
+	// #4522: the census must know which fixture inputs git hides; its
+	// collectUntrackedIgnoredIds call spawns the real `git ls-files` that
+	// decides, and no stub reproduces git's own index state.
+	"real-process-spawn:clients/dispatch/smoke-fixture-coverage.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the fixture-input census needs git's own tracked-versus-ignored decision through collectUntrackedIgnoredIds; no stub reproduces the index state that decides whether a fixture survives a fresh checkout",
+	},
 	"real-process-spawn:clients/format-service-tab-width-real-biome.test.ts": {
 		detector: "real-process-spawn",
 		reason:
@@ -1911,6 +1919,27 @@ describe("flake-shape scan — real-process-spawn", () => {
 			"gitFixtureSpawnAsync( support spawn helper",
 			"safeSpawnAsync( support spawn helper",
 		]);
+	});
+
+	it("flags the collectUntrackedIgnoredIds production seam, and its mocked-module escape", () => {
+		const source = [
+			'import { collectUntrackedIgnoredIds } from "../../clients/git-tracked-ignore.js";',
+			'it("census", async () => {',
+			"	await collectUntrackedIgnoredIds(root);",
+			"});",
+		].join("\n");
+		expect(
+			scanRealProcessSpawn("fixture.test.ts", source).map((h) => h.reason),
+		).toEqual(["collectUntrackedIgnoredIds( support spawn helper"]);
+
+		// Mocking the helper's own module closes the spawn, so the call is not
+		// counted — the same escape the support helpers get (#4598).
+		const mocked = [
+			'import { collectUntrackedIgnoredIds } from "../../clients/git-tracked-ignore.js";',
+			'vi.mock("../../clients/git-tracked-ignore.js");',
+			"await collectUntrackedIgnoredIds(root);",
+		].join("\n");
+		expect(scanRealProcessSpawn("fixture.test.ts", mocked)).toEqual([]);
 	});
 
 	it("does not count a helper whose module is mocked", () => {
