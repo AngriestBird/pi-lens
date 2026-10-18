@@ -50,14 +50,21 @@
  * sink joins the sweep without an edit here (AGENTS.md shape 34).
  *
  * Known limits, named (all false negatives):
- * - A read whose path reaches the sink through a function parameter, a value
- *   computed in another module, or a directory a `vi.doMock` redirected
- *   (`tests/clients/lsp/launch.test.ts`) is invisible.
+ * - A read whose path reaches the sink through a value computed in another
+ *   module, or a directory a `vi.doMock` redirected
+ *   (`tests/clients/lsp/launch.test.ts`), is invisible. A SAME-FILE helper
+ *   whose path parameter is read is attributed to its call sites' arguments
+ *   (see below), so `rows(getLatencyLogPath())` is a sink read of the caller's
+ *   drain order.
  * - Path shapes the needles do not see: a shell read (`wc -l ${file}`), a
  *   template or concatenated path (`${dir}/latency.log`, `dir +
  *   "/latency.log"`), a basename held in a variable, a root held in any
  *   variable that is not an alias of `LOG_ROOT_SYMBOLS`, and
  *   `fstatSync(fd)` on a descriptor opened elsewhere.
+ * - A helper parameter the file only *conditionally* passes a sink to
+ *   (`rows(flag ? getLatencyLogPath() : other)`): the argument expression names
+ *   the sink, so the call site is judged like any other read — the direction
+ *   is a loud false positive, never a silent pass.
  * - Sinks with no path evidence. `clients/diagnostic-logger.ts` exports no
  *   path symbol, no `flush*`, and builds a dated file name, so no read of it
  *   can match: it is pinned in `BLIND_SINKS`, and a new blind sink reds the
@@ -580,17 +587,65 @@ function scanUndrainedSinkReads(
 
 	const hits: UndrainedRead[] = [];
 	const lines = source.split("\n");
+	/**
+	 * A read whose path argument is a parameter of a same-file helper: the
+	 * sink is named at each call site, so the CALLER's order decides (#4589).
+	 * The value decides, not a spelling: the parameter may sit inside a
+	 * `path.join(...)` argument.
+	 */
+	const parameterReads = (
+		call: SgNode,
+		first: SgNode,
+	): Array<{ owner: string; at: SgNode }> => {
+		const fn = scopeOf(call);
+		if (!fn) return [];
+		const name = declaredName(fn);
+		if (!name) return [];
+		const params = fn.field("parameters")?.namedChildren() ?? [];
+		const argumentText = blanked.slice(
+			first.range().start.index,
+			first.range().end.index,
+		);
+		const index = params.findIndex((param) => {
+			// A typed parameter is a `required_parameter` wrapping the pattern.
+			const pattern =
+				param.kind() === "identifier"
+					? param
+					: (param.field("pattern") ?? param.namedChildren()[0]);
+			return (
+				pattern?.kind() === "identifier" &&
+				nameNeedle(pattern.text(), false).test(argumentText)
+			);
+		});
+		if (index < 0) return [];
+		const out: Array<{ owner: string; at: SgNode }> = [];
+		for (const site of callsTo(name, fn)) {
+			const argument = site.field("arguments")?.namedChildren()[index];
+			if (!argument) continue;
+			const range = argument.range();
+			for (const owner of sinksIn(range.start.index, range.end.index)) {
+				out.push({ owner, at: site });
+			}
+		}
+		return out;
+	};
 	for (const call of calls) {
 		const callee = calleeName(call);
 		if (!callee || !READ_CALLEES.has(callee)) continue;
 		const first = call.field("arguments")?.namedChildren()[0];
 		if (!first) continue;
 		const owners = sinksIn(first.range().start.index, first.range().end.index);
+		// Sink named at the read, or named by the callers of a helper whose
+		// parameter is the path it reads.
+		const reads: Array<{ owner: string; at: SgNode }> =
+			owners.size > 0
+				? [...owners].map((owner) => ({ owner, at: call }))
+				: parameterReads(call, first);
 		const undrained: string[] = [];
 		const callers = new Set<number>();
 		const line = call.range().start.line + 1;
-		for (const owner of owners) {
-			const at = undrainedAt(call, owner, 0);
+		for (const { owner, at: readAt } of reads) {
+			const at = undrainedAt(readAt, owner, 0);
 			if (at.length === 0) continue;
 			undrained.push(owner);
 			for (const site of at) if (site !== line) callers.add(site);
@@ -850,6 +905,56 @@ describe("sink reads drain first (#4381)", () => {
 				].join("\n"),
 			);
 			expect(hits.map((hit) => hit.line)).toEqual([7]);
+		});
+
+		it("a read through a helper parameter is judged at the caller's drain (#4586)", () => {
+			// #4586's recurrence (the adoption row existed, and only a real-log
+			// read could prove it), one step out: the helper owns the read and the
+			// CALLER owns the sink path, so the caller's order is the one that
+			// decides whether the bytes are on disk yet.
+			const reader = [
+				"function rowsFor(file: string): string {",
+				'\treturn fs.readFileSync(file, "utf8");',
+				"}",
+			];
+			const hits = scanFixture(
+				[
+					...reader,
+					'it("x", async () => {',
+					"\tawait loadLSPConfig(dir, home);",
+					"\tconst text = rowsFor(getLatencyLogPath());",
+					"});",
+				].join("\n"),
+			);
+			expect(
+				hits.map((hit) => [hit.line, hit.sinks, hit.undrainedCallers]),
+			).toEqual([[2, ["clients/latency-logger.ts"], [6]]]);
+			// The same call with the drain in front is clean: the sink may reach
+			// the helper through a local alias as well.
+			expect(
+				scanFixture(
+					[
+						...reader,
+						'it("x", async () => {',
+						"\tconst file = getLatencyLogPath();",
+						"\tawait flushLatencyLog();",
+						"\tconst text = rowsFor(file);",
+						"});",
+					].join("\n"),
+				),
+			).toEqual([]);
+			// A caller that passes a path which is not a sink creates no finding:
+			// the parameter rule follows the value, not the parameter's name.
+			expect(
+				scanFixture(
+					[
+						...reader,
+						'it("x", async () => {',
+						'\tconst text = rowsFor(path.join(dir, "notes.txt"));',
+						"});",
+					].join("\n"),
+				),
+			).toEqual([]);
 		});
 
 		it("stat, lstat, open and openSync of a sink are reads (A2, A4)", () => {
