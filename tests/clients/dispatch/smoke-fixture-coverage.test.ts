@@ -1,3 +1,6 @@
+// flake-shape: real-process-spawn — the git-ignored census needs git's own
+// tracked-versus-ignored decision through collectUntrackedIgnoredIds; no stub
+// reproduces the index state that decides whether a fixture survives checkout.
 /**
  * Smoke-fixture coverage drift guard (#209 requirement 4, #1937).
  *
