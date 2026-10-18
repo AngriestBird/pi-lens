@@ -70,8 +70,9 @@ exports change.
   transcript quoted in `Test assessment`. A redundant test that still guards
   goes only with the named survivor that covers it.
 - Apply folded review follow-ups per `docs/pi-lens-subagent.md`
-  "Follow-ups", and list filed residuals in one **Residuals** section of the
-  PR body.
+  "Follow-ups", and list every gap left open in one **Accepted residuals** section of
+  the PR body, each with its severity and live population (merge bar:
+  `docs/pi-lens-merge-policy.md` "Filing issues").
 
 ## Evidence
 
