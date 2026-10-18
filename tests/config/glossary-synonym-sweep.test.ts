@@ -721,10 +721,19 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// branches onto the observational net's arm, and the surviving ast-grep
 		// site walks its `paths` array instead of filtering it.
 		"clients/runtime-tool-call.ts": 3,
+		// #4535 slice 2: the LSP consumer narrows a publish's population to the
+		// documents a live client holds and keeps the stale ones among them —
+		// two `Array.prototype.filter` calls that moved here from
+		// `runtime-tool-result.ts` with the held-primary pass, not a delivery
+		// filter.
+		"clients/disk-change-subscribers.ts": 2,
 		// 5 -> 8 (#4493): the HEAD-move look keeps the held documents of the
 		// delta and the stale ones among them, and counts the dispositions;
 		// three `Array.prototype.filter` calls, not a delivery filter.
-		"clients/runtime-tool-result.ts": 8,
+		// 8 -> 6 (#4535 slice 2): two of those calls moved into
+		// `clients/disk-change-subscribers.ts` with the held-primary pass; the
+		// disposition count stays here.
+		"clients/runtime-tool-result.ts": 6,
 		// 31 -> 33 (#3901): the cut-advisory hold keeps the fresh items of a part
 		// (one `Array.prototype.filter`), and the call-graph lane drops a parked
 		// file it already walks as fresh (one). The knip and dead-code re-offers

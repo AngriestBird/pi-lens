@@ -289,6 +289,15 @@ export type DegradationKind =
 	 */
 	| "disk-change-append-failed"
 	/**
+	 * #4535 slice 2: a publish that a detector needed an LSP answer from reached
+	 * no LSP subscriber, so no held document was checked for stale bytes
+	 * (`readHeldDocumentsAnswer`, `clients/disk-change-subscribers.ts`). The
+	 * registry is seeded by `ensureDiskChangeSubscribers`, so its absence means a
+	 * second module copy owns the registry or the seed never ran. Subject: the
+	 * normalized project root; one row per root per session.
+	 */
+	| "disk-change-lsp-consumer-missing"
+	/**
 	 * #4535: one publish carried more paths than
 	 * `DISK_CHANGE_MAX_RECORDED_PATHS`, so the tail got no sequence and the
 	 * record is reported as unenumerable (clients/disk-changes.ts). Once per

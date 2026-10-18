@@ -99,11 +99,7 @@ import {
 import type { PiLensFlagSource } from "./lens-config.js";
 import type { EditToolDetails } from "@earendil-works/pi-coding-agent";
 import type { LSPShutdownOptions } from "./lsp/client.js";
-import {
-	notifyExternalFileChange,
-	peekLSPService,
-	resyncGitChangedFiles,
-} from "./lsp/capabilities.js";
+import { notifyExternalFileChange } from "./lsp/capabilities.js";
 import type { MetricsClient } from "./metrics-client.js";
 import { type PipelineResult, runPipeline } from "./pipeline.js";
 import {
@@ -121,7 +117,7 @@ import type {
 } from "./runtime-coordinator.js";
 import { EXPANSION_LIMIT_LINES } from "./read-expansion.js";
 import { syncGitGuardRecord } from "./git-guard.js";
-import { hashContentBytes, hashFileBytes } from "./content-stamp.js";
+import { hashFileBytes } from "./content-stamp.js";
 import { scheduleWordIndexPersist } from "./word-index.js";
 import { RUNTIME_CONFIG } from "./runtime-config.js";
 import { getActiveSessionId } from "./session-lifecycle.js";
@@ -133,6 +129,13 @@ import {
 import { requestBootstrapClients } from "./bootstrap.js";
 import { bounded } from "./deadline-utils.js";
 import type { DiskChangeRuntime } from "./disk-changes.js";
+import { publishDiskChange } from "./disk-changes.js";
+import {
+	BASH_RECOVERY_DRIFT_SOURCE,
+	BASH_WRITE_SOURCE,
+	ensureDiskChangeSubscribers,
+	readHeldDocumentsAnswer,
+} from "./disk-change-subscribers.js";
 import { lookForOutOfBandChanges } from "./out-of-band-changes.js";
 import { HOOK_WALL_BUDGET_MS } from "./hook-budgets.js";
 import {
@@ -218,71 +221,6 @@ export function isFailedGitIntegrationCommand(
 }
 
 /**
- * #4493: forced drift passes a HEAD move's resync may run before it reports
- * the rest deferred: 16 passes of `DRIFT_RESYNC_BATCH` (4) cover 64 held
- * documents. The primary phase sends to the same cap.
- */
-const HEAD_MOVE_RESYNC_MAX_PASSES = 16;
-const HEAD_MOVE_PRIMARY_CAP = 64;
-
-/**
- * #4493, #4507: send the disk bytes of `candidates` to the PRIMARY servers
- * that hold them, awaited, and to no auxiliary: that is the view the next
- * read or edit's dispatch reads, and primaries are not paced. The caller runs
- * the full resync (every holding server, held importers, drift records)
- * detached after it.
- *
- * A queued target is resent unconditionally, and most HEAD moves (every
- * `git commit`, an amend) leave the held bytes current: only a document
- * whose last-sent bytes differ from the disk is a target. An unreadable one
- * is one too, so the resync reports it vanished. A candidate no server holds
- * is skipped: opening it is its dispatch's job. Never spawns, and creates no
- * service.
- */
-async function sendToHeldPrimaries(
-	root: string,
-	candidates: readonly string[],
-	drainMs: number,
-): Promise<{
-	targets: string[];
-	primary: number;
-	failed: boolean;
-	drained: boolean;
-}> {
-	const service = peekLSPService();
-	if (!service || candidates.length === 0)
-		return { targets: [], primary: 0, failed: false, drained: true };
-	const held = new Set(service.getOpenDocumentPaths(root));
-	const targets = (
-		await Promise.all(
-			candidates.map(async (filePath) => {
-				if (!held.has(filePath)) return undefined;
-				const sent = service.getTrackedContent(filePath, root)?.hash;
-				try {
-					const disk = await nodeFs.promises.readFile(filePath, "utf8");
-					return sent === hashContentBytes(Buffer.from(disk, "utf8"))
-						? undefined
-						: filePath;
-				} catch {
-					return filePath;
-				}
-			}),
-		)
-	).filter((filePath): filePath is string => filePath !== undefined);
-	if (targets.length === 0)
-		return { targets, primary: 0, failed: false, drained: true };
-	try {
-		const { sent, drained } = await service.resyncHeldPrimaries(
-			targets.slice(0, HEAD_MOVE_PRIMARY_CAP),
-			drainMs,
-		);
-		return { targets, primary: sent, failed: false, drained };
-	} catch {
-		return { targets, primary: 0, failed: true, drained: false };
-	}
-}
-
-/**
  * #4493: when HEAD moved since this session last looked, resync the held
  * documents in `git diff <old> <new>`.
  *
@@ -336,6 +274,10 @@ interface HeadLook {
  * importers and stamps the drift records; its end writes the row. The hooks and
  * every joined look wait for the first phase only, so an auxiliary's pacing
  * barrier no longer holds back the primary or the next tool call.
+ *
+ * #4535 slice 2: both phases are the disk-change publisher's LSP consumer now.
+ * The look publishes the delta and reads the two answers back out of the
+ * publish, so it names no service and no resync helper.
  */
 async function lookAtHead(args: HeadLook): Promise<void> {
 	if (!(await isGitWorktree(args.root))) return;
@@ -345,28 +287,23 @@ async function lookAtHead(args: HeadLook): Promise<void> {
 	if (!from) return;
 	const started = Date.now();
 	const delta = await listGitHeadDelta(args.root, from, head);
-	const service = peekLSPService();
-	const heldPaths = service?.getOpenDocumentPaths(args.root) ?? [];
-	const held = new Set(heldPaths);
-	// Only a held document can be stale, and the reverse-import lookup inside
-	// the resync costs one index build per path, so a large delta is cut here.
-	// An unknown delta (git failed, or the listing was cut) leaves the held set
-	// as the candidates: the stale views are the harm (shape 48, review r1 F6).
-	const inDelta =
-		delta === undefined
-			? heldPaths
-			: delta.filter((filePath) => held.has(filePath));
-	const {
-		targets,
-		primary,
-		failed: resyncFailed,
-		drained,
-	} = await sendToHeldPrimaries(
-		args.root,
-		inDelta,
-		// The tool_call bound around the look; past it the wait is cut anyway.
-		HOOK_WALL_BUDGET_MS.tool_result_read_only,
+	ensureDiskChangeSubscribers();
+	const { results } = await publishDiskChange(
+		{
+			root: args.root,
+			origin: "head-move",
+			kind: "inferred",
+			// An unknown delta (git failed, or the listing was cut) is published
+			// as unenumerable: the consumer then considers every held document,
+			// because the stale views are the harm (shape 48, review r1 F6).
+			paths: delta ?? "unknown",
+		},
+		// No runtime: a HEAD move's delta records no mutation (#4493). The
+		// publisher's sequence is the consumer path's, and the delta read by
+		// every consumer comes from the record, not from a bump.
 	);
+	const answer = readHeldDocumentsAnswer(results, args.root);
+	const { targets, primary, failed: resyncFailed, drained } = answer;
 	const primaryMs = Date.now() - started;
 	const report = (
 		dispositions: ReadonlyMap<string, string> | undefined,
@@ -390,8 +327,8 @@ async function lookAtHead(args: HeadLook): Promise<void> {
 				from: from.slice(0, 12),
 				to: head.slice(0, 12),
 				changed: delta?.length ?? -1,
-				held: inDelta.length,
-				current: inDelta.length - targets.length,
+				held: answer.held,
+				current: answer.held - targets.length,
 				primary,
 				primaryMs,
 				drained,
@@ -401,13 +338,11 @@ async function lookAtHead(args: HeadLook): Promise<void> {
 			},
 		});
 	};
-	if (targets.length === 0 || resyncFailed) {
+	if (targets.length === 0 || resyncFailed || answer.drift === undefined) {
 		report(undefined, resyncFailed);
 		return;
 	}
-	void resyncGitChangedFiles(targets, {
-		maxPasses: HEAD_MOVE_RESYNC_MAX_PASSES,
-	}).then(
+	void answer.drift.then(
 		(dispositions) => report(dispositions, false),
 		() => report(undefined, true),
 	);
@@ -2113,13 +2048,19 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		if (workspaceRoot && written.length > 0) {
 			const primaryStarted = Date.now();
 			// The servers must also have READ the sends before a dispatch reads a
-			// check (#4528 r1 F1): resyncHeldPrimaries' drain barrier.
+			// check (#4528 r1 F1): the held-primary pass's drain barrier.
 			//
 			// #4504 r1: a server answers for the checkout that roots it, so the
-			// phase runs one send per root `written` spans. A concurrent
+			// phase runs one publish per root `written` spans. A concurrent
 			// secondary's recovered files belong to its own checkout; looking them
 			// up under the coordinator's root found no holder, so the awaited send
 			// skipped every document and a dispatch could read the stale bytes.
+			//
+			// #4535 slice 2: both phases are the publisher's LSP consumer. This
+			// detector names no service: `bash-write` is the population every
+			// written path feeds (the awaited primary phase), and `recovered-drift`
+			// is the recovered subset's detached follow-up.
+			ensureDiskChangeSubscribers();
 			const sendsByRoot = new Map<string, string[]>();
 			for (const file of written) {
 				const owner = isUnderDir(path.resolve(file), scanRoot)
@@ -2129,29 +2070,57 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				if (bucket) bucket.push(file);
 				else sendsByRoot.set(owner, [file]);
 			}
-			const primaryPhase = Promise.all(
+			const publishes = Promise.all(
 				[...sendsByRoot].map(([root, files]) =>
-					sendToHeldPrimaries(
+					publishDiskChange({
 						root,
-						files,
-						HOOK_WALL_BUDGET_MS.tool_result_edit,
-					),
+						origin: "bash-recovery",
+						sources: [BASH_WRITE_SOURCE],
+						// The population is what the command wrote; recovery only
+						// read stat evidence for its opaque half.
+						kind: "inferred",
+						paths: files,
+					}),
 				),
-			).then((outcomes) => ({
-				targets: outcomes.flatMap((outcome) => outcome.targets),
-				primary: outcomes.reduce(
-					(count, outcome) => count + outcome.primary,
-					0,
-				),
-				failed: outcomes.some((outcome) => outcome.failed),
-				drained: outcomes.every((outcome) => outcome.drained),
-			}));
+			);
+			const primaryPhase = publishes.then((published) => {
+				const answers = published.map(({ change, results }) =>
+					readHeldDocumentsAnswer(results, change.root),
+				);
+				return {
+					targets: answers.flatMap((answer) => answer.targets),
+					primary: answers.reduce((count, answer) => count + answer.primary, 0),
+					failed: answers.some((answer) => answer.failed),
+					drained: answers.every((answer) => answer.drained),
+				};
+			});
 			if (opaquePaths.length > 0)
 				void primaryPhase
-					.then(() => resyncGitChangedFiles(opaquePaths))
-					.catch((err) => {
-						dbg(`git-change LSP resync failed: ${err}`);
-					});
+					.then(() =>
+						publishDiskChange({
+							root: scanRoot,
+							origin: "bash-recovery",
+							sources: [BASH_RECOVERY_DRIFT_SOURCE],
+							// `inferred`, the conservative label: the stat-diff
+							// strategy hashed the bytes, but the git strategy reported
+							// a status pair and an mtime window without reading them.
+							// A marker that wants to confirm "not reproduced" reads the
+							// bytes itself; the drift pass does exactly that.
+							kind: "inferred",
+							paths: opaquePaths,
+						}),
+					)
+					.then(
+						({ results }) => {
+							const answer = readHeldDocumentsAnswer(results, scanRoot);
+							void answer.drift?.catch((err) => {
+								dbg(`git-change LSP resync failed: ${err}`);
+							});
+						},
+						(err) => {
+							dbg(`git-change LSP resync failed: ${err}`);
+						},
+					);
 			// A name of its own: the HEAD look above bounds with the same signal.
 			const primarySignal = deps.signal ?? undefined;
 			const sent = await bounded(primaryPhase, {

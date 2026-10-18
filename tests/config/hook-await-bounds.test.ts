@@ -1385,18 +1385,18 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"rather than a change.",
 		owner: "#2523 slice 2",
 	},
-	"clients/runtime-tool-result.ts#lookAtHead:04717176~5f0a37aa": {
+	"clients/runtime-tool-result.ts#lookAtHead:04062605~45cd3f56": {
 		family: "hook-await",
 		site: "tool_result_read_only",
 		reason:
-			"Inside `lookAtHead`, the body of `resyncHeadMove` (#4493). Both " +
-			"callers await it under bounded() with the read-only tool_result " +
-			"budget and the hook's signal (the bash tool_result and the " +
-			"tool_call look), so this await is bounded one frame up; the " +
-			"line-granular scan cannot see a caller's bound.",
-		owner: "#4493",
+			"Inside `lookAtHead`, the publish of a HEAD move's delta (#4535 " +
+			"slice 2). Both callers await the whole look under bounded() with " +
+			"the read-only tool_result budget and the hook's signal (the bash " +
+			"tool_result and the tool_call look), so this await is bounded one " +
+			"frame up; the line-granular scan cannot see a caller's bound.",
+		owner: "#4535",
 	},
-	"clients/runtime-tool-result.ts#lookAtHead:6ea98e35~6fe2f153": {
+	"clients/runtime-tool-result.ts#lookAtHead:04717176~8dd6e0a0": {
 		family: "hook-await",
 		site: "tool_result_read_only",
 		reason:
@@ -1450,42 +1450,6 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"this await is bounded one frame up; the line-granular scan cannot " +
 			"see a caller's bound.",
 		owner: "#4476",
-	},
-	"clients/runtime-tool-result.ts#sendToHeldPrimaries:48fdd1b8~35660cb8": {
-		family: "hook-await",
-		site: "tool_result_edit",
-		reason:
-			"Inside `sendToHeldPrimaries` (#4493, #4507): its two callers are " +
-			"`lookAtHead`, bounded one frame up through `resyncHeadMove`, and " +
-			"the bash tool_result's primary phase, which awaits it under " +
-			"bounded() with the edit budget (#4528 r1 F1) and " +
-			"ToolResultDeps.signal; the line-granular scan cannot see a " +
-			"caller's bound.",
-		owner: "#4507",
-	},
-	"clients/runtime-tool-result.ts#sendToHeldPrimaries:c4c6636f~415851d2": {
-		family: "hook-await",
-		site: "tool_result_edit",
-		reason:
-			"Inside `sendToHeldPrimaries` (#4493, #4507): its two callers are " +
-			"`lookAtHead`, bounded one frame up through `resyncHeadMove`, and " +
-			"the bash tool_result's primary phase, which awaits it under " +
-			"bounded() with the edit budget (#4528 r1 F1) and " +
-			"ToolResultDeps.signal; the line-granular scan cannot see a " +
-			"caller's bound.",
-		owner: "#4507",
-	},
-	"clients/runtime-tool-result.ts#sendToHeldPrimaries:f0b9e5ad~9c757531": {
-		family: "hook-await",
-		site: "tool_result_edit",
-		reason:
-			"Inside `sendToHeldPrimaries` (#4493, #4507): its two callers are " +
-			"`lookAtHead`, bounded one frame up through `resyncHeadMove`, and " +
-			"the bash tool_result's primary phase, which awaits it under " +
-			"bounded() with the edit budget (#4528 r1 F1) and " +
-			"ToolResultDeps.signal; the line-granular scan cannot see a " +
-			"caller's bound.",
-		owner: "#4507",
 	},
 	"clients/runtime-turn.ts#handleTurnEnd:156451e5~bf99fb9e": {
 		family: "hook-await",
@@ -2293,6 +2257,18 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	"clients/cache-manager.ts": 2,
 	"clients/cooperative-budget.ts": 3,
 	"clients/dead-code-client.ts": 4,
+	// #4535 slice 2: the publisher and its subscriber registry became
+	// one-hop helpers when the HEAD look and the bash write path stopped
+	// naming the LSP service and published instead. `disk-changes.ts` awaits
+	// each subscriber inside `fanOut` and the fan-out inside
+	// `publishDiskChange`; `disk-change-subscribers.ts` awaits the held-
+	// document pass it calls, the two service calls, and the two file
+	// reads that decide which held documents are stale. None can be bounded
+	// here for the same reason as the rest of this table: the hook signal
+	// lives in the detector, which bounds the whole publish one frame up
+	// (#2523 AC4).
+	"clients/disk-change-subscribers.ts": 5,
+	"clients/disk-changes.ts": 2,
 	// `bounded()` itself awaits the raced work; this is the shared primitive's
 	// implementation await, not an additional hook-path await at the caller.
 	"clients/deadline-utils.ts": 1,
