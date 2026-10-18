@@ -41,6 +41,11 @@ import {
 	resetDegradationLedger,
 } from "../../../clients/degradation-ledger.js";
 import {
+	clearLatencyLog,
+	flushLatencyLog,
+	getLatencyLogPath,
+} from "../../../clients/latency-logger.js";
+import {
 	classifyJsTsGlobalScope,
 	feedsJsTsGlobalScope,
 	goPackageChangedAt,
@@ -156,5 +161,46 @@ describe("an implicit-scope answer that could not be derived", () => {
 
 		expect(classifyJsTsGlobalScope(modulePath)).toBe("none");
 		expect(unknownRows()).toEqual([]);
+	});
+
+	it("writes the file, the cause and the error into the durable row", async () => {
+		// The in-process summary carries the reason; only the durable row carries
+		// metadata, so a monitor reading `latency.log` sees `file`/`cause`/`err`
+		// here or not at all (#4603 review, the P2 row-read thread).
+		// `PI_LENS_TEST_MODE=0` is the sanctioned opt-out that lets the real sink
+		// write into the worker's own hermetic home, scoped to this case.
+		const moduleDir = path.join(root, "durable.ts");
+		fs.mkdirSync(moduleDir);
+
+		const previousMode = process.env.PI_LENS_TEST_MODE;
+		process.env.PI_LENS_TEST_MODE = "0";
+		clearLatencyLog();
+		await flushLatencyLog();
+		try {
+			expect(classifyJsTsGlobalScope(moduleDir)).toBe("unknown");
+			await flushLatencyLog();
+		} finally {
+			if (previousMode === undefined) delete process.env.PI_LENS_TEST_MODE;
+			else process.env.PI_LENS_TEST_MODE = previousMode;
+		}
+
+		const rows = fs
+			.readFileSync(getLatencyLogPath(), "utf-8")
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line) as Record<string, unknown>)
+			.filter(
+				(row) =>
+					(row.metadata as Record<string, unknown> | undefined)?.kind ===
+					"lsp-implicit-scope-unknown",
+			);
+		expect(rows).toHaveLength(1);
+		expect(rows[0].metadata).toMatchObject({
+			file: moduleDir,
+			cause: "unreadable-file",
+		});
+		expect(String((rows[0].metadata as Record<string, unknown>).err)).toContain(
+			"EISDIR",
+		);
 	});
 });

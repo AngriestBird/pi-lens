@@ -46,6 +46,9 @@ import {
 import {
 	_setRecentPhasesForTest,
 	getRecentLoggedPhases,
+	clearLatencyLog,
+	flushLatencyLog,
+	getLatencyLogPath,
 } from "../../clients/latency-logger.js";
 import { lookForOutOfBandChanges } from "../../clients/out-of-band-changes.js";
 import { normalizeMapKey } from "../../clients/path-utils.js";
@@ -155,6 +158,41 @@ afterEach(() => {
 	fs.rmSync(root, { recursive: true, force: true });
 });
 
+/**
+ * One look with the real sink enabled (`PI_LENS_TEST_MODE=0`, the sanctioned
+ * opt-in, scoped to this look) and the durable
+ * `lsp-declaration-walk-unreadable` rows it wrote. The in-process summary
+ * carries only the reason, which the ledger caps at `LEDGER_FIELD_MAX`, so the
+ * counts a reader needs (`heldBackDeclarations`, `carriedDropped`) live only in
+ * the durable row: a claim about them reads it.
+ */
+async function lookAndReadUnreadableRows(): Promise<
+	Array<Record<string, unknown>>
+> {
+	const previousMode = process.env.PI_LENS_TEST_MODE;
+	process.env.PI_LENS_TEST_MODE = "0";
+	clearLatencyLog();
+	await flushLatencyLog();
+	try {
+		await lookForOutOfBandChanges(root, "tool_result");
+		await flushLatencyLog();
+	} finally {
+		if (previousMode === undefined) delete process.env.PI_LENS_TEST_MODE;
+		else process.env.PI_LENS_TEST_MODE = previousMode;
+	}
+	return fs
+		.readFileSync(getLatencyLogPath(), "utf-8")
+		.split("\n")
+		.map((line) => line.trim())
+		.filter((line) => line.length > 0)
+		.map((line) => JSON.parse(line) as Record<string, unknown>)
+		.filter(
+			(row) =>
+				(row.metadata as Record<string, unknown> | undefined)?.kind ===
+				"lsp-declaration-walk-unreadable",
+		);
+}
+
 describe("a declaration walk that could not read a subtree", () => {
 	it("reports a changed declaration under a readable directory (control)", async () => {
 		await lookForOutOfBandChanges(root, "tool_result");
@@ -186,7 +224,7 @@ describe("a declaration walk that could not read a subtree", () => {
 
 		denyListing(types);
 		const seen = recordPublishes();
-		await lookForOutOfBandChanges(root, "tool_result");
+		const durable = await lookAndReadUnreadableRows();
 
 		// The pre-fix detector published `deleted: 1` for a file that exists.
 		expect(seen).toEqual([]);
@@ -198,7 +236,14 @@ describe("a declaration walk that could not read a subtree", () => {
 		// directory, and how many fingerprints were kept instead of deleted.
 		expect(rows[0].latestReasons[0].subject).toBe(normalizeMapKey(root));
 		expect(rows[0].latestReasons[0].reason).toContain(types);
-		expect(rows[0].latestReasons[0].reason).toContain("1 declaration file(s)");
+		// The kept count is in the durable row's metadata: the reason string is
+		// capped by the ledger, so it names only the first unreadable path.
+		expect(durable).toHaveLength(1);
+		expect(
+			Number(
+				(durable[0].metadata as Record<string, unknown>).heldBackDeclarations,
+			),
+		).toBe(1);
 	});
 
 	it("reports the deferred change on the first walk that can read the subtree", async () => {
@@ -291,7 +336,7 @@ describe("a declaration walk that could not read a subtree", () => {
 			fs.writeFileSync(path.join(b, `h${index}.d.ts`), "export {};\n");
 		denyListing(a);
 		const seen = recordPublishes();
-		await lookForOutOfBandChanges(root, "tool_result");
+		const durable = await lookAndReadUnreadableRows();
 
 		// Over the cap the walk is incomplete: the previous map stands and
 		// nothing is published this round. Pre-fix it published
@@ -302,6 +347,12 @@ describe("a declaration walk that could not read a subtree", () => {
 		expect(rows[0].latestReasons[0].reason).toMatch(
 			/could not be carried past the 2048-file cap/,
 		);
+		// #4603 F5/N8: the metadata field is the record, so assert the drop
+		// count the durable row carries, not only the reason text.
+		expect(durable).toHaveLength(1);
+		expect(
+			Number((durable[0].metadata as Record<string, unknown>).carriedDropped),
+		).toBeGreaterThan(0);
 
 		// A later complete walk still diffs against the map the over-cap round
 		// kept, so `a`'s files are never read as deleted.

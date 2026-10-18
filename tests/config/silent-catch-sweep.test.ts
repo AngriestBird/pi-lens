@@ -26,12 +26,18 @@
  * seam (`record…`, `log…`, `increment…` — the repo's logger convention) runs at
  * the handler's top level and before any exit, `rethrows` only when a
  * top-level `throw` runs with no `return`/`continue`/`break` anywhere in the
- * handler, `declared-none` when a comment inside it carries `none: <reason>`,
- * `silent` otherwise, and `unclassified` (a hard failure, never a skip) when a
- * handler or a statically string-valued key is not a form the scan can follow.
- * A conditional record or a conditional rethrow leaves the other path
- * swallowing, so it is `silent`. The detector's own state table, one named case
- * per row, is `tests/support/silent-catch-scan.test.ts`.
+ * handler, `declared-none` when a `none: <reason>` comment sits inside the
+ * handler actually judged (its body, never a sibling argument, the catch
+ * parameter or a nested closure the failure cannot reach) or on the line just
+ * above it, `silent` otherwise, and `unclassified` (a hard failure, never a
+ * skip) when a handler or a statically string-valued key is not a form the
+ * scan can follow. An indirect reach of a rejection member
+ * (`.catch.call`/`.apply`/`.bind`, a binding of `p.catch` that is then called)
+ * is a site too, and `unclassified`: the scan cannot tell which argument is
+ * the handler, and shape 69 forbids dropping it. A conditional record or a
+ * conditional rethrow leaves the other path swallowing, so it is `silent`.
+ * The detector's own state table, one named case per row, is
+ * `tests/support/silent-catch-scan.test.ts`.
  *
  * ## Scope
  *
@@ -118,8 +124,8 @@ const SHARP_INSTALL_STAMP =
 const SHARP_DID_SAVE =
 	"the residual `didSave` gaps after #4575 (which made the rejected save record and retry once) belong to the open save-failure change (#4532); that round re-pins this row";
 
-const SHARP_PRESCAN =
-	"owned by the open prescan change (PR #4594, issue #4504); that round re-pins this row";
+const SHARP_TOOL_RESULT =
+	"this file's remaining silent handlers predate #4596; the prescan change (#4594, issue #4504) merged as `7b83505ad` and left the set unchanged, so it is admitted at its pinned count and content identity rather than owned by an open round";
 
 const SHARP_HOST =
 	"the host adapter's best-effort shutdown and teardown arms; the one this change fixed (`deregisterInstanceRoot`'s `.catch`) now records through `recordRootDeregistrationFailure`. Several others record through `surfaceHandlerCrash` or a stale-ctx rethrow plus `recordDegradationOnce`, which this scan cannot follow, so they are pinned here";
@@ -1108,7 +1114,7 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 	"clients/runtime-tool-result.ts": {
 		silent: 15,
 		identities: "c768149ea66bc1a5",
-		reason: SHARP_PRESCAN,
+		reason: SHARP_TOOL_RESULT,
 	}, // :261, :275, :405, :837, :845, :876, :899, :940, :1135, :1587, :2089, :2322, :2756, :3334, :3558
 	"clients/runtime-turn.ts": {
 		silent: 20,
@@ -1440,7 +1446,7 @@ function identityList(sites: ReadonlyArray<CatchSite>): string[] {
 		for (let repeat = 2; repeat <= count; repeat += 1)
 			listed.push(`${identity}#${repeat}`);
 	}
-	return listed.sort();
+	return listed.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
 /** The admitted set's content identity: 16 hex over the sorted handler ids. */
@@ -1499,11 +1505,11 @@ function auditSilentCatches(
 		mismatched,
 		dead: Object.keys(baseline)
 			.filter((file) => !c.byFile.has(file))
-			.sort(),
+			.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
 		unreasoned: Object.entries(baseline)
 			.filter(([, admission]) => admission.reason.trim().length < 40)
 			.map(([file]) => file)
-			.sort(),
+			.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
 		overTotal: c.silent > total,
 	};
 }

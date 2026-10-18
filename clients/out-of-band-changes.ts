@@ -290,7 +290,7 @@ function carryUnreadable(
 	}
 	// Deterministic order: the population that fits the cap must not depend on
 	// Map insertion order or on which parallel stat settled first.
-	carried.sort();
+	carried.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 	let dropped = 0;
 	for (const filePath of carried) {
 		if (declarations.size >= DECLARATION_WALK_MAX_FILES) {

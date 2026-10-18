@@ -373,6 +373,153 @@ describe("every spelling of a rejection handler is a site", () => {
 	});
 });
 
+/**
+ * #4603 review N1: a `none:` marker explains exactly the handler it sits in
+ * (or the line above it), never a sibling argument and never code a nested
+ * closure holds that the failure can never reach. Each green case below was
+ * `declared-none` under the pre-fix wide-span reader.
+ */
+describe("a `none:` marker belongs to the handler it judges", () => {
+	it("refuses a marker that explains the fulfilled callback, not the rejection", () => {
+		expect(
+			only(
+				"go().then(() => { /* none: optional work, unrelated */ }, () => {});",
+			).verdict,
+		).toBe("silent");
+	});
+
+	it("refuses a marker on a sibling handler's own line", () => {
+		// The marker is on the fulfilled handler's line; the rejection handler
+		// is on the next one and declares nothing.
+		expect(
+			only(
+				[
+					"go().then(",
+					"\t() => { ok(); }, // none: optional work, unrelated",
+					"\t() => {},",
+					");",
+				].join("\n"),
+			).verdict,
+		).toBe("silent");
+	});
+
+	it("refuses a marker inside a nested closure the failure cannot reach", () => {
+		expect(
+			only(
+				"go().catch(() => { const later = () => { /* none: inner */ }; void later; });",
+			).verdict,
+		).toBe("silent");
+	});
+
+	it("refuses a marker in a nested closure of a catch clause", () => {
+		expect(
+			only(
+				"try { go(); } catch { const later = () => { /* none: inner */ }; void later; }",
+			).verdict,
+		).toBe("silent");
+	});
+
+	it("refuses a marker in the catch clause's parameter list", () => {
+		// The parameter is not the handler body: a comment there explains the
+		// caught binding, not why the failure needs no row.
+		expect(
+			only(
+				"try { go(); } catch (/* none: the binding is unused */ e) { void e; }",
+			).verdict,
+		).toBe("silent");
+	});
+
+	it("accepts a marker in the rejection handler's own body", () => {
+		expect(
+			only(
+				"go().then((v) => v, () => { /* none: the rejection is expected */ });",
+			).verdict,
+		).toBe("declared-none");
+	});
+
+	it("accepts a marker on the line just above the handler", () => {
+		expect(
+			only(
+				[
+					"go().then(",
+					"\t() => ok(),",
+					"\t// none: the rejection is expected",
+					"\t() => {},",
+					");",
+				].join("\n"),
+			).verdict,
+		).toBe("declared-none");
+	});
+
+	it("accepts a marker on the line above an identifier handler", () => {
+		expect(
+			only(
+				[
+					"// none: an imported handler that records internally",
+					"go().catch(handleImported);",
+				].join("\n"),
+			).verdict,
+		).toBe("declared-none");
+	});
+});
+
+/**
+ * #4603 review N2: an indirect reach of a rejection member is a site, never
+ * absent (AGENTS.md shape 69). The scan cannot tell which argument is the
+ * handler, so each is `unclassified` and asks for a direct spelling or a
+ * deliberate exemption — rather than passing silently.
+ */
+describe("an indirect rejection member is a site, never absent", () => {
+	it("reads `.catch.call` as an unclassified site", () => {
+		const site = only("go().catch.call(go(), () => {});");
+		expect(site.verdict).toBe("unclassified");
+		expect(site.problem).toContain("indirectly");
+	});
+
+	it("reads `.catch.apply` as an unclassified site", () => {
+		const site = only("go().catch.apply(go(), [() => {}]);");
+		expect(site.verdict).toBe("unclassified");
+	});
+
+	it("reads `.catch.bind` as an unclassified site", () => {
+		expect(only("go().catch.bind(go());").verdict).toBe("unclassified");
+	});
+
+	it("reads a subscript `.catch` reached through `.call`", () => {
+		expect(only('go()["catch"].call(go(), () => {});').verdict).toBe(
+			"unclassified",
+		);
+	});
+
+	it("reads a local binding of `.catch` called indirectly", () => {
+		expect(only("const c = go().catch;\nc(() => {});").verdict).toBe(
+			"unclassified",
+		);
+	});
+
+	it("resolves a bound subscript member's key where it is declared", () => {
+		// The binding's own scope holds the key; the function that calls it
+		// declares an unrelated string under the same name. Reading the call's
+		// scope would lose the site entirely.
+		expect(
+			only(
+				[
+					'const key = "catch";',
+					"const c = go()[key];",
+					"function later() {",
+					'\tconst key = "map";',
+					"\tc(() => {});",
+					"}",
+				].join("\n"),
+			).verdict,
+		).toBe("unclassified");
+	});
+
+	it("does not read an unrelated `.call` as a rejection handler", () => {
+		expect(scanSilentCatches("fn.call(receiver, () => {});")).toEqual([]);
+	});
+});
+
 describe("a site's identity", () => {
 	it("distinguishes two different handlers in one file", () => {
 		const sites = scanSilentCatches(

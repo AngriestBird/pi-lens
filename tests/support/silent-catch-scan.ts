@@ -16,7 +16,11 @@
  * - the handler of a `<expr>.catch(…)` call, written as `.catch` or as a
  *   statically known subscript (`p["catch"](…)`, `` p[`catch`](…) ``);
  * - the SECOND argument of `<expr>.then(onOk, onRejected)`, which is the
- *   rejection handler an author reached for instead of `.catch`.
+ *   rejection handler an author reached for instead of `.catch`;
+ * - a rejection member reached indirectly — `p.catch.call(…)`,
+ *   `p.catch.apply(…)`, `p.catch.bind(…)`, or a local binding of `p.catch`
+ *   that is then called — which is a site too, but `unclassified`: the scan
+ *   cannot tell which argument is the handler (AGENTS.md shape 69).
  *
  * The rule, derived and never a hand list:
  * - A handler is `recorded` only when a record seam runs on the path the
@@ -31,9 +35,14 @@
  *   `continue` or `break` may exist anywhere in the handler. A `throw` inside
  *   `if (fatal)` leaves the other branch swallowing, so the handler is
  *   `silent`.
- * - Any other handler is `silent` unless a comment inside the site carries
- *   `none: <reason>`, which makes it `declared-none` and states why the
- *   failure needs no row (a deliberate skip, an idempotent teardown).
+ * - Any other handler is `silent` unless a comment carries `none: <reason>`,
+ *   which makes it `declared-none` and states why the failure needs no row (a
+ *   deliberate skip, an idempotent teardown). The marker counts only inside the
+ *   handler actually judged — the `then` rejection argument for a `.then`, the
+ *   handler for a `.catch`, the clause body for a `catch` — or on the comment
+ *   line immediately above that handler. A marker in a SIBLING argument
+ *   (`then(ok, …)` with the comment on `ok`) or inside a nested function the
+ *   failure can never reach is NOT this handler's reason (#4603 review N1).
  * - A `.catch(…)` handler that is not a function this file defines and not a
  *   bare identifier (a call, a `new` expression) is `unclassified`, which
  *   fails loud in the ratchet and is never counted as recorded. A statically
@@ -62,7 +71,13 @@
  * delegation the scan cannot follow always asks for a `none:` line; an
  * indexed call whose key is a variable the file never binds (`arr[i]()`) is
  * not matched, because it is not evidence of a rejection handler and calling
- * every indexed call a handler would fail closed on the whole tree.
+ * every indexed call a handler would fail closed on the whole tree. An
+ * indirect rejection member (`p.catch.call(…)`, `.apply`, `.bind`, a local
+ * binding of `p.catch`) is a site but `unclassified`, never absent and never
+ * guessed: the scan cannot tell which argument is the handler (#4603 review
+ * N2). A member reached through a destructuring pattern (`const { catch: c } =
+ * p`) or a later assignment to an existing binding is a residual the binding
+ * pre-filter does not see; the declaration form (`const c = p.catch`) is.
  */
 
 import { createHash } from "node:crypto";
@@ -270,34 +285,90 @@ function rethrows(body: SgNode): boolean {
 	return throws && !swallows;
 }
 
-/**
- * Whether the raw span `[start, end)` carries a `none: <reason>` marker at a
- * COMMENT position. Both strippings blank a comment and nothing else in
- * common, so a marker blanked in both is a comment: one inside a string
- * survives the `strings: "keep"` pass and is refused.
- */
-function declaredNone(
-	raw: string,
-	commentsBlanked: string,
-	stringsBlanked: string,
-	start: number,
-	end: number,
-): boolean {
-	const span = raw.slice(start, end);
-	NONE_MARKER.lastIndex = 0;
-	let match: RegExpExecArray | null = NONE_MARKER.exec(span);
-	while (match !== null) {
-		const at = start + (match.index ?? 0);
-		if (commentsBlanked[at] === " " && stringsBlanked[at] === " ") return true;
-		match = NONE_MARKER.exec(span);
-	}
-	return false;
-}
-
 interface Strippings {
 	raw: string;
 	commentsBlanked: string;
 	stringsBlanked: string;
+}
+
+/**
+ * The ranges of the function bodies NESTED inside `scope`, which its `none:`
+ * marker may not use: a comment in code the failure can never reach does not
+ * explain the handler (#4603 review N1). The outer range covers an inner one,
+ * so a function's body is recorded and its own nested functions skipped.
+ */
+function nestedFunctionSpans(scope: SgNode): Array<[number, number]> {
+	const spans: Array<[number, number]> = [];
+	const collect = (current: SgNode): void => {
+		for (const child of current.children()) {
+			if (FUNCTION_KINDS.has(child.kind())) {
+				const range = child.range();
+				spans.push([range.start.index, range.end.index]);
+				continue;
+			}
+			collect(child);
+		}
+	};
+	collect(scope);
+	return spans;
+}
+
+/**
+ * The whole-line span immediately above `index`, when that line holds only a
+ * comment or whitespace (`commentsBlanked` keeps the code and blanks the
+ * comment, so a line with code survives the trim). This is where a `none:`
+ * marker sits for a handler that is a bare identifier or an import: on the
+ * line just above the handler, never on a sibling's line.
+ */
+function commentLineAbove(
+	strippings: Strippings,
+	index: number,
+): [number, number] | undefined {
+	const lineStart = strippings.raw.lastIndexOf("\n", index - 1) + 1;
+	if (lineStart === 0) return undefined;
+	const previousStart = strippings.raw.lastIndexOf("\n", lineStart - 2) + 1;
+	const previousEnd = lineStart - 1;
+	if (previousEnd <= previousStart) return undefined;
+	if (
+		strippings.commentsBlanked.slice(previousStart, previousEnd).trim() !== ""
+	)
+		return undefined;
+	return [previousStart, previousEnd];
+}
+
+/**
+ * Whether the handler judged by `scope` carries a `none: <reason>` marker at a
+ * COMMENT position within its own range — the `then` rejection argument, the
+ * `.catch` handler, or the clause body — excluding nested function bodies, or
+ * on the comment line immediately above it. Both strippings blank a comment
+ * and nothing else in common, so a marker blanked in both is a comment: one
+ * inside a string survives the `strings: "keep"` pass and is refused.
+ */
+function declaredNone(strippings: Strippings, scope: SgNode): boolean {
+	const range = scope.range();
+	const nested = nestedFunctionSpans(scope);
+	const ranges: Array<[number, number]> = [
+		[range.start.index, range.end.index],
+	];
+	const above = commentLineAbove(strippings, range.start.index);
+	if (above !== undefined) ranges.push(above);
+	for (const [start, end] of ranges) {
+		const span = strippings.raw.slice(start, end);
+		NONE_MARKER.lastIndex = 0;
+		let match: RegExpExecArray | null = NONE_MARKER.exec(span);
+		while (match !== null) {
+			const at = start + (match.index ?? 0);
+			const inNested = nested.some(([from, to]) => at >= from && at < to);
+			if (
+				!inNested &&
+				strippings.commentsBlanked[at] === " " &&
+				strippings.stringsBlanked[at] === " "
+			)
+				return true;
+			match = NONE_MARKER.exec(span);
+		}
+	}
+	return false;
 }
 
 /**
@@ -350,10 +421,15 @@ function declaredFunction(declaration: SgNode): SgNode | undefined {
 	return value && FUNCTION_KINDS.has(value.kind()) ? value : undefined;
 }
 
-/** One handler body's verdict, over the raw span a `none:` marker may live in. */
+/**
+ * One handler body's verdict. `body` is the function body whose statements are
+ * judged; `markerScope` is the node whose own range a `none:` marker may live
+ * in — the `then` rejection argument, the `.catch` handler, or the clause —
+ * so a marker on a sibling argument or in a nested closure is not borrowed.
+ */
 function judge(
 	body: SgNode | undefined,
-	span: { start: number; end: number },
+	markerScope: SgNode | undefined,
 	strippings: Strippings,
 ): { verdict: CatchVerdict; records: string[] } {
 	if (body) {
@@ -361,15 +437,7 @@ function judge(
 		if (records.length > 0) return { verdict: "recorded", records };
 		if (rethrows(body)) return { verdict: "rethrows", records: [] };
 	}
-	if (
-		declaredNone(
-			strippings.raw,
-			strippings.commentsBlanked,
-			strippings.stringsBlanked,
-			span.start,
-			span.end,
-		)
-	)
+	if (markerScope !== undefined && declaredNone(strippings, markerScope))
 		return { verdict: "declared-none", records: [] };
 	return { verdict: "silent", records: [] };
 }
@@ -449,12 +517,62 @@ function staticKey(
 }
 
 /**
+ * The `catch`/`then` property an expression names, when the scan can read it:
+ * a member (`p.catch`) or a statically known subscript (`p["catch"]`).
+ */
+function rejectionMemberOf(
+	node: SgNode | undefined,
+	raw: string,
+	callSite: SgNode,
+): string | undefined {
+	if (node === undefined || node === null) return undefined;
+	if (node.kind() === "member_expression") {
+		const property = node.field("property")?.text();
+		return property === "catch" || property === "then" ? property : undefined;
+	}
+	if (node.kind() === "subscript_expression") {
+		const key = node.field("index");
+		if (key === undefined || key === null) return undefined;
+		const statik = staticKey(key, callSite, raw);
+		if (
+			"value" in statik &&
+			(statik.value === "catch" || statik.value === "then")
+		)
+			return statik.value;
+	}
+	return undefined;
+}
+
+/**
+ * The `catch`/`then` property an identifier is bound to (`const c = p.catch`),
+ * when a single declaration in its scope binds it to such a member.
+ */
+function boundRejectionMember(
+	identifier: SgNode,
+	raw: string,
+	callSite: SgNode,
+): string | undefined {
+	const declaration = resolveHandlerIdentifier(
+		identifier,
+		callSite,
+	).declaration;
+	if (!declaration || declaration.kind() !== "variable_declarator")
+		return undefined;
+	// The key a subscript value names resolves in the DECLARATION's scope, not
+	// the later call's: `const c = p[k]` and `c(fn)` can see different `k`.
+	return rejectionMemberOf(declaration.field("value"), raw, declaration);
+}
+
+/**
  * The rejection-handler call site this call_expression is, when it is one:
- * `.catch`/`["catch"]`, or the second argument of `.then`/`["then"]`.
+ * `.catch`/`["catch"]`, the second argument of `.then`/`["then"]`, or an
+ * indirect reach of either (`.call`/`.apply`/`.bind`, a local binding) that is
+ * a site but `unclassified` (#4603 review N2).
  */
 function rejectionHandlerCall(
 	node: SgNode,
 	raw: string,
+	boundNames: ReadonlySet<string>,
 ):
 	| {
 			handler?: SgNode;
@@ -469,7 +587,17 @@ function rejectionHandlerCall(
 	let propertyNode: SgNode | undefined;
 	let problem: string | undefined;
 	if (fn.kind() === "member_expression") {
-		property = fn.field("property")?.text();
+		const name = fn.field("property")?.text();
+		if (name === "call" || name === "apply" || name === "bind") {
+			const reached = rejectionMemberOf(fn.field("object"), raw, node);
+			if (reached === undefined) return undefined;
+			return {
+				property: reached,
+				propertyNode: fn.field("object"),
+				problem: `\`.${reached}.${name}(…)\` reaches the rejection handler indirectly; the scan cannot tell which argument is the handler`,
+			};
+		}
+		property = name;
 		propertyNode = fn.field("property");
 	} else if (fn.kind() === "subscript_expression") {
 		const key = fn.field("index");
@@ -481,6 +609,18 @@ function rejectionHandlerCall(
 		else if ("unresolved" in statik) {
 			problem = String(statik.unresolved);
 		}
+	} else if (fn.kind() === "identifier") {
+		// A cheap file-level pre-filter (`boundNames`) keeps this resolution off
+		// every ordinary call; only a name a file binds to a rejection member is
+		// resolved, and then in its own scope.
+		if (!boundNames.has(fn.text())) return undefined;
+		const reached = boundRejectionMember(fn, raw, node);
+		if (reached === undefined) return undefined;
+		return {
+			property: reached,
+			propertyNode: fn,
+			problem: `\`${fn.text()}\` is bound to a \`${reached}\` member and called indirectly; the scan cannot classify it`,
+		};
 	} else return undefined;
 	if (property === undefined) {
 		if (problem !== undefined) return { problem, propertyNode };
@@ -510,24 +650,45 @@ export function scanSilentCatches(source: string): CatchSite[] {
 		stringsBlanked,
 	};
 	const sites: CatchSite[] = [];
+	// Names a file binds to a `catch`/`then` member (`const c = p.catch`), so an
+	// indirect call through one is a site without resolving every call's callee
+	// (#4603 review N2). A subscript value adds the name unconditionally; the
+	// scope-aware resolution decides whether it really names a member.
+	const boundRejectionNames = new Set<string>();
+	walk(root, (node: SgNode) => {
+		if (node.kind() !== "variable_declarator") return;
+		const name = node.field("name");
+		if (name === undefined || name === null || name.kind() !== "identifier")
+			return;
+		const value = node.field("value");
+		if (value === undefined || value === null) return;
+		if (value.kind() === "subscript_expression") {
+			boundRejectionNames.add(name.text());
+			return;
+		}
+		if (value.kind() !== "member_expression") return;
+		const property = value.field("property")?.text();
+		if (property === "catch" || property === "then")
+			boundRejectionNames.add(name.text());
+	});
 	walk(root, (node: SgNode) => {
 		if (node.kind() === "catch_clause") {
 			const body = node.field("body");
-			const span = {
-				start: node.range().start.index,
-				end: node.range().end.index,
-			};
+			const range = node.range();
+			const span = { start: range.start.index, end: range.end.index };
 			sites.push({
-				line: node.range().start.line + 1,
+				line: range.start.line + 1,
 				form: "catch-clause",
-				...judge(body, span, strippings),
+				// The marker scope is the clause BODY: a comment in the parameter
+				// list (`catch (/* none: x */ e)`) is not the handler's reason.
+				...judge(body, body ?? node, strippings),
 				snippet: firstLine(body?.text() ?? node.text()),
 				identity: handlerIdentity(source, span.start, span.end),
 			});
 			return;
 		}
 		if (node.kind() !== "call_expression") return;
-		const call = rejectionHandlerCall(node, source);
+		const call = rejectionHandlerCall(node, source, boundRejectionNames);
 		if (call === undefined) return;
 		const property = node.field("function");
 		const line =
@@ -603,11 +764,15 @@ export function scanSilentCatches(source: string): CatchSite[] {
 		const body = FUNCTION_KINDS.has(target.kind())
 			? target.field("body")
 			: undefined;
+		// The `none:` marker's scope is the handler actually judged: the
+		// resolved function, or the bare handler node the scan could not follow
+		// (whose marker sits on the line just above it).
+		const markerScope = FUNCTION_KINDS.has(target.kind()) ? target : handler;
 		const targetRange = target.range();
 		sites.push({
 			line,
 			form,
-			...judge(body, span, strippings),
+			...judge(body, markerScope, strippings),
 			snippet: firstLine(handler.text()),
 			identity: handlerIdentity(
 				source,

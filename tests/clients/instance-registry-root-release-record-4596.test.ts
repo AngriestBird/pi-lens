@@ -91,7 +91,7 @@ describe("a rejected root release", () => {
 		expect(
 			group()
 				?.latestReasons.map((entry) => entry.subject)
-				.sort(),
+				.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
 		).toEqual(["/work/lane-root", "/work/other-root"]);
 	});
 
