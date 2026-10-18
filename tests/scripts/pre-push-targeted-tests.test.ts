@@ -434,6 +434,7 @@ describe("selectTargetedTests — path-mirror pass", () => {
 		];
 		const testScanners = [
 			"tests/clients/flake-shape-ratchet.test.ts",
+			"tests/clients/fixture-home-teardown.test.ts",
 			"tests/real-harness/bridge-reload-ts.test.ts",
 			"tests/real-harness/bridge-reload.test.ts",
 			"tests/real-harness/child-exit.test.ts",
@@ -448,8 +449,10 @@ describe("selectTargetedTests — path-mirror pass", () => {
 			"tests/real-harness/tools-enabled.test.ts",
 			"tests/config/handler-verdict-sweep.test.ts",
 			"tests/config/sink-read-drain-sweep.test.ts",
+			"tests/config/test-env-restore-sweep.test.ts",
 			"tests/config/module-instance-coverage.test.ts",
 			"tests/config/tmp-fixture-hygiene.test.ts",
+			"tests/config/tmp-hygiene-leak-origin.test.ts",
 			"tests/config/vacuous-skip-coverage.test.ts",
 			"tests/support/host-event-shape-scan.test.ts",
 		];
