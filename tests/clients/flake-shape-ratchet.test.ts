@@ -1079,6 +1079,19 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"session_start's background tasks and the quick-mode warmup timer expose no awaitable, so a real-time vi.waitFor is the only join on their snapshot save",
 	},
+	// 2026-10-18 (#4583): a cold word-index build is fire-and-forget (its
+	// `triggerBackgroundWordIndexBuild` status is not joinable), so a witness
+	// that must observe the published snapshot has only vi.waitFor.
+	"ungoverned-wait-for:clients/word-index.test.ts": {
+		detector: "ungoverned-wait-for",
+		reason:
+			"the cold build's completion exposes no awaitable, so the adoption witness joins the snapshot it publishes with vi.waitFor",
+	},
+	"ungoverned-wait-for:tools/symbol-search.test.ts": {
+		detector: "ungoverned-wait-for",
+		reason:
+			"the cold build's completion exposes no awaitable, so the tool witness joins the snapshot it publishes with vi.waitFor",
+	},
 };
 
 /** The `wallClockBudgetInclude` project's `include` list, read from the live config — not a hand-copied mirror of it (single-source-of-truth). */
