@@ -10,7 +10,7 @@
  * `git` answers the two `grep -l` calls. Nothing here re-implements the rule's
  * own decisions, so a case fails when the rule changes, not when a helper does.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { lintPrBody } from "../../scripts/check-pr-body.mjs";
 
 // A docs-only diff: truthy, so the rule runs, and holding no runtime hunk, so
@@ -276,41 +276,60 @@ describe("#4597 a named observability record must be read by a test", () => {
 		expect(ruleErrors(result)).toEqual([]);
 	});
 
-	it("refuses visibly when the runtime harvest cannot run", () => {
-		const result = lint({
-			observability: "The record is `fixture_record_emitted`.",
-			records: ["fixture_record_emitted"],
-			git: () => {
-				const error = new Error("fatal: not a git repository") as Error & {
-					status: number;
-				};
-				error.status = 128;
-				throw error;
-			},
-		});
-		expect(ruleErrors(result)).toEqual([
-			expect.stringContaining("the runtime record harvest could not run"),
-		]);
-	});
-
-	it("refuses visibly when the tests/ search cannot run", () => {
-		const result = lint({
-			observability: "The record is `fixture_record_emitted`.",
-			records: ["fixture_record_emitted"],
-			git: (args) => {
-				if (args.includes("tests")) {
-					const error = new Error("fatal: bad revision") as Error & {
+	// Shape 10: a probe that cannot run is a skipped check, disclosed once, and
+	// never a refusal of a body the author cannot fix (a copied body outside a
+	// checkout) and never silence.
+	it("discloses a skipped check when the runtime harvest cannot run", () => {
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const result = lint({
+				observability: "The record is `fixture_record_emitted`.",
+				records: ["fixture_record_emitted"],
+				git: () => {
+					const error = new Error("fatal: not a git repository") as Error & {
 						status: number;
 					};
 					error.status = 128;
 					throw error;
-				}
-				return RUNTIME_FILE;
-			},
-		});
-		expect(ruleErrors(result)).toEqual([
-			expect.stringContaining("the tests/ search could not run"),
-		]);
+				},
+			});
+			expect(ruleErrors(result)).toEqual([]);
+			expect(warn).toHaveBeenCalledWith(
+				expect.stringContaining(
+					"`fixture_record_emitted`, but the runtime record harvest could not run",
+				),
+			);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it("discloses a skipped check when the tests/ search cannot run", () => {
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const result = lint({
+				observability: "The record is `fixture_record_emitted`.",
+				records: ["fixture_record_emitted"],
+				git: (args) => {
+					if (args.includes("tests")) {
+						const error = new Error("fatal: bad revision") as Error & {
+							status: number;
+						};
+						error.status = 128;
+						throw error;
+					}
+					return RUNTIME_FILE;
+				},
+			});
+			expect(ruleErrors(result)).toEqual([]);
+			expect(warn).toHaveBeenCalledWith(
+				expect.stringContaining(
+					"`fixture_record_emitted`, but the tests/ search could not run",
+				),
+			);
+		} finally {
+			warn.mockRestore();
+		}
 	});
 
 	it("reads the two records this repository shipped untested", () => {

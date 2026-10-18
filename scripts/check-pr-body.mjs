@@ -1705,22 +1705,38 @@ function testedRecordLiterals(literals, options = {}) {
  * only when a diff was resolved, like the record-naming rule beside it, so the
  * local preflight without an upstream ref keeps structural lint alone.
  */
+/**
+ * A probe that cannot run is a skipped check, and a skipped check says so: a
+ * caller that copied a body outside a checkout must not read the silence as a
+ * clean result (shape 10), and refusing would answer a body under test with an
+ * error the author cannot act on. The record is the CI annotation below.
+ */
+function warnRecordReadBackSkipped(step, names) {
+	console.warn(
+		`::warning::PR body Observability names ${names
+			.map((name) => `\`${name}\``)
+			.join(
+				", ",
+			)}, but ${step} could not run (git grep failed), so the #4597 read-back check was skipped for them.`,
+	);
+}
+
 function lintObservabilityRecordsTested(lines, headings, options = {}) {
 	const content = observabilitySectionContent(lines, headings);
 	const spans = recordLiteralSpans(content);
 	if (!spans.length) return [];
 	const emitted = emittedRecordLiterals(spans, options);
-	if (emitted === null)
-		return [
-			`PR body Observability names ${spans.map((span) => `\`${span}\``).join(", ")}, and the runtime record harvest could not run (git grep failed), so no record literal could be confirmed (#4597).`,
-		];
+	if (emitted === null) {
+		warnRecordReadBackSkipped("the runtime record harvest", spans);
+		return [];
+	}
 	const named = spans.filter((span) => emitted.has(span));
 	if (!named.length) return [];
 	const tested = testedRecordLiterals(named, options);
-	if (tested === null)
-		return [
-			`PR body Observability names ${named.map((name) => `\`${name}\``).join(", ")}, and the tests/ search could not run (git grep failed), so no read-back could be confirmed (#4597).`,
-		];
+	if (tested === null) {
+		warnRecordReadBackSkipped("the tests/ search", named);
+		return [];
+	}
 	const missing = named.filter((name) => !tested.has(name));
 	if (!missing.length) return [];
 	return [
