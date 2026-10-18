@@ -95,7 +95,7 @@ Optional unless this PR closes a bug-labelled issue: name `Caught by:` (one laye
 
 ## Accepted residuals
 
-Optional. List each review finding of MEDIUM or below that this PR leaves open, with its severity and live population (sites in the tree that hit it today). These are accepted under the merge bar in `docs/pi-lens-merge-policy.md` "Filing issues" and are not filed as issues. Write `None.` when nothing is left open.
+Optional. List each review finding of MEDIUM or below that this PR leaves open as `p3 (<severity>, live <n>): <the gap>`, where live is the number of sites in the tree that hit it today. These are accepted under the merge bar in `docs/pi-lens-merge-policy.md` "Filing issues" and are not filed as issues. Write `None.` when nothing is left open.
 
 ## Blast radius
 

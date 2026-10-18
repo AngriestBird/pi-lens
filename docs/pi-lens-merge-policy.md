@@ -209,7 +209,9 @@ issue filed without one is a triage defect, not a shortcut.
 **Merge bar (user, 2026-10-18).** A PR merges when no HIGH finding is open and
 every gating check is green on the exact head. Each MEDIUM or LOW finding
 either folds into the same PR or becomes an accepted residual: the PR body
-lists it under `## Accepted residuals` with its severity and live population.
+lists it under `## Accepted residuals`, named `p3` with its severity and live
+population (for example `p3 (MEDIUM, live 0): <the gap>`), so the gap keeps a
+priority without an issue.
 A residual never becomes a follow-up issue. File an issue only for p2 or
 higher work that cannot ride the PR: a HIGH outside the PR's scope, or a
 MEDIUM with a live population. Before a final round, the brief says "final

@@ -111,7 +111,7 @@ real seam. Check that every gate the diff adds is exercised through that path.
 - **Generalization verdict.** When a mechanism, policy, guard, or optimisation
   targets N of M members (registry entries, servers, tools, languages,
   stores), name M, why the others are excluded, and their default, and end
-  with *widen in this PR*, *accepted residual* (with its live population),
+  with *widen in this PR*, *accepted residual* (named `p3`, with its live population),
   *follow-up issue* (p2 or higher only, with its seam group), or *stay
   specific* (with the reason). A missing verdict is a finding (#3622; the
   optional ast-grep assist is #3684).
@@ -282,8 +282,8 @@ the rate they remove them.
 
 ## Findings and verdict
 
-Classify every finding as **fold**, **accepted residual** or **file** with a
-one-word reason and its live population (`docs/pi-lens-subagent.md`
+Classify every finding as **fold**, **accepted residual** (named `p3`) or
+**file** with a one-word reason and its live population (`docs/pi-lens-subagent.md`
 "Follow-ups"; the merge bar is in `docs/pi-lens-merge-policy.md` "Filing
 issues"). Order findings `CRITICAL`, `HIGH`,
 `MEDIUM`, `LOW`, `NITPICK`. Each carries a stable id, a file or symbol anchor,
