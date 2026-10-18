@@ -1339,7 +1339,7 @@ ${body}`,
 	});
 
 	it("ends the script only on an exit in command position, not on the word exit", () => {
-		// Greptile P2 at 350729ded (shape 43, text read as structure): `sawExit`
+		// Greptile P2 on the r4 head (shape 43, text read as structure): `sawExit`
 		// fired on any `exit` TOKEN, so `echo exit` and `grep -n exit f` ended the
 		// script and refused a floor the shell does run.
 		for (const body of [
