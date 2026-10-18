@@ -479,4 +479,331 @@ describe("diff-keyed compliance (#4585)", () => {
 		]);
 		expect(errors("", diff, headFiles)).toEqual([]);
 	});
+
+	// #4605 F1: one file, one red. A green row for this file, another file's
+	// red, a path that merely starts the same, prose, and a "not run" fence all
+	// leave row 2 unproved.
+	it("refuses another file's red, a green row and a prose mutation line (#4605 row 2 binding)", () => {
+		const { diff, headFiles } = image(
+			"clients/a.ts",
+			"if (ready) return value;",
+		);
+		expect(
+			errors(
+				[
+					"## Mutations",
+					"| File | Mutation | Verdict |",
+					"|---|---|---|",
+					"| `clients/a.ts` | drop ready guard | survived (green) |",
+					"| `clients/b.ts` | drop other guard | RED `Tests 1 failed` |",
+				].join("\n"),
+				diff,
+				headFiles,
+			).join(),
+		).toContain("row 2");
+		expect(
+			errors(
+				"## Mutations\n| `clients/a.ts.backup` | drop | RED `Tests 1 failed` |",
+				diff,
+				headFiles,
+			).join(),
+		).toContain("row 2");
+		expect(
+			errors(
+				"mutation: clients/a.ts — dropped the guard, `Tests 2 failed`",
+				diff,
+				headFiles,
+			).join(),
+		).toContain("row 2");
+		expect(
+			errors(
+				[
+					"```text",
+					"mutation: not run (tool unavailable)",
+					"guard added in clients/a.ts",
+					"FAIL tests/other.test.ts > unrelated",
+					"Tests 1 failed",
+					"```",
+				].join("\n"),
+				diff,
+				headFiles,
+			).join(),
+		).toContain("row 2");
+		// A mutation fence that quotes no red at all proves nothing.
+		expect(
+			errors(
+				[
+					"```text",
+					"mutation: clients/a.ts",
+					"no failing run recorded",
+					"```",
+				].join("\n"),
+				diff,
+				headFiles,
+			).join(),
+		).toContain("row 2");
+		// A header that names the file but says the run never happened is not a
+		// read: the mutation was proposed, not performed.
+		expect(
+			errors(
+				[
+					"```text",
+					"mutation: clients/a.ts — not run (tool unavailable)",
+					"Tests 1 failed",
+					"```",
+				].join("\n"),
+				diff,
+				headFiles,
+			).join(),
+		).toContain("row 2");
+	});
+
+	// #4605 F2: the declaration chain is structure, not a modifier list, and a
+	// row added to a table held in a local binding is a new case.
+	it("finds runIf, skipIf and a row added to an external each source (#4605 row 1 discovery)", () => {
+		const modifiers = image(
+			"tests/a.test.ts",
+			'it.runIf(true)("runIf case", () => {});\ntest.skipIf(false)("skipIf case", () => {});',
+		);
+		expect(errors("", modifiers.diff, modifiers.headFiles).join()).toContain(
+			"runIf case",
+		);
+		expect(errors("", modifiers.diff, modifiers.headFiles).join()).toContain(
+			"skipIf case",
+		);
+		// A namespace import declares a test through `v.test(...)`; the binding
+		// comes from the import, not from the callee's spelling (Greptile P1).
+		const namespaced = image(
+			"tests/b.test.ts",
+			'import * as v from "vitest";\nv.test("namespace case", () => {});',
+		);
+		expect(errors("", namespaced.diff, namespaced.headFiles).join()).toContain(
+			"namespace case",
+		);
+		const after = [
+			"const cases = [",
+			'  ["old case", 1],',
+			'  ["new case", 2],',
+			"];",
+			'it.each(cases)("handles %s", () => {});',
+		].join("\n");
+		const diff = [
+			"diff --git a/tests/a.test.ts b/tests/a.test.ts",
+			"@@ -1,4 +1,5 @@",
+			" const cases = [",
+			'   ["old case", 1],',
+			'+  ["new case", 2],',
+			" ];",
+			' it.each(cases)("handles %s", () => {});',
+		].join("\n");
+		const headFiles = new Map([["tests/a.test.ts", after]]);
+		// The unchanged row's red is not the new case's proof.
+		expect(
+			errors(
+				"```text\nFAIL tests/a.test.ts > handles old case\nTests 1 failed\n```",
+				diff,
+				headFiles,
+			).join(),
+		).toContain("handles new case");
+		expect(
+			errors(
+				"```text\nFAIL tests/a.test.ts > handles new case\nTests 1 failed\n```",
+				diff,
+				headFiles,
+			),
+		).toEqual([]);
+	});
+
+	// #4605 F3: a failing line's own title is the only proof, and a Control's
+	// backticked title must equal it.
+	it("matches a failing line's own title, never a substring or a longer Control (#4605 row 1 exactness)", () => {
+		const prefix = image("tests/a.test.ts", 'test("rejects input", () => {});');
+		expect(
+			errors(
+				"```text\nFAIL tests/other.test.ts > rejects input with a warning\nTests 1 failed\n```",
+				prefix.diff,
+				prefix.headFiles,
+			).join(),
+		).toContain("row 1");
+		const substring = image("tests/a.test.ts", 'test("empty", () => {});');
+		expect(
+			errors(
+				"```text\n× the parser keeps an empty answer 3ms\n```",
+				substring.diff,
+				substring.headFiles,
+			).join(),
+		).toContain("row 1");
+		const control = image("tests/a.test.ts", 'test("empty", () => {});');
+		expect(
+			errors(
+				"Control: `the empty answer is kept` — an older case.",
+				control.diff,
+				control.headFiles,
+			).join(),
+		).toContain("row 1");
+		// The same title in another file does not prove this file's declaration.
+		const otherFile = image("tests/a.test.ts", 'test("same title", () => {});');
+		expect(
+			errors(
+				"```text\nFAIL tests/other.test.ts > same title\nTests 1 failed\n```",
+				otherFile.diff,
+				otherFile.headFiles,
+			).join(),
+		).toContain("row 1");
+	});
+
+	// #4605 F4: a Windows read belongs to the file it names, and only a
+	// terminal run conclusion is a read.
+	it("keys Windows evidence per file and refuses a cancelled run (#4605 row 4 per file)", () => {
+		const two = {
+			diff: [
+				"diff --git a/clients/lsp/launch.ts b/clients/lsp/launch.ts",
+				"@@ -0,0 +1,1 @@",
+				"+const a = 1;",
+				"diff --git a/clients/path-utils.ts b/clients/path-utils.ts",
+				"@@ -0,0 +1,1 @@",
+				"+const b = 2;",
+			].join("\n"),
+			headFiles: new Map([
+				["clients/lsp/launch.ts", "const a = 1;"],
+				["clients/path-utils.ts", "const b = 2;"],
+			]),
+		};
+		expect(
+			errors(
+				"Windows advisory lane run 123456789: passed.",
+				two.diff,
+				two.headFiles,
+			).join(),
+		).toContain("row 4");
+		expect(
+			errors(
+				[
+					"clients/lsp/launch.ts Windows advisory lane run 123456789: passed.",
+					"clients/path-utils.ts Windows advisory lane run 123456789: passed.",
+				].join("\n"),
+				two.diff,
+				two.headFiles,
+			),
+		).toEqual([]);
+		const one = image("clients/lsp/launch.ts", "const a = 1;");
+		expect(
+			errors(
+				"Windows advisory lane run 12345678: cancelled.",
+				one.diff,
+				one.headFiles,
+			).join(),
+		).toContain("row 4");
+		// A line that names a terminal word inside a cancelled run is not a read.
+		expect(
+			errors(
+				"Windows advisory lane run 12345678: cancelled after a failed attempt.",
+				one.diff,
+				one.headFiles,
+			).join(),
+		).toContain("row 4");
+		// The reviewer contract names clients/safe-spawn.ts by path.
+		const safeSpawn = image(
+			"clients/safe-spawn.ts",
+			"const child = spawnTarget(command);",
+		);
+		expect(errors("", safeSpawn.diff, safeSpawn.headFiles).join()).toContain(
+			"clients/safe-spawn.ts",
+		);
+	});
+
+	// #4605 F5: a tilde fence is a fence, and a quoted `<!--` hides nothing.
+	it("reads a tilde fence and a quoted opener's later evidence (#4605 fences)", () => {
+		const tilde = image("tests/a.test.ts", 'test("tilde case", () => {});');
+		expect(
+			errors(
+				"~~~text\nFAIL tests/a.test.ts > tilde case\nTests 1 failed\n~~~",
+				tilde.diff,
+				tilde.headFiles,
+			),
+		).toEqual([]);
+		const opener = image("tests/a.test.ts", 'test("control case", () => {});');
+		expect(
+			errors(
+				[
+					"| shape | result |",
+					"| --- | --- |",
+					"| `<!--` | literal opener |",
+					"",
+					"Control: `control case` — proves the old path still passes.",
+				].join("\n"),
+				opener.diff,
+				opener.headFiles,
+			),
+		).toEqual([]);
+		const mutation = image("clients/a.ts", "if (ready) return value;");
+		expect(
+			errors(
+				[
+					"| shape | result |",
+					"| --- | --- |",
+					"| `<!--` | literal opener |",
+					"",
+					"## Mutations",
+					"| `clients/a.ts` | drop ready | `Tests 1 failed` |",
+				].join("\n"),
+				mutation.diff,
+				mutation.headFiles,
+			),
+		).toEqual([]);
+		const windows = image("clients/lsp/launch.ts", "const a = 1;");
+		expect(
+			errors(
+				"```text\nWindows advisory lane run 123456789: passed.\n```",
+				windows.diff,
+				windows.headFiles,
+			),
+		).toEqual([]);
+	});
+
+	// #4605 F6: a `$field` title resolves from its row, and a placeholder-only
+	// title resolves only to its own expansion, never to any red.
+	it("resolves $field titles and refuses a placeholder-only title (#4605 table titles)", () => {
+		const field = image(
+			"tests/a.test.ts",
+			'it.each([{kind:"missing"}])("handles $kind", () => {});',
+		);
+		expect(
+			errors(
+				"```text\nFAIL tests/a.test.ts > handles missing\nTests 1 failed\n```",
+				field.diff,
+				field.headFiles,
+			),
+		).toEqual([]);
+		expect(
+			errors(
+				"```text\nFAIL tests/a.test.ts > handles present\nTests 1 failed\n```",
+				field.diff,
+				field.headFiles,
+			).join(),
+		).toContain("handles missing");
+		const placeholder = image(
+			"tests/a.test.ts",
+			'it.each([["x"]])("%s", () => {});',
+		);
+		expect(
+			errors(
+				"```text\n× totally unrelated case 9ms\n```",
+				placeholder.diff,
+				placeholder.headFiles,
+			).join(),
+		).toContain("row 1");
+		expect(
+			errors("```text\n× x 9ms\n```", placeholder.diff, placeholder.headFiles),
+		).toEqual([]);
+		// A placeholder-only table whose rows do not resolve cannot be proved by
+		// any title, so it fails closed.
+		const external = image(
+			"tests/a.test.ts",
+			'it.each(getCases())("%s", () => {});',
+		);
+		expect(errors("", external.diff, external.headFiles).join()).toContain(
+			"row 1",
+		);
+	});
 });

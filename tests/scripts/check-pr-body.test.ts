@@ -40,7 +40,15 @@ import {
 } from "../../scripts/check-pr-body.mjs";
 import { blankCommentsAndStrings } from "../../scripts/check-pr-body.mjs";
 
-const body = `## Why\nThe body gate makes review intent explicit.\n\n## Notes for the reviewer\nNone.\n\n## Change outline\n- caller\n  + changed symbol\n    + callee\n\n## Summary\nOpening context.\n\n## Tests\nTargeted tests pass.\n\n## Blast radius\nNo runtime module touched.\n\n## Class sweep\nDefect shape: a body section answered with generic text. Search: \`rg -n "whole-tree grep" scripts\`. Verdict: none outside this fixture.\n\n## Observability\nThe advisory check run is the record.\n\n## Mutations\n| File | Mutation | Transcript |\n| --- | --- | --- |\n| index.ts | drop the emit guard | \`Tests 1 failed\` |\n| clients/session-scope.ts | invert the reset branch | \`Tests 1 failed\` |\n| clients/new-path.ts | drop the catch | \`Tests 1 failed\` |\n| clients/lsp/server.ts | drop the ordering branch | \`Tests 1 failed\` |\n| clients/example.ts | drop the record guard | \`Tests 1 failed\` |\n| clients/agent-nudge.ts | drop the cap | \`Tests 1 failed\` |\n\n`;
+const body = `## Why\nThe body gate makes review intent explicit.\n\n## Notes for the reviewer\nNone.\n\n## Change outline\n- caller\n  + changed symbol\n    + callee\n\n## Summary\nOpening context.\n\n## Tests\nTargeted tests pass.\n\n## Blast radius\nNo runtime module touched.\n\n## Class sweep\nDefect shape: a body section answered with generic text. Search: \`rg -n "whole-tree grep" scripts\`. Verdict: none outside this fixture.\n\n## Observability\nThe advisory check run is the record.\n\n`;
+// #4605 F12: the shared `body` fixture carries no mutation table, so a case
+// whose diff adds a guard states its own row-2 proof for the file it changes.
+function withMutationProof(text: string, ...files: string[]) {
+	const rows = files
+		.map((file) => `| \`${file}\` | drop the guard | \`Tests 1 failed\` |`)
+		.join("\n");
+	return `${text}\n\n## Mutations\n| File | Mutation | Transcript |\n| --- | --- | --- |\n${rows}\n`;
+}
 // A synthetic runtime file: `rows` is the whole post-image and `added` lists
 // the 1-based post-image lines the diff adds. The harvest reads `rows`, so a
 // test that needs the block-comment opener passes real rows — a bare hunk
@@ -1339,10 +1347,19 @@ describe("PR body lint (#1844)", () => {
 		it.each(["session_start_duplicate_suppressed", "session-start-duplicate"])(
 			"accepts #2895's honest body naming %s from a positional index.ts emitBounded",
 			(record) => {
+				// The diff adds a guard to index.ts, so this body owns row-2 proof
+				// for it; the shared `body` fixture carries none (#4605 F12).
+				const mutationEvidence =
+					"\n\n## Mutations\n| File | Mutation | Transcript |\n|---|---|---|\n" +
+					"| `index.ts` | drop the duplicate-start guard | `Tests 1 failed` |";
 				expect(
-					lintPrBody(withObservability(`The bounded record is ${record}.`), {
-						...postImageFromDiff(pr2895Diff),
-					}),
+					lintPrBody(
+						withObservability(`The bounded record is ${record}.`) +
+							mutationEvidence,
+						{
+							...postImageFromDiff(pr2895Diff),
+						},
+					),
 				).toEqual({ valid: true, errors: [] });
 			},
 		);
@@ -2242,7 +2259,10 @@ describe("PR body lint (#1844)", () => {
 			);
 			expect(
 				lintPrBody(
-					withObservability("The record is session_handoff_adopt."),
+					withMutationProof(
+						withObservability("The record is session_handoff_adopt."),
+						"clients/session-scope.ts",
+					),
 					diff,
 				),
 			).toEqual({ valid: true, errors: [] });
@@ -2255,7 +2275,13 @@ describe("PR body lint (#1844)", () => {
 		// `none: <reason> goes here` passed, so one throwaway line answered every
 		// branch in every file. The reason now names each flagged file.
 		const none = (reason: string) =>
-			lintPrBody(withObservability(reason), postImageFromDiff(seamBranch));
+			lintPrBody(
+				withMutationProof(
+					withObservability(reason),
+					"clients/session-scope.ts",
+				),
+				postImageFromDiff(seamBranch),
+			);
 
 		it("accepts `none: <reason>` that names the flagged file", () => {
 			expect(
@@ -2320,8 +2346,11 @@ describe("PR body lint (#1844)", () => {
 			);
 			expect(
 				lintPrBody(
-					withObservability(
-						"none: clients/lsp/server.ts only forwards the recorded outcome",
+					withMutationProof(
+						withObservability(
+							"none: clients/lsp/server.ts only forwards the recorded outcome",
+						),
+						"clients/lsp/server.ts",
 					),
 					diff,
 				),
@@ -2336,7 +2365,14 @@ describe("PR body lint (#1844)", () => {
 				].join("\n"),
 			);
 			const reasons = (text: string) =>
-				lintPrBody(withObservability(text), diff);
+				lintPrBody(
+					withMutationProof(
+						withObservability(text),
+						"clients/session-scope.ts",
+						"clients/agent-nudge.ts",
+					),
+					diff,
+				);
 			expect(
 				reasons(
 					"none: session-scope.ts only selects a recorded outcome\nnone: agent-nudge.ts only flushes an already counted queue",
@@ -2428,7 +2464,12 @@ describe("PR body lint (#1844)", () => {
 			const diff = postImageFromDiff(
 				diffAdding("clients/example.ts", "\tif (ready) go();"),
 			);
-			expect(lintPrBody(withObservability(sentence), diff)).toEqual({
+			expect(
+				lintPrBody(
+					withMutationProof(withObservability(sentence), "clients/example.ts"),
+					diff,
+				),
+			).toEqual({
 				valid: true,
 				errors: [],
 			});
@@ -2677,9 +2718,12 @@ describe("PR body lint (#1844)", () => {
 			'recordDegradationOnce({ kind: "tool-cwd-resolution" });\n',
 		);
 		const result = lintLocalPrBody(
-			body.replace(
-				"The advisory check run is the record.",
-				"covered by existing record `tool-cwd-resolution` at `clients/existing-record.ts:1`",
+			withMutationProof(
+				body.replace(
+					"The advisory check run is the record.",
+					"covered by existing record `tool-cwd-resolution` at `clients/existing-record.ts:1`",
+				),
+				"clients/new-path.ts",
 			),
 			process.cwd(),
 			() => NEW_PATH_RUNTIME_DIFF,
@@ -2693,9 +2737,12 @@ describe("PR body lint (#1844)", () => {
 		mkdirSync(join(process.cwd(), "tests"), { recursive: true });
 		writeFileSync(source, 'recordDegradationOnce({ kind: "test-record" });\n');
 		const result = lintLocalPrBody(
-			body.replace(
-				"The advisory check run is the record.",
-				"covered by existing record `test-record` at `tests/existing-record.test.ts:1`",
+			withMutationProof(
+				body.replace(
+					"The advisory check run is the record.",
+					"covered by existing record `test-record` at `tests/existing-record.test.ts:1`",
+				),
+				"clients/new-path.ts",
 			),
 			process.cwd(),
 			() => NEW_PATH_RUNTIME_DIFF,
@@ -2730,9 +2777,12 @@ describe("PR body lint (#1844)", () => {
 			);
 			try {
 				const result = lintLocalPrBody(
-					body.replace(
-						"The advisory check run is the record.",
-						`covered by existing record \`${kind}\` at \`${file}\``,
+					withMutationProof(
+						body.replace(
+							"The advisory check run is the record.",
+							`covered by existing record \`${kind}\` at \`${file}\``,
+						),
+						"clients/new-path.ts",
 					),
 					root,
 					() => NEW_PATH_RUNTIME_DIFF,
@@ -2753,9 +2803,12 @@ describe("PR body lint (#1844)", () => {
 
 	it("rejects a stale existing-record citation without throwing", () => {
 		const result = lintLocalPrBody(
-			body.replace(
-				"The advisory check run is the record.",
-				"covered by existing record `missing-record` at `clients/does-not-exist.ts:1`",
+			withMutationProof(
+				body.replace(
+					"The advisory check run is the record.",
+					"covered by existing record `missing-record` at `clients/does-not-exist.ts:1`",
+				),
+				"clients/new-path.ts",
 			),
 			process.cwd(),
 			() => NEW_PATH_RUNTIME_DIFF,
@@ -3417,10 +3470,10 @@ describe("dispatcher seam row (#3906 AC2)", () => {
 		const result = lintPrBody(body, { diff, headFiles });
 		expect(result.valid).toBe(false);
 		const refusal = result.errors.find((error) =>
-			error.includes("clients/dispatch/dispatcher.ts"),
+			error.includes("decision branch"),
 		);
 		expect(refusal).toBeDefined();
-		expect(refusal).toContain("decision branch");
+		expect(refusal).toContain("clients/dispatch/dispatcher.ts");
 		expect(refusal).toContain("(clients/dispatch/dispatcher.ts: 4)");
 	});
 
@@ -3439,11 +3492,15 @@ describe("dispatcher seam row (#3906 AC2)", () => {
 		const rowOne = result.errors.filter((error) => error.includes("row 1"));
 		expect(rowOne.length).toBeGreaterThan(0);
 		// A shallow clone can also carry the bounded post-image notice for the
-		// archived files it cannot read; no other rule may fire.
+		// archived files it cannot read. The archived body predates a per-file
+		// mutation row, so row 2 fires here as a true positive; this case isolates
+		// the Observability rule and the row-2 binding is pinned by
+		// check-pr-body-compliance.test.ts.
 		expect(
 			result.errors.filter(
 				(error) =>
 					!error.includes("row 1") &&
+					!error.includes("row 2") &&
 					!error.startsWith("PR body compliance: cannot classify"),
 			),
 		).toEqual([]);

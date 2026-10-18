@@ -602,6 +602,20 @@ function lineAt(source, index) {
 	return source.slice(0, index).split("\n").length;
 }
 
+// Index of the `]` closing the `[` at `open`, over comment- and
+// string-blanked text; -1 when the array runs past the end of the source.
+function closeBracketIndex(blanked, open) {
+	let depth = 0;
+	for (let index = open; index < blanked.length; index++) {
+		const char = blanked[index];
+		if (char === "[" || char === "(" || char === "{") depth++;
+		else if (char === "]" || char === ")" || char === "}") {
+			if (--depth === 0) return index;
+		}
+	}
+	return -1;
+}
+
 // Index of the `)` closing the `(` at `open`, over comment- and
 // string-blanked text; -1 when the call runs past the end of the source.
 function closeParenIndex(blanked, open) {
@@ -932,24 +946,34 @@ export function testCorpus(options = {}) {
 	return corpus;
 }
 
-function markdownBlocks(body) {
+// `tilde` reads CommonMark's `~~~` fences too. The citation and test-reference
+// lints keep the backtick-only view on purpose (master's behavior, pinned by
+// the "nested bullets and tilde fences" case), while the diff-keyed compliance
+// rows read every fence a reader sees (#4605 F5).
+function markdownBlocks(body, { tilde = false } = {}) {
 	const lines = String(body ?? "").split(/\r?\n/);
 	const blocks = [];
 	let current = null;
 	let fence = null;
+	const fenceMarker = tilde ? /^\s*(`{3,}|~{3,})/ : /^\s*(`{3,})/;
 	const flush = () => {
 		if (current?.lines.length) blocks.push(current);
 		current = null;
 	};
 	for (let index = 0; index < lines.length; index += 1) {
 		const line = lines[index];
-		const marker = line.match(/^\s*(```+)/)?.[1];
+		const marker = fenceMarker.exec(line)?.[1];
 		if (marker || fence) {
 			if (marker && !fence && current && current.lines.length) flush();
 			if (!current) current = { lines: [], start: index, fence: true };
 			current.lines.push(line);
 			if (marker && !fence) fence = marker;
-			else if (fence && marker && marker.length >= fence.length) {
+			else if (
+				fence &&
+				marker &&
+				marker[0] === fence[0] &&
+				marker.length >= fence.length
+			) {
 				fence = null;
 				flush();
 			}
@@ -2326,26 +2350,310 @@ export function lintClassSweep(body = "", { diff } = {}) {
 	return [CLASS_SWEEP_MESSAGE];
 }
 
-/**
- * A quoted transcript vouches for a test title when the title's static
- * segments appear in order on one of its lines. A declaration's own `%s`
- * specifier is a gap the expanded transcript fills (`reds the step for %s`
- * accepts `reds the step for an empty report`), and an unrelated red never
- * satisfies every segment.
- */
-function titleInTranscript(title, quote) {
-	const segments = String(title)
-		.split(/%[sdifjo#]/)
-		.filter(Boolean);
-	return quote.split("\n").some((line) => {
-		let at = 0;
-		for (const segment of segments) {
-			const found = line.indexOf(segment, at);
-			if (found < 0) return false;
-			at = found + segment.length;
+// A failing-test line names its own title: a `FAIL`/`❯` line carries a runner
+// tag, a file and zero or more suite segments before the title, and a glyph
+// line carries the title alone. Vitest appends a duration, which is not part
+// of the title. #4585 row 1 matches this line's own title, never a substring of
+// another test's evidence (#4605 F3).
+const FAILING_ENTRY = /(?:^|\s)(FAIL|❯|[×✗✕])\s+/g;
+const RUNNER_TAG = /^\|[^|]*\|\s*/;
+const VITEST_DURATION = /\s+\d+(?:\.\d+)?\s*m?s\s*$/;
+const UNKNOWN_FILE = /^(?:\.{3}|…)$/;
+
+function failingEntries(quote) {
+	const entries = [];
+	for (const row of String(quote ?? "").split("\n")) {
+		const markers = [...row.matchAll(FAILING_ENTRY)];
+		for (const [index, marker] of markers.entries()) {
+			const start = (marker.index ?? 0) + marker[0].length;
+			const end = markers[index + 1]?.index ?? row.length;
+			const body = row.slice(start, end).replace(/[;\s]+$/, "");
+			entries.push(failingEntry(marker[1], body));
 		}
-		return true;
+	}
+	return entries;
+}
+
+function failingEntry(marker, body) {
+	const title = String(body).replace(VITEST_DURATION, "").trim();
+	if (marker !== "FAIL" && marker !== "❯") return { file: null, title };
+	const parts = title.replace(RUNNER_TAG, "").split(/\s+>\s+/);
+	if (parts.length < 2) return { file: null, title };
+	const file = parts[0].trim().replace(/^\.\//, "");
+	return {
+		file: file && !UNKNOWN_FILE.test(file) ? file : null,
+		title: parts.at(-1),
+	};
+}
+
+const TITLE_PLACEHOLDER = /%[sdifjo#]|\$[A-Za-z_]\w*/g;
+
+function titleSegments(template) {
+	const segments = [];
+	let last = 0;
+	for (const match of String(template).matchAll(TITLE_PLACEHOLDER)) {
+		segments.push(template.slice(last, match.index));
+		last = match.index + match[0].length;
+	}
+	segments.push(template.slice(last));
+	return segments;
+}
+
+// Every wildcard is non-empty, and the static text around it is the
+// declaration's own prefix and suffix in order. A template with no static text
+// (`"%s"`) matches any non-empty title, so a caller refuses it unless the
+// table rows resolve to exact expansions (#4605 F6).
+function titleSegmentsMatch(title, segments) {
+	if (!segments.length) return false;
+	if (segments.length === 1) return title === segments[0];
+	if (!title.startsWith(segments[0])) return false;
+	if (!title.endsWith(segments.at(-1))) return false;
+	let at = segments[0].length;
+	let wildcards = 0;
+	for (const segment of segments.slice(1, -1)) {
+		const found = title.indexOf(segment, at);
+		if (found < 0) return false;
+		if (found > at) wildcards += 1;
+		at = found + segment.length;
+	}
+	if (title.length - segments.at(-1).length > at) wildcards += 1;
+	return wildcards > 0;
+}
+
+function samePath(left, right) {
+	return left.replace(/^\.\//, "") === right.replace(/^\.\//, "");
+}
+
+function titleProofMatches(proof, entry, file) {
+	if (entry.file && !samePath(entry.file, file)) return false;
+	return proof.kind === "exact"
+		? entry.title === proof.title
+		: titleSegmentsMatch(entry.title, proof.segments);
+}
+
+function controlEntry(row) {
+	if (!/\bcontrol\b/i.test(row)) return null;
+	const span = /`([^`\n]+)`/.exec(row);
+	if (!span) return null;
+	const after = row.slice(span.index + span[0].length);
+	if (!/(?:—|:|because)\s*[A-Za-z0-9].+/.test(after)) return null;
+	return { file: null, title: span[1].trim() };
+}
+
+// A path token, or a bare filename for a root-level changed file (`index.ts`).
+// A bare name never stands in for a nested path: `launch.ts` does not name
+// `clients/lsp/launch.ts` (#4605 F4).
+const PATH_TOKEN = /[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*/g;
+
+function pathTokens(text) {
+	return [...String(text ?? "").matchAll(PATH_TOKEN)].map((match) => match[0]);
+}
+
+function namesFile(text, file) {
+	const candidates = new Set([file, file.replace(/\.[cm]?ts$/, ".js")]);
+	return pathTokens(text).some((token) =>
+		candidates.has(token.replace(/^\.\//, "")),
+	);
+}
+
+function namedChangedFiles(text, changedPaths) {
+	const found = new Set();
+	for (const token of pathTokens(text)) {
+		const path = token.replace(/^\.\//, "");
+		if (changedPaths.has(path)) found.add(path);
+	}
+	return found;
+}
+
+function splitTopLevel(blanked, start, end) {
+	const parts = [];
+	let depth = 0;
+	let last = start;
+	for (let index = start; index < end; index += 1) {
+		const char = blanked[index];
+		if (char === "[" || char === "(" || char === "{") depth += 1;
+		else if (char === "]" || char === ")" || char === "}") depth -= 1;
+		else if (char === "," && depth === 0) {
+			parts.push([last, index]);
+			last = index + 1;
+		}
+	}
+	parts.push([last, end]);
+	return parts.filter(([from, to]) => blanked.slice(from, to).trim());
+}
+
+function rowValues(blanked, strings, start, end) {
+	const values = [];
+	const fields = new Map();
+	for (const string of strings) {
+		if (string.start < start || string.end > end) continue;
+		const field = /([A-Za-z_$][\w$]*)\s*:\s*$/.exec(
+			blanked.slice(start, string.start),
+		);
+		if (field) fields.set(field[1], string.text);
+		values.push(string.text);
+	}
+	return { values, fields };
+}
+
+function arrayRows(source, blanked, strings, open) {
+	const close = closeBracketIndex(blanked, open);
+	if (close < 0) return null;
+	return splitTopLevel(blanked, open + 1, close).map(([start, end]) => ({
+		startLine: lineAt(source, start),
+		endLine: lineAt(source, end),
+		...rowValues(blanked, strings, start, end),
+	}));
+}
+
+// The `each` argument names a table held in a local binding: resolve that
+// binding's own initializer, so a row added there is a new case (#4605 F2).
+function boundArrayOpen(blanked, identifier) {
+	for (const keyword of ["const", "let", "var"]) {
+		const needle = `${keyword} ${identifier}`;
+		for (
+			let at = blanked.indexOf(needle);
+			at >= 0;
+			at = blanked.indexOf(needle, at + 1)
+		) {
+			if (/[\w$]/.test(blanked[at - 1] ?? "")) continue;
+			const assignment = /^\s*=\s*\[/.exec(blanked.slice(at + needle.length));
+			if (assignment)
+				return at + needle.length + assignment[0].lastIndexOf("[");
+		}
+	}
+	return -1;
+}
+
+function eachRows(source, blanked, strings, open, close) {
+	const argument = blanked.slice(open + 1, close);
+	const literal = /^\s*\[/.exec(argument);
+	if (literal) {
+		const bracket = open + 1 + argument.indexOf("[");
+		return arrayRows(source, blanked, strings, bracket);
+	}
+	const identifier = /^\s*([A-Za-z_$][\w$]*)\s*$/.exec(argument);
+	if (!identifier) return null;
+	const bracket = boundArrayOpen(blanked, identifier[1]);
+	return bracket < 0 ? null : arrayRows(source, blanked, strings, bracket);
+}
+
+function expandedTitle(template, row) {
+	let cursor = 0;
+	let resolved = true;
+	const text = String(template).replace(TITLE_PLACEHOLDER, (placeholder) => {
+		if (placeholder[0] === "$") {
+			const value = row.fields.get(placeholder.slice(1));
+			if (value === undefined) resolved = false;
+			return value ?? placeholder;
+		}
+		const value = row.values[cursor];
+		cursor += 1;
+		if (value === undefined) resolved = false;
+		return value ?? placeholder;
 	});
+	return resolved ? text : null;
+}
+
+// A declaration is the identifier plus any `.modifier` or `.modifier(args)`
+// chain and then the title call: `it`, `it.each(rows)`, `it.runIf(flag)`,
+// `it.concurrent.only`. The chain is consumed structure, not a list of known
+// modifiers, so a form the author never saw is still discovered (#4605 F2).
+// A `vitest` namespace import (`import * as v from "vitest"`) declares a test
+// through `v.test(...)`, so the binding is read from the source, not guessed
+// from the callee's spelling.
+const VITEST_NAMESPACE_IMPORT =
+	/import\s+\*\s+as\s+([A-Za-z_$][\w$]*)\s+from\s+["']vitest["']/g;
+
+function vitestNamespaces(source) {
+	return [...String(source ?? "").matchAll(VITEST_NAMESPACE_IMPORT)].map(
+		(match) => match[1],
+	);
+}
+
+function declarationCalls(blanked, names, namespaces = []) {
+	const found = [];
+	const callees = [
+		...[...names].map((name) => `${name}`),
+		...namespaces.map((name) => `${name}\\s*\\.\\s*(?:it|test)`),
+	];
+	const identifier = new RegExp(
+		`(?<![\\w$.])(?:${callees.join("|")})(?![\\w$])`,
+		"g",
+	);
+	for (const match of blanked.matchAll(identifier)) {
+		let index = (match.index ?? 0) + match[0].length;
+		let paren = -1;
+		let each = null;
+		for (;;) {
+			while (/\s/.test(blanked[index] ?? "")) index += 1;
+			// `(0, test)(...)` wraps the identifier in a comma expression; the
+			// declaration call is the outer one (#4605 F2 indirect call).
+			while (blanked[index] === ")") {
+				index += 1;
+				while (/\s/.test(blanked[index] ?? "")) index += 1;
+			}
+			if (blanked[index] === ".") {
+				const property = /^[.]\s*([A-Za-z_$][\w$]*)/.exec(blanked.slice(index));
+				if (!property) break;
+				index += property[0].length;
+				while (/\s/.test(blanked[index] ?? "")) index += 1;
+				if (blanked[index] === "(") {
+					const close = closeParenIndex(blanked, index);
+					if (close < 0) break;
+					if (property[1] === "each") each = { open: index, close };
+					index = close + 1;
+				}
+				continue;
+			}
+			if (blanked[index] === "(") paren = index;
+			break;
+		}
+		if (paren < 0) continue;
+		const close = closeParenIndex(blanked, paren);
+		if (close < 0) continue;
+		found.push({ start: match.index ?? 0, paren, close, each });
+	}
+	return found;
+}
+
+// A table row in the mutation section may name its file in the row, or sit
+// under a one-file opener. The label on the last cell lets a row point at a
+// failing fence below it, the shape `scripts/mutate.mjs` writes.
+function mutationTableRows(visibleRows) {
+	let mutationSection = false;
+	let mutationScope = "";
+	const rows = [];
+	for (const row of visibleRows) {
+		const heading = HEADING.exec(row);
+		if (heading) {
+			mutationSection = /\bmutations?\b/i.test(heading[1]);
+			mutationScope = "";
+			continue;
+		}
+		if (/^\s*(?:\*\*)?(?:Hand[- ]mutation|Mutations?)\b/i.test(row)) {
+			mutationSection = true;
+			mutationScope = row;
+			continue;
+		}
+		if (!mutationSection || !row.trim()) continue;
+		if (/^\s*\|/.test(row)) {
+			if (/^\s*\|[\s:|-]+\|?\s*$/.test(row)) continue;
+			const cells = row
+				.split("|")
+				.slice(1, -1)
+				.map((cell) => cell.trim());
+			const label = (cells.at(-1) ?? "").replace(/`/g, "").trim();
+			rows.push({
+				text: row,
+				scope: mutationScope,
+				label: /^[A-Za-z]*\d+$/.test(label) ? label : null,
+			});
+			continue;
+		}
+		mutationScope = row;
+	}
+	return rows;
 }
 
 /** Check the structural PR-body contract, including answered sections. */
@@ -2353,74 +2661,89 @@ function titleInTranscript(title, quote) {
 // Row 3 (model fidelity) remains reviewer judgement per issuecomment 6241755363.
 function lintDiffCompliance(body, options) {
 	const errors = [];
-	const visible = blankMarkdown(body);
 	// A literal `<!--` inside a fence or an inline code span is quoted text, not
 	// a comment opener: the body of a PR that documents comment ends reads it as
 	// text, and blanking from it would hide every fence below (#4585 row 1 hit
-	// exactly that). A fence reads as a backticked span here, so one pass covers
-	// both, and the restore below keeps a fence that sits inside a real comment
-	// hidden.
+	// exactly that). Both a backticked span and a fence restore their literal
+	// `<!--`, and a real comment still hides what it contains.
 	const source = String(body);
 	const quotedSpans = codeSpanMasked(source);
+	const fencedSpans = sourceWithoutFencedBlocks(source, {
+		indentedCode: false,
+	});
 	const guarded = source.replace(/<!--/g, (marker, offset) =>
-		quotedSpans.startsWith("    ", offset) ? "    " : marker,
+		quotedSpans[offset] === " " || fencedSpans[offset] === " "
+			? "    "
+			: marker,
 	);
+	// `visibleRows` hides fenced examples (a quoted heading, control or table
+	// is an example, not a claim). `evidenceRows` keeps fence content, because
+	// an honest body quotes the Windows advisory row in a fence (#4605 F5).
 	const rawRows = blankHtmlComments(guarded).split(/\r?\n/);
-	const fences = markdownBlocks(body).filter((block) => block.fence);
-	for (const block of fences)
-		if (rawRows[block.start].trim())
-			rawRows.splice(block.start, block.lines.length, ...block.lines);
-	const visibleRows = visible.split(/\r?\n/);
-	const transcripts = [];
-	for (let index = 0; index < rawRows.length; index++) {
-		// Only a real, visible fence can introduce evidence. Examples in HTML
-		// comments and unterminated fences cannot vouch for a run.
-		if (!/^\s*```/.test(rawRows[index])) continue;
-		const quote = sourceQuoteAfter(rawRows, index - 1);
-		if (!quote) break;
-		if (isFailureQuote(quote))
-			transcripts.push({ text: quote.text.join("\n"), line: index });
-		index = quote.end;
+	const visibleRows = blankMarkdown(guarded).split(/\r?\n/);
+	const evidenceRows = rawRows;
+	const transcriptFences = [];
+	for (const block of markdownBlocks(body, { tilde: true })) {
+		if (!block.fence || !rawRows[block.start]?.trim()) continue;
+		const opener = /^\s*(`{3,}|~{3,})(.*)$/.exec(block.lines[0]);
+		const closer = /^\s*(`{3,}|~{3,})\s*$/.exec(block.lines.at(-1));
+		if (!opener || !closer || block.lines.length < 2) continue;
+		if (closer[1][0] !== opener[1][0] || closer[1].length < opener[1].length)
+			continue;
+		const lines = block.lines.slice(1, -1).filter((line) => line.trim());
+		if (!lines.length) continue;
+		transcriptFences.push({
+			start: block.start,
+			header: lines[0].trim(),
+			lines,
+			failure: isFailureQuote({ info: opener[2].trim(), text: lines }),
+		});
 	}
-	let mutationSection = false;
-	const mutationRows = [];
-	const mutationLines = new Set();
-	for (const [index, row] of visibleRows.entries()) {
-		const heading = HEADING.exec(row);
-		if (heading) mutationSection = /\bmutations?\b/i.test(heading[1]);
-		else if (/^\s*(?:\*\*)?(?:Hand[- ]mutation|Mutations?)\b/i.test(row))
-			mutationSection = true;
-		if (mutationSection) {
-			mutationLines.add(index);
-			mutationRows.push(rawRows[index]);
-		}
-	}
-	let windows = false;
-	for (const row of visibleRows) {
+	// Only a failing fence can vouch for a run, and a fence inside a real
+	// comment was removed above.
+	const transcripts = transcriptFences.filter((fence) => fence.failure);
+	const mutationRows = mutationTableRows(visibleRows);
+	const windowsReads = [];
+	for (const row of evidenceRows) {
 		if (!/\bWindows\b/i.test(row)) continue;
-		windows ||=
+		const reason =
 			/\b(?:cannot differ|platform.independent|platform.neutral)\b.*\bbecause\b\s+\S.+/i.test(
 				row,
-			) ||
-			(/\b(?:advisory|lane)\b/i.test(row) &&
-				/\b(?:passed|failed|success|failure|cancelled)\b/i.test(row) &&
-				/\b\d{5,}\b/.test(row));
-	}
-	const unclassified = [];
-	for (const file of parseRuntimeHunks(options.diff)) {
-		const windowsPath = [file.pre, file.post].some((name) =>
-			/^clients\/(?:package-manager\.|lsp\/launch|path-utils\.)/.test(name),
-		);
-		if (windowsPath && !windows)
-			errors.push(
-				`PR body compliance row 4: ${file.post} needs a Windows advisory-lane result with run id, or a reason it cannot differ (Windows: cannot differ because ...).`,
 			);
+		const run =
+			/\b(?:advisory|lane|job)\b/i.test(row) &&
+			/\b(?:passed|failed|success|failure)\b/i.test(row) &&
+			/\b\d{5,}\b/.test(row) &&
+			!/\b(?:cancelled|canceled|skipped|pending|queued|not run|did not run)\b/i.test(
+				row,
+			);
+		if (reason || run) windowsReads.push(row);
+	}
+	const changedFiles = parseRuntimeHunks(options.diff);
+	const changedPaths = new Set();
+	for (const file of changedFiles) {
+		if (file.pre) changedPaths.add(file.pre);
+		if (file.post) changedPaths.add(file.post);
+	}
+	const rowFour = [];
+	const unclassified = [];
+	for (const file of changedFiles) {
+		const windowsPath = [file.pre, file.post].some((name) =>
+			/^clients\/(?:package-manager\.|lsp\/launch|path-utils\.|safe-spawn\.)/.test(
+				name,
+			),
+		);
 		const tests = /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(file.post);
 		const production =
 			/\.[cm]?[jt]sx?$/.test(file.post) &&
 			!/\.d\.[cm]?ts$/.test(file.post) &&
 			(isRuntimeObservabilityPath(file.post) ||
 				file.post.startsWith("scripts/"));
+		if (windowsPath)
+			rowFour.push({
+				file: file.post,
+				read: windowsReads.some((row) => namesFile(row, file.post)),
+			});
 		if ((!tests && !production) || !file.added.size) continue;
 		const source = headFileSource(file.post, {
 			...options,
@@ -2474,49 +2797,96 @@ function lintDiffCompliance(body, options) {
 				const binding = /\b(?:const|let|var)\s+(\w+)\s*=\s*$/.exec(
 					string.prefix,
 				);
-				if (binding) bindings.set(binding[1], string.text);
+				if (binding) bindings.set(binding[1], string);
 			}
-			const calls = new RegExp(
-				`(?<![\\w$.])(?:${[...names].join("|")})(?:\\s*\\.\\s*(?:only|skip|todo|concurrent|sequential|fails|each))*\\s*(?:\\))?\\s*\\(`,
-				"g",
-			);
-			for (const call of text.matchAll(calls)) {
-				let from = call.index + call[0].length;
-				if (/\.\s*each\s*\($/.test(call[0])) {
-					const close = closeParenIndex(text, from - 1);
-					const next = /^\s*\(/.exec(text.slice(close + 1));
-					if (close >= 0 && next) from = close + 1 + next[0].length;
-				}
+			const added = [...file.added.keys()];
+			const addedIn = (from, to) =>
+				added.some((line) => line >= from && line <= to);
+			const namespaces = vitestNamespaces(source);
+			for (const declaration of declarationCalls(text, names, namespaces)) {
+				const callLine = lineAt(source, declaration.start);
+				const callEndLine = lineAt(source, declaration.close);
+				const declarationAdded = addedIn(callLine, callEndLine);
 				const string = strings.find(
 					(value) =>
-						value.start >= from && !text.slice(from, value.start).trim(),
+						value.start > declaration.paren &&
+						!text.slice(declaration.paren + 1, value.start).trim(),
 				);
-				const binding = /^\s*(\w+)\s*,/.exec(text.slice(from));
-				const title = string?.text ?? bindings.get(binding?.[1]);
-				const end = string?.end ?? from + (binding?.[0].length ?? 0);
-				const titleChanged = [...file.added.keys()].some(
-					(line) =>
-						line >= lineAt(source, call.index) && line <= lineAt(source, end),
+				const binding = /^\s*(\w+)\s*,/.exec(text.slice(declaration.paren + 1));
+				const bound = string ? null : bindings.get(binding?.[1]);
+				const title = string?.text ?? bound?.text;
+				const titleSpan = string
+					? [lineAt(source, string.start), lineAt(source, string.end)]
+					: bound
+						? [lineAt(source, bound.start), lineAt(source, bound.end)]
+						: null;
+				const titleChanged = titleSpan ? addedIn(...titleSpan) : false;
+				const tableRows = declaration.each
+					? eachRows(
+							source,
+							text,
+							strings,
+							declaration.each.open,
+							declaration.each.close,
+						)
+					: null;
+				const changedRows = tableRows?.filter((row) =>
+					addedIn(row.startLine, row.endLine),
 				);
-				if (!titleChanged) continue;
-				const control =
-					title &&
-					visibleRows.some(
-						(row) =>
-							row.includes(title) &&
-							/\bcontrol\b/i.test(row) &&
-							/(?:—|:|because)\s*[A-Za-z0-9].+/.test(
-								row.slice(row.indexOf(title) + title.length),
-							),
-					);
-				if (
-					!control &&
-					(!title ||
-						!transcripts.some((quote) => titleInTranscript(title, quote.text)))
-				)
+				if (!declarationAdded && !titleChanged && !changedRows?.length)
+					continue;
+				const proofs = new Map();
+				if (!title) {
 					errors.push(
-						`PR body compliance row 1: ${file.post}: ${title ?? "unresolved test title"} needs a quoted red-first transcript or a named Control with a reason.`,
+						`PR body compliance row 1: ${file.post}: unresolved test title needs a quoted red-first transcript or a named Control with a reason.`,
 					);
+					continue;
+				}
+				if (!declaration.each) {
+					proofs.set(title, { kind: "exact", title });
+				} else if (tableRows) {
+					// A new declaration, a renamed template, or a changed table row
+					// owes the expansion of each row it touches, exactly as Vitest
+					// prints it (#4605 F2 and F6).
+					const chosen =
+						declarationAdded || titleChanged ? tableRows : (changedRows ?? []);
+					for (const row of chosen) {
+						const expanded = expandedTitle(title, row);
+						if (expanded)
+							proofs.set(expanded, { kind: "exact", title: expanded });
+					}
+				}
+				if (!proofs.size && declaration.each) {
+					const segments = titleSegments(title);
+					if (segments.some((segment) => segment.length))
+						proofs.set(segments.join("\u0000"), {
+							kind: "pattern",
+							segments,
+						});
+				}
+				if (!proofs.size) {
+					// A placeholder-only title whose table does not resolve cannot be
+					// proved by any title: refuse rather than accept every red.
+					errors.push(
+						`PR body compliance row 1: ${file.post}: ${title} needs a quoted red-first transcript or a named Control with a reason.`,
+					);
+					continue;
+				}
+				for (const proof of proofs.values()) {
+					const proved = transcripts.some((fence) =>
+						failingEntries(fence.lines.join("\n")).some((entry) =>
+							titleProofMatches(proof, entry, file.post),
+						),
+					);
+					const control = visibleRows.some((row) => {
+						const entry = controlEntry(row);
+						return entry ? titleProofMatches(proof, entry, file.post) : false;
+					});
+					if (!proved && !control)
+						errors.push(
+							`PR body compliance row 1: ${file.post}: ${proof.kind === "exact" ? proof.title : title} needs a quoted red-first transcript or a named Control with a reason.`,
+						);
+				}
 			}
 		}
 		if (
@@ -2526,29 +2896,56 @@ function lintDiffCompliance(body, options) {
 			)
 		) {
 			// #4575: a mutation row, or the tool's own `mutation:` transcript,
-			// names the file it proves. A row that only claims a result is not
-			// evidence, so the red must be quoted (backticked or fenced).
-			const names = (text) =>
-				[file.post, file.post.replace(/\.[cm]?ts$/, ".js")].some((name) =>
-					text.includes(name),
-				);
-			const rowProves =
-				mutationRows.some(names) &&
-				(mutationRows.some((row) => BACKTICKED_RED.test(row)) ||
-					transcripts.some((quote) => mutationLines.has(quote.line)));
-			const transcriptProves = transcripts.some(
-				(quote) =>
-					/^\s*(?:\$\s*)?mutation:/m.test(quote.text) && names(quote.text),
+			// names the file it proves. One file, one red (#4605 F1): a table row
+			// binds to the file it names (or to the one-file opener above it),
+			// and its red must be in that row or in a labelled failing fence. A
+			// `mutation:` fence must open with this file and be a failing run, so
+			// prose and a "not run" header prove nothing.
+			const transcriptProves = transcriptFences.some(
+				(fence) =>
+					fence.failure &&
+					/^(?:\$\s+)?mutation:/i.test(fence.header) &&
+					!/\b(?:not run|did not run|could not run|skipped|unavailable)\b/i.test(
+						fence.header,
+					) &&
+					namesFile(fence.header, file.post),
 			);
+			const rowProves = mutationRows.some((row) => {
+				if (!namesFile(row.text, file.post)) {
+					const scoped = namedChangedFiles(row.scope, changedPaths);
+					if (scoped.size !== 1 || !scoped.has(file.post)) return false;
+				}
+				if (BACKTICKED_RED.test(row.text)) return true;
+				if (!row.label) return false;
+				return transcriptFences.some(
+					(fence) =>
+						fence.failure &&
+						namesFile(fence.header, file.post) &&
+						new RegExp(`\\b${row.label}\\b`).test(fence.header),
+				);
+			});
 			if (!rowProves && !transcriptProves)
 				errors.push(
 					`PR body compliance row 2: ${file.post} needs a Mutation section naming that file and a quoted failing mutation transcript.`,
 				);
 		}
-		if (production && !windowsPath && /\btrySpawn\b/.test(text) && !windows)
-			errors.push(
-				`PR body compliance row 4: ${file.post} needs a Windows advisory-lane result with run id, or a reason it cannot differ (Windows: cannot differ because ...).`,
-			);
+		if (production && !windowsPath && /\btrySpawn\b/.test(text))
+			rowFour.push({
+				file: file.post,
+				read: windowsReads.some((row) => namesFile(row, file.post)),
+			});
+	}
+	// #4605 F4: row 4 is per file. A Windows line that names the file covers it;
+	// a generic line covers a diff with exactly one seam file, where it cannot
+	// be ambiguous. A cancelled, skipped or pending run is not a read.
+	const genericRead = windowsReads.some(
+		(row) => !rowFour.some((seam) => namesFile(row, seam.file)),
+	);
+	for (const seam of rowFour) {
+		if (seam.read || (rowFour.length === 1 && genericRead)) continue;
+		errors.push(
+			`PR body compliance row 4: ${seam.file} needs a Windows advisory-lane result with run id, or a reason it cannot differ (Windows: cannot differ because ...).`,
+		);
 	}
 	// A post-image the diff names but cannot be read or matched classifies no
 	// row, so the body owes the rows it may still hold. One bounded line names
