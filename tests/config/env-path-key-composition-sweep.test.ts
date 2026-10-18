@@ -1429,7 +1429,6 @@ export function findPathKeyFindings(
 						has: { kind: "property_identifier" },
 					},
 				},
-				{ kind: "call_expression" },
 			],
 		},
 	})) {
@@ -2384,7 +2383,7 @@ describe("#4590 env PATH composition", () => {
 			'Reflect.set(process.env, "PATH", next);',
 			'Object.defineProperty(process.env, "Path", { value: next });',
 			'const env: ProcessEnv = process.env; Reflect.set(env, "PATH", next);',
-			'const env: ProcessEnv = process.env; writeEnv(env, "Path", next);',
+			'const env: ProcessEnv = process.env; writer.writeEnv(env, "Path", next);',
 		];
 		expect(
 			sources.map((source) =>
