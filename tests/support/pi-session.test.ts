@@ -15,6 +15,7 @@ import {
 	fauxToolCall,
 } from "@earendil-works/pi-ai";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { flushAllNdjsonWriters } from "../../clients/ndjson-logger.js";
 import { piSessionFixture, startPiSession } from "./pi-session.js";
 
 const fixture = piSessionFixture();
@@ -157,6 +158,7 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 		// handler returns pi-lens's own writer drain; the row below is the
 		// loaded copy's, flushed through that seam.
 		const latencyLog = path.join(process.env.PI_LENS_HOME ?? "", "latency.log");
+		await flushAllNdjsonWriters();
 		const rows = fs
 			.readFileSync(latencyLog, "utf8")
 			.split("\n")

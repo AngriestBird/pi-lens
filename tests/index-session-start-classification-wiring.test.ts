@@ -20,6 +20,7 @@ import {
 	flushLatencyLog,
 	getLatencyLogPath,
 } from "../clients/latency-logger.js";
+import { flushAllNdjsonWriters } from "../clients/ndjson-logger.js";
 import { _resetSessionLifecycleForTests } from "../clients/session-lifecycle.js";
 import { makeSessionStartEvent } from "./support/host-event-factory.js";
 import { createPiMock, makeCtx, STALE_CTX_MESSAGE } from "./support/pi-mock.js";
@@ -52,6 +53,18 @@ type SessionStartTotalRecord = {
  * the home `tests/support/pi-session.ts` pinned (its loggers bind their path at
  * their own module load, so this graph's binding names a different file).
  */
+//
+// The tier-2 case reads the LOADED copy's log, whose path this graph's
+// `getLatencyLogPath()` does not name (the copy's loggers bind their own path
+// at ITS module load). `flushAllNdjsonWriters` drains the process-global
+// writer map both graphs registered into, so it settles the copy's rows before
+// the read (#4381 shape: a sink read drains first).
+async function sessionStartTotalsAt(
+	filePath: string,
+): Promise<SessionStartTotalRecord[]> {
+	await flushAllNdjsonWriters();
+	return sessionStartTotals(filePath);
+}
 function sessionStartTotals(
 	filePath: string = getLatencyLogPath(),
 ): SessionStartTotalRecord[] {
@@ -128,7 +141,7 @@ describe("index session_start wiring — classification logged with mode (#2129)
 		await handle.dispose();
 		expect(handle.errors).toEqual([]);
 
-		const totals = sessionStartTotals(
+		const totals = await sessionStartTotalsAt(
 			path.join(process.env.PI_LENS_HOME ?? "", "latency.log"),
 		);
 		expect(totals).toHaveLength(1);
