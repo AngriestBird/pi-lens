@@ -16,10 +16,12 @@
  * bounded record against the grammar, and a late success changes nothing.
  *
  * The loader is the only fake in the code under test. `loadLanguage`,
- * `compileQueryBatch`, the failure record and the cooldown are the production
- * code, the user notifier is the real seam wired to a recorder, and the bound
- * is the shared constant, so a bound that only looks right on a short fake
- * clock cannot pass.
+ * `compileQueryBatch`, the logger, the failure record and the cooldown are the
+ * production code, the user notifier is the real seam wired to a recorder, and
+ * the bound is the shared constant, so a bound that only looks right on a short
+ * fake clock cannot pass. The cases that assert a log record read it back out
+ * of the real `tree-sitter.log` rather than a spy on the logger: a spy replaces
+ * the seam, so it proves what the client handed over, not what reached the sink.
  */
 
 import * as fs from "node:fs";
@@ -51,6 +53,49 @@ const REPLACEMENT_WASM = Buffer.from([
 	0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0xde, 0xad,
 ]);
 const GRAMMAR_FILE = "tree-sitter-python.wasm";
+
+/** The shape `tree-sitter.log` holds, as read back from disk below. */
+type SinkRow = {
+	phase?: string;
+	filePath?: string;
+	status?: string;
+	reason?: string;
+	metadata?: Record<string, unknown>;
+};
+
+/** Every row `tree-sitter.log` holds right now. The sink binds its directory at
+ * module load (`getGlobalPiLensLogDir`), so the path is read from the logger
+ * itself: it is this worker's own `PI_LENS_HOME`, never the maintainer's. */
+function readTreeSitterRows(): SinkRow[] {
+	const file = treeSitterLogger.getTreeSitterLogPath();
+	if (!fs.existsSync(file)) return [];
+	return fs
+		.readFileSync(file, "utf8")
+		.split("\n")
+		.filter((line) => line.trim().length > 0)
+		.map((line) => JSON.parse(line) as SinkRow);
+}
+
+/** Row count to compare a case's own writes against. The flush keeps a row a
+ * previous case left queued from landing after the baseline is taken. */
+async function treeSitterRowCount(): Promise<number> {
+	await treeSitterLogger.flushTreeSitterLog();
+	return readTreeSitterRows().length;
+}
+
+/** The rows the sink gained since `baseline`. The flush is the LAST await before
+ * the read: a read that races the writer's own queue counts late bytes on the
+ * wrong side of its window (AGENTS.md shape 67). */
+async function treeSitterRowsSince(baseline: number): Promise<SinkRow[]> {
+	await treeSitterLogger.flushTreeSitterLog();
+	return readTreeSitterRows().slice(baseline);
+}
+
+/** The row `outcome` names, e.g. `load-failed` or `late-load-failed`. */
+const rowWithOutcome = (
+	rows: SinkRow[],
+	outcome: string,
+): SinkRow | undefined => rows.find((row) => row.metadata?.outcome === outcome);
 
 type LoadClient = {
 	loadLanguage(languageId: string): Promise<unknown>;
@@ -131,8 +176,11 @@ const decodeError = (): Error =>
 describe("Language.load bound (#4224)", () => {
 	let env: ReturnType<typeof setupTestEnvironment>;
 	let notices: Array<{ message: string; level?: string }>;
+	/** `PI_LENS_TEST_MODE` as the environment had it before a case opted in. */
+	let priorTestMode: string | undefined;
 
 	beforeEach(() => {
+		priorTestMode = process.env.PI_LENS_TEST_MODE;
 		resetDegradationLedger();
 		notices = [];
 		wireUserNotifier(() => (message, level) => {
@@ -153,10 +201,18 @@ describe("Language.load bound (#4224)", () => {
 		for (const release of stuckLoads.splice(0)) release();
 		vi.useRealTimers();
 		vi.restoreAllMocks();
+		if (priorTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
+		else process.env.PI_LENS_TEST_MODE = priorTestMode;
 		resetUserNotifier();
 		_setGrammarManifestForTests(undefined);
 		removeTempDirSync(env.tmpDir);
 	});
+
+	/** Let `logTreeSitter` run for real, so the record reaches the sink instead of
+	 * being dropped by the vitest early return in `isTestMode()`. */
+	function writeRealLog(): void {
+		process.env.PI_LENS_TEST_MODE = "0";
+	}
 
 	async function makeClient(
 		load: (path: string) => Promise<unknown>,
@@ -366,7 +422,8 @@ describe("Language.load bound (#4224)", () => {
 	it("records a late decode failure once against the grammar, without a second notice", async () => {
 		const late = lateLoad();
 		const { client } = await makeClient(late.load);
-		const diagnostics = vi.spyOn(treeSitterLogger, "logTreeSitterDiagnostic");
+		writeRealLog();
+		const baseline = await treeSitterRowCount();
 		vi.useFakeTimers();
 
 		const pending = client.loadLanguage("python");
@@ -378,12 +435,16 @@ describe("Language.load bound (#4224)", () => {
 		late.reject(decodeError());
 		await vi.advanceTimersByTimeAsync(0);
 
-		// tree-sitter.log names the late failure for whoever reads it.
-		const lateLogged = diagnostics.mock.calls
-			.map(([entry]) => entry)
-			.filter((entry) => entry.metadata?.outcome === "late-load-failed");
+		// The real sink names the late failure for whoever reads tree-sitter.log.
+		const lateLogged = (await treeSitterRowsSince(baseline)).filter(
+			(row) => row.metadata?.outcome === "late-load-failed",
+		);
 		expect(lateLogged).toHaveLength(1);
-		expect(lateLogged[0]?.message).toContain("expected magic word");
+		expect(lateLogged[0]?.reason).toContain("settled after its");
+		expect(lateLogged[0]?.reason).toContain("expected magic word");
+		expect(lateLogged[0]?.metadata).toMatchObject({
+			grammarFile: GRAMMAR_FILE,
+		});
 		expect(client.wasmAborted).toBe(false);
 		expect(ledgerCount("wasm-abort")).toBe(0);
 		// Two events, one retained slot for the grammar: bounded.
@@ -463,26 +524,31 @@ describe("Language.load bound (#4224)", () => {
 	// file already on disk is neither.
 	it("words the timeout as a local hang, not a truncated download", async () => {
 		const { client } = await makeClient(stuckLoad);
-		const diagnostics = vi.spyOn(treeSitterLogger, "logTreeSitterDiagnostic");
+		writeRealLog();
+		const baseline = await treeSitterRowCount();
 		vi.useFakeTimers();
 
 		const pending = client.loadLanguage("python");
 		await vi.advanceTimersByTimeAsync(GRAMMAR_LOAD_TIMEOUT_MS);
 		expect(await peek(pending)).toBeNull();
 
-		const records = diagnostics.mock.calls.map(([entry]) => entry);
-		const loadFailed = records.find(
-			(entry) => entry.metadata?.outcome === "load-failed",
-		);
-		const unavailable = records.find(
-			(entry) => entry.metadata?.outcome === "unavailable",
-		);
-		expect(loadFailed?.message).toContain(String(GRAMMAR_LOAD_TIMEOUT_MS));
-		expect(loadFailed?.message).toContain("hang in the local load");
-		expect(loadFailed?.message).not.toContain(
+		// Both rows are read out of the real sink: the diagnosis a bug report
+		// greps for lives there, not in anything the client handed to a spy.
+		const records = await treeSitterRowsSince(baseline);
+		const loadFailed = rowWithOutcome(records, "load-failed");
+		const unavailable = rowWithOutcome(records, "unavailable");
+		expect(loadFailed?.reason).toContain(String(GRAMMAR_LOAD_TIMEOUT_MS));
+		expect(loadFailed?.reason).toContain("hang in the local load");
+		expect(loadFailed?.reason).not.toContain(
 			"most likely a truncated download",
 		);
+		expect(loadFailed?.metadata).toMatchObject({ grammarFile: GRAMMAR_FILE });
 		expect(unavailable?.metadata).toMatchObject({ cause: "load-timed-out" });
+		expect(unavailable?.reason).toContain("local hang");
+		// The remedy names what to attach; the notice already names the grammar it
+		// is about, so it does not ask for the name a second time.
+		expect(unavailable?.reason).toContain("attach the tree-sitter log");
+		expect(unavailable?.reason).not.toContain("this grammar name");
 		expect(notices[0]?.message).toContain("local hang");
 		expect(notices[0]?.message).not.toMatch(
 			/approve-builds|trustedDependencies|network/,
@@ -496,21 +562,18 @@ describe("Language.load bound (#4224)", () => {
 	// the bound is the #1564 shape, and keeps its own message and remedy.
 	it("keeps the truncated-download wording for a load that fails inside the bound", async () => {
 		const { client } = await makeClient(() => Promise.reject(decodeError()));
-		const diagnostics = vi.spyOn(treeSitterLogger, "logTreeSitterDiagnostic");
+		writeRealLog();
+		const baseline = await treeSitterRowCount();
 		vi.useFakeTimers();
 
 		const pending = client.loadLanguage("python");
 		await vi.advanceTimersByTimeAsync(0);
 		expect(await peek(pending)).toBeNull();
 
-		const records = diagnostics.mock.calls.map(([entry]) => entry);
-		const loadFailed = records.find(
-			(entry) => entry.metadata?.outcome === "load-failed",
-		);
-		const unavailable = records.find(
-			(entry) => entry.metadata?.outcome === "unavailable",
-		);
-		expect(loadFailed?.message).toContain("most likely a truncated download");
+		const records = await treeSitterRowsSince(baseline);
+		const loadFailed = rowWithOutcome(records, "load-failed");
+		const unavailable = rowWithOutcome(records, "unavailable");
+		expect(loadFailed?.reason).toContain("most likely a truncated download");
 		expect(unavailable?.metadata).not.toHaveProperty("cause");
 		expect(notices[0]?.message).toContain("approve-builds");
 		expect(grammarLedgerReason()).toContain("runtime grammar download failed");

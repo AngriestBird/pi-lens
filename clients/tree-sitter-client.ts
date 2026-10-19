@@ -1647,7 +1647,7 @@ export class TreeSitterClient {
 						`for the user pi-lens runs as, or reinstall pi-lens as that user.`
 					: cause === "load-timed-out"
 						? `This is a local hang while loading the grammar, not a download problem: if it keeps ` +
-							`timing out, restart pi, and report it with this grammar name if it still does.`
+							`timing out, restart pi and attach the tree-sitter log to a bug report.`
 						: retryable
 							? `if the problem persists, allow the package manager's build scripts ` +
 								`(pnpm approve-builds / bun trustedDependencies) or restore network access.`

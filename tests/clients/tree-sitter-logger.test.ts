@@ -218,4 +218,41 @@ describe("tree-sitter-logger", () => {
 		const payload = JSON.parse(appendFile.mock.calls[0][1]);
 		expect(payload.filePath).toBe("<tree-sitter>");
 	});
+
+	// #4224 review R1: the record is what a bug report greps for, so the entry's
+	// `reason` and its whole `metadata` must survive the write. A case that only
+	// reads `filePath` passes while the logger drops the diagnosis.
+	it("keeps a diagnostic entry's reason and metadata", async () => {
+		const appendFile = vi.fn(async (_file: string, _data: string) => {});
+		vi.doMock("node:fs", () => ({
+			mkdirSync: vi.fn(),
+			statSync: () => {
+				throw new Error("ENOENT");
+			},
+			promises: { appendFile },
+		}));
+		vi.doMock("node:os", () => ({
+			homedir: () => "/mock-home",
+		}));
+
+		const mod = await import("../../clients/tree-sitter-logger.js");
+		mod.logTreeSitterDiagnostic({
+			subsystem: "tree-sitter-client",
+			message: "wasm aborted",
+			metadata: {
+				grammarFile: "tree-sitter-python.wasm",
+				outcome: "unavailable",
+			},
+		});
+		await mod.flushTreeSitterLog();
+
+		const payload = JSON.parse(appendFile.mock.calls[0][1]);
+		expect(payload.phase).toBe("diagnostic");
+		expect(payload.reason).toBe("wasm aborted");
+		expect(payload.metadata).toEqual({
+			subsystem: "tree-sitter-client",
+			grammarFile: "tree-sitter-python.wasm",
+			outcome: "unavailable",
+		});
+	});
 });
