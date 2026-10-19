@@ -211,6 +211,12 @@ describe("#3734: rename_file refuses an edit on a file that changed", () => {
 
 	it("an opened importer re-sent while the server computes is refused on the send stamp, although its disk equals that send", async () => {
 		const edit = importEdit(importPath);
+		// The clock is frozen at the real instant the case starts, so the write's
+		// mtime stays consistent with the request instant; only the answer's own
+		// arrival moves it forward, which is what makes "before the request" and
+		// "after the answer" two distinct instants here.
+		let clock = Date.now();
+		const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => clock);
 		let sentAtMs = 0;
 		const client = makeRenameClient(env.tmpDir, edit);
 		client.willRenameFiles.mockImplementation(async () => {
@@ -218,6 +224,7 @@ describe("#3734: rename_file refuses an edit on a file that changed", () => {
 			// server answered from the send before this one.
 			sentAtMs = Date.now();
 			fs.writeFileSync(importPath, AGENT_IMPORT);
+			clock = sentAtMs + 1_000;
 			return edit;
 		});
 		client.getSentContent = vi.fn(() => ({
@@ -232,9 +239,13 @@ describe("#3734: rename_file refuses an edit on a file that changed", () => {
 
 			expect(fs.readFileSync(importPath, "utf-8")).toBe(AGENT_IMPORT);
 			expect(result.isError).toBe(true);
-			expect(resultText(result)).toContain("stale text document content");
+			// The stamp rule, not the mtime margin: the disk equals the last send.
+			expect(resultText(result)).toContain(
+				"it changed after the language server computed the rename from it",
+			);
 			expect(staleRows()).toEqual([expect.objectContaining({ count: 1 })]);
 		} finally {
+			nowSpy.mockRestore();
 			await harness.realService.shutdown();
 		}
 	});
