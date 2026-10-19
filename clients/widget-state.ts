@@ -1479,8 +1479,10 @@ export function reconcileCorrelatedScanDiagnostics(
  * footer's observer-less sweep, read the siblings' clean (#4620). The unfinished
  * flag is the mark every reader already honours (`getFileDiagnosticSummaries`'
  * `hasFinalSnapshot`, the footer's pending test), and the next final snapshot
- * (`commitDiagnostics`) replaces it. Retired by that snapshot, the store's idle
- * eviction, or the file's deletion: a file that no longer exists has no
+ * (`commitDiagnostics`) replaces it. Retired by that snapshot, by the file's
+ * deletion, or by the store's idle eviction while the record holds no errors or
+ * warnings: a record that still holds some stays and is drawn, as a final
+ * snapshot's are (`holdsDrawableFindings`). A file that no longer exists has no
  * evidence left to disclose, so a missing file still drops.
  *
  * Returns how many records changed (so callers can tell the agent those files
@@ -2501,13 +2503,28 @@ function hasFailedFormatter(rec: FileRecord): boolean {
 function shouldRenderFile(rec: FileRecord): boolean {
 	return (
 		rec.hasFinalDiagnosticsSnapshot ||
+		holdsDrawableFindings(rec) ||
 		hasChangedFormatter(rec) ||
 		hasFailedFormatter(rec)
 	);
 }
 
+// Errors or warnings on the record. A row that draws them cannot read as a
+// clean frame, so it needs no final snapshot; only a row with nothing to show
+// waits for one. The header counts every record's findings, so an unfinished
+// record that holds some draws them, and the store's idle eviction keeps them
+// as it keeps a final snapshot's. Two records are unfinished and hold findings:
+// a changed file the stale sweep kept (#4625), and a file whose earlier
+// findings wait for the snapshot of its next run.
+function holdsDrawableFindings(rec: FileRecord): boolean {
+	return classifyFileTier(rec) !== "clean";
+}
+
 function hasLiveDiagnostic(rec: FileRecord): boolean {
-	return rec.hasFinalDiagnosticsSnapshot && rec.diagnostics.length > 0;
+	return (
+		rec.diagnostics.length > 0 &&
+		(rec.hasFinalDiagnosticsSnapshot || holdsDrawableFindings(rec))
+	);
 }
 
 // A record without a final snapshot is unfinished evidence whether or not a

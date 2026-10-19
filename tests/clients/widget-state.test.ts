@@ -115,6 +115,49 @@ describe("inactive file-record eviction", () => {
 			snapshot.files.some((file) => file.filePath === "inactive-0.ts"),
 		).toBe(false);
 	});
+
+	// The other side of the same predicate (#4625): a final snapshot that holds no
+	// findings is not live, so it goes first when it is the oldest idle record.
+	it("evicts an idle final snapshot with no findings ahead of newer inactive records", () => {
+		const old = Date.now() - 31 * 60_000;
+		const files = [
+			{
+				filePath: "settled-clean.ts",
+				runners: [],
+				formatters: [],
+				diagnostics: [],
+				allDiagnostics: [],
+				diagnosticCounts: { blocking: 0, errors: 0, warnings: 0 },
+				hasFinalDiagnosticsSnapshot: true,
+				touchedAt: old,
+			},
+			...Array.from({ length: 1024 }, (_, i) => ({
+				filePath: `inactive-${i}.ts`,
+				runners: [],
+				formatters: [],
+				diagnostics: [],
+				allDiagnostics: [],
+				diagnosticCounts: { blocking: 0, errors: 0, warnings: 0 },
+				hasFinalDiagnosticsSnapshot: false,
+				touchedAt: old + 1 + i,
+			})),
+		];
+		expect(
+			importWidgetState({
+				version: WIDGET_STATE_VERSION,
+				sessionLanguages: [],
+				files,
+			} as Parameters<typeof importWidgetState>[0]),
+		).toBe(true);
+		const snapshot = __testing.getWidgetStateSnapshot();
+		expect(snapshot.files).toHaveLength(1024);
+		expect(
+			snapshot.files.some((file) => file.filePath === "settled-clean.ts"),
+		).toBe(false);
+		expect(
+			snapshot.files.some((file) => file.filePath === "inactive-0.ts"),
+		).toBe(true);
+	});
 });
 
 describe("getFileDiagnostics (#502 single-file accessor)", () => {
@@ -1987,6 +2030,132 @@ describe("a stale record stays as unfinished evidence (#4625 F1)", () => {
 			});
 		},
 	);
+
+	// A partial prune keeps the findings observed after the change. They are real
+	// findings on an unfinished record, so each surface that shows or keeps
+	// findings must still do so for them (#4625 review, second round).
+	async function retainOnlyTheFresherFinding(tmpDir: string): Promise<string> {
+		const target = path.join(tmpDir, "changed.ts");
+		await fs.writeFile(target, "const a = 1;\n");
+		const observed = Date.now();
+		recordDiagnostics(
+			target,
+			[
+				{
+					severity: "error",
+					semantic: "blocking",
+					tool: "ast-grep",
+					rule: "no-eval",
+					message: "live blocking finding",
+					line: 1,
+				},
+			],
+			undefined,
+			observed,
+		);
+		// An aging cascade snapshot adds a cross-file error observed long before.
+		reconcileCascadeNeighborLspErrors(
+			target,
+			[
+				{
+					severity: "error",
+					tool: "lsp",
+					rule: "TS2304",
+					message: "stale cross-file error",
+					line: 1,
+				},
+			],
+			undefined,
+			observed - 200_000,
+		);
+		// The file changed between the two observations.
+		const between = new Date(observed - 100_000);
+		await fs.utimes(target, between, between);
+		expect(await reconcileStaleWidgetFiles()).toBe(1);
+		expect(row(target)).toMatchObject({ hasFinalSnapshot: false, blocking: 1 });
+		return target;
+	}
+
+	it("draws the findings a partial prune kept, with their blocker details, and still withholds ✓ clean", async () => {
+		await inTmp(async (tmpDir) => {
+			await retainOnlyTheFresherFinding(tmpDir);
+			const frame = renderWidget(120, theme).join("\n");
+			// The header already counts the survivor; the row and the blocker detail
+			// must show it too.
+			expect(frame).toContain("changed.ts");
+			expect(frame).toContain("live blocking finding");
+			expect(frame).not.toContain("stale cross-file error");
+			expect(frame).not.toContain("✓ clean");
+		});
+	});
+
+	// The same predicate covers a file whose earlier findings are still stored
+	// while its next run is in flight: the header counts them, so the row shows
+	// them until the new snapshot replaces them.
+	it("keeps drawing a file's earlier findings while its next run is in flight", () => {
+		const filePath = path.join(process.cwd(), "in-flight.ts");
+		recordRunner(filePath, "lint", "succeeded", 1);
+		recordDiagnostics(filePath, [
+			{
+				severity: "warning",
+				tool: "eslint",
+				rule: "no-console",
+				message: "earlier warning",
+				line: 1,
+			},
+		]);
+		// The next pipeline's first runner reports: no snapshot has replaced the
+		// stored findings yet.
+		recordRunner(filePath, "lint", "succeeded", 1);
+		expect(row(filePath)).toMatchObject({
+			hasFinalSnapshot: false,
+			warnings: 1,
+		});
+		const frame = renderWidget(120, theme).join("\n");
+		expect(frame).toContain("in-flight.ts");
+		expect(frame).not.toContain("✓ clean");
+	});
+
+	it("keeps a retained record that holds findings through idle eviction", async () => {
+		await inTmp(async (tmpDir) => {
+			const target = await retainOnlyTheFresherFinding(tmpDir);
+			// Fill the store past its inactive-record bound with records written 31
+			// minutes later, so the next write prunes at the size boundary.
+			vi.useFakeTimers({ toFake: ["Date"] });
+			try {
+				vi.setSystemTime(Date.now() + 31 * 60_000);
+				for (let i = 0; i < 1024; i++)
+					recordDiagnostics(path.join(tmpDir, `filler-${i}.ts`), []);
+				recordDiagnostics(path.join(tmpDir, "extra.ts"), []);
+			} finally {
+				vi.useRealTimers();
+			}
+			expect(row(target)).toMatchObject({
+				hasFinalSnapshot: false,
+				blocking: 1,
+			});
+		});
+	});
+
+	// A row with no errors or warnings reads as a clean frame. A retained record
+	// with nothing left therefore waits for its snapshot, where a green row would
+	// call the changed file clean.
+	it("draws no row for a retained record with no findings left", async () => {
+		await inTmp(async (tmpDir) => {
+			const stale = path.join(tmpDir, "stale.ts");
+			const clean = path.join(tmpDir, "clean.ts");
+			await fs.writeFile(stale, "const a = 1;\n");
+			await fs.writeFile(clean, "const b = 2;\n");
+			recordDiagnostics(stale, []);
+			recordDiagnostics(clean, []);
+			await changeOnDisk(stale);
+			expect(await reconcileStaleWidgetFiles()).toBe(1);
+			expect(row(stale)?.hasFinalSnapshot).toBe(false);
+			const frame = renderWidget(120, theme).join("\n");
+			expect(frame).toContain("clean.ts");
+			expect(frame).not.toContain("stale.ts");
+		});
+	});
 
 	// A session reset can land while the sweep is reading the file's mtime; the
 	// sweep must neither throw nor bring the cleared record back.

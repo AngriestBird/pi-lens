@@ -238,7 +238,11 @@ the built tool and the real widget store; `tests/clients/widget-state.test.ts`
   eviction (a record idle for 30 minutes, once the store holds more than
   1,024 file records) retires the mark too: that is the store's existing rule, no timer was
   added for it, and the vitest case "is retired by idle eviction counted
-  from the sweep" pins that the idle window starts at the sweep.
+  from the sweep" pins that the idle window starts at the sweep. A retained
+  record that still holds errors or warnings is the exception: like a final
+  snapshot's findings it stays, and the footer draws it, so the findings the
+  header counts stay visible ("keeps a retained record that holds findings
+  through idle eviction", "draws the findings a partial prune kept, ...").
 - `StoreRetire`: a file that is gone from disk still drops its record,
   which the model does not reach (X is only written). `dropStaleFiles`
   (resume) deletes a persisted record whose file changed between sessions;
