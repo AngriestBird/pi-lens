@@ -9,6 +9,12 @@
  * the build settles, its record clears, and the grammar's cooldown stops each
  * later call from waiting out the bound again.
  *
+ * web-tree-sitter gives `Language.load` no abort, so the abandoned load keeps
+ * running and settles later. The late settle is observed, not dropped: an
+ * Emscripten abort that arrives after the bound still kills the wasm runtime
+ * and latches it (AGENTS.md shape 60), any other late failure leaves one
+ * bounded record against the grammar, and a late success changes nothing.
+ *
  * The loader is the only fake in the code under test. `loadLanguage`,
  * `compileQueryBatch`, the failure record and the cooldown are the production
  * code, the user notifier is the real seam wired to a recorder, and the bound
@@ -28,6 +34,7 @@ import {
 	GRAMMAR_LOAD_TIMEOUT_MS,
 } from "../../clients/grammar-source.js";
 import type { TreeSitterQuery } from "../../clients/tree-sitter-query-loader.js";
+import * as treeSitterLogger from "../../clients/tree-sitter-logger.js";
 import {
 	resetUserNotifier,
 	wireUserNotifier,
@@ -58,6 +65,10 @@ type LoadClient = {
 	grammarsDir: string;
 	ParserClass: unknown;
 	LanguageLoader: { load: (path: string) => Promise<unknown> };
+	languages: Map<string, unknown>;
+	queryBatchCache: { size: number };
+	wasmAborted: boolean;
+	onWasmAbort: (() => void) | undefined;
 };
 
 const rule: TreeSitterQuery = {
@@ -82,6 +93,40 @@ const stuckLoad = (): Promise<unknown> =>
 	new Promise((resolve) => {
 		stuckLoads.push(() => resolve(undefined));
 	});
+
+/** A load the test settles by hand, after the bound has passed. Teardown
+ * resolves whatever is left, so no promise outlives its test. */
+function lateLoad(): {
+	load: () => Promise<unknown>;
+	resolve: (value: unknown) => void;
+	reject: (reason: unknown) => void;
+} {
+	let resolve!: (value: unknown) => void;
+	let reject!: (reason: unknown) => void;
+	const promise = new Promise<unknown>((res, rej) => {
+		resolve = res;
+		reject = rej;
+	});
+	stuckLoads.push(() => resolve(undefined));
+	return { load: () => promise, resolve, reject };
+}
+
+/** The error an Emscripten `abort()` throws out of the wasm runtime. */
+const abortError = (): Error =>
+	new Error("Aborted(native code called abort())");
+
+/** A wasm runtime trap: the runtime lives on, and the grammar is charged. */
+const { WebAssembly } = globalThis as unknown as {
+	WebAssembly: { RuntimeError: new (message: string) => Error };
+};
+const trapError = (): Error =>
+	new WebAssembly.RuntimeError("memory access out of bounds");
+
+/** A decode failure that is not abort-shaped, as a truncated download gives. */
+const decodeError = (): Error =>
+	new Error(
+		"CompileError: WebAssembly.instantiate(): expected magic word 00 61 73 6d, found 3c 21 44 4f @+0",
+	);
 
 describe("Language.load bound (#4224)", () => {
 	let env: ReturnType<typeof setupTestEnvironment>;
@@ -138,6 +183,19 @@ describe("Language.load bound (#4224)", () => {
 		getDegradationSummary()
 			.find((group) => group.kind === "grammar-blocked")
 			?.latestReasons.find((entry) => entry.subject === GRAMMAR_FILE)?.reason;
+
+	/** Events the ledger counted under `kind`. */
+	const ledgerCount = (kind: string): number =>
+		getDegradationSummary().find((group) => group.kind === kind)?.count ?? 0;
+
+	/** Retained ledger entries under `kind` that name the python grammar. */
+	const grammarEntries = (kind: string): string[] =>
+		(
+			getDegradationSummary().find((group) => group.kind === kind)
+				?.latestReasons ?? []
+		)
+			.filter((entry) => entry.subject === GRAMMAR_FILE)
+			.map((entry) => entry.reason);
 
 	// Recurrence: master awaited the loader with no bound, so this call never
 	// returned.
@@ -242,5 +300,219 @@ describe("Language.load bound (#4224)", () => {
 			getDegradationSummary().find((g) => g.kind === "grammar-blocked"),
 		).toBeUndefined();
 		expect(notices).toEqual([]);
+	});
+
+	// Recurrence: the abandoned load keeps running, and `withDeadline` handed its
+	// late rejection to a silent catch. An Emscripten abort that lands after the
+	// bound therefore never reached the runtime-death latch, and the ledger kept
+	// the timeout as the only record.
+	it("latches the wasm runtime when the abandoned load aborts after the bound", async () => {
+		const late = lateLoad();
+		const { client } = await makeClient(late.load);
+		const onWasmAbort = vi.fn();
+		client.onWasmAbort = onWasmAbort;
+		vi.useFakeTimers();
+
+		const pending = client.loadLanguage("python");
+		await vi.advanceTimersByTimeAsync(GRAMMAR_LOAD_TIMEOUT_MS);
+		expect(await peek(pending)).toBeNull();
+		// At the bound it is a timeout and nothing more.
+		expect(client.wasmAborted).toBe(false);
+
+		await vi.advanceTimersByTimeAsync(1_000);
+		late.reject(abortError());
+		await vi.advanceTimersByTimeAsync(0);
+
+		expect(client.wasmAborted).toBe(true);
+		expect(onWasmAbort).toHaveBeenCalledTimes(1);
+		expect(ledgerCount("wasm-abort")).toBe(1);
+		expect(
+			getDegradationSummary()
+				.find((group) => group.kind === "wasm-abort")
+				?.latestReasons.map((entry) => entry.reason),
+		).toEqual(["Aborted(native code called abort())"]);
+		// The timeout's own record stays; the abort adds to it, it does not replace it.
+		expect(ledgerCount("grammar-blocked")).toBe(1);
+	});
+
+	// Control: the late-settle watch must not turn a late success into state.
+	// The caller already got null and the grammar is on its cooldown, so the
+	// language reaches neither `languages` nor the batch cache, and nothing is
+	// recorded for a load that worked.
+	it("ignores a load that succeeds after the bound", async () => {
+		const late = lateLoad();
+		const { client } = await makeClient(late.load);
+		vi.useFakeTimers();
+
+		const batch = client.compileQueryBatch([rule], "python");
+		await vi.advanceTimersByTimeAsync(GRAMMAR_LOAD_TIMEOUT_MS);
+		expect(await peek(batch)).toBeNull();
+		const ledgerAtBound = JSON.stringify(getDegradationSummary());
+
+		late.resolve({ name: "python" });
+		await vi.advanceTimersByTimeAsync(0);
+
+		expect(client.languages.has("python")).toBe(false);
+		expect(client.queryBatchCache.size).toBe(0);
+		expect(JSON.stringify(getDegradationSummary())).toBe(ledgerAtBound);
+		expect(notices).toHaveLength(1);
+		expect(await client.loadLanguage("python")).toBeNull();
+	});
+
+	// A late failure that is not an abort says something the timeout did not:
+	// the load did not hang for ever, it failed. It gets one bounded record
+	// naming the grammar and the failure, and nothing else: the user was told at
+	// the bound, and the cooldown ladder is not climbed twice for one load.
+	it("records a late decode failure once against the grammar, without a second notice", async () => {
+		const late = lateLoad();
+		const { client } = await makeClient(late.load);
+		const diagnostics = vi.spyOn(treeSitterLogger, "logTreeSitterDiagnostic");
+		vi.useFakeTimers();
+
+		const pending = client.loadLanguage("python");
+		await vi.advanceTimersByTimeAsync(GRAMMAR_LOAD_TIMEOUT_MS);
+		expect(await peek(pending)).toBeNull();
+		expect(ledgerCount("grammar-blocked")).toBe(1);
+
+		await vi.advanceTimersByTimeAsync(1_000);
+		late.reject(decodeError());
+		await vi.advanceTimersByTimeAsync(0);
+
+		// tree-sitter.log names the late failure for whoever reads it.
+		const lateLogged = diagnostics.mock.calls
+			.map(([entry]) => entry)
+			.filter((entry) => entry.metadata?.outcome === "late-load-failed");
+		expect(lateLogged).toHaveLength(1);
+		expect(lateLogged[0]?.message).toContain("expected magic word");
+		expect(client.wasmAborted).toBe(false);
+		expect(ledgerCount("wasm-abort")).toBe(0);
+		// Two events, one retained slot for the grammar: bounded.
+		expect(ledgerCount("grammar-blocked")).toBe(2);
+		expect(grammarEntries("grammar-blocked")).toHaveLength(1);
+		expect(grammarLedgerReason()).toContain("expected magic word");
+		expect(grammarLedgerReason()).toContain(String(GRAMMAR_LOAD_TIMEOUT_MS));
+		expect(notices).toHaveLength(1);
+	});
+
+	// A trap inside the grammar's own module is charged to the grammar and not
+	// to the runtime's trap budget (#3605). A late trap is the same trap.
+	it("charges a late wasm trap to the grammar, not to the runtime", async () => {
+		const late = lateLoad();
+		const { client } = await makeClient(late.load);
+		vi.useFakeTimers();
+
+		const pending = client.loadLanguage("python");
+		await vi.advanceTimersByTimeAsync(GRAMMAR_LOAD_TIMEOUT_MS);
+		expect(await peek(pending)).toBeNull();
+
+		late.reject(trapError());
+		await vi.advanceTimersByTimeAsync(0);
+
+		expect(client.wasmAborted).toBe(false);
+		expect(ledgerCount("wasm-trap")).toBe(0);
+		expect(ledgerCount("grammar-blocked")).toBe(2);
+	});
+
+	// One record per load that settles late, not one per caller. Two callers
+	// join one build, the build starts one load, so one late settle is one
+	// record however many callers were waiting on it.
+	it("records one late settle once however many callers waited on the build", async () => {
+		const late = lateLoad();
+		const { client, load } = await makeClient(late.load);
+		vi.useFakeTimers();
+
+		const first = client.compileQueryBatch([rule], "python");
+		const second = client.compileQueryBatch([rule], "python");
+		await vi.advanceTimersByTimeAsync(GRAMMAR_LOAD_TIMEOUT_MS);
+		expect(await peek(first)).toBeNull();
+		expect(await peek(second)).toBeNull();
+		expect(load).toHaveBeenCalledTimes(1);
+		expect(ledgerCount("grammar-blocked")).toBe(1);
+
+		late.reject(decodeError());
+		await vi.advanceTimersByTimeAsync(0);
+
+		// The timeout and the late failure: two events, not three.
+		expect(ledgerCount("grammar-blocked")).toBe(2);
+		expect(grammarEntries("grammar-blocked")).toHaveLength(1);
+	});
+
+	// Control: a load that fails inside the bound is already handled by the
+	// failure path. It is not an abandoned load, so there is nothing late to
+	// watch and it must not be recorded a second time.
+	it("does not watch a load that fails inside the bound", async () => {
+		const { client } = await makeClient(
+			() =>
+				new Promise((_resolve, reject) =>
+					setTimeout(() => reject(decodeError()), GRAMMAR_LOAD_TIMEOUT_MS - 1),
+				),
+		);
+		vi.useFakeTimers();
+
+		const pending = client.loadLanguage("python");
+		await vi.advanceTimersByTimeAsync(GRAMMAR_LOAD_TIMEOUT_MS - 1);
+		expect(await peek(pending)).toBeNull();
+		await vi.advanceTimersByTimeAsync(GRAMMAR_LOAD_TIMEOUT_MS);
+
+		expect(ledgerCount("grammar-blocked")).toBe(1);
+		expect(notices).toHaveLength(1);
+	});
+
+	// F2: the failure log and the user notice named a truncated download and
+	// sent the user to build scripts and the network. A load that hangs on a
+	// file already on disk is neither.
+	it("words the timeout as a local hang, not a truncated download", async () => {
+		const { client } = await makeClient(stuckLoad);
+		const diagnostics = vi.spyOn(treeSitterLogger, "logTreeSitterDiagnostic");
+		vi.useFakeTimers();
+
+		const pending = client.loadLanguage("python");
+		await vi.advanceTimersByTimeAsync(GRAMMAR_LOAD_TIMEOUT_MS);
+		expect(await peek(pending)).toBeNull();
+
+		const records = diagnostics.mock.calls.map(([entry]) => entry);
+		const loadFailed = records.find(
+			(entry) => entry.metadata?.outcome === "load-failed",
+		);
+		const unavailable = records.find(
+			(entry) => entry.metadata?.outcome === "unavailable",
+		);
+		expect(loadFailed?.message).toContain(String(GRAMMAR_LOAD_TIMEOUT_MS));
+		expect(loadFailed?.message).toContain("hang in the local load");
+		expect(loadFailed?.message).not.toContain(
+			"most likely a truncated download",
+		);
+		expect(unavailable?.metadata).toMatchObject({ cause: "load-timed-out" });
+		expect(notices[0]?.message).toContain("local hang");
+		expect(notices[0]?.message).not.toMatch(
+			/approve-builds|trustedDependencies|network/,
+		);
+		// The ledger is what a bug report shows, so it must not say "download" either.
+		expect(grammarLedgerReason()).toContain("grammar load timed out");
+		expect(grammarLedgerReason()).not.toContain("download");
+	});
+
+	// Control: only a timeout takes the new wording. A load that fails inside
+	// the bound is the #1564 shape, and keeps its own message and remedy.
+	it("keeps the truncated-download wording for a load that fails inside the bound", async () => {
+		const { client } = await makeClient(() => Promise.reject(decodeError()));
+		const diagnostics = vi.spyOn(treeSitterLogger, "logTreeSitterDiagnostic");
+		vi.useFakeTimers();
+
+		const pending = client.loadLanguage("python");
+		await vi.advanceTimersByTimeAsync(0);
+		expect(await peek(pending)).toBeNull();
+
+		const records = diagnostics.mock.calls.map(([entry]) => entry);
+		const loadFailed = records.find(
+			(entry) => entry.metadata?.outcome === "load-failed",
+		);
+		const unavailable = records.find(
+			(entry) => entry.metadata?.outcome === "unavailable",
+		);
+		expect(loadFailed?.message).toContain("most likely a truncated download");
+		expect(unavailable?.metadata).not.toHaveProperty("cause");
+		expect(notices[0]?.message).toContain("approve-builds");
+		expect(grammarLedgerReason()).toContain("runtime grammar download failed");
 	});
 });
