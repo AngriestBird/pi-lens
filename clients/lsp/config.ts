@@ -1046,9 +1046,23 @@ export function compileLspRegistry(
 		}
 	}
 
+	// #3952: the CATALOG ENTRY ITSELF for a server with no command override,
+	// never a copy. `compiledRegistry`'s list is what `getServersForFileWithConfig`
+	// hands the service, and the service keeps that object for the client's whole
+	// lifetime (`SpawnedServer.info` → `scheduleIdleEviction`, `spawn`). A copy
+	// makes the list a second registry whose entries look identical but answer
+	// for nothing: the nightly idle-eviction probe arms `server.idleEviction` on
+	// the object `LSP_SERVERS`/`getServerById` exposes (#3645), and from
+	// 2026-10-10 (when this branch began copying) that arm never reached
+	// `scheduleIdleEviction`, so every candidate read `not-evicted` and no server
+	// could earn a promotion night. Repairing the identity here is what makes
+	// "the registry object the service reads" true again.
+	//
+	// An OVERRIDDEN server keeps its copy below: that one carries the
+	// override's `spawn` and `trustAllowed`, which must stay out of the catalog.
 	const overriddenBuiltins = LSP_SERVERS.map((server) => {
 		const override = serverOverrides.get(server.id);
-		if (!override?.command) return { ...server };
+		if (!override?.command) return server;
 		const argv = Array.isArray(override.command)
 			? override.command
 			: [override.command, "--stdio"];

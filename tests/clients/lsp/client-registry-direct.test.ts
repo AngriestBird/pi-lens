@@ -863,6 +863,10 @@ describe("ClientRegistry.scheduleIdleEviction (#4449)", () => {
 	}
 	const idleRecord = () =>
 		getDegradationSummary().find((g) => g.kind === "lsp-idle-eviction");
+	const declinedRecord = () =>
+		getDegradationSummary().find(
+			(g) => g.kind === "lsp-idle-eviction-declined",
+		);
 
 	// Recurrence: the timer callback is the ONLY thing standing between an idle
 	// language server and unbounded residency. It must retire synchronously, shut
@@ -928,10 +932,24 @@ describe("ClientRegistry.scheduleIdleEviction (#4449)", () => {
 	// Recurrence: only `transparent` servers are evicted on idle; every other
 	// policy stays resident (#3645). Adopted roots are evicted regardless, on the
 	// fixed adopted window rather than the configured one.
+	//
+	// #3952: the decline is also WRITTEN DOWN, once per server per session. A
+	// nightly probe that arms a server and then waits reads `not-evicted` from
+	// `scheduleIdleEviction`'s early return exactly like a server whose timer is
+	// merely slow; this row is the only place the two verdicts differ, and it
+	// must not fire for the adopted key below, which does arm a timer.
 	it("arms no timer for a resident server and an adopted-window timer for an adopted key", async () => {
 		const resident = idleFixture({ idleEviction: "resident" });
 		resident.registry.scheduleIdleEviction(resident.key, resident.serverInfo);
 		expect(vi.getTimerCount()).toBe(0);
+		expect(declinedRecord()?.count).toBe(1);
+		expect(declinedRecord()?.latestReasons[0]).toEqual({
+			subject: resident.serverInfo.id,
+			reason: "no idle-eviction timer: declared resident",
+		});
+		// A second touch of the same server is the same declaration: one row.
+		resident.registry.scheduleIdleEviction(resident.key, resident.serverInfo);
+		expect(declinedRecord()?.count).toBe(1);
 
 		const adopted = idleFixture({ idleEviction: "resident" });
 		internals(adopted.registry).adoptedClientKeys.add(adopted.key);
@@ -940,6 +958,8 @@ describe("ClientRegistry.scheduleIdleEviction (#4449)", () => {
 		expect(adopted.client.shutdown).not.toHaveBeenCalled();
 		await vi.advanceTimersByTimeAsync(60_000 - IDLE_MS);
 		expect(adopted.client.shutdown).toHaveBeenCalledTimes(1);
+		// The adopted arm is a scheduled timer, never a decline.
+		expect(declinedRecord()?.count).toBe(1);
 	});
 });
 

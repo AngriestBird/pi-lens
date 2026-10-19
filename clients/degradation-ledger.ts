@@ -810,6 +810,18 @@ export type DegradationKind =
 	 */
 	| "lsp-idle-eviction"
 	/**
+	 * #3952: `scheduleIdleEviction` was asked to arm a client and DECLINED,
+	 * because the server object the service holds does not declare
+	 * `idleEviction: "transparent"` and the client is not an adopted-root one.
+	 * The pair this row separates is `resident-by-declaration` (a policy answer:
+	 * `unmeasured`/`resident` servers are meant to stay) from
+	 * `not-evicted` (a measurement whose arm never reached the policy), and
+	 * before it both read as "the timer did not fire". Subject is the server id,
+	 * recorded ONCE per server per session: the declaration is the same every
+	 * time, so one row answers for every touch of that server.
+	 */
+	| "lsp-idle-eviction-declined"
+	/**
 	 * #4596: an implicit-scope question could not be answered — a JS/TS file
 	 * that cannot be read or parsed, a Go package directory that cannot be
 	 * listed, a Go package's mtime, or a Go peer's header
