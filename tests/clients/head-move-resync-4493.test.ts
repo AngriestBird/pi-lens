@@ -998,16 +998,25 @@ describe("a clean-tree HEAD move resyncs held documents (#4493)", () => {
 		};
 		await resyncHeadMove(move);
 
+		// The delta is unlistable (an old HEAD the repository never had), so the
+		// population is the whole held set: 70 documents, one publish, and the
+		// 64-send cap defers the other 6. #4612 round 3: a LISTED population
+		// over the cap no longer reaches this state — the detector publishes it
+		// in chunks, so all 70 are sent and none is deferred. The cap's row is
+		// still owed for the unlistable branch, which is why this cell makes the
+		// delta unknown rather than listing it.
+		observeGitHead(move.key, "c".repeat(40));
 		repo.git("checkout", "-q", "B");
 		await resyncHeadMove(move);
 
 		const rows = await settledHeadMovedRows(repo, 1);
 		expect(rows).toHaveLength(1);
 		expect(rows[0]).toMatchObject({
-			result: "changed:70",
+			result: "delta-unknown",
 			metadata: {
-				changed: 70,
+				changed: -1,
 				held: 70,
+				heldPopulation: "all-held",
 				primary: 64,
 				resynced: 64,
 				deferred: 6,

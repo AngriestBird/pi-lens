@@ -460,15 +460,21 @@ async function lookOnce(
 	const at = Date.now();
 	// I1: the per-root record is committed above, before any consumer runs.
 	ensureDiskChangeSubscribers();
-	const { results } = await publishDiskChange(
+	const { results, failedSubscribers } = await publishDiskChange(
 		outOfBandChange(root, installed, changes, at),
 		runtime,
 	);
 	// The restart count belongs to the LSP subscriber's own answer; the row
 	// keeps reporting it rather than the publisher growing a special case.
-	const restarted =
-		(results.get(LSP_CONSUMER) as { restarted?: number } | undefined)
-			?.restarted ?? 0;
+	//
+	// A consumer that threw is not a consumer that restarted nothing: it never
+	// got as far as the look, and `-1` is the same "never answered" the other
+	// rows use for `changed`, `held` and `targets` (review round 3, p3-1). The
+	// publisher already recorded `disk-change-subscriber-failed` for it.
+	const restarted = failedSubscribers.has(LSP_CONSUMER)
+		? -1
+		: ((results.get(LSP_CONSUMER) as { restarted?: number } | undefined)
+				?.restarted ?? 0);
 	const count = (type: number) =>
 		changes.reduce((n, change) => n + (change.type === type ? 1 : 0), 0);
 	logLatency({

@@ -1287,6 +1287,19 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"an invented one.",
 		owner: "#2523 slice 2",
 	},
+	"clients/runtime-tool-call.ts#handleToolCallImpl:a2647826~85840855": {
+		family: "hook-await",
+		site: "unbudgeted-hook",
+		reason:
+			"Inside `handleToolCallImpl`, the pre-command dirty set a same-HEAD " +
+			"discard is detected from (#4502): one `git status --porcelain` " +
+			"through safeSpawnAsync with its own 5s timeout, awaited exactly as " +
+			"the opaque baseline beside it is (a baseline the command's own " +
+			"`tool_result` diffs against, and which cannot be taken after the " +
+			"command ran). It holds no hook signal by the same #2523 AC4 limit " +
+			"the other one-hop rows name.",
+		owner: "#4502",
+	},
 	"clients/runtime-tool-call.ts#handleToolCallImpl:ce0d3f2f~51275360": {
 		family: "hook-await",
 		site: "unbudgeted-hook",
@@ -1337,6 +1350,19 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 				"well, so its cost lands in three budgets.",
 			owner: "#2523 slice 2",
 		},
+	"clients/runtime-tool-result.ts#handleToolResult:023b0a2a~aacaac3b": {
+		family: "hook-await",
+		site: "tool_result_edit",
+		reason:
+			"Inside `handleToolResult`, the same-HEAD discard comparison " +
+			"(#4502): one `git status --porcelain` with its own 5s timeout, " +
+			"compared against the baseline `tool_call` recorded. The publish it " +
+			"feeds is awaited under `bounded(resyncHeadMove(...))` with the " +
+			"edit budget and `deps.signal` one statement below; this read is the " +
+			"population that publish carries, so it cannot move inside the " +
+			"bound without reading the tree after the look's own bound began.",
+		owner: "#4502",
+	},
 	"clients/runtime-tool-result.ts#handleToolResult:39fdd082~e70743cd": {
 		family: "hook-await",
 		site: "tool_result_edit",
@@ -1385,27 +1411,40 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"rather than a change.",
 		owner: "#2523 slice 2",
 	},
-	"clients/runtime-tool-result.ts#lookAtHead:04717176~8dd6e0a0": {
+	"clients/runtime-tool-result.ts#handleToolResult:a8a6946a~c0d9adaf": {
 		family: "hook-await",
-		site: "tool_result_read_only",
+		site: "tool_result_edit",
 		reason:
-			"Inside `lookAtHead`, the body of `resyncHeadMove` (#4493). Both " +
-			"callers await it under bounded() with the read-only tool_result " +
-			"budget and the hook's signal (the bash tool_result and the " +
-			"tool_call look), so this await is bounded one frame up; the " +
+			"Inside `handleToolResult`, the chunked bash-write publish (#4535 " +
+			"slice 2, round 3). The `Promise.all` of per-root publishes IS the " +
+			"`primaryPhase` the hook awaits under bounded() with the edit budget " +
+			"and `deps.signal`, so this await is bounded one frame up; the " +
 			"line-granular scan cannot see a caller's bound.",
-		owner: "#4493",
+		owner: "#4535",
 	},
-	"clients/runtime-tool-result.ts#lookAtHead:b8e44daf~45cd3f56": {
+	"clients/runtime-tool-result.ts#lookAtHead:6c9224dd~45cd3f56": {
 		family: "hook-await",
 		site: "tool_result_read_only",
 		reason:
-			"Inside `lookAtHead`, the publish of a HEAD move's delta (#4535 " +
-			"slice 2). Both callers await the whole look under bounded() with " +
-			"the read-only tool_result budget and the hook's signal (the bash " +
-			"tool_result and the tool_call look), so this await is bounded one " +
-			"frame up; the line-granular scan cannot see a caller's bound.",
+			"Inside `lookAtHead`, the chunked publish of a HEAD move's delta " +
+			"and its same-HEAD discard (#4535 slice 2, round 3). Both callers " +
+			"await the whole look under bounded() with the read-only " +
+			"tool_result budget and the hook's signal, so this await is " +
+			"bounded one frame up; the line-granular scan cannot see a " +
+			"caller's bound.",
 		owner: "#4535",
+	},
+	"clients/runtime-tool-result.ts#lookAtHead:a910e0e6~bf56e184": {
+		family: "hook-await",
+		site: "tool_result_read_only",
+		reason:
+			"Inside `lookAtHead`, the delta listing of a move (#4493, #4502 " +
+			"round 3 reads it only when HEAD moved). Both callers await the " +
+			"whole look under bounded() with the read-only tool_result budget " +
+			"and the hook's signal (the bash tool_result and the tool_call " +
+			"look), so this await is bounded one frame up; the line-granular " +
+			"scan cannot see a caller's bound.",
+		owner: "#4493",
 	},
 	"clients/runtime-tool-result.ts#lookAtHead:ba45e194~865d8f07": {
 		family: "hook-await",
@@ -1429,28 +1468,29 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"line-granular scan cannot see a caller's bound.",
 		owner: "#4493",
 	},
-	"clients/runtime-tool-result.ts#publishRecoveredDrift:2231ec46~2fe97775": {
+	"clients/runtime-tool-result.ts#publishRecoveredDrift:2231ec46~7bf2b803": {
 		family: "hook-await",
 		site: "tool_result_edit",
 		reason:
-			"Inside `publishRecoveredDrift` (#4535 slice 2, review round 2 F2): " +
-			"the bash tool_result hands the recovered set to this chain with " +
-			"`void`, after its own bounded primary phase, exactly as the base " +
-			"branch `void`ed the detached `resyncGitChangedFiles` pass. Nothing " +
-			"awaits the chain, so it holds no hook and must not be cut by a hook " +
-			"budget or signal (the auxiliaries heal after the hook returns); the " +
-			"hook's own awaits are the `bounded()` primary phase it does await.",
+			"Inside `publishRecoveredDrift` (#4535 slice 2, review round 2 F2, " +
+			"round 3 p3-3): the bash tool_result hands the recovered set to this " +
+			"chain with `void`, after its own bounded primary phase, exactly as " +
+			"the base branch `void`ed the detached `resyncGitChangedFiles` " +
+			"pass. Nothing awaits the chain, so it holds no hook and must not be " +
+			"cut by a hook budget or signal (the auxiliaries heal after the hook " +
+			"returns); the hook's own awaits are the `bounded()` primary phase it " +
+			"does await.",
 		owner: "#4535",
 	},
-	"clients/runtime-tool-result.ts#publishRecoveredDrift:832d990f~1ac0c20f": {
+	"clients/runtime-tool-result.ts#publishRecoveredDrift:832d990f~ca5c4b35": {
 		family: "hook-await",
 		site: "tool_result_edit",
 		reason:
-			"Inside `publishRecoveredDrift` (#4535 slice 2, review round 2 F2): " +
-			"the same detached chain, awaiting one chunk's drift pass before " +
-			"publishing the next chunk, so the chunks resync in order instead of " +
-			"racing each other. Detached for the same reason as the publish " +
-			"above.",
+			"Inside `publishRecoveredDrift` (#4535 slice 2, review round 2 F2, " +
+			"round 3 p3-3): the same detached chain, awaiting one chunk's drift " +
+			"pass before publishing the next chunk, so the chunks resync in " +
+			"order instead of racing each other, and a rejection records the " +
+			"paths it drops. Detached for the same reason as the publish above.",
 		owner: "#4535",
 	},
 	"clients/runtime-tool-result.ts#resyncHeadMove:301d8f0a~1bf32683": {
@@ -2292,7 +2332,13 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// lives in the detector, which bounds the whole publish one frame up
 	// (#2523 AC4).
 	"clients/disk-change-subscribers.ts": 5,
-	"clients/disk-changes.ts": 2,
+	// #4502 round 3: 2 -> 5. `publishDiskChangeChunked` awaits one publish per
+	// chunk (two awaits: the unlistable branch and the loop) and then its
+	// caller's per-chunk hook, so the recovered set's drift pass still settles
+	// before the next chunk publishes. None can be bounded here: the hook
+	// signal lives in the detector, which bounds the whole publish one frame
+	// up (#2523 AC4), and a second timer here would double that deadline.
+	"clients/disk-changes.ts": 5,
 	// `bounded()` itself awaits the raced work; this is the shared primitive's
 	// implementation await, not an additional hook-path await at the caller.
 	"clients/deadline-utils.ts": 1,
@@ -2533,7 +2579,13 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// #4493: 10 -> 12, the `git rev-parse` in readGitHead and the `git diff`
 	// in listGitHeadDelta, each with its own spawn timeout; both run inside
 	// the HEAD look its hook callers bound with bounded().
-	"clients/opaque-mutation-scan.ts": 12,
+	// #4502 round 3: 12 -> 15. One `git status` read moved into
+	// `readGitStatusEntries` (so the recovery and the discard comparison share
+	// one parser), and two callers now await it: `captureGitDirtyPaths` at
+	// tool_call and `readSameHeadDiscards` at tool_result. Each is one
+	// safeSpawnAsync with its own 5s timeout, and the look the second one feeds
+	// is bounded one frame up.
+	"clients/opaque-mutation-scan.ts": 15,
 	// #4476: new to the one-hop set. The out-of-band look: the root listing
 	// and the stat of each install stamp it holds, the declaration walk's
 	// directory reads and stats, the per-root chain, and the restart of a

@@ -305,6 +305,14 @@ export type DegradationKind =
 	 */
 	| "disk-change-paths-truncated"
 	/**
+	 * #4502 (#4612 round 3): one chunk of the recovered set's detached resync
+	 * rejected, so every chunk after it was never published and those paths
+	 * keep whatever view their servers hold (clients/runtime-tool-result.ts).
+	 * The recovery loop records it once with the chunk ordinal and the number
+	 * of paths it dropped. Subject: the normalized root; counted.
+	 */
+	| "disk-change-recovered-drift-failed"
+	/**
 	 * #4535: one disk-change subscriber threw while a publish delivered to it
 	 * (clients/disk-changes.ts). The publish continues to the next subscriber;
 	 * the record names the consumer and the root, once per consumer per session,
@@ -1451,6 +1459,14 @@ export type DegradationKind =
 	 * while the host is already exiting, so a second row would never be read.
 	 */
 	| "safe-spawn-signal-reraise-unsupported"
+	/**
+	 * #4502 (#4612 round 3): more working-tree paths were dirty than
+	 * `SAME_HEAD_DIRTY_SET_CAP` when a bash call started
+	 * (clients/opaque-mutation-scan.ts), so a same-HEAD discard that reverts
+	 * one of the rest is not detected for that call. Subject: the normalized
+	 * root; counted, because the cap is per call.
+	 */
+	| "same-head-discard-set-capped"
 	/**
 	 * A project scanner (vulture, jscpd) was started over a root that holds a
 	 * linked worktree it could not be told to leave out (#4117): the project's

@@ -42,6 +42,7 @@ import {
 	BASH_WRITE_SOURCE,
 	LSP_CONSUMER,
 	readHeldDocumentsAnswer,
+	SAME_HEAD_DISCARD_SOURCE,
 } from "../../clients/disk-change-subscribers.js";
 import {
 	getLSPService,
@@ -51,7 +52,12 @@ import { configureLspServiceLifecycle } from "../../clients/lsp/service-singleto
 import { HOOK_WALL_BUDGET_MS } from "../../clients/hook-budgets.js";
 import { flushLatencyLog } from "../../clients/latency-logger.js";
 import { getGlobalPiLensLogDir } from "../../clients/probe-home-state.js";
-import { observeGitHead } from "../../clients/opaque-mutation-scan.js";
+import {
+	captureGitDirtyPaths,
+	observeGitHead,
+	SAME_HEAD_DIRTY_SET_CAP,
+} from "../../clients/opaque-mutation-scan.js";
+import { lookForOutOfBandChanges } from "../../clients/out-of-band-changes.js";
 import { normalizeMapKey } from "../../clients/path-utils.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { resetSessionScopedState } from "../../clients/runtime-session.js";
@@ -412,54 +418,59 @@ describe("the HEAD look publishes instead of calling the LSP consumer", () => {
 	}, 30_000);
 });
 
-describe("a bash command's written documents publish instead of calling the LSP consumer", () => {
-	function sessionFor(h: Harness) {
-		let n = 0;
-		const callDeps = (input: unknown, toolCallId: string) =>
-			({
-				event: { toolName: "bash", toolCallId, input },
-				ctx: { cwd: h.root },
-				lensEnabled: true,
-				getFlag: () => false,
-				dbg: () => {},
-				runtime: h.runtime,
-				cacheManager: new CacheManager(false),
-				ensureLSPConfigInitialized: async () => {},
-				updateLspStatus: () => {},
-				resetLSPService: () => {},
-				sessionId: "slice2-session",
-			}) as Parameters<typeof handleToolCall>[0];
-		const resultDeps = (command: string, toolCallId: string) =>
-			({
-				event: {
-					toolName: "bash",
-					toolCallId,
-					input: { command },
-					content: [{ type: "text", text: "ok" }],
-				},
-				getFlag: () => false,
-				dbg: () => {},
-				runtime: h.runtime,
-				cacheManager: new CacheManager(false),
-				biomeClient: {},
-				ruffClient: {},
-				testRunnerClient: {},
-				metricsClient: {},
-				resetLSPService: () => {},
-				agentBehaviorRecord: () => [],
-				formatBehaviorWarnings: () => "",
-				sessionId: "slice2-session",
-			}) as unknown as Parameters<typeof handleToolResult>[0];
-		return async (command: string, run: () => void): Promise<void> => {
-			const toolCallId = `slice2-c${++n}`;
-			await runHandlerExpectingNoThrow(() =>
-				handleToolCall(callDeps({ command }, toolCallId)),
-			);
-			run();
-			await handleToolResult(resultDeps(command, toolCallId));
-		};
-	}
+/**
+ * One bash call, as the two hooks drive it: the `tool_call` that records the
+ * call's baseline and the `tool_result` that publishes what it wrote. Shared
+ * by every describe below that needs a real bash write.
+ */
+function sessionFor(h: Harness) {
+	let n = 0;
+	const callDeps = (input: unknown, toolCallId: string) =>
+		({
+			event: { toolName: "bash", toolCallId, input },
+			ctx: { cwd: h.root },
+			lensEnabled: true,
+			getFlag: () => false,
+			dbg: () => {},
+			runtime: h.runtime,
+			cacheManager: new CacheManager(false),
+			ensureLSPConfigInitialized: async () => {},
+			updateLspStatus: () => {},
+			resetLSPService: () => {},
+			sessionId: "slice2-session",
+		}) as Parameters<typeof handleToolCall>[0];
+	const resultDeps = (command: string, toolCallId: string) =>
+		({
+			event: {
+				toolName: "bash",
+				toolCallId,
+				input: { command },
+				content: [{ type: "text", text: "ok" }],
+			},
+			getFlag: () => false,
+			dbg: () => {},
+			runtime: h.runtime,
+			cacheManager: new CacheManager(false),
+			biomeClient: {},
+			ruffClient: {},
+			testRunnerClient: {},
+			metricsClient: {},
+			resetLSPService: () => {},
+			agentBehaviorRecord: () => [],
+			formatBehaviorWarnings: () => "",
+			sessionId: "slice2-session",
+		}) as unknown as Parameters<typeof handleToolResult>[0];
+	return async (command: string, run: () => void): Promise<void> => {
+		const toolCallId = `slice2-c${++n}`;
+		await runHandlerExpectingNoThrow(() =>
+			handleToolCall(callDeps({ command }, toolCallId)),
+		);
+		run();
+		await handleToolResult(resultDeps(command, toolCallId));
+	};
+}
 
+describe("a bash command's written documents publish instead of calling the LSP consumer", () => {
 	it("publishes the written set for the primary phase from a parser-recognized write", async () => {
 		const target = path.join(tmp, "bash-write", "a.ts");
 		fs.mkdirSync(path.dirname(target), { recursive: true });
@@ -588,6 +599,28 @@ describe("a publish that reaches no LSP consumer", () => {
 			),
 		).toBe(answer);
 	});
+
+	it("reads a consumer that answered `undefined` as one that answered", () => {
+		// The `settled-sweep` and `drift-heartbeat` branches answer `undefined` on
+		// purpose. `results.has` is what separates "answered nothing to check" from
+		// "was never asked": reading the two as one recorded a false
+		// `disk-change-lsp-consumer-missing` row for a consumer that answered
+		// (review round 3, p3-2).
+		const root = normalizeMapKey(path.join(tmp, "answered-undefined"));
+		resetDegradationLedger();
+		expect(
+			readHeldDocumentsAnswer(
+				new Map([[LSP_CONSUMER, undefined]]),
+				root,
+				new Set(),
+			),
+		).toMatchObject({ held: 0, targets: [], failed: false });
+		expect(
+			getDegradationSummary().filter(
+				(group) => group.kind === "disk-change-lsp-consumer-missing",
+			),
+		).toEqual([]);
+	});
 });
 
 describe("a publish whose LSP consumer threw", () => {
@@ -633,4 +666,354 @@ describe("a publish over the recorded path cap", () => {
 		expect(row?.latestReasons[0]?.reason).toContain("are named");
 		expect(row?.latestReasons[0]?.reason).toContain("no runtime");
 	});
+});
+
+/**
+ * #4612 round 3 (HIGH): a listed population over
+ * `DISK_CHANGE_MAX_RECORDED_PATHS` used to be published as `paths: "unknown"`,
+ * and the consumer's only honest reading of that is the WHOLE held set. The
+ * awaited primary send then left the change: with 65 changed documents and 135
+ * unrelated held ones, `changedSent` was 0/65 and `unrelatedSent` 64/135 — a
+ * changed document kept its server's pre-change view while the dispatch that
+ * ran right after read it. The detector publishes in chunks now, so every
+ * publish stays inside the cap and the send is drawn from the change.
+ */
+describe("an over-cap publish keeps its send inside the change", () => {
+	/** Branch `B` rewrites `count` files; `A` has them all. */
+	function wideMoveRepo(h: Harness, count: number): string[] {
+		const files = Array.from({ length: count }, (_, i) => `m${i}.ts`);
+		for (const file of files)
+			fs.writeFileSync(path.join(h.root, file), "export const v = 1;\n");
+		fs.writeFileSync(
+			path.join(h.root, "repo-id.txt"),
+			`${path.basename(h.root)}\n`,
+		);
+		git(h.root, "init", "-q", "-b", "A");
+		git(h.root, "add", "-A");
+		git(h.root, "commit", "-qm", "base");
+		git(h.root, "branch", "B");
+		git(h.root, "checkout", "-q", "B");
+		for (const file of files)
+			fs.writeFileSync(path.join(h.root, file), "export const v = 2;\n");
+		git(h.root, "commit", "-qam", "B");
+		git(h.root, "checkout", "-q", "A");
+		return files.map((file) => normalizeMapKey(path.join(h.root, file)));
+	}
+
+	it("sends every changed held document of an over-cap HEAD move and no unrelated one", async () => {
+		const dir = path.join(tmp, "wide-move");
+		fs.mkdirSync(dir, { recursive: true });
+		const changed = Array.from({ length: 65 }, (_, i) =>
+			normalizeMapKey(path.join(dir, `m${i}.ts`)),
+		);
+		// The held set is 200 documents: the 65 the move rewrote and 135 the
+		// publish never names. A stale server hash makes every one of them a
+		// candidate, so the population the send is drawn from is visible.
+		const unrelated = Array.from({ length: 135 }, (_, i) =>
+			normalizeMapKey(path.join(dir, "elsewhere", `u${i}.ts`)),
+		);
+		// The unrelated documents are listed FIRST, which is the state probe E
+		// reproduced: an `"unknown"` population spends its capped send on them.
+		const h = harness("wide-move", [...unrelated, ...changed]);
+		const files = wideMoveRepo(h, 65);
+		expect(files).toEqual(changed);
+		// The session's first look only records HEAD; the second sees the move.
+		await look(h);
+		git(dir, "checkout", "-q", "B");
+
+		await look(h, "tool_result");
+
+		// The delivery is the claim: the numbers are probe E's, read as one
+		// assertion, because a publish that happened but sent nothing to the
+		// change is the defect this cell exists for.
+		const sent = new Set(h.calls.primaries.flatMap((call) => call.paths));
+		expect({
+			changedSent: changed.filter((filePath) => sent.has(filePath)).length,
+			unrelatedSent: unrelated.filter((filePath) => sent.has(filePath)).length,
+		}).toEqual({ changedSent: 65, unrelatedSent: 0 });
+		const published = h.publishes.filter(
+			(change) => change.origin === "head-move",
+		);
+		expect(published.length).toBeGreaterThan(1);
+		// No publish is reported as unenumerable: every one of them listed its own
+		// population, so the cap never decided this delivery.
+		expect(published.filter((change) => change.paths === "unknown")).toEqual(
+			[],
+		);
+		expect(
+			new Set(published.flatMap((change) => [...(change.paths as string[])])),
+		).toEqual(new Set(changed));
+	}, 30_000);
+
+	it("sends every written held document of an over-cap bash write and no unrelated one", async () => {
+		const dir = path.join(tmp, "wide-bash");
+		fs.mkdirSync(dir, { recursive: true });
+		const files = Array.from({ length: 65 }, (_, i) =>
+			path.join(dir, `m${i}.ts`),
+		);
+		for (const file of files) fs.writeFileSync(file, "export const v = 1;\n");
+		const written = files.map(normalizeMapKey);
+		const unrelated = Array.from({ length: 135 }, (_, i) =>
+			normalizeMapKey(path.join(dir, "elsewhere", `u${i}.ts`)),
+		);
+		const h = harness("wide-bash", [...unrelated, ...written]);
+
+		await sessionFor(h)("node codemod.mjs", () => {
+			for (const file of files) fs.writeFileSync(file, "export const v = 2;\n");
+		});
+
+		// No drift pass heals this branch, so a send spent outside the change is
+		// simply stale: the whole population must reach the primary phase.
+		const sent = new Set(h.calls.primaries.flatMap((call) => call.paths));
+		expect({
+			changedSent: written.filter((filePath) => sent.has(filePath)).length,
+			unrelatedSent: unrelated.filter((filePath) => sent.has(filePath)).length,
+		}).toEqual({ changedSent: 65, unrelatedSent: 0 });
+		const primary = h.publishes.filter(
+			(change) =>
+				change.origin === "bash-recovery" &&
+				change.sources.includes(BASH_WRITE_SOURCE),
+		);
+		expect(primary.length).toBeGreaterThan(1);
+		expect(primary.filter((change) => change.paths === "unknown")).toEqual([]);
+		// The row is the monitor's evidence for the same delivery, and it is read
+		// back here (#4597): the record the body names is asserted, not described.
+		await flushLatencyLog();
+		const log = path.join(getGlobalPiLensLogDir(), "latency.log");
+		const rows = fs.existsSync(log)
+			? fs
+					.readFileSync(log, "utf8")
+					.split("\n")
+					.filter(Boolean)
+					.map((line) => JSON.parse(line) as Record<string, unknown>)
+					.filter(
+						(row) =>
+							String(row.filePath).includes("wide-bash") &&
+							row.phase === "bash_write_primary_resync",
+					)
+			: [];
+		expect(rows.map((row) => row.phase)).toContain("bash_write_primary_resync");
+		expect(rows.at(-1)?.metadata).toMatchObject({ written: 65, targets: 65 });
+	}, 60_000);
+
+	it("records one bounded row when a recovered chunk's drift pass rejects", async () => {
+		const dir = path.join(tmp, "chunk-rejects");
+		fs.mkdirSync(dir, { recursive: true });
+		const files = Array.from({ length: 65 }, (_, i) =>
+			path.join(dir, `m${i}.ts`),
+		);
+		for (const file of files) fs.writeFileSync(file, "export const v = 1;\n");
+		const h = harness("chunk-rejects", []);
+		resetDegradationLedger();
+		// The detached chain awaits each chunk's drift pass; the second chunk's
+		// rejection used to leave the rest unpublished with a `dbg` line only.
+		configureLspServiceLifecycle<Record<string, unknown>>({
+			create: () =>
+				makeLspServiceDouble({
+					getOpenDocumentPaths: () => [],
+					getTrackedContent: () => undefined,
+					resyncHeldPrimaries: async () => ({ sent: 0, drained: true }),
+					resyncGitChangedFiles: async () => {
+						throw new Error("drift refused");
+					},
+				}),
+			beforeReset: () => undefined,
+			destroy: async () => undefined,
+		});
+		resetLSPService();
+		getLSPService();
+
+		await sessionFor(h)("node codemod.mjs", () => {
+			for (const file of files) fs.writeFileSync(file, "export const v = 2;\n");
+		});
+
+		await expect
+			.poll(
+				() =>
+					getDegradationSummary()
+						.filter(
+							(group) => group.kind === "disk-change-recovered-drift-failed",
+						)
+						.map((group) => group.latestReasons[0]?.reason ?? ""),
+				{ timeout: 30_000 },
+			)
+			.toEqual([expect.stringContaining("were never republished")]);
+		const [row] = getDegradationSummary().filter(
+			(group) => group.kind === "disk-change-recovered-drift-failed",
+		);
+		expect(row?.latestReasons[0]?.reason).toContain("chunk 1 of 2");
+		expect(row?.latestReasons[0]?.subject).toBe(normalizeMapKey(dir));
+	}, 60_000);
+});
+
+/**
+ * #4502: a same-HEAD discard. `git stash`, `git checkout .` and `git restore`
+ * rewrite working-tree bytes, keep HEAD, and leave `git status` clean, so both
+ * of the head-move detector's signals name nothing while an open document keeps
+ * the reverted bytes. The bash call's own baseline is the only evidence: dirty
+ * before, clean after. The cells drive the real hooks, a real repository and a
+ * real `git stash` / `git checkout .`.
+ */
+describe("a same-HEAD discard resyncs the documents it reverted", () => {
+	/** A repo with `lib.ts` committed at v1 and dirty at v2. */
+	function dirtyRepo(name: string): { h: Harness; lib: string } {
+		const dir = path.join(tmp, name);
+		fs.mkdirSync(dir, { recursive: true });
+		const lib = path.join(dir, "lib.ts");
+		fs.writeFileSync(lib, "export const v = 1;\n");
+		git(dir, "init", "-q", "-b", "main");
+		git(dir, "add", "-A");
+		git(dir, "commit", "-qm", "base");
+		fs.writeFileSync(lib, "export const v = 2;\n");
+		return { h: harness(name, [normalizeMapKey(lib)]), lib };
+	}
+
+	it("resyncs what `git stash` reverted before the tool_result returns", async () => {
+		const { h, lib } = dirtyRepo("discard-stash");
+
+		await sessionFor(h)("git stash", () => {
+			git(h.root, "stash", "-q");
+		});
+
+		const published = h.publishes.filter(
+			(change) => change.origin === "head-move",
+		);
+		expect(published).toHaveLength(1);
+		const discard = published[0];
+		expect(discard?.sources).toContain(SAME_HEAD_DISCARD_SOURCE);
+		// HEAD did not move: the publish is the discard's, and the row says so.
+		expect(discard?.paths).toEqual([normalizeMapKey(lib)]);
+		// The awaited send ran before the result returned: the held document's
+		// server copy is the discarded bytes, so it had to be resent.
+		expect(h.calls.primaries.flatMap((call) => call.paths)).toEqual([
+			normalizeMapKey(lib),
+		]);
+	}, 30_000);
+
+	it("resyncs what `git checkout .` reverted", async () => {
+		const { h, lib } = dirtyRepo("discard-checkout");
+
+		await sessionFor(h)("git checkout .", () => {
+			git(h.root, "checkout", ".");
+		});
+
+		const published = h.publishes.filter(
+			(change) => change.origin === "head-move",
+		);
+		expect(published).toHaveLength(1);
+		expect(published[0]?.sources).toContain(SAME_HEAD_DISCARD_SOURCE);
+		expect(h.calls.primaries.flatMap((call) => call.paths)).toEqual([
+			normalizeMapKey(lib),
+		]);
+	}, 30_000);
+
+	it("publishes nothing when the command leaves the dirty set dirty", async () => {
+		const { h } = dirtyRepo("discard-none");
+
+		// A command that rewrites nothing keeps every dirty path dirty, so no
+		// discard happened and no look is published for it.
+		await sessionFor(h)("true", () => {});
+
+		expect(
+			h.publishes.filter((change) =>
+				change.sources.includes(SAME_HEAD_DISCARD_SOURCE),
+			),
+		).toEqual([]);
+	}, 30_000);
+});
+
+/**
+ * #4612 round 3, p3-1: the out-of-band look's row read a consumer that THREW as
+ * one that restarted nothing (`restarted: 0`), which is the same row a clean
+ * look with no install writes. The other two readers were taught to tell
+ * "never asked" from "asked and failed" in round 2; this is the third, and on a
+ * root whose primary client restart fails it is the only evidence there is.
+ */
+describe("an out-of-band look whose LSP consumer throws", () => {
+	it("reports the restart count as -1, never as a clean zero", async () => {
+		const dir = path.join(tmp, "oob-throws");
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(
+			path.join(dir, "types.d.ts"),
+			"declare const A: number;\n",
+		);
+		harness("oob-throws", []);
+		configureLspServiceLifecycle<Record<string, unknown>>({
+			create: () =>
+				makeLspServiceDouble({
+					getOpenDocumentPaths: () => [],
+					getTrackedContent: () => undefined,
+					resyncHeldPrimaries: async () => ({ sent: 0, drained: true }),
+					resyncGitChangedFiles: async () => new Map(),
+					restartPrimaryClientsUnder: async () => {
+						throw new Error("restart refused");
+					},
+				}),
+			beforeReset: () => undefined,
+			destroy: async () => undefined,
+		});
+		resetLSPService();
+		getLSPService();
+		const previous = process.env.PI_LENS_DECLARATION_LOOK_MS;
+		process.env.PI_LENS_DECLARATION_LOOK_MS = "0";
+		try {
+			// The first look records the install stamp; the lockfile appearing is
+			// the second look's `install` source, which is what restarts clients.
+			await lookForOutOfBandChanges(dir, "tool_call");
+			fs.writeFileSync(path.join(dir, "package-lock.json"), "{}\n");
+			await lookForOutOfBandChanges(dir, "tool_result");
+		} finally {
+			if (previous === undefined)
+				delete process.env.PI_LENS_DECLARATION_LOOK_MS;
+			else process.env.PI_LENS_DECLARATION_LOOK_MS = previous;
+		}
+
+		await flushLatencyLog();
+		const log = path.join(getGlobalPiLensLogDir(), "latency.log");
+		const rows = fs.existsSync(log)
+			? fs
+					.readFileSync(log, "utf8")
+					.split("\n")
+					.filter(Boolean)
+					.map((line) => JSON.parse(line) as Record<string, unknown>)
+					.filter(
+						(row) =>
+							row.phase === "lsp_out_of_band_change" && row.filePath === dir,
+					)
+			: [];
+		expect(rows.map((row) => row.result)).toContain("install");
+		expect(rows.at(-1)?.metadata).toMatchObject({ restarted: -1 });
+		expect(getDegradationSummary().map((group) => group.kind)).toContain(
+			"disk-change-subscriber-failed",
+		);
+	}, 30_000);
+});
+
+/**
+ * #4502: the pre-command dirty set is bounded, and a bound on a delivery path
+ * says so. `SAME_HEAD_DIRTY_SET_CAP` keeps the pending baseline small; a tree
+ * with more dirty paths than that is read up to the cap, and one counted row
+ * names the loss instead of a silent truncation (AGENTS.md shape 10).
+ */
+describe("the pre-command dirty set is bounded and says when it is cut", () => {
+	it("keeps SAME_HEAD_DIRTY_SET_CAP paths and records one capped row", async () => {
+		const dir = path.join(tmp, "dirty-set-cap");
+		fs.mkdirSync(dir, { recursive: true });
+		git(dir, "init", "-q", "-b", "main");
+		const count = SAME_HEAD_DIRTY_SET_CAP + 1;
+		for (let i = 0; i < count; i += 1)
+			fs.writeFileSync(path.join(dir, `d${i}.ts`), "export const v = 1;\n");
+		resetDegradationLedger();
+
+		const dirty = await captureGitDirtyPaths(dir);
+
+		expect(dirty).toHaveLength(SAME_HEAD_DIRTY_SET_CAP);
+		const [row] = getDegradationSummary().filter(
+			(group) => group.kind === "same-head-discard-set-capped",
+		);
+		expect(row?.latestReasons[0]?.reason).toContain(
+			"is not detected for this call",
+		);
+		expect(row?.latestReasons[0]?.subject).toBe(normalizeMapKey(dir));
+	}, 30_000);
 });

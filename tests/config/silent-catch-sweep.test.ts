@@ -1118,10 +1118,10 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 		reason: PRE_RULE,
 	}, // :286, :461, :485, :799, :960, :966, :1133, :1356, :1705, :1813, :1906
 	"clients/runtime-tool-result.ts": {
-		silent: 10,
-		identities: "2cd24d38d0b1e880",
+		silent: 9,
+		identities: "b34b5e082d0b70b8",
 		reason: SHARP_TOOL_RESULT,
-	}, // :353, :844, :939, :1134, :1586, :2149, :2387, :2821, :3399, :3623
+	}, // :399, :919, :1014, :1209, :1661, :2495, :2929, :3507, :3731
 	"clients/runtime-turn.ts": {
 		silent: 20,
 		identities: "4baf397dfa7d293d",

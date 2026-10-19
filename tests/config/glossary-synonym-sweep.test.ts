@@ -676,7 +676,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/observed-mutation.ts": 2,
 		// 0 -> 1 (#4493): listGitHeadDelta drops the empty NUL-split entries,
 		// an `Array.prototype.filter` call, not a delivery filter.
-		"clients/opaque-mutation-scan.ts": 1,
+		// 1 -> 2 (#4502): readSameHeadDiscards keeps the paths that were dirty
+		// before a command and are clean after it, another
+		// `Array.prototype.filter` call.
+		"clients/opaque-mutation-scan.ts": 2,
 		"clients/opengrep-client.ts": 2,
 		"clients/path-utils.ts": 1,
 		"clients/persistent-reverify.ts": 4,
@@ -1078,7 +1081,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// the OS `path` namespace; the keys still go through normalizeMapKey.
 		// 7 -> 9 (#4493 r2): gitPathBase joins the `.git` entry and its HEAD
 		// with the same namespace to check the walk found a repository.
-		"clients/opaque-mutation-scan.ts": 9,
+		// 9 -> 10 (#4502): readGitStatusEntries resolves each porcelain path
+		// against the checkout base with the same namespace.
+		"clients/opaque-mutation-scan.ts": 10,
 		"clients/opengrep-client.ts": 8,
 		"clients/opengrep-config.ts": 3,
 		// 21 -> 23 (#4515 r2): commandSearchReachesProject splits PATH on
@@ -1465,7 +1470,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/module-report.ts": 6,
 		// 24 -> 26 (#4493): readGitHead and listGitHeadDelta read the spawn
 		// result's exit `status`, not a delivery status.
-		"clients/opaque-mutation-scan.ts": 26,
+		// 26 -> 27 (#4502): readGitStatusEntries checks the spawn result's exit
+		// `status` once for every porcelain read it now serves.
+		"clients/opaque-mutation-scan.ts": 27,
 		"clients/opengrep-client.ts": 9,
 		"clients/package-manager.ts": 2,
 		"clients/pipeline.ts": 4,

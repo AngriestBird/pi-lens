@@ -89,6 +89,17 @@ export const BASH_WRITE_SOURCE = "bash-write";
 export const BASH_RECOVERY_DRIFT_SOURCE = "recovered-drift";
 
 /**
+ * #4502: the branch label of a same-HEAD discard. `git stash`,
+ * `git checkout .` and `git restore` rewrite working-tree bytes without moving
+ * HEAD and leave no dirty entry behind, so the head-move detector's two
+ * signals both stay silent while an open document keeps the reverted bytes.
+ * The bash `tool_result` reads the set from the call's own baseline (dirty
+ * before, clean after) and publishes it as a `head-move` change carrying this
+ * source: one delivery seam, one new input, no new detector.
+ */
+export const SAME_HEAD_DISCARD_SOURCE = "same-head-discard";
+
+/**
  * Primaries one held-document pass sends to. A pass that reaches the cap
  * leaves the remaining stale documents to the next look, and the detector's
  * row still reports every target it found.
@@ -366,6 +377,12 @@ export const LSP_CONSUMER = "lsp";
  *   never seeded or a second module copy owns it. That is recorded once per
  *   root per session, and only that case is
  *   `disk-change-lsp-consumer-missing` (F7).
+ *
+ * An answer of `undefined` is neither: the `settled-sweep` and
+ * `drift-heartbeat` branches of {@link lspSubscriber} answer it on purpose
+ * (they have no held-document policy until slice 3). `results.has` is the
+ * discriminator, so a consumer that ANSWERED is never reported as one that was
+ * never asked (review round 3, p3-2).
  */
 export function readHeldDocumentsAnswer(
 	results: ReadonlyMap<string, unknown>,
@@ -375,6 +392,7 @@ export function readHeldDocumentsAnswer(
 	const answer = results.get(LSP_CONSUMER) as HeldDocumentsAnswer | undefined;
 	if (answer !== undefined) return answer;
 	if (failedSubscribers.has(LSP_CONSUMER)) return UNCHECKED_HELD_DOCUMENTS;
+	if (results.has(LSP_CONSUMER)) return NO_HELD_DOCUMENTS;
 	recordDegradationOnce({
 		kind: "disk-change-lsp-consumer-missing",
 		subject: root,

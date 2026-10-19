@@ -168,8 +168,29 @@ export interface DiskChangePublishResult {
  * unenumerable with one bounded record: the conservative direction for every
  * subscriber, never a false clean. The cap counts the detector's own spellings
  * ({@link recordedPopulation}), so it also bounds the normalization work.
+ *
+ * A detector that can name a longer population must PUBLISH it in chunks of
+ * this size ({@link publishDiskChangeChunked}) rather than accept the
+ * truncation: `"unknown"` is the right value for a change nobody can
+ * enumerate, and the wrong value for one the detector already listed. A
+ * delivered consumer reads `"unknown"` as the whole held set, so an over-cap
+ * listed publish spends its capped delivery outside the change it named
+ * (review round 3, HIGH: 65 changed paths, `changedSent 0/65`,
+ * `unrelatedSent 64/135`).
  */
 export const DISK_CHANGE_MAX_RECORDED_PATHS = 64;
+
+/**
+ * The chunkable publish input: a listed (or unlistable) population and no typed
+ * subset. `pathChanges` describes ONE record whole (the out-of-band look's
+ * watched-files events), so a caller that types its paths keeps the single
+ * {@link publishDiskChange} form instead of splitting the typing across
+ * records.
+ */
+export type ChunkableDiskChangeInput = Omit<
+	DiskChangeInput,
+	"paths" | "pathChanges"
+> & { paths: readonly string[] | "unknown" };
 
 const REGISTRY_FAMILY = "disk-changes.subscribers";
 const REGISTRY_VERSION = 1;
@@ -280,6 +301,49 @@ export async function publishDiskChange(
 		},
 	});
 	return { change, results, failedSubscribers: failed };
+}
+
+/**
+ * Publish a detector's listed population in {@link DISK_CHANGE_MAX_RECORDED_PATHS}
+ * chunks, one publish at a time, and return every publish in population order.
+ *
+ * This is the shape every detector with a population it already listed uses
+ * (a HEAD move's delta, the bash-write population, the recovered set): each
+ * chunk stays inside the cap, so no publish is reported as `"unknown"`, and a
+ * consumer's awaited phase is drawn from the change instead of from every
+ * document the root happens to hold. An `"unknown"` population has nothing to
+ * split and publishes once.
+ *
+ * `onChunk` is awaited after each chunk's fan-out and before the next publishes,
+ * so a caller that must await a chunk's own answer (the recovered set's drift
+ * pass) keeps one chunk in flight at a time.
+ */
+export async function publishDiskChangeChunked(
+	input: ChunkableDiskChangeInput,
+	runtime?: DiskChangeRuntime,
+	onAppendError?: (err: unknown) => void,
+	onChunk?: (published: DiskChangePublishResult) => Promise<void> | void,
+): Promise<DiskChangePublishResult[]> {
+	if (input.paths === "unknown")
+		return [await publishDiskChange(input, runtime, onAppendError)];
+	const chunkSize = DISK_CHANGE_MAX_RECORDED_PATHS;
+	// At least one publish for an empty population: a detector that saw the
+	// event but no path still records it, and every consumer still hears it.
+	const chunks = Math.max(1, Math.ceil(input.paths.length / chunkSize));
+	const published: DiskChangePublishResult[] = [];
+	for (let index = 0; index < chunks; index += 1) {
+		const one = await publishDiskChange(
+			{
+				...input,
+				paths: input.paths.slice(index * chunkSize, (index + 1) * chunkSize),
+			},
+			runtime,
+			onAppendError,
+		);
+		published.push(one);
+		await onChunk?.(one);
+	}
+	return published;
 }
 
 /**
