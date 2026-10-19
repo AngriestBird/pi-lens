@@ -976,6 +976,16 @@ file-scoped worklist and receives no project-wide scanner output.
   refresh-state block; never auto-merged, never demotes). `tests/config/lsp-idle-eviction-measurement.test.ts`
   fails when a registry server can go unmeasured without an admission or when
   the committed measurement vetoes a server declared `transparent`.
+- The compiled registry holds the CATALOG ENTRY for every built-in with no
+  command override (`compileLspRegistry`), so the object the client registry
+  keeps (`SpawnedServer.info`) is the object `LSP_SERVERS`/`getServerById`
+  exposes; an overridden server keeps its own copy so its `spawn` and trust
+  admission never reach the catalog. A copy here is not a safe container: it is
+  a second registry whose entries swallow every arm a caller applies to the
+  first, which is how the nightly probe read `not-evicted` for nine nights
+  (#3952). `tests/clients/lsp/lsp-registry-trust.test.ts` pins both directions;
+  `scheduleIdleEviction` records `lsp-idle-eviction-declined` once per server
+  per session when it arms no timer.
 - The server-role vocabulary and the declared trait table have one owner,
   `clients/lsp/server-traits.ts` (#1488, #1756 stage 1). Ask `isAuxiliary`,
   never a comparison against the role literal, and read `notifyInflightLimit`

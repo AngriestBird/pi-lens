@@ -734,7 +734,7 @@ export class ClientRegistry {
 			!this.adoptedClientKeys.has(key)
 		) {
 			// #3952: say why no timer was scheduled. Without this row a caller
-			// that ARM an `unmeasured` server and waited for the eviction (the
+			// that ARMS an `unmeasured` server and waits for the eviction (the
 			// nightly probe's whole protocol) sees the same "nothing happened" as
 			// a server whose timer is merely slow, and the two are opposite
 			// verdicts: `not-evicted` here means the policy was never read off the
