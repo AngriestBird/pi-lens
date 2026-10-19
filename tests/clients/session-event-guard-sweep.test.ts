@@ -16,12 +16,12 @@
  * the ledger subject, so it fails too.
  *
  * The declared floor of 12 is the second half of the emptiness guard. index.ts
- * registers 12 handlers today. A regex that stops matching one of them, the
+ * registers 14 handlers today. A regex that stops matching one of them, the
  * way the first draft missed the `on?.()` form, drops the count and reds here
  * instead of quietly excusing the handler it can no longer see.
  *
  * #1929 moved `session_start` and `context` out of the exemption table and into
- * the wrapper, so seven registrations are wrapped and five carry a reason. The
+ * the wrapper, so nine registrations are wrapped and five carry a reason. The
  * registration count is unchanged: neither handler was added or removed.
  */
 

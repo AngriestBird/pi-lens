@@ -168,7 +168,7 @@ describe("#1892 witness: pi turn_end → context, scanner freshness", () => {
 		);
 		await pi.emit("turn_end", {}, makeCtx({ cwd: tmpDir }));
 		const injected = (await pi.emit(
-			"context",
+			"context_with_system",
 			{ messages: [{ role: "user", content: "keep working" }] },
 			makeCtx({ cwd: tmpDir }),
 		)) as { messages?: Array<{ content: string }> } | undefined;

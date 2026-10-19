@@ -265,6 +265,46 @@ describe("cache-observability — context observations (#1018 follow-up)", () =>
 		).toBeDefined();
 	});
 
+	it("names the request hook and the message the prefix anchors on (#4631)", () => {
+		// A pi 0.87+ request: the hook that sees the full transcript reports which
+		// one it is, and the prefix hash names the SYSTEM head it anchored on, so a
+		// rewritten head is readable instead of a stable-looking conversation.
+		observeCacheContext({
+			sessionId: "s",
+			turnIndex: 0,
+			injectionEnabled: true,
+			existingMessages: [{ role: "system", content: "BASE" }],
+			placement: "append",
+			injectionHook: "context_with_system",
+		});
+		expect(latencyEntries[0].metadata?.injectionHook).toBe(
+			"context_with_system",
+		);
+
+		// A caller that does not name its hook records `null`, never a guess.
+		observeCacheContext({
+			sessionId: "s",
+			turnIndex: 0,
+			injectionEnabled: false,
+			existingMessages: [{ role: "user", content: "private" }],
+		});
+		expect(latencyEntries[1].metadata?.injectionHook).toBeNull();
+
+		observeCachePrefix([{ role: "system", content: "BASE" }], 0, "s");
+		observeCachePrefix(
+			[{ role: "system", content: "BASE\n\nMERGED SECTION" }],
+			1,
+			"s",
+		);
+		const prefixRows = latencyEntries.filter(
+			(entry) => entry.phase === "cache_prefix_break",
+		);
+		expect(prefixRows).toHaveLength(2);
+		for (const row of prefixRows) {
+			expect(row.metadata?.firstMessageRole).toBe("system");
+		}
+	});
+
 	it("caps counts and hashes without writing prompt or finding contents", () => {
 		const privateText = "DO_NOT_LOG_THIS_PROMPT_".repeat(20_000);
 		observeCacheContext({

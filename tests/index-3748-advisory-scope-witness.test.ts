@@ -56,7 +56,7 @@ describe("pi context delivers the primary's own queued advisory (#3748)", () => 
 		queueAgentAdvisory("lost edit in a.rs", runtime.captureSessionGeneration());
 
 		const injected = (await pi.emit(
-			"context",
+			"context_with_system",
 			{ messages: [{ role: "user", content: "keep working" }] },
 			makeCtx({ cwd: tmpDir, sessionId: "pi-3748-advisory-session" }),
 		)) as { messages?: Array<{ content: string }> } | undefined;

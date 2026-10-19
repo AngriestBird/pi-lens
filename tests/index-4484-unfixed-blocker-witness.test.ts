@@ -481,7 +481,7 @@ async function openSession(
 		async endTurn(): Promise<string> {
 			await pi.emit("turn_end", {}, ctx());
 			const injected = (await pi.emit(
-				"context",
+				"context_with_system",
 				{ messages: [{ role: "user", content: "keep working" }] },
 				ctx(),
 			)) as { messages?: Array<{ content: string }> } | undefined;

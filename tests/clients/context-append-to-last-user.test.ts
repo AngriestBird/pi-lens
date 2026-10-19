@@ -29,7 +29,10 @@ async function loadContextHandler() {
 	const { default: registerExtension } = await import("../../index.js");
 	const mock = createPiMock();
 	registerExtension(mock.asExtensionAPI() as any);
-	const context = mock.handlers.get("context")?.[0];
+	// #4631: pi 0.87+ delivers the full transcript to `context_with_system` and
+	// strips system messages from `context`, so the injector is that hook. Its
+	// event carries the transcript the placement rule reads.
+	const context = mock.handlers.get("context_with_system")?.[0];
 	expect(context).toBeTypeOf("function");
 	return { context: context!, mock };
 }

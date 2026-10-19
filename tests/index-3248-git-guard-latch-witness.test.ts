@@ -172,7 +172,7 @@ describe("#3248 witness: the commit gate and the banner agree through pi", () =>
 		const endTurn = async () => {
 			await pi.emit("turn_end", {}, makeCtx({ cwd: tmpDir }));
 			const injected = (await pi.emit(
-				"context",
+				"context_with_system",
 				{ messages: [{ role: "user", content: "keep working" }] },
 				makeCtx({ cwd: tmpDir }),
 			)) as { messages?: Array<{ content: string }> } | undefined;
@@ -302,7 +302,7 @@ describe("#3248 witness: the commit gate and the banner agree through pi", () =>
 		);
 		await pi.emit("turn_end", {}, makeCtx({ cwd: tmpDir }));
 		await pi.emit(
-			"context",
+			"context_with_system",
 			{ messages: [{ role: "user", content: "keep working" }] },
 			makeCtx({ cwd: tmpDir }),
 		);

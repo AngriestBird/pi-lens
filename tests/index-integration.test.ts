@@ -1925,17 +1925,20 @@ describe("index.ts integration", () => {
 		INTEGRATION_TIMEOUT_MS,
 	);
 
-	// #1016: pi-lens injects ephemeral turn-end findings via the `context` event.
+	// #1016: pi-lens injects ephemeral turn-end findings at request time.
 	// The findings are spliced in IMMEDIATELY BEFORE the final message rather than
 	// prepended at index 0, so messages[0] stays byte-stable across turns and the
 	// prompt-cache prefix on prefix-caching providers (Anthropic/Bedrock) survives.
 	// The real user prompt stays as the trailing message (cache breakpoint), and the
 	// existing transcript is never dropped (fe0ed5da: never emit empty input).
+	// #4631: on pi 0.87+ this runs in `context_with_system`, the hook that sees the
+	// full transcript (system head included) and whose returned list pi uses
+	// verbatim; `context` there sees the conversation alone.
 	async function loadContextHandler() {
 		const { default: registerExtension } = await import("../index.js");
 		const { pi, handlers } = createMockPi();
 		registerExtension(pi as any);
-		const context = handlers.context?.[0];
+		const context = handlers.context_with_system?.[0];
 		expect(context).toBeTypeOf("function");
 		return context as IntegrationHook;
 	}
@@ -3262,7 +3265,7 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 			registerExtension(pi as any);
 
 			const result = await mock.emit(
-				"context",
+				"context_with_system",
 				{ messages: [{ role: "user", content: "continue" }] },
 				{ cwd: tmpDir },
 			);
@@ -3316,7 +3319,7 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 
 			expect(sentMessages).toHaveLength(0);
 			const firstContext = await mock.emit(
-				"context",
+				"context_with_system",
 				{ messages: [{ role: "user", content: "continue" }] },
 				{ cwd: tmpDir },
 			);
@@ -3331,7 +3334,7 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 			expect(messages).toContain("[from a prior turn");
 			expect(messages).toContain("FAIL test/app.test.ts:1");
 			const secondContext = await mock.emit(
-				"context",
+				"context_with_system",
 				{ messages: [{ role: "user", content: "continue again" }] },
 				{ cwd: tmpDir },
 			);
@@ -3380,7 +3383,7 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 			);
 
 			const result = await mock.emit(
-				"context",
+				"context_with_system",
 				{ messages: [{ role: "user", content: "continue" }] },
 				{ cwd: tmpDir },
 			);
@@ -3891,7 +3894,7 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 			await secondary.trigger("session_start", {}, secondaryCtx);
 			resetLSPService.mockClear();
 			await secondary.trigger(
-				"context",
+				"context_with_system",
 				{ messages: [{ role: "user", content: "prompt" }] },
 				secondaryCtx,
 			);

@@ -301,7 +301,7 @@ async function startSession(guard = true) {
 		turnEnd: async () => {
 			await pi.emit("turn_end", {}, ctx());
 			const injected = (await pi.emit(
-				"context",
+				"context_with_system",
 				{ messages: [{ role: "user", content: "keep working" }] },
 				ctx(),
 			)) as { messages?: Array<{ content: string }> } | undefined;
