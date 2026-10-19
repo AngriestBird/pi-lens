@@ -12,9 +12,9 @@ import {
 } from "./path-utils.js";
 import {
 	convertCharacterOffset,
-	lineTextAt,
 	type PositionEncoding,
 } from "./position-encoding.js";
+import { lineTextAt } from "./content-scan.js";
 import { recordLspMutation, type LspMutationContext } from "../lsp-mutation.js";
 import { withHostFileMutationQueues } from "../file-mutation-queue.js";
 import { incrementDegradationCount } from "../degradation-ledger.js";
