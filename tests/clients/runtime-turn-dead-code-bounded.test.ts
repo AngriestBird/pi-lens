@@ -861,3 +861,84 @@ describe("#4117 a parked scan whose baseline write throws", () => {
 		expect(vultureProcess.scans).toBe(2);
 	});
 });
+
+describe("#4117 a parked scan's drop is its own", () => {
+	// Recurrence prevented: `dropLateDeadCodeScan` deleted by key. Two turns of
+	// one session that both reach the lane before either parks (the client's
+	// single flight hands both the same scan) park twice under one key, the second
+	// entry replacing the first. When the first entry's settle then dropped, it
+	// deleted the second, which had settled, so its delta was never delivered.
+	it("keeps the newer turn's settled scan when the older turn's baseline write throws", async () => {
+		let release!: () => void;
+		vultureProcess.gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let scan!: () => void;
+		const scanning = new Promise<void>((resolve) => {
+			scan = resolve;
+		});
+		vultureProcess.onScan = scan;
+		vi.useFakeTimers();
+		edit();
+		const analyze = vi.spyOn(client, "analyze");
+		const older = startTurn();
+		await scanning;
+		edit("other.py");
+		const newer = startTurn();
+		// Both turns are inside their dead-code await before either budget is spent.
+		for (let i = 0; i < 100 && analyze.mock.calls.length < 2; i++)
+			await vi.advanceTimersByTimeAsync(1);
+		expect(analyze).toHaveBeenCalledTimes(2);
+		await vi.advanceTimersByTimeAsync(3_100);
+		await Promise.all([older.turn, newer.turn]);
+		expect(vultureProcess.scans).toBe(1);
+
+		// Entries register in turn order, so the older turn's settle writes first.
+		const write = vi
+			.spyOn(cacheManager, "writeCache")
+			.mockImplementationOnce(() => {
+				throw new Error("EIO: write refused");
+			});
+		release();
+		await vi.advanceTimersByTimeAsync(10);
+		vi.useRealTimers();
+		write.mockRestore();
+
+		vultureProcess.gate = undefined;
+		edit("third.py");
+		await startTurn().turn;
+		expect(String(deadCodeRows().at(-1)?.reason)).toContain("late_scan");
+		expect(advisory()).toContain("late");
+		// The settled scan was delivered; this turn's own file got the one more scan.
+		expect(vultureProcess.scans).toBe(2);
+	});
+
+	it("drops a parked scan that threw, and lets the next turn start another", async () => {
+		let reject!: (err: Error) => void;
+		const analyze = vi.spyOn(client, "analyze").mockImplementationOnce(
+			() =>
+				new Promise<DeadCodeResult>((_, fail) => {
+					reject = fail;
+				}),
+		);
+		vi.useFakeTimers();
+		edit();
+		const turn = startTurn();
+		for (let i = 0; i < 100 && analyze.mock.calls.length < 1; i++)
+			await vi.advanceTimersByTimeAsync(1);
+		await vi.advanceTimersByTimeAsync(3_100);
+		await turn.turn;
+		reject(new Error("vulture crashed"));
+		await vi.advanceTimersByTimeAsync(10);
+		vi.useRealTimers();
+
+		const dropped = getDegradationSummary().find(
+			(group) => group.kind === "dead-code-late-scan-dropped",
+		);
+		expect(JSON.stringify(dropped ?? null)).toContain("scan-threw");
+		edit("other.py");
+		await startTurn().turn;
+		expect(String(deadCodeRows().at(-1)?.reason)).not.toContain("in_flight");
+		expect(vultureProcess.scans).toBe(1);
+	});
+});

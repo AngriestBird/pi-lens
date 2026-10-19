@@ -635,14 +635,20 @@ function deadCodeScanEvent(
 	};
 }
 
-/** Remove a late scan that will not be used, and count why. */
+/**
+ * Remove a late scan that will not be used, and count why. Only `entry` goes:
+ * two turns of one session that reach the lane before either parks both park
+ * under the one key, and the older entry's drop must not take the newer one
+ * (the client's own `inFlight` release is guarded the same way, #1968).
+ */
 function dropLateDeadCodeScan(
 	scans: Map<string, LateDeadCodeScan>,
 	key: string,
+	entry: LateDeadCodeScan,
 	client: DeadCodeClient,
 	reason: string,
 ): void {
-	scans.delete(key);
+	if (scans.get(key) === entry) scans.delete(key);
 	incrementDegradationCount({
 		kind: "dead-code-late-scan-dropped",
 		subject: client.id,
@@ -690,7 +696,7 @@ function parkLateDeadCodeScan(args: {
 	).then(
 		({ result, row }) => {
 			if (!scope.isLive()) {
-				dropLateDeadCodeScan(scans, key, client, "session-ended");
+				dropLateDeadCodeScan(scans, key, entry, client, "session-ended");
 				return;
 			}
 			const durationMs = Date.now() - startedAt;
@@ -708,6 +714,7 @@ function parkLateDeadCodeScan(args: {
 				dropLateDeadCodeScan(
 					scans,
 					key,
+					entry,
 					client,
 					`scan-failed: ${result.summary}`,
 				);
@@ -716,7 +723,7 @@ function parkLateDeadCodeScan(args: {
 			entry.settled = result;
 		},
 		(err: unknown) =>
-			dropLateDeadCodeScan(scans, key, client, `scan-threw: ${err}`),
+			dropLateDeadCodeScan(scans, key, entry, client, `scan-threw: ${err}`),
 	);
 	// No caller awaits `watch`, so a throw from its settle branch (the baseline
 	// write's mkdir and rename throw on a full or read-only disk) would be an
@@ -725,7 +732,13 @@ function parkLateDeadCodeScan(args: {
 	// it, as a scan that throws is.
 	void watch.catch((err: unknown) => {
 		// none: dropLateDeadCodeScan counts it as dead-code-late-scan-dropped
-		dropLateDeadCodeScan(scans, key, client, `scan-settle-threw: ${err}`);
+		dropLateDeadCodeScan(
+			scans,
+			key,
+			entry,
+			client,
+			`scan-settle-threw: ${err}`,
+		);
 	});
 }
 
