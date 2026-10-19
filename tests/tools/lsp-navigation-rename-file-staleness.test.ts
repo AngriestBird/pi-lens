@@ -271,9 +271,9 @@ describe("#3734: rename_file refuses an edit on a file that changed", () => {
 		try {
 			const result = await runRenameFile(env.tmpDir, true);
 
-			// The stale file keeps the agent's bytes, and the clean sibling keeps
-			// the bytes it had: applyWorkspaceEdit refuses the whole edit in
-			// preflight, before its first write.
+			// The write lands inside willRenameFiles, so the capture throws on the
+			// stale file before applyWorkspaceEdit is entered: the whole edit is
+			// refused and neither the stale file nor the clean sibling is written.
 			expect(fs.readFileSync(importPath, "utf-8")).toBe(AGENT_IMPORT);
 			expect(fs.readFileSync(cleanPath, "utf-8")).toBe(OLD_IMPORT);
 			expect(result.isError).toBe(true);
