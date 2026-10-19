@@ -67,6 +67,7 @@ import { classifyCascadeWaitTier } from "../clients/lsp/wait-policy/index.js";
 import { attemptTsserverSyncDiagnostics } from "../clients/lsp/tsserver-sync.js";
 import { convertLspDiagnostics } from "../clients/dispatch/utils/lsp-diagnostics.js";
 import { demoteInferredProjectDiagnostics } from "../clients/lsp/inferred-project.js";
+import { demoteEnvironmentGapDiagnostics } from "../clients/lsp/environment-gap.js";
 import { normalizeMapKey, resolveHostToolPath } from "../clients/path-utils.js";
 import {
 	countRetainedSuppressedRows,
@@ -1218,7 +1219,15 @@ function demoteInferredForFile(
 	cwd: string,
 	lspService: NonNullable<ReturnType<typeof getLSPService>>,
 ): Promise<LSPDiagnostic[]> {
-	return demoteInferredProjectDiagnostics(diagnostics, {
+	// #4532: the environment-gap demotion runs first and is synchronous (one
+	// bounded walk-up of `stat` calls, no server request), so it applies to a
+	// cache REPLAY as well as a fresh touch. Demoting here rather than at one
+	// entry keeps #1645 F3's invariant: every writer of the widget store applies
+	// one rule for "is this file's finding demoted".
+	const environmentChecked = demoteEnvironmentGapDiagnostics(diagnostics, {
+		filePath: file,
+	});
+	return demoteInferredProjectDiagnostics(environmentChecked, {
 		filePath: file,
 		cwd,
 		service: lspService,

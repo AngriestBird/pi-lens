@@ -727,6 +727,16 @@ export type DegradationKind =
 	 */
 	| "lsp-declaration-walk-unreadable"
 	/**
+	 * #4532: a TypeScript diagnostic was demoted from blocking to warning
+	 * because the file's root resolves no `node_modules`, so its ambient
+	 * declarations (`node:*` module types, the `NodeJS` namespace, `node`'s
+	 * globals) are absent. `clients/lsp/environment-gap.ts` produces it; the
+	 * subject is the admitted TypeScript code (`2307`, `2503`, `2304`), which is
+	 * also the admission key, so the count carries repeats and the ledger holds
+	 * at most three subjects per session. A refusal never records here.
+	 */
+	| "lsp-environment-gap-demoted"
+	/**
 	 * `loadWebTreeSitter()` (clients/deps/web-tree-sitter.js) rejected during
 	 * MODULE EVALUATION, not resolution (#1592). Node's ESM loader permanently
 	 * memoizes a module record that threw while evaluating, so re-importing

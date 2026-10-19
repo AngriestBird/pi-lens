@@ -34,6 +34,7 @@ import type {
 import { findingsResult, spanOverlapsModifiedRanges } from "../types.js";
 import { convertLspDiagnostics } from "../utils/lsp-diagnostics.js";
 import { demoteInferredProjectDiagnostics } from "../../lsp/inferred-project.js";
+import { demoteEnvironmentGapDiagnostics } from "../../lsp/environment-gap.js";
 import {
 	enabledAuxiliaryLspServerIds,
 	retagAuxiliaryDiagnostics,
@@ -426,9 +427,25 @@ const lspRunner: RunnerDefinition = {
 		// is a known gap, recorded on the issue rather than papered over with an
 		// "unverified" label that would fire on every warm-attach file including
 		// the properly configured majority.
-		const validLspDiags = usedWarmAttach
+		// #4532: before the project-membership probe, demote the environment-gap
+		// codes a root with no resolvable `node_modules` produces. A worktree with
+		// no dependency install makes the TS server report `node:*` modules, the
+		// `NodeJS` namespace and the timer globals as missing, and those are not
+		// defects in the edited file: the agent cannot close a missing install by
+		// editing code, and at blocking authority it starved the cascade
+		// (`cascade_skip reason=primary_has_blockers`). It runs FIRST so the
+		// inferred-project probe (which only looks at severity-1 rows) pays nothing
+		// for a file this already demoted. Skipped under warm attach with #1645
+		// F2's reason plus one of its own: a warm-attached session's filesystem is
+		// not ours, so our own walk-up cannot answer for its root.
+		const environmentChecked = usedWarmAttach
 			? rawValidLspDiags
-			: await demoteInferredProjectDiagnostics(rawValidLspDiags, {
+			: demoteEnvironmentGapDiagnostics(rawValidLspDiags, {
+					filePath: diagnosticPath,
+				});
+		const validLspDiags = usedWarmAttach
+			? environmentChecked
+			: await demoteInferredProjectDiagnostics(environmentChecked, {
 					filePath: diagnosticPath,
 					cwd: ctx.cwd,
 					service: lspService,

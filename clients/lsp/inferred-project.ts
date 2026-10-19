@@ -67,7 +67,11 @@ export function isTsProjectFile(filePath: string): boolean {
 	return TS_PROJECT_EXTENSIONS.has(path.extname(filePath).toLowerCase());
 }
 
-function isTypeScriptSourcedDiagnostic(d: LSPDiagnostic): boolean {
+/**
+ * Whether a diagnostic came from the TypeScript server. Shared with
+ * `environment-gap.ts`, which must refuse every other producer's findings.
+ */
+export function isTypeScriptSourcedDiagnostic(d: LSPDiagnostic): boolean {
 	return TYPESCRIPT_DIAGNOSTIC_SOURCES.has((d.source ?? "").toLowerCase());
 }
 

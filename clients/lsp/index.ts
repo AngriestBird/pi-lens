@@ -3534,6 +3534,19 @@ export class LSPService {
 	}
 
 	/**
+	 * #4532: the roots of the live PRIMARY clients, each with the epoch ms its
+	 * earliest live client at that root spawned. The `tool_result` install look
+	 * runs at each of these roots as well as the session's cwd, so an install in
+	 * a LINKED WORKTREE restarts that worktree's server; before this, the look
+	 * only ever ran at the session cwd, and a worktree install reached no server
+	 * for 14 minutes (issue #4532 gap 7). Read-only: spawns nothing.
+	 */
+	livePrimaryClientRoots(): Array<{ root: string; spawnedAt: number }> {
+		if (this.checkDestroyed()) return [];
+		return this.clientRegistry.livePrimaryClientRoots();
+	}
+
+	/**
 	 * #4320: before a batch serves any cached answer, tell every live client the
 	 * batch's files that are new to its server and not yet announced to it, and
 	 * send each client's waiting Created now (`notify.announceCreated`). Without

@@ -827,6 +827,36 @@ export class ClientRegistry {
 	}
 
 	/**
+	 * #4532: the roots of the live PRIMARY clients, each with the epoch ms its
+	 * earliest live client at that root spawned. The out-of-band install look
+	 * runs at these roots as well as the session's cwd, so a dependency install
+	 * in a LINKED WORKTREE — a root the session cwd is not under — restarts that
+	 * worktree's server. Read-only: never spawns and never waits.
+	 *
+	 * The earliest spawn, not the latest: `restartPrimaryClientsUnder` retires
+	 * every primary overlapping a root, so a root whose newer client spawned
+	 * after an install must not hide an older one that read the pre-install
+	 * tree. An absent `clientSpawnedAt` reports 0, which a first look reads as
+	 * "no epoch" and never as "before every install".
+	 */
+	livePrimaryClientRoots(): Array<{ root: string; spawnedAt: number }> {
+		const byRoot = new Map<string, number>();
+		for (const [key, client] of this.clients) {
+			if (!client.isAlive()) continue;
+			const { serverId, root } = parseClientKey(key);
+			if (!root) continue;
+			if (isAuxiliary(getServerById(serverId))) continue;
+			const spawnedAt = this.clientSpawnedAt.get(key) ?? 0;
+			const prior = byRoot.get(root);
+			byRoot.set(
+				root,
+				prior === undefined ? spawnedAt : Math.min(prior, spawnedAt),
+			);
+		}
+		return [...byRoot].map(([root, spawnedAt]) => ({ root, spawnedAt }));
+	}
+
+	/**
 	 * #1934 review F1: record what a `spawnClient` call decided, at the point
 	 * it decides it. Called on EVERY path that returns without a client, so
 	 * "no verdict" cannot silently mean "failed".

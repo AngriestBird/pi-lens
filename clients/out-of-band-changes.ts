@@ -25,7 +25,10 @@
  * The records are process-wide per root, as the servers are (two sessions on
  * one root share them, so one install restarts once). They describe the disk,
  * not a session, so a session boundary keeps them: an install made between
- * sessions is still seen. A root's first look records and changes nothing.
+ * sessions is still seen. A root's first look records and changes nothing
+ * unless the caller names the epoch of the live server rooted there (#4532):
+ * an install fresher than that epoch is the change the server missed, so it is
+ * published instead of recorded as a baseline the server never read.
  */
 import { promises as fsp } from "node:fs";
 import { join } from "node:path";
@@ -117,32 +120,92 @@ const fingerprint = (stat: {
 }): string => `${stat.ino}:${stat.size}:${stat.mtimeMs}`;
 
 /**
- * The root's install stamp: one listing of the root, then a stat of each
- * lockfile it holds and, when it holds `node_modules`, of each install marker
- * (a tool call pays a listing and a few stats, not one stat per name). A name
- * that appears, changes or goes away changes the stamp.
+ * The root's install stamp and the freshest timestamp in it.
+ *
+ * `stamp` is opaque equality evidence: one listing of the root, then a stat of
+ * each lockfile it holds and, when it holds `node_modules`, of each install
+ * marker (a tool call pays a listing and a few stats, not one stat per name). A
+ * name that appears, changes or goes away changes the stamp.
+ *
+ * `newestChangeMs` is what a FIRST look needs (#4532). With no prior record the
+ * look has nothing to compare, and the reported case — `ln -s` of another
+ * checkout's `node_modules` into a worktree that had none — carries OLD mtimes:
+ * the target install predates the server's spawn. So the stamp also carries the
+ * `node_modules` entry's OWN `lstat` when it is a symlink: that is the instant
+ * the root acquired its dependency tree, which is the change the server missed.
+ * A real `node_modules` directory is deliberately NOT an entry — a tool writing
+ * a cache directory under it would change the stamp and restart servers for
+ * nothing (#4476's reason for listing markers instead of the directory).
  */
-async function readInstallStamp(root: string): Promise<string> {
+async function readInstallStamp(
+	root: string,
+): Promise<{ stamp: string; newestChangeMs: number }> {
 	let listed: Set<string>;
 	try {
 		listed = new Set(await fsp.readdir(root));
 	} catch {
-		return "-";
+		return { stamp: "-", newestChangeMs: 0 };
 	}
 	const names: string[] = [];
 	for (const name of INSTALL_LOCKFILES) if (listed.has(name)) names.push(name);
-	if (listed.has("node_modules"))
+	let linkPrint: string | undefined;
+	let linkChangedAt = 0;
+	if (listed.has("node_modules")) {
 		for (const marker of INSTALL_MARKERS) names.push(`node_modules/${marker}`);
+		let link: import("node:fs").Stats | undefined;
+		try {
+			link = await fsp.lstat(join(root, "node_modules"));
+		} catch {
+			// none: the entry vanished between the listing and the lstat, so this
+			// look has no symlink lane to record (the stamp still carries the
+			// markers it listed).
+			link = undefined;
+		}
+		if (link?.isSymbolicLink()) {
+			linkPrint = `node_modules=${fingerprint(link)}`;
+			linkChangedAt = link.mtimeMs;
+		}
+	}
 	const parts = await Promise.all(
 		names.map(async (name) => {
 			try {
-				return `${name}=${fingerprint(await fsp.stat(join(root, name)))}`;
+				const stat = await fsp.stat(join(root, name));
+				return {
+					part: `${name}=${fingerprint(stat)}`,
+					changedAt: stat.mtimeMs,
+				};
 			} catch {
-				return `${name}=-`;
+				return { part: `${name}=-`, changedAt: 0 };
 			}
 		}),
 	);
-	return parts.join("|");
+	if (linkPrint !== undefined)
+		parts.push({ part: linkPrint, changedAt: linkChangedAt });
+	return {
+		stamp: parts.map((entry) => entry.part).join("|"),
+		newestChangeMs: parts.reduce(
+			(newest, entry) => Math.max(newest, entry.changedAt),
+			0,
+		),
+	};
+}
+
+/**
+ * The FIRST look's verdict for a root with no record yet (#4532): an install
+ * counts when the freshest stamp entry is at or after the epoch of the client
+ * that has to re-read it. `since` absent or 0 means "no epoch" — the caller
+ * has no live client at this root, so the first look keeps #4476's rule and
+ * changes nothing.
+ *
+ * `>=`, not `>`: an install that finished in the same millisecond the client
+ * spawned is indistinguishable from one that landed after it, and the safe
+ * direction is the restart.
+ */
+function firstLookSawInstall(
+	install: { newestChangeMs: number },
+	since: number | undefined,
+): boolean {
+	return since !== undefined && since > 0 && install.newestChangeMs >= since;
 }
 
 /**
@@ -318,6 +381,29 @@ function diffDeclarations(
 }
 
 /**
+ * What a look needs to know beyond its root (#4532).
+ */
+export interface OutOfBandLookOptions {
+	/**
+	 * The epoch ms of the earliest live PRIMARY client rooted here. Used only by
+	 * a FIRST look of this root (no record yet): an install whose freshest stamp
+	 * entry is at or after it restarts those clients, because they spawned
+	 * before the root resolved its dependencies. Absent or 0 keeps #4476's rule —
+	 * a first look records and changes nothing.
+	 */
+	since?: number;
+	/**
+	 * When the declaration walk runs. `"trigger"` (the default) keeps #4476's
+	 * rule: a `tool_result` always walks, a `tool_call` walks at most once per
+	 * `PI_LENS_DECLARATION_LOOK_MS`. `"interval"` walks at most that often on
+	 * every trigger, which is what a look at an EXTRA root uses: the walk is
+	 * bounded per root, and the install stamp is what an extra root is looked at
+	 * for, so a big worktree's walk cannot run on every bash result.
+	 */
+	walk?: "trigger" | "interval";
+}
+
+/**
  * Look at `root` for an install or a declaration-file change since its last
  * look, and publish what changed (see the module doc). Looks of one root run
  * one at a time, each against the record the previous one left (`looks`).
@@ -327,14 +413,20 @@ function diffDeclarations(
  * is the bulk mutation seam the publisher allocates the existing project
  * sequence through; without it the change still reaches every subscriber, but
  * no sequence is allocated.
+ *
+ * `options.since` is the one way a FIRST look of a root publishes (#4532): it
+ * names the epoch of the server that has to re-read the root, so an install
+ * that appeared after that server spawned is not mistaken for state it already
+ * read.
  */
 export function lookForOutOfBandChanges(
 	root: string,
 	trigger: "tool_call" | "tool_result",
 	runtime?: DiskChangeRuntime,
+	options: OutOfBandLookOptions = {},
 ): Promise<void> {
 	const key = normalizeMapKey(root);
-	return looks.run(key, () => lookOnce(root, key, trigger, runtime));
+	return looks.run(key, () => lookOnce(root, key, trigger, runtime, options));
 }
 
 /** `diffDeclarations`'s watched-files type codes, as the record names them. */
@@ -387,14 +479,18 @@ async function lookOnce(
 	key: string,
 	trigger: "tool_call" | "tool_result",
 	runtime: DiskChangeRuntime | undefined,
+	options: OutOfBandLookOptions,
 ): Promise<void> {
 	const started = Date.now();
 	const prior = records.get(key);
 	const walkDue =
-		trigger === "tool_result" ||
-		prior === undefined ||
-		started - prior.walkedAt >= declarationLookIntervalMs();
-	const [stamp, walked] = await Promise.all([
+		options.walk === "interval"
+			? prior === undefined ||
+				started - prior.walkedAt >= declarationLookIntervalMs()
+			: trigger === "tool_result" ||
+				prior === undefined ||
+				started - prior.walkedAt >= declarationLookIntervalMs();
+	const [install, walked] = await Promise.all([
 		readInstallStamp(root),
 		walkDue ? walkDeclarations(root) : Promise.resolve(undefined),
 	]);
@@ -418,7 +514,7 @@ async function lookOnce(
 		? prior?.declarations
 		: (observed?.declarations ?? prior?.declarations);
 	records.set(key, {
-		stamp,
+		stamp: install.stamp,
 		declarations,
 		walkedAt: walkDue && !incomplete ? started : (prior?.walkedAt ?? started),
 	});
@@ -448,12 +544,20 @@ async function lookOnce(
 			},
 		});
 	}
-	if (prior === undefined) return;
-	const installed = stamp !== prior.stamp;
+	// #4532: a root's FIRST look normally records and changes nothing (#4476).
+	// When the caller names the epoch of the live server rooted here, an install
+	// fresher than that epoch IS the change the server missed — the worktree
+	// whose `node_modules` symlink appeared after its server spawned — so the
+	// first look publishes it. Without `since`, this is unchanged behaviour.
+	const installed =
+		prior === undefined
+			? firstLookSawInstall(install, options.since)
+			: install.stamp !== prior.stamp;
+	if (prior === undefined && !installed) return;
 	// An incomplete walk (`incomplete`) leaves the record's own map in place, so
 	// there is nothing to diff this round.
 	const changes =
-		walkDue && !incomplete && declarations && prior.declarations
+		walkDue && !incomplete && declarations && prior?.declarations
 			? diffDeclarations(prior.declarations, declarations)
 			: [];
 	if (!installed && changes.length === 0) return;
@@ -484,6 +588,9 @@ async function lookOnce(
 		metadata: {
 			trigger,
 			restarted,
+			// Which caller looked: the session-cwd root, or a live client's root
+			// (#4532). Both write the same record and the same row.
+			scope: prior === undefined ? "first-look" : "recorded",
 			created: count(1),
 			changed: count(2),
 			deleted: count(3),
