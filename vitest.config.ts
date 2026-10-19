@@ -860,6 +860,12 @@ export default defineConfig({
 					setupFiles: sharedSetupFiles,
 					maxWorkers: sharedMaxWorkers,
 					execArgv: sharedExecArgv,
+					// #4634: the only project without this field, so its hooks ran on
+					// vitest's 10 s default while every sibling project and the
+					// documented invariant (`tests/support/vitest-setup.ts`) say 60 s.
+					// `availability-policy-coverage.test.ts`' whole-clients scan costs
+					// ~9.9 s in `beforeAll` here and timed out at load 52.
+					hookTimeout: 60_000,
 					// Vitest 4 requires distinct groupOrder whenever projects have
 					// different `maxWorkers` — see the "grammar-heavy" project below
 					// for why that's actually desirable here, not just a workaround.
