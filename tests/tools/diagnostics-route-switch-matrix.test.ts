@@ -1546,65 +1546,75 @@ describe("the primary-unavailable note's cause (#4403)", () => {
 	// where it would root. The service's own root rule has a marker fallback
 	// (#3750), so an enabled rust IS tried for a `.rs` file outside any crate,
 	// and named when it does not answer. A disabled one is named exactly there.
-	it("names a disabled primary exactly where an enabled one that cannot start is named", async () => {
-		const trust = await import("../../clients/project-trust.js");
-		const config = await import("../../clients/lsp/config.js");
-		const savedInstall = process.env.PI_LENS_DISABLE_LSP_INSTALL;
-		process.env.PI_LENS_DISABLE_LSP_INSTALL = "1";
-		trust.setProjectTrustState("trusted");
-		const unanswered = async (rust: "missing" | "disabled") => {
-			const env = setupTestEnvironment(PREFIX);
-			const workspace = fs.realpathSync(env.tmpDir);
-			fs.writeFileSync(path.join(workspace, "package.json"), "{}\n");
-			fs.mkdirSync(path.join(workspace, ".pi-lens"));
-			fs.writeFileSync(
-				path.join(workspace, ".pi-lens", "lsp.json"),
-				JSON.stringify(
-					rust === "disabled"
-						? { disabledServers: ["rust"] }
-						: {
-								serverOverrides: {
-									rust: {
-										command: [path.join(workspace, "missing", "rust-analyzer")],
+	// Two full service lifecycles cost 4.9s at HEAD and 5.0s at origin/master
+	// (measured 2026-10-19), each at vitest's 5s default: the cell redded
+	// `Test timed out in 5000ms` on three lanes that day. The budget below is
+	// the one every other heavy cell in this file declares.
+	it(
+		"names a disabled primary exactly where an enabled one that cannot start is named",
+		async () => {
+			const trust = await import("../../clients/project-trust.js");
+			const config = await import("../../clients/lsp/config.js");
+			const savedInstall = process.env.PI_LENS_DISABLE_LSP_INSTALL;
+			process.env.PI_LENS_DISABLE_LSP_INSTALL = "1";
+			trust.setProjectTrustState("trusted");
+			const unanswered = async (rust: "missing" | "disabled") => {
+				const env = setupTestEnvironment(PREFIX);
+				const workspace = fs.realpathSync(env.tmpDir);
+				fs.writeFileSync(path.join(workspace, "package.json"), "{}\n");
+				fs.mkdirSync(path.join(workspace, ".pi-lens"));
+				fs.writeFileSync(
+					path.join(workspace, ".pi-lens", "lsp.json"),
+					JSON.stringify(
+						rust === "disabled"
+							? { disabledServers: ["rust"] }
+							: {
+									serverOverrides: {
+										rust: {
+											command: [
+												path.join(workspace, "missing", "rust-analyzer"),
+											],
+										},
 									},
 								},
-							},
-				),
-			);
-			// Outside any crate: no Cargo.toml anywhere above it.
-			const loose = path.join(workspace, "loose", "main.rs");
-			fs.mkdirSync(path.dirname(loose), { recursive: true });
-			fs.writeFileSync(loose, "fn main() {}\n");
-			config.resetLSPConfigStateForTests();
-			await config.initLSPConfig(workspace);
-			resetLSPService();
-			const service = getLSPService();
-			await service.getDiagnostics(loose);
-			const health = service.getDiagnosticsHealth(loose);
-			await service.shutdown();
-			return {
-				named: health?.unavailablePrimaryServerIds ?? [],
-				disabled: health?.disabledPrimaryServerIds ?? [],
+					),
+				);
+				// Outside any crate: no Cargo.toml anywhere above it.
+				const loose = path.join(workspace, "loose", "main.rs");
+				fs.mkdirSync(path.dirname(loose), { recursive: true });
+				fs.writeFileSync(loose, "fn main() {}\n");
+				config.resetLSPConfigStateForTests();
+				await config.initLSPConfig(workspace);
+				resetLSPService();
+				const service = getLSPService();
+				await service.getDiagnostics(loose);
+				const health = service.getDiagnosticsHealth(loose);
+				await service.shutdown();
+				return {
+					named: health?.unavailablePrimaryServerIds ?? [],
+					disabled: health?.disabledPrimaryServerIds ?? [],
+				};
 			};
-		};
-		try {
-			expect(await unanswered("missing")).toEqual({
-				named: ["rust"],
-				disabled: [],
-			});
-			expect(await unanswered("disabled")).toEqual({
-				named: ["rust"],
-				disabled: ["rust"],
-			});
-		} finally {
-			resetLSPService();
-			trust.resetProjectTrust();
-			config.resetLSPConfigStateForTests();
-			if (savedInstall === undefined)
-				delete process.env.PI_LENS_DISABLE_LSP_INSTALL;
-			else process.env.PI_LENS_DISABLE_LSP_INSTALL = savedInstall;
-		}
-	});
+			try {
+				expect(await unanswered("missing")).toEqual({
+					named: ["rust"],
+					disabled: [],
+				});
+				expect(await unanswered("disabled")).toEqual({
+					named: ["rust"],
+					disabled: ["rust"],
+				});
+			} finally {
+				resetLSPService();
+				trust.resetProjectTrust();
+				config.resetLSPConfigStateForTests();
+				if (savedInstall === undefined)
+					delete process.env.PI_LENS_DISABLE_LSP_INSTALL;
+				else process.env.PI_LENS_DISABLE_LSP_INSTALL = savedInstall;
+			}
+		},
+		scaledTestTimeout(60_000),
+	);
 });
 
 // #4403 F5: the reader scored `ok:false, status:no_server` clean, so the
