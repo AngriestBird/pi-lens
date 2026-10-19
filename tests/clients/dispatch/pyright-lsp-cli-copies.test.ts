@@ -92,7 +92,12 @@ afterEach(() => {
  */
 async function dispatchCopies(
 	capture: Capture,
-	lanes: { lsp?: LSPDiagnostic[]; cliStdout?: string } = {},
+	lanes: {
+		lsp?: LSPDiagnostic[];
+		cliStdout?: string;
+		/** One store across dispatches, so each one reads the last one's baseline. */
+		facts?: FactStore;
+	} = {},
 ) {
 	const lspDiagnostics = convertLspDiagnostics(
 		lanes.lsp ?? capture.lsp.diagnostics,
@@ -118,9 +123,22 @@ async function dispatchCopies(
 		file,
 		tmpDir,
 		{ getFlag: () => false },
-		new FactStore(),
+		lanes.facts ?? new FactStore(),
 	);
 	return dispatchForFile(ctx, [group], registry);
+}
+
+/** The CLI's bytes, parsed, for a case that edits what the CLI reports. */
+function cliOutput(capture: Capture) {
+	return JSON.parse(capture.cli.stdout) as {
+		generalDiagnostics: {
+			rule: string;
+			range: {
+				start: { line: number; character: number };
+				end: { line: number; character: number };
+			};
+		}[];
+	};
 }
 
 function findings(
@@ -224,6 +242,101 @@ describe.each(FLAVOURS)(
 			);
 			expect(findings(result.diagnostics)).toEqual(expected);
 			expect(result.output).not.toContain("declared type");
+		});
+
+		it("calls nothing new when the language server goes silent on an unchanged file (#4629)", async () => {
+			// Delta mode: the agent is told only what is NEW since the last dispatch.
+			// The first one holds the language server's copy of each finding (its
+			// copy wins the dedupe). The second sees the same file with only the
+			// CLI's copy, which carries another id. One finding is one finding, so
+			// the delta calls nothing new and nothing fixed.
+			const facts = new FactStore();
+			const first = await dispatchCopies(capture, { facts });
+			expect(findings(first.diagnostics)).toEqual(expectedFindings(capture));
+
+			const second = await dispatchCopies(capture, { facts, lsp: [] });
+			expect(findings(second.diagnostics)).toEqual([]);
+			expect(second.blockers).toEqual([]);
+			expect(second.output).not.toContain("STOP");
+			expect(second.resolvedCount).toBe(0);
+		});
+
+		it("calls nothing new when the language server comes back on an unchanged file (#4629)", async () => {
+			// The other half of the same flap: the baseline now holds the CLI's copy,
+			// and the language server's copy, which wins the dedupe, must not read as
+			// new beside it.
+			const facts = new FactStore();
+			await dispatchCopies(capture, { facts });
+			await dispatchCopies(capture, { facts, lsp: [] });
+
+			const third = await dispatchCopies(capture, { facts });
+			expect(findings(third.diagnostics)).toEqual([]);
+			expect(third.blockers).toEqual([]);
+			expect(third.output).not.toContain("STOP");
+			expect(third.resolvedCount).toBe(0);
+		});
+
+		it("still calls a changed finding new and a gone one fixed while the language server is silent (#4629)", async () => {
+			// The shared identity must not hide a real change: the same place under
+			// another rule, and the same rule on another line, are different findings.
+			const facts = new FactStore();
+			await dispatchCopies(capture, { facts });
+
+			const cli = cliOutput(capture);
+			const gone = cli.generalDiagnostics.find(
+				(d) => d.rule === "reportAssignmentType",
+			);
+			const repeated = cli.generalDiagnostics.find((d) => d !== gone);
+			if (!gone || !repeated) throw new Error("the capture lost its premise");
+			const otherRuleHere = { ...gone, rule: "reportCallIssue" };
+			const sameRuleElsewhere = {
+				...repeated,
+				range: {
+					start: { line: 59, character: 0 },
+					end: { line: 59, character: 4 },
+				},
+			};
+			cli.generalDiagnostics = [
+				...cli.generalDiagnostics.filter((d) => d !== gone),
+				otherRuleHere,
+				sameRuleElsewhere,
+			];
+
+			const second = await dispatchCopies(capture, {
+				facts,
+				lsp: [],
+				cliStdout: JSON.stringify(cli),
+			});
+			expect(findings(second.diagnostics)).toEqual(
+				[
+					`${gone.range.start.line + 1}:${gone.range.start.character + 1}:reportCallIssue`,
+					`60:1:${repeated.rule}`,
+				].sort(),
+			);
+			expect(second.resolvedCount).toBe(1);
+		});
+
+		it("still reads the id: an unchanged CLI finding that moved lines is not new (#4629)", async () => {
+			// The shared identity joins the id, it does not replace it. The CLI's id
+			// carries no line, so a finding that moved keeps it, and so stays known.
+			const facts = new FactStore();
+			await dispatchCopies(capture, { facts, lsp: [] });
+
+			const cli = cliOutput(capture);
+			const moved = cli.generalDiagnostics.find(
+				(d) => d.rule === "reportAssignmentType",
+			);
+			if (!moved) throw new Error("the capture lost its premise");
+			moved.range.start.line += 1;
+			moved.range.end.line += 1;
+
+			const second = await dispatchCopies(capture, {
+				facts,
+				lsp: [],
+				cliStdout: JSON.stringify(cli),
+			});
+			expect(findings(second.diagnostics)).toEqual([]);
+			expect(second.resolvedCount).toBe(0);
 		});
 	},
 );

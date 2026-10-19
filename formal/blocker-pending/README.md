@@ -11,9 +11,10 @@ Issue: #4484.
 
 The seam:
 
-- The delta split is `filterDelta(..., d => d.id)` in
-  `clients/dispatch/dispatcher.ts`. Its held-back blocking set is
-  `DispatchResult.heldBackBlockers`.
+- The delta split is `filterDelta(...)` in `clients/dispatch/dispatcher.ts`,
+  keyed on `d.id`. Its held-back blocking set is
+  `DispatchResult.heldBackBlockers`. The model reads the id; the cross-tool
+  `findingKey` match is under "What the model cannot see".
 - The pipeline's record, clean text and stored diagnostics are in
   `clients/pipeline.ts` (`recordBlockers`, `stillUnfixed`, `storedDiagnostics`).
 - The record verb is `recordInlineBlockers` or `clearInlineBlockers`, called
@@ -341,6 +342,14 @@ observes only outside the edit, on lines no run owes, is still never recorded
 
 ## What the model cannot see
 
+- Two lanes' copies of one finding (#4629). The model gives each finding one
+  id. The code's delta also matches a finding that a different tool reports
+  under the same `findingKey` (place, defect class, and the rule with a
+  server's source prefix stripped; `clients/dispatch/dispatcher.ts`), so a
+  language server's copy and the CLI's copy of one finding, which carry two
+  ids, are one finding to it. That match only adds to the id's, and only across
+  tools: two ids of one tool at one place and rule stay two findings. The model
+  has one fast runner group and no pair of tools reporting one finding.
 - Parallel writes and the write-order token (`dispatch-pipeline`'s `InlineFix`).
 - Neighbour-file cascade baselines (`applyCascadeDeltaBaselines` in
   `clients/dispatch/integration.ts`). That is another file's record, a separate

@@ -451,18 +451,41 @@ export function deltaBaselineFactKey(filePath: string): string {
 }
 
 /**
- * Filter diagnostics to only show NEW issues (delta mode)
+ * Filter diagnostics to only show NEW issues (delta mode). Two diagnostics are
+ * one finding when they share an id, or when ANOTHER lane reports the same
+ * `copyOf.key` (#4629: a language server's copy and its CLI's copy of one
+ * finding carry two ids). Two ids of ONE lane stay two findings, as the id
+ * decides alone: an ordinal or a message in the id marks a different finding
+ * at the same place and rule.
  */
 function filterDelta<T extends { id: string }>(
 	after: T[],
 	before: T[] | undefined,
-	keyFn: (d: T) => string,
+	copyOf: { key: (d: T) => string; lane: (d: T) => string },
 ): { new: T[]; fixed: T[] } {
-	const beforeSet = new Set((before ?? []).map(keyFn));
-	const afterSet = new Set(after.map(keyFn));
+	const namedBy = (side: T[]) => {
+		const ids = new Set(side.map((d) => d.id));
+		const lanesByKey = new Map<string, Set<string>>();
+		for (const d of side) {
+			const key = copyOf.key(d);
+			const lanes = lanesByKey.get(key) ?? new Set<string>();
+			lanes.add(copyOf.lane(d));
+			lanesByKey.set(key, lanes);
+		}
+		return (d: T) => {
+			if (ids.has(d.id)) return true;
+			const lane = copyOf.lane(d);
+			for (const other of lanesByKey.get(copyOf.key(d)) ?? []) {
+				if (other !== lane) return true;
+			}
+			return false;
+		};
+	};
+	const inBefore = namedBy(before ?? []);
+	const inAfter = namedBy(after);
 
-	const fixed = (before ?? []).filter((d) => !afterSet.has(keyFn(d)));
-	const newItems = after.filter((d) => !beforeSet.has(keyFn(d)));
+	const fixed = (before ?? []).filter((d) => !inAfter(d));
+	const newItems = after.filter((d) => !inBefore(d));
 
 	return { new: newItems, fixed };
 }
@@ -471,18 +494,31 @@ function toolPriority(tool: string, defectClass: string): number {
 	return getToolProfile(tool, defectClass).dedupPriority;
 }
 
+/**
+ * One finding's identity across lanes (#4629): its place, its defect class and
+ * its rule. A language server renders the rule `<source>:<code>` where its CLI
+ * prints `<code>`, so the normalized rule is the key, as `lens_diagnostics` and
+ * `laneCopyStandsFor` read it: one finding has one identity on every surface.
+ * The two lanes' copies carry different ids and one `findingKey`. The overlap
+ * dedupe keeps one copy per key and the delta reads the same key, so a lane
+ * that goes silent does not make the other lane's copy a new finding.
+ */
+function findingKey(
+	d: Diagnostic,
+	defectClass: string = d.defectClass ?? classifyDiagnostic(d),
+): string {
+	const line = d.line ?? 1;
+	const column = d.column ?? 1;
+	const ruleKey = normalizeRuleId(d.rule || d.id || "unknown");
+	return `${d.filePath}:${line}:${column}:${defectClass}:${ruleKey}`;
+}
+
 function dedupeOverlappingDiagnostics(diagnostics: Diagnostic[]): Diagnostic[] {
 	const byKey = new Map<string, Diagnostic>();
 
 	for (const d of diagnostics) {
 		const defectClass = d.defectClass ?? classifyDiagnostic(d);
-		const line = d.line ?? 1;
-		const column = d.column ?? 1;
-		// #4629: a language server renders `<source>:<code>` where its CLI prints
-		// `<code>`. Key on the normalized rule, as `lens_diagnostics` and
-		// `laneCopyStandsFor` do, so one finding has one identity on every surface.
-		const ruleKey = normalizeRuleId(d.rule || d.id || "unknown");
-		const key = `${d.filePath}:${line}:${column}:${defectClass}:${ruleKey}`;
+		const key = findingKey(d, defectClass);
 		const current = byKey.get(key);
 		if (!current) {
 			byKey.set(key, { ...d, defectClass });
@@ -1718,10 +1754,17 @@ export async function dispatchForFile(
 		// finding sits in `fixed` on every dispatch and inflates the agent's
 		// resolved tally (trackAgentFixed) forever. Only `fixed` changes:
 		// filtered-out ids are absent from `after` either way.
+		//
+		// #4629: the id alone is one lane's name for a finding. The baseline keeps
+		// the language server's copy of a finding both lanes reported, so when that
+		// lane goes silent, the CLI's copy of the unchanged finding carries another
+		// id. `findingKey` is the identity the dedupe merged the two copies on, so
+		// a copy that another tool reports under it is the same finding, and the
+		// delta calls it neither new nor fixed. Two ids of one tool stay apart.
 		const filtered = filterDelta(
 			visibleDiagnostics,
 			applyOutputFilters(previousBaseline),
-			(d) => d.id,
+			{ key: (d) => findingKey(d), lane: (d) => d.tool },
 		);
 		const isNew = new Set(filtered.new);
 		heldBackBlockers = visibleDiagnostics.filter(

@@ -811,6 +811,64 @@ describe("Dispatch Flow", () => {
 			expect(result.diagnostics[0].id).toBe("new-issue");
 		});
 
+		it("calls a finding new when one tool names it under another id at the same place and rule (#4629)", async () => {
+			// Two copies are one finding across LANES (a language server and a CLI),
+			// not across ids of one tool: helm-lint's id carries an ordinal and
+			// actionlint's carries the message, so a new message at the same line and
+			// rule is a new finding. The id alone decides, as it did before #4629.
+			const file = "/project/test.ts";
+			const facts = new FactStore();
+			setBaselineFacts(facts, file, [
+				{
+					id: "reporter-1-error",
+					message: "chart name is missing",
+					filePath: file,
+					line: 3,
+					column: 1,
+					rule: "error",
+					tool: "reporter",
+					semantic: "blocking",
+				},
+			]);
+
+			registerRunner(
+				createMockRunner({
+					id: "reporter",
+					appliesTo: ["jsts"],
+					runResult: {
+						status: "succeeded",
+						diagnostics: [
+							{
+								id: "reporter-2-error",
+								message: "chart version is missing",
+								filePath: "test.ts",
+								line: 3,
+								column: 1,
+								rule: "error",
+								severity: "error",
+								semantic: "blocking",
+								tool: "reporter",
+							},
+						],
+						semantic: "blocking",
+					},
+				}),
+			);
+
+			const ctx = createDispatchContext(
+				"test.ts",
+				"/project",
+				{ getFlag: () => false },
+				facts,
+			);
+			const groups: RunnerGroup[] = [{ mode: "all", runnerIds: ["reporter"] }];
+
+			const result = await dispatchForFile(ctx, groups);
+
+			expect(result.diagnostics.map((d) => d.id)).toEqual(["reporter-2-error"]);
+			expect(result.resolvedCount).toBe(1);
+		});
+
 		it("reports baseline issues when delta mode is disabled", async () => {
 			const facts = new FactStore();
 			setBaselineFacts(facts, "/project/test.ts", [
