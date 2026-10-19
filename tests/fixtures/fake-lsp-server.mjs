@@ -566,6 +566,18 @@ function handle(raw) {
 					`text ${data.params?.textDocument?.uri} ${createHash("sha256").update(text).digest("hex").slice(0, 12)}`,
 				);
 		}
+		// #4636: the `languageId` each `didOpen` announced, so a test reads the
+		// classifier's answer off the wire instead of from the helper behind it.
+		// Off by default: the line would join every existing trace assertion.
+		if (
+			process.env.FAKE_LSP_TRACE_LANGUAGE_ID === "1" &&
+			data.method === "textDocument/didOpen" &&
+			typeof data.params?.textDocument?.languageId === "string"
+		) {
+			trace(
+				`language ${data.params.textDocument.uri} ${data.params.textDocument.languageId}`,
+			);
+		}
 		// #4320 r3: which watched-files changes reached this server.
 		if (data.method === "workspace/didChangeWatchedFiles") {
 			for (const change of data.params?.changes ?? []) {

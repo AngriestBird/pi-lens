@@ -420,6 +420,11 @@ const lspSpawnHeavyInclude = [
 	// initialize handshake plus a two-publish diagnostics sequence per case —
 	// the same #1022/#2332 contention class as its lane siblings.
 	"tests/tools/lsp-diagnostics-empty-first-publish-3310.test.ts",
+	// #4636: the production lsp_diagnostics handler and LSPService over a real
+	// stdio fake-server child (a project custom server for `.json`), reading the
+	// announced `languageId` off the wire after a real handshake and a
+	// diagnostics round like its lane siblings.
+	"tests/tools/lsp-diagnostics-jsonc-language-id-4636.test.ts",
 	// #4322: the production lsp_diagnostics handler, LSPService and the dispatch
 	// LSP runner beside a real stdio fake-server child (the typos auxiliary)
 	// whose primary cannot start; waits on a real handshake like #4346's.
