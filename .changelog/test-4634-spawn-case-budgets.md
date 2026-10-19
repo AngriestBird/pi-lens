@@ -14,7 +14,9 @@ audience: internal
   census in `tests/clients/pi-lens-home-hermeticity.test.ts` and
   `tests/config/vacuous-skip-coverage.test.ts`, to the wedged-notify rename case
   in `tests/clients/lsp/rename-notify-wedged.test.ts`, and to the five unbudgeted
-  real-pi cases in `tests/real-harness/tools-enabled.test.ts`; the
+  real-pi cases in `tests/real-harness/tools-enabled.test.ts` (whose four
+  budgeted siblings take the same scaled spelling, so the file has one budget),
+  and the
   `expect.poll` waits on a real pi child in `tests/real-harness/lifecycle.test.ts`
   now take a scaled 10 s poll budget instead of Vitest's 1 s poll default. No
   product behaviour changes.

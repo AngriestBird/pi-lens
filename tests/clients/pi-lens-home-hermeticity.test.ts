@@ -848,8 +848,10 @@ describe("no tests/**/*.test.ts file drives a producer's registry against the ru
 
 	// #4634: this case parses every `tests/**/*.test.ts` file, so its cost is
 	// host-bound, not fixture-bound. Measured 947 ms on an idle host and 5,314 ms
-	// under load average 57.75 (a timeout at vitest's 5 s default); it keeps a
-	// 60 s budget like the file's other walk-heavy cases.
+	// under load average 57.75 (a timeout at vitest's 5 s default), so it takes
+	// 60 s — 9.4x its worst measurement, and this file's only scaled budget. The
+	// file's only other explicit budgets are raw `30_000` on the two
+	// `session_start` driver cases below, and neither walks the tree.
 	it(
 		"registered-or-fail: every unpinned reach into a producer's registry is named or exempted with a reason",
 		() => {

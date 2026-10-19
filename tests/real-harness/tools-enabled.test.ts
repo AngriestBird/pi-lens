@@ -57,77 +57,85 @@ function orientationText(pi: {
 describe.skipIf(!realPiAvailable)("real pi RPC: tools.<name>.enabled", () => {
 	// #2889 recurrence: pi rebuilds the extension factory on reload, so a
 	// closure-local activation set loses the model's lazy-tool posture.
-	it("restores lazy activation after the real extension factory reloads", async () => {
-		await withRealPi(
-			{
-				fixture: "scenario-1",
-				script: "lazy-activation-reload.json",
-				extensions: [
-					fileURLToPath(
-						new URL(
-							"../fixtures/real-harness/reload-extension.mjs",
-							import.meta.url,
+	it(
+		"restores lazy activation after the real extension factory reloads",
+		async () => {
+			await withRealPi(
+				{
+					fixture: "scenario-1",
+					script: "lazy-activation-reload.json",
+					extensions: [
+						fileURLToPath(
+							new URL(
+								"../fixtures/real-harness/reload-extension.mjs",
+								import.meta.url,
+							),
 						),
-					),
-				],
-				env: { PI_LENS_TEST_MODE: "0" },
-			},
-			async (pi) => {
-				await pi.prompt("activate a lazy tool");
-				await pi.awaitAssistantTurn();
-				const before = pi.providerObservations().at(0)?.tools;
-				expect(
-					(Array.isArray(before) ? before : []).some(
-						(tool) => (tool as { name?: string }).name === "ast_grep_search",
-					),
-				).toBe(false);
-				await pi.awaitToolResult("pi_lens_activate_tools");
-				await pi.awaitAssistantTurn();
-				const activated = pi.providerObservations().at(-1)?.tools;
-				expect(
-					(Array.isArray(activated) ? activated : []).some(
-						(tool) => (tool as { name?: string }).name === "ast_grep_search",
-					),
-				).toBe(true);
+					],
+					env: { PI_LENS_TEST_MODE: "0" },
+				},
+				async (pi) => {
+					await pi.prompt("activate a lazy tool");
+					await pi.awaitAssistantTurn();
+					const before = pi.providerObservations().at(0)?.tools;
+					expect(
+						(Array.isArray(before) ? before : []).some(
+							(tool) => (tool as { name?: string }).name === "ast_grep_search",
+						),
+					).toBe(false);
+					await pi.awaitToolResult("pi_lens_activate_tools");
+					await pi.awaitAssistantTurn();
+					const activated = pi.providerObservations().at(-1)?.tools;
+					expect(
+						(Array.isArray(activated) ? activated : []).some(
+							(tool) => (tool as { name?: string }).name === "ast_grep_search",
+						),
+					).toBe(true);
 
-				await pi.prompt("/real-harness-reload");
-				await pi.prompt("observe the restored tool set");
-				await pi.awaitAssistantTurn();
-				const restored = pi.providerObservations().at(-1)?.tools;
-				expect(
-					(Array.isArray(restored) ? restored : []).some(
-						(tool) => (tool as { name?: string }).name === "ast_grep_search",
-					),
-				).toBe(true);
+					await pi.prompt("/real-harness-reload");
+					await pi.prompt("observe the restored tool set");
+					await pi.awaitAssistantTurn();
+					const restored = pi.providerObservations().at(-1)?.tools;
+					expect(
+						(Array.isArray(restored) ? restored : []).some(
+							(tool) => (tool as { name?: string }).name === "ast_grep_search",
+						),
+					).toBe(true);
 
-				const restores = () =>
-					pi.lens
-						.latencyRows()
-						.filter(
-							(row) =>
-								row.phase === "tool_set_mutation" &&
-								(row.metadata as { reason?: string })?.reason ===
-									"session_rebuild_restore",
-						);
-				await expect.poll(() => restores().length, { timeout: 5_000 }).toBe(1);
-				const restoreRows = restores();
-				expect(restoreRows).toHaveLength(1);
-				expect(restoreRows[0]?.metadata).toMatchObject({
-					reason: "session_rebuild_restore",
-					addedCount: expect.any(Number),
-					removedCount: expect.any(Number),
-				});
-			},
-		);
-	}, 60_000);
+					const restores = () =>
+						pi.lens
+							.latencyRows()
+							.filter(
+								(row) =>
+									row.phase === "tool_set_mutation" &&
+									(row.metadata as { reason?: string })?.reason ===
+										"session_rebuild_restore",
+							);
+					await expect
+						.poll(() => restores().length, { timeout: 5_000 })
+						.toBe(1);
+					const restoreRows = restores();
+					expect(restoreRows).toHaveLength(1);
+					expect(restoreRows[0]?.metadata).toMatchObject({
+						reason: "session_rebuild_restore",
+						addedCount: expect.any(Number),
+						removedCount: expect.any(Number),
+					});
+				},
+			);
+		},
+		scaledTestTimeout(60_000),
+	);
 
 	// #4634: these five cases spawn a real pi child and wait for its RPC turn —
-	// the same shape as the four siblings that already declare 60 s — but they
-	// ran on vitest's 5 s default. Measured 701-788 ms on an idle host, and
-	// 3,051-8,666 ms under load average 50-80 (up to 173% of the default, a
-	// timeout five times in nothing but its own budget). Each now declares the
-	// 60 s its siblings declare, through `scaledTestTimeout` so a lane that sets
-	// PI_LENS_TEST_TIMEOUT_SCALE widens it with the rest of the suite.
+	// the same shape as the four siblings above and below, which declared a raw
+	// 60 s — but they ran on vitest's 5 s default. Measured 701-788 ms on an idle
+	// host, and 3,051-8,666 ms under load average 50-80 (up to 173% of the
+	// default, a timeout five times in nothing but its own budget). Each now
+	// declares the 60 s its siblings declare, through `scaledTestTimeout` so a
+	// lane that sets PI_LENS_TEST_TIMEOUT_SCALE widens it with the rest of the
+	// suite; the four raw siblings were converted to the same spelling, so the
+	// file has one budget and every case in it scales with the lane.
 
 	it(
 		"omits a project-disabled tool from pi's wire roster and records it once",
@@ -171,91 +179,105 @@ describe.skipIf(!realPiAvailable)("real pi RPC: tools.<name>.enabled", () => {
 		scaledTestTimeout(60_000),
 	);
 
-	it("renders the session-start orientation from the enabled tool set (#2967)", async () => {
-		await withRealPi(
-			{
-				fixture: "tools-guidance",
-				script: "script.json",
-				env: { PI_LENS_TEST_MODE: "0" },
-			},
-			async (pi) => {
-				// A second start in this process runs full mode, which is where the
-				// orientation is published (the first start protects TUI latency).
-				await pi.newSession();
-				await pi.prompt("read the session-start orientation");
-				await pi.awaitAssistantTurn();
-				const text = orientationText(pi);
-				expect(text).toContain("pi-lens active");
-				// Every disabled tool is never mentioned ...
-				expect(text).not.toMatch(/\bsymbol_search\b/);
-				expect(text).not.toMatch(/\bmodule_report\b/);
-				expect(text).not.toMatch(/\bread_enclosing\b/);
-				// ... while the tool that stayed enabled is still advertised.
-				expect(text).toContain("read_symbol");
-				expect(text).toContain("lens_diagnostics");
-			},
-		);
-	}, 60_000);
+	it(
+		"renders the session-start orientation from the enabled tool set (#2967)",
+		async () => {
+			await withRealPi(
+				{
+					fixture: "tools-guidance",
+					script: "script.json",
+					env: { PI_LENS_TEST_MODE: "0" },
+				},
+				async (pi) => {
+					// A second start in this process runs full mode, which is where the
+					// orientation is published (the first start protects TUI latency).
+					await pi.newSession();
+					await pi.prompt("read the session-start orientation");
+					await pi.awaitAssistantTurn();
+					const text = orientationText(pi);
+					expect(text).toContain("pi-lens active");
+					// Every disabled tool is never mentioned ...
+					expect(text).not.toMatch(/\bsymbol_search\b/);
+					expect(text).not.toMatch(/\bmodule_report\b/);
+					expect(text).not.toMatch(/\bread_enclosing\b/);
+					// ... while the tool that stayed enabled is still advertised.
+					expect(text).toContain("read_symbol");
+					expect(text).toContain("lens_diagnostics");
+				},
+			);
+		},
+		scaledTestTimeout(60_000),
+	);
 
-	it("keeps the orientation byte-stable for the default config (#2967)", async () => {
-		await withRealPi(
-			{
-				fixture: "scenario-1",
-				script: "script.json",
-				env: { PI_LENS_TEST_MODE: "0" },
-			},
-			async (pi) => {
-				await pi.newSession();
-				await pi.prompt("read the session-start orientation");
-				await pi.awaitAssistantTurn();
-				const text = orientationText(pi);
-				expect(text).toContain(
-					"symbol_search → module_report → read_symbol/read_enclosing — ranked identifier search, then navigable outline/callback handles + exact body reads; cheaper than reading a whole file before editing.",
-				);
-				expect(text).toContain(
-					"blocking errors (including pre-existing) show inline and must be fixed.",
-				);
-			},
-		);
-	}, 60_000);
-
-	it("scopes the config-driven fix demand from the global config on the wire (#2967)", async () => {
-		// The key is global-only, so it reaches the child through the global
-		// config override, not a project `.pi-lens.json`. This is the load ->
-		// handleSessionStart -> orientation path the pure renderer test cannot
-		// connect.
-		const configRoot = mkdtempSync(join(tmpdir(), "pi-lens-2967-scoped-"));
-		const configPath = join(configRoot, "config.json");
-		writeFileSync(
-			configPath,
-			JSON.stringify({ contextInjection: { requirePreExistingFixes: false } }),
-		);
-		try {
+	it(
+		"keeps the orientation byte-stable for the default config (#2967)",
+		async () => {
 			await withRealPi(
 				{
 					fixture: "scenario-1",
 					script: "script.json",
-					env: {
-						PI_LENS_TEST_MODE: "0",
-						PI_LENS_CONFIG_PATH: configPath,
-					},
+					env: { PI_LENS_TEST_MODE: "0" },
 				},
 				async (pi) => {
 					await pi.newSession();
-					await pi.prompt("read the scoped session-start orientation");
+					await pi.prompt("read the session-start orientation");
 					await pi.awaitAssistantTurn();
 					const text = orientationText(pi);
-					expect(text).toContain("pi-lens active");
 					expect(text).toContain(
-						"blocking errors you introduce must be fixed; pre-existing ones are only reported.",
+						"symbol_search → module_report → read_symbol/read_enclosing — ranked identifier search, then navigable outline/callback handles + exact body reads; cheaper than reading a whole file before editing.",
 					);
-					expect(text).not.toContain("including pre-existing");
+					expect(text).toContain(
+						"blocking errors (including pre-existing) show inline and must be fixed.",
+					);
 				},
 			);
-		} finally {
-			removeTempDirSync(configRoot);
-		}
-	}, 60_000);
+		},
+		scaledTestTimeout(60_000),
+	);
+
+	it(
+		"scopes the config-driven fix demand from the global config on the wire (#2967)",
+		async () => {
+			// The key is global-only, so it reaches the child through the global
+			// config override, not a project `.pi-lens.json`. This is the load ->
+			// handleSessionStart -> orientation path the pure renderer test cannot
+			// connect.
+			const configRoot = mkdtempSync(join(tmpdir(), "pi-lens-2967-scoped-"));
+			const configPath = join(configRoot, "config.json");
+			writeFileSync(
+				configPath,
+				JSON.stringify({
+					contextInjection: { requirePreExistingFixes: false },
+				}),
+			);
+			try {
+				await withRealPi(
+					{
+						fixture: "scenario-1",
+						script: "script.json",
+						env: {
+							PI_LENS_TEST_MODE: "0",
+							PI_LENS_CONFIG_PATH: configPath,
+						},
+					},
+					async (pi) => {
+						await pi.newSession();
+						await pi.prompt("read the scoped session-start orientation");
+						await pi.awaitAssistantTurn();
+						const text = orientationText(pi);
+						expect(text).toContain("pi-lens active");
+						expect(text).toContain(
+							"blocking errors you introduce must be fixed; pre-existing ones are only reported.",
+						);
+						expect(text).not.toContain("including pre-existing");
+					},
+				);
+			} finally {
+				removeTempDirSync(configRoot);
+			}
+		},
+		scaledTestTimeout(60_000),
+	);
 
 	it(
 		"does not emit a disabled-tools note for the default config",
