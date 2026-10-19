@@ -756,7 +756,19 @@ async function runColumn(column: Column): Promise<Record<RouteId, Cell>> {
 			// reports these writes produced: another dispatch of the same file can
 			// land inside this window under load and plan no `lsp` runner at all,
 			// which #4634 captured as `runner rows skipped,,skipped,skipped` at
-			// load 74.
+			// load 74. #4634's review (F1) could not prove that filter through
+			// `scripts/mutate.mjs`, which blanks the `"lsp"` literal before it
+			// searches, so this case drives the off-plan dispatch itself: with the
+			// runner flag set, dispatch planning drops every `lsp` runner
+			// (`withPrimaryPolicyGroup`), the write still produces a latency report
+			// with no `lsp` row, and the filter is what keeps that missing row from
+			// standing in for one of the three writes above.
+			pi.setFlag("no-lsp", true);
+			try {
+				await write("write", 4);
+			} finally {
+				pi.setFlag("no-lsp", false);
+			}
 			const rows = getLatencyReports()
 				.filter(
 					(report) =>
