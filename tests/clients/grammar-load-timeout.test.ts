@@ -578,4 +578,62 @@ describe("Language.load bound (#4224)", () => {
 		expect(notices[0]?.message).toContain("approve-builds");
 		expect(grammarLedgerReason()).toContain("runtime grammar download failed");
 	});
+
+	// The watch's own handler runs where no caller can catch a throw. A late
+	// abort reaches the host's `onWasmAbort`, and a host callback that throws
+	// rejects the promise `.then` returns, which nothing holds. Under Node's
+	// default `--unhandled-rejections=throw` that ends the process, a worse
+	// outcome than the latch the watch exists to reach. On time the same throw
+	// goes to the caller of `loadLanguage`; late it has no caller, so it is
+	// logged, not swallowed. The record is read out of the real `tree-sitter.log`,
+	// like the other log cases here: a spy would only prove what the client handed
+	// to the logger.
+	it("logs a throw from the late-abort latch rather than leaving an unhandled rejection", async () => {
+		const late = lateLoad();
+		const { client } = await makeClient(late.load);
+		const onWasmAbort = vi.fn(() => {
+			throw new Error("host callback failed");
+		});
+		client.onWasmAbort = onWasmAbort;
+		writeRealLog();
+		const baseline = await treeSitterRowCount();
+		const unhandled: unknown[] = [];
+		const onUnhandled = (reason: unknown): void => {
+			unhandled.push(reason);
+		};
+		process.on("unhandledRejection", onUnhandled);
+		vi.useFakeTimers();
+		try {
+			const pending = client.loadLanguage("python");
+			await vi.advanceTimersByTimeAsync(GRAMMAR_LOAD_TIMEOUT_MS);
+			expect(await peek(pending)).toBeNull();
+
+			late.reject(abortError());
+			await vi.advanceTimersByTimeAsync(0);
+			// The throw must have happened for the guard to mean anything: a
+			// callback that never ran would pass the checks below vacuously.
+			expect(onWasmAbort).toHaveBeenCalledTimes(1);
+
+			// Node delivers `unhandledRejection` on a real macrotask; fake timers
+			// never fire it, so drain one real tick.
+			vi.useRealTimers();
+			await new Promise((resolve) => setImmediate(resolve));
+		} finally {
+			process.off("unhandledRejection", onUnhandled);
+		}
+
+		expect(unhandled.map(String)).toEqual([]);
+		const handlerFailed = (await treeSitterRowsSince(baseline)).filter(
+			(row) => row.metadata?.outcome === "late-load-handler-failed",
+		);
+		expect(handlerFailed).toHaveLength(1);
+		expect(handlerFailed[0]?.status).toBe("warn");
+		expect(handlerFailed[0]?.reason).toContain("host callback failed");
+		expect(handlerFailed[0]?.reason).toContain(GRAMMAR_FILE);
+		expect(handlerFailed[0]?.metadata).toMatchObject({
+			grammarFile: GRAMMAR_FILE,
+		});
+		// The latch was set before the callback ran, so the throw cost it nothing.
+		expect(client.wasmAborted).toBe(true);
+	});
 });

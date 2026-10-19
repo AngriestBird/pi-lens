@@ -1800,39 +1800,57 @@ export class TreeSitterClient {
 	 *
 	 * One abandoned load has one watch, so a late settle is one record however
 	 * many callers joined the build that started it.
+	 *
+	 * No caller awaits the watch, so it ends in a logging catch: a handler that
+	 * throws (the host's `onWasmAbort` can) is written to `tree-sitter.log`
+	 * rather than escaping as an unhandled rejection.
 	 */
 	private observeAbandonedLoad(
 		loading: Promise<TreeSitterLanguage>,
 		grammarPath: string,
 		grammarFile: string,
 	): void {
-		loading.then(
-			() => {
-				this.dbg(
-					`Abandoned Language.load for ${grammarFile} succeeded after the bound; ignored`,
-				);
-			},
-			(late: unknown) => {
-				const message = late instanceof Error ? late.message : String(late);
+		loading
+			.then(
+				() => {
+					this.dbg(
+						`Abandoned Language.load for ${grammarFile} succeeded after the bound; ignored`,
+					);
+				},
+				(late: unknown) => {
+					const message = late instanceof Error ? late.message : String(late);
+					logTreeSitterDiagnostic({
+						subsystem: "tree-sitter-client",
+						level: "warn",
+						message:
+							`Language.load for ${grammarPath} settled after its ${GRAMMAR_LOAD_TIMEOUT_MS}ms ` +
+							`bound and failed (${message}).`,
+						metadata: { grammarFile, outcome: "late-load-failed" },
+					});
+					if (classifyTreeSitterWasmError(late) === "abort") {
+						this.reportWasmAbort(late);
+					} else {
+						incrementDegradationCount({
+							kind: "grammar-blocked",
+							subject: grammarFile,
+							reason: `Language.load failed after its ${GRAMMAR_LOAD_TIMEOUT_MS}ms bound (${message}).`,
+						});
+					}
+				},
+			)
+			// No caller awaits this chain, so a throw from either handler (the host's
+			// `onWasmAbort` is the live source) would be an unhandled rejection, which
+			// ends the process under Node's default. Log it with the grammar's name.
+			.catch((handlerErr: unknown) => {
+				const message =
+					handlerErr instanceof Error ? handlerErr.message : String(handlerErr);
 				logTreeSitterDiagnostic({
 					subsystem: "tree-sitter-client",
 					level: "warn",
-					message:
-						`Language.load for ${grammarPath} settled after its ${GRAMMAR_LOAD_TIMEOUT_MS}ms ` +
-						`bound and failed (${message}).`,
-					metadata: { grammarFile, outcome: "late-load-failed" },
+					message: `The late-settle handler for Language.load of ${grammarPath} threw (${message}).`,
+					metadata: { grammarFile, outcome: "late-load-handler-failed" },
 				});
-				if (classifyTreeSitterWasmError(late) === "abort") {
-					this.reportWasmAbort(late);
-				} else {
-					incrementDegradationCount({
-						kind: "grammar-blocked",
-						subject: grammarFile,
-						reason: `Language.load failed after its ${GRAMMAR_LOAD_TIMEOUT_MS}ms bound (${message}).`,
-					});
-				}
-			},
-		);
+			});
 	}
 
 	/** Initialize tree-sitter WASM runtime */
