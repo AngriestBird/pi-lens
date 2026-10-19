@@ -1047,11 +1047,12 @@ export function compileLspRegistry(
 	}
 
 	// #3952: the CATALOG ENTRY ITSELF for a server with no command override,
-	// never a copy. `compiledRegistry`'s list is what `getServersForFileWithConfig`
-	// hands the service, and the service keeps that object for the client's whole
-	// lifetime (`SpawnedServer.info` → `scheduleIdleEviction`, `spawn`). A copy
-	// makes the list a second registry whose entries look identical but answer
-	// for nothing: the nightly idle-eviction probe arms `server.idleEviction` on
+	// never a copy. `compileLspRegistry`'s list is what
+	// `getServersForFileWithConfig` hands the service, and the service keeps
+	// that object for the client's whole lifetime (`SpawnedServer.info` →
+	// `scheduleIdleEviction`, `spawn`). A copy makes the list a second registry
+	// whose entries look identical but answer for nothing: the nightly
+	// idle-eviction probe arms `server.idleEviction` on
 	// the object `LSP_SERVERS`/`getServerById` exposes (#3645), and from
 	// 2026-10-10 (when this branch began copying) that arm never reached
 	// `scheduleIdleEviction`, so every candidate read `not-evicted` and no server
