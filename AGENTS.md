@@ -982,7 +982,7 @@ file-scoped worklist and receives no project-wide scanner output.
   exposes; an overridden server keeps its own copy so its `spawn` and trust
   admission never reach the catalog. A copy here is not a safe container: it is
   a second registry whose entries swallow every arm a caller applies to the
-  first, which is how the nightly probe read `not-evicted` for nine nights.
+  first (history: `HISTORY.md`, 2026-10-19).
   `tests/clients/lsp/lsp-registry-trust.test.ts` pins both directions;
   `scheduleIdleEviction` records `lsp-idle-eviction-declined` once per server
   per session when it arms no timer.
