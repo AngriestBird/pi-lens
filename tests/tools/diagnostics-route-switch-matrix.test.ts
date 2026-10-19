@@ -729,8 +729,10 @@ async function runColumn(column: Column): Promise<Record<RouteId, Cell>> {
 
 		await cell("write-time dispatch", async () => {
 			clearLatencyReports();
+			const written: string[] = [];
 			const write = async (relative: string, n: number): Promise<string> => {
 				const target = fx.file(relative, n);
+				written.push(target);
 				const result = (await pi.emit(
 					"tool_result",
 					{
@@ -750,15 +752,39 @@ async function runColumn(column: Column): Promise<Record<RouteId, Cell>> {
 				await write("write", 2),
 				await write("write-2", 3),
 			];
-			// The runner row agrees with what the agent was shown.
-			const rows = getLatencyReports().map(
-				(report) =>
-					report.runners.find((runner) => runner.runnerId === "lsp")?.status,
-			);
+			// The runner row agrees with what the agent was shown. Judge only the
+			// reports these writes produced: another dispatch of the same file can
+			// land inside this window under load and plan no `lsp` runner at all,
+			// which #4634 captured as `runner rows skipped,,skipped,skipped` at
+			// load 74. #4634's review (F1) could not prove that filter through
+			// `scripts/mutate.mjs`, which blanks the `"lsp"` literal before it
+			// searches, so this case drives the off-plan dispatch itself: with the
+			// runner flag set, dispatch planning drops every `lsp` runner
+			// (`withPrimaryPolicyGroup`), the write still produces a latency report
+			// with no `lsp` row, and the filter is what keeps that missing row from
+			// standing in for one of the three writes above.
+			pi.setFlag("no-lsp", true);
+			try {
+				await write("write", 4);
+			} finally {
+				pi.setFlag("no-lsp", false);
+			}
+			const rows = getLatencyReports()
+				.filter(
+					(report) =>
+						written.includes(report.filePath) &&
+						report.runners.some((runner) => runner.runnerId === "lsp"),
+				)
+				.map(
+					(report) =>
+						report.runners.find((runner) => runner.runnerId === "lsp")?.status,
+				);
 			const verdict = writeTimeVerdict(outcomes);
-			const rowsAgree = rows.every((status) =>
-				verdict === "clean" ? status === "succeeded" : status === "skipped",
-			);
+			const rowsAgree =
+				rows.length >= outcomes.length &&
+				rows.every((status) =>
+					verdict === "clean" ? status === "succeeded" : status === "skipped",
+				);
 			return {
 				verdict: rowsAgree ? verdict : `runner rows ${rows.join(",")}`,
 				lines: outcomes,
@@ -1406,150 +1432,173 @@ function auditRoutes(
 }
 
 describe("diagnostics routes are derived from code (#4403)", () => {
-	it("maps every LSPService diagnostics read to a matrix route or a reasoned exemption", () => {
-		const sources = productionSources();
-		const problems = auditRoutes(
-			sources.length,
-			deriveSites(sources),
-			SITE_REGISTRY,
-			ROUTES,
-		);
+	it(
+		"maps every LSPService diagnostics read to a matrix route or a reasoned exemption",
+		() => {
+			const sources = productionSources();
+			const problems = auditRoutes(
+				sources.length,
+				deriveSites(sources),
+				SITE_REGISTRY,
+				ROUTES,
+			);
 
-		expect(problems).toEqual([]);
-	});
+			expect(problems).toEqual([]);
+		},
+		scaledTestTimeout(60_000),
+	);
 
-	it("reds a new route the matrix does not drive, and never reads one from a comment or a string", () => {
-		// The fixture route: one real read, and two members named only in a
-		// comment and a string (#4403: prose must not add or satisfy a site).
-		const fixture: SourceFile = {
-			rel: "tools/fixture-new-route.ts",
-			source: [
-				"export async function newRoute(svc: any, file: string) {",
-				"\t// svc.touchFile(file, '', {}) is only prose here",
-				"\tconst note = 'svc.getAllDiagnostics()';",
-				"\treturn [note, await svc.getDiagnostics(file)];",
-				"}",
-				"",
-			].join("\n"),
-		};
+	it(
+		"reds a new route the matrix does not drive, and never reads one from a comment or a string",
+		() => {
+			// The fixture route: one real read, and two members named only in a
+			// comment and a string (#4403: prose must not add or satisfy a site).
+			const fixture: SourceFile = {
+				rel: "tools/fixture-new-route.ts",
+				source: [
+					"export async function newRoute(svc: any, file: string) {",
+					"\t// svc.touchFile(file, '', {}) is only prose here",
+					"\tconst note = 'svc.getAllDiagnostics()';",
+					"\treturn [note, await svc.getDiagnostics(file)];",
+					"}",
+					"",
+				].join("\n"),
+			};
 
-		const sites = deriveSites([fixture]);
-		const sources = productionSources();
-		const problems = auditRoutes(
-			sources.length,
-			[...deriveSites(sources), ...sites],
-			SITE_REGISTRY,
-			ROUTES,
-		);
+			const sites = deriveSites([fixture]);
+			const sources = productionSources();
+			const problems = auditRoutes(
+				sources.length,
+				[...deriveSites(sources), ...sites],
+				SITE_REGISTRY,
+				ROUTES,
+			);
 
-		expect(sites.map((site) => site.key)).toEqual([
-			"tools/fixture-new-route.ts#newRoute:getDiagnostics",
-		]);
-		expect(problems.join("\n")).toContain(
-			"tools/fixture-new-route.ts#newRoute:getDiagnostics (tools/fixture-new-route.ts:4)",
-		);
-	});
+			expect(sites.map((site) => site.key)).toEqual([
+				"tools/fixture-new-route.ts#newRoute:getDiagnostics",
+			]);
+			expect(problems.join("\n")).toContain(
+				"tools/fixture-new-route.ts#newRoute:getDiagnostics (tools/fixture-new-route.ts:4)",
+			);
+		},
+		scaledTestTimeout(60_000),
+	);
 
-	it("fails closed on a spelling it cannot read as a site (#4403 F3)", () => {
-		// The review's five spellings that each derived no site in round 2,
-		// and a local of the same name that is not bound to a member access. A
-		// renamed destructure and a literal subscript are sites; a name kept in
-		// a variable, passed to Reflect, or bound to something else is
-		// unclassified, as is any other node kind that carries the name (an
-		// enum member, a type name). Either reds until it is mapped or exempted. A
-		// definition and a type-level name do not.
-		const spellings: Record<string, string> = {
-			renamedDestructure:
-				"export function r(svc: any, f: string) {\n\tconst { touchFile: t } = svc;\n\treturn t(f, '', {});\n}\n",
-			paramDestructureRenamed:
-				"export function r(\n\t{ getDiagnostics: g }: any,\n\tf: string,\n) {\n\treturn g(f);\n}\n",
-			bracket:
-				"export function r(svc: any, f: string) {\n\treturn svc['touchFile'](f, '', {});\n}\n",
-			computedKey:
-				"export function r(svc: any, f: string) {\n\tconst M = 'getDiagnostics';\n\treturn svc[M](f);\n}\n",
-			reflect:
-				"export function r(svc: any, f: string) {\n\treturn Reflect.get(svc, 'getDiagnostics').call(svc, f);\n}\n",
-			enumMember: "export enum E {\n\ttouchFile = 1,\n}\n",
-			typeNamed: "export type getDiagnostics = (f: string) => void;\n",
-			aliasFromCall:
-				"export function r(svc: any, f: string) {\n\tconst getDiagnostics = pick(svc);\n\treturn getDiagnostics(f);\n}\n",
-			definitionsOnly:
-				"interface S { touchFile(f: string): void }\nexport function r(): Pick<S, 'touchFile'> {\n\treturn { touchFile() {} };\n}\n",
-		};
-		const derived = Object.fromEntries(
-			Object.entries(spellings).map(([name, source]) => [
-				name,
-				deriveSites([{ rel: `tools/${name}.ts`, source }]).map(
-					(site) => site.key,
-				),
-			]),
-		);
+	it(
+		"fails closed on a spelling it cannot read as a site (#4403 F3)",
+		() => {
+			// The review's five spellings that each derived no site in round 2,
+			// and a local of the same name that is not bound to a member access. A
+			// renamed destructure and a literal subscript are sites; a name kept in
+			// a variable, passed to Reflect, or bound to something else is
+			// unclassified, as is any other node kind that carries the name (an
+			// enum member, a type name). Either reds until it is mapped or exempted. A
+			// definition and a type-level name do not.
+			const spellings: Record<string, string> = {
+				renamedDestructure:
+					"export function r(svc: any, f: string) {\n\tconst { touchFile: t } = svc;\n\treturn t(f, '', {});\n}\n",
+				paramDestructureRenamed:
+					"export function r(\n\t{ getDiagnostics: g }: any,\n\tf: string,\n) {\n\treturn g(f);\n}\n",
+				bracket:
+					"export function r(svc: any, f: string) {\n\treturn svc['touchFile'](f, '', {});\n}\n",
+				computedKey:
+					"export function r(svc: any, f: string) {\n\tconst M = 'getDiagnostics';\n\treturn svc[M](f);\n}\n",
+				reflect:
+					"export function r(svc: any, f: string) {\n\treturn Reflect.get(svc, 'getDiagnostics').call(svc, f);\n}\n",
+				enumMember: "export enum E {\n\ttouchFile = 1,\n}\n",
+				typeNamed: "export type getDiagnostics = (f: string) => void;\n",
+				aliasFromCall:
+					"export function r(svc: any, f: string) {\n\tconst getDiagnostics = pick(svc);\n\treturn getDiagnostics(f);\n}\n",
+				definitionsOnly:
+					"interface S { touchFile(f: string): void }\nexport function r(): Pick<S, 'touchFile'> {\n\treturn { touchFile() {} };\n}\n",
+			};
+			const derived = Object.fromEntries(
+				Object.entries(spellings).map(([name, source]) => [
+					name,
+					deriveSites([{ rel: `tools/${name}.ts`, source }]).map(
+						(site) => site.key,
+					),
+				]),
+			);
 
-		expect(derived).toEqual({
-			renamedDestructure: ["tools/renamedDestructure.ts#r:touchFile"],
-			paramDestructureRenamed: [
-				"tools/paramDestructureRenamed.ts#r:getDiagnostics",
-			],
-			bracket: ["tools/bracket.ts#r:touchFile"],
-			computedKey: ['tools/computedKey.ts#r:"getDiagnostics"'],
-			reflect: ['tools/reflect.ts#r:"getDiagnostics"'],
-			enumMember: ['tools/enumMember.ts#(top level):"touchFile"'],
-			typeNamed: ['tools/typeNamed.ts#(top level):"getDiagnostics"'],
-			aliasFromCall: [
-				'tools/aliasFromCall.ts#r:"getDiagnostics"',
-				'tools/aliasFromCall.ts#r:"getDiagnostics"',
-			],
-			definitionsOnly: [],
-		});
-	});
+			expect(derived).toEqual({
+				renamedDestructure: ["tools/renamedDestructure.ts#r:touchFile"],
+				paramDestructureRenamed: [
+					"tools/paramDestructureRenamed.ts#r:getDiagnostics",
+				],
+				bracket: ["tools/bracket.ts#r:touchFile"],
+				computedKey: ['tools/computedKey.ts#r:"getDiagnostics"'],
+				reflect: ['tools/reflect.ts#r:"getDiagnostics"'],
+				enumMember: ['tools/enumMember.ts#(top level):"touchFile"'],
+				typeNamed: ['tools/typeNamed.ts#(top level):"getDiagnostics"'],
+				aliasFromCall: [
+					'tools/aliasFromCall.ts#r:"getDiagnostics"',
+					'tools/aliasFromCall.ts#r:"getDiagnostics"',
+				],
+				definitionsOnly: [],
+			});
+		},
+		scaledTestTimeout(60_000),
+	);
 
 	// Also the rename guard: an entry member that is no longer a method fails
 	// the equality, so the scan cannot keep looking for a name nothing calls.
-	it("places every public LSPService method as a diagnostics entry or not (#4403 N5)", () => {
-		expect(lspServicePublicMethods()).toEqual(
-			[...DIAGNOSTICS_ENTRY_MEMBERS, ...Object.keys(NON_ENTRY_MEMBERS)].sort(),
-		);
-	});
+	it(
+		"places every public LSPService method as a diagnostics entry or not (#4403 N5)",
+		() => {
+			expect(lspServicePublicMethods()).toEqual(
+				[
+					...DIAGNOSTICS_ENTRY_MEMBERS,
+					...Object.keys(NON_ENTRY_MEMBERS),
+				].sort(),
+			);
+		},
+		scaledTestTimeout(60_000),
+	);
 
-	it("keeps the MCP --no-opengrep cell inapplicable only while the flag has no environment spelling", () => {
-		// createMcpHost resolves env, then config; a CLI-only flag cannot reach it.
-		expect(getLensFlagSpec("no-opengrep")?.env).toBeUndefined();
-	});
+	it(
+		"keeps the MCP --no-opengrep cell inapplicable only while the flag has no environment spelling",
+		() => {
+			// createMcpHost resolves env, then config; a CLI-only flag cannot reach it.
+			expect(getLensFlagSpec("no-opengrep")?.env).toBeUndefined();
+		},
+		scaledTestTimeout(10_000),
+	);
 });
 
 // #4403: the matrix's disabled and missing columns each have one cause. A file
 // whose primaries mix the two must not be told only one of them, and the cause
 // comes from the read's own record, never from a second look at config.
 describe("the primary-unavailable note's cause (#4403)", () => {
-	it("names a disabled primary, an unstarted one, and both when they mix", async () => {
-		const { describePrimaryUnavailable } =
-			await import("../../tools/lsp-diagnostics.js");
-		const note = (ids: string[], disabled: string[]) =>
-			describePrimaryUnavailable(undefined, {
-				unavailablePrimaryServerIds: ids,
-				disabledPrimaryServerIds: disabled,
-			})?.text ?? "";
+	it(
+		"names a disabled primary, an unstarted one, and both when they mix",
+		async () => {
+			const { describePrimaryUnavailable } =
+				await import("../../tools/lsp-diagnostics.js");
+			const note = (ids: string[], disabled: string[]) =>
+				describePrimaryUnavailable(undefined, {
+					unavailablePrimaryServerIds: ids,
+					disabledPrimaryServerIds: disabled,
+				})?.text ?? "";
 
-		expect(note(["json"], ["json"])).toContain(
-			"(it is disabled in config by lsp.disabledServers)",
-		);
-		expect(note(["yaml"], [])).toContain(
-			"(it could not be started, or was still starting)",
-		);
-		expect(note(["json", "yaml"], ["json"])).toContain(
-			"(it could not be started, was still starting, or is disabled in config by lsp.disabledServers)",
-		);
-	});
+			expect(note(["json"], ["json"])).toContain(
+				"(it is disabled in config by lsp.disabledServers)",
+			);
+			expect(note(["yaml"], [])).toContain(
+				"(it could not be started, or was still starting)",
+			);
+			expect(note(["json", "yaml"], ["json"])).toContain(
+				"(it could not be started, was still starting, or is disabled in config by lsp.disabledServers)",
+			);
+		},
+		scaledTestTimeout(10_000),
+	);
 
 	// #4403 F7: review r1 read the raw `server.root` detectors, found rust
 	// rootless outside a crate, and asked that a disabled primary be named only
 	// where it would root. The service's own root rule has a marker fallback
 	// (#3750), so an enabled rust IS tried for a `.rs` file outside any crate,
 	// and named when it does not answer. A disabled one is named exactly there.
-	// Two full service lifecycles cost 4.9s at HEAD and 5.0s at origin/master
-	// (measured 2026-10-19), each at vitest's 5s default: the cell redded
-	// `Test timed out in 5000ms` on three lanes that day. The budget below is
-	// the one every other heavy cell in this file declares.
 	it(
 		"names a disabled primary exactly where an enabled one that cannot start is named",
 		async () => {
@@ -1613,26 +1662,30 @@ describe("the primary-unavailable note's cause (#4403)", () => {
 				else process.env.PI_LENS_DISABLE_LSP_INSTALL = savedInstall;
 			}
 		},
-		scaledTestTimeout(60_000),
+		scaledTestTimeout(120_000),
 	);
 });
 
 // #4403 F5: the reader scored `ok:false, status:no_server` clean, so the
 // navigation cell of a primary disabled with no auxiliary read as agreeing.
 describe("the navigation reader (#4403)", () => {
-	it("never scores an envelope that did not answer as clean", () => {
-		const noServer = JSON.stringify({
-			tool: "lsp_navigation",
-			operation: "workspaceDiagnostics",
-			ok: false,
-			status: "no_server",
-			resultCount: 0,
-		});
+	it(
+		"never scores an envelope that did not answer as clean",
+		() => {
+			const noServer = JSON.stringify({
+				tool: "lsp_navigation",
+				operation: "workspaceDiagnostics",
+				ok: false,
+				status: "no_server",
+				resultCount: 0,
+			});
 
-		expect(navigationVerdict(`${noServer}\n\nresult error`)).toBe(
-			"unconfirmed",
-		);
-	});
+			expect(navigationVerdict(`${noServer}\n\nresult error`)).toBe(
+				"unconfirmed",
+			);
+		},
+		scaledTestTimeout(10_000),
+	);
 });
 
 // #4403 round 4 (N4): hover and documentSymbol gate on `supportsLSP` alone,
@@ -1784,13 +1837,17 @@ describe("every diagnostics route under every server-selecting switch (#4403)", 
 		);
 	}
 
-	it("declares inapplicable cells only for a real route and column", () => {
-		const columns = new Set<string>(COLUMNS.map((column) => column.id));
-		for (const row of NOT_APPLICABLE) {
-			expect(ROUTES).toContain(row.route);
-			expect(columns.has(row.column)).toBe(true);
-		}
-		for (const route of Object.keys(NO_VERDICT_SURFACE))
-			expect(ROUTES).toContain(route);
-	});
+	it(
+		"declares inapplicable cells only for a real route and column",
+		() => {
+			const columns = new Set<string>(COLUMNS.map((column) => column.id));
+			for (const row of NOT_APPLICABLE) {
+				expect(ROUTES).toContain(row.route);
+				expect(columns.has(row.column)).toBe(true);
+			}
+			for (const route of Object.keys(NO_VERDICT_SURFACE))
+				expect(ROUTES).toContain(route);
+		},
+		scaledTestTimeout(10_000),
+	);
 });

@@ -181,6 +181,8 @@ const SPAWN_EXEMPTIONS: Readonly<Record<string, string>> = {
 		"real handshakes at two roots proving per-root client attribution; the assertion is the side table, not a timing budget",
 	"tests/clients/lsp/idle-eviction-enabled-servers.test.ts":
 		"#3952 caller witness: every spawn seam is doubled (all LSP_SERVERS.spawn implementations and createLSPClient are mocked) and the shared idle timer runs on a fake clock, so no real LSP child is launched; the registry lookup only establishes object identity, and the assertions are the shutdown call and the respawned client generation, not a handshake-plus-diagnostics budget",
+	"tests/clients/lsp/lsp-registry-trust.test.ts":
+		"#3952 identity witness: the registry lookup only reads the catalog object and `clients/lsp/launch.js` is mocked whole-module, so no LSP child, handshake or diagnostics wait exists for a fork storm to starve",
 	// NB: these reasons must NOT spell the fixture's own name — this file
 	// self-excludes by splitting that literal at runtime, so writing it out
 	// here would make the sweep flag itself.

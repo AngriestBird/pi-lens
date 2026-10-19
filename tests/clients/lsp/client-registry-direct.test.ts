@@ -846,17 +846,21 @@ describe("ClientRegistry.makeCapacityForClient (#4449)", () => {
 
 describe("ClientRegistry.scheduleIdleEviction (#4449)", () => {
 	const IDLE_MS = 1_000;
-	function idleFixture(info?: Record<string, unknown>) {
+	// #3952 review (F2): the server id is a parameter because the decline record
+	// latches on `(kind, subject = server.id)`. A shared `ts` fixture made two
+	// arms write under ONE subject, so a decline wrongly recorded on the second
+	// arm was swallowed by the first arm's latch and no assertion could see it.
+	function idleFixture(info?: Record<string, unknown>, serverId = "ts") {
 		process.env.PI_LENS_LSP_IDLE_EVICT_MS = String(IDLE_MS);
 		vi.useFakeTimers();
 		const { hooks, calls } = makeHooks();
 		const registry = new ClientRegistry(hooks);
-		const serverInfo = server("ts", {
+		const serverInfo = server(serverId, {
 			idleEviction: "transparent",
 			...info,
 		});
-		const client = fakeClient("ts", "/r");
-		const key = "ts:/r";
+		const client = fakeClient(serverId, "/r");
+		const key = `${serverId}:/r`;
 		registry.clients.set(key, client);
 		// Every production caller stamps last use before it arms the timer.
 		internals(registry).clientLastUsedAt.set(key, Date.now());
@@ -864,6 +868,10 @@ describe("ClientRegistry.scheduleIdleEviction (#4449)", () => {
 	}
 	const idleRecord = () =>
 		getDegradationSummary().find((g) => g.kind === "lsp-idle-eviction");
+	const declinedRecord = () =>
+		getDegradationSummary().find(
+			(g) => g.kind === "lsp-idle-eviction-declined",
+		);
 
 	// Recurrence: the timer callback is the ONLY thing standing between an idle
 	// language server and unbounded residency. It must retire synchronously, shut
@@ -929,18 +937,40 @@ describe("ClientRegistry.scheduleIdleEviction (#4449)", () => {
 	// Recurrence: only `transparent` servers are evicted on idle; every other
 	// policy stays resident (#3645). Adopted roots are evicted regardless, on the
 	// fixed adopted window rather than the configured one.
+	//
+	// #3952: the decline is also WRITTEN DOWN, once per server per session. A
+	// nightly probe that arms a server and then waits reads `not-evicted` from
+	// `scheduleIdleEviction`'s early return exactly like a server whose timer is
+	// merely slow; this row is the only place the two verdicts differ, and it
+	// must not fire for the adopted key below, which does arm a timer. The two
+	// arms carry DIFFERENT server ids (#3952 review F2), so the once-latch
+	// cannot hide a decline the adopted arm recorded under the resident id.
 	it("arms no timer for a resident server and an adopted-window timer for an adopted key", async () => {
 		const resident = idleFixture({ idleEviction: "resident" });
 		resident.registry.scheduleIdleEviction(resident.key, resident.serverInfo);
 		expect(vi.getTimerCount()).toBe(0);
+		expect(declinedRecord()?.count).toBe(1);
+		expect(declinedRecord()?.latestReasons[0]).toEqual({
+			subject: resident.serverInfo.id,
+			reason: "no idle-eviction timer: declared resident",
+		});
+		// A second touch of the same server is the same declaration: one row.
+		resident.registry.scheduleIdleEviction(resident.key, resident.serverInfo);
+		expect(declinedRecord()?.count).toBe(1);
 
-		const adopted = idleFixture({ idleEviction: "resident" });
+		const adopted = idleFixture({ idleEviction: "resident" }, "ts-adopted");
 		internals(adopted.registry).adoptedClientKeys.add(adopted.key);
 		adopted.registry.scheduleIdleEviction(adopted.key, adopted.serverInfo);
 		await vi.advanceTimersByTimeAsync(IDLE_MS); // the configured window
 		expect(adopted.client.shutdown).not.toHaveBeenCalled();
 		await vi.advanceTimersByTimeAsync(60_000 - IDLE_MS);
 		expect(adopted.client.shutdown).toHaveBeenCalledTimes(1);
+		// The adopted arm is a scheduled timer, never a decline: still one row,
+		// and the row still names only the resident server.
+		expect(declinedRecord()?.count).toBe(1);
+		expect(declinedRecord()?.latestReasons.map((row) => row.subject)).toEqual([
+			resident.serverInfo.id,
+		]);
 	});
 });
 

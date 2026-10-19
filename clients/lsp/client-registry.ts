@@ -732,8 +732,22 @@ export class ClientRegistry {
 		if (
 			server.idleEviction !== "transparent" &&
 			!this.adoptedClientKeys.has(key)
-		)
+		) {
+			// #3952: say why no timer was scheduled. Without this row a caller
+			// that ARMS an `unmeasured` server and waits for the eviction (the
+			// nightly probe's whole protocol) sees the same "nothing happened" as
+			// a server whose timer is merely slow, and the two are opposite
+			// verdicts: `not-evicted` here means the policy was never read off the
+			// object the service holds, which is a pi-lens defect, not a slow
+			// server. Once per server per session: the policy is a declaration, so
+			// one row per (server, session) carries every occurrence's verdict.
+			recordDegradationOnce({
+				kind: "lsp-idle-eviction-declined",
+				subject: server.id,
+				reason: `no idle-eviction timer: declared ${server.idleEviction ?? "unmeasured"}`,
+			});
 			return;
+		}
 		// Pressure-gating these timers would require a separate reconciliation pass
 		// when the manager crosses the threshold; keep ownership simple and use the
 		// warm-LSP-friendly 20-minute default instead.
