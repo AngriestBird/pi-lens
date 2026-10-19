@@ -847,6 +847,8 @@ export function captureRenameExpectedContent(
 		try {
 			targetRealPath = realpathSync.native(target.filePath);
 		} catch {
+			// none: an unresolvable target path matches no file, so it binds
+			// nothing and every file takes the rules below.
 			targetRealPath = undefined;
 		}
 	}
@@ -861,6 +863,8 @@ export function captureRenameExpectedContent(
 			// mtime, and one after it is caught by the apply-time comparison.
 			mtimeMs = statSync(realPath).mtimeMs;
 		} catch {
+			// none: a file that cannot be read is not bound here, matching every
+			// other expectedContent caller; the apply reports its own failure.
 			continue;
 		}
 		if (target !== undefined && realPath === targetRealPath) {
