@@ -45,7 +45,7 @@ describe("lsp language mapping", () => {
 		expect(getLanguageId("tsconfig.json5")).toBe("json");
 		expect(getLanguageId("mytconfig.json")).toBe("json");
 		expect(getLanguageId("tsconfigx.json")).toBe("json");
-		// The declared `*` segment is non-empty and single-segment.
+		// The declared `*` segment is non-empty: `tsconfig..json` has an empty one.
 		expect(getLanguageId("tsconfig..json")).toBe("json");
 		expect(getLanguageId("tsconfig/sub.json")).toBe("json");
 	});
