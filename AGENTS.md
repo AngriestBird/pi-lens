@@ -1041,8 +1041,7 @@ file-scoped worklist and receives no project-wide scanner output.
   LSP sync bound, the last LSP-addressable line an Incremental change spans,
   and one line's text (`lineTextAt`, which the diagnostic-conversion call
   sites read) all come from it. No other module splits document content to
-  count or read lines: a send, a bound check, and a line read ask this owner
-  (#2066).
+  count or read lines: a send, a bound check, and a line read ask this owner.
 - `touchFile` fires a type-2 watched-file announcement at entry for the first
   seen content hash of a path, before the owner's didChange; it reaches every
   other live client of the same server across package roots through the client
