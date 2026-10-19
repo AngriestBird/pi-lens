@@ -82,6 +82,7 @@ import {
 	type DeadCodeResult,
 	PythonDeadCodeClient,
 } from "../../clients/dead-code-client.js";
+import { getProjectDataDir } from "../../clients/file-utils.js";
 import { consumeTurnEndFindings } from "../../clients/runtime-context.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { handleTurnEnd } from "../../clients/runtime-turn.js";
@@ -801,5 +802,62 @@ describe("#4154 a late scan is fenced to its session, its edits and the row on d
 		await startTurn().turn;
 		expect(String(deadCodeRows().at(-1)?.reason)).not.toContain("late_scan");
 		expect(advisory()).not.toContain("late");
+	});
+});
+
+describe("#4117 a parked scan whose baseline write throws", () => {
+	// Recurrence prevented: the settle handler's success branch ran
+	// `cacheManager.writeCache` (mkdir + `writeFileAtomic(..., { bestEffort:
+	// false })`, so a disk fault throws) with nothing after the `.then(ok, fail)`
+	// pair. The throw rejected a promise nobody held, which ends the process under
+	// Node's default, and it skipped `entry.settled`, so the entry stayed parked
+	// and every later turn answered `in_flight` without starting a scan.
+
+	/**
+	 * Park a scan, put a regular file where the cache directory must be (`mkdirSync`
+	 * throws EEXIST on every platform and needs no permission bits), let the scan
+	 * settle, and return every `unhandledRejection` Node raised meanwhile.
+	 */
+	async function settleOnABrokenCache(): Promise<unknown[]> {
+		const slow = await slowTurn();
+		await slow.turn;
+		const cacheDir = path.join(getProjectDataDir(root), "cache");
+		fs.rmSync(cacheDir, { recursive: true, force: true });
+		fs.writeFileSync(cacheDir, "not a directory");
+		const unhandled: unknown[] = [];
+		const onUnhandled = (reason: unknown) => unhandled.push(reason);
+		process.on("unhandledRejection", onUnhandled);
+		try {
+			slow.release();
+			// `unhandledRejection` is delivered on a real macrotask; each step of the
+			// fake clock's async advance yields to one.
+			await vi.advanceTimersByTimeAsync(10);
+			await vi.advanceTimersByTimeAsync(10);
+		} finally {
+			process.off("unhandledRejection", onUnhandled);
+			vi.useRealTimers();
+			fs.rmSync(cacheDir, { force: true });
+		}
+		return unhandled;
+	}
+
+	it("leaves no unhandled rejection", async () => {
+		expect(await settleOnABrokenCache()).toEqual([]);
+	});
+
+	it("counts the dropped scan and lets the next turn start another", async () => {
+		await settleOnABrokenCache();
+
+		const dropped = getDegradationSummary().find(
+			(group) => group.kind === "dead-code-late-scan-dropped",
+		);
+		const record = JSON.stringify(dropped ?? null);
+		expect(record).toContain("scan-settle-threw");
+		expect(record).toContain("EEXIST");
+		vultureProcess.gate = undefined;
+		edit("other.py");
+		await startTurn().turn;
+		expect(String(deadCodeRows().at(-1)?.reason)).not.toContain("in_flight");
+		expect(vultureProcess.scans).toBe(2);
 	});
 });

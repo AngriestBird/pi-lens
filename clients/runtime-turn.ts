@@ -656,7 +656,8 @@ function dropLateDeadCodeScan(
  * it writes the baseline row (a failure never replaces the good row on disk
  * then, #925, #4154 V1) and its `dead-code.log` event, and a successful result
  * waits in the entry for the next turn_end of the same session that reaches
- * the lane. A result for a session that has ended is dropped and counted.
+ * the lane. A result for a session that has ended is dropped and counted, and
+ * so is a settle that throws (a baseline write the disk refuses).
  */
 function parkLateDeadCodeScan(args: {
 	scope: SessionScope;
@@ -680,7 +681,7 @@ function parkLateDeadCodeScan(args: {
 		askedAt: startedAt,
 	};
 	scans.set(key, entry);
-	void withRowForFailureWrite(
+	const watch = withRowForFailureWrite(
 		args.scan,
 		cacheManager,
 		cacheKey,
@@ -717,6 +718,15 @@ function parkLateDeadCodeScan(args: {
 		(err: unknown) =>
 			dropLateDeadCodeScan(scans, key, client, `scan-threw: ${err}`),
 	);
+	// No caller awaits `watch`, so a throw from its settle branch (the baseline
+	// write's mkdir and rename throw on a full or read-only disk) would be an
+	// unhandled rejection, which ends the host under Node's default, and would
+	// leave the entry parked so no later turn starts a scan. Drop it and count
+	// it, as a scan that throws is.
+	void watch.catch((err: unknown) => {
+		// none: dropLateDeadCodeScan counts it as dead-code-late-scan-dropped
+		dropLateDeadCodeScan(scans, key, client, `scan-settle-threw: ${err}`);
+	});
 }
 
 // LSP idle reset scheduling — prevents thrashing by delaying shutdown
