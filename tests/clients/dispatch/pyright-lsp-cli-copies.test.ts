@@ -29,7 +29,7 @@ import { convertLspDiagnostics } from "../../../clients/dispatch/utils/lsp-diagn
 import { getPrimaryDispatchGroup } from "../../../clients/language-policy.js";
 import type { LSPDiagnostic } from "../../../clients/lsp/client.js";
 import { resetProjectLensConfigCache } from "../../../clients/project-lens-config.js";
-import { setupTestEnvironment } from "../test-utils.js";
+import { pinFixtureHome, setupTestEnvironment } from "../test-utils.js";
 
 interface Capture {
 	provenance: { tool: string; version: string };
@@ -71,16 +71,23 @@ function expectedFindings(capture: Capture): string[] {
 let tmpDir: string;
 let file: string;
 let cleanup: () => void;
+let restoreHome: () => void;
 
 beforeEach(() => {
 	// The shared setup plants the fixture's own `.git` marker, so the project
 	// root resolves to this directory and never to one above the tmp root.
 	({ tmpDir, cleanup } = setupTestEnvironment("pi-lens-pyright-copies-"));
+	// A fixture HOME beside the worker home: the project-config walk stops
+	// below the real `~/.pi-lens`, so an operator's config can never select the
+	// rules these cases read (a `.git` marker does not bound that walk, #4629
+	// review F4).
+	({ restore: restoreHome } = pinFixtureHome("pyright-copies"));
 	file = path.join(tmpDir, "app.py");
 	resetProjectLensConfigCache();
 });
 
 afterEach(() => {
+	restoreHome?.();
 	cleanup();
 	resetProjectLensConfigCache();
 });
