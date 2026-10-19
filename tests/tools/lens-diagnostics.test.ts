@@ -102,7 +102,6 @@ const mockSummaries: ReturnType<
 	(typeof import("../../clients/widget-state.js"))["getFileDiagnosticSummaries"]
 > = [];
 
-let mockStaleDropped = 0;
 let mockDependencyDemoted = 0;
 
 const reconcileScanDiagnosticsMock = vi.fn().mockReturnValue(true);
@@ -114,11 +113,10 @@ vi.mock("../../clients/widget-state.js", async (importOriginal) => {
 	return {
 		...actual,
 		getFileDiagnosticSummaries: () => mockSummaries,
-		reconcileStaleWidgetFiles: async (onStaleFile?: (file: string) => void) => {
-			for (let i = 0; i < mockStaleDropped; i++)
-				onStaleFile?.(`/proj/stale-${i}.ts`);
-			return mockStaleDropped;
-		},
+		// No stale record exists in this file's mocked summaries, so the sweep
+		// reports nothing. The stale-evidence verdict runs against the real store in
+		// lens-diagnostics-session-evidence.test.ts.
+		reconcileStaleWidgetFiles: async () => 0,
 		reconcileStaleWidgetDependencyBlockers: async () => mockDependencyDemoted,
 		reconcileScanDiagnostics: (...args: unknown[]) =>
 			reconcileScanDiagnosticsMock(...args),
@@ -160,7 +158,6 @@ beforeEach(() => {
 		timings: {},
 	});
 	mockSummaries.length = 0;
-	mockStaleDropped = 0;
 	mockDependencyDemoted = 0;
 	reconcileScanDiagnosticsMock.mockReset().mockReturnValue(true);
 	reconcileCorrelatedScanDiagnosticsMock.mockReset();
@@ -4042,17 +4039,6 @@ describe("lens_diagnostics mode=all", () => {
 		expect(flush).toHaveBeenCalledOnce();
 	});
 
-	it("notes stale files dropped by reconciliation with a targeted active-check recipe", async () => {
-		mockStaleDropped = 2;
-		mockSummaries.length = 0;
-		const result = await run(makeTool(), { mode: "all" });
-		const text = String(result.content[0].text);
-		expect(text).toContain("2 changed files omitted as stale");
-		expect(text).toContain("source=lsp scope=paths");
-		expect(text).not.toContain("✓");
-		expect(result.details).toMatchObject({ staleDropped: 2 });
-	});
-
 	it("returns clean message when all files have zero issues", async () => {
 		mockSummaries.length = 0;
 		mockSummaries.push(sum("/proj/src/clean.ts", {}));
@@ -4632,7 +4618,7 @@ describe("lens_diagnostics paths", () => {
 		expect(text).not.toContain("exclude this");
 	});
 
-	it("mode=all with paths hitting no cached files includes the cached-only/use-mode=full note", async () => {
+	it("mode=all with paths hitting no cached files names the targeted next check, not the older mode=full note", async () => {
 		mockSummaries.length = 0;
 		mockSummaries.push(sum("/proj/src/unrelated.ts", { warnings: 1 }));
 		const result = await run(makeTool(), {
@@ -4640,8 +4626,11 @@ describe("lens_diagnostics paths", () => {
 			paths: ["/proj/src/never-dispatched.ts"],
 		});
 		const text = String(result.content[0].text);
-		expect(text).toContain("mode=full");
-		expect(text).toContain("cached findings");
+		// #4625 F5: the verdict carries one next step; the older advice beside it
+		// would be a second, different instruction.
+		expect(text).toContain("Session cache unverified");
+		expect(text).toContain("source=lsp scope=paths");
+		expect(text).not.toContain("mode=full");
 	});
 
 	it("mode=delta with paths hitting no cached files includes the cached-only/use-mode=full note", async () => {

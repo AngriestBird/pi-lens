@@ -3411,10 +3411,9 @@ async function formatAllMode(
 	const footerCapped = visibleDiagnostics.filter(
 		(d) => d.footerRetired === true,
 	).length;
+	// The omitted-as-stale count is part of the session verdict line below, which
+	// states the reasons once; `mode=full` passes no stale count.
 	const staleNote =
-		(staleDropped > 0
-			? ` (${staleDropped} changed file${staleDropped === 1 ? "" : "s"} omitted as stale)`
-			: "") +
 		(dependencyDemoted > 0
 			? ` (${dependencyDemoted} blocking finding${dependencyDemoted === 1 ? "" : "s"} demoted to [stale] — an imported file changed since; re-run to confirm)`
 			: "") +
@@ -3524,9 +3523,15 @@ async function formatAllMode(
 					}
 				: {}),
 		};
+		// Name the files this call's sweep changed. A deleted one leaves no record to
+		// count in another reason; a kept one also reads pending, here and later.
+		const omittedClause =
+			staleDropped > 0
+				? `, ${staleDropped} changed file${staleDropped === 1 ? "" : "s"} omitted as stale`
+				: "";
 		validationNote =
 			validationStatus === "inconclusive" || validationStatus === "unverified"
-				? `Session cache ${validationStatus} — not a clean verdict: ${pending.length} pending file(s), ${staleDiagnosticCount} stale finding(s), ${unverified.length} requested file(s) without cached evidence. Not active validation.\n` +
+				? `Session cache ${validationStatus} — not a clean verdict: ${pending.length} pending file(s), ${staleDiagnosticCount} stale finding(s), ${unverified.length} requested file(s) without cached evidence${omittedClause}. Not active validation.\n` +
 					`Next check: ${nextTool ?? "diagnostics"} source=lsp scope=paths${nextPaths.length > 0 ? ` paths=${JSON.stringify(nextPaths)}` : " with the changed paths"}.` +
 					(remainingRescanPathCount > 0
 						? ` ${remainingRescanPathCount} more path(s) need a check; narrow or batch the remaining paths.`
@@ -3550,7 +3555,12 @@ async function formatAllMode(
 			},
 		});
 	}
-	const pathsNote = isFullMode ? "" : pathsScopeCacheOnlyNote(pathsScope);
+	// The verdict's next check already names the one targeted step; the older
+	// `mode=full` advice beside it would be a second, different instruction.
+	const pathsNote =
+		isFullMode || evidenceDetails.nextCheck !== undefined
+			? ""
+			: pathsScopeCacheOnlyNote(pathsScope);
 	const suppressedLine = dispositionSuppressedLine(
 		dispositionSuppressed,
 		suppressedBreakdown,

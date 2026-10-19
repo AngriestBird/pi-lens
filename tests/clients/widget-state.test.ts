@@ -1507,7 +1507,8 @@ describe("reconcileScanDiagnostics observation timestamp — cache-hit replays m
 			await fs.utimes(filePath, mtime, mtime);
 
 			expect(await reconcileStaleWidgetFiles()).toBe(1);
-			expect(getFileDiagnostics(filePath)).toBeUndefined();
+			// Shed, not vanished: the record stays as unfinished evidence (#4625).
+			expect(getFileDiagnostics(filePath)).toEqual([]);
 		} finally {
 			await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
 		}
@@ -1651,11 +1652,16 @@ describe("scheduleStaleReconcile — widget self-corrects fixed files (#298 foll
 			// flushes can't await it, so poll for the observable outcome instead
 			// of racing it (flaked on CI: entry not yet dropped at assert time).
 			vi.useRealTimers();
-			// Stale entry is gone — the TUI stops showing the fixed error.
-			await vi.waitFor(
-				() => expect(getFileDiagnostics(filePath)).toBeUndefined(),
-				{ timeout: 5000 },
-			);
+			// The stale finding is gone, so the TUI stops showing the fixed error.
+			// The footer's observer-less sweep keeps the record as unfinished
+			// evidence (#4625 F1): the same state the tool's own sweep leaves.
+			await vi.waitFor(() => expect(getFileDiagnostics(filePath)).toEqual([]), {
+				timeout: 5000,
+			});
+			expect(
+				getFileDiagnosticSummaries().find((s) => s.filePath === filePath)
+					?.hasFinalSnapshot,
+			).toBe(false);
 		} finally {
 			vi.useRealTimers();
 			await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
@@ -1682,8 +1688,8 @@ describe("scheduleStaleReconcile — widget self-corrects fixed files (#298 foll
 			);
 			expect(getFileDiagnostics(filePath)).toHaveLength(1);
 
-			// Sentinel: a second, genuinely STALE entry in the same sweep. When it
-			// drops we KNOW the sweep completed — only then is asserting the fresh
+			// Sentinel: a second, genuinely STALE entry in the same sweep. When its
+			// findings are shed we KNOW the sweep completed — only then is asserting the fresh
 			// entry still present meaningful (otherwise a not-yet-finished sweep
 			// would false-pass this test).
 			const sentinelPath = path.join(tmpDir, "sentinel-stale.ts");
@@ -1701,10 +1707,10 @@ describe("scheduleStaleReconcile — widget self-corrects fixed files (#298 foll
 			await vi.advanceTimersByTimeAsync(STALE_RECONCILE_DEBOUNCE_MS);
 
 			// Same real-I/O caveat as above: wait for the sweep to observably
-			// finish (sentinel dropped) on real timers.
+			// finish (sentinel's findings shed) on real timers.
 			vi.useRealTimers();
 			await vi.waitFor(
-				() => expect(getFileDiagnostics(sentinelPath)).toBeUndefined(),
+				() => expect(getFileDiagnostics(sentinelPath)).toEqual([]),
 				{ timeout: 5000 },
 			);
 
@@ -1795,7 +1801,7 @@ describe("per-entry observation timestamps — the stale gate drops entries, not
 		}
 	});
 
-	it("no-regression: a fully-stale record (every entry older than mtime) still drops entirely", async () => {
+	it("no-regression: a fully-stale record (every entry older than mtime) sheds every entry and stays as unfinished evidence", async () => {
 		const tmpDir = await fs.mkdtemp(
 			path.join(os.tmpdir(), "pi-lens-per-entry-allstale-"),
 		);
@@ -1819,17 +1825,250 @@ describe("per-entry observation timestamps — the stale gate drops entries, not
 			const newer = new Date(oldTs + 100_000);
 			await fs.utimes(filePath, newer, newer);
 
-			// Every entry stale → the whole record drops (survivors empty), but
-			// its path remains available to the caller's scoped disclosure.
+			// Every entry stale → every finding is shed (survivors empty), but the
+			// record stays as unfinished evidence (#4625 F1) and its path is reported
+			// to the caller's scoped disclosure.
 			const changed: string[] = [];
 			expect(
 				await reconcileStaleWidgetFiles((file) => changed.push(file)),
 			).toBe(1);
 			expect(changed).toEqual([filePath]);
-			expect(getFileDiagnostics(filePath)).toBeUndefined();
+			expect(getFileDiagnostics(filePath)).toEqual([]);
+			expect(
+				getFileDiagnosticSummaries().find((s) => s.filePath === filePath)
+					?.hasFinalSnapshot,
+			).toBe(false);
 		} finally {
 			await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
 		}
+	});
+});
+
+describe("a stale record stays as unfinished evidence (#4625 F1)", () => {
+	// The mtime moves past every observation. Returns that instant, so a
+	// re-analysis can be stamped after the change.
+	async function changeOnDisk(target: string, afterMs = 60_000) {
+		const changedAt = Date.now() + afterMs;
+		await fs.utimes(target, new Date(changedAt), new Date(changedAt));
+		return changedAt;
+	}
+	const row = (target: string) =>
+		getFileDiagnosticSummaries().find((s) => s.filePath === target);
+
+	async function inTmp(body: (tmpDir: string) => Promise<void>): Promise<void> {
+		const tmpDir = await fs.mkdtemp(
+			path.join(os.tmpdir(), "pi-lens-retain-stale-"),
+		);
+		try {
+			await body(tmpDir);
+		} finally {
+			await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+		}
+	}
+
+	it("keeps the record unfinished, reports it once, keeps it on the next sweep and reports a later change again", async () => {
+		await inTmp(async (tmpDir) => {
+			const target = path.join(tmpDir, "changed.ts");
+			await fs.writeFile(target, "const a = 1;\n");
+			recordDiagnostics(target, []);
+			expect(row(target)?.hasFinalSnapshot).toBe(true);
+
+			await changeOnDisk(target);
+			const first: string[] = [];
+			expect(await reconcileStaleWidgetFiles((f) => first.push(f))).toBe(1);
+			expect(first).toEqual([target]);
+			// The record is still there: nothing in it and no final snapshot.
+			expect(getFileDiagnostics(target)).toEqual([]);
+			expect(row(target)).toMatchObject({
+				hasFinalSnapshot: false,
+				blocking: 0,
+				errors: 0,
+				warnings: 0,
+			});
+
+			// Same bytes, next sweep: nothing new changed, and the mark stays. Without
+			// a `touchedAt` at or past the mtime the empty-record gate would delete it.
+			const second: string[] = [];
+			expect(await reconcileStaleWidgetFiles((f) => second.push(f))).toBe(0);
+			expect(second).toEqual([]);
+			expect(row(target)?.hasFinalSnapshot).toBe(false);
+
+			// A further change is reported again, and the record is still kept.
+			const changedAgain = await changeOnDisk(target, 120_000);
+			const third: string[] = [];
+			expect(await reconcileStaleWidgetFiles((f) => third.push(f))).toBe(1);
+			expect(third).toEqual([target]);
+			expect(row(target)?.hasFinalSnapshot).toBe(false);
+
+			// A final snapshot taken after the change retires the mark.
+			recordDiagnostics(target, [], undefined, changedAgain + 1_000);
+			expect(row(target)?.hasFinalSnapshot).toBe(true);
+			expect(await reconcileStaleWidgetFiles()).toBe(0);
+			expect(row(target)?.hasFinalSnapshot).toBe(true);
+		});
+	});
+
+	it("withholds the footer's ✓ clean for a retained record that has no runner", async () => {
+		await inTmp(async (tmpDir) => {
+			const stale = path.join(tmpDir, "stale.ts");
+			const clean = path.join(tmpDir, "clean.ts");
+			await fs.writeFile(stale, "const a = 1;\n");
+			await fs.writeFile(clean, "const b = 2;\n");
+			recordDiagnostics(stale, []);
+			recordDiagnostics(clean, []);
+			expect(renderWidget(120, theme).join("\n")).toContain("✓ clean");
+
+			const changedAt = await changeOnDisk(stale);
+			await reconcileStaleWidgetFiles();
+			expect(row(stale)?.hasFinalSnapshot).toBe(false);
+			expect(renderWidget(120, theme).join("\n")).not.toContain("✓ clean");
+
+			recordDiagnostics(stale, [], undefined, changedAt + 1_000);
+			expect(renderWidget(120, theme).join("\n")).toContain("✓ clean");
+		});
+	});
+
+	// The precondition was a runner on the record. Another record with no runner
+	// and no snapshot is one only a formatter has touched; it is unfinished too.
+	it("withholds the footer's ✓ clean for a formatter-only record until a snapshot commits", () => {
+		const target = "/proj/formatted.ts";
+		recordFormatter(target, "prettier", false, true);
+		expect(renderWidget(120, theme).join("\n")).not.toContain("✓ clean");
+		recordDiagnostics(target, []);
+		expect(renderWidget(120, theme).join("\n")).toContain("✓ clean");
+	});
+
+	it("still drops a record whose file no longer exists", async () => {
+		await inTmp(async (tmpDir) => {
+			const target = path.join(tmpDir, "gone.ts");
+			await fs.writeFile(target, "const a = 1;\n");
+			recordDiagnostics(target, []);
+			await fs.unlink(target);
+			const dropped: string[] = [];
+			expect(await reconcileStaleWidgetFiles((f) => dropped.push(f))).toBe(1);
+			expect(dropped).toEqual([target]);
+			expect(getFileDiagnostics(target)).toBeUndefined();
+			expect(row(target)).toBeUndefined();
+		});
+	});
+
+	// The retained record is retired by the store's own idle eviction (no timer),
+	// and its idle window starts at the SWEEP: an old mtime must not make it
+	// evictable the moment it is kept.
+	it.each([
+		{ afterMinutes: 29, kept: true },
+		{ afterMinutes: 31, kept: false },
+	])(
+		"is retired by idle eviction counted from the sweep: kept=$kept $afterMinutes min after it",
+		async ({ afterMinutes, kept }) => {
+			await inTmp(async (tmpDir) => {
+				const target = path.join(tmpDir, "changed.ts");
+				await fs.writeFile(target, "const a = 1;\n");
+				// Observed three hours ago, edited two hours ago: the edit is long past,
+				// the sweep is now.
+				const observedAt = Date.now() - 3 * 3_600_000;
+				recordDiagnostics(target, [], undefined, observedAt);
+				const editedAt = new Date(observedAt + 3_600_000);
+				await fs.utimes(target, editedAt, editedAt);
+				expect(await reconcileStaleWidgetFiles()).toBe(1);
+
+				// Fill the store past its inactive-record bound with records written
+				// `afterMinutes` later, so the next write prunes at the size boundary.
+				vi.useFakeTimers({ toFake: ["Date"] });
+				try {
+					vi.setSystemTime(Date.now() + afterMinutes * 60_000);
+					for (let i = 0; i < 1024; i++)
+						recordDiagnostics(path.join(tmpDir, `filler-${i}.ts`), []);
+					recordDiagnostics(path.join(tmpDir, "extra.ts"), []);
+				} finally {
+					vi.useRealTimers();
+				}
+				expect(row(target) !== undefined).toBe(kept);
+			});
+		},
+	);
+
+	// A session reset can land while the sweep is reading the file's mtime; the
+	// sweep must neither throw nor bring the cleared record back.
+	it("neither throws nor revives a record cleared while the sweep is reading the file", async () => {
+		await inTmp(async (tmpDir) => {
+			const target = path.join(tmpDir, "changed.ts");
+			await fs.writeFile(target, "const a = 1;\n");
+			recordDiagnostics(target, []);
+			await changeOnDisk(target);
+			const sweep = reconcileStaleWidgetFiles();
+			clearWidgetState();
+			await expect(sweep).resolves.toBeTypeOf("number");
+			expect(row(target)).toBeUndefined();
+		});
+	});
+
+	// The mark rides the persisted `hasFinalDiagnosticsSnapshot` flag, so a saved
+	// and restored session keeps the record unfinished, and what is saved is the
+	// surviving entries alone (the display list agrees with the full set).
+	it("survives a save and restore as unfinished evidence holding only its survivors", async () => {
+		await inTmp(async (tmpDir) => {
+			const target = path.join(tmpDir, "changed.ts");
+			await fs.writeFile(target, "const a = 1;\n");
+			const observed = Date.now();
+			recordDiagnostics(
+				target,
+				[
+					{
+						severity: "warning",
+						tool: "biome",
+						rule: "lint/style",
+						message: "live biome finding",
+						line: 1,
+					},
+				],
+				undefined,
+				observed,
+			);
+			// An aging cascade snapshot adds a cross-file error observed long before.
+			reconcileCascadeNeighborLspErrors(
+				target,
+				[
+					{
+						severity: "error",
+						tool: "lsp",
+						rule: "TS2304",
+						message: "stale cross-file error",
+						line: 1,
+					},
+				],
+				undefined,
+				observed - 200_000,
+			);
+			// The file changed between the two observations.
+			const between = new Date(observed - 100_000);
+			await fs.utimes(target, between, between);
+			expect(await reconcileStaleWidgetFiles()).toBe(1);
+
+			const saved = exportWidgetState();
+			expect(saved.files).toHaveLength(1);
+			expect(saved.files[0]).toMatchObject({
+				hasFinalDiagnosticsSnapshot: false,
+				diagnosticCounts: { blocking: 0, errors: 0, warnings: 1 },
+			});
+			expect(saved.files[0]?.allDiagnostics.map((d) => d.message)).toEqual([
+				"live biome finding",
+			]);
+			expect(saved.files[0]?.diagnostics.map((d) => d.message)).toEqual([
+				"live biome finding",
+			]);
+
+			clearWidgetState();
+			expect(importWidgetState(saved)).toBe(true);
+			expect(row(target)).toMatchObject({
+				hasFinalSnapshot: false,
+				warnings: 1,
+				errors: 0,
+			});
+			expect(getFileDiagnostics(target)?.map((d) => d.message)).toEqual([
+				"live biome finding",
+			]);
+		});
 	});
 });
 
@@ -1935,7 +2174,7 @@ describe("PersistedWidgetState v1→v2 migration — per-entry stamps inherit th
 			// The v1 snapshot must be ACCEPTED and its entry present before we test
 			// gating — this intermediate assertion makes the test discriminate
 			// against pre-fix code (which rejected v1 outright, leaving nothing to
-			// gate and passing the final `toBeUndefined` for the wrong reason).
+			// gate: `getFileDiagnostics` would read `undefined`, never the retained `[]`).
 			expect(getFileDiagnostics(filePath)).toHaveLength(1);
 
 			// File changed after the inherited observation → the migrated entry is
@@ -1944,7 +2183,7 @@ describe("PersistedWidgetState v1→v2 migration — per-entry stamps inherit th
 			const newer = new Date(touchedAt + 10_000);
 			await fs.utimes(filePath, newer, newer);
 			expect(await reconcileStaleWidgetFiles()).toBe(1);
-			expect(getFileDiagnostics(filePath)).toBeUndefined();
+			expect(getFileDiagnostics(filePath)).toEqual([]);
 		} finally {
 			await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
 		}

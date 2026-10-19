@@ -1923,6 +1923,23 @@
 			]
 		},
 		"store-freshness": {
+			"pins": {
+				"Retire": {
+					"value": "\"retain\"",
+					"test": "tests/clients/widget-state.test.ts",
+					"title": "keeps the record unfinished, reports it once, keeps it on the next sweep and reports a later change again",
+					"also": [
+						{
+							"test": "tests/tools/lens-diagnostics-session-evidence.test.ts",
+							"title": "stays inconclusive on a second read that rescans nothing"
+						},
+						{
+							"test": "tests/tools/lens-diagnostics-session-evidence.test.ts",
+							"title": "stays inconclusive when the footer's observer-less sweep ran first"
+						}
+					]
+				}
+			},
 			"notCodeChoice": [
 				{
 					"reason": "Scenario bound or actor set: it sizes the state space or picks which actors, inputs and steps TLC explores; no code branch reads it.",

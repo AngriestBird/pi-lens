@@ -12,6 +12,8 @@ import {
 	clearWidgetState,
 	getFileDiagnosticSummaries,
 	markWidgetFileBlockersStale,
+	reconcileCascadeNeighborLspErrors,
+	reconcileStaleWidgetFiles,
 	recordDiagnostics,
 	recordRunner,
 	retireWidgetDependencyDriftBlockers,
@@ -194,9 +196,21 @@ describe("session diagnostic evidence", () => {
 			staleDropped: 1,
 			nextCheck: { paths: [stale] },
 		});
-		expect(getFileDiagnosticSummaries().map((s) => s.filePath)).toEqual([
-			clean,
-		]);
+		// The changed file is not omitted from the store: it stays as an unfinished
+		// record (#4625 F1), the clean sibling as a final one.
+		expect(
+			new Map(
+				getFileDiagnosticSummaries().map((s) => [
+					s.filePath,
+					s.hasFinalSnapshot,
+				]),
+			),
+		).toEqual(
+			new Map([
+				[stale, false],
+				[clean, true],
+			]),
+		);
 	});
 
 	it("names a deleted stale path without claiming that a probe can validate it", async () => {
@@ -468,6 +482,221 @@ describe("session diagnostic evidence", () => {
 			);
 		},
 	);
+
+	// #4625 F1: the first read that saw a changed file reported it, and the
+	// next read, or the footer's observer-less sweep before the first, found
+	// nothing that remembered the file. The store keeps the record as unfinished
+	// evidence until a final snapshot replaces it.
+	describe("a stale disclosure outlives the read that reported it (#4625 F1)", () => {
+		// The mtime moves a minute past every observation. Returns that instant,
+		// so a re-analysis can be stamped after the change.
+		function changeOnDisk(target: string): number {
+			const changedAt = Date.now() + 60_000;
+			const when = new Date(changedAt);
+			fs.utimesSync(target, when, when);
+			return changedAt;
+		}
+
+		function nextPaths(result: Awaited<ReturnType<typeof run>>): string[] {
+			return [
+				...((result.details as { nextCheck?: { paths: string[] } }).nextCheck
+					?.paths ?? []),
+			].sort();
+		}
+
+		// A final clean snapshot for a file that then changes, beside an
+		// unchanged final clean sibling that would carry the ✓ alone.
+		function changedBesideClean(dir = "") {
+			const stale = file(path.join(dir, "stale.txt"));
+			const clean = file(path.join(dir, "clean.txt"));
+			recordDiagnostics(stale, []);
+			recordDiagnostics(clean, []);
+			return { stale, clean, changedAt: changeOnDisk(stale) };
+		}
+
+		it("stays inconclusive on a second read that rescans nothing", async () => {
+			const { stale } = changedBesideClean();
+			const first = await run();
+			const second = await run();
+			expect(first.details).toMatchObject({
+				validationStatus: "inconclusive",
+				staleDropped: 1,
+			});
+			expect(second.details).toMatchObject({
+				validationStatus: "inconclusive",
+				staleDropped: 0,
+				pendingFileCount: 1,
+			});
+			for (const read of [first, second]) {
+				expect(nextPaths(read)).toEqual([stale]);
+				expect(read.content[0]?.text).not.toContain("✓");
+				expect(compact(read)).toContain("inconclusive");
+			}
+		});
+
+		it("stays inconclusive when the footer's observer-less sweep ran first", async () => {
+			const { stale } = changedBesideClean();
+			// What `scheduleStaleReconcile` runs: the same reconcile, no observer.
+			expect(await reconcileStaleWidgetFiles()).toBe(1);
+			const read = await run();
+			expect(read.details).toMatchObject({
+				validationStatus: "inconclusive",
+				staleDropped: 0,
+				pendingFileCount: 1,
+			});
+			expect(nextPaths(read)).toEqual([stale]);
+			expect(read.content[0]?.text).not.toContain("✓");
+		});
+
+		it.each(["file", "directory"] as const)(
+			"keeps a %s scope inconclusive after the footer sweep",
+			async (kind) => {
+				const { stale } = changedBesideClean("src");
+				await reconcileStaleWidgetFiles();
+				const read = await run({
+					paths: [kind === "file" ? stale : path.join(cwd, "src")],
+				});
+				expect(read.details).toMatchObject({
+					validationStatus: "inconclusive",
+				});
+				expect(nextPaths(read)).toEqual([stale]);
+				expect(read.content[0]?.text).not.toContain("✓");
+			},
+		);
+
+		it("keeps a pruned record's surviving finding and the disclosure across two reads", async () => {
+			const target = file();
+			const observed = Date.now();
+			recordDiagnostics(
+				target,
+				[
+					{
+						severity: "warning",
+						semantic: "advisory",
+						tool: "biome",
+						rule: "lint/style",
+						message: "live biome finding",
+						line: 1,
+					},
+				],
+				undefined,
+				observed,
+			);
+			// An aging cascade snapshot adds a cross-file error observed long before.
+			reconcileCascadeNeighborLspErrors(
+				target,
+				[
+					{
+						severity: "error",
+						tool: "lsp",
+						rule: "TS2304",
+						message: "stale cross-file error",
+						line: 1,
+					},
+				],
+				undefined,
+				observed - 200_000,
+			);
+			// The file changed between the two observations.
+			const between = new Date(observed - 100_000);
+			fs.utimesSync(target, between, between);
+			for (const read of [await run(), await run()]) {
+				expect(read.details).toMatchObject({
+					validationStatus: "inconclusive",
+				});
+				expect(nextPaths(read)).toEqual([target]);
+				expect(read.content[0]?.text).toContain("live biome finding");
+				expect(read.content[0]?.text).not.toContain("stale cross-file error");
+				expect(read.content[0]?.text).not.toContain("✓");
+			}
+		});
+
+		it("stays inconclusive until a fresh final snapshot replaces the evidence", async () => {
+			const { stale, changedAt } = changedBesideClean();
+			expect((await run()).details).toMatchObject({
+				validationStatus: "inconclusive",
+			});
+			expect((await run()).details).toMatchObject({
+				validationStatus: "inconclusive",
+			});
+			// The pipeline re-analyses the changed file and commits a final snapshot.
+			recordDiagnostics(stale, [], undefined, changedAt + 1_000);
+			const cleared = await run();
+			expect(cleared.details).toMatchObject({
+				validationStatus: "no-matching-findings",
+				staleDropped: 0,
+				pendingFileCount: 0,
+			});
+			expect(cleared.details).not.toHaveProperty("nextCheck");
+			expect(cleared.content[0]?.text).toContain("✓");
+		});
+
+		it("names every changed file when two are omitted, on both reads", async () => {
+			const first = file("a.txt");
+			const second = file("b.txt");
+			for (const target of [first, second, file("clean.txt")])
+				recordDiagnostics(target, []);
+			changeOnDisk(first);
+			changeOnDisk(second);
+			const initial = await run();
+			expect(initial.content[0]?.text).toContain(
+				"2 changed files omitted as stale",
+			);
+			expect(initial.content[0]?.text).toContain("source=lsp scope=paths");
+			expect(initial.details).toMatchObject({
+				validationStatus: "inconclusive",
+				staleDropped: 2,
+				pendingFileCount: 2,
+			});
+			const again = await run();
+			expect(again.details).toMatchObject({
+				validationStatus: "inconclusive",
+				staleDropped: 0,
+				pendingFileCount: 2,
+			});
+			for (const read of [initial, again])
+				expect(nextPaths(read)).toEqual([first, second].sort());
+		});
+	});
+
+	// #4625 F3: a changed file that leaves no record (it was deleted) counts
+	// nowhere else, so the line that gives the verdict's reasons must name it.
+	it("names a stale drop in the verdict line, once", async () => {
+		const target = file();
+		recordDiagnostics(target, []);
+		fs.unlinkSync(target);
+		const text = (await run({ paths: [target] })).content[0]?.text ?? "";
+		const verdict =
+			text.split("\n").find((line) => line.includes("not a clean verdict")) ??
+			"";
+		expect(verdict).toContain("1 changed file omitted as stale");
+		expect(text.match(/omitted as stale/g)).toHaveLength(1);
+	});
+
+	// #4625 F5: the verdict already carries the one targeted next check, so a
+	// scoped read must not append the older `mode=full` advice beside it. A clean
+	// scoped read has no next check and keeps the cache-only note.
+	it("gives a scoped incomplete read one next step", async () => {
+		const target = file();
+		recordDiagnostics(target, []);
+		const changedAt = new Date(Date.now() + 60_000);
+		fs.utimesSync(target, changedAt, changedAt);
+		const text = (await run({ paths: [target] })).content[0]?.text ?? "";
+		expect(text).toContain("source=lsp scope=paths");
+		expect(text).not.toContain("mode=full");
+	});
+
+	it("keeps the cache-only note on a clean scoped read", async () => {
+		const target = file();
+		recordDiagnostics(target, []);
+		const result = await run({ paths: [target] });
+		expect(result.details).toMatchObject({
+			validationStatus: "no-matching-findings",
+		});
+		expect(result.content[0]?.text).toContain(
+			"paths restricts this to cached findings",
+		);
+	});
 
 	it("records the scoped evidence decision in the real latency sink", async () => {
 		vi.stubEnv("PI_LENS_TEST_MODE", "0");
