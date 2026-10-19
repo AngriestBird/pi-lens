@@ -994,6 +994,11 @@ const NON_ENTRY_MEMBERS: Record<string, string> = {
 	hasWarmLSP: STATUS,
 	hasLSP: STATUS,
 	isSpawnInFlight: STATUS,
+	// #4532: a read-only accessor the bash `tool_result` install look asks for
+	// the live primary client roots. It reads no diagnostics and spawns nothing,
+	// so it is not a diagnostics entry; the routes that emit rows are the
+	// matrix's subject.
+	livePrimaryClientRoots: STATUS,
 	getStatus: STATUS,
 	getBrokenStatus: STATUS,
 	getAliveClientCount: STATUS,

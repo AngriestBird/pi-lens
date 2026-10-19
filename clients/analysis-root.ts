@@ -9,8 +9,14 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as nodePath from "node:path";
-import { isAtOrAboveHomeDir, isUnderDir, isVendorPath } from "./path-utils.js";
+import {
+	isAtOrAboveHomeDir,
+	isUnderDir,
+	isVendorPath,
+	walkUpDirs,
+} from "./path-utils.js";
 import { isPiLensInternalPath } from "./file-utils.js";
+import { findPiLensConfigInDir } from "./project-lens-config.js";
 import {
 	resolveGitCheckout,
 	resolveLinkedWorktreeOwner,
@@ -131,4 +137,56 @@ export function resolveAnalysisRoot(
 
 export function canWriteAnalysisRoot(mode: AnalysisRootMode): boolean {
 	return mode === "session" || mode === "linked-worktree";
+}
+
+/**
+ * #2657: the root a session should REGISTER for `filePath`, declared as one
+ * workspace rather than one directory.
+ *
+ * Pre-fix, the `tool_call` seam registered `path.dirname(filePath)`, so a
+ * session touching 128 directories cycled the FIFO(128) session-root registry
+ * and evicted the project root — which carries the operator's
+ * `lsp.disabledServers` denial — until something re-registered it, and
+ * `getConfigForFile` walked a population that grew with the number of
+ * directories an agent happened to touch.
+ *
+ * The rule, in the order it answers (STATE_TABLE.md's #2657 table):
+ *
+ * 1. a file OUTSIDE the session root belongs to whatever
+ *    {@link resolveAnalysisRootPath} says owns it (a linked worktree, or an
+ *    eligible sibling project), because that function is the sole classifier
+ *    for out-of-session edits; a refused file contributes the session root, so
+ *    a vendor or `$HOME` path cannot widen the #2052 gate;
+ * 2. a file INSIDE the session root registers the NEAREST directory at or above
+ *    its own that holds a `.pi-lens.json`/`pi-lens.json`, never above the
+ *    session root. The config loader layers upward from the registered root, so
+ *    that root must sit at or below the nearest config owner or a nested config
+ *    stops applying;
+ * 3. otherwise the session root itself.
+ *
+ * The population is therefore O(workspaces + nested config owners), not
+ * O(directories touched). A linked worktree stays its own workspace root, so
+ * per-worktree isolation is preserved (maintainer decision on #1129).
+ */
+export function resolveSessionConfigRoot(
+	filePath: string,
+	sessionRoot: string,
+	homeDirOverride?: string,
+): string {
+	const session = nodePath.resolve(sessionRoot);
+	const start = nodePath.dirname(nodePath.resolve(filePath));
+	if (!isUnderDir(start, session)) {
+		// Out of session: the analysis root owns eligibility, and a refused path
+		// (vendor, $HOME or above, tmp, pi-lens internal) must not declare a new
+		// served root — it contributes the session's own root instead.
+		return (
+			resolveAnalysisRootPath(filePath, session, homeDirOverride) ?? session
+		);
+	}
+	for (const dir of walkUpDirs(start)) {
+		if (dir !== session && !isUnderDir(dir, session)) break;
+		if (findPiLensConfigInDir(dir)) return dir;
+		if (dir === session) break;
+	}
+	return session;
 }

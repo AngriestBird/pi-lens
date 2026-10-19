@@ -1207,7 +1207,7 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"an invented one.",
 		owner: "#2523 slice 2",
 	},
-	"clients/runtime-tool-call.ts#handleToolCallImpl:1a767ae6~924dc100": {
+	"clients/runtime-tool-call.ts#handleToolCallImpl:1a767ae6~81c1d77f": {
 		family: "hook-await",
 		site: "unbudgeted-hook",
 		reason:
@@ -2539,7 +2539,11 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// directory reads and stats, the per-root chain, and the restart of a
 	// root's primary clients. It runs only inside the HEAD look, which both
 	// hook callers bound with bounded().
-	"clients/out-of-band-changes.ts": 9,
+	// #4532: 9 -> 10. The install stamp's `node_modules` symlink lane adds
+	// `await fsp.lstat(...)` beside the marker stats; #2523 AC4's deps-type
+	// threading is what would bound it, and `lookForOutOfBandChanges` is called
+	// from inside `bounded()` at the hook, not here.
+	"clients/out-of-band-changes.ts": 10,
 	"clients/package-manager.ts": 8,
 	"clients/partial-edit-apply.ts": 2,
 	"clients/performance-report.ts": 8,
@@ -2802,6 +2806,13 @@ const BOUNDED_CALL_SITES: Readonly<Record<string, string>> = {
 	"call:clients/runtime-tool-result.ts#handleToolResult:b9faf573~b4f8a98d":
 		"Classified pipeline analysis uses ToolResultDeps.signal and the edit " +
 		"budget; a missing signal is an explicit standalone-harness case.",
+	"call:clients/runtime-tool-result.ts#handleToolResult:d0c1590a~b4f8a98d":
+		"`deps.signal` — the `tool_result` hook's own ctx signal, the same one the " +
+		"head-move look beside it passes. Optional in the deps type: a host that " +
+		"offers no signal leaves the wall-clock half live on its own, which is " +
+		"weaker than #2523's contract and is the pre-existing shape of every " +
+		"`tool_result` bound in this handler. The look's publish is never " +
+		"cancelled by a cut, only this wait.",
 	"call:clients/runtime-tool-result.ts#handleToolResult:ef8fdef7~b4f8a98d":
 		"The primary phase of a bash tool_result's written files (#4507) uses " +
 		"ToolResultDeps.signal (aliased so this site keys apart from the HEAD " +

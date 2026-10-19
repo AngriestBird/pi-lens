@@ -5,6 +5,7 @@ import type { CacheManager } from "./cache-manager.js";
 import { recordDegradationOnce } from "./degradation-ledger.js";
 import { detectFileKind } from "./file-kinds.js";
 import { isPathIgnoredByProject } from "./file-utils.js";
+import { resolveSessionConfigRoot } from "./analysis-root.js";
 import { evaluateGitGuard, isGitCommitOrPushAttempt } from "./git-guard.js";
 import { dropHashlineAnchorMemo } from "./hashline-anchor.js";
 import { evaluateSharedCheckoutGuard } from "./shared-checkout-guard.js";
@@ -799,9 +800,19 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 
 	if (!getFlag("no-lsp")) {
 		try {
+			// #2657: register the file's WORKSPACE, never its own directory. A
+			// per-directory registration made the FIFO(128) session-root registry
+			// grow with the number of directories an agent touched, so 128 of them
+			// evicted the project root itself — which carries the operator's
+			// `lsp.disabledServers` denial — and every dispatch walked a registry
+			// sized by directories. `resolveSessionConfigRoot` is the one owner of
+			// that rule (nearest `.pi-lens.json` owner at or below the session
+			// root; a linked worktree or eligible sibling project root for an
+			// out-of-session file; the session root otherwise).
+			const sessionRoot = ctx.cwd ?? runtime.projectRoot ?? process.cwd();
 			const configCwd = filePath
-				? path.dirname(filePath)
-				: (ctx.cwd ?? runtime.projectRoot ?? process.cwd());
+				? resolveSessionConfigRoot(filePath, sessionRoot)
+				: sessionRoot;
 			await ensureLSPConfigInitialized(configCwd);
 		} catch (cfgErr) {
 			dbg(`lsp config init failed during tool_call: ${cfgErr}`);

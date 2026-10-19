@@ -1021,6 +1021,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// #4346: resolves a Go importer's package directory to announce its peers.
 		"clients/lsp/created-import-targets.ts": 3,
 		"clients/lsp/edits.ts": 23,
+		// #4532: the environment-gap gate resolves its walk-up from the file's
+		// own directory, so these are real filesystem `path` calls.
+		"clients/lsp/environment-gap.ts": 5,
 		"clients/lsp/file-server-match.ts": 3,
 		"clients/lsp/index.ts": 15,
 		// #4346: Go package directories and TS/JS extensions of the implicit
@@ -1143,7 +1146,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// owned mutation path through the shared path helper.
 		// 23 -> 22 (#4187 R5): the fold onto the observational net's arm drops
 		// the single-path branches, and with them the `input.path` read.
-		"clients/runtime-tool-call.ts": 22,
+		// 22 -> 21 (#2657): the config-init call registers the resolved
+		// WORKSPACE root (`resolveSessionConfigRoot`), so the bare
+		// `path.dirname(filePath)` that made every directory a session root is
+		// gone from this file.
+		"clients/runtime-tool-call.ts": 21,
 		// 22 -> 20 (#3650): the tool_result path read is routed through
 		// readToolResultPathField; the open-coded input.path cast is gone.
 		// 19 -> 18 (#4576): the tool_result path resolves through

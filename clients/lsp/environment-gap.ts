@@ -178,6 +178,10 @@ export function hasResolvableNodeModules(
 			stat(path.join(dir, "node_modules"));
 			return true;
 		} catch (err) {
+			// none: this catch answers the walk's own question (absent vs
+			// unreadable) instead of swallowing a failure — an unreadable ancestor
+			// returns true, so the finding keeps its published severity. The
+			// demotion's own record is `lsp-environment-gap-demoted`.
 			const code = (err as NodeJS.ErrnoException | undefined)?.code;
 			if (code !== "ENOENT" && code !== "ENOTDIR") {
 				// Unreadable is not absent: keep the finding blocking.

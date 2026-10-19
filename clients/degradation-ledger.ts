@@ -673,6 +673,21 @@ export type DegradationKind =
 	| "lsp-breaker"
 	| "lsp-capability-skip"
 	/**
+	 * #4532: one bash `tool_result` found more live primary client roots outside
+	 * the session root than `CLIENT_ROOT_LOOK_CAP`, so the install look only ran
+	 * at the first few (clients/runtime-tool-result.ts). An install in the rest
+	 * reaches no server until a tool call names a file under that root. Subject is
+	 * `cap`; once per session, because the population is the process's, not one
+	 * command's.
+	 */
+	| "lsp-client-root-look-capped"
+	/**
+	 * #4532: the install look at a live client root threw, so nothing is known
+	 * about that root's install and the absence of a publish is not evidence of
+	 * none. Subject is the root; once per root per session.
+	 */
+	| "lsp-client-root-look-failed"
+	/**
 	 * The napi fallback ADMITTED a file — its extension is in the in-process
 	 * language matrix (`clients/dispatch/runners/ast-grep-napi.ts`) — and the
 	 * addon that actually loaded then exposed no grammar for it, so every rule
@@ -726,16 +741,6 @@ export type DegradationKind =
 	 * fingerprints were kept so no consumer is told the file went away.
 	 */
 	| "lsp-declaration-walk-unreadable"
-	/**
-	 * #4532: a TypeScript diagnostic was demoted from blocking to warning
-	 * because the file's root resolves no `node_modules`, so its ambient
-	 * declarations (`node:*` module types, the `NodeJS` namespace, `node`'s
-	 * globals) are absent. `clients/lsp/environment-gap.ts` produces it; the
-	 * subject is the admitted TypeScript code (`2307`, `2503`, `2304`), which is
-	 * also the admission key, so the count carries repeats and the ledger holds
-	 * at most three subjects per session. A refusal never records here.
-	 */
-	| "lsp-environment-gap-demoted"
 	/**
 	 * `loadWebTreeSitter()` (clients/deps/web-tree-sitter.js) rejected during
 	 * MODULE EVALUATION, not resolution (#1592). Node's ESM loader permanently
@@ -806,6 +811,16 @@ export type DegradationKind =
 	 * `incrementDegradationCount` keeps one bounded entry per file.
 	 */
 	| "lsp-edit-stale-content"
+	/**
+	 * #4532: a TypeScript diagnostic was demoted from blocking to warning
+	 * because the file's root resolves no `node_modules`, so its ambient
+	 * declarations (`node:*` module types, the `NodeJS` namespace, `node`'s
+	 * globals) are absent. `clients/lsp/environment-gap.ts` produces it; the
+	 * subject is the admitted TypeScript code (`2307`, `2503`, `2304`), which is
+	 * also the admission key, so the count carries repeats and the ledger holds
+	 * at most three subjects per session. A refusal never records here.
+	 */
+	| "lsp-environment-gap-demoted"
 	/**
 	 * #4320: this process cannot tell when a path was born (the filesystem
 	 * reports no birth time, or Node reports ctime as it without statx), so a
