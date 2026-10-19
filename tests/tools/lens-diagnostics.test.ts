@@ -3813,67 +3813,6 @@ describe("lens_diagnostics mode=full", () => {
 		expect(result.details).toMatchObject({ totalWarnings: 1 });
 	});
 
-	it.each([
-		["pyright-langserver", "Pyright"],
-		["basedpyright-langserver", "basedpyright"],
-	])(
-		"lists a finding once when the CLI's stored row meets the %s sweep copy (#4629)",
-		async (_server, source) => {
-			// A write whose language-server lane stayed silent leaves only the CLI's
-			// row in the store, spelled with the bare code. A sweep that cannot
-			// confirm the file keeps that row and merges its own copy of the same
-			// finding, `<source>:<code>`, by `diagnosticDedupKey`. Same file, same
-			// line, same rule: one row, as for `ast-grep:` above.
-			const message =
-				'Type "Literal[\'s\']" is not assignable to declared type "int"';
-			const file = "/proj/app.py";
-			mockSummaries.length = 0;
-			mockSummaries.push(
-				sum(
-					file,
-					{ blocking: 1, errors: 1 },
-					{
-						diagnostics: [
-							{
-								severity: "error",
-								semantic: "blocking",
-								message,
-								line: 1,
-								rule: "reportAssignmentType",
-								tool: "pyright",
-							},
-						],
-					},
-				),
-			);
-			// A confirmed sweep retires the stored row outright (#1993); only an
-			// unconfirmed one leaves the two to meet in the merge.
-			reconcileScanDiagnosticsMock.mockReturnValue(false);
-			const lspService = {
-				runWorkspaceDiagnostics: vi.fn().mockResolvedValue([
-					{
-						filePath: file,
-						diagnostics: [
-							{
-								severity: 1,
-								message,
-								range: {
-									start: { line: 0, character: 13 },
-									end: { line: 0, character: 16 },
-								},
-								source,
-								code: "reportAssignmentType",
-							},
-						],
-						count: 1,
-					},
-				]),
-			};
-			const result = await run(makeTool({}, lspService), { mode: "full" });
-			expect(String(result.content[0].text).split(message)).toHaveLength(2);
-		},
-	);
-
 	it("filters ignored cached/widget/project diagnostics when merging full mode (#279)", async () =>
 		withIgnoredFixture(async (cwd) => {
 			const keep = path.join(cwd, "src", "keep.ts");

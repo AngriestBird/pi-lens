@@ -14,7 +14,6 @@
  * `dispatchForFile` with its dedupe, rule policy and delta.
  */
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -30,7 +29,7 @@ import { convertLspDiagnostics } from "../../../clients/dispatch/utils/lsp-diagn
 import { getPrimaryDispatchGroup } from "../../../clients/language-policy.js";
 import type { LSPDiagnostic } from "../../../clients/lsp/client.js";
 import { resetProjectLensConfigCache } from "../../../clients/project-lens-config.js";
-import { removeTempDirSync } from "../test-utils.js";
+import { setupTestEnvironment } from "../test-utils.js";
 
 interface Capture {
 	provenance: { tool: string; version: string };
@@ -71,15 +70,18 @@ function expectedFindings(capture: Capture): string[] {
 
 let tmpDir: string;
 let file: string;
+let cleanup: () => void;
 
 beforeEach(() => {
-	tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-pyright-copies-"));
+	// The shared setup plants the fixture's own `.git` marker, so the project
+	// root resolves to this directory and never to one above the tmp root.
+	({ tmpDir, cleanup } = setupTestEnvironment("pi-lens-pyright-copies-"));
 	file = path.join(tmpDir, "app.py");
 	resetProjectLensConfigCache();
 });
 
 afterEach(() => {
-	removeTempDirSync(tmpDir);
+	cleanup();
 	resetProjectLensConfigCache();
 });
 
