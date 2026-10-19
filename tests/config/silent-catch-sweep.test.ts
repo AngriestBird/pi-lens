@@ -1263,9 +1263,9 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 	}, // :115, :245
 	"clients/widget-state.ts": {
 		silent: 3,
-		identities: "e99ef23d332bc102",
+		identities: "0627f400a0b73f7f",
 		reason: PRE_RULE,
-	}, // :1476, :1621, :1862
+	}, // :1503, :1655, :1898
 	"clients/word-index.ts": {
 		silent: 5,
 		identities: "7d9f55557f569789",
