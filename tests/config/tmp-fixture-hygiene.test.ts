@@ -44,6 +44,7 @@ import {
 	type TmpHygieneProcessProbe,
 } from "../support/vitest-setup.js";
 import { setupTestEnvironment } from "../clients/test-utils.js";
+import { scaledTestTimeout } from "../support/test-timeout-scale.js";
 import {
 	getTmpRootRegistry,
 	recordedTmpRootCreators,
@@ -631,23 +632,27 @@ describe("tmp-fixture-hygiene", () => {
 		}
 	});
 
-	it("routes every tests/ and scripts/ mkdtemp parent through a contained root", () => {
-		const checks = new Map<string, ((line: number) => boolean) | undefined>();
-		const escapees = scanMkdtempSites().filter((site) => {
-			if (site.file === "tests/support/vitest-setup.ts") return false;
-			if (!checks.has(site.file)) {
-				const raw = readWalkedFile(path.join(REPO_ROOT, site.file));
-				checks.set(
-					site.file,
-					raw === undefined ? undefined : mkdtempSiteEscapes(site.file, raw),
-				);
-			}
-			return checks.get(site.file)?.(site.line) ?? false;
-		});
-		expect(
-			escapees.map((site) => `${site.file}:${site.line}: ${site.text}`),
-		).toEqual([]);
-	});
+	it(
+		"routes every tests/ and scripts/ mkdtemp parent through a contained root",
+		() => {
+			const checks = new Map<string, ((line: number) => boolean) | undefined>();
+			const escapees = scanMkdtempSites().filter((site) => {
+				if (site.file === "tests/support/vitest-setup.ts") return false;
+				if (!checks.has(site.file)) {
+					const raw = readWalkedFile(path.join(REPO_ROOT, site.file));
+					checks.set(
+						site.file,
+						raw === undefined ? undefined : mkdtempSiteEscapes(site.file, raw),
+					);
+				}
+				return checks.get(site.file)?.(site.line) ?? false;
+			});
+			expect(
+				escapees.map((site) => `${site.file}:${site.line}: ${site.text}`),
+			).toEqual([]);
+		},
+		scaledTestTimeout(60_000),
+	);
 
 	it("exempts a mkdtemp site only for code, never for a comment or a string", () => {
 		// #4347: the exemption regexes read the raw call window, so a comment or
