@@ -2157,6 +2157,90 @@ describe("a stale record stays as unfinished evidence (#4625 F1)", () => {
 		});
 	});
 
+	// Shape 10 at the row cap (#4625 round 3): a retained record's touchedAt is the
+	// sweep time, so it is always the most recently touched renderable record. The
+	// cap must therefore choose by tier before recency, or a retained warning takes
+	// one of the five row slots and the header counts a blocker the frame never
+	// draws.
+	it("fills the five row slots by tier before recency, so a retained warning never displaces a blocker", async () => {
+		await inTmp(async (tmpDir) => {
+			const observed = Date.now() - 5_000;
+			const blockers: string[] = [];
+			for (let i = 0; i < 5; i++) {
+				const target = path.join(tmpDir, `blocker-${i}.ts`);
+				await fs.writeFile(target, "const a = 1;\n");
+				recordDiagnostics(
+					target,
+					[
+						{
+							severity: "error",
+							semantic: "blocking",
+							tool: "biome",
+							rule: "lint/x",
+							message: `blocker ${i}`,
+							line: 1,
+						},
+					],
+					undefined,
+					observed - i * 100,
+				);
+				// The bytes predate every observation, so the sweep keeps them final.
+				const untouched = new Date(observed - 1_000);
+				await fs.utimes(target, untouched, untouched);
+				blockers.push(target);
+			}
+			const retained = path.join(tmpDir, "retained-warning.ts");
+			await fs.writeFile(retained, "const b = 2;\n");
+			recordDiagnostics(
+				retained,
+				[
+					{
+						severity: "warning",
+						tool: "eslint",
+						rule: "no-console",
+						message: "surviving warning",
+						line: 1,
+					},
+				],
+				undefined,
+				observed,
+			);
+			// An aging cascade snapshot adds a peer error observed long before: the
+			// sweep keeps the fresh warning, drops the old error, and stamps the record
+			// with the sweep time, so it becomes the newest renderable record.
+			reconcileCascadeNeighborLspErrors(
+				retained,
+				[
+					{
+						severity: "error",
+						tool: "lsp",
+						rule: "TS2304",
+						message: "older peer",
+						line: 2,
+					},
+				],
+				undefined,
+				observed - 200_000,
+			);
+			const untouched = new Date(observed - 1_000);
+			await fs.utimes(retained, untouched, untouched);
+			expect(await reconcileStaleWidgetFiles()).toBe(1);
+			expect(row(retained)).toMatchObject({
+				hasFinalSnapshot: false,
+				blocking: 0,
+				warnings: 1,
+			});
+			for (const width of [60, 120]) {
+				const frame = renderWidget(width, theme).join("\n");
+				expect(frame).toContain("●5E");
+				expect(
+					blockers.filter((file) => frame.includes(path.basename(file))),
+				).toHaveLength(5);
+				expect(frame).not.toContain("retained-warning.ts");
+			}
+		});
+	});
+
 	// A session reset can land while the sweep is reading the file's mtime; the
 	// sweep must neither throw nor bring the cleared record back.
 	it("neither throws nor revives a record cleared while the sweep is reading the file", async () => {

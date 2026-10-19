@@ -2122,7 +2122,15 @@ export function renderWidget(
 
 	// Header — counts from deduplicated files only
 	const deduped = dedupeByBasename([...files.values()]);
-	const recencySorted = deduped.filter(shouldRenderFile).slice(0, 5);
+	// The five row slots go to the highest tiers first (#4625 round 3): a retained
+	// record's `touchedAt` is its sweep time, so capping by recency alone let it
+	// take a slot from a blocking file and the header counted a row the frame
+	// never drew. The chosen rows are then drawn in the recency order both
+	// layouts showed before the cap.
+	const renderable = deduped.filter(shouldRenderFile);
+	const recencySorted = sortByTierThenRecency(renderable)
+		.slice(0, 5)
+		.sort((a, b) => b.touchedAt - a.touchedAt);
 	const langStr = sessionLanguages.slice(0, 6).join(" ");
 	const totalBlocking = countBlockingIn(deduped);
 	const totalErrors = countTotalIn("error", deduped);
