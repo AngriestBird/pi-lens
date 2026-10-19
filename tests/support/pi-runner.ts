@@ -9,30 +9,38 @@
  *   tools (including the definition pi wraps them in) and the commands
  *   `index.ts` registered. `tests/support/pi-mock.ts` records the arguments
  *   `index.ts` passed; the runner reports what pi actually stored.
- * - It pins pi's post-processing of a handler's return value (`emitToolResult`
- *   merging, `emitContext`'s system-head handling) and its per-handler error
- *   isolation.
- * - It does NOT validate event payload shapes: `emit()` takes any object, so a
- *   test that needs the shape pi itself produces (a real prompt, a real
- *   `tool_result` from an executed tool) is tier 2, not this helper.
+ * - It pins what the extension itself declared, read from the maps pi's loader
+ *   filled (`getDeclaredRegistrations`), so a contract case compares the
+ *   declaration with the host's registry instead of sampling both.
+ * - It does NOT pin event payload shapes or handler behaviour. This tier
+ *   exposes no `emit`: a lifecycle event takes any object, so payload tests are
+ *   tier 2, and the loaded copy's own writers cannot be drained from here
+ *   (point 2).
  *
- * Two consequences of loading through pi's loader, both relied on below:
+ * Three consequences of loading through pi's loader, all relied on below:
  *
  * 1. pi loads an extension file with jiti, so the factory runs against its own
  *    copies of `clients/*` — never the file's imports. Assert on registered
  *    data (names, descriptions, schemas, flags) or on `globalThis`, never on a
  *    `clients/` module object identity.
- * 2. The copy reads `PI_LENS_HOME` / `PILENS_DATA_DIR` at its own load, and
- *    `session_start` schedules background writes into it. Both are pinned
- *    here, before the load, and drained before the fixture root is removed
- *    (`tests/index-3521-fork-tree-witness.test.ts`'s `afterEach` is the model;
- *    this helper keeps one fixture for the whole file, so it drains in
- *    `afterAll`).
+ * 2. The copy reads `PI_LENS_HOME` / `PILENS_DATA_DIR` at its own load, so both
+ *    are pinned here, before the load. Its background writers are reachable
+ *    only from inside that copy: `drainBackgroundWritesForTests` resolves the
+ *    modules this test process loaded through Vite, so a write the loaded copy
+ *    schedules would land in the pinned home after the fixture root is removed
+ *    (#2912). That is why this tier emits nothing, and why the `afterAll` drain
+ *    below covers the test-side writers only (#4641 F4).
+ * 3. pi's loader also builds jiti's transform cache at
+ *    `path.join(os.tmpdir(), "jiti")`, so the load runs with `os.tmpdir()`
+ *    aimed inside the fixture: a direct child of the shared tmp root is a
+ *    fixture sibling to the tmp-hygiene census (#4641 F1).
  */
 
+import { mkdirSync } from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type {
+	Extension,
 	ExtensionActions,
 	ExtensionContextActions,
 	ExtensionError,
@@ -88,7 +96,7 @@ interface HostModule {
 		cwd: string,
 		agentDir?: string,
 	) => Promise<{
-		extensions: unknown;
+		extensions: Extension[];
 		errors: { path: string; error: unknown }[];
 		warnings: unknown[];
 		runtime: unknown;
@@ -156,7 +164,17 @@ const CONTEXT_ACTIONS: ExtensionContextActions = {
 	getSystemPrompt: () => "",
 };
 
-/** A `pi` for one loaded extension: the real registries plus the emit seams. */
+/** What the loaded extension declared, read from the maps pi's loader filled. */
+export interface PiRunnerDeclarations {
+	/** Event types the extension registered a handler for (`pi.on`). */
+	readonly handlers: readonly string[];
+	/** Flag names the extension registered (`pi.registerFlag`). */
+	readonly flags: readonly string[];
+	/** Command names the extension registered (`pi.registerCommand`). */
+	readonly commands: readonly string[];
+}
+
+/** A `pi` for one loaded extension: the real registries and its declarations. */
 export interface PiRunner {
 	/** Absolute project directory the extension was loaded for. */
 	readonly cwd: string;
@@ -164,6 +182,8 @@ export interface PiRunner {
 	readonly hostVersion: string;
 	/** Errors pi reported from a handler (`runner.onError`), in order. */
 	readonly errors: ExtensionError[];
+	/** What the extension declared, before the host resolves anything. */
+	getDeclaredRegistrations(): PiRunnerDeclarations;
 	/** `pi.registerFlag` results, as the host holds them. */
 	getFlags(): Map<string, ExtensionFlag>;
 	/** `pi.registerTool` results, including pi's own wrapper on each definition. */
@@ -171,14 +191,6 @@ export interface PiRunner {
 	/** `pi.registerCommand` results, resolved through the host. */
 	getRegisteredCommands(): readonly ResolvedCommand[];
 	hasHandlers(event: string): boolean;
-	/** pi's generic emit (session_start, turn_end, …); returns the last result. */
-	emit(event: { type: string } & Record<string, unknown>): Promise<unknown>;
-	emitToolResult(event: {
-		type: "tool_result";
-		[key: string]: unknown;
-	}): Promise<unknown>;
-	/** pi's `emitContext`: the list a provider request would see. */
-	emitContext(messages: readonly unknown[]): Promise<unknown[]>;
 }
 
 export interface StartPiRunnerOptions {
@@ -188,8 +200,43 @@ export interface StartPiRunnerOptions {
 	 * every project-state write land in this checkout.
 	 */
 	cwd?: string;
-	/** Extra paths pi loads before the extension, e.g. a second extension. */
+	/** Extra paths pi loads after the extension, e.g. a second extension. */
 	extraExtensionPaths?: string[];
+}
+
+/**
+ * Run `load` with `os.tmpdir()` aimed inside the fixture. pi's loader builds
+ * jiti's transform cache as `path.join(os.tmpdir(), "jiti")` for every
+ * extension it loads, so an in-process load otherwise leaves a `jiti`
+ * directory at the shared tmp root, where the fixture-sibling census judges it
+ * (#4641 F1). Inside the fixture it is removed with the fixture. jiti only
+ * creates the directory: the built entry imports natively, so the cache stays
+ * empty and the redirect costs nothing.
+ */
+async function withFixtureTmpdir<T>(
+	root: string,
+	load: () => Promise<T>,
+): Promise<T> {
+	const isolate = path.join(root, "tmp");
+	mkdirSync(isolate, { recursive: true });
+	const previous = {
+		TMPDIR: process.env.TMPDIR,
+		TEMP: process.env.TEMP,
+		TMP: process.env.TMP,
+	};
+	process.env.TMPDIR = isolate;
+	process.env.TEMP = isolate;
+	process.env.TMP = isolate;
+	try {
+		return await load();
+	} finally {
+		if (previous.TMPDIR === undefined) delete process.env.TMPDIR;
+		else process.env.TMPDIR = previous.TMPDIR;
+		if (previous.TEMP === undefined) delete process.env.TEMP;
+		else process.env.TEMP = previous.TEMP;
+		if (previous.TMP === undefined) delete process.env.TMP;
+		else process.env.TMP = previous.TMP;
+	}
 }
 
 /**
@@ -215,10 +262,12 @@ export async function startPiRunner(
 	const host = (await import(
 		/* @vite-ignore */ hostSpecifier()
 	)) as unknown as HostModule;
-	const loaded = await host.discoverAndLoadExtensions(
-		[EXTENSION_ENTRY, ...(options.extraExtensionPaths ?? [])],
-		cwd,
-		agentDir,
+	const loaded = await withFixtureTmpdir(root, () =>
+		host.discoverAndLoadExtensions(
+			[EXTENSION_ENTRY, ...(options.extraExtensionPaths ?? [])],
+			cwd,
+			agentDir,
+		),
 	);
 	if (loaded.extensions === undefined || loaded.errors.length > 0) {
 		throw new Error(
@@ -265,25 +314,36 @@ export async function startPiRunner(
 		cwd,
 		hostVersion: host.VERSION,
 		errors,
+		getDeclaredRegistrations: () => {
+			/** One entry per name a loaded extension declared in `pick`. */
+			const names = (
+				pick: (extension: Extension) => ReadonlyMap<string, unknown>,
+			): string[] => [
+				...new Set(loaded.extensions.flatMap((ext) => [...pick(ext).keys()])),
+			];
+			return {
+				handlers: names((ext) => ext.handlers),
+				flags: names((ext) => ext.flags),
+				commands: names((ext) => ext.commands),
+			};
+		},
 		getFlags: () => runner.getFlags(),
 		getAllRegisteredTools: () => runner.getAllRegisteredTools(),
 		getRegisteredCommands: () => runner.getRegisteredCommands(),
 		hasHandlers: (event) => runner.hasHandlers(event),
-		emit: async (event) => runner.emit(event as never),
-		emitToolResult: async (event) =>
-			runner.emitToolResult(event as never) as Promise<unknown>,
-		emitContext: async (messages) =>
-			(await runner.emitContext(messages as never)) as unknown as unknown[],
 	};
 }
 
 /**
- * Drain, put the environment back, then remove every fixture root this file
- * owns. `session_start` schedules project snapshot and log writes into the
- * pinned data directory, so a root removed before the drain is re-created by
- * its own writer (#2912's hygiene sweep reds on that); the fixture therefore
- * lives for the whole file, which is why `startPiRunner` belongs in
- * `beforeAll`.
+ * Drain the test-side writers, put the environment back, then remove every
+ * fixture root this file owns. The drain covers the modules this test process
+ * loaded through Vite. It cannot reach the copy pi's loader created — that copy
+ * is a separate jiti module graph with its own write queues (#4641 F4) — which
+ * is why this tier emits no lifecycle event: a `session_start` emitted into the
+ * loaded copy would schedule writes into the pinned home that nothing here can
+ * await, and the root removed first would be re-created by its own writer
+ * (#2912). The fixture lives for the whole file, which is why `startPiRunner`
+ * belongs in `beforeAll`.
  */
 afterAll(async () => {
 	await drainBackgroundWritesForTests();
