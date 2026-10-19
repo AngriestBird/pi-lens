@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import { TOOL_REGISTRY } from "../../clients/tool-config.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
 import { withRealPi } from "../support/real-pi-harness.js";
+import { scaledTestTimeout } from "../support/test-timeout-scale.js";
 
 const realPiAvailable =
 	spawnSync("pi", ["--version"], {
@@ -120,43 +121,55 @@ describe.skipIf(!realPiAvailable)("real pi RPC: tools.<name>.enabled", () => {
 		);
 	}, 60_000);
 
-	it("omits a project-disabled tool from pi's wire roster and records it once", async () => {
-		await withRealPi(
-			{
-				fixture: "tools-disabled",
-				script: "script.json",
-				args: ["--no-lazy-tools"],
-				env: { PI_LENS_TEST_MODE: "0" },
-			},
-			async (pi) => {
-				await pi.prompt("report the tool roster");
-				await pi.awaitAssistantTurn();
-				const tools = latestTools(pi).filter((tool) =>
-					EXPECTED_PI_TOOLS.includes(tool.name),
-				);
-				const names = tools.map((tool) => tool.name);
-				expect(names).not.toContain("ast_grep_replace");
-				expect(names.sort()).toEqual(
-					EXPECTED_PI_TOOLS.filter(
-						(name) => name !== "ast_grep_replace",
-					).sort(),
-				);
-				const disabledLines = pi.lens
-					.sessionStartLog()
-					.filter((line) =>
-						line.includes(
-							"session_start: disabled tools = ast_grep_replace, health (2 total)",
-						),
+	// #4634: these five cases spawn a real pi child and wait for its RPC turn —
+	// the same shape as the four siblings that already declare 60 s — but they
+	// ran on vitest's 5 s default. Measured 701-788 ms on an idle host, and
+	// 3,051-8,666 ms under load average 50-80 (up to 173% of the default, a
+	// timeout five times in nothing but its own budget). Each now declares the
+	// 60 s its siblings declare, through `scaledTestTimeout` so a lane that sets
+	// PI_LENS_TEST_TIMEOUT_SCALE widens it with the rest of the suite.
+
+	it(
+		"omits a project-disabled tool from pi's wire roster and records it once",
+		async () => {
+			await withRealPi(
+				{
+					fixture: "tools-disabled",
+					script: "script.json",
+					args: ["--no-lazy-tools"],
+					env: { PI_LENS_TEST_MODE: "0" },
+				},
+				async (pi) => {
+					await pi.prompt("report the tool roster");
+					await pi.awaitAssistantTurn();
+					const tools = latestTools(pi).filter((tool) =>
+						EXPECTED_PI_TOOLS.includes(tool.name),
 					);
-				expect(disabledLines).toHaveLength(1);
-				for (const tool of tools) {
-					expect(tool.surfaceBytes).toBe(
-						tool.descriptionBytes + tool.schemaBytes,
+					const names = tools.map((tool) => tool.name);
+					expect(names).not.toContain("ast_grep_replace");
+					expect(names.sort()).toEqual(
+						EXPECTED_PI_TOOLS.filter(
+							(name) => name !== "ast_grep_replace",
+						).sort(),
 					);
-				}
-			},
-		);
-	});
+					const disabledLines = pi.lens
+						.sessionStartLog()
+						.filter((line) =>
+							line.includes(
+								"session_start: disabled tools = ast_grep_replace, health (2 total)",
+							),
+						);
+					expect(disabledLines).toHaveLength(1);
+					for (const tool of tools) {
+						expect(tool.surfaceBytes).toBe(
+							tool.descriptionBytes + tool.schemaBytes,
+						);
+					}
+				},
+			);
+		},
+		scaledTestTimeout(60_000),
+	);
 
 	it("renders the session-start orientation from the enabled tool set (#2967)", async () => {
 		await withRealPi(
@@ -244,90 +257,106 @@ describe.skipIf(!realPiAvailable)("real pi RPC: tools.<name>.enabled", () => {
 		}
 	}, 60_000);
 
-	it("does not emit a disabled-tools note for the default config", async () => {
-		await withRealPi(
-			{
-				fixture: "scenario-1",
-				script: "script.json",
-				env: { PI_LENS_TEST_MODE: "0" },
-			},
-			async (pi) => {
-				await pi.prompt("check the default startup note");
-				await pi.awaitAssistantTurn();
-				expect(
-					pi.lens
-						.sessionStartLog()
-						.some((line) => line.includes("session_start: disabled tools =")),
-				).toBe(false);
-			},
-		);
-	});
+	it(
+		"does not emit a disabled-tools note for the default config",
+		async () => {
+			await withRealPi(
+				{
+					fixture: "scenario-1",
+					script: "script.json",
+					env: { PI_LENS_TEST_MODE: "0" },
+				},
+				async (pi) => {
+					await pi.prompt("check the default startup note");
+					await pi.awaitAssistantTurn();
+					expect(
+						pi.lens
+							.sessionStartLog()
+							.some((line) => line.includes("session_start: disabled tools =")),
+					).toBe(false);
+				},
+			);
+		},
+		scaledTestTimeout(60_000),
+	);
 
-	it("bounds a long disabled-tools session note", async () => {
-		await withRealPi(
-			{
-				fixture: "tools-disabled-many",
-				script: "script.json",
-				env: { PI_LENS_TEST_MODE: "0" },
-			},
-			async (pi) => {
-				await pi.prompt("report the disabled tools");
-				await pi.awaitAssistantTurn();
-				expect(
-					pi.lens
-						.sessionStartLog()
-						.some((line) =>
-							line.includes(
-								"session_start: disabled tools = ast_grep_search, ast_grep_replace, ast_grep_outline, lsp_navigation, lens_diagnostics, lens_diagnostic_mark, symbol_search, module_report and 9 more (17 total)",
+	it(
+		"bounds a long disabled-tools session note",
+		async () => {
+			await withRealPi(
+				{
+					fixture: "tools-disabled-many",
+					script: "script.json",
+					env: { PI_LENS_TEST_MODE: "0" },
+				},
+				async (pi) => {
+					await pi.prompt("report the disabled tools");
+					await pi.awaitAssistantTurn();
+					expect(
+						pi.lens
+							.sessionStartLog()
+							.some((line) =>
+								line.includes(
+									"session_start: disabled tools = ast_grep_search, ast_grep_replace, ast_grep_outline, lsp_navigation, lens_diagnostics, lens_diagnostic_mark, symbol_search, module_report and 9 more (17 total)",
+								),
 							),
-						),
-				).toBe(true);
-			},
-		);
-	});
+					).toBe(true);
+				},
+			);
+		},
+		scaledTestTimeout(60_000),
+	);
 
-	it("keeps the activation loader registered and emits its config diagnostic once", async () => {
-		await withRealPi(
-			{
-				fixture: "loader-disabled",
-				script: "script.json",
-				env: { PI_LENS_TEST_MODE: "0" },
-			},
-			async (pi) => {
-				await pi.prompt("report the loader roster");
-				await pi.awaitAssistantTurn();
-				expect(
-					latestTools(pi)
-						.filter((tool) => EXPECTED_PI_TOOLS.includes(tool.name))
-						.map((tool) => tool.name),
-				).toContain("pi_lens_activate_tools");
-				const diagnostics = pi.lens
-					.extensionLog()
-					.filter((row) =>
-						String(row.message ?? "").includes("PILENS_CFG_0009"),
-					);
-				expect(diagnostics).toHaveLength(1);
-			},
-		);
-	});
+	it(
+		"keeps the activation loader registered and emits its config diagnostic once",
+		async () => {
+			await withRealPi(
+				{
+					fixture: "loader-disabled",
+					script: "script.json",
+					env: { PI_LENS_TEST_MODE: "0" },
+				},
+				async (pi) => {
+					await pi.prompt("report the loader roster");
+					await pi.awaitAssistantTurn();
+					expect(
+						latestTools(pi)
+							.filter((tool) => EXPECTED_PI_TOOLS.includes(tool.name))
+							.map((tool) => tool.name),
+					).toContain("pi_lens_activate_tools");
+					const diagnostics = pi.lens
+						.extensionLog()
+						.filter((row) =>
+							String(row.message ?? "").includes("PILENS_CFG_0009"),
+						);
+					expect(diagnostics).toHaveLength(1);
+				},
+			);
+		},
+		scaledTestTimeout(60_000),
+	);
 
-	it("lets --no-tool win over a project config that enables the tool", async () => {
-		await withRealPi(
-			{
-				fixture: "cli-no-tool",
-				script: "script.json",
-				args: ["--no-lazy-tools", "--no-tool=lsp_navigation"],
-				env: { PI_LENS_TEST_MODE: "0" },
-			},
-			async (pi) => {
-				await pi.prompt("report the CLI roster");
-				await pi.awaitAssistantTurn();
-				expect(
-					latestTools(pi)
-						.filter((tool) => EXPECTED_PI_TOOLS.includes(tool.name))
-						.map((tool) => tool.name),
-				).not.toContain("lsp_navigation");
-			},
-		);
-	});
+	it(
+		"lets --no-tool win over a project config that enables the tool",
+		async () => {
+			await withRealPi(
+				{
+					fixture: "cli-no-tool",
+					script: "script.json",
+					args: ["--no-lazy-tools", "--no-tool=lsp_navigation"],
+					env: { PI_LENS_TEST_MODE: "0" },
+				},
+				async (pi) => {
+					await pi.prompt("report the CLI roster");
+					await pi.awaitAssistantTurn();
+					expect(
+						latestTools(pi)
+							.filter((tool) => EXPECTED_PI_TOOLS.includes(tool.name))
+							.map((tool) => tool.name),
+					).not.toContain("lsp_navigation");
+				},
+			);
+		},
+		scaledTestTimeout(60_000),
+	);
 });
