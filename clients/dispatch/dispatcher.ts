@@ -74,6 +74,7 @@ import {
 } from "./adopted-root-runners.js";
 
 import { laneCopyStandsFor, semanticRank } from "./lane-copies.js";
+import { normalizeRuleId } from "./rule-id-normalize.js";
 import {
 	applyRulePolicy,
 	resolvedRulePolicyMap,
@@ -477,7 +478,10 @@ function dedupeOverlappingDiagnostics(diagnostics: Diagnostic[]): Diagnostic[] {
 		const defectClass = d.defectClass ?? classifyDiagnostic(d);
 		const line = d.line ?? 1;
 		const column = d.column ?? 1;
-		const ruleKey = d.rule || d.id || "unknown";
+		// #4629: a language server renders `<source>:<code>` where its CLI prints
+		// `<code>`. Key on the normalized rule, as `lens_diagnostics` and
+		// `laneCopyStandsFor` do, so one finding has one identity on every surface.
+		const ruleKey = normalizeRuleId(d.rule || d.id || "unknown");
 		const key = `${d.filePath}:${line}:${column}:${defectClass}:${ruleKey}`;
 		const current = byKey.get(key);
 		if (!current) {

@@ -1273,8 +1273,9 @@ describe("Dispatch Flow", () => {
 			semantic: "blocking",
 			tool: serverId ? "lsp" : "ast-grep-napi",
 			// The spellings each runner gives one rule: the server's LSP copy
-			// carries its source, napi's the rule id. The two keys differ, so
-			// the overlap dedupe keeps both.
+			// carries its source, napi's the rule id. The overlap dedupe keys on
+			// the normalized rule (#4629), so the two name one finding there.
+			// `laneCopyStandsFor` still decides what a settled run records.
 			rule: serverId ? "ast-grep:no-unknown-returns" : "no-unknown-returns",
 			...(serverId && { serverId }),
 			...over,
@@ -1304,7 +1305,7 @@ describe("Dispatch Flow", () => {
 				}),
 			});
 		};
-		const run = async () => {
+		const run = async (withSemantic = false) => {
 			const ctx = createDispatchContext(
 				"test.ts",
 				"/project",
@@ -1314,7 +1315,12 @@ describe("Dispatch Flow", () => {
 			const result = await dispatchForFile(ctx, [
 				{ mode: "all", runnerIds: ["lane", "peer"] },
 			]);
-			return result.diagnostics.map((d) => `${d.runnerId}@${d.line}`).sort();
+			return result.diagnostics
+				.map(
+					(d) =>
+						`${d.runnerId}@${d.line}${withSemantic ? `:${d.semantic}` : ""}`,
+				)
+				.sort();
 		};
 
 		// Recurrence (#4491 row 18b, probe P35): the run and the lane both
@@ -1343,10 +1349,12 @@ describe("Dispatch Flow", () => {
 
 		// Recurrence (#4529 review R1): a team sgconfig can downgrade the same
 		// rule, and the server's warning copy then stood for napi's blocker,
-		// so nothing blocked.
+		// so nothing blocked. The blocker is still the one delivered; the
+		// overlap dedupe (#4629) absorbs the weaker copy of the same finding
+		// into it, where it used to list both.
 		it("keeps a covered run's blocker where its lane's copy of the rule is weaker", async () => {
 			register(true, { severity: "warning", semantic: "warning" });
-			expect(await run()).toEqual(["lane@3", "peer@3", "peer@5"]);
+			expect(await run(true)).toEqual(["peer@3:blocking", "peer@5:blocking"]);
 		});
 
 		// A cover may name a runner and no server (`coveredBy.serverId` is
