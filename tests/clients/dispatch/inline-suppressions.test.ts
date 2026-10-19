@@ -102,6 +102,20 @@ describe("applyInlineSuppressions (#442 — shared by mode=all + mode=full)", ()
 		).toEqual([]);
 	});
 
+	it("suppresses a Pyright language-server copy by the bare code in the comment (#4629)", () => {
+		const content =
+			'value: int = "s"  # pi-lens-ignore: reportAssignmentType\n';
+		for (const rule of [
+			"Pyright:reportAssignmentType",
+			"basedpyright:reportAssignmentType",
+			"reportAssignmentType",
+		]) {
+			expect(applyInlineSuppressions([{ line: 1, rule }], content)).toEqual([]);
+		}
+		const foreign: D[] = [{ line: 1, rule: "ty:reportAssignmentType" }];
+		expect(applyInlineSuppressions(foreign, content)).toEqual(foreign);
+	});
+
 	it("preserves a colon inside a namespaced rule id", () => {
 		const content = "eval(x)  # pi-lens-ignore: ast-grep:no-eval\n";
 		const diags: D[] = [{ line: 1, rule: "ast-grep:no-eval" }];

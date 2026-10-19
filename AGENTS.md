@@ -976,6 +976,16 @@ file-scoped worklist and receives no project-wide scanner output.
   refresh-state block; never auto-merged, never demotes). `tests/config/lsp-idle-eviction-measurement.test.ts`
   fails when a registry server can go unmeasured without an admission or when
   the committed measurement vetoes a server declared `transparent`.
+- The compiled registry holds the CATALOG ENTRY for every built-in with no
+  command override (`compileLspRegistry`), so the object the client registry
+  keeps (`SpawnedServer.info`) is the object `LSP_SERVERS`/`getServerById`
+  exposes; an overridden server keeps its own copy so its `spawn` and trust
+  admission never reach the catalog. A copy here is not a safe container: it is
+  a second registry whose entries swallow every arm a caller applies to the
+  first (history: `HISTORY.md`, 2026-10-19).
+  `tests/clients/lsp/lsp-registry-trust.test.ts` pins both directions;
+  `scheduleIdleEviction` records `lsp-idle-eviction-declined` once per server
+  per session when it arms no timer.
 - The server-role vocabulary and the declared trait table have one owner,
   `clients/lsp/server-traits.ts` (#1488, #1756 stage 1). Ask `isAuxiliary`,
   never a comparison against the role literal, and read `notifyInflightLimit`
@@ -1071,6 +1081,22 @@ file-scoped worklist and receives no project-wide scanner output.
   carried save leaves the save owed; a failed standalone save gets one bounded
   retry (`GateSaveRetry`, `MutGateSaveNoRetry`) and a retry that lands for
   other bytes cannot suppress the save the next saved touch owes.
+
+- Every server-produced `WorkspaceEdit` a path applies is bound to the bytes the
+  server computed it from. Both rename flows take the request instant before
+  they ask (`rename` right before `lspService.rename`, `renameFile` right before
+  `workspace/willRenameFiles`) and pass `captureRenameExpectedContent`'s map as
+  `expectedContent`; `clients/lsp/edits.ts` compares every bound file inside
+  pi's mutation queue before its first write, refuses the whole edit, and
+  records one `lsp-edit-stale-content` row naming the file. `renameFile` has no
+  target (nothing read the old path), so an unopened file there is best effort
+  by mtime, the same remainder the `rename` path carries. The evidence a file
+  is compared against is one sent-content record, the highest-priority live
+  client's for the cwd, so when two live clients hold one file the binding can
+  read a record that did not produce the edit; that topology is a live
+  remainder, not a covered case. `documentVersions` is
+  the other binding axis, for a server-initiated `workspace/applyEdit`. A new
+  apply site binds the content or states why it cannot.
 - `touchFile` freezes content-bound auxiliary coverage at merge time. A later
   publication cannot undo a finding drop. Auxiliary gaps narrow coverage and
   never turn a primary answer inconclusive. When a primary touch is
