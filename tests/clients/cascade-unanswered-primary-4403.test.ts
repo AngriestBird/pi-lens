@@ -201,7 +201,9 @@ async function deliveredCascadeLines(
 	ctx: unknown,
 ): Promise<string[]> {
 	const context = (await pi.emit(
-		"context",
+		// #4631: on pi 0.87+ the full transcript arrives at this hook and its
+		// returned list is used verbatim; `context` sees the conversation alone.
+		"context_with_system",
 		{ messages: [{ role: "user", content: "continue" }] },
 		ctx,
 	)) as { messages?: Array<{ content: unknown }> } | undefined;
