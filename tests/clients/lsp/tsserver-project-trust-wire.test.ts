@@ -451,9 +451,13 @@ describe("real wrapper effective compiler trust (#4299)", () => {
 			PATH: `node_modules/.bin${path.delimiter}${process.env.PATH ?? ""}`,
 		});
 		try {
-			expect(await attach(session, root, file)).toBeUndefined();
+			// The marker assertions name the defect first: a spawn-based probe
+			// executes the project's `which` even when the shim itself is later
+			// refused, so "no project program ran" is the round-3 requirement.
+			const spawned = await attach(session, root, file);
 			expect(fs.existsSync(probeMarker)).toBe(false);
 			expect(fs.existsSync(hostile.marker)).toBe(false);
+			expect(spawned).toBeUndefined();
 		} finally {
 			restorePath();
 		}
