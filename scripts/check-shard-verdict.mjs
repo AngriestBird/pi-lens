@@ -35,6 +35,15 @@
 // never read as green, and the harm from a false green here is a model
 // violation or a failing test that lands on master.
 //
+// Two inputs this seam does not recognise fail closed (#4680 r4 state table).
+// A blank `--check-step` value -- what `--check-step "${SHARD_CHECK_STEP}"`
+// passes when the variable is unset -- is a usage error (exit 2): "every
+// required step concluded" is vacuously true of no step, and it read a shard
+// cancelled mid-check as `warn`. And the warning needs the WHOLE matrix: the
+// shard rows must carry `(shard k/N)` with one N and each k from 1 to N once,
+// because a teardown cancel beside a shard row the listing does not show
+// explains nothing about the shard it does not show.
+//
 // Evidence that cannot be read is NOT a pass. If the run's job list cannot be
 // fetched or parsed, this prints one bounded `fail` line with the reason and
 // exits non-zero ("unreadable evidence is not a pass"): the aggregate must
@@ -103,10 +112,16 @@ export function parseArgs(argv) {
 /** A conclusion that means "this step ran to its end". */
 const STEP_DONE = new Set(["success"]);
 
+/** A step name that names something: a blank one never matches a step. */
+function isStepName(step) {
+	return typeof step === "string" && step.trim() !== "";
+}
+
 /** `checkSteps` as the list of steps this job must finish, first one first. */
 function requiredSteps(checkSteps) {
-	if (Array.isArray(checkSteps)) return checkSteps.filter(Boolean);
-	return checkSteps ? [checkSteps] : [];
+	return (Array.isArray(checkSteps) ? checkSteps : [checkSteps]).filter(
+		isStepName,
+	);
 }
 
 /**
@@ -129,6 +144,14 @@ export function classifyShardJob(job, checkSteps) {
 	const required = requiredSteps(checkSteps);
 	const work = required[0];
 
+	// #4680 r4 F4: with no required step, nothing vouches for the work, and the
+	// cancelled branch below would warn on a vacuous "every step concluded".
+	if (required.length === 0) {
+		return {
+			outcome: "fail",
+			reason: `${name} cannot be judged: no required step was named (an unset --check-step variable passes an empty one)`,
+		};
+	}
 	if (conclusion === "success") {
 		return { outcome: "pass", reason: `${name} succeeded` };
 	}
@@ -245,6 +268,13 @@ export function evaluateShardVerdict({
 			line: `${label}: needs result ${result}; ${warned.map((entry) => entry.reason).join("; ")}. A teardown race explains a \`cancelled\` aggregate, not a \`${result}\` one, and no visible shard row reports that result, so it is unexplained; unreadable evidence is not a pass`,
 		};
 	}
+	const gap = matrixGap(rows);
+	if (warned.length > 0 && gap !== null) {
+		return {
+			outcome: "fail",
+			line: `${label}: needs result ${result}; ${warned.map((entry) => entry.reason).join("; ")}. But ${gap}, so the rows cannot vouch for the whole matrix; unreadable evidence is not a pass`,
+		};
+	}
 	if (warned.length > 0) {
 		return {
 			outcome: "warn",
@@ -264,6 +294,46 @@ export function evaluateShardVerdict({
 		outcome: "fail",
 		line: `${label}: needs result ${result}; the ${rows.length} shard row(s) in the run's job list concluded ${conclusions.join(", ")} and none explains that result, so a shard row is missing from the evidence${conclusions.includes("skipped") ? " (a `skipped` shard job ran nothing: the `formal/`-unchanged rule skipped it, or its `needs` failed)" : ""}; unreadable evidence is not a pass`,
 	};
+}
+
+/** `(shard k/N)` at the end of a matrix row's name, as GitHub expands it. */
+const SHARD_SUFFIX = /\(shard ([0-9]+)\/([0-9]+)\)$/;
+
+/**
+ * Why the matched rows are not one whole matrix, or `null` when they are:
+ * every row names `(shard k/N)` with the same N, and k covers 1..N exactly
+ * once. The warning is a claim about every shard, so a row the listing does
+ * not show (or shows twice, or names in a form this cannot read) refuses it
+ * (#4680 r4 state table, "missing").
+ *
+ * @param {object[]} rows the shard rows the pattern matched
+ * @returns {string | null}
+ */
+function matrixGap(rows) {
+	const seen = new Map();
+	let total = null;
+	for (const job of rows) {
+		const match = SHARD_SUFFIX.exec(job.name);
+		if (match === null)
+			return `\`${job.name}\` carries no \`(shard k/N)\`, so its matrix cannot be checked`;
+		const count = Number(match[2]);
+		if (total !== null && count !== total)
+			return `the shard rows disagree on the shard count (${total} and ${count})`;
+		total = count;
+		const index = Number(match[1]);
+		seen.set(index, (seen.get(index) ?? 0) + 1);
+	}
+	for (const [index, times] of seen) {
+		if (index < 1 || index > total)
+			return `shard ${index} lies outside 1..${total}`;
+		if (times !== 1) return `shard ${index} of ${total} appears ${times} times`;
+	}
+	const missing = [];
+	for (let index = 1; index <= total; index += 1)
+		if (!seen.has(index)) missing.push(index);
+	return missing.length === 0
+		? null
+		: `missing shard ${missing.join(", ")} of ${total} from the run's job list`;
 }
 
 /** The conclusion a shard row actually reports, for the message above. */
@@ -378,6 +448,15 @@ export async function runShardVerdict({
 		return fail(
 			{ code: 2 },
 			`check-shard-verdict: missing ${missing.map((flag) => `--${flag}`).join(", ")}; usage: node scripts/check-shard-verdict.mjs --label <name> --result <needs result> --shard-pattern <regexp> --check-step <step name> [--check-step <step name> ...] [--repository <owner/repo> --run <id> | --jobs-file <path>]`,
+			stdout,
+		);
+	}
+	// #4680 r4 F4: a blank value is what an unset workflow variable passes, and
+	// it names no step; refuse it before any branch, `success` included.
+	if (!parsed["check-step"].every(isStepName)) {
+		return fail(
+			{ code: 2 },
+			'check-shard-verdict: --check-step needs a step name (an empty or blank value names no step; an unset variable in `--check-step "${VAR}"` passes one)',
 			stdout,
 		);
 	}

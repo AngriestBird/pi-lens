@@ -27,7 +27,9 @@
 //     `Unit tests (shard 1/5)` row of run 39374931372 attempt 1 (the same real
 //     step list, names renumbered): shards 1 and 2 `success`, shard 3
 //     `cancelled` with `Run tests` concluded `success`, which is #4672's race
-//     on the other aggregate.
+//     on the other aggregate. Rows 4/5 and 5/5 were added in round 4 as copies
+//     of shard 2's row (name, id and urls renumbered), because a warning now
+//     needs the whole matrix: every `k` of `(shard k/N)` exactly once.
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -83,6 +85,16 @@ function verdictLine(options: {
 		checkSteps: options.checkSteps ?? [options.checkStep],
 		jobs: options.jobs,
 	});
+}
+
+/** A shard row that concluded `success`, for building a whole matrix. */
+function succeededShard(label: string, index: number, total: number): ShardJob {
+	return {
+		id: index,
+		name: `${label} (shard ${index}/${total})`,
+		conclusion: "success",
+		steps: [{ name: "Run tests", conclusion: "success" }],
+	};
 }
 
 describe("#4672 a cancelled shard that finished its work is a pass with a warning", () => {
@@ -281,7 +293,10 @@ describe("#4672 a cancelled shard that finished its work is a pass with a warnin
 			pattern: UNIT_PATTERN,
 			checkStep: UNIT_CHECK_STEP,
 			checkSteps: [UNIT_CHECK_STEP, "Tmp-fixture hygiene owner"],
-			jobs: [job],
+			jobs: [
+				...[1, 2, 4, 5].map((k) => succeededShard("Unit tests", k, 5)),
+				job,
+			],
 		});
 		expect(verdict.outcome).toBe("warn");
 		expect(verdict.line).toContain(
@@ -312,6 +327,78 @@ describe("#4672 a cancelled shard that finished its work is a pass with a warnin
 		// case where the old wording pointed at a green shard that never ran.
 		expect(verdict.line).not.toContain("every one of the");
 	});
+
+	// #4680 r4 state table, Table A "missing" row: a teardown cancel explains a
+	// `cancelled` result, and the warning used to need nothing else -- so with
+	// shard 4/4's row absent and shard 3/4 cancelled at teardown the aggregate
+	// read `warn` and exit 0 for a shard it never saw. Reproduced before the fix
+	// (probes-r4/cells-a.mjs: `missing (3 teardown, 4 absent) ... warn exit 0`).
+	// The warning now needs the whole matrix: every `k` of `(shard k/N)` once.
+	it("fails closed when a teardown cancel sits beside a missing shard row", () => {
+		const rows = jobsOf("tla-cancelled-complete.real.json")
+			.filter((job) => TLA_PATTERN.test(String(job.name)))
+			.filter((job) => !String(job.name).includes("shard 1/4"));
+		expect(rows.map((job) => job.conclusion).sort()).toEqual([
+			"cancelled",
+			"success",
+			"success",
+		]);
+		const verdict = verdictLine({
+			label: "TLA+ models",
+			result: "cancelled",
+			pattern: TLA_PATTERN,
+			checkStep: TLA_CHECK_STEP,
+			jobs: rows,
+		});
+		expect(verdict.outcome).toBe("fail");
+		expect(verdict.line).toContain("missing shard 1 of 4");
+		expect(verdict.line).toContain("unreadable evidence is not a pass");
+	});
+
+	it.each([
+		[
+			"a shard index appears twice",
+			(rows: ShardJob[]) => [...rows, { ...rows[0] }],
+			"shard 2 of 4 appears 2 times",
+		],
+		[
+			"the rows disagree on the shard count",
+			(rows: ShardJob[]) =>
+				rows.map((job) =>
+					String(job.name).includes("shard 2/4")
+						? { ...job, name: "TLA+ models (shard 2/5)" }
+						: job,
+				),
+			"disagree on the shard count",
+		],
+		[
+			"a matched name carries no `(shard k/N)`",
+			(rows: ShardJob[]) => [
+				...rows,
+				{ id: 99, name: "TLA+ models (shard x)", conclusion: "success" },
+			],
+			"no `(shard k/N)`",
+		],
+	])(
+		"fails closed when %s",
+		(_why, edit: (rows: ShardJob[]) => ShardJob[], expected: string) => {
+			const rows = jobsOf("tla-cancelled-complete.real.json").filter((job) =>
+				TLA_PATTERN.test(String(job.name)),
+			);
+			// The pattern a caller passes decides what is a shard row, so the
+			// unrecognised name is admitted by a looser pattern here.
+			const loose = /^TLA\+ models \(shard .+\)$/;
+			const verdict = verdictLine({
+				label: "TLA+ models",
+				result: "cancelled",
+				pattern: loose,
+				checkStep: TLA_CHECK_STEP,
+				jobs: edit(rows),
+			});
+			expect(verdict.outcome).toBe("fail");
+			expect(verdict.line).toContain(expected);
+		},
+	);
 
 	// F7, the misnamed case: a skipped matrix cell (a failed upstream `changes`
 	// job skips every shard) makes the aggregate's own result `skipped`, and the
@@ -607,6 +694,53 @@ describe("#4672 the aggregate step's own boundary: argv, fetch failures, annotat
 		expect(result.outcome).toBe("fail");
 	});
 
+	// #4680 r4 F4 (coderabbit "Fail closed when the required step list is
+	// empty"): `--check-step "${SHARD_CHECK_STEP}"` with the variable unset
+	// passes ONE empty value, which the step filter dropped -- so a shard
+	// cancelled with its work step still running read `warn`, exit 0, because
+	// "every required step concluded" is vacuously true of no step. Reproduced
+	// before the fix (probes-r4/cells-a.mjs: four `empty ("")` cells warned). A
+	// blank value is a usage error before any branch, `success` included.
+	it.each([
+		["an empty value", ["--check-step", ""]],
+		["a whitespace value", ["--check-step", "  "]],
+		[
+			"an empty value beside a real one",
+			["--check-step", TLA_CHECK_STEP, "--check-step", ""],
+		],
+	])("rejects %s for --check-step", async (_label, steps) => {
+		for (const result of ["cancelled", "success"]) {
+			const result_ = await run([
+				"--label",
+				"TLA+ models",
+				"--shard-pattern",
+				TLA_PATTERN.source,
+				...steps,
+				"--result",
+				result,
+				"--jobs-file",
+				join(FIXTURES, "tla-cancelled-in-flight.synthetic.json"),
+			]);
+			expect(result_.code).toBe(2);
+			expect(result_.outcome).toBe("fail");
+			expect(result_.lines[0]).toContain("--check-step needs a step name");
+		}
+	});
+
+	// The seam's own half of F4, for a direct caller: no required step means
+	// nothing vouches for a cancelled row's work.
+	it("fails a cancelled row when no required step is named", () => {
+		const cancelled = jobsOf("tla-cancelled-complete.real.json").find(
+			(job) => job.conclusion === "cancelled",
+		);
+		expect(cancelled).toBeDefined();
+		for (const steps of [[], [""], ""]) {
+			const verdict = classifyShardJob(cancelled as ShardJob, steps);
+			expect(verdict.outcome).toBe("fail");
+			expect(verdict.reason).toContain("no required step was named");
+		}
+	});
+
 	it("names every missing required flag", async () => {
 		const result = await run(["--result", "cancelled"]);
 		expect(result.code).toBe(2);
@@ -673,6 +807,44 @@ describe("#4672 the aggregate step's own boundary: argv, fetch failures, annotat
 		expect(printed.join("\n")).not.toContain("check-shard-verdict:");
 		expect(printed).toEqual([]);
 		expect(process.exitCode).toBe(exitCodeBefore);
+	});
+
+	// #4680 r4 F3: the other direction of the same guard. The test above pins
+	// "a wrapper import does not run main()", and nothing pinned "running the
+	// script does": replacing the guard with `false` left all 112 tests green
+	// while `node scripts/check-shard-verdict.mjs --result failure ...` printed
+	// nothing and exited 0 -- both REQUIRED aggregates green on any shard
+	// result. Driven in process like its sibling: `process.argv[1]` is the
+	// script's own path and the module is imported by its plain URL, so the
+	// guard's comparison is what answers.
+	it("runs the entry point when the script itself is argv[1]", async () => {
+		const script = resolve(
+			import.meta.dirname,
+			"../../scripts/check-shard-verdict.mjs",
+		);
+		const argvBefore = [...process.argv];
+		const exitCodeBefore = process.exitCode;
+		const printed: string[] = [];
+		const log = vi.spyOn(console, "log").mockImplementation((line: unknown) => {
+			printed.push(String(line));
+		});
+		let exitCode: number | string | null | undefined;
+		try {
+			// No flags at all: `main()` must print its usage line and exit 2.
+			process.argv.splice(0, process.argv.length, argvBefore[0], script);
+			vi.resetModules();
+			await import(pathToFileURL(script).href);
+			await vi.waitFor(() => expect(process.exitCode).toBe(2));
+			exitCode = process.exitCode;
+		} finally {
+			process.argv.splice(0, process.argv.length, ...argvBefore);
+			process.exitCode = exitCodeBefore;
+			log.mockRestore();
+		}
+		expect(exitCode).toBe(2);
+		expect(printed.join("\n")).toContain(
+			"check-shard-verdict: missing --label, --result, --shard-pattern, --check-step",
+		);
 	});
 
 	it("refuses a jobs file with no jobs array", async () => {
