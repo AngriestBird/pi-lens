@@ -355,6 +355,7 @@ describe("Windows LSP startup repair classification (#4263)", () => {
 	// as `...\bin\gopls` is installed. Only the real Windows resolver can read
 	// that, so this cell runs on the Windows lane alone; on POSIX the resolver
 	// answers null for every path and the cell has nothing to witness.
+	// lane: windows-vitest
 	it.runIf(process.platform === "win32")(
 		"does not repair an extensionless explicit command whose .exe is present",
 		async () => {
