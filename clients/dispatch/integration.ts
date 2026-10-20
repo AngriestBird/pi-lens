@@ -729,15 +729,13 @@ function cascadeReconcilableLspErrors(
 	// rule the cascade display runs (`applyCascadeDisplayPolicy`), applied before
 	// the ERROR filter, so a gap the agent no longer sees is not persisted as a
 	// blocking footer entry either. A demoted row is a warning and leaves here
-	// as every LSP warning does.
-	const languageServerRows = rawDiags.filter(
-		(d) => !findAuxiliaryProfileForSource(d.source),
-	);
+	// as every LSP warning does. The rule reads TypeScript rows only, so an
+	// auxiliary row passes through it untouched and is dropped below.
 	return convertLspDiagnostics(
-		demoteEnvironmentGapDiagnostics(languageServerRows, {
-			filePath: neighborPath,
-		})
-			.filter((d) => d.severity === 1)
+		demoteEnvironmentGapDiagnostics([...rawDiags], { filePath: neighborPath })
+			.filter(
+				(d) => d.severity === 1 && !findAuxiliaryProfileForSource(d.source),
+			)
 			.slice(0, MAX_PER_FILE),
 		neighborPath,
 	);
