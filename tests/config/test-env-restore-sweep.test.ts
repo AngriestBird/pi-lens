@@ -12,8 +12,10 @@
  * runs `vi.unstubAllEnvs()` after `vi.stubEnv`).
  *
  * The baseline (`tests/support/test-env-restore-baseline.ts`) admits the
- * writes already leaking on master, so this lands as a ratchet instead of a
- * mass edit. Every admitted file carries a reason in
+ * writes no restore provably covers, so this lands as a ratchet instead of a
+ * mass edit. Most rows are the leaks master already had; a change adds a row
+ * only where a restore would re-arm the defect its write pins (#4673's
+ * run-wide jiti cache pin). Every admitted file carries a reason in
  * `tests/support/test-env-restore-admissions.ts`, re-checked against the file
  * here: a new row cannot be admitted by appending one line (AGENTS.md shape
  * 38). Shrinking the baseline is the work; growing it reds.
@@ -52,7 +54,7 @@ const BASELINE_PATH = path.join(
 	"tests/support/test-env-restore-baseline.ts",
 );
 const BASELINE_HEADER =
-	"#4589 baseline: the env writes already leaking on master, admitted so the sweep is a ratchet, not a mass edit.";
+	"#4589 baseline: env writes no restore provably covers, admitted so the sweep is a ratchet, not a mass edit. Rows are the leaks master already had, plus rows a change adds where a restore would re-arm the defect its write pins.";
 /** The admission guard's row spelling; a regenerated row must pass it. */
 const ROW_RE = /^tests\/[\w./-]+\.ts:[^\s]+$/;
 /** Baseline for the live tree, as a Set so the two directions are symmetric. */

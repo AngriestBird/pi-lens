@@ -531,7 +531,13 @@ export function mergeServerCapabilitiesDoc(priorText, freshText) {
 //    degrades to `unknown` once `FIRST_PUBLISH_EXPIRY_DAYS` have elapsed. Only
 //    `direct` is in the population: `empty-first` backs live
 //    `emptyFirstPublish` markers, so expiring it would erase the measurement
-//    behind a marker while the first-publish census stays green.
+//    behind a marker while the first-publish census stays green. #4615 closes
+//    the other half of that exception: an `empty-first` cell the probe no
+//    longer observes is stamped with the same `firstMissed` clock (never
+//    expired, never slid), so the census can require the cell's evidence to be
+//    current instead of letting the marker/cell pair outlive the instrument
+//    that produced it — the #3310 blindness in the direction that never
+//    expires.
 //  - HYSTERESIS (clean-behavior/tier, run-based): a change is written only after
 //    `TIER_CHANGE_AGREE_RUNS` consecutive runs observe the same new value, so a
 //    single flapping run (ast-grep 2 -> 2* -> 3 -> 2* across four nightlies)
@@ -892,6 +898,21 @@ export function refreshCapabilityMatrix(text, observations, opts = {}) {
 				} else {
 					nextState["first-publish"][lang] = priorFp[lang];
 				}
+			} else {
+				nextState["first-publish"][lang] = { firstMissed: today };
+			}
+		} else if (currentFp === "empty-first") {
+			// #4615: an `empty-first` cell is never expired — it backs a live
+			// `emptyFirstPublish` marker — but the same rule made the pair immortal:
+			// a probe that stopped observing this axis left the cell standing with
+			// nothing behind it, which is the #3310 dead-instrument failure again in
+			// the direction that never expires. Stamp the FIRST unobserved night once
+			// (never slid) exactly as a `direct` miss does; the census reds when a
+			// marker-backed `empty-first` cell's stamp is `FIRST_PUBLISH_EXPIRY_DAYS`
+			// old, so the cell outlives nothing it cannot re-measure.
+			const elapsed = elapsedDays(priorFp[lang]?.firstMissed, today);
+			if (elapsed !== null && elapsed >= 0) {
+				nextState["first-publish"][lang] = priorFp[lang];
 			} else {
 				nextState["first-publish"][lang] = { firstMissed: today };
 			}

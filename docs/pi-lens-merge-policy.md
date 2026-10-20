@@ -680,6 +680,9 @@ Each row cost a lane at least once; the prose above carries the record.
 | Dispatching a fixer on an issue's text without checking it against the code | Grep the claimed gap on master before the brief. A stale premise turns the lane into a no-op or a witness-only PR |
 | Writing off a worker's reds as "sandbox" without a same-env base run | Accept a sandbox attribution only with the same test names red on origin/master under the same env vars. Hundreds of guard reds can hide one real red |
 | Folding a reviewer's remedy after running only the file the reviewer named | Run every test that references the changed symbol (`rg -l <symbol> tests`) before pushing a fold |
+| Refreshing a census or matrix cell from a probe artifact | shape 76: the row must come from the subject's own emitter, never from an order-sensitive drain (#4615) |
+| Reading a cancelled shard as a failure, or assuming a rerun clears it | shape 77: check the shard's own step conclusions and its measured runtime against the cap (#4672) |
+| Admitting a third-party cache directory at the shared tmp root by name | shape 78: pin the loader's cache off and keep a planted sibling red (#4673) |
 | Pushing with `-q` or a grep filter, then landing on whatever the PR head is | Read the push result unfiltered, check `git merge-base --is-ancestor <intended> origin/<branch>`, and land with `EXPECT_HEAD=<intended or its merge>` |
 | Gating a background step on `until ! pgrep -f '<pattern>'` | That command line matches itself and never exits. Chain the steps in one command, or wait on a PID |
 | Editing an orchestrator script while a chain or monitor runs it | Stop the chain first, or write a new file and `mv` it into place |
