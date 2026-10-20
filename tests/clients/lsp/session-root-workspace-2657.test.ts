@@ -18,7 +18,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { resolveAnalysisRoot } from "../../../clients/analysis-root.js";
+import {
+	isSessionBookkeepingRoot,
+	resolveAnalysisRoot,
+} from "../../../clients/analysis-root.js";
 import { CacheManager } from "../../../clients/cache-manager.js";
 import {
 	getDegradationSummary,
@@ -238,6 +241,42 @@ describe("a session root is a workspace (#2657)", () => {
 		expect(isSessionRootRegistered(path.dirname(file))).toBe(false);
 		const registry = new ClientRegistry(noopHooks(), undefined, workspace);
 		expect(registry.analysisRootModeForFile(file)).toBe("linked-worktree");
+	});
+
+	// CodeRabbit round 3: `loadLSPConfig` layers from the registered root
+	// UPWARD, so a config nested inside a linked worktree reaches the runtime
+	// only when its own owner directory is registered. The walk must stop at
+	// the worktree root (never above it), or the worktree loses its isolation.
+	it("registers a config owner nested inside a linked worktree", async () => {
+		const worktree = addLinkedWorktree(workspace, "wt-config");
+		const nested = path.join(worktree, "packages", "app");
+		fs.mkdirSync(path.join(nested, "src"), { recursive: true });
+		fs.writeFileSync(path.join(nested, "package.json"), "{}\n");
+		fs.writeFileSync(
+			path.join(nested, ".pi-lens.json"),
+			JSON.stringify({ lsp: { disabledServers: ["opengrep"] } }),
+		);
+		const file = path.join(nested, "src", "index.ts");
+		fs.writeFileSync(file, "export const x = 1;\n");
+
+		await readCall(file, 904);
+
+		expect(getSessionRootsForTelemetry(200)).toContain(nested);
+		// The worktree root itself is not the owner here, and the file's own
+		// directory is never a root.
+		expect(isSessionRootRegistered(worktree)).toBe(false);
+		expect(isSessionRootRegistered(path.dirname(file))).toBe(false);
+		const registry = new ClientRegistry(noopHooks(), undefined, workspace);
+		expect(registry.analysisRootModeForFile(file)).toBe("linked-worktree");
+	});
+
+	it("calls the session root and its linked worktrees bookkeeping roots, an adopted project not", () => {
+		const worktree = addLinkedWorktree(workspace, "wt-bookkeeping");
+		expect(isSessionBookkeepingRoot(workspace, workspace)).toBe(true);
+		expect(isSessionBookkeepingRoot(worktree, workspace)).toBe(true);
+		// A sibling project with its own marker is adopted: it may host a client
+		// and receive the look, never a session sequence or receipt.
+		expect(isSessionBookkeepingRoot(adoptedProject(), workspace)).toBe(false);
 	});
 
 	it("records no session root for a refused (none) path", async () => {

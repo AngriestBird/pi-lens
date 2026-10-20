@@ -140,6 +140,45 @@ export function canWriteAnalysisRoot(mode: AnalysisRootMode): boolean {
 }
 
 /**
+ * The NEAREST config owner at or above `start`, never above `ceiling`: the
+ * direction `loadLSPConfig` layers (registered root, then its ancestors), so a
+ * nested `repo/sub/.pi-lens.json` keeps applying only when `repo/sub` itself is
+ * registered (#4532 round 3, CodeRabbit).
+ */
+function nearestConfigOwner(start: string, ceiling: string): string {
+	for (const dir of walkUpDirs(start)) {
+		if (dir !== ceiling && !isUnderDir(dir, ceiling)) break;
+		if (findPiLensConfigInDir(dir)) return dir;
+		if (dir === ceiling) break;
+	}
+	return ceiling;
+}
+
+/**
+ * May this ROOT receive session bookkeeping? The session root and the session
+ * repository's linked worktrees may; an adopted project must not (AGENTS.md
+ * "Analysis-root invariant"). The root form of {@link resolveAnalysisRoot}:
+ * checkout identity is read at the root itself, not at a child path, so a
+ * caller holding a root asks the owner instead of re-deriving the rule.
+ */
+export function isSessionBookkeepingRoot(
+	root: string,
+	sessionRoot: string,
+): boolean {
+	const resolved = realPathOrResolved(root);
+	const session = realPathOrResolved(sessionRoot);
+	if (resolved === session) return true;
+	const checkout = resolveGitCheckout(session);
+	if (!checkout) return false;
+	const owner = resolveGitCheckout(resolved);
+	return (
+		owner !== null &&
+		owner.commonDir === checkout.commonDir &&
+		owner.root !== checkout.root
+	);
+}
+
+/**
  * #2657 + #4242: the root a session should REGISTER for `filePath`, or
  * `undefined` when this file's mode must register NOTHING.
  *
@@ -157,8 +196,10 @@ export function canWriteAnalysisRoot(mode: AnalysisRootMode): boolean {
  *   session root. The config loader layers upward from the registered root, so
  *   that root must sit at or below the nearest config owner or a nested config
  *   stops applying;
- * - `linked-worktree` → the linked worktree's OWN root, so per-worktree
- *   isolation is preserved (maintainer decision on #1129);
+ * - `linked-worktree` → the nearest config owner from the file up to the
+ *   worktree's OWN root, never above it, so per-worktree isolation is preserved
+ *   (maintainer decision on #1129) and a config nested inside the worktree
+ *   keeps applying;
  * - `adopted` / `none` → `undefined`, i.e. register nothing.
  *
  * The last line is the analysis-root invariant (AGENTS.md): an adopted root is
@@ -177,21 +218,19 @@ export function resolveSessionConfigRoot(
 ): string | undefined {
 	const session = nodePath.resolve(sessionRoot);
 	const mode = resolveAnalysisRoot(filePath, session, homeDirOverride);
+	const start = nodePath.dirname(nodePath.resolve(filePath));
 	if (mode === "linked-worktree") {
 		const checkout = resolveGitCheckout(session);
-		return (
+		const worktreeRoot =
 			(checkout &&
 				resolveLinkedWorktreeOwner(checkout, realPathOrResolved(filePath))
 					?.root) ??
-			session
-		);
+			session;
+		// The worktree is a workspace of its own, and its config layers are the
+		// worktree's: register from the file upward to the worktree root, never
+		// above it (maintainer decision on #1129).
+		return nearestConfigOwner(start, worktreeRoot);
 	}
 	if (mode !== "session") return undefined;
-	const start = nodePath.dirname(nodePath.resolve(filePath));
-	for (const dir of walkUpDirs(start)) {
-		if (dir !== session && !isUnderDir(dir, session)) break;
-		if (findPiLensConfigInDir(dir)) return dir;
-		if (dir === session) break;
-	}
-	return session;
+	return nearestConfigOwner(start, session);
 }

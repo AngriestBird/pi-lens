@@ -26,6 +26,7 @@ import {
 	resolveToolCallFilePath,
 } from "./path-utils.js";
 import { detectFileKind } from "./file-kinds.js";
+import { isSessionBookkeepingRoot } from "./analysis-root.js";
 import {
 	extractReadPathsFromCommand,
 	extractDeletedPathsFromCommand,
@@ -2160,10 +2161,23 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			await bounded(
 				Promise.all(
 					clientRoots.map((entry) =>
-						lookForOutOfBandChanges(entry.root, "tool_result", runtime, {
-							since: entry.spawnedAt,
-							walk: "interval",
-						}).catch((cause: unknown) => {
+						lookForOutOfBandChanges(
+							entry.root,
+							"tool_result",
+							// AGENTS.md "Analysis-root invariant": the look may run at
+							// an adopted root (its client must restart when its install
+							// appears), but an adopted root never receives session
+							// bookkeeping — no sequence, no receipt, no change-log entry
+							// (#4532 round 3, Greptile). The session root and its
+							// repository's linked worktrees are bookkeeping roots.
+							isSessionBookkeepingRoot(entry.root, headScanRoot)
+								? runtime
+								: undefined,
+							{
+								since: entry.spawnedAt,
+								walk: "interval",
+							},
+						).catch((cause: unknown) => {
 							// One bounded record per root: a look that threw tells nothing
 							// about the root's install, so it must not read as "no install".
 							recordDegradationOnce({

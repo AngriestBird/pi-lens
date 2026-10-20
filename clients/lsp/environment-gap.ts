@@ -102,8 +102,18 @@ const MISSING_NAME = /^Cannot find name '([^']+)'/;
 /** The namespace `@types/node` declares and nothing else in a TS project does. */
 const NODE_NAMESPACE = "NodeJS";
 
-/** Codes this gate can demote at all; every other code stays blocking. */
-const ENVIRONMENT_GAP_CODES = new Set([2307, 2503, 2304]);
+/**
+ * Codes this gate can demote at all; every other code stays blocking.
+ *
+ * 2580/2591 are TypeScript's own "do you need to install type definitions for
+ * node?" forms of 2304 for the main Node globals (`process`, `require`,
+ * `Buffer`, `module`): the checker reports those four with 2580, or 2591 when
+ * `compilerOptions.types` is set, never with 2304 (#4532 round 3, CodeRabbit).
+ */
+const ENVIRONMENT_GAP_CODES = new Set([2307, 2503, 2304, 2580, 2591]);
+
+/** The codes whose message is `Cannot find name '<name>'.` */
+type MissingNameCode = 2304 | 2580 | 2591;
 
 /**
  * A bare specifier is resolved from `node_modules`; a relative, absolute or
@@ -116,9 +126,13 @@ function isBareSpecifier(specifier: string): boolean {
 	if (specifier.startsWith(".") || specifier.startsWith("/")) return false;
 	if (specifier.startsWith("#")) return false;
 	if (/^[A-Za-z]:[\\/]/.test(specifier)) return false;
-	// A URL or a bare path-like token with a separator at the front is not a
-	// package name either; `@scope/name` and `name/sub` are.
-	return !specifier.includes("\\") || specifier.startsWith("@");
+	// `@scope/name` is a package; `@/missing` (an empty scope) is a project
+	// path alias — a tsconfig `paths` mapping — that installing dependencies
+	// cannot fix, so it stays blocking (#4532 round 3, Greptile).
+	if (specifier.startsWith("@")) return /^@[^/]+\/.+$/.test(specifier);
+	// A bare path-like token with a separator at the front is not a package
+	// name either; `name/sub` is.
+	return !specifier.includes("\\");
 }
 
 /**
@@ -128,7 +142,7 @@ function isBareSpecifier(specifier: string): boolean {
  */
 export function environmentGapKind(
 	diagnostic: LSPDiagnostic,
-): 2307 | 2503 | 2304 | undefined {
+): 2307 | 2503 | MissingNameCode | undefined {
 	if (diagnostic.severity !== 1) return undefined;
 	if (!isTypeScriptSourcedDiagnostic(diagnostic)) return undefined;
 	if (
@@ -151,7 +165,9 @@ export function environmentGapKind(
 			: undefined;
 	}
 	const name = MISSING_NAME.exec(message)?.[1];
-	return name !== undefined && NODE_GLOBALS.has(name) ? 2304 : undefined;
+	return name !== undefined && NODE_GLOBALS.has(name)
+		? (code as MissingNameCode)
+		: undefined;
 }
 
 /**
@@ -222,7 +238,7 @@ export function demoteEnvironmentGapDiagnostics(
 	diagnostics: LSPDiagnostic[],
 	options: EnvironmentGapOptions,
 ): LSPDiagnostic[] {
-	const admitted = new Map<LSPDiagnostic, 2307 | 2503 | 2304>();
+	const admitted = new Map<LSPDiagnostic, 2307 | 2503 | MissingNameCode>();
 	for (const diagnostic of diagnostics) {
 		const kind = environmentGapKind(diagnostic);
 		if (kind !== undefined) admitted.set(diagnostic, kind);

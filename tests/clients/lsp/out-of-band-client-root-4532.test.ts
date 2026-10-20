@@ -147,8 +147,10 @@ afterEach(() => {
 describe("the install look at a live client root (#4532 gap 7)", () => {
 	it("restarts the worktree's client when node_modules is symlinked in after it spawned", async () => {
 		// The server is already rooted at the worktree and spawned BEFORE the
-		// install: exactly the reported order.
-		const spawnedAt = Date.now();
+		// install: exactly the reported order. A second in the past, because a
+		// file's mtime comes from the kernel's coarse clock and can trail
+		// `Date.now()` by a tick (CodeRabbit round 3).
+		const spawnedAt = Date.now() - 1_000;
 		clientRoots = [{ root: worktree, spawnedAt }];
 		installService();
 		fs.symlinkSync(
@@ -171,6 +173,40 @@ describe("the install look at a live client root (#4532 gap 7)", () => {
 				() => true,
 			),
 		).toBeGreaterThan(0);
+	});
+
+	// Greptile round 3: AGENTS.md "Analysis-root invariant" — an adopted root may
+	// host a client and receive the look, but never session bookkeeping, so the
+	// look must allocate no project sequence for it.
+	it("restarts an adopted root's client without session bookkeeping", async () => {
+		// The look must still PUBLISH at an adopted root — its client restarts
+		// when its install lands — so the population here is a declaration
+		// change, the input that would allocate a project sequence if the look
+		// handed it the session runtime.
+		const previousLookMs = process.env.PI_LENS_DECLARATION_LOOK_MS;
+		process.env.PI_LENS_DECLARATION_LOOK_MS = "0";
+		const declaration = path.join(worktree, "types.d.ts");
+		fs.writeFileSync(declaration, "declare const A: number;\n");
+		installService();
+		fs.symlinkSync(
+			path.join(main, "node_modules"),
+			path.join(worktree, "node_modules"),
+		);
+		clientRoots = [{ root: worktree, spawnedAt: Date.now() - 1_000 }];
+		try {
+			await bashResult("ln -s ../main-checkout/node_modules node_modules");
+			expect(restarts).toContain(normalizeMapKey(worktree));
+			fs.writeFileSync(declaration, "declare const A: string;\n");
+			await bashResult("true");
+		} finally {
+			if (previousLookMs === undefined)
+				delete process.env.PI_LENS_DECLARATION_LOOK_MS;
+			else process.env.PI_LENS_DECLARATION_LOOK_MS = previousLookMs;
+		}
+		expect(restarts).toContain(normalizeMapKey(worktree));
+		// No sequence, receipt or change-log entry for a foreign root: the
+		// session's own look published nothing (main's install is unchanged).
+		expect(runtime.projectSeq).toBe(0);
 	});
 
 	it("publishes nothing on a first look at a root whose install predates its client", async () => {

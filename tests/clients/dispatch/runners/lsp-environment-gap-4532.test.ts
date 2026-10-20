@@ -31,7 +31,11 @@ import {
 	getLSPService,
 	resetLSPService,
 } from "../../../../clients/lsp/capabilities.js";
-import { ENVIRONMENT_GAP_MARKER } from "../../../../clients/lsp/environment-gap.js";
+import {
+	ENVIRONMENT_GAP_MARKER,
+	ENV_NODE_MODULES_WALK_MAX_LEVELS,
+	hasResolvableNodeModules,
+} from "../../../../clients/lsp/environment-gap.js";
 import { configureLspServiceLifecycle } from "../../../../clients/lsp/service-singleton.js";
 import {
 	getDegradationSummary,
@@ -190,6 +194,108 @@ describe("a worktree with no dependency install (#4532)", () => {
 		expect(kinds).toContain("2307");
 		expect(kinds).toContain("2503");
 		expect(kinds).toContain("2304");
+	});
+
+	// CodeRabbit round 3: the main Node globals are reported with TS2580, or
+	// TS2591 when `compilerOptions.types` is set — never with TS2304 — so the
+	// four `NODE_GLOBALS` entries that matter most never matched. Fail-closed
+	// direction kept: a name outside the closed list still blocks.
+	it("demotes the TS2580/TS2591 forms of the main Node globals", async () => {
+		const missingName = (
+			code: number,
+			name: string,
+			line: number,
+		): RawDiagnostic => ({
+			severity: 1,
+			message: `Cannot find name '${name}'. Do you need to install type definitions for node? Try \`npm i --save-dev @types/node\`.`,
+			code,
+			source: "ts",
+			serverId: "typescript",
+			range: atLine(line),
+		});
+		rows = [
+			missingName(2580, "process", 7),
+			missingName(2591, "require", 8),
+			missingName(2580, "Buffer", 9),
+			// Not a Node global: a real reference error keeps blocking.
+			missingName(2580, "describe", 10),
+		];
+		installService();
+		const result = await run();
+
+		const admitted = result.diagnostics.filter((item) =>
+			item.message.includes(ENVIRONMENT_GAP_MARKER),
+		);
+		expect(admitted).toHaveLength(3);
+		expect(admitted.every((item) => item.severity === "warning")).toBe(true);
+		expect(result.semantic).toBe("blocking");
+		expect(
+			result.diagnostics.some(
+				(item) =>
+					item.message.includes("'describe'") && item.semantic === "blocking",
+			),
+		).toBe(true);
+	});
+
+	// Greptile round 3: `@/missing` is a tsconfig `paths` alias, not a package
+	// (an npm scope has a name). Installing dependencies cannot fix it, so the
+	// gate must not demote it.
+	it("keeps a path-alias specifier blocking while a scoped package demotes", async () => {
+		rows = [
+			{
+				severity: 1,
+				message:
+					"Cannot find module '@/missing' or its corresponding type declarations.",
+				code: 2307,
+				source: "ts",
+				serverId: "typescript",
+				range: atLine(3),
+			},
+			{
+				severity: 1,
+				message:
+					"Cannot find module '@scope/pkg' or its corresponding type declarations.",
+				code: 2307,
+				source: "ts",
+				serverId: "typescript",
+				range: atLine(4),
+			},
+		];
+		installService();
+		const result = await run();
+		const aliasRow = result.diagnostics.find((item) =>
+			item.message.includes("'@/missing'"),
+		);
+		const scopedRow = result.diagnostics.find((item) =>
+			item.message.includes("'@scope/pkg'"),
+		);
+		expect(aliasRow).toMatchObject({ severity: "error", semantic: "blocking" });
+		expect(scopedRow).toMatchObject({
+			severity: "warning",
+			semantic: "warning",
+		});
+	});
+
+	it("keeps the install lookup's unreadable-directory and depth guards", () => {
+		// An unreadable ancestor is not an absent one: the finding keeps its
+		// published severity (fail closed).
+		let calls = 0;
+		const unreadable = hasResolvableNodeModules("/probe/root", () => {
+			calls += 1;
+			throw Object.assign(new Error("denied"), { code: "EACCES" });
+		});
+		expect(unreadable).toBe(true);
+		expect(calls).toBe(1);
+		// The 32-level cap is a depth bound, not a verdict: past it the question
+		// is unanswered, so the finding stays blocking and the walk stops.
+		calls = 0;
+		const deep = `/${Array.from({ length: 40 }, (_, i) => `d${i}`).join("/")}`;
+		const capped = hasResolvableNodeModules(deep, () => {
+			calls += 1;
+			throw Object.assign(new Error("missing"), { code: "ENOENT" });
+		});
+		expect(capped).toBe(true);
+		expect(calls).toBe(ENV_NODE_MODULES_WALK_MAX_LEVELS);
 	});
 
 	it("keeps every code blocking when the root resolves a dependency install", async () => {
