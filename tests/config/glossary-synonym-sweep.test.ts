@@ -1018,6 +1018,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/log-cleanup.ts": 9,
 		"clients/lsp-mutation.ts": 3,
 		"clients/lsp/client-registry.ts": 4,
+		// 0 -> 1 (#4615): the `[lsp-pub]` debug row's `path` member carries the
+		// client's own normalized document key into extension.log. One more
+		// `path` use, same sense (a path value written to a sink), and it is an
+		// object member name, not a path operation the glossary retires.
+		"clients/lsp/client.ts": 1,
 		// 9 -> 3 (#4403): the file gates' `path.extname`/`basename` moved to
 		// clients/lsp/file-server-match.ts (3, with its own import) and the
 		// session-root walk to clients/lsp/session-roots.ts (6 -> 8).
@@ -1492,7 +1497,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/spawn-timeout-cooldown.ts": 1,
 		"clients/test-runner-client.ts": 15,
 		"clients/tree-sitter-logger.ts": 2,
-		"clients/tree-sitter-query-loader.ts": 1,
+		// 1 -> 4 (#2678): the health-check record reads the resource status
+		// twice and writes metadata.status; none denotes a delivery status.
+		"clients/tree-sitter-query-loader.ts": 4,
 		"clients/tree-sitter-shared.ts": 1,
 		"clients/widget-state.ts": 12,
 		"clients/word-index.ts": 6,
