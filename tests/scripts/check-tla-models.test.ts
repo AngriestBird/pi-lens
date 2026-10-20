@@ -412,16 +412,27 @@ describe("selectShard (#3918)", () => {
 	// The table is the shard's only cost input, so a malformed one must be loud:
 	// a silent fallback to equal costs would quietly restore the old tail.
 	it("refuses a malformed cost table", () => {
-		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-model-costs-"));
-		fs.mkdirSync(path.join(dir, "scripts"));
-		const file = path.join(dir, MODEL_COSTS_FILE);
-		fs.writeFileSync(file, JSON.stringify({ files: { "formal/x/a.cfg": -1 } }));
-		expect(() => loadModelCosts(dir)).toThrow(/non-negative/);
-		fs.writeFileSync(file, JSON.stringify({ nope: true }));
-		expect(() => loadModelCosts(dir)).toThrow(/no "files" object/);
-		fs.rmSync(file);
-		expect(() => loadModelCosts(dir)).toThrow(/unreadable/);
-		fs.rmSync(dir, { recursive: true, force: true });
+		// The fixture root is removed on EVERY path, green or red: a straggler
+		// under the shared tmp root is what the tmp-fixture-hygiene owner reds on,
+		// and a throwing assertion would otherwise skip the cleanup below.
+		const dir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-check-tla-models-costs-"),
+		);
+		try {
+			fs.mkdirSync(path.join(dir, "scripts"));
+			const file = path.join(dir, MODEL_COSTS_FILE);
+			fs.writeFileSync(
+				file,
+				JSON.stringify({ files: { "formal/x/a.cfg": -1 } }),
+			);
+			expect(() => loadModelCosts(dir)).toThrow(/non-negative/);
+			fs.writeFileSync(file, JSON.stringify({ nope: true }));
+			expect(() => loadModelCosts(dir)).toThrow(/no "files" object/);
+			fs.rmSync(file);
+			expect(() => loadModelCosts(dir)).toThrow(/unreadable/);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });
 

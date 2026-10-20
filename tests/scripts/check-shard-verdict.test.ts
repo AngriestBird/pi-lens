@@ -341,7 +341,13 @@ describe("#4672 the aggregate step's own boundary: argv, fetch failures, annotat
 		expect(seen[0].url).toBe(
 			"https://api.github.com/repos/acme/repo/actions/runs/42/jobs",
 		);
-		expect(seen[0].headers).toMatchObject({ authorization: "Bearer tok" });
+		// The header block is `scripts/lib/github-rest.mjs`'s own (the bearer
+		// ratchet's one spelling), not a second copy in this script.
+		expect(seen[0].headers).toMatchObject({
+			Accept: "application/vnd.github+json",
+			Authorization: "Bearer tok",
+			"X-GitHub-Api-Version": "2022-11-28",
+		});
 	});
 
 	it("emits the GitHub annotation beside the same line", async () => {

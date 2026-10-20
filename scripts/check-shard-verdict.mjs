@@ -54,6 +54,7 @@
 
 import fs from "node:fs";
 import { parseArgs as parseNodeArgs } from "node:util";
+import { githubHeaders } from "./lib/github-rest.mjs";
 
 /** The one step whose conclusion decides whether a cancelled shard finished
  * its work. Accepted as a flag so `tla-shards` and `test` name their own. */
@@ -246,12 +247,9 @@ export async function readJobs({
 	if (!token) {
 		throw new Error(`no GITHUB_TOKEN/GH_TOKEN to read ${url}`);
 	}
-	const response = await fetchImpl(url, {
-		headers: {
-			accept: "application/vnd.github+json",
-			authorization: `Bearer ${token}`,
-		},
-	});
+	// The header block is the repo's ONE builder (#4427):
+	// `tests/config/github-bearer-ratchet.test.ts` reds on a second spelling.
+	const response = await fetchImpl(url, { headers: githubHeaders(token) });
 	if (!response?.ok) {
 		throw new Error(`GET ${url} -> HTTP ${response?.status ?? "no response"}`);
 	}

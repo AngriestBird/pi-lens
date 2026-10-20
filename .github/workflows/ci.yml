@@ -177,21 +177,30 @@ jobs:
   # estimate this comment used to carry. The job id `tla-models` and the check
   # name `TLA+ models` stay with the aggregate below (CodeQL `needs:` it, and
   # the ruleset requires that name); the shard jobs are `tla-shards`.
+  # Measured per-shard WALL time on master run 39380875926 (attempt 1):
+  # 268 s, 349 s, 494 s and 726 s -- the round-robin split was unbalanced by
+  # ~2.7x and shard 4 owned the tail. That shard hit the 12-minute cap TWICE,
+  # every step of it concluded `success` both times: attempt 1 job
+  # 118491126416 was `cancelled` at 735 s, attempt 2 job 118632989721 at 726 s.
+  # Each cancellation reded the required `TLA+ models` check with no model
+  # violation, and a rerun lost the same race.
+  #
   # #4672: scripts/check-tla-models.mjs now partitions by MEASURED COST
   # (longest-processing-time pack over scripts/tla-model-costs.json), not
   # round-robin by config count. Round-robin was the defect: configs' TLC times
-  # run 1.2 s to 422 s, so on master run 39380875926 the four shards summed
-  # 733 s / 1255 s / 1617 s / 2148 s of TLC time (2.9x) and the heaviest lost
-  # its race with the 720 s cap. Same four shards, measured cost table, summed
-  # work per shard: 1538 s / 1539 s / 1538 s / 1538 s (1.00x).
+  # run 1.2 s to 422 s, so on that run the four shards summed 733 s / 1255 s /
+  # 1617 s / 2148 s of TLC time (2.9x). Same four shards, measured cost table,
+  # summed work per shard: 1538 s / 1539 s / 1538 s / 1538 s (1.00x).
   # tests/config/tla-models-shard-workflow.test.ts pins that every config lands
   # in exactly one shard and that the measured split stays balanced.
-  # Measured per-shard WALL time (master runs 39380005583 and 39374847276,
-  # 2026-10-20; `started_at` -> `completed_at` of each `TLA+ models (shard k/N)`
-  # job): 195 s-701 s at the old partition, 698 s for the heaviest; the balanced
-  # partition's projected worst shard is 1538 s of TLC work, which is 505 s at
-  # that run's measured 3.05 s-of-work-per-second-of-wall. The first CI run on
-  # this change observes it (a ci.yml or checker edit is a `formal` trigger).
+  # Measured per-shard WALL time over 15 model-checking runs (master pushes and
+  # PR heads, 2026-10-20; `started_at` -> `completed_at` of each
+  # `TLA+ models (shard k/N)` job): per-shard-position p50/p90 465/510 s
+  # (shard 1), 334/357 s (shard 2), 337/348 s (shard 3), 685/700 s (shard 4).
+  # The balanced partition's projected worst shard is 1538 s of TLC work, which
+  # is 505 s at that run's measured 3.05 s-of-work-per-second-of-wall. The
+  # first CI run on this change observes it (a ci.yml or checker edit is a
+  # `formal` trigger).
   tla-shards:
     name: TLA+ models (shard ${{ matrix.shard }}/${{ strategy.job-total }})
     needs: changes
@@ -212,18 +221,19 @@ jobs:
     #
     # #4672 cap sizing (the #3123 rule: measured maximum plus margin). The
     # 12-minute cap was AT the measured maximum, so a slower runner turned
-    # finished work into `cancelled`: 735 s against 720 s on run 39380875926
-    # with every step `success`. Measured over 15 model-checking runs
-    # (2026-10-20, both master pushes and PR heads): per-shard-position p50/p90
-    # 465/510 s (shard 1), 334/357 s (shard 2), 337/348 s (shard 3),
-    # 685/700 s (shard 4) -- the tail is shard 4 because the old partition
-    # packed it by count while its configs cost 2.9x the others. After the
-    # cost-weighted partition the projected worst shard is 505 s of wall, so
-    # 20 min is 2.4x the projected worst and 1.6x the worst shard ever
-    # observed (724 s), which is the `test` job's documented measured-max x2
-    # rule (#3111). The cap is the SECOND mechanism: the partition removes the
-    # tail, the cap and the cancelled-shard verdict keep a slow runner's
-    # teardown race from reddening a required check.
+    # finished work into `cancelled`: 735 s and then 726 s against 720 s on run
+    # 39380875926, with every step `success` both times, and 20 minutes is the
+    # floor of the next whole step above that tail (the way #3591 raised the
+    # pre-shard job 10 -> 20). Measured over 15 model-checking runs
+    # (2026-10-20, both master pushes and PR heads): per-shard-position p90
+    # 510 s (shard 1), 357 s (shard 2), 348 s (shard 3), 700 s (shard 4) --
+    # the tail is shard 4 because the old partition packed it by count while
+    # its configs cost 2.9x the others. After the cost-weighted partition the
+    # projected worst shard is 505 s of wall, so 20 min is 2.4x the projected
+    # worst and 1.6x the worst shard ever observed (724 s), the `test` job's
+    # documented measured-max x2 rule (#3111). The cap is the SECOND mechanism:
+    # the partition removes the tail, the cap and the cancelled-shard verdict
+    # keep a slow runner's teardown race from reddening a required check.
     timeout-minutes: 20
     permissions:
       contents: read
