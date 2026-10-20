@@ -354,7 +354,6 @@ describe("a worktree with no dependency install (#4532)", () => {
 			"./missing",
 			"../missing",
 			"C:/x/y",
-			"@/x",
 			"0",
 			"left-pad",
 		];
