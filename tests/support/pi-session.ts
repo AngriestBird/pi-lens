@@ -718,10 +718,16 @@ function handleFor(
 			// A replaced handle's session is gone, and one being replaced is about
 			// to be: restarting it again would build a session beside the live
 			// replacement and take its identity (#4692 L2; overlapping calls,
-			// Sourcery T3).
-			if (disposed || replacing)
+			// Sourcery T3). ONE message per state, because a caller has to tell
+			// the two apart: the stale handle is finished with, while the one
+			// being replaced only has to be awaited.
+			if (disposed)
 				throw new Error(
-					"pi-session: restart() on a session that already ended or is being replaced; restart the handle the previous restart() returned",
+					"pi-session: restart() on a session that already ended; restart the handle the previous restart() returned",
+				);
+			if (replacing)
+				throw new Error(
+					"pi-session: restart() while that session is being replaced; await the call already in flight",
 				);
 			replacing = true;
 			try {

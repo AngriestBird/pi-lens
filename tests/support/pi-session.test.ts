@@ -302,20 +302,22 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 
 		// A handle being replaced cannot be restarted beside it: the overlapping
 		// call would build a second replacement while the first is still in
-		// flight (Sourcery T3). Its refusal must leave the first to complete.
+		// flight (Sourcery T3). Its own message names that state, so this
+		// assertion cannot be satisfied by the stale handle's refusal.
 		const pending = first.restart({ reason: "new" }, [
 			fauxAssistantMessage(fauxText("two")),
 		]);
 		expect(await outcome(first.restart({ reason: "new" }, []))).toContain(
-			"being replaced",
+			"restart() while that session is being replaced",
 		);
 		// A replaced handle cannot be restarted again: that would build a third
 		// session beside the live replacement and take its identity (#4692 L2).
+		// Its message is the other state's, so the two guards are distinguishable.
 		const second = await pending;
 		const secondId = second.session.sessionManager.getSessionId();
 		expect(secondId).not.toBe(firstId);
 		expect(await outcome(first.restart({ reason: "new" }, []))).toContain(
-			"already ended",
+			"restart() on a session that already ended",
 		);
 		expect(getActiveSessionId()).toBe(secondId);
 	});

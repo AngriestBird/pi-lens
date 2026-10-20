@@ -90,8 +90,13 @@ const CLEAN_FILE = "const a = 1;\nexport function f() {\n\treturn a;\n}\n";
 
 /** The commit gate's own prefix, as the model reads it. */
 const GATE_BLOCK = "🔴 COMMIT BLOCKED (--lens-guard)";
-/** The latch's own answer: the live session still holds the blocker. */
-const LATCH_BLOCK = "unresolved blockers must be fixed before commit/push";
+/**
+ * The sentence BOTH guard branches answer with: the live latch (`:1358`) and
+ * the persisted record (`:1457`). Only what each appends tells them apart.
+ */
+const GATE_PHRASE = "unresolved blockers must be fixed before commit/push";
+/** What only the LATCH branch appends: the blocker list the live copy holds. */
+const LATCH_LIST = "🔴 STOP —";
 /**
  * The blocker the marked cases triage. A mark must name EVERY blocker on the
  * file, so these cases need a finding exactly one runner reports: the bundled
@@ -594,22 +599,32 @@ describe("#4632 s4: a record written in one session answers the next one", () =>
 		expect(second.errors).toEqual([]);
 	});
 
-	it("refuses the commit after a reload from the blocker the reload handed on", async () => {
+	it("refuses the commit after a reload from the record the reloaded copy still reads", async () => {
 		const { proj, target } = seed("replace-reload", CLEAN_FILE);
 		const first = await open(proj, raise(target));
 		await first.prompt("write the file");
 		const firstId = first.session.sessionManager.getSessionId();
+		// pi's reload re-runs this session's extension factories, so the loaded
+		// copy the gate runs in is a NEW one. Captured here, asserted below: with
+		// `session.reload()` neutered the same runner answers, which is how this
+		// cell once passed with the reload never running.
+		const runnerBefore = first.session.extensionRunner;
 
 		const second = await first.restart({ reason: "reload" }, commitThenEnd());
 		await second.prompt("commit it");
 
-		// pi's `reload`: the same session and id. The record's session matches,
-		// and the answer is the latch's: the reloaded copy holds the blocker the
-		// departing one handed on (#3612), not a record from another session.
+		// pi's `reload`: the same session and id. The reloaded copy's own latch is
+		// empty (nothing raised in IT), so the answer is the persisted record
+		// (`clients/git-guard.ts:1457`, `cache_blockers`): the session identity
+		// and the file sequence still match, so the record refuses. That is why
+		// the latch's sentence alone cannot pin this cell — the latch branch
+		// appends the blocker list (`:1358`), and this answer carries none.
 		expect(second).toBe(first);
 		expect(second.session.sessionManager.getSessionId()).toBe(firstId);
+		expect(second.session.extensionRunner).not.toBe(runnerBefore);
 		const verdict = bashResults(second.requests).at(-1);
-		expectRefused(verdict, LATCH_BLOCK);
+		expectRefused(verdict, GATE_PHRASE);
+		expect(verdict?.text).not.toContain(LATCH_LIST);
 		expect(verdict?.text).not.toContain("session_mismatch");
 		expect(second.errors).toEqual([]);
 	});
