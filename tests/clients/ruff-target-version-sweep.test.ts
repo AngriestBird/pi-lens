@@ -11,6 +11,7 @@
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+	assertNonEmptyScan,
 	listSourceFiles,
 	readWalkedFile,
 	relativePosix,
@@ -33,9 +34,11 @@ interface Hit {
 	text: string;
 }
 
+const FILES = listSourceFiles(ROOT);
+
 function scan(): Hit[] {
 	const hits: Hit[] = [];
-	for (const absolute of listSourceFiles(ROOT)) {
+	for (const absolute of FILES) {
 		const source = readWalkedFile(absolute);
 		if (source === undefined) continue;
 		const lines = source.split("\n");
@@ -50,6 +53,13 @@ function scan(): Hit[] {
 
 describe("ruff syntax-level overrides stay out of clients/ (#4638)", () => {
 	it("admits only black's CLI shape and no ruff invocation", () => {
+		// A dead walk must never read as clean (#1718): the floor is the clients/
+		// population this sweep can actually see.
+		assertNonEmptyScan(
+			"ruff target-version sweep (clients/)",
+			FILES.length,
+			40,
+		);
 		const hits = scan();
 
 		const unadmitted = hits.filter(

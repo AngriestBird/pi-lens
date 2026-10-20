@@ -1,6 +1,6 @@
 import { access, readFile } from "node:fs/promises";
 import os from "node:os";
-import path from "node:path";
+import path, { dirname, join, resolve } from "node:path";
 import {
 	extractTomlTableSection,
 	hasTomlTable,
@@ -487,11 +487,11 @@ function reduceRuffTargetVersion(
 }
 
 function withSource(
-	version: DeclaredPythonVersion | undefined,
+	level: DeclaredPythonVersion | undefined,
 	source: PythonTargetVersionSource,
 	file: string,
 ): PythonTargetVersion | undefined {
-	return version ? { ...version, source, file } : undefined;
+	return level ? { ...level, source, file } : undefined;
 }
 
 /**
@@ -504,13 +504,13 @@ async function readDeclarationFile(
 ): Promise<string | undefined> {
 	try {
 		return await readFile(filePath, "utf-8");
-	} catch (error) {
-		const code = (error as NodeJS.ErrnoException).code;
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException).code;
 		if (code === "ENOENT" || code === "ENOTDIR") return undefined;
 		recordDegradationOnce({
 			kind: "python-target-version-unreadable",
 			subject: filePath,
-			reason: `Python syntax-level declaration could not be read: ${error instanceof Error ? error.message : String(error)}`,
+			reason: `Python syntax-level declaration could not be read: ${err instanceof Error ? err.message : String(err)}`,
 		});
 		return undefined;
 	}
@@ -549,7 +549,7 @@ function parsePyrightJsonVersion(
 async function readPythonDeclarationInDirectory(
 	dir: string,
 ): Promise<PythonTargetVersion | undefined> {
-	const pyprojectPath = path.join(dir, "pyproject.toml");
+	const pyprojectPath = join(dir, "pyproject.toml");
 	const pyproject = await readDeclarationFile(pyprojectPath);
 	const ruffSection =
 		pyproject !== undefined && hasTomlTable(pyproject, "tool\\.ruff")
@@ -563,7 +563,7 @@ async function readPythonDeclarationInDirectory(
 	let ruffContent = ruffSection;
 	if (ruffFile === undefined) {
 		for (const name of [".ruff.toml", "ruff.toml"]) {
-			const candidatePath = path.join(dir, name);
+			const candidatePath = join(dir, name);
 			const content = await readDeclarationFile(candidatePath);
 			if (content === undefined) continue;
 			ruffFile = candidatePath;
@@ -581,7 +581,7 @@ async function readPythonDeclarationInDirectory(
 		if (resolved) return resolved;
 	}
 
-	const pyrightConfigPath = path.join(dir, "pyrightconfig.json");
+	const pyrightConfigPath = join(dir, "pyrightconfig.json");
 	const pyrightConfig = await readDeclarationFile(pyrightConfigPath);
 	if (pyrightConfig !== undefined) {
 		const resolved = withSource(
@@ -617,7 +617,7 @@ async function readPythonDeclarationInDirectory(
 		if (resolved) return resolved;
 	}
 
-	const versionFilePath = path.join(dir, ".python-version");
+	const versionFilePath = join(dir, ".python-version");
 	const versionFile = await readDeclarationFile(versionFilePath);
 	if (versionFile !== undefined) {
 		const firstLine = (versionFile.split(/\r?\n/, 1)[0] ?? "").trim();
@@ -648,7 +648,7 @@ export async function detectPythonTargetVersion(
 	homeDir: string = os.homedir(),
 ): Promise<PythonTargetVersion | undefined> {
 	if (resolveLanguage(filePath)?.id !== "python") return undefined;
-	for (const dir of walkUpDirs(path.dirname(path.resolve(filePath)))) {
+	for (const dir of walkUpDirs(dirname(resolve(filePath)))) {
 		if (isAtOrAboveHomeDir(dir, homeDir)) return undefined;
 		const resolved = await readPythonDeclarationInDirectory(dir);
 		if (resolved) return resolved;

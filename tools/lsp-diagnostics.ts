@@ -1292,11 +1292,15 @@ export function applyProbeFindingPolicy(
 		// does not use. Drop those rows from what is DELIVERED (kept), never
 		// from `inlineKept`: the cache must hold them so a replay re-evaluates
 		// the drop against the declaration current at that read.
-		const outranked = pythonCompileTarget
-			? result.kept.filter((diagnostic) =>
-					isJediCompileVerdictOutranked(diagnostic, pythonCompileTarget),
-				)
-			: [];
+		const outranked: typeof result.kept = [];
+		const delivered: typeof result.kept = [];
+		for (const diagnostic of result.kept) {
+			if (isJediCompileVerdictOutranked(diagnostic, pythonCompileTarget)) {
+				outranked.push(diagnostic);
+			} else {
+				delivered.push(diagnostic);
+			}
+		}
 		if (outranked.length > 0 && pythonCompileTarget) {
 			recordDegradationOnce({
 				kind: "python-compile-target-mismatch",
@@ -1310,13 +1314,6 @@ export function applyProbeFindingPolicy(
 				},
 			});
 		}
-		const delivered =
-			outranked.length > 0
-				? result.kept.filter(
-						(diagnostic) =>
-							!isJediCompileVerdictOutranked(diagnostic, pythonCompileTarget),
-					)
-				: result.kept;
 		const inScopeBefore = applySeverityFilter(diagnostics, severity).length;
 		const suppressed =
 			inScopeBefore - applySeverityFilter(result.kept, severity).length;

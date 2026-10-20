@@ -26,8 +26,10 @@ const hoisted = vi.hoisted(() => ({
 	calls: [] as SpawnCall[],
 }));
 
-vi.mock("../../clients/safe-spawn.js", () => ({
-	safeSpawn: vi.fn(),
+// #2281: a whole-module mock must re-export every production export, so the
+// actual module is spread in and only the process boundary is replaced.
+vi.mock("../../clients/safe-spawn.js", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../../clients/safe-spawn.js")>()),
 	safeSpawnAsync: vi.fn(
 		async (command: string, args: string[], options: { cwd?: string }) => {
 			hoisted.calls.push({ command, args, options });

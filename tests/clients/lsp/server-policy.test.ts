@@ -2053,13 +2053,15 @@ describe("lsp server policy", () => {
 			'[project]\nname = "demo"\nrequires-python = ">=3.14"\n',
 		);
 
-		const envKeys = [
-			"VIRTUAL_ENV",
-			"CONDA_PREFIX",
-			"UV_PROJECT_ENVIRONMENT",
-		] as const;
-		const savedEnv = envKeys.map((key) => process.env[key]);
-		for (const key of envKeys) delete process.env[key];
+		// Self-contained (#4638, #4589): the project tier needs trust and an
+		// ambient Python environment would outrank it, so the case states both
+		// through the harness seams and restores them.
+		const { setProjectTrustState } =
+			await import("../../../clients/project-trust.js");
+		setProjectTrustState("trusted");
+		vi.stubEnv("VIRTUAL_ENV", undefined);
+		vi.stubEnv("CONDA_PREFIX", undefined);
+		vi.stubEnv("UV_PROJECT_ENVIRONMENT", undefined);
 
 		launchLSP.mockClear();
 		launchLSP.mockResolvedValue({
@@ -2088,10 +2090,8 @@ describe("lsp server policy", () => {
 			expect(String(options.env?.PATH).split(path.delimiter)[0]).toBe(binDir);
 			expect(ensureTool).not.toHaveBeenCalled();
 		} finally {
-			envKeys.forEach((key, index) => {
-				const value = savedEnv[index];
-				if (value !== undefined) process.env[key] = value;
-			});
+			vi.unstubAllEnvs();
+			setProjectTrustState("trusted");
 		}
 	});
 
@@ -2122,13 +2122,9 @@ describe("lsp server policy", () => {
 			'[project]\nname = "demo"\nrequires-python = ">=3.14"\n',
 		);
 
-		const envKeys = [
-			"VIRTUAL_ENV",
-			"CONDA_PREFIX",
-			"UV_PROJECT_ENVIRONMENT",
-		] as const;
-		const savedEnv = envKeys.map((key) => process.env[key]);
-		for (const key of envKeys) delete process.env[key];
+		vi.stubEnv("VIRTUAL_ENV", undefined);
+		vi.stubEnv("CONDA_PREFIX", undefined);
+		vi.stubEnv("UV_PROJECT_ENVIRONMENT", undefined);
 
 		resetDegradationLedger();
 		setProjectTrustState("unknown");
@@ -2161,22 +2157,21 @@ describe("lsp server policy", () => {
 				detectPythonTargetVersion(path.join(tmp, "app.py"), path.dirname(tmp)),
 			).resolves.toMatchObject({ major: 3, minor: 14 });
 		} finally {
-			envKeys.forEach((key, index) => {
-				const value = savedEnv[index];
-				if (value !== undefined) process.env[key] = value;
-			});
+			vi.unstubAllEnvs();
+			setProjectTrustState("trusted");
 		}
 	});
 
 	it("pythonEnvironmentToolCandidates offers the Windows shim order without a platform skip (#4638)", async () => {
 		const { pythonEnvironmentToolCandidates } =
 			await import("../../../clients/python-environment.js");
-		const { setPlatform } = await import("../../support/platform-stub.js");
+		const { withPlatform } = await import("../../support/platform-stub.js");
 
 		const root = path.join("/fixture", ".venv");
 		const binDir = path.join(root, "Scripts");
-		setPlatform("win32");
-		try {
+		// `withPlatform` captures the real platform BEFORE stubbing, so the stub
+		// cannot leak `win32` into a later case in the same worker.
+		withPlatform("win32", () => {
 			expect(
 				pythonEnvironmentToolCandidates(
 					{
@@ -2192,9 +2187,7 @@ describe("lsp server policy", () => {
 				path.join(binDir, "jedi-language-server.cmd"),
 				path.join(binDir, "jedi-language-server"),
 			]);
-		} finally {
-			setPlatform(process.platform);
-		}
+		});
 		// A bare environment offers nothing: the bare command stays the fallback.
 		expect(
 			pythonEnvironmentToolCandidates(undefined, "jedi-language-server"),
