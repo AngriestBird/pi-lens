@@ -33,8 +33,7 @@ import type {
 } from "../types.js";
 import { findingsResult, spanOverlapsModifiedRanges } from "../types.js";
 import { convertLspDiagnostics } from "../utils/lsp-diagnostics.js";
-import { demoteInferredProjectDiagnostics } from "../../lsp/inferred-project.js";
-import { demoteEnvironmentGapDiagnostics } from "../../lsp/environment-gap.js";
+import { demoteLanguageServerRows } from "../../lsp/inferred-project.js";
 import {
 	enabledAuxiliaryLspServerIds,
 	retagAuxiliaryDiagnostics,
@@ -427,36 +426,17 @@ const lspRunner: RunnerDefinition = {
 		// is a known gap, recorded on the issue rather than papered over with an
 		// "unverified" label that would fire on every warm-attach file including
 		// the properly configured majority.
-		// #4532: before the project-membership probe, demote the environment-gap
-		// codes a root with no resolvable `node_modules` produces. A worktree with
-		// no dependency install makes the TS server report `node:*` modules, the
-		// `NodeJS` namespace and the timer globals as missing, and those are not
-		// defects in the edited file: the agent cannot close a missing install by
-		// editing code, and at blocking authority it starved the cascade
-		// (`cascade_skip reason=primary_has_blockers`). It runs FIRST so the
-		// inferred-project probe (which only looks at severity-1 rows) pays nothing
-		// for a file this already demoted.
-		//
-		// MOVED OUT OF THE WARM-ATTACH GATE (#4532 round 4). This rule asks ONE
-		// filesystem question about the file's OWN directory — a path this process
-		// just wrote and can stat — so it needs nothing from the remote session and
-		// is not the probe #1645 review F2 held back. Leaving it behind
-		// `usedWarmAttach` kept the reported `🔴 STOP` alive on the warm-attach
-		// route, which is the very symptom this rule exists to close. Only the
-		// inferred-PROJECT probe below stays gated, because THAT rule asks the
-		// server which project owns the file and a warm-attached session's answers
-		// are about a fleet this process does not own.
-		const environmentChecked = demoteEnvironmentGapDiagnostics(
-			rawValidLspDiags,
-			{ filePath: diagnosticPath },
-		);
-		const validLspDiags = usedWarmAttach
-			? environmentChecked
-			: await demoteInferredProjectDiagnostics(environmentChecked, {
-					filePath: diagnosticPath,
-					cwd: ctx.cwd,
-					service: lspService,
-				});
+		// #4532: the environment-gap rule rides the same pipeline and is NOT
+		// gated on warm attach: it asks one filesystem question about the file's
+		// own directory, needs nothing from the remote session, and left behind
+		// `usedWarmAttach` it kept the reported `🔴 STOP` on this route (round 4).
+		// `demoteLanguageServerRows` runs it on every route and the membership
+		// probe only where a local client may answer (round 5, review F3).
+		const validLspDiags = await demoteLanguageServerRows(rawValidLspDiags, {
+			filePath: diagnosticPath,
+			cwd: ctx.cwd,
+			...(!usedWarmAttach && { service: lspService }),
+		});
 		const fixSuggestionByIndex = new Map<number, string>();
 
 		// #1640: read severity off the RAW list. A demoted diagnostic is still

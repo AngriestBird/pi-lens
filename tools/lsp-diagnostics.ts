@@ -66,8 +66,7 @@ import {
 import { classifyCascadeWaitTier } from "../clients/lsp/wait-policy/index.js";
 import { attemptTsserverSyncDiagnostics } from "../clients/lsp/tsserver-sync.js";
 import { convertLspDiagnostics } from "../clients/dispatch/utils/lsp-diagnostics.js";
-import { demoteInferredProjectDiagnostics } from "../clients/lsp/inferred-project.js";
-import { demoteEnvironmentGapDiagnostics } from "../clients/lsp/environment-gap.js";
+import { demoteLanguageServerRows } from "../clients/lsp/inferred-project.js";
 import { normalizeMapKey, resolveHostToolPath } from "../clients/path-utils.js";
 import {
 	countRetainedSuppressedRows,
@@ -1200,45 +1199,29 @@ function coveredSourcesForCheck(
 	return [...covered];
 }
 
-/**
+/*
  * #1645 review F3: `lsp_diagnostics` writes into the SAME widget store as
  * `lens_diagnostics mode=full`. Two tools writing one store must apply ONE rule
  * for "is this file's diagnostics demoted" — otherwise an orphan file blocks or
  * does not depending purely on which tool ran last, which is the #1633-V1
  * lesson. Every path in this file that reaches `reconcileWidgetFromLspResult`
- * or the rendered output routes its raw diagnostics through here first, so the
- * store, the counts, and the text all agree.
+ * or the rendered output routes its raw diagnostics through
+ * `demoteLanguageServerRows` (`clients/lsp/inferred-project.ts`) first, so the
+ * store, the counts, and the text all agree. It is the pipeline the per-edit
+ * runner and the `mode=full` sweep run too (#4532 round 5, review F3).
  *
  * Applied AFTER the confirmation verdict is computed, never before: confirmation
  * asks "did the server answer for this content", which the demotion must not
- * influence.
+ * influence. Applied on every SERVE, a cache replay included, and never baked
+ * into the cache entry: the environment-gap verdict depends on the install
+ * state, which no entry key carries (review F5).
  */
-function demoteInferredForFile(
-	file: string,
-	diagnostics: LSPDiagnostic[],
-	cwd: string,
-	lspService: NonNullable<ReturnType<typeof getLSPService>>,
-): Promise<LSPDiagnostic[]> {
-	// #4532: the environment-gap demotion runs first and is synchronous (one
-	// bounded walk-up of `stat` calls, no server request), so it applies to a
-	// cache REPLAY as well as a fresh touch. Demoting here rather than at one
-	// entry keeps #1645 F3's invariant: every writer of the widget store applies
-	// one rule for "is this file's finding demoted".
-	const environmentChecked = demoteEnvironmentGapDiagnostics(diagnostics, {
-		filePath: file,
-	});
-	return demoteInferredProjectDiagnostics(environmentChecked, {
-		filePath: file,
-		cwd,
-		service: lspService,
-	});
-}
 
 /**
  * #3088: the probe lane's stored-disposition / rule-policy / inline-suppression
  * gate — the same `clients/dispatch/finding-policy.ts` stack `mode=full` and
  * the per-edit dispatcher apply, called once per file at the position
- * `demoteInferredForFile` already established: AFTER the confirmation verdict
+ * the demotion pipeline already established: AFTER the confirmation verdict
  * (which asks "did the server answer for this content" and must not be
  * influenced by a policy drop) and BEFORE the rendered output, the severity
  * filter and `reconcileWidgetFromLspResult`. One filtered set for all three, so
@@ -1475,12 +1458,11 @@ async function collectFileDiagnosticResult(
 			// fresh touch does, so it gets the same demotion. Without this, replaying
 			// yesterday's cached blocker would re-cement an orphan file as blocking
 			// after mode=full had demoted it.
-			const demotedCached = await demoteInferredForFile(
-				file,
-				cached.diagnostics,
+			const demotedCached = await demoteLanguageServerRows(cached.diagnostics, {
+				filePath: file,
 				cwd,
-				lspService,
-			);
+				service: lspService,
+			});
 			// #3088 AC5: a replay is served to the agent exactly like a fresh
 			// observation, so it passes the same filter. The cached set is already
 			// inline-suppression-clean (the record below stores `inlineKept`), so
@@ -1610,12 +1592,24 @@ async function collectFileDiagnosticResult(
 		confirmation = "unconfirmed";
 	}
 	// #1645 review F3: one demotion rule for every writer of the widget store.
-	effectiveRawDiags = await demoteInferredForFile(
-		file,
-		effectiveRawDiags,
+	const serverRows = effectiveRawDiags;
+	effectiveRawDiags = await demoteLanguageServerRows(serverRows, {
+		filePath: file,
 		cwd,
-		lspService,
-	);
+		service: lspService,
+	});
+	// #4532 round 5 (review F5): the cache entry holds the SERVER's rows, never
+	// the demoted ones. The pipeline is index-aligned, so each demoted row maps
+	// back to the row it came from; the replay above demotes again against the
+	// install state of that serve, and a missing module whose install landed
+	// without providing it blocks again.
+	const serverRowOf = new Map<LSPDiagnostic, LSPDiagnostic>();
+	if (effectiveRawDiags !== serverRows) {
+		for (const [index, row] of effectiveRawDiags.entries()) {
+			const original = serverRows[index];
+			if (original !== undefined) serverRowOf.set(row, original);
+		}
+	}
 	// #3088: one filter for the output, the counts and the footer reconcile.
 	const policy = applyProbeFindingPolicy(
 		file,
@@ -1676,7 +1670,7 @@ async function collectFileDiagnosticResult(
 		cacheCtx.record(
 			file,
 			scopeKey,
-			policy.inlineKept,
+			policy.inlineKept.map((row) => serverRowOf.get(row) ?? row),
 			stat.mtimeMs,
 			collectedContent !== undefined
 				? hashDiagnosticContent(collectedContent)
@@ -1829,12 +1823,11 @@ async function runFileDiagnostics(
 		unconfirmedServerIds.length > 0 && confirmation === "clean";
 	if (primaryCoverageGapOnly) confirmation = "unconfirmed";
 	// #1645 review F3: one demotion rule for every writer of the widget store.
-	effectiveRawDiags = await demoteInferredForFile(
-		absPath,
-		effectiveRawDiags,
+	effectiveRawDiags = await demoteLanguageServerRows(effectiveRawDiags, {
+		filePath: absPath,
 		cwd,
-		lspService,
-	);
+		service: lspService,
+	});
 	// #3088: one filter for the output, the counts and the footer reconcile.
 	const policy = applyProbeFindingPolicy(
 		absPath,

@@ -283,6 +283,24 @@ describe("in-lane cascade neighbour diagnostics take the finding policy (#3157)"
 		expect(formatted).not.toContain("suppressed by disposition:");
 	});
 
+	// #4532 round 5 (review F3; AGENTS.md shape 71): the cascade read the same
+	// raw rows the per-edit runner demotes and applied no demotion, so the file
+	// the agent edited read "warning" while a neighbour in the same uninstalled
+	// worktree read "blocking". The gap leaves the neighbour's ERROR list; the
+	// real error beside it stays.
+	it("drops a neighbour's environment-gap row in a root with no install (#4532)", async () => {
+		const { hasResolvableNodeModules } =
+			await import("../../clients/lsp/environment-gap.js");
+		expect(hasResolvableNodeModules(env.tmpDir)).toBe(false);
+		const gap =
+			"Cannot find module 'node:crypto' or its corresponding type declarations.";
+		const formatted = await cascadeFor(
+			snapshotService([errorDiag(0, gap, 2307), errorDiag(1, OTHER)]),
+		);
+		expect(formatted).not.toContain("node:crypto");
+		expect(formatted).toContain(OTHER);
+	});
+
 	it("site 1 (passive cold snapshot): drops a neighbour error marked false-positive", async () => {
 		await mark({
 			filePath: neighbor,

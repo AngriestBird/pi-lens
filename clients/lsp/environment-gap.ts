@@ -45,7 +45,6 @@ import * as fs from "node:fs";
 import { isBuiltin } from "node:module";
 import * as path from "node:path";
 import type { LSPDiagnostic } from "./client.js";
-import { isTypeScriptSourcedDiagnostic } from "./inferred-project.js";
 import { incrementDegradationCount } from "../degradation-ledger.js";
 import { logLatency } from "../latency-logger.js";
 
@@ -60,6 +59,23 @@ export const ENVIRONMENT_GAP_MARKER =
 
 /** The full label appended to a demoted diagnostic's message. */
 export const ENVIRONMENT_GAP_NOTICE = `[${ENVIRONMENT_GAP_MARKER}; install the project's dependencies (npm ci, pnpm install, …) and the server picks them up on its next restart]`;
+
+/**
+ * `source` values the classic typescript-language-server stamps on its own
+ * diagnostics. Auxiliary servers sharing the same result (opengrep, typos,
+ * zizmor, ast-grep) carry their own source and are NOT affected by a tsconfig
+ * or install gap, so they keep their severity.
+ */
+const TYPESCRIPT_DIAGNOSTIC_SOURCES = new Set(["typescript", "ts", "tsserver"]);
+
+/**
+ * Whether a diagnostic came from the TypeScript server. Both demotions in
+ * `demoteLanguageServerRows` (`inferred-project.ts`) refuse every other
+ * producer's findings through this one predicate.
+ */
+export function isTypeScriptSourcedDiagnostic(d: LSPDiagnostic): boolean {
+	return TYPESCRIPT_DIAGNOSTIC_SOURCES.has((d.source ?? "").toLowerCase());
+}
 
 /** The registered id of the server whose ambient declarations are at stake. */
 const TYPESCRIPT_SERVER_ID = "typescript";

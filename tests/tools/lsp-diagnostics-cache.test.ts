@@ -18,6 +18,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getProjectDataDir } from "../../clients/file-utils.js";
+import {
+	ENVIRONMENT_GAP_MARKER,
+	hasResolvableNodeModules,
+} from "../../clients/lsp/environment-gap.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
 import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 
@@ -514,5 +518,102 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 		// footer re-stamped `touchedAt = Date.now()` on every re-serve, permanently
 		// disarming the mtime gate (#1092). Post-fix: it carries the scan time.
 		expect(hitCall?.[4]).toBe(scannedAt);
+	});
+
+	// #4532 round 5 (review F4 and F5). `lsp_diagnostics` is the route the user
+	// runs by hand, and deleting its environment-gap demotion left every test of
+	// the tool green. The fresh touch, the cache replay and the single-file mode
+	// each render the rows through the demotion, so each has a cell here.
+	describe("environment-gap demotion on the lsp_diagnostics route (#4532)", () => {
+		/** TS2307 for a package the root DECLARES: an environment gap. */
+		const declaredGap = {
+			severity: 1,
+			message:
+				"Cannot find module 'left-pad' or its corresponding type declarations.",
+			code: 2307,
+			range: {
+				start: { line: 0, character: 0 },
+				end: { line: 0, character: 1 },
+			},
+			source: "typescript",
+			serverId: "typescript",
+		};
+
+		/** The widget rows the last reconcile wrote for `file`. */
+		function writtenFor(
+			file: string,
+		): Array<{ semantic: string; message: string }> {
+			const call = reconcileScanDiagnostics.mock.calls
+				.filter((c) => c[0] === file)
+				.at(-1);
+			return (call?.[1] ?? []) as Array<{ semantic: string; message: string }>;
+		}
+
+		beforeEach(() => {
+			fs.writeFileSync(
+				path.join(tmpDir, "package.json"),
+				JSON.stringify({ dependencies: { "left-pad": "1.3.0" } }),
+			);
+			// Shape 73 (fixture adopts an ancestor root): an install anywhere above
+			// the fixture would make every demotion cell red and every blocking
+			// cell vacuous, so the premise is asserted, not assumed.
+			expect(hasResolvableNodeModules(tmpDir)).toBe(false);
+			touchFile.mockResolvedValue({ diags: [{ ...declaredGap }] });
+		});
+
+		it("demotes a declared-package gap on a fresh touch and on its cache replay", async () => {
+			const [file] = writeFiles(["a.ts"]);
+
+			await runBatch([file!]);
+			expect(writtenFor(file!)).toHaveLength(1);
+			expect(writtenFor(file!)[0]).toMatchObject({ semantic: "warning" });
+			expect(writtenFor(file!)[0]?.message).toContain(ENVIRONMENT_GAP_MARKER);
+
+			reconcileScanDiagnostics.mockClear();
+			touchFile.mockClear();
+			await runBatch([file!]);
+			// A replay, never a second touch: the demotion holds on the cache too.
+			expect(touchFile).not.toHaveBeenCalled();
+			expect(writtenFor(file!)[0]).toMatchObject({ semantic: "warning" });
+		});
+
+		it("demotes a declared-package gap in single-file mode", async () => {
+			const [file] = writeFiles(["a.ts"]);
+			await createLspDiagnosticsTool().execute(
+				"diag-env-gap-single",
+				{ path: file, severity: "all", waitMs: 50 },
+				new AbortController().signal,
+				null,
+				{ cwd: tmpDir },
+			);
+			expect(writtenFor(file!)[0]).toMatchObject({ semantic: "warning" });
+			expect(writtenFor(file!)[0]?.message).toContain(ENVIRONMENT_GAP_MARKER);
+		});
+
+		// Review F5 (shape 6, a cache entry missing one input): the entry used to
+		// store the DEMOTED rows, and the demotion only reads severity-1 rows, so
+		// once an install landed and the package stayed unresolved the replay kept
+		// a real missing-module error at warning authority with nothing to re-promote
+		// it. The entry now holds the server's own rows and the replay demotes them
+		// against the install state of the serve.
+		it("re-promotes a cached gap once an install resolves and the package is still missing", async () => {
+			const [file] = writeFiles(["a.ts"]);
+			await runBatch([file!]);
+			expect(writtenFor(file!)[0]).toMatchObject({ semantic: "warning" });
+
+			// The install lands from outside (no project file changes, so the entry
+			// stays fresh) but does not provide `left-pad`.
+			fs.mkdirSync(path.join(tmpDir, "node_modules", "other"), {
+				recursive: true,
+			});
+			reconcileScanDiagnostics.mockClear();
+			touchFile.mockClear();
+			await runBatch([file!]);
+			expect(touchFile).not.toHaveBeenCalled();
+			expect(writtenFor(file!)[0]).toMatchObject({ semantic: "blocking" });
+			expect(writtenFor(file!)[0]?.message).not.toContain(
+				ENVIRONMENT_GAP_MARKER,
+			);
+		});
 	});
 });
