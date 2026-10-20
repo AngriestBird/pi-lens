@@ -526,8 +526,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/call-graph.ts": 4,
 		// 4 -> 5 (#4403): `renderCascadeResult` keeps the notes whose servers
 		// are undelivered, an `Array.prototype.filter` call, not a delivery
-		// filter.
-		"clients/cascade-format.ts": 5,
+		// filter. 5 -> 6 (#4532 round 5): `applyCascadeDisplayPolicy` keeps
+		// the rows still at error severity after the environment-gap demotion,
+		// the same `Array.prototype.filter` shape.
+		"clients/cascade-format.ts": 6,
 		"clients/code-quality-warnings.ts": 5,
 		"clients/codebase-model.ts": 4,
 		"clients/complexity-client.ts": 3,
@@ -1031,8 +1033,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/created-import-targets.ts": 3,
 		"clients/lsp/edits.ts": 23,
 		// #4532: the environment-gap gate resolves its walk-up from the file's
-		// own directory, so these are real filesystem `path` calls.
-		"clients/lsp/environment-gap.ts": 5,
+		// own directory, so these are real filesystem `path` calls. 5 -> 8
+		// (#4532 round 5): the manifest walk-up reads `package.json` at each
+		// level on the same bounded ancestry.
+		"clients/lsp/environment-gap.ts": 8,
 		"clients/lsp/file-server-match.ts": 3,
 		"clients/lsp/index.ts": 15,
 		// #4346: Go package directories and TS/JS extensions of the implicit
