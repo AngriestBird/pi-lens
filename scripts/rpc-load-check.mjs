@@ -55,7 +55,7 @@ import * as fs from "node:fs";
 import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
-import { pathToFileURL } from "node:url";
+import { isMainModule } from "./lib/is-main-module.mjs";
 import {
 	parseNdjsonEntries,
 	phaseWasLogged,
@@ -578,10 +578,7 @@ async function main(argv) {
 	return result.code;
 }
 
-if (
-	process.argv[1] &&
-	import.meta.url === pathToFileURL(process.argv[1]).href
-) {
+if (isMainModule(import.meta.url)) {
 	main(process.argv.slice(2)).then(
 		(code) => process.exit(code),
 		(err) => {

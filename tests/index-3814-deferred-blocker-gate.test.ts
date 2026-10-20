@@ -662,42 +662,41 @@ describe("#3814: deferred blocking findings gate the commit", () => {
 		expect(fs.readFileSync(filePath, "utf8")).toBe("alpha();\n");
 	});
 
+	// Recurrence (r1 M3): the deferred recording refreshed the latch but not the
+	// persisted guard record, so across a session boundary the deferred blocker
+	// let the commit through while an inline blocker blocked as `session_mismatch`.
+	//
+	// The INLINE half of this loop moved to tier 2 (#4632 slice 4,
+	// `tests/index-4632-s4-tool-call-verdict.test.ts`): its blocker needs no
+	// deferred tier, so it is produced by a real bundled rule and read through
+	// pi's own replacement, where the model-visible refusal and the tool not
+	// running are both observable. What stays here is the deferred half.
 	for (const reason of ["new", "resume", "fork", "reload"] as const) {
 		for (const order of ["gate-first", "turn-end-first"] as const) {
-			// Recurrence (r1 M3): the deferred recording refreshed the latch but not the
-			// persisted guard record, so across a session boundary the inline blocker
-			// blocked as `session_mismatch` and the deferred one let the commit
-			// through. The inline row is the control: the same boundary, the same
-			// record contract.
-			for (const mode of ["inline", "deferred"] as const) {
-				it(`blocks the ${reason} session as an unknown record, ${mode} blocker, ${order}`, async () => {
-					if (mode === "inline") {
-						runnerAnswer = answersClean;
-						inlineBlocker = blockingDiagnostic();
-					} else runnerAnswer = answersBlocking("succeeded");
-					const host = await startSession();
-					await host.turnStart();
-					await host.edit();
-					await settle();
-					if (order === "gate-first") await host.gate();
-					else await host.turnEnd();
-					expect((await host.gate()).block).toBe(true);
-					await host.pi.emit(
-						"session_shutdown",
-						{ reason },
-						makeCtx({ cwd: tmpDir, sessionId: SESSION_ID }),
-					);
-					await host.pi.emit(
-						"session_start",
-						makeSessionStartEvent({ reason }),
-						makeCtx({ cwd: tmpDir, sessionId: `next-${reason}` }),
-					);
-					const verdict = await host.gate();
+			it(`blocks the ${reason} session as an unknown record, deferred blocker, ${order}`, async () => {
+				runnerAnswer = answersBlocking("succeeded");
+				const host = await startSession();
+				await host.turnStart();
+				await host.edit();
+				await settle();
+				if (order === "gate-first") await host.gate();
+				else await host.turnEnd();
+				expect((await host.gate()).block).toBe(true);
+				await host.pi.emit(
+					"session_shutdown",
+					{ reason },
+					makeCtx({ cwd: tmpDir, sessionId: SESSION_ID }),
+				);
+				await host.pi.emit(
+					"session_start",
+					makeSessionStartEvent({ reason }),
+					makeCtx({ cwd: tmpDir, sessionId: `next-${reason}` }),
+				);
+				const verdict = await host.gate();
 
-					expect(verdict.block).toBe(true);
-					expect(verdict.reason).toContain("session_mismatch");
-				});
-			}
+				expect(verdict.block).toBe(true);
+				expect(verdict.reason).toContain("session_mismatch");
+			});
 		}
 	}
 

@@ -19,7 +19,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
-import { fileURLToPath } from "node:url";
 import { minimatch } from "minimatch";
 
 const DEFAULT_ROOT = path.join(os.homedir(), ".pi-lens");
@@ -3024,8 +3023,4 @@ function formatExample(ex) {
 	if (ex.error) bits.push(`— ${String(ex.error).slice(0, 160)}`);
 	if (!bits.length && ex.key) bits.push(`${ex.count} × ${ex.key}`);
 	return bits.join(" ");
-}
-
-if (process.argv[1] === fileURLToPath(import.meta.url) && args.help) {
-	printHelp();
 }

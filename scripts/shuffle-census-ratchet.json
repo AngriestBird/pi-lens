@@ -50,12 +50,6 @@
 			"test": "a one-off trap's entry decays after a healthy parse (#3678 F-A) > decays when the SAME consumer parses the same unchanged content"
 		},
 		{
-			"file": "tests/index-3248-git-guard-latch-witness.test.ts",
-			"seam": "index-activation-state",
-			"seed": 202,
-			"test": "#3248 witness: the commit gate and the banner agree through pi > matches the committed golden for a fully marked file"
-		},
-		{
 			"file": "tests/index-3873-session-decision-records.test.ts",
 			"seam": "index-activation-state",
 			"seed": 202,
