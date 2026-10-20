@@ -14,7 +14,6 @@ import {
 	copyFileSync,
 	mkdirSync,
 	mkdtempSync,
-	readdirSync,
 	readFileSync,
 	rmSync,
 } from "node:fs";
@@ -398,15 +397,19 @@ describe("#4680 r4 F1: ci-verdict runs in a checkout that was never built", () =
 	it("loads without build output and degrades only the cap report, to one line", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-lens-ci-verdict-unbuilt-"));
 		try {
-			const lib = join(dir, "scripts", "lib");
-			mkdirSync(lib, { recursive: true });
-			copyFileSync(
-				join(ROOT, "scripts", "ci-verdict.mjs"),
-				join(dir, "scripts", "ci-verdict.mjs"),
-			);
-			for (const name of readdirSync(join(ROOT, "scripts", "lib")))
-				if (name.endsWith(".mjs"))
-					copyFileSync(join(ROOT, "scripts", "lib", name), join(lib, name));
+			mkdirSync(join(dir, "scripts", "lib"), { recursive: true });
+			// The script's static import closure, by name. A new static import
+			// outside this list fails the import below with ERR_MODULE_NOT_FOUND,
+			// naming the file, which is the loud direction: extend the list when
+			// that import is itself tracked source.
+			for (const file of [
+				"scripts/ci-verdict.mjs",
+				"scripts/lib/ci-checks.mjs",
+				"scripts/lib/ci-failure-classifier.mjs",
+				"scripts/lib/github-rest.mjs",
+				"scripts/lib/vitest-summary.mjs",
+			])
+				copyFileSync(join(ROOT, file), join(dir, file));
 			mkdirSync(join(dir, ".github", "workflows"), { recursive: true });
 			copyFileSync(
 				join(ROOT, ".github", "workflows", "ci.yml"),

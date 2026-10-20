@@ -842,7 +842,10 @@ describe("#4672 the aggregate step's own boundary: argv, fetch failures, annotat
 			process.argv.splice(0, process.argv.length, argvBefore[0], script);
 			vi.resetModules();
 			await import(pathToFileURL(script).href);
-			await vi.waitFor(() => expect(process.exitCode).toBe(2));
+			// `main()` reaches its usage line through microtasks alone (no I/O,
+			// no timer), so a bounded microtask drain joins it deterministically.
+			for (let tick = 0; tick < 50 && process.exitCode !== 2; tick += 1)
+				await Promise.resolve();
 			exitCode = process.exitCode;
 		} finally {
 			process.argv.splice(0, process.argv.length, ...argvBefore);
