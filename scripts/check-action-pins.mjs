@@ -2,7 +2,7 @@
 
 import { readFile } from "node:fs/promises";
 import { readdir } from "node:fs/promises";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { load as loadYaml } from "js-yaml";
 import { githubHeaders } from "./lib/github-rest.mjs";
@@ -200,6 +200,14 @@ function interpreterErrorsInSteps(steps, at, matrix) {
 	);
 }
 
+/** A workflow's path as a message spells it: the repository-relative path with
+ *  forward slashes, on every platform. The Windows lane otherwise reads
+ *  `.github\\workflows\\ci.yml` where a reader (and every test that pins an exact
+ *  message) expects `.github/workflows/ci.yml` (#4683). */
+export function displayPath(repoRelativePath, separator = sep) {
+	return repoRelativePath.split(separator).join("/");
+}
+
 /**
  * Every `actions/setup-python` step in one workflow or composite action, with
  * the verdict for its interpreter pin (#4683).
@@ -391,7 +399,7 @@ export async function checkActionPins({
 	const files = await workflowFiles(root);
 	const texts = await Promise.all(
 		files.map(async (file) => [
-			relative(root, file),
+			displayPath(relative(root, file)),
 			await readFile(file, "utf8"),
 		]),
 	);

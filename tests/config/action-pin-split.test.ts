@@ -5,6 +5,7 @@ import { toPosix } from "../../clients/path-utils.js";
 import {
 	type ActionPin,
 	checkActionPins,
+	displayPath,
 	interpreterPinErrors,
 	parseActionPins,
 	workflowFiles,
@@ -626,6 +627,17 @@ describe("#4683 the interpreter pin is read from the parsed workflow", () => {
 		it(`pins or refuses ${shape}`, async () => {
 			expect(await pinErrors({ [file]: text })).toEqual(expected);
 		});
+
+	it("spells every message path with forward slashes, as the Windows lane needs", () => {
+		// Unit tests Windows reded on 08f672c1d: `relative()` yields backslashes
+		// there, so every message in this file disagreed with its expectation.
+		expect(displayPath(".github\\workflows\\plant.yml", win32.sep)).toBe(
+			".github/workflows/plant.yml",
+		);
+		expect(displayPath(".github/workflows/plant.yml")).toBe(
+			".github/workflows/plant.yml",
+		);
+	});
 
 	it("refuses a workflow the parser cannot read, and names the file", async () => {
 		const errors = await pinErrors({
