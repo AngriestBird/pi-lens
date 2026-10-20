@@ -205,6 +205,9 @@ export const TEST_TREE_GOVERNANCE_TESTS = [
 	"tests/real-harness/tools-enabled.test.ts",
 	// #3518: walks tests/ for unchecked `handleToolCall` calls (recurrence #4182).
 	"tests/config/handler-verdict-sweep.test.ts",
+	// #4632: walks tests/ for files that use the hand-built pi double (recurrence
+	// #4631: host semantics passed CI on the double).
+	"tests/config/pi-mock-importer-sweep.test.ts",
 	// #4381: walks tests/ for log-sink reads with no drain of that sink first.
 	"tests/config/sink-read-drain-sweep.test.ts",
 	// #4590: the tests/ half of the env PATH-key composition sweep; its

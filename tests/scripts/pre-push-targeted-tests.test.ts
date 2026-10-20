@@ -450,6 +450,7 @@ describe("selectTargetedTests — path-mirror pass", () => {
 			"tests/real-harness/scenario-3.test.ts",
 			"tests/real-harness/tools-enabled.test.ts",
 			"tests/config/handler-verdict-sweep.test.ts",
+			"tests/config/pi-mock-importer-sweep.test.ts",
 			"tests/config/sink-read-drain-sweep.test.ts",
 			"tests/config/env-path-key-composition-sweep.test.ts",
 			"tests/config/test-env-restore-sweep.test.ts",
