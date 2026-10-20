@@ -1207,6 +1207,16 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"an invented one.",
 		owner: "#2523 slice 2",
 	},
+	"clients/runtime-tool-call.ts#handleToolCallImpl:1a767ae6~924dc100": {
+		family: "hook-await",
+		site: "unbudgeted-hook",
+		reason:
+			"On the `tool_call` path. #2523's contract table declares no " +
+			"wall budget for tool_call, so this await has no number to be " +
+			"measured against yet; recorded as the gap rather than assigned " +
+			"an invented one.",
+		owner: "#2523 slice 2",
+	},
 	"clients/runtime-tool-call.ts#handleToolCallImpl:22725cc2~723fd306": {
 		family: "hook-await",
 		site: "unbudgeted-hook",
@@ -1248,16 +1258,6 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 		owner: "#2523 slice 2",
 	},
 	"clients/runtime-tool-call.ts#handleToolCallImpl:750505ab~c899dd87": {
-		family: "hook-await",
-		site: "unbudgeted-hook",
-		reason:
-			"On the `tool_call` path. #2523's contract table declares no " +
-			"wall budget for tool_call, so this await has no number to be " +
-			"measured against yet; recorded as the gap rather than assigned " +
-			"an invented one.",
-		owner: "#2523 slice 2",
-	},
-	"clients/runtime-tool-call.ts#handleToolCallImpl:7c856ad1~89821fd1": {
 		family: "hook-await",
 		site: "unbudgeted-hook",
 		reason:

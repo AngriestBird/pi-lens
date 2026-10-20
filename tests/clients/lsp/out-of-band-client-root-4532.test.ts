@@ -40,6 +40,7 @@ import {
 import { configureLspServiceLifecycle } from "../../../clients/lsp/service-singleton.js";
 import { workspaceFileCreatedAtFor } from "../../../clients/lsp/workspace-diagnostics-session.js";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
+import { isSessionBookkeepingRoot } from "../../../clients/analysis-root.js";
 import { lookForOutOfBandChanges } from "../../../clients/out-of-band-changes.js";
 import {
 	getRecentLoggedPhases,
@@ -173,6 +174,25 @@ describe("the install look at a live client root (#4532 gap 7)", () => {
 				() => true,
 			),
 		).toBeGreaterThan(0);
+	});
+
+	// The gate the look asks: the session root and its repository's linked
+	// worktrees may allocate session bookkeeping; an adopted project may not
+	// (AGENTS.md "Analysis-root invariant", Greptile round 3).
+	it("calls the session root and its linked worktrees bookkeeping roots, an adopted project not", () => {
+		// A linked worktree laid out the way git writes it: a `.git` FILE naming
+		// a gitdir under the session checkout's own `.git/worktrees/`.
+		const linked = path.join(env.tmpDir, "linked-checkout");
+		const gitDir = path.join(main, ".git", "worktrees", "linked-checkout");
+		fs.mkdirSync(gitDir, { recursive: true });
+		fs.writeFileSync(path.join(gitDir, "commondir"), "../..\n");
+		fs.mkdirSync(linked, { recursive: true });
+		fs.writeFileSync(path.join(linked, ".git"), `gitdir: ${gitDir}\n`);
+
+		expect(isSessionBookkeepingRoot(main, main)).toBe(true);
+		expect(isSessionBookkeepingRoot(linked, main)).toBe(true);
+		// A sibling project with its own marker is adopted.
+		expect(isSessionBookkeepingRoot(worktree, main)).toBe(false);
 	});
 
 	// Greptile round 3: AGENTS.md "Analysis-root invariant" — an adopted root may

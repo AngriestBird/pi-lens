@@ -9,14 +9,8 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as nodePath from "node:path";
-import {
-	isAtOrAboveHomeDir,
-	isUnderDir,
-	isVendorPath,
-	walkUpDirs,
-} from "./path-utils.js";
+import { isAtOrAboveHomeDir, isUnderDir, isVendorPath } from "./path-utils.js";
 import { isPiLensInternalPath } from "./file-utils.js";
-import { findPiLensConfigInDir } from "./project-lens-config.js";
 import {
 	resolveGitCheckout,
 	resolveLinkedWorktreeOwner,
@@ -140,21 +134,6 @@ export function canWriteAnalysisRoot(mode: AnalysisRootMode): boolean {
 }
 
 /**
- * The NEAREST config owner at or above `start`, never above `ceiling`: the
- * direction `loadLSPConfig` layers (registered root, then its ancestors), so a
- * nested `repo/sub/.pi-lens.json` keeps applying only when `repo/sub` itself is
- * registered (#4532 round 3, CodeRabbit).
- */
-function nearestConfigOwner(start: string, ceiling: string): string {
-	for (const dir of walkUpDirs(start)) {
-		if (dir !== ceiling && !isUnderDir(dir, ceiling)) break;
-		if (findPiLensConfigInDir(dir)) return dir;
-		if (dir === ceiling) break;
-	}
-	return ceiling;
-}
-
-/**
  * May this ROOT receive session bookkeeping? The session root and the session
  * repository's linked worktrees may; an adopted project must not (AGENTS.md
  * "Analysis-root invariant"). The root form of {@link resolveAnalysisRoot}:
@@ -176,61 +155,4 @@ export function isSessionBookkeepingRoot(
 		owner.commonDir === checkout.commonDir &&
 		owner.root !== checkout.root
 	);
-}
-
-/**
- * #2657 + #4242: the root a session should REGISTER for `filePath`, or
- * `undefined` when this file's mode must register NOTHING.
- *
- * Pre-fix, the `tool_call` seam registered `path.dirname(filePath)`, so a
- * session touching 128 directories cycled the FIFO(128) session-root registry
- * and evicted the project root — which carries the operator's
- * `lsp.disabledServers` denial — until something re-registered it, and
- * `getConfigForFile` walked a population that grew with the number of
- * directories an agent happened to touch. Registering the file's WORKSPACE
- * fixes that population, but only for the modes that may declare one
- * (`resolveAnalysisRoot` is the answer, this function only routes it):
- *
- * - `session` → the NEAREST directory at or above the file that holds a
- *   `.pi-lens.json`/`pi-lens.json`, never above the session root, else the
- *   session root. The config loader layers upward from the registered root, so
- *   that root must sit at or below the nearest config owner or a nested config
- *   stops applying;
- * - `linked-worktree` → the nearest config owner from the file up to the
- *   worktree's OWN root, never above it, so per-worktree isolation is preserved
- *   (maintainer decision on #1129) and a config nested inside the worktree
- *   keeps applying;
- * - `adopted` / `none` → `undefined`, i.e. register nothing.
- *
- * The last line is the analysis-root invariant (AGENTS.md): an adopted root is
- * separate from session roots, capped at two with idle eviction, and never
- * reaches project-local executables by default. Registering one here answers
- * `session` from `ClientRegistry.analysisRootModeForFile`, which skips
- * `admitAdoptedRoot` — voiding the cap, the idle window, and the
- * project-local-binary refusal for the whole adopted project, not just the
- * directory a call named. #2657's population argument does not need it:
- * `session` and `linked-worktree` are the modes that carry session bookkeeping.
- */
-export function resolveSessionConfigRoot(
-	filePath: string,
-	sessionRoot: string,
-	homeDirOverride?: string,
-): string | undefined {
-	const session = nodePath.resolve(sessionRoot);
-	const mode = resolveAnalysisRoot(filePath, session, homeDirOverride);
-	const start = nodePath.dirname(nodePath.resolve(filePath));
-	if (mode === "linked-worktree") {
-		const checkout = resolveGitCheckout(session);
-		const worktreeRoot =
-			(checkout &&
-				resolveLinkedWorktreeOwner(checkout, realPathOrResolved(filePath))
-					?.root) ??
-			session;
-		// The worktree is a workspace of its own, and its config layers are the
-		// worktree's: register from the file upward to the worktree root, never
-		// above it (maintainer decision on #1129).
-		return nearestConfigOwner(start, worktreeRoot);
-	}
-	if (mode !== "session") return undefined;
-	return nearestConfigOwner(start, session);
 }
