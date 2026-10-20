@@ -66,7 +66,7 @@ Read active files, retained numbered siblings (for example, `cascade.log.1`),
 and date-only archives (for example, `cascade.log.2026-03-01`), plus timestamped
 archives that overlap the selected window. The analyzer includes numbered and
 date-only siblings by default; use `--archived` for timestamped archive names
-containing `T` (for example, `cascade.log.2026-03-01T12-00-00Z`). Filter rows by
+containing `T` (for example, `cascade.2026-03-01T12-00-00Z.log`, the form session-start cleanup writes). Filter rows by
 the selected window in every file. A missing active file does not make its
 retained siblings empty; flag incomplete retention when the files do not cover
 the requested window.
