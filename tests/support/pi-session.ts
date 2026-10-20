@@ -630,6 +630,7 @@ function handleFor(
 ): PiSession {
 	const { session } = created;
 	let disposed = false;
+	let replacing = false;
 	/**
 	 * Settle every sink after the session ended. It runs whether the loaded
 	 * copy's `session_shutdown` came from `dispose()` or from pi's own teardown
@@ -661,6 +662,46 @@ function handleFor(
 			await flushAllNdjsonWriters();
 		}
 	};
+	/** One replacement of this handle's session; `restart` serializes it. */
+	const replaceSession = async (
+		replacement: PiReplacement,
+		responses: readonly PiFauxReply[],
+	): Promise<PiSession> => {
+		if (replacement.reason === "reload") {
+			// pi's own reload keeps this AgentSession, its manager and its
+			// session id; it re-runs the extension factories and emits
+			// `session_shutdown`/`session_start` with reason `reload` itself.
+			created.script(responses);
+			await session.reload();
+			return handle;
+		}
+		const replacementErrors: unknown[] = [];
+		let next: CreatedSession | undefined;
+		const runtime = new AgentSessionRuntime(
+			session,
+			created.services,
+			async (options) => {
+				next = await createSession(args, options, responses);
+				return { ...next.result, services: next.services, diagnostics: [] };
+			},
+		);
+		runtime.setRebindSession((replaced) => bindTo(replaced, replacementErrors));
+		// pi calls this after the shutdown handlers ran and before it disposes
+		// the session, so from here on this handle owns no live session and
+		// must not emit a second shutdown. A refusal before the teardown (an
+		// unknown reason, a missing file) leaves the session live, and
+		// `afterEach` still disposes it.
+		runtime.setBeforeSessionInvalidate(() => {
+			disposed = true;
+		});
+		const { cancelled } = await replaceThrough(runtime, replacement);
+		await drain();
+		if (cancelled || next === undefined)
+			throw new Error(
+				`pi-session: pi did not complete the ${replacement.reason} replacement`,
+			);
+		return handleFor(args, next, replacementErrors);
+	};
 	const handle: PiSession = {
 		session,
 		cwd: created.services.cwd,
@@ -674,49 +715,20 @@ function handleFor(
 			return session.compact(instructions);
 		},
 		async restart(replacement, responses) {
-			// A replaced handle's session is gone; restarting it again would build
-			// a session beside the live replacement and take its identity
-			// (#4692 L2).
-			if (disposed)
+			// A replaced handle's session is gone, and one being replaced is about
+			// to be: restarting it again would build a session beside the live
+			// replacement and take its identity (#4692 L2; overlapping calls,
+			// Sourcery T3).
+			if (disposed || replacing)
 				throw new Error(
-					"pi-session: restart() on a session that already ended; restart the handle the previous restart() returned",
+					"pi-session: restart() on a session that already ended or is being replaced; restart the handle the previous restart() returned",
 				);
-			if (replacement.reason === "reload") {
-				// pi's own reload keeps this AgentSession, its manager and its
-				// session id; it re-runs the extension factories and emits
-				// `session_shutdown`/`session_start` with reason `reload` itself.
-				created.script(responses);
-				await session.reload();
-				return handle;
+			replacing = true;
+			try {
+				return await replaceSession(replacement, responses);
+			} finally {
+				replacing = false;
 			}
-			const replacementErrors: unknown[] = [];
-			let next: CreatedSession | undefined;
-			const runtime = new AgentSessionRuntime(
-				session,
-				created.services,
-				async (options) => {
-					next = await createSession(args, options, responses);
-					return { ...next.result, services: next.services, diagnostics: [] };
-				},
-			);
-			runtime.setRebindSession((replaced) =>
-				bindTo(replaced, replacementErrors),
-			);
-			// pi calls this after the shutdown handlers ran and before it disposes
-			// the session, so from here on this handle owns no live session and
-			// must not emit a second shutdown. A refusal before the teardown (an
-			// unknown reason, a missing file) leaves the session live, and
-			// `afterEach` still disposes it.
-			runtime.setBeforeSessionInvalidate(() => {
-				disposed = true;
-			});
-			const { cancelled } = await replaceThrough(runtime, replacement);
-			await drain();
-			if (cancelled || next === undefined)
-				throw new Error(
-					`pi-session: pi did not complete the ${replacement.reason} replacement`,
-				);
-			return handleFor(args, next, replacementErrors);
 		},
 		async resume(responses) {
 			const file = session.sessionManager.getSessionFile();

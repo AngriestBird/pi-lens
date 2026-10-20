@@ -286,12 +286,20 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 		).rejects.toThrow("no faithful replacement");
 		expect(getActiveSessionId()).toBe(firstId);
 
-		// A replaced handle cannot be restarted again: that would build a third
-		// session beside the live replacement and take its identity (#4692 L2).
-		const second = await first.restart({ reason: "new" }, [
+		// A handle being replaced cannot be restarted beside it: the overlapping
+		// call would build a second replacement while the first is still in
+		// flight (Sourcery T3). Its refusal must leave the first to complete.
+		const pending = first.restart({ reason: "new" }, [
 			fauxAssistantMessage(fauxText("two")),
 		]);
+		await expect(first.restart({ reason: "new" }, [])).rejects.toThrow(
+			"being replaced",
+		);
+		// A replaced handle cannot be restarted again: that would build a third
+		// session beside the live replacement and take its identity (#4692 L2).
+		const second = await pending;
 		const secondId = second.session.sessionManager.getSessionId();
+		expect(secondId).not.toBe(firstId);
 		await expect(first.restart({ reason: "new" }, [])).rejects.toThrow(
 			"already ended",
 		);
