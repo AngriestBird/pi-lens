@@ -778,7 +778,16 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_RUN_ID: ${{ github.run_id }}
           SHARD_JOB_PATTERN: '^Unit tests \(shard [0-9]+/[0-9]+\)$'
+          # The step that runs the tests...
           SHARD_CHECK_STEP: 'Run tests'
+          # ...and the gate that runs AFTER it in the same job. `--check-step`
+          # is repeatable and every listed step must have concluded: a cancel
+          # between `Run tests` and this step leaves a real gate (tmp entries
+          # another file leaked) unjudged, so one step was not enough (#4672
+          # review, V2b). A NEW gating step added after `Run tests` belongs in
+          # this list -- tests/config/unit-tests-shard-workflow.test.ts reds
+          # until it is, because it reads the job's own step order.
+          SHARD_TRAILING_CHECK_STEP: 'Tmp-fixture hygiene owner'
         run: |
           echo "Unit tests shard jobs (test): ${SHARDS_RESULT}"
           node scripts/check-shard-verdict.mjs \
@@ -786,6 +795,7 @@ jobs:
             --result "${SHARDS_RESULT}" \
             --shard-pattern "${SHARD_JOB_PATTERN}" \
             --check-step "${SHARD_CHECK_STEP}" \
+            --check-step "${SHARD_TRAILING_CHECK_STEP}" \
             --repository "${GITHUB_REPOSITORY}" \
             --run "${GITHUB_RUN_ID}"
 

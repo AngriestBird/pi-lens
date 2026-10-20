@@ -66,26 +66,28 @@ export declare function modelCostId(
 	pathImpl?: { relative: (from: string, to: string) => string; sep: string },
 ): string;
 /** `costs` null keeps the round-robin split; a table packs by measured cost. */
-export declare function selectShard<Item>(
-	configs: readonly Item[],
+export declare function selectShard(
+	configs: readonly string[],
 	shard: { index: number; total: number },
 	costs?: ModelCosts | null,
-): Item[];
+): string[];
 /**
- * How far this run's own seconds may sit from the table before the balance
- * line calls the table stale.
+ * How far this run's own ORDERING may disagree with the table's before the
+ * balance line calls the table stale. Scale-free on purpose: one shard's summed
+ * ratio carries the runner's speed, the ranking does not.
  */
-export declare const MODEL_COST_DRIFT_TOLERANCE: number;
+export declare const MODEL_COST_RANK_TOLERANCE: number;
 /**
  * The balance line. `observed` maps `modelCostId` keys to the seconds this run
- * measured, so the drift half compares the projection with the run.
+ * measured, so the second half compares the projection with the run: the
+ * summed ratio as an advisory number, the rank agreement as the drift verdict.
  */
 export declare function formatShardBalance(args: {
 	configs: readonly string[];
 	total: number;
 	costs: ModelCosts;
 	observed?: Map<string, number> | Record<string, number> | null;
-	driftTolerance?: number;
+	rankTolerance?: number;
 }): string;
 export declare function resolveShardCosts(
 	argv: readonly string[],

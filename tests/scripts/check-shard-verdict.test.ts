@@ -28,8 +28,10 @@
 //     step list, names renumbered): shards 1 and 2 `success`, shard 3
 //     `cancelled` with `Run tests` concluded `success`, which is #4672's race
 //     on the other aggregate.
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
 	classifyShardJob,
@@ -71,6 +73,7 @@ function verdictLine(options: {
 	result: string;
 	pattern: RegExp;
 	checkStep: string;
+	checkSteps?: string[];
 	jobs: ShardJob[];
 }) {
 	return evaluateShardVerdict({
@@ -78,6 +81,7 @@ function verdictLine(options: {
 		result: options.result,
 		shardPattern: options.pattern,
 		checkStep: options.checkStep,
+		checkSteps: options.checkSteps ?? [options.checkStep],
 		jobs: options.jobs,
 	});
 }
@@ -172,6 +176,118 @@ describe("#4672 a cancelled shard that finished its work is a pass with a warnin
 		expect(verdict.outcome).toBe("warn");
 		expect(verdict.line).toContain("Unit tests (shard 3/5)");
 		expect(verdict.line).toContain("`Run tests` concluded success");
+	});
+
+	// V2a: the warn arm is reachable ONLY for a `cancelled` aggregate result.
+	// A `failure` aggregate says a shard did not do its work; a visible row list
+	// in which every row merely lost a race with its own timeout has not shown
+	// that, and reading it as a warning is the row-count check's own harm class
+	// arriving from the other side. Reproduced before the fix: the shipped code
+	// answered `warn` here.
+	it("stays red when the aggregate result is `failure` and every visible row is a teardown cancel", () => {
+		const rows = jobsOf("tla-cancelled-complete.real.json").filter(
+			(job) =>
+				TLA_PATTERN.test(String(job.name)) && job.conclusion === "cancelled",
+		);
+		expect(rows).toHaveLength(1);
+		const verdict = verdictLine({
+			label: "TLA+ models",
+			result: "failure",
+			pattern: TLA_PATTERN,
+			checkStep: TLA_CHECK_STEP,
+			jobs: rows,
+		});
+		expect(verdict.outcome).toBe("fail");
+		expect(verdict.line).toContain("needs result failure");
+		expect(verdict.line).toContain(
+			"A teardown race explains a `cancelled` aggregate",
+		);
+		expect(verdict.line).toContain("unreadable evidence is not a pass");
+		// The reason still names the shard it read, so the reader is not left
+		// guessing which row produced the line.
+		expect(verdict.line).toContain("TLA+ models (shard 4/4)");
+	});
+
+	it.each(["failure", "timed_out", "skipped"])(
+		"never warns for a `%s` aggregate result",
+		(result) => {
+			const verdict = verdictLine({
+				label: "TLA+ models",
+				result,
+				pattern: TLA_PATTERN,
+				checkStep: TLA_CHECK_STEP,
+				jobs: jobsOf("tla-cancelled-complete.real.json"),
+			});
+			expect(verdict.outcome).not.toBe("warn");
+			expect(verdict.outcome).toBe("fail");
+		},
+	);
+
+	// V2b: `--check-step` is a list, and EVERY listed step must have concluded.
+	// In the `test` job `Tmp-fixture hygiene owner` runs AFTER `Run tests`, so a
+	// cancel between the two left the aggregate green while a gate in that very
+	// job never finished. The shipped fixture has exactly that shape.
+	it("stays red when a gating step after the work step never ran", () => {
+		const jobs = jobsOf("unit-cancelled-complete.synthetic.json");
+		const cancelled = jobs.filter(
+			(job) =>
+				UNIT_PATTERN.test(String(job.name)) && job.conclusion === "cancelled",
+		);
+		expect(cancelled).toHaveLength(1);
+		const verdict = verdictLine({
+			label: "Unit tests",
+			result: "cancelled",
+			pattern: UNIT_PATTERN,
+			checkStep: UNIT_CHECK_STEP,
+			checkSteps: [UNIT_CHECK_STEP, "Tmp-fixture hygiene owner"],
+			jobs,
+		});
+		expect(verdict.outcome).toBe("fail");
+		expect(verdict.line).toContain("Unit tests (shard 3/5)");
+		expect(verdict.line).toContain("`Tmp-fixture hygiene owner`");
+		expect(verdict.line).toMatch(
+			/cancelled before `Tmp-fixture hygiene owner` finished after `Run tests` concluded success/,
+		);
+		// And the same rows stay a warning for the single-step list, which is
+		// what `tla-shards` passes: the difference is the required step list, not
+		// the row.
+		expect(
+			verdictLine({
+				label: "Unit tests",
+				result: "cancelled",
+				pattern: UNIT_PATTERN,
+				checkStep: UNIT_CHECK_STEP,
+				jobs,
+			}).outcome,
+		).toBe("warn");
+	});
+
+	// The other direction: a cancel whose EVERY required step concluded stays a
+	// warning, so the second step never turns a real teardown race red.
+	it("keeps warning when every listed step concluded before the cancel", () => {
+		const job = {
+			id: 7,
+			name: "Unit tests (shard 3/5)",
+			conclusion: "cancelled",
+			steps: [
+				{ name: "Build", conclusion: "success" },
+				{ name: "Run tests", conclusion: "success" },
+				{ name: "Tmp-fixture hygiene owner", conclusion: "success" },
+				{ name: "Upload per-file test results", conclusion: "success" },
+			],
+		};
+		const verdict = verdictLine({
+			label: "Unit tests",
+			result: "cancelled",
+			pattern: UNIT_PATTERN,
+			checkStep: UNIT_CHECK_STEP,
+			checkSteps: [UNIT_CHECK_STEP, "Tmp-fixture hygiene owner"],
+			jobs: [job],
+		});
+		expect(verdict.outcome).toBe("warn");
+		expect(verdict.line).toContain(
+			"`Run tests` and `Tmp-fixture hygiene owner`",
+		);
 	});
 
 	// Unreadable evidence is not a pass: a non-success aggregate result that no
@@ -513,6 +629,33 @@ describe("#4672 the aggregate step's own boundary: argv, fetch failures, annotat
 		]);
 		expect(result.code).toBe(2);
 		expect(result.lines[0]).toContain("not a regular expression");
+	});
+
+	// V5b, AGENTS.md shape 44: importing this module must not run the entry
+	// point. The retired guard compared `process.argv[1]` against a FILENAME
+	// SUFFIX, so any wrapper whose name ended in `check-shard-verdict.mjs` ran
+	// `main()` with the wrapper's argv and set the wrapper's exit code -- the
+	// reproduction below exits 2 on this module's own usage line. The guard now
+	// compares `import.meta.url` with `pathToFileURL(process.argv[1]).href`, the
+	// form the sibling scripts use.
+	it("does not run the entry point when a wrapper imports the module", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-lens-shard-verdict-wrapper-"));
+		try {
+			const wrapper = join(dir, "wrapper-check-shard-verdict.mjs");
+			writeFileSync(
+				wrapper,
+				`import ${JSON.stringify(resolve(import.meta.dirname, "../../scripts/check-shard-verdict.mjs"))};\nconsole.log("wrapper: after import");\n`,
+			);
+			const run = spawnSync(process.execPath, [wrapper], {
+				encoding: "utf8",
+				env: { PATH: process.env.PATH },
+			});
+			expect(run.stderr).not.toContain("missing --label");
+			expect(run.stdout.trim()).toBe("wrapper: after import");
+			expect(run.status).toBe(0);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 
 	it("refuses a jobs file with no jobs array", async () => {

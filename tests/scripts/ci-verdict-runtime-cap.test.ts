@@ -109,6 +109,82 @@ describe("#3920 item 3: a required job's runtime against its cap", () => {
 		expect(lines[0]).not.toContain("(gating)");
 	});
 
+	// V5a: the marker must agree with the verdict. A check-run from a
+	// schedule-only workflow is not a gate on this commit (#4090), so the row
+	// is advisory -- and `computeVerdict` scores the same name `gating: false`.
+	// Before the fix the report labelled seven nightly jobs `(gating)` while the
+	// verdict excused them, so a reader of the report chased a blocker that
+	// could not block.
+	it("marks a schedule-only nightly row advisory, exactly as the verdict scores it", async () => {
+		const caps = await readJobTimeCaps(ROOT);
+		const name = "Build combined nightly report";
+		const entry = caps.find((candidate) => candidate.pattern.test(name));
+		expect(entry, `no cap entry for ${name}`).toBeDefined();
+		const checkRun = {
+			name,
+			workflow_event: "schedule",
+			started_at: "2026-10-20T07:00:00Z",
+			completed_at: "2026-10-20T08:25:30Z", // 5130 s of a 5400 s cap = 95%
+		};
+		const lines = runtimeCapLines({ checkRuns: [checkRun], caps });
+		expect(lines[0]).toContain(`${name} 5130s of 5400s (95%)`);
+		expect(lines[0]).toContain("(advisory)");
+		expect(lines[0]).not.toContain("(gating)");
+		// The verdict's own answer for the same payload, so the two cannot drift
+		// apart again: the row is reported red and still not gating.
+		const verdict = computeVerdict(
+			{
+				check_runs: [
+					{
+						name: "Unit tests",
+						status: "completed",
+						conclusion: "success",
+						started_at: "2026-10-20T07:00:00Z",
+					},
+					{
+						name: "Lint & type-check",
+						status: "completed",
+						conclusion: "success",
+						started_at: "2026-10-20T07:00:00Z",
+					},
+					{ ...checkRun, status: "completed", conclusion: "failure" },
+				],
+			},
+			undefined,
+			"MERGEABLE",
+		);
+		const scored = verdict.rows.find((row) => row.name === name);
+		expect(scored?.gating).toBe(false);
+		expect(verdict.exitCode).toBe(0);
+	});
+
+	// And the override still wins (AGENTS.md shape 38): the same schedule-only
+	// name gates when branch protection's own list requires it.
+	it("keeps a schedule-only name gating when branch protection requires it", () => {
+		const caps = [
+			{
+				file: "stryker-nightly.yml",
+				jobId: "publish",
+				name: "Build combined nightly report",
+				capMinutes: 90,
+				pattern: checkNamePattern("Build combined nightly report"),
+			},
+		];
+		const lines = runtimeCapLines({
+			checkRuns: [
+				{
+					name: "Build combined nightly report",
+					workflow_event: "schedule",
+					started_at: "2026-10-20T07:00:00Z",
+					completed_at: "2026-10-20T08:25:30Z",
+				},
+			],
+			caps,
+			requiredChecks: ["Build combined nightly report"],
+		});
+		expect(lines[0]).toContain("(gating)");
+	});
+
 	// The size decision this PR made, pinned as behaviour: at the new 20-minute
 	// cap the measured shard is at 61%, under the 70% warning line. A regression
 	// that silently re-tightens the cap shows up here.
@@ -252,7 +328,14 @@ describe("#3920 item 3: a required job's runtime against its cap", () => {
 
 	// Non-gating, proven through the real verdict function: the report is a
 	// separate read of the same payload and never enters the exit code.
-	it("does not change the verdict for an over-cap job", async () => {
+	//
+	// #3920 review: this case used the REAL checkout's caps, where the shard's
+	// 735 s is 61% of its 20-minute budget -- so the row printed only the "no
+	// job is at 70%" summary and the assertion proved nothing about an over-cap
+	// row. The cap is now 12 minutes, the value that shipped when the 735 s
+	// shard was actually `cancelled`, so the row is at 102% and the over-cap arm
+	// runs.
+	it("does not change the verdict for a job at or over its cap", async () => {
 		const payload = {
 			check_runs: [
 				{
@@ -265,10 +348,26 @@ describe("#3920 item 3: a required job's runtime against its cap", () => {
 			],
 		};
 		const verdict = computeVerdict(payload, ["TLA+ models (shard 4/4)"]);
-		const caps = await readJobTimeCaps(ROOT);
+		const caps = [
+			{
+				file: ".github/workflows/ci.yml",
+				jobId: "tla-shards",
+				name: "TLA+ models (shard ...)",
+				capMinutes: 12,
+				pattern: checkNamePattern(
+					"TLA+ models (shard ${{ matrix.shard }}/${{ strategy.job-total }})",
+				),
+			},
+		];
 		const lines = runtimeCapLines({ checkRuns: payload.check_runs, caps });
+		expect(lines).toHaveLength(1);
+		// The report names it as over its cap...
+		expect(lines[0]).toContain("735s of 720s (102%)");
+		expect(lines[0]).toContain("at or over its cap");
+		expect(lines[0]).toContain("(gating)");
+		// ...and the verdict on the same payload is unchanged: the row concluded
+		// success, so the runtime report cannot move the exit code.
 		expect(verdict.exitCode).toBe(0);
-		expect(lines.length).toBeGreaterThan(0);
 	});
 });
 

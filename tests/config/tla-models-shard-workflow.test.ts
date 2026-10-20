@@ -1,15 +1,16 @@
 import { readFileSync } from "node:fs";
-import { resolve, win32 } from "node:path";
+import { join, resolve, win32 } from "node:path";
 import { describe, expect, it } from "vitest";
 import yaml from "../../clients/deps/js-yaml.js";
 import {
 	MODEL_COSTS_FILE,
-	MODEL_COST_DRIFT_TOLERANCE,
+	MODEL_COST_RANK_TOLERANCE,
 	formatShardBalance,
 	listModelConfigs,
 	loadModelCosts,
 	modelCostId,
 	selectConfigs,
+	selectShard,
 } from "../../scripts/check-tla-models.mjs";
 import { assertNonEmptyScan } from "../support/sweep-kit.js";
 
@@ -292,11 +293,11 @@ describe("#3918 sharded TLA+ models workflow contract", () => {
 
 	// F4: the projection half of that line is computed from the table itself, so
 	// it is 1.00x by construction and can never reveal drift in the table -- the
-	// one thing `Accepted residuals` offers it for. These two cases are the
-	// drift half: this run's own summed seconds against the table's rows.
+	// one thing `Accepted residuals` offers it for. These cases are the drift
+	// half: this run's own seconds against the table's own ORDERING.
 	it("prints the drift between the table and this run when they agree", () => {
 		const costs = { root: ROOT, ...loadModelCosts(ROOT) };
-		const configs = listModelConfigs(ROOT).slice(0, 4);
+		const configs = listModelConfigs(ROOT).slice(0, 40);
 		const observed = new Map<string, number>(
 			configs.map((config) => [
 				modelCostId(ROOT, config),
@@ -305,34 +306,155 @@ describe("#3918 sharded TLA+ models workflow contract", () => {
 		);
 		const line = formatShardBalance({ configs, total: 4, costs, observed });
 		expect(line).toContain("this run measured");
-		expect(line).toContain("(1.00x the table,");
-		expect(line).toContain("inside the");
+		expect(line).toContain("(1.00x the table's");
+		expect(line).toContain("the table's ordering still describes this run");
+		expect(line).toContain("rank agreement 1.00");
+		expect(line).toContain(`${MODEL_COST_RANK_TOLERANCE.toFixed(2)} tolerance`);
 		expect(line).not.toContain("COST-TABLE DRIFT");
 	});
 
-	// The direction that must red: the table says one thing, the run did another.
+	// V1, the false positive this replaces: the shipped 1.25x band was sized
+	// from "shard-level sums move up to 24% run to run", and the partition's
+	// FIRST live run (39435284236) falsified that. Replayed here from that
+	// run's own four shard logs (fixtures/tla-model-costs/, captured verbatim
+	// with `gh run view 39435284236 --log --job <id>`), a FRESH table and a
+	// per-shard sum sit 0.64x apart on shard 1/4 -- so the published line
+	// printed `COST-TABLE DRIFT` on a healthy run, one shard of four. A warning
+	// that cries wolf is worse than none: no shard of this run may print it.
+	it.each([
+		["1of4", "0.64x"],
+		["2of4", "1.14x"],
+		["3of4", "1.05x"],
+		["4of4", "1.03x"],
+	] as const)(
+		"does not call the table stale for shard %s of the healthy run 39435284236",
+		(shard, ratio) => {
+			const measured = JSON.parse(
+				readFileSync(
+					join(
+						import.meta.dirname,
+						"..",
+						"fixtures",
+						"tla-model-costs",
+						`run-39435284236-${shard}.json`,
+					),
+					"utf8",
+				),
+			) as { files: Record<string, number> };
+			const costs = { root: ROOT, ...loadModelCosts(ROOT) };
+			const observed = new Map<string, number>(Object.entries(measured.files));
+			const configs = Object.keys(measured.files).map((id) =>
+				resolve(ROOT, id),
+			);
+			assertNonEmptyScan(`shard ${shard} configs`, configs.length, 100);
+			const line = formatShardBalance({ configs, total: 4, costs, observed });
+			// The ratio is still reported -- an operator reads this run's own
+			// numbers -- but it is not the verdict, because one shard's sum
+			// carries the runner's speed as well as the table's error.
+			expect(line).toContain(`(${ratio} the table's`);
+			expect(line).toContain("one shard's own ratio");
+			expect(line).not.toContain("COST-TABLE DRIFT");
+			expect(line).toContain("the table's ordering still describes this run");
+		},
+	);
+
+	// The direction that must red: the table's rows still exist, nothing is
+	// unmeasured, but its ORDERING no longer describes this run -- the shape a
+	// table that was never regenerated after a corpus rewrite arrives in.
 	it("names a stale cost table instead of confirming it with its own projection", () => {
 		const costs = { root: ROOT, ...loadModelCosts(ROOT) };
-		const configs = listModelConfigs(ROOT).slice(0, 4);
-		// 3x the projected seconds for every config in this shard -- what the
-		// live run 39435284236 showed at 1.14x on shard 2/4 and 0.64x on
-		// shard 1/4, only further out.
+		const configs = listModelConfigs(ROOT).slice(0, 40);
+		// Hand this run the table's rows in REVERSE order: each config measured
+		// roughly what the table budgets for its opposite end.
+		const reversed = [...configs].reverse();
 		const observed = new Map<string, number>(
-			configs.map((config) => [
+			configs.map((config, index) => [
 				modelCostId(ROOT, config),
-				3 * (costs.files[modelCostId(ROOT, config)] ?? costs.max),
+				Math.max(
+					0.1,
+					costs.files[modelCostId(ROOT, reversed[index])] ?? costs.max,
+				),
 			]),
 		);
 		const line = formatShardBalance({ configs, total: 4, costs, observed });
 		expect(line).toContain("COST-TABLE DRIFT");
+		expect(line).toContain("the table's ordering no longer describes this run");
 		expect(line).toContain(
-			`${MODEL_COST_DRIFT_TOLERANCE.toFixed(2)}x tolerance`,
+			`outside the ${MODEL_COST_RANK_TOLERANCE.toFixed(2)}`,
 		);
-		expect(line).toContain("(3.00x the table,");
 		expect(line).toContain("scripts/gen-tla-model-costs.mjs");
 		// The projection half is untouched: the two halves are independent, so a
-		// reader sees the table's own 1.00x next to this run's 3.00x.
-		expect(line).toContain("heaviest/lightest = 1.00x");
+		// reader sees the table's own spread next to this run's disagreement.
+		expect(line).toContain("heaviest/lightest = ");
+	});
+
+	// A config count too small to rank cannot be compared, and the line says
+	// so instead of guessing in either direction.
+	it("says it cannot compare when this shard has too few priced configs to rank", () => {
+		const costs = { root: ROOT, ...loadModelCosts(ROOT) };
+		const configs = listModelConfigs(ROOT).slice(0, 2);
+		const observed = new Map<string, number>(
+			configs.map((config) => [
+				modelCostId(ROOT, config),
+				99 * (costs.files[modelCostId(ROOT, config)] ?? costs.max),
+			]),
+		);
+		const line = formatShardBalance({ configs, total: 4, costs, observed });
+		expect(line).toContain("too few priced configs");
+		expect(line).not.toContain("COST-TABLE DRIFT");
+	});
+
+	// V5d: `selectShard` (the selector each shard runs) and
+	// `formatShardBalance` (the line it prints) packed the same 811 configs with
+	// DIFFERENT item ids -- `String(position)` against the config path -- and
+	// `assignShards` breaks a cost tie by ascending id. 714 of these configs sit
+	// in tie groups, so the two packs disagreed on the MEMBERSHIP of all four
+	// shards (102 of shard 1's 201 configs swapped) while every number either
+	// printed was identical. One pack, keyed by the config path.
+	it("packs the selector and the printed balance with one item id scheme", () => {
+		const costs = { root: ROOT, ...loadModelCosts(ROOT) };
+		const all = listModelConfigs(ROOT);
+		for (let index = 1; index <= 4; index += 1) {
+			const selected = selectShard(all, { index, total: 4 }, costs);
+			const line = formatShardBalance({
+				configs: selected,
+				total: 4,
+				costs,
+			});
+			// The count the line prints is THIS selection's count, and every
+			// config lands in exactly one shard.
+			expect(
+				line,
+				`shard ${index}/4 prints a different population than it selects`,
+			).toContain(`this shard: ${selected.length} configs`);
+			expect(selected.length).toBeGreaterThan(0);
+		}
+		const owners = new Map<string, number>();
+		for (let index = 1; index <= 4; index += 1)
+			for (const config of selectShard(all, { index, total: 4 }, costs))
+				owners.set(config, (owners.get(config) ?? 0) + 1);
+		expect(owners.size).toBe(all.length);
+		expect([...owners.values()].filter((count) => count !== 1)).toEqual([]);
+	});
+
+	// The selector's own docstring: equal-cost input reproduces the count-based
+	// round-robin exactly. Keyed by `String(position)` the tie broke in
+	// LEXICOGRAPHIC id order ('0','1','10','100',...), so the pack was a shuffle
+	// of that round-robin, not that round-robin.
+	it("reproduces the count-based round-robin on equal-cost input", () => {
+		const all = listModelConfigs(ROOT);
+		const flat = {
+			root: ROOT,
+			files: Object.fromEntries(
+				all.map((config) => [modelCostId(ROOT, config), 1]),
+			),
+			max: 1,
+		};
+		for (let index = 1; index <= 4; index += 1) {
+			expect(selectShard(all, { index, total: 4 }, flat)).toEqual(
+				all.filter((_, position) => position % 4 === index - 1),
+			);
+		}
 	});
 
 	// F1, the HIGH finding: `Unit tests Windows` was red at the PR's head because

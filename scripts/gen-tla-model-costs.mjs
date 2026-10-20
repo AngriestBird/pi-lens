@@ -32,8 +32,11 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { median } from "./lib/test-shard-assignment.mjs";
+// The population a table must price is the checker's own: one glob here and
+// one there would let the floor below measure the wrong denominator.
+import { listModelConfigs } from "./check-tla-models.mjs";
 
 /** One `ok`/`FAIL` line the checker prints per config. Group 1 is the config's
  * repo-relative path, group 2 its TLC seconds. */
@@ -90,6 +93,37 @@ export function buildModelCosts(logs) {
 	};
 }
 
+/**
+ * The share of the tree's configs (`listModelConfigs`) a generated table must
+ * price before it may be written.
+ *
+ * The table's whole contract is that a config with no row costs the table's
+ * MAX (never zero), so a table missing 75% of the corpus does not fail loudly
+ * at the reader -- it silently prices three shards' worth of configs at one
+ * fallback number, and the balance line then reports a spread that measured
+ * nothing. The documented workflow captures one `--log` per shard, so a
+ * complete regeneration clears 100% and a partial one is a mistake worth
+ * stopping (V4). Half is the floor: it admits a regeneration from a run that
+ * covered a re-sharded subset while refusing a single shard's log.
+ */
+export const MIN_TABLE_COVERAGE = 0.5;
+
+/**
+ * Why `files` cannot ship as the cost table, or `null` when it can.
+ *
+ * @param {Record<string, number>} files the per-config seconds just generated
+ * @param {{ configCount: number }} args `configCount` is the tree's config count
+ * @returns {string | null}
+ */
+export function incompleteTableReason(files, { configCount }) {
+	const rows = Object.keys(files ?? {}).length;
+	if (rows === 0)
+		return "no per-config TLC timings found: no --log carried an `ok|FAIL formal/... (Ns)` line, so this table would price every config at the table max and leave them all in one shard";
+	if (configCount > 0 && rows < Math.ceil(configCount * MIN_TABLE_COVERAGE))
+		return `only ${rows} of the ${configCount} configs under formal/ have a row (floor ${Math.round(MIN_TABLE_COVERAGE * 100)}%); a config with no row costs the table max, so a partial regeneration prices the shards by fallback -- pass one --log per shard`;
+	return null;
+}
+
 const USAGE =
 	"usage: node scripts/gen-tla-model-costs.mjs --log <job-log> [--log <job-log> ...] [--source <label> ...] [--out <file>]";
 
@@ -109,7 +143,12 @@ function parse(argv) {
 	return { logs, sources, out };
 }
 
-export function main(argv = process.argv.slice(2)) {
+export function main(
+	argv = process.argv.slice(2),
+	{
+		root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."),
+	} = {},
+) {
 	let parsed;
 	try {
 		parsed = parse(argv);
@@ -124,6 +163,17 @@ export function main(argv = process.argv.slice(2)) {
 		text: fs.readFileSync(file, "utf8"),
 	}));
 	const { files } = buildModelCosts(logs);
+	// A table that prices almost nothing is worse than no table: `loadModelCosts`
+	// would accept it, every lookup would fall back to the (now zero) max, and
+	// `selectShard` would leave the whole corpus in shard 1 (V4). Refuse before
+	// the write, so the committed file is never the broken one.
+	const refusal = incompleteTableReason(files, {
+		configCount: listModelConfigs(root).length,
+	});
+	if (refusal !== null) {
+		console.error(refusal);
+		return 2;
+	}
 	const payload = {
 		generatedBy:
 			"node scripts/gen-tla-model-costs.mjs --source <run-id> ... --log <job-log> ... (logs from `gh run view <run-id> --log --job <shard-job-id>`)",

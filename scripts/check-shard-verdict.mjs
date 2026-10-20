@@ -16,12 +16,20 @@
 // ci.yml already recorded "PR heads cancelled at 736 s, 881 s and 12m15s".
 //
 // THE RULE, and why the other direction stays red. A cancelled shard is read
-// as a pass-with-warning ONLY when the step that does the shard's work
-// concluded `success`: at that point the work that mattered finished, and what
-// was cancelled is the job's own teardown (post-steps / the runner reclaiming
-// the box). A shard cancelled BEFORE that step finished -- the step is
+// as a pass-with-warning ONLY when EVERY step that job must finish concluded
+// `success` (V2b): `--check-step` is repeatable, so `test` names both `Run
+// tests` and `Tmp-fixture hygiene owner` -- which runs AFTER it (ci.yml) and
+// reds on tmp entries another file leaked. One step is not enough: a cancel
+// between the two left the aggregate green while a gate in that very job never
+// concluded. A shard cancelled BEFORE any of them finished -- the step is
 // `cancelled`, `failed`, or never started -- is a real timeout: its shard's
 // configs or tests were not all run, so the aggregate must stay red.
+//
+// And the warning is only ever reachable for a `cancelled` aggregate result
+// (V2a): `needs.<job>.result` of `failure` says a shard FAILED, and a list
+// whose visible rows are all cancelled-teardown races has not shown that
+// failure -- so it stays red. A `failure` that reads green is exactly the
+// direction the row-count check below exists to catch.
 // AGENTS.md "Recurring defect shapes" 11 forbids the opposite reading
 // ("absent required checks are not passing checks"): a genuine timeout must
 // never read as green, and the harm from a false green here is a model
@@ -41,6 +49,8 @@
 //     --check-step "Model-check formal/ against each config's expected verdict" \
 //     --repository "$GITHUB_REPOSITORY" --run "$GITHUB_RUN_ID"
 //
+// Repeat `--check-step` once per gating step the job must finish.
+//
 // `--result` is `needs.<shard-job>.result`, the same input the old step read.
 // A `success` result short-circuits to `pass` without touching the API, so the
 // green path costs nothing. Any other result reads
@@ -54,17 +64,19 @@
 
 import fs from "node:fs";
 import { parseArgs as parseNodeArgs } from "node:util";
+import { pathToFileURL } from "node:url";
 import { githubHeaders } from "./lib/github-rest.mjs";
 
-/** The one step whose conclusion decides whether a cancelled shard finished
- * its work. Accepted as a flag so `tla-shards` and `test` name their own. */
+/** The steps whose conclusions decide whether a cancelled shard finished its
+ * work. `--check-step` is repeatable, so `test` names both its work step and
+ * the gate that runs after it; `tla-shards` names one. */
 const REQUIRED_FLAGS = ["label", "result", "shard-pattern", "check-step"];
 
 const CLI_OPTIONS = Object.freeze({
 	label: { type: "string" },
 	result: { type: "string" },
 	"shard-pattern": { type: "string" },
-	"check-step": { type: "string" },
+	"check-step": { type: "string", multiple: true },
 	repository: { type: "string" },
 	run: { type: "string" },
 	"jobs-file": { type: "string" },
@@ -91,20 +103,31 @@ export function parseArgs(argv) {
 /** A conclusion that means "this step ran to its end". */
 const STEP_DONE = new Set(["success"]);
 
+/** `checkSteps` as the list of steps this job must finish, first one first. */
+function requiredSteps(checkSteps) {
+	if (Array.isArray(checkSteps)) return checkSteps.filter(Boolean);
+	return checkSteps ? [checkSteps] : [];
+}
+
 /**
- * Classify ONE shard job row against the step that does its work.
+ * Classify ONE shard job row against the steps that do its work.
+ *
+ * A cancelled job warns only when EVERY required step concluded `success`:
+ * the first one is the work itself, and any after it are gates that run later
+ * in the SAME job (`test`'s `Tmp-fixture hygiene owner` runs after its `Run
+ * tests`). The step array's own order is what names an unfinished later gate,
+ * so the diagnosis says which step the cancellation cut off.
  *
  * @param {object} job a job object from `GET /actions/runs/<id>/jobs`'s `jobs`
- * @param {string} checkStep the step name whose conclusion vouches for the work
+ * @param {string | string[]} checkSteps the step name(s) whose conclusions vouch for the work
  * @returns {{ outcome: "pass" | "warn" | "fail", reason: string }}
  */
-export function classifyShardJob(job, checkStep) {
+export function classifyShardJob(job, checkSteps) {
 	const name = String(job?.name ?? "(unnamed job)");
 	const conclusion = String(job?.conclusion ?? "");
 	const steps = Array.isArray(job?.steps) ? job.steps : [];
-	const step = steps.find((entry) => entry?.name === checkStep);
-	const stepConclusion =
-		step === undefined ? "absent" : String(step.conclusion ?? "in progress");
+	const required = requiredSteps(checkSteps);
+	const work = required[0];
 
 	if (conclusion === "success") {
 		return { outcome: "pass", reason: `${name} succeeded` };
@@ -118,16 +141,26 @@ export function classifyShardJob(job, checkStep) {
 		return { outcome: "pass", reason: `${name} was skipped` };
 	}
 	if (conclusion === "cancelled") {
-		if (step !== undefined && STEP_DONE.has(stepConclusion)) {
-			const seconds = stepSeconds(step);
+		for (const [at, stepName] of required.entries()) {
+			const step = steps.find((entry) => entry?.name === stepName);
+			const stepConclusion =
+				step === undefined
+					? "absent"
+					: String(step.conclusion ?? "in progress");
+			if (step !== undefined && STEP_DONE.has(stepConclusion)) continue;
+			// An earlier required step finished and this one did not: the job's
+			// work is unfinished, whatever the earlier step's success suggests.
+			const after =
+				at === 0 ? "" : ` after \`${required[at - 1]}\` concluded success`;
 			return {
-				outcome: "warn",
-				reason: `${name} was cancelled at its own job timeout after \`${checkStep}\` concluded success${seconds === null ? "" : ` (${seconds} s in that step)`}`,
+				outcome: "fail",
+				reason: `${name} was cancelled before \`${stepName}\` finished${after} (step ${step === undefined ? "absent from the job" : `conclusion ${stepConclusion}`})`,
 			};
 		}
+		const seconds = stepSeconds(steps.find((entry) => entry?.name === work));
 		return {
-			outcome: "fail",
-			reason: `${name} was cancelled before \`${checkStep}\` finished (step ${step === undefined ? "absent from the job" : `conclusion ${stepConclusion}`})`,
+			outcome: "warn",
+			reason: `${name} was cancelled at its own job timeout after ${required.map((stepName) => `\`${stepName}\``).join(" and ")} concluded success${seconds === null ? "" : ` (${seconds} s in the work step)`}`,
 		};
 	}
 	return {
@@ -163,13 +196,14 @@ function describeStepConclusions(steps) {
  * evidence we were given, and shape 11 says an absent row is not a passing
  * one.
  *
- * @param {{ label: string, result: string, shardPattern: RegExp, checkStep: string, jobs: object[] }} args
+ * @param {{ label: string, result: string, shardPattern: RegExp, checkStep?: string, checkSteps?: string | string[], jobs: object[] }} args
  */
 export function evaluateShardVerdict({
 	label,
 	result,
 	shardPattern,
 	checkStep,
+	checkSteps = checkStep,
 	jobs,
 }) {
 	if (result === "success") {
@@ -189,7 +223,7 @@ export function evaluateShardVerdict({
 	}
 	const classified = rows.map((job) => ({
 		job,
-		...classifyShardJob(job, checkStep),
+		...classifyShardJob(job, checkSteps),
 	}));
 	const failed = classified.filter((entry) => entry.outcome === "fail");
 	if (failed.length > 0) {
@@ -199,10 +233,22 @@ export function evaluateShardVerdict({
 		};
 	}
 	const warned = classified.filter((entry) => entry.outcome === "warn");
+	// V2a: a teardown cancellation explains a `cancelled` aggregate result and
+	// NOTHING ELSE. `failure` (or `timed_out`, or `skipped`) says a shard did
+	// not do its work; a visible list in which every row merely lost a race with
+	// its own timeout has not shown that, so the aggregate stays red. Reading
+	// it as a warning is the one direction the row-count check below exists to
+	// catch, arriving from the other side.
+	if (warned.length > 0 && result !== "cancelled") {
+		return {
+			outcome: "fail",
+			line: `${label}: needs result ${result}; ${warned.map((entry) => entry.reason).join("; ")}. A teardown race explains a \`cancelled\` aggregate, not a \`${result}\` one, and no visible shard row reports that result, so it is unexplained; unreadable evidence is not a pass`,
+		};
+	}
 	if (warned.length > 0) {
 		return {
 			outcome: "warn",
-			line: `${label}: needs result ${result}; ${warned.map((entry) => entry.reason).join("; ")}. The step that does this shard's work finished, so the cancellation is a teardown race with the job's own timeout, not a violation; kept as a pass and recorded here`,
+			line: `${label}: needs result ${result}; ${warned.map((entry) => entry.reason).join("; ")}. Every step that does this shard's work finished, so the cancellation is a teardown race with the job's own timeout, not a violation; kept as a pass and recorded here`,
 		};
 	}
 	// Every row passed, yet the shard job did not report `success`. That is not
@@ -323,11 +369,15 @@ export async function runShardVerdict({
 			stdout,
 		);
 	}
-	const missing = REQUIRED_FLAGS.filter((flag) => !parsed[flag]);
+	const missing = REQUIRED_FLAGS.filter((flag) =>
+		flag === "check-step"
+			? !Array.isArray(parsed[flag]) || parsed[flag].length === 0
+			: !parsed[flag],
+	);
 	if (missing.length > 0) {
 		return fail(
 			{ code: 2 },
-			`check-shard-verdict: missing ${missing.map((flag) => `--${flag}`).join(", ")}; usage: node scripts/check-shard-verdict.mjs --label <name> --result <needs result> --shard-pattern <regexp> --check-step <step name> [--repository <owner/repo> --run <id> | --jobs-file <path>]`,
+			`check-shard-verdict: missing ${missing.map((flag) => `--${flag}`).join(", ")}; usage: node scripts/check-shard-verdict.mjs --label <name> --result <needs result> --shard-pattern <regexp> --check-step <step name> [--check-step <step name> ...] [--repository <owner/repo> --run <id> | --jobs-file <path>]`,
 			stdout,
 		);
 	}
@@ -348,7 +398,8 @@ export async function runShardVerdict({
 				label,
 				result: parsed.result,
 				shardPattern,
-				checkStep: parsed["check-step"],
+				checkStep: requiredSteps(parsed["check-step"])[0],
+				checkSteps: parsed["check-step"],
 				jobs: [],
 			}),
 			env,
@@ -383,7 +434,8 @@ export async function runShardVerdict({
 			label,
 			result: parsed.result,
 			shardPattern,
-			checkStep: parsed["check-step"],
+			checkStep: requiredSteps(parsed["check-step"])[0],
+			checkSteps: parsed["check-step"],
 			jobs,
 		}),
 		env,
@@ -419,7 +471,17 @@ export async function main() {
 	process.exitCode = result.code;
 }
 
-if (process.argv[1] && process.argv[1].endsWith("check-shard-verdict.mjs")) {
+// AGENTS.md shape 44: `import.meta.url` against `pathToFileURL(process.argv[1])`,
+// not a filename suffix. A suffix check runs `main()` when ANY wrapper whose
+// name happens to end in `check-shard-verdict.mjs` imports this module, with
+// the wrapper's argv and this module's exit code -- reproduced as a wrapper
+// exiting 2 on the module's own "missing --label" usage line (V5b). The
+// sibling scripts (`check-close-keywords.mjs`, `gen-tla-model-costs.mjs`)
+// already use the portable form.
+if (
+	process.argv[1] &&
+	import.meta.url === pathToFileURL(process.argv[1]).href
+) {
 	main().catch((error) => {
 		console.error(
 			`check-shard-verdict failed: ${error instanceof Error ? error.message : String(error)}`,

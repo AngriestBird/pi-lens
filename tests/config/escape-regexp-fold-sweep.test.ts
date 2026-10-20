@@ -85,9 +85,17 @@ const CANONICAL_FILE = "clients/string-utils.ts";
 // (quote style may vary; whitespace around the comma may vary).
 const ESCAPE_CALL = String.raw`\.replace\(\s*\/\[\.\*\+\?\^\$\{\}\(\)\|\[\\\]\\\\\]\/g\s*,\s*["'\`]\\\\\$&["'\`]\s*\)`;
 
-/** Shape A: a function declaration/expression whose body returns the escape. */
+/** Shape A: a function declaration/expression whose body returns the escape.
+ *
+ * The `(?:String\(\s*)?` arm covers the form that shipped through this sweep
+ * unnoticed in `scripts/ci-verdict.mjs` (#4680 V5c):
+ * `return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");`. The body was
+ * byte-identical to the canonical leaf -- only a `String(...)` wrapper sat
+ * between the parameter and `.replace`, which the bare-identifier arm below
+ * requires. That is shape 38's own evasion (a copy the guard's spelling cannot
+ * see), so the sweep now reads through the wrapper. */
 const FUNCTION_SHAPE = new RegExp(
-	String.raw`function\s+[A-Za-z_$][\w$]*\s*\([^)]*\)[^{]*\{\s*return\s+[A-Za-z_$][\w$]*` +
+	String.raw`function\s+[A-Za-z_$][\w$]*\s*\([^)]*\)[^{]*\{\s*return\s+(?:String\(\s*)?[A-Za-z_$][\w$]*\s*\)?` +
 		ESCAPE_CALL +
 		String.raw`\s*;?\s*\}`,
 );
@@ -177,6 +185,27 @@ describe("escapeRegExp single-source-of-truth (#2558)", () => {
 				`the body: ${offenders.join(", ")}`,
 		).toEqual([]);
 	}, 30_000);
+
+	// The guard's own positive control: the body that shipped as a second copy
+	// in #4680's `scripts/ci-verdict.mjs` must MATCH, or the sweep is a spelling
+	// the next copy walks around (shape 38, shape 69).
+	it("sees the `String(...)`-wrapped copy that shipped through it", () => {
+		// The body that shipped as a second copy in this PR's scripts/ci-verdict.mjs:
+		// byte-identical to the canonical leaf, with only a `String(...)` wrapper in
+		// front of `.replace`. The pieces are separate literals so the fixture line
+		// below is reproduced exactly rather than re-escaped by hand.
+		const escapeBody = "[.*+?^${}()|[\\]\\\\]";
+		const escapeReplacement = '"\\\\$&"';
+		const emit = (receiver: string) =>
+			`function escapeRegExp(text) {\n\treturn ${receiver}.replace(/${escapeBody}/g, ${escapeReplacement});\n}`;
+		expect(FUNCTION_SHAPE.test(emit("String(text)"))).toBe(true);
+		// ...and the bare form still does.
+		expect(FUNCTION_SHAPE.test(emit("value"))).toBe(true);
+		// A DIFFERENT character class is a variant, not a copy: it must stay out.
+		const globBody = "[.+^${}()|[\\]\\\\]";
+		const variant = `function globToRegExp(text) {\n\treturn text.replace(/${globBody}/g, ${escapeReplacement});\n}`;
+		expect(FUNCTION_SHAPE.test(variant)).toBe(false);
+	});
 
 	it("the canonical leaf still defines escapeRegExp with the expected body", () => {
 		const src = readFileSync(path.join(root, CANONICAL_FILE), "utf8");

@@ -33,7 +33,10 @@ export type ShardVerdictArgs = {
 	label: string;
 	result: string;
 	shardPattern: RegExp;
-	checkStep: string;
+	/** The step that does the shard's work (the first entry of `checkSteps`). */
+	checkStep?: string;
+	/** Every gating step that job must finish; `--check-step` is repeatable. */
+	checkSteps?: string | readonly string[];
 	jobs: readonly ShardJob[];
 };
 
@@ -41,7 +44,7 @@ export type ShardVerdictCliArgs = {
 	label: string;
 	result: string;
 	"shard-pattern": string;
-	"check-step": string;
+	"check-step": string[];
 	repository?: string;
 	run?: string;
 	"jobs-file"?: string;
@@ -51,7 +54,7 @@ export type ShardVerdictCliArgs = {
 export declare function parseArgs(argv: readonly string[]): ShardVerdictCliArgs;
 export declare function classifyShardJob(
 	job: ShardJob,
-	checkStep: string,
+	checkSteps: string | readonly string[],
 ): ShardJobVerdict;
 export declare function evaluateShardVerdict(
 	args: ShardVerdictArgs,

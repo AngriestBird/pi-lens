@@ -118,6 +118,14 @@ describe("#3753 sharded Unit tests workflow contract", () => {
 			"^Unit tests \\(shard [0-9]+/[0-9]+\\)$",
 		);
 		expect(verdictStep.env?.SHARD_CHECK_STEP).toBe("Run tests");
+		// V2b: the gate that runs AFTER `Run tests` in this job is named too, so
+		// a cancel between the two cannot green the aggregate. The flag is
+		// repeatable and both values reach the seam.
+		expect(verdictStep.env?.SHARD_TRAILING_CHECK_STEP).toBe(
+			"Tmp-fixture hygiene owner",
+		);
+		expect(run).toContain('--check-step "${SHARD_CHECK_STEP}"');
+		expect(run).toContain('--check-step "${SHARD_TRAILING_CHECK_STEP}"');
 		expect(run).not.toMatch(/exit 0/);
 		// The shard count is not baked into the pattern's semantics: it matches
 		// `shard k/N` for any N, so the #3753 re-shard moves the matrix alone.
@@ -130,6 +138,43 @@ describe("#3753 sharded Unit tests workflow contract", () => {
 			contents: "read",
 			actions: "read",
 		});
+	});
+
+	// V2b, the ordering half: the seam reads a step LIST, so the list has to
+	// follow the job's own step order. Every step in `test` that runs at or
+	// after `Run tests` and is not an `if: always()`/`failure()`/`cancelled()`
+	// tail step must be named as a `--check-step`; otherwise a cancel between
+	// `Run tests` and it leaves a real gate unjudged while the aggregate greens.
+	// Adding a gating step there therefore reds this test until the flag list
+	// follows, instead of silently widening the hole.
+	it("names every gating step that runs after `Run tests` as a required step", () => {
+		const jobs = CI();
+		const shardSteps = jobs.test.steps ?? [];
+		const names = shardSteps.map((entry) => entry.name ?? "");
+		const work = names.indexOf("Run tests");
+		expect(work).toBeGreaterThan(-1);
+		const tolerates = (entry: Step) =>
+			/^(always|failure|cancelled)\(\)$/.test(String(entry.if ?? ""));
+		const gatingAfter = shardSteps
+			.slice(work + 1)
+			.filter((entry) => !tolerates(entry))
+			.map((entry) => String(entry.name));
+		// The hygiene gate is the one that matters here, and it really does run
+		// after the work step.
+		expect(gatingAfter).toContain("Tmp-fixture hygiene owner");
+		const verdictStep = step(
+			jobs["unit-tests"],
+			"Require every Unit tests shard to succeed",
+		);
+		const run = String(verdictStep.run);
+		const required = [
+			...run.matchAll(/--check-step "\$\{(SHARD_[A-Z_]+)\}"/g),
+		].map((match) => String(verdictStep.env?.[match[1]]));
+		expect(required[0]).toBe("Run tests");
+		expect(required).toEqual(["Run tests", ...gatingAfter]);
+		// The names are real steps of the shard job, not typos: a renamed step
+		// would otherwise leave the seam requiring a name nothing can report.
+		for (const name of required) expect(names).toContain(name);
 	});
 
 	// Recurrence: a literal shard count beside a matrix edit (`--shard=k/3` with

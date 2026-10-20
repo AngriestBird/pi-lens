@@ -1233,6 +1233,105 @@ describe("computeVerdict — a discovered row's cancelled conclusion is uncertai
 	// required row), so there is no separate line left to guard against.
 });
 
+// #4672 V3: the merge policy's own gate step runs THIS tool, and it kept
+// reading a cancelled shard row as blocking after #4680 taught the ci.yml
+// aggregates that a teardown race is a pass. Reproduced before the fix: green
+// aggregates plus one cancelled shard row returned exit 3 / kind `cancelled`,
+// so `node scripts/ci-verdict.mjs <pr>` could never return 0 on the very run
+// shape the seam makes green.
+describe("computeVerdict — a cancelled shard row its aggregate judged green is not blocking (#4672 V3)", () => {
+	const shardShape = () => [
+		checkRun({ name: "Unit tests", id: 1 }),
+		checkRun({ name: "Lint & type-check", id: 2 }),
+		checkRun({ name: "TLA+ models", id: 3 }),
+		checkRun({ name: "Unit tests (shard 1/5)", id: 4 }),
+		checkRun({ name: "Unit tests (shard 3/5)", id: 5 }),
+		checkRun({
+			name: "Unit tests (shard 3/5)",
+			conclusion: "cancelled",
+			started_at: "2026-09-03T00:10:00Z",
+			id: 6,
+		}),
+		checkRun({ name: "TLA+ models (shard 1/4)", id: 7 }),
+		checkRun({
+			name: "TLA+ models (shard 4/4)",
+			conclusion: "cancelled",
+			started_at: "2026-09-03T00:10:00Z",
+			id: 8,
+		}),
+	];
+
+	it("returns green when the cancelled shard's own aggregate concluded success", () => {
+		const verdict = computeVerdict(
+			{ check_runs: shardShape() },
+			undefined,
+			"MERGEABLE",
+		);
+		expect(verdict.exitCode).toBe(0);
+		expect(verdict.kind).toBe("success");
+		// The cancellation is still RECORDED -- the judgement is "a teardown
+		// race the aggregate already read", not "no cancellation happened".
+		expect(verdict.cancelledRows).toEqual([]);
+		const rows = new Map(verdict.rows.map((row) => [row.name, row]));
+		expect(rows.get("Unit tests (shard 3/5)")?.conclusion).toBe("cancelled");
+	});
+
+	it("returns green for a REQUIRED name that has shard rows beside it", () => {
+		// `Unit tests` is a required name, so its own row is the only input that
+		// decides the required half; the shard rows must not resurrect a pending.
+		const verdict = computeVerdict(
+			{ check_runs: shardShape() },
+			["Unit tests", "Lint & type-check", "TLA+ models"],
+			"MERGEABLE",
+		);
+		expect(verdict.exitCode).toBe(0);
+	});
+
+	it.each([
+		["cancelled", "the aggregate was itself cancelled"],
+		["failure", "the aggregate concluded a real failure"],
+		[null, "the aggregate has not concluded"],
+	])("still pends when the aggregate is %s (%s)", (conclusion, _why) => {
+		const runs = shardShape().map((run) =>
+			run.name === "TLA+ models" ? { ...run, conclusion } : run,
+		);
+		const verdict = computeVerdict(
+			{ check_runs: runs },
+			undefined,
+			"MERGEABLE",
+		);
+		expect(verdict.exitCode).toBe(3);
+		expect(verdict.kind).toBe("cancelled");
+		expect(verdict.cancelledRows.map((row) => row.name)).toContain(
+			"TLA+ models (shard 4/4)",
+		);
+	});
+
+	it("still pends for a cancelled row that belongs to no aggregate", () => {
+		const runs = [
+			...shardShape(),
+			checkRun({
+				name: "Production install build (--omit=dev, from source)",
+				conclusion: "cancelled",
+				started_at: "2026-09-03T00:10:00Z",
+				id: 9,
+			}),
+		];
+		const verdict = computeVerdict(
+			{ check_runs: runs },
+			undefined,
+			"MERGEABLE",
+		);
+		expect(verdict.exitCode).toBe(3);
+		expect(verdict.kind).toBe("cancelled");
+		expect(verdict.cancelledRows.map((row) => row.name)).toEqual(
+			expect.arrayContaining([
+				"Production install build (--omit=dev, from source)",
+			]),
+		);
+	});
+});
+
 describe("resolveRequiredCheckNames — live branch-protection read (#2609)", () => {
 	it("returns the contexts array when gh api resolves branch protection", () => {
 		const ghExec = (args: string[]) => {

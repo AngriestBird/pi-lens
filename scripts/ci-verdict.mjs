@@ -210,6 +210,10 @@ import {
 	stripAnsi,
 	stripLineTimestamps,
 } from "./lib/ci-failure-classifier.mjs";
+// The ONE `escapeRegExp` runtime copy (#2558). `scripts/lib/astgrep-self-scan.mjs`
+// already imports this leaf from a script, so the owner is reachable here; this
+// file's own hand-copy beside it was a second spelling of a shared rule (V5c).
+import { escapeRegExp } from "../clients/string-utils.js";
 import { githubHeaders } from "./lib/github-rest.mjs";
 import { parseVitestSummary } from "./lib/vitest-summary.mjs";
 import {
@@ -218,11 +222,13 @@ import {
 	HEAVY_GATE_CHECK,
 	isAdvisoryCheck,
 	isBlockingConclusion,
-	isNonPrCiEvent,
+	isGatingCheckName,
 	isUncertainConclusion,
 	isUnitTestsJobName,
 	REQUIRED_CHECKS,
 	resolveLatestByName,
+	resolveTriggerAdvisoryNames,
+	shardAggregateName,
 } from "./lib/ci-checks.mjs";
 
 export { REQUIRED_CHECKS };
@@ -661,27 +667,20 @@ export function computeVerdict(
 	// #4090: a name every one of whose runs came from a schedule/dispatch/
 	// workflow_run workflow is not part of this commit's PR/push CI. One run of
 	// the name from any other (or unknown) event keeps it gating, and a
-	// required name is never excused.
-	const eventsByName = new Map();
-	for (const checkRun of checkRuns) {
-		const events = eventsByName.get(checkRun.name) ?? [];
-		events.push(checkRun.workflow_event);
-		eventsByName.set(checkRun.name, events);
-	}
-	const triggerAdvisoryNames = new Set(
-		[...eventsByName]
-			.filter(([, events]) => events.every((event) => isNonPrCiEvent(event)))
-			.map(([name]) => name),
-	);
+	// required name is never excused. The rule and its one resolution live in
+	// `scripts/lib/ci-checks.mjs`, because `runtimeCapLines` prints the same
+	// answer as a `(gating)` marker and the two disagreed (V5a).
+	const triggerAdvisoryNames = resolveTriggerAdvisoryNames(checkRuns);
 
 	const buildRow = (name) => {
 		const run = byName.get(name);
 		// requiredNameSet.has(name): see the doc comment above -- a name GitHub
 		// itself confirms as required always gates, even if it were also (by
 		// mistake) on the static advisory allowlist.
-		const gating =
-			requiredNameSet.has(name) ||
-			(!isAdvisoryCheck(name) && !triggerAdvisoryNames.has(name));
+		const gating = isGatingCheckName(name, {
+			required: requiredNameSet,
+			triggerAdvisoryNames,
+		});
 		if (!run) {
 			return {
 				name,
@@ -756,13 +755,33 @@ export function computeVerdict(
 					: isBlockingConclusion(row.conclusion)),
 		),
 	);
+	// #4672 V3: a SHARD row's cancellation is judged by its aggregate, not here.
+	// The aggregate (`Unit tests`, `TLA+ models`) is the required context, and
+	// its own job runs `scripts/check-shard-verdict.mjs`, which reads every
+	// shard's step conclusions and keeps a teardown race as a pass with a
+	// warning. So when that aggregate row concluded `success`, the cancellation
+	// below has already been judged benign -- and this tool used to report
+	// PENDING / `cancelled` for it, leaving the merge policy's own gate step
+	// (which runs this script) waiting on the very run shape that seam makes
+	// green. An aggregate that did not conclude success judges nothing here, and
+	// the row keeps its old pending reading.
+	const aggregateJudgedGreen = (row) => {
+		const aggregate = shardAggregateName(row.name);
+		if (aggregate === null) return false;
+		const parent = byName.get(aggregate);
+		return (
+			String(parent?.status ?? "").toLowerCase() === "completed" &&
+			String(parent?.conclusion ?? "").toLowerCase() === "success"
+		);
+	};
 	const cancelledLatestRows = rows.filter(
 		(row) =>
 			row.gating &&
 			row.present &&
 			row.status === "completed" &&
 			!supersededRows.has(row) &&
-			isUncertainConclusion(row.conclusion),
+			isUncertainConclusion(row.conclusion) &&
+			!aggregateJudgedGreen(row),
 	);
 	// #3700: a row the caller proved is post-merge noise (its job could not
 	// fetch `refs/pull/N/merge` after the PR merged) is not a failure. The proof
@@ -1049,11 +1068,6 @@ export function checkNamePattern(jobName) {
 	return new RegExp(`^${parts.join("")}$`);
 }
 
-/** One string's regex metacharacters, escaped; no state, no globbing. */
-function escapeRegExp(text) {
-	return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 /**
  * The cap entries of one parsed workflow document.
  *
@@ -1130,8 +1144,15 @@ export function runtimeCapLines({
 	ratio = RUNTIME_CAP_WARN_RATIO,
 	limit = MAX_RUNTIME_CAP_LINES,
 }) {
-	const latest = resolveLatestByName(Array.isArray(checkRuns) ? checkRuns : []);
+	const payload = Array.isArray(checkRuns) ? checkRuns : [];
+	const latest = resolveLatestByName(payload);
 	const required = new Set(requiredChecks);
+	// The same #4090 resolution the verdict applies: a nightly lane's check-run
+	// attaches to whatever head it ran on, so its name is not a gate on THIS
+	// commit. Without it the marker labelled seven schedule-only jobs
+	// `(gating)` while `computeVerdict` scored the same names `gating: false`
+	// (V5a).
+	const triggerAdvisoryNames = resolveTriggerAdvisoryNames(payload);
 	const measured = [];
 	for (const [name, run] of latest) {
 		const entry = caps.find((candidate) => candidate.pattern.test(name));
@@ -1149,11 +1170,14 @@ export function runtimeCapLines({
 			file: entry.file,
 			// A row is gating when branch protection requires its name -- the
 			// live read's list, else `REQUIRED_CHECKS` -- or when the name is
-			// not on the advisory allowlist. (The old third term tested the
-			// pattern this loop has already matched, so it was always true and
-			// made the field unreadable *and* unused; the printed line reads it
-			// now, so a runtime report can say which row blocks a merge.)
-			gating: required.has(name) || !isAdvisoryCheck(name),
+			// neither on the advisory allowlist nor a schedule-only lane. The
+			// printed line reads it, and `computeVerdict` answers the same
+			// question through the same owner, so the two markers cannot
+			// disagree again (V5a).
+			gating: isGatingCheckName(name, {
+				required,
+				triggerAdvisoryNames,
+			}),
 		});
 	}
 	// A matrix shard is its own subject: the aggregate's row measures seconds of
