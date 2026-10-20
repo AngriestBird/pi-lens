@@ -296,26 +296,56 @@ export function isCmdShimValid(cmdPath: string): boolean {
 }
 
 /**
+ * Whether the launcher ESTABLISHED that the program it spawned exists
+ * (#4263, #4532 round 4 — the caller reads this, it is not re-derived).
+ *
+ * `present` when the launcher holds evidence of presence: a `.cmd`/`.bat` shim
+ * whose npm target it read on disk before the spawn, the path its own
+ * in-process PATH scan returned, or a managed/global fallback path that
+ * replaced the spelling the caller asked for. `absent` only when the one search
+ * the launcher ran — `findBinaryOnPath` over the child's own PATH — came back
+ * empty.
+ *
+ * The distinction is the whole rule: a command the scan did NOT find is not
+ * proof the binary is absent when the failure came from the spawn. Windows'
+ * shell-backed launches report exit code 1 both for a command cmd.exe never
+ * found and for a present tool that failed at startup, so the exit code answers
+ * "the program failed", never "the program is absent". The pre-fix rule
+ * re-resolved the spelling a second time, against a fresh reading of the cwd
+ * and PATH that can disagree with the one the spawn used, so a present binary
+ * became `tool-not-found` — which hands it to the installer.
+ */
+function windowsCommandPresence(
+	command: string,
+	spawnCommand: string,
+	scannedCommandPath: string | undefined,
+): "present" | "absent" {
+	// The shim's own target was read on disk before the spawn.
+	if (/\.(cmd|bat)$/i.test(spawnCommand) && isCmdShimValid(spawnCommand)) {
+		return "present";
+	}
+	// The scan resolved this spelling, or a managed/global fallback replaced it.
+	if (scannedCommandPath !== undefined || spawnCommand !== command) {
+		return "present";
+	}
+	return "absent";
+}
+
+/**
  * Windows' shell-backed missing commands report exit code 1 instead of ENOENT.
- * Only classify that startup shape as repairable when the shared Windows
- * resolver cannot find the command, or an npm shim's target is absent. A
+ * Only classify that startup shape as repairable when an npm shim's target is
+ * absent, or when the launcher's own search for the command came back empty. A
  * present executable that exits 1 remains a runtime failure (#4263, #1199).
  */
 function isMissingWindowsStartupCommand(
-	command: string,
 	spawnCommand: string,
-	cwd: string,
-	env: NodeJS.ProcessEnv,
+	presence: "present" | "absent",
 ): boolean {
 	if (!isWindows) return false;
 	if (/\.(cmd|bat)$/i.test(spawnCommand) && !isCmdShimValid(spawnCommand)) {
 		return true;
 	}
-	// `findBinaryOnPath`/the global-bin fallback already proved a bare command
-	// resolves to this path. Do not re-resolve the original spelling against a
-	// possibly different PATH representation and misclassify a real binary.
-	if (spawnCommand !== command) return false;
-	return resolveWindowsCommandForEnvironment(command, cwd, env) === null;
+	return presence === "absent";
 }
 
 /**
@@ -398,9 +428,11 @@ function findBinaryOnPath(
 		return resolveWindowsCommandForEnvironment(command, cwd, env)?.resolvedPath;
 	}
 	for (const entry of (env.PATH ?? "").split(path.delimiter)) {
-		// `path.resolve` covers both kernel rules: an absolute entry is kept,
-		// a relative one (and an EMPTY entry, which names the cwd) is resolved
-		// against the spawn cwd.
+		// `path.resolve` covers both kernel rules: an absolute entry is kept and a
+		// relative one is resolved against the spawn cwd. An EMPTY entry never
+		// reaches this scan — `resolvePathValue`'s `combinePathValuesForPlatform`
+		// drops empty entries upstream (the kernel would read one as the cwd), so
+		// the scan and the child see the same list (#4532 round 4, LOW-1).
 		const dir = path.resolve(cwd, entry);
 		const candidate = path.join(dir, command);
 		try {
@@ -809,16 +841,21 @@ export async function launchLSP(
 	// - If already absolute, use as-is
 	// - If it's a simple command (no path separators), let system find it via PATH
 	// - Otherwise, resolve relative to cwd
+	// `isBareCommand` is computed ONCE: the scan, the global-bin fallback and the
+	// presence the exit-code classifier reads must all agree on which spelling
+	// the launcher is judging (#4532 round 4).
+	const isBareCommand =
+		!isFullyQualified(command) &&
+		!command.includes(path.sep) &&
+		!command.includes("/");
 	const isRelativePath =
 		!isFullyQualified(command) &&
 		(command.includes(path.sep) || command.includes("/"));
 	const explicitCommand = isRelativePath ? path.resolve(cwd, command) : command;
-	const resolvedCommand =
-		!isFullyQualified(command) &&
-		!command.includes(path.sep) &&
-		!command.includes("/")
-			? (findBinaryOnPath(command, env, cwd) ?? explicitCommand)
-			: explicitCommand;
+	const scannedCommandPath = isBareCommand
+		? findBinaryOnPath(command, env, cwd)
+		: undefined;
+	const resolvedCommand = scannedCommandPath ?? explicitCommand;
 
 	// Compute needsShell based on command
 	// On Windows, shell: true is needed for .cmd/.bat files and extensionless binaries
@@ -830,11 +867,7 @@ export async function launchLSP(
 	let spawnCommand = resolvedCommand;
 
 	// First, try to find in npm global if it's a simple command name
-	if (
-		!isFullyQualified(command) &&
-		!command.includes(path.sep) &&
-		!command.includes("/")
-	) {
+	if (isBareCommand) {
 		const globalBinPath = await findGlobalBinary(command);
 		if (globalBinPath) {
 			spawnCommand = globalBinPath;
@@ -842,6 +875,14 @@ export async function launchLSP(
 			needsShell = computeNeedsShell(spawnCommand);
 		}
 	}
+
+	// AGENTS.md defect shape 58 — a known identity is carried, not re-derived:
+	// the presence the exit-code classifier asks about is resolved HERE, once,
+	// from the evidence this launch holds, and both classification sites below
+	// read it. Nothing re-reads the PATH or the cwd after the spawn.
+	const commandPresence: "present" | "absent" = isWindows
+		? windowsCommandPresence(command, spawnCommand, scannedCommandPath)
+		: "absent";
 
 	// Built-in server commands have no config provenance to carry into the
 	// registry. Once PATH resolution selects a project-local installed binary,
@@ -899,11 +940,7 @@ export async function launchLSP(
 		proc = trySpawn(spawnCommand, args, cwd, env, needsShell);
 	} catch (err) {
 		// If spawn failed with simple command, try npm global
-		if (
-			!isFullyQualified(command) &&
-			!command.includes(path.sep) &&
-			!command.includes("/")
-		) {
+		if (isBareCommand) {
 			const globalBinPath = await findGlobalBinary(command);
 			if (globalBinPath && globalBinPath !== spawnCommand) {
 				// Recompute needsShell for the resolved global path
@@ -929,7 +966,7 @@ export async function launchLSP(
 		const failure = new Error(message);
 		if (
 			proc.exitCode === 1 &&
-			isMissingWindowsStartupCommand(command, spawnCommand, cwd, env)
+			isMissingWindowsStartupCommand(spawnCommand, commandPresence)
 		) {
 			throw new SpawnFailureError("tool-not-found", message, failure);
 		}
@@ -993,7 +1030,7 @@ export async function launchLSP(
 					const failure = new Error(message);
 					if (
 						code === 1 &&
-						isMissingWindowsStartupCommand(command, spawnCommand, cwd, env)
+						isMissingWindowsStartupCommand(spawnCommand, commandPresence)
 					) {
 						reject(new SpawnFailureError("tool-not-found", message, failure));
 						return;
