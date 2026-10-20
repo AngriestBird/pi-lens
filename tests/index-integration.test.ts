@@ -19,6 +19,7 @@ import {
 import {
 	makeContextWithSystemEvent,
 	makeSessionStartEvent,
+	makeSystemHead,
 } from "./support/host-event-factory.js";
 // #2146: process-scope state (the primary-session registration, the instance
 // registry's mutation tail) now lives on `globalThis`, so `vi.resetModules()`
@@ -1970,19 +1971,30 @@ describe("index.ts integration", () => {
 			const assistant = { role: "assistant", content: "On it." };
 			const finalUser = { role: "user", content: "Fix the bug" };
 			const existing = [firstUser, assistant, finalUser];
+			// #4631 round 6 (R6-1): the host's `context_with_system` event leads
+			// with the system head, and the handler must hand it back untouched.
+			const head = makeSystemHead();
 
 			const result = (await context(
-				{ messages: existing },
+				makeContextWithSystemEvent(existing, head),
 				{ cwd: tmpDir },
 			)) as { messages: Array<{ role: string; content: unknown }> };
 
-			// Full expected ordering: prior turns, then updated final user prompt
-			// with guidance appended — [firstUser, assistant, updatedFinalUser].
-			expect(result.messages).toHaveLength(3);
-			expect(result.messages[0]).toEqual(firstUser);
-			expect(result.messages[1]).toEqual(assistant);
+			// Full expected ordering: the host's head, prior turns, then the
+			// updated final user prompt with guidance appended —
+			// [head, firstUser, assistant, updatedFinalUser].
+			expect(result.messages).toHaveLength(4);
+			// #4631 round 6 (R6-1): the host's shape is a SYSTEM message at index
+			// 0, exactly as the builder sends it; a handler that dropped it would
+			// shift every turn below.
+			// Compared against a FRESH builder output, not the event's own object: a
+			// handler that mutated the head in place would pass the reference check.
+			expect(result.messages[0]).toEqual(makeSystemHead());
+			expect(result.messages[0].role).toBe("system");
+			expect(result.messages[1]).toEqual(firstUser);
+			expect(result.messages[2]).toEqual(assistant);
 
-			const last = result.messages[2];
+			const last = result.messages[3];
 			expect(last.role).toBe("user");
 			expect(last.content).toContain(
 				"Fix the bug\n\n[pi-lens automated context — not a user request]",
@@ -2005,11 +2017,14 @@ describe("index.ts integration", () => {
 			const firstUser = { role: "user", content: "Start the task" };
 			const assistant = { role: "assistant", content: "On it." };
 			const finalUser = { role: "user", content: "Fix the bug" };
-			const baseTranscript = () => [
-				{ ...firstUser },
-				{ ...assistant },
-				{ ...finalUser },
-			];
+			// #4631 round 6 (R6-1): the same host head leads BOTH turns, so the
+			// prefix comparison below measures the real cached bytes.
+			const head = makeSystemHead();
+			const baseTranscript = () =>
+				makeContextWithSystemEvent(
+					[{ ...firstUser }, { ...assistant }, { ...finalUser }],
+					head,
+				);
 
 			// Turn A
 			const contextA = await loadContextHandler();
@@ -2018,10 +2033,9 @@ describe("index.ts integration", () => {
 				{ content: "Finding A" },
 				tmpDir,
 			);
-			const resultA = (await contextA(
-				{ messages: baseTranscript() },
-				{ cwd: tmpDir },
-			)) as { messages: Array<{ role: string; content: unknown }> };
+			const resultA = (await contextA(baseTranscript(), { cwd: tmpDir })) as {
+				messages: Array<{ role: string; content: unknown }>;
+			};
 
 			// Turn B — same base transcript, different injected finding. Fresh module
 			// registration to mirror a second independent turn.
@@ -2032,10 +2046,9 @@ describe("index.ts integration", () => {
 				{ content: "Completely different Finding B" },
 				tmpDir,
 			);
-			const resultB = (await contextB(
-				{ messages: baseTranscript() },
-				{ cwd: tmpDir },
-			)) as { messages: Array<{ role: string; content: unknown }> };
+			const resultB = (await contextB(baseTranscript(), { cwd: tmpDir })) as {
+				messages: Array<{ role: string; content: unknown }>;
+			};
 
 			// The prior conversation prefix (everything up to the trailing user prompt)
 			// is identical between the two turns — this is what prefix-caching providers reuse.
@@ -2043,7 +2056,9 @@ describe("index.ts integration", () => {
 			const prefixB = resultB.messages.slice(0, -1);
 			// Assert that turn 2's prefix equals turn 1's prefix byte-for-byte:
 			expect(prefixB).toEqual(prefixA);
-			expect(prefixA).toEqual([firstUser, assistant]);
+			// #4631 round 6 (R6-1): the prefix the providers cache is the host's
+			// head plus the prior turns — the user message sits at index 1.
+			expect(prefixA).toEqual([makeSystemHead(), firstUser, assistant]);
 
 			// The trailing message starts with the same user prompt text across turns
 			const lastA = resultA.messages[resultA.messages.length - 1];
@@ -2075,6 +2090,10 @@ describe("index.ts integration", () => {
 
 			// Degenerate case: no trailing message to sit before, so we emit just the
 			// injected block (identical to pre-#1016 behavior) — never empty input.
+			// #4631 round 6 (R6-1): this cell stays HEADLESS on purpose. The branch
+			// it reaches (`existingMessages.length === 0`) is unreachable from a
+			// host, which always leads the transcript with the system head; giving
+			// it a head would delete its only coverage.
 			expect(result.messages.length).toBeGreaterThan(0);
 			expect(result.messages[0]).toEqual(injectedMatcher);
 		},
@@ -2107,9 +2126,11 @@ describe("index.ts integration", () => {
 				content: [{ type: "tool_result", tool_use_id: "tu_1", content: "ok" }],
 			};
 			const existing = [firstUser, toolUse, toolResult];
+			// #4631 round 6 (R6-1): the host's transcript leads with the system head.
+			const head = makeSystemHead();
 
 			const result = (await context(
-				{ messages: existing },
+				makeContextWithSystemEvent(existing, head),
 				{ cwd: tmpDir },
 			)) as { messages: Array<{ role: string; content: unknown }> };
 
@@ -2119,13 +2140,18 @@ describe("index.ts integration", () => {
 			expect(result.messages[toolUseIdx + 1]).toBe(toolResult);
 
 			// The findings are appended AFTER the whole transcript, not before the tail.
-			expect(result.messages.slice(0, existing.length)).toEqual(existing);
+			expect(result.messages.slice(1, 1 + existing.length)).toEqual(existing);
 			expect(result.messages[result.messages.length - 1]).toEqual(
 				injectedMatcher,
 			);
 
-			// index-0 stability still holds (cache prefix preserved).
-			expect(result.messages[0]).toEqual(firstUser);
+			// index-0 stability still holds (cache prefix preserved): the host's
+			// head is still at index 0, and the first user turn follows it.
+			// Compared against a FRESH builder output, not the event's own object: a
+			// handler that mutated the head in place would pass the reference check.
+			expect(result.messages[0]).toEqual(makeSystemHead());
+			expect(result.messages[0].role).toBe("system");
+			expect(result.messages[1]).toEqual(firstUser);
 		},
 		INTEGRATION_TIMEOUT_MS,
 	);
@@ -2137,7 +2163,11 @@ describe("index.ts integration", () => {
 			// No cache written → nothing to inject → handler returns undefined (no
 			// override), so a non-injecting turn is byte-identical to no handler.
 			const finalUser = { role: "user", content: "Fix the bug" };
-			const result = await context({ messages: [finalUser] }, { cwd: tmpDir });
+			// #4631 round 6 (R6-1): a real request, head included, so the no-op
+			// answer is measured on the shape the host sends.
+			const result = await context(makeContextWithSystemEvent([finalUser]), {
+				cwd: tmpDir,
+			});
 			expect(result).toBeUndefined();
 		},
 		INTEGRATION_TIMEOUT_MS,

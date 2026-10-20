@@ -151,4 +151,51 @@ describe("pi context delivers the primary's own queued advisory (#3748)", () => 
 			(injected?.messages ?? []).map((m) => m.content).join("\n"),
 		).toContain("lost edit in a.rs");
 	});
+
+	it("drains the activation-wide scope when this activation never recorded the requesting session (#4631 F3 fallback)", async () => {
+		// #4631 round 6 (R6-2): the OTHER arm of the same drain. The lookup
+		// (`liveSessionMembers.find(...)`) answers for a session this activation
+		// started; when the request names a session it never recorded, the
+		// activation-wide `scope` is the only identity left and the fallback
+		// carries it. Without one of the two arms, a branch that returns
+		// `undefined` here would silently stop delivering and every case above
+		// would stay green.
+		const runtimes: RuntimeCoordinator[] = [];
+		const resetForSession = RuntimeCoordinator.prototype.resetForSession;
+		vi.spyOn(
+			RuntimeCoordinator.prototype,
+			"resetForSession",
+		).mockImplementation(function (this: RuntimeCoordinator, ...args) {
+			runtimes.push(this);
+			return resetForSession.apply(this, args);
+		});
+		const pi = createPiMock();
+		extension(pi.asExtensionAPI());
+
+		await pi.emit(
+			"session_start",
+			makeSessionStartEvent(),
+			makeCtx({ cwd: tmpDir, sessionId: "pi-3748-recorded" }),
+		);
+		const recorded = runtimes[0];
+		expect(recorded).toBeDefined();
+		queueAgentAdvisory(
+			"lost edit in b.rs",
+			recorded.captureSessionGeneration(),
+		);
+
+		// The request's own session id is NOT in `liveSessionMembers`: no
+		// `session_start` in this activation carried it, so the lookup answers
+		// nothing and the drain must fall back to the activation-wide scope.
+		const injected = (await pi.emit(
+			"context_with_system",
+			makeContextWithSystemEvent([{ role: "user", content: "keep working" }]),
+			makeCtx({ cwd: tmpDir, sessionId: "pi-3748-never-recorded" }),
+		)) as { messages?: Array<{ role?: string; content: string }> } | undefined;
+
+		expect((injected?.messages ?? [])[0]?.role).toBe("system");
+		expect(
+			(injected?.messages ?? []).map((m) => m.content).join("\n"),
+		).toContain("lost edit in b.rs");
+	});
 });
