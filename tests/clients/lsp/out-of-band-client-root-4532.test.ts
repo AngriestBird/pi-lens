@@ -209,6 +209,12 @@ describe("the install look at a live client root (#4532 gap 7)", () => {
 		const plainSub = path.join(plain, "sub");
 		fs.mkdirSync(plainSub, { recursive: true });
 		expect(isSessionBookkeepingRoot(plainSub, plain)).toBe(true);
+		// #4532 round 6 (verify r5, section 13): a vendor root under the session
+		// (a client rooted at an installed package) answered true while
+		// `resolveAnalysisRoot` refuses every file under it.
+		const vendor = path.join(main, "node_modules", "pkg");
+		fs.mkdirSync(vendor, { recursive: true });
+		expect(isSessionBookkeepingRoot(vendor, main)).toBe(false);
 		// One rule in two forms: the root form agrees with the file form the
 		// owner gives a file under each root.
 		for (const [root, session] of [
@@ -217,6 +223,7 @@ describe("the install look at a live client root (#4532 gap 7)", () => {
 			[linked, main],
 			[worktree, main],
 			[plainSub, plain],
+			[vendor, main],
 		] as const) {
 			expect(isSessionBookkeepingRoot(root, session), root).toBe(
 				canWriteAnalysisRoot(

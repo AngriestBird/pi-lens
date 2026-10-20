@@ -154,6 +154,9 @@ export function isSessionBookkeepingRoot(
 	sessionRoot: string,
 ): boolean {
 	const resolved = realPathOrResolved(root);
+	// The file form's first refusal (#4532 round 6, verify r5): every file
+	// under a vendor root resolves to "none", so the root is no session's.
+	if (isVendorPath(resolved)) return false;
 	const session = realPathOrResolved(sessionRoot);
 	if (pathsEqual(resolved, session) || isUnderDir(resolved, session))
 		return true;
