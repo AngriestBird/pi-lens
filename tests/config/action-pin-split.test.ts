@@ -550,6 +550,58 @@ const DOCUMENTS: Array<[string, string, string, string[]]> = [
 			),
 		],
 	],
+	// Shape 69 sweep (round 3): every matrix shape the rule cannot read refuses
+	// instead of reading as absent. Recurrence F-4695-1: `matrix.include` was
+	// read only when it was an array, so an expression-valued include vanished
+	// and the concrete axis legs admitted the step.
+	[
+		"a matrix include: that is not a list",
+		".github/workflows/plant.yml",
+		`${WORKFLOW_HEAD}    strategy:\n      matrix:\n        py: ["3.12"]\n        include: "\${{ fromJSON('{}') }}"\n    steps:\n      - uses: actions/setup-python@v7\n        with:\n          python-version: "\${{ matrix.py }}"\n`,
+		[
+			unresolved(
+				STEP0,
+				"${{ matrix.py }}",
+				"matrix.include is not a list the rule can read",
+			),
+		],
+	],
+	[
+		"an empty matrix include:",
+		".github/workflows/plant.yml",
+		`${WORKFLOW_HEAD}    strategy:\n      matrix:\n        py: ["3.12"]\n        include:\n    steps:\n      - uses: actions/setup-python@v7\n        with:\n          python-version: "\${{ matrix.py }}"\n`,
+		[],
+	],
+	[
+		"a matrix include: row that is not a mapping",
+		".github/workflows/plant.yml",
+		`${WORKFLOW_HEAD}    strategy:\n      matrix:\n        include:\n          - 3.12\n    steps:\n      - uses: actions/setup-python@v7\n        with:\n          python-version: "\${{ matrix.py }}"\n`,
+		[
+			unresolved(
+				STEP0,
+				"${{ matrix.py }}",
+				"matrix.include holds 3.12, which is not a mapping",
+			),
+		],
+	],
+	[
+		"a strategy that is not a mapping",
+		".github/workflows/plant.yml",
+		`${WORKFLOW_HEAD}    strategy: [py]\n    steps:\n      - uses: actions/setup-python@v7\n        with:\n          python-version: "\${{ matrix.py }}"\n`,
+		[
+			unresolved(
+				STEP0,
+				"${{ matrix.py }}",
+				"the job's strategy is not a mapping",
+			),
+		],
+	],
+	[
+		"a strategy.matrix that is not a mapping",
+		".github/workflows/plant.yml",
+		`${WORKFLOW_HEAD}    strategy:\n      matrix: py\n    steps:\n      - uses: actions/setup-python@v7\n        with:\n          python-version: "\${{ matrix.py }}"\n`,
+		[unresolved(STEP0, "${{ matrix.py }}", "strategy.matrix is not a mapping")],
+	],
 	[
 		"a floating pin in a composite action",
 		".github/actions/pin/action.yml",
@@ -646,6 +698,18 @@ describe("#4683 the interpreter pin is read from the parsed workflow", () => {
 		expect(errors).toHaveLength(1);
 		expect(errors[0]).toMatch(
 			/^\.github\/workflows\/plant\.yml: cannot be parsed as YAML: unknown sequence tag/,
+		);
+	});
+
+	it("refuses a multi-document file rather than reading the first document", async () => {
+		// The state table listed this shape with no case until round 3 of the
+		// review (F-4695-6). js-yaml answers `expected a single document`.
+		const errors = await pinErrors({
+			".github/workflows/plant.yml": `${WORKFLOW_HEAD}    steps:\n      - uses: actions/setup-python@v7\n        with:\n          python-version: "3.12"\n---\njobs:\n  other:\n    runs-on: ubuntu-latest\n`,
+		});
+		expect(errors).toHaveLength(1);
+		expect(errors[0]).toMatch(
+			/^\.github\/workflows\/plant\.yml: cannot be parsed as YAML: expected a single document/,
 		);
 	});
 

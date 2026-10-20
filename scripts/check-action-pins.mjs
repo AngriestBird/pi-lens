@@ -103,19 +103,35 @@ const shown = (value) => JSON.stringify(value) ?? String(value);
  * The values one `${{ matrix.<key> }}` reference can take, or an error string.
  * GitHub builds the matrix from the axis list AND from every `include:` row, so
  * both answer for the key; a key nothing declares is unanswerable, not empty.
+ *
+ * Every matrix shape this rule cannot read is an error, not an empty list of
+ * legs (shape 69). An `include:` it cannot read used to read as absent, so a
+ * concrete axis list admitted a step whose included legs it never saw (#4695
+ * F-4695-1). `null` is the absent spelling of a present key — `include:` with
+ * nothing after it adds no row — and every other non-list refuses.
  */
-function matrixLegs(matrix, key) {
-	if (!isMapping(matrix))
+function matrixLegs(strategy, key) {
+	if (!isMapping(strategy))
+		return strategy === undefined || strategy === null
+			? `the job declares no strategy.matrix, so matrix.${key} has no value`
+			: "the job's strategy is not a mapping";
+	const matrix = strategy.matrix;
+	if (matrix === undefined || matrix === null)
 		return `the job declares no strategy.matrix, so matrix.${key} has no value`;
+	if (!isMapping(matrix)) return "strategy.matrix is not a mapping";
+	if (matrix.include != null && !Array.isArray(matrix.include))
+		return "matrix.include is not a list the rule can read";
 	const legs = [];
 	if (key in matrix) {
 		if (!Array.isArray(matrix[key]))
 			return `matrix.${key} is not a list of values`;
 		legs.push(...matrix[key]);
 	}
-	if (Array.isArray(matrix.include))
-		for (const row of matrix.include)
-			if (isMapping(row) && key in row) legs.push(row[key]);
+	for (const row of matrix.include ?? []) {
+		if (!isMapping(row))
+			return `matrix.include holds ${shown(row)}, which is not a mapping`;
+		if (key in row) legs.push(row[key]);
+	}
 	if (!legs.length) return `matrix.${key} declares no value`;
 	return legs;
 }
@@ -148,7 +164,7 @@ function mergeKeyAt(value, at = "") {
 }
 
 /** One error for one step, or nothing when the step pins a concrete release. */
-function interpreterPinError(step, at, matrix) {
+function interpreterPinError(step, at, strategy) {
 	if (step.uses === undefined) return [];
 	if (typeof step.uses !== "string")
 		return [`${at}: uses is not a string; the action cannot be read`];
@@ -175,7 +191,7 @@ function interpreterPinError(step, at, matrix) {
 			`${at}: ${SETUP_PYTHON} python-version ${shown(pin)} is not a concrete x.y or x.y.z release`,
 		];
 	const key = reference[1];
-	const legs = matrixLegs(matrix, key);
+	const legs = matrixLegs(strategy, key);
 	if (typeof legs === "string")
 		return [
 			`${at}: ${SETUP_PYTHON} python-version ${shown(pin)} cannot be resolved: ${legs}`,
@@ -190,12 +206,12 @@ function interpreterPinError(step, at, matrix) {
 	return [];
 }
 
-function interpreterErrorsInSteps(steps, at, matrix) {
+function interpreterErrorsInSteps(steps, at, strategy) {
 	if (steps === undefined) return [];
 	if (!Array.isArray(steps)) return [`${at} is not a list of steps`];
 	return steps.flatMap((step, index) =>
 		isMapping(step)
-			? interpreterPinError(step, `${at}[${index}]`, matrix)
+			? interpreterPinError(step, `${at}[${index}]`, strategy)
 			: [`${at}[${index}]: the step is not a mapping`],
 	);
 }
@@ -252,7 +268,7 @@ export function interpreterPinErrors(text, file = "<fixture>") {
 				...interpreterErrorsInSteps(
 					job.steps,
 					`${file}: jobs.${id}.steps`,
-					job.strategy?.matrix,
+					job.strategy,
 				),
 			);
 		}
