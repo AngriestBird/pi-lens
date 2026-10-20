@@ -702,9 +702,19 @@ function parkLateDeadCodeScan(args: {
 			const durationMs = Date.now() - startedAt;
 			const cacheKept = wouldPoisonCache(row, result);
 			if (!cacheKept) {
-				cacheManager.writeCache(cacheKey, result, cwd, {
-					scanDurationMs: durationMs,
-				});
+				try {
+					cacheManager.writeCache(cacheKey, result, cwd, {
+						scanDurationMs: durationMs,
+					});
+				} catch (err) {
+					// The write can fail partway; the computed result is still good, so
+					// only the on-disk baseline is lost (review of #4663, F1).
+					incrementDegradationCount({
+						kind: "dead-code-baseline-write-failed",
+						subject: client.id,
+						reason: String(err),
+					});
+				}
 			}
 			logDeadCodeScan({
 				...deadCodeScanEvent(client, cwd, result, durationMs),

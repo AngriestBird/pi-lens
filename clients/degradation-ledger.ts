@@ -268,6 +268,12 @@ export type DegradationKind =
 	 */
 	| "dead-code-late-scan-dropped"
 	/**
+	 * A late dead-code scan's baseline write threw (a full or read-only disk, a
+	 * cache path taken by a file). The scan's findings are still delivered; only
+	 * the on-disk baseline is lost. Subject is the client id (review of #4663).
+	 */
+	| "dead-code-baseline-write-failed"
+	/**
 	 * #3814: the commit gate's pre-check of settled collect-later runner answers
 	 * (`absorbSettledRunnerBlockers`) threw. The gate falls back to the blocker
 	 * map as it stood, and the turn-end drain still records those answers. Subject
