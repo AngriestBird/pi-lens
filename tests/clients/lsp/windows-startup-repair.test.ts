@@ -56,6 +56,46 @@ function plantShim(parent: string): { shim: string; target: string } {
 	return { shim, target };
 }
 
+/**
+ * The three process-boundary doubles every exit-code cell below shares: a
+ * spawn whose child exits 1, the global-bin fallback (an npm-prefix probe), and
+ * the installer the repair would run.
+ */
+function mockExit1Launch(globalBinary?: string): void {
+	findGlobalBinary.mockResolvedValue(globalBinary);
+	vi.doMock("node:child_process", () => ({
+		execFileSync: vi.fn(() => ""),
+		spawn: vi.fn(exitWith(1)),
+	}));
+	vi.doMock("../../../clients/package-manager.js", async (importActual) => ({
+		...(await importActual<
+			typeof import("../../../clients/package-manager.js")
+		>()),
+		findGlobalBinary,
+		isProjectLocalBinPath: vi.fn(() => false),
+	}));
+	vi.doMock("../../../clients/installer/index.js", async (importActual) => ({
+		...(await importActual<
+			typeof import("../../../clients/installer/index.js")
+		>()),
+		ensureTool,
+		findManagedToolBinary: vi.fn(async () => undefined),
+	}));
+}
+
+/** One `resolveAndLaunch` of `candidate` under the `mockExit1Launch` doubles. */
+async function launchOnce(
+	candidate: string,
+	cwd: string,
+	managedToolId: string,
+): Promise<unknown> {
+	const { resolveAndLaunch } = await import("../../../clients/lsp/server.js");
+	return resolveAndLaunch(
+		{ candidates: [candidate], args: ["--stdio"], cwd, managedToolId },
+		true,
+	);
+}
+
 describe("Windows LSP startup repair classification (#4263)", () => {
 	afterEach(() => {
 		setPlatform(process.platform);
@@ -113,40 +153,12 @@ describe("Windows LSP startup repair classification (#4263)", () => {
 		const { shim } = plantShim(path.join(root, "global"));
 		const project = path.join(root, "project");
 		fs.mkdirSync(project, { recursive: true });
-		findGlobalBinary.mockResolvedValue(shim);
-		vi.doMock("node:child_process", () => ({
-			execFileSync: vi.fn(() => ""),
-			spawn: vi.fn(exitWith(1)),
-		}));
-		vi.doMock("../../../clients/package-manager.js", async (importActual) => ({
-			...(await importActual<
-				typeof import("../../../clients/package-manager.js")
-			>()),
-			findGlobalBinary,
-			isProjectLocalBinPath: vi.fn(() => false),
-		}));
-		vi.doMock("../../../clients/installer/index.js", async (importActual) => ({
-			...(await importActual<
-				typeof import("../../../clients/installer/index.js")
-			>()),
-			ensureTool,
-			findManagedToolBinary: vi.fn(async () => undefined),
-		}));
+		mockExit1Launch(shim);
 
 		try {
-			const { resolveAndLaunch } =
-				await import("../../../clients/lsp/server.js");
-			await expect(
-				resolveAndLaunch(
-					{
-						candidates: ["server"],
-						args: ["--stdio"],
-						cwd: project,
-						managedToolId: "server",
-					},
-					true,
-				),
-			).rejects.toThrow(/exited immediately with code 1/);
+			await expect(launchOnce("server", project, "server")).rejects.toThrow(
+				/exited immediately with code 1/,
+			);
 			expect(ensureTool).not.toHaveBeenCalled();
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
@@ -166,39 +178,11 @@ describe("Windows LSP startup repair classification (#4263)", () => {
 		const binary = path.join(root, "global", "bin", "gopls.exe");
 		fs.mkdirSync(path.dirname(binary), { recursive: true });
 		fs.writeFileSync(binary, "MZ\n");
-		findGlobalBinary.mockResolvedValue(binary);
-		vi.doMock("node:child_process", () => ({
-			execFileSync: vi.fn(() => ""),
-			spawn: vi.fn(exitWith(1)),
-		}));
-		vi.doMock("../../../clients/package-manager.js", async (importActual) => ({
-			...(await importActual<
-				typeof import("../../../clients/package-manager.js")
-			>()),
-			findGlobalBinary,
-			isProjectLocalBinPath: vi.fn(() => false),
-		}));
-		vi.doMock("../../../clients/installer/index.js", async (importActual) => ({
-			...(await importActual<
-				typeof import("../../../clients/installer/index.js")
-			>()),
-			ensureTool,
-			findManagedToolBinary: vi.fn(async () => undefined),
-		}));
+		mockExit1Launch(binary);
 
 		try {
-			const { resolveAndLaunch } =
-				await import("../../../clients/lsp/server.js");
 			await expect(
-				resolveAndLaunch(
-					{
-						candidates: ["gopls"],
-						args: ["serve"],
-						cwd: path.join(root, "project"),
-						managedToolId: "gopls",
-					},
-					true,
-				),
+				launchOnce("gopls", path.join(root, "project"), "gopls"),
 			).rejects.toThrow(/exited immediately with code 1/);
 			expect(ensureTool).not.toHaveBeenCalled();
 		} finally {
@@ -219,40 +203,83 @@ describe("Windows LSP startup repair classification (#4263)", () => {
 		setPlatform("win32");
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-4263-abs-"));
 		const { shim } = plantShim(path.join(root, "global"));
-		vi.doMock("node:child_process", () => ({
-			execFileSync: vi.fn(() => ""),
-			spawn: vi.fn(exitWith(1)),
-		}));
-		vi.doMock("../../../clients/package-manager.js", async (importActual) => ({
-			...(await importActual<
-				typeof import("../../../clients/package-manager.js")
-			>()),
-			findGlobalBinary,
-			isProjectLocalBinPath: vi.fn(() => false),
-		}));
-		vi.doMock("../../../clients/installer/index.js", async (importActual) => ({
-			...(await importActual<
-				typeof import("../../../clients/installer/index.js")
-			>()),
-			ensureTool,
-			findManagedToolBinary: vi.fn(async () => undefined),
-		}));
+		mockExit1Launch();
 
 		try {
-			const { resolveAndLaunch } =
-				await import("../../../clients/lsp/server.js");
 			await expect(
-				resolveAndLaunch(
-					{
-						candidates: [shim],
-						args: ["--stdio"],
-						cwd: path.join(root, "global"),
-						managedToolId: "server",
-					},
-					true,
-				),
+				launchOnce(shim, path.join(root, "global"), "server"),
 			).rejects.toThrow(/exited immediately with code 1/);
 			expect(ensureTool).not.toHaveBeenCalled();
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+			setPlatform(originalPlatform);
+		}
+	});
+
+	// #4532 round 5 (review F1, CodeRabbit): an EXPLICIT spelling gets no PATH
+	// scan and no global fallback, so the round-4 presence rule ("the spelling
+	// changed") read an installed absolute binary as absent and handed a present
+	// program that exited 1 to the installer. `resolveAndLaunch` puts the managed
+	// `~/.pi-lens/bin/gopls.exe` first, so this is the managed-binary case.
+	it("does not repair a present absolute binary with no fallback that exits with code 1", async () => {
+		const originalPlatform = process.platform;
+		setPlatform("win32");
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-4263-absexe-"));
+		const binary = path.join(root, "bin", "gopls.exe");
+		fs.mkdirSync(path.dirname(binary), { recursive: true });
+		fs.writeFileSync(binary, "MZ\n");
+		mockExit1Launch();
+		try {
+			await expect(
+				launchOnce(binary, path.join(root, "project"), "gopls"),
+			).rejects.toThrow(/exited immediately with code 1/);
+			expect(ensureTool).not.toHaveBeenCalled();
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+			setPlatform(originalPlatform);
+		}
+	});
+
+	// The same arm's other direction: an explicit spelling whose file is NOT on
+	// disk is the missing install, absolute or relative. Round 4 read a relative
+	// spelling as present because resolving it against the cwd changed it.
+	it("repairs an absent explicit command, absolute or relative, reported as exit-code 1", async () => {
+		const originalPlatform = process.platform;
+		setPlatform("win32");
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-4263-absent-"));
+		const project = path.join(root, "project");
+		fs.mkdirSync(project, { recursive: true });
+		mockExit1Launch();
+		try {
+			for (const candidate of [
+				path.join(root, "bin", "gopls.exe"),
+				"./bin/gopls.exe",
+			]) {
+				ensureTool.mockClear();
+				await launchOnce(candidate, project, "gopls").catch(() => undefined);
+				expect(ensureTool, candidate).toHaveBeenCalledWith("gopls");
+			}
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+			setPlatform(originalPlatform);
+		}
+	});
+
+	// Review F4: the missing-shim arm had no witness. A `.cmd` shim on disk whose
+	// npm target is gone is the missing install even though the shim file itself
+	// exists, so the exit code 1 is repaired.
+	it("repairs an npm shim whose target is absent, reported as exit-code 1", async () => {
+		const originalPlatform = process.platform;
+		setPlatform("win32");
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-4263-shim-"));
+		const { shim, target } = plantShim(path.join(root, "global"));
+		fs.rmSync(target);
+		mockExit1Launch();
+		try {
+			await launchOnce(shim, path.join(root, "global"), "server").catch(
+				() => undefined,
+			);
+			expect(ensureTool).toHaveBeenCalledWith("server");
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 			setPlatform(originalPlatform);

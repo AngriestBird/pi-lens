@@ -35,6 +35,7 @@ import {
 	isOwnLiveChild,
 	resolveWindowsCommandForEnvironment,
 	SpawnFailureError,
+	statIsFile,
 } from "../safe-spawn.js";
 import { getRubyVersionDirNamesAsync } from "./ruby-drive-dirs.js";
 
@@ -299,36 +300,52 @@ export function isCmdShimValid(cmdPath: string): boolean {
  * Whether the launcher ESTABLISHED that the program it spawned exists
  * (#4263, #4532 round 4 — the caller reads this, it is not re-derived).
  *
- * `present` when the launcher holds evidence of presence: a `.cmd`/`.bat` shim
- * whose npm target it read on disk before the spawn, the path its own
- * in-process PATH scan returned, or a managed/global fallback path that
- * replaced the spelling the caller asked for. `absent` only when the one search
- * the launcher ran — `findBinaryOnPath` over the child's own PATH — came back
- * empty.
+ * The evidence depends on the spelling. A BARE command is found by a search:
+ * `present` when the launcher's in-process PATH scan returned a path, or a
+ * managed/global fallback replaced the spelling, and `absent` only when that
+ * search came back empty. An EXPLICIT spelling (absolute, or relative to the
+ * cwd) names one file and no search applies, so its presence is that file on
+ * disk, read before the spawn: the file itself, or the file cmd.exe would run
+ * under PATHEXT (`resolveWindowsCommandForEnvironment`, the rule the pre-#4532
+ * classifier asked). Round 5 (review F1): this arm used to read "the spelling
+ * changed" for both, so an installed absolute `gopls.exe` that exited 1 read
+ * `absent` and went to the installer, and a relative spelling that did not
+ * exist read `present`. A `.cmd`/`.bat` shim whose npm target the launcher read
+ * on disk is present under either spelling.
  *
- * The distinction is the whole rule: a command the scan did NOT find is not
- * proof the binary is absent when the failure came from the spawn. Windows'
- * shell-backed launches report exit code 1 both for a command cmd.exe never
- * found and for a present tool that failed at startup, so the exit code answers
- * "the program failed", never "the program is absent". The pre-fix rule
- * re-resolved the spelling a second time, against a fresh reading of the cwd
- * and PATH that can disagree with the one the spawn used, so a present binary
- * became `tool-not-found` — which hands it to the installer.
+ * The distinction is the whole rule: the exit code answers "the program
+ * failed", never "the program is absent". Windows' shell-backed launches report
+ * exit code 1 both for a command cmd.exe never found and for a present tool
+ * that failed at startup, and a present binary classified absent is handed to
+ * the installer.
  */
-function windowsCommandPresence(
-	command: string,
-	spawnCommand: string,
-	scannedCommandPath: string | undefined,
-): "present" | "absent" {
+function windowsCommandPresence(evidence: {
+	command: string;
+	spawnCommand: string;
+	isBareCommand: boolean;
+	scannedCommandPath: string | undefined;
+	cwd: string;
+	env: NodeJS.ProcessEnv;
+}): "present" | "absent" {
+	const { command, spawnCommand } = evidence;
 	// The shim's own target was read on disk before the spawn.
 	if (/\.(cmd|bat)$/i.test(spawnCommand) && isCmdShimValid(spawnCommand)) {
 		return "present";
 	}
-	// The scan resolved this spelling, or a managed/global fallback replaced it.
-	if (scannedCommandPath !== undefined || spawnCommand !== command) {
-		return "present";
+	if (evidence.isBareCommand) {
+		// The scan resolved this spelling, or a managed/global fallback replaced it.
+		return evidence.scannedCommandPath !== undefined || spawnCommand !== command
+			? "present"
+			: "absent";
 	}
-	return "absent";
+	return statIsFile(spawnCommand) ||
+		resolveWindowsCommandForEnvironment(
+			spawnCommand,
+			evidence.cwd,
+			evidence.env,
+		)
+		? "present"
+		: "absent";
 }
 
 /**
@@ -881,7 +898,14 @@ export async function launchLSP(
 	// from the evidence this launch holds, and both classification sites below
 	// read it. Nothing re-reads the PATH or the cwd after the spawn.
 	const commandPresence: "present" | "absent" = isWindows
-		? windowsCommandPresence(command, spawnCommand, scannedCommandPath)
+		? windowsCommandPresence({
+				command,
+				spawnCommand,
+				isBareCommand,
+				scannedCommandPath,
+				cwd,
+				env,
+			})
 		: "absent";
 
 	// Built-in server commands have no config provenance to carry into the
