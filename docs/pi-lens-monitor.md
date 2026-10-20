@@ -43,7 +43,9 @@ snapshots; no additional telemetry sink is created.
 Read the monitored process's log directory, resolved by `getGlobalPiLensLogDir()`
 in `clients/probe-home-state.ts`: a non-empty `PI_LENS_HOME` wins, otherwise
 any applicable probe-home redirect, otherwise `~/.pi-lens`. Do not infer this
-from the monitor's own environment. Pass that directory as `--root` to
+from the monitor's own environment. The brief names the root; when it does
+not, read the monitored pid's environment (`/proc/<pid>/environ` on Linux,
+`ps eww -p <pid>` on macOS). Pass that directory as `--root` to
 `scripts/analyze-pi-lens-logs.mjs`, whose default is `~/.pi-lens`.
 
 - `latency.log` and `extension.log` (JSON lines; every row carries `pid`
@@ -181,8 +183,10 @@ the requested window.
 - File nothing yourself unless the brief grants `gh`; then one comment on the
   issue the brief names, never a new issue: the orchestrator decides what
   becomes a lane.
-- The analyzer reads discovered sources independently; it does not apply a
-  pid-evidence stop rule or supply an input-state report or file inventory.
+- The analyzer reads discovered sources independently and does not apply a
+  pid-evidence stop rule. It reports per-family file and row counts
+  (`filesScanned`, `rowsSeen`, `parseErrors`) but cannot classify each input
+  as absent, empty, unreadable, or out-of-window.
   Missing files and unreadable directories can yield no discovered input;
   empty files and out-of-window rows contribute no rows. A discovered file
   read error fails the command instead of producing an empty report. Do not
