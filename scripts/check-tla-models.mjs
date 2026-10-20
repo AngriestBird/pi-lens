@@ -49,6 +49,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs as parseNodeArgs } from "node:util";
+import { assignShards, shardLoads } from "./lib/test-shard-assignment.mjs";
 
 export const TLA_TOOLS = Object.freeze({
 	release: "v1.7.4",
@@ -141,9 +142,128 @@ export function parseShardArg(raw) {
 	return { index, total };
 }
 
-/** Shard `index` (1-based) of `total`: round-robin over the given order. */
-export function selectShard(configs, { index, total }) {
-	return configs.filter((_, position) => position % total === index - 1);
+/**
+ * The measured per-config TLC seconds, from scripts/tla-model-costs.json
+ * (`scripts/gen-tla-model-costs.mjs`). The table's own provenance -- the run
+ * ids it was measured from and the note -- lives in that file.
+ *
+ * A config the table does not know costs the table's MAXIMUM, not zero and not
+ * the median: a config added without a regeneration is usually a NEW model
+ * (heavier than the ones already there), and over-pricing it can only move it
+ * into a lighter shard, while under-pricing it is how a fresh tail shard
+ * appears. Same fail-closed direction as the Unit shards' weights file
+ * (`scripts/lib/test-shard-assignment.mjs`), whose median fallback is safe
+ * there because a new test file is small; a new TLC config is not.
+ */
+export const MODEL_COSTS_FILE = "scripts/tla-model-costs.json";
+
+/**
+ * @param {string} root repository root
+ * @returns {{ files: Record<string, number>, max: number }}
+ */
+export function loadModelCosts(root) {
+	const file = path.join(root, MODEL_COSTS_FILE);
+	let parsed;
+	try {
+		parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+	} catch (error) {
+		// Loud, like the Unit shards' weights loader: every shard reads the same
+		// checkout, so a missing or malformed table is a repository defect.
+		throw new Error(
+			`TLA+ model costs unreadable at ${file}: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+	const files = parsed?.files;
+	if (!files || typeof files !== "object" || Array.isArray(files))
+		throw new Error(`TLA+ model costs at ${file} have no "files" object`);
+	const seconds = [];
+	for (const [id, value] of Object.entries(files)) {
+		if (typeof value !== "number" || !Number.isFinite(value) || value < 0)
+			throw new Error(
+				`TLA+ model costs at ${file}: "${id}" is not a finite non-negative number`,
+			);
+		seconds.push(value);
+	}
+	return {
+		files,
+		max: seconds.length === 0 ? 0 : Math.max(...seconds),
+	};
+}
+
+/** `config`'s measured TLC seconds, or the table's max when it has no row. */
+function costOf(config, root, costs) {
+	const id = path.relative(root, config).split(path.sep).join("/");
+	return costs.files[id] ?? costs.max;
+}
+
+/**
+ * Shard `index` (1-based) of `total`.
+ *
+ * With no cost table (`costs === null`) this is the original round-robin over
+ * the given order: equal costs make the LPT pack below assign exactly the same
+ * way, and the pure helper stays usable without touching disk.
+ *
+ * With the measured table it is the same longest-processing-time pack the Unit
+ * shards use (`assignShards`), over per-config TLC seconds. Round-robin by
+ * COUNT was the #4672 defect: configs' costs differ by two orders of magnitude
+ * (1.2 s to 422 s on the 2026-10-20 runs), so master run 39380875926's four
+ * shards summed 733 s / 1255 s / 1617 s / 2148 s of TLC time, and the heaviest
+ * was cancelled at 735 s against its 720 s `timeout-minutes` with every step
+ * `success`.
+ *
+ * The result is re-sorted into the input (path) order, so a shard's execution
+ * order -- and the log's config order -- is stable across runs.
+ */
+export function selectShard(configs, { index, total }, costs = null) {
+	if (costs === null)
+		return configs.filter((_, position) => position % total === index - 1);
+	const items = configs.map((config, position) => ({
+		id: String(position),
+		cost: costOf(config, costs.root, costs),
+	}));
+	const assignment = assignShards(items, total);
+	return configs.filter(
+		(_, position) => assignment.get(String(position)) === index,
+	);
+}
+
+/**
+ * The one line a shard prints about its own share of the measured work: the
+ * per-shard balance is otherwise invisible, and a table that has gone stale
+ * shows up here as a spread rather than as a timeout 12 minutes later.
+ *
+ * @param {{ configs: string[], total: number, costs: { root: string, files: Record<string, number>, max: number } }} args
+ */
+export function formatShardBalance({ configs, total, costs }) {
+	const all = listModelConfigs(costs.root);
+	const items = all.map((config) => ({
+		id: config,
+		cost: costOf(config, costs.root, costs),
+	}));
+	const assignment = assignShards(items, total);
+	const { loads, files } = shardLoads(items, assignment, total);
+	const unmeasured = all.filter(
+		(config) =>
+			!(
+				path.relative(costs.root, config).split(path.sep).join("/") in
+				costs.files
+			),
+	);
+	const hereLoad = items
+		.filter((item) => configs.includes(item.id))
+		.reduce((sum, item) => sum + item.cost, 0);
+	const heaviest = Math.max(...loads);
+	const lightest = Math.min(...loads);
+	const shards = loads
+		.map((load, at) => `${files[at]} configs/${load.toFixed(0)}s`)
+		.join(", ");
+	return (
+		`this shard: ${configs.length} configs, ${hereLoad.toFixed(1)}s of measured TLC time; ` +
+		`all shards: ${shards}; heaviest/lightest = ${(heaviest / Math.max(1, lightest)).toFixed(2)}x` +
+		(unmeasured.length === 0
+			? ""
+			: `; ${unmeasured.length} config(s) have no row in ${MODEL_COSTS_FILE} and cost the table max -- rerun scripts/gen-tla-model-costs.mjs`)
+	);
 }
 
 const CLI_OPTIONS = Object.freeze({
@@ -178,15 +298,27 @@ export function parseCliArgs(argv) {
 export function selectConfigs(argv, root) {
 	const { shard } = parseCliArgs(argv);
 	const all = listModelConfigs(root);
-	const configs =
-		shard === undefined ? all : selectShard(all, parseShardArg(shard));
+	if (shard === undefined) {
+		if (all.length === 0) throw new Error("no formal/*/*.cfg found");
+		return all;
+	}
+	// The measured cost table is what makes a shard's WORK, not its config
+	// COUNT, the thing the partition balances (#4672, see selectShard).
+	const table = loadModelCosts(root);
+	const configs = selectShard(all, parseShardArg(shard), {
+		root,
+		...table,
+	});
 	if (configs.length === 0)
-		throw new Error(
-			shard === undefined
-				? "no formal/*/*.cfg found"
-				: `--shard ${shard} selects no formal/*/*.cfg`,
-		);
+		throw new Error(`--shard ${shard} selects no formal/*/*.cfg`);
 	return configs;
+}
+
+/** The model costs a run loaded, or null when it ran unsharded. */
+export function resolveShardCosts(argv, root) {
+	const { shard } = parseCliArgs(argv);
+	if (shard === undefined) return null;
+	return { root, ...loadModelCosts(root) };
 }
 
 /**
@@ -375,6 +507,10 @@ async function main() {
 		shard,
 	} = parseCliArgs(argv);
 	const configs = selectConfigs(argv, root);
+	// #4672: with a shard, the run also prints how the measured work split
+	// across ALL shards -- the balance is otherwise invisible until a shard
+	// loses its race against `timeout-minutes` and reports `cancelled`.
+	const shardCosts = resolveShardCosts(argv, root);
 
 	const availableParallelism =
 		typeof os.availableParallelism === "function"
@@ -422,6 +558,10 @@ async function main() {
 		);
 	console.log("");
 	console.log(formatSummary(configs.length, shard, wallSeconds, concurrency));
+	if (shard !== undefined && shardCosts) {
+		const { total } = parseShardArg(shard);
+		console.log(formatShardBalance({ configs, total, costs: shardCosts }));
+	}
 	console.log("Per-directory TLC time (summed, not wall time):");
 	for (const line of dirLines) console.log(line);
 

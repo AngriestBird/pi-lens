@@ -44,10 +44,32 @@ export declare function parseShardArg(raw: string | undefined): {
 	index: number;
 	total: number;
 };
+/** The measured per-config cost table's file, repo-relative (#4672). */
+export declare const MODEL_COSTS_FILE: string;
+export type ModelCosts = {
+	root: string;
+	files: Record<string, number>;
+	max: number;
+};
+export declare function loadModelCosts(root: string): {
+	files: Record<string, number>;
+	max: number;
+};
+/** `costs` null keeps the round-robin split; a table packs by measured cost. */
 export declare function selectShard<Item>(
 	configs: readonly Item[],
 	shard: { index: number; total: number },
+	costs?: ModelCosts | null,
 ): Item[];
+export declare function formatShardBalance(args: {
+	configs: readonly string[];
+	total: number;
+	costs: ModelCosts;
+}): string;
+export declare function resolveShardCosts(
+	argv: readonly string[],
+	root: string,
+): ModelCosts | null;
 export declare function parseCliArgs(argv: readonly string[]): {
 	jar?: string;
 	concurrency?: string;

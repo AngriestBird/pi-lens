@@ -1,0 +1,6 @@
+---
+section: Fixed
+audience: internal
+---
+
+- CI: one shard-verdict seam for both sharded required aggregates. A shard whose own work step concluded `success` and was then `cancelled` at its own `timeout-minutes` (master run 39380875926, `TLA+ models (shard 4/4)`, 735 s against 720 s) is now a pass with a recorded `::warning::` instead of a red `TLA+ models` / `Unit tests` check; a shard cancelled before that step finished stays red, and unreadable evidence fails closed. `scripts/check-shard-verdict.mjs` is the one implementation, driven from the run's own job list with `actions: read` (#4672). The `ci-infra-kill-rerun` classifier also judges a `cancelled` `CI` run on `master` whose cancelled jobs all concluded every step `success`, and reruns it at most once under the existing two-rerun bound; a cancelled pull-request run is still left alone (#4672). `ci-verdict` now prints a non-gating runtime-vs-cap line for any job at 70% of its `timeout-minutes`, read from the workflow YAML and the check-runs it already has (#3920 item 3). The TLA+ shards are packed by measured per-config cost (`scripts/tla-model-costs.json`, `scripts/gen-tla-model-costs.mjs`) instead of round-robin by count, which took the per-shard measured work from a 2.9x spread to 1.00x, and the shard cap moves 12 -> 20 minutes from that measurement (#4672).

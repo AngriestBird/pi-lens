@@ -20,6 +20,7 @@ type Job = {
 	needs?: string | string[];
 	if?: string;
 	env?: Record<string, string>;
+	permissions?: Record<string, string>;
 	strategy?: { "fail-fast"?: boolean; matrix?: { shard?: number[] } };
 	steps?: Step[];
 };
@@ -89,7 +90,13 @@ describe("#3753 sharded Unit tests workflow contract", () => {
 	// Recurrence: a required check that is SKIPPED (its `needs` failed) counts
 	// as passing in branch protection. An aggregate without `if: always()`
 	// would turn a red shard into a green `Unit tests`.
-	it("keeps exactly one check named `Unit tests`: an always() aggregate over the shard job that fails unless every shard succeeded", () => {
+	// #4672: the verdict itself moved to the shared
+	// `scripts/check-shard-verdict.mjs` seam, which both sharded aggregates
+	// call; what stays pinned here is this aggregate's own inputs (its shard
+	// job's result, its shard-row pattern, its check step) and that no step can
+	// green a red shard. The classification is pinned from fixtures in
+	// tests/scripts/check-shard-verdict.test.ts.
+	it("keeps exactly one check named `Unit tests`: an always() aggregate over the shard job, classified by the shared shard-verdict seam", () => {
 		const jobs = CI();
 		const named = Object.entries(jobs).filter(
 			([, job]) => job.name === "Unit tests",
@@ -99,14 +106,30 @@ describe("#3753 sharded Unit tests workflow contract", () => {
 		expect(asList(aggregate.needs)).toEqual(["test"]);
 		expect(aggregate.if).toBe("always()");
 		expect(aggregate.env?.SHARDS_RESULT).toBe("${{ needs.test.result }}");
-		const run = String(
-			step(aggregate, "Require every Unit tests shard to succeed").run,
+		const verdictStep = step(
+			aggregate,
+			"Require every Unit tests shard to succeed",
 		);
-		// The exit sits INSIDE the not-success branch (a bare `exit 1` anywhere
-		// else, or `exit 0` here, would pass a red shard).
+		const run = String(verdictStep.run);
 		expect(run).toMatch(
-			/if \[\[ "\$\{SHARDS_RESULT\}" != "success" \]\]; then[\s\S]*\n\s*exit 1\n\s*fi\s*$/,
+			/^\s*node scripts\/check-shard-verdict\.mjs \\\n\s*--label "Unit tests" \\\n\s*--result "\$\{SHARDS_RESULT\}"/m,
 		);
+		expect(verdictStep.env?.SHARD_JOB_PATTERN).toBe(
+			"^Unit tests \\(shard [0-9]+/[0-9]+\\)$",
+		);
+		expect(verdictStep.env?.SHARD_CHECK_STEP).toBe("Run tests");
+		expect(run).not.toMatch(/exit 0/);
+		// The shard count is not baked into the pattern's semantics: it matches
+		// `shard k/N` for any N, so the #3753 re-shard moves the matrix alone.
+		const pattern = new RegExp(String(verdictStep.env?.SHARD_JOB_PATTERN));
+		expect(pattern.test("Unit tests (shard 7/9)")).toBe(true);
+		expect(pattern.test("Unit tests")).toBe(false);
+		// #4672: reading this run's job list needs the actions scope and nothing
+		// wider.
+		expect(aggregate.permissions).toEqual({
+			contents: "read",
+			actions: "read",
+		});
 	});
 
 	// Recurrence: a literal shard count beside a matrix edit (`--shard=k/3` with
