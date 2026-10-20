@@ -708,10 +708,8 @@ file-scoped worklist and receives no project-wide scanner output.
     flips between two answers and a data refresh commits the artifact as a
     finding. Stamp each row with the subject that emitted it, or scope the drain
     to that subject, and require the last writer of a verdict to be the subject's
-    own emitter. Guard: planned, not yet running; the regression test is
-    `tests/clients/lsp/lsp-publish-trace-attribution.test.ts` on
-    `fix/4615-typescript-first-publish`, off master. Instance and dates:
-    `HISTORY.md`.
+    own emitter. Enforced by `tests/clients/lsp/lsp-publish-trace-attribution.test.ts`.
+    Instance and dates: `HISTORY.md`.
 
 77. **Cancellation read as failure:** an aggregate that compares each shard's
     result against `success` reds a required check when the shard finished every
