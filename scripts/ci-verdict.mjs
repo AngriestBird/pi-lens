@@ -768,7 +768,8 @@ export function computeVerdict(
 	// a later run whose own aggregate row did not exist yet. A real run posts
 	// them in this order (run 39481284562: each aggregate starts 2-3 s after its
 	// last shard ends). A missing or unparsable timestamp on either side proves
-	// no ordering, so it judges nothing (fail closed).
+	// no ordering, so it judges nothing (fail closed): `Date.parse` gives NaN,
+	// and every comparison with NaN is false.
 	const aggregateJudgedGreen = (row) => {
 		const aggregate = shardAggregateName(row.name);
 		if (aggregate === null) return false;
@@ -780,8 +781,6 @@ export function computeVerdict(
 		return (
 			String(parent?.status ?? "").toLowerCase() === "completed" &&
 			String(parent?.conclusion ?? "").toLowerCase() === "success" &&
-			Number.isFinite(parentStarted) &&
-			Number.isFinite(shardCompleted) &&
 			parentStarted >= shardCompleted
 		);
 	};

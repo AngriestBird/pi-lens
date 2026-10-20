@@ -372,6 +372,14 @@ describe("#4672 a cancelled shard that finished its work is a pass with a warnin
 			"disagree on the shard count",
 		],
 		[
+			"a shard index lies outside 1..N",
+			(rows: ShardJob[]) => [
+				...rows,
+				{ id: 98, name: "TLA+ models (shard 5/4)", conclusion: "success" },
+			],
+			"shard 5 lies outside 1..4",
+		],
+		[
 			"a matched name carries no `(shard k/N)`",
 			(rows: ShardJob[]) => [
 				...rows,
