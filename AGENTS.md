@@ -723,10 +723,10 @@ file-scoped worklist and receives no project-wide scanner output.
     accurate per process and wrong per cause, and the sweep reds a file that
     never created it. Pin the loader's cache off for the test process rather
     than admitting the directory's name, and keep a planted sibling red to prove
-    it. Guard: planned, not yet running; the hygiene test is
-    `tests/config/tmp-fixture-hygiene.test.ts` on
-    `fix/tmp-root-jiti-cache-4673`, off master. Instance and dates:
-    `HISTORY.md`.
+    it. Enforced by the by-path-cache case in
+    `tests/config/tmp-fixture-hygiene.test.ts`, plus the `JITI_FS_CACHE=0` pin
+    that `tests/support/vitest-setup.ts` and `vitest.config.ts` force on the
+    test process. Instance and dates: `HISTORY.md`.
 
 </important>
 

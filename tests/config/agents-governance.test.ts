@@ -66,8 +66,10 @@ describe("AGENTS.md trigger-block governance (#3259)", () => {
 		// catalog shapes the maintainer approved on 2026-10-17 (#4565); each
 		// instance number is what makes a shape recognisable. The 2026-10-20
 		// shapes 76-78 cite no instance number: each entry names its guard's
-		// test and branch, and each instance date lives in `HISTORY.md` under a
-		// heading naming the shape, so this pin does not move.
+		// test path, and each instance date lives in `HISTORY.md` under a
+		// heading naming the shape, so this pin does not move. Shape 78's guard
+		// shipped (#4679), so its entry names the running path instead of a
+		// branch, which adds no reference either.
 		expect(issueRefs(agentsText())).toBeLessThanOrEqual(119);
 	});
 
