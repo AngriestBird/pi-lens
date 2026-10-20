@@ -39,7 +39,6 @@ export const PI_MOCK_IMPORTERS: Readonly<Record<string, string>> = {
 	"index-2939-tool-result-budget-witness.test.ts": "internal-seam",
 	"index-3190-inline-blocker-deleted-path-witness.test.ts": "internal-seam",
 	"index-3246-turn-end-delivery.test.ts": "internal-seam",
-	"index-3248-git-guard-latch-witness.test.ts": "internal-seam",
 	"index-3290-actionable-warnings-witness.test.ts": "internal-seam",
 	"index-3506-file-mutation-queue-wiring.test.ts": "internal-seam",
 	"index-3620-sweep-scope-fence.test.ts": "internal-seam",
