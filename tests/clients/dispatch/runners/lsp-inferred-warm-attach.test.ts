@@ -37,6 +37,7 @@ vi.mock("../../../../clients/lsp/capabilities.js", async () => {
 });
 
 import lspRunner from "../../../../clients/dispatch/runners/lsp.js";
+import { ENVIRONMENT_GAP_MARKER } from "../../../../clients/lsp/environment-gap.js";
 
 const INFERRED_BODY = { configFileName: "/dev/null/inferredProject1*" };
 
@@ -55,6 +56,30 @@ function makeService() {
 		codeAction: vi.fn(async () => []),
 	});
 }
+
+/** The seven ambient-declaration gaps the reported session actually got. */
+const ENVIRONMENT_GAP_ROWS = [
+	"Cannot find module 'node:crypto' or its corresponding type declarations.",
+	"Cannot find namespace 'NodeJS'.",
+	"Cannot find name 'setTimeout'.",
+	"Cannot find name 'clearTimeout'.",
+	"Cannot find name 'setInterval'.",
+	"Cannot find name 'clearInterval'.",
+].map((message, index) => ({
+	severity: 1,
+	message,
+	code: message.startsWith("Cannot find module")
+		? 2307
+		: message.startsWith("Cannot find namespace")
+			? 2503
+			: 2304,
+	range: {
+		start: { line: index, character: 0 },
+		end: { line: index, character: 24 },
+	},
+	source: "ts",
+	serverId: "typescript",
+}));
 
 describe("LSP dispatch runner — warm attach skips the membership probe (#1645 F2)", () => {
 	let cwd: string;
@@ -108,5 +133,42 @@ describe("LSP dispatch runner — warm attach skips the membership probe (#1645 
 		expect(service.executeReadOnlyCommandOnLiveClient).not.toHaveBeenCalled();
 		expect(service.executeCommand).not.toHaveBeenCalled();
 		expect(service.getAdvertisedCommands).not.toHaveBeenCalled();
+	});
+
+	// #4532 round 4 (M2): the environment-gap demotion used to inherit #1645
+	// F2's reason as well, and kept the reported `🔴 STOP` on this route while
+	// the per-edit route was fixed. It asks ONE filesystem question about the
+	// file's own directory — no server, no probe — so it holds here too and only
+	// the membership probe stays gated.
+	it("still demotes an ambient-declaration gap on the warm-attach path (#4532)", async () => {
+		const file = path.join(cwd, "orphan.ts");
+		fs.writeFileSync(file, "export const x = 1;\n");
+		mocked.attachedDiagnostics.mockResolvedValue({
+			available: true,
+			response: { diagnostics: ENVIRONMENT_GAP_ROWS },
+		});
+
+		const result = await lspRunner.run({
+			filePath: file,
+			cwd,
+			fileRole: "source",
+			pi: { getFlag: () => undefined },
+		} as never);
+
+		// The gap is labelled and never blocking — the same verdict the per-edit
+		// route gives the same rows.
+		expect(result.semantic).toBe("warning");
+		expect(result.diagnostics).toHaveLength(ENVIRONMENT_GAP_ROWS.length);
+		expect(
+			result.diagnostics.every((item) => item.semantic === "warning"),
+		).toBe(true);
+		expect(
+			result.diagnostics.filter((item) =>
+				item.message.includes(ENVIRONMENT_GAP_MARKER),
+			),
+		).toHaveLength(ENVIRONMENT_GAP_ROWS.length);
+		// …and the membership probe is still skipped on this path.
+		const service = mocked.service as ReturnType<typeof makeService>;
+		expect(service.executeReadOnlyCommandOnLiveClient).not.toHaveBeenCalled();
 	});
 });

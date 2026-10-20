@@ -1043,7 +1043,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 31 -> 34 (#4532): the bare-command probe is an in-process PATH scan —
 		// `path.delimiter`, `path.resolve` against the spawn cwd, and
 		// `path.join` for each candidate; not the retired `path` domain term.
-		"clients/lsp/launch.ts": 34,
+		// 34 -> 32 (#4532 round 4): the three copies of the bare-spelling test
+		// (`!isFullyQualified && !includes(path.sep) && !includes("/")`) became
+		// one `isBareCommand`, so two of the three `path.sep` reads are gone.
+		"clients/lsp/launch.ts": 32,
 		"clients/lsp/lombok.ts": 14,
 		// #4299: 121 -> 124; OS path namespace calls for canonical compiler
 		// validation replace the wrapper-relative guess. No path-key owner changes.
