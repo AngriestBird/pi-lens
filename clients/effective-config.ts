@@ -347,10 +347,13 @@ function decidedByOrNothing(entry: ProvenanceViewEntry | undefined): {
  * explicit argument. Same gate, same answer, no write.
  *
  * ONE RESOLUTION ANSWERS THE WHOLE QUERY (#2427 review round 5, F-R4-1), taken
- * at the FILE's own directory whenever a file is asked about — matching what
- * the runtime registers via `ensureLSPConfigInitialized(path.dirname(filePath))`,
- * because a nested `repo/sub/.pi-lens.json` layer (config.ts header point 3)
- * reaches the runtime's decision no other way (round 4, F1).
+ * at the FILE's own directory whenever a file is asked about — matching the
+ * root the runtime registers, `resolveSessionConfigRoot(filePath, …)`
+ * (`clients/analysis-root.ts`, #2657), which is the nearest
+ * `.pi-lens.json`/`pi-lens.json` owner at or below the session root and so the
+ * file's own directory exactly when that directory owns a config. A nested
+ * `repo/sub/.pi-lens.json` layer (config.ts header point 3) reaches the
+ * runtime's decision no other way (round 4, F1).
  *
  * Round 4 moved the GATES to that root and left the rest — the redacted spec,
  * every `decidedBy`, the `documents` list — reading a SECOND resolution taken
@@ -434,12 +437,12 @@ export async function effectiveConfig(
 	// and its root is the FILE's own directory whenever a CONFINED file is
 	// asked about.
 	//
-	// The runtime registers LSP config at that directory —
-	// `ensureLSPConfigInitialized(path.dirname(filePath))` in
-	// `runtime-tool-call.ts` — and `getConfigForFile` answers with the deepest
-	// registered ancestor, so a nested `repo/sub/.pi-lens.json` (config.ts
-	// header point 3) only reaches the runtime's decision through the file's
-	// own directory. Round 4 fixed the GATES that way but left every other fact
+	// The runtime registers the file's config OWNER —
+	// `resolveSessionConfigRoot(filePath, …)` in `clients/analysis-root.ts`,
+	// called from `runtime-tool-call.ts` (#2657) — and `getConfigForFile`
+	// answers with the deepest registered ancestor, so a nested
+	// `repo/sub/.pi-lens.json` (config.ts header point 3) reaches the runtime's
+	// decision through that owner's directory. Round 4 fixed the GATES that way but left every other fact
 	// — the redacted spec, every `decidedBy`, the `documents` list — read off a
 	// second resolution taken at the workspace root, so the query had two
 	// resolution roots and they disagreed: it reported the root's definition of
