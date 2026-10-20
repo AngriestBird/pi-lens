@@ -693,6 +693,41 @@ file-scoped worklist and receives no project-wide scanner output.
     pre-push runs. Plant the fixture's own marker, or assert the root it
     resolved before the case runs. Guard: planned in #4560, not yet running.
 
+76. **Instrument attributes by id and order, not by the emitting subject:** a
+    probe that brackets each phase with an offset into a buffered async sink,
+    and drains rows by subject id alone, folds a sibling's late row into its own
+    phase. The verdict then depends on write order, so the same measurement
+    flips between two answers and a data refresh commits the artifact as a
+    finding. Stamp each row with the subject that emitted it, or scope the drain
+    to that subject, and require the last writer of a verdict to be the subject's
+    own emitter. Guard: planned, not yet running; the regression test is
+    `tests/clients/lsp/lsp-publish-trace-attribution.test.ts` on
+    `fix/4615-typescript-first-publish`, off master. Instance and dates:
+    `HISTORY.md`.
+
+77. **Cancellation read as failure:** an aggregate that compares each shard's
+    result against `success` reds a required check when the shard finished every
+    step and lost its race with `timeout-minutes`, and no rerun recovers it,
+    because the infra-kill classifier reads only `failure` runs. A shard's own
+    step conclusions tell a teardown cancellation from a mid-check one, and every
+    required job's measured runtime belongs beside its cap, because a cap set at
+    the measured maximum fails the first time a runner is slow. Guard: planned,
+    not yet running; the shard-verdict test is
+    `tests/scripts/check-shard-verdict.test.ts` on
+    `ci/4672-cancelled-shard-verdict`, off master. Instance and dates:
+    `HISTORY.md`.
+
+78. **A dependency's cache directory attributed to the fixture that triggered
+    it:** a loader that materialises `os.tmpdir()/<tool>` on the caller's own
+    stack looks like a fixture sibling, so the creator recorded for it is
+    accurate per process and wrong per cause, and the sweep reds a file that
+    never created it. Pin the loader's cache off for the test process rather
+    than admitting the directory's name, and keep a planted sibling red to prove
+    it. Guard: planned, not yet running; the hygiene test is
+    `tests/config/tmp-fixture-hygiene.test.ts` on
+    `fix/tmp-root-jiti-cache-4673`, off master. Instance and dates:
+    `HISTORY.md`.
+
 </important>
 
 <important if="session, turn or generation lifecycle">
