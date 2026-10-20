@@ -102,15 +102,19 @@ import { createRequire } from "node:module";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+	AgentSessionRuntime,
 	ModelRuntime,
 	SessionManager,
 	createAgentSessionFromServices,
 	createAgentSessionServices,
 } from "@earendil-works/pi-coding-agent";
-import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import type {
+	AgentSession,
+	AgentSessionServices,
+	CreateAgentSessionResult,
+	CreateAgentSessionRuntimeFactory,
+} from "@earendil-works/pi-coding-agent";
 import { afterAll, afterEach } from "vitest";
-import { deregisterInstance } from "../../clients/instance-registry.js";
-import { _resetSessionLifecycleForTests } from "../../clients/session-lifecycle.js";
 import { _settleRegistryMutationsForTests } from "../../clients/instance-registry-tail.js";
 import { flushAllNdjsonWriters } from "../../clients/ndjson-logger.js";
 import {
@@ -170,13 +174,30 @@ export type PiFauxReplyFactory = (
 /** A scripted provider reply: a message, or a function of the request it answers. */
 export type PiFauxReply = Record<string, unknown> | PiFauxReplyFactory;
 
-/** A start reason pi accepts on `session_start` (host `SessionStartEvent.reason`). */
-export type PiSessionStartReason =
-	| "startup"
-	| "reload"
-	| "new"
-	| "resume"
-	| "fork";
+/**
+ * A session replacement pi performs, named by the reason its events carry.
+ * Each one runs pi's OWN code for that reason (see `PiSession.restart`); the
+ * fields are the inputs pi's entry point takes, never a payload this helper
+ * shapes.
+ *
+ * - `new`: `AgentSessionRuntime.newSession()` — a new session id, an empty
+ *   conversation.
+ * - `resume`: `AgentSessionRuntime.switchSession(sessionFile)` — the target
+ *   file's session id and conversation.
+ * - `fork`: `AgentSessionRuntime.fork(entryId, { position })` — a new session
+ *   id whose conversation is branched from this one.
+ * - `reload`: `AgentSession.reload()` — the SAME session id and conversation;
+ *   the extension is loaded again in place.
+ */
+export type PiReplacement =
+	| { readonly reason: "new" }
+	| { readonly reason: "resume"; readonly sessionFile: string }
+	| {
+			readonly reason: "fork";
+			readonly entryId: string;
+			readonly position?: "before" | "at";
+	  }
+	| { readonly reason: "reload" };
 
 /** The provider half of the host's own `pi-ai` that this tier calls. */
 interface FauxProviderHandle {
@@ -402,14 +423,16 @@ export interface PiSession {
 	 */
 	resume(responses: readonly PiFauxReply[]): Promise<PiSession>;
 	/**
-	 * End this session and open the next one in the SAME project, the way pi's
-	 * own replacement does: the loaded copy's `session_shutdown` handler runs
-	 * with `reason`, then pi builds a fresh session (new session id, new
-	 * provider script) whose `session_start` carries `reason`. The previous
-	 * session file is named to the new start, as pi does for a replacement.
+	 * Replace this session the way pi does, in process, through pi's own entry
+	 * point for the reason (see {@link PiReplacement}). pi emits every event and
+	 * builds every payload: `session_shutdown` with its `targetSessionFile`, then
+	 * the next session's `session_start` with its `previousSessionFile`. Nothing
+	 * process-wide is reset, because pi resets nothing. `responses` scripts the
+	 * session that answers next. `new`, `resume` and `fork` return a NEW handle
+	 * and end this one; `reload` returns THIS handle, whose session pi kept.
 	 */
 	restart(
-		reason: PiSessionStartReason,
+		replacement: PiReplacement,
 		responses: readonly PiFauxReply[],
 	): Promise<PiSession>;
 	/** Settle the loaded copy, dispose the session, drain. Idempotent. */
@@ -460,29 +483,37 @@ function assertOneRoot(root: string): void {
 	pinnedRoot = root;
 }
 
-/** A model runtime whose only provider is the scripted one. */
+/**
+ * A model runtime whose only provider is the scripted one. `script` sets the
+ * replies the provider gives next; it is called again when pi keeps the
+ * session and a case scripts what follows (`restart({ reason: "reload" })`).
+ */
 async function buildModelRuntime(
 	agentDir: string,
-	responses: readonly PiFauxReply[],
 	requests: PiProviderRequest[],
-): Promise<{ modelRuntime: ModelRuntime; model: unknown }> {
+): Promise<{
+	modelRuntime: ModelRuntime;
+	model: unknown;
+	script(responses: readonly PiFauxReply[]): void;
+}> {
 	const faux = piAiModule().fauxProvider({ models: [FAUX_MODEL] });
 	// Every scripted step is wrapped so the request it answered is recorded
 	// before the reply is produced: `requests.length` is then the count of
 	// provider round trips pi actually made.
-	faux.setResponses(
-		responses.map(
-			(step): PiFauxReplyFactory =>
-				(context, options, state, model) => {
-					requests.push(
-						context.messages.map((message) => structuredClone(message)),
-					);
-					return typeof step === "function"
-						? step(context, options, state, model)
-						: structuredClone(step);
-				},
-		),
-	);
+	const script = (responses: readonly PiFauxReply[]): void =>
+		faux.setResponses(
+			responses.map(
+				(step): PiFauxReplyFactory =>
+					(context, options, state, model) => {
+						requests.push(
+							context.messages.map((message) => structuredClone(message)),
+						);
+						return typeof step === "function"
+							? step(context, options, state, model)
+							: structuredClone(step);
+					},
+			),
+		);
 	const modelRuntime = await ModelRuntime.create({
 		modelsPath: null,
 		refreshOnCreate: false,
@@ -491,40 +522,49 @@ async function buildModelRuntime(
 	modelRuntime.registerNativeProvider(faux.provider as never);
 	const model = modelRuntime.getModel("faux", FAUX_MODEL.id as string);
 	if (!model) throw new Error("the faux provider registered no model");
-	return { modelRuntime, model };
+	return { modelRuntime, model, script };
+}
+
+/** What every session of one file shares. */
+interface SessionArgs {
+	readonly root: string;
+	readonly flags: ReadonlyMap<string, boolean | string>;
+}
+
+/** One pi session before its extensions are bound, with its provider recorder. */
+interface CreatedSession {
+	readonly session: AgentSession;
+	readonly services: AgentSessionServices;
+	/** What pi's runtime factory hands back beside the session. */
+	readonly result: CreateAgentSessionResult;
+	readonly requests: PiProviderRequest[];
+	script(responses: readonly PiFauxReply[]): void;
 }
 
 /**
- * Build one session against the pinned environment. `sessionManager` decides
- * whether this is a new session (`SessionManager.create`) or a resume
- * (`SessionManager.open`).
+ * Build one session the way pi's runtime factory does: pi's services (its own
+ * extension loader over the built entry), the scripted model, then
+ * `createAgentSessionFromServices` with the session manager and start event
+ * the CALLER chose — `startPiSession`, `resume`, or pi's own
+ * `AgentSessionRuntime` for a replacement. Extensions are not bound here:
+ * binding emits `session_start`, and for a replacement pi does that itself
+ * (`rebindSession`, see `PiSession.restart`).
  */
-async function buildSession(args: {
-	root: string;
-	cwd: string;
-	agentDir: string;
-	sessionsDir: string;
-	responses: readonly PiFauxReply[];
-	flags: ReadonlyMap<string, boolean | string>;
-	sessionManager: () => SessionManager;
-	/**
-	 * The start event pi is told about. Absent means pi's default start (the
-	 * one `createAgentSessionFromServices` synthesises); a replacement passes
-	 * its own reason, exactly as the SDK caller in
-	 * `tests/index-3521-fork-tree-witness.test.ts` does.
-	 */
-	sessionStartEvent?: { type: "session_start"; reason: PiSessionStartReason };
-}): Promise<PiSession> {
+async function createSession(
+	args: SessionArgs,
+	options: Parameters<CreateAgentSessionRuntimeFactory>[0],
+	responses: readonly PiFauxReply[],
+): Promise<CreatedSession> {
 	const requests: PiProviderRequest[] = [];
-	const { modelRuntime, model } = await buildModelRuntime(
-		args.agentDir,
-		args.responses,
+	const { modelRuntime, model, script } = await buildModelRuntime(
+		options.agentDir,
 		requests,
 	);
+	script(responses);
 	const services = await withFixtureTmpdir(args.root, () =>
 		createAgentSessionServices({
-			cwd: args.cwd,
-			agentDir: args.agentDir,
+			cwd: options.cwd,
+			agentDir: options.agentDir,
 			modelRuntime,
 			extensionFlagValues: new Map(args.flags),
 			resourceLoaderOptions: {
@@ -538,38 +578,67 @@ async function buildSession(args: {
 			`pi failed to load ${EXTENSION_ENTRY}: ${JSON.stringify(loadErrors.map((entry) => String(entry.error)))}`,
 		);
 	}
-	const { session } = await createAgentSessionFromServices({
+	const result = await createAgentSessionFromServices({
 		services,
-		sessionManager: args.sessionManager(),
+		sessionManager: options.sessionManager,
 		model: model as never,
-		sessionStartEvent: args.sessionStartEvent as never,
+		sessionStartEvent: options.sessionStartEvent,
 	});
-	const errors: unknown[] = [];
+	return { session: result.session, services, result, requests, script };
+}
+
+/** Bind the loaded copy to a session: pi emits that session's `session_start`. */
+async function bindTo(session: AgentSession, errors: unknown[]): Promise<void> {
 	await session.bindExtensions({
 		onError: (error: unknown) => errors.push(error),
 	});
+}
+
+/**
+ * The replacement pi performs for one reason, through pi's OWN entry point:
+ * pi builds the next session manager, tears this session down (`abort`,
+ * `session_shutdown` with `targetSessionFile`, `dispose`), then creates and
+ * binds the next one (`session_start` with `previousSessionFile`). A reason
+ * with no entry point here throws BEFORE pi tears anything down: a replacement
+ * this helper cannot run faithfully is refused, never approximated.
+ */
+function replaceThrough(
+	runtime: AgentSessionRuntime,
+	replacement: Exclude<PiReplacement, { reason: "reload" }>,
+): Promise<{ cancelled: boolean }> {
+	switch (replacement.reason) {
+		case "new":
+			return runtime.newSession();
+		case "resume":
+			return runtime.switchSession(replacement.sessionFile);
+		case "fork":
+			return runtime.fork(replacement.entryId, {
+				position: replacement.position,
+			});
+		default:
+			throw new Error(
+				`pi-session: no faithful replacement for reason ${JSON.stringify((replacement as { reason?: unknown }).reason)}; add pi's own entry point for it, never a synthesised event`,
+			);
+	}
+}
+
+/** The handle over one bound session; registered for `afterEach` at once. */
+function handleFor(
+	args: SessionArgs,
+	created: CreatedSession,
+	errors: unknown[],
+): PiSession {
+	const { session } = created;
 	let disposed = false;
 	/**
-	 * Emit `session_shutdown` (pi AWAITS every handler, so this runs the loaded
-	 * copy's own handler), dispose the session and settle every sink. Splitting
-	 * the reason out lets a replacement boundary carry its own reason instead of
-	 * `quit`; `dispose()` below is the quit-shaped call.
+	 * Settle every sink after the session ended. It runs whether the loaded
+	 * copy's `session_shutdown` came from `dispose()` or from pi's own teardown
+	 * in a replacement.
 	 */
-	const settle = async (shutdownReason: string): Promise<void> => {
-		if (disposed) return;
-		disposed = true;
-		// pi awaits every handler it emits, so this runs the LOADED copy's own
-		// `session_shutdown` handler: its primary release, its registry
-		// deregistration, and its writer drain (the handler returns
-		// `bounded(flushAllNdjsonWriters(), …)`).
-		await session.extensionRunner.emit({
-			type: "session_shutdown",
-			reason: shutdownReason,
-		} as never);
-		session.dispose();
+	const drain = async (): Promise<void> => {
 		// The same process-global writer map the loaded copy registered into:
 		// a second, test-side settle of the same sinks. It writes the same
-		// rows whether or not the emit above ran, so it is a belt, never the
+		// rows whether or not the shutdown emit ran, so it is a belt, never the
 		// proof that the handler did (a case that proves the emit asserts a
 		// handler effect, not a log row).
 		await flushAllNdjsonWriters();
@@ -594,8 +663,8 @@ async function buildSession(args: {
 	};
 	const handle: PiSession = {
 		session,
-		cwd: args.cwd,
-		requests,
+		cwd: created.services.cwd,
+		requests: created.requests,
 		errors,
 		sessionFile: () => session.sessionManager.getSessionFile(),
 		async prompt(text) {
@@ -604,36 +673,50 @@ async function buildSession(args: {
 		async compact(instructions) {
 			return session.compact(instructions);
 		},
-		async restart(reason, responses) {
-			const previousSessionFile = session.sessionManager.getSessionFile();
-			await settle(reason);
-			// The shutdown handler releases the session's own root holder, but this
-			// PROCESS's registry entry stays for the reaper to prune — measured: the
-			// next start was classified `concurrent-secondary` (`count=1,
-			// sameRoot=undefined`) and skipped its full start, so the replacement
-			// observed a shared activation instead of its own. A real restart is a
-			// new process with no entry, so the test-owned entry is dropped here,
-			// the same seam `tests/index-2992-integration.test.ts` uses (#2912).
-			await _settleRegistryMutationsForTests();
-			deregisterInstance();
-			// A real restart is a NEW PROCESS: none of the previous activation's
-			// process-lifetime lifecycle state exists, so the next start is a
-			// primary rather than a second activation of a still-registered one.
-			// Released here through the documented test seam (the same one
-			// `tests/index-3521-fork-tree-witness.test.ts` uses between runtimes);
-			// without it the replacement's start is declined as
-			// `concurrent-secondary` and would inherit state a restart destroys.
-			_resetSessionLifecycleForTests();
-			return buildSession({
-				...args,
-				responses,
-				sessionManager: () => SessionManager.create(args.cwd, args.sessionsDir),
-				sessionStartEvent: {
-					type: "session_start",
-					reason,
-					...(previousSessionFile === undefined ? {} : { previousSessionFile }),
+		async restart(replacement, responses) {
+			// A replaced handle's session is gone; restarting it again would build
+			// a session beside the live replacement and take its identity
+			// (#4692 L2).
+			if (disposed)
+				throw new Error(
+					"pi-session: restart() on a session that already ended; restart the handle the previous restart() returned",
+				);
+			if (replacement.reason === "reload") {
+				// pi's own reload keeps this AgentSession, its manager and its
+				// session id; it re-runs the extension factories and emits
+				// `session_shutdown`/`session_start` with reason `reload` itself.
+				created.script(responses);
+				await session.reload();
+				return handle;
+			}
+			const replacementErrors: unknown[] = [];
+			let next: CreatedSession | undefined;
+			const runtime = new AgentSessionRuntime(
+				session,
+				created.services,
+				async (options) => {
+					next = await createSession(args, options, responses);
+					return { ...next.result, services: next.services, diagnostics: [] };
 				},
+			);
+			runtime.setRebindSession((replaced) =>
+				bindTo(replaced, replacementErrors),
+			);
+			// pi calls this after the shutdown handlers ran and before it disposes
+			// the session, so from here on this handle owns no live session and
+			// must not emit a second shutdown. A refusal before the teardown (an
+			// unknown reason, a missing file) leaves the session live, and
+			// `afterEach` still disposes it.
+			runtime.setBeforeSessionInvalidate(() => {
+				disposed = true;
 			});
+			const { cancelled } = await replaceThrough(runtime, replacement);
+			await drain();
+			if (cancelled || next === undefined)
+				throw new Error(
+					`pi-session: pi did not complete the ${replacement.reason} replacement`,
+				);
+			return handleFor(args, next, replacementErrors);
 		},
 		async resume(responses) {
 			const file = session.sessionManager.getSessionFile();
@@ -642,14 +725,32 @@ async function buildSession(args: {
 					`pi-session: nothing to resume — the session wrote no file under ${args.root}/sessions`,
 				);
 			await handle.dispose();
-			return buildSession({
-				...args,
-				responses,
-				sessionManager: () => SessionManager.open(file, path.dirname(file)),
-			});
+			return bindSession(
+				args,
+				await createSession(
+					args,
+					{
+						cwd: created.services.cwd,
+						agentDir: created.services.agentDir,
+						sessionManager: SessionManager.open(file, path.dirname(file)),
+					},
+					responses,
+				),
+			);
 		},
 		async dispose() {
-			await settle("quit");
+			if (disposed) return;
+			disposed = true;
+			// pi awaits every handler it emits, so this runs the LOADED copy's
+			// own `session_shutdown` handler: its primary release, its registry
+			// deregistration, and its writer drain (the handler returns
+			// `bounded(flushAllNdjsonWriters(), …)`).
+			await session.extensionRunner.emit({
+				type: "session_shutdown",
+				reason: "quit",
+			} as never);
+			session.dispose();
+			await drain();
 		},
 	};
 	// Registered the moment the session exists, BEFORE any assertion the case
@@ -657,6 +758,16 @@ async function buildSession(args: {
 	// cannot leave a primary session behind for the next one (#4664 M2).
 	liveHandles.push(handle);
 	return handle;
+}
+
+/** Bind a created session and return its handle. */
+async function bindSession(
+	args: SessionArgs,
+	created: CreatedSession,
+): Promise<PiSession> {
+	const errors: unknown[] = [];
+	await bindTo(created.session, errors);
+	return handleFor(args, created, errors);
 }
 
 /**
@@ -692,15 +803,22 @@ export async function startPiSession(
 	// start branch — the skipped work and the `mode: "quick"` row — still runs.
 	if (startupMode === "quick") process.env.PI_LENS_COLD_START_QUICK = "0";
 	else delete process.env.PI_LENS_COLD_START_QUICK;
-	return buildSession({
+	const args: SessionArgs = {
 		root: options.root,
-		cwd,
-		agentDir,
-		sessionsDir,
-		responses: options.responses,
 		flags: options.flags ?? new Map(DEFAULT_FLAGS),
-		sessionManager: () => SessionManager.create(cwd, sessionsDir),
-	});
+	};
+	return bindSession(
+		args,
+		await createSession(
+			args,
+			{
+				cwd,
+				agentDir,
+				sessionManager: SessionManager.create(cwd, sessionsDir),
+			},
+			options.responses,
+		),
+	);
 }
 
 /**

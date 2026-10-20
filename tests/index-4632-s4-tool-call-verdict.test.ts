@@ -18,10 +18,12 @@
  * 2. The inline half of #3814's session-boundary cells
  *    (`tests/index-3814-deferred-blocker-gate.test.ts`): a record written in
  *    one session must answer a commit in the NEXT session as a refusal, never
- *    as allowed. Here the second session is pi's own replacement — a new
- *    session id, pi's own `session_start` — instead of a re-emitted event on
- *    one process-lifetime activation, which is why the old cells could pass on
- *    an in-memory latch alone.
+ *    as allowed. Here the next session comes from pi's own replacement code
+ *    for each reason (`PiSession.restart`), so the shutdown and start events,
+ *    their payloads, the session id and the conversation are pi's — not a
+ *    re-emitted event on one process-lifetime activation, which is how the old
+ *    cells answered `session_mismatch` for `reload` too, a reason that keeps
+ *    the session id.
  *
  * What stays on the double, and why: #3814's deferred half. A deferred runner
  * is a LATENCY classification (`clients/dispatch/collect-later-tier.ts`), so
@@ -75,9 +77,12 @@ const GUARDED_FLAGS: ReadonlyArray<[string, boolean]> = [
 ];
 
 /**
- * The blocker, and its fix. `debugger;` is blocked by two bundled rules at
- * once (ast-grep's `debugger-statement` and `lint/suspicious/noDebugger`), so
- * the STOP text carries two findings with no external binary involved.
+ * The blocker, and its fix. `debugger;` always raises the bundled tree-sitter
+ * rule `debugger-statement` (`rules/tree-sitter-queries/typescript/debugger.yml`,
+ * `inline_tier: blocking`), and in SOME runs biome's `noDebugger` too —
+ * measured both ways on one host (`🔴 1 blocking` from `lens_diagnostics`, and
+ * a gate answer listing `2 issue(s)`). The cases that use it assert a refusal
+ * and its first blocker, which hold either way.
  */
 const BLOCKING_FILE =
 	"const a = 1;\nexport function f() {\n\tdebugger;\n\treturn a;\n}\n";
@@ -85,12 +90,36 @@ const CLEAN_FILE = "const a = 1;\nexport function f() {\n\treturn a;\n}\n";
 
 /** The commit gate's own prefix, as the model reads it. */
 const GATE_BLOCK = "🔴 COMMIT BLOCKED (--lens-guard)";
+/** The latch's own answer: the live session still holds the blocker. */
+const LATCH_BLOCK = "unresolved blockers must be fixed before commit/push";
+/**
+ * The blocker the marked cases triage. A mark must name EVERY blocker on the
+ * file, so these cases need a finding exactly one runner reports: the bundled
+ * tree-sitter rule `ts-weak-hash` has no biome, oxlint or ast-grep twin for
+ * TypeScript, unlike `debugger;` above. Its identity is the one
+ * `lens_diagnostics` reports (`[ts-weak-hash]` at L3) and the runner stamps
+ * (`clients/dispatch/runners/tree-sitter.ts`, `tool: "tree-sitter"`).
+ */
+const MARKED_FILE =
+	'import * as crypto from "node:crypto";\nexport function digest(text: string): string {\n\treturn crypto.createHash("md5").update(text).digest("hex");\n}\n';
+const BLOCKER = {
+	line: 3,
+	message:
+		"Weak hash primitive selected (md5/sha1) — use sha256+ for security-sensitive contexts",
+	rule: "ts-weak-hash",
+	tool: "tree-sitter",
+} as const;
 /** Printed by the shell only when the guarded command actually ran. */
 const RAN_MARKER = "PI-LENS-GUARDED-COMMAND-RAN";
 
 const GOLDEN = path.join(
 	import.meta.dirname,
 	"fixtures/witness/git-guard-latch/tool-call-verdict.txt",
+);
+/** #3282's witness: a marked blocker, then the commits it no longer gates. */
+const MARKED_GOLDEN = path.join(
+	import.meta.dirname,
+	"fixtures/witness/git-guard-latch/all-marked-commit-allowed.txt",
 );
 
 /** The commit attempt: the guarded verb, then a marker the shell prints. */
@@ -106,6 +135,25 @@ function readTarget(target: string): Record<string, unknown> {
 
 function writeTarget(target: string, content: string): Record<string, unknown> {
 	return fauxToolCall("write", { path: target, content });
+}
+
+/**
+ * The model's own triage: `lens_diagnostic_mark` with the blocker's reported
+ * identity, the call `tools/lens-diagnostic-mark.ts` documents.
+ */
+function markFalsePositive(target: string): Record<string, unknown> {
+	return fauxToolCall("lens_diagnostic_mark", {
+		filePath: target,
+		...BLOCKER,
+		disposition: "false-positive",
+	});
+}
+
+/** `lens_diagnostic_mark` is situational: callable only after activation. */
+function activateMarkTool(): Record<string, unknown> {
+	return fauxToolCall("pi_lens_activate_tools", {
+		tools: ["lens_diagnostic_mark"],
+	});
 }
 
 function editTarget(
@@ -158,18 +206,34 @@ function received(message: PiMessage): Received {
 	};
 }
 
+/** Every result of one tool in one transcript, in order. */
+function toolResults(
+	transcript: readonly PiMessage[],
+	toolName: string,
+): Received[] {
+	return transcript
+		.filter(
+			(message) =>
+				message.role === "toolResult" && message.toolName === toolName,
+		)
+		.map(received);
+}
+
 /**
  * Every `bash` tool result the model received, in order. Read from the LAST
  * transcript only: each provider request carries the whole conversation, so
  * folding every request would count one result once per later round trip.
  */
 function bashResults(requests: readonly (readonly PiMessage[])[]): Received[] {
-	const transcript = requests.at(-1) ?? [];
-	return transcript
-		.filter(
-			(message) => message.role === "toolResult" && message.toolName === "bash",
-		)
-		.map(received);
+	return toolResults(requests.at(-1) ?? [], "bash");
+}
+
+/** A refused commit: the gate's prefix and `answer`, an error, never run. */
+function expectRefused(verdict: Received | undefined, answer: string): void {
+	expect(verdict?.text).toContain(GATE_BLOCK);
+	expect(verdict?.text).toContain(answer);
+	expect(verdict?.text).not.toContain(RAN_MARKER);
+	expect(verdict?.isError).toBe(true);
 }
 
 /** The first `L<n>: …` blocker line in a rendered finding block. */
@@ -196,6 +260,23 @@ function injections(transcript: readonly PiMessage[]): string[] {
 		.filter((text) => text.startsWith(INJECTION_PREFIX));
 }
 
+/**
+ * The injections one request carried from a prompt on: the prompt's own
+ * message (pi merges a `context` block beside its text) and every user
+ * message after it. Prompt texts are unique per case, so the prompt names its
+ * turn.
+ */
+function readDuring(
+	transcript: readonly PiMessage[],
+	promptText: string,
+): string[] {
+	const at = transcript.findIndex(
+		(message) =>
+			message.role === "user" && textBlocks(message)[0] === promptText,
+	);
+	return injections(at === -1 ? [] : transcript.slice(at));
+}
+
 /** The last injection the model read in one transcript. */
 function lastInjection(transcript: readonly PiMessage[]): string {
 	return injections(transcript).at(-1) ?? "(nothing injected)";
@@ -208,6 +289,37 @@ function seed(name: string, content: string): { proj: string; target: string } {
 	fs.mkdirSync(path.dirname(target), { recursive: true });
 	fs.writeFileSync(target, content);
 	return { proj, target };
+}
+
+/** Raise a blocker, and let the turn end record it. */
+function raise(target: string, content = BLOCKING_FILE): PiFauxReply[] {
+	return [
+		step(readTarget(target), "reading"),
+		step(writeTarget(target, content), "writing"),
+		endTurn("turn 1 done"),
+	];
+}
+
+/** The next session's script: one commit attempt. */
+function commitThenEnd(): PiFauxReply[] {
+	return [step(commitAttempt(), "committing"), endTurn("done")];
+}
+
+/**
+ * Turns 1 and 2 of the marked family: raise the blocker, then mark it
+ * false-positive the way a model does (activate the tool, call it). pi ends a
+ * turn after every reply, and a turn that wrote no file returns before the
+ * turn-end policy pass that re-judges a mark (the `files.length === 0` return
+ * in `clients/runtime-turn.ts`), so the latch is re-judged by the NEXT turn
+ * that writes. The cases therefore write a file after the mark.
+ */
+function raiseThenMark(target: string): PiFauxReply[] {
+	return [
+		...raise(target, MARKED_FILE),
+		step(activateMarkTool(), "activating the mark tool"),
+		step(markFalsePositive(target), "marking"),
+		endTurn("turn 2 done"),
+	];
 }
 
 async function open(
@@ -260,10 +372,8 @@ describe("#4632 s4: a blocked tool_call reaches the model (git guard)", () => {
 
 		// The witness artifact: what the model was shown at turn end, and what the
 		// gate answered a moment later. It records FACTS drawn from both texts
-		// rather than the texts themselves: which bundled rules fire depends on
-		// the tools installed (`debugger;` is caught by the ast-grep rule alone
-		// where the code-quality runner is unavailable), so a raw golden would
-		// pin the runner set instead of the verdict.
+		// rather than the texts themselves: the texts also carry fixture paths
+		// and fix hints, so a raw golden would pin those instead of the verdict.
 		const facts = (label: string, text: string) =>
 			[
 				`--- ${label} ---`,
@@ -305,94 +415,202 @@ describe("#4632 s4: a blocked tool_call reaches the model (git guard)", () => {
 		expect(handle.errors).toEqual([]);
 	});
 
-	it("does not allow the commit after an external change to the recorded bytes", async () => {
-		const { proj, target } = seed("gate-external", CLEAN_FILE);
+	it("lets the commit through once the blocker is marked false-positive, and a later write keeps it clear", async () => {
+		// #3282's witness, through the host: the model marks the blocker with its
+		// own tool call, the next turn that writes re-judges the record, and the
+		// banner and the gate then agree that nothing blocks. A second write to
+		// the unrelated file must not bring the marked blocker back.
+		const { proj, target } = seed("gate-marked", CLEAN_FILE);
+		const notes = path.join(proj, "src", "notes.ts");
+		const prompts = [
+			"write the file",
+			"mark the blocker",
+			"write the notes and commit",
+			"edit the notes and commit again",
+		];
 		const handle = await open(proj, [
-			step(readTarget(target), "reading"),
-			step(writeTarget(target, BLOCKING_FILE), "writing"),
-			endTurn("turn 1 done"),
+			...raiseThenMark(target),
+			step(writeTarget(notes, "export const note = 1;\n"), "writing notes"),
 			step(commitAttempt(), "committing"),
-			endTurn("turn 2 done"),
+			endTurn("turn 3 done"),
+			step(editTarget(notes, "note = 1", "note = 2"), "editing notes"),
+			step(commitAttempt(), "committing again"),
+			endTurn("turn 4 done"),
 		]);
+		// The request index each prompt starts at: an injection rides only the
+		// request pi built it for, so a turn's banner is read from that turn's
+		// own requests, never from the final transcript.
+		const starts: number[] = [];
+		for (const text of prompts) {
+			starts.push(handle.requests.length);
+			await handle.prompt(text);
+		}
+		starts.push(handle.requests.length);
 
+		const [marked] = toolResults(
+			handle.requests.at(-1) ?? [],
+			"lens_diagnostic_mark",
+		);
+		const commits = bashResults(handle.requests);
+		expect(commits).toHaveLength(2);
+		const shown = (turn: number) =>
+			handle.requests
+				.slice(starts[turn], starts[turn + 1])
+				.some((transcript) =>
+					readDuring(transcript, prompts[turn]).some((block) =>
+						block.includes(BLOCKER.message),
+					),
+				);
+		const actual = `${[
+			"=== turn 1: the blocker raised ===",
+			`the model was shown the blocker: ${shown(0)}`,
+			"",
+			"=== turn 2: the model marks it false-positive ===",
+			`the mark's tool result: ${(marked?.text ?? "(none)").split("\n")[0]}`,
+			"",
+			"=== turn 3: another file written, then the commit ===",
+			`the model was shown the blocker: ${shown(2)}`,
+			`names the gate's prefix: ${commits[0].text.includes(GATE_BLOCK)}`,
+			`the command ran: ${commits[0].text.includes(RAN_MARKER)}`,
+			"",
+			"=== turn 4: the other file edited again, then the commit ===",
+			`the model was shown the blocker: ${shown(3)}`,
+			`names the gate's prefix: ${commits[1].text.includes(GATE_BLOCK)}`,
+			`the command ran: ${commits[1].text.includes(RAN_MARKER)}`,
+		].join("\n")}\n`;
+		if (process.env.PI_LENS_WITNESS_UPDATE === "1") {
+			fs.mkdirSync(path.dirname(MARKED_GOLDEN), { recursive: true });
+			fs.writeFileSync(MARKED_GOLDEN, actual);
+		}
+		expect(actual).toBe(fs.readFileSync(MARKED_GOLDEN, "utf8"));
+
+		// The golden's facts, stated: the mark took, and both commits ran.
+		expect(marked?.isError).toBe(false);
+		for (const commit of commits) {
+			expect(commit.text).not.toContain(GATE_BLOCK);
+			expect(commit.text).toContain(RAN_MARKER);
+		}
+		expect(handle.errors).toEqual([]);
+	});
+
+	it("does not allow the commit after an external change to a marked file", async () => {
+		// GG-3283-01 through the host. The blocker is MARKED and the latch is
+		// clear, so the only branch left that can refuse is the stale-bytes
+		// check (`firstExpiredSuppressionVerdict`): the mark's verdict spoke for
+		// the bytes the turn end read, and an external writer moved them without
+		// a dispatch.
+		const { proj, target } = seed("gate-external", CLEAN_FILE);
+		const notes = path.join(proj, "src", "notes.ts");
+		const handle = await open(proj, [
+			...raiseThenMark(target),
+			step(writeTarget(notes, "export const note = 1;\n"), "writing notes"),
+			endTurn("turn 3 done"),
+			step(commitAttempt(), "committing"),
+			endTurn("turn 4 done"),
+		]);
 		await handle.prompt("write the file");
+		await handle.prompt("mark the blocker");
+		await handle.prompt("write the notes");
 		// A formatter, a checkout or an editor wrote the file: no dispatch ran,
-		// so nothing re-analysed these bytes, and the record still describes the
-		// bytes before them.
-		fs.writeFileSync(target, `${BLOCKING_FILE}// external writer\n`);
+		// so nothing re-analysed these bytes.
+		fs.writeFileSync(target, `${MARKED_FILE}// external writer\n`);
 		await handle.prompt("commit it");
 
-		const [verdict] = bashResults(handle.requests);
-		expect(verdict.text).toContain(GATE_BLOCK);
-		expect(verdict.isError).toBe(true);
-		expect(verdict.text).not.toContain(RAN_MARKER);
+		const verdict = bashResults(handle.requests).at(-1);
+		expectRefused(verdict, "inline_policy_stale");
 		expect(handle.errors).toEqual([]);
 	});
 });
 
 describe("#4632 s4: a record written in one session answers the next one", () => {
-	for (const reason of ["new", "resume", "fork", "reload"] as const) {
-		for (const order of ["gate-first", "turn-end-first"] as const) {
-			it(`refuses the commit of a ${reason} replacement (${order})`, async () => {
-				const name = `replace-${reason}-${order}`;
-				const { proj, target } = seed(name, CLEAN_FILE);
-				const first = await open(proj, [
-					step(readTarget(target), "reading"),
-					step(writeTarget(target, BLOCKING_FILE), "writing"),
-					// `gate-first` asks the gate in the same turn as the write;
-					// `turn-end-first` lets the turn end record the blocker first.
-					...(order === "gate-first"
-						? [step(commitAttempt(), "committing")]
-						: []),
-					endTurn("turn 1 done"),
-				]);
+	// One order per reason. Round 1 also ran each reason with the commit in the
+	// SAME turn as the write ("gate-first"); the inline record is written at
+	// `tool_result` in both orders, every reason answered the same way in both,
+	// and no mutation told the two apart, so those cells were duplicates.
 
-				await first.prompt("write the file");
-				const turnOneBanner = lastInjection(first.requests.at(-1) ?? []);
-				if (order === "gate-first") {
-					// The control: in the session that raised the blocker, the gate
-					// answers on the blocker itself.
-					const [here] = bashResults(first.requests);
-					expect(here.text).toContain(GATE_BLOCK);
-					expect(here.text).toContain("Debugger statement");
-					expect(here.isError).toBe(true);
-					expect(here.text).not.toContain(RAN_MARKER);
-				}
+	it("refuses the commit of a new session, which starts empty, as a session_mismatch", async () => {
+		const { proj, target } = seed("replace-new", CLEAN_FILE);
+		const first = await open(proj, raise(target));
+		await first.prompt("write the file");
+		const firstId = first.session.sessionManager.getSessionId();
 
-				const second = await first.restart(reason, [
-					step(commitAttempt(), "committing again"),
-					endTurn("done"),
-				]);
-				await second.prompt("commit it");
+		const second = await first.restart({ reason: "new" }, commitThenEnd());
+		await second.prompt("commit it");
 
-				const [verdict] = bashResults(second.requests);
-				// The gate refused the commit in a conversation that did not record
-				// the blocker: `session_mismatch` for the record is one answer, and a
-				// restored pending blocker is the other. MEASURED, not assumed: at
-				// this head both orders answer with the blocker a restored record
-				// still owes, so the assertion is the refusal that must hold either
-				// way — never "allowed", and never executed.
-				expect(verdict.text).toContain(GATE_BLOCK);
-				// The RECORD's own refusal, not the live latch's: a replacement whose
-				// start ran in full has no in-memory blockers, so the answer can only
-				// come from re-judging the previous session's record — the session id
-				// that wrote it, or the record's provenance when it names none.
-				expect(verdict.text).toMatch(
-					/session_mismatch|blocking_provenance_untrusted/,
-				);
-				// The tool never ran: the marker the shell would print is absent,
-				// and pi marked the call an error.
-				expect(verdict.text).not.toContain(RAN_MARKER);
-				expect(verdict.isError).toBe(true);
-				expect(second.errors).toEqual([]);
-				if (order === "turn-end-first") {
-					// The surface the agent was shown at turn end named the blocker, and
-					// the conversation that did not record it is refused: the two
-					// surfaces agree that this commit must not proceed.
-					expect(turnOneBanner).toContain("Unresolved from this turn");
-					expect(turnOneBanner).toContain("Debugger statement");
-				}
-			});
-		}
-	}
+		// pi's `newSession`: a new id and an empty conversation.
+		expect(second.session.sessionManager.getSessionId()).not.toBe(firstId);
+		expect(second.requests[0]?.map((message) => message.role)).toEqual([
+			"system",
+			"user",
+		]);
+		// The record names the session that wrote it, and that is not this one.
+		expectRefused(bashResults(second.requests).at(-1), "session_mismatch");
+		expect(second.errors).toEqual([]);
+	});
+
+	it("refuses the commit of a resumed earlier conversation as a session_mismatch", async () => {
+		const { proj, target } = seed("replace-resume", CLEAN_FILE);
+		const earlier = await open(proj, [endTurn("hello")]);
+		await earlier.prompt("an earlier conversation");
+		const earlierFile = earlier.sessionFile() ?? "";
+		const earlierId = earlier.session.sessionManager.getSessionId();
+		const first = await earlier.restart({ reason: "new" }, raise(target));
+		await first.prompt("write the file");
+
+		const second = await first.restart(
+			{ reason: "resume", sessionFile: earlierFile },
+			commitThenEnd(),
+		);
+		await second.prompt("commit it");
+
+		// pi's `switchSession`: the earlier file's id and its conversation.
+		expect(second.session.sessionManager.getSessionId()).toBe(earlierId);
+		expect(textBlocks(second.requests[0]?.[1])[0]).toBe(
+			"an earlier conversation",
+		);
+		expectRefused(bashResults(second.requests).at(-1), "session_mismatch");
+		expect(second.errors).toEqual([]);
+	});
+
+	it("refuses the commit of a fork that carries the blocker's turn as a session_mismatch", async () => {
+		const { proj, target } = seed("replace-fork", CLEAN_FILE);
+		const first = await open(proj, raise(target));
+		await first.prompt("write the file");
+		const firstId = first.session.sessionManager.getSessionId();
+		const leaf = first.session.sessionManager.getLeafId() ?? "";
+
+		const second = await first.restart(
+			{ reason: "fork", entryId: leaf, position: "at" },
+			commitThenEnd(),
+		);
+		await second.prompt("commit it");
+
+		// pi's `fork` at the leaf: a new id over a branched copy of the
+		// conversation, which still holds the write that raised the blocker.
+		expect(second.session.sessionManager.getSessionId()).not.toBe(firstId);
+		const [write] = toolResults(second.requests[0] ?? [], "write");
+		expect(write?.text).toContain("Debugger statement");
+		expectRefused(bashResults(second.requests).at(-1), "session_mismatch");
+		expect(second.errors).toEqual([]);
+	});
+
+	it("refuses the commit after a reload from the blocker the reload handed on", async () => {
+		const { proj, target } = seed("replace-reload", CLEAN_FILE);
+		const first = await open(proj, raise(target));
+		await first.prompt("write the file");
+		const firstId = first.session.sessionManager.getSessionId();
+
+		const second = await first.restart({ reason: "reload" }, commitThenEnd());
+		await second.prompt("commit it");
+
+		// pi's `reload`: the same session and id. The record's session matches,
+		// and the answer is the latch's: the reloaded copy holds the blocker the
+		// departing one handed on (#3612), not a record from another session.
+		expect(second).toBe(first);
+		expect(second.session.sessionManager.getSessionId()).toBe(firstId);
+		const verdict = bashResults(second.requests).at(-1);
+		expectRefused(verdict, LATCH_BLOCK);
+		expect(verdict?.text).not.toContain("session_mismatch");
+		expect(second.errors).toEqual([]);
+	});
 });

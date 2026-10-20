@@ -215,7 +215,7 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 		const firstFile = first.sessionFile();
 		expect(getActiveSessionId()).toBe(firstId);
 
-		const second = await first.restart("new", [
+		const second = await first.restart({ reason: "new" }, [
 			fauxAssistantMessage(fauxText("second answer")),
 		]);
 		const secondId = second.session.sessionManager.getSessionId();
@@ -238,13 +238,15 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 		expect(fs.readFileSync(firstFile ?? "", "utf8")).toContain("first answer");
 	});
 
-	it("starts the replacement as a primary, from the state a real restart leaves", async () => {
-		// The restart releases what a real restart destroys: the previous
-		// activation's process-lifetime lifecycle state and this process's
-		// instance-registry entry. Without that, pi-lens's own #473 classifier
-		// declines the replacement's start as `concurrent-secondary` and the
-		// replacement would inherit state a restart cannot — measured before the
-		// release was added: `count=1, sameRoot=undefined`, full start skipped.
+	it("starts the replacement as a primary once the old session's shutdown named it", async () => {
+		// pi's own teardown runs the old session's `session_shutdown` handler
+		// with `targetSessionFile`, which leaves the primary slot pending for
+		// that successor; the next start claims it. Nothing process-wide is
+		// reset, because pi resets nothing (round 1 did, to make up for a
+		// shutdown event without `targetSessionFile`: #4692 H2). This is also
+		// the witness that the shutdown RAN: without it the old primary stays a
+		// live member, and pi-lens's #473 classifier declines the next start as
+		// a `concurrent-secondary`, so the active id stays the old one.
 		const first = await startPiSession({
 			root: fixture.root,
 			cwd: path.join(fixture.root, "replace-primary", "proj"),
@@ -253,7 +255,7 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 		await first.prompt("hello");
 		const firstId = first.session.sessionManager.getSessionId();
 
-		const second = await first.restart("reload", [
+		const second = await first.restart({ reason: "new" }, [
 			fauxAssistantMessage(fauxText("two")),
 		]);
 		await second.prompt("hello again");
@@ -266,6 +268,34 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 			path.join(fixture.root, "replace-primary", "proj"),
 		);
 		expect(second.errors).toEqual([]);
+	});
+
+	it("refuses a replacement it cannot run through pi, and a restart of a handle already replaced", async () => {
+		const first = await startPiSession({
+			root: fixture.root,
+			cwd: path.join(fixture.root, "replace-refused", "proj"),
+			responses: [fauxAssistantMessage(fauxText("one"))],
+		});
+		await first.prompt("hello");
+		const firstId = first.session.sessionManager.getSessionId();
+
+		// A reason with no pi entry point here fails closed BEFORE pi tears the
+		// session down: no synthesised event, and the session stays live.
+		await expect(
+			first.restart({ reason: "quit" } as never, []),
+		).rejects.toThrow("no faithful replacement");
+		expect(getActiveSessionId()).toBe(firstId);
+
+		// A replaced handle cannot be restarted again: that would build a third
+		// session beside the live replacement and take its identity (#4692 L2).
+		const second = await first.restart({ reason: "new" }, [
+			fauxAssistantMessage(fauxText("two")),
+		]);
+		const secondId = second.session.sessionManager.getSessionId();
+		await expect(first.restart({ reason: "new" }, [])).rejects.toThrow(
+			"already ended",
+		);
+		expect(getActiveSessionId()).toBe(secondId);
 	});
 
 	it("refuses a second fixture root in one file", async () => {

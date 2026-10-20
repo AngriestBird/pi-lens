@@ -1,0 +1,15 @@
+=== turn 1: the blocker raised ===
+the model was shown the blocker: true
+
+=== turn 2: the model marks it false-positive ===
+the mark's tool result: src/target.ts:3 marked false-positive.
+
+=== turn 3: another file written, then the commit ===
+the model was shown the blocker: false
+names the gate's prefix: false
+the command ran: true
+
+=== turn 4: the other file edited again, then the commit ===
+the model was shown the blocker: false
+names the gate's prefix: false
+the command ran: true

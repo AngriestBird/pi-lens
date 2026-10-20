@@ -1225,6 +1225,7 @@
 		"tests/index-3917-orphan-sweep-scope.test.ts": 0.06,
 		"tests/index-4483-first-write-seed-witness.test.ts": 6.58,
 		"tests/index-4484-unfixed-blocker-witness.test.ts": 32.98,
+		"tests/index-4632-s4-tool-call-verdict.test.ts": 9.6,
 		"tests/index-cascade-resolved-clean-wiring.test.ts": 1.6,
 		"tests/index-config-resolved-session-wiring.test.ts": 0.32,
 		"tests/index-drain-refresh-straddle.test.ts": 0.08,
@@ -1508,7 +1509,6 @@
 		"tests/tools/scan-progress.test.ts": 0.01,
 		"tests/tools/symbol-search.test.ts": 0.38,
 		"tests/tools/tool-contract-pins.test.ts": 0.01,
-		"tests/typescript-runtime-free.test.ts": 0.08,
-		"tests/index-4632-s4-tool-call-verdict.test.ts": 9.6
+		"tests/typescript-runtime-free.test.ts": 0.08
 	}
 }

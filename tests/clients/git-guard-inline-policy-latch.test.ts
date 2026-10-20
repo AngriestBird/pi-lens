@@ -19,7 +19,7 @@
  * decides, from one state. `editDispatch` below is the exact call sequence
  * `handleToolResult` makes (`clients/runtime-tool-result.ts:2526-2549`); the
  * pi host entry that calls it for real is witnessed by
- * `tests/index-3248-git-guard-latch-witness.test.ts`.
+ * `tests/index-4632-s4-tool-call-verdict.test.ts` (tier 2, the real pi session).
  */
 
 import { createHash } from "node:crypto";
