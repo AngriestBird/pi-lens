@@ -2068,6 +2068,30 @@ describe("ClientRegistry.spawnClient success and shutdown guards (#4449)", () =>
 		vi.setSystemTime(T0);
 	});
 
+	// #4532 round 5 (review F6, shape 6): the install look's epoch was the
+	// post-initialize stamp, so an install that landed while the server was
+	// starting (it reads the tree from its spawn on) read as older than the
+	// client and became the first look's baseline. The look's epoch is the
+	// LAUNCH start; the #1127 breaker keeps its post-init `clientSpawnedAt`.
+	it("gives the install look the launch-start epoch, not the post-initialize one", async () => {
+		const f = ensureFixture();
+		createLSPClient.mockImplementation(async () => {
+			// A 5 s initialize handshake.
+			vi.setSystemTime(T0 + 5_000);
+			return fakeClient("ts", f.root);
+		});
+		await f.ensure();
+
+		expect(f.registry.clientSpawnedAt.get(f.key)).toBe(T0 + 5_000);
+		expect(f.registry.clientLaunchStartedAt.get(f.key)).toBe(T0);
+		expect(f.registry.livePrimaryClientRoots()).toEqual([
+			{ root: f.root, spawnedAt: T0 },
+		]);
+		// Retired with the client it describes.
+		f.registry.retireClient(f.key);
+		expect(f.registry.clientLaunchStartedAt.has(f.key)).toBe(false);
+	});
+
 	// Recurrence (#3502, #2356, #1934): publishing a client is one transaction. The
 	// replacement is registered with fresh spawn and use stamps, its readiness and
 	// stall-demotion markers are dropped, first contact is re-armed BEFORE the
@@ -2730,7 +2754,7 @@ describe("live primary client roots (#4532)", () => {
 		if (facts.alive === false) client.kill();
 		registry.clients.set(key, client as unknown as LSPClientInfo);
 		if (facts.spawnedAt !== undefined)
-			registry.clientSpawnedAt.set(key, facts.spawnedAt);
+			registry.clientLaunchStartedAt.set(key, facts.spawnedAt);
 	}
 
 	// `restartPrimaryClientsUnder` retires EVERY primary overlapping a root, so a

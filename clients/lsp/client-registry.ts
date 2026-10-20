@@ -300,6 +300,16 @@ export class ClientRegistry {
 	readonly inFlight = new Map<string, Promise<SpawnedServer | undefined>>();
 	/** Epoch ms of each key's last successful spawn. */
 	readonly clientSpawnedAt = new Map<string, number>();
+	/**
+	 * Epoch ms each live client's LAUNCH began, before its process read the
+	 * tree (#4532 round 5, review F6). The install look compares an install
+	 * against this: `clientSpawnedAt` is stamped after the initialize handshake,
+	 * so an install that landed while the server was starting read as older
+	 * than the client and became the baseline. Kept apart from
+	 * `clientSpawnedAt` because the #1127 breaker measures post-init uptime from
+	 * that one. Same key and lifetime: written beside it, retired with it.
+	 */
+	readonly clientLaunchStartedAt = new Map<string, number>();
 	private readonly hooks: ClientGenerationHooks;
 	private readonly sessionCwd: string | undefined;
 	private readonly workspaceProbeLogged = new Set<string>();
@@ -710,6 +720,7 @@ export class ClientRegistry {
 		this.hooks.releaseNotifyWrite(key);
 		this.clients.delete(key);
 		this.clientSpawnedAt.delete(key);
+		this.clientLaunchStartedAt.delete(key);
 		this.hooks.forgetReadiness(key);
 		this.clientLastUsedAt.delete(key);
 		if (this.adoptedClientKeys.delete(key)) {
@@ -850,8 +861,10 @@ export class ClientRegistry {
 	 * The earliest spawn, not the latest: `restartPrimaryClientsUnder` retires
 	 * every primary overlapping a root, so a root whose newer client spawned
 	 * after an install must not hide an older one that read the pre-install
-	 * tree. An absent `clientSpawnedAt` reports 0, which a first look reads as
-	 * "no epoch" and never as "before every install".
+	 * tree. The epoch is the client's LAUNCH start (`clientLaunchStartedAt`):
+	 * the server reads the tree from its spawn on, not from the end of its
+	 * initialize handshake. An absent stamp reports 0, which a first look reads
+	 * as "no epoch" and never as "before every install".
 	 */
 	livePrimaryClientRoots(): Array<{ root: string; spawnedAt: number }> {
 		const byRoot = new Map<string, number>();
@@ -860,7 +873,7 @@ export class ClientRegistry {
 			const { serverId, root } = parseClientKey(key);
 			if (!root) continue;
 			if (isAuxiliary(getServerById(serverId))) continue;
-			const spawnedAt = this.clientSpawnedAt.get(key) ?? 0;
+			const spawnedAt = this.clientLaunchStartedAt.get(key) ?? 0;
 			const prior = byRoot.get(root);
 			byRoot.set(
 				root,
@@ -1536,6 +1549,7 @@ export class ClientRegistry {
 			// never outlives the attempts it describes.
 			this.lastSpawnVerdict.delete(key);
 			this.clientSpawnedAt.set(key, Date.now());
+			this.clientLaunchStartedAt.set(key, startedAt);
 			this.clientLastUsedAt.set(key, Date.now());
 			this.scheduleIdleEviction(key, server);
 			this.failureCounts.delete(key);
