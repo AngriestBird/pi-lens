@@ -151,6 +151,11 @@ export const TEST_ENV_RESTORE_ADMISSIONS: Readonly<
 		reason:
 			"vi.hoisted sets the shutdown timeout before the imports evaluate, and no hook restores it",
 	},
+	"tests/clients/lsp/lsp-publish-trace-attribution.test.ts": {
+		mechanism: "module-pin",
+		reason:
+			"PILENS_PUB_DEBUG is read once when clients/lsp/client.js loads, so the pin has to sit before the dynamic import and no per-case hook can put the flag back after the module captured it",
+	},
 	"tests/clients/lsp/managed-bin-fastpath.test.ts": {
 		mechanism: "module-pin",
 		reason: "set before the dynamic import and never restored",

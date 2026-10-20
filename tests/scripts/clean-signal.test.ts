@@ -329,9 +329,15 @@ describe("classifyCleanBehavior (phase-aware 4-way)", () => {
 				});
 				let touches = 0;
 				const probeFixture = createProbeFixture({
-					lsp: {
+					// #4362 shape 66: seeded from the shared LSPService factory, so
+					// only the two methods this cell drives are overridden (the
+					// service-double ratchet flags a hand-rolled service object).
+					// The factory's `Record<string, unknown>` is looser than the
+					// three-method shape `createProbeFixture` declares, hence the
+					// same cast this file's trust-refusal cell already uses.
+					lsp: makeLspServiceDouble({
 						supportsLSP: () => true,
-						async touchFile() {
+						touchFile: async () => {
 							touches += 1;
 							if (touches === 1) {
 								log = Buffer.concat([
@@ -344,7 +350,7 @@ describe("classifyCleanBehavior (phase-aware 4-way)", () => {
 						getWorkspaceDiagnosticsSupport: async () => ({
 							mode: "push-only",
 						}),
-					},
+					}) as never,
 					repoRoot: process.cwd(),
 					install: false,
 					initLSPConfig: undefined,

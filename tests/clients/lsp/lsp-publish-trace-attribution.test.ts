@@ -12,41 +12,28 @@
  * `classifyFirstPublish` (order-only) read it as `direct`. That value fed the
  * nightly's `typescript` row.
  *
- * This file drives the production notification handler, captures what it hands
- * the extension-log sink, and drains that window through the real
- * `createPublishTraceDrainer` for one (server, document). The plant is the real
- * ordering: fixture B's own empty answer, then fixture A's row arriving late.
+ * This file drives the production notification handler through the REAL
+ * extension-log sink: a per-case `PI_LENS_TEST_MODE=0` window lets
+ * `logExtension` write to this worker's own `extension.log`, the bytes are
+ * captured right after `flushExtensionLog()`, and that window is drained
+ * through the real `createPublishTraceDrainer` for one (server, document). No
+ * in-process module double stands in for the sink (shape 66): the bytes are
+ * the production writer's own. The plant is the real ordering: fixture B's own
+ * empty answer, then fixture A's row arriving late.
  */
-import { describe, expect, it, vi } from "vitest";
+import * as fs from "node:fs";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { logged } = vi.hoisted(() => ({
-	logged: [] as Array<{
-		subsystem: string;
-		level?: string;
-		message: string;
-		metadata?: { path?: string };
-	}>,
-}));
-
-// `logExtension` is a no-op under Vitest (`isTestMode`), and the client reads
-// `PILENS_PUB_DEBUG` once at module load, so the sink is captured here and the
-// env flag is set before the dynamic import below.
-vi.mock("../../../clients/extension-log.js", () => ({
-	logExtension: (entry: (typeof logged)[number]) => {
-		logged.push(entry);
-	},
-	createSubsystemLogger: () =>
-		Object.assign(() => undefined, {
-			error: () => undefined,
-			warn: () => undefined,
-			debug: () => undefined,
-		}),
-	EXTENSION_LOG_FILE: "/dev/null/extension.log",
-}));
-
+// `logExtension` is a no-op under Vitest (`isTestMode`) and the client reads
+// `PILENS_PUB_DEBUG` once at module load, so the debug pin has to sit before
+// the dynamic import below; no per-case hook can put it back after the module
+// captured the flag. #4589: that module-lifetime pin is an admission —
+// `tests/support/test-env-restore-admissions.ts`, mechanism `module-pin`.
 process.env.PILENS_PUB_DEBUG = "1";
 const { setupIncomingHandlers } =
 	await import("../../../clients/lsp/client.js");
+const { flushExtensionLog, getExtensionLogPath } =
+	await import("../../../clients/extension-log.js");
 const { createPublishTraceDrainer, classifyFirstPublish } =
 	await import("../../../scripts/lib/clean-signal.mjs");
 const { normalizeMapKey } = await import("../../../clients/path-utils.js");
@@ -62,6 +49,37 @@ const FINDING = {
 		end: { line: 0, character: 5 },
 	},
 };
+
+/**
+ * The real sink, off for the length of a case so `logExtension` writes
+ * (test mode is read at call time), then put back exactly as found. The
+ * precedent is `tests/scripts/latency-log-phases.test.ts`, and the sweep's
+ * own classifier reads this save/restore pair as restored (#4589).
+ */
+let previousTestMode: string | undefined;
+beforeEach(() => {
+	previousTestMode = process.env.PI_LENS_TEST_MODE;
+	process.env.PI_LENS_TEST_MODE = "0";
+});
+afterEach(() => {
+	if (previousTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
+	else process.env.PI_LENS_TEST_MODE = previousTestMode;
+});
+
+/**
+ * This worker's real `extension.log` bytes. Flushed immediately before the
+ * read, with no other `await` in between (AGENTS.md shape 67): the writer
+ * enqueues, so an unflushed read counts the phase's own row outside its
+ * window.
+ */
+let sinkBytes = Buffer.alloc(0);
+
+async function captureSink(): Promise<void> {
+	await flushExtensionLog();
+	sinkBytes = fs.existsSync(getExtensionLogPath())
+		? fs.readFileSync(getExtensionLogPath())
+		: Buffer.alloc(0);
+}
 
 /** One parsed `[lsp-pub]` row as the drainer pushes it into a phase sink. */
 interface DrainedPublish {
@@ -91,16 +109,21 @@ function armHandler(serverId: string): Publish {
 	return handler as Publish;
 }
 
-/** The captured sink as the NDJSON text the real writer would append. */
-function sinkText(): string {
-	return logged.map((entry) => `${JSON.stringify(entry)}\n`).join("");
+/** The rows the real sink gained since byte `offset`, JSON-parsed. */
+function rowsSince(offset: number): Array<Record<string, unknown>> {
+	return sinkBytes
+		.subarray(offset)
+		.toString("utf8")
+		.split("\n")
+		.filter((line) => line.trim())
+		.map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
-/** A drainer over the captured sink, keyed exactly as the probe keys it. */
+/** A drainer over the real sink snapshot, keyed exactly as the probe keys it. */
 function drainer() {
 	return createPublishTraceDrainer({
 		readLog() {
-			const bytes = Buffer.from(sinkText());
+			const bytes = sinkBytes;
 			return {
 				size: bytes.length,
 				read(start: number) {
@@ -116,40 +139,45 @@ function drainer() {
 }
 
 describe("#4615 the publish trace names its document", () => {
-	it("stamps the client's own document key into every [lsp-pub] row", () => {
-		logged.length = 0;
+	it("stamps the client's own document key into every [lsp-pub] row", async () => {
+		await captureSink();
+		const offset = sinkBytes.length;
 		const publish = armHandler("typescript");
 		publish({ uri: `file://${DIRTY_FILE}`, diagnostics: [FINDING] });
+		await captureSink();
 
-		expect(logged).toHaveLength(1);
-		expect(logged[0]).toMatchObject({
+		const rows = rowsSince(offset);
+		expect(rows).toHaveLength(1);
+		expect(rows[0]).toMatchObject({
 			subsystem: "lsp-pub",
 			message: expect.stringContaining("diags=1"),
 			metadata: { path: normalizeMapKey(DIRTY_FILE) },
 		});
 	});
 
-	it("never attributes another live client's late publish to this fixture (#4615)", () => {
-		logged.length = 0;
+	it("never attributes another live client's late publish to this fixture (#4615)", async () => {
+		await captureSink();
 		const drain = drainer();
 		const publishDirty = armHandler("typescript");
 		const publishClean = armHandler("typescript");
 
 		// Fixture A (dirty): its own one-finding answer, the measured `direct`.
-		drain.reset(0);
+		drain.reset(sinkBytes.length);
 		publishDirty({ uri: `file://${DIRTY_FILE}`, diagnostics: [FINDING] });
+		await captureSink();
 		const dirtySink: DrainedPublish[] = [];
 		drain(dirtySink, "typescript", DIRTY_FILE);
 		expect(classifyFirstPublish(dirtySink).firstPublish).toBe("direct");
 
 		// Fixture B (clean): its phase starts at the current sink size; its own
 		// only publish is the empty settled answer...
-		drain.reset(Buffer.byteLength(sinkText()));
+		drain.reset(sinkBytes.length);
 		publishClean({ uri: `file://${CLEAN_FILE}`, diagnostics: [] });
 		// ...and fixture A's client republishes AFTER that reset — the buffered
 		// writer's late flush that landed three lines 1 ms apart in run
 		// 39410536713.
 		publishDirty({ uri: `file://${DIRTY_FILE}`, diagnostics: [FINDING] });
+		await captureSink();
 
 		const cleanSink: DrainedPublish[] = [];
 		drain(cleanSink, "typescript", CLEAN_FILE);

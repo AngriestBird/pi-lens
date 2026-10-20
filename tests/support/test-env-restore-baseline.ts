@@ -47,6 +47,7 @@ export const TEST_ENV_RESTORE_BASELINE: readonly string[] = [
 	"tests/clients/lsp/client-registry-direct.test.ts:PI_LENS_TEST_MODE",
 	"tests/clients/lsp/idle-eviction-probe-driver.test.ts:PI_LENS_TS_IDLE_EVICT_MS",
 	"tests/clients/lsp/integration.test.ts:PI_LENS_LSP_SHUTDOWN_TIMEOUT_MS",
+	"tests/clients/lsp/lsp-publish-trace-attribution.test.ts:PILENS_PUB_DEBUG",
 	"tests/clients/lsp/managed-bin-fastpath.test.ts:PI_LENS_TEST_MODE",
 	"tests/clients/lsp/managed-fallback-after-trust-refusal-4515.test.ts:PI_LENS_TEST_MODE",
 	"tests/clients/lsp/rename-notify-wedged.test.ts:PI_LENS_LSP_RENAME_NOTIFY_TIMEOUT_MS",
