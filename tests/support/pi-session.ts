@@ -12,13 +12,15 @@
  * `index.ts` PASSED to a handler; this tier records what the host and the
  * model actually GOT.
  *
- * ONE FIXTURE ROOT PER FILE, one live session per case. The loaded copy
- * resolves `PI_LENS_HOME` once per process and later copies keep the first
- * answer (`clients/probe-home-state.ts`), so `startPiSession` refuses a second
- * root; a case that needs another project root passes another `cwd` under the
- * same root. A session started while another is still live in a different
- * root is classified by pi-lens as a concurrent secondary and its full start
- * is declined, so dispose a handle before starting the next session.
+ * ONE FIXTURE ROOT PER FILE, one live session per case. A session started under
+ * a SECOND fixture root writes into the first root's home and nothing into its
+ * own — measured: the second root's session put 78 `session_start` rows under
+ * the first root's home and 0 under its own, whose `home/` directory it still
+ * created (#4664 F4) — so `startPiSession` refuses a second root; a case that
+ * needs another project root passes another `cwd` under the same root. A
+ * session started while another is still live in a different root is classified
+ * by pi-lens as a concurrent secondary and its full start is declined, so
+ * dispose a handle before starting the next session.
  *
  * What it pins, and what it does not. It pins the session loop's own flow —
  * `session_start`, a turn, a tool-call round trip, the transcript the provider
@@ -28,7 +30,7 @@
  * shapes: for those `pi-mock.ts`'s `emit` stays the cheaper tool, and tier 1's
  * `pi-runner.ts` owns registration questions.
  *
- * FIVE CONSEQUENCES OF LOADING THROUGH PI'S OWN LOADER, all relied on below:
+ * SIX CONSEQUENCES OF LOADING THROUGH PI'S OWN LOADER, all relied on below:
  *
  * 1. pi loads the entry with jiti and `moduleCache: false`, so the factory runs
  *    against its OWN copies of `clients/*` — never the copies this test
@@ -41,39 +43,59 @@
  *    accepted shape). `PI_LENS_TEST_MODE=0` matches
  *    `tests/index-3521-fork-tree-witness.test.ts`: the start runs its
  *    production writes instead of the test-mode shortcuts.
- * 3. `PI_LENS_STARTUP_MODE=full` pins the start shape. A quick start (the
- *    production default for a process's first `session_start`) arms an
- *    unref'd 2 s warmup timer (`clients/runtime-session.ts`,
- *    `PI_LENS_WARMUP_DELAY_MS ?? 2000`) whose project-snapshot persist lands
- *    AFTER this fixture root is gone — measured: the root is re-created at
- *    `<root>/data/<project>/cache/project-snapshot.meta.json` ~0.4–2 s later
- *    (the accepted `p3` residual below). A full start does that work inline,
- *    so `bindExtensions` resolving is a real end of the start: measured twice,
- *    nothing writes after the root is removed. A case that must observe the
- *    quick/warmup shape passes `startupMode: "quick"` and owns that residual.
+ * 3. `PI_LENS_STARTUP_MODE` pins the start shape, and the pinned value is what
+ *    a `session_start_total` row reports as `mode`. `"full"` (the default here)
+ *    settles the start inside `bindExtensions`. `"quick"` is the shape a real
+ *    process's FIRST `session_start` takes (the cold-start heuristic), and it
+ *    is paired with `PI_LENS_COLD_START_QUICK=0`: a quick start otherwise arms
+ *    an unref'd 2 s warmup timer (`clients/runtime-session.ts`), and the warmup's
+ *    project-snapshot persist is a module-scope queue in the loaded copy that
+ *    nothing here can drain — measured, it lands after this fixture root is
+ *    gone and re-creates it (the accepted `p3` residual in the PR body). The
+ *    opt-out drops the TIMER, not the quick start: the skipped-work branch and
+ *    the `mode: "quick"` row are what a quick-mode case observes.
  * 4. The load builds jiti's transform cache at `path.join(os.tmpdir(), "jiti")`,
  *    so `os.tmpdir()` is aimed inside the fixture for the load only — tier 1's
- *    `withFixtureTmpdir` (#4641 F1: a direct child of the shared tmp root is a
- *    fixture sibling to the tmp-hygiene census).
- * 5. Teardown does NOT pretend to reach the loaded copy's internals. Two seams
- *    are real and are used:
+ *    `withFixtureTmpdir`, now the ONE copy in `tests/clients/test-utils.ts`
+ *    (#4641 F1: a direct child of the shared tmp root is a fixture sibling to
+ *    the tmp-hygiene census).
+ * 5. The scripted provider comes from the HOST's own `@earendil-works/pi-ai`,
+ *    resolved at runtime through the host package's directory (`piAiModule`)
+ *    instead of a static specifier: that package is not a dependency of this
+ *    repo — it ships inside the certified host's install — so declaring it here
+ *    would pin a second version of a module the host answers for itself
+ *    (#4664 F1). Nothing in this file or in a case that imports it holds a
+ *    `@earendil-works/pi-ai` import specifier for knip to read.
+ * 6. Teardown does NOT pretend to reach the loaded copy's internals. Three
+ *    seams are real and are used:
  *      - pi's `ExtensionRunner.emit` AWAITS every handler
  *        (`node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/runner.js`),
- *        and pi-lens's `session_shutdown` handler RETURNS its writer-drain
- *        promise (`index.ts`: `const ndjsonDrain = bounded(flushAllNdjsonWriters(), …)`,
- *        returned at the end of the handler), so emitting `session_shutdown`
- *        drains the copy's NDJSON sinks FROM INSIDE its own graph;
+ *        and emitting `session_shutdown` therefore runs the copy's own shutdown
+ *        handler: its primary release, its registry deregistration, and its
+ *        writer drain (`index.ts` returns
+ *        `bounded(flushAllNdjsonWriters(), …)`). That handler's effects are what
+ *        the helper's contract test reads back;
  *      - the NDJSON writer map is process-global
  *        (`clients/ndjson-logger.ts`, `Symbol.for("pi-lens.ndjson-logger.state")`),
- *        so `flushAllNdjsonWriters()` from this side reaches the copy's sinks
- *        too (probed: 13 writers, all under the pinned home).
+ *        so `flushAllNdjsonWriters()` from this side settles the copy's sinks
+ *        too (probed: 13 writers, all under the pinned home). It is a
+ *        belt-and-braces second drain, NOT the proof that the emit ran: it
+ *        writes the same rows either way, so a case that must prove the emit
+ *        asserts a handler effect instead;
+ *      - the registry mutation tail is process-global too (#2146 keys it on
+ *        `globalThis`), so `_settleRegistryMutationsForTests()` here joins the
+ *        copy's own queued `deregisterInstance()` write. Without that await the
+ *        write lands after `dispose()` returns and re-creates the removed
+ *        fixture root (#4664 F7, probed).
  *    The copy's module-scope persist queues (`clients/project-snapshot.ts`,
- *    `clients/review-graph/builder.ts`) have no such seam: they are reachable
- *    only through the copy's own module objects, which nothing here holds.
- *    That is the `p3` residual documented in the PR body, NOT a silence.
+ *    `clients/review-graph/builder.ts`, the warmup timer) have no such seam:
+ *    they are reachable only through the copy's own module objects, which
+ *    nothing here holds. That is the `p3` residual documented in the PR body,
+ *    NOT a silence.
  */
 
 import * as fs from "node:fs";
+import { createRequire } from "node:module";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -83,17 +105,14 @@ import {
 	createAgentSessionServices,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
-import {
-	type FauxResponseStep,
-	type Message,
-	fauxProvider,
-} from "@earendil-works/pi-ai";
 import { afterAll } from "vitest";
+import { _settleRegistryMutationsForTests } from "../../clients/instance-registry-tail.js";
 import { flushAllNdjsonWriters } from "../../clients/ndjson-logger.js";
 import {
 	cleanupTestEnvironmentsDrained,
 	drainBackgroundWritesForTests,
 	setupTestEnvironment,
+	withFixtureTmpdir,
 } from "../clients/test-utils.js";
 
 /** The built extension every case loads: `npm run build` writes this twin. */
@@ -101,9 +120,200 @@ const EXTENSION_ENTRY = fileURLToPath(
 	new URL("../../index.js", import.meta.url),
 );
 
+/**
+ * The scripted-provider package, and the host whose dependency graph supplies
+ * it. `@earendil-works/pi-ai` is NOT a dependency of this repo: it ships inside
+ * the certified host's own install, and a row for it here would pin a second
+ * version of a module the host must answer for itself (#4664 F1). So the module
+ * is resolved at RUNTIME through the host package's directory — never through a
+ * static specifier the dependency graph (and `npm run knip`) would read.
+ *
+ * The host constants repeat `tests/support/pi-runner.ts`'s rather than being
+ * imported from it: that module registers file-scope vitest hooks (`afterAll`)
+ * on import, so a tier-2 file importing it for two strings would attach tier
+ * 1's teardown to itself.
+ */
+const HOST_PACKAGE = "@earendil-works/pi-coding-agent";
+/**
+ * Points the helper at another installed host, as a package directory or a
+ * module file — tier 1's own override (`tests/support/pi-runner.ts`), honoured
+ * here for the one module this tier loads from the host's graph.
+ */
+const HOST_PACKAGE_ENV = "PI_LENS_PI_HOST_PACKAGE";
+const PI_AI_PACKAGE = "@earendil-works/pi-ai";
+
+/** One message pi sent to the provider, as the live module shaped it. */
+export interface PiMessage {
+	readonly role: string;
+	readonly content?: unknown;
+	readonly [key: string]: unknown;
+}
+
+/** What a scripted reply receives: the request pi is answering. */
+export interface PiFauxContext {
+	readonly messages: readonly PiMessage[];
+}
+
+/** A scripted reply computed from the request pi is answering. */
+export type PiFauxReplyFactory = (
+	context: PiFauxContext,
+	options: unknown,
+	state: unknown,
+	model: unknown,
+) => Record<string, unknown>;
+
+/** A scripted provider reply: a message, or a function of the request it answers. */
+export type PiFauxReply = Record<string, unknown> | PiFauxReplyFactory;
+
+/** The provider half of the host's own `pi-ai` that this tier calls. */
+interface FauxProviderHandle {
+	readonly provider: unknown;
+	setResponses(responses: readonly PiFauxReply[]): void;
+}
+
+/**
+ * The host's `@earendil-works/pi-ai` surface this tier uses. Structural on
+ * purpose: the module is loaded at runtime, so no declaration of it can come
+ * from its own package (see `piAiModule`).
+ */
+interface PiAiModule {
+	fauxProvider(options?: {
+		models?: readonly Record<string, unknown>[];
+	}): FauxProviderHandle;
+	fauxText(text: string): Record<string, unknown>;
+	fauxToolCall(
+		name: string,
+		arguments_: Record<string, unknown>,
+		options?: { id?: string },
+	): Record<string, unknown>;
+	fauxAssistantMessage(
+		content: unknown,
+		options?: Record<string, unknown>,
+	): Record<string, unknown>;
+}
+
+const nodeRequire = createRequire(import.meta.url);
+
+let loadedPiAi: PiAiModule | undefined;
+
+function isDirectory(candidate: string): boolean {
+	try {
+		return fs.statSync(candidate).isDirectory();
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * `<dir>/node_modules/<name>` at `from` and at every ancestor, in node's own
+ * order (a directory already named `node_modules` is not searched again), so a
+ * nested install wins over the hoisted one exactly as it does for a real
+ * `import`.
+ */
+function findPackageDir(name: string, from: string): string | undefined {
+	for (let dir = path.resolve(from); ; dir = path.dirname(dir)) {
+		if (path.basename(dir) !== "node_modules") {
+			const candidate = path.join(dir, "node_modules", name);
+			if (fs.existsSync(path.join(candidate, "package.json"))) return candidate;
+		}
+		if (path.dirname(dir) === dir) return undefined;
+	}
+}
+
+/** The package directory a package directory or a module file lives in. */
+function packageRootOf(target: string): string {
+	if (isDirectory(target)) return target;
+	for (let dir = path.dirname(target); ; dir = path.dirname(dir)) {
+		if (fs.existsSync(path.join(dir, "package.json"))) return dir;
+		if (path.dirname(dir) === dir) return path.dirname(target);
+	}
+}
+
+/** The install the extension under test runs in: the override, or this repo's host. */
+function hostPackageDir(): string {
+	const override = process.env[HOST_PACKAGE_ENV];
+	if (override) return packageRootOf(path.resolve(override));
+	const here = path.dirname(fileURLToPath(import.meta.url));
+	const hostDir = findPackageDir(HOST_PACKAGE, here);
+	if (hostDir === undefined)
+		throw new Error(
+			`pi-session: cannot find ${HOST_PACKAGE} from ${here}; set ${HOST_PACKAGE_ENV} to the host package's directory`,
+		);
+	return hostDir;
+}
+
+/** The `import` entry a package's own `package.json` declares. */
+function packageEntry(packageDir: string): string {
+	const manifest = JSON.parse(
+		fs.readFileSync(path.join(packageDir, "package.json"), "utf8"),
+	) as { exports?: Record<string, unknown>; main?: string };
+	const root = manifest.exports?.["."];
+	const declared =
+		root && typeof root === "object"
+			? (root as { import?: unknown }).import
+			: undefined;
+	const target = typeof declared === "string" ? declared : manifest.main;
+	if (typeof target !== "string")
+		throw new Error(
+			`pi-session: ${packageDir}/package.json declares no import entry`,
+		);
+	return path.join(packageDir, target);
+}
+
+/**
+ * The host's own scripted provider, loaded once per file at RUNTIME. Fails
+ * loudly rather than skipping: a host that stopped exporting `fauxProvider`
+ * makes every case in this tier meaningless, and a quiet fallback would report
+ * that as a green run.
+ */
+export function piAiModule(): PiAiModule {
+	if (loadedPiAi) return loadedPiAi;
+	const hostDir = hostPackageDir();
+	const piAiDir = findPackageDir(PI_AI_PACKAGE, hostDir);
+	if (piAiDir === undefined)
+		throw new Error(
+			`pi-session: the host install at ${hostDir} carries no ${PI_AI_PACKAGE}; ${HOST_PACKAGE_ENV} must name one that does`,
+		);
+	const entry = packageEntry(piAiDir);
+	const loaded = nodeRequire(entry) as Partial<PiAiModule>;
+	for (const name of [
+		"fauxProvider",
+		"fauxText",
+		"fauxToolCall",
+		"fauxAssistantMessage",
+	] as const) {
+		if (typeof loaded[name] !== "function")
+			throw new Error(`pi-session: ${entry} does not export ${name}`);
+	}
+	loadedPiAi = loaded as PiAiModule;
+	return loadedPiAi;
+}
+
+/** pi-ai's `fauxText`, through the host's own module (see `piAiModule`). */
+export function fauxText(text: string): Record<string, unknown> {
+	return piAiModule().fauxText(text);
+}
+
+/** pi-ai's `fauxToolCall`, through the host's own module (see `piAiModule`). */
+export function fauxToolCall(
+	name: string,
+	arguments_: Record<string, unknown>,
+	options?: { id?: string },
+): Record<string, unknown> {
+	return piAiModule().fauxToolCall(name, arguments_, options);
+}
+
+/** pi-ai's `fauxAssistantMessage`, through the host's own module (see `piAiModule`). */
+export function fauxAssistantMessage(
+	content: unknown,
+	options?: Record<string, unknown>,
+): Record<string, unknown> {
+	return piAiModule().fauxAssistantMessage(content, options);
+}
+
 const TMP_PREFIX = "pi-lens-pi-session-";
 
-const FAUX_MODEL = {
+const FAUX_MODEL: Record<string, unknown> = {
 	id: "faux-1",
 	name: "Faux",
 	contextWindow: 200_000,
@@ -129,13 +339,13 @@ const DEFAULT_FLAGS: ReadonlyArray<[string, boolean]> = [
 ];
 
 /** One provider request: the messages the model received, in order. */
-export type PiProviderRequest = ReadonlyArray<Message>;
+export type PiProviderRequest = ReadonlyArray<PiMessage>;
 
 export interface PiSessionOptions {
 	/** Fixture root, created by `setupTestEnvironment(TMP_PREFIX)` below. */
 	root: string;
-	/** Scripted provider replies, one per expected request (pi-ai `fauxProvider`). */
-	responses: readonly FauxResponseStep[];
+	/** Scripted provider replies, one per expected request (the host's `fauxProvider`). */
+	responses: readonly PiFauxReply[];
 	/**
 	 * Project directory the session runs in. Defaults to `<root>/proj`, which
 	 * the helper marks with `.git`; passing this checkout would make every
@@ -149,9 +359,11 @@ export interface PiSessionOptions {
 	/** Session store. Defaults to `<root>/sessions`. */
 	sessionsDir?: string;
 	/**
-	 * Startup shape pinned through `PI_LENS_STARTUP_MODE`. `"full"` (the
-	 * default) settles the start inside `bindExtensions`; `"quick"` leaves the
-	 * warmup timer armed (see the header, point 3).
+	 * Startup shape pinned through `PI_LENS_STARTUP_MODE`, which is also the
+	 * `mode` a `session_start_total` row reports. `"full"` (the default) settles
+	 * the start inside `bindExtensions`; `"quick"` is the shape a real process's
+	 * first `session_start` takes, with the warmup timer opted out — see the
+	 * header, point 3.
 	 */
 	startupMode?: "full" | "quick";
 }
@@ -175,7 +387,7 @@ export interface PiSession {
 	 * Reopen this session's persisted file in a NEW session with a new provider
 	 * script — the resume path a restarted process takes.
 	 */
-	resume(responses: readonly FauxResponseStep[]): Promise<PiSession>;
+	resume(responses: readonly PiFauxReply[]): Promise<PiSession>;
 	/** Settle the loaded copy, dispose the session, drain. Idempotent. */
 	dispose(): Promise<void>;
 }
@@ -194,17 +406,20 @@ const PINNED_KEYS = [
 	"PILENS_DATA_DIR",
 	"PI_LENS_TEST_MODE",
 	"PI_LENS_STARTUP_MODE",
+	"PI_LENS_COLD_START_QUICK",
 ] as const;
 
 /** The one-root rule (see `startPiSession`): a second root cannot be observed. */
 function assertOneRoot(root: string): void {
-	// ONE ROOT PER FILE. The loaded copy resolves `PI_LENS_HOME` once per
-	// process and later copies keep the first answer (its own
-	// `clients/probe-home-state.ts` resolution memo), so a second root would
-	// pin the environment somewhere the copy never reads: measured — after a
-	// session under `<root>/a`, a session under `<root>/b` wrote
-	// `<root>/a/home/latency.log` and nothing under `<root>/b`. Sessions that
-	// need a different project root pass a different `cwd` UNDER this root.
+	// ONE ROOT PER FILE. A session started under a SECOND fixture root writes
+	// into the FIRST root's home and nothing into its own: measured — the
+	// second root's session put 78 `session_start` rows under the first
+	// root's home against 0 under its own, whose `home/` directory it still
+	// created. The seam that holds the copy to its first home was not
+	// isolated, and `clients/probe-home-state.ts` is NOT it: that module
+	// re-reads `PI_LENS_HOME` on every call (#4664 F4). So this guard states
+	// the measurement, not a module. Sessions that need a different project
+	// root pass a different `cwd` UNDER this root.
 	if (pinnedRoot !== undefined && pinnedRoot !== root)
 		throw new Error(
 			`pi-session: one fixture root per test file — this file already pinned ${pinnedRoot}, so the loaded copy keeps that home and ${root} would observe nothing (pass a different cwd under ${pinnedRoot} instead)`,
@@ -212,64 +427,36 @@ function assertOneRoot(root: string): void {
 	pinnedRoot = root;
 }
 
-/**
- * Run `load` with `os.tmpdir()` aimed inside the fixture: pi's loader builds
- * jiti's transform cache as `path.join(os.tmpdir(), "jiti")`, and an in-process
- * load otherwise leaves that directory at the shared tmp root (#4641 F1).
- */
-async function withFixtureTmpdir<T>(
-	root: string,
-	load: () => Promise<T>,
-): Promise<T> {
-	const isolate = path.join(root, "tmp");
-	fs.mkdirSync(isolate, { recursive: true });
-	const previous = {
-		TMPDIR: process.env.TMPDIR,
-		TEMP: process.env.TEMP,
-		TMP: process.env.TMP,
-	};
-	process.env.TMPDIR = isolate;
-	process.env.TEMP = isolate;
-	process.env.TMP = isolate;
-	try {
-		return await load();
-	} finally {
-		if (previous.TMPDIR === undefined) delete process.env.TMPDIR;
-		else process.env.TMPDIR = previous.TMPDIR;
-		if (previous.TEMP === undefined) delete process.env.TEMP;
-		else process.env.TEMP = previous.TEMP;
-		if (previous.TMP === undefined) delete process.env.TMP;
-		else process.env.TMP = previous.TMP;
-	}
-}
-
 /** A model runtime whose only provider is the scripted one. */
 async function buildModelRuntime(
 	agentDir: string,
-	responses: readonly FauxResponseStep[],
+	responses: readonly PiFauxReply[],
 	requests: PiProviderRequest[],
 ): Promise<{ modelRuntime: ModelRuntime; model: unknown }> {
-	const faux = fauxProvider({ models: [FAUX_MODEL] });
+	const faux = piAiModule().fauxProvider({ models: [FAUX_MODEL] });
 	// Every scripted step is wrapped so the request it answered is recorded
 	// before the reply is produced: `requests.length` is then the count of
 	// provider round trips pi actually made.
 	faux.setResponses(
-		responses.map((step) => (context, options, state, model) => {
-			requests.push(
-				context.messages.map((message) => structuredClone(message)),
-			);
-			return typeof step === "function"
-				? step(context, options, state, model)
-				: structuredClone(step);
-		}),
+		responses.map(
+			(step): PiFauxReplyFactory =>
+				(context, options, state, model) => {
+					requests.push(
+						context.messages.map((message) => structuredClone(message)),
+					);
+					return typeof step === "function"
+						? step(context, options, state, model)
+						: structuredClone(step);
+				},
+		),
 	);
 	const modelRuntime = await ModelRuntime.create({
 		modelsPath: null,
 		refreshOnCreate: false,
 		authPath: path.join(agentDir, "auth.json"),
 	});
-	modelRuntime.registerNativeProvider(faux.provider);
-	const model = modelRuntime.getModel("faux", FAUX_MODEL.id);
+	modelRuntime.registerNativeProvider(faux.provider as never);
+	const model = modelRuntime.getModel("faux", FAUX_MODEL.id as string);
 	if (!model) throw new Error("the faux provider registered no model");
 	return { modelRuntime, model };
 }
@@ -283,7 +470,7 @@ async function buildSession(args: {
 	root: string;
 	cwd: string;
 	agentDir: string;
-	responses: readonly FauxResponseStep[];
+	responses: readonly PiFauxReply[];
 	flags: ReadonlyMap<string, boolean | string>;
 	sessionManager: () => SessionManager;
 }): Promise<PiSession> {
@@ -348,16 +535,39 @@ async function buildSession(args: {
 		async dispose() {
 			if (disposed) return;
 			disposed = true;
-			// The in-graph drain: pi awaits each handler, and pi-lens's
-			// `session_shutdown` handler returns its writer-drain promise.
+			// pi awaits every handler it emits, so this runs the LOADED copy's
+			// own `session_shutdown` handler: its primary release, its registry
+			// deregistration, and its writer drain (the handler returns
+			// `bounded(flushAllNdjsonWriters(), …)`).
 			await session.extensionRunner.emit({
 				type: "session_shutdown",
 				reason: "quit",
 			} as never);
 			session.dispose();
-			// The same process-global writer map the loaded copy registered into.
+			// The same process-global writer map the loaded copy registered into:
+			// a second, test-side settle of the same sinks. It writes the same
+			// rows whether or not the emit above ran, so it is a belt, never the
+			// proof that the handler did (a case that proves the emit asserts a
+			// handler effect, not a log row).
 			await flushAllNdjsonWriters();
 			await drainBackgroundWritesForTests();
+			// Join the copy's queued registry mutations AND the sink rows those
+			// mutations log. #2146 keys the tail on `globalThis`, so this import
+			// joins the copy's own queue; without the join the deregistration
+			// write lands after `dispose()` returns and re-creates the removed
+			// fixture root — measured on this host, warm process: 5 of 5 runs,
+			// 5–8 ms after the removal, carrying `instances.json.locks/…`,
+			// `cascade.log` and `latency.log` (#4664 F7).
+			//
+			// TWO rounds, because a round joins only what is queued when it is
+			// called: the deregistration mutation logs its own sink rows, and the
+			// registry read taken inside it can queue the next mutation (the
+			// dead-pid prune). Measured the same way: one round still re-created
+			// the root in 1 of 5 runs, two rounds in 0 of 6.
+			for (let round = 0; round < 2; round += 1) {
+				await _settleRegistryMutationsForTests();
+				await flushAllNdjsonWriters();
+			}
 		},
 	};
 	return handle;
@@ -386,7 +596,16 @@ export async function startPiSession(
 	process.env.PI_LENS_HOME = path.join(options.root, "home");
 	process.env.PILENS_DATA_DIR = path.join(options.root, "data");
 	process.env.PI_LENS_TEST_MODE = "0";
-	process.env.PI_LENS_STARTUP_MODE = options.startupMode ?? "full";
+	const startupMode = options.startupMode ?? "full";
+	process.env.PI_LENS_STARTUP_MODE = startupMode;
+	// A quick start is the production FIRST-session shape, and it arms pi-lens's
+	// cold-start warmup timer. That timer's project-snapshot persist is
+	// module-scope in the loaded copy with no test-side drain (the `p3` residual
+	// in the PR body), so it lands after this fixture root is removed and
+	// re-creates it. The documented opt-out drops the TIMER only: the quick
+	// start branch — the skipped work and the `mode: "quick"` row — still runs.
+	if (startupMode === "quick") process.env.PI_LENS_COLD_START_QUICK = "0";
+	else delete process.env.PI_LENS_COLD_START_QUICK;
 	return buildSession({
 		root: options.root,
 		cwd,
@@ -408,14 +627,15 @@ export function piSessionFixture(): { root: string; cleanup: () => void } {
 }
 
 /**
- * Put the environment back, then remove every fixture root this file owns. The
- * drain first covers this process's writers; the loaded copy's NDJSON sinks
- * were already settled by `dispose()`'s in-graph `session_shutdown` and
- * `flushAllNdjsonWriters()`. The copy's module-scope persist queues stay
- * unreachable (header, point 5).
+ * Settle, put the environment back, then remove every fixture root this file
+ * owns. `dispose()` already emitted `session_shutdown` into the loaded copy and
+ * joined its registry tail; this pass repeats both settles so a case that left a
+ * handle undisposed cannot leave a write in flight over the removal. The copy's
+ * module-scope persist queues stay unreachable (header, point 6).
  */
 afterAll(async () => {
 	await drainBackgroundWritesForTests();
+	await _settleRegistryMutationsForTests();
 	for (const [key, value] of Object.entries(savedEnv)) {
 		if (value === undefined) delete process.env[key];
 		else process.env[key] = value;

@@ -9,14 +9,19 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { flushAllNdjsonWriters } from "../../clients/ndjson-logger.js";
+import {
+	getActivePrimaryRoot,
+	getActiveSessionId,
+} from "../../clients/session-lifecycle.js";
 import {
 	fauxAssistantMessage,
 	fauxText,
 	fauxToolCall,
-} from "@earendil-works/pi-ai";
-import { afterAll, afterEach, describe, expect, it } from "vitest";
-import { flushAllNdjsonWriters } from "../../clients/ndjson-logger.js";
-import { piSessionFixture, startPiSession } from "./pi-session.js";
+	piSessionFixture,
+	startPiSession,
+} from "./pi-session.js";
 
 const fixture = piSessionFixture();
 const handles: Array<{ dispose: () => Promise<void> }> = [];
@@ -145,18 +150,32 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 		);
 	});
 
-	it("drains the loaded copy's sinks from inside its own graph", async () => {
+	it("runs the loaded copy's shutdown handler when dispose() emits session_shutdown", async () => {
 		const handle = await startPiSession({
 			root: fixture.root,
 			cwd: path.join(fixture.root, "tee", "proj"),
 			responses: [fauxAssistantMessage(fauxText("ok"))],
 		});
 		await handle.prompt("hello");
+		// The start registered this session as the process primary, in state the
+		// LOADED copy's own graph holds (a `getProcessSingleton` cell, so this
+		// graph reads the same one). Removing the emit from `dispose()` reds the
+		// release below — and that, not the log row, is what separates "the
+		// handler ran" from "a writer drained on its own": `flushAllNdjsonWriters`
+		// reaches the same process-global sinks from either side, so the row
+		// lands either way (#4664 F2).
+		const sessionId = handle.session.sessionManager.getSessionId();
+		expect(getActiveSessionId()).toBe(sessionId);
+
 		await handle.dispose();
 
-		// `dispose()` emitted `session_shutdown`, which pi awaits and whose
-		// handler returns pi-lens's own writer drain; the row below is the
-		// loaded copy's, flushed through that seam.
+		expect(getActiveSessionId()).toBeUndefined();
+		expect(getActivePrimaryRoot()).toBeUndefined();
+		expect(handle.errors).toEqual([]);
+
+		// The row the copy's writer queued is on disk under the home the copy
+		// pinned — the sink a later case would read, settled when `dispose()`
+		// returns.
 		const latencyLog = path.join(process.env.PI_LENS_HOME ?? "", "latency.log");
 		await flushAllNdjsonWriters();
 		const rows = fs
@@ -203,11 +222,13 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 	});
 
 	it("refuses a second fixture root in one file", async () => {
-		// The loaded copy resolves `PI_LENS_HOME` once per process and later
-		// copies keep the first answer (`clients/probe-home-state.ts`), so a
-		// session under a second root would write into the FIRST root's home
-		// while its own fixture path stayed empty. The helper fails closed
-		// instead of running a case that observes nothing.
+		// A session under a SECOND fixture root writes into the FIRST root's home
+		// and nothing into its own — measured: 78 `session_start` rows against 0
+		// — while its own fixture path still gets a `home/` directory. The helper
+		// fails closed instead of running a case that observes nothing. Where the
+		// copy binds that first home is not isolated, and it is demonstrably NOT
+		// `clients/probe-home-state.ts`, which re-reads `PI_LENS_HOME` per call
+		// (#4664 F4).
 		await expect(
 			startPiSession({
 				root: path.join(fixture.root, "a-second-root"),

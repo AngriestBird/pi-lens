@@ -16,15 +16,16 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { CacheManager } from "../../clients/cache-manager.js";
+import { _resetProcessSingletonsForTests } from "../../clients/process-singletons.js";
+import { createPiMock, makeCtx } from "../support/pi-mock.js";
 import {
 	fauxAssistantMessage,
 	fauxText,
 	fauxToolCall,
-} from "@earendil-works/pi-ai";
-import { CacheManager } from "../../clients/cache-manager.js";
-import { _resetProcessSingletonsForTests } from "../../clients/process-singletons.js";
-import { createPiMock, makeCtx } from "../support/pi-mock.js";
-import { piSessionFixture, startPiSession } from "../support/pi-session.js";
+	piSessionFixture,
+	startPiSession,
+} from "../support/pi-session.js";
 
 const TIMEOUT_MS = 30_000;
 

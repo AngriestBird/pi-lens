@@ -13,7 +13,6 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { fauxAssistantMessage, fauxText } from "@earendil-works/pi-ai";
 import extension from "../index.js";
 import {
 	clearLatencyLog,
@@ -24,7 +23,12 @@ import { flushAllNdjsonWriters } from "../clients/ndjson-logger.js";
 import { _resetSessionLifecycleForTests } from "../clients/session-lifecycle.js";
 import { makeSessionStartEvent } from "./support/host-event-factory.js";
 import { createPiMock, makeCtx, STALE_CTX_MESSAGE } from "./support/pi-mock.js";
-import { piSessionFixture, startPiSession } from "./support/pi-session.js";
+import {
+	fauxAssistantMessage,
+	fauxText,
+	piSessionFixture,
+	startPiSession,
+} from "./support/pi-session.js";
 import { removeTempDirSync } from "./clients/test-utils.js";
 
 /** Make an already-emitted ctx read as invalidated, the way the SDK does
@@ -131,11 +135,19 @@ describe("index session_start wiring — classification logged with mode (#2129)
 		// own ctx and session manager, not a hand-built event. The row is read
 		// from the home the loaded copy pinned, after `dispose()` emitted
 		// `session_shutdown` and pi awaited the copy's writer drain.
+		//
+		// The shape is QUICK: the mode a real process's FIRST `session_start`
+		// takes (the cold-start heuristic in `clients/runtime-session.ts`), so
+		// the row asserts `mode: "quick"` exactly as the double-based version of
+		// this case did. The helper opts the quick mode's warmup timer out (its
+		// persist has no test-side drain); the START shape is what this case
+		// pins (#4664 F3).
 		const cwd = path.join(fixture.root, "primary", "proj");
 		const handle = await startPiSession({
 			root: fixture.root,
 			cwd,
 			responses: [fauxAssistantMessage(fauxText("ready"))],
+			startupMode: "quick",
 		});
 		await handle.prompt("hello");
 		await handle.dispose();
@@ -146,7 +158,7 @@ describe("index session_start wiring — classification logged with mode (#2129)
 		);
 		expect(totals).toHaveLength(1);
 		expect(totals[0].metadata).toMatchObject({
-			mode: "full",
+			mode: "quick",
 			classification: "primary",
 			sameRoot: "unknown",
 		});
