@@ -30,6 +30,7 @@
 import { promises as fsp } from "node:fs";
 import { join } from "node:path";
 import { BoundedFifoMap } from "./bounded-cache.js";
+import { compareKeys } from "./config-core/provenance.js";
 import {
 	incrementDegradationCount,
 	recordDegradationOnce,
@@ -219,7 +220,12 @@ async function walkDeclarations(
 			Array.from({ length: DECLARATION_WALK_CONCURRENCY }, worker),
 		);
 	if (capped) return undefined;
-	found.sort();
+	// Deterministic order: `declarations` inserts in this order, and that order
+	// becomes the emission order of `diffDeclarations` and of the published
+	// `pathChanges`. `compareKeys` (Sonar S2871): code units, never
+	// `localeCompare`, whose answer depends on the machine's locale and ICU
+	// build and would reorder one run's payload against another's.
+	found.sort(compareKeys);
 	const declarations = new Map<string, string>();
 	// Parallel stats, then one pass into the map: the callback returns its pair
 	// so a failed stat is an explicit `undefined` rather than a swallowed
@@ -289,8 +295,9 @@ function carryUnreadable(
 		carried.push(filePath);
 	}
 	// Deterministic order: the population that fits the cap must not depend on
-	// Map insertion order or on which parallel stat settled first.
-	carried.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+	// Map insertion order or on which parallel stat settled first. Same
+	// comparator as the walk's, for the same reason.
+	carried.sort(compareKeys);
 	let dropped = 0;
 	for (const filePath of carried) {
 		if (declarations.size >= DECLARATION_WALK_MAX_FILES) {
