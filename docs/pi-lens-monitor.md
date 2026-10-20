@@ -40,10 +40,16 @@ snapshots; no additional telemetry sink is created.
 
 ## Inputs
 
-- `~/.pi-lens/latency.log` and `~/.pi-lens/extension.log` (JSON lines; every
-  row carries `pid` and `ts`). The session is the `pid` the brief names, or the
-  newest pid with rows in the last hour when the brief says "live".
-- `~/.pi-lens/cascade.log` (JSON lines with `ts`, `phase`, and `filePath`,
+Read the monitored process's log directory, resolved by `getGlobalPiLensLogDir()`
+in `clients/probe-home-state.ts`: a non-empty `PI_LENS_HOME` wins, otherwise
+any applicable probe-home redirect, otherwise `~/.pi-lens`. Do not infer this
+from the monitor's own environment. Pass that directory as `--root` to
+`scripts/analyze-pi-lens-logs.mjs`, whose default is `~/.pi-lens`.
+
+- `latency.log` and `extension.log` (JSON lines; every row carries `pid`
+  and `ts`). The session is the `pid` the brief names, or the newest pid with
+  rows in the last hour when the brief says "live".
+- `cascade.log` (JSON lines with `ts`, `phase`, and `filePath`,
   but no `pid` or `type`). Use the selected time window and `filePath` to
   narrow by project. Label counts as project/time-window evidence, not
   pid-attributed evidence; flag shared-project and non-path rows as
@@ -52,13 +58,22 @@ snapshots; no additional telemetry sink is created.
   the brief links, or a file under the scratch directory). Every number is
   reported as a delta against it when available.
 
+Read active files and retained numbered siblings (for example, `cascade.log.1`),
+plus timestamped archives that overlap the selected window. The analyzer includes
+numbered siblings by default; use `--archived` for timestamped archives. Filter
+rows by the selected window in every file. A missing active file does not make
+its retained siblings empty; flag incomplete retention when the files do not
+cover the requested window.
+
 ## The readout (fixed shape, one comment or file, never stdout to the session)
 
 1. **Session line**: pid, project root, first/last row timestamps, row count,
    pi-lens version if a session-start row carries it.
 2. **Phase table**: group `latency.log` rows with `type:"phase"` and
-   `cascade.log` rows by `source | phase`. Report `n | timed_n | p50 | p95 |
-   max | total_ms`, sorted by total, top 15. Count every row in `n`; compute
+   `cascade.log` rows from all selected files by `source | phase`, using the
+   log family as `source` across active and archived siblings. Report
+   `n | timed_n | p50 | p95 | max | total_ms`, sorted by total, top 15.
+   Count every row in `n`; compute
    timing columns only from numeric `durationMs`, in ms, with `timed_n`
    showing that sample count. Show `-` when no durations exist. List count-only
    phases separately so the timing top 15 cannot hide `cascade_carry_rendered`;
@@ -164,8 +179,12 @@ snapshots; no additional telemetry sink is created.
 - File nothing yourself unless the brief grants `gh`; then one comment on the
   issue the brief names, never a new issue: the orchestrator decides what
   becomes a lane.
-- A worker that finds the logs empty or the pid absent reports exactly that
-  with the `ls -la` of the three log files and stops.
+- If the pid is absent from the selected latency/extension rows, report that
+  and stop only pid-attributed analysis. Continue the project/time-window
+  cascade readout, including carry counters, without claiming pid ownership.
+  Stop the whole readout only when neither kind of evidence is available.
+  Report absent, empty, unreadable, or out-of-window inputs as observed, with
+  a bounded `ls -la` inventory of the resolved active files and retained archives.
 
 ## Deliverable
 
