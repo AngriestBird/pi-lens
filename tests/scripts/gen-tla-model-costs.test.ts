@@ -16,7 +16,6 @@
 //     partition's first live run), including the `<job>\t<step>\t<timestamp>Z `
 //     prefix `gh run view --log` adds -- so the parser is proven against the
 //     real capture, not against a hand-written line (AGENTS.md shape 16).
-import { spawnSync } from "node:child_process";
 import {
 	mkdirSync,
 	mkdtempSync,
@@ -26,7 +25,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
 	buildModelCosts,
 	costsFromLog,
@@ -48,6 +47,30 @@ const FIXTURES = join(import.meta.dirname, "..", "fixtures", "tla-model-costs");
 function scratch() {
 	const dir = mkdtempSync(join(tmpdir(), "pi-lens-gen-tla-costs-"));
 	return { dir, done: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+/**
+ * `console.error` captured and silenced. A refusal is the only record a bad
+ * `--log` leaves, so the test asserts it -- and a PASSING case must not print
+ * it into a CI transcript, where a reader cannot tell an expected refusal from
+ * a failure (#2547's `real-process-spawn` doctrine: drive the module
+ * in-process instead of spawning `node`).
+ */
+function captureErrors() {
+	const lines: string[] = [];
+	const spy = vi.spyOn(console, "error").mockImplementation((line: unknown) => {
+		lines.push(String(line));
+	});
+	return { lines, restore: () => spy.mockRestore() };
+}
+
+/** The generator's own progress line, captured rather than printed. */
+function captureLogs() {
+	const lines: string[] = [];
+	const spy = vi.spyOn(console, "log").mockImplementation((line: unknown) => {
+		lines.push(String(line));
+	});
+	return { lines, restore: () => spy.mockRestore() };
 }
 
 describe("#4672 V4 cost generation — the parser, the median, and a table worth writing", () => {
@@ -116,12 +139,18 @@ describe("#4672 V4 cost generation — the parser, the median, and a table worth
 
 	it("refuses a table with no measured config, before writing it", () => {
 		const { dir, done } = scratch();
+		const errors = captureErrors();
 		try {
 			const log = join(dir, "empty.log");
 			writeFileSync(log, "no config lines here\n");
 			const out = join(dir, "table.json");
 			const code = main(["--log", log, "--out", out], { root: ROOT });
 			expect(code).toBe(2);
+			// The refusal is the only record a bad `--log` leaves, so it is
+			// asserted here instead of being read off a CI transcript.
+			expect(errors.lines.join("\n")).toContain(
+				"no per-config TLC timings found",
+			);
 			// Nothing was written: the committed table is never the broken one.
 			expect(() => readFileSync(out, "utf8")).toThrow();
 			expect(
@@ -131,12 +160,14 @@ describe("#4672 V4 cost generation — the parser, the median, and a table worth
 				),
 			).toContain("no per-config TLC timings found");
 		} finally {
+			errors.restore();
 			done();
 		}
 	});
 
 	it("refuses an under-populated table (one shard's log is not a table)", () => {
 		const { dir, done } = scratch();
+		const errors = captureErrors();
 		try {
 			const log = join(FIXTURES, "run-39435284236-shard1-excerpt.log");
 			const out = join(dir, "table.json");
@@ -148,6 +179,7 @@ describe("#4672 V4 cost generation — the parser, the median, and a table worth
 			).toContain(`only 1 of the ${configCount} configs under formal/`);
 			const code = main(["--log", log, "--out", out], { root: ROOT });
 			expect(code).toBe(2);
+			expect(errors.lines.join("\n")).toContain("have a row (floor 50%)");
 			expect(() => readFileSync(out, "utf8")).toThrow();
 			// The floor one row above it is accepted, so the guard has a boundary
 			// rather than a mood.
@@ -159,6 +191,7 @@ describe("#4672 V4 cost generation — the parser, the median, and a table worth
 			);
 			expect(incompleteTableReason(files, { configCount })).toBeNull();
 		} finally {
+			errors.restore();
 			done();
 		}
 	});
@@ -180,7 +213,17 @@ describe("#4672 V4 cost generation — the parser, the median, and a table worth
 					.join("\n"),
 			);
 			const out = join(dir, "table.json");
-			expect(main(["--log", log, "--out", out], { root: ROOT })).toBe(0);
+			const progress = captureLogs();
+			try {
+				expect(main(["--log", log, "--out", out], { root: ROOT })).toBe(0);
+			} finally {
+				progress.restore();
+			}
+			// The one line a regeneration prints, read back here rather than
+			// printed into the lane's transcript.
+			expect(progress.lines.join("\n")).toContain(
+				`wrote ${out}: ${all.length} configs from 1 log(s)`,
+			);
 			const written = JSON.parse(readFileSync(out, "utf8")) as {
 				files: Record<string, number>;
 				generatedBy: string;
@@ -230,14 +273,18 @@ describe("#4672 V4 cost generation — the parser, the median, and a table worth
 		}
 	});
 
-	it("prints the usage and exits 2 on a bad invocation", () => {
-		const run = spawnSync(
-			process.execPath,
-			[join(ROOT, "scripts", "gen-tla-model-costs.mjs")],
-			{ encoding: "utf8" },
+	// The entry point the workflow calls, driven in-process: no child `node`, so
+	// this file holds no real spawn (#2547's `real-process-spawn`).
+	it("prints the usage and returns 2 on a bad invocation", () => {
+		const errors = captureErrors();
+		try {
+			expect(main([])).toBe(2);
+		} finally {
+			errors.restore();
+		}
+		expect(errors.lines.join("\n")).toContain("at least one --log is required");
+		expect(errors.lines.join("\n")).toContain(
+			"usage: node scripts/gen-tla-model-costs.mjs",
 		);
-		expect(run.status).toBe(2);
-		expect(run.stderr).toContain("at least one --log is required");
-		expect(run.stderr).toContain("usage: node scripts/gen-tla-model-costs.mjs");
 	});
 });

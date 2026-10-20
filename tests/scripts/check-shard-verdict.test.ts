@@ -28,11 +28,10 @@
 //     step list, names renumbered): shards 1 and 2 `success`, shard 3
 //     `cancelled` with `Run tests` concluded `success`, which is #4672's race
 //     on the other aggregate.
-import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+import { pathToFileURL } from "node:url";
+import { describe, expect, it, vi } from "vitest";
 import {
 	classifyShardJob,
 	evaluateShardVerdict,
@@ -634,28 +633,46 @@ describe("#4672 the aggregate step's own boundary: argv, fetch failures, annotat
 	// V5b, AGENTS.md shape 44: importing this module must not run the entry
 	// point. The retired guard compared `process.argv[1]` against a FILENAME
 	// SUFFIX, so any wrapper whose name ended in `check-shard-verdict.mjs` ran
-	// `main()` with the wrapper's argv and set the wrapper's exit code -- the
-	// reproduction below exits 2 on this module's own usage line. The guard now
-	// compares `import.meta.url` with `pathToFileURL(process.argv[1]).href`, the
-	// form the sibling scripts use.
-	it("does not run the entry point when a wrapper imports the module", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-lens-shard-verdict-wrapper-"));
+	// `main()` with the wrapper's argv and set the wrapper's exit code. The guard
+	// now compares `import.meta.url` with `pathToFileURL(process.argv[1]).href`,
+	// the form the sibling scripts use.
+	//
+	// Driven IN PROCESS: the wrapper is a path this test puts in `process.argv[1]`
+	// and the module is re-imported under it, so the platform guard itself is what
+	// answers. No child process: a real spawn here is the flake shape #2547
+	// ratchets (`real-process-spawn`), and the spawn proved nothing the guard's
+	// own comparison does not.
+	it("does not run the entry point when a wrapper imports the module", async () => {
+		const moduleUrl = pathToFileURL(
+			resolve(import.meta.dirname, "../../scripts/check-shard-verdict.mjs"),
+		).href;
+		const wrapperArgv1 = resolve(
+			import.meta.dirname,
+			"wrapper-check-shard-verdict.mjs",
+		);
+		const argvBefore = process.argv[1];
+		const exitCodeBefore = process.exitCode;
+		const printed: string[] = [];
+		const log = vi.spyOn(console, "log").mockImplementation((line: unknown) => {
+			printed.push(String(line));
+		});
 		try {
-			const wrapper = join(dir, "wrapper-check-shard-verdict.mjs");
-			writeFileSync(
-				wrapper,
-				`import ${JSON.stringify(resolve(import.meta.dirname, "../../scripts/check-shard-verdict.mjs"))};\nconsole.log("wrapper: after import");\n`,
-			);
-			const run = spawnSync(process.execPath, [wrapper], {
-				encoding: "utf8",
-				env: { PATH: process.env.PATH },
-			});
-			expect(run.stderr).not.toContain("missing --label");
-			expect(run.stdout.trim()).toBe("wrapper: after import");
-			expect(run.status).toBe(0);
+			process.argv[1] = wrapperArgv1;
+			// A fresh module instance, so the entry guard runs again under the
+			// wrapper's argv. The query keeps it distinct even outside vitest's
+			// module registry.
+			vi.resetModules();
+			await import(`${moduleUrl}?wrapper-check`);
 		} finally {
-			rmSync(dir, { recursive: true, force: true });
+			process.argv[1] = argvBefore;
+			process.exitCode = exitCodeBefore;
+			log.mockRestore();
 		}
+		// `main()` prints its own usage line and sets the exit code; a wrapper
+		// import must do neither.
+		expect(printed.join("\n")).not.toContain("check-shard-verdict:");
+		expect(printed).toEqual([]);
+		expect(process.exitCode).toBe(exitCodeBefore);
 	});
 
 	it("refuses a jobs file with no jobs array", async () => {
