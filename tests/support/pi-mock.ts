@@ -16,9 +16,19 @@ import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
-import { afterEach } from "vitest";
+import { afterEach, expect } from "vitest";
 import { withTimeout } from "../../clients/deadline-utils.js";
 import { runHandlerExpectingNoThrow } from "./handler-verdict.js";
+import { piMockAdmission } from "./pi-mock-importers.js";
+
+/**
+ * Admit-list gate (#4632, recurrence #4631): this double is the wrong seam for
+ * host-semantics cases, and the list of test files still allowed to load it only
+ * shrinks. The check runs at module load, on the test file vitest is running, so
+ * it sees every importer however the specifier was spelled or reached.
+ */
+const admissionRefusal = piMockAdmission(expect.getState().testPath);
+if (admissionRefusal !== undefined) throw new Error(admissionRefusal);
 
 /**
  * #3855: the session manager is pi's, not the ctx's. pi 1.0.4 hands a /reload

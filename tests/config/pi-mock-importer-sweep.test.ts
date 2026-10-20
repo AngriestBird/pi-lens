@@ -1,5 +1,5 @@
 /**
- * Registered-or-fail ratchet on the hand-built pi double `tests/support/pi-mock.ts`
+ * Admit-list ratchet on the hand-built pi double `tests/support/pi-mock.ts`
  * (#4632).
  *
  * Recurrence this prevents: #4631. pi rebuilds the system head when a `context`
@@ -11,32 +11,35 @@
  * `ExtensionRunner`) or tier 2 (`tests/support/pi-session.ts`, a real
  * `AgentSession`), see AGENTS.md "Testing".
  *
- * The importer list below is the baseline measured on 2026-10-20. A NEW importer
- * fails here; a REMOVED importer must also leave the list (a stale row fails), so
- * the list only shrinks. A row's class is acceptance 7 of #4632: `process-boundary`,
- * `internal-seam` (the case interposes on a pi-lens `clients/` module through
- * `vi.mock`, which cannot reach the copy pi's loader builds), or
- * `unproducible-payload`; `pending slice N` marks a file a roadmap slice still
- * owns, and slice 10 (the last) records the final three-class counts. Classes
- * are the author's reading at the baseline date and are checked for vocabulary
- * only; the SET of files is what the ratchet pins.
+ * THE GATE IS A LOAD-TIME ADMIT LIST, not a scan. `pi-mock.ts` calls
+ * `piMockAdmission` (`tests/support/pi-mock-importers.ts`) when it loads and
+ * throws for any test file not on `PI_MOCK_IMPORTERS`, so a new importer fails
+ * however its specifier is spelled: escapes, fragments, a re-export through a
+ * support file, an alias, a `.tsx` test or a test outside `tests/` all load the
+ * same module and meet the same check. The first version of this ratchet scanned
+ * source text for the spelling and four plants passed it (review r1, F1).
  *
- * The scan reads non-comment text with strings kept, because the evidence is a
- * module specifier. Comments are blanked, so prose naming the module neither
- * counts nor excuses. Two needles, either one flags a file. The first is the
- * token `pi-mock`, unless it prefixes another module's name: static,
- * side-effect and dynamic import, `require`, `vi.mock`, `importActual`,
- * `export * from`, a specifier held in a binding, `path.join` pieces. The
- * second is the double's own entry identifiers: a specifier assembled from
- * fragments that never spell the token still has to call them. KNOWN MISS: a
- * `makeCtx`-only user that also assembles the specifier from fragments;
- * `makeCtx` is a generic name in 18 unrelated files, so it cannot be a needle.
+ * WHAT THIS FILE STILL SCANS: only the other direction. A row for a file that no
+ * longer uses the double is stale and must be deleted, so the list only
+ * shrinks, and only a scan can see a file that does NOT load a module. The scan
+ * reads `tests/` (the registry's keys are `tests/`-relative); files elsewhere
+ * are covered by the load check, and `tests/scripts/ci-shuffle-census.test.ts`
+ * guards the collected-file population. The scan blanks comments and, for the
+ * specifier, reads strings only in a module-specifier position (`from "…"`,
+ * `import("…")`, `require("…")`, `vi.mock("…")`), so prose or a string that
+ * merely names the module neither keeps a row alive nor counts as a use. Its
+ * misses (an assembled specifier with no entry identifier) cost a false stale
+ * row, never a missed importer: the load check decides admission.
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import {
+	PI_MOCK_IMPORTERS,
+	piMockAdmission,
+} from "../support/pi-mock-importers.js";
 import {
 	assertNonEmptyScan,
 	auditRegistry,
@@ -50,132 +53,56 @@ const TESTS_ROOT = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
 	"..",
 );
-/** This file names the token in its own plant fixtures and messages. */
+/** This file names the module in its own plants and messages. */
 const SELF = "config/pi-mock-importer-sweep.test.ts";
 const CLASS_VOCABULARY =
-	/^(process-boundary|internal-seam|unproducible-payload|text-reference|double-subject|pending slice (?:[3-9]|10))$/;
+	/^(process-boundary|internal-seam|unproducible-payload|double-subject|pending slice (?:[3-9]|10))$/;
 
-const NEEDLES: Array<{ via: string; pattern: RegExp }> = [
-	{ via: "specifier", pattern: /pi-mock(?![\w-])/ },
-	{
-		via: "entry identifier",
-		pattern: /\b(?:createPiMock|makeStaleCtx|SESSION_START_TEST_BUDGET_MS)\b/,
-	},
-];
+const SPECIFIER_POSITION =
+	/\b(?:from|import|require|mock|doMock|unmock|importActual|importMock)\s*\(?\s*(["'`])((?:(?!\1)[^\n\\]|\\.)*)\1/g;
+const ENTRY_IDENTIFIER =
+	/\b(?:createPiMock|makeStaleCtx|SESSION_START_TEST_BUDGET_MS|STALE_CTX_MESSAGE)\b/;
+const ESCAPE = /\\x([0-9a-fA-F]{2})|\\u([0-9a-fA-F]{4})|\\u\{([0-9a-fA-F]+)\}/g;
 
-interface Hit {
-	line: number;
-	via: string;
-}
-
-/** First hit per needle, comment-blanked and string-kept. Pure, for the plants. */
-function piMockHits(source: string): Hit[] {
-	const text = stripSource(source, { strings: "keep" });
-	const hits: Hit[] = [];
-	for (const { via, pattern } of NEEDLES) {
-		const match = pattern.exec(text);
-		if (match) {
-			hits.push({
-				line: text.slice(0, match.index).split("\n").length,
-				via,
-			});
-		}
+/** Does this source still use the double? For the stale direction only. */
+function usesPiMock(source: string): boolean {
+	// Raw text carries the specifier; the blanked copy (same layout) says
+	// whether the keyword in front of it is code, so a commented-out or quoted
+	// import never counts.
+	const kept = source;
+	const blanked = stripSource(source, { strings: "blank" });
+	if (ENTRY_IDENTIFIER.test(blanked)) return true;
+	for (const match of kept.matchAll(SPECIFIER_POSITION)) {
+		// The keyword must be code: inside a string or regex it is blanked.
+		if (blanked[match.index] !== kept[match.index]) continue;
+		const decoded = match[2].replace(ESCAPE, (_all, a, b, c) =>
+			String.fromCodePoint(Number.parseInt(a ?? b ?? c, 16)),
+		);
+		if (/pi-mock(?![\w-])/.test(decoded)) return true;
 	}
-	return hits;
+	return false;
 }
-
-/**
- * file (tests/-relative) -> class. Only ever shrinks: delete a row in the PR that
- * removes the file's last pi-mock use.
- */
-const BASELINE: Record<string, string> = {
-	// double-subject
-	"support/pi-mock.test.ts": "double-subject",
-	// internal-seam
-	"clients/bootstrap-lazy-liveness.test.ts": "internal-seam",
-	"clients/dispatch/lazy-liveness.test.ts": "internal-seam",
-	"clients/formatters-lazy-liveness.test.ts": "internal-seam",
-	"clients/lsp-lazy-liveness.test.ts": "internal-seam",
-	"index-1892-govulncheck-lane-witness.test.ts": "internal-seam",
-	"index-1892-scanner-freshness-witness.test.ts": "internal-seam",
-	"index-1892-secrets-lane-witness.test.ts": "internal-seam",
-	"index-2939-read-path-witness.test.ts": "internal-seam",
-	"index-2939-tool-result-budget-witness.test.ts": "internal-seam",
-	"index-3190-inline-blocker-deleted-path-witness.test.ts": "internal-seam",
-	"index-3246-turn-end-delivery.test.ts": "internal-seam",
-	"index-3248-git-guard-latch-witness.test.ts": "internal-seam",
-	"index-3290-actionable-warnings-witness.test.ts": "internal-seam",
-	"index-3506-file-mutation-queue-wiring.test.ts": "internal-seam",
-	"index-3620-sweep-scope-fence.test.ts": "internal-seam",
-	"index-3748-advisory-scope-witness.test.ts": "internal-seam",
-	"index-3814-deferred-blocker-gate.test.ts": "internal-seam",
-	"index-3917-orphan-sweep-scope.test.ts": "internal-seam",
-	"index-4483-first-write-seed-witness.test.ts": "internal-seam",
-	"index-4484-unfixed-blocker-witness.test.ts": "internal-seam",
-	"index-4504-opaque-prescan-root-witness.test.ts": "internal-seam",
-	"index-drain-refresh-straddle.test.ts": "internal-seam",
-	"index-integration.test.ts": "internal-seam",
-	"index-loop-block-wiring.test.ts": "internal-seam",
-	"index-lsp-idle-reset.test.ts": "internal-seam",
-	"index-memory-sample-wiring.test.ts": "internal-seam",
-	"index-mode-awareness.test.ts": "internal-seam",
-	"index-mutation-bridge-recordability.test.ts": "internal-seam",
-	"index-mutation-latency-marker.test.ts": "internal-seam",
-	"index-observed-sweep-no-read-guard.test.ts": "internal-seam",
-	"index-project-trust-wiring.test.ts": "internal-seam",
-	"index-read-bridge-zero-line.test.ts": "internal-seam",
-	"index-smells-rollup-wiring.test.ts": "internal-seam",
-	"index-vanished-instance-wiring.test.ts": "internal-seam",
-	"index-wiring.test.ts": "internal-seam",
-	"index-word-index-memo-settle.test.ts": "internal-seam",
-	"index-write-order-token.test.ts": "internal-seam",
-	// pending slice 10
-	"clients/cascade-unanswered-primary-4403.test.ts": "pending slice 10",
-	"config/result-contract-governance.test.ts": "pending slice 10",
-	"index-process-bridge-rebind-real-factory.test.ts": "pending slice 10",
-	"tools/diagnostics-route-switch-matrix.test.ts": "pending slice 10",
-	// pending slice 3
-	"clients/context-append-to-last-user.test.ts": "pending slice 3",
-	"index-4631-pre-087-context-shape.test.ts": "pending slice 3",
-	// pending slice 5
-	"index-4554-last-member-teardown.test.ts": "pending slice 5",
-	"index-config-resolved-session-wiring.test.ts": "pending slice 5",
-	"index-multi-root-session-start.test.ts": "pending slice 5",
-	// pending slice 8
-	"clients/session-event-guard.test.ts": "pending slice 8",
-	"index-cascade-resolved-clean-wiring.test.ts": "pending slice 8",
-	"index-process-bridge-registration.test.ts": "pending slice 8",
-	// pending slice 9
-	"index-2992-integration.test.ts": "pending slice 9",
-	"index-lsp-config-root-eviction.test.ts": "pending slice 9",
-	"index-session-start-classification-wiring.test.ts": "pending slice 9",
-	"lens-toggle-command.test.ts": "pending slice 9",
-	// process-boundary
-	"clients/handler-verdict-helper.test.ts": "process-boundary",
-	"clients/ndjson-logger.test.ts": "process-boundary",
-	"clients/pi-host-callable-schema-contract.test.ts": "process-boundary",
-	"clients/pi-lens-home-hermeticity.test.ts": "process-boundary",
-	// text-reference
-	"config/handler-verdict-sweep.test.ts": "text-reference",
-};
 
 describe("pi-mock importer ratchet (#4632, recurrence #4631)", () => {
-	it("every file that uses the pi double is on the baseline list, and no row is stale", () => {
+	it("no row is stale and no scanned file uses the double off the list", () => {
 		const files = listSourceFiles(TESTS_ROOT, {
-			extensions: [".ts", ".mts", ".cts", ".js", ".mjs", ".cjs"],
+			extensions: [
+				".ts",
+				".mts",
+				".cts",
+				".tsx",
+				".js",
+				".mjs",
+				".cjs",
+				".jsx",
+			],
 		}).filter((file) => relativePosix(TESTS_ROOT, file) !== SELF);
-		const flagged: Array<{ key: string; detail: string }> = [];
+		const flagged: string[] = [];
 		for (const { file, source } of readWalkedFiles(files)) {
 			const rel = relativePosix(TESTS_ROOT, file);
-			// The double itself names its own module and entry points.
+			// The double itself names its own entry points.
 			if (rel === "support/pi-mock.ts") continue;
-			const hits = piMockHits(source);
-			if (hits.length > 0) {
-				flagged.push({
-					key: rel,
-					detail: `line ${hits[0].line}, ${hits.map((h) => h.via).join(" + ")}`,
-				});
-			}
+			if (usesPiMock(source)) flagged.push(rel);
 		}
 		// Calibration 2026-10-20: ~1,300 files under tests/. Half rounds to 650.
 		// A dead walk with a non-empty list already reds as stale rows; this floor
@@ -185,26 +112,21 @@ describe("pi-mock importer ratchet (#4632, recurrence #4631)", () => {
 			sweepName: "pi-mock importer ratchet",
 			flagged,
 			registered: [],
-			exemptions: BASELINE,
+			exemptions: { ...PI_MOCK_IMPORTERS },
 			minReasonLength: 10,
 			remediation:
-				"A new file may not drive the extension through tests/support/pi-mock.ts. " +
-				"A case whose verdict depends on what pi does with a handler's return value, " +
-				"what the model receives, or how pi orders a session goes through tier 1 " +
-				"(tests/support/pi-runner.ts, a real ExtensionRunner: flags, tools, commands, " +
-				"registrations) or tier 2 (tests/support/pi-session.ts, a real AgentSession: " +
-				"turns, tool round trips, session ids, the model-visible request). AGENTS.md " +
-				"'Testing' says which. Add a capability to pi-runner.test.ts / " +
-				"pi-session.test.ts first. If the file is a genuine process-boundary subject, " +
-				"internal seam or unproducible payload (#4632 acceptance 7), add it to BASELINE " +
-				"with that class and say why in the PR body. A row for a file that no longer " +
-				"uses the double must be deleted.",
+				"A test file may not load tests/support/pi-mock.ts unless it is on " +
+				"PI_MOCK_IMPORTERS (tests/support/pi-mock-importers.ts); the double throws " +
+				"at load otherwise. Host-semantics cases go through tier 1 " +
+				"(tests/support/pi-runner.ts) or tier 2 (tests/support/pi-session.ts); " +
+				"AGENTS.md 'Testing' says which. A row for a file that no longer uses " +
+				"the double must be deleted.",
 		});
 		expect(audit.problems).toEqual([]);
 	});
 
-	it("every baseline row names a class from the #4632 vocabulary", () => {
-		const bad = Object.entries(BASELINE)
+	it("every importer row names a class from the #4632 vocabulary", () => {
+		const bad = Object.entries(PI_MOCK_IMPORTERS)
 			.filter(([, cls]) => !CLASS_VOCABULARY.test(cls))
 			.map(([file, cls]) => `${file}: ${cls}`);
 		expect(bad).toEqual([]);
@@ -213,56 +135,106 @@ describe("pi-mock importer ratchet (#4632, recurrence #4631)", () => {
 	});
 });
 
-describe("pi-mock scan plants (spellings nobody designed the list for)", () => {
-	const flaggedPlants: Record<string, string> = {
+describe("piMockAdmission fails closed", () => {
+	const listed = path.join(TESTS_ROOT, "lens-toggle-command.test.ts");
+
+	it("admits a listed test file", () => {
+		expect(piMockAdmission(listed)).toBeUndefined();
+	});
+
+	it("refuses an unlisted test file, naming tier 1 and tier 2", () => {
+		const refusal = piMockAdmission(path.join(TESTS_ROOT, SELF));
+		expect(refusal).toContain("is not on the importer list");
+		expect(refusal).toContain("tier 1");
+		expect(refusal).toContain("tier 2");
+	});
+
+	it.each([
+		["no path (vitest reported none)", undefined],
+		["an empty path", ""],
+		["a non-string path", 42],
+		[
+			"a path that does not resolve",
+			path.join(TESTS_ROOT, "zz-missing.test.ts"),
+		],
+		["a file outside tests/", path.join(TESTS_ROOT, "..", "package.json")],
+	])("refuses %s", (_name, testPath) => {
+		expect(piMockAdmission(testPath)).toContain("refuses to load");
+	});
+});
+
+describe("pi-mock.ts is wired to the admit list", () => {
+	// Recurrence: review r1 F1 (#4693). The gate lives in the double's module
+	// body; neutering the call there must red something, so this loads the real
+	// module with the test path vitest reports swapped for an unlisted one.
+	async function loadAs(testPath: unknown): Promise<unknown> {
+		const spy = vi
+			.spyOn(expect, "getState")
+			.mockReturnValue({ testPath } as never);
+		try {
+			vi.resetModules();
+			return await import("../support/pi-mock.js");
+		} finally {
+			spy.mockRestore();
+		}
+	}
+
+	it("refuses to load for an unlisted test file", async () => {
+		await expect(loadAs(path.join(TESTS_ROOT, SELF))).rejects.toThrow(
+			/is not on the importer list/,
+		);
+	});
+
+	it("refuses to load when vitest reports no test path", async () => {
+		await expect(loadAs(undefined)).rejects.toThrow(/no test file path/);
+	});
+});
+
+describe("usesPiMock (stale direction): spellings and non-uses", () => {
+	// Plants are assembled from fragments so no plant string is itself a hit in
+	// a scan of this file's neighbours; backslash sequences are built from one.
+	const bs = String.fromCharCode(92);
+	const usedPlants: Record<string, string> = {
 		"static import": `import { createPiMock } from "../support/pi-mock.js";`,
 		"side-effect import": `import "./support/pi-mock.js";`,
-		"multi-line named import": `import {\n\tmakeCtx,\n\ttype PiMock,\n} from "../support/pi-mock.ts";`,
+		"multi-line import": `import {\n\tmakeCtx,\n} from\n\t"../support/pi-mock.ts";`,
 		"dynamic import": `const m = await import("../support/pi-mock.js");`,
-		"alias binding": `const spec = "../support/pi-mock.js";\nconst m = await import(spec);`,
-		"indirect call": `const load = () => import("../support/pi-mock.js");\nawait load();`,
 		require: `const m = require("../support/pi-mock.js");`,
-		"vi.mock of the double": `vi.mock("../support/pi-mock.js", () => ({}));`,
-		importActual: `const m = await vi.importActual("../support/pi-mock.js");`,
-		"value through another binding (re-export)": `export * from "../support/pi-mock.js";`,
-		"template literal": "const m = await import(`../support/pi-mock.js`);",
+		"vi.mock": `vi.mock("../support/pi-mock.js", () => ({}));`,
+		importActual: `await vi.importActual("../support/pi-mock.js");`,
+		"re-export": `export * from "../support/pi-mock.js";`,
+		"template literal": "await import(`../support/pi-mock.js`);",
 		"directory-style specifier": `await import("../support/pi-mock/index.js");`,
-		"template with interpolation": "await import(`../${dir}/pi-mock.js`);",
-		"path.join pieces": `path.join(ROOT, "support", "pi-mock.ts");`,
-		"split specifier, entry identifier used": `const spec = "../support/pi-" + "mock.js";\nconst { createPiMock } = await import(spec);`,
-		"entry identifier only": `const pi = createPiMock();`,
-		"after a comment on the same line": `/* tier 2 */ import { createPiMock } from "./pi-mock.js";`,
+		"escaped specifier": `import { makeCtx } from "./support/pi${bs}x2Dmock.js";`,
+		"unicode-escaped specifier": `import { makeCtx } from "./support/pi${bs}u002Dmock.js";`,
+		"entry identifier": `const pi = createPiMock();`,
+		"STALE_CTX_MESSAGE only": `expect(msg).toBe(STALE_CTX_MESSAGE);`,
+		"after a comment": `/* tier 2 */ import { makeCtx } from "./pi-mock.js";`,
+		"after a url string": `const url = "http://x"; import "../support/pi-mock.js";`,
 	};
-	for (const [name, source] of Object.entries(flaggedPlants)) {
-		it(`flags: ${name}`, () => {
-			expect(piMockHits(source).length).toBeGreaterThan(0);
+	for (const [name, source] of Object.entries(usedPlants)) {
+		it(`uses: ${name}`, () => {
+			expect(usesPiMock(source)).toBe(true);
 		});
 	}
 
-	// KNOWN MISS, stated in the header: a makeCtx-only user assembling the
-	// specifier from fragments. Pinned so a widened needle shows up as a change.
-	it("documents the one miss: makeCtx-only, specifier from fragments", () => {
-		const source = `const spec = "../support/pi-" + "mo" + "ck.js";\nconst { makeCtx } = await import(spec);`;
-		expect(piMockHits(source)).toEqual([]);
-	});
-
-	const quietPlants: Record<string, string> = {
+	const unusedPlants: Record<string, string> = {
 		"line comment": `// moved off tests/support/pi-mock.ts onto tier 2\nconst x = 1;`,
 		"block comment": `/* createPiMock was here, see pi-mock.ts */\nconst x = 1;`,
+		// Review r1 F5: a migrated file that keeps a note must not keep its row.
+		"string-only mention": `const MIGRATED = "moved off pi-mock onto tier 2";`,
 		"unrelated mock": `import { makeCtx } from "./runner-ctx.js";`,
-		// Recurrence: the first run of this ratchet flagged
-		// tests/scripts/pre-push-targeted-tests.test.ts for naming this very
-		// file's path in a registry list.
-		"a sibling module whose name starts with the token": `"tests/config/pi-mock-importer-sweep.test.ts",`,
+		"commented-out import": `// import { makeCtx } from "./support/pi-mock.js";\nconst x = 1;`,
+		// A specifier-position keyword inside a string is not an import.
+		"import statement quoted inside a string": `const sample = "import x from './support/pi-mock.js'";`,
+		// Recurrence: the first run of the first version flagged
+		// tests/scripts/pre-push-targeted-tests.test.ts for naming a sibling path.
+		"sibling module whose name starts with the token": `"tests/support/pi-mock-importers.ts",`,
+		"import of the admit-list module": `import { PI_MOCK_IMPORTERS } from "../support/pi-mock-importers.js";`,
 	};
-	for (const [name, source] of Object.entries(quietPlants)) {
-		it(`does not flag: ${name}`, () => {
-			expect(piMockHits(source)).toEqual([]);
+	for (const [name, source] of Object.entries(unusedPlants)) {
+		it(`does not use: ${name}`, () => {
+			expect(usesPiMock(source)).toBe(false);
 		});
 	}
-
-	it("a comment opener inside a string does not blank the import after it", () => {
-		const source = `const url = "http://x"; import "../support/pi-mock.js";`;
-		expect(piMockHits(source).length).toBeGreaterThan(0);
-	});
 });

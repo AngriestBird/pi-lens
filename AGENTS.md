@@ -1729,10 +1729,13 @@ rebuilt the system head, and every test passed. Tier 1,
 `AgentSession` with pi-ai's `fauxProvider`: turns, tool round trips, session
 ids, and the request the model sees. Their header comments state the APIs
 and limits. A new tier capability adds a case to `pi-runner.test.ts` or
-`pi-session.test.ts` first. `pi-mock.ts` stays for three classes only:
-process-boundary subjects, pi-lens-internal seams, and payloads a scripted
-provider cannot produce. `tests/config/pi-mock-importer-sweep.test.ts` lists
-today's importers and fails a new one; a removed importer leaves the list.
+`pi-session.test.ts` first. `pi-mock.ts` stays for three classes: process-boundary
+subjects, pi-lens-internal seams, and payloads a scripted provider cannot
+produce. It also stays for files a roadmap slice still owns. It throws at load
+for a test file not on `PI_MOCK_IMPORTERS` (`tests/support/pi-mock-importers.ts`),
+so a new user fails however it imports the double. The list only shrinks:
+`tests/config/pi-mock-importer-sweep.test.ts` fails on a row whose file no
+longer uses it.
 
 When the defect is an ordering of awaits on one seam (a coalescing queue, a
 per-key serializer), or the seam has regressed before, write a scheduler
