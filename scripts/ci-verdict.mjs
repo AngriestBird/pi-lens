@@ -210,10 +210,6 @@ import {
 	stripAnsi,
 	stripLineTimestamps,
 } from "./lib/ci-failure-classifier.mjs";
-// The ONE `escapeRegExp` runtime copy (#2558). `scripts/lib/astgrep-self-scan.mjs`
-// already imports this leaf from a script, so the owner is reachable here; this
-// file's own hand-copy beside it was a second spelling of a shared rule (V5c).
-import { escapeRegExp } from "../clients/string-utils.js";
 import { githubHeaders } from "./lib/github-rest.mjs";
 import { parseVitestSummary } from "./lib/vitest-summary.mjs";
 import {
@@ -1045,10 +1041,17 @@ export const MAX_RUNTIME_CAP_LINES = 12;
  * unrecognised placeholder still matches its job rather than silently dropping
  * the job from the report.
  *
+ * `escapeRegExp` is the ONE runtime copy (`clients/string-utils.ts`, #2558),
+ * passed in rather than imported: that file is build output, and this script
+ * must load in a checkout that never ran `npm run build` (#4680 r4 F1).
+ * `readJobTimeCaps` loads it lazily beside the YAML parser, the other compiled
+ * file this report needs, so an unbuilt checkout loses this report alone.
+ *
  * @param {string} jobName
+ * @param {(text: string) => string} escapeRegExp
  * @returns {RegExp}
  */
-export function checkNamePattern(jobName) {
+export function checkNamePattern(jobName, escapeRegExp) {
 	// Split on the placeholders FIRST and escape only the literal chunks: a
 	// name is escaped after expansion would leave `matrix\.shard` behind, and
 	// an expansion pattern escaped with the rest would stop being a pattern.
@@ -1073,9 +1076,10 @@ export function checkNamePattern(jobName) {
  *
  * @param {object} doc a `yaml.load` of a workflow file
  * @param {string} file the workflow's path, for the printed line
+ * @param {(text: string) => string} escapeRegExp see `checkNamePattern`
  * @returns {Array<{ file: string, jobId: string, name: string, capMinutes: number, pattern: RegExp }>}
  */
-export function jobCapEntries(doc, file) {
+export function jobCapEntries(doc, file, escapeRegExp) {
 	const jobs = doc?.jobs;
 	if (!jobs || typeof jobs !== "object") return [];
 	const entries = [];
@@ -1089,7 +1093,7 @@ export function jobCapEntries(doc, file) {
 			jobId,
 			name,
 			capMinutes: cap,
-			pattern: checkNamePattern(name),
+			pattern: checkNamePattern(name, escapeRegExp),
 		});
 	}
 	return entries;
@@ -1097,9 +1101,10 @@ export function jobCapEntries(doc, file) {
 
 /**
  * The caps of every workflow file under `<root>/.github/workflows`, parsed from
- * the YAML the runner itself reads. The YAML parser is loaded dynamically: this
- * script is documented to run with nothing but `gh` on PATH, so a checkout with
- * no install degrades to one `unavailable` line instead of a crash.
+ * the YAML the runner itself reads. The YAML parser and the escape helper are
+ * loaded dynamically: both are compiled `clients/` files, and this script is
+ * documented to run with nothing but `gh` on PATH, so a checkout with no
+ * install or build degrades to one `unavailable` line instead of a crash.
  *
  * @param {string} root repository root
  * @returns {Promise<Array<{ file: string, jobId: string, name: string, capMinutes: number, pattern: RegExp }>>}
@@ -1111,10 +1116,13 @@ export async function readJobTimeCaps(root) {
 		.filter((file) => /\.ya?ml$/.test(file))
 		.sort();
 	const yaml = (await import("../clients/deps/js-yaml.js")).default;
+	const { escapeRegExp } = await import("../clients/string-utils.js");
 	const entries = [];
 	for (const file of files) {
 		const doc = yaml.load(readFileSync(join(dir, file), "utf8"));
-		entries.push(...jobCapEntries(doc, `.github/workflows/${file}`));
+		entries.push(
+			...jobCapEntries(doc, `.github/workflows/${file}`, escapeRegExp),
+		);
 	}
 	return entries;
 }

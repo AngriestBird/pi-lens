@@ -10,10 +10,20 @@
 // already fetched (`started_at`/`completed_at` on every row), so the report
 // costs no network call of its own. It is non-gating: it never touches the
 // exit code.
-import { readFileSync } from "node:fs";
+import {
+	copyFileSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import yaml from "../../clients/deps/js-yaml.js";
+import { escapeRegExp } from "../../clients/string-utils.js";
 import {
 	checkNamePattern,
 	computeVerdict,
@@ -65,6 +75,7 @@ describe("#3920 item 3: a required job's runtime against its cap", () => {
 				capMinutes: 12,
 				pattern: checkNamePattern(
 					"TLA+ models (shard ${{ matrix.shard }}/${{ strategy.job-total }})",
+					escapeRegExp,
 				),
 			},
 		];
@@ -92,7 +103,7 @@ describe("#3920 item 3: a required job's runtime against its cap", () => {
 				jobId: "slow",
 				name: "slow (advisory)",
 				capMinutes: 10,
-				pattern: checkNamePattern("slow (advisory)"),
+				pattern: checkNamePattern("slow (advisory)", escapeRegExp),
 			},
 		];
 		const lines = runtimeCapLines({
@@ -167,7 +178,10 @@ describe("#3920 item 3: a required job's runtime against its cap", () => {
 				jobId: "publish",
 				name: "Build combined nightly report",
 				capMinutes: 90,
-				pattern: checkNamePattern("Build combined nightly report"),
+				pattern: checkNamePattern(
+					"Build combined nightly report",
+					escapeRegExp,
+				),
 			},
 		];
 		const lines = runtimeCapLines({
@@ -210,6 +224,7 @@ describe("#3920 item 3: a required job's runtime against its cap", () => {
 				capMinutes: 12,
 				pattern: checkNamePattern(
 					"TLA+ models (shard ${{ matrix.shard }}/${{ strategy.job-total }})",
+					escapeRegExp,
 				),
 			},
 			{
@@ -217,7 +232,7 @@ describe("#3920 item 3: a required job's runtime against its cap", () => {
 				jobId: "tla-models",
 				name: "aggregate",
 				capMinutes: 10,
-				pattern: checkNamePattern("TLA+ models"),
+				pattern: checkNamePattern("TLA+ models", escapeRegExp),
 			},
 		];
 		const lines = runtimeCapLines({
@@ -249,7 +264,7 @@ describe("#3920 item 3: a required job's runtime against its cap", () => {
 				jobId: "j",
 				name: "Job",
 				capMinutes: 10,
-				pattern: checkNamePattern("Job"),
+				pattern: checkNamePattern("Job", escapeRegExp),
 			},
 		];
 		const lines = runtimeCapLines({
@@ -280,7 +295,7 @@ describe("#3920 item 3: a required job's runtime against its cap", () => {
 				jobId: "j",
 				name: "Job",
 				capMinutes: 1,
-				pattern: checkNamePattern("Job"),
+				pattern: checkNamePattern("Job", escapeRegExp),
 			},
 		];
 		const lines = runtimeCapLines({
@@ -356,6 +371,7 @@ describe("#3920 item 3: a required job's runtime against its cap", () => {
 				capMinutes: 12,
 				pattern: checkNamePattern(
 					"TLA+ models (shard ${{ matrix.shard }}/${{ strategy.job-total }})",
+					escapeRegExp,
 				),
 			},
 		];
@@ -368,6 +384,68 @@ describe("#3920 item 3: a required job's runtime against its cap", () => {
 		// ...and the verdict on the same payload is unchanged: the row concluded
 		// success, so the runtime report cannot move the exit code.
 		expect(verdict.exitCode).toBe(0);
+	});
+});
+
+// #4680 r4 F1: `scripts/ci-verdict.mjs` is documented to run with nothing but
+// `gh` on PATH, and lanes read CI before they build. Round 3 folded its private
+// escape helper onto `clients/string-utils.js` with a STATIC import, and that
+// file is build output (`.gitignore` `*.js`): an unbuilt `git archive` of the
+// head died with ERR_MODULE_NOT_FOUND before printing a verdict, while master
+// loaded. The tree below is what an unbuilt checkout gives the script: its
+// tracked `scripts/` sources and the workflows, and no `clients/` build output.
+describe("#4680 r4 F1: ci-verdict runs in a checkout that was never built", () => {
+	it("loads without build output and degrades only the cap report, to one line", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-lens-ci-verdict-unbuilt-"));
+		try {
+			const lib = join(dir, "scripts", "lib");
+			mkdirSync(lib, { recursive: true });
+			copyFileSync(
+				join(ROOT, "scripts", "ci-verdict.mjs"),
+				join(dir, "scripts", "ci-verdict.mjs"),
+			);
+			for (const name of readdirSync(join(ROOT, "scripts", "lib")))
+				if (name.endsWith(".mjs"))
+					copyFileSync(join(ROOT, "scripts", "lib", name), join(lib, name));
+			mkdirSync(join(dir, ".github", "workflows"), { recursive: true });
+			copyFileSync(
+				join(ROOT, ".github", "workflows", "ci.yml"),
+				join(dir, ".github", "workflows", "ci.yml"),
+			);
+			const unbuilt = (await import(
+				pathToFileURL(join(dir, "scripts", "ci-verdict.mjs")).href
+			)) as typeof import("../../scripts/ci-verdict.mjs");
+			// The verdict itself needs no build output...
+			expect(
+				unbuilt.computeVerdict(
+					{
+						check_runs: [
+							{
+								name: "Unit tests",
+								status: "completed",
+								conclusion: "success",
+							},
+							{
+								name: "Lint & type-check",
+								status: "completed",
+								conclusion: "success",
+							},
+						],
+					},
+					["Unit tests", "Lint & type-check"],
+				).exitCode,
+			).toBe(0);
+			// ...and the one report that does (the YAML parser and the escape
+			// helper are both compiled `clients/` files) says so in one line.
+			const lines = await unbuilt.formatRuntimeCapLines({
+				checkRuns: realShardRows(),
+				root: dir,
+			});
+			expect(lines).toHaveLength(1);
+			expect(lines[0]).toMatch(/^Runtime vs cap: unavailable \(/);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });
 
@@ -403,10 +481,11 @@ describe("#3920 item 3: the caps come from the workflow YAML itself", () => {
 	it("expands only strategy.job-total to a number; any other expression admits one token", () => {
 		const total = checkNamePattern(
 			"Join (${{ matrix.os }}/${{ strategy.job-total }})",
+			escapeRegExp,
 		);
 		expect(total.test("Join (ubuntu-latest/4)")).toBe(true);
 		expect(total.test("Join (ubuntu-latest/x)")).toBe(false);
-		const any = checkNamePattern("Job (${{ github.ref }})");
+		const any = checkNamePattern("Job (${{ github.ref }})", escapeRegExp);
 		expect(any.test("Job (refs/heads/master)")).toBe(true);
 		// Anchored: a longer name is a different check.
 		expect(any.test("Job (refs/heads/master) extra")).toBe(false);
@@ -416,6 +495,7 @@ describe("#3920 item 3: the caps come from the workflow YAML itself", () => {
 		const entries = jobCapEntries(
 			{ jobs: { build: { "timeout-minutes": 5 }, other: {} } },
 			"ci.yml",
+			escapeRegExp,
 		);
 		expect(entries).toHaveLength(1);
 		expect(entries[0]).toMatchObject({
@@ -438,6 +518,7 @@ describe("#3920 item 3: the caps come from the workflow YAML itself", () => {
 					},
 				},
 				"ci.yml",
+				escapeRegExp,
 			),
 		).toEqual([]);
 	});
@@ -446,7 +527,7 @@ describe("#3920 item 3: the caps come from the workflow YAML itself", () => {
 		const doc = yaml.load(
 			readFileSync(join(ROOT, ".github", "workflows", "ci.yml"), "utf8"),
 		) as { jobs: Record<string, { "timeout-minutes"?: number }> };
-		const entries = jobCapEntries(doc, "ci.yml");
+		const entries = jobCapEntries(doc, "ci.yml", escapeRegExp);
 		const shard = entries.find((entry) => entry.jobId === "tla-shards");
 		expect(shard?.capMinutes).toBe(doc.jobs["tla-shards"]["timeout-minutes"]);
 		expect(doc.jobs["tla-shards"]["timeout-minutes"]).toBe(20);

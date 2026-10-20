@@ -515,10 +515,14 @@ export type JobCapEntry = {
 	capMinutes: number;
 	pattern: RegExp;
 };
-export declare function checkNamePattern(jobName: string): RegExp;
+export declare function checkNamePattern(
+	jobName: string,
+	escapeRegExp: (text: string) => string,
+): RegExp;
 export declare function jobCapEntries(
 	doc: unknown,
 	file: string,
+	escapeRegExp: (text: string) => string,
 ): JobCapEntry[];
 export declare function readJobTimeCaps(root: string): Promise<JobCapEntry[]>;
 export declare function runtimeCapLines(args: {
