@@ -976,6 +976,16 @@ file-scoped worklist and receives no project-wide scanner output.
   refresh-state block; never auto-merged, never demotes). `tests/config/lsp-idle-eviction-measurement.test.ts`
   fails when a registry server can go unmeasured without an admission or when
   the committed measurement vetoes a server declared `transparent`.
+- The compiled registry holds the CATALOG ENTRY for every built-in with no
+  command override (`compileLspRegistry`), so the object the client registry
+  keeps (`SpawnedServer.info`) is the object `LSP_SERVERS`/`getServerById`
+  exposes; an overridden server keeps its own copy so its `spawn` and trust
+  admission never reach the catalog. A copy here is not a safe container: it is
+  a second registry whose entries swallow every arm a caller applies to the
+  first (history: `HISTORY.md`, 2026-10-19).
+  `tests/clients/lsp/lsp-registry-trust.test.ts` pins both directions;
+  `scheduleIdleEviction` records `lsp-idle-eviction-declined` once per server
+  per session when it arms no timer.
 - The server-role vocabulary and the declared trait table have one owner,
   `clients/lsp/server-traits.ts` (#1488, #1756 stage 1). Ask `isAuxiliary`,
   never a comparison against the role literal, and read `notifyInflightLimit`
@@ -1036,6 +1046,16 @@ file-scoped worklist and receives no project-wide scanner output.
 - Per-path LSP notifications serialize read/build/send/record work. Pull
   cancellation blocks a same-path replacement until settlement. Waits are
   deadline- and abort-bounded, and silence is never clean.
+- Document line addressing has one owner, `clients/lsp/content-scan.ts`: the
+  `\n` count behind the `lsp_document_send` record's `contentLineCount` and the
+  LSP sync bound (`countLfNewlines`), the last LSP-addressable line an
+  Incremental change spans, and one line's text (`lineTextAt`, which the
+  diagnostic-conversion call sites read) all come from it. The rule it owns is
+  the count and the one-line read: no other module may `split("\n")` document
+  content to obtain a line count or a single line — a send, a bound check, and
+  a line read ask this owner. A module that needs the whole line array (a
+  multi-line table, a per-line scan of its own document) keeps its `split`; the
+  array is the value it consumes, never a way to count or to reach one line.
 - `touchFile` fires a type-2 watched-file announcement at entry for the first
   seen content hash of a path, before the owner's didChange; it reaches every
   other live client of the same server across package roots through the client

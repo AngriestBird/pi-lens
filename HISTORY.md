@@ -1,5 +1,28 @@
 # HISTORY
 
+## 2026-10-19 — a defensive copy severed the identity the idle-eviction probe arms
+
+`compileLspRegistry` returned `{ ...server }` for every built-in with no command
+override (since `7f7c8cde6`, #2372), so the object the client registry kept as
+`SpawnedServer.info` was a copy. The nightly idle-eviction probe arms
+`server.idleEviction = "transparent"` on the object `LSP_SERVERS` /
+`getServerById` exposes; the copy never saw the arm, so `scheduleIdleEviction`
+declined to start a timer. From the 2026-10-10 nightly on, every candidate row
+in `docs/lsp-idle-eviction.md` read `not-evicted`, and the promotion sweep
+(#3989) had nothing to promote.
+
+Nine nights of those rows reached the doc and were read as a measurement
+verdict rather than as a defect: "not evicted yet" from a server whose timer
+never armed is indistinguishable, on that surface, from a server whose eviction
+is merely slow. CI stayed green because the probe's driver test doubles
+`getServersForFileWithConfig`, and the earlier rollout witness read the catalog
+fallback instead of a compiled session config.
+
+`clients/lsp/config.ts` now hands back the catalog entry itself, an overridden
+server keeps its own copy, and `scheduleIdleEviction` records
+`lsp-idle-eviction-declined` once per server per session so "no timer was
+scheduled" stops reading as "the eviction is slow". PR #4639.
+
 ## 2026-10-18 — swallowed failure recorded as a different event (shape 75)
 
 Shape 75 ("Swallowed failure recorded as a different event") entered the catalog

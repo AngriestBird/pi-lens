@@ -240,8 +240,14 @@ export interface TmpRootFsTarget {
  * the census observes and sweeps (#2912). `mkdir` records ANY name: a fixture
  * sibling written at the tmp root — `path.join(<fixture>, "..")` — is the
  * pattern-class leak of #4560, and its name is not namespaced. A directory a
- * CHILD process creates is not observed here, which is what keeps a tool's own
- * tmp cache (`jiti`) out of the fixture-sibling population. The caller
+ * CHILD process creates is not observed here: that is the case with no creator
+ * on record, and the reason a child's tmp cache is counted and never asserted.
+ * It is NOT the case for a loader's cache created IN THIS PROCESS -- pi's
+ * `createJiti` (`@earendil-works/pi-coding-agent/dist/core/extensions/loader.js`)
+ * mkdirs `path.join(os.tmpdir(), "jiti")` from the test process itself on the
+ * first by-path extension load, so this interposer sees it and attributes it to
+ * the file that was running (#4673; the write is removed at its source by the
+ * `JITI_FS_CACHE=0` pin in `tests/support/vitest-setup.ts`). The caller
  * re-publishes the patched members to ESM importers with
  * `syncBuiltinESMExports()`.
  */
