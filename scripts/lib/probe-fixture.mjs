@@ -127,7 +127,11 @@ export function createProbeFixture(deps) {
 			support = await lsp.getWorkspaceDiagnosticsSupport(absFile);
 			await sleep(SETTLE_MS);
 			// Phase boundary: every publish written so far is the dirty touch's.
-			drainPublishTrace(dirtyPubs, row.serverId);
+			// The trace is scoped to (server, THIS fixture's document) — several
+			// live clients share a server id, and the sink's byte offset marks the
+			// flush position, not the arrival position, so a foreign client's late
+			// line can land inside this phase (#4615).
+			drainPublishTrace(dirtyPubs, row.serverId, absFile);
 
 			fs.writeFileSync(
 				absFile,
@@ -137,7 +141,7 @@ export function createProbeFixture(deps) {
 			await touch(fs.readFileSync(absFile, "utf8"), STEP_WAIT_MS);
 			await sleep(SETTLE_MS);
 		} finally {
-			drainPublishTrace(cleanPubs, row.serverId);
+			drainPublishTrace(cleanPubs, row.serverId, absFile);
 		}
 
 		row.mode = support?.mode ?? "unknown";
@@ -174,9 +178,21 @@ export function createProbeFixture(deps) {
 		// which this trace already holds — no extra touch, no extra server time.
 		const firstPublishVerdict = classifyFirstPublish(dirtyPubs);
 		row.firstPublish = firstPublishVerdict.firstPublish;
+		// #4615: a `clean: true` fixture's file carries no diagnostic, so a
+		// publish that CARRIES findings during its phase cannot be that file's
+		// answer. `direct` from it is therefore never a measurement of this
+		// axis — it is another client's line, or the fixture's `clean` flag is
+		// stale. Refuse the class (the conservative reading) instead of writing it
+		// into the matrix: the `empty-first`/`direct` cell this row fed is exactly
+		// how the typescript row drifted.
+		let firstPublishReason = firstPublishVerdict.reason;
+		if (fx.clean && firstPublishVerdict.firstPublish === "direct") {
+			row.firstPublish = "unknown";
+			firstPublishReason = `refused (#4615): a clean fixture's file has no finding to publish, so this is not its measurement — ${firstPublishVerdict.reason}`;
+		}
 		row.behavior = verdict.behavior;
 		row.tier = verdict.tier;
 		row.tierLabel = verdict.tierLabel;
-		row.detail = `dirtyPubs=${obs.dirtyPublishes}(v:${obs.dirtyVersioned}) cleanPubs=${obs.cleanTransitionPublishes}(v:${obs.cleanTransitionVersioned}) dirtyDiags=${dirtyDiagCount} first-publish=${row.firstPublish} — ${verdict.reason}; ${firstPublishVerdict.reason}`;
+		row.detail = `dirtyPubs=${obs.dirtyPublishes}(v:${obs.dirtyVersioned}) cleanPubs=${obs.cleanTransitionPublishes}(v:${obs.cleanTransitionVersioned}) dirtyDiags=${dirtyDiagCount} first-publish=${row.firstPublish} — ${verdict.reason}; ${firstPublishReason}`;
 	};
 }

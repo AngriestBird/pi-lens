@@ -26,6 +26,7 @@ import {
 	createPublishTraceDrainer,
 	findCleanSignalDrift,
 	resolveProbeServerId,
+	resolveTargetLangRows,
 	strategyKeyForLang,
 	targetLangForFixture,
 } from "../../scripts/lib/clean-signal.mjs";
@@ -44,36 +45,75 @@ import {
 /** One parsed `[lsp-pub]` record as the drainer pushes it into a phase sink. */
 interface DrainedPublish {
 	server: string;
+	/** #4615: the document the row is about, absent on an unattributable row. */
+	path?: string;
 	pubVersion: string;
 	diags: number;
 	versioned: boolean;
 }
 
+const INTERLEAVED_FIXTURE = path.join(
+	process.cwd(),
+	"tests/fixtures/extension-logs/probe-clean-signal-interleaved.log",
+);
+
+/**
+ * Drain one NDJSON sink window for one (server, document) through the real
+ * drainer — the production offset/parse/filter path, fed from a buffer instead
+ * of extension.log.
+ */
+function drainRows(
+	logText: string,
+	serverId: string,
+	fixturePath: string,
+): DrainedPublish[] {
+	const bytes = Buffer.from(logText);
+	const drain = createPublishTraceDrainer({
+		readLog() {
+			return {
+				size: bytes.length,
+				read(start) {
+					const chunk = bytes.subarray(start).toString("utf8");
+					return { chunk, bytesRead: bytes.length - start };
+				},
+			};
+		},
+	});
+	const sink: DrainedPublish[] = [];
+	drain(sink, serverId, fixturePath);
+	return sink;
+}
+
+/** The saved interleaved sink window, drained for one (server, document). */
+function drainFixtureLog(
+	serverId: string,
+	fixturePath: string,
+): DrainedPublish[] {
+	return drainRows(
+		fs.readFileSync(INTERLEAVED_FIXTURE, "utf8"),
+		serverId,
+		fixturePath,
+	);
+}
+
+/** One `[lsp-pub]` sink line, as the client's `logExtension` writes it. */
+function pubLine(server: string, diags: number, documentPath?: string): string {
+	return `${JSON.stringify({
+		subsystem: "lsp-pub",
+		level: "debug",
+		message: `server=${server} pubVersion=undefined docVersion=1 diags=${diags}`,
+		...(documentPath === undefined ? {} : { metadata: { path: documentPath } }),
+	})}\n`;
+}
+
 describe("classifyCleanBehavior (phase-aware 4-way)", () => {
-	it("scopes an interleaved extension.log trace to the row's server", () => {
+	it("scopes an interleaved extension.log trace to the row's server and document", () => {
 		// #3390 recurrence: a shared extension.log lets another live server's
 		// publish become this row's first-publish and clean-signal evidence.
-		const fixture = fs.readFileSync(
-			path.join(
-				process.cwd(),
-				"tests/fixtures/extension-logs/probe-clean-signal-interleaved.log",
-			),
-			"utf8",
-		);
-		const bytes = Buffer.from(fixture);
-		const drain = createPublishTraceDrainer({
-			readLog() {
-				return {
-					size: bytes.length,
-					read(start) {
-						const chunk = bytes.subarray(start).toString("utf8");
-						return { chunk, bytesRead: bytes.length - start };
-					},
-				};
-			},
-		});
-		const own: DrainedPublish[] = [];
-		drain(own, "server-a");
+		// #4615: the same log also holds other DOCUMENTS of the same server id
+		// (five typescript fixtures), so the drain is scoped to both.
+		const drainA = drainFixtureLog("server-a", "/proj/a.ts");
+		const own = drainA;
 		expect(own).toHaveLength(2);
 		expect(own.map((publish) => publish.diags)).toEqual([1, 0]);
 		expect(
@@ -84,33 +124,19 @@ describe("classifyCleanBehavior (phase-aware 4-way)", () => {
 				cleanTransitionVersioned: 1,
 			}).behavior,
 		).toBe("publishes-versioned");
+		// The other server's rows are in the same window, interleaved, and do not
+		// leak into A's phase; the same server on another document neither.
+		expect(
+			drainFixtureLog("server-b", "/proj/b.ts").map((p) => p.diags),
+		).toEqual([7, 6]);
+		expect(drainFixtureLog("server-a", "/proj/b.ts")).toEqual([]);
 	});
 	it("scopes an auxiliary fixture's trace to the auxiliary, not the file's primary (#3665)", () => {
 		// #3665 recurrence (the inverse of #3390): the probe resolved serverId by
 		// `role !== "auxiliary"`, so the ast-grep row read typescript's two
 		// unversioned publishes instead of ast-grep's three versioned ones.
-		const bytes = fs.readFileSync(
-			path.join(
-				process.cwd(),
-				"tests/fixtures/extension-logs/probe-clean-signal-interleaved.log",
-			),
-		);
-		const drainFor = (serverId: string | undefined) => {
-			const drain = createPublishTraceDrainer({
-				readLog() {
-					return {
-						size: bytes.length,
-						read(start) {
-							const chunk = bytes.subarray(start).toString("utf8");
-							return { chunk, bytesRead: bytes.length - start };
-						},
-					};
-				},
-			});
-			const sink: DrainedPublish[] = [];
-			drain(sink, serverId as string);
-			return sink;
-		};
+		const drainFor = (serverId: string | undefined) =>
+			drainFixtureLog(serverId as string, "/proj/sample.ts");
 		// `getServersForFileWithConfig` order for a .ts file with the ast-grep aux.
 		const servers = [
 			{ id: "typescript" },
@@ -139,17 +165,10 @@ describe("classifyCleanBehavior (phase-aware 4-way)", () => {
 		// log the real drainer reads: dirty touch = ts(unversioned), ast-grep v1,
 		// ast-grep v2; clean touch = ts(unversioned), ast-grep v3.
 		const lines = fs
-			.readFileSync(
-				path.join(
-					process.cwd(),
-					"tests/fixtures/extension-logs/probe-clean-signal-interleaved.log",
-				),
-				"utf8",
-			)
+			.readFileSync(INTERLEAVED_FIXTURE, "utf8")
 			.trimEnd()
 			.split("\n")
 			.slice(4);
-		const phases = [lines.slice(0, 3), lines.slice(3)];
 		let log = Buffer.alloc(0);
 		const drain = createPublishTraceDrainer({
 			readLog() {
@@ -168,6 +187,14 @@ describe("classifyCleanBehavior (phase-aware 4-way)", () => {
 		try {
 			const absFile = path.join(dst, "sample.ts");
 			fs.writeFileSync(absFile, "export const x = 1;\n");
+			// #4615: the saved window names its own document; re-stamp it to THIS
+			// fixture's file so the rows are the ones its phase may claim.
+			const stamped = lines.map((line) => {
+				const row = JSON.parse(line) as { metadata?: { path: string } };
+				row.metadata = { path: absFile };
+				return JSON.stringify(row);
+			});
+			const phases = [stamped.slice(0, 3), stamped.slice(3)];
 			let touches = 0;
 			const probeFixture = createProbeFixture({
 				lsp: {
@@ -229,6 +256,173 @@ describe("classifyCleanBehavior (phase-aware 4-way)", () => {
 			fs.rmSync(dst, { recursive: true, force: true });
 		}
 	});
+	describe("#4615 publish-trace attribution (document-scoped, fail-closed)", () => {
+		it("drops a publish row that names no document", () => {
+			// A line from a writer that predates the path stamp cannot be shown to
+			// be this fixture's, so it is not evidence in either direction. Dropping
+			// it under-counts a phase (conservative); keeping it is how a foreign
+			// client decided a classification.
+			expect(
+				drainRows(pubLine("typescript", 1), "typescript", "/proj/x.ts"),
+			).toEqual([]);
+		});
+
+		it("drops another live client's publish for the same server id", () => {
+			const window =
+				pubLine("typescript", 0, "/proj/x.ts") +
+				pubLine("typescript", 1, "/proj/other-fixture/bad.ts");
+			expect(
+				drainRows(window, "typescript", "/proj/x.ts").map((p) => p.diags),
+			).toEqual([0]);
+		});
+
+		it("probeFixture classifies a clean fixture empty-only when a foreign row lands in its phase (#4615)", async () => {
+			// The plant: the clean fixture's own settled answer is the empty publish,
+			// and a still-live sibling fixture's finding-bearing row flushes into
+			// the same phase — the 2026-10-18..20 sequence, reproduced in the sink's
+			// arrival order. A clean fixture's file has no finding to publish, so
+			// `direct` from it is never its measurement.
+			const row = await probePhaseTrace((absFile) => [
+				pubLine("typescript", 0, absFile),
+				pubLine("typescript", 1, "/proj/other-fixture/bad.ts"),
+			]);
+			expect(row.firstPublish).toBe("empty-only");
+			expect(row.firstPublish).not.toBe("direct");
+			expect(row.detail).toContain("first-publish=empty-only");
+		});
+
+		it("probeFixture refuses the direct class from a clean fixture even on its own path (#4615)", async () => {
+			// The same file name never carries a finding in a `clean: true` fixture,
+			// so a finding-bearing row attributed to it means the trace (or the
+			// fixture's flag) is wrong. Refuse the class instead of writing it.
+			const row = await probePhaseTrace((absFile) => [
+				pubLine("typescript", 1, absFile),
+			]);
+			expect(row.firstPublish).toBe("unknown");
+			expect(row.detail).toContain("refused (#4615)");
+		});
+
+		/**
+		 * Drive the production row construction for a `clean: true` fixture whose
+		 * dirty phase appends exactly `buildLines(absFile)` to the sink.
+		 */
+		async function probePhaseTrace(
+			buildLines: (absFile: string) => string[],
+		): Promise<Record<string, unknown> & { detail: string }> {
+			const dst = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-probe-clean-attr-"),
+			);
+			try {
+				const absFile = path.join(dst, "clean.ts");
+				fs.writeFileSync(absFile, "export const x = 1;\n");
+				let log = Buffer.alloc(0);
+				const drain = createPublishTraceDrainer({
+					readLog() {
+						return {
+							size: log.length,
+							read(start) {
+								const chunk = log.subarray(start).toString("utf8");
+								return { chunk, bytesRead: log.length - start };
+							},
+						};
+					},
+				});
+				let touches = 0;
+				const probeFixture = createProbeFixture({
+					lsp: {
+						supportsLSP: () => true,
+						async touchFile() {
+							touches += 1;
+							if (touches === 1) {
+								log = Buffer.concat([
+									log,
+									Buffer.from(buildLines(absFile).join("")),
+								]);
+							}
+							return { diags: [], inconclusive: false };
+						},
+						getWorkspaceDiagnosticsSupport: async () => ({
+							mode: "push-only",
+						}),
+					},
+					repoRoot: process.cwd(),
+					install: false,
+					initLSPConfig: undefined,
+					getServersForFileWithConfig: () => [{ id: "typescript" }],
+					bootstrapFixtureWorkspace: async () => ({ absFile }),
+					drainPublishTrace: drain,
+					pubLogSize: () => log.length,
+					sleep: async () => undefined,
+				});
+				const row = {
+					lang: "typescript-clean",
+					serverId: undefined as string | undefined,
+					behavior: "unknown",
+					tier: 0,
+					tierLabel: "",
+					mode: "?",
+					detail: "",
+					firstPublish: "unknown",
+					cleanFixture: true,
+				};
+				await probeFixture(
+					{ lang: "typescript-clean", file: "clean.ts", clean: true },
+					dst,
+					row,
+				);
+				return row;
+			} finally {
+				fs.rmSync(dst, { recursive: true, force: true });
+			}
+		}
+	});
+
+	describe("#4615 first-publish axis prefers the dirty fixture", () => {
+		const dirtyTypeScript = {
+			lang: "typescript",
+			behavior: "publishes-unversioned",
+			tier: 2,
+			tierLabel: "2*",
+			firstPublish: "direct",
+			cleanFixture: false,
+		};
+		const cleanTypeScript = {
+			lang: "typescript-clean",
+			behavior: "silent",
+			tier: 3,
+			tierLabel: "3",
+			firstPublish: "empty-only",
+			cleanFixture: true,
+		};
+
+		it("takes clean-behavior from the clean fixture and first-publish from the dirty one", () => {
+			const [row] = resolveTargetLangRows([dirtyTypeScript, cleanTypeScript]);
+			expect(row.lang).toBe("typescript");
+			expect(row.behavior).toBe("silent");
+			expect(row.tierLabel).toBe("3");
+			// The matrix cell's own value: the dirty fixture's measurement.
+			expect(row.firstPublish).toBe("direct");
+			expect(row.firstPublishFrom).toBe("typescript");
+		});
+
+		it("resolves identically when the clean fixture is probed first", () => {
+			const [row] = resolveTargetLangRows([cleanTypeScript, dirtyTypeScript]);
+			expect(row.behavior).toBe("silent");
+			expect(row.firstPublish).toBe("direct");
+			expect(row.firstPublishFrom).toBe("typescript");
+		});
+
+		it("never derives a first-publish class from a clean fixture alone", () => {
+			const [row] = resolveTargetLangRows([cleanTypeScript]);
+			expect(row.lang).toBe("typescript");
+			expect(row.firstPublish).toBe("empty-only");
+			expect(row.firstPublishFrom).toBeUndefined();
+			expect(COMPARABLE_FIRST_PUBLISH.has(String(row.firstPublish))).toBe(
+				false,
+			);
+		});
+	});
+
 	// Recurrence #4514 (acceptance 2): trust kept the server from launching, no
 	// publish ever arrived, and the row read "no publish observed (server
 	// slow/absent)" for six nights. Drives the production row construction with

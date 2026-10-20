@@ -46,12 +46,11 @@ import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { writeEvaluatedRecord } from "./lib/assert-evaluated.mjs";
 import {
-	COMPARABLE_FIRST_PUBLISH,
 	DRIFT_SUMMARY_PATH,
-	MEASURED_CLEAN_BEHAVIORS,
 	buildMatrixObservations,
 	createPublishTraceDrainer,
 	findCleanSignalDrift,
+	resolveTargetLangRows,
 	strategyKeyForLang,
 	targetLangForFixture,
 } from "./lib/clean-signal.mjs";
@@ -93,6 +92,10 @@ const { getLSPService, resetLSPService } = await imp(
 const { getServersForFileWithConfig, initLSPConfig } = await imp(
 	"dist/clients/lsp/config.js",
 );
+// #4615: the client stamps its normalized document key into each `[lsp-pub]`
+// row; the drainer must key the probe's fixture file the same way, or one
+// live fixture's row would attribute to another fixture of the same server.
+const { normalizeMapKey } = await imp("dist/clients/path-utils.js");
 const { SERVER_DIAGNOSTIC_STRATEGIES } = await imp(
 	"dist/clients/lsp/wait-policy/strategies.js",
 );
@@ -169,6 +172,7 @@ function pubLogSize() {
 
 const drainPublishTrace = createPublishTraceDrainer({
 	echoTrace: ECHO_TRACE,
+	documentPathKey: normalizeMapKey,
 	readLog(offset) {
 		const size = pubLogSize();
 		if (size === offset) return { size, read: () => null };
@@ -292,12 +296,13 @@ const unk = rows.filter((r) => r.behavior === "unknown").length;
 // matrix footnote so a human decides whether to flip the marker. `unknown`
 // rows are never fed in (findCleanSignalDrift's per-row check guards this).
 //
-// Resolved to the same `targetLang` the matrix merge uses (clean fixture wins
-// over its dirty sibling for the same base lang — resolveTargetLangRows is
-// shared with updateMatrix below) so the console report and the footnote never
-// disagree, and so typescript's clean-fixture verdict (the authoritative
+// Resolved to the same `targetLang` the matrix merge uses (resolveTargetLangRows
+// is shared with updateMatrix below) so the console report and the footnote
+// never disagree, and so typescript's clean-fixture verdict (the authoritative
 // clean→clean observation) is what's compared, not the dirty fixture's
-// diagnostic-neutral-edit approximation.
+// diagnostic-neutral-edit approximation. #4615: that per-axis author is now
+// explicit — the clean fixture owns clean-behavior, a DIRTY sibling owns
+// first-publish (a clean file has no finding to publish).
 //
 // #558: the native-ts7 rows (typescript7/typescript7-clean) stay IN this
 // comparison (not re-excluded), but `lookupSilentOnClean` now gives them an
@@ -398,26 +403,6 @@ try {
 } catch {}
 process.exit(0);
 
-// Resolve a `clean: true` fixture onto its base lang's row (clean fixture wins)
-// and keep only rows with at least one comparable axis. Shared by the console
-// drift report and the matrix refresh, so they never disagree (#3310). The
-// matrix writer itself stays dependency-free; this classification lives here.
-function resolveTargetLangRows(measuredRows) {
-	const measurable = measuredRows.filter(
-		(r) =>
-			MEASURED_CLEAN_BEHAVIORS.has(r.behavior) ||
-			COMPARABLE_FIRST_PUBLISH.has(r.firstPublish),
-	);
-	const byTargetLang = new Map();
-	for (const r of measurable) {
-		const targetLang = targetLangForFixture(r.lang, r.cleanFixture);
-		const prev = byTargetLang.get(targetLang);
-		if (prev && prev.cleanFixture && !r.cleanFixture) continue; // clean fixture wins
-		byTargetLang.set(targetLang, { ...r, lang: targetLang, targetLang });
-	}
-	return [...byTargetLang.values()];
-}
-
 function nameList(langs) {
 	return langs.length ? langs.join(", ") : "none";
 }
@@ -432,7 +417,7 @@ function updateMatrix(measuredRows) {
 	}
 	const text = fs.readFileSync(docPath, "utf8");
 	// #529/#541/#558 drift footnote: same targetLangRows the table merge below
-	// uses (clean fixture wins), so the footnote and the row it's about agree.
+	// uses (per-axis authors, #4615), so the footnote and the row it's about agree.
 	// NEVER a CI gate — this only rewrites a footnote section in the doc. #558:
 	// native-ts7 rows are compared too, against an explicit `false` expectation
 	// (see the drift-check comment above), not classic's marker.

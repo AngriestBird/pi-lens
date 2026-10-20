@@ -90,6 +90,14 @@ the docs refresh commits the confirmed class and the marker must move with it.
 A single-night flip remains in the refresh-state JSON below and does not change
 the census's confirmed population.
 
+The class is defined on a DIRTY file — is the first publish for a file that HAS
+findings the answer, or an empty placeholder while a one-time index builds? — so
+the probe takes it from a dirty fixture and never from a `clean: true` one: a
+clean file has no finding to publish, so its trace can only ever be `empty-only`.
+Before #4615 the clean fixture supplied both axes, which is how a publish that
+belonged to another live client of the same server id became `typescript`'s
+`empty-first`.
+
 ## The strategies
 
 | Tier | Signal | Affirmative clean? | Example |
@@ -132,11 +140,15 @@ re-observe is stamped once with the date of its first miss and degrades to
 `unknown` once five calendar days have elapsed since it (skipped nights do not
 stall it, and a re-observation clears the stamp). `empty-first` cells are never
 expired: they back the live `emptyFirstPublish` markers (php, terraform) and
-expiring one would erase the measurement behind a marker. A `clean-behavior`/
-`tier` change is written only after two consecutive nightly runs observe the
-same new value, so one flapping nightly (ast-grep went 2 → 2* → 3 → 2* across
-four runs) cannot rewrite a cell; a night that measured nothing for the lang
-resets the hold. A subset probe (`probe-clean-signal.mjs <langs>`) leaves the
+expiring one would erase the measurement behind a marker. That exception is
+bounded too (#4615): the refresh stamps the FIRST night it does not re-observe an
+`empty-first` cell, and the first-publish census reds once that stamp is five
+days old, so the cell+marker pair cannot outlive the instrument that produced it
+— a cell with no live measurement behind it is no longer indistinguishable from
+a healthy one. A `clean-behavior`/`tier` change is written only after two
+consecutive nightly runs observe the same new value, so one flapping nightly
+(ast-grep went 2 → 2* → 3 → 2* across four runs) cannot rewrite a cell; a night
+that measured nothing for the lang resets the hold. A subset probe (`probe-clean-signal.mjs <langs>`) leaves the
 bookkeeping of the langs it did not probe untouched.
 
 The bookkeeping lives in the generated `## Capability matrix refresh state`
