@@ -25,7 +25,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import lspRunner from "../../../../clients/dispatch/runners/lsp.js";
 import {
 	getLSPService,
@@ -43,6 +43,21 @@ import {
 } from "../../../../clients/degradation-ledger.js";
 import { makeLspServiceDouble } from "../../../support/lsp-service-double.js";
 import { setupTestEnvironment } from "../../test-utils.js";
+
+// #4532 round 4 (M2): the warm-attach route is a delivery route of its own —
+// `tryWarmAttachedDiagnostics` answers from an already-running session over IPC
+// and no local client exists — so the environment-gap demotion has to hold
+// there too. The double sits at that process boundary (shape 66) and every
+// other cell leaves it answering `undefined`, i.e. "not attached".
+const warmAttach = vi.hoisted(() => ({
+	diagnostics: vi.fn(async (): Promise<unknown> => undefined),
+}));
+vi.mock("../../../../clients/warm-attach.js", async (importOriginal) => ({
+	...(await importOriginal<
+		typeof import("../../../../clients/warm-attach.js")
+	>()),
+	tryWarmAttachedDiagnostics: warmAttach.diagnostics,
+}));
 
 type RawDiagnostic = {
 	severity: number;
@@ -142,6 +157,8 @@ beforeEach(() => {
 	file = path.join(root, "src", "admission-limiter.ts");
 	fs.writeFileSync(file, "export const x = 1;\n");
 	rows = liveSessionRows();
+	warmAttach.diagnostics.mockReset();
+	warmAttach.diagnostics.mockResolvedValue(undefined);
 	resetDegradationLedger();
 });
 
@@ -240,7 +257,14 @@ describe("a worktree with no dependency install (#4532)", () => {
 	// Greptile round 3: `@/missing` is a tsconfig `paths` alias, not a package
 	// (an npm scope has a name). Installing dependencies cannot fix it, so the
 	// gate must not demote it.
-	it("keeps a path-alias specifier blocking while a scoped package demotes", async () => {
+	// AGENTS.md shape 69 (enumerated detector), measured (#4532 round 4, M4): the
+	// rule is a PREFIX test — a 2307 specifier with no leading `.`, `/`, `#` or
+	// `@scope/` form is treated as a package and demoted. Naming the class by
+	// example ("looks like a scoped package") understated it by the three
+	// spellings a real `paths` map uses most (`~/`, `@app/`, `src/`), so each has
+	// its own row here and the two refusals that must keep blocking stay.
+	it("keeps every path-alias spelling that is not a package blocking", async () => {
+		const demoted = ["@app/missing", "~/missing", "src/missing"];
 		rows = [
 			{
 				severity: 1,
@@ -254,26 +278,46 @@ describe("a worktree with no dependency install (#4532)", () => {
 			{
 				severity: 1,
 				message:
-					"Cannot find module '@scope/pkg' or its corresponding type declarations.",
+					"Cannot find module '#internal/missing' or its corresponding type declarations.",
 				code: 2307,
 				source: "ts",
 				serverId: "typescript",
 				range: atLine(4),
 			},
+			...demoted.map((specifier, index) => ({
+				severity: 1,
+				message: `Cannot find module '${specifier}' or its corresponding type declarations.`,
+				code: 2307,
+				source: "ts",
+				serverId: "typescript",
+				range: atLine(10 + index),
+			})),
 		];
 		installService();
 		const result = await run();
-		const aliasRow = result.diagnostics.find((item) =>
-			item.message.includes("'@/missing'"),
-		);
-		const scopedRow = result.diagnostics.find((item) =>
-			item.message.includes("'@scope/pkg'"),
-		);
-		expect(aliasRow).toMatchObject({ severity: "error", semantic: "blocking" });
-		expect(scopedRow).toMatchObject({
-			severity: "warning",
-			semantic: "warning",
+		const rowFor = (specifier: string) =>
+			result.diagnostics.find((item) =>
+				item.message.includes(`'${specifier}'`),
+			);
+
+		// The two admitted refusals: a `@/` alias and a `package.json` `imports`
+		// subpath are not packages, so a missing one stays a blocker.
+		expect(rowFor("@/missing")).toMatchObject({
+			severity: "error",
+			semantic: "blocking",
 		});
+		expect(rowFor("#internal/missing")).toMatchObject({
+			severity: "error",
+			semantic: "blocking",
+		});
+		// The class the residual names: these ARE `paths` aliases, and the
+		// install-less root cannot tell them from a package, so they demote.
+		for (const specifier of demoted) {
+			expect(rowFor(specifier)).toMatchObject({
+				severity: "warning",
+				semantic: "warning",
+			});
+		}
 	});
 
 	it("keeps the install lookup's unreadable-directory and depth guards", () => {
@@ -324,6 +368,34 @@ describe("a worktree with no dependency install (#4532)", () => {
 	// proves a blocker survives, never that the STOP goes away. This is the
 	// reported shape with no real type error: only the environment-gap rows, so
 	// the whole result must be non-blocking.
+	// M2 (round 4): the same seven rows, delivered by the WARM-ATTACH route. That
+	// route used to skip the demotion on #1645 F2's reason, which belongs to the
+	// SIBLING rule (the inferred-project probe asks the server which project owns
+	// the file). This rule asks one filesystem question about the file's own
+	// directory, so the reported `🔴 STOP` survived here while the per-edit route
+	// was fixed.
+	it("demotes the same gap rows when the warm-attach route serves them", async () => {
+		rows = liveSessionRows().filter((row) => row.code !== 2322);
+		installService();
+		warmAttach.diagnostics.mockResolvedValue({
+			available: true,
+			response: { diagnostics: rows.map((row) => ({ ...row })) },
+		});
+
+		const result = await run();
+
+		expect(result.diagnostics).toHaveLength(rows.length);
+		expect(result.semantic).toBe("warning");
+		expect(
+			result.diagnostics.every((item) => item.semantic === "warning"),
+		).toBe(true);
+		expect(
+			result.diagnostics.filter((item) =>
+				item.message.includes(ENVIRONMENT_GAP_MARKER),
+			),
+		).toHaveLength(rows.length);
+	});
+
 	it("reports the reported gap-only STOP shape as a warning, never a blocker", async () => {
 		rows = liveSessionRows().filter((row) => row.code !== 2322);
 		installService();

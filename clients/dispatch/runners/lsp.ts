@@ -435,14 +435,21 @@ const lspRunner: RunnerDefinition = {
 		// editing code, and at blocking authority it starved the cascade
 		// (`cascade_skip reason=primary_has_blockers`). It runs FIRST so the
 		// inferred-project probe (which only looks at severity-1 rows) pays nothing
-		// for a file this already demoted. Skipped under warm attach with #1645
-		// F2's reason plus one of its own: a warm-attached session's filesystem is
-		// not ours, so our own walk-up cannot answer for its root.
-		const environmentChecked = usedWarmAttach
-			? rawValidLspDiags
-			: demoteEnvironmentGapDiagnostics(rawValidLspDiags, {
-					filePath: diagnosticPath,
-				});
+		// for a file this already demoted.
+		//
+		// MOVED OUT OF THE WARM-ATTACH GATE (#4532 round 4). This rule asks ONE
+		// filesystem question about the file's OWN directory — a path this process
+		// just wrote and can stat — so it needs nothing from the remote session and
+		// is not the probe #1645 review F2 held back. Leaving it behind
+		// `usedWarmAttach` kept the reported `🔴 STOP` alive on the warm-attach
+		// route, which is the very symptom this rule exists to close. Only the
+		// inferred-PROJECT probe below stays gated, because THAT rule asks the
+		// server which project owns the file and a warm-attached session's answers
+		// are about a fleet this process does not own.
+		const environmentChecked = demoteEnvironmentGapDiagnostics(
+			rawValidLspDiags,
+			{ filePath: diagnosticPath },
+		);
 		const validLspDiags = usedWarmAttach
 			? environmentChecked
 			: await demoteInferredProjectDiagnostics(environmentChecked, {

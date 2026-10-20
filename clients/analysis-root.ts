@@ -9,11 +9,17 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as nodePath from "node:path";
-import { isAtOrAboveHomeDir, isUnderDir, isVendorPath } from "./path-utils.js";
+import {
+	isAtOrAboveHomeDir,
+	isUnderDir,
+	isVendorPath,
+	pathsEqual,
+} from "./path-utils.js";
 import { isPiLensInternalPath } from "./file-utils.js";
 import {
 	resolveGitCheckout,
 	resolveLinkedWorktreeOwner,
+	sameCheckoutOtherRoot,
 } from "./review-graph/git-identity.js";
 
 export type AnalysisRootMode =
@@ -146,13 +152,11 @@ export function isSessionBookkeepingRoot(
 ): boolean {
 	const resolved = realPathOrResolved(root);
 	const session = realPathOrResolved(sessionRoot);
-	if (resolved === session) return true;
+	if (pathsEqual(resolved, session)) return true;
 	const checkout = resolveGitCheckout(session);
 	if (!checkout) return false;
-	const owner = resolveGitCheckout(resolved);
-	return (
-		owner !== null &&
-		owner.commonDir === checkout.commonDir &&
-		owner.root !== checkout.root
-	);
+	// The owner rule itself, asked of two ROOTS instead of a root and a file
+	// (#4532 round 4, NITPICK-1): this used to be a second spelling of
+	// `resolveLinkedWorktreeOwner`'s predicate, on `===` rather than `pathsEqual`.
+	return sameCheckoutOtherRoot(checkout, resolveGitCheckout(resolved));
 }

@@ -148,10 +148,12 @@ afterEach(() => {
 describe("the install look at a live client root (#4532 gap 7)", () => {
 	it("restarts the worktree's client when node_modules is symlinked in after it spawned", async () => {
 		// The server is already rooted at the worktree and spawned BEFORE the
-		// install: exactly the reported order. A second in the past, because a
-		// file's mtime comes from the kernel's coarse clock and can trail
-		// `Date.now()` by a tick (CodeRabbit round 3).
-		const spawnedAt = Date.now() - 1_000;
+		// install: exactly the reported order. The epoch is `Date.now()` itself —
+		// a file's mtime comes from the kernel's coarse clock and can trail it by
+		// a tick, and the slack that absorbs that now lives in the production
+		// comparison (`COARSE_MTIME_SLACK_MS`), not in this fixture (#4532
+		// round 4, LOW-5).
+		const spawnedAt = Date.now();
 		clientRoots = [{ root: worktree, spawnedAt }];
 		installService();
 		fs.symlinkSync(
@@ -212,7 +214,7 @@ describe("the install look at a live client root (#4532 gap 7)", () => {
 			path.join(main, "node_modules"),
 			path.join(worktree, "node_modules"),
 		);
-		clientRoots = [{ root: worktree, spawnedAt: Date.now() - 1_000 }];
+		clientRoots = [{ root: worktree, spawnedAt: Date.now() }];
 		try {
 			await bashResult("ln -s ../main-checkout/node_modules node_modules");
 			expect(restarts).toContain(normalizeMapKey(worktree));
@@ -227,6 +229,62 @@ describe("the install look at a live client root (#4532 gap 7)", () => {
 		// No sequence, receipt or change-log entry for a foreign root: the
 		// session's own look published nothing (main's install is unchanged).
 		expect(runtime.projectSeq).toBe(0);
+	});
+
+	// LOW-5 (round 4): the coarse-mtime slack lives in the production
+	// comparison now. An install stamped a fraction of a second BEFORE the
+	// client's spawn epoch is a first look that must still publish; comparing
+	// exactly would record it as the baseline and publish nothing afterwards.
+	it("publishes an install whose coarse mtime trails the client's spawn epoch", async () => {
+		const root = path.join(env.tmpDir, "coarse-mtime-root");
+		fs.mkdirSync(path.join(root, "src"), { recursive: true });
+		fs.writeFileSync(path.join(root, "package.json"), "{}\n");
+		const lockfile = path.join(root, "package-lock.json");
+		fs.writeFileSync(lockfile, '{"lockfileVersion":3}\n');
+		const trailing = new Date(Date.now() - 400);
+		fs.utimesSync(lockfile, trailing, trailing);
+		installService();
+
+		await lookForOutOfBandChanges(root, "tool_call", runtime, {
+			since: Date.now(),
+		});
+
+		expect(latestScope()).toBe("first-look");
+	});
+
+	// M1 (round 4): the GRANT arm of the bookkeeping gate. A root git writes as
+	// a linked worktree of the SESSION checkout is a bookkeeping root, so a
+	// declaration change there allocates a project sequence. Every other cell
+	// points the look at a root with no `.git` (an adopted root), so only the
+	// refusal arm was observed and this predicate could drift to `false`
+	// silently.
+	it("allocates session bookkeeping for a client root that is a linked worktree", async () => {
+		const linked = path.join(env.tmpDir, "git-worktree");
+		const gitDir = path.join(main, ".git", "worktrees", "git-worktree");
+		fs.mkdirSync(gitDir, { recursive: true });
+		fs.writeFileSync(path.join(gitDir, "commondir"), "../..\n");
+		fs.mkdirSync(path.join(linked, "src"), { recursive: true });
+		fs.writeFileSync(path.join(linked, ".git"), `gitdir: ${gitDir}\n`);
+		fs.writeFileSync(path.join(linked, "package.json"), "{}\n");
+		const declaration = path.join(linked, "types.d.ts");
+		fs.writeFileSync(declaration, "declare const A: number;\n");
+		const previousLookMs = process.env.PI_LENS_DECLARATION_LOOK_MS;
+		process.env.PI_LENS_DECLARATION_LOOK_MS = "0";
+		installService();
+		clientRoots = [{ root: linked, spawnedAt: Date.now() }];
+		try {
+			// The first look records the baseline; the second sees a declaration
+			// change at a root that may carry session bookkeeping.
+			await bashResult("true");
+			fs.writeFileSync(declaration, "declare const A: string;\n");
+			await bashResult("true");
+		} finally {
+			if (previousLookMs === undefined)
+				delete process.env.PI_LENS_DECLARATION_LOOK_MS;
+			else process.env.PI_LENS_DECLARATION_LOOK_MS = previousLookMs;
+		}
+
+		expect(runtime.projectSeq).toBeGreaterThan(0);
 	});
 
 	it("publishes nothing on a first look at a root whose install predates its client", async () => {

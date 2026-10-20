@@ -65,6 +65,7 @@ import type { LSPDiagnostic } from "../clients/lsp/client.js";
 import type { LSPWorkspaceUnconfirmedReason } from "../clients/lsp/capabilities.js";
 import { getFullScanWallClockMs } from "../clients/lsp/workspace-sweep-hold.js";
 import { demoteInferredProjectSweepResults } from "../clients/lsp/inferred-project.js";
+import { demoteEnvironmentGapDiagnostics } from "../clients/lsp/environment-gap.js";
 import {
 	hashDiagnosticContent,
 	PRIMARY_UNAVAILABLE_CAUSE,
@@ -2483,8 +2484,24 @@ async function formatFullMode(
 	// merge, the rendered counts — demote TypeScript errors on files tsserver
 	// checked in its INFERRED project. Applied once, here, so a single seam
 	// governs the whole sweep instead of each renderer learning the rule.
+	//
+	// #4532 round 4 (AGENTS.md defect shape 71 — one signal wired consumer by
+	// consumer): the environment-gap demotion is the SIBLING rule and it was
+	// wired into the per-edit runner and the `lsp_diagnostics` tool only, so one
+	// file read as a warning there and as a BLOCKING finding in this sweep. It
+	// sits here, at the same seat, and runs FIRST for the same reason it does
+	// there: the inferred-project probe only looks at severity-1 rows, so a file
+	// this demoted costs no probe.
+	const environmentCheckedLspResults = rawLspResults
+		.filter((result) => includeFile(result.filePath))
+		.map((result) => ({
+			...result,
+			diagnostics: demoteEnvironmentGapDiagnostics(result.diagnostics, {
+				filePath: result.filePath,
+			}),
+		}));
 	const lspResults = await demoteInferredProjectSweepResults(
-		rawLspResults.filter((result) => includeFile(result.filePath)),
+		environmentCheckedLspResults,
 		cwd,
 		lspService,
 		// #1645 review F1: the sweep that produced these results is signal-bounded,

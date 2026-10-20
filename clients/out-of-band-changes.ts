@@ -201,11 +201,28 @@ async function readInstallStamp(
  * spawned is indistinguishable from one that landed after it, and the safe
  * direction is the restart.
  */
+/**
+ * A file's mtime comes from the kernel's COARSER clock and can land a tick
+ * BELOW `Date.now()`, so an install written in the same second as the spawn can
+ * stamp earlier than the spawn epoch. Comparing exactly would read that install
+ * as "the client already saw it" and record its stamp as the baseline, and
+ * nothing publishes afterwards because the record now holds the new stamp
+ * (#4532 round 4, LOW-5: the margin lived in a test fixture, where it proved
+ * nothing about production). One second is the whole slack a coarse-granularity
+ * filesystem needs; a wider window would start admitting installs the client
+ * really did read.
+ */
+const COARSE_MTIME_SLACK_MS = 1_000;
+
 function firstLookSawInstall(
 	install: { newestChangeMs: number },
 	since: number | undefined,
 ): boolean {
-	return since !== undefined && since > 0 && install.newestChangeMs >= since;
+	return (
+		since !== undefined &&
+		since > 0 &&
+		install.newestChangeMs >= since - COARSE_MTIME_SLACK_MS
+	);
 }
 
 /**

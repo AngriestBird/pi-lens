@@ -178,16 +178,32 @@ export function resolveGitCheckout(startPath: string): GitCheckout | null {
  * "which checkout owns this edit" decision in turn_end asks here, so the knip
  * scan root and the test runner root cannot disagree about a file.
  */
+/**
+ * The same-checkout-different-root rule, asked of two RESOLVED checkouts. One
+ * rule, two callers: {@link resolveLinkedWorktreeOwner} decides which checkout
+ * owns an edit (a file's directory), and `isSessionBookkeepingRoot`
+ * (`clients/analysis-root.ts`) decides whether a ROOT may receive session
+ * bookkeeping (#4532 round 4, NITPICK-1 — the second spelling dropped the
+ * `pathsEqual` the first one uses). Equality is `pathsEqual`, never `===`: one
+ * checkout can be spelled with another case or through a symlink.
+ */
+export function sameCheckoutOtherRoot(
+	session: GitCheckout,
+	other: GitCheckout | null,
+): boolean {
+	return (
+		other !== null &&
+		!pathsEqual(other.root, session.root) &&
+		pathsEqual(other.commonDir, session.commonDir)
+	);
+}
+
 export function resolveLinkedWorktreeOwner(
 	session: GitCheckout,
 	absoluteFile: string,
 ): GitCheckout | null {
 	const owner = resolveGitCheckout(dirname(absoluteFile));
-	return owner !== null &&
-		!pathsEqual(owner.root, session.root) &&
-		pathsEqual(owner.commonDir, session.commonDir)
-		? owner
-		: null;
+	return sameCheckoutOtherRoot(session, owner) ? owner : null;
 }
 
 /**
