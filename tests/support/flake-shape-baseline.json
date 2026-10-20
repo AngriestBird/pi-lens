@@ -1236,7 +1236,6 @@
 		"index-2939-tool-result-budget-witness.test.ts::clients/bootstrap": 1,
 		"index-2939-tool-result-budget-witness.test.ts::clients/runtime-tool-result": 1,
 		"index-3246-turn-end-delivery.test.ts::clients/pipeline": 1,
-		"index-3248-git-guard-latch-witness.test.ts::clients/pipeline": 1,
 		"index-3290-actionable-warnings-witness.test.ts::clients/pipeline": 1,
 		"index-3506-file-mutation-queue-wiring.test.ts::clients/bootstrap": 1,
 		"index-3506-file-mutation-queue-wiring.test.ts::clients/extension-log": 1,
