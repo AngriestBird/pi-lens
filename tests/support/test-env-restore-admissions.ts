@@ -380,7 +380,7 @@ export const TEST_ENV_RESTORE_ADMISSIONS: Readonly<
 	"tests/support/vitest-setup.ts": {
 		mechanism: "module-pin",
 		reason:
-			"global setup pins the machine-global variables once for the process",
+			"global setup pins the machine-global variables once for the process, and the jiti cache switches (#4673) must hold for the whole worker: restoring them would re-enable the write between cases",
 	},
 	"tests/support/with-env.test.ts": {
 		mechanism: "teardown",

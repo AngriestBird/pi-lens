@@ -11,6 +11,19 @@ import {
 process.env.PI_LENS_DISABLE_TOOL_INSTALL ??= "1";
 process.env.PI_LENS_TMP_HYGIENE_RUN_ID ??= `${Date.now()}-${process.pid}`;
 
+// #4673: pin jiti's fs cache off for the pre-fork process too. pi's loader
+// mkdirs `path.join(os.tmpdir(), "jiti")` in-process on the first by-path
+// extension load -- its `createJiti(import.meta.url, …)` call at
+// `@earendil-works/pi-coding-agent/dist/core/extensions/loader.js:477` -- and
+// the tmp-root census then judges it as a #4560 fixture sibling. Workers force
+// the same pair in `tests/support/vitest-setup.ts` before any test module
+// loads; this copy reaches globalSetup and every child forked ahead of the
+// first worker, forced here for the same reason (an ambient value would put
+// the sibling back). `tests/config/tmp-fixture-hygiene.test.ts` pins this
+// file's half and drives the load.
+process.env.JITI_FS_CACHE = "0";
+process.env.JITI_CACHE = "0";
+
 // #4019: GitHub's Windows runner exposes TEMP as an 8.3 short path
 // (`C:\Users\RUNNER~1\...`), but production canonicalizes through
 // `realpath.native`, which answers the long spelling (`...\runneradmin\...`).

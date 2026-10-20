@@ -1,5 +1,5 @@
 /**
- * #4589 baseline: the env writes already leaking on master, admitted so the sweep is a ratchet, not a mass edit.
+ * #4589 baseline: env writes no restore provably covers, admitted so the sweep is a ratchet, not a mass edit. Rows are the leaks master already had, plus rows a change adds where a restore would re-arm the defect its write pins.
  *
  * A row is `<file>:<key>`, keyed on file and environment key,
  * never on line. It means "this write is not PROVABLY restored
@@ -115,6 +115,8 @@ export const TEST_ENV_RESTORE_BASELINE: readonly string[] = [
 	"tests/support/git-fixture-env.ts:key",
 	"tests/support/prewarm-tool-home.ts:PI_LENS_TEST_TOOLS_TEMPLATE",
 	"tests/support/vitest-setup-console-channel.test.ts:PI_LENS_TMP_HYGIENE_TRACE",
+	"tests/support/vitest-setup.ts:JITI_CACHE",
+	"tests/support/vitest-setup.ts:JITI_FS_CACHE",
 	"tests/support/vitest-setup.ts:PI_CODING_AGENT_DIR",
 	"tests/support/vitest-setup.ts:PI_LENS_CONFIG_PATH",
 	"tests/support/vitest-setup.ts:PI_LENS_DISABLE_TOOL_INSTALL",
