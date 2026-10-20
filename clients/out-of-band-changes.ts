@@ -13,14 +13,14 @@
  * old declarations for its whole life, and the diagnostics cache served
  * entries whose ambient scope had changed under them.
  *
- * At each #4493 look (a bash tool_result, every tool_call) this module:
- * - compares the root's install stamps (lockfiles and package-manager install
- *   markers): a change is an install no event can enumerate, so the root's
- *   live primary clients restart, and every cache entry scanned before it is
- *   refused;
- * - compares a bounded walk of the root's declaration files: each one created,
- *   edited or deleted goes to the live clients as an exact-URI watched-files
- *   event, and the cache refuses the entries whose scope holds it.
+ * At each #4493 look (a bash tool_result, every tool_call) this module
+ * compares the root's install stamps (lockfiles and package-manager install
+ * markers) and a bounded walk of the root's declaration files, then publishes
+ * what changed as one `DiskChange` (#4535). The publisher allocates the
+ * project sequence; its subscribers restart the root's primary clients and
+ * send the exact-URI watched-files events (#4528), and move the
+ * diagnostics-cache clock so the entries whose scope holds a changed path or
+ * an install are refused. This module names no consumer.
  *
  * The records are process-wide per root, as the servers are (two sessions on
  * one root share them, so one install restarts once). They describe the disk,
@@ -30,15 +30,22 @@
 import { promises as fsp } from "node:fs";
 import { join } from "node:path";
 import { BoundedFifoMap } from "./bounded-cache.js";
-import { recordDegradationOnce } from "./degradation-ledger.js";
+import {
+	incrementDegradationCount,
+	recordDegradationOnce,
+} from "./degradation-ledger.js";
+import {
+	type DiskChangeInput,
+	type DiskChangeRuntime,
+	publishDiskChange,
+} from "./disk-changes.js";
+import {
+	ensureDiskChangeSubscribers,
+	LSP_CONSUMER,
+} from "./disk-change-subscribers.js";
 import { isExcludedDirName } from "./file-utils.js";
 import { logLatency } from "./latency-logger.js";
-import { peekLSPService } from "./lsp/capabilities.js";
-import {
-	noteWorkspaceDependenciesChanged,
-	noteWorkspaceFilesChangedOnDisk,
-} from "./lsp/workspace-diagnostics-session.js";
-import { normalizeMapKey } from "./path-utils.js";
+import { isUnderDir, normalizeMapKey } from "./path-utils.js";
 import { createSingleFlight } from "./single-flight.js";
 
 /**
@@ -139,14 +146,45 @@ async function readInstallStamp(root: string): Promise<string> {
 }
 
 /**
+ * One walk's answer: the declaration files under `root`, the directories the
+ * walk could not read, and the files it listed but could not stat for a reason
+ * other than absence.
+ */
+interface DeclarationWalk {
+	declarations: Map<string, string>;
+	/** Directories whose listing failed, bounded by `DECLARATION_WALK_MAX_DIRS`. */
+	unreadable: string[];
+	/** Files whose `stat` failed with an error that is not absence (#4603 F2). */
+	unreadableFiles: string[];
+}
+
+/**
  * The declaration files under `root`, outside the shared excluded directories
  * (gitignored ones included: codegen writes there), in a deterministic order;
  * `undefined` when the walk hit a cap.
+ *
+ * #4596: a directory that cannot be listed is REPORTED, not skipped. Skipping
+ * it left the walk's map looking complete, so the diff below read every
+ * declaration file under it as deleted (`lsp_out_of_band_change` said
+ * `deleted: 1` for a file that still existed), and a consumer acted on that
+ * row. The map the caller diffs keeps the previous fingerprint of a file under
+ * an unreadable directory instead, so an unreadable subtree reads as
+ * "unchanged, as far as this walk could tell" rather than as a deletion.
+ *
+ * #4603 F2: a file the walk listed but could not stat is the same question one
+ * level down. `ENOENT`/`ENOTDIR` mean the file went away between the listing
+ * and the stat, which is absence; `EACCES`, `EPERM`, `EIO`, `ESTALE` and
+ * `ENOMEM` mean the walk cannot tell, so the file joins `unreadableFiles` and
+ * keeps its previous fingerprint exactly as a subtree does. Reading every
+ * failure as absence published `deleted: 1` for a file that exists whenever a
+ * readable directory held an unreadable file.
  */
 async function walkDeclarations(
 	root: string,
-): Promise<Map<string, string> | undefined> {
+): Promise<DeclarationWalk | undefined> {
 	const found: string[] = [];
+	const unreadable: string[] = [];
+	const unreadableFiles: string[] = [];
 	const queue = [root];
 	let next = 0;
 	let capped = false;
@@ -161,6 +199,7 @@ async function walkDeclarations(
 			try {
 				entries = await fsp.readdir(dir, { withFileTypes: true });
 			} catch {
+				unreadable.push(dir);
 				continue;
 			}
 			for (const entry of entries) {
@@ -182,16 +221,85 @@ async function walkDeclarations(
 	if (capped) return undefined;
 	found.sort();
 	const declarations = new Map<string, string>();
-	await Promise.all(
-		found.map(async (filePath) => {
-			try {
-				declarations.set(filePath, fingerprint(await fsp.stat(filePath)));
-			} catch {
-				// Gone between the listing and the stat: absent.
-			}
-		}),
+	// Parallel stats, then one pass into the map: the callback returns its pair
+	// so a failed stat is an explicit `undefined` rather than a swallowed
+	// statement.
+	const prints = await Promise.all(
+		found.map(
+			async (
+				filePath,
+			): Promise<[string, string] | [string, undefined] | undefined> => {
+				try {
+					return [filePath, fingerprint(await fsp.stat(filePath))];
+				} catch (err) {
+					const code = (err as NodeJS.ErrnoException | undefined)?.code;
+					if (code === "ENOENT" || code === "ENOTDIR") {
+						// none: gone between the listing and the stat, which is absence,
+						// not a failure reading the subtree (the walk's own listing above
+						// is what reports an unreadable directory).
+						return undefined;
+					}
+					// Unreadable is not absent: keep the file's identity and let
+					// `carryUnreadable` restore its previous fingerprint.
+					return [filePath, undefined];
+				}
+			},
+		),
 	);
-	return declarations;
+	for (const print of prints) {
+		if (print === undefined) continue;
+		if (print[1] === undefined) unreadableFiles.push(print[0]);
+		else declarations.set(print[0], print[1]);
+	}
+	return { declarations, unreadable, unreadableFiles };
+}
+
+/**
+ * Keep the previous fingerprint of every declaration file the walk could not
+ * read — one under a directory it could not list, or one it listed and could
+ * not stat for a reason other than absence — so the diff sees it as unchanged
+ * rather than absent (#4596, #4603 F2).
+ *
+ * The carried set is bounded by the walk's own file cap: entries that would
+ * take the map past it are counted in `dropped` and not added, and the caller
+ * then keeps the previous map whole instead of storing a partial one (#4603
+ * F5). Neither the map nor the diff can exceed the cap, and no entry the diff
+ * would read as deleted leaves the record.
+ */
+function carryUnreadable(
+	declarations: Map<string, string> | undefined,
+	previous: ReadonlyMap<string, string> | undefined,
+	walk: DeclarationWalk | undefined,
+): { carried: number; dropped: number } {
+	if (
+		!declarations ||
+		!previous ||
+		!walk ||
+		(walk.unreadable.length === 0 && walk.unreadableFiles.length === 0)
+	)
+		return { carried: 0, dropped: 0 };
+	const unreadableFiles = new Set(walk.unreadableFiles);
+	const carried: string[] = [];
+	for (const filePath of previous.keys()) {
+		if (declarations.has(filePath)) continue;
+		const underUnreadableDir = walk.unreadable.some((dir) =>
+			isUnderDir(filePath, dir),
+		);
+		if (!underUnreadableDir && !unreadableFiles.has(filePath)) continue;
+		carried.push(filePath);
+	}
+	// Deterministic order: the population that fits the cap must not depend on
+	// Map insertion order or on which parallel stat settled first.
+	carried.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+	let dropped = 0;
+	for (const filePath of carried) {
+		if (declarations.size >= DECLARATION_WALK_MAX_FILES) {
+			dropped++;
+			continue;
+		}
+		declarations.set(filePath, previous.get(filePath) as string);
+	}
+	return { carried: carried.length - dropped, dropped };
 }
 
 function diffDeclarations(
@@ -211,21 +319,74 @@ function diffDeclarations(
 
 /**
  * Look at `root` for an install or a declaration-file change since its last
- * look, and act on what changed (see the module doc). Looks of one root run
+ * look, and publish what changed (see the module doc). Looks of one root run
  * one at a time, each against the record the previous one left (`looks`).
+ *
+ * The consumers are subscribers of the disk-change publisher (#4535): this
+ * detector no longer names the LSP service or the diagnostics cache. `runtime`
+ * is the bulk mutation seam the publisher allocates the existing project
+ * sequence through; without it the change still reaches every subscriber, but
+ * no sequence is allocated.
  */
 export function lookForOutOfBandChanges(
 	root: string,
 	trigger: "tool_call" | "tool_result",
+	runtime?: DiskChangeRuntime,
 ): Promise<void> {
 	const key = normalizeMapKey(root);
-	return looks.run(key, () => lookOnce(root, key, trigger));
+	return looks.run(key, () => lookOnce(root, key, trigger, runtime));
+}
+
+/** `diffDeclarations`'s watched-files type codes, as the record names them. */
+const CHANGE_TYPE = {
+	1: "created",
+	2: "changed",
+	3: "deleted",
+} as const;
+
+/**
+ * One look's record. `paths` is the population the cache refuses entries for
+ * (normalized); `pathChanges` keeps the detector's own spelling for the
+ * exact-URI watched-files events. An install cannot be enumerated, so a
+ * look that only saw one records `paths: "unknown"`, never an empty list.
+ */
+function outOfBandChange(
+	root: string,
+	installed: boolean,
+	changes: ReadonlyArray<{ filePath: string; type: number }>,
+	at: number,
+): DiskChangeInput {
+	const sources = [
+		...(installed ? ["install"] : []),
+		...(changes.length > 0 ? ["declarations"] : []),
+	];
+	const pathChanges = changes.map((change) => ({
+		filePath: change.filePath,
+		type: CHANGE_TYPE[change.type as 1 | 2 | 3],
+	}));
+	return {
+		root,
+		origin: "out-of-band",
+		sources,
+		// A stat fingerprint, not the bytes: an `inferred` change may never by
+		// itself confirm that a finding was not reproduced.
+		kind: "inferred",
+		paths:
+			changes.length > 0
+				? changes.map((change) => normalizeMapKey(change.filePath))
+				: installed
+					? "unknown"
+					: [],
+		...(pathChanges.length > 0 ? { pathChanges } : {}),
+		at,
+	};
 }
 
 async function lookOnce(
 	root: string,
 	key: string,
 	trigger: "tool_call" | "tool_result",
+	runtime: DiskChangeRuntime | undefined,
 ): Promise<void> {
 	const started = Date.now();
 	const prior = records.get(key);
@@ -237,11 +398,29 @@ async function lookOnce(
 		readInstallStamp(root),
 		walkDue ? walkDeclarations(root) : Promise.resolve(undefined),
 	]);
-	const declarations = walkDue ? walked : prior?.declarations;
+	const observed = walkDue ? walked : undefined;
+	// #4596: a file under a directory this walk could not read — or one it
+	// listed and could not stat — keeps the fingerprint the previous walk gave
+	// it. The diff then cannot call it deleted, and a real change there is
+	// reported by the first walk that can read it again: deferred, never
+	// invented and never lost.
+	const carry = carryUnreadable(
+		observed?.declarations,
+		prior?.declarations,
+		observed,
+	);
+	// #4603 F5: when the carried set does not fit the walk's own file cap, the
+	// walk is incomplete. Keep the previous map whole (it is at or below the cap
+	// by induction) so the stored snapshot can never grow past the cap and the
+	// diff cannot read a carried file as deleted.
+	const incomplete = carry.dropped > 0;
+	const declarations = incomplete
+		? prior?.declarations
+		: (observed?.declarations ?? prior?.declarations);
 	records.set(key, {
 		stamp,
 		declarations,
-		walkedAt: walkDue ? started : (prior?.walkedAt ?? started),
+		walkedAt: walkDue && !incomplete ? started : (prior?.walkedAt ?? started),
 	});
 	if (walkDue && walked === undefined)
 		recordDegradationOnce({
@@ -249,28 +428,47 @@ async function lookOnce(
 			subject: key,
 			reason: `the declaration-file walk passed ${DECLARATION_WALK_MAX_DIRS} directories or ${DECLARATION_WALK_MAX_FILES} files; declaration files created, edited or deleted outside pi-lens under this root reach no language server and no diagnostics-cache entry is refused for them`,
 		});
+	const unreadableFiles = observed?.unreadableFiles ?? [];
+	if (
+		observed &&
+		(observed.unreadable.length > 0 || unreadableFiles.length > 0)
+	) {
+		const firstUnreadable = observed.unreadable[0] ?? unreadableFiles[0];
+		incrementDegradationCount({
+			kind: "lsp-declaration-walk-unreadable",
+			subject: key,
+			reason: `${incomplete ? `${carry.dropped} declaration file(s) could not be carried past the ${DECLARATION_WALK_MAX_FILES}-file cap, so the previous walk's map stands; ` : ""}${observed.unreadable.length} unreadable dir(s) and ${unreadableFiles.length} unreadable file(s) under this root, first \`${firstUnreadable}\`; ${carry.carried} declaration file(s) kept their previous fingerprint, so a change there is not read as a deletion`,
+			metadata: {
+				unreadableDirs: observed.unreadable.length,
+				firstUnreadableDir: observed.unreadable[0],
+				unreadableFiles: unreadableFiles.length,
+				firstUnreadableFile: unreadableFiles[0],
+				heldBackDeclarations: carry.carried,
+				carriedDropped: carry.dropped,
+			},
+		});
+	}
 	if (prior === undefined) return;
 	const installed = stamp !== prior.stamp;
+	// An incomplete walk (`incomplete`) leaves the record's own map in place, so
+	// there is nothing to diff this round.
 	const changes =
-		walkDue && walked && prior.declarations
-			? diffDeclarations(prior.declarations, walked)
+		walkDue && !incomplete && declarations && prior.declarations
+			? diffDeclarations(prior.declarations, declarations)
 			: [];
 	if (!installed && changes.length === 0) return;
 	const at = Date.now();
-	const service = peekLSPService();
-	let restarted = 0;
-	if (installed) {
-		noteWorkspaceDependenciesChanged(at);
-		restarted = (await service?.restartPrimaryClientsUnder(root)) ?? 0;
-	}
-	if (changes.length > 0) {
-		noteWorkspaceFilesChangedOnDisk(
-			root,
-			changes.map((change) => normalizeMapKey(change.filePath)),
-			at,
-		);
-		service?.notifyOutOfBandFileChanges(changes);
-	}
+	// I1: the per-root record is committed above, before any consumer runs.
+	ensureDiskChangeSubscribers();
+	const { results } = await publishDiskChange(
+		outOfBandChange(root, installed, changes, at),
+		runtime,
+	);
+	// The restart count belongs to the LSP subscriber's own answer; the row
+	// keeps reporting it rather than the publisher growing a special case.
+	const restarted =
+		(results.get(LSP_CONSUMER) as { restarted?: number } | undefined)
+			?.restarted ?? 0;
 	const count = (type: number) =>
 		changes.reduce((n, change) => n + (change.type === type ? 1 : 0), 0);
 	logLatency({

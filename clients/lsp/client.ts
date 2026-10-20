@@ -56,9 +56,13 @@ import { applyWorkspaceEdit, normalizeWorkspaceEditToUtf16 } from "./edits.js";
 import type { LSPProcess } from "./launch.js";
 import { normalizeMapKey, uriToPath } from "./path-utils.js";
 import {
+	lineTextAt,
+	scanDocumentContent,
+	type LastLinePosition,
+} from "./content-scan.js";
+import {
 	ADVERTISED_POSITION_ENCODINGS,
 	convertCharacterOffset,
-	lineTextAt,
 	negotiatePositionEncoding,
 	type PositionEncoding,
 } from "./position-encoding.js";
@@ -371,7 +375,8 @@ export interface LSPClientInfo {
 		 * nothing left for this entry. Optional so client doubles need not
 		 * implement it.
 		 */
-		save?(filePath: string): Promise<boolean>;
+		/** The touch gate sets onlyIfOwed to reuse landed save evidence. */
+		save?(filePath: string, onlyIfOwed?: boolean): Promise<boolean>;
 		/**
 		 * #1668: queue a `workspace/didChangeWatchedFiles` entry for a disk
 		 * change this client did not learn about through didOpen/didChange —
@@ -587,12 +592,26 @@ export interface LSPClientInfo {
 	getSentContent?(filePath: string):
 		| {
 				hash: string;
+				savedHash?: string | undefined;
 				changedAtMs?: number | undefined;
 				openedAtMs?: number | undefined;
 				openedHash?: string | undefined;
 				clientStartedAtMs?: number | undefined;
 		  }
 		| undefined;
+	/**
+	 * #4532 gap 9 F1: true while a send that can change this document is running
+	 * or queued on the path's notify queue. `getSentContent` reports what
+	 * LANDED, so its answer is not the server's final state while such a send is
+	 * still to come: that send writes the bytes the server ends on, and a close
+	 * removes the document altogether. A SAVE-ONLY send is not one of these
+	 * (round 4): it sends no content and closes nothing, so it cannot change the
+	 * answer and must not cost the cached diagnostics a redundant re-push clears.
+	 * Optional for the same reason `getSentContent` is; a client that cannot
+	 * answer fails closed in the touch gate, never open (`clients/lsp/index.ts`
+	 * `shouldSkipNotify`).
+	 */
+	hasNotifyInFlight?(filePath: string): boolean;
 	/** Whether this client currently has an LSP request in flight. */
 	isBusy?(): boolean;
 	/** URI spelling used when this document was opened. */
@@ -658,8 +677,21 @@ export interface LSPClientInfo {
  * document state waits behind it and supersedes only the still-pending entry.
  */
 interface PendingDocumentNotify {
+	/**
+	 * #4532 gap 9 round 4: this run is `sendDidSaveForHeldDocument` alone, so it
+	 * can neither change the document's bytes nor remove it. It must stay paired
+	 * with `run`: a stale save retains the run it coalesces onto, and with it
+	 * that run's kind, so a save-only flag can never describe a content send.
+	 * The touch gate reads it through `hasNotifyInFlightFor`.
+	 */
+	saveOnly: boolean;
 	/** Resolves `false` when it sent nothing for the path (#3477). */
-	run: (coalescedCount: number, saved: boolean) => Promise<boolean | void>;
+	onlyIfOwed?: boolean;
+	run: (
+		coalescedCount: number,
+		saved: boolean,
+		onlyIfOwed?: boolean,
+	) => Promise<boolean | void>;
 	waiters: Array<{
 		/**
 		 * `false`: this caller's content was not sent, because a later read
@@ -702,6 +734,15 @@ interface DiagnosticFence {
 }
 
 interface DocumentNotifyQueue {
+	/**
+	 * The entry whose `run` is on the wire now. Held separately from `pending`
+	 * because the gate needs the KIND of the send still to come, not only that
+	 * one exists: a running save never blocks a skip, a running content send
+	 * does. Cleared only after the run settles. Required with an `undefined`
+	 * member (not optional): the settle path assigns `undefined`, and
+	 * `exactOptionalPropertyTypes` refuses that on an optional field.
+	 */
+	active: PendingDocumentNotify | undefined;
 	pending?: PendingDocumentNotify;
 	running: boolean;
 	/**
@@ -1087,7 +1128,7 @@ export interface LSPClientState {
 	 *  server last saw it (see `buildContentChanges`). Full/None servers never
 	 *  populate it, so the common case pays no extra retained memory.
 	 *
-	 *  #2066: `lastLine` is where that same send's `scanSentContent` pass left
+	 *  #2066: `lastLine` is where that same send's `scanDocumentContent` pass left
 	 *  the end of `text`, so the next change reads two numbers instead of
 	 *  re-walking (and re-splitting) the whole document for them. It travels
 	 *  with `text` and only with `text`: the eviction rewrite below drops both
@@ -1097,6 +1138,8 @@ export interface LSPClientState {
 		{
 			version: number;
 			hash: string;
+			/** Last successful didSave, owned by this document lifetime. */
+			savedHash?: string | undefined;
 			/** #3601: `Date.now()` when a send last CHANGED this document's bytes
 			 *  on the server (a re-send of the same bytes keeps it), so a caller
 			 *  can tell whether the server's copy changed after a request it made. */
@@ -2164,82 +2207,6 @@ function logTypeScriptPullSettle(
 	});
 }
 
-/** Where a document's last LSP-addressable line begins (#2066). */
-interface LastLinePosition {
-	/** Its 0-based line index. */
-	index: number;
-	/** Its first character's offset into the document. */
-	start: number;
-}
-
-interface SentContentScan {
-	/** `\n` count — `contentLineCount` is this + 1. */
-	lfNewlineCount: number;
-	lastLine: LastLinePosition;
-}
-
-/**
- * #2066: the ONE full-document walk a send needs, replacing the two that used
- * to run independently — a `charCodeAt` loop counting `\n` for the
- * `lsp_document_send` line count, and a `.split(/\r\n|\r|\n/)` in
- * `buildContentChanges` that materialized one substring per line to read the
- * last one. The #1095 sha256 is a third walk and stays; it is native, and it
- * is load-bearing. A document with no `\r` is walked natively (`indexOf`)
- * instead of per character (#2066).
- *
- * The two counts here are deliberately NOT the same number and must not be
- * collapsed into one. `lfNewlineCount` counts `\n` only, because its consumer
- * pairs against `diagnostic_past_eof`, whose gate counts LF BYTES
- * (`clients/diagnostic-line-freshness.ts`); merging the conventions would put
- * the two records one apart on exactly the mixed-ending documents the pairing
- * exists to debug. `lastLine` uses the full LSP terminator set (`\r\n`, lone
- * `\r`, `\n` — #1669 review F6), because a CRLF or classic-Mac document whose
- * terminators went uncounted computes a range ending mid-document.
- */
-function scanSentContent(content: string): SentContentScan {
-	// A document with no `\r` (the common case) has exactly one terminator
-	// kind, so `\n` count == terminator count and the last line starts after
-	// the last `\n`. `indexOf` is native and walks ~10x faster than the
-	// per-character loop below (0.30 vs 3.0 ms on a 1.96 MB document). Any `\r`
-	// falls through to the loop, which owns the `\r\n`/lone-`\r` rules.
-	if (content.indexOf("\r") === -1) {
-		let lfNewlineCount = 0;
-		let start = 0;
-		for (
-			let i = content.indexOf("\n");
-			i !== -1;
-			i = content.indexOf("\n", i + 1)
-		) {
-			lfNewlineCount++;
-			start = i + 1;
-		}
-		return { lfNewlineCount, lastLine: { index: lfNewlineCount, start } };
-	}
-	let lfNewlineCount = 0;
-	let index = 0;
-	let start = 0;
-	// `charCodeAt`, not `codePointAt` (typescript:S7758, accepted): both are
-	// compared against 10/13, which no surrogate unit or astral code point can
-	// equal, so they are interchangeable here — but `codePointAt` measured 8%
-	// slower on a 400 KiB LF document (0.716 vs 0.663 ms/scan), because every
-	// ordinary character pays a surrogate-pair check this loop never uses.
-	for (let i = 0; i < content.length; i++) {
-		const code = content.charCodeAt(i);
-		if (code !== 10 && code !== 13) continue;
-		if (code === 10) {
-			lfNewlineCount++;
-		} else if (content.charCodeAt(i + 1) === 10) {
-			// `\r\n` is ONE line terminator, and still carries the `\n` the
-			// LF-only count wants.
-			lfNewlineCount++;
-			i++;
-		}
-		index++;
-		start = i + 1;
-	}
-	return { lfNewlineCount, lastLine: { index, start } };
-}
-
 /**
  * #1095: fingerprint the EXACT didOpen/didChange payload text at SEND time and
  * tag it with the document version it was sent as, so a later
@@ -2255,7 +2222,7 @@ function recordSentContent(
 	content: string,
 	coalescedCount = 0,
 ): void {
-	const scan = scanSentContent(content);
+	const scan = scanDocumentContent(content);
 	const previous = state.documentContentHashes.get(normalizedPath);
 	if (previous && previous.version > version) {
 		incrementDegradationCount({
@@ -2293,6 +2260,7 @@ function recordSentContent(
 	state.documentContentHashes.set(normalizedPath, {
 		version,
 		hash,
+		savedHash: previous?.savedHash,
 		changedAtMs: previous?.hash === hash ? previous.changedAtMs : Date.now(),
 		openedAtMs: previous?.openedAtMs ?? Date.now(),
 		openedHash: previous === undefined ? hash : previous.openedHash,
@@ -2334,10 +2302,14 @@ function recordSentContent(
 			state.incrementalTextBearingPaths.delete(oldestPath);
 			if (!binding || binding.text === undefined) continue;
 			// #2066: `lastLine` is dropped here with the text it describes. The
-			// #1095 version/hash binding is what must survive the strip.
+			// #1095 version/hash binding is what must survive the strip, and with
+			// it the save evidence (#4532 round 8 N1, shape 55): a landed save is
+			// not part of the payload, so a rebuild without `savedHash` made the
+			// next saved touch of the same bytes send a second didSave.
 			state.documentContentHashes.set(oldestPath, {
 				version: binding.version,
 				hash: binding.hash,
+				savedHash: binding.savedHash,
 				changedAtMs: binding.changedAtMs,
 				openedAtMs: binding.openedAtMs,
 				openedHash: binding.openedHash,
@@ -2363,7 +2335,7 @@ function recordSentContent(
 	// convention as the gate itself (newline count + 1 — a trailing `\n` adds
 	// one more, empty, addressable line; an empty document is still 1 line),
 	// or the two records disagree by one at exactly the boundary this counter
-	// exists to help debug. #2066: the count comes from `scanSentContent`
+	// exists to help debug. #2066: the count comes from `scanDocumentContent`
 	// above, which folded this loop into the walk `buildContentChanges` was
 	// already paying for; the LF-only convention is unchanged.
 	logLatency({
@@ -2426,7 +2398,8 @@ function buildContentChanges(
 	// document a second time. An entry carrying text without that position was
 	// written by something else — resolve it through the SAME scanner, never a
 	// second convention that can drift from it.
-	const lastLine = previous.lastLine ?? scanSentContent(previousText).lastLine;
+	const lastLine =
+		previous.lastLine ?? scanDocumentContent(previousText).lastLine;
 	const lastLineText = previousText.slice(lastLine.start);
 	return [
 		{
@@ -4376,13 +4349,34 @@ function handleAnnounceCreated(
 /** #3482: a didSave to a `rescansOnSave` server (opengrep) brings one more
  * publication that answers no send, so the path expects it. Raised before the
  * save is written, so the rescan can never land first and be absorbed by the
- * cap. A save that fails to leave does so because the connection is gone,
- * and a dead client's backlog no longer binds (`captureAuxPublicationBacklog`),
- * so nothing is given back. */
+ * cap. */
 function expectSaveRescan(state: LSPClientState, normalizedPath: string): void {
 	if (!getStrategy(state.serverId, state.launchVariant).rescansOnSave) return;
 	const beyond = state.expectedPublicationsBeyondSends;
 	beyond?.set(normalizedPath, (beyond.get(normalizedPath) ?? 0) + 1);
+}
+
+/**
+ * #4532 gap 9 round 5: a standalone save whose notification did not leave gives
+ * its rescan expectation back.
+ *
+ * Before round 5 the expectation was never given back, because a save that
+ * failed to leave did so on a dead connection and a dead client's backlog no
+ * longer binds (`captureAuxPublicationBacklog`). That is no longer the only
+ * failure: `saveDebouncedPush` retries a save the client survived, and the retry
+ * raises its own expectation. Keeping the failed attempt's leaves a SURPLUS,
+ * which binds the path to one more publication than arrives and withholds the
+ * one the retry does produce (#3482's surplus shape, `late-auxiliary-findings`
+ * `REPLAY-SAVE-RESCAN`).
+ */
+function giveBackSaveRescan(
+	state: LSPClientState,
+	normalizedPath: string,
+): void {
+	const beyond = state.expectedPublicationsBeyondSends;
+	const current = beyond?.get(normalizedPath);
+	if (beyond && current !== undefined && current > 0)
+		beyond.set(normalizedPath, current - 1);
 }
 
 /**
@@ -4410,11 +4404,15 @@ async function sendDidSave(
 	state: LSPClientState,
 	normalizedPath: string,
 	uri: string,
-	content: string,
-): Promise<void> {
+	content?: string,
+	onlyIfOwed = false,
+): Promise<boolean> {
 	const save = state.saveOptions;
-	if (!save) return;
-	if (!isClientAlive(state)) return;
+	if (!save || !isClientAlive(state)) return false;
+	// A standalone caller can follow an unsuccessful open, which has no record.
+	const covered = state.documentContentHashes.get(normalizedPath);
+	// R7: a queued duplicate is satisfied only by an already landed save.
+	if (onlyIfOwed && covered && covered.savedHash === covered.hash) return true;
 	expectSaveRescan(state, normalizedPath);
 	// #3405 r2 (M3406-1): `text` is a SECOND full copy of bytes the server was
 	// just handed, so it is the one payload here that can be file-sized. The
@@ -4431,9 +4429,10 @@ async function sendDidSave(
 	// and pi-lens only ever sends this after a landed didOpen/didChange for the
 	// same document, so the server has these bytes either way. Skipping the save
 	// outright would instead drop the diagnose trigger this PR exists to restore.
-	const limit = save.includeText
-		? exceedsLspSyncLimits(content)
-		: { tooLarge: false, reason: "" };
+	const limit =
+		save.includeText && content !== undefined
+			? exceedsLspSyncLimits(content)
+			: { tooLarge: false, reason: "" };
 	if (limit.tooLarge) {
 		recordDegradationOnce({
 			kind: "lsp-did-save-text-omitted",
@@ -4441,10 +4440,30 @@ async function sendDidSave(
 			reason: limit.reason,
 		});
 	}
-	await safeSendNotification(state.connection, "textDocument/didSave", {
-		textDocument: { uri },
-		...(save.includeText && !limit.tooLarge ? { text: content } : {}),
-	});
+	let sent = false;
+	try {
+		sent = await safeSendNotification(
+			state.connection,
+			"textDocument/didSave",
+			{
+				textDocument: { uri },
+				...(save.includeText && content !== undefined && !limit.tooLarge
+					? { text: content }
+					: {}),
+			},
+		);
+	} catch {
+		// Non-stream failures use the same give-back and bounded record below.
+	}
+	if (!sent) {
+		giveBackSaveRescan(state, normalizedPath);
+		recordDidSaveSendFailed(state, normalizedPath);
+	} else if (covered) {
+		// The sole evidence writer: this save's document, never a waiter's input
+		// or the record that happens to exist after its queue callback settles.
+		covered.savedHash = covered.hash;
+	}
+	return sent;
 }
 
 /**
@@ -4455,22 +4474,38 @@ async function sendDidSave(
 async function sendDidSaveForHeldDocument(
 	state: LSPClientState,
 	normalizedPath: string,
+	onlyIfOwed = false,
 ): Promise<boolean> {
 	if (!state.saveOptions || !isClientAlive(state)) return false;
 	if (!state.openDocuments.has(normalizedPath)) return false;
 	const uri = state.openDocumentUris?.get(normalizedPath);
 	if (uri === undefined) return false;
-	expectSaveRescan(state, normalizedPath);
-	try {
-		return await safeSendNotification(
-			state.connection,
-			"textDocument/didSave",
-			{ textDocument: { uri } },
-		);
-	} catch {
-		// A failed save notify must not stop the queue runner.
-		return false;
-	}
+	return sendDidSave(state, normalizedPath, uri, undefined, onlyIfOwed);
+}
+
+/**
+ * #4532 gap 9 round 6 F4 (shape 31): a standalone save that never left, and
+ * the recovery's own last attempt, used to vanish into the queue runner, and
+ * `lsp_touch_file` is written BEFORE the save finishes, so no row said "this
+ * save never reached the server" — the reader chasing missing save-triggered
+ * findings had nothing to find.
+ *
+ * One bounded row per server per session, exactly like the sibling
+ * `lsp-did-save-text-omitted`: the FILE rides `metadata`, because a per-save row
+ * on a save-triggered project is one row per edit. The service records the
+ * other half (`lsp-did-save-recovery-exhausted`, `clients/lsp/index.ts`),
+ * which is the only side that knows the retry bound is spent.
+ */
+function recordDidSaveSendFailed(
+	state: LSPClientState,
+	normalizedPath: string,
+): void {
+	recordDegradationOnce({
+		kind: "lsp-did-save-send-failed",
+		subject: state.serverId,
+		reason: "textDocument/didSave did not leave the process",
+		metadata: { filePath: normalizedPath },
+	});
 }
 
 /**
@@ -4667,7 +4702,11 @@ async function handleNotifyOpenOnce(
 function enqueueDocumentNotify(
 	state: LSPClientState,
 	normalizedPath: string,
-	run: (coalescedCount: number, saved: boolean) => Promise<boolean | void>,
+	run: (
+		coalescedCount: number,
+		saved: boolean,
+		onlyIfOwed?: boolean,
+	) => Promise<boolean | void>,
 	saved = false,
 	readStamp?: number,
 	close = false,
@@ -4678,10 +4717,11 @@ function enqueueDocumentNotify(
 	 * cannot change.
 	 */
 	saveOnly = false,
+	onlyIfOwed = false,
 ): Promise<boolean> {
 	let queue = state.notifyChangeQueues.get(normalizedPath);
 	if (!queue) {
-		queue = { running: false };
+		queue = { running: false, active: undefined };
 		state.notifyChangeQueues.set(normalizedPath, queue);
 	}
 	return new Promise<boolean>((resolve, reject) => {
@@ -4721,11 +4761,15 @@ function enqueueDocumentNotify(
 		waiters.push({ resolve, reject, stale });
 		queue!.pending = {
 			run: stale ? previous!.run : run,
+			saveOnly: stale ? previous!.saveOnly : saveOnly,
 			waiters,
 			// A save-only entry coalesces no content send.
 			coalescedCount:
 				(previous?.coalescedCount ?? 0) + (previous && !saveOnly ? 1 : 0),
 			saved: saved || previous?.saved === true,
+			// An explicit save in either entry keeps its notification request.
+			onlyIfOwed:
+				onlyIfOwed && (previous === undefined || previous.onlyIfOwed === true),
 			// An unstamped replacement cannot say how old its bytes are; keeping the
 			// pending stamp keeps an older read arriving next out (#3481 round 1).
 			// A close carries no content, so it never inherits a stamp: the
@@ -4746,6 +4790,7 @@ function enqueueDocumentNotify(
 					const next = queue!.pending;
 					if (!next) break;
 					queue!.pending = undefined;
+					queue!.active = next;
 					// #3481: an entry read before the content this path last sent
 					// would replace newer bytes with older ones. Drop it; its
 					// callers resolve without claiming a send.
@@ -4767,7 +4812,11 @@ function enqueueDocumentNotify(
 					if (next.readStamp !== undefined)
 						state.sentReadStamps.set(normalizedPath, next.readStamp);
 					try {
-						const sent = await next.run(next.coalescedCount, next.saved);
+						const sent = await next.run(
+							next.coalescedCount,
+							next.saved,
+							next.onlyIfOwed,
+						);
 						for (const waiter of next.waiters)
 							waiter.resolve(sent !== false && !waiter.stale);
 					} catch (error) {
@@ -4775,6 +4824,7 @@ function enqueueDocumentNotify(
 					}
 				}
 			} finally {
+				queue!.active = undefined;
 				queue!.running = false;
 				if (
 					!queue!.pending &&
@@ -4806,16 +4856,19 @@ function cancelDocumentNotifyQueues(state: LSPClientState): void {
 export function handleNotifySave(
 	state: LSPClientState,
 	filePath: string,
+	onlyIfOwed = false,
 ): Promise<boolean> {
 	const normalizedPath = normalizeMapKey(filePath);
 	return enqueueDocumentNotify(
 		state,
 		normalizedPath,
-		() => sendDidSaveForHeldDocument(state, normalizedPath),
+		(_count, _saved, debtOnly) =>
+			sendDidSaveForHeldDocument(state, normalizedPath, debtOnly),
 		true,
 		undefined,
 		false,
 		true,
+		onlyIfOwed,
 	);
 }
 
@@ -5960,6 +6013,65 @@ async function resolveCodeActionBestEffort(
 
 // --- Client Factory ---
 
+/**
+ * #4532 gap 9: the client's record of the payload it last sent for a document
+ * (`LSPClient.getSentContent`), read from state. Exported because a client
+ * double built on a real `LSPClientState` must answer the touch gate with this
+ * reader rather than a hand-rolled copy of the rule.
+ */
+export function sentContentFor(
+	state: LSPClientState,
+	filePath: string,
+):
+	| {
+			hash: string;
+			savedHash?: string | undefined;
+			changedAtMs?: number | undefined;
+			openedAtMs?: number | undefined;
+			openedHash?: string | undefined;
+			clientStartedAtMs?: number | undefined;
+	  }
+	| undefined {
+	const sent = state.documentContentHashes.get(normalizeMapKey(filePath));
+	return (
+		sent && {
+			hash: sent.hash,
+			savedHash: sent.savedHash,
+			changedAtMs: sent.changedAtMs,
+			openedAtMs: sent.openedAtMs,
+			openedHash: sent.openedHash,
+			clientStartedAtMs: state.startedAtMs,
+		}
+	);
+}
+
+/**
+ * #4532 gap 9 F1: is a content send for this document running or queued?
+ *
+ * `sentContentFor` says what the server has LANDED. `enqueueDocumentNotify`
+ * works one entry at a time and coalesces an unstarted entry with the last one
+ * enqueued for the same path, so while this is true the record is not the
+ * server's final state: the send still running, or the entry behind it, is
+ * what the server ends on. Same export reason as `sentContentFor`.
+ *
+ * #4532 gap 9 round 4: a save-only entry is `sendDidSaveForHeldDocument`,
+ * which writes no content and closes nothing, so it leaves the record as the
+ * server's final state and does not answer here. Counting it did exactly the
+ * harm this gate exists to prevent: a slow `didSave` made the next identical
+ * touch look uncovered, and its redundant `didChange` cleared the cached
+ * diagnostics. A didClose is NOT save-only: removing the document is the
+ * strongest change to it, so it always answers true.
+ */
+export function hasNotifyInFlightFor(
+	state: LSPClientState,
+	filePath: string,
+): boolean {
+	const queue = state.notifyChangeQueues.get(normalizeMapKey(filePath));
+	return (
+		queue?.active?.saveOnly === false || queue?.pending?.saveOnly === false
+	);
+}
+
 export async function createLSPClient(options: {
 	serverId: string;
 	process: LSPProcess;
@@ -6439,8 +6551,8 @@ export async function createLSPClient(options: {
 			async change(filePath, content) {
 				return handleNotifyChange(state, filePath, content);
 			},
-			save(filePath) {
-				return handleNotifySave(state, filePath);
+			save(filePath, onlyIfOwed) {
+				return handleNotifySave(state, filePath, onlyIfOwed);
 			},
 			watchedFileChange(filePath, type) {
 				handleNotifyExternalChange(state, filePath, type);
@@ -6684,16 +6796,11 @@ export async function createLSPClient(options: {
 		},
 
 		getSentContent(filePath) {
-			const sent = state.documentContentHashes.get(normalizeMapKey(filePath));
-			return (
-				sent && {
-					hash: sent.hash,
-					changedAtMs: sent.changedAtMs,
-					openedAtMs: sent.openedAtMs,
-					openedHash: sent.openedHash,
-					clientStartedAtMs: state.startedAtMs,
-				}
-			);
+			return sentContentFor(state, filePath);
+		},
+
+		hasNotifyInFlight(filePath) {
+			return hasNotifyInFlightFor(state, filePath);
 		},
 
 		isBusy() {
