@@ -102,7 +102,11 @@ export function findDetektConfig(cwd: string): string | undefined {
 	return undefined;
 }
 
-// detekt text output: /path/file.kt:10:5: error: Message [RuleId]
+// detekt text output: /path/file.kt:10:5: Message [RuleId] — no severity token
+//
+// The level is therefore optional, and a finding that carries none is a warning
+// (#4522). The comment here is the one place the shape is stated; the captured
+// replay (`detekt/real`) is what proves it.
 function parseDetektOutput(
 	raw: string,
 	filePath: string,
@@ -110,7 +114,7 @@ function parseDetektOutput(
 ): Diagnostic[] {
 	const diagnostics: Diagnostic[] = [];
 	const pattern =
-		/^(.+?):(\d+):(\d+): (error|warning): (.+?)(?:\s+\[([^\]]+)\])?$/gm;
+		/^(.+?):(\d+):(\d+): (?:(error|warning): )?(.+?)(?:\s+\[([^\]]+)\])?$/gm;
 
 	const absTarget = path.resolve(cwd, filePath);
 	for (const match of raw.matchAll(pattern)) {
