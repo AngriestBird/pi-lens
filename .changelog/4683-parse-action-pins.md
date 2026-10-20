@@ -10,7 +10,10 @@ audience: internal
   `${{ matrix.<key> }}` reference whose every matrix leg is one. Flow
   collections, anchors, aliases, tags and block scalars resolve through the
   parser instead of a scanner, and a file the parser cannot read, a step it
-  cannot classify, and every other expression refuse rather than pass. The
+  cannot classify, and every other expression refuse rather than pass. A matrix
+  the rule cannot read refuses too — a non-list `include:`, an `include:` row
+  that is not a mapping, a non-mapping `strategy` or `strategy.matrix` — instead
+  of reading as absent. The
   withdrawn text scan in #4671 found a new silent pass in each of six review
   rounds; this one has no shape to enumerate. `Action pin comments` installs
   its dependencies because the rule parses with a runtime dependency, and
