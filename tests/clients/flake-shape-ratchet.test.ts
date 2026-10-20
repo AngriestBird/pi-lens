@@ -561,6 +561,13 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"real Lean elaboration and diagnostic publication require Lake and elan across the child-process boundary; the serialized wall-clock lane isolates the handshake and diagnostic wait",
 	},
+	// #2657: a real `git worktree add` registers the linked-worktree metadata whose
+	// ownership rule the case measures; a fabricated `.git` file measures the fixture.
+	"real-process-spawn:clients/lsp/session-root-class-2657.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"a real git worktree supplies the linked-worktree identity the registration rule reads; an in-process double cannot prove checkout ownership",
+	},
 	"real-process-spawn:clients/metrics-history-stderr.test.ts": {
 		detector: "real-process-spawn",
 		reason:
@@ -575,6 +582,13 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		detector: "real-process-spawn",
 		reason:
 			"the sibling snapshot writer must be a second real process: the stage sweep keys on its pid, and a second module instance here shares ours",
+	},
+	// #2050: the linked-worktree delivery rung is reached through a real
+	// `git worktree add`, because its class comes from git identity.
+	"real-process-spawn:clients/runtime-tool-result.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the linked-worktree delivery rung needs a real worktree of the session's own checkout; the class it reaches is resolved from git identity, which no in-process double can supply",
 	},
 	"real-process-spawn:clients/safe-spawn-ambient-signal.test.ts": {
 		detector: "real-process-spawn",

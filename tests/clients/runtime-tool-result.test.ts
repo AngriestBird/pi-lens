@@ -1,3 +1,6 @@
+// flake-shape: real-process-spawn — the linked-worktree delivery witness builds
+// its worktree with a real `git init` + `git worktree add`, because the class it
+// reaches comes from git identity (flake-shape admission, #2050).
 // lane: windows-vitest — #3294's case-spelling cell asserts the host
 // filesystem's own answer; no external toolchain is required because the
 // production handleToolResult path and pipeline boundary are in-process.
@@ -284,6 +287,14 @@ it("announces a linked-worktree edit the pipeline found nothing in (#2050 AC3)",
 			readGuard: runtime.readGuard,
 			agentBehaviorRecord: () => [],
 			formatBehaviorWarnings: () => "",
+			// The pipeline is doubled, so these three only satisfy
+			// `ensureToolResultClients` (`deps.biomeClient && deps.ruffClient &&
+			// deps.metricsClient`): the dispatch itself must be REACHED for the
+			// delivery rung to be the thing under test, and a failed bootstrap
+			// demand would skip it.
+			biomeClient: {},
+			ruffClient: {},
+			metricsClient: {},
 		}) as never;
 	try {
 		runtime.projectRoot = repo;
