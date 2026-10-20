@@ -717,11 +717,14 @@ file-scoped worklist and receives no project-wide scanner output.
     because the infra-kill classifier reads only `failure` runs. A shard's own
     step conclusions tell a teardown cancellation from a mid-check one, and every
     required job's measured runtime belongs beside its cap, because a cap set at
-    the measured maximum fails the first time a runner is slow. Guard: planned,
-    not yet running; the shard-verdict test is
-    `tests/scripts/check-shard-verdict.test.ts` on
-    `ci/4672-cancelled-shard-verdict`, off master. Instance and dates:
-    `HISTORY.md`.
+    the measured maximum fails the first time a runner is slow. That runtime is
+    also a per-shard SUM, so it can never be the stale-cost verdict: only the
+    table's rank agreement with the run's own ordering is scale-free enough to
+    survive one shard's machine. Guard: `tests/scripts/check-shard-verdict.test.ts`
+    (the seam, both fail-closed directions), the gating-step list in
+    `tests/config/unit-tests-shard-workflow.test.ts`, and
+    `tests/scripts/ci-verdict-runtime-cap.test.ts` (a measured runtime beside its
+    cap). Instance and dates: `HISTORY.md`.
 
 78. **A dependency's cache directory attributed to the fixture that triggered
     it:** a loader that materialises `os.tmpdir()/<tool>` on the caller's own

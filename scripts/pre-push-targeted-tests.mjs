@@ -128,6 +128,8 @@ export const TREE_SCANNING_GOVERNANCE_TESTS = [
 	"tests/clients/mutation-bridge-lineage-epoch-sweep.test.ts",
 	"tests/clients/session-state-conformance.test.ts",
 	"tests/config/glossary-synonym-sweep.test.ts",
+	// #4312: literal runner references must resolve after registry renames.
+	"tests/config/runner-group-id-census.test.ts",
 	// #3968: walks the custom-server config fields and the LSP_SERVERS
 	// projection for config claims gating runtime behavior without fail-closed
 	// enum validation (the covers validation row is the pinned member).

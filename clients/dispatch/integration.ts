@@ -366,7 +366,7 @@ export async function runAstGrepWarningScan(
 		// Single-runner group: ast-grep only, warning mode (blockingOnly=false)
 		const group: RunnerGroup = {
 			mode: "all",
-			runnerIds: ["ast-grep"],
+			runnerIds: ["ast-grep-napi"],
 			filterKinds: ["jsts"],
 		};
 		await runProviders(ctx);
