@@ -238,8 +238,6 @@ export async function demoteInferredProjectSweepResults<
 	service: TsserverSyncCapableService,
 	signal?: AbortSignal,
 ): Promise<T[]> {
-	const canProbe =
-		typeof service?.executeReadOnlyCommandOnLiveClient === "function";
 	const startedAt = Date.now();
 	const identityCache = new Map<string, TsserverProjectIdentity | undefined>();
 	const out: T[] = [];
@@ -258,10 +256,6 @@ export async function demoteInferredProjectSweepResults<
 		});
 		const checked = diagnostics === raw ? result : { ...result, diagnostics };
 		if (checked !== result) changed = true;
-		if (!canProbe) {
-			out.push(checked);
-			continue;
-		}
 		if (signal?.aborted) {
 			// Carry the remaining results through UNCHANGED rather than dropping
 			// them — an abort must cost the demotion, never a finding.

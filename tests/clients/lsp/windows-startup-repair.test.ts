@@ -13,6 +13,9 @@ const logExtension = vi.hoisted(() => vi.fn());
 const findGlobalBinary = vi.hoisted(() =>
 	vi.fn(async () => undefined as string | undefined),
 );
+// The spawn double of `mockExit1Launch`, hoisted so a cell can read whether
+// the launcher spawned at all and can act inside the child's startup window.
+const spawnDouble = vi.hoisted(() => vi.fn());
 
 vi.mock("../../../clients/extension-log.js", async (importOriginal) => ({
 	...(await importOriginal<
@@ -63,9 +66,10 @@ function plantShim(parent: string): { shim: string; target: string } {
  */
 function mockExit1Launch(globalBinary?: string): void {
 	findGlobalBinary.mockResolvedValue(globalBinary);
+	spawnDouble.mockImplementation(exitWith(1));
 	vi.doMock("node:child_process", () => ({
 		execFileSync: vi.fn(() => ""),
-		spawn: vi.fn(exitWith(1)),
+		spawn: spawnDouble,
 	}));
 	vi.doMock("../../../clients/package-manager.js", async (importActual) => ({
 		...(await importActual<
@@ -106,6 +110,7 @@ describe("Windows LSP startup repair classification (#4263)", () => {
 		vi.clearAllMocks();
 		findGlobalBinary.mockReset();
 		findGlobalBinary.mockResolvedValue(undefined);
+		spawnDouble.mockReset();
 	});
 
 	it("repairs an absent bare command reported as exit-code 1", async () => {
@@ -280,11 +285,98 @@ describe("Windows LSP startup repair classification (#4263)", () => {
 				() => undefined,
 			);
 			expect(ensureTool).toHaveBeenCalledWith("server");
+			// The pre-spawn check skips the candidate: an npm shim with no target
+			// exits 1 only after the 500 ms startup window, so spawning it costs
+			// that wait for a verdict the disk already gave.
+			expect(spawnDouble).not.toHaveBeenCalled();
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 			setPlatform(originalPlatform);
 		}
 	});
+
+	// Review F4, the classifier's own shim arm: presence is decided before the
+	// spawn, so a shim whose target an uninstall or upgrade removes inside the
+	// startup window was valid when presence was read. The exit code 1 it then
+	// reports is the missing install, and the post-exit shim check is the only
+	// reading that sees it.
+	it("repairs a shim whose target vanishes during the startup window", async () => {
+		const originalPlatform = process.platform;
+		setPlatform("win32");
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-4263-race-"));
+		const { shim, target } = plantShim(path.join(root, "global"));
+		mockExit1Launch();
+		const exit1 = exitWith(1);
+		spawnDouble.mockImplementation(() => {
+			fs.rmSync(target);
+			return exit1();
+		});
+		try {
+			await launchOnce(shim, path.join(root, "global"), "server").catch(
+				() => undefined,
+			);
+			expect(spawnDouble).toHaveBeenCalled();
+			expect(ensureTool).toHaveBeenCalledWith("server");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+			setPlatform(originalPlatform);
+		}
+	});
+
+	// Review F4, the bare-command arm: a bare spelling the PATH scan and the
+	// global fallback both missed is absent, whatever sits in pi's OWN cwd. The
+	// explicit-command rule stats its spelling, and a bare name statted from
+	// the process cwd would read a project file called `gopls` as the
+	// installed server and leave the missing install unrepaired.
+	it("repairs an unresolved bare command even when pi's cwd holds a file of that name", async () => {
+		const originalPlatform = process.platform;
+		const originalCwd = process.cwd();
+		setPlatform("win32");
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-4263-cwd-"));
+		fs.writeFileSync(path.join(root, "missing-language-server"), "");
+		mockExit1Launch();
+		try {
+			process.chdir(root);
+			await launchOnce(
+				"missing-language-server",
+				path.join(root, "project"),
+				"missing-language-server",
+			).catch(() => undefined);
+			expect(ensureTool).toHaveBeenCalledWith("missing-language-server");
+		} finally {
+			process.chdir(originalCwd);
+			fs.rmSync(root, { recursive: true, force: true });
+			setPlatform(originalPlatform);
+		}
+	});
+
+	// Review F1/F4, the PATHEXT arm: an explicit spelling with no extension is
+	// what `CreateProcess` completes to `.exe`, so a present `gopls.exe` named
+	// as `...\bin\gopls` is installed. Only the real Windows resolver can read
+	// that, so this cell runs on the Windows lane alone; on POSIX the resolver
+	// answers null for every path and the cell has nothing to witness.
+	it.runIf(process.platform === "win32")(
+		"does not repair an extensionless explicit command whose .exe is present",
+		async () => {
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-4263-ext-"));
+			const binary = path.join(root, "bin", "gopls.exe");
+			fs.mkdirSync(path.dirname(binary), { recursive: true });
+			fs.writeFileSync(binary, "MZ\n");
+			mockExit1Launch();
+			try {
+				await expect(
+					launchOnce(
+						path.join(root, "bin", "gopls"),
+						path.join(root, "project"),
+						"gopls",
+					),
+				).rejects.toThrow(/exited immediately with code 1/);
+				expect(ensureTool).not.toHaveBeenCalled();
+			} finally {
+				fs.rmSync(root, { recursive: true, force: true });
+			}
+		},
+	);
 
 	it("refuses an unknown-trust local missing-target shim before repair", async () => {
 		const originalPlatform = process.platform;
