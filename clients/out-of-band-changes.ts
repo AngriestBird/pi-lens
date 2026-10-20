@@ -191,17 +191,6 @@ async function readInstallStamp(
 }
 
 /**
- * The FIRST look's verdict for a root with no record yet (#4532): an install
- * counts when the freshest stamp entry is at or after the epoch of the client
- * that has to re-read it. `since` absent or 0 means "no epoch" — the caller
- * has no live client at this root, so the first look keeps #4476's rule and
- * changes nothing.
- *
- * `>=`, not `>`: an install that finished in the same millisecond the client
- * spawned is indistinguishable from one that landed after it, and the safe
- * direction is the restart.
- */
-/**
  * A file's mtime comes from the kernel's COARSER clock and can land a tick
  * BELOW `Date.now()`, so an install written in the same second as the spawn can
  * stamp earlier than the spawn epoch. Comparing exactly would read that install
@@ -214,6 +203,17 @@ async function readInstallStamp(
  */
 const COARSE_MTIME_SLACK_MS = 1_000;
 
+/**
+ * The FIRST look's verdict for a root with no record yet (#4532): an install
+ * counts when the freshest stamp entry is at or after the epoch of the client
+ * that has to re-read it. `since` absent or 0 means "no epoch" — the caller
+ * has no live client at this root, so the first look keeps #4476's rule and
+ * changes nothing.
+ *
+ * `>=`, not `>`: an install that finished in the same millisecond the client
+ * spawned is indistinguishable from one that landed after it, and the safe
+ * direction is the restart.
+ */
 function firstLookSawInstall(
 	install: { newestChangeMs: number },
 	since: number | undefined,

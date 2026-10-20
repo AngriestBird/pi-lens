@@ -171,14 +171,6 @@ export function resolveGitCheckout(startPath: string): GitCheckout | null {
 }
 
 /**
- * The linked worktree of `session`'s repository that owns `absoluteFile`, or
- * `null` when the session checkout owns it, its owner is a different
- * repository (a submodule, a nested clone), or no owner can be resolved (#3871,
- * #3872). Same commondir plus a different top level is the whole rule; every
- * "which checkout owns this edit" decision in turn_end asks here, so the knip
- * scan root and the test runner root cannot disagree about a file.
- */
-/**
  * The same-checkout-different-root rule, asked of two RESOLVED checkouts. One
  * rule, two callers: {@link resolveLinkedWorktreeOwner} decides which checkout
  * owns an edit (a file's directory), and `isSessionBookkeepingRoot`
@@ -198,6 +190,14 @@ export function sameCheckoutOtherRoot(
 	);
 }
 
+/**
+ * The linked worktree of `session`'s repository that owns `absoluteFile`, or
+ * `null` when the session checkout owns it, its owner is a different
+ * repository (a submodule, a nested clone), or no owner can be resolved (#3871,
+ * #3872). Same commondir plus a different top level is the whole rule; every
+ * "which checkout owns this edit" decision in turn_end asks here, so the knip
+ * scan root and the test runner root cannot disagree about a file.
+ */
 export function resolveLinkedWorktreeOwner(
 	session: GitCheckout,
 	absoluteFile: string,
