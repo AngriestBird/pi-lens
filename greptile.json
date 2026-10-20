@@ -20,6 +20,7 @@
 		]
 	},
 
+	"statusCheck": false,
 	"includeSequenceDiagram": false,
 	"sequenceDiagramSection": {
 		"included": false,
