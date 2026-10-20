@@ -8,16 +8,36 @@ import { registerDefaultRunners } from "../../clients/dispatch/runners/index.js"
 import { censusSourceFiles, parseRoot } from "../support/ast-census.js";
 import {
 	assertNonEmptyScan,
+	auditRegistry,
 	readWalkedFiles,
 	relativePosix,
+	stableOccurrenceKey,
 } from "../support/sweep-kit.js";
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const registry = new RunnerRegistry();
 registerDefaultRunners(registry);
 
+// Runtime-derived values are audited per occurrence, never skipped by shape.
+const DYNAMIC_SITES: Record<string, string> = {
+	"clients/deferred-runner-blockers.ts#absorbSettledRunnerBlockers:e342c2bb":
+		"telemetry copies runner identities from settled results; it does not construct a dispatch group",
+	"clients/dispatch/adopted-root-runners.ts#filterGroupsForAdoptedRoot:030a55e6":
+		"filters the input group's existing runner ids through the adopted-root policy; introduces no ids",
+	"clients/dispatch/dispatcher.ts#dispatchForFile:74a0e36b":
+		"result metadata copies the set of inconclusive runners; it does not construct a dispatch group",
+	"clients/dispatch/integration.ts#withPrimaryPolicyGroup:b9413ec9":
+		"filters lsp from the input group's existing runner ids; introduces no ids",
+	"clients/dispatch/integration.ts#capturePreEditLinterFindings:97a13cae":
+		"filters existing plan ids to eligible inline linters for pre-edit capture; introduces no ids",
+	"clients/language-policy.ts#getPrimaryDispatchGroup:17282e2d":
+		"copies or filters the censused PRIMARY_DISPATCH_GROUPS literals; introduces no ids",
+};
+
+type Problem = { key: string; detail: string };
+
 function propertyName(pair: SgNode): unknown {
-	const raw = pair.field("key");
+	const raw = pair.field("key") ?? pair;
 	const key =
 		raw?.kind() === "computed_property_name"
 			? raw.children().find((node) => node.isNamed())
@@ -28,34 +48,41 @@ function propertyName(pair: SgNode): unknown {
 }
 
 /** #4312: literal references must resolve against registrations, not declarations. */
-function census(source: string): { ids: string[]; problems: string[] } {
+function census(
+	source: string,
+	file = "fixture.ts",
+): { ids: string[]; problems: Problem[] } {
 	const ids: string[] = [];
-	const problems: string[] = [];
-	for (const pair of parseRoot(source).findAll({ rule: { kind: "pair" } })) {
+	const problems: Problem[] = [];
+	const lines = source.split("\n");
+	const report = (node: SgNode, message: string) => {
+		const line = node.range().start.line;
+		problems.push({
+			key: stableOccurrenceKey(file, lines, line),
+			detail: `${file}:${line + 1}: ${message}`,
+		});
+	};
+	for (const pair of parseRoot(source).findAll({
+		rule: {
+			any: [{ kind: "pair" }, { kind: "shorthand_property_identifier" }],
+		},
+	})) {
 		if (propertyName(pair) !== "runnerIds") continue;
 		const value = pair.field("value");
-		// Runtime-derived lists contain no direct literal references to check.
-		if (value?.kind() !== "array") continue;
-		const elements = value.children().filter((node) => node.isNamed());
-		// Also named runnerIds: runtime result metadata, with no literal ids or
-		// RunnerGroup mode (e.g. DispatchResult.inconclusiveSources).
-		const hasMode = pair
-			.parent()
-			?.children()
-			.some((node) => node.kind() === "pair" && propertyName(node) === "mode");
-		if (!hasMode && !elements.some((node) => node.kind() === "string"))
+		if (value?.kind() !== "array") {
+			report(pair, `unclassified runner ids ${pair.text()}`);
 			continue;
+		}
+		const elements = value.children().filter((node) => node.isNamed());
 		for (const element of elements) {
 			if (element.kind() === "comment") continue;
-			const line = element.range().start.line + 1;
 			if (element.kind() !== "string") {
-				problems.push(`${line}: unclassified runner id ${element.text()}`);
+				report(element, `unclassified runner id ${element.text()}`);
 				continue;
 			}
 			const id = JSON5.parse<string>(element.text());
 			ids.push(id);
-			if (!registry.get(id))
-				problems.push(`${line}: unregistered runner id ${id}`);
+			if (!registry.get(id)) report(element, `unregistered runner id ${id}`);
 		}
 	}
 	return { ids, problems };
@@ -71,27 +98,30 @@ describe("RunnerGroup literal id census (#4312)", () => {
 		);
 		assertNonEmptyScan("production sources", files.length, 600);
 		assertNonEmptyScan("registered runners", registry.list().length, 40);
-		const problems: string[] = [];
+		const problems: Problem[] = [];
 		let references = 0;
 		for (const { file, source } of readWalkedFiles(files)) {
-			const result = census(source);
+			const result = census(source, relativePosix(ROOT, file));
 			references += result.ids.length;
-			problems.push(
-				...result.problems.map(
-					(problem) => `${relativePosix(ROOT, file)}:${problem}`,
-				),
-			);
+			problems.push(...result.problems);
 		}
 		assertNonEmptyScan("literal runner id references", references, 100);
-		expect(problems).toEqual([]);
+		expect(
+			auditRegistry({
+				sweepName: "runner-group-id-census",
+				flagged: problems,
+				registered: [],
+				exemptions: DYNAMIC_SITES,
+			}).problems,
+		).toEqual([]);
 	});
 
 	it("checks quoted and computed literal keys without counting prose", () => {
 		const result = census(`
 			// runnerIds: ["comment-only"]
 			const prose = 'runnerIds: ["string-only"]';
-			const metadata = { runnerIds: [...inconclusiveRunnerIds] };
-			const groups = [{ runnerIds: ["lsp"] },
+			const metadata = { runnerIds: [] };
+			const groups = [{ runnerIds: ["lsp" /* registered */] },
 				{ "runnerIds": ["not-registered"] },
 				{ ["runnerIds"]: ['also-not-registered'] },
 				{ ["runner\\u0049ds"]: ['escaped-not-registered'] }];
@@ -104,8 +134,29 @@ describe("RunnerGroup literal id census (#4312)", () => {
 		]);
 		expect(result.problems).toHaveLength(3);
 		expect(
-			result.problems.every((problem) => problem.includes("unregistered")),
+			result.problems.every((problem) =>
+				problem.detail.includes("unregistered"),
+			),
 		).toBe(true);
+	});
+
+	it.each([
+		'const ids = ["missing"]; const group = { mode: "all", runnerIds: ids };',
+		'const getIds = () => ["missing"]; const group = { mode: "all", runnerIds: getIds() };',
+		'const holder = { ids: ["missing"] }; const group = { mode: "all", runnerIds: holder.ids };',
+		'const runnerIds = ["missing"]; const group = { mode: "all", runnerIds };',
+		'const ids = ["missing"]; const group = { runnerIds: ids };',
+		'const ids = ["missing"]; const group = { runnerIds: [...ids] };',
+		'const group = { mode: "all", runnerIds: (["missing"]) };',
+		'const group = { mode: "all", runnerIds: ["missing"] as string[] };',
+		'const group = { mode: "all", runnerIds: ["missing"] satisfies string[] };',
+		'const group = { mode: "all", runnerIds: <string[]>["missing"] };',
+		'const group = { mode: "all", runnerIds: ["missing"]! };',
+	])("refuses an unclassified runnerIds value: %s", (source) => {
+		// #4312 review: whole values bypassed the array-element classifier.
+		const { problems } = census(source);
+		expect(problems).toHaveLength(1);
+		expect(problems[0]?.detail).toContain("unclassified runner id");
 	});
 
 	it.each([
@@ -117,7 +168,9 @@ describe("RunnerGroup literal id census (#4312)", () => {
 		(source) => {
 			// Shape 69: alias, indirect call, and a value through another binding.
 			expect(census(source).problems).toEqual([
-				expect.stringContaining("unclassified runner id"),
+				expect.objectContaining({
+					detail: expect.stringContaining("unclassified runner id"),
+				}),
 			]);
 		},
 	);

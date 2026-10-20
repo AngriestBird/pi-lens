@@ -224,12 +224,6 @@ const ADMITTED_ACCESSOR_SITES: readonly AccessorAdmission[] = [
 			"enumerates one runnerIds array's direct elements for classification",
 	},
 	{
-		file: "tests/config/runner-group-id-census.test.ts",
-		text: "?.children()",
-		count: 1,
-		reason: "checks one object's direct properties for a RunnerGroup mode key",
-	},
-	{
 		file: "tests/support/silent-catch-scan.ts",
 		text: "for (const child of node.children()) {",
 		count: 1,
