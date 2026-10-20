@@ -347,5 +347,6 @@ produced — so a session's config posture is visible without the detail.
 - `docs/globalconfig.md` — every key of `~/.pi-lens/config.json`, in detail.
 - `docs/settings.md` — the CLI flags and what they map to.
 - `docs/environment-variables.md` — the `PI_LENS_*` tier.
+- `docs/features.md` — the Python interpreter and syntax-level declarations pi-lens reads from a project (`VIRTUAL_ENV`, `requires-python`, `target-version`, `.python-version`).
 - `docs/public-api-stability.md` — what `x-stability`, the `PILENS_CFG_*` codes,
   and the deprecation windows commit pi-lens to.

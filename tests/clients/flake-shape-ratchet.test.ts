@@ -334,6 +334,15 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			reason:
 				"spawning the managed language server is the process boundary; the wrapper delegates every other command, the refused project-local candidate included, to the real launchLSP",
 		},
+	// 2026-10-20 (#4638): tool availability is resolved so the spawn seam records the
+	// real argv (cwd + config args) without probing or installing ruff; only that
+	// resolver is doubled, and resolveToolCwd, ruffConfigArgs, safe-spawn stay real.
+	"in-process-mock:clients/ruff-target-version-argv.test.ts::clients/dispatch/runners/utils/runner-helpers":
+		{
+			detector: "in-process-mock",
+			reason:
+				"the argv case must not probe or install ruff; the resolver stands in for the availability probe while resolveToolCwd, ruffConfigArgs and the spawn seam stay real",
+		},
 	// 2026-10-16 (#4483): the first-write seed witness keeps every pi-lens
 	// module on the tool_call-to-turn-end chain real; only the language-server
 	// process behind the LSP capability adapter is stood in for, for the
@@ -575,6 +584,14 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		detector: "real-process-spawn",
 		reason:
 			"the sibling snapshot writer must be a second real process: the stage sweep keys on its pid, and a second module instance here shares ours",
+	},
+	// 2026-10-20 (#4638): ruff's own config discovery and target-gated fixes are the
+	// behaviour under test, so the case runs the real binary and its outcome
+	// (fixed/changed) is the witness; it is serialized in the wall-clock lane.
+	"real-process-spawn:clients/ruff-target-version-real.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"ruff's config discovery and target-gated fixes are the behaviour under test; a fake binary would encode the guess this ticket removed",
 	},
 	"real-process-spawn:clients/safe-spawn-ambient-signal.test.ts": {
 		detector: "real-process-spawn",

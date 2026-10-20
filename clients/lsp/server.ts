@@ -20,6 +20,7 @@ import {
 	augmentPythonEnvironment,
 	detectPythonEnvironment,
 	detectPythonVenv,
+	PYTHON_COMPILE_VERDICT_SERVER_ID,
 	pythonEnvironmentToolCandidates,
 } from "../python-environment.js";
 
@@ -2966,7 +2967,9 @@ export const PythonServer: LSPServerInfo = {
 };
 
 export const PythonJediServer: LSPServerInfo = {
-	id: "python-jedi",
+	// One identity: `isJediCompileVerdictOutranked` matches `compile` rows by
+	// this id, so the rule and the registration cannot drift (#4638).
+	id: PYTHON_COMPILE_VERDICT_SERVER_ID,
 	idleEviction: "transparent",
 	role: "language",
 	name: "Jedi Language Server",
@@ -2984,23 +2987,52 @@ export const PythonJediServer: LSPServerInfo = {
 		]),
 	),
 	async spawn(root, options) {
+		// #4638: launch jedi from the project's own interpreter first, exactly as
+		// pyright does, so it parses with the environment the project declared
+		// instead of whichever interpreter the managed install happens to carry.
+		// The project tier carries no `managedToolId`: a managed binary is
+		// prepended to `candidates` ahead of everything, which would put it back
+		// in front of the project's environment.
+		const pythonEnvironment = await detectPythonEnvironment(root);
+		const env = augmentPythonEnvironment(
+			await getToolEnvironment(),
+			pythonEnvironment,
+		);
+		const initialization = pythonEnvironment
+			? { workspace: { environmentPath: pythonEnvironment.pythonPath } }
+			: {};
+
+		if (pythonEnvironment) {
+			const projectLaunched = await resolveAndLaunch(
+				{
+					candidates: pythonEnvironmentToolCandidates(
+						pythonEnvironment,
+						"jedi-language-server",
+					),
+					args: [],
+					cwd: root,
+					env,
+				},
+				options?.allowInstall,
+			);
+			if (projectLaunched) return { ...projectLaunched, initialization };
+		}
+
+		// No project-owned interpreter (absent, or refused untrusted inside
+		// `detectPythonEnvironment`, which records the one-shot refusal): fall back
+		// to the managed install and then the host PATH, as before.
 		const launched = await resolveAndLaunch(
 			{
 				candidates: ["jedi-language-server"],
 				args: [],
 				cwd: root,
+				env,
 				managedToolId: "jedi-language-server",
 			},
 			options?.allowInstall,
 		);
 		if (!launched) return undefined;
-		const pythonPath = await detectPythonVenv(root);
-		return {
-			...launched,
-			initialization: pythonPath
-				? { workspace: { environmentPath: pythonPath } }
-				: {},
-		};
+		return { ...launched, initialization };
 	},
 };
 

@@ -46,6 +46,10 @@ import {
 } from "../clients/finding-delivery-gate.js";
 import { disabledPrimaries } from "../clients/lsp/session-roots.js";
 import { SYMBOL_KIND_NAMES } from "../clients/lsp-document-symbols.js";
+import {
+	detectPythonTargetVersion,
+	type PythonTargetVersion,
+} from "../clients/python-environment.js";
 
 const VALID_OPERATIONS = [
 	"definition",
@@ -1285,6 +1289,9 @@ export function createLspNavigationTool(
 					// #1634: the same finding policy (stored dispositions, `.pi-lens.json`
 					// rule policy, inline `pi-lens-ignore`) the `lens_diagnostics
 					// source=lsp` probe applies to the same server answer.
+					// #4638: the project's declared Python syntax level, so jedi's own
+					// `compile` verdict cannot outrank it on this route either.
+					const pythonCompileTarget = await detectPythonTargetVersion(filePath);
 					const policy = applyProbeFindingPolicy(
 						filePath,
 						await lspService.getDiagnostics(
@@ -1296,6 +1303,7 @@ export function createLspNavigationTool(
 						openedContent,
 						"all",
 						"lsp_navigation",
+						pythonCompileTarget,
 					);
 					const diagnostics = policy.kept;
 					const suppressedLine = dispositionSuppressedLine(policy.suppressed);
@@ -1361,6 +1369,18 @@ export function createLspNavigationTool(
 				// #1634: a tracked snapshot replays what each client last published,
 				// so every row passes the same finding policy as the path read and
 				// carries its age: nothing here re-checks the file.
+				// #4638: resolve each tracked file's declaration before the
+				// synchronous map below, which cannot await per row.
+				const pythonCompileTargets = new Map<
+					string,
+					PythonTargetVersion | undefined
+				>();
+				for (const trackedFile of allDiagnostics.keys()) {
+					pythonCompileTargets.set(
+						trackedFile,
+						await detectPythonTargetVersion(trackedFile),
+					);
+				}
 				let snapshotSuppressed = 0;
 				const result = Array.from(allDiagnostics.entries()).map(
 					([trackedFile, { diags, ts }]) => {
@@ -1373,6 +1393,7 @@ export function createLspNavigationTool(
 								readFileContent(trackedFile),
 								"all",
 								"lsp_navigation",
+								pythonCompileTargets.get(trackedFile),
 							);
 							snapshotSuppressed += policy.suppressed;
 							kept = policy.kept;

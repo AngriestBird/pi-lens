@@ -2034,6 +2034,173 @@ describe("lsp server policy", () => {
 		}
 	});
 
+	it("PythonJediServer launches from the project's own venv before the managed install (#4638)", async () => {
+		const { PythonJediServer } = await import("../../../clients/lsp/server.js");
+		const tmp = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-jedi-project-env-"),
+		);
+		dirs.push(tmp);
+		const binDir = path.join(tmp, ".venv", "bin");
+		const jediPath = path.join(binDir, "jedi-language-server");
+		const pythonPath = path.join(binDir, "python");
+		fs.mkdirSync(binDir, { recursive: true });
+		for (const executable of [jediPath, pythonPath]) {
+			fs.writeFileSync(executable, "#!/usr/bin/env bash\nexit 0\n");
+			fs.chmodSync(executable, 0o755);
+		}
+		fs.writeFileSync(
+			path.join(tmp, "pyproject.toml"),
+			'[project]\nname = "demo"\nrequires-python = ">=3.14"\n',
+		);
+
+		const envKeys = [
+			"VIRTUAL_ENV",
+			"CONDA_PREFIX",
+			"UV_PROJECT_ENVIRONMENT",
+		] as const;
+		const savedEnv = envKeys.map((key) => process.env[key]);
+		for (const key of envKeys) delete process.env[key];
+
+		launchLSP.mockClear();
+		launchLSP.mockResolvedValue({
+			process: { killed: false } as never,
+			stdin: {} as never,
+			stdout: {} as never,
+			stderr: {} as never,
+			pid: 2222,
+		});
+
+		try {
+			const spawned = await PythonJediServer.spawn(tmp);
+
+			expect(spawned?.initialization).toMatchObject({
+				workspace: { environmentPath: pythonPath },
+			});
+			expect(launchLSP).toHaveBeenCalledTimes(1);
+			const [command, , options] = launchLSP.mock.calls[0] as [
+				string,
+				string[],
+				{ cwd?: string; env?: NodeJS.ProcessEnv },
+			];
+			expect(command).toBe(jediPath);
+			expect(options.cwd).toBe(tmp);
+			expect(options.env?.VIRTUAL_ENV).toBe(path.join(tmp, ".venv"));
+			expect(String(options.env?.PATH).split(path.delimiter)[0]).toBe(binDir);
+			expect(ensureTool).not.toHaveBeenCalled();
+		} finally {
+			envKeys.forEach((key, index) => {
+				const value = savedEnv[index];
+				if (value !== undefined) process.env[key] = value;
+			});
+		}
+	});
+
+	it("PythonJediServer falls back to the managed install when the project venv is untrusted (#4638)", async () => {
+		const { PythonJediServer } = await import("../../../clients/lsp/server.js");
+		const { setProjectTrustState } =
+			await import("../../../clients/project-trust.js");
+		const { detectPythonTargetVersion } =
+			await import("../../../clients/python-environment.js");
+		const { getDegradationSummary, resetDegradationLedger } =
+			await import("../../../clients/degradation-ledger.js");
+
+		const tmp = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-jedi-untrusted-"),
+		);
+		dirs.push(tmp);
+		const binDir = path.join(tmp, ".venv", "bin");
+		fs.mkdirSync(binDir, { recursive: true });
+		for (const name of ["jedi-language-server", "python"]) {
+			fs.writeFileSync(
+				path.join(binDir, name),
+				"#!/usr/bin/env bash\nexit 0\n",
+			);
+			fs.chmodSync(path.join(binDir, name), 0o755);
+		}
+		fs.writeFileSync(
+			path.join(tmp, "pyproject.toml"),
+			'[project]\nname = "demo"\nrequires-python = ">=3.14"\n',
+		);
+
+		const envKeys = [
+			"VIRTUAL_ENV",
+			"CONDA_PREFIX",
+			"UV_PROJECT_ENVIRONMENT",
+		] as const;
+		const savedEnv = envKeys.map((key) => process.env[key]);
+		for (const key of envKeys) delete process.env[key];
+
+		resetDegradationLedger();
+		setProjectTrustState("unknown");
+		launchLSP.mockClear();
+		launchLSP.mockResolvedValue({
+			process: { killed: false } as never,
+			stdin: {} as never,
+			stdout: {} as never,
+			stderr: {} as never,
+			pid: 3333,
+		});
+
+		try {
+			const spawned = await PythonJediServer.spawn(tmp);
+
+			expect(spawned).toBeDefined();
+			const [command, , options] = launchLSP.mock.calls[0] as [
+				string,
+				string[],
+				{ cwd?: string; env?: NodeJS.ProcessEnv },
+			];
+			expect(command).toBe("jedi-language-server");
+			expect(options.env?.VIRTUAL_ENV).toBeUndefined();
+			expect(getDegradationSummary().map((entry) => entry.kind)).toContain(
+				"trust-refusal",
+			);
+			// The declaration is read independently of trust, so the compile drop
+			// still applies to a project whose interpreter pi-lens refuses.
+			await expect(
+				detectPythonTargetVersion(path.join(tmp, "app.py"), path.dirname(tmp)),
+			).resolves.toMatchObject({ major: 3, minor: 14 });
+		} finally {
+			envKeys.forEach((key, index) => {
+				const value = savedEnv[index];
+				if (value !== undefined) process.env[key] = value;
+			});
+		}
+	});
+
+	it("pythonEnvironmentToolCandidates offers the Windows shim order without a platform skip (#4638)", async () => {
+		const { pythonEnvironmentToolCandidates } =
+			await import("../../../clients/python-environment.js");
+		const { setPlatform } = await import("../../support/platform-stub.js");
+
+		const root = path.join("/fixture", ".venv");
+		const binDir = path.join(root, "Scripts");
+		setPlatform("win32");
+		try {
+			expect(
+				pythonEnvironmentToolCandidates(
+					{
+						root,
+						binDir,
+						pythonPath: path.join(binDir, "python.exe"),
+						source: "project-dot-venv" as const,
+					},
+					"jedi-language-server",
+				),
+			).toEqual([
+				path.join(binDir, "jedi-language-server.exe"),
+				path.join(binDir, "jedi-language-server.cmd"),
+				path.join(binDir, "jedi-language-server"),
+			]);
+		} finally {
+			setPlatform(process.platform);
+		}
+		// A bare environment offers nothing: the bare command stays the fallback.
+		expect(
+			pythonEnvironmentToolCandidates(undefined, "jedi-language-server"),
+		).toEqual([]);
+	});
+
 	describe("rust-analyzer force-reinstall", () => {
 		const MANAGED =
 			process.platform === "win32"

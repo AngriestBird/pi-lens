@@ -4,8 +4,10 @@ import path from "node:path";
 import {
 	extractTomlTableSection,
 	hasTomlTable,
+	parseTomlScalarString,
 	parseTomlStringArray,
 } from "./cargo-manifest.js";
+import { resolveLanguage } from "./language-registry.js";
 import {
 	isAtOrAboveHomeDir,
 	matchesWorkspaceMemberPattern,
@@ -386,4 +388,270 @@ export function pythonEnvironmentToolCandidates(
 		path.join(environment.binDir, `${command}.cmd`),
 		path.join(environment.binDir, command),
 	];
+}
+
+/**
+ * #4638: where a project declared its Python syntax level, named by the source
+ * so a degradation record can say which declaration it overrode.
+ */
+export type PythonTargetVersionSource =
+	| "ruff-target-version"
+	| "pyright-python-version"
+	| "requires-python"
+	| "python-version-file";
+
+export interface PythonTargetVersion {
+	major: number;
+	minor: number;
+	source: PythonTargetVersionSource;
+	/** Absolute path of the file that declared it. */
+	file: string;
+}
+
+/** The LSP server whose `compile` verdict a project declaration outranks. */
+export const PYTHON_COMPILE_VERDICT_SERVER_ID = "python-jedi";
+
+/** First declared level at which jedi's own `compile` verdict is outranked. */
+const PYTHON_COMPILE_VERDICT_FLOOR = { major: 3, minor: 14 } as const;
+
+/**
+ * jedi compiles a file with the interpreter it launched. Under a declared level
+ * at or above the floor its `compile` row describes a grammar the project does
+ * not use (PEP 758's unparenthesized `except` is the common case), so the row is
+ * not evidence about this project. Every other server, source, and level keeps
+ * its verdict, and no declaration keeps every verdict.
+ */
+export function isJediCompileVerdictOutranked(
+	diagnostic: { serverId?: string; source?: string },
+	declared: PythonTargetVersion | undefined,
+): boolean {
+	if (declared === undefined) return false;
+	if (diagnostic.serverId !== PYTHON_COMPILE_VERDICT_SERVER_ID) return false;
+	if (diagnostic.source !== "compile") return false;
+	return (
+		declared.major > PYTHON_COMPILE_VERDICT_FLOOR.major ||
+		(declared.major === PYTHON_COMPILE_VERDICT_FLOOR.major &&
+			declared.minor >= PYTHON_COMPILE_VERDICT_FLOOR.minor)
+	);
+}
+
+interface DeclaredPythonVersion {
+	major: number;
+	minor: number;
+}
+
+function reducePythonVersion(
+	match: RegExpMatchArray | null,
+): DeclaredPythonVersion | undefined {
+	if (!match) return undefined;
+	return { major: Number(match[1]), minor: Number(match[2]) };
+}
+
+/**
+ * Reduce one version-ish text to its major/minor. Anything that does not BEGIN
+ * with `<major>.<minor>` names no CPython syntax level: `pypy-3.10`, a branch
+ * name in `.python-version`, or a bare major `3` with no minor. A patch or
+ * trailing suffix (`3.14.2`, `3.10-pypy`) is not part of the syntax level.
+ */
+function reduceBarePythonVersion(
+	text: string,
+): DeclaredPythonVersion | undefined {
+	return reducePythonVersion(
+		text.trim().match(/^v?(\d+)\.(\d+)(?:\.\d+)?[-+._a-z0-9]*$/i),
+	);
+}
+
+/**
+ * Reduce a PEP 440 specifier to its lower bound (`>=3.12`, `>=3.12,<4`,
+ * `==3.14.*`, `~=3.11`). A clause with no inclusive lower bound (`<4`, `>3.12`,
+ * `!=3.12`, `===3.12`) yields nothing rather than a guess, so a specifier made
+ * only of those is absent.
+ */
+function reducePythonSpecifier(
+	text: string,
+): DeclaredPythonVersion | undefined {
+	for (const clause of text.split(",")) {
+		const lowerBound = reducePythonVersion(
+			clause.trim().match(/^(?:>=|==|~=)\s*v?(\d+)\.(\d+)/),
+		);
+		if (lowerBound) return lowerBound;
+	}
+	return reduceBarePythonVersion(text);
+}
+
+/** `py312` -> 3.12. Ruff names the level this way and never as a bare version. */
+function reduceRuffTargetVersion(
+	text: string,
+): DeclaredPythonVersion | undefined {
+	return reducePythonVersion(text.trim().match(/^py(\d)(\d+)$/i));
+}
+
+function withSource(
+	version: DeclaredPythonVersion | undefined,
+	source: PythonTargetVersionSource,
+	file: string,
+): PythonTargetVersion | undefined {
+	return version ? { ...version, source, file } : undefined;
+}
+
+/**
+ * Read a declaration file. A missing file declares nothing, which is what the
+ * walk is for; any other read failure is recorded once and also declares
+ * nothing, so a probe never throws over an unreadable manifest.
+ */
+async function readDeclarationFile(
+	filePath: string,
+): Promise<string | undefined> {
+	try {
+		return await readFile(filePath, "utf-8");
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		if (code === "ENOENT" || code === "ENOTDIR") return undefined;
+		recordDegradationOnce({
+			kind: "python-target-version-unreadable",
+			subject: filePath,
+			reason: `Python syntax-level declaration could not be read: ${error instanceof Error ? error.message : String(error)}`,
+		});
+		return undefined;
+	}
+}
+
+/**
+ * pyright's `pythonVersion`, from its own JSON config. Text that does not parse
+ * is no declaration: pyright reads JSONC, and inventing a failure record for a
+ * commented config would misreport a file pyright accepts.
+ */
+function parsePyrightJsonVersion(
+	content: string,
+): DeclaredPythonVersion | undefined {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(content);
+	} catch {
+		// none: unparseable text is no declaration (pyright reads JSONC, so a
+		// commented config is a file pyright still accepts, not a failure); the
+		// read that could fail is recorded as `python-target-version-unreadable`.
+		return undefined;
+	}
+	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+		return undefined;
+	}
+	const value = (parsed as Record<string, unknown>).pythonVersion;
+	return typeof value === "string" ? reduceBarePythonVersion(value) : undefined;
+}
+
+/**
+ * The declarations one directory can hold, probed in the documented order:
+ * ruff `target-version`, pyright `pythonVersion`, `requires-python`, then
+ * `.python-version`. Within a tier the nearest declaration wins, so the first
+ * directory that declares anything answers for the file.
+ */
+async function readPythonDeclarationInDirectory(
+	dir: string,
+): Promise<PythonTargetVersion | undefined> {
+	const pyprojectPath = path.join(dir, "pyproject.toml");
+	const pyproject = await readDeclarationFile(pyprojectPath);
+	const ruffSection =
+		pyproject !== undefined && hasTomlTable(pyproject, "tool\\.ruff")
+			? extractTomlTableSection(pyproject, "tool\\.ruff")
+			: undefined;
+
+	// Ruff reads ONE config file per project: pyproject `[tool.ruff]`, else
+	// `.ruff.toml`, else `ruff.toml`. A file with no usable `target-version` ends
+	// the ruff tier rather than falling through to a spelling ruff would ignore.
+	let ruffFile = ruffSection !== undefined ? pyprojectPath : undefined;
+	let ruffContent = ruffSection;
+	if (ruffFile === undefined) {
+		for (const name of [".ruff.toml", "ruff.toml"]) {
+			const candidatePath = path.join(dir, name);
+			const content = await readDeclarationFile(candidatePath);
+			if (content === undefined) continue;
+			ruffFile = candidatePath;
+			ruffContent = content;
+			break;
+		}
+	}
+	if (ruffFile !== undefined && ruffContent !== undefined) {
+		const target = parseTomlScalarString(ruffContent, "target-version");
+		const resolved = withSource(
+			target ? reduceRuffTargetVersion(target) : undefined,
+			"ruff-target-version",
+			ruffFile,
+		);
+		if (resolved) return resolved;
+	}
+
+	const pyrightConfigPath = path.join(dir, "pyrightconfig.json");
+	const pyrightConfig = await readDeclarationFile(pyrightConfigPath);
+	if (pyrightConfig !== undefined) {
+		const resolved = withSource(
+			parsePyrightJsonVersion(pyrightConfig),
+			"pyright-python-version",
+			pyrightConfigPath,
+		);
+		if (resolved) return resolved;
+	} else if (pyproject !== undefined) {
+		const section = extractTomlTableSection(pyproject, "tool\\.pyright");
+		const raw = section
+			? parseTomlScalarString(section, "pythonVersion")
+			: undefined;
+		const resolved = withSource(
+			raw ? reduceBarePythonVersion(raw) : undefined,
+			"pyright-python-version",
+			pyprojectPath,
+		);
+		if (resolved) return resolved;
+	}
+
+	if (pyproject !== undefined) {
+		const projectSection = extractTomlTableSection(pyproject, "project");
+		const raw =
+			projectSection !== undefined
+				? parseTomlScalarString(projectSection, "requires-python")
+				: undefined;
+		const resolved = withSource(
+			raw ? reducePythonSpecifier(raw) : undefined,
+			"requires-python",
+			pyprojectPath,
+		);
+		if (resolved) return resolved;
+	}
+
+	const versionFilePath = path.join(dir, ".python-version");
+	const versionFile = await readDeclarationFile(versionFilePath);
+	if (versionFile !== undefined) {
+		const firstLine = (versionFile.split(/\r?\n/, 1)[0] ?? "").trim();
+		const resolved = withSource(
+			reduceBarePythonVersion(firstLine),
+			"python-version-file",
+			versionFilePath,
+		);
+		if (resolved) return resolved;
+	}
+
+	return undefined;
+}
+
+/**
+ * #4638: the Python syntax level the project declares for `filePath`, or
+ * undefined when it declares none. Walks up from the file's directory (so every
+ * project root is on the way) and stops at `homeDir`, the shared ceiling for
+ * walk-up discovery. Only a Python source file has an answer, so a mixed sweep
+ * pays nothing for its other files.
+ *
+ * A declaration that names no CPython major/minor is absent, never a default:
+ * guessing a level is what produced the spurious `compile` verdict in the first
+ * place.
+ */
+export async function detectPythonTargetVersion(
+	filePath: string,
+	homeDir: string = os.homedir(),
+): Promise<PythonTargetVersion | undefined> {
+	if (resolveLanguage(filePath)?.id !== "python") return undefined;
+	for (const dir of walkUpDirs(path.dirname(path.resolve(filePath)))) {
+		if (isAtOrAboveHomeDir(dir, homeDir)) return undefined;
+		const resolved = await readPythonDeclarationInDirectory(dir);
+		if (resolved) return resolved;
+	}
+	return undefined;
 }

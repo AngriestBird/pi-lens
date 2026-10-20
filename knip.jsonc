@@ -186,6 +186,11 @@
 		// row) -- system tools, never npm packages, so no dependency could
 		// provide them. The case skips when the toolchain is absent.
 		"elan",
-		"lake"
+		"lake",
+		// tests/clients/ruff-target-version-real.test.ts (#4638) runs the real
+		// `ruff` binary in the production autofix path: docs/dependencies.md's
+		// PATH row (Python lint/format/autofix, language-default + flow-gated),
+		// never an npm package. The case skips visibly when it is absent.
+		"ruff"
 	]
 }

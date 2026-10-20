@@ -21,6 +21,21 @@ pi-lens includes **49 language server definitions** (including four cross-cuttin
 
 LSP servers for: TypeScript, Deno, Python (pyright/basedpyright + jedi), Go, Rust, Ruby (ruby-lsp + solargraph), PHP, PowerShell, C# (omnisharp), F#, Java (JDT LS, with Lombok javaagent support when a Lombok jar is available), Kotlin, Lean, Swift, Dart, Lua, C/C++, Zig, Haskell, Elixir, Gleam, Typst (tinymist), Markdown (marksman), OCaml, Clojure, CUE (syntax and parse diagnostics; evaluation errors via the cue-vet auxiliary runner), Terraform, Nix, Bash, Shuck (zsh-aware shell language server), Fish, CMake, Docker, YAML, JSON, HTML, TOML, Prisma, Vue, Svelte, CSS.
 
+
+### Python: interpreter and syntax level
+
+Python carries two separate declarations, and pi-lens reads both from the project rather than from whichever interpreter happens to run a checker.
+
+**Interpreter** — `detectPythonEnvironment` walks up from the file to the session root and takes the first of the ambient `VIRTUAL_ENV`, `CONDA_PREFIX`, or `UV_PROJECT_ENVIRONMENT`, a uv workspace's `.venv`, or the project's own `.venv`/`venv`. pyright and jedi both launch from it. A binary that comes from a project's own environment needs project trust; without it pi-lens falls back to the managed install and then `PATH`, and records the refusal once per session.
+
+**Syntax level** — `detectPythonTargetVersion` walks the same way and takes the first readable declaration of ruff `target-version` (`pyproject.toml` `[tool.ruff]`, `.ruff.toml`, `ruff.toml`), pyright `pythonVersion` (`pyrightconfig.json`, `pyproject.toml` `[tool.pyright]`), `requires-python` from `pyproject.toml` `[project]` reduced to its lower bound, then the first line of `.python-version`. Per directory the list is tried in that order, and the nearest ancestor holding a declaration wins. Text that names no CPython major/minor — a `pypy-3.10` or branch name in `.python-version`, an empty file, a specifier with no lower bound — is no declaration at all; pi-lens never invents a default.
+
+When the declared level is 3.14 or newer, jedi's `compile` findings are dropped. jedi compiles with the interpreter it launched, so a 3.14-only construct reports a spurious `SyntaxError` (PEP 758's unparenthesized `except` is the common case). The drop is recorded once per session and file, naming the declared level and the file that declared it, and it applies to the fresh probe, its cached replay, and `lsp_navigation`. Pyright is unaffected: it parses at the level it resolves and stays the authority on type errors.
+
+ruff needs no override. Its pre-check, `--fix` pass, and lint run all read `target-version` from the project config, so pi-lens passes no level to any of them, and pre-check and fix cannot disagree about which syntax parses.
+
+Non-goal: pi-lens never installs, selects, or pins a Python interpreter, and never rewrites a project's declaration.
+
 ### Formatters
 
 pi-lens auto-detects and runs **35 formatters** based on project config:

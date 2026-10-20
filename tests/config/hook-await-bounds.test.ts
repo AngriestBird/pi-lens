@@ -2527,7 +2527,12 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// #4414 round 2: 119 -> 121, the local `stat` of the typescript package
 	// directories beside a resolved `tsc` and the await on that helper, which
 	// tell a shim (no package) from a package whose version is unreadable.
-	"clients/lsp/server.ts": 121,
+	// #4638: 121 -> 123. The jedi spawn resolves the project's interpreter once
+	// (`detectPythonEnvironment`) and reads the tool environment once, instead of
+	// its old single `detectPythonVenv`; the second `resolveAndLaunch` arm is the
+	// fall-through when no project environment is admitted. Each await is a local
+	// filesystem probe before launch, and hook-signal threading stays #2523 AC4.
+	"clients/lsp/server.ts": 123,
 	"clients/map-with-concurrency.ts": 2,
 	"clients/observed-mutation.ts": 18,
 	// #4493: 10 -> 12, the `git rev-parse` in readGitHead and the `git diff`
@@ -2577,7 +2582,12 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// `hasAmbientPythonEnvironment`, which this one-hop walk cannot tell apart.
 	// The four awaits are `detectPythonEnvironment`'s filesystem probes, which
 	// turn_end already reached two hops away through test-runner-client.ts.
-	"clients/python-environment.ts": 4,
+	// #4638: 4 -> 10. `detectPythonTargetVersion` reads one small declaration
+	// file per ancestor directory (pyproject, the one ruff config it would use,
+	// pyrightconfig.json, `.python-version`); the tool handlers that call it
+	// carry their own signal, but this module is also imported directly by a
+	// hook handler, so hook-signal threading stays #2523 AC4.
+	"clients/python-environment.ts": 10,
 	"clients/quiet-window.ts": 6,
 	"clients/read-expansion.ts": 2,
 	// 5 -> 3 (#3612): `resolveReadGuardStartState`'s two sidecar awaits moved
@@ -2632,7 +2642,10 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// arm — the fallback for "a service shape without touchFile", which the
 	// real `LSPService` never was.
 	"tools/lsp-diagnostics.ts": 29,
-	"tools/lsp-navigation.ts": 32,
+	// #4638: 32 -> 34, the two probes that must hand the sync finding-policy seam
+	// a prepared Python declaration: the path read resolves it once, and the
+	// tracked-snapshot read resolves one per file before its synchronous map.
+	"tools/lsp-navigation.ts": 34,
 	"tools/module-report.ts": 3,
 	"tools/project-report.ts": 1,
 	"tools/symbol-search.ts": 1,

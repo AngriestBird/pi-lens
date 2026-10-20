@@ -1203,6 +1203,21 @@ export type DegradationKind =
 	 */
 	| "project-snapshot-stage-reap-failed"
 	/**
+	 * #4638: jedi compiles with the interpreter it launched, so under a project
+	 * declaration of Python 3.14 or newer its `compile` rows describe a grammar
+	 * the project does not use. Dropped from delivery, never from the cached
+	 * inline set, so a replay re-decides against the declaration current then.
+	 * Subject is the analysed file; the reason and metadata name the declared
+	 * level, its source file, and the dropped count.
+	 */
+	| "python-compile-target-mismatch"
+	/**
+	 * #4638: a Python syntax-level declaration file could not be read (beyond a
+	 * plain absence), so the walk treated it as declaring nothing. Subject is
+	 * the manifest path; reason carries the error message.
+	 */
+	| "python-target-version-unreadable"
+	/**
 	 * The orphan backstop's OWN process-table scanner blew the scan timeout and
 	 * had to be tree-killed (#1864 review F3). Reason carries the kill verdict,
 	 * so a scanner that survived its own sweep's escalation — an orphan sweep

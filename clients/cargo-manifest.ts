@@ -210,8 +210,11 @@ function indexOfArrayEnd(text: string, from: number): number {
  * `key` of `edition`, and a dotted-key inheritance line (`edition.workspace =
  * true`) never matches either — the literal key is immediately followed by
  * `=`, not `.`.
+ *
+ * Shared with the Python syntax-level reader (#4638), whose `target-version`,
+ * `pythonVersion`, and `requires-python` values are the same scalar shape.
  */
-function parseTomlScalarString(
+export function parseTomlScalarString(
 	content: string | undefined,
 	key: string,
 ): string | undefined {

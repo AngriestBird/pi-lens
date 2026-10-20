@@ -31,6 +31,11 @@ import {
 	type LspRootFallback,
 } from "../clients/lsp/server.js";
 import { isAuxiliary } from "../clients/lsp/server-traits.js";
+import {
+	detectPythonTargetVersion,
+	isJediCompileVerdictOutranked,
+	type PythonTargetVersion,
+} from "../clients/python-environment.js";
 import { mapWithConcurrency } from "../clients/map-with-concurrency.js";
 import {
 	combineAbortSignals,
@@ -1266,6 +1271,12 @@ export function applyProbeFindingPolicy(
 	 * `lsp_navigation` route's records said `lsp_diagnostics`).
 	 */
 	toolName: "lsp_diagnostics" | "lsp_navigation" = "lsp_diagnostics",
+	/**
+	 * #4638: the project's declared Python syntax level, prepared by the caller
+	 * (resolving it needs the filesystem, and this seam is synchronous). Present
+	 * only for a Python file; absent leaves every finding delivered.
+	 */
+	pythonCompileTarget?: PythonTargetVersion,
 ): { kept: LSPDiagnostic[]; inlineKept: LSPDiagnostic[]; suppressed: number } {
 	const started = Date.now();
 	try {
@@ -1276,6 +1287,36 @@ export function applyProbeFindingPolicy(
 			policyMap: loadProjectRulePolicyMap(cwd),
 			fileRole: detectFileRole(file, content),
 		});
+		// #4638: jedi compiles with the interpreter it launched, so under a
+		// declared 3.14+ its `compile` verdict describes a grammar the project
+		// does not use. Drop those rows from what is DELIVERED (kept), never
+		// from `inlineKept`: the cache must hold them so a replay re-evaluates
+		// the drop against the declaration current at that read.
+		const outranked = pythonCompileTarget
+			? result.kept.filter((diagnostic) =>
+					isJediCompileVerdictOutranked(diagnostic, pythonCompileTarget),
+				)
+			: [];
+		if (outranked.length > 0 && pythonCompileTarget) {
+			recordDegradationOnce({
+				kind: "python-compile-target-mismatch",
+				subject: file,
+				reason: `${outranked.length} jedi compile ${outranked.length === 1 ? "finding" : "findings"} dropped: declared Python ${pythonCompileTarget.major}.${pythonCompileTarget.minor} (${pythonCompileTarget.source}) in ${pythonCompileTarget.file}`,
+				metadata: {
+					declared: `${pythonCompileTarget.major}.${pythonCompileTarget.minor}`,
+					source: pythonCompileTarget.source,
+					declarationFile: pythonCompileTarget.file,
+					dropped: outranked.length,
+				},
+			});
+		}
+		const delivered =
+			outranked.length > 0
+				? result.kept.filter(
+						(diagnostic) =>
+							!isJediCompileVerdictOutranked(diagnostic, pythonCompileTarget),
+					)
+				: result.kept;
 		const inScopeBefore = applySeverityFilter(diagnostics, severity).length;
 		const suppressed =
 			inScopeBefore - applySeverityFilter(result.kept, severity).length;
@@ -1308,7 +1349,7 @@ export function applyProbeFindingPolicy(
 				},
 			});
 		}
-		return { kept: result.kept, inlineKept: result.inlineKept, suppressed };
+		return { kept: delivered, inlineKept: result.inlineKept, suppressed };
 	} catch (err) {
 		recordDegradationOnce({
 			kind: "lsp-probe-finding-policy",
@@ -1453,6 +1494,11 @@ async function collectFileDiagnosticResult(
 		return { file, diagnostics: [], error: `${file}: path not found` };
 	}
 
+	// #4638: one resolution per file, shared by the fresh touch below and the
+	// cache replay: the drop is a revocable delivery policy, not part of the
+	// cached observation. A non-Python path short-circuits inside the resolver.
+	const pythonCompileTarget = await detectPythonTargetVersion(file);
+
 	if (cacheCtx && scopeKey !== undefined) {
 		const cached = cacheCtx.lookup(file, scopeKey);
 		// #1095: a cached entry whose content binding demonstrably mismatches disk
@@ -1482,6 +1528,8 @@ async function collectFileDiagnosticResult(
 				cwd,
 				replayContentForStrictMarks(file, cwd),
 				severity,
+				undefined,
+				pythonCompileTarget,
 			);
 			const cachedDiags = cachedPolicy.kept;
 			const filteredDiags = applySeverityFilter(cachedDiags, severity);
@@ -1614,6 +1662,8 @@ async function collectFileDiagnosticResult(
 		cwd,
 		collectedContent,
 		severity,
+		undefined,
+		pythonCompileTarget,
 	);
 	effectiveRawDiags = policy.kept;
 	const filteredDiags = applySeverityFilter(effectiveRawDiags, severity);
@@ -1714,6 +1764,9 @@ async function runFileDiagnostics(
 	// Reserve the token before awaiting this file's LSP result. The direct-file
 	// path performs its own confirmation/reconciliation below (#1198).
 	const writeIndex = nextWriteIndex?.();
+	// #4638: the declaration this file's project makes, if any. Resolved once,
+	// before the touch, so the seam below stays synchronous and fails open.
+	const pythonCompileTarget = await detectPythonTargetVersion(absPath);
 	// #4346: a module this file imports, created outside pi-lens, reaches its
 	// servers before the touch (the batch path gates this on cached findings;
 	// one file needs no gate), and so do a Go file's package files.
@@ -1833,6 +1886,8 @@ async function runFileDiagnostics(
 		cwd,
 		collectedContent,
 		severity,
+		undefined,
+		pythonCompileTarget,
 	);
 	effectiveRawDiags = policy.kept;
 	const filtered = applySeverityFilter(effectiveRawDiags, severity);
