@@ -88,10 +88,15 @@ describe("classifyCascadeWaitTier", () => {
 		expect(tier).toBe("tier3-silent");
 	});
 
-	it("keeps TypeScript's empty-first hold and silent-clean cascade markers together", () => {
+	it("keeps TypeScript's silent-clean cascade tier while its first publish is measured direct (#4615)", () => {
+		// The two axes are independent: `first-publish=direct` in
+		// docs/lsp-capability-matrix.md is the dirty-file measurement, so no hold
+		// marker exists, and `silentOnClean` still makes the cascade skip its
+		// in-lane wait (tier 3). Losing either half is a cascade regression.
 		getServersForFileWithConfig.mockReturnValue([server("typescript")]);
 		const strategy = getStrategy("typescript", "classic");
-		expect(strategy.emptyFirstPublish).toBe("indexing");
+		expect(strategy.emptyFirstPublish).toBeUndefined();
+		expect(strategy.silentOnClean).toBe(true);
 		expect(
 			mod.classifyServerWaitTier("typescript", {
 				serverId: "typescript",
