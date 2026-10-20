@@ -25,18 +25,42 @@ const SCRIPT = path.resolve(
 
 const NOW = new Date().toISOString();
 
-function runReport(root: string, extraArgs: string[] = []): any {
-	const out = execFileSync(
+function runAnalyzer(
+	root: string,
+	extraArgs: string[] = [],
+	script = SCRIPT,
+): string {
+	return execFileSync(
 		process.execPath,
-		[SCRIPT, "--root", root, "--json", "--since", "all", ...extraArgs],
-		{ encoding: "utf8" },
+		[script, "--root", root, "--json", "--since", "all", ...extraArgs],
+		{ encoding: "utf8", timeout: 60_000 },
 	);
-	return JSON.parse(out);
+}
+
+function runReport(root: string, extraArgs: string[] = []): any {
+	return JSON.parse(runAnalyzer(root, extraArgs));
 }
 
 describe("analyze-pi-lens-logs.mjs", () => {
 	let root: string;
 	let report: any;
+
+	it("prints help exactly once through canonical and symlinked scripts paths", () => {
+		// #4096: the unconditional main and the lexical tail both printed help
+		// only on the canonical path; the symlink reached main once already.
+		const linkedScripts = path.join(root, "scripts");
+		fs.symlinkSync(path.dirname(SCRIPT), linkedScripts, "junction");
+		for (const script of [
+			SCRIPT,
+			path.join(linkedScripts, path.basename(SCRIPT)),
+		]) {
+			const out = runAnalyzer(root, ["--help"], script);
+			expect(
+				out.match(/Usage: node scripts\/analyze-pi-lens-logs\.mjs/g),
+				script,
+			).toHaveLength(1);
+		}
+	});
 
 	beforeAll(() => {
 		root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-loganalyze-"));
