@@ -266,6 +266,56 @@ describe("git-guard commit gate honors the turn-end disposition policy (#3248)",
 		}
 	});
 
+	it("clears the latch and the record on a turn that only marked", async () => {
+		// #4698: the same disposition, made on a turn that wrote NO file. The
+		// policy pass that reconciles the latch sits below `handleTurnEnd`'s
+		// `files.length === 0` early return, so before this case the mark took,
+		// the banner said nothing, and the latch kept the marked record gating the
+		// next commit. No `registerEdit` here: that is the whole point.
+		const env = setupTestEnvironment("pi-lens-4698-mark-only-");
+		try {
+			const cwd = env.tmpDir;
+			const filePath = path.join(cwd, "app.ts");
+			fs.writeFileSync(filePath, "alpha();\nbeta();\n");
+
+			const runtime = newRuntime();
+			runtime.projectRoot = cwd;
+			const cacheManager = new CacheManager(false);
+			const diagnostics = [
+				blockingDiagnostic(filePath, 1, "alpha is unsafe"),
+				blockingDiagnostic(filePath, 2, "beta is unsafe"),
+			];
+			editDispatch(runtime, cacheManager, cwd, filePath, diagnostics);
+			expect(evaluateGitGuard(runtime, cacheManager, cwd).block).toBe(true);
+			for (const diagnostic of diagnostics) markFalsePositive(cwd, diagnostic);
+
+			logLatency.mockClear();
+			runtime.beginTurn();
+			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, cwd));
+
+			// The gate the agent reaches next agrees with the mark …
+			expect(runtime.gitGuardHasBlockers).toBe(false);
+			expect(evaluateGitGuard(runtime, cacheManager, cwd)).toEqual({
+				block: false,
+			});
+			// … the record it would fall back on is gone too …
+			expect(guardRecord(cacheManager, cwd)?.hasBlockers ?? false).toBe(false);
+			// … and the turn left the ONE record a reader explains the flip with,
+			// the same literal and the same fields the edit turn writes.
+			const rows = inlinePolicyRows();
+			expect(rows).toHaveLength(1);
+			expect(rows[0]?.metadata).toMatchObject({
+				records: 1,
+				candidates: 2,
+				dispositionSuppressed: 2,
+				guardFilesSuppressed: 1,
+				guardLatchCleared: true,
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("keeps the gate closed when only two of four blockers are marked", async () => {
 		const env = setupTestEnvironment("pi-lens-3248-two-of-four-");
 		try {
@@ -537,12 +587,27 @@ describe("git-guard commit gate honors the turn-end disposition policy (#3248)",
 				blockingDiagnostic(filePath, 1, "alpha is unsafe"),
 			]);
 			expect(runtime.gitGuardHasBlockers).toBe(true);
+			// Marked BEFORE the delete: a mark needs the bytes it anchors against.
+			markFalsePositive(
+				cwd,
+				blockingDiagnostic(filePath, 1, "alpha is unsafe"),
+			);
 			fs.rmSync(filePath);
 			expect(runtime.getInlineBlockersSnapshot()).toHaveLength(0);
 
 			registerEdit(cacheManager, cwd, other);
 			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, cwd));
 
+			expect(runtime.gitGuardHasBlockers).toBe(true);
+
+			// #4698: the read-only turn shares the pin. The map holds no record for
+			// the deleted file, so the quiet turn judges nothing — it must not
+			// re-derive a latch whose population is gone, and writes no row.
+			logLatency.mockClear();
+			runtime.beginTurn();
+			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, cwd));
+
+			expect(inlinePolicyRows()).toHaveLength(0);
 			expect(runtime.gitGuardHasBlockers).toBe(true);
 		} finally {
 			env.cleanup();
@@ -595,9 +660,10 @@ describe("git-guard commit gate honors the turn-end disposition policy (#3248)",
 	it("still allows the commit after an unjudged turn end that changed nothing", async () => {
 		// The other direction of the same rule, so the fix cannot become "any
 		// turn end without a policy population re-blocks". A read-only turn takes
-		// `handleTurnEnd`'s no-file early return and judges nothing — but the
-		// bytes the verdict was computed against are still on disk, so the
-		// verdict still describes them and the gate must stay open.
+		// `handleTurnEnd`'s no-file early return (#4698 re-judges the latch there,
+		// but only while the gate is CLOSED), and this gate is already open, so
+		// the quiet turn judges nothing: the bytes the verdict was computed
+		// against are still on disk, and the gate stays open.
 		const env = setupTestEnvironment("pi-lens-3248-unjudged-turn-");
 		try {
 			const cwd = env.tmpDir;
@@ -614,14 +680,151 @@ describe("git-guard commit gate honors the turn-end disposition policy (#3248)",
 			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, cwd));
 			turnEndText(cacheManager, cwd, runtime);
 
-			// A turn that touched no file at all: the early return, no policy pass.
+			// A turn that touched no file at all: the early return, no fresh
+			// population, and no work to do — this latch cannot be opened.
+			logLatency.mockClear();
 			runtime.beginTurn();
 			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, cwd));
 
+			expect(inlinePolicyRows()).toHaveLength(0);
 			expect(runtime.gitGuardHasBlockers).toBe(false);
 			expect(evaluateGitGuard(runtime, cacheManager, cwd)).toEqual({
 				block: false,
 			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("judges nothing on a quiet turn when --lens-guard is off", async () => {
+		// The read-only re-judge (#4698) exists for ONE reader: `evaluateGitGuard`.
+		// With the flag off nothing consults the latch, so a quiet turn must not
+		// pay for a policy pass whose verdict nobody reads — the state of a
+		// project that never enabled the gate.
+		const env = setupTestEnvironment("pi-lens-4698-flag-off-");
+		try {
+			const cwd = env.tmpDir;
+			const filePath = path.join(cwd, "app.ts");
+			fs.writeFileSync(filePath, "alpha();\n");
+
+			const runtime = newRuntime();
+			runtime.projectRoot = cwd;
+			const cacheManager = new CacheManager(false);
+			editDispatch(runtime, cacheManager, cwd, filePath, [
+				blockingDiagnostic(filePath, 1, "alpha is unsafe"),
+			]);
+			// Marked, so the store is non-empty and only the FLAG can stop the pass.
+			markFalsePositive(
+				cwd,
+				blockingDiagnostic(filePath, 1, "alpha is unsafe"),
+			);
+
+			logLatency.mockClear();
+			runtime.beginTurn();
+			await handleTurnEnd(
+				makeTurnEndDeps(runtime, cacheManager, cwd, { getFlag: () => false }),
+			);
+
+			expect(inlinePolicyRows()).toHaveLength(0);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("judges nothing on a closed gate with no mark in the project", async () => {
+		// #4698's pass reacts to a MARK: a file-less turn can change a survivor
+		// only through one. The guard is load-bearing on cost as well as on
+		// meaning — `applyInlineBlockerPolicy` pays `loadProjectRulePolicyMap` per
+		// record — so a blocked but unmarked session must re-read nothing on a
+		// quiet turn. Without it, every reply in that state runs the whole policy
+		// pass over every live blocker.
+		const env = setupTestEnvironment("pi-lens-4698-unmarked-");
+		try {
+			const cwd = env.tmpDir;
+			const filePath = path.join(cwd, "app.ts");
+			fs.writeFileSync(filePath, "alpha();\n");
+
+			const runtime = newRuntime();
+			runtime.projectRoot = cwd;
+			const cacheManager = new CacheManager(false);
+			editDispatch(runtime, cacheManager, cwd, filePath, [
+				blockingDiagnostic(filePath, 1, "alpha is unsafe"),
+			]);
+
+			// No mark: the empty store is the population.
+			logLatency.mockClear();
+			runtime.beginTurn();
+			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, cwd));
+
+			expect(inlinePolicyRows()).toHaveLength(0);
+			expect(runtime.gitGuardHasBlockers).toBe(true);
+			// The next commit is still refused: the pass judged nothing.
+			expect(evaluateGitGuard(runtime, cacheManager, cwd).block).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("keeps the gate closed for a DEMOTED blocker marked on a quiet turn", async () => {
+		// #4698's read-only pass shares the edit turn's rule for a demoted record
+		// verbatim: `stale` takes the record out of the authoritative CHANNEL, it
+		// is not a resolution, and the policy never judges it (the case above).
+		// A mark-only turn must not open a gate the edit-turn shape would keep
+		// shut on the same state, or the two turn shapes disagree about one
+		// disposition — the defect #4698 fixed in the other direction.
+		const env = setupTestEnvironment("pi-lens-4698-demoted-mark-only-");
+		try {
+			const cwd = env.tmpDir;
+			const filePath = path.join(cwd, "drifted.ts");
+			fs.writeFileSync(filePath, "alpha();\n");
+
+			const runtime = newRuntime();
+			runtime.projectRoot = cwd;
+			const cacheManager = new CacheManager(false);
+			const diagnostic = blockingDiagnostic(filePath, 1, "alpha is unsafe");
+			editDispatch(runtime, cacheManager, cwd, filePath, [diagnostic]);
+			expect(runtime.markInlineBlockerStale(filePath, "dependency-drift")).toBe(
+				true,
+			);
+			markFalsePositive(cwd, diagnostic);
+
+			// A turn that writes nothing at all: the mark-only shape.
+			runtime.beginTurn();
+			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, cwd));
+
+			expect(runtime.gitGuardHasBlockers).toBe(true);
+			expect(evaluateGitGuard(runtime, cacheManager, cwd).block).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("keeps the gate closed when a quiet turn marks only one of two blockers", async () => {
+		// The read-only sibling of the "two of four" case above: the pass may open
+		// the gate only for a file whose WHOLE blocker set the policy suppressed.
+		// A survivor is still gating, and this is also the shape a quiet turn pays
+		// the policy cost for — marks exist, so the store probe cannot skip it.
+		const env = setupTestEnvironment("pi-lens-4698-partial-mark-");
+		try {
+			const cwd = env.tmpDir;
+			const filePath = path.join(cwd, "app.ts");
+			fs.writeFileSync(filePath, "alpha();\nbeta();\n");
+
+			const runtime = newRuntime();
+			runtime.projectRoot = cwd;
+			const cacheManager = new CacheManager(false);
+			const pair = [
+				blockingDiagnostic(filePath, 1, "alpha is unsafe"),
+				blockingDiagnostic(filePath, 2, "beta is unsafe"),
+			];
+			editDispatch(runtime, cacheManager, cwd, filePath, pair);
+			markFalsePositive(cwd, pair[0]);
+
+			runtime.beginTurn();
+			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, cwd));
+
+			expect(runtime.gitGuardHasBlockers).toBe(true);
+			expect(evaluateGitGuard(runtime, cacheManager, cwd).block).toBe(true);
 		} finally {
 			env.cleanup();
 		}
