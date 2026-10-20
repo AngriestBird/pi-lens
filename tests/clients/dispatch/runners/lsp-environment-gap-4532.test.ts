@@ -326,6 +326,62 @@ describe("a worktree with no dependency install (#4532)", () => {
 		}
 	});
 
+	// #4532 round 6 (verify r5, section 3): a manifest key that is not a package
+	// name declared itself, so `""`, `"."`, `".."`, `"C:"`, an empty `@types/`
+	// stem or an array's index keys made a project path (absolute, relative,
+	// drive) demote. The admit-list now admits package-name spellings only; a
+	// legacy capitalised name and yarn's `"~"` link key are real declarations
+	// and still demote.
+	it("declares nothing from a manifest key that is not a package name", async () => {
+		writeManifest(
+			JSON.stringify({
+				dependencies: {
+					"": "1.0.0",
+					".": "1.0.0",
+					"..": "1.0.0",
+					"C:": "1.0.0",
+					"@types/": "1.0.0",
+					"@types/__": "1.0.0",
+					"~": "link:./src",
+					JSONStream: "1.0.0",
+				},
+				devDependencies: ["left-pad"],
+				peerDependencies: "left-pad",
+			}),
+		);
+		const blocking = [
+			"/abs/missing",
+			"./missing",
+			"../missing",
+			"C:/x/y",
+			"@/x",
+			"0",
+			"left-pad",
+		];
+		const demoted = ["~/missing", "JSONStream"];
+		rows = [...blocking, ...demoted].map((specifier, index) =>
+			missingModule(specifier, 3 + index),
+		);
+		installService();
+		const result = await run();
+		const rowFor = (specifier: string) =>
+			result.diagnostics.find((item) =>
+				item.message.includes(`'${specifier}'`),
+			);
+		for (const specifier of blocking) {
+			expect(rowFor(specifier), specifier).toMatchObject({
+				severity: "error",
+				semantic: "blocking",
+			});
+		}
+		for (const specifier of demoted) {
+			expect(rowFor(specifier), specifier).toMatchObject({
+				severity: "warning",
+				semantic: "warning",
+			});
+		}
+	});
+
 	// The fail-closed half of the manifest read: a manifest the gate cannot read
 	// declares nothing, so the import keeps blocking. A directory named
 	// `package.json` stands in for an unreadable one on every platform.

@@ -159,6 +159,19 @@ function packageNameOf(specifier: string): string | undefined {
 }
 
 /**
+ * A package-name spelling: an optional `@scope/` and a name, neither empty nor
+ * led by `.` or `_`, over npm's URL-safe characters. Capitals stay admitted
+ * for legacy names (`JSONStream`), and `~` for yarn's `"~": "link:./src"`.
+ * Everything else (`""`, `"."`, `"C:"`, an empty `@types/` stem) is a key no
+ * install creates, and admitting it would demote a project path.
+ */
+const PACKAGE_NAME = /^(?:@[A-Za-z0-9~-][\w.~-]*\/)?[A-Za-z0-9~-][\w.~-]*$/;
+
+function admitPackageName(names: Set<string>, name: string): void {
+	if (PACKAGE_NAME.test(name)) names.add(name);
+}
+
+/**
  * Every package name declared by a `package.json` at or above `startDir`, over
  * the same bounded walk the install lookup uses: an install at any level
  * resolves upward, so a name an ancestor manifest declares (a monorepo root's
@@ -175,11 +188,19 @@ function declaredPackageNames(startDir: string): Set<string> {
 				fs.readFileSync(path.join(dir, "package.json"), "utf8"),
 			) as Record<string, Record<string, unknown> | null | undefined>;
 			for (const field of DECLARING_FIELDS) {
-				for (const name of Object.keys(manifest[field] ?? {})) {
-					names.add(name);
+				const declared = manifest[field];
+				// A field declares names only as an object; an array or a string
+				// would hand its index keys in as names.
+				if (typeof declared !== "object" || declared === null) continue;
+				if (Array.isArray(declared)) continue;
+				for (const name of Object.keys(declared)) {
+					admitPackageName(names, name);
 					if (!name.startsWith("@types/")) continue;
 					const stem = name.slice("@types/".length);
-					names.add(stem.includes("__") ? `@${stem.replace("__", "/")}` : stem);
+					admitPackageName(
+						names,
+						stem.includes("__") ? `@${stem.replace("__", "/")}` : stem,
+					);
 				}
 			}
 		} catch {
