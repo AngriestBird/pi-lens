@@ -1450,9 +1450,27 @@ export function logCacheUsage(
 }
 
 /**
- * Content hash of the first transcript message. Stable for identical content
- * (role + content are serialized in a fixed order), so a changing hash means
- * `messages[0]` actually changed byte-for-byte.
+ * Hash of the first transcript message, over EVERY field the message carries.
+ *
+ * #4631 round 5 (F1): it must be the whole message, not a projection. The
+ * signal answers "did what the provider caches first change", and on pi 0.87+
+ * `messages[0]` is the SYSTEM head: the prompt lives in `sections`, the tool
+ * table in `toolsAdded`, and `content` is an empty string. A `{ role, content }`
+ * projection therefore hashed the constant `{"role":"system","content":""}` on
+ * the exact generation #4631 is about, so a rebuilt head read as a stable
+ * prefix: `prefixStableSinceLastUsage` stayed true and the miss verdict stayed
+ * `unknown`. Measured on the built twin: a head whose `sections`, `toolsAdded`
+ * and `timestamp` had all moved answered `unchanged`, while a `content` change
+ * was visible.
+ *
+ * Enumerating the fields at fault would re-create the same shape for the next
+ * host field, so the serialization covers whatever the message carries. The
+ * parameter's DECLARED shape stays the two fields its callers are guaranteed to
+ * have; the runtime object is the host's whole message, and `JSON.stringify`
+ * reads every own field of it, not the declared two. A stable head stays stable
+ * — pi hands the transcript's own object across turns, and the tier-2 cells pin
+ * that byte-for-byte — and a rebuilt one is visible whatever recency field the
+ * host re-stamps.
  */
 function hashFirstMessage(first: {
 	role?: unknown;
@@ -1461,10 +1479,7 @@ function hashFirstMessage(first: {
 	// Keep the original full local hash semantics for the existing
 	// `cache_prefix_break` signal. The new `cache_context` hashes above are the
 	// bounded hashes; this signal must not silently miss a suffix-only change.
-	const serialized = JSON.stringify({
-		role: first.role,
-		content: first.content,
-	});
+	const serialized = JSON.stringify(first);
 	return createHash("sha256").update(serialized).digest("hex");
 }
 

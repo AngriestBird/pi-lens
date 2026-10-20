@@ -4523,7 +4523,26 @@ function activateExtension(hostPi: ExtensionAPI) {
 				cacheManager,
 				runtime,
 			});
-			const agentNudge = consumeAgentNudge(dbg, scope);
+			// #4631 round 5 (F3): drain the nudge for the scope THIS request
+			// belongs to, not the activation-wide `scope` above. `session_start`
+			// reassigns that variable (both the primary and the declined-secondary
+			// arms), and on 0.87+ this consume runs in `context_with_system` — the
+			// LAST phase of the host's `emitContext`, after every other extension's
+			// `context` handler has been awaited. A concurrent in-process session
+			// start (#473) landing in that window used to reassign `scope`, so this
+			// request drained the OTHER session's advisories into its own messages
+			// and the owning session lost them. `liveSessionMembers` records each
+			// session's own scope at its start (#4554), and this is the same
+			// identity `leaveLiveSession` reads; when this activation never recorded
+			// the requesting session, the activation-wide scope is the only answer
+			// left and stays the fallback.
+			const requestScope =
+				(prefixSessionId === undefined
+					? undefined
+					: liveSessionMembers.find(
+							(member) => member.sessionId === prefixSessionId,
+						)?.scope) ?? scope;
+			const agentNudge = consumeAgentNudge(dbg, requestScope);
 			const sourceMessages = [
 				{
 					source: "session-guidance" as const,
