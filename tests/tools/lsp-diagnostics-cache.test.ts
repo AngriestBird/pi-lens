@@ -749,6 +749,21 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 			expect(replayed).toEqual(["warning"]);
 		});
 
+		// The replayable form's extra membership pass shares the rendered pass's
+		// identity memo. Without it, every file holding both a gap and another
+		// TypeScript error would send tsserver two `projectInfo` requests per serve.
+		it("asks tsserver once per serve when the cache form needs its own membership pass", async () => {
+			const file = path.join(tmpDir, "spawn.test.ts");
+			fs.writeFileSync(file, "describe('x', () => {});\n");
+			touchFile.mockResolvedValue({
+				diags: [{ ...declaredGap }, { ...inferredError }],
+			});
+			probe.mockResolvedValue(inferred);
+			await runBatch([file]);
+			expect(semanticsFor(file)).toEqual(["warning", "warning"]);
+			expect(probe).toHaveBeenCalledTimes(1);
+		});
+
 		// Cells 10 and 11: a verdict unknown at the serve is not baked as one.
 		it("demotes on replay when membership was unknown at the serve and is answered now", async () => {
 			const { fresh, replayed } = await serveThenReplay(
