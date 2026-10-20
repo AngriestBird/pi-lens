@@ -21,7 +21,9 @@
  * (code, operand) pairs from the TypeScript server and refuses everything else,
  * so the cells below are half admitted forms and half refusals. A refusal cell
  * that demoted would hide a real type error, which is the harm this gate must
- * never cause.
+ * never cause. A missing module is admitted only as a Node built-in or a name a
+ * `package.json` on the walk-up declares (#4532 round 5), so the refusal cells
+ * name spellings the gate never lists.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -143,7 +145,27 @@ beforeEach(() => {
 	fs.writeFileSync(file, "export const x = 1;\n");
 	rows = liveSessionRows();
 	resetDegradationLedger();
+	// Shape 73 (fixture adopts an ancestor root), CodeRabbit round 4: the walk
+	// climbs 32 levels past the fixture, so an install anywhere in the temp
+	// ancestry would red every demotion cell and make every blocking cell
+	// vacuous. The premise is asserted, not assumed.
+	expect(hasResolvableNodeModules(root)).toBe(false);
 });
+
+function missingModule(specifier: string, line: number): RawDiagnostic {
+	return {
+		severity: 1,
+		message: `Cannot find module '${specifier}' or its corresponding type declarations.`,
+		code: 2307,
+		source: "ts",
+		serverId: "typescript",
+		range: atLine(line),
+	};
+}
+
+function writeManifest(body: string): void {
+	fs.writeFileSync(path.join(root, "package.json"), body);
+}
 
 afterEach(() => {
 	resetLSPService();
@@ -237,45 +259,32 @@ describe("a worktree with no dependency install (#4532)", () => {
 		).toBe(true);
 	});
 
-	// Greptile round 3: `@/missing` is a tsconfig `paths` alias, not a package
-	// (an npm scope has a name). Installing dependencies cannot fix it, so the
-	// gate must not demote it.
-	// AGENTS.md shape 69 (enumerated detector), measured (#4532 round 4, M4): the
-	// rule is a PREFIX test — a 2307 specifier with no leading `.`, `/`, `#` or
-	// `@scope/` form is treated as a package and demoted. Naming the class by
-	// example ("looks like a scoped package") understated it by the three
-	// spellings a real `paths` map uses most (`~/`, `@app/`, `src/`), so each has
-	// its own row here and the two refusals that must keep blocking stay.
-	it("keeps every path-alias spelling that is not a package blocking", async () => {
-		const demoted = ["@app/missing", "~/missing", "src/missing"];
-		rows = [
-			{
-				severity: 1,
-				message:
-					"Cannot find module '@/missing' or its corresponding type declarations.",
-				code: 2307,
-				source: "ts",
-				serverId: "typescript",
-				range: atLine(3),
-			},
-			{
-				severity: 1,
-				message:
-					"Cannot find module '#internal/missing' or its corresponding type declarations.",
-				code: 2307,
-				source: "ts",
-				serverId: "typescript",
-				range: atLine(4),
-			},
-			...demoted.map((specifier, index) => ({
-				severity: 1,
-				message: `Cannot find module '${specifier}' or its corresponding type declarations.`,
-				code: 2307,
-				source: "ts",
-				serverId: "typescript",
-				range: atLine(10 + index),
-			})),
+	// Greptile round 3 and CodeRabbit round 4, redesigned in round 5 (AGENTS.md
+	// shape 69, second round on one gate): the enumerated gate refused `@/` and
+	// demoted every alias it did not list, and this cell used to PIN that
+	// (`@app/`, `~/` and `src/` asserted as demoted under a title saying the
+	// opposite). The admit-list refuses them without naming them: no manifest
+	// declares a path alias, and a misspelled import is not one either.
+	it("keeps every path alias and undeclared name blocking, and demotes a declared package", async () => {
+		writeManifest(
+			JSON.stringify({
+				dependencies: { "left-pad": "1.3.0" },
+				devDependencies: { "@types/foo": "1.0.0" },
+			}),
+		);
+		const blocking = [
+			"@/missing",
+			"#internal/missing",
+			"@app/missing",
+			"~/missing",
+			"src/missing",
+			"components/missing",
+			"left-pda",
 		];
+		const demoted = ["left-pad", "left-pad/lib/pad", "foo"];
+		rows = [...blocking, ...demoted].map((specifier, index) =>
+			missingModule(specifier, 3 + index),
+		);
 		installService();
 		const result = await run();
 		const rowFor = (specifier: string) =>
@@ -283,24 +292,91 @@ describe("a worktree with no dependency install (#4532)", () => {
 				item.message.includes(`'${specifier}'`),
 			);
 
-		// The two admitted refusals: a `@/` alias and a `package.json` `imports`
-		// subpath are not packages, so a missing one stays a blocker.
-		expect(rowFor("@/missing")).toMatchObject({
-			severity: "error",
-			semantic: "blocking",
-		});
-		expect(rowFor("#internal/missing")).toMatchObject({
-			severity: "error",
-			semantic: "blocking",
-		});
-		// The class the residual names: these ARE `paths` aliases, and the
-		// install-less root cannot tell them from a package, so they demote.
+		for (const specifier of blocking) {
+			expect(rowFor(specifier), specifier).toMatchObject({
+				severity: "error",
+				semantic: "blocking",
+			});
+		}
 		for (const specifier of demoted) {
-			expect(rowFor(specifier)).toMatchObject({
+			expect(rowFor(specifier), specifier).toMatchObject({
 				severity: "warning",
 				semantic: "warning",
 			});
+			expect(rowFor(specifier)?.message).toContain(ENVIRONMENT_GAP_MARKER);
 		}
+	});
+
+	// The fail-closed half of the manifest read: a manifest the gate cannot read
+	// declares nothing, so the import keeps blocking. A directory named
+	// `package.json` stands in for an unreadable one on every platform.
+	it("keeps a package import blocking when the manifest is absent, unreadable or malformed", async () => {
+		const states: Array<[string, () => void]> = [
+			["absent", () => undefined],
+			[
+				"unreadable",
+				() =>
+					fs.mkdirSync(path.join(root, "package.json"), { recursive: true }),
+			],
+			["malformed", () => writeManifest('{"dependencies": {"left-pad": ')],
+		];
+		for (const [state, plant] of states) {
+			fs.rmSync(path.join(root, "package.json"), {
+				recursive: true,
+				force: true,
+			});
+			plant();
+			rows = [missingModule("left-pad", 3)];
+			installService();
+			const result = await run();
+			expect(finding(result, "ts:2307"), state).toMatchObject({
+				severity: "error",
+				semantic: "blocking",
+			});
+		}
+	});
+
+	// A Node built-in needs no manifest; a `node:` name that is not a built-in
+	// is not one, whatever its prefix says.
+	it("demotes a Node built-in with no manifest and keeps an unknown node: name blocking", async () => {
+		rows = [
+			missingModule("node:fs/promises", 3),
+			missingModule("node:nope", 4),
+		];
+		installService();
+		const result = await run();
+		const rowFor = (specifier: string) =>
+			result.diagnostics.find((item) =>
+				item.message.includes(`'${specifier}'`),
+			);
+		expect(rowFor("node:fs/promises")).toMatchObject({ semantic: "warning" });
+		expect(rowFor("node:nope")).toMatchObject({ semantic: "blocking" });
+	});
+
+	// Review F4: the severity and producer gates had no witness. A warning is
+	// never relabelled (it was never a blocker), and a TS2307-shaped row from a
+	// producer that is not the TypeScript server keeps its authority even when
+	// it names no server.
+	it("leaves a warning row and a non-TypeScript producer's row untouched", async () => {
+		rows = [
+			{ ...missingModule("node:crypto", 3), severity: 2 },
+			{
+				...missingModule("node:path", 4),
+				source: "eslint",
+				serverId: undefined,
+			},
+		];
+		installService();
+		const result = await run();
+		const warning = result.diagnostics.find((item) =>
+			item.message.includes("'node:crypto'"),
+		);
+		const foreign = result.diagnostics.find((item) =>
+			item.message.includes("'node:path'"),
+		);
+		expect(warning?.message).not.toContain(ENVIRONMENT_GAP_MARKER);
+		expect(foreign).toMatchObject({ severity: "error", semantic: "blocking" });
+		expect(foreign?.message).not.toContain(ENVIRONMENT_GAP_MARKER);
 	});
 
 	it("keeps the install lookup's unreadable-directory and depth guards", () => {

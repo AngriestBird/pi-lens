@@ -22,19 +22,27 @@
  * FAIL CLOSED (AGENTS shape 69). The gate admits a closed list of (code,
  * operand) pairs from the TypeScript server and refuses every other form:
  * another code (a real type error), another server (an auxiliary sharing the
- * same result), a specifier that resolves from the project itself (relative,
- * absolute, or a `#` subpath import), a missing name that is not one of `node`'s
- * globals, and any root that resolves a `node_modules` at all. A demotion this
- * gate should not have made hides a real blocker, so the refusal direction is
- * the one the tests spend the most cells on.
+ * same result), a missing name that is not one of `node`'s globals, and any
+ * root that resolves a `node_modules` at all. A missing MODULE is admitted only
+ * in two known-good forms: a Node built-in (`node:crypto`, `fs/promises`), or a
+ * package some `package.json` on the file's walk-up DECLARES. Every other
+ * specifier stays blocking without being named: a relative or absolute path, a
+ * `#` import, and every tsconfig `paths`/`baseUrl` alias (`@/x`, `@app/x`,
+ * `~/x`, `src/x`), because no manifest declares them (#4532 round 5: the
+ * enumerated form this replaced refused the spellings it listed and demoted
+ * every alias it did not, two rounds running). The cost is named: an
+ * undeclared or misspelled import stays blocking in an uninstalled worktree,
+ * which is the truth, since installing would not fix it.
  *
  * The one "we do not know" path changes nothing: an unreadable directory in the
- * walk-up, a message the admitted parse cannot read, or a diagnostic whose
- * producer cannot be named leaves the finding at its published severity. An
- * unanswered question is not a verdict (AGENTS shape 10).
+ * walk-up, an absent, unreadable or malformed `package.json`, a message the
+ * admitted parse cannot read, or a diagnostic whose producer cannot be named
+ * leaves the finding at its published severity. An unanswered question is not
+ * a verdict (AGENTS shape 10).
  */
 
 import * as fs from "node:fs";
+import { isBuiltin } from "node:module";
 import * as path from "node:path";
 import type { LSPDiagnostic } from "./client.js";
 import { isTypeScriptSourcedDiagnostic } from "./inferred-project.js";
@@ -115,34 +123,78 @@ const ENVIRONMENT_GAP_CODES = new Set([2307, 2503, 2304, 2580, 2591]);
 /** The codes whose message is `Cannot find name '<name>'.` */
 type MissingNameCode = 2304 | 2580 | 2591;
 
+/** The manifest fields whose names a dependency install provides. */
+const DECLARING_FIELDS = [
+	"dependencies",
+	"devDependencies",
+	"peerDependencies",
+	"optionalDependencies",
+] as const;
+
 /**
- * A bare specifier is resolved from `node_modules`; a relative, absolute or
- * drive-absolute one is resolved from the project, and a `#`-prefixed one from
- * the project's own `package.json` `imports` map. Only the first form can be
- * missing BECAUSE no install exists.
+ * The package a module specifier names: `@scope/name` for a scoped one, its
+ * first segment otherwise. A project path yields a name no manifest declares
+ * (`.`, an empty segment, `#internal`, `~`, `src`), so it needs no case of its
+ * own; `@/x` (an empty scope) yields none at all.
  */
-function isBareSpecifier(specifier: string): boolean {
-	if (specifier.startsWith("node:")) return true;
-	if (specifier.startsWith(".") || specifier.startsWith("/")) return false;
-	if (specifier.startsWith("#")) return false;
-	if (/^[A-Za-z]:[\\/]/.test(specifier)) return false;
-	// `@scope/name` is a package; `@/missing` (an empty scope) is a project
-	// path alias — a tsconfig `paths` mapping — that installing dependencies
-	// cannot fix, so it stays blocking (#4532 round 3, Greptile).
-	if (specifier.startsWith("@")) return /^@[^/]+\/.+$/.test(specifier);
-	// A bare path-like token with a separator at the front is not a package
-	// name either; `name/sub` is.
-	return !specifier.includes("\\");
+function packageNameOf(specifier: string): string | undefined {
+	if (specifier.startsWith("@")) return /^@[^/]+\/[^/]+/.exec(specifier)?.[0];
+	return specifier.split("/")[0];
 }
 
 /**
- * Whether this diagnostic is an environment gap for a root with no resolvable
- * `node_modules`. Returns the admitted code when it is, `undefined` otherwise,
- * so the caller records what fired rather than re-deriving it.
+ * Every package name declared by a `package.json` at or above `startDir`, over
+ * the same bounded walk the install lookup uses: an install at any level
+ * resolves upward, so a name an ancestor manifest declares (a monorepo root's
+ * hoisted devDependency) is one the install would provide. A declared
+ * `@types/foo` also declares `foo`, and `@types/scope__bar` declares
+ * `@scope/bar`: the types package is what an absent install leaves missing.
+ */
+function declaredPackageNames(startDir: string): Set<string> {
+	const names = new Set<string>();
+	let dir = path.resolve(startDir);
+	for (let level = 0; level < ENV_NODE_MODULES_WALK_MAX_LEVELS; level++) {
+		try {
+			const manifest = JSON.parse(
+				fs.readFileSync(path.join(dir, "package.json"), "utf8"),
+			) as Record<string, Record<string, unknown> | null | undefined>;
+			for (const field of DECLARING_FIELDS) {
+				for (const name of Object.keys(manifest[field] ?? {})) {
+					names.add(name);
+					if (!name.startsWith("@types/")) continue;
+					const stem = name.slice("@types/".length);
+					names.add(stem.includes("__") ? `@${stem.replace("__", "/")}` : stem);
+				}
+			}
+		} catch {
+			// none: an absent, unreadable or malformed manifest declares nothing,
+			// so a specifier only it could have admitted stays blocking (fail
+			// closed). The demotion's own record is `lsp-environment-gap-demoted`.
+		}
+		const parent = path.dirname(dir);
+		if (parent === dir) break;
+		dir = parent;
+	}
+	return names;
+}
+
+/** What `environmentGapKind` admits: the code, and a missing module's specifier. */
+interface EnvironmentGapCandidate {
+	code: 2307 | 2503 | MissingNameCode;
+	/** TS2307 only: the specifier, admitted later against the root's manifests. */
+	specifier?: string;
+}
+
+/**
+ * Whether this diagnostic has an environment gap's (code, operand) shape.
+ * Returns what it admitted, `undefined` otherwise, so the caller records what
+ * fired rather than re-deriving it. A TS2307 is only a CANDIDATE here: its
+ * specifier is admitted against the root's manifests once the install lookup
+ * has answered (see `demoteEnvironmentGapDiagnostics`).
  */
 export function environmentGapKind(
 	diagnostic: LSPDiagnostic,
-): 2307 | 2503 | MissingNameCode | undefined {
+): EnvironmentGapCandidate | undefined {
 	if (diagnostic.severity !== 1) return undefined;
 	if (!isTypeScriptSourcedDiagnostic(diagnostic)) return undefined;
 	if (
@@ -155,18 +207,16 @@ export function environmentGapKind(
 	const message = diagnostic.message.trim();
 	if (code === 2307) {
 		const specifier = MISSING_MODULE.exec(message)?.[1];
-		return specifier !== undefined && isBareSpecifier(specifier)
-			? 2307
-			: undefined;
+		return specifier === undefined ? undefined : { code, specifier };
 	}
 	if (code === 2503) {
 		return MISSING_NAMESPACE.exec(message)?.[1] === NODE_NAMESPACE
-			? 2503
+			? { code }
 			: undefined;
 	}
 	const name = MISSING_NAME.exec(message)?.[1];
 	return name !== undefined && NODE_GLOBALS.has(name)
-		? (code as MissingNameCode)
+		? { code: code as MissingNameCode }
 		: undefined;
 }
 
@@ -198,9 +248,10 @@ export function hasResolvableNodeModules(
 			// unreadable) instead of swallowing a failure — an unreadable ancestor
 			// returns true, so the finding keeps its published severity. The
 			// demotion's own record is `lsp-environment-gap-demoted`.
-			const code = (err as NodeJS.ErrnoException | undefined)?.code;
-			if (code !== "ENOENT" && code !== "ENOTDIR") {
-				// Unreadable is not absent: keep the finding blocking.
+			// Unreadable is not absent: keep the finding blocking. Only ENOENT is
+			// absence; ENOTDIR (a walk level that is not a directory) is a path no
+			// diagnostic names, so it gets the unanswered verdict too (#4532 r5).
+			if ((err as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") {
 				return true;
 			}
 		}
@@ -238,20 +289,28 @@ export function demoteEnvironmentGapDiagnostics(
 	diagnostics: LSPDiagnostic[],
 	options: EnvironmentGapOptions,
 ): LSPDiagnostic[] {
-	const admitted = new Map<LSPDiagnostic, 2307 | 2503 | MissingNameCode>();
+	const candidates = new Map<LSPDiagnostic, EnvironmentGapCandidate>();
 	for (const diagnostic of diagnostics) {
 		const kind = environmentGapKind(diagnostic);
-		if (kind !== undefined) admitted.set(diagnostic, kind);
+		if (kind !== undefined) candidates.set(diagnostic, kind);
+	}
+	if (candidates.size === 0) return diagnostics;
+	// One filesystem question per file, asked only when a demotion could act.
+	const startDir = options.startDir ?? path.dirname(options.filePath);
+	if (hasResolvableNodeModules(startDir, options.stat)) return diagnostics;
+	// A missing module is an install gap only in the two known-good forms; the
+	// manifests are read once, and only when a non-built-in candidate asks.
+	let declared: Set<string> | undefined;
+	const admitted = new Map<LSPDiagnostic, EnvironmentGapCandidate["code"]>();
+	for (const [diagnostic, { code, specifier }] of candidates) {
+		if (specifier !== undefined && !isBuiltin(specifier)) {
+			declared ??= declaredPackageNames(startDir);
+			const name = packageNameOf(specifier);
+			if (name === undefined || !declared.has(name)) continue;
+		}
+		admitted.set(diagnostic, code);
 	}
 	if (admitted.size === 0) return diagnostics;
-	// One filesystem question per file, asked only when a demotion could act.
-	if (
-		hasResolvableNodeModules(
-			options.startDir ?? path.dirname(options.filePath),
-			options.stat,
-		)
-	)
-		return diagnostics;
 	const startedAt = Date.now();
 	const counts = new Map<number, number>();
 	const demoted = diagnostics.map((diagnostic) => {
