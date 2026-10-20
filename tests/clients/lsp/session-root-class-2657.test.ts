@@ -1,3 +1,7 @@
+// flake-shape: real-process-spawn — the linked-worktree class comes from git
+// identity (`resolveGitCheckout` / `resolveLinkedWorktreeOwner`), so the fixture
+// is a real `git init` + `git worktree add` of the session's own checkout; a
+// fabricated `.git` file would measure the fixture rather than the rule (#2657).
 /**
  * #2657 / #4242 item 3: the CLASS decides what a session registers.
  *
