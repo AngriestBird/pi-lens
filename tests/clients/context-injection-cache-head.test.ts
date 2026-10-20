@@ -1,6 +1,6 @@
 /**
- * #4631, at tier 2 (#4632's slice-0 pilot): the prompt-cache prefix is what the
- * PROVIDER receives, across turns.
+ * #4631, at tier 2 (#4632): the prompt-cache prefix is what the PROVIDER
+ * receives, across turns.
  *
  * pi 0.87+ hands a `context` handler the conversation with every system message
  * filtered out; when that handler returns a changed list, pi rebuilds one
@@ -11,103 +11,101 @@
  * request. So this file runs a real `AgentSession` (pi's own services and
  * session, pi-ai's `fauxProvider`) and asserts the messages pi actually sent.
  *
+ * LIFECYCLE (the #4664 merge order, not a signature swap). This file began as
+ * #4632's slice-0 pilot and now runs on the merged tier-2 helper:
+ *
+ * - ONE file-scoped fixture root from `piSessionFixture()`, not a root per case
+ *   (`beforeEach`). `startPiSession` refuses a second root, measured: a
+ *   session under a second root writes into the FIRST root's home and nothing
+ *   into its own (#4664 F4). A case that needs its own project directory passes
+ *   a `cwd` under the fixture root instead.
+ * - NO in-process `extensionFactories`. pi loads `index.js` through its own
+ *   loader with `moduleCache: false`, so the extension under test is the same
+ *   BUILT twin an install runs, and it holds its own copies of `clients/*`.
+ *   Neither the factory this file used to pass nor
+ *   `_resetSessionLifecycleForTests()` reaches that copy; disposal is the
+ *   helper's (`dispose()` emits `session_shutdown` into the loaded copy, then
+ *   drains).
+ * - Guidance is staged through the cache the delivery reads, not through a
+ *   `stageGuidance` helper method: `CacheManager(false).writeCache(
+ *   "session-start-guidance", …)` under the session's own cwd. That is the
+ *   same row `clients/runtime-session.ts` writes at the end of a start, so the
+ *   injecting turn is caused by delivery alone and never by a start's timing.
+ *
  * The expected head comes from pi-ai's own replay (`getCurrentSystemMessage`,
  * `collapseSystemMessages`), never a hand-rolled merge.
  */
-import * as path from "node:path";
+import { describe, expect, it } from "vitest";
+import { CacheManager } from "../../clients/cache-manager.js";
 import {
-	type FauxResponseStep,
-	collapseSystemMessages,
 	fauxAssistantMessage,
 	fauxToolCall,
-	getCurrentSystemMessage,
-	normalizeContext,
-} from "@earendil-works/pi-ai";
-import {
-	afterAll,
-	afterEach,
-	beforeEach,
-	describe,
-	expect,
-	it,
-	vi,
-} from "vitest";
-import { _resetSessionLifecycleForTests } from "../../clients/session-lifecycle.js";
-import extension from "../../index.js";
-import {
-	piSessionEnv,
+	piAiModule,
+	piSessionFixture,
 	startPiSession,
-	type PiSessionHandle,
 } from "../support/pi-session.js";
-import {
-	cleanupTestEnvironmentsDrained,
-	setupTestEnvironment,
-} from "./test-utils.js";
 
-const TMP_PREFIX = "pi-lens-4631-";
+/**
+ * The transcript replay this file adds to the helper's pi-ai handle. The helper
+ * declares only the four `faux*` entry points it asserts exist (#4664 F1), and
+ * no `@earendil-works/pi-ai` import SPECIFIER may exist in this tree: that
+ * package ships inside the host's own install, so a static specifier would pin
+ * a second copy. This file therefore reuses the handle `piAiModule()` loads
+ * from the host and declares the three transcript entry points it reads. The
+ * package entry re-exports them (`@earendil-works/pi-ai` `dist/index.js` →
+ * `./utils/transcript.ts`), so they are the same module instance pi itself
+ * calls. Read `piAiModule()`'s own failure mode first: a host without them
+ * makes `getCurrentSystemMessage` undefined here rather than silently passing.
+ */
+interface TranscriptReplay {
+	getCurrentSystemMessage(messages: readonly { role: string }[]): unknown;
+	normalizeContext(context: { messages: readonly unknown[] }): {
+		messages: readonly unknown[];
+	};
+	collapseSystemMessages(context: { messages: readonly unknown[] }): {
+		messages: readonly unknown[];
+	};
+}
 
-/** The same flags every real-session witness passes; none may reach a tool. */
-const FLAGS = new Map<string, boolean>([
-	["no-lsp", true],
-	["no-autofix", true],
-	["no-autoformat", true],
-	["no-tests", true],
-	["no-opengrep", true],
-	["no-delta", true],
-]);
+const piAi = piAiModule() as unknown as TranscriptReplay;
 
-let env: ReturnType<typeof setupTestEnvironment>;
-let root: string;
-let handle: PiSessionHandle | undefined;
+const fixture = piSessionFixture();
+// No per-case root, no per-case handle list: the helper owns both. It disposes
+// a live session in its own `afterEach` (#4664 M2), and its `afterAll` removes
+// the root after the drain.
 
-beforeEach(() => {
-	_resetSessionLifecycleForTests();
-	env = setupTestEnvironment(TMP_PREFIX);
-	root = path.join(env.tmpDir, "fixture");
-	for (const [key, value] of Object.entries(piSessionEnv(root)))
-		vi.stubEnv(key, value);
-});
-
-afterEach(async () => {
-	try {
-		await handle?.dispose();
-		handle = undefined;
-	} finally {
-		_resetSessionLifecycleForTests();
-		vi.unstubAllEnvs();
-		env.cleanup();
-	}
-});
-
-afterAll(async () => {
-	await cleanupTestEnvironmentsDrained(TMP_PREFIX);
-});
-
-function start(
-	responses: readonly FauxResponseStep[],
-): Promise<PiSessionHandle> {
-	return startPiSession({
-		root,
-		responses,
-		extensionFactories: [extension],
-		flags: FLAGS,
-	});
+/**
+ * Stage one `session-start-guidance` payload for the next request to inject,
+ * under the session's own cwd — the key `consumeSessionStartGuidance`
+ * (`clients/runtime-context.ts`) reads it back by.
+ */
+function stageGuidance(cwd: string, text: string): void {
+	new CacheManager(false).writeCache(
+		"session-start-guidance",
+		{ content: text },
+		cwd,
+	);
 }
 
 describe("#4631 the injecting turn keeps the prompt-cache head pi sent before it", () => {
 	it("keeps the system head byte-identical on an injecting turn", async () => {
-		handle = await start([
-			fauxAssistantMessage("first answer"),
-			fauxAssistantMessage("second answer"),
-			fauxAssistantMessage("third answer"),
-		]);
+		const handle = await startPiSession({
+			root: fixture.root,
+			cwd: `${fixture.root}/prefix-plain/proj`,
+			responses: [
+				fauxAssistantMessage("first answer"),
+				fauxAssistantMessage("second answer"),
+				fauxAssistantMessage("third answer"),
+			],
+		});
 		const { requests } = handle;
 
 		await handle.prompt("first question");
 		const before = requests.at(-1);
 		if (!before) throw new Error("the plain turn sent no request");
 
-		handle.stageGuidance(
+		stageGuidance(
+			handle.cwd,
 			"NARROW-DIFF-GUIDANCE: change only the line under test",
 		);
 		await handle.prompt("second question");
@@ -123,11 +121,12 @@ describe("#4631 the injecting turn keeps the prompt-cache head pi sent before it
 		// never makes the host rebuild one.
 		expect(sent.filter((message) => message.role === "system")).toHaveLength(1);
 		// pi's own replay of this transcript is the head the provider received.
-		expect(sent[0]).toEqual(getCurrentSystemMessage(sent));
+		expect(sent[0]).toEqual(piAi.getCurrentSystemMessage(sent));
 		// Nothing is mid-list, so pi's collapse is a no-op for this request.
 		expect(
-			collapseSystemMessages(normalizeContext({ messages: [...sent] }))
-				.messages,
+			piAi.collapseSystemMessages(
+				piAi.normalizeContext({ messages: [...sent] }),
+			).messages,
 		).toEqual(sent);
 		// The cached prefix survives BYTE for byte: the provider hashes the
 		// serialized message, so key order and values both count. The previous
@@ -139,14 +138,20 @@ describe("#4631 the injecting turn keeps the prompt-cache head pi sent before it
 	});
 
 	it("keeps the earlier prefix when a lazy-tool activation appends its delta", async () => {
-		handle = await start([
-			fauxAssistantMessage("first answer"),
-			fauxAssistantMessage(
-				fauxToolCall("pi_lens_activate_tools", { tools: ["ast_grep_search"] }),
-			),
-			fauxAssistantMessage("activation answer"),
-			fauxAssistantMessage("third answer"),
-		]);
+		const handle = await startPiSession({
+			root: fixture.root,
+			cwd: `${fixture.root}/prefix-delta/proj`,
+			responses: [
+				fauxAssistantMessage("first answer"),
+				fauxAssistantMessage(
+					fauxToolCall("pi_lens_activate_tools", {
+						tools: ["ast_grep_search"],
+					}),
+				),
+				fauxAssistantMessage("activation answer"),
+				fauxAssistantMessage("third answer"),
+			],
+		});
 		const { requests } = handle;
 
 		await handle.prompt("first question");
@@ -155,7 +160,8 @@ describe("#4631 the injecting turn keeps the prompt-cache head pi sent before it
 
 		// pi appends one system message announcing the tool delta before the
 		// request that follows the activation, which is the mid-list shape
-		// `restoreSystemMessages` used to fold into the head.
+		// `restoreSystemMessages` used to fold into the head. The tool call runs
+		// in the LOADED copy's registry: this file passes no factory of its own.
 		await handle.prompt("activate the search tool");
 		const requestBeforeActivation = requests.at(-2);
 		const activated = requests.at(-1);
@@ -165,9 +171,11 @@ describe("#4631 the injecting turn keeps the prompt-cache head pi sent before it
 		expect(delta?.role).toBe("system");
 		if (delta?.role !== "system")
 			throw new Error("the activation turn appended no system delta");
-		expect(delta.toolsAdded?.map((tool) => tool.name)).toContain(
-			"ast_grep_search",
-		);
+		expect(
+			(delta as { toolsAdded?: Array<{ name: string }> }).toolsAdded?.map(
+				(tool) => tool.name,
+			),
+		).toContain("ast_grep_search");
 		// The delta is only appended: the earlier request prefix and the head
 		// are byte-identical.
 		expect(activated.slice(0, requestBeforeActivation.length)).toEqual(
@@ -175,7 +183,7 @@ describe("#4631 the injecting turn keeps the prompt-cache head pi sent before it
 		);
 		expect(JSON.stringify(activated[0])).toBe(JSON.stringify(plain[0]));
 
-		handle.stageGuidance("ACTIVATION-GUIDANCE: keep the delta mid-list");
+		stageGuidance(handle.cwd, "ACTIVATION-GUIDANCE: keep the delta mid-list");
 		await handle.prompt("third question");
 		const injecting = requests.at(-1);
 		if (!injecting) throw new Error("the injecting turn sent no request");

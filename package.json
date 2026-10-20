@@ -126,8 +126,8 @@
 		"banner.png"
 	],
 	"dependencies": {
-		"@ast-grep/cli": "0.50.0",
-		"@ast-grep/napi": "^0.50.0",
+		"@ast-grep/cli": "0.51.0",
+		"@ast-grep/napi": "^0.51.0",
 		"js-yaml": "^5.2.2",
 		"minimatch": "^10.2.6",
 		"pidusage": "^4.0.1",
@@ -173,9 +173,9 @@
 		"jscpd": "5.4.1",
 		"json5": "^2.2.3",
 		"knip": "6.41.0",
-		"oxc-parser": "0.153.0",
-		"oxfmt": "0.72.0",
-		"oxlint": "1.87.0",
+		"oxc-parser": "0.154.0",
+		"oxfmt": "0.73.0",
+		"oxlint": "1.88.0",
 		"oxlint-tsgolint": "7.0.2004",
 		"publint": "0.3.25",
 		"semver": "^7.8.0",
@@ -193,7 +193,7 @@
 		]
 	},
 	"allowScripts": {
-		"@ast-grep/cli@0.50.0": true,
+		"@ast-grep/cli@0.51.0": true,
 		"@google/genai@2.21.0": true,
 		"esbuild@0.28.2": true,
 		"fsevents@2.3.3": false,
