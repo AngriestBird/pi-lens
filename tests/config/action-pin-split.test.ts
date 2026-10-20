@@ -375,7 +375,41 @@ const DOCUMENTS: Array<[string, string, string, string[]]> = [
 		"a with: that carries a merge key",
 		".github/workflows/plant.yml",
 		`x-base: &base\n  python-version: "3.x"\n${WORKFLOW_HEAD}    steps:\n      - uses: actions/setup-python@v7\n        with:\n          <<: *base\n`,
-		[`${STEP0}: with carries a "<<" merge key this rule does not resolve`],
+		[
+			`.github/workflows/plant.yml: jobs.lint.steps[0].with carries a "<<" merge key this rule does not resolve; pin python-version on the step it applies to`,
+		],
+	],
+	[
+		"a step that inherits its uses through a merge key",
+		".github/workflows/plant.yml",
+		`x-step: &step\n  uses: actions/setup-python@v7\n  with:\n    python-version: "3.x"\n${WORKFLOW_HEAD}    steps:\n      - <<: *step\n`,
+		[
+			`.github/workflows/plant.yml: jobs.lint.steps[0] carries a "<<" merge key this rule does not resolve; pin python-version on the step it applies to`,
+		],
+	],
+	[
+		"a job that inherits its steps through a merge key",
+		".github/workflows/plant.yml",
+		`x-job: &job\n  runs-on: ubuntu-latest\n  steps:\n    - uses: actions/setup-python@v7\n      with:\n        python-version: "3.x"\njobs:\n  lint:\n    <<: *job\n`,
+		[
+			`.github/workflows/plant.yml: jobs.lint carries a "<<" merge key this rule does not resolve; pin python-version on the step it applies to`,
+		],
+	],
+	[
+		"a composite runs: that inherits its steps through a merge key",
+		".github/actions/pin/action.yml",
+		`x-runs: &runs\n  using: composite\n  steps:\n    - uses: actions/setup-python@v7\n      with:\n        python-version: "3.x"\nruns:\n  <<: *runs\n`,
+		[
+			`.github/actions/pin/action.yml: runs carries a "<<" merge key this rule does not resolve; pin python-version on the step it applies to`,
+		],
+	],
+	[
+		"a matrix that inherits its legs through a merge key",
+		".github/workflows/plant.yml",
+		`x-matrix: &m\n  py: ["3.x"]\n${WORKFLOW_HEAD}    strategy:\n      matrix:\n        <<: *m\n    steps:\n      - uses: actions/setup-python@v7\n        with:\n          python-version: "\${{ matrix.py }}"\n`,
+		[
+			`.github/workflows/plant.yml: jobs.lint.strategy.matrix carries a "<<" merge key this rule does not resolve; pin python-version on the step it applies to`,
+		],
 	],
 	[
 		"a step anchor reused through an alias",

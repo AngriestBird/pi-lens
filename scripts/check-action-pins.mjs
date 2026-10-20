@@ -120,6 +120,33 @@ function matrixLegs(matrix, key) {
 	return legs;
 }
 
+/**
+ * The path to the first `<<` merge key in a parsed document, or undefined.
+ *
+ * The default YAML 1.2 schema leaves a merge key as a literal key, so
+ * everything it would bring in — a step's `uses`, a job's or a composite
+ * `runs` mapping's `steps`, a matrix's legs — stays invisible to this walker.
+ * One unresolved merge ANYWHERE refuses the file, rather than enumerating the
+ * positions that could hide a pin (shape 69: an enumerated guard passes the
+ * position it does not list).
+ */
+function mergeKeyAt(value, at = "") {
+	if (Array.isArray(value)) {
+		for (const [index, item] of value.entries()) {
+			const found = mergeKeyAt(item, `${at}[${index}]`);
+			if (found) return found;
+		}
+		return undefined;
+	}
+	if (!isMapping(value)) return undefined;
+	if ("<<" in value) return at || "the document";
+	for (const [key, child] of Object.entries(value)) {
+		const found = mergeKeyAt(child, at ? `${at}.${key}` : key);
+		if (found) return found;
+	}
+	return undefined;
+}
+
 /** One error for one step, or nothing when the step pins a concrete release. */
 function interpreterPinError(step, at, matrix) {
 	if (step.uses === undefined) return [];
@@ -132,9 +159,8 @@ function interpreterPinError(step, at, matrix) {
 			? [`${at}: ${SETUP_PYTHON} has no python-version pin`]
 			: [`${at}: with is not a mapping; the python-version pin cannot be read`];
 	// The default YAML 1.2 schema leaves a `<<` merge key as a key, so the pin
-	// it would bring in is invisible here. Refuse rather than read a half step.
-	if ("<<" in inputs)
-		return [`${at}: with carries a "<<" merge key this rule does not resolve`];
+	// it would bring in is invisible here. interpreterPinErrors refuses the whole
+	// file on one, before any step is read, so this branch needs no merge case.
 	if (!("python-version" in inputs))
 		return [`${at}: ${SETUP_PYTHON} has no python-version pin`];
 	const pin = inputs["python-version"];
@@ -195,6 +221,11 @@ export function interpreterPinErrors(text, file = "<fixture>") {
 	if (!isMapping(document))
 		return [
 			`${file}: the document is not a mapping; no step's python-version can be read`,
+		];
+	const merge = mergeKeyAt(document);
+	if (merge)
+		return [
+			`${file}: ${merge} carries a "<<" merge key this rule does not resolve; pin python-version on the step it applies to`,
 		];
 	const errors = [];
 	const jobs = document.jobs;
