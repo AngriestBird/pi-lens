@@ -204,6 +204,70 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 		expect(blocks[1]).toContain("pi-lens active");
 	});
 
+	it("replaces the session: the old conversation ends, and the next one starts empty under a new id", async () => {
+		const first = await startPiSession({
+			root: fixture.root,
+			cwd: path.join(fixture.root, "replace", "proj"),
+			responses: [fauxAssistantMessage(fauxText("first answer"))],
+		});
+		await first.prompt("first question");
+		const firstId = first.session.sessionManager.getSessionId();
+		const firstFile = first.sessionFile();
+		expect(getActiveSessionId()).toBe(firstId);
+
+		const second = await first.restart("new", [
+			fauxAssistantMessage(fauxText("second answer")),
+		]);
+		const secondId = second.session.sessionManager.getSessionId();
+
+		// A replacement is a DIFFERENT conversation: pi minted a new session id,
+		// so nothing that keys on the session identity can cross it by accident.
+		expect(secondId).not.toBe(firstId);
+		// The old conversation's own state was released, and the new one binds its
+		// own provider script.
+		expect(second.requests).toHaveLength(0);
+		expect(second.errors).toEqual([]);
+
+		// The new conversation starts empty: pi restored nothing from the old
+		// session file, which is still on disk under the first id.
+		await second.prompt("second question");
+		expect(second.requests[0].map((message) => message.role)).toEqual([
+			"system",
+			"user",
+		]);
+		expect(fs.readFileSync(firstFile ?? "", "utf8")).toContain("first answer");
+	});
+
+	it("starts the replacement as a primary, from the state a real restart leaves", async () => {
+		// The restart releases what a real restart destroys: the previous
+		// activation's process-lifetime lifecycle state and this process's
+		// instance-registry entry. Without that, pi-lens's own #473 classifier
+		// declines the replacement's start as `concurrent-secondary` and the
+		// replacement would inherit state a restart cannot — measured before the
+		// release was added: `count=1, sameRoot=undefined`, full start skipped.
+		const first = await startPiSession({
+			root: fixture.root,
+			cwd: path.join(fixture.root, "replace-primary", "proj"),
+			responses: [fauxAssistantMessage(fauxText("one"))],
+		});
+		await first.prompt("hello");
+		const firstId = first.session.sessionManager.getSessionId();
+
+		const second = await first.restart("reload", [
+			fauxAssistantMessage(fauxText("two")),
+		]);
+		await second.prompt("hello again");
+		const secondId = second.session.sessionManager.getSessionId();
+
+		// The replacement took the primary slot the previous conversation left.
+		expect(secondId).not.toBe(firstId);
+		expect(getActiveSessionId()).toBe(secondId);
+		expect(getActivePrimaryRoot()).toBe(
+			path.join(fixture.root, "replace-primary", "proj"),
+		);
+		expect(second.errors).toEqual([]);
+	});
+
 	it("refuses a second fixture root in one file", async () => {
 		// A session under a SECOND fixture root writes into the FIRST root's home
 		// and nothing into its own — measured: 78 `session_start` rows against 0

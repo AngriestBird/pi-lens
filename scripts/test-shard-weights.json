@@ -1215,7 +1215,6 @@
 		"tests/index-2992-integration.test.ts": 2.61,
 		"tests/index-3190-inline-blocker-deleted-path-witness.test.ts": 0.39,
 		"tests/index-3246-turn-end-delivery.test.ts": 0.36,
-		"tests/index-3248-git-guard-latch-witness.test.ts": 0.36,
 		"tests/index-3290-actionable-warnings-witness.test.ts": 0.28,
 		"tests/index-3506-file-mutation-queue-wiring.test.ts": 1.48,
 		"tests/index-3521-fork-tree-witness.test.ts": 24.18,
@@ -1509,6 +1508,7 @@
 		"tests/tools/scan-progress.test.ts": 0.01,
 		"tests/tools/symbol-search.test.ts": 0.38,
 		"tests/tools/tool-contract-pins.test.ts": 0.01,
-		"tests/typescript-runtime-free.test.ts": 0.08
+		"tests/typescript-runtime-free.test.ts": 0.08,
+		"tests/index-4632-s4-tool-call-verdict.test.ts": 9.6
 	}
 }

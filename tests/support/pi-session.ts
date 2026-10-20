@@ -109,6 +109,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { afterAll, afterEach } from "vitest";
+import { deregisterInstance } from "../../clients/instance-registry.js";
+import { _resetSessionLifecycleForTests } from "../../clients/session-lifecycle.js";
 import { _settleRegistryMutationsForTests } from "../../clients/instance-registry-tail.js";
 import { flushAllNdjsonWriters } from "../../clients/ndjson-logger.js";
 import {
@@ -167,6 +169,14 @@ export type PiFauxReplyFactory = (
 
 /** A scripted provider reply: a message, or a function of the request it answers. */
 export type PiFauxReply = Record<string, unknown> | PiFauxReplyFactory;
+
+/** A start reason pi accepts on `session_start` (host `SessionStartEvent.reason`). */
+export type PiSessionStartReason =
+	| "startup"
+	| "reload"
+	| "new"
+	| "resume"
+	| "fork";
 
 /** The provider half of the host's own `pi-ai` that this tier calls. */
 interface FauxProviderHandle {
@@ -391,6 +401,17 @@ export interface PiSession {
 	 * script — the resume path a restarted process takes.
 	 */
 	resume(responses: readonly PiFauxReply[]): Promise<PiSession>;
+	/**
+	 * End this session and open the next one in the SAME project, the way pi's
+	 * own replacement does: the loaded copy's `session_shutdown` handler runs
+	 * with `reason`, then pi builds a fresh session (new session id, new
+	 * provider script) whose `session_start` carries `reason`. The previous
+	 * session file is named to the new start, as pi does for a replacement.
+	 */
+	restart(
+		reason: PiSessionStartReason,
+		responses: readonly PiFauxReply[],
+	): Promise<PiSession>;
 	/** Settle the loaded copy, dispose the session, drain. Idempotent. */
 	dispose(): Promise<void>;
 }
@@ -482,9 +503,17 @@ async function buildSession(args: {
 	root: string;
 	cwd: string;
 	agentDir: string;
+	sessionsDir: string;
 	responses: readonly PiFauxReply[];
 	flags: ReadonlyMap<string, boolean | string>;
 	sessionManager: () => SessionManager;
+	/**
+	 * The start event pi is told about. Absent means pi's default start (the
+	 * one `createAgentSessionFromServices` synthesises); a replacement passes
+	 * its own reason, exactly as the SDK caller in
+	 * `tests/index-3521-fork-tree-witness.test.ts` does.
+	 */
+	sessionStartEvent?: { type: "session_start"; reason: PiSessionStartReason };
 }): Promise<PiSession> {
 	const requests: PiProviderRequest[] = [];
 	const { modelRuntime, model } = await buildModelRuntime(
@@ -513,12 +542,56 @@ async function buildSession(args: {
 		services,
 		sessionManager: args.sessionManager(),
 		model: model as never,
+		sessionStartEvent: args.sessionStartEvent as never,
 	});
 	const errors: unknown[] = [];
 	await session.bindExtensions({
 		onError: (error: unknown) => errors.push(error),
 	});
 	let disposed = false;
+	/**
+	 * Emit `session_shutdown` (pi AWAITS every handler, so this runs the loaded
+	 * copy's own handler), dispose the session and settle every sink. Splitting
+	 * the reason out lets a replacement boundary carry its own reason instead of
+	 * `quit`; `dispose()` below is the quit-shaped call.
+	 */
+	const settle = async (shutdownReason: string): Promise<void> => {
+		if (disposed) return;
+		disposed = true;
+		// pi awaits every handler it emits, so this runs the LOADED copy's own
+		// `session_shutdown` handler: its primary release, its registry
+		// deregistration, and its writer drain (the handler returns
+		// `bounded(flushAllNdjsonWriters(), …)`).
+		await session.extensionRunner.emit({
+			type: "session_shutdown",
+			reason: shutdownReason,
+		} as never);
+		session.dispose();
+		// The same process-global writer map the loaded copy registered into:
+		// a second, test-side settle of the same sinks. It writes the same
+		// rows whether or not the emit above ran, so it is a belt, never the
+		// proof that the handler did (a case that proves the emit asserts a
+		// handler effect, not a log row).
+		await flushAllNdjsonWriters();
+		await drainBackgroundWritesForTests();
+		// Join the copy's queued registry mutations AND the sink rows those
+		// mutations log. #2146 keys the tail on `globalThis`, so this import
+		// joins the copy's own queue; without the join the deregistration
+		// write lands after `dispose()` returns and re-creates the removed
+		// fixture root — measured on this host, warm process: 5 of 5 runs,
+		// 5–8 ms after the removal, carrying `instances.json.locks/…`,
+		// `cascade.log` and `latency.log` (#4664 F7).
+		//
+		// TWO rounds, because a round joins only what is queued when it is
+		// called: the deregistration mutation logs its own sink rows, and the
+		// registry read taken inside it can queue the next mutation (the
+		// dead-pid prune). Measured the same way: one round still re-created
+		// the root in 1 of 5 runs, two rounds in 0 of 6.
+		for (let round = 0; round < 2; round += 1) {
+			await _settleRegistryMutationsForTests();
+			await flushAllNdjsonWriters();
+		}
+	};
 	const handle: PiSession = {
 		session,
 		cwd: args.cwd,
@@ -530,6 +603,37 @@ async function buildSession(args: {
 		},
 		async compact(instructions) {
 			return session.compact(instructions);
+		},
+		async restart(reason, responses) {
+			const previousSessionFile = session.sessionManager.getSessionFile();
+			await settle(reason);
+			// The shutdown handler releases the session's own root holder, but this
+			// PROCESS's registry entry stays for the reaper to prune — measured: the
+			// next start was classified `concurrent-secondary` (`count=1,
+			// sameRoot=undefined`) and skipped its full start, so the replacement
+			// observed a shared activation instead of its own. A real restart is a
+			// new process with no entry, so the test-owned entry is dropped here,
+			// the same seam `tests/index-2992-integration.test.ts` uses (#2912).
+			await _settleRegistryMutationsForTests();
+			deregisterInstance();
+			// A real restart is a NEW PROCESS: none of the previous activation's
+			// process-lifetime lifecycle state exists, so the next start is a
+			// primary rather than a second activation of a still-registered one.
+			// Released here through the documented test seam (the same one
+			// `tests/index-3521-fork-tree-witness.test.ts` uses between runtimes);
+			// without it the replacement's start is declined as
+			// `concurrent-secondary` and would inherit state a restart destroys.
+			_resetSessionLifecycleForTests();
+			return buildSession({
+				...args,
+				responses,
+				sessionManager: () => SessionManager.create(args.cwd, args.sessionsDir),
+				sessionStartEvent: {
+					type: "session_start",
+					reason,
+					...(previousSessionFile === undefined ? {} : { previousSessionFile }),
+				},
+			});
 		},
 		async resume(responses) {
 			const file = session.sessionManager.getSessionFile();
@@ -545,41 +649,7 @@ async function buildSession(args: {
 			});
 		},
 		async dispose() {
-			if (disposed) return;
-			disposed = true;
-			// pi awaits every handler it emits, so this runs the LOADED copy's
-			// own `session_shutdown` handler: its primary release, its registry
-			// deregistration, and its writer drain (the handler returns
-			// `bounded(flushAllNdjsonWriters(), …)`).
-			await session.extensionRunner.emit({
-				type: "session_shutdown",
-				reason: "quit",
-			} as never);
-			session.dispose();
-			// The same process-global writer map the loaded copy registered into:
-			// a second, test-side settle of the same sinks. It writes the same
-			// rows whether or not the emit above ran, so it is a belt, never the
-			// proof that the handler did (a case that proves the emit asserts a
-			// handler effect, not a log row).
-			await flushAllNdjsonWriters();
-			await drainBackgroundWritesForTests();
-			// Join the copy's queued registry mutations AND the sink rows those
-			// mutations log. #2146 keys the tail on `globalThis`, so this import
-			// joins the copy's own queue; without the join the deregistration
-			// write lands after `dispose()` returns and re-creates the removed
-			// fixture root — measured on this host, warm process: 5 of 5 runs,
-			// 5–8 ms after the removal, carrying `instances.json.locks/…`,
-			// `cascade.log` and `latency.log` (#4664 F7).
-			//
-			// TWO rounds, because a round joins only what is queued when it is
-			// called: the deregistration mutation logs its own sink rows, and the
-			// registry read taken inside it can queue the next mutation (the
-			// dead-pid prune). Measured the same way: one round still re-created
-			// the root in 1 of 5 runs, two rounds in 0 of 6.
-			for (let round = 0; round < 2; round += 1) {
-				await _settleRegistryMutationsForTests();
-				await flushAllNdjsonWriters();
-			}
+			await settle("quit");
 		},
 	};
 	// Registered the moment the session exists, BEFORE any assertion the case
@@ -626,6 +696,7 @@ export async function startPiSession(
 		root: options.root,
 		cwd,
 		agentDir,
+		sessionsDir,
 		responses: options.responses,
 		flags: options.flags ?? new Map(DEFAULT_FLAGS),
 		sessionManager: () => SessionManager.create(cwd, sessionsDir),
