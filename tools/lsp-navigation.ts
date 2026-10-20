@@ -46,10 +46,7 @@ import {
 } from "../clients/finding-delivery-gate.js";
 import { disabledPrimaries } from "../clients/lsp/session-roots.js";
 import { SYMBOL_KIND_NAMES } from "../clients/lsp-document-symbols.js";
-import {
-	detectPythonTargetVersion,
-	type PythonTargetVersion,
-} from "../clients/python-environment.js";
+import { detectPythonTargetVersion } from "../clients/python-environment.js";
 
 const VALID_OPERATIONS = [
 	"definition",
@@ -1370,17 +1367,21 @@ export function createLspNavigationTool(
 				// so every row passes the same finding policy as the path read and
 				// carries its age: nothing here re-checks the file.
 				// #4638: resolve each tracked file's declaration before the
-				// synchronous map below, which cannot await per row.
-				const pythonCompileTargets = new Map<
-					string,
-					PythonTargetVersion | undefined
-				>();
-				for (const trackedFile of allDiagnostics.keys()) {
-					pythonCompileTargets.set(
-						trackedFile,
-						await detectPythonTargetVersion(trackedFile),
-					);
-				}
+				// synchronous map below, which cannot await per row. The reads run
+				// concurrently, and the map is built back in key order so snapshot
+				// row order (and each row's own target) is unchanged.
+				const trackedFiles = [...allDiagnostics.keys()];
+				const trackedTargets = await Promise.all(
+					trackedFiles.map(async (trackedFile) =>
+						detectPythonTargetVersion(trackedFile),
+					),
+				);
+				const pythonCompileTargets = new Map(
+					trackedFiles.map(
+						(trackedFile, index) =>
+							[trackedFile, trackedTargets[index]] as const,
+					),
+				);
 				let snapshotSuppressed = 0;
 				const result = Array.from(allDiagnostics.entries()).map(
 					([trackedFile, { diags, ts }]) => {

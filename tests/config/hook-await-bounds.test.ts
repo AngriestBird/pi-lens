@@ -2587,7 +2587,11 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// pyrightconfig.json, `.python-version`); the tool handlers that call it
 	// carry their own signal, but this module is also imported directly by a
 	// hook handler, so hook-signal threading stays #2523 AC4.
-	"clients/python-environment.ts": 10,
+	// 10 -> 13: the declarer walk was split into one function per tier (Sonar
+	// S3776, cognitive complexity 35 -> under the limit), so the same five reads
+	// now cost three extra `await` expressions at the tier calls. No new I/O, no
+	// new unbounded operation; the probes themselves are unchanged.
+	"clients/python-environment.ts": 13,
 	"clients/quiet-window.ts": 6,
 	"clients/read-expansion.ts": 2,
 	// 5 -> 3 (#3612): `resolveReadGuardStartState`'s two sidecar awaits moved

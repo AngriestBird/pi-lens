@@ -19,12 +19,12 @@ import {
 import {
 	augmentPythonEnvironment,
 	detectPythonEnvironment,
-	detectPythonVenv,
 	PYTHON_COMPILE_VERDICT_SERVER_ID,
 	pythonEnvironmentToolCandidates,
 } from "../python-environment.js";
 
-export { detectPythonVenv };
+// Re-exported for the callers that ask this module for the venv probe (#4638).
+export { detectPythonVenv } from "../python-environment.js";
 import { STAGE_TMP_PATTERN } from "../atomic-write-staging.js";
 import {
 	DOTNET_CSHARP_ROOT_MARKERS,

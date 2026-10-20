@@ -440,8 +440,21 @@ interface DeclaredPythonVersion {
 	minor: number;
 }
 
+/** `<major>.<minor>` at the start of a version-ish text, with an optional `v`. */
+const BARE_VERSION_PREFIX = /^v?(\d+)\.(\d+)/i;
+/**
+ * Everything after that prefix: a patch, a pre-release tag, or a pyenv-style
+ * suffix (`3.10-pypy`). Measured separately so the whole reduction stays linear
+ * instead of backtracking over one ambiguous pattern.
+ */
+const VERSION_SUFFIX = /^[-+._a-z0-9]*$/i;
+/** A PEP 440 clause that carries an inclusive lower bound. */
+const SPECIFIER_LOWER_BOUND = /^(?:>=|==|~=)\s*v?(\d+)\.(\d+)/;
+/** Ruff's spelling of a syntax level (`py312`). */
+const RUFF_LEVEL = /^py(\d)(\d+)$/i;
+
 function reducePythonVersion(
-	match: RegExpMatchArray | null,
+	match: RegExpExecArray | null,
 ): DeclaredPythonVersion | undefined {
 	if (!match) return undefined;
 	return { major: Number(match[1]), minor: Number(match[2]) };
@@ -456,9 +469,11 @@ function reducePythonVersion(
 function reduceBarePythonVersion(
 	text: string,
 ): DeclaredPythonVersion | undefined {
-	return reducePythonVersion(
-		text.trim().match(/^v?(\d+)\.(\d+)(?:\.\d+)?[-+._a-z0-9]*$/i),
-	);
+	const trimmed = text.trim();
+	const prefix = BARE_VERSION_PREFIX.exec(trimmed);
+	if (!prefix) return undefined;
+	if (!VERSION_SUFFIX.test(trimmed.slice(prefix[0].length))) return undefined;
+	return reducePythonVersion(prefix);
 }
 
 /**
@@ -472,7 +487,7 @@ function reducePythonSpecifier(
 ): DeclaredPythonVersion | undefined {
 	for (const clause of text.split(",")) {
 		const lowerBound = reducePythonVersion(
-			clause.trim().match(/^(?:>=|==|~=)\s*v?(\d+)\.(\d+)/),
+			SPECIFIER_LOWER_BOUND.exec(clause.trim()),
 		);
 		if (lowerBound) return lowerBound;
 	}
@@ -483,7 +498,7 @@ function reducePythonSpecifier(
 function reduceRuffTargetVersion(
 	text: string,
 ): DeclaredPythonVersion | undefined {
-	return reducePythonVersion(text.trim().match(/^py(\d)(\d+)$/i));
+	return reducePythonVersion(RUFF_LEVEL.exec(text.trim()));
 }
 
 function withSource(
@@ -541,26 +556,23 @@ function parsePyrightJsonVersion(
 }
 
 /**
- * The declarations one directory can hold, probed in the documented order:
- * ruff `target-version`, pyright `pythonVersion`, `requires-python`, then
- * `.python-version`. Within a tier the nearest declaration wins, so the first
- * directory that declares anything answers for the file.
+ * Tier 1, ruff `target-version`. Ruff reads ONE config file per project:
+ * pyproject `[tool.ruff]`, else `.ruff.toml`, else `ruff.toml`. A file with no
+ * usable `target-version` ends the tier rather than falling through to a
+ * spelling ruff would ignore.
  */
-async function readPythonDeclarationInDirectory(
+async function readRuffTier(
 	dir: string,
+	pyproject: string | undefined,
+	pyprojectPath: string,
 ): Promise<PythonTargetVersion | undefined> {
-	const pyprojectPath = join(dir, "pyproject.toml");
-	const pyproject = await readDeclarationFile(pyprojectPath);
-	const ruffSection =
-		pyproject !== undefined && hasTomlTable(pyproject, "tool\\.ruff")
-			? extractTomlTableSection(pyproject, "tool\\.ruff")
+	const pyprojectRuff =
+		pyproject !== undefined && hasTomlTable(pyproject, String.raw`tool\.ruff`)
+			? extractTomlTableSection(pyproject, String.raw`tool\.ruff`)
 			: undefined;
 
-	// Ruff reads ONE config file per project: pyproject `[tool.ruff]`, else
-	// `.ruff.toml`, else `ruff.toml`. A file with no usable `target-version` ends
-	// the ruff tier rather than falling through to a spelling ruff would ignore.
-	let ruffFile = ruffSection !== undefined ? pyprojectPath : undefined;
-	let ruffContent = ruffSection;
+	let ruffFile = pyprojectRuff !== undefined ? pyprojectPath : undefined;
+	let ruffContent = pyprojectRuff;
 	if (ruffFile === undefined) {
 		for (const name of [".ruff.toml", "ruff.toml"]) {
 			const candidatePath = join(dir, name);
@@ -571,65 +583,97 @@ async function readPythonDeclarationInDirectory(
 			break;
 		}
 	}
-	if (ruffFile !== undefined && ruffContent !== undefined) {
-		const target = parseTomlScalarString(ruffContent, "target-version");
-		const resolved = withSource(
-			target ? reduceRuffTargetVersion(target) : undefined,
-			"ruff-target-version",
-			ruffFile,
-		);
-		if (resolved) return resolved;
-	}
+	if (ruffFile === undefined || ruffContent === undefined) return undefined;
+	const target = parseTomlScalarString(ruffContent, "target-version");
+	return withSource(
+		target ? reduceRuffTargetVersion(target) : undefined,
+		"ruff-target-version",
+		ruffFile,
+	);
+}
 
-	const pyrightConfigPath = join(dir, "pyrightconfig.json");
-	const pyrightConfig = await readDeclarationFile(pyrightConfigPath);
-	if (pyrightConfig !== undefined) {
-		const resolved = withSource(
-			parsePyrightJsonVersion(pyrightConfig),
+/**
+ * Tier 2, pyright `pythonVersion`. pyright's own config file outranks
+ * `[tool.pyright]`, and only one of the two is read.
+ */
+async function readPyrightTier(
+	dir: string,
+	pyproject: string | undefined,
+	pyprojectPath: string,
+): Promise<PythonTargetVersion | undefined> {
+	const configPath = join(dir, "pyrightconfig.json");
+	const config = await readDeclarationFile(configPath);
+	if (config !== undefined) {
+		return withSource(
+			parsePyrightJsonVersion(config),
 			"pyright-python-version",
-			pyrightConfigPath,
+			configPath,
 		);
-		if (resolved) return resolved;
-	} else if (pyproject !== undefined) {
-		const section = extractTomlTableSection(pyproject, "tool\\.pyright");
-		const raw = section
-			? parseTomlScalarString(section, "pythonVersion")
+	}
+	if (pyproject === undefined) return undefined;
+	const section = extractTomlTableSection(pyproject, String.raw`tool\.pyright`);
+	const raw = section
+		? parseTomlScalarString(section, "pythonVersion")
+		: undefined;
+	return withSource(
+		raw ? reduceBarePythonVersion(raw) : undefined,
+		"pyright-python-version",
+		pyprojectPath,
+	);
+}
+
+/** Tier 3, `requires-python` reduced to its lower bound. */
+function readRequiresPythonTier(
+	pyproject: string | undefined,
+	pyprojectPath: string,
+): PythonTargetVersion | undefined {
+	if (pyproject === undefined) return undefined;
+	const projectSection = extractTomlTableSection(pyproject, "project");
+	const raw =
+		projectSection !== undefined
+			? parseTomlScalarString(projectSection, "requires-python")
 			: undefined;
-		const resolved = withSource(
-			raw ? reduceBarePythonVersion(raw) : undefined,
-			"pyright-python-version",
-			pyprojectPath,
-		);
-		if (resolved) return resolved;
-	}
+	return withSource(
+		raw ? reducePythonSpecifier(raw) : undefined,
+		"requires-python",
+		pyprojectPath,
+	);
+}
 
-	if (pyproject !== undefined) {
-		const projectSection = extractTomlTableSection(pyproject, "project");
-		const raw =
-			projectSection !== undefined
-				? parseTomlScalarString(projectSection, "requires-python")
-				: undefined;
-		const resolved = withSource(
-			raw ? reducePythonSpecifier(raw) : undefined,
-			"requires-python",
-			pyprojectPath,
-		);
-		if (resolved) return resolved;
-	}
+/** Tier 4, the first line of `.python-version`. */
+async function readVersionFileTier(
+	dir: string,
+): Promise<PythonTargetVersion | undefined> {
+	const levelFilePath = join(dir, ".python-version");
+	const content = await readDeclarationFile(levelFilePath);
+	if (content === undefined) return undefined;
+	const firstLine = (content.split(/\r?\n/, 1)[0] ?? "").trim();
+	return withSource(
+		reduceBarePythonVersion(firstLine),
+		"python-version-file",
+		levelFilePath,
+	);
+}
 
-	const versionFilePath = join(dir, ".python-version");
-	const versionFile = await readDeclarationFile(versionFilePath);
-	if (versionFile !== undefined) {
-		const firstLine = (versionFile.split(/\r?\n/, 1)[0] ?? "").trim();
-		const resolved = withSource(
-			reduceBarePythonVersion(firstLine),
-			"python-version-file",
-			versionFilePath,
-		);
-		if (resolved) return resolved;
-	}
+/**
+ * The declarations one directory can hold, probed in the documented order:
+ * ruff `target-version`, pyright `pythonVersion`, `requires-python`, then
+ * `.python-version`. Within a tier the nearest declaration wins, so the first
+ * directory that declares anything answers for the file. `??` keeps the tiers
+ * sequential: each is only read when the one before it declared nothing.
+ */
+async function readPythonDeclarationInDirectory(
+	dir: string,
+): Promise<PythonTargetVersion | undefined> {
+	const pyprojectPath = join(dir, "pyproject.toml");
+	const pyproject = await readDeclarationFile(pyprojectPath);
 
-	return undefined;
+	return (
+		(await readRuffTier(dir, pyproject, pyprojectPath)) ??
+		(await readPyrightTier(dir, pyproject, pyprojectPath)) ??
+		readRequiresPythonTier(pyproject, pyprojectPath) ??
+		(await readVersionFileTier(dir))
+	);
 }
 
 /**
