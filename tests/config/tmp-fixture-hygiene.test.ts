@@ -1271,7 +1271,13 @@ describe("tmp-fixture-hygiene", () => {
 	// `DefaultResourceLoader`, and asserts the tmp root gained nothing: the pin
 	// assertion is unconditional, and the snapshot comparison binds on a root
 	// without a pre-existing `jiti` (the same condition the pair itself needs,
-	// since a directory already present is in the run's baseline).
+	// since a directory already present is in the run's baseline). The
+	// comparison judges the SAME population the file's census judges: entries a
+	// creator is on record for (`judgedTmpRootWrites`, read after the load).
+	// The raw widened list also carries entries a child process wrote, and
+	// asserting that would red this case on a foreign `jiti`-class cache
+	// directory while blaming the load -- the #4673 false red, in the fix's own
+	// regression test.
 	it("keeps a by-path extension load out of the tmp root (#4673)", async () => {
 		expect(process.env.JITI_FS_CACHE).toBe("0");
 		expect(process.env.JITI_CACHE).toBe("0");
@@ -1282,7 +1288,7 @@ describe("tmp-fixture-hygiene", () => {
 		// `additionalExtensionPaths` / a manifest `pi.extensions`.
 		const entry = path.join(env.tmpDir, "extension.js");
 		fs.writeFileSync(entry, "export default function () { return {}; }\n");
-		const before = [...(tmpHygieneTmpRootWrites() ?? [])].sort();
+		const rawBefore = tmpHygieneTmpRootWrites() ?? [];
 		try {
 			const loader = new DefaultResourceLoader({
 				cwd: env.tmpDir,
@@ -1294,7 +1300,18 @@ describe("tmp-fixture-hygiene", () => {
 			// loader, so the jiti instance this case is about was constructed.
 			expect(loader.getExtensions().errors).toEqual([]);
 			expect(loader.getExtensions().extensions).toHaveLength(1);
-			const after = [...(tmpHygieneTmpRootWrites() ?? [])].sort();
+			// Read the creator record AFTER the load, never before: the write this
+			// case is about is registered BY the load, so a before-time snapshot
+			// filters `jiti` out and the comparison would pass over the very
+			// entry it exists to catch. Both lists take the file's own judgment,
+			// so an entry a CHILD process wrote (no creator on record) is
+			// observed on the census line, never blamed on the load.
+			const creators = censusTmpRootCreators();
+			const before = judgedTmpRootWrites(rawBefore, creators).sort();
+			const after = judgedTmpRootWrites(
+				tmpHygieneTmpRootWrites() ?? [],
+				creators,
+			).sort();
 			expect(
 				after,
 				`[tmp-hygiene] a by-path extension load wrote ${after

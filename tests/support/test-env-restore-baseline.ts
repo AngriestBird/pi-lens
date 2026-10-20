@@ -1,5 +1,5 @@
 /**
- * #4589 baseline: the env writes already leaking on master, admitted so the sweep is a ratchet, not a mass edit.
+ * #4589 baseline: env writes no restore provably covers, admitted so the sweep is a ratchet, not a mass edit. Rows are the leaks master already had, plus rows a change adds where a restore would re-arm the defect its write pins.
  *
  * A row is `<file>:<key>`, keyed on file and environment key,
  * never on line. It means "this write is not PROVABLY restored
