@@ -345,6 +345,10 @@ const lspSpawnHeavyInclude = [
 	// #4248: the unknown-trust project-local binary witness resolves a real
 	// PATH entry through launchLSP; keep that child-spawn boundary phased here.
 	"tests/clients/lsp/service-project-trust.test.ts",
+	// #4532 gap 9: the server's own view of what it was sent only exists on a
+	// real stdio wire to a real fake-server child; the initialize handshake is
+	// the same #1022/#2332 shape as its lane siblings.
+	"tests/clients/lsp/touch-debounce-content-gate.test.ts",
 	// #4299: real wrapper compiler-resolution security witness.
 	"tests/clients/lsp/tsserver-project-trust-wire.test.ts",
 	// #4320: the watched-files wire frames only exist on a real stdio connection
@@ -416,6 +420,11 @@ const lspSpawnHeavyInclude = [
 	// initialize handshake plus a two-publish diagnostics sequence per case —
 	// the same #1022/#2332 contention class as its lane siblings.
 	"tests/tools/lsp-diagnostics-empty-first-publish-3310.test.ts",
+	// #4636: the production lsp_diagnostics handler and LSPService over a real
+	// stdio fake-server child (a project custom server for `.json`), reading the
+	// announced `languageId` off the wire after a real handshake and a
+	// diagnostics round like its lane siblings.
+	"tests/tools/lsp-diagnostics-jsonc-language-id-4636.test.ts",
 	// #4322: the production lsp_diagnostics handler, LSPService and the dispatch
 	// LSP runner beside a real stdio fake-server child (the typos auxiliary)
 	// whose primary cannot start; waits on a real handshake like #4346's.
@@ -492,6 +501,9 @@ export const wallClockBudgetInclude = [
 	"tests/clients/config-diagnostic-codes.test.ts",
 	"tests/clients/dispatch/runners/ast-grep-playground-verify.test.ts",
 	"tests/clients/dispatch/runners/ast-grep-rule-ignores.test.ts",
+	// #4522: the git-ignored census reads git's own tracked-versus-ignored
+	// answer through a real `git ls-files` child (flake-shape admission).
+	"tests/clients/dispatch/smoke-fixture-coverage.test.ts",
 	// #4321: the real Biome binary's 80-column wrapping is the subject (flake-shape admission).
 	"tests/clients/format-service-tab-width-real-biome.test.ts",
 	"tests/clients/git-tracked-ignore.test.ts",
@@ -588,6 +600,10 @@ export const wallClockBudgetInclude = [
 	// #3511 review round 3: the quick-mode warmup witness joins session_start's
 	// background save with vi.waitFor (flake-shape admission).
 	"tests/clients/word-index-lifecycle.test.ts",
+	// #4583: the cold build is fire-and-forget (`triggerBackgroundWordIndexBuild`
+	// returns a status, not a joinable), so the witness joins the snapshot it
+	// publishes with a real-time vi.waitFor (flake-shape admission).
+	"tests/clients/word-index.test.ts",
 	// #2603 (was #2591 review round 2, F1): the workspace-member matcher's
 	// budget asserts a real elapsed-time bound through detectPythonEnvironment;
 	// the defect it pins is wall-clock (2^N regex backtracking on an interleaved
@@ -608,6 +624,10 @@ export const wallClockBudgetInclude = [
 	"tests/config/strictness-ratchet.test.ts",
 	"tests/config/tracked-control-bytes.test.ts",
 	"tests/config/workflow-writers-governance.test.ts",
+	// #4504: a real linked worktree (`git worktree add`) and the real
+	// tool_call/tool_result seams that key the opaque prescan (flake-shape
+	// admission); the git children ride along in the serialized lane.
+	"tests/index-4504-opaque-prescan-root-witness.test.ts",
 	"tests/mcp/session-end.smoke.test.ts",
 	// published-manifest guard runs the real `npm pack` (flake-shape admission).
 	"tests/packaging-pack-manifest.test.ts",
@@ -791,6 +811,10 @@ export const wallClockBudgetInclude = [
 	// so the pool's SIGTERM of each fixture fork and a real hook timeout are
 	// what the file observes (flake-shape admission).
 	"tests/support/vitest-setup-registry-teardown.test.ts",
+	// #4583: same fire-and-forget cold build as its clients sibling above; the
+	// pi-tool witness joins it with a real-time vi.waitFor (flake-shape
+	// admission).
+	"tests/tools/symbol-search.test.ts",
 ];
 
 // #2912: the tmp-fixture governance sweep compares the real process-wide
@@ -841,6 +865,12 @@ export default defineConfig({
 					setupFiles: sharedSetupFiles,
 					maxWorkers: sharedMaxWorkers,
 					execArgv: sharedExecArgv,
+					// #4634: the only project without this field, so its hooks ran on
+					// vitest's 10 s default while every sibling project and the
+					// documented invariant (`tests/support/vitest-setup.ts`) say 60 s.
+					// `availability-policy-coverage.test.ts`' whole-clients scan costs
+					// ~9.9 s in `beforeAll` here and timed out at load 52.
+					hookTimeout: 60_000,
 					// Vitest 4 requires distinct groupOrder whenever projects have
 					// different `maxWorkers` — see the "grammar-heavy" project below
 					// for why that's actually desirable here, not just a workaround.

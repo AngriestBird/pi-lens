@@ -178,7 +178,9 @@ export interface LSPWorkspaceScopeAttribution {
 import { raceToCompletion, type PromiseDescriptor } from "./aggregation.js";
 import {
 	applyWorkspaceEdit,
+	captureRenameExpectedContent,
 	mergeWorkspaceTextEditsByPriority,
+	type RenameTrackedSend,
 	summarizeWorkspaceEdit,
 	validateWorkspaceEdit,
 } from "./edits.js";
@@ -291,11 +293,25 @@ const NAV_CLIENT_WAIT_TIMEOUT_MS = Math.max(
 	Number.parseInt(process.env.PI_LENS_LSP_NAV_CLIENT_WAIT_MS ?? "1500", 10) ||
 		1500,
 );
+/**
+ * #4532 gap 9: the touch debounce's ONLY remaining job is to switch the skip
+ * off (`0` disables it). It no longer bounds how long an entry stays useful,
+ * because the gate decides by the client's content record, not by elapsed
+ * time — see `shouldSkipNotify`. Kept as one identity for the switch and the
+ * container bound so a deployment that turns the feature off gets no skips at
+ * all.
+ */
 const TOUCH_DEBOUNCE_MS = Math.max(
 	0,
 	Number.parseInt(process.env.PI_LENS_LSP_TOUCH_DEBOUNCE_MS ?? "1500", 10) ||
 		1500,
 );
+/**
+ * #4532 gap 9 F4: the per-server touch-record cap. Entries are per
+ * (file, server), so the cap is per ENTRY; 800 keeps the file capacity the
+ * file-level key gave a multi-server scope.
+ */
+const RECENT_TOUCH_CAP = 800;
 const SCOPED_DEPENDENCY_TOUCH_MAX = 32;
 // #1621: the rename-propagation notifies (`didClose` ahead of the rename,
 // `workspace/didRenameFiles` after) share the exit-notify defect #1620 fixed —
@@ -1217,8 +1233,27 @@ export class LSPService {
 	 * The drift sweep compares disk (size, mtime) against these records and
 	 * resynchronizes anything an untracked edit moved behind the server's back.
 	 * See `document-drift.ts` for the key design and the pacing rules.
+	 *
+	 * #4503: the tracker is told which documents a live server still holds, so
+	 * its cap never evicts the record of one — that record is the only thing
+	 * comparing the server's stale view against disk. The same answer feeds the
+	 * per-pass drop, from this one wiring point, so eviction and the sweep can
+	 * never disagree.
 	 */
-	private readonly documentDrift = new DocumentDriftTracker();
+	private readonly documentDrift = new DocumentDriftTracker({
+		holdsDocument: (filePath) => this.hasLiveClientHoldingDocument(filePath),
+		onCapOverflow: ({ tracked, cap }) => {
+			// Bounded: at most one row per session, emitted when the tracked set
+			// first stands above the cap because every record is still held.
+			logLatency({
+				type: "phase",
+				phase: "lsp_document_drift_cap",
+				filePath: "",
+				durationMs: 0,
+				metadata: { tracked, cap },
+			});
+		},
+	});
 	/**
 	 * #1095: lazily verifies a stored {@link DiagnosticBinding} against current
 	 * disk bytes, memoizing the disk fingerprint per (file, mtime) so repeated
@@ -1256,17 +1291,16 @@ export class LSPService {
 	 * touch re-push the bytes the post-write sync or the MCP analysis had just
 	 * pushed as "primary", clearing the diagnostics of every edit.
 	 *
-	 * #3405: `saved` records whether that landed push carried a save. A save
-	 * rides on its push, so an entry without one does not cover a later saved
-	 * touch of the same bytes (see `saveDebouncedPush`).
+	 * #4532 gap 9: an entry is EVIDENCE the gate keeps using, whatever its age
+	 * — the verdict reads the client's record, not the clock. Trimming one
+	 * therefore costs a redundant didChange (no entry means the gate pushes),
+	 * which is why the trim drops the oldest entries first.
 	 */
 	private readonly recentTouches = new Map<
 		string,
 		{
-			fingerprint: string;
 			touchedAt: number;
 			client: WeakRef<LSPClientInfo>;
-			saved: boolean;
 		}
 	>();
 	/**
@@ -1569,7 +1603,7 @@ export class LSPService {
 	 */
 	private shouldSkipTouch(
 		filePath: string,
-		contentFingerprint: () => string,
+		sentContentHash: string,
 		waitForDiagnostics: boolean,
 		spawned: readonly SpawnedServer[],
 	): boolean {
@@ -1581,7 +1615,7 @@ export class LSPService {
 		return spawned.every((entry) =>
 			this.shouldSkipNotify(
 				filePath,
-				contentFingerprint,
+				sentContentHash,
 				entry.info.id,
 				entry.client,
 			),
@@ -1590,8 +1624,8 @@ export class LSPService {
 
 	/**
 	 * Should the didOpen/didChange notify be skipped while keeping the
-	 * waitForDiagnostics step? True when the same content was already pushed
-	 * recently. Skipping the notify avoids the diagnostic-cache clear that
+	 * waitForDiagnostics step? True when the server already holds exactly these
+	 * bytes. Skipping the notify avoids the diagnostic-cache clear that
 	 * notify.open does, so the LSP doesn't restart computation it already
 	 * finished for the first push.
 	 *
@@ -1601,12 +1635,38 @@ export class LSPService {
 	 * second call's notify clears in-progress diagnostics and the LSP has to
 	 * start over — observed as multi-second waits on slow TS projects.
 	 *
+	 * ONE RULE (#4532 gap 9): skip only when the bytes the server will hold once
+	 * this document's notify queue drains are exactly this touch's content. The
+	 * elapsed window is not evidence about content, so it never decides.
+	 *
+	 * Three facts answer that one question, and only two of them are read here:
+	 *
+	 * - the client's record of the payload it last sent (`getSentContent`). A
+	 *   document with no record (never opened, closed since, or a replacement
+	 *   instance) holds nothing, so it is always pushed;
+	 * - the path's notify queue (`hasNotifyInFlight`). The record reports what
+	 *   LANDED; while a CONTENT send for this path is running or queued, that
+	 *   send is what the server ends on, so the record is not yet the answer. A
+	 *   skip taken then loses the race and leaves the server holding the other
+	 *   bytes (F1). A save-only send (round 4) writes no content and closes
+	 *   nothing, so it is not one of these: the record is already the final
+	 *   state, and counting the save would re-push identical bytes and clear the
+	 *   cached diagnostics;
+	 * - the save mark (`getSentContent().savedHash`), read by `saveDebouncedPush`
+	 *   rather than here: a skip sends no content, so it owes the save its own
+	 *   content identity requires (F2).
+	 *
+	 * A client that cannot answer the first two fails CLOSED. An unknown record
+	 * or an unknown queue is an unknown final state, and the pre-#4532 gate that
+	 * used to decide here is one `GateWindowReopen` proves can leave a server
+	 * holding no document at all for a file on disk (`formal/lsp-server-content`).
+	 *
 	 * Decided PER SERVER (#743): a sibling's stalled write must not cost this
 	 * server its debounce. See {@link recentTouches}.
 	 */
 	private shouldSkipNotify(
 		filePath: string,
-		contentFingerprint: () => string,
+		sentContentHash: string,
 		serverId: string,
 		client: LSPClientInfo,
 	): boolean {
@@ -1615,8 +1675,6 @@ export class LSPService {
 			this.recentTouchKey(filePath, serverId),
 		);
 		if (!previous) return false;
-		const now = Date.now();
-		if (now - previous.touchedAt > TOUCH_DEBOUNCE_MS) return false;
 		// #3501: another client instance (a respawn, a replacement after an
 		// eviction) was never sent this content, whatever its predecessor held.
 		if (previous.client.deref() !== client) return false;
@@ -1631,7 +1689,18 @@ export class LSPService {
 		) {
 			return false;
 		}
-		return previous.fingerprint === contentFingerprint();
+		// F3: `getSentContent` is optional only so a client shape that cannot
+		// report a record can exist at all. Such a client, and one that reports
+		// no record for this document, are both "not known to hold these bytes".
+		const sentContent = client.getSentContent?.(filePath);
+		if (sentContent === undefined || sentContent.hash !== sentContentHash) {
+			return false;
+		}
+		// F1: the record is final only with no content send left to come. Absent
+		// `hasNotifyInFlight` is not "idle" — it is an unanswerable question.
+		// Round 4: that answer counts content sends only; a running save leaves
+		// the record final, so it still skips here.
+		return client.hasNotifyInFlight?.(filePath) === false;
 	}
 
 	/**
@@ -1646,23 +1715,50 @@ export class LSPService {
 	 * push carried none and the server declared `save`. Not awaited: a
 	 * notification has no answer, and the path's queue may hold a running push.
 	 * Returns the server id when a save was queued.
+	 *
+	 * #4532 gap 9 round 7: only the client's send continuation records a landed
+	 * save. Pending saves carry no evidence; queued duplicates check that same
+	 * record when they run. A failed standalone save gets one bounded retry.
 	 */
 	private saveDebouncedPush(
 		filePath: string,
 		entry: SpawnedServer,
 		saved: boolean,
+		sentContentHash: string,
+		retryOnFailure = true,
 	): string | undefined {
 		if (!saved) return undefined;
 		const previous = this.recentTouches.get(
 			this.recentTouchKey(filePath, entry.info.id),
 		);
-		if (!previous || previous.saved) return undefined;
+		// F2: the mark names the content its save went out for. A save the server
+		// already received for THESE bytes owes none; a save it received for
+		// other bytes does not count, whichever writer advanced the record.
+		if (
+			!previous ||
+			entry.client.getSentContent?.(filePath)?.savedHash === sentContentHash
+		)
+			return undefined;
 		if (entry.client.getSaveOptions?.() === undefined) return undefined;
 		const save = entry.client.notify.save;
 		if (!save) return undefined;
-		// Marked before the send: a second saved touch of these bytes owes none.
-		previous.saved = true;
-		void save.call(entry.client.notify, filePath).catch(() => {});
+		const recover = () => {
+			if (retryOnFailure) {
+				this.saveDebouncedPush(filePath, entry, true, sentContentHash, false);
+				return;
+			}
+			// The bound is spent: no later attempt is made for these bytes, so the
+			// save a save-triggered server needed is not coming from this touch.
+			recordDegradationOnce({
+				kind: "lsp-did-save-recovery-exhausted",
+				subject: entry.info.id,
+				reason: "a standalone didSave and its one retry both sent nothing",
+				metadata: { filePath },
+			});
+		};
+		void save.call(entry.client.notify, filePath, true).then((sent) => {
+			if (sent === false) recover();
+		}, recover);
 		return entry.info.id;
 	}
 
@@ -1672,30 +1768,26 @@ export class LSPService {
 
 	private markTouched(
 		filePath: string,
-		contentFingerprint: string,
 		serverId: string,
 		client: LSPClientInfo,
-		saved: boolean,
 	): void {
 		const key = this.recentTouchKey(filePath, serverId);
-		const now = Date.now();
+		// Re-inserted, so Map order is recency order and the trim below is
+		// oldest-first. A key that stays put would read as old and be trimmed
+		// while its entry is the freshest.
+		this.recentTouches.delete(key);
 		this.recentTouches.set(key, {
-			fingerprint: contentFingerprint,
-			touchedAt: now,
+			touchedAt: Date.now(),
 			client: new WeakRef(client),
-			saved,
 		});
-		// Trim entries that are already past the debounce window — shouldSkipTouch
-		// ignores them anyway, so they serve no purpose. Only sweep when the map
-		// exceeds the threshold to avoid iterating on every call. The threshold is
-		// per-ENTRY and entries are now per-server, so it is scaled up to keep the
-		// same effective file capacity a file-level key gave a multi-server scope.
-		if (this.recentTouches.size > 800) {
-			for (const [k, v] of this.recentTouches) {
-				if (now - v.touchedAt > TOUCH_DEBOUNCE_MS) {
-					this.recentTouches.delete(k);
-				}
-			}
+		// F4: trim by COUNT, oldest first. Age decides nothing about whether an
+		// entry is useful now, and a trimmed entry costs exactly one redundant
+		// didChange — the re-push this gate exists to avoid. Only sweep above the
+		// cap, so the hot path does not iterate per touch.
+		while (this.recentTouches.size > RECENT_TOUCH_CAP) {
+			const oldest = this.recentTouches.keys().next();
+			if (oldest.done) break;
+			this.recentTouches.delete(oldest.value);
 		}
 	}
 
@@ -2659,15 +2751,7 @@ export class LSPService {
 	getTrackedContent(
 		filePath: string,
 		cwd: string,
-	):
-		| {
-				hash: string;
-				changedAtMs?: number | undefined;
-				openedAtMs?: number | undefined;
-				openedHash?: string | undefined;
-				clientStartedAtMs?: number | undefined;
-		  }
-		| undefined {
+	): RenameTrackedSend | undefined {
 		const priorityServerIds = getServersForFileWithConfig(filePath).map(
 			(server) => server.id,
 		);
@@ -3721,8 +3805,9 @@ export class LSPService {
 						fingerprintDocumentContent(content)
 					);
 				},
-				holdsDocument: (filePath) =>
-					this.hasLiveClientHoldingDocument(filePath),
+				// #4503: the tracker's own `holdsDocument` answers this same question
+				// (wired once, where the tracker is built), so the pass does not repeat
+				// the wiring here.
 				onDrift: (event) => {
 					// A clean re-stamp, a deleted file and a closed document are all
 					// normal bookkeeping, not degradations. Only a real resync — or a
@@ -4173,15 +4258,19 @@ export class LSPService {
 			if (
 				this.shouldSkipTouch(
 					filePath,
-					contentFingerprint,
+					contentHash,
 					diagnosticsMode !== "none",
 					spawned,
 				)
 			) {
 				const savedServerIds = spawned.flatMap(
 					(entry) =>
-						this.saveDebouncedPush(filePath, entry, options.saved === true) ??
-						[],
+						this.saveDebouncedPush(
+							filePath,
+							entry,
+							options.saved === true,
+							contentHash,
+						) ?? [],
 				);
 				logLatency({
 					type: "phase",
@@ -4222,7 +4311,7 @@ export class LSPService {
 					.filter((entry) =>
 						this.shouldSkipNotify(
 							filePath,
-							contentFingerprint,
+							contentHash,
 							entry.info.id,
 							entry.client,
 						),
@@ -4235,8 +4324,12 @@ export class LSPService {
 			// goes alone (`saveDebouncedPush`).
 			const savedServerIds = spawned.flatMap((entry) =>
 				notifySkippedServerIds.has(entry.info.id)
-					? (this.saveDebouncedPush(filePath, entry, options.saved === true) ??
-						[])
+					? (this.saveDebouncedPush(
+							filePath,
+							entry,
+							options.saved === true,
+							contentHash,
+						) ?? [])
 					: [],
 			);
 			// #1531: the pre-notify diagnostics baseline for THIS file on each client.
@@ -4565,13 +4658,7 @@ export class LSPService {
 							// re-pushes it instead of laundering the failure into a later
 							// touch that looks fully delivered (which the silent-clean gates
 							// would then read as a confirmed clean).
-							this.markTouched(
-								filePath,
-								contentFingerprint(),
-								entry.info.id,
-								entry.client,
-								options.saved === true,
-							);
+							this.markTouched(filePath, entry.info.id, entry.client);
 						} else if (wrote === false) {
 							// #3481: the server does not hold `content` (a later read, a
 							// closing/closed path, or a dead client, #3543), so no debounce
@@ -7678,6 +7765,12 @@ export class LSPService {
 			return false;
 		});
 
+		// #3734: the instant the servers are asked. Every file a returned edit
+		// writes text to must still hold the bytes each server computed from; a
+		// write that lands from here on is refused inside pi's queue, before any
+		// write. The same instant the `rename` path takes before its request
+		// (#3601); see `captureRenameExpectedContent` for the rules.
+		const renameRequestedAtMs = Date.now();
 		const willResults = await Promise.all(
 			willRenameClients.map(async ({ serverId, client }) => {
 				try {
@@ -7727,6 +7820,17 @@ export class LSPService {
 				mutationContext: options.mutationContext,
 				observe: false,
 				watchedFileSink: this,
+				// #3734: nothing read the old path on this flow, so there is no
+				// target: every text-edited file is bound by its client's send record,
+				// else by its mtime against the instant above (`formal/lsp-rename-edit`,
+				// `Issue3734Bound`).
+				expectedContent: captureRenameExpectedContent(
+					merged.edit,
+					cwd,
+					renameRequestedAtMs,
+					(filePath: string, atCwd: string) =>
+						this.getTrackedContent(filePath, atCwd),
+				),
 			});
 		} catch (err) {
 			if (options.mutationContext) {

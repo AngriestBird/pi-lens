@@ -9,13 +9,13 @@ import { evaluateGitGuard, isGitCommitOrPushAttempt } from "./git-guard.js";
 import { dropHashlineAnchorMemo } from "./hashline-anchor.js";
 import { evaluateSharedCheckoutGuard } from "./shared-checkout-guard.js";
 import { logLatency } from "./latency-logger.js";
-import { toPosix } from "./path-utils.js";
 import {
 	captureFileStats,
 	getOpaqueBaselineStore,
 	headRecordKey,
 	isGitWorktree,
 	opaqueBaselineSlot,
+	opaquePrescanRoot,
 	shouldRunOpaqueRecovery,
 	type PendingOpaqueBaseline,
 } from "./opaque-mutation-scan.js";
@@ -51,10 +51,9 @@ import {
 } from "./oldtext-autopatch.js";
 import { applyPartiallyApplicableEdits } from "./partial-edit-apply.js";
 import {
-	type HostPathVariantResolution,
 	isExternalOrVendorFile,
-	resolveHostPathVariants,
-	resolveHostToolPath,
+	resolveToolCallFilePath,
+	toPosix,
 } from "./path-utils.js";
 import {
 	EXPANSION_BUDGET_MS,
@@ -203,48 +202,6 @@ function retireAstGrepApplyTargets(
 	runtime.readGuard?.noteCheckedPaths?.(
 		resolveToolCallCorrelationId(event),
 		checked,
-	);
-}
-
-/**
- * Resolve a tool_call's raw path to the file pi will actually touch.
- *
- * The `cwd` basis is the host `ctx.cwd`, which for the pinned host IS the same
- * value the tools were constructed with — `AgentSession` passes its one `_cwd`
- * to both `createAllToolDefinitions`
- * (`@earendil-works/pi-coding-agent/dist/core/agent-session.js:2026`, source
- * `src/core/tools/index.ts:99-124`) and the `ExtensionRunner` behind `ctx.cwd`
- * (`dist/core/agent-session.js:2037`; `runner.js:154`, `:476-479`). Neither is
- * reassigned after construction, so there is no drift TODAY (#1655 item 4).
- * `tests/clients/pi-host-contract.test.ts` pins that, because the day a host
- * lets one move independently, every path here silently retargets.
- *
- * The path is produced the way pi produces it, in pi's two stages (#1655 item
- * 5, plus review F1):
- *
- *   1. `resolveHostToolPath` mirrors pi's BASE resolution, `resolveToCwd`
- *      (`dist/core/tools/path-utils.js:42-44`, source
- *      `src/core/tools/path-utils.ts:~44-46`) — unicode-space folding, `@`
- *      prefix stripping, `~` expansion, `file://` conversion, and Git-Bash
- *      drive paths, all BEFORE anything is probed.
- *   2. `resolveHostPathVariants` mirrors pi's fallback LADDER
- *      (`dist/core/tools/path-utils.js:45-70`, source
- *      `src/core/tools/path-utils.ts:52-83`).
- *
- * Stage 1 was missing in the first cut of this fix, and the ladder cannot
- * stand in for it: an `@`-prefixed path, a `file://` URL, or a non-breaking
- * space are all resolved by pi at stage 1 and are untouched by any of the four
- * stage-2 candidates. A plain `path.resolve` therefore produced a path pi
- * never opens, and the miss looked identical to "file genuinely absent".
- */
-function resolveToolCallFilePath(
-	rawFilePath: string | undefined,
-	cwd: string | undefined,
-	projectRoot: string,
-): HostPathVariantResolution | undefined {
-	if (!rawFilePath) return undefined;
-	return resolveHostPathVariants(
-		resolveHostToolPath(rawFilePath, cwd ?? projectRoot),
 	);
 }
 
@@ -624,7 +581,10 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 	// starts from, without which the first move of a session would read as a
 	// first sight at its tool_result. Reading HEAD is a file read; the bound
 	// ends the wait, and a cut look writes a `hook-await-exceeded` row.
-	const headRoot = ctx.cwd ?? runtime.projectRoot;
+	// #4504 r1: the head-move record resolves its root through the same owner as
+	// the opaque baseline slot, so a concurrent secondary's (#473) `tool_result`
+	// take finds the look this hook recorded.
+	const headRoot = opaquePrescanRoot(ctx.cwd, runtime.projectRoot);
 	if (headRoot)
 		await bounded(
 			resyncHeadMove({
@@ -635,6 +595,7 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 				),
 				trigger: "tool_call",
 				label: toolName,
+				runtime,
 			}),
 			{
 				ms: HOOK_WALL_BUDGET_MS.tool_result_read_only,
@@ -662,7 +623,10 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 			))
 				runtime.readGuard?.retireChangedAuthorship?.(target);
 		if (typeof commandInput?.command === "string" && commandInput.command) {
-			const scanRoot = ctx.cwd ?? runtime.projectRoot;
+			// #4504: the record and the take resolve their root through one
+			// owner, so a session whose cwd is not the coordinator's project root
+			// (a concurrent secondary, #473) cannot key the two lookups apart.
+			const scanRoot = opaquePrescanRoot(ctx.cwd, runtime.projectRoot);
 			if (scanRoot && shouldRunOpaqueRecovery(toolName, scanRoot)) {
 				const started = Date.now();
 				const baselineSlot = opaqueBaselineSlot(

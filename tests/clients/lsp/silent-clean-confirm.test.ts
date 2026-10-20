@@ -20,6 +20,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { hashDiagnosticContent } from "../../../clients/lsp/diagnostic-binding.js";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
 import { removeTempDirSync } from "../test-utils.js";
 
@@ -50,6 +51,14 @@ function makeServer(id: string, ext: string, root: string) {
  */
 function makeSilentPushOnlyClient(serverId: string, root: string) {
 	const waitCalls: Array<{ filePath: string; ms: number }> = [];
+	// #4532 gap 9: the double answers the touch gate the way a real client does.
+	// `sent` is the record its own `notify.open` builds; a case that replaces
+	// `notify.open` with its own fake must write the record itself (see the
+	// "#1253" block). The double holds no queue, so nothing is in flight.
+	const sent = new Map<string, { hash: string }>();
+	const open = vi.fn(async (filePath: string, content: string) => {
+		sent.set(filePath, { hash: hashDiagnosticContent(content) });
+	});
 	return {
 		client: {
 			isAlive: () => true,
@@ -65,7 +74,9 @@ function makeSilentPushOnlyClient(serverId: string, root: string) {
 			getLaunchVariant: () => undefined,
 			serverId,
 			root,
-			notify: { open: vi.fn(async () => {}) },
+			getSentContent: (filePath: string) => sent.get(filePath),
+			hasNotifyInFlight: () => false,
+			notify: { open },
 			waitForDiagnostics: vi.fn(async (filePath: string, ms: number) => {
 				waitCalls.push({ filePath, ms });
 				await new Promise<void>((resolve) => {
@@ -466,16 +477,27 @@ describe("touchFile capability-aware AGGREGATE wait (#814)", () => {
 		expect((result as { inconclusive?: boolean }).inconclusive).toBe(true);
 		const { getDegradationSummary } =
 			await import("../../../clients/degradation-ledger.js");
-		expect(getDegradationSummary()).toEqual([
-			expect.objectContaining({
-				kind: "lsp-diagnostics-timeout",
-				count: 2,
-				latestReasons: expect.arrayContaining([
-					expect.objectContaining({ subject: "marksman" }),
-					expect.objectContaining({ subject: "typos" }),
-				]),
-			}),
-		]);
+		// #3952: both servers here declare `idleEviction: "resident"`, so the
+		// touch also records one `lsp-idle-eviction-declined` row per server
+		// (a declaration, not a timer that failed). This case is about the
+		// timeout verdict, so it asserts its own group and admits the decline
+		// row by name rather than pinning the ledger to one kind.
+		expect(getDegradationSummary()).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					kind: "lsp-diagnostics-timeout",
+					count: 2,
+					latestReasons: expect.arrayContaining([
+						expect.objectContaining({ subject: "marksman" }),
+						expect.objectContaining({ subject: "typos" }),
+					]),
+				}),
+				expect.objectContaining({
+					kind: "lsp-idle-eviction-declined",
+					count: 2,
+				}),
+			]),
+		);
 	});
 
 	it("(d) scope-all: EVERY spawned server is silent+tier3-silent — resolves at the max of their budgets as CONFIRMED clean", async () => {
@@ -645,8 +667,15 @@ describe("touch debounce after a failed notify write (#1253)", () => {
 			fp.endsWith(".md") ? [marksman] : [],
 		);
 		const { client } = makeSilentPushOnlyClient("marksman", tmp);
-		const open = vi.fn(async () => {});
+		// The landed write records the bytes it carried, as the real client does.
+		const sent = new Map<string, { hash: string }>();
+		const open = vi.fn(async (filePath: string, content: string) => {
+			sent.set(filePath, { hash: hashDiagnosticContent(content) });
+		});
 		client.notify.open = open as never;
+		(client as { getSentContent?: unknown }).getSentContent = (
+			filePath: string,
+		) => sent.get(filePath);
 		createLSPClient.mockResolvedValue(client);
 
 		const { LSPService } = await import("../../../clients/lsp/index.js");

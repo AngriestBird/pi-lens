@@ -28,8 +28,11 @@ function shapesWithoutHistory(agents: string, history: string): number[] {
 	const blanked = blankMarkdown(history);
 	const referenced = issueNumbers(blanked);
 	const headed = new Set(
-		[...blanked.matchAll(/^#{1,6}[^\n]*\bshape\s+(\d+)\b/gim)].map((match) =>
-			Number(match[1]),
+		// An ATX heading needs a space after its marks, and the number sits on the
+		// heading's own line: a prose line opening with an issue reference
+		// ("#4527's ... Shape" / "31") once counted as a heading naming shape 31.
+		[...blanked.matchAll(/^#{1,6}[ \t][^\n]*\bshape[ \t]+(\d+)\b/gim)].map(
+			(match) => Number(match[1]),
 		),
 	);
 	return [...parseDefectShapes(agents)]
@@ -112,6 +115,57 @@ describe("blankMarkdown options (#4439)", () => {
 	});
 });
 
+// Recurrence (#4565): the comment rule knew `-->` alone, so it blanked every
+// line after a comment GitHub had already closed, and a gating rule then read
+// a visible answer as absent. Each row names one end the HTML spec gives a
+// comment (13.2.5.43-46) that the parser must agree the renderer has.
+describe("blankMarkdown comment ends (#4565)", () => {
+	const hidden = (markdown: string) => blankMarkdown(markdown);
+
+	it("ends a comment at `--!>` and keeps the text after it", () => {
+		const out = hidden("<!-- secret --!> visible");
+		expect(out).not.toContain("secret");
+		expect(out).toContain("visible");
+	});
+
+	it("reads `<!-->` as a complete empty comment", () => {
+		const out = hidden("<!-->visible");
+		expect(out).toContain("visible");
+		expect(blankMarkdown("<!-->")).toBe("     ");
+	});
+
+	it("reads `<!--->` as a complete empty comment", () => {
+		const out = hidden("<!--->visible");
+		expect(out).toContain("visible");
+		expect(blankMarkdown("<!--->")).toBe("      ");
+	});
+
+	it("does not end a comment at `--!` without the `>`", () => {
+		// The comment end bang state consumes `!` and returns to the comment
+		// state, so this text is still hidden; only `tail` is visible.
+		const out = hidden("<!-- secret --! still hidden --> tail");
+		expect(out).not.toContain("still hidden");
+		expect(out).toContain("tail");
+	});
+
+	it("keeps the `-->` end and the unterminated tail", () => {
+		expect(hidden("<!-- secret --> visible")).toContain("visible");
+		expect(hidden("<!-- secret\nhidden")).not.toContain("hidden");
+	});
+
+	it("keeps a comment opener inside a fence literal", () => {
+		// Fences go first: an opener in a fence is text, so it cannot swallow
+		// the visible line after the fence.
+		expect(hidden("```\n<!--\n```\nvisible")).toContain("visible");
+	});
+
+	it("keeps the line count and every line's length", () => {
+		const out = hidden("<!-->\nafter");
+		expect(out.split("\n")).toHaveLength(2);
+		expect(out.split("\n")[0]).toHaveLength(5);
+	});
+});
+
 describe("baselineViolations (#4439)", () => {
 	// Recurrence (#4448 review F2): both guards survived neutering because only
 	// an env override on the real files ever exercised them.
@@ -180,6 +234,17 @@ describe("shapesWithoutHistory (#4439)", () => {
 		expect(shapesWithoutHistory(agents, "A relative of shape 7.\n")).toEqual([
 			7,
 		]);
+	});
+
+	// Recurrence (#4601 compliance F1): a prose line opening with an issue
+	// reference and wrapping before the number ("#4527's ... Shape" / "31")
+	// counted as a heading naming shape 31, so shape 31 left the baseline.
+	it.each([
+		["a line opening with an issue reference", "#4527's save. Shape 7 asks.\n"],
+		["a number wrapped onto the next line", "## Retro, see shape\n7 below\n"],
+	])("ignores %s as a heading naming the shape", (_name, history) => {
+		const agents = catalog(shape(7, "no issue number here."));
+		expect(shapesWithoutHistory(agents, history)).toEqual([7]);
 	});
 
 	it("is not satisfied by a reference or heading inside an HTML comment", () => {

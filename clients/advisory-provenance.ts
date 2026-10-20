@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
@@ -6,6 +5,7 @@ import { logLatency } from "./latency-logger.js";
 import { normalizeMapKey, toProjectRelativePath } from "./path-utils.js";
 import { resolveRunnerPath } from "./dispatch/runner-context.js";
 import { freshnessFromMtime } from "./freshness.js";
+import { hashFileBytes } from "./content-stamp.js";
 
 export type AdvisoryFileRole = "source" | "test" | "affected";
 
@@ -45,7 +45,7 @@ export function advisoryPathKey(filePath: string, cwd: string): string {
 /** Shared with git guard: there is one SHA-256 implementation for advisories. */
 export function advisoryFileHash(filePath: string): string {
 	try {
-		return createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+		return hashFileBytes(filePath);
 	} catch (error) {
 		const code = (error as NodeJS.ErrnoException).code ?? "unknown";
 		return code === "ENOENT" ? "missing" : `unreadable:${code}`;
@@ -209,7 +209,7 @@ export function validateAdvisoryProvenance(
 			changedPaths.add(advisoryPathKey(resolved, cwd));
 			continue;
 		}
-		if (stat.mtimeMs !== captured.mtimeMs || stat.size !== captured.size) {
+		if (stat.size !== captured.size) {
 			reasons.push(`metadata-changed:${advisoryPathKey(resolved, cwd)}`);
 		}
 		const currentHash = advisoryFileHash(resolved);
