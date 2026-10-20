@@ -260,6 +260,12 @@ export type DegradationKind =
 	 */
 	| "data_dir_migrated"
 	/**
+	 * A late dead-code scan's baseline write threw (a full or read-only disk, a
+	 * cache path taken by a file). The scan's findings are still delivered; only
+	 * the on-disk baseline is lost. Subject is the client id (review of #4663).
+	 */
+	| "dead-code-baseline-write-failed"
+	/**
 	 * A dead-code scan that missed the turn_end budget finished in the
 	 * background and was NOT used (#4117): its session ended before it settled
 	 * (`session-ended`), or it failed (`scan-failed`; a timeout or kill also
@@ -267,12 +273,6 @@ export type DegradationKind =
 	 * repeats it every turn.
 	 */
 	| "dead-code-late-scan-dropped"
-	/**
-	 * A late dead-code scan's baseline write threw (a full or read-only disk, a
-	 * cache path taken by a file). The scan's findings are still delivered; only
-	 * the on-disk baseline is lost. Subject is the client id (review of #4663).
-	 */
-	| "dead-code-baseline-write-failed"
 	/**
 	 * #3814: the commit gate's pre-check of settled collect-later runner answers
 	 * (`absorbSettledRunnerBlockers`) threw. The gate falls back to the blocker
