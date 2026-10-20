@@ -58,12 +58,14 @@ from the monitor's own environment. Pass that directory as `--root` to
   the brief links, or a file under the scratch directory). Every number is
   reported as a delta against it when available.
 
-Read active files and retained numbered siblings (for example, `cascade.log.1`),
-plus timestamped archives that overlap the selected window. The analyzer includes
-numbered siblings by default; use `--archived` for timestamped archives. Filter
-rows by the selected window in every file. A missing active file does not make
-its retained siblings empty; flag incomplete retention when the files do not
-cover the requested window.
+Read active files, retained numbered siblings (for example, `cascade.log.1`),
+and date-only archives (for example, `cascade.log.2026-03-01`), plus timestamped
+archives that overlap the selected window. The analyzer includes numbered and
+date-only siblings by default; use `--archived` for timestamped archive names
+containing `T` (for example, `cascade.log.2026-03-01T12-00-00Z`). Filter rows by
+the selected window in every file. A missing active file does not make its
+retained siblings empty; flag incomplete retention when the files do not cover
+the requested window.
 
 ## The readout (fixed shape, one comment or file, never stdout to the session)
 
@@ -179,12 +181,20 @@ cover the requested window.
 - File nothing yourself unless the brief grants `gh`; then one comment on the
   issue the brief names, never a new issue: the orchestrator decides what
   becomes a lane.
-- If the pid is absent from the selected latency/extension rows, report that
-  and stop only pid-attributed analysis. Continue the project/time-window
-  cascade readout, including carry counters, without claiming pid ownership.
-  Stop the whole readout only when neither kind of evidence is available.
-  Report absent, empty, unreadable, or out-of-window inputs as observed, with
-  a bounded `ls -la` inventory of the resolved active files and retained archives.
+- The analyzer reads discovered sources independently; it does not apply a
+  pid-evidence stop rule or supply an input-state report or file inventory.
+  Missing files and unreadable directories can yield no discovered input;
+  empty files and out-of-window rows contribute no rows. A discovered file
+  read error fails the command instead of producing an empty report. Do not
+  infer absent or empty inputs from zero counts alone.
+- Apply the evidence policy in the monitor's own readout: if the pid is absent
+  from the selected latency/extension rows, report that and stop only
+  pid-attributed analysis. Continue the project/time-window cascade readout,
+  including carry counters, without claiming pid ownership. Inspect the inputs
+  separately and report absent, empty, unreadable, or out-of-window states as
+  observed, with a bounded `ls -la` inventory of the resolved active files and
+  retained archives. After reporting those limits, stop the whole readout only
+  when neither kind of evidence is available.
 
 ## Deliverable
 
