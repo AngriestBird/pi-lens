@@ -268,9 +268,19 @@ describe("a worktree with no dependency install (#4532)", () => {
 	it("keeps every path alias and undeclared name blocking, and demotes a declared package", async () => {
 		writeManifest(
 			JSON.stringify({
-				dependencies: { "left-pad": "1.3.0" },
-				devDependencies: { "@types/foo": "1.0.0" },
+				dependencies: { "left-pad": "1.3.0", "@scope/pkg": "1.0.0" },
+				devDependencies: {
+					"@types/foo": "1.0.0",
+					"@types/scope__bar": "1.0.0",
+				},
+				peerDependencies: { "peer-pkg": "1.0.0" },
+				optionalDependencies: { "opt-pkg": "1.0.0" },
 			}),
+		);
+		// A monorepo root's manifest declares what the install would hoist.
+		fs.writeFileSync(
+			path.join(env.tmpDir, "package.json"),
+			JSON.stringify({ devDependencies: { "hoisted-pkg": "1.0.0" } }),
 		);
 		const blocking = [
 			"@/missing",
@@ -281,7 +291,16 @@ describe("a worktree with no dependency install (#4532)", () => {
 			"components/missing",
 			"left-pda",
 		];
-		const demoted = ["left-pad", "left-pad/lib/pad", "foo"];
+		const demoted = [
+			"left-pad",
+			"left-pad/lib/pad",
+			"@scope/pkg/sub",
+			"foo",
+			"@scope/bar",
+			"peer-pkg",
+			"opt-pkg",
+			"hoisted-pkg",
+		];
 		rows = [...blocking, ...demoted].map((specifier, index) =>
 			missingModule(specifier, 3 + index),
 		);

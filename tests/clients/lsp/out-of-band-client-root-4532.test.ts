@@ -40,7 +40,11 @@ import {
 import { configureLspServiceLifecycle } from "../../../clients/lsp/service-singleton.js";
 import { workspaceFileCreatedAtFor } from "../../../clients/lsp/workspace-diagnostics-session.js";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
-import { isSessionBookkeepingRoot } from "../../../clients/analysis-root.js";
+import {
+	canWriteAnalysisRoot,
+	isSessionBookkeepingRoot,
+	resolveAnalysisRoot,
+} from "../../../clients/analysis-root.js";
 import { lookForOutOfBandChanges } from "../../../clients/out-of-band-changes.js";
 import {
 	getRecentLoggedPhases,
@@ -195,6 +199,31 @@ describe("the install look at a live client root (#4532 gap 7)", () => {
 		expect(isSessionBookkeepingRoot(linked, main)).toBe(true);
 		// A sibling project with its own marker is adopted.
 		expect(isSessionBookkeepingRoot(worktree, main)).toBe(false);
+		// Review F7: a client rooted at a package INSIDE the session root (a
+		// monorepo package) is the session's, as `resolveAnalysisRoot` says for
+		// its files; so is a subdirectory of a session root that is no checkout.
+		const pkg = path.join(main, "packages", "a");
+		fs.mkdirSync(pkg, { recursive: true });
+		expect(isSessionBookkeepingRoot(pkg, main)).toBe(true);
+		const plain = path.join(env.tmpDir, "plain-session");
+		const plainSub = path.join(plain, "sub");
+		fs.mkdirSync(plainSub, { recursive: true });
+		expect(isSessionBookkeepingRoot(plainSub, plain)).toBe(true);
+		// One rule in two forms: the root form agrees with the file form the
+		// owner gives a file under each root.
+		for (const [root, session] of [
+			[main, main],
+			[pkg, main],
+			[linked, main],
+			[worktree, main],
+			[plainSub, plain],
+		] as const) {
+			expect(isSessionBookkeepingRoot(root, session), root).toBe(
+				canWriteAnalysisRoot(
+					resolveAnalysisRoot(path.join(root, "x.ts"), session),
+				),
+			);
+		}
 	});
 
 	// Greptile round 3: AGENTS.md "Analysis-root invariant" — an adopted root may

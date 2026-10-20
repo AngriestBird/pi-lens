@@ -140,11 +140,14 @@ export function canWriteAnalysisRoot(mode: AnalysisRootMode): boolean {
 }
 
 /**
- * May this ROOT receive session bookkeeping? The session root and the session
- * repository's linked worktrees may; an adopted project must not (AGENTS.md
- * "Analysis-root invariant"). The root form of {@link resolveAnalysisRoot}:
- * checkout identity is read at the root itself, not at a child path, so a
- * caller holding a root asks the owner instead of re-deriving the rule.
+ * May this ROOT receive session bookkeeping? The session root, a directory
+ * under it, and the session repository's linked worktrees may; an adopted
+ * project must not (AGENTS.md "Analysis-root invariant"). The root form of
+ * {@link resolveAnalysisRoot}, which answers "session" for any file under the
+ * session root (a monorepo package's client is rooted there, #4532 round 5,
+ * review F7): checkout identity is read at the root itself, not at a child
+ * path, so a caller holding a root asks the owner instead of re-deriving the
+ * rule.
  */
 export function isSessionBookkeepingRoot(
 	root: string,
@@ -152,7 +155,8 @@ export function isSessionBookkeepingRoot(
 ): boolean {
 	const resolved = realPathOrResolved(root);
 	const session = realPathOrResolved(sessionRoot);
-	if (pathsEqual(resolved, session)) return true;
+	if (pathsEqual(resolved, session) || isUnderDir(resolved, session))
+		return true;
 	const checkout = resolveGitCheckout(session);
 	if (!checkout) return false;
 	// The owner rule itself, asked of two ROOTS instead of a root and a file
