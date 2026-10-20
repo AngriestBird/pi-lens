@@ -240,8 +240,9 @@ describe("the install look at a live client root (#4532 gap 7)", () => {
 		});
 		expect(latestScope()).toBe("first-look");
 
-		// A later look compared against that record is the recorded shape.
-		await new Promise((resolve) => setTimeout(resolve, 5));
+		// A later look compared against that record is the recorded shape. The
+		// longer content alone changes the stamp's size component, so the case
+		// needs no wall-clock wait.
 		fs.writeFileSync(lockfile, '{"lockfileVersion":3,"packages":{}}\n');
 		await lookForOutOfBandChanges(root, "tool_call", runtime);
 		expect(latestScope()).toBe("recorded");
