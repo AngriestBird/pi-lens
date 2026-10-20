@@ -312,6 +312,13 @@ it("announces a linked-worktree edit the pipeline found nothing in (#2050 AC3)",
 		expect(worktreeRows[0]?.latestReasons[0]?.subject).toContain(
 			path.basename(worktree),
 		);
+		// The advisory is gated by its own once-per-root row, and that record is
+		// what a reader can count: one clean run, one row.
+		expect(
+			getDegradationSummary()
+				.filter((entry) => entry.kind === "tool-result-linked-worktree-clean")
+				.map((entry) => entry.count),
+		).toEqual([1]);
 		// The run produced nothing, so silence would be ambiguous: the agent is
 		// told the analysis RAN and found nothing.
 		expect(
