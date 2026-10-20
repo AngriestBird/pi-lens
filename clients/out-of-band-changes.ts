@@ -47,6 +47,7 @@ import { isExcludedDirName } from "./file-utils.js";
 import { logLatency } from "./latency-logger.js";
 import { isUnderDir, normalizeMapKey } from "./path-utils.js";
 import { createSingleFlight } from "./single-flight.js";
+import { compareOrdinal } from "./string-utils.js";
 
 /**
  * Files an install rewrites at the root: the lockfiles, and the markers a
@@ -219,7 +220,15 @@ async function walkDeclarations(
 			Array.from({ length: DECLARATION_WALK_CONCURRENCY }, worker),
 		);
 	if (capped) return undefined;
-	found.sort();
+	// Deterministic, code-unit order (Sonar S2871): `declarations` inserts in
+	// this order, so every class `diffDeclarations` emits is in this order. The
+	// finished `changes` array is not globally sorted — it is the walk's class
+	// first, then the `deleted` class from the previous map — and no consumer
+	// reads a position: subscribers key by path and count by type.
+	// `compareOrdinal` (the documented comparator for a sort whose output becomes
+	// a key), never `localeCompare`, whose answer depends on the machine's locale
+	// and ICU build and would order one run's walk differently from another's.
+	found.sort(compareOrdinal);
 	const declarations = new Map<string, string>();
 	// Parallel stats, then one pass into the map: the callback returns its pair
 	// so a failed stat is an explicit `undefined` rather than a swallowed
@@ -289,8 +298,12 @@ function carryUnreadable(
 		carried.push(filePath);
 	}
 	// Deterministic order: the population that fits the cap must not depend on
-	// Map insertion order or on which parallel stat settled first.
-	carried.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+	// Map insertion order or on which parallel stat settled first. Same
+	// comparator as the walk's, for the same reason. This one orders the stored
+	// record, not a payload: a carried entry keeps its previous fingerprint, so
+	// it never appears in this round's diff, and a round that drops carried
+	// entries past the cap keeps the previous map whole.
+	carried.sort(compareOrdinal);
 	let dropped = 0;
 	for (const filePath of carried) {
 		if (declarations.size >= DECLARATION_WALK_MAX_FILES) {
