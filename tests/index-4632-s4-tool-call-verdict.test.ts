@@ -621,7 +621,11 @@ describe("#4632 s4: a record written in one session answers the next one", () =>
 		// appends the blocker list (`:1358`), and this answer carries none.
 		expect(second).toBe(first);
 		expect(second.session.sessionManager.getSessionId()).toBe(firstId);
-		expect(second.session.extensionRunner).not.toBe(runnerBefore);
+		// Compared as a boolean: vitest prints an `AgentSession` by reading pi's
+		// theme Proxy, which throws `Theme not initialized`, so an identity
+		// matcher on the session hides WHY it failed (#4664).
+		const runnerChanged = second.session.extensionRunner !== runnerBefore;
+		expect(runnerChanged).toBe(true);
 		const verdict = bashResults(second.requests).at(-1);
 		expectRefused(verdict, GATE_PHRASE);
 		expect(verdict?.text).not.toContain(LATCH_LIST);
