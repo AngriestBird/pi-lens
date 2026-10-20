@@ -1018,7 +1018,7 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 	}, // :520, :532, :573, :701, :1085, :1430, :1460, :1907, :1970, :2007, :2043, :2049, :2083, :2551, :2588
 	"clients/python-environment.ts": {
 		silent: 3,
-		identities: "6f5f64b2286102e7",
+		identities: "060c5d89924ff841",
 		reason: PRE_RULE,
 	}, // :86, :338, :507
 	"clients/quiet-window.ts": {
