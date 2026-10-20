@@ -391,22 +391,107 @@ describe("the install look at a live client root (#4532 gap 7)", () => {
 		expect(latestScope()).toBe("recorded");
 	});
 
-	it("records the client-root look cap instead of silently skipping the rest", async () => {
-		clientRoots = Array.from({ length: 6 }, (_, index) => ({
-			root: path.join(env.tmpDir, `project-${index}`),
-			spawnedAt: Date.now(),
-		}));
-		for (const entry of clientRoots)
-			fs.mkdirSync(path.join(entry.root, "src"), { recursive: true });
+	/**
+	 * `count` client roots outside the session root, each holding an install
+	 * younger than its client's epoch, so a FIRST look at any of them restarts
+	 * it: the restarts list is the set of roots the look actually reached.
+	 */
+	function freshInstallRoots(count: number): string[] {
+		return Array.from({ length: count }, (_, index) => {
+			const root = path.join(env.tmpDir, `project-${index}`);
+			fs.mkdirSync(path.join(root, "src"), { recursive: true });
+			fs.writeFileSync(
+				path.join(root, "package-lock.json"),
+				'{"lockfileVersion":3}\n',
+			);
+			return root;
+		});
+	}
+
+	const cappedRecords = () =>
+		getDegradationSummary().filter(
+			(group) => group.kind === "lsp-client-root-look-capped",
+		);
+
+	// Review F4: the cap record had a cell, the slice that enforces the cap did
+	// not, so a mutant that recorded the cap and looked at every root anyway
+	// stayed green.
+	it("looks at the first four client roots, and records the cap instead of silently skipping the rest", async () => {
+		const roots = freshInstallRoots(6);
+		const spawnedAt = Date.now() - 60_000;
+		clientRoots = roots.map((root) => ({ root, spawnedAt }));
 		installService();
 
 		await bashResult("true");
 
-		const capped = getDegradationSummary().filter(
-			(group) => group.kind === "lsp-client-root-look-capped",
+		expect([...restarts].sort()).toEqual(
+			roots
+				.slice(0, 4)
+				.map((root) => normalizeMapKey(root))
+				.sort(),
 		);
-		expect(capped).toHaveLength(1);
-		expect(capped[0].count).toBe(1);
+		expect(cappedRecords()).toHaveLength(1);
+		expect(cappedRecords()[0].count).toBe(1);
+	});
+
+	// Review F4: two spellings of one root are one root. Without the path-key
+	// dedupe the second spelling takes a cap slot, the cap fires, and a real
+	// fourth root is never looked at.
+	it("counts two spellings of one client root once against the cap", async () => {
+		const roots = freshInstallRoots(4);
+		const spawnedAt = Date.now() - 60_000;
+		const [first, ...rest] = roots;
+		const respelled = `${path.dirname(first!)}/./${path.basename(first!)}`;
+		clientRoots = [first!, respelled, ...rest].map((root) => ({
+			root,
+			spawnedAt,
+		}));
+		installService();
+
+		await bashResult("true");
+
+		expect([...new Set(restarts)].sort()).toEqual(
+			roots.map((root) => normalizeMapKey(root)).sort(),
+		);
+		expect(cappedRecords()).toHaveLength(0);
+	});
+
+	// Review F4: an extra root's look walks its declarations at most once per
+	// `PI_LENS_DECLARATION_LOOK_MS` (`walk: "interval"`), never on every bash
+	// result as the session root's own look does, so a big worktree's walk
+	// cannot run per command. The control runs the same two results with the
+	// interval at 0.
+	it("walks an extra client root's declarations at most once per interval", async () => {
+		const declaration = path.join(worktree, "types.d.ts");
+		// The ring keeps a row's metadata only; the session root's own look sees
+		// no declaration change here, so a `changed` row is the worktree's.
+		const declarationRows = () =>
+			getRecentLoggedPhases().filter(
+				(row) =>
+					row.phase === "lsp_out_of_band_change" &&
+					Number(row.metadata?.changed) > 0,
+			);
+		const previousLookMs = process.env.PI_LENS_DECLARATION_LOOK_MS;
+		installService();
+		clientRoots = [{ root: worktree, spawnedAt: Date.now() }];
+		try {
+			for (const lookMs of ["600000", "0"]) {
+				process.env.PI_LENS_DECLARATION_LOOK_MS = lookMs;
+				fs.writeFileSync(declaration, `declare const A${lookMs}: number;\n`);
+				_setRecentPhasesForTest([]);
+				// The baseline look, then a declaration change inside the interval.
+				await bashResult("true");
+				// A longer body, so the change shows in the size within one mtime tick.
+				fs.writeFileSync(declaration, `declare const A${lookMs}: boolean;\n`);
+				await bashResult("true");
+				if (lookMs === "0") expect(declarationRows().length).toBeGreaterThan(0);
+				else expect(declarationRows()).toHaveLength(0);
+			}
+		} finally {
+			if (previousLookMs === undefined)
+				delete process.env.PI_LENS_DECLARATION_LOOK_MS;
+			else process.env.PI_LENS_DECLARATION_LOOK_MS = previousLookMs;
+		}
 	});
 });
 

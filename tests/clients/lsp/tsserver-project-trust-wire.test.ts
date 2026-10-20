@@ -462,6 +462,47 @@ describe("real wrapper effective compiler trust (#4299)", () => {
 			restorePath();
 		}
 	});
+	it.skipIf(process.platform === "win32")(
+		"skips a PATH directory and a non-executable file of the server's name (#4532 F4)",
+		async () => {
+			// #4532 review F4: the in-process PATH scan replaced `which`, and its
+			// `isFile`/`X_OK` checks had no witness. Without them the scan returns
+			// the first entry of the right NAME: a directory (a directory passes
+			// X_OK) or a 0644 file, the launcher spawns it, and the real server
+			// later on PATH never starts. The kernel's own search skips both.
+			const session = path.join(tmp, "session");
+			const file = path.join(session, "index.html");
+			project(session);
+			fs.writeFileSync(file, "<p>hello</p>");
+			const server = nativeCompilerTree(session, "path-scan-launcher");
+			const name = "vscode-html-language-server";
+			const decoyDir = path.join(tmp, "path-decoy-dir");
+			fs.mkdirSync(path.join(decoyDir, name), { recursive: true });
+			const nonExecDir = path.join(tmp, "path-non-exec");
+			fs.mkdirSync(nonExecDir);
+			fs.writeFileSync(path.join(nonExecDir, name), "#!/bin/sh\nexit 0\n");
+			fs.chmodSync(path.join(nonExecDir, name), 0o644);
+			const binDir = path.join(tmp, "path-bin");
+			fs.mkdirSync(binDir);
+			fs.copyFileSync(server.tsc, path.join(binDir, name));
+			fs.chmodSync(path.join(binDir, name), 0o755);
+			selectedServer.value = "html";
+			expect(resolveAnalysisRoot(file, session)).toBe("session");
+			process.chdir(session);
+			setProjectTrustState("trusted");
+			const restorePath = withEnv({
+				PATH: [decoyDir, nonExecDir, binDir, process.env.PATH ?? ""].join(
+					path.delimiter,
+				),
+			});
+			try {
+				expect(await attach(session, session, file)).toBeDefined();
+				expect(fs.existsSync(server.marker)).toBe(true);
+			} finally {
+				restorePath();
+			}
+		},
+	);
 	it("forces an absolute managed compiler through the real wrapper under unknown trust", async () => {
 		const root = path.join(tmp, "project");
 		const file = project(root);
