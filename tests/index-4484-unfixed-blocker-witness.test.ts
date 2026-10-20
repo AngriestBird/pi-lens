@@ -337,7 +337,10 @@ import {
 import { getDegradationSummary } from "../clients/degradation-ledger.js";
 import { exportWidgetState } from "../clients/widget-state.js";
 import { removeTempDirSync } from "./clients/test-utils.js";
-import { makeSessionStartEvent } from "./support/host-event-factory.js";
+import {
+	makeContextWithSystemEvent,
+	makeSessionStartEvent,
+} from "./support/host-event-factory.js";
 import { createPiMock, makeCtx } from "./support/pi-mock.js";
 
 let tmpDir = "";
@@ -482,7 +485,7 @@ async function openSession(
 			await pi.emit("turn_end", {}, ctx());
 			const injected = (await pi.emit(
 				"context_with_system",
-				{ messages: [{ role: "user", content: "keep working" }] },
+				makeContextWithSystemEvent([{ role: "user", content: "keep working" }]),
 				ctx(),
 			)) as { messages?: Array<{ content: string }> } | undefined;
 			await pi.emit("turn_start", {}, ctx());

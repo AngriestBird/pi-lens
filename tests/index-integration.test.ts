@@ -16,7 +16,10 @@ import {
 	aliveServerHolder,
 	lspStatusRecorder,
 } from "./support/lsp-status-repaint.js";
-import { makeSessionStartEvent } from "./support/host-event-factory.js";
+import {
+	makeContextWithSystemEvent,
+	makeSessionStartEvent,
+} from "./support/host-event-factory.js";
 // #2146: process-scope state (the primary-session registration, the instance
 // registry's mutation tail) now lives on `globalThis`, so `vi.resetModules()`
 // no longer clears it — that is the fix, not a regression. This suite gives
@@ -3266,7 +3269,7 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 
 			const result = await mock.emit(
 				"context_with_system",
-				{ messages: [{ role: "user", content: "continue" }] },
+				makeContextWithSystemEvent([{ role: "user", content: "continue" }]),
 				{ cwd: tmpDir },
 			);
 			expect(result).toBeUndefined();
@@ -3320,7 +3323,7 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 			expect(sentMessages).toHaveLength(0);
 			const firstContext = await mock.emit(
 				"context_with_system",
-				{ messages: [{ role: "user", content: "continue" }] },
+				makeContextWithSystemEvent([{ role: "user", content: "continue" }]),
 				{ cwd: tmpDir },
 			);
 			const messages = (
@@ -3335,7 +3338,9 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 			expect(messages).toContain("FAIL test/app.test.ts:1");
 			const secondContext = await mock.emit(
 				"context_with_system",
-				{ messages: [{ role: "user", content: "continue again" }] },
+				makeContextWithSystemEvent([
+					{ role: "user", content: "continue again" },
+				]),
 				{ cwd: tmpDir },
 			);
 			expect(secondContext).toBeUndefined();
@@ -3384,7 +3389,7 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 
 			const result = await mock.emit(
 				"context_with_system",
-				{ messages: [{ role: "user", content: "continue" }] },
+				makeContextWithSystemEvent([{ role: "user", content: "continue" }]),
 				{ cwd: tmpDir },
 			);
 			expect(result).toBeUndefined();
@@ -3895,7 +3900,7 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 			resetLSPService.mockClear();
 			await secondary.trigger(
 				"context_with_system",
-				{ messages: [{ role: "user", content: "prompt" }] },
+				makeContextWithSystemEvent([{ role: "user", content: "prompt" }]),
 				secondaryCtx,
 			);
 			await secondary.trigger(

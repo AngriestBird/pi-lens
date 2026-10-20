@@ -92,6 +92,12 @@ describe("#4631 the injecting turn keeps the prompt-cache head pi sent before it
 		const handle = await startPiSession({
 			root: fixture.root,
 			cwd: `${fixture.root}/prefix-plain/proj`,
+			// A QUICK start writes no `session-start-guidance` (the row is written at
+			// the END of a full start), so the first request is a genuinely quiet
+			// turn. Left at the "full" default, request 1 would already carry the
+			// guidance advisory and the cells would compare injecting turn to
+			// injecting turn, losing the contrast their names claim.
+			startupMode: "quick",
 			responses: [
 				fauxAssistantMessage("first answer"),
 				fauxAssistantMessage("second answer"),
@@ -103,6 +109,10 @@ describe("#4631 the injecting turn keeps the prompt-cache head pi sent before it
 		await handle.prompt("first question");
 		const before = requests.at(-1);
 		if (!before) throw new Error("the plain turn sent no request");
+		// The precondition both cells rely on: the baseline turn is QUIET. A start
+		// that wrote guidance would red here instead of quietly weakening the
+		// contrast (the pin the "quick" mode above buys).
+		expect(JSON.stringify(before)).not.toContain("pi-lens automated context");
 
 		stageGuidance(
 			handle.cwd,
@@ -137,10 +147,12 @@ describe("#4631 the injecting turn keeps the prompt-cache head pi sent before it
 		expect(JSON.stringify(sent.at(-1))).toContain("NARROW-DIFF-GUIDANCE");
 	});
 
-	it("keeps the earlier prefix when a lazy-tool activation appends its delta", async () => {
+	it("appends the activation's tool delta and injects without touching the head", async () => {
 		const handle = await startPiSession({
 			root: fixture.root,
 			cwd: `${fixture.root}/prefix-delta/proj`,
+			// Quick, for the same reason as the cell above.
+			startupMode: "quick",
 			responses: [
 				fauxAssistantMessage("first answer"),
 				fauxAssistantMessage(
@@ -157,6 +169,7 @@ describe("#4631 the injecting turn keeps the prompt-cache head pi sent before it
 		await handle.prompt("first question");
 		const plain = requests.at(-1);
 		if (!plain) throw new Error("the plain turn sent no request");
+		expect(JSON.stringify(plain)).not.toContain("pi-lens automated context");
 
 		// pi appends one system message announcing the tool delta before the
 		// request that follows the activation, which is the mid-list shape
@@ -197,5 +210,22 @@ describe("#4631 the injecting turn keeps the prompt-cache head pi sent before it
 		expect(JSON.stringify(injecting[0])).toBe(JSON.stringify(plain[0]));
 		expect(injecting[activated.length - 1]).toEqual(delta);
 		expect(JSON.stringify(injecting.at(-1))).toContain("ACTIVATION-GUIDANCE");
+
+		// THE MEASURED BOUNDARY (#4631 round 5, F4). `fauxProvider` maps
+		// `context.messages` straight into the prompt, so the byte identity above
+		// is the TRANSCRIPT the host hands the extension — not the payload a
+		// provider that collapses system messages sends. pi-ai's real adapters run
+		// `collapseSystemMessages` first, and that replayed head DOES re-render
+		// when the tool table changes; that is pi's design, not pi-lens's. So the
+		// property to hold at BOTH boundaries is narrower and is asserted here:
+		// appending a delta rewrites the head, and INJECTING rewrites nothing.
+		const collapsedHead = (messages: readonly unknown[]) =>
+			JSON.stringify(
+				piAi.collapseSystemMessages(
+					piAi.normalizeContext({ messages: [...messages] }),
+				).messages[0],
+			);
+		expect(collapsedHead(activated)).not.toBe(collapsedHead(plain));
+		expect(collapsedHead(injecting)).toBe(collapsedHead(activated));
 	});
 });

@@ -32,7 +32,10 @@ import type { Diagnostic } from "../clients/dispatch/types.js";
 import { formatDiagnostics } from "../clients/dispatch/utils/format-utils.js";
 import extension from "../index.js";
 import { removeTempDirSync } from "./clients/test-utils.js";
-import { makeSessionStartEvent } from "./support/host-event-factory.js";
+import {
+	makeContextWithSystemEvent,
+	makeSessionStartEvent,
+} from "./support/host-event-factory.js";
 import { createPiMock, makeCtx } from "./support/pi-mock.js";
 
 const SESSION_ID = "pi-3246-delivery-session";
@@ -130,7 +133,7 @@ async function driveTurn(
 	await pi.emit("turn_end", {}, makeCtx({ cwd: tmpDir }));
 	const injected = (await pi.emit(
 		"context_with_system",
-		{ messages: [{ role: "user", content: "keep working" }] },
+		makeContextWithSystemEvent([{ role: "user", content: "keep working" }]),
 		makeCtx({ cwd: tmpDir }),
 	)) as { messages?: Array<{ content: string }> } | undefined;
 	return (injected?.messages ?? []).map((m) => m.content).join("\n\n");
