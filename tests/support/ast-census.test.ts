@@ -2,8 +2,8 @@
  * The census seam's own guard (#4606 S0).
  *
  * `tests/support/ast-census.ts` is the ONE place the AST governance sweeps
- * parse a source text, walk an AST, and enumerate the census files. Five
- * consumers load it:
+ * parse a source text, walk an AST, and enumerate the census files. Its
+ * consumers keep separate predicates:
  *
  * - `tests/config/bounded-eviction-idiom-sweep.test.ts` asks "is this an
  *   eviction program?" (#2442);
@@ -12,7 +12,9 @@
  * - `tests/clients/socket-error-listener-sweep.test.ts` and
  *   `tests/support/silent-catch-scan.ts` are further folds of the same walk
  *   (#4603, #4596);
- * - `tests/support/worker-message-scan.ts` folds it too (#4402).
+ * - `tests/support/worker-message-scan.ts` folds it too (#4402);
+ * - `tests/config/runner-group-id-census.test.ts` resolves literal runner ids
+ *   against the live registry (#4312).
  *
  * Each sweep keeps its own root list; they share the seam and nothing else.
  * The tests below are the properties that make that sharing real rather than
@@ -80,6 +82,7 @@ const CONSUMERS = [
 	"tests/clients/socket-error-listener-sweep.test.ts",
 	"tests/config/bounded-container-guard.test.ts",
 	"tests/config/bounded-eviction-idiom-sweep.test.ts",
+	"tests/config/runner-group-id-census.test.ts",
 	"tests/support/eviction-programs.ts",
 	"tests/support/silent-catch-scan.ts",
 	"tests/support/worker-message-scan.ts",
@@ -206,6 +209,25 @@ const ADMITTED_ACCESSOR_SITES: readonly AccessorAdmission[] = [
 		text: '(value.field("arguments")?.namedChildren().length ?? 0) >= 2',
 		count: 1,
 		reason: "measures a call's argument count; nothing is visited",
+	},
+	{
+		file: "tests/config/runner-group-id-census.test.ts",
+		text: "? raw.children().find((node) => node.isNamed())",
+		count: 1,
+		reason: "unwraps one computed property key; no recursive traversal",
+	},
+	{
+		file: "tests/config/runner-group-id-census.test.ts",
+		text: "const elements = value.children().filter((node) => node.isNamed());",
+		count: 1,
+		reason:
+			"enumerates one runnerIds array's direct elements for classification",
+	},
+	{
+		file: "tests/config/runner-group-id-census.test.ts",
+		text: "?.children()",
+		count: 1,
+		reason: "checks one object's direct properties for a RunnerGroup mode key",
 	},
 	{
 		file: "tests/support/silent-catch-scan.ts",
