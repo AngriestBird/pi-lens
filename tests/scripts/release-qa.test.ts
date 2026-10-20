@@ -1590,6 +1590,7 @@ describe("release-QA pack call site (#3887 F1)", () => {
 				"scripts/release-qa.mjs",
 				// release-qa imports the shared RPC driver (#4401), and its phase reader.
 				"scripts/rpc-load-check.mjs",
+				"scripts/lib/is-main-module.mjs",
 				"scripts/lib/latency-log-phases.mjs",
 				"scripts/lib/md-matrix.mjs",
 				"scripts/lib/mcp-stdio-client.mjs",
@@ -1711,6 +1712,7 @@ describe("release-QA dirty-checkout refusal (#2619 review F1)", () => {
 				"scripts/release-qa.mjs",
 				// release-qa imports the shared RPC driver (#4401), and its phase reader.
 				"scripts/rpc-load-check.mjs",
+				"scripts/lib/is-main-module.mjs",
 				"scripts/lib/latency-log-phases.mjs",
 				"scripts/lib/md-matrix.mjs",
 				"scripts/lib/mcp-stdio-client.mjs",
