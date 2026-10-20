@@ -154,6 +154,59 @@ describe("Windows LSP startup repair classification (#4263)", () => {
 		}
 	});
 
+	// The global-bin fallback's other shape: a resolved path with no shim to
+	// validate (`gopls.exe`, a managed archive binary). Presence here is the
+	// fallback's own answer — it stats the file before returning it — so the
+	// presence arm that reads "the launcher resolved something" is what keeps a
+	// code-1 exit a runtime failure.
+	it("does not repair a present binary the global fallback resolved without a shim", async () => {
+		const originalPlatform = process.platform;
+		setPlatform("win32");
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-4263-exe-"));
+		const binary = path.join(root, "global", "bin", "gopls.exe");
+		fs.mkdirSync(path.dirname(binary), { recursive: true });
+		fs.writeFileSync(binary, "MZ\n");
+		findGlobalBinary.mockResolvedValue(binary);
+		vi.doMock("node:child_process", () => ({
+			execFileSync: vi.fn(() => ""),
+			spawn: vi.fn(exitWith(1)),
+		}));
+		vi.doMock("../../../clients/package-manager.js", async (importActual) => ({
+			...(await importActual<
+				typeof import("../../../clients/package-manager.js")
+			>()),
+			findGlobalBinary,
+			isProjectLocalBinPath: vi.fn(() => false),
+		}));
+		vi.doMock("../../../clients/installer/index.js", async (importActual) => ({
+			...(await importActual<
+				typeof import("../../../clients/installer/index.js")
+			>()),
+			ensureTool,
+			findManagedToolBinary: vi.fn(async () => undefined),
+		}));
+
+		try {
+			const { resolveAndLaunch } =
+				await import("../../../clients/lsp/server.js");
+			await expect(
+				resolveAndLaunch(
+					{
+						candidates: ["gopls"],
+						args: ["serve"],
+						cwd: path.join(root, "project"),
+						managedToolId: "gopls",
+					},
+					true,
+				),
+			).rejects.toThrow(/exited immediately with code 1/);
+			expect(ensureTool).not.toHaveBeenCalled();
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+			setPlatform(originalPlatform);
+		}
+	});
+
 	// #4532 round 4, red on the pre-fix head: an ABSOLUTE command spelling of a
 	// shim whose target is present. The pre-fix classifier re-resolved the
 	// spelling after the spawn, and when that second reading could not see the
