@@ -178,32 +178,65 @@ export async function demoteInferredProjectDiagnostics(
  * severity-1 rows, pays nothing for a row it already demoted. The per-edit
  * runner and every `lsp_diagnostics` route call this; the `mode=full` sweep
  * runs the same two rules in `demoteInferredProjectSweepResults`, and the
- * cascade's synchronous display seam runs the environment rule alone (it has
- * no membership probe; see `applyCascadeDisplayPolicy`).
+ * cascade's synchronous seams run the environment rule alone (they have no
+ * membership probe; see `applyCascadeDisplayPolicy` and
+ * `cascadeReconcilableLspErrors`). Every writer of the widget store routes its
+ * rows through it, so an orphan file never blocks or not depending on which
+ * tool ran last (#1645 review F3, the #1633-V1 lesson).
  *
  * `service` omitted skips the membership probe and keeps the environment rule:
  * a warm-attached session's rows came from a remote fleet this process does
  * not own, so the probe would have to spawn one to answer (#1645 review F2).
  *
- * Index-aligned: the output has one entry per input, in order, and the SAME
- * array when nothing changed. `lsp_diagnostics` relies on it to cache the
- * server's own rows (review F5).
+ * `rows` is what a consumer renders. `replayable()` is what a cache entry
+ * stores, and the two rules differ in what a replay can re-derive (#4532
+ * round 6, r5 verify NEW-1, shape 6). The environment verdict depends on the
+ * install state, which no entry key carries, so it is never baked in: the
+ * replay re-runs it (review F5). The membership verdict needs a live tsserver,
+ * which a replay often lacks (a new session reading the on-disk cache, an
+ * evicted server), so it IS baked in: an unknown answer on the replay must not
+ * undo a known one from the serve. `replayable()` is therefore the membership
+ * rule over the RAW rows. When the environment rule changed nothing that is
+ * `rows` itself; otherwise it is one more membership pass sharing the identity
+ * memo, which sends a probe only when every severity-1 row was an environment
+ * gap. It is lazy, so a consumer that caches nothing pays nothing.
+ *
+ * Both outputs are index-aligned with the input, one entry per row, in order,
+ * and `rows` is the SAME array when nothing changed.
  */
+export interface LanguageServerRowDemotion {
+	rows: LSPDiagnostic[];
+	replayable(): Promise<LSPDiagnostic[]>;
+}
+
 export async function demoteLanguageServerRows(
 	diagnostics: LSPDiagnostic[],
 	options: Omit<InferredProjectDemotionOptions, "service"> & {
 		service?: TsserverSyncCapableService;
 	},
-): Promise<LSPDiagnostic[]> {
+): Promise<LanguageServerRowDemotion> {
 	const environmentChecked = demoteEnvironmentGapDiagnostics(diagnostics, {
 		filePath: options.filePath,
 	});
 	const { service } = options;
-	if (service === undefined) return environmentChecked;
-	return demoteInferredProjectDiagnostics(environmentChecked, {
+	if (service === undefined)
+		return { rows: environmentChecked, replayable: async () => diagnostics };
+	const membership = {
 		...options,
 		service,
-	});
+		identityCache: options.identityCache ?? new Map(),
+	};
+	const rows = await demoteInferredProjectDiagnostics(
+		environmentChecked,
+		membership,
+	);
+	return {
+		rows,
+		replayable: async () =>
+			environmentChecked === diagnostics
+				? rows
+				: demoteInferredProjectDiagnostics(diagnostics, membership),
+	};
 }
 
 /**

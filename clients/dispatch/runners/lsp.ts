@@ -432,11 +432,13 @@ const lspRunner: RunnerDefinition = {
 		// `usedWarmAttach` it kept the reported `🔴 STOP` on this route (round 4).
 		// `demoteLanguageServerRows` runs it on every route and the membership
 		// probe only where a local client may answer (round 5, review F3).
-		const validLspDiags = await demoteLanguageServerRows(rawValidLspDiags, {
-			filePath: diagnosticPath,
-			cwd: ctx.cwd,
-			...(!usedWarmAttach && { service: lspService }),
-		});
+		const validLspDiags = (
+			await demoteLanguageServerRows(rawValidLspDiags, {
+				filePath: diagnosticPath,
+				cwd: ctx.cwd,
+				...(!usedWarmAttach && { service: lspService }),
+			})
+		).rows;
 		const fixSuggestionByIndex = new Map<number, string>();
 
 		// #1640: read severity off the RAW list. A demoted diagnostic is still

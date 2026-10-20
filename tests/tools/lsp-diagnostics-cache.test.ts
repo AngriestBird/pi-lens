@@ -616,4 +616,158 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 			);
 		});
 	});
+
+	// #4532 round 6 (r5 verify NEW-1, shape 6). Round 5 stored the server's rows
+	// for BOTH demotion rules, so a replay re-asked tsserver for the file's
+	// project. A replay often has no live client to ask: a new session replaying
+	// the on-disk cache, an idle-evicted server, a file tsserver never opened.
+	// The unknown answer then re-cemented an inferred-project file as blocking,
+	// the #1645 F3 contract this cache must keep. The entry now keeps the
+	// membership verdict and leaves only the environment rule to the replay.
+	describe("membership verdict on a cache replay (#4532 round 6)", () => {
+		const inferredError = {
+			severity: 1,
+			message: "Cannot find name 'describe'.",
+			code: 2582,
+			range: {
+				start: { line: 0, character: 0 },
+				end: { line: 0, character: 8 },
+			},
+			source: "typescript",
+			serverId: "typescript",
+		};
+		const declaredGap = {
+			...inferredError,
+			message:
+				"Cannot find module 'left-pad' or its corresponding type declarations.",
+			code: 2307,
+		};
+		type ProbeAnswer = { executed: boolean; result?: unknown; reason?: string };
+		const inferred: ProbeAnswer = {
+			executed: true,
+			result: {
+				success: true,
+				body: { configFileName: "/dev/null/inferredProject1*" },
+			},
+		};
+		const noLiveClient: ProbeAnswer = {
+			executed: false,
+			reason: "no live LSP server for file",
+		};
+		const notOpened: ProbeAnswer = {
+			executed: true,
+			result: { success: false },
+		};
+		let probe: ReturnType<typeof vi.fn>;
+
+		function semanticsFor(file: string): string[] {
+			const call = reconcileScanDiagnostics.mock.calls
+				.filter((c) => c[0] === file)
+				.at(-1);
+			return ((call?.[1] ?? []) as Array<{ semantic: string }>).map(
+				(row) => row.semantic,
+			);
+		}
+
+		/** One fresh serve, then one replay with the probe answering `replay`. */
+		async function serveThenReplay(
+			rows: unknown[],
+			serve: ProbeAnswer,
+			replay: ProbeAnswer,
+			beforeReplay?: () => void,
+		): Promise<{ fresh: string[]; replayed: string[] }> {
+			const file = path.join(tmpDir, "spawn.test.ts");
+			fs.writeFileSync(file, "describe('x', () => {});\n");
+			touchFile.mockResolvedValue({
+				diags: rows.map((row) => ({ ...(row as object) })),
+			});
+			probe.mockResolvedValue(serve);
+			await runBatch([file]);
+			const fresh = semanticsFor(file);
+			beforeReplay?.();
+			probe.mockResolvedValue(replay);
+			reconcileScanDiagnostics.mockClear();
+			touchFile.mockClear();
+			await runBatch([file]);
+			// A replay, never a second touch.
+			expect(touchFile).not.toHaveBeenCalled();
+			return { fresh, replayed: semanticsFor(file) };
+		}
+
+		beforeEach(() => {
+			fs.writeFileSync(
+				path.join(tmpDir, "package.json"),
+				JSON.stringify({ dependencies: { "left-pad": "1.3.0" } }),
+			);
+			// Shape 73: an install above the fixture would make the gap cells vacuous.
+			expect(hasResolvableNodeModules(tmpDir)).toBe(false);
+			probe = vi.fn();
+			mocked.service = makeLspServiceDouble({
+				touchFile,
+				getDiagnostics: vi.fn().mockResolvedValue([]),
+				getDiagnosticsHealth: vi.fn().mockReturnValue(undefined),
+				getCapabilitySnapshots: vi.fn().mockResolvedValue([]),
+				ensureWarmForSweep: vi
+					.fn()
+					.mockResolvedValue({ performedWarmup: false }),
+				executeReadOnlyCommandOnLiveClient: probe,
+			});
+		});
+
+		it.each([
+			["no live client", noLiveClient],
+			["a file tsserver has not opened", notOpened],
+		])(
+			"keeps an inferred-project demotion when the replay's probe finds %s",
+			async (_label, replay) => {
+				const { fresh, replayed } = await serveThenReplay(
+					[inferredError],
+					inferred,
+					replay,
+				);
+				expect(fresh).toEqual(["warning"]);
+				expect(replayed).toEqual(["warning"]);
+			},
+		);
+
+		// State table cell 8: an environment gap in an inferred-project file. The
+		// environment rule demotes it first, so the displayed pass never asks for
+		// membership; the entry must still carry the file's membership verdict, or
+		// an install that leaves the package missing turns it blocking on a replay
+		// that cannot ask, though a live fresh touch would answer inferred.
+		it("keeps an inferred file's gap demoted after an install, when the replay cannot ask", async () => {
+			const { fresh, replayed } = await serveThenReplay(
+				[declaredGap],
+				inferred,
+				noLiveClient,
+				() =>
+					fs.mkdirSync(path.join(tmpDir, "node_modules", "other"), {
+						recursive: true,
+					}),
+			);
+			expect(fresh).toEqual(["warning"]);
+			expect(replayed).toEqual(["warning"]);
+		});
+
+		// Cells 10 and 11: a verdict unknown at the serve is not baked as one.
+		it("demotes on replay when membership was unknown at the serve and is answered now", async () => {
+			const { fresh, replayed } = await serveThenReplay(
+				[inferredError],
+				noLiveClient,
+				inferred,
+			);
+			expect(fresh).toEqual(["blocking"]);
+			expect(replayed).toEqual(["warning"]);
+		});
+
+		it("keeps a row blocking when membership is unknown at the serve and on the replay", async () => {
+			const { fresh, replayed } = await serveThenReplay(
+				[inferredError],
+				noLiveClient,
+				noLiveClient,
+			);
+			expect(fresh).toEqual(["blocking"]);
+			expect(replayed).toEqual(["blocking"]);
+		});
+	});
 });
