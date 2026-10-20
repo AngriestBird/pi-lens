@@ -43,9 +43,11 @@ snapshots; no additional telemetry sink is created.
 Read the monitored process's log directory, resolved by `getGlobalPiLensLogDir()`
 in `clients/probe-home-state.ts`: a non-empty `PI_LENS_HOME` wins, otherwise
 any applicable probe-home redirect, otherwise `~/.pi-lens`. Do not infer this
-from the monitor's own environment. The brief names the root; when it does
-not, read the monitored pid's environment (`/proc/<pid>/environ` on Linux,
-`ps eww -p <pid>` on macOS). Pass that directory as `--root` to
+from the monitor's own environment. The brief names the root. When it does
+not, a `PI_LENS_HOME` in the monitored pid's environment (`/proc/<pid>/environ`
+on Linux, `ps eww -p <pid>` on macOS) settles it; otherwise a probe-home
+redirect may have chosen the root from that process's working directory, so
+ask the orchestrator for the root instead of reading `~/.pi-lens`. Pass that directory as `--root` to
 `scripts/analyze-pi-lens-logs.mjs`, whose default is `~/.pi-lens`.
 
 - `latency.log` and `extension.log` (JSON lines; every row carries `pid`
