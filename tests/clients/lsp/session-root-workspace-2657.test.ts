@@ -18,11 +18,16 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { resolveAnalysisRoot } from "../../../clients/analysis-root.js";
 import { CacheManager } from "../../../clients/cache-manager.js";
 import {
 	getDegradationSummary,
 	resetDegradationLedger,
 } from "../../../clients/degradation-ledger.js";
+import {
+	ClientRegistry,
+	type ClientGenerationHooks,
+} from "../../../clients/lsp/client-registry.js";
 import {
 	initLSPConfig,
 	resetLSPConfigStateForTests,
@@ -117,6 +122,8 @@ afterEach(() => {
 	resetLSPService();
 	resetLSPConfigStateForTests();
 	env.cleanup();
+	for (const dir of adoptedRoots.splice(0))
+		fs.rmSync(dir, { recursive: true, force: true });
 });
 
 describe("a session root is a workspace (#2657)", () => {
@@ -170,4 +177,140 @@ describe("a session root is a workspace (#2657)", () => {
 		expect(getSessionRootsForTelemetry(200)).toContain(nested);
 		expect(isSessionRootRegistered(path.dirname(file))).toBe(false);
 	});
+
+	// #4532 round 3 (HIGH-3): registering the ADOPTED project root as a session
+	// root answers `session` from `analysisRootModeForFile` for every file in
+	// it — not only the one a call named — so `admitAdoptedRoot` is skipped and
+	// AGENTS.md's "Analysis-root invariant" (separate registry, cap two, no
+	// project-local executables) stops applying to the whole project. Red on
+	// the pre-fix resolver, which returned the analysis root for out-of-session
+	// files.
+	it("registers nothing for an adopted project and keeps its adopted class", async () => {
+		// The project sits beside the checkout, not inside the run's temp tree:
+		// a path under the pi-owned OS-temp tree is the intended-skip class
+		// (`isPiOwnedTempPath`), i.e. mode `none`, not an adopted project.
+		const adopted = adoptedProject();
+		fs.mkdirSync(path.join(adopted, "src"), { recursive: true });
+		fs.writeFileSync(path.join(adopted, "package.json"), "{}\n");
+		const file = path.join(adopted, "src", "index.ts");
+		fs.writeFileSync(file, "export const x = 1;\n");
+		// The sibling the call never names is the one the cap has to keep
+		// covering: on the pre-fix head it was `session` too.
+		const sibling = path.join(adopted, "src", "other.ts");
+		fs.writeFileSync(sibling, "export const y = 1;\n");
+		expect(resolveAnalysisRoot(file, workspace)).toBe("adopted");
+		const before = getSessionRootsForTelemetry(200);
+
+		await readCall(file, 901);
+
+		// No root was declared: not the project, not the edited directory.
+		expect(getSessionRootsForTelemetry(200)).toEqual(before);
+		expect(isSessionRootRegistered(adopted)).toBe(false);
+		expect(isSessionRootRegistered(path.dirname(file))).toBe(false);
+		// The registry still classifies the file — and its unnamed sibling — as
+		// adopted, so the adopted admission path is reached (it early-returns
+		// false for every other mode).
+		const registry = new ClientRegistry(noopHooks(), undefined, workspace);
+		expect(registry.analysisRootModeForFile(file)).toBe("adopted");
+		expect(registry.analysisRootModeForFile(sibling)).toBe("adopted");
+		expect(admit(registry, adopted, file)).toBe(true);
+	});
+
+	// The other half of the same branch (Lane A: "linked-worktree → register the
+	// worktree root"): a worktree of the session's own repository is a workspace
+	// of its own, so exactly one root is declared for it and its files keep the
+	// `linked-worktree` class. Green on the pre-fix head too — the old resolver
+	// already answered the worktree root for a sibling path — so this cell pins
+	// the narrowing rather than reding it: the adopted cell above is the red.
+	it("registers exactly one root for a linked worktree and keeps it linked-worktree", async () => {
+		const worktree = addLinkedWorktree(workspace, "wt");
+		const file = path.join(worktree, "src", "index.ts");
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(file, "export const x = 1;\n");
+		expect(resolveAnalysisRoot(file, workspace)).toBe("linked-worktree");
+		const before = getSessionRootsForTelemetry(200);
+
+		await readCall(file, 902);
+
+		const after = getSessionRootsForTelemetry(200);
+		expect(after).toHaveLength(before.length + 1);
+		expect(after).toContain(worktree);
+		expect(isSessionRootRegistered(path.dirname(file))).toBe(false);
+		const registry = new ClientRegistry(noopHooks(), undefined, workspace);
+		expect(registry.analysisRootModeForFile(file)).toBe("linked-worktree");
+	});
+
+	it("records no session root for a refused (none) path", async () => {
+		// A vendor path inside the session has no workspace to declare: the
+		// analysis root refuses it (`none`), and Lane A's rule registers nothing.
+		const file = path.join(workspace, "node_modules", "dep", "index.js");
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(file, "module.exports = 1;\n");
+		expect(resolveAnalysisRoot(file, workspace)).toBe("none");
+		const before = getSessionRootsForTelemetry(200);
+
+		await readCall(file, 903);
+
+		expect(getSessionRootsForTelemetry(200)).toEqual(before);
+		expect(isSessionRootRegistered(path.dirname(file))).toBe(false);
+	});
 });
+
+/**
+ * A linked worktree of `repo`, laid out the way `git worktree add` writes it:
+ * `<repo>/.git/worktrees/<name>/commondir`, and a `.git` FILE in the worktree
+ * naming that gitdir. Plain files, no git process — the classifier reads files
+ * only (`clients/review-graph/git-identity.ts`), the same fixture
+ * `client-registry-direct.test.ts` uses for the linked-worktree class.
+ */
+function addLinkedWorktree(repo: string, name: string): string {
+	const gitDir = path.join(repo, ".git", "worktrees", name);
+	fs.mkdirSync(gitDir, { recursive: true });
+	fs.writeFileSync(path.join(gitDir, "commondir"), "../..\n");
+	const worktree = path.join(repo, name);
+	fs.mkdirSync(worktree, { recursive: true });
+	fs.writeFileSync(path.join(worktree, ".git"), `gitdir: ${gitDir}\n`);
+	fs.writeFileSync(path.join(worktree, "package.json"), "{}\n");
+	return worktree;
+}
+
+const adoptedRoots: string[] = [];
+
+/**
+ * A marked project beside the checkout — the shape `resolveAnalysisRoot` calls
+ * `adopted` (the same `process.cwd()` fixture `analysis-root-writers.test.ts`
+ * and `client-registry-direct.test.ts` use). It must NOT sit in the run's
+ * pi-owned temp tree: `isPiOwnedTempPath` refuses that whole tree as mode
+ * `none`, which is a different cell.
+ */
+function adoptedProject(): string {
+	const root = fs.mkdtempSync(path.join(process.cwd(), ".probe-4532-adopted-"));
+	adoptedRoots.push(root);
+	return root;
+}
+
+/** The registry hooks are generation bookkeeping this cell never exercises. */
+function noopHooks(): ClientGenerationHooks {
+	const noop = () => {};
+	return {
+		releaseNotifyWrite: noop,
+		forgetReadiness: noop,
+		forgetNotifyBacklog: noop,
+		clearStallDemotion: noop,
+		rearmFirstContact: noop,
+		noteDiagnosticsPublished: noop,
+	};
+}
+
+/**
+ * `admitAdoptedRoot` is private; the review's probe reads it through the same
+ * cast `client-registry-direct.test.ts` uses. It answers `false` for every mode
+ * except `adopted`, so `true` proves the adopted path was reached (cap, idle
+ * window and the project-local-binary refusal all live behind it).
+ */
+const admit = (registry: ClientRegistry, root: string, file: string): boolean =>
+	(
+		registry as unknown as {
+			admitAdoptedRoot(root: string, filePath: string): boolean;
+		}
+	).admitAdoptedRoot(root, file);

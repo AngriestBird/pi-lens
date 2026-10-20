@@ -10,7 +10,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import {
 	type ChildProcess,
-	execFileSync,
 	spawn as nodeSpawn,
 	type SpawnOptions,
 } from "node:child_process";
@@ -363,53 +362,54 @@ function bypassPs1OnWindows(
 	return undefined;
 }
 
+/**
+ * Resolve a bare command name against the effective child PATH, IN PROCESS.
+ *
+ * #4532 round 3 (HIGH-2): this used to spawn `which`/`where`. A spawn resolves
+ * its OWN program through the same PATH it is asked to judge, from the cwd the
+ * server child is spawned with — so an adopted root that ships
+ * `node_modules/.bin/which` executed its own copy of the probe, wrote its
+ * marker, and could answer anything. A resolver the classified program can
+ * supply classifies nothing. The scan below runs in this process, over the
+ * PATH and the child cwd `launchLSP` already resolved, and consults no program
+ * the project can put on PATH.
+ *
+ * The kernel's rule (`execvp`) is the model: entries are searched in order, a
+ * RELATIVE entry is resolved against the CHILD's cwd (husky's generated
+ * `.husky/_/h` exports exactly `node_modules/.bin` for every git hook, and a
+ * caller's own `PATH=bin:$PATH` reaches it too), the first entry holding an
+ * executable file wins, and the result is absolute. Classifying where the
+ * child will exec is exactly what the analysis-root permission gate below
+ * needs; a resolution this function did not perform is one the child performs
+ * unclassified (#4248, #4299 R2-F1).
+ *
+ * Windows keeps its PATHEXT-aware in-process resolver
+ * (`resolveWindowsCommandForEnvironment`, the same `where`-equivalent
+ * `computeNeedsShell` already asks), so the `.cmd`/`.exe` suffix rules are
+ * unchanged. The in-process scan also removes the 5 s child-process bound the
+ * spawn needed (#1980): there is no probe binary left to hang.
+ */
 function findBinaryOnPath(
 	command: string,
 	env: NodeJS.ProcessEnv,
 	cwd: string,
 ): string | undefined {
-	try {
-		const result = execFileSync(isWindows ? "where" : "which", [command], {
-			encoding: "utf-8",
-			stdio: ["ignore", "pipe", "ignore"],
-			env,
-			// #4532: probe in the cwd the CHILD is spawned with, and return an
-			// absolute path. A relative PATH entry follows each spawn's own cwd
-			// (the rule `commandSearchReachesProject` already states for the
-			// repair seam), so the kernel resolves `node_modules/.bin` — husky's
-			// generated `.husky/_/h` exports exactly that entry for every git
-			// hook, and a caller's own `PATH=bin:$PATH` reaches it too — against
-			// the adopted root the server launches in. Probing from THIS
-			// process's cwd reported such a command as absent while the child
-			// exec'd `<root>/node_modules/.bin/<command>`, and the
-			// analysis-root permission gate below judges the string it got:
-			// a resolution this function did not perform is a resolution the
-			// child performs unclassified (#4248, #4299 R2-F1).
-			cwd,
-			// #1980 population sweep: this was the one synchronous
-			// child-process site in the repo with no bound at all. It runs on
-			// the LSP server spawn path, so an unresponsive `where`/`which` — a
-			// stale network PATH entry is the classic cause — parked the event
-			// loop with no ceiling, and read as ordinary compute in
-			// `loop_block`. 5s matches `isCommandAvailable`/`findCommand` in
-			// clients/safe-spawn.ts, which run these same two binaries.
-			timeout: 5000,
-		})
-			.split(/\r?\n/)
-			.map((line) => line.trim())
-			.filter(Boolean);
-		for (const candidate of result) {
-			// `which` echoes a relative PATH entry relative to ITS cwd, which is
-			// now the spawn cwd.
-			const absolute = path.isAbsolute(candidate)
-				? candidate
-				: path.resolve(cwd, candidate);
-			if (fs.existsSync(absolute)) {
-				return absolute;
-			}
+	if (isWindows) {
+		return resolveWindowsCommandForEnvironment(command, cwd, env)?.resolvedPath;
+	}
+	for (const entry of (env.PATH ?? "").split(path.delimiter)) {
+		// `path.resolve` covers both kernel rules: an absolute entry is kept,
+		// a relative one (and an EMPTY entry, which names the cwd) is resolved
+		// against the spawn cwd.
+		const dir = path.resolve(cwd, entry);
+		const candidate = path.join(dir, command);
+		try {
+			if (!fs.statSync(candidate).isFile()) continue;
+			fs.accessSync(candidate, fs.constants.X_OK);
+			return candidate;
+		} catch {
+			// Not in this entry: the kernel would move to the next one too.
 		}
-	} catch {
-		// ignore lookup failures
 	}
 	return undefined;
 }

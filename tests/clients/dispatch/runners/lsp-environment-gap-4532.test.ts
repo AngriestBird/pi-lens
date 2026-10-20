@@ -213,6 +213,28 @@ describe("a worktree with no dependency install (#4532)", () => {
 		});
 	});
 
+	// LOW-2 (round 3): the reported symptom was `🔴 STOP — 7 issue(s)` from the
+	// gap rows ALONE. The cell above stacks a real TS2322 beside them, so it
+	// proves a blocker survives, never that the STOP goes away. This is the
+	// reported shape with no real type error: only the environment-gap rows, so
+	// the whole result must be non-blocking.
+	it("reports the reported gap-only STOP shape as a warning, never a blocker", async () => {
+		rows = liveSessionRows().filter((row) => row.code !== 2322);
+		installService();
+		const result = await run();
+
+		expect(result.diagnostics).toHaveLength(rows.length);
+		expect(result.semantic).toBe("warning");
+		expect(
+			result.diagnostics.every((item) => item.semantic === "warning"),
+		).toBe(true);
+		expect(
+			result.diagnostics.filter((item) =>
+				item.message.includes(ENVIRONMENT_GAP_MARKER),
+			),
+		).toHaveLength(rows.length);
+	});
+
 	it("keeps a namespace gap blocking when the namespace is not NodeJS", async () => {
 		rows = [
 			{

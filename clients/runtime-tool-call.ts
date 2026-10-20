@@ -806,14 +806,17 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 			// evicted the project root itself — which carries the operator's
 			// `lsp.disabledServers` denial — and every dispatch walked a registry
 			// sized by directories. `resolveSessionConfigRoot` is the one owner of
-			// that rule (nearest `.pi-lens.json` owner at or below the session
-			// root; a linked worktree or eligible sibling project root for an
-			// out-of-session file; the session root otherwise).
+			// that rule: a `.pi-lens.json` owner at or below the session root, a
+			// linked worktree's own root, and NOTHING for an adopted or refused
+			// path — an adopted root is never a session root (AGENTS.md "Analysis-
+			// root invariant"), or the cap and its project-local-binary refusal
+			// stop applying to the whole project.
 			const sessionRoot = ctx.cwd ?? runtime.projectRoot ?? process.cwd();
 			const configCwd = filePath
 				? resolveSessionConfigRoot(filePath, sessionRoot)
 				: sessionRoot;
-			await ensureLSPConfigInitialized(configCwd);
+			// `undefined` is the adopted/none answer: no registration at all.
+			if (configCwd !== undefined) await ensureLSPConfigInitialized(configCwd);
 		} catch (cfgErr) {
 			dbg(`lsp config init failed during tool_call: ${cfgErr}`);
 		}

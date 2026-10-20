@@ -803,9 +803,9 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 	}, // :65
 	"clients/lsp/launch.ts": {
 		silent: 11,
-		identities: "679b905d4af5e7db",
+		identities: "e1182b429465b599",
 		reason: PRE_RULE,
-	}, // :97, :195, :294, :359, :392, :649, :655, :881, :1110, :1121, :1132
+	}, // :96, :194, :293, :358, :410, :668, :674, :900, :1129, :1140, :1151
 	"clients/lsp/lombok.ts": {
 		silent: 6,
 		identities: "a076d98b1826881f",

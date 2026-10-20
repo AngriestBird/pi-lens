@@ -266,17 +266,8 @@ export function demoteEnvironmentGapDiagnostics(
 		metadata: {
 			demoted: demoted.length - (diagnostics.length - admitted.size),
 			considered: diagnostics.length,
-			codes: [...counts.keys()].sort().join(","),
+			codes: [...counts.keys()].sort((a, b) => a - b).join(","),
 		},
 	});
 	return demoted;
-}
-
-/**
- * Whether this run should record that a root's install is missing for a
- * finding it demoted. The ledger's own once/count pair already bounds the
- * record, so this only names the seam's answer for a caller that wants to know.
- */
-export function environmentGapAdmitted(diagnostic: LSPDiagnostic): boolean {
-	return environmentGapKind(diagnostic) !== undefined;
 }

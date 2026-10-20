@@ -588,8 +588,11 @@ async function lookOnce(
 		metadata: {
 			trigger,
 			restarted,
-			// Which caller looked: the session-cwd root, or a live client's root
-			// (#4532). Both write the same record and the same row.
+			// Which look produced this row: the root's FIRST look (no record yet,
+			// so only `since` can make it publish — the #4532 live-client epoch)
+			// or a later look compared against the recorded stamp. Both the
+			// session-cwd root and a live client's root write the same record,
+			// so this names the look, not the caller.
 			scope: prior === undefined ? "first-look" : "recorded",
 			created: count(1),
 			changed: count(2),

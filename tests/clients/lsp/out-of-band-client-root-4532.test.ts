@@ -40,6 +40,11 @@ import {
 import { configureLspServiceLifecycle } from "../../../clients/lsp/service-singleton.js";
 import { workspaceFileCreatedAtFor } from "../../../clients/lsp/workspace-diagnostics-session.js";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
+import { lookForOutOfBandChanges } from "../../../clients/out-of-band-changes.js";
+import {
+	getRecentLoggedPhases,
+	_setRecentPhasesForTest,
+} from "../../../clients/latency-logger.js";
 import { RuntimeCoordinator } from "../../../clients/runtime-coordinator.js";
 import { handleToolResult } from "../../../clients/runtime-tool-result.js";
 import { makeLspServiceDouble } from "../../support/lsp-service-double.js";
@@ -129,6 +134,9 @@ beforeEach(() => {
 	restarts = [];
 	clientRoots = [];
 	resetDegradationLedger();
+	// The recent-phase ring is process-wide and `resetDegradationLedger` does
+	// not clear it, so the scope cells would otherwise read a sibling case's row.
+	_setRecentPhasesForTest([]);
 });
 
 afterEach(() => {
@@ -213,6 +221,32 @@ describe("the install look at a live client root (#4532 gap 7)", () => {
 		);
 	});
 
+	// LOW-1 (round 3): the row's `scope` metadata is the observable that says a
+	// publish came from a FIRST look (only a named live-client epoch can make
+	// that publish, #4532) or from a later look compared against the record.
+	// Nothing read it, so the field and its comment asserted different things.
+	it("labels its row as first-look or recorded (#4532 LOW-1)", async () => {
+		const root = path.join(env.tmpDir, "scope-root");
+		fs.mkdirSync(path.join(root, "src"), { recursive: true });
+		fs.writeFileSync(path.join(root, "package.json"), "{}\n");
+		// An install younger than the client's epoch: a FIRST look publishes it.
+		const spawnedAt = Date.now() - 60_000;
+		const lockfile = path.join(root, "package-lock.json");
+		fs.writeFileSync(lockfile, '{"lockfileVersion":3}\n');
+		installService();
+
+		await lookForOutOfBandChanges(root, "tool_call", runtime, {
+			since: spawnedAt,
+		});
+		expect(latestScope()).toBe("first-look");
+
+		// A later look compared against that record is the recorded shape.
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		fs.writeFileSync(lockfile, '{"lockfileVersion":3,"packages":{}}\n');
+		await lookForOutOfBandChanges(root, "tool_call", runtime);
+		expect(latestScope()).toBe("recorded");
+	});
+
 	it("records the client-root look cap instead of silently skipping the rest", async () => {
 		clientRoots = Array.from({ length: 6 }, (_, index) => ({
 			root: path.join(env.tmpDir, `project-${index}`),
@@ -231,3 +265,11 @@ describe("the install look at a live client root (#4532 gap 7)", () => {
 		expect(capped[0].count).toBe(1);
 	});
 });
+
+/** The newest `lsp_out_of_band_change` row's `scope`, read from the process ring. */
+function latestScope(): unknown {
+	const row = getRecentLoggedPhases().find(
+		(entry) => entry.phase === "lsp_out_of_band_change",
+	);
+	return row?.metadata?.scope;
+}

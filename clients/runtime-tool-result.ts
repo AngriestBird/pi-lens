@@ -2154,8 +2154,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		// epoch, so a FIRST look at that root publishes an install the client never
 		// read instead of recording it as the baseline. It runs before the primary
 		// resync below, so a restart lands before the resend.
-		const clientRoots =
-			headScanRoot === undefined ? [] : liveClientRootsApartFrom(headScanRoot);
+		const clientRoots = liveClientRootsApartFrom(headScanRoot);
 		if (clientRoots.length > 0) {
 			const lookSignal = deps.signal ?? undefined;
 			await bounded(

@@ -410,6 +410,54 @@ describe("real wrapper effective compiler trust (#4299)", () => {
 			restorePath();
 		}
 	});
+	it("never runs a project-supplied which while resolving a bare server command (#4532 HIGH-2)", async () => {
+		// Round 2 moved the probe's cwd into the SPAWN cwd and used `which` from
+		// PATH — so the probe's own binary resolved through the same untrusted
+		// PATH and cwd it was added to judge. An adopted root shipping
+		// `node_modules/.bin/which` ran its own copy of the resolver, wrote its
+		// marker, and could answer anything: here it echoes the bare name, the
+		// launcher keeps the unresolved token, the permission gate has nothing to
+		// refuse, and the child execs the adopted root's `vscode-html-language-server`
+		// shim. The launcher now scans PATH in process; neither marker may appear.
+		const session = path.join(tmp, "session");
+		project(session);
+		const root = path.join(tmp, "adopted");
+		const file = path.join(root, "index.html");
+		project(root);
+		fs.writeFileSync(file, "<p>hello</p>");
+		const hostile = nativeCompilerTree(root, "hostile-which");
+		const suffix = process.platform === "win32" ? ".cmd" : "";
+		const bin = path.join(root, "node_modules", ".bin");
+		const command = path.join(bin, `vscode-html-language-server${suffix}`);
+		fs.copyFileSync(`${hostile.tsc}${suffix}`, command);
+		fs.chmodSync(command, 0o755);
+		const probeMarker = path.join(root, "hostile-which.marker");
+		const probe = path.join(
+			bin,
+			process.platform === "win32" ? "where.cmd" : "which",
+		);
+		fs.writeFileSync(
+			probe,
+			process.platform === "win32"
+				? `@echo off\r\necho ran> "${probeMarker}"\r\necho %1\r\n`
+				: `#!/bin/sh\necho ran > "${probeMarker}"\necho "vscode-html-language-server"\n`,
+		);
+		fs.chmodSync(probe, 0o755);
+		selectedServer.value = "html";
+		expect(resolveAnalysisRoot(file, session)).toBe("adopted");
+		process.chdir(session);
+		setProjectTrustState("trusted");
+		const restorePath = withEnv({
+			PATH: `node_modules/.bin${path.delimiter}${process.env.PATH ?? ""}`,
+		});
+		try {
+			expect(await attach(session, root, file)).toBeUndefined();
+			expect(fs.existsSync(probeMarker)).toBe(false);
+			expect(fs.existsSync(hostile.marker)).toBe(false);
+		} finally {
+			restorePath();
+		}
+	});
 	it("forces an absolute managed compiler through the real wrapper under unknown trust", async () => {
 		const root = path.join(tmp, "project");
 		const file = project(root);

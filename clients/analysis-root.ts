@@ -140,49 +140,54 @@ export function canWriteAnalysisRoot(mode: AnalysisRootMode): boolean {
 }
 
 /**
- * #2657: the root a session should REGISTER for `filePath`, declared as one
- * workspace rather than one directory.
+ * #2657 + #4242: the root a session should REGISTER for `filePath`, or
+ * `undefined` when this file's mode must register NOTHING.
  *
  * Pre-fix, the `tool_call` seam registered `path.dirname(filePath)`, so a
  * session touching 128 directories cycled the FIFO(128) session-root registry
  * and evicted the project root — which carries the operator's
  * `lsp.disabledServers` denial — until something re-registered it, and
  * `getConfigForFile` walked a population that grew with the number of
- * directories an agent happened to touch.
+ * directories an agent happened to touch. Registering the file's WORKSPACE
+ * fixes that population, but only for the modes that may declare one
+ * (`resolveAnalysisRoot` is the answer, this function only routes it):
  *
- * The rule, in the order it answers (STATE_TABLE.md's #2657 table):
+ * - `session` → the NEAREST directory at or above the file that holds a
+ *   `.pi-lens.json`/`pi-lens.json`, never above the session root, else the
+ *   session root. The config loader layers upward from the registered root, so
+ *   that root must sit at or below the nearest config owner or a nested config
+ *   stops applying;
+ * - `linked-worktree` → the linked worktree's OWN root, so per-worktree
+ *   isolation is preserved (maintainer decision on #1129);
+ * - `adopted` / `none` → `undefined`, i.e. register nothing.
  *
- * 1. a file OUTSIDE the session root belongs to whatever
- *    {@link resolveAnalysisRootPath} says owns it (a linked worktree, or an
- *    eligible sibling project), because that function is the sole classifier
- *    for out-of-session edits; a refused file contributes the session root, so
- *    a vendor or `$HOME` path cannot widen the #2052 gate;
- * 2. a file INSIDE the session root registers the NEAREST directory at or above
- *    its own that holds a `.pi-lens.json`/`pi-lens.json`, never above the
- *    session root. The config loader layers upward from the registered root, so
- *    that root must sit at or below the nearest config owner or a nested config
- *    stops applying;
- * 3. otherwise the session root itself.
- *
- * The population is therefore O(workspaces + nested config owners), not
- * O(directories touched). A linked worktree stays its own workspace root, so
- * per-worktree isolation is preserved (maintainer decision on #1129).
+ * The last line is the analysis-root invariant (AGENTS.md): an adopted root is
+ * separate from session roots, capped at two with idle eviction, and never
+ * reaches project-local executables by default. Registering one here answers
+ * `session` from `ClientRegistry.analysisRootModeForFile`, which skips
+ * `admitAdoptedRoot` — voiding the cap, the idle window, and the
+ * project-local-binary refusal for the whole adopted project, not just the
+ * directory a call named. #2657's population argument does not need it:
+ * `session` and `linked-worktree` are the modes that carry session bookkeeping.
  */
 export function resolveSessionConfigRoot(
 	filePath: string,
 	sessionRoot: string,
 	homeDirOverride?: string,
-): string {
+): string | undefined {
 	const session = nodePath.resolve(sessionRoot);
-	const start = nodePath.dirname(nodePath.resolve(filePath));
-	if (!isUnderDir(start, session)) {
-		// Out of session: the analysis root owns eligibility, and a refused path
-		// (vendor, $HOME or above, tmp, pi-lens internal) must not declare a new
-		// served root — it contributes the session's own root instead.
+	const mode = resolveAnalysisRoot(filePath, session, homeDirOverride);
+	if (mode === "linked-worktree") {
+		const checkout = resolveGitCheckout(session);
 		return (
-			resolveAnalysisRootPath(filePath, session, homeDirOverride) ?? session
+			(checkout &&
+				resolveLinkedWorktreeOwner(checkout, realPathOrResolved(filePath))
+					?.root) ??
+			session
 		);
 	}
+	if (mode !== "session") return undefined;
+	const start = nodePath.dirname(nodePath.resolve(filePath));
 	for (const dir of walkUpDirs(start)) {
 		if (dir !== session && !isUnderDir(dir, session)) break;
 		if (findPiLensConfigInDir(dir)) return dir;
