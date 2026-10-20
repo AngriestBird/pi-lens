@@ -76,6 +76,7 @@ import {
 	createReadToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { runHandlerExpectingNoThrow } from "../support/handler-verdict.js";
+import { gitExecFileSync } from "../support/git-fixture-env.js";
 
 const readFileSyncSpy = vi.hoisted(() => vi.fn());
 vi.mock("node:fs", async (importOriginal) => {
@@ -226,6 +227,112 @@ it("keeps intended vendor skips silent (#4218)", async () => {
 		expect(consumeAgentNudge(undefined, runtime.sessionScope)).toBeUndefined();
 	} finally {
 		env.cleanup();
+	}
+});
+
+it("announces a linked-worktree edit the pipeline found nothing in (#2050 AC3)", async () => {
+	resetDegradationLedger();
+	const env = setupTestEnvironment("pi-lens-2050-worktree-delivery-");
+	// A real linked worktree of the session's own checkout, and a checkout that
+	// is a DIRECT child of the temp root with no `pi-lens-` prefix: a pi-owned
+	// temp path is the intended-skip class, not the linked-worktree class the
+	// delivery rung is about (#4560). Removed here, so the widened tmp-root
+	// census never sees a leftover.
+	const checkoutRoot = path.join(
+		env.tmpDir,
+		"..",
+		`capture-2050-worktree-${process.pid}`,
+	);
+	const repo = path.join(checkoutRoot, "repo");
+	const worktree = path.join(checkoutRoot, "repo-wt");
+	fs.mkdirSync(repo, { recursive: true });
+	fs.writeFileSync(path.join(repo, "package.json"), "{}\n");
+	gitExecFileSync("git", ["init", "-q"], { cwd: repo });
+	gitExecFileSync("git", ["add", "package.json"], { cwd: repo });
+	gitExecFileSync("git", ["commit", "-q", "-m", "seed"], {
+		cwd: repo,
+		env: {
+			GIT_AUTHOR_NAME: "t",
+			GIT_AUTHOR_EMAIL: "t@t.t",
+			GIT_COMMITTER_NAME: "t",
+			GIT_COMMITTER_EMAIL: "t@t.t",
+		},
+	});
+	gitExecFileSync("git", ["worktree", "add", "-q", worktree], { cwd: repo });
+	const worktreeFile = path.join(worktree, "src", "sibling.ts");
+	fs.mkdirSync(path.dirname(worktreeFile), { recursive: true });
+	fs.writeFileSync(worktreeFile, "export const value = 1;\n");
+	const runtime = new RuntimeCoordinator();
+	const pipelineResult = (output: string) => ({
+		output,
+		hasBlockers: false,
+		isError: false,
+		fileModified: false,
+	});
+	const editResult = () =>
+		({
+			event: {
+				toolName: "edit",
+				input: { path: worktreeFile },
+				content: [{ type: "text", text: "ok" }],
+			},
+			getFlag: () => false,
+			dbg: () => {},
+			runtime,
+			cacheManager: new CacheManager(false),
+			resetLSPService: () => {},
+			readGuard: runtime.readGuard,
+			agentBehaviorRecord: () => [],
+			formatBehaviorWarnings: () => "",
+		}) as never;
+	try {
+		runtime.projectRoot = repo;
+		expect(resolveAnalysisRoot(worktreeFile, repo)).toBe("linked-worktree");
+		vi.mocked(runPipeline).mockResolvedValue(pipelineResult(""));
+
+		await handleToolResult(editResult());
+
+		// One bounded row names the root the session analysed, so "the analysis
+		// ran on a worktree foreign to the session" is not only in latency.log.
+		const worktreeRows = getDegradationSummary().filter(
+			(entry) => entry.kind === "tool-result-linked-worktree",
+		);
+		expect(worktreeRows).toHaveLength(1);
+		expect(worktreeRows[0]?.latestReasons[0]?.subject).toContain(
+			path.basename(worktree),
+		);
+		// The run produced nothing, so silence would be ambiguous: the agent is
+		// told the analysis RAN and found nothing.
+		expect(
+			consumeAgentNudge(undefined, runtime.sessionScope)?.messages,
+		).toEqual([
+			expect.objectContaining({
+				content: expect.stringContaining(path.basename(worktree)),
+			}),
+		]);
+		expect(consumeAgentNudge(undefined, runtime.sessionScope)).toBeUndefined();
+
+		// Bounded: a second silent run in the same worktree is covered by the
+		// first row and advisory, not by a second pair.
+		await handleToolResult(editResult());
+		expect(
+			getDegradationSummary().filter(
+				(entry) => entry.kind === "tool-result-linked-worktree",
+			),
+		).toHaveLength(1);
+		expect(consumeAgentNudge(undefined, runtime.sessionScope)).toBeUndefined();
+
+		// A run that produced a finding is its own statement: no advisory.
+		resetDegradationLedger();
+		vi.mocked(runPipeline).mockResolvedValue(
+			pipelineResult("src/sibling.ts:1:1 lint: unused value"),
+		);
+		await handleToolResult(editResult());
+		expect(consumeAgentNudge(undefined, runtime.sessionScope)).toBeUndefined();
+	} finally {
+		vi.mocked(runPipeline).mockReset();
+		env.cleanup();
+		fs.rmSync(checkoutRoot, { recursive: true, force: true });
 	}
 });
 

@@ -1713,6 +1713,18 @@ export type DegradationKind =
 	| "tool-result-adopted-project"
 	/** A project edit was outside the session root and skipped analysis (#4218). */
 	| "tool-result-outside-project-root"
+	/**
+	 * An edit in a linked worktree of this repository was analysed with the full
+	 * pipeline. Once per worktree root per session: the row exists so "analysis
+	 * ran and the root was foreign to the session" is never only in `latency.log`
+	 * (#2050 AC3).
+	 */
+	| "tool-result-linked-worktree"
+	/**
+	 * That analysis produced no finding at all, so the agent gets one advisory
+	 * instead of an ambiguous silence. Once per worktree root per session.
+	 */
+	| "tool-result-linked-worktree-clean"
 	/** #3612: a lazy-tool activation arrived before its activation's session scope began. */
 	| "tool-set-scope-unavailable"
 	/**

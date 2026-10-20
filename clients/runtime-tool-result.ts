@@ -3741,6 +3741,39 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		}
 	}
 
+	// #2050 AC3 / #2657: `linked-worktree` is a WRITABLE class
+	// (`canWriteAnalysisRoot`), so the pipeline above ran the full set — format,
+	// autofix, LSP touch/sync and dispatch. That makes it the one class whose
+	// silence is ambiguous: the agent saw a real analysis and heard nothing,
+	// which it cannot tell apart from "analysis never ran". Record one bounded
+	// row per (mode, root) per session, and state it when a run produced no
+	// finding. The findings themselves are the statement when there are any.
+	if (analysisRootMode === "linked-worktree") {
+		const worktreeRoot = resolveAnalysisRootPath(filePath, workspaceRoot);
+		if (worktreeRoot) {
+			recordDegradationOnce({
+				kind: "tool-result-linked-worktree",
+				subject: worktreeRoot,
+				reason: `analysed a linked worktree of this repository: ${worktreeRoot}`,
+			});
+			const producedFindings =
+				result.hasBlockers || result.isError || result.output.trim() !== "";
+			if (resultLive && !producedFindings) {
+				const firstSilentRun = recordDegradationOnce({
+					kind: "tool-result-linked-worktree-clean",
+					subject: worktreeRoot,
+					reason: `a linked-worktree edit produced no finding: ${filePath}`,
+				});
+				if (firstSilentRun) {
+					queueAgentAdvisory(
+						`pi-lens analysed the edit at ${filePath} in the linked worktree ${worktreeRoot} (full LSP, formatting, autofix and dispatch) and found nothing to report.`,
+						writeSession,
+					);
+				}
+			}
+		}
+	}
+
 	if (result.isError) {
 		return {
 			content: [...event.content, { type: "text", text: result.output }],

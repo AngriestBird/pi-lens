@@ -2,6 +2,7 @@ import * as nodeFs from "node:fs";
 import * as path from "node:path";
 import { loadBootstrapClients, requestBootstrapClients } from "./bootstrap.js";
 import type { CacheManager } from "./cache-manager.js";
+import { resolveSessionConfigRoot } from "./analysis-root.js";
 import { recordDegradationOnce } from "./degradation-ledger.js";
 import { detectFileKind } from "./file-kinds.js";
 import { isPathIgnoredByProject } from "./file-utils.js";
@@ -799,10 +800,17 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 
 	if (!getFlag("no-lsp")) {
 		try {
-			const configCwd = filePath
-				? path.dirname(filePath)
-				: (ctx.cwd ?? runtime.projectRoot ?? process.cwd());
-			await ensureLSPConfigInitialized(configCwd);
+			// #2657: the session registers a WORKSPACE, and the owning class
+			// decides whether it registers at all. This seam answered with a raw
+			// `path.dirname(filePath)`, so every touched directory became a root
+			// (cycling the FIFO(128) registry out from under the operator's
+			// `lsp.disabledServers` denial) and an adopted project was laundered
+			// into a session root.
+			const sessionRoot = ctx.cwd ?? runtime.projectRoot ?? process.cwd();
+			const configRoot = filePath
+				? resolveSessionConfigRoot(filePath, sessionRoot).register
+				: sessionRoot;
+			if (configRoot) await ensureLSPConfigInitialized(configRoot);
 		} catch (cfgErr) {
 			dbg(`lsp config init failed during tool_call: ${cfgErr}`);
 		}
