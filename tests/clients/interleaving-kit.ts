@@ -1,6 +1,7 @@
 /** Small, deterministic coordination helpers for concurrency tests. */
 
 import { inspect } from "node:util";
+import { testTimeoutScale } from "../support/test-timeout-scale.js";
 
 type SpyLike<T extends (...args: any[]) => any> = {
 	mockImplementation(implementation: T): unknown;
@@ -19,16 +20,6 @@ export type WaitForOptions = {
 	intervalMs?: number;
 	yieldControl?: () => Promise<void>;
 };
-
-/**
- * The wall-budget multiplier CI sets on a loaded runner (#4437). Parsed like
- * `tests/clients/bounded-pid-file-lock.test.ts` and `tests/mcp/harness.ts`;
- * read per call so a probe can stub the env.
- */
-function testTimeoutScale(): number {
-	const parsed = Number(process.env.PI_LENS_TEST_TIMEOUT_SCALE ?? "1");
-	return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
-}
 
 function budgetNote(budgetMs: number, unscaledMs: number, scale: number) {
 	return `budget ${budgetMs}ms = ${unscaledMs}ms x PI_LENS_TEST_TIMEOUT_SCALE ${scale}`;
