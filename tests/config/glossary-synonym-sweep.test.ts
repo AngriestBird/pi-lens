@@ -1145,7 +1145,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// owned mutation path through the shared path helper.
 		// 23 -> 22 (#4187 R5): the fold onto the observational net's arm drops
 		// the single-path branches, and with them the `input.path` read.
-		"clients/runtime-tool-call.ts": 22,
+		// 22 -> 21 (#2657): the LSP config root for an edit is no longer a
+		// `path.dirname(filePath)`; `resolveSessionConfigRoot` answers it.
+		"clients/runtime-tool-call.ts": 21,
 		// 22 -> 20 (#3650): the tool_result path read is routed through
 		// readToolResultPathField; the open-coded input.path cast is gone.
 		// 19 -> 18 (#4576): the tool_result path resolves through
