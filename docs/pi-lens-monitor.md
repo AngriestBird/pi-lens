@@ -43,6 +43,11 @@ snapshots; no additional telemetry sink is created.
 - `~/.pi-lens/latency.log` and `~/.pi-lens/extension.log` (JSON lines; every
   row carries `pid` and `ts`). The session is the `pid` the brief names, or the
   newest pid with rows in the last hour when the brief says "live".
+- `~/.pi-lens/cascade.log` (JSON lines with `ts`, `phase`, and `filePath`,
+  but no `pid` or `type`). Use the selected time window and `filePath` to
+  narrow by project. Label counts as project/time-window evidence, not
+  pid-attributed evidence; flag shared-project and non-path rows as
+  attribution-ambiguous.
 - The previous readout for the same project when one exists (an issue comment
   the brief links, or a file under the scratch directory). Every number is
   reported as a delta against it when available.
@@ -51,8 +56,14 @@ snapshots; no additional telemetry sink is created.
 
 1. **Session line**: pid, project root, first/last row timestamps, row count,
    pi-lens version if a session-start row carries it.
-2. **Phase table**: for every `type:"phase"` value, `n | p50 | p95 | max |
-   total_ms`, sorted by total, top 15. Durations in ms, from `durationMs`.
+2. **Phase table**: group `latency.log` rows with `type:"phase"` and
+   `cascade.log` rows by `source | phase`. Report `n | timed_n | p50 | p95 |
+   max | total_ms`, sorted by total, top 15. Count every row in `n`; compute
+   timing columns only from numeric `durationMs`, in ms, with `timed_n`
+   showing that sample count. Show `-` when no durations exist. List count-only
+   phases separately so the timing top 15 cannot hide `cascade_carry_rendered`;
+   include its `metadata.carriedRunsRendered` and `metadata.labeledAdvisories`
+   totals.
 3. **Bounds reached at p50** (shape 41): every phase whose p50 is within 10%
    of a declared budget or timeout in its metadata (`budgetMs`, `timeoutMs`,
    `elapsedMs` ≈ budget). Name the constant when it is known
@@ -154,7 +165,7 @@ snapshots; no additional telemetry sink is created.
   issue the brief names, never a new issue: the orchestrator decides what
   becomes a lane.
 - A worker that finds the logs empty or the pid absent reports exactly that
-  with the `ls -la` of the two files and stops.
+  with the `ls -la` of the three log files and stops.
 
 ## Deliverable
 
