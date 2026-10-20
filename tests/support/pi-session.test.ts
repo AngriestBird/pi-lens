@@ -10,7 +10,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
-import { flushAllNdjsonWriters } from "../../clients/ndjson-logger.js";
 import {
 	getActivePrimaryRoot,
 	getActiveSessionId,
@@ -174,15 +173,15 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 
 		// The row the copy's writer queued is on disk under the home the copy
 		// pinned — the sink a later case would read, settled when `dispose()`
-		// returns.
-		const latencyLog = path.join(process.env.PI_LENS_HOME ?? "", "latency.log");
-		await flushAllNdjsonWriters();
-		const rows = fs
-			.readFileSync(latencyLog, "utf8")
-			.split("\n")
-			.filter(Boolean)
-			.map((line) => JSON.parse(line) as { phase?: string });
-		expect(rows.some((row) => row.phase === "session_start_total")).toBe(true);
+		// returns. `latencyRows()` is the helper's own accessor: it flushes the
+		// process-global writer map (the copy's writers are in it) and reads the
+		// home the copy pinned, so no case has to spell either path.
+		const rows = await handle.latencyRows();
+		expect(
+			rows.some(
+				(row) => (row as { phase?: string }).phase === "session_start_total",
+			),
+		).toBe(true);
 	});
 
 	it("refuses a manual compaction the fixture transcript is too small for", async () => {

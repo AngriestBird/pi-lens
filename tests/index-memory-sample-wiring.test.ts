@@ -1,107 +1,95 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createPiMock } from "./support/pi-mock.js";
+/**
+ * Wiring guard for the #1123 item 2 periodic memory sample: the extension emits
+ * exactly one `memory_sample` latency record every `MEMORY_SAMPLE_TURN_INTERVAL`
+ * turns (the coordinator's turn index, bumped by the host's `turn_start`),
+ * never on turns in between and never on turn 0.
+ *
+ * Slice 8 of #4632 moved this off `tests/support/pi-mock.ts` onto tier 2
+ * (`tests/support/pi-session.ts`): a real pi `AgentSession` over the BUILT
+ * extension, driven by real prompts, with pi-ai's `fauxProvider` at the
+ * provider boundary. The record is read from the sink the LOADED copy's own
+ * writer queued, so the cadence is asserted against a run of real turns rather
+ * than against a handler this test invoked itself. The old double stubbed
+ * `handleTurnEnd` and captured `logLatency`; both are gone, so a turn that
+ * never reaches the production path cannot pass here.
+ *
+ * WHAT EACH CASE ASSERTS (#4632 "shape or processing"):
+ *
+ * - `processing`: the host's turn loop, at the sampler's own interval, produces
+ *   the record — turns 1–9 produce none.
+ * - `shape`: the record the loaded copy wrote — `phase`, `metadata.turnIndex`,
+ *   the process block and the session block (#1999's session-age/turn-count
+ *   ridealong).
+ * - `processing`: the cadence, not a one-shot — turn 20 writes the second one.
+ */
+import * as path from "node:path";
+import { describe, expect, it } from "vitest";
+import {
+	fauxText,
+	piSessionFixture,
+	startPiSession,
+	type PiSession,
+} from "./support/pi-session.js";
 
-// Wiring guard for the #1123 item 2 periodic memory sample: turn_end MUST
-// emit exactly one `memory_sample` latency.log phase every
-// MEMORY_SAMPLE_TURN_INTERVAL turns (runtime.turnIndex, bumped by turn_start's
-// beginTurn()), never on turns in between and never on turn 0. This lives at
-// the index.ts wiring seam (not clients/memory-sampler.ts's own unit tests)
-// because the fact under test is "turn_end actually calls
-// shouldEmitMemorySample/buildMemorySample/logLatency together at the right
-// cadence" — a fact only observable by driving the real turn_start/turn_end
-// handlers index.ts registers.
+const fixture = piSessionFixture();
 
-const latencyCalls: Array<Record<string, unknown>> = [];
-vi.mock("../clients/latency-logger.js", async (importActual) => {
-	const actual =
-		await importActual<typeof import("../clients/latency-logger.js")>();
-	return {
-		...actual,
-		logLatency: (entry: Record<string, unknown>) => {
-			latencyCalls.push(entry);
-		},
-	};
-});
+/** The sampler's interval, as the record's own `turnIndex` reports it. */
+const MEMORY_SAMPLE_TURN_INTERVAL = 10;
 
-// Heavy turn_end tail is separately tested; stub to keep this a wiring check.
-vi.mock("../clients/bootstrap.js", async () => {
-	const { bootstrapSeamMock } = await import("./support/bootstrap-mock.js");
-	return bootstrapSeamMock(async () => ({
-		metricsClient: { reset: () => {} },
-		knipClient: { isAvailable: () => false },
-		depChecker: { isAvailable: () => false },
-		testRunnerClient: { detectRunner: () => null },
-		deadCodeClients: [],
-	}));
-});
-vi.mock("../clients/runtime-turn.js", () => ({
-	handleTurnEnd: vi.fn(async () => undefined),
-	cancelLSPIdleReset: vi.fn(),
-}));
-
-const memorySamples = () =>
-	latencyCalls.filter((e) => e.phase === "memory_sample");
-
-const turnCtx = {
-	cwd: process.cwd(),
-	ui: {
-		notify: vi.fn(),
-		setStatus: () => {},
-		theme: { fg: (_c: string, s: string) => s },
-	},
-};
-
-async function driveTurns(count: number) {
-	const { default: registerExtension } = await import("../index.js");
-	const mock = createPiMock({ "lens-lsp": true });
-	registerExtension(mock.asExtensionAPI() as never);
-	const turnStart = mock.getHandlers("turn_start")[0];
-	const turnEnd = mock.getHandlers("turn_end")[0];
-	expect(turnStart).toBeTypeOf("function");
-	expect(turnEnd).toBeTypeOf("function");
-	for (let i = 0; i < count; i++) {
-		await turnStart?.({}, turnCtx as never);
-		await turnEnd?.({}, turnCtx as never);
-	}
-	return mock;
+/** One `memory_sample` row per turn the sampler considered. */
+function samplesIn(rows: readonly Record<string, unknown>[]) {
+	return rows.filter((row) => row.phase === "memory_sample");
 }
 
-// #1778: each case drives `driveTurns`, which pays a COLD
-// `import("../index.js")` after `vi.resetModules()` in `beforeEach` —
-// deliberate, not accidental. index.ts carries turn-scoped module state
-// (runtime.turnIndex), which is exactly what this wiring guard checks
-// (cadence across turns). Sharing one import across cases would defeat the
-// isolation the tests exist to prove, so the fix is a timeout budget, not a
-// hoisted import (matching #1772/#1779's index-loop-block-wiring fix and
-// this repo's HEAVY_IO_TIMEOUT_MS convention,
-// tests/clients/ast-grep-rule-precedence-followups.test.ts:210).
+/**
+ * Run `turns` real turns and return the `memory_sample` rows THIS run produced.
+ * The file shares one pinned home, so a case diffs against the rows already
+ * there: `latencyRows()` returns them in write order and a prompt only appends.
+ */
+async function driveTurns(
+	handle: PiSession,
+	turns: number,
+): Promise<Array<Record<string, unknown>>> {
+	const before = (await handle.latencyRows()).length;
+	for (let turn = 0; turn < turns; turn += 1) {
+		// One scripted reply per turn, so `prompt` resolves on a real request.
+		await handle.prompt(`turn ${turn + 1}`);
+	}
+	return samplesIn((await handle.latencyRows()).slice(before));
+}
+
+async function startSession(turns: number): Promise<PiSession> {
+	return startPiSession({
+		root: fixture.root,
+		// One project directory per case keeps the session state of a case
+		// out of its neighbours' project data.
+		cwd: path.join(fixture.root, `memory-sample-${turns}`, "proj"),
+		responses: Array.from({ length: turns }, () => fauxText("ok")),
+	});
+}
+
+// #1778: the cold `index.js` import this file used to pay is gone with the
+// double, but a 20-turn case still starts a session, loads the built copy and
+// writes its own project state, so the budget stays generous.
 const MEMORY_SAMPLE_WIRING_TIMEOUT_MS = 30_000;
 
 describe(
-	"index turn_end memory_sample wiring (#1123 item 2)",
-	{
-		timeout: MEMORY_SAMPLE_WIRING_TIMEOUT_MS,
-	},
+	"turn_end memory_sample cadence through the real session (#1123 item 2)",
+	{ timeout: MEMORY_SAMPLE_WIRING_TIMEOUT_MS },
 	() => {
-		beforeEach(() => {
-			vi.resetModules();
-			latencyCalls.length = 0;
-		});
-		afterEach(() => {
-			vi.clearAllMocks();
-		});
-
-		it("emits nothing before turn 10 (runtime.turnIndex bumped by turn_start)", async () => {
-			await driveTurns(9);
-			expect(memorySamples()).toHaveLength(0);
+		it("emits nothing before turn 10 (the host's turn_start bumps the index)", async () => {
+			const handle = await startSession(MEMORY_SAMPLE_TURN_INTERVAL - 1);
+			const samples = await driveTurns(handle, MEMORY_SAMPLE_TURN_INTERVAL - 1);
+			// `processing`: nine real turns reach the sampler, which declines.
+			expect(samples).toHaveLength(0);
 		});
 
 		it("emits exactly one memory_sample on turn 10, with process + subsystems metadata", async () => {
-			await driveTurns(10);
-			const samples = memorySamples();
+			const handle = await startSession(MEMORY_SAMPLE_TURN_INTERVAL);
+			const samples = await driveTurns(handle, MEMORY_SAMPLE_TURN_INTERVAL);
 			expect(samples).toHaveLength(1);
-			expect(samples[0].durationMs).toBe(0);
 			const metadata = samples[0].metadata as Record<string, unknown>;
+			// `shape`: what the loaded copy's sampler wrote into the record.
 			expect(metadata.turnIndex).toBe(10);
 			expect(metadata.process).toBeDefined();
 			expect(metadata.subsystems).toBeDefined();
@@ -111,11 +99,13 @@ describe(
 			const session = metadata.session as Record<string, number>;
 			expect(session.sessionAgeMs).toBeGreaterThanOrEqual(0);
 			expect(session.turnCount).toBe(10);
+			expect(handle.errors).toEqual([]);
 		});
 
 		it("emits again on turn 20 but not on turns 11-19 (cadence, not a one-shot)", async () => {
-			await driveTurns(20);
-			const samples = memorySamples();
+			const handle = await startSession(MEMORY_SAMPLE_TURN_INTERVAL * 2);
+			const samples = await driveTurns(handle, MEMORY_SAMPLE_TURN_INTERVAL * 2);
+			// `processing`: the second interval fires exactly once more.
 			expect(samples).toHaveLength(2);
 			expect((samples[0].metadata as Record<string, unknown>).turnIndex).toBe(
 				10,

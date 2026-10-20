@@ -414,6 +414,15 @@ export interface PiSession {
 	readonly errors: unknown[];
 	/** The persisted session file, once pi has written one. */
 	sessionFile(): string | undefined;
+	/**
+	 * Rows the LOADED copy wrote to `<root>/home/latency.log`, in order, after a
+	 * flush. The copy's writers live in the same process-global map
+	 * (`Symbol.for("pi-lens.ndjson-logger.state")`), so `flushAllNdjsonWriters`
+	 * settles them; reading before the await would count a row still queued
+	 * (AGENTS.md shape 67). A watchdog record a case asserts on goes through
+	 * here, never through a test-side logger double.
+	 */
+	latencyRows(): Promise<readonly Record<string, unknown>[]>;
 	/** Run one prompt to completion (tool calls included). */
 	prompt(text: string): Promise<void>;
 	/** Manual compaction, pi's `/compact` entry point. */
@@ -623,6 +632,25 @@ function replaceThrough(
 	}
 }
 
+/** Parsed JSON-lines rows of `file`; a line that is not an object is skipped. */
+function readNdjsonRows(file: string): Record<string, unknown>[] {
+	if (!fs.existsSync(file)) return [];
+	return fs
+		.readFileSync(file, "utf8")
+		.split("\n")
+		.filter(Boolean)
+		.flatMap((line) => {
+			try {
+				const row = JSON.parse(line) as unknown;
+				return row && typeof row === "object"
+					? [row as Record<string, unknown>]
+					: [];
+			} catch {
+				return [];
+			}
+		});
+}
+
 /** The handle over one bound session; registered for `afterEach` at once. */
 function handleFor(
 	args: SessionArgs,
@@ -709,6 +737,10 @@ function handleFor(
 		requests: created.requests,
 		errors,
 		sessionFile: () => session.sessionManager.getSessionFile(),
+		async latencyRows() {
+			await flushAllNdjsonWriters();
+			return readNdjsonRows(path.join(args.root, "home", "latency.log"));
+		},
 		async prompt(text) {
 			await session.prompt(text);
 		},
