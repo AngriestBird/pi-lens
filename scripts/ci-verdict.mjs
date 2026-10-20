@@ -761,13 +761,28 @@ export function computeVerdict(
 	// (which runs this script) waiting on the very run shape that seam makes
 	// green. An aggregate that did not conclude success judges nothing here, and
 	// the row keeps its old pending reading.
+	//
+	// #4680 r4 F2: and only an aggregate that STARTED AT OR AFTER the shard
+	// completed has read that shard. The lookup is by name, so without the
+	// ordering a green aggregate from an earlier run excused a shard cancelled in
+	// a later run whose own aggregate row did not exist yet. A real run posts
+	// them in this order (run 39481284562: each aggregate starts 2-3 s after its
+	// last shard ends). A missing or unparsable timestamp on either side proves
+	// no ordering, so it judges nothing (fail closed).
 	const aggregateJudgedGreen = (row) => {
 		const aggregate = shardAggregateName(row.name);
 		if (aggregate === null) return false;
 		const parent = byName.get(aggregate);
+		const parentStarted = Date.parse(String(parent?.started_at ?? ""));
+		const shardCompleted = Date.parse(
+			String(byName.get(row.name)?.completed_at ?? ""),
+		);
 		return (
 			String(parent?.status ?? "").toLowerCase() === "completed" &&
-			String(parent?.conclusion ?? "").toLowerCase() === "success"
+			String(parent?.conclusion ?? "").toLowerCase() === "success" &&
+			Number.isFinite(parentStarted) &&
+			Number.isFinite(shardCompleted) &&
+			parentStarted >= shardCompleted
 		);
 	};
 	const cancelledLatestRows = rows.filter(
