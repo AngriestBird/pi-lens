@@ -410,6 +410,11 @@ describe("#4632 s4: a blocked tool_call reaches the model (git guard)", () => {
 		expect(banner).toContain("Debugger statement");
 		expect(blocked.text).toContain(GATE_BLOCK);
 		expect(blocked.text).toContain("Debugger statement");
+		// The LATCH's answer, which is what a same-session commit reads: the live
+		// copy still holds the blocker, so the gate appends its list. The reload
+		// cell below asserts the opposite of this line, so the constant has to be
+		// witnessed where it really appears.
+		expect(blocked.text).toContain(LATCH_LIST);
 		// A blocked call never reached the shell.
 		expect(blocked.isError).toBe(true);
 		expect(blocked.text).not.toContain(RAN_MARKER);
