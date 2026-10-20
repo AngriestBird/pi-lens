@@ -102,9 +102,11 @@ const FUNCTION_SHAPE = new RegExp(
 
 /** Shape B: an arrow function (parenthesized or bare single param) whose
  * expression body is the escape — including an inline callback such as
- * `.map((token) => token.replace(...))`. */
+ * `.map((token) => token.replace(...))`. The `(?:String\(\s*)?` arm is shape
+ * A's, for the same wrapper (#4680 r4 F10): round 3 widened shape A only, and
+ * `const escapeRegExp = (text) => String(text).replace(...)` stayed green. */
 const ARROW_SHAPE = new RegExp(
-	String.raw`(?:\(\s*[A-Za-z_$][\w$]*[^)]*\)|[A-Za-z_$][\w$]*)\s*(?::\s*[\w$]+)?\s*=>\s*[A-Za-z_$][\w$]*` +
+	String.raw`(?:\(\s*[A-Za-z_$][\w$]*[^)]*\)|[A-Za-z_$][\w$]*)\s*(?::\s*[\w$]+)?\s*=>\s*(?:String\(\s*)?[A-Za-z_$][\w$]*\s*\)?` +
 		ESCAPE_CALL,
 );
 
@@ -205,6 +207,22 @@ describe("escapeRegExp single-source-of-truth (#2558)", () => {
 		const globBody = "[.+^${}()|[\\]\\\\]";
 		const variant = `function globToRegExp(text) {\n\treturn text.replace(/${globBody}/g, ${escapeReplacement});\n}`;
 		expect(FUNCTION_SHAPE.test(variant)).toBe(false);
+		// #4680 r4 F10: the arrow spelling of the same wrapper, and the bare
+		// arrow forms it must keep seeing.
+		const arrow = (receiver: string) =>
+			`const escapeRegExp = (text) => ${receiver}.replace(/${escapeBody}/g, ${escapeReplacement});`;
+		expect(ARROW_SHAPE.test(arrow("String(text)"))).toBe(true);
+		expect(ARROW_SHAPE.test(arrow("text"))).toBe(true);
+		expect(
+			ARROW_SHAPE.test(
+				`const e = v => v.replace(/${escapeBody}/g, ${escapeReplacement});`,
+			),
+		).toBe(true);
+		expect(
+			ARROW_SHAPE.test(
+				`const g = (text) => text.replace(/${globBody}/g, ${escapeReplacement});`,
+			),
+		).toBe(false);
 	});
 
 	it("the canonical leaf still defines escapeRegExp with the expected body", () => {

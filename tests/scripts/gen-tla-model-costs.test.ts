@@ -25,6 +25,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import {
 	buildModelCosts,
@@ -118,12 +119,17 @@ describe("#4672 V4 cost generation — the parser, the median, and a table worth
 						`ok   formal/y/M${at}.cfg: expected pass, got pass (${s}s)`,
 				)
 				.join("\n");
+		// #4680 r4 F6: each config has one slow outlier, so the median and the
+		// mean differ in every row. The old rows (1/3/5, 10/30/50, 100/300/500)
+		// had mean == median, and a mean mutation stayed green (8 passed).
 		const table = buildModelCosts([
-			{ source: "1", text: rows([1, 10, 100]) },
-			{ source: "2", text: rows([3, 30, 300]) },
-			{ source: "3", text: rows([5, 50, 500]) },
+			{ source: "1", text: rows([1, 10, 300]) },
+			{ source: "2", text: rows([3, 30, 100]) },
+			{ source: "3", text: rows([100, 31, 900]) },
 		]);
-		// Median, not mean: 1/3/5 -> 3, 10/30/50 -> 30, 100/300/500 -> 300.
+		// Median, not mean: 1/3/100 -> 3 (mean 34.7), 10/30/31 -> 30 (mean
+		// 23.7), 300/100/900 -> 300 (mean 433.3). One slow runner does not
+		// move a config's cost.
 		expect(table.files).toEqual({
 			"formal/y/M0.cfg": 3,
 			"formal/y/M1.cfg": 30,
@@ -133,8 +139,8 @@ describe("#4672 V4 cost generation — the parser, the median, and a table worth
 			[...Object.keys(table.files)].sort(),
 		);
 		expect(table.sources).toEqual(["1", "2", "3"]);
-		// The measurement's per-shard totals are kept beside it (1 + 10 + 100).
-		expect(table.perShardShares).toEqual({ "1": 111, "2": 333, "3": 555 });
+		// The measurement's per-shard totals are kept beside it (1 + 10 + 300).
+		expect(table.perShardShares).toEqual({ "1": 311, "2": 133, "3": 1031 });
 	});
 
 	it("refuses a table with no measured config, before writing it", () => {
@@ -228,7 +234,12 @@ describe("#4672 V4 cost generation — the parser, the median, and a table worth
 				files: Record<string, number>;
 				generatedBy: string;
 				note: string;
+				sources: string[];
 			};
+			// #4680 r4 F9: a run with no `--source` still names its measurement.
+			// It wrote `sources: []` before, though `buildModelCosts` already
+			// labels each log by its basename.
+			expect(written.sources).toEqual(["full.log"]);
 			expect(Object.keys(written.files)).toHaveLength(all.length);
 			expect(Object.keys(written.files)).toEqual(
 				all.map((c) => modelCostId(ROOT, c)).sort(),
@@ -266,11 +277,51 @@ describe("#4672 V4 cost generation — the parser, the median, and a table worth
 				JSON.stringify({ files: {} }),
 			);
 			expect(() => loadModelCosts(fakeRoot)).toThrow(
-				/price no config; regenerate with scripts\/gen-tla-model-costs\.mjs/,
+				/price no config above 0 s; regenerate with scripts\/gen-tla-model-costs\.mjs/,
 			);
 		} finally {
 			done();
 		}
+	});
+
+	// #4680 r4 F5, V4's sibling spelling: `{}` was refused, but a table whose
+	// every row is 0 s has the same `max` of 0, and every unmeasured config then
+	// costs 0 too. Reproduced before the fix: `{"formal/a/b.cfg": 0}` loaded,
+	// and the shards packed 811/0/0/0. The rule is the max, not the row count.
+	it.each([
+		["one zero row", { "formal/a/b.cfg": 0 }],
+		["every row zero", { "formal/a/b.cfg": 0, "formal/a/c.cfg": 0 }],
+	])("refuses to load a table with %s", (_why, files) => {
+		const { dir, done } = scratch();
+		try {
+			const fakeRoot = join(dir, "repo");
+			mkdirSync(join(fakeRoot, "scripts"), { recursive: true });
+			writeFileSync(
+				join(fakeRoot, "scripts", "tla-model-costs.json"),
+				JSON.stringify({ files }),
+			);
+			expect(() => loadModelCosts(fakeRoot)).toThrow(
+				/price no config above 0 s; regenerate with scripts\/gen-tla-model-costs\.mjs/,
+			);
+		} finally {
+			done();
+		}
+	});
+
+	it("refuses to write a table whose every measured config took 0 s", () => {
+		const configCount = listModelConfigs(ROOT).length;
+		const files = Object.fromEntries(
+			Array.from({ length: configCount }, (_, at) => [
+				`formal/y/M${at}.cfg`,
+				0,
+			]),
+		);
+		expect(incompleteTableReason(files, { configCount })).toContain(
+			"every measured config took 0 s",
+		);
+		// One measured second is a table.
+		files["formal/y/M0.cfg"] = 1;
+		expect(incompleteTableReason(files, { configCount })).toBeNull();
 	});
 
 	// The entry point the workflow calls, driven in-process: no child `node`, so
@@ -286,5 +337,30 @@ describe("#4672 V4 cost generation — the parser, the median, and a table worth
 		expect(errors.lines.join("\n")).toContain(
 			"usage: node scripts/gen-tla-model-costs.mjs",
 		);
+	});
+
+	// #4680 r4 F3, the generator's half: replacing its entry guard with `false`
+	// left all 8 tests green, because every case calls `main` directly. Running
+	// the script must still run `main`: `process.argv[1]` is the script's own
+	// path and the module is imported by its plain URL, so the guard's
+	// comparison is what answers. No flags means the usage line and exit 2.
+	it("runs main when the script itself is argv[1]", async () => {
+		const script = resolve(ROOT, "scripts", "gen-tla-model-costs.mjs");
+		const argvBefore = [...process.argv];
+		const exitCodeBefore = process.exitCode;
+		const errors = captureErrors();
+		let exitCode: number | string | null | undefined;
+		try {
+			process.argv.splice(0, process.argv.length, argvBefore[0], script);
+			vi.resetModules();
+			await import(pathToFileURL(script).href);
+			exitCode = process.exitCode;
+		} finally {
+			process.argv.splice(0, process.argv.length, ...argvBefore);
+			process.exitCode = exitCodeBefore;
+			errors.restore();
+		}
+		expect(exitCode).toBe(2);
+		expect(errors.lines.join("\n")).toContain("at least one --log is required");
 	});
 });

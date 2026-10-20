@@ -4,7 +4,11 @@
  *
  *   gh run view <run-id> --log --job <shard-job-id> > shard-k.log   # one per shard
  *   node scripts/gen-tla-model-costs.mjs --source 39380005583 --source 39374847276 \
- *     --log .probe-home/scratch/log-*.txt --out scripts/tla-model-costs.json
+ *     --log shard-1.log --log shard-2.log --log shard-3.log --log shard-4.log \
+ *     --out scripts/tla-model-costs.json
+ *
+ * Repeat `--log` once per file: the parser reads one value per flag, so a shell
+ * glob after a single `--log` (`--log log-*.txt`) exits 2 on the second file.
  *
  * Regenerates scripts/tla-model-costs.json, the per-config TLC seconds the
  * cost-weighted TLA+ shard assignment (scripts/check-tla-models.mjs) packs by.
@@ -119,6 +123,10 @@ export function incompleteTableReason(files, { configCount }) {
 	const rows = Object.keys(files ?? {}).length;
 	if (rows === 0)
 		return "no per-config TLC timings found: no --log carried an `ok|FAIL formal/... (Ns)` line, so this table would price every config at the table max and leave them all in one shard";
+	// #4680 r4 F5: zero rows and all-zero rows have the same max, 0, which the
+	// reader refuses too: every config would cost 0 and land in shard 1.
+	if (Object.values(files).every((seconds) => seconds <= 0))
+		return "every measured config took 0 s, so the table max is 0 and every config would cost 0 and land in shard 1; check the --log captures";
 	if (configCount > 0 && rows < Math.ceil(configCount * MIN_TABLE_COVERAGE))
 		return `only ${rows} of the ${configCount} configs under formal/ have a row (floor ${Math.round(MIN_TABLE_COVERAGE * 100)}%); a config with no row costs the table max, so a partial regeneration prices the shards by fallback -- pass one --log per shard`;
 	return null;
@@ -162,7 +170,7 @@ export function main(
 		source: parsed.sources[parsed.logs.indexOf(file)] ?? path.basename(file),
 		text: fs.readFileSync(file, "utf8"),
 	}));
-	const { files } = buildModelCosts(logs);
+	const { files, sources } = buildModelCosts(logs);
 	// A table that prices almost nothing is worse than no table: `loadModelCosts`
 	// would accept it, every lookup would fall back to the (now zero) max, and
 	// `selectShard` would leave the whole corpus in shard 1 (V4). Refuse before
@@ -177,7 +185,10 @@ export function main(
 	const payload = {
 		generatedBy:
 			"node scripts/gen-tla-model-costs.mjs --source <run-id> ... --log <job-log> ... (logs from `gh run view <run-id> --log --job <shard-job-id>`)",
-		sources: parsed.sources,
+		// The labels `buildModelCosts` used: each `--source`, else the log's
+		// basename, so a run with no `--source` still names its measurement
+		// (#4680 r4 F9).
+		sources,
 		note: "Per-config TLC seconds (median over the source runs), read from `ok|FAIL formal/<family>/<Model>.cfg: ... (Ns)` lines the checker prints. scripts/tla-model-costs.json packs the TLA+ shards with these; a config with no row costs the table's MAX so an unmeasured config can never quietly become the tail.",
 		files,
 	};

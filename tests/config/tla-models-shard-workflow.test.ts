@@ -12,6 +12,7 @@ import {
 	selectConfigs,
 	selectShard,
 } from "../../scripts/check-tla-models.mjs";
+import { assignShards } from "../../scripts/lib/test-shard-assignment.mjs";
 import { assertNonEmptyScan } from "../support/sweep-kit.js";
 
 // #3918: the required `TLA+ models` check is an aggregate job over a
@@ -411,22 +412,40 @@ describe("#3918 sharded TLA+ models workflow contract", () => {
 	// in tie groups, so the two packs disagreed on the MEMBERSHIP of all four
 	// shards (102 of shard 1's 201 configs swapped) while every number either
 	// printed was identical. One pack, keyed by the config path.
+	//
+	// #4680 r4 F7: the expectation is built HERE, from the table and the
+	// shared LPT pack keyed by the config path, not read back from either
+	// function. The old assertion (`this shard: <selected.length> configs`)
+	// restated the count the test itself passed in, and the faithful old
+	// selector (position-keyed) left it green.
 	it("packs the selector and the printed balance with one item id scheme", () => {
 		const costs = { root: ROOT, ...loadModelCosts(ROOT) };
 		const all = listModelConfigs(ROOT);
+		const pack = assignShards(
+			all.map((config) => ({
+				id: config,
+				cost: costs.files[modelCostId(ROOT, config)] ?? costs.max,
+			})),
+			4,
+		);
 		for (let index = 1; index <= 4; index += 1) {
 			const selected = selectShard(all, { index, total: 4 }, costs);
-			const line = formatShardBalance({
-				configs: selected,
-				total: 4,
-				costs,
-			});
-			// The count the line prints is THIS selection's count, and every
-			// config lands in exactly one shard.
+			const expected = all.filter((config) => pack.get(config) === index);
 			expect(
-				line,
-				`shard ${index}/4 prints a different population than it selects`,
-			).toContain(`this shard: ${selected.length} configs`);
+				selected,
+				`shard ${index}/4 selects a different membership than the path-keyed pack`,
+			).toEqual(expected);
+			// The printed line projects the same members' seconds.
+			const projected = expected.reduce(
+				(sum, config) =>
+					sum + (costs.files[modelCostId(ROOT, config)] ?? costs.max),
+				0,
+			);
+			expect(
+				formatShardBalance({ configs: selected, total: 4, costs }),
+			).toContain(
+				`this shard: ${expected.length} configs, ${projected.toFixed(1)}s projected`,
+			);
 			expect(selected.length).toBeGreaterThan(0);
 		}
 		const owners = new Map<string, number>();

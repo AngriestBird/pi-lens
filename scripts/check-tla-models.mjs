@@ -176,15 +176,6 @@ export function loadModelCosts(root) {
 	const files = parsed?.files;
 	if (!files || typeof files !== "object" || Array.isArray(files))
 		throw new Error(`TLA+ model costs at ${file} have no "files" object`);
-	// An EMPTY table is not a table: `max` would be 0, every config would price
-	// at 0, `assignShards` would leave the whole corpus in shard 1 and three
-	// runners would red with "selects no formal/*/*.cfg" -- a confusing
-	// diagnosis for one bad regeneration (V4). Refuse it here as well as at the
-	// generator, because a committed file can also be truncated by hand.
-	if (Object.keys(files).length === 0)
-		throw new Error(
-			`TLA+ model costs at ${file} price no config; regenerate with scripts/gen-tla-model-costs.mjs (a config with no row costs the table max, so an empty table sends every config to shard 1)`,
-		);
 	const seconds = [];
 	for (const [id, value] of Object.entries(files)) {
 		if (typeof value !== "number" || !Number.isFinite(value) || value < 0)
@@ -193,10 +184,19 @@ export function loadModelCosts(root) {
 			);
 		seconds.push(value);
 	}
-	return {
-		files,
-		max: seconds.length === 0 ? 0 : Math.max(...seconds),
-	};
+	// A table whose max is 0 is not a table: every config would price at 0,
+	// `assignShards` would leave the whole corpus in shard 1 and three runners
+	// would red with "selects no formal/*/*.cfg" -- a confusing diagnosis for
+	// one bad regeneration (V4). The rule is the max, not the row count: `{}`
+	// and a table of zero rows have the same max (#4680 r4 F5). Refuse it here
+	// as well as at the generator, because a committed file can also be
+	// truncated by hand.
+	const max = seconds.length === 0 ? 0 : Math.max(...seconds);
+	if (max <= 0)
+		throw new Error(
+			`TLA+ model costs at ${file} price no config above 0 s; regenerate with scripts/gen-tla-model-costs.mjs (a config with no row costs the table max, so a table whose max is 0 sends every config to shard 1)`,
+		);
+	return { files, max };
 }
 
 /**
