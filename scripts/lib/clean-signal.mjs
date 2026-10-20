@@ -509,6 +509,25 @@ export function buildMatrixObservations(targetLangRows) {
 }
 
 /**
+ * The first-publish class a row may AUTHOR, or `undefined`. Only a DIRTY
+ * fixture can: a `clean: true` fixture's file has no finding to publish, so a
+ * comparable class from it (`direct`, and equally `empty-first` — its own empty
+ * publish followed by a finding-bearing one) is not that axis's measurement
+ * (#4615). This is the seam's half of the refusal `createProbeFixture` applies
+ * at the producer: a class that reached a clean row anyway (a row built by
+ * another caller, or a producer that regressed) cannot be stored or handed to
+ * the matrix.
+ *
+ * @param {{ cleanFixture?: boolean, firstPublish?: string }} row
+ * @returns {string | undefined}
+ */
+function authoredFirstPublish(row) {
+	return !row.cleanFixture && COMPARABLE_FIRST_PUBLISH.has(row.firstPublish)
+		? row.firstPublish
+		: undefined;
+}
+
+/**
  * Resolve each fixture row onto the matrix row it writes, one row per target
  * lang. Shared by the drift report, the console summary and the matrix refresh
  * so they never disagree (#3310); the matrix writer itself stays
@@ -519,10 +538,12 @@ export function buildMatrixObservations(targetLangRows) {
  * production clean-file case, #240). `first-publish` is defined on a DIRTY file
  * — is the first publish for a file WITH findings the answer, or an empty
  * placeholder while an index builds? — and a clean fixture's file has no
- * finding to publish, so it can never be that axis's source. Before #4615 the
- * clean fixture supplied both, which is how a leaked publish from another live
- * client put `empty-first` on the `typescript` row; the dirty fixture
- * `typescript` measures `direct` in every recorded run.
+ * finding to publish, so it can never author that axis. A clean row's
+ * comparable class is normalised to `unknown` here and never becomes the
+ * row's first-publish arm. Before #4615 the clean fixture supplied both, which
+ * is how a leaked publish from another live client — or the clean fixture's own
+ * empty-then-finding trace — put a class on the `typescript` row; the dirty
+ * fixture `typescript` measures `direct` in every recorded run.
  *
  * @param {Array<{ lang: string, cleanFixture?: boolean, behavior?: string, firstPublish?: string, targetLang?: string }>} measuredRows
  * @returns {Array<Record<string, unknown> & { lang: string, targetLang: string }>}
@@ -536,13 +557,18 @@ export function resolveTargetLangRows(measuredRows) {
 	const byTargetLang = new Map();
 	for (const r of measurable) {
 		const targetLang = targetLangForFixture(r.lang, r.cleanFixture);
+		const authored = authoredFirstPublish(r);
 		const resolved = {
 			...r,
 			lang: targetLang,
 			targetLang,
-			firstPublishFrom: COMPARABLE_FIRST_PUBLISH.has(r.firstPublish)
-				? r.lang
-				: undefined,
+			// A clean row keeps its own non-comparable evidence (`empty-only`)
+			// verbatim; a comparable class from it is refused, not passed on.
+			firstPublish:
+				r.cleanFixture && COMPARABLE_FIRST_PUBLISH.has(r.firstPublish)
+					? "unknown"
+					: r.firstPublish,
+			firstPublishFrom: authored ? r.lang : undefined,
 		};
 		const prev = byTargetLang.get(targetLang);
 		if (!prev) {
@@ -551,16 +577,44 @@ export function resolveTargetLangRows(measuredRows) {
 		}
 		const cleanBehaviorRow = r.cleanFixture ? resolved : prev;
 		const firstPublishRow = !r.cleanFixture ? resolved : prev;
+		// The arm that supplies the class must also supply its author: a dirty
+		// sibling's class is kept even when this row refused (or never observed)
+		// its own, and a clean row never names one.
+		const firstPublishArm = authoredFirstPublish(firstPublishRow)
+			? firstPublishRow
+			: authoredFirstPublish(cleanBehaviorRow)
+				? cleanBehaviorRow
+				: undefined;
 		byTargetLang.set(targetLang, {
 			...cleanBehaviorRow,
-			firstPublish: COMPARABLE_FIRST_PUBLISH.has(firstPublishRow.firstPublish)
-				? firstPublishRow.firstPublish
-				: cleanBehaviorRow.firstPublish,
-			firstPublishFrom:
-				firstPublishRow.firstPublishFrom ?? cleanBehaviorRow.firstPublishFrom,
+			firstPublish:
+				firstPublishArm?.firstPublish ?? cleanBehaviorRow.firstPublish,
+			firstPublishFrom: firstPublishArm?.firstPublishFrom,
 		});
 	}
 	return [...byTargetLang.values()];
+}
+
+/**
+ * The nightly log line naming the fixture behind each matrix row's first-publish
+ * class. `firstPublishFrom` is the resolution's own author field, and it used to
+ * reach only the tests, so a class a `clean: true` fixture supplied would have
+ * been committed with nothing in the log naming it. A clean fixture can no
+ * longer author the axis (the producer's refusal plus this seam's
+ * normalisation), and this line is the record that would name one that did —
+ * the cheapest closure for the whole clean-authored shape.
+ *
+ * Pure, so the probe's summary line is testable: `resolveTargetLangRows` output
+ * in, one string out.
+ *
+ * @param {Array<{ targetLang?: string, firstPublishFrom?: string }>} targetLangRows
+ * @returns {string}
+ */
+export function describeFirstPublishAuthors(targetLangRows) {
+	const pairs = (targetLangRows ?? [])
+		.filter((row) => row.firstPublishFrom && row.targetLang)
+		.map((row) => `${row.targetLang} <- ${row.firstPublishFrom}`);
+	return pairs.length ? pairs.join(", ") : "none";
 }
 
 /**

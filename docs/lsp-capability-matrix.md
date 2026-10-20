@@ -287,13 +287,3 @@ marker; a mismatch means the marker may need a human update (#529). `unknown`
 observations are never compared (a slow/absent server is not evidence either way).
 
 _None observed as of the last probe run._
-
-## Capability matrix refresh state (nightly-generated)
-
-Bookkeeping for the two-run `first-publish`/`clean-behavior` hysteresis, the
-date-based `direct` expiry (#3401) and consecutive-night `idle-eviction`
-counts (#3989). Regenerated every run; never a measurement.
-
-```json
-{"first-publish":{"typescript":{"pendingFirstPublish":"direct","runs":1}}}
-```

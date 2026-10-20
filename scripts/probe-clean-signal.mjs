@@ -49,6 +49,7 @@ import {
 	DRIFT_SUMMARY_PATH,
 	buildMatrixObservations,
 	createPublishTraceDrainer,
+	describeFirstPublishAuthors,
 	findCleanSignalDrift,
 	resolveTargetLangRows,
 	strategyKeyForLang,
@@ -384,6 +385,14 @@ console.log(
 );
 console.log(
 	`  first-publish empty-only/unknown (not classifiable on this axis):      ${emptyOnly.length + rows.filter((r) => r.firstPublish === "unknown" && r.mode !== "pull").length}\n`,
+);
+// #4615: name the fixture that AUTHORED each matrix row's class, in the nightly
+// step log. `firstPublishFrom` used to reach only the tests, so a class a clean
+// fixture supplied would have been committed with nothing in the log naming it.
+// A clean fixture can no longer author the axis (producer refusal + the seam's
+// normalisation), and this line is the record that would name it if one did.
+console.log(
+	`  first-publish author: ${describeFirstPublishAuthors(resolveTargetLangRows(rows))}`,
 );
 
 // Merge classifications into docs/lsp-capability-matrix.md — MERGE, don't

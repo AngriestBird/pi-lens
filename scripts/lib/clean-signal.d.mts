@@ -122,6 +122,14 @@ export function resolveTargetLangRows<
 	}
 >;
 
+/** #4615: resolved rows -> the nightly log line naming each class's fixture. */
+export function describeFirstPublishAuthors(
+	targetLangRows: ReadonlyArray<{
+		targetLang?: string;
+		firstPublishFrom?: string;
+	}>,
+): string;
+
 /** #3401: resolved probe rows -> `refreshCapabilityMatrix` observations. */
 export function buildMatrixObservations(
 	targetLangRows: ReadonlyArray<{

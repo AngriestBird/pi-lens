@@ -8,6 +8,7 @@ import * as path from "node:path";
 import {
 	classifyCleanBehavior,
 	classifyFirstPublish,
+	COMPARABLE_FIRST_PUBLISH,
 	resolveProbeServerId,
 } from "./clean-signal.mjs";
 import { touchAnsweredDiagnostics } from "./touch-result.mjs";
@@ -178,15 +179,21 @@ export function createProbeFixture(deps) {
 		// which this trace already holds — no extra touch, no extra server time.
 		const firstPublishVerdict = classifyFirstPublish(dirtyPubs);
 		row.firstPublish = firstPublishVerdict.firstPublish;
-		// #4615: a `clean: true` fixture's file carries no diagnostic, so a
-		// publish that CARRIES findings during its phase cannot be that file's
-		// answer. `direct` from it is therefore never a measurement of this
-		// axis — it is another client's line, or the fixture's `clean` flag is
-		// stale. Refuse the class (the conservative reading) instead of writing it
-		// into the matrix: the `empty-first`/`direct` cell this row fed is exactly
-		// how the typescript row drifted.
+		// #4615: a `clean: true` fixture's file carries no diagnostic, so ANY
+		// comparable class from it is not a measurement of this axis — not only
+		// `direct` (a finding-bearing publish) but equally `empty-first` (its own
+		// empty publish, then a finding-bearing one): a clean file has no finding
+		// to publish, so such a trace is another document's line, or the fixture's
+		// `clean` flag is stale. Its own honest class is `empty-only`. Refuse the
+		// class at the producer (the conservative reading) so nothing clean-authored
+		// can be stored or handed to the matrix; `resolveTargetLangRows` refuses it
+		// again at the seam, because the guard keys on who may AUTHOR the axis, not
+		// on which class arrived.
 		let firstPublishReason = firstPublishVerdict.reason;
-		if (fx.clean && firstPublishVerdict.firstPublish === "direct") {
+		if (
+			fx.clean &&
+			COMPARABLE_FIRST_PUBLISH.has(firstPublishVerdict.firstPublish)
+		) {
 			row.firstPublish = "unknown";
 			firstPublishReason = `refused (#4615): a clean fixture's file has no finding to publish, so this is not its measurement — ${firstPublishVerdict.reason}`;
 		}

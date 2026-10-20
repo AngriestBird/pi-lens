@@ -22,6 +22,7 @@
  * empty answer, then fixture A's row arriving late.
  */
 import * as fs from "node:fs";
+import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // `logExtension` is a no-op under Vitest (`isTestMode`) and the client reads
@@ -39,8 +40,20 @@ const { createPublishTraceDrainer, classifyFirstPublish } =
 const { normalizeMapKey } = await import("../../../clients/path-utils.js");
 const { createMockState } = await import("./mock-client-state.js");
 
-const DIRTY_FILE = "/proj/fixtures/typescript/bad.ts";
-const CLEAN_FILE = "/proj/fixtures/typescript-clean/clean.ts";
+// #4615 review F2: a drive-less `file:///proj/...` URL is invalid on win32 —
+// `fileURLToPath` throws, `uriToPath` then treats the URL as a plain path, and
+// the stamped key becomes `file:/proj/...`, so both cells would fail on a
+// Windows host. Build the URL from a platform-shaped path instead; the key is
+// whatever `normalizeMapKey` makes of it, and both sides of the drain use it.
+const WIN32 = process.platform === "win32";
+const DIRTY_FILE = WIN32
+	? "C:\\proj\\fixtures\\typescript\\bad.ts"
+	: "/proj/fixtures/typescript/bad.ts";
+const CLEAN_FILE = WIN32
+	? "C:\\proj\\fixtures\\typescript-clean\\clean.ts"
+	: "/proj/fixtures/typescript-clean/clean.ts";
+const DIRTY_URI = pathToFileURL(DIRTY_FILE).href;
+const CLEAN_URI = pathToFileURL(CLEAN_FILE).href;
 const FINDING = {
 	severity: 1,
 	message: "Type 'string' is not assignable to type 'number'.",
@@ -143,7 +156,7 @@ describe("#4615 the publish trace names its document", () => {
 		await captureSink();
 		const offset = sinkBytes.length;
 		const publish = armHandler("typescript");
-		publish({ uri: `file://${DIRTY_FILE}`, diagnostics: [FINDING] });
+		publish({ uri: DIRTY_URI, diagnostics: [FINDING] });
 		await captureSink();
 
 		const rows = rowsSince(offset);
@@ -163,7 +176,7 @@ describe("#4615 the publish trace names its document", () => {
 
 		// Fixture A (dirty): its own one-finding answer, the measured `direct`.
 		drain.reset(sinkBytes.length);
-		publishDirty({ uri: `file://${DIRTY_FILE}`, diagnostics: [FINDING] });
+		publishDirty({ uri: DIRTY_URI, diagnostics: [FINDING] });
 		await captureSink();
 		const dirtySink: DrainedPublish[] = [];
 		drain(dirtySink, "typescript", DIRTY_FILE);
@@ -172,11 +185,11 @@ describe("#4615 the publish trace names its document", () => {
 		// Fixture B (clean): its phase starts at the current sink size; its own
 		// only publish is the empty settled answer...
 		drain.reset(sinkBytes.length);
-		publishClean({ uri: `file://${CLEAN_FILE}`, diagnostics: [] });
+		publishClean({ uri: CLEAN_URI, diagnostics: [] });
 		// ...and fixture A's client republishes AFTER that reset — the buffered
 		// writer's late flush that landed three lines 1 ms apart in run
 		// 39410536713.
-		publishDirty({ uri: `file://${DIRTY_FILE}`, diagnostics: [FINDING] });
+		publishDirty({ uri: DIRTY_URI, diagnostics: [FINDING] });
 		await captureSink();
 
 		const cleanSink: DrainedPublish[] = [];

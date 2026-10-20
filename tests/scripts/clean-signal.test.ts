@@ -24,6 +24,7 @@ import {
 	classifyFirstPublish,
 	COMPARABLE_FIRST_PUBLISH,
 	createPublishTraceDrainer,
+	describeFirstPublishAuthors,
 	findCleanSignalDrift,
 	resolveProbeServerId,
 	resolveTargetLangRows,
@@ -302,6 +303,36 @@ describe("classifyCleanBehavior (phase-aware 4-way)", () => {
 			expect(row.detail).toContain("refused (#4615)");
 		});
 
+		it("keeps a clean fixture's own empty-first class out of the matrix (#4615)", async () => {
+			// The reviewer's sequence, end to end: the clean fixture's OWN document
+			// publishes the empty set and then a finding-bearing one — the shape
+			// `classifyFirstPublish` reads as `empty-first` — and no dirty sibling
+			// exists (an unmeasured or absent one). A clean file has no finding to
+			// publish, so this trace is not the axis's measurement in EITHER
+			// comparable class: refusing only `direct` refused half the gap. The
+			// producer must refuse the row, and the resolver must hand the matrix
+			// nothing rather than the clean fixture's class.
+			const row = await probePhaseTrace((absFile) => [
+				pubLine("typescript", 0, absFile),
+				pubLine("typescript", 1, absFile),
+			]);
+			expect(row.firstPublish).toBe("unknown");
+			expect(row.detail).toContain("first-publish=unknown");
+			expect(row.detail).toContain("refused (#4615)");
+			const resolved = resolveTargetLangRows([
+				{
+					lang: "typescript-clean",
+					cleanFixture: true,
+					behavior: String(row.behavior),
+					firstPublish: String(row.firstPublish),
+				},
+			]);
+			expect(resolved).toHaveLength(1);
+			expect(resolved[0].firstPublishFrom).toBeUndefined();
+			expect(resolved[0].firstPublish).not.toBe("empty-first");
+			expect(buildMatrixObservations(resolved)[0].firstPublish).toBeNull();
+		});
+
 		/**
 		 * Drive the production row construction for a `clean: true` fixture whose
 		 * dirty phase appends exactly `buildLines(absFile)` to the sink.
@@ -426,6 +457,52 @@ describe("classifyCleanBehavior (phase-aware 4-way)", () => {
 			expect(COMPARABLE_FIRST_PUBLISH.has(String(row.firstPublish))).toBe(
 				false,
 			);
+		});
+
+		it("names the fixture behind each resolved row's class (#4615 nightly log)", () => {
+			// The probe's summary line, pure so it is testable: `firstPublishFrom`
+			// used to reach only the tests, so a clean-authored class would have
+			// been committed with nothing in the nightly log naming its author.
+			expect(
+				describeFirstPublishAuthors(
+					resolveTargetLangRows([dirtyTypeScript, cleanTypeScript]),
+				),
+			).toBe("typescript <- typescript");
+			// A clean row that carries a comparable class anyway names no author,
+			// so the log reads "none" rather than inventing one.
+			expect(
+				describeFirstPublishAuthors(
+					resolveTargetLangRows([
+						{ ...cleanTypeScript, firstPublish: "empty-first" },
+					]),
+				),
+			).toBe("none");
+		});
+
+		it("refuses a comparable class a clean row carries anyway (#4615 seam defence)", () => {
+			// The producer refuses every comparable class from a clean fixture, and
+			// this seam keys on who may AUTHOR the axis rather than on which class
+			// arrived: a row any other caller built with `empty-first` on a clean
+			// fixture cannot become the matrix's class either — alone (the dirty
+			// sibling absent) or beside an unmeasured dirty sibling.
+			const leaked = { ...cleanTypeScript, firstPublish: "empty-first" };
+			const [alone] = resolveTargetLangRows([leaked]);
+			expect(alone.firstPublishFrom).toBeUndefined();
+			expect(COMPARABLE_FIRST_PUBLISH.has(String(alone.firstPublish))).toBe(
+				false,
+			);
+			expect(buildMatrixObservations([alone])[0].firstPublish).toBeNull();
+			for (const order of [
+				[leaked, { ...dirtyTypeScript, firstPublish: "unknown" }],
+				[{ ...dirtyTypeScript, firstPublish: "unknown" }, leaked],
+			]) {
+				const [merged] = resolveTargetLangRows(order);
+				expect(merged.firstPublishFrom).toBeUndefined();
+				expect(COMPARABLE_FIRST_PUBLISH.has(String(merged.firstPublish))).toBe(
+					false,
+				);
+				expect(buildMatrixObservations([merged])[0].firstPublish).toBeNull();
+			}
 		});
 	});
 

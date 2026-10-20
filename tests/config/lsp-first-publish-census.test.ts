@@ -129,6 +129,12 @@ describe("#3310 first-publish census", () => {
 	 * same `firstMissed` clock a stale `direct` cell gets; this rule reds when
 	 * that stamp is old enough that the cell's measurement can no longer be
 	 * called live.
+	 *
+	 * The rule is bounded by the nightly, and says so: a cell with no stamp (an
+	 * unstamped committed cell, or one a human flipped) is not named here until a
+	 * full nightly miss writes one. So a green census means "observed since the
+	 * last miss, or not yet missed by a full nightly" — the accepted p3 residual,
+	 * not a claim that every unstamped cell was observed recently.
 	 */
 	function unbackedEmptyFirstCells(
 		text: string,
