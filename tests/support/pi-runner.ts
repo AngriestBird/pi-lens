@@ -36,7 +36,6 @@
  *    fixture sibling to the tmp-hygiene census (#4641 F1).
  */
 
-import { mkdirSync } from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type {
@@ -54,6 +53,7 @@ import {
 	cleanupTestEnvironmentsDrained,
 	drainBackgroundWritesForTests,
 	setupTestEnvironment,
+	withFixtureTmpdir,
 } from "../clients/test-utils.js";
 
 /**
@@ -202,41 +202,6 @@ export interface StartPiRunnerOptions {
 	cwd?: string;
 	/** Extra paths pi loads after the extension, e.g. a second extension. */
 	extraExtensionPaths?: string[];
-}
-
-/**
- * Run `load` with `os.tmpdir()` aimed inside the fixture. pi's loader builds
- * jiti's transform cache as `path.join(os.tmpdir(), "jiti")` for every
- * extension it loads, so an in-process load otherwise leaves a `jiti`
- * directory at the shared tmp root, where the fixture-sibling census judges it
- * (#4641 F1). Inside the fixture it is removed with the fixture. jiti only
- * creates the directory: the built entry imports natively, so the cache stays
- * empty and the redirect costs nothing.
- */
-async function withFixtureTmpdir<T>(
-	root: string,
-	load: () => Promise<T>,
-): Promise<T> {
-	const isolate = path.join(root, "tmp");
-	mkdirSync(isolate, { recursive: true });
-	const previous = {
-		TMPDIR: process.env.TMPDIR,
-		TEMP: process.env.TEMP,
-		TMP: process.env.TMP,
-	};
-	process.env.TMPDIR = isolate;
-	process.env.TEMP = isolate;
-	process.env.TMP = isolate;
-	try {
-		return await load();
-	} finally {
-		if (previous.TMPDIR === undefined) delete process.env.TMPDIR;
-		else process.env.TMPDIR = previous.TMPDIR;
-		if (previous.TEMP === undefined) delete process.env.TEMP;
-		else process.env.TEMP = previous.TEMP;
-		if (previous.TMP === undefined) delete process.env.TMP;
-		else process.env.TMP = previous.TMP;
-	}
 }
 
 /**
