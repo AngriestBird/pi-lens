@@ -9,7 +9,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { flushAllNdjsonWriters } from "../../clients/ndjson-logger.js";
 import {
 	getActivePrimaryRoot,
@@ -24,20 +24,9 @@ import {
 } from "./pi-session.js";
 
 const fixture = piSessionFixture();
-const handles: Array<{ dispose: () => Promise<void> }> = [];
-
-/**
- * One live session per case. pi-lens classifies a start behind a live primary
- * in another root as a concurrent secondary and declines its full start, so a
- * handle left open would silently weaken the next case.
- */
-afterEach(async () => {
-	for (const handle of handles.splice(0)) await handle.dispose();
-});
-
-afterAll(async () => {
-	for (const handle of handles.splice(0)) await handle.dispose();
-});
+// No per-case handle list here: the helper registers every session it creates
+// and disposes the live ones in its own `afterEach`, so a case that fails
+// before `dispose()` cannot leak one (#4664 M2).
 
 /** The delimiter pi-lens prefixes every injected context block with. */
 const INJECTION_DELIMITER = "[pi-lens automated context — not a user request]";
@@ -60,7 +49,6 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 			cwd: path.join(fixture.root, "turn", "proj"),
 			responses: [fauxAssistantMessage(fauxText("ready"))],
 		});
-		handles.push(handle);
 
 		await handle.prompt("hello");
 
@@ -89,7 +77,6 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 				fauxAssistantMessage(fauxText("done")),
 			],
 		});
-		handles.push(handle);
 
 		await handle.prompt("check this project");
 
@@ -117,12 +104,10 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 			responses: [fauxAssistantMessage(fauxText("first answer"))],
 		});
 		await first.prompt("first question");
-		handles.push(first);
 
 		const resumed = await first.resume([
 			fauxAssistantMessage(fauxText("second answer")),
 		]);
-		handles.push(resumed);
 		await resumed.prompt("second question");
 
 		// pi restored the transcript from the file, then appended the new turn:
@@ -192,7 +177,6 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 			cwd: path.join(fixture.root, "compact", "proj"),
 			responses: [fauxAssistantMessage(fauxText("ok"))],
 		});
-		handles.push(handle);
 		await handle.prompt("hello");
 
 		// pi's compaction entry point is reachable from this tier and answers
@@ -208,7 +192,6 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 			cwd: path.join(fixture.root, "guidance", "proj"),
 			responses: [fauxAssistantMessage(fauxText("ok"))],
 		});
-		handles.push(handle);
 		await handle.prompt("hello");
 
 		// The guidance pi-lens staged at `session_start` reaches the model on

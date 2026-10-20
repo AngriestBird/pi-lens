@@ -33,7 +33,9 @@ const TIMEOUT_MS = 30_000;
 const INJECTION_DELIMITER = "[pi-lens automated context — not a user request]";
 
 const fixture = piSessionFixture();
-let sessionHandles: Array<{ dispose: () => Promise<void> }> = [];
+// No per-case handle list: the helper registers every session it creates and
+// disposes the live ones in its own `afterEach`, so a case that fails before
+// `dispose()` cannot leak one (#4664 M2).
 const sessionCwd = (name: string) => path.join(fixture.root, name, "proj");
 
 let tmpDir: string;
@@ -43,8 +45,7 @@ beforeEach(() => {
 	tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-3693-append-"));
 });
 
-afterEach(async () => {
-	for (const handle of sessionHandles.splice(0)) await handle.dispose();
+afterEach(() => {
 	fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -67,7 +68,6 @@ describe("context injection appends to last user message (#3693)", () => {
 				cwd: sessionCwd("string-prompt"),
 				responses: [fauxAssistantMessage(fauxText("ready"))],
 			});
-			sessionHandles.push(handle);
 
 			await handle.prompt("Optimize performance");
 
@@ -245,7 +245,6 @@ describe("context injection appends to last user message (#3693)", () => {
 					fauxAssistantMessage(fauxText("done")),
 				],
 			});
-			sessionHandles.push(handle);
 
 			await handle.prompt("keep working");
 

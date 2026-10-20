@@ -12,15 +12,18 @@
  * `index.ts` PASSED to a handler; this tier records what the host and the
  * model actually GOT.
  *
- * ONE FIXTURE ROOT PER FILE, one live session per case. A session started under
- * a SECOND fixture root writes into the first root's home and nothing into its
- * own — measured: the second root's session put 78 `session_start` rows under
- * the first root's home and 0 under its own, whose `home/` directory it still
- * created (#4664 F4) — so `startPiSession` refuses a second root; a case that
- * needs another project root passes another `cwd` under the same root. A
- * session started while another is still live in a different root is classified
- * by pi-lens as a concurrent secondary and its full start is declined, so
- * dispose a handle before starting the next session.
+ * ONE FIXTURE ROOT PER FILE, one live session per case, and both are enforced
+ * rather than documented. `piSessionFixture()` pins the file's root as it
+ * creates it, and `startPiSession` refuses any other root: a session started
+ * under a SECOND fixture root writes into the first root's home and nothing
+ * into its own — measured: the second root's session put 78 `session_start`
+ * rows under the first root's home and 0 under its own, whose `home/`
+ * directory it still created (#4664 F4). A case that needs another project
+ * root passes another `cwd` under the same root. Every handle is registered
+ * when it is created and disposed in `afterEach`, so a case that fails before
+ * its own `dispose()` leaves no live session for the next case (#4664 M2); a
+ * session still live in a different root would be classified by pi-lens as a
+ * concurrent secondary, whose full start it declines.
  *
  * What it pins, and what it does not. It pins the session loop's own flow —
  * `session_start`, a turn, a tool-call round trip, the transcript the provider
@@ -105,7 +108,7 @@ import {
 	createAgentSessionServices,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
-import { afterAll } from "vitest";
+import { afterAll, afterEach } from "vitest";
 import { _settleRegistryMutationsForTests } from "../../clients/instance-registry-tail.js";
 import { flushAllNdjsonWriters } from "../../clients/ndjson-logger.js";
 import {
@@ -401,6 +404,15 @@ let pinnedRoot: string | undefined;
 /** Fixtures this file still owns; removed with the environment in `afterAll`. */
 const liveFixtures: Array<() => void> = [];
 
+/**
+ * Every handle this file created and has not yet seen disposed. `afterEach`
+ * below disposes them, so a case that fails between `startPiSession` and its
+ * own `dispose()` cannot leave a live session behind for the next case
+ * (#4664 M2: a leaked primary in another root declines the next start, which
+ * turns one red assertion into a cascade).
+ */
+const liveHandles: PiSession[] = [];
+
 const PINNED_KEYS = [
 	"PI_LENS_HOME",
 	"PILENS_DATA_DIR",
@@ -570,6 +582,10 @@ async function buildSession(args: {
 			}
 		},
 	};
+	// Registered the moment the session exists, BEFORE any assertion the case
+	// makes: `afterEach` disposes whatever is still live, so a failing case
+	// cannot leave a primary session behind for the next one (#4664 M2).
+	liveHandles.push(handle);
 	return handle;
 }
 
@@ -619,21 +635,39 @@ export async function startPiSession(
 /**
  * Create the file's fixture root. The caller owns the handle for the file's
  * lifetime; `afterAll` below removes it after the drain.
+ *
+ * This call PINS the file's one root. The guard therefore fires even when no
+ * case has started a session yet, which makes it independent of case order: a
+ * second `piSessionFixture()` — or a `startPiSession` under another root —
+ * fails at creation instead of quietly starting a session that observes
+ * nothing (#4664 M1).
  */
 export function piSessionFixture(): { root: string; cleanup: () => void } {
 	const fixture = setupTestEnvironment(TMP_PREFIX);
+	assertOneRoot(fixture.tmpDir);
 	liveFixtures.push(fixture.cleanup);
 	return { root: fixture.tmpDir, cleanup: fixture.cleanup };
 }
 
 /**
+ * Dispose every handle this file created that is still live: the per-case
+ * teardown, and the reason a failing assertion cannot cascade into the next
+ * case (#4664 M2). `dispose()` is idempotent, so a case that disposes its own
+ * handle is a no-op here.
+ */
+afterEach(async () => {
+	for (const handle of liveHandles.splice(0)) await handle.dispose();
+});
+
+/**
  * Settle, put the environment back, then remove every fixture root this file
- * owns. `dispose()` already emitted `session_shutdown` into the loaded copy and
- * joined its registry tail; this pass repeats both settles so a case that left a
- * handle undisposed cannot leave a write in flight over the removal. The copy's
- * module-scope persist queues stay unreachable (header, point 6).
+ * owns. `afterEach` above already disposed each case's handles; this pass is
+ * the backstop for a case that threw before its first `await`, plus the
+ * settle/removal order. The copy's module-scope persist queues stay
+ * unreachable (header, point 6).
  */
 afterAll(async () => {
+	for (const handle of liveHandles.splice(0)) await handle.dispose();
 	await drainBackgroundWritesForTests();
 	await _settleRegistryMutationsForTests();
 	for (const [key, value] of Object.entries(savedEnv)) {
