@@ -154,16 +154,25 @@ newest-in-range lane reads it, bounded above so `"*"` can never mean
 matrix has passed on. A newer host enters the window in ONE change: run this
 matrix on it, add it to that test's verified list, and move the workflow's
 ceiling together. P1 is one verified host per minor line from 0.86 onward;
-0.81–0.83 are in-window without a dedicated host, while 0.80, 0.84, and
-0.85 are represented by the existing host list and ratchet. A ceiling past an
-unrun minor still claims that minor, so the verified-minor ratchet names the
-admitted lines explicitly.
+0.81–0.83 are in-window without a dedicated host. A ceiling past an unrun
+minor still claims that minor, so the verified-minor ratchet names the admitted
+lines explicitly.
+
+The floor is 0.86.1 (#4688, maintainer decision 2026-10-20). 0.80–0.85 are
+out of the window: since #4644 pi-lens injects context only from a `context`
+event that carries a system head, and those hosts keep the prompt in
+`agent.state.systemPrompt` and never emit `context_with_system`, so they
+receive no findings and no guidance. Raising the floor was chosen over reviving
+the old hosts; a real 0.80.10 session delivered the staged guidance at
+`91c939e10` and nothing at `e7a0a8aba` (`markerReachedProvider: false` on all
+3 requests).
 
 ### Verified hosts
 
-The certified policy is `>=0.80.10 <1.4.0`. Each listed minor line has a
-release-QA witness; the workflow ceiling and `tests/packaging.test.ts` list are
-updated together.
+The certified policy is `>=0.86.1 <1.4.0`, and this table is the whole verified
+set: `tests/packaging.test.ts` fails when it and `PI_HOST_SUPPORTED_RANGE`
+disagree. Each listed minor line has a release-QA witness; the workflow ceiling
+and `tests/packaging.test.ts` list are updated together.
 
 | host | date | pi-lens commit | result |
 | --- | --- | --- | --- |

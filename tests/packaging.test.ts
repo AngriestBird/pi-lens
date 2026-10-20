@@ -424,12 +424,10 @@ describe("host-provided peers are open; the supported window lives in install-sm
 
 	// Hosts release-qa has actually passed. NOT derived from the lockfile: the
 	// lockfile's pi version is only a test host, not a promise. P1 requires one
-	// release-qa witness per minor line from 0.86 onward; represented 0.80,
-	// 0.84, and 0.85 lines are also kept in this ratchet.
+	// release-qa witness per minor line from 0.86 onward; #4688 removed the
+	// 0.80, 0.84 and 0.85 rows with the certified floor, because a pi below
+	// 0.86 emits no `context_with_system` and receives no findings at all.
 	const RELEASE_QA_VERIFIED_HOSTS = [
-		"0.80.10",
-		"0.84.1",
-		"0.85.1",
 		"0.86.1",
 		"0.87.1",
 		"0.99.2",
@@ -439,9 +437,6 @@ describe("host-provided peers are open; the supported window lives in install-sm
 		"1.3.0",
 	];
 	const VERIFIED_MINOR_LINES = [
-		"0.80",
-		"0.84",
-		"0.85",
 		"0.86",
 		"0.87",
 		"0.99",
@@ -488,9 +483,9 @@ describe("host-provided peers are open; the supported window lives in install-sm
 	});
 
 	// Recurrence prevented (#4513): the ceiling moved from <1.2.0 to <1.4.0 while
-	// the real-pi compat smoke stayed on the 0.80.10 floor, so nothing exercised
-	// the new top of the window. The floor is install-smoke's job; compat-smoke
-	// carries the newest verified host.
+	// the real-pi compat smoke stayed on the oldest supported floor, so nothing
+	// exercised the new top of the window. The floor is install-smoke's job;
+	// compat-smoke carries the newest verified host.
 	it("pins compat-smoke to the newest release-qa verified host", () => {
 		const compat = yaml.load(
 			fs.readFileSync(
@@ -542,7 +537,49 @@ describe("host-provided peers are open; the supported window lives in install-sm
 			).toBe(true);
 		}
 	});
+
+	// #4688: the floor is declared twice on purpose -- once as the window a
+	// workflow measures, once as the policy sentence a human reads before
+	// running the matrix -- and nothing compared them. The doc kept
+	// `>=0.80.10 <1.4.0` and a host list carrying three hosts below the
+	// certified floor after the floor moved, so the two declarations could
+	// disagree with every case above still green.
+	const baselineDoc = fs.readFileSync(
+		path.join(root, "docs", "release-qa-baseline.md"),
+		"utf8",
+	);
+
+	it("states in the baseline doc the same certified policy the workflow enforces", () => {
+		const cited = baselineDoc.match(/The certified policy is `([^`]+)`/)?.[1];
+		expect(cited, "docs/release-qa-baseline.md 'Verified hosts' policy").toBe(
+			window,
+		);
+	});
+
+	it("keeps the baseline doc's verified-host table and this ratchet one list", () => {
+		expect(verifiedHostsFromBaseline(baselineDoc)).toEqual(
+			[...RELEASE_QA_VERIFIED_HOSTS].sort(semver.compare),
+		);
+	});
+
+	it("lists no verified host the certified window excludes", () => {
+		const excluded = verifiedHostsFromBaseline(baselineDoc).filter(
+			(version) => !semver.satisfies(version, window),
+		);
+		expect(
+			excluded,
+			`PI_HOST_SUPPORTED_RANGE (${window}) excludes listed host(s) ${excluded.join(", ")}`,
+		).toEqual([]);
+	});
 });
+
+/** Host rows of the baseline doc's `### Verified hosts` table, in table order. */
+function verifiedHostsFromBaseline(text: string): string[] {
+	const section = (text.split("### Verified hosts")[1] ?? "").split(/\n## /)[0];
+	return [...(section ?? "").matchAll(/^\| (\d+\.\d+\.\d+) \|/gm)].map(
+		(match) => match[1] as string,
+	);
+}
 
 // Recurrence prevented (#4513): `build:dist` reads the esbuild and tsc versions
 // out of package-lock.json. esbuild was in the lock only because pi 1.1's
