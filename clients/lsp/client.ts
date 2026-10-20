@@ -2634,10 +2634,17 @@ export function setupIncomingHandlers(
 			}
 			if (PUB_DEBUG) {
 				// #1333: PUB_DEBUG gate preserved; sink is extension.log.
+				// #4615: the row names the DOCUMENT it is about. Several live clients
+				// share a server id (five typescript fixtures), so a reader that keys
+				// on `server` alone attributes one client's publish to another's
+				// phase — the mis-read that put `empty-first` on typescript. The path
+				// is the client's own normalized document key, the identifier the
+				// probe compares against its fixture file.
 				logExtension({
 					subsystem: "lsp-pub",
 					level: "debug",
 					message: `server=${state.serverId} pubVersion=${docVersion} docVersion=${state.documentVersions?.get(normalizedPath)} diags=${newDiags.length}`,
+					metadata: { path: normalizedPath },
 				});
 			}
 			const strategy = getStrategy(state.serverId, state.launchVariant);
