@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { DefaultResourceLoader } from "@earendil-works/pi-coding-agent";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
 	assertNonEmptyScan,
@@ -460,9 +461,16 @@ function censusTmpRootCreators(): Map<string, string> {
 
 /** The widened census's JUDGMENT (#4560): of the new entries at the tmp root,
  *  the ones a TEST PROCESS created (the shared interposer recorded a creator).
- *  A child process's own tmp cache (`jiti` and friends) has no creator on
- *  record, so it is counted on the census line, never asserted — the #4307-4
- *  direction that keeps an innocent file out of the report. */
+ *  A directory a CHILD process creates has no creator on record, so it is
+ *  counted on the census line, never asserted — the #4307-4 direction that
+ *  keeps an innocent file out of the report. A loader's cache is not that case
+ *  when the load runs in this process: pi's `createJiti`
+ *  (`@earendil-works/pi-coding-agent/dist/core/extensions/loader.js`) mkdirs
+ *  `path.join(os.tmpdir(), "jiti")` from THIS process on the first by-path
+ *  extension load (#4673), so the interposer does record it and this judgment
+ *  does assert it. The fix is at the writer (`JITI_FS_CACHE=0` and
+ *  `JITI_CACHE=0` in `tests/support/vitest-setup.ts`), never a name filter
+ *  here. */
 function judgedTmpRootWrites(
 	entries: readonly string[],
 	creators: ReadonlyMap<string, string> = censusTmpRootCreators(),
@@ -1244,6 +1252,76 @@ describe("tmp-fixture-hygiene", () => {
 		} finally {
 			fs.rmSync(sibling, { recursive: true, force: true });
 		}
+	});
+
+	// #4673: the mechanism, not a name. pi builds its jiti with
+	// `{ moduleCache: false }` and no `cache`, so jiti's `prepareCacheDir`
+	// derives `path.join(os.tmpdir(), "jiti")` (pi's loader file has no
+	// `node_modules` sibling) and mkdirs it IN THE TEST PROCESS on the first
+	// by-path extension load -- the `loader.reload()` of
+	// `tests/clients/skills-package-filter.test.ts`
+	// (`@earendil-works/pi-coding-agent/dist/core/extensions/loader.js` calls
+	// `createJiti` with `import.meta.url`). The shared interposer records that
+	// write as a #4560 fixture sibling, so a run pairing those two files reds
+	// this census on a name neither file spells. The run-wide pin
+	// (`JITI_FS_CACHE=0` and `JITI_CACHE=0`, forced in
+	// `tests/support/vitest-setup.ts` before any test module loads and mirrored
+	// in `vitest.config.ts` for globalSetup and pre-fork children) removes the
+	// write at its source. This case drives the same load, through pi's real
+	// `DefaultResourceLoader`, and asserts the tmp root gained nothing: the pin
+	// assertion is unconditional, and the snapshot comparison binds on a root
+	// without a pre-existing `jiti` (the same condition the pair itself needs,
+	// since a directory already present is in the run's baseline).
+	it("keeps a by-path extension load out of the tmp root (#4673)", async () => {
+		expect(process.env.JITI_FS_CACHE).toBe("0");
+		expect(process.env.JITI_CACHE).toBe("0");
+		const env = setupTestEnvironment("pi-lens-4673-jiti-");
+		const agentDir = path.join(env.tmpDir, "agent");
+		fs.mkdirSync(agentDir, { recursive: true });
+		// A by-path entry pi jiti-loads, the shape the accused file passes as
+		// `additionalExtensionPaths` / a manifest `pi.extensions`.
+		const entry = path.join(env.tmpDir, "extension.js");
+		fs.writeFileSync(entry, "export default function () { return {}; }\n");
+		const before = [...(tmpHygieneTmpRootWrites() ?? [])].sort();
+		try {
+			const loader = new DefaultResourceLoader({
+				cwd: env.tmpDir,
+				agentDir,
+				additionalExtensionPaths: [entry],
+			});
+			await loader.reload();
+			// Non-vacuous: the extension really was loaded by path through pi's
+			// loader, so the jiti instance this case is about was constructed.
+			expect(loader.getExtensions().errors).toEqual([]);
+			expect(loader.getExtensions().extensions).toHaveLength(1);
+			const after = [...(tmpHygieneTmpRootWrites() ?? [])].sort();
+			expect(
+				after,
+				`[tmp-hygiene] a by-path extension load wrote ${after
+					.filter((name) => !before.includes(name))
+					.join(", ")} at the tmp root (#4673)`,
+			).toEqual(before);
+			expect(after).not.toContain("jiti");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// #4673: a worker cannot witness the config MIRROR's effect. The setup
+	// forces both values before any test module loads, so a worker's
+	// `process.env` reads "0" whether `vitest.config.ts` says so or not; the
+	// mirror's own surface is the pre-fork process (`globalSetup` and any child
+	// forked ahead of the first worker), which no test body can read. Pinned at
+	// its only observable surface -- the source -- in this file's existing
+	// wiring idiom for a call a test body must not drive, with comments blanked
+	// so prose naming the line cannot satisfy it.
+	it("keeps the jiti cache pin in the vitest config, not only in the workers (#4673)", () => {
+		const config = stripSource(
+			fs.readFileSync(path.join(REPO_ROOT, "vitest.config.ts"), "utf8"),
+			{ strings: "keep" },
+		);
+		expect(config).toMatch(/process\.env\.JITI_FS_CACHE = "0";/);
+		expect(config).toMatch(/process\.env\.JITI_CACHE = "0";/);
 	});
 
 	it("reds when a live prefix loses its admission row", () => {
