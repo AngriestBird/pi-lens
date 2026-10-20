@@ -10,9 +10,11 @@
  *  - `lastLine`: where the last LSP-addressable line begins, for the
  *    Incremental `didChange` range (#1669).
  *
- * Both come out of ONE walk here, with no line array, and — for a document
- * with no `\r` — no per-character work at all. `lineTextAt` reads one line's
- * text out of the same addressing scheme without materializing the others.
+ * The count needs no terminator knowledge and stays native on every document
+ * (`countLfNewlines`); only `lastLine` needs the `\r` rules, and only a
+ * document holding a `\r` pays a per-character loop for it. `lineTextAt` reads
+ * one line's text out of the same addressing scheme without materializing the
+ * others.
  */
 
 /** Where a document's last LSP-addressable line begins (#2066). */
@@ -27,6 +29,43 @@ export interface DocumentContentScan {
 	/** `\n` count — `contentLineCount` is this + 1. */
 	lfNewlineCount: number;
 	lastLine: LastLinePosition;
+}
+
+/**
+ * ONE native walk over the document for the `\n` count and the line start the
+ * last `\n` leaves behind.
+ */
+function walkLfLines(content: string): {
+	lfNewlineCount: number;
+	lastStart: number;
+} {
+	let lfNewlineCount = 0;
+	let lastStart = 0;
+	for (
+		let i = content.indexOf("\n");
+		i !== -1;
+		i = content.indexOf("\n", i + 1)
+	) {
+		lfNewlineCount++;
+		lastStart = i + 1;
+	}
+	return { lfNewlineCount, lastStart };
+}
+
+/**
+ * The document's `\n` count — the answer a bound check or a record asks for,
+ * on its own (#2066).
+ *
+ * A `\r` needs no disambiguation for this number: `\r\n` carries exactly one
+ * `\n`, and a lone `\r` carries none, so the count is the `\n` count on every
+ * document and this native walk costs an LF document and a CRLF one the same.
+ * That is why the sync bound asks THIS function: `scanDocumentContent`'s
+ * `\r` branch runs a per-character loop for `lastLine`, and paying it to
+ * answer a count made `exceedsLspSyncLimits` 4.6x to 5.5x slower on any
+ * document holding a `\r` (review F1: 0.06 -> 0.31 ms at 196 KB).
+ */
+export function countLfNewlines(content: string): number {
+	return walkLfLines(content).lfNewlineCount;
 }
 
 /**
@@ -45,25 +84,17 @@ export interface DocumentContentScan {
  * terminators went uncounted computes a range ending mid-document.
  */
 export function scanDocumentContent(content: string): DocumentContentScan {
+	// The count is the native one on every document; the per-character loop
+	// below is the ONLY cost a `\r` adds, and it computes `lastLine` alone.
+	const { lfNewlineCount, lastStart } = walkLfLines(content);
 	// A document with no `\r` (the common case) has exactly one terminator
-	// kind, so `\n` count == terminator count and the last line starts after
-	// the last `\n`. `indexOf` is native and walks ~10x faster than the
-	// per-character loop below (0.30 vs 3.0 ms on a 1.96 MB document). Any `\r`
-	// falls through to the loop, which owns the `\r\n`/lone-`\r` rules.
+	// kind, so `lastLine` starts right after the last `\n`.
 	if (content.indexOf("\r") === -1) {
-		let lfNewlineCount = 0;
-		let start = 0;
-		for (
-			let i = content.indexOf("\n");
-			i !== -1;
-			i = content.indexOf("\n", i + 1)
-		) {
-			lfNewlineCount++;
-			start = i + 1;
-		}
-		return { lfNewlineCount, lastLine: { index: lfNewlineCount, start } };
+		return {
+			lfNewlineCount,
+			lastLine: { index: lfNewlineCount, start: lastStart },
+		};
 	}
-	let lfNewlineCount = 0;
 	let index = 0;
 	let start = 0;
 	// `charCodeAt`, not `codePointAt` (typescript:S7758, accepted): both are
@@ -74,14 +105,9 @@ export function scanDocumentContent(content: string): DocumentContentScan {
 	for (let i = 0; i < content.length; i++) {
 		const code = content.charCodeAt(i);
 		if (code !== 10 && code !== 13) continue;
-		if (code === 10) {
-			lfNewlineCount++;
-		} else if (content.charCodeAt(i + 1) === 10) {
-			// `\r\n` is ONE line terminator, and still carries the `\n` the
-			// LF-only count wants.
-			lfNewlineCount++;
-			i++;
-		}
+		// `\r\n` is ONE terminator; the `\n` it carries is already in the
+		// native count above, so only the terminator index moves here.
+		if (code === 13 && content.charCodeAt(i + 1) === 10) i++;
 		index++;
 		start = i + 1;
 	}

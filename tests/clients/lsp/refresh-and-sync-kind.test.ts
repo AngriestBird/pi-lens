@@ -883,6 +883,25 @@ describe("#2066 one JS document pass per send", () => {
 		expect(probe.lfIndexOfCalls).toBe(NEWLINES + 1);
 	});
 
+	it("checks the LSP sync bound on a CRLF document in one LF walk, with no per-character visit", async () => {
+		// Review F1: the bound check used to ask `scanDocumentContent`, whose
+		// `\r` branch walks the document per character to compute a `lastLine`
+		// the bound check never reads. On any document holding a `\r` that made
+		// the check 4.6x to 5.5x slower than the split it replaced (0.06 ->
+		// 0.31 ms at 196 KB, 0.63 -> 2.91 ms at 1.92 MB).
+		const CRLF_DOCUMENT =
+			"const value = 1; // padding for a realistic line\r\n".repeat(4000);
+		const probe = await measureDocumentScans(1024, async () => {
+			exceedsLspSyncLimits(CRLF_DOCUMENT);
+		});
+		expect(probe.splitReceiverChars).toBe(0);
+		expect(probe.maxSplitResultLength).toBeLessThanOrEqual(1);
+		// No per-character visit, and one native LF pass that reaches every
+		// `\n` and then misses once — the same shape the LF case pins.
+		expect(probe.charCodeAtVisits).toBe(0);
+		expect(probe.lfIndexOfCalls).toBe(CRLF_DOCUMENT.split("\n").length);
+	});
+
 	it("reads one line without splitting the document", async () => {
 		const probe = await measureDocumentScans(1024, async () => {
 			lineTextAt(DOCUMENT, 3);

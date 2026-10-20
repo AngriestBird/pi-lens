@@ -1048,10 +1048,14 @@ file-scoped worklist and receives no project-wide scanner output.
   deadline- and abort-bounded, and silence is never clean.
 - Document line addressing has one owner, `clients/lsp/content-scan.ts`: the
   `\n` count behind the `lsp_document_send` record's `contentLineCount` and the
-  LSP sync bound, the last LSP-addressable line an Incremental change spans,
-  and one line's text (`lineTextAt`, which the diagnostic-conversion call
-  sites read) all come from it. No other module splits document content to
-  count or read lines: a send, a bound check, and a line read ask this owner.
+  LSP sync bound (`countLfNewlines`), the last LSP-addressable line an
+  Incremental change spans, and one line's text (`lineTextAt`, which the
+  diagnostic-conversion call sites read) all come from it. The rule it owns is
+  the count and the one-line read: no other module may `split("\n")` document
+  content to obtain a line count or a single line — a send, a bound check, and
+  a line read ask this owner. A module that needs the whole line array (a
+  multi-line table, a per-line scan of its own document) keeps its `split`; the
+  array is the value it consumes, never a way to count or to reach one line.
 - `touchFile` fires a type-2 watched-file announcement at entry for the first
   seen content hash of a path, before the owner's didChange; it reaches every
   other live client of the same server across package roots through the client

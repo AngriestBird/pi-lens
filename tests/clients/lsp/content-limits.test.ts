@@ -66,6 +66,12 @@ describe("the line bound counts what its historical split counted (#2066)", () =
 		},
 		{ name: "LF lines one past the bound", content: "a\n".repeat(MAX_LINES) },
 		{
+			// #2066 review F1: the CRLF count is the native LF count, so this
+			// row reds if a `\r` is ever counted as a second newline.
+			name: "CRLF lines exactly at the bound (one terminator each, one LF each)",
+			content: "a\r\n".repeat(MAX_LINES - 1),
+		},
+		{
 			name: "CRLF lines one past the bound (one terminator each, one LF each)",
 			content: "a\r\n".repeat(MAX_LINES),
 		},

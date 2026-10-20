@@ -5,7 +5,10 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { lineTextAt } from "../../../clients/lsp/content-scan.js";
+import {
+	countLfNewlines,
+	lineTextAt,
+} from "../../../clients/lsp/content-scan.js";
 
 describe("lineTextAt (#269)", () => {
 	it("returns the 0-based line text", () => {
@@ -113,4 +116,32 @@ describe("lineTextAt answers what the split it replaced answered (#2066)", () =>
 		}
 		expect(documentsChecked).toBe(60 * 25);
 	});
+});
+
+/**
+ * #2066 review F1: the LF count is the one answer that needs no terminator
+ * knowledge — `\r\n` carries exactly one `\n`, a lone `\r` none — so it is the
+ * `\n` count on every document. `countLfNewlines` is the entry point the sync
+ * bound asks, so that a document holding a `\r` does not pay the per-character
+ * loop `lastLine` needs (the loop made the bound check 4.6x-5.5x slower until
+ * this round). Each row is pinned against the split the bound check used.
+ */
+describe("countLfNewlines answers the split's line count on every terminator (#2066)", () => {
+	const DOCUMENTS: ReadonlyArray<readonly [string, string]> = [
+		["an empty document", ""],
+		["LF content", "first\nsecond\nthird"],
+		["CRLF content", "a\r\nb\r\nc\r\n"],
+		["lone-CR content", "a\rb\rc"],
+		["mixed terminators", "a\r\nb\rc\nd\r\n"],
+		["an astral glyph", "🙂 é\nx"],
+		["a trailing newline", "a\nb\n"],
+		["no trailing newline", "a\nb"],
+		["CRLF at the line bound", "a\r\n".repeat(4999)],
+	];
+
+	for (const [name, content] of DOCUMENTS) {
+		it(`counts the split's newlines for ${name}`, () => {
+			expect(countLfNewlines(content)).toBe(content.split("\n").length - 1);
+		});
+	}
 });
