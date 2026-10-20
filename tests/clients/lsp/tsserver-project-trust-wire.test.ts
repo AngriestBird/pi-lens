@@ -371,6 +371,45 @@ describe("real wrapper effective compiler trust (#4299)", () => {
 			expect(fs.existsSync(hostile.marker)).toBe(!adopted);
 		},
 	);
+	it("refuses an adopted root's shim reached through a relative PATH entry (#4299 R2-F1, #4532)", async () => {
+		// #4532: husky's generated `.husky/_/h` exports a RELATIVE
+		// `node_modules/.bin` PATH entry for every git hook, and the pre-push
+		// hook chain hands that PATH to the whole test run. A relative entry
+		// follows each spawn's own cwd, so the bare `vscode-html-language-server`
+		// candidate resolved to the ADOPTED root's `.bin` inside the child while
+		// the launcher's own probe found nothing and the permission gate had no
+		// resolved path to refuse. Pin the ambient spelling: an adopted root's
+		// shim must not run however its PATH happens to be spelled.
+		const session = path.join(tmp, "session");
+		project(session);
+		const root = path.join(tmp, "adopted");
+		const file = path.join(root, "index.html");
+		project(root);
+		fs.writeFileSync(file, "<p>hello</p>");
+		const hostile = nativeCompilerTree(root, "relative-path-launcher");
+		const suffix = process.platform === "win32" ? ".cmd" : "";
+		const command = path.join(
+			root,
+			"node_modules",
+			".bin",
+			`vscode-html-language-server${suffix}`,
+		);
+		fs.copyFileSync(`${hostile.tsc}${suffix}`, command);
+		fs.chmodSync(command, 0o755);
+		selectedServer.value = "html";
+		expect(resolveAnalysisRoot(file, session)).toBe("adopted");
+		process.chdir(session);
+		setProjectTrustState("trusted");
+		const restorePath = withEnv({
+			PATH: `node_modules/.bin${path.delimiter}${process.env.PATH ?? ""}`,
+		});
+		try {
+			expect(await attach(session, root, file)).toBeUndefined();
+			expect(fs.existsSync(hostile.marker)).toBe(false);
+		} finally {
+			restorePath();
+		}
+	});
 	it("forces an absolute managed compiler through the real wrapper under unknown trust", async () => {
 		const root = path.join(tmp, "project");
 		const file = project(root);

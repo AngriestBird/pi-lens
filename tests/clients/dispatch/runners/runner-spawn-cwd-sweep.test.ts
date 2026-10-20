@@ -195,6 +195,10 @@ const EXPECTED_WRAPPER_SITES = [
 	"clients/installer/index.ts:runCommand",
 	"clients/jscpd-client.ts:runScan",
 	"clients/knip-client.ts:runAnalyze",
+	// #4532: the bare-command probe resolves its `which`/`where` child against
+	// the SPAWN cwd, so a relative PATH entry lands on the same target the
+	// server child execs.
+	"clients/lsp/launch.ts:findBinaryOnPath",
 	"clients/lsp/launch.ts:trySpawn",
 	"clients/lsp/launch.ts:trySpawn",
 	"clients/opengrep-client.ts:runScan",
@@ -239,10 +243,11 @@ const NO_CWD_EXEMPTION_ROWS: ReadonlyArray<readonly [string, string]> = [
 		"clients/lsp/launch.ts#runStderrGuardedProbe:eedfa033",
 		"execFileSync runs a stderr probe and does not resolve project configuration",
 	],
-	[
-		"clients/lsp/launch.ts#findBinaryOnPath:90f3c9a8",
-		"execFileSync runs a PATH lookup and does not resolve project configuration",
-	],
+	// #4532 removed `clients/lsp/launch.ts#findBinaryOnPath:90f3c9a8` ("runs a
+	// PATH lookup and does not resolve project configuration"): the lookup now
+	// passes the spawn cwd, because a relative PATH entry is resolved by the
+	// CHILD against that cwd, so probing where the child will exec is exactly
+	// the classification the analysis-root refusal needs.
 	[
 		"clients/pipeline.ts#runPipeline:6e2471d5",
 		"runPipeline hands its `ctx`, which carries `cwd`, to analysePipeline, its own body split off by #3506 so the queue hold's `finally` wraps it; the argument is named `ctx`, so the wrapper rule reads it as no cwd. The checked site is analysePipeline's runAutofix call",
@@ -444,6 +449,14 @@ const ORIGIN_ADMISSION_ROWS: ReadonlyArray<readonly [string, string]> = [
 	[
 		"clients/lsp/launch.ts#launchLSP:e7df4bb9~3f60133c",
 		"launchLSP forwards its caller-provided cwd through trySpawn",
+	],
+	[
+		"clients/lsp/launch.ts#findBinaryOnPath:dc875252~dbf27697",
+		"cwd is findBinaryOnPath's own `cwd` parameter — the spawn cwd the launcher resolved; probing anywhere else is the defect (#4532). Its caller is the checked site",
+	],
+	[
+		"clients/lsp/launch.ts#launchLSP:d2cdf71f~6ffd1d8e",
+		"launchLSP forwards its caller-provided cwd into the bare-command path probe, the same boundary value it gives trySpawn (#4532)",
 	],
 	[
 		"clients/biome-client.ts#BiomeClient.spawnBiomeAsync:710974ec~dbf27697",

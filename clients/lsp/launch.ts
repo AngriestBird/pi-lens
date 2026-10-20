@@ -366,12 +366,26 @@ function bypassPs1OnWindows(
 function findBinaryOnPath(
 	command: string,
 	env: NodeJS.ProcessEnv,
+	cwd: string,
 ): string | undefined {
 	try {
 		const result = execFileSync(isWindows ? "where" : "which", [command], {
 			encoding: "utf-8",
 			stdio: ["ignore", "pipe", "ignore"],
 			env,
+			// #4532: probe in the cwd the CHILD is spawned with, and return an
+			// absolute path. A relative PATH entry follows each spawn's own cwd
+			// (the rule `commandSearchReachesProject` already states for the
+			// repair seam), so the kernel resolves `node_modules/.bin` — husky's
+			// generated `.husky/_/h` exports exactly that entry for every git
+			// hook, and a caller's own `PATH=bin:$PATH` reaches it too — against
+			// the adopted root the server launches in. Probing from THIS
+			// process's cwd reported such a command as absent while the child
+			// exec'd `<root>/node_modules/.bin/<command>`, and the
+			// analysis-root permission gate below judges the string it got:
+			// a resolution this function did not perform is a resolution the
+			// child performs unclassified (#4248, #4299 R2-F1).
+			cwd,
 			// #1980 population sweep: this was the one synchronous
 			// child-process site in the repo with no bound at all. It runs on
 			// the LSP server spawn path, so an unresponsive `where`/`which` — a
@@ -385,8 +399,13 @@ function findBinaryOnPath(
 			.map((line) => line.trim())
 			.filter(Boolean);
 		for (const candidate of result) {
-			if (fs.existsSync(candidate)) {
-				return candidate;
+			// `which` echoes a relative PATH entry relative to ITS cwd, which is
+			// now the spawn cwd.
+			const absolute = path.isAbsolute(candidate)
+				? candidate
+				: path.resolve(cwd, candidate);
+			if (fs.existsSync(absolute)) {
+				return absolute;
 			}
 		}
 	} catch {
@@ -798,7 +817,7 @@ export async function launchLSP(
 		!isFullyQualified(command) &&
 		!command.includes(path.sep) &&
 		!command.includes("/")
-			? (findBinaryOnPath(command, env) ?? explicitCommand)
+			? (findBinaryOnPath(command, env, cwd) ?? explicitCommand)
 			: explicitCommand;
 
 	// Compute needsShell based on command

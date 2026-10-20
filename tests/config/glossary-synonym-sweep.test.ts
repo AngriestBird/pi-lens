@@ -1038,7 +1038,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/language.ts": 3,
 		// 30 -> 31 (#4248): the project-local binary refusal records the
 		// resolved command basename through the existing path vocabulary.
-		"clients/lsp/launch.ts": 31,
+		// 31 -> 33 (#4532): the bare-command probe absolutizes the `which`
+		// result against the spawn cwd, one `path.isAbsolute` test and one
+		// `path.resolve`; not the retired `path` domain term.
+		"clients/lsp/launch.ts": 33,
 		"clients/lsp/lombok.ts": 14,
 		// #4299: 121 -> 124; OS path namespace calls for canonical compiler
 		// validation replace the wrapper-relative guess. No path-key owner changes.
