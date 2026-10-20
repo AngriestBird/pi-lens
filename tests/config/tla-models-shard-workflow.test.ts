@@ -235,9 +235,17 @@ describe("#3918 sharded TLA+ models workflow contract", () => {
 			file.indexOf("#4672 cap sizing"),
 			file.indexOf("#4672 cap sizing") + 1600,
 		);
-		// The comment carries the measured tail and the margin, not a guess.
-		expect(block).toContain("735 s against 720 s");
-		expect(block).toContain("685/700 s");
+		// The comment carries the measured tail and the margin, not a guess: both
+		// cancellations (attempt 1 at 735 s, attempt 2 at 726 s, each against the
+		// 720 s cap) and the per-shard-position p90 the cap was sized from.
+		const whole = readFileSync(
+			resolve(ROOT, ".github/workflows/ci.yml"),
+			"utf8",
+		);
+		expect(whole).toContain("735 s and then 726 s against 720 s");
+		expect(whole).toContain("118491126416");
+		expect(whole).toContain("118632989721");
+		expect(block).toContain("700 s (shard 4)");
 	});
 
 	// The balance line is the shard's own record of the split; without it a
