@@ -179,7 +179,14 @@ jobs:
   # the ruleset requires that name); the shard jobs are `tla-shards`.
   # scripts/check-tla-models.mjs partitions the sorted config list round-robin,
   # and tests/config/tla-models-shard-workflow.test.ts pins that every config
-  # lands in exactly one shard. Measured per-shard times: PENDING this PR's run.
+  # lands in exactly one shard. Measured per-shard times on master run
+  # 39380875926: 268 s, 349 s, 494 s and 726 s, so the round-robin split is
+  # unbalanced by ~2.7x and shard 4 owns the tail. That shard hit the 12-minute
+  # cap twice (735 s, then 726 s after a rerun) while every step of it had
+  # concluded success, which reded the required `TLA+ models` check with no
+  # model violation. #4672 carries the real fix (one aggregate verdict seam,
+  # a measured cap or a cost-weighted partition); until it lands, the cap
+  # follows that tail as a stopgap, the way #3591 raised it 10 -> 20.
   tla-shards:
     name: TLA+ models (shard ${{ matrix.shard }}/${{ strategy.job-total }})
     needs: changes
@@ -197,7 +204,11 @@ jobs:
     # refs #3572, #3517: each shard runs its configs through the CPU-sized
     # concurrency pool in scripts/check-tla-models.mjs, one TLC worker per
     # config (deterministic first violation).
-    timeout-minutes: 12
+    # Stopgap (#4672): the tail shard needs 726 s measured and this cap sat at
+    # 720 s, so it was cancelled after finishing its model check. 20 minutes is
+    # the floor of the next whole step above that tail, matching #3591. The
+    # measured partition is #4672's, not a comment's guess.
+    timeout-minutes: 20
     permissions:
       contents: read
 
