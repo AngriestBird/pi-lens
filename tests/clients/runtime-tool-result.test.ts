@@ -510,7 +510,16 @@ it("adopts a home sibling but refuses home, ancestors, and a home symlink (#4230
 	// os.homedir() reads USERPROFILE rather than HOME. Keep this fake home
 	// outside the OS temp tree and pin both environment spellings so the D1
 	// boundary is testing home ownership, not the temp-root refusal (#4230).
-	const home = fs.mkdtempSync(path.join(process.cwd(), ".analysis-root-home-"));
+	// Shape 73: it must also sit outside the session's own checkout. In a
+	// git-worktree lane `process.cwd()` IS that checkout's root, so the parent
+	// of a fixture there resolves a linked worktree of the same repository and
+	// the ancestor case below would read `linked-worktree` instead of `none`.
+	// A direct child of the OS temp root has a parent that is no checkout.
+	const home = path.join(
+		path.dirname(env.tmpDir),
+		`capture-4230-home-${process.pid}`,
+	);
+	fs.mkdirSync(home, { recursive: true });
 	const sessionRoot = path.join(home, "code", "a");
 	const siblingRoot = path.join(home, "code", "b");
 	const homeLink = path.join(env.tmpDir, "home-link");
