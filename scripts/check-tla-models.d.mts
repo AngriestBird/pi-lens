@@ -55,16 +55,37 @@ export declare function loadModelCosts(root: string): {
 	files: Record<string, number>;
 	max: number;
 };
+/**
+ * The cost table's key for `config`: its path under `root`, always posix.
+ * `pathImpl` defaults to the host `path`; pass `path.win32` to dose one
+ * (AGENTS.md shape 35).
+ */
+export declare function modelCostId(
+	root: string,
+	config: string,
+	pathImpl?: { relative: (from: string, to: string) => string; sep: string },
+): string;
 /** `costs` null keeps the round-robin split; a table packs by measured cost. */
 export declare function selectShard<Item>(
 	configs: readonly Item[],
 	shard: { index: number; total: number },
 	costs?: ModelCosts | null,
 ): Item[];
+/**
+ * How far this run's own seconds may sit from the table before the balance
+ * line calls the table stale.
+ */
+export declare const MODEL_COST_DRIFT_TOLERANCE: number;
+/**
+ * The balance line. `observed` maps `modelCostId` keys to the seconds this run
+ * measured, so the drift half compares the projection with the run.
+ */
 export declare function formatShardBalance(args: {
 	configs: readonly string[];
 	total: number;
 	costs: ModelCosts;
+	observed?: Map<string, number> | Record<string, number> | null;
+	driftTolerance?: number;
 }): string;
 export declare function resolveShardCosts(
 	argv: readonly string[],

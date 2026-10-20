@@ -206,18 +206,56 @@ export function evaluateShardVerdict({
 		};
 	}
 	// Every row passed, yet the shard job did not report `success`. That is not
-	// a green: at least one shard row is missing from what we can read.
+	// a green: at least one shard row is missing from what we can read. The
+	// line names what the rows ACTUALLY concluded -- a `skipped` matrix cell
+	// ran nothing (the `formal/`-unchanged rule or a failed upstream `needs`),
+	// so calling it "succeeded" would point a reader at a green shard that does
+	// not exist.
+	const conclusions = [
+		...new Set(classified.map((entry) => seenConclusion(entry.job))),
+	];
 	return {
 		outcome: "fail",
-		line: `${label}: needs result ${result}; every one of the ${rows.length} shard job(s) in the run's job list succeeded, so a shard row is missing from the evidence; unreadable evidence is not a pass`,
+		line: `${label}: needs result ${result}; the ${rows.length} shard row(s) in the run's job list concluded ${conclusions.join(", ")} and none explains that result, so a shard row is missing from the evidence${conclusions.includes("skipped") ? " (a `skipped` shard job ran nothing: the `formal/`-unchanged rule skipped it, or its `needs` failed)" : ""}; unreadable evidence is not a pass`,
 	};
 }
+
+/** The conclusion a shard row actually reports, for the message above. */
+function seenConclusion(job) {
+	const conclusion = String(job?.conclusion ?? "");
+	return conclusion || "no conclusion";
+}
+
+/**
+ * The endpoint's maximum page, and the repo's own spelling for a jobs listing
+ * (`scripts/ci-verdict.mjs`). The default page is 30 rows and this run already
+ * has 25 jobs; #3753 re-shards exactly this matrix, so a shard row past row 30
+ * would make the aggregate read "no row matched" and redden a required check
+ * on unreadable evidence -- a false red, the harm class this seam exists
+ * against.
+ */
+const JOBS_PER_PAGE = 100;
 
 /** The jobs URL the aggregate reads. */
 export function jobsUrl({ repository, run, jobsUrlOverride }) {
 	if (jobsUrlOverride) return jobsUrlOverride;
 	if (!repository || !run) return null;
-	return `https://api.github.com/repos/${repository}/actions/runs/${run}/jobs`;
+	return `https://api.github.com/repos/${repository}/actions/runs/${run}/jobs?per_page=${JOBS_PER_PAGE}`;
+}
+
+/**
+ * Refuse a listing that the payload itself says is incomplete: a `total_count`
+ * larger than the rows returned means the read saw one page, and a shard row
+ * could be on a page it did not see. Failing with that diagnosis beats both a
+ * false pass and a false "no row matched".
+ */
+function assertCompleteListing(payload, source) {
+	const total = payload?.total_count;
+	if (typeof total === "number" && total > payload.jobs.length) {
+		throw new Error(
+			`${source} returned ${payload.jobs.length} of ${total} jobs (incomplete listing)`,
+		);
+	}
 }
 
 /**
@@ -237,6 +275,7 @@ export async function readJobs({
 		if (!Array.isArray(payload?.jobs)) {
 			throw new Error(`${jobsFile} has no jobs array`);
 		}
+		assertCompleteListing(payload, jobsFile);
 		return payload.jobs;
 	}
 	if (!url) {
@@ -257,6 +296,7 @@ export async function readJobs({
 	if (!Array.isArray(payload?.jobs)) {
 		throw new Error(`GET ${url} returned no jobs array`);
 	}
+	assertCompleteListing(payload, `GET ${url}`);
 	return payload.jobs;
 }
 

@@ -189,8 +189,40 @@ describe("#4672 a cancelled shard that finished its work is a pass with a warnin
 			jobs: rows,
 		});
 		expect(verdict.outcome).toBe("fail");
+		expect(verdict.line).toContain("concluded success");
 		expect(verdict.line).toContain("a shard row is missing from the evidence");
 		expect(verdict.line).toContain("unreadable evidence is not a pass");
+		// F7: the line must name what the rows ACTUALLY concluded. Three shards
+		// succeeded here, so "succeeded" is true; a skipped matrix cell is the
+		// case where the old wording pointed at a green shard that never ran.
+		expect(verdict.line).not.toContain("every one of the");
+	});
+
+	// F7, the misnamed case: a skipped matrix cell (a failed upstream `changes`
+	// job skips every shard) makes the aggregate's own result `skipped`, and the
+	// rows it reads conclude `skipped`. Nothing "succeeded" -- the old line said
+	// "every one of the 1 shard job(s) ... succeeded", which pointed a reader at
+	// a green shard that ran nothing.
+	it("says a skipped shard ran nothing instead of calling it succeeded", () => {
+		const verdict = verdictLine({
+			label: "TLA+ models",
+			result: "skipped",
+			pattern: TLA_PATTERN,
+			checkStep: TLA_CHECK_STEP,
+			jobs: [
+				{
+					id: 1,
+					name: "TLA+ models (shard 1/4)",
+					conclusion: "skipped",
+					steps: [],
+				},
+			],
+		});
+		expect(verdict.outcome).toBe("fail");
+		expect(verdict.line).toContain("concluded skipped");
+		expect(verdict.line).toContain("ran nothing");
+		expect(verdict.line).toContain("`formal/`-unchanged rule");
+		expect(verdict.line).not.toContain("succeeded");
 	});
 
 	it("fails closed when no job in the list matches the shard pattern", () => {
@@ -338,8 +370,11 @@ describe("#4672 the aggregate step's own boundary: argv, fetch failures, annotat
 			},
 		});
 		expect(result.outcome).toBe("warn");
+		// F3: the endpoint's default page is 30 rows and this repo's own runs
+		// already have 25 jobs, so the fetch asks for the maximum page -- the
+		// spelling `scripts/ci-verdict.mjs` already uses for a jobs listing.
 		expect(seen[0].url).toBe(
-			"https://api.github.com/repos/acme/repo/actions/runs/42/jobs",
+			"https://api.github.com/repos/acme/repo/actions/runs/42/jobs?per_page=100",
 		);
 		// The header block is `scripts/lib/github-rest.mjs`'s own (the bearer
 		// ratchet's one spelling), not a second copy in this script.
@@ -348,6 +383,82 @@ describe("#4672 the aggregate step's own boundary: argv, fetch failures, annotat
 			Authorization: "Bearer tok",
 			"X-GitHub-Api-Version": "2022-11-28",
 		});
+	});
+
+	// F3: the aggregate reads `GET /actions/runs/<id>/jobs`, whose default page is
+	// 30 rows. This repo's ci.yml runs already carry 25 jobs, and #3753
+	// re-shards exactly this matrix, so a run that outgrows one default page
+	// would hide its shard rows and the aggregate would redden a required check
+	// on "no row matched". The fake below models GitHub's paging: it returns the
+	// `per_page` rows asked for, and `total_count` always describes the whole
+	// run.
+	it("reads the shard rows of a run that has more than one default page of jobs", async () => {
+		let requested = "";
+		const filler = Array.from({ length: 30 }, (_, index) => ({
+			id: 1000 + index,
+			name: `Filler job ${index}`,
+			conclusion: "success",
+			steps: [{ name: "run", conclusion: "success" }],
+		}));
+		const shardRows = jobsOf("tla-cancelled-complete.real.json").filter((job) =>
+			TLA_PATTERN.test(String(job.name)),
+		);
+		const all = [...filler, ...shardRows];
+		expect(all).toHaveLength(34);
+		const result = await run([...BASE, "--result", "cancelled"], {
+			env: {
+				GITHUB_REPOSITORY: "acme/repo",
+				GITHUB_RUN_ID: "42",
+				GITHUB_TOKEN: "t",
+			},
+			fetchImpl: async (url: string) => {
+				requested = String(url);
+				const perPage = Number(
+					new URL(String(url)).searchParams.get("per_page") ?? "30",
+				);
+				return {
+					ok: true,
+					status: 200,
+					json: async () => ({
+						total_count: all.length,
+						jobs: all.slice(0, perPage),
+					}),
+				};
+			},
+		});
+		expect(requested).toContain("per_page=100");
+		expect(result.outcome).toBe("warn");
+		expect(result.lines[0]).toContain("TLA+ models (shard 4/4)");
+	});
+
+	// The other side of the same read: a listing the payload itself marks as
+	// incomplete must fail with THAT diagnosis, not with "no shard row matched",
+	// so a future run past even the maximum page is actionable (shape 11).
+	it("fails closed, naming an incomplete listing, when the page is short of total_count", async () => {
+		const result = await run([...BASE, "--result", "cancelled"], {
+			env: {
+				GITHUB_REPOSITORY: "acme/repo",
+				GITHUB_RUN_ID: "42",
+				GITHUB_TOKEN: "t",
+			},
+			fetchImpl: async () => ({
+				ok: true,
+				status: 200,
+				json: async () => ({
+					total_count: 140,
+					jobs: Array.from({ length: 100 }, (_, index) => ({
+						id: index,
+						name: `Filler job ${index}`,
+						conclusion: "success",
+					})),
+				}),
+			}),
+		});
+		expect(result.code).toBe(1);
+		expect(result.outcome).toBe("fail");
+		expect(result.lines[0]).toContain("incomplete listing");
+		expect(result.lines[0]).toContain("100 of 140 jobs");
+		expect(result.lines[0]).toContain("unreadable evidence is not a pass");
 	});
 
 	it("emits the GitHub annotation beside the same line", async () => {

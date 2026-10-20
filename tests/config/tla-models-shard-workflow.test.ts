@@ -1,12 +1,14 @@
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { resolve, win32 } from "node:path";
 import { describe, expect, it } from "vitest";
 import yaml from "../../clients/deps/js-yaml.js";
 import {
 	MODEL_COSTS_FILE,
+	MODEL_COST_DRIFT_TOLERANCE,
 	formatShardBalance,
 	listModelConfigs,
 	loadModelCosts,
+	modelCostId,
 	selectConfigs,
 } from "../../scripts/check-tla-models.mjs";
 import { assertNonEmptyScan } from "../support/sweep-kit.js";
@@ -164,12 +166,23 @@ describe("#3918 sharded TLA+ models workflow contract", () => {
 		const total = JOBS["tla-shards"].strategy?.matrix?.shard?.length ?? 0;
 		expect(total).toBeGreaterThan(1);
 		const table = loadModelCosts(ROOT);
+		// Every lookup goes through `modelCostId`, the production key seam: a
+		// hand-built `resolve(config).slice(ROOT.length + 1)` keeps the HOST
+		// separator, so on a Windows runner every one of the 811 lookups misses,
+		// every config falls back to `table.max`, and the balance assertion below
+		// is then 1.00x by construction -- vacuous (F1, AGENTS.md "Windows path
+		// shapes" 1/2). The miss guard is what keeps that from passing silently.
+		const misses = listModelConfigs(ROOT).filter(
+			(config) => !(modelCostId(ROOT, config) in table.files),
+		);
+		expect(
+			misses,
+			"a cost lookup that misses the table falls back to table.max for every config, which makes the 1.05 balance assertion below vacuous instead of measured; key the table through modelCostId",
+		).toEqual([]);
 		const byShard = Array.from({ length: total }, (_, index) =>
 			selectConfigs(["--shard", `${index + 1}/${total}`], ROOT).reduce(
-				(sum, config) => {
-					const relative = resolve(config).slice(ROOT.length + 1);
-					return sum + (table.files[relative] ?? table.max);
-				},
+				(sum, config) =>
+					sum + (table.files[modelCostId(ROOT, config)] ?? table.max),
 				0,
 			),
 		);
@@ -185,10 +198,11 @@ describe("#3918 sharded TLA+ models workflow contract", () => {
 		const roundRobin = Array.from({ length: total }, (_, index) =>
 			listModelConfigs(ROOT)
 				.filter((_, position) => position % total === index)
-				.reduce((sum, config) => {
-					const relative = resolve(config).slice(ROOT.length + 1);
-					return sum + (table.files[relative] ?? table.max);
-				}, 0),
+				.reduce(
+					(sum, config) =>
+						sum + (table.files[modelCostId(ROOT, config)] ?? table.max),
+					0,
+				),
 		);
 		expect(
 			Math.max(...roundRobin) / Math.min(...roundRobin),
@@ -201,9 +215,7 @@ describe("#3918 sharded TLA+ models workflow contract", () => {
 	it("carries a cost row for every formal config and none for a vanished one", () => {
 		const table = loadModelCosts(ROOT);
 		const live = new Set(
-			listModelConfigs(ROOT).map((config) =>
-				resolve(config).slice(ROOT.length + 1),
-			),
+			listModelConfigs(ROOT).map((config) => modelCostId(ROOT, config)),
 		);
 		const stale = Object.keys(table.files).filter((id) => !live.has(id));
 		expect(
@@ -224,16 +236,18 @@ describe("#3918 sharded TLA+ models workflow contract", () => {
 		);
 		// The projected worst shard after the cost-weighted partition is ~505 s
 		// (1538 s of TLC work at the measured 3.05 s work per second of wall);
-		// the worst shard ever observed at the old partition was 724 s.
+		// the worst shard ever observed at the old partition was 735 s -- the
+		// attempt the 720 s cap CUT SHORT, not the 724 s the p90 table's maximum
+		// shows, because that table cannot contain a censored attempt (F6).
 		expect(cap).toBe(20);
-		expect(cap * 60).toBeGreaterThanOrEqual(1.5 * 724);
+		expect(cap * 60).toBeGreaterThanOrEqual(1.5 * 735);
 		const file = readFileSync(
 			resolve(ROOT, ".github/workflows/ci.yml"),
 			"utf8",
 		);
 		const block = file.slice(
 			file.indexOf("#4672 cap sizing"),
-			file.indexOf("#4672 cap sizing") + 1600,
+			file.indexOf("#4672 cap sizing") + 2400,
 		);
 		// The comment carries the measured tail and the margin, not a guess: both
 		// cancellations (attempt 1 at 735 s, attempt 2 at 726 s, each against the
@@ -246,18 +260,109 @@ describe("#3918 sharded TLA+ models workflow contract", () => {
 		expect(whole).toContain("118491126416");
 		expect(whole).toContain("118632989721");
 		expect(block).toContain("700 s (shard 4)");
+		// F6: the p90 table excludes the two attempts the cap censored, so its
+		// 724 s maximum is NOT the worst shard ever observed; the margin is
+		// stated against 735 s (1200/735 = 1.63x), and the table's window says
+		// what it leaves out. The comment is wrapped, so collapse it before
+		// matching a phrase that spans lines.
+		const prose = block.replace(/^[ \t]*#/gm, "").replace(/\s+/g, " ");
+		expect(prose).toContain(
+			"excludes the two attempts the 720 s cap cut short",
+		);
+		expect(prose).toContain("1.63x the worst shard ever observed (735 s)");
+		expect(prose).not.toContain("1.6x the worst shard ever observed (724 s)");
 	});
 
 	// The balance line is the shard's own record of the split; without it a
 	// stale table is invisible until a timeout 12 minutes later.
-	it("prints the per-shard measured balance, and names every unmeasured config", () => {
+	it("prints the per-shard balance, labels the split as the table's projection, and names every unmeasured config", () => {
 		const costs = resolveCostsFixture();
 		const configs = listModelConfigs(ROOT).slice(0, 4);
 		const line = formatShardBalance({ configs, total: 4, costs });
-		expect(line).toContain("all shards:");
+		expect(line).toContain("all shards");
+		expect(line).toContain("projected from scripts/tla-model-costs.json");
 		expect(line).toContain("heaviest/lightest = ");
 		expect(line).toContain("have no row in");
 		expect(line).toContain("scripts/gen-tla-model-costs.mjs");
+		// With no measurement handed in there is nothing to compare, and the
+		// line says so instead of implying the projection is the run.
+		expect(line).toContain("this run's own seconds unavailable");
+		expect(line).not.toContain("COST-TABLE DRIFT");
+	});
+
+	// F4: the projection half of that line is computed from the table itself, so
+	// it is 1.00x by construction and can never reveal drift in the table -- the
+	// one thing `Accepted residuals` offers it for. These two cases are the
+	// drift half: this run's own summed seconds against the table's rows.
+	it("prints the drift between the table and this run when they agree", () => {
+		const costs = { root: ROOT, ...loadModelCosts(ROOT) };
+		const configs = listModelConfigs(ROOT).slice(0, 4);
+		const observed = new Map<string, number>(
+			configs.map((config) => [
+				modelCostId(ROOT, config),
+				costs.files[modelCostId(ROOT, config)] ?? costs.max,
+			]),
+		);
+		const line = formatShardBalance({ configs, total: 4, costs, observed });
+		expect(line).toContain("this run measured");
+		expect(line).toContain("(1.00x the table,");
+		expect(line).toContain("inside the");
+		expect(line).not.toContain("COST-TABLE DRIFT");
+	});
+
+	// The direction that must red: the table says one thing, the run did another.
+	it("names a stale cost table instead of confirming it with its own projection", () => {
+		const costs = { root: ROOT, ...loadModelCosts(ROOT) };
+		const configs = listModelConfigs(ROOT).slice(0, 4);
+		// 3x the projected seconds for every config in this shard -- what the
+		// live run 39435284236 showed at 1.14x on shard 2/4 and 0.64x on
+		// shard 1/4, only further out.
+		const observed = new Map<string, number>(
+			configs.map((config) => [
+				modelCostId(ROOT, config),
+				3 * (costs.files[modelCostId(ROOT, config)] ?? costs.max),
+			]),
+		);
+		const line = formatShardBalance({ configs, total: 4, costs, observed });
+		expect(line).toContain("COST-TABLE DRIFT");
+		expect(line).toContain(
+			`${MODEL_COST_DRIFT_TOLERANCE.toFixed(2)}x tolerance`,
+		);
+		expect(line).toContain("(3.00x the table,");
+		expect(line).toContain("scripts/gen-tla-model-costs.mjs");
+		// The projection half is untouched: the two halves are independent, so a
+		// reader sees the table's own 1.00x next to this run's 3.00x.
+		expect(line).toContain("heaviest/lightest = 1.00x");
+	});
+
+	// F1, the HIGH finding: `Unit tests Windows` was red at the PR's head because
+	// the cost-table key was built by hand with the HOST separator, while every
+	// key in scripts/tla-model-costs.json is posix. AGENTS.md shape 35: dose the
+	// win32 semantics here rather than trusting a CI lane to notice.
+	it("keys the cost table through one posix normalizer, so a Windows host separator cannot miss every row", () => {
+		const table = loadModelCosts(ROOT);
+		const winRoot = "C:\\pi-lens";
+		const winConfig = "C:\\pi-lens\\formal\\blocker-pending\\CarryGateB.cfg";
+		// The pre-fix expression, verbatim in shape: a root-relative slice keeps
+		// `\`, and no row in the posix-keyed table answers to it.
+		const preFixKey = win32.relative(winRoot, winConfig);
+		expect(preFixKey).toBe("formal\\blocker-pending\\CarryGateB.cfg");
+		expect(table.files[preFixKey]).toBeUndefined();
+		// The production seam maps the same pair onto the table's own key.
+		const key = modelCostId(winRoot, winConfig, win32);
+		expect(key).toBe("formal/blocker-pending/CarryGateB.cfg");
+		expect(table.files[key]).toBeGreaterThan(0);
+		// And over the whole population: every real config, addressed as a
+		// Windows runner would address it, still keys its row.
+		const unreached = listModelConfigs(ROOT)
+			.map((config) => {
+				const relative = modelCostId(ROOT, config);
+				expect(relative).not.toContain("\\");
+				const asWindows = `${winRoot}\\${relative.split("/").join("\\")}`;
+				return modelCostId(winRoot, asWindows, win32);
+			})
+			.filter((id) => !(id in table.files));
+		expect(unreached).toEqual([]);
 	});
 });
 

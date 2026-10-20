@@ -227,10 +227,13 @@ jobs:
     # pre-shard job 10 -> 20). Measured over 15 model-checking runs
     # (2026-10-20, both master pushes and PR heads): per-shard-position p90
     # 510 s (shard 1), 357 s (shard 2), 348 s (shard 3), 700 s (shard 4) --
-    # the tail is shard 4 because the old partition packed it by count while
-    # its configs cost 2.9x the others. After the cost-weighted partition the
-    # projected worst shard is 505 s of wall, so 20 min is 2.4x the projected
-    # worst and 1.6x the worst shard ever observed (724 s), the `test` job's
+    # that window excludes the two attempts the 720 s cap cut short, so its
+    # 724 s maximum is not the worst shard ever observed: the censored 735 s
+    # attempt named above is. The tail is shard 4 because the old partition packed
+    # it by count while its configs cost 2.9x the others. After the
+    # cost-weighted partition the projected worst shard is 505 s of wall, so
+    # 20 min is 2.4x the projected worst and 1.63x the worst shard ever
+    # observed (735 s), the `test` job's
     # documented measured-max x2 rule (#3111). The cap is the SECOND mechanism:
     # the partition removes the tail, the cap and the cancelled-shard verdict
     # keep a slow runner's teardown race from reddening a required check.

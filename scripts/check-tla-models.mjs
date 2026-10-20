@@ -190,10 +190,30 @@ export function loadModelCosts(root) {
 	};
 }
 
+/**
+ * The cost table's key for `config`: its path under `root`, ALWAYS posix.
+ *
+ * One seam for the table's key, because the table's keys are posix and the host
+ * separator is not: keyed by hand, `<root>`-relative paths carry `\` on a
+ * Windows runner, every lookup misses, and a miss costs the table's MAXIMUM --
+ * so all configs become equal-cost and the balance this shard prints reads a
+ * flat 1.00x by construction (AGENTS.md "Windows path shapes" 1 and 2; the
+ * #4356 recurrence: a host-default separator reddening the Windows lane).
+ * `pathImpl` is injectable so a posix lane can prove the win32 shape
+ * (AGENTS.md shape 35) instead of trusting it.
+ *
+ * @param {string} root repository root
+ * @param {string} config an absolute config path
+ * @param {typeof path} [pathImpl] the host path module, or `path.win32` to dose one
+ * @returns {string} the table key
+ */
+export function modelCostId(root, config, pathImpl = path) {
+	return pathImpl.relative(root, config).split(pathImpl.sep).join("/");
+}
+
 /** `config`'s measured TLC seconds, or the table's max when it has no row. */
 function costOf(config, root, costs) {
-	const id = path.relative(root, config).split(path.sep).join("/");
-	return costs.files[id] ?? costs.max;
+	return costs.files[modelCostId(root, config)] ?? costs.max;
 }
 
 /**
@@ -228,13 +248,38 @@ export function selectShard(configs, { index, total }, costs = null) {
 }
 
 /**
- * The one line a shard prints about its own share of the measured work: the
- * per-shard balance is otherwise invisible, and a table that has gone stale
- * shows up here as a spread rather than as a timeout 12 minutes later.
- *
- * @param {{ configs: string[], total: number, costs: { root: string, files: Record<string, number>, max: number } }} args
+ * How far this run's own per-config seconds may sit from
+ * `scripts/tla-model-costs.json`'s rows before the balance line calls the
+ * table stale. Shard-level sums move up to 24% run to run over the 21 runs the
+ * cap was sized from, so 25% is the point where this run's numbers stop being
+ * one run's noise spread over 800 configs.
  */
-export function formatShardBalance({ configs, total, costs }) {
+export const MODEL_COST_DRIFT_TOLERANCE = 1.25;
+
+/**
+ * The one line a shard prints about its own share of the measured work.
+ *
+ * The projected balance is computed from `scripts/tla-model-costs.json`, so it
+ * is 1.00x BY CONSTRUCTION: it can never reveal drift in that table. The
+ * second half is therefore the part that actually tests the table -- this
+ * shard's own configs, projected from the table and measured by this run, with
+ * the ratio between them. On the first live run of the cost-weighted
+ * partition (39435284236) shard 2/4 was projected 1538.8 s and spent 1753.5 s
+ * (1.14x) while shard 1/4 was projected 1537.6 s and spent 990.2 s (0.64x), so
+ * a stale table is visible here instead of self-confirming.
+ *
+ * @param {{ configs: string[], total: number, costs: { root: string, files: Record<string, number>, max: number }, observed?: Map<string, number> | Record<string, number> | null, driftTolerance?: number }} args
+ * `observed` maps the cost table's keys (`modelCostId`) to the seconds this run
+ * measured for that config; absent means "no measurement to compare", and the
+ * line then says only that the projection is a projection.
+ */
+export function formatShardBalance({
+	configs,
+	total,
+	costs,
+	observed = null,
+	driftTolerance = MODEL_COST_DRIFT_TOLERANCE,
+}) {
 	const all = listModelConfigs(costs.root);
 	const items = all.map((config) => ({
 		id: config,
@@ -243,11 +288,7 @@ export function formatShardBalance({ configs, total, costs }) {
 	const assignment = assignShards(items, total);
 	const { loads, files } = shardLoads(items, assignment, total);
 	const unmeasured = all.filter(
-		(config) =>
-			!(
-				path.relative(costs.root, config).split(path.sep).join("/") in
-				costs.files
-			),
+		(config) => !(modelCostId(costs.root, config) in costs.files),
 	);
 	const hereLoad = items
 		.filter((item) => configs.includes(item.id))
@@ -257,13 +298,59 @@ export function formatShardBalance({ configs, total, costs }) {
 	const shards = loads
 		.map((load, at) => `${files[at]} configs/${load.toFixed(0)}s`)
 		.join(", ");
+	const headline =
+		`this shard: ${configs.length} configs, ${hereLoad.toFixed(1)}s projected from ${MODEL_COSTS_FILE}; ` +
+		`all shards (projected, so 1.00x says nothing about this run): ${shards}; ` +
+		`heaviest/lightest = ${(heaviest / Math.max(1, lightest)).toFixed(2)}x`;
 	return (
-		`this shard: ${configs.length} configs, ${hereLoad.toFixed(1)}s of measured TLC time; ` +
-		`all shards: ${shards}; heaviest/lightest = ${(heaviest / Math.max(1, lightest)).toFixed(2)}x` +
+		headline +
+		describeCostDrift({ configs, costs, observed, driftTolerance }) +
 		(unmeasured.length === 0
 			? ""
 			: `; ${unmeasured.length} config(s) have no row in ${MODEL_COSTS_FILE} and cost the table max -- rerun scripts/gen-tla-model-costs.mjs`)
 	);
+}
+
+/** `observed` as a `modelCostId` -> seconds reader, or null. */
+function observedSecondsReader(observed) {
+	if (!observed) return null;
+	if (typeof observed.get === "function")
+		return (id) => observed.get(id) ?? null;
+	return (id) => (id in observed ? observed[id] : null);
+}
+
+/**
+ * The drift half of the balance line: this run's own summed seconds for this
+ * shard's configs against the table's projection for the same configs, and
+ * whether the ratio leaves the tolerance. Only configs the table prices are
+ * compared -- an unmeasured config is priced at the table maximum on purpose,
+ * so its ratio would measure that fallback and not the table.
+ */
+function describeCostDrift({ configs, costs, observed, driftTolerance }) {
+	const read = observedSecondsReader(observed);
+	const unavailable =
+		"; this run's own seconds unavailable, so the table's projection above is unverified";
+	if (read === null) return unavailable;
+	let measured = 0;
+	let compared = 0;
+	let projectedCompared = 0;
+	for (const config of configs) {
+		const id = modelCostId(costs.root, config);
+		if (!(id in costs.files)) continue;
+		const seconds = read(id);
+		if (seconds === null) continue;
+		measured += seconds;
+		projectedCompared += costs.files[id];
+		compared += 1;
+	}
+	if (compared === 0) return unavailable;
+	const ratio = measured / Math.max(1e-9, projectedCompared);
+	const text = `; this run measured ${measured.toFixed(1)}s for ${compared} of them (${ratio.toFixed(2)}x the table, ${projectedCompared.toFixed(1)}s)`;
+	const drift =
+		ratio > driftTolerance || ratio < 1 / driftTolerance
+			? ` -- COST-TABLE DRIFT beyond the ${driftTolerance.toFixed(2)}x tolerance: the projection above does not describe this run, so balance it with a fresh measurement (scripts/gen-tla-model-costs.mjs) rather than trusting the spread`
+			: `, inside the ${driftTolerance.toFixed(2)}x drift tolerance`;
+	return text + drift;
 }
 
 const CLI_OPTIONS = Object.freeze({
@@ -526,10 +613,14 @@ async function main() {
 	const wallStarted = Date.now();
 	const outcomes = await runPool(configs, concurrency, async (config) => {
 		const name = path.relative(root, config);
+		// The table's own key, so the balance line's drift half compares THIS
+		// run's seconds against the table for the same configs (never a second
+		// spelling of the key: `modelCostId` is the only one).
+		const id = modelCostId(root, config);
 		const header = parseModelHeader(fs.readFileSync(config, "utf8"));
 		if (header.error) {
 			console.log(`FAIL ${name}: ${header.error}`);
-			return { name, dir: path.dirname(name), ok: false, seconds: 0 };
+			return { name, id, dir: path.dirname(name), ok: false, seconds: 0 };
 		}
 		const started = Date.now();
 		const actual = await runTlc(jar, config, header.module);
@@ -538,7 +629,7 @@ async function main() {
 		console.log(
 			`${ok ? "ok  " : "FAIL"} ${name}: expected ${describeVerdict(header.expect)}, got ${describeVerdict(actual)} (${seconds.toFixed(1)}s)`,
 		);
-		return { name, dir: path.dirname(name), ok, seconds };
+		return { name, id, dir: path.dirname(name), ok, seconds };
 	});
 	const wallSeconds = (Date.now() - wallStarted) / 1000;
 
@@ -560,7 +651,16 @@ async function main() {
 	console.log(formatSummary(configs.length, shard, wallSeconds, concurrency));
 	if (shard !== undefined && shardCosts) {
 		const { total } = parseShardArg(shard);
-		console.log(formatShardBalance({ configs, total, costs: shardCosts }));
+		console.log(
+			formatShardBalance({
+				configs,
+				total,
+				costs: shardCosts,
+				observed: new Map(
+					outcomes.map((outcome) => [outcome.id, outcome.seconds]),
+				),
+			}),
+		);
 	}
 	console.log("Per-directory TLC time (summed, not wall time):");
 	for (const line of dirLines) console.log(line);

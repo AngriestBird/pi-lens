@@ -1147,10 +1147,13 @@ export function runtimeCapLines({
 			used,
 			jobId: entry.jobId,
 			file: entry.file,
-			gating:
-				required.has(name) ||
-				entry.pattern.test(name) ||
-				!isAdvisoryCheck(name),
+			// A row is gating when branch protection requires its name -- the
+			// live read's list, else `REQUIRED_CHECKS` -- or when the name is
+			// not on the advisory allowlist. (The old third term tested the
+			// pattern this loop has already matched, so it was always true and
+			// made the field unreadable *and* unused; the printed line reads it
+			// now, so a runtime report can say which row blocks a merge.)
+			gating: required.has(name) || !isAdvisoryCheck(name),
 		});
 	}
 	// A matrix shard is its own subject: the aggregate's row measures seconds of
@@ -1172,7 +1175,7 @@ export function runtimeCapLines({
 			row.used >= 1
 				? "at or over its cap -- a slower runner turns finished work into `cancelled` (#4672)"
 				: `within ${Math.round((1 - ratio) * 100)}% of its cap`;
-		return `Runtime vs cap: ${row.name} ${row.seconds}s of ${row.capSeconds}s (${percent}%) -- ${verdict} [${row.file} job \`${row.jobId}\`]`;
+		return `Runtime vs cap: ${row.name} ${row.seconds}s of ${row.capSeconds}s (${percent}%) -- ${verdict} [${row.file} job \`${row.jobId}\`]${row.gating ? " (gating)" : " (advisory)"}`;
 	});
 	const hidden = over.length - printed.length;
 	if (hidden > 0)

@@ -75,6 +75,38 @@ describe("#3920 item 3: a required job's runtime against its cap", () => {
 		expect(lines[0]).toContain("735s of 720s (102%)");
 		expect(lines[0]).toContain("at or over its cap");
 		expect(lines[0]).toContain("#4672");
+		// F8: the row's `gating` field is now consumed, so a reader of the
+		// report can tell a cap that blocks a merge from a nightly's advisory
+		// one. Before this round the field was computed from a test the loop had
+		// already passed (always true) and read nowhere.
+		expect(lines[0]).toContain("(gating)");
+	});
+
+	// The other direction of the same field: a name on the advisory allowlist
+	// carries a timeout-minutes in no workflow here, so the row is injected --
+	// what matters is that a non-gating row says so.
+	it("marks an advisory row's cap as advisory, not gating", () => {
+		const caps = [
+			{
+				file: "nightly.yml",
+				jobId: "slow",
+				name: "slow (advisory)",
+				capMinutes: 10,
+				pattern: checkNamePattern("slow (advisory)"),
+			},
+		];
+		const lines = runtimeCapLines({
+			checkRuns: [
+				{
+					name: "slow (advisory)",
+					started_at: "2026-10-20T07:00:00Z",
+					completed_at: "2026-10-20T07:09:00Z",
+				},
+			],
+			caps,
+		});
+		expect(lines[0]).toContain("(advisory)");
+		expect(lines[0]).not.toContain("(gating)");
 	});
 
 	// The size decision this PR made, pinned as behaviour: at the new 20-minute
