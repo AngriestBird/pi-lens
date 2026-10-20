@@ -1,7 +1,3 @@
-// flake-shape: real-process-spawn — the linked-worktree class comes from git
-// identity (`resolveGitCheckout` / `resolveLinkedWorktreeOwner`), so the fixture
-// is a real `git init` + `git worktree add` of the session's own checkout; a
-// fabricated `.git` file would measure the fixture rather than the rule (#2657).
 /**
  * #2657 / #4242 item 3: the CLASS decides what a session registers.
  *
@@ -53,7 +49,6 @@ import {
 import { configureLspServiceLifecycle } from "../../../clients/lsp/service-singleton.js";
 import { makeLspServiceDouble } from "../../support/lsp-service-double.js";
 import { runHandlerExpectingNoThrow } from "../../support/handler-verdict.js";
-import { gitExecFileSync } from "../../support/git-fixture-env.js";
 import { setupTestEnvironment } from "../test-utils.js";
 
 let env: { tmpDir: string; cleanup: () => void };
@@ -109,6 +104,26 @@ function registryFor(cwd: string): ClientRegistry {
 		undefined,
 		cwd,
 	);
+}
+
+/**
+ * A checkout with one linked worktree, written as git writes it: `<repo>/.git`
+ * is a directory (the shared commondir), `<worktree>/.git` is a file holding
+ * `gitdir: <repo>/.git/worktrees/<name>`, and that gitdir's `commondir` points
+ * back at the shared `.git`. `resolveGitCheckout`/`resolveLinkedWorktreeOwner`
+ * read exactly these files, so no `git` child is needed to classify the file.
+ */
+function writeLinkedWorktree(root: string): { repo: string; worktree: string } {
+	const repo = path.join(root, "repo");
+	const worktree = path.join(root, "repo-wt");
+	const gitDir = path.join(repo, ".git");
+	const linkedGitDir = path.join(gitDir, "worktrees", "repo-wt");
+	fs.mkdirSync(linkedGitDir, { recursive: true });
+	fs.mkdirSync(worktree, { recursive: true });
+	fs.writeFileSync(path.join(repo, "package.json"), "{}\n");
+	fs.writeFileSync(path.join(worktree, ".git"), `gitdir: ${linkedGitDir}\n`);
+	fs.writeFileSync(path.join(linkedGitDir, "commondir"), "../..\n");
+	return { repo, worktree };
 }
 
 beforeEach(() => {
@@ -209,33 +224,20 @@ describe("the analysis-root class decides what a session registers (#2657, #4242
 	});
 
 	it("registers the worktree root for a linked-worktree file, never its directory", async () => {
-		// A real linked worktree of the session's own checkout: the class comes
-		// from git identity (`resolveLinkedWorktreeOwner`), so a fabricated
-		// `.git` file would measure the fixture, not the rule. The checkout is a
-		// DIRECT child of the temp root and carries no `pi-lens-` prefix: a
-		// pi-owned temp path is refused as an analysis root, which is the
+		// A linked worktree of the session's checkout, written as the metadata git
+		// itself writes (#2657): the worktree's `.git` is a FILE naming a
+		// worktree-private gitdir, and that gitdir's `commondir` points at the
+		// shared `.git`. No child process is needed, and the class assertion
+		// below reds if the fixture ever stops resolving as a worktree. The
+		// checkout is a DIRECT child of the temp root with no `pi-lens-` prefix:
+		// a pi-owned temp path is refused as an analysis root, which is the
 		// intended-skip class and not what this case measures (#4560).
 		const checkoutRoot = path.join(
 			env.tmpDir,
 			"..",
 			`capture-2657-worktree-${process.pid}`,
 		);
-		const repo = path.join(checkoutRoot, "repo");
-		const worktree = path.join(checkoutRoot, "repo-wt");
-		fs.mkdirSync(repo, { recursive: true });
-		fs.writeFileSync(path.join(repo, "package.json"), "{}\n");
-		gitExecFileSync("git", ["init", "-q"], { cwd: repo });
-		gitExecFileSync("git", ["add", "package.json"], { cwd: repo });
-		gitExecFileSync("git", ["commit", "-q", "-m", "seed"], {
-			cwd: repo,
-			env: {
-				GIT_AUTHOR_NAME: "t",
-				GIT_AUTHOR_EMAIL: "t@t.t",
-				GIT_COMMITTER_NAME: "t",
-				GIT_COMMITTER_EMAIL: "t@t.t",
-			},
-		});
-		gitExecFileSync("git", ["worktree", "add", "-q", worktree], { cwd: repo });
+		const { repo, worktree } = writeLinkedWorktree(checkoutRoot);
 		const worktreeFile = path.join(worktree, "src", "sibling.ts");
 		fs.mkdirSync(path.dirname(worktreeFile), { recursive: true });
 		fs.writeFileSync(worktreeFile, "export const value = 1;\n");

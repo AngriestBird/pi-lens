@@ -1,6 +1,3 @@
-// flake-shape: real-process-spawn — the linked-worktree delivery witness builds
-// its worktree with a real `git init` + `git worktree add`, because the class it
-// reaches comes from git identity (flake-shape admission, #2050).
 // lane: windows-vitest — #3294's case-spelling cell asserts the host
 // filesystem's own answer; no external toolchain is required because the
 // production handleToolResult path and pipeline boundary are in-process.
@@ -79,7 +76,6 @@ import {
 	createReadToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { runHandlerExpectingNoThrow } from "../support/handler-verdict.js";
-import { gitExecFileSync } from "../support/git-fixture-env.js";
 
 const readFileSyncSpy = vi.hoisted(() => vi.fn());
 vi.mock("node:fs", async (importOriginal) => {
@@ -233,35 +229,43 @@ it("keeps intended vendor skips silent (#4218)", async () => {
 	}
 });
 
+/**
+ * A checkout with one linked worktree, written as git writes it: `<repo>/.git`
+ * is a directory (the shared commondir), `<worktree>/.git` is a file holding
+ * `gitdir: <repo>/.git/worktrees/<name>`, and that gitdir's `commondir` points
+ * back at the shared `.git`. `resolveGitCheckout`/`resolveLinkedWorktreeOwner`
+ * read exactly these files, so no `git` child is needed to classify the file.
+ */
+function writeLinkedWorktree(root: string): { repo: string; worktree: string } {
+	const repo = path.join(root, "repo");
+	const worktree = path.join(root, "repo-wt");
+	const gitDir = path.join(repo, ".git");
+	const linkedGitDir = path.join(gitDir, "worktrees", "repo-wt");
+	fs.mkdirSync(linkedGitDir, { recursive: true });
+	fs.mkdirSync(worktree, { recursive: true });
+	fs.writeFileSync(path.join(repo, "package.json"), "{}\n");
+	fs.writeFileSync(path.join(worktree, ".git"), `gitdir: ${linkedGitDir}\n`);
+	fs.writeFileSync(path.join(linkedGitDir, "commondir"), "../..\n");
+	return { repo, worktree };
+}
+
 it("announces a linked-worktree edit the pipeline found nothing in (#2050 AC3)", async () => {
 	resetDegradationLedger();
 	const env = setupTestEnvironment("pi-lens-2050-worktree-delivery-");
-	// A real linked worktree of the session's own checkout, and a checkout that
-	// is a DIRECT child of the temp root with no `pi-lens-` prefix: a pi-owned
-	// temp path is the intended-skip class, not the linked-worktree class the
-	// delivery rung is about (#4560). Removed here, so the widened tmp-root
-	// census never sees a leftover.
+	// A linked worktree of the session's checkout, written as the metadata git
+	// itself writes (`<worktree>/.git` names a worktree-private gitdir whose
+	// `commondir` points at the shared `.git`), so no child process is needed.
+	// The class assertion below reds if the fixture stops resolving as a
+	// worktree. The checkout is a DIRECT child of the temp root with no
+	// `pi-lens-` prefix: a pi-owned temp path is the intended-skip class, not
+	// the linked-worktree class this rung is about (#4560). Removed here, so the
+	// widened tmp-root census never sees a leftover.
 	const checkoutRoot = path.join(
 		env.tmpDir,
 		"..",
 		`capture-2050-worktree-${process.pid}`,
 	);
-	const repo = path.join(checkoutRoot, "repo");
-	const worktree = path.join(checkoutRoot, "repo-wt");
-	fs.mkdirSync(repo, { recursive: true });
-	fs.writeFileSync(path.join(repo, "package.json"), "{}\n");
-	gitExecFileSync("git", ["init", "-q"], { cwd: repo });
-	gitExecFileSync("git", ["add", "package.json"], { cwd: repo });
-	gitExecFileSync("git", ["commit", "-q", "-m", "seed"], {
-		cwd: repo,
-		env: {
-			GIT_AUTHOR_NAME: "t",
-			GIT_AUTHOR_EMAIL: "t@t.t",
-			GIT_COMMITTER_NAME: "t",
-			GIT_COMMITTER_EMAIL: "t@t.t",
-		},
-	});
-	gitExecFileSync("git", ["worktree", "add", "-q", worktree], { cwd: repo });
+	const { repo, worktree } = writeLinkedWorktree(checkoutRoot);
 	const worktreeFile = path.join(worktree, "src", "sibling.ts");
 	fs.mkdirSync(path.dirname(worktreeFile), { recursive: true });
 	fs.writeFileSync(worktreeFile, "export const value = 1;\n");

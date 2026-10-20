@@ -547,10 +547,6 @@ export const wallClockBudgetInclude = [
 	// window. Keep child-process CPU sampling and this wall-clock lower bound in
 	// the fully serialized, dead-last phase.
 	"tests/clients/lsp/service-notify-cpu-liveness.test.ts",
-	// #2657: the registration witness builds a real `git worktree add` to measure
-	// the linked-worktree class, which comes from git identity (flake-shape
-	// admission, real-process-spawn).
-	"tests/clients/lsp/session-root-class-2657.test.ts",
 	"tests/clients/metrics-history-stderr.test.ts",
 	// #4268 MED-8: a real `npx` child is the observation (the spawned process's
 	// own environment), so it runs in the quiet serialized phase (flake-shape
@@ -580,10 +576,6 @@ export const wallClockBudgetInclude = [
 	// #4126: the first-session warmup has no awaitable completion signal; keep
 	// its real deferred-notification ordering in the serialized phase.
 	"tests/clients/runtime-session-warm-skip-notify.test.ts",
-	// #2050: the delivery witness builds a real `git worktree add` to reach the
-	// linked-worktree rung, which comes from git identity (flake-shape admission,
-	// real-process-spawn).
-	"tests/clients/runtime-tool-result.test.ts",
 	// #3872: real `git worktree add` children are the fixture (flake-shape admission).
 	"tests/clients/runtime-turn-knip-checkout-root.test.ts",
 	// #2528: the bounded batch helper tests race a real wall-clock budget against settle latency (flake-shape admission).
