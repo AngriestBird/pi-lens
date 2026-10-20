@@ -30,6 +30,8 @@ export function resolveGithubMatchingTags(
 	env?: NodeJS.ProcessEnv,
 ): Promise<MatchingTag[]>;
 export function workflowFiles(root?: string): Promise<string[]>;
+/** Interpreter-pin errors for one workflow or composite action's text. */
+export function interpreterPinErrors(text: string, file?: string): string[];
 export function checkActionPins(options?: {
 	root?: string;
 	fetchImpl?: typeof fetch;
