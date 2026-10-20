@@ -171,6 +171,15 @@ The principles' delegation contract applies. pi-lens adds:
 - Three open issues on one mechanism, in any seam groups, open a consolidation
   audit across every consumer of that mechanism before the next one is filed
   (history: `HISTORY.md`, 2026-10-16).
+- Run the **fold check** before a lane is planned, not after it is written: read
+  every open issue against the mechanism the lane will touch and decide each
+  candidate as folded into this PR (one `Closes #…` per folded issue) or not
+  folded, with the reason (two hazards in one review, a maintainer decision, a
+  blocked dependency, a different seam). The brief carries the candidate list
+  and its verdicts, and the PR body records them. Planning precedes filing: a
+  new issue is the answer for p2+ work no lane can carry, never for a p3 the
+  lane could fold (history: 2026-10-20, where #4672 folded #3920's three
+  members and refused #3753 with a recorded verdict).
 - The per-PR loop (review, verify, auto-merge on green), round routing, the
   merge gate and the Common mistakes table live in `docs/pi-lens-merge-policy.md`.
 - Read CI with `node scripts/ci-verdict.mjs <pr|sha>` (exact head, all pages).

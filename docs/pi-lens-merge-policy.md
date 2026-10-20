@@ -236,6 +236,12 @@ re-verification; small code folds carry a red-first test and return to the same
 reviewer. File only different-seam, blocked, decision-dependent, untouched
 pre-existing, or risk-class-changing items, as one consolidated issue per PR.
 
+The same check runs one step earlier, before a lane is planned: read every open
+issue against the mechanism the lane will touch, and fold the ones it settles
+into that PR, recording a verdict per candidate (AGENTS.md "Orchestration and
+delegated work", the fold check). Planning precedes filing, so a lane that can
+carry a p2 leaves the issue list no new member.
+
 A brief carries the lane's facts and the task, and points at the role
 contract for everything else. Lane facts are the worktree, branch, base,
 TMPDIR, test-worker cap, Git grant, and deliverable path. It never restates
