@@ -31,6 +31,20 @@ const fixture = piSessionFixture();
 /** The delimiter pi-lens prefixes every injected context block with. */
 const INJECTION_DELIMITER = "[pi-lens automated context — not a user request]";
 
+/**
+ * A settled call as plain text: its rejection's message, or `resolved`. A
+ * resolved restart is a handle over pi's session, and vitest cannot print one
+ * (it reads pi's uninitialised theme Proxy and throws `Theme not
+ * initialized`), so a `rejects` matcher would hide what the call did.
+ */
+async function outcome(call: Promise<unknown>): Promise<string> {
+	return call.then(
+		() => "resolved",
+		(error: unknown) =>
+			error instanceof Error ? error.message : String(error),
+	);
+}
+
 function textBlocks(content: unknown): string[] {
 	if (typeof content === "string") return [content];
 	if (!Array.isArray(content)) return [];
@@ -281,9 +295,9 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 
 		// A reason with no pi entry point here fails closed BEFORE pi tears the
 		// session down: no synthesised event, and the session stays live.
-		await expect(
-			first.restart({ reason: "quit" } as never, []),
-		).rejects.toThrow("no faithful replacement");
+		expect(
+			await outcome(first.restart({ reason: "quit" } as never, [])),
+		).toContain("no faithful replacement");
 		expect(getActiveSessionId()).toBe(firstId);
 
 		// A handle being replaced cannot be restarted beside it: the overlapping
@@ -292,7 +306,7 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 		const pending = first.restart({ reason: "new" }, [
 			fauxAssistantMessage(fauxText("two")),
 		]);
-		await expect(first.restart({ reason: "new" }, [])).rejects.toThrow(
+		expect(await outcome(first.restart({ reason: "new" }, []))).toContain(
 			"being replaced",
 		);
 		// A replaced handle cannot be restarted again: that would build a third
@@ -300,7 +314,7 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 		const second = await pending;
 		const secondId = second.session.sessionManager.getSessionId();
 		expect(secondId).not.toBe(firstId);
-		await expect(first.restart({ reason: "new" }, [])).rejects.toThrow(
+		expect(await outcome(first.restart({ reason: "new" }, []))).toContain(
 			"already ended",
 		);
 		expect(getActiveSessionId()).toBe(secondId);
