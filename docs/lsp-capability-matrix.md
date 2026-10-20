@@ -167,7 +167,7 @@ carries the named admission until then.
 | deno | deno (alt of typescript) | pull | — | n/a (pull) | 1 | dev+ci |
 | ruby | ruby-lsp | pull | — | n/a (pull) | 1 | ci |
 | csharp | csharp-ls | pull | — | n/a (pull) | 1 | ci |
-| typescript | typescript-language-server | push-only | silent | empty-first | 3 | dev+ci |
+| typescript | typescript-language-server | push-only | silent | direct | 3 | dev+ci |
 | markdown | marksman | push-only | silent | direct | 3 | ci |
 | lua | lua-language-server | push-only | silent | direct | 3 | dev+ci |
 | python | pyright | push-only | publishes-versioned | direct | 2 | dev+ci |
