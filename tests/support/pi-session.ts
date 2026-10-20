@@ -30,8 +30,9 @@
  * receives, resume from the persisted session file, and manual compaction —
  * so a case asserts an effect of the extension's registered behaviour rather
  * than the shape of a handler's return value. It does NOT pin event payload
- * shapes: for those `pi-mock.ts`'s `emit` stays the cheaper tool, and tier 1's
- * `pi-runner.ts` owns registration questions.
+ * shapes: `pi-mock.ts`'s `emit` is for the payloads a scripted provider cannot
+ * produce and for files the admit list still holds (AGENTS.md "Testing"), and
+ * tier 1's `pi-runner.ts` owns registration questions.
  *
  * SIX CONSEQUENCES OF LOADING THROUGH PI'S OWN LOADER, all relied on below:
  *

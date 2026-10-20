@@ -1718,6 +1718,25 @@ process. Read lifecycle order from the real `session_scope_transition` rows
 and dead-weight rows, not from the pi mock; the mock does not re-run the
 extension factory or reproduce pi lifecycle ordering.
 
+Two in-process pi tiers sit under that child lane. A case whose verdict
+depends on what pi does with a handler's return value, what the model
+receives, or how pi orders a session goes through one of them, never
+`tests/support/pi-mock.ts`. The double kept a `context` list as returned, pi
+rebuilt the system head, and every test passed. Tier 1,
+`tests/support/pi-runner.ts`, loads the built extension into pi's real
+`ExtensionRunner`: flags, tools, commands, declared registrations, and no
+`emit`, by design. Tier 2, `tests/support/pi-session.ts`, runs a real
+`AgentSession` with pi-ai's `fauxProvider`: turns, tool round trips, session
+ids, and the request the model sees. Their header comments state the APIs
+and limits. A new tier capability adds a case to `pi-runner.test.ts` or
+`pi-session.test.ts` first. `pi-mock.ts` stays for three classes: process-boundary
+subjects, pi-lens-internal seams, and payloads a scripted provider cannot
+produce. It also stays for files a roadmap slice still owns. It throws at load
+for a test file not on `PI_MOCK_IMPORTERS` (`tests/support/pi-mock-importers.ts`),
+so a new user fails however it imports the double. The list only shrinks:
+`tests/config/pi-mock-importer-sweep.test.ts` fails on a row whose file no
+longer uses it.
+
 When the defect is an ordering of awaits on one seam (a coalescing queue, a
 per-key serializer), or the seam has regressed before, write a scheduler
 property with `fc.scheduler()` instead of one more replay:
@@ -1727,7 +1746,8 @@ property with `fc.scheduler()` instead of one more replay:
 Use `tests/support/fault-injection.ts` for wedged children, seam delays,
 starved budgets, and gates; `makeRunnerCtx`, `makeLspServiceDouble`, and
 `makeRealRunnerEnv` for dispatch, LSP, and rule behavior. Mock only external
-binaries, network, host SDK seams, clocks, or fault injection.
+binaries, network, host SDK seams (not pi's own behaviour: see the pi tiers
+above), clocks, or fault injection.
 
 Test authoring screens:
 
