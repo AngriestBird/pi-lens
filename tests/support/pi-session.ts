@@ -398,9 +398,10 @@ export interface PiSessionOptions {
 	 * `mode` a `session_start_total` row reports. `"full"` (the default) settles
 	 * the start inside `bindExtensions`; `"quick"` is the shape a real process's
 	 * first `session_start` takes, with the warmup timer opted out — see the
-	 * header, point 3.
+	 * header, point 3; `"minimal"` is the third production mode, whose only
+	 * config-resolution path is the ensure (no warm-up, no deferred load).
 	 */
-	startupMode?: "full" | "quick";
+	startupMode?: "full" | "quick" | "minimal";
 }
 
 export interface PiSession {

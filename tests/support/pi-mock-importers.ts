@@ -73,9 +73,8 @@ export const PI_MOCK_IMPORTERS: Readonly<Record<string, string>> = {
 	"clients/context-append-to-last-user.test.ts": "unproducible-payload",
 	"index-4631-pre-087-context-shape.test.ts": "unproducible-payload",
 	// pending slice 5
-	"index-4554-last-member-teardown.test.ts": "pending slice 5",
-	"index-config-resolved-session-wiring.test.ts": "pending slice 5",
-	"index-multi-root-session-start.test.ts": "pending slice 5",
+	"index-4554-last-member-teardown.test.ts": "internal-seam",
+	"index-multi-root-session-start.test.ts": "unproducible-payload",
 	// pending slice 8
 	"clients/session-event-guard.test.ts": "pending slice 8",
 	"index-cascade-resolved-clean-wiring.test.ts": "pending slice 8",

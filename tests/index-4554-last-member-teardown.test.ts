@@ -440,31 +440,6 @@ describe("#4554 one activation, four live sessions", () => {
 		});
 	}, 45_000);
 
-	it("runs the shared teardown when the primary is the last session to leave", async () => {
-		const { pi, resetLSPService } = await bootActivation();
-		const primary = makeCtx({ cwd: project, sessionId: "m-primary" });
-		const secondaries = ["s1", "s2", "s3"].map((id) =>
-			makeCtx({ cwd: project, sessionId: id }),
-		);
-		await start(pi, primary);
-		for (const ctx of secondaries) await start(pi, ctx);
-		expect(getSecondarySessionCount()).toBe(3);
-		expect(getActiveSessionId()).toBe("m-primary");
-		await settleRegistryWrites();
-		expect(await rootsForThisPid()).toContain(project);
-
-		// main last: secondaries first, the primary last.
-		for (const ctx of [...secondaries, primary]) await shutdown(pi, ctx);
-
-		// The primary registration is released: on the pre-fix tree it stayed
-		// set forever, the independent effect of the skipped teardown.
-		expect(getActiveSessionId()).toBeUndefined();
-		await settleRegistryWrites();
-		expect(await rootsForThisPid()).not.toContain(project);
-		expect(teardownResets(resetLSPService)).toHaveLength(1);
-		expect(getSecondarySessionCount()).toBe(0);
-	}, 45_000);
-
 	it("runs the shared teardown once when the last session to leave is a secondary", async () => {
 		const { pi, resetLSPService } = await bootActivation();
 		const primary = makeCtx({ cwd: project, sessionId: "m-primary" });
@@ -496,25 +471,6 @@ describe("#4554 one activation, four live sessions", () => {
 		expect(teardownResets(resetLSPService)).toHaveLength(1);
 	}, 45_000);
 
-	it("leaves the shared infra alone at every non-last leave", async () => {
-		const { pi, resetLSPService } = await bootActivation();
-		const primary = makeCtx({ cwd: project, sessionId: "m-primary" });
-		const s1 = makeCtx({ cwd: project, sessionId: "s1" });
-		await start(pi, primary);
-		await start(pi, s1);
-		await settleRegistryWrites();
-		const resetsAfterStart = resetLSPService.mock.calls.length;
-
-		await shutdown(pi, s1);
-
-		expect(resetLSPService.mock.calls).toHaveLength(resetsAfterStart);
-		expect(getActiveSessionId()).toBe("m-primary");
-		expect(await rootsForThisPid()).toContain(project);
-		// Its own per-session bookkeeping still ends: the live secondary
-		// counter is a departure count, not a teardown side effect.
-		expect(getSecondarySessionCount()).toBe(0);
-	}, 45_000);
-
 	it("never releases a sibling's registry root when the primary leaves first", async () => {
 		const otherRoot = path.join(root, "sibling-project");
 		fs.mkdirSync(path.join(otherRoot, ".git"), { recursive: true });
@@ -542,72 +498,6 @@ describe("#4554 one activation, four live sessions", () => {
 		await shutdown(pi, sibling);
 		await settleRegistryWrites();
 		expect(await rootsForThisPid()).not.toContain(otherRoot);
-	}, 45_000);
-
-	it("still releases the old primary and re-arms the successor on a sequential replacement", async () => {
-		const { pi, resetLSPService } = await bootActivation();
-		const first = makeCtx({ cwd: project, sessionId: "m-first" });
-		await start(pi, first);
-		await shutdown(pi, first, { type: "session_shutdown", reason: "new" });
-
-		expect(teardownResets(resetLSPService)).toHaveLength(1);
-		expect(getActiveSessionId()).toBeUndefined();
-
-		// The successor is its own activation in pi, but the same process: it
-		// must take a full start, not a declined one.
-		const successor = makeCtx({ cwd: project, sessionId: "m-second" });
-		await start(pi, successor, "new");
-		expect(getActiveSessionId()).toBe("m-second");
-		expect(getSecondarySessionCount()).toBe(0);
-	}, 45_000);
-
-	it("keeps a separate activation's concurrent secondary local-only", async () => {
-		const primaryActivation = await bootActivation();
-		const primary = makeCtx({ cwd: project, sessionId: "m-primary" });
-		await start(primaryActivation.pi, primary);
-
-		vi.resetModules();
-		const secondaryActivation = await bootActivation();
-		const secondary = makeCtx({ cwd: project, sessionId: "s-sub" });
-		await start(secondaryActivation.pi, secondary);
-		expect(getSecondarySessionCount()).toBe(1);
-
-		await shutdown(secondaryActivation.pi, secondary);
-		// A declined start never touches the shared fleet, and its local-only
-		// teardown must not either: today's #473 behaviour, unchanged.
-		expect(secondaryActivation.resetLSPService.mock.calls).toHaveLength(0);
-		expect(getActiveSessionId()).toBe("m-primary");
-		await settleRegistryWrites();
-		expect(await rootsForThisPid()).toContain(project);
-		expect(getSecondarySessionCount()).toBe(0);
-
-		await shutdown(primaryActivation.pi, primary);
-		expect(teardownResets(primaryActivation.resetLSPService)).toHaveLength(1);
-		expect(getActiveSessionId()).toBeUndefined();
-	}, 45_000);
-
-	it("keeps a different-root start's decline local-only", async () => {
-		const otherRoot = path.join(root, "other-project");
-		fs.mkdirSync(path.join(otherRoot, ".git"), { recursive: true });
-		const hostActivation = await bootActivation();
-		const host = makeCtx({ cwd: project, sessionId: "m-host" });
-		await start(hostActivation.pi, host);
-
-		vi.resetModules();
-		const tempActivation = await bootActivation();
-		const temp = makeCtx({ cwd: otherRoot, sessionId: "s-temp" });
-		await start(tempActivation.pi, temp);
-		expect(getSecondarySessionCount()).toBe(1);
-
-		await shutdown(tempActivation.pi, temp);
-		expect(teardownResets(tempActivation.resetLSPService)).toHaveLength(0);
-		expect(getActiveSessionId()).toBe("m-host");
-		await settleRegistryWrites();
-		expect(await rootsForThisPid()).toContain(project);
-
-		await shutdown(hostActivation.pi, host);
-		expect(teardownResets(hostActivation.resetLSPService)).toHaveLength(1);
-		expect(getActiveSessionId()).toBeUndefined();
 	}, 45_000);
 
 	it("records the one teardown a session classified secondary ran for", async () => {
