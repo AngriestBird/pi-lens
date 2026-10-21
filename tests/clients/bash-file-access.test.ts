@@ -1172,6 +1172,11 @@ describe("scanShellWriteScopes — the command's effective directory (#2050)", (
 			fallback: "f.ts",
 		},
 		{
+			row: "R12b entered after a || whose left side succeeded",
+			command: "true || cd sub; printf x > f.ts",
+			bash: "f.ts",
+		},
+		{
 			row: "R13 right of a pipe (V1 C1)",
 			command: "echo | cd sub && printf x > f.ts",
 			bash: "f.ts",
@@ -1182,6 +1187,11 @@ describe("scanShellWriteScopes — the command's effective directory (#2050)", (
 			bash: "f.ts",
 		},
 		{ row: "R15 |&", command: "cd sub |& cat; printf x > f.ts", bash: "f.ts" },
+		{
+			row: "R15b |& inside a list",
+			command: "cd sub && true |& cat; printf x > f.ts",
+			bash: "sub/f.ts",
+		},
 		{
 			row: "R16 backgrounded list (V1 C2)",
 			command: "cd sub && true & printf x > f.ts",
@@ -1235,6 +1245,11 @@ describe("scanShellWriteScopes — the command's effective directory (#2050)", (
 			bash: "f.ts",
 		},
 		{
+			row: "R25b popd back to a moved directory",
+			command: "cd sub && pushd ../other && popd && printf x > f.ts",
+			bash: "sub/f.ts",
+		},
+		{
 			row: "R26 bare pushd (V1 C4)",
 			command: "pushd sub; pushd; printf x > f.ts",
 			bash: "f.ts",
@@ -1276,6 +1291,11 @@ describe("scanShellWriteScopes — the command's effective directory (#2050)", (
 			row: "R33 escaped verb",
 			command: "cd sub && \\cd .. && printf x > f.ts",
 			bash: "f.ts",
+		},
+		{
+			row: "R34 cd inside a heredoc substitution",
+			command: "cd sub && cat <<EOF\n$(cd ..)\nEOF\nprintf x > f.ts",
+			bash: "sub/f.ts",
 		},
 	];
 
