@@ -124,6 +124,13 @@ real seam. Check that every gate the diff adds is exercised through that path.
   *follow-up issue* (p2 or higher only, with its seam group), or *stay
   specific* (with the reason). A missing verdict is a finding (#3622; the
   optional ast-grep assist is #3684).
+- **A new test's layer.** A registration question (flags, tools, commands,
+  declarations) belongs on tier 1 (`tests/support/pi-runner.ts`), a
+  session-flow case on tier 2 (`tests/support/pi-session.ts`), and a
+  JSON-lines sink on `readNdjsonRows` (`tests/support/ndjson-rows.ts`), with
+  `skipped === 0` asserted when the claim needs the complete output. A fake of
+  an in-process store or registry is a finding; other doubles only where
+  `AGENTS.md` admits them, which holds the detail.
 - Review the pre-push self-scan with `npm run astgrep:self-scan`; `pr-preflight`
   runs the same gate after its build.
 - Require the exact-pin rule in `docs/pi-lens-subagent.md` on the MERGE of
