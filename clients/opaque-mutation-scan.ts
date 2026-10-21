@@ -57,7 +57,7 @@ import { freshnessFromMtime } from "./freshness.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
 import { createSingleFlight } from "./single-flight.js";
 import { truncatedByOutputCap } from "./spawn-output-cap.js";
-import { PI_LENS_TOOL_NAMES } from "./tool-config.js";
+import { isPiLensToolName } from "./tool-config.js";
 
 interface FileStatEntry {
 	mtimeMs: number;
@@ -165,7 +165,7 @@ const PI_BUILTIN_TOOL_WRITES = new Map<string, "opaque" | "named" | "none">(
  * #4732: fail closed. A tool is diffed unless its name is known not to write a
  * path pi-lens does not already record: pi's read-only and structured built-ins
  * ({@link PI_BUILTIN_TOOL_WRITES}) and pi-lens's own pi tools
- * (`PI_LENS_TOOL_NAMES`), which are read-only or record every write through the
+ * ({@link isPiLensToolName}), which are read-only or record every write through the
  * mutation bridge. Every other name (another extension's tool, an MCP tool
  * routed through pi, the outer codemode call) is opaque. A tool whose EVENT the
  * structured classifier recognizes is excluded at the record site, which has
@@ -178,7 +178,7 @@ export function shouldRunOpaqueRecovery(
 	if (workspaceRoot === undefined) return false;
 	const builtin = PI_BUILTIN_TOOL_WRITES.get(toolName);
 	if (builtin !== undefined) return builtin === "opaque";
-	return !PI_LENS_TOOL_NAMES.includes(toolName);
+	return !isPiLensToolName(toolName);
 }
 
 /**
