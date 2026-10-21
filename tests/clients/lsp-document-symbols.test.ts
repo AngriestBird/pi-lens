@@ -1,15 +1,20 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	findDocumentSymbolAtLine,
 	getOpenDocumentSymbols,
 	qualifiedLspSymbolName,
 } from "../../clients/lsp-document-symbols.js";
-import { getLSPService } from "../../clients/lsp/capabilities.js";
 import { makeLspServiceDouble } from "../support/lsp-service-double.js";
+import {
+	installLspService,
+	installLspServiceDouble,
+} from "../support/lsp-service-seam.js";
 
-vi.mock("../../clients/lsp/capabilities.js", () => ({
-	getLSPService: vi.fn(),
-}));
+// No service until a case installs one (the former `getLSPService: vi.fn()`
+// answered undefined). The first two cases are pure functions and never ask.
+beforeEach(async () => {
+	await installLspServiceDouble(null);
+});
 
 const range = (start: number, end: number) => ({
 	start: { line: start, character: 0 },
@@ -60,10 +65,10 @@ describe("LSP document symbols", () => {
 			},
 		],
 	])("does not request symbols when %s", async (_name, warm) => {
-		vi.mocked(getLSPService).mockReturnValue(
+		installLspService(
 			makeLspServiceDouble({
 				getWarmClientForFile: vi.fn().mockResolvedValue(warm),
-			}) as never,
+			}),
 		);
 		expect(await getOpenDocumentSymbols("/a.ts")).toBeUndefined();
 	});
@@ -73,7 +78,7 @@ describe("LSP document symbols", () => {
 			.fn()
 			.mockRejectedValueOnce(new Error("nope"))
 			.mockReturnValueOnce(new Promise(() => {}));
-		vi.mocked(getLSPService).mockReturnValue(
+		installLspService(
 			makeLspServiceDouble({
 				getWarmClientForFile: vi.fn().mockResolvedValue({
 					client: {
@@ -82,7 +87,7 @@ describe("LSP document symbols", () => {
 						documentSymbol,
 					},
 				}),
-			}) as never,
+			}),
 		);
 		expect(await getOpenDocumentSymbols("/a.ts", 5)).toBeUndefined();
 		expect(await getOpenDocumentSymbols("/a.ts", 5)).toBeUndefined();

@@ -23,6 +23,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { normalizeMapKey } from "../../clients/path-utils.js";
 import { clearWidgetState } from "../../clients/widget-state.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
+import { installLspService } from "../support/lsp-service-seam.js";
 
 beforeEach(() => {
 	clearWidgetState();
@@ -62,13 +63,6 @@ vi.mock("../../clients/lsp/client.js", async () => {
 });
 
 let service: unknown;
-vi.mock("../../clients/lsp/capabilities.js", async () => {
-	const actual = await vi.importActual<
-		typeof import("../../clients/lsp/capabilities.js")
-	>("../../clients/lsp/capabilities.js");
-	return { ...actual, getLSPService: () => service };
-});
-
 function makeServer(
 	id: string,
 	root: string,
@@ -194,7 +188,7 @@ async function runTool(
 
 async function freshService(): Promise<void> {
 	const { LSPService } = await import("../../clients/lsp/index.js");
-	service = new LSPService();
+	service = installLspService(new LSPService());
 }
 
 describe("#1253 lsp_diagnostics end-to-end silent-clean confirmation", () => {

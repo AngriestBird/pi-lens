@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import { withResidentBootstrap } from "../support/bootstrap-access.js";
 import * as path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	getGlobalPiLensDir,
 	getProjectDataDir,
@@ -38,8 +38,8 @@ import {
 	useTrackedTempDirs,
 } from "./test-utils.js";
 import { waitFor as waitForCondition } from "./interleaving-kit.js";
-import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 import { dataDir444 } from "../support/data-dir-4-4-4.js";
+import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 
 // `handleSessionStart` queues project-snapshot body writes that can recreate a
 // fixture root after its `env.cleanup()`; the drain lets them land first.
@@ -63,18 +63,6 @@ function findDeadPid(): number {
 // afterEach cleanup would then race). supportsLSP:false short-circuits the warm
 // before it opens any file.
 const mockTouchFile = vi.fn(async () => undefined);
-vi.mock("../../clients/lsp/capabilities.js", async (importOriginal) => ({
-	...(await importOriginal<
-		typeof import("../../clients/lsp/capabilities.js")
-	>()),
-	getLSPService: vi.fn(() =>
-		makeLspServiceDouble({
-			supportsLSP: () => false,
-			touchFile: mockTouchFile,
-		}),
-	),
-}));
-
 // #1767: every test in this file drives `handleSessionStart`, which does
 // real synchronous fs work (detectProjectLanguageProfile, scanProjectRules)
 // plus fire-and-forget background scans (`scheduleStartupScans`) that reach
@@ -377,6 +365,14 @@ async function runSessionStartPastExportsDefer(
 	}
 	return run;
 }
+
+// The service stub documented above `mockTouchFile`, installed for every case.
+beforeEach(async () => {
+	await installLspServiceDouble({
+		supportsLSP: () => false,
+		touchFile: mockTouchFile,
+	});
+});
 
 afterEach(() => {
 	vi.useRealTimers();

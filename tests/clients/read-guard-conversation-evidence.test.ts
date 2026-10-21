@@ -49,13 +49,6 @@ vi.mock("../../clients/dispatch/integration.js", async (importOriginal) => ({
 	dispatchLintWithResult: vi.fn(),
 	computeCascadeForFile: vi.fn().mockResolvedValue(undefined),
 }));
-vi.mock("../../clients/lsp/capabilities.js", async (importOriginal) => ({
-	...(await importOriginal<
-		typeof import("../../clients/lsp/capabilities.js")
-	>()),
-	getLSPService: vi.fn(),
-	resyncGitChangedFiles: vi.fn().mockResolvedValue(undefined),
-}));
 vi.mock("../../clients/recent-touches.js", async (importOriginal) => ({
 	...(await importOriginal<typeof import("../../clients/recent-touches.js")>()),
 	appendRecentTouches: vi.fn().mockResolvedValue(undefined),
@@ -86,13 +79,12 @@ import {
 	formatFile as runFormatter,
 	getFormattersForFile,
 } from "../../clients/formatters.js";
-import { getLSPService } from "../../clients/lsp/capabilities.js";
-import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 import { pathToFileURL } from "node:url";
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { setHostFileMutationQueueLoader } from "../../clients/file-mutation-queue.js";
 import { createLspNavigationTool } from "../../tools/lsp-navigation.js";
 import { runHandlerExpectingNoThrow } from "../support/handler-verdict.js";
+import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 
 const CLEAN_DISPATCH = {
 	diagnostics: [],
@@ -435,18 +427,16 @@ const WRITTEN = [
 	"const d = 4;",
 ].join("\n");
 
-beforeEach(() => {
+beforeEach(async () => {
 	resetDegradationLedger();
 	vi.mocked(logLatency).mockClear();
-	vi.mocked(getLSPService).mockReturnValue(
-		makeLspServiceDouble({
-			supportsLSP: () => false,
-			hasLSP: async () => false,
-			openFile: async () => {},
-			touchFile: async () => {},
-			getAllDiagnostics: async () => new Map(),
-		}) as never,
-	);
+	await installLspServiceDouble({
+		supportsLSP: () => false,
+		hasLSP: async () => false,
+		openFile: async () => {},
+		touchFile: async () => {},
+		getAllDiagnostics: async () => new Map(),
+	});
 	vi.mocked(dispatchLintWithResult).mockReset();
 	vi.mocked(dispatchLintWithResult).mockResolvedValue(CLEAN_DISPATCH as never);
 });
@@ -3002,25 +2992,23 @@ describe("#3525: FileTime moves only over bytes the conversation accounts for", 
 			const runtime = newRuntime(env.tmpDir);
 			await piWrite(runtime, file, BIG);
 			foreignWrite(file, 11, "EXTERNAL11");
-			vi.mocked(getLSPService).mockReturnValue(
-				makeLspServiceDouble({
-					supportsLSP: () => true,
-					hasLSP: async () => true,
-					rename: async () => ({
-						changes: {
-							[pathToFileURL(file).href]: [
-								{
-									range: {
-										start: { line: 2, character: 0 },
-										end: { line: 2, character: 4 },
-									},
-									newText: "renamed",
+			await installLspServiceDouble({
+				supportsLSP: () => true,
+				hasLSP: async () => true,
+				rename: async () => ({
+					changes: {
+						[pathToFileURL(file).href]: [
+							{
+								range: {
+									start: { line: 2, character: 0 },
+									end: { line: 2, character: 4 },
 								},
-							],
-						},
-					}),
-				}) as never,
-			);
+								newText: "renamed",
+							},
+						],
+					},
+				}),
+			});
 			const tool = createLspNavigationTool((flag) => flag === "lens-lsp", {
 				runtime,
 				cacheManager: new CacheManager(false),

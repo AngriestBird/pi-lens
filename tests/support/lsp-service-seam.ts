@@ -1,5 +1,6 @@
 import {
 	configureLspServiceLifecycle,
+	type LspServiceShutdownOptions,
 	resetOwnedLspService,
 } from "../../clients/lsp/service-singleton.js";
 import {
@@ -7,6 +8,16 @@ import {
 	makeLspServiceDouble,
 	type LspServiceOverrides,
 } from "./lsp-service-double.js";
+
+export interface LspServiceInstallOptions extends LspServiceDoubleOptions {
+	/**
+	 * The lifecycle's `beforeReset` hook: it receives the options of every
+	 * `resetLSPService(options)` call, exactly as the module-level export passes
+	 * them on. A case that asserts the reset CALL (its `reason`, `fast`,
+	 * `processExiting`) passes a `vi.fn()` here instead of mocking the export.
+	 */
+	beforeReset?: (options: LspServiceShutdownOptions) => void;
+}
 
 /**
  * Install the LSP service double through the REAL singleton lifecycle seam
@@ -45,18 +56,41 @@ import {
  * the double, not to `adaptLspService`'s facade), so the documented
  * focused-override shape still applies.
  *
+ * `null` installs NO service: the lifecycle's `create` throws, so
+ * `getLSPService()` fails the way a caller sees it when no service can be
+ * built, instead of answering a default double. That is the state the
+ * `getLSPService: vi.fn()` mocks (returns `undefined` until a case sets one)
+ * modelled, and a case that sets a service afterwards uses `installLspService`.
+ *
  * The reset is per install, in BOTH entry points (#4720 review F1/F2). A second
  * install must not keep serving the first one's cached service: that is what the
  * next slice's per-case doubles depend on, and it is silent when wrong, because
  * a file-scoped hoisted spy answers identically from a stale double.
  */
 export async function installLspServiceDouble(
-	overrides: LspServiceOverrides = {},
-	options: LspServiceDoubleOptions = {},
-): Promise<Record<string, unknown>> {
+	overrides: null,
+): Promise<undefined>;
+export async function installLspServiceDouble(
+	overrides?: LspServiceOverrides,
+	options?: LspServiceInstallOptions,
+): Promise<Record<string, unknown>>;
+export async function installLspServiceDouble(
+	overrides: LspServiceOverrides | null = {},
+	options: LspServiceInstallOptions = {},
+): Promise<Record<string, unknown> | undefined> {
 	resetInstalledLspService();
 	await import("../../clients/lsp/capabilities.js");
-	return configureInstalledService(makeLspServiceDouble(overrides, options));
+	if (overrides === null) {
+		configureInstalledLifecycle(() => {
+			throw new Error(
+				"no LSP service installed (installLspServiceDouble(null))",
+			);
+		});
+		return undefined;
+	}
+	const service = makeLspServiceDouble(overrides, options);
+	configureInstalledLifecycle(() => service, options.beforeReset);
+	return service;
 }
 
 /**
@@ -74,24 +108,23 @@ export async function installLspServiceDouble(
  * installing before `clients/lsp/index.ts` evaluates is what its third step
  * exists to avoid, and it fails silently.
  */
-export function installLspService(
-	service: Record<string, unknown>,
-): Record<string, unknown> {
+export function installLspService<T extends object>(service: T): T {
 	resetInstalledLspService();
-	return configureInstalledService(service);
+	configureInstalledLifecycle(() => service);
+	return service;
 }
 
-/** The configure step both installers share; it never resets, so each entry
+/** The configure step every installer shares; it never resets, so each entry
  * point owns exactly one reset and each one is witnessed on its own (#4720). */
-function configureInstalledService(
-	service: Record<string, unknown>,
-): Record<string, unknown> {
-	configureLspServiceLifecycle<Record<string, unknown>>({
-		create: () => service,
-		beforeReset: () => undefined,
+function configureInstalledLifecycle<T extends object>(
+	create: () => T,
+	beforeReset: (options: LspServiceShutdownOptions) => void = () => undefined,
+): void {
+	configureLspServiceLifecycle<T>({
+		create,
+		beforeReset,
 		destroy: async () => undefined,
 	});
-	return service;
 }
 
 /**

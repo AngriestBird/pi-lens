@@ -903,6 +903,12 @@ async function createSession(
 			extensionFlagValues: new Map(args.flags),
 			resourceLoaderOptions: {
 				additionalExtensionPaths: [EXTENSION_ENTRY],
+				// pi discovers skills under `$HOME/.agents/skills` as well as
+				// `agentDir`, so a host's own skills padded every system prompt
+				// (15,144 characters on one dev host, none on a CI runner) and moved
+				// prefix-ratio verdicts (#4724). A direct `-e` load gives pi-lens no
+				// skills of its own (index.ts `resources_discover`).
+				noSkills: true,
 			},
 		}),
 	);

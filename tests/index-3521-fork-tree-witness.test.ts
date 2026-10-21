@@ -43,6 +43,10 @@ import {
 } from "vitest";
 import extension from "../index.js";
 import { makeLspServiceDouble } from "./support/lsp-service-double.js";
+import {
+	installLspService,
+	installLspServiceDouble,
+} from "./support/lsp-service-seam.js";
 import { readNdjsonRows } from "./support/ndjson-rows.js";
 import {
 	getDegradationSummary,
@@ -87,23 +91,6 @@ import {
 // to latency.log, and beforeEach truncates latency.log. The harness's
 // per-worker PI_LENS_HOME (#3721) keeps those writes off every other worker's
 // sink; the loggers bind their paths at load, so the home is the harness's.
-
-/**
- * #3676: the LSP service is the one process boundary the quick fix's real
- * apply path crosses. Armed only by the #3676 describe; every other test in
- * this file sees the real service.
- */
-const lspDouble = vi.hoisted(() => ({ service: undefined as unknown }));
-vi.mock("../clients/lsp/capabilities.js", async (importOriginal) => {
-	const original =
-		await importOriginal<typeof import("../clients/lsp/capabilities.js")>();
-	return {
-		...original,
-		getLSPService: () =>
-			(lspDouble.service as ReturnType<typeof original.getLSPService>) ??
-			original.getLSPService(),
-	};
-});
 
 /**
  * #3613: the dispatch pipeline is doubled at its boundary for the S4 turn
@@ -167,6 +154,7 @@ const runtimes: AgentSessionRuntime[] = [];
 const extensionErrors: unknown[] = [];
 
 beforeEach(async () => {
+	await installLspServiceDouble();
 	_resetSessionLifecycleForTests();
 	env = setupTestEnvironment(TMP_PREFIX);
 	root = env.tmpDir;
@@ -798,7 +786,6 @@ describe("#3676 the quick fix is credited to the branch its report was produced 
 
 	afterEach(() => {
 		for (const flag of ACTIONABLE_FLAGS) FLAGS.delete(flag);
-		lspDouble.service = undefined;
 	});
 
 	/** The LSP boundary: a warning with a preferred quick fix, served while warm. */
@@ -807,32 +794,34 @@ describe("#3676 the quick fix is credited to the branch its report was produced 
 			start: { line: 0, character: 0 },
 			end: { line: 0, character: 5 },
 		};
-		lspDouble.service = makeLspServiceDouble({
-			supportsLSP: () => warm(),
-			openFile: async () => undefined,
-			getLastKnownDiagnostics: () => [
-				{
-					severity: 2,
-					message: "replace this value",
-					code: "fix-value",
-					source: "eslint",
-					serverId: "eslint",
-					range,
-				},
-			],
-			codeAction: async () => [
-				{
-					title: "Fix it",
-					kind: "quickfix",
-					isPreferred: true,
-					edit: {
-						changes: {
-							[pathToFileURL(file).href]: [{ range, newText: "FIXED" }],
+		installLspService(
+			makeLspServiceDouble({
+				supportsLSP: () => warm(),
+				openFile: async () => undefined,
+				getLastKnownDiagnostics: () => [
+					{
+						severity: 2,
+						message: "replace this value",
+						code: "fix-value",
+						source: "eslint",
+						serverId: "eslint",
+						range,
+					},
+				],
+				codeAction: async () => [
+					{
+						title: "Fix it",
+						kind: "quickfix",
+						isPreferred: true,
+						edit: {
+							changes: {
+								[pathToFileURL(file).href]: [{ range, newText: "FIXED" }],
+							},
 						},
 					},
-				},
-			],
-		});
+				],
+			}),
+		);
 	}
 
 	const settle = (runtime: AgentSessionRuntime) =>
