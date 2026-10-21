@@ -52,7 +52,6 @@ export const PI_MOCK_IMPORTERS: Readonly<Record<string, string>> = {
 	"index-integration.test.ts": "internal-seam",
 	"index-loop-block-wiring.test.ts": "internal-seam",
 	"index-lsp-idle-reset.test.ts": "internal-seam",
-	"index-memory-sample-wiring.test.ts": "internal-seam",
 	"index-mode-awareness.test.ts": "internal-seam",
 	"index-mutation-bridge-recordability.test.ts": "internal-seam",
 	"index-mutation-latency-marker.test.ts": "internal-seam",
@@ -76,9 +75,8 @@ export const PI_MOCK_IMPORTERS: Readonly<Record<string, string>> = {
 	"index-4554-last-member-teardown.test.ts": "internal-seam",
 	"index-multi-root-session-start.test.ts": "unproducible-payload",
 	// pending slice 8
-	"clients/session-event-guard.test.ts": "pending slice 8",
-	"index-cascade-resolved-clean-wiring.test.ts": "pending slice 8",
-	"index-process-bridge-registration.test.ts": "pending slice 8",
+	"clients/session-event-guard.test.ts": "unproducible-payload",
+	"index-cascade-resolved-clean-wiring.test.ts": "internal-seam",
 	// pending slice 9
 	"index-2992-integration.test.ts": "pending slice 9",
 	"index-lsp-config-root-eviction.test.ts": "pending slice 9",

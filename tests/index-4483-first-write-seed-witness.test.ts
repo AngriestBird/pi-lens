@@ -202,6 +202,7 @@ import {
 import { removeTempDirSync } from "./clients/test-utils.js";
 import { makeSessionStartEvent } from "./support/host-event-factory.js";
 import { createPiMock, makeCtx } from "./support/pi-mock.js";
+import { readNdjsonRows } from "./support/ndjson-rows.js";
 
 let tmpDir = "";
 const originalTestMode = process.env.PI_LENS_TEST_MODE;
@@ -252,22 +253,18 @@ async function rows(
 	name: string,
 ): Promise<Array<{ result?: string; metadata?: Record<string, unknown> }>> {
 	await flushLatencyLog();
-	return fs
-		.readFileSync(getLatencyLogPath(), "utf8")
-		.split("\n")
-		.filter((line) => line.includes(file) && line.includes(`"${name}"`))
-		.map(
-			(line) =>
-				JSON.parse(line) as {
-					filePath?: string;
-					phase?: string;
-					result?: string;
-					metadata?: Record<string, unknown>;
-				},
-		)
+	const read = readNdjsonRows(getLatencyLogPath());
+	// A row whose write was torn cannot be the row this witness names: red
+	// rather than read a shorter trace as the answer.
+	expect(read.skipped).toBe(0);
+	return read.rows
 		.filter(
 			(r) => r.filePath === file && (r.phase === name || r.result === name),
-		);
+		)
+		.map((r) => ({
+			result: r.result as string | undefined,
+			metadata: r.metadata as Record<string, unknown> | undefined,
+		}));
 }
 
 /**

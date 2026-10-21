@@ -397,8 +397,11 @@ describe("session-state registry — session_start wiring", () => {
 		// One down: #1666 wired package-manager's reset into handleSessionStart,
 		// this list's own test went red naming the fix, and the entry lost its
 		// `gap`. That is the loop the registry exists to close.
+		// Empty since #4701 F1 wired `resetDeferredDispositions` into
+		// `resetSessionScopedState`: the last declared gap is closed, and this
+		// assertion is what keeps a new one from being added silently.
 		const gaps = SESSION_STATE_REGISTRY.filter((e) => e.gap).map((e) => e.id);
-		expect(gaps).toEqual(["diagnostic-dispositions:deferredThisSession"]);
+		expect(gaps).toEqual([]);
 	});
 });
 
