@@ -185,6 +185,29 @@ describe("certified hosts come from the baseline doc, fail-closed (#4632 accepta
 		expect(certifiedHosts(headerless).problem).toContain("no header row");
 	});
 
+	it("refuses a host row where the header belongs", () => {
+		// Recurrence (#4719 F9, sourcery Medium's surviving spelling): a version
+		// row directly above the separator was taken for the header and dropped,
+		// so the table lost that host and both readers called the shorter set
+		// clean. A header names columns, never a host.
+		const doc = [
+			"### Verified hosts",
+			"",
+			"| 0.86.1 | 2026-10-08 |",
+			"| --- | --- |",
+			"| 1.3.0 | 2026-10-16 |",
+		].join("\n");
+		const parsed = parseVerifiedHostRows(doc);
+		// Nothing is dropped: the host above the separator is a host row.
+		expect(parsed.rows.map((row) => row.version)).toEqual(["0.86.1", "1.3.0"]);
+		expect(parsed.hasHeader).toBe(false);
+		const { versions, problem } = certifiedHosts(doc);
+		expect(problem).toContain("names a host, not a header");
+		// The refusal is what the caller acts on; the set it also returns is the
+		// full table, never a silently shorter one.
+		expect(versions).toEqual(["0.86.1", "1.3.0"]);
+	});
+
 	it("orders versions numerically, not lexically", () => {
 		expect(["1.10.0", "1.9.3", "0.99.2"].sort(compareVersions)).toEqual([
 			"0.99.2",
@@ -228,12 +251,17 @@ describe("host installs are found by version, in every layout", () => {
 	});
 
 	it("resolves an npm global prefix", () => {
+		// An npm global install is at `<prefix>/lib/node_modules/<pkg>`, and the
+		// prefix, not the install directory, is what `--host-root` may name. The
+		// case resolves from the prefix itself: deriving it from the planted
+		// package's own path landed on a directory whose generic candidate WAS
+		// the planted install, so the case stayed green with the `lib` layout
+		// removed (#4719 F10, CodeRabbit thread #8).
+		const prefix = path.join(fixtureRoot(), "global");
 		const planted = plantHostAt(
-			path.join(fixtureRoot(), "global", "lib", "node_modules", HOST_PACKAGE),
+			path.join(prefix, "lib", "node_modules", HOST_PACKAGE),
 		);
-		expect(
-			resolveHostPackage(path.dirname(path.dirname(path.dirname(planted.dir)))),
-		).toEqual(planted);
+		expect(resolveHostPackage(prefix)).toEqual(planted);
 		// A prefix that holds no install resolves to nothing, never to a guess.
 		const empty = path.join(fixtureRoot(), "empty-prefix");
 		expect(resolveHostPackage(empty)).toBeUndefined();

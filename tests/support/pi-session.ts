@@ -131,7 +131,7 @@ import type {
 	createAgentSessionFromServices,
 	createAgentSessionServices,
 } from "@earendil-works/pi-coding-agent";
-import { afterAll, afterEach } from "vitest";
+import { afterAll, afterEach, beforeAll } from "vitest";
 import { _settleRegistryMutationsForTests } from "../../clients/instance-registry-tail.js";
 import { flushAllNdjsonWriters } from "../../clients/ndjson-logger.js";
 import {
@@ -246,7 +246,8 @@ interface PiAiModule {
 
 const nodeRequire = createRequire(import.meta.url);
 
-let loadedPiAi: PiAiModule | undefined;
+/** The host's scripted provider this tier last loaded, and the host it came from. */
+let loadedPiAi: { dir: string; module: PiAiModule } | undefined;
 
 function isDirectory(candidate: string): boolean {
 	try {
@@ -391,26 +392,66 @@ export function hostModule(): HostModule {
 }
 
 /**
- * The host's own scripted provider, loaded once per file at RUNTIME. Fails
+ * The host's own scripted provider, loaded once per host at RUNTIME. Fails
  * loudly rather than skipping: a host that stopped exporting `fauxProvider`
  * makes every case in this tier meaningless, and a quiet fallback would report
  * that as a green run.
+ *
+ * The cache is keyed on the host directory, exactly as `hostModuleFor` keys
+ * its own (#4719 F11): a cache keyed on nothing answers a second host with the
+ * first host's provider, so the session API would follow a mid-process
+ * `PI_LENS_PI_HOST_PACKAGE` switch while the scripted model stayed on the old
+ * install (measured: `hostA 0.86.1 aiA 0.86.1 hostB 1.3.0 aiB 0.86.1`). No
+ * production path switches hosts inside one process -- the spread spawns one
+ * child per host -- so the pair is what keeps the two halves agreeing about
+ * which install they came from.
  */
 export function piAiModule(): PiAiModule {
-	if (loadedPiAi) return loadedPiAi;
 	const hostDir = hostPackageDir();
+	if (loadedPiAi?.dir === hostDir) return loadedPiAi.module;
 	const piAiDir = findPackageDir(PI_AI_PACKAGE, hostDir);
 	if (piAiDir === undefined)
 		throw new Error(
 			`pi-session: the host install at ${hostDir} carries no ${PI_AI_PACKAGE}; ${HOST_PACKAGE_ENV} must name one that does`,
 		);
-	loadedPiAi = loadHostedModule<PiAiModule>(
+	const module = loadHostedModule<PiAiModule>(
 		piAiDir,
 		["fauxProvider", "fauxText", "fauxToolCall", "fauxAssistantMessage"],
 		"the scripted provider",
 	);
-	return loadedPiAi;
+	loadedPiAi = { dir: hostDir, module };
+	return module;
 }
+
+/**
+ * Pay the host module's one expensive load in a HOOK rather than inside the
+ * first case that creates a session (#4719 F8). `require(<host entry>)` costs
+ * ~0.9 s (pi's entry, its dependencies and jiti); while this tier held a static
+ * import that cost landed at helper load, outside every timed case, and the
+ * runtime resolver moved it into the first case -- `Unit tests (shard 5/5)`
+ * then failed `tests/index-4632-s4-tool-call-verdict.test.ts` with `Test timed
+ * out in 5000ms`, on a case that already ran 4.0-4.7 s against the 5 s default.
+ *
+ * A hook, not a case: Vitest's hookTimeout is 10 s (60 s in the projects that
+ * set it), so the load can never be charged to the 5 s default a file's first
+ * case runs against, and no test timeout is raised to make room for it.
+ *
+ * The load's own failure is the CASE's to report, never this hook's: every
+ * consumer calls `hostModule()` itself, so a host that cannot supply the API
+ * still refuses loudly there. Swallowing it here is what keeps a file whose
+ * cases are all gated on a host being installed (they `skipIf` it) a run of
+ * skips instead of a file-level hook failure.
+ */
+export function warmHostModule(): void {
+	try {
+		hostModule();
+	} catch {
+		// none: the case that needs the host calls hostModule() itself and raises
+		// this same failure there; the hook only pre-pays a successful load.
+	}
+}
+
+beforeAll(warmHostModule);
 
 /** pi-ai's `fauxText`, through the host's own module (see `piAiModule`). */
 export function fauxText(text: string): Record<string, unknown> {

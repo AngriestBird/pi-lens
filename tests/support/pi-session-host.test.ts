@@ -18,7 +18,7 @@ import {
 	cleanupTestEnvironmentsDrained,
 	setupTestEnvironment,
 } from "../clients/test-utils.js";
-import { hostModule } from "./pi-session.js";
+import { hostModule, piAiModule, warmHostModule } from "./pi-session.js";
 
 /** The one override the tier, and therefore this file, resolves through. */
 const HOST_PACKAGE_ENV = "PI_LENS_PI_HOST_PACKAGE";
@@ -32,6 +32,17 @@ const SESSION_API = [
 	"createAgentSessionFromServices",
 ] as const;
 
+/** The scripted-provider members (`piAiModule`) every host install must carry. */
+const PI_AI_API = [
+	"fauxProvider",
+	"fauxText",
+	"fauxToolCall",
+	"fauxAssistantMessage",
+] as const;
+
+/** The host's own provider package, resolved from the host install's own tree. */
+const PI_AI_PACKAGE = "@earendil-works/pi-ai";
+
 const fixtures: Array<{ tmpDir: string; cleanup: () => void }> = [];
 
 function fixtureRoot(): string {
@@ -41,36 +52,65 @@ function fixtureRoot(): string {
 }
 
 /**
- * A package directory that answers for `names` and nothing else. Each export is
- * a function carrying the name it was exported under, so a case can tell the
- * fixture's module from any other copy of the API.
+ * A package directory at `root/pi-<version>/node_modules/<name>` that answers
+ * for `names` and nothing else. Each export is a function carrying the name it
+ * was exported under and the install it was planted for, so a case can tell one
+ * planted host's module from another's.
  */
-function plantHost(root: string, names: readonly string[]): string {
+function plantPackage(
+	root: string,
+	options: {
+		packageName: string;
+		tag: string;
+		version: string;
+		names: readonly string[];
+	},
+): string {
 	const dir = path.join(
 		root,
-		"pi-0.86.1",
+		`pi-${options.version}`,
 		"node_modules",
-		"@earendil-works",
-		"pi-coding-agent",
+		...options.packageName.split("/"),
 	);
 	fs.mkdirSync(dir, { recursive: true });
 	fs.writeFileSync(
 		path.join(dir, "package.json"),
 		JSON.stringify({
-			name: "@earendil-works/pi-coding-agent",
-			version: "0.86.1",
+			name: options.packageName,
+			version: options.version,
 			main: "index.cjs",
 		}),
 	);
 	const lines = [
 		"const exported = {};",
-		`for (const name of ${JSON.stringify(names)}) {`,
-		"\texported[name] = Object.assign(function hosted() {}, { exportedAs: name });",
+		`for (const name of ${JSON.stringify(options.names)}) {`,
+		`\texported[name] = Object.assign(function hosted() {}, { exportedAs: name, install: ${JSON.stringify(options.tag)} });`,
 		"}",
 		"module.exports = exported;",
 	];
 	fs.writeFileSync(path.join(dir, "index.cjs"), `${lines.join("\n")}\n`);
 	return dir;
+}
+
+/** A host install (the session API) at the versioned install layout. */
+function plantHost(
+	root: string,
+	names: readonly string[],
+	version = "0.86.1",
+	tag = "host",
+): string {
+	return plantPackage(root, {
+		names,
+		packageName: "@earendil-works/pi-coding-agent",
+		tag,
+		version,
+	});
+}
+
+/** The install tag a planted module's export was written with. */
+function installOf(module: unknown, name: string): string | undefined {
+	const exports = module as Record<string, { install?: string } | undefined>;
+	return exports[name]?.install;
 }
 
 /** Run `body` with the override pointed at `dir`, and put the value back. */
@@ -137,6 +177,53 @@ describe("the tier's session API comes from the host the override names (#4719 F
 		expect(() => withHostOverride(dir, () => hostModule())).toThrow(
 			`does not export SessionManager, so the session API cannot come from the host ${HOST_PACKAGE_ENV} names (${dir})`,
 		);
+	});
+
+	it("warms the host module without turning a host-less run into a hook failure", () => {
+		// Recurrence (#4719 F8): the host module's ~0.9 s load moved from helper
+		// module load into the first case that creates a session, and a master-side
+		// tier-2 case at 4.0-4.7 s against the 5 s default timed out on CI. The
+		// warm-up hook pre-pays it. Its ONE swallowed failure is "nothing to
+		// load": a file whose cases are gated on a host being installed must stay
+		// a run of skips, and a case that NEEDS the host still raises the load's
+		// own error itself (the cases above).
+		expect(() => warmHostModule()).not.toThrow();
+		const notAHost = path.join(fixtureRoot(), "not-a-host");
+		fs.mkdirSync(notAHost, { recursive: true });
+		fs.writeFileSync(
+			path.join(notAHost, "package.json"),
+			JSON.stringify({ name: "not-a-host" }),
+		);
+		expect(() =>
+			withHostOverride(notAHost, () => warmHostModule()),
+		).not.toThrow();
+	});
+
+	it("loads the scripted provider from the same host as the session API", () => {
+		// Recurrence (#4719 F11): `hostModuleFor` is keyed on the host directory
+		// and `loadedPiAi` was keyed on nothing, so a second host in one process
+		// paired host B's session API with host A's provider (measured:
+		// `hostA 0.86.1 aiA 0.86.1 hostB 1.3.0 aiB 0.86.1`). The two halves of
+		// one session must agree about the install they came from.
+		const root = fixtureRoot();
+		const hosts = ["hostA", "hostB"].map((tag, index) => {
+			const version = index === 0 ? "0.86.1" : "1.3.0";
+			plantPackage(root, {
+				names: PI_AI_API,
+				packageName: PI_AI_PACKAGE,
+				tag,
+				version,
+			});
+			return plantHost(root, SESSION_API, version, tag);
+		});
+		const pairFor = (dir: string) =>
+			withHostOverride(dir, () => [
+				installOf(hostModule(), "SessionManager"),
+				installOf(piAiModule(), "fauxProvider"),
+			]);
+		// Both directions: the FIRST host's pair, then a switch to the second.
+		expect(pairFor(hosts[0])).toEqual(["hostA", "hostA"]);
+		expect(pairFor(hosts[1])).toEqual(["hostB", "hostB"]);
 	});
 
 	it("falls back to this repo's host when the override is unset", () => {

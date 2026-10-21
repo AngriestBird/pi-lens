@@ -85,19 +85,42 @@ export function parseVerifiedHostRows(markdown) {
 	// first pipe row instead loses a HOST whenever the header is absent, and
 	// the table then shrinks with both readers reporting it clean (#4719 F4:
 	// a table without its header returned only its last host).
-	const rows = (separator < 0 ? pipeRows : pipeRows.slice(separator + 1)).map(
-		(line) => ({ line, version: line.match(VERSION_ROW)?.[1] ?? null }),
-	);
+	//
+	// The row above the separator is a header only while it names COLUMNS: a
+	// row spelling a version is a HOST, and taking it for the header drops that
+	// host while both readers call the shorter set clean (#4719 F9, the
+	// spelling F4 left behind). Such a row is kept as a host and the table is
+	// refused, because the header it needs is not there either way.
+	const headerRow = separator > 0 ? pipeRows[separator - 1] : undefined;
+	const headerNamesHost =
+		headerRow !== undefined && VERSION_ROW.test(headerRow);
+	const body = separator < 0 ? pipeRows : pipeRows.slice(separator + 1);
+	const rows = (headerNamesHost ? [headerRow, ...body] : body).map((line) => ({
+		line,
+		version: line.match(VERSION_ROW)?.[1] ?? null,
+	}));
 	// `hasHeader` is part of the parse because a section whose pipes have no
 	// separator row above them is not a table: markdown renders those pipes as
 	// literal text, so a reader that took them for hosts would invent a
-	// certified set out of prose.
-	return { rows, hasHeader: separator > 0 };
+	// certified set out of prose. `problem` is the one structural refusal both
+	// readers share, so neither can read a table the other refuses.
+	const hasHeader = separator > 0 && !headerNamesHost;
+	return {
+		rows,
+		hasHeader,
+		problem: !hasHeader
+			? headerNamesHost
+				? `the row above the separator under \`${CERTIFIED_SECTION}\` names a host, not a header: ${headerRow.trim()}`
+				: pipeRows.length > 0
+					? `the piped rows under \`${CERTIFIED_SECTION}\` have no header row above their separator`
+					: undefined
+			: undefined,
+	};
 }
 
 /** The certified host versions the doc's table names, plus any row it could not read. */
 export function certifiedHosts(markdown) {
-	const { rows, hasHeader } = parseVerifiedHostRows(markdown);
+	const { rows, problem } = parseVerifiedHostRows(markdown);
 	const versions = rows
 		.map((row) => row.version)
 		.filter((version) => typeof version === "string");
@@ -110,10 +133,7 @@ export function certifiedHosts(markdown) {
 		// read, so the caller refuses rather than reading the text as hosts. A
 		// section with no pipes at all is a different refusal (no certified host
 		// is named), which the caller already has.
-		problem:
-			!hasHeader && rows.length > 0
-				? `the piped rows under \`${CERTIFIED_SECTION}\` have no header row above their separator`
-				: undefined,
+		problem,
 	};
 }
 
