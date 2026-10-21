@@ -323,11 +323,11 @@ describe("#4554 one activation, four live sessions", () => {
 		expect(teardownResets(b.resetLSPService)).toHaveLength(1);
 	}, 45_000);
 
-	it("r7 a sibling left behind by a reload into another activation releases the registration last", async () => {
+	it("r7 a sibling left behind by a reload into another activation tears the shared infra down last", async () => {
 		// #4704, the mirror order of the r5 case above: the reloaded primary
 		// leaves while the old activation's sibling is live, so the process's
-		// last live session is that sibling. Its activation admitted M, not the
-		// held registration, and no other leave would release it.
+		// last live session is that sibling. The reloaded primary's own leave
+		// releases its registration; the sibling's leave tears the infra down.
 		const a = await bootActivation();
 		const primary = makeCtx({ cwd: project, sessionId: "m" });
 		const sibling = makeCtx({ cwd: project, sessionId: "s" });
@@ -340,10 +340,12 @@ describe("#4554 one activation, four live sessions", () => {
 		await start(b.pi, reloaded, "reload");
 
 		await shutdown(b.pi, reloaded);
-		// The sibling on the other activation is live: nothing shared is
-		// released under it.
+		// The sibling on the other activation is live: the shared infra stays
+		// under it, and only the departing holder's registration goes.
 		expect(teardownResets(b.resetLSPService)).toHaveLength(0);
-		expect(getActiveSessionId()).toBe("m");
+		expect(getActiveSessionId()).toBeUndefined();
+		await settleRegistryWrites();
+		expect(await rootsForThisPid()).toContain(project);
 
 		await shutdown(a.pi, sibling);
 		expect(teardownResets(a.resetLSPService)).toHaveLength(1);
@@ -485,12 +487,14 @@ describe("#4554 one activation, four live sessions", () => {
 		expect(getSecondarySessionCount()).toBe(2);
 		await shutdown(pi, primary);
 		// The primary's leave must not have torn the shared infra down while
-		// members were still live, and it is not a secondary departure.
+		// members were still live. #4704: it does release its own registration
+		// (#2129 F3), which zeroes the observability counter by design (see
+		// `releasePrimarySession`).
 		expect(teardownResets(resetLSPService)).toHaveLength(0);
-		expect(getActiveSessionId()).toBe("m-primary");
-		expect(getSecondarySessionCount()).toBe(2);
+		expect(getActiveSessionId()).toBeUndefined();
+		expect(getSecondarySessionCount()).toBe(0);
 		await shutdown(pi, s2);
-		expect(getSecondarySessionCount()).toBe(1);
+		expect(getSecondarySessionCount()).toBe(0);
 		expect(await rootsForThisPid()).toContain(project);
 
 		await shutdown(pi, s3);
@@ -783,5 +787,82 @@ describe("#4554 one activation, four live sessions", () => {
 		// The sibling can still leave normally afterwards.
 		await shutdown(a.pi, sibling);
 		expect(teardownResets(a.resetLSPService)).toHaveLength(0);
+	}, 45_000);
+	it("keeps the shared infra up while a sibling's liveness probe is inconclusive", async () => {
+		// Review F3 on #4708 (R12): only pi's own stale-context error proves a
+		// session ended. A probe that throws anything else is no proof, so the
+		// sibling still counts as live: reading it as dead tore the shared
+		// infra down under a session that may still be running turns.
+		const { pi, resetLSPService } = await bootActivation();
+		const primary = makeCtx({ cwd: project, sessionId: "m-primary" });
+		const sibling = makeCtx({ cwd: project, sessionId: "s-inconclusive" });
+		await start(pi, primary);
+		await start(pi, sibling);
+		Object.defineProperty(sibling, "isIdle", {
+			get() {
+				throw new Error("host probe failed");
+			},
+		});
+
+		await shutdown(pi, primary);
+
+		expect(teardownResets(resetLSPService)).toHaveLength(0);
+		await settleRegistryWrites();
+		expect(await rootsForThisPid()).toContain(project);
+		await shutdown(pi, sibling);
+		expect(teardownResets(resetLSPService)).toHaveLength(1);
+	}, 45_000);
+
+	it("retires the departing scope at the last live leave past a member pi disposed", async () => {
+		// Review F5 on #4708: the activation's own last-member read counted a
+		// member pi had disposed without a shutdown, while the process read did
+		// not. The teardown ran, but the departing scope was never retired.
+		process.env.PI_LENS_TEST_MODE = "0";
+		const { pi, resetLSPService } = await bootActivation();
+		const sink = await latencySink();
+		sink.clear();
+		await sink.flush();
+		const primary = makeCtx({ cwd: project, sessionId: "m-disposed" });
+		const sibling = makeCtx({ cwd: project, sessionId: "s-last" });
+		await start(pi, primary);
+		await start(pi, sibling);
+		Object.defineProperty(primary, "isIdle", {
+			get() {
+				throw new Error(STALE_CTX_MESSAGE);
+			},
+		});
+
+		await shutdown(pi, sibling);
+
+		expect(teardownResets(resetLSPService)).toHaveLength(1);
+		await sink.flush();
+		expect(await shutdownScopeRows(sink)).toHaveLength(1);
+	}, 45_000);
+
+	it("releases the registration a re-announced member's admission took at that member's leave", async () => {
+		// Review F3 on #4708 (R15): the registration is keyed by the context
+		// its admission used. A member re-announced with a new context, and
+		// admitted on it, must leave holding that context; with the old one
+		// its leave kept a dead registration while another session lived,
+		// which declines a successor in another root (#2129).
+		const { pi, resetLSPService } = await bootActivation();
+		const primary = makeCtx({ cwd: project, sessionId: "m-first" });
+		const sibling = makeCtx({ cwd: project, sessionId: "s-reannounced" });
+		const other = makeCtx({ cwd: project, sessionId: "t-live" });
+		await start(pi, primary);
+		await start(pi, sibling);
+		await start(pi, other);
+		await shutdown(pi, primary);
+		expect(getActiveSessionId()).toBeUndefined();
+		const reannounced = makeCtx({ cwd: project, sessionId: "s-reannounced" });
+		await start(pi, reannounced);
+		expect(getActiveSessionId()).toBe("s-reannounced");
+
+		await shutdown(pi, reannounced);
+
+		expect(getActiveSessionId()).toBeUndefined();
+		expect(teardownResets(resetLSPService)).toHaveLength(0);
+		await shutdown(pi, other);
+		expect(teardownResets(resetLSPService)).toHaveLength(1);
 	}, 45_000);
 });

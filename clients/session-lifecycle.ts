@@ -29,7 +29,10 @@
  * `subagent-mode.ts` / `runtime-config.ts`).
  */
 
-import { recordDegradationOnce } from "./degradation-ledger.js";
+import {
+	incrementDegradationCount,
+	recordDegradationOnce,
+} from "./degradation-ledger.js";
 import { normalizeFilePath } from "./path-utils.js";
 import { getProcessSingleton } from "./process-singletons.js";
 
@@ -138,6 +141,15 @@ export function hasPrimaryRegistration(): boolean {
 	return s.activeCtx !== undefined || s.activeSessionId !== undefined;
 }
 
+/**
+ * Whether `ctx` is the context the registered primary was admitted with: the
+ * ownership identity of the registration, not its stable session id, since a
+ * reload can re-register that id in another activation (#4554 r5).
+ */
+export function isPrimarySessionOwner(ctx: unknown): boolean {
+	return state().activeCtx === ctx;
+}
+
 /** One live-session record as `index.ts` keeps it: its start's context. */
 interface LiveSessionMember {
 	readonly ctx: unknown;
@@ -184,18 +196,21 @@ export function trackLiveSessionMembers(
  * not hold the shared infra forever (the #472 orphan class). An inconclusive
  * probe stays live, since nothing proves that session ended.
  */
-export function hasLiveSessionInProcess(): boolean {
+export function hasLiveSessionInProcess(except?: LiveSessionMember): boolean {
 	const lists = liveSessionLists();
 	let live = false;
 	for (const members of lists) {
-		if (members.some((member) => probeCtxActive(member.ctx) !== false))
+		if (
+			members.some((member) => member !== except && isLiveSessionMember(member))
+		)
 			live = true;
-		else {
+		else if (!members.some((member) => member === except)) {
 			lists.delete(members);
-			// Members still listed never left: pi disposed them without a
-			// shutdown, so their end-of-session work did not run either.
-			if (members.length > 0)
-				recordDegradationOnce({
+			// Each member still listed never left: pi disposed it without a
+			// shutdown, so its end-of-session work did not run either. Counted
+			// per member, so the ledger's tally is the number of such sessions.
+			for (const _member of members)
+				incrementDegradationCount({
 					kind: "session-member-disposed",
 					subject: "no-shutdown",
 					reason:
@@ -204,6 +219,16 @@ export function hasLiveSessionInProcess(): boolean {
 		}
 	}
 	return live;
+}
+
+/**
+ * The one liveness predicate for a recorded member (#4704): live unless pi
+ * POSITIVELY invalidated its context. The process read above and an
+ * activation's own scope retirement both use it, so the two cannot disagree
+ * about a session pi disposed without a shutdown.
+ */
+export function isLiveSessionMember(member: LiveSessionMember): boolean {
+	return probeCtxActive(member.ctx) !== false;
 }
 
 /** How many activations' member lists the process still tracks (#4704): a
@@ -479,12 +504,16 @@ function normalizeRootForCompare(root: string | undefined): string | undefined {
  * primary, never a full start, no re-arm.
  *
  * This is the catalog's process-lifetime-latch shape (state that must re-arm at
- * a session boundary must not outlive it). `session_shutdown`'s shared teardown
- * is that boundary, and it runs at the leave that leaves the PROCESS with no
- * live session (#4554, #4704: {@link hasLiveSessionInProcess}). A primary that
- * leaves while a sibling session is live therefore keeps the registration held
- * until that sibling's own leave releases it; a later start then probes the
- * departed primary's invalidated context, exactly as after a replacement.
+ * a session boundary must not outlive it). The primary's own `session_shutdown`
+ * is that boundary, whatever else is live (#4704): the registration is per
+ * primary. Holding it past the primary's leave declined a cross-root
+ * successor (`/resume`) as `secondary-root` for its whole life, since root
+ * identity makes a held, dead registration decisive. The process's shared
+ * infra is per process: only a leave that leaves the PROCESS with no live
+ * session tears it down ({@link hasLiveSessionInProcess}), and a repeat of
+ * that teardown with nothing live is a no-op. That last leave also releases a
+ * registration still held by a session that can no longer leave (pi disposed
+ * it without a shutdown).
  *
  * A concurrent secondary that outlives a released primary classifies `primary` on
  * its later emissions rather than `concurrent-secondary`. That is the fail-safe

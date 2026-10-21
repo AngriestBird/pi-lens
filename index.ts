@@ -245,6 +245,8 @@ import {
 	getActivePrimaryRoot,
 	hasLiveSessionInProcess,
 	hasPrimaryRegistration,
+	isLiveSessionMember,
+	isPrimarySessionOwner,
 	namedSuccessorReason,
 	expiredSuccessorReason,
 	noteSessionShutdown,
@@ -830,10 +832,9 @@ function activateExtension(hostPi: ExtensionAPI) {
 		ctx: unknown;
 		scope?: SessionScope;
 	}> = [];
-	// The context this activation's full admission registered. #4704: it now
-	// answers only whether this activation admitted a primary; which
-	// registration a last leave releases is the process's (the held one).
-	let sharedInfraOwner: unknown;
+	// Whether this activation ever ran a full admission (#4106: an activation
+	// that admitted none keeps the classifier's answer for an unmatched leave).
+	let admittedPrimary = false;
 	const enterLiveSession = (
 		sessionId: string | undefined,
 		role: "primary" | "concurrent-secondary",
@@ -847,6 +848,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 		);
 		if (known) {
 			known.role = role;
+			// The registration is keyed by the context its admission used, so a
+			// re-admission's context is the one this member's leave must hold.
 			known.ctx = ctx;
 			return known;
 		}
@@ -883,6 +886,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 		isLast: boolean;
 		isLastInProcess: boolean;
 		role: "primary" | "concurrent-secondary" | undefined;
+		ctx: unknown;
 		scope: SessionScope | undefined;
 		matched: boolean;
 	} => {
@@ -901,9 +905,12 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// admission), and reading it as last reset the shared LSP fleet and the
 			// registry entry under the live replacement, and retired that
 			// replacement's scope in the `finally` (#4554 r6).
-			isLast: liveSessionMembers.length === 0,
+			// #4704: a member pi disposed with no shutdown never leaves, so it is
+			// not live here either (the process read's own predicate).
+			isLast: !liveSessionMembers.some(isLiveSessionMember),
 			isLastInProcess: !hasLiveSessionInProcess(),
 			role: member?.role,
+			ctx: member?.ctx,
 			scope: member?.scope,
 			matched: member !== undefined,
 		};
@@ -2519,7 +2526,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// or not; the full start is also what makes the shared teardown this
 					// activation's to run.
 					if (sessionStartDecision.runFullSessionStart) {
-						sharedInfraOwner = ctx;
+						admittedPrimary = true;
 						// Full admission supersedes the previous primary, even when
 						// its stale host never delivered session_shutdown (#4554 r5).
 						for (let i = liveSessionMembers.length - 1; i >= 0; i--) {
@@ -2789,6 +2796,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 						sessionStartBasis: sessionStartDecision.basis,
 						sessionStartGapMs: sessionStartDecision.gapMs,
 						sessionStartLineageMatch: sessionStartDecision.lineageMatch,
+						// #4704: another live session in the process (an in-process
+						// subagent) still drives the shared LSP fleet, so this full
+						// start must not reset it under that session.
+						keepSharedLsp: hasLiveSessionInProcess(startingMember),
 						getFlag: (name: string) => getLensFlag(name),
 						notify: (msg, level) => notifyUi(ctx, msg, level),
 						dbg,
@@ -4089,20 +4100,27 @@ function activateExtension(hostPi: ExtensionAPI) {
 				: leave.role === "primary"
 					? "primary"
 					: "secondary";
-		// #4704: the process's last live leave releases whichever registration
-		// is held, whichever activation admitted it: no live successor can
-		// remain (that is what last-in-process means, and it is why a
-		// superseded activation can no longer tear down its successor, #4554
-		// r5), and no other leave would release it — a declined subagent
-		// whose primary left first on another activation, or a sibling left
-		// behind by a reload into another activation. With nothing held, an
-		// activation that admitted a primary has nothing left to release (its
-		// registration was released or superseded); one that admitted none
-		// keeps the classifier's answer (#4106, #4113).
-		const ownsCurrentSharedInfra =
-			hasPrimaryRegistration() ||
-			(sharedInfraOwner === undefined && shutdownClassification === "primary");
-		const runsSharedTeardown = leave.isLastInProcess && ownsCurrentSharedInfra;
+		// #4704: two facts with two owners. The primary REGISTRATION is per
+		// primary: the leave of the session that holds it releases it, whatever
+		// else is live, so its successor (a cross-root `/resume` included) is
+		// admitted rather than declined behind a dead registration. A
+		// superseded activation never holds its successor's (#4554 r5); one
+		// that admitted none keeps the classifier's answer (#4106, #4113). The
+		// process's shared INFRA is per process: only a leave that leaves no
+		// session live in ANY activation tears it down. Every step of that
+		// teardown is a no-op with nothing up, so a delayed leave after the
+		// last one repeats nothing harmful.
+		// The holder is the member whose start context the registration was
+		// admitted with: the ownership identity, not the stable session id,
+		// which a reload can re-register in another activation (#4554 r5).
+		const holdsRegistration = leave.matched
+			? isPrimarySessionOwner(leave.ctx)
+			: !admittedPrimary && shutdownClassification === "primary";
+		const runsSharedTeardown = leave.isLastInProcess;
+		// The last live leave also releases a registration still held by a
+		// session that can no longer leave (pi disposed it with no shutdown).
+		const releasesRegistration =
+			holdsRegistration || (leave.isLastInProcess && hasPrimaryRegistration());
 
 		const shutdownEvent = event as
 			| { reason?: string; targetSessionFile?: string }
@@ -4175,12 +4193,13 @@ function activateExtension(hostPi: ExtensionAPI) {
 				shutdownClassification === "secondary"
 					? "concurrent-secondary"
 					: "primary";
-			// A shared primary leaves its persisted work for successor replay;
-			// only local leaves and secondaries clear their turn partition (#3676).
+			// A departing primary leaves its persisted work for successor replay;
+			// every other leave clears its turn partition (#3676). #4704: that is
+			// the registration holder, whether or not the shared infra goes too.
 			if (
 				stableSessionId !== undefined &&
 				shutdownCwd !== undefined &&
-				(!runsSharedTeardown || shutdownClassification === "secondary")
+				!holdsRegistration
 			) {
 				cacheManager.clearTurnState(
 					shutdownCwd,
@@ -4199,6 +4218,23 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// secondary departure.
 			if (shutdownClassification === "secondary")
 				decrementSecondarySessionCount();
+			// #2129 review F3: a departed primary's registration must not outlive
+			// it. Root identity made a stale `activeRoot` decisive: without this,
+			// once root A's primary ended, every later start in root B would
+			// classify `secondary-root` forever. #3662: a replacement reason
+			// leaves the slot pending for its successor. #3855: and names it by
+			// the key its start will compute. Read after the stash or forward
+			// above, which bind a file-less successor's ticket.
+			if (releasesRegistration)
+				releasePrimarySession(
+					shutdownReason,
+					successorStartKey({
+						reason: shutdownReason,
+						sessionFile: getSessionFile(ctx),
+						targetSessionFile: shutdownEvent?.targetSessionFile,
+						sessionManager: getSessionManager(ctx),
+					}),
+				);
 			if (!runsSharedTeardown) {
 				// #2130: scoped deregistration. A secondary's shutdown must never run
 				// `deregisterInstance()` — the process lives on and the primary still
@@ -4280,25 +4316,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// #449 slice 1: SYNC-only deregistration (no child spawns — see the
 			// processExiting note below); safe to call unconditionally here.
 			deregisterInstance();
-			// #2129 review F3: release the primary registration at the same boundary
-			// the registry entry is released. Root identity made a stale `activeRoot`
-			// decisive: without this, once root A's primary ended, every later start
-			// in root B would classify `secondary-root` forever — never primary,
-			// never a full start, no re-arm. This is the process-lifetime-latch shape
-			// the catalog names. Only the PRIMARY path reaches here; a secondary
-			// returned above precisely because the primary is still live.
-			// #3662: a replacement reason leaves the slot pending for its successor.
-			// #3855: and names it by the key its start will compute. Read after the
-			// stash or forward above, which bind a file-less successor's ticket.
-			releasePrimarySession(
-				shutdownReason,
-				successorStartKey({
-					reason: shutdownReason,
-					sessionFile: getSessionFile(ctx),
-					targetSessionFile: shutdownEvent?.targetSessionFile,
-					sessionManager: getSessionManager(ctx),
-				}),
-			);
 			// #2467: no analyzer bootstrap may START loading from here on. A demand
 			// already in flight keeps its promise and still settles — the gate is
 			// checked only when no flight exists. Nothing is spawned, which is what
