@@ -1349,6 +1349,37 @@ describe("scanShellWriteScopes — the command's effective directory (#2050)", (
 			bash: "sub/f.ts",
 			fallback: "f.ts",
 		},
+		{
+			row: "R45 pushd +foo, an index bash cannot parse (R6-1)",
+			command: "pushd +foo; printf x > f.ts",
+			bash: "f.ts",
+		},
+		{
+			row: "R46 pushd + (R6-1)",
+			command: "pushd +; printf x > f.ts",
+			bash: "f.ts",
+		},
+		{
+			row: "R47 pushd \\+foo, an escaped index",
+			command: "pushd \\+foo; printf x > f.ts",
+			bash: "f.ts",
+		},
+		{
+			row: "R48 cd s\\ub, an escape bash removes",
+			command: "cd s\\ub; printf x > f.ts",
+			bash: "sub/f.ts",
+			fallback: "f.ts",
+		},
+		{
+			row: "R49 cd +foo enters a directory named +foo",
+			command: "mkdir +foo; cd +foo; printf x > f.ts",
+			bash: "+foo/f.ts",
+		},
+		{
+			row: 'R50 cd "s\\ub", a quoted backslash bash keeps',
+			command: 'cd "s\\ub"; printf x > f.ts',
+			bash: "f.ts",
+		},
 	];
 
 	it.each(CWD_ROWS)(

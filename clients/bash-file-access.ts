@@ -1314,7 +1314,7 @@ export function scanShellWriteScopes(
 		simpleCommand.push(range);
 		if (range.exit === "redirect") continue;
 		const exit = range.exit;
-		const effect = directoryEffect(simpleCommand, effectiveCwd);
+		const effect = directoryEffect(simpleCommand, effectiveCwd, command);
 		simpleCommand = [];
 		const previousEntry = entry;
 		entry = exit;
@@ -1410,8 +1410,9 @@ type DirectoryEffect =
 /**
  * What one simple command does to the shell's directory, read as a positive
  * list (#4713 round 4). Admitted: `cd DIR` and `pushd DIR` with exactly one
- * statically resolvable directory operand (a `pushd +N`/`-N` stack index is
- * not one), and a bare `popd`, each spelled as that
+ * statically resolvable plain path operand (no backslash in the command, and
+ * for `pushd` not empty and not starting with `+` or `-`), and a bare `popd`,
+ * each spelled as that
  * literal first word once leading assignments and redirections are set aside.
  * A command whose first word is a plain word naming none of the directory or
  * shell-text builtins is `none`. A reserved word or an unquoted grouping
@@ -1420,6 +1421,7 @@ type DirectoryEffect =
 function directoryEffect(
 	ranges: readonly ShellSegmentRange[],
 	cwd: string,
+	source: string,
 ): DirectoryEffect {
 	if (ranges.some((range) => range.grouping)) return { kind: "construct" };
 	const words: ShellOperand[] = [];
@@ -1434,11 +1436,19 @@ function directoryEffect(
 	const operands = words.slice(first + 1);
 	if (verb === "cd" || verb === "pushd") {
 		const operand = operands.length === 1 ? operands[0] : undefined;
-		// `pushd +N`/`-N` rotates the stack: the operand is an index, not a
-		// directory (#4713 R5-2).
-		const rotation = verb === "pushd" && /^[+-]\d+$/.test(operand?.text ?? "");
+		// The directory moves only on a plain path operand (#4713 R5-2, R6-1).
+		// Its command text holds no backslash: the tokenizer keeps or drops an
+		// escape where bash does the opposite (`s\ub`, `"s\ub"`), so the token
+		// is not the word bash sees. A `pushd` operand also starts with neither
+		// `+` nor `-`: bash reads any such word as a stack index or an option,
+		// and fails on one it cannot parse.
+		const escaped = ranges.some((range) =>
+			source.slice(range.start, range.end + 1).includes("\\"),
+		);
+		const word = stripQuotes(operand?.text ?? "");
+		const plainPath = !escaped && (verb === "cd" || /^[^+-]/.test(word));
 		const target =
-			operand && !rotation ? resolveCdOperand(operand, cwd) : undefined;
+			operand && plainPath ? resolveCdOperand(operand, cwd) : undefined;
 		return target
 			? { kind: "move", target, push: verb === "pushd" }
 			: { kind: "unknown" };

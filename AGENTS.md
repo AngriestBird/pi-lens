@@ -1217,18 +1217,22 @@ file-scoped worklist and receives no project-wide scanner output.
   checkout the command ITSELF names — its `cd`/`pushd` target or a recognised
   write operand — when that checkout is a linked worktree of the session's own
   repository (`resolveOpaqueRecoveryRoots`, `sameCheckoutOtherRoot`). Both hooks
-  derive the same bounded list (`OPAQUE_RECOVERY_ROOT_CAP`) from the command
-  text and the session root, so a record and its take still name one key per
-  root; a checkout of another repository, a checkout named past the cap, and a
+  derive bounded root lists (`OPAQUE_RECOVERY_ROOT_CAP`) from the command text,
+  the session root, and the checkout each hook sees at its own instant, so a
+  worktree the command itself creates is admitted only at `tool_result` and its
+  missing baseline is reported as `partial-recognition-no-baseline`, while a
+  root both hooks admit still names one key for its record and its take; a
+  checkout of another repository, a checkout named past the cap, and a
   git target under a non-checkout session root each leave one bounded
   `opaque-recovery-root-refused` record per session. This is why a `cd` into a
   sibling worktree no longer reads a clean `git status` in the wrong checkout as
   "nothing changed". Relative operands resolve against the directory in effect
   for their own segment (`scanShellWriteScopes`). That directory moves only for
-  an admitted form: `cd DIR` or `pushd DIR` with one static directory operand
-  (a `pushd +N` stack index is not one), or a bare `popd` of a push the scan
-  admitted, entered at list start or after `&&`, `;`, a newline or a
-  backgrounded list, ended by `&&`, `;`, a newline or the end, and in no
+  an admitted form: `cd DIR` or `pushd DIR` with one static plain path operand
+  (no backslash escape, and for `pushd` not empty and not starting with `+` or
+  `-`, which bash reads as a stack index or an option), or a bare `popd` of a
+  push the scan admitted, entered at list start or after `&&`, `;`, a newline
+  or a backgrounded list, ended by `&&`, `;`, a newline or the end, and in no
   pipeline or backgrounded list. A move entered after `&&` holds only to the end
   of that `&&` chain, because it happened only if the left side succeeded. A
   directory builtin in a pipeline or a backgrounded list leaves the directory
