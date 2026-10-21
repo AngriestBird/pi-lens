@@ -18,6 +18,7 @@ import {
 	opaquePrescanRoot,
 	readGitHead,
 	readSameHeadDiscards,
+	recordOpaqueCaptureRefused,
 	recoverOpaqueChangesViaGit,
 	resolveOpaqueRecoveryRoots,
 	serializeHeadLook,
@@ -86,6 +87,7 @@ import {
 import {
 	hasPendingObservation,
 	noteMutationHandled,
+	pendingObservationPaths,
 	settleObservedMutation,
 } from "./observed-mutation.js";
 import {
@@ -1881,6 +1883,32 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// extension's `tool_result` hook can rewrite to success. Before any return.
 	if (event.isError === true && toolCallId !== undefined)
 		deps.readGuard?.dropProvisionalReadByCall(toolCallId);
+	// #4732: the command text bash's recovery reads its roots and recognized
+	// writes from, and whether this is a call of another tool whose own
+	// `tool_call` recorded an opaque baseline. That record is the decision (the
+	// gate, the structured classifier and the id rule all ran there); this side
+	// follows it instead of re-deriving it (shape 19).
+	const bashCommand =
+		event.toolName === "bash" &&
+		typeof (event.input as { command?: unknown }).command === "string"
+			? (event.input as { command: string }).command
+			: undefined;
+	const opaqueNonBash =
+		event.toolName !== "bash" &&
+		toolCallId !== undefined &&
+		shouldRunOpaqueRecovery(event.toolName, workspaceRoot) &&
+		getOpaqueBaselineStore().has(
+			opaqueBaselineSlot(
+				opaquePrescanRoot(deps.cwd, workspaceRoot),
+				runtime.sessionGeneration,
+			),
+			toolCallId,
+		);
+	// #4732: a captured tool's relative path field that has no attribution
+	// (none is recorded for a tool the classifier does not know) is still
+	// refused as a PATH, but its call's writes are recovered from the diff
+	// below before the handler returns.
+	let unattributedOpaque = false;
 	const attribution =
 		toolCallId !== undefined
 			? runtime.takeToolCallAttribution(toolCallId)
@@ -1961,12 +1989,15 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			durationMs: 0,
 			metadata: { toolCallId, rawFilePath, guessedPath },
 		});
-		return readNote.length > 0
-			? {
-					content: [...readNote, ...event.content],
-					structuredContent: event.structuredContent,
-				}
-			: undefined;
+		if (!opaqueNonBash)
+			return readNote.length > 0
+				? {
+						content: [...readNote, ...event.content],
+						structuredContent: event.structuredContent,
+					}
+				: undefined;
+		unattributedOpaque = true;
+		resolutionBasis = workspaceRoot;
 	} else {
 		// Either an ABSOLUTE path (bash-synthetic writes always pass one —
 		// unambiguous regardless of any basis, see the bash-write dispatch
@@ -1984,8 +2015,9 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// #4577: a path recovered from disk is already an identity, not a spelling
 	// the model typed — `_pathAlreadyResolved` carries that provenance from the
 	// recovery caller instead of this handler guessing it from the string.
-	const filePath =
-		rawFilePath && deps._pathAlreadyResolved
+	const filePath = unattributedOpaque
+		? undefined
+		: rawFilePath && deps._pathAlreadyResolved
 			? rawFilePath
 			: resolveToolCallFilePath(rawFilePath, resolutionBasis, workspaceRoot)
 					?.path;
@@ -2024,9 +2056,10 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	}
 	// The parent bash call is already recorded. Its per-file diagnostic replays
 	// must not push that real call out of the BLIND WRITE knowledge window.
-	const behaviorWarnings = isBashDerivedReplay(event)
-		? []
-		: agentBehaviorRecord(event.toolName, filePath);
+	const behaviorWarnings =
+		isBashDerivedReplay(event) || unattributedOpaque
+			? []
+			: agentBehaviorRecord(event.toolName, filePath);
 	const syntheticWriteContent: Array<{ type: string; text?: string }> = [];
 	// #1590: one shared authoritative-content budget for every path this bash
 	// command wrote. It is handed DOWN to each synthetic call so the single
@@ -2043,11 +2076,14 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// synthetic `write` event so its diagnostics, fileSeq, and change-log refresh.
 	// Without (2) a `git checkout -- f` restore keeps serving the pre-restore
 	// (e.g. broken-state) warnings on every later lens_diagnostics call.
-	if (
-		event.toolName === "bash" &&
-		typeof (event.input as { command?: unknown }).command === "string"
-	) {
-		const command = (event.input as { command: string }).command;
+	// #4732: the same recovery, publish and dispatch serve every other tool
+	// whose `tool_call` recorded a baseline. It has no command text, so it
+	// recognizes nothing, recovers from the session root only, and every path
+	// it wrote is opaque evidence (unauthored, no blockers).
+	if (bashCommand !== undefined || opaqueNonBash) {
+		const command = bashCommand ?? "";
+		/** What the rows below name the call by: its command, or its tool. */
+		const opaqueLabel = bashCommand ?? event.toolName;
 		const recognized = extractWrittenPathsFromCommand(command, workspaceRoot);
 		// #2050: the trees this command's writes are recovered from. The session
 		// root is where the host ran it; every further root is a checkout the
@@ -2235,6 +2271,10 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			);
 			for (const outcome of outcomes) {
 				if (outcome.verdict === "unknown") {
+					// #4732: bash already says this through its coverage row and its
+					// withheld blockers; another tool's writes simply go unseen.
+					if (bashCommand === undefined)
+						recordOpaqueCaptureRefused(outcome.reason, event.toolName);
 					// #2060: deliberately WIDER than the old `recognized.length > 0`
 					// guard. A fully opaque command whose probe failed is the shape
 					// whose coverage is least knowable, and it used to record
@@ -2251,7 +2291,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 					logLatency({
 						type: "phase",
 						phase: "opaque_mutation_incoming_excluded",
-						filePath: command.slice(0, 80),
+						filePath: opaqueLabel.slice(0, 80),
 						durationMs: Date.now() - started,
 						result: `excluded:${outcome.excluded}`,
 						metadata: { root: outcome.root },
@@ -2260,7 +2300,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 					logLatency({
 						type: "phase",
 						phase: "opaque_mutation_status_pair_unknown",
-						filePath: command.slice(0, 80),
+						filePath: opaqueLabel.slice(0, 80),
 						durationMs: Date.now() - started,
 						result: `kept:${outcome.unknownPairs}`,
 						metadata: { root: outcome.root },
@@ -2283,6 +2323,20 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 					recognizedWritten.map((p) => normalizeMapKey(realpathOrResolve(p))),
 				);
 				opaquePaths = opaquePaths.filter((p) => !survivingKeys.has(p));
+			}
+			// #4732: a path the #2430 net armed an observation of for this same
+			// call is the settle's to answer, with the tool's own attribution.
+			// Only when the handler reaches that settle: a deferred
+			// `path_attribution_missing` return never does, so there the diff is
+			// the one answer and keeps it.
+			if (opaquePaths.length > 0 && opaqueNonBash && !unattributedOpaque) {
+				const observed = new Set(
+					pendingObservationPaths(toolCallId, runtime.sessionGeneration).map(
+						(p) => normalizeMapKey(realpathOrResolve(p)),
+					),
+				);
+				if (observed.size > 0)
+					opaquePaths = opaquePaths.filter((p) => !observed.has(p));
 			}
 			hadOpaqueRecovery = opaquePaths.length > 0;
 			if (recoveredByRoot.size > 0 || unknownRoots.size > 0) {
@@ -2315,7 +2369,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				logLatency({
 					type: "phase",
 					phase: "opaque_mutation_coverage_unknown",
-					filePath: command.slice(0, 80),
+					filePath: opaqueLabel.slice(0, 80),
 					durationMs: Date.now() - started,
 					result: unknownReason,
 					metadata: {
@@ -2372,7 +2426,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 						deps.sessionId,
 					),
 					trigger: "tool_result",
-					label: command,
+					label: opaqueLabel,
 					...(discarded ? { discarded } : {}),
 					runtime,
 				}),
@@ -2596,7 +2650,10 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				});
 		}
 		const recognizedAuthoredSet = new Set(recognizedAuthored);
-		bashAuthorshipConfirmed = recognizedAuthored.length > 0;
+		// #4732: another tool's own authorship is the chain below's question,
+		// exactly as before it was captured; its recovery credits none.
+		if (bashCommand !== undefined)
+			bashAuthorshipConfirmed = recognizedAuthored.length > 0;
 		for (const wp of written) {
 			// #3525: a parser-recognized bash write is whole-file authorship only
 			// after the tool_call preflight proved no foreign writer intervened.
@@ -2800,6 +2857,15 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			}
 		}
 	}
+	// #4732: the deferred `path_attribution_missing` return, now that the
+	// call's writes are dispatched. Its path is still refused (#1642).
+	if (unattributedOpaque)
+		return readNote.length > 0 || syntheticWriteContent.length > 0
+			? {
+					content: [...readNote, ...event.content, ...syntheticWriteContent],
+					structuredContent: event.structuredContent,
+				}
+			: undefined;
 
 	// Search tools reveal specific lines (file:line) the agent then edits — register
 	// those shown lines (± context) as reads so the follow-up edit isn't blocked (#169).
@@ -3071,8 +3137,11 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// bytes is read HERE, before the yield. Otherwise the racing call rewrites
 	// the file while this one is awaiting and this one registers under the
 	// OTHER call's state hash, collapsing two distinct pipelines into one.
+	// #4732: a write pi-lens replays from an opaque diff carries its call's id,
+	// and that call's observation is the call's own to settle, never a replay's.
 	const observationPending =
 		!getFlag("no-read-guard") &&
+		!isBashDerivedReplay(event) &&
 		hasPendingObservation(resolveToolCallCorrelationId(event));
 	// #2464 review round 2 (S2): NOT gated on `mutation !== undefined` any more.
 	// The observed path now dispatches on call ONE of an unknown tool too, and

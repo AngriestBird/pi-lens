@@ -17,6 +17,7 @@ import {
 	isGitWorktree,
 	opaqueBaselineSlot,
 	opaquePrescanRoot,
+	recordOpaqueCaptureRefused,
 	recordOpaqueRootRefusals,
 	resolveOpaqueRecoveryRoots,
 	shouldRunOpaqueRecovery,
@@ -665,8 +666,8 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 	// Fire-and-forget capture is WRONG here (the child may finish first), but
 	// the capture is stat-only and budgeted, so awaiting it is bounded work on
 	// an already-second-scale bash path.
+	const commandInput = (event as { input?: { command?: unknown } }).input;
 	if (toolName === "bash") {
-		const commandInput = (event as { input?: { command?: unknown } }).input;
 		// #4131: a recognized bash write credits authorship without the bytes
 		// it wrote, so it may only advance an authorship whose bytes still
 		// hold. One another writer broke ends here, before the command rewrites
@@ -677,66 +678,84 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 				runtime.projectRoot || process.cwd(),
 			))
 				runtime.readGuard?.retireChangedAuthorship?.(target);
-		if (typeof commandInput?.command === "string" && commandInput.command) {
-			// #4504: the record and the take resolve their root through one
-			// owner, so a session whose cwd is not the coordinator's project root
-			// (a concurrent secondary, #473) cannot key the two lookups apart.
-			const scanRoot = opaquePrescanRoot(ctx.cwd, runtime.projectRoot);
-			if (scanRoot && shouldRunOpaqueRecovery(toolName, scanRoot)) {
-				const started = Date.now();
-				// #2050: the trees this command's writes must be recovered from. The
-				// session root is where the host ran it; any further root is a
-				// checkout the command itself named and that belongs to THIS
-				// repository (a linked worktree), so its baseline is taken here and
-				// its recovery happens there. Bounded by `OPAQUE_RECOVERY_ROOT_CAP`,
-				// and every refused or over-cap root leaves one record per session.
-				const scopes = resolveOpaqueRecoveryRoots(
-					commandInput.command,
-					scanRoot,
+	}
+	// #4504: the record and the take resolve their root through one owner, so a
+	// session whose cwd is not the coordinator's project root (a concurrent
+	// secondary, #473) cannot key the two lookups apart.
+	const scanRoot = opaquePrescanRoot(ctx.cwd, runtime.projectRoot);
+	const callId = resolveToolCallCorrelationId(event);
+	// #4732: the command text the prescan reads its roots from. bash: its
+	// non-empty command, as before. Any other tool the gate does not know to be
+	// read-only or structured, and whose event the structured classifier does
+	// not recognize either: no text, so its one root is the session's. Such a
+	// call needs its own id, because a host with none gives every call the one
+	// shared slot and a non-bash take there would consume a bash call's baseline.
+	const otherOpaqueTool =
+		toolName !== "bash" &&
+		mutation === undefined &&
+		shouldRunOpaqueRecovery(toolName, scanRoot);
+	if (otherOpaqueTool && callId === undefined)
+		recordOpaqueCaptureRefused("no-tool-call-id", toolName);
+	const opaqueCommand =
+		toolName === "bash"
+			? typeof commandInput?.command === "string" && commandInput.command
+				? commandInput.command
+				: undefined
+			: otherOpaqueTool && callId !== undefined
+				? ""
+				: undefined;
+	if (opaqueCommand !== undefined) {
+		if (scanRoot && shouldRunOpaqueRecovery(toolName, scanRoot)) {
+			const started = Date.now();
+			// #2050: the trees this command's writes must be recovered from. The
+			// session root is where the host ran it; any further root is a
+			// checkout the command itself named and that belongs to THIS
+			// repository (a linked worktree), so its baseline is taken here and
+			// its recovery happens there. Bounded by `OPAQUE_RECOVERY_ROOT_CAP`,
+			// and every refused or over-cap root leaves one record per session.
+			const scopes = resolveOpaqueRecoveryRoots(opaqueCommand, scanRoot);
+			recordOpaqueRootRefusals(scopes);
+			const turn = {
+				key: runtime.turnKey(deps.sessionId),
+				isLive: (key: number) => runtime.isLiveTurnKey(key),
+			};
+			let resultNote = "";
+			for (const [index, root] of scopes.roots.entries()) {
+				// The session root keeps the strategy it chose before: git when it
+				// is a worktree, the bounded stat snapshot otherwise. An admitted
+				// worktree IS a checkout by admission, so its baseline is the
+				// timestamp and its recovery is `git status` in that root.
+				const baseline = await captureOpaqueBaseline(
+					root,
+					index === 0,
+					started,
 				);
-				recordOpaqueRootRefusals(scopes);
-				const turn = {
-					key: runtime.turnKey(deps.sessionId),
-					isLive: (key: number) => runtime.isLiveTurnKey(key),
-				};
-				const callId = resolveToolCallCorrelationId(event);
-				let resultNote = "";
-				for (const [index, root] of scopes.roots.entries()) {
-					// The session root keeps the strategy it chose before: git when it
-					// is a worktree, the bounded stat snapshot otherwise. An admitted
-					// worktree IS a checkout by admission, so its baseline is the
-					// timestamp and its recovery is `git status` in that root.
-					const baseline = await captureOpaqueBaseline(
-						root,
-						index === 0,
-						started,
-					);
-					if (index === 0) resultNote = baseline.note;
-					// Session-stamped slot: a concurrent-secondary session (#473)
-					// replacing it must yield a no-pending-snapshot UNKNOWN for us -
-					// never a diff against another session's baseline. One entry per
-					// call (#4137): parallel bash calls all record before the first
-					// result. The turn lets the store retire the entry of a call that
-					// never gets a result (#3613 F2: this session's own turn).
-					getOpaqueBaselineStore().record(
-						opaqueBaselineSlot(root, runtime.sessionGeneration),
-						callId,
-						baseline.state,
-						turn,
-					);
-				}
-				logLatency({
-					type: "phase",
-					phase: "opaque_mutation_prescan",
-					filePath: commandInput.command.slice(0, 80),
-					durationMs: Date.now() - started,
-					result: resultNote,
-					metadata: {
-						root: scanRoot,
-						roots: scopes.roots.join(",").slice(0, 300),
-					},
-				});
+				if (index === 0) resultNote = baseline.note;
+				// Session-stamped slot: a concurrent-secondary session (#473)
+				// replacing it must yield a no-pending-snapshot UNKNOWN for us -
+				// never a diff against another session's baseline. One entry per
+				// call (#4137): parallel calls all record before the first
+				// result. The turn lets the store retire the entry of a call that
+				// never gets a result (#3613 F2: this session's own turn).
+				getOpaqueBaselineStore().record(
+					opaqueBaselineSlot(root, runtime.sessionGeneration),
+					callId,
+					baseline.state,
+					turn,
+				);
 			}
+			logLatency({
+				type: "phase",
+				phase: "opaque_mutation_prescan",
+				// A tool with no command text is named by the tool instead.
+				filePath: (opaqueCommand || toolName).slice(0, 80),
+				durationMs: Date.now() - started,
+				result: resultNote,
+				metadata: {
+					root: scanRoot,
+					roots: scopes.roots.join(",").slice(0, 300),
+				},
+			});
 		}
 	}
 	// #2430: the observational net. A call the seam could NOT classify, whose

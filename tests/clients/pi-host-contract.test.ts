@@ -884,19 +884,31 @@ describe("#1655 review F2 — bookkeeping must not discard a block verdict", () 
 });
 
 describe("#1655 review F3 — the bash-side path source, pinned by use", () => {
-	/** Text of every `event.toolName === "bash"` block in a source file. */
+	/**
+	 * The heads of the blocks that hold the bash command string. #4732: the
+	 * recovery block also serves other captured tools, so its head names the
+	 * command variable rather than the tool; its command is still bash's.
+	 */
+	const BASH_BLOCK_HEADS = [
+		'event.toolName === "bash"',
+		"if (bashCommand !== undefined || opaqueNonBash)",
+	];
+
+	/** Text of every bash block (`BASH_BLOCK_HEADS`) in a source file. */
 	function bashBlocks(source: string): string[] {
 		const blocks: string[] = [];
-		let from = 0;
-		for (;;) {
-			const hit = source.indexOf('event.toolName === "bash"', from);
-			if (hit === -1) break;
-			from = hit + 1;
-			const open = source.indexOf("{", source.indexOf(")", hit));
-			if (open === -1) continue;
-			const close = matchingCloseIndex(source, open, "{", "}");
-			const index = close === -1 ? source.length : close;
-			blocks.push(source.slice(open, index + 1));
+		for (const head of BASH_BLOCK_HEADS) {
+			let from = 0;
+			for (;;) {
+				const hit = source.indexOf(head, from);
+				if (hit === -1) break;
+				from = hit + 1;
+				const open = source.indexOf("{", source.indexOf(")", hit));
+				if (open === -1) continue;
+				const close = matchingCloseIndex(source, open, "{", "}");
+				const index = close === -1 ? source.length : close;
+				blocks.push(source.slice(open, index + 1));
+			}
 		}
 		return blocks;
 	}

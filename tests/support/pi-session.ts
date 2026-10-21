@@ -128,6 +128,7 @@ import type {
 	ExtensionUIContext,
 	ModelRuntime,
 	SessionManager,
+	ToolDefinition,
 	createAgentSessionFromServices,
 	createAgentSessionServices,
 } from "@earendil-works/pi-coding-agent";
@@ -655,6 +656,14 @@ export interface PiSessionOptions {
 	 * no pi-lens module.
 	 */
 	captureUi?: boolean;
+	/**
+	 * Tools another extension (or an SDK host) registers beside the loaded
+	 * copy's, handed to pi's own `customTools` option. pi runs them through its
+	 * tool loop and fires the loaded copy's `tool_call`/`tool_result` hooks for
+	 * them like any other tool, so a case can drive a tool pi-lens has never
+	 * met (#4732). Every session of the handle (resume, restart) keeps them.
+	 */
+	customTools?: readonly ToolDefinition[];
 }
 
 export interface PiSession {
@@ -807,6 +816,8 @@ interface SessionArgs {
 	readonly flags: ReadonlyMap<string, boolean | string>;
 	/** Present only when the case asked for a recording UI context. */
 	readonly ui?: UiRecorder;
+	/** {@link PiSessionOptions.customTools}. */
+	readonly customTools?: readonly ToolDefinition[];
 }
 
 /** One pi session before its extensions are bound, with its provider recorder. */
@@ -861,6 +872,7 @@ async function createSession(
 		sessionManager: options.sessionManager,
 		model: model as never,
 		sessionStartEvent: options.sessionStartEvent,
+		...(args.customTools ? { customTools: [...args.customTools] } : {}),
 	});
 	return { session: result.session, services, result, requests, script };
 }
@@ -1135,6 +1147,7 @@ export async function startPiSession(
 		root: options.root,
 		flags: flagMap(DEFAULT_FLAGS, options.flags),
 		...(options.captureUi ? { ui: createUiRecorder() } : {}),
+		...(options.customTools ? { customTools: options.customTools } : {}),
 	};
 	return bindSession(
 		args,

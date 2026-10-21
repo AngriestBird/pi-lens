@@ -474,6 +474,22 @@ export function hasPendingObservation(toolCallId: string | undefined): boolean {
 	return toolCallId !== undefined && state().pending.has(toolCallId);
 }
 
+/**
+ * #4732: the paths this session's armed observation of a call watches (the
+ * target it named, or a directory target's entries). The opaque diff of the
+ * same call leaves them to the settle, which answers for them with the tool's
+ * own attribution; dispatching them from the diff as well recorded the bytes
+ * twice and taught the net nothing. Empty when nothing is armed.
+ */
+export function pendingObservationPaths(
+	toolCallId: string | undefined,
+	sessionGeneration: number,
+): readonly string[] {
+	if (toolCallId === undefined) return [];
+	const pending = state().pending.get(toolCallId);
+	return pending?.sessionGeneration === sessionGeneration ? pending.paths : [];
+}
+
 /** The net's state with `turnIndex`'s spend in the budget slot. */
 function budgetFor(
 	turnIndex: number,

@@ -2151,3 +2151,55 @@ describe("#3763 a dead handler's mutation receipt stays out of session 2's turn"
 		});
 	});
 });
+
+// #4732: an unknown tool is also diffed as an opaque call. Recurrence
+// prevented: the diff dispatched the observed path as an unauthored replay
+// first, and that replay (it carries the call's id) settled the call's
+// observation under the name `write`, so the net never learned the tool and
+// the change log named the wrong tool. The named path is the settle's; the
+// diff answers for every OTHER file the call wrote.
+describe("#4732 an observed tool's opaque diff", () => {
+	it("leaves the named path to the settle and dispatches the rest once", async () => {
+		const env = setupTestEnvironment("pi-lens-4732-observed-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const filePath = path.join(env.tmpDir, "observed.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+			const event = patchEvent(filePath, "call-4732-observed");
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				),
+			);
+			fs.writeFileSync(
+				filePath,
+				["const a = 1;", "const b = 222;", "const c = 3;", ""].join("\n"),
+			);
+			const sidePath = path.join(env.tmpDir, "side.ts");
+			fs.writeFileSync(sidePath, "export const side = 1;\n");
+			await handleToolResult(toolResultDeps({ event, runtime, cacheManager }));
+
+			const sources = readChangesSince(env.tmpDir, 0).map((entry) => [
+				path.basename(entry.filePath),
+				entry.source,
+			]);
+			expect(sources.sort()).toEqual([
+				["observed.ts", "agent-tool:patch_file"],
+				["side.ts", "opaque-script"],
+			]);
+			// The settle, not the replay, answered: the net learned the tool.
+			expect(
+				classifyMutatingTool(patchEvent(filePath, "call-4732-next")),
+			).toMatchObject({
+				toolName: "patch_file",
+				provenance: "learned",
+			});
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+});

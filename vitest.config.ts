@@ -576,6 +576,10 @@ export const wallClockBudgetInclude = [
 	// own environment), so it runs in the quiet serialized phase (flake-shape
 	// admission).
 	"tests/clients/npx-child-env-isolation.test.ts",
+	// #4732: the per-call cost under test is the real `git status` children a
+	// captured tool call spawns, counted at the spawn boundary (flake-shape
+	// admission).
+	"tests/clients/opaque-any-tool-4732.test.ts",
 	// #2886 round 2: the /lens-perf occupancy row keeps its real-clock
 	// sampler assertion (a yield count is O(input) and cannot see per-chunk
 	// block growth), so the file runs here, fully serialized (flake-shape
@@ -656,6 +660,9 @@ export const wallClockBudgetInclude = [
 	// tool_call/tool_result seams that key the opaque prescan (flake-shape
 	// admission); the git children ride along in the serialized lane.
 	"tests/index-4504-opaque-prescan-root-witness.test.ts",
+	// #4732: the same real-checkout recovery, for a tool that is not bash,
+	// through a real pi session; the git children ride in the serialized lane.
+	"tests/index-4732-opaque-any-tool-witness.test.ts",
 	"tests/mcp/session-end.smoke.test.ts",
 	// published-manifest guard runs the real `npm pack` (flake-shape admission).
 	"tests/packaging-pack-manifest.test.ts",

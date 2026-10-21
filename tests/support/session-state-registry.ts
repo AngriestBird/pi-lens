@@ -1809,7 +1809,10 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// in the entry above and cleared by `resetOpaqueMutationState`.
 	// #4612 r4: 5 -> 6, `pendingHeadDiscards`, the discard paths a joined HEAD
 	// look owes, in the entry above and cleared by the same reset.
-	"opaque-mutation-scan.ts": 6,
+	// #4732: 6 -> 7, `PI_BUILTIN_TOOL_WRITES`, the frozen table of what each of
+	// pi's built-in tools can write — an import-time constant with no session
+	// identity, so it needs no reset (SWEEP_HEURISTIC_LIMITS item 5).
+	"opaque-mutation-scan.ts": 7,
 	// #1602 added `globalBinDirCache` (1 → 2), cleared by the same
 	// `_resetPackageManagerCache` the registry entry above names.
 	"package-manager.ts": 2,

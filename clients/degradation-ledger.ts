@@ -1134,7 +1134,8 @@ export type DegradationKind =
 	/** An observed directory mutation exceeded the same-turn analysis fan-out. */
 	| "observed-mutation-dispatch-cap"
 	/**
-	 * #4137: a pending bash baseline was dropped before its `tool_result` took
+	 * #4137: a pending opaque baseline (a bash call's, or since #4732 any other
+	 * captured tool's) was dropped before its `tool_result` took
 	 * it, so that call could not prove it authored its own writes and withheld
 	 * their blockers. Subject `overwrite`: a baseline with the same key was
 	 * replaced (a host with no distinct tool-call ids, or a reused id). Subject
@@ -1144,6 +1145,14 @@ export type DegradationKind =
 	 * retired; a result that still arrives loses its authorship. Counted.
 	 */
 	| "opaque-baseline-lost"
+	/**
+	 * #4732: a tool other than bash was not diffed, or its diff could not
+	 * answer, so the files it wrote were not observed. Subject
+	 * `no-tool-call-id`: the host gave the call no id (a shared slot would take
+	 * a bash call's baseline). Any other subject is the recovery's unknown
+	 * verdict. Once per subject per session.
+	 */
+	| "opaque-capture-refused"
 	/** Opaque mutation was analyzed without granting autonomous writer rights. */
 	| "opaque-mutation-ownership-boundary"
 	/**

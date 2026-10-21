@@ -582,6 +582,14 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"real git children emit stderr bytes whose metrics classification cannot be observed in-process",
 	},
+	// 2026-10-22 (#4732): the cost under test is how many real `git status`
+	// children each tool call spawns; a stubbed git answers the count it is
+	// told.
+	"real-process-spawn:clients/opaque-any-tool-4732.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the subject is the real git status children a captured tool call spawns, counted at the spawn boundary; a stubbed git answers only the count it was given",
+	},
 	"real-process-spawn:clients/project-data-dir-slug.test.ts": {
 		detector: "real-process-spawn",
 		reason:
@@ -666,6 +674,13 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		detector: "real-process-spawn",
 		reason:
 			"a linked worktree exists only when real git creates one, and the opaque prescan under test recovers through git's own status; a stub proves only that the stub answers",
+	},
+	// 2026-10-22 (#4732): a tool another extension registers writes into a real
+	// checkout through pi's own tool loop, and git's own status is the detector.
+	"real-process-spawn:index-4732-opaque-any-tool-witness.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the subject is what a real non-bash tool writes into a real git checkout, detected by git's own status; a stubbed git answers only what it was told",
 	},
 	// 2026-09-03: the published-manifest guard must run the real `npm pack`
 	// (prepack/postpack are npm lifecycle hooks); header on the file states why.
