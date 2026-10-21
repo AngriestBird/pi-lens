@@ -1166,17 +1166,20 @@ function getDeltaFileGroup(
 	cwd: string,
 	filePath: string,
 ): DeltaFileGroup {
-	const rel = path.relative(cwd, filePath);
-	let group = groups.get(rel);
+	// Producers arrive on either path axis (#4689 review r2 B): actionable
+	// rows carry the dispatch identity, quality rows the session spelling.
+	// Key by identity so one file is one group, and render on one axis.
+	const key = normalizeMapKey(filePath);
+	let group = groups.get(key);
 	if (!group) {
 		group = {
-			rel,
+			rel: toProjectRelativePath(filePath, cwd),
 			actionableLines: [],
 			qualityLines: [],
 			projectLines: [],
 			incomplete: false,
 		};
-		groups.set(rel, group);
+		groups.set(key, group);
 	}
 	return group;
 }

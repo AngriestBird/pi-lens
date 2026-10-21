@@ -342,10 +342,10 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 		reason: PRE_RULE,
 	}, // :26
 	"clients/diagnostic-dispositions.ts": {
-		silent: 5,
-		identities: "7578e0c38034b277",
+		silent: 4,
+		identities: "c22583bf9d0e2f37",
 		reason: PRE_RULE,
-	}, // :391, :421, :449, :564, :811
+	}, // :546, :574, :689, :957 (#4689 r3: the store's stat-miss arm now declares its none)
 	"clients/diagnostic-line-freshness.ts": {
 		silent: 5,
 		identities: "809dfcb662f6df93",

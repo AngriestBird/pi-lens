@@ -22,15 +22,19 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
+import { getProjectDataDir } from "../clients/file-utils.js";
 import {
 	BLOCKING_FILE,
 	CLEAN_FILE,
 	GATE_BLOCK,
 	GUARDED_FLAGS,
+	MARKED_FILE,
 	RAN_MARKER,
 	type Received,
+	activateMarkTool,
 	commitAttempt,
 	endTurn,
+	markFalsePositive,
 	readTarget,
 	step,
 	toolResults,
@@ -329,4 +333,114 @@ describe("#4689: lens_diagnostics names a file relative to the session root unde
 			}
 		});
 	}
+});
+
+describe("#4689: a mark silences its finding under any spelling of the session root", () => {
+	// RECURRENCE GUARDED: #4689 review r2 A. The mark tool wrote the
+	// disposition store under the data dir of the session's spelling while
+	// dispatch read it under the data dir of the root's path identity, so in
+	// a session rooted at a link the model marked a finding false-positive
+	// and the next write of the same file reported it as STOP again.
+	for (const [name, rooted] of [
+		["a session rooted at a link to the repo", "alias"],
+		["the real root (control)", "repo"],
+	] as const) {
+		it(`${name}: write is STOP, mark, the rewrite reads clean`, async (ctx) => {
+			const fx = family(`mark-${rooted}`);
+			if (fx.skipReason) return ctx.skip(fx.skipReason);
+			const cwd = rooted === "alias" ? fx.aliasRoot : fx.repo;
+			const target = path.join(cwd, "src", "target.ts");
+			const handle = await startPiSession({
+				root: fixture.root,
+				cwd,
+				flags: new Map(GUARDED_FLAGS),
+				responses: [
+					step(activateMarkTool(), "activating"),
+					step(writeTarget(target, MARKED_FILE), "writing"),
+					step(markFalsePositive(target), "marking"),
+					step(writeTarget(target, `${MARKED_FILE}\n`), "rewriting"),
+					endTurn(),
+				],
+			});
+			try {
+				await handle.prompt("go");
+				const last = handle.requests.at(-1) ?? [];
+				const [first, second] = toolResults(last, "write");
+				const [mark] = toolResults(last, "lens_diagnostic_mark");
+				expect(first?.text ?? "").toContain("STOP");
+				expect(mark?.text ?? "").toContain("marked false-positive");
+				expect(second?.text ?? "").not.toContain("STOP");
+				expect(second?.text ?? "").toContain("clean");
+			} finally {
+				await handle.dispose();
+			}
+		});
+	}
+
+	it("a session rooted at a link adopts a mark stored where 4.4.4 put it", async (ctx) => {
+		// 4.4.4 located the store by the session's spelling of the root. The
+		// next session's dispatch holds only the identity, so session_start
+		// adopts the spelled store before the first write is analysed.
+		const fx = family("mark-444");
+		if (fx.skipReason) return ctx.skip(fx.skipReason);
+		const cwd = fx.aliasRoot;
+		const target = path.join(cwd, "src", "target.ts");
+		const marking = await startPiSession({
+			root: fixture.root,
+			cwd,
+			flags: new Map(GUARDED_FLAGS),
+			responses: [
+				step(activateMarkTool(), "activating"),
+				step(writeTarget(target, MARKED_FILE), "writing"),
+				step(markFalsePositive(target), "marking"),
+				endTurn(),
+			],
+		});
+		try {
+			await marking.prompt("go");
+		} finally {
+			await marking.dispose();
+		}
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(fixture.root, "data");
+		try {
+			const store = (root: string) =>
+				path.join(
+					getProjectDataDir(root),
+					"cache",
+					"diagnostic-dispositions.json",
+				);
+			const identityStore = store(fs.realpathSync(cwd));
+			const spelledStore = store(cwd);
+			// Premise: the two forms of the root name two data dirs.
+			expect(spelledStore).not.toBe(identityStore);
+			if (fs.existsSync(identityStore)) {
+				fs.mkdirSync(path.dirname(spelledStore), { recursive: true });
+				fs.renameSync(identityStore, spelledStore);
+			}
+			expect(fs.existsSync(identityStore)).toBe(false);
+			expect(fs.existsSync(spelledStore)).toBe(true);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+		}
+		const rewriting = await startPiSession({
+			root: fixture.root,
+			cwd,
+			flags: new Map(GUARDED_FLAGS),
+			responses: [
+				step(writeTarget(target, `${MARKED_FILE}\n`), "rewriting"),
+				endTurn(),
+			],
+		});
+		try {
+			await rewriting.prompt("go");
+			const last = rewriting.requests.at(-1) ?? [];
+			const [rewrite] = toolResults(last, "write");
+			expect(rewrite?.text ?? "").not.toContain("STOP");
+			expect(rewrite?.text ?? "").toContain("clean");
+		} finally {
+			await rewriting.dispose();
+		}
+	});
 });

@@ -13,7 +13,10 @@ import {
 	recordDegradationOnce,
 	resetDegradationLedger,
 } from "./degradation-ledger.js";
-import { resetDeferredDispositions } from "./diagnostic-dispositions.js";
+import {
+	adoptSpelledDispositionStore,
+	resetDeferredDispositions,
+} from "./diagnostic-dispositions.js";
 import { getDiagnosticTracker } from "./diagnostic-tracker.js";
 import { resetPsScriptAnalyzerAvailability } from "./dispatch/runners/psscriptanalyzer.js";
 import { resetInstallRetryLatches } from "./dispatch/runners/utils/availability-policy.js";
@@ -2739,6 +2742,9 @@ export async function handleSessionStart(
 	// project data roots and machine-global registry root once per session start;
 	// this is fire-and-forget and bounded so it never delays startup.
 	const projectDataDir = getProjectDataDir(cwd);
+	// #4689 review r2 A: before the first dispatch, which holds only the root's
+	// identity and so cannot find marks stored under its link spelling.
+	adoptSpelledDispositionStore(cwd);
 	// #2874: `getProjectDataDir` queues one migration per old-slug directory
 	// it renames (or finds coexisting with its hashed successor). Drain here
 	// so each migration emits one bounded record per session at most.

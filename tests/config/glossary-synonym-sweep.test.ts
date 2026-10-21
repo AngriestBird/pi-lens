@@ -926,7 +926,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// `path.dirname(target)` instead of passing `projectRoot` through — one
 		// more `path` use, same sense (a path operation).
 		"clients/dependency-checker.ts": 30,
-		"clients/diagnostic-dispositions.ts": 10,
+		// 10 -> 13 (#4689 r3): the store is located by the root's identity
+		// (`path.resolve`), and adopting a store an earlier version wrote under
+		// the root's spelling creates its directory (`path.dirname`) and
+		// commits through the durable store's `path:` member. Same sense.
+		"clients/diagnostic-dispositions.ts": 13,
 		"clients/diagnostic-logger.ts": 3,
 		"clients/diagnostics-publish.ts": 6,
 		"clients/dispatch/dispatcher.ts": 6,
@@ -1273,7 +1277,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// `resolveHostToolPath`, dropping three `path.*` calls.
 		// 27 -> 26 (#4689 r2): mode=all renders a row's file through
 		// `toProjectRelativePath`, not a `path.relative` of two axes.
-		"tools/lens-diagnostics.ts": 26,
+		// 26 -> 25 (#4689 r3): mode=delta's group renders through
+		// `toProjectRelativePath` too.
+		"tools/lens-diagnostics.ts": 25,
 		// 10 -> 8 (#4577 M2): the scalar and batch `path`/`paths` arguments fold
 		// onto `resolveHostToolPath`, dropping one `path.resolve` each.
 		"tools/lsp-diagnostics.ts": 8,
