@@ -174,6 +174,9 @@ export const TREE_SCANNING_GOVERNANCE_TESTS = [
 	// reads and maps each to a matrix route; a new route must arm it. The whole
 	// file, matrix included, measured ~28 s alone (2026-10-14).
 	"tests/tools/diagnostics-route-switch-matrix.test.ts",
+	// #4689: walks clients/ for raw realpath calls and raw path.resolve keys
+	// outside the path identity seam.
+	"tests/config/path-identity-sweep.test.ts",
 	// #4590: the one scanner that walks BOTH trees (clients/, scripts/ AND
 	// tests/), so it is registered in both lists: a production change arms it
 	// here, a tests/ change through TEST_TREE_GOVERNANCE_TESTS below.

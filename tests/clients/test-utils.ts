@@ -375,6 +375,93 @@ export function createCaseAliasFixture(
 		: { rawMisCased, onDisk };
 }
 
+/** The spellings {@link createPathIdentityFixture} plants, all absolute. */
+export interface PathIdentityFixture {
+	/** The real repository root. */
+	repo: string;
+	/** `repo-alias` -> `repo`: a link-spelled session root (case h). */
+	aliasRoot: string;
+	/** `repo/src/real.ts`, a regular file. */
+	realFile: string;
+	/** `repo/src/link.ts` -> `real.ts`: a file link in the root (case b). */
+	fileLink: string;
+	/** `repo/CLAUDE.md`, the target of {@link agentsLink}. */
+	claudeMd: string;
+	/** `repo/AGENTS.md` -> `CLAUDE.md`: the everyday markdown link (case a). */
+	agentsLink: string;
+	/** `repo/shared/util.ts`, reached through {@link dirLinkFile}. */
+	sharedFile: string;
+	/** `repo/src/linked/util.ts`, where `src/linked` -> `../shared` (case c). */
+	dirLinkFile: string;
+	/** `outside/ext.ts`, a file outside the repository. */
+	outsideFile: string;
+	/** `repo/src/out-link.ts` -> `../../outside/ext.ts`: a link out of the root (case d1). */
+	outLink: string;
+	/** Set when this host cannot create symlinks; the cell must skip visibly. */
+	skipReason?: string;
+}
+
+/**
+ * The #4689 symlinked-fixture family: one real repository and every link
+ * spelling pi-lens must key by path identity, the kernel-real path. Each
+ * shape names the defect its cells guard: a file link and a directory link
+ * split one file into two records (shape 1, divergent path keys), a link out
+ * of the root crosses the analysis-root class, and an alias root spells every
+ * in-root file differently from its identity. `baseDir` should be a
+ * `setupTestEnvironment` root so the shared hygiene owner removes it. The
+ * other-worktree and unrelated-repository members of the #4689 family join
+ * with the slices that consume them.
+ */
+export function createPathIdentityFixture(
+	baseDir: string,
+): PathIdentityFixture {
+	const repo = path.join(baseDir, "repo");
+	const outside = path.join(baseDir, "outside");
+	fs.mkdirSync(path.join(repo, "src"), { recursive: true });
+	fs.mkdirSync(path.join(repo, "shared"), { recursive: true });
+	fs.mkdirSync(outside, { recursive: true });
+	const realFile = path.join(repo, "src", "real.ts");
+	const claudeMd = path.join(repo, "CLAUDE.md");
+	const sharedFile = path.join(repo, "shared", "util.ts");
+	const outsideFile = path.join(outside, "ext.ts");
+	fs.writeFileSync(realFile, "export const real = 1;\n");
+	fs.writeFileSync(claudeMd, "# Agents\n");
+	fs.writeFileSync(sharedFile, "export const util = 1;\n");
+	fs.writeFileSync(outsideFile, "export const ext = 1;\n");
+	const fixture: PathIdentityFixture = {
+		repo,
+		aliasRoot: path.join(baseDir, "repo-alias"),
+		realFile,
+		fileLink: path.join(repo, "src", "link.ts"),
+		claudeMd,
+		agentsLink: path.join(repo, "AGENTS.md"),
+		sharedFile,
+		dirLinkFile: path.join(repo, "src", "linked", "util.ts"),
+		outsideFile,
+		outLink: path.join(repo, "src", "out-link.ts"),
+	};
+	try {
+		fs.symlinkSync("real.ts", fixture.fileLink, "file");
+		fs.symlinkSync("CLAUDE.md", fixture.agentsLink, "file");
+		fs.symlinkSync(
+			path.join("..", "shared"),
+			path.join(repo, "src", "linked"),
+			"dir",
+		);
+		fs.symlinkSync(
+			path.join("..", "..", "outside", "ext.ts"),
+			fixture.outLink,
+			"file",
+		);
+		fs.symlinkSync("repo", fixture.aliasRoot, "dir");
+	} catch (err) {
+		fixture.skipReason = `cannot create symlinks here: ${
+			err instanceof Error ? err.message : String(err)
+		}`;
+	}
+	return fixture;
+}
+
 export function createTempFile(
 	baseDir: string,
 	relativePath: string,

@@ -178,6 +178,10 @@ const DECLARED_EXCEPTIONS: Readonly<Record<string, string>> = {
 		"path behavior cases, not a production population sweep",
 	"tests/clients/pi-host-contract.test.ts":
 		"host contract cases, not a production population sweep",
+	"tests/clients/project-data-dir-slug.test.ts":
+		"data-dir naming and adoption cases (#4689 r5): it lists one fixture " +
+		"data dir and asserts a migration drain is empty, not a production " +
+		"population sweep",
 	"tests/clients/project-diagnostics/scanner.test.ts":
 		"scanner behavior cases, not a production population sweep",
 	"tests/clients/project-snapshot.test.ts":

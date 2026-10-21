@@ -2765,7 +2765,11 @@ export async function handleSessionStart(
 						? "using hashed directory because legacy and hashed directories both exist"
 						: migration.outcome === "rename-failed"
 							? "using legacy directory after hashed-directory rename failure"
-							: "using resolved directory after realpath fallback",
+							: migration.outcome === "adopted"
+								? "copied the data an earlier version stored under the root's link spelling into the real path's directory; the old directory is kept"
+								: migration.outcome === "adopt-failed"
+									? "some data an earlier version stored under the root's link spelling could not be copied and stays in the old directory"
+									: "using resolved directory after realpath fallback",
 		});
 	}
 	// #1609 review F1: sweepOwnStagingFiles does not recurse, so the installer's
