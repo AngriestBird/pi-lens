@@ -161,7 +161,11 @@ function logCollapseUsage(
  */
 async function inProcessLatencyRows(): Promise<Array<Record<string, unknown>>> {
 	await flushAllNdjsonWriters();
-	return readNdjsonRows(getLatencyLogPath()).rows;
+	const read = readNdjsonRows(getLatencyLogPath());
+	// Every claim below counts rows in this sink, so a line the reader dropped
+	// would make a "no row was written" assertion pass for the wrong reason.
+	expect(read.skipped).toBe(0);
+	return read.rows;
 }
 
 function usageRows(
@@ -447,9 +451,15 @@ describe("#4687 unexplained-miss degradation row", () => {
 			logCollapseUsage(sessionId, { cacheRead: 8_000, input: 100 }, 0);
 
 			// The FIRST unexplained miss counts silently: one provider-side gap is
-			// noise, not a pattern.
+			// noise, not a pattern, and the ledger must not render a warning for it
+			// (#4718 review F2).
 			logCollapseUsage(sessionId, { cacheRead: 0, input: 9_000 }, 1);
 			expect(await unexplainedLedgerRows()).toHaveLength(0);
+			expect(
+				getDegradationSummary().some(
+					(entry) => entry.kind === "prompt-cache-miss-unexplained",
+				),
+			).toBe(false);
 
 			// The SECOND admits the row.
 			logCollapseUsage(sessionId, { cacheRead: 0, input: 9_000 }, 2);
@@ -461,13 +471,14 @@ describe("#4687 unexplained-miss degradation row", () => {
 				count: 1,
 			});
 
-			// The THIRD only raises the ledger count: no second row.
+			// The THIRD only raises the ledger count: no second row, and the count
+			// starts at the row's own admission (#4718 review F2).
 			logCollapseUsage(sessionId, { cacheRead: 0, input: 9_000 }, 3);
 			expect(await unexplainedLedgerRows()).toHaveLength(1);
 			const group = getDegradationSummary().find(
 				(entry) => entry.kind === "prompt-cache-miss-unexplained",
 			);
-			expect(group?.count).toBe(3);
+			expect(group?.count).toBe(2);
 		} finally {
 			if (previousTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
 			else process.env.PI_LENS_TEST_MODE = previousTestMode;

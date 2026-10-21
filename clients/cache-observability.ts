@@ -274,9 +274,12 @@ interface SessionAttributionState {
 	requestEvidenceIncompleteSinceLastUsage: boolean;
 	/**
 	 * The last HEALTHY `cacheRead`, the baseline every shortfall is measured
-	 * against (#4687). A miss does not replace it, so a second consecutive
-	 * rewrite is measured against the last read that was whole rather than
-	 * against the previous miss's remainder.
+	 * against (#4687). A miss measured against it does not replace it, so a
+	 * second consecutive rewrite is measured against the last read that was
+	 * whole rather than against the previous miss's remainder. A DURABLE shrink
+	 * does replace it: a low read the provider did not re-write is a smaller
+	 * prefix served from cache, and keeping the old number made every following
+	 * turn a fresh false miss (#4718 review F1).
 	 */
 	lastHealthyCacheRead?: number;
 	/** Unbounded hash of the ordered system-message set pi-lens last observed. */
@@ -767,16 +770,107 @@ function classifyCacheMiss(args: {
 }
 
 /**
+ * What one usage record does to the session's prompt-cache baseline. Logged
+ * beside the usage numbers on `cache_usage`, so a reader can tell why a later
+ * shortfall was or was not measured against this read.
+ *
+ * `advanced` — a healthy record IS the prefix this session last read whole;
+ * `shrunk` — a low read whose disappeared tokens were not re-written, i.e. a
+ * durable smaller prefix (compaction, a trimmed system prompt); `held` — a miss
+ * that kept the last healthy read (a rewrite, a zero read, or no write
+ * evidence); `switched` — a model or provider change cleared it; `cleared` —
+ * the record carried no readable `cacheRead`.
+ */
+type CacheBaselineDecision =
+	| "advanced"
+	| "shrunk"
+	| "held"
+	| "switched"
+	| "cleared";
+
+/**
+ * Whether the provider says it RE-WROTE the prefix that this request stopped
+ * reading. `cacheWrite` is the provider's own report of the tokens it wrote
+ * into its cache, so a write at least as large as the shortfall is a rewrite:
+ * the prefix was discarded and built again.
+ *
+ * A write far below the shortfall (or none) means the request carried a
+ * SMALLER prefix, and a proportional read is not a shortfall at all (#4718
+ * review F1: compaction, a model or provider switch). `undefined` means the
+ * provider reported nothing readable, so the record proves neither shape and
+ * the caller keeps the last healthy read.
+ */
+function prefixRewritten(args: {
+	cacheRead: number | undefined;
+	cacheWrite: number | undefined;
+	priorCacheRead: number | undefined;
+}): boolean | undefined {
+	const prior = readableTokenCount(args.priorCacheRead);
+	const cacheWrite = readableTokenCount(args.cacheWrite);
+	if (
+		prior === undefined ||
+		cacheWrite === undefined ||
+		args.cacheRead === undefined
+	) {
+		return undefined;
+	}
+	const shortfall = prior - args.cacheRead;
+	if (shortfall <= 0) return undefined;
+	return cacheWrite >= shortfall;
+}
+
+/**
+ * Decide the baseline the NEXT turn is measured against (#4687 item 3, #4718
+ * review F1). A baseline that only ever advanced treated a durable prefix
+ * shrink as a permanent miss: the shrink turn's lower read was never written
+ * again, so `cacheWrite` stays near zero and every later turn re-reported the
+ * same shortfall against a prefix that no longer exists.
+ */
+function nextCacheBaseline(args: {
+	cacheRead: number | undefined;
+	cacheWrite: number | undefined;
+	priorCacheRead: number | undefined;
+	kind: CacheMissKind | undefined;
+	modelProviderChanged: boolean;
+}): { baseline: number | undefined; decision: CacheBaselineDecision } {
+	// A new provider or model tokenizes and caches its own prefix, so the read
+	// of the previous one says nothing about it: start a fresh baseline rather
+	// than measuring the new provider against the old provider's number.
+	if (args.modelProviderChanged) {
+		return { baseline: undefined, decision: "switched" };
+	}
+	if (args.cacheRead === undefined) {
+		return { baseline: undefined, decision: "cleared" };
+	}
+	// No kind means no shortfall: a healthy read becomes the new baseline.
+	if (args.kind === undefined) {
+		return { baseline: args.cacheRead, decision: "advanced" };
+	}
+	if (args.kind === "low-read" && prefixRewritten(args) === false) {
+		return { baseline: args.cacheRead, decision: "shrunk" };
+	}
+	// A re-written prefix, a zero read, or a provider that reports no writes:
+	// keep the last healthy read so a second consecutive rewrite is still a miss.
+	// A write at or above the shortfall rebuilt at least what disappeared, so the
+	// new prefix is at least the old baseline and holding it cannot manufacture a
+	// shortfall.
+	return { baseline: args.priorCacheRead, decision: "held" };
+}
+
+/**
  * Record one unexplained miss (#4687 item 5).
  *
  * The FIRST unknown miss in a session counts silently: one provider-side gap
- * with no local cause is ordinary noise. From the SECOND on the session has a
- * pattern, so the ledger carries one bounded `prompt-cache-miss-unexplained`
- * row and every later miss only raises the count. The row is written through
- * `recordDegradationOnce` exactly once (`tallies` is the session's own
- * counter), so the split is: the first miss records a plain count, the second
- * is the admitted one that also writes the durable row, and every later miss
- * counts. The ledger count therefore equals the number of unknown misses.
+ * with no local cause is ordinary noise, so it only raises the session's own
+ * counter and the ledger hears nothing. That silence is what the doc says and
+ * what a reader of `/lens-perf` or `pilens_health` sees: no `⚠` line before the
+ * second miss (#4718 review F2, where the first miss already recorded a ledger
+ * entry). From the SECOND on the session has a pattern, so the ledger carries
+ * one bounded `prompt-cache-miss-unexplained` row and every later miss only
+ * raises the count. The row is written through `recordDegradationOnce` exactly
+ * once, so the ledger count starts at the row's own admission: 1 for the
+ * second miss, 2 for the third, and so on. `metadata.misses` always carries the
+ * session's real total.
  */
 function recordUnexplainedMiss(
 	state: SessionAttributionState,
@@ -784,6 +878,7 @@ function recordUnexplainedMiss(
 	unknownReason: CacheMissUnknownReason | undefined,
 ): void {
 	state.unexplainedMisses += 1;
+	if (state.unexplainedMisses === 1) return;
 	const reason = `prompt-cache miss has no local cause (${unknownReason ?? "unspecified"})`;
 	const metadata = {
 		unknownReason: unknownReason ?? "unspecified",
@@ -1396,6 +1491,10 @@ export function logCacheUsage(
 			state.injectedCharsSinceLastUsage +
 				state.newTranscriptCharsSinceLastUsage,
 		);
+		// One derivation read by both the classifier and the unexplained-miss
+		// counter (#4718 review F5).
+		const stableSessionIdentity =
+			sessionKey(context?.sessionId) !== NO_SESSION_KEY;
 		const verdict = classifyCacheMiss({
 			cacheRead,
 			// Missing/malformed input cannot prove fresh-input pressure. The explicit
@@ -1411,7 +1510,7 @@ export function logCacheUsage(
 			prefixStable: state.prefixStableSinceLastUsage,
 			sequenceHashTruncated: state.sequenceHashTruncatedSinceLastUsage,
 			requestEvidenceIncomplete: state.requestEvidenceIncompleteSinceLastUsage,
-			stableSessionIdentity: sessionKey(context?.sessionId) !== NO_SESSION_KEY,
+			stableSessionIdentity,
 			modelProviderChanged,
 			modelProviderEvidenceAvailable,
 			providerUsageMalformed,
@@ -1433,7 +1532,13 @@ export function logCacheUsage(
 			verdict,
 			unknownReason,
 		});
-		if (verdict?.cause === "unknown") {
+		// #4718 review F5: without a stable session id every miss lands in one
+		// shared `<no-session>` bucket, so two different sessions would combine
+		// toward the second-miss row and the row would claim "no local cause" for
+		// what is really a telemetry gap. The classifier already fails such a
+		// record closed (`request-correlation-unavailable`); the ledger simply
+		// does not count it.
+		if (verdict?.cause === "unknown" && stableSessionIdentity) {
 			recordUnexplainedMiss(
 				state,
 				sessionKey(context?.sessionId),
@@ -1458,13 +1563,21 @@ export function logCacheUsage(
 		state.lastUsageAtMs = nowMs;
 		// #1071 review round 1, F4: a record whose `cacheRead` is absent or
 		// non-finite carries no baseline, so clear the stored one rather than
-		// keeping it. #4687 item 3: a MISS does not replace the baseline either,
-		// so a second consecutive rewrite is measured against the last healthy
-		// read instead of against the previous miss's remainder. A healthy record
-		// (including the first zero-read of a session with no baseline) becomes
-		// the new baseline.
-		if (cacheRead === undefined) state.lastHealthyCacheRead = undefined;
-		else if (verdict === null) state.lastHealthyCacheRead = cacheRead;
+		// keeping it. #4687 item 3: a MISS does not replace the baseline, so a
+		// second consecutive rewrite is measured against the last healthy read
+		// instead of against the previous miss's remainder. #4718 review F1: a
+		// durable SHRINK does replace it, or every later turn re-reports a
+		// shortfall against a prefix the provider no longer holds; and a model or
+		// provider switch clears it, because the new provider's prefix is its own.
+		// `nextCacheBaseline` owns that rule and names the decision it took.
+		const cacheBaseline = nextCacheBaseline({
+			cacheRead,
+			cacheWrite: cacheWriteEvidence.value,
+			priorCacheRead: priorCacheReadValue,
+			kind: verdict?.kind,
+			modelProviderChanged,
+		});
+		state.lastHealthyCacheRead = cacheBaseline.baseline;
 		state.lastProviderIdentityHash = currentProvider.hash;
 		state.lastModelIdentityHash = currentModel.hash;
 		state.prefixBrokeSinceLastUsage = false;
@@ -1501,6 +1614,10 @@ export function logCacheUsage(
 				modelIdentityTruncated: currentModel.status === "truncated",
 				cacheRead: cacheReadEvidence.value ?? null,
 				cacheWrite: cacheWriteEvidence.value ?? null,
+				// What this record did to the baseline the NEXT shortfall is measured
+				// against (#4718 review F1). `held` keeps the last healthy read;
+				// `shrunk` replaces it with this record's smaller read.
+				cacheBaseline: cacheBaseline.decision,
 				input: inputEvidence.value ?? null,
 				output: outputEvidence.value ?? null,
 				// `Usage.cost` is a breakdown object; the total is the headline number.

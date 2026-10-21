@@ -19,7 +19,11 @@ import {
 	resetCacheFindingIdentitiesSession,
 	resetCachePrefixObservation,
 } from "../../clients/cache-observability.js";
-import { resetDegradationLedger } from "../../clients/degradation-ledger.js";
+import {
+	getDegradationSummary,
+	renderDegradationLines,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
 
 function assistantMessage(overrides?: Record<string, unknown>) {
 	return {
@@ -74,6 +78,8 @@ describe("cache-observability — response-side usage (#1018)", () => {
 					modelIdentityTruncated: false,
 					cacheRead: 8000,
 					cacheWrite: 512,
+					// #4718 review F1: no prior baseline, so this read becomes it.
+					cacheBaseline: "advanced",
 					input: 1200,
 					output: 340,
 					cost: 0.037,
@@ -711,6 +717,39 @@ describe("cache-observability — miss attribution (#1071)", () => {
 		});
 	}
 
+	/**
+	 * One record that reports the provider's own cache WRITE, which is the
+	 * evidence `nextCacheBaseline` reads (#4718 review F1): a rewrite charges the
+	 * tokens it built again, a durable shrink charges almost nothing.
+	 */
+	function logWrite(
+		cacheRead: number,
+		cacheWrite: number,
+		input = 100,
+		sessionId = "attr",
+	) {
+		logCacheUsage(
+			assistantMessage({
+				usage: { input, output: 10, cacheRead, cacheWrite },
+			}),
+			undefined,
+			{ sessionId, turnIndex: 0 },
+		);
+	}
+
+	/** One record from a different provider/model, for the switch transitions. */
+	function logForeignUsage(cacheRead: number, cacheWrite: number) {
+		logCacheUsage(
+			assistantMessage({
+				provider: "openai",
+				model: "gpt-5",
+				usage: { input: 9_000, output: 10, cacheRead, cacheWrite },
+			}),
+			undefined,
+			{ sessionId: "attr", turnIndex: 0 },
+		);
+	}
+
 	function lastUsageMetadata(): Record<string, unknown> {
 		const usageEntries = latencyEntries.filter(
 			(entry) => entry.phase === "cache_usage",
@@ -1068,28 +1107,124 @@ describe("cache-observability — miss attribution (#1071)", () => {
 		// The measured sequence: a healthy 8,000, a head rewrite that reads 257,
 		// then the same 257 again. Comparing against the previous read made the
 		// second turn a cache HIT, so the session's second rewrite was invisible.
+		// The provider charges the rewrite it performed (9,732 written tokens), and
+		// that write is what tells a rewrite from a durable shrink (#4718 F1).
 		logUsage(8_000, 100);
 		observeCachePrefix([{ role: "user", content: "first" }], 0, "attr");
 		logUsage(8_000, 100);
 		observeCachePrefix([{ role: "user", content: "rewritten" }], 1, "attr");
 		vi.setSystemTime(BASE_MS + 1_000);
-		logUsage(257, 9_732);
+		logWrite(257, 9_732, 9_732);
 		expect(lastUsageMetadata()).toMatchObject({
 			cacheMissCause: "prefix-broke",
 			cacheMissKind: "low-read",
 			priorCacheRead: 8_000,
+			cacheBaseline: "held",
 		});
 
 		// No request observation between the two usage records: the prefix is not
 		// re-declared stable, and the SECOND rewrite is still a miss against the
 		// last healthy read, not a hit against the first miss's remainder.
 		vi.setSystemTime(BASE_MS + 2_000);
-		logUsage(257, 9_700);
+		logWrite(257, 9_732, 9_700);
 		expect(lastUsageMetadata()).toMatchObject({
 			cacheMissCause: "unknown",
 			cacheMissKind: "low-read",
 			priorCacheRead: 8_000,
+			cacheBaseline: "held",
 		});
+	});
+
+	// #4718 review F1: the baseline transitions, one row each. `held` keeps the
+	// last healthy read, `shrunk` replaces it, `advanced` is a healthy read.
+	it("moves the baseline to a larger read (grow)", () => {
+		logUsage(8_000, 100);
+		logUsage(9_000, 100);
+		expect(lastUsageMetadata()).toMatchObject({
+			priorCacheRead: 8_000,
+			cacheMissCause: null,
+			cacheBaseline: "advanced",
+		});
+		logUsage(9_000, 100);
+		expect(lastUsageMetadata()).toMatchObject({ priorCacheRead: 9_000 });
+	});
+
+	it("keeps the baseline across an unchanged read", () => {
+		logUsage(8_000, 100);
+		logUsage(8_000, 100);
+		expect(lastUsageMetadata()).toMatchObject({
+			priorCacheRead: 8_000,
+			cacheMissCause: null,
+			cacheBaseline: "advanced",
+		});
+		logUsage(8_000, 100);
+		expect(lastUsageMetadata()).toMatchObject({
+			priorCacheRead: 8_000,
+			cacheMissCause: null,
+		});
+	});
+
+	it("re-baselines a durable prefix shrink (compaction)", () => {
+		// A compacted session reads a 2,000-token prefix where 8,000 used to be.
+		// The provider wrote nothing back: the smaller prefix was already cached,
+		// so the dropped tokens were never in this request.
+		logUsage(8_000, 100);
+		logUsage(2_000, 100);
+		const transition = lastUsageMetadata();
+		expect(transition).toMatchObject({
+			cacheMissKind: "low-read",
+			priorCacheRead: 8_000,
+		});
+		// The NEXT turn is measured against the smaller prefix, so it is not a
+		// second false miss against a prefix that no longer exists.
+		logUsage(2_100, 100);
+		expect(lastUsageMetadata()).toMatchObject({
+			priorCacheRead: 2_000,
+			cacheMissKind: null,
+			cacheMissCause: null,
+		});
+		expect(transition.cacheBaseline).toBe("shrunk");
+	});
+
+	it("re-baselines a shrink and then tracks the regrowth", () => {
+		logUsage(8_000, 100);
+		logUsage(2_000, 100);
+		const shrunk = lastUsageMetadata();
+		logUsage(8_000, 100);
+		expect(lastUsageMetadata()).toMatchObject({
+			priorCacheRead: 2_000,
+			cacheMissCause: null,
+		});
+		logUsage(8_000, 100);
+		expect(lastUsageMetadata()).toMatchObject({
+			priorCacheRead: 8_000,
+			cacheMissCause: null,
+		});
+		expect(shrunk.cacheBaseline).toBe("shrunk");
+	});
+
+	it("clears the baseline across a model/provider switch", () => {
+		// The old provider's read says nothing about the new provider's prefix, so
+		// the switch clears the baseline instead of measuring the new provider
+		// against it for the rest of the session.
+		logUsage(8_000, 100);
+		logForeignUsage(3_000, 0);
+		const switched = lastUsageMetadata();
+		expect(switched).toMatchObject({
+			cacheMissCause: "model-provider-changed",
+			priorCacheRead: 8_000,
+		});
+		logForeignUsage(3_000, 0);
+		expect(lastUsageMetadata()).toMatchObject({
+			priorCacheRead: null,
+			cacheMissCause: null,
+		});
+		logForeignUsage(3_100, 0);
+		expect(lastUsageMetadata()).toMatchObject({
+			priorCacheRead: 3_000,
+			cacheMissCause: null,
+		});
+		expect(switched.cacheBaseline).toBe("switched");
 	});
 
 	it("reads a head whose keys moved as an unchanged prefix (#4687 item 6)", () => {
@@ -1526,6 +1661,62 @@ describe("cache-observability — miss attribution (#1071)", () => {
 				usageRecords: 1,
 			}),
 		]);
+	});
+
+	// #4718 review F2: the doc says the first unexplained miss counts silently.
+	// It did not: `recordDegradation` added the group entry on the first miss, so
+	// `/lens-perf` and `pilens_health` rendered "⚠ prompt-cache-miss-unexplained:
+	// 1" before the second-miss threshold the record exists for.
+	it("keeps the first unexplained miss out of the ledger", () => {
+		const missLines = () =>
+			renderDegradationLines().filter((line) =>
+				line.includes("prompt-cache-miss-unexplained"),
+			);
+		logUsage(8_000, 100);
+		logUsage(0, 9_000);
+		expect(missLines()).toEqual([]);
+		logUsage(0, 9_000);
+		expect(missLines()).toEqual([
+			expect.stringContaining("prompt-cache-miss-unexplained: 1"),
+		]);
+		// Later misses only raise the count the reader sees.
+		logUsage(0, 9_000);
+		expect(missLines()).toEqual([
+			expect.stringContaining("prompt-cache-miss-unexplained: 2"),
+		]);
+		const group = getDegradationSummary().find(
+			(entry) => entry.kind === "prompt-cache-miss-unexplained",
+		);
+		expect(group?.latestReasons.at(-1)?.subject).toBe("attr");
+	});
+
+	// #4718 review F5: without a stable session id every miss shares one
+	// `<no-session>` bucket, so two unrelated sessions would combine toward the
+	// second-miss row and the row would blame the provider for a telemetry gap.
+	it("does not count unexplained misses that share the no-session bucket", () => {
+		const logAnonymous = (cacheRead: number) =>
+			logCacheUsage(usageMessage(cacheRead, 100), undefined, {
+				sessionRole: "primary",
+				turnIndex: 0,
+			});
+		logAnonymous(8_000);
+		logAnonymous(0);
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheMissCause: "unknown",
+			cacheMissUnknownReason: "request-correlation-unavailable",
+		});
+		logAnonymous(0);
+		logAnonymous(0);
+		expect(
+			getDegradationSummary().some(
+				(entry) => entry.kind === "prompt-cache-miss-unexplained",
+			),
+		).toBe(false);
+		expect(
+			renderDegradationLines().filter((line) =>
+				line.includes("prompt-cache-miss-unexplained"),
+			),
+		).toEqual([]);
 	});
 
 	it("suppresses the eviction verdict when the char accumulators were capped", () => {
