@@ -1228,10 +1228,12 @@ file-scoped worklist and receives no project-wide scanner output.
   sibling worktree no longer reads a clean `git status` in the wrong checkout as
   "nothing changed". Relative operands resolve against the directory in effect
   for their own segment (`scanShellWriteScopes`). That directory moves only for
-  an admitted form: `cd DIR` or `pushd DIR` with one static plain path operand
-  (no backslash escape, and for `pushd` not empty and not starting with `+` or
-  `-`, which bash reads as a stack index or an option), or a bare `popd` of a
-  push the scan admitted, entered at list start or after `&&`, `;`, a newline
+  an admitted form: `cd DIR` or `pushd DIR` whose one operand is a plain
+  path: bash's own word after quote removal, made only of admitted characters
+  (any quoted one, an escape bash also removes, an unquoted letter, digit or
+  `_./@%:,=+-`, and a leading `~` only as `~` or `~/`), starting with a
+  letter, digit, `_`, `.`, `/` or `~`; or a bare `popd` of a push the scan
+  admitted, entered at list start or after `&&`, `;`, a newline
   or a backgrounded list, ended by `&&`, `;`, a newline or the end, and in no
   pipeline or backgrounded list. A move entered after `&&` holds only to the end
   of that `&&` chain, because it happened only if the left side succeeded. A

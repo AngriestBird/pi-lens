@@ -1374,11 +1374,135 @@ describe("scanShellWriteScopes — the command's effective directory (#2050)", (
 			row: "R49 cd +foo enters a directory named +foo",
 			command: "mkdir +foo; cd +foo; printf x > f.ts",
 			bash: "+foo/f.ts",
+			fallback: "f.ts",
 		},
 		{
 			row: 'R50 cd "s\\ub", a quoted backslash bash keeps',
 			command: 'cd "s\\ub"; printf x > f.ts',
 			bash: "f.ts",
+		},
+		{
+			row: "R51 cd ~+1, a stack entry bash lacks (R7-1)",
+			command: "cd ~+1; printf x > f.ts",
+			bash: "f.ts",
+		},
+		{
+			row: "R52 cd ~-1 (R7-1)",
+			command: "cd ~-1; printf x > f.ts",
+			bash: "f.ts",
+		},
+		{
+			row: "R53 cd ~+, the current directory (R7-1)",
+			command: "cd ~+; printf x > f.ts",
+			bash: "f.ts",
+		},
+		{
+			row: "R54 pushd ~+1 (R7-1)",
+			command: "pushd ~+1; printf x > f.ts",
+			bash: "f.ts",
+		},
+		{
+			row: "R55 cd ~+1 after a real push (R7-1)",
+			command: "cd sub; pushd ..; cd ~+1; printf x > f.ts",
+			bash: "sub/f.ts",
+			fallback: "f.ts",
+		},
+		{
+			row: "R56 cd ~nosuchuser (R7-1)",
+			command: "cd ~nosuchuser; printf x > f.ts",
+			bash: "f.ts",
+		},
+		{
+			row: "R57 cd ~- with no OLDPWD (R7-1)",
+			command: "unset OLDPWD; cd ~-; printf x > f.ts",
+			bash: "f.ts",
+		},
+		{
+			row: "R58 cd ~+ with no OLDPWD (R7-1)",
+			command: "unset OLDPWD; cd ~+; printf x > f.ts",
+			bash: "f.ts",
+		},
+		{
+			row: "R59 cd ~-1 with no OLDPWD (R7-1)",
+			command: "unset OLDPWD; cd ~-1; printf x > f.ts",
+			bash: "f.ts",
+		},
+		{
+			row: "R60 cd ~+1 with no OLDPWD (R7-1)",
+			command: "unset OLDPWD; cd ~+1; printf x > f.ts",
+			bash: "f.ts",
+		},
+		{
+			row: "R61 pushd ~- with no OLDPWD (R7-1)",
+			command: "unset OLDPWD; pushd ~-; printf x > f.ts",
+			bash: "f.ts",
+		},
+		{
+			row: "R62 cd ~- with OLDPWD set (R7-1)",
+			command: "cd old; cd ..; cd ~-; printf x > f.ts",
+			bash: "old/f.ts",
+			fallback: "f.ts",
+		},
+		{
+			row: "R63 cd ~+ with OLDPWD set (R7-1)",
+			command: "cd old; cd ..; cd ~+; printf x > f.ts",
+			bash: "f.ts",
+		},
+		{
+			row: "R64 cd ~-1 with OLDPWD set (R7-1)",
+			command: "cd old; cd ..; cd ~-1; printf x > f.ts",
+			bash: "f.ts",
+		},
+		{
+			row: "R65 cd ~+1 with OLDPWD set (R7-1)",
+			command: "cd old; cd ..; cd ~+1; printf x > f.ts",
+			bash: "f.ts",
+		},
+		{
+			row: "R66 pushd ~- with OLDPWD set (R7-1)",
+			command: "cd old; cd ..; pushd ~-; printf x > f.ts",
+			bash: "old/f.ts",
+			fallback: "f.ts",
+		},
+		{
+			row: "R67 cd 's\\ub', no escape in single quotes (R7-2)",
+			command: "mkdir 's\\ub'; cd 's\\ub'; printf x > f.ts",
+			bash: "s\\ub/f.ts",
+		},
+		{
+			row: "R68 pushd 's\\ub' (R7-2)",
+			command: "mkdir 's\\ub'; pushd 's\\ub'; printf x > f.ts",
+			bash: "s\\ub/f.ts",
+		},
+		{
+			row: "R69 cd 'C:\\src' (R7-2)",
+			command: "mkdir 'C:\\src'; cd 'C:\\src'; printf x > f.ts",
+			bash: "C:\\src/f.ts",
+		},
+		{
+			row: "R70 a backslash in a prefix assignment (R7-2)",
+			command: "FOO=a\\b cd sub; printf x > f.ts",
+			bash: "sub/f.ts",
+		},
+		{
+			row: "R71 a backslash in a trailing comment (R7-2)",
+			command: "cd sub # C:\\src\nprintf x > f.ts",
+			bash: "sub/f.ts",
+		},
+		{
+			row: 'R72 cd "s\\\\ub", an escape bash also removes (R7-2)',
+			command: "mkdir 's\\ub'; cd \"s\\\\ub\"; printf x > f.ts",
+			bash: "s\\ub/f.ts",
+		},
+		{
+			row: "R73 cd a=~/x, a tilde bash expands after = (R7-1)",
+			command: "mkdir -p 'a=~/x'; cd a=~/x; printf x > f.ts",
+			bash: "f.ts",
+		},
+		{
+			row: "R74 cd a\\ b, an escape bash also removes (R7-1)",
+			command: "mkdir 'a b'; cd a\\ b; printf x > f.ts",
+			bash: "a b/f.ts",
 		},
 	];
 
@@ -1388,6 +1512,24 @@ describe("scanShellWriteScopes — the command's effective directory (#2050)", (
 			expect(written(command)).toEqual([path.join(tmp, fallback ?? bash)]);
 		},
 	);
+
+	// #4713 R7-1: a leading unquoted `~` moves the directory only as `~` or
+	// `~/`, which bash and the scan both expand from HOME; the other tilde
+	// forms are rows R51-R66 and R73.
+	it("moves to HOME for a leading ~ or ~/ (#4713 R7-1)", () => {
+		const { home, restore } = pinFixtureHome("bfa-cd-home");
+		try {
+			expect(os.homedir()).toBe(home);
+			expect(written("cd ~; printf x > f.ts")).toEqual([
+				path.join(home, "f.ts"),
+			]);
+			expect(written("cd ~/x; printf x > f.ts")).toEqual([
+				path.join(home, "x", "f.ts"),
+			]);
+		} finally {
+			restore();
+		}
+	});
 });
 
 // ── edge cases ──────────────────────────────────────────────────────────────

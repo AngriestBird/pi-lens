@@ -89,7 +89,24 @@ interface ShellSegmentRange {
 	grouping: boolean;
 	/** Per token: a redirection's descriptor or target, not an argument. */
 	redirectWords: readonly boolean[];
+	/**
+	 * Per token: the token is bash's own word after quote removal (#4713 R7-1).
+	 * Admitted characters only: any character in single or double quotes,
+	 * except a double-quoted escape bash does not remove; an escaped unquoted
+	 * one; an unquoted one from `LITERAL_WORD_CHAR`; and an unquoted `~` that
+	 * starts the word as `~` or `~/`. Any other character clears it. `$` and a
+	 * backtick, which double quotes still expand, are refused later by
+	 * `resolveCdOperand`, as for every directory a command names.
+	 */
+	literalWords: readonly boolean[];
 }
+
+/**
+ * An unquoted character bash takes as itself in a word. No `~`: bash expands
+ * one after `=` (`a=~/x`), so only a leading one is admitted, and only as `~`
+ * or `~/`, which `resolveCdOperand` expands.
+ */
+const LITERAL_WORD_CHAR = /^[A-Za-z0-9_./@%:,=+-]$/;
 
 interface PendingHeredoc {
 	delimiter: string;
@@ -249,9 +266,16 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 	let redirectWords: boolean[] = [];
 	// The next word is a redirection's target (`> f`, `2>&1`'s `1`).
 	let redirectPending = false;
-	const appendChar = (ch: string | undefined, quoted: boolean) => {
+	let literalWords: boolean[] = [];
+	let wordLiteral = true;
+	const appendChar = (
+		ch: string | undefined,
+		quoted: boolean,
+		literal: boolean,
+	) => {
 		if (word === "") wordFirstCharQuoted = quoted;
 		word += ch ?? "";
+		if (!literal) wordLiteral = false;
 	};
 	const flushWord = () => {
 		if (word) {
@@ -259,9 +283,16 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 			tokens.push(word);
 			redirectWords.push(redirectPending);
 			redirectPending = false;
+			const expandedTilde =
+				!wordFirstCharQuoted &&
+				word.startsWith("~") &&
+				word !== "~" &&
+				!word.startsWith("~/");
+			literalWords.push(wordLiteral && !expandedTilde);
 		}
 		word = "";
 		wordFirstCharQuoted = false;
+		wordLiteral = true;
 		atTokenStart = true;
 	};
 	const flushSegment = (
@@ -283,10 +314,12 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 				exit,
 				grouping,
 				redirectWords,
+				literalWords,
 			});
 		tokens = [];
 		quotedTilde = [];
 		redirectWords = [];
+		literalWords = [];
 		grouping = false;
 		unsupported = false;
 		atTokenStart = true;
@@ -297,23 +330,25 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 		const next = command[i + 1];
 		if (quote === "single") {
 			if (ch === "'") quote = undefined;
-			else appendChar(ch, true);
+			else appendChar(ch, true, true);
 			continue;
 		}
 		if (quote === "double") {
 			if (escaped) {
-				appendChar(ch, true);
+				// Bash unescapes only these inside double quotes; elsewhere it keeps
+				// the backslash this drops.
+				appendChar(ch, true, ch !== undefined && '$`"\\'.includes(ch));
 				escaped = false;
 			} else if (ch === "\\") escaped = true;
 			else if (ch === '"') quote = undefined;
-			else appendChar(ch, true);
+			else appendChar(ch, true, true);
 			continue;
 		}
 		if (escaped) {
 			// A backslash-newline is a shell line continuation, not part of the
 			// command argument. Keeping the newline here makes a continued git command
 			// visible to command guards.
-			if (ch !== "\n") appendChar(ch, true);
+			if (ch !== "\n") appendChar(ch, true, true);
 			escaped = false;
 			atTokenStart = false;
 			continue;
@@ -326,7 +361,8 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 			if (next === "\n" || /[\s\\'";$|&<>]/.test(next ?? "")) {
 				escaped = true;
 			} else {
-				appendChar(ch, false);
+				// Bash removes this backslash; the token keeps it.
+				appendChar(ch, false, false);
 				atTokenStart = false;
 			}
 			atTokenStart = false;
@@ -420,7 +456,11 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 			continue;
 		}
 		if (ch !== undefined && "(){}`".includes(ch)) grouping = true;
-		appendChar(ch, false);
+		appendChar(
+			ch,
+			false,
+			LITERAL_WORD_CHAR.test(ch ?? "") || (ch === "~" && word === ""),
+		);
 		atTokenStart = false;
 	}
 	if (quote || escaped) unsupported = true;
@@ -1030,12 +1070,13 @@ export function extractGrepSearchReadsFromOutput(
 
 /**
  * The file a `cd`/`pushd` operand names, or `undefined` when the operand cannot
- * be known before the shell runs it (`$VAR`, a substitution, a glob, `-`, no
- * operand). #2050 AC4: bash rewrites the working directory mid-command, so a
- * relative operand after a `cd` belongs to the directory it entered, not to
- * the directory the command started in. An unknown target leaves the effective
- * directory unchanged — the pre-#2050 answer — rather than crediting the wrong
- * one.
+ * be known before the shell runs it (`$VAR`, a substitution, a glob, no
+ * operand). An option or `cd -` never reaches it: `directoryEffect` admits a
+ * plain path start only, and the `cdTargets` reading skips `-` words. #2050
+ * AC4: bash rewrites the working directory mid-command, so a relative operand
+ * after a `cd` belongs to the directory it entered, not to the directory the
+ * command started in. An unknown target leaves the effective directory
+ * unchanged — the pre-#2050 answer — rather than crediting the wrong one.
  */
 function resolveCdOperand(
 	token: ShellOperand | undefined,
@@ -1043,7 +1084,7 @@ function resolveCdOperand(
 ): string | undefined {
 	if (!token) return undefined;
 	const cleaned = stripQuotes(token.text);
-	if (!cleaned || cleaned.startsWith("-")) return undefined;
+	if (!cleaned) return undefined;
 	// Shell expansions the static parse cannot follow. A directory whose NAME
 	// contains one of these is rare; guessing would be the shape-74 defect this
 	// resolution exists to remove.
@@ -1314,7 +1355,7 @@ export function scanShellWriteScopes(
 		simpleCommand.push(range);
 		if (range.exit === "redirect") continue;
 		const exit = range.exit;
-		const effect = directoryEffect(simpleCommand, effectiveCwd, command);
+		const effect = directoryEffect(simpleCommand, effectiveCwd);
 		simpleCommand = [];
 		const previousEntry = entry;
 		entry = exit;
@@ -1400,6 +1441,9 @@ const SHELL_CODE_BUILTINS: ReadonlySet<string> = new Set([
 	"trap",
 ]);
 
+/** The first character of an operand bash reads as a directory path. */
+const PLAIN_PATH_START = /^[A-Za-z0-9_./~]/;
+
 type DirectoryEffect =
 	| { kind: "none" }
 	| { kind: "construct" }
@@ -1410,10 +1454,10 @@ type DirectoryEffect =
 /**
  * What one simple command does to the shell's directory, read as a positive
  * list (#4713 round 4). Admitted: `cd DIR` and `pushd DIR` with exactly one
- * statically resolvable plain path operand (no backslash in the command, and
- * for `pushd` not empty and not starting with `+` or `-`), and a bare `popd`,
- * each spelled as that
- * literal first word once leading assignments and redirections are set aside.
+ * statically resolvable plain path operand (a literal word, see
+ * `literalWords`, starting with a `PLAIN_PATH_START` character), and a bare
+ * `popd`, each spelled as that literal first word once leading assignments
+ * and redirections are set aside.
  * A command whose first word is a plain word naming none of the directory or
  * shell-text builtins is `none`. A reserved word or an unquoted grouping
  * character is a `construct`; every other form is `unknown`.
@@ -1421,13 +1465,16 @@ type DirectoryEffect =
 function directoryEffect(
 	ranges: readonly ShellSegmentRange[],
 	cwd: string,
-	source: string,
 ): DirectoryEffect {
 	if (ranges.some((range) => range.grouping)) return { kind: "construct" };
 	const words: ShellOperand[] = [];
+	const literal: boolean[] = [];
 	for (const range of ranges)
 		for (const [index, operand] of shellOperands(range.segment).entries())
-			if (range.redirectWords[index] !== true) words.push(operand);
+			if (range.redirectWords[index] !== true) {
+				words.push(operand);
+				literal.push(range.literalWords[index] === true);
+			}
 	let first = 0;
 	while (/^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(words[first]?.text ?? "")) first++;
 	const verb = words[first]?.text;
@@ -1436,17 +1483,14 @@ function directoryEffect(
 	const operands = words.slice(first + 1);
 	if (verb === "cd" || verb === "pushd") {
 		const operand = operands.length === 1 ? operands[0] : undefined;
-		// The directory moves only on a plain path operand (#4713 R5-2, R6-1).
-		// Its command text holds no backslash: the tokenizer keeps or drops an
-		// escape where bash does the opposite (`s\ub`, `"s\ub"`), so the token
-		// is not the word bash sees. A `pushd` operand also starts with neither
-		// `+` nor `-`: bash reads any such word as a stack index or an option,
-		// and fails on one it cannot parse.
-		const escaped = ranges.some((range) =>
-			source.slice(range.start, range.end + 1).includes("\\"),
-		);
-		const word = stripQuotes(operand?.text ?? "");
-		const plainPath = !escaped && (verb === "cd" || /^[^+-]/.test(word));
+		// The directory moves only on a plain path operand (#4713 R7-1): bash's
+		// own word, with no expansion, and a start bash reads as a path. Every
+		// other operand (a stack index or option, `~+1`, `~user`, `$D`, a glob,
+		// an escape the tokenizer resolves unlike bash) falls back.
+		const plainPath =
+			operand !== undefined &&
+			literal[first + 1] === true &&
+			PLAIN_PATH_START.test(operand.text);
 		const target =
 			operand && plainPath ? resolveCdOperand(operand, cwd) : undefined;
 		return target
