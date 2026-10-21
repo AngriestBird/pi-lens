@@ -346,6 +346,11 @@ describe("session_start keys on the project root (#2129 wiring)", () => {
 		await settleRegistryWrites();
 		expect(await rootsForThisPid()).toContain(path.resolve(tempWorktree));
 
+		// #4704: while S1 is live the reload is not the process's last leave and
+		// removes nothing. S1's hold drops with the entry once pi has invalidated
+		// S1 with no shutdown (its runner disposed it), which makes the reload
+		// the last live leave; the late shutdown below is that dropped holder's.
+		invalidate(firstCtx);
 		await host.emit("session_shutdown", { reason: "reload" }, hostCtx);
 		invalidate(hostCtx);
 		const reloaded = createPiMock();

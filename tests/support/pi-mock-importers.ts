@@ -72,7 +72,10 @@ export const PI_MOCK_IMPORTERS: Readonly<Record<string, string>> = {
 	"clients/context-append-to-last-user.test.ts": "unproducible-payload",
 	"index-4631-pre-087-context-shape.test.ts": "unproducible-payload",
 	// pending slice 5
-	"index-4554-last-member-teardown.test.ts": "pending slice 5",
+	// #4704: one activation serving several members, which pins the closure
+	// logic only; pi 1.3.0 runs one activation per session, and that
+	// production topology is tier 2 in index-4704-sibling-teardown.test.ts.
+	"index-4554-last-member-teardown.test.ts": "internal-seam",
 	"index-config-resolved-session-wiring.test.ts": "pending slice 5",
 	"index-multi-root-session-start.test.ts": "pending slice 5",
 	// pending slice 8

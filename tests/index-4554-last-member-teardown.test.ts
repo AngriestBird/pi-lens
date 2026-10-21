@@ -322,6 +322,35 @@ describe("#4554 one activation, four live sessions", () => {
 		expect(teardownResets(b.resetLSPService)).toHaveLength(1);
 	}, 45_000);
 
+	it("r7 a sibling left behind by a reload into another activation releases the registration last", async () => {
+		// #4704, the mirror order of the r5 case above: the reloaded primary
+		// leaves while the old activation's sibling is live, so the process's
+		// last live session is that sibling. Its activation admitted M, not the
+		// held registration, and no other leave would release it.
+		const a = await bootActivation();
+		const primary = makeCtx({ cwd: project, sessionId: "m" });
+		const sibling = makeCtx({ cwd: project, sessionId: "s" });
+		await start(a.pi, primary);
+		await start(a.pi, sibling);
+		await shutdown(a.pi, primary, { reason: "reload" });
+		vi.resetModules();
+		const b = await bootActivation();
+		const reloaded = makeCtx({ cwd: project, sessionId: "m" });
+		await start(b.pi, reloaded, "reload");
+
+		await shutdown(b.pi, reloaded);
+		// The sibling on the other activation is live: nothing shared is
+		// released under it.
+		expect(teardownResets(b.resetLSPService)).toHaveLength(0);
+		expect(getActiveSessionId()).toBe("m");
+
+		await shutdown(a.pi, sibling);
+		expect(teardownResets(a.resetLSPService)).toHaveLength(1);
+		expect(getActiveSessionId()).toBeUndefined();
+		await settleRegistryWrites();
+		expect(await rootsForThisPid()).not.toContain(project);
+	}, 45_000);
+
 	it.each([true, false])(
 		"r5 reload hands off the departing primary scope (secondary leaves first: %s)",
 		async (secondaryLeavesFirst) => {

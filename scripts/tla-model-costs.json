@@ -594,6 +594,8 @@
 		"formal/session-lifecycle/Mut4113Unstarted.cfg": 3.7,
 		"formal/session-lifecycle/Mut4554TeardownAtPrimary.cfg": 2.1,
 		"formal/session-lifecycle/Mut4554r6UnmatchedLeaveLast.cfg": 1.9,
+		"formal/session-lifecycle/Mut4704ActivationLast.cfg": 1.9,
+		"formal/session-lifecycle/Mut4704StaleSiblingHolds.cfg": 1.9,
 		"formal/session-lifecycle/MutDuplicateStart.cfg": 2.4,
 		"formal/session-lifecycle/MutFileLessNoTicketKey.cfg": 2.8,
 		"formal/session-lifecycle/MutForkClosureStash.cfg": 2,

@@ -243,12 +243,14 @@ import {
 	decideSessionStart,
 	decrementSecondarySessionCount,
 	getActivePrimaryRoot,
-	isPrimarySessionOwner,
+	hasLiveSessionInProcess,
+	hasPrimaryRegistration,
 	namedSuccessorReason,
 	expiredSuccessorReason,
 	noteSessionShutdown,
 	releasePrimarySession,
 	probeCtxActive,
+	trackLiveSessionMembers,
 } from "./clients/session-lifecycle.js";
 import {
 	clearLastAnalyzedStateCache,
@@ -815,20 +817,29 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// `resetLSPService`, `deregisterInstance` and `releasePrimarySession` never
 	// ran for the process, which kept its `instances.json` entry and its stale
 	// primary registration. Membership, not the stored role, decides the shared
-	// teardown: it runs once, when the LAST member this activation started
-	// leaves.
+	// teardown: it runs once, when the LAST live member leaves.
+	// #4704: last in the PROCESS, not in this activation. pi 1.3.0 runs this
+	// factory once per session load, so an in-process subagent is ANOTHER
+	// activation, and reading only this list tore the shared infra down under
+	// it. The list stays this activation's own; `trackLiveSessionMembers`
+	// makes it readable to the others, and `hasLiveSessionInProcess` merges
+	// every list at read. `ctx` is the start's context, which that read probes.
 	const liveSessionMembers: Array<{
 		sessionId: string | undefined;
 		role: "primary" | "concurrent-secondary";
+		ctx: unknown;
 		scope?: SessionScope;
 	}> = [];
-	// The admitted primary context is the ownership identity, not its stable
-	// session id: a reload can re-register that id in another activation.
+	// The context this activation's full admission registered. #4704: it now
+	// answers only whether this activation admitted a primary; which
+	// registration a last leave releases is the process's (the held one).
 	let sharedInfraOwner: unknown;
 	const enterLiveSession = (
 		sessionId: string | undefined,
 		role: "primary" | "concurrent-secondary",
+		ctx: unknown,
 	): (typeof liveSessionMembers)[number] => {
+		trackLiveSessionMembers(liveSessionMembers);
 		// A session re-announcing its own id in one activation is one member, not
 		// two: its single shutdown must still be able to be the last leave.
 		const known = liveSessionMembers.find(
@@ -836,9 +847,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 		);
 		if (known) {
 			known.role = role;
+			known.ctx = ctx;
 			return known;
 		}
-		const member = { sessionId, role };
+		const member = { sessionId, role, ctx };
 		liveSessionMembers.push(member);
 		return member;
 	};
@@ -859,11 +871,17 @@ function activateExtension(hostPi: ExtensionAPI) {
 	 * is empty the fail-safe direction still holds — skipping the teardown is the
 	 * #472 orphan class (a leaked LSP fleet and registry entry), so an unmatched
 	 * leave with nothing left is treated as the last one.
+	 *
+	 * `isLast` is this activation's answer, which retires its own scope.
+	 * `isLastInProcess` is the process's (#4704): no activation, this one
+	 * included, still holds a live session, which is when the shared teardown
+	 * may run.
 	 */
 	const leaveLiveSession = (
 		sessionId: string | undefined,
 	): {
 		isLast: boolean;
+		isLastInProcess: boolean;
 		role: "primary" | "concurrent-secondary" | undefined;
 		scope: SessionScope | undefined;
 		matched: boolean;
@@ -884,6 +902,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// registry entry under the live replacement, and retired that
 			// replacement's scope in the `finally` (#4554 r6).
 			isLast: liveSessionMembers.length === 0,
+			isLastInProcess: !hasLiveSessionInProcess(),
 			role: member?.role,
 			scope: member?.scope,
 			matched: member !== undefined,
@@ -2511,6 +2530,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 					const startingMember = enterLiveSession(
 						stableSessionId,
 						ownedSessionRole,
+						ctx,
 					);
 					if (!sessionStartDecision.runFullSessionStart) {
 						dbg(
@@ -4069,11 +4089,20 @@ function activateExtension(hostPi: ExtensionAPI) {
 				: leave.role === "primary"
 					? "primary"
 					: "secondary";
+		// #4704: the process's last live leave releases whichever registration
+		// is held, whichever activation admitted it: no live successor can
+		// remain (that is what last-in-process means, and it is why a
+		// superseded activation can no longer tear down its successor, #4554
+		// r5), and no other leave would release it — a declined subagent
+		// whose primary left first on another activation, or a sibling left
+		// behind by a reload into another activation. With nothing held, an
+		// activation that admitted a primary has nothing left to release (its
+		// registration was released or superseded); one that admitted none
+		// keeps the classifier's answer (#4106, #4113).
 		const ownsCurrentSharedInfra =
-			sharedInfraOwner === undefined
-				? shutdownClassification === "primary"
-				: isPrimarySessionOwner(sharedInfraOwner);
-		const runsSharedTeardown = isLastLiveMember && ownsCurrentSharedInfra;
+			hasPrimaryRegistration() ||
+			(sharedInfraOwner === undefined && shutdownClassification === "primary");
+		const runsSharedTeardown = leave.isLastInProcess && ownsCurrentSharedInfra;
 
 		const shutdownEvent = event as
 			| { reason?: string; targetSessionFile?: string }

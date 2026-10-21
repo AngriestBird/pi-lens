@@ -131,7 +131,7 @@ const ACTIVATION_STATE: Readonly<Record<string, string>> = {
 	renderInvalidator: "this activation's widget repaint callback",
 	scope: "this activation's session scope (#3611)",
 	sharedInfraOwner:
-		"the admitted primary context; shared teardown requires it still owns the current process registration (#4554 r5)",
+		"the context this activation's full admission registered; with no registration held, only an activation that admitted none may still run the shared teardown (#4554 r5, #4704)",
 	startInFlight:
 		"this activation's primary session_start until it returns, so a shutdown that lands before the start adopted hands on the slot left for it (#3881)",
 	turnStartScope:

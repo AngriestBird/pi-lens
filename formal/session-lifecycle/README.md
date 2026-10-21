@@ -1137,3 +1137,25 @@ live member remains); `= TRUE` is the pre-fix reading, and
 `Mut4554r6UnmatchedLeaveLast` registers its violation of `NoEarlyTeardown`.
 The round-5 handoff save already keys `saved` by the departing context, which
 is the as-built identity Greptile F2 restored in `index.ts`.
+
+#4704 adds the topology pi 1.3.0 actually produces for an in-process
+subagent: pi runs the factory once per session load, so M's subagent T is
+its own activation C, a declined start that admits nothing. Two constants:
+
+- `ProcessWideLast` (as-built `TRUE`): "last" is read across every
+  activation, and the process's last live leave releases whichever
+  registration is held. `= FALSE` is the pre-fix reading, and
+  `Mut4704ActivationLast` registers its `NoEarlyTeardown` violation: M's
+  leave finds A empty and tears the shared infra down while T is live.
+- `StaleMemberHolds` (as-built `FALSE`): `DisposeT` is T's runner calling
+  `AgentSession.dispose()`, which invalidates T and emits no shutdown, so T
+  never leaves. A member pi invalidated does not count as live.
+  `Mut4704StaleSiblingHolds` sets it `TRUE` and violates `NoMissedTeardown`:
+  M's leave after T's disposal keeps the registration with nothing live.
+
+`NoStrandedOwner` now reads "a held registration implies a truly live
+session", with one accepted exception: every recorded member was disposed
+without a shutdown, so no pi-lens callback can run (M left first, then T was
+disposed). The next full admission or process exit releases it.
+`NoForeignTeardown` now reads "no teardown releases a registration whose own
+session is still live".
