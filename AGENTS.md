@@ -771,11 +771,10 @@ file-scoped worklist and receives no project-wide scanner output.
     reaches 1.7 to 1.9 GB). An `await` on a settled promise does not turn it.
     Turn the loop once per file with `setImmediate`. Screen: does the loop's
     body parse, and does it reach a `setImmediate` or a real I/O await per
-    iteration? Instances: #3565 (three sweeps), #4292, #4736. Enforcer: none:
-    judgment-only. The per-file RSS budget and its 200 MB headroom warning
-    observe the symptom, but a source scan cannot tell which loops parse
-    without data-flow reading, so it could not fail closed. Instance and
-    dates: `HISTORY.md`.
+    iteration? Enforcer: none: judgment-only. The per-file RSS budget and its
+    200 MB headroom warning observe the symptom, but a source scan cannot tell
+    which loops parse without data-flow reading, so it could not fail closed.
+    Instances and dates: `HISTORY.md`.
 
 </important>
 
