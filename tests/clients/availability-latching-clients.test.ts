@@ -56,6 +56,7 @@ const missingResult = {
 const versionOk = { stdout: "6.4.1", stderr: "", status: 0 };
 
 let tmpHome = "";
+let previousHome: string | undefined;
 
 async function spawnMock() {
 	const mod = await import("../../clients/safe-spawn.js");
@@ -66,7 +67,8 @@ beforeEach(async () => {
 	tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-1467-home-"));
 	// `PI_LENS_HOME` is the knob `getGlobalPiLensDir` reads, so the managed
 	// tools dir resolves under `tmpHome` as in production.
-	vi.stubEnv("PI_LENS_HOME", tmpHome);
+	previousHome = process.env.PI_LENS_HOME;
+	process.env.PI_LENS_HOME = tmpHome;
 	(await spawnMock()).mockReset();
 	resetDispatchAvailabilityState();
 	vi.useFakeTimers({ toFake: ["Date"] });
@@ -74,7 +76,8 @@ beforeEach(async () => {
 
 afterEach(() => {
 	vi.useRealTimers();
-	vi.unstubAllEnvs();
+	if (previousHome === undefined) delete process.env.PI_LENS_HOME;
+	else process.env.PI_LENS_HOME = previousHome;
 	removeTempDirSync(tmpHome);
 });
 

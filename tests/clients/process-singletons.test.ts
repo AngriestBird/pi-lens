@@ -32,16 +32,19 @@ import { removeTempDirSync } from "./test-utils.js";
 // The registry suite re-points it at a per-test dir.
 const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-2146-base-"));
 let dir: string = baseDir;
+let previousHome: string | undefined;
 
 afterAll(() => removeTempDirSync(baseDir));
 
 // `PI_LENS_HOME` is the knob `getGlobalPiLensDir` reads; every case, in every
 // describe, runs with it pointing at the current `dir`.
 beforeEach(() => {
-	vi.stubEnv("PI_LENS_HOME", dir);
+	previousHome = process.env.PI_LENS_HOME;
+	process.env.PI_LENS_HOME = dir;
 });
 afterEach(() => {
-	vi.unstubAllEnvs();
+	if (previousHome === undefined) delete process.env.PI_LENS_HOME;
+	else process.env.PI_LENS_HOME = previousHome;
 });
 
 type SessionLifecycleModule =
@@ -141,7 +144,7 @@ describe("#2146 — session-lifecycle registration is one per process", () => {
 describe("#2146 — the registry mutation tail is one per process", () => {
 	beforeEach(async () => {
 		dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-2146-reg-"));
-		vi.stubEnv("PI_LENS_HOME", dir);
+		process.env.PI_LENS_HOME = dir;
 		const singletons = await import("../../clients/process-singletons.js");
 		singletons._resetProcessSingletonsForTests();
 	});

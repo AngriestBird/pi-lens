@@ -59,6 +59,8 @@ import {
 } from "vitest";
 import { removeTempDirSync } from "./test-utils.js";
 
+let previousHome: string | undefined;
+
 const h = vi.hoisted(() => ({
 	dir: "",
 	/** Every pid this file spawned: the only rows the reaper may see. */
@@ -277,7 +279,8 @@ beforeEach(() => {
 	h.dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-pid-reuse-"));
 	// `PI_LENS_HOME` is the knob `getGlobalPiLensDir` reads, so the registry
 	// file lands in `h.dir` as in production.
-	vi.stubEnv("PI_LENS_HOME", h.dir);
+	previousHome = process.env.PI_LENS_HOME;
+	process.env.PI_LENS_HOME = h.dir;
 	h.afterFirstIdentityQuery = undefined;
 	h.latency.length = 0;
 	signals.length = 0;
@@ -285,7 +288,8 @@ beforeEach(() => {
 });
 afterEach(() => {
 	process.kill = kill;
-	vi.unstubAllEnvs();
+	if (previousHome === undefined) delete process.env.PI_LENS_HOME;
+	else process.env.PI_LENS_HOME = previousHome;
 	removeTempDirSync(h.dir);
 });
 afterAll(() => {

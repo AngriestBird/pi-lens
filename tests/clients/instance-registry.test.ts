@@ -15,6 +15,7 @@ import { suspendAt } from "./interleaving-kit.js";
 import { removeTempDirSync } from "./test-utils.js";
 
 let dir: string;
+let previousHome: string | undefined;
 
 // #3602: a controllable pause point on `ownProcessStart`, the call
 // `registerInstanceNow` makes right after `rememberRegistrationRoot` and
@@ -39,7 +40,8 @@ describe("instance-registry", () => {
 		dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-instreg-"));
 		// #2506: `PI_LENS_HOME` is the one knob both the data and the log
 		// resolvers read, so the registry file lands in `dir` as in production.
-		vi.stubEnv("PI_LENS_HOME", dir);
+		previousHome = process.env.PI_LENS_HOME;
+		process.env.PI_LENS_HOME = dir;
 		// vi.resetModules() gives every test a FRESH instance-registry.js
 		// instance, which means a fresh degradation-ledger.js too (its module
 		// state — the groups/onceKeys maps — is reinitialized on re-evaluation),
@@ -50,6 +52,8 @@ describe("instance-registry", () => {
 
 	afterEach(() => {
 		vi.unstubAllEnvs();
+		if (previousHome === undefined) delete process.env.PI_LENS_HOME;
+		else process.env.PI_LENS_HOME = previousHome;
 		removeTempDirSync(dir);
 	});
 

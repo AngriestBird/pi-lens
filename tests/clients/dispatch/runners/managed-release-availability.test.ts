@@ -71,6 +71,7 @@ const decisions = () =>
 		.filter((entry) => entry?.phase === "availability_decision");
 
 let tmpHome = "";
+let previousHome: string | undefined;
 let cwd = "";
 
 /**
@@ -168,12 +169,14 @@ beforeEach(async () => {
 	// The installer captures `GITHUB_BIN_DIR` at module load, so the redirect
 	// has to be in place before the fresh import each test takes
 	// (`vi.resetModules`). `PI_LENS_HOME` is the knob `getGlobalPiLensDir` reads.
-	vi.stubEnv("PI_LENS_HOME", tmpHome);
+	previousHome = process.env.PI_LENS_HOME;
+	process.env.PI_LENS_HOME = tmpHome;
 });
 
 afterEach(async () => {
 	vi.useRealTimers();
-	vi.unstubAllEnvs();
+	if (previousHome === undefined) delete process.env.PI_LENS_HOME;
+	else process.env.PI_LENS_HOME = previousHome;
 	(await import("../../../../clients/project-trust.js")).resetProjectTrust();
 	removeTempDirSync(tmpHome);
 	removeTempDirSync(cwd);

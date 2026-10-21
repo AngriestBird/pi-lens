@@ -26,6 +26,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { removeTempDirSync } from "./test-utils.js";
 
 let dir: string;
+let previousHome: string | undefined;
 
 describe("instance-registry root lifecycle (#2130 round 2)", () => {
 	let realRoot: string;
@@ -35,7 +36,8 @@ describe("instance-registry root lifecycle (#2130 round 2)", () => {
 		dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-instreg-rl-"));
 		// #2506: `PI_LENS_HOME` is the one knob both the data and the log
 		// resolvers read, so the registry file lands in `dir` as in production.
-		vi.stubEnv("PI_LENS_HOME", dir);
+		previousHome = process.env.PI_LENS_HOME;
+		process.env.PI_LENS_HOME = dir;
 		// Real directories: `normalizeFilePath` canonicalizes an EXISTING path
 		// via realpath, so a made-up path would compare two differently-derived
 		// spellings and prove nothing.
@@ -46,6 +48,8 @@ describe("instance-registry root lifecycle (#2130 round 2)", () => {
 
 	afterEach(() => {
 		vi.unstubAllEnvs();
+		if (previousHome === undefined) delete process.env.PI_LENS_HOME;
+		else process.env.PI_LENS_HOME = previousHome;
 		removeTempDirSync(dir);
 		removeTempDirSync(realRoot);
 		removeTempDirSync(tempRoot);
