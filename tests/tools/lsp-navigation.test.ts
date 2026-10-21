@@ -275,6 +275,122 @@ describe("lsp_navigation tool", () => {
 		expect(result.details?.operation).toBe("incomingCalls");
 	});
 
+	// #4687: the schema carries callHierarchyItem as an opaque object, so the
+	// LSP CallHierarchyItem shape is checked at execute, before any server call
+	// (MCP never validates the schema at all). Recurrence: a malformed item
+	// reaching `uriToPath` or the server, where it fails as an opaque error or
+	// an empty "no callers" answer instead of a refusal naming the field.
+	const wellFormedItem = () => ({
+		name: "foo",
+		kind: 12,
+		uri: tmpFileUrl("item.py"),
+		range: {
+			start: { line: 1, character: 0 },
+			end: { line: 1, character: 3 },
+		},
+		selectionRange: {
+			start: { line: 1, character: 0 },
+			end: { line: 1, character: 3 },
+		},
+	});
+	it.each([
+		[
+			"absent",
+			(): unknown => undefined,
+			"callHierarchyItem parameter required",
+		],
+		[
+			"a string",
+			(): unknown => "foo",
+			"callHierarchyItem must be the object prepareCallHierarchy returned",
+		],
+		// #4723 F7: an array is an object to `typeof`; without the array branch
+		// it would be reported as a missing `name` instead of the wrong shape.
+		[
+			"an array",
+			(): unknown => [],
+			"callHierarchyItem must be the object prepareCallHierarchy returned",
+		],
+		[
+			"no uri",
+			(): unknown => ({ ...wellFormedItem(), uri: undefined }),
+			"callHierarchyItem.uri must be a string",
+		],
+		[
+			"a string kind",
+			(): unknown => ({ ...wellFormedItem(), kind: "Function" }),
+			"callHierarchyItem.kind must be a number",
+		],
+		[
+			"no range",
+			(): unknown => ({ ...wellFormedItem(), range: undefined }),
+			"callHierarchyItem.range must be a range object",
+		],
+		[
+			"a string selectionRange.end.character",
+			(): unknown => {
+				const item = wellFormedItem();
+				return {
+					...item,
+					selectionRange: {
+						...item.selectionRange,
+						end: { line: 1, character: "3" },
+					},
+				};
+			},
+			"callHierarchyItem.selectionRange.end.character must be a number",
+		],
+	] satisfies ReadonlyArray<readonly [string, () => unknown, string]>)(
+		"refuses a callHierarchyItem that is %s before any server call",
+		async (_label, makeItem, message) => {
+			for (const operation of ["incomingCalls", "outgoingCalls"] as const) {
+				const service = mocked.service as Record<
+					string,
+					ReturnType<typeof vi.fn>
+				>;
+				service.getOperationSupport?.mockClear();
+				service[operation]?.mockClear();
+				const tool = createLspNavigationTool((flag) => flag === "lens-lsp");
+				const result = await tool.execute(
+					`bad-item-${operation}`,
+					{ operation, callHierarchyItem: makeItem() },
+					new AbortController().signal,
+					null,
+					{ cwd: "." },
+				);
+
+				expect(result.isError).toBe(true);
+				expect(result.details?.failureKind).toBe("bad_input");
+				expect(parseToolJson(result).errors).toEqual([
+					`${message} for ${operation}`,
+				]);
+				expect(service[operation]).not.toHaveBeenCalled();
+				expect(service.getOperationSupport).not.toHaveBeenCalled();
+			}
+		},
+	);
+
+	it("passes a call hierarchy item's extra fields (detail, data) to the server unchanged", async () => {
+		const tool = createLspNavigationTool((flag) => flag === "lens-lsp");
+		const callHierarchyItem = {
+			...wellFormedItem(),
+			detail: "module a",
+			data: { serverToken: 7 },
+		};
+		await tool.execute(
+			"item-extra",
+			{ operation: "outgoingCalls", callHierarchyItem },
+			new AbortController().signal,
+			null,
+			{ cwd: "." },
+		);
+
+		expect(
+			(mocked.service as { outgoingCalls: ReturnType<typeof vi.fn> })
+				.outgoingCalls,
+		).toHaveBeenCalledWith(callHierarchyItem);
+	});
+
 	it("adds workspaceSymbol hint when path is omitted and empty", async () => {
 		const tool = createLspNavigationTool((flag) => flag === "lens-lsp");
 
@@ -2168,6 +2284,17 @@ describe("lsp_navigation workspaceDiagnostics delivery gate (#1634)", () => {
  * mutation target, filed as #4578.
  */
 describe("lsp_navigation path resolution (#4577 M2)", () => {
+	// #4723 F2: this block installs its own service. It used to inherit the
+	// last block's double; under --sequence.shuffle (seed 424) that was the
+	// delivery-gate double, whose hasLSP is false, so `references` never ran.
+	beforeEach(() => {
+		mocked.service = makeLspServiceDouble({
+			supportsLSP: vi.fn().mockReturnValue(true),
+			hasLSP: vi.fn().mockResolvedValue(true),
+			getOperationSupport: vi.fn().mockResolvedValue(null),
+		});
+	});
+
 	it("resolves a ~ path to $HOME, not under the cwd", async () => {
 		const { home, restore } = pinFixtureHome("nav-tilde");
 		const filePath = path.join(home, "proj", "refs.ts");

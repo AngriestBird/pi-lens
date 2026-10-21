@@ -654,7 +654,9 @@ describe("Pipeline", () => {
 				getFormatService: () => formatService,
 			});
 			formatService.formatFile = async (fp: string) => {
-				const result = await originalFormatFile(fp);
+				const result = await originalFormatFile(fp, {
+					sessionRoot: path.dirname(fp),
+				});
 				// Force a file change by writing different content
 				if (fp === filePath || path.resolve(fp) === path.resolve(filePath)) {
 					fs.writeFileSync(filePath, "const x = 1;\n");
@@ -1019,7 +1021,9 @@ describe("Pipeline", () => {
 			const originalFormatFile = formatService.formatFile.bind(formatService);
 			const deps = createMockDeps({ getFormatService: () => formatService });
 			formatService.formatFile = async (fp: string) => {
-				const result = await originalFormatFile(fp);
+				const result = await originalFormatFile(fp, {
+					sessionRoot: path.dirname(fp),
+				});
 				if (fp === filePath || path.resolve(fp) === path.resolve(filePath)) {
 					fs.writeFileSync(filePath, "const x = 1;\n");
 					return {
@@ -1149,7 +1153,9 @@ describe("Pipeline", () => {
 			const originalFormatFile = formatService.formatFile.bind(formatService);
 			const deps = createMockDeps({ getFormatService: () => formatService });
 			formatService.formatFile = async (fp: string) => {
-				const result = await originalFormatFile(fp);
+				const result = await originalFormatFile(fp, {
+					sessionRoot: path.dirname(fp),
+				});
 				if (fp === filePath || path.resolve(fp) === path.resolve(filePath)) {
 					fs.writeFileSync(filePath, "const x = 1;\n");
 					return {

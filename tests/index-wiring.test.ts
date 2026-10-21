@@ -1,17 +1,8 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { getProjectDataDir } from "../clients/file-utils.js";
 import { takeHandoff } from "../clients/session-scope.js";
-import {
-	afterAll,
-	afterEach,
-	beforeEach,
-	describe,
-	expect,
-	it,
-	vi,
-} from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const activationToolFactoryOverride = vi.hoisted(() => ({
 	enabled: false,
@@ -175,10 +166,12 @@ import {
 } from "../clients/degradation-ledger.js";
 import { _resetSessionLifecycleForTests } from "../clients/session-lifecycle.js";
 import { _settleRegistryMutationsForTests } from "../clients/instance-registry.js";
-import { makeSessionStartEvent } from "./support/host-event-factory.js";
+import {
+	makeContextWithSystemEvent,
+	makeSessionStartEvent,
+} from "./support/host-event-factory.js";
 import { createPiMock, makeCtx, makeStaleCtx } from "./support/pi-mock.js";
 import {
-	cleanupTestEnvironmentsDrained,
 	removeTempDirSync,
 	setupTestEnvironment,
 } from "./clients/test-utils.js";
@@ -292,36 +285,11 @@ const EXPECTED_HOOKS = [
 	"agent_end",
 	"turn_end",
 	"context",
+	// #4631: pi 0.87+ delivers the full request transcript (system head in
+	// place) to this hook and strips system messages from `context`; pi-lens
+	// registers both so exactly one of them injects per request.
+	"context_with_system",
 ];
-
-/**
- * turn_end and a `/fork` or `/reload` shutdown persist the session stores
- * (#3612) fire-and-forget (#2523): yield until a wall-clock deadline so the
- * sidecar's atomic rename is visible, and never lands after cleanup. The
- * deadline covers thread-pool latency; a yield-count cap does not (#4134).
- */
-async function sidecarWritten(cwd: string, sessionId: string): Promise<void> {
-	const sidecar = path.join(
-		getProjectDataDir(cwd),
-		"sessions",
-		`${sessionId}.json`,
-	);
-	const deadline = Date.now() + 10_000;
-	while (Date.now() < deadline && !fs.existsSync(sidecar))
-		await new Promise<void>((resolve) => setImmediate(resolve));
-	expect(fs.existsSync(sidecar), sidecar).toBe(true);
-}
-
-/** A turn ends after the activation, as every real one does. */
-async function endTurnAndPersist(
-	pi: ReturnType<typeof createPiMock>,
-	ctx: unknown,
-	cwd: string,
-	sessionId: string,
-): Promise<void> {
-	await pi.emit("turn_end", {}, ctx);
-	await sidecarWritten(cwd, sessionId);
-}
 
 describe("index.ts extension wiring", () => {
 	it.each(["reject", "throw"])(
@@ -861,63 +829,13 @@ describe("index.ts extension wiring", () => {
 			expect(properties).toHaveProperty("limit");
 		});
 
-		// #dynamic-tooling: 5 situational tools are registered but start
-		// inactive on a host that supports pi's dynamic tool loading
-		// (pi.getActiveTools/setActiveTools); the 6 always-active tools plus
-		// the loader itself stay active. Newly-activated tools only need to
-		// be visible from the NEXT turn, so this only asserts load-time state.
-		// #643: the deactivation call moved from synchronous registration into
-		// the session_start handler (the correct lifecycle point — see
-		// index.ts), so this test now fires session_start before asserting.
-		it("registers the 5 situational tools inactive and everything else active on a dynamic-tooling host", async () => {
-			const tmp = fs.mkdtempSync(
-				path.join(os.tmpdir(), "pi-lens-wiring-session-start-"),
-			);
-			const prevDataDir = process.env.PILENS_DATA_DIR;
-			process.env.PILENS_DATA_DIR = path.join(tmp, "data");
-			try {
-				const pi = createPiMock();
-				extension(pi.asExtensionAPI());
-				await pi.emit("session_start", {}, makeCtx({ cwd: tmp }));
-
-				const LAZY_TOOLS = [
-					"ast_grep_search",
-					"ast_grep_replace",
-					"ast_grep_outline",
-					"lsp_navigation",
-					"lens_diagnostic_mark",
-				];
-				const ALWAYS_ACTIVE = [
-					"lens_diagnostics",
-					"symbol_search",
-					"project_report",
-					"module_report",
-					"read_symbol",
-					"read_enclosing",
-					"pi_lens_activate_tools",
-				];
-
-				for (const t of LAZY_TOOLS) {
-					expect(pi.getTool(t), `tool registered: ${t}`).toBeDefined();
-					expect(pi.activeTools.has(t), `should start inactive: ${t}`).toBe(
-						false,
-					);
-				}
-				for (const t of ALWAYS_ACTIVE) {
-					expect(pi.getTool(t), `tool registered: ${t}`).toBeDefined();
-					expect(pi.activeTools.has(t), `should start active: ${t}`).toBe(true);
-				}
-			} finally {
-				if (prevDataDir === undefined) delete process.env.PILENS_DATA_DIR;
-				else process.env.PILENS_DATA_DIR = prevDataDir;
-				removeTempDirSync(tmp);
-			}
-		});
-
-		// Feature-detection fallback: a host without getActiveTools/setActiveTools
-		// (older pi, or any host not implementing dynamic tooling) must not throw,
-		// and every tool — including the 6 normally-lazy ones — stays statically
-		// active, matching pi-lens's behavior before this feature existed.
+		// Slice 6 of #4632 moved the dynamic-tooling cases that a real host can
+		// drive to `tests/index-4632-s6-dynamic-tooling.test.ts` (tier 2): pi's own
+		// active tool set, the real `pi_lens_activate_tools` tool, and pi's own
+		// new/resume/fork/reload replacements. Two claims stay here, each a payload
+		// this host cannot produce: a host WITHOUT `getActiveTools`/`setActiveTools`
+		// (the feature-detection fallback), and a `/new` whose successor names the
+		// CURRENT session file (pi always mints a fresh one).
 		// #643: assert through session_start, the call's new (correct) home.
 		it("falls back to all tools statically active on a host without dynamic-tooling support", async () => {
 			const tmp = fs.mkdtempSync(
@@ -938,322 +856,6 @@ describe("index.ts extension wiring", () => {
 					// skipped the deactivation step entirely (the graceful fallback).
 					expect(pi.activeTools.has(t), `should stay active: ${t}`).toBe(true);
 				}
-			} finally {
-				if (prevDataDir === undefined) delete process.env.PILENS_DATA_DIR;
-				else process.env.PILENS_DATA_DIR = prevDataDir;
-				removeTempDirSync(tmp);
-			}
-		});
-
-		// #1453: the host hands the rebuilt session an all-active tool set.
-		// #3589/#3612: pi re-runs the factory for a fork or a reload, so the
-		// rebuilt session starts in a SECOND activation, as here; one mock
-		// activation receiving both events is the shape that hid #3589. Resume
-		// restores from the session's own sidecar, which a real turn_end writes;
-		// the real-runtime witness "restores a resumed session's activations
-		// after a process restart" covers it.
-		it.each(["fork", "reload"])(
-			"restores the parent's tool posture on %s session_start",
-			async (reason) => {
-				// #3306: these three roots are the ONLY ones in this file that
-				// outlive it. `removeTempDirSync(tmp)` in the `finally` below does
-				// remove the directory — measured — but this scenario's
-				// `session_start` leaves a `recent-touches` append in flight against
-				// the `PILENS_DATA_DIR` captured HERE, and that append recreates the
-				// root after the case has ended (measured: the `fork` root's
-				// `data/repo-<hash>/recent-touches.json` is written while the
-				// `resume` case is running). The repo's answer to a deferred fixture
-				// producer is the tracked-root seam plus the drained sweep at file
-				// end, not a second removal loop of this file's own.
-				const { tmpDir: tmp, cleanup } = setupTestEnvironment(
-					`pi-lens-wiring-${reason}-`,
-				);
-				const prevDataDir = process.env.PILENS_DATA_DIR;
-				process.env.PILENS_DATA_DIR = path.join(tmp, "data");
-				try {
-					_resetSessionLifecycleForTests();
-					const pi = createPiMock();
-					extension(pi.asExtensionAPI());
-					const ctx = makeCtx({
-						cwd: tmp,
-						sessionId: `cache-${reason}`,
-						sessionFile: path.join(tmp, `${reason}-session.jsonl`),
-					});
-					await pi.emit("session_start", { reason: "startup" }, ctx);
-					const loader = pi.getTool("pi_lens_activate_tools") as {
-						execute: (...args: unknown[]) => Promise<unknown>;
-					};
-					await loader.execute(
-						"activate",
-						{ tools: ["ast_grep_search"] },
-						undefined,
-						undefined,
-						ctx,
-					);
-					const parentPosture = new Set(pi.activeTools);
-					expect(parentPosture.has("ast_grep_search")).toBe(true);
-					expect(parentPosture.has("ast_grep_replace")).toBe(false);
-
-					// A fork's successor announces itself on the file pi names at
-					// shutdown; a reload keeps its file and names none.
-					await pi.emit(
-						"session_shutdown",
-						{
-							reason,
-							targetSessionFile:
-								reason === "reload"
-									? undefined
-									: ctx.sessionManager.getSessionFile(),
-						},
-						ctx,
-					);
-					const rebuilt = createPiMock();
-					extension(rebuilt.asExtensionAPI());
-					for (const name of rebuilt.tools.keys())
-						rebuilt.activeTools.add(name);
-					await rebuilt.emit("session_start", { reason }, ctx);
-					// Character-for-character the parent's set: the advertised tool
-					// list still matches the cached prompt prefix AND the model's
-					// activation survived.
-					expect([...rebuilt.activeTools].sort()).toEqual(
-						[...parentPosture].sort(),
-					);
-					expect(rebuilt.activeTools.has("ast_grep_search")).toBe(true);
-					expect(rebuilt.activeTools.has("ast_grep_replace")).toBe(false);
-					expect(rebuilt.activeTools.has("lsp_navigation")).toBe(false);
-				} finally {
-					if (prevDataDir === undefined) delete process.env.PILENS_DATA_DIR;
-					else process.env.PILENS_DATA_DIR = prevDataDir;
-					cleanup();
-				}
-			},
-		);
-
-		// #3306: the three roots above stay TRACKED after `cleanup()` so this sweep
-		// still has a handle on the one a deferred `recent-touches` append
-		// recreated. It runs before the setup file's own teardown check, because
-		// vitest runs `afterAll` hooks in reverse registration order and the setup
-		// file registered first.
-		afterAll(async () => {
-			await cleanupTestEnvironmentsDrained("pi-lens-wiring-");
-		});
-
-		it("restores activation after a factory re-run for the same session file", async () => {
-			const tmp = fs.mkdtempSync(
-				path.join(os.tmpdir(), "pi-lens-factory-rebuild-"),
-			);
-			const prevDataDir = process.env.PILENS_DATA_DIR;
-			process.env.PILENS_DATA_DIR = path.join(tmp, "data");
-			try {
-				_resetSessionLifecycleForTests();
-				const sessionFile = path.join(tmp, "conversation.jsonl");
-				const ctx = makeCtx({
-					cwd: tmp,
-					sessionId: "factory-rebuild",
-					sessionFile,
-				});
-				const first = createPiMock();
-				extension(first.asExtensionAPI());
-				await first.emit("session_start", { reason: "startup" }, ctx);
-				const loader = first.getTool("pi_lens_activate_tools") as {
-					execute: (...args: unknown[]) => Promise<unknown>;
-				};
-				await loader.execute(
-					"factory-rebuild",
-					{ tools: ["ast_grep_search"] },
-					undefined,
-					undefined,
-					ctx,
-				);
-
-				// pi shuts the old activation down before it re-runs the factory.
-				await first.emit("session_shutdown", { reason: "reload" }, ctx);
-				const rebuilt = createPiMock();
-				extension(rebuilt.asExtensionAPI());
-				for (const name of rebuilt.tools.keys()) rebuilt.activeTools.add(name);
-				await rebuilt.emit("session_start", { reason: "reload" }, ctx);
-
-				expect(rebuilt.activeTools.has("ast_grep_search")).toBe(true);
-				expect(rebuilt.activeTools.has("ast_grep_replace")).toBe(false);
-				await sidecarWritten(tmp, "factory-rebuild");
-			} finally {
-				if (prevDataDir === undefined) delete process.env.PILENS_DATA_DIR;
-				else process.env.PILENS_DATA_DIR = prevDataDir;
-				removeTempDirSync(tmp);
-			}
-		});
-
-		it("inherits activation from the parent session file on a fork", async () => {
-			const tmp = fs.mkdtempSync(
-				path.join(os.tmpdir(), "pi-lens-wiring-fork-"),
-			);
-			const prevDataDir = process.env.PILENS_DATA_DIR;
-			process.env.PILENS_DATA_DIR = path.join(tmp, "data");
-			try {
-				_resetSessionLifecycleForTests();
-				const pi = createPiMock();
-				extension(pi.asExtensionAPI());
-				const parentFile = path.join(tmp, "parent.jsonl");
-				const childFile = path.join(tmp, "child.jsonl");
-				const parent = makeCtx({
-					cwd: tmp,
-					sessionId: "fork-parent",
-					sessionFile: parentFile,
-				});
-				const child = makeCtx({
-					cwd: tmp,
-					sessionId: "fork-child",
-					sessionFile: childFile,
-				});
-				await pi.emit("session_start", { reason: "startup" }, parent);
-				const loader = pi.getTool("pi_lens_activate_tools") as {
-					execute: (...args: unknown[]) => Promise<unknown>;
-				};
-				await loader.execute(
-					"activate",
-					{ tools: ["ast_grep_search"] },
-					undefined,
-					undefined,
-					parent,
-				);
-				await pi.emit(
-					"session_shutdown",
-					{ reason: "fork", targetSessionFile: childFile },
-					parent,
-				);
-				// #3521: pi re-runs the extension factory for the forked runtime,
-				// so the child's session_start reaches a SECOND activation that
-				// shares only the module with the parent's.
-				const forked = createPiMock();
-				extension(forked.asExtensionAPI());
-				for (const name of forked.tools.keys()) forked.activeTools.add(name);
-				await forked.emit(
-					"session_start",
-					{ reason: "fork", previousSessionFile: parentFile },
-					child,
-				);
-				expect(forked.activeTools.has("ast_grep_search")).toBe(true);
-				expect(forked.activeTools.has("ast_grep_replace")).toBe(false);
-				await sidecarWritten(tmp, "fork-parent");
-			} finally {
-				if (prevDataDir === undefined) delete process.env.PILENS_DATA_DIR;
-				else process.env.PILENS_DATA_DIR = prevDataDir;
-				removeTempDirSync(tmp);
-			}
-		});
-
-		it("keeps the departing conversation's posture when /new changes session file", async () => {
-			const tmp = fs.mkdtempSync(
-				path.join(os.tmpdir(), "pi-lens-wiring-new-retain-"),
-			);
-			const prevDataDir = process.env.PILENS_DATA_DIR;
-			process.env.PILENS_DATA_DIR = path.join(tmp, "data");
-			try {
-				_resetSessionLifecycleForTests();
-				const pi = createPiMock();
-				extension(pi.asExtensionAPI());
-				const departing = makeCtx({
-					cwd: tmp,
-					sessionId: "new-departing",
-					sessionFile: path.join(tmp, "departing.jsonl"),
-				});
-				const replacement = makeCtx({
-					cwd: tmp,
-					sessionId: "new-replacement",
-					sessionFile: path.join(tmp, "replacement.jsonl"),
-				});
-				await pi.emit("session_start", { reason: "startup" }, departing);
-				const loader = pi.getTool("pi_lens_activate_tools") as {
-					execute: (...args: unknown[]) => Promise<unknown>;
-				};
-				await loader.execute(
-					"activate",
-					{ tools: ["ast_grep_search"] },
-					undefined,
-					undefined,
-					departing,
-				);
-				await endTurnAndPersist(pi, departing, tmp, "new-departing");
-
-				await pi.emit(
-					"session_shutdown",
-					{
-						type: "session_shutdown",
-						reason: "new",
-						targetSessionFile: path.join(tmp, "replacement.jsonl"),
-					},
-					departing,
-				);
-				for (const name of pi.tools.keys()) pi.activeTools.add(name);
-				await pi.emit(
-					"session_start",
-					{
-						reason: "new",
-						previousSessionFile: path.join(tmp, "departing.jsonl"),
-					},
-					replacement,
-				);
-				await pi.emit(
-					"session_shutdown",
-					{
-						type: "session_shutdown",
-						reason: "resume",
-						targetSessionFile: path.join(tmp, "departing.jsonl"),
-					},
-					replacement,
-				);
-				for (const name of pi.tools.keys()) pi.activeTools.add(name);
-				await pi.emit("session_start", { reason: "resume" }, departing);
-
-				expect(pi.activeTools.has("ast_grep_search")).toBe(true);
-				expect(pi.activeTools.has("ast_grep_replace")).toBe(false);
-			} finally {
-				if (prevDataDir === undefined) delete process.env.PILENS_DATA_DIR;
-				else process.env.PILENS_DATA_DIR = prevDataDir;
-				removeTempDirSync(tmp);
-			}
-		});
-
-		it("does not restore activation for a different session file on resume", async () => {
-			const tmp = fs.mkdtempSync(
-				path.join(os.tmpdir(), "pi-lens-wiring-identity-"),
-			);
-			const prevDataDir = process.env.PILENS_DATA_DIR;
-			process.env.PILENS_DATA_DIR = path.join(tmp, "data");
-			try {
-				_resetSessionLifecycleForTests();
-				const pi = createPiMock();
-				extension(pi.asExtensionAPI());
-				const first = makeCtx({
-					cwd: tmp,
-					sessionId: "identity-a",
-					sessionFile: path.join(tmp, "a.jsonl"),
-				});
-				const second = makeCtx({
-					cwd: tmp,
-					sessionId: "identity-b",
-					sessionFile: path.join(tmp, "b.jsonl"),
-				});
-				await pi.emit("session_start", { reason: "startup" }, first);
-				const loader = pi.getTool("pi_lens_activate_tools") as {
-					execute: (...args: unknown[]) => Promise<unknown>;
-				};
-				await loader.execute(
-					"activate",
-					{ tools: ["ast_grep_search"] },
-					undefined,
-					undefined,
-					first,
-				);
-				await pi.emit(
-					"session_shutdown",
-					{ reason: "resume", targetSessionFile: path.join(tmp, "b.jsonl") },
-					first,
-				);
-				for (const name of pi.tools.keys()) pi.activeTools.add(name);
-				await pi.emit("session_start", { reason: "resume" }, second);
-
-				expect(pi.activeTools.has("ast_grep_search")).toBe(false);
 			} finally {
 				if (prevDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 				else process.env.PILENS_DATA_DIR = prevDataDir;
@@ -1301,128 +903,6 @@ describe("index.ts extension wiring", () => {
 				await pi.emit("session_start", { reason: "new" }, current);
 
 				expect(pi.activeTools.has("ast_grep_search")).toBe(false);
-			} finally {
-				if (prevDataDir === undefined) delete process.env.PILENS_DATA_DIR;
-				else process.env.PILENS_DATA_DIR = prevDataDir;
-				removeTempDirSync(tmp);
-			}
-		});
-
-		// A genuinely new conversation drops the activation memory: the rebuilt
-		// all-active set shrinks back to the bare baseline.
-		it("forgets the previous conversation's activations on a new session", async () => {
-			const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-wiring-new-"));
-			const prevDataDir = process.env.PILENS_DATA_DIR;
-			process.env.PILENS_DATA_DIR = path.join(tmp, "data");
-			try {
-				_resetSessionLifecycleForTests();
-				const pi = createPiMock();
-				extension(pi.asExtensionAPI());
-				const ctx = makeCtx({
-					cwd: tmp,
-					sessionId: "cache-new",
-					sessionFile: path.join(tmp, "new-session.jsonl"),
-				});
-				await pi.emit("session_start", { reason: "startup" }, ctx);
-				const loader = pi.getTool("pi_lens_activate_tools") as {
-					execute: (...args: unknown[]) => Promise<unknown>;
-				};
-				await loader.execute(
-					"activate",
-					{ tools: ["ast_grep_search"] },
-					undefined,
-					undefined,
-					ctx,
-				);
-				expect(pi.activeTools.has("ast_grep_search")).toBe(true);
-
-				// pi-mock bound: this lifecycle assertion does not re-run the factory or reproduce host ordering.
-				await pi.simulateSessionShutdownAndRebuild("new", ctx);
-
-				expect(pi.activeTools.has("ast_grep_search")).toBe(false);
-				expect(pi.activeTools.has("lens_diagnostics")).toBe(true);
-			} finally {
-				if (prevDataDir === undefined) delete process.env.PILENS_DATA_DIR;
-				else process.env.PILENS_DATA_DIR = prevDataDir;
-				removeTempDirSync(tmp);
-			}
-		});
-
-		// Round 4: `session_shutdown` with reason "quit" performs no
-		// activation-memory mutation — real pi exits on quit, so a clear
-		// there is production-inert. Re-adding one reds this case: the same
-		// file resumes with its posture intact.
-		it("retains remembered posture across a quit shutdown", async () => {
-			const tmp = fs.mkdtempSync(
-				path.join(os.tmpdir(), "pi-lens-wiring-quit-"),
-			);
-			const prevDataDir = process.env.PILENS_DATA_DIR;
-			process.env.PILENS_DATA_DIR = path.join(tmp, "data");
-			try {
-				_resetSessionLifecycleForTests();
-				const pi = createPiMock();
-				extension(pi.asExtensionAPI());
-				const ctx = makeCtx({
-					cwd: tmp,
-					sessionId: "cache-quit",
-					sessionFile: path.join(tmp, "quit-session.jsonl"),
-				});
-				await pi.emit("session_start", { reason: "startup" }, ctx);
-				const loader = pi.getTool("pi_lens_activate_tools") as {
-					execute: (...args: unknown[]) => Promise<unknown>;
-				};
-				await loader.execute(
-					"activate",
-					{ tools: ["ast_grep_search"] },
-					undefined,
-					undefined,
-					ctx,
-				);
-				expect(pi.activeTools.has("ast_grep_search")).toBe(true);
-				await endTurnAndPersist(pi, ctx, tmp, "cache-quit");
-
-				// pi-mock bound: this lifecycle assertion does not re-run the factory or reproduce host ordering.
-				await pi.simulateSessionShutdownAndRebuild("quit", ctx);
-
-				// The host rebuilds all-active, as on every replacement; the
-				// same file resumes with its posture intact.
-				for (const name of pi.tools.keys()) pi.activeTools.add(name);
-				await pi.emit("session_start", { reason: "resume" }, ctx);
-
-				expect(pi.activeTools.has("ast_grep_search")).toBe(true);
-				expect(pi.activeTools.has("ast_grep_replace")).toBe(false);
-			} finally {
-				if (prevDataDir === undefined) delete process.env.PILENS_DATA_DIR;
-				else process.env.PILENS_DATA_DIR = prevDataDir;
-				removeTempDirSync(tmp);
-			}
-		});
-
-		it("keeps every tool statically active when lazy tooling is disabled", async () => {
-			const tmp = fs.mkdtempSync(
-				path.join(os.tmpdir(), "pi-lens-wiring-static-tools-"),
-			);
-			const prevDataDir = process.env.PILENS_DATA_DIR;
-			process.env.PILENS_DATA_DIR = path.join(tmp, "data");
-			try {
-				_resetSessionLifecycleForTests();
-				const pi = createPiMock({ "no-lazy-tools": true });
-				extension(pi.asExtensionAPI());
-				const ctx = makeCtx({ cwd: tmp, sessionId: "static" });
-				await pi.emit("session_start", { reason: "startup" }, ctx);
-
-				for (const tool of EXPECTED_TOOLS) {
-					expect(pi.activeTools.has(tool), tool).toBe(true);
-				}
-
-				// Still all-active after a rebuild: under the opt-out pi-lens never
-				// touches the set, on any reason.
-				for (const name of pi.tools.keys()) pi.activeTools.add(name);
-				await pi.emit("session_start", { reason: "fork" }, ctx);
-
-				for (const tool of EXPECTED_TOOLS) {
-					expect(pi.activeTools.has(tool), tool).toBe(true);
-				}
 			} finally {
 				if (prevDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 				else process.env.PILENS_DATA_DIR = prevDataDir;
@@ -1844,7 +1324,10 @@ describe("stale extension ctx tolerance in event handlers (#1925)", () => {
 		// `session_start crashed: …` / `context event error: …` and counted
 		// nowhere, so `expectStaleSkipRecorded` is what reds on pre-fix code.
 		{ event: "session_start", payload: makeSessionStartEvent() },
-		{ event: "context", payload: { messages: [] } },
+		// #4631: the INJECTING hook on pi 0.87+. `context` above sees the
+		// conversation without system messages and answers `undefined` without
+		// reading the event at all, so it is that later hook which touches ctx.
+		{ event: "context_with_system", payload: makeContextWithSystemEvent() },
 	];
 
 	for (const { event, payload } of CASES) {
@@ -1886,9 +1369,10 @@ describe("stale extension ctx tolerance in event handlers (#1925)", () => {
 	 *
 	 * `makeStaleCtx` is dead on arrival, so the wrapper's probe catches it and
 	 * the handler never runs. The other half of the race is a swap that lands
-	 * while the handler is already inside its own body. `session_start` and
-	 * `context` each wrap their body in a total catch, so without an explicit
-	 * rethrow that catch eats the stale throw and the wrapper never sees it.
+	 * while the handler is already inside its own body. `session_start` and the
+	 * two request hooks (`context`, `context_with_system`) each wrap their body in
+	 * a total catch, so without an explicit rethrow that catch eats the stale
+	 * throw and the wrapper never sees it.
 	 */
 	function makeCtxThatDiesMidHandler() {
 		const ctx = makeCtx({ sessionId: "dies-mid-handler" });
@@ -1906,7 +1390,8 @@ describe("stale extension ctx tolerance in event handlers (#1925)", () => {
 
 	for (const { event, payload } of [
 		{ event: "session_start", payload: makeSessionStartEvent() },
-		{ event: "context", payload: { messages: [] } },
+		// #4631: the hook that reads ctx to build an injection on pi 0.87+.
+		{ event: "context_with_system", payload: makeContextWithSystemEvent() },
 	]) {
 		it(`hands a MID-handler stale throw to the wrapper from ${event} (#1929)`, async () => {
 			const pi = createPiMock();

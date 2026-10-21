@@ -18,7 +18,7 @@
 import { withResidentBootstrap } from "../support/bootstrap-access.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { removeTempDirSync, setupTestEnvironment } from "./test-utils.js";
-import { makeLspServiceDouble } from "../support/lsp-service-double.js";
+import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 
 // Dynamically imported below (never a static top-level import): a static
 // `import ... from "../../clients/runtime-session.js"` pulls in
@@ -56,10 +56,6 @@ vi.mock("../../clients/lsp/config.js", () => ({
 	loadLSPConfig: vi.fn().mockResolvedValue({}),
 	initLSPConfig: vi.fn().mockResolvedValue(undefined),
 	getServerInitOverride: vi.fn().mockReturnValue(undefined),
-}));
-
-vi.mock("../../clients/lsp/capabilities.js", () => ({
-	getLSPService: vi.fn(() => makeLspServiceDouble()),
 }));
 
 function makeDefaultRuntime() {
@@ -145,6 +141,7 @@ describe("cascade tier-3 registry is reset at session_start (#1910)", () => {
 	let handleSessionStart: HandleSessionStart;
 
 	beforeEach(async () => {
+		await installLspServiceDouble();
 		vi.clearAllMocks();
 		tmpDir = setupTestEnvironment("pi-lens-cascade-tier-reset-").tmpDir;
 		const cascadeTier = await import("../../clients/lsp/cascade-tier.js");

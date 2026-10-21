@@ -14,9 +14,22 @@ Before mocking a `clients/` module, look for its test seam (`set*`, `adopt*`, or
 `reset*`). The pre-flight must list the mock dependents of any module whose
 exports change.
 
+A new test starts from `tests/support/`: a registration question (flags,
+tools, commands, declarations) goes through tier 1
+(`tests/support/pi-runner.ts`, a real `ExtensionRunner`), a session-flow case
+through tier 2 (`tests/support/pi-session.ts`), and a JSON-lines sink through
+`readNdjsonRows` (`tests/support/ndjson-rows.ts`), asserting `skipped === 0`
+when the claim needs the complete output. No fake of an in-process store or
+registry; other doubles only as `AGENTS.md` admits them.
+
 - Trace the production entry point and reproduce the defect through it
   (principles §1, "Premise first"). Name no seam before the reproduction; the
   red reproduction is your feedback loop, built before any theory of the fix.
+  Reproduce on the reporter's pi host and pi-lens version, taken from the
+  report or its session log. When that version cannot be installed, name the
+  one you used instead; never substitute the latest silently. Report
+  `confirmed`, `partially confirmed` (name what differed), `not reproduced`
+  (name what you tried), or `blocked` (name the missing access or state).
 - Climb the minimalism ladder before screening against the `AGENTS.md`
   catalog: the catalog says what must not break, never what to add.
 - Check which open PRs touch your files (`gh pr list`, `gh pr diff`), design to

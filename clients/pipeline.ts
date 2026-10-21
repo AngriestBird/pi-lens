@@ -1735,11 +1735,11 @@ export async function runFormatPhase(
 	filePath: string,
 	getFormatService: () => FormatService,
 	dbg: PipelineContext["dbg"],
-	signal?: AbortSignal,
+	signal: AbortSignal | undefined,
 	budgetMs = HOOK_WALL_BUDGET_MS.tool_result_edit,
 	hook: LedgerHookKey = "tool_result_edit",
-	writeHold?: FileMutationHold,
-	sessionRoot?: string,
+	writeHold: FileMutationHold | undefined,
+	sessionRoot: string,
 ): Promise<FormatPhaseResult> {
 	let formatChanged = false;
 	let formattersUsed: string[] = [];
@@ -1748,9 +1748,7 @@ export async function runFormatPhase(
 	let fileContent: string | undefined;
 	let abandoned: Promise<void> | undefined;
 
-	const adopted =
-		sessionRoot !== undefined &&
-		resolveAnalysisRoot(filePath, sessionRoot) === "adopted";
+	const adopted = resolveAnalysisRoot(filePath, sessionRoot) === "adopted";
 	if (adopted)
 		emitBounded(
 			"adopted_root_writer_skipped",
@@ -1773,6 +1771,7 @@ export async function runFormatPhase(
 				signal,
 				budgetMs,
 				hook,
+				sessionRoot,
 				...(writeHold ? { writeHold } : {}),
 			});
 			abandoned = result.abandoned;
@@ -2175,7 +2174,15 @@ async function analysePipeline(
 	// re-token below replaces the pair.
 	const widgetOrder = () =>
 		writeOrderToken(ctx.telemetry?.orderTurn, ctx.telemetry?.writeIndex);
-	admitWidgetDiagnosticsWrite(filePath, widgetOrder());
+	// The widget store keys syntactically (#1020), so every writer of one file
+	// must hand it one form. Dispatch records this file's runners under
+	// `ctx.filePath`, its key (`createDispatchContext`), and so do
+	// `clients/mcp/analyze.ts` and the LSP reconciles; the final snapshot
+	// takes the same key, or a file spelled through a link (a file link, a
+	// session rooted at a link) kept a pending record nothing finished (#4689
+	// review r1 F4).
+	const widgetKey = normalizeMapKey(filePath);
+	admitWidgetDiagnosticsWrite(widgetKey, widgetOrder());
 
 	const phase = createPhaseTracker(toolName, filePath);
 	const pipelineStart = Date.now();
@@ -2528,7 +2535,7 @@ async function analysePipeline(
 			? [...dispatchResult.diagnostics, ...keptBlockers]
 			: dispatchResult.diagnostics;
 	recordDiagnostics(
-		filePath,
+		widgetKey,
 		storedDiagnostics,
 		widgetOrder(),
 		analysisReadAtMs,

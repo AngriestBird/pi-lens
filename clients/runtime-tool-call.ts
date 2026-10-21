@@ -12,6 +12,7 @@ import { evaluateSharedCheckoutGuard } from "./shared-checkout-guard.js";
 import { logLatency } from "./latency-logger.js";
 import {
 	captureFileStats,
+	captureGitDirtyPaths,
 	getOpaqueBaselineStore,
 	headRecordKey,
 	isGitWorktree,
@@ -639,7 +640,19 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 				if (await isGitWorktree(scanRoot)) {
 					// Git-first: the timestamp IS the baseline; git answers what
 					// changed, at any repo size, with no file-universe cap.
-					baseline = { startedAt: started, strategy: "git" };
+					//
+					// #4502: the dirty set is the second half. A same-HEAD discard
+					// (`git stash`, `git checkout .`, `git restore`) moves no HEAD and
+					// leaves the tree clean, so neither signal names the reverted
+					// files; the pre-command dirty set is the only evidence that they
+					// were ours to resync. `undefined` when git could not answer, which
+					// says "unknown", never "the tree was clean".
+					const dirtyPaths = await captureGitDirtyPaths(scanRoot);
+					baseline = {
+						startedAt: started,
+						strategy: "git",
+						...(dirtyPaths === undefined ? {} : { dirtyPaths }),
+					};
 					resultNote = "git";
 				} else {
 					const outcome = await captureFileStats(scanRoot, {

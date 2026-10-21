@@ -1,5 +1,85 @@
 # HISTORY
 
+## 2026-10-20 — a fold rule that ran only after the lane was written
+
+Three documents decided folding before this date, and none of them read the
+open-issue board when a lane was still being planned: the consolidation audit in
+`AGENTS.md`, the brief-time sibling fold in `docs/pi-lens-merge-policy.md`
+"Brief contract (orchestrator)", and the review-follow-up folds in that file's
+"Filing issues (orchestrator)" and `docs/pi-lens-subagent.md` "Follow-ups". So
+an issue a planned lane could settle still became its own fix later, which is
+the issue-list growth the p3 known-gap rules exist to prevent.
+
+The fix is a `fold check` in `AGENTS.md` "Orchestration and delegated work": as
+soon as a lane's mechanism is known, read every open issue against it, fold the
+candidates into that PR with one `Closes #…` each, and record a decision for
+each one that stays out. #4672 is the first lane to run it: it planned to fold
+#3920's three members into one change, refused #3753 with a reason, and sent two
+findings that no lane could carry (#4673, and the `index-3248` shuffle member on
+#4561) to the record instead of the folder.
+
+## 2026-10-21 — a detector reads one root while its subject writes in several (shape 80)
+
+Bash write recovery ran `git status` in the session's own checkout only. A
+write inside a sibling linked worktree therefore read as "nothing changed",
+and got no dispatch, no LSP resync and no record (#2050). The same shape made
+a HEAD-less `.git` resolve to the wrong checkout (#4508). The #2050 fix takes
+the verdict per root: the session root plus each checkout the command itself
+names, capped and with one bounded refusal record per session.
+
+## 2026-10-20 — instrument attributes by id and order (shape 76)
+
+The nightly capability census bracketed each fixture phase with a byte offset
+into `extension.log`, a buffered async sink, and `filterPublishTrace` drained
+rows by `server` alone. Five typescript fixtures share that id, so a foreign
+client's late `diags=1` publish landed in the clean fixture's phase;
+`classifyFirstPublish` reads order only, so the cell flipped between
+`empty-first` and `direct` and the two-run hysteresis committed the flip. Raw
+JSON-RPC against ts-ls 5.3.0 with TS 5.9.3 showed what the fixtures actually
+do: `bad.ts` publishes one dirty set carrying 2322, `clean.ts` publishes one
+EMPTY set and nothing else. The marker had no measurement behind it (#4615).
+
+## 2026-10-20 — cancellation read as failure (shape 77)
+
+Master's required `TLA+ models` check reded while every model in the shard was
+`ok`: shard 4/4 finished all its steps and was recorded `cancelled` at 735 s
+against a 720 s cap, and the aggregate compares the shard result against
+`success` alone. A rerun reproduced it at 726 s, and the infra-kill classifier
+never looked, because that workflow gates on a `failure` conclusion. The four
+shards took 268, 349, 494 and 726 seconds, so one shard owns the tail of a
+round-robin split by count (#4672).
+
+## 2026-10-20 — a dependency's cache directory attributed to the fixture (shape 78)
+
+`jiti`'s `prepareCacheDir` runs `mkdirSync(os.tmpdir()/jiti)` on the caller's
+stack when pi's loader resolves an extension by path, so the tmp-root
+interposer recorded the directory as a fixture sibling of
+`tests/clients/skills-package-filter.test.ts` — accurate per process, wrong per
+cause. Pinning `JITI_FS_CACHE=0`/`JITI_CACHE=0` drops the write from 1/1 to 0/0
+and a planted sibling still reds (#4673).
+
+## 2026-10-20 — prefix churn from a non-append write (shape 79)
+
+Shape 79 ("Prefix churn from a non-append write") entered the catalog here.
+
+#4644 moved context injection onto `context_with_system` so a turn-end finding
+no longer makes pi rebuild the system head: before it, an injecting turn cost
+about 175k written tokens (#4631). A sweep of every pi-lens writer of the cached
+prefix then found one more live member, lazy tool activation through
+`pi_lens_activate_tools`. On a model without mid-conversation system messages,
+pi-ai folds the system messages into one rebuilt head per request, so one
+activation rewrote that head once (a real 1.3.0 session: `329be587b646` ->
+`ffbf6d1b3f38`) and the miss read `unknown / sequence-hash-truncated` right
+after pi-lens's own `tool_set_mutation` row. The guard is the per-writer tier-2
+prefix-stability case in #4687.
+
+## 2026-10-20 — the lesson shapes 76, 77 and 78 share
+
+All three share one lesson: the surface that reports a result is not the surface
+that produced it, so a verdict read from an aggregate, an ordering, or a
+recorded creator needs the producing step's own evidence before anything trusts
+it.
+
 ## 2026-10-19 — a defensive copy severed the identity the idle-eviction probe arms
 
 `compileLspRegistry` returned `{ ...server }` for every built-in with no command

@@ -13,6 +13,8 @@ import {
 	isAtOrAboveHomeDir,
 	isUnderDir,
 	isVendorPath,
+	pathsEqual,
+	realpathOrResolve,
 	walkUpDirs,
 } from "./path-utils.js";
 import { isPiLensInternalPath } from "./file-utils.js";
@@ -20,6 +22,7 @@ import { findPiLensConfigInDir } from "./project-lens-config.js";
 import {
 	resolveGitCheckout,
 	resolveLinkedWorktreeOwner,
+	sameCheckoutOtherRoot,
 } from "./review-graph/git-identity.js";
 
 export type AnalysisRootMode =
@@ -62,34 +65,17 @@ function nearestProjectRoot(filePath: string): string | undefined {
 	return hasProjectMarker(filesystemRoot) ? filesystemRoot : undefined;
 }
 
-function realPathOrResolved(filePath: string): string {
-	const resolved = nodePath.resolve(filePath);
-	let current = resolved;
-	const missing: string[] = [];
-	while (true) {
-		try {
-			const real = fs.realpathSync.native(current);
-			return nodePath.join(real, ...missing.reverse());
-		} catch {
-			const parent = nodePath.dirname(current);
-			if (parent === current) return resolved;
-			missing.push(nodePath.basename(current));
-			current = parent;
-		}
-	}
-}
-
 /** The selected filesystem root, or undefined for a refused path. */
 export function resolveAnalysisRootPath(
 	filePath: string,
 	sessionRoot: string,
 	homeDirOverride?: string,
 ): string | undefined {
-	const resolved = realPathOrResolved(filePath);
-	const session = realPathOrResolved(sessionRoot);
-	const tmp = realPathOrResolved(os.tmpdir());
+	const resolved = realpathOrResolve(filePath);
+	const session = realpathOrResolve(sessionRoot);
+	const tmp = realpathOrResolve(os.tmpdir());
 	const data = process.env.PI_LENS_HOME
-		? realPathOrResolved(process.env.PI_LENS_HOME)
+		? realpathOrResolve(process.env.PI_LENS_HOME)
 		: undefined;
 	if (isVendorPath(resolved)) return undefined;
 	if (
@@ -109,7 +95,7 @@ export function resolveAnalysisRootPath(
 	const candidate = nearestProjectRoot(resolved);
 	if (!candidate || candidate === nodePath.parse(candidate).root)
 		return undefined;
-	const home = realPathOrResolved(homeDirOverride ?? os.homedir());
+	const home = realpathOrResolve(homeDirOverride ?? os.homedir());
 	// D1: sibling projects below $HOME are eligible; only $HOME itself and
 	// ancestors are refused. Keep the shared ceiling in isAtOrAboveHomeDir.
 	if (isAtOrAboveHomeDir(candidate, home)) return undefined;
@@ -131,7 +117,7 @@ function classifyAnalysisRoot(
 	sessionRoot: string,
 	homeDirOverride?: string,
 ): { mode: AnalysisRootMode; root: string | undefined } {
-	const resolved = realPathOrResolved(filePath);
+	const resolved = realpathOrResolve(filePath);
 	if (isVendorPath(resolved)) return { mode: "none", root: undefined };
 	const checkout = resolveGitCheckout(sessionRoot);
 	const owner = checkout
@@ -225,4 +211,33 @@ export function resolveSessionConfigRoot(
 		if (dir === session) break;
 	}
 	return { register: session, mode };
+}
+
+/**
+ * May this ROOT receive session bookkeeping? The session root, a directory
+ * under it, and the session repository's linked worktrees may; an adopted
+ * project must not (AGENTS.md "Analysis-root invariant"). The root form of
+ * {@link resolveAnalysisRoot}, which answers "session" for any file under the
+ * session root (a monorepo package's client is rooted there, #4532 round 5,
+ * review F7): checkout identity is read at the root itself, not at a child
+ * path, so a caller holding a root asks the owner instead of re-deriving the
+ * rule.
+ */
+export function isSessionBookkeepingRoot(
+	root: string,
+	sessionRoot: string,
+): boolean {
+	const resolved = realpathOrResolve(root);
+	// The file form's first refusal (#4532 round 6, verify r5): every file
+	// under a vendor root resolves to "none", so the root is no session's.
+	if (isVendorPath(resolved)) return false;
+	const session = realpathOrResolve(sessionRoot);
+	if (pathsEqual(resolved, session) || isUnderDir(resolved, session))
+		return true;
+	const checkout = resolveGitCheckout(session);
+	if (!checkout) return false;
+	// The owner rule itself, asked of two ROOTS instead of a root and a file
+	// (#4532 round 4, NITPICK-1): this used to be a second spelling of
+	// `resolveLinkedWorktreeOwner`'s predicate, on `===` rather than `pathsEqual`.
+	return sameCheckoutOtherRoot(checkout, resolveGitCheckout(resolved));
 }

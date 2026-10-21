@@ -48,7 +48,7 @@ import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { handleToolCall } from "../../clients/runtime-tool-call.js";
 import { handleToolResult } from "../../clients/runtime-tool-result.js";
 import { setupTestEnvironment } from "./test-utils.js";
-import { makeLspServiceDouble } from "../support/lsp-service-double.js";
+import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 import { runHandlerExpectingNoThrow } from "../support/handler-verdict.js";
 
 vi.mock("../../clients/pipeline.js", () => ({
@@ -58,12 +58,6 @@ vi.mock("../../clients/pipeline.js", () => ({
 		isError: false,
 		fileModified: false,
 	})),
-}));
-
-vi.mock("../../clients/lsp/capabilities.js", () => ({
-	getLSPService: () => makeLspServiceDouble(),
-	resetLSPService: () => {},
-	notifyExternalFileChange: vi.fn(async () => undefined),
 }));
 
 vi.mock("../../clients/bootstrap.js", () => ({
@@ -166,7 +160,8 @@ if (!(MUTATION_BRIDGE_KEY in (globalThis as object))) {
 	});
 }
 
-beforeEach(() => {
+beforeEach(async () => {
+	await installLspServiceDouble();
 	resetObservedMutationNet();
 	resetMutationAttribution();
 	resetDegradationLedger();

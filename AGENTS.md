@@ -181,6 +181,14 @@ The principles' delegation contract applies. pi-lens adds:
 - Three open issues on one mechanism, in any seam groups, open a consolidation
   audit across every consumer of that mechanism before the next one is filed
   (history: `HISTORY.md`, 2026-10-16).
+- Run the **fold check** as soon as a lane's mechanism is known, which is when
+  the brief is written: read every open issue against that mechanism and decide
+  each candidate as folded into this PR (one `Closes #…` per folded issue) or
+  not folded, with the reason (two hazards in one review, a maintainer decision,
+  a blocked dependency, a different seam). The brief carries the candidate list
+  and its decisions, and the PR body records them under `## Fold check`.
+  Planning precedes filing: a new issue is the answer for p2+ work no lane can
+  carry, never for a p3 the lane could fold (history: `HISTORY.md`, 2026-10-20).
 - The per-PR loop (review, verify, auto-merge on green), round routing, the
   merge gate and the Common mistakes table live in `docs/pi-lens-merge-policy.md`.
 - Read CI with `node scripts/ci-verdict.mjs <pr|sha>` (exact head, all pages).
@@ -204,8 +212,8 @@ The principles' delegation contract applies. pi-lens adds:
 - **store** — The owner of durable or session rows, including their read/modify/write lifecycle; owned by `clients/durable-store.ts`; retires `cache` when state ownership, not derived reuse, is meant.
 - **mirror** — A derived copy refreshed inside the writer's guard; owned by `clients/diagnostic-dispositions.ts`; retires `replica` and `shadow`.
 - **path spelling** — The input string form of a path, before key or canonical normalization; owned by `clients/path-utils.ts`; retires `path name` and `raw path` when form is meant.
-- **path key** — A normalized process-local map key; owned by `clients/path-utils.ts` (`normalizeEphemeralMapKey`); retires `path identity` and `canonical path` for ephemeral maps.
-- **canonical path** — A filesystem-aware normalized path used for long-lived map state; owned by `clients/path-utils.ts` (`normalizeFilePath`); retires `resolved path` when canonical casing and realpath semantics are meant.
+- **path key** — A normalized process-local map key; owned by `clients/path-utils.ts` (`normalizeEphemeralMapKey`); retires `canonical path` for ephemeral maps.
+- **path identity** — The kernel-real path of a file: the realpath of its nearest existing ancestor plus the missing tail, what `normalizeMapKey` answers for an absolute spelling and `realpathOrResolve` for any spelling, on every platform; owned by `clients/path-utils.ts`; retires `canonical path` and `resolved path` where identity is meant.
 - **rendezvous id** — A pure, cross-process string derivation shared by independent writers/readers; owned by `clients/mcp/ipc.ts`; retires `workspace key` and `IPC path key`.
 - **generation** — A monotonic/session/content/scan/disposition-store identity that rejects late work; owned by `clients/generation-guard.ts` (`GenerationSource`, `GenerationHandle`, and `createGenerationSource`); retires `epoch` and `version` when the identity's lifecycle is meant.
 - **degradation record** — A bounded once-only or counted ledger event for a partial, unavailable, or deferred result; owned by `clients/degradation-ledger.ts`; retires `log`, `warning`, and `telemetry`.
@@ -231,7 +239,12 @@ ADR: docs/adr/0009-reported-path-attribution.md
 ## Recurring defect shapes
 
 Screen against these before writing code. Shapes are numbered once, grouped by
-the surface they bite; each block loads only when its trigger applies.
+the surface they bite; each block loads only when its trigger applies. A shape
+whose open population is countable names its census in its entry. The census
+is one command, run at the repo root, printing one line per member or naming
+one baseline key. A PR that fixes members of the shape quotes that census
+before and after. A shape with no census in its entry is uncounted: a PR that
+fixes its members says so instead of quoting a before and after.
 
 <!-- markdownlint-disable MD029 -->
 
@@ -245,11 +258,13 @@ the surface they bite; each block loads only when its trigger applies.
    normalizer each uses; a claim that one normalizer subsumes another is
    measured per transformation (separators, dot segments, case, symlinks,
    existence), never asserted (#3178: four rounds, two inverted arms, one
-   unmeasured swap).
+   unmeasured swap). Enforced by `tests/config/path-identity-sweep.test.ts`
+   (partial: a raw realpath or a raw `path.resolve` key outside
+   `clients/path-utils.ts`).
 
 2. **Host path functions in a shape branch:** once a path is classified as
    Windows-shaped, use `path.win32`; do not use host-default `path` functions.
-   Prefer `toPosix`, `splitPathSegments`, and the canonical path helpers.
+   Prefer `toPosix`, `splitPathSegments`, and the path identity helpers.
 
 32. **Mixed path comparison:** use one platform-aware containment expression;
     do not combine case-sensitive equality with case-folded relative paths. A
@@ -471,6 +486,18 @@ file-scoped worklist and receives no project-wide scanner output.
     publish; the model checked `FreshResult` alone and the fake published after
     the fence reply).
 
+79. **Prefix churn from a non-append write:** a provider caches the request in
+    order (tools, then system, then messages), so a write that changes bytes
+    before the newest message re-bills the whole conversation: a returned
+    `context` list that makes pi rebuild the system head, or a tool-set change
+    on a model that folds system messages into the head. Write at the tail
+    only, and count each tool-set change as one full rewrite on such models. A
+    host-generation gate takes a recorded fixture per certified minor, never
+    two. Screen: drive two real-session requests that differ only in the
+    writer, and compare the head and pi-ai's collapsed head. Enforced by
+    `tests/clients/prompt-cache-prefix-writers.test.ts` (one tier-2 cell per
+    writer: registration, session-start plan, activation, injection).
+
 </important>
 
 <important if="a runner outcome or tool execution">
@@ -587,6 +614,12 @@ file-scoped worklist and receives no project-wide scanner output.
     hits are the classifier's own already-normalized patterns, `ci-verdict`'s
     line classifier (strips before it matches), `check-pr-body`'s lint of pasted
     body text, and readers of Vitest's JSON report.
+80. **Single scan root:** a detector takes its population from one root while
+    its subject can write in several, so a clean answer from the wrong root
+    reads as a complete negative. Screen: for each detector, list the roots its
+    subject can write in. Then show that each root gets its own verdict, or that
+    one root provably covers them. Census: not countable yet. Instance and
+    dates: `HISTORY.md`.
 
 </important>
 
@@ -661,7 +694,9 @@ file-scoped worklist and receives no project-wide scanner output.
     process or host boundary. New in-process `vi.mock` targets and hand-rolled
     LSP client or service doubles are ratcheted by
     `tests/clients/flake-shape-ratchet.test.ts` (`in-process-mock`,
-    `service-double`).
+    `service-double`). Its census is the `in-process-mock` key of
+    `tests/support/flake-shape-baseline.json`: one line per `<file>::<module>`
+    row, 1009 of them on master 33eac2aa1. #4709 drives that count down.
 
 67. **Sink read before drain:** a log sink's `log`/`append` only enqueue, so a
     test that reads the sink's byte offset, line count, or rows while one of
@@ -702,6 +737,42 @@ file-scoped worklist and receives no project-wide scanner output.
     root became the project root and #4559's quick-mode cell failed three
     pre-push runs. Plant the fixture's own marker, or assert the root it
     resolved before the case runs. Guard: planned in #4560, not yet running.
+
+76. **Instrument attributes by id and order, not by the emitting subject:** a
+    probe that brackets each phase with an offset into a buffered async sink,
+    and drains rows by subject id alone, folds a sibling's late row into its own
+    phase. The verdict then depends on write order, so the same measurement
+    flips between two answers and a data refresh commits the artifact as a
+    finding. Stamp each row with the subject that emitted it, or scope the drain
+    to that subject, and require the last writer of a verdict to be the subject's
+    own emitter. Enforced by `tests/clients/lsp/lsp-publish-trace-attribution.test.ts`.
+    Instance and dates: `HISTORY.md`.
+
+77. **Cancellation read as failure:** an aggregate that compares each shard's
+    result against `success` reds a required check when the shard finished every
+    step and lost its race with `timeout-minutes`, and no rerun recovers it,
+    because the infra-kill classifier reads only `failure` runs. A shard's own
+    step conclusions tell a teardown cancellation from a mid-check one, and every
+    required job's measured runtime belongs beside its cap, because a cap set at
+    the measured maximum fails the first time a runner is slow. That runtime is
+    also a per-shard SUM, so it can never be the stale-cost verdict: only the
+    table's rank agreement with the run's own ordering is scale-free enough to
+    survive one shard's machine. Guard: `tests/scripts/check-shard-verdict.test.ts`
+    (the seam, both fail-closed directions), the gating-step list in
+    `tests/config/unit-tests-shard-workflow.test.ts`, and
+    `tests/scripts/ci-verdict-runtime-cap.test.ts` (a measured runtime beside its
+    cap). Instance and dates: `HISTORY.md`.
+
+78. **A dependency's cache directory attributed to the fixture that triggered
+    it:** a loader that materialises `os.tmpdir()/<tool>` on the caller's own
+    stack looks like a fixture sibling, so the creator recorded for it is
+    accurate per process and wrong per cause, and the sweep reds a file that
+    never created it. Pin the loader's cache off for the test process rather
+    than admitting the directory's name, and keep a planted sibling red to prove
+    it. Enforced by the by-path-cache case in
+    `tests/config/tmp-fixture-hygiene.test.ts`, plus the `JITI_FS_CACHE=0` pin
+    that `tests/support/vitest-setup.ts` and `vitest.config.ts` force on the
+    test process. Instance and dates: `HISTORY.md`.
 
 </important>
 
@@ -1056,6 +1127,16 @@ file-scoped worklist and receives no project-wide scanner output.
 - Per-path LSP notifications serialize read/build/send/record work. Pull
   cancellation blocks a same-path replacement until settlement. Waits are
   deadline- and abort-bounded, and silence is never clean.
+- Document line addressing has one owner, `clients/lsp/content-scan.ts`: the
+  `\n` count behind the `lsp_document_send` record's `contentLineCount` and the
+  LSP sync bound (`countLfNewlines`), the last LSP-addressable line an
+  Incremental change spans, and one line's text (`lineTextAt`, which the
+  diagnostic-conversion call sites read) all come from it. The rule it owns is
+  the count and the one-line read: no other module may `split("\n")` document
+  content to obtain a line count or a single line — a send, a bound check, and
+  a line read ask this owner. A module that needs the whole line array (a
+  multi-line table, a per-line scan of its own document) keeps its `split`; the
+  array is the value it consumes, never a way to count or to reach one line.
 - `touchFile` fires a type-2 watched-file announcement at entry for the first
   seen content hash of a path, before the owner's didChange; it reaches every
   other live client of the same server across package roots through the client
@@ -1170,6 +1251,19 @@ file-scoped worklist and receives no project-wide scanner output.
 - `scripts/ci-verdict.mjs` ends every CLI path with `ci-verdict: exit <N> (<kind>)`;
   read that final stdout line instead of `$?` after a pipe. `guard-bash` denies
   the piped-status recurrence while allowing output-only pipes.
+- A formatter is handed the file's identity, never the link that named it:
+  `realpathOrResolve` (`clients/path-utils.ts`) is the real path
+  of the nearest existing ancestor plus the missing tail, with no lexical `..`
+  collapse first. `formatFile` and `FormatService.formatFile` use it, so
+  `AGENTS.md -> CLAUDE.md` formats `CLAUDE.md` and Prettier's "is a symbolic
+  link" rejection never occurs. `FormatService.formatFile` also requires
+  `sessionRoot` and classifies the identity through `resolveAnalysisRoot`: an
+  `adopted` or `none` identity is refused, writes nothing, and records one
+  `adopted-root-writer-skipped` row (`writer: "format"`). The refusal is on
+  identity, not spelling, so a plain file outside every writable root (a
+  sibling package of a monorepo session cwd, say) is refused as well; a caller
+  that must format it passes that root as `sessionRoot`. Proven by
+  `tests/clients/format-service-symlink-identity.test.ts`.
 - Formatter and autofix policy is config-first where the registry says so.
   Formatting is strict by default. Autofix must carry per-diagnostic fixability
   or a conservative capability allowlist.
@@ -1261,7 +1355,7 @@ file-scoped worklist and receives no project-wide scanner output.
 - Async publication carries a generation or epoch and checks it before and
   after awaited work. Graph snapshots are immutable by replacement.
 - Review-graph, snapshot, reverse-dependency, word-index, and call-graph data
-  use canonical paths and explicit partial-coverage markers. A capped walk is
+  use path identities and explicit partial-coverage markers. A capped walk is
   lower-bound evidence, never a clean zero.
 - Tree-sitter uses the shared client and file-major project passes. Grammar
   crashes are blocked before load; source overrides record package/version
@@ -1674,6 +1768,61 @@ process. Read lifecycle order from the real `session_scope_transition` rows
 and dead-weight rows, not from the pi mock; the mock does not re-run the
 extension factory or reproduce pi lifecycle ordering.
 
+Two in-process pi tiers sit under that child lane. A case whose verdict
+depends on what pi does with a handler's return value, what the model
+receives, or how pi orders a session goes through one of them, never
+`tests/support/pi-mock.ts`. The double kept a `context` list as returned, pi
+rebuilt the system head, and every test passed. Tier 1,
+`tests/support/pi-runner.ts`, loads the built extension into pi's real
+`ExtensionRunner`: flags, tools, commands, declared registrations, and no
+`emit`, by design. Tier 2, `tests/support/pi-session.ts`, runs a real
+`AgentSession` with pi-ai's `fauxProvider`: turns, tool round trips, session
+ids, and the request the model sees. Their header comments state the APIs
+and limits. A new tier capability adds a case to `pi-runner.test.ts` or
+`pi-session.test.ts` first. `pi-mock.ts` stays only for a test file on
+`PI_MOCK_IMPORTERS` (`tests/support/pi-mock-importers.ts`), whose row states the
+class: `process-boundary` (4 rows), `internal-seam` (41: the case interposes on
+a pi-lens `clients/` module either through `vi.mock`, which cannot reach the
+copy pi's loader builds, or through a test-side copy of a process-global
+service the loaded copy does not share, such as `clients/lsp`'s service),
+`unproducible-payload` (5: a payload a scripted provider cannot
+produce), `double-subject` (1: the double is the subject), and
+`real-ui-harness` (1: the claim is what the TUI shows or mounts, which no
+in-process tier can produce).
+
+A row's class holds for the whole file only while every case in it needs that
+class. A slice that edits an admitted file re-checks it case by case, and its
+PR body records the split: moved, or stays with the class. A file whose double
+replaces a spawned process (a child spawn, a pipeline runner, or a language
+server binary) is `process-boundary`, not `internal-seam`. A test-side copy of
+the in-process `clients/lsp` service object stays `internal-seam`.
+
+No row carries a `pending slice` marker, and the sweep test refuses that
+label: slice 7 classified the last three with the probe that keeps each on the
+double, and every roadmap slice is closed, so a reopened placeholder reds
+instead of naming work no slice owns. The five classes cover the list's 52
+rows at that recording (slice 7 moved the `index-smells-rollup-wiring` row out
+with its file), and this command reproduces them:
+`grep -oE '^[[:space:]]*"[^"]*": *"[^"]+"' tests/support/pi-mock-importers.ts | sed -E 's/.*": *"([^"]+)"$/\1/' | sort | uniq -c`.
+The double throws at load for a test file not on the list, so a new user fails
+however it imports it. The list only shrinks:
+`tests/config/pi-mock-importer-sweep.test.ts` fails on a row whose file no
+longer uses it. A host claim names the host it ran on, and the per-PR tiers run
+on the one installed host (`@earendil-works/pi-coding-agent`, the dev pin). The
+certified spread is a manual or nightly run, never a per-PR gate:
+`node scripts/probe-pi-host-tiers.mjs` runs tier 1 and tier 2 against every
+certified host installed on the machine, takes the certified set from the
+baseline doc's verified-host table through `scripts/lib/pi-host-spread.mjs` (the
+reader the packaging ratchet uses), and prints one line per host naming the host
+and the version it ran on. Each tier loads the SELECTED host's own code through
+`PI_LENS_PI_HOST_PACKAGE` — tier 1's entry, and tier 2's session API and
+scripted provider — so a host directory that cannot supply it fails that tier
+instead of being reported as probed. It installs nothing: a host it cannot find
+is reported `not installed` and only fails the run under `--require-all`, and an
+installed host the certified set does not name is named in a warning and not
+probed. Run `npm run build` first, because both tiers load the built extension,
+and `tests/scripts/probe-pi-host-tiers.test.ts` holds the script's own logic.
+
 When the defect is an ordering of awaits on one seam (a coalescing queue, a
 per-key serializer), or the seam has regressed before, write a scheduler
 property with `fc.scheduler()` instead of one more replay:
@@ -1682,8 +1831,15 @@ property with `fc.scheduler()` instead of one more replay:
 
 Use `tests/support/fault-injection.ts` for wedged children, seam delays,
 starved budgets, and gates; `makeRunnerCtx`, `makeLspServiceDouble`, and
-`makeRealRunnerEnv` for dispatch, LSP, and rule behavior. Mock only external
-binaries, network, host SDK seams, clocks, or fault injection.
+`makeRealRunnerEnv` for dispatch, LSP, and rule behavior. Check `tests/support/`
+before writing a helper: a host case uses a pi tier, and a JSON-lines sink is
+read through `readNdjsonRows` (`tests/support/ndjson-rows.ts`), never a local
+`JSON.parse` loop; a claim that needs the complete output asserts its
+`skipped === 0`, because the reader drops a line it cannot parse and reports
+the count instead of throwing. Mock only external binaries, network, host SDK
+seams (not pi's own behaviour: see the pi tiers above), clocks, or fault
+injection; an in-process store, registry or coordinator is never replaced by a
+fake.
 
 Test authoring screens:
 

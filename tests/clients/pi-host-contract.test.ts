@@ -28,20 +28,11 @@ import {
 } from "../../clients/runtime-coordinator.js";
 import { handleToolCall } from "../../clients/runtime-tool-call.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
-import { makeLspServiceDouble } from "../support/lsp-service-double.js";
+import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 import { matchingCloseIndex } from "../support/sweep-kit.js";
 import { runHandlerExpectingNoThrow } from "../support/handler-verdict.js";
 
 const touchFileMock = vi.fn().mockResolvedValue(undefined);
-vi.mock("../../clients/lsp/capabilities.js", () => ({
-	getLSPService: () =>
-		makeLspServiceDouble({
-			touchFile: touchFileMock,
-			getWarmClientForFile: vi.fn().mockResolvedValue(undefined),
-		}),
-	resetLSPService: () => {},
-}));
-
 vi.mock("../../clients/bootstrap.js", async () => {
 	const { bootstrapSeamMock } = await import("../support/bootstrap-mock.js");
 	return bootstrapSeamMock(async () => ({
@@ -110,10 +101,65 @@ function baseDeps(
 	} as Parameters<typeof handleToolCall>[0];
 }
 
-beforeEach(() => {
+beforeEach(async () => {
+	await installLspServiceDouble({
+		touchFile: touchFileMock,
+		getWarmClientForFile: vi.fn().mockResolvedValue(undefined),
+	});
 	resetDegradationLedger();
 	readGuardLogEntries.length = 0;
 	touchFileMock.mockClear();
+});
+
+/**
+ * #4631 — the host's two request phases own DIFFERENT structures, which is the
+ * whole reason pi-lens injects from the later one (N1: the `## Detection` gap
+ * named this file, so the contract it would have caught lives here rather than
+ * only in a #4631-specific witness).
+ *
+ * `context` (phase 1) hands a handler the conversation with system messages
+ * FILTERED OUT and, when the handler returns a changed list, rebuilds one
+ * merged system head from the transcript (`restoreSystemMessages`). That
+ * re-derived head is what broke the prompt cache on pi 0.87+. `context_with_system`
+ * (phase 2) hands over the FULL transcript and assigns the returned list
+ * verbatim, reporting `Handler removed the leading system message` if a
+ * handler's return loses it.
+ */
+describe("#4631 — the request phases own different structures", () => {
+	it("pins that `context` filters and re-derives, and `context_with_system` assigns verbatim", () => {
+		const source = readHostSource(path.join("core", "extensions", "runner.js"));
+		const phaseStart = source.indexOf(
+			'snapshotEventHandlers(this.extensions, "context")',
+		);
+		const withSystemStart = source.indexOf(
+			'snapshotEventHandlers(this.extensions, "context_with_system")',
+		);
+		expect(phaseStart).toBeGreaterThan(-1);
+		expect(withSystemStart).toBeGreaterThan(phaseStart);
+		const contextPhase = source.slice(phaseStart, withSystemStart);
+		const withSystemPhase = source.slice(withSystemStart);
+
+		// Phase 1: system messages are stripped from what the handler sees …
+		expect(contextPhase).toContain(
+			'const visibleMessages = currentMessages.filter((message) => message.role !== "system")',
+		);
+		// … and a changed return is RE-DERIVED into one merged head, which is the
+		// rebuild that invalidates the provider's cached prefix.
+		expect(contextPhase).toContain(
+			"restoreSystemMessages(currentMessages, visibleSnapshot, returned)",
+		);
+		// Phase 2: the returned list is assigned, never re-derived …
+		expect(withSystemPhase).toContain(
+			"currentMessages = handlerResult?.messages ?? currentMessages",
+		);
+		// … and losing the leading system message is reported as an error.
+		expect(withSystemPhase).toContain(
+			"Handler removed the leading system message",
+		);
+
+		// The premise that makes the split matter: phase 2 has no re-derivation.
+		expect(withSystemPhase).not.toContain("restoreSystemMessages(");
+	});
 });
 
 describe("#1655 item 1 — a throwing tool_call handler must not block the tool", () => {

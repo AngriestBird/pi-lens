@@ -18,6 +18,7 @@
  */
 
 import type { LSPDiagnostic } from "../lsp/client.js";
+import { lineTextAt } from "../lsp/content-scan.js";
 import { shouldDegradeAuxiliaryLsp } from "../lsp-budget.js";
 import { isSubagentSession } from "../subagent-mode.js";
 import type { FileRole } from "../file-role.js";
@@ -83,7 +84,6 @@ export function isNosemgrepSuppressed(
 ): boolean {
 	const startLine = d.range?.start?.line; // 0-based
 	if (startLine == null) return false;
-	const lines = content.split("\n");
 	const ruleId = String(d.code ?? "");
 	const checkLine = (
 		text: string | undefined,
@@ -102,8 +102,12 @@ export function isNosemgrepSuppressed(
 			.includes(ruleId);
 	};
 	// The finding's own line (inline OK), then the line above (standalone comment only).
+	// #2066: both lines come from `lineTextAt`, which walks to them instead of
+	// splitting the whole document — this runs once per auxiliary finding, so
+	// the split was a full-document allocation per finding.
 	return (
-		checkLine(lines[startLine], false) || checkLine(lines[startLine - 1], true)
+		checkLine(lineTextAt(content, startLine), false) ||
+		checkLine(lineTextAt(content, startLine - 1), true)
 	);
 }
 
@@ -126,7 +130,9 @@ export function isZizmorIgnoreSuppressed(
 ): boolean {
 	const startLine = d.range?.start?.line; // 0-based
 	if (startLine == null) return false;
-	const line = content.split("\n")[startLine];
+	// #2066: `lineTextAt` reads the one line this needs; the split it replaces
+	// built every line of the document for the finding's own.
+	const line = lineTextAt(content, startLine);
 	if (!line) return false;
 	const match = ZIZMOR_IGNORE_RE.exec(line);
 	if (!match) return false;

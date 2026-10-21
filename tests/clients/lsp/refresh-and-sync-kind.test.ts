@@ -21,6 +21,8 @@ import {
 	MAX_INCREMENTAL_TEXT_RETAINED_ENTRIES,
 } from "../../../clients/lsp/client.js";
 import { hashDiagnosticContent } from "../../../clients/lsp/diagnostic-binding.js";
+import { exceedsLspSyncLimits } from "../../../clients/lsp/content-limits.js";
+import { lineTextAt } from "../../../clients/lsp/content-scan.js";
 import { stopLSP } from "../../../clients/lsp/launch.js";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
 import { spawnFakeLspServer } from "../../support/fake-lsp-server.js";
@@ -521,22 +523,30 @@ interface DocumentScanProbe {
 	charCodeAtVisits: number;
 	splitReceiverChars: number;
 	maxSplitResultLength: number;
+	/** `indexOf("\n", …)` calls over a document-sized receiver. */
+	lfIndexOfCalls: number;
 }
 
 /**
  * #2066: count the JS full-document work one call performs — every
- * `charCodeAt` visit, plus the receiver length and result size of every
- * `split` over a string at least `minReceiverLength` long (shorter splits are
- * path/URI plumbing, not document passes). Patched onto `String.prototype`
- * because the code under test walks a plain string: there is no seam to
- * inject, and a count is the only instrument that distinguishes one pass from
- * three without measuring wall time.
+ * `charCodeAt` visit, every `indexOf("\n", …)` over a document, plus the
+ * receiver length and result size of every `split` over a string at least
+ * `minReceiverLength` long (shorter splits are path/URI plumbing, not document
+ * passes). Patched onto `String.prototype` because the code under test walks a
+ * plain string: there is no seam to inject, and a count is the only instrument
+ * that distinguishes one pass from three without measuring wall time.
+ *
+ * The three counters catch the three shapes a second full pass can take: a
+ * line array (`split`), a per-character walk (`charCodeAt`), and a second
+ * native LF walk (`lfIndexOfCalls`, which one pass over an LF document pays
+ * exactly once per terminator plus one final miss).
  */
 async function measureDocumentScans(
 	minReceiverLength: number,
 	run: () => Promise<void>,
 ): Promise<DocumentScanProbe> {
 	const realCharCodeAt = String.prototype.charCodeAt;
+	const realIndexOf = String.prototype.indexOf;
 	// Pinned to the string/RegExp overload; `.call` on the raw method resolves
 	// to the `Symbol.split` one instead.
 	const realSplit: (
@@ -548,6 +558,7 @@ async function measureDocumentScans(
 		charCodeAtVisits: 0,
 		splitReceiverChars: 0,
 		maxSplitResultLength: 0,
+		lfIndexOfCalls: 0,
 	};
 	const install = (name: string, value: unknown) => {
 		Object.defineProperty(String.prototype, name, {
@@ -560,6 +571,15 @@ async function measureDocumentScans(
 		probe.charCodeAtVisits++;
 		return realCharCodeAt.call(this, index);
 	});
+	install(
+		"indexOf",
+		function (this: string, search: string, fromIndex?: number): number {
+			if (search === "\n" && this.length >= minReceiverLength) {
+				probe.lfIndexOfCalls++;
+			}
+			return realIndexOf.call(this, search, fromIndex as number);
+		},
+	);
 	install(
 		"split",
 		function (
@@ -582,6 +602,7 @@ async function measureDocumentScans(
 		await run();
 	} finally {
 		install("charCodeAt", realCharCodeAt);
+		install("indexOf", realIndexOf);
 		install("split", realSplit);
 	}
 	return probe;
@@ -814,6 +835,12 @@ describe("#2066 one JS document pass per send", () => {
 		expect(passes).toBeLessThan(0.05);
 		expect(probe.splitReceiverChars).toBe(0);
 		expect(probe.maxSplitResultLength).toBeLessThanOrEqual(1);
+		// #2066: exactly ONE native LF walk for the send — every `\n` once, then
+		// the miss that ends it. A second line-count pass in the send doubles
+		// this, whichever shape it takes.
+		expect(probe.lfIndexOfCalls).toBe(
+			`${previous}const tail = 2;\n`.split("\n").length,
+		);
 	});
 
 	it("still walks a CRLF document exactly once, with no split and no line array", async () => {
@@ -832,6 +859,68 @@ describe("#2066 one JS document pass per send", () => {
 		expect(passes).toBeLessThan(1.5);
 		expect(probe.splitReceiverChars).toBe(0);
 		expect(probe.maxSplitResultLength).toBeLessThanOrEqual(1);
+	});
+
+	// The other two document-sized consumers of the same walk (#2066). Each
+	// one used to answer by splitting the whole document, and each assertion
+	// below fails on a second full pass: a line array shows up in
+	// `splitReceiverChars`, a per-character walk in `charCodeAtVisits`, and a
+	// second native LF pass doubles `lfIndexOfCalls`.
+	const DOCUMENT = "const value = 1; // padding for a realistic line\n".repeat(
+		4000,
+	);
+	const NEWLINES = DOCUMENT.split("\n").length - 1;
+
+	it("checks the LSP sync bound in one LF walk, with no line array", async () => {
+		const probe = await measureDocumentScans(1024, async () => {
+			exceedsLspSyncLimits(DOCUMENT);
+		});
+		// Pre-fix: `content.split("\n").length` — one substring per line.
+		expect(probe.splitReceiverChars).toBe(0);
+		expect(probe.maxSplitResultLength).toBeLessThanOrEqual(1);
+		expect(probe.charCodeAtVisits).toBe(0);
+		// One pass reaches every `\n` and then misses once.
+		expect(probe.lfIndexOfCalls).toBe(NEWLINES + 1);
+	});
+
+	it("checks the LSP sync bound on a CRLF document in one LF walk, with no per-character visit", async () => {
+		// Review F1: the bound check used to ask `scanDocumentContent`, whose
+		// `\r` branch walks the document per character to compute a `lastLine`
+		// the bound check never reads. On any document holding a `\r` that made
+		// the check 4.6x to 5.5x slower than the split it replaced (0.06 ->
+		// 0.31 ms at 196 KB, 0.63 -> 2.91 ms at 1.92 MB).
+		const CRLF_DOCUMENT =
+			"const value = 1; // padding for a realistic line\r\n".repeat(4000);
+		const probe = await measureDocumentScans(1024, async () => {
+			exceedsLspSyncLimits(CRLF_DOCUMENT);
+		});
+		expect(probe.splitReceiverChars).toBe(0);
+		expect(probe.maxSplitResultLength).toBeLessThanOrEqual(1);
+		// No per-character visit, and one native LF pass that reaches every
+		// `\n` and then misses once — the same shape the LF case pins.
+		expect(probe.charCodeAtVisits).toBe(0);
+		expect(probe.lfIndexOfCalls).toBe(CRLF_DOCUMENT.split("\n").length);
+	});
+
+	it("reads one line without splitting the document", async () => {
+		const probe = await measureDocumentScans(1024, async () => {
+			lineTextAt(DOCUMENT, 3);
+		});
+		// Pre-fix: `content.split("\n")[line]` — the whole document's lines.
+		expect(probe.splitReceiverChars).toBe(0);
+		expect(probe.maxSplitResultLength).toBeLessThanOrEqual(1);
+		// Line 3 costs three separators to reach it plus one to end it.
+		expect(probe.lfIndexOfCalls).toBe(4);
+	});
+
+	it("counts the LF walk the instrument observes (positive control)", async () => {
+		const content = "x\n".repeat(2000);
+		const probe = await measureDocumentScans(1024, async () => {
+			content.indexOf("\n");
+		});
+		// Without this, a probe that observed nothing would also read 0 for
+		// both consumers above.
+		expect(probe.lfIndexOfCalls).toBe(1);
 	});
 });
 

@@ -28,8 +28,8 @@
  * its config-resolution expectation — which is what the `handleSessionStart`
  * describe block asserts, through the real handler. The re-arm of the claim
  * itself belongs to index.ts's `session_start` closure, ahead of its own
- * `ensureLSPConfigInitialized`; `tests/index-config-resolved-session-wiring.
- * test.ts` drives that ordering end-to-end (review round 2, F1).
+ * `ensureLSPConfigInitialized`; `tests/index-4632-s5-session-identity.test.ts`
+ * drives that ordering end-to-end (review round 2, F1).
  */
 
 import * as fs from "node:fs";
@@ -558,7 +558,7 @@ describe("config_resolved: the session's one positive config record (#2526)", ()
  * `ensureLSPConfigInitialized` before it calls the handler, so a re-arm inside
  * the handler would still split one session across two rows (the ensure's,
  * then the deferred load's) — the re-arm belongs to index.ts's session_start
- * closure; `tests/index-config-resolved-session-wiring.test.ts` drives that
+ * closure; `tests/index-4632-s5-session-identity.test.ts` drives that
  * ordering, and the quick/minimal "no load scheduled" cases, end-to-end.
  *
  * What this block proves is the NEGATIVE: the handler itself writes nothing

@@ -593,6 +593,10 @@ describe("index.ts hook anchors (#3878)", () => {
 			tool_result: ["on", "onToolResult"],
 			tool_execution_end: ["on"],
 			context: ["on"],
+			// #4631: the pi 0.87+ request hook, an inline registration like `context`.
+			context_with_system: ["on"],
+			// #4687: the model-switch re-plan of the lazy-tools posture.
+			model_select: ["on"],
 		});
 	});
 

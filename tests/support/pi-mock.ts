@@ -10,15 +10,32 @@
  *
  * Typed against the pinned `@earendil-works/pi-coding-agent` types only
  * (type-only import — no runtime dependency, per AGENTS.md install constraints).
+ *
+ * LAZY-TOOLS POSTURE (#4687, #4723 F5). Both harnesses start the situational
+ * tools INACTIVE by default, because pi-lens's default `tools.lazy` is `true`
+ * on every model; the one decision table is `lazyToolsApply` in
+ * `clients/tool-set-policy.ts`. `makeCtx` names no model, which an opted-in
+ * `tools.lazy: "auto"` treats as lazy too (the configured default, never
+ * eager); a per-model case belongs on tier 2 (`pi-session.ts`, `modelCompat`).
  */
 
 import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
-import { afterEach } from "vitest";
+import { afterEach, expect } from "vitest";
 import { withTimeout } from "../../clients/deadline-utils.js";
 import { runHandlerExpectingNoThrow } from "./handler-verdict.js";
+import { piMockAdmission } from "./pi-mock-importers.js";
+
+/**
+ * Admit-list gate (#4632, recurrence #4631): this double is the wrong seam for
+ * host-semantics cases, and the list of test files still allowed to load it only
+ * shrinks. The check runs at module load, on the test file vitest is running, so
+ * it sees every importer however the specifier was spelled or reached.
+ */
+const admissionRefusal = piMockAdmission(expect.getState().testPath);
+if (admissionRefusal !== undefined) throw new Error(admissionRefusal);
 
 /**
  * #3855: the session manager is pi's, not the ctx's. pi 1.0.4 hands a /reload

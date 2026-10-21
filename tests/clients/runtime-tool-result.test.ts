@@ -232,8 +232,8 @@ it("keeps intended vendor skips silent (#4218)", async () => {
 /**
  * A checkout with one linked worktree, written as git writes it: `<repo>/.git`
  * is a directory (the shared commondir), `<worktree>/.git` is a file holding
- * `gitdir: <repo>/.git/worktrees/<name>`, and that gitdir's `commondir` points
- * back at the shared `.git`. `resolveGitCheckout`/`resolveLinkedWorktreeOwner`
+ * `gitdir: <repo>/.git/worktrees/<name>`, that gitdir's `commondir` points
+ * back at the shared `.git`, and each gitdir holds a `HEAD`. `resolveGitCheckout`/`resolveLinkedWorktreeOwner`
  * read exactly these files, so no `git` child is needed to classify the file.
  */
 function writeLinkedWorktree(root: string): { repo: string; worktree: string } {
@@ -246,6 +246,10 @@ function writeLinkedWorktree(root: string): { repo: string; worktree: string } {
 	fs.writeFileSync(path.join(repo, "package.json"), "{}\n");
 	fs.writeFileSync(path.join(worktree, ".git"), `gitdir: ${linkedGitDir}\n`);
 	fs.writeFileSync(path.join(linkedGitDir, "commondir"), "../..\n");
+	// git writes a HEAD in both gitdirs, and a `.git` directory without one is
+	// not a repository to `resolveGitCheckout` (#4508).
+	fs.writeFileSync(path.join(gitDir, "HEAD"), "ref: refs/heads/main\n");
+	fs.writeFileSync(path.join(linkedGitDir, "HEAD"), "ref: refs/heads/wt\n");
 	return { repo, worktree };
 }
 

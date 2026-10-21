@@ -39,7 +39,7 @@ const WORKFLOW_PATH = resolve(ROOT, ".github/workflows/ci.yml");
 
 const PRODUCTION_ROOTS = "clients|tools|mcp|scripts|commands|index\\.ts";
 const WALK_HELPERS =
-	"listSourceFiles|clientSourceFiles|collectTestFiles|globSync|glob|fastGlob|readdirSync|readdir";
+	"listSourceFiles|clientSourceFiles|collectTestFiles|walkFiles|globSync|glob|fastGlob|readdirSync|readdir";
 
 // Modules whose exports walk a tree, and the export names that do.
 const WALK_MODULES = "fast-glob|glob|node:fs|fs|node:fs/promises|fs/promises";
@@ -61,6 +61,9 @@ const NAMED_IMPORT = new RegExp(
 	`\\bimport\\s*\\{([^}]*)\\}\\s*from\\s*["'](?:${WALK_MODULES})["']`,
 	"g",
 );
+// The repo-wide walker's module, by its path tail (#4104 F4).
+const WALK_FILES_IMPORT =
+	/\bimport\s*\{([^}]*)\}\s*from\s*["'](?:[^"']*\/)?walk-files(?:\.mjs)?["']/g;
 
 // The local names this file binds to a walk helper (#3448): `fg` for
 // `import fg from "fast-glob"`, `g` for `import { glob as g } from "glob"`.
@@ -75,16 +78,33 @@ function walkHelperAliases(source: string): string[] {
 		);
 	}
 	for (const match of codeMatches(source, NAMED_IMPORT)) {
-		for (const specifier of match[1].split(",")) {
-			const [imported, local = imported] = specifier
-				.trim()
-				.replace(/^type\s+/, "")
-				.split(/\s+as\s+/);
-			if (imported && WALK_EXPORTS.has(imported) && local)
-				aliases.add(local.replaceAll("$", "\\$"));
-		}
+		bindNamedWalkers(
+			match[1],
+			(imported) => WALK_EXPORTS.has(imported),
+			aliases,
+		);
+	}
+	// The repo-wide walker (scripts/lib/walk-files.mjs, #4104 F4) is walk-named
+	// too, so an alias of it (`walkFiles as wf`) binds the same way.
+	for (const match of codeMatches(source, WALK_FILES_IMPORT)) {
+		bindNamedWalkers(match[1], (imported) => imported === "walkFiles", aliases);
 	}
 	return [...aliases];
+}
+
+function bindNamedWalkers(
+	specifiers: string,
+	accepts: (imported: string) => boolean,
+	aliases: Set<string>,
+): void {
+	for (const specifier of specifiers.split(",")) {
+		const [imported, local = imported] = specifier
+			.trim()
+			.replace(/^type\s+/, "")
+			.split(/\s+as\s+/);
+		if (imported && accepts(imported) && local)
+			aliases.add(local.replaceAll("$", "\\$"));
+	}
 }
 
 // ── Walks delegated to a tests/support module (#3472) ──────────────────────
@@ -653,7 +673,10 @@ describe("targeted advisory workflow contract (#3215)", () => {
 				"a scanner in both lists is armed by a production change AND a " +
 					"tests/ change; only a scanner that walks both trees may be, and " +
 					"the list is pinned",
-			).toEqual(["tests/config/env-path-key-composition-sweep.test.ts"]);
+			).toEqual([
+				"tests/config/env-path-key-composition-sweep.test.ts",
+				"tests/config/git-fixture-governance.test.ts",
+			]);
 			expect(expectedRegistry).toEqual([...new Set(registered)].sort());
 			expect(new Set(registered).size).toBe(
 				registered.length - bothLists.length,
@@ -768,6 +791,16 @@ describe("targeted advisory workflow contract (#3215)", () => {
 		);
 		expect(selector).toContain("GITHUB_STEP_SUMMARY");
 		expect(selector).toContain("cap exceeded");
+	});
+
+	// #4437: run 38618401454 failed "Run targeted tests" on a fixed 3000 ms
+	// waitFor while only the shuffle step below set the timeout scale.
+	it("scales the interleaving kit's wall budgets on the targeted run (#4437)", () => {
+		const job = readWorkflow().jobs["targeted-tests-advisory"];
+		const step = job?.steps?.find(
+			(other) => other.name === "Run targeted tests",
+		);
+		expect(step?.env).toMatchObject({ PI_LENS_TEST_TIMEOUT_SCALE: "3" });
 	});
 
 	// #4397 recurrence: a PR's new test file that depends on case order passes
@@ -1002,6 +1035,34 @@ describe("tree-scanner census — walks delegated to tests/support (#3472)", () 
 			{
 				"scan.ts": 'export { default } from "./inner.js";',
 				"inner.ts": "export default (d: string) => listSourceFiles(d);",
+			},
+		],
+		// The repo-wide walker (scripts/lib/walk-files.mjs, #4104) is a walk
+		// helper too: a support module that calls it directly, through a
+		// module-local helper, or through an import alias is a walker. Before
+		// `walkFiles` joined WALK_HELPERS these were missed (#4104 F4).
+		[
+			"a walkFiles call in the support export",
+			'import { counts } from "../support/scan.js";\ncounts("x");',
+			{
+				"scan.ts":
+					"export function counts(d: string) {\n	return walkFiles(d, () => true, () => {});\n}",
+			},
+		],
+		[
+			"a walkFiles call reached through a module-local helper",
+			'import { counts } from "../support/scan.js";\ncounts("x");',
+			{
+				"scan.ts":
+					"export function counts(d: string) {\n	return files(d);\n}\nfunction files(d: string) {\n	return walkFiles(d, () => true, () => {});\n}",
+			},
+		],
+		[
+			"a walkFiles import renamed in the support module",
+			'import { counts } from "../support/scan.js";\ncounts("x");',
+			{
+				"scan.ts":
+					'import { walkFiles as wf } from "../../scripts/lib/walk-files.mjs";\nexport function counts(d: string) {\n	return wf(d, () => true, () => {});\n}',
 			},
 		],
 	])("detects %s", (_label, source, modules) => {

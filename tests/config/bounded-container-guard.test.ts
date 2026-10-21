@@ -461,7 +461,12 @@ describe("#2981 long-lived containers are bounded or admitted", () => {
 		"clients/runtime-tool-result.ts#inFlightPipelines:5e20396b",
 		"clients/sgconfig.ts#materializeMergedRuleDir:8f144dfd",
 		"clients/tool-policy.ts#GRADLE_BUILD_LOGIC_SCAN_MAX_ENTRIES:2ff14979",
-		"clients/diagnostic-dispositions.ts#06a3807d",
+		// #4701 F1: `deferredByCwd` (the session `defer` map, keyed by normalized
+		// cwd) replaced the flat `deferredThisSession` Set, so the identity moved
+		// with the declaration. Still bounded the same way: `resetDeferredDispositions`
+		// clears it whole at `session_start`, and an entry exists only for a project
+		// holding a `defer` the agent marked this session.
+		"clients/diagnostic-dispositions.ts#1c05c89b",
 		"clients/review-graph/builder.ts#recordPersistFailure:59b74176",
 		"clients/tree-sitter-client.ts#TYPESCRIPT_SQL_KNOWN_PACKAGES:95dcb590",
 		"clients/widget-state.ts#wireWidgetDispositionSubscriber:d8f1770a",

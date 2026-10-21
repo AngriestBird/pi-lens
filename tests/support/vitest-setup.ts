@@ -55,6 +55,28 @@ process.env.PI_LENS_WORD_INDEX_PERSIST_DEBOUNCE_MS = "0";
 // read window, so an ambient value would resize what the perf tests parse.
 process.env.PI_LENS_MAX_LOG_SIZE_MB = "10";
 
+// #4673: pi builds its jiti with `{ moduleCache: false }` and no `cache` --
+// its `createJiti(import.meta.url, …)` call at
+// `@earendil-works/pi-coding-agent/dist/core/extensions/loader.js:477` -- so
+// on the first by-path extension load jiti's `prepareCacheDir` finds no
+// `node_modules` sibling of the loader file and mkdirs
+// `path.join(os.tmpdir(), "jiti")` IN THIS PROCESS. The shared setup's
+// tmp-root interposer records that write as a #4560 fixture sibling created by
+// whichever file was loading, so a run that pairs
+// `tests/clients/skills-package-filter.test.ts` with the hygiene census reds
+// on a name neither file spells. Disable the cache instead of relocating it:
+// jiti's env knobs are booleans (`JITI_CACHE=/tmp/x` still derives
+// `<tmpdir>/jiti`), a cache DIRECTORY is the caller's option and pi passes
+// none, and `TMPDIR` is the census root itself (AGENTS.md: never move the
+// harness home through it). Both are FORCED, not defaulted, because an ambient
+// value must not put the sibling back (same reason `PI_LENS_STARTUP_MODE` is
+// deleted below), and `JITI_FS_CACHE` wins over `JITI_CACHE` inside jiti, so
+// setting only the latter is not enough. Mirrored in `vitest.config.ts` for
+// the pre-fork process; `tests/config/tmp-fixture-hygiene.test.ts` drives the
+// load and pins both halves.
+process.env.JITI_FS_CACHE = "0";
+process.env.JITI_CACHE = "0";
+
 // Hermeticity: never let the developer's PERSONAL ~/.pi-lens/config.json leak
 // into test behavior. Seen live 2026-07-11: opting into `turnSummary.enabled`
 // on this machine flipped the #484 "default off-by-default" integration test
