@@ -31,11 +31,10 @@
  *   the loaded copy reads from its OWN module instance; a test-side mutation
  *   reaches nothing, and a >1000-char payload is not producible at the
  *   provider boundary.
- * - "b.ts, then its neighbour c.ts, which nothing imports" is RED ON
- *   `origin/master` here and on tier 2 alike: the line is delivered on turn 1
- *   where this case expects turn 2. Two independent drivers agreeing means the
- *   production behaviour moved and the case was not updated — a pre-existing
- *   red this slice does not own, left untouched rather than bent to pass.
+ * - "b.ts, then its neighbour c.ts, which nothing imports" depends on the
+ *   environment: in the plegma sandbox it delivered the line on turn 1 (3 of 3,
+ *   both drivers); on the orchestrator's host it passes on master and here. It
+ *   stays on the double until that dependence is understood (#4632 remainder).
  */
 import fs from "node:fs";
 import path from "node:path";
