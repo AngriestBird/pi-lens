@@ -2483,6 +2483,11 @@ async function formatFullMode(
 	// merge, the rendered counts — demote TypeScript errors on files tsserver
 	// checked in its INFERRED project. Applied once, here, so a single seam
 	// governs the whole sweep instead of each renderer learning the rule.
+	//
+	// #4532 (AGENTS.md defect shape 71): the sweep runs the environment-gap rule
+	// too, inside `demoteInferredProjectSweepResults`, the sweep form of the one
+	// pipeline the per-edit runner and `lsp_diagnostics` call (round 5, review
+	// F3), so one file reads the same in all three.
 	const lspResults = await demoteInferredProjectSweepResults(
 		rawLspResults.filter((result) => includeFile(result.filePath)),
 		cwd,

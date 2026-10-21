@@ -33,7 +33,7 @@ import type {
 } from "../types.js";
 import { findingsResult, spanOverlapsModifiedRanges } from "../types.js";
 import { convertLspDiagnostics } from "../utils/lsp-diagnostics.js";
-import { demoteInferredProjectDiagnostics } from "../../lsp/inferred-project.js";
+import { demoteLanguageServerRows } from "../../lsp/inferred-project.js";
 import {
 	enabledAuxiliaryLspServerIds,
 	retagAuxiliaryDiagnostics,
@@ -426,13 +426,19 @@ const lspRunner: RunnerDefinition = {
 		// is a known gap, recorded on the issue rather than papered over with an
 		// "unverified" label that would fire on every warm-attach file including
 		// the properly configured majority.
-		const validLspDiags = usedWarmAttach
-			? rawValidLspDiags
-			: await demoteInferredProjectDiagnostics(rawValidLspDiags, {
-					filePath: diagnosticPath,
-					cwd: ctx.cwd,
-					service: lspService,
-				});
+		// #4532: the environment-gap rule rides the same pipeline and is NOT
+		// gated on warm attach: it asks one filesystem question about the file's
+		// own directory, needs nothing from the remote session, and left behind
+		// `usedWarmAttach` it kept the reported `🔴 STOP` on this route (round 4).
+		// `demoteLanguageServerRows` runs it on every route and the membership
+		// probe only where a local client may answer (round 5, review F3).
+		const validLspDiags = (
+			await demoteLanguageServerRows(rawValidLspDiags, {
+				filePath: diagnosticPath,
+				cwd: ctx.cwd,
+				...(!usedWarmAttach && { service: lspService }),
+			})
+		).rows;
 		const fixSuggestionByIndex = new Map<number, string>();
 
 		// #1640: read severity off the RAW list. A demoted diagnostic is still

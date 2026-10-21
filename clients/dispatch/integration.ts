@@ -95,6 +95,7 @@ import {
 	touchCoverageGap,
 } from "../lsp/diagnostic-binding.js";
 import { getServersForFileWithConfig } from "../lsp/config.js";
+import { demoteEnvironmentGapDiagnostics } from "../lsp/environment-gap.js";
 import {
 	classifyJsTsGlobalScope,
 	goPackageFiles,
@@ -724,8 +725,14 @@ function cascadeReconcilableLspErrors(
 	rawDiags: readonly import("../lsp/client.js").LSPDiagnostic[],
 	neighborPath: string,
 ): ReturnType<typeof convertLspDiagnostics> {
+	// #4532 round 6 (review NEW-2; AGENTS.md shape 71): the environment-gap
+	// rule the cascade display runs (`applyCascadeDisplayPolicy`), applied before
+	// the ERROR filter, so a gap the agent no longer sees is not persisted as a
+	// blocking footer entry either. A demoted row is a warning and leaves here
+	// as every LSP warning does. The rule reads TypeScript rows only, so an
+	// auxiliary row passes through it untouched and is dropped below.
 	return convertLspDiagnostics(
-		rawDiags
+		demoteEnvironmentGapDiagnostics([...rawDiags], { filePath: neighborPath })
 			.filter(
 				(d) => d.severity === 1 && !findAuxiliaryProfileForSource(d.source),
 			)

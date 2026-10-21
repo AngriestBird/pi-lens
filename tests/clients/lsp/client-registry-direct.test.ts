@@ -23,6 +23,7 @@ import {
 	resetDegradationLedger,
 } from "../../../clients/degradation-ledger.js";
 import type { LSPClientInfo } from "../../../clients/lsp/client.js";
+import { LSPService } from "../../../clients/lsp/index.js";
 import { initLSPConfig } from "../../../clients/lsp/config.js";
 import {
 	ClientRegistry,
@@ -2067,6 +2068,30 @@ describe("ClientRegistry.spawnClient success and shutdown guards (#4449)", () =>
 		vi.setSystemTime(T0);
 	});
 
+	// #4532 round 5 (review F6, shape 6): the install look's epoch was the
+	// post-initialize stamp, so an install that landed while the server was
+	// starting (it reads the tree from its spawn on) read as older than the
+	// client and became the first look's baseline. The look's epoch is the
+	// LAUNCH start; the #1127 breaker keeps its post-init `clientSpawnedAt`.
+	it("gives the install look the launch-start epoch, not the post-initialize one", async () => {
+		const f = ensureFixture();
+		createLSPClient.mockImplementation(async () => {
+			// A 5 s initialize handshake.
+			vi.setSystemTime(T0 + 5_000);
+			return fakeClient("ts", f.root);
+		});
+		await f.ensure();
+
+		expect(f.registry.clientSpawnedAt.get(f.key)).toBe(T0 + 5_000);
+		expect(f.registry.clientLaunchStartedAt.get(f.key)).toBe(T0);
+		expect(f.registry.livePrimaryClientRoots()).toEqual([
+			{ root: f.root, spawnedAt: T0 },
+		]);
+		// Retired with the client it describes.
+		f.registry.retireClient(f.key);
+		expect(f.registry.clientLaunchStartedAt.has(f.key)).toBe(false);
+	});
+
 	// Recurrence (#3502, #2356, #1934): publishing a client is one transaction. The
 	// replacement is registered with fresh spawn and use stamps, its readiness and
 	// stall-demotion markers are dropped, first contact is re-armed BEFORE the
@@ -2702,6 +2727,99 @@ describe("client-registry environment limits (#4449)", () => {
 			process.env.PI_LENS_LSP_CLIENT_CEILING = bad;
 			expect(getLspClientCeiling()).toBe(24);
 		}
+	});
+});
+
+/**
+ * #4532: the out-of-band install look runs at every live PRIMARY client's root,
+ * and `livePrimaryClientRoots` is the reader it asks. A mutant that made this
+ * accessor return `[]` survived every other test: they reach the look through
+ * the shared service double (`tests/support/lsp-service-double.ts`), which
+ * answers the accessor itself. These cells drive the REAL registry and the REAL
+ * `LSPService` accessor over the maps production writes, so the reader is
+ * observed at both ends of its own delegation.
+ */
+describe("live primary client roots (#4532)", () => {
+	const clientKey = (serverId: string, root: string) => `${serverId}:${root}`;
+
+	/** One entry in the maps a real spawn writes, with its own liveness. */
+	function register(
+		registry: ClientRegistry,
+		serverId: string,
+		root: string,
+		facts: { spawnedAt?: number; alive?: boolean } = {},
+	): void {
+		const key = clientKey(serverId, root);
+		const client = fakeClient(serverId, root);
+		if (facts.alive === false) client.kill();
+		registry.clients.set(key, client as unknown as LSPClientInfo);
+		if (facts.spawnedAt !== undefined)
+			registry.clientLaunchStartedAt.set(key, facts.spawnedAt);
+	}
+
+	// `restartPrimaryClientsUnder` retires EVERY primary overlapping a root, so a
+	// root whose newer client spawned after an install must not outrank an older
+	// one that read the pre-install tree: the earliest spawn answers.
+	it("reports each live primary root once, at that root's earliest spawn", () => {
+		const registry = new ClientRegistry(makeHooks().hooks);
+		register(registry, "typescript", "/w/a", { spawnedAt: 1_000 });
+		register(registry, "rust", "/w/a", { spawnedAt: 400 });
+		register(registry, "typescript", "/w/b", { spawnedAt: 700 });
+
+		expect(registry.livePrimaryClientRoots()).toEqual([
+			{ root: "/w/a", spawnedAt: 400 },
+			{ root: "/w/b", spawnedAt: 700 },
+		]);
+	});
+
+	// A look at an auxiliary's root would restart a server the install cannot
+	// help, a dead client's root names a server no longer holding the tree, and a
+	// key with no root carries no directory to walk.
+	it("omits auxiliaries, dead clients, and a key that names no root", () => {
+		const registry = new ClientRegistry(makeHooks().hooks);
+		register(registry, "typescript", "/w/a", { spawnedAt: 1_000 });
+		register(registry, "opengrep", "/w/a", { spawnedAt: 10 });
+		register(registry, "rust", "/w/dead", { spawnedAt: 20, alive: false });
+		// The bare-id shape `parseClientKey` reads as a server with no root.
+		registry.clients.set("typescript", {
+			...fakeClient("typescript", "/w/rootless"),
+		} as unknown as LSPClientInfo);
+
+		expect(registry.livePrimaryClientRoots()).toEqual([
+			{ root: "/w/a", spawnedAt: 1_000 },
+		]);
+	});
+
+	// A client that cannot say when it spawned reads as epoch 0: the first look
+	// then never treats the install it finds as older than the client.
+	it("reports an absent spawn stamp as 0 instead of dropping the root", () => {
+		const registry = new ClientRegistry(makeHooks().hooks);
+		register(registry, "typescript", "/w/c");
+
+		expect(registry.livePrimaryClientRoots()).toEqual([
+			{ root: "/w/c", spawnedAt: 0 },
+		]);
+	});
+
+	// The look reaches the registry through `LSPService`, and a destroyed service
+	// answers nothing: a restart request against it would race its own teardown.
+	// A client registered AFTER the teardown is the shape that guard exists for
+	// (`markDestroyed` is sticky, so a late spawn leaves the map unanswerable).
+	it("answers through the service until it is shut down", async () => {
+		const service = new LSPService();
+		const registry = (service as unknown as { clientRegistry: ClientRegistry })
+			.clientRegistry;
+		register(registry, "typescript", "/w/a", { spawnedAt: 5 });
+
+		expect(service.livePrimaryClientRoots()).toEqual([
+			{ root: "/w/a", spawnedAt: 5 },
+		]);
+
+		await service.shutdown();
+		expect(service.livePrimaryClientRoots()).toEqual([]);
+
+		register(registry, "rust", "/w/b", { spawnedAt: 7 });
+		expect(service.livePrimaryClientRoots()).toEqual([]);
 	});
 });
 

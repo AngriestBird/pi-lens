@@ -18,6 +18,7 @@ import { formatCacheAgeLabel } from "./finding-delivery-gate.js";
 import { recordDegradationOnce } from "./degradation-ledger.js";
 import { normalizeMapKey } from "./path-utils.js";
 import type { LSPDiagnostic } from "./lsp/client.js";
+import { demoteEnvironmentGapDiagnostics } from "./lsp/environment-gap.js";
 import {
 	PRIMARY_UNAVAILABLE_CAUSE,
 	type PrimaryUnavailableCause,
@@ -347,16 +348,24 @@ export function applyCascadeDisplayPolicy(
 		 * unmarked errors sat below the cap — a false clean, and worse than the
 		 * unfiltered behaviour for that input). It also has to stay after
 		 * `retagAuxiliaryDiagnostics`, which needs `converted` index-aligned 1:1
-		 * with `errors`. Omitted → no display cap, which is the quiet-window
+		 * with its input. Omitted → no display cap, which is the quiet-window
 		 * lane's single-neighbour case.
 		 */
 		displayCap?: number;
 	},
 ): CascadeDisplayPolicyResult {
-	if (errors.length === 0) {
+	const { cwd, policyRoot, filePath } = options;
+	// #4532 round 5 (review F3; AGENTS.md shape 71): the environment-gap rule of
+	// `demoteLanguageServerRows`, run here because both cascade lanes reach this
+	// seam and it is synchronous (#3157), so the pipeline's async membership
+	// probe stays out. A demoted row is a warning, and a cascade renders ERRORs
+	// only, so it leaves the neighbour's list as any warning row does.
+	const live = demoteEnvironmentGapDiagnostics(errors, { filePath }).filter(
+		(d) => d.severity === 1,
+	);
+	if (live.length === 0) {
 		return { diagnostics: [], suppressed: 0, auxSuppressed: 0, total: 0 };
 	}
-	const { cwd, policyRoot, filePath } = options;
 	// `undefined` → the fail-open empty string: inline suppression becomes a
 	// no-op and a STRICT `false-positive` anchor hashes an empty line, so a
 	// finding is never hidden by an I/O error (AGENTS.md shape 48).
@@ -381,10 +390,10 @@ export function applyCascadeDisplayPolicy(
 	// quiet-window builder's synchronous callback to become async for no
 	// measurable gain.
 	const content = options.content ?? readFileContent(filePath);
-	const converted = convertLspDiagnostics(errors, filePath);
+	const converted = convertLspDiagnostics(live, filePath);
 	// #692/#3046: identity comes from the ONE shared derivation every other
 	// surface anchors a mark against — never a hardcoded `tool: "lsp"`.
-	const retained = retagAuxiliaryDiagnostics(converted, errors, content ?? "", {
+	const retained = retagAuxiliaryDiagnostics(converted, live, content ?? "", {
 		cwd,
 		fileRole: detectFileRole(filePath, content),
 	});
