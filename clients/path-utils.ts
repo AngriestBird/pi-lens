@@ -322,16 +322,6 @@ function normalizePathForm(filePath: string, identity: boolean): string {
 	}
 }
 
-/**
- * The kernel-real path of an absolute `spelled` path, parsed with `p`: the
- * `realpath` of the path itself when it exists, otherwise the `realpath` of its
- * nearest existing ancestor joined with the missing tail. Only the tail is
- * folded (`p.join`): it names nothing on disk, so it holds no link for the
- * kernel to follow. `undefined` when no ancestor resolves.
- *
- * The first attempt is the only syscall for an existing path, which is the
- * per-edit case; a missing path pays one more `realpath` per missing segment.
- */
 /** One tally row per errno that made a path identity fall back to an ancestor. */
 export interface PathIdentityFallback {
 	code: string;
@@ -367,6 +357,16 @@ export function resetPathIdentityFallbacks(): void {
 	pathIdentityFallbacks.clear();
 }
 
+/**
+ * The kernel-real path of an absolute `spelled` path, parsed with `p`: the
+ * `realpath` of the path itself when it exists, otherwise the `realpath` of its
+ * nearest existing ancestor joined with the missing tail. Only the tail is
+ * folded (`p.join`): it names nothing on disk, so it holds no link for the
+ * kernel to follow. `undefined` when no ancestor resolves.
+ *
+ * The first attempt is the only syscall for an existing path, which is the
+ * per-edit case; a missing path pays one more `realpath` per missing segment.
+ */
 function kernelRealPath(
 	spelled: string,
 	p: typeof path.posix,

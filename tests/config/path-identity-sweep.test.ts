@@ -60,7 +60,7 @@ const REPO_ROOT = path.resolve(
 const SEAM = "clients/path-utils.ts";
 
 /** The shipped runtime: the trees the class sweep covers, plus `index.ts`. */
-const SCANNED_TREES = ["clients", "tools", "mcp"] as const;
+const SCAN_ROOTS = ["clients", "tools", "mcp"] as const;
 
 /**
  * Why a pinned row's sites are not identity derivations owed to the seam
@@ -348,7 +348,7 @@ interface Occurrence {
 
 function census(): { scanned: number; occurrences: Occurrence[] } {
 	const files = [
-		...SCANNED_TREES.flatMap((tree) =>
+		...SCAN_ROOTS.flatMap((tree) =>
 			listSourceFiles(path.join(REPO_ROOT, tree), { skipTests: true }),
 		),
 		path.join(REPO_ROOT, "index.ts"),
