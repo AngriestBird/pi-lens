@@ -42,10 +42,10 @@ describe("AGENTS.md trigger-block governance (#3259)", () => {
 
 	it("keeps every numbered defect shape exactly once", () => {
 		const numbers = shapeNumbers(agentsText());
-		expect(numbers).toHaveLength(79);
-		expect(new Set(numbers).size).toBe(79);
+		expect(numbers).toHaveLength(80);
+		expect(new Set(numbers).size).toBe(80);
 		expect(numbers.sort((a, b) => a - b)).toEqual(
-			Array.from({ length: 79 }, (_, index) => index + 1),
+			Array.from({ length: 80 }, (_, index) => index + 1),
 		);
 	});
 
@@ -54,7 +54,7 @@ describe("AGENTS.md trigger-block governance (#3259)", () => {
 		const counterfeit = agentsText()
 			.replace(/^1\. \*\*.*$/m, "")
 			.concat("\n<!--\n1. **Counterfeit shape:** hidden comment\n-->\n");
-		expect(shapeNumbers(counterfeit)).toHaveLength(78);
+		expect(shapeNumbers(counterfeit)).toHaveLength(79);
 		expect(shapeNumbers(counterfeit)).not.toContain(1);
 	});
 
@@ -72,8 +72,11 @@ describe("AGENTS.md trigger-block governance (#3259)", () => {
 		// branch, which adds no reference either. Shape 79 (approved by the
 		// maintainer on 2026-10-20) is the second raise, 119 -> 120: its guard is
 		// unbuilt, so the entry names the tracker (#4687) instead of a path, and
-		// the instances stay in `HISTORY.md`.
-		expect(issueRefs(agentsText())).toBeLessThanOrEqual(120);
+		// the instances stay in `HISTORY.md`. The 2026-10-21 retro adds the third
+		// raise, 120 -> 121: shape 66 names the issue that drives its
+		// `in-process-mock` census down (#4709), because a census without its
+		// tracker names nothing a reader can act on.
+		expect(issueRefs(agentsText())).toBeLessThanOrEqual(121);
 	});
 
 	it("counts a reference and not a heading anchor", () => {

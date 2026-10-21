@@ -334,6 +334,31 @@ merge-order interactions with other open PRs, plus:
   (`:34`, `:81`). Recurrence: #4566 and #4575 (2026-10-17), where the threads
   outlived the rounds that should have read them.
 
+Beside the prose report, write `FINDINGS_<pr>.json` at the worktree root, and
+never commit it. The orchestrator's validator reads it before routing the
+round. Shape:
+
+```json
+{"pr": 4710, "head": "<40-hex sha reviewed>", "verdict": "merge-ready|needs changes|redesign|conflicted", "oneWayDoors": ["..."], "findings": [{"id": "F1", "severity": "<one of the five severity words>", "file": "path", "line": 1, "claim": "one sentence", "probe": "command or probe name whose output proves it", "remedy": "the prescribed change, or null", "addsMechanism": true, "class": "fold|accepted residual|file"}]}
+```
+
+Write one entry per finding, with the same ids as the prose. `remedy: null`
+means the fixer must design the change. `addsMechanism` is true when the
+remedy adds a guard, branch, state, record, or lifecycle step, rather than a
+fix to an existing line. The prose report stays the record a human reads;
+the JSON is what routing reads, so the two must agree. This exists because
+the orchestrator re-typed each finding into a fix brief by hand, and routed
+rounds by judgment instead of by the review's own data.
+
+State the change's rollback cost as a required summary line. Name every
+one-way door it ships: something users or other code can come to depend on,
+which a revert does not undo. Examples are a config key or flag users set, a
+durable record shape already written to disk, a public tool, MCP or CLI
+surface, or a migration. Each one-way door needs its proof in the PR: an
+old-record parse fixture, a deprecation path, or a stated reason it is safe.
+`none` is a valid answer, and state it. The JSON's `oneWayDoors` lists the
+same items.
+
 Use short, active, plain prose.
 
 ## Documentation and prose standard
