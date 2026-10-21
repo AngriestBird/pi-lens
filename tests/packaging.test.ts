@@ -617,7 +617,7 @@ describe("host-provided peers are open; the supported window lives in install-sm
 		] as const;
 		const claims = files.flatMap(([file, text]) =>
 			[
-				...text.matchAll(/(\d+\.\d+)(?:[–-](\d+\.\d+))? (?:are|is) in-window/g),
+				...text.matchAll(/(?<![\w.])(\d+\.\d+)[–-](\d+\.\d+) are in-window/g),
 			].map((match) => ({
 				file,
 				claim: match[0],
@@ -627,11 +627,17 @@ describe("host-provided peers are open; the supported window lives in install-sm
 		// A sweep that reads no claim is not a passing sweep: both files must keep
 		// stating the in-window range, which is what gives the check below a
 		// population to refuse.
-		for (const [file] of files) {
+		for (const [file, text] of files) {
 			expect(
 				claims.filter((entry) => entry.file === file),
 				`${file} must keep an in-window claim`,
 			).not.toEqual([]);
+			// Fail closed: every "in-window" mention must be a form the regex reads,
+			// so a wording it cannot parse ("0.85 through 1.3") reds, not passes.
+			expect(
+				text.match(/in-window/g)?.length,
+				`${file}: every "in-window" mention must read "<x.y>-<x.y> are in-window"`,
+			).toBe(claims.filter((entry) => entry.file === file).length);
 		}
 		const floorMinorLine = `${semver.major(floor)}.${semver.minor(floor)}.0`;
 		const belowFloor = claims.filter((entry) =>
