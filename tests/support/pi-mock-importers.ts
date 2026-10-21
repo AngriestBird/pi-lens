@@ -52,6 +52,7 @@ export const PI_MOCK_IMPORTERS: Readonly<Record<string, string>> = {
 	"index-integration.test.ts": "internal-seam",
 	"index-loop-block-wiring.test.ts": "internal-seam",
 	"index-lsp-idle-reset.test.ts": "internal-seam",
+	"index-lsp-config-root-eviction.test.ts": "internal-seam",
 	"index-mode-awareness.test.ts": "internal-seam",
 	"index-mutation-bridge-recordability.test.ts": "internal-seam",
 	"index-mutation-latency-marker.test.ts": "internal-seam",
@@ -71,18 +72,15 @@ export const PI_MOCK_IMPORTERS: Readonly<Record<string, string>> = {
 	// unproducible-payload
 	"clients/context-append-to-last-user.test.ts": "unproducible-payload",
 	"index-4631-pre-087-context-shape.test.ts": "unproducible-payload",
+	"index-session-start-classification-wiring.test.ts": "unproducible-payload",
 	// pending slice 5
 	"index-4554-last-member-teardown.test.ts": "pending slice 5",
 	"index-config-resolved-session-wiring.test.ts": "pending slice 5",
 	"index-multi-root-session-start.test.ts": "pending slice 5",
+	"lens-toggle-command.test.ts": "pending slice 5",
 	// pending slice 8
 	"clients/session-event-guard.test.ts": "unproducible-payload",
 	"index-cascade-resolved-clean-wiring.test.ts": "internal-seam",
-	// pending slice 9
-	"index-2992-integration.test.ts": "pending slice 9",
-	"index-lsp-config-root-eviction.test.ts": "pending slice 9",
-	"index-session-start-classification-wiring.test.ts": "pending slice 9",
-	"lens-toggle-command.test.ts": "pending slice 9",
 	// process-boundary
 	"clients/handler-verdict-helper.test.ts": "process-boundary",
 	"clients/ndjson-logger.test.ts": "process-boundary",
