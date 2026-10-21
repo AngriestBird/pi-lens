@@ -15,8 +15,11 @@ import {
 	isVendorPath,
 	pathsEqual,
 	realpathOrResolve,
+	walkUpDirs,
 } from "./path-utils.js";
 import { isPiLensInternalPath } from "./file-utils.js";
+import { PROJECT_CONFIG_LOCATIONS } from "./config-locations.js";
+import { getDirectoryMarkers } from "./workspace-topology.js";
 import {
 	resolveGitCheckout,
 	resolveLinkedWorktreeOwner,
@@ -102,25 +105,169 @@ export function resolveAnalysisRootPath(
 	return candidate;
 }
 
+/**
+ * The class AND the owning root, answered once (#2657). `resolveAnalysisRoot`
+ * is the mode-only projection of this; a caller that needs the root for the
+ * class must not re-derive it from a second rule — `resolveAnalysisRootPath`
+ * is the eligibility rule for an out-of-session path and answers `undefined`
+ * for a worktree root inside a pi-owned temp dir, which is not what the class
+ * said.
+ */
+export function classifyAnalysisRoot(
+	filePath: string,
+	sessionRoot: string,
+	homeDirOverride?: string,
+): { mode: AnalysisRootMode; root: string | undefined } {
+	const resolved = realpathOrResolve(filePath);
+	if (isVendorPath(resolved)) return { mode: "none", root: undefined };
+	const checkout = resolveGitCheckout(sessionRoot);
+	const owner = checkout
+		? resolveLinkedWorktreeOwner(checkout, resolved)
+		: null;
+	if (owner) return { mode: "linked-worktree", root: owner.root };
+	const root = resolveAnalysisRootPath(filePath, sessionRoot, homeDirOverride);
+	if (!root) return { mode: "none", root: undefined };
+	// #4689 item 7: `root` is an identity (`resolveAnalysisRootPath` resolves
+	// the session through the kernel), so the session side is compared as one
+	// too. A spelling here made a symlink-spelled session root adopt itself.
+	if (pathsEqual(root, sessionRoot)) return { mode: "session", root };
+	return { mode: "adopted", root };
+}
+
 export function resolveAnalysisRoot(
 	filePath: string,
 	sessionRoot: string,
 	homeDirOverride?: string,
 ): AnalysisRootMode {
-	const resolved = realpathOrResolve(filePath);
-	if (isVendorPath(resolved)) return "none";
-	const checkout = resolveGitCheckout(sessionRoot);
-	if (checkout && resolveLinkedWorktreeOwner(checkout, resolved)) {
-		return "linked-worktree";
-	}
-	const root = resolveAnalysisRootPath(filePath, sessionRoot, homeDirOverride);
-	if (!root) return "none";
-	if (root === nodePath.resolve(sessionRoot)) return "session";
-	return "adopted";
+	return classifyAnalysisRoot(filePath, sessionRoot, homeDirOverride).mode;
 }
 
 export function canWriteAnalysisRoot(mode: AnalysisRootMode): boolean {
 	return mode === "session" || mode === "linked-worktree";
+}
+
+/** What a session declares to its root registries for one file (#2657). */
+export interface SessionConfigRoot {
+	/**
+	 * The root to hand `ensureLSPConfigInitialized`, or `undefined` when the
+	 * session must register NOTHING for this file.
+	 */
+	register: string | undefined;
+	/** The owning class, as {@link resolveAnalysisRoot} answered it. */
+	mode: AnalysisRootMode;
+}
+
+/**
+ * #2657: the root a session should REGISTER for `filePath`, declared as one
+ * workspace rather than one directory, and whether it may register at all.
+ *
+ * Pre-fix, the `tool_call` seam registered `path.dirname(filePath)`, so a
+ * session touching 128 directories cycled the FIFO(128) session-root registry
+ * and evicted the project root — which carries the operator's
+ * `lsp.disabledServers` denial — until something re-registered it, and
+ * `getConfigForFile` walked a population that grew with the number of
+ * directories an agent happened to touch.
+ *
+ * The registration follows the CLASS, never the directory:
+ *
+ * 1. `session` — register the nearest directory at or above the file that
+ *    holds a file the config loader layers (`holdsProjectConfig`), never
+ *    above the session root. The loader layers upward from the registered
+ *    root, so that root must sit at or below the nearest config owner or a
+ *    nested config stops applying; otherwise the session root itself.
+ * 2. `linked-worktree` — register the worktree root, or the nearest config
+ *    owner below it by the rule in 1: it is its own workspace with its own
+ *    `.pi-lens.json`, and `resolveServerRoot`'s #2052 gate refuses a file
+ *    outside every registered root, so registering nothing would deny the
+ *    worktree its LSP client. Per-worktree isolation is preserved (maintainer
+ *    decision on #1129).
+ * 3. `adopted` — register NOTHING. An adopted root is a foreign project, never
+ *    a session root: it is served through the `adopted` branch of
+ *    `resolveServerRoot` and admitted by `ClientRegistry.admitAdoptedRoot`,
+ *    which is capped, idle-evicted, and refuses its project-local binaries.
+ *    Registering it would launder `adopted` into `session` for
+ *    `analysisRootModeForFile` and skip every one of those rules.
+ * 4. `none` — register nothing; `tool_result` announces the skip.
+ *
+ * The population is therefore O(workspaces + nested config owners), not
+ * O(directories touched).
+ *
+ * The root is decided by identity and SPELLED on the file's side (#4689 item
+ * 7): the session-root registry (`clients/lsp/session-roots.ts`) tests
+ * containment lexically, so a root registered in any other spelling never
+ * holds the file, the #2052 gate declines it, and its `lsp.disabledServers`
+ * denial stops applying. When no ancestor of the file's spelling is the root
+ * (a directory link from outside into it), the link's entry is registered (see
+ * `configRootOnFileSpelling`). When no ancestor is even inside the root (a
+ * file link from outside), no registrable spelling holds the file, so the
+ * session root is registered as the host spelled it: the entry `session_start`
+ * made, restored if the cap dropped it, never a new one.
+ */
+export function resolveSessionConfigRoot(
+	filePath: string,
+	sessionRoot: string,
+	homeDirOverride?: string,
+): SessionConfigRoot {
+	const { mode, root } = classifyAnalysisRoot(
+		filePath,
+		sessionRoot,
+		homeDirOverride,
+	);
+	if (root === undefined || mode === "adopted" || mode === "none")
+		return { register: undefined, mode };
+	// The owner the class resolved — the session root or the worktree root —
+	// never the edited file's directory and never a re-derived eligibility.
+	return {
+		register:
+			configRootOnFileSpelling(filePath, root) ?? nodePath.resolve(sessionRoot),
+		mode,
+	};
+}
+
+/**
+ * The nearest config owner at or below `root` on the file's own spelling, else the outermost ancestor of that spelling still inside `root`:
+ * `root` itself when the file is spelled under it, or, for a directory link
+ * from outside into it, the link's entry. Either holds the file lexically, and
+ * every file under it resolves into `root`, so registering it serves the file
+ * and makes no outside file a session file. `undefined` when no ancestor is
+ * inside `root` (a file link from outside). `isUnderDir` holds a directory
+ * within itself and compares identities on POSIX (#4689), so a link on either
+ * side neither stops the walk early nor carries it above the root.
+ */
+function configRootOnFileSpelling(
+	filePath: string,
+	root: string,
+): string | undefined {
+	let entry: string | undefined;
+	for (const dir of walkUpDirs(nodePath.dirname(nodePath.resolve(filePath)))) {
+		if (!isUnderDir(dir, root)) return entry;
+		if (holdsProjectConfig(dir)) return dir;
+		entry = dir;
+	}
+	return entry;
+}
+
+/**
+ * Does `dir` hold a file the config loader layers? The loader reads EVERY
+ * `PROJECT_CONFIG_LOCATIONS` entry in each directory upward from the
+ * registered root, the legacy LSP-scoped `pi-lsp.json` and `.pi-lens/lsp.json`
+ * included, so a root registered above a directory holding only one of those
+ * never applies it (#4734 Greptile "Nested LSP settings disappear").
+ * `findPiLensConfigInDir` knows only the two pi-lens basenames. Presence is
+ * read from the memoized directory listings: an entry that cannot be read
+ * still makes `dir` the owner, so the loader reads it and reports the failure.
+ */
+function holdsProjectConfig(dir: string): boolean {
+	return PROJECT_CONFIG_LOCATIONS.some((location) => {
+		// `relativePath` is POSIX-joined. Descend only through names the parent
+		// listing holds, so no listing is cached for a directory that is absent.
+		let at = dir;
+		for (const segment of location.relativePath.split("/")) {
+			if (!getDirectoryMarkers(at).entryNames.has(segment)) return false;
+			at = nodePath.join(at, segment);
+		}
+		return true;
+	});
 }
 
 /**
