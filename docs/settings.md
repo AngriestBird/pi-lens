@@ -88,7 +88,7 @@ column is the effective behavior when nothing is set.
 | `--lens-compact-lsp-status` | `ui.compactLspStatus` | global | **off** (footer lists the active server names) |
 | `--lens-hide-lsp-status` | `ui.hideLspStatus` | global | **off** (footer publishes the `pi-lens-lsp` status; outranks `ui.compactLspStatus` when both are set) |
 | `--lens-compact-widget` | `ui.compactWidget` | global | **off** (widget stacks file rows, suppressed count and blocker details below its summary header; **on** renders only that header — languages + totals, plus the `LSP↑` chip while servers are spawning) |
-| `--no-lazy-tools` | `tools.lazy` | global | `"auto"`: the five situational tools start inactive only on a model that keeps mid-conversation system messages (`true` always, `false` never) |
+| `--no-lazy-tools` | `tools.lazy` | global | `true`: the five situational tools start inactive on every model (`"auto"` only on a model that keeps mid-conversation system messages, `false` never) |
 | `--no-tool=<name>` | `tools.<name>.enabled` | project | every lens tool **on** |
 | `--lens-turn-end-madge` | `turnEnd.madge.enabled` | global | **off** (madge runs at session start, not per turn) |
 | `--no-knip` | `knip.enabled` | project | knip analyzer **on** |
@@ -100,10 +100,10 @@ column is the effective behavior when nothing is set.
 | `--no-complexity` | `complexity.enabled` | project | complexity analyzer **on** |
 
 `--no-lazy-tools` (or `tools.lazy: false`) keeps every pi-lens tool active for
-the whole session, so the advertised tool list never changes. The default
+the whole session, so the advertised tool list never changes. The opt-in
 `"auto"` decides per model, at session start and on a model switch only; see
-[globalconfig.md](globalconfig.md#startup-controls) for the rule and its
-precedence over `tools.<name>.enabled`. The `pi_lens_activate_tools` loader
+[globalconfig.md](globalconfig.md#startup-controls) for the rule, why `true`
+stays the default, and the precedence over `tools.<name>.enabled`. The `pi_lens_activate_tools` loader
 stays registered and keeps its usual description; when the tools it names are
 already active, calling it is a no-op.
 

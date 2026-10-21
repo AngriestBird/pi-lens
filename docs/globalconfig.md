@@ -34,7 +34,7 @@ Each runtime toggle is settable from the CLI *and* from `config.json`. The two a
 | `--lens-compact-lsp-status` | `ui.compactLspStatus` | `false` |
 | `--lens-hide-lsp-status` | `ui.hideLspStatus` | `false` |
 | `--lens-compact-widget` | `ui.compactWidget` | `false` |
-| `--no-lazy-tools` | `tools.lazy` | `"auto"` |
+| `--no-lazy-tools` | `tools.lazy` | `true` |
 | `--lens-turn-end-madge` | `turnEnd.madge.enabled` | `false` |
 | `--no-knip` | `knip.enabled` | `true` |
 | `--no-jscpd` | `jscpd.enabled` | `true` |
@@ -58,17 +58,23 @@ pi-lens registers five situational tools (the `ast_grep_*` family,
 
 | `tools.lazy` | Situational tools |
 | --- | --- |
-| `"auto"` (default) | Start inactive only when the session's model keeps mid-conversation system messages (`compat.supportsMidConvoSystemMessages` is `true`). On any other model, including one that does not state the fact, every tool is active from the first turn. |
-| `true` | Start inactive on every model. |
+| `true` (default) | Start inactive on every model. |
+| `"auto"` | Start inactive only when the session's model keeps mid-conversation system messages (`compat.supportsMidConvoSystemMessages` is `true`). On any other model, including one that does not state the fact, every tool is active from the first turn. Before a model is known, the tools start inactive. |
 | `false`, or `--no-lazy-tools` | Every tool is active for the whole session and pi-lens never changes the tool list. |
 
-The reason for `"auto"`: a model without that fact gets every system message
+Why `true` is the default: a model without that fact gets every system message
 folded into one prompt head, so each tool-list change rewrites the whole cached
-prompt. pi-lens decides at session start and again only when you switch models,
-never between turns of one model. A switch to a folding model activates every
-enabled situational tool; a switch back deactivates the ones the conversation
-never asked for. Any other value is reported once as an ignored setting, and
-`"auto"` applies.
+prompt. Activations are rare, though. Over the window measured for #4687 the
+loader ran about once per 3,329 requests, while carrying every situational
+schema on every request costs more than the rewrites once activations are
+rarer than about one per 1,000 requests. `"auto"` is there for a workload that
+activates often on a folding model.
+
+Under `"auto"`, pi-lens decides at session start and again only when you
+switch models, never between turns of one model. A switch to a folding model
+activates every enabled situational tool. A switch back deactivates only the
+ones the conversation never activated or called. Any other value is reported
+once as an ignored setting, and the default applies.
 
 Precedence: `tools.<name>.enabled` (in either config file, or `--no-tool`)
 filters first. A disabled tool is never registered, so it is absent under every

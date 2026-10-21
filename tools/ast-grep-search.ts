@@ -21,7 +21,7 @@ import type { SearchReadLocation } from "../clients/search-read-registration.js"
 import { isAtOrAboveHomeDir } from "../clients/path-utils.js";
 import { compactRenderResult } from "./render-compact.js";
 import { combineAbortSignals } from "../clients/deadline-utils.js";
-import { astGrepLangError, resolveAstGrepPaths } from "./shared.js";
+import { readAstGrepLang, resolveAstGrepPaths } from "./shared.js";
 
 /**
  * Build the agent-facing error text, appending a remediation hint derived from
@@ -475,11 +475,10 @@ export function createAstGrepSearchTool(astGrepClient: AstGrepClient) {
 				validateOnly?: boolean;
 			};
 			const pattern = typeof params.pattern === "string" ? params.pattern : "";
-			const rawLang = typeof params.lang === "string" ? params.lang : "";
 			const normalizedNodeKind =
 				typeof nodeKind === "string" ? nodeKind.trim() : "";
 			const skipOffset = Math.max(0, Math.floor(skip ?? 0));
-			const lang = rawLang.replace(/^"|"$/g, "");
+			const { lang, refusal: langError } = readAstGrepLang(params.lang, true);
 			const searchPathsCount = paths?.length ?? 1;
 			const executionOptions = { signal: abortSignal, deadlineAt };
 			const dumpMode = dump === true;
@@ -596,7 +595,6 @@ export function createAstGrepSearchTool(astGrepClient: AstGrepClient) {
 					};
 				}
 
-				const langError = astGrepLangError(lang, true);
 				if (langError) {
 					logOutcome("error", { errorRaw: langError });
 					return {

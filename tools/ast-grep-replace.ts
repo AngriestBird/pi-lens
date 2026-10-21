@@ -29,7 +29,7 @@ function errorTextWithHint(raw: string): string {
 	const hint = astGrepRemediationHint(classifyAstGrepError(raw));
 	return hint ? `Error: ${raw}\n\n${hint}` : `Error: ${raw}`;
 }
-import { astGrepLangError, resolveAstGrepPaths } from "./shared.js";
+import { readAstGrepLang, resolveAstGrepPaths } from "./shared.js";
 
 function lineCount(value: string): number {
 	if (!value) return 0;
@@ -150,9 +150,9 @@ export function createAstGrepReplaceTool(
 				follows?: string;
 				precedes?: string;
 			};
-			const lang = ((params as { lang: string }).lang ?? "").replace(
-				/^"|"$/g,
-				"",
+			const { lang, refusal: langError } = readAstGrepLang(
+				(params as { lang?: unknown }).lang,
+				true,
 			);
 			const pathsCount = paths?.length ?? 1;
 			const applyFlag = apply ?? false;
@@ -193,7 +193,6 @@ export function createAstGrepReplaceTool(
 				}
 			}
 
-			const langError = astGrepLangError(lang, true);
 			if (langError) {
 				logOutcome("error", { errorRaw: langError });
 				return {

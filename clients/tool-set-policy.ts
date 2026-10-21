@@ -92,8 +92,14 @@ type DeferredToolModel = {
 
 /**
  * The lazy-tools posture the configuration asks for (#4687 item 7):
- * `tools.lazy` = `"auto"` (the default), `true` (`on`), or `false` (`off`,
- * also `--no-lazy-tools`). The CLI flag wins, as for every registry flag.
+ * `tools.lazy` = `true` (`on`, the default: lazy on every model), `"auto"`
+ * (decide per model), or `false` (`off`, also `--no-lazy-tools`). The CLI flag
+ * wins, as for every registry flag.
+ *
+ * The default stays `true` (maintainer decision, 2026-10-21): over the live
+ * window measured on #4687, one activation per 3,329 requests sits under the
+ * ~1-per-1,000 break-even at which a folding model's prefix rewrite costs more
+ * than carrying the situational schemas on every request.
  */
 export type LazyToolsMode = "auto" | "on" | "off";
 
@@ -102,7 +108,7 @@ export function resolveLazyToolsMode(
 	setting: LazyToolsSetting | undefined,
 ): LazyToolsMode {
 	if (noLazyToolsFlag) return "off";
-	return setting === true ? "on" : "auto";
+	return setting === "auto" ? "auto" : "on";
 }
 
 /**
@@ -111,15 +117,18 @@ export function resolveLazyToolsMode(
  * `auto` reads pi-ai's own per-model fact. A model WITHOUT mid-conversation
  * system messages has pi-ai fold every system message into one head
  * (`collapseSystemMessages`), so each tool-set change rewrites the whole cached
- * prefix; such a model gets every tool from the start instead. A missing flag
- * is `false`: an unknown model pays the schema bytes, never the rewrite.
- * The answer depends on the model alone, so it changes only on a model switch.
+ * prefix; such a model gets every tool from the start instead. A model that
+ * does not state the fact is `false`: it pays the schema bytes, never the
+ * rewrite. A session with NO resolved model is not a model without the fact:
+ * nothing is known yet, so it keeps the configured default posture (lazy), and
+ * the `model_select` that resolves one re-decides.
  */
 export function lazyToolsApply(
 	mode: LazyToolsMode,
 	model: DeferredToolModel | undefined,
 ): boolean {
 	if (mode !== "auto") return mode === "on";
+	if (!model) return true;
 	return supportsMidConvoSystemMessages(model);
 }
 

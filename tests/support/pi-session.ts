@@ -113,6 +113,16 @@
  *    they are reachable only through the copy's own module objects, which
  *    nothing here holds. That is the `p3` residual documented in the PR body,
  *    NOT a silence.
+ *
+ * LAZY-TOOLS POSTURE (#4687, #4723 F5). Both harnesses start the situational
+ * tools INACTIVE by default, because pi-lens's default `tools.lazy` is `true`
+ * on every model. The model matters only to a case that opts into
+ * `tools.lazy: "auto"` through a global config; the one decision table is
+ * `lazyToolsApply` in `clients/tool-set-policy.ts`. This tier's model carries
+ * {@link DEFAULT_MODEL_COMPAT} (the faux provider's real, mid-conversation
+ * support), so "auto" is lazy here too; `modelCompat: {}` gives a collapsing
+ * model. `pi-mock.ts`'s `makeCtx` names no model, which "auto" also treats as
+ * lazy (the configured default, never eager).
  */
 
 import * as fs from "node:fs";

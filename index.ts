@@ -2311,10 +2311,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// dependency allows. Under `--no-lazy-tools` the plan is the eager one,
 	// which keeps every enabled tool active (a no-op on a host start).
 	//
-	// #4687 item 7: whether the lazy tools start inactive is decided per model
-	// (`lazyToolsApply`): on a model that folds system messages into one head,
-	// every tool is active from the start, because each later tool-set change
-	// would rewrite the whole cached prefix. The plan runs at session_start and
+	// #4687 item 7: whether the lazy tools start inactive follows `tools.lazy`
+	// (`lazyToolsApply`): lazy on every model by default; under `"auto"`, a
+	// model that folds system messages into one head gets every tool from the
+	// start, because each later tool-set change would rewrite the whole cached
+	// prefix. The plan runs at session_start and
 	// on a model switch only, so the set never flips within one model. An
 	// eager plan is the lazy one with every enabled lazy tool remembered: it
 	// re-activates what a lazy model left inactive and changes nothing on a
@@ -3028,6 +3029,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 		);
 		if (toolEntry && "situational" in toolEntry && toolEntry.situational) {
 			observeSituationalToolCall(toolEntry.name);
+			// #4723 F3: a tool the model called is a tool the conversation asked
+			// for, whichever posture made it active. Remembering it keeps a later
+			// switch to the lazy posture (or a reload) from hiding a tool in use.
+			if (enabledLazyTools.has(toolEntry.name))
+				rememberLazyTools(scope, [toolEntry.name]);
 		}
 		return handleToolCall({
 			event: event as unknown as Parameters<typeof handleToolCall>[0]["event"],

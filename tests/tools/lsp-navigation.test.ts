@@ -304,6 +304,13 @@ describe("lsp_navigation tool", () => {
 			(): unknown => "foo",
 			"callHierarchyItem must be the object prepareCallHierarchy returned",
 		],
+		// #4723 F7: an array is an object to `typeof`; without the array branch
+		// it would be reported as a missing `name` instead of the wrong shape.
+		[
+			"an array",
+			(): unknown => [],
+			"callHierarchyItem must be the object prepareCallHierarchy returned",
+		],
 		[
 			"no uri",
 			(): unknown => ({ ...wellFormedItem(), uri: undefined }),
@@ -2277,6 +2284,17 @@ describe("lsp_navigation workspaceDiagnostics delivery gate (#1634)", () => {
  * mutation target, filed as #4578.
  */
 describe("lsp_navigation path resolution (#4577 M2)", () => {
+	// #4723 F2: this block installs its own service. It used to inherit the
+	// last block's double; under --sequence.shuffle (seed 424) that was the
+	// delivery-gate double, whose hasLSP is false, so `references` never ran.
+	beforeEach(() => {
+		mocked.service = makeLspServiceDouble({
+			supportsLSP: vi.fn().mockReturnValue(true),
+			hasLSP: vi.fn().mockResolvedValue(true),
+			getOperationSupport: vi.fn().mockResolvedValue(null),
+		});
+	});
+
 	it("resolves a ~ path to $HOME, not under the cwd", async () => {
 		const { home, restore } = pinFixtureHome("nav-tilde");
 		const filePath = path.join(home, "proj", "refs.ts");

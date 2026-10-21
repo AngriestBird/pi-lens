@@ -5,7 +5,7 @@ import type {
 } from "../clients/ast-grep-client.js";
 import { Type } from "../clients/deps/typebox.js";
 import { compactRenderResult } from "./render-compact.js";
-import { astGrepLangError, resolveAstGrepPaths } from "./shared.js";
+import { readAstGrepLang, resolveAstGrepPaths } from "./shared.js";
 
 // Cap the wire payload so an outline over a large directory can't flood context.
 const MAX_FILES = 50;
@@ -133,7 +133,7 @@ export function createAstGrepOutlineTool(astGrepClient: AstGrepClient) {
 				(p): p is string => typeof p === "string" && p.trim().length > 0,
 			);
 			if (rawPaths.length === 0) return errorResult("paths is required");
-			const langError = astGrepLangError(params.lang, false);
+			const { lang, refusal: langError } = readAstGrepLang(params.lang, false);
 			if (langError) return errorResult(`Error: ${langError}`);
 			// Resolve relative paths against the workspace; pass absolute paths to the
 			// CLI (execFile-style args — no shell interpolation).
@@ -148,7 +148,7 @@ export function createAstGrepOutlineTool(astGrepClient: AstGrepClient) {
 			let result: { output?: AstGrepOutlineFile[]; error?: string };
 			try {
 				result = await astGrepClient.outline(absPaths, {
-					lang: params.lang,
+					lang: lang || undefined,
 					items: params.items,
 					view: params.view,
 					types: params.type,

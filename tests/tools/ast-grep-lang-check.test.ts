@@ -104,6 +104,56 @@ describe("ast-grep tools refuse an unknown lang at execute (#4687)", () => {
 		expect(tool.cliCalls(cli)).toBe(1);
 	});
 
+	// #4723 F4: the MCP route hands execute the client's JSON unvalidated, so
+	// `lang` can be any JSON value. Recurrence: replace and outline threw a
+	// TypeError on a number (`.replace` / `.trim` of a non-string) and search
+	// called a number "lang is required"; each must be the refusal naming the
+	// valid ids, before the CLI runs.
+	const NON_STRINGS: Array<[string, unknown]> = [
+		["a number", 3],
+		["null", null],
+		["an object", { id: "typescript" }],
+		["an array", ["typescript"]],
+		["a boolean", true],
+	];
+	describe.each(TOOLS)("$name with a non-string lang", (tool) => {
+		it.each(NON_STRINGS)(
+			"refuses %s, naming every valid id",
+			async (_l, lang) => {
+				const cli = cliDouble();
+				const result = (await tool.run(cli, lang)) as ToolResult;
+
+				expect(result.isError).toBe(true);
+				const text = result.content[0]?.text ?? "";
+				expect(text).toContain("lang must be a string");
+				expect(text).toContain("typescript");
+				expect(tool.cliCalls(cli)).toBe(0);
+				expect(cli.ensureAvailable).not.toHaveBeenCalled();
+			},
+		);
+	});
+
+	// #4723 F4: search and replace strip one pair of wrapping quotes from an id
+	// a model sends quoted; outline refused `"\"typescript\""` as unknown.
+	it.each(TOOLS)(
+		"$name runs a quoted valid lang as the bare id",
+		async (tool) => {
+			const cli = cliDouble();
+			const result = (await tool.run(cli, '"typescript"')) as ToolResult;
+
+			expect(result.content[0]?.text ?? "").not.toContain("unknown lang");
+			expect(tool.cliCalls(cli)).toBe(1);
+			const call =
+				tool.name === "ast_grep_outline"
+					? (cli.outline.mock.calls[0]?.[1] as { lang?: string } | undefined)
+							?.lang
+					: tool.name === "ast_grep_search"
+						? cli.search.mock.calls[0]?.[1]
+						: cli.replace.mock.calls[0]?.[2];
+			expect(call).toBe("typescript");
+		},
+	);
+
 	it("ast_grep_outline still infers the language when lang is absent", async () => {
 		const cli = cliDouble();
 		const outline = TOOLS[2];

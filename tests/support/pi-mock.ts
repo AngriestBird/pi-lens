@@ -10,6 +10,13 @@
  *
  * Typed against the pinned `@earendil-works/pi-coding-agent` types only
  * (type-only import — no runtime dependency, per AGENTS.md install constraints).
+ *
+ * LAZY-TOOLS POSTURE (#4687, #4723 F5). Both harnesses start the situational
+ * tools INACTIVE by default, because pi-lens's default `tools.lazy` is `true`
+ * on every model; the one decision table is `lazyToolsApply` in
+ * `clients/tool-set-policy.ts`. `makeCtx` names no model, which an opted-in
+ * `tools.lazy: "auto"` treats as lazy too (the configured default, never
+ * eager); a per-model case belongs on tier 2 (`pi-session.ts`, `modelCompat`).
  */
 
 import type {
@@ -432,18 +439,6 @@ export function createPiMock(
 }
 
 /**
- * #4687: a model whose provider keeps mid-conversation system messages, so the
- * default `tools.lazy` ("auto") starts the situational tools inactive. A case
- * that asserts the lazy posture passes it as `makeCtx({ model })`; with no
- * model (or one without the fact) every tool stays active.
- */
-export const MID_CONVO_MODEL = {
-	id: "mid-convo",
-	provider: "faux",
-	compat: { supportsMidConvoSystemMessages: true },
-} as const;
-
-/**
  * A minimal command/handler context. Only the fields pi-lens handlers actually
  * touch are real (`cwd`, `ui.notify`, `ui.setStatus`, `ui.setWidget`,
  * `ui.theme`); the rest are inert stubs. `notifications` captures every
@@ -472,12 +467,8 @@ export function makeCtx(
 		 * telemetry identity from HERE, not from any event field — pi sets none
 		 * of `provider`/`model`/`sessionId` on a `session_start` or a
 		 * `tool_result` payload. Omit to simulate a host with no model selected.
-		 * `compat` carries pi-ai's model facts; the lazy-tools posture reads
-		 * `supportsMidConvoSystemMessages` from it (#4687, {@link MID_CONVO_MODEL}).
 		 */
-		model:
-			| { id: string; provider: string; compat?: Record<string, unknown> }
-			| undefined;
+		model: { id: string; provider: string } | undefined;
 	}> = {},
 ): MockCtx {
 	const notifications: CapturedNotification[] = [];

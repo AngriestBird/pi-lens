@@ -1,5 +1,6 @@
 /**
- * #4687 item 7: `tools.lazy` takes "auto" | true | false, default "auto".
+ * #4687 item 7: `tools.lazy` takes true | "auto" | false, default true (the
+ * maintainer's 2026-10-21 decision; "auto" and false are opt-in).
  *
  * One fixture per form a config file can hold (`tests/fixtures/tools-lazy-config/`),
  * each parsed by the real global loader and resolved through the real flag
@@ -9,8 +10,8 @@
  *
  * Recurrences:
  * - widening a boolean registry row silently re-reads an old config (an old
- *   `false` that no longer turns the flag on, or an old `true` that now
- *   follows the model);
+ *   `false` that no longer turns the flag on, or an old `true` or an absent
+ *   key that now follows the model, as #4723 r1's "auto" default did);
  * - a malformed value that falls back to the default with no record (the
  *   silent-default shape this loader's `warnInvalid` exists for);
  * - "auto" in a project file honored, or dropped without the global-only note.
@@ -63,7 +64,7 @@ describe("tools.lazy config forms (#4687 item 7)", () => {
 		["lazy-true.json", true, false, "on"],
 		["lazy-false.json", false, true, "off"],
 		["lazy-auto.json", "auto", false, "auto"],
-		["lazy-absent.json", undefined, false, "auto"],
+		["lazy-absent.json", undefined, false, "on"],
 	] as const)(
 		"%s parses to %s and resolves --no-lazy-tools=%s, mode %s",
 		(fixture, parsed, noLazyTools, mode) => {
@@ -78,12 +79,15 @@ describe("tools.lazy config forms (#4687 item 7)", () => {
 		},
 	);
 
-	it("a malformed value is reported and the setting stays unset (auto)", () => {
+	it("a malformed value is reported and the default (on) applies", () => {
 		const config = loadPiLensGlobalConfig(
 			path.join(FIXTURES, "lazy-malformed.json"),
 		);
 		expect(readLazyToolsSetting(config)).toBeUndefined();
 		expect(resolvePiLensFlag("no-lazy-tools", undefined, config)).toBe(false);
+		expect(resolveLazyToolsMode(false, readLazyToolsSetting(config))).toBe(
+			"on",
+		);
 		expect(ignoredReasons()).toEqual([
 			'tools.lazy must be "auto", true, or false',
 		]);
@@ -134,7 +138,12 @@ describe("lazyToolsApply decides per model only under auto (#4687 item 7)", () =
 		// A missing fact is false: every tool active.
 		["auto", { compat: {} }, false],
 		["auto", {}, false],
-		["auto", undefined, false],
+		// #4723 F1: NO resolved model is not a model without the fact. Nothing
+		// is known, so the configured default (lazy) holds until a model_select
+		// re-decides; r1 made it eager, and every driver naming no model (the
+		// fork-tree witness on CI) saw every tool active.
+		["auto", undefined, true],
+		["auto", null, true],
 		// Only the boolean `true` counts, never a truthy spelling.
 		["auto", { compat: { supportsMidConvoSystemMessages: "true" } }, false],
 		["on", undefined, true],

@@ -63,13 +63,29 @@ export const LANGUAGES = [
  * #4687: the three ast-grep schemas carry `lang` as a plain string (the 24-id
  * enum cost ~240 bytes per tool per request), so this is the one check that
  * keeps an unknown id from reaching the CLI. It names every valid id, which is
- * what the enum used to tell the model. Empty is "required" or "absent".
+ * what the enum used to tell the model.
+ *
+ * It reads the raw argument, not a typed one: the MCP route hands `execute`
+ * the client's JSON without schema validation, so `lang` can be any JSON value
+ * (#4723 F4). It admits only a string that is a known id, once one pair of
+ * wrapping double quotes is stripped; absent or blank is "required" (or absent
+ * when optional), and every other value is refused with `refusal`. `lang` is
+ * the normalized id, or "" when there is none.
  */
-export function astGrepLangError(
-	lang: string | undefined,
+export function readAstGrepLang(
+	raw: unknown,
 	required: boolean,
-): string | undefined {
-	if (!lang?.trim()) return required ? "lang is required" : undefined;
-	if ((LANGUAGES as readonly string[]).includes(lang)) return undefined;
-	return `unknown lang "${lang}"; valid ids: ${LANGUAGES.join(", ")}`;
+): { lang: string; refusal?: string } {
+	const lang = typeof raw === "string" ? raw.replace(/^"|"$/g, "") : "";
+	if (
+		typeof raw === "string" &&
+		(LANGUAGES as readonly string[]).includes(lang)
+	)
+		return { lang };
+	const validIds = `valid ids: ${LANGUAGES.join(", ")}`;
+	if (raw !== undefined && typeof raw !== "string")
+		return { lang, refusal: `lang must be a string; ${validIds}` };
+	if (!lang.trim())
+		return required ? { lang, refusal: "lang is required" } : { lang };
+	return { lang, refusal: `unknown lang "${lang}"; ${validIds}` };
 }

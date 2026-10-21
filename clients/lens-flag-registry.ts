@@ -260,13 +260,13 @@ export const LENS_FLAGS: readonly LensFlagSpec[] = [
 	{
 		name: "no-lazy-tools",
 		description:
-			'Keep every pi-lens tool active for the whole session. Same as tools.lazy=false in ~/.pi-lens/config.json; the default tools.lazy="auto" starts the situational tools inactive only for models that support mid-conversation system messages, and true always does.',
+			'Keep every pi-lens tool active for the whole session. Same as tools.lazy=false in ~/.pi-lens/config.json; the default tools.lazy=true starts the situational tools inactive on every model, and tools.lazy="auto" only on models that support mid-conversation system messages.',
 		configKey: "tools.lazy",
 		negated: true,
 		default: false,
 		scope: "global",
 		// #4687: `tools.lazy` takes a third value, "auto", which leaves this flag
-		// at its default; only the two booleans decide it.
+		// at its default (off); only the two booleans decide it.
 		readGlobal: (config) => {
 			const setting = readLazyToolsSetting(config);
 			return typeof setting === "boolean" ? setting : undefined;
