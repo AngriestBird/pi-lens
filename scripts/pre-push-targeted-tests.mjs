@@ -341,7 +341,14 @@ export function resolveBaseRef() {
 // Every pushed ref diffs against the base branch, the PR diff CI's targeted
 // job selects. The remote tip would count a merged-in master's files as the
 // branch's own: #4557's master merge selected 366 test files for 11 (#4724).
-export function resolveDiffRange(input = readStdin(), base = "origin/master") {
+// `remoteTip` is the range set before that change, kept as the fallback for a
+// base that cannot be resolved: an update diffs `<remote tip>...<sha>`, a new
+// branch `origin/master...HEAD`.
+export function resolveDiffRange(
+	input = readStdin(),
+	base = "origin/master",
+	{ remoteTip = false } = {},
+) {
 	const lines = input
 		.trim()
 		.split(/\r?\n/)
@@ -358,7 +365,11 @@ export function resolveDiffRange(input = readStdin(), base = "origin/master") {
 			// A zero local sha is a branch deletion. It has no changed files and
 			// must not trigger a build or a failed `git diff` (#3661).
 			if (/^0+$/.test(localSha)) continue;
-			const range = `${base}...${localSha}`;
+			const range = remoteTip
+				? /^0+$/.test(remoteSha)
+					? "origin/master...HEAD"
+					: `${remoteSha}...${localSha}`
+				: `${base}...${localSha}`;
 			if (!ranges.includes(range)) ranges.push(range);
 		}
 		return ranges.length > 0 ? ranges : null;
@@ -391,7 +402,7 @@ export function changedFiles(range, { diffFilter, cwd, env } = {}) {
 			.filter((line) => line.length > 0 && !line.startsWith("dist/"));
 	} catch (error) {
 		console.warn(
-			`[pre-push] could not compute diff range "${range}", falling back to a build-only pass: ${error instanceof Error ? error.message : error}`,
+			`[pre-push] could not compute diff range "${range}": ${error instanceof Error ? error.message : error}`,
 		);
 		return null;
 	}
@@ -642,6 +653,7 @@ export function writePrePushRecord({
 	vitestExitCode,
 	wallTimeMs,
 	outcome = "tests-not-started",
+	treeBound = false,
 }) {
 	const dir = recordDir(commonDir);
 	mkdirSync(dir, { recursive: true });
@@ -666,6 +678,9 @@ export function writePrePushRecord({
 		vitestExitCode,
 		wallTimeMs,
 		outcome,
+		// Present only when the tests ran in a clean tree at exactly this head:
+		// the one mark `alreadyPassed` trusts (#4726 F1).
+		...(treeBound ? { treeBound: true } : {}),
 	};
 	const target = path.join(dir, `${head}.json`);
 	const temporary = path.join(dir, `.${head}.${process.pid}.${Date.now()}.tmp`);
@@ -717,34 +732,82 @@ export function parseVitestCounts(output) {
 }
 
 // Every pushed head already passed this exact selection, so the run would
-// repeat it (#4724: an SSH drop after a green hook re-ran it on one head).
+// repeat it (#4724: an SSH drop after a green hook re-ran it on one head). Only
+// a record the hook marked `treeBound` counts: the tests run in the working
+// tree, so a pass says nothing about a sha that was not that clean tree
+// (#4726 F1).
+// Returns each head's record timestamp, or null when any head lacks one.
 function alreadyPassed(heads, selected) {
-	if (heads.length === 0) return false;
+	if (heads.length === 0) return null;
 	let commonDir;
 	try {
 		commonDir = gitCommonDir();
 	} catch {
-		return false;
+		return null;
 	}
 	const want = [...selected].sort().join("\n");
-	return heads.every(({ head }) => {
+	const timestamps = [];
+	for (const { head } of heads) {
 		const record = readPrePushRecord(commonDir, head);
-		return (
-			record?.outcome === "tests-complete" &&
+		if (
+			record?.outcome !== "tests-complete" ||
+			record.treeBound !== true ||
 			record.selected
 				.map(({ file }) => file)
 				.sort()
-				.join("\n") === want
-		);
-	});
+				.join("\n") !== want
+		)
+			return null;
+		timestamps.push(record.timestamp);
+	}
+	return timestamps;
+}
+
+// One NDJSON row per decision that removes or relaxes the gate for a push, beside
+// the shared test lock (#3717).
+function appendPrePushLog(logPath, row) {
+	mkdirSync(path.dirname(logPath), { recursive: true });
+	appendFileSync(
+		logPath,
+		`${JSON.stringify({ ts: new Date().toISOString(), ...row })}\n`,
+	);
+}
+
+// The heads whose bytes the tests just ran against: the checked-out HEAD in a
+// tree with no tracked edits. Anything else fails closed to none.
+function testedHeads(heads) {
+	try {
+		const git = (args) =>
+			execFileSync("git", args, { encoding: "utf8" }).trim();
+		if (git(["status", "--porcelain", "--untracked-files=no"]) !== "")
+			return [];
+		const current = git(["rev-parse", "HEAD"]);
+		return heads.filter(({ head }) => head === current);
+	} catch {
+		return [];
+	}
 }
 
 function writeHeadRecords(heads, values) {
 	if (heads.length === 0) return;
 	try {
 		const commonDir = gitCommonDir();
-		for (const { head, base } of heads)
-			writePrePushRecord({ commonDir, head, base, ...values });
+		// A `tests-complete` outcome is written only for a head the tests ran
+		// against; the others keep their provisional `tests-not-started` record.
+		const passed = values.outcome === "tests-complete";
+		const bound = passed ? testedHeads(heads) : [];
+		if (passed && bound.length < heads.length)
+			console.log(
+				"[pre-push] tests passed, but not as a clean checkout of every pushed head; those heads are not recorded as passed.",
+			);
+		for (const entry of passed ? bound : heads)
+			writePrePushRecord({
+				commonDir,
+				head: entry.head,
+				base: entry.base,
+				...values,
+				treeBound: passed,
+			});
 	} catch (error) {
 		if (!recordWriteWarningEmitted) {
 			recordWriteWarningEmitted = true;
@@ -848,24 +911,44 @@ function runTargetedTests(selected) {
 	});
 }
 
+// The union of the files every range changes, or null when any range cannot
+// be diffed.
+function unionChanged(ranges) {
+	const changed = [];
+	for (const range of ranges) {
+		const files = changedFiles(range);
+		if (files === null) return null;
+		for (const file of files) {
+			if (!changed.includes(file)) changed.push(file);
+		}
+	}
+	return changed;
+}
+
 export async function main() {
 	const input = readStdin();
-	const heads = pushHeads(input);
-	const ranges = resolveDiffRange(input, resolveBaseRef());
+	const base = resolveBaseRef();
+	let ranges = resolveDiffRange(input, base);
 	if (ranges === null) {
 		console.log("[pre-push] deletion-only push; skipping build and tests.");
 		return 0;
 	}
-	let changed = [];
-	for (const range of ranges) {
-		const files = changedFiles(range);
-		if (files === null) {
-			changed = null;
-			break;
-		}
-		for (const file of files) {
-			if (!changed.includes(file)) changed.push(file);
-		}
+	// Each record names the comparison base its selection diffed (#4726 F3).
+	let heads = pushHeads(input).map((head) => ({ ...head, base }));
+	let changed = unionChanged(ranges);
+	if (changed === null) {
+		// An unresolvable base range (no origin/master ref, an upstream with no
+		// merge base) selected nothing and passed: fall back to the range set
+		// before #4724, which resolves from the pushed shas (#4726 F2).
+		console.log(
+			`[pre-push] could not diff against ${base}; falling back to the remote-tip range.`,
+		);
+		ranges = resolveDiffRange(input, base, { remoteTip: true });
+		heads = pushHeads(input).map((head) => ({
+			...head,
+			base: /^0+$/.test(head.base) ? "origin/master" : head.base,
+		}));
+		changed = unionChanged(ranges);
 	}
 	if (changed !== null && process.argv.includes("--include-worktree")) {
 		const uncommitted = worktreeChangedFiles();
@@ -932,7 +1015,22 @@ export async function main() {
 			);
 	}
 
-	if (alreadyPassed(heads, selected)) {
+	const priorPass = alreadyPassed(heads, selected);
+	if (priorPass) {
+		// The skip removes the gate for this push, so it leaves a durable row
+		// like the lock opt-out does; the record keeps its own timestamp.
+		try {
+			appendPrePushLog(path.join(path.dirname(getLockPath()), "pre-push.log"), {
+				event: "pre-push-skip",
+				heads: heads.map(({ head }) => head),
+				selected: selected.length,
+				recordTimestamps: priorPass,
+			});
+		} catch (error) {
+			console.warn(
+				`[pre-push] could not log the skip; continuing: ${error instanceof Error ? error.message : error}`,
+			);
+		}
 		console.log(
 			`[pre-push] ${heads.map(({ head }) => head.slice(0, 9)).join(", ")} already passed these ${selected.length} test file(s); skipping build and tests.`,
 		);
@@ -1078,10 +1176,13 @@ export async function main() {
 			// The opt-out is a decision, so it leaves a durable trace beside the
 			// lock (#3717): stderr scrolls away, the push does not. The lock
 			// directory exists: the wrapper just waited on a file inside it.
-			appendFileSync(
-				logPath,
-				`${JSON.stringify({ ts: new Date().toISOString(), event: "lock-skip", waitedMs, holder, lockPath, selected: selected.length })}\n`,
-			);
+			appendPrePushLog(logPath, {
+				event: "lock-skip",
+				waitedMs,
+				holder,
+				lockPath,
+				selected: selected.length,
+			});
 			console.error(
 				`[pre-push] WARNING: PI_LENS_PREPUSH_LOCK_SKIP=1 opted out of the targeted test run after ${waitedMs / 1000} s (${holder}); the push is ungated, recorded in ${logPath}, and CI remains the real gate.`,
 			);

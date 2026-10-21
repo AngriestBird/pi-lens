@@ -201,9 +201,13 @@ Each pre-push head has a durable result record at
 `$(git rev-parse --git-common-dir)/pi-lens-prepush/<sha>.json`. It contains the
 head/base, timestamp, selected test files and their `changed`, `mirror`,
 `import`, `history`, or `governance` reason, plus passed/failed/skipped
-counts, the Vitest exit code, and wall time. A re-push of a head whose record
-is `tests-complete` for the same selection skips the build and tests and keeps
-the record (#4724); any other re-push overwrites it. Writes prune records
+counts, the Vitest exit code, and wall time. `base` is the ref the selection
+diffed. A `tests-complete` record carries `treeBound` only when the tests ran
+in a clean checkout of exactly that head (HEAD equal to it, no tracked
+edits); other heads keep their `tests-not-started` record. A re-push of a head
+whose `treeBound` record passed the same selection skips the build and tests,
+keeps the record and appends one `pre-push-skip` row to `pre-push.log` (#4724);
+any other re-push overwrites it. Writes prune records
 older than fourteen days. The provisional record is written before build and
 self-scan work with outcome `tests-not-started`; preparation failures update it
 to `build-failed` or `self-scan-failed`. The write uses a same-directory
