@@ -39,7 +39,6 @@ import {
 	getLSPService,
 	resetLSPService,
 } from "../../clients/lsp/capabilities.js";
-import { configureLspServiceLifecycle } from "../../clients/lsp/service-singleton.js";
 import {
 	resetWorkspaceDiagnosticsCacheSession,
 	workspaceFileCreatedAtFor,
@@ -47,7 +46,7 @@ import {
 import { lookForOutOfBandChanges } from "../../clients/out-of-band-changes.js";
 import { normalizeMapKey } from "../../clients/path-utils.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
-import { makeLspServiceDouble } from "../support/lsp-service-double.js";
+import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 
 interface ServiceCalls {
 	restartRoots: string[];
@@ -77,7 +76,7 @@ function recordPublishes(): DiskChange[] {
 	return seen;
 }
 
-beforeEach(() => {
+beforeEach(async () => {
 	tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-disk-change-subs-"));
 	fs.mkdirSync(path.join(tmp, "src"), { recursive: true });
 	runtime = new RuntimeCoordinator();
@@ -87,8 +86,7 @@ beforeEach(() => {
 	calls = { restartRoots: [], notified: [] };
 	// Drop the previous case's service, then install this case's recorder
 	// through the same lifecycle seam the host uses.
-	resetLSPService();
-	const service = makeLspServiceDouble({
+	await installLspServiceDouble({
 		restartPrimaryClientsUnder: async (root: string) => {
 			calls.restartRoots.push(root);
 			return [`primary:${root}`];
@@ -99,11 +97,8 @@ beforeEach(() => {
 			calls.notified.push(...events);
 		},
 	});
-	configureLspServiceLifecycle<Record<string, unknown>>({
-		create: () => service,
-		beforeReset: () => undefined,
-		destroy: async () => undefined,
-	});
+	// The look reads the LIVE service through `peekLSPService`, so the double has
+	// to exist before it runs — the same eager call the hand-rolled install made.
 	getLSPService();
 });
 

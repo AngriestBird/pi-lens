@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AstGrepClient } from "../../clients/ast-grep-client.js";
 import { CacheManager } from "../../clients/cache-manager.js";
 import {
@@ -21,7 +21,7 @@ import { handleToolCall } from "../../clients/runtime-tool-call.js";
 import type { TreeSitterClient } from "../../clients/tree-sitter-client.js";
 import { createLensDiagnosticMarkTool } from "../../tools/lens-diagnostic-mark.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
-import { makeLspServiceDouble } from "../support/lsp-service-double.js";
+import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 import { runHandlerExpectingNoThrow } from "../support/handler-verdict.js";
 
 // handleToolCall calls getLSPService() directly (not via DI, matching the
@@ -30,14 +30,12 @@ import { runHandlerExpectingNoThrow } from "../support/handler-verdict.js";
 // touchFile that resolves immediately is enough to observe its call args.
 const touchFileMock = vi.fn().mockResolvedValue(undefined);
 const getWarmClientForFileMock = vi.fn().mockResolvedValue(undefined);
-vi.mock("../../clients/lsp/capabilities.js", () => ({
-	getLSPService: () =>
-		makeLspServiceDouble({
-			touchFile: touchFileMock,
-			getWarmClientForFile: getWarmClientForFileMock,
-		}),
-	resetLSPService: () => {},
-}));
+beforeEach(async () => {
+	await installLspServiceDouble({
+		touchFile: touchFileMock,
+		getWarmClientForFile: getWarmClientForFileMock,
+	});
+});
 
 vi.mock("../../clients/bootstrap.js", async () => {
 	const { bootstrapSeamMock } = await import("../support/bootstrap-mock.js");
