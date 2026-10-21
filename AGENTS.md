@@ -1738,8 +1738,10 @@ produce), `double-subject` (1: the double is the subject), and
 `real-ui-harness` (1: the claim is what the TUI shows or mounts, which no
 in-process tier can produce). Four rows still carry `pending slice 10`, the
 last roadmap slice, which moves no file, so a slice marker now names no
-scheduled work. The class counts are the list's 53 rows at that recording:
-`grep -oE '^\s*"[^"]*": *"[^"]+"' tests/support/pi-mock-importers.ts | sed -E 's/.*": *"([^"]+)"$/\1/' | sort | uniq -c`.
+scheduled work. The class counts are the list's 53 rows at that recording, and
+a row grouped under a `pending slice 8` comment already carries its own class,
+so it is counted in that bucket:
+`grep -oE '^[[:space:]]*"[^"]*": *"[^"]+"' tests/support/pi-mock-importers.ts | sed -E 's/.*": *"([^"]+)"$/\1/' | sort | uniq -c`.
 The double throws at load for a test file not on the list, so a new user fails
 however it imports it. The list only shrinks:
 `tests/config/pi-mock-importer-sweep.test.ts` fails on a row whose file no
@@ -1759,9 +1761,12 @@ starved budgets, and gates; `makeRunnerCtx`, `makeLspServiceDouble`, and
 `makeRealRunnerEnv` for dispatch, LSP, and rule behavior. Check `tests/support/`
 before writing a helper: a host case uses a pi tier, and a JSON-lines sink is
 read through `readNdjsonRows` (`tests/support/ndjson-rows.ts`), never a local
-`JSON.parse` loop. Mock only external binaries, network, host SDK seams (not
-pi's own behaviour: see the pi tiers above), clocks, or fault injection; an
-in-process store, registry or coordinator is never replaced by a fake.
+`JSON.parse` loop; a claim that needs the complete output asserts its
+`skipped === 0`, because the reader drops a line it cannot parse and reports
+the count instead of throwing. Mock only external binaries, network, host SDK
+seams (not pi's own behaviour: see the pi tiers above), clocks, or fault
+injection; an in-process store, registry or coordinator is never replaced by a
+fake.
 
 Test authoring screens:
 
