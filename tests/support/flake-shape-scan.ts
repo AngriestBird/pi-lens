@@ -833,7 +833,14 @@ export const SERVICE_SURFACES: readonly ServiceSurface[] = [
 	{
 		name: "LSPService",
 		file: "clients/lsp/index.ts",
-		factories: ["makeLspServiceDouble"],
+		// `tests/support/lsp-service-seam.ts` (#4709) is the factory's only
+		// sanctioned wrapper: it hands its argument straight to
+		// `makeLspServiceDouble` and installs the result through the singleton
+		// lifecycle seam, so an overrides object passed to it is factory-seeded
+		// exactly like one passed to the factory itself. `installLspService` is
+		// NOT registered: it takes a finished double, so an object literal handed
+		// to it is a hand-rolled double and must keep being counted.
+		factories: ["makeLspServiceDouble", "installLspServiceDouble"],
 	},
 ];
 
