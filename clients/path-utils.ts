@@ -332,6 +332,41 @@ function normalizePathForm(filePath: string, identity: boolean): string {
  * The first attempt is the only syscall for an existing path, which is the
  * per-edit case; a missing path pays one more `realpath` per missing segment.
  */
+/** One tally row per errno that made a path identity fall back to an ancestor. */
+export interface PathIdentityFallback {
+	code: string;
+	count: number;
+	/** The first spelling the kernel refused with this code. */
+	firstPath: string;
+}
+
+/** Distinct errno codes kept; realpath(3) can answer only a handful. */
+const PATH_IDENTITY_FALLBACK_CODES_MAX = 16;
+const pathIdentityFallbacks = new Map<string, PathIdentityFallback>();
+
+function recordPathIdentityFallback(code: string, spelled: string): void {
+	const existing = pathIdentityFallbacks.get(code);
+	if (existing) existing.count += 1;
+	else if (pathIdentityFallbacks.size < PATH_IDENTITY_FALLBACK_CODES_MAX)
+		pathIdentityFallbacks.set(code, { code, count: 1, firstPath: spelled });
+}
+
+/**
+ * The identity fallbacks this process has seen (#4689), PULLED at read time
+ * by `getDegradationSummary()` as `path-identity-fallback`: this module sits
+ * below the ledger, which imports it, so it cannot write through
+ * `recordDegradation` without a no-client-cycles cycle. Bounded to one row
+ * per errno code.
+ */
+export function getPathIdentityFallbacks(): readonly PathIdentityFallback[] {
+	return [...pathIdentityFallbacks.values()].map((row) => ({ ...row }));
+}
+
+/** Re-armed with the ledger at a session boundary (catalog shape 17). */
+export function resetPathIdentityFallbacks(): void {
+	pathIdentityFallbacks.clear();
+}
+
 function kernelRealPath(
 	spelled: string,
 	p: typeof path.posix,
@@ -342,11 +377,15 @@ function kernelRealPath(
 		try {
 			const real = realpathSync.native(current);
 			return tail.length === 0 ? real : p.join(real, ...tail.reverse());
-		} catch {
-			// none: missing, unreadable, or a dangling or cyclic link is the
-			// expected answer for a file not yet written (a per-key hot path,
-			// #2016), not a failure: the identity is decided by the nearest
-			// ancestor the kernel can resolve.
+		} catch (refusal) {
+			// none: a missing component is the expected answer for a file not
+			// yet written (a per-key hot path, #2016), not a failure. Any other
+			// errno (an unreadable ancestor, a cyclic link) is tallied for the
+			// ledger's read-time fold. Either way the identity is decided by
+			// the nearest ancestor the kernel can resolve.
+			const code = (refusal as NodeJS.ErrnoException | undefined)?.code;
+			if (code !== "ENOENT" && code !== "ENOTDIR")
+				recordPathIdentityFallback(code ?? "unknown", current);
 			const parent = p.dirname(current);
 			if (parent === current) return undefined;
 			tail.push(p.basename(current));
