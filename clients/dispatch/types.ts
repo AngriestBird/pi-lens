@@ -478,6 +478,55 @@ export function reachedNoVerdict(
 	}
 }
 
+/**
+ * #4733 r1 F2: whether one dispatch checked the whole file, as far as this
+ * checkout can. The commit gate's record lets a clean write drop another
+ * session's blocker section for the file only on such a run, since another
+ * session's section names no runner a per-runner carry could judge it by.
+ *
+ * Admitted: no language server went unanswered (`serverIds`), the primary
+ * group checked the file (`unconfirmedStatus`), no verdict covers only the
+ * edit (`editScopedRunnerIds`), at least one runner ran and answered, and
+ * every runner that reached no verdict either skipped or is a collect-later
+ * run still in flight (its answer joins this session's own blocker map when
+ * it settles). Refused: everything else, a runner that failed or broke part
+ * way above all, and a no-verdict runner with no latency row. A skip carries
+ * no marker of why it skipped, so one that could not read the file (a size
+ * cap, an aborted WASM runtime) is admitted with the not-configured ones.
+ */
+export function checkedWholeFile(
+	result: Pick<
+		DispatchResult,
+		| "unconfirmedStatus"
+		| "editScopedRunnerIds"
+		| "inconclusiveSources"
+		| "latencyReport"
+	>,
+): boolean {
+	if (
+		result.unconfirmedStatus !== undefined ||
+		result.editScopedRunnerIds !== undefined ||
+		(result.inconclusiveSources?.serverIds.length ?? 0) > 0
+	) {
+		return false;
+	}
+	const noVerdict = new Set(result.inconclusiveSources?.runnerIds);
+	const runners = result.latencyReport?.runners ?? [];
+	const statusOf = new Map(
+		runners.map((runner) => [runner.runnerId, runner.status]),
+	);
+	return (
+		runners.some(
+			(runner) =>
+				runner.status === "succeeded" && !noVerdict.has(runner.runnerId),
+		) &&
+		[...noVerdict].every((runnerId) => {
+			const status = statusOf.get(runnerId);
+			return status === "skipped" || status === "pending";
+		})
+	);
+}
+
 // --- Dispatch Context ---
 
 /**

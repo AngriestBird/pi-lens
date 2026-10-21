@@ -859,8 +859,10 @@ function isTurnEndFindingsCache(value: unknown): value is TurnEndFindingsCache {
 type StoredRecord = Partial<TurnEndFindingsCache>;
 
 /**
- * The stored record WHATEVER ITS AGE (#4725), or `undefined` when there is none
- * or it cannot be read.
+ * The stored value WHATEVER ITS AGE (#4725), or `undefined` when there is none
+ * or it cannot be read. A value that is not an object is returned as stored
+ * (#4733 r2): present, so the gate still refuses it, and never read as a
+ * record that makes no claim.
  *
  * The cache's freshness window is the gate's bound on TRUSTING a recorded
  * blocker, not a reason for the record's own writers to stop seeing it. Read
@@ -868,21 +870,20 @@ type StoredRecord = Partial<TurnEndFindingsCache>;
  * carry or retire it: a clean write latched `cache_stale`, the turn end's
  * clean-up skipped it, and it refused every commit in every later session.
  */
-function storedRecord(
-	cacheManager: CacheManager,
-	cwd: string,
-): StoredRecord | undefined {
+function storedRecord(cacheManager: CacheManager, cwd: string): unknown {
 	const read = cacheManager.readCache<unknown>(
 		"turn-end-findings",
 		cwd,
 		Number.POSITIVE_INFINITY,
 	);
-	if (!read) return undefined;
-	// A stored value that is not an object carries none of the record's
-	// fields: present, so the gate still refuses it, and claiming nothing.
-	return read.data && typeof read.data === "object"
-		? (read.data as StoredRecord)
-		: {};
+	return read ? (read.data ?? null) : undefined;
+}
+
+/** The stored value's fields, or `undefined` for a value that is not a record. */
+function storedFields(stored: unknown): StoredRecord | undefined {
+	return stored && typeof stored === "object" && !Array.isArray(stored)
+		? (stored as StoredRecord)
+		: undefined;
 }
 
 function cacheRecord(
@@ -902,12 +903,47 @@ function cacheRecord(
  * not admitted here and keeps failing closed.
  */
 function claimsNoBlocker(data: unknown): boolean {
-	if (!data || typeof data !== "object") return false;
-	const record = data as Partial<TurnEndFindingsCache>;
+	const record = storedFields(data);
+	if (!record) return false;
 	return (
 		record.hasBlockers === false &&
 		(record.testFailures === undefined || record.testFailures === false) &&
-		(record.blockerContent === undefined || record.blockerContent === "")
+		(record.blockerContent === undefined || record.blockerContent === "") &&
+		// #4733 r1 F7: a test failure's text or files contradict the claim too.
+		(record.testFailureContent === undefined ||
+			record.testFailureContent === "") &&
+		(record.testFailureFiles === undefined ||
+			(Array.isArray(record.testFailureFiles) &&
+				record.testFailureFiles.length === 0))
+	);
+}
+
+/**
+ * The only fields a record that makes NO claim carries (#4733 r1 F3): what the
+ * `--lens-guard`-off turn-end writer stores for delivery
+ * (`clients/runtime-turn.ts`, the `else` branch), and 3.8.74's `{ content }`.
+ */
+const NO_CLAIM_FIELDS: ReadonlySet<string> = new Set([
+	"content",
+	"affectedFiles",
+	"affectedFilesTruncated",
+	"provenance",
+]);
+
+/**
+ * True only for a record that makes no claim at all: an object with string
+ * `content` and no field outside {@link NO_CLAIM_FIELDS}. It answers to no
+ * file, so no re-check of one file clears it; the gate still refuses it, and a
+ * settled turn end with no blocker retires it. Any other key (a claim, an
+ * owner, a field no writer of these shapes stores) is not this form and keeps
+ * failing closed.
+ */
+function makesNoClaim(data: unknown): boolean {
+	const record = storedFields(data);
+	return (
+		!!record &&
+		typeof record.content === "string" &&
+		Object.keys(record).every((key) => NO_CLAIM_FIELDS.has(key))
 	);
 }
 
@@ -915,7 +951,7 @@ function claimsNoBlocker(data: unknown): boolean {
 function logRecordRetired(
 	cwd: string,
 	by: "turn_end" | "write",
-	basis: "own_session" | "no_blocker" | "rechecked",
+	basis: "own_session" | "no_blocker" | "no_claim" | "rechecked",
 ): void {
 	logLatency({
 		type: "phase",
@@ -932,11 +968,14 @@ function logRecordRetired(
  * The turn end's clean-up of the persisted record, once the turn settled with
  * no blocker in the runtime (the caller's guard). It retires the record when
  * it is this session's own and holds no test failure (the rule both turn-end
- * branches applied before #4725), or when it claims no blocker at all — read
- * whatever its age, so a record the freshness window hides is no longer kept
- * for good. A record another session wrote that still carries a blocker stays:
- * this session's turn end did not re-check it (`syncGitGuardRecord` clears it
- * file by file as this session re-checks the files it names).
+ * branches applied before #4725), when it claims no blocker at all, or when it
+ * makes no claim (#4733 r1 F3: the `--lens-guard`-off writer's record, which
+ * answers to no file) — read whatever its age, so a record the freshness
+ * window hides is no longer kept for good. A record another session wrote
+ * that still carries a blocker stays: this session's turn end did not
+ * re-check it (`syncGitGuardRecord` clears it file by file as this session
+ * re-checks the files it names). A latch that described the record goes with
+ * it (`releaseRecordLatch`).
  *
  * @returns true when the record was retired.
  */
@@ -945,20 +984,75 @@ export function retireSettledGitGuardRecord(
 	cacheManager: CacheManager,
 	cwd: string,
 ): boolean {
-	const stored = storedRecord(cacheManager, cwd);
+	const stored = storedFields(storedRecord(cacheManager, cwd));
 	if (!stored) return false;
 	const own =
 		stored.sessionId === runtime.telemetrySessionId &&
 		stored.testFailures !== true;
-	const noBlocker = claimsNoBlocker(stored);
-	if (!own && !noBlocker) return false;
+	const basis = own
+		? "own_session"
+		: claimsNoBlocker(stored)
+			? "no_blocker"
+			: makesNoClaim(stored)
+				? "no_claim"
+				: undefined;
+	if (!basis) return false;
 	cacheManager.clearCache("turn-end-findings", cwd);
-	logRecordRetired(cwd, "turn_end", own ? "own_session" : "no_blocker");
+	releaseRecordLatch(runtime);
+	logRecordRetired(cwd, "turn_end", basis);
 	return true;
 }
 
-function markCacheUnknown(runtime: RuntimeCoordinator, reason: string): void {
+/**
+ * Every reason this module latches about the stored record itself (#4733 r1
+ * F4). A latch about a dispatch (`pipeline_error`, `pipeline_crash`, set in
+ * `clients/runtime-tool-result.ts`) is not one of them.
+ */
+const RECORD_LATCH_REASONS = [
+	"session_mismatch",
+	"blocking_provenance_untrusted",
+	"cache_write_failed",
+	"cache_fresh",
+	"cache_stale",
+	"cache_malformed",
+	"cache_unreadable",
+] as const;
+type RecordLatchReason = (typeof RECORD_LATCH_REASONS)[number];
+
+function markCacheUnknown(
+	runtime: RuntimeCoordinator,
+	reason: RecordLatchReason,
+): void {
 	runtime.markGitGuardCacheUnknown(reason);
+}
+
+/**
+ * A writer that deletes the record releases the latch that described it, and
+ * only that latch: the gate read the latch first, so a reason about a record
+ * that is gone refused the commit after the action its remedy named (#4733 r1
+ * F4).
+ */
+function releaseRecordLatch(runtime: RuntimeCoordinator): void {
+	const latched = runtime.gitGuardCacheUnknownReason;
+	if (RECORD_LATCH_REASONS.some((reason) => reason === latched)) {
+		runtime.clearGitGuardCacheUnknown();
+	}
+}
+
+/**
+ * The session a rewritten record belongs to (#4733 r1 F1). The owner speaks
+ * for the record's blocker sections, so a writer keeps the stored owner while
+ * any stored section survives its write, and stamps this session only when it
+ * writes none. Test failures carry no owner: only a passing run clears them.
+ */
+function recordOwner(
+	existing: TurnEndFindingsCache | undefined,
+	runtime: RuntimeCoordinator,
+	storedSectionSurvives: boolean,
+): string {
+	return existing && storedSectionSurvives
+		? existing.sessionId
+		: runtime.telemetrySessionId;
 }
 
 /** Persist a complete, bounded, content-bound guard record. */
@@ -1050,11 +1144,12 @@ const MAX_REMEDY_FILES = 5;
  * this session's own, fresh evidence, whose unknown states `RECHECK_REMEDY`
  * answers.
  *
- * Each sentence names an action `syncGitGuardRecord` or
- * `clearGitGuardTestFailure` honours for such a record: a clean dispatch of a
- * named file drops that file's sections, and a passing run retires its test
- * failures. A record whose blockers name no file has no such action, and the
- * text says what replaces it instead of inventing one.
+ * Each sentence names an action `syncGitGuardRecord`,
+ * `clearGitGuardTestFailure` or `retireSettledGitGuardRecord` honours for such
+ * a record: a clean dispatch of a named file drops that file's sections, a
+ * passing run retires its test failures, and a settled turn end retires a
+ * record that makes no claim. A record whose blockers name no file has no
+ * such action, and the text says what replaces it instead of inventing one.
  */
 function unconfirmedRecordRemedy(
 	stored: unknown,
@@ -1064,12 +1159,20 @@ function unconfirmedRecordRemedy(
 ): string | undefined {
 	if (stored === undefined) return undefined;
 	const record = isTurnEndFindingsCache(stored) ? stored : undefined;
+	const testRemedy =
+		record?.testFailures === true
+			? "Run the failing tests again: a passing run clears them."
+			: undefined;
 	if (
 		record &&
 		inspection === "fresh" &&
 		record.sessionId === runtime.telemetrySessionId
 	) {
-		return undefined;
+		// #4733 r1 F5: a write re-checks this session's own files, and clears no
+		// test failure, so a record that holds one names the passing run too.
+		return testRemedy
+			? `Write the affected files again so pi-lens re-checks them. ${testRemedy} Then retry.`
+			: undefined;
 	}
 	const sections = record?.blockerContent
 		? blockingProvenance(record.blockerContent, record.blockingFiles, cwd)
@@ -1083,22 +1186,34 @@ function unconfirmedRecordRemedy(
 				),
 			),
 		];
-		const shown = files.slice(0, MAX_REMEDY_FILES).join(", ");
-		const more =
-			files.length > MAX_REMEDY_FILES
-				? ` and ${files.length - MAX_REMEDY_FILES} more`
-				: "";
+		// #4733 r1 F6: a file outside the project keeps an absolute spelling,
+		// which the model-facing text counts and never prints.
+		const named = files.filter((file) => !path.isAbsolute(file));
+		const outside = files.length - named.length;
+		const cut = [
+			named.length > MAX_REMEDY_FILES
+				? `${named.length - MAX_REMEDY_FILES} more`
+				: "",
+			outside > 0
+				? `${outside} file${outside === 1 ? "" : "s"} outside the project`
+				: "",
+		].filter((part) => part.length > 0);
+		const shown = [named.slice(0, MAX_REMEDY_FILES).join(", "), ...cut]
+			.filter((part) => part.length > 0)
+			.join(" and ");
 		parts.push(
-			`The record names blockers in ${shown}${more} that pi-lens cannot confirm. Fix them and write each file again: a clean pi-lens check of a file clears its part of the record.`,
+			`The record names blockers in ${shown} that pi-lens cannot confirm. Fix them and write each file again: a clean pi-lens check of a file clears its part of the record.`,
+		);
+	} else if (makesNoClaim(stored)) {
+		parts.push(
+			"The record makes no blocker claim pi-lens can check, so no re-check of one file clears it; a turn that ends with no blocker clears it.",
 		);
 	} else if (!record || record.blockerContent) {
 		parts.push(
 			"The record holds blockers pi-lens cannot attribute to a file, so no re-check of one file clears them; this session's next turn-end findings replace it.",
 		);
 	}
-	if (record?.testFailures === true) {
-		parts.push("Run the failing tests again: a passing run clears them.");
-	}
+	if (testRemedy) parts.push(testRemedy);
 	return parts.length > 0 ? `${parts.join(" ")} Then retry.` : undefined;
 }
 
@@ -1216,12 +1331,22 @@ export function resyncGitGuardAfterInlinePolicy(args: {
 	args.runtime.updateGitGuardStatus(false, "");
 }
 
+/**
+ * `editedCleanVerdict` is true only when the dispatch of `editedFilePath`
+ * reached a clean verdict over the whole file (#4733 r1 F2): every runner and
+ * server answered, over all of it, and the observation holds no blocker. Only
+ * such a write speaks for another session's section of that file. A run with
+ * no verdict (failed, unanswered, in flight, edit-scoped) observes nothing
+ * (AGENTS.md shape 10), and this session's map, which carries its own blockers
+ * through such runs, holds nothing of another session's.
+ */
 export function syncGitGuardRecord(
 	runtime: RuntimeCoordinator,
 	cacheManager: CacheManager,
 	cwd: string,
 	editedFilePath?: string,
 	analysisRootMode: AnalysisRootMode = "session",
+	editedCleanVerdict = false,
 ): void {
 	if (!canWriteAnalysisRoot(analysisRootMode)) return;
 	// #3248: a record the turn-end policy fully suppressed is not a blocker the
@@ -1260,6 +1385,7 @@ export function syncGitGuardRecord(
 		!!existing && existing.sessionId !== runtime.telemetrySessionId;
 	const recheckedForeign =
 		foreign &&
+		editedCleanVerdict &&
 		entries.length === 0 &&
 		!!blockerSections?.some((section) => section.key === editedKey);
 	if (foreign && entries.length === 0 && !recheckedForeign) {
@@ -1391,6 +1517,8 @@ export function mergeGitGuardTestFailure(
 	}
 	const failedFiles = files.map((file) => resolveGuardPath(file, cwd));
 	const blockerContent = existing?.blockerContent;
+	// #4733 r1 F1: the stored sections stay, so their owner does.
+	const sessionId = recordOwner(existing, runtime, !!blockerContent);
 	const testFailureFiles = [
 		...(existing?.testFailureFiles ?? []),
 		...failedFiles,
@@ -1408,7 +1536,7 @@ export function mergeGitGuardTestFailure(
 		testFailureFiles: testFailureFiles,
 		hasBlockers: true,
 		affectedFiles: [...(existing?.affectedFiles ?? []), ...failedFiles],
-		sessionId: runtime.telemetrySessionId,
+		sessionId,
 		projectSeqStart: runtime.turnStartProjectSeq,
 		projectSeqEnd: runtime.projectSeq,
 		fileSeqByPath,
@@ -1439,6 +1567,7 @@ export function clearGitGuardTestFailure(
 	const blockerContent = existing.blockerContent ?? "";
 	if (!blockerContent && remainingFiles.length === 0) {
 		cacheManager.clearCache("turn-end-findings", cwd);
+		releaseRecordLatch(runtime);
 		return;
 	}
 	const blockingKeys = new Set(
@@ -1461,7 +1590,9 @@ export function clearGitGuardTestFailure(
 			remainingFiles.length > 0 ? existing.testFailureContent : undefined,
 		testFailureFiles: remainingFiles.length > 0 ? remainingFiles : undefined,
 		hasBlockers: !!blockerContent || remainingFiles.length > 0,
-		sessionId: runtime.telemetrySessionId,
+		// #4733 r1 F1: a passing run re-checks its tests, not the stored
+		// sections, so they keep their owner.
+		sessionId: recordOwner(existing, runtime, !!blockerContent),
 		projectSeqStart: runtime.turnStartProjectSeq,
 		projectSeqEnd: runtime.projectSeq,
 		fileSeqByPath: Object.fromEntries(

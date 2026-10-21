@@ -3151,6 +3151,89 @@ describe("runtime-tool-result writers across a replacement (#3596)", () => {
 			},
 		);
 	});
+	it("drops another session's git-guard section only for a write that reached a whole-file clean verdict (#4733 r1 F2)", async () => {
+		// RECURRENCE GUARDED: #4733 r1 F2 (Greptile "Unanswered checks clear
+		// blockers"). Every live write under `--lens-guard` called
+		// `syncGitGuardRecord` with no verdict, so a write whose runners reached
+		// none (timed out, unanswered, a coverage gap) dropped another
+		// session's section for the file, and the last one cleared the record.
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		await acrossReplacement(
+			"4733-verdict",
+			async ({ tmpDir, filePath, runtime, cacheManager }) => {
+				runtime.setTelemetryIdentity({ sessionId: "session-A" });
+				const section = `${filePath}: 🔴 STOP — 1 issue(s) must be fixed:\n  L1: Debugger statement`;
+				const seed = () =>
+					cacheManager.writeCache(
+						"turn-end-findings",
+						{
+							content: section,
+							blockerContent: section,
+							blockingFiles: [filePath],
+							hasBlockers: true,
+							affectedFiles: [filePath],
+							sessionId: "an-earlier-session",
+							projectSeqStart: 0,
+							projectSeqEnd: 0,
+							fileSeqByPath: {},
+							fileContentHashes: {},
+							consumed: true,
+						},
+						tmpDir,
+					);
+				const stored = () =>
+					cacheManager.readCache<{ blockerContent?: string }>(
+						"turn-end-findings",
+						tmpDir,
+						Number.POSITIVE_INFINITY,
+					)?.data;
+				const clean = {
+					output: "",
+					hasBlockers: false,
+					isError: false,
+					fileModified: false,
+					currentBlockerCount: 0,
+				};
+				const verdicts: Array<[string, Record<string, unknown>]> = [
+					["no verdict field", clean],
+					[
+						"observation still holds a blocker",
+						{ ...clean, fileVerdictComplete: true, currentBlockerCount: 1 },
+					],
+					[
+						"pipeline error",
+						{ ...clean, isError: true, fileVerdictComplete: true },
+					],
+					["whole-file clean verdict", { ...clean, fileVerdictComplete: true }],
+				];
+				const kept: Array<[string, boolean]> = [];
+				for (const [label, result] of verdicts) {
+					seed();
+					vi.mocked(runPipeline).mockReset();
+					vi.mocked(runPipeline).mockResolvedValue(result as never);
+					runtime.beginTurn();
+					// index.ts' turn_start clears the already-analysed latch.
+					clearLastAnalyzedStateCache();
+					await handleToolResult(
+						toolResultDeps({
+							filePath,
+							runtime,
+							cacheManager,
+							flags: ["lens-guard"],
+						}),
+					);
+					kept.push([label, stored()?.blockerContent === section]);
+				}
+				expect(kept).toEqual([
+					["no verdict field", true],
+					["observation still holds a blocker", true],
+					["pipeline error", true],
+					["whole-file clean verdict", false],
+				]);
+			},
+		);
+	});
+
 	it("a session-1 pipeline finishing in session 2's turn does not mark session 2's bytes analysed (#3763)", async () => {
 		// #3763 item 2: the already-analysed latch is keyed by the LIVE turn
 		// index, so a dead pipeline that settled after session 2's turn_start
