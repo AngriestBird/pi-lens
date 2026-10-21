@@ -20,6 +20,7 @@ import {
 } from "../clients/test-utils.js";
 import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 import { createLensDiagnosticsTool } from "../../tools/lens-diagnostics.js";
+import { createLspDiagnosticsTool } from "../../tools/lsp-diagnostics.js";
 
 const COMPILE_MESSAGE =
 	"SyntaxError: multiple exception types must be parenthesized";
@@ -169,5 +170,58 @@ describe("mode=full and source=session apply the declaration rule (#4638 F1)", (
 					row.startsWith("🔴") && row.includes("multiple exception types"),
 			),
 		).toBe(true);
+	});
+});
+
+describe("mode=file discloses a withheld row (#4638 F6)", () => {
+	let tmp: string;
+	let file: string;
+
+	beforeEach(() => {
+		clearWidgetState();
+		tmp = fs.realpathSync(setupTestEnvironment("pi-lens-4638-f6-file-").tmpDir);
+		file = path.join(tmp, "app.py");
+		fs.writeFileSync(file, "def run() -> None:\n\tpass\n");
+		fs.writeFileSync(
+			path.join(tmp, "pyproject.toml"),
+			'[project]\nname = "demo"\nrequires-python = ">=3.14"\n',
+		);
+		_resetDeferredForTests();
+		_resetStateCacheForTests();
+	});
+
+	afterEach(() => {
+		_resetDeferredForTests();
+		_resetStateCacheForTests();
+		clearWidgetState();
+		removeTempDirSync(tmp);
+	});
+
+	it("renders the disclosure instead of a bare clean line", async () => {
+		const service = makeLspServiceDouble({
+			supportsLSP: vi.fn(() => true),
+			touchFile: vi.fn(async () => ({ diags: [jediCompile()] })),
+		});
+		let writeIndex = 0;
+		const tool = createLspDiagnosticsTool(
+			() => (writeIndex += 1),
+			undefined,
+			() => service as never,
+		);
+		const result = (await tool.execute(
+			"f6-file",
+			{ path: file },
+			new AbortController().signal,
+			null as never,
+			{ cwd: tmp } as never,
+		)) as { content: Array<{ text: string }> };
+		const text = result.content.map((entry) => entry.text).join("\n");
+
+		// The route's own clean sentence, plus the disclosure that keeps it honest.
+		expect(text).toContain("confirmed clean");
+		expect(text).toContain(
+			"1 python-jedi compile finding withheld: the project declares Python 3.14 (requires-python)",
+		);
+		expect(text).toContain(path.join(tmp, "pyproject.toml"));
 	});
 });

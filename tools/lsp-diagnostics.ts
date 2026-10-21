@@ -204,18 +204,28 @@ function describeWithheld(withheld: PythonCompileWithheld): {
  * that only the ledger knows about is silencing, so the count and the declaring
  * file ride the same text the agent reads.
  */
-function withheldCompileLine(
-	results: ReadonlyArray<FileDiagnosticResult>,
+function withheldCompileDisclosure(
+	entries: ReadonlyArray<NonNullable<FileDiagnosticResult["withheldCompile"]>>,
 ): string | undefined {
 	let total = 0;
 	let first: NonNullable<FileDiagnosticResult["withheldCompile"]> | undefined;
-	for (const result of results) {
-		if (!result.withheldCompile) continue;
-		total += result.withheldCompile.count;
-		first ??= result.withheldCompile;
+	for (const entry of entries) {
+		total += entry.count;
+		first ??= entry;
 	}
 	if (total === 0 || first === undefined) return undefined;
 	return `${total} python-jedi compile finding${total === 1 ? "" : "s"} withheld: the project declares Python ${first.declaredLevel} (${first.source}) in ${first.declarationFile}`;
+}
+
+function withheldCompileLine(
+	results: ReadonlyArray<FileDiagnosticResult>,
+): string | undefined {
+	const entries: Array<NonNullable<FileDiagnosticResult["withheldCompile"]>> =
+		[];
+	for (const result of results) {
+		if (result.withheldCompile) entries.push(result.withheldCompile);
+	}
+	return withheldCompileDisclosure(entries);
 }
 
 type FileDiagnosticResult = {
@@ -2036,6 +2046,12 @@ async function runFileDiagnostics(
 	// stated as a count, never left to read as "nothing was wrong here"
 	// (AGENTS.md shape 10). Bounded: one line per call, whatever the count.
 	const suppressedLine = dispositionSuppressedLine(policy.suppressed);
+	// #4638 review (F6): the single-file route discloses a withheld row on the
+	// model-facing text exactly as the batch and directory renderers do; the
+	// ledger alone is silencing (AGENTS.md shape 10).
+	const withheldLine = policy.withheld
+		? withheldCompileDisclosure([describeWithheld(policy.withheld)])
+		: undefined;
 
 	// #4323 (#4391 F8): an auxiliary the operator turned off never ran, so a bare
 	// "No auxiliary findings." would read like a scanner result. Name it. A
@@ -2059,6 +2075,7 @@ async function runFileDiagnostics(
 			unavailable ?? noAuxiliaryLine,
 			...(coverageLine ? [coverageLine] : []),
 			...(suppressedLine ? [suppressedLine] : []),
+			...(withheldLine ? [withheldLine] : []),
 		].join("\n");
 	} else {
 		const lines = [primaryLine, ""];
@@ -2071,6 +2088,8 @@ async function runFileDiagnostics(
 		}
 		if (coverageLine) lines.push("", coverageLine);
 		if (suppressedLine) lines.push("", suppressedLine);
+		// #4638 review (F6): disclose beside survivors too, never only in the ledger.
+		if (withheldLine) lines.push("", withheldLine);
 		if (unavailable) lines.unshift(unavailable, "");
 		if (truncated) {
 			lines.unshift(
