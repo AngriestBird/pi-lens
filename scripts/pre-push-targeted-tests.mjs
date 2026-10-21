@@ -178,6 +178,10 @@ export const TREE_SCANNING_GOVERNANCE_TESTS = [
 	// tests/), so it is registered in both lists: a production change arms it
 	// here, a tests/ change through TEST_TREE_GOVERNANCE_TESTS below.
 	"tests/config/env-path-key-composition-sweep.test.ts",
+	// #4104 F4 fold: walks tests/ (.ts) AND scripts/ (.mjs) for Git fixture
+	// identity writes (its own walkFiles helper), so it is registered in both
+	// lists, as the #4590 rule requires for a both-tree scanner.
+	"tests/config/git-fixture-governance.test.ts",
 ];
 
 // Suites that scan the TESTS tree for a test shape (a real spawn, a raw timer
@@ -216,6 +220,9 @@ export const TEST_TREE_GOVERNANCE_TESTS = [
 	// production half is the same file, registered in
 	// TREE_SCANNING_GOVERNANCE_TESTS above (a both-tree scanner).
 	"tests/config/env-path-key-composition-sweep.test.ts",
+	// #4104 F4 fold: the both-tree scanner (tests/ and scripts/), armed by a
+	// tests/ change here as well as by a production change above.
+	"tests/config/git-fixture-governance.test.ts",
 	// #4589: walks tests/ for env writes with no restore in the same file.
 	"tests/config/test-env-restore-sweep.test.ts",
 	// #4589: walks tests/ for listeners with no awaited teardown.
@@ -237,11 +244,23 @@ export const TEST_TREE_GOVERNANCE_TESTS = [
 	// tree, so a tests-tree change must arm it.
 	"tests/support/ast-census.test.ts",
 	"tests/support/host-event-shape-scan.test.ts",
+	// #4104: the tests-tree and win32 walkers' vanished-directory tolerance.
+	"tests/support/source-walkers-vanished-dir.test.ts",
 	// #4522: walks both captured-fixture trees (and asks git which inputs are
 	// ignored), so a fixture change must arm it; neither pass above selects it
 	// because it imports no changed module.
 	"tests/clients/dispatch/smoke-fixture-coverage.test.ts",
 ];
+
+// #4104 (Greptile P2 on PR #4557): the shared repo walker has no direct
+// importer, so the import index selects none of the tests that pin it. A change
+// to a listed source selects its tests as the change's own.
+const SOURCE_OWN_TESTS = {
+	"scripts/lib/walk-files.mjs": [
+		"tests/support/source-walkers-vanished-dir.test.ts",
+		"tests/support/sweep-kit.test.ts",
+	],
+};
 
 export function changesTestTreeFile(file) {
 	return toPosix(file).startsWith("tests/");
@@ -480,6 +499,14 @@ export function selectTargetedTests(changed, allTests, options = {}) {
 			if (existsSync(mirror)) {
 				matches.add(toPosix(mirror));
 				if (!own.has(toPosix(mirror))) own.set(toPosix(mirror), "mirror");
+			}
+			const sourceOwn = Object.hasOwn(SOURCE_OWN_TESTS, toPosix(file))
+				? SOURCE_OWN_TESTS[toPosix(file)]
+				: [];
+			for (const test of sourceOwn) {
+				if (!existsSync(test)) continue;
+				matches.add(test);
+				if (!own.has(test)) own.set(test, "mirror");
 			}
 
 			const changedAbsNoExt = toAbsNoExt(file);
