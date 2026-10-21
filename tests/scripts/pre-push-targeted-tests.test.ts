@@ -149,6 +149,19 @@ describe("resolveDiffRange — pre-push ref population (#3661)", () => {
 		]);
 	});
 
+	it("remoteTip returns the pre-#4724 ranges: remote tip for an update, origin/master for a new branch (#4724)", () => {
+		// Recurrence (#4726 F2): the fallback for an unresolvable base must be the
+		// range set master ran, not another base range that fails the same way.
+		expect(
+			resolveDiffRange(
+				"refs/heads/a localsha refs/heads/a remotesha\n" +
+					`refs/heads/b newlocal refs/heads/b ${zero}\n`,
+				"upstream/master",
+				{ remoteTip: true },
+			),
+		).toEqual(["remotesha...localsha", "origin/master...HEAD"]);
+	});
+
 	it("deduplicates repeated ranges", () => {
 		// F3664-1 recurrence: multiple ref lines can describe the same range;
 		// main must not run the same diff and target twice.
