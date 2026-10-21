@@ -190,7 +190,18 @@ export function hasLiveSessionInProcess(): boolean {
 	for (const members of lists) {
 		if (members.some((member) => probeCtxActive(member.ctx) !== false))
 			live = true;
-		else lists.delete(members);
+		else {
+			lists.delete(members);
+			// Members still listed never left: pi disposed them without a
+			// shutdown, so their end-of-session work did not run either.
+			if (members.length > 0)
+				recordDegradationOnce({
+					kind: "session-member-disposed",
+					subject: "no-shutdown",
+					reason:
+						"a live session's context was invalidated with no session_shutdown (pi's AgentSession.dispose); it no longer holds the shared teardown, and its own end-of-session work did not run",
+				});
+		}
 	}
 	return live;
 }

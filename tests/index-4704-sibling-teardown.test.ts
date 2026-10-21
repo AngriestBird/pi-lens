@@ -110,6 +110,15 @@ async function lastMemberRows(...sessions: PiSession[]): Promise<unknown[]> {
 		.filter((metadata) => ids.has(metadata?.sessionId ?? ""));
 }
 
+/** The ledger rows that name a live session dropped with no shutdown. */
+async function disposedMemberRows(session: PiSession): Promise<unknown[]> {
+	const { rows } = await session.latencyRows();
+	return rows
+		.filter((row) => (row as { phase?: string }).phase === "degradation_ledger")
+		.map((row) => (row as { metadata?: { kind?: string } }).metadata)
+		.filter((metadata) => metadata?.kind === "session-member-disposed");
+}
+
 describe("#4704 a primary and a sibling on separate activations", () => {
 	it("keeps the sibling's root, the primary registration and the LSP service when the primary leaves first", async () => {
 		const { primary, sibling, primaryRoot, siblingRoot } =
@@ -183,6 +192,8 @@ describe("#4704 a primary and a sibling on separate activations", () => {
 		expect(peekOwnedLspService()).toBeUndefined();
 		// The primary ran its own teardown: no row for a secondary's.
 		expect(await lastMemberRows(primary, sibling)).toEqual([]);
+		// Both left through a shutdown, so neither counts as disposed.
+		expect(await disposedMemberRows(primary)).toEqual([]);
 	}, 60_000);
 
 	it("does not count a sibling pi disposed without a shutdown as live", async () => {
@@ -199,7 +210,10 @@ describe("#4704 a primary and a sibling on separate activations", () => {
 		expect(getActiveSessionId()).toBeUndefined();
 		expect(peekOwnedLspService()).toBeUndefined();
 		// The disposed sibling's list (and the context it pins) is dropped,
-		// not kept for the life of the process.
+		// not kept for the life of the process, and the drop is recorded once.
 		expect(_trackedLiveSessionListCountForTests()).toBe(0);
+		expect(await disposedMemberRows(primary)).toEqual([
+			expect.objectContaining({ subject: "no-shutdown", count: 1 }),
+		]);
 	}, 60_000);
 });
