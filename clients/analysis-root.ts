@@ -18,7 +18,8 @@ import {
 	walkUpDirs,
 } from "./path-utils.js";
 import { isPiLensInternalPath } from "./file-utils.js";
-import { findPiLensConfigInDir } from "./project-lens-config.js";
+import { PROJECT_CONFIG_LOCATIONS } from "./config-locations.js";
+import { getDirectoryMarkers } from "./workspace-topology.js";
 import {
 	resolveGitCheckout,
 	resolveLinkedWorktreeOwner,
@@ -170,10 +171,10 @@ export interface SessionConfigRoot {
  * The registration follows the CLASS, never the directory:
  *
  * 1. `session` — register the nearest directory at or above the file that
- *    holds a `.pi-lens.json`/`pi-lens.json`, never above the session root. The
- *    config loader layers upward from the registered root, so that root must
- *    sit at or below the nearest config owner or a nested config stops
- *    applying; otherwise the session root itself.
+ *    holds a file the config loader layers (`holdsProjectConfig`), never
+ *    above the session root. The loader layers upward from the registered
+ *    root, so that root must sit at or below the nearest config owner or a
+ *    nested config stops applying; otherwise the session root itself.
  * 2. `linked-worktree` — register the worktree root, or the nearest config
  *    owner below it by the rule in 1: it is its own workspace with its own
  *    `.pi-lens.json`, and `resolveServerRoot`'s #2052 gate refuses a file
@@ -224,8 +225,7 @@ export function resolveSessionConfigRoot(
 }
 
 /**
- * The nearest `.pi-lens.json` owner at or below `root` on the file's own
- * spelling, else the outermost ancestor of that spelling still inside `root`:
+ * The nearest config owner at or below `root` on the file's own spelling, else the outermost ancestor of that spelling still inside `root`:
  * `root` itself when the file is spelled under it, or, for a directory link
  * from outside into it, the link's entry. Either holds the file lexically, and
  * every file under it resolves into `root`, so registering it serves the file
@@ -241,10 +241,33 @@ function configRootOnFileSpelling(
 	let entry: string | undefined;
 	for (const dir of walkUpDirs(nodePath.dirname(nodePath.resolve(filePath)))) {
 		if (!isUnderDir(dir, root)) return entry;
-		if (findPiLensConfigInDir(dir)) return dir;
+		if (holdsProjectConfig(dir)) return dir;
 		entry = dir;
 	}
 	return entry;
+}
+
+/**
+ * Does `dir` hold a file the config loader layers? The loader reads EVERY
+ * `PROJECT_CONFIG_LOCATIONS` entry in each directory upward from the
+ * registered root, the legacy LSP-scoped `pi-lsp.json` and `.pi-lens/lsp.json`
+ * included, so a root registered above a directory holding only one of those
+ * never applies it (#4734 Greptile "Nested LSP settings disappear").
+ * `findPiLensConfigInDir` knows only the two pi-lens basenames. Presence is
+ * read from the memoized directory listings: an entry that cannot be read
+ * still makes `dir` the owner, so the loader reads it and reports the failure.
+ */
+function holdsProjectConfig(dir: string): boolean {
+	return PROJECT_CONFIG_LOCATIONS.some((location) => {
+		// `relativePath` is POSIX-joined. Descend only through names the parent
+		// listing holds, so no listing is cached for a directory that is absent.
+		let at = dir;
+		for (const segment of location.relativePath.split("/")) {
+			if (!getDirectoryMarkers(at).entryNames.has(segment)) return false;
+			at = nodePath.join(at, segment);
+		}
+		return true;
+	});
 }
 
 /**

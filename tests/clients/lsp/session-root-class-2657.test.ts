@@ -43,6 +43,7 @@ import {
 	resetSessionRootsForTests,
 } from "../../../clients/lsp/session-roots.js";
 import { RuntimeCoordinator } from "../../../clients/runtime-coordinator.js";
+import { resetSessionScopedState } from "../../../clients/runtime-session.js";
 import { handleToolCall } from "../../../clients/runtime-tool-call.js";
 import {
 	getLSPService,
@@ -54,12 +55,12 @@ import { runHandlerExpectingNoThrow } from "../../support/handler-verdict.js";
 import {
 	createPathIdentityFixture,
 	type PathIdentityFixture,
+	pinFixtureHome,
 	setupTestEnvironment,
 } from "../test-utils.js";
 
 let env: { tmpDir: string; cleanup: () => void };
 let runtime: RuntimeCoordinator;
-let scratchHomes: string[] = [];
 
 /** index.ts's per-cwd memo, without its registry re-check (same effect here). */
 const initialized = new Set<string>();
@@ -138,11 +139,14 @@ function writeLinkedWorktree(root: string): { repo: string; worktree: string } {
 
 beforeEach(() => {
 	env = setupTestEnvironment("pi-lens-2657-registration-class-");
+	// The shared per-case session reset (AGENTS.md), which also drops the
+	// directory-marker index the registration walk reads; the LSP config and
+	// session-root stores below are owner resets it does not cover.
+	resetSessionScopedState();
 	resetLSPConfigStateForTests();
 	resetSessionRootsForTests();
 	resetDegradationLedger();
 	initialized.clear();
-	scratchHomes = [];
 	// The language server is the process boundary: a service double keeps this a
 	// measurement of the registration rule, not of a spawn.
 	resetLSPService();
@@ -163,9 +167,6 @@ afterEach(() => {
 	resetLSPConfigStateForTests();
 	resetSessionRootsForTests();
 	env.cleanup();
-	for (const home of scratchHomes)
-		fs.rmSync(home, { recursive: true, force: true });
-	scratchHomes = [];
 });
 
 describe("the analysis-root class decides what a session registers (#2657, #4242)", () => {
@@ -173,16 +174,8 @@ describe("the analysis-root class decides what a session registers (#2657, #4242
 		// A fixture whose own marker makes it eligible to be adopted needs its
 		// OWN home, so the $HOME ceiling is the fixture's, not the runner's
 		// (#4230 D1: siblings below $HOME are adopted; $HOME and above are
-		// refused). Kept under the repo, not the OS temp tree, so the temp-root
-		// refusal is not what the case is measuring.
-		const home = fs.mkdtempSync(
-			path.join(process.cwd(), ".analysis-root-class-home-"),
-		);
-		scratchHomes.push(home);
-		const previousHome = process.env.HOME;
-		const previousUserProfile = process.env.USERPROFILE;
-		process.env.HOME = home;
-		process.env.USERPROFILE = home;
+		// refused). `pinFixtureHome` restores it even when setup throws.
+		const { home, restore } = pinFixtureHome("analysis-root-class-home");
 		const session = path.join(home, "code", "a");
 		const adopted = path.join(home, "code", "b");
 		fs.mkdirSync(path.join(session, "src"), { recursive: true });
@@ -226,10 +219,7 @@ describe("the analysis-root class decides what a session registers (#2657, #4242
 				),
 			).toBe(false);
 		} finally {
-			if (previousHome === undefined) delete process.env.HOME;
-			else process.env.HOME = previousHome;
-			if (previousUserProfile === undefined) delete process.env.USERPROFILE;
-			else process.env.USERPROFILE = previousUserProfile;
+			restore();
 		}
 	});
 
@@ -570,5 +560,66 @@ describe("the class and the registration read path identity (#4689 item 7)", () 
 		} finally {
 			fs.rmSync(checkoutRoot, { recursive: true, force: true });
 		}
+	});
+});
+
+/**
+ * The registration walk stops at every file the config loader layers, not
+ * only at `.pi-lens.json`: the loader reads each `PROJECT_CONFIG_LOCATIONS`
+ * entry in each directory upward from the registered root, so a root above a
+ * directory that holds only a legacy LSP file never applies it.
+ *
+ * Recurrence: #4734 Greptile "Nested LSP settings disappear". The walk asked
+ * `findPiLensConfigInDir`, which knows only the two pi-lens basenames, so
+ * `pkg/pi-lsp.json` and `pkg/.pi-lens/lsp.json` stopped applying; master's
+ * dirname registration started below them and read them.
+ */
+describe("the registration walk stops at every config location the loader reads", () => {
+	it.for([
+		{
+			row: "legacy pi-lsp.json, TypeScript",
+			config: "pi-lsp.json",
+			body: { disabledServers: ["typescript"] },
+			file: "a.ts",
+			server: "typescript",
+		},
+		{
+			row: "legacy .pi-lens/lsp.json, TypeScript",
+			config: path.join(".pi-lens", "lsp.json"),
+			body: { disabledServers: ["typescript"] },
+			file: "a.ts",
+			server: "typescript",
+		},
+		{
+			// AGENTS.md shape 42: the rule is language-neutral, so a non-TypeScript
+			// row (Greptile "Other languages lack a test").
+			row: "canonical .pi-lens.json, Python",
+			config: ".pi-lens.json",
+			body: { lsp: { disabledServers: ["python"] } },
+			file: "a.py",
+			server: "python",
+		},
+	])("$row", async (cell) => {
+		const repo = path.join(env.tmpDir, "repo");
+		const pkg = path.join(repo, "pkg");
+		fs.mkdirSync(path.join(pkg, "src"), { recursive: true });
+		fs.writeFileSync(path.join(repo, "package.json"), "{}\n");
+		fs.mkdirSync(path.dirname(path.join(pkg, cell.config)), {
+			recursive: true,
+		});
+		fs.writeFileSync(path.join(pkg, cell.config), JSON.stringify(cell.body));
+		const file = path.join(pkg, "src", cell.file);
+		fs.writeFileSync(file, "\n");
+		runtime.projectRoot = repo;
+		await initLSPConfig(repo);
+
+		expect(resolveSessionConfigRoot(file, repo)).toEqual({
+			register: pkg,
+			mode: "session",
+		});
+		await readCall(file, repo, 4734);
+		expect(isSessionRootRegistered(pkg)).toBe(true);
+		expect(registryFor(repo).fileIsOutsideRegisteredRoots(file)).toBe(false);
+		expect(disabledPrimaries(file).disabledServerIds).toContain(cell.server);
 	});
 });

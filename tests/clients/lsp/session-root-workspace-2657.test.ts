@@ -33,6 +33,7 @@ import {
 	isSessionRootRegistered,
 } from "../../../clients/lsp/session-roots.js";
 import { RuntimeCoordinator } from "../../../clients/runtime-coordinator.js";
+import { resetSessionScopedState } from "../../../clients/runtime-session.js";
 import { handleToolCall } from "../../../clients/runtime-tool-call.js";
 import {
 	getLSPService,
@@ -93,6 +94,9 @@ beforeEach(async () => {
 		path.join(workspace, ".pi-lens.json"),
 		JSON.stringify({ lsp: { disabledServers: ["typescript"] } }),
 	);
+	// The shared per-case session reset (AGENTS.md); the LSP config store and
+	// the ledger below are owner resets it does not cover.
+	resetSessionScopedState();
 	resetLSPConfigStateForTests();
 	resetDegradationLedger();
 	initialized.clear();

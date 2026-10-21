@@ -1693,6 +1693,90 @@ describe("Pipeline", () => {
 			expect(result.hasBlockers).toBe(false);
 			expect(result.isError).toBe(false);
 		});
+
+		// Recurrence: #4734 review F1 and Greptile "Unchecked edits look checked".
+		// `tool_result` read "found nothing" off `output` being empty, but a clean
+		// run's output is the all-clear line, and an empty output is a format-only
+		// change whose primary may never have answered. The verdict is structured,
+		// from the one place that chooses the all-clear line.
+		const cleanDispatch = (unconfirmedStatus?: string) =>
+			({
+				diagnostics: [],
+				blockers: [],
+				warnings: [],
+				baselineWarningCount: 0,
+				fixed: [],
+				resolvedCount: 0,
+				output: "",
+				blockerOutput: "",
+				hasBlockers: false,
+				...(unconfirmedStatus === undefined ? {} : { unconfirmedStatus }),
+			}) as Awaited<ReturnType<typeof dispatchLintWithResult>>;
+
+		it("reports a checked clean verdict with the clean line, and none for an unconfirmed one", async () => {
+			const filePath = createTempFile(tmpDir, "app.ts", "const x = 1;");
+			vi.mocked(dispatchLintWithResult).mockResolvedValue(cleanDispatch());
+			const clean = await runPipeline(
+				createMockContext(filePath),
+				createMockDeps(),
+			);
+			vi.mocked(dispatchLintWithResult).mockResolvedValue(
+				cleanDispatch("no language server answered (disabled)"),
+			);
+			const unconfirmed = await runPipeline(
+				createMockContext(filePath),
+				createMockDeps(),
+			);
+
+			expect({
+				clean: [clean.output.split(" · ")[0], clean.checkedClean],
+				unconfirmed: [
+					unconfirmed.output.split(" — ")[0],
+					unconfirmed.checkedClean,
+				],
+			}).toEqual({
+				clean: ["✓ JavaScript/TypeScript clean", true],
+				unconfirmed: ["⚠ JavaScript/TypeScript unconfirmed", false],
+			});
+		});
+
+		it("reports no checked clean verdict for a format-only change whose primary did not answer", async () => {
+			const filePath = createTempFile(tmpDir, "fmt.ts", "const x=1;\n");
+			vi.mocked(dispatchLintWithResult).mockResolvedValue(
+				cleanDispatch("no language server answered (disabled)"),
+			);
+			const formatFile = vi.fn(async (fp: string) => {
+				fs.writeFileSync(fp, "const x = 1;\n");
+				return {
+					filePath: fp,
+					formatters: [
+						{
+							name: "biome",
+							success: true,
+							changed: true,
+							outcome: "formatted" as const,
+						},
+					],
+					anyChanged: true,
+					allSucceeded: true,
+				};
+			});
+
+			const result = await runPipeline(
+				createMockContext(filePath, {
+					getFlag: (name) => name === "immediate-format",
+				}),
+				createMockDeps({
+					getFormatService: () => ({ recordRead: vi.fn(), formatFile }) as any,
+				}),
+			);
+
+			// The shape the consumer used to read as "found nothing": no output.
+			expect(formatFile).toHaveBeenCalled();
+			expect(result.output).toBe("");
+			expect(result.postAutofixNotice).toBeDefined();
+			expect(result.checkedClean).toBe(false);
+		});
 	});
 
 	// #1641 review F1/F2: `inlineBlockerLines` is the structured field the

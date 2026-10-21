@@ -247,12 +247,37 @@ function writeLinkedWorktree(root: string): { repo: string; worktree: string } {
 	return { repo, worktree };
 }
 
-const linkedWorktreeResult = (output: string) => ({
-	output,
-	hasBlockers: false,
-	isError: false,
-	fileModified: false,
-});
+/**
+ * What `runPipeline` returns for a linked-worktree edit, by verdict: the
+ * shapes `tests/clients/pipeline.test.ts` pins on the real pipeline ("reports
+ * a checked clean verdict ..."). A clean run's output is the all-clear line,
+ * never empty (#4734 review F1).
+ */
+const linkedWorktreeResult = {
+	clean: () => ({
+		output: "✓ JavaScript/TypeScript clean · 5ms",
+		hasBlockers: false,
+		isError: false,
+		fileModified: false,
+		checkedClean: true,
+	}),
+	finding: (output: string) => ({
+		output,
+		hasBlockers: false,
+		isError: false,
+		fileModified: false,
+		checkedClean: false,
+	}),
+	/** A format-only change whose primary did not answer: no output at all. */
+	formatOnlyUnconfirmed: (targetPath: string) => ({
+		output: "",
+		hasBlockers: false,
+		isError: false,
+		fileModified: true,
+		checkedClean: false,
+		postAutofixNotice: { targetPath, changedFiles: [targetPath] },
+	}),
+};
 
 /**
  * One linked worktree of a session checkout at `checkoutRoot`, its session
@@ -312,7 +337,7 @@ it("announces a linked-worktree edit the pipeline found nothing in (#2050 AC3)",
 		linkedWorktreeEdit(checkoutRoot);
 	try {
 		expect(resolveAnalysisRoot(worktreeFile, repo)).toBe("linked-worktree");
-		vi.mocked(runPipeline).mockResolvedValue(linkedWorktreeResult(""));
+		vi.mocked(runPipeline).mockResolvedValue(linkedWorktreeResult.clean());
 		const runsBefore = vi.mocked(runPipeline).mock.calls.length;
 
 		await handleToolResult(editResult());
@@ -361,12 +386,53 @@ it("announces a linked-worktree edit the pipeline found nothing in (#2050 AC3)",
 		// A run that produced a finding is its own statement: no advisory.
 		resetDegradationLedger();
 		vi.mocked(runPipeline).mockResolvedValue(
-			linkedWorktreeResult("src/sibling.ts:1:1 lint: unused value"),
+			linkedWorktreeResult.finding("src/sibling.ts:1:1 lint: unused value"),
 		);
 		fs.writeFileSync(worktreeFile, "export const value = 3;\n");
 		await handleToolResult(editResult());
 		expect(vi.mocked(runPipeline).mock.calls).toHaveLength(runsBefore + 3);
 		expect(consumeAgentNudge(undefined, runtime.sessionScope)).toBeUndefined();
+	} finally {
+		vi.mocked(runPipeline).mockReset();
+		env.cleanup();
+		fs.rmSync(checkoutRoot, { recursive: true, force: true });
+	}
+});
+
+// Recurrence: #4734 Greptile "Unchecked edits look checked". An empty output
+// is a format-only change, and here the primary never answered: telling the
+// agent the analysis ran and found nothing would read an unavailable check as
+// a clean one (AGENTS.md shape 10).
+it("states nothing for a linked-worktree format-only change whose primary did not answer", async () => {
+	resetDegradationLedger();
+	const env = setupTestEnvironment("pi-lens-2657-worktree-unconfirmed-");
+	const checkoutRoot = path.join(
+		env.tmpDir,
+		"..",
+		`capture-2657-unconfirmed-${process.pid}`,
+	);
+	const { repo, worktreeFile, runtime, editResult } =
+		linkedWorktreeEdit(checkoutRoot);
+	try {
+		expect(resolveAnalysisRoot(worktreeFile, repo)).toBe("linked-worktree");
+		vi.mocked(runPipeline).mockResolvedValue(
+			linkedWorktreeResult.formatOnlyUnconfirmed("src/sibling.ts"),
+		);
+		const runsBefore = vi.mocked(runPipeline).mock.calls.length;
+
+		await handleToolResult(editResult());
+
+		expect(vi.mocked(runPipeline).mock.calls).toHaveLength(runsBefore + 1);
+		expect(
+			getDegradationSummary()
+				.filter((entry) => entry.kind.startsWith("tool-result-linked-worktree"))
+				.map((entry) => entry.kind),
+		).toEqual(["tool-result-linked-worktree"]);
+		expect(
+			(
+				consumeAgentNudge(undefined, runtime.sessionScope)?.messages ?? []
+			).filter((message) => String(message.content).includes("found nothing")),
+		).toEqual([]);
 	} finally {
 		vi.mocked(runPipeline).mockReset();
 		env.cleanup();
@@ -391,7 +457,7 @@ it("records the linked-worktree row for a worktree under a pi-owned temp dir", a
 		linkedWorktreeEdit(checkoutRoot);
 	try {
 		expect(resolveAnalysisRoot(worktreeFile, repo)).toBe("linked-worktree");
-		vi.mocked(runPipeline).mockResolvedValue(linkedWorktreeResult(""));
+		vi.mocked(runPipeline).mockResolvedValue(linkedWorktreeResult.clean());
 
 		await handleToolResult(editResult());
 
@@ -427,7 +493,7 @@ it("a linked-worktree result settling after a replacement records nothing in the
 		vi.mocked(runPipeline).mockImplementation(async () => {
 			entered.resolve();
 			await release.promise;
-			return linkedWorktreeResult("");
+			return linkedWorktreeResult.clean();
 		});
 
 		const handler = handleToolResult(editResult());

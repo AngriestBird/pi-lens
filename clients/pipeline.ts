@@ -406,6 +406,15 @@ export interface PipelineResult {
 	isError: boolean;
 	/** True if file was modified by format/autofix */
 	fileModified: boolean;
+	/**
+	 * True only when this run's whole delivery is the `✓ <lang> clean` line:
+	 * the file's primary group checked it and nothing else was delivered (no
+	 * finding, no fix, no format notice). The verdict behind that line, so a
+	 * consumer never re-derives it from `output` (#4734 review F1): a clean
+	 * run's output is the line itself, and an EMPTY output is a format-only
+	 * change whose primary may never have answered. Absent on any other path.
+	 */
+	checkedClean?: boolean;
 	/** Hash captured after this pipeline's own writes, before analysis awaits. */
 	postWriteStateHash?: string;
 	/** #3506: the write token the analysis was recorded under. */
@@ -1644,8 +1653,9 @@ type DispatchResult = Awaited<
 	>
 >;
 /**
- * The line a write with nothing else to say ends with. #4403: "clean" only
- * when the file's primary group checked it; otherwise one line naming why not
+ * The line a write with nothing else to say ends with, and whether it is the
+ * clean verdict (`PipelineResult.checkedClean`). #4403: "clean" only when the
+ * file's primary group checked it; otherwise one line naming why not
  * (`DispatchResult.unconfirmedStatus`), so a write after the once-only
  * coverage notice does not read as a clean result.
  */
@@ -1653,11 +1663,14 @@ function buildAllClearOutput(
 	dispatchResult: DispatchResult,
 	elapsed: number,
 	filePath: string,
-): string {
+): { line: string; clean: boolean } {
 	const kind = detectFileKind(filePath);
 	const langLabel = kind ? getFileKindLabel(kind) : path.extname(filePath);
 	if (kind && dispatchResult.unconfirmedStatus !== undefined) {
-		return `\u26a0 ${langLabel} unconfirmed — ${dispatchResult.unconfirmedStatus} · ${elapsed}ms`;
+		return {
+			line: `\u26a0 ${langLabel} unconfirmed — ${dispatchResult.unconfirmedStatus} · ${elapsed}ms`,
+			clean: false,
+		};
 	}
 	const parts: string[] = [];
 
@@ -1666,7 +1679,10 @@ function buildAllClearOutput(
 	}
 
 	parts.push(`${elapsed}ms`);
-	return `checkmark ${parts.join(" · ")}`.replace("checkmark", "\u2713");
+	return {
+		line: `checkmark ${parts.join(" · ")}`.replace("checkmark", "\u2713"),
+		clean: kind !== undefined,
+	};
 }
 
 /**
@@ -2803,8 +2819,11 @@ async function analysePipeline(
 	// #1590: `postAutofixNotice` is output this run produces, just rendered a
 	// layer up. Treat it as output here, or a format-only change would newly
 	// gain an "all clear" line it never had while the sentence lived inline.
+	let checkedClean = false;
 	if (!output && !postAutofixNotice) {
-		output = buildAllClearOutput(dispatchResult, elapsed, filePath);
+		const allClear = buildAllClearOutput(dispatchResult, elapsed, filePath);
+		output = allClear.line;
+		checkedClean = allClear.clean;
 	}
 
 	phase.end("total", { hasOutput: !!output });
@@ -2842,6 +2861,7 @@ async function analysePipeline(
 		cascadePromise,
 		isError: false,
 		fileModified,
+		checkedClean,
 		postWriteStateHash,
 		writeIndex: ctx.telemetry?.writeIndex,
 		orderTurn: ctx.telemetry?.orderTurn,

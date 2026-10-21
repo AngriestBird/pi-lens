@@ -3972,8 +3972,11 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// autofix, LSP touch/sync and dispatch. That makes it the one class whose
 	// silence is ambiguous: the agent saw a real analysis and heard nothing,
 	// which it cannot tell apart from "analysis never ran". Record one bounded
-	// row per (mode, root) per session, and state it when a run produced no
-	// finding. The findings themselves are the statement when there are any.
+	// row per (mode, root) per session, and state it when the primary checked
+	// the file and found nothing. Any delivery is its own statement. The
+	// pipeline answers that (`checkedClean`); `output` cannot, because a clean
+	// run's output is the all-clear line and an empty one is a format-only
+	// change whose primary may not have answered (#4734 review F1).
 	// #3596: after the pipeline await, so a replaced session's handler records
 	// nothing; its once-key would otherwise latch in the live session's ledger.
 	if (resultLive && analysisRootMode === "linked-worktree") {
@@ -3984,9 +3987,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				subject: worktreeRoot,
 				reason: `analysed a linked worktree of this repository: ${worktreeRoot}`,
 			});
-			const producedFindings =
-				result.hasBlockers || result.isError || result.output.trim() !== "";
-			if (!producedFindings) {
+			if (result.checkedClean === true) {
 				const firstSilentRun = recordDegradationOnce({
 					kind: "tool-result-linked-worktree-clean",
 					subject: worktreeRoot,

@@ -66,8 +66,9 @@ linters, but adopted roots are separate from session roots, capped at two with
 early idle eviction, and never receive session bookkeeping, whole-project
 scanners, turn-end tests, or project-local executables under unknown pi trust.
 Registration follows the class, not a directory, through
-`resolveSessionConfigRoot`: a `session` file registers the nearest
-`.pi-lens.json` owner (else the session root), a `linked-worktree` file the
+`resolveSessionConfigRoot`: a `session` file registers the nearest directory
+holding any file the config loader layers (`PROJECT_CONFIG_LOCATIONS`, else
+the session root), a `linked-worktree` file the
 same below the worktree root, spelled as the file spells it (the session-root
 registry contains lexically; the class compares identities, #4689), and an
 `adopted` or `none` file registers nothing —
@@ -75,8 +76,9 @@ an adopted root reaches LSP only through `resolveServerRoot`'s adopted branch
 and `ClientRegistry.admitAdoptedRoot`. A linked worktree is its own workspace,
 so its edits take the same dispatch, formatting, autofix and LSP treatment as a
 session edit, and `tool_result` records `tool-result-linked-worktree` for that
-root and states a run that produced no finding
-(`tool-result-linked-worktree-clean`), so the path is never silent.
+root and states a run whose primary checked the file and found nothing
+(`tool-result-linked-worktree-clean`, keyed off `PipelineResult.checkedClean`,
+never off `output`), so the path is never silent.
 
 The repository ships compiled JavaScript. TypeScript sources are authoritative;
 compiled twins are generated and must not be edited by hand.
