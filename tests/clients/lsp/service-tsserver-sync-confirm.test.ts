@@ -63,10 +63,6 @@ vi.mock("../../../clients/latency-logger.js", async (importActual) => ({
 	logLatency: vi.fn(),
 }));
 
-vi.mock("../../../clients/widget-state.js", () => ({
-	recordLsp: vi.fn(),
-}));
-
 vi.mock("../../../clients/cascade-logger.js", () => ({
 	logCascade: vi.fn(),
 }));

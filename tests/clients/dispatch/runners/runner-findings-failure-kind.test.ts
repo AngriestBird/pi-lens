@@ -30,8 +30,9 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FactStore } from "../../../../clients/dispatch/fact-store.js";
+import { _resetWarmAttachForTests } from "../../../../clients/warm-attach.js";
 import {
 	hasUsableResult,
 	type RunnerResult,
@@ -126,6 +127,10 @@ vi.mock("../../../../clients/rust-client.js", async (importOriginal) => ({
 	rustClient: { findCargoPathAsync: async () => "/usr/bin/cargo" },
 }));
 
+afterEach(() => {
+	_resetWarmAttachForTests();
+});
+
 vi.mock("../../../../clients/go-client.js", async (importOriginal) => ({
 	...(await importOriginal<
 		typeof import("../../../../clients/go-client.js")
@@ -134,6 +139,7 @@ vi.mock("../../../../clients/go-client.js", async (importOriginal) => ({
 }));
 
 beforeEach(async () => {
+	_resetWarmAttachForTests();
 	await installLspServiceDouble({
 		supportsLSP: () => true,
 		hasLSP: async () => true,
@@ -144,14 +150,6 @@ beforeEach(async () => {
 		hasServerPublishedForFileRoot: async () => false,
 	});
 });
-
-vi.mock("../../../../clients/warm-attach.js", async (importOriginal) => ({
-	...(await importOriginal<
-		typeof import("../../../../clients/warm-attach.js")
-	>()),
-	tryWarmAttachedDiagnostics: async () => undefined,
-	tryWarmAttachedCodeActions: async () => undefined,
-}));
 
 // tree-sitter's entity diff fires background blast-radius work on a non-empty
 // diff (tests/support/real-runner-ctx.ts documents the race). Keep it empty.
