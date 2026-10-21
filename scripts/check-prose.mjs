@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { blankMarkdown as blankMarkdownShared } from "./lib/defect-shapes.mjs";
+import { markdownHeadings } from "./lib/markdown-lexer.mjs";
 
 const MAX_WORDS = 30;
 const FILLER_PATTERNS = [
@@ -63,10 +64,6 @@ function blankMarkdown(text) {
 		.join("\n");
 }
 
-function isHeading(line) {
-	return /^\s*#{1,6}\s+(.+?)\s*$/.exec(line);
-}
-
 function sentenceEnd(text, index) {
 	const char = text[index];
 	if (!".!?".includes(char) || /[.!?]/.test(text[index - 1] ?? ""))
@@ -108,15 +105,21 @@ export function checkProse(text = "", options = {}) {
 	const errors = [];
 	const warnings = [];
 	const lines = proseLines(text);
+	// Headings are the lexer's (#4717 N2): a setext underline and an indented
+	// ATX heading are headings, and a `#` line in a comment or code is not.
+	const headingAt = new Map();
+	for (const heading of markdownHeadings(text))
+		for (let line = heading.line; line < heading.contentLine; line += 1)
+			headingAt.set(line, line === heading.line ? heading : null);
 	const addBlock = (message) => {
 		(mode === "warn" ? warnings : errors).push(message);
 	};
 	for (let index = 0; index < lines.length; index += 1) {
 		const raw = lines[index];
-		const heading = isHeading(raw);
-		if (heading) {
-			// A blanked code span keeps its width; the quote reads as one space.
-			const title = heading[1].trim().replace(/\s+/g, " ");
+		if (headingAt.has(index)) {
+			const heading = headingAt.get(index);
+			if (!heading) continue;
+			const title = heading.text;
 			if (
 				/\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+\b/.test(title) ||
 				/\b(?:WHY|SUMMARY|NOTES|TESTS)\b/.test(title)
@@ -160,20 +163,29 @@ export function checkProse(text = "", options = {}) {
 	return { valid: errors.length === 0, errors, warnings };
 }
 
+/**
+ * The prose sections of a PR body (Why, Notes for the reviewer, Summary) with
+ * their headings, each up to the next heading of any level. The boundaries are
+ * the lexer's (#4717 N2): a setext or indented ATX `Tests` ends `## Summary`,
+ * so its prose is not judged as Summary prose.
+ */
 export function proseSections(body = "") {
 	const lines = String(body ?? "").split(/\r?\n/);
 	const wanted = new Set(["why", "notes for the reviewer", "summary"]);
-	const sections = [];
-	let current = null;
-	for (const line of lines) {
-		const heading = /^#{2,4}\s+(.+?)\s*$/.exec(line);
-		if (heading) {
-			if (current) sections.push(current);
-			current = wanted.has(heading[1].trim().toLowerCase()) ? [line] : null;
-		} else if (current) current.push(line);
-	}
-	if (current) sections.push(current);
-	return sections.map((section) => section.join("\n")).join("\n\n");
+	const headings = markdownHeadings(body);
+	return headings
+		.flatMap((heading, index) =>
+			heading.depth >= 2 &&
+			heading.depth <= 4 &&
+			wanted.has(heading.text.toLowerCase())
+				? [
+						lines
+							.slice(heading.line, headings[index + 1]?.line ?? lines.length)
+							.join("\n"),
+					]
+				: [],
+		)
+		.join("\n\n");
 }
 
 export { FILLER_PATTERNS };

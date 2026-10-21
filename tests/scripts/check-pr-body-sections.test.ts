@@ -255,6 +255,42 @@ const cases: Array<[string, string, string[]]> = [
 		body("Text.\n\n#### Tests\nx"),
 		[],
 	],
+	// #4717 N6: GitHub passes the raw `<!--` through, so a comment a list
+	// item leaves open hides every later section, whatever closes the item.
+	[
+		"N6a an unterminated comment in a list item hides the rest",
+		body("- item\n  <!--\n## Tests\nhidden"),
+		["Tests", ...AFTER_SUMMARY],
+	],
+	[
+		"N6a the same in CRLF",
+		crlf(body("- item\n  <!--\n## Tests\nhidden")),
+		["Tests", ...AFTER_SUMMARY],
+	],
+	[
+		"N6b a closer outside the item is text and ends nothing",
+		body("- item\n  <!--\n## Tests\nhidden\n  -->"),
+		["Tests", ...AFTER_SUMMARY],
+	],
+	// #4717 N7: the section name is the heading's rendered text.
+	[
+		"N7 a trailing inline comment on the heading",
+		body("Text.\n\n## Tests <!-- note -->\nx"),
+		[],
+	],
+	[
+		"N7 a leading inline comment on the heading",
+		body("Text.\n\n## <!-- note --> Tests\nx"),
+		[],
+	],
+	["N7 a bold heading", body("Text.\n\n## **Tests**\nx"), []],
+	["N7 an emphasised heading", body("Text.\n\n## *Tests*\nx"), []],
+	[
+		"N7 a link heading",
+		body("Text.\n\n## [Tests](https://example.com)\nx"),
+		[],
+	],
+	["N7 a code-span heading", body("Text.\n\n## `Tests`\nx"), []],
 ];
 
 describe("PR body sections as the reader sees them (#4717)", () => {
@@ -277,6 +313,23 @@ describe("PR body sections as the reader sees them (#4717)", () => {
 		expect(lintPrBody(text, { workingTree: true }).errors).toContainEqual(
 			expect.stringContaining('"## Tests"'),
 		);
+	});
+});
+
+describe("prose sections end where the lexer ends them (#4717 N2)", () => {
+	const long = `${Array.from({ length: 37 }, (_, i) => `word${i}`).join(" ")}.`;
+	it.each([
+		["a setext heading", "Tests\n-----"],
+		["an indented ATX heading", "   ## Tests"],
+		["a closed ATX heading", "## Tests ##"],
+	])("does not judge the prose under %s as Summary prose", (_name, heading) => {
+		// Recurrence it prevents: the prose reader kept its own `## ` regex, so
+		// a heading the section reader accepts did not end `## Summary`, and
+		// the Tests prose was judged (and refused) as Summary prose.
+		const errors = lintPrBody(body(`Text.\n\n${heading}\n${long}`), {
+			workingTree: true,
+		}).errors;
+		expect(errors).toEqual([]);
 	});
 });
 

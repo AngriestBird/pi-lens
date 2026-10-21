@@ -92,6 +92,20 @@ describe("markdownHeadings (#4717)", () => {
 		expect(markdownHeadings(markdown)).toEqual([]);
 	});
 
+	it("names a heading by its rendered text (#4717 N7)", () => {
+		// Recurrence it prevents: the name was the heading's source text, so
+		// `## Tests <!-- note -->` or `## **Tests**` named no section.
+		expect(
+			markdownHeadings(
+				"## Tests <!-- note -->\n## **Bold** [link](u) `code` *em*\n",
+			).map((heading) => heading.text),
+		).toEqual(["Tests", "Bold link code em"]);
+	});
+
+	it("drops a heading a comment left open in a list item hides (#4717 N6)", () => {
+		expect(markdownHeadings("- item\n  <!--\n## Tests\nx")).toEqual([]);
+	});
+
 	it("counts lines over CRLF text", () => {
 		expect(markdownHeadings("x\r\n\r\n## Tests\r\ny")).toEqual([
 			{ line: 2, contentLine: 3, depth: 2, text: "Tests" },
@@ -149,6 +163,55 @@ describe("blankMarkdownRegions (#4717)", () => {
 		expect(out).not.toContain("a\\|b");
 		expect(out.trim()).toBe("");
 	});
+
+	it("blanks the table when only a later copy matches its cell (#4717 N4)", () => {
+		// Recurrence it prevents: placement searched the whole rest of the
+		// text, so a later `a|b` placed the cell's span outside the table and
+		// the escaped cell stayed visible.
+		const out = blankMarkdownRegions(
+			"| `a\\|b` | y |\n| - | - |\n\nLater `a|b` copy.",
+			{ codeSpans: true },
+		);
+		expect(out).toBe(
+			`${" ".repeat(14)}\n${" ".repeat(9)}\n\nLater       copy.`,
+		);
+	});
+
+	it("places each of two identical items on its own line (#4717 N5)", () => {
+		// Recurrence it prevents: a placement that ignored the cursor put the
+		// second item's comment on the first copy and left it visible.
+		expect(
+			blankMarkdownRegions("- <!-- same -->\n- <!-- same -->\nafter", {
+				html: "comments",
+			}),
+		).toBe(`-${" ".repeat(14)}\n-${" ".repeat(14)}\nafter`);
+	});
+
+	it.each([
+		[
+			"a list item's unterminated comment hides to the end",
+			"- item\n  <!--\n## Tests\nhidden",
+			"- item\n      \n        \n      ",
+		],
+		[
+			"a second comment left open on a block comment's line",
+			"<!-- a --> <!-- b\n## Tests\n\n<!-- c --> d",
+			`${" ".repeat(17)}\n${" ".repeat(8)}\n\n${" ".repeat(11)}d`,
+		],
+		[
+			"an escaped `-->` in a code span ends nothing",
+			"- item\n  <!--\n\nText `-->` tail",
+			"- item\n      \n\n               ",
+		],
+	])(
+		"carries an open comment past its token: %s (#4717 N6)",
+		(_name, text, out) => {
+			// Recurrence it prevents: a comment a token left open was hidden only
+			// inside that token, while GitHub hides everything up to the next raw
+			// `-->` (a later HTML token) or the end of the text.
+			expect(blankMarkdownRegions(text, { html: "comments" })).toBe(out);
+		},
+	);
 
 	it("hides a comment whose copy sits in an earlier link destination", () => {
 		// Recurrence it prevents: the link's destination is text no child token

@@ -2,6 +2,16 @@ import { describe, expect, it } from "vitest";
 import { checkProse } from "../../scripts/check-prose.mjs";
 import { lintPrBody } from "../../scripts/check-pr-body.mjs";
 
+describe("heading rules read the lexer's headings (#4717 N2)", () => {
+	it("judges a setext heading's case", () => {
+		// Recurrence it prevents: the heading rule kept its own `#` regex, so a
+		// setext heading in Title Case was read as a prose line.
+		expect(checkProse("Some Title Case\n---------------\n").errors).toEqual([
+			expect.stringContaining("heading-case"),
+		]);
+	});
+});
+
 describe("checkProse", () => {
 	it("blocks the long sentence from the #4274 comment", () => {
 		const result = checkProse(

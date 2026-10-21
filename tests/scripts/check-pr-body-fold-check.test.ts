@@ -233,6 +233,20 @@ describe("Fold check refuses an unlisted or malformed form (#4717)", () => {
 		expect(lintFoldCheck(body(contradictory))).toHaveLength(1);
 	});
 
+	it.each([["none: no"], ["none: no candidate"]])(
+		"refuses a short %s beside a candidate line (#4717 N3)",
+		(none) => {
+			// Recurrence it prevents: the contradiction was judged only after a
+			// three-word reason, so a short `none:` left the candidate line alone
+			// to decide the section.
+			const contradictory = [
+				none,
+				"#4606 not folded: a different rule and file.",
+			].join("\n");
+			expect(lintFoldCheck(body(contradictory))).toHaveLength(1);
+		},
+	);
+
 	it("refuses a folded candidate the body does not close", () => {
 		expect(
 			lintFoldCheck(body("#4602 folded: the same body-lint seam.")),
@@ -248,6 +262,21 @@ describe("Fold check refuses an unlisted or malformed form (#4717)", () => {
 			"| #4672 | folded: `Closes #4672` | the mechanism itself |",
 		].join("\n");
 		expect(lintFoldCheck(body(table))).toHaveLength(1);
+	});
+
+	it.each([
+		["a backtick fence", "```\nCloses #4602\n```"],
+		["a tilde fence", "~~~\nCloses #4602\n~~~"],
+		["indented code", "    Closes #4602"],
+	])("does not read a Closes that %s holds (#4717 N1)", (_name, code) => {
+		// Recurrence it prevents: the close parser blanked backtick fences
+		// only, so a tilde-fenced closer satisfied a `folded` line while the
+		// issue stayed open. The lexer decides what is code.
+		const text = body("#4602 folded: the same body-lint seam.").replace(
+			"The lint reads the fold check section.",
+			`The lint reads the fold check section.\n\n${code}\n`,
+		);
+		expect(lintFoldCheck(text)).toHaveLength(1);
 	});
 
 	it("accepts a folded candidate its body closes elsewhere", () => {

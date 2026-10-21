@@ -3382,6 +3382,18 @@ const FOLD_CHECK_REASON_WORDS = 2;
 // The `none: <reason>` escape both sections accept.
 const NONE_LINE = /^\s*none\s*:\s*(.+?)\s*$/im;
 
+/**
+ * The issues this body closes, read with the lexer's code structure (#4717
+ * N1): a `Closes #N` in a backtick or tilde fence, indented code or a code
+ * span closes nothing. `parseCloseKeywords` keeps its own dependency-free
+ * reading for the close-keyword jobs, which run with no install.
+ */
+function closedIssues(body) {
+	return parseCloseKeywords(
+		blankMarkdownRegions(body, { code: "blocks", codeSpans: true }),
+	).issues;
+}
+
 function sectionVerdict(section, text, { closes = [] } = {}) {
 	const source = String(text ?? "");
 	if (section === "fold check") {
@@ -3390,8 +3402,10 @@ function sectionVerdict(section, text, { closes = [] } = {}) {
 			.filter((line) => FOLD_CHECK_CANDIDATE.test(line));
 		// `none:` says the search listed no candidate, so a line naming one
 		// contradicts it whatever that line says (#4717 F4).
+		// The contradiction is judged before the reason's length, so a short
+		// `none: no` beside a candidate refuses too (#4717 N3).
 		const none = NONE_LINE.exec(source);
-		if (none && wordCount(none[1]) >= 3) return candidates.length === 0;
+		if (none) return candidates.length === 0 && wordCount(none[1]) >= 3;
 		if (candidates.length === 0) return false;
 		return candidates.every((line) => {
 			const decision = FOLD_CHECK_DECISION.exec(line);
@@ -3534,7 +3548,7 @@ export function lintFoldCheck(body = "") {
 	const content = section.visible.trim();
 	// A `folded` candidate must be closed by this body (#4717 F5), so the
 	// verdict is judged against the body's own close keywords.
-	const closes = parseCloseKeywords(body).issues;
+	const closes = closedIssues(body);
 	return sectionVerdict("fold check", content, { closes })
 		? []
 		: [FOLD_CHECK_MESSAGE];
@@ -4223,7 +4237,7 @@ export async function resolveTouchesTests(
  * justify (issue #4288, "Detecting the bug label").
  */
 export async function resolveBugClosing(body, fetchImpl = globalThis.fetch) {
-	const issues = parseCloseKeywords(body).issues;
+	const issues = closedIssues(body);
 	if (issues.length === 0) return false;
 	// A missing env makes githubGet reject, which anyIssueLabelledBug reads as
 	// "cannot read the label" (null), as the old early return did.
@@ -4244,7 +4258,7 @@ export async function resolveBugClosingViaGh(
 	cwd = process.cwd(),
 	exec = execFileSync,
 ) {
-	return anyIssueLabelledBug(parseCloseKeywords(body).issues, (number) => {
+	return anyIssueLabelledBug(closedIssues(body), (number) => {
 		const raw = exec("gh", ["api", `repos/{owner}/{repo}/issues/${number}`], {
 			cwd,
 			encoding: "utf8",
@@ -4330,7 +4344,7 @@ export async function lintPullRequestEvent(
 	} catch {
 		bugClosing = null;
 	}
-	if (bugClosing === null && parseCloseKeywords(body).issues.length > 0)
+	if (bugClosing === null && closedIssues(body).length > 0)
 		console.warn(
 			'::warning::PR body check could not read the closed issue label(s), so the "## Detection" section is not required (#4288).',
 		);
@@ -4583,7 +4597,7 @@ export function lintLocalPrBody(
 			typeof options.resolveBugClosing === "function"
 				? options.resolveBugClosing(body)
 				: null;
-	if (bugClosing === null && parseCloseKeywords(body).issues.length > 0)
+	if (bugClosing === null && closedIssues(body).length > 0)
 		console.warn(
 			'::warning::PR body check could not read the closed issue label (gh missing, unauthenticated, or failed), so the "## Detection" requirement check was skipped (#4288).',
 		);
