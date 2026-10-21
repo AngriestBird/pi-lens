@@ -19,6 +19,7 @@ import {
 	resetCacheFindingIdentitiesSession,
 	resetCachePrefixObservation,
 } from "../../clients/cache-observability.js";
+import { resetDegradationLedger } from "../../clients/degradation-ledger.js";
 
 function assistantMessage(overrides?: Record<string, unknown>) {
 	return {
@@ -754,6 +755,9 @@ describe("cache-observability — miss attribution (#1071)", () => {
 	beforeEach(() => {
 		latencyEntries.length = 0;
 		resetCachePrefixObservation();
+		// #4687: an unknown miss now records a bounded ledger entry (once per
+		// session), so the ledger's session boundary is part of this reset.
+		resetDegradationLedger();
 		_resetProviderCacheTtlForTests();
 		delete process.env.PI_LENS_PROVIDER_CACHE_TTL_MS;
 		vi.useFakeTimers();
@@ -1060,6 +1064,117 @@ describe("cache-observability — miss attribution (#1071)", () => {
 		expect(lastUsageMetadata()).toMatchObject({ cacheMissCause: "unknown" });
 	});
 
+	it("measures a second consecutive rewrite against the last healthy read (#4687 item 3)", () => {
+		// The measured sequence: a healthy 8,000, a head rewrite that reads 257,
+		// then the same 257 again. Comparing against the previous read made the
+		// second turn a cache HIT, so the session's second rewrite was invisible.
+		logUsage(8_000, 100);
+		observeCachePrefix([{ role: "user", content: "first" }], 0, "attr");
+		logUsage(8_000, 100);
+		observeCachePrefix([{ role: "user", content: "rewritten" }], 1, "attr");
+		vi.setSystemTime(BASE_MS + 1_000);
+		logUsage(257, 9_732);
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheMissCause: "prefix-broke",
+			cacheMissKind: "low-read",
+			priorCacheRead: 8_000,
+		});
+
+		// No request observation between the two usage records: the prefix is not
+		// re-declared stable, and the SECOND rewrite is still a miss against the
+		// last healthy read, not a hit against the first miss's remainder.
+		vi.setSystemTime(BASE_MS + 2_000);
+		logUsage(257, 9_700);
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheMissCause: "unknown",
+			cacheMissKind: "low-read",
+			priorCacheRead: 8_000,
+		});
+	});
+
+	it("reads a head whose keys moved as an unchanged prefix (#4687 item 6)", () => {
+		const head = {
+			role: "system",
+			content: "",
+			sections: { preamble: "prompt", rules: ["a", "b"] },
+			toolsAdded: [{ name: "read" }],
+		};
+		const reordered = {
+			toolsAdded: [{ name: "read" }],
+			sections: { rules: ["a", "b"], preamble: "prompt" },
+			content: "",
+			role: "system",
+		};
+		expect(observeCachePrefix([head], 0, "attr")).toBe("baseline");
+		expect(JSON.stringify(reordered)).not.toBe(JSON.stringify(head));
+		expect(observeCachePrefix([reordered], 1, "attr")).toBe("unchanged");
+		// Only the baseline row: an equal head is not a prefix break.
+		expect(
+			latencyEntries.filter((e) => e.phase === "cache_prefix_break"),
+		).toHaveLength(1);
+	});
+
+	it("attributes a mid-list tool delta to tool-set-changed (#4687 item 2)", () => {
+		// Typed wide on purpose: the runtime object is the host's whole message,
+		// and the delta fields are exactly what the observer must read.
+		const head: Record<string, unknown> = {
+			role: "system",
+			content: "",
+			sections: { preamble: "prompt" },
+			toolsAdded: [{ name: "read" }],
+		};
+		const delta: Record<string, unknown> = {
+			role: "system",
+			content: "",
+			toolsAdded: [{ name: "ast_grep_search" }],
+		};
+		logUsage(8_000, 100);
+		observeCachePrefix([head, { role: "user", content: "prompt" }], 0, "attr");
+		logUsage(8_000, 100);
+		// pi appends the activation's tool delta as a NEW system message; the head
+		// (messages[0]) never moves, which is why the first-message hash missed it.
+		observeCachePrefix(
+			[head, { role: "user", content: "prompt" }, delta],
+			1,
+			"attr",
+		);
+		vi.setSystemTime(BASE_MS + 1_000);
+		logUsage(257, 9_732);
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheMissCause: "tool-set-changed",
+			cacheMissKind: "low-read",
+		});
+	});
+
+	it("attributes a mid-list prompt delta to system-prompt-changed (#4687 item 2)", () => {
+		const head: Record<string, unknown> = {
+			role: "system",
+			content: "",
+			sections: { preamble: "prompt" },
+			toolsAdded: [{ name: "read" }],
+		};
+		logUsage(8_000, 100);
+		observeCachePrefix([head, { role: "user", content: "prompt" }], 0, "attr");
+		logUsage(8_000, 100);
+		// A reload after AGENTS.md changed appends a system message carrying the
+		// rebuilt prompt. No tool table moved, so the cause is the prompt itself.
+		observeCachePrefix(
+			[
+				head,
+				{ role: "user", content: "prompt" },
+				{ role: "system", content: "NEW PROJECT RULES" },
+			],
+			1,
+			"attr",
+		);
+		vi.setSystemTime(BASE_MS + 1_000);
+		logUsage(257, 9_732);
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheMissCause: "system-prompt-changed",
+			cacheMissKind: "low-read",
+		});
+	});
+
 	it("attributes a low read with fresh input far above new content to partial-eviction", () => {
 		logUsage(8_000, 100);
 		observeInjection(200);
@@ -1210,19 +1325,27 @@ describe("cache-observability — miss attribution (#1071)", () => {
 		});
 	});
 
-	it("does not infer ttl when request sequence evidence truncated", () => {
+	it("reads ttl-expired across an ordinary long tool result (#4687 item 4)", () => {
+		// Before #4687 a 20,000-character message made the BOUNDED sequence hash
+		// truncate, and the truncation gate ran before the TTL rule, so a genuine
+		// request-time expiry read `unknown / sequence-hash-truncated`. The gap is
+		// measured from the request clock, so content truncation cannot refute it.
 		logUsage(8_000, 100);
 		vi.setSystemTime(BASE_MS + DEFAULT_PROVIDER_CACHE_TTL_MS);
 		observeCacheContext({
 			sessionId: "attr",
 			turnIndex: 1,
 			injectionEnabled: false,
-			existingMessages: [{ role: "user", content: "x".repeat(3_000) }],
+			existingMessages: [
+				{ role: "user", content: "prompt" },
+				{ role: "toolResult", content: "t".repeat(20_000) },
+			],
 		});
 		logUsage(0, 9_000);
 		expect(lastUsageMetadata()).toMatchObject({
-			cacheMissCause: "unknown",
-			cacheMissUnknownReason: "sequence-hash-truncated",
+			cacheMissCause: "ttl-expired",
+			gapBasis: "request-time",
+			interTurnGapMs: DEFAULT_PROVIDER_CACHE_TTL_MS,
 		});
 	});
 
@@ -1576,6 +1699,8 @@ describe("cache-observability — miss attribution (#1071)", () => {
 			cacheMissCauses: {
 				"ttl-expired": 1,
 				"prefix-broke": 0,
+				"tool-set-changed": 0,
+				"system-prompt-changed": 0,
 				"partial-eviction": 0,
 				"model-provider-changed": 0,
 				unknown: 1,
