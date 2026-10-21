@@ -669,7 +669,14 @@ describe("host-provided peers are open; the supported window lives in install-sm
 	});
 
 	it("keeps the baseline doc's verified-host table and this ratchet one list", () => {
-		const rows = parseVerifiedHostRows(baselineDoc);
+		const { rows, hasHeader } = parseVerifiedHostRows(baselineDoc);
+		// The header is part of the table's structure, not of its content: a
+		// table that lost its header is not a shorter list of hosts, it is a
+		// list this ratchet cannot read (#4719 F4).
+		expect(
+			hasHeader,
+			"docs/release-qa-baseline.md 'Verified hosts' has its header row",
+		).toBe(true);
 		const unreadable = rows.filter((row) => row.version === null);
 		// Fail closed on a row this reader cannot parse (#4688 R2 F2): a row
 		// spelled `| 1.4 |` is a host the ratchet does not carry and the window
@@ -688,7 +695,7 @@ describe("host-provided peers are open; the supported window lives in install-sm
 
 	it("lists no verified host the certified window excludes", () => {
 		const excluded = parseVerifiedHostRows(baselineDoc)
-			.map((row) => row.version)
+			.rows.map((row) => row.version)
 			.filter((version): version is string => version !== null)
 			.filter((version) => !semver.satisfies(version, window));
 		expect(

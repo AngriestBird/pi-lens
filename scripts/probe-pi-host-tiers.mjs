@@ -18,7 +18,10 @@
  * hosts` table through `scripts/lib/pi-host-spread.mjs`, the same parser
  * `tests/packaging.test.ts` holds the packaging ratchet to. Nothing is
  * installed here: a certified host that is not on this machine is reported as
- * `not installed`, and that is only an error with `--require-all`.
+ * `not installed`, and that is only an error with `--require-all`. An install
+ * whose version the certified set does not name is NAMED in a warning and not
+ * probed, because a host the reader silently skipped reads as "not installed"
+ * (#4719 F3).
  *
  * PREREQUISITE: `npm run build`. The tiers load the BUILT extension
  * (`index.js`), so a missing build refuses the run instead of probing every
@@ -41,7 +44,7 @@
  * EXIT CODES
  *   0  every installed certified host passed its tiers (missing hosts allowed)
  *   1  an installed host failed a tier
- *   2  usage error, an unreadable certified-host row, or a missing build
+ *   2  usage error, an unreadable certified-host table, or a missing build
  *   3  `--require-all` and a certified host is not installed
  *
  * Node only, no new dependency. Every spawn is shell-free (an argv array) and
@@ -185,7 +188,15 @@ export async function main(
 		warn(`${vitestEntry} is missing: install this repo's devDependencies\n`);
 		return EXIT.usage;
 	}
-	const { versions, unparseable } = certifiedHosts(readFile(baselineDoc));
+	const { versions, unparseable, problem } = certifiedHosts(
+		readFile(baselineDoc),
+	);
+	if (problem !== undefined) {
+		warn(
+			`${baselineDoc} has no readable certified-host table, so the certified set is unreadable: ${problem}\n`,
+		);
+		return EXIT.usage;
+	}
 	if (unparseable.length > 0) {
 		warn(
 			`${baselineDoc} has verified-host row(s) with no \`| x.y.z |\` version, so the certified set is unreadable: ${unparseable.join("; ")}\n`,
@@ -203,6 +214,16 @@ export async function main(
 	const { hosts, unreadable } = discoverInstalledHosts(roots);
 	for (const root of unreadable) {
 		warn(`warning: ${root} holds no ${HOST_PACKAGE}, so it was skipped\n`);
+	}
+	// A host that IS installed and that the doc does not certify is named, never
+	// dropped: its `1.4.0-rc.1` install would otherwise leave the certified
+	// `1.4.0` row reading `not installed` with nothing to explain why (#4719 F3).
+	for (const host of hosts) {
+		if (!versions.includes(host.version)) {
+			warn(
+				`warning: ${HOST_PACKAGE} ${host.version} (${host.dir}) is installed but not in the certified set, so it is not probed\n`,
+			);
+		}
 	}
 	write(`certified hosts (${baselineDoc}): ${versions.join(", ")}\n`);
 	const spread = await runSpread({

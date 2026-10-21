@@ -22,8 +22,8 @@
  *    so it is returned as `unparseable` and the caller refuses the run rather
  *    than probing the hosts it happened to understand.
  * 2. An argument the parser does not recognize refuses the run. A probe that
- *    ignores `--reqire-all` prints a partial spread in the shape of a full
- *    one, which is the failure a hand-typed flag makes once.
+ *    ignores a flag it was never taught prints a partial spread in the shape of
+ *    a full one, which is the failure a hand-typed flag makes once.
  */
 
 import * as fs from "node:fs";
@@ -76,20 +76,28 @@ export function parseVerifiedHostRows(markdown) {
 	const section = (markdown.split(CERTIFIED_SECTION)[1] ?? "").split(
 		/\n## /,
 	)[0];
-	return (section ?? "")
+	const pipeRows = (section ?? "")
 		.split("\n")
-		.filter((line) => line.trimStart().startsWith("|"))
-		.filter((line) => !SEPARATOR_ROW.test(line))
-		.slice(1)
-		.map((line) => ({
-			line,
-			version: line.match(VERSION_ROW)?.[1] ?? null,
-		}));
+		.filter((line) => line.trimStart().startsWith("|"));
+	const separator = pipeRows.findIndex((line) => SEPARATOR_ROW.test(line));
+	// A markdown table's separator sits BETWEEN its header and its body, so the
+	// header is the row above it and every row below it is a host. Dropping the
+	// first pipe row instead loses a HOST whenever the header is absent, and
+	// the table then shrinks with both readers reporting it clean (#4719 F4:
+	// a table without its header returned only its last host).
+	const rows = (separator < 0 ? pipeRows : pipeRows.slice(separator + 1)).map(
+		(line) => ({ line, version: line.match(VERSION_ROW)?.[1] ?? null }),
+	);
+	// `hasHeader` is part of the parse because a section whose pipes have no
+	// separator row above them is not a table: markdown renders those pipes as
+	// literal text, so a reader that took them for hosts would invent a
+	// certified set out of prose.
+	return { rows, hasHeader: separator > 0 };
 }
 
 /** The certified host versions the doc's table names, plus any row it could not read. */
 export function certifiedHosts(markdown) {
-	const rows = parseVerifiedHostRows(markdown);
+	const { rows, hasHeader } = parseVerifiedHostRows(markdown);
 	const versions = rows
 		.map((row) => row.version)
 		.filter((version) => typeof version === "string");
@@ -98,6 +106,14 @@ export function certifiedHosts(markdown) {
 		unparseable: rows
 			.filter((row) => row.version === null)
 			.map((row) => row.line.trim()),
+		// A section whose pipes are not under a header has no certified set to
+		// read, so the caller refuses rather than reading the text as hosts. A
+		// section with no pipes at all is a different refusal (no certified host
+		// is named), which the caller already has.
+		problem:
+			!hasHeader && rows.length > 0
+				? `the piped rows under \`${CERTIFIED_SECTION}\` have no header row above their separator`
+				: undefined,
 	};
 }
 
@@ -292,7 +308,11 @@ export function parseCliArgs(argv) {
 		}
 		if (FLAGS_WITH_VALUE.has(argument)) {
 			const value = argv[index + 1];
-			if (value === undefined || value.startsWith("--"))
+			// A leading dash is another flag, never a value: `--host-root -h`
+			// used to become a directory named `-h`, and the run exited 0 with a
+			// green spread over a path that cannot be an install (#4719 F5). A
+			// value that really starts with a dash is spelled `./-name`.
+			if (value === undefined || value.startsWith("-"))
 				throw new Error(`${argument} needs a value`);
 			index += 1;
 			if (argument === "--host-root") hostRoots.push(path.resolve(value));

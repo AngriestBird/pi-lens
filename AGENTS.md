@@ -1788,10 +1788,14 @@ certified spread is a manual or nightly run, never a per-PR gate:
 certified host installed on the machine, takes the certified set from the
 baseline doc's verified-host table through `scripts/lib/pi-host-spread.mjs` (the
 reader the packaging ratchet uses), and prints one line per host naming the host
-and the version it ran on. It installs nothing: a host it cannot find is
-reported `not installed` and only fails the run under `--require-all`. Run
-`npm run build` first, because both tiers load the built extension, and
-`tests/scripts/probe-pi-host-tiers.test.ts` holds the script's own logic.
+and the version it ran on. Each tier loads the SELECTED host's own code through
+`PI_LENS_PI_HOST_PACKAGE` — tier 1's entry, and tier 2's session API and
+scripted provider — so a host directory that cannot supply it fails that tier
+instead of being reported as probed. It installs nothing: a host it cannot find
+is reported `not installed` and only fails the run under `--require-all`, and an
+installed host the certified set does not name is named in a warning and not
+probed. Run `npm run build` first, because both tiers load the built extension,
+and `tests/scripts/probe-pi-host-tiers.test.ts` holds the script's own logic.
 
 When the defect is an ordering of awaits on one seam (a coalescing queue, a
 per-key serializer), or the seam has regressed before, write a scheduler

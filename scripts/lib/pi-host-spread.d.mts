@@ -16,13 +16,15 @@ export interface VerifiedHostRow {
 
 export declare function compareVersions(a: string, b: string): number;
 
-export declare function parseVerifiedHostRows(
-	markdown: string,
-): VerifiedHostRow[];
+export declare function parseVerifiedHostRows(markdown: string): {
+	rows: VerifiedHostRow[];
+	hasHeader: boolean;
+};
 
 export declare function certifiedHosts(markdown: string): {
 	versions: string[];
 	unparseable: string[];
+	problem?: string;
 };
 
 export declare function hostPackageCandidates(candidate: string): string[];
