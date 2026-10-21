@@ -379,28 +379,47 @@ describe("Fold check section requirement (#4711)", () => {
 	});
 
 	// #4717 V1: only the commonmark opener forms hide text. A mid-line `<!--`
-	// (in prose or in a backtick span) with no end inside its paragraph is text
-	// the reader sees, so every later heading stays visible and both entries
-	// accept the body. The reviewed head blanked from the first mid-line opener,
-	// so each of these read as five missing sections (Greptile P1).
-	it.each([
-		["in a backtick span with no end", "The scan reads `<!--` as an opener."],
-		[
-			"in a backtick span, end in a later fence",
-			"The scan reads `<!--` as an opener.\n\n```text\n<!-- closer -->\n```",
-		],
-		["in prose with no end", "The scan reads <!-- as an opener."],
-		[
-			"in prose, end past a blank line",
-			"The scan reads <!-- as an opener.\n\n--> and a later bot comment closes it.",
-		],
-		["in a backtick span with its end", "Markup `<!-- note -->` hides text."],
-		["in prose with its end", "Markup <!-- note --> hides text."],
-	])("accepts a Summary naming <!-- %s", (_name, summary) => {
-		const text = body("#4606 not folded: a different file and a rule.").replace(
+	// (in prose or in a backtick span) is text the reader sees, so every later
+	// heading stays visible and both entries accept the body. The reviewed head
+	// blanked from the first mid-line opener to the next `-->` anywhere in the
+	// body, so each shape puts its end after `## Tests` and the row reds on
+	// 0186fefbd (its round's pre-fix source: `Tests 4 failed`, quoted in the PR
+	// body). A shape whose end sits inside the Summary paragraph was satisfied by
+	// that scan too, so it proved nothing (#4717 F2).
+	const openedAtSummary = (summary: string, end: string) =>
+		`${body("#4606 not folded: a different file and a rule.").replace(
 			"The lint reads the fold check section.",
 			summary,
-		);
+		)}\n\n${end}`;
+	it.each([
+		["in prose with no end", "The scan reads <!-- as an opener.", ""],
+		[
+			"in a backtick span with no end",
+			"The scan reads `<!--` as an opener.",
+			"",
+		],
+		[
+			"in prose, end in a later section",
+			"The scan reads <!-- as an opener.",
+			"--> and a later bot comment closes it.",
+		],
+		[
+			"in a backtick span, end in a later section",
+			"The scan reads `<!--` as an opener.",
+			"--> and a later bot comment closes it.",
+		],
+		[
+			"in prose, end in a later fence",
+			"The scan reads <!-- as an opener.",
+			"```text\n<!-- closer -->\n```",
+		],
+		[
+			"in a backtick span, end in a later fence",
+			"The scan reads `<!--` as an opener.",
+			"```text\n<!-- closer -->\n```",
+		],
+	])("accepts a Summary naming <!-- %s", (_name, summary, end) => {
+		const text = openedAtSummary(summary, end);
 		expect(lintFoldCheck(text)).toEqual([]);
 		expect(lintPrBody(text, { workingTree: true }).errors).toEqual([]);
 		const stub = (): string => "";

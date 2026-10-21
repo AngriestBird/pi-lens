@@ -164,20 +164,42 @@ function templatePlaceholderLines() {
 	return placeholders;
 }
 
-function hasRealContent(lines, section, placeholders) {
+function hasRealContent(lines, section, placeholders, structure) {
 	const templateLines = placeholders.get(section) ?? new Set();
 	return lines.some((line) => {
 		const value = line.trim();
 		// A nested heading is structure, not content: counting it let an empty
 		// "## Tests" pass on the strength of its own "### Test assessment" line
-		// (#2124 review F1).
+		// (#2124 review F1). `structure` is the lexer's heading lines, so a
+		// family the `HEADING` regex cannot spell is structure too (#4717 F1).
 		return (
 			value &&
-			!HEADING.test(value) &&
+			!structure.has(value) &&
 			!/^[-*+] \[ \]/.test(value) &&
 			!templateLines.has(value)
 		);
 	});
+}
+
+/**
+ * The lines the reader sees as headings, from the lexer (#4717 F1). `name`
+ * maps each of a heading's line indices to its text, for a caller scanning the
+ * body's rows; `text` holds those lines trimmed, for a caller that has only a
+ * section's own slice. A setext heading's underline and an indented ATX
+ * heading are structure here exactly as a plain ATX one is, so no reader of a
+ * body needs a heading regex of its own.
+ */
+function headingLines(body, headings = bodyHeadings(body)) {
+	const source = String(body ?? "").split(/\r?\n/);
+	const name = new Map();
+	const text = new Set();
+	for (const heading of headings) {
+		for (let line = heading.index; line < heading.contentIndex; line += 1) {
+			name.set(line, heading.name);
+			text.add(String(source[line] ?? "").trim());
+		}
+	}
+	return { name, text };
 }
 
 /**
@@ -3260,6 +3282,7 @@ export function lintDetectionSection(body = "", options = {}) {
 			content.split("\n").filter((line) => !GENERATED_FOOTER.test(line.trim())),
 			"detection",
 			templatePlaceholderLines(),
+			headingLines(body).text,
 		)
 	)
 		return [];
@@ -3614,14 +3637,14 @@ function transcriptNamesFile(fence, file) {
 // A Controls row names the file it covers and gives a reason: a `Control: ...`
 // line, or a row of a Controls table. A row that names no file, or gives no
 // reason, proves nothing.
-function controlRows(visibleRows) {
+function controlRows(visibleRows, headingByLine) {
 	let inSection = false;
 	let controlTable = false;
 	const rows = [];
-	for (const row of visibleRows) {
-		const heading = HEADING.exec(row);
-		if (heading) {
-			inSection = /\bcontrols?\b/i.test(heading[1]);
+	for (const [index, row] of visibleRows.entries()) {
+		const name = headingByLine.get(index);
+		if (name !== undefined) {
+			inSection = /\bcontrols?\b/i.test(name);
 			controlTable = false;
 			continue;
 		}
@@ -3731,14 +3754,14 @@ function mutationHeaderProves(header, file) {
 // A table row in the mutation section may name its file in the row, or sit
 // under a one-file opener. The label on the last cell lets a row point at a
 // failing fence below it, the shape `scripts/mutate.mjs` writes.
-function mutationTableRows(visibleRows) {
+function mutationTableRows(visibleRows, headingByLine) {
 	let mutationSection = false;
 	let mutationScope = "";
 	const rows = [];
-	for (const row of visibleRows) {
-		const heading = HEADING.exec(row);
-		if (heading) {
-			mutationSection = /\bmutations?\b/i.test(heading[1]);
+	for (const [index, row] of visibleRows.entries()) {
+		const name = headingByLine.get(index);
+		if (name !== undefined) {
+			mutationSection = /\bmutations?\b/i.test(name);
 			mutationScope = "";
 			continue;
 		}
@@ -3781,6 +3804,10 @@ function lintDiffCompliance(body, options) {
 	const source = String(body);
 	const rawRows = blankHtmlComments(source).split(/\r?\n/);
 	const visibleRows = blankMarkdown(source).split(/\r?\n/);
+	// A row belongs to a section the lexer named (#4717 F1): the heading lines
+	// come from the same reader `sectionLines` uses, so a heading family the
+	// section list accepts cannot leave a row in the previous section.
+	const headingByLine = headingLines(source).name;
 	const evidenceRows = rawRows;
 	const transcriptFences = [];
 	for (const block of markdownBlocks(body, { tilde: true })) {
@@ -3802,7 +3829,7 @@ function lintDiffCompliance(body, options) {
 	// Only a failing fence can vouch for a run, and a fence inside a real
 	// comment was removed above.
 	const transcripts = transcriptFences.filter((fence) => fence.failure);
-	const mutationRows = mutationTableRows(visibleRows);
+	const mutationRows = mutationTableRows(visibleRows, headingByLine);
 	const windowsReads = [];
 	for (const row of evidenceRows) {
 		if (!/\bWindows\b/i.test(row)) continue;
@@ -3953,7 +3980,10 @@ function lintDiffCompliance(body, options) {
 				const proved = transcripts.some((fence) =>
 					transcriptNamesFile(fence, file.post),
 				);
-				const control = controlsNameFile(controlRows(visibleRows), file.post);
+				const control = controlsNameFile(
+					controlRows(visibleRows, headingByLine),
+					file.post,
+				);
 				if (!proved && !control)
 					errors.push(
 						`PR body compliance row 1: ${file.post} adds or edits test declarations; the body needs one fenced red-first transcript naming that file with a failure from it, or a Controls row naming it with a reason.`,
@@ -4044,6 +4074,7 @@ export function lintPrBody(body = "", options = {}) {
 	const headings = bodyHeadings(body);
 	const { text: rawLines, visible: lines } = sectionLines(body, headings);
 	const placeholders = templatePlaceholderLines();
+	const structure = headingLines(body, headings).text;
 	const errors = options.diff ? lintDiffCompliance(body, options) : [];
 	const summary = headings.find((heading) => hasSection(heading, "summary"));
 	const firstHeading = headings[0]?.index ?? lines.length;
@@ -4061,8 +4092,14 @@ export function lintPrBody(body = "", options = {}) {
 				lines.slice(summary.contentIndex, summaryEnd),
 				"summary",
 				placeholders,
+				structure,
 			)) &&
-		!hasRealContent(lines.slice(0, firstHeading), "summary", placeholders)
+		!hasRealContent(
+			lines.slice(0, firstHeading),
+			"summary",
+			placeholders,
+			structure,
+		)
 	) {
 		errors.push(`PR body is missing a Summary section. See ${TEMPLATE_PATH}.`);
 	}
@@ -4097,7 +4134,9 @@ export function lintPrBody(body = "", options = {}) {
 			heading.contentIndex,
 			nextHeading?.index ?? lines.length,
 		);
-		if (!hasRealContent(rawContent, name.toLowerCase(), placeholders))
+		if (
+			!hasRealContent(rawContent, name.toLowerCase(), placeholders, structure)
+		)
 			errors.push(
 				sectionMessage(name, "has no content before the next heading"),
 			);

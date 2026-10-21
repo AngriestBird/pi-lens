@@ -85,7 +85,7 @@ const cases: Array<[string, string, string[]]> = [
 	],
 	[
 		"B4 a 4-space opener after a blank line is code",
-		body(`Text.\n\n    <!--\n## Tests\nx\n-->\n\n${TESTS}`),
+		body("Text.\n\n    <!--\n## Tests\nx\n-->"),
 		[],
 	],
 	[
@@ -120,7 +120,7 @@ const cases: Array<[string, string, string[]]> = [
 	],
 	[
 		"I3 an inline opener closed past a blank line (V1)",
-		body(`Reads <!-- as an opener.\n\n--> closes it.\n\n${TESTS}`),
+		body(`Reads <!-- as an opener.\n\n${TESTS}\n\n--> closes it.`),
 		[],
 	],
 	[
@@ -130,7 +130,7 @@ const cases: Array<[string, string, string[]]> = [
 	],
 	[
 		"I5 a code-span opener closed in a later fence (V1)",
-		body(`Reads \`<!--\`.\n\n\`\`\`text\n<!-- c -->\n\`\`\`\n\n${TESTS}`),
+		body(`Reads \`<!--\`.\n\n${TESTS}\n\n\`\`\`text\n<!-- c -->\n\`\`\``),
 		[],
 	],
 	[
@@ -338,6 +338,17 @@ describe("section text drops every raw-HTML block (#4717)", () => {
 		// Recurrence it prevents: round 3's accepted residual. The heading was
 		// visible, its content commented out, and the section counted as written.
 		const text = body("Text.\n\n## Tests\n<!-- Targeted tests pass. -->");
+		expect(lintPrBody(text, { workingTree: true }).errors).toContainEqual(
+			expect.stringContaining('no content before the next heading "## Tests"'),
+		);
+	});
+
+	it("refuses a required section whose only content is a deeper heading", () => {
+		// Recurrence it prevents: the content test spelled its own heading regex
+		// (`#{2,4}`), so a level-5 heading was content and an empty section passed
+		// (#4717 F1 folds it onto the lexer's heading lines, as #2124 F1 did for
+		// `###`).
+		const text = body("Text.\n\n## Tests\n##### Test assessment");
 		expect(lintPrBody(text, { workingTree: true }).errors).toContainEqual(
 			expect.stringContaining('no content before the next heading "## Tests"'),
 		);
