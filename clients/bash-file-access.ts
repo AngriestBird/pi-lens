@@ -419,7 +419,7 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 			unsupported = true;
 			continue;
 		}
-		if ("(){}`".includes(ch)) grouping = true;
+		if (ch !== undefined && "(){}`".includes(ch)) grouping = true;
 		appendChar(ch, false);
 		atTokenStart = false;
 	}
@@ -1403,11 +1403,10 @@ function directoryEffect(
 	cwd: string,
 ): DirectoryEffect {
 	if (ranges.some((range) => range.grouping)) return { kind: "construct" };
-	const words = ranges.flatMap((range) =>
-		shellOperands(range.segment).filter(
-			(_, index) => range.redirectWords[index] !== true,
-		),
-	);
+	const words: ShellOperand[] = [];
+	for (const range of ranges)
+		for (const [index, operand] of shellOperands(range.segment).entries())
+			if (range.redirectWords[index] !== true) words.push(operand);
 	let first = 0;
 	while (/^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(words[first]?.text ?? "")) first++;
 	const verb = words[first]?.text;
