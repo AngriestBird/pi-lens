@@ -1001,8 +1001,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// onto path-utils' `realpathOrResolve`.
 		"clients/ephemeral-root.ts": 13,
 		// 61 -> 68 (#4689 r4): the data-dir adoption joins its walk with the
-		// node `path` module (no `path` binding of its own).
-		"clients/file-utils.ts": 68,
+		// node `path` module (no `path` binding of its own). 68 -> 70 (r5): the
+		// done-marker's path and its parent.
+		"clients/file-utils.ts": 70,
 		"clients/finding-identity.ts": 2,
 		"clients/fix-worklog.ts": 3,
 		"clients/format-service.ts": 3,

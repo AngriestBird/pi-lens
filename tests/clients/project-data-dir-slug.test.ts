@@ -38,11 +38,15 @@ vi.mock("node:fs", async () => {
 });
 import { resetDegradationLedger } from "../../clients/degradation-ledger.js";
 import { getDisposition } from "../../clients/diagnostic-dispositions.js";
+import { CacheManager } from "../../clients/cache-manager.js";
 import {
+	canonicalProjectRoot,
 	drainProjectDataDirMigrations,
 	getProjectDataDir,
 	_resetProjectDataDirMemoForTests,
 } from "../../clients/file-utils.js";
+import { evaluateGitGuard } from "../../clients/git-guard.js";
+import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { dataDir444 } from "../support/data-dir-4-4-4.js";
 
 const FIXTURES = path.join(
@@ -182,6 +186,23 @@ describe("project data-dir slug (#2874)", () => {
 		if (process.platform === "win32")
 			expect(linked).not.toBe(getProjectDataDir(target));
 		else expect(linked).toBe(getProjectDataDir(target));
+	});
+
+	it("a win32 root keeps the resolved spelling's name, a POSIX root takes its real path's (#4689 r5 N3)", (ctx) => {
+		// RECURRENCE GUARDED: verify r5 N3. Every win32 data-dir name is the
+		// resolved spelling in every version; no Windows lane runs this file,
+		// so the platform is injected to keep that durable name pinned.
+		if (process.platform === "win32")
+			return ctx.skip("creating a directory link needs privileges on win32");
+		const scratch = makeScratch("pi-lens-platform-");
+		fs.mkdirSync(path.join(scratch, "realproj"));
+		const alias = path.join(scratch, "aliasproj");
+		fs.symlinkSync("realproj", alias, "dir");
+
+		expect(canonicalProjectRoot(alias, "win32").root).toBe(path.resolve(alias));
+		expect(canonicalProjectRoot(alias, "linux").root).toBe(
+			fs.realpathSync.native(alias),
+		);
 	});
 
 	it("a root spelled through a link still reads the marks 4.4.4 wrote under that spelling (#4689)", (ctx) => {
@@ -388,11 +409,15 @@ const ALIAS_SESSION_444 = path.join(
 	"alias-session",
 );
 
+/** The done-marker an adoption leaves in the adopting directory (#4689 r5). */
+const MARKER = /^\.adopted-/;
+
 function filesUnder(dir: string, rel = ""): string[] {
 	return fs
 		.readdirSync(path.join(dir, rel), { withFileTypes: true })
 		.flatMap((entry) => {
 			const child = path.join(rel, entry.name);
+			if (MARKER.test(entry.name)) return [];
 			return entry.isDirectory() ? filesUnder(dir, child) : [child];
 		});
 }
@@ -441,6 +466,9 @@ describe("adopting the data dir a link spelling named (#4689 round 4)", () => {
 		}
 		expect(drainProjectDataDirMigrations()).toEqual([
 			{ to: dir, outcome: "adopted" },
+		]);
+		expect(fs.readdirSync(dir).filter((name) => MARKER.test(name))).toEqual([
+			`.adopted-${path.basename(fx.spelled)}`,
 		]);
 	});
 
@@ -530,5 +558,199 @@ describe("adopting the data dir a link spelling named (#4689 round 4)", () => {
 		expect(drainProjectDataDirMigrations()).toEqual([
 			{ to: dir, outcome: "adopt-failed" },
 		]);
+		// A capped walk is done too: the next process neither walks nor records.
+		_resetProjectDataDirMemoForTests();
+		getProjectDataDir(fx.alias);
+		expect(drainProjectDataDirMigrations()).toEqual([]);
+	});
+
+	it("counts a name already taken at the target as present, a dangling link included", (ctx) => {
+		// RECURRENCE GUARDED: verify r5 N1. `linkSync` raises EEXIST when a
+		// concurrent adopter (or anything else) took the name first; r4 counted
+		// it as a failure, so every racing session recorded "adopt-failed".
+		const fx = aliasRoot("pi-lens-adopt-eexist-");
+		if (!fx) return ctx.skip("the win32 name never moved");
+		const dir = getProjectDataDir(fs.realpathSync.native(fx.alias));
+		const taken = path.join(dir, "cache", "todo-baseline.json");
+		fs.mkdirSync(path.dirname(taken), { recursive: true });
+		fs.symlinkSync(path.join(fx.base, "gone"), taken);
+		_resetProjectDataDirMemoForTests();
+
+		getProjectDataDir(fx.alias);
+
+		expect(drainProjectDataDirMigrations()).toEqual([
+			{ to: dir, outcome: "adopted" },
+		]);
+		expect(fs.lstatSync(taken).isSymbolicLink()).toBe(true);
+	});
+
+	it("records nothing for a link root with no directory under its spelling", (ctx) => {
+		// RECURRENCE GUARDED: verify r5 N2. Every link-rooted project with no
+		// 4.4.4 data would otherwise walk a missing directory and record
+		// "adopt-failed" at every start.
+		const fx = aliasRoot("pi-lens-adopt-none-");
+		if (!fx) return ctx.skip("the win32 name never moved");
+		fs.rmSync(fx.spelled, { recursive: true });
+
+		const dir = getProjectDataDir(fx.alias);
+
+		expect(drainProjectDataDirMigrations()).toEqual([]);
+		expect(fs.existsSync(dir)).toBe(false);
+	});
+
+	it("records nothing when the real path's directory already holds every file", (ctx) => {
+		// RECURRENCE GUARDED: verify r5 N2. A walk that copies nothing and fails
+		// nothing (a directory an unmarked earlier walk already filled) changes
+		// nothing, so it says nothing.
+		const fx = aliasRoot("pi-lens-adopt-full-");
+		if (!fx) return ctx.skip("the win32 name never moved");
+		const dir = getProjectDataDir(fs.realpathSync.native(fx.alias));
+		fs.cpSync(ALIAS_SESSION_444, dir, { recursive: true });
+		_resetProjectDataDirMemoForTests();
+
+		getProjectDataDir(fx.alias);
+
+		expect(drainProjectDataDirMigrations()).toEqual([]);
+		expect(
+			fs.existsSync(path.join(dir, `.adopted-${path.basename(fx.spelled)}`)),
+		).toBe(true);
+	});
+
+	it("copies neither a symlink nor an earlier done-marker", (ctx) => {
+		// RECURRENCE GUARDED: verify r5 N2 and the r5 marker. A link in the old
+		// directory would be copied as its target's bytes (or fail when it
+		// dangles); a marker copied from a directory that was once adopting
+		// would tell this one a source it never walked was done.
+		const fx = aliasRoot("pi-lens-adopt-skip-");
+		if (!fx) return ctx.skip("the win32 name never moved");
+		fs.symlinkSync(
+			path.join(fx.spelled, "cache", "todo-baseline.json"),
+			path.join(fx.spelled, "cache", "linked.json"),
+		);
+		fs.writeFileSync(path.join(fx.spelled, ".adopted-elsewhere-01234567"), "");
+
+		const dir = getProjectDataDir(fx.alias);
+
+		expect(fs.existsSync(path.join(dir, "cache", "linked.json"))).toBe(false);
+		expect(fs.existsSync(path.join(dir, ".adopted-elsewhere-01234567"))).toBe(
+			false,
+		);
+		expect(drainProjectDataDirMigrations()).toEqual([
+			{ to: dir, outcome: "adopted" },
+		]);
+	});
+
+	it("resumes a walk that died before its marker, then never walks again", (ctx) => {
+		// RECURRENCE GUARDED: verify r5 N4. The marker is written only after
+		// the walk, so a process killed mid-walk (half the files linked, a
+		// stage left behind) leaves no marker and the next start completes it.
+		const fx = aliasRoot("pi-lens-adopt-resume-");
+		if (!fx) return ctx.skip("the win32 name never moved");
+		const dir = getProjectDataDir(fs.realpathSync.native(fx.alias));
+		const files = filesUnder(ALIAS_SESSION_444).sort();
+		for (const file of files.slice(0, 2)) {
+			fs.mkdirSync(path.dirname(path.join(dir, file)), { recursive: true });
+			fs.copyFileSync(path.join(ALIAS_SESSION_444, file), path.join(dir, file));
+		}
+		fs.writeFileSync(path.join(dir, `${files[2]}.tmp-999999-0-0`), "{");
+		_resetProjectDataDirMemoForTests();
+
+		getProjectDataDir(fx.alias);
+
+		expect(
+			filesUnder(dir)
+				.filter((file) => !/\.tmp-/.test(file))
+				.sort(),
+		).toEqual(files);
+		expect(drainProjectDataDirMigrations()).toEqual([
+			{ to: dir, outcome: "adopted" },
+		]);
+		_resetProjectDataDirMemoForTests();
+		getProjectDataDir(fx.alias);
+		expect(drainProjectDataDirMigrations()).toEqual([]);
+	});
+
+	it("records adopt-failed when the done-marker cannot be written, so the next start walks again", (ctx) => {
+		// RECURRENCE GUARDED: the r5 marker. Without a marker every start walks
+		// again and can undo a deletion, so a marker that cannot be written is
+		// reported instead of passing as "adopted".
+		const fx = aliasRoot("pi-lens-adopt-unmarked-");
+		if (!fx) return ctx.skip("the win32 name never moved");
+		const dir = getProjectDataDir(fs.realpathSync.native(fx.alias));
+		fs.mkdirSync(dir, { recursive: true });
+		// A dangling link through a missing directory: `existsSync` says no
+		// marker, and writing through it fails.
+		fs.symlinkSync(
+			path.join(fx.base, "missing", "marker"),
+			path.join(dir, `.adopted-${path.basename(fx.spelled)}`),
+		);
+		_resetProjectDataDirMemoForTests();
+
+		getProjectDataDir(fx.alias);
+
+		expect(drainProjectDataDirMigrations()).toEqual([
+			{ to: dir, outcome: "adopt-failed" },
+		]);
+		expect(fs.existsSync(path.join(dir, "cache", "todo-baseline.json"))).toBe(
+			true,
+		);
+	});
+
+	it("keeps a record a store deleted after adoption deleted in the next process, and the commit gate allows the commit", (ctx) => {
+		// RECURRENCE GUARDED: verify r5 N4 HIGH (probe resurrect.mjs). r4 walked
+		// the kept old directory at every process start, so a record a store
+		// deleted under the real path came back: a cleared turn-end record
+		// returned stale and `--lens-guard` refused every commit as
+		// "blocker state is unknown (cache_stale)", and a fresh session brought
+		// it back again. On master the same steps allow the commit.
+		const fx = aliasRoot("pi-lens-adopt-prune-");
+		if (!fx) return ctx.skip("the win32 name never moved");
+		const cache = new CacheManager(false);
+		// The record as 4.4.4 wrote it: CacheManager's writer is unchanged since
+		// 4.4.4 (`git diff 755c1c7a3 -- clients/cache-manager.ts` is empty), so
+		// it writes under a plain root and the files move to the old directory.
+		const writer = makeScratch("pi-lens-adopt-prune-writer-");
+		cache.writeCache(
+			"turn-end-findings",
+			{ content: "old", hasBlockers: false },
+			writer,
+		);
+		const written = path.join(getProjectDataDir(writer), "cache");
+		for (const name of [
+			"turn-end-findings.json",
+			"turn-end-findings.meta.json",
+		])
+			fs.copyFileSync(
+				path.join(written, name),
+				path.join(fx.spelled, "cache", name),
+			);
+		const metaPath = path.join(
+			fx.spelled,
+			"cache",
+			"turn-end-findings.meta.json",
+		);
+		fs.writeFileSync(
+			metaPath,
+			JSON.stringify({
+				timestamp: new Date(Date.now() - 86_400_000).toISOString(),
+			}),
+		);
+		drainProjectDataDirMigrations();
+
+		// Session 1 adopts the record, and the turn-end path clears it.
+		expect(cache.inspectCache("turn-end-findings", fx.alias)).toBe("stale");
+		cache.clearCache("turn-end-findings", fx.alias);
+		expect(drainProjectDataDirMigrations()).toEqual([
+			{ to: getProjectDataDir(fx.alias), outcome: "adopted" },
+		]);
+
+		// A new process: the settle memo is per process.
+		_resetProjectDataDirMemoForTests();
+		expect(cache.inspectCache("turn-end-findings", fx.alias)).toBe("missing");
+		expect(drainProjectDataDirMigrations()).toEqual([]);
+		const gate = evaluateGitGuard(new RuntimeCoordinator(), cache, fx.alias);
+		expect(gate.block).toBe(false);
+		// The old directory is kept for a downgrade.
+		expect(fs.existsSync(metaPath)).toBe(true);
 	});
 });

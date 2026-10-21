@@ -116,6 +116,13 @@ export function getProjectDataDir(cwd: string): string {
 const ADOPT_MAX_FILES = 4096;
 
 /**
+ * The done-marker's name prefix, in the adopting directory, one per source
+ * directory (#4689 round 5, N4). Never copied by a walk, so a directory never
+ * inherits another source's marker.
+ */
+const ADOPTED_MARKER_PREFIX = ".adopted-";
+
+/**
  * #4689 round 4: before this change the directory was named from the
  * caller's spelling of the root, so a session rooted at a link stored its
  * data under the link's name. When `spelledRoot` names a directory other
@@ -126,23 +133,47 @@ const ADOPT_MAX_FILES = 4096;
  * Lock entries and atomic-write stages are not data, so they are skipped.
  * The outcome is queued for the session-start drain (no ledger import here,
  * see `settleProjectDataDir`).
+ *
+ * Round 5 (N4): the walk runs once per source directory, not once per
+ * process. A done-marker written after the walk, whatever each file's
+ * outcome, stops every later process from walking again. Without it, a
+ * file a store deleted under the real path came back from the kept old
+ * directory at the next start (a cleared commit-gate record blocked commits
+ * as stale). A crash before the marker leaves none, so the next start
+ * resumes the copy-if-missing walk.
  */
 function adoptSpelledDataDir(
 	spelledRoot: string,
 	base: string,
 	dir: string,
 ): void {
-	const from = path.join(
-		base,
-		`${projectDataDirReadableSlug(spelledRoot) || "default"}-${projectDataDirRootHash(spelledRoot)}`,
-	);
+	const source = `${projectDataDirReadableSlug(spelledRoot) || "default"}-${projectDataDirRootHash(spelledRoot)}`;
+	const from = path.join(base, source);
 	if (from === dir || !isDirectory(from)) return;
+	const marker = path.join(dir, `${ADOPTED_MARKER_PREFIX}${source}`);
+	if (fs.existsSync(marker)) return;
 	const { copied, failed } = copyMissingFiles(from, dir);
-	if ((copied > 0 || failed > 0) && pendingDataDirMigrations.length < 32) {
+	// An unwritten marker means the next start walks again, so it is reported.
+	const unmarked = markAdopted(marker) ? 0 : 1;
+	if (
+		(copied > 0 || failed + unmarked > 0) &&
+		pendingDataDirMigrations.length < 32
+	) {
 		pendingDataDirMigrations.push({
 			to: dir,
-			outcome: failed > 0 ? "adopt-failed" : "adopted",
+			outcome: failed + unmarked > 0 ? "adopt-failed" : "adopted",
 		});
+	}
+}
+
+function markAdopted(marker: string): boolean {
+	try {
+		fs.mkdirSync(path.dirname(marker), { recursive: true });
+		fs.writeFileSync(marker, "");
+		return true;
+	} catch {
+		// none: the caller records it as adopt-failed; the next start walks again.
+		return false;
 	}
 }
 
@@ -177,6 +208,7 @@ function copyMissingFiles(
 			const name = entry.name;
 			if (name.endsWith(".lock") || name.endsWith(".locks")) continue;
 			if (STAGE_TMP_PATTERN.test(name)) continue;
+			if (name.startsWith(ADOPTED_MARKER_PREFIX)) continue;
 			const child = path.join(rel, name);
 			if (entry.isDirectory()) {
 				pending.push(child);
@@ -199,7 +231,8 @@ function copyIfMissing(
 	source: string,
 	target: string,
 ): "copied" | "present" | "failed" {
-	if (fs.existsSync(target)) return "present";
+	// No existence pre-check: `linkSync` refuses a taken name (EEXIST below),
+	// which answers the same question without a window between check and create.
 	const stage = stagePathFor(target);
 	// The stage is removed only once its parent is known to be a directory:
 	// removing it under a parent that is a file throws ENOTDIR.
@@ -210,12 +243,15 @@ function copyIfMissing(
 		fs.copyFileSync(source, stage);
 		fs.linkSync(stage, target);
 		return "copied";
-	} catch {
-		// none: counted into the outcome the session-start drain records. A
-		// session adopting concurrently that links the file first lands here
-		// too: its copy is the same bytes, and the next session start finds
-		// the file present and records nothing.
-		return "failed";
+	} catch (cause) {
+		// none: EEXIST from `linkSync` (the parent is known to be a directory)
+		// is a name already taken, by a concurrent adopter or by anything else
+		// at the target, which wins as `existsSync` would have; any other errno
+		// is counted into the outcome the session-start drain records. An
+		// EEXIST from `mkdirSync` (a file where a directory is needed) fails.
+		return staged && (cause as NodeJS.ErrnoException).code === "EEXIST"
+			? "present"
+			: "failed";
 	} finally {
 		if (staged) fs.rmSync(stage, { force: true });
 	}
@@ -351,13 +387,15 @@ function projectDataDirReadableSlug(canonicalRoot: string): string {
  * root. A collision needs the same readable slug and the same 32-bit prefix,
  * so the practical collision population is readable-slug twin pairs.
  */
-function canonicalProjectRoot(cwd: string): {
+export function canonicalProjectRoot(
+	cwd: string,
+	platform: NodeJS.Platform = process.platform,
+): {
 	root: string;
 	fallback: boolean;
 } {
 	const resolved = path.resolve(cwd);
-	const root =
-		process.platform === "win32" ? resolved : realpathOrResolve(resolved);
+	const root = platform === "win32" ? resolved : realpathOrResolve(resolved);
 	try {
 		fs.realpathSync(resolved);
 	} catch {
