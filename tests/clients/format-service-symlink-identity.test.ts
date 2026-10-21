@@ -27,6 +27,11 @@ import { FormatService } from "../../clients/format-service.js";
 import { clearFormatterRuntimeState } from "../../clients/formatters.js";
 import { setProjectTrustState } from "../../clients/project-trust.js";
 import {
+	clearWidgetState,
+	getFileDiagnosticSummaries,
+	recordFormatter,
+} from "../../clients/widget-state.js";
+import {
 	getTmpRootRegistry,
 	registerTmpRoot,
 } from "../support/tmp-root-registry.js";
@@ -281,6 +286,32 @@ describe("FormatService formats the identity of a symlinked file (#4689)", () =>
 
 			expect(summary.allSucceeded).toBe(true);
 			expect(written).toEqual([file]);
+		} finally {
+			fx.cleanup();
+		}
+	});
+
+	// #4689 item 3 / #4675 F2: the widget keys a row by its spelling, so the
+	// identity-keyed formatter record must not open a second row for the same
+	// inode. Red on 1ce5d1480: the row is keyed by the target (`CLAUDE.md`), and
+	// the sibling record under the link spelling adds a second row.
+	it("keys the widget row by the caller's spelling, one row per inode", async () => {
+		const fx = layout();
+		try {
+			const link = path.join(fx.session, "AGENTS.md");
+			fs.writeFileSync(path.join(fx.session, "CLAUDE.md"), "# title\n");
+			fs.symlinkSync("CLAUDE.md", link);
+			installPrettierDouble();
+			clearWidgetState();
+
+			const service = new FormatService("identity-widget", true);
+			service.recordRead(link);
+			await service.formatFile(link, { sessionRoot: fx.session });
+			recordFormatter(link, "prettier", true, true, "formatted");
+
+			expect(getFileDiagnosticSummaries().map((s) => s.filePath)).toEqual([
+				link,
+			]);
 		} finally {
 			fx.cleanup();
 		}

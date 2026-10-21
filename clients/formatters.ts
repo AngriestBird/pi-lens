@@ -2423,8 +2423,8 @@ export async function formatFile(
 	enter?: () => Promise<void>,
 ): Promise<FormatterResult> {
 	try {
-		// A symlink is never handed to a formatter (Prettier and `biome format`
-		// reject an explicitly named link): format the file it resolves to (#4689).
+		// A symlink is never handed to a formatter (Prettier rejects an
+		// explicitly named link): format the file it resolves to (#4689).
 		const absolutePath = realPathIdentity(filePath);
 		const cwd = path.dirname(absolutePath);
 		const formatterCwd = resolveToolCwd(

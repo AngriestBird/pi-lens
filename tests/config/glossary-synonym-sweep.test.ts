@@ -1000,8 +1000,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/finding-identity.ts": 2,
 		"clients/fix-worklog.ts": 3,
 		// 3 -> 2, 16 -> 15 (#4689): the formatter is handed `realPathIdentity`,
-		// not a `path.resolve` of the spelling it was given.
-		"clients/format-service.ts": 2,
+		// not a `path.resolve` of the spelling it was given. 2 -> 3 (#4675 F2):
+		// the widget row keeps the caller's spelling, a `path.resolve` again.
+		"clients/format-service.ts": 3,
 		"clients/formatters.ts": 15,
 		"clients/generated-artifacts.ts": 4,
 		"clients/generation-lock.ts": 7,
