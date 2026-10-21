@@ -106,6 +106,8 @@ let recordWriteWarningEmitted = false;
 // in 64.91s through this hook on 2026-09-26 (#3492's range, capped selection).
 // After #3472 widened the census, all 24 registry suites across both lists ran
 // in 23.65s as one `vitest run` at 6 workers (2026-10-03).
+// #4557's master merge, replayed after #4724: 11 changed files, 68 test files,
+// 54s end to end with build and self-scan (497s and 366 files before).
 // Suites over the budget on their own, or together in a serialized lane, move
 // to CI_ONLY_PRE_PUSH_TESTS below.
 
