@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { htmlCommentEnd } from "./lib/defect-shapes.mjs";
+import { blankMarkdown as blankMarkdownShared } from "./lib/defect-shapes.mjs";
 
 const MAX_WORDS = 30;
 const FILLER_PATTERNS = [
@@ -16,61 +16,40 @@ const PASSIVE_RE =
 	/\b(?:is|are|was|were|been|being)\s+(?:\w+ly\s+)?\w+(?:ed|en)\b/gi;
 const ABBREVIATIONS = /\b(?:e\.g|i\.e|etc|vs|cf|mr|mrs|dr|no)\./i;
 
+// Trailers, fences, and the shared blanker's comments come out first, so the
+// prose rules read only text a reader sees. The comment rule is
+// `blankHtmlComments`'s, not a second copy (#4717 V1: this masker treated any
+// `<!--` as an opener, so a body quoting the syntax skipped every later
+// section of prose instead of judging it).
 function blankMarkdown(text) {
-	const lines = String(text ?? "").split(/\r?\n/);
+	const raw = String(text ?? "").split(/\r?\n/);
 	const trailerPattern =
 		/^\s*(?:Co-Authored-By|Signed-off-by|Refs|Closes):\s+/i;
-	let lastContent = lines.length - 1;
-	while (lastContent >= 0 && !lines[lastContent].trim()) lastContent -= 1;
+	let lastContent = raw.length - 1;
+	while (lastContent >= 0 && !raw[lastContent].trim()) lastContent -= 1;
 	const trailerLines = new Set();
 	for (let index = lastContent; index >= 0; index -= 1) {
-		if (!lines[index].trim()) {
+		if (!raw[index].trim()) {
 			trailerLines.add(index);
 			continue;
 		}
-		if (!trailerPattern.test(lines[index])) break;
+		if (!trailerPattern.test(raw[index])) break;
 		trailerLines.add(index);
 	}
-	let fence = null;
-	let inComment = false;
-	return lines
+	return blankMarkdownShared(String(text ?? ""), { indentedCode: false })
+		.split(/\r?\n/)
 		.map((line, lineIndex) => {
 			if (trailerLines.has(lineIndex)) return "";
 			if (/^\s*🤖 Generated with \[Claude Code\]\([^)]*\)\s*$/u.test(line))
 				return "";
-			const marker = line.match(/^\s*(`{3,}|~{3,})/)?.[1];
-			if (marker) {
-				if (!fence) fence = marker;
-				else if (marker[0] === fence[0] && marker.length >= fence.length)
-					fence = null;
-				return "";
-			}
-			if (fence || /^\s*>/.test(line) || /^\s*\|/.test(line)) return "";
+			if (/^\s*>/.test(line) || /^\s*\|/.test(line)) return "";
 			if (
 				/^\s*(?:\$\s|npm\s|yarn\s|pnpm\s|(?:FAIL|PASS|Tests:|Test Files:|AssertionError|Error:|at\s))/.test(
 					line,
 				)
 			)
 				return "";
-			let masked = "";
-			for (let index = 0; index < line.length;) {
-				if (inComment) {
-					const end = htmlCommentEnd(line, index);
-					if (end === -1) break;
-					inComment = false;
-					index = end;
-					continue;
-				}
-				const start = line.indexOf("<!--", index);
-				if (start === -1) {
-					masked += line.slice(index);
-					break;
-				}
-				masked += line.slice(index, start);
-				inComment = true;
-				index = start + 4;
-			}
-			return masked
+			return line
 				.replace(/https?:\/\/\S+/gi, " ")
 				.replace(/(`+)[\s\S]*?\1/g, " ")
 				.replace(/(^|\s)(?:["'])([^"']+)(?:["'])(?=\s|$)/g, "$1 ");

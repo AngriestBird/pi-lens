@@ -110,6 +110,28 @@ describe("checkProse", () => {
 		).not.toContain("sentence-length");
 	});
 
+	// #4717 V1: the masker treated any `<!--` as an opener, so prose after a
+	// mid-line opener that never closes was skipped instead of judged, and a
+	// body writing about the comment syntax escaped the length rule. The opener
+	// rule is `blankHtmlComments`'s now.
+	it("counts prose after a mid-line opener that never closes", () => {
+		const long =
+			"This sentence follows a mid-line opener and carries enough ordinary words in one unbroken unit to exceed the prose limit that the checker enforces on every submitted body because visible prose is prose.";
+		expect(
+			checkProse(`The scan reads <!-- as an opener. ${long}`).errors.join(" "),
+		).toContain("sentence-length");
+	});
+
+	it("counts prose after an opener quoted in a backtick span", () => {
+		const long =
+			"This sentence follows a quoted opener and carries enough ordinary words in one unbroken unit to exceed the prose limit that the checker enforces on every submitted body because visible prose is prose.";
+		expect(
+			checkProse(`The scan reads \`<!--\` as an opener. ${long}`).errors.join(
+				" ",
+			),
+		).toContain("sentence-length");
+	});
+
 	it("hides a continuation line that starts with the abrupt-end dash", () => {
 		// Recurrence (#4565 round 7): the masker calls the owner at index 0 of a
 		// continuation line, where the comment is in body state, but the owner
