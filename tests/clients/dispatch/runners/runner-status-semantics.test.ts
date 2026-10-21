@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { FactStore } from "../../../../clients/dispatch/fact-store.js";
 import { setupTestEnvironment } from "../../test-utils.js";
-import { makeLspServiceDouble } from "../../../support/lsp-service-double.js";
+import { installLspServiceDouble } from "../../../support/lsp-service-seam.js";
 
 const safeSpawnAsync = vi.fn();
 const safeSpawn = vi.fn();
@@ -47,19 +47,6 @@ vi.mock("../../../../clients/dispatch/runners/utils/lazy-installer.js", () => ({
 	tryLazyInstall,
 }));
 
-vi.mock("../../../../clients/lsp/capabilities.js", () => ({
-	getLSPService: () =>
-		makeLspServiceDouble({
-			supportsLSP,
-			hasLSP,
-			openFile,
-			touchFile,
-			getDiagnostics,
-			codeAction,
-			getClientForFile: vi.fn(),
-		}),
-}));
-
 vi.mock("../../../../clients/dispatch/runners/utils.js", () => ({
 	readFileContent,
 }));
@@ -91,7 +78,16 @@ function ctx(
 }
 
 describe("runner status/semantic edge cases", () => {
-	beforeEach(() => {
+	beforeEach(async () => {
+		await installLspServiceDouble({
+			supportsLSP,
+			hasLSP,
+			openFile,
+			touchFile,
+			getDiagnostics,
+			codeAction,
+			getClientForFile: vi.fn(),
+		});
 		safeSpawn.mockReset();
 		safeSpawnAsync.mockReset();
 		tryLazyInstall.mockClear();

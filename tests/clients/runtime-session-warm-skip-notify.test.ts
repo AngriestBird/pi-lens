@@ -43,16 +43,12 @@ import {
 	setupTestEnvironment,
 } from "./test-utils.js";
 import { suspendAt, waitFor } from "./interleaving-kit.js";
-import { makeLspServiceDouble } from "../support/lsp-service-double.js";
+import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 
 vi.mock("../../clients/lsp/config.js", () => ({
 	loadLSPConfig: vi.fn().mockResolvedValue({}),
 	initLSPConfig: vi.fn().mockResolvedValue(undefined),
 	getServerInitOverride: vi.fn().mockReturnValue(undefined),
-}));
-
-vi.mock("../../clients/lsp/capabilities.js", () => ({
-	getLSPService: vi.fn(() => makeLspServiceDouble()),
 }));
 
 // The quick-mode warmup's scan is the one await the N1 tests must hold open
@@ -201,7 +197,8 @@ describe("warm-pipeline size-skip notify (#775)", () => {
 	afterEach(cleanupWarmSkipNotifyTemps);
 	afterAll(cleanupWarmSkipNotifyTemps);
 
-	beforeEach(() => {
+	beforeEach(async () => {
+		await installLspServiceDouble();
 		restoreStartupMode = setStartupMode("full");
 		previousDataDir = process.env.PILENS_DATA_DIR;
 	});
