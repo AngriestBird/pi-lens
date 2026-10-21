@@ -450,28 +450,47 @@ describe("the class and the registration read path identity (#4689 item 7)", () 
 			expect(isSessionRootRegistered(path.dirname(file))).toBe(false);
 	});
 
-	it("row 15 a link from outside into the root falls back to the host's spelling", async (ctx) => {
-		// No ancestor of `ext/in/real.ts` is the session root, so the walk stops
-		// at `ext`, which is outside it, and never registers the config owner
-		// there. The fallback is the session root as the host spelled it, the
-		// entry `session_start` made, so the registry does not grow.
+	it("row 15 a link from outside into the root registers the link's entry, never the dir outside", async (ctx) => {
+		// No ancestor of `ext/in/deep/real.ts` is the session root, so the walk
+		// stops at `ext`, which is outside it, and never registers the config
+		// owner there: every file under `ext` would then read as a session file.
+		// It registers `ext/in`, the outermost ancestor whose identity is inside
+		// the root, so the #2052 gate serves the file. Recurrence: #4734
+		// Sourcery thread 1; the host-spelling fallback declined this file,
+		// which master's dirname registration served.
 		const fx = createPathIdentityFixture(env.tmpDir);
 		if (fx.skipReason) return ctx.skip(fx.skipReason);
 		const ext = path.join(env.tmpDir, "ext");
 		fs.mkdirSync(ext, { recursive: true });
 		fs.writeFileSync(path.join(ext, ".pi-lens.json"), "{}\n");
 		fs.symlinkSync(path.join("..", "repo", "src"), path.join(ext, "in"), "dir");
-		const file = path.join(ext, "in", "real.ts");
+		fs.mkdirSync(real(fx, "src", "deep"), { recursive: true });
+		const entry = path.join(ext, "in");
+		const file = path.join(entry, "deep", "real.ts");
 		const session = fx.aliasRoot;
 		runtime.projectRoot = session;
 		await initLSPConfig(session);
 
 		expect(resolveSessionConfigRoot(file, session)).toEqual({
-			register: session,
+			register: entry,
 			mode: "session",
 		});
 		await readCall(file, session, 4691);
-		expect(getSessionRootsForTelemetry(200)).toEqual([session]);
+		expect([...getSessionRootsForTelemetry(200)].sort()).toEqual(
+			[session, entry].sort(),
+		);
+		const registry = registryFor(session);
+		expect(registry.fileIsOutsideRegisteredRoots(file)).toBe(false);
+		expect(registry.analysisRootModeForFile(file)).toBe("session");
+
+		// A FILE link from outside has no ancestor inside the root: the session's
+		// host spelling, as before, and never `ext`.
+		const fileLink = path.join(ext, "f.ts");
+		fs.symlinkSync(real(fx, "src", "real.ts"), fileLink);
+		expect(resolveSessionConfigRoot(fileLink, session)).toEqual({
+			register: session,
+			mode: "session",
+		});
 	});
 
 	it("row 16 a linked worktree registers its nested config owner", async () => {

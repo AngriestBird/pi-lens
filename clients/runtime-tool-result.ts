@@ -156,8 +156,7 @@ import {
 } from "./degradation-ledger.js";
 import {
 	canWriteAnalysisRoot,
-	resolveAnalysisRoot,
-	resolveAnalysisRootPath,
+	classifyAnalysisRoot,
 	type AnalysisRootMode,
 } from "./analysis-root.js";
 
@@ -1979,7 +1978,10 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			? rawFilePath
 			: resolveToolCallFilePath(rawFilePath, resolutionBasis, workspaceRoot)
 					?.path;
-	const analysisRootMode = resolveAnalysisRoot(filePath ?? "", workspaceRoot);
+	// The class and its root, answered once: the rows below name the root the
+	// class served, never a second rule's answer (#4734 Sourcery thread 3).
+	const analysisRoot = classifyAnalysisRoot(filePath ?? "", workspaceRoot);
+	const analysisRootMode = analysisRoot.mode;
 	if (filePath) {
 		invalidateProjectIgnoreMatcherForPath(filePath);
 		invalidateFormatterCacheForPath(filePath);
@@ -3229,7 +3231,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		return;
 	}
 	if (analysisRootMode === "adopted") {
-		const adoptedRoot = resolveAnalysisRootPath(filePath, workspaceRoot);
+		const adoptedRoot = analysisRoot.root;
 		if (adoptedRoot) {
 			const firstAdoptedRoot = recordDegradationOnce({
 				kind: "tool-result-adopted-project",
@@ -3972,8 +3974,10 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// which it cannot tell apart from "analysis never ran". Record one bounded
 	// row per (mode, root) per session, and state it when a run produced no
 	// finding. The findings themselves are the statement when there are any.
-	if (analysisRootMode === "linked-worktree") {
-		const worktreeRoot = resolveAnalysisRootPath(filePath, workspaceRoot);
+	// #3596: after the pipeline await, so a replaced session's handler records
+	// nothing; its once-key would otherwise latch in the live session's ledger.
+	if (resultLive && analysisRootMode === "linked-worktree") {
+		const worktreeRoot = analysisRoot.root;
 		if (worktreeRoot) {
 			recordDegradationOnce({
 				kind: "tool-result-linked-worktree",
@@ -3982,7 +3986,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			});
 			const producedFindings =
 				result.hasBlockers || result.isError || result.output.trim() !== "";
-			if (resultLive && !producedFindings) {
+			if (!producedFindings) {
 				const firstSilentRun = recordDegradationOnce({
 					kind: "tool-result-linked-worktree-clean",
 					subject: worktreeRoot,

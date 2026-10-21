@@ -253,33 +253,24 @@ function writeLinkedWorktree(root: string): { repo: string; worktree: string } {
 	return { repo, worktree };
 }
 
-it("announces a linked-worktree edit the pipeline found nothing in (#2050 AC3)", async () => {
-	resetDegradationLedger();
-	const env = setupTestEnvironment("pi-lens-2050-worktree-delivery-");
-	// A linked worktree of the session's checkout, written as the metadata git
-	// itself writes (`<worktree>/.git` names a worktree-private gitdir whose
-	// `commondir` points at the shared `.git`), so no child process is needed.
-	// The class assertion below reds if the fixture stops resolving as a
-	// worktree. The checkout is a DIRECT child of the temp root with no
-	// `pi-lens-` prefix: a pi-owned temp path is the intended-skip class, not
-	// the linked-worktree class this rung is about (#4560). Removed here, so the
-	// widened tmp-root census never sees a leftover.
-	const checkoutRoot = path.join(
-		env.tmpDir,
-		"..",
-		`capture-2050-worktree-${process.pid}`,
-	);
+const linkedWorktreeResult = (output: string) => ({
+	output,
+	hasBlockers: false,
+	isError: false,
+	fileModified: false,
+});
+
+/**
+ * One linked worktree of a session checkout at `checkoutRoot`, its session
+ * coordinator, and an edit `tool_result` for one file in the worktree.
+ */
+function linkedWorktreeEdit(checkoutRoot: string) {
 	const { repo, worktree } = writeLinkedWorktree(checkoutRoot);
 	const worktreeFile = path.join(worktree, "src", "sibling.ts");
 	fs.mkdirSync(path.dirname(worktreeFile), { recursive: true });
 	fs.writeFileSync(worktreeFile, "export const value = 1;\n");
 	const runtime = new RuntimeCoordinator();
-	const pipelineResult = (output: string) => ({
-		output,
-		hasBlockers: false,
-		isError: false,
-		fileModified: false,
-	});
+	runtime.projectRoot = repo;
 	const editResult = () =>
 		({
 			event: {
@@ -304,10 +295,30 @@ it("announces a linked-worktree edit the pipeline found nothing in (#2050 AC3)",
 			ruffClient: {},
 			metricsClient: {},
 		}) as never;
+	return { repo, worktree, worktreeFile, runtime, editResult };
+}
+
+it("announces a linked-worktree edit the pipeline found nothing in (#2050 AC3)", async () => {
+	resetDegradationLedger();
+	const env = setupTestEnvironment("pi-lens-2050-worktree-delivery-");
+	// A linked worktree of the session's checkout, written as the metadata git
+	// itself writes (`<worktree>/.git` names a worktree-private gitdir whose
+	// `commondir` points at the shared `.git`), so no child process is needed.
+	// The class assertion below reds if the fixture stops resolving as a
+	// worktree. The checkout is a DIRECT child of the temp root with no
+	// `pi-lens-` prefix: a pi-owned temp path is the intended-skip class, not
+	// the linked-worktree class this rung is about (#4560). Removed here, so the
+	// widened tmp-root census never sees a leftover.
+	const checkoutRoot = path.join(
+		env.tmpDir,
+		"..",
+		`capture-2050-worktree-${process.pid}`,
+	);
+	const { repo, worktree, worktreeFile, runtime, editResult } =
+		linkedWorktreeEdit(checkoutRoot);
 	try {
-		runtime.projectRoot = repo;
 		expect(resolveAnalysisRoot(worktreeFile, repo)).toBe("linked-worktree");
-		vi.mocked(runPipeline).mockResolvedValue(pipelineResult(""));
+		vi.mocked(runPipeline).mockResolvedValue(linkedWorktreeResult(""));
 		const runsBefore = vi.mocked(runPipeline).mock.calls.length;
 
 		await handleToolResult(editResult());
@@ -356,11 +367,89 @@ it("announces a linked-worktree edit the pipeline found nothing in (#2050 AC3)",
 		// A run that produced a finding is its own statement: no advisory.
 		resetDegradationLedger();
 		vi.mocked(runPipeline).mockResolvedValue(
-			pipelineResult("src/sibling.ts:1:1 lint: unused value"),
+			linkedWorktreeResult("src/sibling.ts:1:1 lint: unused value"),
 		);
 		fs.writeFileSync(worktreeFile, "export const value = 3;\n");
 		await handleToolResult(editResult());
 		expect(vi.mocked(runPipeline).mock.calls).toHaveLength(runsBefore + 3);
+		expect(consumeAgentNudge(undefined, runtime.sessionScope)).toBeUndefined();
+	} finally {
+		vi.mocked(runPipeline).mockReset();
+		env.cleanup();
+		fs.rmSync(checkoutRoot, { recursive: true, force: true });
+	}
+});
+
+// Recurrence: #4734 Sourcery thread 3. The row's root came from the
+// out-of-session eligibility rule, which refuses a pi-owned temp path, so a
+// worktree the class served in full was analysed in silence.
+it("records the linked-worktree row for a worktree under a pi-owned temp dir", async () => {
+	resetDegradationLedger();
+	const env = setupTestEnvironment("pi-lens-2657-pi-owned-worktree-");
+	// A `pi-` prefix directly under the temp root is pi-owned
+	// (`isPiOwnedTempPath`); removed here, as in the AC3 cell.
+	const checkoutRoot = path.join(
+		env.tmpDir,
+		"..",
+		`pi-2657-worktree-${process.pid}`,
+	);
+	const { repo, worktree, worktreeFile, editResult } =
+		linkedWorktreeEdit(checkoutRoot);
+	try {
+		expect(resolveAnalysisRoot(worktreeFile, repo)).toBe("linked-worktree");
+		vi.mocked(runPipeline).mockResolvedValue(linkedWorktreeResult(""));
+
+		await handleToolResult(editResult());
+
+		expect(
+			getDegradationSummary()
+				.filter((entry) => entry.kind === "tool-result-linked-worktree")
+				.map((entry) => path.basename(entry.latestReasons[0]?.subject ?? "")),
+		).toEqual([path.basename(worktree)]);
+	} finally {
+		vi.mocked(runPipeline).mockReset();
+		env.cleanup();
+		fs.rmSync(checkoutRoot, { recursive: true, force: true });
+	}
+});
+
+// Recurrence: #4734 Sourcery thread 4. The row was written after the pipeline
+// await without the #3596 liveness check, so a replaced session's handler
+// latched its once-key in the new session's ledger.
+it("a linked-worktree result settling after a replacement records nothing in the new session", async () => {
+	resetDegradationLedger();
+	const env = setupTestEnvironment("pi-lens-2657-worktree-replaced-");
+	const checkoutRoot = path.join(
+		env.tmpDir,
+		"..",
+		`capture-2657-replaced-${process.pid}`,
+	);
+	const { repo, worktreeFile, runtime, editResult } =
+		linkedWorktreeEdit(checkoutRoot);
+	const entered = gatedPromise<void>();
+	const release = gatedPromise<void>();
+	try {
+		expect(resolveAnalysisRoot(worktreeFile, repo)).toBe("linked-worktree");
+		vi.mocked(runPipeline).mockImplementation(async () => {
+			entered.resolve();
+			await release.promise;
+			return linkedWorktreeResult("");
+		});
+
+		const handler = handleToolResult(editResult());
+		await entered.promise;
+		// session_start: the coordinator and the ledger reset for session 2.
+		runtime.resetForSession();
+		resetDegradationLedger();
+		release.resolve();
+		await handler;
+
+		expect(vi.mocked(runPipeline).mock.calls.length).toBeGreaterThan(0);
+		expect(
+			getDegradationSummary()
+				.filter((entry) => entry.kind.startsWith("tool-result-linked-worktree"))
+				.map((entry) => entry.kind),
+		).toEqual([]);
 		expect(consumeAgentNudge(undefined, runtime.sessionScope)).toBeUndefined();
 	} finally {
 		vi.mocked(runPipeline).mockReset();

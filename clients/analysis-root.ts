@@ -112,7 +112,7 @@ export function resolveAnalysisRootPath(
  * for a worktree root inside a pi-owned temp dir, which is not what the class
  * said.
  */
-function classifyAnalysisRoot(
+export function classifyAnalysisRoot(
 	filePath: string,
 	sessionRoot: string,
 	homeDirOverride?: string,
@@ -196,9 +196,11 @@ export interface SessionConfigRoot {
  * containment lexically, so a root registered in any other spelling never
  * holds the file, the #2052 gate declines it, and its `lsp.disabledServers`
  * denial stops applying. When no ancestor of the file's spelling is the root
- * (a link from outside into it), no spelling of that root holds the file, so
- * the session root is registered as the host spelled it: the entry
- * `session_start` made, restored if the cap dropped it, never a new one.
+ * (a directory link from outside into it), the link's entry is registered (see
+ * `configRootOnFileSpelling`). When no ancestor is even inside the root (a
+ * file link from outside), no registrable spelling holds the file, so the
+ * session root is registered as the host spelled it: the entry `session_start`
+ * made, restored if the cap dropped it, never a new one.
  */
 export function resolveSessionConfigRoot(
 	filePath: string,
@@ -223,21 +225,27 @@ export function resolveSessionConfigRoot(
 
 /**
  * The nearest `.pi-lens.json` owner between `filePath` and `root`, else the
- * ancestor that IS `root`, both on the file's own spelling; `undefined` when
- * no ancestor of that spelling is `root`. `pathsEqual` and `isUnderDir`
- * compare identities on POSIX (#4689), so a link on either side neither stops
- * the walk early nor carries it above the root.
+ * ancestor that IS `root`, both on the file's own spelling. When no ancestor of
+ * that spelling is `root` (a directory link from outside into it), the
+ * outermost ancestor still inside `root`: the link's entry, which holds the
+ * file lexically and whose files all resolve into `root`, so registering it
+ * serves the file and makes no outside file a session file. `undefined` when
+ * no ancestor is inside `root` (a file link from outside). `pathsEqual` and
+ * `isUnderDir` compare identities on POSIX (#4689), so a link on either side
+ * neither stops the walk early nor carries it above the root.
  */
 function configRootOnFileSpelling(
 	filePath: string,
 	root: string,
 ): string | undefined {
+	let entry: string | undefined;
 	for (const dir of walkUpDirs(nodePath.dirname(nodePath.resolve(filePath)))) {
 		const atRoot = pathsEqual(dir, root);
-		if (!atRoot && !isUnderDir(dir, root)) return undefined;
+		if (!atRoot && !isUnderDir(dir, root)) return entry;
 		if (atRoot || findPiLensConfigInDir(dir)) return dir;
+		entry = dir;
 	}
-	return undefined;
+	return entry;
 }
 
 /**
