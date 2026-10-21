@@ -1731,13 +1731,28 @@ rebuilt the system head, and every test passed. Tier 1,
 `AgentSession` with pi-ai's `fauxProvider`: turns, tool round trips, session
 ids, and the request the model sees. Their header comments state the APIs
 and limits. A new tier capability adds a case to `pi-runner.test.ts` or
-`pi-session.test.ts` first. `pi-mock.ts` stays for three classes: process-boundary
-subjects, pi-lens-internal seams, and payloads a scripted provider cannot
-produce. It also stays for files a roadmap slice still owns. It throws at load
-for a test file not on `PI_MOCK_IMPORTERS` (`tests/support/pi-mock-importers.ts`),
-so a new user fails however it imports the double. The list only shrinks:
+`pi-session.test.ts` first. `pi-mock.ts` stays only for a test file on
+`PI_MOCK_IMPORTERS` (`tests/support/pi-mock-importers.ts`), whose row states the
+class: `process-boundary` (4 rows), `internal-seam` (39: the case interposes on
+a pi-lens `clients/` module either through `vi.mock`, which cannot reach the
+copy pi's loader builds, or through a test-side copy of a process-global
+service the loaded copy does not share, such as `clients/lsp`'s service),
+`unproducible-payload` (5: a payload a scripted provider cannot
+produce), `double-subject` (1: the double is the subject), and
+`real-ui-harness` (1: the claim is what the TUI shows or mounts, which no
+in-process tier can produce). Three rows still carry `pending slice 10`, the
+last roadmap slice, which moves no file, so a slice marker now names no
+scheduled work. The class counts are the list's 53 rows at that recording, and
+a row grouped under a `pending slice 8` comment already carries its own class,
+so it is counted in that bucket:
+`grep -oE '^[[:space:]]*"[^"]*": *"[^"]+"' tests/support/pi-mock-importers.ts | sed -E 's/.*": *"([^"]+)"$/\1/' | sort | uniq -c`.
+The double throws at load for a test file not on the list, so a new user fails
+however it imports it. The list only shrinks:
 `tests/config/pi-mock-importer-sweep.test.ts` fails on a row whose file no
-longer uses it.
+longer uses it. A host claim names the host it ran on, and the tiers run on the
+one installed host (`@earendil-works/pi-coding-agent`, the dev pin): no
+automated spread exists, `scripts/probe-pi-host-tiers.mjs` is not built, and no
+CI job repeats a tier case on another host.
 
 When the defect is an ordering of awaits on one seam (a coalescing queue, a
 per-key serializer), or the seam has regressed before, write a scheduler
@@ -1747,9 +1762,15 @@ property with `fc.scheduler()` instead of one more replay:
 
 Use `tests/support/fault-injection.ts` for wedged children, seam delays,
 starved budgets, and gates; `makeRunnerCtx`, `makeLspServiceDouble`, and
-`makeRealRunnerEnv` for dispatch, LSP, and rule behavior. Mock only external
-binaries, network, host SDK seams (not pi's own behaviour: see the pi tiers
-above), clocks, or fault injection.
+`makeRealRunnerEnv` for dispatch, LSP, and rule behavior. Check `tests/support/`
+before writing a helper: a host case uses a pi tier, and a JSON-lines sink is
+read through `readNdjsonRows` (`tests/support/ndjson-rows.ts`), never a local
+`JSON.parse` loop; a claim that needs the complete output asserts its
+`skipped === 0`, because the reader drops a line it cannot parse and reports
+the count instead of throwing. Mock only external binaries, network, host SDK
+seams (not pi's own behaviour: see the pi tiers above), clocks, or fault
+injection; an in-process store, registry or coordinator is never replaced by a
+fake.
 
 Test authoring screens:
 
