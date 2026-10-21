@@ -10,7 +10,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
-import { flushAllNdjsonWriters } from "../../clients/ndjson-logger.js";
 import {
 	getActivePrimaryRoot,
 	getActiveSessionId,
@@ -174,15 +173,52 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 
 		// The row the copy's writer queued is on disk under the home the copy
 		// pinned — the sink a later case would read, settled when `dispose()`
-		// returns.
-		const latencyLog = path.join(process.env.PI_LENS_HOME ?? "", "latency.log");
-		await flushAllNdjsonWriters();
-		const rows = fs
-			.readFileSync(latencyLog, "utf8")
-			.split("\n")
-			.filter(Boolean)
-			.map((line) => JSON.parse(line) as { phase?: string });
-		expect(rows.some((row) => row.phase === "session_start_total")).toBe(true);
+		// returns. `latencyRows()` is the helper's own accessor: it flushes the
+		// process-global writer map (the copy's writers are in it) and reads the
+		// home the copy pinned, so no case has to spell either path.
+		const rows = (await handle.latencyRows()).rows;
+		expect(
+			rows.some(
+				(row) => (row as { phase?: string }).phase === "session_start_total",
+			),
+		).toBe(true);
+	});
+
+	it("reports a latency.log line it cannot parse instead of dropping it", async () => {
+		const handle = await startPiSession({
+			root: fixture.root,
+			cwd: path.join(fixture.root, "latency-read", "proj"),
+			responses: [fauxAssistantMessage(fauxText("ok"))],
+		});
+		await handle.prompt("hello");
+
+		// `shape`: a clean run of the copy's own writers skips nothing, and the
+		// rows are the ones it queued (a capability case for `latencyRows()`
+		// itself, AGENTS.md's "a new tier capability adds a case first").
+		const clean = await handle.latencyRows();
+		expect(clean.skipped).toBe(0);
+		expect(clean.rows.length).toBeGreaterThan(0);
+		expect(clean.rows.some((row) => row.phase === "session_start_total")).toBe(
+			true,
+		);
+
+		// Sourcery on #4699: a mangled row and a line cut mid-write were both
+		// DROPPED, so an exact-count or absence assertion could not see a corrupt
+		// record at all (`PROBE-A`/`PROBE-B2` in the review). The count is the
+		// record, and the good rows beside a bad line are never lost (the
+		// one-direction rule: a skip is not a licence to drop the fresh answer).
+		const file = path.join(fixture.root, "home", "latency.log");
+		const settled = fs.readFileSync(file);
+		try {
+			fs.appendFileSync(file, 'not a row\n{"phase":"memory_sam');
+			const read = await handle.latencyRows();
+			expect(read.skipped).toBe(2);
+			expect(read.rows.length).toBeGreaterThanOrEqual(clean.rows.length);
+		} finally {
+			// The file is shared by every case in this file: put the bytes back, so
+			// a corrupt line this case planted cannot red a neighbour.
+			fs.writeFileSync(file, settled);
+		}
 	});
 
 	it("refuses a manual compaction the fixture transcript is too small for", async () => {

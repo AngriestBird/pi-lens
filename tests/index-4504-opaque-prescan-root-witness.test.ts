@@ -59,6 +59,7 @@ import { setupTestEnvironment } from "./clients/test-utils.js";
 import { execFileSync } from "./support/git-fixture-env.js";
 import { makeSessionStartEvent } from "./support/host-event-factory.js";
 import { createPiMock, makeCtx } from "./support/pi-mock.js";
+import { readNdjsonRows } from "./support/ndjson-rows.js";
 
 /** The file the opaque command is stood in for writing. */
 const GENERATED = "generated-4504.ts";
@@ -127,21 +128,21 @@ async function rowsNaming(
 	needle: string,
 ): Promise<Array<{ phase?: string; filePath?: string; result?: string }>> {
 	await flushLatencyLog();
-	const log = getLatencyLogPath();
-	if (!fs.existsSync(log)) return [];
-	return fs
-		.readFileSync(log, "utf8")
-		.split("\n")
-		.filter((line) => line.trim().length > 0)
-		.map(
-			(line) =>
-				JSON.parse(line) as {
-					phase?: string;
-					filePath?: string;
-					result?: string;
-				},
-		)
-		.filter((row) => (row.filePath ?? "").includes(needle));
+	const read = readNdjsonRows<{
+		phase?: string;
+		filePath?: string;
+		result?: string;
+	}>(getLatencyLogPath());
+	// A row whose write was torn cannot be the row this witness names; red with
+	// the count rather than read a shorter trace as the answer.
+	expect(read.skipped).toBe(0);
+	return read.rows
+		.filter((row) => (row.filePath ?? "").includes(needle))
+		.map((row) => ({
+			phase: row.phase,
+			filePath: row.filePath,
+			result: row.result,
+		}));
 }
 
 describe("the opaque prescan's two looks resolve one root per session (#4504)", () => {
