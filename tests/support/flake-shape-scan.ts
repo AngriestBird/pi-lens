@@ -816,6 +816,9 @@ export function scanInProcessMock(
  * so a method added to the service widens the detector in the same commit.
  * `factories` are the shared double factories: an object passed to one, or
  * spreading one's result, is seeded from it and is not hand-rolled.
+ * `argumentOnlyFactories` are the entry points whose ARGUMENT is a factory's
+ * overrides but whose RESULT is not a double (an async installer resolves a
+ * `Promise`), so only the argument spelling is seeded (#4720 review F3).
  *
  * #4344 round 3 (G5) is the recurrence: one method added to `LSPClientInfo`
  * and `LSPService` had to be added by hand to doubles in 40 test files (34
@@ -825,7 +828,16 @@ export interface ServiceSurface {
 	name: string;
 	/** Repo-relative production file that declares `name`. */
 	file: string;
+	/**
+	 * Factories that seed in BOTH directions: the object literal is their
+	 * argument, or it spreads their result.
+	 */
 	factories: readonly string[];
+	/**
+	 * Factories that seed as an ARGUMENT only. Their result is not a double, so
+	 * a spread of it seeds nothing; absent means none.
+	 */
+	argumentOnlyFactories?: readonly string[];
 }
 
 export const SERVICE_SURFACES: readonly ServiceSurface[] = [
@@ -833,14 +845,19 @@ export const SERVICE_SURFACES: readonly ServiceSurface[] = [
 	{
 		name: "LSPService",
 		file: "clients/lsp/index.ts",
-		// `tests/support/lsp-service-seam.ts` (#4709) is the factory's only
-		// sanctioned wrapper: it hands its argument straight to
-		// `makeLspServiceDouble` and installs the result through the singleton
-		// lifecycle seam, so an overrides object passed to it is factory-seeded
-		// exactly like one passed to the factory itself. `installLspService` is
-		// NOT registered: it takes a finished double, so an object literal handed
-		// to it is a hand-rolled double and must keep being counted.
-		factories: ["makeLspServiceDouble", "installLspServiceDouble"],
+		// `makeLspServiceDouble` is synchronous and returns the double, so an
+		// overrides object passed to it, or a spread of its result, is seeded
+		// exactly like one passed to the factory itself.
+		factories: ["makeLspServiceDouble"],
+		// `tests/support/lsp-service-seam.ts` (#4709) is the installer: it hands
+		// its argument straight to `makeLspServiceDouble` and installs the
+		// result, so an overrides object passed to it is factory-seeded. It is
+		// ASYNC, so `{ ...installLspServiceDouble(), … }` spreads a Promise and
+		// seeds nothing: that spelling stays a hand-rolled double (#4720 F3).
+		// `installLspService` is NOT registered: it takes a finished double, so
+		// an object literal handed to it is a hand-rolled double and must keep
+		// being counted.
+		argumentOnlyFactories: ["installLspServiceDouble"],
 	},
 ];
 
@@ -987,19 +1004,32 @@ function calledName(call: SgNode | null | undefined): string | undefined {
 	return bareIdentifier(call.field("function") as SgNode);
 }
 
-/** The object is an argument of, or spreads the result of, a factory call. */
+/**
+ * The object is an argument of an admitted seeding call, or it spreads the
+ * result of a factory whose result is itself a double. Every other spelling is
+ * refused: the admitted set is the two `ServiceSurface` lists above, so a name
+ * reached through any other form is counted, never skipped.
+ */
 function factorySeeded(
 	object: SgNode,
 	factories: ReadonlySet<string>,
+	argumentOnlyFactories: ReadonlySet<string>,
 ): boolean {
-	if (factories.size === 0) return false;
+	if (factories.size === 0 && argumentOnlyFactories.size === 0) return false;
 	const parent = object.parent();
 	if (parent?.kind() === "arguments") {
 		const name = calledName(parent.parent());
-		if (name !== undefined && factories.has(name)) return true;
+		if (
+			name !== undefined &&
+			(factories.has(name) || argumentOnlyFactories.has(name))
+		)
+			return true;
 	}
+	if (factories.size === 0) return false;
 	return object.children().some((child) => {
 		if (child.kind() !== "spread_element") return false;
+		// A spread admits `factories` only: an argument-only entry point's result
+		// is not a double (it is a Promise), so spreading it seeds nothing.
 		const name = calledName(unwrapParens(child.namedChildren()[0] as SgNode));
 		return name !== undefined && factories.has(name);
 	});
@@ -1029,6 +1059,9 @@ export function scanServiceDouble(
 	const factories = new Set(
 		SERVICE_SURFACES.flatMap((surface) => surface.factories),
 	);
+	const argumentOnlyFactories = new Set(
+		SERVICE_SURFACES.flatMap((surface) => surface.argumentOnlyFactories ?? []),
+	);
 	// Lexical pre-check over comment-blanked text (quoted keys are real keys,
 	// so strings stay): skip the parse unless some surface could reach the
 	// threshold at all.
@@ -1046,7 +1079,7 @@ export function scanServiceDouble(
 	for (const object of syntaxRoot(scan).findAll({ rule: { kind: "object" } })) {
 		const keys = objectKeys(object);
 		if (keys.size < SERVICE_DOUBLE_MIN_MEMBERS) continue;
-		if (factorySeeded(object, factories)) continue;
+		if (factorySeeded(object, factories, argumentOnlyFactories)) continue;
 		let best: { name: string; shared: number } | undefined;
 		for (const { surface, members } of reachable) {
 			const shared = [...keys].filter(([key]) => members.has(key));

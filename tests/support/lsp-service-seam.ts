@@ -41,8 +41,14 @@ import {
  *
  * The install is NOT eager: a file whose path never asks for a service keeps
  * `peekLSPService()` undefined, exactly as it was when the module was mocked.
- * The double is a plain `makeLspServiceDouble` surface, so the documented
+ * The double is a plain `makeLspServiceDouble` surface (this module resolves to
+ * the double, not to `adaptLspService`'s facade), so the documented
  * focused-override shape still applies.
+ *
+ * The reset is per install, in BOTH entry points (#4720 review F1/F2). A second
+ * install must not keep serving the first one's cached service: that is what the
+ * next slice's per-case doubles depend on, and it is silent when wrong, because
+ * a file-scoped hoisted spy answers identically from a stale double.
  */
 export async function installLspServiceDouble(
 	overrides: LspServiceOverrides = {},
@@ -50,18 +56,35 @@ export async function installLspServiceDouble(
 ): Promise<Record<string, unknown>> {
 	resetInstalledLspService();
 	await import("../../clients/lsp/capabilities.js");
-	return installLspService(makeLspServiceDouble(overrides, options));
+	return configureInstalledService(makeLspServiceDouble(overrides, options));
 }
 
 /**
- * Install an already-built service object, synchronously. Two callers only:
- * a file that re-installs mid-case (the graph is evaluated by then), and
- * {@link installLspServiceDouble}, which has just evaluated it. A file that has
- * not imported the facade's graph yet must use the async form: installing
- * before `clients/lsp/index.ts` evaluates is what the third step exists to
- * avoid, and it fails silently.
+ * Install an already-built service object, synchronously, replacing whatever the
+ * previous install left cached. Four call sites in four files
+ * (`grep -rn "installLspService(" tests`):
+ * `tests/clients/disk-change-subscribers.test.ts`,
+ * `tests/clients/dispatch/runners/lsp-environment-gap-4532.test.ts`,
+ * `tests/clients/lsp/out-of-band-client-root-4532.test.ts` and
+ * `tests/tools/lsp-diagnostics-inferred-project.test.ts`. They need no reset of
+ * their own: this one runs first and replaces a cached service (#4720 F2). A
+ * caller that resets too is harmless, because a second reset over an empty
+ * singleton returns before any teardown.
+ *
+ * A file that has not evaluated the facade's graph yet must use the async form:
+ * installing before `clients/lsp/index.ts` evaluates is what its third step
+ * exists to avoid, and it fails silently.
  */
 export function installLspService(
+	service: Record<string, unknown>,
+): Record<string, unknown> {
+	resetInstalledLspService();
+	return configureInstalledService(service);
+}
+
+/** The configure step both installers share; it never resets, so each entry
+ * point owns exactly one reset and each one is witnessed on its own (#4720). */
+function configureInstalledService(
 	service: Record<string, unknown>,
 ): Record<string, unknown> {
 	configureLspServiceLifecycle<Record<string, unknown>>({
@@ -76,8 +99,9 @@ export function installLspService(
  * Drop the installed service from the process singleton without rebuilding it.
  * The next `getLSPService()` asks the installed lifecycle for a fresh one, so a
  * case that asserts a post-reset state sees the same double again rather than a
- * stale cached instance.
+ * stale cached instance. Module-private: both installers are its callers, and
+ * `tests/clients/lsp-service-seam.test.ts` is the witness for each.
  */
-export function resetInstalledLspService(): void {
+function resetInstalledLspService(): void {
 	resetOwnedLspService();
 }
