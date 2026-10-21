@@ -281,6 +281,15 @@ describe("PR body sections as the reader sees them (#4717)", () => {
 });
 
 describe("section text drops every raw-HTML block (#4717)", () => {
+	it("refuses a required section whose only content is a comment", () => {
+		// Recurrence it prevents: round 3's accepted residual. The heading was
+		// visible, its content commented out, and the section counted as written.
+		const text = body("Text.\n\n## Tests\n<!-- Targeted tests pass. -->");
+		expect(lintPrBody(text, { workingTree: true }).errors).toContainEqual(
+			expect.stringContaining('no content before the next heading "## Tests"'),
+		);
+	});
+
 	const fold = (section: string) =>
 		body(TESTS).replace(
 			"#4606 not folded: a different file and a separate rule.",
