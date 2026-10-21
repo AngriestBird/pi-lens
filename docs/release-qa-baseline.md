@@ -154,7 +154,8 @@ newest-in-range lane reads it, bounded above so `"*"` can never mean
 matrix has passed on. A newer host enters the window in ONE change: run this
 matrix on it, add it to that test's verified list, and move the workflow's
 ceiling together. P1 is one verified host per minor line from 0.86 onward;
-0.81–0.83 are in-window without a dedicated host. A ceiling past an unrun
+0.86–1.3 are in-window, and every minor line below 0.86 falls outside the
+window entirely, so none needs a dedicated host. A ceiling past an unrun
 minor still claims that minor, so the verified-minor ratchet names the admitted
 lines explicitly.
 

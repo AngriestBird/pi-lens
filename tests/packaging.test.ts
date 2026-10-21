@@ -556,16 +556,128 @@ describe("host-provided peers are open; the supported window lives in install-sm
 		);
 	});
 
-	it("keeps the baseline doc's verified-host table and this ratchet one list", () => {
-		expect(verifiedHostsFromBaseline(baselineDoc)).toEqual(
-			[...RELEASE_QA_VERIFIED_HOSTS].sort(semver.compare),
+	// #4688 R2 (F1): the paragraph said `0.81–0.83 are in-window` after the floor
+	// moved past them. #4688's own sweep enumerated the three removed host
+	// versions (`0\.80\.10|>=0\.80|0\.84\.1|0\.85\.1`), so the class -- any minor
+	// below the new floor -- survived it (AGENTS.md shape 69). The paragraph now
+	// names the certified minor range, and this case reads that sentence against
+	// the workflow's own values: a rewording reds, which is the fail-closed
+	// behaviour the policy case above already has.
+	it("states in the baseline doc the certified minor range the workflow enforces", () => {
+		const clause = baselineDoc.match(
+			/one verified host per minor line from (\d+\.\d+) onward;\s+(\d+\.\d+)[–-](\d+\.\d+)\s+are\s+in-window/,
+		);
+		expect(
+			clause,
+			"docs/release-qa-baseline.md 'P1 is one verified host per minor line …' clause",
+		).toBeTruthy();
+		const [from, low, high] = (clause as RegExpMatchArray).slice(1) as [
+			string,
+			string,
+			string,
+		];
+		// The range must start on the floor's own minor line, derived from
+		// PI_HOST_FLOOR_VERSION, and end on the newest verified host's minor line,
+		// derived from this ratchet. Both ends are independent of the clause.
+		const floorMinorLine = `${semver.major(floor)}.${semver.minor(floor)}`;
+		const newest =
+			[...RELEASE_QA_VERIFIED_HOSTS].sort(semver.compare).at(-1) ?? "";
+		const newestMinorLine = `${semver.major(newest)}.${semver.minor(newest)}`;
+		expect(from, "docs/release-qa-baseline.md in-window start").toBe(
+			floorMinorLine,
+		);
+		expect(low, "docs/release-qa-baseline.md in-window range start").toBe(
+			floorMinorLine,
+		);
+		expect(high, "docs/release-qa-baseline.md in-window range end").toBe(
+			newestMinorLine,
 		);
 	});
 
-	it("lists no verified host the certified window excludes", () => {
-		const excluded = verifiedHostsFromBaseline(baselineDoc).filter(
-			(version) => !semver.satisfies(version, window),
+	// #4688 R2 (F1), the class sweep: the defect was an enumeration of three
+	// removed versions, so a claim naming any other pre-floor minor slipped by.
+	// Every `<x.y>[–<x.y>] are in-window` claim in the two files that declare the
+	// window is read here, and the claim's low end must not sit below the floor.
+	it("claims no minor line below the floor is in-window", () => {
+		const files = [
+			[
+				"docs/release-qa-baseline.md",
+				fs.readFileSync(
+					path.join(root, "docs", "release-qa-baseline.md"),
+					"utf8",
+				),
+			],
+			[
+				".github/workflows/install-smoke.yml",
+				fs.readFileSync(
+					path.join(root, ".github", "workflows", "install-smoke.yml"),
+					"utf8",
+				),
+			],
+		] as const;
+		const claims = files.flatMap(([file, text]) =>
+			[
+				...text.matchAll(/(\d+\.\d+)(?:[–-](\d+\.\d+))? (?:are|is) in-window/g),
+			].map((match) => ({
+				file,
+				claim: match[0],
+				low: match[1] as string,
+			})),
 		);
+		// A sweep that reads no claim is not a passing sweep: both files must keep
+		// stating the in-window range, which is what gives the check below a
+		// population to refuse.
+		expect(
+			claims.map((entry) => entry.claim),
+			"in-window claims found in the two files that declare the window",
+		).not.toEqual([]);
+		const floorMinorLine = `${semver.major(floor)}.${semver.minor(floor)}.0`;
+		const belowFloor = claims.filter((entry) =>
+			semver.lt(`${entry.low}.0`, floorMinorLine),
+		);
+		expect(
+			belowFloor.map((entry) => `${entry.file}: ${entry.claim}`),
+			`in-window claim(s) naming a minor below the floor ${floor}: ${belowFloor.map((entry) => `${entry.file}: ${entry.claim}`).join("; ")}`,
+		).toEqual([]);
+	});
+
+	// #4688 R2 (F3): the two prose floors a human reads before running the
+	// matrix were graded by nothing, so a later floor move could leave either
+	// behind while every case here stayed green.
+	it("states the same floor in the baseline doc's floor sentence", () => {
+		const cited = baselineDoc.match(/The floor is (\d+\.\d+\.\d+)/)?.[1];
+		expect(cited, "docs/release-qa-baseline.md 'The floor is …'").toBe(floor);
+	});
+
+	it("states the same floor in the README's requirement line", () => {
+		const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
+		const cited = readme.match(/a pi host of (\d+\.\d+\.\d+) or newer/)?.[1];
+		expect(cited, "README.md 'a pi host of … or newer'").toBe(floor);
+	});
+
+	it("keeps the baseline doc's verified-host table and this ratchet one list", () => {
+		const rows = verifiedHostRowsFromBaseline(baselineDoc);
+		const unreadable = rows.filter((row) => row.version === null);
+		// Fail closed on a row this reader cannot parse (#4688 R2 F2): a row
+		// spelled `| 1.4 |` is a host the ratchet does not carry and the window
+		// excludes, and dropping it silently let it ship.
+		expect(
+			unreadable.map((row) => row.line),
+			`docs/release-qa-baseline.md verified-host row(s) with no \`| x.y.z |\` version: ${unreadable.map((row) => row.line).join("; ")}`,
+		).toEqual([]);
+		// A set comparison (#4688 R2 F4): a certified host back-filled in the
+		// middle of the range is the doc's own update habit, not a disagreement
+		// about membership.
+		expect(
+			rows.map((row) => row.version as string).sort(semver.compare),
+		).toEqual([...RELEASE_QA_VERIFIED_HOSTS].sort(semver.compare));
+	});
+
+	it("lists no verified host the certified window excludes", () => {
+		const excluded = verifiedHostRowsFromBaseline(baselineDoc)
+			.map((row) => row.version)
+			.filter((version): version is string => version !== null)
+			.filter((version) => !semver.satisfies(version, window));
 		expect(
 			excluded,
 			`PI_HOST_SUPPORTED_RANGE (${window}) excludes listed host(s) ${excluded.join(", ")}`,
@@ -573,12 +685,25 @@ describe("host-provided peers are open; the supported window lives in install-sm
 	});
 });
 
-/** Host rows of the baseline doc's `### Verified hosts` table, in table order. */
-function verifiedHostsFromBaseline(text: string): string[] {
+/**
+ * Rows of the baseline doc's `### Verified hosts` table, in table order, with
+ * the version column or `null` when the row does not spell a three-part
+ * version. Returning the unparsed rows is what lets the caller refuse them
+ * instead of reading a row it cannot understand as absent (#4688 R2 F2).
+ */
+function verifiedHostRowsFromBaseline(
+	text: string,
+): Array<{ line: string; version: string | null }> {
 	const section = (text.split("### Verified hosts")[1] ?? "").split(/\n## /)[0];
-	return [...(section ?? "").matchAll(/^\| (\d+\.\d+\.\d+) \|/gm)].map(
-		(match) => match[1] as string,
-	);
+	return (section ?? "")
+		.split("\n")
+		.filter((line) => line.trimStart().startsWith("|"))
+		.filter((line) => !/^\|\s*[-:]+\s*\|/.test(line))
+		.slice(1)
+		.map((line) => ({
+			line,
+			version: line.match(/^\|\s*(\d+\.\d+\.\d+)\s*\|/)?.[1] ?? null,
+		}));
 }
 
 // Recurrence prevented (#4513): `build:dist` reads the esbuild and tsc versions
