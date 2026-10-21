@@ -164,9 +164,25 @@ function templatePlaceholderLines() {
 	return placeholders;
 }
 
-function hasRealContent(lines, section, placeholders, structure) {
+/**
+ * Does a section hold content the reader sees? `lines` is a slice of the
+ * blanked body starting at absolute line `startLine`, and `structure` maps a
+ * heading line's index to its name (`headingLines(...).name`). Structure is
+ * answered by the line a heading occupies, in the same reading the slice came
+ * from (#4717 F5): a body-wide set of heading *text* both counted a commented
+ * heading as content, because the slice is comment-blanked and the heading's
+ * raw line is not, and dropped an answer whose words repeat a setext heading's
+ * title.
+ */
+function hasRealContent(
+	lines,
+	section,
+	placeholders,
+	structure,
+	startLine = 0,
+) {
 	const templateLines = placeholders.get(section) ?? new Set();
-	return lines.some((line) => {
+	return lines.some((line, offset) => {
 		const value = line.trim();
 		// A nested heading is structure, not content: counting it let an empty
 		// "## Tests" pass on the strength of its own "### Test assessment" line
@@ -174,7 +190,7 @@ function hasRealContent(lines, section, placeholders, structure) {
 		// family the `HEADING` regex cannot spell is structure too (#4717 F1).
 		return (
 			value &&
-			!structure.has(value) &&
+			!structure.has(startLine + offset) &&
 			!/^[-*+] \[ \]/.test(value) &&
 			!templateLines.has(value)
 		);
@@ -184,22 +200,19 @@ function hasRealContent(lines, section, placeholders, structure) {
 /**
  * The lines the reader sees as headings, from the lexer (#4717 F1). `name`
  * maps each of a heading's line indices to its text, for a caller scanning the
- * body's rows; `text` holds those lines trimmed, for a caller that has only a
- * section's own slice. A setext heading's underline and an indented ATX
- * heading are structure here exactly as a plain ATX one is, so no reader of a
- * body needs a heading regex of its own.
+ * body's rows and for `hasRealContent`, which asks whether a line of its slice
+ * is one. A setext heading's underline and an indented ATX heading are
+ * structure here exactly as a plain ATX one is, so no reader of a body needs a
+ * heading regex of its own.
  */
 function headingLines(body, headings = bodyHeadings(body)) {
-	const source = String(body ?? "").split(/\r?\n/);
 	const name = new Map();
-	const text = new Set();
 	for (const heading of headings) {
 		for (let line = heading.index; line < heading.contentIndex; line += 1) {
 			name.set(line, heading.name);
-			text.add(String(source[line] ?? "").trim());
 		}
 	}
-	return { name, text };
+	return { name };
 }
 
 /**
@@ -243,6 +256,7 @@ function sectionLines(body, headings = bodyHeadings(body)) {
 		);
 		const end = next?.index ?? text.length;
 		return {
+			start: heading.contentIndex,
 			raw: String(body ?? "")
 				.split(/\r?\n/)
 				.slice(heading.contentIndex, end),
@@ -259,6 +273,7 @@ function sectionContent(body, section) {
 	if (!heading) return null;
 	const lines = sectionLines(body, headings).of(heading);
 	return {
+		start: lines.start,
 		raw: lines.raw.join("\n"),
 		text: lines.text.join("\n"),
 		visible: lines.visible.join("\n"),
@@ -3279,10 +3294,15 @@ export function lintDetectionSection(body = "", options = {}) {
 	if (
 		options.ignoreUnfilled &&
 		!hasRealContent(
-			content.split("\n").filter((line) => !GENERATED_FOOTER.test(line.trim())),
+			// Blank the footer rather than drop it, so every line keeps its index
+			// in the section slice `hasRealContent` reads structure by (#4717 F5).
+			content
+				.split("\n")
+				.map((line) => (GENERATED_FOOTER.test(line.trim()) ? "" : line)),
 			"detection",
 			templatePlaceholderLines(),
-			headingLines(body).text,
+			headingLines(body).name,
+			section.start,
 		)
 	)
 		return [];
@@ -4074,7 +4094,7 @@ export function lintPrBody(body = "", options = {}) {
 	const headings = bodyHeadings(body);
 	const { text: rawLines, visible: lines } = sectionLines(body, headings);
 	const placeholders = templatePlaceholderLines();
-	const structure = headingLines(body, headings).text;
+	const structure = headingLines(body, headings).name;
 	const errors = options.diff ? lintDiffCompliance(body, options) : [];
 	const summary = headings.find((heading) => hasSection(heading, "summary"));
 	const firstHeading = headings[0]?.index ?? lines.length;
@@ -4093,6 +4113,7 @@ export function lintPrBody(body = "", options = {}) {
 				"summary",
 				placeholders,
 				structure,
+				summary.contentIndex,
 			)) &&
 		!hasRealContent(
 			lines.slice(0, firstHeading),
@@ -4135,7 +4156,13 @@ export function lintPrBody(body = "", options = {}) {
 			nextHeading?.index ?? lines.length,
 		);
 		if (
-			!hasRealContent(rawContent, name.toLowerCase(), placeholders, structure)
+			!hasRealContent(
+				rawContent,
+				name.toLowerCase(),
+				placeholders,
+				structure,
+				heading.contentIndex,
+			)
 		)
 			errors.push(
 				sectionMessage(name, "has no content before the next heading"),

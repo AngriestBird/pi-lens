@@ -5818,6 +5818,20 @@ describe("detection retrospective for bug-closing PRs (#4288)", () => {
 		).toEqual([expect.stringContaining('"## Detection"')]);
 	});
 
+	it("skips a section holding only a deeper heading on the local preflight", () => {
+		// Recurrence it prevents: #4717 F6. This call site's structure argument was
+		// the only one no test reached, so emptying it left all 42 detection rows
+		// green while an empty "## Detection" holding an H5 became a refused
+		// answer instead of an unfilled section. The section starts away from line
+		// 0 so the row also pins the slice's offset (#4717 F5).
+		expect(
+			lintDetectionSection(
+				"## Why\nOne sentence.\n\n## Detection\n##### a\n##### b\n",
+				{ ignoreUnfilled: true },
+			),
+		).toEqual([]);
+	});
+
 	it("refuses the template's optional hint as a bug-closing answer", () => {
 		const template = readFileSync(
 			resolve(repositoryRoot, ".github/PULL_REQUEST_TEMPLATE.md"),

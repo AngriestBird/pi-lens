@@ -359,6 +359,29 @@ describe("section text drops every raw-HTML block (#4717)", () => {
 		);
 	});
 
+	it("refuses a required section whose only content is a commented nested heading", () => {
+		// Recurrence it prevents: #4717 F5. Structure was a body-wide set of the
+		// headings' *raw* lines, compared against a comment-blanked section slice,
+		// so this heading never matched and an empty "## Tests" passed the merge
+		// gate on a trailing `<!-- todo -->`.
+		const text = body("Text.\n\n## Tests\n### Note <!-- todo -->");
+		expect(lintPrBody(text, { workingTree: true }).errors).toContainEqual(
+			expect.stringContaining('no content before the next heading "## Tests"'),
+		);
+	});
+
+	it("keeps a fold decision that repeats a setext heading's title", () => {
+		// Recurrence it prevents: the mirror of #4717 F5. Keyed on text, a setext
+		// heading titled with the fold decision claimed that decision's own line as
+		// structure, so a valid body was refused.
+		const decision = "#4606 not folded: a different file and a separate rule.";
+		const text = body("Text.\n\n## Tests\nTargeted tests pass.").replace(
+			decision,
+			`${decision}\n\n${decision}\n-----`,
+		);
+		expect(lintPrBody(text, { workingTree: true }).errors).toEqual([]);
+	});
+
 	const fold = (section: string) =>
 		body(TESTS).replace(
 			"#4606 not folded: a different file and a separate rule.",
