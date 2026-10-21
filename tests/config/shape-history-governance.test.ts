@@ -166,6 +166,69 @@ describe("blankMarkdown comment ends (#4565)", () => {
 	});
 });
 
+// Recurrence (#4717 V1): the blanker matched `<!--` at any offset, so a body
+// writing about the comment syntax (in prose or in a backtick span) blanked
+// every later heading and both PR-body entries refused a valid body with five
+// false `missing "## …"` errors. The admitted openers are commonmark's: a
+// block opener at a line start after at most three spaces of indent, and an
+// inline opener whose end closes inside its own paragraph. Every other
+// spelling is literal text.
+describe("blankMarkdown comment openers (#4717 V1)", () => {
+	const hidden = (markdown: string) => blankMarkdown(markdown);
+
+	it.each([
+		["at a line start", "<!--"],
+		["after three spaces of indent", "   <!--"],
+	])("hides a block comment %s", (_name, opener) => {
+		const out = hidden(`${opener}\nhidden\n-->.\nvisible`);
+		expect(out).not.toContain("hidden");
+		expect(out).toContain("visible");
+	});
+
+	it("runs an unterminated block comment to the end of the text", () => {
+		// CommonMark's HTML block ends at the end of the document when no closer
+		// follows, so the heading below stays hidden.
+		expect(hidden("   <!--\n## Fold check")).not.toContain("Fold check");
+	});
+
+	it("hides an inline comment that closes in its own paragraph", () => {
+		const out = hidden("text <!-- hidden -->\nvisible");
+		expect(out).not.toContain("hidden");
+		expect(out).toContain("visible");
+	});
+
+	it.each([
+		["has no end at all", "text <!-- literal\nvisible"],
+		[
+			"closes only past a blank line",
+			"text <!-- literal\n\n--> later\nvisible",
+		],
+	])("keeps an inline opener literal when it %s", (_name, markdown) => {
+		const out = hidden(markdown);
+		expect(out).toContain("literal");
+		expect(out).toContain("visible");
+	});
+
+	it.each([
+		["unclosed", "text `<!--` literal\nvisible"],
+		["with its end inside the span", "text `<!-- note --> now`\nvisible"],
+	])("never opens a comment in a backtick span (%s)", (_name, markdown) => {
+		const out = hidden(markdown);
+		expect(out).toContain("`<!--");
+		expect(out).toContain("visible");
+	});
+
+	it("reads an opener that is the line's first content after a deep indent as a block", () => {
+		// A four-space line cannot interrupt a paragraph (CommonMark), so it is a
+		// continuation, and the comment is still the line's first content. The
+		// catalog fixture `    <!-- (#100)` is this shape, and its hidden issue
+		// reference must not cover a shape.
+		const out = hidden("para\n    <!--\n## hidden");
+		expect(out).toContain("para");
+		expect(out).not.toContain("## hidden");
+	});
+});
+
 describe("baselineViolations (#4439)", () => {
 	// Recurrence (#4448 review F2): both guards survived neutering because only
 	// an env override on the real files ever exercised them.

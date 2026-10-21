@@ -349,6 +349,37 @@ describe("Fold check section requirement (#4711)", () => {
 		).toContain('missing "## Fold check"');
 	});
 
+	// #4717 V1: only the commonmark opener forms hide text. A mid-line `<!--`
+	// (in prose or in a backtick span) with no end inside its paragraph is text
+	// the reader sees, so every later heading stays visible and both entries
+	// accept the body. The reviewed head blanked from the first mid-line opener,
+	// so each of these read as five missing sections (Greptile P1).
+	it.each([
+		["in a backtick span with no end", "The scan reads `<!--` as an opener."],
+		[
+			"in a backtick span, end in a later fence",
+			"The scan reads `<!--` as an opener.\n\n```text\n<!-- closer -->\n```",
+		],
+		["in prose with no end", "The scan reads <!-- as an opener."],
+		[
+			"in prose, end past a blank line",
+			"The scan reads <!-- as an opener.\n\n--> and a later bot comment closes it.",
+		],
+		["in a backtick span with its end", "Markup `<!-- note -->` hides text."],
+		["in prose with its end", "Markup <!-- note --> hides text."],
+	])("accepts a Summary naming <!-- %s", (_name, summary) => {
+		const text = body("#4606 not folded: a different file and a rule.").replace(
+			"The lint reads the fold check section.",
+			summary,
+		);
+		expect(lintFoldCheck(text)).toEqual([]);
+		expect(lintPrBody(text, { workingTree: true }).errors).toEqual([]);
+		const stub = (): string => "";
+		expect(lintLocalPrBody(text, process.cwd(), stub as never).errors).toEqual(
+			[],
+		);
+	});
+
 	// #4717 F8: a `###` sub-heading does not end the section, because the section
 	// ends at the next heading of the same or a higher level. Dropping that level
 	// test turned no case red on the reviewed head.

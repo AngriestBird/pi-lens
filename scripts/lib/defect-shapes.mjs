@@ -95,13 +95,35 @@ export function htmlCommentEnd(text, from) {
 	return end === null ? -1 : from + end.index + end[0].length;
 }
 
+/** A backtick span, masked where the text renders as code, not prose. */
+export function codeSpanMasked(text) {
+	return String(text).replace(/(`+)([\s\S]*?)\1/g, (span) =>
+		" ".repeat(span.length),
+	);
+}
+
 /**
  * Blank HTML comments, keeping every line's length so line numbers and offsets
  * still match the raw source (LF text). A consumer that masks one line at a
  * time asks `htmlCommentEnd` rather than carrying its own end rule.
+ *
+ * Only the two forms commonmark gives a comment open one here, because a
+ * consumer reads the blanked copy as what the reader sees (#4717 V1: matching
+ * `<!--` at any offset blanked every later heading, so a body writing about
+ * the comment syntax was refused for five missing sections):
+ *
+ * - a block opener is the first content on its line, after any indent, and
+ *   runs to its end, or to the end of the text when it has none;
+ * - an inline opener, anywhere else on a line, hides text only when its end
+ *   closes in the same paragraph. A blank line ends the paragraph, so an
+ *   opener with no end inside it is literal text.
+ *
+ * A backtick span never opens a comment: it renders as text, not markup.
  */
 export function blankHtmlComments(text) {
 	const source = String(text ?? "");
+	if (!source.includes("<!--")) return source;
+	const codeSpans = codeSpanMasked(source);
 	let output = "";
 	let index = 0;
 	while (index < source.length) {
@@ -110,11 +132,31 @@ export function blankHtmlComments(text) {
 			output += source.slice(index);
 			break;
 		}
-		output += source.slice(index, start);
+		// A quoted opener is text the reader sees; copy it through untouched.
+		if (codeSpans[start] === " ") {
+			output += source.slice(index, start + 4);
+			index = start + 4;
+			continue;
+		}
+		const lineStart = source.lastIndexOf("\n", start - 1) + 1;
 		const end = htmlCommentEnd(source, start + 4);
-		const stop = end === -1 ? source.length : end;
-		output += source.slice(start, stop).replace(/[^\n]/g, " ");
-		index = stop;
+		if (/^[ \t]*$/.test(source.slice(lineStart, start))) {
+			const stop = end === -1 ? source.length : end;
+			output += source.slice(index, start);
+			output += source.slice(start, stop).replace(/[^\n]/g, " ");
+			index = stop;
+			continue;
+		}
+		const paragraph = source.slice(start).search(/\n[ \t]*\n/);
+		const paragraphEnd = paragraph === -1 ? source.length : start + paragraph;
+		if (end === -1 || end > paragraphEnd) {
+			output += source.slice(index, start + 4);
+			index = start + 4;
+			continue;
+		}
+		output += source.slice(index, start);
+		output += source.slice(start, end).replace(/[^\n]/g, " ");
+		index = end;
 	}
 	return output;
 }
@@ -122,9 +164,10 @@ export function blankHtmlComments(text) {
 /**
  * Blank fenced and indented code blocks (see `sourceWithoutFencedBlocks`) and
  * HTML comments (see `blankHtmlComments`), keeping line numbers. An
- * unterminated `<!--` runs to the end of the text, as GitHub renders it. A
- * reference or heading quoted in an example or a comment never counts as real
- * content. Fences go first: a `<!--` inside a fence is literal text.
+ * unterminated `<!--` at a line start runs to the end of the text, as GitHub
+ * renders it. A reference or heading quoted in an example or a comment never
+ * counts as real content. Fences go first: a `<!--` inside a fence is literal
+ * text.
  */
 export function blankMarkdown(text, options = {}) {
 	return blankHtmlComments(

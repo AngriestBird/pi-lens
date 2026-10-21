@@ -6,6 +6,7 @@ import { gitExecFileSync } from "./lib/git-fixture-env.mjs";
 import {
 	blankMarkdown,
 	blankHtmlComments,
+	codeSpanMasked,
 	HEADING,
 	parseDefectShapes,
 	sourceWithoutFencedBlocks,
@@ -1047,12 +1048,6 @@ function markdownBlocks(body, { tilde = false } = {}) {
 		text: block.lines.join("\n"),
 		table: !block.fence && block.lines.every((line) => /^\s*\|/.test(line)),
 	}));
-}
-
-function codeSpanMasked(text) {
-	return String(text).replace(/(`+)([\s\S]*?)\1/g, (span) =>
-		" ".repeat(span.length),
-	);
 }
 
 function endsSentence(text, index, original = text) {
@@ -3740,24 +3735,21 @@ function mutationTableRows(visibleRows) {
 // Row 3 (model fidelity) remains reviewer judgement per issuecomment 6241755363.
 function lintDiffCompliance(body, options) {
 	const errors = [];
-	// A literal `<!--` inside a fence or an inline code span is quoted text, not
-	// a comment opener: the body of a PR that documents comment ends reads it as
-	// text, and blanking from it would hide every fence below (#4585 row 1 hit
-	// exactly that). Both a backticked span and a fence restore their literal
-	// `<!--`, and a real comment still hides what it contains.
+	// A literal `<!--` inside a fence is quoted text, not a comment opener: the
+	// body of a PR that documents comment ends reads it as text, and blanking
+	// from it would hide every fence below (#4585 row 1 hit exactly that). An
+	// inline code span is the same, and `blankHtmlComments` owns that rule now
+	// (#4717 V1). `visibleRows` hides fenced examples (a quoted heading, control
+	// or table is an example, not a claim). `evidenceRows` keeps fence content,
+	// because an honest body quotes the Windows advisory row in a fence (#4605
+	// F5).
 	const source = String(body);
-	const quotedSpans = codeSpanMasked(source);
 	const fencedSpans = sourceWithoutFencedBlocks(source, {
 		indentedCode: false,
 	});
 	const guarded = source.replace(/<!--/g, (marker, offset) =>
-		quotedSpans[offset] === " " || fencedSpans[offset] === " "
-			? "    "
-			: marker,
+		fencedSpans[offset] === " " ? "    " : marker,
 	);
-	// `visibleRows` hides fenced examples (a quoted heading, control or table
-	// is an example, not a claim). `evidenceRows` keeps fence content, because
-	// an honest body quotes the Windows advisory row in a fence (#4605 F5).
 	const rawRows = blankHtmlComments(guarded).split(/\r?\n/);
 	const visibleRows = blankMarkdown(guarded).split(/\r?\n/);
 	const evidenceRows = rawRows;
