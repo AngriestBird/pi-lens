@@ -140,7 +140,10 @@ import {
 	resolvePiLensFlag,
 	resolvePiLensFlagWithSource,
 } from "./clients/lens-config.js";
-import { LENS_FLAGS } from "./clients/lens-flag-registry.js";
+import {
+	LENS_FLAGS,
+	readLazyToolsSetting,
+} from "./clients/lens-flag-registry.js";
 import {
 	LENS_TOOL_NAMES,
 	resolveLensToolEnabled,
@@ -310,10 +313,14 @@ const LOOP_BLOCK_IDENTITY = "<pi-lens>";
 import {
 	isFreshSessionStart,
 	getRememberedLazyTools,
+	lazyToolsApply,
 	planToolSet,
+	recordToolSetDecision,
 	recordToolSetMutation,
 	rememberLazyTools,
+	resolveLazyToolsMode,
 	supportsDeferredTools,
+	supportsMidConvoSystemMessages,
 } from "./clients/tool-set-policy.js";
 import {
 	endSituationalToolTelemetry,
@@ -2303,36 +2310,63 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// present on every host the broad `@earendil-works/pi-coding-agent` peer
 	// dependency allows. Under `--no-lazy-tools` nothing is touched at all:
 	// all-active IS the requested posture.
-	const applyToolSetPlan = (ctx: unknown, reason: string | undefined): void => {
+	//
+	// #4687 item 7: whether the lazy tools start inactive is decided per model
+	// (`lazyToolsApply`): on a model that folds system messages into one head,
+	// every tool is active from the start, because each later tool-set change
+	// would rewrite the whole cached prefix. The plan runs at session_start and
+	// on a model switch only, so the set never flips within one model. An
+	// eager plan is the lazy one with every enabled lazy tool remembered: it
+	// re-activates what a lazy model left inactive and changes nothing on a
+	// host start, where every registered tool is already active.
+	const applyToolSetPlan = (
+		ctx: unknown,
+		reason: string | undefined,
+		trigger: "session_start" | "model_select" = "session_start",
+	): void => {
 		try {
 			const piWithActiveTools = pi as unknown as {
 				getActiveTools?: () => string[];
 				setActiveTools?: (names: string[]) => void;
 			};
 			if (
-				getLensFlag("no-lazy-tools") === true ||
 				typeof piWithActiveTools.getActiveTools !== "function" ||
 				typeof piWithActiveTools.setActiveTools !== "function"
 			)
 				return;
+			const model = (
+				ctx as { model?: Parameters<typeof lazyToolsApply>[1] } | undefined
+			)?.model;
+			const mode = resolveLazyToolsMode(
+				getLensFlag("no-lazy-tools") === true,
+				readLazyToolsSetting(globalConfig),
+			);
+			const lazy = lazyToolsApply(mode, model);
+			recordToolSetDecision({
+				trigger,
+				mode,
+				lazy,
+				supportsMidConvoSystemMessages: supportsMidConvoSystemMessages(model),
+			});
+			if (mode === "off") return;
 			const lazyNames = new Set(enabledLazyTools);
 			const plan = planToolSet(
 				piWithActiveTools.getActiveTools(),
 				lazyNames,
-				getRememberedLazyTools(scope),
+				lazy ? getRememberedLazyTools(scope) : lazyNames,
 			);
 			if (!plan.changed) return;
 			piWithActiveTools.setActiveTools(plan.desired);
 			recordToolSetMutation({
 				addedCount: plan.addedCount,
 				removedCount: plan.removedCount,
-				reason: isFreshSessionStart(reason)
-					? "fresh_session_lazy_deactivation"
-					: "session_rebuild_restore",
-				deferralApplies: supportsDeferredTools(
-					(ctx as { model?: Parameters<typeof supportsDeferredTools>[0] })
-						?.model,
-				),
+				reason:
+					trigger === "model_select"
+						? "model_switch"
+						: isFreshSessionStart(reason)
+							? "fresh_session_lazy_deactivation"
+							: "session_rebuild_restore",
+				deferralApplies: supportsDeferredTools(model),
 			});
 		} catch (toolSetErr) {
 			dbg(
@@ -2935,6 +2969,16 @@ function activateExtension(hostPi: ExtensionAPI) {
 			{ dbg },
 		),
 	);
+
+	// #4687 item 7: a model switch re-decides the lazy-tools posture for the
+	// new model. pi's switch already starts a fresh prompt cache, so the one
+	// tool-set write it may cause costs no extra prefix rewrite. pi emits this
+	// only when the model really changed (`modelsAreEqual`), and the plan is
+	// idempotent, so a switch between two models with the same capability
+	// writes nothing.
+	pi.on("model_select", (event) => {
+		applyToolSetPlan({ model: event.model }, undefined, "model_select");
+	});
 
 	// #3521: `/tree` moves the conversation inside this activation. Keep only
 	// the reads whose tool result is on the new branch. A concurrent secondary

@@ -37,6 +37,8 @@ const DECLARED_HANDLERS = [
 	// defers here; the roster is pinned in both directions, so a second
 	// registration is a change to this line, never a silent extra.
 	"context_with_system",
+	// #4687: a model switch re-decides the lazy-tools posture for the new model.
+	"model_select",
 ];
 
 /** Every flag `index.ts` registers: `LENS_FLAGS` plus `no-tool`. */

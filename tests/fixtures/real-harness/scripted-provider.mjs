@@ -115,6 +115,11 @@ export default function scriptedProvider(pi) {
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 				contextWindow: 32_000,
 				maxTokens: 2_000,
+				// #4687: this provider's own streamSimple never folds system
+				// messages, which is the fact pi-lens's default tools.lazy="auto"
+				// reads to keep the situational tools lazy. Without it the harness
+				// would witness the eager posture instead.
+				compat: { supportsMidConvoSystemMessages: true },
 			},
 		],
 		streamSimple(model, context, options) {

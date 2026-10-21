@@ -34,7 +34,7 @@ Each runtime toggle is settable from the CLI *and* from `config.json`. The two a
 | `--lens-compact-lsp-status` | `ui.compactLspStatus` | `false` |
 | `--lens-hide-lsp-status` | `ui.hideLspStatus` | `false` |
 | `--lens-compact-widget` | `ui.compactWidget` | `false` |
-| `--no-lazy-tools` | `tools.lazy` | `true` |
+| `--no-lazy-tools` | `tools.lazy` | `"auto"` |
 | `--lens-turn-end-madge` | `turnEnd.madge.enabled` | `false` |
 | `--no-knip` | `knip.enabled` | `true` |
 | `--no-jscpd` | `jscpd.enabled` | `true` |
@@ -51,15 +51,35 @@ Each runtime toggle is settable from the CLI *and* from `config.json`. The two a
 | `startup.mode` | `full` | `quick`, `full`, or `minimal`; `PI_LENS_STARTUP_MODE` wins |
 | `startup.scans.enabled` | `true` | `true` or `false` |
 
-By default pi-lens registers five situational tools (the `ast_grep_*` family,
-`lsp_navigation`, `lens_diagnostic_mark`) inactive and exposes a small loader,
+pi-lens registers five situational tools (the `ast_grep_*` family,
+`lsp_navigation`, `lens_diagnostic_mark`) and a small loader,
 `pi_lens_activate_tools`, that the model calls to activate the ones it needs.
-`--no-lazy-tools` turns that off: every pi-lens tool is active from the first
-turn and pi-lens never changes the tool list. Use it if you would rather spend
-the tokens of a longer tool list than have the list change mid-session. The
-loader tool is still registered and still describes itself as activating
-inactive tools; under this flag those tools are already active, so calling it
-does nothing.
+`tools.lazy` decides whether the situational tools start inactive:
+
+| `tools.lazy` | Situational tools |
+| --- | --- |
+| `"auto"` (default) | Start inactive only when the session's model keeps mid-conversation system messages (`compat.supportsMidConvoSystemMessages` is `true`). On any other model, including one that does not state the fact, every tool is active from the first turn. |
+| `true` | Start inactive on every model. |
+| `false`, or `--no-lazy-tools` | Every tool is active for the whole session and pi-lens never changes the tool list. |
+
+The reason for `"auto"`: a model without that fact gets every system message
+folded into one prompt head, so each tool-list change rewrites the whole cached
+prompt. pi-lens decides at session start and again only when you switch models,
+never between turns of one model. A switch to a folding model activates every
+enabled situational tool; a switch back deactivates the ones the conversation
+never asked for. Any other value is reported once as an ignored setting, and
+`"auto"` applies.
+
+Precedence: `tools.<name>.enabled` (in either config file, or `--no-tool`)
+filters first. A disabled tool is never registered, so it is absent under every
+`tools.lazy` value and the loader refuses to activate it. `tools.lazy` then
+applies only to the enabled situational tools. It is user-level only: a project
+`.pi-lens.json` that sets it, `"auto"` included, is reported and ignored. The
+CLI flag outranks the key.
+
+The loader tool stays registered under every value and keeps describing itself
+as activating inactive tools; when the tools it names are already active,
+calling it does nothing.
 
 Keys are positive (`"enabled": true` means the feature runs), so a `--no-*` flag corresponds to setting its key `false`. A `no-*` flag on the command line is a one-way switch: it can disable, never re-enable, so `--no-lsp` wins over `lsp.enabled: true` but nothing on the CLI overrides `lsp.enabled: false`. Set the key back to `true` to re-enable.
 

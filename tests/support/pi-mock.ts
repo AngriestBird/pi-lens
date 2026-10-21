@@ -432,6 +432,18 @@ export function createPiMock(
 }
 
 /**
+ * #4687: a model whose provider keeps mid-conversation system messages, so the
+ * default `tools.lazy` ("auto") starts the situational tools inactive. A case
+ * that asserts the lazy posture passes it as `makeCtx({ model })`; with no
+ * model (or one without the fact) every tool stays active.
+ */
+export const MID_CONVO_MODEL = {
+	id: "mid-convo",
+	provider: "faux",
+	compat: { supportsMidConvoSystemMessages: true },
+} as const;
+
+/**
  * A minimal command/handler context. Only the fields pi-lens handlers actually
  * touch are real (`cwd`, `ui.notify`, `ui.setStatus`, `ui.setWidget`,
  * `ui.theme`); the rest are inert stubs. `notifications` captures every
@@ -460,8 +472,12 @@ export function makeCtx(
 		 * telemetry identity from HERE, not from any event field — pi sets none
 		 * of `provider`/`model`/`sessionId` on a `session_start` or a
 		 * `tool_result` payload. Omit to simulate a host with no model selected.
+		 * `compat` carries pi-ai's model facts; the lazy-tools posture reads
+		 * `supportsMidConvoSystemMessages` from it (#4687, {@link MID_CONVO_MODEL}).
 		 */
-		model: { id: string; provider: string } | undefined;
+		model:
+			| { id: string; provider: string; compat?: Record<string, unknown> }
+			| undefined;
 	}> = {},
 ): MockCtx {
 	const notifications: CapturedNotification[] = [];

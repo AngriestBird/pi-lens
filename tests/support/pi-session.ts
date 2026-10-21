@@ -364,6 +364,25 @@ const FAUX_MODEL: Record<string, unknown> = {
 	maxTokens: 4_096,
 };
 
+/** The second scripted model a {@link PiSession.switchModel} alternates to. */
+const FAUX_MODEL_ALT: Record<string, unknown> = { ...FAUX_MODEL, id: "faux-2" };
+
+/**
+ * The per-model capability facts a session's model carries unless a case
+ * overrides them ({@link PiSessionOptions.modelCompat}). pi-ai's `fauxProvider`
+ * drops `compat` from its model definitions, so the helper sets it on the
+ * model object pi is handed, which is what `ctx.model` returns.
+ *
+ * `supportsMidConvoSystemMessages: true` is the faux provider's real behaviour:
+ * it answers from the transcript exactly as pi sent it and never folds system
+ * messages into one head. A case that needs a collapsing model (pi-ai's
+ * `collapseSystemMessages` path) passes `modelCompat: {}`, the shape a catalog
+ * model without the fact has (#4687 item 7: pi-lens reads this fact).
+ */
+const DEFAULT_MODEL_COMPAT: Readonly<Record<string, unknown>> = {
+	supportsMidConvoSystemMessages: true,
+};
+
 /**
  * The flag set a case runs with unless it overrides it: the same six the
  * repo's other real-session drivers pin (`tests/index-3521-fork-tree-witness.test.ts`,
@@ -528,6 +547,12 @@ export interface PiSessionOptions {
 	 */
 	startupMode?: "full" | "quick" | "minimal";
 	/**
+	 * The session model's `compat` facts, replacing {@link DEFAULT_MODEL_COMPAT}
+	 * whole (`{}` is a model with none). Carried by every session this handle
+	 * builds (a replacement or a resume keeps it).
+	 */
+	modelCompat?: Readonly<Record<string, unknown>>;
+	/**
 	 * Bind a RECORDING UI context instead of pi's no-op one. A case that asserts
 	 * what pi-lens asked the UI to show (a notification, the LSP status line)
 	 * reads it back from {@link PiSession.notifications} / `.statuses`; the
@@ -571,6 +596,12 @@ export interface PiSession {
 	prompt(text: string): Promise<void>;
 	/** Manual compaction, pi's `/compact` entry point. */
 	compact(instructions?: string): Promise<unknown>;
+	/**
+	 * Switch the session to the other scripted model (`faux-1` and `faux-2`
+	 * alternate) carrying `compat`, through pi's own `AgentSession.setModel`,
+	 * which emits `model_select` to the loaded copy.
+	 */
+	switchModel(compat: Readonly<Record<string, unknown>>): Promise<void>;
 	/**
 	 * Reopen this session's persisted file in a NEW session with a new provider
 	 * script — the resume path a restarted process takes.
@@ -647,12 +678,16 @@ function assertOneRoot(root: string): void {
 async function buildModelRuntime(
 	agentDir: string,
 	requests: PiProviderRequest[],
+	compat: Readonly<Record<string, unknown>>,
 ): Promise<{
 	modelRuntime: ModelRuntime;
 	model: unknown;
+	modelFor(id: string, compat: Readonly<Record<string, unknown>>): unknown;
 	script(responses: readonly PiFauxReply[]): void;
 }> {
-	const faux = piAiModule().fauxProvider({ models: [FAUX_MODEL] });
+	const faux = piAiModule().fauxProvider({
+		models: [FAUX_MODEL, FAUX_MODEL_ALT],
+	});
 	// Every scripted step is wrapped so the request it answered is recorded
 	// before the reply is produced: `requests.length` is then the count of
 	// provider round trips pi actually made.
@@ -676,15 +711,24 @@ async function buildModelRuntime(
 		authPath: path.join(agentDir, "auth.json"),
 	});
 	modelRuntime.registerNativeProvider(faux.provider as never);
-	const model = modelRuntime.getModel("faux", FAUX_MODEL.id as string);
-	if (!model) throw new Error("the faux provider registered no model");
-	return { modelRuntime, model, script };
+	const modelFor = (
+		id: string,
+		modelCompat: Readonly<Record<string, unknown>>,
+	): unknown => {
+		const registered = modelRuntime.getModel("faux", id);
+		if (!registered) throw new Error(`the faux provider registered no ${id}`);
+		return { ...registered, compat: { ...modelCompat } };
+	};
+	const model = modelFor(FAUX_MODEL.id as string, compat);
+	return { modelRuntime, model, modelFor, script };
 }
 
 /** What every session of one file shares. */
 interface SessionArgs {
 	readonly root: string;
 	readonly flags: ReadonlyMap<string, boolean | string>;
+	/** The `compat` every session of this handle's model carries. */
+	readonly modelCompat: Readonly<Record<string, unknown>>;
 	/** Present only when the case asked for a recording UI context. */
 	readonly ui?: UiRecorder;
 }
@@ -697,6 +741,7 @@ interface CreatedSession {
 	readonly result: CreateAgentSessionResult;
 	readonly requests: PiProviderRequest[];
 	script(responses: readonly PiFauxReply[]): void;
+	modelFor(id: string, compat: Readonly<Record<string, unknown>>): unknown;
 }
 
 /**
@@ -714,9 +759,10 @@ async function createSession(
 	responses: readonly PiFauxReply[],
 ): Promise<CreatedSession> {
 	const requests: PiProviderRequest[] = [];
-	const { modelRuntime, model, script } = await buildModelRuntime(
+	const { modelRuntime, model, modelFor, script } = await buildModelRuntime(
 		options.agentDir,
 		requests,
+		args.modelCompat,
 	);
 	script(responses);
 	const services = await withFixtureTmpdir(args.root, () =>
@@ -742,7 +788,14 @@ async function createSession(
 		model: model as never,
 		sessionStartEvent: options.sessionStartEvent,
 	});
-	return { session: result.session, services, result, requests, script };
+	return {
+		session: result.session,
+		services,
+		result,
+		requests,
+		script,
+		modelFor,
+	};
 }
 
 /** Bind the loaded copy to a session: pi emits that session's `session_start`. */
@@ -885,6 +938,13 @@ function handleFor(
 		async compact(instructions) {
 			return session.compact(instructions);
 		},
+		async switchModel(compat) {
+			const next =
+				session.model?.id === FAUX_MODEL.id ? FAUX_MODEL_ALT : FAUX_MODEL;
+			await session.setModel(
+				created.modelFor(next.id as string, compat) as never,
+			);
+		},
 		async restart(replacement, responses) {
 			// A replaced handle's session is gone, and one being replaced is about
 			// to be: restarting it again would build a session beside the live
@@ -1011,6 +1071,7 @@ export async function startPiSession(
 	const args: SessionArgs = {
 		root: options.root,
 		flags: flagMap(DEFAULT_FLAGS, options.flags),
+		modelCompat: options.modelCompat ?? DEFAULT_MODEL_COMPAT,
 		...(options.captureUi ? { ui: createUiRecorder() } : {}),
 	};
 	return bindSession(

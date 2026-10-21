@@ -170,7 +170,12 @@ import {
 	makeContextWithSystemEvent,
 	makeSessionStartEvent,
 } from "./support/host-event-factory.js";
-import { createPiMock, makeCtx, makeStaleCtx } from "./support/pi-mock.js";
+import {
+	createPiMock,
+	makeCtx,
+	makeStaleCtx,
+	MID_CONVO_MODEL,
+} from "./support/pi-mock.js";
 import {
 	removeTempDirSync,
 	setupTestEnvironment,
@@ -877,6 +882,7 @@ describe("index.ts extension wiring", () => {
 					cwd: tmp,
 					sessionId: "fresh-current",
 					sessionFile: path.join(tmp, "current.jsonl"),
+					model: MID_CONVO_MODEL,
 				});
 				const departing = makeCtx({
 					cwd: tmp,
@@ -1523,7 +1529,7 @@ describe("hook handler crash surfacing (#2884)", () => {
 		handlerCrashInjection.site = "session_start_after_reset";
 		const pi = createPiMock();
 		extension(pi.asExtensionAPI());
-		const ctx = makeCtx({ cwd: tmp });
+		const ctx = makeCtx({ cwd: tmp, model: MID_CONVO_MODEL });
 		await expect(
 			pi.emit("session_start", { reason: "startup" }, ctx),
 		).rejects.toThrow("probe: session_start boom after reset");

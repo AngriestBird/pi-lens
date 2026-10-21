@@ -6,7 +6,12 @@ import * as vm from "node:vm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../clients/cache-manager.js";
 import { getEffectiveLspIdleResetMs } from "../clients/runtime-turn.js";
-import { createPiMock, makeCtx, makeStaleCtx } from "./support/pi-mock.js";
+import {
+	createPiMock,
+	makeCtx,
+	makeStaleCtx,
+	MID_CONVO_MODEL,
+} from "./support/pi-mock.js";
 import {
 	drainResidentJscpdScans,
 	removeTempDirSync,
@@ -409,6 +414,7 @@ describe("index.ts integration", () => {
 				sessionId: "session-a",
 				sessionFile,
 				mode: "rpc",
+				model: MID_CONVO_MODEL,
 			});
 			const resumeEvent = makeSessionStartEvent({ reason: "resume" });
 			await sessionStart?.(resumeEvent, ctx);
@@ -938,7 +944,11 @@ describe("index.ts integration", () => {
 			const { default: registerExtension } = await import("../index.js");
 			const { mock, pi, handlers } = createMockPi();
 			registerExtension(pi as any);
-			const ctx = makeCtx({ cwd: tmpDir, sessionId: "pi-restart-dead-weight" });
+			const ctx = makeCtx({
+				cwd: tmpDir,
+				sessionId: "pi-restart-dead-weight",
+				model: MID_CONVO_MODEL,
+			});
 
 			// A brand-new process whose FIRST session_start carries a rebuild
 			// reason — nothing was activated or called in it yet.
