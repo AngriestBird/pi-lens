@@ -333,6 +333,14 @@ export type DegradationKind =
 	| "disk-change-subscriber-failed"
 	| "dispatch-non-absolute-baseline-path"
 	/**
+	 * #4689 review r2 A: the disposition store an earlier version wrote under
+	 * the project root's link spelling could not be read (`read:`) or copied
+	 * into the store the root's path identity names (`copy:`). The old marks
+	 * still apply to that read when they were read; the copy is retried by the
+	 * next read that holds the spelling. Once per step and store per session.
+	 */
+	| "disposition-store-adopt-failed"
+	/**
 	 * A server-initiated `workspace/applyEdit` fell back to the mutation
 	 * bridge (`clients/lsp-mutation.ts`, #2450) because its `LspMutationContext`
 	 * carried no `runtime`/`cacheManager`, and no bridge is mounted in this
