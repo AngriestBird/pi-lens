@@ -321,6 +321,14 @@ describe("which calls pay for git status (#4732)", () => {
 			expect(await prescanRowsSince(offset)).toEqual(
 				expected > 0 ? [label] : [],
 			);
+			// A call whose own `tool_call` took no baseline (allowlisted, or an
+			// event the classifier knows) is not recovered at its result either,
+			// so it is never reported as an unanswered diff.
+			expect(
+				getDegradationSummary().filter(
+					(group) => group.kind === "opaque-capture-refused",
+				),
+			).toEqual([]);
 		},
 	);
 
