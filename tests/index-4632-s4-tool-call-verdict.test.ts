@@ -47,49 +47,35 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+	BLOCKER,
+	BLOCKING_FILE,
+	CLEAN_FILE,
+	GATE_BLOCK,
+	MARKED_FILE,
+	RAN_MARKER,
+	type Received,
+	activateMarkTool,
+	commitAttempt,
+	endTurn,
+	markFalsePositive,
+	openGuardedSession,
+	raise,
+	readTarget,
+	seed,
+	step,
+	textBlocks,
+	toolResults,
+	writeTarget,
+} from "./support/pi-session-commit-gate.js";
+import {
 	type PiFauxReply,
 	type PiMessage,
-	type PiSession,
-	fauxAssistantMessage,
-	fauxText,
 	fauxToolCall,
 	piSessionFixture,
-	startPiSession,
 } from "./support/pi-session.js";
 
 const fixture = piSessionFixture();
 
-/**
- * The flag set these cases run with: the helper's defaults plus the commit
- * gate. LSP is off because the blocker under test is a bundled rule's, not a
- * language server's; a case that wanted an LSP finding belongs to a heavier
- * lane than this one.
- */
-const GUARDED_FLAGS: ReadonlyArray<[string, boolean]> = [
-	["lens-guard", true],
-	["no-lsp", true],
-	["no-autofix", true],
-	["no-autoformat", true],
-	["no-tests", true],
-	["no-opengrep", true],
-	["no-delta", true],
-	["no-complexity", true],
-];
-
-/**
- * The blocker, and its fix. `debugger;` always raises the bundled tree-sitter
- * rule `debugger-statement` (`rules/tree-sitter-queries/typescript/debugger.yml`,
- * `inline_tier: blocking`), and in SOME runs biome's `noDebugger` too —
- * measured both ways on one host (`🔴 1 blocking` from `lens_diagnostics`, and
- * a gate answer listing `2 issue(s)`). The cases that use it assert a refusal
- * and its first blocker, which hold either way.
- */
-const BLOCKING_FILE =
-	"const a = 1;\nexport function f() {\n\tdebugger;\n\treturn a;\n}\n";
-const CLEAN_FILE = "const a = 1;\nexport function f() {\n\treturn a;\n}\n";
-
-/** The commit gate's own prefix, as the model reads it. */
-const GATE_BLOCK = "🔴 COMMIT BLOCKED (--lens-guard)";
 /**
  * The sentence BOTH guard branches answer with: the live latch (`:1358`) and
  * the persisted record (`:1457`). Only what each appends tells them apart.
@@ -97,25 +83,6 @@ const GATE_BLOCK = "🔴 COMMIT BLOCKED (--lens-guard)";
 const GATE_PHRASE = "unresolved blockers must be fixed before commit/push";
 /** What only the LATCH branch appends: the blocker list the live copy holds. */
 const LATCH_LIST = "🔴 STOP —";
-/**
- * The blocker the marked cases triage. A mark must name EVERY blocker on the
- * file, so these cases need a finding exactly one runner reports: the bundled
- * tree-sitter rule `ts-weak-hash` has no biome, oxlint or ast-grep twin for
- * TypeScript, unlike `debugger;` above. Its identity is the one
- * `lens_diagnostics` reports (`[ts-weak-hash]` at L3) and the runner stamps
- * (`clients/dispatch/runners/tree-sitter.ts`, `tool: "tree-sitter"`).
- */
-const MARKED_FILE =
-	'import * as crypto from "node:crypto";\nexport function digest(text: string): string {\n\treturn crypto.createHash("md5").update(text).digest("hex");\n}\n';
-const BLOCKER = {
-	line: 3,
-	message:
-		"Weak hash primitive selected (md5/sha1) — use sha256+ for security-sensitive contexts",
-	rule: "ts-weak-hash",
-	tool: "tree-sitter",
-} as const;
-/** Printed by the shell only when the guarded command actually ran. */
-const RAN_MARKER = "PI-LENS-GUARDED-COMMAND-RAN";
 
 const GOLDEN = path.join(
 	import.meta.dirname,
@@ -127,40 +94,6 @@ const MARKED_GOLDEN = path.join(
 	"fixtures/witness/git-guard-latch/all-marked-commit-allowed.txt",
 );
 
-/** The commit attempt: the guarded verb, then a marker the shell prints. */
-function commitAttempt(): Record<string, unknown> {
-	return fauxToolCall("bash", {
-		command: `git commit -m "wip"; echo ${RAN_MARKER}`,
-	});
-}
-
-function readTarget(target: string): Record<string, unknown> {
-	return fauxToolCall("read", { path: target });
-}
-
-function writeTarget(target: string, content: string): Record<string, unknown> {
-	return fauxToolCall("write", { path: target, content });
-}
-
-/**
- * The model's own triage: `lens_diagnostic_mark` with the blocker's reported
- * identity, the call `tools/lens-diagnostic-mark.ts` documents.
- */
-function markFalsePositive(target: string): Record<string, unknown> {
-	return fauxToolCall("lens_diagnostic_mark", {
-		filePath: target,
-		...BLOCKER,
-		disposition: "false-positive",
-	});
-}
-
-/** `lens_diagnostic_mark` is situational: callable only after activation. */
-function activateMarkTool(): Record<string, unknown> {
-	return fauxToolCall("pi_lens_activate_tools", {
-		tools: ["lens_diagnostic_mark"],
-	});
-}
-
 function editTarget(
 	target: string,
 	oldText: string,
@@ -170,58 +103,6 @@ function editTarget(
 		path: target,
 		edits: [{ oldText, newText }],
 	});
-}
-
-/** One scripted step: at most ONE tool call, so its result lands first. */
-function step(call: Record<string, unknown>, note = "working"): PiFauxReply {
-	return fauxAssistantMessage([fauxText(note), call]);
-}
-
-/** A turn-closing step: no tool call, so the host emits `turn_end`. */
-function endTurn(note = "done"): PiFauxReply {
-	return fauxAssistantMessage(fauxText(note));
-}
-
-/** Every text block of one message, in order. */
-function textBlocks(message: PiMessage | undefined): string[] {
-	const content = message?.content;
-	if (typeof content === "string") return [content];
-	if (!Array.isArray(content)) return [];
-	return content.flatMap((block) => {
-		const typed = block as { type?: string; text?: string };
-		return typed.type === "text" && typeof typed.text === "string"
-			? [typed.text]
-			: [];
-	});
-}
-
-/** One tool result, as the model received it. */
-interface Received {
-	readonly text: string;
-	readonly isError: boolean;
-}
-
-function received(message: PiMessage): Received {
-	const typed = message as { content?: unknown; isError?: unknown };
-	return {
-		text: textBlocks({ role: "toolResult", content: typed.content })
-			.join("\n")
-			.trim(),
-		isError: typed.isError === true,
-	};
-}
-
-/** Every result of one tool in one transcript, in order. */
-function toolResults(
-	transcript: readonly PiMessage[],
-	toolName: string,
-): Received[] {
-	return transcript
-		.filter(
-			(message) =>
-				message.role === "toolResult" && message.toolName === toolName,
-		)
-		.map(received);
 }
 
 /**
@@ -287,24 +168,6 @@ function lastInjection(transcript: readonly PiMessage[]): string {
 	return injections(transcript).at(-1) ?? "(nothing injected)";
 }
 
-/** A file written before the session starts, in a project of its own. */
-function seed(name: string, content: string): { proj: string; target: string } {
-	const proj = path.join(fixture.root, name, "proj");
-	const target = path.join(proj, "src", "target.ts");
-	fs.mkdirSync(path.dirname(target), { recursive: true });
-	fs.writeFileSync(target, content);
-	return { proj, target };
-}
-
-/** Raise a blocker, and let the turn end record it. */
-function raise(target: string, content = BLOCKING_FILE): PiFauxReply[] {
-	return [
-		step(readTarget(target), "reading"),
-		step(writeTarget(target, content), "writing"),
-		endTurn("turn 1 done"),
-	];
-}
-
 /** The next session's script: one commit attempt. */
 function commitThenEnd(): PiFauxReply[] {
 	return [step(commitAttempt(), "committing"), endTurn("done")];
@@ -327,22 +190,10 @@ function raiseThenMark(target: string): PiFauxReply[] {
 	];
 }
 
-async function open(
-	proj: string,
-	responses: readonly PiFauxReply[],
-): Promise<PiSession> {
-	return startPiSession({
-		root: fixture.root,
-		cwd: proj,
-		flags: new Map(GUARDED_FLAGS),
-		responses,
-	});
-}
-
 describe("#4632 s4: a blocked tool_call reaches the model (git guard)", () => {
 	it("shows the model the blocker and blocks the commit, then lets it through once the blocker is fixed", async () => {
-		const { proj, target } = seed("gate-golden", CLEAN_FILE);
-		const handle = await open(proj, [
+		const { proj, target } = seed(fixture.root, "gate-golden", CLEAN_FILE);
+		const handle = await openGuardedSession(fixture.root, proj, [
 			// Turn 1: raise the blockers, then try to commit them.
 			step(readTarget(target), "reading"),
 			step(writeTarget(target, BLOCKING_FILE), "writing"),
@@ -430,7 +281,7 @@ describe("#4632 s4: a blocked tool_call reaches the model (git guard)", () => {
 		// own tool call, the next turn that writes re-judges the record, and the
 		// banner and the gate then agree that nothing blocks. A second write to
 		// the unrelated file must not bring the marked blocker back.
-		const { proj, target } = seed("gate-marked", CLEAN_FILE);
+		const { proj, target } = seed(fixture.root, "gate-marked", CLEAN_FILE);
 		const notes = path.join(proj, "src", "notes.ts");
 		const prompts = [
 			"write the file",
@@ -438,7 +289,7 @@ describe("#4632 s4: a blocked tool_call reaches the model (git guard)", () => {
 			"write the notes and commit",
 			"edit the notes and commit again",
 		];
-		const handle = await open(proj, [
+		const handle = await openGuardedSession(fixture.root, proj, [
 			...raiseThenMark(target),
 			step(writeTarget(notes, "export const note = 1;\n"), "writing notes"),
 			step(commitAttempt(), "committing"),
@@ -509,9 +360,9 @@ describe("#4632 s4: a blocked tool_call reaches the model (git guard)", () => {
 		// check (`firstExpiredSuppressionVerdict`): the mark's verdict spoke for
 		// the bytes the turn end read, and an external writer moved them without
 		// a dispatch.
-		const { proj, target } = seed("gate-external", CLEAN_FILE);
+		const { proj, target } = seed(fixture.root, "gate-external", CLEAN_FILE);
 		const notes = path.join(proj, "src", "notes.ts");
-		const handle = await open(proj, [
+		const handle = await openGuardedSession(fixture.root, proj, [
 			...raiseThenMark(target),
 			step(writeTarget(notes, "export const note = 1;\n"), "writing notes"),
 			endTurn("turn 3 done"),
@@ -539,8 +390,8 @@ describe("#4632 s4: a record written in one session answers the next one", () =>
 	// and no mutation told the two apart, so those cells were duplicates.
 
 	it("refuses the commit of a new session, which starts empty, as a session_mismatch", async () => {
-		const { proj, target } = seed("replace-new", CLEAN_FILE);
-		const first = await open(proj, raise(target));
+		const { proj, target } = seed(fixture.root, "replace-new", CLEAN_FILE);
+		const first = await openGuardedSession(fixture.root, proj, raise(target));
 		await first.prompt("write the file");
 		const firstId = first.session.sessionManager.getSessionId();
 
@@ -559,8 +410,10 @@ describe("#4632 s4: a record written in one session answers the next one", () =>
 	});
 
 	it("refuses the commit of a resumed earlier conversation as a session_mismatch", async () => {
-		const { proj, target } = seed("replace-resume", CLEAN_FILE);
-		const earlier = await open(proj, [endTurn("hello")]);
+		const { proj, target } = seed(fixture.root, "replace-resume", CLEAN_FILE);
+		const earlier = await openGuardedSession(fixture.root, proj, [
+			endTurn("hello"),
+		]);
 		await earlier.prompt("an earlier conversation");
 		const earlierFile = earlier.sessionFile() ?? "";
 		const earlierId = earlier.session.sessionManager.getSessionId();
@@ -583,8 +436,8 @@ describe("#4632 s4: a record written in one session answers the next one", () =>
 	});
 
 	it("refuses the commit of a fork that carries the blocker's turn as a session_mismatch", async () => {
-		const { proj, target } = seed("replace-fork", CLEAN_FILE);
-		const first = await open(proj, raise(target));
+		const { proj, target } = seed(fixture.root, "replace-fork", CLEAN_FILE);
+		const first = await openGuardedSession(fixture.root, proj, raise(target));
 		await first.prompt("write the file");
 		const firstId = first.session.sessionManager.getSessionId();
 		const leaf = first.session.sessionManager.getLeafId() ?? "";
@@ -605,8 +458,8 @@ describe("#4632 s4: a record written in one session answers the next one", () =>
 	});
 
 	it("refuses the commit after a reload from the record the reloaded copy still reads", async () => {
-		const { proj, target } = seed("replace-reload", CLEAN_FILE);
-		const first = await open(proj, raise(target));
+		const { proj, target } = seed(fixture.root, "replace-reload", CLEAN_FILE);
+		const first = await openGuardedSession(fixture.root, proj, raise(target));
 		await first.prompt("write the file");
 		const firstId = first.session.sessionManager.getSessionId();
 		// pi's reload re-runs this session's extension factories, so the loaded

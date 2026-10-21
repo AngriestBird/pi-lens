@@ -13,6 +13,7 @@ import {
 	recordDegradationOnce,
 	resetDegradationLedger,
 } from "./degradation-ledger.js";
+import { resetDeferredDispositions } from "./diagnostic-dispositions.js";
 import { getDiagnosticTracker } from "./diagnostic-tracker.js";
 import { resetPsScriptAnalyzerAvailability } from "./dispatch/runners/psscriptanalyzer.js";
 import { resetInstallRetryLatches } from "./dispatch/runners/utils/availability-policy.js";
@@ -2023,6 +2024,12 @@ export function resetSessionScopedState(
 	primePersistedMutationAttribution(cwd);
 	// #2026: pending auxiliary baselines are unreachable after generation bump.
 	resetPendingAuxiliaryCoverage();
+	// #4701 F1 (shape 17): `defer` is session-ephemeral by design (#690), so a
+	// new session sees every deferred finding again. Until this line the only
+	// reset was the test-only seam, so one `defer` stayed suppressed — and its
+	// project stayed "marked" to the read-only turn's cost guard — for the life
+	// of the PROCESS.
+	resetDeferredDispositions();
 	// #817/#1199: Windows command resolution is cached per (command, canonical
 	// effective child PATH/PATHEXT/cwd/per-drive provenance); drop it each
 	// session so environment changes (e.g.
