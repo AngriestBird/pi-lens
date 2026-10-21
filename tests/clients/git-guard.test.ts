@@ -8,6 +8,7 @@ import {
 	isGitCommitOrPushAttempt,
 	mergeGitGuardTestFailure,
 	retireInlineBlockerAndResyncGuard,
+	retireSettledGitGuardRecord,
 	syncGitGuardRecord,
 	writeGitGuardRecord,
 	type TurnEndFindingsCache,
@@ -1163,6 +1164,427 @@ describe("git-guard", () => {
 				block: true,
 				unknown: true,
 			});
+		} finally {
+			env.cleanup();
+		}
+	});
+});
+
+/** Move the record's meta timestamp back by `ageMs` (a day: past the window). */
+function ageRecord(cwd: string, ageMs = 86_400_000): void {
+	const metaPath = path.join(
+		getProjectDataDir(cwd),
+		"cache",
+		"turn-end-findings.meta.json",
+	);
+	fs.writeFileSync(
+		metaPath,
+		JSON.stringify({ timestamp: new Date(Date.now() - ageMs).toISOString() }),
+	);
+}
+
+/** The stored record, read whatever its age. */
+function storedData(
+	cache: CacheManager,
+	cwd: string,
+): Partial<TurnEndFindingsCache> | undefined {
+	return cache.readCache<Partial<TurnEndFindingsCache>>(
+		"turn-end-findings",
+		cwd,
+		Number.POSITIVE_INFINITY,
+	)?.data;
+}
+
+/** The turn-end composer's section shape for each file, as one record text. */
+function composerSections(files: readonly string[]): string {
+	return files
+		.map(
+			(file, index) =>
+				`Unresolved from this turn — ${file}:\n${productionSummary(file, [`issue ${index + 1} is unsafe`])}`,
+		)
+		.join("\n\n");
+}
+
+function sessionA(cwd: string): RuntimeCoordinator {
+	const runtime = new RuntimeCoordinator();
+	runtime.projectRoot = cwd;
+	runtime.setTelemetryIdentity({ sessionId: "session-A" });
+	return runtime;
+}
+
+describe("#4725: the record's writers read it whatever its age", () => {
+	it("clears this session's own day-old record once its blocked file dispatches clean", () => {
+		// RECURRENCE GUARDED: #4725 F5. `cacheRecord` read through the cache's
+		// freshness window, so a clean dispatch of the blocked file met "no
+		// record", latched `cache_stale` and left the record in place.
+		const env = setupTestEnvironment("pi-lens-git-guard-4725-own-stale-");
+		try {
+			const file = path.join(env.tmpDir, "a.ts");
+			fs.writeFileSync(file, "const x = 1;\n");
+			const runtime = sessionA(env.tmpDir);
+			const cache = new CacheManager(false);
+			const text = composerSections([file]);
+			writeGitGuardRecord(
+				cache,
+				runtime,
+				env.tmpDir,
+				record({
+					content: text,
+					blockerContent: text,
+					hasBlockers: true,
+					affectedFiles: [file],
+					blockingFiles: [file],
+				}),
+			);
+			ageRecord(env.tmpDir);
+
+			syncGitGuardRecord(runtime, cache, env.tmpDir, file);
+
+			expect(runtime.gitGuardCacheUnknownReason).toBeUndefined();
+			expect(storedData(cache, env.tmpDir)).toBeUndefined();
+			expect(evaluateGitGuard(runtime, cache, env.tmpDir)).toEqual({
+				block: false,
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("drops a clean file's sections from another session's record, keeps it that session's, and clears it at the last one", () => {
+		// RECURRENCE GUARDED: #4725 F8. A record another session wrote was never
+		// cleared by anything this session did: every clean write latched
+		// `session_mismatch` and returned, so the refusal had no true action.
+		const env = setupTestEnvironment("pi-lens-git-guard-4725-foreign-");
+		try {
+			const files = ["a.ts", "b.ts"].map((name) => path.join(env.tmpDir, name));
+			for (const file of files) fs.writeFileSync(file, "const x = 1;\n");
+			const runtime = sessionA(env.tmpDir);
+			const cache = new CacheManager(false);
+			const text = composerSections(files);
+			writeGitGuardRecord(
+				cache,
+				runtime,
+				env.tmpDir,
+				record({
+					content: text,
+					blockerContent: text,
+					hasBlockers: true,
+					affectedFiles: files,
+					blockingFiles: files,
+					sessionId: "an-earlier-session",
+					consumed: true,
+				}),
+			);
+
+			syncGitGuardRecord(runtime, cache, env.tmpDir, files[0]);
+
+			const after = storedData(cache, env.tmpDir);
+			expect(after?.sessionId).toBe("an-earlier-session");
+			expect(after?.consumed).toBe(true);
+			expect(after?.blockerContent).toContain("issue 2 is unsafe");
+			expect(after?.blockerContent).not.toContain("issue 1 is unsafe");
+			const refusal = evaluateGitGuard(runtime, cache, env.tmpDir);
+			expect(refusal).toMatchObject({ block: true, unknown: true });
+			expect(refusal.reason).toContain("session_mismatch");
+			expect(refusal.reason).toContain("The record names blockers in b.ts ");
+			expect(refusal.reason).toContain("write each file again");
+
+			syncGitGuardRecord(runtime, cache, env.tmpDir, files[1]);
+
+			expect(storedData(cache, env.tmpDir)).toBeUndefined();
+			expect(runtime.gitGuardCacheUnknownReason).toBeUndefined();
+			expect(evaluateGitGuard(runtime, cache, env.tmpDir)).toEqual({
+				block: false,
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("keeps another session's record whose blocker names no file, and says no re-check of one file clears it", () => {
+		// The fail-closed control (#4725 F7, #1561): a section no file owns, such
+		// as a project scanner's report, is never cleared by a clean dispatch of
+		// the file beside it.
+		const env = setupTestEnvironment("pi-lens-git-guard-4725-unattributed-");
+		try {
+			const file = path.join(env.tmpDir, "legacy.ts");
+			fs.writeFileSync(file, "alpha();\n");
+			const fixture = JSON.parse(
+				fs.readFileSync(
+					path.join(
+						import.meta.dirname,
+						"../fixtures/git-guard-records/4.2.1-turn-end-findings.json",
+					),
+					"utf-8",
+				),
+			) as TurnEndFindingsCache;
+			const runtime = sessionA(env.tmpDir);
+			const cache = new CacheManager(false);
+			writeGitGuardRecord(cache, runtime, env.tmpDir, {
+				...fixture,
+				affectedFiles: [file],
+				blockingFiles: [file],
+			});
+
+			syncGitGuardRecord(runtime, cache, env.tmpDir, file);
+
+			expect(storedData(cache, env.tmpDir)?.blockerContent).toBe(
+				fixture.blockerContent,
+			);
+			const refusal = evaluateGitGuard(runtime, cache, env.tmpDir);
+			expect(refusal).toMatchObject({ block: true, unknown: true });
+			expect(refusal.reason).toContain(
+				"cannot attribute to a file, so no re-check of one file clears them",
+			);
+			expect(refusal.reason).not.toContain("fresh session");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("clears this session's two-file record one clean file at a time, with no untrusted latch", () => {
+		// RECURRENCE GUARDED: the per-file clear kept the cleaned file's own
+		// section while dropping it from `blockingFiles`, so the next clean file's
+		// lookup found a section nobody owned and latched
+		// `blocking_provenance_untrusted` (the same seam #4725's foreign-record
+		// clear depends on).
+		const env = setupTestEnvironment("pi-lens-git-guard-4725-own-two-");
+		try {
+			const files = ["a.ts", "b.ts"].map((name) => path.join(env.tmpDir, name));
+			for (const file of files) fs.writeFileSync(file, "const x = 1;\n");
+			const runtime = sessionA(env.tmpDir);
+			const cache = new CacheManager(false);
+			const text = composerSections(files);
+			writeGitGuardRecord(
+				cache,
+				runtime,
+				env.tmpDir,
+				record({
+					content: text,
+					blockerContent: text,
+					hasBlockers: true,
+					affectedFiles: files,
+					blockingFiles: files,
+				}),
+			);
+
+			syncGitGuardRecord(runtime, cache, env.tmpDir, files[0]);
+			syncGitGuardRecord(runtime, cache, env.tmpDir, files[1]);
+
+			expect(runtime.gitGuardCacheUnknownReason).toBeUndefined();
+			expect(storedData(cache, env.tmpDir)).toBeUndefined();
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("keeps a day-old record's blocker text when a test failure joins it", () => {
+		// RECURRENCE GUARDED: #4725 F6. The merge read the record through the
+		// freshness window, met "no record", and wrote the test failure over the
+		// blocker it carried.
+		const env = setupTestEnvironment("pi-lens-git-guard-4725-merge-");
+		try {
+			const file = path.join(env.tmpDir, "a.ts");
+			fs.writeFileSync(file, "const x = 1;\n");
+			const runtime = sessionA(env.tmpDir);
+			const cache = new CacheManager(false);
+			const text = composerSections([file]);
+			writeGitGuardRecord(
+				cache,
+				runtime,
+				env.tmpDir,
+				record({
+					content: text,
+					blockerContent: text,
+					hasBlockers: true,
+					affectedFiles: [file],
+					blockingFiles: [file],
+				}),
+			);
+			ageRecord(env.tmpDir);
+
+			mergeGitGuardTestFailure(cache, env.tmpDir, runtime, "FAIL 0p/1f", [
+				file,
+			]);
+
+			expect(storedData(cache, env.tmpDir)?.blockerContent).toBe(text);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("retires a day-old record's test failures on a passing run", () => {
+		// RECURRENCE GUARDED: #4725 F6. A passing run met "no record" through the
+		// freshness window and returned, so the old failure kept the gate closed.
+		const env = setupTestEnvironment("pi-lens-git-guard-4725-test-pass-");
+		try {
+			const file = path.join(env.tmpDir, "a.test.ts");
+			fs.writeFileSync(file, "it('x', () => {});\n");
+			const runtime = sessionA(env.tmpDir);
+			const cache = new CacheManager(false);
+			mergeGitGuardTestFailure(cache, env.tmpDir, runtime, "FAIL 0p/1f", [
+				file,
+			]);
+			ageRecord(env.tmpDir);
+
+			clearGitGuardTestFailure(cache, env.tmpDir, runtime, [file]);
+
+			expect(storedData(cache, env.tmpDir)).toBeUndefined();
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("refuses a record that says it has no blocker beside a test failure", () => {
+		// The gate admits a no-blocker claim at any age (#4725), so the one form
+		// left past it, a contradiction no writer produces, must fail closed
+		// rather than ride the old `!hasBlockers` allow.
+		const env = setupTestEnvironment("pi-lens-git-guard-4725-contradiction-");
+		try {
+			const runtime = sessionA(env.tmpDir);
+			const cache = new CacheManager(false);
+			cache.writeCache(
+				"turn-end-findings",
+				record({ content: "FAIL", hasBlockers: false, testFailures: true }),
+				env.tmpDir,
+			);
+			expect(evaluateGitGuard(runtime, cache, env.tmpDir)).toMatchObject({
+				block: true,
+				unknown: true,
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("names a write as the action for this session's own unknown state, never a fresh session", () => {
+		// #4725 acceptance 3: a fresh session reads the same record, so the old
+		// "or start a fresh session" named an action that clears nothing.
+		const env = setupTestEnvironment("pi-lens-git-guard-4725-own-remedy-");
+		try {
+			const runtime = sessionA(env.tmpDir);
+			const cache = new CacheManager(false);
+			runtime.markGitGuardCacheUnknown("pipeline_error");
+			const refusal = evaluateGitGuard(runtime, cache, env.tmpDir);
+			expect(refusal.reason).toContain(
+				"Write the affected files again so pi-lens re-checks them",
+			);
+			expect(refusal.reason).not.toContain("fresh session");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("retires at a settled turn end only a record that is this session's or claims no blocker", () => {
+		const env = setupTestEnvironment("pi-lens-git-guard-4725-retire-");
+		try {
+			const file = path.join(env.tmpDir, "a.ts");
+			fs.writeFileSync(file, "const x = 1;\n");
+			const runtime = sessionA(env.tmpDir);
+			const cache = new CacheManager(false);
+			const text = composerSections([file]);
+			const blocker = record({
+				content: text,
+				blockerContent: text,
+				hasBlockers: true,
+				affectedFiles: [file],
+				blockingFiles: [file],
+			});
+			const cells: Array<[string, unknown, boolean]> = [
+				["own blocker record", blocker, true],
+				[
+					"own record with a test failure",
+					{ ...blocker, testFailures: true },
+					false,
+				],
+				[
+					"another session's blocker record",
+					{ ...blocker, sessionId: "other" },
+					false,
+				],
+				[
+					"another session's no-blocker claim",
+					record({ content: "advisory", sessionId: "other" }),
+					true,
+				],
+				[
+					"a bare no-blocker claim",
+					{ content: "old", hasBlockers: false },
+					true,
+				],
+				[
+					"a no-blocker claim beside blocker text",
+					{ content: "x", hasBlockers: false, blockerContent: text },
+					false,
+				],
+				["a record with no claim", { content: "legacy blocker" }, false],
+				["a null record", null, false],
+			];
+			const verdicts = cells.map(([label, data]) => {
+				cache.writeCache("turn-end-findings", data, env.tmpDir);
+				ageRecord(env.tmpDir);
+				const retired = retireSettledGitGuardRecord(runtime, cache, env.tmpDir);
+				const gone = !fs.existsSync(
+					path.join(
+						getProjectDataDir(env.tmpDir),
+						"cache",
+						"turn-end-findings.json",
+					),
+				);
+				cache.clearCache("turn-end-findings", env.tmpDir);
+				return [label, retired && gone];
+			});
+			expect(verdicts).toEqual(cells.map(([label, , want]) => [label, want]));
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("reads every released record shape with the verdict its claim allows, fresh and a day old", () => {
+		// Fixture corpus (principles §2): one record per writer that ever wrote
+		// it — 3.8.74's `{ content }` (`clients/runtime-turn.ts` at v3.8.74), the
+		// 4.2.1 lens-guard blocker record, and both 4.4.4 writers (the lens-guard
+		// advisory-only record, and the record written with --lens-guard off).
+		// Only an explicit no-blocker claim is admitted; every other shape fails
+		// closed at either age, and a clean write retires only the admitted one.
+		const corpus: Array<[string, boolean]> = [
+			["3.8.74-turn-end-findings.json", false],
+			["4.2.1-turn-end-findings.json", false],
+			["4.4.4-advisory-turn-end-findings.json", true],
+			["4.4.4-guard-off-turn-end-findings.json", false],
+		];
+		const env = setupTestEnvironment("pi-lens-git-guard-4725-corpus-");
+		try {
+			const file = path.join(env.tmpDir, "clean.ts");
+			fs.writeFileSync(file, "const x = 1;\n");
+			const cache = new CacheManager(false);
+			const observed = corpus.flatMap(([name]) => {
+				const data = JSON.parse(
+					fs.readFileSync(
+						path.join(
+							import.meta.dirname,
+							"../fixtures/git-guard-records",
+							name,
+						),
+						"utf-8",
+					),
+				);
+				return [false, true].map((old) => {
+					const runtime = sessionA(env.tmpDir);
+					cache.writeCache("turn-end-findings", data, env.tmpDir);
+					if (old) ageRecord(env.tmpDir);
+					const allowed = !evaluateGitGuard(runtime, cache, env.tmpDir).block;
+					syncGitGuardRecord(runtime, cache, env.tmpDir, file);
+					const retired = storedData(cache, env.tmpDir) === undefined;
+					cache.clearCache("turn-end-findings", env.tmpDir);
+					return [name, old ? "day-old" : "fresh", allowed, retired];
+				});
+			});
+			expect(observed).toEqual(
+				corpus.flatMap(([name, admitted]) =>
+					["fresh", "day-old"].map((age) => [name, age, admitted, admitted]),
+				),
+			);
 		} finally {
 			env.cleanup();
 		}
