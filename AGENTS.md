@@ -482,8 +482,9 @@ file-scoped worklist and receives no project-wide scanner output.
     only, and count each tool-set change as one full rewrite on such models. A
     host-generation gate takes a recorded fixture per certified minor, never
     two. Screen: drive two real-session requests that differ only in the
-    writer, and compare the head and pi-ai's collapsed head. Guard: planned,
-    tracked in #4687.
+    writer, and compare the head and pi-ai's collapsed head. Enforced by
+    `tests/clients/prompt-cache-prefix-writers.test.ts` (one tier-2 cell per
+    writer: registration, session-start plan, activation, injection).
 
 </important>
 
@@ -1807,18 +1808,31 @@ replaces a spawned process (a child spawn, a pipeline runner, or a language
 server binary) is `process-boundary`, not `internal-seam`. A test-side copy of
 the in-process `clients/lsp` service object stays `internal-seam`.
 
-No row carries a `pending slice` marker: slice 7 classified the last three with
-the probe that keeps each on the double. The five classes cover the list's 52
+No row carries a `pending slice` marker, and the sweep test refuses that
+label: slice 7 classified the last three with the probe that keeps each on the
+double, and every roadmap slice is closed, so a reopened placeholder reds
+instead of naming work no slice owns. The five classes cover the list's 52
 rows at that recording (slice 7 moved the `index-smells-rollup-wiring` row out
 with its file), and this command reproduces them:
 `grep -oE '^[[:space:]]*"[^"]*": *"[^"]+"' tests/support/pi-mock-importers.ts | sed -E 's/.*": *"([^"]+)"$/\1/' | sort | uniq -c`.
 The double throws at load for a test file not on the list, so a new user fails
 however it imports it. The list only shrinks:
 `tests/config/pi-mock-importer-sweep.test.ts` fails on a row whose file no
-longer uses it. A host claim names the host it ran on, and the tiers run on the
-one installed host (`@earendil-works/pi-coding-agent`, the dev pin): no
-automated spread exists, `scripts/probe-pi-host-tiers.mjs` is not built, and no
-CI job repeats a tier case on another host.
+longer uses it. A host claim names the host it ran on, and the per-PR tiers run
+on the one installed host (`@earendil-works/pi-coding-agent`, the dev pin). The
+certified spread is a manual or nightly run, never a per-PR gate:
+`node scripts/probe-pi-host-tiers.mjs` runs tier 1 and tier 2 against every
+certified host installed on the machine, takes the certified set from the
+baseline doc's verified-host table through `scripts/lib/pi-host-spread.mjs` (the
+reader the packaging ratchet uses), and prints one line per host naming the host
+and the version it ran on. Each tier loads the SELECTED host's own code through
+`PI_LENS_PI_HOST_PACKAGE` — tier 1's entry, and tier 2's session API and
+scripted provider — so a host directory that cannot supply it fails that tier
+instead of being reported as probed. It installs nothing: a host it cannot find
+is reported `not installed` and only fails the run under `--require-all`, and an
+installed host the certified set does not name is named in a warning and not
+probed. Run `npm run build` first, because both tiers load the built extension,
+and `tests/scripts/probe-pi-host-tiers.test.ts` holds the script's own logic.
 
 When the defect is an ordering of awaits on one seam (a coalescing queue, a
 per-key serializer), or the seam has regressed before, write a scheduler
