@@ -13,11 +13,13 @@
  *
  * Keys are `tests/`-relative posix paths. A row's class is acceptance 7 of
  * #4632: `process-boundary`, `internal-seam` (the case interposes on a pi-lens
- * `clients/` module through `vi.mock`, which cannot reach the copy pi's loader
- * builds), `unproducible-payload`, or `double-subject`; `real-ui-harness` names
- * a case whose claim is what the TUI shows or mounts, which no in-process tier
- * can produce until one binds a real UI context; `pending slice N` marks a file
- * a roadmap slice still owns, and slice 10 (the last) records the final counts.
+ * `clients/` module: a `vi.mock`, which cannot reach the copy pi's loader
+ * builds, or the test-side copy of a process-global service the loaded copy
+ * does not share, such as `clients/lsp`'s service), `unproducible-payload`, or
+ * `double-subject`; `real-ui-harness` names a case whose claim is what the TUI
+ * shows or mounts, which no in-process tier can produce until one binds a real
+ * UI context; `pending slice N` marks a file a roadmap slice still owns, and
+ * slice 10 (the last) records the final counts.
  * `real-ui-harness` is NOT a slice dependency: slice 5 builds no UI harness and
  * slice 10 is docs-and-stop, so a `pending slice N` label would name work no
  * slice carries (review F4 on #4702). Classes are the author's reading at
@@ -73,7 +75,10 @@ export const PI_MOCK_IMPORTERS: Readonly<Record<string, string>> = {
 	"clients/cascade-unanswered-primary-4403.test.ts": "pending slice 10",
 	"config/result-contract-governance.test.ts": "pending slice 10",
 	"index-process-bridge-rebind-real-factory.test.ts": "pending slice 10",
-	"tools/diagnostics-route-switch-matrix.test.ts": "pending slice 10",
+	// internal-seam (slice 6 classified this row; the three rows above keep their
+	// `pending slice 10` marker — slice 10 landed as docs-and-stop and moves no
+	// file, so that marker names no scheduled work and those rows stay here)
+	"tools/diagnostics-route-switch-matrix.test.ts": "internal-seam",
 	// unproducible-payload
 	"clients/context-append-to-last-user.test.ts": "unproducible-payload",
 	"index-4631-pre-087-context-shape.test.ts": "unproducible-payload",
