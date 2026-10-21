@@ -526,8 +526,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/call-graph.ts": 4,
 		// 4 -> 5 (#4403): `renderCascadeResult` keeps the notes whose servers
 		// are undelivered, an `Array.prototype.filter` call, not a delivery
-		// filter.
-		"clients/cascade-format.ts": 5,
+		// filter. 5 -> 6 (#4532 round 5): `applyCascadeDisplayPolicy` keeps
+		// the rows still at error severity after the environment-gap demotion,
+		// the same `Array.prototype.filter` shape.
+		"clients/cascade-format.ts": 6,
 		"clients/code-quality-warnings.ts": 5,
 		"clients/codebase-model.ts": 4,
 		"clients/complexity-client.ts": 3,
@@ -654,7 +656,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/inferred-project.ts": 2,
 		"clients/lsp/jvm-runtime.ts": 3,
 		"clients/lsp/language.ts": 1,
-		"clients/lsp/launch.ts": 2,
+		// 2 -> 1 (#4532 round 3): the in-process PATH scan replaced the
+		// `which` output chain whose `.filter(Boolean)` was the second use.
+		"clients/lsp/launch.ts": 1,
 		"clients/lsp/ruby-drive-dirs.ts": 1,
 		"clients/lsp/server.ts": 5,
 		// 1 (#4403): `disabledPrimaryServerIds` is an `Array.prototype.filter`
@@ -1028,6 +1032,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// #4346: resolves a Go importer's package directory to announce its peers.
 		"clients/lsp/created-import-targets.ts": 3,
 		"clients/lsp/edits.ts": 23,
+		// #4532: the environment-gap gate resolves its walk-up from the file's
+		// own directory, so these are real filesystem `path` calls. 5 -> 8
+		// (#4532 round 5): the manifest walk-up reads `package.json` at each
+		// level on the same bounded ancestry.
+		"clients/lsp/environment-gap.ts": 8,
 		"clients/lsp/file-server-match.ts": 3,
 		"clients/lsp/index.ts": 15,
 		// #4346: Go package directories and TS/JS extensions of the implicit
@@ -1040,7 +1049,13 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/language.ts": 3,
 		// 30 -> 31 (#4248): the project-local binary refusal records the
 		// resolved command basename through the existing path vocabulary.
-		"clients/lsp/launch.ts": 31,
+		// 31 -> 34 (#4532): the bare-command probe is an in-process PATH scan —
+		// `path.delimiter`, `path.resolve` against the spawn cwd, and
+		// `path.join` for each candidate; not the retired `path` domain term.
+		// 34 -> 32 (#4532 round 4): the three copies of the bare-spelling test
+		// (`!isFullyQualified && !includes(path.sep) && !includes("/")`) became
+		// one `isBareCommand`, so two of the three `path.sep` reads are gone.
+		"clients/lsp/launch.ts": 32,
 		"clients/lsp/lombok.ts": 14,
 		// #4299: 121 -> 124; OS path namespace calls for canonical compiler
 		// validation replace the wrapper-relative guess. No path-key owner changes.

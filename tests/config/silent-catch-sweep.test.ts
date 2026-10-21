@@ -803,9 +803,9 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 	}, // :65
 	"clients/lsp/launch.ts": {
 		silent: 11,
-		identities: "679b905d4af5e7db",
+		identities: "af7b6d53949cd956",
 		reason: PRE_RULE,
-	}, // :97, :195, :294, :359, :392, :649, :655, :881, :1110, :1121, :1132
+	}, // :96, :194, :293, :388, :442, :700, :706, :941, :1166, :1177, :1188
 	"clients/lsp/lombok.ts": {
 		silent: 6,
 		identities: "a076d98b1826881f",
@@ -923,9 +923,9 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 	}, // :291, :328, :387
 	"clients/out-of-band-changes.ts": {
 		silent: 3,
-		identities: "7d466b1252af9e30",
+		identities: "ec722a49db9a4818",
 		reason: SHARP_INSTALL_STAMP,
-	}, // :129, :140, :189
+	}, // :146, :177, :264
 	"clients/package-manager.ts": {
 		silent: 2,
 		identities: "56b6f18636fed761",
