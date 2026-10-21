@@ -25,6 +25,11 @@ registry; other doubles only as `AGENTS.md` admits them.
 - Trace the production entry point and reproduce the defect through it
   (principles §1, "Premise first"). Name no seam before the reproduction; the
   red reproduction is your feedback loop, built before any theory of the fix.
+  Reproduce on the reporter's pi host and pi-lens version, taken from the
+  report or its session log. When that version cannot be installed, name the
+  one you used instead; never substitute the latest silently. Report
+  `confirmed`, `partially confirmed` (name what differed), `not reproduced`
+  (name what you tried), or `blocked` (name the missing access or state).
 - Climb the minimalism ladder before screening against the `AGENTS.md`
   catalog: the catalog says what must not break, never what to add.
 - Check which open PRs touch your files (`gh pr list`, `gh pr diff`), design to

@@ -683,6 +683,7 @@ Each row cost a lane at least once; the prose above carries the record.
 | Refreshing a census or matrix cell from a probe artifact | shape 76: the row must come from the subject's own emitter, never from an order-sensitive drain (#4615) |
 | Reading a cancelled shard as a failure, or assuming a rerun clears it | shape 77: check the shard's own step conclusions and its measured runtime against the cap (#4672) |
 | Admitting a third-party cache directory at the shared tmp root by name | shape 78: pin the loader's cache off and keep a planted sibling red (#4673) |
+| Writing bytes ahead of the newest message (a returned `context` list, a tool-set change) without measuring the provider prefix | shape 79: write at the tail only, count a tool-set change as one full rewrite on a collapsing model, and compare the head and pi-ai's collapsed head across two real-session requests |
 | Pushing with `-q` or a grep filter, then landing on whatever the PR head is | Read the push result unfiltered, check `git merge-base --is-ancestor <intended> origin/<branch>`, and land with `EXPECT_HEAD=<intended or its merge>` |
 | Gating a background step on `until ! pgrep -f '<pattern>'` | That command line matches itself and never exits. Chain the steps in one command, or wait on a PID |
 | Editing an orchestrator script while a chain or monitor runs it | Stop the chain first, or write a new file and `mv` it into place |

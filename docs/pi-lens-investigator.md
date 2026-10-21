@@ -68,6 +68,14 @@ to read them.
 
 ## Reproducible behavior
 
+Reproduce on the reporter's pi host version and pi-lens version, taken from
+the report or its session log. When you cannot install that version, say so
+and name the version you used instead. Never substitute the latest silently.
+Report one of four outcomes: confirmed, partially confirmed (name what
+differed), not reproduced (name what you tried), or blocked (name the missing
+access or state). Our bugs often depend on the host version; #4690 raises the
+certified floor to 0.86.1.
+
 When the symptom reproduces, the loop comes before the reading. Build the
 tightest loop that goes red on the symptom (a failing test, a minimal driver, a
 differential run), confirm it matches the reporter's exact symptom, and
