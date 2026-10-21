@@ -196,7 +196,11 @@ describe("#3918 sharded TLA+ models workflow contract", () => {
 		expect(heaviest / lightest).toBeLessThan(1.05);
 		// And the counterfactual the fix exists for: the count-based round-robin
 		// over the same table is NOT balanced, so this assertion cannot be
-		// satisfied by a table that ignores the costs.
+		// satisfied by a table that ignores the costs. The round-robin spread
+		// moves with each config's sorted position, not with the table: one
+		// added config took it from 2.07x (811 configs) to 2.00x, a second to
+		// 1.47x (#4704). The bound stays well clear of the 1.05 above, which is
+		// all a cost-blind table needs to fail (it lands near 1.00x).
 		const roundRobin = Array.from({ length: total }, (_, index) =>
 			listModelConfigs(ROOT)
 				.filter((_, position) => position % total === index)
@@ -209,7 +213,7 @@ describe("#3918 sharded TLA+ models workflow contract", () => {
 		expect(
 			Math.max(...roundRobin) / Math.min(...roundRobin),
 			"the count-based split this PR replaced should still be measurably worse; if it is not, the table or the corpus changed shape and the note in ci.yml is stale",
-		).toBeGreaterThan(1.5);
+		).toBeGreaterThan(1.25);
 	});
 
 	// A cost row for a config that no longer exists is a table that was not
