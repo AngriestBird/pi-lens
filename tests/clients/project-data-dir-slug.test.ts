@@ -677,7 +677,8 @@ describe("adopting the data dir a link spelling named (#4689 round 4)", () => {
 		const fx = aliasRoot("pi-lens-adopt-unmarked-");
 		if (!fx) return ctx.skip("the win32 name never moved");
 		const dir = getProjectDataDir(fs.realpathSync.native(fx.alias));
-		fs.mkdirSync(dir, { recursive: true });
+		// Every file is already there, so only the marker is left to fail.
+		fs.cpSync(ALIAS_SESSION_444, dir, { recursive: true });
 		// A dangling link through a missing directory: `existsSync` says no
 		// marker, and writing through it fails.
 		fs.symlinkSync(
@@ -691,9 +692,12 @@ describe("adopting the data dir a link spelling named (#4689 round 4)", () => {
 		expect(drainProjectDataDirMigrations()).toEqual([
 			{ to: dir, outcome: "adopt-failed" },
 		]);
-		expect(fs.existsSync(path.join(dir, "cache", "todo-baseline.json"))).toBe(
-			true,
-		);
+		// No marker, so the next process walks again and says so again.
+		_resetProjectDataDirMemoForTests();
+		getProjectDataDir(fx.alias);
+		expect(drainProjectDataDirMigrations()).toEqual([
+			{ to: dir, outcome: "adopt-failed" },
+		]);
 	});
 
 	it("keeps a record a store deleted after adoption deleted in the next process, and the commit gate allows the commit", (ctx) => {
