@@ -17,7 +17,6 @@
  *   directory's target, not under the link.
  */
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -101,11 +100,11 @@ describe("FormatService formats the identity of a symlinked file (#4689)", () =>
 
 	/**
 	 * The session root (a tmp fixture) and a second project root. The second
-	 * sits under the OS tmp dir (TMPDIR), never the checkout, and the seam
-	 * adopts it as a marked project (`adopted`). Its name must not start with
-	 * `pi-`: `isPiOwnedTempPath` treats a tmp entry named `pi-*` as pi's own and
-	 * refuses it as internal (`none`). It is registered so the tmp-fixture
-	 * census owns it even if the worker dies before cleanup.
+	 * sits beside the checkout, where the analysis-root seam adopts a marked
+	 * project; a marked directory under the tmp root is refused outright.
+	 * It cannot move to the OS tmp dir: the tmp-fixture hygiene gate requires a
+	 * `pi-lens-` prefix there, and `isPiOwnedTempPath` refuses any `pi-*` entry
+	 * as pi's own (`none`), so no tmp name is both admitted and adopted.
 	 */
 	function layout(): {
 		session: string;
@@ -114,7 +113,7 @@ describe("FormatService formats the identity of a symlinked file (#4689)", () =>
 	} {
 		const sessionEnv = setupTestEnvironment("pi-lens-format-identity-");
 		const outside = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), "format-identity-project-")),
+			fs.mkdtempSync(path.join(process.cwd(), ".format-identity-project-")),
 		);
 		registerTmpRoot(getTmpRootRegistry(), outside, "registered");
 		const session = fs.realpathSync(sessionEnv.tmpDir);
