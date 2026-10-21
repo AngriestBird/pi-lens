@@ -50,13 +50,13 @@ const withoutFold = (text: string) =>
 	text.slice(0, text.indexOf("\n\n## Fold check"));
 const folded = [
 	"#4606 not folded: a different file and a separate rule.",
-	"#4602 folded: the same body-lint seam, so its rule lands here.",
+	"#4602 folded: the same body-lint seam, so its rule lands here. Closes #4602.",
 	"#3260 sequenced: after this form lands and its tests run.",
 ].join("\n");
 
 describe("Fold check form (#4711)", () => {
 	it.each([
-		["folded", "#4602 folded: the same body-lint seam."],
+		["folded", "#4602 folded: the same body-lint seam. Closes #4602."],
 		["not folded", "#4606 not folded: a different rule and file."],
 		["sequenced", "#3260 sequenced: after this form lands."],
 	])("accepts a %s decision with its reason", (_name, line) => {
@@ -150,6 +150,115 @@ describe("Fold check form (#4711)", () => {
 	});
 });
 
+// #4717: the reviewed head admitted a form a reader cannot act on. Each case
+// below is a shape the review measured as ACCEPTED, and each is refused now,
+// because the gate fails closed (engineering principles §1): a malformed line
+// beside a good one does not become a decision, a decision word before its
+// candidate decides the wrong issue, an unlisted spelling is not one of the
+// three decisions, `none:` beside a candidate contradicts itself, and a
+// `folded` candidate whose issue the body never closes leaves the issue open.
+describe("Fold check refuses an unlisted or malformed form (#4717)", () => {
+	it("refuses a well-formed line that excuses a malformed sibling", () => {
+		// The review's `mixed-candidates` probe: `.some` accepted this section.
+		const mixed = [
+			"#4602 folded: the same body-lint seam. Closes #4602.",
+			"#4606 not folded",
+		].join("\n");
+		expect(lintFoldCheck(body(mixed))).toHaveLength(1);
+	});
+
+	it("refuses a candidate line with no decision word", () => {
+		// PR 4710's merged record names a candidate and decides nothing.
+		expect(
+			lintFoldCheck(
+				body("- #4690 landed on master and this branch merged it."),
+			),
+		).toHaveLength(1);
+	});
+
+	it("refuses the decision word before its candidate", () => {
+		// Two spellings: the first also fails the reason floor, and the second
+		// fails nothing but the order, so the ordering guard has its own witness.
+		expect(lintFoldCheck(body("folded: see #4606"))).toHaveLength(1);
+		expect(
+			lintFoldCheck(body("not folded: #4606 is a different file and rule.")),
+		).toHaveLength(1);
+	});
+
+	it("does not count an issue number as the reason", () => {
+		expect(lintFoldCheck(body("#4606 not folded: see #4675"))).toHaveLength(1);
+	});
+
+	it.each([
+		["not-folded", "#4711 not-folded: the same seam and file."],
+		["re-sequenced", "#4711 re-sequenced: after this form lands."],
+	])("refuses the unlisted spelling %s", (_name, line) => {
+		// The body closes #4711, so a reader that resolved `not-folded` to the
+		// `folded` token (the reviewed head did) would accept this line: the
+		// spelling is the only thing left refusing it.
+		const closing = body(line).replace(
+			"The lint reads the fold check section.",
+			"The lint reads the fold check section. Closes #4711.",
+		);
+		expect(lintFoldCheck(closing)).toHaveLength(1);
+	});
+
+	it("does not read an HTML entity as a candidate", () => {
+		// PR 4708's merged fold section ends with a bot footer that quotes
+		// `&#39;`: a fail-closed candidate scan that took the entity for `#39`
+		// refused the whole section.
+		const text = body(
+			[
+				"- #4708 not folded: this PR itself.",
+				"",
+				"<sub>Reviewed commit &#39;abc&#39;</sub>",
+			].join("\n"),
+		);
+		expect(lintFoldCheck(text)).toEqual([]);
+	});
+
+	it("refuses one line deciding two candidates", () => {
+		expect(
+			lintFoldCheck(
+				body("#4602 and #4610 folded: both are the same seam. Closes #4602."),
+			),
+		).toHaveLength(1);
+	});
+
+	it("refuses none: beside a candidate line", () => {
+		const contradictory = [
+			"none: the search listed no candidate",
+			"#4606 not folded: a different rule and file.",
+		].join("\n");
+		expect(lintFoldCheck(body(contradictory))).toHaveLength(1);
+	});
+
+	it("refuses a folded candidate the body does not close", () => {
+		expect(
+			lintFoldCheck(body("#4602 folded: the same body-lint seam.")),
+		).toHaveLength(1);
+	});
+
+	it("does not read a Closes that inline code hides", () => {
+		// PR 4680's fold cell: `parseCloseKeywords` blanks inline code, so that
+		// row would say `folded` while the issue stays open.
+		const table = [
+			"| candidate | decision | reason |",
+			"| --- | --- | --- |",
+			"| #4672 | folded: `Closes #4672` | the mechanism itself |",
+		].join("\n");
+		expect(lintFoldCheck(body(table))).toHaveLength(1);
+	});
+
+	it("accepts a folded candidate its body closes elsewhere", () => {
+		const text = body("#4602 folded: the same body-lint seam.").replace(
+			"The lint reads the fold check section.",
+			"The lint reads the fold check section. Closes #4602.",
+		);
+		expect(lintFoldCheck(text)).toEqual([]);
+	});
+});
+
 describe("Fold check section requirement (#4711)", () => {
 	it("refuses a body with no section", () => {
 		const result = lintPrBody(withoutFold(body("none: no candidate listed")), {
@@ -203,5 +312,55 @@ describe("Fold check section requirement (#4711)", () => {
 				" ",
 			),
 		).not.toContain('"## Fold check"');
+	});
+
+	// #4717 F7: the reviewed head's `lintLocalPrBody` wire carried no case of its
+	// own, so deleting it left the suite green while the local preflight accepted
+	// a malformed decision line. This case reaches the wire that call site makes.
+	it("refuses a malformed decision line at the local preflight", () => {
+		const stub = (): string => "";
+		const result = lintLocalPrBody(
+			body("#4606 not folded"),
+			process.cwd(),
+			stub as never,
+		);
+		expect(result.errors.join(" ")).toContain('"## Fold check"');
+	});
+
+	// #4717 F1: GitHub renders nothing for a section inside an HTML comment, so
+	// both entries read the section list as the reader sees it. The reviewed head
+	// found the heading through the fence-blanked scan and accepted the body.
+	it("refuses a Fold check section an HTML comment hides (CI entry)", () => {
+		const hidden = `${withoutFold(
+			body("none: no candidate listed"),
+		)}\n\n<!--\n## Fold check\n#4606 not folded: a different file and rule.\n-->`;
+		expect(lintPrBody(hidden, { workingTree: true }).errors).toContainEqual(
+			expect.stringContaining('missing "## Fold check"'),
+		);
+	});
+
+	it("refuses a Fold check section an HTML comment hides (local entry)", () => {
+		const hidden = `${withoutFold(
+			body("none: no candidate listed"),
+		)}\n\n<!--\n## Fold check\n#4606 not folded: a different file and rule.\n-->`;
+		const stub = (): string => "";
+		expect(
+			lintLocalPrBody(hidden, process.cwd(), stub as never).errors.join(" "),
+		).toContain('missing "## Fold check"');
+	});
+
+	// #4717 F8: a `###` sub-heading does not end the section, because the section
+	// ends at the next heading of the same or a higher level. Dropping that level
+	// test turned no case red on the reviewed head.
+	it("keeps a deeper sub-heading inside the section", () => {
+		const text = body(
+			[
+				"Decide after the round.",
+				"",
+				"### Detail",
+				"#4606 not folded: a different file and rule.",
+			].join("\n"),
+		);
+		expect(lintFoldCheck(text)).toEqual([]);
 	});
 });

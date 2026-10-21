@@ -176,6 +176,29 @@ function hasRealContent(lines, section, placeholders) {
 }
 
 /**
+ * Every `##`-level heading of the body AS THE READER SEES IT: a heading inside
+ * an HTML comment renders no section, so the comment-blanked copy is scanned
+ * (#4717 F1: the unblanked scan found a heading whose section GitHub never
+ * shows, and both entries accepted the body). Fences are blanked too, and both
+ * blankings keep line offsets, so a caller's raw-line indices still align.
+ */
+function bodyHeadings(body) {
+	const lines = blankMarkdown(body).split(/\r?\n/);
+	const headings = [];
+	for (let index = 0; index < lines.length; index += 1) {
+		const match = HEADING.exec(lines[index]);
+		if (match)
+			headings.push({
+				index,
+				name: match[1],
+				level: match[0].match(/^#+/)[0].length,
+				section: SECTION_SYNONYMS.get(match[1].trim().toLowerCase()),
+			});
+	}
+	return headings;
+}
+
+/**
  * The body of the first `## <section>` heading, as the raw lines and as the
  * fence-blanked copy. `null` when the heading is absent, so the missing-section
  * message stays owned by `lintPrBody`. Three section linters read a section
@@ -184,16 +207,7 @@ function hasRealContent(lines, section, placeholders) {
 function sectionContent(body, section) {
 	const rawLines = String(body ?? "").split(/\r?\n/);
 	const lines = sourceWithoutFencedBlocks(body).split(/\r?\n/);
-	const headings = [];
-	for (let index = 0; index < lines.length; index += 1) {
-		const match = HEADING.exec(lines[index]);
-		if (match)
-			headings.push({
-				index,
-				level: match[0].match(/^#+/)[0].length,
-				section: SECTION_SYNONYMS.get(match[1].trim().toLowerCase()),
-			});
-	}
+	const headings = bodyHeadings(body);
 	const heading = headings.find((candidate) => hasSection(candidate, section));
 	if (!heading) return null;
 	const nextHeading = headings.find(
@@ -3323,30 +3337,70 @@ const CLASS_SWEEP_DECISION =
 const CLASS_SWEEP_OUTCOME =
 	/(?:→|->|=>|\bcovered\b|\buncovered\b|\bnot a member\b|\bnot a runtime\b|\bno member\b|\bexcluded\b|\bout of scope\b|\bin scope\b|\bclean\b|\bsame target\b|\bnot found\b)/i;
 
-// #4711: `## Fold check` and `## Class sweep` share ONE verdict parser, so one
-// body answers both the repository lint and the maintainer's local script. A
-// fold-check decision line names its candidate (`#N`), one of the three
-// decisions, and a reason after it: the local gate (`pr-create.sh`'s
-// `fold_gate`) reads the same three facts, in the same order, with two words of
-// reason. A decision word with nothing after it is not a decision.
-const FOLD_CHECK_DECISION = /\b(?:not\s+folded|folded|sequenced)\b/i;
-const FOLD_CHECK_CANDIDATE = /(?:^|[^0-9A-Za-z])#\d+(?![0-9])/;
+// #4711: `## Fold check` and `## Class sweep` share ONE verdict parser and its
+// `none:` escape, so one body answers both the repository lint and the
+// maintainer's local script. Their admitted vocabularies differ, so each branch
+// keeps its own tokens. A fold-check decision line names its candidate (`#N`)
+// FIRST, then one of the three decisions, then a reason: the local gate
+// (`pr-create.sh`'s `fold_gate`) reads the same three facts, in the same order,
+// with two words of reason.
+//
+// It fails closed (#4717 F2/F3/F4/F5/N1): every line in the section that names a
+// candidate must be such a line, so a malformed sibling is not excused by a
+// well-formed neighbour; the decision is one of the three listed spellings, so
+// `not-folded` and `re-sequenced` refuse; and a `folded` candidate is one this
+// body closes. The candidate token has one spelling, read as a match and as a
+// count.
+const FOLD_CHECK_CANDIDATE_SOURCE = "(?:^|[^0-9A-Za-z&])#(\\d+)(?![0-9])";
+const FOLD_CHECK_CANDIDATE = new RegExp(FOLD_CHECK_CANDIDATE_SOURCE);
+const FOLD_CHECK_CANDIDATE_ALL = new RegExp(FOLD_CHECK_CANDIDATE_SOURCE, "g");
+// The three listed spellings, as whole tokens: a hyphenated `not-folded` or
+// `re-sequenced` is not one of them, and its `folded`/`sequenced` tail is not a
+// decision either.
+const FOLD_CHECK_DECISION =
+	/(?<![-\w])(?:not\s+folded|folded|sequenced)(?![-\w])/i;
+const FOLD_CHECK_FOLDED = /^folded$/i;
 const FOLD_CHECK_REASON_WORDS = 2;
 // The `none: <reason>` escape both sections accept.
 const NONE_LINE = /^\s*none\s*:\s*(.+?)\s*$/im;
 
-function sectionVerdict(section, text) {
+function sectionVerdict(section, text, { closes = [] } = {}) {
 	const source = String(text ?? "");
-	if (section === "fold check")
-		return source.split(/\r?\n/).some((line) => {
-			if (!FOLD_CHECK_CANDIDATE.test(line)) return false;
+	if (section === "fold check") {
+		const candidates = source
+			.split(/\r?\n/)
+			.filter((line) => FOLD_CHECK_CANDIDATE.test(line));
+		// `none:` says the search listed no candidate, so a line naming one
+		// contradicts it whatever that line says (#4717 F4).
+		const none = NONE_LINE.exec(source);
+		if (none && wordCount(none[1]) >= 3) return candidates.length === 0;
+		if (candidates.length === 0) return false;
+		return candidates.every((line) => {
 			const decision = FOLD_CHECK_DECISION.exec(line);
 			if (!decision) return false;
-			const reason = line.slice(decision.index + decision[0].length);
+			// The candidate comes first, and it is the only one named before the
+			// decision, so the reason and the close rule read one candidate
+			// (#4717 F3).
+			const named = [
+				...line.slice(0, decision.index).matchAll(FOLD_CHECK_CANDIDATE_ALL),
+			];
+			if (named.length !== 1) return false;
+			const reason = line
+				.slice(decision.index + decision[0].length)
+				.replace(FOLD_CHECK_CANDIDATE_ALL, " ");
+			if (
+				(reason.match(/[A-Za-z0-9]+/g) ?? []).length < FOLD_CHECK_REASON_WORDS
+			)
+				return false;
+			// A `folded` candidate is one this body closes: the record claims the
+			// issue lands here, and the post-merge verifier reads
+			// `parseCloseKeywords` (#4717 F5).
 			return (
-				(reason.match(/[A-Za-z0-9]+/g) ?? []).length >= FOLD_CHECK_REASON_WORDS
+				!FOLD_CHECK_FOLDED.test(decision[0].trim()) ||
+				closes.includes(Number(named[0][1]))
 			);
 		});
+	}
 	if (CLASS_SWEEP_DECISION.test(source)) return true;
 	return source.split(/\r?\n/).some((line) => {
 		const perMember =
@@ -3437,9 +3491,11 @@ export function lintClassSweep(body = "", { diff } = {}) {
 }
 
 const FOLD_CHECK_MESSAGE =
-	'PR body "## Fold check" must decide each candidate: a line naming `#N`, ' +
-	"one of folded / not folded / sequenced, and a reason after the decision " +
-	'word, or say "none: <reason>" (three words minimum). ' +
+	'PR body "## Fold check" must decide each candidate: `#N` first, then one ' +
+	"of folded / not folded / sequenced, then a reason of at least two words " +
+	"(issue numbers do not count), and a `folded` candidate's `Closes #N` in the " +
+	'body; or say "none: <reason>" (three words minimum) when the search found ' +
+	"no candidate. Every line that names a candidate must be a decision line. " +
 	`See ${TEMPLATE_PATH}.`;
 
 /**
@@ -3458,9 +3514,12 @@ export function lintFoldCheck(body = "") {
 	// blanked copy is judged and an empty one refuses here (#4711).
 	if (!section.raw.trim()) return [];
 	const content = blankMarkdown(section.raw).trim();
-	const none = NONE_LINE.exec(content);
-	if (none && wordCount(none[1]) >= 3) return [];
-	return sectionVerdict("fold check", content) ? [] : [FOLD_CHECK_MESSAGE];
+	// A `folded` candidate must be closed by this body (#4717 F5), so the
+	// verdict is judged against the body's own close keywords.
+	const closes = parseCloseKeywords(body).issues;
+	return sectionVerdict("fold check", content, { closes })
+		? []
+		: [FOLD_CHECK_MESSAGE];
 }
 
 // A failing-test line names its own title: a `FAIL`/`❯` line carries a runner
@@ -3959,17 +4018,9 @@ function lintDiffCompliance(body, options) {
 export function lintPrBody(body = "", options = {}) {
 	const rawLines = String(body ?? "").split(/\r?\n/);
 	const lines = sourceWithoutFencedBlocks(body).split(/\r?\n/);
-	const headings = [];
-	for (let index = 0; index < lines.length; index += 1) {
-		const match = HEADING.exec(lines[index]);
-		if (match)
-			headings.push({
-				index,
-				name: match[1],
-				level: match[0].match(/^#+/)[0].length,
-				section: SECTION_SYNONYMS.get(match[1].trim().toLowerCase()),
-			});
-	}
+	// The same rendered-text heading scan `sectionContent` reads (#4717 F1): a
+	// section GitHub hides in an HTML comment is a missing section here too.
+	const headings = bodyHeadings(body);
 	const placeholders = templatePlaceholderLines();
 	const errors = options.diff ? lintDiffCompliance(body, options) : [];
 	const summary = headings.find((heading) => hasSection(heading, "summary"));
