@@ -995,7 +995,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/extension-log.ts": 2,
 		"clients/file-kinds.ts": 2,
 		"clients/file-time.ts": 7,
-		"clients/ephemeral-root.ts": 18,
+		// 18 -> 13 (#4689): the private nearest-existing realpath walk folded
+		// onto path-utils' `realpathOrResolve`.
+		"clients/ephemeral-root.ts": 13,
 		"clients/file-utils.ts": 61,
 		"clients/finding-identity.ts": 2,
 		"clients/fix-worklog.ts": 3,

@@ -557,11 +557,6 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 		identities: "d8fb5fd4d9ec3e87",
 		reason: PRE_RULE,
 	}, // :49, :103
-	"clients/ephemeral-root.ts": {
-		silent: 1,
-		identities: "e6a61419909e565c",
-		reason: PRE_RULE,
-	}, // :43
 	"clients/event-loop-hold.ts": {
 		silent: 2,
 		identities: "255f028624add8ac",
