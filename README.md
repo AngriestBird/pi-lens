@@ -166,7 +166,9 @@ file directly (`pi --extension ./index.js`) does not read that manifest and
 loads no pi-lens skills.
 
 Requires Node.js >=22.19.0 (matches the pi host's own floor — see `engines`
-in `package.json`).
+in `package.json`), and a pi host of 0.86.1 or newer. pi 0.80–0.85 keep the
+prompt outside the request the extension can write to, so pi-lens delivers no
+findings there; `docs/release-qa-baseline.md` lists the certified hosts.
 
 Letting a coding agent do it: paste this into its prompt.
 

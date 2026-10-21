@@ -49,6 +49,21 @@ interposer recorded the directory as a fixture sibling of
 cause. Pinning `JITI_FS_CACHE=0`/`JITI_CACHE=0` drops the write from 1/1 to 0/0
 and a planted sibling still reds (#4673).
 
+## 2026-10-20 — prefix churn from a non-append write (shape 79)
+
+Shape 79 ("Prefix churn from a non-append write") entered the catalog here.
+
+#4644 moved context injection onto `context_with_system` so a turn-end finding
+no longer makes pi rebuild the system head: before it, an injecting turn cost
+about 175k written tokens (#4631). A sweep of every pi-lens writer of the cached
+prefix then found one more live member, lazy tool activation through
+`pi_lens_activate_tools`. On a model without mid-conversation system messages,
+pi-ai folds the system messages into one rebuilt head per request, so one
+activation rewrote that head once (a real 1.3.0 session: `329be587b646` ->
+`ffbf6d1b3f38`) and the miss read `unknown / sequence-hash-truncated` right
+after pi-lens's own `tool_set_mutation` row. The guard is the per-writer tier-2
+prefix-stability case in #4687.
+
 ## 2026-10-20 — the lesson shapes 76, 77 and 78 share
 
 All three share one lesson: the surface that reports a result is not the surface
