@@ -3,7 +3,7 @@ import * as path from "node:path";
 import type { CacheInspection, CacheManager } from "./cache-manager.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 import { isPathIgnoredByProject } from "./file-utils.js";
-import { toProjectRelativePath } from "./path-utils.js";
+import { isOutsideProjectRoot, toProjectRelativePath } from "./path-utils.js";
 import { tokenizeShellCommand } from "./bash-file-access.js";
 import { incrementDegradationCount } from "./degradation-ledger.js";
 import { absorbSettledRunnerBlockers } from "./deferred-runner-blockers.js";
@@ -903,18 +903,18 @@ function cacheRecord(
  * not admitted here and keeps failing closed.
  */
 function claimsNoBlocker(data: unknown): boolean {
-	const record = storedFields(data);
-	if (!record) return false;
+	const fields = storedFields(data);
+	if (!fields) return false;
 	return (
-		record.hasBlockers === false &&
-		(record.testFailures === undefined || record.testFailures === false) &&
-		(record.blockerContent === undefined || record.blockerContent === "") &&
+		fields.hasBlockers === false &&
+		(fields.testFailures === undefined || fields.testFailures === false) &&
+		(fields.blockerContent === undefined || fields.blockerContent === "") &&
 		// #4733 r1 F7: a test failure's text or files contradict the claim too.
-		(record.testFailureContent === undefined ||
-			record.testFailureContent === "") &&
-		(record.testFailureFiles === undefined ||
-			(Array.isArray(record.testFailureFiles) &&
-				record.testFailureFiles.length === 0))
+		(fields.testFailureContent === undefined ||
+			fields.testFailureContent === "") &&
+		(fields.testFailureFiles === undefined ||
+			(Array.isArray(fields.testFailureFiles) &&
+				fields.testFailureFiles.length === 0))
 	);
 }
 
@@ -923,12 +923,12 @@ function claimsNoBlocker(data: unknown): boolean {
  * `--lens-guard`-off turn-end writer stores for delivery
  * (`clients/runtime-turn.ts`, the `else` branch), and 3.8.74's `{ content }`.
  */
-const NO_CLAIM_FIELDS: ReadonlySet<string> = new Set([
+const NO_CLAIM_FIELDS = [
 	"content",
 	"affectedFiles",
 	"affectedFilesTruncated",
 	"provenance",
-]);
+] as const;
 
 /**
  * True only for a record that makes no claim at all: an object with string
@@ -939,11 +939,13 @@ const NO_CLAIM_FIELDS: ReadonlySet<string> = new Set([
  * failing closed.
  */
 function makesNoClaim(data: unknown): boolean {
-	const record = storedFields(data);
+	const fields = storedFields(data);
 	return (
-		!!record &&
-		typeof record.content === "string" &&
-		Object.keys(record).every((key) => NO_CLAIM_FIELDS.has(key))
+		!!fields &&
+		typeof fields.content === "string" &&
+		Object.keys(fields).every((key) =>
+			NO_CLAIM_FIELDS.some((field) => field === key),
+		)
 	);
 }
 
@@ -1179,28 +1181,27 @@ function unconfirmedRecordRemedy(
 		: undefined;
 	const parts: string[] = [];
 	if (sections) {
-		const files = [
-			...new Set(
-				sections.map((section) =>
-					toProjectRelativePath(resolveGuardPath(section.file, cwd), cwd),
-				),
-			),
-		];
-		// #4733 r1 F6: a file outside the project keeps an absolute spelling,
-		// which the model-facing text counts and never prints.
-		const named = files.filter((file) => !path.isAbsolute(file));
-		const outside = files.length - named.length;
-		const cut = [
-			named.length > MAX_REMEDY_FILES
-				? `${named.length - MAX_REMEDY_FILES} more`
-				: "",
-			outside > 0
-				? `${outside} file${outside === 1 ? "" : "s"} outside the project`
-				: "",
-		].filter((part) => part.length > 0);
-		const shown = [named.slice(0, MAX_REMEDY_FILES).join(", "), ...cut]
-			.filter((part) => part.length > 0)
-			.join(" and ");
+		// #4733 r1 F6: a file outside the project is counted, never printed:
+		// its spelling is not the model's to see.
+		const named = new Set<string>();
+		const outsideKeys = new Set<string>();
+		for (const section of sections) {
+			const resolved = resolveGuardPath(section.file, cwd);
+			if (isOutsideProjectRoot(resolved, cwd)) outsideKeys.add(section.key);
+			else named.add(toProjectRelativePath(resolved, cwd));
+		}
+		const outside = outsideKeys.size;
+		const listed = [...named].slice(0, MAX_REMEDY_FILES);
+		const shownParts = listed.length > 0 ? [listed.join(", ")] : [];
+		if (named.size > listed.length) {
+			shownParts.push(`${named.size - listed.length} more`);
+		}
+		if (outside > 0) {
+			shownParts.push(
+				`${outside} file${outside === 1 ? "" : "s"} outside the project`,
+			);
+		}
+		const shown = shownParts.join(" and ");
 		parts.push(
 			`The record names blockers in ${shown} that pi-lens cannot confirm. Fix them and write each file again: a clean pi-lens check of a file clears its part of the record.`,
 		);

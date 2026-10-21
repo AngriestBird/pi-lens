@@ -512,18 +512,18 @@ export function checkedWholeFile(
 	}
 	const noVerdict = new Set(result.inconclusiveSources?.runnerIds);
 	const runners = result.latencyReport?.runners ?? [];
-	const statusOf = new Map(
+	const outcomeOf = new Map(
 		runners.map((runner) => [runner.runnerId, runner.status]),
 	);
+	const skippedOrInFlight = new Set<string | undefined>(["skipped", "pending"]);
 	return (
-		runners.some(
-			(runner) =>
-				runner.status === "succeeded" && !noVerdict.has(runner.runnerId),
+		[...outcomeOf].some(
+			([runnerId, outcome]) =>
+				outcome === "succeeded" && !noVerdict.has(runnerId),
 		) &&
-		[...noVerdict].every((runnerId) => {
-			const status = statusOf.get(runnerId);
-			return status === "skipped" || status === "pending";
-		})
+		[...noVerdict].every((runnerId) =>
+			skippedOrInFlight.has(outcomeOf.get(runnerId)),
+		)
 	);
 }
 
