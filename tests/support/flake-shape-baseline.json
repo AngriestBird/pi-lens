@@ -1281,6 +1281,7 @@
 		"index-write-order-token.test.ts::clients/runtime-coordinator": 1,
 		"index-write-order-token.test.ts::tools/lens-diagnostics": 1,
 		"scripts/check-tla-models.test.ts::node:crypto": 1,
+		"scripts/smoke-tools-format-install.test.ts::clients/installer/index": 1,
 		"source-filter-skip-observability.test.ts::clients/latency-logger": 1,
 		"tools/lens-diagnostics-delta-project-order.test.ts::clients/project-diagnostics/scanner": 1,
 		"tools/lens-diagnostics-inferred-project.test.ts::clients/bootstrap": 1,

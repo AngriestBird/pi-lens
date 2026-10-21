@@ -1,3 +1,4 @@
+// flake-shape: in-process-mock — tool installation and discovery are the network boundary: the stub hands the real formatter resolution a managed path, while FormatService, formatter selection and formatFile are real and only the formatter child process is doubled.
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
