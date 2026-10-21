@@ -2011,6 +2011,7 @@ describe("opaque recovery for tools other than bash (#4732)", () => {
 	function resultDeps(
 		runtime: RuntimeCoordinator,
 		event: Record<string, unknown>,
+		agentBehaviorRecord: (toolName: string, filePath?: string) => [] = () => [],
 	): Parameters<typeof handleToolResult>[0] {
 		return {
 			event: { content: [{ type: "text", text: "ok" }], ...event },
@@ -2023,7 +2024,7 @@ describe("opaque recovery for tools other than bash (#4732)", () => {
 			testRunnerClient: {},
 			metricsClient: {},
 			resetLSPService: () => {},
-			agentBehaviorRecord: () => [],
+			agentBehaviorRecord,
 			formatBehaviorWarnings: () => "",
 			readGuard: runtime.readGuard,
 		} as unknown as Parameters<typeof handleToolResult>[0];
@@ -2089,8 +2090,17 @@ describe("opaque recovery for tools other than bash (#4732)", () => {
 			handleToolCall(callDeps(runtime, event)),
 		);
 		fs.writeFileSync(path.join(repoDir, "rel-out.ts"), "export const r = 1;\n");
-		await handleToolResult(resultDeps(runtime, event));
+		const recordedPaths: Array<string | undefined> = [];
+		await handleToolResult(
+			resultDeps(runtime, event, (_tool, filePath) => {
+				recordedPaths.push(filePath);
+				return [];
+			}),
+		);
 		expect(await dispatchLog()).toEqual([["rel-out.ts", false]]);
+		// The path itself is still refused (#1642): the guess against the
+		// session root is never recorded as the file this call wrote.
+		expect(recordedPaths).toEqual([undefined]);
 	});
 
 	// The outer codemode call's window holds every nested call's writes. A
