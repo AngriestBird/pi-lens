@@ -300,6 +300,16 @@ export class ClientRegistry {
 	readonly inFlight = new Map<string, Promise<SpawnedServer | undefined>>();
 	/** Epoch ms of each key's last successful spawn. */
 	readonly clientSpawnedAt = new Map<string, number>();
+	/**
+	 * Epoch ms each live client's LAUNCH began, before its process read the
+	 * tree (#4532 round 5, review F6). The install look compares an install
+	 * against this: `clientSpawnedAt` is stamped after the initialize handshake,
+	 * so an install that landed while the server was starting read as older
+	 * than the client and became the baseline. Kept apart from
+	 * `clientSpawnedAt` because the #1127 breaker measures post-init uptime from
+	 * that one. Same key and lifetime: written beside it, retired with it.
+	 */
+	readonly clientLaunchStartedAt = new Map<string, number>();
 	private readonly hooks: ClientGenerationHooks;
 	private readonly sessionCwd: string | undefined;
 	private readonly workspaceProbeLogged = new Set<string>();
@@ -710,6 +720,7 @@ export class ClientRegistry {
 		this.hooks.releaseNotifyWrite(key);
 		this.clients.delete(key);
 		this.clientSpawnedAt.delete(key);
+		this.clientLaunchStartedAt.delete(key);
 		this.hooks.forgetReadiness(key);
 		this.clientLastUsedAt.delete(key);
 		if (this.adoptedClientKeys.delete(key)) {
@@ -732,8 +743,22 @@ export class ClientRegistry {
 		if (
 			server.idleEviction !== "transparent" &&
 			!this.adoptedClientKeys.has(key)
-		)
+		) {
+			// #3952: say why no timer was scheduled. Without this row a caller
+			// that ARMS an `unmeasured` server and waits for the eviction (the
+			// nightly probe's whole protocol) sees the same "nothing happened" as
+			// a server whose timer is merely slow, and the two are opposite
+			// verdicts: `not-evicted` here means the policy was never read off the
+			// object the service holds, which is a pi-lens defect, not a slow
+			// server. Once per server per session: the policy is a declaration, so
+			// one row per (server, session) carries every occurrence's verdict.
+			recordDegradationOnce({
+				kind: "lsp-idle-eviction-declined",
+				subject: server.id,
+				reason: `no idle-eviction timer: declared ${server.idleEviction ?? "unmeasured"}`,
+			});
 			return;
+		}
 		// Pressure-gating these timers would require a separate reconciliation pass
 		// when the manager crosses the threshold; keep ownership simple and use the
 		// warm-LSP-friendly 20-minute default instead.
@@ -824,6 +849,38 @@ export class ClientRegistry {
 
 	private recordBreaker(key: string, reason: string): void {
 		recordDegradationOnce({ kind: "lsp-breaker", subject: key, reason });
+	}
+
+	/**
+	 * #4532: the roots of the live PRIMARY clients, each with the epoch ms its
+	 * earliest live client at that root spawned. The out-of-band install look
+	 * runs at these roots as well as the session's cwd, so a dependency install
+	 * in a LINKED WORKTREE — a root the session cwd is not under — restarts that
+	 * worktree's server. Read-only: never spawns and never waits.
+	 *
+	 * The earliest spawn, not the latest: `restartPrimaryClientsUnder` retires
+	 * every primary overlapping a root, so a root whose newer client spawned
+	 * after an install must not hide an older one that read the pre-install
+	 * tree. The epoch is the client's LAUNCH start (`clientLaunchStartedAt`):
+	 * the server reads the tree from its spawn on, not from the end of its
+	 * initialize handshake. An absent stamp reports 0, which a first look reads
+	 * as "no epoch" and never as "before every install".
+	 */
+	livePrimaryClientRoots(): Array<{ root: string; spawnedAt: number }> {
+		const byRoot = new Map<string, number>();
+		for (const [key, client] of this.clients) {
+			if (!client.isAlive()) continue;
+			const { serverId, root } = parseClientKey(key);
+			if (!root) continue;
+			if (isAuxiliary(getServerById(serverId))) continue;
+			const spawnedAt = this.clientLaunchStartedAt.get(key) ?? 0;
+			const prior = byRoot.get(root);
+			byRoot.set(
+				root,
+				prior === undefined ? spawnedAt : Math.min(prior, spawnedAt),
+			);
+		}
+		return [...byRoot].map(([root, spawnedAt]) => ({ root, spawnedAt }));
 	}
 
 	/**
@@ -1492,6 +1549,7 @@ export class ClientRegistry {
 			// never outlives the attempts it describes.
 			this.lastSpawnVerdict.delete(key);
 			this.clientSpawnedAt.set(key, Date.now());
+			this.clientLaunchStartedAt.set(key, startedAt);
 			this.clientLastUsedAt.set(key, Date.now());
 			this.scheduleIdleEviction(key, server);
 			this.failureCounts.delete(key);

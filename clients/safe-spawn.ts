@@ -1151,7 +1151,8 @@ function getPathExts(env: NodeJS.ProcessEnv): string[] {
 		.filter(Boolean);
 }
 
-function statIsFile(candidate: string): boolean {
+/** Whether `candidate` is a regular file, following links; any stat failure reads false. */
+export function statIsFile(candidate: string): boolean {
 	try {
 		return fs.statSync(candidate).isFile();
 	} catch {

@@ -477,16 +477,27 @@ describe("touchFile capability-aware AGGREGATE wait (#814)", () => {
 		expect((result as { inconclusive?: boolean }).inconclusive).toBe(true);
 		const { getDegradationSummary } =
 			await import("../../../clients/degradation-ledger.js");
-		expect(getDegradationSummary()).toEqual([
-			expect.objectContaining({
-				kind: "lsp-diagnostics-timeout",
-				count: 2,
-				latestReasons: expect.arrayContaining([
-					expect.objectContaining({ subject: "marksman" }),
-					expect.objectContaining({ subject: "typos" }),
-				]),
-			}),
-		]);
+		// #3952: both servers here declare `idleEviction: "resident"`, so the
+		// touch also records one `lsp-idle-eviction-declined` row per server
+		// (a declaration, not a timer that failed). This case is about the
+		// timeout verdict, so it asserts its own group and admits the decline
+		// row by name rather than pinning the ledger to one kind.
+		expect(getDegradationSummary()).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					kind: "lsp-diagnostics-timeout",
+					count: 2,
+					latestReasons: expect.arrayContaining([
+						expect.objectContaining({ subject: "marksman" }),
+						expect.objectContaining({ subject: "typos" }),
+					]),
+				}),
+				expect.objectContaining({
+					kind: "lsp-idle-eviction-declined",
+					count: 2,
+				}),
+			]),
+		);
 	});
 
 	it("(d) scope-all: EVERY spawned server is silent+tier3-silent — resolves at the max of their budgets as CONFIRMED clean", async () => {

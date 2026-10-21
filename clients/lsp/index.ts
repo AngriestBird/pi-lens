@@ -178,7 +178,9 @@ export interface LSPWorkspaceScopeAttribution {
 import { raceToCompletion, type PromiseDescriptor } from "./aggregation.js";
 import {
 	applyWorkspaceEdit,
+	captureRenameExpectedContent,
 	mergeWorkspaceTextEditsByPriority,
+	type RenameTrackedSend,
 	summarizeWorkspaceEdit,
 	validateWorkspaceEdit,
 } from "./edits.js";
@@ -2749,15 +2751,7 @@ export class LSPService {
 	getTrackedContent(
 		filePath: string,
 		cwd: string,
-	):
-		| {
-				hash: string;
-				changedAtMs?: number | undefined;
-				openedAtMs?: number | undefined;
-				openedHash?: string | undefined;
-				clientStartedAtMs?: number | undefined;
-		  }
-		| undefined {
+	): RenameTrackedSend | undefined {
 		const priorityServerIds = getServersForFileWithConfig(filePath).map(
 			(server) => server.id,
 		);
@@ -3531,6 +3525,19 @@ export class LSPService {
 	async restartPrimaryClientsUnder(root: string): Promise<number> {
 		if (this.checkDestroyed()) return 0;
 		return (await this.clientRegistry.restartPrimaryClientsUnder(root)).length;
+	}
+
+	/**
+	 * #4532: the roots of the live PRIMARY clients, each with the epoch ms its
+	 * earliest live client at that root spawned. The `tool_result` install look
+	 * runs at each of these roots as well as the session's cwd, so an install in
+	 * a LINKED WORKTREE restarts that worktree's server; before this, the look
+	 * only ever ran at the session cwd, and a worktree install reached no server
+	 * for 14 minutes (issue #4532 gap 7). Read-only: spawns nothing.
+	 */
+	livePrimaryClientRoots(): Array<{ root: string; spawnedAt: number }> {
+		if (this.checkDestroyed()) return [];
+		return this.clientRegistry.livePrimaryClientRoots();
 	}
 
 	/**
@@ -7771,6 +7778,12 @@ export class LSPService {
 			return false;
 		});
 
+		// #3734: the instant the servers are asked. Every file a returned edit
+		// writes text to must still hold the bytes each server computed from; a
+		// write that lands from here on is refused inside pi's queue, before any
+		// write. The same instant the `rename` path takes before its request
+		// (#3601); see `captureRenameExpectedContent` for the rules.
+		const renameRequestedAtMs = Date.now();
 		const willResults = await Promise.all(
 			willRenameClients.map(async ({ serverId, client }) => {
 				try {
@@ -7820,6 +7833,17 @@ export class LSPService {
 				mutationContext: options.mutationContext,
 				observe: false,
 				watchedFileSink: this,
+				// #3734: nothing read the old path on this flow, so there is no
+				// target: every text-edited file is bound by its client's send record,
+				// else by its mtime against the instant above (`formal/lsp-rename-edit`,
+				// `Issue3734Bound`).
+				expectedContent: captureRenameExpectedContent(
+					merged.edit,
+					cwd,
+					renameRequestedAtMs,
+					(filePath: string, atCwd: string) =>
+						this.getTrackedContent(filePath, atCwd),
+				),
 			});
 		} catch (err) {
 			if (options.mutationContext) {

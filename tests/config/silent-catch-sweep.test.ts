@@ -809,9 +809,9 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 	}, // :65
 	"clients/lsp/launch.ts": {
 		silent: 11,
-		identities: "679b905d4af5e7db",
+		identities: "af7b6d53949cd956",
 		reason: PRE_RULE,
-	}, // :97, :195, :294, :359, :392, :649, :655, :881, :1110, :1121, :1132
+	}, // :96, :194, :293, :388, :442, :700, :706, :941, :1166, :1177, :1188
 	"clients/lsp/lombok.ts": {
 		silent: 6,
 		identities: "a076d98b1826881f",
@@ -929,9 +929,9 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 	}, // :291, :328, :387
 	"clients/out-of-band-changes.ts": {
 		silent: 3,
-		identities: "7d466b1252af9e30",
+		identities: "ec722a49db9a4818",
 		reason: SHARP_INSTALL_STAMP,
-	}, // :129, :140, :189
+	}, // :146, :177, :264
 	"clients/package-manager.ts": {
 		silent: 2,
 		identities: "56b6f18636fed761",
@@ -1124,9 +1124,9 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 	}, // :399, :919, :1014, :1209, :1661, :2495, :2929, :3507, :3731
 	"clients/runtime-turn.ts": {
 		silent: 20,
-		identities: "4baf397dfa7d293d",
+		identities: "d3c52ebe36413a9f",
 		reason: PRE_RULE,
-	}, // :393, :413, :438, :689, :738, :750, :817, :1043, :3319, :3325, :3331, :4697, :4524, :4645, :4678, :4899, :5032, :5352, :5393, :5648
+	}, // :393, :413, :438, :696, :761, :773, :840, :1066, :3342, :3348, :3354, :4720, :4547, :4668, :4701, :4922, :5055, :5375, :5416, :5671
 	"clients/safe-spawn.ts": {
 		silent: 18,
 		identities: "e64267868c7a0d5b",
@@ -1223,10 +1223,10 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 		reason: PRE_RULE,
 	}, // :238, :406
 	"clients/tree-sitter-client.ts": {
-		silent: 30,
-		identities: "b4c4b8bd525f5d57",
+		silent: 29,
+		identities: "3871ef6d8dab7e4c",
 		reason: PRE_RULE,
-	}, // :291, :306, :998, :1054, :1082, :1098, :1346, :1473, :1815, :1911, :2033, :2057, :2185, :2364, :2530, :2570, :2777, :2827, :3678, :3695, :3705, :3724, :3751, :3776, :3827, :3871, :3883, :3946, :5276, :5321
+	}, // :310, :325, :1017, :1073, :1101, :1117, :1365, :1492, :1906, :2162, :2186, :2314, :2493, :2659, :2699, :2906, :2956, :3807, :3824, :3834, :3853, :3880, :3905, :3956, :4000, :4012, :4075, :5405, :5450
 	"clients/tree-sitter-query-loader.ts": {
 		silent: 3,
 		identities: "849c788bdb73aed7",
@@ -1269,9 +1269,9 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 	}, // :115, :245
 	"clients/widget-state.ts": {
 		silent: 3,
-		identities: "e99ef23d332bc102",
+		identities: "0627f400a0b73f7f",
 		reason: PRE_RULE,
-	}, // :1476, :1621, :1862
+	}, // :1503, :1655, :1898
 	"clients/word-index.ts": {
 		silent: 5,
 		identities: "7d9f55557f569789",
@@ -1343,10 +1343,10 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 		reason: PRE_RULE,
 	}, // :371, :405, :628, :861, :1026, :1084, :1184, :1405, :1452, :2477
 	"tools/lsp-navigation.ts": {
-		silent: 10,
-		identities: "158733f8dbc9b754",
+		silent: 8,
+		identities: "7d261d33eecee18f",
 		reason: PRE_RULE,
-	}, // :531, :741, :759, :824, :838, :1334, :1703, :1808, :1842, :2030
+	}, // :529, :739, :757, :1200, :1569, :1676, :1710, :1898
 	"tools/lsp-structured-output.ts": {
 		silent: 3,
 		identities: "0460d5b535aef4a2",

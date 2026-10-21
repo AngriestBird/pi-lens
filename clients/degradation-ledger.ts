@@ -260,6 +260,12 @@ export type DegradationKind =
 	 */
 	| "data_dir_migrated"
 	/**
+	 * A late dead-code scan's baseline write threw (a full or read-only disk, a
+	 * cache path taken by a file). The scan's findings are still delivered; only
+	 * the on-disk baseline is lost. Subject is the client id (review of #4663).
+	 */
+	| "dead-code-baseline-write-failed"
+	/**
 	 * A dead-code scan that missed the turn_end budget finished in the
 	 * background and was NOT used (#4117): its session ended before it settled
 	 * (`session-ended`), or it failed (`scan-failed`; a timeout or kill also
@@ -690,6 +696,21 @@ export type DegradationKind =
 	| "lsp-breaker"
 	| "lsp-capability-skip"
 	/**
+	 * #4532: one bash `tool_result` found more live primary client roots outside
+	 * the session root than `CLIENT_ROOT_LOOK_CAP`, so the install look only ran
+	 * at the first few (clients/runtime-tool-result.ts). An install in the rest
+	 * reaches no server until a tool call names a file under that root. Subject is
+	 * `cap`; once per session, because the population is the process's, not one
+	 * command's.
+	 */
+	| "lsp-client-root-look-capped"
+	/**
+	 * #4532: the install look at a live client root threw, so nothing is known
+	 * about that root's install and the absence of a publish is not evidence of
+	 * none. Subject is the root; once per root per session.
+	 */
+	| "lsp-client-root-look-failed"
+	/**
 	 * The napi fallback ADMITTED a file — its extension is in the in-process
 	 * language matrix (`clients/dispatch/runners/ast-grep-napi.ts`) — and the
 	 * addon that actually loaded then exposed no grammar for it, so every rule
@@ -814,6 +835,16 @@ export type DegradationKind =
 	 */
 	| "lsp-edit-stale-content"
 	/**
+	 * #4532: a TypeScript diagnostic was demoted from blocking to warning
+	 * because the file's root resolves no `node_modules`, so its ambient
+	 * declarations (`node:*` module types, the `NodeJS` namespace, `node`'s
+	 * globals) are absent. `clients/lsp/environment-gap.ts` produces it; the
+	 * subject is the admitted TypeScript code (`2307`, `2503`, `2304`), which is
+	 * also the admission key, so the count carries repeats and the ledger holds
+	 * at most three subjects per session. A refusal never records here.
+	 */
+	| "lsp-environment-gap-demoted"
+	/**
 	 * #4320: this process cannot tell when a path was born (the filesystem
 	 * reports no birth time, or Node reports ctime as it without statx), so a
 	 * file created while a language server runs is announced as Changed.
@@ -826,6 +857,18 @@ export type DegradationKind =
 	 * next request. Subject is the client key.
 	 */
 	| "lsp-idle-eviction"
+	/**
+	 * #3952: `scheduleIdleEviction` was asked to arm a client and DECLINED,
+	 * because the server object the service holds does not declare
+	 * `idleEviction: "transparent"` and the client is not an adopted-root one.
+	 * The pair this row separates is `resident-by-declaration` (a policy answer:
+	 * `unmeasured`/`resident` servers are meant to stay) from
+	 * `not-evicted` (a measurement whose arm never reached the policy), and
+	 * before it both read as "the timer did not fire". Subject is the server id,
+	 * recorded ONCE per server per session: the declaration is the same every
+	 * time, so one row answers for every touch of that server.
+	 */
+	| "lsp-idle-eviction-declined"
 	/**
 	 * #4596: an implicit-scope question could not be answered — a JS/TS file
 	 * that cannot be read or parsed, a Go package directory that cannot be
@@ -2385,6 +2428,17 @@ const INFORMATIONAL_DEGRADATION_KINDS: ReadonlySet<string> = new Set([
 	// the cap and its re-offer working together; the agent's message carries
 	// the "N held" note, and the ledger needs only the tally.
 	"turn-end-sections-held",
+	// #3952: both are the idle-eviction POLICY answering, not a timer that
+	// failed. `lsp-idle-eviction` is the memory bound releasing a client that
+	// respawns on the next request; `lsp-idle-eviction-declined` is the
+	// declaration `unmeasured`/`resident` doing its job, once per server, so a
+	// nominal session writes up to one row per non-`transparent` server (32 of
+	// the 49 built-ins today). A `⚠` per server on every healthy session is
+	// the cry-wolf shape #2505 rejected; the sibling that DOES stand out is a
+	// measurement whose arm never reached the policy, and that one reads as a
+	// missing row, not as a warning here.
+	"lsp-idle-eviction",
+	"lsp-idle-eviction-declined",
 ]);
 
 export function renderDegradationLines(

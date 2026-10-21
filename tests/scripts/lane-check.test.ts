@@ -91,8 +91,8 @@ function makeLane(spec: LaneSpec) {
 	const home = path.join(env.tmpDir, "home");
 	const bin = path.join(env.tmpDir, "bin");
 	for (const dir of [root, tmp, home, bin]) fs.mkdirSync(dir);
-	// A copy, not a symlink: with-test-lock.mjs is a no-op behind a symlinked
-	// `scripts/` (its entry-point check compares real paths).
+	// A copy, not a symlink: the fixture repo must own its `scripts/` so the
+	// copied scripts resolve their repo root and Git state inside `root`.
 	fs.cpSync(REAL_SCRIPTS, path.join(root, "scripts"), { recursive: true });
 	// The copied scripts run their own Git reads (lane-check's changelog check,
 	// check-pr-body, red-on-base), so the copied helper needs its policy file:

@@ -29,6 +29,7 @@ import {
 	resolveToolCallFilePath,
 } from "./path-utils.js";
 import { detectFileKind } from "./file-kinds.js";
+import { isSessionBookkeepingRoot } from "./analysis-root.js";
 import {
 	extractReadPathsFromCommand,
 	extractDeletedPathsFromCommand,
@@ -103,7 +104,10 @@ import {
 import type { PiLensFlagSource } from "./lens-config.js";
 import type { EditToolDetails } from "@earendil-works/pi-coding-agent";
 import type { LSPShutdownOptions } from "./lsp/client.js";
-import { notifyExternalFileChange } from "./lsp/capabilities.js";
+import {
+	notifyExternalFileChange,
+	peekLSPService,
+} from "./lsp/capabilities.js";
 import type { MetricsClient } from "./metrics-client.js";
 import { type PipelineResult, runPipeline } from "./pipeline.js";
 import {
@@ -226,6 +230,49 @@ export function isFailedGitIntegrationCommand(
 		}
 		return false;
 	});
+}
+
+/**
+ * #4532: client roots one bash `tool_result` looks at for an install, besides
+ * the session's own root. A process serving more roots than this looks at the
+ * first ones and records the cap (a bound that is not disclosed is a silenced
+ * answer). Four covers the shapes the issue measured: a main checkout, a linked
+ * worktree, an adopted sibling root, and one spare.
+ */
+const CLIENT_ROOT_LOOK_CAP = 4;
+
+/**
+ * #4532: the live primary client roots the install look has NOT already
+ * covered — everything except the session's own root, which the head look at
+ * `sessionRoot` just looked at. Read-only: `peekLSPService` spawns nothing, and
+ * a service without the accessor answers no extra roots (today's behaviour).
+ * Roots are de-duplicated by path key, and the cap is enforced here with one
+ * bounded record per session so a many-root process is never silently unbounded.
+ */
+function liveClientRootsApartFrom(
+	sessionRoot: string,
+): Array<{ root: string; spawnedAt: number }> {
+	const service = peekLSPService();
+	const roots = service?.livePrimaryClientRoots?.() ?? [];
+	if (roots.length === 0) return [];
+	const sessionKey = normalizeMapKey(sessionRoot);
+	const seen = new Set<string>([sessionKey]);
+	const out: Array<{ root: string; spawnedAt: number }> = [];
+	for (const entry of roots) {
+		const key = normalizeMapKey(entry.root);
+		if (seen.has(key)) continue;
+		seen.add(key);
+		out.push(entry);
+	}
+	if (out.length > CLIENT_ROOT_LOOK_CAP) {
+		recordDegradationOnce({
+			kind: "lsp-client-root-look-capped",
+			subject: "cap",
+			reason: `${out.length} live primary client root(s) outside the session root; the first ${CLIENT_ROOT_LOOK_CAP} got the install look, so an install in the rest is not seen until a tool call names one of their files`,
+		});
+		return out.slice(0, CLIENT_ROOT_LOOK_CAP);
+	}
+	return out;
 }
 
 /**
@@ -2195,6 +2242,58 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 					signal: headMoveSignal,
 					hook: "tool_result_edit",
 					label: "head-move-resync",
+				},
+			);
+		}
+		// #4532 gap 7: the install look also runs at the roots of the LIVE primary
+		// clients, not only at the session's cwd. A session whose cwd is a main
+		// checkout can drive a server rooted in a LINKED WORKTREE, and a
+		// `node_modules` symlinked into that worktree was invisible to a look that
+		// only ever read the session root's install stamp: tsserver republished the
+		// same seven `@types/node` gaps for 14 minutes after `tsc` was clean. Keyed
+		// on the live ROOTS, not on the files this command wrote (a `ln -s` writes
+		// no project file), and each root is looked at with its own client's spawn
+		// epoch, so a FIRST look at that root publishes an install the client never
+		// read instead of recording it as the baseline. It runs before the primary
+		// resync below, so a restart lands before the resend.
+		const clientRoots = liveClientRootsApartFrom(headScanRoot);
+		if (clientRoots.length > 0) {
+			const lookSignal = deps.signal ?? undefined;
+			await bounded(
+				Promise.all(
+					clientRoots.map((entry) =>
+						lookForOutOfBandChanges(
+							entry.root,
+							"tool_result",
+							// AGENTS.md "Analysis-root invariant": the look may run at
+							// an adopted root (its client must restart when its install
+							// appears), but an adopted root never receives session
+							// bookkeeping — no sequence, no receipt, no change-log entry
+							// (#4532 round 3, Greptile). The session root and its
+							// repository's linked worktrees are bookkeeping roots.
+							isSessionBookkeepingRoot(entry.root, headScanRoot)
+								? runtime
+								: undefined,
+							{
+								since: entry.spawnedAt,
+								walk: "interval",
+							},
+						).catch((cause: unknown) => {
+							// One bounded record per root: a look that threw tells nothing
+							// about the root's install, so it must not read as "no install".
+							recordDegradationOnce({
+								kind: "lsp-client-root-look-failed",
+								subject: normalizeMapKey(entry.root),
+								reason: `the install look at a live client root failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+							});
+						}),
+					),
+				),
+				{
+					ms: HOOK_WALL_BUDGET_MS.tool_result_edit,
+					signal: lookSignal,
+					hook: "tool_result_edit",
+					label: "client-root-install-look",
 				},
 			);
 		}

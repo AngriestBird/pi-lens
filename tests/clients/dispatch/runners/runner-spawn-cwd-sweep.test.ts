@@ -148,7 +148,11 @@ const POPULATION_FILES = [
  * listGitHeadDelta (opaque-mutation-scan.ts, already counted).
  */
 const EXPECTED_FILES = 79;
-const EXPECTED_DIRECT_SITES = 135;
+// 135 -> 134 (#4532 round 3): `findBinaryOnPath` stopped spawning
+// `which`/`where` — the bare-command probe resolved its own binary through the
+// path and cwd it was asked to judge, so a project-supplied `which` ran. It is
+// an in-process PATH scan now, and 134 counts the direct spawns that remain.
+const EXPECTED_DIRECT_SITES = 134;
 /**
  * Every same-file spawn-routing wrapper call site the scan discovers. Pinned
  * as a LIST, not a count, because the list is the part round 2 got wrong: it
@@ -242,10 +246,11 @@ const NO_CWD_EXEMPTION_ROWS: ReadonlyArray<readonly [string, string]> = [
 		"clients/lsp/launch.ts#runStderrGuardedProbe:eedfa033",
 		"execFileSync runs a stderr probe and does not resolve project configuration",
 	],
-	[
-		"clients/lsp/launch.ts#findBinaryOnPath:90f3c9a8",
-		"execFileSync runs a PATH lookup and does not resolve project configuration",
-	],
+	// #4532 removed `clients/lsp/launch.ts#findBinaryOnPath:90f3c9a8` ("runs a
+	// PATH lookup and does not resolve project configuration"): round 2 passed
+	// the spawn cwd, and round 3 removed the spawn entirely. The probe is an
+	// in-process PATH scan now, so there is no child whose cwd could come from
+	// anywhere but itself.
 	[
 		"clients/pipeline.ts#runPipeline:6e2471d5",
 		"runPipeline hands its `ctx`, which carries `cwd`, to analysePipeline, its own body split off by #3506 so the queue hold's `finally` wraps it; the argument is named `ctx`, so the wrapper rule reads it as no cwd. The checked site is analysePipeline's runAutofix call",

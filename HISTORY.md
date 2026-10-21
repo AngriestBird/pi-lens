@@ -1,5 +1,84 @@
 # HISTORY
 
+## 2026-10-20 — a fold rule that ran only after the lane was written
+
+Three documents decided folding before this date, and none of them read the
+open-issue board when a lane was still being planned: the consolidation audit in
+`AGENTS.md`, the brief-time sibling fold in `docs/pi-lens-merge-policy.md`
+"Brief contract (orchestrator)", and the review-follow-up folds in that file's
+"Filing issues (orchestrator)" and `docs/pi-lens-subagent.md` "Follow-ups". So
+an issue a planned lane could settle still became its own fix later, which is
+the issue-list growth the p3 known-gap rules exist to prevent.
+
+The fix is a `fold check` in `AGENTS.md` "Orchestration and delegated work": as
+soon as a lane's mechanism is known, read every open issue against it, fold the
+candidates into that PR with one `Closes #…` each, and record a decision for
+each one that stays out. #4672 is the first lane to run it: it planned to fold
+#3920's three members into one change, refused #3753 with a reason, and sent two
+findings that no lane could carry (#4673, and the `index-3248` shuffle member on
+#4561) to the record instead of the folder.
+
+## 2026-10-20 — instrument attributes by id and order (shape 76)
+
+The nightly capability census bracketed each fixture phase with a byte offset
+into `extension.log`, a buffered async sink, and `filterPublishTrace` drained
+rows by `server` alone. Five typescript fixtures share that id, so a foreign
+client's late `diags=1` publish landed in the clean fixture's phase;
+`classifyFirstPublish` reads order only, so the cell flipped between
+`empty-first` and `direct` and the two-run hysteresis committed the flip. Raw
+JSON-RPC against ts-ls 5.3.0 with TS 5.9.3 showed what the fixtures actually
+do: `bad.ts` publishes one dirty set carrying 2322, `clean.ts` publishes one
+EMPTY set and nothing else. The marker had no measurement behind it (#4615).
+
+## 2026-10-20 — cancellation read as failure (shape 77)
+
+Master's required `TLA+ models` check reded while every model in the shard was
+`ok`: shard 4/4 finished all its steps and was recorded `cancelled` at 735 s
+against a 720 s cap, and the aggregate compares the shard result against
+`success` alone. A rerun reproduced it at 726 s, and the infra-kill classifier
+never looked, because that workflow gates on a `failure` conclusion. The four
+shards took 268, 349, 494 and 726 seconds, so one shard owns the tail of a
+round-robin split by count (#4672).
+
+## 2026-10-20 — a dependency's cache directory attributed to the fixture (shape 78)
+
+`jiti`'s `prepareCacheDir` runs `mkdirSync(os.tmpdir()/jiti)` on the caller's
+stack when pi's loader resolves an extension by path, so the tmp-root
+interposer recorded the directory as a fixture sibling of
+`tests/clients/skills-package-filter.test.ts` — accurate per process, wrong per
+cause. Pinning `JITI_FS_CACHE=0`/`JITI_CACHE=0` drops the write from 1/1 to 0/0
+and a planted sibling still reds (#4673).
+
+## 2026-10-20 — the lesson shapes 76, 77 and 78 share
+
+All three share one lesson: the surface that reports a result is not the surface
+that produced it, so a verdict read from an aggregate, an ordering, or a
+recorded creator needs the producing step's own evidence before anything trusts
+it.
+
+## 2026-10-19 — a defensive copy severed the identity the idle-eviction probe arms
+
+`compileLspRegistry` returned `{ ...server }` for every built-in with no command
+override (since `7f7c8cde6`, #2372), so the object the client registry kept as
+`SpawnedServer.info` was a copy. The nightly idle-eviction probe arms
+`server.idleEviction = "transparent"` on the object `LSP_SERVERS` /
+`getServerById` exposes; the copy never saw the arm, so `scheduleIdleEviction`
+declined to start a timer. From the 2026-10-10 nightly on, every candidate row
+in `docs/lsp-idle-eviction.md` read `not-evicted`, and the promotion sweep
+(#3989) had nothing to promote.
+
+Nine nights of those rows reached the doc and were read as a measurement
+verdict rather than as a defect: "not evicted yet" from a server whose timer
+never armed is indistinguishable, on that surface, from a server whose eviction
+is merely slow. CI stayed green because the probe's driver test doubles
+`getServersForFileWithConfig`, and the earlier rollout witness read the catalog
+fallback instead of a compiled session config.
+
+`clients/lsp/config.ts` now hands back the catalog entry itself, an overridden
+server keeps its own copy, and `scheduleIdleEviction` records
+`lsp-idle-eviction-declined` once per server per session so "no timer was
+scheduled" stops reading as "the eviction is slow". PR #4639.
+
 ## 2026-10-18 — swallowed failure recorded as a different event (shape 75)
 
 Shape 75 ("Swallowed failure recorded as a different event") entered the catalog
