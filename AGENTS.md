@@ -1189,6 +1189,18 @@ file-scoped worklist and receives no project-wide scanner output.
   command that did write. Scan evidence is scoped to the checkout it ran in: a
   recognized write outside that root is kept (never cleared by a scan that
   could not see it) and earns no authorship the scan cannot confirm.
+- A bash command's writes are recovered from that session root AND from every
+  checkout the command ITSELF names — its `cd`/`pushd` target or a recognised
+  write operand — when that checkout is a linked worktree of the session's own
+  repository (`resolveOpaqueRecoveryRoots`, `sameCheckoutOtherRoot`). Both hooks
+  derive the same bounded list (`OPAQUE_RECOVERY_ROOT_CAP`) from the command
+  text and the session root, so a record and its take still name one key per
+  root; a checkout of another repository, a checkout named past the cap, and a
+  git target under a non-checkout session root each leave one bounded
+  `opaque-recovery-root-refused` record per session. This is why a `cd` into a
+  sibling worktree no longer reads a clean `git status` in the wrong checkout as
+  "nothing changed". Relative operands resolve against the `cd` in effect for
+  their own segment (`scanShellWriteScopes`), never against the session root.
 - `RUNNERS` declarations include file kinds. Runner selection is gated by file
   kind and anchored at the file's language root, not by dispatch-root config or
   declaration order. Runner children use `resolveToolCwd` with launcher markers.

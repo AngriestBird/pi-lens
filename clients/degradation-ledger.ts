@@ -1144,6 +1144,15 @@ export type DegradationKind =
 	 * retired; a result that still arrives loses its authorship. Counted.
 	 */
 	| "opaque-baseline-lost"
+	/**
+	 * #2050: a bash command named a git checkout that got NO opaque baseline, so
+	 * its writes were not observed. Subject is the normalized root (once per
+	 * root per session), or `cap` when the command named more checkouts than
+	 * `OPAQUE_RECOVERY_ROOT_CAP`. Deliberately not `opaque-baseline-lost`, which
+	 * is a baseline that WAS taken and then dropped: this one was never taken,
+	 * because the root is not a linked worktree of the session's repository.
+	 */
+	| "opaque-recovery-root-refused"
 	/** Opaque mutation was analyzed without granting autonomous writer rights. */
 	| "opaque-mutation-ownership-boundary"
 	/** Opengrep completed with partial parsing warnings (#2943). */

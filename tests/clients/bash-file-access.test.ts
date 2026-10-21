@@ -9,6 +9,7 @@ import {
 	extractWrittenPathsFromCommand,
 	isEditClassToolResult,
 	parseGrepContextLines,
+	scanShellWriteScopes,
 	tokenizeShellCommand,
 	type ReadSpan,
 } from "../../clients/bash-file-access.js";
@@ -1013,6 +1014,79 @@ describe("commands with no file content are not registered at all", () => {
 			expect(extractWrittenPathsFromCommand(build(f), tmp)).not.toContain(f);
 		});
 	}
+});
+
+// ── #2050: a command's own `cd` decides where its operands land ─────────────
+
+describe("scanShellWriteScopes — the command's effective directory (#2050)", () => {
+	/** The scan's own absolute paths, so a relative fixture cannot leak in. */
+	function written(command: string): string[] {
+		return scanShellWriteScopes(command, tmp).written;
+	}
+
+	it("resolves a redirect after `cd` against the directory it entered", () => {
+		const sub = path.join(tmp, "sub");
+		expect(written(`cd ${sub} && echo x > f.ts`)).toEqual([
+			path.join(sub, "f.ts"),
+		]);
+		// The phantom the pre-fix resolution named, under the session root.
+		expect(written(`cd ${sub} && echo x > f.ts`)).not.toContain(
+			path.join(tmp, "f.ts"),
+		);
+	});
+
+	it("keeps one directory per segment across a chain of cds", () => {
+		const a = path.join(tmp, "a");
+		const b = path.join(tmp, "b");
+		expect(
+			written(`cd ${a} && echo x > in-a.ts && cd ${b} && echo y > in-b.ts`),
+		).toEqual([path.join(a, "in-a.ts"), path.join(b, "in-b.ts")]);
+	});
+
+	it("tracks pushd, and a relative cd against the directory already entered", () => {
+		const a = path.join(tmp, "a");
+		expect(
+			written(`pushd ${a} && echo x > one.ts && cd nested && echo y > two.ts`),
+		).toEqual([path.join(a, "one.ts"), path.join(a, "nested", "two.ts")]);
+	});
+
+	it("resolves a recognised `tee` operand against the cd too", () => {
+		const sub = path.join(tmp, "tee-dir");
+		expect(written(`cd ${sub} && echo x | tee f.ts`)).toEqual([
+			path.join(sub, "f.ts"),
+		]);
+	});
+
+	it("leaves the directory unchanged for a cd it cannot know statically", () => {
+		// `$DIR`, `cd -` and a glob are expansions only the shell can resolve, so
+		// the operand keeps the pre-#2050 answer rather than a guess.
+		for (const cd of ["cd $DIR", "cd -", "cd ../*"]) {
+			expect(written(`${cd} && echo x > f.ts`)).toEqual([
+				path.join(tmp, "f.ts"),
+			]);
+		}
+	});
+
+	it("reports the cd targets in command order, without duplicates", () => {
+		const a = path.join(tmp, "a");
+		const b = path.join(tmp, "b");
+		expect(
+			scanShellWriteScopes(`cd ${a} && cd ${b} && cd ${a} && true`, tmp)
+				.cdTargets,
+		).toEqual([a, b]);
+	});
+
+	it("does not credit a redirect inside a heredoc body", () => {
+		// The body is data for the interpreter, not shell syntax, and its offsets
+		// are relative to the substituted text.
+		expect(
+			written(
+				["cat <<'EOF'", "python3 - <<'PY' > not-a-write.ts", "PY", "EOF"].join(
+					"\n",
+				),
+			),
+		).toEqual([]);
+	});
 });
 
 // ── edge cases ──────────────────────────────────────────────────────────────
