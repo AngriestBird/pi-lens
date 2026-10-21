@@ -1202,7 +1202,7 @@ file-scoped worklist and receives no project-wide scanner output.
   "nothing changed". Relative operands resolve against the `cd` in effect for
   their own segment (`scanShellWriteScopes`), never against the session root;
   that directory moves across `&&`, `;` and a newline only, never out of a `|`
-  or `&` subshell, and a `popd` restores the directory it pops (#4713).
+  or `&` subshell, and a `popd` restores the directory it pops.
 - A recovered write is judged by the checkout that OWNS it, in both directions:
   the ignore gate a synthetic bash-write dispatch passes asks the `.gitignore`
   of the root that admitted the write (`_ownerRoot`), not the session root's, so
@@ -1211,7 +1211,7 @@ file-scoped worklist and receives no project-wide scanner output.
   repository); and admission asks `analysis-root.ts`
   (`canWriteAnalysisRoot(resolveAnalysisRoot(...))`) rather than re-deriving the
   rule. Ownership is compared by REAL path, so a `cd` into a symlinked spelling
-  of a worktree keeps its authorship and its observed identity (#4713).
+  of a worktree keeps its authorship and its observed identity.
 - `RUNNERS` declarations include file kinds. Runner selection is gated by file
   kind and anchored at the file's language root, not by dispatch-root config or
   declaration order. Runner children use `resolveToolCwd` with launcher markers.
