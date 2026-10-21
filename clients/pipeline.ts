@@ -1735,11 +1735,11 @@ export async function runFormatPhase(
 	filePath: string,
 	getFormatService: () => FormatService,
 	dbg: PipelineContext["dbg"],
-	signal?: AbortSignal,
+	signal: AbortSignal | undefined,
 	budgetMs = HOOK_WALL_BUDGET_MS.tool_result_edit,
 	hook: LedgerHookKey = "tool_result_edit",
-	writeHold?: FileMutationHold,
-	sessionRoot?: string,
+	writeHold: FileMutationHold | undefined,
+	sessionRoot: string,
 ): Promise<FormatPhaseResult> {
 	let formatChanged = false;
 	let formattersUsed: string[] = [];
@@ -1748,9 +1748,7 @@ export async function runFormatPhase(
 	let fileContent: string | undefined;
 	let abandoned: Promise<void> | undefined;
 
-	const adopted =
-		sessionRoot !== undefined &&
-		resolveAnalysisRoot(filePath, sessionRoot) === "adopted";
+	const adopted = resolveAnalysisRoot(filePath, sessionRoot) === "adopted";
 	if (adopted)
 		emitBounded(
 			"adopted_root_writer_skipped",
@@ -1773,6 +1771,7 @@ export async function runFormatPhase(
 				signal,
 				budgetMs,
 				hook,
+				sessionRoot,
 				...(writeHold ? { writeHold } : {}),
 			});
 			abandoned = result.abandoned;

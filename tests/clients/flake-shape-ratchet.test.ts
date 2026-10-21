@@ -354,6 +354,16 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			reason:
 				"two activations in one process each assert their own module-level resetLSPService spy, and the singleton lifecycle holds one beforeReset at a time, so the seam cannot tell the activations apart; the stand-in spawns no language server",
 		},
+	// 2026-10-21 (#4675 r2): the format smoke runs the REAL FormatService and
+	// formatter selection; installation is the network boundary, so the stub
+	// answers `ensureTool`/`getToolPath` and the child process is doubled below
+	// it (AGENTS.md shape 66).
+	"in-process-mock:scripts/smoke-tools-format-install.test.ts::clients/installer/index":
+		{
+			detector: "in-process-mock",
+			reason:
+				"tool installation and discovery are the network boundary; the stub hands the real formatter resolution a managed path while the FormatService, selection and formatFile stay real and only the formatter child is doubled",
+		},
 
 	"never-settling-wait:scripts/mutate-fixture.test.ts": {
 		detector: "never-settling-wait",
