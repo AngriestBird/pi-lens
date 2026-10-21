@@ -58,3 +58,18 @@ export const LANGUAGES = [
 	"typescript",
 	"yaml",
 ] as const;
+
+/**
+ * #4687: the three ast-grep schemas carry `lang` as a plain string (the 24-id
+ * enum cost ~240 bytes per tool per request), so this is the one check that
+ * keeps an unknown id from reaching the CLI. It names every valid id, which is
+ * what the enum used to tell the model. Empty is "required" or "absent".
+ */
+export function astGrepLangError(
+	lang: string | undefined,
+	required: boolean,
+): string | undefined {
+	if (!lang?.trim()) return required ? "lang is required" : undefined;
+	if ((LANGUAGES as readonly string[]).includes(lang)) return undefined;
+	return `unknown lang "${lang}"; valid ids: ${LANGUAGES.join(", ")}`;
+}

@@ -1,20 +1,20 @@
 {
 	"pi": {
-		"budget": 20444,
+		"budget": 18478,
 		"descriptionTotal": 3338,
-		"schemaTotal": 15247,
+		"schemaTotal": 13460,
 		"tools": {
 			"ast_grep_outline": {
 				"description": 269,
-				"schema": 1380
+				"schema": 1163
 			},
 			"ast_grep_replace": {
 				"description": 124,
-				"schema": 1773
+				"schema": 1062
 			},
 			"ast_grep_search": {
 				"description": 94,
-				"schema": 1629
+				"schema": 1473
 			},
 			"effective_config": {
 				"description": 308,
@@ -30,7 +30,7 @@
 			},
 			"lsp_navigation": {
 				"description": 170,
-				"schema": 2432
+				"schema": 1729
 			},
 			"module_report": {
 				"description": 505,
@@ -59,9 +59,9 @@
 		}
 	},
 	"mcp": {
-		"budget": 19621,
+		"budget": 17894,
 		"descriptionTotal": 3321,
-		"schemaTotal": 14516,
+		"schemaTotal": 12946,
 		"tools": {
 			"pilens_analyze": {
 				"description": 98,
@@ -69,11 +69,11 @@
 			},
 			"pilens_ast_grep_replace": {
 				"description": 106,
-				"schema": 1862
+				"schema": 1151
 			},
 			"pilens_ast_grep_search": {
 				"description": 92,
-				"schema": 1718
+				"schema": 1562
 			},
 			"pilens_diagnostics": {
 				"description": 258,
@@ -93,7 +93,7 @@
 			},
 			"pilens_lsp_navigation": {
 				"description": 120,
-				"schema": 2521
+				"schema": 1818
 			},
 			"pilens_module_report": {
 				"description": 509,

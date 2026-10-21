@@ -88,25 +88,17 @@ describe("ast_grep_replace tool", () => {
 	});
 
 	describe("schema shape", () => {
-		it("lang uses enum not anyOf/const so LLMs do not double-quote it", () => {
+		// #4687: lang is a plain string (the enum cost ~240 bytes per request);
+		// the valid ids are enforced at execute (tests/tools/ast-grep-lang-check.test.ts).
+		it("lang is a plain string, not anyOf/const, so LLMs do not double-quote it", () => {
 			const tool = createAstGrepReplaceTool(makeClient());
 			const langSchema = (
 				tool.parameters as { properties: Record<string, unknown> }
 			).properties.lang as Record<string, unknown>;
 			expect(langSchema.type).toBe("string");
-			expect(Array.isArray(langSchema.enum)).toBe(true);
+			expect(langSchema.enum).toBeUndefined();
 			expect(langSchema.anyOf).toBeUndefined();
 			expect(langSchema.const).toBeUndefined();
-		});
-
-		it("lang enum includes common languages", () => {
-			const tool = createAstGrepReplaceTool(makeClient());
-			const langSchema = (
-				tool.parameters as { properties: Record<string, unknown> }
-			).properties.lang as { enum: string[] };
-			expect(langSchema.enum).toContain("typescript");
-			expect(langSchema.enum).toContain("python");
-			expect(langSchema.enum).toContain("rust");
 		});
 
 		it("hasKind description describes immediate-child semantics, not descendant (#1423)", () => {

@@ -21,7 +21,7 @@ import type { SearchReadLocation } from "../clients/search-read-registration.js"
 import { isAtOrAboveHomeDir } from "../clients/path-utils.js";
 import { compactRenderResult } from "./render-compact.js";
 import { combineAbortSignals } from "../clients/deadline-utils.js";
-import { LANGUAGES, resolveAstGrepPaths } from "./shared.js";
+import { astGrepLangError, resolveAstGrepPaths } from "./shared.js";
 
 /**
  * Build the agent-facing error text, appending a remediation hint derived from
@@ -345,8 +345,7 @@ export function createAstGrepSearchTool(astGrepClient: AstGrepClient) {
 			dump: Type.Optional(Type.Boolean()),
 			pattern: Type.Optional(Type.String({ description: "AST pattern." })),
 			lang: Type.String({
-				enum: [...LANGUAGES] as string[],
-				description: "Target language",
+				description: "Language id, e.g. typescript, tsx, python, go.",
 			}),
 			paths: Type.Optional(
 				Type.Array(Type.String(), {
@@ -376,7 +375,7 @@ export function createAstGrepSearchTool(astGrepClient: AstGrepClient) {
 			),
 			hasKind: Type.Optional(
 				Type.String({
-					description: "Immediate-child AST node kind filter.",
+					description: "Immediate child AST node kind filter.",
 				}),
 			),
 			hasDescendantKind: Type.Optional(
@@ -417,7 +416,7 @@ export function createAstGrepSearchTool(astGrepClient: AstGrepClient) {
 			strictness: Type.Optional(
 				Type.String({
 					enum: ["smart", "relaxed", "ast", "cst", "signature", "template"],
-					description: "Pattern matching strictness.",
+					description: "Match strictness; default smart.",
 				}),
 			),
 			validateOnly: Type.Optional(
@@ -597,12 +596,11 @@ export function createAstGrepSearchTool(astGrepClient: AstGrepClient) {
 					};
 				}
 
-				if (!lang.trim()) {
-					logOutcome("error", { errorRaw: "lang is required" });
+				const langError = astGrepLangError(lang, true);
+				if (langError) {
+					logOutcome("error", { errorRaw: langError });
 					return {
-						content: [
-							{ type: "text" as const, text: "Error: lang is required" },
-						],
+						content: [{ type: "text" as const, text: `Error: ${langError}` }],
 						isError: true,
 						details: {},
 					};

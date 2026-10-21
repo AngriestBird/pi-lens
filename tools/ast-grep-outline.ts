@@ -5,7 +5,7 @@ import type {
 } from "../clients/ast-grep-client.js";
 import { Type } from "../clients/deps/typebox.js";
 import { compactRenderResult } from "./render-compact.js";
-import { LANGUAGES, resolveAstGrepPaths } from "./shared.js";
+import { astGrepLangError, resolveAstGrepPaths } from "./shared.js";
 
 // Cap the wire payload so an outline over a large directory can't flood context.
 const MAX_FILES = 50;
@@ -70,9 +70,8 @@ export function createAstGrepOutlineTool(astGrepClient: AstGrepClient) {
 			}),
 			lang: Type.Optional(
 				Type.String({
-					enum: [...LANGUAGES] as string[],
 					description:
-						"Restrict to one language. Required for stdin; for paths, ast-grep infers per file when omitted.",
+						"Language id, e.g. typescript, python; inferred per file when omitted.",
 				}),
 			),
 			items: Type.Optional(
@@ -134,6 +133,8 @@ export function createAstGrepOutlineTool(astGrepClient: AstGrepClient) {
 				(p): p is string => typeof p === "string" && p.trim().length > 0,
 			);
 			if (rawPaths.length === 0) return errorResult("paths is required");
+			const langError = astGrepLangError(params.lang, false);
+			if (langError) return errorResult(`Error: ${langError}`);
 			// Resolve relative paths against the workspace; pass absolute paths to the
 			// CLI (execFile-style args — no shell interpolation).
 			const absPaths = resolveAstGrepPaths(rawPaths, cwd);
