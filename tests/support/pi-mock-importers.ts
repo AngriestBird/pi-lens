@@ -18,14 +18,17 @@
  * does not share, such as `clients/lsp`'s service), `unproducible-payload`, or
  * `double-subject`; `real-ui-harness` names a case whose claim is what the TUI
  * shows or mounts, which no in-process tier can produce until one binds a real
- * UI context; `pending slice N` marks a file a roadmap slice still owns, and
- * slice 10 (the last) records the final counts.
- * `real-ui-harness` is NOT a slice dependency: slice 5 builds no UI harness and
- * slice 10 is docs-and-stop, so a `pending slice N` label would name work no
- * slice carries (review F4 on #4702). Classes are the author's reading at
+ * UI context.
+ * `real-ui-harness` is NOT a slice dependency: no roadmap slice builds a UI
+ * harness (review F4 on #4702). Classes are the author's reading at
  * 2026-10-21 and are checked for vocabulary only; the SET of files is what the
- * gate pins. NO `pending slice` row remains: slice 7 (#4632) classified the last
- * three, with the probe that keeps each on the double.
+ * gate pins.
+ *
+ * THE VOCABULARY IS CLOSED. `pending slice N` was the last class the roadmap
+ * needed, and it is gone: every slice is closed and `pi-mock-importer-sweep`
+ * refuses the label, so a reopened placeholder reds instead of naming work no
+ * slice carries. A class an author believes is missing is a deliberate edit to
+ * that test's vocabulary, never a free-form string here.
  */
 
 import * as fs from "node:fs";
