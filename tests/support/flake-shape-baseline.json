@@ -101,6 +101,7 @@
 		"scripts/lint-js.test.ts": 6,
 		"scripts/lockfile-completeness.test.ts": 1,
 		"scripts/lsp-idle-eviction-promote.test.ts": 3,
+		"scripts/markdown-lexer-entry-points.test.ts": 2,
 		"scripts/mutate-fixture.test.ts": 2,
 		"scripts/mutate.test.ts": 1,
 		"scripts/mutation-report-render.test.ts": 3,

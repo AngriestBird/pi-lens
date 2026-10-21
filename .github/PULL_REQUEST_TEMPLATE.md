@@ -154,3 +154,16 @@ The `PR body` check requires one of two forms here:
 
 A section that only lists the files this PR changed is refused: that is a
 change list, not a tree-wide sweep (#4248, #4273).
+
+## Fold check
+
+The fold check ran before this lane was written (AGENTS.md, "Orchestration and
+delegated work"): every open issue and pull request against this change's
+mechanism got a decision. One line per candidate, `#N` first:
+`#N folded: <reason>`, `#N not folded: <reason>`, or `#N sequenced: <reason>`;
+a `folded` line also carries its `Closes #N`. When the search found no
+candidate, write `none: <reason>`. `scripts/check-pr-body.mjs` refuses a section
+with neither form, a decision word with no reason after it, a decision spelling
+other than these three, a line that names a candidate without deciding it,
+`none:` beside a candidate line, and a `folded` candidate the body never
+closes (#4711, #4717).

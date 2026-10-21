@@ -94,6 +94,27 @@ jobs:
         with:
           node-version: "22"
 
+      # #4717: the body lint reads markdown through `marked`
+      # (scripts/lib/markdown-lexer.mjs). The lane keeps its "no install"
+      # cheapness: `npm install --no-save marked@<v>` would reify the whole
+      # lockfile (457 packages, measured), so the one zero-dependency tarball is
+      # fetched with `npm pack` and checked against the lockfile's sha512
+      # before it is unpacked. A mismatch, or a version the lockfile does not
+      # pin, fails the step: the lint never reads a body with an unpinned
+      # parser.
+      - name: Install marked (version and integrity pinned by the lockfile)
+        run: |
+          set -eu
+          version=$(node -p "require('./package.json').devDependencies.marked")
+          locked=$(node -p "require('./package-lock.json').packages['node_modules/marked'].version")
+          integrity=$(node -p "require('./package-lock.json').packages['node_modules/marked'].integrity")
+          test "$version" = "$locked"
+          tarball=$(npm pack --silent --ignore-scripts "marked@${version}" --pack-destination "$RUNNER_TEMP")
+          actual="sha512-$(openssl dgst -sha512 -binary "$RUNNER_TEMP/$tarball" | base64 -w0)"
+          test "$actual" = "$integrity"
+          mkdir -p node_modules/marked
+          tar -xzf "$RUNNER_TEMP/$tarball" -C node_modules/marked --strip-components=1
+
       - name: Validate PR body structure
         env:
           # Existing bodies need a cleanup window before prose becomes blocking.

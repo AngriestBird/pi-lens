@@ -1977,8 +1977,8 @@ consistent. Use sentence-case headings, Oxford commas, and no em-dash chains.
 Issue bodies lead with evidence, then root cause, acceptance criteria,
 observability, and cross-links. Every issue has one type label and at least one
 `area:` label, plus exactly one `priority:` label. Every PR includes `Summary`,
-`Tests`, `Blast radius`, `Class sweep`, and `Observability`; test changes also
-include `Test assessment`.
+`Tests`, `Blast radius`, `Class sweep`, `Observability`, and `Fold check`; test
+changes also include `Test assessment`.
 
 Observability is part of correctness. Name the record, sink, ledger, or test
 that proves a change. If no telemetry is appropriate, state why. Keep records
