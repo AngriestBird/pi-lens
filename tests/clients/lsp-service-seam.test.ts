@@ -87,6 +87,10 @@ describe("installLspServiceDouble({ beforeReset }) observes the reset call", () 
 		await installLspServiceDouble({});
 		// The second install's reset-first step ran the first lifecycle's hook once,
 		// with no options; what matters is that the reset after it is not heard.
+		// The first assertion is the red: a seam that never installs the hook
+		// (pre-fix) never calls `first` here, so the case reds on it.
+		expect(first).toHaveBeenCalledTimes(1);
+		expect(first).toHaveBeenCalledWith({});
 		first.mockClear();
 
 		resetLSPService({ reason: "idle" });
