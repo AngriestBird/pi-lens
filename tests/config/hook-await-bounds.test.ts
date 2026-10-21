@@ -1457,7 +1457,7 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"line-granular scan cannot see a caller's bound.",
 		owner: "#4493",
 	},
-	"clients/runtime-tool-result.ts#lookAtHead:cf85f0b1~e6bbc8fb": {
+	"clients/runtime-tool-result.ts#lookAtHead:cf85f0b1~dfd2c795": {
 		family: "hook-await",
 		site: "tool_result_read_only",
 		reason:
@@ -1468,12 +1468,13 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"line-granular scan cannot see a caller's bound.",
 		owner: "#4493",
 	},
-	"clients/runtime-tool-result.ts#publishRecoveredDrift:2231ec46~7bf2b803": {
+	"clients/runtime-tool-result.ts#publishRecoveredDrift:02371281~d6bd7169": {
 		family: "hook-await",
 		site: "tool_result_edit",
 		reason:
 			"Inside `publishRecoveredDrift` (#4535 slice 2, review round 2 F2, " +
-			"round 3 p3-3): the bash tool_result hands the recovered set to this " +
+			"round 3 p3-3; #4612 r4 moved its chunk loop onto " +
+			"`publishDiskChangeChunked`): the bash tool_result hands the recovered set to this " +
 			"chain with `void`, after its own bounded primary phase, exactly as " +
 			"the base branch `void`ed the detached `resyncGitChangedFiles` " +
 			"pass. Nothing awaits the chain, so it holds no hook and must not be " +
@@ -1482,7 +1483,7 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"does await.",
 		owner: "#4535",
 	},
-	"clients/runtime-tool-result.ts#publishRecoveredDrift:832d990f~ca5c4b35": {
+	"clients/runtime-tool-result.ts#publishRecoveredDrift:832d990f~51c52f98": {
 		family: "hook-await",
 		site: "tool_result_edit",
 		reason:
@@ -1490,7 +1491,8 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"round 3 p3-3): the same detached chain, awaiting one chunk's drift " +
 			"pass before publishing the next chunk, so the chunks resync in " +
 			"order instead of racing each other, and a rejection records the " +
-			"paths it drops. Detached for the same reason as the publish above.",
+			"chunk it drops and lets the next chunk run (#4612 r4). Detached " +
+			"for the same reason as the publish above.",
 		owner: "#4535",
 	},
 	"clients/runtime-tool-result.ts#resyncHeadMove:301d8f0a~1bf32683": {

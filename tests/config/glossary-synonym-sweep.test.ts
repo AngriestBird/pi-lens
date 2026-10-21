@@ -1083,7 +1083,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// with the same namespace to check the walk found a repository.
 		// 9 -> 10 (#4502): readGitStatusEntries resolves each porcelain path
 		// against the checkout base with the same namespace.
-		"clients/opaque-mutation-scan.ts": 10,
+		// 10 -> 11 (#4612 r4): it also resolves a rename's source token, so
+		// the discard baseline names both sides of the entry.
+		"clients/opaque-mutation-scan.ts": 11,
 		"clients/opengrep-client.ts": 8,
 		"clients/opengrep-config.ts": 3,
 		// 21 -> 23 (#4515 r2): commandSearchReachesProject splits PATH on

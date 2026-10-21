@@ -316,13 +316,18 @@ export async function publishDiskChange(
  *
  * `onChunk` is awaited after each chunk's fan-out and before the next publishes,
  * so a caller that must await a chunk's own answer (the recovered set's drift
- * pass) keeps one chunk in flight at a time.
+ * pass) keeps one chunk in flight at a time. It receives the chunk's position
+ * in the chain, because the ordinal is the caller's evidence when a chunk
+ * fails (`publishRecoveredDrift` records it and goes on).
  */
 export async function publishDiskChangeChunked(
 	input: ChunkableDiskChangeInput,
 	runtime?: DiskChangeRuntime,
 	onAppendError?: (err: unknown) => void,
-	onChunk?: (published: DiskChangePublishResult) => Promise<void> | void,
+	onChunk?: (
+		published: DiskChangePublishResult,
+		position: { index: number; total: number },
+	) => Promise<void> | void,
 ): Promise<DiskChangePublishResult[]> {
 	if (input.paths === "unknown")
 		return [await publishDiskChange(input, runtime, onAppendError)];
@@ -341,7 +346,7 @@ export async function publishDiskChangeChunked(
 			onAppendError,
 		);
 		published.push(one);
-		await onChunk?.(one);
+		await onChunk?.(one, { index, total: chunks });
 	}
 	return published;
 }

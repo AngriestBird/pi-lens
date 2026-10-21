@@ -5,6 +5,7 @@ import {
 	queueAgentAdvisory,
 } from "./agent-nudge.js";
 import {
+	addHeadDiscards,
 	captureFileStats,
 	type CaptureOptions,
 	diffFileContent,
@@ -20,6 +21,7 @@ import {
 	recoverOpaqueChangesViaGit,
 	serializeHeadLook,
 	shouldRunOpaqueRecovery,
+	takeHeadDiscards,
 } from "./opaque-mutation-scan.js";
 import {
 	isUnderDir,
@@ -133,7 +135,6 @@ import { bounded } from "./deadline-utils.js";
 import type { DiskChangeRuntime } from "./disk-changes.js";
 import {
 	DISK_CHANGE_MAX_RECORDED_PATHS,
-	publishDiskChange,
 	publishDiskChangeChunked,
 } from "./disk-changes.js";
 import {
@@ -247,6 +248,13 @@ export function isFailedGitIntegrationCommand(
  * the next check.
  */
 export function resyncHeadMove(args: HeadLook): Promise<void> {
+	// #4612 r4: this call's discard set is handed to the look key BEFORE the
+	// join, because a look that arrives while another of its key is in flight
+	// never runs its own closure (`serializeHeadLook` coalesces it into one
+	// trailing pass of the FIRST caller's closure, which captured that caller's
+	// `discarded`). Synchronous, so a joining caller's paths are in the
+	// accumulator before any drain that could owe them.
+	addHeadDiscards(args.key, args.discarded);
 	return serializeHeadLook(args.key, async () => {
 		try {
 			await lookForOutOfBandChanges(args.root, args.trigger, args.runtime);
@@ -268,6 +276,11 @@ interface HeadLook {
 	 * dirty set, so neither the delta nor the dirty status names these files;
 	 * the bash `tool_result` reads them from the call's own baseline and hands
 	 * them to this look, which publishes them with the move's delta.
+	 *
+	 * {@link resyncHeadMove} adds the set to the look key before it joins, so a
+	 * look that only JOINED another flight's still publishes its own set (#4612
+	 * r4: the closure that runs is the first caller's, and it captured the first
+	 * caller's array).
 	 */
 	discarded?: readonly string[];
 	/**
@@ -304,12 +317,16 @@ interface HeadLook {
  * publish whose HEAD never moved, so `sources` names it and `from`/`to` match).
  */
 async function lookAtHead(args: HeadLook): Promise<void> {
+	// The discards owed to this key: this pass's caller, plus any look that
+	// joined the flight and could not run its own closure (#4612 r4). Drained
+	// before the first await, so a joiner's add lands either before this drain
+	// (taken here) or after it (taken by the trailing pass its join earned).
+	const discarded = takeHeadDiscards(args.key);
 	if (!(await isGitWorktree(args.root))) return;
 	const head = await readGitHead(args.root);
 	if (!head) return;
 	const from = observeGitHead(args.key, head);
 	const moved = from !== undefined;
-	const discarded = args.discarded ?? [];
 	// A look that saw neither a move nor a discard has nothing to publish, and
 	// its row would be a row about no event (the same early return the delta had).
 	if (!moved && discarded.length === 0) return;
@@ -414,45 +431,54 @@ async function lookAtHead(args: HeadLook): Promise<void> {
  *
  * Each chunk's drift pass is awaited INSIDE this detached chain: the caller
  * `void`s the whole thing, so the hook still never waits, and the caller needs
- * exactly one rejection handler for the chain rather than one per chunk.
+ * exactly one rejection handler for the chain rather than one per chunk. The
+ * chunk loop itself is `publishDiskChangeChunked`'s (#4612 r4): a second loop
+ * over one cap was the same-shape sibling that helper exists to delete.
  *
- * A chunk that rejects stops the chain, so the chunks after it are never
- * published. That is a partial heal, and it is recorded as one: the base branch
- * dropped the whole set with a `dbg` line, which for a detached chain is no
- * record at all (review round 3, p3-3: the loss is now partial, and a partial
- * loss is exactly the state nothing recovers on its own).
+ * A chunk whose drift pass rejects is recorded and the chain goes on to the
+ * next chunk (#4612 r4, CodeRabbit): one failed pass must not leave every later
+ * chunk's documents stale. The record is counted per root, so a service that
+ * rejects every chunk costs one ledger entry whose count says how many, never
+ * one row per chunk (review round 3, p3-3: the base branch dropped the whole
+ * set with a `dbg` line, which for a detached chain is no record at all).
  */
 async function publishRecoveredDrift(
 	root: string,
 	paths: readonly string[],
 ): Promise<void> {
-	const chunks = Math.ceil(paths.length / DISK_CHANGE_MAX_RECORDED_PATHS);
-	for (let index = 0; index < chunks; index += 1) {
-		const start = index * DISK_CHANGE_MAX_RECORDED_PATHS;
-		try {
-			const { results, failedSubscribers } = await publishDiskChange({
-				root,
-				origin: "bash-recovery",
-				sources: [BASH_RECOVERY_DRIFT_SOURCE],
-				// `inferred`, the conservative label: the stat-diff strategy hashed
-				// the bytes, but the git strategy reported a status pair and an mtime
-				// window without reading them. A marker that wants to confirm "not
-				// reproduced" reads the bytes itself; the drift pass does exactly
-				// that.
-				kind: "inferred",
-				paths: paths.slice(start, start + DISK_CHANGE_MAX_RECORDED_PATHS),
-			});
-			await readHeldDocumentsAnswer(results, root, failedSubscribers).drift;
-		} catch (cause) {
-			const dropped = paths.length - start;
-			incrementDegradationCount({
-				kind: "disk-change-recovered-drift-failed",
-				subject: root,
-				reason: `chunk ${index + 1} of ${chunks} rejected, so ${dropped} recovered path(s) were never republished to a server: ${cause instanceof Error ? cause.message : String(cause)}`,
-			});
-			return;
-		}
-	}
+	await publishDiskChangeChunked(
+		{
+			root,
+			origin: "bash-recovery",
+			sources: [BASH_RECOVERY_DRIFT_SOURCE],
+			// `inferred`, the conservative label: the stat-diff strategy hashed
+			// the bytes, but the git strategy reported a status pair and an mtime
+			// window without reading them. A marker that wants to confirm "not
+			// reproduced" reads the bytes itself; the drift pass does exactly
+			// that.
+			kind: "inferred",
+			paths,
+		},
+		undefined,
+		undefined,
+		async ({ results, failedSubscribers }, { index, total }) => {
+			try {
+				await readHeldDocumentsAnswer(results, root, failedSubscribers).drift;
+			} catch (cause) {
+				// Every chunk before this one was full, so this chunk holds the cap
+				// or the remainder, whichever is smaller.
+				const dropped = Math.min(
+					DISK_CHANGE_MAX_RECORDED_PATHS,
+					paths.length - index * DISK_CHANGE_MAX_RECORDED_PATHS,
+				);
+				incrementDegradationCount({
+					kind: "disk-change-recovered-drift-failed",
+					subject: root,
+					reason: `chunk ${index + 1} of ${total} rejected, so its ${dropped} recovered path(s) were never republished to a server: ${cause instanceof Error ? cause.message : String(cause)}`,
+				});
+			}
+		},
+	);
 }
 
 /**
@@ -2250,9 +2276,10 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 					.then(() => publishRecoveredDrift(scanRoot, opaquePaths))
 					.catch((err) => {
 						// The one handler the base branch had for this detached chain.
-						// `publishDiskChange` never rejects (see its contract) and a drift
-						// rejection is recorded by `publishRecoveredDrift` chunk by chunk
-						// (review round 3, p3-3), so only a programming error reaches here.
+						// The publisher never rejects (see `publishDiskChange`'s contract)
+						// and a drift rejection is recorded by `publishRecoveredDrift`
+						// chunk by chunk (review round 3, p3-3; #4612 r4 lets the chain
+						// go on), so only a programming error reaches here.
 						// none: the two failure paths this chain owns record themselves, so
 						// a record here would duplicate one and mislabel the other.
 						dbg(`git-change LSP resync failed: ${err}`);

@@ -54,7 +54,10 @@ import { flushLatencyLog } from "../../clients/latency-logger.js";
 import { getGlobalPiLensLogDir } from "../../clients/probe-home-state.js";
 import {
 	captureGitDirtyPaths,
+	headLookPendingRerun,
+	headRecordKey,
 	observeGitHead,
+	opaqueBaselineSlot,
 	SAME_HEAD_DIRTY_SET_CAP,
 } from "../../clients/opaque-mutation-scan.js";
 import { lookForOutOfBandChanges } from "../../clients/out-of-band-changes.js";
@@ -68,6 +71,7 @@ import {
 } from "../../clients/runtime-tool-result.js";
 import { execFileSync } from "../support/git-fixture-env.js";
 import { runHandlerExpectingNoThrow } from "../support/handler-verdict.js";
+import { waitFor } from "./interleaving-kit.js";
 import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
@@ -418,6 +422,47 @@ describe("the HEAD look publishes instead of calling the LSP consumer", () => {
 	}, 30_000);
 });
 
+/** The `tool_call` half of one bash call, as the host hook builds it. */
+function bashCallDeps(h: Harness, input: unknown, toolCallId: string) {
+	return {
+		event: { toolName: "bash", toolCallId, input },
+		ctx: { cwd: h.root },
+		lensEnabled: true,
+		getFlag: () => false,
+		dbg: () => {},
+		runtime: h.runtime,
+		cacheManager: new CacheManager(false),
+		ensureLSPConfigInitialized: async () => {},
+		updateLspStatus: () => {},
+		resetLSPService: () => {},
+		sessionId: "slice2-session",
+	} as Parameters<typeof handleToolCall>[0];
+}
+
+/** The `tool_result` half of one bash call, as the host hook builds it. */
+function bashResultDeps(h: Harness, command: string, toolCallId: string) {
+	return {
+		event: {
+			toolName: "bash",
+			toolCallId,
+			input: { command },
+			content: [{ type: "text", text: "ok" }],
+		},
+		getFlag: () => false,
+		dbg: () => {},
+		runtime: h.runtime,
+		cacheManager: new CacheManager(false),
+		biomeClient: {},
+		ruffClient: {},
+		testRunnerClient: {},
+		metricsClient: {},
+		resetLSPService: () => {},
+		agentBehaviorRecord: () => [],
+		formatBehaviorWarnings: () => "",
+		sessionId: "slice2-session",
+	} as unknown as Parameters<typeof handleToolResult>[0];
+}
+
 /**
  * One bash call, as the two hooks drive it: the `tool_call` that records the
  * call's baseline and the `tool_result` that publishes what it wrote. Shared
@@ -425,48 +470,13 @@ describe("the HEAD look publishes instead of calling the LSP consumer", () => {
  */
 function sessionFor(h: Harness) {
 	let n = 0;
-	const callDeps = (input: unknown, toolCallId: string) =>
-		({
-			event: { toolName: "bash", toolCallId, input },
-			ctx: { cwd: h.root },
-			lensEnabled: true,
-			getFlag: () => false,
-			dbg: () => {},
-			runtime: h.runtime,
-			cacheManager: new CacheManager(false),
-			ensureLSPConfigInitialized: async () => {},
-			updateLspStatus: () => {},
-			resetLSPService: () => {},
-			sessionId: "slice2-session",
-		}) as Parameters<typeof handleToolCall>[0];
-	const resultDeps = (command: string, toolCallId: string) =>
-		({
-			event: {
-				toolName: "bash",
-				toolCallId,
-				input: { command },
-				content: [{ type: "text", text: "ok" }],
-			},
-			getFlag: () => false,
-			dbg: () => {},
-			runtime: h.runtime,
-			cacheManager: new CacheManager(false),
-			biomeClient: {},
-			ruffClient: {},
-			testRunnerClient: {},
-			metricsClient: {},
-			resetLSPService: () => {},
-			agentBehaviorRecord: () => [],
-			formatBehaviorWarnings: () => "",
-			sessionId: "slice2-session",
-		}) as unknown as Parameters<typeof handleToolResult>[0];
 	return async (command: string, run: () => void): Promise<void> => {
 		const toolCallId = `slice2-c${++n}`;
 		await runHandlerExpectingNoThrow(() =>
-			handleToolCall(callDeps({ command }, toolCallId)),
+			handleToolCall(bashCallDeps(h, { command }, toolCallId)),
 		);
 		run();
-		await handleToolResult(resultDeps(command, toolCallId));
+		await handleToolResult(bashResultDeps(h, command, toolCallId));
 	};
 }
 
@@ -583,21 +593,40 @@ describe("a publish that reaches no LSP consumer", () => {
 		]);
 	});
 
-	it("returns the answer the consumer gave when one exists", () => {
-		const answer = {
-			held: 3,
-			targets: [],
-			primary: 0,
+	it("reads the consumer's own answer back out of a real publish", async () => {
+		// Greptile round 4 (P2): the case this replaces handed
+		// `readHeldDocumentsAnswer` a map it had just built and asserted the same
+		// object came back — the test supplied the value it checked. This one
+		// publishes through the real publisher and the real LSP consumer (the
+		// service is the host boundary) and asserts the count the CONSUMER
+		// derived: one held document, computed from the published population.
+		const dir = path.join(tmp, "answered");
+		const lib = normalizeMapKey(path.join(dir, "lib.ts"));
+		harness("answered", [lib]);
+
+		const { results, failedSubscribers } = await publishDiskChange({
+			root: dir,
+			origin: "head-move",
+			kind: "inferred",
+			paths: [lib],
+		});
+		const answer = readHeldDocumentsAnswer(
+			results,
+			normalizeMapKey(dir),
+			failedSubscribers,
+		);
+
+		expect(answer).toMatchObject({
+			held: 1,
 			failed: false,
 			drained: true,
-		};
+		});
+		// A consumer that answered is never reported as one that was never asked.
 		expect(
-			readHeldDocumentsAnswer(
-				new Map([[LSP_CONSUMER, answer]]),
-				"/x",
-				new Set(),
+			getDegradationSummary().filter(
+				(group) => group.kind === "disk-change-lsp-consumer-missing",
 			),
-		).toBe(answer);
+		).toEqual([]);
 	});
 
 	it("reads a consumer that answered `undefined` as one that answered", () => {
@@ -796,7 +825,11 @@ describe("an over-cap publish keeps its send inside the change", () => {
 		expect(rows.at(-1)?.metadata).toMatchObject({ written: 65, targets: 65 });
 	}, 60_000);
 
-	it("records one bounded row when a recovered chunk's drift pass rejects", async () => {
+	it("records a rejected recovered chunk and still resyncs the chunks after it", async () => {
+		// #4612 r4 (CodeRabbit): one chunk's rejected drift pass used to stop the
+		// detached chain, so a 65-file code-mod whose first pass failed left the
+		// 65th file's servers on the old bytes. The first pass rejects here and
+		// the second must still run, with one counted row for the first.
 		const dir = path.join(tmp, "chunk-rejects");
 		fs.mkdirSync(dir, { recursive: true });
 		const files = Array.from({ length: 65 }, (_, i) =>
@@ -805,16 +838,17 @@ describe("an over-cap publish keeps its send inside the change", () => {
 		for (const file of files) fs.writeFileSync(file, "export const v = 1;\n");
 		const h = harness("chunk-rejects", []);
 		resetDegradationLedger();
-		// The detached chain awaits each chunk's drift pass; the second chunk's
-		// rejection used to leave the rest unpublished with a `dbg` line only.
+		const driftPasses: string[][] = [];
 		configureLspServiceLifecycle<Record<string, unknown>>({
 			create: () =>
 				makeLspServiceDouble({
 					getOpenDocumentPaths: () => [],
 					getTrackedContent: () => undefined,
 					resyncHeldPrimaries: async () => ({ sent: 0, drained: true }),
-					resyncGitChangedFiles: async () => {
-						throw new Error("drift refused");
+					resyncGitChangedFiles: async (paths: readonly string[]) => {
+						driftPasses.push([...paths]);
+						if (driftPasses.length === 1) throw new Error("drift refused");
+						return new Map<string, string>();
 					},
 				}),
 			beforeReset: () => undefined,
@@ -827,22 +861,20 @@ describe("an over-cap publish keeps its send inside the change", () => {
 			for (const file of files) fs.writeFileSync(file, "export const v = 2;\n");
 		});
 
-		await expect
-			.poll(
-				() =>
-					getDegradationSummary()
-						.filter(
-							(group) => group.kind === "disk-change-recovered-drift-failed",
-						)
-						.map((group) => group.latestReasons[0]?.reason ?? ""),
-				{ timeout: 30_000 },
-			)
-			.toEqual([expect.stringContaining("were never republished")]);
-		const [row] = getDegradationSummary().filter(
+		// The detached chain reaches the second chunk although the first rejected.
+		await expect.poll(() => driftPasses.length, { timeout: 30_000 }).toBe(2);
+		expect(driftPasses.flat().sort()).toEqual(
+			files.map((file) => normalizeMapKey(file)).sort(),
+		);
+		const rows = getDegradationSummary().filter(
 			(group) => group.kind === "disk-change-recovered-drift-failed",
 		);
-		expect(row?.latestReasons[0]?.reason).toContain("chunk 1 of 2");
-		expect(row?.latestReasons[0]?.subject).toBe(normalizeMapKey(dir));
+		expect(rows.map((group) => group.latestReasons[0]?.reason ?? "")).toEqual([
+			expect.stringContaining(
+				"chunk 1 of 2 rejected, so its 64 recovered path(s) were never republished",
+			),
+		]);
+		expect(rows[0]?.latestReasons[0]?.subject).toBe(normalizeMapKey(dir));
 	}, 60_000);
 });
 
@@ -920,6 +952,238 @@ describe("a same-HEAD discard resyncs the documents it reverted", () => {
 			),
 		).toEqual([]);
 	}, 30_000);
+});
+
+/**
+ * #4612 round 4 (Greptile P1, "Joined discards lose their paths"): two calls of
+ * one session run their bash commands in parallel. Each reads its own discard
+ * set from its own baseline, and both looks share one key, so the second one
+ * JOINS the first's flight — and a joining look never runs its own closure.
+ * The first caller's `discarded` array is what the shared closure published, so
+ * the second call's reverted file was never sent and its held document kept the
+ * discarded bytes.
+ */
+describe("a look that joins a discard look of the same call key", () => {
+	it("publishes the joining call's discarded paths too", async () => {
+		const dir = path.join(tmp, "joined-discard");
+		fs.mkdirSync(dir, { recursive: true });
+		const a = path.join(dir, "a.ts");
+		const b = path.join(dir, "b.ts");
+		fs.writeFileSync(a, "export const a = 1;\n");
+		fs.writeFileSync(b, "export const b = 1;\n");
+		git(dir, "init", "-q", "-b", "main");
+		git(dir, "add", "-A");
+		git(dir, "commit", "-qm", "base");
+		fs.writeFileSync(a, "export const a = 2;\n");
+		const held = [normalizeMapKey(a), normalizeMapKey(b)];
+		const h = harness("joined-discard", held);
+
+		// The first look's awaited primary send is held open here, so the second
+		// call has a flight to join. The gate is released only once the join has
+		// happened (the flight's pending trailing pass), so the two calls overlap
+		// by construction rather than by timing.
+		let openGate!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			openGate = resolve;
+		});
+		configureLspServiceLifecycle<Record<string, unknown>>({
+			create: () =>
+				makeLspServiceDouble({
+					getOpenDocumentPaths: () => held,
+					getTrackedContent: () => ({ hash: "the-bytes-the-server-holds" }),
+					resyncHeldPrimaries: async (
+						paths: readonly string[],
+						drainMs: number,
+					) => {
+						h.calls.primaries.push({ paths: [...paths], drainMs });
+						await gate;
+						return { sent: paths.length, drained: true };
+					},
+					resyncGitChangedFiles: async (
+						paths: readonly string[],
+						options: { maxPasses?: number } = {},
+					) => {
+						h.calls.drift.push({
+							paths: [...paths],
+							maxPasses: options.maxPasses,
+						});
+						return new Map<string, string>([["resynced", "resynced"]]);
+					},
+				}),
+			beforeReset: () => undefined,
+			destroy: async () => undefined,
+		});
+		resetLSPService();
+		getLSPService();
+
+		// Call 1's baseline is {a}; its command reverts a.
+		await runHandlerExpectingNoThrow(() =>
+			handleToolCall(bashCallDeps(h, { command: "git stash" }, "join-1")),
+		);
+		git(dir, "stash", "-q");
+		// Call 2's baseline is {b}, and its command reverts b.
+		fs.writeFileSync(b, "export const b = 2;\n");
+		await runHandlerExpectingNoThrow(() =>
+			handleToolCall(bashCallDeps(h, { command: "git stash" }, "join-2")),
+		);
+		git(dir, "stash", "-q");
+
+		// The look key both hooks derive, so the join is awaited on the flight
+		// the hooks actually use.
+		const lookKey = headRecordKey(
+			opaqueBaselineSlot(dir, h.runtime.sessionGeneration),
+			"slice2-session",
+		);
+		const first = handleToolResult(bashResultDeps(h, "git stash", "join-1"));
+		let second: Promise<unknown> | undefined;
+		try {
+			await waitFor(
+				() => h.calls.primaries.length,
+				(count) => count === 1,
+			);
+			second = handleToolResult(bashResultDeps(h, "git stash", "join-2"));
+			await waitFor(
+				() => headLookPendingRerun(lookKey),
+				(pending) => pending,
+			);
+		} finally {
+			// Released on every path: a held flight would otherwise outlive this
+			// case and publish into the next one's subscriber.
+			openGate();
+		}
+		await first;
+		await second;
+
+		// Both calls' discards reach a server. Pre-fix only `a` did: the joining
+		// call's set never reached the closure that published.
+		const sent = new Set(h.calls.primaries.flatMap((call) => call.paths));
+		expect([...sent].sort()).toEqual([...held].sort());
+	}, 60_000);
+});
+
+/**
+ * #4612 round 4 (Greptile P1, "Restored rename sources stay stale"): porcelain
+ * v1 `-z` gives a rename as two tokens, `R  <new>` then `<old>`. The discard
+ * baseline recorded only the destination, and `git reset --hard HEAD` restores
+ * the SOURCE while removing the destination without moving HEAD: the published
+ * population named a path that no longer exists and never the file the reset
+ * rewrote, so the source kept its pre-reset server copy.
+ */
+describe("a rename a same-HEAD discard reverts", () => {
+	it("resyncs the restored source side of the rename", async () => {
+		const dir = path.join(tmp, "discard-rename");
+		fs.mkdirSync(dir, { recursive: true });
+		const source = path.join(dir, "a.ts");
+		fs.writeFileSync(source, "export const a = 1;\n");
+		git(dir, "init", "-q", "-b", "main");
+		git(dir, "add", "-A");
+		git(dir, "commit", "-qm", "base");
+		// The agent edits a.ts, then stages the rename to b.ts: the index holds
+		// `R  b.ts` and git also reports the old path.
+		fs.writeFileSync(source, "export const a = 2;\n");
+		git(dir, "mv", "a.ts", "b.ts");
+		const renamed = path.join(dir, "b.ts");
+		const h = harness("discard-rename", [
+			normalizeMapKey(source),
+			normalizeMapKey(renamed),
+		]);
+
+		await sessionFor(h)("git reset --hard HEAD", () => {
+			git(dir, "reset", "-q", "--hard", "HEAD");
+		});
+
+		const published = h.publishes.filter(
+			(change) => change.origin === "head-move",
+		);
+		expect(published).toHaveLength(1);
+		expect(published[0]?.sources).toContain(SAME_HEAD_DISCARD_SOURCE);
+		// Both sides of the entry are in the baseline, so both are republished.
+		expect([...(published[0]?.paths ?? [])]).toEqual(
+			expect.arrayContaining([
+				normalizeMapKey(source),
+				normalizeMapKey(renamed),
+			]),
+		);
+		// The restored source is the document whose bytes the reset rewrote.
+		expect(h.calls.primaries.flatMap((call) => call.paths)).toContain(
+			normalizeMapKey(source),
+		);
+	}, 60_000);
+
+	it("does not read a rename that is still staged as a discard", async () => {
+		// The other direction of the same pair (#4612 r4): the baseline names both
+		// sides, so the still-dirty set must name both too. Otherwise every call
+		// made while the rename is staged republishes the source as if a discard
+		// had reverted it.
+		const dir = path.join(tmp, "rename-staged");
+		fs.mkdirSync(dir, { recursive: true });
+		const source = path.join(dir, "a.ts");
+		fs.writeFileSync(source, "export const a = 1;\n");
+		git(dir, "init", "-q", "-b", "main");
+		git(dir, "add", "-A");
+		git(dir, "commit", "-qm", "base");
+		fs.writeFileSync(source, "export const a = 2;\n");
+		git(dir, "mv", "a.ts", "b.ts");
+		const h = harness("rename-staged", [normalizeMapKey(source)]);
+
+		await sessionFor(h)("true", () => {});
+
+		expect(
+			h.publishes.filter((change) =>
+				change.sources.includes(SAME_HEAD_DISCARD_SOURCE),
+			),
+		).toEqual([]);
+	}, 60_000);
+});
+
+/**
+ * #4612 round 3 review (row 21): the discard branch writes fields of its own
+ * into `opaque_mutation_head_moved` — the count, the `discarded:N` result and an
+ * empty `from` — and no case read any of them back, so the record could have
+ * said anything.
+ */
+describe("the discard's own row", () => {
+	it("names the discard set, its count and that HEAD did not move", async () => {
+		const dir = path.join(tmp, "discard-row");
+		fs.mkdirSync(dir, { recursive: true });
+		const lib = path.join(dir, "lib.ts");
+		fs.writeFileSync(lib, "export const v = 1;\n");
+		git(dir, "init", "-q", "-b", "main");
+		git(dir, "add", "-A");
+		git(dir, "commit", "-qm", "base");
+		fs.writeFileSync(lib, "export const v = 2;\n");
+		const command = "git stash # discard-row";
+		const h = harness("discard-row", [normalizeMapKey(lib)]);
+
+		await sessionFor(h)(command, () => {
+			git(dir, "stash", "-q");
+		});
+
+		await flushLatencyLog();
+		const log = path.join(getGlobalPiLensLogDir(), "latency.log");
+		const rows = fs
+			.readFileSync(log, "utf8")
+			.split("\n")
+			.filter(Boolean)
+			.map((line) => JSON.parse(line) as Record<string, unknown>)
+			.filter(
+				(row) =>
+					row.phase === "opaque_mutation_head_moved" &&
+					row.filePath === command,
+			);
+		expect(rows).toHaveLength(1);
+		expect(rows[0]).toMatchObject({
+			result: "discarded:1",
+			metadata: {
+				discarded: 1,
+				// The move's fields: no move happened, so no old HEAD and an empty
+				// delta (0 changed paths — not the -1 an unlistable delta reports).
+				from: "",
+				changed: 0,
+				heldPopulation: "delta-held",
+			},
+		});
+	}, 60_000);
 });
 
 /**
