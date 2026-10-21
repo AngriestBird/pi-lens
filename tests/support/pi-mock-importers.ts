@@ -14,10 +14,15 @@
  * Keys are `tests/`-relative posix paths. A row's class is acceptance 7 of
  * #4632: `process-boundary`, `internal-seam` (the case interposes on a pi-lens
  * `clients/` module through `vi.mock`, which cannot reach the copy pi's loader
- * builds), `unproducible-payload`, or `double-subject`; `pending slice N`
- * marks a file a roadmap slice still owns, and slice 10 (the last) records the
- * final counts. Classes are the author's reading at 2026-10-20 and are checked
- * for vocabulary only; the SET of files is what the gate pins.
+ * builds), `unproducible-payload`, or `double-subject`; `real-ui-harness` names
+ * a case whose claim is what the TUI shows or mounts, which no in-process tier
+ * can produce until one binds a real UI context; `pending slice N` marks a file
+ * a roadmap slice still owns, and slice 10 (the last) records the final counts.
+ * `real-ui-harness` is NOT a slice dependency: slice 5 builds no UI harness and
+ * slice 10 is docs-and-stop, so a `pending slice N` label would name work no
+ * slice carries (review F4 on #4702). Classes are the author's reading at
+ * 2026-10-21 and are checked for vocabulary only; the SET of files is what the
+ * gate pins.
  */
 
 import * as fs from "node:fs";
@@ -52,6 +57,7 @@ export const PI_MOCK_IMPORTERS: Readonly<Record<string, string>> = {
 	"index-integration.test.ts": "internal-seam",
 	"index-loop-block-wiring.test.ts": "internal-seam",
 	"index-lsp-idle-reset.test.ts": "internal-seam",
+	"index-lsp-config-root-eviction.test.ts": "internal-seam",
 	"index-mode-awareness.test.ts": "internal-seam",
 	"index-mutation-bridge-recordability.test.ts": "internal-seam",
 	"index-mutation-latency-marker.test.ts": "internal-seam",
@@ -71,6 +77,9 @@ export const PI_MOCK_IMPORTERS: Readonly<Record<string, string>> = {
 	// unproducible-payload
 	"clients/context-append-to-last-user.test.ts": "unproducible-payload",
 	"index-4631-pre-087-context-shape.test.ts": "unproducible-payload",
+	"index-session-start-classification-wiring.test.ts": "unproducible-payload",
+	// real-ui-harness
+	"lens-toggle-command.test.ts": "real-ui-harness",
 	// pending slice 5
 	"index-4554-last-member-teardown.test.ts": "pending slice 5",
 	"index-config-resolved-session-wiring.test.ts": "pending slice 5",
@@ -78,11 +87,6 @@ export const PI_MOCK_IMPORTERS: Readonly<Record<string, string>> = {
 	// pending slice 8
 	"clients/session-event-guard.test.ts": "unproducible-payload",
 	"index-cascade-resolved-clean-wiring.test.ts": "internal-seam",
-	// pending slice 9
-	"index-2992-integration.test.ts": "pending slice 9",
-	"index-lsp-config-root-eviction.test.ts": "pending slice 9",
-	"index-session-start-classification-wiring.test.ts": "pending slice 9",
-	"lens-toggle-command.test.ts": "pending slice 9",
 	// process-boundary
 	"clients/handler-verdict-helper.test.ts": "process-boundary",
 	"clients/ndjson-logger.test.ts": "process-boundary",

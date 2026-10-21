@@ -55,8 +55,14 @@ const TESTS_ROOT = path.resolve(
 );
 /** This file names the module in its own plants and messages. */
 const SELF = "config/pi-mock-importer-sweep.test.ts";
+/**
+ * The #4632 acceptance-7 classes, plus `real-ui-harness` (review F4 on #4702:
+ * a TUI-observable claim no slice owns and no in-process tier can produce) and
+ * `pending slice N` for a file a roadmap slice still owns. A row whose class is
+ * not on this list reds, so a new class is a deliberate edit here, not a typo.
+ */
 const CLASS_VOCABULARY =
-	/^(process-boundary|internal-seam|unproducible-payload|double-subject|pending slice (?:[3-9]|10))$/;
+	/^(process-boundary|internal-seam|unproducible-payload|double-subject|real-ui-harness|pending slice (?:[3-9]|10))$/;
 
 const SPECIFIER_POSITION =
 	/\b(?:from|import|require|mock|doMock|unmock|importActual|importMock)\s*\(?\s*(["'`])((?:(?!\1)[^\n\\]|\\.)*)\1/g;
