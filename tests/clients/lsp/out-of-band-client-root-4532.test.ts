@@ -192,6 +192,10 @@ describe("the install look at a live client root (#4532 gap 7)", () => {
 		const gitDir = path.join(main, ".git", "worktrees", "linked-checkout");
 		fs.mkdirSync(gitDir, { recursive: true });
 		fs.writeFileSync(path.join(gitDir, "commondir"), "../..\n");
+		// git writes a HEAD in both the checkout's `.git` and the worktree's
+		// gitdir; a `.git` directory without one is not a repository (#4508).
+		fs.writeFileSync(path.join(main, ".git", "HEAD"), "ref: refs/heads/main\n");
+		fs.writeFileSync(path.join(gitDir, "HEAD"), "ref: refs/heads/linked\n");
 		fs.mkdirSync(linked, { recursive: true });
 		fs.writeFileSync(path.join(linked, ".git"), `gitdir: ${gitDir}\n`);
 
@@ -299,6 +303,10 @@ describe("the install look at a live client root (#4532 gap 7)", () => {
 		const gitDir = path.join(main, ".git", "worktrees", "git-worktree");
 		fs.mkdirSync(gitDir, { recursive: true });
 		fs.writeFileSync(path.join(gitDir, "commondir"), "../..\n");
+		// git writes a HEAD in both the checkout's `.git` and the worktree's
+		// gitdir; a `.git` directory without one is not a repository (#4508).
+		fs.writeFileSync(path.join(main, ".git", "HEAD"), "ref: refs/heads/main\n");
+		fs.writeFileSync(path.join(gitDir, "HEAD"), "ref: refs/heads/linked\n");
 		fs.mkdirSync(path.join(linked, "src"), { recursive: true });
 		fs.writeFileSync(path.join(linked, ".git"), `gitdir: ${gitDir}\n`);
 		fs.writeFileSync(path.join(linked, "package.json"), "{}\n");
