@@ -1222,7 +1222,10 @@ file-scoped worklist and receives no project-wide scanner output.
   link" rejection never occurs. `FormatService.formatFile` also requires
   `sessionRoot` and classifies the identity through `resolveAnalysisRoot`: an
   `adopted` or `none` identity is refused, writes nothing, and records one
-  `adopted-root-writer-skipped` row (`writer: "format"`). Proven by
+  `adopted-root-writer-skipped` row (`writer: "format"`). The refusal is on
+  identity, not spelling, so a plain file outside every writable root (a
+  sibling package of a monorepo session cwd, say) is refused as well; a caller
+  that must format it passes that root as `sessionRoot`. Proven by
   `tests/clients/format-service-symlink-identity.test.ts`.
 - Formatter and autofix policy is config-first where the registry says so.
   Formatting is strict by default. Autofix must carry per-diagnostic fixability

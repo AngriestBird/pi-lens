@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import {
 	FORMAT_FIXTURES,
@@ -38,19 +39,31 @@ describe("format smoke installer wiring", () => {
 				getInstallAttempt,
 				getFormatService: () => ({
 					recordRead: vi.fn(),
-					formatFile: vi.fn(async (filePath: string) => ({
-						formatters: [
-							{
-								name: FORMAT_FIXTURES.find((fx) => filePath.endsWith(fx.file))
-									?.formatter,
-								success: true,
-								changed: true,
-								outcome: "formatted",
-							},
-						],
-						anyChanged: true,
-						allSucceeded: true,
-					})),
+					formatFile: vi.fn(
+						async (filePath: string, options?: { sessionRoot: string }) => {
+							// The real service requires `sessionRoot` and throws reading
+							// `skip` of undefined without it (#4689): the smoke must pass it,
+							// and the file must sit inside it.
+							if (!options?.sessionRoot)
+								throw new Error("sessionRoot required");
+							if (!fs.realpathSync(filePath).startsWith(options.sessionRoot))
+								throw new Error("file outside sessionRoot");
+							return {
+								formatters: [
+									{
+										name: FORMAT_FIXTURES.find((fx) =>
+											filePath.endsWith(fx.file),
+										)?.formatter,
+										success: true,
+										changed: true,
+										outcome: "formatted",
+									},
+								],
+								anyChanged: true,
+								allSucceeded: true,
+							};
+						},
+					),
 				}),
 				onEnsure: (toolId: string) => requests.push(toolId),
 			},

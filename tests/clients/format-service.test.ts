@@ -65,7 +65,9 @@ describe("FormatService", () => {
 
 		const service = new FormatService("test", true);
 		service.recordRead(filePath);
-		const result = await service.formatFile(filePath, { sessionRoot: tmpDir });
+		const result = await service.formatFile(filePath, {
+			sessionRoot: fs.realpathSync(tmpDir),
+		});
 
 		expect(result.formatters).toEqual([]);
 		expect(result.anyChanged).toBe(false);
@@ -92,7 +94,9 @@ describe("FormatService", () => {
 
 		const service = new FormatService("test", true);
 		service.recordRead(filePath);
-		const result = await service.formatFile(filePath, { sessionRoot: tmpDir });
+		const result = await service.formatFile(filePath, {
+			sessionRoot: fs.realpathSync(tmpDir),
+		});
 
 		expect(result.anyChanged).toBe(true);
 		expect(result.allSucceeded).toBe(true);
@@ -125,7 +129,9 @@ describe("FormatService", () => {
 
 		const service = new FormatService("test", true);
 		service.recordRead(filePath);
-		const result = await service.formatFile(filePath, { sessionRoot: tmpDir });
+		const result = await service.formatFile(filePath, {
+			sessionRoot: fs.realpathSync(tmpDir),
+		});
 
 		expect(result.anyChanged).toBe(false);
 		expect(result.allSucceeded).toBe(false);
@@ -144,7 +150,9 @@ describe("FormatService", () => {
 		await new Promise((r) => setTimeout(r, 10));
 		fs.writeFileSync(filePath, "const x = 2;");
 
-		const result = await service.formatFile(filePath, { sessionRoot: tmpDir });
+		const result = await service.formatFile(filePath, {
+			sessionRoot: fs.realpathSync(tmpDir),
+		});
 
 		expect(result.allSucceeded).toBe(false);
 		expect(result.formatters).toEqual([]);

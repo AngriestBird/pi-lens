@@ -11,6 +11,8 @@
  * - a link inside the session whose target is another project (fixture d1):
  *   the identity classifies as `adopted`, so nothing is written.
  * - a link inside the session whose target is a vendor path: `none`.
+ * - a plain (non-link) file outside every writable root: `none`, the same
+ *   refusal, because the gate decides on identity and not on the spelling.
  * - a new file under a directory link: the missing tail lands beside the
  *   directory's target, not under the link.
  */
@@ -228,6 +230,38 @@ describe("FormatService formats the identity of a symlinked file (#4689)", () =>
 				)?.latestReasons[0]?.reason,
 			).toContain("none");
 		} finally {
+			fx.cleanup();
+		}
+	});
+
+	it("refuses a regular file with no project root outside the session (not a link)", async () => {
+		const fx = layout();
+		const strayEnv = setupTestEnvironment("pi-lens-format-identity-stray-", {
+			rootMarker: false,
+		});
+		try {
+			const stray = path.join(fs.realpathSync(strayEnv.tmpDir), "stray.md");
+			fs.writeFileSync(stray, "# stray\n");
+			const written = installPrettierDouble();
+
+			const service = new FormatService("identity-stray", true);
+			service.recordRead(stray);
+			const summary = await service.formatFile(stray, {
+				sessionRoot: fx.session,
+			});
+
+			// The refusal is the class decision on the identity, whatever the
+			// spelling: a plain file outside every writable root is not written.
+			expect(summary.formatters).toEqual([]);
+			expect(written).toEqual([]);
+			expect(fs.readFileSync(stray, "utf8")).toBe("# stray\n");
+			expect(
+				getDegradationSummary().find(
+					(group) => group.kind === "adopted-root-writer-skipped",
+				)?.latestReasons[0]?.reason,
+			).toContain("none");
+		} finally {
+			strayEnv.cleanup();
 			fx.cleanup();
 		}
 	});
