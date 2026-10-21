@@ -1747,6 +1747,12 @@ describe("scanShellWriteScopes — the command's effective directory (#2050)", (
 			bash: "~/x/f.ts",
 			named: ["~/x"],
 		},
+		{
+			row: "R111 cd ~\\ x, an escape in the tilde-prefix (R10)",
+			command: "mkdir '~ x'; cd ~\\ x; printf x > f.ts",
+			bash: "~ x/f.ts",
+			named: ["~ x"],
+		},
 	];
 
 	it.each(CWD_ROWS)(
