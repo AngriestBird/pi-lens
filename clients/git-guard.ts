@@ -940,8 +940,10 @@ const NO_CLAIM_FIELDS = [
 ] as const;
 
 /**
- * True only for a record that makes no claim at all: an object with string
- * `content` and no field outside {@link NO_CLAIM_FIELDS}. It answers to no
+ * True only for a record that holds no structured claim: an object with string
+ * `content` and no field outside {@link NO_CLAIM_FIELDS}. Its `content` may
+ * still be a blocker report the writer delivered (#4733 r2 F14), but no field
+ * says so a check could answer, so it answers to no
  * file, so no re-check of one file clears it; the gate still refuses it, and a
  * settled turn end with no blocker retires it. Any other key (a claim, an
  * owner, a field no writer of these shapes stores) is not this form and keeps
@@ -984,8 +986,8 @@ function logRecordRetired(
  * window hides is no longer kept for good. A record another session wrote
  * that still carries a blocker stays: this session's turn end did not
  * re-check it (`syncGitGuardRecord` clears it file by file as this session
- * re-checks the files it names). A latch that described the record goes with
- * it (`releaseRecordLatch`).
+ * re-checks the files it names). The latch that described the record goes
+ * with it; a dispatch latch stays (`RecordLatchReason`).
  *
  * @returns true when the record was retired.
  */
@@ -1008,45 +1010,32 @@ export function retireSettledGitGuardRecord(
 				: undefined;
 	if (!basis) return false;
 	cacheManager.clearCache("turn-end-findings", cwd);
-	releaseRecordLatch(runtime);
+	runtime.clearGitGuardCacheUnknown();
 	logRecordRetired(cwd, "turn_end", basis);
 	return true;
 }
 
 /**
  * Every reason this module latches about the stored record itself (#4733 r1
- * F4). A latch about a dispatch (`pipeline_error`, `pipeline_crash`, set in
- * `clients/runtime-tool-result.ts`) is not one of them.
+ * F4), the only reasons the coordinator's latch slot holds. A dispatch that
+ * never answered is latched per file instead
+ * (`markGitGuardDispatchUnanswered`, #4733 r2 F12), so a writer that deletes
+ * or rewrites the record clears this slot and leaves that latch alone.
  */
-const RECORD_LATCH_REASONS = [
-	"session_mismatch",
-	"blocking_provenance_untrusted",
-	"cache_write_failed",
-	"cache_fresh",
-	"cache_stale",
-	"cache_malformed",
-	"cache_unreadable",
-] as const;
-type RecordLatchReason = (typeof RECORD_LATCH_REASONS)[number];
+type RecordLatchReason =
+	| "session_mismatch"
+	| "blocking_provenance_untrusted"
+	| "cache_write_failed"
+	| "cache_fresh"
+	| "cache_stale"
+	| "cache_malformed"
+	| "cache_unreadable";
 
 function markCacheUnknown(
 	runtime: RuntimeCoordinator,
 	reason: RecordLatchReason,
 ): void {
 	runtime.markGitGuardCacheUnknown(reason);
-}
-
-/**
- * A writer that deletes the record releases the latch that described it, and
- * only that latch: the gate read the latch first, so a reason about a record
- * that is gone refused the commit after the action its remedy named (#4733 r1
- * F4).
- */
-function releaseRecordLatch(runtime: RuntimeCoordinator): void {
-	const latched = runtime.gitGuardCacheUnknownReason;
-	if (RECORD_LATCH_REASONS.some((reason) => reason === latched)) {
-		runtime.clearGitGuardCacheUnknown();
-	}
 }
 
 /**
@@ -1146,6 +1135,15 @@ const RECHECK_REMEDY =
 	"Write the affected files again so pi-lens re-checks them, then retry.";
 
 const MAX_REMEDY_FILES = 5;
+
+/** What answers a dispatch latch: that file's own next dispatch (#4733 r2 F12). */
+function unansweredDispatchRemedy(filePath: string, cwd: string): string {
+	const resolved = resolveGuardPath(filePath, cwd);
+	const shown = isOutsideProjectRoot(resolved, cwd)
+		? "a file outside the project"
+		: toProjectRelativePath(resolved, cwd);
+	return `pi-lens could not check ${shown}. Write it again so pi-lens re-checks it, then retry.`;
+}
 
 /**
  * The action that clears a stored record this session cannot confirm: one
@@ -1577,7 +1575,7 @@ export function clearGitGuardTestFailure(
 	const blockerContent = existing.blockerContent ?? "";
 	if (!blockerContent && remainingFiles.length === 0) {
 		cacheManager.clearCache("turn-end-findings", cwd);
-		releaseRecordLatch(runtime);
+		runtime.clearGitGuardCacheUnknown();
 		return;
 	}
 	const blockingKeys = new Set(
@@ -1727,6 +1725,17 @@ export function evaluateGitGuard(
 		unconfirmedRecordRemedy(stored, inspection, runtime, cwd) ?? RECHECK_REMEDY;
 	const latched = runtime.gitGuardCacheUnknownReason;
 	if (latched) return unknown(cwd, latched, {}, recordRemedy());
+	// #4733 r2 F12: a dispatch that never answered refuses until that file's own
+	// dispatch returns, whatever happened to the record since.
+	const unanswered = runtime.gitGuardUnansweredDispatch;
+	if (unanswered) {
+		return unknown(
+			cwd,
+			unanswered.reason,
+			{},
+			unansweredDispatchRemedy(unanswered.filePath, cwd),
+		);
+	}
 
 	if (inspection === "missing") {
 		logDecision(cwd, "allowed", "no_record");

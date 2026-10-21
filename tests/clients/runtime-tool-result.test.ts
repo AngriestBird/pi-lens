@@ -8,6 +8,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../../clients/cache-manager.js";
+import { evaluateGitGuard } from "../../clients/git-guard.js";
 import {
 	AgentBehaviorClient,
 	type BehaviorWarning,
@@ -3224,6 +3225,170 @@ describe("runtime-tool-result writers across a replacement (#3596)", () => {
 					["pipeline error", true],
 					["whole-file clean verdict", false],
 				]);
+			},
+		);
+	});
+
+	it("keeps this session's own git-guard section after a write that reached no whole-file verdict (#4733 r2 F11)", async () => {
+		// RECURRENCE GUARDED: #4733 r2 F11. The section trim asked for a whole-file
+		// verdict only of another session's record, so a write of a file that
+		// reached none dropped this session's own section, and the next clean
+		// write of another file deleted the record and the commit ran. A run with
+		// no verdict observes nothing (AGENTS.md shape 10), on either session axis.
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		await acrossReplacement(
+			"4733-own-verdict",
+			async ({ tmpDir, filePath, runtime, cacheManager }) => {
+				runtime.setTelemetryIdentity({ sessionId: "session-A" });
+				const other = createTempFile(
+					tmpDir,
+					"other.ts",
+					"export const y = 1;\n",
+				);
+				fs.utimesSync(other, LONG_AGO, LONG_AGO);
+				const section = (file: string) =>
+					`${file}: 🔴 STOP — 1 issue(s) must be fixed:\n  L1: Debugger statement`;
+				const blockerContent = `${section(filePath)}\n\n${section(other)}`;
+				cacheManager.writeCache(
+					"turn-end-findings",
+					{
+						content: blockerContent,
+						blockerContent,
+						blockingFiles: [filePath, other],
+						hasBlockers: true,
+						affectedFiles: [filePath, other],
+						sessionId: "session-A",
+						projectSeqStart: 0,
+						projectSeqEnd: 0,
+						fileSeqByPath: {},
+						fileContentHashes: {},
+						consumed: true,
+					},
+					tmpDir,
+				);
+				const stored = () =>
+					cacheManager.readCache<{ blockerContent?: string }>(
+						"turn-end-findings",
+						tmpDir,
+						Number.POSITIVE_INFINITY,
+					)?.data;
+				const clean = {
+					output: "",
+					hasBlockers: false,
+					isError: false,
+					fileModified: false,
+					currentBlockerCount: 0,
+				};
+				const write = async (file: string, result: Record<string, unknown>) => {
+					vi.mocked(runPipeline).mockReset();
+					vi.mocked(runPipeline).mockResolvedValue(result as never);
+					runtime.beginTurn();
+					clearLastAnalyzedStateCache();
+					await handleToolResult(
+						toolResultDeps({
+							filePath: file,
+							runtime,
+							cacheManager,
+							flags: ["lens-guard"],
+						}),
+					);
+				};
+
+				await write(filePath, clean);
+				expect(stored()?.blockerContent).toContain(section(filePath));
+
+				await write(other, { ...clean, fileVerdictComplete: true });
+				expect(stored()?.blockerContent).toBe(section(filePath));
+				expect(evaluateGitGuard(runtime, cacheManager, tmpDir).block).toBe(
+					true,
+				);
+			},
+		);
+	});
+
+	it("keeps a crashed dispatch's latch through other files' clean writes until that file's own dispatch returns (#4733 r2 F12)", async () => {
+		// RECURRENCE GUARDED: #4733 r2 F12 (Greptile "Unrelated writes erase
+		// failed checks"). The latch held one reason and no file, and every record
+		// write or delete cleared it, so after one file's pipeline crashed a clean
+		// write of another file let the commit run with the crashed file never
+		// re-checked.
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		await acrossReplacement(
+			"4733-crash-latch",
+			async ({ tmpDir, filePath, runtime, cacheManager }) => {
+				runtime.setTelemetryIdentity({ sessionId: "session-A" });
+				const crashed = createTempFile(
+					tmpDir,
+					"crashed.ts",
+					"export const z = 1;\n",
+				);
+				fs.utimesSync(crashed, LONG_AGO, LONG_AGO);
+				const clean = {
+					output: "",
+					hasBlockers: false,
+					isError: false,
+					fileModified: false,
+					currentBlockerCount: 0,
+					fileVerdictComplete: true,
+				};
+				const write = async (file: string, outcome: "crash" | "clean") => {
+					vi.mocked(runPipeline).mockReset();
+					if (outcome === "crash")
+						vi.mocked(runPipeline).mockRejectedValue(
+							new Error("runner exploded"),
+						);
+					else vi.mocked(runPipeline).mockResolvedValue(clean as never);
+					runtime.beginTurn();
+					clearLastAnalyzedStateCache();
+					await handleToolResult(
+						toolResultDeps({
+							filePath: file,
+							runtime,
+							cacheManager,
+							flags: ["lens-guard"],
+						}),
+					);
+				};
+				const gate = () => evaluateGitGuard(runtime, cacheManager, tmpDir);
+				// Another session's record whose only section is the clean file, so its
+				// clean write deletes the record (the delete site the latch must survive).
+				const section = `${filePath}: 🔴 STOP — 1 issue(s) must be fixed:\n  L1: Debugger statement`;
+				cacheManager.writeCache(
+					"turn-end-findings",
+					{
+						content: section,
+						blockerContent: section,
+						blockingFiles: [filePath],
+						hasBlockers: true,
+						affectedFiles: [filePath],
+						sessionId: "an-earlier-session",
+						projectSeqStart: 0,
+						projectSeqEnd: 0,
+						fileSeqByPath: {},
+						fileContentHashes: {},
+						consumed: true,
+					},
+					tmpDir,
+				);
+
+				await write(crashed, "crash");
+				expect(gate().reason).toContain("pipeline_crash");
+
+				await write(filePath, "clean");
+				expect(
+					cacheManager.readCache(
+						"turn-end-findings",
+						tmpDir,
+						Number.POSITIVE_INFINITY,
+					)?.data,
+				).toBeUndefined();
+				const refusal = gate();
+				expect(refusal.block).toBe(true);
+				expect(refusal.reason).toContain("pipeline_crash");
+				expect(refusal.reason).toContain("crashed.ts");
+
+				await write(crashed, "clean");
+				expect(gate()).toEqual({ block: false });
 			},
 		);
 	});

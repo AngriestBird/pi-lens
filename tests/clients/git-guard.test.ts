@@ -1131,9 +1131,10 @@ describe("git-guard", () => {
 			runtime.projectRoot = env.tmpDir;
 			runtime.setTelemetryIdentity({ sessionId: "session-A" });
 			const cache = new CacheManager(false);
-			// A pipeline error earlier in the session — the one mark that is set
-			// AFTER the sync it belongs to (`clients/runtime-tool-result.ts:2551`).
-			runtime.markGitGuardCacheUnknown("pipeline_error");
+			// A reason about the record latched earlier in the session (a write of
+			// the record that failed). #4733 r2 F12: a dispatch that never answered
+			// is latched per file instead, and a sync does not clear it.
+			runtime.markGitGuardCacheUnknown("cache_write_failed");
 
 			syncGitGuardRecord(runtime, cache, env.tmpDir, file);
 
@@ -1530,7 +1531,7 @@ describe("#4725: the record's writers read it whatever its age", () => {
 					blockingFiles: [file],
 				}),
 			);
-			runtime.markGitGuardCacheUnknown("pipeline_error");
+			runtime.markGitGuardCacheUnknown("cache_write_failed");
 			const refusal = evaluateGitGuard(runtime, cache, env.tmpDir);
 			expect(refusal.reason).toContain(
 				"Write the affected files again so pi-lens re-checks them",
@@ -1990,25 +1991,162 @@ describe("#4725 r2: a writer never takes another session's record", () => {
 		}
 	});
 
-	it("keeps a latch about a dispatch when a settled turn end retires the record", () => {
-		// The latch rule's other side: `pipeline_error` describes a write pi-lens
-		// could not check, not the record, so retiring the record leaves it.
+	it("keeps a dispatch latch through every write and delete of the record (#4733 r2 F12)", () => {
+		// RECURRENCE GUARDED: #4733 r2 F12 (Greptile "Unrelated writes erase
+		// failed checks"). The latch held one reason and no file, and every
+		// record write or delete cleared it, so one file's crashed dispatch was
+		// erased by another file's clean write and the commit ran with the
+		// crashed file never re-checked.
 		const env = setupTestEnvironment("pi-lens-git-guard-4733-dispatch-latch-");
+		try {
+			const crashed = path.join(env.tmpDir, "crashed.ts");
+			const edited = path.join(env.tmpDir, "edited.ts");
+			const testFile = path.join(env.tmpDir, "edited.test.ts");
+			for (const file of [crashed, edited, testFile])
+				fs.writeFileSync(file, "export const x = 1;\n");
+			const ownSection = composerSections([edited]);
+			const seed = (cache: CacheManager, data: TurnEndFindingsCache) =>
+				cache.writeCache("turn-end-findings", data, env.tmpDir);
+			const writers: Array<
+				[string, (runtime: RuntimeCoordinator, cache: CacheManager) => void]
+			> = [
+				[
+					"a settled turn end retires a no-blocker claim",
+					(runtime, cache) => {
+						seed(cache, record());
+						retireSettledGitGuardRecord(runtime, cache, env.tmpDir);
+					},
+				],
+				[
+					"a write deletes a no-blocker claim",
+					(runtime, cache) => {
+						seed(cache, record({ sessionId: "an-earlier-session" }));
+						syncGitGuardRecord(
+							runtime,
+							cache,
+							env.tmpDir,
+							edited,
+							"session",
+							true,
+						);
+					},
+				],
+				[
+					"a whole-file clean write deletes the last section",
+					(runtime, cache) => {
+						seed(
+							cache,
+							record({
+								content: ownSection,
+								blockerContent: ownSection,
+								blockingFiles: [edited],
+								hasBlockers: true,
+								affectedFiles: [edited],
+							}),
+						);
+						syncGitGuardRecord(
+							runtime,
+							cache,
+							env.tmpDir,
+							edited,
+							"session",
+							true,
+						);
+					},
+				],
+				[
+					"a blocker write rewrites the record",
+					(runtime, cache) => {
+						runtime.recordInlineBlockers(
+							edited,
+							productionSummary(edited, ["unsafe"]),
+							1,
+						);
+						syncGitGuardRecord(runtime, cache, env.tmpDir, undefined);
+					},
+				],
+				[
+					"a passing run deletes the record",
+					(runtime, cache) => {
+						seed(
+							cache,
+							record({
+								content: "FAIL 0p/1f",
+								hasBlockers: true,
+								testFailures: true,
+								testFailureContent: "FAIL 0p/1f",
+								testFailureFiles: [testFile],
+							}),
+						);
+						clearGitGuardTestFailure(cache, env.tmpDir, runtime, [testFile]);
+					},
+				],
+			];
+			const kept = writers.map(([label, writer]) => {
+				const runtime = sessionA(env.tmpDir);
+				const cache = new CacheManager(false);
+				cache.clearCache("turn-end-findings", env.tmpDir);
+				runtime.markGitGuardDispatchUnanswered(crashed, "pipeline_crash");
+				writer(runtime, cache);
+				const refusal = evaluateGitGuard(runtime, cache, env.tmpDir);
+				return [
+					label,
+					refusal.block === true &&
+						!!refusal.reason?.includes("pipeline_crash") &&
+						!!refusal.reason?.includes("pi-lens could not check crashed.ts"),
+				];
+			});
+			expect(kept).toEqual(writers.map(([label]) => [label, true]));
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("clears each dispatch latch only with its own file's answer (#4733 r2 F12)", () => {
+		// RECURRENCE GUARDED: #4733 r2 F12. One latch slot held the last reason,
+		// so a second file's crash replaced the first's, and the first file's
+		// answer could clear the second's.
+		const env = setupTestEnvironment("pi-lens-git-guard-4733-two-latches-");
 		try {
 			const runtime = sessionA(env.tmpDir);
 			const cache = new CacheManager(false);
-			cache.writeCache(
-				"turn-end-findings",
-				{ content: "old", hasBlockers: false },
+			const first = path.join(env.tmpDir, "first.ts");
+			const second = path.join(env.tmpDir, "second.ts");
+			runtime.markGitGuardDispatchUnanswered(first, "pipeline_crash");
+			runtime.markGitGuardDispatchUnanswered(second, "pipeline_error");
+
+			runtime.answerGitGuardDispatch(first);
+			const refusal = evaluateGitGuard(runtime, cache, env.tmpDir);
+			expect(refusal.block).toBe(true);
+			expect(refusal.reason).toContain("(pipeline_error)");
+			expect(refusal.reason).toContain("pi-lens could not check second.ts");
+
+			runtime.answerGitGuardDispatch(second);
+			expect(evaluateGitGuard(runtime, cache, env.tmpDir)).toEqual({
+				block: false,
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("names a crashed file outside the project without printing its path (#4733 r2 F12)", () => {
+		// RECURRENCE GUARDED: #4733 r1 F6's rule, for the new remedy: a path
+		// outside the project is not the model's to see.
+		const env = setupTestEnvironment("pi-lens-git-guard-4733-outside-latch-");
+		try {
+			const runtime = sessionA(env.tmpDir);
+			const outside = path.join(path.dirname(env.tmpDir), "elsewhere", "x.ts");
+			runtime.markGitGuardDispatchUnanswered(outside, "pipeline_crash");
+			const reason = evaluateGitGuard(
+				runtime,
+				new CacheManager(false),
 				env.tmpDir,
+			).reason;
+			expect(reason).toContain(
+				"pi-lens could not check a file outside the project",
 			);
-			runtime.markGitGuardCacheUnknown("pipeline_error");
-
-			expect(retireSettledGitGuardRecord(runtime, cache, env.tmpDir)).toBe(
-				true,
-			);
-
-			expect(runtime.gitGuardCacheUnknownReason).toBe("pipeline_error");
+			expect(reason).not.toContain("elsewhere");
 		} finally {
 			env.cleanup();
 		}
@@ -2068,7 +2206,7 @@ describe("#4725 r2: a writer never takes another session's record", () => {
 			mergeGitGuardTestFailure(cache, env.tmpDir, runtime, "FAIL 0p/1f", [
 				testFile,
 			]);
-			runtime.markGitGuardCacheUnknown("pipeline_error");
+			runtime.markGitGuardCacheUnknown("cache_write_failed");
 
 			const reason = evaluateGitGuard(runtime, cache, env.tmpDir).reason ?? "";
 

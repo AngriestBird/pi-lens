@@ -1485,7 +1485,8 @@ async function dispatchPipelineAnalysis(args: {
 		result = await pipelinePromise;
 	} catch (pipelineErr) {
 		if (getFlag("lens-guard")) {
-			runtime.markGitGuardCacheUnknown("pipeline_crash");
+			// #4733 r2 F12: about this file, so only its own next dispatch answers it.
+			runtime.markGitGuardDispatchUnanswered(filePath, "pipeline_crash");
 		}
 		dbg(`runPipeline crashed: ${pipelineErr}`);
 		logReadGuardEvent({
@@ -3952,22 +3953,30 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			result.output,
 		);
 		if (getFlag("lens-guard")) {
+			// #4733 r1 F2: a clean verdict over the whole file, applied, with no
+			// blocker left in the observation; anything less observes nothing.
+			const wholeFileClean =
+				inlineVerdictApplied &&
+				!result.isError &&
+				!result.hasBlockers &&
+				result.currentBlockerCount === 0 &&
+				result.fileVerdictComplete === true;
 			syncGitGuardRecord(
 				runtime,
 				cacheManager,
 				turnStateCwd,
-				filePath,
+				// #4733 r2 F11: a write speaks for its file's recorded sections only
+				// with that verdict, whichever session wrote them.
+				wholeFileClean ? filePath : undefined,
 				analysisRootMode,
-				// #4733 r1 F2: a clean verdict over the whole file, applied, with no
-				// blocker left in the observation; anything less observes nothing.
-				inlineVerdictApplied &&
-					!result.isError &&
-					!result.hasBlockers &&
-					result.currentBlockerCount === 0 &&
-					result.fileVerdictComplete === true,
+				wholeFileClean,
 			);
+			// #4733 r2 F12: a dispatch latch is this file's: an errored run sets it,
+			// and a run that returned without error answers it.
 			if (result.isError && !result.hasBlockers) {
-				runtime.markGitGuardCacheUnknown("pipeline_error");
+				runtime.markGitGuardDispatchUnanswered(filePath, "pipeline_error");
+			} else {
+				runtime.answerGitGuardDispatch(filePath);
 			}
 		}
 	}

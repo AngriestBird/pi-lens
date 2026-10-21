@@ -13,4 +13,6 @@ audience: user
   the refusal now names its files: a write that pi-lens checks in full and
   finds clean clears that file's part, and the last one clears the record. A
   passing test run no longer takes over another session's record, so its
-  blockers stay until their files are checked.
+  blockers stay until their files are checked. A file whose check crashed
+  keeps the gate closed, and names the file, until pi-lens checks that file
+  again; other files' clean writes no longer clear it.
