@@ -482,8 +482,9 @@ file-scoped worklist and receives no project-wide scanner output.
     only, and count each tool-set change as one full rewrite on such models. A
     host-generation gate takes a recorded fixture per certified minor, never
     two. Screen: drive two real-session requests that differ only in the
-    writer, and compare the head and pi-ai's collapsed head. Guard: planned,
-    tracked in #4687.
+    writer, and compare the head and pi-ai's collapsed head. Enforced by
+    `tests/clients/prompt-cache-prefix-writers.test.ts` (one tier-2 cell per
+    writer: registration, session-start plan, activation, injection).
 
 </important>
 
