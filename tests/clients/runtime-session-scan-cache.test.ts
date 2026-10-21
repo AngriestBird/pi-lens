@@ -32,16 +32,12 @@ import {
 } from "../../clients/startup-scan.js";
 import { getStartupScanMaxSourceFilesDerived } from "../../clients/project-scale.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
-import { makeLspServiceDouble } from "../support/lsp-service-double.js";
+import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 
 vi.mock("../../clients/lsp/config.js", () => ({
 	loadLSPConfig: vi.fn().mockResolvedValue({}),
 	initLSPConfig: vi.fn().mockResolvedValue(undefined),
 	getServerInitOverride: vi.fn().mockReturnValue(undefined),
-}));
-
-vi.mock("../../clients/lsp/capabilities.js", () => ({
-	getLSPService: vi.fn(() => makeLspServiceDouble()),
 }));
 
 const resolveStartupScanContextSpy = vi.hoisted(() => vi.fn());
@@ -134,7 +130,8 @@ describe("startup-scan verdict cache in session_start (#699)", () => {
 	let restoreStartupMode: () => void;
 	let previousDataDir: string | undefined;
 
-	beforeEach(() => {
+	beforeEach(async () => {
+		await installLspServiceDouble();
 		restoreStartupMode = setStartupMode("full");
 		previousDataDir = process.env.PILENS_DATA_DIR;
 		// #958: force the synchronous snapshot body writer so the gz body a

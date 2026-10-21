@@ -22,16 +22,12 @@ import {
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import type { SessionStartRootTelemetry } from "../../clients/runtime-session.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
-import { makeLspServiceDouble } from "../support/lsp-service-double.js";
+import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 
 vi.mock("../../clients/lsp/config.js", () => ({
 	loadLSPConfig: vi.fn().mockResolvedValue({}),
 	initLSPConfig: vi.fn().mockResolvedValue(undefined),
 	getServerInitOverride: vi.fn().mockReturnValue(undefined),
-}));
-
-vi.mock("../../clients/lsp/capabilities.js", () => ({
-	getLSPService: vi.fn(() => makeLspServiceDouble()),
 }));
 
 import { handleSessionStart } from "../../clients/runtime-session.js";
@@ -140,6 +136,7 @@ describe("session_start_total carries the classification decision (#2129)", () =
 	let previousTestMode: string | undefined;
 
 	beforeEach(async () => {
+		await installLspServiceDouble();
 		previousTestMode = process.env.PI_LENS_TEST_MODE;
 		process.env.PI_LENS_TEST_MODE = "0";
 		clearLatencyLog();
