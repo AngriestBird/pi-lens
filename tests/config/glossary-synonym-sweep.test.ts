@@ -247,7 +247,7 @@ const EXPECTED_GLOSSARY_TERMS = [
 	"mirror",
 	"path spelling",
 	"path key",
-	"canonical path",
+	"path identity",
 	"rendezvous id",
 	"generation",
 	"degradation record",
@@ -277,11 +277,6 @@ const EXPECTED_RETIRED_IN_ONE_SENSE: readonly OneSenseRow[] = [
 		term: "blocker",
 		owner: "clients/dispatch/types.ts",
 		retiredBy: ["finding"],
-	},
-	{
-		term: "canonical path",
-		owner: "clients/path-utils.ts",
-		retiredBy: ["path key"],
 	},
 	{
 		term: "diagnostic",
