@@ -81,10 +81,21 @@ function plantPackage(
 			main: "index.cjs",
 		}),
 	);
+	// The entry reads its names and tag from a data file rather than having them
+	// spliced into its source, so no value is ever built into code. It also
+	// leaves a `loaded` mark beside itself, which the warm-up case reads.
+	fs.writeFileSync(
+		path.join(dir, "fixture.json"),
+		JSON.stringify({ names: options.names, tag: options.tag }),
+	);
 	const lines = [
+		'const fs = require("node:fs");',
+		'const path = require("node:path");',
+		'const fixture = require("./fixture.json");',
+		'fs.writeFileSync(path.join(__dirname, "loaded"), "1");',
 		"const exported = {};",
-		`for (const name of ${JSON.stringify(options.names)}) {`,
-		`\texported[name] = Object.assign(function hosted() {}, { exportedAs: name, install: ${JSON.stringify(options.tag)} });`,
+		"for (const name of fixture.names) {",
+		"\texported[name] = Object.assign(function hosted() {}, { exportedAs: name, install: fixture.tag });",
 		"}",
 		"module.exports = exported;",
 	];
@@ -187,7 +198,13 @@ describe("the tier's session API comes from the host the override names (#4719 F
 		// load": a file whose cases are gated on a host being installed must stay
 		// a run of skips, and a case that NEEDS the host still raises the load's
 		// own error itself (the cases above).
-		expect(() => warmHostModule()).not.toThrow();
+		// Recurrence (#4719 F13): with a no-op warmHostModule this case passed.
+		// A fresh host's entry marks that it loaded; warming under the override
+		// must load it before anything calls hostModule().
+		const freshHost = plantHost(fixtureRoot(), SESSION_API, "0.86.2", "warmed");
+		expect(fs.existsSync(path.join(freshHost, "loaded"))).toBe(false);
+		withHostOverride(freshHost, () => warmHostModule());
+		expect(fs.existsSync(path.join(freshHost, "loaded"))).toBe(true);
 		const notAHost = path.join(fixtureRoot(), "not-a-host");
 		fs.mkdirSync(notAHost, { recursive: true });
 		fs.writeFileSync(
