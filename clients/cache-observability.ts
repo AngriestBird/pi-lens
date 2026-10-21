@@ -613,12 +613,14 @@ interface CacheMissVerdict {
  *      not, #1016's fix has regressed.
  *   3. `model-provider-changed` — both adjacent identities were present and
  *      differ. This is direct local evidence and outranks timing heuristics.
- *   4. `prefix-shrunk` — a low read of a request whose whole prompt is itself
- *      below half the baseline (`promptShrank`): the prompt got smaller
- *      (compaction, a trimmed transcript), so the read is low because there is
- *      less to read. It is decided from the provider's own token counts, not
- *      from timing, so it outranks the evidence gates; it names the turn so the
- *      shrink never counts as an unexplained miss (#4718 review F7).
+ *   4. `prefix-shrunk` — a low or zero read of a request whose whole prompt
+ *      is itself below half the baseline (`promptShrank`): the prompt got
+ *      smaller (compaction, a trimmed transcript), so the read is low because
+ *      there is less to read, and the compacted turn often reads nothing at
+ *      all (#4718 verify F11). It is decided from the provider's own token
+ *      counts, not from timing, so it outranks the evidence gates; it names
+ *      the turn so the shrink never counts as an unexplained miss (#4718
+ *      review F7).
  *   5. Evidence gates — heuristic causes require a REQUEST-time observation,
  *      a complete bounded sequence hash, adjacent full provider/model identity,
  *      and well-formed provider usage numbers.
@@ -788,10 +790,11 @@ function classifyCacheMiss(args: {
  * shortfall was or was not measured against this read.
  *
  * `advanced` — a healthy record IS the prefix this session last read whole;
- * `shrunk` — the request's whole prompt fell below half the baseline
+ * `shrunk` — a low read whose whole prompt fell below half the baseline
  * (`promptShrank`), i.e. a durable smaller prompt (compaction, a trimmed
  * transcript); `held` — a miss that kept the last healthy read (a rewrite, a
- * zero read, or unreadable token counts); `switched` — a model or provider
+ * zero read, the compacted turn itself when it read nothing, or unreadable
+ * token counts); `switched` — a model or provider
  * change cleared it; `cleared` — the record carried no readable `cacheRead`.
  */
 type CacheBaselineDecision =
@@ -819,9 +822,14 @@ type CacheBaselineDecision =
  *
  * A prompt below half the baseline is the same "low" the classifier applies
  * to the read, so a turn held by this rule has a prompt the next turn's read
- * is not low against: holding can cost one miss, never a stream of them. A
- * zero read is never a shrink: nothing was served, so it is a miss whatever
- * the size. Any unreadable count fails closed (false: hold and keep the miss).
+ * is not low against: holding can cost one miss, never a stream of them.
+ *
+ * The read does not matter (#4718 verify F11): a compaction changes the
+ * prefix, so the compacted turn usually reads NOTHING from cache (13 of 13
+ * real compactions in the maintainer's log) and its prompt arrives in `input`
+ * or `cacheWrite`. An empty prompt (pi-ai's all-zero usage on an aborted or
+ * errored request) proves nothing, so it is not a shrink. Any unreadable
+ * count fails closed (false: hold and keep the miss).
  */
 function promptShrank(args: {
 	cacheRead: number | undefined;
@@ -841,10 +849,8 @@ function promptShrank(args: {
 	) {
 		return false;
 	}
-	return (
-		cacheRead > 0 &&
-		cacheRead + input + cacheWrite < prior * LOW_CACHE_READ_RATIO
-	);
+	const prompt = cacheRead + input + cacheWrite;
+	return prompt > 0 && prompt < prior * LOW_CACHE_READ_RATIO;
 }
 
 /**
@@ -870,7 +876,11 @@ function nextCacheBaseline(args: {
 	if (args.cacheRead === undefined) {
 		return { baseline: undefined, decision: "cleared" };
 	}
-	if (args.promptShrank) {
+	// Only a low read moves the baseline to the smaller prefix. A zero-read
+	// shrink (the compacted turn itself, #4718 verify F11) holds: moving to 0
+	// would switch off low-read detection for the next turn, which reads the
+	// compacted prefix and shrinks the baseline with real read evidence.
+	if (args.promptShrank && args.kind === "low-read") {
 		return { baseline: args.cacheRead, decision: "shrunk" };
 	}
 	// No kind means no shortfall: a healthy read becomes the new baseline.

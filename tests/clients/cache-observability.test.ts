@@ -912,7 +912,9 @@ describe("cache-observability — miss attribution (#1071)", () => {
 		vi.setSystemTime(BASE_MS + DEFAULT_PROVIDER_CACHE_TTL_MS - 1);
 		observeRequest("boundary-below");
 		vi.setSystemTime(BASE_MS + DEFAULT_PROVIDER_CACHE_TTL_MS + 3_000);
-		logUsage(0, 100, "boundary-below");
+		// The same 9,000-token prompt as above: a 100-token prompt would be a
+		// shrink by its own numbers (#4718 verify F11), not a timing question.
+		logUsage(0, 9_000, "boundary-below");
 		expect(lastUsageMetadata()).toMatchObject({
 			cacheMissCause: "unknown",
 			gapBasis: "request-time",
@@ -1349,6 +1351,64 @@ describe("cache-observability — miss attribution (#1071)", () => {
 			priorCacheRead: 8_000,
 			cacheMissCause: "prefix-shrunk",
 			cacheBaseline: "shrunk",
+		});
+	});
+
+	// #4718 verify F11: a compaction changes the prefix, so the provider usually
+	// serves NOTHING on the compacted turn (13 of 13 real compactions in the
+	// maintainer's log). Requiring a non-zero read left every one of them an
+	// unexplained miss, and two compactions wrote the row. The real `01a14e00`
+	// sequence, with request-time evidence.
+	it("names a zero-read compaction and keeps it out of the unexplained count", () => {
+		logUsage(245_272, 100);
+		observeRequest();
+		logUsage(0, 67_400);
+		const first = lastUsageMetadata();
+		observeRequest();
+		logUsage(67_716, 293);
+		const after = lastUsageMetadata();
+		observeRequest();
+		logUsage(244_169, 100);
+		observeRequest();
+		logUsage(0, 61_733);
+		const second = lastUsageMetadata();
+		expect(
+			renderDegradationLines().filter((line) =>
+				line.includes("prompt-cache-miss-unexplained"),
+			),
+		).toEqual([]);
+		expect(
+			getDegradationSummary().some(
+				(entry) => entry.kind === "prompt-cache-miss-unexplained",
+			),
+		).toBe(false);
+		expect(first).toMatchObject({
+			gapBasis: "request-time",
+			cacheMissKind: "zero-read",
+			cacheMissCause: "prefix-shrunk",
+			cacheBaseline: "held",
+		});
+		// The next turn reads the compacted prefix and moves the baseline to it.
+		expect(after).toMatchObject({
+			priorCacheRead: 245_272,
+			cacheMissCause: "prefix-shrunk",
+			cacheBaseline: "shrunk",
+		});
+		expect(second).toMatchObject({
+			cacheMissKind: "zero-read",
+			cacheMissCause: "prefix-shrunk",
+		});
+	});
+
+	// An aborted or errored request carries pi-ai's empty usage (every count 0).
+	// A zero prompt is no evidence of a smaller prompt, so it stays a miss.
+	it("keeps an empty usage record a counted miss", () => {
+		logUsage(8_000, 100);
+		logWrite(0, 0, 0);
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheMissKind: "zero-read",
+			cacheMissCause: "unknown",
+			cacheBaseline: "held",
 		});
 	});
 
