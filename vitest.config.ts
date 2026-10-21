@@ -509,6 +509,9 @@ export const wallClockBudgetInclude = [
 	// #4148: a 199K-blank-line rule is a real event-loop occupancy witness for
 	// validateRule's synchronous language extraction, so it runs serialized.
 	"tests/clients/ast-grep-rule-regex-budget.test.ts",
+	// #4713 R11: real `bash -c` is the oracle for ~1 500 generated cd
+	// spellings (flake-shape admission); about 5 s of serial spawns.
+	"tests/clients/bash-word-composition.test.ts",
 	"tests/clients/biome-config-decorator-metadata.test.ts",
 	"tests/clients/build-identity.test.ts",
 	// #4046: the impact-cascade and reverse-dependency cases assert a t(4N)/t(N)

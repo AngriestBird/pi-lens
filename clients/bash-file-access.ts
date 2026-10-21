@@ -32,17 +32,6 @@ export interface ReadSpan {
 	limit: number;
 }
 
-function stripQuotes(token: string): string {
-	if (token.length >= 2) {
-		const first = token[0];
-		const last = token[token.length - 1];
-		if ((first === "'" && last === "'") || (first === '"' && last === '"')) {
-			return token.slice(1, -1);
-		}
-	}
-	return token;
-}
-
 /** Small conservative shell lexer shared by command-analysis consumers. */
 export interface ShellCommandSegment {
 	tokens: string[];
@@ -55,8 +44,42 @@ export interface ShellCommandSegment {
 	 * them.
 	 */
 	terminator?: "pipe";
-	/** Quoted-leading-tilde facts indexed by the token they came from. */
-	quotedTilde?: readonly boolean[];
+}
+
+/**
+ * How bash quoted one stretch of a word's SOURCE (#4713 R11). `escaped` is one
+ * unquoted backslash-escaped character; `ansiC` is `$'…'` and `locale` is
+ * `$"…"`. A backslash-newline is no part: bash removes it before it reads
+ * quoting, so it joins the stretch around it.
+ */
+type WordPartKind =
+	| "unquoted"
+	| "single"
+	| "double"
+	| "ansiC"
+	| "locale"
+	| "escaped";
+
+/**
+ * One stretch of a word, kept even when it emits nothing (`""`). `text` is
+ * what bash emits for it, and is `undefined` only for an `ansiC` part holding
+ * an escape, which this model does not decode. `span` is `[start, end)` in the
+ * text the tokenizer read.
+ */
+interface WordPart {
+	kind: WordPartKind;
+	text: string | undefined;
+	span: readonly [number, number];
+}
+
+/**
+ * A word as bash lexed it: `text` is the token callers already compare (a
+ * backslash before an ordinary character stays, for native Windows paths),
+ * and `parts` is the model every quoting question is read from (#4713 R11).
+ */
+interface ShellWord {
+	text: string;
+	parts: readonly WordPart[];
 }
 
 /**
@@ -89,31 +112,14 @@ interface ShellSegmentRange {
 	grouping: boolean;
 	/** Per token: a redirection's descriptor or target, not an argument. */
 	redirectWords: readonly boolean[];
-	/**
-	 * Per token: the token is bash's own word after quote removal (#4713 R7-1).
-	 * Admitted characters only: any character in single or double quotes,
-	 * except a double-quoted escape bash does not remove; an escaped unquoted
-	 * one; an unquoted one from `LITERAL_WORD_CHAR`; and an unquoted `~` that
-	 * starts the word as `~` or `~/`. Any other character clears it. `$` and a
-	 * backtick, which double quotes still expand, are refused later by
-	 * `resolveCdOperand`, as for every directory a command names.
-	 */
-	literalWords: readonly boolean[];
-	/**
-	 * Per token: the length of its leading run of characters that came from no
-	 * quotes and no removed escape (#4713 R8-3). The run ends at the first quote
-	 * or escape in the SOURCE, even one that adds no character (`FOO""=bar`,
-	 * #4713 R10). Bash reads `NAME=` as an assignment only when it lies inside
-	 * that run. A backslash the token keeps (`\cd`) and the character after it
-	 * count as part of the run: the token's text still shows it.
-	 */
-	unquotedLengths: readonly number[];
+	/** Per token: the word model behind `segment.tokens` (#4713 R11). */
+	words: readonly ShellWord[];
 }
 
 /**
  * An unquoted character bash takes as itself in a word. No `~`: bash expands
  * one after `=` (`a=~/x`), so only a leading one is admitted, and only as `~`
- * or `~/`, which `resolveCdOperand` expands.
+ * or `~/`, which `cdOperandPath` expands.
  */
 const LITERAL_WORD_CHAR = /^[A-Za-z0-9_./@%:,=+-]$/;
 
@@ -238,16 +244,49 @@ function consumeHeredocBodies(
 	return { end: cursor - 1, substitutions };
 }
 
+/**
+ * A word a write or read reader resolves: the token text, and whether bash
+ * expands its leading `~` (see {@link tildeExpands}).
+ */
 interface ShellOperand {
 	text: string;
-	quotedTilde: boolean;
+	tildeExpands: boolean;
 }
 
-function shellOperands(segment: ShellCommandSegment): ShellOperand[] {
-	return segment.tokens.map((text, index) => ({
-		text,
-		quotedTilde: segment.quotedTilde?.[index] === true,
+function shellOperands(range: ShellSegmentRange): ShellOperand[] {
+	return range.words.map((word) => ({
+		text: word.text,
+		tildeExpands: tildeExpands(word),
 	}));
+}
+
+/**
+ * Bash's word after quote removal, or `undefined` when a part's text is not
+ * known statically (#4713 R11). This is the name bash looks a command up by:
+ * `\c""d`, `'cd'` and `$'cd'` are all `cd`, and `"\c"d` is `\cd`.
+ */
+function wordValue(word: ShellWord): string | undefined {
+	let value = "";
+	for (const part of word.parts) {
+		if (part.text === undefined) return undefined;
+		value += part.text;
+	}
+	return value;
+}
+
+/**
+ * Bash expands a leading `~` only when its whole tilde-prefix, up to the first
+ * unquoted `/`, is unquoted (#4577 M1, #4713 R11): the word's first part is
+ * unquoted and starts with `~`, and it is the only part or holds the `/`.
+ * `~/x""` expands; `""~`, `~""/x` and `~\ x` do not.
+ */
+function tildeExpands(word: ShellWord): boolean {
+	const [first, ...rest] = word.parts;
+	return (
+		first?.kind === "unquoted" &&
+		first.text?.startsWith("~") === true &&
+		(rest.length === 0 || first.text.includes("/"))
+	);
 }
 
 export function tokenizeShellCommand(command: string): ShellCommandSegment[] {
@@ -259,18 +298,21 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 	const pendingHeredocs: PendingHeredoc[] = [];
 	let tokens: string[] = [];
 	let word = "";
-	/**
-	 * How many leading characters of the word came out of no quotes and no
-	 * escape, before the first quote or escape in its source. A leading tilde
-	 * outside that run is literal to bash (`'~/x'`, `"~/x"`, `""~/x`,
-	 * `~""/x`) rather than a home prefix (#4577 M1). Reset with the word.
-	 */
-	let wordUnquoted = 0;
-	// False once the word's source met a quote or an escape (#4713 R10).
-	let wordRunOpen = true;
-	let quotedTilde: boolean[] = [];
+	let words: ShellWord[] = [];
+	// The word's parts so far, and the one still open (#4713 R11).
+	let parts: WordPart[] = [];
+	let part:
+		| { kind: WordPartKind; text: string; start: number; end: number }
+		| undefined;
 	let quote: "single" | "double" | undefined;
+	// The part kind the open quote emits: `single`, `double`, `ansiC`, `locale`.
+	let quoteKind: WordPartKind = "single";
 	let escaped = false;
+	// The previous character was an unquoted `$` opening `$'…'` or `$"…"`.
+	let dollarQuote = false;
+	// The previous character was a backslash the token keeps (`\c`): bash
+	// removes it and takes this character as escaped.
+	let escapeKept = false;
 	let unsupported = false;
 	let atTokenStart = true;
 	let segmentStart = 0;
@@ -278,41 +320,45 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 	let redirectWords: boolean[] = [];
 	// The next word is a redirection's target (`> f`, `2>&1`'s `1`).
 	let redirectPending = false;
-	let literalWords: boolean[] = [];
-	let unquotedLengths: number[] = [];
-	let wordLiteral = true;
-	const appendChar = (
-		ch: string | undefined,
-		quoted: boolean,
-		literal: boolean,
+	const closePart = () => {
+		if (part)
+			parts.push({
+				kind: part.kind,
+				// The model does not decode an ANSI-C escape: such a part has no
+				// static text, and every reader of it fails closed.
+				text:
+					part.kind === "ansiC" && part.text.includes("\\")
+						? undefined
+						: part.text,
+				span: [part.start, part.end],
+			});
+		part = undefined;
+	};
+	// Append source `[start, end)`, emitting `text`, to the open part of
+	// `kind`, opening one when the open part is of another kind.
+	const addToPart = (
+		kind: WordPartKind,
+		text: string,
+		start: number,
+		end: number,
 	) => {
-		if (quoted) wordRunOpen = false;
-		else if (wordRunOpen) wordUnquoted += (ch ?? "").length;
-		word += ch ?? "";
-		if (!literal) wordLiteral = false;
+		if (part?.kind !== kind) {
+			closePart();
+			part = { kind, text: "", start, end };
+		}
+		part.text += text;
+		part.end = end;
 	};
 	const flushWord = () => {
+		closePart();
 		if (word) {
-			// Bash expands a leading `~` only when its tilde-prefix, up to the
-			// first `/`, lies in the unquoted run (`~""/x` stays literal; #4577
-			// M1, #4713 R10).
-			const slash = word.indexOf("/");
-			const tildeExpands =
-				word.startsWith("~") &&
-				(wordRunOpen || (slash >= 0 && wordUnquoted > slash));
-			quotedTilde.push(word.startsWith("~") && !tildeExpands);
 			tokens.push(word);
+			words.push({ text: word, parts });
 			redirectWords.push(redirectPending);
 			redirectPending = false;
-			const expandedTilde =
-				tildeExpands && word !== "~" && !word.startsWith("~/");
-			literalWords.push(wordLiteral && !expandedTilde);
-			unquotedLengths.push(wordUnquoted);
 		}
 		word = "";
-		wordUnquoted = 0;
-		wordRunOpen = true;
-		wordLiteral = true;
+		parts = [];
 		atTokenStart = true;
 	};
 	const flushSegment = (
@@ -326,51 +372,65 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 				segment: {
 					tokens,
 					unsupported,
-					terminator,
-					...(quotedTilde.some(Boolean) ? { quotedTilde } : {}),
+					...(terminator ? { terminator } : {}),
 				},
 				start: segmentStart,
 				end,
 				exit,
 				grouping,
 				redirectWords,
-				literalWords,
-				unquotedLengths,
+				words,
 			});
 		tokens = [];
-		quotedTilde = [];
+		words = [];
 		redirectWords = [];
-		literalWords = [];
-		unquotedLengths = [];
 		grouping = false;
 		unsupported = false;
 		atTokenStart = true;
 		segmentStart = end + 1;
 	};
 	for (let i = 0; i < command.length; i++) {
-		const ch = command[i];
+		const ch = command[i] ?? "";
 		const next = command[i + 1];
 		if (quote === "single") {
-			if (ch === "'") quote = undefined;
-			else appendChar(ch, true, true);
+			if (ch === "'") {
+				quote = undefined;
+				addToPart(quoteKind, "", i, i + 1);
+				closePart();
+			} else {
+				word += ch;
+				addToPart(quoteKind, ch, i, i + 1);
+			}
 			continue;
 		}
 		if (quote === "double") {
 			if (escaped) {
-				// Bash unescapes only these inside double quotes; elsewhere it keeps
-				// the backslash this drops.
-				appendChar(ch, true, ch !== undefined && '$`"\\'.includes(ch));
+				// Bash removes the backslash before these inside double quotes, so
+				// the character is an escaped part of its own, and keeps it before
+				// any other character; the token drops it either way.
+				word += ch;
+				if ('$`"\\'.includes(ch)) addToPart("escaped", ch, i - 1, i + 1);
+				else if (ch !== "\n") addToPart(quoteKind, `\\${ch}`, i - 1, i + 1);
 				escaped = false;
 			} else if (ch === "\\") escaped = true;
-			else if (ch === '"') quote = undefined;
-			else appendChar(ch, true, true);
+			else if (ch === '"') {
+				quote = undefined;
+				addToPart(quoteKind, "", i, i + 1);
+				closePart();
+			} else {
+				word += ch;
+				addToPart(quoteKind, ch, i, i + 1);
+			}
 			continue;
 		}
 		if (escaped) {
 			// A backslash-newline is a shell line continuation, not part of the
 			// command argument. Keeping the newline here makes a continued git command
 			// visible to command guards.
-			if (ch !== "\n") appendChar(ch, true, true);
+			if (ch !== "\n") {
+				word += ch;
+				addToPart("escaped", ch, i - 1, i + 1);
+			}
 			escaped = false;
 			atTokenStart = false;
 			continue;
@@ -384,21 +444,28 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 				escaped = true;
 			} else {
 				// Bash removes this backslash; the token keeps it.
-				appendChar(ch, false, false);
-				atTokenStart = false;
+				word += ch;
+				if (next === undefined) addToPart("unquoted", ch, i, i + 1);
+				else escapeKept = true;
 			}
 			atTokenStart = false;
 			continue;
 		}
-		if (ch === "'") {
-			quote = "single";
-			wordRunOpen = false;
-			atTokenStart = false;
-			continue;
-		}
-		if (ch === '"') {
-			quote = "double";
-			wordRunOpen = false;
+		if (ch === "'" || ch === '"') {
+			quote = ch === "'" ? "single" : "double";
+			quoteKind =
+				ch === "'"
+					? dollarQuote
+						? "ansiC"
+						: "single"
+					: dollarQuote
+						? "locale"
+						: "double";
+			// A quote always opens its own part, so `""` is kept though it emits
+			// nothing.
+			closePart();
+			addToPart(quoteKind, "", dollarQuote ? i - 1 : i, i + 1);
+			dollarQuote = false;
 			atTokenStart = false;
 			continue;
 		}
@@ -479,12 +546,12 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 			unsupported = true;
 			continue;
 		}
-		if (ch !== undefined && "(){}`".includes(ch)) grouping = true;
-		appendChar(
-			ch,
-			false,
-			LITERAL_WORD_CHAR.test(ch ?? "") || (ch === "~" && word === ""),
-		);
+		if ("(){}`".includes(ch)) grouping = true;
+		word += ch;
+		if (escapeKept) addToPart("escaped", ch, i - 1, i + 1);
+		else if (ch === "$" && (next === "'" || next === '"')) dollarQuote = true;
+		else addToPart("unquoted", ch, i, i + 1);
+		escapeKept = false;
 		atTokenStart = false;
 	}
 	if (quote || escaped) unsupported = true;
@@ -505,18 +572,15 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
  * the pre-fix seam left it under the cwd.
  */
 function resolveCandidate(token: ShellOperand, cwd: string): string | null {
-	const cleaned = stripQuotes(token.text);
+	const cleaned = token.text;
 	if (!cleaned || cleaned.startsWith("-") || !isReadableSourceFile(cleaned)) {
 		return null;
 	}
-	// A redirect target reaches here still spelled with its quotes
-	// (`> "~/x.ts"`); a lexed word lost them, so the segment carries the bit.
-	const tildeIsLiteral = token.quotedTilde;
 	// `\~/x` survives the lexer backslash-first (it keeps native Windows
 	// path separators), and bash reads that tilde literally: drop the escape
 	// instead of crediting the phantom `<cwd>/\~/x`.
 	const operand =
-		cleaned.startsWith("~") && !tildeIsLiteral
+		cleaned.startsWith("~") && token.tildeExpands
 			? normalizeHostToolPath(cleaned)
 			: cleaned.startsWith("\\~")
 				? cleaned.slice(1)
@@ -687,8 +751,8 @@ export function extractReadPathsFromCommand(
 		spans.push({ filePath: file.abs, offset, limit });
 	};
 
-	for (const segment of tokenizeShellCommand(command)) {
-		const tokens = shellOperands(segment);
+	for (const range of tokenizeShellCommandWithRanges(command)) {
+		const tokens = shellOperands(range);
 		if (tokens.length === 0) continue;
 		const verb = path.basename(tokens[0]?.text ?? "");
 		const args = tokens.slice(1);
@@ -723,7 +787,7 @@ export function extractReadPathsFromCommand(
 			if (args.some((arg) => arg.text === "-i")) continue; // sed -i writes, not reads
 			let range: { start: number; end: number } | undefined;
 			for (const a of args) {
-				const m = stripQuotes(a.text).match(/^(\d+),(\d+)p$/);
+				const m = a.text.match(/^(\d+),(\d+)p$/);
 				if (m) {
 					range = {
 						start: Number.parseInt(m[1], 10),
@@ -742,8 +806,7 @@ export function extractReadPathsFromCommand(
 }
 
 function grepHasLineNumbers(args: string[]): boolean {
-	return args.some((arg) => {
-		const token = stripQuotes(arg);
+	return args.some((token) => {
 		if (token === "--line-number") return true;
 		if (!token.startsWith("-") || token.startsWith("--")) return false;
 		return token.slice(1).includes("n");
@@ -793,10 +856,9 @@ export function parseGrepContextLines(args: string[]): GrepContextLines {
 	let before = 0;
 	let after = 0;
 	for (let i = 0; i < args.length; i++) {
-		const token = stripQuotes(args[i]);
+		const token = args[i] ?? "";
 		if (token === "--") break;
-		const nextToken =
-			args[i + 1] === undefined ? undefined : stripQuotes(args[i + 1]);
+		const nextToken = args[i + 1];
 
 		const long = /^--(after|before)-context(?:=(\d+))?$/.exec(token);
 		if (long) {
@@ -846,7 +908,7 @@ function extractGrepSearchFiles(args: ShellOperand[], cwd: string): string[] {
 	for (let i = 0; i < args.length; i++) {
 		const operand = args[i];
 		if (!operand) continue;
-		const token = stripQuotes(operand.text);
+		const token = operand.text;
 		if (!endOfOptions && token === "--") {
 			endOfOptions = true;
 			continue;
@@ -883,7 +945,7 @@ function parseGrepLineWithFile(
 	if (!Number.isFinite(lineNumber) || lineNumber < 1) return undefined;
 	// Grep prints shell-expanded filenames. A leading tilde in OUTPUT is
 	// literal bytes, not an operand whose quoting can be recovered.
-	const abs = resolveCandidate({ text: match[1], quotedTilde: true }, cwd);
+	const abs = resolveCandidate({ text: match[1], tildeExpands: false }, cwd);
 	if (!abs) return undefined;
 	try {
 		if (!nodeFs.statSync(abs).isFile()) return undefined;
@@ -944,8 +1006,7 @@ function parseGrepLineWithoutFile(
 const LINE_DROPPING_TAIL_VERBS = new Set(["head", "tail", "uniq"]);
 
 function isSedQuitCommand(args: string[]): boolean {
-	for (const arg of args) {
-		const token = stripQuotes(arg);
+	for (const token of args) {
 		if (token.startsWith("-")) continue;
 		// A `q` command anchored at the start of the script or after a `;`/
 		// newline separator, optionally preceded by a numeric/`$` address
@@ -956,7 +1017,7 @@ function isSedQuitCommand(args: string[]): boolean {
 }
 
 function isLineDroppingTailCommand(tokens: string[]): boolean {
-	const verb = path.basename(stripQuotes(tokens[0] ?? ""));
+	const verb = path.basename(tokens[0] ?? "");
 	if (LINE_DROPPING_TAIL_VERBS.has(verb)) return true;
 	if (verb === "sed") return isSedQuitCommand(tokens.slice(1));
 	return false;
@@ -1001,10 +1062,11 @@ function collectGrepCommandFiles(
 	// no segment identity, so a per-segment override isn't representable in
 	// the aggregate `context` this function returns.
 	let truncated = false;
-	const segments = tokenizeShellCommand(command);
+	const ranges = tokenizeShellCommandWithRanges(command);
+	const segments = ranges.map((range) => range.segment);
 	for (let i = 0; i < segments.length; i++) {
 		const tokens = segments[i].tokens;
-		const verb = path.basename(stripQuotes(tokens[0] ?? ""));
+		const verb = path.basename(tokens[0] ?? "");
 		if (verb !== "grep" && verb !== "egrep" && verb !== "fgrep") continue;
 		const args = tokens.slice(1);
 		if (!grepHasLineNumbers(args)) continue;
@@ -1017,7 +1079,7 @@ function collectGrepCommandFiles(
 				}
 			: segmentContext;
 		for (const file of extractGrepSearchFiles(
-			shellOperands(segments[i]!).slice(1),
+			shellOperands(ranges[i]!).slice(1),
 			cwd,
 		)) {
 			files.add(file);
@@ -1093,32 +1155,53 @@ export function extractGrepSearchReadsFromOutput(
 }
 
 /**
- * The file a `cd`/`pushd` operand names, or `undefined` when the operand cannot
- * be known before the shell runs it (`$VAR`, a substitution, a glob, no
- * operand). An option or `cd -` never reaches it: `directoryEffect` admits a
- * plain path start only, for the move and for `cdTargets` alike. #2050
- * AC4: bash rewrites the working directory mid-command, so a relative operand
- * after a `cd` belongs to the directory it entered, not to the directory the
- * command started in. An unknown target leaves the effective directory
- * unchanged — the pre-#2050 answer — rather than crediting the wrong one.
+ * The directory a `cd`/`pushd` operand names, read from its word model
+ * (#4713 R7-1, R8-2, R11), or `undefined` when bash's word is not known before
+ * the shell runs it. Admitted: bash's own word after quote removal, with no
+ * backslash bash keeps inside double quotes, every unquoted character from
+ * `LITERAL_WORD_CHAR` (an unquoted
+ * `~` only as the word's first character), starting with a `PLAIN_PATH_START`
+ * character, with no `$`, backtick or glob character, and a tilde bash expands
+ * only as `~` or `~/…`. `~+1`, `~-`, `~user`, `$D` and `*` name nothing.
+ *
+ * #2050 AC4: bash rewrites the working directory mid-command, so a relative
+ * operand after a `cd` belongs to the directory it entered, not to the
+ * directory the command started in.
  */
-function resolveCdOperand(
-	token: ShellOperand | undefined,
+function cdOperandPath(
+	word: ShellWord | undefined,
 	cwd: string,
 ): string | undefined {
-	if (!token) return undefined;
-	const cleaned = stripQuotes(token.text);
-	if (!cleaned) return undefined;
-	// Shell expansions the static parse cannot follow. A directory whose NAME
-	// contains one of these is rare; guessing would be the shape-74 defect this
-	// resolution exists to remove.
-	if (/[$`*?[]/.test(cleaned)) return undefined;
-	const operand =
-		cleaned.startsWith("~") && !token.quotedTilde
-			? normalizeHostToolPath(cleaned)
-			: cleaned.startsWith("\\~")
-				? cleaned.slice(1)
-				: cleaned;
+	const value = word && wordValue(word);
+	if (
+		!word ||
+		value === undefined ||
+		!PLAIN_PATH_START.test(value) ||
+		/[$`*?[]/.test(value)
+	)
+		return undefined;
+	let emitted = 0;
+	for (const part of word.parts) {
+		const text = part.text ?? "";
+		// A backslash bash keeps inside double quotes (`"s\ub"`, R50) names a
+		// directory the token text spells without it.
+		if (
+			(part.kind === "double" || part.kind === "locale") &&
+			text.includes("\\")
+		)
+			return undefined;
+		if (part.kind === "unquoted")
+			for (const [index, ch] of [...text].entries())
+				if (
+					!LITERAL_WORD_CHAR.test(ch) &&
+					!(ch === "~" && emitted + index === 0)
+				)
+					return undefined;
+		emitted += text.length;
+	}
+	const tilde = tildeExpands(word);
+	if (tilde && value !== "~" && !value.startsWith("~/")) return undefined;
+	const operand = tilde ? normalizeHostToolPath(value) : value;
 	return path.isAbsolute(operand) ? operand : path.resolve(cwd, operand);
 }
 
@@ -1210,7 +1293,7 @@ export function scanShellWriteScopes(
 	let entry: ShellSegmentExit = "seq";
 	let simpleCommand: ShellSegmentRange[] = [];
 	for (const [rangeIndex, range] of ranges.entries()) {
-		const { segment, start: segmentStart, end: segmentEnd } = range;
+		const { start: segmentStart, end: segmentEnd } = range;
 		if (segmentEnd >= 0) {
 			for (; redirectCursor < redirects.length; redirectCursor += 1) {
 				const redirect = redirects[redirectCursor];
@@ -1219,13 +1302,14 @@ export function scanShellWriteScopes(
 				// the first segment after the body would otherwise claim its `>`
 				// (#4713 F5).
 				if (redirect.index < segmentStart) continue;
-				add({
-					text: redirect.text,
-					quotedTilde: /^['"]/.test(redirect.text),
-				});
+				// The target is read through the same word model as any operand,
+				// so `> ''~/f.ts` names the literal `./~/f.ts` (#4713 R11).
+				const [target, ...more] = tokenizeShellCommandWithRanges(redirect.text);
+				if (target && more.length === 0 && !target.segment.unsupported)
+					for (const operand of shellOperands(target)) add(operand);
 			}
 		}
-		const tokens = shellOperands(segment);
+		const tokens = shellOperands(range);
 		const { verb, args } =
 			tokens.length === 0
 				? { verb: "", args: [] as ShellOperand[] }
@@ -1337,13 +1421,16 @@ export function scanShellWriteScopes(
 			for (let i = 1; i < args.length; i += 1) {
 				if (args[i]?.text === "--include" && args[i + 1]) {
 					for (const file of (args[i + 1]?.text ?? "").split(","))
-						add({ text: file, quotedTilde: args[i + 1]?.quotedTilde === true });
+						add({
+							text: file,
+							tildeExpands: args[i + 1]?.tildeExpands === true,
+						});
 					i += 1;
 				} else if (args[i]?.text.startsWith("--include=")) {
 					for (const file of (args[i]?.text ?? "")
 						.slice("--include=".length)
 						.split(","))
-						add({ text: file, quotedTilde: args[i]?.quotedTilde === true });
+						add({ text: file, tildeExpands: args[i]?.tildeExpands === true });
 				}
 			}
 		} else if (verb === "git") {
@@ -1490,76 +1577,56 @@ type DirectoryEffect = (
 /**
  * What one simple command does to the shell's directory, read as a positive
  * list (#4713 round 4). Admitted: `cd DIR` and `pushd DIR` with exactly one
- * statically resolvable plain path operand (a literal word, see
- * `literalWords`, starting with a `PLAIN_PATH_START` character), and a bare
- * `popd`, each spelled as that literal first word once leading assignments
- * and redirections are set aside.
+ * statically resolvable plain path operand (see `cdOperandPath`), and a bare
+ * `popd`, each the name bash runs (`wordValue`) once leading assignments and
+ * redirections are set aside.
  * A command whose first word is a plain word naming none of the directory or
  * shell-text builtins is `none`. A reserved word or an unquoted grouping
  * character is a `construct`; every other form is `unknown`.
  *
  * `named` reads the same words more loosely (#4713 R8-1): a `builtin` or
- * `command` prefix, an escaped verb (`\cd`), an option before the operand or
- * a second operand still name the directory, which the move rule leaves
- * `unknown`.
+ * `command` prefix, an option before the operand or a second operand still
+ * name the directory, which the move rule leaves `unknown`. Every quoting
+ * question is asked of the word model (#4713 R11), never of the token text.
  */
 function directoryEffect(
 	ranges: readonly ShellSegmentRange[],
 	cwd: string,
 ): DirectoryEffect {
-	const words: ShellOperand[] = [];
-	const literal: boolean[] = [];
-	const unquoted: number[] = [];
+	const words: ShellWord[] = [];
 	for (const range of ranges)
-		for (const [index, operand] of shellOperands(range.segment).entries())
-			if (range.redirectWords[index] !== true) {
-				words.push(operand);
-				literal.push(range.literalWords[index] === true);
-				unquoted.push(range.unquotedLengths[index] ?? 0);
-			}
+		for (const [index, word] of range.words.entries())
+			if (range.redirectWords[index] !== true) words.push(word);
 	// Bash takes `NAME=value` as an assignment only when the name and `=` are
-	// unquoted; `'FOO=bar' cd sub` runs a command named `FOO=bar` (#4713 R8-3).
+	// unquoted; `'FOO=bar' cd sub` and `FOO""=bar cd sub` run a command named
+	// `FOO=bar` (#4713 R8-3, R10).
 	let first = 0;
-	for (;;) {
-		const prefix = ASSIGNMENT_PREFIX.exec(words[first]?.text ?? "");
-		if (!prefix || prefix[0].length > (unquoted[first] ?? 0)) break;
+	while (
+		words[first]?.parts[0]?.kind === "unquoted" &&
+		ASSIGNMENT_PREFIX.test(words[first]?.parts[0]?.text ?? "")
+	)
 		first++;
-	}
-	// The command a word names, compared below with builtin names only: the
-	// literal word, or an unquoted one whose backslashes bash removes (`\cd`,
-	// `c\d`). A word with any quoted character and no literal flag names none.
-	const commandName = (index: number): string | undefined => {
-		const text = words[index]?.text;
-		if (text === undefined || literal[index]) return text;
-		return unquoted[index] === text.length
-			? text.replace(/\\/g, "")
-			: undefined;
-	};
+	// The name bash looks each word up by (#4713 R11): `\c""d` is `cd`.
+	const names = words.map(wordValue);
 	let at = first;
-	while (commandName(at) === "builtin" || commandName(at) === "command") at++;
+	while (names[at] === "builtin" || names[at] === "command") at++;
 	let named: string | undefined;
-	if (commandName(at) === "cd" || commandName(at) === "pushd") {
-		const index = words.findIndex(
-			(word, i) => i > at && !word.text.startsWith("-"),
+	if (names[at] === "cd" || names[at] === "pushd")
+		named = cdOperandPath(
+			words.find((_, i) => i > at && names[i]?.startsWith("-") !== true),
+			cwd,
 		);
-		const operand = words[index];
-		// The move rule's operand test (#4713 R7-1, R8-2): bash's own word, with
-		// no expansion (`~+1`, `~-`, `~user`, `$D`), and a plain path start.
-		if (operand && literal[index] && PLAIN_PATH_START.test(operand.text))
-			named = resolveCdOperand(operand, cwd);
-	}
 	if (ranges.some((range) => range.grouping))
 		return { kind: "construct", named };
-	const verb = words[first]?.text;
-	if (verb === undefined) return { kind: "none" };
+	if (first >= words.length) return { kind: "none" };
+	const verb = names[first];
+	if (verb === undefined) return { kind: "unknown", named };
 	if (SHELL_RESERVED_WORDS.has(verb)) return { kind: "construct" };
 	const operands = words.slice(first + 1);
 	if (verb === "cd" || verb === "pushd") {
 		// The directory moves only on one plain path operand (#4713 R7-1):
-		// `named` is then that operand, and it is set only when bash runs `cd`
-		// (`"\c"d` runs `\cd`). Every other form (a stack index or option,
-		// `~+1`, `~user`, `$D`, a glob, an escape the tokenizer resolves unlike
-		// bash, a prefix) falls back.
+		// `named` is then that operand. Every other form (a stack index or
+		// option, `~+1`, `~user`, `$D`, a glob, a prefix) falls back.
 		return operands.length === 1 && named
 			? { kind: "move", target: named, push: verb === "pushd", named }
 			: { kind: "unknown", named };
@@ -1639,8 +1706,8 @@ export function extractDeletedPathsFromCommand(
 		}
 	};
 
-	for (const segment of tokenizeShellCommand(command)) {
-		const tokens = shellOperands(segment);
+	for (const range of tokenizeShellCommandWithRanges(command)) {
+		const tokens = shellOperands(range);
 		if (tokens.length === 0) continue;
 		const verb = path.basename(tokens[0]?.text ?? "");
 		const args = tokens.slice(1);

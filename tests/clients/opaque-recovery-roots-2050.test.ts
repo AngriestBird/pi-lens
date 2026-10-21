@@ -190,6 +190,9 @@ describe("resolveOpaqueRecoveryRoots (#2050)", () => {
 		["builtin", "builtin cd"],
 		["command", "command cd"],
 		["an escaped verb", "\\cd"],
+		// #4713 R11 (greptile u5ycK): an escape and an empty quote in one word.
+		["an escaped verb holding an empty quote", '\\c""d'],
+		["an escaped builtin holding an empty quote", 'b\\u""iltin cd'],
 	])("admits a linked worktree a cd names after %s", (_label, verb) => {
 		const repo = initRepo(path.join(env.tmpDir, "prefixed-repo"));
 		const worktree = initLinkedWorktree(

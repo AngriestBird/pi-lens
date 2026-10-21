@@ -1384,7 +1384,7 @@ describe("scanShellWriteScopes — the command's effective directory (#2050)", (
 			row: "R48 cd s\\ub, an escape bash removes",
 			command: "cd s\\ub; printf x > f.ts",
 			bash: "sub/f.ts",
-			fallback: "f.ts",
+			named: ["sub"],
 		},
 		{
 			row: "R49 cd +foo enters a directory named +foo",
@@ -1571,14 +1571,12 @@ describe("scanShellWriteScopes — the command's effective directory (#2050)", (
 			row: "R82 \\cd names the target (R8-1)",
 			command: "\\cd sub; printf x > f.ts",
 			bash: "sub/f.ts",
-			fallback: "f.ts",
 			named: ["sub"],
 		},
 		{
 			row: "R83 c\\d names the target (R8-1)",
 			command: "c\\d sub; printf x > f.ts",
 			bash: "sub/f.ts",
-			fallback: "f.ts",
 			named: ["sub"],
 		},
 		{
@@ -1752,6 +1750,33 @@ describe("scanShellWriteScopes — the command's effective directory (#2050)", (
 			command: "mkdir '~ x'; cd ~\\ x; printf x > f.ts",
 			bash: "~ x/f.ts",
 			named: ["~ x"],
+		},
+		// #4713 R11 (greptile u5ycK, verify r11 F1): an escape and an empty
+		// quote inside one verb word. Bash runs `cd`; round 10 named nothing.
+		{
+			row: 'R112 \\c""d, an escape and an empty quote in the verb (R11)',
+			command: '\\c""d sub; printf x > f.ts',
+			bash: "sub/f.ts",
+			named: ["sub"],
+		},
+		{
+			row: "R113 ''\\cd (R11)",
+			command: "''\\cd sub; printf x > f.ts",
+			bash: "sub/f.ts",
+			named: ["sub"],
+		},
+		{
+			row: 'R114 b\\u""iltin cd, the same in a prefix (R11)',
+			command: 'b\\u""iltin cd sub; printf x > f.ts',
+			bash: "sub/f.ts",
+			fallback: "f.ts",
+			named: ["sub"],
+		},
+		{
+			row: "R115 $'cd', ANSI-C quoting in the verb (R11)",
+			command: "$'cd' sub; printf x > f.ts",
+			bash: "sub/f.ts",
+			named: ["sub"],
 		},
 	];
 
