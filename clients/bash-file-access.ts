@@ -1514,14 +1514,15 @@ function directoryEffect(
 		if (!prefix || prefix[0].length > (unquoted[first] ?? 0)) break;
 		first++;
 	}
-	// The command a word names: the literal word, or an unquoted word whose
-	// only escapes are backslashes bash removes (`\cd`, `c\d`).
+	// The command a word names, compared below with builtin names only: the
+	// literal word, or an unquoted one whose backslashes bash removes (`\cd`,
+	// `c\d`). A word with any quoted character and no literal flag names none.
 	const commandName = (index: number): string | undefined => {
 		const text = words[index]?.text;
 		if (text === undefined || literal[index]) return text;
-		if (unquoted[index] !== text.length) return undefined;
-		const name = text.replace(/\\/g, "");
-		return /^\w+$/.test(name) ? name : undefined;
+		return unquoted[index] === text.length
+			? text.replace(/\\/g, "")
+			: undefined;
 	};
 	let at = first;
 	while (commandName(at) === "builtin" || commandName(at) === "command") at++;
@@ -1540,7 +1541,7 @@ function directoryEffect(
 		return { kind: "construct", named };
 	const verb = words[first]?.text;
 	if (verb === undefined) return { kind: "none" };
-	if (SHELL_RESERVED_WORDS.has(verb)) return { kind: "construct", named };
+	if (SHELL_RESERVED_WORDS.has(verb)) return { kind: "construct" };
 	const operands = words.slice(first + 1);
 	if (verb === "cd" || verb === "pushd") {
 		// The directory moves only on the literal verb and one plain path

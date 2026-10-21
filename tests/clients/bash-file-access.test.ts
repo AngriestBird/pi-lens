@@ -1305,6 +1305,7 @@ describe("scanShellWriteScopes — the command's effective directory (#2050)", (
 			row: "R34 cd inside a heredoc substitution",
 			command: "cd sub && cat <<EOF\n$(cd ..)\nEOF\nprintf x > f.ts",
 			bash: "sub/f.ts",
+			named: ["sub", "."],
 		},
 		{
 			row: "R35 cd on the line after a heredoc",
@@ -1362,6 +1363,7 @@ describe("scanShellWriteScopes — the command's effective directory (#2050)", (
 			row: "R45 pushd +foo, an index bash cannot parse (R6-1)",
 			command: "pushd +foo; printf x > f.ts",
 			bash: "f.ts",
+			named: [],
 		},
 		{
 			row: "R46 pushd + (R6-1)",
@@ -1635,6 +1637,20 @@ describe("scanShellWriteScopes — the command's effective directory (#2050)", (
 			command: '"\\c"d sub; printf x > f.ts',
 			bash: "f.ts",
 			named: [],
+		},
+		{
+			row: "R94 a process substitution in a redirection (R8-1)",
+			command: "cd sub 2> >(cat); printf x > f.ts",
+			bash: "sub/f.ts",
+			fallback: "f.ts",
+			named: ["sub"],
+		},
+		{
+			row: "R95 an option before the operand (R8-1)",
+			command: "cd -P sub; printf x > f.ts",
+			bash: "sub/f.ts",
+			fallback: "f.ts",
+			named: ["sub"],
 		},
 	];
 
