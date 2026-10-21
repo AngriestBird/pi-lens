@@ -195,6 +195,10 @@ export function trackLiveSessionMembers(
  * `session_shutdown`, so a subagent its runner disposed never leaves and must
  * not hold the shared infra forever (the #472 orphan class). An inconclusive
  * probe stays live, since nothing proves that session ended.
+ *
+ * `except` is a starting session asking whether ANOTHER session is live: it
+ * is not counted, and its own list is kept even when it is that list's only
+ * member.
  */
 export function hasLiveSessionInProcess(except?: LiveSessionMember): boolean {
 	const lists = liveSessionLists();

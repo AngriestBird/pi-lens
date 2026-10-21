@@ -127,6 +127,18 @@ function teardownResets(resetLSPService: ReturnType<typeof vi.fn>): unknown[] {
 		);
 }
 
+/** The resets a full session_start made: the shared teardown's carry
+ *  `processExiting` instead. */
+function sessionStartResets(
+	resetLSPService: ReturnType<typeof vi.fn>,
+): unknown[] {
+	return resetLSPService.mock.calls
+		.map(([options]) => options)
+		.filter(
+			(options) => (options as { reason?: string })?.reason === "session_start",
+		);
+}
+
 /** The latency sink the activation under test writes to, and the lines it holds.
  *
  *  Resolved AFTER the activation boots, never at module load. `beforeEach`
@@ -863,6 +875,30 @@ describe("#4554 one activation, four live sessions", () => {
 		expect(getActiveSessionId()).toBeUndefined();
 		expect(teardownResets(resetLSPService)).toHaveLength(0);
 		await shutdown(pi, other);
+		expect(teardownResets(resetLSPService)).toHaveLength(1);
+	}, 45_000);
+	it("keeps the LSP fleet at a full start while another session in the process is live", async () => {
+		// #4704 review F1 on #4708: the primary's leave now releases its
+		// registration while a sibling lives, so its successor runs a full
+		// start. That start's LSP reset would kill the fleet the live sibling
+		// still drives. A start with no other live session still resets it.
+		const { pi, resetLSPService } = await bootActivation();
+		const primary = makeCtx({ cwd: project, sessionId: "m-replaced" });
+		const sibling = makeCtx({ cwd: project, sessionId: "s-driving" });
+		await start(pi, primary);
+		expect(sessionStartResets(resetLSPService)).toHaveLength(1);
+		await start(pi, sibling);
+		await shutdown(pi, primary, { type: "session_shutdown", reason: "new" });
+		expect(getActiveSessionId()).toBeUndefined();
+
+		const successor = makeCtx({ cwd: project, sessionId: "r-successor" });
+		await start(pi, successor, "new");
+
+		expect(getActiveSessionId()).toBe("r-successor");
+		expect(sessionStartResets(resetLSPService)).toHaveLength(1);
+		expect(teardownResets(resetLSPService)).toHaveLength(0);
+		await shutdown(pi, sibling);
+		await shutdown(pi, successor);
 		expect(teardownResets(resetLSPService)).toHaveLength(1);
 	}, 45_000);
 });
