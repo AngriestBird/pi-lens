@@ -78,23 +78,33 @@ const TOOLS = [
 	},
 ] as const;
 
-describe("ast-grep tools refuse an unknown lang at execute (#4687)", () => {
-	it.each(TOOLS)(
-		"$name refuses an unknown lang, naming every valid id, before the CLI runs",
-		async (tool) => {
-			const cli = cliDouble();
-			const result = (await tool.run(cli, "klingon")) as ToolResult;
+// Refused ids: a string that is not a registry id. The CLI accepts some of
+// these (`ts` is an ast-grep alias, #4723 F5), so only this table pins that
+// the validator keeps refusing them. Recurrence: an alias re-admitted on MCP.
+const REFUSED_IDS: Array<[string, string]> = [
+	["an unknown id", "klingon"],
+	["an ast-grep CLI alias", "ts"],
+];
 
-			expect(result.isError).toBe(true);
-			const text = result.content[0]?.text ?? "";
-			expect(text).toContain('unknown lang "klingon"');
-			// The refusal is what the enum used to tell the model: every valid id.
-			for (const id of ["bash", "tsx", "typescript", "python", "yaml"])
-				expect(text).toContain(id);
-			expect(tool.cliCalls(cli)).toBe(0);
-			expect(cli.ensureAvailable).not.toHaveBeenCalled();
-		},
-	);
+describe("ast-grep tools refuse an unknown lang at execute (#4687)", () => {
+	describe.each(TOOLS)("$name", (tool) => {
+		it.each(REFUSED_IDS)(
+			"refuses %s before the CLI runs, naming every valid id",
+			async (_label, id) => {
+				const cli = cliDouble();
+				const result = (await tool.run(cli, id)) as ToolResult;
+
+				expect(result.isError).toBe(true);
+				const text = result.content[0]?.text ?? "";
+				expect(text).toContain(`unknown lang "${id}"`);
+				// The refusal is what the enum used to tell the model: every valid id.
+				for (const valid of ["bash", "tsx", "typescript", "python", "yaml"])
+					expect(text).toContain(valid);
+				expect(tool.cliCalls(cli)).toBe(0);
+				expect(cli.ensureAvailable).not.toHaveBeenCalled();
+			},
+		);
+	});
 
 	it.each(TOOLS)("$name still runs a valid lang", async (tool) => {
 		const cli = cliDouble();
@@ -117,7 +127,12 @@ describe("ast-grep tools refuse an unknown lang at execute (#4687)", () => {
 		["a boolean", true],
 	];
 	describe.each(TOOLS)("$name with a non-string lang", (tool) => {
-		it.each(NON_STRINGS)(
+		// #4723 N2: outline's optional `lang` treats null as absent (see below),
+		// so null is refused only on the required fields.
+		const refusedHere = NON_STRINGS.filter(
+			([, lang]) => !(lang === null && tool.name === "ast_grep_outline"),
+		);
+		it.each(refusedHere)(
 			"refuses %s, naming every valid id",
 			async (_l, lang) => {
 				const cli = cliDouble();
@@ -173,5 +188,28 @@ describe("ast-grep tools refuse an unknown lang at execute (#4687)", () => {
 
 		expect(outline.cliCalls(cli)).toBe(1);
 		expect(cli.outline.mock.calls[0]?.[1]).toMatchObject({ lang: undefined });
+	});
+
+	// #4723 N2: master forwarded `lang: null` on the optional outline field and
+	// the client built `--lang` only when truthy, so null meant "infer". The
+	// required search field refused null at master too, so it stays refused.
+	it("ast_grep_outline infers the language when lang is null (as at master)", async () => {
+		const cli = cliDouble();
+		const outline = TOOLS[2];
+		const result = (await outline.run(cli, null)) as ToolResult;
+
+		expect(result.isError).toBeFalsy();
+		expect(outline.cliCalls(cli)).toBe(1);
+		expect(cli.outline.mock.calls[0]?.[1]).toMatchObject({ lang: undefined });
+	});
+
+	it("ast_grep_search still refuses a null lang (required, as at master)", async () => {
+		const cli = cliDouble();
+		const search = TOOLS[0];
+		const result = (await search.run(cli, null)) as ToolResult;
+
+		expect(result.isError).toBe(true);
+		expect(result.content[0]?.text ?? "").toContain("lang must be a string");
+		expect(search.cliCalls(cli)).toBe(0);
 	});
 });

@@ -69,14 +69,17 @@ export const LANGUAGES = [
  * the client's JSON without schema validation, so `lang` can be any JSON value
  * (#4723 F4). It admits only a string that is a known id, once one pair of
  * wrapping double quotes is stripped; absent or blank is "required" (or absent
- * when optional), and every other value is refused with `refusal`. `lang` is
- * the normalized id, or "" when there is none (blank included, so a blank
- * optional `lang` never reaches the CLI as `--lang " "`).
+ * when optional), and every other value is refused with `refusal`. An optional
+ * `null` is absent, as at master, where the client built `--lang` only when the
+ * value was truthy (#4723 N2); a required `null` is refused. `lang` is the
+ * normalized id, or "" when there is none (blank included, so a blank optional
+ * `lang` never reaches the CLI as `--lang " "`).
  */
 export function readAstGrepLang(
-	raw: unknown,
+	rawArg: unknown,
 	required: boolean,
 ): { lang: string; refusal?: string } {
+	const raw = rawArg === null && !required ? undefined : rawArg;
 	const lang = typeof raw === "string" ? raw.replace(/^"|"$/g, "") : "";
 	if (
 		typeof raw === "string" &&

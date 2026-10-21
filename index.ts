@@ -3032,8 +3032,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// #4723 F3: a tool the model called is a tool the conversation asked
 			// for, whichever posture made it active. Remembering it keeps a later
 			// switch to the lazy posture (or a reload) from hiding a tool in use.
-			if (enabledLazyTools.has(toolEntry.name))
-				rememberLazyTools(scope, [toolEntry.name]);
+			// A disabled tool is never registered, so pi never delivers its call.
+			rememberLazyTools(scope, [toolEntry.name]);
 		}
 		return handleToolCall({
 			event: event as unknown as Parameters<typeof handleToolCall>[0]["event"],
