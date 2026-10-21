@@ -1619,10 +1619,10 @@ function canonicalJsonValue(value: unknown, seen: Set<object>): string {
 				)
 				.join(",")}]`;
 		}
-		const record = object as Record<string, unknown>;
+		const entries = object as Record<string, unknown>;
 		const fields: string[] = [];
-		for (const key of Object.keys(record).sort(compareOrdinal)) {
-			const item = record[key];
+		for (const key of Object.keys(entries).sort(compareOrdinal)) {
+			const item = entries[key];
 			if (item === undefined || typeof item === "function") continue;
 			fields.push(`${JSON.stringify(key)}:${canonicalJsonValue(item, seen)}`);
 		}

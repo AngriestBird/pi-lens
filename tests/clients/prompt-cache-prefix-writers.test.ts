@@ -176,16 +176,6 @@ function usageRows(
 	});
 }
 
-/** `PI_LENS_TEST_MODE=0` makes the in-process logger write its real sink. */
-function withRealSink(): () => void {
-	const previous = process.env.PI_LENS_TEST_MODE;
-	process.env.PI_LENS_TEST_MODE = "0";
-	return () => {
-		if (previous === undefined) delete process.env.PI_LENS_TEST_MODE;
-		else process.env.PI_LENS_TEST_MODE = previous;
-	};
-}
-
 /** A fresh project directory for one case, under this file's one fixture. */
 function projectDir(segment: string): string {
 	return `${fixture.root}/${segment}/proj`;
@@ -244,7 +234,10 @@ describe("#4687 prefix writers keep the provider's cached head", () => {
 	});
 
 	it("activation: the tool delta changes the collapsed head exactly once, and the miss names tool-set-changed", async () => {
-		const restore = withRealSink();
+		// `PI_LENS_TEST_MODE=0` makes the in-process logger write its real sink;
+		// the same-function `finally` restores it (the accepted restore shape).
+		const previousTestMode = process.env.PI_LENS_TEST_MODE;
+		process.env.PI_LENS_TEST_MODE = "0";
 		try {
 			const handle = await startPiSession({
 				root: fixture.root,
@@ -305,12 +298,16 @@ describe("#4687 prefix writers keep the provider's cached head", () => {
 				null,
 			]);
 		} finally {
-			restore();
+			if (previousTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
+			else process.env.PI_LENS_TEST_MODE = previousTestMode;
 		}
 	});
 
 	it("injection: the payload rides the last user message and neither head moves", async () => {
-		const restore = withRealSink();
+		// `PI_LENS_TEST_MODE=0` makes the in-process logger write its real sink;
+		// the same-function `finally` restores it (the accepted restore shape).
+		const previousTestMode = process.env.PI_LENS_TEST_MODE;
+		process.env.PI_LENS_TEST_MODE = "0";
 		try {
 			const { CacheManager } = await import("../../clients/cache-manager.js");
 			const handle = await startPiSession({
@@ -349,12 +346,16 @@ describe("#4687 prefix writers keep the provider's cached head", () => {
 			const verdicts = usageRows(await inProcessLatencyRows(), sessionId);
 			expect(verdicts.map((row) => row.cacheMissCause)).toEqual([null, null]);
 		} finally {
-			restore();
+			if (previousTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
+			else process.env.PI_LENS_TEST_MODE = previousTestMode;
 		}
 	});
 
 	it("reload after AGENTS.md changes names system-prompt-changed, not tool-set-changed", async () => {
-		const restore = withRealSink();
+		// `PI_LENS_TEST_MODE=0` makes the in-process logger write its real sink;
+		// the same-function `finally` restores it (the accepted restore shape).
+		const previousTestMode = process.env.PI_LENS_TEST_MODE;
+		process.env.PI_LENS_TEST_MODE = "0";
 		try {
 			const cwd = projectDir("writer-system-prompt");
 			fs.mkdirSync(cwd, { recursive: true });
@@ -413,7 +414,8 @@ describe("#4687 prefix writers keep the provider's cached head", () => {
 				"system-prompt-changed",
 			]);
 		} finally {
-			restore();
+			if (previousTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
+			else process.env.PI_LENS_TEST_MODE = previousTestMode;
 		}
 	});
 });
@@ -431,7 +433,10 @@ async function unexplainedLedgerRows(): Promise<
 
 describe("#4687 unexplained-miss degradation row", () => {
 	it("writes one row on the second unexplained miss and only counts later ones", async () => {
-		const restore = withRealSink();
+		// `PI_LENS_TEST_MODE=0` makes the in-process logger write its real sink;
+		// the same-function `finally` restores it (the accepted restore shape).
+		const previousTestMode = process.env.PI_LENS_TEST_MODE;
+		process.env.PI_LENS_TEST_MODE = "0";
 		try {
 			resetCachePrefixObservation();
 			resetDegradationLedger();
@@ -464,7 +469,8 @@ describe("#4687 unexplained-miss degradation row", () => {
 			);
 			expect(group?.count).toBe(3);
 		} finally {
-			restore();
+			if (previousTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
+			else process.env.PI_LENS_TEST_MODE = previousTestMode;
 		}
 	});
 });
