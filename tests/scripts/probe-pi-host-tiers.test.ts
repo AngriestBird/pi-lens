@@ -23,6 +23,7 @@ import {
 	renderSpreadSummary,
 	resolveHostPackage,
 	runSpread,
+	tierVerdict,
 } from "../../scripts/lib/pi-host-spread.mjs";
 import type {
 	SpreadRow,
@@ -129,11 +130,19 @@ describe("host installs are found by version, in every layout", () => {
 	});
 
 	it("refuses a directory whose manifest names another package", () => {
-		// A `pi-coding-agent` directory that holds some other package is not a
-		// host: the version it would report is not the host's.
-		const host = path.join(REPO_HOST_ROOT, HOST_PACKAGE);
+		// A directory that holds SOME package's manifest is not a host: without
+		// the name check, `node_modules/vitest` would report host version 5.0.5
+		// and the spread would probe a tier suite against Vitest itself.
+		expect(
+			resolveHostPackage(path.join(REPO_HOST_ROOT, "vitest")),
+		).toBeUndefined();
+		// And a directory with no manifest at all resolves to nothing either.
 		expect(resolveHostPackage(path.join(REPO_ROOT, "clients"))).toBeUndefined();
-		expect(resolveHostPackage(host)?.dir).toBe(host);
+		// The real install still resolves, so the two refusals above are not the
+		// candidate list failing to reach it.
+		expect(
+			resolveHostPackage(path.join(REPO_HOST_ROOT, HOST_PACKAGE))?.dir,
+		).toBe(path.join(REPO_HOST_ROOT, HOST_PACKAGE));
 	});
 
 	it("reports a root that holds no host at all", () => {
@@ -205,6 +214,69 @@ describe("the spread probes the installed certified host and reports the rest", 
 		expect(exitCodeForSpread(spread, { requireAll: true })).toBe(
 			EXIT.tiersFailed,
 		);
+	});
+});
+
+describe("a tier's verdict is fail-closed", () => {
+	/** A summary shape as `parseVitestSummary` returns it on a green run. */
+	const green = {
+		testsPassed: 4,
+		testsFailed: null,
+		testsSkipped: null,
+		noTests: false,
+	};
+
+	it("passes a green run and counts its tests", () => {
+		expect(tierVerdict({ status: 0, summary: green })).toEqual({
+			ok: true,
+			passed: 4,
+			total: 4,
+			timedOut: false,
+		});
+		expect(
+			tierVerdict({
+				status: 0,
+				summary: { ...green, testsSkipped: 2 },
+			}).total,
+		).toBe(6);
+	});
+
+	it.each([
+		[
+			"a failing test",
+			{ status: 1, summary: { ...green, testsFailed: 1, testsPassed: 3 } },
+		],
+		["a non-zero exit with no red", { status: 1, summary: green }],
+		[
+			"a run that collected nothing",
+			{
+				status: 0,
+				summary: {
+					testsPassed: 0,
+					testsFailed: 0,
+					testsSkipped: 0,
+					noTests: true,
+				},
+			},
+		],
+		[
+			"a transcript with no counts at all",
+			{
+				status: 0,
+				summary: {
+					testsPassed: null,
+					testsFailed: null,
+					testsSkipped: null,
+					noTests: false,
+				},
+			},
+		],
+		[
+			"a child killed by its timeout",
+			{ status: null, timedOut: true, summary: { ...green, noTests: true } },
+		],
+	])("fails %s", (_name, input) => {
+		expect(tierVerdict(input).ok).toBe(false);
 	});
 });
 

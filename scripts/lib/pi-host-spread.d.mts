@@ -67,6 +67,20 @@ export declare function runSpread(options: {
 	}) => Promise<TierResult>;
 }): Promise<Spread>;
 
+/** A parsed Vitest summary, as `parseVitestSummary` shapes it. */
+export interface TierTranscriptSummary {
+	testsPassed: number | null;
+	testsFailed: number | null;
+	testsSkipped: number | null;
+	noTests: boolean;
+}
+
+export declare function tierVerdict(input: {
+	status: number | null;
+	timedOut?: boolean;
+	summary: TierTranscriptSummary;
+}): TierResult & { timedOut: boolean };
+
 export declare function renderHostLine(row: SpreadRow): string;
 
 export declare function renderSpreadSummary(spread: Spread): string;

@@ -203,6 +203,33 @@ export async function runSpread({ certified, hosts, runTierSuite }) {
 	};
 }
 
+/**
+ * The verdict one tier run earns, from its child's exit status and the
+ * transcript's parsed summary. A run that collected nothing is NOT a pass: an
+ * empty tier would otherwise report green on every host, which is the exact
+ * shape a mis-set `PI_LENS_PI_HOST_PACKAGE` produces (Vitest collects nothing
+ * when the file filter matches nothing).
+ */
+export function tierVerdict({ status, timedOut, summary }) {
+	const passed = summary.testsPassed;
+	const failed = summary.testsFailed;
+	const skipped = summary.testsSkipped ?? 0;
+	const ok =
+		status === 0 &&
+		typeof passed === "number" &&
+		passed > 0 &&
+		(failed ?? 0) === 0 &&
+		!summary.noTests;
+	return {
+		ok,
+		passed: typeof passed === "number" ? passed : null,
+		// Vitest prints no `failed` count on a green run, so an absent one is
+		// zero, not unknown.
+		total: typeof passed === "number" ? passed + (failed ?? 0) + skipped : null,
+		timedOut: timedOut === true,
+	};
+}
+
 /** One line per host: what ran, where, and on which version. */
 export function renderHostLine(row) {
 	if (!row.installed) return `${HOST_PACKAGE} ${row.version}: not installed`;

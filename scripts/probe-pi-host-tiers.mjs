@@ -65,6 +65,7 @@ import {
 	renderHostLine,
 	renderSpreadSummary,
 	runSpread,
+	tierVerdict,
 } from "./lib/pi-host-spread.mjs";
 import {
 	normalizeVitestOutput,
@@ -129,19 +130,9 @@ function runTierSuiteInChild({ host, suite, timeoutMs }) {
 		`${child.stdout ?? ""}\n${child.stderr ?? ""}`,
 	);
 	const summary = parseVitestSummary(transcript);
-	const passed = summary.testsPassed;
-	const failed = summary.testsFailed;
-	const skipped = summary.testsSkipped ?? 0;
-	// A run that collected nothing is not a pass: it would report an empty tier
-	// as green on a host the tests never reached.
-	const ok =
-		child.status === 0 &&
-		typeof passed === "number" &&
-		passed > 0 &&
-		(failed ?? 0) === 0 &&
-		!summary.noTests;
 	const timedOut = child.error?.code === "ETIMEDOUT";
-	const detail = ok
+	const verdict = tierVerdict({ status: child.status, timedOut, summary });
+	const detail = verdict.ok
 		? undefined
 		: [
 				timedOut
@@ -149,14 +140,7 @@ function runTierSuiteInChild({ host, suite, timeoutMs }) {
 					: `exit ${child.status ?? "none"}${child.signal ? ` (signal ${child.signal})` : ""}`,
 				...transcript.split("\n").slice(-FAILURE_LINES),
 			].join("\n");
-	return {
-		ok,
-		passed: typeof passed === "number" ? passed : null,
-		// Vitest prints no `failed` count on a green run, so an absent one is
-		// zero, not unknown.
-		total: typeof passed === "number" ? passed + (failed ?? 0) + skipped : null,
-		detail,
-	};
+	return { ...verdict, detail };
 }
 
 async function main(argv) {
