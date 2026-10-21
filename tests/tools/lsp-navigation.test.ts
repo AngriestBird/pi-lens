@@ -1,3 +1,6 @@
+// flake-shape: in-process-mock — the declaration owner is wrapped, not replaced:
+// every other export stays real, and only the resolver is counted so the
+// snapshot's per-file walks are observable (#4638 review F10).
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -36,6 +39,23 @@ const mocked = vi.hoisted(() => ({
 vi.mock("../../clients/lsp/capabilities.js", () => ({
 	getLSPService: () => mocked.service,
 }));
+
+// #4638 review (F10): the declaration owner is wrapped, not replaced — every
+// other export stays real — so the snapshot's per-file walks can be counted.
+const walkedDeclarations = vi.hoisted(() => ({ files: [] as string[] }));
+vi.mock("../../clients/python-environment.js", async (importOriginal) => {
+	const actual =
+		await importOriginal<
+			typeof import("../../clients/python-environment.js")
+		>();
+	return {
+		...actual,
+		detectPythonTargetVersion: vi.fn(async (filePath: string) => {
+			walkedDeclarations.files.push(filePath);
+			return actual.detectPythonTargetVersion(filePath);
+		}),
+	};
+});
 
 import { createLensDiagnosticMarkTool } from "../../tools/lens-diagnostic-mark.js";
 import { createLspNavigationTool } from "../../tools/lsp-navigation.js";
@@ -2156,6 +2176,101 @@ describe("lsp_navigation workspaceDiagnostics delivery gate (#1634)", () => {
 				phase: "lsp_probe_disposition_filter",
 				toolName: "lsp_navigation",
 			}),
+		);
+	});
+
+	const COMPILE = "SyntaxError: multiple exception types must be parenthesized";
+	const PYRIGHT = 'Cannot access attribute "value" for class "object"';
+
+	const jediCompileRow = () => ({
+		severity: 1,
+		message: COMPILE,
+		source: "compile",
+		rule: "compile:unknown",
+		semantic: "blocking" as const,
+		serverId: "python-jedi",
+		range: {
+			start: { line: 2, character: 8 },
+			end: { line: 2, character: 20 },
+		},
+	});
+	const pyrightRow = () => ({
+		severity: 1,
+		message: PYRIGHT,
+		source: "pyright",
+		serverId: "pyright",
+		range: { start: { line: 4, character: 4 }, end: { line: 4, character: 9 } },
+	});
+
+	async function snapshotWith(
+		files: Array<[string, Array<Record<string, unknown>>]>,
+	) {
+		walkedDeclarations.files.length = 0;
+		(mocked.service as { getAllDiagnostics: unknown }).getAllDiagnostics = vi
+			.fn()
+			.mockResolvedValue(
+				new Map(
+					files.map(([file, diags]) => [file, { diags, ts: Date.now() }]),
+				),
+			);
+		return parseToolJson(
+			await createLspNavigationTool((flag) => flag === "lens-lsp").execute(
+				"nav-4638",
+				{ operation: "workspaceDiagnostics" },
+				new AbortController().signal,
+				null,
+				{ cwd },
+			),
+		);
+	}
+
+	function snapshotRows(envelope: Record<string, unknown>) {
+		return (
+			envelope.result as Array<{
+				diagnostics: Array<Record<string, unknown>>;
+			}>
+		).flatMap((entry) => entry.diagnostics);
+	}
+
+	it("drops jedi's compile row from the tracked snapshot and names what it withheld (#4638 F10)", async () => {
+		const jediFile = path.join(cwd, "jedi_only.py");
+		const typedFile = path.join(cwd, "typed.py");
+		fs.writeFileSync(jediFile, "def run() -> None:\n\tpass\n");
+		fs.writeFileSync(typedFile, "value: int = 1\n");
+		fs.writeFileSync(
+			path.join(cwd, "pyproject.toml"),
+			'[project]\nname = "d"\nrequires-python = ">=3.14"\n',
+		);
+
+		const envelope = await snapshotWith([
+			[jediFile, [jediCompileRow(), pyrightRow()]],
+			[typedFile, [pyrightRow()]],
+		]);
+
+		expect(resultMessages(envelope)).not.toContain(COMPILE);
+		expect(resultMessages(envelope)).toContain(PYRIGHT);
+		expect(envelope.notes).toContainEqual(
+			expect.stringContaining("1 python-jedi compile finding withheld"),
+		);
+		// The filter is what keeps the pyright-only file from paying for a walk.
+		expect(walkedDeclarations.files).not.toContain(typedFile);
+		expect(walkedDeclarations.files).toContain(jediFile);
+	});
+
+	it("still delivers jedi's compile row blocking while the project declares 3.13 (#4638 F10)", async () => {
+		const jediFile = path.join(cwd, "jedi_only.py");
+		fs.writeFileSync(jediFile, "def run() -> None:\n\tpass\n");
+		fs.writeFileSync(
+			path.join(cwd, "pyproject.toml"),
+			'[project]\nname = "d"\nrequires-python = ">=3.13"\n',
+		);
+
+		const envelope = await snapshotWith([
+			[jediFile, [jediCompileRow(), pyrightRow()]],
+		]);
+
+		expect(snapshotRows(envelope)).toContainEqual(
+			expect.objectContaining({ message: COMPILE, semantic: "blocking" }),
 		);
 	});
 });

@@ -39,6 +39,7 @@ import { buildLspNavigationEnvelope } from "./lsp-structured-output.js";
 import {
 	applyProbeFindingPolicy,
 	describePrimaryUnavailable,
+	withheldCompileNote,
 } from "./lsp-diagnostics.js";
 import {
 	dispositionSuppressedLine,
@@ -1394,6 +1395,8 @@ export function createLspNavigationTool(
 					),
 				);
 				let snapshotSuppressed = 0;
+				let snapshotWithheld = 0;
+				let snapshotWithheldLine: string | undefined;
 				const result = Array.from(allDiagnostics.entries()).map(
 					([trackedFile, { diags, ts }]) => {
 						let kept = diags;
@@ -1408,6 +1411,10 @@ export function createLspNavigationTool(
 								pythonCompileTargets.get(trackedFile),
 							);
 							snapshotSuppressed += policy.suppressed;
+							// #4638 review (F10): the snapshot is model-facing too, so a
+							// withheld row is named on its text rather than left to the ledger.
+							snapshotWithheld += policy.withheld?.count ?? 0;
+							snapshotWithheldLine ??= withheldCompileNote(policy.withheld);
 							kept = policy.kept;
 						}
 						return {
@@ -1433,7 +1440,7 @@ export function createLspNavigationTool(
 						content: [
 							{
 								type: "text" as const,
-								text: `${note}\n${JSON.stringify(result)}${snapshotSuppressedLine ? `\nNote: ${snapshotSuppressedLine}` : ""}`,
+								text: `${note}\n${JSON.stringify(result)}${snapshotSuppressedLine ? `\nNote: ${snapshotSuppressedLine}` : ""}${snapshotWithheldLine ? `\nNote: ${snapshotWithheldLine}` : ""}`,
 							},
 						],
 						details: {
@@ -1443,6 +1450,9 @@ export function createLspNavigationTool(
 							coverage: "tracked-open-files",
 							...(snapshotSuppressed > 0 && {
 								dispositionSuppressed: snapshotSuppressed,
+							}),
+							...(snapshotWithheld > 0 && {
+								withheldCompile: snapshotWithheld,
 							}),
 						},
 					},

@@ -217,6 +217,19 @@ function withheldCompileDisclosure(
 	return `${total} python-jedi compile finding${total === 1 ? "" : "s"} withheld: the project declares Python ${first.declaredLevel} (${first.source}) in ${first.declarationFile}`;
 }
 
+/**
+ * #4638 review (F6/F10): the disclosure sentence for any surface with a policy
+ * result in hand, so the probe, the renderers, and the navigation snapshot say
+ * it the same way.
+ */
+export function withheldCompileNote(
+	withheld: PythonCompileWithheld | undefined,
+): string | undefined {
+	return withheld
+		? withheldCompileDisclosure([describeWithheld(withheld)])
+		: undefined;
+}
+
 function withheldCompileLine(
 	results: ReadonlyArray<FileDiagnosticResult>,
 ): string | undefined {

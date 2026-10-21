@@ -410,6 +410,14 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			reason:
 				"the language-server process is the boundary; the shell the tool resolves returns a real LSPService whose only client is a willRenameFiles answer, so no server is spawned",
 		},
+	// 2026-10-21 (#4638 review F10): the wrapper spreads the actual owner module
+	// and counts only the declaration resolver, so the snapshot filter's effect on
+	// the walk is observed rather than inferred.
+	"in-process-mock:tools/lsp-navigation.test.ts::clients/python-environment": {
+		detector: "in-process-mock",
+		reason:
+			"the real export still answers each call; the wrapper exists to prove a file without jedi's row is never walked",
+	},
 
 	"never-settling-wait:scripts/mutate-fixture.test.ts": {
 		detector: "never-settling-wait",

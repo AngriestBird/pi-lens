@@ -1387,7 +1387,8 @@
 		"tools/lsp-navigation-rename-staleness.test.ts::clients/lsp/capabilities": 1,
 		"tools/lsp-navigation-workspace-attribution.test.ts::clients/latency-logger": 1,
 		"tools/lsp-navigation-workspace-attribution.test.ts::clients/lsp/capabilities": 1,
-		"tools/lsp-navigation.test.ts::clients/lsp/capabilities": 1
+		"tools/lsp-navigation.test.ts::clients/lsp/capabilities": 1,
+		"tools/lsp-navigation.test.ts::clients/python-environment": 1
 	},
 	"service-double": {
 		"clients/cascade-compute.test.ts::LSPClientInfo": 1,
