@@ -1731,12 +1731,14 @@ ids, and the request the model sees. Their header comments state the APIs
 and limits. A new tier capability adds a case to `pi-runner.test.ts` or
 `pi-session.test.ts` first. `pi-mock.ts` stays only for a test file on
 `PI_MOCK_IMPORTERS` (`tests/support/pi-mock-importers.ts`), whose row states the
-class: `process-boundary` (4 rows), `internal-seam` (38: the case interposes on
-a pi-lens `clients/` module through `vi.mock`, which cannot reach the copy pi's
-loader builds), `unproducible-payload` (5: a payload a scripted provider cannot
+class: `process-boundary` (4 rows), `internal-seam` (39: the case interposes on
+a pi-lens `clients/` module either through `vi.mock`, which cannot reach the
+copy pi's loader builds, or through a test-side copy of a process-global
+service the loaded copy does not share, such as `clients/lsp`'s service),
+`unproducible-payload` (5: a payload a scripted provider cannot
 produce), `double-subject` (1: the double is the subject), and
 `real-ui-harness` (1: the claim is what the TUI shows or mounts, which no
-in-process tier can produce). Four rows still carry `pending slice 10`, the
+in-process tier can produce). Three rows still carry `pending slice 10`, the
 last roadmap slice, which moves no file, so a slice marker now names no
 scheduled work. The class counts are the list's 53 rows at that recording, and
 a row grouped under a `pending slice 8` comment already carries its own class,

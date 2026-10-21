@@ -377,6 +377,31 @@ const DEFAULT_FLAGS: ReadonlyArray<[string, boolean]> = [
 /** One provider request: the messages the model received, in order. */
 export type PiProviderRequest = ReadonlyArray<PiMessage>;
 
+/**
+ * The tool set a provider request declares, by the replay rule a consumer must
+ * use: every `toolsAdded` entry adds, every `toolsRemoved` entry deletes, in
+ * message order. pi's agent loop writes both deltas into SYSTEM messages
+ * before each request, so a request's loadout is the fold over its transcript,
+ * never the head message alone.
+ *
+ * ONE reader, two callers (#4707 F5): the contract case that pins the rule and
+ * the case that reads a loadout both call this function, so the pinned reader
+ * and the used reader cannot drift apart.
+ */
+export function replayToolNames(request: PiProviderRequest): string[] {
+	const tools = new Set<string>();
+	for (const message of request) {
+		if (message.role !== "system") continue;
+		const typed = message as {
+			toolsAdded?: Array<{ name: string }>;
+			toolsRemoved?: Array<{ name: string }>;
+		};
+		for (const tool of typed.toolsRemoved ?? []) tools.delete(tool.name);
+		for (const tool of typed.toolsAdded ?? []) tools.add(tool.name);
+	}
+	return [...tools];
+}
+
 export interface PiSessionOptions {
 	/** Fixture root, created by `setupTestEnvironment(TMP_PREFIX)` below. */
 	root: string;
@@ -390,7 +415,12 @@ export interface PiSessionOptions {
 	 * second ROOT is refused — see `pinEnv`.
 	 */
 	cwd?: string;
-	/** `pi.getFlag` values; defaults to {@link DEFAULT_FLAGS}. */
+	/**
+	 * `pi.getFlag` overrides on top of {@link DEFAULT_FLAGS}: a key named here
+	 * wins, and every other default (the analyzers this tier neither observes
+	 * nor can drain) stays off. A case that needs the real analyzer deletes its
+	 * flag explicitly.
+	 */
 	flags?: ReadonlyMap<string, boolean | string>;
 	/** Session store. Defaults to `<root>/sessions`. */
 	sessionsDir?: string;
@@ -845,7 +875,7 @@ export async function startPiSession(
 	else delete process.env.PI_LENS_COLD_START_QUICK;
 	const args: SessionArgs = {
 		root: options.root,
-		flags: options.flags ?? new Map(DEFAULT_FLAGS),
+		flags: new Map([...DEFAULT_FLAGS, ...(options.flags ?? [])]),
 	};
 	return bindSession(
 		args,
