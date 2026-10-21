@@ -473,6 +473,17 @@ file-scoped worklist and receives no project-wide scanner output.
     publish; the model checked `FreshResult` alone and the fake published after
     the fence reply).
 
+79. **Prefix churn from a non-append write:** a provider caches the request in
+    order (tools, then system, then messages), so a write that changes bytes
+    before the newest message re-bills the whole conversation: a returned
+    `context` list that makes pi rebuild the system head, or a tool-set change
+    on a model that folds system messages into the head. Write at the tail
+    only, and count each tool-set change as one full rewrite on such models. A
+    host-generation gate takes a recorded fixture per certified minor, never
+    two. Screen: drive two real-session requests that differ only in the
+    writer, and compare the head and pi-ai's collapsed head. Guard: planned,
+    tracked in #4687.
+
 </important>
 
 <important if="a runner outcome or tool execution">
@@ -589,7 +600,7 @@ file-scoped worklist and receives no project-wide scanner output.
     hits are the classifier's own already-normalized patterns, `ci-verdict`'s
     line classifier (strips before it matches), `check-pr-body`'s lint of pasted
     body text, and readers of Vitest's JSON report.
-79. **Single scan root:** a detector takes its population from one root while
+80. **Single scan root:** a detector takes its population from one root while
     its subject can write in several, so a clean answer from the wrong root
     reads as a complete negative. Screen: for each detector, list the roots its
     subject can write in. Then show that each root gets its own verdict, or that
