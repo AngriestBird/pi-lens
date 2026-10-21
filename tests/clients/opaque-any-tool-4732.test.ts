@@ -13,7 +13,8 @@
  * registers), the runtime coordinator, the opaque baseline store, and a real
  * git repository. The one double is at the process boundary: `safeSpawnAsync`
  * passes every call through to the real spawn and records its argv, so the
- * table below can count the `git status` children each call costs.
+ * table below can count the `git status` children each call costs; one case
+ * makes the post-call `git status` exit 128, as a broken repository does.
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -21,7 +22,11 @@ import * as path from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const spawned = vi.hoisted(() => ({ argv: [] as string[][] }));
+const spawned = vi.hoisted(() => ({
+	argv: [] as string[][],
+	/** 1-based: this and every later `git status` exits 128 (git failed). */
+	failStatusFrom: Number.POSITIVE_INFINITY,
+}));
 vi.mock("../../clients/safe-spawn.js", async (importOriginal) => {
 	const actual =
 		await importOriginal<typeof import("../../clients/safe-spawn.js")>();
@@ -30,6 +35,19 @@ vi.mock("../../clients/safe-spawn.js", async (importOriginal) => {
 		safeSpawnAsync: vi.fn(
 			(...args: Parameters<typeof actual.safeSpawnAsync>) => {
 				spawned.argv.push([args[0], ...(args[1] ?? [])]);
+				const statuses = spawned.argv.filter(
+					(argv) => argv[0] === "git" && argv[1] === "status",
+				).length;
+				if (
+					args[0] === "git" &&
+					args[1]?.[0] === "status" &&
+					statuses >= spawned.failStatusFrom
+				)
+					return Promise.resolve({
+						stdout: "",
+						stderr: "fatal: probe",
+						status: 128,
+					});
 				return actual.safeSpawnAsync(...args);
 			},
 		),
@@ -121,6 +139,7 @@ describe("which calls pay for git status (#4732)", () => {
 		resetOpaqueMutationState();
 		resetDegradationLedger();
 		spawned.argv.length = 0;
+		spawned.failStatusFrom = Number.POSITIVE_INFINITY;
 	});
 
 	afterEach(() => {
@@ -304,6 +323,45 @@ describe("which calls pay for git status (#4732)", () => {
 			);
 		},
 	);
+
+	// The captured call's writes went unseen, and nothing else would say so:
+	// bash names the same verdict through its coverage row and its withheld
+	// blockers, so only a non-bash call records it.
+	it("names a captured call whose diff git could not answer", async () => {
+		const runtime = runtimeFor("4732-git-failed");
+		// The baseline's dirty set is status 1; the recovery's is status 2.
+		spawned.failStatusFrom = 2;
+		const event = {
+			toolName: "some_ext_tool",
+			toolCallId: "4732-git-failed-1",
+			input: { query: "x" },
+		};
+		await runHandlerExpectingNoThrow(() =>
+			handleToolCall(callDeps(runtime, event)),
+		);
+		await handleToolResult(resultDeps(runtime, event));
+		const refused = () =>
+			getDegradationSummary().find(
+				(group) => group.kind === "opaque-capture-refused",
+			);
+		expect(refused()?.latestReasons.map((entry) => entry.subject)).toEqual([
+			"git-failed",
+		]);
+
+		resetDegradationLedger();
+		spawned.argv.length = 0;
+		const bash = {
+			toolName: "bash",
+			toolCallId: "4732-git-failed-bash",
+			input: { command: "node -e ''" },
+		};
+		await runHandlerExpectingNoThrow(() =>
+			handleToolCall(callDeps(runtime, bash)),
+		);
+		await handleToolResult(resultDeps(runtime, bash));
+		expect(gitStatusSpawns()).toBe(2);
+		expect(refused()).toBeUndefined();
+	});
 
 	it("refuses a non-bash call with no tool-call id, once per session", async () => {
 		const runtime = runtimeFor("4732-no-id");
