@@ -81,12 +81,7 @@ import {
 	dispatchLintWithResult,
 } from "../../clients/dispatch/integration.js";
 
-// Mock LSP service
-vi.mock("../../clients/lsp/capabilities.js", () => ({
-	getLSPService: vi.fn(),
-}));
-
-import { getLSPService } from "../../clients/lsp/capabilities.js";
+import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 import { scaledTestTimeout } from "../support/test-timeout-scale.js";
 
 // #4019: the Windows lane declares PI_LENS_TEST_TIMEOUT_SCALE=3 because a
@@ -119,11 +114,10 @@ describe("Pipeline", () => {
 				},
 			}),
 		);
-		mockLSPService = makeLspServiceDouble({
+		mockLSPService = await installLspServiceDouble({
 			supportsLSP: vi.fn().mockReturnValue(true),
 			hasLSP: vi.fn().mockResolvedValue(true),
 		});
-		vi.mocked(getLSPService).mockReturnValue(mockLSPService as any);
 		vi.mocked(dispatchLintWithResult).mockReset();
 		const { resetFormatService } =
 			await import("../../clients/format-service.js");
@@ -654,7 +648,9 @@ describe("Pipeline", () => {
 				getFormatService: () => formatService,
 			});
 			formatService.formatFile = async (fp: string) => {
-				const result = await originalFormatFile(fp);
+				const result = await originalFormatFile(fp, {
+					sessionRoot: path.dirname(fp),
+				});
 				// Force a file change by writing different content
 				if (fp === filePath || path.resolve(fp) === path.resolve(filePath)) {
 					fs.writeFileSync(filePath, "const x = 1;\n");
@@ -1019,7 +1015,9 @@ describe("Pipeline", () => {
 			const originalFormatFile = formatService.formatFile.bind(formatService);
 			const deps = createMockDeps({ getFormatService: () => formatService });
 			formatService.formatFile = async (fp: string) => {
-				const result = await originalFormatFile(fp);
+				const result = await originalFormatFile(fp, {
+					sessionRoot: path.dirname(fp),
+				});
 				if (fp === filePath || path.resolve(fp) === path.resolve(filePath)) {
 					fs.writeFileSync(filePath, "const x = 1;\n");
 					return {
@@ -1149,7 +1147,9 @@ describe("Pipeline", () => {
 			const originalFormatFile = formatService.formatFile.bind(formatService);
 			const deps = createMockDeps({ getFormatService: () => formatService });
 			formatService.formatFile = async (fp: string) => {
-				const result = await originalFormatFile(fp);
+				const result = await originalFormatFile(fp, {
+					sessionRoot: path.dirname(fp),
+				});
 				if (fp === filePath || path.resolve(fp) === path.resolve(filePath)) {
 					fs.writeFileSync(filePath, "const x = 1;\n");
 					return {

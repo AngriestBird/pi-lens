@@ -36,16 +36,6 @@ vi.mock("../../clients/lsp/config.js", async (importOriginal) => ({
 	primaryServerId: (fp: string) => getServersForFileWithConfig(fp)[0]?.id,
 }));
 
-vi.mock("../../clients/lsp/capabilities.js", async () => {
-	const actual = await vi.importActual<
-		typeof import("../../clients/lsp/capabilities.js")
-	>("../../clients/lsp/capabilities.js");
-	return {
-		...actual,
-		getLSPService: () => mocked.service,
-	};
-});
-
 const { reconcileScanDiagnostics } = vi.hoisted(() => ({
 	// Production returns a boolean (accepted / rejected by the ordering
 	// guard); a double returning undefined put every result in this suite on
@@ -57,6 +47,7 @@ vi.mock("../../clients/widget-state.js", () => ({
 }));
 
 import { createLspDiagnosticsTool } from "../../tools/lsp-diagnostics.js";
+import { installLspService } from "../support/lsp-service-seam.js";
 
 function serverIdForFile(file: string): string {
 	return file.endsWith(".ts") ? "typescript" : "none";
@@ -83,13 +74,17 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 		});
 
 		touchFile = vi.fn().mockResolvedValue({ diags: [] });
-		mocked.service = makeLspServiceDouble({
-			touchFile,
-			getDiagnostics: vi.fn().mockResolvedValue([]),
-			getDiagnosticsHealth: vi.fn().mockReturnValue(undefined),
-			getCapabilitySnapshots: vi.fn().mockResolvedValue([]),
-			ensureWarmForSweep: vi.fn().mockResolvedValue({ performedWarmup: false }),
-		});
+		mocked.service = installLspService(
+			makeLspServiceDouble({
+				touchFile,
+				getDiagnostics: vi.fn().mockResolvedValue([]),
+				getDiagnosticsHealth: vi.fn().mockReturnValue(undefined),
+				getCapabilitySnapshots: vi.fn().mockResolvedValue([]),
+				ensureWarmForSweep: vi
+					.fn()
+					.mockResolvedValue({ performedWarmup: false }),
+			}),
+		);
 	});
 
 	afterEach(() => {
@@ -702,16 +697,18 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 			// Shape 73: an install above the fixture would make the gap cells vacuous.
 			expect(hasResolvableNodeModules(tmpDir)).toBe(false);
 			probe = vi.fn();
-			mocked.service = makeLspServiceDouble({
-				touchFile,
-				getDiagnostics: vi.fn().mockResolvedValue([]),
-				getDiagnosticsHealth: vi.fn().mockReturnValue(undefined),
-				getCapabilitySnapshots: vi.fn().mockResolvedValue([]),
-				ensureWarmForSweep: vi
-					.fn()
-					.mockResolvedValue({ performedWarmup: false }),
-				executeReadOnlyCommandOnLiveClient: probe,
-			});
+			mocked.service = installLspService(
+				makeLspServiceDouble({
+					touchFile,
+					getDiagnostics: vi.fn().mockResolvedValue([]),
+					getDiagnosticsHealth: vi.fn().mockReturnValue(undefined),
+					getCapabilitySnapshots: vi.fn().mockResolvedValue([]),
+					ensureWarmForSweep: vi
+						.fn()
+						.mockResolvedValue({ performedWarmup: false }),
+					executeReadOnlyCommandOnLiveClient: probe,
+				}),
+			);
 		});
 
 		it.each([

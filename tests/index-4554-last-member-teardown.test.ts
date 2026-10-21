@@ -1,4 +1,4 @@
-// flake-shape: in-process-mock — the shared branch calls the module-level `resetLSPService`, and the assertion is on THAT call, which the service double does not expose as a spy; the stand-in never spawns a language server, so no child process and no real wire take part.
+// flake-shape: in-process-mock — two activations share one process; each asserts its OWN module-level `resetLSPService` spy (the r7 cell reads the first activation's spy after the second has booted), and the singleton lifecycle holds one `beforeReset` at a time, so the seam cannot tell the activations apart; the stand-in never spawns a language server, so no child process and no real wire take part.
 /**
  * #4554 witness: the shared session teardown belongs to the LAST live session
  * of one pi-lens activation, not to the role that activation recorded last.
@@ -49,6 +49,7 @@ import {
 } from "../clients/instance-registry.js";
 import { _resetProcessSingletonsForTests } from "../clients/process-singletons.js";
 import { createPiMock, makeCtx, STALE_CTX_MESSAGE } from "./support/pi-mock.js";
+import { makeLspServiceDouble } from "./support/lsp-service-double.js";
 import { aliveServerHolder } from "./support/lsp-status-repaint.js";
 import {
 	cleanupTestEnvironmentsDrained,
@@ -90,9 +91,9 @@ async function bootActivation(): Promise<{
 	pi: ReturnType<typeof createPiMock>;
 	resetLSPService: ReturnType<typeof vi.fn>;
 }> {
-	const { resetLSPService, service } = aliveServerHolder();
+	const { resetLSPService, overrides } = aliveServerHolder();
 	vi.doMock("../clients/lsp/capabilities.js", () => ({
-		getLSPService: service,
+		getLSPService: () => makeLspServiceDouble(overrides),
 		resetLSPService,
 	}));
 	const { default: registerExtension } = await import("../index.js");

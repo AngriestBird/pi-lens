@@ -1751,6 +1751,49 @@ describe("cascade delivery at turn_end (#4485, #4487)", () => {
 		}
 	});
 
+	// Recurrence (#4689 review r1 F5): a cascade names its neighbours by path
+	// identity (review-graph keys) while turn_end holds the session root as
+	// spelled, so under a root reached through a link the pending line's
+	// containment filter read every neighbour as outside the project and the
+	// unresolved errors went silent, which reads as fixed.
+	it("a pending neighbour keyed by identity still renders under a session root spelled through a link", async (ctx) => {
+		const env = setupTestEnvironment("cascade-4689-alias-");
+		try {
+			const real = path.join(env.tmpDir, "repo");
+			const alias = path.join(env.tmpDir, "repo-alias");
+			fs.mkdirSync(real);
+			try {
+				fs.symlinkSync("repo", alias, "dir");
+			} catch (error) {
+				return ctx.skip(`symlinks unavailable: ${String(error)}`);
+			}
+			const runtime = new RuntimeCoordinator();
+			const cacheManager = new CacheManager(false);
+			const a = path.join(alias, "a.ts");
+			const other = path.join(alias, "other.ts");
+			const n1 = path.join(fs.realpathSync.native(real), "n1.ts");
+
+			runtime.beginTurn();
+			edit(cacheManager, a, alias);
+			runtime.appendCascadeRun({
+				filePath: a,
+				result: await computedResult(alias, a, [[n1, ["first error"]]]),
+				neighborCount: 1,
+				diagnosticCount: 1,
+				observedNeighborPaths: [n1],
+				checkedAt: Date.now(),
+			} as any);
+			await turnEndOf(runtime, cacheManager, alias);
+
+			runtime.beginTurn();
+			edit(cacheManager, other, alias);
+			const second = await turnEndOf(runtime, cacheManager, alias);
+			expect(second).toMatch(/n1\.ts: 1 error\(s\) unresolved \(scanned/);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	// Recurrence (#4495 review F1, round-2 verify R2-1/R2-2/R2-3): the 📐 line
 	// said "2 error(s) unresolved" for a neighbour fixed by a write pi never
 	// saw, every edit turn until a cascade covered it (r1; and r2 again when

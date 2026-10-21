@@ -11,6 +11,7 @@ import {
 	flushLatencyLog,
 	getLatencyLogPath,
 } from "../../clients/latency-logger.js";
+import { normalizeMapKey } from "../../clients/path-utils.js";
 import {
 	isExcludedTestTarget,
 	RUNNERS,
@@ -1865,6 +1866,41 @@ describe("test-runner-client", () => {
 		const client = new TestRunnerClient(false);
 		const detected = client.detectRunner(tmpDir, path.join(tmpDir, "main.py"));
 		expect(detected?.runner).toBe("pytest");
+	});
+
+	it("anchors a package's runner under a session root spelled through a link (#4689)", (ctx) => {
+		// RECURRENCE GUARDED: review r1 F5. The source file arrives as a path
+		// identity (a dispatch key) while the dispatch root is the session's
+		// link spelling, so the file read as outside the root: detection fell
+		// back to every runner at the root (pytest here) instead of the
+		// package's own runner (#2870's anchoring).
+		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-tests-");
+		cleanups.push(cleanup);
+		const real = path.join(tmpDir, "mono");
+		const alias = path.join(tmpDir, "mono-alias");
+		const app = path.join(real, "packages", "app");
+		fs.mkdirSync(path.join(app, "src"), { recursive: true });
+		fs.writeFileSync(
+			path.join(real, "pyproject.toml"),
+			"[tool.pytest.ini_options]\naddopts='-q'\n",
+		);
+		fs.writeFileSync(path.join(app, "package.json"), '{"name":"app"}');
+		fs.writeFileSync(
+			path.join(app, "vitest.config.ts"),
+			"export default {};\n",
+		);
+		fs.writeFileSync(path.join(app, "src", "a.ts"), "export const a = 1;\n");
+		try {
+			fs.symlinkSync("mono", alias, "dir");
+		} catch (error) {
+			return ctx.skip(`symlinks unavailable: ${String(error)}`);
+		}
+
+		const client = new TestRunnerClient(false);
+		const sourceKey = normalizeMapKey(
+			path.join(alias, "packages", "app", "src", "a.ts"),
+		);
+		expect(client.detectRunner(alias, sourceKey)?.runner).toBe("vitest");
 	});
 
 	it("does not use global pytest fallback for non-Python files", () => {
