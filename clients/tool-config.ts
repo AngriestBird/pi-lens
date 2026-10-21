@@ -223,7 +223,11 @@ export function translateGuidanceToolNames(
 			entry.mcpName,
 		);
 	}
-	return text.replace("activate via pi_lens_activate_tools", "call directly");
+	// #4682 (PR #4730 F1): the longer qualified clause first, so MCP never
+	// renders a condition it cannot satisfy ("if unlisted" with every tool listed).
+	return text
+		.replace("activate via pi_lens_activate_tools if unlisted", "call directly")
+		.replace("activate via pi_lens_activate_tools", "call directly");
 }
 
 export function toolRegistryEntryForPi(

@@ -7,8 +7,8 @@
  * model, so "activate via pi_lens_activate_tools" describes a state that never
  * happens. Under `"auto"` the posture is decided per model at session_start, so
  * the one text rendered at that moment must be true for both outcomes. The
- * clause is one literal under every posture, which also keeps the cached prompt
- * prefix stable: it never changes mid-session or between postures.
+ * clause is one literal under every posture, so the text does not depend on the
+ * posture at all (the renderer receives no posture input).
  *
  * Recurrence each case names: the orientation bullet asserts "activate via
  * pi_lens_activate_tools" while the tools are already active (tools.lazy=false,
@@ -165,19 +165,11 @@ describe("the situational orientation is true under every tools.lazy posture (#4
 						"Situational (activate via pi_lens_activate_tools)",
 					);
 
-					// The prefix holds across turns: the orientation is staged once at
-					// session_start and never re-rendered, so the requests after the
-					// first replay the same leading history on every later turn.
-					await handle.prompt("second question");
-					await handle.prompt("third question");
-					const second = handle.requests[1];
-					const third = handle.requests[2];
-					expect(second?.[0], "leading message, turns 2 and 3").toEqual(
-						third?.[0],
-					);
-					expect(requestText(third)).not.toContain(
-						"Situational (activate via pi_lens_activate_tools)",
-					);
+					// No later-turn assertion: the orientation is a request-local `context`
+					// message consumed on first read (clients/runtime-context.ts), so
+					// turn-2 and turn-3 requests never carry it and a comparison there
+					// cannot fail (PR #4730 review F2). The turn-1 checks above are the
+					// whole proof of what this PR changes.
 				},
 			);
 		},
