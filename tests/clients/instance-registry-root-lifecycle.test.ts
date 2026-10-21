@@ -27,19 +27,15 @@ import { removeTempDirSync } from "./test-utils.js";
 
 let dir: string;
 
-vi.mock("../../clients/file-utils.js", () => ({
-	// #2506: both resolvers, same dir. Under the vitest PI_LENS_HOME pin
-	// production returns one value for both, so a double that split them
-	// would diverge from production on the axis these tests measure.
-	getGlobalPiLensDir: () => dir,
-}));
-
 describe("instance-registry root lifecycle (#2130 round 2)", () => {
 	let realRoot: string;
 	let tempRoot: string;
 
 	beforeEach(() => {
 		dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-instreg-rl-"));
+		// #2506: `PI_LENS_HOME` is the one knob both the data and the log
+		// resolvers read, so the registry file lands in `dir` as in production.
+		vi.stubEnv("PI_LENS_HOME", dir);
 		// Real directories: `normalizeFilePath` canonicalizes an EXISTING path
 		// via realpath, so a made-up path would compare two differently-derived
 		// spellings and prove nothing.

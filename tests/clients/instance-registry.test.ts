@@ -3,7 +3,7 @@
  * observability substrate: read/write atomicity, corrupt/missing-file
  * recovery, cross-form path normalization, and the kill switch.
  *
- * `getGlobalPiLensDir` is mocked to point at a per-test temp dir so these
+ * `PI_LENS_HOME` is pinned to a per-test temp dir so these
  * tests never touch the real `~/.pi-lens/instances.json`.
  */
 
@@ -15,13 +15,6 @@ import { suspendAt } from "./interleaving-kit.js";
 import { removeTempDirSync } from "./test-utils.js";
 
 let dir: string;
-
-vi.mock("../../clients/file-utils.js", () => ({
-	// #2506: both resolvers, same dir. Under the vitest PI_LENS_HOME pin
-	// production returns one value for both, so a double that split them
-	// would diverge from production on the axis these tests measure.
-	getGlobalPiLensDir: () => dir,
-}));
 
 // #3602: a controllable pause point on `ownProcessStart`, the call
 // `registerInstanceNow` makes right after `rememberRegistrationRoot` and
@@ -44,6 +37,9 @@ vi.mock("../../clients/process-snapshot.js", async (importOriginal) => {
 describe("instance-registry", () => {
 	beforeEach(() => {
 		dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-instreg-"));
+		// #2506: `PI_LENS_HOME` is the one knob both the data and the log
+		// resolvers read, so the registry file lands in `dir` as in production.
+		vi.stubEnv("PI_LENS_HOME", dir);
 		// vi.resetModules() gives every test a FRESH instance-registry.js
 		// instance, which means a fresh degradation-ledger.js too (its module
 		// state — the groups/onceKeys maps — is reinitialized on re-evaluation),

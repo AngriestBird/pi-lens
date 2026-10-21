@@ -16,9 +16,10 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createLensDiagnosticsTool } from "../../tools/lens-diagnostics.js";
 import { resetProjectLensConfigCache } from "../../clients/project-lens-config.js";
+import { clearWidgetState } from "../../clients/widget-state.js";
 import { ENVIRONMENT_GAP_MARKER } from "../../clients/lsp/environment-gap.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
 
@@ -72,22 +73,8 @@ vi.mock(
 	}),
 );
 
-// Spread the real module rather than hand-listing its exports; see the same
-// note in tests/tools/lens-diagnostics-rule-policy.test.ts.
-vi.mock("../../clients/widget-state.js", async (importOriginal) => {
-	const actual =
-		await importOriginal<typeof import("../../clients/widget-state.js")>();
-	return {
-		...actual,
-		getFileDiagnosticSummaries: () => [],
-		reconcileStaleWidgetFiles: async () => 0,
-		reconcileStaleWidgetDependencyBlockers: async () => 0,
-		reconcileScanDiagnostics: vi.fn().mockReturnValue(true),
-		reconcileCorrelatedScanDiagnostics: vi.fn(),
-	};
-});
-
 beforeEach(() => {
+	clearWidgetState();
 	freshFetchMocks.fetchFreshProjectDiagnostics.mockReset();
 	freshFetchMocks.fetchFreshProjectDiagnostics.mockResolvedValue({
 		diagnostics: [],
@@ -96,6 +83,10 @@ beforeEach(() => {
 		timings: {},
 	});
 	resetProjectLensConfigCache();
+});
+
+afterEach(() => {
+	clearWidgetState();
 });
 
 const INFERRED_CONFIG_FILE = "/dev/null/inferredProject1*";

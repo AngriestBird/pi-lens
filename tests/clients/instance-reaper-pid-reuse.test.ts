@@ -72,11 +72,6 @@ const h = vi.hoisted(() => ({
 	latency: [] as Array<{ phase?: string; metadata?: Record<string, unknown> }>,
 }));
 
-vi.mock("../../clients/file-utils.js", async (importOriginal) => ({
-	...(await importOriginal<typeof import("../../clients/file-utils.js")>()),
-	getGlobalPiLensDir: () => h.dir,
-}));
-
 vi.mock("../../clients/latency-logger.js", async (importOriginal) => ({
 	...(await importOriginal<typeof import("../../clients/latency-logger.js")>()),
 	logLatency: (entry: {
@@ -280,6 +275,9 @@ function sweepRecord(): Record<string, unknown> | undefined {
 
 beforeEach(() => {
 	h.dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-pid-reuse-"));
+	// `PI_LENS_HOME` is the knob `getGlobalPiLensDir` reads, so the registry
+	// file lands in `h.dir` as in production.
+	vi.stubEnv("PI_LENS_HOME", h.dir);
 	h.afterFirstIdentityQuery = undefined;
 	h.latency.length = 0;
 	signals.length = 0;
@@ -287,6 +285,7 @@ beforeEach(() => {
 });
 afterEach(() => {
 	process.kill = kill;
+	vi.unstubAllEnvs();
 	removeTempDirSync(h.dir);
 });
 afterAll(() => {

@@ -32,11 +32,6 @@ import { removeTempDirSync } from "./test-utils.js";
 
 let dir: string;
 
-vi.mock("../../clients/file-utils.js", async (importOriginal) => ({
-	...(await importOriginal<typeof import("../../clients/file-utils.js")>()),
-	getGlobalPiLensDir: () => dir,
-}));
-
 const ROOT_A = "/repo/session-1";
 const ROOT_B = "/repo/session-2";
 /** A declined secondary's root (#2130), served beside session 1's. */
@@ -103,6 +98,8 @@ async function expectSessionTwoRegistersAlone(): Promise<void> {
 // Shared by both describes below: a fresh registry dir and module graph per case.
 beforeEach(async () => {
 	dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-instreg-"));
+	// `PI_LENS_HOME` is the knob the registry's data and log resolvers read.
+	vi.stubEnv("PI_LENS_HOME", dir);
 	vi.resetModules();
 	registry = await import("../../clients/instance-registry.js");
 	ledger = await import("../../clients/degradation-ledger.js");
@@ -110,6 +107,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
 	vi.restoreAllMocks();
+	vi.unstubAllEnvs();
 	peerReleases();
 	// The tail is a process singleton: settle it here so nothing queued by
 	// one case lands in the next case's directory.
