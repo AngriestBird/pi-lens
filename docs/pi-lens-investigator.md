@@ -17,6 +17,12 @@ issue and the requested evidence surface.
 
 ## Evidence sources
 
+The log root is the monitored process's, resolved as in
+`docs/pi-lens-monitor.md` "Inputs": a non-empty `PI_LENS_HOME`, then any
+probe-home redirect, then `~/.pi-lens`. The paths below assume the default.
+Rotation also writes timestamped archives; pass `--archived` to the analyzer
+to read them.
+
 - `~/.pi-lens/latency.log` and its `.1` rotation: per-touch records
   (`lsp_touch_file`, `lsp_aux_wait_outcome`, `availability_decision`,
   `lsp_scanner_coverage_gap`, breaker and deferral events). Rotation is by size:
@@ -61,6 +67,14 @@ issue and the requested evidence surface.
   entries and include one non-TypeScript case when the rule is language-neutral.
 
 ## Reproducible behavior
+
+Reproduce on the reporter's pi host version and pi-lens version, taken from
+the report or its session log. When you cannot install that version, say so
+and name the version you used instead. Never substitute the latest silently.
+Report one of four outcomes: confirmed, partially confirmed (name what
+differed), not reproduced (name what you tried), or blocked (name the missing
+access or state). Our bugs often depend on the host version; #4690 raises the
+certified floor to 0.86.1.
 
 When the symptom reproduces, the loop comes before the reading. Build the
 tightest loop that goes red on the symptom (a failing test, a minimal driver, a

@@ -124,6 +124,13 @@ real seam. Check that every gate the diff adds is exercised through that path.
   *follow-up issue* (p2 or higher only, with its seam group), or *stay
   specific* (with the reason). A missing verdict is a finding (#3622; the
   optional ast-grep assist is #3684).
+- **A new test's layer.** A registration question (flags, tools, commands,
+  declarations) belongs on tier 1 (`tests/support/pi-runner.ts`), a
+  session-flow case on tier 2 (`tests/support/pi-session.ts`), and a
+  JSON-lines sink on `readNdjsonRows` (`tests/support/ndjson-rows.ts`), with
+  `skipped === 0` asserted when the claim needs the complete output. A fake of
+  an in-process store or registry is a finding; other doubles only where
+  `AGENTS.md` admits them, which holds the detail.
 - Review the pre-push self-scan with `npm run astgrep:self-scan`; `pr-preflight`
   runs the same gate after its build.
 - Require the exact-pin rule in `docs/pi-lens-subagent.md` on the MERGE of
@@ -326,6 +333,31 @@ merge-order interactions with other open PRs, plus:
   `docs/pi-lens-merge-policy.md` "The loop, per PR" step 1 and step 4
   (`:34`, `:81`). Recurrence: #4566 and #4575 (2026-10-17), where the threads
   outlived the rounds that should have read them.
+
+Beside the prose report, write `FINDINGS_<pr>.json` at the worktree root, and
+never commit it. The orchestrator's validator reads it before routing the
+round. Shape:
+
+```json
+{"pr": 4710, "head": "<40-hex sha reviewed>", "verdict": "merge-ready|needs changes|redesign|conflicted", "oneWayDoors": ["..."], "findings": [{"id": "F1", "severity": "<one of the five severity words>", "file": "path", "line": 1, "claim": "one sentence", "probe": "command or probe name whose output proves it", "remedy": "the prescribed change, or null", "addsMechanism": true, "class": "fold|accepted residual|file"}]}
+```
+
+Write one entry per finding, with the same ids as the prose. `remedy: null`
+means the fixer must design the change. `addsMechanism` is true when the
+remedy adds a guard, branch, state, record, or lifecycle step, rather than a
+fix to an existing line. The prose report stays the record a human reads;
+the JSON is what routing reads, so the two must agree. This exists because
+the orchestrator re-typed each finding into a fix brief by hand, and routed
+rounds by judgment instead of by the review's own data.
+
+State the change's rollback cost as a required summary line. Name every
+one-way door it ships: something users or other code can come to depend on,
+which a revert does not undo. Examples are a config key or flag users set, a
+durable record shape already written to disk, a public tool, MCP or CLI
+surface, or a migration. Each one-way door needs its proof in the PR: an
+old-record parse fixture, a deprecation path, or a stated reason it is safe.
+`none` is a valid answer, and state it. The JSON's `oneWayDoors` lists the
+same items.
 
 Use short, active, plain prose.
 

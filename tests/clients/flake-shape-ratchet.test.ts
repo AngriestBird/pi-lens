@@ -501,6 +501,14 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"real git children enumerate tracked diagnostic files, which a mocked repository cannot resolve",
 	},
+	// 2026-10-18 (#4535 slice 2): a HEAD move exists only in a real repository
+	// that git checks out; a stubbed git could not rewrite the files the look
+	// lists in its delta, and the publish is about what git actually reports.
+	"real-process-spawn:clients/disk-change-detectors-4535.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"a clean-tree HEAD move is a real git checkout; a stubbed git cannot produce the delta the look publishes",
+	},
 	"real-process-spawn:clients/dispatch/runners/ast-grep-playground-verify.test.ts":
 		{
 			detector: "real-process-spawn",
@@ -2782,8 +2790,38 @@ describe("flake-shape scan — service-double (#4362)", () => {
 		const source = [
 			"makeLspServiceDouble({ touchFile: vi.fn(), hasLSP: vi.fn(), getDiagnostics: vi.fn() });",
 			"const s = { ...makeLspServiceDouble(), touchFile: vi.fn(), hasLSP: vi.fn(), getStatus: vi.fn() };",
+			// #4709: the seam hands this argument to the factory, so it is seeded.
+			"await installLspServiceDouble({ touchFile: vi.fn(), hasLSP: vi.fn(), getDiagnostics: vi.fn() });",
 		].join("\n");
 		expect(doubles(source)).toEqual([]);
+	});
+
+	it("ATTACK: counts a spread of the async installer's Promise as a hand-rolled double", () => {
+		// Recurrence (#4720 review F3, Greptile P2): `installLspServiceDouble`
+		// is async, so `{ ...installLspServiceDouble(), … }` spreads a Promise and
+		// seeds nothing. Registering it as an argument-only seed is what refuses
+		// this spelling; before that fix the same spread produced 0 hits.
+		const source = [
+			"const a = { ...installLspServiceDouble(), touchFile: vi.fn(), hasLSP: vi.fn(), getStatus: vi.fn() };",
+			// A cast around the same callee resolves to the registered name and is
+			// still refused, because the result is a Promise whichever way it is
+			// spelled.
+			"const b = { ...(installLspServiceDouble as any)(), touchFile: vi.fn(), hasLSP: vi.fn(), getStatus: vi.fn() };",
+		].join("\n");
+		expect(doubles(source)).toEqual(["LSPService", "LSPService"]);
+	});
+
+	it("ATTACK: counts a seed reached through an alias, or through another binding", () => {
+		// The safe direction for a ratchet: a callee that is not a bare
+		// registered identifier, or a spread operand that is not a call, keeps
+		// the object counted.
+		const source = [
+			"const alias = installLspServiceDouble;",
+			"const a = { ...alias(), touchFile: vi.fn(), hasLSP: vi.fn(), getStatus: vi.fn() };",
+			"const d = await installLspServiceDouble();",
+			"const b = { ...d, touchFile: vi.fn(), hasLSP: vi.fn(), getStatus: vi.fn() };",
+		].join("\n");
+		expect(doubles(source)).toEqual(["LSPService", "LSPService"]);
 	});
 
 	it("does not flag a data record that reuses the names", () => {

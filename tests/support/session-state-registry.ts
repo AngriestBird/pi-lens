@@ -89,9 +89,10 @@ import {
 	resetLSPCaseSensitivityState,
 } from "../../clients/lsp/server.js";
 import {
-	_resetDeferredForTests,
+	hasAnyDispositionMarks,
 	isDeferredThisSession,
 	markDisposition,
+	resetDeferredDispositions,
 } from "../../clients/diagnostic-dispositions.js";
 import {
 	_getReverseDepsIndexCacheKeysForTests,
@@ -499,12 +500,11 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 	{
 		id: "diagnostic-dispositions:deferredThisSession",
 		module: "diagnostic-dispositions.ts",
-		state: "deferredThisSession",
+		state: "deferredByCwd",
 		policy: "session_start",
-		resetName: "_resetDeferredForTests",
+		resetName: "resetDeferredDispositions",
 		reason:
-			"A `defer` mark suppresses a diagnostic for THIS session by design; carrying it into the next session hides a finding nobody deferred.",
-		gap: "Not wired: the only reset is the test-only seam, so a deferred diagnostic stays suppressed for the life of the PROCESS rather than the session. PR #1625 has now merged and did NOT close this (review round R1, S5): it scoped the Set's key per project and re-signed isDeferredThisSession, but added no session_start reset. The gap survives it and still needs an owner.",
+			"A `defer` mark suppresses a diagnostic for THIS session by design; carrying it into the next session hides a finding nobody deferred. #4701 F1 wired the reset #1625's gap declared missing: `resetDeferredDispositions` clears the anchor Set and the project index beside it, and `resetSessionScopedState` (reached from `handleSessionStart`) calls it.",
 		probe: {
 			arm: () => {
 				const cwd = scratchCwd();
@@ -523,7 +523,7 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 				);
 			},
 			isArmed: () => probeDeferredAnchor === undefined || !probeIsDeferred(),
-			reset: () => _resetDeferredForTests(),
+			reset: () => resetDeferredDispositions(),
 		},
 	},
 	{
@@ -1009,11 +1009,11 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 		id: "opaque-mutation-scan:baselineStore+gitMemo",
 		module: "opaque-mutation-scan.ts",
 		state:
-			"OpaqueBaselineStore pending map, gitRepoMemo, gitToplevelMemo, headRecords, headLooks",
+			"OpaqueBaselineStore pending map, gitRepoMemo, gitToplevelMemo, headRecords, headLooks, pendingHeadDiscards",
 		policy: "session_start",
 		resetName: "resetOpaqueMutationState",
 		reason:
-			"#2000 phase 2: pending pre-command baselines are keyed cwd:generation (plus the tool-call id, #4137) and become unreachable when the session generation advances; and the git-worktree and toplevel memos must re-probe after a session that may have seen a directory become a worktree, or become a LINKED worktree of another (#2007). Without the reset the baselines leak per session and the memos mis-answer forever. #4493: the per-session HEAD records (capped at 64) and the per-key HEAD-look flights clear at the same boundary, where the LSP service resets too, so no record outlives the documents it guards.",
+			"#2000 phase 2: pending pre-command baselines are keyed cwd:generation (plus the tool-call id, #4137) and become unreachable when the session generation advances; and the git-worktree and toplevel memos must re-probe after a session that may have seen a directory become a worktree, or become a LINKED worktree of another (#2007). Without the reset the baselines leak per session and the memos mis-answer forever. #4493: the per-session HEAD records (capped at 64) and the per-key HEAD-look flights clear at the same boundary, where the LSP service resets too, so no record outlives the documents it guards. #4612 r4: the discard paths a joined HEAD look still owes (keyed like the HEAD records, capped at 64 keys) clear at the same boundary.",
 	},
 
 	// ── The rest of the session_start reset chain ────────────────────────────
@@ -1400,9 +1400,13 @@ function getFormattersInternals() {
  * encodes only a relative path, so the same anchor in two projects collided.
  */
 function probeIsDeferred(): boolean {
-	return isDeferredThisSession(
-		probeDeferredCwd as string,
-		probeDeferredAnchor as string,
+	if (probeDeferredCwd === undefined) return false;
+	// Both halves of the entry's state: the anchor that suppresses a finding and
+	// the project index the read-only turn's cost guard reads (#4701 F1). A
+	// reset that cleared one and not the other is not the session boundary.
+	return (
+		isDeferredThisSession(probeDeferredCwd, probeDeferredAnchor as string) ||
+		hasAnyDispositionMarks(probeDeferredCwd)
 	);
 }
 
@@ -1803,7 +1807,9 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// is registered above and cleared by the same `resetOpaqueMutationState`.
 	// #4493: 4 -> 5, the HEAD records and the HEAD-look single-flight, both
 	// in the entry above and cleared by `resetOpaqueMutationState`.
-	"opaque-mutation-scan.ts": 5,
+	// #4612 r4: 5 -> 6, `pendingHeadDiscards`, the discard paths a joined HEAD
+	// look owes, in the entry above and cleared by the same reset.
+	"opaque-mutation-scan.ts": 6,
 	// #1602 added `globalBinDirCache` (1 → 2), cleared by the same
 	// `_resetPackageManagerCache` the registry entry above names.
 	"package-manager.ts": 2,

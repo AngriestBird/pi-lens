@@ -9,11 +9,17 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as nodePath from "node:path";
-import { isAtOrAboveHomeDir, isUnderDir, isVendorPath } from "./path-utils.js";
+import {
+	isAtOrAboveHomeDir,
+	isUnderDir,
+	isVendorPath,
+	pathsEqual,
+} from "./path-utils.js";
 import { isPiLensInternalPath } from "./file-utils.js";
 import {
 	resolveGitCheckout,
 	resolveLinkedWorktreeOwner,
+	sameCheckoutOtherRoot,
 } from "./review-graph/git-identity.js";
 
 export type AnalysisRootMode =
@@ -131,4 +137,33 @@ export function resolveAnalysisRoot(
 
 export function canWriteAnalysisRoot(mode: AnalysisRootMode): boolean {
 	return mode === "session" || mode === "linked-worktree";
+}
+
+/**
+ * May this ROOT receive session bookkeeping? The session root, a directory
+ * under it, and the session repository's linked worktrees may; an adopted
+ * project must not (AGENTS.md "Analysis-root invariant"). The root form of
+ * {@link resolveAnalysisRoot}, which answers "session" for any file under the
+ * session root (a monorepo package's client is rooted there, #4532 round 5,
+ * review F7): checkout identity is read at the root itself, not at a child
+ * path, so a caller holding a root asks the owner instead of re-deriving the
+ * rule.
+ */
+export function isSessionBookkeepingRoot(
+	root: string,
+	sessionRoot: string,
+): boolean {
+	const resolved = realPathOrResolved(root);
+	// The file form's first refusal (#4532 round 6, verify r5): every file
+	// under a vendor root resolves to "none", so the root is no session's.
+	if (isVendorPath(resolved)) return false;
+	const session = realPathOrResolved(sessionRoot);
+	if (pathsEqual(resolved, session) || isUnderDir(resolved, session))
+		return true;
+	const checkout = resolveGitCheckout(session);
+	if (!checkout) return false;
+	// The owner rule itself, asked of two ROOTS instead of a root and a file
+	// (#4532 round 4, NITPICK-1): this used to be a second spelling of
+	// `resolveLinkedWorktreeOwner`'s predicate, on `===` rather than `pathsEqual`.
+	return sameCheckoutOtherRoot(checkout, resolveGitCheckout(resolved));
 }

@@ -194,6 +194,7 @@ import {
 	incrementDegradationCount,
 	recordDegradationOnce,
 } from "./degradation-ledger.js";
+import { hasAnyDispositionMarks } from "./diagnostic-dispositions.js";
 import { mapWithConcurrency } from "./map-with-concurrency.js";
 import { getAmbientAbortSignal } from "./safe-spawn.js";
 import { emitBounded } from "./bounded-telemetry.js";
@@ -635,14 +636,20 @@ function deadCodeScanEvent(
 	};
 }
 
-/** Remove a late scan that will not be used, and count why. */
+/**
+ * Remove a late scan that will not be used, and count why. Only `entry` goes:
+ * two turns of one session that reach the lane before either parks both park
+ * under the one key, and the older entry's drop must not take the newer one
+ * (the client's own `inFlight` release is guarded the same way, #1968).
+ */
 function dropLateDeadCodeScan(
 	scans: Map<string, LateDeadCodeScan>,
 	key: string,
+	entry: LateDeadCodeScan,
 	client: DeadCodeClient,
 	reason: string,
 ): void {
-	scans.delete(key);
+	if (scans.get(key) === entry) scans.delete(key);
 	incrementDegradationCount({
 		kind: "dead-code-late-scan-dropped",
 		subject: client.id,
@@ -656,7 +663,8 @@ function dropLateDeadCodeScan(
  * it writes the baseline row (a failure never replaces the good row on disk
  * then, #925, #4154 V1) and its `dead-code.log` event, and a successful result
  * waits in the entry for the next turn_end of the same session that reaches
- * the lane. A result for a session that has ended is dropped and counted.
+ * the lane. A result for a session that has ended is dropped and counted, and
+ * so is a settle that throws (a baseline write the disk refuses).
  */
 function parkLateDeadCodeScan(args: {
 	scope: SessionScope;
@@ -680,7 +688,7 @@ function parkLateDeadCodeScan(args: {
 		askedAt: startedAt,
 	};
 	scans.set(key, entry);
-	void withRowForFailureWrite(
+	const watch = withRowForFailureWrite(
 		args.scan,
 		cacheManager,
 		cacheKey,
@@ -689,15 +697,25 @@ function parkLateDeadCodeScan(args: {
 	).then(
 		({ result, row }) => {
 			if (!scope.isLive()) {
-				dropLateDeadCodeScan(scans, key, client, "session-ended");
+				dropLateDeadCodeScan(scans, key, entry, client, "session-ended");
 				return;
 			}
 			const durationMs = Date.now() - startedAt;
 			const cacheKept = wouldPoisonCache(row, result);
 			if (!cacheKept) {
-				cacheManager.writeCache(cacheKey, result, cwd, {
-					scanDurationMs: durationMs,
-				});
+				try {
+					cacheManager.writeCache(cacheKey, result, cwd, {
+						scanDurationMs: durationMs,
+					});
+				} catch (err) {
+					// The write can fail partway; the computed result is still good, so
+					// only the on-disk baseline is lost (review of #4663, F1).
+					incrementDegradationCount({
+						kind: "dead-code-baseline-write-failed",
+						subject: client.id,
+						reason: String(err),
+					});
+				}
 			}
 			logDeadCodeScan({
 				...deadCodeScanEvent(client, cwd, result, durationMs),
@@ -707,6 +725,7 @@ function parkLateDeadCodeScan(args: {
 				dropLateDeadCodeScan(
 					scans,
 					key,
+					entry,
 					client,
 					`scan-failed: ${result.summary}`,
 				);
@@ -715,8 +734,23 @@ function parkLateDeadCodeScan(args: {
 			entry.settled = result;
 		},
 		(err: unknown) =>
-			dropLateDeadCodeScan(scans, key, client, `scan-threw: ${err}`),
+			dropLateDeadCodeScan(scans, key, entry, client, `scan-threw: ${err}`),
 	);
+	// No caller awaits `watch`, so a throw from its settle branch (the baseline
+	// write's mkdir and rename throw on a full or read-only disk) would be an
+	// unhandled rejection, which ends the host under Node's default, and would
+	// leave the entry parked so no later turn starts a scan. Drop it and count
+	// it, as a scan that throws is.
+	void watch.catch((err: unknown) => {
+		// none: dropLateDeadCodeScan counts it as dead-code-late-scan-dropped
+		dropLateDeadCodeScan(
+			scans,
+			key,
+			entry,
+			client,
+			`scan-settle-threw: ${err}`,
+		);
+	});
 }
 
 // LSP idle reset scheduling — prevents thrashing by delaying shutdown
@@ -994,6 +1028,102 @@ function formatWriteOrdinal(n: number): string {
 	}
 }
 
+/**
+ * #4698: the commit-gate latch's own re-judge on a turn that wrote no file.
+ *
+ * The latch is reconciled with the turn-end disposition policy
+ * (`resyncGitGuardAfterInlinePolicy`) at the point a file's post-policy
+ * survivor set is final, and that point sits strictly BELOW the
+ * `files.length === 0` early return: a `lens_diagnostic_mark` made on a turn
+ * that wrote nothing took effect — the PULL surfaces that honour a mark
+ * immediately (`lens_diagnostics`, the widget footer) stopped reporting the
+ * finding — while the LATCH kept counting the marked record, so `--lens-guard`
+ * refused the next `git commit` and quoted the marked finding back. The
+ * turn-end banner is not evidence either way: `consumeTurnEndFindings` is a
+ * one-shot delivery, so it is silent after the turn that raised the finding
+ * whether or not a later turn marks it (probe B1 on #4701: 291 chars on the
+ * first delivery, 0 on every later read). The disagreement is gate versus pull
+ * surfaces about one disposition; this is the gate's half, taken on the turn
+ * that made the mark.
+ *
+ * What it reads, and what it deliberately does not:
+ * - `record.stale` is the freshness sweep's OWN demotion. A demoted record is
+ *   rendered as a `[stale — re-run to confirm]` advisory and stays out of the
+ *   authoritative blocker channel by design (`clients/blocker-freshness.ts`
+ *   says the commit gate is unaffected either way), and the edit turn's pass
+ *   does not judge it — so neither does this one, and the latch keeps counting
+ *   it. Demote-not-drop is not demote-to-open (AGENTS.md shape 10).
+ * - Bytes that move OUTSIDE dispatch after a suppression verdict are the
+ *   commit gate's own check (`firstExpiredSuppressionVerdict`, #3248 round 2),
+ *   which is the one place a verdict may OPEN a commit. This pass re-derives
+ *   the verdict; it never re-confirms content.
+ *
+ * Cost: one flag read and one boolean on every turn that writes no file, which
+ * is the common quiet turn, plus one disposition-store probe
+ * (`hasAnyDispositionMarks`, measured 5.5 µs warm) while the gate is closed. The
+ * policy pass itself needs BOTH a closed gate and at least one mark in the
+ * project, because a mark is the only thing a file-less turn can change: with no
+ * marks IN THIS PROJECT no read-only turn can turn a survivor into a suppressed
+ * record. The probe answers per project (#4701 F1) — a `defer` recorded in
+ * another project cannot turn this pass on.
+ * That second condition is load-bearing on cost, not cosmetic —
+ * `applyInlineBlockerPolicy` pays `loadProjectRulePolicyMap` per record
+ * (measured 1.39 ms p50, the same price an edit turn already pays for this
+ * population), so without it a blocked but unmarked session would re-read every
+ * live blocker's file on every reply.
+ */
+function resyncCommitGateForReadOnlyTurn(args: {
+	runtime: RuntimeCoordinator;
+	cwd: string;
+	lensGuardEnabled: boolean;
+}): void {
+	if (!args.lensGuardEnabled) return;
+	if (!args.runtime.gitGuardHasBlockers) return;
+	if (!hasAnyDispositionMarks(args.cwd)) return;
+	const inlinePolicyEntries: InlineBlockerPolicyTallyEntry[] = [];
+	const policySuppressedPaths: string[] = [];
+	const inlinePolicyStart = Date.now();
+	for (const entry of args.runtime.getInlineBlockersSnapshot()) {
+		const tally = {
+			displayPath: toRunnerDisplayPath(args.cwd, entry.filePath),
+			sources: entry.sources,
+		};
+		if (entry.stale) {
+			inlinePolicyEntries.push({ ...tally, stale: true });
+			continue;
+		}
+		const policy = applyInlineBlockerPolicy(entry, args.cwd);
+		inlinePolicyEntries.push({ ...tally, stale: false, outcome: policy });
+		if (policy.body === undefined) policySuppressedPaths.push(entry.filePath);
+	}
+	// No live record is a population this pass has no verdict about (#3248's
+	// scope pin): a latch set by a dispatch whose record the map has since
+	// reconciled away is not this pass's to move, and there is nothing to report.
+	if (inlinePolicyEntries.length === 0) return;
+	const guardLatchBefore = args.runtime.gitGuardHasBlockers;
+	resyncGitGuardAfterInlinePolicy({
+		runtime: args.runtime,
+		suppressedFilePaths: policySuppressedPaths,
+	});
+	// The SAME per-turn record the edit turn's pass writes, through the same
+	// summarizer and with the same guard fields: one phase literal carries one
+	// semantic — the turn-end disposition policy pass, on either turn shape — so
+	// a reader of `latency.log` explains a latch flip without first having to
+	// find out which branch produced the row.
+	logLatency({
+		type: "phase",
+		toolName: "turn_end",
+		filePath: args.cwd,
+		phase: "inline_blocker_policy",
+		durationMs: Date.now() - inlinePolicyStart,
+		metadata: {
+			...summarizeInlineBlockerPolicy(inlinePolicyEntries),
+			guardFilesSuppressed: policySuppressedPaths.length,
+			guardLatchCleared: guardLatchBefore && !args.runtime.gitGuardHasBlockers,
+		},
+	});
+}
+
 export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	const {
 		ctxCwd,
@@ -1165,6 +1295,15 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// below intentionally remains a terminal reset; its pending work stays in
 	// the bounded handoff store for the next eligible turn.
 	if (files.length === 0 && !runtime.hasCascadeRuns() && !isSecondarySession) {
+		// #4698: the one action this turn may still have taken is a disposition
+		// mark, and the policy pass that reconciles the commit-gate latch with it
+		// is below this return. Reconcile it here, BEFORE the record cleanup
+		// below reads the latch it just moved.
+		resyncCommitGateForReadOnlyTurn({
+			runtime,
+			cwd,
+			lensGuardEnabled: Boolean(getFlag("lens-guard")),
+		});
 		// A genuinely clean session must invalidate the persisted guard record.
 		// Blocker records are retained only while the runtime still reports one.
 		if (getFlag("lens-guard") && !runtime.gitGuardHasBlockers) {

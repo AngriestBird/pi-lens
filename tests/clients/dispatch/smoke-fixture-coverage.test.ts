@@ -155,10 +155,6 @@ const EXEMPT = new Map<string, string>([
 		"alternate: elixir-check is the Elixir primary; credo is the config-gated alternate",
 	],
 	[
-		"detekt",
-		"alternate: ktlint is the Kotlin primary; detekt needs the detekt CLI plus its formatting plugin, which is not a single-binary install",
-	],
-	[
 		"prisma-validate",
 		"lsp: exercised through the --lsp prisma smoke lane; the runner shells out to the same @prisma/language-server package",
 	],

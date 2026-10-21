@@ -9,17 +9,20 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { describe, expect, it } from "vitest";
-import { flushAllNdjsonWriters } from "../../clients/ndjson-logger.js";
+import { describe, expect, it, vi } from "vitest";
+import { normalizeFilePath } from "../../clients/path-utils.js";
+import { scannerReportParentDir } from "../../clients/scanner-temp-root.js";
 import {
 	getActivePrimaryRoot,
 	getActiveSessionId,
+	getSecondarySessionCount,
 } from "../../clients/session-lifecycle.js";
 import {
 	fauxAssistantMessage,
 	fauxText,
 	fauxToolCall,
 	piSessionFixture,
+	replayToolNames,
 	startPiSession,
 } from "./pi-session.js";
 
@@ -31,6 +34,20 @@ const fixture = piSessionFixture();
 /** The delimiter pi-lens prefixes every injected context block with. */
 const INJECTION_DELIMITER = "[pi-lens automated context — not a user request]";
 
+/**
+ * A settled call as plain text: its rejection's message, or `resolved`. A
+ * resolved restart is a handle over pi's session, and vitest cannot print one
+ * (it reads pi's uninitialised theme Proxy and throws `Theme not
+ * initialized`), so a `rejects` matcher would hide what the call did.
+ */
+async function outcome(call: Promise<unknown>): Promise<string> {
+	return call.then(
+		() => "resolved",
+		(error: unknown) =>
+			error instanceof Error ? error.message : String(error),
+	);
+}
+
 function textBlocks(content: unknown): string[] {
 	if (typeof content === "string") return [content];
 	if (!Array.isArray(content)) return [];
@@ -40,6 +57,15 @@ function textBlocks(content: unknown): string[] {
 			? [typed.text]
 			: [];
 	});
+}
+
+/** The system messages of one provider request, in order. */
+function systemMessages(
+	transcript: ReadonlyArray<{ role: string; [key: string]: unknown }>,
+): Array<Record<string, unknown>> {
+	return transcript.filter((message) => message.role === "system") as Array<
+		Record<string, unknown>
+	>;
 }
 
 describe("pi-session: the built extension in a real AgentSession (#4632)", () => {
@@ -160,15 +186,52 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 
 		// The row the copy's writer queued is on disk under the home the copy
 		// pinned — the sink a later case would read, settled when `dispose()`
-		// returns.
-		const latencyLog = path.join(process.env.PI_LENS_HOME ?? "", "latency.log");
-		await flushAllNdjsonWriters();
-		const rows = fs
-			.readFileSync(latencyLog, "utf8")
-			.split("\n")
-			.filter(Boolean)
-			.map((line) => JSON.parse(line) as { phase?: string });
-		expect(rows.some((row) => row.phase === "session_start_total")).toBe(true);
+		// returns. `latencyRows()` is the helper's own accessor: it flushes the
+		// process-global writer map (the copy's writers are in it) and reads the
+		// home the copy pinned, so no case has to spell either path.
+		const rows = (await handle.latencyRows()).rows;
+		expect(
+			rows.some(
+				(row) => (row as { phase?: string }).phase === "session_start_total",
+			),
+		).toBe(true);
+	});
+
+	it("reports a latency.log line it cannot parse instead of dropping it", async () => {
+		const handle = await startPiSession({
+			root: fixture.root,
+			cwd: path.join(fixture.root, "latency-read", "proj"),
+			responses: [fauxAssistantMessage(fauxText("ok"))],
+		});
+		await handle.prompt("hello");
+
+		// `shape`: a clean run of the copy's own writers skips nothing, and the
+		// rows are the ones it queued (a capability case for `latencyRows()`
+		// itself, AGENTS.md's "a new tier capability adds a case first").
+		const clean = await handle.latencyRows();
+		expect(clean.skipped).toBe(0);
+		expect(clean.rows.length).toBeGreaterThan(0);
+		expect(clean.rows.some((row) => row.phase === "session_start_total")).toBe(
+			true,
+		);
+
+		// Sourcery on #4699: a mangled row and a line cut mid-write were both
+		// DROPPED, so an exact-count or absence assertion could not see a corrupt
+		// record at all (`PROBE-A`/`PROBE-B2` in the review). The count is the
+		// record, and the good rows beside a bad line are never lost (the
+		// one-direction rule: a skip is not a licence to drop the fresh answer).
+		const file = path.join(fixture.root, "home", "latency.log");
+		const settled = fs.readFileSync(file);
+		try {
+			fs.appendFileSync(file, 'not a row\n{"phase":"memory_sam');
+			const read = await handle.latencyRows();
+			expect(read.skipped).toBe(2);
+			expect(read.rows.length).toBeGreaterThanOrEqual(clean.rows.length);
+		} finally {
+			// The file is shared by every case in this file: put the bytes back, so
+			// a corrupt line this case planted cannot red a neighbour.
+			fs.writeFileSync(file, settled);
+		}
 	});
 
 	it("refuses a manual compaction the fixture transcript is too small for", async () => {
@@ -202,6 +265,339 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 		expect(blocks[0]).toBe("hello");
 		expect(blocks[1]).toContain(INJECTION_DELIMITER);
 		expect(blocks[1]).toContain("pi-lens active");
+	});
+
+	it("replaces the session: the old conversation ends, and the next one starts empty under a new id", async () => {
+		const first = await startPiSession({
+			root: fixture.root,
+			cwd: path.join(fixture.root, "replace", "proj"),
+			responses: [fauxAssistantMessage(fauxText("first answer"))],
+		});
+		await first.prompt("first question");
+		const firstId = first.session.sessionManager.getSessionId();
+		const firstFile = first.sessionFile();
+		expect(getActiveSessionId()).toBe(firstId);
+
+		const second = await first.restart({ reason: "new" }, [
+			fauxAssistantMessage(fauxText("second answer")),
+		]);
+		const secondId = second.session.sessionManager.getSessionId();
+
+		// A replacement is a DIFFERENT conversation: pi minted a new session id,
+		// so nothing that keys on the session identity can cross it by accident.
+		expect(secondId).not.toBe(firstId);
+		// The old conversation's own state was released, and the new one binds its
+		// own provider script.
+		expect(second.requests).toHaveLength(0);
+		expect(second.errors).toEqual([]);
+
+		// The new conversation starts empty: pi restored nothing from the old
+		// session file, which is still on disk under the first id.
+		await second.prompt("second question");
+		expect(second.requests[0].map((message) => message.role)).toEqual([
+			"system",
+			"user",
+		]);
+		expect(fs.readFileSync(firstFile ?? "", "utf8")).toContain("first answer");
+	});
+
+	it("starts the replacement as a primary once the old session's shutdown named it", async () => {
+		// pi's own teardown runs the old session's `session_shutdown` handler
+		// with `targetSessionFile`, which leaves the primary slot pending for
+		// that successor; the next start claims it. Nothing process-wide is
+		// reset, because pi resets nothing (round 1 did, to make up for a
+		// shutdown event without `targetSessionFile`: #4692 H2). This is also
+		// the witness that the shutdown RAN: without it the old primary stays a
+		// live member, and pi-lens's #473 classifier declines the next start as
+		// a `concurrent-secondary`, so the active id stays the old one.
+		const first = await startPiSession({
+			root: fixture.root,
+			cwd: path.join(fixture.root, "replace-primary", "proj"),
+			responses: [fauxAssistantMessage(fauxText("one"))],
+		});
+		await first.prompt("hello");
+		const firstId = first.session.sessionManager.getSessionId();
+
+		const second = await first.restart({ reason: "new" }, [
+			fauxAssistantMessage(fauxText("two")),
+		]);
+		await second.prompt("hello again");
+		const secondId = second.session.sessionManager.getSessionId();
+
+		// The replacement took the primary slot the previous conversation left.
+		expect(secondId).not.toBe(firstId);
+		expect(getActiveSessionId()).toBe(secondId);
+		expect(normalizeFilePath(getActivePrimaryRoot() ?? "")).toBe(
+			normalizeFilePath(path.join(fixture.root, "replace-primary", "proj")),
+		);
+		expect(second.errors).toEqual([]);
+	});
+
+	it("refuses a replacement it cannot run through pi, and a restart of a handle already replaced", async () => {
+		const first = await startPiSession({
+			root: fixture.root,
+			cwd: path.join(fixture.root, "replace-refused", "proj"),
+			responses: [fauxAssistantMessage(fauxText("one"))],
+		});
+		await first.prompt("hello");
+		const firstId = first.session.sessionManager.getSessionId();
+
+		// A reason with no pi entry point here fails closed BEFORE pi tears the
+		// session down: no synthesised event, and the session stays live.
+		expect(
+			await outcome(first.restart({ reason: "quit" } as never, [])),
+		).toContain("no faithful replacement");
+		expect(getActiveSessionId()).toBe(firstId);
+
+		// A handle being replaced cannot be restarted beside it: the overlapping
+		// call would build a second replacement while the first is still in
+		// flight (Sourcery T3). Its own message names that state, so this
+		// assertion cannot be satisfied by the stale handle's refusal.
+		const pending = first.restart({ reason: "new" }, [
+			fauxAssistantMessage(fauxText("two")),
+		]);
+		expect(await outcome(first.restart({ reason: "new" }, []))).toContain(
+			"restart() while that session is being replaced",
+		);
+		// A replaced handle cannot be restarted again: that would build a third
+		// session beside the live replacement and take its identity (#4692 L2).
+		// Its message is the other state's, so the two guards are distinguishable.
+		const second = await pending;
+		const secondId = second.session.sessionManager.getSessionId();
+		expect(secondId).not.toBe(firstId);
+		expect(await outcome(first.restart({ reason: "new" }, []))).toContain(
+			"restart() on a session that already ended",
+		);
+		expect(getActiveSessionId()).toBe(secondId);
+	});
+
+	it("runs a second live session in one root as a concurrent secondary", async () => {
+		// The documented multi-session shape: a second `startPiSession` under
+		// another cwd of the SAME fixture root is a separate extension load, and
+		// the process-global guard classifies it `concurrent-secondary` while the
+		// first session stays the registered primary (#4632 slice 5 consumes
+		// this). Each handle is its own activation; what they share is the
+		// process-scoped session state.
+		const primary = await startPiSession({
+			root: fixture.root,
+			cwd: path.join(fixture.root, "second-live", "primary"),
+			responses: [fauxAssistantMessage(fauxText("ok"))],
+		});
+		const primaryId = primary.session.sessionManager.getSessionId();
+		const secondary = await startPiSession({
+			root: fixture.root,
+			cwd: path.join(fixture.root, "second-live", "secondary"),
+			responses: [fauxAssistantMessage(fauxText("ok"))],
+		});
+
+		expect(secondary.session.sessionManager.getSessionId()).not.toBe(primaryId);
+		expect(getActiveSessionId()).toBe(primaryId);
+		expect(getSecondarySessionCount()).toBe(1);
+
+		await secondary.dispose();
+		expect(getActiveSessionId()).toBe(primaryId);
+		expect(getSecondarySessionCount()).toBe(0);
+		await primary.dispose();
+		expect(getActiveSessionId()).toBeUndefined();
+	});
+
+	it("pins the startup mode the loaded copy reports", async () => {
+		// The third production mode has no warm-up timer and no deferred load,
+		// so it is the one mode whose config resolution runs ONLY through the
+		// ensure path (slice 5's minimal-mode cell depends on that). The row the
+		// loaded copy writes is the assertion: the env pin and the mode the
+		// extension observes are the same value.
+		const cwd = path.join(fixture.root, "minimal-mode", "proj");
+		const handle = await startPiSession({
+			root: fixture.root,
+			cwd,
+			startupMode: "minimal",
+			responses: [fauxAssistantMessage(fauxText("ok"))],
+		});
+		// `handle.latencyRows()` flushes this side's writer map, then reads through
+		// the shared `readNdjsonRows`; `skipped` is the record of a line the reader
+		// could not parse, and a count assertion built on a short read is a red.
+		const read = await handle.latencyRows();
+		expect(read.skipped, "a torn line would shorten this read").toBe(0);
+		// The row is written through `normalizeLoggedPath`, so the comparison uses
+		// the same fold; `cwd` carries native separators on win32.
+		const rows = read.rows.filter(
+			(row) =>
+				row.phase === "session_start_total" &&
+				row.filePath === normalizeFilePath(cwd),
+		);
+		expect(rows).toHaveLength(1);
+		const metadata = rows[0]?.metadata as { mode?: string } | undefined;
+		expect(metadata?.mode).toBe("minimal");
+		await handle.dispose();
+	});
+
+	it("owns every scanner report directory a session's background scans create", async () => {
+		// #4632 slice 7 round 2. A `session_start` scanner (jscpd, the ast-grep
+		// exports pass, ...) creates its report directory under
+		// `scannerReportParentDir()` and removes it in the scan's own `finally`.
+		// The scan is fire-and-forget, and `drainBackgroundWritesForTests()`
+		// (#4505) reaches only THIS process's copy of the resident clients: the
+		// loaded copy owns its own (header, point 1), so a worker that ends before
+		// the scan settles strands the directory. Measured on a host pre-push: two
+		// `pi-lens-jscpd-*` entries sat in the shared tmp root, attributed to the
+		// slice-7 ordering file. The seam's own contract (`scanner-temp-root.ts`)
+		// is that a harness owning a root points `PI_LENS_TEST_SCANNER_TMPDIR` at
+		// it, so an orphan lands inside the root the harness removes.
+		const handle = await startPiSession({
+			root: fixture.root,
+			cwd: path.join(fixture.root, "scanner-root", "proj"),
+			responses: [fauxAssistantMessage(fauxText("ok"))],
+		});
+		await handle.prompt("hello");
+
+		// The resolver the loaded copy's scanners call, read through this side's
+		// copy of it: the environment is shared, and the copy cleared VITEST
+		// (`PI_LENS_TEST_MODE=0`), so the scanner-only harness marker is what lets
+		// the override through at all.
+		const parent = scannerReportParentDir();
+		expect(parent, "the scanner report parent is the fixture's own").toBe(
+			path.join(fixture.root, "scanner-tmp"),
+		);
+		// Created with the pin, so `mkdtempSync` in the scan has a parent to
+		// write under even when the file's first scan starts immediately.
+		expect(fs.existsSync(parent)).toBe(true);
+	});
+
+	it("pins the tool-loadout declaration pi builds for a request", async () => {
+		// #4632 acceptance 4, recurrence acceptance 3: the dynamic-tooling cases
+		// moved by slice 6 read the active tool set, so the host's declaration of
+		// it is pinned here BEFORE any consumer uses it. `toolsAdded` /
+		// `toolsRemoved` are not fields of an ExtensionAPI event
+		// (`core/extensions/types.d.ts` carries only `getActiveTools` /
+		// `setActiveTools`): they are system messages pi's agent loop writes into
+		// the transcript, and a `context_with_system` handler is handed them for
+		// the request it answers (the `context` phase strips system messages).
+		// The case pins all three seams a consumer can reach: the host's own API,
+		// the model-visible request, and the handler-visible transcript.
+		const handle = await startPiSession({
+			root: fixture.root,
+			cwd: path.join(fixture.root, "tool-loadout", "proj"),
+			responses: [
+				fauxAssistantMessage([
+					fauxText("activating"),
+					fauxToolCall("pi_lens_activate_tools", {
+						tools: ["ast_grep_search"],
+					}),
+				]),
+				fauxAssistantMessage(fauxText("ready")),
+				fauxAssistantMessage(fauxText("ready")),
+			],
+		});
+		const runner = handle.session.extensionRunner;
+		const emitContext = vi.spyOn(runner, "emitContext");
+		try {
+			// The load-time set, before the activation below changes it.
+			const initialActive = runner.getActiveTools();
+			await handle.prompt("activate the search tool");
+
+			const active = runner.getActiveTools();
+			expect(active).toContain("ast_grep_search");
+			expect(active).not.toEqual(initialActive);
+			const head = handle.requests[0][0] as {
+				role: string;
+				toolsAdded?: Array<{
+					name: string;
+					description?: unknown;
+					parameters?: unknown;
+				}>;
+				toolsRemoved?: unknown;
+			};
+			// The first request declares the WHOLE active set, each tool with the
+			// schema the host sends (a name-only double cannot see a schema drift).
+			expect(head.role).toBe("system");
+			expect(head.toolsRemoved).toBeUndefined();
+			expect(head.toolsAdded?.map((tool) => tool.name)).toEqual(initialActive);
+			for (const tool of head.toolsAdded ?? []) {
+				expect(tool.description).toBeTypeOf("string");
+				expect(tool.parameters).toBeTypeOf("object");
+			}
+
+			// An activation in a later request declares a DELTA: the added tool only,
+			// no removal. A consumer that reads this must fold it onto the head.
+			const activationDelta = systemMessages(handle.requests[1]).at(-1) as {
+				toolsAdded?: Array<{ name: string }>;
+				toolsRemoved?: unknown;
+			};
+			expect(activationDelta.toolsAdded?.map((tool) => tool.name)).toEqual([
+				"ast_grep_search",
+			]);
+			expect(activationDelta.toolsRemoved).toBeUndefined();
+
+			// A shrink declares a removal in the same shape, and the replayed tool
+			// state equals what the host's own API answers.
+			handle.session.setActiveToolsByName(
+				runner.getActiveTools().filter((name) => name !== "symbol_search"),
+			);
+			await handle.prompt("second turn");
+			const shrinkDelta = systemMessages(handle.requests[2]).at(-1) as {
+				toolsAdded?: unknown;
+				toolsRemoved?: Array<{ name: string }>;
+			};
+			expect(shrinkDelta.toolsRemoved?.map((tool) => tool.name)).toEqual([
+				"symbol_search",
+			]);
+			expect(shrinkDelta.toolsAdded).toBeUndefined();
+			expect(replayToolNames(handle.requests[2])).toEqual(
+				runner.getActiveTools(),
+			);
+
+			// The seam a handler reads: the request's own delta is in the messages
+			// `emitContext` is handed, not only in the provider's copy.
+			const handed = emitContext.mock.calls.at(-1)?.[0] as Array<
+				Record<string, unknown>
+			>;
+			const handedLast = systemMessages(
+				handed as Array<{ role: string; [key: string]: unknown }>,
+			).at(-1) as {
+				toolsRemoved?: Array<{ name: string }>;
+			};
+			expect(handedLast?.toolsRemoved?.map((tool) => tool.name)).toEqual([
+				"symbol_search",
+			]);
+		} finally {
+			emitContext.mockRestore();
+		}
+	});
+
+	it("records what the copy asks the host's UI to show", async () => {
+		// #4632 acceptance 6: the capability lands BEFORE its consumers. A case that
+		// asserts what pi-lens asks the USER to see (the smells rollup's note, the
+		// LSP status line) cannot read a handler's return value: the message leaves
+		// through `ctx.ui.notify`, which is the host's own boundary. The helper
+		// binds a real `ExtensionUIContext` (`bindExtensions`), and `/lens-toggle`
+		// is the smallest production path that notifies — the same command the
+		// `real-ui-harness` row pins on the double.
+		const handle = await startPiSession({
+			root: fixture.root,
+			cwd: path.join(fixture.root, "ui-recorder", "proj"),
+			captureUi: true,
+			responses: [
+				fauxAssistantMessage(fauxText("ready")),
+				fauxAssistantMessage(fauxText("ready")),
+			],
+		});
+
+		expect(handle.notifications).toEqual([]);
+		await handle.prompt("hello");
+		expect(handle.notifications).toEqual([]);
+
+		// pi dispatches the extension command from the prompt text, so the command
+		// runs against pi's real ctx — the mode is `tui`, so `notifyUi` renders
+		// instead of logging the suppression.
+		await handle.prompt("/lens-toggle");
+		expect(handle.notifications).toEqual([
+			{
+				message:
+					"pi-lens disabled for this session. Run /lens-toggle again to resume.",
+				type: "warning",
+			},
+		]);
 	});
 
 	it("refuses a second fixture root in one file", async () => {

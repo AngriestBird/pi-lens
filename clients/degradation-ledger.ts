@@ -260,6 +260,12 @@ export type DegradationKind =
 	 */
 	| "data_dir_migrated"
 	/**
+	 * A late dead-code scan's baseline write threw (a full or read-only disk, a
+	 * cache path taken by a file). The scan's findings are still delivered; only
+	 * the on-disk baseline is lost. Subject is the client id (review of #4663).
+	 */
+	| "dead-code-baseline-write-failed"
+	/**
 	 * A dead-code scan that missed the turn_end budget finished in the
 	 * background and was NOT used (#4117): its session ended before it settled
 	 * (`session-ended`), or it failed (`scan-failed`; a timeout or kill also
@@ -289,12 +295,29 @@ export type DegradationKind =
 	 */
 	| "disk-change-append-failed"
 	/**
+	 * #4535 slice 2: a publish that a detector needed an LSP answer from reached
+	 * no LSP subscriber, so no held document was checked for stale bytes
+	 * (`readHeldDocumentsAnswer`, `clients/disk-change-subscribers.ts`). The
+	 * registry is seeded by `ensureDiskChangeSubscribers`, so its absence means a
+	 * second module copy owns the registry or the seed never ran. Subject: the
+	 * normalized project root; one row per root per session.
+	 */
+	| "disk-change-lsp-consumer-missing"
+	/**
 	 * #4535: one publish carried more paths than
 	 * `DISK_CHANGE_MAX_RECORDED_PATHS`, so the tail got no sequence and the
 	 * record is reported as unenumerable (clients/disk-changes.ts). Once per
 	 * root per session; the conservative direction for every subscriber.
 	 */
 	| "disk-change-paths-truncated"
+	/**
+	 * #4502 (#4612 round 3): one chunk of the recovered set's detached resync
+	 * rejected, so every chunk after it was never published and those paths
+	 * keep whatever view their servers hold (clients/runtime-tool-result.ts).
+	 * The recovery loop records it once with the chunk ordinal and the number
+	 * of paths it dropped. Subject: the normalized root; counted.
+	 */
+	| "disk-change-recovered-drift-failed"
 	/**
 	 * #4535: one disk-change subscriber threw while a publish delivered to it
 	 * (clients/disk-changes.ts). The publish continues to the next subscriber;
@@ -673,6 +696,21 @@ export type DegradationKind =
 	| "lsp-breaker"
 	| "lsp-capability-skip"
 	/**
+	 * #4532: one bash `tool_result` found more live primary client roots outside
+	 * the session root than `CLIENT_ROOT_LOOK_CAP`, so the install look only ran
+	 * at the first few (clients/runtime-tool-result.ts). An install in the rest
+	 * reaches no server until a tool call names a file under that root. Subject is
+	 * `cap`; once per session, because the population is the process's, not one
+	 * command's.
+	 */
+	| "lsp-client-root-look-capped"
+	/**
+	 * #4532: the install look at a live client root threw, so nothing is known
+	 * about that root's install and the absence of a publish is not evidence of
+	 * none. Subject is the root; once per root per session.
+	 */
+	| "lsp-client-root-look-failed"
+	/**
 	 * The napi fallback ADMITTED a file — its extension is in the in-process
 	 * language matrix (`clients/dispatch/runners/ast-grep-napi.ts`) — and the
 	 * addon that actually loaded then exposed no grammar for it, so every rule
@@ -796,6 +834,16 @@ export type DegradationKind =
 	 * `incrementDegradationCount` keeps one bounded entry per file.
 	 */
 	| "lsp-edit-stale-content"
+	/**
+	 * #4532: a TypeScript diagnostic was demoted from blocking to warning
+	 * because the file's root resolves no `node_modules`, so its ambient
+	 * declarations (`node:*` module types, the `NodeJS` namespace, `node`'s
+	 * globals) are absent. `clients/lsp/environment-gap.ts` produces it; the
+	 * subject is the admitted TypeScript code (`2307`, `2503`, `2304`), which is
+	 * also the admission key, so the count carries repeats and the ledger holds
+	 * at most three subjects per session. A refusal never records here.
+	 */
+	| "lsp-environment-gap-demoted"
 	/**
 	 * #4320: this process cannot tell when a path was born (the filesystem
 	 * reports no birth time, or Node reports ctime as it without statx), so a
@@ -1476,6 +1524,14 @@ export type DegradationKind =
 	 */
 	| "safe-spawn-signal-reraise-unsupported"
 	/**
+	 * #4502 (#4612 round 3): more working-tree paths were dirty than
+	 * `SAME_HEAD_DIRTY_SET_CAP` when a bash call started
+	 * (clients/opaque-mutation-scan.ts), so a same-HEAD discard that reverts
+	 * one of the rest is not detected for that call. Subject: the normalized
+	 * root; counted, because the cap is per call.
+	 */
+	| "same-head-discard-set-capped"
+	/**
 	 * A project scanner (vulture, jscpd) was started over a root that holds a
 	 * linked worktree it could not be told to leave out (#4117): the project's
 	 * own scanner config could not be read, so passing the exclusion would have
@@ -1489,6 +1545,14 @@ export type DegradationKind =
 	/** A self-drift baseline could not be verified within its available evidence. */
 	| "self-drift-hash-budget-exhausted"
 	| "self-drift-unverifiable"
+	/**
+	 * #4704: an activation's live session was dropped from the process-wide
+	 * membership because pi invalidated its context with no `session_shutdown`
+	 * (`AgentSession.dispose()`, a subagent runner's teardown). It no longer
+	 * holds the shared teardown, and its own end-of-session work never ran.
+	 * Subject `no-shutdown`; once per session.
+	 */
+	| "session-member-disposed"
 	/**
 	 * #3819 r2: a demoted `/fork` or `/reload` start (a row-17 start held the
 	 * primary registration) discarded the hand-off slot left for it, so the

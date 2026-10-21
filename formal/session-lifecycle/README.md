@@ -1137,3 +1137,45 @@ live member remains); `= TRUE` is the pre-fix reading, and
 `Mut4554r6UnmatchedLeaveLast` registers its violation of `NoEarlyTeardown`.
 The round-5 handoff save already keys `saved` by the departing context, which
 is the as-built identity Greptile F2 restored in `index.ts`.
+
+#4704 adds the topology pi 1.3.0 actually produces for an in-process
+subagent: pi runs the factory once per session load, so M's subagent T is
+its own activation C, a declined start that admits nothing. Two constants:
+
+- `ProcessWideLast` (as-built `TRUE`): "last" is read across every
+  activation, and only the process's last live leave tears the shared infra
+  down. `= FALSE` is the pre-fix reading, and
+  `Mut4704ActivationLast` registers its `NoEarlyTeardown` violation: M's
+  leave finds A empty and tears the shared infra down while T is live.
+- `StaleMemberHolds` (as-built `FALSE`): `DisposeT` is T's runner calling
+  `AgentSession.dispose()`, which invalidates T and emits no shutdown, so T
+  never leaves. A member pi invalidated does not count as live.
+  `Mut4704StaleSiblingHolds` sets it `TRUE` and violates `NoMissedTeardown`:
+  M's leave after T's disposal keeps the registration with nothing live.
+
+`NoStrandedOwner` now reads "a held registration implies a truly live
+session", with one accepted exception: every recorded member was disposed
+without a shutdown, so no pi-lens callback can run. `NoForeignTeardown` now
+reads "no leave releases a registration whose own session is still live".
+
+Review F1 on #4708 splits the two facts round 1 released at one boundary.
+`StartR(a, r)` now picks R's root: the registered primary's (`same`) or
+another (`other`, a cross-root `/resume`). It declines R as the classifier
+does, when a registration is still held and the roots differ (#2129). The
+`declinedSuccessor` ghost flags a decline only once M really left, and
+`NoDeclinedSuccessor` forbids it. Two constants:
+
+- `SplitRelease` (as-built `TRUE`): the registration is per primary, so the
+  holder's own leave releases it, whatever else is live. The process's last
+  live leave tears the infra down and releases a registration still held
+  then. `= FALSE` is round 1, one boundary for both, and
+  `Mut4704RegistrationHeld` registers its `NoDeclinedSuccessor` violation:
+  M leaves while T lives, then R starts in another root and is declined.
+- `StartKeepsLiveFleet` (as-built `TRUE`): a full start keeps the shared LSP
+  fleet while another session is truly live (`keepSharedLsp`).
+  `Mut4704StartResetsFleet` sets it `FALSE` and violates `NoEarlyTeardown`:
+  R's start resets the fleet that S and T still drive.
+
+The model has no disposed holder: only T can be disposed, and T never holds
+the registration. The last leave's release of a held registration whose
+holder pi disposed is pinned by the tier-2 witness instead.

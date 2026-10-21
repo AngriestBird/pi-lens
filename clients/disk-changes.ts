@@ -152,6 +152,14 @@ export interface DiskChangePublishResult {
 	change: DiskChange;
 	/** Each subscriber's own answer, by consumer id. Opaque to the publisher. */
 	results: ReadonlyMap<string, unknown>;
+	/**
+	 * Consumer ids whose handler threw. Their absence from `results` means the
+	 * same thing as an unregistered consumer, and the two are opposite facts: a
+	 * caller that needed an answer must tell "never asked" from "asked and
+	 * failed" (review round 2, F3/F7). The throw itself is recorded once per
+	 * consumer per root per session as `disk-change-subscriber-failed`.
+	 */
+	failedSubscribers: ReadonlySet<string>;
 }
 
 /**
@@ -160,8 +168,29 @@ export interface DiskChangePublishResult {
  * unenumerable with one bounded record: the conservative direction for every
  * subscriber, never a false clean. The cap counts the detector's own spellings
  * ({@link recordedPopulation}), so it also bounds the normalization work.
+ *
+ * A detector that can name a longer population must PUBLISH it in chunks of
+ * this size ({@link publishDiskChangeChunked}) rather than accept the
+ * truncation: `"unknown"` is the right value for a change nobody can
+ * enumerate, and the wrong value for one the detector already listed. A
+ * delivered consumer reads `"unknown"` as the whole held set, so an over-cap
+ * listed publish spends its capped delivery outside the change it named
+ * (review round 3, HIGH: 65 changed paths, `changedSent 0/65`,
+ * `unrelatedSent 64/135`).
  */
 export const DISK_CHANGE_MAX_RECORDED_PATHS = 64;
+
+/**
+ * The chunkable publish input: a listed (or unlistable) population and no typed
+ * subset. `pathChanges` describes ONE record whole (the out-of-band look's
+ * watched-files events), so a caller that types its paths keeps the single
+ * {@link publishDiskChange} form instead of splitting the typing across
+ * records.
+ */
+export type ChunkableDiskChangeInput = Omit<
+	DiskChangeInput,
+	"paths" | "pathChanges"
+> & { paths: readonly string[] | "unknown" };
 
 const REGISTRY_FAMILY = "disk-changes.subscribers";
 const REGISTRY_VERSION = 1;
@@ -223,10 +252,19 @@ export async function publishDiskChange(
 		appendFailureHandler(root, onAppendError),
 	);
 	if (truncated) {
+		// The wording names what actually happened to each half: the first 64 are
+		// NAMED to subscribers, the rest are reported as unenumerable. A publish
+		// made without a runtime allocates no sequence for any of them, so the
+		// record says so rather than claiming a sequence that never existed
+		// (review round 2, F4).
 		recordDegradationOnce({
 			kind: "disk-change-paths-truncated",
 			subject: root,
-			reason: `one publish carried more than ${DISK_CHANGE_MAX_RECORDED_PATHS} paths; the first ${DISK_CHANGE_MAX_RECORDED_PATHS} got a sequence and the rest are reported as unenumerable`,
+			reason: `one publish carried more than ${DISK_CHANGE_MAX_RECORDED_PATHS} paths; the first ${DISK_CHANGE_MAX_RECORDED_PATHS} are named and the rest are reported as unenumerable${
+				seq === 0
+					? " (this publish allocated no sequence: it ran with no runtime)"
+					: ""
+			}`,
 		});
 	}
 	const unknown = input.paths === "unknown" || truncated;
@@ -244,7 +282,7 @@ export async function publishDiskChange(
 		sessionScopeId: runtime?.sessionGeneration ?? 0,
 	};
 	const started = Date.now();
-	const results = await fanOut(change);
+	const { results, failed } = await fanOut(change);
 	logLatency({
 		type: "phase",
 		phase: "disk_change_published",
@@ -262,7 +300,55 @@ export async function publishDiskChange(
 			subscribers: [...subscribers().keys()].join(",").slice(0, 200),
 		},
 	});
-	return { change, results };
+	return { change, results, failedSubscribers: failed };
+}
+
+/**
+ * Publish a detector's listed population in {@link DISK_CHANGE_MAX_RECORDED_PATHS}
+ * chunks, one publish at a time, and return every publish in population order.
+ *
+ * This is the shape every detector with a population it already listed uses
+ * (a HEAD move's delta, the bash-write population, the recovered set): each
+ * chunk stays inside the cap, so no publish is reported as `"unknown"`, and a
+ * consumer's awaited phase is drawn from the change instead of from every
+ * document the root happens to hold. An `"unknown"` population has nothing to
+ * split and publishes once.
+ *
+ * `onChunk` is awaited after each chunk's fan-out and before the next publishes,
+ * so a caller that must await a chunk's own answer (the recovered set's drift
+ * pass) keeps one chunk in flight at a time. It receives the chunk's position
+ * in the chain, because the ordinal is the caller's evidence when a chunk
+ * fails (`publishRecoveredDrift` records it and goes on).
+ */
+export async function publishDiskChangeChunked(
+	input: ChunkableDiskChangeInput,
+	runtime?: DiskChangeRuntime,
+	onAppendError?: (err: unknown) => void,
+	onChunk?: (
+		published: DiskChangePublishResult,
+		position: { index: number; total: number },
+	) => Promise<void> | void,
+): Promise<DiskChangePublishResult[]> {
+	if (input.paths === "unknown")
+		return [await publishDiskChange(input, runtime, onAppendError)];
+	const chunkSize = DISK_CHANGE_MAX_RECORDED_PATHS;
+	// At least one publish for an empty population: a detector that saw the
+	// event but no path still records it, and every consumer still hears it.
+	const chunks = Math.max(1, Math.ceil(input.paths.length / chunkSize));
+	const published: DiskChangePublishResult[] = [];
+	for (let index = 0; index < chunks; index += 1) {
+		const one = await publishDiskChange(
+			{
+				...input,
+				paths: input.paths.slice(index * chunkSize, (index + 1) * chunkSize),
+			},
+			runtime,
+			onAppendError,
+		);
+		published.push(one);
+		await onChunk?.(one, { index, total: chunks });
+	}
+	return published;
 }
 
 /**
@@ -347,8 +433,11 @@ function allocateSequence(
 }
 
 /** Step 2 (I5): every registered consumer, isolated one from another. */
-async function fanOut(change: DiskChange): Promise<Map<string, unknown>> {
+async function fanOut(
+	change: DiskChange,
+): Promise<{ results: Map<string, unknown>; failed: Set<string> }> {
 	const results = new Map<string, unknown>();
+	const failed = new Set<string>();
 	// A snapshot, not a live iteration: a subscriber that unsubscribes or
 	// registers while this publish runs must not change who this one reaches.
 	const registered = Array.from(subscribers().values());
@@ -356,6 +445,7 @@ async function fanOut(change: DiskChange): Promise<Map<string, unknown>> {
 		try {
 			results.set(subscriber.id, await subscriber.handler(change));
 		} catch (cause) {
+			failed.add(subscriber.id);
 			recordDegradationOnce({
 				kind: "disk-change-subscriber-failed",
 				subject: `${subscriber.id}:${change.root}`,
@@ -363,5 +453,5 @@ async function fanOut(change: DiskChange): Promise<Map<string, unknown>> {
 			});
 		}
 	}
-	return results;
+	return { results, failed };
 }

@@ -114,6 +114,7 @@
 		"scripts/analyze-pi-lens-logs.mjs",
 		"scripts/install-selftest.mjs",
 		"scripts/lib/host-provided-deps.mjs",
+		"scripts/lib/is-main-module.mjs",
 		"scripts/lib/latency-log-phases.mjs",
 		"scripts/lib/skills-predicate.mjs",
 		"scripts/lib/web-tree-sitter-dir.mjs",

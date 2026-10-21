@@ -13,6 +13,7 @@ import {
 	recordDegradationOnce,
 	resetDegradationLedger,
 } from "./degradation-ledger.js";
+import { resetDeferredDispositions } from "./diagnostic-dispositions.js";
 import { getDiagnosticTracker } from "./diagnostic-tracker.js";
 import { resetPsScriptAnalyzerAvailability } from "./dispatch/runners/psscriptanalyzer.js";
 import { resetInstallRetryLatches } from "./dispatch/runners/utils/availability-policy.js";
@@ -197,6 +198,12 @@ interface SessionStartDeps {
 	 *  gap's marker and the start's match against the successor it named. */
 	sessionStartBasis?: ClassificationBasis;
 	sessionStartGapMs?: number;
+	/**
+	 * #4704: another live session in the process still drives the shared LSP
+	 * fleet (an in-process subagent outliving the primary this start
+	 * replaces), so the start keeps the fleet instead of resetting it.
+	 */
+	keepSharedLsp?: boolean;
 	sessionStartLineageMatch?: SessionStartGuardDecision["lineageMatch"];
 	runtime: RuntimeCoordinator;
 	cacheManager: CacheManager;
@@ -2023,6 +2030,12 @@ export function resetSessionScopedState(
 	primePersistedMutationAttribution(cwd);
 	// #2026: pending auxiliary baselines are unreachable after generation bump.
 	resetPendingAuxiliaryCoverage();
+	// #4701 F1 (shape 17): `defer` is session-ephemeral by design (#690), so a
+	// new session sees every deferred finding again. Until this line the only
+	// reset was the test-only seam, so one `defer` stayed suppressed — and its
+	// project stayed "marked" to the read-only turn's cost guard — for the life
+	// of the PROCESS.
+	resetDeferredDispositions();
 	// #817/#1199: Windows command resolution is cached per (command, canonical
 	// effective child PATH/PATHEXT/cwd/per-drive provenance); drop it each
 	// session so environment changes (e.g.
@@ -2663,7 +2676,12 @@ export async function handleSessionStart(
 		filePath: ctxCwd ?? process.cwd(),
 		startedAt: new Date(handlerEnteredAt).toISOString(),
 		durationMs: Date.now() - handlerEnteredAt,
-		metadata: { mode: startupMode, reason: deps.sessionReason },
+		metadata: {
+			mode: startupMode,
+			reason: deps.sessionReason,
+			// #4704: true when another live session keeps the shared LSP fleet.
+			sharedLspKept: deps.keepSharedLsp === true,
+		},
 	});
 
 	// #1019: log cleanup is deferred OFF the interactive critical path. It does
@@ -2698,7 +2716,9 @@ export async function handleSessionStart(
 	});
 	dbg(`session_start startup mode: ${startupMode}`);
 
-	if (!getFlag("no-lsp")) {
+	if (deps.keepSharedLsp) {
+		dbg("session_start: LSP service kept for a live in-process session");
+	} else if (!getFlag("no-lsp")) {
 		resetLSPService({ fast: true, reason: "session_start" });
 		dbg("session_start: LSP service reset");
 		dbg(

@@ -106,6 +106,16 @@ export interface PendingOpaqueBaseline {
 	strategy: "git" | "stat-diff";
 	stats?: FileStatsSnapshot;
 	statsUnknownReason?: OpaqueUnknownReason;
+	/**
+	 * #4502: the working-tree paths that were dirty when the command started,
+	 * so a same-HEAD discard (`git stash`, `git checkout .`, `git restore`) can
+	 * be seen at all: those commands move no HEAD and leave no dirty entry, and
+	 * both of the head-move detector's signals are therefore silent while an
+	 * open document keeps bytes the disk no longer has. `undefined` when git
+	 * could not answer: an empty array would read as "the tree was clean",
+	 * which is a different fact.
+	 */
+	dirtyPaths?: readonly string[];
 }
 
 /**
@@ -464,6 +474,7 @@ export function resetOpaqueMutationState(): void {
 	gitToplevelMemo.clear();
 	headRecords.clear();
 	headLooks.clear();
+	pendingHeadDiscards.clear();
 }
 
 /**
@@ -483,6 +494,55 @@ export function headRecordKey(
 	sessionId: string | undefined,
 ): string {
 	return `${slot}|${sessionId ?? ""}`;
+}
+
+/**
+ * The same-HEAD discard paths a look of `key` still owes a publish (#4612 r4).
+ * The bash `tool_result` reads its own discard set from its own baseline, then
+ * hands it to a look; a look that arrives while another of its key is in
+ * flight JOINS it ({@link serializeHeadLook} coalescing), so its own closure
+ * never runs and its set would be dropped on the floor. Each caller adds its
+ * paths here in the same synchronous step as its join, and a pass drains its
+ * key first, before any await: the running pass has either not drained yet
+ * (it takes the paths) or has (the join earned a trailing pass, which takes
+ * them).
+ *
+ * Keyed by the look key ({@link headRecordKey}, which carries the session id
+ * and the generation, so a late pass never drains another session's set),
+ * bounded by {@link HEAD_RECORD_CAP} keys, each holding only what arrived
+ * during one pass, and cleared with the rest of this module at the session
+ * boundary.
+ */
+const pendingHeadDiscards = new BoundedFifoMap<string, Set<string>>(
+	HEAD_RECORD_CAP,
+);
+
+/** Hand this call's discard paths to the look of `key` that will publish them. */
+export function addHeadDiscards(
+	key: string,
+	paths: readonly string[] | undefined,
+): void {
+	if (!paths || paths.length === 0) return;
+	const pending = pendingHeadDiscards.get(key) ?? new Set<string>();
+	for (const filePath of paths) pending.add(filePath);
+	pendingHeadDiscards.set(key, pending);
+}
+
+/** Every discard path owed to `key`, in arrival order, and forget them. */
+export function takeHeadDiscards(key: string): string[] {
+	const pending = pendingHeadDiscards.get(key);
+	if (!pending) return [];
+	pendingHeadDiscards.delete(key);
+	return [...pending];
+}
+
+/**
+ * Test and diagnostic probe (#4612 r4): does a look of `key` in flight owe a
+ * trailing pass? A joining caller's own closure never runs, so a join is
+ * otherwise unobservable before the flight settles.
+ */
+export function headLookPendingRerun(key: string): boolean {
+	return headLooks.hasPendingRerun(key);
 }
 
 /**
@@ -544,18 +604,11 @@ export async function readGitHead(root: string): Promise<string | undefined> {
  * the checkout `root` is in, in `root`'s own spelling (git's own toplevel is
  * a real path). Read from files; `root` itself when that cannot answer.
  *
- * The file walk stops at the first `.git` it finds, but git skips a `.git`
- * directory with no HEAD and keeps looking. Such a top is not git's, so it
- * answers `root` (a stray `/tmp/.git` once sent every path to `/tmp`).
+ * The walk skips a `.git` directory with no HEAD as git does (a stray
+ * `/tmp/.git` once sent every path to `/tmp`).
  */
 function gitPathBase(root: string): string {
-	const top = resolveGitCheckout(root)?.spelledRoot;
-	if (!top) return root;
-	const dotGit = path.join(top, ".git");
-	// A `.git` file (a linked worktree) names a git dir the walk checked.
-	const linked =
-		fs.statSync(dotGit, { throwIfNoEntry: false })?.isFile() === true;
-	return linked || fs.existsSync(path.join(dotGit, "HEAD")) ? top : root;
+	return resolveGitCheckout(root)?.spelledRoot ?? root;
 }
 
 /**
@@ -671,6 +724,16 @@ export interface GitRecoveryOptions {
 interface GitStatusEntry {
 	status: string;
 	absPath: string;
+	/**
+	 * A rename's or copy's SOURCE side (#4612 r4). Porcelain v1 `-z` gives such
+	 * an entry as two NUL-separated tokens, `XY <new>` then `<old>`, so the
+	 * destination alone is one side of one entry. Recovery keeps using
+	 * `absPath` only (the bytes on disk are the destination's), while the
+	 * same-HEAD discard baseline needs both sides: `git reset --hard HEAD`
+	 * restores the source and removes the destination, which leaves the
+	 * destination absent from the tree and the source never named.
+	 */
+	renamedFrom?: string;
 }
 
 const UNMERGED_PORCELAIN_STATUSES = new Set([
@@ -754,20 +817,27 @@ function isStructurallyValidStatus(status: string): boolean {
 }
 
 /**
- * Files dirty in the working tree whose mtime falls inside
- * [startedAt - tolerance, now]. Porcelain -z parsing handles renames
- * (the NEW path is reported; the old path token is skipped before filtering).
+ * One `git status --porcelain -z` read, parsed into typed entries, or the
+ * reason it could not be trusted. Extracted so the two consumers of the same
+ * bytes share one parser: {@link recoverOpaqueChangesViaGit} filters these
+ * entries through its mtime window, and {@link captureGitDirtyPaths} /
+ * {@link readSameHeadDiscards} compare the set before and after a command
+ * (#4502). A second hand-rolled porcelain parser is a second chance to disagree
+ * about a rename, a `!!` entry or an untrusted pair.
  */
-export async function recoverOpaqueChangesViaGit(
-	root: string,
-	startedAt: number,
-	options: GitRecoveryOptions = {},
-): Promise<GitRecoveryOutcome> {
+async function readGitStatusEntries({
+	cwd,
+}: {
+	cwd: string;
+}): Promise<
+	| { verdict: "ok"; entries: GitStatusEntry[]; unknownStatusCount: number }
+	| { verdict: "unknown"; unknownReason: OpaqueUnknownReason }
+> {
 	const result = await safeSpawnAsync(
 		"git",
 		["status", "--porcelain", "-z", "--untracked-files=all"],
 		{
-			cwd: root,
+			cwd,
 			timeout: 5000,
 			maxOutputBytes: MAX_GIT_STATUS_OUTPUT_BYTES,
 		},
@@ -782,74 +852,157 @@ export async function recoverOpaqueChangesViaGit(
 	// "git-failed" and this guard could never speak. `truncatedByOutputCap`
 	// leaves a timed-out or aborted read to the git-failed branch below, which
 	// is the honest answer for those.
-	if (truncatedByOutputCap(result)) {
-		return {
-			verdict: "unknown",
-			paths: [],
-			unknownReason: "git-status-parse-failed",
-			scannedCount: 0,
-		};
-	}
-	if (result.error || (result.status !== 0 && result.status !== null)) {
-		return {
-			verdict: "unknown",
-			paths: [],
-			unknownReason: "git-failed",
-			scannedCount: 0,
-		};
-	}
+	if (truncatedByOutputCap(result))
+		return { verdict: "unknown", unknownReason: "git-status-parse-failed" };
+	if (result.error || (result.status !== 0 && result.status !== null))
+		return { verdict: "unknown", unknownReason: "git-failed" };
 	const raw = result.stdout ?? "";
-	if (raw && !raw.endsWith("\0")) {
-		return {
-			verdict: "unknown",
-			paths: [],
-			unknownReason: "git-status-parse-failed",
-			scannedCount: 0,
-		};
-	}
-	// Porcelain paths are relative to the top of the checkout, not to `root`
+	if (raw && !raw.endsWith("\0"))
+		return { verdict: "unknown", unknownReason: "git-status-parse-failed" };
+	// Porcelain paths are relative to the top of the checkout, not to `cwd`
 	// (#4493 residual 3): from a subdirectory each one pointed below itself.
-	const base = gitPathBase(root);
+	const base = gitPathBase(cwd);
 	const entries: GitStatusEntry[] = [];
 	let unknownStatusCount = 0;
-	let skipNext = false; // rename's OLD path follows its NEW path
+	// A rename's or copy's OLD path follows its NEW path as the next token; this
+	// is the entry still waiting for it.
+	let awaitingSource: GitStatusEntry | undefined;
 	for (const token of raw.split("\0")) {
 		if (!token) continue;
-		if (skipNext) {
-			skipNext = false;
+		if (awaitingSource) {
+			awaitingSource.renamedFrom = path.resolve(base, token);
+			awaitingSource = undefined;
 			continue;
 		}
 		// Each entry: two status chars, one space, then the path.
-		if (token.length < 4 || token[2] !== " ") {
-			return {
-				verdict: "unknown",
-				paths: [],
-				unknownReason: "git-status-parse-failed",
-				scannedCount: 0,
-			};
-		}
+		if (token.length < 4 || token[2] !== " ")
+			return { verdict: "unknown", unknownReason: "git-status-parse-failed" };
 		const status = token.slice(0, 2);
 		const relPath = token.slice(3);
-		if (!isStructurallyValidStatus(status) || !relPath) {
-			return {
-				verdict: "unknown",
-				paths: [],
-				unknownReason: "git-status-parse-failed",
-				scannedCount: 0,
-			};
-		}
+		if (!isStructurallyValidStatus(status) || !relPath)
+			return { verdict: "unknown", unknownReason: "git-status-parse-failed" };
 		if (!isKnownPorcelainStatus(status)) unknownStatusCount += 1;
-		if (status.includes("R") || status.includes("C")) skipNext = true;
-		entries.push({ status, absPath: path.resolve(base, relPath) });
+		const entry: GitStatusEntry = {
+			status,
+			absPath: path.resolve(base, relPath),
+		};
+		entries.push(entry);
+		if (status.includes("R") || status.includes("C")) awaitingSource = entry;
 	}
-	if (skipNext) {
+	if (awaitingSource)
+		return { verdict: "unknown", unknownReason: "git-status-parse-failed" };
+	return { verdict: "ok", entries, unknownStatusCount };
+}
+
+/**
+ * The cap on the dirty set one bash call records before it runs (#4502). A
+ * discard restores at most the working tree, and an open document set is far
+ * smaller than a checkout, so the bound costs nothing real while keeping the
+ * pending baseline's memory and the post-command comparison bounded.
+ */
+export const SAME_HEAD_DIRTY_SET_CAP = 512;
+
+/**
+ * The working-tree paths that are dirty NOW, as map keys, or `undefined` when
+ * git could not answer. Recorded before a bash command so a same-HEAD discard
+ * (`git stash`, `git checkout .`, `git restore`) can be seen at all: those
+ * commands leave `git status` clean and HEAD unmoved, so the delta and the
+ * dirty set AFTER the command both name nothing.
+ *
+ * Bounded twice: the porcelain read by `MAX_GIT_STATUS_OUTPUT_BYTES`, and the
+ * recorded set by {@link SAME_HEAD_DIRTY_SET_CAP}. A cut set keeps its first
+ * `SAME_HEAD_DIRTY_SET_CAP` entries and reports itself, never silently.
+ */
+export async function captureGitDirtyPaths(
+	root: string,
+): Promise<string[] | undefined> {
+	const read = await readGitStatusEntries({ cwd: root });
+	if (read.verdict === "unknown") return undefined;
+	// BOTH sides of a rename or copy (#4612 r4). `git reset --hard HEAD`
+	// restores the source and removes the destination without moving HEAD, so a
+	// baseline that recorded only the destination names a path the discard
+	// removed and never the one it rewrote: the restored source kept its
+	// pre-discard server copy. Recovery keeps using the destination alone
+	// ({@link recoverOpaqueChangesViaGit}) — the bytes on disk are its subject.
+	const named: string[] = [];
+	for (const entry of read.entries) {
+		// `!!` is an ignored path, not a change a discard could revert; every
+		// other status names bytes a discard can rewrite or remove.
+		if (entry.status === "!!") continue;
+		named.push(entry.absPath);
+		if (entry.renamedFrom !== undefined) named.push(entry.renamedFrom);
+	}
+	const dirty: string[] = [];
+	const seen = new Set<string>();
+	for (const side of named) {
+		const key = normalizeMapKey(side);
+		if (seen.has(key)) continue;
+		if (dirty.length === SAME_HEAD_DIRTY_SET_CAP) {
+			incrementDegradationCount({
+				kind: "same-head-discard-set-capped",
+				subject: normalizeMapKey(path.resolve(root)),
+				reason: `more than ${SAME_HEAD_DIRTY_SET_CAP} working-tree paths were dirty before a bash call; a same-HEAD discard that reverts one of the rest is not detected for this call`,
+			});
+			break;
+		}
+		seen.add(key);
+		dirty.push(key);
+	}
+	return dirty;
+}
+
+/**
+ * The paths that were dirty before a command and are clean after it (#4502):
+ * the files a same-HEAD discard reverted. `undefined` when git could not answer
+ * now, so the caller resyncs nothing rather than guessing.
+ *
+ * A path that is merely absent from the new status is not a discard — a
+ * rejected command, an unreadable subtree — but the read itself proves the
+ * file is clean, and a clean file whose MTime moved is exactly what the drift
+ * pass can still check: the publish this feeds compares the server's bytes with
+ * the disk's, so a path whose bytes did not change costs one read and sends
+ * nothing.
+ */
+export async function readSameHeadDiscards(
+	root: string,
+	dirtyBefore: readonly string[],
+): Promise<string[] | undefined> {
+	if (dirtyBefore.length === 0) return [];
+	const read = await readGitStatusEntries({ cwd: root });
+	if (read.verdict === "unknown") return undefined;
+	// Both sides of a rename or copy count as still-dirty (#4612 r4): a baseline
+	// that named a rename's source would otherwise read it as discarded on every
+	// call of a rename that is still staged.
+	const dirtyNow = new Set<string>();
+	for (const entry of read.entries) {
+		dirtyNow.add(normalizeMapKey(entry.absPath));
+		if (entry.renamedFrom !== undefined)
+			dirtyNow.add(normalizeMapKey(entry.renamedFrom));
+	}
+	return dirtyBefore.filter((filePath) => !dirtyNow.has(filePath));
+}
+
+/**
+ * Files dirty in the working tree whose mtime falls inside
+ * [startedAt - tolerance, now]. Porcelain -z parsing handles renames: the NEW
+ * path is the one filtered, and the entry's source side (`renamedFrom`) is
+ * ignored here.
+ */
+export async function recoverOpaqueChangesViaGit(
+	root: string,
+	startedAt: number,
+	options: GitRecoveryOptions = {},
+): Promise<GitRecoveryOutcome> {
+	const read = await readGitStatusEntries({ cwd: root });
+	if (read.verdict === "unknown") {
 		return {
 			verdict: "unknown",
 			paths: [],
-			unknownReason: "git-status-parse-failed",
+			unknownReason: read.unknownReason,
 			scannedCount: 0,
 		};
 	}
+	const { entries, unknownStatusCount } = read;
 
 	const hasUnmerged = entries.some((entry) => isUnmergedStatus(entry.status));
 	const floorMs = startedAt - OPAQUE_MTIME_TOLERANCE_MS;
