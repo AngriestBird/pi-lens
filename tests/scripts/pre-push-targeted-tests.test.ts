@@ -394,6 +394,48 @@ describe("resolveDiffRange — pre-push ref population (#3661)", () => {
 		expect(record?.outcome).not.toBe("tests-complete");
 	});
 
+	// Recurrence (#4726 verify F6): the tree was sampled only after the run, so a
+	// fix that was dirty when the push started and reverted during the run
+	// recorded a pass for the committed (failing) bytes.
+	it("never trusts a pass from a tree that was dirty when the run started (#4724)", () => {
+		const { git, commit, hook } = gitFixture();
+		write(
+			"tests/clients/first.test.ts",
+			[
+				"import { afterAll, expect, it } from 'vitest';",
+				"import { execFileSync } from 'node:child_process';",
+				"import { first } from '../../clients/first.ts';",
+				"it('first', () => { expect(first).toBe(true); });",
+				// The run itself cleans the tree: the pass read the dirty bytes.
+				"afterAll(() => { execFileSync('git', ['checkout', '--', 'clients/first.ts']); });",
+				"",
+			].join("\n"),
+		);
+		git(["add", "tests/clients/first.test.ts"]);
+		git(["commit", "--quiet", "-m", "self-cleaning test"]);
+		git([
+			"update-ref",
+			"refs/remotes/origin/master",
+			git(["rev-parse", "HEAD"]),
+		]);
+		const bad = commit("clients/first.ts", "export const first = false;\n");
+		const push = `refs/heads/main ${bad} refs/heads/main ${zero}\n`;
+		write("clients/first.ts", "export const first = true;\n");
+		const dirty = hook(push);
+		expect(dirty.status).toBe(0);
+		expect(dirty.stdout).toContain("1 passed");
+		expect(git(["status", "--porcelain", "--untracked-files=no"])).toBe("");
+		const record = readPrePushRecord(
+			path.join(fixtureDir as string, ".git"),
+			bad,
+		);
+		expect(record?.outcome).not.toBe("tests-complete");
+		expect(record?.treeBound).toBeUndefined();
+		const rePush = hook(push);
+		expect(rePush.stdout).not.toContain("already passed");
+		expect(rePush.status).toBe(1);
+	});
+
 	it("never trusts a pass for a pushed sha that is not the checked-out HEAD (#4724)", () => {
 		const { commit, hook } = sourceBoundFixture();
 		const bad = commit("clients/first.ts", "export const first = false;\n");

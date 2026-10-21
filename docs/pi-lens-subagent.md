@@ -204,7 +204,8 @@ head/base, timestamp, selected test files and their `changed`, `mirror`,
 counts, the Vitest exit code, and wall time. `base` is the ref the selection
 diffed. A `tests-complete` record carries `treeBound` only when the tests ran
 in a clean checkout of exactly that head (HEAD equal to it, no tracked
-edits); other heads keep their `tests-not-started` record. A re-push of a head
+edits before or after the run); other heads keep their previous record
+(`tests-not-started` after a pass, the run's own outcome after a failure). A re-push of a head
 whose `treeBound` record passed the same selection skips the build and tests,
 keeps the record and appends one `pre-push-skip` row to `pre-push.log` (#4724);
 any other re-push overwrites it. Writes prune records

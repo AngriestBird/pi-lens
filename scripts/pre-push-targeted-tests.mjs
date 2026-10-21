@@ -773,29 +773,46 @@ function appendPrePushLog(logPath, row) {
 	);
 }
 
-// The heads whose bytes the tests just ran against: the checked-out HEAD in a
-// tree with no tracked edits. Anything else fails closed to none.
-function testedHeads(heads) {
+// The checked-out HEAD and the tracked edits on top of it, or null when git
+// cannot say.
+function treeSnapshot() {
 	try {
 		const git = (args) =>
 			execFileSync("git", args, { encoding: "utf8" }).trim();
-		if (git(["status", "--porcelain", "--untracked-files=no"]) !== "")
-			return [];
-		const current = git(["rev-parse", "HEAD"]);
-		return heads.filter(({ head }) => head === current);
+		return {
+			head: git(["rev-parse", "HEAD"]),
+			dirty: git(["status", "--porcelain", "--untracked-files=no"]),
+		};
 	} catch {
-		return [];
+		return null;
 	}
 }
 
-function writeHeadRecords(heads, values) {
+// The heads whose bytes the tests ran against: the checked-out HEAD, with no
+// tracked edits both before the run (`before`) and after it, and the same HEAD
+// both times. A tree cleaned mid-run was not the tree the run read (#4726 F6).
+// Anything else fails closed to none.
+function testedHeads(heads, before) {
+	const after = treeSnapshot();
+	if (
+		!before ||
+		!after ||
+		before.dirty !== "" ||
+		after.dirty !== "" ||
+		before.head !== after.head
+	)
+		return [];
+	return heads.filter(({ head }) => head === after.head);
+}
+
+function writeHeadRecords(heads, values, before = null) {
 	if (heads.length === 0) return;
 	try {
 		const commonDir = gitCommonDir();
 		// A `tests-complete` outcome is written only for a head the tests ran
 		// against; the others keep their provisional `tests-not-started` record.
 		const passed = values.outcome === "tests-complete";
-		const bound = passed ? testedHeads(heads) : [];
+		const bound = passed ? testedHeads(heads, before) : [];
 		if (passed && bound.length < heads.length)
 			console.log(
 				"[pre-push] tests passed, but not as a clean checkout of every pushed head; those heads are not recorded as passed.",
@@ -1149,6 +1166,7 @@ export async function main() {
 	);
 	for (const test of selected) console.log(`  - ${test}`);
 
+	const before = treeSnapshot();
 	const result = await runTargetedTests(selected);
 	const { code, lockTimeout, error } = result;
 	const outcome = error
@@ -1158,15 +1176,19 @@ export async function main() {
 			: code === 0
 				? "tests-complete"
 				: "tests-failed";
-	writeHeadRecords(heads, {
-		selected: selectedRecords,
-		passed: result.passed,
-		failed: result.failed,
-		skipped: result.skipped,
-		vitestExitCode: code,
-		wallTimeMs: Math.round(result.wallTimeMs),
-		outcome,
-	});
+	writeHeadRecords(
+		heads,
+		{
+			selected: selectedRecords,
+			passed: result.passed,
+			failed: result.failed,
+			skipped: result.skipped,
+			vitestExitCode: code,
+			wallTimeMs: Math.round(result.wallTimeMs),
+			outcome,
+		},
+		before,
+	);
 	if (lockTimeout) {
 		const waitedMs = Number(lockTimeout[1]);
 		const holder = lockTimeout[2];
