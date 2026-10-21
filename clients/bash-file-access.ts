@@ -1544,12 +1544,12 @@ function directoryEffect(
 	if (SHELL_RESERVED_WORDS.has(verb)) return { kind: "construct" };
 	const operands = words.slice(first + 1);
 	if (verb === "cd" || verb === "pushd") {
-		// The directory moves only on the literal verb and one plain path
-		// operand (#4713 R7-1): `named` is then that operand. Every other form
-		// (a stack index or option, `~+1`, `~user`, `$D`, a glob, an escape the
-		// tokenizer resolves unlike bash, a prefix, a verb bash spells
-		// otherwise) falls back.
-		return literal[first] === true && operands.length === 1 && named
+		// The directory moves only on one plain path operand (#4713 R7-1):
+		// `named` is then that operand, and it is set only when bash runs `cd`
+		// (`"\c"d` runs `\cd`). Every other form (a stack index or option,
+		// `~+1`, `~user`, `$D`, a glob, an escape the tokenizer resolves unlike
+		// bash, a prefix) falls back.
+		return operands.length === 1 && named
 			? { kind: "move", target: named, push: verb === "pushd", named }
 			: { kind: "unknown", named };
 	}

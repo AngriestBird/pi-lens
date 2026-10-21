@@ -1652,6 +1652,12 @@ describe("scanShellWriteScopes — the command's effective directory (#2050)", (
 			fallback: "f.ts",
 			named: ["sub"],
 		},
+		{
+			row: "R96 a quoted ~+1 is a directory name (R8-3 tokenizer)",
+			command: "mkdir '~+1'; cd '~+1'; printf x > f.ts",
+			bash: "~+1/f.ts",
+			named: ["~+1"],
+		},
 	];
 
 	it.each(CWD_ROWS)(
