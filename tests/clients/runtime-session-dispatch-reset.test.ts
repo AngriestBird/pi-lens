@@ -16,7 +16,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleSessionStart } from "../../clients/runtime-session.js";
 import { safeSpawnAsync } from "../../clients/safe-spawn.js";
 import { removeTempDirSync, setupTestEnvironment } from "./test-utils.js";
-import { makeLspServiceDouble } from "../support/lsp-service-double.js";
+import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 
 vi.mock("../../clients/safe-spawn.js", () => ({
 	safeSpawn: vi.fn(() => ({ stdout: "", stderr: "", status: 1 })),
@@ -39,10 +39,6 @@ vi.mock("../../clients/lsp/config.js", () => ({
 	loadLSPConfig: vi.fn().mockResolvedValue({}),
 	initLSPConfig: vi.fn().mockResolvedValue(undefined),
 	getServerInitOverride: vi.fn().mockReturnValue(undefined),
-}));
-
-vi.mock("../../clients/lsp/capabilities.js", () => ({
-	getLSPService: vi.fn(() => makeLspServiceDouble()),
 }));
 
 function makeDefaultRuntime() {
@@ -113,7 +109,8 @@ function makeDeps(ctxCwd: string) {
 describe("dispatch availability suppression is reset at session start (#1266)", () => {
 	let tmpDir: string;
 
-	beforeEach(() => {
+	beforeEach(async () => {
+		await installLspServiceDouble();
 		vi.clearAllMocks();
 		// Recurrence (#4561, shuffle seed 424): `clearAllMocks()` clears calls,
 		// not implementations, so a case's stubbed probe answers (and its send

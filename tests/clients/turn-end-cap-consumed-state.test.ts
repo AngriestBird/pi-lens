@@ -19,22 +19,11 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { makeLspServiceDouble } from "../support/lsp-service-double.js";
+import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 
 const readCachedDiagnosticsForServers = vi.hoisted(() => vi.fn());
-vi.mock("../../clients/lsp/capabilities.js", async (importOriginal) => ({
-	...(await importOriginal<
-		typeof import("../../clients/lsp/capabilities.js")
-	>()),
-	// The process boundary: a real auxiliary client is an external child
-	// process. The double carries the full service surface (#2582).
-	getLSPService: () =>
-		makeLspServiceDouble({
-			readCachedDiagnosticsForServers,
-			observeLateAuxiliaryAnswer: async () => undefined,
-		}),
-}));
-
+// The process boundary: a real auxiliary client is an external child
+// process. The double carries the full service surface (#2582).
 const logLatency = vi.hoisted(() => vi.fn());
 vi.mock("../../clients/latency-logger.js", async (importOriginal) => {
 	const actual =
@@ -223,7 +212,11 @@ function ledgerCount(kind: string): number {
 		.reduce((sum, entry) => sum + entry.count, 0);
 }
 
-beforeEach(() => {
+beforeEach(async () => {
+	await installLspServiceDouble({
+		readCachedDiagnosticsForServers,
+		observeLateAuxiliaryAnswer: async () => undefined,
+	});
 	_resetStateCacheForTests();
 	resetDegradationLedger();
 	resetBoundedTelemetry();

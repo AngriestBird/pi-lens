@@ -41,7 +41,7 @@ import {
 } from "../../clients/project-changes.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
-import { makeLspServiceDouble } from "../support/lsp-service-double.js";
+import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 
 const readJsonCacheSpy = vi.hoisted(() => vi.fn());
 const logLatencySpy = vi.hoisted(() => vi.fn());
@@ -63,10 +63,6 @@ vi.mock("../../clients/lsp/config.js", () => ({
 	loadLSPConfig: vi.fn().mockResolvedValue({}),
 	initLSPConfig: vi.fn().mockResolvedValue(undefined),
 	getServerInitOverride: vi.fn().mockReturnValue(undefined),
-}));
-
-vi.mock("../../clients/lsp/capabilities.js", () => ({
-	getLSPService: vi.fn(() => makeLspServiceDouble()),
 }));
 
 import { handleSessionStart } from "../../clients/runtime-session.js";
@@ -226,7 +222,8 @@ describe("session_start snapshot meta-gate (#947)", () => {
 	let prevStartupMode: string | undefined;
 	let previousDataDir: string | undefined;
 
-	beforeEach(() => {
+	beforeEach(async () => {
+		await installLspServiceDouble();
 		prevFirst = globals.__piLensFirstSessionDone;
 		prevWarmup = globals.__piLensWarmupScheduled;
 		prevStartupMode = process.env.PI_LENS_STARTUP_MODE;

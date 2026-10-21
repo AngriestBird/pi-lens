@@ -1263,6 +1263,14 @@ export type DegradationKind =
 	 */
 	| "project-snapshot-stage-reap-failed"
 	/**
+	 * #4687 item 5: the session's SECOND prompt-cache miss with no local cause
+	 * was recorded (the first counts silently; every later one only raises the
+	 * count). One bounded row per session, so a provider-side miss pattern is
+	 * visible in the ledger instead of only as an `unknown` verdict per turn.
+	 * Subject is the session id.
+	 */
+	| "prompt-cache-miss-unexplained"
+	/**
 	 * #4638: jedi compiles with the interpreter it launched, so under a project
 	 * declaration of Python 3.14 or newer its `compile` rows describe a grammar
 	 * the project does not use. Dropped from delivery, never from the cached
