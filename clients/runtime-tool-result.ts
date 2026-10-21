@@ -2500,17 +2500,25 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 					drained: answers.every((answer) => answer.drained),
 				};
 			});
-			const driftByRoot = recoveryScopes.roots
-				.map((root) => ({
-					root,
-					paths: [...(recoveredByRoot.get(root) ?? [])],
-				}))
-				.filter((entry) => entry.paths.length > 0);
-			if (driftByRoot.length > 0)
+			// The drift pass carries the OPAQUE half only. `recoveredByRoot` is the
+			// OBSERVATION (it also holds a recognized file, which the authorship
+			// judgement above reads), while `opaquePaths` is the population that
+			// still needs the follow-up: a recognized write already went to the
+			// primaries in the awaited phase and is dispatched on its own, so
+			// publishing it here ran a second LSP drift pass over the same bytes
+			// (#2050 r2, `disk-change-detectors-4535` "a parser-recognized write").
+			const driftByRoot = new Map<string, string[]>();
+			for (const file of opaquePaths) {
+				const root = ownerRootOf(file) ?? scanRoot;
+				const bucket = driftByRoot.get(root);
+				if (bucket) bucket.push(file);
+				else driftByRoot.set(root, [file]);
+			}
+			if (driftByRoot.size > 0)
 				void primaryPhase
 					.then(() =>
 						Promise.all(
-							driftByRoot.map(({ root, paths }) =>
+							[...driftByRoot].map(([root, paths]) =>
 								publishRecoveredDrift(root, paths),
 							),
 						),

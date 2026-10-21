@@ -745,7 +745,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 8 -> 6 (#4535 slice 2): two of those calls moved into
 		// `clients/disk-change-subscribers.ts` with the held-primary pass; the
 		// disposition count stays here.
-		"clients/runtime-tool-result.ts": 6,
+		// 6 -> 5 (#2050): the recognized paths are judged by their own root's
+		// verdict in a loop, so `recognizedAuthored = scanned.filter(...)` is gone.
+		// The bash drift pass buckets its opaque paths in a `Map` (the
+		// `sendsByRoot` idiom beside it) rather than filtering per root.
+		"clients/runtime-tool-result.ts": 5,
 		// 31 -> 33 (#3901): the cut-advisory hold keeps the fresh items of a part
 		// (one `Array.prototype.filter`), and the call-graph lane drops a parked
 		// file it already walks as fresh (one). The knip and dead-code re-offers
