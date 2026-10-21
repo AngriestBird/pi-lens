@@ -634,7 +634,10 @@ interface CacheMissVerdict {
  *      estimated tokens per turn, so they cannot account for a multiple of the
  *      measured content; the remainder is provider-side eviction, typically at
  *      a context limit. Suppressed when the character accumulators were capped,
- *      because a floor estimate would manufacture the verdict.
+ *      because a floor estimate would manufacture the verdict. "Fresh input"
+ *      is every uncached prompt token, `input + cacheWrite`: Anthropic and
+ *      Bedrock carry the re-sent tokens in `cacheWrite`, so `input` alone made
+ *      the rule unreachable on them (#4718 round 3, the F8 shape).
  *   8. `unknown` — a real shortfall with no local explanation. A bounded
  *      `cacheMissUnknownReason` names the missing or conflicting evidence;
  *      provider behavior is never guessed.
@@ -1531,9 +1534,10 @@ export function logCacheUsage(
 		});
 		const verdict = classifyCacheMiss({
 			cacheRead,
-			// Missing/malformed input cannot prove fresh-input pressure. The explicit
-			// malformed gate below also keeps every heuristic fail-closed.
-			input: inputEvidence.value ?? 0,
+			// Every uncached prompt token, wherever the provider puts it (see
+			// `promptShrank`). Missing/malformed counts cannot prove fresh-input
+			// pressure; the explicit malformed gate keeps every heuristic fail-closed.
+			input: (inputEvidence.value ?? 0) + (cacheWriteEvidence.value ?? 0),
 			priorCacheRead: priorCacheReadValue,
 			interTurnGapMs,
 			gapBasis: gap.basis,

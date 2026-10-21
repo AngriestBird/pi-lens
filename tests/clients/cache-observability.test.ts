@@ -1484,6 +1484,21 @@ describe("cache-observability — miss attribution (#1071)", () => {
 		});
 	});
 
+	// #4718 round 3 class sweep (the F8 shape): Anthropic and Bedrock carry the
+	// re-sent tokens in `cacheWrite`, not in `input`, so reading `input` alone
+	// made eviction unreachable there and the miss fell through to `unknown`.
+	it("attributes an eviction the provider re-wrote to partial-eviction", () => {
+		logUsage(8_000, 100);
+		observeInjection(200);
+		vi.setSystemTime(BASE_MS + 1_000);
+		logWrite(3_000, 20_000, 100);
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheMissCause: "partial-eviction",
+			cacheMissKind: "low-read",
+			priorCacheRead: 8_000,
+		});
+	});
+
 	it("does not call it eviction when fresh input matches the new content", () => {
 		logUsage(8_000, 100);
 		observeInjection(8_000);
@@ -1599,9 +1614,10 @@ describe("cache-observability — miss attribution (#1071)", () => {
 		logUsage(8_000, 100);
 		observeCachePrefix([{ role: "user", content: "first" }], 0, "attr");
 		observeRequest();
-		// The provider re-wrote what it stopped reading, so the prompt is still the
-		// old prefix's size: a miss, not a shrink (#4718 review F8).
-		logWrite(3_000, 5_000);
+		// A low read (3,900 of 8,000) whose prompt is not a shrink (4,400 is above
+		// half the baseline, #4718 review F8) and whose 500 uncached tokens stay
+		// under the eviction floor, so only the stable-prefix branch explains it.
+		logWrite(3_900, 400);
 		expect(lastUsageMetadata()).toMatchObject({
 			cacheMissCause: "unknown",
 			cacheMissKind: "low-read",
