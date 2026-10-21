@@ -1,5 +1,5 @@
 /**
- * #4589 baseline: the env writes already leaking on master, admitted so the sweep is a ratchet, not a mass edit.
+ * #4589 baseline: env writes no restore provably covers, admitted so the sweep is a ratchet, not a mass edit. Rows are the leaks master already had, plus rows a change adds where a restore would re-arm the defect its write pins.
  *
  * A row is `<file>:<key>`, keyed on file and environment key,
  * never on line. It means "this write is not PROVABLY restored
@@ -47,6 +47,7 @@ export const TEST_ENV_RESTORE_BASELINE: readonly string[] = [
 	"tests/clients/lsp/client-registry-direct.test.ts:PI_LENS_TEST_MODE",
 	"tests/clients/lsp/idle-eviction-probe-driver.test.ts:PI_LENS_TS_IDLE_EVICT_MS",
 	"tests/clients/lsp/integration.test.ts:PI_LENS_LSP_SHUTDOWN_TIMEOUT_MS",
+	"tests/clients/lsp/lsp-publish-trace-attribution.test.ts:PILENS_PUB_DEBUG",
 	"tests/clients/lsp/managed-bin-fastpath.test.ts:PI_LENS_TEST_MODE",
 	"tests/clients/lsp/managed-fallback-after-trust-refusal-4515.test.ts:PI_LENS_TEST_MODE",
 	"tests/clients/lsp/rename-notify-wedged.test.ts:PI_LENS_LSP_RENAME_NOTIFY_TIMEOUT_MS",
@@ -114,6 +115,8 @@ export const TEST_ENV_RESTORE_BASELINE: readonly string[] = [
 	"tests/support/git-fixture-env.ts:key",
 	"tests/support/prewarm-tool-home.ts:PI_LENS_TEST_TOOLS_TEMPLATE",
 	"tests/support/vitest-setup-console-channel.test.ts:PI_LENS_TMP_HYGIENE_TRACE",
+	"tests/support/vitest-setup.ts:JITI_CACHE",
+	"tests/support/vitest-setup.ts:JITI_FS_CACHE",
 	"tests/support/vitest-setup.ts:PI_CODING_AGENT_DIR",
 	"tests/support/vitest-setup.ts:PI_LENS_CONFIG_PATH",
 	"tests/support/vitest-setup.ts:PI_LENS_DISABLE_TOOL_INSTALL",

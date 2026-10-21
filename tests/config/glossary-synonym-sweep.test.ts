@@ -526,8 +526,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/call-graph.ts": 4,
 		// 4 -> 5 (#4403): `renderCascadeResult` keeps the notes whose servers
 		// are undelivered, an `Array.prototype.filter` call, not a delivery
-		// filter.
-		"clients/cascade-format.ts": 5,
+		// filter. 5 -> 6 (#4532 round 5): `applyCascadeDisplayPolicy` keeps
+		// the rows still at error severity after the environment-gap demotion,
+		// the same `Array.prototype.filter` shape.
+		"clients/cascade-format.ts": 6,
 		"clients/code-quality-warnings.ts": 5,
 		"clients/codebase-model.ts": 4,
 		"clients/complexity-client.ts": 3,
@@ -654,7 +656,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/inferred-project.ts": 2,
 		"clients/lsp/jvm-runtime.ts": 3,
 		"clients/lsp/language.ts": 1,
-		"clients/lsp/launch.ts": 2,
+		// 2 -> 1 (#4532 round 3): the in-process PATH scan replaced the
+		// `which` output chain whose `.filter(Boolean)` was the second use.
+		"clients/lsp/launch.ts": 1,
 		"clients/lsp/ruby-drive-dirs.ts": 1,
 		"clients/lsp/server.ts": 5,
 		// 1 (#4403): `disabledPrimaryServerIds` is an `Array.prototype.filter`
@@ -676,7 +680,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/observed-mutation.ts": 2,
 		// 0 -> 1 (#4493): listGitHeadDelta drops the empty NUL-split entries,
 		// an `Array.prototype.filter` call, not a delivery filter.
-		"clients/opaque-mutation-scan.ts": 1,
+		// 1 -> 2 (#4502): readSameHeadDiscards keeps the paths that were dirty
+		// before a command and are clean after it, another
+		// `Array.prototype.filter` call.
+		"clients/opaque-mutation-scan.ts": 2,
 		"clients/opengrep-client.ts": 2,
 		"clients/path-utils.ts": 1,
 		"clients/persistent-reverify.ts": 4,
@@ -721,10 +728,19 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// branches onto the observational net's arm, and the surviving ast-grep
 		// site walks its `paths` array instead of filtering it.
 		"clients/runtime-tool-call.ts": 3,
+		// #4535 slice 2: the LSP consumer narrows a publish's population to the
+		// documents a live client holds and keeps the stale ones among them —
+		// two `Array.prototype.filter` calls that moved here from
+		// `runtime-tool-result.ts` with the held-primary pass, not a delivery
+		// filter.
+		"clients/disk-change-subscribers.ts": 2,
 		// 5 -> 8 (#4493): the HEAD-move look keeps the held documents of the
 		// delta and the stale ones among them, and counts the dispositions;
 		// three `Array.prototype.filter` calls, not a delivery filter.
-		"clients/runtime-tool-result.ts": 8,
+		// 8 -> 6 (#4535 slice 2): two of those calls moved into
+		// `clients/disk-change-subscribers.ts` with the held-primary pass; the
+		// disposition count stays here.
+		"clients/runtime-tool-result.ts": 6,
 		// 31 -> 33 (#3901): the cut-advisory hold keeps the fresh items of a part
 		// (one `Array.prototype.filter`), and the call-graph lane drops a parked
 		// file it already walks as fresh (one). The knip and dead-code re-offers
@@ -1016,6 +1032,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/log-cleanup.ts": 9,
 		"clients/lsp-mutation.ts": 3,
 		"clients/lsp/client-registry.ts": 4,
+		// 0 -> 1 (#4615): the `[lsp-pub]` debug row's `path` member carries the
+		// client's own normalized document key into extension.log. One more
+		// `path` use, same sense (a path value written to a sink), and it is an
+		// object member name, not a path operation the glossary retires.
+		"clients/lsp/client.ts": 1,
 		// 9 -> 3 (#4403): the file gates' `path.extname`/`basename` moved to
 		// clients/lsp/file-server-match.ts (3, with its own import) and the
 		// session-root walk to clients/lsp/session-roots.ts (6 -> 8).
@@ -1023,6 +1044,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// #4346: resolves a Go importer's package directory to announce its peers.
 		"clients/lsp/created-import-targets.ts": 3,
 		"clients/lsp/edits.ts": 23,
+		// #4532: the environment-gap gate resolves its walk-up from the file's
+		// own directory, so these are real filesystem `path` calls. 5 -> 8
+		// (#4532 round 5): the manifest walk-up reads `package.json` at each
+		// level on the same bounded ancestry.
+		"clients/lsp/environment-gap.ts": 8,
 		"clients/lsp/file-server-match.ts": 3,
 		"clients/lsp/index.ts": 15,
 		// #4346: Go package directories and TS/JS extensions of the implicit
@@ -1035,7 +1061,13 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/language.ts": 3,
 		// 30 -> 31 (#4248): the project-local binary refusal records the
 		// resolved command basename through the existing path vocabulary.
-		"clients/lsp/launch.ts": 31,
+		// 31 -> 34 (#4532): the bare-command probe is an in-process PATH scan —
+		// `path.delimiter`, `path.resolve` against the spawn cwd, and
+		// `path.join` for each candidate; not the retired `path` domain term.
+		// 34 -> 32 (#4532 round 4): the three copies of the bare-spelling test
+		// (`!isFullyQualified && !includes(path.sep) && !includes("/")`) became
+		// one `isBareCommand`, so two of the three `path.sep` reads are gone.
+		"clients/lsp/launch.ts": 32,
 		"clients/lsp/lombok.ts": 14,
 		// #4299: 121 -> 124; OS path namespace calls for canonical compiler
 		// validation replace the wrapper-relative guess. No path-key owner changes.
@@ -1069,7 +1101,15 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/observed-mutation.ts": 6,
 		// 6 -> 7 (#4493): listGitHeadDelta resolves git's relative names with
 		// the OS `path` namespace; the keys still go through normalizeMapKey.
-		"clients/opaque-mutation-scan.ts": 7,
+		// 7 -> 9 (#4493 r2): gitPathBase joins the `.git` entry and its HEAD
+		// with the same namespace to check the walk found a repository.
+		// 9 -> 10 (#4502): readGitStatusEntries resolves each porcelain path
+		// against the checkout base with the same namespace.
+		// 10 -> 11 (#4612 r4): it also resolves a rename's source token, so
+		// the discard baseline names both sides of the entry.
+		// 11 -> 9 (#4508): the walk in resolveGitCheckout skips a HEAD-less
+		// `.git`, so gitPathBase no longer joins the `.git` entry and its HEAD.
+		"clients/opaque-mutation-scan.ts": 9,
 		"clients/opengrep-client.ts": 8,
 		"clients/opengrep-config.ts": 3,
 		// 21 -> 23 (#4515 r2): commandSearchReachesProject splits PATH on
@@ -1457,7 +1497,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/module-report.ts": 6,
 		// 24 -> 26 (#4493): readGitHead and listGitHeadDelta read the spawn
 		// result's exit `status`, not a delivery status.
-		"clients/opaque-mutation-scan.ts": 26,
+		// 26 -> 27 (#4502): readGitStatusEntries checks the spawn result's exit
+		// `status` once for every porcelain read it now serves.
+		"clients/opaque-mutation-scan.ts": 27,
 		"clients/opengrep-client.ts": 9,
 		"clients/package-manager.ts": 2,
 		"clients/pipeline.ts": 4,
@@ -1480,7 +1522,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/spawn-timeout-cooldown.ts": 1,
 		"clients/test-runner-client.ts": 15,
 		"clients/tree-sitter-logger.ts": 2,
-		"clients/tree-sitter-query-loader.ts": 1,
+		// 1 -> 4 (#2678): the health-check record reads the resource status
+		// twice and writes metadata.status; none denotes a delivery status.
+		"clients/tree-sitter-query-loader.ts": 4,
 		"clients/tree-sitter-shared.ts": 1,
 		"clients/widget-state.ts": 12,
 		"clients/word-index.ts": 6,

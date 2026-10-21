@@ -43,6 +43,7 @@ import {
 } from "vitest";
 import extension from "../index.js";
 import { makeLspServiceDouble } from "./support/lsp-service-double.js";
+import { readNdjsonRows } from "./support/ndjson-rows.js";
 import {
 	getDegradationSummary,
 	resetDegradationLedger,
@@ -423,13 +424,12 @@ const ZERO_READ = expect.stringMatching(/^BLOCK: .*Edit without read/);
 
 async function branchRetainedRows(): Promise<Record<string, unknown>[]> {
 	await flushLatencyLog();
-	const text = fs.existsSync(getLatencyLogPath())
-		? fs.readFileSync(getLatencyLogPath(), "utf8")
-		: "";
-	return text
-		.split("\n")
-		.filter(Boolean)
-		.map((line) => JSON.parse(line) as Record<string, unknown>)
+	const read = readNdjsonRows(getLatencyLogPath());
+	// A line this witness cannot parse is not a row it can reason about: red
+	// rather than let a corrupt write lower a count (the old reader threw, which
+	// named no row; `skipped` is the count the throw could not give).
+	expect(read.skipped).toBe(0);
+	return read.rows
 		.filter((row) => row.phase === "read_guard_branch_retained")
 		.map((row) => row.metadata as Record<string, unknown>);
 }
@@ -1241,13 +1241,11 @@ describe("#3521 a resumed session keeps only its branch's reads", () => {
 /** The `session_scope_transition` rows (#3611), in write order. */
 async function latencyRows(phase: string): Promise<Record<string, unknown>[]> {
 	await flushLatencyLog();
-	const text = fs.existsSync(getLatencyLogPath())
-		? fs.readFileSync(getLatencyLogPath(), "utf8")
-		: "";
-	return text
-		.split("\n")
-		.filter(Boolean)
-		.map((line) => JSON.parse(line) as Record<string, unknown>)
+	const read = readNdjsonRows(getLatencyLogPath());
+	// Same record as `branchRetainedRows`: the exact counts below (`toBe(0)`,
+	// `toBe(2)`) are only truthful when no line was dropped.
+	expect(read.skipped).toBe(0);
+	return read.rows
 		.filter((row) => row.phase === phase)
 		.map((row) => row.metadata as Record<string, unknown>);
 }
@@ -3857,11 +3855,9 @@ describe("#3613 a concurrent secondary's turn leaves the primary's turn state al
 
 		await flushLatencyLog();
 		const turnIds = new Set(
-			fs
-				.readFileSync(getLatencyLogPath(), "utf8")
-				.split("\n")
-				.filter(Boolean)
-				.map((line) => (JSON.parse(line) as { turnId?: string }).turnId),
+			readNdjsonRows(getLatencyLogPath()).rows.map(
+				(row) => (row as { turnId?: string }).turnId,
+			),
 		);
 		expect({
 			subagent: turnIds.has(`${sessionIdOf(subagent)}:2`),

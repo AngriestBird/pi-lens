@@ -32,6 +32,7 @@ import {
 	applyWeakDispositions,
 	computeStrictAnchor,
 	getDisposition,
+	hasAnyDispositionMarks,
 	isDeferredThisSession,
 	markDisposition,
 	_setMultiFileReadForTests,
@@ -523,6 +524,47 @@ describe("applyDispositionsMultiFile (#1617 — cross-file lanes: gitleaks/trivy
 		}
 	});
 
+	it("F1 (#4701 review): a defer in ANOTHER project reads no file group here", () => {
+		// The empty-store hoist above is project-scoped on both halves. Its defer
+		// half used to be the process-wide `deferredThisSession.size`, so one
+		// `defer` recorded in any project sent this project's cross-file scan
+		// through the per-group read path (the ~270 ms/analyzer cost the hoist
+		// exists to prevent) to discover there was nothing to filter.
+		const projectDir = cwd();
+		const otherProject = `${projectDir}-other`;
+		fs.mkdirSync(projectDir, { recursive: true });
+		fs.mkdirSync(otherProject, { recursive: true });
+		const fileA = path.join(projectDir, "a.ts");
+		fs.writeFileSync(fileA, "const secretA = 'aaa';\n");
+		const diagA = { filePath: fileA, tool: "gitleaks", message: "m", line: 1 };
+		markDisposition(
+			otherProject,
+			{
+				cwd: otherProject,
+				filePath: path.join(otherProject, "a.ts"),
+				tool: "eslint",
+				rule: "no-bad",
+				message: "bad call",
+				line: 1,
+			},
+			"defer",
+		);
+
+		const readSpy = vi.fn(fs.readFileSync);
+		_setMultiFileReadForTests(readSpy as unknown as typeof fs.readFileSync);
+		try {
+			const kept = applyDispositionsMultiFile(
+				[diagA],
+				projectDir,
+				(d) => d.filePath,
+			);
+			expect(kept).toEqual([diagA]);
+			expect(readSpy).not.toHaveBeenCalled();
+		} finally {
+			_setMultiFileReadForTests(null);
+		}
+	});
+
 	it("preserves the caller's original element order across file groups", () => {
 		const projectDir = cwd();
 		fs.mkdirSync(projectDir, { recursive: true });
@@ -725,6 +767,22 @@ describe("F3 (#1625 review round): deferredThisSession is scoped per-project, no
 
 		expect(isDeferredThisSession(projectA, anchor)).toBe(true);
 		expect(isDeferredThisSession(projectB, anchor)).toBe(false);
+	});
+
+	it("hasAnyDispositionMarks answers for its OWN project (#4701 F1)", () => {
+		// #4701 review F1: the probe is the read-only turn's cost guard
+		// (`resyncCommitGateForReadOnlyTurn`, clients/runtime-turn.ts). Its defer
+		// half read the process-wide anchor Set, so one `defer` in ANY project —
+		// in any session of the process's life — made every project look marked
+		// and every quiet turn in that project paid the whole policy pass. The
+		// mark a file-less turn can act on is this project's own.
+		const { projectA, projectB } = projectDirs();
+		markDisposition(projectA, { ...finding(projectA), content }, "defer");
+
+		// A defer writes no store entry, so project A's `true` is the defer half.
+		expect(hasAnyDispositionMarks(projectA)).toBe(true);
+		// Project B holds no mark of any kind and can act on none of A's.
+		expect(hasAnyDispositionMarks(projectB)).toBe(false);
 	});
 });
 

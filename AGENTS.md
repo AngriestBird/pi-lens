@@ -171,6 +171,14 @@ The principles' delegation contract applies. pi-lens adds:
 - Three open issues on one mechanism, in any seam groups, open a consolidation
   audit across every consumer of that mechanism before the next one is filed
   (history: `HISTORY.md`, 2026-10-16).
+- Run the **fold check** as soon as a lane's mechanism is known, which is when
+  the brief is written: read every open issue against that mechanism and decide
+  each candidate as folded into this PR (one `Closes #…` per folded issue) or
+  not folded, with the reason (two hazards in one review, a maintainer decision,
+  a blocked dependency, a different seam). The brief carries the candidate list
+  and its decisions, and the PR body records them under `## Fold check`.
+  Planning precedes filing: a new issue is the answer for p2+ work no lane can
+  carry, never for a p3 the lane could fold (history: `HISTORY.md`, 2026-10-20).
 - The per-PR loop (review, verify, auto-merge on green), round routing, the
   merge gate and the Common mistakes table live in `docs/pi-lens-merge-policy.md`.
 - Read CI with `node scripts/ci-verdict.mjs <pr|sha>` (exact head, all pages).
@@ -692,6 +700,42 @@ file-scoped worklist and receives no project-wide scanner output.
     root became the project root and #4559's quick-mode cell failed three
     pre-push runs. Plant the fixture's own marker, or assert the root it
     resolved before the case runs. Guard: planned in #4560, not yet running.
+
+76. **Instrument attributes by id and order, not by the emitting subject:** a
+    probe that brackets each phase with an offset into a buffered async sink,
+    and drains rows by subject id alone, folds a sibling's late row into its own
+    phase. The verdict then depends on write order, so the same measurement
+    flips between two answers and a data refresh commits the artifact as a
+    finding. Stamp each row with the subject that emitted it, or scope the drain
+    to that subject, and require the last writer of a verdict to be the subject's
+    own emitter. Enforced by `tests/clients/lsp/lsp-publish-trace-attribution.test.ts`.
+    Instance and dates: `HISTORY.md`.
+
+77. **Cancellation read as failure:** an aggregate that compares each shard's
+    result against `success` reds a required check when the shard finished every
+    step and lost its race with `timeout-minutes`, and no rerun recovers it,
+    because the infra-kill classifier reads only `failure` runs. A shard's own
+    step conclusions tell a teardown cancellation from a mid-check one, and every
+    required job's measured runtime belongs beside its cap, because a cap set at
+    the measured maximum fails the first time a runner is slow. That runtime is
+    also a per-shard SUM, so it can never be the stale-cost verdict: only the
+    table's rank agreement with the run's own ordering is scale-free enough to
+    survive one shard's machine. Guard: `tests/scripts/check-shard-verdict.test.ts`
+    (the seam, both fail-closed directions), the gating-step list in
+    `tests/config/unit-tests-shard-workflow.test.ts`, and
+    `tests/scripts/ci-verdict-runtime-cap.test.ts` (a measured runtime beside its
+    cap). Instance and dates: `HISTORY.md`.
+
+78. **A dependency's cache directory attributed to the fixture that triggered
+    it:** a loader that materialises `os.tmpdir()/<tool>` on the caller's own
+    stack looks like a fixture sibling, so the creator recorded for it is
+    accurate per process and wrong per cause, and the sweep reds a file that
+    never created it. Pin the loader's cache off for the test process rather
+    than admitting the directory's name, and keep a planted sibling red to prove
+    it. Enforced by the by-path-cache case in
+    `tests/config/tmp-fixture-hygiene.test.ts`, plus the `JITI_FS_CACHE=0` pin
+    that `tests/support/vitest-setup.ts` and `vitest.config.ts` force on the
+    test process. Instance and dates: `HISTORY.md`.
 
 </important>
 
@@ -1674,6 +1718,25 @@ process. Read lifecycle order from the real `session_scope_transition` rows
 and dead-weight rows, not from the pi mock; the mock does not re-run the
 extension factory or reproduce pi lifecycle ordering.
 
+Two in-process pi tiers sit under that child lane. A case whose verdict
+depends on what pi does with a handler's return value, what the model
+receives, or how pi orders a session goes through one of them, never
+`tests/support/pi-mock.ts`. The double kept a `context` list as returned, pi
+rebuilt the system head, and every test passed. Tier 1,
+`tests/support/pi-runner.ts`, loads the built extension into pi's real
+`ExtensionRunner`: flags, tools, commands, declared registrations, and no
+`emit`, by design. Tier 2, `tests/support/pi-session.ts`, runs a real
+`AgentSession` with pi-ai's `fauxProvider`: turns, tool round trips, session
+ids, and the request the model sees. Their header comments state the APIs
+and limits. A new tier capability adds a case to `pi-runner.test.ts` or
+`pi-session.test.ts` first. `pi-mock.ts` stays for three classes: process-boundary
+subjects, pi-lens-internal seams, and payloads a scripted provider cannot
+produce. It also stays for files a roadmap slice still owns. It throws at load
+for a test file not on `PI_MOCK_IMPORTERS` (`tests/support/pi-mock-importers.ts`),
+so a new user fails however it imports the double. The list only shrinks:
+`tests/config/pi-mock-importer-sweep.test.ts` fails on a row whose file no
+longer uses it.
+
 When the defect is an ordering of awaits on one seam (a coalescing queue, a
 per-key serializer), or the seam has regressed before, write a scheduler
 property with `fc.scheduler()` instead of one more replay:
@@ -1683,7 +1746,8 @@ property with `fc.scheduler()` instead of one more replay:
 Use `tests/support/fault-injection.ts` for wedged children, seam delays,
 starved budgets, and gates; `makeRunnerCtx`, `makeLspServiceDouble`, and
 `makeRealRunnerEnv` for dispatch, LSP, and rule behavior. Mock only external
-binaries, network, host SDK seams, clocks, or fault injection.
+binaries, network, host SDK seams (not pi's own behaviour: see the pi tiers
+above), clocks, or fault injection.
 
 Test authoring screens:
 

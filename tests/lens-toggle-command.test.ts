@@ -1,17 +1,34 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import piLens from "../index.js";
+import { type PiRunner, startPiRunner } from "./support/pi-runner.js";
 import { createPiMock, makeCtx, type PiMock } from "./support/pi-mock.js";
 import { removeTempDirSync } from "./clients/test-utils.js";
 
-// Template for #171: a command test driven entirely through the shared
-// createPiMock() harness — no bespoke ExtensionAPI mock. Run the real entry,
-// then invoke the registered command handler and assert captured UI calls.
+// Template for #171: a command test driven through the shared harnesses — no
+// bespoke ExtensionAPI mock. Run the real entry, then invoke the registered
+// command handler and assert captured UI calls.
+//
+// #4632 slice 9 moved the REGISTRATION case onto tier 1: the real host's
+// loader holds the flags and resolves the commands, so a command that pi drops
+// (or a name it prefixes) is a red here, not a value the double recorded. The
+// four handler cases stay on the double, class `real-ui-harness`: their whole
+// claim is the text `ctx.ui.notify` shows and the component `ctx.ui.setWidget`
+// mounts, and a real `AgentSession` binds `mode: "print"` with `hasUI() ===
+// false` (probed on host 1.3.0), so `notifyUi` suppresses the message and no
+// widget mounts. Nothing in this slice builds that harness; slice 5 builds none
+// and slice 10 is docs-and-stop, so the row names the missing capability rather
+// than a slice that would move it (review F4 on #4702).
 
 const tmpDirs: string[] = [];
 let previousConfigPath: string | undefined;
+let runner: PiRunner;
+
+beforeAll(async () => {
+	runner = await startPiRunner();
+});
 
 beforeEach(() => {
 	previousConfigPath = process.env.PI_LENS_CONFIG_PATH;
@@ -38,15 +55,25 @@ function installLens(
 
 describe("lens-toggle command", () => {
 	it("registers the single session-level lens toggle command", () => {
-		const pi = installLens();
-
-		expect(pi.flags.has("no-lens")).toBe(true);
-		expect(pi.getCommand("lens-toggle")).toBeDefined();
-		expect(pi.getCommand("lens-widget-toggle")).toBeDefined();
-		expect(pi.getCommand("lens-enable")).toBeUndefined();
-		expect(pi.getCommand("lens-disable")).toBeUndefined();
-		expect(pi.getCommand("lens-status")).toBeUndefined();
-		expect(pi.getCommand("lens")).toBeUndefined();
+		// Tier 1 (#4632 slice 9): the real host's loader and command resolver
+		// hold the registration. The claim is the host's registry, not the
+		// arguments `index.ts` handed a stand-in.
+		expect(runner.getFlags().has("no-lens")).toBe(true);
+		const registered = runner
+			.getRegisteredCommands()
+			.map((command) => command.name);
+		expect(registered).toContain("lens-toggle");
+		expect(registered).toContain("lens-widget-toggle");
+		// The retired single-purpose commands stay gone, so this case fails on a
+		// roster that quietly re-adds one.
+		for (const retired of [
+			"lens-enable",
+			"lens-disable",
+			"lens-status",
+			"lens",
+		]) {
+			expect(registered).not.toContain(retired);
+		}
 	});
 
 	it("toggles an enabled session off and back on", async () => {
