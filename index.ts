@@ -140,7 +140,10 @@ import {
 	resolvePiLensFlag,
 	resolvePiLensFlagWithSource,
 } from "./clients/lens-config.js";
-import { LENS_FLAGS } from "./clients/lens-flag-registry.js";
+import {
+	LENS_FLAGS,
+	readLazyToolsSetting,
+} from "./clients/lens-flag-registry.js";
 import {
 	LENS_TOOL_NAMES,
 	resolveLensToolEnabled,
@@ -310,10 +313,14 @@ const LOOP_BLOCK_IDENTITY = "<pi-lens>";
 import {
 	isFreshSessionStart,
 	getRememberedLazyTools,
+	lazyToolsApply,
 	planToolSet,
+	recordToolSetDecision,
 	recordToolSetMutation,
 	rememberLazyTools,
+	resolveLazyToolsMode,
 	supportsDeferredTools,
+	supportsMidConvoSystemMessages,
 } from "./clients/tool-set-policy.js";
 import {
 	endSituationalToolTelemetry,
@@ -918,6 +925,21 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// Most recent event scope for existing delivery handlers. Shutdown reads
 	// the departing member's scope, since an activation can serve siblings.
 	let scope: SessionScope | undefined;
+	/**
+	 * The scope of the session an event came from: the member that session's
+	 * own start recorded (#4554), by pi's stable id. `scope` names only the
+	 * session that started LAST, so a request or a tool call from an earlier
+	 * live sibling on this activation read or wrote that sibling's state
+	 * (#4631 r5, #4723 r4). An id this activation never recorded falls back to
+	 * `scope`, the only answer left.
+	 */
+	const scopeOfSession = (
+		sessionId: string | undefined,
+	): SessionScope | undefined =>
+		(sessionId === undefined
+			? undefined
+			: liveSessionMembers.find((member) => member.sessionId === sessionId)
+					?.scope) ?? scope;
 	// #3613: turn_end can deliver after another in-process activation has
 	// started its next session and changed the live coordinator scope. Keep the
 	// identity that owned this turn, rather than resolving ownership at delivery
@@ -2125,10 +2147,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 		},
 		filteredLazyCatalog,
 		{
-			onActivated: (names) => {
+			onActivated: (names, ctx) => {
 				observeSituationalToolActivation(names);
-				// #3612: this activation's session scope owns its activations.
-				rememberLazyTools(scope, names);
+				// #3612: the calling session's scope owns its activations (#4723 r4).
+				rememberLazyTools(scopeOfSession(getStableSessionId(ctx)), names);
 			},
 			onRejected: (name) => {
 				if (
@@ -2301,38 +2323,65 @@ function activateExtension(hostPi: ExtensionAPI) {
 	//
 	// Feature-detected: `pi.getActiveTools`/`setActiveTools` aren't guaranteed
 	// present on every host the broad `@earendil-works/pi-coding-agent` peer
-	// dependency allows. Under `--no-lazy-tools` nothing is touched at all:
-	// all-active IS the requested posture.
-	const applyToolSetPlan = (ctx: unknown, reason: string | undefined): void => {
+	// dependency allows. Under `--no-lazy-tools` the plan is the eager one,
+	// which keeps every enabled tool active (a no-op on a host start).
+	//
+	// #4687 item 7: whether the lazy tools start inactive follows `tools.lazy`
+	// (`lazyToolsApply`): lazy on every model by default; under `"auto"`, a
+	// model that folds system messages into one head gets every tool from the
+	// start, because each later tool-set change would rewrite the whole cached
+	// prefix. The plan runs at session_start and
+	// on a model switch only, so the set never flips within one model. An
+	// eager plan is the lazy one with every enabled lazy tool remembered: it
+	// re-activates what a lazy model left inactive and changes nothing on a
+	// host start, where every registered tool is already active.
+	const applyToolSetPlan = (
+		ctx: unknown,
+		reason: string | undefined,
+		trigger: "session_start" | "model_select" = "session_start",
+	): void => {
 		try {
 			const piWithActiveTools = pi as unknown as {
 				getActiveTools?: () => string[];
 				setActiveTools?: (names: string[]) => void;
 			};
 			if (
-				getLensFlag("no-lazy-tools") === true ||
 				typeof piWithActiveTools.getActiveTools !== "function" ||
 				typeof piWithActiveTools.setActiveTools !== "function"
 			)
 				return;
+			const model = (
+				ctx as { model?: Parameters<typeof lazyToolsApply>[1] } | undefined
+			)?.model;
+			const mode = resolveLazyToolsMode(
+				getLensFlag("no-lazy-tools") === true,
+				readLazyToolsSetting(globalConfig),
+			);
+			const lazy = lazyToolsApply(mode, model);
+			recordToolSetDecision({
+				trigger,
+				mode,
+				lazy,
+				supportsMidConvoSystemMessages: supportsMidConvoSystemMessages(model),
+			});
 			const lazyNames = new Set(enabledLazyTools);
 			const plan = planToolSet(
 				piWithActiveTools.getActiveTools(),
 				lazyNames,
-				getRememberedLazyTools(scope),
+				lazy ? getRememberedLazyTools(scope) : lazyNames,
 			);
 			if (!plan.changed) return;
 			piWithActiveTools.setActiveTools(plan.desired);
 			recordToolSetMutation({
 				addedCount: plan.addedCount,
 				removedCount: plan.removedCount,
-				reason: isFreshSessionStart(reason)
-					? "fresh_session_lazy_deactivation"
-					: "session_rebuild_restore",
-				deferralApplies: supportsDeferredTools(
-					(ctx as { model?: Parameters<typeof supportsDeferredTools>[0] })
-						?.model,
-				),
+				reason:
+					trigger === "model_select"
+						? "model_switch"
+						: isFreshSessionStart(reason)
+							? "fresh_session_lazy_deactivation"
+							: "session_rebuild_restore",
+				deferralApplies: supportsDeferredTools(model),
 			});
 		} catch (toolSetErr) {
 			dbg(
@@ -2936,6 +2985,16 @@ function activateExtension(hostPi: ExtensionAPI) {
 		),
 	);
 
+	// #4687 item 7: a model switch re-decides the lazy-tools posture for the
+	// new model. pi's switch already starts a fresh prompt cache, so the one
+	// tool-set write it may cause costs no extra prefix rewrite. pi emits this
+	// only when the model really changed (`modelsAreEqual`), and the plan is
+	// idempotent, so a switch between two models with the same capability
+	// writes nothing.
+	pi.on("model_select", (event) => {
+		applyToolSetPlan({ model: event.model }, undefined, "model_select");
+	});
+
 	// #3521: `/tree` moves the conversation inside this activation. Keep only
 	// the reads whose tool result is on the new branch. A concurrent secondary
 	// shares the module-level runtime, so its tree moves never touch the
@@ -2985,6 +3044,14 @@ function activateExtension(hostPi: ExtensionAPI) {
 		);
 		if (toolEntry && "situational" in toolEntry && toolEntry.situational) {
 			observeSituationalToolCall(toolEntry.name);
+			// #4723 F3: a tool the model called is a tool the conversation asked
+			// for, whichever posture made it active. Remembering it keeps a later
+			// switch to the lazy posture (or a reload) from hiding a tool in use.
+			// A disabled tool is never registered, so pi never delivers its call.
+			// r4: into the CALLING session's memory, not the last-started one's.
+			rememberLazyTools(scopeOfSession(getStableSessionId(ctx)), [
+				toolEntry.name,
+			]);
 		}
 		return handleToolCall({
 			event: event as unknown as Parameters<typeof handleToolCall>[0]["event"],
@@ -4579,16 +4646,12 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// request drained the OTHER session's advisories into its own messages
 			// and the owning session lost them. `liveSessionMembers` records each
 			// session's own scope at its start (#4554), and this is the same
-			// identity `leaveLiveSession` reads; when this activation never recorded
-			// the requesting session, the activation-wide scope is the only answer
-			// left and stays the fallback.
-			const requestScope =
-				(prefixSessionId === undefined
-					? undefined
-					: liveSessionMembers.find(
-							(member) => member.sessionId === prefixSessionId,
-						)?.scope) ?? scope;
-			const agentNudge = consumeAgentNudge(dbg, requestScope);
+			// identity `leaveLiveSession` reads; `scopeOfSession` keeps the
+			// activation-wide scope as the fallback for a session it never recorded.
+			const agentNudge = consumeAgentNudge(
+				dbg,
+				scopeOfSession(prefixSessionId),
+			);
 			const sourceMessages = [
 				{
 					source: "session-guidance" as const,

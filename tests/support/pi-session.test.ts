@@ -565,6 +565,68 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 		}
 	});
 
+	it("hands the provider the model's compat facts and switches models through pi's own setModel", async () => {
+		// #4687 item 7: the tier capability lands before its consumers. pi-ai's
+		// fauxProvider drops `compat` from its model definitions, so the helper
+		// sets it on the model object pi is handed; this case pins that the fact
+		// reaches the PROVIDER (the model a reply factory is called with) and that
+		// `switchModel` goes through `AgentSession.setModel`, which emits
+		// `model_select`. Recurrence: a case asserting a per-model decision on a
+		// model that silently carries no compat, so every cell reads "unknown".
+		const seen: Array<{ id?: unknown; compat?: unknown }> = [];
+		const reply =
+			(text: string) =>
+			(
+				_context: unknown,
+				_options: unknown,
+				_state: unknown,
+				model: unknown,
+			) => {
+				const typed = model as { id?: unknown; compat?: unknown };
+				seen.push({ id: typed.id, compat: typed.compat });
+				return fauxAssistantMessage(fauxText(text));
+			};
+		const handle = await startPiSession({
+			root: fixture.root,
+			cwd: path.join(fixture.root, "model-compat", "proj"),
+			modelCompat: {},
+			responses: [reply("first"), reply("second")],
+		});
+		const runner = handle.session.extensionRunner;
+		const emit = vi.spyOn(runner, "emit");
+		try {
+			await handle.prompt("first question");
+			await handle.switchModel({ supportsMidConvoSystemMessages: true });
+			await handle.prompt("second question");
+			const selected = emit.mock.calls
+				.map(([event]) => event as { type: string; model?: { id?: unknown } })
+				.filter((event) => event.type === "model_select")
+				.map((event) => event.model?.id);
+			expect(selected).toEqual(["faux-2"]);
+		} finally {
+			emit.mockRestore();
+		}
+
+		expect(seen).toEqual([
+			{ id: "faux-1", compat: {} },
+			{ id: "faux-2", compat: { supportsMidConvoSystemMessages: true } },
+		]);
+	});
+
+	it("gives the default model the faux provider's real mid-conversation system support", async () => {
+		// The faux provider answers from the raw transcript and never folds
+		// system messages into one head, so its honest fact is `true`; a case
+		// that needs a collapsing model passes `modelCompat: {}` (above).
+		const handle = await startPiSession({
+			root: fixture.root,
+			cwd: path.join(fixture.root, "model-default-compat", "proj"),
+			responses: [],
+		});
+		expect(
+			(handle.session.model as { compat?: unknown } | undefined)?.compat,
+		).toEqual({ supportsMidConvoSystemMessages: true });
+	});
+
 	it("records what the copy asks the host's UI to show", async () => {
 		// #4632 acceptance 6: the capability lands BEFORE its consumers. A case that
 		// asserts what pi-lens asks the USER to see (the smells rollup's note, the
