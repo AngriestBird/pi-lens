@@ -38,9 +38,10 @@ afterEach(() => {
 	env.cleanup();
 });
 
-/** A checkout whose `.git` is a directory, as `git init` writes it. */
+/** A checkout whose `.git` is a directory, as `git init` writes it (with HEAD: #4508 skips a HEAD-less `.git`). */
 function initRepo(dir: string): string {
 	fs.mkdirSync(path.join(dir, ".git"), { recursive: true });
+	fs.writeFileSync(path.join(dir, ".git", "HEAD"), "ref: refs/heads/main\n");
 	fs.writeFileSync(path.join(dir, "seed.ts"), "export const seed = 1;\n");
 	return dir;
 }
