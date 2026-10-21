@@ -126,7 +126,10 @@ function classifyAnalysisRoot(
 	if (owner) return { mode: "linked-worktree", root: owner.root };
 	const root = resolveAnalysisRootPath(filePath, sessionRoot, homeDirOverride);
 	if (!root) return { mode: "none", root: undefined };
-	if (root === nodePath.resolve(sessionRoot)) return { mode: "session", root };
+	// #4689 item 7: `root` is an identity (`resolveAnalysisRootPath` resolves
+	// the session through the kernel), so the session side is compared as one
+	// too. A spelling here made a symlink-spelled session root adopt itself.
+	if (pathsEqual(root, sessionRoot)) return { mode: "session", root };
 	return { mode: "adopted", root };
 }
 
@@ -186,31 +189,63 @@ export interface SessionConfigRoot {
  *
  * The population is therefore O(workspaces + nested config owners), not
  * O(directories touched).
+ *
+ * The root is decided by identity and SPELLED on the file's side (#4689 item
+ * 7): the session-root registry (`clients/lsp/session-roots.ts`) tests
+ * containment lexically, so a root registered in any other spelling never
+ * holds the file, the #2052 gate declines it, and its `lsp.disabledServers`
+ * denial stops applying. When no ancestor of the file's spelling is the root
+ * (a link from outside into it), the session root is registered as the host
+ * spelled it, which `session_start` already did.
  */
 export function resolveSessionConfigRoot(
 	filePath: string,
 	sessionRoot: string,
 	homeDirOverride?: string,
 ): SessionConfigRoot {
-	const session = nodePath.resolve(sessionRoot);
 	const { mode, root } = classifyAnalysisRoot(
 		filePath,
 		sessionRoot,
 		homeDirOverride,
 	);
-	if (mode === "adopted" || mode === "none")
+	if (root === undefined || mode === "adopted" || mode === "none")
 		return { register: undefined, mode };
 	// A linked worktree registers its own root — the owner the class resolved,
 	// never the edited file's directory and never a re-derived eligibility.
-	if (mode === "linked-worktree") return { register: root, mode };
-	const start = nodePath.dirname(nodePath.resolve(filePath));
-	if (!isUnderDir(start, session)) return { register: session, mode };
-	for (const dir of walkUpDirs(start)) {
-		if (dir !== session && !isUnderDir(dir, session)) break;
-		if (findPiLensConfigInDir(dir)) return { register: dir, mode };
-		if (dir === session) break;
+	if (mode === "linked-worktree")
+		return {
+			register: rootOnFileSpelling(filePath, root, false) ?? root,
+			mode,
+		};
+	return {
+		register:
+			rootOnFileSpelling(filePath, root, true) ?? nodePath.resolve(sessionRoot),
+		mode,
+	};
+}
+
+/**
+ * The ancestor of `filePath`'s own spelling that IS `root`, or with
+ * `configOwners` the nearest `.pi-lens.json` owner between the file and that
+ * ancestor; `undefined` when no ancestor of the spelling is `root`. Equality
+ * and containment compare identities, so a link on either side neither stops
+ * the walk early nor carries it above the root.
+ */
+function rootOnFileSpelling(
+	filePath: string,
+	root: string,
+	configOwners: boolean,
+): string | undefined {
+	for (const dir of walkUpDirs(nodePath.dirname(nodePath.resolve(filePath)))) {
+		// `root` is already an identity; resolving `dir` too keeps the
+		// containment an identity test on win32, whose `isUnderDir` arm
+		// compares spellings only.
+		const identity = realpathOrResolve(dir);
+		const atRoot = pathsEqual(identity, root);
+		if (!atRoot && !isUnderDir(identity, root)) return undefined;
+		if (atRoot || (configOwners && findPiLensConfigInDir(dir))) return dir;
 	}
-	return { register: session, mode };
+	return undefined;
 }
 
 /**

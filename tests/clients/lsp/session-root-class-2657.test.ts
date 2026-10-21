@@ -25,6 +25,7 @@ import { CacheManager } from "../../../clients/cache-manager.js";
 import {
 	resolveAnalysisRoot,
 	resolveAnalysisRootPath,
+	resolveSessionConfigRoot,
 } from "../../../clients/analysis-root.js";
 import {
 	getDegradationSummary,
@@ -49,7 +50,11 @@ import {
 import { configureLspServiceLifecycle } from "../../../clients/lsp/service-singleton.js";
 import { makeLspServiceDouble } from "../../support/lsp-service-double.js";
 import { runHandlerExpectingNoThrow } from "../../support/handler-verdict.js";
-import { setupTestEnvironment } from "../test-utils.js";
+import {
+	createPathIdentityFixture,
+	type PathIdentityFixture,
+	setupTestEnvironment,
+} from "../test-utils.js";
 
 let env: { tmpDir: string; cleanup: () => void };
 let runtime: RuntimeCoordinator;
@@ -273,6 +278,210 @@ describe("the analysis-root class decides what a session registers (#2657, #4242
 					(group) => group.kind === "lsp-session-root-evicted",
 				),
 			).toHaveLength(0);
+		} finally {
+			fs.rmSync(checkoutRoot, { recursive: true, force: true });
+		}
+	});
+});
+
+/**
+ * #4689 item 7: the class and the registration compare path IDENTITIES on both
+ * sides, and the registration is spelled on the FILE's side.
+ *
+ * Recurrence it prevents: `classifyAnalysisRoot` compared the real-path root
+ * `resolveAnalysisRootPath` returns against `nodePath.resolve(sessionRoot)`, so
+ * a symlink-spelled session root classified every in-root file as `adopted`
+ * (#4689 rows h and h2) and `resolveSessionConfigRoot` registered nothing for
+ * it. The registration walk compared spellings too, so a file spelled through
+ * an alias of a real session root registered the session's spelling, which the
+ * session-root registry (`clients/lsp/session-roots.ts`, lexical containment)
+ * never matches to the file: the #2052 gate then declined the file and its
+ * `lsp.disabledServers` denial stopped applying. Rows are the state table in
+ * the PR body.
+ */
+describe("the class and the registration read path identity (#4689 item 7)", () => {
+	type Cell = {
+		row: string;
+		session: (fx: PathIdentityFixture) => string;
+		file: (fx: PathIdentityFixture) => string;
+		mode: "session" | "none";
+		register: (fx: PathIdentityFixture) => string | undefined;
+	};
+	const real = (fx: PathIdentityFixture, ...rest: string[]) =>
+		path.join(fx.repo, ...rest);
+	const alias = (fx: PathIdentityFixture, ...rest: string[]) =>
+		path.join(fx.aliasRoot, ...rest);
+	const none = () => undefined;
+	const cells: Cell[] = [
+		{
+			row: "1 real root, real file",
+			session: (fx) => real(fx),
+			file: (fx) => real(fx, "src", "real.ts"),
+			mode: "session",
+			register: (fx) => real(fx),
+		},
+		{
+			row: "2 real root, alias file",
+			session: (fx) => real(fx),
+			file: (fx) => alias(fx, "src", "real.ts"),
+			mode: "session",
+			register: (fx) => alias(fx),
+		},
+		{
+			row: "3 real root, alias file under a nested config",
+			session: (fx) => real(fx),
+			file: (fx) => alias(fx, "pkg", "a.ts"),
+			mode: "session",
+			register: (fx) => alias(fx, "pkg"),
+		},
+		{
+			row: "4 real root, outside file",
+			session: (fx) => real(fx),
+			file: (fx) => fx.outsideFile,
+			mode: "none",
+			register: none,
+		},
+		{
+			row: "5 real root, in-root link out of the root",
+			session: (fx) => real(fx),
+			file: (fx) => fx.outLink,
+			mode: "none",
+			register: none,
+		},
+		{
+			row: "6 (h) alias root, real file",
+			session: (fx) => alias(fx),
+			file: (fx) => real(fx, "src", "real.ts"),
+			mode: "session",
+			register: (fx) => real(fx),
+		},
+		{
+			row: "7 (h2) alias root, alias file",
+			session: (fx) => alias(fx),
+			file: (fx) => alias(fx, "src", "real.ts"),
+			mode: "session",
+			register: (fx) => alias(fx),
+		},
+		{
+			row: "8 alias root, real file under a nested config",
+			session: (fx) => alias(fx),
+			file: (fx) => real(fx, "pkg", "a.ts"),
+			mode: "session",
+			register: (fx) => real(fx, "pkg"),
+		},
+		{
+			row: "9 alias root, outside file",
+			session: (fx) => alias(fx),
+			file: (fx) => fx.outsideFile,
+			mode: "none",
+			register: none,
+		},
+		{
+			row: "10 missing alias root, real file",
+			session: (fx) => alias(fx, "gone"),
+			file: (fx) => real(fx, "gone", "src", "a.ts"),
+			mode: "session",
+			register: (fx) => real(fx, "gone"),
+		},
+		{
+			row: "11 missing alias root, alias file",
+			session: (fx) => alias(fx, "gone"),
+			file: (fx) => alias(fx, "gone", "src", "a.ts"),
+			mode: "session",
+			register: (fx) => alias(fx, "gone"),
+		},
+		{
+			row: "12 missing real root, real file",
+			session: (fx) => real(fx, "gone"),
+			file: (fx) => real(fx, "gone", "src", "a.ts"),
+			mode: "session",
+			register: (fx) => real(fx, "gone"),
+		},
+		{
+			row: "13 missing alias root, outside file",
+			session: (fx) => alias(fx, "gone"),
+			file: (fx) => fx.outsideFile,
+			mode: "none",
+			register: none,
+		},
+	];
+
+	it.for(cells)("row $row", async (cell, ctx) => {
+		const fx = createPathIdentityFixture(env.tmpDir);
+		if (fx.skipReason) return ctx.skip(fx.skipReason);
+		fs.mkdirSync(real(fx, "pkg"), { recursive: true });
+		fs.writeFileSync(real(fx, "pkg", ".pi-lens.json"), "{}\n");
+		fs.writeFileSync(real(fx, "pkg", "a.ts"), "export const a = 1;\n");
+		const session = cell.session(fx);
+		const file = cell.file(fx);
+		const expected = cell.register(fx);
+		runtime.projectRoot = session;
+		// session_start registers the session root as the host spelled it.
+		await initLSPConfig(session);
+
+		expect(resolveAnalysisRoot(file, session)).toBe(cell.mode);
+		expect(resolveSessionConfigRoot(file, session)).toEqual({
+			register: expected,
+			mode: cell.mode,
+		});
+
+		await readCall(file, session, 4689);
+
+		const registry = registryFor(session);
+		if (expected === undefined) {
+			expect(getSessionRootsForTelemetry(200)).toEqual([session]);
+			return;
+		}
+		expect(isSessionRootRegistered(expected)).toBe(true);
+		// The #2052 gate serves the file, so its root's denial reaches it, and
+		// the LSP keeps the session class for it.
+		expect(registry.fileIsOutsideRegisteredRoots(file)).toBe(false);
+		expect(registry.analysisRootModeForFile(file)).toBe("session");
+		// Never the edited file's own directory (the #2657 population).
+		if (path.dirname(file) !== expected)
+			expect(isSessionRootRegistered(path.dirname(file))).toBe(false);
+	});
+
+	it("row 14 linked worktree spelled through an alias registers the alias", async (ctx) => {
+		// The worktree branch takes the same rule: the class resolves the owner
+		// by identity, and the registration must hold the file as spelled. The
+		// checkout sits beside the temp root for the reason the linked-worktree
+		// cell above gives (#4560).
+		const checkoutRoot = path.join(
+			env.tmpDir,
+			"..",
+			`capture-4689-worktree-${process.pid}`,
+		);
+		try {
+			const { repo, worktree } = writeLinkedWorktree(checkoutRoot);
+			const worktreeAlias = path.join(checkoutRoot, "repo-wt-alias");
+			fs.mkdirSync(path.join(worktree, "src"), { recursive: true });
+			fs.writeFileSync(
+				path.join(worktree, "src", "sibling.ts"),
+				"export const value = 1;\n",
+			);
+			try {
+				fs.symlinkSync("repo-wt", worktreeAlias, "dir");
+			} catch (err) {
+				return ctx.skip(`cannot create symlinks here: ${String(err)}`);
+			}
+			const file = path.join(worktreeAlias, "src", "sibling.ts");
+			runtime.projectRoot = repo;
+			await initLSPConfig(repo);
+
+			expect(resolveSessionConfigRoot(file, repo)).toEqual({
+				register: worktreeAlias,
+				mode: "linked-worktree",
+			});
+
+			await readCall(file, repo, 4690);
+
+			expect([...getSessionRootsForTelemetry(200)].sort()).toEqual(
+				[repo, worktreeAlias].sort(),
+			);
+			const registry = registryFor(repo);
+			expect(registry.fileIsOutsideRegisteredRoots(file)).toBe(false);
+			expect(registry.analysisRootModeForFile(file)).toBe("linked-worktree");
 		} finally {
 			fs.rmSync(checkoutRoot, { recursive: true, force: true });
 		}
