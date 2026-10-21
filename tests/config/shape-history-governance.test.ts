@@ -197,18 +197,31 @@ describe("blankMarkdown comment openers (#4717 V1)", () => {
 		expect(hidden("   <!--\n## Fold check")).not.toContain("Fold check");
 	});
 
-	it("drops the rest of a block comment's line, a raw-HTML block (fail closed)", () => {
-		// GitHub prints the text after `-->` on the opener's line as raw HTML
-		// text; a raw-HTML block's text is never an answer, so it is dropped.
-		expect(hidden("<!-- note --> after\n\nnext")).not.toContain("after");
-		expect(hidden("<!-- note --> after\n\nnext")).toContain("next");
-	});
+	it.each([
+		["-->", "<!-- note --> after"],
+		["--!>", "<!-- note --!> after"],
+		["<!-->", "<!--> after"],
+		["<!--->", "<!---> after"],
+	])(
+		"keeps the text after a block comment's %s end on its line (#4565)",
+		(_name, line) => {
+			// GitHub prints the block's text after the comment: the browser ends a
+			// comment at each of these, whatever the markdown block around it.
+			const out = hidden(`${line}\n\nnext`);
+			expect(out).not.toContain("note");
+			expect(out).toContain("after");
+			expect(out).toContain("next");
+		},
+	);
 
-	it("runs a block comment that only `--!>` ends to the end of the text (B6)", () => {
-		// No `-->` line ends the HTML block, so GitHub renders no heading after it.
-		expect(hidden("<!--\nhidden\n--!>\n\n## Tests\nx")).not.toContain(
-			"## Tests",
-		);
+	it("hides only the comment of a block that `--!>` ends (B6)", () => {
+		// No `-->` line ends the HTML block, so it runs to the end and GitHub
+		// renders no heading after it (the sections test pins that through the
+		// lexer's headings); the browser still shows the block's text after
+		// `--!>`, as raw text.
+		const out = hidden("<!--\nhidden\n--!>\n\n## Tests\nx");
+		expect(out).not.toContain("hidden");
+		expect(out).toContain("## Tests");
 	});
 
 	it("hides an inline comment that closes in its own paragraph", () => {

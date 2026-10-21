@@ -62,13 +62,40 @@ function children(token) {
 }
 
 function isComment(token) {
-	return /^ {0,3}<!--/.test(token.raw);
+	return token.raw.startsWith("<!--");
+}
+
+/**
+ * The comments inside a raw-HTML block's text, as the browser reads them
+ * (the HTML tokenizer's comment states, not CommonMark's): `<!-->` and
+ * `<!--->` end at once, any other comment at its first `-->` or `--!>`, and
+ * one with no end runs to the end of the block. GitHub shows the rest of the
+ * block, so a comment that ends mid-line leaves the line's tail visible
+ * (#4565). Offsets are into `raw`.
+ */
+function commentRanges(raw) {
+	const ranges = [];
+	for (let at = raw.indexOf("<!--"); at !== -1;) {
+		const open = at + 4;
+		let end;
+		if (raw.startsWith(">", open)) end = open + 1;
+		else if (raw.startsWith("->", open)) end = open + 2;
+		else {
+			const close = /--!?>/g;
+			close.lastIndex = open;
+			const match = close.exec(raw);
+			end = match ? match.index + match[0].length : raw.length;
+		}
+		ranges.push([at, end]);
+		at = raw.indexOf("<!--", end);
+	}
+	return ranges;
 }
 
 // What a mode blanks. `code`: "blocks" (fenced and indented), "fenced"
 // (indented code stays text) or false. `html`: "blocks" (every raw-HTML block
-// and every inline comment), "comments" (comment blocks and inline comments)
-// or false. `codeSpans`: true blanks inline code.
+// and every inline comment), "comments" (the comments inside raw-HTML blocks,
+// and inline comments) or false. `codeSpans`: true blanks inline code.
 function isTarget(token, mode) {
 	if (token.type === "code")
 		return (
@@ -78,7 +105,8 @@ function isTarget(token, mode) {
 	if (token.type === "html") {
 		if (token.block)
 			return (
-				mode.html === "blocks" || (mode.html === "comments" && isComment(token))
+				mode.html === "blocks" ||
+				(mode.html === "comments" && token.raw.includes("<!--"))
 			);
 		return Boolean(mode.html) && isComment(token);
 	}
@@ -113,22 +141,53 @@ function place(source, raw, cursor) {
 	return { spans, end: at };
 }
 
-/** Mark every target inside one block; false when one cannot be placed. */
+/**
+ * The source spans a placed target hides: all of it, except a raw-HTML block
+ * under `html: "comments"`, which hides only its comments. A raw range is
+ * mapped through the placed lines (`raw`'s non-empty lines, in order).
+ */
+function hiddenSpans(token, mode, spans) {
+	if (!(token.type === "html" && token.block && mode.html === "comments"))
+		return spans;
+	const lines = [];
+	let offset = 0;
+	for (const piece of token.raw.split("\n")) {
+		if (piece) lines.push([offset, offset + piece.length]);
+		offset += piece.length + 1;
+	}
+	const hidden = [];
+	for (const [from, to] of commentRanges(token.raw))
+		lines.forEach(([start, end], index) => {
+			const low = Math.max(from, start);
+			const high = Math.min(to, end);
+			if (low < high)
+				hidden.push([
+					spans[index][0] + low - start,
+					spans[index][0] + high - start,
+				]);
+		});
+	return hidden;
+}
+
+/**
+ * Mark every target inside one block; false when one holding a target cannot
+ * be placed. Each token is placed before its children and the cursor then
+ * moves past all of it, so text a token holds outside its children (a link's
+ * destination) can never take a later token's place.
+ */
 function markInside(source, block, mode, mask) {
 	let cursor = block.start;
 	const visit = (token) => {
-		const target = isTarget(token, mode);
-		const kids = target ? [] : children(token);
-		if (kids.length) return kids.every(visit);
 		const placed = place(source, token.raw ?? "", cursor);
-		if (!placed) return !target;
-		if (target) for (const [from, to] of placed.spans) mask.fill(1, from, to);
+		if (!placed) return !containsTarget(token, mode);
+		if (isTarget(token, mode))
+			for (const [from, to] of hiddenSpans(token, mode, placed.spans))
+				mask.fill(1, from, to);
+		else if (!children(token).every(visit)) return false;
 		cursor = placed.end;
 		return true;
 	};
-	return isTarget(block.token, mode)
-		? false
-		: children(block.token).every(visit);
+	return visit(block.token);
 }
 
 function markRegions(source, mode, mask) {
@@ -143,19 +202,13 @@ function markRegions(source, mode, mask) {
  * `text` with the regions `mode` names replaced by spaces. Line breaks are
  * kept, and so is every other character, so line numbers and offsets still
  * match the input (`\r\n` included). Fail closed: a target the lexer reports
- * but this module cannot place blanks its whole top-level block, and a second
- * lex of the result blanks a target that survived because the first pass
- * placed it on an earlier copy of its text (a link destination).
+ * but this module cannot place blanks its whole top-level block.
  */
 export function blankMarkdownRegions(text, mode) {
 	const original = String(text ?? "");
 	const source = normalized(original);
 	const mask = new Uint8Array(source.length);
 	markRegions(source, mode, mask);
-	const once = apply(source, mask);
-	// A target that survives (a raw string placed on an earlier copy of itself)
-	// is found again in the blanked text, whose offsets are the same.
-	markRegions(once, mode, mask);
 	return restoreLineEnds(original, apply(source, mask));
 }
 

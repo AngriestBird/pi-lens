@@ -115,11 +115,13 @@ describe("blankMarkdownRegions (#4717)", () => {
 	});
 
 	it.each([
+		["a raw-HTML block", "<details>\n<!-- hidden -->\nb\n</details>", "b"],
+		["a block comment's line", "<!-- hidden --> b", "b"],
 		["a block quote", "> a <!-- hidden -->\n> b", "b"],
 		["a list item", "- a <!-- hidden -->\n- b", "b"],
 		["a table cell", "| a | <!-- hidden --> |\n| - | - |\n| b | c |", "b"],
 		["a heading", "## A <!-- hidden --> B\nb", "B"],
-	])("hides an inline comment inside %s", (_name, markdown, kept) => {
+	])("hides only the comment inside %s", (_name, markdown, kept) => {
 		const out = blankMarkdownRegions(markdown, { html: "comments" });
 		expect(out).not.toContain("hidden");
 		expect(out).toContain(kept);
@@ -152,16 +154,26 @@ describe("blankMarkdownRegions (#4717)", () => {
 		expect(out.trim()).toBe("");
 	});
 
-	it("hides a comment the first pass placed on its copy in a link destination", () => {
-		// Recurrence it prevents: the comment's raw text also sits inside the
-		// link's destination, which no token covers, so the first pass blanks
-		// that copy and the real comment stays visible. GitHub hides the
-		// comment; the second lex finds it.
+	it("hides a comment whose copy sits in an earlier link destination", () => {
+		// Recurrence it prevents: the link's destination is text no child token
+		// covers, so a cursor that only moved past the children found the
+		// comment's copy there, blanked it, and left the real comment visible.
 		const out = blankMarkdownRegions("[a](u<!--z-->)<!--z--> tail", {
 			html: "comments",
 		});
-		expect(out).not.toMatch(/\)<!--z-->/);
-		expect(out).toContain("tail");
+		expect(out).toBe(`[a](u<!--z-->)${" ".repeat(8)} tail`);
+	});
+
+	it("never turns a blanked line start into indented code", () => {
+		// Recurrence it prevents: a second lex of the blanked text read the
+		// spaces left before a comment's visible tail as an indented code block
+		// and blanked the tail too (#4565's evidence line).
+		expect(
+			blankMarkdownRegions("<!-- note --> after", {
+				html: "comments",
+				code: "blocks",
+			}),
+		).toBe(`${" ".repeat(13)} after`);
 	});
 
 	it("keeps a lone CR and CRLF line end where they were", () => {
