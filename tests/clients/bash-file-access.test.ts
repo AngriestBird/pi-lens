@@ -1778,6 +1778,33 @@ describe("scanShellWriteScopes — the command's effective directory (#2050)", (
 			bash: "sub/f.ts",
 			named: ["sub"],
 		},
+		// #4713 R11 mutations: each row reds one reader of the word model that
+		// no earlier row reached (C2, K7, C5, the dropped value regex).
+		{
+			row: 'R116 cd "s$D", an expansion inside double quotes (R11)',
+			command: 'D=ub; cd "s$D"; printf x > f.ts',
+			bash: "sub/f.ts",
+			fallback: "f.ts",
+			named: [],
+		},
+		{
+			row: "R117 cd sub\\ at the end, a backslash bash keeps (R11)",
+			command: "printf x > f.ts; cd sub\\",
+			bash: "f.ts",
+			named: [],
+		},
+		{
+			row: 'R118 cd a""~, a ~ that begins a later part (R11)',
+			command: "mkdir 'a~'; cd a\"\"~; printf x > f.ts",
+			bash: "a~/f.ts",
+			named: ["a~"],
+		},
+		{
+			row: "R119 cd 'a*', a quoted glob character (R11)",
+			command: "mkdir 'a*'; cd 'a*'; printf x > f.ts",
+			bash: "a*/f.ts",
+			named: ["a*"],
+		},
 	];
 
 	it.each(CWD_ROWS)(
@@ -1795,6 +1822,13 @@ describe("scanShellWriteScopes — the command's effective directory (#2050)", (
 			);
 		},
 	);
+
+	// #4713 R11 (mutation D1): the raw redirect scanner splits a quoted name
+	// at its space and hands the model `"f.ts`, an open quote; crediting
+	// `f.ts` would mark a file bash never wrote as authored.
+	it("names no file for a redirect target the raw scanner split (#4713 R11)", () => {
+		expect(written('printf x > "f.ts x"')).toEqual([]);
+	});
 
 	// #4713 R7-1: a leading unquoted `~` moves the directory only as `~` or
 	// `~/`, which bash and the scan both expand from HOME; the other tilde

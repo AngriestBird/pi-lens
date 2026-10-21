@@ -12,7 +12,8 @@
  * with every quoting form that emits nothing (`''`, `""`, `$''`, `$""`,
  * backslash-newline), crossed with an escape before any letter or of the
  * separator after the token; plus one quoting form wrapped around the whole
- * token or one letter, with and without an escape inside.
+ * token or one letter, with nothing, an escape or a backslash-newline inside
+ * (bash removes `\⏎` inside double quotes, and keeps it inside single ones).
  *
  * Each row runs `<spelling> ; printf x > f.ts` through real `bash -c` in a
  * fixture holding `sub/` and `sub /`, then through `scanShellWriteScopes`.
@@ -68,9 +69,9 @@ function spellings(token: string): string[] {
 		[middle, middle + 1],
 	] as const)
 		for (const [open, close] of WRAPS)
-			for (const escapeInside of [false, true])
+			for (const inside of ["", "\\", "\\\n"])
 				out.add(
-					`${token.slice(0, from)}${open}${escapeInside ? "\\" : ""}${token.slice(from, to)}${close}${token.slice(to)}`,
+					`${token.slice(0, from)}${open}${inside}${token.slice(from, to)}${close}${token.slice(to)}`,
 				);
 	return [...out];
 }
@@ -114,8 +115,8 @@ const ACCEPTED: ReadonlyArray<{
 }> = [
 	{
 		reason:
-			"R7-4, the PR's declared p3 residual: a cd whose one operand is a static path moves the scan without a stat, so a directory that does not exist (here a single-quoted backslash, `cd s'\\u'b`) is entered where bash stays",
-		rows: 2,
+			"R7-4, the PR's declared p3 residual: a cd whose one operand is a static path moves the scan without a stat, so a directory that does not exist (here a single-quoted backslash or backslash-newline, `cd s'\\u'b`, bash's own word) is entered where bash stays",
+		rows: 4,
 		covers: (_row, outcome) =>
 			outcome.bashEntered === undefined &&
 			outcome.named.length === 1 &&

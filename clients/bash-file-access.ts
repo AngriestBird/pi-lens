@@ -63,13 +63,12 @@ type WordPartKind =
 /**
  * One stretch of a word, kept even when it emits nothing (`""`). `text` is
  * what bash emits for it, and is `undefined` only for an `ansiC` part holding
- * an escape, which this model does not decode. `span` is `[start, end)` in the
- * text the tokenizer read.
+ * an escape, which this model does not decode. Adjacent quotes of one kind
+ * share a part: no reader tells `'a''b'` from `'ab'`, as bash does not.
  */
 interface WordPart {
 	kind: WordPartKind;
 	text: string | undefined;
-	span: readonly [number, number];
 }
 
 /**
@@ -301,9 +300,7 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 	let words: ShellWord[] = [];
 	// The word's parts so far, and the one still open (#4713 R11).
 	let parts: WordPart[] = [];
-	let part:
-		| { kind: WordPartKind; text: string; start: number; end: number }
-		| undefined;
+	let part: { kind: WordPartKind; text: string } | undefined;
 	let quote: "single" | "double" | undefined;
 	// The part kind the open quote emits: `single`, `double`, `ansiC`, `locale`.
 	let quoteKind: WordPartKind = "single";
@@ -330,24 +327,17 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 					part.kind === "ansiC" && part.text.includes("\\")
 						? undefined
 						: part.text,
-				span: [part.start, part.end],
 			});
 		part = undefined;
 	};
-	// Append source `[start, end)`, emitting `text`, to the open part of
-	// `kind`, opening one when the open part is of another kind.
-	const addToPart = (
-		kind: WordPartKind,
-		text: string,
-		start: number,
-		end: number,
-	) => {
+	// Append the emitted `text` to the open part of `kind`, opening one when
+	// the open part is of another kind.
+	const addToPart = (kind: WordPartKind, text: string) => {
 		if (part?.kind !== kind) {
 			closePart();
-			part = { kind, text: "", start, end };
+			part = { kind, text: "" };
 		}
 		part.text += text;
-		part.end = end;
 	};
 	const flushWord = () => {
 		closePart();
@@ -393,13 +383,10 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 		const ch = command[i] ?? "";
 		const next = command[i + 1];
 		if (quote === "single") {
-			if (ch === "'") {
-				quote = undefined;
-				addToPart(quoteKind, "", i, i + 1);
-				closePart();
-			} else {
+			if (ch === "'") quote = undefined;
+			else {
 				word += ch;
-				addToPart(quoteKind, ch, i, i + 1);
+				addToPart(quoteKind, ch);
 			}
 			continue;
 		}
@@ -409,17 +396,14 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 				// the character is an escaped part of its own, and keeps it before
 				// any other character; the token drops it either way.
 				word += ch;
-				if ('$`"\\'.includes(ch)) addToPart("escaped", ch, i - 1, i + 1);
-				else if (ch !== "\n") addToPart(quoteKind, `\\${ch}`, i - 1, i + 1);
+				if ('$`"\\'.includes(ch)) addToPart("escaped", ch);
+				else if (ch !== "\n") addToPart(quoteKind, `\\${ch}`);
 				escaped = false;
 			} else if (ch === "\\") escaped = true;
-			else if (ch === '"') {
-				quote = undefined;
-				addToPart(quoteKind, "", i, i + 1);
-				closePart();
-			} else {
+			else if (ch === '"') quote = undefined;
+			else {
 				word += ch;
-				addToPart(quoteKind, ch, i, i + 1);
+				addToPart(quoteKind, ch);
 			}
 			continue;
 		}
@@ -429,7 +413,7 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 			// visible to command guards.
 			if (ch !== "\n") {
 				word += ch;
-				addToPart("escaped", ch, i - 1, i + 1);
+				addToPart("escaped", ch);
 			}
 			escaped = false;
 			atTokenStart = false;
@@ -445,7 +429,7 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 			} else {
 				// Bash removes this backslash; the token keeps it.
 				word += ch;
-				if (next === undefined) addToPart("unquoted", ch, i, i + 1);
+				if (next === undefined) addToPart("unquoted", ch);
 				else escapeKept = true;
 			}
 			atTokenStart = false;
@@ -461,10 +445,9 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 					: dollarQuote
 						? "locale"
 						: "double";
-			// A quote always opens its own part, so `""` is kept though it emits
-			// nothing.
-			closePart();
-			addToPart(quoteKind, "", dollarQuote ? i - 1 : i, i + 1);
+			// A quote opens a part even when it emits nothing, so `""FOO=1`
+			// starts with a quoted part and is no assignment.
+			addToPart(quoteKind, "");
 			dollarQuote = false;
 			atTokenStart = false;
 			continue;
@@ -548,9 +531,9 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 		}
 		if ("(){}`".includes(ch)) grouping = true;
 		word += ch;
-		if (escapeKept) addToPart("escaped", ch, i - 1, i + 1);
+		if (escapeKept) addToPart("escaped", ch);
 		else if (ch === "$" && (next === "'" || next === '"')) dollarQuote = true;
-		else addToPart("unquoted", ch, i, i + 1);
+		else addToPart("unquoted", ch);
 		escapeKept = false;
 		atTokenStart = false;
 	}
@@ -1157,12 +1140,12 @@ export function extractGrepSearchReadsFromOutput(
 /**
  * The directory a `cd`/`pushd` operand names, read from its word model
  * (#4713 R7-1, R8-2, R11), or `undefined` when bash's word is not known before
- * the shell runs it. Admitted: bash's own word after quote removal, with no
- * backslash bash keeps inside double quotes, every unquoted character from
- * `LITERAL_WORD_CHAR` (an unquoted
- * `~` only as the word's first character), starting with a `PLAIN_PATH_START`
- * character, with no `$`, backtick or glob character, and a tilde bash expands
- * only as `~` or `~/…`. `~+1`, `~-`, `~user`, `$D` and `*` name nothing.
+ * the shell runs it. Admitted: bash's own word after quote removal, starting
+ * with a `PLAIN_PATH_START` character, with no `$`, backtick or backslash in
+ * a double-quoted part, every unquoted character from `LITERAL_WORD_CHAR` (or
+ * a `~` that begins its part), and a tilde bash expands only as `~` or `~/…`.
+ * `~+1`, `~-`, `~user`, `$D` and an unquoted `*` name nothing; a quoted `'*'`
+ * is the literal name bash enters.
  *
  * #2050 AC4: bash rewrites the working directory mid-command, so a relative
  * operand after a `cd` belongs to the directory it entered, not to the
@@ -1173,31 +1156,24 @@ function cdOperandPath(
 	cwd: string,
 ): string | undefined {
 	const value = word && wordValue(word);
-	if (
-		!word ||
-		value === undefined ||
-		!PLAIN_PATH_START.test(value) ||
-		/[$`*?[]/.test(value)
-	)
+	if (!word || value === undefined || !PLAIN_PATH_START.test(value))
 		return undefined;
-	let emitted = 0;
 	for (const part of word.parts) {
 		const text = part.text ?? "";
-		// A backslash bash keeps inside double quotes (`"s\ub"`, R50) names a
-		// directory the token text spells without it.
+		// Inside double quotes bash expands `$` and a backtick (`"s$D"`, R116),
+		// and keeps a backslash the token text drops (`"s\ub"`, R50).
 		if (
 			(part.kind === "double" || part.kind === "locale") &&
-			text.includes("\\")
+			/[\\$`]/.test(text)
 		)
 			return undefined;
+		// Unquoted, a `~` is literal unless it begins the word (the tilde rule
+		// below) or follows an unquoted `=` (`cd a=~/x`, R73): one that begins
+		// a later part follows a quote or an escape (`cd a""~`, R118).
 		if (part.kind === "unquoted")
 			for (const [index, ch] of [...text].entries())
-				if (
-					!LITERAL_WORD_CHAR.test(ch) &&
-					!(ch === "~" && emitted + index === 0)
-				)
+				if (!LITERAL_WORD_CHAR.test(ch) && !(ch === "~" && index === 0))
 					return undefined;
-		emitted += text.length;
 	}
 	const tilde = tildeExpands(word);
 	if (tilde && value !== "~" && !value.startsWith("~/")) return undefined;
@@ -1304,8 +1280,11 @@ export function scanShellWriteScopes(
 				if (redirect.index < segmentStart) continue;
 				// The target is read through the same word model as any operand,
 				// so `> ''~/f.ts` names the literal `./~/f.ts` (#4713 R11).
-				const [target, ...more] = tokenizeShellCommandWithRanges(redirect.text);
-				if (target && more.length === 0 && !target.segment.unsupported)
+				// The raw scanner stops at every character that ends a range, so
+				// the text is one range; it holds an open quote when the scanner
+				// split a quoted name (`> "f.ts x"`), which names nothing.
+				const [target] = tokenizeShellCommandWithRanges(redirect.text);
+				if (target && !target.segment.unsupported)
 					for (const operand of shellOperands(target)) add(operand);
 			}
 		}
