@@ -288,7 +288,6 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 		quotedTilde = [];
 		redirectWords = [];
 		grouping = false;
-		if (exit !== "redirect") redirectPending = false;
 		unsupported = false;
 		atTokenStart = true;
 		segmentStart = end + 1;
@@ -413,6 +412,7 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 				if (parsed) {
 					pendingHeredocs.push(parsed.heredoc);
 					i = parsed.end;
+					// The delimiter was this redirection's word.
 					redirectPending = false;
 				}
 			}

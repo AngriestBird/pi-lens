@@ -1297,6 +1297,16 @@ describe("scanShellWriteScopes — the command's effective directory (#2050)", (
 			command: "cd sub && cat <<EOF\n$(cd ..)\nEOF\nprintf x > f.ts",
 			bash: "sub/f.ts",
 		},
+		{
+			row: "R35 cd on the line after a heredoc",
+			command: "cat <<EOF\nx\nEOF\ncd sub && printf x > f.ts",
+			bash: "sub/f.ts",
+		},
+		{
+			row: "R36 a relative cd after a fallback",
+			command: "cd sub; pushd; cd ..; printf x > f.ts",
+			bash: "f.ts",
+		},
 	];
 
 	it.each(CWD_ROWS)(
