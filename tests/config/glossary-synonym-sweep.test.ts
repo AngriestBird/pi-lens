@@ -1209,7 +1209,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// the scan ran in, and the held-primary send groups the written set by
 		// the root that holds each file; three `path.resolve` reads where there
 		// were one, no new delivery path.
-		"clients/runtime-tool-result.ts": 20,
+		// 20 -> 17 (#4713 F3): ownership, the observed-identity lookup and the
+		// recognized-set subtraction compare REAL paths (`realpathOrResolve`), so
+		// a symlinked spelling of a worktree file matches the identity git
+		// reported. Three `path.resolve` reads became realpath reads.
+		"clients/runtime-tool-result.ts": 17,
 		// 25 -> 27 (#3218): the resolved-blocker filter keys both the current
 		// blocker set and each resolved entry with `path.resolve`.
 		// 27 -> 26 (#2542 ask 3): `deferralEntryKey` moved to

@@ -27,6 +27,7 @@ import {
 import {
 	isUnderDir,
 	normalizeMapKey,
+	realpathOrResolve,
 	resolveToolCallFilePath,
 } from "./path-utils.js";
 import { detectFileKind } from "./file-kinds.js";
@@ -660,6 +661,14 @@ interface ToolResultDeps {
 	 * provenance, so it states it here instead of the handler re-detecting it.
 	 */
 	_pathAlreadyResolved?: boolean;
+	/**
+	 * Internal (#4713 F2): the checkout a synthetic bash-write dispatch belongs
+	 * to. The ignore gate asks THAT checkout's rules, not the session root's: a
+	 * linked worktree nested inside the session root is admitted by its own
+	 * checkout, while the parent's rule for the directory it sits in says
+	 * nothing about the nested tree's files. Absent means the session root.
+	 */
+	_ownerRoot?: string;
 }
 
 /** How the agent's own write/edit moves the read guard (#3524, #3525). */
@@ -2051,9 +2060,13 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		/**
 		 * The most specific recovery root holding `file`, so two roots that
 		 * overlap (a worktree nested under the session root) never both claim it.
+		 * The file is compared by its REAL path (#4713 F3): a `cd` into a symlink
+		 * that points at a linked worktree names that checkout under a different
+		 * spelling, and a lexical match put the file under the session root — the
+		 * root whose observation never saw it.
 		 */
 		const ownerRootOf = (file: string): string | undefined => {
-			const abs = path.resolve(file);
+			const abs = realpathOrResolve(file);
 			let owner: string | undefined;
 			for (const root of recoveryScopes.roots) {
 				if (!isUnderDir(abs, root)) continue;
@@ -2072,6 +2085,12 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		// (`canWriteAnalysisRoot("linked-worktree")`), so it is admitted by the
 		// checkout it belongs to and judged against THAT checkout's ignores.
 		const isRecordableBashWrite = (wp: string): boolean => {
+			// #4713 F3: whether a checkout may be written is `analysis-root.ts`'s
+			// rule, not a second derivation here. It resolves the file's real path,
+			// so a worktree reached through a symlinked spelling is admitted exactly
+			// like the real one; the OWNER root still answers which ignores apply.
+			if (!canWriteAnalysisRoot(resolveAnalysisRoot(wp, workspaceRoot)))
+				return false;
 			if (isRecordableProjectPath(wp, workspaceRoot)) return true;
 			const owner = ownerRootOf(wp);
 			return (
@@ -2255,8 +2274,13 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			// OBSERVATION keeps it (`recoveredByRoot`), because that is the evidence
 			// its authorship is judged on below.
 			if (opaquePaths.length > 0 && recognizedWritten.length > 0) {
+				// #4713 F3: the recovered keys are git's own identities, so the
+				// recognized side is compared by its real path too. A symlinked
+				// spelling of a worktree file is the same file, and subtracting it
+				// keeps one dispatch and one authorship rather than an authored
+				// write plus an opaque copy of its own bytes.
 				const survivingKeys = new Set(
-					recognizedWritten.map((p) => normalizeMapKey(path.resolve(p))),
+					recognizedWritten.map((p) => normalizeMapKey(realpathOrResolve(p))),
 				);
 				opaquePaths = opaquePaths.filter((p) => !survivingKeys.has(p));
 			}
@@ -2276,7 +2300,11 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 						owner === undefined ? undefined : recoveredByRoot.get(owner);
 					if (owner === undefined || observed === undefined)
 						unscanned.push(file);
-					else if (observed.has(normalizeMapKey(path.resolve(file))))
+					// #4713 F3: the observation is keyed by the identity git reported, so
+					// the LOOKUP takes the file's real path too. A symlinked spelling of a
+					// worktree path matched nothing, so a recognised write that WAS
+					// observed read as unscanned and lost its authorship.
+					else if (observed.has(normalizeMapKey(realpathOrResolve(file))))
 						scanned.push(file);
 				}
 				recognizedAuthored = scanned;
@@ -2616,6 +2644,9 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				...deps,
 				event: syntheticEvent,
 				_bypassDebounce: true,
+				// #4713 F2: the checkout that owns this written path, so the ignore
+				// gate below asks the root that admitted the write.
+				_ownerRoot: ownerRootOf(wp),
 				_autofixMode: autofixMode,
 				_attachmentBudget: syntheticAttachmentBudget,
 				_mutationSourceOverride: isOpaque ? "opaque-script" : undefined,
@@ -3656,7 +3687,9 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// declaration right after the observational settle.
 	dbg(`tool_result: tracking turn state for ${event.toolName} on ${filePath}`);
 
-	if (isPathIgnoredByProject(filePath, workspaceRoot, false)) {
+	if (
+		isPathIgnoredByProject(filePath, deps._ownerRoot ?? workspaceRoot, false)
+	) {
 		dbg(`tool_result: skipping gitignored file ${filePath}`);
 		return;
 	}

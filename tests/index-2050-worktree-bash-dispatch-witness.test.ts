@@ -220,18 +220,128 @@ describe("a bash write in a linked worktree of the session repo (#2050)", () => 
 			expect(dispatchedRules(read, target)).toContain(DISPATCH_RULE);
 			// DELIVERY, half 2: the publisher (#4612) got each phase's population
 			// under the WORKTREE root, so the LSP consumer asks that root's clients.
-			// Both phases are asserted by their own source label: the awaited
-			// primary phase and the detached drift pass.
-			const publishedRoots = (source: string): Array<string | undefined> =>
+			// Both phases are asserted by their own source label AND by the
+			// population the publish carried: `recorded` is the count the publisher
+			// derived from the paths handed to it, so an emptied population reds
+			// here too (review round 3, F4: the root-only assertion survived both
+			// `paths: files -> []` and `publishRecoveredDrift(root, [])`).
+			const published = (source: string) =>
 				phases(read, "disk_change_published")
 					.filter((row) => row.metadata?.sources === source)
-					.map((row) => row.filePath);
-			expect(publishedRoots("bash-write")).toEqual([
-				fs.realpathSync.native(worktree),
+					.map((row) => ({
+						root: row.filePath,
+						recorded: row.metadata?.recorded,
+						result: row.result,
+					}));
+			const worktreeRoot = fs.realpathSync.native(worktree);
+			expect(published("bash-write")).toEqual([
+				{ root: worktreeRoot, recorded: 1, result: "bash-recovery:1" },
 			]);
-			expect(publishedRoots("recovered-drift")).toEqual([
-				fs.realpathSync.native(worktree),
+			expect(published("recovered-drift")).toEqual([
+				{ root: worktreeRoot, recorded: 1, result: "bash-recovery:1" },
 			]);
+		},
+	);
+
+	it(
+		"dispatches a write in a nested worktree the session checkout ignores",
+		{ timeout: 180_000 },
+		async () => {
+			// The documented fixer layout: this repository ignores `.claude/`, and a
+			// fixer cuts its worktree under `.claude/worktrees/`. The owning checkout
+			// admits the file; judging it again against the PARENT's ignores dropped
+			// it silently (review round 3, F2: publish under the nested root, no
+			// runner row, no record).
+			const root = path.join(fixture.root, "ignored-parent");
+			const repo = initRepo(path.join(root, "proj"));
+			const scope = fs.realpathSync.native(root);
+			fs.writeFileSync(path.join(repo, ".gitignore"), ".claude/\n");
+			git(["add", "-A"], repo);
+			git(["commit", "-qm", "ignore the worktree parent"], repo);
+			const nested = path.join(repo, ".claude", "worktrees", "nested");
+			git(["worktree", "add", "-q", nested, "HEAD"], repo);
+			const target = path.join(nested, "opaque-nested-ignored.ts");
+
+			const session = await startPiSession({
+				root: fixture.root,
+				cwd: repo,
+				responses: [
+					step(
+						fauxToolCall("bash", {
+							command: `cd .claude/worktrees/nested && ${heredocWriter("opaque-nested-ignored.ts")}`,
+						}),
+					),
+					endTurn(),
+				],
+			});
+			await runBash(session);
+
+			expect(fs.readFileSync(target, "utf8")).toBe(BLOCKING);
+			const read = await rows(session, scope);
+			expect(
+				phases(read, "opaque_mutation_recovered").map((row) => row.result),
+			).toEqual(["changed:1"]);
+			expect(
+				phases(read, "disk_change_published")
+					.filter((row) => row.metadata?.sources === "bash-write")
+					.map((row) => ({
+						root: row.filePath,
+						recorded: row.metadata?.recorded,
+					})),
+			).toEqual([{ root: fs.realpathSync.native(nested), recorded: 1 }]);
+			// The parent's `.claude/` rule never reaches the nested checkout's own
+			// files, so the recovered bytes reach a dispatcher.
+			expect(dispatchedRules(read, target)).toContain(DISPATCH_RULE);
+		},
+	);
+
+	it(
+		"keeps the ownership of a write reached through a symlinked worktree spelling",
+		{ timeout: 180_000 },
+		async () => {
+			// A `cd` into a symlink that points at a linked worktree names the same
+			// checkout under a different spelling. The witness that judges a
+			// recognised write by ITS OWN root's observation compared a lexical
+			// spelling with a real path, lost the match, and fell back to the opaque
+			// half: dispatched, but with no authorship, so no inline finding
+			// (review round 3, F3).
+			const root = path.join(fixture.root, "alias");
+			const repo = initRepo(path.join(root, "proj"));
+			const scope = fs.realpathSync.native(root);
+			const worktree = path.join(root, "linked-worktree");
+			git(["worktree", "add", "-q", worktree, "HEAD"], repo);
+			const alias = path.join(repo, "alias-to-linked");
+			fs.symlinkSync(fs.realpathSync.native(worktree), alias);
+			const target = path.join(worktree, "alias-target.ts");
+			const spelled = path.join(alias, "alias-target.ts");
+
+			const session = await startPiSession({
+				root: fixture.root,
+				cwd: repo,
+				responses: [
+					step(
+						fauxToolCall("bash", {
+							command: `cd ${alias} && printf ${BLOCKING_PRINTF} > alias-target.ts`,
+						}),
+					),
+					endTurn(),
+				],
+			});
+			await runBash(session);
+
+			expect(fs.readFileSync(target, "utf8")).toBe(BLOCKING);
+			const read = await rows(session, scope);
+			// The recognised write dispatches under the spelling the command used
+			// (the symlink), which is the checkout the recovery root also reports.
+			expect(dispatchedRules(read, spelled)).toContain(DISPATCH_RULE);
+			// The same effect the sibling-worktree case pins for its own spelling:
+			// authorship is what carries the finding to the model, and with the
+			// ownership lost the file dispatched as an opaque write instead.
+			expect(bashResults(session)).toContain(DISPATCHED_FINDING);
+			// One file, one dispatch: the opaque half subtracts the identity the
+			// recognised write already claimed, so the model is never told "clean"
+			// about the same bytes it has just been told are blocked.
+			expect(phases(read, "dispatch_start")).toHaveLength(1);
 		},
 	);
 

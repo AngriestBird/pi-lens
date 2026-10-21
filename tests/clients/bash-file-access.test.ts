@@ -1087,6 +1087,47 @@ describe("scanShellWriteScopes — the command's effective directory (#2050)", (
 			),
 		).toEqual([]);
 	});
+
+	it("does not credit a heredoc body's redirect to the segment after it", () => {
+		// Body offsets sit in the gap BETWEEN two segments, so the first outer
+		// segment after the body claimed an unquoted `>` from it as its own
+		// redirect (#4713 F5). The trailing body above never showed it.
+		expect(
+			written(
+				["node - <<'EOF'", "foo > phantom.ts", "EOF", "echo done"].join("\n"),
+			),
+		).toEqual([]);
+	});
+
+	it("does not carry a `cd` out of a pipe or a background job", () => {
+		// `|` and `&` run their side in a subshell, so a `cd` there never moves a
+		// later top-level segment. #4713 F1: the per-segment rule named these
+		// writes under `<sub>` while bash wrote them under the session root, so
+		// the real file lost its recognised authorship.
+		const sub = path.join(tmp, "sub");
+		expect(written(`cd ${sub} | cat; echo x > f.ts`)).toEqual([
+			path.join(tmp, "f.ts"),
+		]);
+		expect(written(`cd ${sub} & echo x > f.ts`)).toEqual([
+			path.join(tmp, "f.ts"),
+		]);
+	});
+
+	it("returns to the directory a `popd` restores", () => {
+		const sub = path.join(tmp, "sub");
+		expect(
+			written(`pushd ${sub} && echo x > in.ts && popd && echo y > out.ts`),
+		).toEqual([path.join(sub, "in.ts"), path.join(tmp, "out.ts")]);
+	});
+
+	it("keeps a `cd` the right side of `||` never ran", () => {
+		// A failing `cd` is the only way to reach the right side, so that write
+		// lands where the command started.
+		const sub = path.join(tmp, "sub");
+		expect(written(`cd ${sub} || echo x > f.ts`)).toEqual([
+			path.join(tmp, "f.ts"),
+		]);
+	});
 });
 
 // ── edge cases ──────────────────────────────────────────────────────────────

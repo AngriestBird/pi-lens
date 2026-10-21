@@ -1026,6 +1026,10 @@ export interface ShellWriteScan {
  * Every operand resolves against the working directory in effect for ITS
  * segment, so `cd <dir> && echo x > f.ts` names `<dir>/f.ts` (#2050 AC4).
  *
+ * A `cd` moves that directory only where bash would: across `&&`, `;` and a
+ * newline, never out of a `|` or `&` subshell, and never back past a `popd`
+ * (#4713 F1).
+ *
  * Returns absolute paths. The file need not exist yet (it may be created) —
  * existence is confirmed later by recordWritten at tool_result time.
  */
@@ -1039,6 +1043,9 @@ export function scanShellWriteScopes(
 	// The working directory in effect for the segment being read, which a `cd`
 	// or `pushd` in an earlier segment moves.
 	let effectiveCwd = cwd;
+	// The `pushd` directory stack, so a `popd` returns to the directory it
+	// restores instead of leaving the last `pushd` target in effect (#4713 F1).
+	const dirStack: string[] = [];
 	const add = (token: ShellOperand) => {
 		const abs = resolveCandidate(token, effectiveCwd);
 		if (abs) out.add(abs);
@@ -1053,22 +1060,36 @@ export function scanShellWriteScopes(
 	// body is not credited to this command at all.
 	const redirects = extractRedirectTargets(command);
 	let redirectCursor = 0;
-	for (const { segment, end: segmentEnd } of tokenizeShellCommandWithRanges(
-		command,
-	)) {
+	for (const {
+		segment,
+		start: segmentStart,
+		end: segmentEnd,
+	} of tokenizeShellCommandWithRanges(command)) {
+		// The directory this segment INHERITED, which the next one keeps unless
+		// this segment both moved and the terminator runs it in the same shell.
+		const inheritedCwd = effectiveCwd;
 		if (segmentEnd >= 0) {
 			for (; redirectCursor < redirects.length; redirectCursor += 1) {
 				const redirect = redirects[redirectCursor];
 				if (!redirect || redirect.index > segmentEnd) break;
+				// A heredoc body's offsets sit in the gap between two segments, so
+				// the first segment after the body would otherwise claim its `>`
+				// (#4713 F5).
+				if (redirect.index < segmentStart) continue;
 				add({
 					text: redirect.text,
 					quotedTilde: /^['"]/.test(redirect.text),
 				});
 			}
 		}
+		// Whether this segment moved the directory, which `||` reads: its right
+		// side runs only after a FAILURE, so a `cd` there did not move it.
+		let moved = false;
 		const tokens = shellOperands(segment);
-		if (tokens.length === 0) continue;
-		const { verb, args } = unwrapCommand(tokens);
+		const { verb, args } =
+			tokens.length === 0
+				? { verb: "", args: [] as ShellOperand[] }
+				: unwrapCommand(tokens);
 
 		if (verb === "cd" || verb === "pushd") {
 			const target = resolveCdOperand(
@@ -1080,12 +1101,19 @@ export function scanShellWriteScopes(
 					seenCdTargets.add(target);
 					cdTargets.push(target);
 				}
+				if (verb === "pushd") dirStack.push(effectiveCwd);
 				effectiveCwd = target;
+				moved = true;
 			}
-			continue;
-		}
-
-		if (verb === "tee" || verb === "touch") {
+		} else if (verb === "popd" && args.length === 0) {
+			// A `popd` that names an entry (`+N`, `-N`) is left alone: which
+			// directory it restores is not knowable from the stack alone.
+			const restored = dirStack.pop();
+			if (restored !== undefined) {
+				effectiveCwd = restored;
+				moved = true;
+			}
+		} else if (verb === "tee" || verb === "touch") {
 			for (const a of args) if (!a.text.startsWith("-")) add(a);
 		} else if (verb === "sed" && args.some((arg) => arg.text === "-i")) {
 			for (const a of args) add(a);
@@ -1225,6 +1253,20 @@ export function scanShellWriteScopes(
 				if (files.length >= 1) add(files[files.length - 1]);
 			}
 		}
+		// What the NEXT segment inherits. `&&`, `;` and a newline run it in this
+		// shell, so a move carries; `|` and `&` run this side in a subshell, whose
+		// cwd never leaks back; `||` runs its right side only after a failure, so
+		// a `cd` there did NOT move the directory. The terminator's own character
+		// is the segment's `end` (the tokenizer's `&&`/`||` end on their second
+		// character), so a chained pair is read from the character before it.
+		const endChar = segmentEnd >= 0 ? command[segmentEnd] : "";
+		const beforeEnd = segmentEnd > 0 ? command[segmentEnd - 1] : "";
+		const sameShell =
+			endChar === ";" ||
+			endChar === "\n" ||
+			(endChar === "&" && beforeEnd === "&");
+		const orChain = endChar === "|" && beforeEnd === "|";
+		if (!(sameShell || (orChain && !moved))) effectiveCwd = inheritedCwd;
 	}
 
 	return { written: Array.from(out), cdTargets };

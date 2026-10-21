@@ -1200,7 +1200,18 @@ file-scoped worklist and receives no project-wide scanner output.
   `opaque-recovery-root-refused` record per session. This is why a `cd` into a
   sibling worktree no longer reads a clean `git status` in the wrong checkout as
   "nothing changed". Relative operands resolve against the `cd` in effect for
-  their own segment (`scanShellWriteScopes`), never against the session root.
+  their own segment (`scanShellWriteScopes`), never against the session root;
+  that directory moves across `&&`, `;` and a newline only, never out of a `|`
+  or `&` subshell, and a `popd` restores the directory it pops (#4713).
+- A recovered write is judged by the checkout that OWNS it, in both directions:
+  the ignore gate a synthetic bash-write dispatch passes asks the `.gitignore`
+  of the root that admitted the write (`_ownerRoot`), not the session root's, so
+  a linked worktree nested under a directory the session checkout ignores is
+  analysed instead of dropped silently (`.claude/worktrees/` in this
+  repository); and admission asks `analysis-root.ts`
+  (`canWriteAnalysisRoot(resolveAnalysisRoot(...))`) rather than re-deriving the
+  rule. Ownership is compared by REAL path, so a `cd` into a symlinked spelling
+  of a worktree keeps its authorship and its observed identity (#4713).
 - `RUNNERS` declarations include file kinds. Runner selection is gated by file
   kind and anchored at the file's language root, not by dispatch-root config or
   declaration order. Runner children use `resolveToolCwd` with launcher markers.
