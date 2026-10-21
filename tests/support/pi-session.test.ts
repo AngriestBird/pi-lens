@@ -11,6 +11,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { normalizeFilePath } from "../../clients/path-utils.js";
+import { scannerReportParentDir } from "../../clients/scanner-temp-root.js";
 import {
 	getActivePrimaryRoot,
 	getActiveSessionId,
@@ -429,6 +430,38 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 		const metadata = rows[0]?.metadata as { mode?: string } | undefined;
 		expect(metadata?.mode).toBe("minimal");
 		await handle.dispose();
+	});
+
+	it("owns every scanner report directory a session's background scans create", async () => {
+		// #4632 slice 7 round 2. A `session_start` scanner (jscpd, the ast-grep
+		// exports pass, ...) creates its report directory under
+		// `scannerReportParentDir()` and removes it in the scan's own `finally`.
+		// The scan is fire-and-forget, and `drainBackgroundWritesForTests()`
+		// (#4505) reaches only THIS process's copy of the resident clients: the
+		// loaded copy owns its own (header, point 1), so a worker that ends before
+		// the scan settles strands the directory. Measured on a host pre-push: two
+		// `pi-lens-jscpd-*` entries sat in the shared tmp root, attributed to the
+		// slice-7 ordering file. The seam's own contract (`scanner-temp-root.ts`)
+		// is that a harness owning a root points `PI_LENS_TEST_SCANNER_TMPDIR` at
+		// it, so an orphan lands inside the root the harness removes.
+		const handle = await startPiSession({
+			root: fixture.root,
+			cwd: path.join(fixture.root, "scanner-root", "proj"),
+			responses: [fauxAssistantMessage(fauxText("ok"))],
+		});
+		await handle.prompt("hello");
+
+		// The resolver the loaded copy's scanners call, read through this side's
+		// copy of it: the environment is shared, and the copy cleared VITEST
+		// (`PI_LENS_TEST_MODE=0`), so the scanner-only harness marker is what lets
+		// the override through at all.
+		const parent = scannerReportParentDir();
+		expect(parent, "the scanner report parent is the fixture's own").toBe(
+			path.join(fixture.root, "scanner-tmp"),
+		);
+		// Created with the pin, so `mkdtempSync` in the scan has a parent to
+		// write under even when the file's first scan starts immediately.
+		expect(fs.existsSync(parent)).toBe(true);
 	});
 
 	it("pins the tool-loadout declaration pi builds for a request", async () => {

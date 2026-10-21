@@ -90,7 +90,14 @@
  *        `globalThis`), so `_settleRegistryMutationsForTests()` here joins the
  *        copy's own queued `deregisterInstance()` write. Without that await the
  *        write lands after `dispose()` returns and re-creates the removed
- *        fixture root (#4664 F7, probed).
+ *        fixture root (#4664 F7, probed);
+ *      - the scanner report root is OWNED, not drained: every `session_start`
+ *        scanner writes under `scannerReportParentDir()`, and the pin below
+ *        points that seam at `<root>/scanner-tmp`. A fire-and-forget scan whose
+ *        `finally` never runs (the worker ends first) therefore strands its
+ *        directory inside the fixture root this file removes, never in the
+ *        shared tmp root (#4632 slice 7 round 2, probed: `pi-lens-temp-find-functions-*`
+ *        under the fixture after the pin, under `os.tmpdir()` before it).
  *    The copy's module-scope persist queues (`clients/project-snapshot.ts`,
  *    `clients/review-graph/builder.ts`, the warmup timer) have no such seam:
  *    they are reachable only through the copy's own module objects, which
@@ -608,6 +615,8 @@ const PINNED_KEYS = [
 	"PI_LENS_HOME",
 	"PILENS_DATA_DIR",
 	"PI_LENS_TEST_MODE",
+	"PI_LENS_TEST_SCANNER_TMPDIR",
+	"PI_LENS_TEST_SCANNER_HARNESS",
 	"PI_LENS_STARTUP_MODE",
 	"PI_LENS_COLD_START_QUICK",
 ] as const;
@@ -973,6 +982,22 @@ export async function startPiSession(
 	process.env.PI_LENS_HOME = path.join(options.root, "home");
 	process.env.PILENS_DATA_DIR = path.join(options.root, "data");
 	process.env.PI_LENS_TEST_MODE = "0";
+	// Every background scanner's report directory (jscpd, the ast-grep exports
+	// pass, ...) is created under `scannerReportParentDir()` and removed in the
+	// scan's own `finally`. A `session_start` scan is fire-and-forget and the
+	// LOADED copy owns its resident clients, so this side cannot drain it
+	// (header, point 6): a scan still running when the worker ends would strand
+	// its directory in the SHARED tmp root — measured on a host pre-push, where
+	// two `pi-lens-jscpd-*` entries outlived the slice-7 ordering file and the
+	// hygiene census attributed them to it. The seam's contract is that a
+	// harness owning a root points the override at it, so an orphan lands inside
+	// the root this file removes; the scanner-only harness marker supplies the
+	// half the `PI_LENS_TEST_MODE=0` pin removes (the copy is deliberately not in
+	// test mode, so `isTestMode()` alone would fall back to the shared tmpdir).
+	const scannerTmp = path.join(options.root, "scanner-tmp");
+	fs.mkdirSync(scannerTmp, { recursive: true });
+	process.env.PI_LENS_TEST_SCANNER_TMPDIR = scannerTmp;
+	process.env.PI_LENS_TEST_SCANNER_HARNESS = "1";
 	const startupMode = options.startupMode ?? "full";
 	process.env.PI_LENS_STARTUP_MODE = startupMode;
 	// A quick start is the production FIRST-session shape, and it arms pi-lens's
