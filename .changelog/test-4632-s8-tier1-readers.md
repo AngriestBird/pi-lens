@@ -10,4 +10,6 @@ audience: internal
   `AgentSession` (`tests/support/pi-session.ts`) and reads the `memory_sample` record the loaded copy's
   writer queued, through a new `PiSession.latencyRows()` accessor. Both files' `pi-mock` rows and the
   memory-sample file's three `in-process-mock` baseline rows are deleted. The reader files slice 8 could
-  not move keep their rows with a stated class and reason. No product behaviour changes.
+  not move keep their rows with a stated class and reason. The ten hand-rolled JSON-lines readers those
+  tests carried now come from one shared reader (`tests/support/ndjson-rows.ts`), which reports the
+  lines it cannot parse instead of dropping them silently. No product behaviour changes.
