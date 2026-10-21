@@ -75,7 +75,9 @@ export const PI_MOCK_IMPORTERS: Readonly<Record<string, string>> = {
 	"clients/cascade-unanswered-primary-4403.test.ts": "pending slice 10",
 	"config/result-contract-governance.test.ts": "pending slice 10",
 	"index-process-bridge-rebind-real-factory.test.ts": "pending slice 10",
-	// internal-seam (slice 6 classified this row; the other three stay for slice 7)
+	// internal-seam (slice 6 classified this row; the three rows above keep their
+	// `pending slice 10` marker — slice 10 landed as docs-and-stop and moves no
+	// file, so that marker names no scheduled work and those rows stay here)
 	"tools/diagnostics-route-switch-matrix.test.ts": "internal-seam",
 	// unproducible-payload
 	"clients/context-append-to-last-user.test.ts": "unproducible-payload",

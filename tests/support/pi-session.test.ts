@@ -21,6 +21,7 @@ import {
 	fauxText,
 	fauxToolCall,
 	piSessionFixture,
+	replayToolNames,
 	startPiSession,
 } from "./pi-session.js";
 
@@ -64,26 +65,6 @@ function systemMessages(
 	return transcript.filter((message) => message.role === "system") as Array<
 		Record<string, unknown>
 	>;
-}
-
-/**
- * The tool set a transcript declares, by the replay rule a consumer must use:
- * every `toolsAdded` entry adds, every `toolsRemoved` entry deletes.
- */
-function replayToolNames(
-	transcript: ReadonlyArray<{ role: string; [key: string]: unknown }>,
-): string[] {
-	const tools = new Set<string>();
-	for (const message of transcript) {
-		if (message.role !== "system") continue;
-		const typed = message as {
-			toolsAdded?: Array<{ name: string }>;
-			toolsRemoved?: Array<{ name: string }>;
-		};
-		for (const tool of typed.toolsRemoved ?? []) tools.delete(tool.name);
-		for (const tool of typed.toolsAdded ?? []) tools.add(tool.name);
-	}
-	return [...tools];
 }
 
 describe("pi-session: the built extension in a real AgentSession (#4632)", () => {

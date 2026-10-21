@@ -46,6 +46,7 @@ import {
 	fauxText,
 	fauxToolCall,
 	piSessionFixture,
+	replayToolNames,
 	startPiSession,
 	type PiSession,
 } from "./support/pi-session.js";
@@ -82,26 +83,6 @@ function activeTools(handle: PiSession): string[] {
 	return handle.session.extensionRunner.getActiveTools();
 }
 
-/**
- * The tool set a provider request declares, by the replay rule the tier-2
- * helper case pins: later `toolsAdded` entries add, `toolsRemoved` deletes.
- */
-function declaredTools(
-	transcript: ReadonlyArray<{ role: string; [key: string]: unknown }>,
-): string[] {
-	const tools = new Set<string>();
-	for (const message of transcript) {
-		if (message.role !== "system") continue;
-		const typed = message as {
-			toolsAdded?: Array<{ name: string }>;
-			toolsRemoved?: Array<{ name: string }>;
-		};
-		for (const tool of typed.toolsRemoved ?? []) tools.delete(tool.name);
-		for (const tool of typed.toolsAdded ?? []) tools.add(tool.name);
-	}
-	return [...tools];
-}
-
 /** The sidecar the loaded copy persists per conversation (pi's session id). */
 function sidecarPath(cwd: string, sessionId: string): string {
 	return path.join(getProjectDataDir(cwd), "sessions", `${sessionId}.json`);
@@ -134,18 +115,36 @@ async function startActivated(segments: string[]): Promise<PiSession> {
 	return handle;
 }
 
+/**
+ * The `metadata` of the loaded copy's `phase` rows that `match` accepts, in
+ * write order. ONE reader for this file's rows: every case below asserts a
+ * record the loaded copy wrote, never a value this file supplied.
+ */
+async function latencyMetadata(
+	handle: PiSession,
+	phase: string,
+	match: (metadata: Record<string, unknown>) => boolean = () => true,
+): Promise<Array<Record<string, unknown>>> {
+	return (await handle.latencyRows()).rows.flatMap((row) => {
+		const metadata = row.metadata as Record<string, unknown> | undefined;
+		if (row.phase !== phase) return [];
+		if (typeof metadata !== "object" || metadata === null) return [];
+		return match(metadata) ? [metadata] : [];
+	});
+}
+
 /** `tool_set_mutation` rows the loaded copy wrote, optionally by reason. */
 async function toolSetRows(
 	handle: PiSession,
 	reason?: string,
 ): Promise<number> {
-	const rows = (await handle.latencyRows()).rows.filter(
-		(row) =>
-			row.phase === "tool_set_mutation" &&
-			(reason === undefined ||
-				(row.metadata as { reason?: string } | undefined)?.reason === reason),
-	);
-	return rows.length;
+	return (
+		await latencyMetadata(
+			handle,
+			"tool_set_mutation",
+			(metadata) => reason === undefined || metadata.reason === reason,
+		)
+	).length;
 }
 
 describe("dynamic tooling on the real host (#4632 slice 6)", () => {
@@ -167,7 +166,7 @@ describe("dynamic tooling on the real host (#4632 slice 6)", () => {
 		// The model-visible half: the request declares exactly the set the host
 		// holds, so an inactive tool is not callable by name on this turn.
 		await handle.prompt("hello");
-		expect(new Set(declaredTools(handle.requests[0]))).toEqual(active);
+		expect(new Set(replayToolNames(handle.requests[0]))).toEqual(active);
 		expect(handle.errors).toEqual([]);
 	});
 
@@ -311,9 +310,29 @@ describe("dynamic tooling on the real host (#4632 slice 6)", () => {
 
 		expect(activeTools(next)).not.toContain(ACTIVATED_TOOL);
 		expect(activeTools(next)).toContain("lens_diagnostics");
+		// The decision the `new` start recorded for the activation memory: the
+		// policy RESETS it. `reset` and `adopt` land the same cells here (a new
+		// conversation has no hand-off source and no payload), so this row is the
+		// only witness that the policy still says reset (#4707 F3).
+		const startRow = (
+			await latencyMetadata(
+				next,
+				"session_store_action",
+				(metadata) =>
+					metadata.store === "lazy-tool-memory" && metadata.reason === "new",
+			)
+		).at(-1);
+		expect(startRow).toMatchObject({
+			store: "lazy-tool-memory",
+			action: "reset",
+			reason: "new",
+			source: "none",
+			payloadPresent: false,
+		});
+
 		// The new conversation's first request declares the bare baseline.
 		await next.prompt("hello");
-		expect(declaredTools(next.requests[0])).not.toContain(ACTIVATED_TOOL);
+		expect(replayToolNames(next.requests[0])).not.toContain(ACTIVATED_TOOL);
 	});
 
 	it("retains remembered posture across a quit shutdown", async () => {
@@ -344,7 +363,7 @@ describe("dynamic tooling on the real host (#4632 slice 6)", () => {
 			expect(activeTools(handle), tool).toContain(tool);
 		}
 		await handle.prompt("hello");
-		expect(declaredTools(handle.requests[0])).toContain(ACTIVATED_TOOL);
+		expect(replayToolNames(handle.requests[0])).toContain(ACTIVATED_TOOL);
 
 		// A rebuild does not shrink it either: under the opt-out pi-lens never
 		// touches the set, on any reason.
