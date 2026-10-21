@@ -292,7 +292,6 @@ const REMEDIATION =
 const SLASH_FOLD_PINS: Readonly<Record<string, number>> = {
 	"clients/actionable-warnings.ts": 1,
 	"clients/cache-manager.ts": 1,
-	"clients/codebase-model.ts": 1,
 	"clients/config-locations.ts": 1,
 	"clients/dispatch/dispatcher.ts": 1,
 	"clients/dispatch/integration.ts": 2,

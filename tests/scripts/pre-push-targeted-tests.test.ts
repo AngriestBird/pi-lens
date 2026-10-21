@@ -432,6 +432,7 @@ describe("selectTargetedTests — path-mirror pass", () => {
 			"tests/config/project-trust-seam-ratchet.test.ts",
 			"tests/config/pr-smoke-paths.test.ts",
 			"tests/tools/diagnostics-route-switch-matrix.test.ts",
+			"tests/config/path-identity-sweep.test.ts",
 			// #4590: walks both trees, so both change kinds must arm it.
 			"tests/config/env-path-key-composition-sweep.test.ts",
 			"tests/config/git-fixture-governance.test.ts",
