@@ -1242,7 +1242,7 @@ file-scoped worklist and receives no project-wide scanner output.
   read that final stdout line instead of `$?` after a pipe. `guard-bash` denies
   the piped-status recurrence while allowing output-only pipes.
 - A formatter is handed the file's identity, never the link that named it:
-  `realPathIdentity` (`clients/path-utils.ts`) is the real path
+  `realpathOrResolve` (`clients/path-utils.ts`) is the real path
   of the nearest existing ancestor plus the missing tail, with no lexical `..`
   collapse first. `formatFile` and `FormatService.formatFile` use it, so
   `AGENTS.md -> CLAUDE.md` formats `CLAUDE.md` and Prettier's "is a symbolic

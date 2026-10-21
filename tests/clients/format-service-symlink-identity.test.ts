@@ -25,6 +25,10 @@ import {
 } from "../../clients/degradation-ledger.js";
 import { FormatService } from "../../clients/format-service.js";
 import { clearFormatterRuntimeState } from "../../clients/formatters.js";
+import {
+	getPathIdentityFallbacks,
+	resetPathIdentityFallbacks,
+} from "../../clients/path-utils.js";
 import { setProjectTrustState } from "../../clients/project-trust.js";
 import {
 	clearWidgetState,
@@ -91,6 +95,7 @@ describe("FormatService formats the identity of a symlinked file (#4689)", () =>
 		safeSpawnAsync.mockReset();
 		clearFormatterRuntimeState();
 		resetDegradationLedger();
+		resetPathIdentityFallbacks();
 	});
 
 	/**
@@ -286,6 +291,35 @@ describe("FormatService formats the identity of a symlinked file (#4689)", () =>
 
 			expect(summary.allSucceeded).toBe(true);
 			expect(written).toEqual([file]);
+		} finally {
+			fx.cleanup();
+		}
+	});
+
+	// #4675 F1: the identity step is `realpathOrResolve`, which answers the
+	// spelling for a link loop (and tallies the errno) instead of rethrowing the
+	// way the PR's own `realPathIdentity` did. Recurrence: an `ELOOP` out of the
+	// identity step rejected `FormatService.formatFile`, so one cyclic link in a
+	// session's edit set threw out of every drain that reached it.
+	it("answers a link loop with a refused summary instead of rejecting", async () => {
+		const fx = layout();
+		try {
+			fs.symlinkSync("loop-b", path.join(fx.session, "loop-a"));
+			fs.symlinkSync("loop-a", path.join(fx.session, "loop-b"));
+			const viaLoop = path.join(fx.session, "loop-a", "x.ts");
+			const written = installPrettierDouble();
+
+			const service = new FormatService("identity-loop", true);
+			const summary = await service.formatFile(viaLoop, {
+				sessionRoot: fx.session,
+			});
+
+			expect(summary.filePath).toBe(viaLoop);
+			expect(summary.formatters).toEqual([]);
+			expect(written).toEqual([]);
+			expect(getPathIdentityFallbacks()).toEqual([
+				expect.objectContaining({ code: "ELOOP" }),
+			]);
 		} finally {
 			fx.cleanup();
 		}

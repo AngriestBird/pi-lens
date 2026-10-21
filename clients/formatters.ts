@@ -19,7 +19,7 @@ import { createGenerationSource } from "./generation-guard.js";
 import {
 	findNearestContaining,
 	normalizeMapKey,
-	realPathIdentity,
+	realpathOrResolve,
 } from "./path-utils.js";
 import { resolveToolCwd } from "./tool-cwd.js";
 import { resolveCargoPackageEdition } from "./cargo-manifest.js";
@@ -2425,7 +2425,7 @@ export async function formatFile(
 	try {
 		// A symlink is never handed to a formatter (Prettier rejects an
 		// explicitly named link): format the file it resolves to (#4689).
-		const absolutePath = realPathIdentity(filePath);
+		const absolutePath = realpathOrResolve(filePath);
 		const cwd = path.dirname(absolutePath);
 		const formatterCwd = resolveToolCwd(
 			"formatter",

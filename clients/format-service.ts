@@ -15,7 +15,7 @@ import { logExtension } from "./extension-log.js";
 import * as path from "node:path";
 import { canWriteAnalysisRoot, resolveAnalysisRoot } from "./analysis-root.js";
 import { recordDegradationOnce } from "./degradation-ledger.js";
-import { realPathIdentity } from "./path-utils.js";
+import { realpathOrResolve } from "./path-utils.js";
 import { recordFormatter } from "./widget-state.js";
 import { FileTime } from "./file-time.js";
 import type {
@@ -102,7 +102,7 @@ export class FormatService {
 	): Promise<FormatSummary> {
 		// The file a formatter writes is the identity, not the link that named it
 		// (#4689): `AGENTS.md -> CLAUDE.md` formats CLAUDE.md.
-		const absolutePath = realPathIdentity(filePath);
+		const absolutePath = realpathOrResolve(filePath);
 		const cwd = path.dirname(absolutePath);
 
 		// Skip if disabled
@@ -316,21 +316,21 @@ export class FormatService {
 	 * Throws FileTimeError if file modified externally
 	 */
 	assertUnchanged(filePath: string): void {
-		this.fileTime.assert(realPathIdentity(filePath));
+		this.fileTime.assert(realpathOrResolve(filePath));
 	}
 
 	/**
 	 * Check if file has changed externally
 	 */
 	hasChanged(filePath: string): boolean {
-		return this.fileTime.hasChanged(realPathIdentity(filePath));
+		return this.fileTime.hasChanged(realpathOrResolve(filePath));
 	}
 
 	/**
 	 * Record file read (after agent reads file)
 	 */
 	recordRead(filePath: string): void {
-		this.fileTime.read(realPathIdentity(filePath));
+		this.fileTime.read(realpathOrResolve(filePath));
 	}
 
 	/**
