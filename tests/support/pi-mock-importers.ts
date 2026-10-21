@@ -69,9 +69,9 @@ export const PI_MOCK_IMPORTERS: Readonly<Record<string, string>> = {
 	"config/result-contract-governance.test.ts": "pending slice 10",
 	"index-process-bridge-rebind-real-factory.test.ts": "pending slice 10",
 	"tools/diagnostics-route-switch-matrix.test.ts": "pending slice 10",
-	// pending slice 3
-	"clients/context-append-to-last-user.test.ts": "pending slice 3",
-	"index-4631-pre-087-context-shape.test.ts": "pending slice 3",
+	// unproducible-payload
+	"clients/context-append-to-last-user.test.ts": "unproducible-payload",
+	"index-4631-pre-087-context-shape.test.ts": "unproducible-payload",
 	// pending slice 5
 	"index-4554-last-member-teardown.test.ts": "pending slice 5",
 	"index-config-resolved-session-wiring.test.ts": "pending slice 5",
