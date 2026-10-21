@@ -627,10 +627,12 @@ describe("host-provided peers are open; the supported window lives in install-sm
 		// A sweep that reads no claim is not a passing sweep: both files must keep
 		// stating the in-window range, which is what gives the check below a
 		// population to refuse.
-		expect(
-			claims.map((entry) => entry.claim),
-			"in-window claims found in the two files that declare the window",
-		).not.toEqual([]);
+		for (const [file] of files) {
+			expect(
+				claims.filter((entry) => entry.file === file),
+				`${file} must keep an in-window claim`,
+			).not.toEqual([]);
+		}
 		const floorMinorLine = `${semver.major(floor)}.${semver.minor(floor)}.0`;
 		const belowFloor = claims.filter((entry) =>
 			semver.lt(`${entry.low}.0`, floorMinorLine),
