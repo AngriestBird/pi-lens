@@ -40,6 +40,7 @@ import {
 	drainBackgroundWritesForTests,
 	setupTestEnvironment,
 } from "./clients/test-utils.js";
+import { readNdjsonRows } from "./support/ndjson-rows.js";
 
 const FLAGS = new Map<string, boolean>([
 	["no-lsp", true],
@@ -258,18 +259,14 @@ describe("#4631 a mid-list system message never changes the head", () => {
 			seedTurnEndFindings();
 			await request(runtime);
 			await flushLatencyLog();
-
-			const rows = fs
-				.readFileSync(getLatencyLogPath(), "utf8")
-				.split("\n")
-				.filter(Boolean)
-				.map(
-					(line) =>
-						JSON.parse(line) as {
-							phase?: string;
-							metadata?: Record<string, unknown>;
-						},
-				);
+			const read = readNdjsonRows<{
+				phase?: string;
+				metadata?: Record<string, unknown>;
+			}>(getLatencyLogPath());
+			// The two rows this case names are the claim; a torn write would hide
+			// one, so a skipped line is a red with its count.
+			expect(read.skipped).toBe(0);
+			const rows = read.rows;
 			const contextRow = rows
 				.filter((row) => row.phase === "cache_context")
 				.at(-1);

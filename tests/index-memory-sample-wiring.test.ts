@@ -50,12 +50,16 @@ async function driveTurns(
 	handle: PiSession,
 	turns: number,
 ): Promise<Array<Record<string, unknown>>> {
-	const before = (await handle.latencyRows()).length;
+	const before = (await handle.latencyRows()).rows.length;
 	for (let turn = 0; turn < turns; turn += 1) {
 		// One scripted reply per turn, so `prompt` resolves on a real request.
 		await handle.prompt(`turn ${turn + 1}`);
 	}
-	return samplesIn((await handle.latencyRows()).slice(before));
+	const read = await handle.latencyRows();
+	// A row the reader could not parse would lower an exact count below, so the
+	// file's own writer is held to "no corrupt line" for this case's window.
+	expect(read.skipped).toBe(0);
+	return samplesIn(read.rows.slice(before));
 }
 
 async function startSession(turns: number): Promise<PiSession> {
@@ -88,6 +92,9 @@ describe(
 			const handle = await startSession(MEMORY_SAMPLE_TURN_INTERVAL);
 			const samples = await driveTurns(handle, MEMORY_SAMPLE_TURN_INTERVAL);
 			expect(samples).toHaveLength(1);
+			// #4699 F5: the record's `durationMs` stays a literal 0 the sampler
+			// passes (`index.ts`), so the pin is free and belongs here.
+			expect(samples[0].durationMs).toBe(0);
 			const metadata = samples[0].metadata as Record<string, unknown>;
 			// `shape`: what the loaded copy's sampler wrote into the record.
 			expect(metadata.turnIndex).toBe(10);

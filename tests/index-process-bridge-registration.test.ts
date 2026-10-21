@@ -16,6 +16,11 @@
  *
  * WHAT EACH CASE ASSERTS (#4632 slice 8, mode migrate-all):
  *
+ * - `processing`: importing the built extension evaluates its module graph and
+ *   mounts NOTHING; the mount is the host activation's (the `beforeAll` below),
+ *   never an import side effect. The flags are read at module load, before any
+ *   hook runs, so the case is order-free (#4699 F1: the capture this replaced
+ *   was on the pi double, where nothing could run at import either way).
  * - `processing`: pi's loader runs the built factory, and that activation is
  *   what mounts both bridges (no session event is emitted at this tier, so a
  *   mount that waited for `session_start` would be absent).
@@ -30,9 +35,21 @@ import {
 	MUTATION_BRIDGE_KEY,
 } from "../clients/mutation-bridge.js";
 import { READ_BRIDGE_KEY } from "../clients/read-bridge.js";
+// The built extension's module graph, evaluated by this file's import and never
+// activated: the host runs the factory only in `startPiRunner()` (#4699 F1).
+import "../index.js";
 import { startPiRunner, type PiRunner } from "./support/pi-runner.js";
 
 let runner: PiRunner;
+
+/**
+ * The mount state at module load, read before `beforeAll` activates anything.
+ * Evaluated once per file, so no case's order can decide it.
+ */
+const mountedAtImport = {
+	read: READ_BRIDGE_KEY in (globalThis as object),
+	mutation: MUTATION_BRIDGE_KEY in (globalThis as object),
+};
 
 beforeAll(async () => {
 	// The real host loads the built extension; activation alone must mount both
@@ -41,6 +58,18 @@ beforeAll(async () => {
 });
 
 describe("process-bridge registration through the real extension factory (#2437)", () => {
+	it("importing the built extension mounts neither bridge; the host's activation mounts both", () => {
+		// `processing`: evaluating index.js ran no activation, so neither slot was
+		// written. This is the load-time half of the claim the four cases below
+		// carry from the other side: a mount moved to module scope (a
+		// `registerReadBridge` call at a module tail, an import-time side effect)
+		// reds HERE and nowhere else, because the others read after activation.
+		expect(mountedAtImport).toEqual({ read: false, mutation: false });
+		// And the activation that did happen (beforeAll) mounted both.
+		expect(READ_BRIDGE_KEY in (globalThis as object)).toBe(true);
+		expect(MUTATION_BRIDGE_KEY in (globalThis as object)).toBe(true);
+	});
+
 	it("mounts the read bridge during the host's load, version 1, frozen", () => {
 		// `processing`: the mount happened without a session_start, and pi
 		// reported no handler error while the factory ran.

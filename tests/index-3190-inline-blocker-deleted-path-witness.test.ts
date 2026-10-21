@@ -123,6 +123,7 @@ vi.mock("../clients/safe-spawn.js", async (importOriginal) => ({
 
 import extension from "../index.js";
 import { removeTempDirSync } from "./clients/test-utils.js";
+import { readNdjsonRows } from "./support/ndjson-rows.js";
 import {
 	makeContextWithSystemEvent,
 	makeSessionStartEvent,
@@ -146,17 +147,12 @@ async function readNewDiagnosticRows(
 	offset: number,
 ): Promise<Array<Record<string, unknown>>> {
 	await getDiagnosticLogger().flush();
-	const file = diagnosticLogPath();
-	if (!fs.existsSync(file)) return [];
-	// `offset` is a byte count: slice the bytes, then decode (#4484 review F3).
-	return fs
-		.readFileSync(file)
-		.subarray(offset)
-		.toString("utf8")
-		.trim()
-		.split("\n")
-		.filter(Boolean)
-		.map((line) => JSON.parse(line) as Record<string, unknown>);
+	// `offset` is a byte count: the reader slices the bytes before decoding
+	// (#4484 review F3). A line it cannot parse would lower the step count this
+	// witness reads, so it is a red, named by its count.
+	const read = readNdjsonRows(diagnosticLogPath(), offset);
+	expect(read.skipped).toBe(0);
+	return read.rows;
 }
 
 beforeEach(() => {

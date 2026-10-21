@@ -124,6 +124,7 @@ import {
 	setupTestEnvironment,
 	withFixtureTmpdir,
 } from "../clients/test-utils.js";
+import { readNdjsonRows, type NdjsonRowRead } from "./ndjson-rows.js";
 
 /** The built extension every case loads: `npm run build` writes this twin. */
 const EXTENSION_ENTRY = fileURLToPath(
@@ -416,13 +417,19 @@ export interface PiSession {
 	sessionFile(): string | undefined;
 	/**
 	 * Rows the LOADED copy wrote to `<root>/home/latency.log`, in order, after a
-	 * flush. The copy's writers live in the same process-global map
+	 * flush, together with the lines the read could not parse. The copy's
+	 * writers live in the same process-global map
 	 * (`Symbol.for("pi-lens.ndjson-logger.state")`), so `flushAllNdjsonWriters`
 	 * settles them; reading before the await would count a row still queued
 	 * (AGENTS.md shape 67). A watchdog record a case asserts on goes through
 	 * here, never through a test-side logger double.
+	 *
+	 * `skipped` is beside the rows on purpose: a corrupt line used to be dropped
+	 * silently, so an exact-count or absence assertion could not see it
+	 * (Sourcery on #4699). A case whose claim depends on the total asserts it is
+	 * zero; a case that names rows only reads `.rows`.
 	 */
-	latencyRows(): Promise<readonly Record<string, unknown>[]>;
+	latencyRows(): Promise<NdjsonRowRead>;
 	/** Run one prompt to completion (tool calls included). */
 	prompt(text: string): Promise<void>;
 	/** Manual compaction, pi's `/compact` entry point. */
@@ -630,25 +637,6 @@ function replaceThrough(
 				`pi-session: no faithful replacement for reason ${JSON.stringify((replacement as { reason?: unknown }).reason)}; add pi's own entry point for it, never a synthesised event`,
 			);
 	}
-}
-
-/** Parsed JSON-lines rows of `file`; a line that is not an object is skipped. */
-function readNdjsonRows(file: string): Record<string, unknown>[] {
-	if (!fs.existsSync(file)) return [];
-	return fs
-		.readFileSync(file, "utf8")
-		.split("\n")
-		.filter(Boolean)
-		.flatMap((line) => {
-			try {
-				const row = JSON.parse(line) as unknown;
-				return row && typeof row === "object"
-					? [row as Record<string, unknown>]
-					: [];
-			} catch {
-				return [];
-			}
-		});
 }
 
 /** The handle over one bound session; registered for `afterEach` at once. */
