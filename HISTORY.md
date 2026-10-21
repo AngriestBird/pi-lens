@@ -18,6 +18,15 @@ each one that stays out. #4672 is the first lane to run it: it planned to fold
 findings that no lane could carry (#4673, and the `index-3248` shuffle member on
 #4561) to the record instead of the folder.
 
+## 2026-10-21 — a detector reads one root while its subject writes in several (shape 79)
+
+Bash write recovery ran `git status` in the session's own checkout only. A
+write inside a sibling linked worktree therefore read as "nothing changed",
+and got no dispatch, no LSP resync and no record (#2050). The same shape made
+a HEAD-less `.git` resolve to the wrong checkout (#4508). The #2050 fix takes
+the verdict per root: the session root plus each checkout the command itself
+names, capped and with one bounded refusal record per session.
+
 ## 2026-10-20 — instrument attributes by id and order (shape 76)
 
 The nightly capability census bracketed each fixture phase with a byte offset

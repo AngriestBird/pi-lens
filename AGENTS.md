@@ -589,6 +589,12 @@ file-scoped worklist and receives no project-wide scanner output.
     hits are the classifier's own already-normalized patterns, `ci-verdict`'s
     line classifier (strips before it matches), `check-pr-body`'s lint of pasted
     body text, and readers of Vitest's JSON report.
+79. **Single scan root:** a detector takes its population from one root while
+    its subject can write in several, so a clean answer from the wrong root
+    reads as a complete negative. Screen: for each detector, list the roots its
+    subject can write in. Then show that each root gets its own verdict, or that
+    one root provably covers them. Census: not countable yet. Instance and
+    dates: `HISTORY.md`.
 
 </important>
 

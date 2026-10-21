@@ -42,10 +42,10 @@ describe("AGENTS.md trigger-block governance (#3259)", () => {
 
 	it("keeps every numbered defect shape exactly once", () => {
 		const numbers = shapeNumbers(agentsText());
-		expect(numbers).toHaveLength(78);
-		expect(new Set(numbers).size).toBe(78);
+		expect(numbers).toHaveLength(79);
+		expect(new Set(numbers).size).toBe(79);
 		expect(numbers.sort((a, b) => a - b)).toEqual(
-			Array.from({ length: 78 }, (_, index) => index + 1),
+			Array.from({ length: 79 }, (_, index) => index + 1),
 		);
 	});
 
@@ -54,7 +54,7 @@ describe("AGENTS.md trigger-block governance (#3259)", () => {
 		const counterfeit = agentsText()
 			.replace(/^1\. \*\*.*$/m, "")
 			.concat("\n<!--\n1. **Counterfeit shape:** hidden comment\n-->\n");
-		expect(shapeNumbers(counterfeit)).toHaveLength(77);
+		expect(shapeNumbers(counterfeit)).toHaveLength(78);
 		expect(shapeNumbers(counterfeit)).not.toContain(1);
 	});
 
