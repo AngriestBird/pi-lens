@@ -15,11 +15,19 @@
  *
  * - a fresh start is `primary` with `sameRoot: "unknown"` (processing: the
  *   classifier's decision reaches the row through pi's own start);
- * - a dead prior ctx in the SAME root is `sequential-replacement`,
+ * - a start after a dead prior ctx in the SAME root is `sequential-replacement`,
  *   `sameRoot: true` (the row a start with no `session_shutdown` produces);
- * - a dead prior ctx in ANOTHER root is `secondary-root` and is declined
- *   (`sameRoot: false` in the `concurrent_session_bind` row, no
- *   `session_start_total` row) — the arm #2129 added for root identity.
+ * - a start in ANOTHER root after a dead prior ctx is refused as
+ *   `secondary-root` (`sameRoot: false` in the `concurrent_session_bind` row,
+ *   no `session_start_total` row) — the arm #2129 added for root identity.
+ *
+ * Neither moved case is pi's replacement entry point, and neither claims to be:
+ * probed on host 1.3.0, `AgentSessionRuntime.newSession()` emits
+ * `session_shutdown` before it disposes (`agent-session-runtime.js`
+ * `teardownCurrent`), so pi-lens releases the primary and the successor
+ * classifies `primary` with `basis: "no-prior-primary"`. The cases below pin
+ * the classifier's prior-ctx-dead arm, which a start with NO
+ * `session_shutdown` reaches (review F2 on #4702).
  *
  * The last case stays on the double: it needs a start whose cwd is a
  * `pi-agent-*` staging root under the real tmpdir that no checkout owns, and
@@ -175,7 +183,7 @@ describe("index session_start wiring — classification logged with mode (#2129)
 		});
 	}, 30_000);
 
-	it("a same-root sequential replacement carries classification + sameRoot:true", async () => {
+	it("a start after a dead prior ctx in the same root carries classification + sameRoot:true", async () => {
 		// Tier 2 (#4632 slice 9): the prior primary's ctx is invalidated by pi
 		// and never reaches `session_shutdown`, the crash/kill path index.ts
 		// documents ("on the sequential-replacement path (prior primary never
@@ -210,13 +218,15 @@ describe("index session_start wiring — classification logged with mode (#2129)
 		});
 	}, 60_000);
 
-	it("an accepted replacement in a different root carries sameRoot:false", async () => {
+	it("a replacement in a different root is refused with sameRoot:false", async () => {
 		// Tier 2 (#4632 slice 9): a start in ANOTHER root after a dead prior
 		// primary is refused by the #2129 root rule — `secondary-root`, not the
 		// full start — and that refusal is the row that carries `sameRoot:false`.
 		// The double-based version of this case re-announced the SAME ctx object
 		// with a mutated cwd, a state pi never produces (pi builds a fresh ctx
-		// per emit), so it read as `sequential-replacement` on a `sameCtx` match.
+		// per emit and invalidates every getter on the old runner), and pi's own
+		// replacement emits `session_shutdown` first, so neither is used here: a
+		// dead prior ctx plus a second root is the state the rule answers.
 		const first = await startPiSession({
 			root: fixture.root,
 			cwd: path.join(fixture.root, "root-a", "proj"),

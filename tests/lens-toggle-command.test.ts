@@ -14,11 +14,13 @@ import { removeTempDirSync } from "./clients/test-utils.js";
 // #4632 slice 9 moved the REGISTRATION case onto tier 1: the real host's
 // loader holds the flags and resolves the commands, so a command that pi drops
 // (or a name it prefixes) is a red here, not a value the double recorded. The
-// four handler cases stay on the double: their whole claim is the text
-// `ctx.ui.notify` shows and the component `ctx.ui.setWidget` mounts, and a real
-// `AgentSession` binds `mode: "print"` with `hasUI() === false` (probed on the
-// same host), so `notifyUi` suppresses the message and no widget mounts. The
-// real-UI harness is the TUI lane the issue assigns to slice 5.
+// four handler cases stay on the double, class `real-ui-harness`: their whole
+// claim is the text `ctx.ui.notify` shows and the component `ctx.ui.setWidget`
+// mounts, and a real `AgentSession` binds `mode: "print"` with `hasUI() ===
+// false` (probed on host 1.3.0), so `notifyUi` suppresses the message and no
+// widget mounts. Nothing in this slice builds that harness; slice 5 builds none
+// and slice 10 is docs-and-stop, so the row names the missing capability rather
+// than a slice that would move it (review F4 on #4702).
 
 const tmpDirs: string[] = [];
 let previousConfigPath: string | undefined;
