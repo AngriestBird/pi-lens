@@ -626,10 +626,15 @@ describe("path identity: every link spelling of one file derives one key (#4689)
 			).toBe(false);
 			// A spelling through a link under a root held as a key (`ctx.cwd`).
 			expect(isUnderDir(viaAlias, normalizeMapKey(fx.repo))).toBe(true);
-			// A link spelled inside the root stays inside (#2556 trust inputs:
-			// a `.bin` shim that points out of the project is still the
-			// project's), while its identity is the outside file.
-			expect(isUnderDir(fx.outLink, fx.repo)).toBe(true);
+			// A link spelled inside the root stays inside on POSIX (#2556 trust
+			// inputs: a `.bin` shim that points out of the project is still the
+			// project's), while its identity is the outside file. On win32 both
+			// forms are the realpath, as they were on master, so there the link
+			// reads as the outside file it names (Windows lane, r2 head
+			// 1261d812d).
+			expect(isUnderDir(fx.outLink, fx.repo)).toBe(
+				process.platform !== "win32",
+			);
 			expect(isUnderDir(normalizeMapKey(fx.outLink), fx.repo)).toBe(false);
 			// Control: outside on both axes.
 			expect(isUnderDir(fx.outsideFile, fx.aliasRoot)).toBe(false);
