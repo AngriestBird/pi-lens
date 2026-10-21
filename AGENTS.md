@@ -229,7 +229,11 @@ ADR: docs/adr/0009-reported-path-attribution.md
 ## Recurring defect shapes
 
 Screen against these before writing code. Shapes are numbered once, grouped by
-the surface they bite; each block loads only when its trigger applies.
+the surface they bite; each block loads only when its trigger applies. A shape
+whose open population is countable names its census in its entry. The census
+is one command, run at the repo root, printing one line per member or naming
+one baseline key. A PR that fixes members of the shape quotes that census
+before and after.
 
 <!-- markdownlint-disable MD029 -->
 
@@ -659,7 +663,9 @@ file-scoped worklist and receives no project-wide scanner output.
     process or host boundary. New in-process `vi.mock` targets and hand-rolled
     LSP client or service doubles are ratcheted by
     `tests/clients/flake-shape-ratchet.test.ts` (`in-process-mock`,
-    `service-double`).
+    `service-double`). Its census is the `in-process-mock` key of
+    `tests/support/flake-shape-baseline.json`: one line per `<file>::<module>`
+    row, 1009 of them on master 33eac2aa1. #4709 drives that count down.
 
 67. **Sink read before drain:** a log sink's `log`/`append` only enqueue, so a
     test that reads the sink's byte offset, line count, or rows while one of
@@ -1738,11 +1744,19 @@ service the loaded copy does not share, such as `clients/lsp`'s service),
 `unproducible-payload` (5: a payload a scripted provider cannot
 produce), `double-subject` (1: the double is the subject), and
 `real-ui-harness` (1: the claim is what the TUI shows or mounts, which no
-in-process tier can produce). Three rows still carry `pending slice 10`, the
-last roadmap slice, which moves no file, so a slice marker now names no
-scheduled work. The class counts are the list's 53 rows at that recording, and
-a row grouped under a `pending slice 8` comment already carries its own class,
-so it is counted in that bucket:
+in-process tier can produce).
+
+A row's class holds for the whole file only while every case in it needs that
+class. A slice that edits an admitted file re-checks it case by case, and its
+PR body records the split: moved, or stays with the class. A file whose double
+is a spawn, pipeline runner, or LSP service double is `process-boundary`, not
+`internal-seam`.
+
+Three rows still carry `pending slice 10`, the last roadmap slice, which moves
+no file, so a slice marker now names no scheduled work. The class counts are
+the list's 53 rows at that recording, and a row grouped under a
+`pending slice 8` comment already carries its own class, so it is counted in
+that bucket:
 `grep -oE '^[[:space:]]*"[^"]*": *"[^"]+"' tests/support/pi-mock-importers.ts | sed -E 's/.*": *"([^"]+)"$/\1/' | sort | uniq -c`.
 The double throws at load for a test file not on the list, so a new user fails
 however it imports it. The list only shrinks:

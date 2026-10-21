@@ -69,8 +69,11 @@ describe("AGENTS.md trigger-block governance (#3259)", () => {
 		// test path, and each instance date lives in `HISTORY.md` under a
 		// heading naming the shape, so this pin does not move. Shape 78's guard
 		// shipped (#4679), so its entry names the running path instead of a
-		// branch, which adds no reference either.
-		expect(issueRefs(agentsText())).toBeLessThanOrEqual(119);
+		// branch, which adds no reference either. The 2026-10-21 retro adds one
+		// raise, 119 -> 120: shape 66 names the issue that drives its
+		// `in-process-mock` census down (#4709), because a census without its
+		// tracker names nothing a reader can act on.
+		expect(issueRefs(agentsText())).toBeLessThanOrEqual(120);
 	});
 
 	it("counts a reference and not a heading anchor", () => {
