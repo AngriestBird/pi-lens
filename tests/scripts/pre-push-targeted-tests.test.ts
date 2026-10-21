@@ -617,6 +617,33 @@ describe("selectTargetedTests — path-mirror pass", () => {
 		);
 	});
 
+	// #4104 (Greptile P2 on PR #4557): walk-files.mjs has no direct importer, so
+	// the import index selected none of the walker's own tests. Recurrence: an
+	// edit to the shared walker that runs no vanished-directory or sort pin
+	// before the push.
+	it("selects the walker's own tests for a change to scripts/lib/walk-files.mjs", () => {
+		enterFixture();
+		write("scripts/lib/walk-files.mjs", "export function walkFiles() {}\n");
+		write(
+			"tests/support/source-walkers-vanished-dir.test.ts",
+			"it('vanished', () => {});\n",
+		);
+		write("tests/support/sweep-kit.test.ts", "it('sweep', () => {});\n");
+
+		const allTests = collectTestFiles("tests");
+		const result = selectTargetedTests(
+			["scripts/lib/walk-files.mjs"],
+			allTests,
+		);
+
+		expect(result.selected).toEqual([
+			"tests/support/source-walkers-vanished-dir.test.ts",
+			"tests/support/sweep-kit.test.ts",
+		]);
+		expect(result.unmatched).toEqual([]);
+		expect(result.capped).toBe(false);
+	});
+
 	it("always includes a changed test file itself", () => {
 		enterFixture();
 		write("tests/clients/foo/bar.test.ts", "it('x', () => {});\n");

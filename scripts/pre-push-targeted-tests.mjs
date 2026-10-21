@@ -245,6 +245,16 @@ export const TEST_TREE_GOVERNANCE_TESTS = [
 	"tests/clients/dispatch/smoke-fixture-coverage.test.ts",
 ];
 
+// #4104 (Greptile P2 on PR #4557): the shared repo walker has no direct
+// importer, so the import index selects none of the tests that pin it. A change
+// to a listed source selects its tests as the change's own.
+export const SOURCE_OWN_TESTS = {
+	"scripts/lib/walk-files.mjs": [
+		"tests/support/source-walkers-vanished-dir.test.ts",
+		"tests/support/sweep-kit.test.ts",
+	],
+};
+
 export function changesTestTreeFile(file) {
 	return toPosix(file).startsWith("tests/");
 }
@@ -482,6 +492,14 @@ export function selectTargetedTests(changed, allTests, options = {}) {
 			if (existsSync(mirror)) {
 				matches.add(toPosix(mirror));
 				if (!own.has(toPosix(mirror))) own.set(toPosix(mirror), "mirror");
+			}
+			const sourceOwn = Object.hasOwn(SOURCE_OWN_TESTS, toPosix(file))
+				? SOURCE_OWN_TESTS[toPosix(file)]
+				: [];
+			for (const test of sourceOwn) {
+				if (!existsSync(test)) continue;
+				matches.add(test);
+				if (!own.has(test)) own.set(test, "mirror");
 			}
 
 			const changedAbsNoExt = toAbsNoExt(file);
