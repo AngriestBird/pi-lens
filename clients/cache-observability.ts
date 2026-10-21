@@ -784,19 +784,28 @@ function recordUnexplainedMiss(
 	unknownReason: CacheMissUnknownReason | undefined,
 ): void {
 	state.unexplainedMisses += 1;
-	const record = {
-		kind: "prompt-cache-miss-unexplained" as const,
-		subject,
-		reason: `prompt-cache miss has no local cause (${unknownReason ?? "unspecified"})`,
-		metadata: {
-			unknownReason: unknownReason ?? "unspecified",
-			misses: state.unexplainedMisses,
-		},
+	const reason = `prompt-cache miss has no local cause (${unknownReason ?? "unspecified"})`;
+	const metadata = {
+		unknownReason: unknownReason ?? "unspecified",
+		misses: state.unexplainedMisses,
 	};
 	// Both ledger entries are documented no-throw: a telemetry failure never
-	// compromises the observed path.
-	if (state.unexplainedMisses === 2) recordDegradationOnce(record);
-	else recordDegradation(record);
+	// compromises the observed path. The record object is inlined at each call
+	// so the kind literal sits in the record's own call site.
+	if (state.unexplainedMisses === 2)
+		recordDegradationOnce({
+			kind: "prompt-cache-miss-unexplained",
+			subject,
+			reason,
+			metadata,
+		});
+	else
+		recordDegradation({
+			kind: "prompt-cache-miss-unexplained",
+			subject,
+			reason,
+			metadata,
+		});
 }
 
 function recordCacheUsageSummary(args: {
