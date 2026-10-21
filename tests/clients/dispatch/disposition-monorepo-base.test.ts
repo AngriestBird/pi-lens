@@ -26,7 +26,6 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	_resetDeferredForTests,
 	_resetStateCacheForTests,
-	adoptSpelledDispositionStore,
 	getDisposition,
 	markDisposition,
 } from "../../../clients/diagnostic-dispositions.js";
@@ -37,11 +36,8 @@ import {
 	RunnerRegistry,
 } from "../../../clients/dispatch/dispatcher.js";
 import { FactStore } from "../../../clients/dispatch/fact-store.js";
-import {
-	getDegradationSummary,
-	resetDegradationLedger,
-} from "../../../clients/degradation-ledger.js";
 import { getProjectDataDir } from "../../../clients/file-utils.js";
+import { dataDir444 } from "../../support/data-dir-4-4-4.js";
 import type { RunnerGroup } from "../../../clients/dispatch/types.js";
 import { createMockRunner } from "../../mocks/runner-factory.js";
 import { removeTempDirSync } from "../test-utils.js";
@@ -65,7 +61,6 @@ beforeEach(() => {
 	_resetDeferredForTests();
 	_resetStateCacheForTests();
 	clearCoverageNoticeState();
-	resetDegradationLedger();
 });
 
 afterEach(() => {
@@ -195,7 +190,7 @@ const STORE_4_4_4 = path.join(
 );
 
 describe("#4689 disposition store under a session root spelled through a link", () => {
-	// RECURRENCE GUARDED: #4689 review r2 A. The store was located by the
+	// RECURRENCE GUARDED: #4689 review r2 A. The data dir was named from the
 	// caller's form of the root: dispatch holds its identity, while the mark
 	// tool, the turn-end readers and 4.4.4 hold the session's spelling. Under
 	// a root reached through a link the two named different data dirs, so a
@@ -234,10 +229,12 @@ describe("#4689 disposition store under a session root spelled through a link", 
 	});
 
 	/** Put the 4.4.4 store where 4.4.4 wrote it: the data dir named by the
-	 * session's spelling of the root (that name is pinned against the 4.4.4
-	 * formula in tests/clients/project-data-dir-slug.test.ts). */
+	 * session's spelling of the root (`tests/support/data-dir-4-4-4.ts`). */
 	function seed444Store(alias: string): string {
-		const cache = path.join(getProjectDataDir(alias), "cache");
+		const cache = path.join(
+			dataDir444(process.env.PILENS_DATA_DIR ?? "", alias),
+			"cache",
+		);
 		fs.mkdirSync(cache, { recursive: true });
 		const file = path.join(cache, "diagnostic-dispositions.json");
 		fs.copyFileSync(STORE_4_4_4, file);
@@ -245,13 +242,13 @@ describe("#4689 disposition store under a session root spelled through a link", 
 		return file;
 	}
 
-	it("honors a mark pi-lens 4.4.4 wrote, once session_start adopts it", async (ctx) => {
+	it("honors a mark pi-lens 4.4.4 wrote, once session_start opens the data dir", async (ctx) => {
 		const project = aliasProject();
 		if (!project) return ctx.skip("symlinks unavailable");
 		const { alias, fileAbs } = project;
 		const spelled = seed444Store(alias);
-		// What session_start calls with the host's cwd, before any dispatch.
-		adoptSpelledDispositionStore(alias);
+		// What session_start does with the host's cwd, before any dispatch.
+		getProjectDataDir(alias);
 		const { count } = await runDispatch(fileAbs, alias);
 		expect(count).toBe(0);
 		// The 4.4.4 file stays, so a downgrade still reads its marks.
@@ -270,47 +267,6 @@ describe("#4689 disposition store under a session root spelled through a link", 
 		_resetStateCacheForTests();
 		const { count } = await runDispatch(fileAbs, alias);
 		expect(count).toBe(0);
-	});
-
-	it("records one row when the store under the spelling cannot be read", async (ctx) => {
-		const project = aliasProject();
-		if (!project) return ctx.skip("symlinks unavailable");
-		const { alias } = project;
-		// A directory where the file should be: readFileSync fails with EISDIR,
-		// which is not the "nothing was ever written here" answer.
-		fs.mkdirSync(
-			path.join(
-				getProjectDataDir(alias),
-				"cache",
-				"diagnostic-dispositions.json",
-			),
-			{ recursive: true },
-		);
-		_resetStateCacheForTests();
-		expect(getDisposition(alias, "dd:164197458e2b")).toBeUndefined();
-		const rows = getDegradationSummary().filter(
-			(group) => group.kind === "disposition-store-adopt-failed",
-		);
-		expect(rows.map((group) => group.count)).toEqual([1]);
-		expect(rows[0]?.latestReasons[0]?.subject).toMatch(/^read:/);
-	});
-
-	it("still honors the 4.4.4 marks when they cannot be copied, and records it", async (ctx) => {
-		const project = aliasProject();
-		if (!project) return ctx.skip("symlinks unavailable");
-		const { alias } = project;
-		seed444Store(alias);
-		// A file where the identity store's directory should be.
-		const identityDir = getProjectDataDir(fs.realpathSync.native(alias));
-		fs.mkdirSync(identityDir, { recursive: true });
-		fs.writeFileSync(path.join(identityDir, "cache"), "");
-		expect(getDisposition(alias, "dd:164197458e2b")?.reason).toBe(
-			"4.4.4 fixture",
-		);
-		const rows = getDegradationSummary().filter(
-			(group) => group.kind === "disposition-store-adopt-failed",
-		);
-		expect(rows[0]?.latestReasons[0]?.subject).toMatch(/^copy:/);
 	});
 
 	it("still reports the finding when nothing marked it (control)", async (ctx) => {

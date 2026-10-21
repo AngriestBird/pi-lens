@@ -11,7 +11,6 @@
  * worktree); `PILENS_DATA_DIR`/`PI_LENS_HOME` are pointed at per-test temp
  * dirs and restored afterwards. The real HOME is never touched.
  */
-import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -44,6 +43,7 @@ import {
 	getProjectDataDir,
 	_resetProjectDataDirMemoForTests,
 } from "../../clients/file-utils.js";
+import { dataDir444 } from "../support/data-dir-4-4-4.js";
 
 const FIXTURES = path.join(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -163,7 +163,12 @@ describe("project data-dir slug (#2874)", () => {
 		expect(trailingSlash).toBe(first);
 	});
 
-	it("resolved root spelling stays the canonical directory identity", () => {
+	it("a root spelled through a link names its real path's directory (#4689)", () => {
+		// RECURRENCE GUARDED: #4689 round 4. The name came from the caller's
+		// spelling while dispatch and the runtime hold the realpath, so one
+		// link-rooted session wrote two data dirs: the turn state, the change
+		// log and the mark store each split between them (r3 probe: getLensDir
+		// opened 38 times by identity and 222 by spelling).
 		isolateDataDir();
 		const scratch = makeScratch("pi-lens-symlink-");
 		const target = path.join(scratch, "target", "proj");
@@ -172,22 +177,21 @@ describe("project data-dir slug (#2874)", () => {
 		fs.mkdirSync(linkParent);
 		fs.symlinkSync(path.join(scratch, "target"), path.join(linkParent, "root"));
 
-		expect(getProjectDataDir(target)).not.toBe(
-			getProjectDataDir(path.join(linkParent, "root", "proj")),
-		);
+		const linked = getProjectDataDir(path.join(linkParent, "root", "proj"));
+		// win32 names have never followed the realpath (canonicalProjectRoot).
+		if (process.platform === "win32")
+			expect(linked).not.toBe(getProjectDataDir(target));
+		else expect(linked).toBe(getProjectDataDir(target));
 	});
 
-	it("a root spelled through a link reads the marks 4.4.4 wrote under that spelling (#4689)", (ctx) => {
-		// RECURRENCE GUARDED: review r1 F2. #4689 r1 moved the slug's readable
-		// half to the root's path identity while the hash half kept the
-		// spelling, so every session rooted at a link (an alias root, macOS
-		// `/var`, a symlinked home) read a new, empty directory after the
-		// upgrade and lost its marks, review graph and snapshot. The store
-		// below is the one 4.4.4 wrote (tests/fixtures/data-dir-4.4.4); it is
-		// placed under the name the pinned contract gives the spelling, both
-		// halves from `path.resolve(cwd)`, and must be found again.
+	it("a root spelled through a link still reads the marks 4.4.4 wrote under that spelling (#4689)", (ctx) => {
+		// RECURRENCE GUARDED: review r1 F2. A session rooted at a link (an
+		// alias root, macOS `/var`, a symlinked home) must not lose its marks,
+		// review graph and snapshot on upgrade. The store below is the one
+		// 4.4.4 wrote (tests/fixtures/data-dir-4.4.4), placed where 4.4.4 put
+		// it, and the directory the real path names adopts it.
 		if (process.platform === "win32")
-			return ctx.skip("the win32 slug was already the realpath in 4.4.4");
+			return ctx.skip("the win32 name never moved");
 		const base = isolateDataDir();
 		const scratch = makeScratch("pi-lens-alias-slug-");
 		const real = path.join(scratch, "realproj");
@@ -195,14 +199,7 @@ describe("project data-dir slug (#2874)", () => {
 		fs.mkdirSync(path.join(real, ".git"), { recursive: true });
 		fs.symlinkSync("realproj", alias, "dir");
 
-		const spelled = path.resolve(alias);
-		const readable = spelled
-			.replace(/\/+/g, "-")
-			.replace(/[^A-Za-z0-9-]/g, "")
-			.replace(/^-+/, "")
-			.replace(/-+$/, "");
-		const hash = createHash("sha256").update(spelled).digest("hex").slice(0, 8);
-		const written = path.join(base, `${readable}-${hash}`);
+		const written = dataDir444(base, alias);
 		fs.mkdirSync(path.join(written, "cache"), { recursive: true });
 		fs.copyFileSync(
 			path.join(
@@ -214,10 +211,19 @@ describe("project data-dir slug (#2874)", () => {
 			path.join(written, "cache", "diagnostic-dispositions.json"),
 		);
 
-		expect(getProjectDataDir(alias)).toBe(written);
+		expect(getProjectDataDir(alias)).toBe(getProjectDataDir(real));
+		expect(getProjectDataDir(alias)).not.toBe(written);
 		expect(getDisposition(alias, "ddw:ec76942a8ce3")?.disposition).toBe(
 			"suppress",
 		);
+		expect(getDisposition(real, "ddw:ec76942a8ce3")?.disposition).toBe(
+			"suppress",
+		);
+		expect(
+			fs.existsSync(
+				path.join(written, "cache", "diagnostic-dispositions.json"),
+			),
+		).toBe(true);
 	});
 
 	it("realpath failure keeps the resolved directory stable and records fallback", () => {
@@ -372,5 +378,124 @@ describe("project data-dir slug (#2874)", () => {
 		} finally {
 			rename.mockRestore();
 		}
+	});
+});
+
+/** Every file of a 4.4.4 alias-rooted session's data dir that names no absolute path. */
+const ALIAS_SESSION_444 = path.join(
+	FIXTURES,
+	"data-dir-4.4.4",
+	"alias-session",
+);
+
+function filesUnder(dir: string, rel = ""): string[] {
+	return fs
+		.readdirSync(path.join(dir, rel), { withFileTypes: true })
+		.flatMap((entry) => {
+			const child = path.join(rel, entry.name);
+			return entry.isDirectory() ? filesUnder(dir, child) : [child];
+		});
+}
+
+describe("adopting the data dir a link spelling named (#4689 round 4)", () => {
+	// RECURRENCE GUARDED: #4689 round 4, maintainer decision 2026-10-21. The
+	// data dir moved from the link spelling's name to the real path's, so
+	// everything 4.4.4 stored for a link-rooted project must be carried over
+	// once, never overwrite newer data, and leave the old directory intact.
+	function aliasRoot(
+		prefix: string,
+	): { base: string; alias: string; spelled: string } | undefined {
+		if (process.platform === "win32") return undefined;
+		const base = isolateDataDir();
+		const scratch = makeScratch(prefix);
+		fs.mkdirSync(path.join(scratch, "realproj"));
+		const alias = path.join(scratch, "aliasproj");
+		fs.symlinkSync("realproj", alias, "dir");
+		const spelled = dataDir444(base, alias);
+		fs.cpSync(ALIAS_SESSION_444, spelled, { recursive: true });
+		return { base, alias, spelled };
+	}
+
+	it("copies every file byte for byte, keeps the old dir and records adopted", (ctx) => {
+		const fx = aliasRoot("pi-lens-adopt-");
+		if (!fx) return ctx.skip("the win32 name never moved");
+		// Not data: a lock directory, a lock file and an atomic-write stage.
+		fs.mkdirSync(path.join(fx.spelled, "cache", "x.json.locks"));
+		fs.writeFileSync(
+			path.join(fx.spelled, "cache", "x.json.locks", "lock.1"),
+			"1",
+		);
+		fs.writeFileSync(path.join(fx.spelled, "cache", "y.lock"), "1");
+		fs.writeFileSync(path.join(fx.spelled, "cache", "z.json.tmp-1-0-0"), "{");
+
+		const dir = getProjectDataDir(fx.alias);
+
+		const expected = filesUnder(ALIAS_SESSION_444).sort();
+		expect(expected.length).toBeGreaterThan(0);
+		expect(filesUnder(dir).sort()).toEqual(expected);
+		for (const file of expected) {
+			expect(fs.readFileSync(path.join(dir, file))).toEqual(
+				fs.readFileSync(path.join(ALIAS_SESSION_444, file)),
+			);
+			expect(fs.existsSync(path.join(fx.spelled, file))).toBe(true);
+		}
+		expect(drainProjectDataDirMigrations()).toEqual([
+			{ to: dir, outcome: "adopted" },
+		]);
+	});
+
+	it("never overwrites a file the real path's directory already holds", (ctx) => {
+		const fx = aliasRoot("pi-lens-adopt-keep-");
+		if (!fx) return ctx.skip("the win32 name never moved");
+		const real = fs.realpathSync.native(fx.alias);
+		const dir = getProjectDataDir(real);
+		const newer = path.join(dir, "cache", "diagnostic-dispositions.json");
+		fs.mkdirSync(path.dirname(newer), { recursive: true });
+		fs.writeFileSync(newer, '{"dispositions":{}}');
+		_resetProjectDataDirMemoForTests();
+
+		expect(getProjectDataDir(fx.alias)).toBe(dir);
+
+		expect(fs.readFileSync(newer, "utf8")).toBe('{"dispositions":{}}');
+		expect(fs.existsSync(path.join(dir, "cache", "todo-baseline.json"))).toBe(
+			true,
+		);
+	});
+
+	it("records adopt-failed when a file cannot be copied, and leaves it where it was", (ctx) => {
+		const fx = aliasRoot("pi-lens-adopt-fail-");
+		if (!fx) return ctx.skip("the win32 name never moved");
+		const real = fs.realpathSync.native(fx.alias);
+		const dir = getProjectDataDir(real);
+		// A file where the copy needs a directory.
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(path.join(dir, "cache"), "");
+		_resetProjectDataDirMemoForTests();
+		drainProjectDataDirMigrations();
+
+		getProjectDataDir(fx.alias);
+
+		expect(drainProjectDataDirMigrations()).toEqual([
+			{ to: dir, outcome: "adopt-failed" },
+		]);
+		expect(
+			fs.existsSync(path.join(fx.spelled, "cache", "todo-baseline.json")),
+		).toBe(true);
+	});
+
+	it("copies at most 4096 files and records the rest as not adopted", (ctx) => {
+		const fx = aliasRoot("pi-lens-adopt-cap-");
+		if (!fx) return ctx.skip("the win32 name never moved");
+		const bulk = path.join(fx.spelled, "bulk");
+		fs.mkdirSync(bulk);
+		for (let i = 0; i < 4100; i++)
+			fs.writeFileSync(path.join(bulk, `${i}.json`), "");
+
+		const dir = getProjectDataDir(fx.alias);
+
+		expect(filesUnder(dir)).toHaveLength(4096);
+		expect(drainProjectDataDirMigrations()).toEqual([
+			{ to: dir, outcome: "adopt-failed" },
+		]);
 	});
 });

@@ -21,8 +21,8 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { getProjectDataDir } from "../clients/file-utils.js";
 import {
 	BLOCKING_FILE,
 	CLEAN_FILE,
@@ -51,7 +51,17 @@ import {
 	createPathIdentityFixture,
 } from "./clients/test-utils.js";
 
+import { dataDir444 } from "./support/data-dir-4-4-4.js";
+
 const fixture = piSessionFixture();
+
+/** A 4.4.4 link-rooted session's data dir, every file that names no absolute path. */
+const ALIAS_SESSION_444 = path.join(
+	path.dirname(fileURLToPath(import.meta.url)),
+	"fixtures",
+	"data-dir-4.4.4",
+	"alias-session",
+);
 
 /** The read guard's refusal, as the edit tool result carries it. */
 const EDIT_WITHOUT_READ = "Edit without read";
@@ -377,15 +387,54 @@ describe("#4689: a mark silences its finding under any spelling of the session r
 		});
 	}
 
-	it("a session rooted at a link adopts a mark stored where 4.4.4 put it", async (ctx) => {
-		// 4.4.4 located the store by the session's spelling of the root. The
-		// next session's dispatch holds only the identity, so session_start
-		// adopts the spelled store before the first write is analysed.
+	it("a session rooted at a link reads the marks a 4.4.4 session stored", async (ctx) => {
+		// RECURRENCE GUARDED: #4689 review r1 F2 and round 4. The data dir is
+		// now named from the root's real path, while 4.4.4 named it from the
+		// session's spelling. The directory below is what a 4.4.4 session
+		// rooted at a link wrote (tests/fixtures/data-dir-4.4.4/alias-session,
+		// a false-positive mark on MARKED_FILE at src/target.ts), placed where
+		// 4.4.4 put it. Without adoption the first write reports STOP again.
 		const fx = family("mark-444");
 		if (fx.skipReason) return ctx.skip(fx.skipReason);
 		const cwd = fx.aliasRoot;
+		const spelled = dataDir444(path.join(fixture.root, "data"), cwd);
+		fs.cpSync(ALIAS_SESSION_444, spelled, { recursive: true });
 		const target = path.join(cwd, "src", "target.ts");
-		const marking = await startPiSession({
+		const handle = await startPiSession({
+			root: fixture.root,
+			cwd,
+			flags: new Map(GUARDED_FLAGS),
+			responses: [step(writeTarget(target, MARKED_FILE), "writing"), endTurn()],
+		});
+		try {
+			await handle.prompt("go");
+			const last = handle.requests.at(-1) ?? [];
+			const [write] = toolResults(last, "write");
+			expect(write?.text ?? "").not.toContain("STOP");
+			expect(write?.text ?? "").toContain("clean");
+		} finally {
+			await handle.dispose();
+		}
+		// The old directory is kept, so a downgrade still reads it.
+		expect(
+			fs.existsSync(
+				path.join(spelled, "cache", "diagnostic-dispositions.json"),
+			),
+		).toBe(true);
+	});
+
+	it("a session rooted at a link stores everything in one data dir", async (ctx) => {
+		// RECURRENCE GUARDED: #4689 round 4. r1 made the runtime and dispatch
+		// hold the root's real path while host-side callers kept the session's
+		// spelling, and each named the data dir from what it held: one session
+		// wrote turn state, caches, the change log and marks into two
+		// directories (r3 probe: getLensDir 38 opens by identity, 222 by
+		// spelling; project-changes 4 and 5).
+		const fx = family("one-dir");
+		if (fx.skipReason) return ctx.skip(fx.skipReason);
+		const cwd = fx.aliasRoot;
+		const target = path.join(cwd, "src", "target.ts");
+		const handle = await startPiSession({
 			root: fixture.root,
 			cwd,
 			flags: new Map(GUARDED_FLAGS),
@@ -393,54 +442,18 @@ describe("#4689: a mark silences its finding under any spelling of the session r
 				step(activateMarkTool(), "activating"),
 				step(writeTarget(target, MARKED_FILE), "writing"),
 				step(markFalsePositive(target), "marking"),
-				endTurn(),
-			],
-		});
-		try {
-			await marking.prompt("go");
-		} finally {
-			await marking.dispose();
-		}
-		const previousDataDir = process.env.PILENS_DATA_DIR;
-		process.env.PILENS_DATA_DIR = path.join(fixture.root, "data");
-		try {
-			const store = (root: string) =>
-				path.join(
-					getProjectDataDir(root),
-					"cache",
-					"diagnostic-dispositions.json",
-				);
-			const identityStore = store(fs.realpathSync(cwd));
-			const spelledStore = store(cwd);
-			// Premise: the two forms of the root name two data dirs.
-			expect(spelledStore).not.toBe(identityStore);
-			if (fs.existsSync(identityStore)) {
-				fs.mkdirSync(path.dirname(spelledStore), { recursive: true });
-				fs.renameSync(identityStore, spelledStore);
-			}
-			expect(fs.existsSync(identityStore)).toBe(false);
-			expect(fs.existsSync(spelledStore)).toBe(true);
-		} finally {
-			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
-			else process.env.PILENS_DATA_DIR = previousDataDir;
-		}
-		const rewriting = await startPiSession({
-			root: fixture.root,
-			cwd,
-			flags: new Map(GUARDED_FLAGS),
-			responses: [
 				step(writeTarget(target, `${MARKED_FILE}\n`), "rewriting"),
 				endTurn(),
 			],
 		});
 		try {
-			await rewriting.prompt("go");
-			const last = rewriting.requests.at(-1) ?? [];
-			const [rewrite] = toolResults(last, "write");
-			expect(rewrite?.text ?? "").not.toContain("STOP");
-			expect(rewrite?.text ?? "").toContain("clean");
+			await handle.prompt("go");
 		} finally {
-			await rewriting.dispose();
+			await handle.dispose();
 		}
+		const data = path.join(fixture.root, "data");
+		// No link on the real path, so its name is the same in every version.
+		expect(fs.existsSync(dataDir444(data, fs.realpathSync(cwd)))).toBe(true);
+		expect(fs.existsSync(dataDir444(data, cwd))).toBe(false);
 	});
 });

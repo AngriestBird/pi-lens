@@ -926,11 +926,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// `path.dirname(target)` instead of passing `projectRoot` through — one
 		// more `path` use, same sense (a path operation).
 		"clients/dependency-checker.ts": 30,
-		// 10 -> 13 (#4689 r3): the store is located by the root's identity
-		// (`path.resolve`), and adopting a store an earlier version wrote under
-		// the root's spelling creates its directory (`path.dirname`) and
-		// commits through the durable store's `path:` member. Same sense.
-		"clients/diagnostic-dispositions.ts": 13,
+		"clients/diagnostic-dispositions.ts": 10,
 		"clients/diagnostic-logger.ts": 3,
 		"clients/diagnostics-publish.ts": 6,
 		"clients/dispatch/dispatcher.ts": 6,
@@ -999,7 +995,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 18 -> 13 (#4689): the private nearest-existing realpath walk folded
 		// onto path-utils' `realpathOrResolve`.
 		"clients/ephemeral-root.ts": 13,
-		"clients/file-utils.ts": 61,
+		// 61 -> 68 (#4689 r4): the data-dir adoption joins its walk with the
+		// node `path` module (no `path` binding of its own).
+		"clients/file-utils.ts": 68,
 		"clients/finding-identity.ts": 2,
 		"clients/fix-worklog.ts": 3,
 		"clients/format-service.ts": 3,

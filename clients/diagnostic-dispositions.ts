@@ -66,7 +66,6 @@ import {
 	stableFindingId,
 } from "./finding-identity.js";
 import { normalizeMapKey } from "./path-utils.js";
-import { recordDegradationOnce } from "./degradation-ledger.js";
 import { lineContentHash } from "./read-guard.js";
 
 /** Minimal shape a diagnostic needs for anchoring/filtering — deliberately
@@ -319,100 +318,12 @@ export function anchorsForDiagnostic(
 	return { strict: computeStrictAnchor(args), weak: computeWeakAnchor(args) };
 }
 
-function storePathUnder(root: string): string {
+function statePath(cwd: string): string {
 	return path.join(
-		getProjectDataDir(root),
+		getProjectDataDir(cwd),
 		"cache",
 		"diagnostic-dispositions.json",
 	);
-}
-
-/**
- * The durable half is located by the root's PATH IDENTITY, the key the session
- * half (`deferredByCwd`) already uses. Actors hold the root on either axis:
- * the mark tool and the turn-end readers hold the host's spelling, while
- * dispatch, the cascade, the bus and fresh-fetch hold the identity. The data
- * dir is named from its argument's spelling (#4689 review r1 F2), so a store
- * located by the caller's form split in two under a root reached through a
- * link, and a mark never silenced the dispatch (#4689 review r2 A). Locating it
- * here, from any spelling, leaves no caller able to pick the other store.
- */
-function statePath(cwd: string): string {
-	return storePathUnder(normalizeMapKey(path.resolve(cwd)));
-}
-
-/**
- * Adopt the store an earlier version wrote under the root's SPELLING (4.4.4
- * located it by the caller's form) into the identity-located store, when the
- * two differ and the identity store does not exist yet. The merge runs under the
- * store's own lock; the spelled file stays, so a downgrade still reads it.
- * Only a caller holding the spelling can find that file: dispatch holds the
- * identity alone, so `session_start` adopts before the first dispatch.
- */
-function adoptSpelledStore(
-	cwd: string,
-	target: string,
-): DispositionStateFile | undefined {
-	const spelled = storePathUnder(cwd);
-	if (spelled === target) return undefined;
-	let legacy: DispositionStateFile;
-	try {
-		legacy = deserializeState(fs.readFileSync(spelled, "utf-8"));
-	} catch (cause) {
-		// none: ENOENT is the common answer (no earlier version wrote marks
-		// here), and every other errno records one row below.
-		if ((cause as NodeJS.ErrnoException).code !== "ENOENT") {
-			recordAdoptFailure(spelled, "read", cause);
-		}
-		return undefined;
-	}
-	const dispositions = legacy.dispositions;
-	if (!dispositions) return undefined;
-	try {
-		fs.mkdirSync(path.dirname(target), { recursive: true });
-		return commitDurableStore({
-			path: target,
-			deserialize: deserializeState,
-			// A union in which the identity store wins: a mark another process
-			// committed there since the stat above is kept.
-			merge: (state) => ({
-				...state,
-				dispositions: { ...dispositions, ...state.dispositions },
-			}),
-			serialize: (state) => JSON.stringify(state, null, 2),
-			waitMs: DISPOSITION_LOCK_WAIT_MS,
-			retryMs: DISPOSITION_LOCK_RETRY_MS,
-			timeoutMessage: "timed out acquiring diagnostic disposition store lock",
-			onContention: "throw",
-			afterWriteLocked: (state) => refreshStateCache(target, state),
-		});
-	} catch (cause) {
-		// The old marks still apply to this read; the copy is retried by the
-		// next read that holds the spelling.
-		recordAdoptFailure(target, "copy", cause);
-		return legacy;
-	}
-}
-
-/** One row per store and step per session, however often the read retries. */
-function recordAdoptFailure(
-	subject: string,
-	step: "read" | "copy",
-	cause: unknown,
-): void {
-	recordDegradationOnce({
-		kind: "disposition-store-adopt-failed",
-		subject: `${step}:${subject}`,
-		reason: `could not ${step} the marks stored under the root's link spelling: ${cause instanceof Error ? cause.message : String(cause)}`,
-	});
-}
-
-/**
- * `session_start`: adopt the marks an earlier version stored under the
- * session root's spelling before the first dispatch reads the store.
- */
-export function adoptSpelledDispositionStore(cwd: string): void {
-	readState(cwd);
 }
 
 // mtime+size-keyed memoization: applyDispositions runs on EVERY per-edit
@@ -513,11 +424,6 @@ function readState(cwd: string): DispositionStateFile {
 	try {
 		stat = dispositionStatSync(p);
 	} catch {
-		// none: a missing store is the "no marks yet" answer, cached below.
-		// Adopt before the missing-cache hit: an identity-holding reader may
-		// have cached the miss before any spelling-holding reader arrived.
-		const adopted = adoptSpelledStore(cwd, p);
-		if (adopted) return adopted;
 		if (stateCache && stateCache.path === p && stateCache.missing) {
 			return stateCache.state;
 		}

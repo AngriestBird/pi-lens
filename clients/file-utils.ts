@@ -28,8 +28,10 @@ import {
 	normalizeEphemeralMapKey,
 	normalizeFilePath,
 	normalizePathSpelling,
+	realpathOrResolve,
 	toProjectRelativePath,
 } from "./path-utils.js";
+import { STAGE_TMP_PATTERN, stagePathFor } from "./atomic-write-staging.js";
 import {
 	findPiLensConfigInDir,
 	findPiLensProjectConfig,
@@ -54,6 +56,13 @@ import { getProcessSingleton } from "./process-singletons.js";
  * subdirectory named after a sanitized form of its absolute path, e.g.
  *   PILENS_DATA_DIR=~/.pi-lens/projects
  *   → ~/.pi-lens/projects/home-user-myapp-<8-hex-hash>/
+ *
+ * The name comes from the root's PATH IDENTITY on POSIX (#4689 round 4,
+ * maintainer decision 2026-10-21): every caller opens one directory whichever
+ * spelling of the root it holds. The host's cwd may be spelled through a
+ * link, while dispatch and the runtime hold the realpath. A directory an
+ * earlier version named from a link spelling is adopted here, once, by
+ * {@link adoptSpelledDataDir}.
  *
  * Temporary checkouts (#1129 decision B, `isEphemeralCheckoutRoot`: a real
  * git checkout below the host tmpdir, or a directory inside one) keep the
@@ -94,7 +103,121 @@ export function getProjectDataDir(cwd: string): string {
 		memoKey,
 		canonical.fallback,
 	);
+	// An ephemeral base belongs to this process, so no earlier version wrote it.
+	if (settled === dir && base === resolvedBase) {
+		adoptSpelledDataDir(path.resolve(cwd), base, dir);
+	}
 	return settled;
+}
+
+/** Files one adoption copies at most; the rest stay in the old directory. */
+const ADOPT_MAX_FILES = 4096;
+
+/**
+ * #4689 round 4: before this change the directory was named from the
+ * caller's spelling of the root, so a session rooted at a link stored its
+ * data under the link's name. When `spelledRoot` names a directory other
+ * than `dir` and that directory exists, every file `dir` lacks is copied
+ * into it. A copy never overwrites: it is staged and then hard-linked into
+ * place, an exclusive create that cannot tear and that loses to a store's own
+ * newer write. The old directory is kept, so a downgrade still reads it.
+ * Lock entries and atomic-write stages are not data, so they are skipped.
+ * The outcome is queued for the session-start drain (no ledger import here,
+ * see `settleProjectDataDir`).
+ */
+function adoptSpelledDataDir(
+	spelledRoot: string,
+	base: string,
+	dir: string,
+): void {
+	const from = path.join(
+		base,
+		`${projectDataDirReadableSlug(spelledRoot) || "default"}-${projectDataDirRootHash(spelledRoot)}`,
+	);
+	if (from === dir || !isDirectory(from)) return;
+	const { copied, failed } = copyMissingFiles(from, dir);
+	if ((copied > 0 || failed > 0) && pendingDataDirMigrations.length < 32) {
+		pendingDataDirMigrations.push({
+			to: dir,
+			outcome: failed > 0 ? "adopt-failed" : "adopted",
+		});
+	}
+}
+
+function isDirectory(dir: string): boolean {
+	try {
+		return fs.statSync(dir).isDirectory();
+	} catch {
+		// none: an absent directory is the common answer, nothing to adopt.
+		return false;
+	}
+}
+
+function copyMissingFiles(
+	from: string,
+	to: string,
+): { copied: number; failed: number } {
+	let copied = 0;
+	let failed = 0;
+	let seen = 0;
+	const pending = [""];
+	while (pending.length > 0) {
+		const rel = pending.pop() ?? "";
+		let entries: fs.Dirent[];
+		try {
+			entries = fs.readdirSync(path.join(from, rel), { withFileTypes: true });
+		} catch {
+			// none: counted into the adoption outcome the session-start drain records.
+			failed++;
+			continue;
+		}
+		for (const entry of entries) {
+			const name = entry.name;
+			if (name.endsWith(".lock") || name.endsWith(".locks")) continue;
+			if (STAGE_TMP_PATTERN.test(name)) continue;
+			const child = path.join(rel, name);
+			if (entry.isDirectory()) {
+				pending.push(child);
+				continue;
+			}
+			if (!entry.isFile()) continue;
+			if (++seen > ADOPT_MAX_FILES) return { copied, failed: failed + 1 };
+			const outcome = copyIfMissing(
+				path.join(from, child),
+				path.join(to, child),
+			);
+			if (outcome === "copied") copied++;
+			else if (outcome === "failed") failed++;
+		}
+	}
+	return { copied, failed };
+}
+
+function copyIfMissing(
+	source: string,
+	target: string,
+): "copied" | "present" | "failed" {
+	if (fs.existsSync(target)) return "present";
+	const stage = stagePathFor(target);
+	// The stage is removed only once its parent is known to be a directory:
+	// removing it under a parent that is a file throws ENOTDIR.
+	let staged = false;
+	try {
+		fs.mkdirSync(path.dirname(target), { recursive: true });
+		staged = true;
+		fs.copyFileSync(source, stage);
+		fs.linkSync(stage, target);
+		return "copied";
+	} catch (cause) {
+		// none: EEXIST is a store's own newer write, which wins; any other
+		// errno is counted into the outcome the session-start drain records.
+		return (cause as NodeJS.ErrnoException).code === "EEXIST" &&
+			fs.existsSync(target)
+			? "present"
+			: "failed";
+	} finally {
+		if (staged) fs.rmSync(stage, { force: true });
+	}
 }
 
 function projectDataBase(): string {
@@ -197,11 +320,13 @@ export async function sweepDeadEphemeralDataDirs(options: {
  * `src/pi/lens` fold to the same string. It is only ever combined with
  * {@link projectDataDirRootHash}. Never use it as a directory name alone.
  *
- * Both halves come from the root's SPELLING (`normalizePathSpelling`, the
- * form `normalizeFilePath` returned before #4689), never its path identity:
- * the name is durable, so a root spelled through a link keeps the directory
- * every earlier version wrote (#4689 review r1 F2, maintainer decision: no
- * migration).
+ * Both halves come from one root: since #4689 round 4 its path identity
+ * ({@link canonicalProjectRoot}). The readable half is `normalizePathSpelling`
+ * of that root, the form `normalizeFilePath` returned before #4689, so a
+ * root with no link keeps the name every earlier version wrote. A root
+ * reached through a link moves to its real path's name, and its old
+ * directory is adopted (#4689 review r1 F2 decided "no migration"; the
+ * maintainer reversed that on 2026-10-21).
  */
 function projectDataDirReadableSlug(canonicalRoot: string): string {
 	const normalized = normalizePathSpelling(canonicalRoot);
@@ -214,29 +339,31 @@ function projectDataDirReadableSlug(canonicalRoot: string): string {
 }
 
 /**
- * The canonical root is the resolved absolute path for both slug halves.
- * `realpathSync` is probed only to expose a fallback boundary failure; using
- * its result would let one root spelling change identity when the boundary
- * recovers. The hash is the first 8 hex chars of SHA-256 over that root. A
- * collision needs the same readable slug and the same 32-bit prefix, so the
- * practical collision population is readable-slug twin pairs. Pinned on
- * purpose because changing it renames every directory.
+ * The canonical root for both slug halves: on POSIX the root's path identity
+ * (`realpathOrResolve`, the kernel-real path of the root or of its nearest
+ * existing ancestor plus the missing tail), so a root that does not exist yet
+ * names the directory it will have once created. On win32 it stays the
+ * resolved path, as in every earlier version: a win32 name has never followed
+ * the realpath, and changing it would rename directories for 8.3, junction
+ * and casing spellings alike. `realpathSync` is probed only to expose a
+ * boundary failure. The hash is the first 8 hex chars of SHA-256 over the
+ * root. A collision needs the same readable slug and the same 32-bit prefix,
+ * so the practical collision population is readable-slug twin pairs.
  */
 function canonicalProjectRoot(cwd: string): {
 	root: string;
 	fallback: boolean;
 } {
 	const resolved = path.resolve(cwd);
+	const root =
+		process.platform === "win32" ? resolved : realpathOrResolve(resolved);
 	try {
-		// Probe the root, but keep the resolved spelling as the identity in both
-		// success and fallback cases. Resolving only on success would let a
-		// transient boundary failure choose a second data directory.
 		fs.realpathSync(resolved);
 	} catch {
 		// Best-effort: the root may not exist yet.
-		return { root: resolved, fallback: true };
+		return { root, fallback: true };
 	}
-	return { root: resolved, fallback: false };
+	return { root, fallback: false };
 }
 
 function projectDataDirRootHash(canonicalRoot: string): string {
@@ -255,7 +382,11 @@ export interface ProjectDataDirMigration {
 		| "coexisting"
 		| "rename-failed"
 		| "identity-fallback"
-		| "ephemeral";
+		| "ephemeral"
+		/** #4689 r4: files stored under the root's link spelling were copied. */
+		| "adopted"
+		/** #4689 r4: some of them could not be copied and stay where they were. */
+		| "adopt-failed";
 }
 
 const pendingDataDirMigrations: ProjectDataDirMigration[] = [];

@@ -342,10 +342,10 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 		reason: PRE_RULE,
 	}, // :26
 	"clients/diagnostic-dispositions.ts": {
-		silent: 4,
-		identities: "c22583bf9d0e2f37",
+		silent: 5,
+		identities: "7578e0c38034b277",
 		reason: PRE_RULE,
-	}, // :546, :574, :689, :957 (#4689 r3: the store's stat-miss arm now declares its none)
+	}, // :391, :421, :449, :564, :811
 	"clients/diagnostic-line-freshness.ts": {
 		silent: 5,
 		identities: "809dfcb662f6df93",
@@ -584,9 +584,9 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 	}, // :148, :202
 	"clients/file-utils.ts": {
 		silent: 11,
-		identities: "282279822595e8b0",
+		identities: "0cb7a41f4e5a5a7a",
 		reason: PRE_RULE,
-	}, // :141, :161, :179, :183, :186, :228, :299, :725, :1085, :1366, :1397
+	}, // :265, :285, :303, :307, :310, :362, :437, :863, :1223, :1504, :1535 (#4689 r4: canonicalProjectRoot's realpath-probe arm now returns the identity root; the adoption's handlers declare their none)
 	"clients/fix-run-restore.ts": {
 		silent: 10,
 		identities: "24b4689d533166d4",

@@ -46,12 +46,7 @@ let previousDataDir: string | undefined;
 const originalBusEnv = process.env.PI_LENS_BUS_PUBLISH;
 
 beforeEach(() => {
-	// The store is located by the root's path identity (#4689 review r2 A);
-	// macOS's os.tmpdir() is spelled through the /var link, so `statePath()`
-	// below locates the file from the identity the store uses.
-	tmpDir = fs.realpathSync.native(
-		fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-dd-")),
-	);
+	tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-dd-"));
 	previousDataDir = process.env.PILENS_DATA_DIR;
 	process.env.PILENS_DATA_DIR = path.join(tmpDir, "data");
 	_resetDeferredForTests();

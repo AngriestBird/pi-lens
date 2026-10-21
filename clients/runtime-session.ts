@@ -13,10 +13,7 @@ import {
 	recordDegradationOnce,
 	resetDegradationLedger,
 } from "./degradation-ledger.js";
-import {
-	adoptSpelledDispositionStore,
-	resetDeferredDispositions,
-} from "./diagnostic-dispositions.js";
+import { resetDeferredDispositions } from "./diagnostic-dispositions.js";
 import { getDiagnosticTracker } from "./diagnostic-tracker.js";
 import { resetPsScriptAnalyzerAvailability } from "./dispatch/runners/psscriptanalyzer.js";
 import { resetInstallRetryLatches } from "./dispatch/runners/utils/availability-policy.js";
@@ -2742,9 +2739,6 @@ export async function handleSessionStart(
 	// project data roots and machine-global registry root once per session start;
 	// this is fire-and-forget and bounded so it never delays startup.
 	const projectDataDir = getProjectDataDir(cwd);
-	// #4689 review r2 A: before the first dispatch, which holds only the root's
-	// identity and so cannot find marks stored under its link spelling.
-	adoptSpelledDispositionStore(cwd);
 	// #2874: `getProjectDataDir` queues one migration per old-slug directory
 	// it renames (or finds coexisting with its hashed successor). Drain here
 	// so each migration emits one bounded record per session at most.
@@ -2771,7 +2765,11 @@ export async function handleSessionStart(
 						? "using hashed directory because legacy and hashed directories both exist"
 						: migration.outcome === "rename-failed"
 							? "using legacy directory after hashed-directory rename failure"
-							: "using resolved directory after realpath fallback",
+							: migration.outcome === "adopted"
+								? "copied the data an earlier version stored under the root's link spelling into the real path's directory; the old directory is kept"
+								: migration.outcome === "adopt-failed"
+									? "some data an earlier version stored under the root's link spelling could not be copied and stays in the old directory"
+									: "using resolved directory after realpath fallback",
 		});
 	}
 	// #1609 review F1: sweepOwnStagingFiles does not recurse, so the installer's
