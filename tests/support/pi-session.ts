@@ -390,7 +390,12 @@ export interface PiSessionOptions {
 	 * second ROOT is refused — see `pinEnv`.
 	 */
 	cwd?: string;
-	/** `pi.getFlag` values; defaults to {@link DEFAULT_FLAGS}. */
+	/**
+	 * `pi.getFlag` overrides on top of {@link DEFAULT_FLAGS}: a key named here
+	 * wins, and every other default (the analyzers this tier neither observes
+	 * nor can drain) stays off. A case that needs the real analyzer deletes its
+	 * flag explicitly.
+	 */
 	flags?: ReadonlyMap<string, boolean | string>;
 	/** Session store. Defaults to `<root>/sessions`. */
 	sessionsDir?: string;
@@ -845,7 +850,7 @@ export async function startPiSession(
 	else delete process.env.PI_LENS_COLD_START_QUICK;
 	const args: SessionArgs = {
 		root: options.root,
-		flags: options.flags ?? new Map(DEFAULT_FLAGS),
+		flags: new Map([...DEFAULT_FLAGS, ...(options.flags ?? [])]),
 	};
 	return bindSession(
 		args,
