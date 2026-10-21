@@ -855,6 +855,9 @@ function isTurnEndFindingsCache(value: unknown): value is TurnEndFindingsCache {
 	);
 }
 
+/** A stored record's fields as read, before any of them is trusted. */
+type StoredRecord = Partial<TurnEndFindingsCache>;
+
 /**
  * The stored record WHATEVER ITS AGE (#4725), or `undefined` when there is none
  * or it cannot be read.
@@ -865,12 +868,21 @@ function isTurnEndFindingsCache(value: unknown): value is TurnEndFindingsCache {
  * carry or retire it: a clean write latched `cache_stale`, the turn end's
  * clean-up skipped it, and it refused every commit in every later session.
  */
-function storedRecord(cacheManager: CacheManager, cwd: string): unknown {
-	return cacheManager.readCache<unknown>(
+function storedRecord(
+	cacheManager: CacheManager,
+	cwd: string,
+): StoredRecord | undefined {
+	const read = cacheManager.readCache<unknown>(
 		"turn-end-findings",
 		cwd,
 		Number.POSITIVE_INFINITY,
-	)?.data;
+	);
+	if (!read) return undefined;
+	// A stored value that is not an object carries none of the record's
+	// fields: present, so the gate still refuses it, and claiming nothing.
+	return read.data && typeof read.data === "object"
+		? (read.data as StoredRecord)
+		: {};
 }
 
 function cacheRecord(
@@ -934,11 +946,10 @@ export function retireSettledGitGuardRecord(
 	cwd: string,
 ): boolean {
 	const stored = storedRecord(cacheManager, cwd);
-	if (!stored || typeof stored !== "object") return false;
-	const record = stored as Partial<TurnEndFindingsCache>;
+	if (!stored) return false;
 	const own =
-		record.sessionId === runtime.telemetrySessionId &&
-		record.testFailures !== true;
+		stored.sessionId === runtime.telemetrySessionId &&
+		stored.testFailures !== true;
 	const noBlocker = claimsNoBlocker(stored);
 	if (!own && !noBlocker) return false;
 	cacheManager.clearCache("turn-end-findings", cwd);

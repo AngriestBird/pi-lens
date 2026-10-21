@@ -1469,6 +1469,40 @@ describe("#4725: the record's writers read it whatever its age", () => {
 		}
 	});
 
+	it("keeps refusing a stored value that is not a record, and names no file", () => {
+		// The fail-closed control for the any-age read (#4725): a value with no
+		// record shape claims nothing, so the turn end may not retire it, and
+		// the refusal must not offer a re-check that cannot clear it.
+		// Recurrence: reading such a value as "no record" gave it the re-check
+		// remedy (and one step further, would allow the commit).
+		for (const value of [null, "garbage", 7]) {
+			const env = setupTestEnvironment("pi-lens-git-guard-4725-non-record-");
+			try {
+				const runtime = sessionA(env.tmpDir);
+				const cache = new CacheManager(false);
+				cache.writeCache("turn-end-findings", value, env.tmpDir);
+				expect(
+					cache.inspectCache("turn-end-findings", env.tmpDir),
+					String(value),
+				).toBe("fresh");
+
+				expect(retireSettledGitGuardRecord(runtime, cache, env.tmpDir)).toBe(
+					false,
+				);
+				const refusal = evaluateGitGuard(runtime, cache, env.tmpDir);
+				expect(refusal, String(value)).toMatchObject({
+					block: true,
+					unknown: true,
+				});
+				expect(refusal.reason).toContain(
+					"cache_malformed). The record holds blockers pi-lens cannot attribute",
+				);
+			} finally {
+				env.cleanup();
+			}
+		}
+	});
+
 	it("names a write as the action for this session's own unknown state, never a fresh session", () => {
 		// #4725 acceptance 3: a fresh session reads the same record, so the old
 		// "or start a fresh session" named an action that clears nothing.
