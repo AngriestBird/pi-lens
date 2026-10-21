@@ -99,8 +99,8 @@ const USAGE = [
 /** How many transcript lines a failure prints: enough to name the case. */
 const FAILURE_LINES = 25;
 
-function hostRootsFromEnv() {
-	const fromEnv = (process.env.PI_LENS_PI_HOST_ROOTS ?? "")
+function hostRootsFromEnv(env) {
+	const fromEnv = (env.PI_LENS_PI_HOST_ROOTS ?? "")
 		.split(path.delimiter)
 		.map((entry) => entry.trim())
 		.filter((entry) => entry.length > 0);
@@ -143,85 +143,96 @@ function runTierSuiteInChild({ host, suite, timeoutMs }) {
 	return { ...verdict, detail };
 }
 
-async function main(argv) {
+/**
+ * The CLI's own decisions, with every boundary injected so a case can drive
+ * them without spawning: `release-qa.mjs` keeps the same shape (its pure core
+ * is exported "so tests/scripts/release-qa.test.ts can hold them without
+ * spawning a real pi"). The defaults are the real filesystem, the real child,
+ * and the real streams.
+ */
+export async function main(
+	argv,
+	{
+		baselineDoc = BASELINE_DOC,
+		extensionEntry = EXTENSION_ENTRY,
+		vitestEntry = VITEST_ENTRY,
+		readFile = (file) => fs.readFileSync(file, "utf8"),
+		exists = (file) => fs.existsSync(file),
+		runTierSuite = (input) => runTierSuiteInChild(input),
+		write = (text) => process.stdout.write(text),
+		warn = (text) => process.stderr.write(text),
+		env = process.env,
+	} = {},
+) {
 	let options;
 	try {
 		options = parseCliArgs(argv);
 	} catch (error) {
-		process.stderr.write(`${error.message}\n\n${USAGE}\n`);
+		warn(`${error.message}\n\n${USAGE}\n`);
 		return EXIT.usage;
 	}
 	if (options.help) {
-		process.stdout.write(`${USAGE}\n`);
+		write(`${USAGE}\n`);
 		return EXIT.ok;
 	}
-	if (!fs.existsSync(EXTENSION_ENTRY)) {
-		process.stderr.write(
-			`${EXTENSION_ENTRY} is missing: run \`npm run build\` first, the tiers load the built extension\n`,
+	if (!exists(extensionEntry)) {
+		warn(
+			`${extensionEntry} is missing: run \`npm run build\` first, the tiers load the built extension\n`,
 		);
 		return EXIT.usage;
 	}
-	if (!fs.existsSync(VITEST_ENTRY)) {
-		process.stderr.write(
-			`${VITEST_ENTRY} is missing: install this repo's devDependencies\n`,
-		);
+	if (!exists(vitestEntry)) {
+		warn(`${vitestEntry} is missing: install this repo's devDependencies\n`);
 		return EXIT.usage;
 	}
-	const { versions, unparseable } = certifiedHosts(
-		fs.readFileSync(BASELINE_DOC, "utf8"),
-	);
+	const { versions, unparseable } = certifiedHosts(readFile(baselineDoc));
 	if (unparseable.length > 0) {
-		process.stderr.write(
-			`${BASELINE_DOC} has verified-host row(s) with no \`| x.y.z |\` version, so the certified set is unreadable: ${unparseable.join("; ")}\n`,
+		warn(
+			`${baselineDoc} has verified-host row(s) with no \`| x.y.z |\` version, so the certified set is unreadable: ${unparseable.join("; ")}\n`,
 		);
 		return EXIT.usage;
 	}
 	if (versions.length === 0) {
-		process.stderr.write(
-			`${BASELINE_DOC} names no certified host under \`### Verified hosts\`\n`,
+		warn(
+			`${baselineDoc} names no certified host under \`### Verified hosts\`\n`,
 		);
 		return EXIT.usage;
 	}
 	const roots =
-		options.hostRoots.length > 0 ? options.hostRoots : hostRootsFromEnv();
+		options.hostRoots.length > 0 ? options.hostRoots : hostRootsFromEnv(env);
 	const { hosts, unreadable } = discoverInstalledHosts(roots);
 	for (const root of unreadable) {
-		process.stderr.write(
-			`warning: ${root} holds no ${HOST_PACKAGE}, so it was skipped\n`,
-		);
+		warn(`warning: ${root} holds no ${HOST_PACKAGE}, so it was skipped\n`);
 	}
-	process.stdout.write(
-		`certified hosts (${BASELINE_DOC}): ${versions.join(", ")}\n`,
-	);
+	write(`certified hosts (${baselineDoc}): ${versions.join(", ")}\n`);
 	const spread = await runSpread({
 		certified: versions,
 		hosts,
 		runTierSuite: (input) =>
-			runTierSuiteInChild({ ...input, timeoutMs: options.timeoutMs }),
+			runTierSuite({ ...input, timeoutMs: options.timeoutMs }),
 	});
 	for (const row of spread.rows) {
-		process.stdout.write(`${renderHostLine(row)}\n`);
-		if (row.failed) {
-			for (const tier of row.tiers.filter((entry) => !entry.ok)) {
-				process.stdout.write(
-					`---- ${row.version} ${tier.tier}: ${tier.file} ----\n${tier.detail ?? ""}\n`,
-				);
-			}
+		write(`${renderHostLine(row)}\n`);
+		for (const tier of row.tiers.filter((entry) => !entry.ok)) {
+			write(
+				`---- ${row.version} ${tier.tier}: ${tier.file} ----\n${tier.detail ?? ""}\n`,
+			);
 		}
 	}
-	process.stdout.write(`${renderSpreadSummary(spread)}\n`);
+	write(`${renderSpreadSummary(spread)}\n`);
 	return exitCodeForSpread(spread, { requireAll: options.requireAll });
 }
 
 if (isMainModule(import.meta.url)) {
-	main(process.argv.slice(2))
-		.then((code) => {
+	main(process.argv.slice(2)).then(
+		(code) => {
 			process.exitCode = code;
-		})
-		.catch((error) => {
+		},
+		(error) => {
 			process.stderr.write(
 				`probe-pi-host-tiers: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`,
 			);
 			process.exitCode = EXIT.usage;
-		});
+		},
+	);
 }

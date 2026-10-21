@@ -9,6 +9,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { main } from "../../scripts/probe-pi-host-tiers.mjs";
 import {
 	EXIT,
 	HOST_PACKAGE,
@@ -45,6 +46,15 @@ const BASELINE_TEXT = fs.readFileSync(BASELINE_DOC, "utf8");
  * never typed here.
  */
 const installedHost = resolveHostPackage(REPO_HOST_ROOT);
+
+/**
+ * Three versions for the spread cases: two this box does not carry, and the one
+ * it does, so both branches of `runSpread` are exercised.
+ */
+const certified = ["0.86.1", "0.87.1", installedHost?.version].filter(
+	(version): version is string => typeof version === "string",
+);
+const hosts = installedHost ? [installedHost] : [];
 
 /** A tier result the injected seam returns; no Vitest run is involved. */
 function tierResult(ok: boolean): TierResult {
@@ -156,11 +166,6 @@ describe("host installs are found by version, in every layout", () => {
 });
 
 describe("the spread probes the installed certified host and reports the rest", () => {
-	const certified = ["0.86.1", "0.87.1", installedHost?.version].filter(
-		(version) => typeof version === "string",
-	);
-	const hosts = installedHost ? [installedHost] : [];
-
 	it("prints one line per certified host, naming host and version", async () => {
 		const calls: Array<{
 			host: { version: string; dir: string };
@@ -259,6 +264,146 @@ describe("a tier's verdict is fail-closed", () => {
 		],
 	])("fails %s", (_name, input) => {
 		expect(tierVerdict(input).ok).toBe(false);
+	});
+});
+
+describe("the CLI's own decisions (no child spawned)", () => {
+	/** Collect the two streams and record every tier call. */
+	function runCli(argv: string[], boundaries: Record<string, unknown> = {}) {
+		const out: string[] = [];
+		const err: string[] = [];
+		const calls: unknown[] = [];
+		const mainStreams = {
+			write: (text: string) => out.push(text),
+			warn: (text: string) => err.push(text),
+			runTierSuite: async (input: unknown) => {
+				calls.push(input);
+				return tierResult(true);
+			},
+		};
+		return {
+			calls,
+			out,
+			err,
+			promise: main(argv, { ...mainStreams, ...boundaries }),
+		};
+	}
+
+	it("prints the usage on --help and spawns nothing", async () => {
+		const cli = runCli(["--help"]);
+		expect(await cli.promise).toBe(EXIT.ok);
+		expect(cli.out.join("")).toContain("--require-all");
+		expect(cli.calls).toHaveLength(0);
+	});
+
+	it("refuses an unknown flag before it reads anything", async () => {
+		const cli = runCli(["--requireall"]);
+		expect(await cli.promise).toBe(EXIT.usage);
+		expect(cli.err.join("")).toContain('unknown argument "--requireall"');
+		expect(cli.calls).toHaveLength(0);
+	});
+
+	it("refuses a missing build and names the command", async () => {
+		const cli = runCli([], {
+			extensionEntry: path.join(REPO_ROOT, "no-such-index.js"),
+		});
+		expect(await cli.promise).toBe(EXIT.usage);
+		expect(cli.err.join("")).toContain("npm run build");
+		expect(cli.calls).toHaveLength(0);
+	});
+
+	it("refuses a missing Vitest entry", async () => {
+		const cli = runCli([], {
+			vitestEntry: path.join(REPO_ROOT, "no-such-vitest.mjs"),
+		});
+		expect(await cli.promise).toBe(EXIT.usage);
+		expect(cli.err.join("")).toContain("devDependencies");
+	});
+
+	it("refuses a certified set it cannot read, naming the row", async () => {
+		const doc = [
+			"### Verified hosts",
+			"",
+			"| host | date |",
+			"| --- | --- |",
+			"| 1.4 | 2026-10-20 |",
+		].join("\n");
+		const cli = runCli([], {
+			readFile: () => doc,
+			baselineDoc: "synthetic.md",
+		});
+		expect(await cli.promise).toBe(EXIT.usage);
+		expect(cli.err.join("")).toContain("| 1.4 | 2026-10-20 |");
+		expect(cli.err.join("")).toContain("unreadable");
+		expect(cli.calls).toHaveLength(0);
+	});
+
+	it("refuses a doc that names no certified host", async () => {
+		const doc = [
+			"### Verified hosts",
+			"",
+			"| host | date |",
+			"| --- | --- |",
+		].join("\n");
+		const cli = runCli([], {
+			readFile: () => doc,
+			baselineDoc: "synthetic.md",
+		});
+		expect(await cli.promise).toBe(EXIT.usage);
+		expect(cli.err.join("")).toContain("names no certified host");
+	});
+
+	it("warns about a root that holds no host and keeps probing", async () => {
+		const cli = runCli([
+			"--host-root",
+			path.join(REPO_ROOT, "clients"),
+			"--host-root",
+			REPO_HOST_ROOT,
+		]);
+		expect(await cli.promise).toBe(EXIT.ok);
+		expect(cli.err.join("")).toContain(`holds no ${HOST_PACKAGE}`);
+		// One line per certified host (this case reads the real doc), plus the
+		// header and the summary line.
+		const docCertified = certifiedHosts(BASELINE_TEXT).versions;
+		const lines = cli.out.join("").trimEnd().split("\n");
+		expect(lines).toHaveLength(1 + docCertified.length + 1);
+		expect(
+			lines.some((line) =>
+				line.startsWith(`${HOST_PACKAGE} ${installedHost?.version} (`),
+			),
+		).toBe(true);
+		expect(lines.at(-1)).toBe(
+			`certified hosts: ${hosts.length} installed, ${docCertified.length - hosts.length} not installed, 0 failed`,
+		);
+	});
+
+	it("prints a failed tier's transcript and exits 1", async () => {
+		const cli = runCli(["--host-root", REPO_HOST_ROOT], {
+			runTierSuite: async ({ suite }: { suite: TierSuite }) =>
+				suite.tier === "tier1"
+					? tierResult(true)
+					: { ok: false, passed: 1, total: 2, detail: "boom from the child" },
+		});
+		expect(await cli.promise).toBe(EXIT.tiersFailed);
+		const out = cli.out.join("");
+		expect(out).toContain("tier2 FAIL 1/2");
+		expect(out).toContain("boom from the child");
+	});
+
+	it("exits 3 when --require-all demands a host this box lacks", async () => {
+		// A certified list with one version no install carries: the spread still
+		// runs the installed host and then refuses the answer.
+		const cli = runCli(["--require-all", "--host-root", REPO_HOST_ROOT], {
+			readFile: (file: string) =>
+				file === "synthetic.md"
+					? ["### Verified hosts", "", "| host |", "| --- |", "| 9.9.9 |"].join(
+							"\n",
+						)
+					: BASELINE_TEXT,
+			baselineDoc: "synthetic.md",
+		});
+		expect(await cli.promise).toBe(EXIT.hostMissing);
+		expect(cli.out.join("")).toContain(`${HOST_PACKAGE} 9.9.9: not installed`);
 	});
 });
 
