@@ -517,10 +517,7 @@ export function checkedWholeFile(
 	);
 	const skippedOrInFlight = new Set<string | undefined>(["skipped", "pending"]);
 	return (
-		[...outcomeOf].some(
-			([runnerId, outcome]) =>
-				outcome === "succeeded" && !noVerdict.has(runnerId),
-		) &&
+		[...outcomeOf.values()].includes("succeeded") &&
 		[...noVerdict].every((runnerId) =>
 			skippedOrInFlight.has(outcomeOf.get(runnerId)),
 		)
