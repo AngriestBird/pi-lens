@@ -2095,6 +2095,63 @@ describe("lsp server policy", () => {
 		}
 	});
 
+	it("falls through to the PATH tier when the project launch throws (#4638 review)", async () => {
+		const { PythonJediServer } = await import("../../../clients/lsp/server.js");
+		const { setProjectTrustState } =
+			await import("../../../clients/project-trust.js");
+		const { getDegradationSummary, resetDegradationLedger } =
+			await import("../../../clients/degradation-ledger.js");
+
+		const tmp = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-jedi-launch-throw-"),
+		);
+		dirs.push(tmp);
+		const binDir = path.join(tmp, ".venv", "bin");
+		const jediPath = path.join(binDir, "jedi-language-server");
+		fs.mkdirSync(binDir, { recursive: true });
+		for (const name of ["jedi-language-server", "python"]) {
+			const target = path.join(binDir, name);
+			fs.writeFileSync(target, "#!/usr/bin/env bash\nexit 0\n");
+			fs.chmodSync(target, 0o755);
+		}
+
+		setProjectTrustState("trusted");
+		vi.stubEnv("VIRTUAL_ENV", undefined);
+		vi.stubEnv("CONDA_PREFIX", undefined);
+		vi.stubEnv("UV_PROJECT_ENVIRONMENT", undefined);
+		resetDegradationLedger();
+		launchLSP.mockClear();
+		// A failure that is not "tool not found" makes the project tier throw
+		// (`resolveAndLaunch` re-raises the runtime failure), which must not end
+		// the attempt.
+		launchLSP.mockRejectedValueOnce(
+			new Error("project interpreter is unusable"),
+		);
+		launchLSP.mockResolvedValueOnce({
+			process: { killed: false } as never,
+			stdin: {} as never,
+			stdout: {} as never,
+			stderr: {} as never,
+			pid: 4444,
+		});
+
+		try {
+			const spawned = await PythonJediServer.spawn(tmp);
+
+			expect(spawned).toBeDefined();
+			expect(launchLSP.mock.calls.map((call) => call[0])).toEqual([
+				jediPath,
+				"jedi-language-server",
+			]);
+			expect(getDegradationSummary().map((entry) => entry.kind)).toContain(
+				"python-project-launch-failed",
+			);
+		} finally {
+			vi.unstubAllEnvs();
+			setProjectTrustState("trusted");
+		}
+	});
+
 	it("PythonJediServer falls back to the managed install when the project venv is untrusted (#4638)", async () => {
 		const { PythonJediServer } = await import("../../../clients/lsp/server.js");
 		const { setProjectTrustState } =

@@ -3003,19 +3003,32 @@ export const PythonJediServer: LSPServerInfo = {
 			: {};
 
 		if (pythonEnvironment) {
-			const projectLaunched = await resolveAndLaunch(
-				{
-					candidates: pythonEnvironmentToolCandidates(
-						pythonEnvironment,
-						"jedi-language-server",
-					),
-					args: [],
-					cwd: root,
-					env,
-				},
-				options?.allowInstall,
-			);
-			if (projectLaunched) return { ...projectLaunched, initialization };
+			// A project launch can fail for a reason other than "tool not found"
+			// (a broken shim, a rejected interpreter, an unusable environment). The
+			// fallback is the documented behaviour either way, so a throw is recorded
+			// and does not end the attempt (#4638 review).
+			try {
+				const projectLaunched = await resolveAndLaunch(
+					{
+						candidates: pythonEnvironmentToolCandidates(
+							pythonEnvironment,
+							"jedi-language-server",
+						),
+						args: [],
+						cwd: root,
+						env,
+					},
+					options?.allowInstall,
+				);
+				if (projectLaunched) return { ...projectLaunched, initialization };
+			} catch (err) {
+				recordDegradationOnce({
+					kind: "python-project-launch-failed",
+					subject: root,
+					reason: `jedi could not launch from the project interpreter ${pythonEnvironment.pythonPath}: ${err instanceof Error ? err.message : String(err)}`,
+					metadata: { tool: "jedi-language-server" },
+				});
+			}
 		}
 
 		// No project-owned interpreter (absent, or refused untrusted inside

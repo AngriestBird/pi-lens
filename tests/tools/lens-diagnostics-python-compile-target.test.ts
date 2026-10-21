@@ -79,7 +79,7 @@ function makeService(diags: Array<Record<string, unknown>>) {
 
 type ServiceDouble = ReturnType<typeof makeService>;
 
-async function probe(service: ServiceDouble) {
+async function probe(service: ServiceDouble, target: string = filePath) {
 	const tool = createLensDiagnosticsTool(
 		{ readCache: vi.fn(() => undefined) } as never,
 		() => cwd,
@@ -87,7 +87,7 @@ async function probe(service: ServiceDouble) {
 	);
 	return (await tool.execute(
 		"diag-4638",
-		{ source: "lsp", scope: "paths", paths: [filePath] },
+		{ source: "lsp", scope: "paths", paths: [target] },
 		new AbortController().signal,
 		null,
 		{ cwd },
@@ -235,5 +235,90 @@ describe("source=lsp keeps every verdict below a declared 3.14 (#4638)", () => {
 
 		expect(result.content[0].text).toContain("multiple exception types");
 		expect(compileDrops()).toHaveLength(0);
+	});
+});
+
+describe("the declaration that governs the drop (#4638 review)", () => {
+	it("takes the strongest lower bound in either clause order", async () => {
+		for (const specifier of [">=3.12,>=3.14", ">=3.14,>=3.12"]) {
+			resetDegradationLedger();
+			declareRequiresPython(specifier);
+			const service = makeService([jediCompile(), pyrightFinding()]);
+
+			const result = await probe(service);
+
+			expect(result.content[0].text, `declaration ${specifier}`).not.toContain(
+				"multiple exception types",
+			);
+			expect(compileDrops()).toHaveLength(1);
+		}
+	});
+
+	it("reads a commented pyrightconfig.json the way pyright does", async () => {
+		fs.writeFileSync(
+			path.join(cwd, "pyrightconfig.json"),
+			[
+				"{",
+				"\t// pyright's own config accepts comments",
+				'\t"pythonVersion": "3.14",',
+				"\t/* and a trailing comma above */",
+				"}",
+				"",
+			].join("\n"),
+		);
+		const service = makeService([jediCompile(), pyrightFinding()]);
+
+		const result = await probe(service);
+
+		expect(result.content[0].text).not.toContain("multiple exception types");
+		expect(compileDrops()[0]?.latestReasons[0]?.reason).toContain(
+			"declared Python 3.14 (pyright-python-version)",
+		);
+	});
+
+	it("stops a nested project from inheriting the enclosing level", async () => {
+		declareRequiresPython(">=3.14");
+		const nestedDir = path.join(cwd, "services", "api");
+		fs.mkdirSync(nestedDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(nestedDir, "pyproject.toml"),
+			'[project]\nname = "api"\n',
+		);
+		const nestedFile = path.join(nestedDir, "app.py");
+		fs.writeFileSync(nestedFile, fs.readFileSync(filePath));
+		const service = makeService([jediCompile(), pyrightFinding()]);
+
+		const result = await probe(service, nestedFile);
+
+		expect(result.content[0].text).toContain("multiple exception types");
+		expect(compileDrops()).toHaveLength(0);
+	});
+
+	it("reads ruff's own same-directory config the way ruff does", async () => {
+		// Measured against ruff 0.16.8: `.ruff.toml` governs the directory, ahead
+		// of `ruff.toml` and of `pyproject.toml`'s `[tool.ruff]`.
+		fs.writeFileSync(
+			path.join(cwd, ".ruff.toml"),
+			'target-version = "py314"\n[lint]\nselect = ["UP006"]\n',
+		);
+		fs.writeFileSync(
+			path.join(cwd, "ruff.toml"),
+			'target-version = "py38"\n[lint]\nselect = ["UP006"]\n',
+		);
+		// pyproject also carries `[tool.ruff]`, so a reader that trusts it first
+		// picks 3.8 here and delivers the spurious row.
+		declareRequiresPython(">=3.8");
+		fs.appendFileSync(
+			path.join(cwd, "pyproject.toml"),
+			'[tool.ruff]\ntarget-version = "py38"\n[lint]\nselect = ["UP006"]\n',
+		);
+		const service = makeService([jediCompile(), pyrightFinding()]);
+
+		const result = await probe(service);
+
+		expect(result.content[0].text).not.toContain("multiple exception types");
+		expect(compileDrops()[0]?.latestReasons[0]?.reason).toContain(
+			"declared Python 3.14 (ruff-target-version)",
+		);
 	});
 });

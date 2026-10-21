@@ -435,6 +435,57 @@ export function isJediCompileVerdictOutranked(
 	);
 }
 
+export interface PythonCompileVerdictPartition<T> {
+	kept: T[];
+	dropped: number;
+}
+
+/**
+ * The one place a declaration's authority over a server answer is applied. The
+ * probe seam and the post-write runner both call this with the declaration they
+ * resolved, so the probe, its cache replay, `lsp_navigation`, and the
+ * post-write delivery drop exactly the same rows and agree on the count
+ * (#4638 review, one rule for every consumer).
+ */
+export function partitionOutrankedPythonCompileVerdicts<
+	T extends { serverId?: string; source?: string },
+>(
+	diagnostics: readonly T[],
+	declared: PythonTargetVersion | undefined,
+): PythonCompileVerdictPartition<T> {
+	const kept: T[] = [];
+	let dropped = 0;
+	for (const diagnostic of diagnostics) {
+		if (isJediCompileVerdictOutranked(diagnostic, declared)) dropped += 1;
+		else kept.push(diagnostic);
+	}
+	return { kept, dropped };
+}
+
+/**
+ * The bounded record every consumer writes when it drops rows: once per file,
+ * naming the declared level, the file that declared it, and the count. `""` is
+ * never passed as a subject, so a drop from `lsp_navigation` and one from the
+ * probe for the same file share one record.
+ */
+export function recordPythonCompileVerdictDrop(
+	file: string,
+	declared: PythonTargetVersion,
+	dropped: number,
+): void {
+	recordDegradationOnce({
+		kind: "python-compile-target-mismatch",
+		subject: file,
+		reason: `${dropped} jedi compile ${dropped === 1 ? "finding" : "findings"} dropped: declared Python ${declared.major}.${declared.minor} (${declared.source}) in ${declared.file}`,
+		metadata: {
+			declared: `${declared.major}.${declared.minor}`,
+			source: declared.source,
+			declarationFile: declared.file,
+			dropped,
+		},
+	});
+}
+
 interface DeclaredPythonVersion {
 	major: number;
 	minor: number;
@@ -485,13 +536,25 @@ function reduceBarePythonVersion(
 function reducePythonSpecifier(
 	text: string,
 ): DeclaredPythonVersion | undefined {
+	// Every recognised clause can carry a lower bound, and a specifier's floor is
+	// its STRONGEST one: `>=3.12,>=3.14` and `>=3.14,>=3.12` both mean 3.14, so
+	// the answer cannot depend on clause order (#4638 review).
+	let strongest: DeclaredPythonVersion | undefined;
 	for (const clause of text.split(",")) {
 		const lowerBound = reducePythonVersion(
 			SPECIFIER_LOWER_BOUND.exec(clause.trim()),
 		);
-		if (lowerBound) return lowerBound;
+		if (!lowerBound) continue;
+		if (
+			!strongest ||
+			lowerBound.major > strongest.major ||
+			(lowerBound.major === strongest.major &&
+				lowerBound.minor > strongest.minor)
+		) {
+			strongest = lowerBound;
+		}
 	}
-	return reduceBarePythonVersion(text);
+	return strongest ?? reduceBarePythonVersion(text);
 }
 
 /** `py312` -> 3.12. Ruff names the level this way and never as a bare version. */
@@ -521,7 +584,11 @@ async function readDeclarationFile(
 		return await readFile(filePath, "utf-8");
 	} catch (err) {
 		const code = (err as NodeJS.ErrnoException).code;
-		if (code === "ENOENT" || code === "ENOTDIR") return undefined;
+		if (code === "ENOENT" || code === "ENOTDIR") {
+			// none: a manifest that is not there declares nothing, and the walk exists
+			// to keep looking; every other failure is recorded just below.
+			return undefined;
+		}
 		recordDegradationOnce({
 			kind: "python-target-version-unreadable",
 			subject: filePath,
@@ -529,6 +596,93 @@ async function readDeclarationFile(
 		});
 		return undefined;
 	}
+}
+
+/**
+ * pyright reads its config as JSONC. Strip what that grammar adds — `//` and
+ * block comments, plus trailing commas — outside string literals, so a
+ * commented config still declares its `pythonVersion` (#4638 review). A
+ * character scan keeps `//` inside a string (a URL, a glob) intact.
+ */
+function skipJsoncTrivia(text: string, from: number): number {
+	let index = from;
+	while (index < text.length) {
+		const char = text[index] ?? "";
+		if (/\s/.test(char)) {
+			index += 1;
+			continue;
+		}
+		if (char === "/" && text[index + 1] === "/") {
+			while (index < text.length && text[index] !== "\n") index += 1;
+			continue;
+		}
+		if (char === "/" && text[index + 1] === "*") {
+			index += 2;
+			while (
+				index < text.length &&
+				!(text[index] === "*" && text[index + 1] === "/")
+			) {
+				index += 1;
+			}
+			index += 2;
+			continue;
+		}
+		break;
+	}
+	return index;
+}
+
+function stripJsoncSyntax(text: string): string {
+	let out = "";
+	let index = 0;
+	let inString = false;
+	while (index < text.length) {
+		const char = text[index] ?? "";
+		if (inString) {
+			out += char;
+			if (char === "\\") {
+				out += text[index + 1] ?? "";
+				index += 2;
+				continue;
+			}
+			if (char === '"') inString = false;
+			index += 1;
+			continue;
+		}
+		if (char === '"') {
+			inString = true;
+			out += char;
+			index += 1;
+			continue;
+		}
+		if (char === "/" && text[index + 1] === "/") {
+			while (index < text.length && text[index] !== "\n") index += 1;
+			continue;
+		}
+		if (char === "/" && text[index + 1] === "*") {
+			index += 2;
+			while (
+				index < text.length &&
+				!(text[index] === "*" && text[index + 1] === "/")
+			) {
+				index += 1;
+			}
+			index += 2;
+			continue;
+		}
+		if (char === ",") {
+			// Comments count as trivia here: `"3.14", // note` followed by `}` still
+			// carries a trailing comma once the note is stripped.
+			const next = text[skipJsoncTrivia(text, index + 1)];
+			if (next === "}" || next === "]") {
+				index += 1;
+				continue;
+			}
+		}
+		out += char;
+		index += 1;
+	}
+	return out;
 }
 
 /**
@@ -541,7 +695,7 @@ function parsePyrightJsonVersion(
 ): DeclaredPythonVersion | undefined {
 	let parsed: unknown;
 	try {
-		parsed = JSON.parse(content);
+		parsed = JSON.parse(stripJsoncSyntax(content));
 	} catch {
 		// none: unparseable text is no declaration (pyright reads JSONC, so a
 		// commented config is a file pyright still accepts, not a failure); the
@@ -556,8 +710,9 @@ function parsePyrightJsonVersion(
 }
 
 /**
- * Tier 1, ruff `target-version`. Ruff reads ONE config file per project:
- * pyproject `[tool.ruff]`, else `.ruff.toml`, else `ruff.toml`. A file with no
+ * Tier 1, ruff `target-version`. Ruff reads ONE config file per project, and in
+ * one directory it prefers `.ruff.toml`, then `ruff.toml`, then
+ * `pyproject.toml`; measured against ruff 0.16.8 (#4638 review). A file with no
  * usable `target-version` ends the tier rather than falling through to a
  * spelling ruff would ignore.
  */
@@ -566,29 +721,32 @@ async function readRuffTier(
 	pyproject: string | undefined,
 	pyprojectPath: string,
 ): Promise<PythonTargetVersion | undefined> {
-	const pyprojectRuff =
-		pyproject !== undefined && hasTomlTable(pyproject, String.raw`tool\.ruff`)
-			? extractTomlTableSection(pyproject, String.raw`tool\.ruff`)
-			: undefined;
-
-	let ruffFile = pyprojectRuff !== undefined ? pyprojectPath : undefined;
-	let ruffContent = pyprojectRuff;
-	if (ruffFile === undefined) {
-		for (const name of [".ruff.toml", "ruff.toml"]) {
-			const candidatePath = join(dir, name);
-			const content = await readDeclarationFile(candidatePath);
-			if (content === undefined) continue;
-			ruffFile = candidatePath;
-			ruffContent = content;
+	let configPath: string | undefined;
+	let config: string | undefined;
+	for (const name of [".ruff.toml", "ruff.toml"]) {
+		const candidatePath = join(dir, name);
+		config = await readDeclarationFile(candidatePath);
+		if (config !== undefined) {
+			configPath = candidatePath;
 			break;
 		}
 	}
-	if (ruffFile === undefined || ruffContent === undefined) return undefined;
-	const target = parseTomlScalarString(ruffContent, "target-version");
+	if (config === undefined) {
+		if (
+			pyproject === undefined ||
+			!hasTomlTable(pyproject, String.raw`tool\.ruff`)
+		) {
+			return undefined;
+		}
+		configPath = pyprojectPath;
+		config = extractTomlTableSection(pyproject, String.raw`tool\.ruff`);
+	}
+	if (configPath === undefined || config === undefined) return undefined;
+	const target = parseTomlScalarString(config, "target-version");
 	return withSource(
 		target ? reduceRuffTargetVersion(target) : undefined,
 		"ruff-target-version",
-		ruffFile,
+		configPath,
 	);
 }
 
@@ -655,25 +813,33 @@ async function readVersionFileTier(
 	);
 }
 
+interface DirectoryDeclarations {
+	declaration: PythonTargetVersion | undefined;
+	/** A `pyproject.toml` here opens a project; nothing above it declares for it. */
+	projectBoundary: boolean;
+}
+
 /**
  * The declarations one directory can hold, probed in the documented order:
  * ruff `target-version`, pyright `pythonVersion`, `requires-python`, then
  * `.python-version`. Within a tier the nearest declaration wins, so the first
  * directory that declares anything answers for the file. `??` keeps the tiers
  * sequential: each is only read when the one before it declared nothing.
+ *
+ * The same probe reports whether the directory holds a `pyproject.toml`, which
+ * the walk uses as a project boundary (#4638 review).
  */
 async function readPythonDeclarationInDirectory(
 	dir: string,
-): Promise<PythonTargetVersion | undefined> {
+): Promise<DirectoryDeclarations> {
 	const pyprojectPath = join(dir, "pyproject.toml");
 	const pyproject = await readDeclarationFile(pyprojectPath);
-
-	return (
+	const declaration =
 		(await readRuffTier(dir, pyproject, pyprojectPath)) ??
 		(await readPyrightTier(dir, pyproject, pyprojectPath)) ??
 		readRequiresPythonTier(pyproject, pyprojectPath) ??
-		(await readVersionFileTier(dir))
-	);
+		(await readVersionFileTier(dir));
+	return { declaration, projectBoundary: pyproject !== undefined };
 }
 
 /**
@@ -694,8 +860,12 @@ export async function detectPythonTargetVersion(
 	if (resolveLanguage(filePath)?.id !== "python") return undefined;
 	for (const dir of walkUpDirs(dirname(resolve(filePath)))) {
 		if (isAtOrAboveHomeDir(dir, homeDir)) return undefined;
-		const resolved = await readPythonDeclarationInDirectory(dir);
-		if (resolved) return resolved;
+		const { declaration, projectBoundary } =
+			await readPythonDeclarationInDirectory(dir);
+		if (declaration) return declaration;
+		// A nested project declares only for itself: a `pyproject.toml` that names
+		// no level must not inherit the enclosing project's declaration.
+		if (projectBoundary) return undefined;
 	}
 	return undefined;
 }

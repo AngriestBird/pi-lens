@@ -33,7 +33,8 @@ import {
 import { isAuxiliary } from "../clients/lsp/server-traits.js";
 import {
 	detectPythonTargetVersion,
-	isJediCompileVerdictOutranked,
+	partitionOutrankedPythonCompileVerdicts,
+	recordPythonCompileVerdictDrop,
 	type PythonTargetVersion,
 } from "../clients/python-environment.js";
 import { mapWithConcurrency } from "../clients/map-with-concurrency.js";
@@ -1291,28 +1292,12 @@ export function applyProbeFindingPolicy(
 		// declared 3.14+ its `compile` verdict describes a grammar the project
 		// does not use. Drop those rows from what is DELIVERED (kept), never
 		// from `inlineKept`: the cache must hold them so a replay re-evaluates
-		// the drop against the declaration current at that read.
-		const outranked: typeof result.kept = [];
-		const delivered: typeof result.kept = [];
-		for (const diagnostic of result.kept) {
-			if (isJediCompileVerdictOutranked(diagnostic, pythonCompileTarget)) {
-				outranked.push(diagnostic);
-			} else {
-				delivered.push(diagnostic);
-			}
-		}
-		if (outranked.length > 0 && pythonCompileTarget) {
-			recordDegradationOnce({
-				kind: "python-compile-target-mismatch",
-				subject: file,
-				reason: `${outranked.length} jedi compile ${outranked.length === 1 ? "finding" : "findings"} dropped: declared Python ${pythonCompileTarget.major}.${pythonCompileTarget.minor} (${pythonCompileTarget.source}) in ${pythonCompileTarget.file}`,
-				metadata: {
-					declared: `${pythonCompileTarget.major}.${pythonCompileTarget.minor}`,
-					source: pythonCompileTarget.source,
-					declarationFile: pythonCompileTarget.file,
-					dropped: outranked.length,
-				},
-			});
+		// the drop against the declaration current at that read. The rule and its
+		// record live in the declaration's owner, shared with the post-write lane.
+		const { kept: delivered, dropped } =
+			partitionOutrankedPythonCompileVerdicts(result.kept, pythonCompileTarget);
+		if (dropped > 0 && pythonCompileTarget) {
+			recordPythonCompileVerdictDrop(file, pythonCompileTarget, dropped);
 		}
 		const inScopeBefore = applySeverityFilter(diagnostics, severity).length;
 		const suppressed =

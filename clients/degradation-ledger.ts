@@ -1216,6 +1216,12 @@ export type DegradationKind =
 	 * plain absence), so the walk treated it as declaring nothing. Subject is
 	 * the manifest path; reason carries the error message.
 	 */
+	/**
+	 * #4638 review: jedi's project-tier launch threw something other than a
+	 * missing tool, so the managed/PATH fallback ran instead. Subject is the
+	 * project root; the reason names the interpreter and the failure.
+	 */
+	| "python-project-launch-failed"
 	| "python-target-version-unreadable"
 	/**
 	 * The orphan backstop's OWN process-table scanner blew the scan timeout and

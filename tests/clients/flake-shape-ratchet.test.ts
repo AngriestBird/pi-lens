@@ -282,6 +282,15 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			reason:
 				"the freshness gate writes its rows through logLatency; turn_end logs more phases after the gate than the five the getRecentLoggedPhases ring keeps, and test mode skips the file sink, so a passed-through spy is the only reader",
 		},
+	// 2026-10-21 (#4638 review): the behaviour under test is the post-write
+	// runner admission of a server answer, so the capability seam hands it a
+	// doubled service and everything downstream of the runner stays production.
+	"in-process-mock:clients/dispatch/runners/lsp-python-compile-target-e2e.test.ts::clients/lsp/capabilities":
+		{
+			detector: "in-process-mock",
+			reason:
+				"the post-write lane must receive a controlled server answer; the service is seeded from the shared double and only getLSPService is replaced",
+		},
 	// 2026-10-16 (#4493 r2): the auxiliary half of the default stack. A
 	// project lsp.json cannot declare an auxiliary (role is reserved and
 	// inert), so the catalog lookup adds one; the servers stay real children.
@@ -341,7 +350,7 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		{
 			detector: "in-process-mock",
 			reason:
-				"the argv case must not probe or install ruff; the resolver stands in for the availability probe while resolveToolCwd, ruffConfigArgs and the spawn seam stay real",
+				"the argv case must not probe or install ruff: the resolver stands in for the availability probe and the spawn boundary is doubled to record argv, while resolveToolCwd and ruffConfigArgs run for real",
 		},
 	// 2026-10-16 (#4483): the first-write seed witness keeps every pi-lens
 	// module on the tool_call-to-turn-end chain real; only the language-server

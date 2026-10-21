@@ -253,6 +253,65 @@ describe("detectPythonTargetVersion reductions", () => {
 		});
 	}
 
+	it("takes the strongest lower bound in either order (#4638 review)", async () => {
+		for (const specifier of [">=3.12,>=3.14", ">=3.14,>=3.12"]) {
+			write("pyproject.toml", `[project]\nrequires-python = "${specifier}"\n`);
+			await expect(resolveFor()).resolves.toMatchObject({
+				major: 3,
+				minor: 14,
+				source: "requires-python",
+			});
+		}
+	});
+
+	it("reads a commented pyrightconfig.json (#4638 review)", async () => {
+		const file = write(
+			"pyrightconfig.json",
+			'{\n\t// comment\n\t"pythonVersion": "3.14",\n\t/* note */\n}\n',
+		);
+		await expect(resolveFor()).resolves.toMatchObject({
+			major: 3,
+			minor: 14,
+			source: "pyright-python-version",
+			file,
+		});
+	});
+
+	it("stops at a nested pyproject.toml that declares nothing (#4638 review)", async () => {
+		write("pyproject.toml", '[project]\nrequires-python = ">=3.14"\n');
+		write("services/api/pyproject.toml", '[project]\nname = "api"\n');
+		await expect(resolveFor("services/api/app.py")).resolves.toBeUndefined();
+	});
+
+	it("still reads a declaration inside the nested project", async () => {
+		write("pyproject.toml", '[project]\nrequires-python = ">=3.12"\n');
+		write(
+			"services/api/pyproject.toml",
+			'[tool.pyright]\npythonVersion = "3.14"\n',
+		);
+		await expect(resolveFor("services/api/app.py")).resolves.toMatchObject({
+			major: 3,
+			minor: 14,
+			source: "pyright-python-version",
+		});
+	});
+
+	it("prefers .ruff.toml, then ruff.toml, then pyproject (#4638 review)", async () => {
+		write("pyproject.toml", '[tool.ruff]\ntarget-version = "py39"\n');
+		write("ruff.toml", 'target-version = "py310"\n');
+		await expect(resolveFor()).resolves.toMatchObject({
+			major: 3,
+			minor: 10,
+			source: "ruff-target-version",
+		});
+		write(".ruff.toml", 'target-version = "py312"\n');
+		await expect(resolveFor()).resolves.toMatchObject({
+			major: 3,
+			minor: 12,
+			source: "ruff-target-version",
+		});
+	});
+
 	it("treats requires-python with no lower bound as no declaration", async () => {
 		write("pyproject.toml", '[project]\nrequires-python = "<4"\n');
 		await expect(resolveFor()).resolves.toBeUndefined();

@@ -3,10 +3,10 @@
  * `target-version` from the project config, so a flag spelled anywhere in
  * `clients/` is either a second owner of that decision or a stale copy of one.
  *
- * The scan is fail-closed: a hit that matches no admitted site reds with its
- * file and line, an admission that matches nothing reds as stale, and the
- * surviving population is pinned exactly. The one admitted site is black's own
- * CLI shape in the bash guard, which is unrelated to ruff.
+ * The scan strips comments and keeps string literals, so a mention in prose is
+ * not a hit while an argv entry is, and it pins per-file hit COUNTS rather than
+ * line numbers: a moved line stays green, a new occurrence reds. The one
+ * admitted site is black's own CLI shape in the bash guard, unrelated to ruff.
  */
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -15,55 +15,76 @@ import {
 	listSourceFiles,
 	readWalkedFile,
 	relativePosix,
+	stripSource,
 } from "../support/sweep-kit.js";
 
 const ROOT = fileURLToPath(new URL("../../clients", import.meta.url));
 const NEEDLE = "--target-version";
+const SCAN_OPTIONS = { strings: "keep" } as const;
 
-const ADMITTED: ReadonlyArray<{ file: string; reason: string }> = [
-	{
-		file: "bash-file-access.ts",
-		reason:
-			"black's CLI takes `--target-version <value>`; the bash guard must skip that value to find file operands, and pi-lens never passes the flag to black",
-	},
-];
+const ADMITTED: ReadonlyArray<{ file: string; hits: number; reason: string }> =
+	[
+		{
+			file: "bash-file-access.ts",
+			hits: 1,
+			reason:
+				"black's CLI takes `--target-version <value>`; the bash guard must skip that value to find file operands, and pi-lens never passes the flag to black",
+		},
+	];
 
 interface Hit {
-	file: string;
 	line: number;
 	text: string;
 }
 
+interface FileHits {
+	file: string;
+	hits: Hit[];
+}
+
 const FILES = listSourceFiles(ROOT);
 
-function scan(): Hit[] {
-	const hits: Hit[] = [];
+function scan(): FileHits[] {
+	const found: FileHits[] = [];
 	for (const absolute of FILES) {
 		const source = readWalkedFile(absolute);
 		if (source === undefined) continue;
-		const lines = source.split("\n");
-		for (let index = 0; index < lines.length; index += 1) {
-			const text = lines[index] ?? "";
-			if (!text.includes(NEEDLE)) continue;
-			hits.push({ file: relativePosix(ROOT, absolute), line: index + 1, text });
+		const rawLines = source.split("\n");
+		const scannedLines = stripSource(source, SCAN_OPTIONS).split("\n");
+		const hits: Hit[] = [];
+		for (let index = 0; index < scannedLines.length; index += 1) {
+			if (!(scannedLines[index] ?? "").includes(NEEDLE)) continue;
+			hits.push({ line: index + 1, text: (rawLines[index] ?? "").trim() });
+		}
+		if (hits.length > 0) {
+			found.push({ file: relativePosix(ROOT, absolute), hits });
 		}
 	}
-	return hits;
+	return found;
 }
 
 describe("ruff syntax-level overrides stay out of clients/ (#4638)", () => {
+	it("counts a comment as prose but a string literal as a hit", () => {
+		// A real fixture crossing the boundary the scan relies on.
+		expect(stripSource(`// ${NEEDLE} py310\n`, SCAN_OPTIONS)).not.toContain(
+			NEEDLE,
+		);
+		expect(
+			stripSource(`const args = ["${NEEDLE}", "py310"];\n`, SCAN_OPTIONS),
+		).toContain(NEEDLE);
+	});
+
 	it("admits only black's CLI shape and no ruff invocation", () => {
-		// A dead walk must never read as clean (#1718): the floor is the clients/
-		// population this sweep can actually see.
+		// A dead walk must never read as clean (#1718).
 		assertNonEmptyScan(
 			"ruff target-version sweep (clients/)",
 			FILES.length,
 			40,
 		);
-		const hits = scan();
+		const found = scan();
 
-		const unadmitted = hits.filter(
-			(hit) => !ADMITTED.some((entry) => entry.file === hit.file),
+		const unadmitted = found.filter(
+			(entry) => !ADMITTED.some((admitted) => admitted.file === entry.file),
 		);
 		expect(
 			unadmitted,
@@ -71,15 +92,15 @@ describe("ruff syntax-level overrides stay out of clients/ (#4638)", () => {
 		).toEqual([]);
 
 		const stale = ADMITTED.filter(
-			(entry) => !hits.some((hit) => hit.file === entry.file),
+			(admitted) => !found.some((entry) => entry.file === admitted.file),
 		);
 		expect(stale, "stale admission(s)").toEqual([]);
 
-		// The population this ticket leaves behind, pinned exactly.
-		expect(hits.map((hit) => `${hit.file}:${hit.line}`)).toEqual([
-			"bash-file-access.ts:1058",
-		]);
-		expect(hits.some((hit) => hit.file === "ruff-client.ts")).toBe(false);
+		// Counts, not line numbers: only the population is pinned.
+		expect(
+			found.map((entry) => `${entry.file}:${entry.hits.length}`).sort(),
+		).toEqual(ADMITTED.map((entry) => `${entry.file}:${entry.hits}`).sort());
+		expect(found.some((entry) => entry.file === "ruff-client.ts")).toBe(false);
 	});
 
 	it("admits every surviving site with a stated reason", () => {

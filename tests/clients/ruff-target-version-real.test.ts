@@ -19,6 +19,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { RuffClient } from "../../clients/ruff-client.js";
+import { detectPythonTargetVersion } from "../../clients/python-environment.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
 
 // lane: the real-bytes tool tree supplies ruff (`captured-real-output` lane in
@@ -72,6 +73,75 @@ describe.skipIf(!hasRuff)(
 			expect(result.fixed).toBe(0);
 			expect(result.changed).toBe(false);
 			expect(fs.readFileSync(filePath, "utf-8")).toBe(SOURCE);
+		});
+
+		it("agrees with ruff's own same-directory config choice", async () => {
+			// Measured against ruff 0.16.8: in one directory `.ruff.toml` governs,
+			// ahead of `ruff.toml` and of `pyproject.toml`'s `[tool.ruff]`. The
+			// binary is the oracle here, so the declaration reader cannot drift.
+			fs.writeFileSync(
+				path.join(cwd, "pyproject.toml"),
+				[
+					'[project]\nname = "demo"',
+					'requires-python = ">=3.8"',
+					'[tool.ruff]\ntarget-version = "py38"',
+					'[tool.ruff.lint]\nselect = ["UP006"]',
+					"",
+				].join("\n"),
+			);
+			fs.writeFileSync(
+				path.join(cwd, "ruff.toml"),
+				'target-version = "py38"\n[lint]\nselect = ["UP006"]\n',
+			);
+			fs.writeFileSync(
+				path.join(cwd, ".ruff.toml"),
+				'target-version = "py312"\n[lint]\nselect = ["UP006"]\n',
+			);
+			const filePath = path.join(cwd, "app.py");
+			fs.writeFileSync(filePath, SOURCE);
+
+			const declared = await detectPythonTargetVersion(
+				filePath,
+				path.dirname(cwd),
+			);
+			const shown = spawnSync("ruff", ["check", "--show-settings", filePath], {
+				cwd,
+				encoding: "utf-8",
+			}).stdout;
+			const target = /linter\.unresolved_target_version = (\d+)\.(\d+)/.exec(
+				shown ?? "",
+			);
+
+			expect(declared).toMatchObject({
+				major: Number(target?.[1]),
+				minor: Number(target?.[2]),
+				source: "ruff-target-version",
+			});
+		});
+
+		it("fixes at the level the same-directory config selects", async () => {
+			// `.ruff.toml` (3.12) governs, so UP006 is fixable even though the
+			// sibling `ruff.toml` and pyproject declare 3.8.
+			fs.writeFileSync(
+				path.join(cwd, "pyproject.toml"),
+				'[project]\nname = "demo"\nrequires-python = ">=3.8"\n',
+			);
+			fs.writeFileSync(
+				path.join(cwd, "ruff.toml"),
+				'target-version = "py38"\n[lint]\nselect = ["UP006"]\n',
+			);
+			fs.writeFileSync(
+				path.join(cwd, ".ruff.toml"),
+				'target-version = "py312"\n[lint]\nselect = ["UP006"]\n',
+			);
+			const filePath = path.join(cwd, "app.py");
+			fs.writeFileSync(filePath, SOURCE);
+
+			const result = await new RuffClient().fixFileAsync(filePath, cwd);
+
+			expect(result.fixed).toBe(1);
+			expect(result.changed).toBe(true);
+			expect(fs.readFileSync(filePath, "utf-8")).not.toContain("List[int]");
 		});
 
 		it("applies and reports the fix when the project's level allows it", async () => {

@@ -1,6 +1,6 @@
 // flake-shape: in-process-mock — tool availability is stubbed so the argv case
-// never probes or installs ruff; `resolveToolCwd`, `ruffConfigArgs` and the
-// spawn seam run for real.
+// never probes or installs ruff, and the spawn boundary is doubled to record the
+// argv it was given; `resolveToolCwd` and `ruffConfigArgs` run for real.
 /**
  * #4638 ticket 02: ruff's fix pre-check and its `--fix` pass must parse at the
  * same syntax level, and neither may override `target-version`: ruff discovers

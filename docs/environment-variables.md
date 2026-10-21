@@ -213,12 +213,14 @@ back to a local LSP fleet for that session.
 ### Ambient Python environments (`VIRTUAL_ENV`, `CONDA_PREFIX`, `UV_PROJECT_ENVIRONMENT`)
 
 pi-lens reads three ambient channels when it resolves the interpreter that runs
-pyright and jedi. In order: `VIRTUAL_ENV` names an active virtualenv's root,
-`CONDA_PREFIX` a conda environment's root, and `UV_PROJECT_ENVIRONMENT` a uv
-project environment path (relative paths resolve against the project root).
-They sit at the head of the interpreter chain — ahead of a uv workspace's
-`.venv` and the project's own `.venv`/`venv` — and the first directory whose
-`bin/python` (`Scripts/python.exe` on Windows) exists wins. An ambient
+pyright and jedi. `UV_PROJECT_ENVIRONMENT` names a uv project environment path
+(relative paths resolve against the uv project root) and is consulted only when
+the directory is a uv project root. The full chain, in the order the code walks
+it, is: `UV_PROJECT_ENVIRONMENT`, a uv workspace's `.venv` for a declared
+member, `VIRTUAL_ENV`, `CONDA_PREFIX`, the project's `.venv`, then its `venv`
+(relative to the root being resolved). The first that holds
+`bin/python` (`Scripts/python.exe` on Windows) wins, and the three variables are
+read in that position, not ahead of the workspace environment. An ambient
 environment is already active in the calling shell, so it needs no project
 trust; a `.venv` or `venv` found inside the project does, because its binary is
 project-sourced. Untrusted or absent, resolution falls through to the managed
