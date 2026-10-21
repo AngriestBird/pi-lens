@@ -166,9 +166,9 @@ describe("formatter indentation inference through FormatService (#3038)", () => 
 
 			const service = new FormatService("format-indent", true);
 			service.recordRead(filePath);
-			await service.formatFile(filePath);
+			await service.formatFile(filePath, { sessionRoot: env.tmpDir });
 			const afterFirst = fs.readFileSync(filePath, "utf8");
-			await service.formatFile(filePath);
+			await service.formatFile(filePath, { sessionRoot: env.tmpDir });
 
 			expect(argv).toHaveLength(2);
 			expect(argv[0]).toEqual(argv[1]);
@@ -191,7 +191,7 @@ describe("formatter indentation inference through FormatService (#3038)", () => 
 
 			const service = new FormatService("format-indent-continuation", true);
 			service.recordRead(filePath);
-			await service.formatFile(filePath);
+			await service.formatFile(filePath, { sessionRoot: env.tmpDir });
 
 			expect(safeSpawnAsync.mock.calls[0]?.[1]).toEqual(
 				expect.arrayContaining(["--indent-width", "2"]),
@@ -210,7 +210,9 @@ describe("formatter indentation inference through FormatService (#3038)", () => 
 
 			const service = new FormatService("format-indent-ambiguous", true);
 			service.recordRead(filePath);
-			const summary = await service.formatFile(filePath);
+			const summary = await service.formatFile(filePath, {
+				sessionRoot: env.tmpDir,
+			});
 
 			expect(summary.formatters).toEqual([
 				expect.objectContaining({ name: "biome", outcome: "skipped" }),
@@ -250,7 +252,9 @@ describe("formatter indentation inference through FormatService (#3038)", () => 
 
 			const service = new FormatService("format-indent-masked", true);
 			service.recordRead(filePath);
-			const summary = await service.formatFile(filePath);
+			const summary = await service.formatFile(filePath, {
+				sessionRoot: env.tmpDir,
+			});
 
 			expect(summary.formatters).toEqual([
 				expect.objectContaining({ name: "biome", outcome: "skipped" }),
@@ -281,7 +285,7 @@ describe("formatter indentation inference through FormatService (#3038)", () => 
 
 			const service = new FormatService("format-indent-config", true);
 			service.recordRead(filePath);
-			await service.formatFile(filePath);
+			await service.formatFile(filePath, { sessionRoot: env.tmpDir });
 
 			expect(safeSpawnAsync).toHaveBeenCalledWith(
 				expect.any(String),
@@ -320,7 +324,7 @@ describe("formatter indentation inference through FormatService (#3038)", () => 
 			const service = new FormatService("format-indent-doc", true);
 			for (let pass = 0; pass < 3; pass++) {
 				service.recordRead(filePath);
-				await service.formatFile(filePath);
+				await service.formatFile(filePath, { sessionRoot: env.tmpDir });
 				expect(fs.readFileSync(filePath, "utf8")).toBe(docCommented);
 			}
 
@@ -353,7 +357,7 @@ describe("formatter indentation inference through FormatService (#3038)", () => 
 
 			const service = new FormatService("format-indent-tabdoc", true);
 			service.recordRead(filePath);
-			await service.formatFile(filePath);
+			await service.formatFile(filePath, { sessionRoot: env.tmpDir });
 
 			expect(safeSpawnAsync.mock.calls[0]?.[1]).toEqual(
 				expect.arrayContaining(["--indent-style", "tab"]),

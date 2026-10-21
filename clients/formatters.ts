@@ -16,7 +16,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { BoundedLruCache } from "./bounded-cache.js";
 import { createGenerationSource } from "./generation-guard.js";
-import { findNearestContaining, normalizeMapKey } from "./path-utils.js";
+import {
+	findNearestContaining,
+	normalizeMapKey,
+	realPathIdentity,
+} from "./path-utils.js";
 import { resolveToolCwd } from "./tool-cwd.js";
 import { resolveCargoPackageEdition } from "./cargo-manifest.js";
 import { resolveKtfmtGradleStyle } from "./gradle-ktfmt-style.js";
@@ -2419,7 +2423,9 @@ export async function formatFile(
 	enter?: () => Promise<void>,
 ): Promise<FormatterResult> {
 	try {
-		const absolutePath = path.resolve(filePath);
+		// A symlink is never handed to a formatter (Prettier and `biome format`
+		// reject an explicitly named link): format the file it resolves to (#4689).
+		const absolutePath = realPathIdentity(filePath);
 		const cwd = path.dirname(absolutePath);
 		const formatterCwd = resolveToolCwd(
 			"formatter",

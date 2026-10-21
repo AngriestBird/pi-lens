@@ -1214,6 +1214,16 @@ file-scoped worklist and receives no project-wide scanner output.
 - `scripts/ci-verdict.mjs` ends every CLI path with `ci-verdict: exit <N> (<kind>)`;
   read that final stdout line instead of `$?` after a pipe. `guard-bash` denies
   the piped-status recurrence while allowing output-only pipes.
+- A formatter is handed the file's identity, never the link that named it:
+  `realPathIdentity` (`clients/path-utils.ts`) is the real path
+  of the nearest existing ancestor plus the missing tail, with no lexical `..`
+  collapse first. `formatFile` and `FormatService.formatFile` use it, so
+  `AGENTS.md -> CLAUDE.md` formats `CLAUDE.md` and Prettier's "is a symbolic
+  link" rejection never occurs. `FormatService.formatFile` also requires
+  `sessionRoot` and classifies the identity through `resolveAnalysisRoot`: an
+  `adopted` or `none` identity is refused, writes nothing, and records one
+  `adopted-root-writer-skipped` row (`writer: "format"`). Proven by
+  `tests/clients/format-service-symlink-identity.test.ts`.
 - Formatter and autofix policy is config-first where the registry says so.
   Formatting is strict by default. Autofix must carry per-diagnostic fixability
   or a conservative capability allowlist.

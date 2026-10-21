@@ -999,8 +999,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/file-utils.ts": 61,
 		"clients/finding-identity.ts": 2,
 		"clients/fix-worklog.ts": 3,
-		"clients/format-service.ts": 3,
-		"clients/formatters.ts": 16,
+		// 3 -> 2, 16 -> 15 (#4689): the formatter is handed `realPathIdentity`,
+		// not a `path.resolve` of the spelling it was given.
+		"clients/format-service.ts": 2,
+		"clients/formatters.ts": 15,
 		"clients/generated-artifacts.ts": 4,
 		"clients/generation-lock.ts": 7,
 		"clients/git-guard.ts": 7,
@@ -1119,7 +1121,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/path-keyed-map.ts": 11,
 		// 30 -> 34: findNearestMarkerRootDetailed (#3691) adds its own marker/root
 		// path locals; the legacy walker body is back to its pre-#3649 text.
-		"clients/path-utils.ts": 34,
+		// 34 -> 40 (#4689): `realPathIdentity` is the path-identity seam; it
+		// joins, splits and anchors host paths itself (`isAbsolute`, `sep`, `join`,
+		// `dirname`, `basename`, `resolve`).
+		"clients/path-utils.ts": 40,
 		"clients/php-cs-fixer-config.ts": 4,
 		"clients/pipeline.ts": 28,
 		"clients/probe-home-state.ts": 10,

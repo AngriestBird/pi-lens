@@ -319,6 +319,39 @@ export function realpathOrResolve(filePath: string): string {
 }
 
 /**
+ * A file's identity (#4689): the kernel-real path of its nearest existing
+ * ancestor plus the missing tail. The input is NOT lexically collapsed first,
+ * because `a/link/../b` leaves through the link target's parent, not through
+ * `a`. A relative path is joined to the process cwd without collapsing. Only a
+ * missing component (`ENOENT`, `ENOTDIR`) moves the walk up; any other errno
+ * (`EACCES`, `ELOOP`) reaches the caller, since skipping an unreadable
+ * ancestor would answer with a spelling that may hide a link. Use the result
+ * where a write lands; keep the caller's spelling for display and the host
+ * wire.
+ */
+export function realPathIdentity(filePath: string): string {
+	const absolute = path.isAbsolute(filePath)
+		? filePath
+		: `${process.cwd()}${path.sep}${filePath}`;
+	const missing: string[] = [];
+	let current = absolute;
+	for (;;) {
+		try {
+			return path.join(realpathSync.native(current), ...missing.reverse());
+		} catch (thrown) {
+			// none: ENOENT/ENOTDIR is the expected walk up to the nearest existing
+			// ancestor; every other errno rethrows to the caller below.
+			const code = (thrown as NodeJS.ErrnoException).code;
+			if (code !== "ENOENT" && code !== "ENOTDIR") throw thrown;
+			const parent = path.dirname(current);
+			if (parent === current) return path.resolve(absolute);
+			missing.push(path.basename(current));
+			current = parent;
+		}
+	}
+}
+
+/**
  * Normalize a logged `filePath`/`cwd` value, but ONLY when it is already a
  * fully-qualified path (#2219, the #2141 class's sibling loggers). Several
  * NDJSON log-entry types reuse a `filePath`-typed field for non-path
