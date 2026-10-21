@@ -17,6 +17,7 @@
  *   directory's target, not under the link.
  */
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -100,8 +101,11 @@ describe("FormatService formats the identity of a symlinked file (#4689)", () =>
 
 	/**
 	 * The session root (a tmp fixture) and a second project root. The second
-	 * sits beside the checkout, where the analysis-root seam adopts a marked
-	 * project; a marked directory under the tmp root is refused outright.
+	 * sits under the OS tmp dir (TMPDIR), never the checkout, and the seam
+	 * adopts it as a marked project (`adopted`). Its name must not start with
+	 * `pi-`: `isPiOwnedTempPath` treats a tmp entry named `pi-*` as pi's own and
+	 * refuses it as internal (`none`). It is registered so the tmp-fixture
+	 * census owns it even if the worker dies before cleanup.
 	 */
 	function layout(): {
 		session: string;
@@ -110,7 +114,7 @@ describe("FormatService formats the identity of a symlinked file (#4689)", () =>
 	} {
 		const sessionEnv = setupTestEnvironment("pi-lens-format-identity-");
 		const outside = fs.realpathSync(
-			fs.mkdtempSync(path.join(process.cwd(), ".format-identity-project-")),
+			fs.mkdtempSync(path.join(os.tmpdir(), "format-identity-project-")),
 		);
 		registerTmpRoot(getTmpRootRegistry(), outside, "registered");
 		const session = fs.realpathSync(sessionEnv.tmpDir);
@@ -298,10 +302,12 @@ describe("FormatService formats the identity of a symlinked file (#4689)", () =>
 
 	// #4675 F1: the identity step is `realpathOrResolve`, which answers the
 	// spelling for a link loop (and tallies the errno) instead of rethrowing the
-	// way the PR's own `realPathIdentity` did. Recurrence: an `ELOOP` out of the
-	// identity step rejected `FormatService.formatFile`, so one cyclic link in a
-	// session's edit set threw out of every drain that reached it.
-	it("answers a link loop with a refused summary instead of rejecting", async () => {
+	// way the PR's own `realPathIdentity` did. Through `formatFile` after
+	// `recordRead`, as `runFormatPhase` calls it, the selected Prettier row still
+	// fails with `ELOOP` (as on master); nothing is written. Recurrence: an
+	// `ELOOP` out of the identity step rejected `FormatService.formatFile`, so one
+	// cyclic link in a session's edit set threw out of every drain that reached it.
+	it("keeps a link loop non-throwing: the pipeline shape yields a failed Prettier row with an ELOOP tally", async () => {
 		const fx = layout();
 		try {
 			fs.symlinkSync("loop-b", path.join(fx.session, "loop-a"));
@@ -310,16 +316,47 @@ describe("FormatService formats the identity of a symlinked file (#4689)", () =>
 			const written = installPrettierDouble();
 
 			const service = new FormatService("identity-loop", true);
+			service.recordRead(viaLoop);
 			const summary = await service.formatFile(viaLoop, {
 				sessionRoot: fx.session,
 			});
 
 			expect(summary.filePath).toBe(viaLoop);
-			expect(summary.formatters).toEqual([]);
+			expect(summary.formatters).toEqual([
+				expect.objectContaining({
+					name: "prettier",
+					success: false,
+					outcome: "failed",
+					error: expect.stringContaining("ELOOP"),
+				}),
+			]);
 			expect(written).toEqual([]);
 			expect(getPathIdentityFallbacks()).toEqual([
 				expect.objectContaining({ code: "ELOOP" }),
 			]);
+		} finally {
+			fx.cleanup();
+		}
+	});
+
+	// #4675 verify F-N2: `hasChanged` and `assertUnchanged` resolve the identity
+	// like `recordRead` does. No in-tree caller reaches them, so this cell is the
+	// only guard: a raw-path revert of either line reds it ("never read" for a link).
+	it("keeps FileTime state under the link spelling (recordRead, hasChanged, assertUnchanged)", async () => {
+		const fx = layout();
+		try {
+			const target = path.join(fx.session, "CLAUDE.md");
+			const link = path.join(fx.session, "AGENTS.md");
+			fs.writeFileSync(target, "# title\n");
+			fs.symlinkSync("CLAUDE.md", link);
+
+			const service = new FormatService("identity-filetime", true);
+			service.recordRead(link);
+
+			expect(service.hasChanged(target)).toBe(false);
+			expect(() => service.assertUnchanged(target)).not.toThrow();
+			expect(service.hasChanged(link)).toBe(false);
+			expect(() => service.assertUnchanged(link)).not.toThrow();
 		} finally {
 			fx.cleanup();
 		}
