@@ -403,11 +403,11 @@ describe("resolveDiffRange — pre-push ref population (#3661)", () => {
 			"tests/clients/first.test.ts",
 			[
 				"import { afterAll, expect, it } from 'vitest';",
-				"import { execFileSync } from 'node:child_process';",
+				"import { gitExecFileSync } from '../../scripts/lib/git-fixture-env.mjs';",
 				"import { first } from '../../clients/first.ts';",
 				"it('first', () => { expect(first).toBe(true); });",
 				// The run itself cleans the tree: the pass read the dirty bytes.
-				"afterAll(() => { execFileSync('git', ['checkout', '--', 'clients/first.ts']); });",
+				"afterAll(() => { gitExecFileSync(['checkout', '--', 'clients/first.ts'], { encoding: 'utf8' }); });",
 				"",
 			].join("\n"),
 		);
@@ -444,10 +444,10 @@ describe("resolveDiffRange — pre-push ref population (#3661)", () => {
 			"tests/clients/first.test.ts",
 			[
 				"import { afterAll, expect, it } from 'vitest';",
-				"import { execFileSync } from 'node:child_process';",
+				"import { gitExecFileSync } from '../../scripts/lib/git-fixture-env.mjs';",
 				"import { first } from '../../clients/first.ts';",
 				"it('first', () => { expect(first).toBe(true); });",
-				"afterAll(() => { execFileSync('git', ['checkout', '--quiet', process.env.PUSHED_SHA ?? '']); });",
+				"afterAll(() => { gitExecFileSync(['checkout', '--quiet', process.env.PUSHED_SHA ?? ''], { encoding: 'utf8' }); });",
 				"",
 			].join("\n"),
 		);
