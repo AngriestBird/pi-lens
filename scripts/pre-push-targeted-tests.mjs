@@ -248,7 +248,7 @@ export const TEST_TREE_GOVERNANCE_TESTS = [
 // #4104 (Greptile P2 on PR #4557): the shared repo walker has no direct
 // importer, so the import index selects none of the tests that pin it. A change
 // to a listed source selects its tests as the change's own.
-export const SOURCE_OWN_TESTS = {
+const SOURCE_OWN_TESTS = {
 	"scripts/lib/walk-files.mjs": [
 		"tests/support/source-walkers-vanished-dir.test.ts",
 		"tests/support/sweep-kit.test.ts",
