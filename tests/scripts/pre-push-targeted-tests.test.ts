@@ -436,6 +436,41 @@ describe("resolveDiffRange — pre-push ref population (#3661)", () => {
 		expect(rePush.status).toBe(1);
 	});
 
+	// Recurrence (#4726 verify F6, HEAD axis): clean at both ends is not enough
+	// when the run moved HEAD from another commit onto the pushed one.
+	it("never trusts a pass from a run that started on a different HEAD (#4724)", () => {
+		const { git, commit, hook } = gitFixture();
+		write(
+			"tests/clients/first.test.ts",
+			[
+				"import { afterAll, expect, it } from 'vitest';",
+				"import { execFileSync } from 'node:child_process';",
+				"import { first } from '../../clients/first.ts';",
+				"it('first', () => { expect(first).toBe(true); });",
+				"afterAll(() => { execFileSync('git', ['checkout', '--quiet', process.env.PUSHED_SHA ?? '']); });",
+				"",
+			].join("\n"),
+		);
+		git(["add", "tests/clients/first.test.ts"]);
+		git(["commit", "--quiet", "-m", "head-moving test"]);
+		git([
+			"update-ref",
+			"refs/remotes/origin/master",
+			git(["rev-parse", "HEAD"]),
+		]);
+		const bad = commit("clients/first.ts", "export const first = false;\n");
+		commit("clients/first.ts", "export const first = true;\n");
+		const push = `refs/heads/old ${bad} refs/heads/old ${zero}\n`;
+		const run = hook(push, [], { PUSHED_SHA: bad });
+		expect(run.status).toBe(0);
+		expect(git(["rev-parse", "HEAD"])).toBe(bad);
+		const record = readPrePushRecord(
+			path.join(fixtureDir as string, ".git"),
+			bad,
+		);
+		expect(record?.outcome).not.toBe("tests-complete");
+	});
+
 	it("never trusts a pass for a pushed sha that is not the checked-out HEAD (#4724)", () => {
 		const { commit, hook } = sourceBoundFixture();
 		const bad = commit("clients/first.ts", "export const first = false;\n");
