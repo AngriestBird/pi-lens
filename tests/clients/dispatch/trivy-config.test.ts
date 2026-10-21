@@ -183,7 +183,7 @@ describe("trivy-config run() — terraform pass-through", () => {
 		const record = group?.latestReasons[0];
 		expect(record?.subject).toBe(tfFile);
 		expect(record?.reason).toContain("trivy config");
-		expect(record?.reason).toContain("1");
+		expect(record?.reason).toMatch(/\bexited 1\b/);
 	});
 });
 
