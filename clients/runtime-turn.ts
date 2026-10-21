@@ -1035,11 +1035,15 @@ function formatWriteOrdinal(n: number): string {
  * (`resyncGitGuardAfterInlinePolicy`) at the point a file's post-policy
  * survivor set is final, and that point sits strictly BELOW the
  * `files.length === 0` early return: a `lens_diagnostic_mark` made on a turn
- * that wrote nothing took, and every findings surface honored it — this turn's
- * banner is silent precisely because the mark suppressed the finding — while
- * the LATCH kept counting the marked record, so `--lens-guard` refused the
- * next `git commit` and quoted the marked finding back. Banner and gate
- * disagreed about one disposition; this is the gate's half, taken on the turn
+ * that wrote nothing took effect — the PULL surfaces that honour a mark
+ * immediately (`lens_diagnostics`, the widget footer) stopped reporting the
+ * finding — while the LATCH kept counting the marked record, so `--lens-guard`
+ * refused the next `git commit` and quoted the marked finding back. The
+ * turn-end banner is not evidence either way: `consumeTurnEndFindings` is a
+ * one-shot delivery, so it is silent after the turn that raised the finding
+ * whether or not a later turn marks it (probe B1 on #4701: 291 chars on the
+ * first delivery, 0 on every later read). The disagreement is gate versus pull
+ * surfaces about one disposition; this is the gate's half, taken on the turn
  * that made the mark.
  *
  * What it reads, and what it deliberately does not:
@@ -1059,7 +1063,9 @@ function formatWriteOrdinal(n: number): string {
  * (`hasAnyDispositionMarks`, measured 5.5 µs warm) while the gate is closed. The
  * policy pass itself needs BOTH a closed gate and at least one mark in the
  * project, because a mark is the only thing a file-less turn can change: with no
- * marks on disk no read-only turn can turn a survivor into a suppressed record.
+ * marks IN THIS PROJECT no read-only turn can turn a survivor into a suppressed
+ * record. The probe answers per project (#4701 F1) — a `defer` recorded in
+ * another project cannot turn this pass on.
  * That second condition is load-bearing on cost, not cosmetic —
  * `applyInlineBlockerPolicy` pays `loadProjectRulePolicyMap` per record
  * (measured 1.39 ms p50, the same price an edit turn already pays for this

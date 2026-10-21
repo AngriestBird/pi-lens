@@ -37,6 +37,7 @@ vi.mock("../../clients/latency-logger.js", async (importOriginal) => {
 import { CacheManager } from "../../clients/cache-manager.js";
 import { resetDegradationLedger } from "../../clients/degradation-ledger.js";
 import {
+	_resetDeferredForTests,
 	_resetStateCacheForTests,
 	markDisposition,
 } from "../../clients/diagnostic-dispositions.js";
@@ -171,6 +172,22 @@ function markFalsePositive(cwd: string, diagnostic: Diagnostic): void {
 	);
 }
 
+/** Record a session `defer` for a diagnostic through the real owner. */
+function markDefer(cwd: string, diagnostic: Diagnostic): void {
+	markDisposition(
+		cwd,
+		{
+			cwd,
+			filePath: diagnostic.filePath,
+			tool: diagnostic.tool,
+			rule: diagnostic.rule,
+			message: diagnostic.message,
+			line: diagnostic.line,
+		},
+		"defer",
+	);
+}
+
 function registerEdit(
 	cacheManager: CacheManager,
 	cwd: string,
@@ -223,6 +240,10 @@ afterEach(() => {
 	cancelLSPIdleReset();
 	resetDegradationLedger();
 	_resetStateCacheForTests();
+	// #4701 F1: a `defer` is process-scoped state in the owner until the
+	// session boundary, so a case that records one must not hand it to the next
+	// case (the cost guard reads it).
+	_resetDeferredForTests();
 	logLatency.mockClear();
 	vi.useRealTimers();
 });
@@ -762,6 +783,54 @@ describe("git-guard commit gate honors the turn-end disposition policy (#3248)",
 			expect(evaluateGitGuard(runtime, cacheManager, cwd).block).toBe(true);
 		} finally {
 			env.cleanup();
+		}
+	});
+
+	it("judges nothing on a quiet turn when ANOTHER project holds the session defer", async () => {
+		// #4701 review F1: the marks guard must answer for the PROJECT. Its defer
+		// half read the process-wide anchor Set, so one `defer` recorded in any
+		// project — in any session of the process's life — made every project
+		// look marked, and a quiet turn here ran the whole policy pass for state
+		// this project cannot act on. Measured through this seam as probe P4: p50
+		// 11,976 µs and 17,520 µs over two runs, 1.00 `inline_blocker_policy` row
+		// per turn, against 85.6 µs and 0 rows in the same shape with no defer
+		// anywhere.
+		const env = setupTestEnvironment("pi-lens-4698-project-marked-");
+		const other = setupTestEnvironment("pi-lens-4698-foreign-mark-");
+		try {
+			const cwd = env.tmpDir;
+			const filePath = path.join(cwd, "app.ts");
+			fs.writeFileSync(filePath, "alpha();\n");
+
+			const runtime = newRuntime();
+			runtime.projectRoot = cwd;
+			const cacheManager = new CacheManager(false);
+			editDispatch(runtime, cacheManager, cwd, filePath, [
+				blockingDiagnostic(filePath, 1, "alpha is unsafe"),
+			]);
+
+			// A SECOND project root (its own marker, its own disposition store)
+			// defers a finding of its own. A defer writes no store entry, so this
+			// project still holds no mark of any kind.
+			const otherFile = path.join(other.tmpDir, "app.ts");
+			fs.writeFileSync(otherFile, "alpha();\n");
+			markDefer(
+				other.tmpDir,
+				blockingDiagnostic(otherFile, 1, "alpha is unsafe"),
+			);
+
+			logLatency.mockClear();
+			runtime.beginTurn();
+			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, cwd));
+
+			expect(inlinePolicyRows()).toHaveLength(0);
+			// The population is untouched here, so the gate stays shut: only the
+			// READ was wrong, never the verdict.
+			expect(runtime.gitGuardHasBlockers).toBe(true);
+			expect(evaluateGitGuard(runtime, cacheManager, cwd).block).toBe(true);
+		} finally {
+			env.cleanup();
+			other.cleanup();
 		}
 	});
 
