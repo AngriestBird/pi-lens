@@ -2214,9 +2214,13 @@ function situationalGuidance(
 		if (isEnabled(name)) active.push(name);
 	}
 	if (active.length === 0) return undefined;
-	let text = `• Situational (activate via pi_lens_activate_tools): ${active.join(", ")}.`;
+	// #4682: one clause, true under every tools.lazy posture. With lazy=false
+	// (and auto on an eager model) the tools are already declared, so nothing
+	// is activated; only an unlisted tool needs the loader. Rendered once at
+	// session_start, never changed mid-session (prompt-cache prefix).
+	let text = `• Situational (activate via pi_lens_activate_tools if unlisted): ${active.join(", ")}.`;
 	if (isEnabled("ast_grep_search")) {
-		text += " Use ast_grep_search with dump=true to inspect AST nodes.";
+		text += " Use ast_grep_search dump=true to inspect AST.";
 	}
 	return text;
 }

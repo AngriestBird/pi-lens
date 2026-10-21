@@ -51,7 +51,6 @@ import {
 	handleTurnEnd,
 } from "../../clients/runtime-turn.js";
 import { setupTestEnvironment } from "./test-utils.js";
-import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 
 vi.mock("../../clients/dispatch/integration.js", async (importOriginal) => ({
 	...(await importOriginal<
@@ -60,16 +59,8 @@ vi.mock("../../clients/dispatch/integration.js", async (importOriginal) => ({
 	dispatchLintWithResult: vi.fn(),
 	computeCascadeForFile: vi.fn().mockResolvedValue(undefined),
 }));
-vi.mock("../../clients/lsp/capabilities.js", async (importOriginal) => ({
-	...(await importOriginal<
-		typeof import("../../clients/lsp/capabilities.js")
-	>()),
-	getLSPService: vi.fn(),
-	resyncGitChangedFiles: vi.fn().mockResolvedValue(undefined),
-}));
-
 import { dispatchLintWithResult } from "../../clients/dispatch/integration.js";
-import { getLSPService } from "../../clients/lsp/capabilities.js";
+import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 
 const DEAD_MARKER = "DEAD-PATH-BLOCKER-MARKER nil pointer evaluating .replicas";
 const LIVE_MARKER = "LIVE-BLOCKER-MARKER unused variable";
@@ -77,17 +68,16 @@ const LIVE_MARKER = "LIVE-BLOCKER-MARKER unused variable";
 let tmpDir: string;
 let cleanup: () => void;
 
-beforeEach(() => {
+beforeEach(async () => {
 	const env = setupTestEnvironment("pi-lens-3190-inline-gate-");
 	tmpDir = env.tmpDir;
 	cleanup = env.cleanup;
 	vi.mocked(dispatchLintWithResult).mockReset();
-	vi.mocked(getLSPService).mockReturnValue(
-		makeLspServiceDouble({
-			supportsLSP: () => false,
-			hasLSP: async () => false,
-		}) as never,
-	);
+	await installLspServiceDouble({
+		resyncGitChangedFiles: vi.fn().mockResolvedValue(undefined),
+		supportsLSP: () => false,
+		hasLSP: async () => false,
+	});
 });
 
 afterEach(() => {

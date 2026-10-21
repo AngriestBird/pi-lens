@@ -58,6 +58,7 @@ import {
 	getOpaqueBaselineStore,
 	opaqueBaselineSlot,
 } from "../../clients/opaque-mutation-scan.js";
+import { getLSPService } from "../../clients/lsp/capabilities.js";
 import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 import { runPipeline } from "../../clients/pipeline.js";
 import { resolveAnalysisRoot } from "../../clients/analysis-root.js";
@@ -76,6 +77,10 @@ import {
 	createReadToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { runHandlerExpectingNoThrow } from "../support/handler-verdict.js";
+import {
+	installLspService,
+	installLspServiceDouble,
+} from "../support/lsp-service-seam.js";
 
 const readFileSyncSpy = vi.hoisted(() => vi.fn());
 vi.mock("node:fs", async (importOriginal) => {
@@ -112,25 +117,14 @@ vi.mock("../../clients/pipeline.js", () => ({
 }));
 
 const notifyExternalFileChange = vi.hoisted(() => vi.fn(async () => undefined));
-/**
- * #4504 r1: the service `peekLSPService` answers for while a case installs one.
- * Absent by default, so every other case sees the module's real answer.
- */
-const lspServiceHolder = vi.hoisted(() => ({
-	current: undefined as unknown,
-}));
-vi.mock("../../clients/lsp/capabilities.js", async (importOriginal) => ({
-	...(await importOriginal<
-		typeof import("../../clients/lsp/capabilities.js")
-	>()),
-	notifyExternalFileChange,
-	peekLSPService: () => lspServiceHolder.current,
-}));
-
 const readdirMock = vi.mocked(fsp.readdir);
 const realReaddir = readdirMock.getMockImplementation()!;
 
-beforeEach(() => {
+beforeEach(async () => {
+	// `notifyExternalFileChange` is the spy above: the double answers it for the
+	// production export. The install is not eager, so `peekLSPService()` stays
+	// undefined until a case builds a service (#4504 r1 builds one below).
+	await installLspServiceDouble({ notifyExternalFileChange });
 	requestBootstrapClients.mockClear();
 	readdirMock.mockImplementation(realReaddir);
 	readdirMock.mockClear();
@@ -6403,10 +6397,8 @@ describe("the prescan root reaches the send and the recognized set (#4504 r1)", 
 			isError: false,
 			fileModified: false,
 		} as never);
-		lspServiceHolder.current = undefined;
 	});
 	afterEach(() => {
-		lspServiceHolder.current = undefined;
 		// The shared per-session reset, not a hand-picked subset: `handleToolResult`
 		// touches stores beyond the opaque baseline these cases write, and
 		// `resetSessionScopedState` clears them all (the opaque store included).
@@ -6481,14 +6473,18 @@ describe("the prescan root reaches the send and the recognized set (#4504 r1)", 
 			);
 			// The opaque command's own write, in the secondary's checkout.
 			fs.writeFileSync(held, "export const held = 2;\n");
-			lspServiceHolder.current = makeLspServiceDouble({
-				getOpenDocumentPaths: (root: string) =>
-					normalizeMapKey(root) === normalizeMapKey(worktreeRoot)
-						? [normalizeMapKey(held)]
-						: [],
-				getTrackedContent: () => ({ hash: "held-before-the-write" }),
-				resyncHeldPrimaries: resync,
-			});
+			installLspService(
+				makeLspServiceDouble({
+					getOpenDocumentPaths: (root: string) =>
+						normalizeMapKey(root) === normalizeMapKey(worktreeRoot)
+							? [normalizeMapKey(held)]
+							: [],
+					getTrackedContent: () => ({ hash: "held-before-the-write" }),
+					resyncHeldPrimaries: resync,
+				}),
+			);
+			// `peekLSPService` answers only for a service something has built.
+			getLSPService();
 
 			await handleToolResult(
 				splitDeps(
@@ -6509,7 +6505,6 @@ describe("the prescan root reaches the send and the recognized set (#4504 r1)", 
 				expect.any(Number),
 			);
 		} finally {
-			lspServiceHolder.current = undefined;
 			env.cleanup();
 		}
 	});

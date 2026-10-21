@@ -20,6 +20,7 @@ import { handleAgentEnd } from "../../clients/runtime-agent-end.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { handleToolResult } from "../../clients/runtime-tool-result.js";
 import { hashlineFixture } from "../support/hashline-anchor-vectors.js";
+import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 import { assertNonEmptyScan, escapeRegExp } from "../support/sweep-kit.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
@@ -29,10 +30,6 @@ vi.mock("../../clients/pipeline.js", async (importOriginal) => {
 	return { ...actual, runPipeline: vi.fn() };
 });
 
-vi.mock("../../clients/lsp/capabilities.js", () => ({
-	notifyExternalFileChange: vi.fn(async () => undefined),
-}));
-
 vi.mock("../../clients/read-guard-logger.js", async (importOriginal) => ({
 	...(await importOriginal<
 		typeof import("../../clients/read-guard-logger.js")
@@ -40,7 +37,10 @@ vi.mock("../../clients/read-guard-logger.js", async (importOriginal) => ({
 	logReadGuardEvent: vi.fn(),
 }));
 
-beforeEach(() => {
+beforeEach(async () => {
+	// `notifyExternalFileChange` resolves undefined on the factory's default
+	// double, as the former one-export module mock did.
+	await installLspServiceDouble();
 	vi.mocked(logReadGuardEvent).mockClear();
 });
 

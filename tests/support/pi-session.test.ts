@@ -12,6 +12,7 @@ import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { normalizeFilePath } from "../../clients/path-utils.js";
 import { scannerReportParentDir } from "../../clients/scanner-temp-root.js";
+import { pinFixtureHome } from "../clients/test-utils.js";
 import {
 	getActivePrimaryRoot,
 	getActiveSessionId,
@@ -231,6 +232,33 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 			// The file is shared by every case in this file: put the bytes back, so
 			// a corrupt line this case planted cannot red a neighbour.
 			fs.writeFileSync(file, settled);
+		}
+	});
+
+	// #4724: pi read the real `$HOME/.agents/skills`, so a host's skills reached
+	// every request and a prefix-ratio verdict differed between hosts.
+	it("keeps the host's own skills out of the session's system prompt", async () => {
+		// pinFixtureHome pins HOME and USERPROFILE to a home beside the worker's
+		// scratch root, never inside a fixture root the harness deletes (#4591).
+		const { home, restore } = pinFixtureHome("4729-host-skills");
+		const skill = path.join(home, ".agents", "skills", "host-only-probe");
+		fs.mkdirSync(skill, { recursive: true });
+		fs.writeFileSync(
+			path.join(skill, "SKILL.md"),
+			"---\nname: host-only-probe\ndescription: A skill only this host has.\n---\n\nBody.\n",
+		);
+		try {
+			const handle = await startPiSession({
+				root: fixture.root,
+				cwd: path.join(fixture.root, "host-skills", "proj"),
+				responses: [fauxAssistantMessage(fauxText("ok"))],
+			});
+			await handle.prompt("hello");
+			const system = handle.requests[0]?.[0];
+			expect(system).toMatchObject({ role: "system" });
+			expect(JSON.stringify(system)).not.toContain("host-only-probe");
+		} finally {
+			restore();
 		}
 	});
 

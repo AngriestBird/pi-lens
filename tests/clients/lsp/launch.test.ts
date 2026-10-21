@@ -124,9 +124,9 @@ describe("lsp launch", () => {
 		vi.doMock("../../../clients/env-utils.js", () => ({
 			isTestMode: () => false,
 		}));
-		vi.doMock("../../../clients/file-utils.js", () => ({
-			getGlobalPiLensDir: () => tempDir,
-		}));
+		// `PI_LENS_HOME` is the knob `getGlobalPiLensDir` reads.
+		const previousHome = process.env.PI_LENS_HOME;
+		process.env.PI_LENS_HOME = tempDir;
 		// #2506: sessionstart.log resolves through the LOG dir, so the double
 		// must move that too — the assertion below reads
 		// `<tempDir>/sessionstart.log`, which is only where launch.ts writes if
@@ -156,7 +156,8 @@ describe("lsp launch", () => {
 			expect(log).toContain("[REDACTED:github-token]");
 		} finally {
 			vi.doUnmock("../../../clients/env-utils.js");
-			vi.doUnmock("../../../clients/file-utils.js");
+			if (previousHome === undefined) delete process.env.PI_LENS_HOME;
+			else process.env.PI_LENS_HOME = previousHome;
 			vi.doUnmock("../../../clients/probe-home-state.js");
 			removeTempDirSync(tempDir);
 		}
