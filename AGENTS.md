@@ -779,6 +779,18 @@ file-scoped worklist and receives no project-wide scanner output.
     that `tests/support/vitest-setup.ts` and `vitest.config.ts` force on the
     test process. Instance and dates: `HISTORY.md`.
 
+81. **Synchronous native-tree walk holds every tree:** a sweep that parses many
+    files with `@ast-grep/napi` in a loop that never reaches a macrotask keeps
+    every native tree until the case ends, because the finalizer that frees a
+    tree runs only when the event loop turns (V8 heap stays near 40 MB while RSS
+    reaches 1.7 to 1.9 GB). An `await` on a settled promise does not turn it.
+    Turn the loop once per file with `setImmediate`. Screen: does the loop's
+    body parse, and does it reach a `setImmediate` or a real I/O await per
+    iteration? Enforcer: none: judgment-only. The per-file RSS budget and its
+    200 MB headroom warning observe the symptom, but a source scan cannot tell
+    which loops parse without data-flow reading, so it could not fail closed.
+    Instances and dates: `HISTORY.md`.
+
 </important>
 
 <important if="session, turn or generation lifecycle">
