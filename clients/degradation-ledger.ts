@@ -1263,7 +1263,6 @@ export type DegradationKind =
 	 */
 	| "project-snapshot-stage-reap-failed"
 	/**
-	/**
 	 * #4687 item 5: the session's SECOND prompt-cache miss with no local cause
 	 * was recorded (the first counts silently; every later one only raises the
 	 * count). One bounded row per session, so a provider-side miss pattern is
