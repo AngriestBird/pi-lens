@@ -198,6 +198,12 @@ interface SessionStartDeps {
 	 *  gap's marker and the start's match against the successor it named. */
 	sessionStartBasis?: ClassificationBasis;
 	sessionStartGapMs?: number;
+	/**
+	 * #4704: another live session in the process still drives the shared LSP
+	 * fleet (an in-process subagent outliving the primary this start
+	 * replaces), so the start keeps the fleet instead of resetting it.
+	 */
+	keepSharedLsp?: boolean;
 	sessionStartLineageMatch?: SessionStartGuardDecision["lineageMatch"];
 	runtime: RuntimeCoordinator;
 	cacheManager: CacheManager;
@@ -2670,7 +2676,12 @@ export async function handleSessionStart(
 		filePath: ctxCwd ?? process.cwd(),
 		startedAt: new Date(handlerEnteredAt).toISOString(),
 		durationMs: Date.now() - handlerEnteredAt,
-		metadata: { mode: startupMode, reason: deps.sessionReason },
+		metadata: {
+			mode: startupMode,
+			reason: deps.sessionReason,
+			// #4704: true when another live session keeps the shared LSP fleet.
+			sharedLspKept: deps.keepSharedLsp === true,
+		},
 	});
 
 	// #1019: log cleanup is deferred OFF the interactive critical path. It does
@@ -2705,7 +2716,9 @@ export async function handleSessionStart(
 	});
 	dbg(`session_start startup mode: ${startupMode}`);
 
-	if (!getFlag("no-lsp")) {
+	if (deps.keepSharedLsp) {
+		dbg("session_start: LSP service kept for a live in-process session");
+	} else if (!getFlag("no-lsp")) {
 		resetLSPService({ fast: true, reason: "session_start" });
 		dbg("session_start: LSP service reset");
 		dbg(
@@ -2752,7 +2765,11 @@ export async function handleSessionStart(
 						? "using hashed directory because legacy and hashed directories both exist"
 						: migration.outcome === "rename-failed"
 							? "using legacy directory after hashed-directory rename failure"
-							: "using resolved directory after realpath fallback",
+							: migration.outcome === "adopted"
+								? "copied the data an earlier version stored under the root's link spelling into the real path's directory; the old directory is kept"
+								: migration.outcome === "adopt-failed"
+									? "some data an earlier version stored under the root's link spelling could not be copied and stays in the old directory"
+									: "using resolved directory after realpath fallback",
 		});
 	}
 	// #1609 review F1: sweepOwnStagingFiles does not recurse, so the installer's

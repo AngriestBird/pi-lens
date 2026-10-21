@@ -33,6 +33,12 @@ import {
 // into `probe-home-state.ts` and read back here instead. See that module's doc
 // comment for the full account.
 import { getProbeHomeRedirectEvent } from "./probe-home-state.js";
+// #4689: path-utils is a dependency leaf below this module, so its identity
+// fallback tally is pulled here at read time, like the sinks above.
+import {
+	getPathIdentityFallbacks,
+	resetPathIdentityFallbacks,
+} from "./path-utils.js";
 
 // Re-exported so existing importers keep one name for the ledger's bound.
 export { LEDGER_FIELD_MAX, truncateForLedger };
@@ -1180,6 +1186,17 @@ export type DegradationKind =
 	 */
 	| "path-attribution-orphan-unresolved"
 	/**
+	 * #4689: deriving a path identity (`clients/path-utils.ts`, the realpath of
+	 * the nearest existing ancestor plus the missing tail) met a realpath error
+	 * other than a missing component (an unreadable ancestor, a cyclic link),
+	 * so the key fell back to an ancestor's identity and may differ from the
+	 * key another spelling of the same file derives. Same read-time fold as
+	 * `log-sink-write-failure`: path-utils cannot import this module, so
+	 * `getDegradationSummary()` PULLS its tally. One entry per errno code;
+	 * subject is the code, reason the count and the first refused spelling.
+	 */
+	| "path-identity-fallback"
+	/**
 	 * Same as `orphan-backstop-kill-unverified`, for the registry-driven
 	 * reaper path, which spelled the identical attempt-counted-as-kill defect
 	 * (#1857 class sweep).
@@ -1262,6 +1279,14 @@ export type DegradationKind =
 	 * path for a late result); reason carries the error message.
 	 */
 	| "project-snapshot-stage-reap-failed"
+	/**
+	 * #4687 item 5: the session's SECOND prompt-cache miss with no local cause
+	 * was recorded (the first counts silently; every later one only raises the
+	 * count). One bounded row per session, so a provider-side miss pattern is
+	 * visible in the ledger instead of only as an `unknown` verdict per turn.
+	 * Subject is the session id.
+	 */
+	| "prompt-cache-miss-unexplained"
 	/**
 	 * The orphan backstop's OWN process-table scanner blew the scan timeout and
 	 * had to be tree-killed (#1864 review F3). Reason carries the kill verdict,
@@ -1524,6 +1549,14 @@ export type DegradationKind =
 	/** A self-drift baseline could not be verified within its available evidence. */
 	| "self-drift-hash-budget-exhausted"
 	| "self-drift-unverifiable"
+	/**
+	 * #4704: an activation's live session was dropped from the process-wide
+	 * membership because pi invalidated its context with no `session_shutdown`
+	 * (`AgentSession.dispose()`, a subagent runner's teardown). It no longer
+	 * holds the shared teardown, and its own end-of-session work never ran.
+	 * Subject `no-shutdown`; once per session.
+	 */
+	| "session-member-disposed"
 	/**
 	 * #3819 r2: a demoted `/fork` or `/reload` start (a row-17 start held the
 	 * primary registration) discarded the hand-off slot left for it, so the
@@ -2249,6 +2282,21 @@ export function getDegradationSummary(): DegradationGroup[] {
 	// Folded in at read time, not written into `groups` (#1970) — see the
 	// `log-sink-write-failure` doc comment on `DegradationKind` for why this
 	// kind never goes through `recordDegradation`.
+	// #4689, same read-time fold: see the `path-identity-fallback` doc comment.
+	const identityFallbacks = getPathIdentityFallbacks();
+	if (identityFallbacks.length > 0) {
+		summary.push({
+			kind: "path-identity-fallback",
+			count: identityFallbacks.reduce((total, row) => total + row.count, 0),
+			droppedCount: 0,
+			latestReasons: identityFallbacks.map((row) => ({
+				subject: truncateForLedger(row.code),
+				reason: truncateForLedger(
+					`${row.count} fallback(s) to an ancestor identity; first: ${row.firstPath}`,
+				),
+			})),
+		});
+	}
 	const sinkFailures = getSinkWriteFailures();
 	if (sinkFailures.length > 0) {
 		summary.push({
@@ -2484,6 +2532,9 @@ export function resetDegradationLedger(): void {
 	// keep crossing the bound), so clearing it costs nothing and a later
 	// session re-observes the fact fresh.
 	resetSinkRotations();
+	// #4689, the same re-arm: an identity fallback recurs on the next key the
+	// kernel refuses, so a later session re-observes it.
+	resetPathIdentityFallbacks();
 	// #2146 review F3: the OTHER pulled source, `getProcessSingletonResets()`,
 	// deliberately does NOT re-arm here, and the difference from its neighbour
 	// above is the point. A sink write failure recurs — new writes fail, so

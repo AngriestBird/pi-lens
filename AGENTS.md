@@ -202,8 +202,8 @@ The principles' delegation contract applies. pi-lens adds:
 - **store** — The owner of durable or session rows, including their read/modify/write lifecycle; owned by `clients/durable-store.ts`; retires `cache` when state ownership, not derived reuse, is meant.
 - **mirror** — A derived copy refreshed inside the writer's guard; owned by `clients/diagnostic-dispositions.ts`; retires `replica` and `shadow`.
 - **path spelling** — The input string form of a path, before key or canonical normalization; owned by `clients/path-utils.ts`; retires `path name` and `raw path` when form is meant.
-- **path key** — A normalized process-local map key; owned by `clients/path-utils.ts` (`normalizeEphemeralMapKey`); retires `path identity` and `canonical path` for ephemeral maps.
-- **canonical path** — A filesystem-aware normalized path used for long-lived map state; owned by `clients/path-utils.ts` (`normalizeFilePath`); retires `resolved path` when canonical casing and realpath semantics are meant.
+- **path key** — A normalized process-local map key; owned by `clients/path-utils.ts` (`normalizeEphemeralMapKey`); retires `canonical path` for ephemeral maps.
+- **path identity** — The kernel-real path of a file: the realpath of its nearest existing ancestor plus the missing tail, what `normalizeMapKey` answers for an absolute spelling and `realpathOrResolve` for any spelling, on every platform; owned by `clients/path-utils.ts`; retires `canonical path` and `resolved path` where identity is meant.
 - **rendezvous id** — A pure, cross-process string derivation shared by independent writers/readers; owned by `clients/mcp/ipc.ts`; retires `workspace key` and `IPC path key`.
 - **generation** — A monotonic/session/content/scan/disposition-store identity that rejects late work; owned by `clients/generation-guard.ts` (`GenerationSource`, `GenerationHandle`, and `createGenerationSource`); retires `epoch` and `version` when the identity's lifecycle is meant.
 - **degradation record** — A bounded once-only or counted ledger event for a partial, unavailable, or deferred result; owned by `clients/degradation-ledger.ts`; retires `log`, `warning`, and `telemetry`.
@@ -229,7 +229,12 @@ ADR: docs/adr/0009-reported-path-attribution.md
 ## Recurring defect shapes
 
 Screen against these before writing code. Shapes are numbered once, grouped by
-the surface they bite; each block loads only when its trigger applies.
+the surface they bite; each block loads only when its trigger applies. A shape
+whose open population is countable names its census in its entry. The census
+is one command, run at the repo root, printing one line per member or naming
+one baseline key. A PR that fixes members of the shape quotes that census
+before and after. A shape with no census in its entry is uncounted: a PR that
+fixes its members says so instead of quoting a before and after.
 
 <!-- markdownlint-disable MD029 -->
 
@@ -243,11 +248,13 @@ the surface they bite; each block loads only when its trigger applies.
    normalizer each uses; a claim that one normalizer subsumes another is
    measured per transformation (separators, dot segments, case, symlinks,
    existence), never asserted (#3178: four rounds, two inverted arms, one
-   unmeasured swap).
+   unmeasured swap). Enforced by `tests/config/path-identity-sweep.test.ts`
+   (partial: a raw realpath or a raw `path.resolve` key outside
+   `clients/path-utils.ts`).
 
 2. **Host path functions in a shape branch:** once a path is classified as
    Windows-shaped, use `path.win32`; do not use host-default `path` functions.
-   Prefer `toPosix`, `splitPathSegments`, and the canonical path helpers.
+   Prefer `toPosix`, `splitPathSegments`, and the path identity helpers.
 
 32. **Mixed path comparison:** use one platform-aware containment expression;
     do not combine case-sensitive equality with case-folded relative paths. A
@@ -469,6 +476,18 @@ file-scoped worklist and receives no project-wide scanner output.
     publish; the model checked `FreshResult` alone and the fake published after
     the fence reply).
 
+79. **Prefix churn from a non-append write:** a provider caches the request in
+    order (tools, then system, then messages), so a write that changes bytes
+    before the newest message re-bills the whole conversation: a returned
+    `context` list that makes pi rebuild the system head, or a tool-set change
+    on a model that folds system messages into the head. Write at the tail
+    only, and count each tool-set change as one full rewrite on such models. A
+    host-generation gate takes a recorded fixture per certified minor, never
+    two. Screen: drive two real-session requests that differ only in the
+    writer, and compare the head and pi-ai's collapsed head. Enforced by
+    `tests/clients/prompt-cache-prefix-writers.test.ts` (one tier-2 cell per
+    writer: registration, session-start plan, activation, injection).
+
 </important>
 
 <important if="a runner outcome or tool execution">
@@ -585,6 +604,12 @@ file-scoped worklist and receives no project-wide scanner output.
     hits are the classifier's own already-normalized patterns, `ci-verdict`'s
     line classifier (strips before it matches), `check-pr-body`'s lint of pasted
     body text, and readers of Vitest's JSON report.
+80. **Single scan root:** a detector takes its population from one root while
+    its subject can write in several, so a clean answer from the wrong root
+    reads as a complete negative. Screen: for each detector, list the roots its
+    subject can write in. Then show that each root gets its own verdict, or that
+    one root provably covers them. Census: not countable yet. Instance and
+    dates: `HISTORY.md`.
 
 </important>
 
@@ -659,7 +684,9 @@ file-scoped worklist and receives no project-wide scanner output.
     process or host boundary. New in-process `vi.mock` targets and hand-rolled
     LSP client or service doubles are ratcheted by
     `tests/clients/flake-shape-ratchet.test.ts` (`in-process-mock`,
-    `service-double`).
+    `service-double`). Its census is the `in-process-mock` key of
+    `tests/support/flake-shape-baseline.json`: one line per `<file>::<module>`
+    row, 1009 of them on master 33eac2aa1. #4709 drives that count down.
 
 67. **Sink read before drain:** a log sink's `log`/`append` only enqueue, so a
     test that reads the sink's byte offset, line count, or rows while one of
@@ -1318,7 +1345,7 @@ file-scoped worklist and receives no project-wide scanner output.
 - Async publication carries a generation or epoch and checks it before and
   after awaited work. Graph snapshots are immutable by replacement.
 - Review-graph, snapshot, reverse-dependency, word-index, and call-graph data
-  use canonical paths and explicit partial-coverage markers. A capped walk is
+  use path identities and explicit partial-coverage markers. A capped walk is
   lower-bound evidence, never a clean zero.
 - Tree-sitter uses the shared client and file-major project passes. Grammar
   crashes are blocked before load; source overrides record package/version
@@ -1744,26 +1771,47 @@ ids, and the request the model sees. Their header comments state the APIs
 and limits. A new tier capability adds a case to `pi-runner.test.ts` or
 `pi-session.test.ts` first. `pi-mock.ts` stays only for a test file on
 `PI_MOCK_IMPORTERS` (`tests/support/pi-mock-importers.ts`), whose row states the
-class: `process-boundary` (4 rows), `internal-seam` (39: the case interposes on
+class: `process-boundary` (4 rows), `internal-seam` (41: the case interposes on
 a pi-lens `clients/` module either through `vi.mock`, which cannot reach the
 copy pi's loader builds, or through a test-side copy of a process-global
 service the loaded copy does not share, such as `clients/lsp`'s service),
 `unproducible-payload` (5: a payload a scripted provider cannot
 produce), `double-subject` (1: the double is the subject), and
 `real-ui-harness` (1: the claim is what the TUI shows or mounts, which no
-in-process tier can produce). Three rows still carry `pending slice 10`, the
-last roadmap slice, which moves no file, so a slice marker now names no
-scheduled work. The class counts are the list's 53 rows at that recording, and
-a row grouped under a `pending slice 8` comment already carries its own class,
-so it is counted in that bucket:
+in-process tier can produce).
+
+A row's class holds for the whole file only while every case in it needs that
+class. A slice that edits an admitted file re-checks it case by case, and its
+PR body records the split: moved, or stays with the class. A file whose double
+replaces a spawned process (a child spawn, a pipeline runner, or a language
+server binary) is `process-boundary`, not `internal-seam`. A test-side copy of
+the in-process `clients/lsp` service object stays `internal-seam`.
+
+No row carries a `pending slice` marker, and the sweep test refuses that
+label: slice 7 classified the last three with the probe that keeps each on the
+double, and every roadmap slice is closed, so a reopened placeholder reds
+instead of naming work no slice owns. The five classes cover the list's 52
+rows at that recording (slice 7 moved the `index-smells-rollup-wiring` row out
+with its file), and this command reproduces them:
 `grep -oE '^[[:space:]]*"[^"]*": *"[^"]+"' tests/support/pi-mock-importers.ts | sed -E 's/.*": *"([^"]+)"$/\1/' | sort | uniq -c`.
 The double throws at load for a test file not on the list, so a new user fails
 however it imports it. The list only shrinks:
 `tests/config/pi-mock-importer-sweep.test.ts` fails on a row whose file no
-longer uses it. A host claim names the host it ran on, and the tiers run on the
-one installed host (`@earendil-works/pi-coding-agent`, the dev pin): no
-automated spread exists, `scripts/probe-pi-host-tiers.mjs` is not built, and no
-CI job repeats a tier case on another host.
+longer uses it. A host claim names the host it ran on, and the per-PR tiers run
+on the one installed host (`@earendil-works/pi-coding-agent`, the dev pin). The
+certified spread is a manual or nightly run, never a per-PR gate:
+`node scripts/probe-pi-host-tiers.mjs` runs tier 1 and tier 2 against every
+certified host installed on the machine, takes the certified set from the
+baseline doc's verified-host table through `scripts/lib/pi-host-spread.mjs` (the
+reader the packaging ratchet uses), and prints one line per host naming the host
+and the version it ran on. Each tier loads the SELECTED host's own code through
+`PI_LENS_PI_HOST_PACKAGE` — tier 1's entry, and tier 2's session API and
+scripted provider — so a host directory that cannot supply it fails that tier
+instead of being reported as probed. It installs nothing: a host it cannot find
+is reported `not installed` and only fails the run under `--require-all`, and an
+installed host the certified set does not name is named in a warning and not
+probed. Run `npm run build` first, because both tiers load the built extension,
+and `tests/scripts/probe-pi-host-tiers.test.ts` holds the script's own logic.
 
 When the defect is an ordering of awaits on one seam (a coalescing queue, a
 per-key serializer), or the seam has regressed before, write a scheduler

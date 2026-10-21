@@ -247,7 +247,7 @@ const EXPECTED_GLOSSARY_TERMS = [
 	"mirror",
 	"path spelling",
 	"path key",
-	"canonical path",
+	"path identity",
 	"rendezvous id",
 	"generation",
 	"degradation record",
@@ -277,11 +277,6 @@ const EXPECTED_RETIRED_IN_ONE_SENSE: readonly OneSenseRow[] = [
 		term: "blocker",
 		owner: "clients/dispatch/types.ts",
 		retiredBy: ["finding"],
-	},
-	{
-		term: "canonical path",
-		owner: "clients/path-utils.ts",
-		retiredBy: ["path key"],
 	},
 	{
 		term: "diagnostic",
@@ -319,7 +314,12 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/runtime-coordinator.ts": 2,
 	},
 	baseline: {
-		"clients/cache-observability.ts": 3,
+		// 3 -> 10 (#4718): the prompt-cache read every shortfall is measured
+		// against, named once in `nextCacheBaseline` and carried on the record as
+		// `cacheBaseline`. This is the cached-prefix sense, not the governance
+		// sense `ratchet` retires (`baseline` as an admitted population), and no
+		// use here admits, exempts or caps anything.
+		"clients/cache-observability.ts": 10,
 		"clients/lsp/diagnostic-binding.ts": 4,
 		"clients/lsp/index.ts": 13,
 		"clients/lsp/server.ts": 3,
@@ -908,7 +908,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/cargo-manifest.ts": 7,
 		"clients/cascade-logger.ts": 2,
 		"clients/code-quality-warnings.ts": 5,
-		"clients/codebase-model.ts": 5,
+		// 5 -> 4 (#4689 r2): the entry's file is rendered by
+		// `toProjectRelativePath`, not a `path.relative` of two axes.
+		"clients/codebase-model.ts": 4,
 		"clients/complexity-client.ts": 3,
 		"clients/config-core/normalize.ts": 22,
 		"clients/config-locations.ts": 26,
@@ -995,8 +997,13 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/extension-log.ts": 2,
 		"clients/file-kinds.ts": 2,
 		"clients/file-time.ts": 7,
-		"clients/ephemeral-root.ts": 18,
-		"clients/file-utils.ts": 61,
+		// 18 -> 13 (#4689): the private nearest-existing realpath walk folded
+		// onto path-utils' `realpathOrResolve`.
+		"clients/ephemeral-root.ts": 13,
+		// 61 -> 68 (#4689 r4): the data-dir adoption joins its walk with the
+		// node `path` module (no `path` binding of its own). 68 -> 70 (r5): the
+		// done-marker's path and its parent.
+		"clients/file-utils.ts": 70,
 		"clients/finding-identity.ts": 2,
 		"clients/fix-worklog.ts": 3,
 		// 3 -> 2, 16 -> 15 (#4689): the formatter is handed `realPathIdentity`,
@@ -1026,7 +1033,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/jscpd-client.ts": 8,
 		"clients/json-cache-read.ts": 4,
 		"clients/knip-client.ts": 26,
-		"clients/language-profile.ts": 14,
+		// 14 -> 12 (#4689 r2): the language-root clamp asks `isUnderDir`
+		// instead of taking a `path.relative` of two spellings.
+		"clients/language-profile.ts": 12,
 		"clients/latency-logger.ts": 2,
 		"clients/lens-config.ts": 6,
 		"clients/lens-engine.ts": 6,
@@ -1122,10 +1131,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/path-keyed-map.ts": 11,
 		// 30 -> 34: findNearestMarkerRootDetailed (#3691) adds its own marker/root
 		// path locals; the legacy walker body is back to its pre-#3649 text.
-		// 34 -> 40 (#4689): `realPathIdentity` is the path-identity seam; it
-		// joins, splits and anchors host paths itself (`isAbsolute`, `sep`, `join`,
-		// `dirname`, `basename`, `resolve`).
-		"clients/path-utils.ts": 40,
+		// 34 -> 40 (#4689): the path-identity walk (`kernelRealPath`) and its
+		// two callers split, join and normalize with the OS `path` namespace.
+		// 40 -> 38 (#4689 r2): `realpathOrResolve` hands a relative spelling to
+		// the kernel as it is, with no `path.isAbsolute`/`path.resolve` first.
+		"clients/path-utils.ts": 38,
 		"clients/php-cs-fixer-config.ts": 4,
 		"clients/pipeline.ts": 28,
 		"clients/probe-home-state.ts": 10,
@@ -1206,7 +1216,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// clients/deferred-test-targets.ts, taking its one `path.resolve` with it.
 		// 26 -> 27 (#4487): the turn_end cascade delivery resolves each edited
 		// file with `path.resolve` to forget its pending cascade errors.
-		"clients/runtime-turn.ts": 27,
+		// 27 -> 19 (#4689): the eight test-target `path.relative(cwd, …)`
+		// renderings go through `toRunnerDisplayPath`, which relates path
+		// identities.
+		"clients/runtime-turn.ts": 19,
 		"clients/rust-client.ts": 5,
 		"clients/safe-spawn.ts": 26,
 		"clients/search-read-registration.ts": 3,
@@ -1269,7 +1282,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"tools/lens-diagnostic-mark.ts": 4,
 		// 30 -> 27 (#4576): `resolvePathsScope` folds onto
 		// `resolveHostToolPath`, dropping three `path.*` calls.
-		"tools/lens-diagnostics.ts": 27,
+		// 27 -> 26 (#4689 r2): mode=all renders a row's file through
+		// `toProjectRelativePath`, not a `path.relative` of two axes.
+		// 26 -> 25 (#4689 r3): mode=delta's group renders through
+		// `toProjectRelativePath` too.
+		"tools/lens-diagnostics.ts": 25,
 		// 10 -> 8 (#4577 M2): the scalar and batch `path`/`paths` arguments fold
 		// onto `resolveHostToolPath`, dropping one `path.resolve` each.
 		"tools/lsp-diagnostics.ts": 8,

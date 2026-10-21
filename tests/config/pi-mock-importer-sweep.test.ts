@@ -57,12 +57,18 @@ const TESTS_ROOT = path.resolve(
 const SELF = "config/pi-mock-importer-sweep.test.ts";
 /**
  * The #4632 acceptance-7 classes, plus `real-ui-harness` (review F4 on #4702:
- * a TUI-observable claim no slice owns and no in-process tier can produce) and
- * `pending slice N` for a file a roadmap slice still owns. A row whose class is
- * not on this list reds, so a new class is a deliberate edit here, not a typo.
+ * a TUI-observable claim no slice owns and no in-process tier can produce). A
+ * row whose class is not on this list reds, so a new class is a deliberate
+ * edit here, not a typo.
+ *
+ * `pending slice N` is NOT a class. Every roadmap slice is closed and no row
+ * carries the marker, so the alternative that used to admit it admitted a
+ * label naming work no slice owns. Dropping it is what makes the vocabulary
+ * closed: a reopened placeholder now reds here instead of passing as a
+ * scheduled file.
  */
 const CLASS_VOCABULARY =
-	/^(process-boundary|internal-seam|unproducible-payload|double-subject|real-ui-harness|pending slice (?:[3-9]|10))$/;
+	/^(process-boundary|internal-seam|unproducible-payload|double-subject|real-ui-harness)$/;
 
 const SPECIFIER_POSITION =
 	/\b(?:from|import|require|mock|doMock|unmock|importActual|importMock)\s*\(?\s*(["'`])((?:(?!\1)[^\n\\]|\\.)*)\1/g;
@@ -138,6 +144,28 @@ describe("pi-mock importer ratchet (#4632, recurrence #4631)", () => {
 		expect(bad).toEqual([]);
 		// The ratchet's own file is excluded by path; the exclusion must name a real file.
 		expect(fs.existsSync(path.join(TESTS_ROOT, SELF))).toBe(true);
+	});
+
+	it("refuses the retired `pending slice` label and any invented class", () => {
+		// Recurrence: `pending slice N` outlived the roadmap. Every slice closed
+		// and no row carries the marker, so the label names work nothing owns —
+		// yet the vocabulary still admitted it, and a row relabelled
+		// `pending slice 9` passed the gate on 56fc3d64c (the red quoted in the
+		// PR body). A reopened placeholder must red here, not read as scheduled.
+		expect(CLASS_VOCABULARY.test("pending slice 9")).toBe(false);
+		expect(CLASS_VOCABULARY.test("pending slice 10")).toBe(false);
+		// The five live classes still pass, and the match is whole-string: a
+		// class with anything appended is a different, unregistered class.
+		for (const cls of [
+			"process-boundary",
+			"internal-seam",
+			"unproducible-payload",
+			"double-subject",
+			"real-ui-harness",
+		])
+			expect(CLASS_VOCABULARY.test(cls), cls).toBe(true);
+		expect(CLASS_VOCABULARY.test("internal-seam ")).toBe(false);
+		expect(CLASS_VOCABULARY.test("pending slice")).toBe(false);
 	});
 });
 

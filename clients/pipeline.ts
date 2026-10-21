@@ -2174,7 +2174,15 @@ async function analysePipeline(
 	// re-token below replaces the pair.
 	const widgetOrder = () =>
 		writeOrderToken(ctx.telemetry?.orderTurn, ctx.telemetry?.writeIndex);
-	admitWidgetDiagnosticsWrite(filePath, widgetOrder());
+	// The widget store keys syntactically (#1020), so every writer of one file
+	// must hand it one form. Dispatch records this file's runners under
+	// `ctx.filePath`, its key (`createDispatchContext`), and so do
+	// `clients/mcp/analyze.ts` and the LSP reconciles; the final snapshot
+	// takes the same key, or a file spelled through a link (a file link, a
+	// session rooted at a link) kept a pending record nothing finished (#4689
+	// review r1 F4).
+	const widgetKey = normalizeMapKey(filePath);
+	admitWidgetDiagnosticsWrite(widgetKey, widgetOrder());
 
 	const phase = createPhaseTracker(toolName, filePath);
 	const pipelineStart = Date.now();
@@ -2527,7 +2535,7 @@ async function analysePipeline(
 			? [...dispatchResult.diagnostics, ...keptBlockers]
 			: dispatchResult.diagnostics;
 	recordDiagnostics(
-		filePath,
+		widgetKey,
 		storedDiagnostics,
 		widgetOrder(),
 		analysisReadAtMs,

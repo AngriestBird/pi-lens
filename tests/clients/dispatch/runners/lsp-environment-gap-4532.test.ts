@@ -38,12 +38,12 @@ import {
 	ENV_NODE_MODULES_WALK_MAX_LEVELS,
 	hasResolvableNodeModules,
 } from "../../../../clients/lsp/environment-gap.js";
-import { configureLspServiceLifecycle } from "../../../../clients/lsp/service-singleton.js";
 import {
 	getDegradationSummary,
 	resetDegradationLedger,
 } from "../../../../clients/degradation-ledger.js";
 import { makeLspServiceDouble } from "../../../support/lsp-service-double.js";
+import { installLspService } from "../../../support/lsp-service-seam.js";
 import { setupTestEnvironment } from "../../test-utils.js";
 
 type RawDiagnostic = {
@@ -98,16 +98,13 @@ let rows: RawDiagnostic[];
 
 function installService(): void {
 	resetLSPService();
-	const service = makeLspServiceDouble({
-		supportsLSP: () => true,
-		touchFile: async () => ({ diags: rows.map((row) => ({ ...row })) }),
-		codeAction: async () => [],
-	});
-	configureLspServiceLifecycle<Record<string, unknown>>({
-		create: () => service as Record<string, unknown>,
-		beforeReset: () => undefined,
-		destroy: async () => undefined,
-	});
+	installLspService(
+		makeLspServiceDouble({
+			supportsLSP: () => true,
+			touchFile: async () => ({ diags: rows.map((row) => ({ ...row })) }),
+			codeAction: async () => [],
+		}),
+	);
 	getLSPService();
 }
 

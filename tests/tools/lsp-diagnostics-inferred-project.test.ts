@@ -9,22 +9,12 @@ import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { removeTempDirSync } from "../clients/test-utils.js";
 import { makeLspServiceDouble } from "../support/lsp-service-double.js";
-
-const mocked = vi.hoisted(() => ({
-	service: null as unknown,
-}));
+import { installLspService } from "../support/lsp-service-seam.js";
 
 vi.mock("../../clients/warm-attach.js", () => ({
 	isWarmAttached: () => false,
 	tryWarmAttachedDiagnostics: vi.fn(),
 }));
-
-vi.mock("../../clients/lsp/capabilities.js", async () => {
-	const actual = await vi.importActual<
-		typeof import("../../clients/lsp/capabilities.js")
-	>("../../clients/lsp/capabilities.js");
-	return { ...actual, getLSPService: () => mocked.service };
-});
 
 vi.mock("../../clients/lsp/wait-policy/index.js", () => ({
 	classifyCascadeWaitTier: () => "waits",
@@ -74,9 +64,9 @@ function makeService() {
 describe("lsp_diagnostics — inferred-project demotion (#1645 F3)", () => {
 	let cwd: string;
 
-	beforeEach(() => {
+	beforeEach(async () => {
 		reconcileScanDiagnosticsMock.mockReset().mockReturnValue(true);
-		mocked.service = makeService();
+		installLspService(makeService());
 		cwd = fs.realpathSync(
 			fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lspdiag-inferred-")),
 		);
