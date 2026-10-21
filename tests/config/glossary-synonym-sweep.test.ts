@@ -680,7 +680,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/observed-mutation.ts": 2,
 		// 0 -> 1 (#4493): listGitHeadDelta drops the empty NUL-split entries,
 		// an `Array.prototype.filter` call, not a delivery filter.
-		"clients/opaque-mutation-scan.ts": 1,
+		// 1 -> 2 (#4502): readSameHeadDiscards keeps the paths that were dirty
+		// before a command and are clean after it, another
+		// `Array.prototype.filter` call.
+		"clients/opaque-mutation-scan.ts": 2,
 		"clients/opengrep-client.ts": 2,
 		"clients/path-utils.ts": 1,
 		"clients/persistent-reverify.ts": 4,
@@ -725,10 +728,19 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// branches onto the observational net's arm, and the surviving ast-grep
 		// site walks its `paths` array instead of filtering it.
 		"clients/runtime-tool-call.ts": 3,
+		// #4535 slice 2: the LSP consumer narrows a publish's population to the
+		// documents a live client holds and keeps the stale ones among them —
+		// two `Array.prototype.filter` calls that moved here from
+		// `runtime-tool-result.ts` with the held-primary pass, not a delivery
+		// filter.
+		"clients/disk-change-subscribers.ts": 2,
 		// 5 -> 8 (#4493): the HEAD-move look keeps the held documents of the
 		// delta and the stale ones among them, and counts the dispositions;
 		// three `Array.prototype.filter` calls, not a delivery filter.
-		"clients/runtime-tool-result.ts": 8,
+		// 8 -> 6 (#4535 slice 2): two of those calls moved into
+		// `clients/disk-change-subscribers.ts` with the held-primary pass; the
+		// disposition count stays here.
+		"clients/runtime-tool-result.ts": 6,
 		// 31 -> 33 (#3901): the cut-advisory hold keeps the fresh items of a part
 		// (one `Array.prototype.filter`), and the call-graph lane drops a parked
 		// file it already walks as fresh (one). The knip and dead-code re-offers
@@ -1091,7 +1103,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// the OS `path` namespace; the keys still go through normalizeMapKey.
 		// 7 -> 9 (#4493 r2): gitPathBase joins the `.git` entry and its HEAD
 		// with the same namespace to check the walk found a repository.
-		"clients/opaque-mutation-scan.ts": 9,
+		// 9 -> 10 (#4502): readGitStatusEntries resolves each porcelain path
+		// against the checkout base with the same namespace.
+		// 10 -> 11 (#4612 r4): it also resolves a rename's source token, so
+		// the discard baseline names both sides of the entry.
+		"clients/opaque-mutation-scan.ts": 11,
 		"clients/opengrep-client.ts": 8,
 		"clients/opengrep-config.ts": 3,
 		// 21 -> 23 (#4515 r2): commandSearchReachesProject splits PATH on
@@ -1478,7 +1494,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/module-report.ts": 6,
 		// 24 -> 26 (#4493): readGitHead and listGitHeadDelta read the spawn
 		// result's exit `status`, not a delivery status.
-		"clients/opaque-mutation-scan.ts": 26,
+		// 26 -> 27 (#4502): readGitStatusEntries checks the spawn result's exit
+		// `status` once for every porcelain read it now serves.
+		"clients/opaque-mutation-scan.ts": 27,
 		"clients/opengrep-client.ts": 9,
 		"clients/package-manager.ts": 2,
 		"clients/pipeline.ts": 4,

@@ -201,6 +201,9 @@ const EXPECTED_WRAPPER_SITES = [
 	"clients/knip-client.ts:runAnalyze",
 	"clients/lsp/launch.ts:trySpawn",
 	"clients/lsp/launch.ts:trySpawn",
+	"clients/opaque-mutation-scan.ts:readGitStatusEntries",
+	"clients/opaque-mutation-scan.ts:readGitStatusEntries",
+	"clients/opaque-mutation-scan.ts:readGitStatusEntries",
 	"clients/opengrep-client.ts:runScan",
 	"clients/pipeline.ts:tryEslintFix",
 	"clients/pipeline.ts:analysePipeline",
@@ -663,7 +666,19 @@ const ORIGIN_ADMISSION_ROWS: ReadonlyArray<readonly [string, string]> = [
 		"cwd is readGitHead's own `root` parameter — `git rev-parse HEAD` names the commit of the worktree at that directory, which is the query's subject (#4493)",
 	],
 	[
-		"clients/opaque-mutation-scan.ts#recoverOpaqueChangesViaGit:dad86fa7~1167a91f",
+		"clients/opaque-mutation-scan.ts#readGitStatusEntries:35a903e1~dbf27697",
+		"cwd is readGitStatusEntries's own `cwd` option — `git status --porcelain` reports the worktree at that directory, which is the query's subject, not a config-resolution start; its three callers below are the checked sites (#2894, #4612)",
+	],
+	[
+		"clients/opaque-mutation-scan.ts#captureGitDirtyPaths:ec85036b~ec85036b",
+		"cwd is captureGitDirtyPaths's own `root` parameter, the opaque prescan root whose pre-command dirty set it records (#4502)",
+	],
+	[
+		"clients/opaque-mutation-scan.ts#readSameHeadDiscards:ec85036b~ec85036b",
+		"cwd is readSameHeadDiscards's own `root` parameter, the same prescan root its baseline's dirty set was read in (#4502)",
+	],
+	[
+		"clients/opaque-mutation-scan.ts#recoverOpaqueChangesViaGit:ec85036b~ec85036b",
 		"cwd is recoverOpaqueChangesViaGit's own `root` parameter — `git status --porcelain` reports the worktree at that root, which is the query's subject, not a config-resolution start (#2894)",
 	],
 	[

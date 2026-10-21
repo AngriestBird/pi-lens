@@ -6,6 +6,7 @@
 		"clients/bounded-pid-file-lock.test.ts": 1,
 		"clients/build-identity.test.ts": 6,
 		"clients/config-diagnostic-codes.test.ts": 1,
+		"clients/disk-change-detectors-4535.test.ts": 1,
 		"clients/dispatch/oxfmt-ignored-file-noop.test.ts": 3,
 		"clients/dispatch/runners/ast-grep-playground-verify.test.ts": 1,
 		"clients/dispatch/runners/ast-grep-rule-ignores.test.ts": 1,
