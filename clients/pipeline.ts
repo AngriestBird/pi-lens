@@ -407,14 +407,16 @@ export interface PipelineResult {
 	/** True if file was modified by format/autofix */
 	fileModified: boolean;
 	/**
-	 * True only when this run's whole delivery is the `✓ <lang> clean` line:
-	 * the file's primary group checked it and nothing else was delivered (no
-	 * finding, no fix, no format notice). The verdict behind that line, so a
-	 * consumer never re-derives it from `output` (#4734 review F1): a clean
-	 * run's output is the line itself, and an EMPTY output is a format-only
-	 * change whose primary may never have answered. Absent on any other path.
+	 * True only when this run's whole delivery is the `✓ <lang> clean` line, a
+	 * language server answered for the file (`DispatchResult.primaryLspChecked`)
+	 * and the run recorded no finding for it (#4734 r3 state table, row 14).
+	 * False on every other path: a finding, a fix, a format notice, an error, a
+	 * non-blocking finding behind the clean line, a run no language server
+	 * answered (`--no-lsp`, a CLI primary, a fallback linter, a deferred or
+	 * silent server). Required, so no producer can leave it to be read as
+	 * clean. A consumer never re-derives it from `output` (#4734 review F1).
 	 */
-	checkedClean?: boolean;
+	checkedClean: boolean;
 	/** Hash captured after this pipeline's own writes, before analysis awaits. */
 	postWriteStateHash?: string;
 	/** #3506: the write token the analysis was recorded under. */
@@ -1653,9 +1655,8 @@ type DispatchResult = Awaited<
 	>
 >;
 /**
- * The line a write with nothing else to say ends with, and whether it is the
- * clean verdict (`PipelineResult.checkedClean`). #4403: "clean" only when the
- * file's primary group checked it; otherwise one line naming why not
+ * The line a write with nothing else to say ends with. #4403: "clean" only
+ * when the file's primary group checked it; otherwise one line naming why not
  * (`DispatchResult.unconfirmedStatus`), so a write after the once-only
  * coverage notice does not read as a clean result.
  */
@@ -1663,14 +1664,11 @@ function buildAllClearOutput(
 	dispatchResult: DispatchResult,
 	elapsed: number,
 	filePath: string,
-): { line: string; clean: boolean } {
+): string {
 	const kind = detectFileKind(filePath);
 	const langLabel = kind ? getFileKindLabel(kind) : path.extname(filePath);
 	if (kind && dispatchResult.unconfirmedStatus !== undefined) {
-		return {
-			line: `\u26a0 ${langLabel} unconfirmed — ${dispatchResult.unconfirmedStatus} · ${elapsed}ms`,
-			clean: false,
-		};
+		return `\u26a0 ${langLabel} unconfirmed — ${dispatchResult.unconfirmedStatus} · ${elapsed}ms`;
 	}
 	const parts: string[] = [];
 
@@ -1679,10 +1677,7 @@ function buildAllClearOutput(
 	}
 
 	parts.push(`${elapsed}ms`);
-	return {
-		line: `checkmark ${parts.join(" · ")}`.replace("checkmark", "\u2713"),
-		clean: kind !== undefined,
-	};
+	return `checkmark ${parts.join(" · ")}`.replace("checkmark", "\u2713");
 }
 
 /**
@@ -2821,9 +2816,14 @@ async function analysePipeline(
 	// gain an "all clear" line it never had while the sentence lived inline.
 	let checkedClean = false;
 	if (!output && !postAutofixNotice) {
-		const allClear = buildAllClearOutput(dispatchResult, elapsed, filePath);
-		output = allClear.line;
-		checkedClean = allClear.clean;
+		output = buildAllClearOutput(dispatchResult, elapsed, filePath);
+		// #4734 r3: the all-clear line is not the verdict. A language server
+		// answered, and the run recorded nothing for the file: no delta finding
+		// (a warning renders no text) and no blocker it keeps (a held-back one
+		// renders none in a run without authorship).
+		checkedClean =
+			dispatchResult.primaryLspChecked === true &&
+			storedDiagnostics.length === 0;
 	}
 
 	phase.end("total", { hasOutput: !!output });

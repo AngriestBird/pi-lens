@@ -249,9 +249,9 @@ function writeLinkedWorktree(root: string): { repo: string; worktree: string } {
 
 /**
  * What `runPipeline` returns for a linked-worktree edit, by verdict: the
- * shapes `tests/clients/pipeline.test.ts` pins on the real pipeline ("reports
- * a checked clean verdict ..."). A clean run's output is the all-clear line,
- * never empty (#4734 review F1).
+ * shapes `tests/clients/pipeline.test.ts` pins on the real pipeline (its
+ * "All-clear output" cells). A clean run's output is the all-clear line,
+ * never empty (#4734 review F1), and that line is not the verdict (r3).
  */
 const linkedWorktreeResult = {
 	clean: () => ({
@@ -261,8 +261,13 @@ const linkedWorktreeResult = {
 		fileModified: false,
 		checkedClean: true,
 	}),
-	finding: (output: string) => ({
-		output,
+	/**
+	 * The same clean line with no clean verdict: a run that recorded only a
+	 * warning (the dispatcher renders no text for one), or one no language
+	 * server answered (#4734 r3 state table, rows 5, 6, 8, 10-13).
+	 */
+	uncheckedCleanLine: () => ({
+		output: "✓ JavaScript/TypeScript clean · 5ms",
 		hasBlockers: false,
 		isError: false,
 		fileModified: false,
@@ -383,10 +388,11 @@ it("announces a linked-worktree edit the pipeline found nothing in (#2050 AC3)",
 		).toHaveLength(1);
 		expect(consumeAgentNudge(undefined, runtime.sessionScope)).toBeUndefined();
 
-		// A run that produced a finding is its own statement: no advisory.
+		// The same clean line from a run that recorded a warning, or that no
+		// language server answered, states nothing: the line is not the verdict.
 		resetDegradationLedger();
 		vi.mocked(runPipeline).mockResolvedValue(
-			linkedWorktreeResult.finding("src/sibling.ts:1:1 lint: unused value"),
+			linkedWorktreeResult.uncheckedCleanLine(),
 		);
 		fs.writeFileSync(worktreeFile, "export const value = 3;\n");
 		await handleToolResult(editResult());
@@ -543,6 +549,7 @@ it("classifies outside-root path families through the real tool-result seam (#42
 		hasBlockers: false,
 		isError: false,
 		fileModified: false,
+		checkedClean: false,
 	});
 	process.env.PILENS_DATA_DIR = dataDir;
 	try {
@@ -790,6 +797,7 @@ describe("bash grep searchReads registration", () => {
 					hasBlockers: false,
 					isError: false,
 					fileModified: false,
+					checkedClean: false,
 				});
 				const filePath = path.join(env.tmpDir, "changed.ts");
 				fs.writeFileSync(filePath, "export const before = true;\n");
@@ -963,6 +971,7 @@ describe("bash grep searchReads registration", () => {
 				hasBlockers: false,
 				isError: false,
 				fileModified: false,
+				checkedClean: false,
 			});
 			expect(await handleToolResult(base)).toEqual(
 				expect.objectContaining({
@@ -976,6 +985,7 @@ describe("bash grep searchReads registration", () => {
 				hasBlockers: false,
 				isError: true,
 				fileModified: false,
+				checkedClean: false,
 			});
 			expect(await handleToolResult(base)).toEqual(
 				expect.objectContaining({
@@ -1866,6 +1876,7 @@ describe("bash grep searchReads registration", () => {
 				hasBlockers: false,
 				isError: false,
 				fileModified: false,
+				checkedClean: false,
 			});
 			const filePath = path.join(env.tmpDir, "unknown.ts");
 			fs.writeFileSync(filePath, "const a = 1;\n", "utf8");
@@ -1979,6 +1990,7 @@ describe("bash grep searchReads registration", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 		});
 		const env = setupTestEnvironment("pi-lens-1603-tool-result-");
 		try {
@@ -2024,6 +2036,7 @@ describe("bash grep searchReads registration", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 		});
 		const env = setupTestEnvironment("pi-lens-1603-rewrite-");
 		try {
@@ -2085,6 +2098,7 @@ describe("bash grep searchReads registration", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 		});
 		const env = setupTestEnvironment("pi-lens-1603-removal-");
 		try {
@@ -2151,6 +2165,7 @@ describe("bash grep searchReads registration", () => {
 				hasBlockers: false,
 				isError: false,
 				fileModified: false,
+				checkedClean: false,
 				changedFiles: [configPath],
 			});
 			await handleToolResult({
@@ -2175,6 +2190,7 @@ describe("bash grep searchReads registration", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 		});
 		const env = setupTestEnvironment("pi-lens-2071-tool-result-");
 		try {
@@ -2349,6 +2365,7 @@ describe("bash grep searchReads registration", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 		});
 		const env = setupTestEnvironment("pi-lens-native-edit-hash-");
 		try {
@@ -2723,6 +2740,7 @@ describe("monorepo turn-state cwd alignment", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 		});
 
 		const env = setupTestEnvironment("pi-lens-monorepo-cwd-");
@@ -2808,6 +2826,7 @@ describe("monorepo turn-state cwd alignment", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 		});
 
 		const env = setupTestEnvironment("pi-lens-monorepo-dispatch-");
@@ -2880,6 +2899,7 @@ describe("monorepo turn-state cwd alignment", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 		});
 		const env = setupTestEnvironment("pi-lens-3512-dispatch-generation-");
 		try {
@@ -2968,6 +2988,7 @@ describe("monorepo turn-state cwd alignment", () => {
 					hasBlockers: false,
 					isError: false,
 					fileModified: false,
+					checkedClean: false,
 					cascadePromise: Promise.resolve(sessionOneRun),
 				};
 			});
@@ -3069,6 +3090,7 @@ describe("monorepo turn-state cwd alignment", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 			cascadePromise: Promise.resolve(sessionOneRun),
 		}));
 		const entered = gatedPromise<void>();
@@ -3149,6 +3171,7 @@ describe("monorepo turn-state cwd alignment", () => {
 					hasBlockers: false,
 					isError: false,
 					fileModified: false,
+					checkedClean: false,
 				};
 			});
 			const existingPath = createTempFile(
@@ -3315,6 +3338,7 @@ describe("runtime-tool-result writers across a replacement (#3596)", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 		});
 		const entered = gatedPromise<void>();
 		const release = gatedPromise<void>();
@@ -3427,6 +3451,7 @@ describe("runtime-tool-result writers across a replacement (#3596)", () => {
 				hasBlockers: false,
 				isError: true,
 				fileModified: false,
+				checkedClean: false,
 			};
 		});
 		await acrossReplacement(
@@ -3472,6 +3497,7 @@ describe("runtime-tool-result writers across a replacement (#3596)", () => {
 						hasBlockers: false,
 						isError: false,
 						fileModified: false,
+						checkedClean: false,
 					};
 				});
 				const handler = handleToolResult(
@@ -3517,6 +3543,7 @@ describe("runtime-tool-result writers across a replacement (#3596)", () => {
 						hasBlockers: false,
 						isError: false,
 						fileModified: false,
+						checkedClean: false,
 					};
 				});
 				const handler = handleToolResult({
@@ -3562,6 +3589,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 		});
 
 		const env = setupTestEnvironment("pi-lens-runtime-tool-change-log-");
@@ -3626,6 +3654,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 		});
 
 		const env = setupTestEnvironment("pi-lens-runtime-tool-deferred-format-");
@@ -3724,6 +3753,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 				hasBlockers: false,
 				isError: false,
 				fileModified: true,
+				checkedClean: false,
 				changedFiles: [filePath],
 				postMutation: {
 					filePath,
@@ -3778,6 +3808,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 				hasBlockers: false,
 				isError: false,
 				fileModified: true,
+				checkedClean: false,
 				// A side-effect file changed, but the target write has no owned hash.
 				changedFiles: [path.join(env.tmpDir, "helper.rs")],
 			});
@@ -3824,6 +3855,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 					hasBlockers: false,
 					isError: false,
 					fileModified: false,
+					checkedClean: false,
 				}));
 				const paths = Array.from({ length: fileCount }, (_, index) =>
 					createTempFile(env.tmpDir, `bash-${index}.ts`, "export {};\n"),
@@ -3898,6 +3930,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 					hasBlockers: false,
 					isError: false,
 					fileModified: false,
+					checkedClean: false,
 				});
 				const runtime = new RuntimeCoordinator();
 				runtime.projectRoot = env.tmpDir;
@@ -3952,6 +3985,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 					hasBlockers: false,
 					isError: false,
 					fileModified: false,
+					checkedClean: false,
 				});
 				const runtime = new RuntimeCoordinator();
 				runtime.projectRoot = env.tmpDir;
@@ -4006,6 +4040,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 				hasBlockers: false,
 				isError: false,
 				fileModified: true,
+				checkedClean: false,
 				changedFiles: [filePath],
 				postMutation:
 					ctx.autofixMode === "immediate"
@@ -4055,6 +4090,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 				hasBlockers: false,
 				isError: false,
 				fileModified: false,
+				checkedClean: false,
 			}));
 			const existingPath = createTempFile(
 				env.tmpDir,
@@ -4195,6 +4231,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 				hasBlockers: false,
 				isError: false,
 				fileModified: false,
+				checkedClean: false,
 			}));
 			const existingPath = createTempFile(
 				env.tmpDir,
@@ -4285,6 +4322,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 				hasBlockers: false,
 				isError: false,
 				fileModified: true,
+				checkedClean: false,
 				changedFiles: [ctx.filePath],
 				postMutation: {
 					filePath: ctx.filePath,
@@ -4340,6 +4378,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 				hasBlockers: false,
 				isError: false,
 				fileModified: false,
+				checkedClean: false,
 			});
 			const runtime = new RuntimeCoordinator();
 			runtime.projectRoot = env.tmpDir;
@@ -4421,6 +4460,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 					hasBlockers: false,
 					isError: false,
 					fileModified: false,
+					checkedClean: false,
 				};
 			});
 			await handleToolResult({
@@ -4452,6 +4492,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 				hasBlockers: false,
 				isError: false,
 				fileModified: false,
+				checkedClean: false,
 			});
 			const runtime = new RuntimeCoordinator();
 			runtime.projectRoot = env.tmpDir;
@@ -4491,6 +4532,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 					hasBlockers: false,
 					isError: false,
 					fileModified: true,
+					checkedClean: false,
 					changedFiles: [boundaryPath],
 					postMutation: {
 						filePath: boundaryPath,
@@ -4503,6 +4545,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 					hasBlockers: false,
 					isError: false,
 					fileModified: true,
+					checkedClean: false,
 					changedFiles: [filePath],
 					postMutation: { filePath, content, source: "autofix" },
 				});
@@ -4577,6 +4620,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 		});
 		const formatEventsPublish =
 			await import("../../clients/format-events-publish.js");
@@ -4677,6 +4721,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 			hasBlockers: true,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 		});
 
 		const env = setupTestEnvironment("pi-lens-runtime-tool-");
@@ -4751,6 +4796,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 		});
 
 		const env = setupTestEnvironment("pi-lens-runtime-tool-");
@@ -4825,6 +4871,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 		});
 
 		const env = setupTestEnvironment("pi-lens-runtime-tool-");
@@ -4918,6 +4965,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 		});
 
 		const env = setupTestEnvironment("pi-lens-runtime-tool-dedupe-");
@@ -5001,6 +5049,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 				hasBlockers: false,
 				isError: false,
 				fileModified: true,
+				checkedClean: false,
 				changedFiles: [filePath, sideEffectPath],
 			});
 
@@ -5080,6 +5129,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 				hasBlockers: false,
 				isError: false,
 				fileModified: true,
+				checkedClean: false,
 				// runPipeline reports the target's post-write hash whenever its own
 				// write touched the target (pipeline.ts, #2499).
 				postWriteStateHash: createHash("sha256")
@@ -5140,6 +5190,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 				hasBlockers: false,
 				isError: false,
 				fileModified: true,
+				checkedClean: false,
 				// A cwd-relative workspace-edit spelling must be resolved against
 				// the workspace passed to applyWorkspaceEdit, not process.cwd().
 				changedFiles: ["src/main.rs"],
@@ -5225,6 +5276,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 				hasBlockers: false,
 				isError: false,
 				fileModified: true,
+				checkedClean: false,
 				changedFiles: [caseVariantPath],
 			});
 
@@ -5427,6 +5479,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 		});
 
 		const env = setupTestEnvironment("pi-lens-runtime-tool-path-");
@@ -5505,6 +5558,7 @@ describe("#484 turn-summary collection gate", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: true,
+			checkedClean: false,
 			diagnostics: [
 				{
 					id: "d1",
@@ -5565,6 +5619,7 @@ describe("#484 turn-summary collection gate", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: true,
+			checkedClean: false,
 			diagnostics: [
 				{
 					id: "d1",
@@ -5659,6 +5714,7 @@ describe("#3246 inline blocker provenance", () => {
 				hasBlockers: true,
 				isError: false,
 				fileModified: false,
+				checkedClean: false,
 				inlineBlockerSummary:
 					"🔴 STOP — 1 issue(s) must be fixed:\n  L1: eval() is banned",
 				inlineBlockerSources: ["ast-grep"],
@@ -5708,6 +5764,7 @@ describe("path attribution across tool_call/tool_result (#1642)", () => {
 			hasBlockers: false,
 			isError: false,
 			fileModified: false,
+			checkedClean: false,
 		});
 		logLatency.mockClear();
 	});

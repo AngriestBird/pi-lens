@@ -76,9 +76,10 @@ an adopted root reaches LSP only through `resolveServerRoot`'s adopted branch
 and `ClientRegistry.admitAdoptedRoot`. A linked worktree is its own workspace,
 so its edits take the same dispatch, formatting, autofix and LSP treatment as a
 session edit, and `tool_result` records `tool-result-linked-worktree` for that
-root and states a run whose primary checked the file and found nothing
-(`tool-result-linked-worktree-clean`, keyed off `PipelineResult.checkedClean`,
-never off `output`), so the path is never silent.
+root and states a run a language server answered that recorded no finding
+(`tool-result-linked-worktree-clean`, keyed off the required
+`PipelineResult.checkedClean`, never off `output` or the all-clear line), so
+the path is never silent.
 
 The repository ships compiled JavaScript. TypeScript sources are authoritative;
 compiled twins are generated and must not be edited by hand.
