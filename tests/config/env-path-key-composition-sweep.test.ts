@@ -1450,10 +1450,10 @@ export interface PathKeyCensus {
  * passes the walked population; a case passes one planted file to prove that
  * what reaches this loop is scanned (#4600 R3).
  */
-export function censusPathKeyFiles(files: readonly string[]): {
+export async function censusPathKeyFiles(files: readonly string[]): Promise<{
 	identities: Map<string, PathKeyReason>;
 	findings: PathKeyFinding[];
-} {
+}> {
 	const identities = new Map<string, PathKeyReason>();
 	const occurrences = new Map<string, number>();
 	const findings: PathKeyFinding[] = [];
@@ -1477,11 +1477,15 @@ export function censusPathKeyFiles(files: readonly string[]): {
 			identities.set(identity, finding.reason);
 			findings.push(finding);
 		}
+		// #4736: turn the loop so `@ast-grep/napi` frees this file's tree before
+		// the next parse; a synchronous walk held ~2,350 trees at once (1,703 MB
+		// peak RSS of a 2,048 MB budget, 37 MB of V8 heap).
+		await new Promise<void>((resolve) => setImmediate(resolve));
 	}
 	return { identities, findings };
 }
 
-export function censusPathKeyCompositions(): PathKeyCensus {
+export async function censusPathKeyCompositions(): Promise<PathKeyCensus> {
 	const files: string[] = [];
 	for (const { dir, extensions, floor } of SCAN_ROOTS) {
 		const found = listSourceFiles(path.join(REPO_ROOT, dir), {
@@ -1492,7 +1496,7 @@ export function censusPathKeyCompositions(): PathKeyCensus {
 		files.push(...found);
 	}
 	files.push(path.join(REPO_ROOT, "index.ts"));
-	return { ...censusPathKeyFiles(files), scanned: files.length };
+	return { ...(await censusPathKeyFiles(files)), scanned: files.length };
 }
 
 /**
@@ -2553,7 +2557,7 @@ describe("#4590 env PATH composition", () => {
 	 * own file list so the layout is the one under test, and removing the scan
 	 * from the walk (rather than from `findPathKeyFindings`) reds it.
 	 */
-	it("scans a walked file whose layout no key filter could spell", () => {
+	it("scans a walked file whose layout no key filter could spell", async () => {
 		const fixture = setupTestEnvironment("pi-lens-4590-census-");
 		try {
 			const file = path.join(fixture.tmpDir, "candidate.ts");
@@ -2568,7 +2572,7 @@ describe("#4590 env PATH composition", () => {
 					"}",
 				].join("\n"),
 			);
-			const rows = [...censusPathKeyFiles([file]).identities.keys()];
+			const rows = [...(await censusPathKeyFiles([file])).identities.keys()];
 			expect(rows.map((row) => row.split("#").at(-1))).toEqual([
 				"PATH",
 				"getPathKey()",
@@ -2580,8 +2584,8 @@ describe("#4590 env PATH composition", () => {
 
 	it(
 		"keeps the seeded baseline exact in both directions",
-		() => {
-			const census = censusPathKeyCompositions();
+		async () => {
+			const census = await censusPathKeyCompositions();
 			const audit = auditRegistry({
 				sweepName: "env PATH composition",
 				flagged: [...census.identities].map(([key, reason]) => ({
