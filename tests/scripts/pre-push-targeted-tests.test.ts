@@ -434,6 +434,7 @@ describe("selectTargetedTests — path-mirror pass", () => {
 			"tests/tools/diagnostics-route-switch-matrix.test.ts",
 			// #4590: walks both trees, so both change kinds must arm it.
 			"tests/config/env-path-key-composition-sweep.test.ts",
+			"tests/config/git-fixture-governance.test.ts",
 		];
 		const testScanners = [
 			"tests/clients/flake-shape-ratchet.test.ts",
@@ -454,6 +455,7 @@ describe("selectTargetedTests — path-mirror pass", () => {
 			"tests/config/pi-mock-importer-sweep.test.ts",
 			"tests/config/sink-read-drain-sweep.test.ts",
 			"tests/config/env-path-key-composition-sweep.test.ts",
+			"tests/config/git-fixture-governance.test.ts",
 			"tests/config/test-env-restore-sweep.test.ts",
 			"tests/config/test-server-teardown-sweep.test.ts",
 			"tests/config/module-instance-coverage.test.ts",
