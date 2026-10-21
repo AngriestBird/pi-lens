@@ -208,13 +208,12 @@ function copyIfMissing(
 		fs.copyFileSync(source, stage);
 		fs.linkSync(stage, target);
 		return "copied";
-	} catch (cause) {
-		// none: EEXIST is a store's own newer write, which wins; any other
-		// errno is counted into the outcome the session-start drain records.
-		return (cause as NodeJS.ErrnoException).code === "EEXIST" &&
-			fs.existsSync(target)
-			? "present"
-			: "failed";
+	} catch {
+		// none: counted into the outcome the session-start drain records. A
+		// session adopting concurrently that links the file first lands here
+		// too: its copy is the same bytes, and the next session start finds
+		// the file present and records nothing.
+		return "failed";
 	} finally {
 		if (staged) fs.rmSync(stage, { force: true });
 	}
