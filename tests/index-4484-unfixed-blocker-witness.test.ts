@@ -342,6 +342,7 @@ import {
 	makeSessionStartEvent,
 } from "./support/host-event-factory.js";
 import { createPiMock, makeCtx } from "./support/pi-mock.js";
+import { readNdjsonRows } from "./support/ndjson-rows.js";
 
 let tmpDir = "";
 let pendingCleanup: (() => Promise<void>) | undefined;
@@ -546,24 +547,19 @@ async function lastRunnerRows(
 ): Promise<Record<string, { status?: string }>> {
 	await flushLatencyLog();
 	const target = path.join(tmpDir, file);
-	const row = fs
-		.readFileSync(getLatencyLogPath(), "utf8")
-		.split("\n")
-		.filter((line) => line.includes(target) && line.includes('"runners"'))
-		.map(
-			(line) =>
-				JSON.parse(line) as {
-					filePath?: string;
-					metadata?: {
-						runners?: Array<{
-							id: string;
-							status?: string;
-							skipReason?: string;
-						}>;
-					};
-				},
-		)
-		.filter((r) => r.filePath === target)
+	const read = readNdjsonRows<{
+		filePath?: string;
+		metadata?: {
+			runners?: Array<{ id: string; status?: string; skipReason?: string }>;
+		};
+	}>(getLatencyLogPath());
+	// A torn write would drop the record this witness reads: red with the count.
+	expect(read.skipped).toBe(0);
+	// The row is the file's LAST one that CARRIES a runners table: a later row
+	// for the same file (a turn_end, a review row) has none, and taking it would
+	// report `{}` as the answer.
+	const row = read.rows
+		.filter((r) => r.filePath === target && r.metadata?.runners !== undefined)
 		.at(-1);
 	return Object.fromEntries(
 		(row?.metadata?.runners ?? []).map((r) => [r.id, r]),
@@ -578,23 +574,17 @@ async function degradationRows(
 	kind: string,
 ): Promise<Record<string, unknown>[]> {
 	await flushLatencyLog();
-	const log = getLatencyLogPath();
-	if (!fs.existsSync(log)) return [];
-	return fs
-		.readFileSync(log, "utf8")
-		.split("\n")
-		.filter((line) => line.includes(`"${kind}"`))
-		.flatMap((line) => {
-			const row = JSON.parse(line) as {
-				phase?: string;
-				metadata?: Record<string, unknown> | undefined;
-			};
-			return row.phase === "degradation_ledger" &&
-				row.metadata?.kind === kind &&
-				row.metadata !== undefined
-				? [row.metadata]
-				: [];
-		});
+	const read = readNdjsonRows(getLatencyLogPath());
+	// The ledger rows ARE the trace under test; a skipped line would shorten it.
+	expect(read.skipped).toBe(0);
+	return read.rows.flatMap((row) => {
+		const metadata = row.metadata as Record<string, unknown> | undefined;
+		return row.phase === "degradation_ledger" &&
+			metadata?.kind === kind &&
+			metadata !== undefined
+			? [metadata]
+			: [];
+	});
 }
 
 describe("#4484 witness: a repeat write keeps an unfixed blocker pending", () => {
@@ -618,21 +608,17 @@ describe("#4484 witness: a repeat write keeps an unfixed blocker pending", () =>
 		expect(await s.commitBlocked()).toBe(true);
 		// The dispatch's own record says one blocker was held back by the delta.
 		await flushLatencyLog();
-		// The offset is a byte count, so slice the bytes before decoding: a
-		// multi-byte character earlier in the log (an emoji in a message) moves
-		// a character index off the row boundary (review F3, seed 202).
-		const rows = fs
-			.readFileSync(latencyLog)
-			.subarray(offset)
-			.toString("utf8")
-			.split("\n")
-			.filter(Boolean)
-			.map((line) => JSON.parse(line) as Record<string, unknown>)
-			.filter(
-				(row) =>
-					row.result === "dispatch_complete" &&
-					String(row.filePath).endsWith("cell-a.ts"),
-			);
+		const read = readNdjsonRows(latencyLog, offset);
+		// The offset is a byte count, so the reader slices the bytes before
+		// decoding: a multi-byte character earlier in the log (an emoji in a
+		// message) moves a character index off the row boundary (review F3, seed
+		// 202). A skipped line would lower the count below, so it is a red.
+		expect(read.skipped).toBe(0);
+		const rows = read.rows.filter(
+			(row) =>
+				row.result === "dispatch_complete" &&
+				String(row.filePath).endsWith("cell-a.ts"),
+		);
 		expect(
 			rows.map(
 				(row) => (row.metadata as Record<string, unknown>).heldBackBlockers,

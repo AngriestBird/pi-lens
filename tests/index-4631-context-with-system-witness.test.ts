@@ -41,6 +41,7 @@ import {
 	piSessionFixture,
 	startPiSession,
 } from "./support/pi-session.js";
+import { readNdjsonRows } from "./support/ndjson-rows.js";
 
 const fixture = piSessionFixture();
 
@@ -86,19 +87,14 @@ async function latencyRows(): Promise<
 	Array<{ phase?: string; metadata?: Record<string, unknown> }>
 > {
 	await flushAllNdjsonWriters();
-	const file = latencyLogPath();
-	if (!fs.existsSync(file)) return [];
-	return fs
-		.readFileSync(file, "utf8")
-		.split("\n")
-		.filter(Boolean)
-		.map(
-			(line) =>
-				JSON.parse(line) as {
-					phase?: string;
-					metadata?: Record<string, unknown>;
-				},
-		);
+	const read = readNdjsonRows<{
+		phase?: string;
+		metadata?: Record<string, unknown>;
+	}>(latencyLogPath());
+	// The old inline reader threw on a line it could not parse; a counted skip
+	// keeps that strictness and names the count (#4699 F2).
+	expect(read.skipped).toBe(0);
+	return read.rows;
 }
 
 describe("#4631 a mid-list system message never changes the head", () => {

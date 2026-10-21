@@ -124,6 +124,7 @@ import {
 	setupTestEnvironment,
 	withFixtureTmpdir,
 } from "../clients/test-utils.js";
+import { readNdjsonRows, type NdjsonRowRead } from "./ndjson-rows.js";
 
 /** The built extension every case loads: `npm run build` writes this twin. */
 const EXTENSION_ENTRY = fileURLToPath(
@@ -414,6 +415,21 @@ export interface PiSession {
 	readonly errors: unknown[];
 	/** The persisted session file, once pi has written one. */
 	sessionFile(): string | undefined;
+	/**
+	 * Rows the LOADED copy wrote to `<root>/home/latency.log`, in order, after a
+	 * flush, together with the lines the read could not parse. The copy's
+	 * writers live in the same process-global map
+	 * (`Symbol.for("pi-lens.ndjson-logger.state")`), so `flushAllNdjsonWriters`
+	 * settles them; reading before the await would count a row still queued
+	 * (AGENTS.md shape 67). A watchdog record a case asserts on goes through
+	 * here, never through a test-side logger double.
+	 *
+	 * `skipped` is beside the rows on purpose: a corrupt line used to be dropped
+	 * silently, so an exact-count or absence assertion could not see it
+	 * (Sourcery on #4699). A case whose claim depends on the total asserts it is
+	 * zero; a case that names rows only reads `.rows`.
+	 */
+	latencyRows(): Promise<NdjsonRowRead>;
 	/** Run one prompt to completion (tool calls included). */
 	prompt(text: string): Promise<void>;
 	/** Manual compaction, pi's `/compact` entry point. */
@@ -709,6 +725,10 @@ function handleFor(
 		requests: created.requests,
 		errors,
 		sessionFile: () => session.sessionManager.getSessionFile(),
+		async latencyRows() {
+			await flushAllNdjsonWriters();
+			return readNdjsonRows(path.join(args.root, "home", "latency.log"));
+		},
 		async prompt(text) {
 			await session.prompt(text);
 		},
