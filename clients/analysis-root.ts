@@ -196,9 +196,9 @@ export interface SessionConfigRoot {
  * containment lexically, so a root registered in any other spelling never
  * holds the file, the #2052 gate declines it, and its `lsp.disabledServers`
  * denial stops applying. When no ancestor of the file's spelling is the root
- * (a link from outside into it), a session file registers the session root as
- * the host spelled it, which `session_start` already did, and a worktree file
- * registers the worktree root.
+ * (a link from outside into it), no spelling of that root holds the file, so
+ * the session root is registered as the host spelled it: the entry
+ * `session_start` made, restored if the cap dropped it, never a new one.
  */
 export function resolveSessionConfigRoot(
 	filePath: string,
@@ -216,8 +216,7 @@ export function resolveSessionConfigRoot(
 	// never the edited file's directory and never a re-derived eligibility.
 	return {
 		register:
-			configRootOnFileSpelling(filePath, root) ??
-			(mode === "session" ? nodePath.resolve(sessionRoot) : root),
+			configRootOnFileSpelling(filePath, root) ?? nodePath.resolve(sessionRoot),
 		mode,
 	};
 }
