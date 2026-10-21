@@ -925,6 +925,21 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// Most recent event scope for existing delivery handlers. Shutdown reads
 	// the departing member's scope, since an activation can serve siblings.
 	let scope: SessionScope | undefined;
+	/**
+	 * The scope of the session an event came from: the member that session's
+	 * own start recorded (#4554), by pi's stable id. `scope` names only the
+	 * session that started LAST, so a request or a tool call from an earlier
+	 * live sibling on this activation read or wrote that sibling's state
+	 * (#4631 r5, #4723 r4). An id this activation never recorded falls back to
+	 * `scope`, the only answer left.
+	 */
+	const scopeOfSession = (
+		sessionId: string | undefined,
+	): SessionScope | undefined =>
+		(sessionId === undefined
+			? undefined
+			: liveSessionMembers.find((member) => member.sessionId === sessionId)
+					?.scope) ?? scope;
 	// #3613: turn_end can deliver after another in-process activation has
 	// started its next session and changed the live coordinator scope. Keep the
 	// identity that owned this turn, rather than resolving ownership at delivery
@@ -2132,10 +2147,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 		},
 		filteredLazyCatalog,
 		{
-			onActivated: (names) => {
+			onActivated: (names, ctx) => {
 				observeSituationalToolActivation(names);
-				// #3612: this activation's session scope owns its activations.
-				rememberLazyTools(scope, names);
+				// #3612: the calling session's scope owns its activations (#4723 r4).
+				rememberLazyTools(scopeOfSession(getStableSessionId(ctx)), names);
 			},
 			onRejected: (name) => {
 				if (
@@ -3033,7 +3048,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// for, whichever posture made it active. Remembering it keeps a later
 			// switch to the lazy posture (or a reload) from hiding a tool in use.
 			// A disabled tool is never registered, so pi never delivers its call.
-			rememberLazyTools(scope, [toolEntry.name]);
+			// r4: into the CALLING session's memory, not the last-started one's.
+			rememberLazyTools(scopeOfSession(getStableSessionId(ctx)), [
+				toolEntry.name,
+			]);
 		}
 		return handleToolCall({
 			event: event as unknown as Parameters<typeof handleToolCall>[0]["event"],
@@ -4628,16 +4646,12 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// request drained the OTHER session's advisories into its own messages
 			// and the owning session lost them. `liveSessionMembers` records each
 			// session's own scope at its start (#4554), and this is the same
-			// identity `leaveLiveSession` reads; when this activation never recorded
-			// the requesting session, the activation-wide scope is the only answer
-			// left and stays the fallback.
-			const requestScope =
-				(prefixSessionId === undefined
-					? undefined
-					: liveSessionMembers.find(
-							(member) => member.sessionId === prefixSessionId,
-						)?.scope) ?? scope;
-			const agentNudge = consumeAgentNudge(dbg, requestScope);
+			// identity `leaveLiveSession` reads; `scopeOfSession` keeps the
+			// activation-wide scope as the fallback for a session it never recorded.
+			const agentNudge = consumeAgentNudge(
+				dbg,
+				scopeOfSession(prefixSessionId),
+			);
 			const sourceMessages = [
 				{
 					source: "session-guidance" as const,
