@@ -171,6 +171,14 @@ The principles' delegation contract applies. pi-lens adds:
 - Three open issues on one mechanism, in any seam groups, open a consolidation
   audit across every consumer of that mechanism before the next one is filed
   (history: `HISTORY.md`, 2026-10-16).
+- Run the **fold check** as soon as a lane's mechanism is known, which is when
+  the brief is written: read every open issue against that mechanism and decide
+  each candidate as folded into this PR (one `Closes #…` per folded issue) or
+  not folded, with the reason (two hazards in one review, a maintainer decision,
+  a blocked dependency, a different seam). The brief carries the candidate list
+  and its decisions, and the PR body records them under `## Fold check`.
+  Planning precedes filing: a new issue is the answer for p2+ work no lane can
+  carry, never for a p3 the lane could fold (history: `HISTORY.md`, 2026-10-20).
 - The per-PR loop (review, verify, auto-merge on green), round routing, the
   merge gate and the Common mistakes table live in `docs/pi-lens-merge-policy.md`.
 - Read CI with `node scripts/ci-verdict.mjs <pr|sha>` (exact head, all pages).
@@ -693,6 +701,42 @@ file-scoped worklist and receives no project-wide scanner output.
     pre-push runs. Plant the fixture's own marker, or assert the root it
     resolved before the case runs. Guard: planned in #4560, not yet running.
 
+76. **Instrument attributes by id and order, not by the emitting subject:** a
+    probe that brackets each phase with an offset into a buffered async sink,
+    and drains rows by subject id alone, folds a sibling's late row into its own
+    phase. The verdict then depends on write order, so the same measurement
+    flips between two answers and a data refresh commits the artifact as a
+    finding. Stamp each row with the subject that emitted it, or scope the drain
+    to that subject, and require the last writer of a verdict to be the subject's
+    own emitter. Enforced by `tests/clients/lsp/lsp-publish-trace-attribution.test.ts`.
+    Instance and dates: `HISTORY.md`.
+
+77. **Cancellation read as failure:** an aggregate that compares each shard's
+    result against `success` reds a required check when the shard finished every
+    step and lost its race with `timeout-minutes`, and no rerun recovers it,
+    because the infra-kill classifier reads only `failure` runs. A shard's own
+    step conclusions tell a teardown cancellation from a mid-check one, and every
+    required job's measured runtime belongs beside its cap, because a cap set at
+    the measured maximum fails the first time a runner is slow. That runtime is
+    also a per-shard SUM, so it can never be the stale-cost verdict: only the
+    table's rank agreement with the run's own ordering is scale-free enough to
+    survive one shard's machine. Guard: `tests/scripts/check-shard-verdict.test.ts`
+    (the seam, both fail-closed directions), the gating-step list in
+    `tests/config/unit-tests-shard-workflow.test.ts`, and
+    `tests/scripts/ci-verdict-runtime-cap.test.ts` (a measured runtime beside its
+    cap). Instance and dates: `HISTORY.md`.
+
+78. **A dependency's cache directory attributed to the fixture that triggered
+    it:** a loader that materialises `os.tmpdir()/<tool>` on the caller's own
+    stack looks like a fixture sibling, so the creator recorded for it is
+    accurate per process and wrong per cause, and the sweep reds a file that
+    never created it. Pin the loader's cache off for the test process rather
+    than admitting the directory's name, and keep a planted sibling red to prove
+    it. Enforced by the by-path-cache case in
+    `tests/config/tmp-fixture-hygiene.test.ts`, plus the `JITI_FS_CACHE=0` pin
+    that `tests/support/vitest-setup.ts` and `vitest.config.ts` force on the
+    test process. Instance and dates: `HISTORY.md`.
+
 </important>
 
 <important if="session, turn or generation lifecycle">
@@ -919,8 +963,40 @@ file-scoped worklist and receives no project-wide scanner output.
   `continue-on-error` producer either calls the same helper (`--count
   <producer>=<n> --floor <m>` from a workflow step; `--min-pass`, the
   complexity file count and the shuffle census's missing starts already do) or
-  carries a `# No floor (<issue>): <reason>` header above its job; a floor comes
-  from a run recorded in `tests/fixtures/nightly-floors/measurements.json`.
+  needs none, and one census decides that: every `continue-on-error` site in a
+  `.github/workflows/*.yml` or `*.yaml` file and in a composite
+  `.github/actions/**/action.yml` or `action.yaml` is registered in
+  `tests/fixtures/nightly-floors/continue-on-error-sites.json` as `floored`
+  (naming the gating step and the floor text, which must sit in the argument
+  list of a named measuring invocation — `scripts/assert-evaluated.mjs`,
+  `scripts/smoke-tools.mjs`, `scripts/complexity-report.mjs` — on a top-level
+  line the shell executes, of a step whose `if:` is absent or a conjunction of
+  `always()`, `success()`, `!cancelled()` and one `github.event_name` or
+  `matrix.<name>` comparison the parsed document settles (the workflow's `on:`
+  keys, that job's `strategy.matrix` list), so
+  `!cancelled() && matrix.os == 'macos-latest'` counts only where the matrix
+  declares that leg; every other `if:` expression, including a trivially true
+  literal and a comparison no declared value satisfies, leaves the floor
+  unproven, and so does a job whose own `if:` the document proves never true).
+  A `\`-continued line and a line the previous one left unfinished with `&&`,
+  `||` or `|` are one command, so the measuring invocation must start the
+  joined command; an `exit` ends the script only in command position. A
+  `no-floor` row states the reader that makes an empty result visible, or
+  `governed-by` (naming the issue and the live tests that own the site, in
+  files vitest collects). The reader derives the population from the parsed
+  files, so it fails closed on a site the registry
+  does not name, on a producer file or a non-file entry it does not classify,
+  on a `continue-on-error` key in a location that is not a job or a step, and
+  on a floor whose evidence is not in the argument list of such an invocation
+  on a top-level command (a comment, a quoted command, a heredoc body, a
+  printed command, a function or block body, a subshell, a chained command, or
+  a line after an `exit`), or that names a step whose `if:` is outside that
+  allowlist; a floor comes from a run recorded in
+  `tests/fixtures/nightly-floors/measurements.json`. A
+  `# No floor (<issue>): <reason>` header above a job is human-facing copy
+  where one exists, not the record: six sites keep one (the five `lint.yml`
+  jobs and `install-smoke.yml`'s `mise-repro`), and the registry row the
+  census requires is the record.
   The helper must stay importable without `dist/` (the refresh-PR job runs it
   on a fresh checkout).
 - LSP service generations, workspace-sweep holds, and repair latches use
@@ -944,6 +1020,16 @@ file-scoped worklist and receives no project-wide scanner output.
   refresh-state block; never auto-merged, never demotes). `tests/config/lsp-idle-eviction-measurement.test.ts`
   fails when a registry server can go unmeasured without an admission or when
   the committed measurement vetoes a server declared `transparent`.
+- The compiled registry holds the CATALOG ENTRY for every built-in with no
+  command override (`compileLspRegistry`), so the object the client registry
+  keeps (`SpawnedServer.info`) is the object `LSP_SERVERS`/`getServerById`
+  exposes; an overridden server keeps its own copy so its `spawn` and trust
+  admission never reach the catalog. A copy here is not a safe container: it is
+  a second registry whose entries swallow every arm a caller applies to the
+  first (history: `HISTORY.md`, 2026-10-19).
+  `tests/clients/lsp/lsp-registry-trust.test.ts` pins both directions;
+  `scheduleIdleEviction` records `lsp-idle-eviction-declined` once per server
+  per session when it arms no timer.
 - The server-role vocabulary and the declared trait table have one owner,
   `clients/lsp/server-traits.ts` (#1488, #1756 stage 1). Ask `isAuxiliary`,
   never a comparison against the role literal, and read `notifyInflightLimit`
@@ -1004,6 +1090,16 @@ file-scoped worklist and receives no project-wide scanner output.
 - Per-path LSP notifications serialize read/build/send/record work. Pull
   cancellation blocks a same-path replacement until settlement. Waits are
   deadline- and abort-bounded, and silence is never clean.
+- Document line addressing has one owner, `clients/lsp/content-scan.ts`: the
+  `\n` count behind the `lsp_document_send` record's `contentLineCount` and the
+  LSP sync bound (`countLfNewlines`), the last LSP-addressable line an
+  Incremental change spans, and one line's text (`lineTextAt`, which the
+  diagnostic-conversion call sites read) all come from it. The rule it owns is
+  the count and the one-line read: no other module may `split("\n")` document
+  content to obtain a line count or a single line — a send, a bound check, and
+  a line read ask this owner. A module that needs the whole line array (a
+  multi-line table, a per-line scan of its own document) keeps its `split`; the
+  array is the value it consumes, never a way to count or to reach one line.
 - `touchFile` fires a type-2 watched-file announcement at entry for the first
   seen content hash of a path, before the owner's didChange; it reaches every
   other live client of the same server across package roots through the client
@@ -1033,6 +1129,22 @@ file-scoped worklist and receives no project-wide scanner output.
   carried save leaves the save owed; a failed standalone save gets one bounded
   retry (`GateSaveRetry`, `MutGateSaveNoRetry`) and a retry that lands for
   other bytes cannot suppress the save the next saved touch owes.
+
+- Every server-produced `WorkspaceEdit` a path applies is bound to the bytes the
+  server computed it from. Both rename flows take the request instant before
+  they ask (`rename` right before `lspService.rename`, `renameFile` right before
+  `workspace/willRenameFiles`) and pass `captureRenameExpectedContent`'s map as
+  `expectedContent`; `clients/lsp/edits.ts` compares every bound file inside
+  pi's mutation queue before its first write, refuses the whole edit, and
+  records one `lsp-edit-stale-content` row naming the file. `renameFile` has no
+  target (nothing read the old path), so an unopened file there is best effort
+  by mtime, the same remainder the `rename` path carries. The evidence a file
+  is compared against is one sent-content record, the highest-priority live
+  client's for the cwd, so when two live clients hold one file the binding can
+  read a record that did not produce the edit; that topology is a live
+  remainder, not a covered case. `documentVersions` is
+  the other binding axis, for a server-initiated `workspace/applyEdit`. A new
+  apply site binds the content or states why it cannot.
 - `touchFile` freezes content-bound auxiliary coverage at merge time. A later
   publication cannot undo a finding drop. Auxiliary gaps narrow coverage and
   never turn a primary answer inconclusive. When a primary touch is
@@ -1606,6 +1718,25 @@ process. Read lifecycle order from the real `session_scope_transition` rows
 and dead-weight rows, not from the pi mock; the mock does not re-run the
 extension factory or reproduce pi lifecycle ordering.
 
+Two in-process pi tiers sit under that child lane. A case whose verdict
+depends on what pi does with a handler's return value, what the model
+receives, or how pi orders a session goes through one of them, never
+`tests/support/pi-mock.ts`. The double kept a `context` list as returned, pi
+rebuilt the system head, and every test passed. Tier 1,
+`tests/support/pi-runner.ts`, loads the built extension into pi's real
+`ExtensionRunner`: flags, tools, commands, declared registrations, and no
+`emit`, by design. Tier 2, `tests/support/pi-session.ts`, runs a real
+`AgentSession` with pi-ai's `fauxProvider`: turns, tool round trips, session
+ids, and the request the model sees. Their header comments state the APIs
+and limits. A new tier capability adds a case to `pi-runner.test.ts` or
+`pi-session.test.ts` first. `pi-mock.ts` stays for three classes: process-boundary
+subjects, pi-lens-internal seams, and payloads a scripted provider cannot
+produce. It also stays for files a roadmap slice still owns. It throws at load
+for a test file not on `PI_MOCK_IMPORTERS` (`tests/support/pi-mock-importers.ts`),
+so a new user fails however it imports the double. The list only shrinks:
+`tests/config/pi-mock-importer-sweep.test.ts` fails on a row whose file no
+longer uses it.
+
 When the defect is an ordering of awaits on one seam (a coalescing queue, a
 per-key serializer), or the seam has regressed before, write a scheduler
 property with `fc.scheduler()` instead of one more replay:
@@ -1615,7 +1746,8 @@ property with `fc.scheduler()` instead of one more replay:
 Use `tests/support/fault-injection.ts` for wedged children, seam delays,
 starved budgets, and gates; `makeRunnerCtx`, `makeLspServiceDouble`, and
 `makeRealRunnerEnv` for dispatch, LSP, and rule behavior. Mock only external
-binaries, network, host SDK seams, clocks, or fault injection.
+binaries, network, host SDK seams (not pi's own behaviour: see the pi tiers
+above), clocks, or fault injection.
 
 Test authoring screens:
 
@@ -1642,6 +1774,17 @@ Test authoring screens:
   members sit in `scripts/shuffle-census-ratchet.json`, keyed by file, which
   only shrinks: a new member reds, and an entry clean two nights running
   must be deleted.
+  A file whose subject IS the order its cases run in (a backstop that reaps
+  the previous case's process, a drain the next case observes) cannot be
+  fixed by restoring state: that `describe` opts out with `{ shuffle: false }`
+  and a header saying why order is the behaviour under test, never the whole
+  file, and is registered in the ratchet's `byDesign` rows, which
+  `tests/scripts/ci-shuffle-census.test.ts` checks both ways. The reader
+  (`tests/support/shuffle-opt-out-scan.ts`) admits only the minimal marker:
+  an options object is read as a SEQUENCE, so a spread or a computed key it
+  cannot name refuses even beside a readable `shuffle` and the last key wins;
+  and a callee resolves through any number of aliases, a binding it cannot
+  follow refusing when the call passes an options object.
   A `vi.doMock` is undone in the file's top-level `afterEach`, not in the
   case that mocks it: a shuffle runs the next case on the leaked mock.
   `vi.resetModules()` does not clear `globalThis` or pre-reset singletons.
@@ -1673,7 +1816,11 @@ one. History: `HISTORY.md`, 2026-10-15. A detector that decides a test exists co
 declarations (`testDeclarations` in `tests/support/sweep-kit.ts`) in files
 vitest collects (`tests/support/vitest-collection.ts`): a skipped, todo,
 conditional (`skipIf`/`runIf`, an options key, a body skip) or uncalled test
-is absent. New mock
+is absent. A governance question with a data-flow answer is asked structurally,
+not by extending a spelling list: `tests/support/eviction-programs.ts` owns the
+eviction question over the S0 census seam's AST, admits four tabled forms, and
+refuses everything else, with the live sites it still refuses tabled beside
+them. New mock
 exports, fixture shapes, path rules, spawn lanes, and durable fields must
 update their registered-or-fail coverage tests.
 

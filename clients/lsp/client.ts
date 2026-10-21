@@ -56,9 +56,13 @@ import { applyWorkspaceEdit, normalizeWorkspaceEditToUtf16 } from "./edits.js";
 import type { LSPProcess } from "./launch.js";
 import { normalizeMapKey, uriToPath } from "./path-utils.js";
 import {
+	lineTextAt,
+	scanDocumentContent,
+	type LastLinePosition,
+} from "./content-scan.js";
+import {
 	ADVERTISED_POSITION_ENCODINGS,
 	convertCharacterOffset,
-	lineTextAt,
 	negotiatePositionEncoding,
 	type PositionEncoding,
 } from "./position-encoding.js";
@@ -1124,7 +1128,7 @@ export interface LSPClientState {
 	 *  server last saw it (see `buildContentChanges`). Full/None servers never
 	 *  populate it, so the common case pays no extra retained memory.
 	 *
-	 *  #2066: `lastLine` is where that same send's `scanSentContent` pass left
+	 *  #2066: `lastLine` is where that same send's `scanDocumentContent` pass left
 	 *  the end of `text`, so the next change reads two numbers instead of
 	 *  re-walking (and re-splitting) the whole document for them. It travels
 	 *  with `text` and only with `text`: the eviction rewrite below drops both
@@ -2203,82 +2207,6 @@ function logTypeScriptPullSettle(
 	});
 }
 
-/** Where a document's last LSP-addressable line begins (#2066). */
-interface LastLinePosition {
-	/** Its 0-based line index. */
-	index: number;
-	/** Its first character's offset into the document. */
-	start: number;
-}
-
-interface SentContentScan {
-	/** `\n` count — `contentLineCount` is this + 1. */
-	lfNewlineCount: number;
-	lastLine: LastLinePosition;
-}
-
-/**
- * #2066: the ONE full-document walk a send needs, replacing the two that used
- * to run independently — a `charCodeAt` loop counting `\n` for the
- * `lsp_document_send` line count, and a `.split(/\r\n|\r|\n/)` in
- * `buildContentChanges` that materialized one substring per line to read the
- * last one. The #1095 sha256 is a third walk and stays; it is native, and it
- * is load-bearing. A document with no `\r` is walked natively (`indexOf`)
- * instead of per character (#2066).
- *
- * The two counts here are deliberately NOT the same number and must not be
- * collapsed into one. `lfNewlineCount` counts `\n` only, because its consumer
- * pairs against `diagnostic_past_eof`, whose gate counts LF BYTES
- * (`clients/diagnostic-line-freshness.ts`); merging the conventions would put
- * the two records one apart on exactly the mixed-ending documents the pairing
- * exists to debug. `lastLine` uses the full LSP terminator set (`\r\n`, lone
- * `\r`, `\n` — #1669 review F6), because a CRLF or classic-Mac document whose
- * terminators went uncounted computes a range ending mid-document.
- */
-function scanSentContent(content: string): SentContentScan {
-	// A document with no `\r` (the common case) has exactly one terminator
-	// kind, so `\n` count == terminator count and the last line starts after
-	// the last `\n`. `indexOf` is native and walks ~10x faster than the
-	// per-character loop below (0.30 vs 3.0 ms on a 1.96 MB document). Any `\r`
-	// falls through to the loop, which owns the `\r\n`/lone-`\r` rules.
-	if (content.indexOf("\r") === -1) {
-		let lfNewlineCount = 0;
-		let start = 0;
-		for (
-			let i = content.indexOf("\n");
-			i !== -1;
-			i = content.indexOf("\n", i + 1)
-		) {
-			lfNewlineCount++;
-			start = i + 1;
-		}
-		return { lfNewlineCount, lastLine: { index: lfNewlineCount, start } };
-	}
-	let lfNewlineCount = 0;
-	let index = 0;
-	let start = 0;
-	// `charCodeAt`, not `codePointAt` (typescript:S7758, accepted): both are
-	// compared against 10/13, which no surrogate unit or astral code point can
-	// equal, so they are interchangeable here — but `codePointAt` measured 8%
-	// slower on a 400 KiB LF document (0.716 vs 0.663 ms/scan), because every
-	// ordinary character pays a surrogate-pair check this loop never uses.
-	for (let i = 0; i < content.length; i++) {
-		const code = content.charCodeAt(i);
-		if (code !== 10 && code !== 13) continue;
-		if (code === 10) {
-			lfNewlineCount++;
-		} else if (content.charCodeAt(i + 1) === 10) {
-			// `\r\n` is ONE line terminator, and still carries the `\n` the
-			// LF-only count wants.
-			lfNewlineCount++;
-			i++;
-		}
-		index++;
-		start = i + 1;
-	}
-	return { lfNewlineCount, lastLine: { index, start } };
-}
-
 /**
  * #1095: fingerprint the EXACT didOpen/didChange payload text at SEND time and
  * tag it with the document version it was sent as, so a later
@@ -2294,7 +2222,7 @@ function recordSentContent(
 	content: string,
 	coalescedCount = 0,
 ): void {
-	const scan = scanSentContent(content);
+	const scan = scanDocumentContent(content);
 	const previous = state.documentContentHashes.get(normalizedPath);
 	if (previous && previous.version > version) {
 		incrementDegradationCount({
@@ -2407,7 +2335,7 @@ function recordSentContent(
 	// convention as the gate itself (newline count + 1 — a trailing `\n` adds
 	// one more, empty, addressable line; an empty document is still 1 line),
 	// or the two records disagree by one at exactly the boundary this counter
-	// exists to help debug. #2066: the count comes from `scanSentContent`
+	// exists to help debug. #2066: the count comes from `scanDocumentContent`
 	// above, which folded this loop into the walk `buildContentChanges` was
 	// already paying for; the LF-only convention is unchanged.
 	logLatency({
@@ -2470,7 +2398,8 @@ function buildContentChanges(
 	// document a second time. An entry carrying text without that position was
 	// written by something else — resolve it through the SAME scanner, never a
 	// second convention that can drift from it.
-	const lastLine = previous.lastLine ?? scanSentContent(previousText).lastLine;
+	const lastLine =
+		previous.lastLine ?? scanDocumentContent(previousText).lastLine;
 	const lastLineText = previousText.slice(lastLine.start);
 	return [
 		{
@@ -2705,10 +2634,17 @@ export function setupIncomingHandlers(
 			}
 			if (PUB_DEBUG) {
 				// #1333: PUB_DEBUG gate preserved; sink is extension.log.
+				// #4615: the row names the DOCUMENT it is about. Several live clients
+				// share a server id (five typescript fixtures), so a reader that keys
+				// on `server` alone attributes one client's publish to another's
+				// phase — the mis-read that put `empty-first` on typescript. The path
+				// is the client's own normalized document key, the identifier the
+				// probe compares against its fixture file.
 				logExtension({
 					subsystem: "lsp-pub",
 					level: "debug",
 					message: `server=${state.serverId} pubVersion=${docVersion} docVersion=${state.documentVersions?.get(normalizedPath)} diags=${newDiags.length}`,
+					metadata: { path: normalizedPath },
 				});
 			}
 			const strategy = getStrategy(state.serverId, state.launchVariant);

@@ -629,6 +629,16 @@ export async function downloadGrammarDetailed(
  */
 export const GRAMMAR_STALL_MS = 15_000;
 
+/**
+ * A `Language.load` that has not settled after this long is abandoned (#4224).
+ * A healthy load is a local file read plus a wasm compile and takes well under
+ * a second, so this is a ceiling for a hung load, not a latency target: a
+ * loaded host must not trip it. Without a bound, a load that never settles
+ * holds every caller for that language, and the in-flight batch build that
+ * later callers join.
+ */
+export const GRAMMAR_LOAD_TIMEOUT_MS = 30_000;
+
 export interface GrammarDownloadOptions {
 	/**
 	 * Abort the transfer once this many ms pass with no response bytes,

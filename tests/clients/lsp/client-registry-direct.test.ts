@@ -23,6 +23,7 @@ import {
 	resetDegradationLedger,
 } from "../../../clients/degradation-ledger.js";
 import type { LSPClientInfo } from "../../../clients/lsp/client.js";
+import { LSPService } from "../../../clients/lsp/index.js";
 import { initLSPConfig } from "../../../clients/lsp/config.js";
 import {
 	ClientRegistry,
@@ -845,17 +846,21 @@ describe("ClientRegistry.makeCapacityForClient (#4449)", () => {
 
 describe("ClientRegistry.scheduleIdleEviction (#4449)", () => {
 	const IDLE_MS = 1_000;
-	function idleFixture(info?: Record<string, unknown>) {
+	// #3952 review (F2): the server id is a parameter because the decline record
+	// latches on `(kind, subject = server.id)`. A shared `ts` fixture made two
+	// arms write under ONE subject, so a decline wrongly recorded on the second
+	// arm was swallowed by the first arm's latch and no assertion could see it.
+	function idleFixture(info?: Record<string, unknown>, serverId = "ts") {
 		process.env.PI_LENS_LSP_IDLE_EVICT_MS = String(IDLE_MS);
 		vi.useFakeTimers();
 		const { hooks, calls } = makeHooks();
 		const registry = new ClientRegistry(hooks);
-		const serverInfo = server("ts", {
+		const serverInfo = server(serverId, {
 			idleEviction: "transparent",
 			...info,
 		});
-		const client = fakeClient("ts", "/r");
-		const key = "ts:/r";
+		const client = fakeClient(serverId, "/r");
+		const key = `${serverId}:/r`;
 		registry.clients.set(key, client);
 		// Every production caller stamps last use before it arms the timer.
 		internals(registry).clientLastUsedAt.set(key, Date.now());
@@ -863,6 +868,10 @@ describe("ClientRegistry.scheduleIdleEviction (#4449)", () => {
 	}
 	const idleRecord = () =>
 		getDegradationSummary().find((g) => g.kind === "lsp-idle-eviction");
+	const declinedRecord = () =>
+		getDegradationSummary().find(
+			(g) => g.kind === "lsp-idle-eviction-declined",
+		);
 
 	// Recurrence: the timer callback is the ONLY thing standing between an idle
 	// language server and unbounded residency. It must retire synchronously, shut
@@ -928,18 +937,40 @@ describe("ClientRegistry.scheduleIdleEviction (#4449)", () => {
 	// Recurrence: only `transparent` servers are evicted on idle; every other
 	// policy stays resident (#3645). Adopted roots are evicted regardless, on the
 	// fixed adopted window rather than the configured one.
+	//
+	// #3952: the decline is also WRITTEN DOWN, once per server per session. A
+	// nightly probe that arms a server and then waits reads `not-evicted` from
+	// `scheduleIdleEviction`'s early return exactly like a server whose timer is
+	// merely slow; this row is the only place the two verdicts differ, and it
+	// must not fire for the adopted key below, which does arm a timer. The two
+	// arms carry DIFFERENT server ids (#3952 review F2), so the once-latch
+	// cannot hide a decline the adopted arm recorded under the resident id.
 	it("arms no timer for a resident server and an adopted-window timer for an adopted key", async () => {
 		const resident = idleFixture({ idleEviction: "resident" });
 		resident.registry.scheduleIdleEviction(resident.key, resident.serverInfo);
 		expect(vi.getTimerCount()).toBe(0);
+		expect(declinedRecord()?.count).toBe(1);
+		expect(declinedRecord()?.latestReasons[0]).toEqual({
+			subject: resident.serverInfo.id,
+			reason: "no idle-eviction timer: declared resident",
+		});
+		// A second touch of the same server is the same declaration: one row.
+		resident.registry.scheduleIdleEviction(resident.key, resident.serverInfo);
+		expect(declinedRecord()?.count).toBe(1);
 
-		const adopted = idleFixture({ idleEviction: "resident" });
+		const adopted = idleFixture({ idleEviction: "resident" }, "ts-adopted");
 		internals(adopted.registry).adoptedClientKeys.add(adopted.key);
 		adopted.registry.scheduleIdleEviction(adopted.key, adopted.serverInfo);
 		await vi.advanceTimersByTimeAsync(IDLE_MS); // the configured window
 		expect(adopted.client.shutdown).not.toHaveBeenCalled();
 		await vi.advanceTimersByTimeAsync(60_000 - IDLE_MS);
 		expect(adopted.client.shutdown).toHaveBeenCalledTimes(1);
+		// The adopted arm is a scheduled timer, never a decline: still one row,
+		// and the row still names only the resident server.
+		expect(declinedRecord()?.count).toBe(1);
+		expect(declinedRecord()?.latestReasons.map((row) => row.subject)).toEqual([
+			resident.serverInfo.id,
+		]);
 	});
 });
 
@@ -2037,6 +2068,30 @@ describe("ClientRegistry.spawnClient success and shutdown guards (#4449)", () =>
 		vi.setSystemTime(T0);
 	});
 
+	// #4532 round 5 (review F6, shape 6): the install look's epoch was the
+	// post-initialize stamp, so an install that landed while the server was
+	// starting (it reads the tree from its spawn on) read as older than the
+	// client and became the first look's baseline. The look's epoch is the
+	// LAUNCH start; the #1127 breaker keeps its post-init `clientSpawnedAt`.
+	it("gives the install look the launch-start epoch, not the post-initialize one", async () => {
+		const f = ensureFixture();
+		createLSPClient.mockImplementation(async () => {
+			// A 5 s initialize handshake.
+			vi.setSystemTime(T0 + 5_000);
+			return fakeClient("ts", f.root);
+		});
+		await f.ensure();
+
+		expect(f.registry.clientSpawnedAt.get(f.key)).toBe(T0 + 5_000);
+		expect(f.registry.clientLaunchStartedAt.get(f.key)).toBe(T0);
+		expect(f.registry.livePrimaryClientRoots()).toEqual([
+			{ root: f.root, spawnedAt: T0 },
+		]);
+		// Retired with the client it describes.
+		f.registry.retireClient(f.key);
+		expect(f.registry.clientLaunchStartedAt.has(f.key)).toBe(false);
+	});
+
 	// Recurrence (#3502, #2356, #1934): publishing a client is one transaction. The
 	// replacement is registered with fresh spawn and use stamps, its readiness and
 	// stall-demotion markers are dropped, first contact is re-armed BEFORE the
@@ -2672,6 +2727,99 @@ describe("client-registry environment limits (#4449)", () => {
 			process.env.PI_LENS_LSP_CLIENT_CEILING = bad;
 			expect(getLspClientCeiling()).toBe(24);
 		}
+	});
+});
+
+/**
+ * #4532: the out-of-band install look runs at every live PRIMARY client's root,
+ * and `livePrimaryClientRoots` is the reader it asks. A mutant that made this
+ * accessor return `[]` survived every other test: they reach the look through
+ * the shared service double (`tests/support/lsp-service-double.ts`), which
+ * answers the accessor itself. These cells drive the REAL registry and the REAL
+ * `LSPService` accessor over the maps production writes, so the reader is
+ * observed at both ends of its own delegation.
+ */
+describe("live primary client roots (#4532)", () => {
+	const clientKey = (serverId: string, root: string) => `${serverId}:${root}`;
+
+	/** One entry in the maps a real spawn writes, with its own liveness. */
+	function register(
+		registry: ClientRegistry,
+		serverId: string,
+		root: string,
+		facts: { spawnedAt?: number; alive?: boolean } = {},
+	): void {
+		const key = clientKey(serverId, root);
+		const client = fakeClient(serverId, root);
+		if (facts.alive === false) client.kill();
+		registry.clients.set(key, client as unknown as LSPClientInfo);
+		if (facts.spawnedAt !== undefined)
+			registry.clientLaunchStartedAt.set(key, facts.spawnedAt);
+	}
+
+	// `restartPrimaryClientsUnder` retires EVERY primary overlapping a root, so a
+	// root whose newer client spawned after an install must not outrank an older
+	// one that read the pre-install tree: the earliest spawn answers.
+	it("reports each live primary root once, at that root's earliest spawn", () => {
+		const registry = new ClientRegistry(makeHooks().hooks);
+		register(registry, "typescript", "/w/a", { spawnedAt: 1_000 });
+		register(registry, "rust", "/w/a", { spawnedAt: 400 });
+		register(registry, "typescript", "/w/b", { spawnedAt: 700 });
+
+		expect(registry.livePrimaryClientRoots()).toEqual([
+			{ root: "/w/a", spawnedAt: 400 },
+			{ root: "/w/b", spawnedAt: 700 },
+		]);
+	});
+
+	// A look at an auxiliary's root would restart a server the install cannot
+	// help, a dead client's root names a server no longer holding the tree, and a
+	// key with no root carries no directory to walk.
+	it("omits auxiliaries, dead clients, and a key that names no root", () => {
+		const registry = new ClientRegistry(makeHooks().hooks);
+		register(registry, "typescript", "/w/a", { spawnedAt: 1_000 });
+		register(registry, "opengrep", "/w/a", { spawnedAt: 10 });
+		register(registry, "rust", "/w/dead", { spawnedAt: 20, alive: false });
+		// The bare-id shape `parseClientKey` reads as a server with no root.
+		registry.clients.set("typescript", {
+			...fakeClient("typescript", "/w/rootless"),
+		} as unknown as LSPClientInfo);
+
+		expect(registry.livePrimaryClientRoots()).toEqual([
+			{ root: "/w/a", spawnedAt: 1_000 },
+		]);
+	});
+
+	// A client that cannot say when it spawned reads as epoch 0: the first look
+	// then never treats the install it finds as older than the client.
+	it("reports an absent spawn stamp as 0 instead of dropping the root", () => {
+		const registry = new ClientRegistry(makeHooks().hooks);
+		register(registry, "typescript", "/w/c");
+
+		expect(registry.livePrimaryClientRoots()).toEqual([
+			{ root: "/w/c", spawnedAt: 0 },
+		]);
+	});
+
+	// The look reaches the registry through `LSPService`, and a destroyed service
+	// answers nothing: a restart request against it would race its own teardown.
+	// A client registered AFTER the teardown is the shape that guard exists for
+	// (`markDestroyed` is sticky, so a late spawn leaves the map unanswerable).
+	it("answers through the service until it is shut down", async () => {
+		const service = new LSPService();
+		const registry = (service as unknown as { clientRegistry: ClientRegistry })
+			.clientRegistry;
+		register(registry, "typescript", "/w/a", { spawnedAt: 5 });
+
+		expect(service.livePrimaryClientRoots()).toEqual([
+			{ root: "/w/a", spawnedAt: 5 },
+		]);
+
+		await service.shutdown();
+		expect(service.livePrimaryClientRoots()).toEqual([]);
+
+		register(registry, "rust", "/w/b", { spawnedAt: 7 });
+		expect(service.livePrimaryClientRoots()).toEqual([]);
 	});
 });
 

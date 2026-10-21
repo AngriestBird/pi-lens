@@ -66,7 +66,7 @@ import {
 import { classifyCascadeWaitTier } from "../clients/lsp/wait-policy/index.js";
 import { attemptTsserverSyncDiagnostics } from "../clients/lsp/tsserver-sync.js";
 import { convertLspDiagnostics } from "../clients/dispatch/utils/lsp-diagnostics.js";
-import { demoteInferredProjectDiagnostics } from "../clients/lsp/inferred-project.js";
+import { demoteLanguageServerRows } from "../clients/lsp/inferred-project.js";
 import { normalizeMapKey, resolveHostToolPath } from "../clients/path-utils.js";
 import {
 	countRetainedSuppressedRows,
@@ -1200,36 +1200,10 @@ function coveredSourcesForCheck(
 }
 
 /**
- * #1645 review F3: `lsp_diagnostics` writes into the SAME widget store as
- * `lens_diagnostics mode=full`. Two tools writing one store must apply ONE rule
- * for "is this file's diagnostics demoted" — otherwise an orphan file blocks or
- * does not depending purely on which tool ran last, which is the #1633-V1
- * lesson. Every path in this file that reaches `reconcileWidgetFromLspResult`
- * or the rendered output routes its raw diagnostics through here first, so the
- * store, the counts, and the text all agree.
- *
- * Applied AFTER the confirmation verdict is computed, never before: confirmation
- * asks "did the server answer for this content", which the demotion must not
- * influence.
- */
-function demoteInferredForFile(
-	file: string,
-	diagnostics: LSPDiagnostic[],
-	cwd: string,
-	lspService: NonNullable<ReturnType<typeof getLSPService>>,
-): Promise<LSPDiagnostic[]> {
-	return demoteInferredProjectDiagnostics(diagnostics, {
-		filePath: file,
-		cwd,
-		service: lspService,
-	});
-}
-
-/**
  * #3088: the probe lane's stored-disposition / rule-policy / inline-suppression
  * gate — the same `clients/dispatch/finding-policy.ts` stack `mode=full` and
  * the per-edit dispatcher apply, called once per file at the position
- * `demoteInferredForFile` already established: AFTER the confirmation verdict
+ * the demotion pipeline already established: AFTER the confirmation verdict
  * (which asks "did the server answer for this content" and must not be
  * influenced by a policy drop) and BEFORE the rendered output, the severity
  * filter and `reconcileWidgetFromLspResult`. One filtered set for all three, so
@@ -1466,12 +1440,13 @@ async function collectFileDiagnosticResult(
 			// fresh touch does, so it gets the same demotion. Without this, replaying
 			// yesterday's cached blocker would re-cement an orphan file as blocking
 			// after mode=full had demoted it.
-			const demotedCached = await demoteInferredForFile(
-				file,
-				cached.diagnostics,
-				cwd,
-				lspService,
-			);
+			const demotedCached = (
+				await demoteLanguageServerRows(cached.diagnostics, {
+					filePath: file,
+					cwd,
+					service: lspService,
+				})
+			).rows;
 			// #3088 AC5: a replay is served to the agent exactly like a fresh
 			// observation, so it passes the same filter. The cached set is already
 			// inline-suppression-clean (the record below stores `inlineKept`), so
@@ -1601,12 +1576,16 @@ async function collectFileDiagnosticResult(
 		confirmation = "unconfirmed";
 	}
 	// #1645 review F3: one demotion rule for every writer of the widget store.
-	effectiveRawDiags = await demoteInferredForFile(
-		file,
-		effectiveRawDiags,
+	// Applied AFTER the confirmation verdict above (which asks "did the server
+	// answer for this content" and must not be influenced by it), on every
+	// serve, the cache replay included.
+	const demotion = await demoteLanguageServerRows(effectiveRawDiags, {
+		filePath: file,
 		cwd,
-		lspService,
-	);
+		service: lspService,
+	});
+	const shownRows = demotion.rows;
+	effectiveRawDiags = shownRows;
 	// #3088: one filter for the output, the counts and the footer reconcile.
 	const policy = applyProbeFindingPolicy(
 		file,
@@ -1664,10 +1643,22 @@ async function collectFileDiagnosticResult(
 		// disposition mark or a `.pi-lens.json` rule can be revoked at any moment,
 		// so caching THEIR effect would keep a finding hidden after its mark was
 		// removed. The replay branch above re-applies those two on every serve.
+		// #4532 rounds 5-6 (review F5, r5 verify NEW-1): the entry stores the
+		// pipeline's REPLAYABLE form, the membership verdict applied and the
+		// environment rule not, mapped back row by row (both forms are
+		// index-aligned with the server's rows). The replay above re-runs the
+		// environment rule against the install state of that serve, and keeps a
+		// membership verdict it may have no live client to re-ask.
+		const replayable = await demotion.replayable();
+		const replayRowOf = new Map<LSPDiagnostic, LSPDiagnostic>();
+		for (const [index, row] of shownRows.entries()) {
+			const stored = replayable[index];
+			if (stored !== undefined) replayRowOf.set(row, stored);
+		}
 		cacheCtx.record(
 			file,
 			scopeKey,
-			policy.inlineKept,
+			policy.inlineKept.map((row) => replayRowOf.get(row) ?? row),
 			stat.mtimeMs,
 			collectedContent !== undefined
 				? hashDiagnosticContent(collectedContent)
@@ -1820,12 +1811,13 @@ async function runFileDiagnostics(
 		unconfirmedServerIds.length > 0 && confirmation === "clean";
 	if (primaryCoverageGapOnly) confirmation = "unconfirmed";
 	// #1645 review F3: one demotion rule for every writer of the widget store.
-	effectiveRawDiags = await demoteInferredForFile(
-		absPath,
-		effectiveRawDiags,
-		cwd,
-		lspService,
-	);
+	effectiveRawDiags = (
+		await demoteLanguageServerRows(effectiveRawDiags, {
+			filePath: absPath,
+			cwd,
+			service: lspService,
+		})
+	).rows;
 	// #3088: one filter for the output, the counts and the footer reconcile.
 	const policy = applyProbeFindingPolicy(
 		absPath,

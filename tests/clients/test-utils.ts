@@ -117,6 +117,45 @@ export function setupTestEnvironment(
 
 const activeTestEnvironments = new Set<string>();
 
+/**
+ * Run `load` with the process's tmp env aimed inside the fixture root. pi's
+ * extension loader builds jiti's transform cache as
+ * `path.join(os.tmpdir(), "jiti")` for every extension it loads, so an
+ * in-process load otherwise leaves a `jiti` directory at the shared tmp root,
+ * where the fixture-sibling census judges it (#4641 F1). Inside the fixture it
+ * is removed with the fixture. jiti only creates the directory: the built entry
+ * imports natively, so the cache stays empty and the redirect costs nothing.
+ *
+ * Both real-host tiers load through that loader (`tests/support/pi-runner.ts`,
+ * `tests/support/pi-session.ts`); this is the one copy they share, so the
+ * redirect cannot drift between them (#4664 F6).
+ */
+export async function withFixtureTmpdir<T>(
+	root: string,
+	load: () => Promise<T>,
+): Promise<T> {
+	const isolate = path.join(root, "tmp");
+	fs.mkdirSync(isolate, { recursive: true });
+	const previous = {
+		TMPDIR: process.env.TMPDIR,
+		TEMP: process.env.TEMP,
+		TMP: process.env.TMP,
+	};
+	process.env.TMPDIR = isolate;
+	process.env.TEMP = isolate;
+	process.env.TMP = isolate;
+	try {
+		return await load();
+	} finally {
+		if (previous.TMPDIR === undefined) delete process.env.TMPDIR;
+		else process.env.TMPDIR = previous.TMPDIR;
+		if (previous.TEMP === undefined) delete process.env.TEMP;
+		else process.env.TEMP = previous.TEMP;
+		if (previous.TMP === undefined) delete process.env.TMP;
+		else process.env.TMP = previous.TMP;
+	}
+}
+
 export function cleanupTestEnvironments(
 	prefix: string,
 	options: { untrack?: boolean } = {},

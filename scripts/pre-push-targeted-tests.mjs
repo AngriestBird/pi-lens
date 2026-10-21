@@ -128,6 +128,8 @@ export const TREE_SCANNING_GOVERNANCE_TESTS = [
 	"tests/clients/mutation-bridge-lineage-epoch-sweep.test.ts",
 	"tests/clients/session-state-conformance.test.ts",
 	"tests/config/glossary-synonym-sweep.test.ts",
+	// #4312: literal runner references must resolve after registry renames.
+	"tests/config/runner-group-id-census.test.ts",
 	// #3968: walks the custom-server config fields and the LSP_SERVERS
 	// projection for config claims gating runtime behavior without fail-closed
 	// enum validation (the covers validation row is the pinned member).
@@ -172,6 +174,10 @@ export const TREE_SCANNING_GOVERNANCE_TESTS = [
 	// reads and maps each to a matrix route; a new route must arm it. The whole
 	// file, matrix included, measured ~28 s alone (2026-10-14).
 	"tests/tools/diagnostics-route-switch-matrix.test.ts",
+	// #4590: the one scanner that walks BOTH trees (clients/, scripts/ AND
+	// tests/), so it is registered in both lists: a production change arms it
+	// here, a tests/ change through TEST_TREE_GOVERNANCE_TESTS below.
+	"tests/config/env-path-key-composition-sweep.test.ts",
 ];
 
 // Suites that scan the TESTS tree for a test shape (a real spawn, a raw timer
@@ -201,17 +207,35 @@ export const TEST_TREE_GOVERNANCE_TESTS = [
 	"tests/real-harness/tools-enabled.test.ts",
 	// #3518: walks tests/ for unchecked `handleToolCall` calls (recurrence #4182).
 	"tests/config/handler-verdict-sweep.test.ts",
+	// #4632: walks tests/ for files that use the hand-built pi double (recurrence
+	// #4631: host semantics passed CI on the double).
+	"tests/config/pi-mock-importer-sweep.test.ts",
 	// #4381: walks tests/ for log-sink reads with no drain of that sink first.
 	"tests/config/sink-read-drain-sweep.test.ts",
+	// #4590: the tests/ half of the env PATH-key composition sweep; its
+	// production half is the same file, registered in
+	// TREE_SCANNING_GOVERNANCE_TESTS above (a both-tree scanner).
+	"tests/config/env-path-key-composition-sweep.test.ts",
 	// #4589: walks tests/ for env writes with no restore in the same file.
 	"tests/config/test-env-restore-sweep.test.ts",
+	// #4589: walks tests/ for listeners with no awaited teardown.
+	"tests/config/test-server-teardown-sweep.test.ts",
 	// #3472: the tests-tree scanners the census finds through tests/support.
 	"tests/config/module-instance-coverage.test.ts",
+	// #4518: walks .github/ producer files through
+	// tests/support/continue-on-error-census.ts.
+	"tests/config/nightly-evaluated-floors.test.ts",
 	"tests/config/tmp-fixture-hygiene.test.ts",
 	// #4591: reads tests/support/vitest-setup.ts to pin the leak-origin
 	// record's write-before-remove wiring.
 	"tests/config/tmp-hygiene-leak-origin.test.ts",
 	"tests/config/vacuous-skip-coverage.test.ts",
+	// #4561 D1: walks tests/ for `describe` shuffle opt-outs and checks the
+	// by-design registry in both directions.
+	"tests/scripts/ci-shuffle-census.test.ts",
+	// #4606: reads both AST sweeps' sources and censuses the tests/support
+	// tree, so a tests-tree change must arm it.
+	"tests/support/ast-census.test.ts",
 	"tests/support/host-event-shape-scan.test.ts",
 	// #4104: the tests-tree and win32 walkers' vanished-directory tolerance.
 	"tests/support/source-walkers-vanished-dir.test.ts",

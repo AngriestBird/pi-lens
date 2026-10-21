@@ -36,6 +36,14 @@
  * Every host-dependent spelling is scrubbed (the project root, the pinned
  * `PI_LENS_HOME` and its `~`-folded form, millisecond timings), and the suite
  * is proven to match with `HOME` moved.
+ *
+ * Round 3 (#4631): the startup mode is pinned (`beforeEach`) so the golden
+ * records the blocker delivery alone. Left to the process-first-session
+ * heuristic, the same two cells wrote the `session-start-guidance` cache once
+ * and delivered the "📌 pi-lens active" banner in cell 2 only, which reddened
+ * this file in a loaded pre-push run whose second start wrote no guidance. The
+ * banner's own pin is `tests/index-integration.test.ts` and
+ * `tests/clients/context-append-to-last-user.test.ts`.
  */
 
 import * as fs from "node:fs";
@@ -115,7 +123,11 @@ vi.mock("../clients/safe-spawn.js", async (importOriginal) => ({
 
 import extension from "../index.js";
 import { removeTempDirSync } from "./clients/test-utils.js";
-import { makeSessionStartEvent } from "./support/host-event-factory.js";
+import { readNdjsonRows } from "./support/ndjson-rows.js";
+import {
+	makeContextWithSystemEvent,
+	makeSessionStartEvent,
+} from "./support/host-event-factory.js";
 import { createPiMock, makeCtx } from "./support/pi-mock.js";
 
 const GOLDEN_DIR = path.join(
@@ -135,21 +147,29 @@ async function readNewDiagnosticRows(
 	offset: number,
 ): Promise<Array<Record<string, unknown>>> {
 	await getDiagnosticLogger().flush();
-	const file = diagnosticLogPath();
-	if (!fs.existsSync(file)) return [];
-	// `offset` is a byte count: slice the bytes, then decode (#4484 review F3).
-	return fs
-		.readFileSync(file)
-		.subarray(offset)
-		.toString("utf8")
-		.trim()
-		.split("\n")
-		.filter(Boolean)
-		.map((line) => JSON.parse(line) as Record<string, unknown>);
+	// `offset` is a byte count: the reader slices the bytes before decoding
+	// (#4484 review F3). A line it cannot parse would lower the step count this
+	// witness reads, so it is a red, named by its count.
+	const read = readNdjsonRows(diagnosticLogPath(), offset);
+	expect(read.skipped).toBe(0);
+	return read.rows;
 }
 
 beforeEach(() => {
 	process.env.PI_LENS_TEST_MODE = "0";
+	// #3190 round 3: pin the startup mode, so the delivered text below cannot
+	// depend on a session_start side effect this witness does not own. The
+	// process's FIRST session is forced to `quick`
+	// (`globalThis.__piLensFirstSessionDone`, `clients/runtime-session.ts`), and
+	// a `quick` start returns before the `session-start-guidance` cache write —
+	// so with the mode left to the heuristic, cell 1 delivers no guidance while
+	// cell 2 does, and the golden records that latch. Pinning `quick` makes both
+	// cells write none, which is the same delivery in both cells whatever the
+	// admission or timing of a second start. The guidance-through-the-injector
+	// pin lives in `tests/clients/context-append-to-last-user.test.ts` and
+	// `tests/index-integration.test.ts` (`context_with_system`), which seed the
+	// cache directly.
+	vi.stubEnv("PI_LENS_STARTUP_MODE", "quick");
 	tmpDir = fs.realpathSync(
 		fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-3190-witness-")),
 	);
@@ -161,6 +181,7 @@ afterEach(() => {
 	removeTempDirSync(tmpDir);
 	if (originalTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
 	else process.env.PI_LENS_TEST_MODE = originalTestMode;
+	vi.unstubAllEnvs();
 });
 
 /**
@@ -265,11 +286,15 @@ async function witnessTurn(
 	)) as { content?: Array<{ text?: string }> } | undefined;
 	await pi.emit("turn_end", {}, makeCtx({ cwd: tmpDir }));
 	const injected = (await pi.emit(
-		"context",
-		{ messages: [{ role: "user", content: "keep working" }] },
+		"context_with_system",
+		makeContextWithSystemEvent([{ role: "user", content: "keep working" }]),
 		makeCtx({ cwd: tmpDir }),
-	)) as { messages?: Array<{ content: string }> } | undefined;
+	)) as { messages?: Array<{ role?: string; content: string }> } | undefined;
 
+	// #4631 round 5 (F2): the transcript leads with the host's system head, so the
+	// golden records the messages pi-lens APPENDED. The assertion pins that the
+	// head is still at index 0: losing it would shift this golden.
+	expect((injected?.messages ?? [])[0]?.role).toBe("system");
 	return {
 		chartRoot,
 		toolResult:
@@ -280,8 +305,12 @@ async function witnessTurn(
 					.trim(),
 			) || "(nothing delivered)",
 		turnEnd:
-			scrub((injected?.messages ?? []).map((m) => m.content).join("\n\n")) ||
-			"(nothing injected)",
+			scrub(
+				(injected?.messages ?? [])
+					.slice(1)
+					.map((m) => m.content)
+					.join("\n\n"),
+			) || "(nothing injected)",
 		diagnosticRows: await readNewDiagnosticRows(logOffset),
 	};
 }

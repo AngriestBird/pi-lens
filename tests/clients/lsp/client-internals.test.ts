@@ -8,6 +8,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 // #1639: capture `lsp_typescript_diagnostic_sequence` phase records so the
@@ -59,6 +60,8 @@ import {
 } from "../../../clients/lsp/client.js";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
 import { hashDiagnosticContent } from "../../../clients/lsp/diagnostic-binding.js";
+import { exceedsLspSyncLimits } from "../../../clients/lsp/content-limits.js";
+import { RUNTIME_CONFIG } from "../../../clients/runtime-config.js";
 import { applyWorkspaceEdit } from "../../../clients/lsp/edits.js";
 import type { LspMutationContext } from "../../../clients/lsp-mutation.js";
 // #1667: the LSPClientState fixture moved to a shared module so the
@@ -891,6 +894,20 @@ describe("handleNotifyOpen", () => {
 					index: lines.length - 1,
 					start: doc.length - lastLineLength,
 				});
+				// #2066: the #1095 content binding is unchanged by the shared walk.
+				// The hash is the sha256 of THIS document's own UTF-8 bytes,
+				// recomputed here independently, so a future fold that hashed
+				// anything else (a normalized text, a byte copy built for the scan)
+				// reds on a corpus that carries CRLF, lone CR, and astral glyphs.
+				expect(state.documentContentHashes.get(TEST_KEY)?.hash, label).toBe(
+					createHash("sha256").update(doc).digest("hex"),
+				);
+				// And the sync bound's line count is still the split it replaced.
+				expect(exceedsLspSyncLimits(doc).tooLarge, label).toBe(
+					Buffer.byteLength(doc, "utf-8") >
+						RUNTIME_CONFIG.pipeline.lspMaxFileBytes ||
+						lfCount + 1 > RUNTIME_CONFIG.pipeline.lspMaxFileLines,
+				);
 				documentsChecked++;
 				if (doc.includes("\r")) loopDocuments++;
 				else fastPathDocuments++;
