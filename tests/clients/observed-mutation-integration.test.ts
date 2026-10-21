@@ -2245,4 +2245,52 @@ describe("#4732 an observed tool's opaque diff", () => {
 			env.cleanup();
 		}
 	});
+
+	// An observation another session armed under the same call id is not this
+	// call's: its settle refuses it (catalog shape 22), so the diff must not
+	// leave the path to it, or the write reaches nothing (shape 54).
+	it("keeps a path whose observation belongs to another session", async () => {
+		const env = setupTestEnvironment("pi-lens-4732-stale-observation-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const filePath = path.join(env.tmpDir, "stale.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+			await armObservedMutation({
+				toolCallId: "call-4732-stale",
+				toolName: "patch_file",
+				targetPath: filePath,
+				cwd: env.tmpDir,
+				sessionGeneration: runtime.sessionGeneration + 1,
+				turnIndex: runtime.turnIndex,
+			});
+			// A tool with no path field: its own call arms nothing over the
+			// other session's entry.
+			const event = {
+				toolName: "gen_tool",
+				toolCallId: "call-4732-stale",
+				input: { query: "regenerate" },
+				content: [{ type: "text", text: "ok" }],
+			};
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				),
+			);
+			fs.writeFileSync(filePath, `${SOURCE}const d = 4;\n`);
+			await handleToolResult(toolResultDeps({ event, runtime, cacheManager }));
+
+			expect(
+				readChangesSince(env.tmpDir, 0).map((entry) => [
+					path.basename(entry.filePath),
+					entry.source,
+				]),
+			).toEqual([["stale.ts", "opaque-script"]]);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
 });
