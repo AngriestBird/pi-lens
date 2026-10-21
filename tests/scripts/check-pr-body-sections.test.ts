@@ -16,6 +16,16 @@ import {
 // table; its expected section list is GitHub's own gfm render of that body
 // (`POST /markdown`, recorded 2026-10-21), an oracle independent of the code,
 // except where a row says the lint departs from it by decision.
+//
+// #4717 F2: a row must fail on the code that carried the defect it names, so
+// `I3` and `I5` place the closing `-->` after `## Tests`: a closer inside the
+// Summary paragraph satisfied the reviewed head's comment scan too, and the
+// row proved nothing. Both now red on 0186fefbd, the source of the V1 defect
+// they cite (`Tests 5 failed`, quoted in the PR body); the rest of the family
+// reds on 8ef319af3. The 4-space-opener-after-a-blank-line row is gone: its
+// claim lives in `marked`'s block tokenizer, so no source in this series and
+// no hand mutation of this tree reds it, and `B5` keeps the family's indented
+// opener red-able.
 
 const SECTIONS = [
 	"Summary",
@@ -82,11 +92,6 @@ const cases: Array<[string, string, string[]]> = [
 		"B3 a 3-space block opener hides the rest",
 		body("Text.\n\n   <!--\n## Tests\nhidden"),
 		["Tests", ...AFTER_SUMMARY],
-	],
-	[
-		"B4 a 4-space opener after a blank line is code",
-		body("Text.\n\n    <!--\n## Tests\nx\n-->"),
-		[],
 	],
 	[
 		"B5 a 4-space opener continuing a paragraph is text",
