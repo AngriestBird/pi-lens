@@ -1473,7 +1473,7 @@ type DirectoryEffect = (
 	 * The directory a `cd`/`pushd` names, whether or not the move is certain:
 	 * a recovery-root candidate (#2050, the `cdTargets` list).
 	 */
-	named?: string;
+	named?: string | undefined;
 };
 
 /**
