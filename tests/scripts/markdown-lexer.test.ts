@@ -1,0 +1,178 @@
+import { createRequire } from "node:module";
+import { resolve } from "node:path";
+import { describe, expect, it } from "vitest";
+import {
+	blankMarkdownRegions,
+	markdownHeadings,
+} from "../../scripts/lib/markdown-lexer.mjs";
+import {
+	assertNonEmptyScan,
+	listSourceFiles,
+	readWalkedFiles,
+	relativePosix,
+} from "../support/sweep-kit.js";
+
+// #4717: the markdown gates read headings, comments and code through one
+// lexer seam. Four review rounds each found one more spelling the hand-written
+// scanner it replaced missed (an inline-code `<!--`, a backtick pair across a
+// blank line, a heading inside an unclosed inline comment). These rows pin the
+// seam's own contract: where it places the lexer's tokens, and how it fails
+// closed when it cannot.
+
+const repositoryRoot = resolve(import.meta.dirname, "../..");
+const { Lexer, getDefaults } = createRequire(import.meta.url)("marked") as {
+	Lexer: new (options: object) => { lex(text: string): { raw: string }[] };
+	getDefaults(): object;
+};
+
+describe("the lexer's raw text covers the source (#4717)", () => {
+	// Recurrence it prevents: every region offset is the running sum of the
+	// top-level tokens' raw text, so a marked upgrade that drops or rewrites a
+	// character would misplace every blanked region silently. This pins the
+	// assumption over every documents markdown file and the characters a lexer
+	// is most likely to rewrite.
+	// One read per walked file (readWalkedFiles drops a path that vanished
+	// mid-walk, #3082); dist/ holds build copies of the same documents.
+	const documents = readWalkedFiles(
+		listSourceFiles(repositoryRoot, {
+			extensions: [".md"],
+			exclude: (file) => file.startsWith("dist/"),
+		}),
+	).map(({ file, source }) => [relativePosix(repositoryRoot, file), source]);
+	const samples = [
+		"﻿## Tests\nx",
+		"a\u0000b\n",
+		"a\tb\n\tc",
+		"x\f\ny",
+		"- a\n\t- b\n",
+		"> a\n>\n> b",
+		"x\n===\n",
+		"| a |\n|-|\n",
+	];
+
+	it("over every markdown file in the repository and the sample characters", () => {
+		assertNonEmptyScan(
+			"markdown files under the repository",
+			documents.length,
+			100,
+		);
+		const uncovered = [
+			...documents,
+			...samples.map((text) => [JSON.stringify(text), text]),
+		]
+			.filter(([, text]) => {
+				const source = text.replace(/\r\n?/g, "\n");
+				const tokens = new Lexer({ ...getDefaults(), gfm: true }).lex(source);
+				return tokens.map((token) => token.raw).join("") !== source;
+			})
+			.map(([name]) => name);
+		expect(uncovered).toEqual([]);
+	});
+});
+
+describe("markdownHeadings (#4717)", () => {
+	it("reads ATX, closed ATX, indented ATX and setext headings", () => {
+		expect(
+			markdownHeadings(
+				"## One\nx\n\n   ## Two ##\ny\n\nThree\n-----\nz\n\n# Four\n",
+			),
+		).toEqual([
+			{ line: 0, contentLine: 1, depth: 2, text: "One" },
+			{ line: 3, contentLine: 4, depth: 2, text: "Two" },
+			{ line: 6, contentLine: 8, depth: 2, text: "Three" },
+			{ line: 10, contentLine: 11, depth: 1, text: "Four" },
+		]);
+	});
+
+	it.each([
+		["a comment", "<!--\n## Tests\n-->"],
+		["a raw-HTML block", "<details>\n## Tests\n</details>"],
+		["a type-7 HTML block", "<span>\n## Tests"],
+		["a list item", "- ## Tests"],
+		["a block quote", "> ## Tests"],
+		["indented code", "para\n\n    ## Tests"],
+		["a fence", "```\n## Tests\n```"],
+	])("is not a section inside %s", (_name, markdown) => {
+		expect(markdownHeadings(markdown)).toEqual([]);
+	});
+
+	it("counts lines over CRLF text", () => {
+		expect(markdownHeadings("x\r\n\r\n## Tests\r\ny")).toEqual([
+			{ line: 2, contentLine: 3, depth: 2, text: "Tests" },
+		]);
+	});
+});
+
+describe("blankMarkdownRegions (#4717)", () => {
+	it("keeps raw-HTML blocks under html: comments and drops them under html: blocks", () => {
+		const text = "<details>\nvisible\n</details>\n\n<!-- hidden -->";
+		const comments = blankMarkdownRegions(text, { html: "comments" });
+		expect(comments).toContain("visible");
+		expect(comments).not.toContain("hidden");
+		expect(blankMarkdownRegions(text, { html: "blocks" })).not.toContain(
+			"visible",
+		);
+	});
+
+	it.each([
+		["a block quote", "> a <!-- hidden -->\n> b", "b"],
+		["a list item", "- a <!-- hidden -->\n- b", "b"],
+		["a table cell", "| a | <!-- hidden --> |\n| - | - |\n| b | c |", "b"],
+		["a heading", "## A <!-- hidden --> B\nb", "B"],
+	])("hides an inline comment inside %s", (_name, markdown, kept) => {
+		const out = blankMarkdownRegions(markdown, { html: "comments" });
+		expect(out).not.toContain("hidden");
+		expect(out).toContain(kept);
+		expect(out).toHaveLength(markdown.length);
+	});
+
+	it("blanks a nested fence in a list item and keeps the item text", () => {
+		const out = blankMarkdownRegions("- item\n  ```\n  secret\n  ```\n", {
+			code: "blocks",
+		});
+		expect(out).toContain("item");
+		expect(out).not.toContain("secret");
+	});
+
+	it("keeps indented code under code: fenced", () => {
+		const text = "para\n\n    indented\n\n```\nfenced\n```";
+		const out = blankMarkdownRegions(text, { code: "fenced" });
+		expect(out).toContain("indented");
+		expect(out).not.toContain("fenced");
+	});
+
+	it("blanks a whole table whose code span it cannot place (fail closed)", () => {
+		// Recurrence it prevents: a table cell's `\|` reaches the lexer as `|`,
+		// so the span's raw text is not in the source. Skipping it would leave
+		// the code span visible to a gate that asked for code spans blanked.
+		const out = blankMarkdownRegions("| `a\\|b` | y |\n| - | - |\n| x | z |", {
+			codeSpans: true,
+		});
+		expect(out).not.toContain("a\\|b");
+		expect(out.trim()).toBe("");
+	});
+
+	it("hides a comment the first pass placed on its copy in a link destination", () => {
+		// Recurrence it prevents: the comment's raw text also sits inside the
+		// link's destination, which no token covers, so the first pass blanks
+		// that copy and the real comment stays visible. GitHub hides the
+		// comment; the second lex finds it.
+		const out = blankMarkdownRegions("[a](u<!--z-->)<!--z--> tail", {
+			html: "comments",
+		});
+		expect(out).not.toMatch(/\)<!--z-->/);
+		expect(out).toContain("tail");
+	});
+
+	it("keeps a lone CR and CRLF line end where they were", () => {
+		const text = "a <!-- x -->\rb\r\nc";
+		const out = blankMarkdownRegions(text, { html: "comments" });
+		expect(out).toHaveLength(text.length);
+		expect(out).toBe(`a ${" ".repeat(10)}\rb\r\nc`);
+	});
+
+	it("blanks nothing when the mode names nothing", () => {
+		const text = "## A\n<!-- c -->\n`x`\n```\ny\n```";
+		expect(blankMarkdownRegions(text, {})).toBe(text);
+	});
+});

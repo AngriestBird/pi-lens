@@ -880,6 +880,14 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the real pinned npm child is required to reproduce lockfile optional-binding rewrites; a process double cannot validate npm behavior",
 	},
+	// 2026-10-21 (#4717): two CI jobs import the PR-body script with no
+	// install; only a fresh node over a scripts copy with no node_modules
+	// proves the lexer's lazy marked load keeps them resolvable.
+	"real-process-spawn:scripts/markdown-lexer-entry-points.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"what a fresh node resolves from a scripts tree with no node_modules is the boundary under test; an in-process import shares vitest's resolved modules",
+	},
 	// 2026-10-16 (#4510): the killed-runner witness ends its own vitest
 	// launcher from outside the worker (the kill guard refuses process.kill).
 	"real-process-spawn:scripts/mutate-fixture.test.ts": {

@@ -1,178 +1,57 @@
 // The AGENTS.md "Recurring defect shapes" catalog, parsed once (#4439). The PR
 // body Detection lint (`Shape:` / `Enforcer:`) and the catalog-to-HISTORY.md
 // governance test both read it here, so neither carries a private parser.
+import { blankMarkdownRegions } from "./markdown-lexer.mjs";
 
 /** A markdown section heading, levels 2 to 4: `## Title`. */
 export const HEADING = /^#{2,4}\s+(.+?)\s*$/;
 
-// Fenced (``` / ~~~) and 4-space indented code blocks are blanked line by line,
-// so a quoted example cannot satisfy a body section (#4288 R3) or a catalog or
-// history scan (#4439). A removed line keeps its length, so line numbers and
-// offsets (LF text) still match the raw source. An indented block cannot
-// interrupt a paragraph (CommonMark), so a 4-space line that follows body text
-// stays: list continuations and nested bullets are content, not code. The
-// closing fence must repeat the opener's character (>=3 of them).
-export function sourceWithoutFencedBlocks(source, options = {}) {
-	const indentedCode = options.indentedCode !== false;
-	const lines = String(source ?? "").split(/\r?\n/);
-	const output = [];
-	let fenceChar = null;
-	let fenceLength = 0;
-	let inIndented = false;
-	// "start" | "blank" | "heading" | "text": whether the previous emitted
-	// line can precede an indented code block.
-	let previous = "start";
-	for (const line of lines) {
-		if (fenceChar) {
-			const close = new RegExp(`^\\s*\\${fenceChar}{${fenceLength},}\\s*$`);
-			if (close.test(line)) {
-				fenceChar = null;
-				fenceLength = 0;
-			}
-			output.push(" ".repeat(line.length));
-			continue;
-		}
-		const open = /^\s*(`{3,}|~{3,})/.exec(line);
-		if (open) {
-			fenceChar = open[1][0];
-			fenceLength = open[1].length;
-			inIndented = false;
-			output.push(" ".repeat(line.length));
-			previous = "blank";
-			continue;
-		}
-		if (indentedCode && /^(?: {4,}|\t)/.test(line)) {
-			if (
-				inIndented ||
-				previous === "start" ||
-				previous === "blank" ||
-				previous === "heading"
-			) {
-				inIndented = true;
-				output.push(" ".repeat(line.length));
-				continue;
-			}
-		} else {
-			inIndented = false;
-		}
-		output.push(line);
-		const trimmed = line.trim();
-		if (trimmed === "") previous = "blank";
-		else if (HEADING.test(line)) previous = "heading";
-		else previous = "text";
-	}
-	return output.join("\n");
-}
-
-// The HTML spec's four comment ends, all of which GitHub renders
-// (13.2.5.43-46): `-->` closes a comment (comment end state), `--!>` closes it
-// too (comment end bang state), and `<!-->` and `<!--->` are complete empty
-// comments closed abruptly (comment start, and comment start dash, states).
-// Only a comment with none of them runs to the end of the text. Recurrence:
-// this rule knew `-->` alone, so a body writing `<!-- note --!>` or `<!-->`
-// blanked every line after it even though the reader sees that text, and a
-// gating rule then read a visible answer as absent (CodeQL js/bad-tag-filter
-// alert #70 flagged this class on a test fixture).
-const COMMENT_END = /--!?>/;
+// Every reading below is the lexer's (`./markdown-lexer.mjs`, #4717): which
+// lines are code, which text is a comment, and which backticks open a code
+// span. Four review rounds each found one more spelling a hand-written scan of
+// these missed, so this module keeps no scan of its own. Every function keeps
+// each line's length, so line numbers and offsets still match the source.
 
 /**
- * Index just past the end of the HTML comment whose `<!--` ends at `from`, or
- * -1 when it does not close in `text`. The two abrupt ends close inside the
- * opener, in the `>` or `->` the start already left behind, so they answer
- * only at the opener itself: a continuation line mid-comment starts in comment
- * state, where `->` is body data (13.2.5.43: `-` to comment end dash, `>`
- * appends `-` and reconsumes in comment state) and only `--!?>` closes it. The
- * one spelling of the comment-end rule: a consumer with its own copy is how a
- * renderer's spelling goes missing.
+ * Blank fenced and indented code blocks, so a quoted example cannot satisfy a
+ * body section (#4288 R3) or a catalog or history scan (#4439). With
+ * `indentedCode: false` an indented block stays: a 4-space continuation of a
+ * list item is content either way, because the lexer reads it as one.
  */
-export function htmlCommentEnd(text, from) {
-	const source = String(text ?? "");
-	const rest = source.slice(from);
-	const atOpener = source.slice(Math.max(0, from - 4), from) === "<!--";
-	if (atOpener && rest.startsWith(">")) return from + 1;
-	if (atOpener && rest.startsWith("->")) return from + 2;
-	const end = COMMENT_END.exec(rest);
-	return end === null ? -1 : from + end.index + end[0].length;
+export function sourceWithoutFencedBlocks(source, options = {}) {
+	return blankMarkdownRegions(source, {
+		code: options.indentedCode === false ? "fenced" : "blocks",
+	});
 }
 
-/** A backtick span, masked where the text renders as code, not prose. */
+/** Blank inline code spans: what the reader sees as code, not prose. */
 export function codeSpanMasked(text) {
-	return String(text).replace(/(`+)([\s\S]*?)\1/g, (span) =>
-		" ".repeat(span.length),
-	);
+	return blankMarkdownRegions(text, { codeSpans: true });
 }
 
 /**
- * Blank HTML comments, keeping every line's length so line numbers and offsets
- * still match the raw source (LF text). A consumer that masks one line at a
- * time asks `htmlCommentEnd` rather than carrying its own end rule.
- *
- * Only the two forms commonmark gives a comment open one here, because a
- * consumer reads the blanked copy as what the reader sees (#4717 V1: matching
- * `<!--` at any offset blanked every later heading, so a body writing about
- * the comment syntax was refused for five missing sections):
- *
- * - a block opener is the first content on its line, after any indent, and
- *   runs to its end, or to the end of the text when it has none;
- * - an inline opener, anywhere else on a line, hides text only when its end
- *   closes in the same paragraph. A blank line ends the paragraph, so an
- *   opener with no end inside it is literal text.
- *
- * A backtick span never opens a comment: it renders as text, not markup.
+ * Blank HTML comments: a comment block (a line opening `<!--`, to the line
+ * holding `-->` or the end of its container) and an inline comment the lexer
+ * closes inside its paragraph. Every other `<!--` is literal text the reader
+ * sees (#4717 V1, V4, V5).
  */
 export function blankHtmlComments(text) {
-	const source = String(text ?? "");
-	if (!source.includes("<!--")) return source;
-	const codeSpans = codeSpanMasked(source);
-	let output = "";
-	let index = 0;
-	while (index < source.length) {
-		const start = source.indexOf("<!--", index);
-		if (start === -1) {
-			output += source.slice(index);
-			break;
-		}
-		// A quoted opener is text the reader sees; copy it through untouched.
-		if (codeSpans[start] === " ") {
-			output += source.slice(index, start + 4);
-			index = start + 4;
-			continue;
-		}
-		const lineStart = source.lastIndexOf("\n", start - 1) + 1;
-		const end = htmlCommentEnd(source, start + 4);
-		if (/^[ \t]*$/.test(source.slice(lineStart, start))) {
-			const stop = end === -1 ? source.length : end;
-			output += source.slice(index, start);
-			output += source.slice(start, stop).replace(/[^\n]/g, " ");
-			index = stop;
-			continue;
-		}
-		const paragraph = source.slice(start).search(/\n[ \t]*\n/);
-		const paragraphEnd = paragraph === -1 ? source.length : start + paragraph;
-		if (end === -1 || end > paragraphEnd) {
-			output += source.slice(index, start + 4);
-			index = start + 4;
-			continue;
-		}
-		output += source.slice(index, start);
-		output += source.slice(start, end).replace(/[^\n]/g, " ");
-		index = end;
-	}
-	return output;
+	return blankMarkdownRegions(text, { html: "comments" });
 }
 
 /**
- * Blank fenced and indented code blocks (see `sourceWithoutFencedBlocks`) and
- * HTML comments (see `blankHtmlComments`), keeping line numbers. An
- * unterminated `<!--` at a line start runs to the end of the text, as GitHub
- * renders it. A reference or heading quoted in an example or a comment never
- * counts as real content. Fences go first: a `<!--` inside a fence is literal
- * text.
+ * Blank code blocks and HTML comments in one lexer pass, so a reference or
+ * heading quoted in an example or a comment never counts as real content.
+ * `htmlBlocks: true` blanks every raw-HTML block, not only comments: GitHub
+ * renders no heading inside one, so section text drops it (fail closed).
+ * `codeSpans: true` blanks inline code too.
  */
 export function blankMarkdown(text, options = {}) {
-	return blankHtmlComments(
-		sourceWithoutFencedBlocks(String(text ?? ""), options),
-	);
+	return blankMarkdownRegions(text, {
+		code: options.indentedCode === false ? "fenced" : "blocks",
+		html: options.htmlBlocks ? "blocks" : "comments",
+		codeSpans: Boolean(options.codeSpans),
+	});
 }
 
 const CATALOG_HEADING = /^## Recurring defect shapes[ \t]*$/m;

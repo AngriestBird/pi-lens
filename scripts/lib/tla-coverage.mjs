@@ -1,10 +1,11 @@
 // Dependency-free coverage-map seam for #3802 rule 2.
 //
 // `scripts/check-pr-body.mjs` runs in the `PR body (advisory)` job, which
-// checks out the repo and runs plain Node with NO `npm install`. Everything
-// this module imports must therefore come from `node:` or the dependency-free
-// `./defect-shapes.mjs` -- `minimatch` and
-// the other glob packages are unavailable on that lane.
+// checks out the repo and runs plain Node with NO `npm install`: the job
+// installs `marked` alone (#4717), the markdown lexer `./defect-shapes.mjs`
+// loads lazily through `./markdown-lexer.mjs`. Everything this module imports
+// must therefore come from `node:` or those two repository modules --
+// `minimatch` and the other glob packages are unavailable on that lane.
 //
 // A PR that changes a file the checked-in `formal/coverage-map.json` maps to
 // model families must also change a `.tla`/`.cfg` under ANY ONE of the row's

@@ -16,11 +16,11 @@ const PASSIVE_RE =
 	/\b(?:is|are|was|were|been|being)\s+(?:\w+ly\s+)?\w+(?:ed|en)\b/gi;
 const ABBREVIATIONS = /\b(?:e\.g|i\.e|etc|vs|cf|mr|mrs|dr|no)\./i;
 
-// Trailers, fences, and the shared blanker's comments come out first, so the
-// prose rules read only text a reader sees. The comment rule is
-// `blankHtmlComments`'s, not a second copy (#4717 V1: this masker treated any
-// `<!--` as an opener, so a body quoting the syntax skipped every later
-// section of prose instead of judging it).
+// Trailers, fences, comments and code spans come out first, so the prose
+// rules read only text a reader sees. Fences, comments and code spans are the
+// shared lexer's (`blankMarkdown`), not a second copy (#4717: this masker
+// treated any `<!--` as an opener, so a body quoting the syntax skipped every
+// later section of prose instead of judging it).
 function blankMarkdown(text) {
 	const raw = String(text ?? "").split(/\r?\n/);
 	const trailerPattern =
@@ -36,6 +36,13 @@ function blankMarkdown(text) {
 		if (!trailerPattern.test(raw[index])) break;
 		trailerLines.add(index);
 	}
+	// The line filters read the line as written; the prose rules read it with
+	// its code spans blanked, so a line opening with one is not taken for a
+	// stack frame (`at …`) or a command.
+	const masked = blankMarkdownShared(String(text ?? ""), {
+		indentedCode: false,
+		codeSpans: true,
+	}).split(/\r?\n/);
 	return blankMarkdownShared(String(text ?? ""), { indentedCode: false })
 		.split(/\r?\n/)
 		.map((line, lineIndex) => {
@@ -49,9 +56,8 @@ function blankMarkdown(text) {
 				)
 			)
 				return "";
-			return line
+			return masked[lineIndex]
 				.replace(/https?:\/\/\S+/gi, " ")
-				.replace(/(`+)[\s\S]*?\1/g, " ")
 				.replace(/(^|\s)(?:["'])([^"']+)(?:["'])(?=\s|$)/g, "$1 ");
 		})
 		.join("\n");
@@ -109,7 +115,8 @@ export function checkProse(text = "", options = {}) {
 		const raw = lines[index];
 		const heading = isHeading(raw);
 		if (heading) {
-			const title = heading[1].trim();
+			// A blanked code span keeps its width; the quote reads as one space.
+			const title = heading[1].trim().replace(/\s+/g, " ");
 			if (
 				/\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+\b/.test(title) ||
 				/\b(?:WHY|SUMMARY|NOTES|TESTS)\b/.test(title)
@@ -145,7 +152,7 @@ export function checkProse(text = "", options = {}) {
 			warnings.push(
 				finding(
 					"passive-voice",
-					`prefer active voice near "${match[0]}"`,
+					`prefer active voice near "${match[0].replace(/\s+/g, " ")}"`,
 					index + 1,
 				),
 			);

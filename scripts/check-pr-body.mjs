@@ -11,6 +11,10 @@ import {
 	parseDefectShapes,
 	sourceWithoutFencedBlocks,
 } from "./lib/defect-shapes.mjs";
+import {
+	blankMarkdownRegions,
+	markdownHeadings,
+} from "./lib/markdown-lexer.mjs";
 import { githubGet } from "./lib/github-rest.mjs";
 import {
 	changedHookAnchors,
@@ -177,48 +181,65 @@ function hasRealContent(lines, section, placeholders) {
 }
 
 /**
- * Every `##`-level heading of the body AS THE READER SEES IT: a heading inside
- * an HTML comment renders no section, so the comment-blanked copy is scanned
- * (#4717 F1: the unblanked scan found a heading whose section GitHub never
- * shows, and both entries accepted the body). Fences are blanked too, and both
- * blankings keep line offsets, so a caller's raw-line indices still align.
+ * Every heading of the body AS THE READER SEES IT, from the lexer (#4717): a
+ * heading inside a comment, a raw-HTML block, a list item or a block quote is
+ * not a section, a setext or indented ATX heading is one, and a heading's name
+ * is its text without closing marks. Every level ends the sections below it;
+ * levels 2 to 4 name one (#1844 accepts H3 and H4 section headings). `index`
+ * is its first line and `contentIndex` the first line of its section, over
+ * `body.split(/\r?\n/)`.
  */
 function bodyHeadings(body) {
-	const lines = blankMarkdown(body).split(/\r?\n/);
-	const headings = [];
-	for (let index = 0; index < lines.length; index += 1) {
-		const match = HEADING.exec(lines[index]);
-		if (match)
-			headings.push({
-				index,
-				name: match[1],
-				level: match[0].match(/^#+/)[0].length,
-				section: SECTION_SYNONYMS.get(match[1].trim().toLowerCase()),
-			});
-	}
-	return headings;
+	return markdownHeadings(body).map((heading) => ({
+		index: heading.line,
+		contentIndex: heading.contentLine,
+		name: heading.text,
+		level: heading.depth,
+		section:
+			heading.depth >= 2 && heading.depth <= 4
+				? SECTION_SYNONYMS.get(heading.text.toLowerCase())
+				: undefined,
+	}));
 }
 
 /**
- * The body of the first `## <section>` heading, as the raw lines and as the
- * fence-blanked copy. `null` when the heading is absent, so the missing-section
- * message stays owned by `lintPrBody`. Three section linters read a section
- * this way; a fourth copy of the heading scan is how one of them drifts.
+ * The lines the reader sees as a section's text, from its heading to the next
+ * heading of the same or a higher level. Every raw-HTML block and inline
+ * comment is dropped (fail closed: GitHub renders no section inside one, and
+ * an answer written there is not a visible answer). `text` keeps code, because
+ * a search command is quoted in one; `visible` blanks code blocks too. `null`
+ * when the heading is absent, so the missing-section message stays owned by
+ * `lintPrBody`. Every section linter reads a section this way.
  */
+function sectionLines(body, headings = bodyHeadings(body)) {
+	const text = blankMarkdownRegions(body, { html: "blocks" }).split(/\r?\n/);
+	const visible = blankMarkdown(body, { htmlBlocks: true }).split(/\r?\n/);
+	const of = (heading) => {
+		const next = headings.find(
+			(candidate) =>
+				candidate.index > heading.index && candidate.level <= heading.level,
+		);
+		const end = next?.index ?? text.length;
+		return {
+			raw: String(body ?? "")
+				.split(/\r?\n/)
+				.slice(heading.contentIndex, end),
+			text: text.slice(heading.contentIndex, end),
+			visible: visible.slice(heading.contentIndex, end),
+		};
+	};
+	return { text, visible, of };
+}
+
 function sectionContent(body, section) {
-	const rawLines = String(body ?? "").split(/\r?\n/);
-	const lines = sourceWithoutFencedBlocks(body).split(/\r?\n/);
 	const headings = bodyHeadings(body);
 	const heading = headings.find((candidate) => hasSection(candidate, section));
 	if (!heading) return null;
-	const nextHeading = headings.find(
-		(candidate) =>
-			candidate.index > heading.index && candidate.level <= heading.level,
-	);
-	const end = nextHeading?.index ?? lines.length;
+	const lines = sectionLines(body, headings).of(heading);
 	return {
-		raw: rawLines.slice(heading.index + 1, end).join("\n"),
-		blanked: lines.slice(heading.index + 1, end).join("\n"),
+		raw: lines.raw.join("\n"),
+		text: lines.text.join("\n"),
+		visible: lines.visible.join("\n"),
 	};
 }
 
@@ -655,7 +676,9 @@ function observabilitySectionContent(lines, headings) {
 		(candidate) =>
 			candidate.index > heading.index && candidate.level <= heading.level,
 	);
-	return lines.slice(heading.index + 1, next?.index ?? lines.length).join("\n");
+	return lines
+		.slice(heading.contentIndex, next?.index ?? lines.length)
+		.join("\n");
 }
 
 function lineAt(source, index) {
@@ -2967,12 +2990,12 @@ function lintBehaviorEquivalence(body, headings, title) {
 		(candidate) =>
 			candidate.index > heading.index && candidate.level <= heading.level,
 	);
-	const sectionLines = lines.slice(
-		heading.index + 1,
+	const tableLines = lines.slice(
+		heading.contentIndex,
 		nextHeading?.index ?? lines.length,
 	);
-	for (let index = 0; index + 1 < sectionLines.length; index += 1) {
-		const headers = behaviorTableCells(sectionLines[index]);
+	for (let index = 0; index + 1 < tableLines.length; index += 1) {
+		const headers = behaviorTableCells(tableLines[index]);
 		if (!headers) continue;
 		const normalizedHeaders = headers.map((header) => header.toLowerCase());
 		const site = normalizedHeaders.indexOf("site");
@@ -2982,7 +3005,7 @@ function lintBehaviorEquivalence(body, headings, title) {
 			site < 0 ||
 			before < 0 ||
 			after < 0 ||
-			!/^\s*\|?(?:\s*:?-+:?\s*\|)+\s*$/.test(sectionLines[index + 1])
+			!/^\s*\|?(?:\s*:?-+:?\s*\|)+\s*$/.test(tableLines[index + 1])
 		)
 			continue;
 		// The table ends at the first line that is not a table row: a blank line,
@@ -2990,10 +3013,10 @@ function lintBehaviorEquivalence(body, headings, title) {
 		// unrelated table's cells (even its header) as this table's data row.
 		for (
 			let rowIndex = index + 2;
-			rowIndex < sectionLines.length;
+			rowIndex < tableLines.length;
 			rowIndex += 1
 		) {
-			const row = behaviorTableCells(sectionLines[rowIndex]);
+			const row = behaviorTableCells(tableLines[rowIndex]);
 			if (!row) break;
 			if (row.length < headers.length) continue;
 			if (
@@ -3226,7 +3249,7 @@ export function lintDetectionSection(body = "", options = {}) {
 	const section = sectionContent(body, "detection");
 	if (!section) return [];
 	// An HTML comment is not an answer: lines quoted in one never count (#4439).
-	const content = blankMarkdown(section.blanked);
+	const content = section.visible;
 	// A non-bug PR may leave the template's optional hint in place; that is an
 	// unanswered section, not a malformed answer.
 	// The mandatory footer is the last line of the body, so it lands inside
@@ -3468,7 +3491,7 @@ function wordCount(text) {
 export function lintClassSweep(body = "", { diff } = {}) {
 	const section = sectionContent(body, "class sweep");
 	if (!section) return [];
-	const content = section.raw.trim();
+	const content = section.text.trim();
 	if (!content) return [];
 	const none = NONE_LINE.exec(content);
 	if (none) {
@@ -3505,10 +3528,10 @@ export function lintFoldCheck(body = "") {
 	const section = sectionContent(body, "fold check");
 	if (!section) return [];
 	// An empty section is `lintPrBody`'s to report. Content that survives only
-	// inside a fence or an HTML comment is not a decision either, so the
+	// inside a fence or a raw-HTML block is not a decision either, so the
 	// blanked copy is judged and an empty one refuses here (#4711).
 	if (!section.raw.trim()) return [];
-	const content = blankMarkdown(section.raw).trim();
+	const content = section.visible.trim();
 	// A `folded` candidate must be closed by this body (#4717 F5), so the
 	// verdict is judged against the body's own close keywords.
 	const closes = parseCloseKeywords(body).issues;
@@ -3735,23 +3758,15 @@ function mutationTableRows(visibleRows) {
 // Row 3 (model fidelity) remains reviewer judgement per issuecomment 6241755363.
 function lintDiffCompliance(body, options) {
 	const errors = [];
-	// A literal `<!--` inside a fence is quoted text, not a comment opener: the
-	// body of a PR that documents comment ends reads it as text, and blanking
-	// from it would hide every fence below (#4585 row 1 hit exactly that). An
-	// inline code span is the same, and `blankHtmlComments` owns that rule now
-	// (#4717 V1). `visibleRows` hides fenced examples (a quoted heading, control
-	// or table is an example, not a claim). `evidenceRows` keeps fence content,
-	// because an honest body quotes the Windows advisory row in a fence (#4605
-	// F5).
+	// A literal `<!--` inside a fence or a code span is quoted text, not a
+	// comment opener (#4585 row 1, #4717 V1): the lexer reads it as code, so
+	// neither blanker hides what follows it. `visibleRows` hides fenced
+	// examples (a quoted heading, control or table is an example, not a
+	// claim). `evidenceRows` keeps fence content, because an honest body
+	// quotes the Windows advisory row in a fence (#4605 F5).
 	const source = String(body);
-	const fencedSpans = sourceWithoutFencedBlocks(source, {
-		indentedCode: false,
-	});
-	const guarded = source.replace(/<!--/g, (marker, offset) =>
-		fencedSpans[offset] === " " ? "    " : marker,
-	);
-	const rawRows = blankHtmlComments(guarded).split(/\r?\n/);
-	const visibleRows = blankMarkdown(guarded).split(/\r?\n/);
+	const rawRows = blankHtmlComments(source).split(/\r?\n/);
+	const visibleRows = blankMarkdown(source).split(/\r?\n/);
 	const evidenceRows = rawRows;
 	const transcriptFences = [];
 	for (const block of markdownBlocks(body, { tilde: true })) {
@@ -4008,11 +4023,12 @@ function lintDiffCompliance(body, options) {
 }
 
 export function lintPrBody(body = "", options = {}) {
-	const rawLines = String(body ?? "").split(/\r?\n/);
-	const lines = sourceWithoutFencedBlocks(body).split(/\r?\n/);
-	// The same rendered-text heading scan `sectionContent` reads (#4717 F1): a
-	// section GitHub hides in an HTML comment is a missing section here too.
+	// The same lexer headings and section text `sectionContent` reads (#4717):
+	// a section GitHub hides in a comment or a raw-HTML block is a missing
+	// section here too, and text inside one is not content. `rawLines` keeps
+	// code (a fenced transcript is content); `lines` blanks it.
 	const headings = bodyHeadings(body);
+	const { text: rawLines, visible: lines } = sectionLines(body, headings);
 	const placeholders = templatePlaceholderLines();
 	const errors = options.diff ? lintDiffCompliance(body, options) : [];
 	const summary = headings.find((heading) => hasSection(heading, "summary"));
@@ -4028,7 +4044,7 @@ export function lintPrBody(body = "", options = {}) {
 	if (
 		(!summary ||
 			!hasRealContent(
-				lines.slice(summary.index + 1, summaryEnd),
+				lines.slice(summary.contentIndex, summaryEnd),
 				"summary",
 				placeholders,
 			)) &&
@@ -4064,7 +4080,7 @@ export function lintPrBody(body = "", options = {}) {
 		}
 		const nextHeading = nextSectionHeading(heading);
 		const rawContent = rawLines.slice(
-			heading.index + 1,
+			heading.contentIndex,
 			nextHeading?.index ?? lines.length,
 		);
 		if (!hasRealContent(rawContent, name.toLowerCase(), placeholders))
@@ -4076,7 +4092,7 @@ export function lintPrBody(body = "", options = {}) {
 	if (why) {
 		const nextHeading = nextSectionHeading(why);
 		const whyLines = rawLines.slice(
-			why.index + 1,
+			why.contentIndex,
 			nextHeading?.index ?? lines.length,
 		);
 		if (countSentenceTerminators(whyLines) !== 1)
