@@ -33,7 +33,9 @@
  * in the schedule: pi makes one request per tool-call round trip, so the two
  * arrays do not line up, and an index taken from the prompts array sampled
  * turn 1's write continuation and read plus turn 2's write continuation while
- * turns 2 and 3's reads were never read (#4716 round 1 F2).
+ * turns 2 and 3's reads were never read (#4716 round 1 F2). It also counts
+ * each line's occurrences across the whole run, so a section composed twice in
+ * one message fails (#4716 round 3 F7).
  *
  * Language servers are the host boundary, as in the file this moves from: each
  * server's command is a project override pointing at a shim that runs the
@@ -223,21 +225,25 @@ function requestText(request: PiProviderRequest): string {
 }
 
 /**
- * The cascade lines one request carries, each listed once.
+ * The cascade lines one request carries, in order and with repeats kept.
  *
  * An injected section rides the request it was composed for and not the next
  * one: measured on this provenance, turn 1's request 1 carried the line and
  * request 2 did not, so a request that carries a line is the request that
  * DELIVERED it — no delta against an earlier request is needed, and a repeat
  * on any later request is a second delivery.
+ *
+ * Repeats inside ONE request are kept for the same reason (#4716 round 3 F7):
+ * a message that carries the line twice composed it twice, and de-duplicating
+ * here would hide that from every case below. Callers that want one entry per
+ * distinct line union the lists themselves.
  */
 function cascadeLinesIn(request: PiProviderRequest): string[] {
 	const lines: string[] = [];
 	for (const line of requestText(request)
 		.split("\n")
 		.map((entry) => entry.trim())) {
-		if (!line.includes("Cascade")) continue;
-		if (!lines.includes(line)) lines.push(line);
+		if (line.includes("Cascade")) lines.push(line);
 	}
 	return lines;
 }
@@ -323,6 +329,19 @@ async function runTurns(
 		laterCarriers,
 		`no request after the first one that carries a cascade line (request ${firstCarrier}) carries one again`,
 	).toEqual([]);
+	// Delivered ONCE per line: a request that composes the same section twice
+	// carries the line twice, which no request-level rule above can see.
+	// #4716 round 3 F7.
+	const lineOccurrences = perRequest
+		.flat()
+		.reduce<Map<string, number>>(
+			(counts, line) => counts.set(line, (counts.get(line) ?? 0) + 1),
+			new Map<string, number>(),
+		);
+	expect(
+		[...lineOccurrences],
+		"every cascade line is delivered exactly once",
+	).toEqual([...lineOccurrences.keys()].map((line) => [line, 1]));
 	return requestWindows.map(({ from, to }) => {
 		const delivered: string[] = [];
 		for (let index = from; index < to; index += 1) {
