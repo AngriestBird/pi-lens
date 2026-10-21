@@ -1263,6 +1263,15 @@ export type DegradationKind =
 	 */
 	| "project-snapshot-stage-reap-failed"
 	/**
+	/**
+	 * #4687 item 5: the session's SECOND prompt-cache miss with no local cause
+	 * was recorded (the first counts silently; every later one only raises the
+	 * count). One bounded row per session, so a provider-side miss pattern is
+	 * visible in the ledger instead of only as an `unknown` verdict per turn.
+	 * Subject is the session id.
+	 */
+	| "prompt-cache-miss-unexplained"
+	/**
 	 * #4638: jedi compiles with the interpreter it launched, so under a project
 	 * declaration of Python 3.14 or newer its `compile` rows describe a grammar
 	 * the project does not use. Dropped from delivery, never from the cached
@@ -1272,16 +1281,16 @@ export type DegradationKind =
 	 */
 	| "python-compile-target-mismatch"
 	/**
-	 * #4638: a Python syntax-level declaration file could not be read (beyond a
-	 * plain absence), so the walk treated it as declaring nothing. Subject is
-	 * the manifest path; reason carries the error message.
-	 */
-	/**
 	 * #4638 review: jedi's project-tier launch threw something other than a
 	 * missing tool, so the managed/PATH fallback ran instead. Subject is the
 	 * project root; the reason names the interpreter and the failure.
 	 */
 	| "python-project-launch-failed"
+	/**
+	 * #4638: a Python syntax-level declaration file could not be read (beyond a
+	 * plain absence), so the walk treated it as declaring nothing. Subject is
+	 * the manifest path; reason carries the error message.
+	 */
 	| "python-target-version-unreadable"
 	/**
 	 * The orphan backstop's OWN process-table scanner blew the scan timeout and

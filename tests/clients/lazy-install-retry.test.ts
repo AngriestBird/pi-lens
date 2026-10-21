@@ -14,7 +14,7 @@
  */
 
 import { withResidentBootstrap } from "../support/bootstrap-access.js";
-import { makeLspServiceDouble } from "../support/lsp-service-double.js";
+import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	resetProjectTrust,
@@ -50,10 +50,6 @@ vi.mock("../../clients/lsp/config.js", () => ({
 	initLSPConfig: vi.fn().mockResolvedValue(undefined),
 	getServerInitOverride: vi.fn().mockReturnValue(undefined),
 }));
-vi.mock("../../clients/lsp/capabilities.js", () => ({
-	getLSPService: vi.fn(() => makeLspServiceDouble()),
-}));
-
 const okResult = { stdout: "", stderr: "", status: 0 };
 
 /** The install ran and exited nonzero — the retry candidate. */
@@ -142,7 +138,8 @@ function makeSessionStartDeps(
 let cwdSeq = 0;
 const freshCwd = () => `/proj/lazy-install-${cwdSeq++}`;
 
-beforeEach(() => {
+beforeEach(async () => {
+	await installLspServiceDouble();
 	safeSpawnAsync.mockReset();
 	resetLazyInstallAttempts();
 	setProjectTrustState("trusted");

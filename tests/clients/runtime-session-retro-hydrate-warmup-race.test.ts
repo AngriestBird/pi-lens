@@ -43,7 +43,7 @@ import {
 	setupTestEnvironment,
 	useTrackedTempDirs,
 } from "./test-utils.js";
-import { makeLspServiceDouble } from "../support/lsp-service-double.js";
+import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 
 const readLatestProjectSequenceAsyncSpy = vi.hoisted(() => vi.fn());
 const loadProjectSnapshotExportsAndRulesCallTimesMs = vi.hoisted(
@@ -82,10 +82,6 @@ vi.mock("../../clients/lsp/config.js", () => ({
 	loadLSPConfig: vi.fn().mockResolvedValue({}),
 	initLSPConfig: vi.fn().mockResolvedValue(undefined),
 	getServerInitOverride: vi.fn().mockReturnValue(undefined),
-}));
-
-vi.mock("../../clients/lsp/capabilities.js", () => ({
-	getLSPService: vi.fn(() => makeLspServiceDouble()),
 }));
 
 import { handleSessionStart } from "../../clients/runtime-session.js";
@@ -169,7 +165,8 @@ describe("#1785 review round F1 — retroactive hydration survives a warmup save
 	let prevFirst: boolean | undefined;
 	let prevWarmup: boolean | undefined;
 
-	beforeEach(() => {
+	beforeEach(async () => {
+		await installLspServiceDouble();
 		prevArgv = process.argv;
 		prevStartupMode = process.env.PI_LENS_STARTUP_MODE;
 		prevBudget = process.env.PI_LENS_SEQUENCE_READ_BUDGET_MS;
