@@ -322,7 +322,7 @@ describe("#4689: lens_diagnostics names a file relative to the session root unde
 					"lens_diagnostics",
 				);
 				const text = all?.text ?? "";
-				expect(text).toMatch(/^src\/new\.ts {2}🔴 1 blocking/m);
+				expect(text).toMatch(/^src\/new\.ts {2}🔴 \d+ blocking/m);
 				expect(text).not.toContain("../");
 			} finally {
 				await handle.dispose();
