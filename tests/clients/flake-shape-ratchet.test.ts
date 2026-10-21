@@ -334,25 +334,6 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			reason:
 				"spawning the managed language server is the process boundary; the wrapper delegates every other command, the refused project-local candidate included, to the real launchLSP",
 		},
-	// 2026-10-16 (#4483): the first-write seed witness keeps every pi-lens
-	// module on the tool_call-to-turn-end chain real; only the language-server
-	// process behind the LSP capability adapter is stood in for, for the
-	// language-server guard cell (acceptance 5).
-	"in-process-mock:index-4483-first-write-seed-witness.test.ts::clients/lsp/capabilities":
-		{
-			detector: "in-process-mock",
-			reason:
-				"the language-server process is the boundary; the capability adapter is where every host witness stands in for it",
-		},
-	// 2026-10-15 (#4484): the host witness keeps every pi-lens module on the
-	// write-to-turn-end chain real; only the language-server process behind the
-	// LSP capability adapter is stood in for, answering from the bytes it gets.
-	"in-process-mock:index-4484-unfixed-blocker-witness.test.ts::clients/lsp/capabilities":
-		{
-			detector: "in-process-mock",
-			reason:
-				"the language-server process is the boundary; the capability adapter is where every host witness stands in for it",
-		},
 	// 2026-10-17 (#4504): the witness runs the real session_start / tool_call /
 	// tool_result handlers and only the per-file dispatch is stood in for, so
 	// the run observes what the opaque prescan recorded and recovered, not a
@@ -363,25 +344,15 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			reason:
 				"the synthetic dispatch of a recovered opaque write is not the subject; a resolved pipeline verdict keeps a linter child out of a witness about the prescan's own record",
 		},
-	// 2026-10-17 (#4554): the assertion is on the module-level
-	// `resetLSPService` CALL the shared teardown makes, and the shared service
-	// double does not expose that call as a spy; no server process is spawned.
+	// 2026-10-17 (#4554, reason corrected in #4709): two activations in one
+	// process each assert their own module-level `resetLSPService` spy. The
+	// singleton lifecycle keeps one `beforeReset` at a time, so installing the
+	// second activation's spy hides the first's (the r7 cell reads it after).
 	"in-process-mock:index-4554-last-member-teardown.test.ts::clients/lsp/capabilities":
 		{
 			detector: "in-process-mock",
 			reason:
-				"the assertion is on the module-level resetLSPService call the shared teardown makes, which the shared service double does not expose as a spy; the stand-in spawns no language server",
-		},
-	// 2026-10-19 (#3734): `rename_file`'s staleness capture needs a client that
-	// answers `workspace/willRenameFiles` with chosen offsets; only the shell the
-	// tool resolves is stood in for, so the real service, the rename guard,
-	// `applyWorkspaceEdit`, pi's queue and the ledger all run, and no language
-	// server is spawned.
-	"in-process-mock:tools/lsp-navigation-rename-file-staleness.test.ts::clients/lsp/capabilities":
-		{
-			detector: "in-process-mock",
-			reason:
-				"the language-server process is the boundary; the shell the tool resolves returns a real LSPService whose only client is a willRenameFiles answer, so no server is spawned",
+				"two activations in one process each assert their own module-level resetLSPService spy, and the singleton lifecycle holds one beforeReset at a time, so the seam cannot tell the activations apart; the stand-in spawns no language server",
 		},
 
 	"never-settling-wait:scripts/mutate-fixture.test.ts": {

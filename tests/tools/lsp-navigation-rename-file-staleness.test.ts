@@ -1,4 +1,3 @@
-// flake-shape: in-process-mock — the tool's service shell is a factory-seeded double over a REAL LSPService, so `rename_file` runs the production rename, capture, queue and apply while no language server can be spawned; the language client stays a double at the process boundary (tests/support/lsp-rename-client-double.ts), as tests/clients/lsp/service-rename-file.test.ts already does for this method.
 /**
  * #3734: `LSPService.renameFile` applied the merged `workspace/willRenameFiles`
  * text edits with no content binding, so a file written between a server
@@ -45,15 +44,9 @@ import {
 } from "../../clients/degradation-ledger.js";
 
 const lsp = vi.hoisted(() => ({ service: undefined as unknown }));
-vi.mock("../../clients/lsp/capabilities.js", async (importOriginal) => ({
-	...(await importOriginal<
-		typeof import("../../clients/lsp/capabilities.js")
-	>()),
-	getLSPService: () => lsp.service,
-}));
-
 import { createLspNavigationTool } from "../../tools/lsp-navigation.js";
 import { LSPService } from "../../clients/lsp/index.js";
+import { installLspService } from "../support/lsp-service-seam.js";
 
 /** The importer as the server read it: the edit replaces `old` with `new`. */
 const OLD_IMPORT = "import { value } from './old';\n";
@@ -122,15 +115,17 @@ let clientFor = (): RenameClientDouble => makeRenameClient(env.tmpDir, null);
 function makeHarness(): { realService: LSPService } {
 	const realService = new LSPService();
 	addRenameClient(realService, "typescript", env.tmpDir, clientFor());
-	lsp.service = makeLspServiceDouble({
-		supportsLSP: vi.fn(() => true),
-		hasLSP: vi.fn(async () => true),
-		renameFile: (
-			oldFilePath: string,
-			newFilePath: string,
-			options: Parameters<LSPService["renameFile"]>[2],
-		) => realService.renameFile(oldFilePath, newFilePath, options),
-	});
+	lsp.service = installLspService(
+		makeLspServiceDouble({
+			supportsLSP: vi.fn(() => true),
+			hasLSP: vi.fn(async () => true),
+			renameFile: (
+				oldFilePath: string,
+				newFilePath: string,
+				options: Parameters<LSPService["renameFile"]>[2],
+			) => realService.renameFile(oldFilePath, newFilePath, options),
+		}),
+	);
 	return { realService };
 }
 

@@ -81,12 +81,7 @@ import {
 	dispatchLintWithResult,
 } from "../../clients/dispatch/integration.js";
 
-// Mock LSP service
-vi.mock("../../clients/lsp/capabilities.js", () => ({
-	getLSPService: vi.fn(),
-}));
-
-import { getLSPService } from "../../clients/lsp/capabilities.js";
+import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 import { scaledTestTimeout } from "../support/test-timeout-scale.js";
 
 // #4019: the Windows lane declares PI_LENS_TEST_TIMEOUT_SCALE=3 because a
@@ -119,11 +114,10 @@ describe("Pipeline", () => {
 				},
 			}),
 		);
-		mockLSPService = makeLspServiceDouble({
+		mockLSPService = await installLspServiceDouble({
 			supportsLSP: vi.fn().mockReturnValue(true),
 			hasLSP: vi.fn().mockResolvedValue(true),
 		});
-		vi.mocked(getLSPService).mockReturnValue(mockLSPService as any);
 		vi.mocked(dispatchLintWithResult).mockReset();
 		const { resetFormatService } =
 			await import("../../clients/format-service.js");

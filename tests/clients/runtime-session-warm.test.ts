@@ -18,18 +18,12 @@ vi.mock("../../clients/lsp/config.js", () => ({
 	getServerInitOverride: vi.fn().mockReturnValue(undefined),
 }));
 
-vi.mock("../../clients/lsp/capabilities.js", () => ({
-	getLSPService: vi.fn(() =>
-		makeLspServiceDouble({
-			touchFile: mockTouchFile,
-			supportsLSP: (f: string) => /\.(ts|tsx|js|jsx|py|cpp)$/.test(f),
-		}),
-	),
-}));
-
 import { initLSPConfig, loadLSPConfig } from "../../clients/lsp/config.js";
-import { getLSPService } from "../../clients/lsp/capabilities.js";
 import { makeLspServiceDouble } from "../support/lsp-service-double.js";
+import {
+	installLspService,
+	installLspServiceDouble,
+} from "../support/lsp-service-seam.js";
 
 function setStartupMode(mode: "full" | "quick"): () => void {
 	const prev = process.env.PI_LENS_STARTUP_MODE;
@@ -114,16 +108,14 @@ function makeDeps(
 }
 
 describe("warmFiles session start", () => {
-	beforeEach(() => {
+	beforeEach(async () => {
 		vi.clearAllMocks();
 
 		vi.mocked(loadLSPConfig).mockResolvedValue({});
-		vi.mocked(getLSPService).mockReturnValue(
-			makeLspServiceDouble({
-				touchFile: mockTouchFile,
-				supportsLSP: (f: string) => /\.(ts|tsx|js|jsx|py|cpp)$/.test(f),
-			}) as any,
-		);
+		await installLspServiceDouble({
+			touchFile: mockTouchFile,
+			supportsLSP: (f: string) => /\.(ts|tsx|js|jsx|py|cpp)$/.test(f),
+		});
 	});
 
 	afterEach(() => {
@@ -254,11 +246,11 @@ describe("warmFiles session start", () => {
 		createTempFile(env.tmpDir, "src/b.ts", "export const b = 2;");
 
 		vi.mocked(loadLSPConfig).mockResolvedValue({});
-		vi.mocked(getLSPService).mockReturnValue(
+		installLspService(
 			makeLspServiceDouble({
 				touchFile: mockTouchFile,
 				supportsLSP: (f: string) => /\.(ts|json|ya?ml)$/.test(f),
-			}) as any,
+			}),
 		);
 
 		try {
@@ -287,11 +279,11 @@ describe("warmFiles session start", () => {
 		createTempFile(env.tmpDir, "b.yaml", "b: 2\n");
 
 		vi.mocked(loadLSPConfig).mockResolvedValue({});
-		vi.mocked(getLSPService).mockReturnValue(
+		installLspService(
 			makeLspServiceDouble({
 				touchFile: mockTouchFile,
 				supportsLSP: (f: string) => /\.ya?ml$/.test(f),
-			}) as any,
+			}),
 		);
 
 		try {

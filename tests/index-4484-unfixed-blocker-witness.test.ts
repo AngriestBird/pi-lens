@@ -1,4 +1,3 @@
-// flake-shape: in-process-mock — clients/lsp/capabilities stands in for the language-server process (the LSP double computes diagnostics from the bytes it is handed); every other pi-lens module on the chain is real
 /**
  * #4484 witness (ADR 0007): a second write must not clear a blocker it left
  * in place.
@@ -299,27 +298,6 @@ vi.mock("../clients/safe-spawn.js", async (importOriginal) => ({
 		boundary.isDoubled(command) ? command : null,
 }));
 
-vi.mock("../clients/lsp/capabilities.js", async (importOriginal) => {
-	const original =
-		await importOriginal<typeof import("../clients/lsp/capabilities.js")>();
-	const { makeLspServiceDouble } =
-		await import("./support/lsp-service-double.js");
-	const double = makeLspServiceDouble({
-		supportsLSP: () => boundary.lsp.enabled,
-		hasLSP: async () => boundary.lsp.enabled,
-		touchFile: boundary.lsp.touch,
-	});
-	return {
-		...original,
-		hasAuxiliaryLspPublishedForRoot: async (serverId: string) =>
-			serverId === "ast-grep" && boundary.ag.published,
-		getLSPService: () =>
-			boundary.lsp.enabled
-				? (double as unknown as ReturnType<typeof original.getLSPService>)
-				: original.getLSPService(),
-	};
-});
-
 import extension from "../index.js";
 import {
 	observeRunnerLatency,
@@ -342,6 +320,7 @@ import {
 	makeSessionStartEvent,
 } from "./support/host-event-factory.js";
 import { createPiMock, makeCtx } from "./support/pi-mock.js";
+import { installLspServiceDouble } from "./support/lsp-service-seam.js";
 import { readNdjsonRows } from "./support/ndjson-rows.js";
 
 let tmpDir = "";
@@ -354,7 +333,14 @@ beforeAll(() => {
 	);
 });
 afterAll(() => removeTempDirSync(tmpDir));
-beforeEach(() => {
+beforeEach(async () => {
+	await installLspServiceDouble({
+		supportsLSP: () => boundary.lsp.enabled,
+		hasLSP: async () => boundary.lsp.enabled,
+		touchFile: boundary.lsp.touch,
+		hasServerPublishedForFileRoot: async (serverId: string) =>
+			serverId === "ast-grep" && boundary.ag.published,
+	});
 	process.env.PI_LENS_TEST_MODE = "0";
 	boundary.lsp.enabled = false;
 	boundary.lsp.touches = 0;

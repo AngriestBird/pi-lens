@@ -25,21 +25,12 @@ vi.mock("../../clients/warm-attach.js", () => ({
 // #631: `groupFilesByPrimaryServer`/`runPerServerGroups` are the REAL
 // per-server-group scheduling primitives (`tools/lsp-diagnostics.ts` now
 // imports them from this module instead of using a flat, server-oblivious
-// pool) — only `getLSPService` is faked here. Keeping the real
-// grouping/scheduling implementations wired through the mock is what lets
-// the "#631 per-server scheduling" describe block below actually exercise
-// the property under test (never >1 in-flight touch per server group),
-// rather than a mock that would trivially satisfy it either way.
-vi.mock("../../clients/lsp/capabilities.js", async () => {
-	const actual = await vi.importActual<
-		typeof import("../../clients/lsp/capabilities.js")
-	>("../../clients/lsp/capabilities.js");
-	return {
-		...actual,
-		getLSPService: () => mocked.service,
-	};
-});
-
+// pool) — only the service the singleton hands out is a double, installed
+// through the lifecycle seam. Keeping the real grouping/scheduling
+// implementations is what lets the "#631 per-server scheduling" describe
+// block below actually exercise the property under test (never >1 in-flight
+// touch per server group), rather than a mock that would trivially satisfy it
+// either way.
 vi.mock("../../clients/lsp/wait-policy/index.js", () => ({
 	classifyCascadeWaitTier: () => mocked.cascadeTier,
 }));
@@ -58,6 +49,7 @@ import {
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
 import { RUNTIME_CONFIG } from "../../clients/runtime-config.js";
+import { installLspService } from "../support/lsp-service-seam.js";
 
 /**
  * The mocked LSP service every case reads through `mocked.service`. #4397: it
@@ -70,37 +62,39 @@ function resetServiceDouble() {
 	mocked.warmAttached = false;
 	mocked.attachedDiagnostics.mockReset();
 	reconcileScanDiagnosticsMock.mockReset().mockReturnValue(true);
-	mocked.service = makeLspServiceDouble({
-		getDiagnostics: vi.fn().mockImplementation(async (filePath: string) => {
-			if (filePath.endsWith("bad.ts")) {
-				return [
-					{
-						severity: 1,
-						message: "Type 'string' is not assignable to type 'number'.",
-						range: {
-							start: { line: 0, character: 16 },
-							end: { line: 0, character: 24 },
+	mocked.service = installLspService(
+		makeLspServiceDouble({
+			getDiagnostics: vi.fn().mockImplementation(async (filePath: string) => {
+				if (filePath.endsWith("bad.ts")) {
+					return [
+						{
+							severity: 1,
+							message: "Type 'string' is not assignable to type 'number'.",
+							range: {
+								start: { line: 0, character: 16 },
+								end: { line: 0, character: 24 },
+							},
+							source: "ts",
 						},
-						source: "ts",
-					},
-				];
-			}
-			return [];
+					];
+				}
+				return [];
+			}),
+			getDiagnosticsHealth: vi.fn().mockReturnValue(undefined),
+			getCapabilitySnapshots: vi.fn().mockResolvedValue([]),
+			runWorkspaceDiagnostics: vi.fn(),
+			// #2598: `collectDiagnosticsForFile` now touches unconditionally —
+			// the real `LSPService` defines `touchFile` on every shape, so the
+			// probe that used to route this suite down an `openFile` arm is
+			// gone. `undefined` is what the real `touchFile` resolves to when
+			// it resolves NO client for the file (clients/lsp/index.ts, the
+			// `no_clients` return), and it is the state these cases want: the
+			// tool falls through to `getDiagnostics`, where their fixtures
+			// live. Cases that want the touch itself to answer install their
+			// own `touchFile` on the double.
+			touchFile: vi.fn(async () => undefined),
 		}),
-		getDiagnosticsHealth: vi.fn().mockReturnValue(undefined),
-		getCapabilitySnapshots: vi.fn().mockResolvedValue([]),
-		runWorkspaceDiagnostics: vi.fn(),
-		// #2598: `collectDiagnosticsForFile` now touches unconditionally —
-		// the real `LSPService` defines `touchFile` on every shape, so the
-		// probe that used to route this suite down an `openFile` arm is
-		// gone. `undefined` is what the real `touchFile` resolves to when
-		// it resolves NO client for the file (clients/lsp/index.ts, the
-		// `no_clients` return), and it is the state these cases want: the
-		// tool falls through to `getDiagnostics`, where their fixtures
-		// live. Cases that want the touch itself to answer install their
-		// own `touchFile` on the double.
-		touchFile: vi.fn(async () => undefined),
-	});
+	);
 }
 
 describe("lsp_diagnostics tool", () => {
