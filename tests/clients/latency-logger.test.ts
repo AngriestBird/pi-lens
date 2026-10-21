@@ -28,6 +28,7 @@ import {
 	phaseStarted,
 	resetCurrentPhaseForSession,
 } from "../../clients/latency-logger.js";
+import { recordToolSetDecision } from "../../clients/tool-set-policy.js";
 import { normalizeFilePath } from "../../clients/path-utils.js";
 
 describe("latency-logger", () => {
@@ -323,6 +324,26 @@ describe("getLastLoggedPhase (loop_block attribution, #1122/#1123)", () => {
 			phase: "concurrent_session_bind_rollup",
 			filePath: "<pi-lens>",
 			durationMs: 0,
+		});
+		expect(getLastLoggedPhase()?.phase).toBe("provider_request");
+	});
+
+	// #4687: `tool_set_decision` is the zero-duration lazy-tools posture row
+	// written at session_start and on a model switch, never work of its own.
+	// Written through its real recorder; pins the `LAST_PHASE_EXCLUDED` entry
+	// so deleting it reds here.
+	it("does not let the tool-set decision record own stall attribution (#4687)", () => {
+		logLatency({
+			type: "phase",
+			phase: "provider_request",
+			filePath: "<pi-lens>",
+			durationMs: 5,
+		});
+		recordToolSetDecision({
+			trigger: "model_select",
+			mode: "auto",
+			lazy: false,
+			supportsMidConvoSystemMessages: false,
 		});
 		expect(getLastLoggedPhase()?.phase).toBe("provider_request");
 	});

@@ -2308,8 +2308,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 	//
 	// Feature-detected: `pi.getActiveTools`/`setActiveTools` aren't guaranteed
 	// present on every host the broad `@earendil-works/pi-coding-agent` peer
-	// dependency allows. Under `--no-lazy-tools` nothing is touched at all:
-	// all-active IS the requested posture.
+	// dependency allows. Under `--no-lazy-tools` the plan is the eager one,
+	// which keeps every enabled tool active (a no-op on a host start).
 	//
 	// #4687 item 7: whether the lazy tools start inactive is decided per model
 	// (`lazyToolsApply`): on a model that folds system messages into one head,
@@ -2348,7 +2348,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 				lazy,
 				supportsMidConvoSystemMessages: supportsMidConvoSystemMessages(model),
 			});
-			if (mode === "off") return;
 			const lazyNames = new Set(enabledLazyTools);
 			const plan = planToolSet(
 				piWithActiveTools.getActiveTools(),

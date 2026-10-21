@@ -295,6 +295,11 @@ describe("lsp_navigation tool", () => {
 	});
 	it.each([
 		[
+			"absent",
+			(): unknown => undefined,
+			"callHierarchyItem parameter required",
+		],
+		[
 			"a string",
 			(): unknown => "foo",
 			"callHierarchyItem must be the object prepareCallHierarchy returned",
