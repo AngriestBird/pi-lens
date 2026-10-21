@@ -2,10 +2,10 @@
  * The ONE reader for the JSON lines pi-lens's sinks write (#4699 F2).
  * `clients/ndjson-logger.ts` puts one JSON object per line into `latency.log`,
  * `extension.log`, `cascade.log`, the diagnostic log and the child's provider
- * log. Every test that read one of those files used to carry its own copy of
- * "read, split, parse each line", and the copies disagreed: most dropped a
- * line they could not parse, three threw at the caller (#4699 F2 measured ten
- * sites across `tests/support/` and `tests/index-*witness*.test.ts`).
+ * log. Ten readers in `tests/support/` and `tests/index-*witness*.test.ts`
+ * each carried their own copy of "read, split, parse each line", and the
+ * copies disagreed: most dropped a line they could not parse, three threw at
+ * the caller (#4699 F2). Other tests still parse sink lines inline.
  *
  * Neither answer was complete. A dropped line is invisible to an exact-count
  * or absence assertion, so a writer that corrupted a row passed (Sourcery on
