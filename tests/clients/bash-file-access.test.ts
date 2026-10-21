@@ -1307,6 +1307,48 @@ describe("scanShellWriteScopes — the command's effective directory (#2050)", (
 			command: "cd sub; pushd; cd ..; printf x > f.ts",
 			bash: "f.ts",
 		},
+		{
+			row: "R37 cd after a failed && (R5-1)",
+			command: "false && cd sub\nprintf x > f.ts",
+			bash: "f.ts",
+		},
+		{
+			row: "R38 cd after a failed test (R5-1)",
+			command: "[ -d nope ] && cd sub\nprintf x > f.ts",
+			bash: "f.ts",
+		},
+		{
+			row: "R39 cd after a failed cd (R5-1)",
+			command: "cd missing && cd sub\nprintf x > f.ts",
+			bash: "f.ts",
+		},
+		{
+			row: "R40 && chain, write inside it",
+			command: "cd sub && cd ../other && printf x > f.ts",
+			bash: "other/f.ts",
+		},
+		{
+			row: "R41 && move across ; (narrowed)",
+			command: "true && cd sub; printf x > f.ts",
+			bash: "sub/f.ts",
+			fallback: "f.ts",
+		},
+		{
+			row: "R42 pushd +2 (R5-2)",
+			command: "pushd sub && pushd ../other && pushd +2 && printf x > f.ts",
+			bash: "f.ts",
+		},
+		{
+			row: "R43 pipe inside an && chain",
+			command: "true && cd sub && echo x | cat > f.ts",
+			bash: "sub/f.ts",
+		},
+		{
+			row: "R44 popd after a failed &&",
+			command: "cd other; pushd ../sub; false && popd\nprintf x > f.ts",
+			bash: "sub/f.ts",
+			fallback: "f.ts",
+		},
 	];
 
 	it.each(CWD_ROWS)(

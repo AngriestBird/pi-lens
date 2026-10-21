@@ -1106,10 +1106,15 @@ export function scanShellWriteScopes(
 	// Set once the scan meets a directory change it cannot certify; from then
 	// on every operand resolves against `cwd`, as before #2050.
 	let fellBack = false;
+	// Set when the current `&&` chain holds a move entered after `&&`: bash
+	// made it only if the left side succeeded, which is certain inside the
+	// chain (a later `&&` command runs only then) and unknowable past its end.
+	let chainMove = false;
 	const fallBack = () => {
 		fellBack = true;
 		effectiveCwd = cwd;
 		dirStack.length = 0;
+		chainMove = false;
 	};
 	const add = (token: ShellOperand) => {
 		const abs = resolveCandidate(token, effectiveCwd);
@@ -1313,28 +1318,41 @@ export function scanShellWriteScopes(
 		simpleCommand = [];
 		const previousEntry = entry;
 		entry = exit;
-		if (fellBack || effect.kind === "none") continue;
-		if (effect.kind === "construct") {
+		if (fellBack || effect.kind === "none") {
+			// No directory change of its own.
+		} else if (effect.kind === "construct") {
 			fallBack();
-			continue;
-		}
-		// A pipeline member or a backgrounded list runs in a subshell: its
-		// directory change never reaches the next command.
-		if (previousEntry === "pipe" || exit === "pipe" || backgrounded[rangeIndex])
-			continue;
-		// Entered at list start or after `&&`/`;`/newline/`&`, and ended by
-		// `&&`/`;`/newline/the end: the only positions where it certainly ran
-		// in this shell and the next command certainly sees its directory.
-		if (previousEntry === "or" || exit === "or" || effect.kind === "unknown") {
+		} else if (
+			previousEntry === "pipe" ||
+			exit === "pipe" ||
+			backgrounded[rangeIndex]
+		) {
+			// A pipeline member or a backgrounded list runs in a subshell: its
+			// directory change never reaches the next command.
+		} else if (
+			previousEntry === "or" ||
+			exit === "or" ||
+			effect.kind === "unknown"
+		) {
+			// A move is certain only when entered at list start or after
+			// `&&`/`;`/newline/`&` and ended by `&&`/`;`/newline/the end, in a
+			// form the scan reads; anything else falls back.
 			fallBack();
 		} else if (effect.kind === "move") {
 			if (effect.push) dirStack.push(effectiveCwd);
 			effectiveCwd = effect.target;
+			if (previousEntry === "and") chainMove = true;
 		} else {
 			const restored = dirStack.pop();
 			if (restored === undefined) fallBack();
-			else effectiveCwd = restored;
+			else {
+				effectiveCwd = restored;
+				if (previousEntry === "and") chainMove = true;
+			}
 		}
+		// Only `&&` and `|` continue the chain; past its end the move it holds
+		// may never have happened (#4713 R5-1).
+		if (chainMove && exit !== "and" && exit !== "pipe") fallBack();
 	}
 
 	return { written: Array.from(out), cdTargets };
@@ -1392,7 +1410,8 @@ type DirectoryEffect =
 /**
  * What one simple command does to the shell's directory, read as a positive
  * list (#4713 round 4). Admitted: `cd DIR` and `pushd DIR` with exactly one
- * statically resolvable operand, and a bare `popd`, each spelled as that
+ * statically resolvable directory operand (a `pushd +N`/`-N` stack index is
+ * not one), and a bare `popd`, each spelled as that
  * literal first word once leading assignments and redirections are set aside.
  * A command whose first word is a plain word naming none of the directory or
  * shell-text builtins is `none`. A reserved word or an unquoted grouping
@@ -1414,8 +1433,12 @@ function directoryEffect(
 	if (SHELL_RESERVED_WORDS.has(verb)) return { kind: "construct" };
 	const operands = words.slice(first + 1);
 	if (verb === "cd" || verb === "pushd") {
+		const operand = operands.length === 1 ? operands[0] : undefined;
+		// `pushd +N`/`-N` rotates the stack: the operand is an index, not a
+		// directory (#4713 R5-2).
+		const rotation = verb === "pushd" && /^[+-]\d+$/.test(operand?.text ?? "");
 		const target =
-			operands.length === 1 ? resolveCdOperand(operands[0], cwd) : undefined;
+			operand && !rotation ? resolveCdOperand(operand, cwd) : undefined;
 		return target
 			? { kind: "move", target, push: verb === "pushd" }
 			: { kind: "unknown" };
