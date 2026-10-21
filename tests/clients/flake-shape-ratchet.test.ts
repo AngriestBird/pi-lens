@@ -432,6 +432,14 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"real git worktree metadata is written and registered by Git; an in-process double cannot prove linked-worktree ownership",
 	},
+	// 2026-10-21 (#4713 R11): real `bash -c` is the oracle for which
+	// directory each generated spelling enters and where its redirect lands;
+	// the generator exists because hand-written expectations missed spellings.
+	"real-process-spawn:clients/bash-word-composition.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"real bash decides which directory each generated spelling enters and where its write lands; a stubbed shell answers neither",
+	},
 	"real-process-spawn:clients/biome-config-decorator-metadata.test.ts": {
 		detector: "real-process-spawn",
 		reason:
@@ -626,6 +634,15 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 	// store, a worktree-local toplevel — and `git worktree add` is the only way
 	// to make one. The prescan's own recovery is git's `status --porcelain`, so
 	// a stubbed git would answer neither question.
+	// 2026-10-19 (#2050): a real linked worktree (`git worktree add`), pi's own
+	// `bash` tool running the script, and the real tree-sitter dispatch are the
+	// subject; a stubbed shell or git could not answer whether the worktree's
+	// own `git status` saw the write.
+	"real-process-spawn:index-2050-worktree-bash-dispatch-witness.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"the subject is what a real bash command does to a real linked worktree, detected by git's own status; a stubbed shell or git answers neither",
+	},
 	"real-process-spawn:index-4504-opaque-prescan-root-witness.test.ts": {
 		detector: "real-process-spawn",
 		reason:

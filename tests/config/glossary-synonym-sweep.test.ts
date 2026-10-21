@@ -326,7 +326,12 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/mcp/session.ts": 4,
 		"clients/metrics-client.ts": 7,
 		"clients/observed-mutation.ts": 7,
-		"clients/runtime-tool-call.ts": 12,
+		// 12 -> 11 (#2050): the prescan's `let baseline` local moved into
+		// `captureOpaqueBaseline`'s returned `state`, so one identifier use is
+		// gone. Every remaining use is the pending opaque baseline, which the
+		// glossary does not retire (it retires `baseline` where a freshness
+		// reference is meant).
+		"clients/runtime-tool-call.ts": 11,
 		"clients/sgconfig.ts": 6,
 		"clients/widget-state.ts": 2,
 	},
@@ -740,7 +745,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 8 -> 6 (#4535 slice 2): two of those calls moved into
 		// `clients/disk-change-subscribers.ts` with the held-primary pass; the
 		// disposition count stays here.
-		"clients/runtime-tool-result.ts": 6,
+		// 6 -> 5 (#2050): the recognized paths are judged by their own root's
+		// verdict in a loop, so `recognizedAuthored = scanned.filter(...)` is gone.
+		// The bash drift pass buckets its opaque paths in a `Map` (the
+		// `sendsByRoot` idiom beside it) rather than filtering per root.
+		"clients/runtime-tool-result.ts": 5,
 		// 31 -> 33 (#3901): the cut-advisory hold keeps the fresh items of a part
 		// (one `Array.prototype.filter`), and the call-graph lane drops a parked
 		// file it already walks as fresh (one). The knip and dead-code re-offers
@@ -886,7 +895,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// host-argument stages a shell word never sees.
 		// 10 -> 9 (#4577 R4): an absolute operand keeps the spelling the command
 		// carried, so the re-resolving `path.resolve(operand)` is gone.
-		"clients/bash-file-access.ts": 9,
+		// 9 -> 11 (#2050): `resolveCdOperand` follows the same shell rules for a
+		// `cd` target (its own `normalizeHostToolPath` branch and its
+		// `path.isAbsolute` / `path.resolve` pair), so a relative write operand
+		// after `cd` lands in that directory.
+		"clients/bash-file-access.ts": 11,
 		// 10 -> 7 (#4268): the hand-built `path.join` candidate list folds onto the
 		// shared `findLocalBinAt` trust seam, one construction site for the shim.
 		"clients/biome-client.ts": 7,
@@ -1121,7 +1134,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// the discard baseline names both sides of the entry.
 		// 11 -> 9 (#4508): the walk in resolveGitCheckout skips a HEAD-less
 		// `.git`, so gitPathBase no longer joins the `.git` entry and its HEAD.
-		"clients/opaque-mutation-scan.ts": 9,
+		// 9 -> 12 (#2050): resolveOpaqueRecoveryRoots resolves each candidate
+		// (a `cd` target, and a recognised write's `path.dirname`) before asking
+		// which checkout owns it, and keys the admission set on the resolved root.
+		"clients/opaque-mutation-scan.ts": 12,
 		"clients/opengrep-client.ts": 8,
 		"clients/opengrep-config.ts": 3,
 		// 21 -> 23 (#4515 r2): commandSearchReachesProject splits PATH on
@@ -1211,7 +1227,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// the scan ran in, and the held-primary send groups the written set by
 		// the root that holds each file; three `path.resolve` reads where there
 		// were one, no new delivery path.
-		"clients/runtime-tool-result.ts": 20,
+		// 20 -> 17 (#4713 F3): ownership, the observed-identity lookup and the
+		// recognized-set subtraction compare REAL paths (`realpathOrResolve`), so
+		// a symlinked spelling of a worktree file matches the identity git
+		// reported. Three `path.resolve` reads became realpath reads.
+		"clients/runtime-tool-result.ts": 17,
 		// 25 -> 27 (#3218): the resolved-blocker filter keys both the current
 		// blocker set and each resolved entry with `path.resolve`.
 		// 27 -> 26 (#2542 ask 3): `deferralEntryKey` moved to

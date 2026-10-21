@@ -1243,6 +1243,42 @@ file-scoped worklist and receives no project-wide scanner output.
   command that did write. Scan evidence is scoped to the checkout it ran in: a
   recognized write outside that root is kept (never cleared by a scan that
   could not see it) and earns no authorship the scan cannot confirm.
+- A bash command's writes are recovered from that session root AND from every
+  checkout the command ITSELF names — its `cd`/`pushd` target or a recognised
+  write operand — when that checkout is a linked worktree of the session's own
+  repository (`resolveOpaqueRecoveryRoots`, `sameCheckoutOtherRoot`). Both hooks
+  derive bounded root lists (`OPAQUE_RECOVERY_ROOT_CAP`) from the command text,
+  the session root, and the checkout each hook sees at its own instant, so a
+  worktree the command itself creates is admitted only at `tool_result` and its
+  missing baseline is reported as `partial-recognition-no-baseline`, while a
+  root both hooks admit still names one key for its record and its take; a
+  checkout of another repository, a checkout named past the cap, and a
+  git target under a non-checkout session root each leave one bounded
+  `opaque-recovery-root-refused` record per session. This is why a `cd` into a
+  sibling worktree no longer reads a clean `git status` in the wrong checkout as
+  "nothing changed". Relative operands resolve against the directory in effect
+  for their own segment (`scanShellWriteScopes`). That directory moves only for
+  an admitted form: `cd DIR` or `pushd DIR` whose one operand is a plain
+  path: bash's own word after quote removal, made only of admitted characters
+  (any quoted one, an escape bash also removes, an unquoted letter, digit or
+  `_./@%:,=+-`, and a leading `~` only as `~` or `~/`), starting with a
+  letter, digit, `_`, `.`, `/` or `~`; or a bare `popd` of a push the scan
+  admitted, entered at list start or after `&&`, `;`, a newline
+  or a backgrounded list, ended by `&&`, `;`, a newline or the end, and in no
+  pipeline or backgrounded list. A move entered after `&&` holds only to the end
+  of that `&&` chain, because it happened only if the left side succeeded. A
+  directory builtin in a pipeline or a backgrounded list leaves the directory
+  unchanged. Any other directory change, construct or shell-text builtin
+  returns the scan to the session root for the rest of the command.
+- A recovered write is judged by the checkout that OWNS it, in both directions:
+  the ignore gate a synthetic bash-write dispatch passes asks the `.gitignore`
+  of the root that admitted the write (`_ownerRoot`), not the session root's, so
+  a linked worktree nested under a directory the session checkout ignores is
+  analysed instead of dropped silently (`.claude/worktrees/` in this
+  repository); and admission asks `analysis-root.ts`
+  (`canWriteAnalysisRoot(resolveAnalysisRoot(...))`) rather than re-deriving the
+  rule. Ownership is compared by REAL path, so a `cd` into a symlinked spelling
+  of a worktree keeps its authorship and its observed identity.
 - `RUNNERS` declarations include file kinds. Runner selection is gated by file
   kind and anchored at the file's language root, not by dispatch-root config or
   declaration order. Runner children use `resolveToolCwd` with launcher markers.
