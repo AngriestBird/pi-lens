@@ -125,10 +125,13 @@ describe("buildCodebaseModel", () => {
 			extracted.coverage,
 		);
 		expect(callGraph.edges.length).toBeGreaterThan(0);
-		const names = buildCodebaseModel(callGraph, alias).entries.map(
-			(entry) => entry.name,
+		const entries = buildCodebaseModel(callGraph, alias).entries;
+		expect(entries.map((entry) => entry.name)).toContain("helper");
+		// The model names each file relative to the session root, never as a
+		// `../` walk out of the link spelling into the target.
+		expect(entries.find((entry) => entry.name === "helper")?.file).toBe(
+			"callee.ts",
 		);
-		expect(names).toContain("helper");
 	});
 
 	it("uses shared file-role classification for missed path-shape cases", () => {

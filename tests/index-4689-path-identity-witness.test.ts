@@ -291,3 +291,42 @@ describe("#4689: a clean write reads clean under any spelling of the session or 
 		});
 	}
 });
+
+describe("#4689: lens_diagnostics names a file relative to the session root under any spelling of it", () => {
+	// RECURRENCE GUARDED: the widget store keys a file by its path identity
+	// while the session root stays the spelling the session started with, and
+	// the report took a lexical `path.relative` of the two, so a session rooted
+	// at a link read every file as `../repo/src/...`, a walk out of the
+	// project into the link's target (#4689 r2 sweep of the r1 F5 shape).
+	for (const [name, rooted] of [
+		["a session rooted at a link to the repo", "alias"],
+		["the real root (control)", "repo"],
+	] as const) {
+		it(`${name}: the blocking row reads src/new.ts`, async (ctx) => {
+			const fx = family(`render-${rooted}`);
+			if (fx.skipReason) return ctx.skip(fx.skipReason);
+			const handle = await startPiSession({
+				root: fixture.root,
+				cwd: rooted === "alias" ? fx.aliasRoot : fx.repo,
+				flags: new Map(GUARDED_FLAGS),
+				responses: [
+					step(writeTarget("src/new.ts", BLOCKING_FILE), "writing"),
+					step(fauxToolCall("lens_diagnostics", { mode: "all" }), "checking"),
+					endTurn(),
+				],
+			});
+			try {
+				await handle.prompt("go");
+				const [all] = toolResults(
+					handle.requests.at(-1) ?? [],
+					"lens_diagnostics",
+				);
+				const text = all?.text ?? "";
+				expect(text).toMatch(/^src\/new\.ts {2}🔴 1 blocking/m);
+				expect(text).not.toContain("../");
+			} finally {
+				await handle.dispose();
+			}
+		});
+	}
+});

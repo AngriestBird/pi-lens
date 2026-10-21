@@ -903,7 +903,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/cargo-manifest.ts": 7,
 		"clients/cascade-logger.ts": 2,
 		"clients/code-quality-warnings.ts": 5,
-		"clients/codebase-model.ts": 5,
+		// 5 -> 4 (#4689 r2): the entry's file is rendered by
+		// `toProjectRelativePath`, not a `path.relative` of two axes.
+		"clients/codebase-model.ts": 4,
 		"clients/complexity-client.ts": 3,
 		"clients/config-core/normalize.ts": 22,
 		"clients/config-locations.ts": 26,
@@ -1269,7 +1271,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"tools/lens-diagnostic-mark.ts": 4,
 		// 30 -> 27 (#4576): `resolvePathsScope` folds onto
 		// `resolveHostToolPath`, dropping three `path.*` calls.
-		"tools/lens-diagnostics.ts": 27,
+		// 27 -> 26 (#4689 r2): mode=all renders a row's file through
+		// `toProjectRelativePath`, not a `path.relative` of two axes.
+		"tools/lens-diagnostics.ts": 26,
 		// 10 -> 8 (#4577 M2): the scalar and batch `path`/`paths` arguments fold
 		// onto `resolveHostToolPath`, dropping one `path.resolve` each.
 		"tools/lsp-diagnostics.ts": 8,

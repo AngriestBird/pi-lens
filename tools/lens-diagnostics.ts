@@ -54,6 +54,7 @@ import {
 	normalizeMapKey,
 	realpathOrResolve,
 	resolveHostToolPath,
+	toProjectRelativePath,
 } from "../clients/path-utils.js";
 import { getLSPService } from "../clients/lsp/capabilities.js";
 import { retireInlineBlockerAndResyncGuard } from "../clients/git-guard.js";
@@ -3618,7 +3619,10 @@ async function formatAllMode(
 	let totalAdvisories = 0;
 
 	for (const s of rendered) {
-		const rel = path.relative(cwd, s.filePath);
+		// Widget rows are keyed by path identity, the root is the session's
+		// spelling: the owner renders `src/x.ts` under a root reached through a
+		// link, where a lexical relative path read `../repo/src/x.ts` (#4689 r2).
+		const rel = toProjectRelativePath(s.filePath, cwd);
 		const parts: string[] = [];
 		if (s.blocking > 0) parts.push(`🔴 ${s.blocking} blocking`);
 		if (s.errors > 0 && s.blocking === 0) parts.push(`${s.errors}E`);
