@@ -9,8 +9,9 @@
  * built and sent (`tests/support/pi-session.ts`, tier 2), so a break in the
  * order between those three hooks changes what the model receives.
  *
- * Moved from `tests/clients/cascade-unanswered-primary-4403.test.ts` (8 of its
- * 10 cases). Two STAY on the double, with the probe that keeps them there:
+ * Moved from `tests/clients/cascade-unanswered-primary-4403.test.ts` (7 of its
+ * 10 cases: the five cause-matrix cells and two of its three scripts). Three
+ * STAY on the double, with the probe that keeps them there:
  *
  * - "delivers the line once: a section the cap cut, then the next turn" and
  *   "delivers the line once: the cascade section leads and the cap cuts it".
@@ -21,6 +22,18 @@
  *   probed by setting `maxChars` to 40 here and watching the whole section
  *   deliver anyway (the cap ran at 1000). A cap-bound claim needs a payload
  *   over 1000 chars, which no scripted provider can produce.
+ * - "b.ts, then its neighbour c.ts, which nothing imports" is environment-
+ *   dependent: it reds in the plegma sandbox (the line rides turn 1, not turn
+ *   2) and passes on the orchestrator's host, where 3 of 3 head runs and
+ *   master's own copy are green. It stays on the double until that dependence
+ *   is understood (#4632 remainder).
+ *
+ * `runTurns` attributes a delivery to the requests a prompt actually made
+ * (`session.requests.length` before and after it), never to the prompt's index
+ * in the schedule: pi makes one request per tool-call round trip, so the two
+ * arrays do not line up, and an index taken from the prompts array sampled
+ * turn 1's write continuation and read plus turn 2's write continuation while
+ * turns 2 and 3's reads were never read (#4716 round 1 F2).
  *
  * Language servers are the host boundary, as in the file this moves from: each
  * server's command is a project override pointing at a shim that runs the
@@ -210,42 +223,31 @@ function requestText(request: PiProviderRequest): string {
 }
 
 /**
- * The cascade lines a request carries, with how many times each appears.
+ * The cascade lines one request carries, each listed once.
  *
- * pi hands each request the WHOLE transcript, and an injected section stays in
- * it afterwards, so a request's own delivery is the INCREASE over the previous
- * request — the same reason `toolResults` reads the last transcript only.
+ * An injected section rides the request it was composed for and not the next
+ * one: measured on this provenance, turn 1's request 1 carried the line and
+ * request 2 did not, so a request that carries a line is the request that
+ * DELIVERED it — no delta against an earlier request is needed, and a repeat
+ * on any later request is a second delivery.
  */
-function cascadeCounts(request: PiProviderRequest): Map<string, number> {
-	const counts = new Map<string, number>();
+function cascadeLinesIn(request: PiProviderRequest): string[] {
+	const lines: string[] = [];
 	for (const line of requestText(request)
 		.split("\n")
 		.map((entry) => entry.trim())) {
 		if (!line.includes("Cascade")) continue;
-		counts.set(line, (counts.get(line) ?? 0) + 1);
+		if (!lines.includes(line)) lines.push(line);
 	}
-	return counts;
+	return lines;
 }
 
-/** The lines a step DELIVERED: every line whose count grew, repeated per growth. */
-function deliveredLines(
-	before: Map<string, number>,
-	after: Map<string, number>,
-): string[] {
-	const delivered: string[] = [];
-	for (const [line, count] of after) {
-		const added = count - (before.get(line) ?? 0);
-		for (let index = 0; index < added; index += 1) delivered.push(line);
-	}
-	return delivered;
-}
-
-/** The read prompt that makes the next provider request; one per turn. */
+/** The prompt that opens the next turn; one per turn. */
 const READ_TURN = "continue";
 
 /**
  * Run `turns` through one real session and return, for each turn, the cascade
- * lines its NEXT model request carried.
+ * lines its requests carried.
  *
  * Every write is one scripted reply (at most one tool call per reply, so its
  * result lands before the next one — #4632 s4), and each turn closes with a
@@ -259,7 +261,7 @@ async function runTurns(
 ): Promise<string[][]> {
 	const workspace = makeWorkspace(testCase, slug);
 	const responses: PiFauxReply[] = [];
-	const prompts: string[] = [];
+	const prompts: Array<{ text: string; turnIndex: number }> = [];
 	for (const [turnIndex, writes] of turns.entries()) {
 		for (const [name, n] of writes) {
 			responses.push(
@@ -274,7 +276,10 @@ async function runTurns(
 		}
 		responses.push(endTurn(`turn ${turnIndex + 1} done`));
 		responses.push(endTurn(`read ${turnIndex + 1}`));
-		prompts.push(`turn ${turnIndex + 1}`, READ_TURN);
+		prompts.push(
+			{ text: `turn ${turnIndex + 1}`, turnIndex },
+			{ text: READ_TURN, turnIndex },
+		);
 	}
 	const session = await startPiSession({
 		root: fixture.root,
@@ -285,25 +290,48 @@ async function runTurns(
 		flags: new Map<string, boolean>([["no-lsp", false]]),
 		responses,
 	});
-	for (const prompt of prompts) await session.prompt(prompt);
-	const counts = session.requests.map(cascadeCounts);
-	// Request 0 opens turn 1; each read prompt's request follows its write turn.
-	const readIndices = prompts
-		.map((prompt, index) => (prompt === READ_TURN ? index : -1))
-		.filter((index) => index >= 0);
+	/** Each turn's half-open request range, taken from the session itself. */
+	const requestWindows: Array<{ from: number; to: number }> = turns.map(() => ({
+		from: -1,
+		to: 0,
+	}));
+	for (const prompt of prompts) {
+		// The request boundary comes from the session, never from the prompt's
+		// position: one prompt makes several requests (one per tool-call round
+		// trip), so a prompt index is not a request index.
+		const before = session.requests.length;
+		await session.prompt(prompt.text);
+		const window = requestWindows[prompt.turnIndex];
+		if (!window) throw new Error(`no request window for turn ${prompt.text}`);
+		if (window.from < 0) window.from = before;
+		window.to = session.requests.length;
+	}
+	const perRequest = session.requests.map(cascadeLinesIn);
 	expect(
-		counts[0]?.size ?? 0,
+		perRequest[0] ?? [],
 		"the first request carries no cascade line",
-	).toBe(0);
+	).toEqual([]);
 	expect(session.errors, "every handler resolved").toEqual([]);
-	return readIndices.map((index, position) =>
-		deliveredLines(
-			position === 0
-				? new Map()
-				: (counts[readIndices[position - 1]] ?? new Map()),
-			counts[index] ?? new Map(),
-		),
+	// Delivered ONCE: the line rides one request and no later request carries
+	// it again. #4716 round 1 F1/F2: the previous sampling read requests 1, 3
+	// and 5 only, so a re-delivery on turn 3 (request 8) was invisible.
+	const firstCarrier = perRequest.findIndex((lines) => lines.length > 0);
+	const laterCarriers = perRequest.flatMap((lines, index) =>
+		index > firstCarrier && lines.length > 0 ? [index] : [],
 	);
+	expect(
+		laterCarriers,
+		`no request after the first one that carries a cascade line (request ${firstCarrier}) carries one again`,
+	).toEqual([]);
+	return requestWindows.map(({ from, to }) => {
+		const delivered: string[] = [];
+		for (let index = from; index < to; index += 1) {
+			for (const line of perRequest[index] ?? []) {
+				if (!delivered.includes(line)) delivered.push(line);
+			}
+		}
+		return delivered;
+	});
 }
 
 const previousConfigPath = process.env.PI_LENS_CONFIG_PATH;
@@ -362,8 +390,8 @@ describe("a cascade neighbour no primary answered for, on the real host (#4403 N
 		expected: string[][];
 	}> = [
 		{
-			// b.ts's run is superseded by the write of its neighbour a.ts, and
-			// a.ts's own run (neighbour d.ts) carries the line.
+			// b.ts's run is superseded by the write of its neighbour a.ts, so the
+			// line must still reach turn 1's own requests (and nothing later).
 			name: "b.ts, then its neighbour a.ts",
 			firstTurn: [
 				["b", 2],
@@ -393,9 +421,10 @@ describe("a cascade neighbour no primary answered for, on the real host (#4403 N
 				`script-${index}`,
 				[script.firstTurn, [["b", 4]], [["b", 5]]],
 			);
-			// `runTurns` reports the lines each turn's next request ADDED; an
-			// injected section stays in the transcript, so this is what the turn
-			// delivered, not what a later request happens to repeat.
+			// `runTurns` reports the lines each turn's OWN requests carried; a
+			// section does not persist into the next request, so a later request
+			// carrying the line again would be a second delivery and `runTurns`
+			// refuses it.
 			expect(turns).toEqual(script.expected);
 		}, 180_000);
 	}

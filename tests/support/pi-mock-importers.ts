@@ -73,10 +73,11 @@ export const PI_MOCK_IMPORTERS: Readonly<Record<string, string>> = {
 	"index-write-order-token.test.ts": "internal-seam",
 	// internal-seam (slice 7 classified these four)
 	// The cascade's five cause-matrix cells and two of its three scripts moved
-	// to `tests/index-4632-s7-turn-end-ordering.test.ts`. What stays needs the
-	// double: the two cap cells script `RUNTIME_CONFIG.turnEnd.maxChars`, an
-	// `as const` copy the loaded copy owns, and the third script is red on
-	// `origin/master` in both drivers (the line rides turn 1, not turn 2).
+	// to `tests/index-4632-s7-turn-end-ordering.test.ts` (7 of its 10 cases).
+	// The three that stay keep the double: the two cap cases script
+	// `RUNTIME_CONFIG.turnEnd.maxChars`, an `as const` copy the loaded copy
+	// owns, and the third script is red on `origin/master` in the plegma sandbox
+	// (the line rides turn 1, not turn 2).
 	"clients/cascade-unanswered-primary-4403.test.ts": "internal-seam",
 	// pi-lens's OWN result rendering on two surfaces (the pi tool result and the
 	// MCP child's), read through the double's registered-tool handle; no host

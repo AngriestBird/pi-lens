@@ -22,6 +22,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
+import type { BusEventLogEntry } from "../clients/bus-events-logger.js";
 import { endTurn } from "./support/pi-session-commit-gate.js";
 import {
 	type PiFauxReply,
@@ -36,20 +37,33 @@ const fixture = piSessionFixture();
 const logDir = path.join(fixture.root, "home");
 const BUS_EVENTS = path.join(logDir, "bus-events.log");
 
-/** One row in the shape `clients/session-lifecycle.ts` writes for a stale ctx. */
-function staleCtxRow(at: number): string {
-	return `${JSON.stringify({
+/**
+ * One `bus-events.log` row, in the shape `logBusEvent`
+ * (`clients/bus-events-logger.ts`) writes when a producer's publish throws the
+ * SDK's stale-ctx error (for example `clients/bus-publish.ts`'s `catch`).
+ * `event`, `outcome` and `cwd` are required by `BusEventLogEntry`; `error` and
+ * `ctxSource` are the emit_failed detail.
+ */
+function staleCtxRow(at: number, cwd: string): string {
+	// Typed as the writer's own record: a field `BusEventLogEntry` gains (or the
+	// rollup starts reading) reds this fixture at `npm run lint` instead of
+	// leaving a row shape the real producers never write.
+	const row: BusEventLogEntry & { error: string } = {
+		ts: new Date(at).toISOString(),
+		event: "pilens:files:touched",
 		outcome: "emit_failed",
+		cwd,
 		error:
 			"This extension ctx is stale after session replacement or reload (assertActive)",
-		ts: new Date(at).toISOString(),
-	})}\n`;
+		ctxSource: "global-fallback",
+	};
+	return `${JSON.stringify(row)}\n`;
 }
 
 /** Append `count` rows stamped `stamp` to the copy's bus-events log. */
-function seedRows(count: number, stamp: number): void {
+function seedRows(count: number, stamp: number, cwd: string): void {
 	fs.mkdirSync(logDir, { recursive: true });
-	fs.appendFileSync(BUS_EVENTS, staleCtxRow(stamp).repeat(count));
+	fs.appendFileSync(BUS_EVENTS, staleCtxRow(stamp, cwd).repeat(count));
 }
 
 function smellNotes(
@@ -86,6 +100,7 @@ async function driveTurns(
 	seedRows(
 		seed.rows,
 		seed.stamp === "fresh" ? Date.now() : Date.now() - 60 * 60_000,
+		cwd,
 	);
 	for (let index = 0; index < count; index += 1) {
 		await handle.prompt(`turn ${index + 1}`);

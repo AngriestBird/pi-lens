@@ -21,11 +21,12 @@
  * every pull with no findings. A missing server's command points at a path
  * that does not exist.
  *
- * WHAT STAYED HERE (#4632 slice 7). The ordering half — the matrix of causes
- * and the two scripts whose line rides the turn it belongs to — now runs on a
- * real pi `AgentSession` in `tests/index-4632-s7-turn-end-ordering.test.ts`,
- * where the next model request IS the observation. Three cases keep the
- * double, each with the probe that keeps it:
+ * WHAT STAYED HERE (#4632 slice 7). Seven of this file's ten cases moved: the
+ * five cause-matrix cells and the two scripts whose line rides the turn it
+ * belongs to now run on a real pi `AgentSession` in
+ * `tests/index-4632-s7-turn-end-ordering.test.ts`, where the next model
+ * request IS the observation. Three cases keep the double, each with the probe
+ * that keeps it:
  *
  * - the two cap cases script `RUNTIME_CONFIG.turnEnd.maxChars`, an `as const`
  *   the loaded copy reads from its OWN module instance; a test-side mutation
@@ -272,6 +273,54 @@ describe("a cascade neighbour no primary answered for (#4403 N2)", () => {
 			},
 		});
 	});
+
+	// Round 6 (W1): the line is committed when the section reaches the agent,
+	// not when turn_end composes it. Recurrence: a mark taken at compose
+	// would spend the line on a section the cap cut. g.ts's blocker leads
+	// the message and the 40-char cap keeps only part of it, so the cascade
+	// section is held; the empty turn 2 delivers the held run, with the line
+	// at the head of the section.
+	it("delivers the line once: a section the cap cut, then the next turn", async () => {
+		const turns = await runTurns(
+			{
+				name: "cut section",
+				typescript: "missing",
+				deno: "disabled",
+				typos: "reporting",
+				maxChars: [40],
+			},
+			[
+				[
+					["g", 2],
+					["b", 2],
+				],
+				[],
+				[["b", 5]],
+			],
+		);
+		// #4486: the held run no longer lists g.ts as a degraded-fallback
+		// neighbour. Its cached typos finding was stored before b.ts's cascade
+		// started, so it is not an observation after the edit (and g.ts's own
+		// dispatch reports it). The section is the line alone.
+		expect(turns).toEqual([[], [UNSTARTED_LINE], []]);
+	}, 180_000);
+
+	// Round 6 (W2): a cascade section that leads an over-long message counts
+	// as delivered. Recurrence: the line sat after the impact header, so a cap
+	// that cut inside it spent the line on a fragment. The kept lines now head
+	// the section.
+	it("delivers the line once: the cascade section leads and the cap cuts it", async () => {
+		const turns = await runTurns(
+			{
+				name: "leading section",
+				typescript: "missing",
+				deno: "disabled",
+				maxChars: [UNSTARTED_LINE.length + 5],
+			},
+			[[["b", 2]], [["b", 4]], [["b", 5]]],
+		);
+		expect(turns).toEqual([[UNSTARTED_LINE], [], []]);
+	}, 180_000);
 
 	// Round 5 (V1): the server is marked once the line is delivered, so a run
 	// that turn_end drops does not use the line up, and two runs that name the
