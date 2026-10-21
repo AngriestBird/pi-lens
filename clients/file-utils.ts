@@ -103,8 +103,10 @@ export function getProjectDataDir(cwd: string): string {
 		memoKey,
 		canonical.fallback,
 	);
-	// An ephemeral base belongs to this process, so no earlier version wrote it.
-	if (settled === dir && base === resolvedBase) {
+	// Only into the directory this call settled on: adopting into `dir` while
+	// an old-slug directory is still in use would create `dir`, and the next
+	// session would prefer it over the old slug's data (#2874 "coexisting").
+	if (settled === dir) {
 		adoptSpelledDataDir(path.resolve(cwd), base, dir);
 	}
 	return settled;

@@ -457,6 +457,10 @@ describe("adopting the data dir a link spelling named (#4689 round 4)", () => {
 		expect(getProjectDataDir(fx.alias)).toBe(dir);
 
 		expect(fs.readFileSync(newer, "utf8")).toBe('{"dispositions":{}}');
+		// A file already present is not a failure to adopt.
+		expect(drainProjectDataDirMigrations()).toEqual([
+			{ to: dir, outcome: "adopted" },
+		]);
 		expect(fs.existsSync(path.join(dir, "cache", "todo-baseline.json"))).toBe(
 			true,
 		);
@@ -481,6 +485,35 @@ describe("adopting the data dir a link spelling named (#4689 round 4)", () => {
 		expect(
 			fs.existsSync(path.join(fx.spelled, "cache", "todo-baseline.json")),
 		).toBe(true);
+	});
+
+	it("adopts nothing while an old-slug directory it could not rename is in use", (ctx) => {
+		// Adopting into the hashed directory would create it, and the next
+		// session would settle on it ("coexisting") and leave the old slug's
+		// data behind.
+		const fx = aliasRoot("pi-lens-adopt-oldslug-");
+		if (!fx) return ctx.skip("the win32 name never moved");
+		const real = fs.realpathSync.native(fx.alias);
+		const hashedDir = getProjectDataDir(real);
+		const oldDir = path.join(
+			fx.base,
+			path.basename(hashedDir).replace(/-[0-9a-f]{8}$/, ""),
+		);
+		fs.mkdirSync(oldDir, { recursive: true });
+		_resetProjectDataDirMemoForTests();
+		drainProjectDataDirMigrations();
+		const rename = vi.spyOn(fs, "renameSync").mockImplementation(() => {
+			throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+		});
+		try {
+			expect(getProjectDataDir(fx.alias)).toBe(oldDir);
+		} finally {
+			rename.mockRestore();
+		}
+		expect(fs.existsSync(hashedDir)).toBe(false);
+		expect(
+			drainProjectDataDirMigrations().map((notice) => notice.outcome),
+		).toEqual(["rename-failed"]);
 	});
 
 	it("copies at most 4096 files and records the rest as not adopted", (ctx) => {
