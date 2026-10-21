@@ -61,9 +61,8 @@ export async function installLspServiceDouble(
 
 /**
  * Install an already-built service object, synchronously, replacing whatever the
- * previous install left cached. Four call sites in four files
- * (`grep -rn "installLspService(" tests`):
- * `tests/clients/disk-change-subscribers.test.ts`,
+ * previous install left cached. Three call sites in three files, besides the
+ * seam's own witness (`grep -rn "installLspService(" tests`):
  * `tests/clients/dispatch/runners/lsp-environment-gap-4532.test.ts`,
  * `tests/clients/lsp/out-of-band-client-root-4532.test.ts` and
  * `tests/tools/lsp-diagnostics-inferred-project.test.ts`. They need no reset of
