@@ -1144,6 +1144,8 @@ export type DegradationKind =
 	 * retired; a result that still arrives loses its authorship. Counted.
 	 */
 	| "opaque-baseline-lost"
+	/** Opaque mutation was analyzed without granting autonomous writer rights. */
+	| "opaque-mutation-ownership-boundary"
 	/**
 	 * #2050: a bash command named a git checkout that got NO opaque baseline, so
 	 * its writes were not observed. Subject is the normalized root (once per
@@ -1153,8 +1155,6 @@ export type DegradationKind =
 	 * because the root is not a linked worktree of the session's repository.
 	 */
 	| "opaque-recovery-root-refused"
-	/** Opaque mutation was analyzed without granting autonomous writer rights. */
-	| "opaque-mutation-ownership-boundary"
 	/** Opengrep completed with partial parsing warnings (#2943). */
 	| "opengrep-partial-scan"
 	/** Opengrep refused the requested root or reported a scan error (#2943). */
