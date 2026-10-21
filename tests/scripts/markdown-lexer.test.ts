@@ -97,9 +97,9 @@ describe("markdownHeadings (#4717)", () => {
 		// `## Tests <!-- note -->` or `## **Tests**` named no section.
 		expect(
 			markdownHeadings(
-				"## Tests <!-- note -->\n## **Bold** [link](u) `code` *em*\n",
+				"## Tests <!-- note -->\n## **Bold** [link](u) `code` *em*\n## *Nested <!-- note -->*\n",
 			).map((heading) => heading.text),
-		).toEqual(["Tests", "Bold link code em"]);
+		).toEqual(["Tests", "Bold link code em", "Nested"]);
 	});
 
 	it("drops a heading a comment left open in a list item hides (#4717 N6)", () => {
