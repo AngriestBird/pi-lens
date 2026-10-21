@@ -113,6 +113,8 @@ const CONVERSATION_MODULE_STATE: Readonly<Record<string, readonly string[]>> = {
  * the containers: `astGrepClient` and `enabledLazyTools` joined the pin.
  */
 const ACTIVATION_STATE: Readonly<Record<string, string>> = {
+	admittedPrimary:
+		"whether this activation ran a full admission; an unmatched leave of one that admitted none keeps the classifier's answer for the registration (#4106, #4704)",
 	astGrepClient:
 		"a per-activation AstGrepClient handle for the tools this factory registers; it holds no conversation facts",
 	contextInjectionEnabled:
@@ -130,8 +132,6 @@ const ACTIVATION_STATE: Readonly<Record<string, string>> = {
 	ownedSessionRole: "this activation's primary or secondary role (#1996)",
 	renderInvalidator: "this activation's widget repaint callback",
 	scope: "this activation's session scope (#3611)",
-	sharedInfraOwner:
-		"the admitted primary context; shared teardown requires it still owns the current process registration (#4554 r5)",
 	startInFlight:
 		"this activation's primary session_start until it returns, so a shutdown that lands before the start adopted hands on the slot left for it (#3881)",
 	turnStartScope:

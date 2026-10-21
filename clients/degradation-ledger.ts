@@ -1542,6 +1542,14 @@ export type DegradationKind =
 	| "self-drift-hash-budget-exhausted"
 	| "self-drift-unverifiable"
 	/**
+	 * #4704: an activation's live session was dropped from the process-wide
+	 * membership because pi invalidated its context with no `session_shutdown`
+	 * (`AgentSession.dispose()`, a subagent runner's teardown). It no longer
+	 * holds the shared teardown, and its own end-of-session work never ran.
+	 * Subject `no-shutdown`; once per session.
+	 */
+	| "session-member-disposed"
+	/**
 	 * #3819 r2: a demoted `/fork` or `/reload` start (a row-17 start held the
 	 * primary registration) discarded the hand-off slot left for it, so the
 	 * session cannot take it stale later. Once per start reason.
