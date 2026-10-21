@@ -114,6 +114,7 @@ import type {
 	AgentSessionServices,
 	CreateAgentSessionResult,
 	CreateAgentSessionRuntimeFactory,
+	ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
 import { afterAll, afterEach } from "vitest";
 import { _settleRegistryMutationsForTests } from "../../clients/instance-registry-tail.js";
@@ -374,6 +375,33 @@ const DEFAULT_FLAGS: ReadonlyArray<[string, boolean]> = [
 	["no-complexity", true],
 ];
 
+/**
+ * The flag map pi is handed: every ON entry, and nothing else.
+ *
+ * pi reads a BOOLEAN extension flag's PRESENCE as `true` —
+ * `applyExtensionFlagValues` (`@earendil-works/pi-coding-agent`'s
+ * `dist/core/agent-session-services.js`) writes `flagValues.set(name, true)`
+ * for any boolean key it is given and never looks at the value. So `false`
+ * cannot be expressed by the value; it means the key must be ABSENT, which for
+ * these flags is also their registered default. A case that turns a default
+ * off (`new Map([["no-lsp", false]])`) therefore deletes the key, and a
+ * `true` entry adds it (#4632 slice 7: passing `["no-lsp", false]` turned the
+ * language servers OFF, the opposite of the request).
+ */
+function flagMap(
+	base: ReadonlyArray<readonly [string, boolean]>,
+	overrides: ReadonlyMap<string, boolean | string> | undefined,
+): Map<string, boolean | string> {
+	const merged = new Map<string, boolean | string>([
+		...base,
+		...(overrides ?? []),
+	]);
+	for (const [name, value] of [...merged]) {
+		if (value === false) merged.delete(name);
+	}
+	return merged;
+}
+
 /** One provider request: the messages the model received, in order. */
 export type PiProviderRequest = ReadonlyArray<PiMessage>;
 
@@ -402,6 +430,64 @@ export function replayToolNames(request: PiProviderRequest): string[] {
 	return [...tools];
 }
 
+/** One notification the loaded copy asked pi's UI to show, in order. */
+export interface PiNotification {
+	readonly message: string;
+	readonly type?: "info" | "warning" | "error";
+}
+
+/**
+ * The host-boundary recorder behind {@link PiSessionOptions.captureUi}.
+ *
+ * `notify` is the one member a case asserts on; `setStatus` is recorded because
+ * the LSP status line rides it, and every other member is a no-op the host may
+ * call. The value is a real `ExtensionUIContext` handed to pi's own
+ * `bindExtensions` — never a pi-lens module — so what a case reads back is what
+ * pi-lens asked the HOST to show, not a payload a handler returned.
+ */
+interface UiRecorder {
+	readonly notifications: PiNotification[];
+	readonly statuses: Array<{ key: string; text: string | undefined }>;
+	readonly context: ExtensionUIContext;
+}
+
+function createUiRecorder(): UiRecorder {
+	const notifications: PiNotification[] = [];
+	const statuses: Array<{ key: string; text: string | undefined }> = [];
+	const theme = {
+		fg: (_color: string, text: string) => text,
+		bg: (_color: string, text: string) => text,
+		bold: (text: string) => text,
+	} as unknown as ExtensionUIContext["theme"];
+	const base: Record<string, unknown> = {
+		notify: (message: string, type?: PiNotification["type"]) => {
+			notifications.push({ message, type });
+		},
+		setStatus: (key: string, text: string | undefined) => {
+			statuses.push({ key, text });
+		},
+		select: async () => undefined,
+		confirm: async () => false,
+		input: async () => undefined,
+		onTerminalInput: () => () => {},
+		theme,
+		getAllThemes: () => [],
+		getTheme: () => undefined,
+		getEditorComponent: () => undefined,
+		getToolsExpanded: () => false,
+		getEditorText: () => "",
+	};
+	// Anything the host calls that a case does not read is a no-op, so a pi
+	// release that adds a UI member does not turn every UI case red.
+	const context = new Proxy(base, {
+		get: (target, property: string | symbol) => {
+			if (property in target) return target[property as string];
+			return () => undefined;
+		},
+	}) as unknown as ExtensionUIContext;
+	return { notifications, statuses, context };
+}
+
 export interface PiSessionOptions {
 	/** Fixture root, created by `setupTestEnvironment(TMP_PREFIX)` below. */
 	root: string;
@@ -418,8 +504,9 @@ export interface PiSessionOptions {
 	/**
 	 * `pi.getFlag` overrides on top of {@link DEFAULT_FLAGS}: a key named here
 	 * wins, and every other default (the analyzers this tier neither observes
-	 * nor can drain) stays off. A case that needs the real analyzer deletes its
-	 * flag explicitly.
+	 * nor can drain) stays off. `false` turns a default OFF rather than on —
+	 * see {@link flagMap} for why the value cannot express that on the host's
+	 * own flag map.
 	 */
 	flags?: ReadonlyMap<string, boolean | string>;
 	/** Session store. Defaults to `<root>/sessions`. */
@@ -433,6 +520,14 @@ export interface PiSessionOptions {
 	 * config-resolution path is the ensure (no warm-up, no deferred load).
 	 */
 	startupMode?: "full" | "quick" | "minimal";
+	/**
+	 * Bind a RECORDING UI context instead of pi's no-op one. A case that asserts
+	 * what pi-lens asked the UI to show (a notification, the LSP status line)
+	 * reads it back from {@link PiSession.notifications} / `.statuses`; the
+	 * recorder is a real `ExtensionUIContext` at the host boundary and reaches
+	 * no pi-lens module.
+	 */
+	captureUi?: boolean;
 }
 
 export interface PiSession {
@@ -444,6 +539,10 @@ export interface PiSession {
 	readonly requests: PiProviderRequest[];
 	/** Errors pi reported from an extension handler (`runner.onError`). */
 	readonly errors: unknown[];
+	/** Notifications the copy asked pi's UI to show ({@link PiSessionOptions.captureUi}). */
+	readonly notifications: readonly PiNotification[];
+	/** Status lines the copy set, in order ({@link PiSessionOptions.captureUi}). */
+	readonly statuses: ReadonlyArray<{ key: string; text: string | undefined }>;
 	/** The persisted session file, once pi has written one. */
 	sessionFile(): string | undefined;
 	/**
@@ -577,6 +676,8 @@ async function buildModelRuntime(
 interface SessionArgs {
 	readonly root: string;
 	readonly flags: ReadonlyMap<string, boolean | string>;
+	/** Present only when the case asked for a recording UI context. */
+	readonly ui?: UiRecorder;
 }
 
 /** One pi session before its extensions are bound, with its provider recorder. */
@@ -636,9 +737,14 @@ async function createSession(
 }
 
 /** Bind the loaded copy to a session: pi emits that session's `session_start`. */
-async function bindTo(session: AgentSession, errors: unknown[]): Promise<void> {
+async function bindTo(
+	session: AgentSession,
+	errors: unknown[],
+	ui?: UiRecorder,
+): Promise<void> {
 	await session.bindExtensions({
 		onError: (error: unknown) => errors.push(error),
+		...(ui ? { uiContext: ui.context, mode: "tui" as const } : {}),
 	});
 }
 
@@ -733,7 +839,9 @@ function handleFor(
 				return { ...next.result, services: next.services, diagnostics: [] };
 			},
 		);
-		runtime.setRebindSession((replaced) => bindTo(replaced, replacementErrors));
+		runtime.setRebindSession((replaced) =>
+			bindTo(replaced, replacementErrors, args.ui),
+		);
 		// pi calls this after the shutdown handlers ran and before it disposes
 		// the session, so from here on this handle owns no live session and
 		// must not emit a second shutdown. A refusal before the teardown (an
@@ -755,6 +863,8 @@ function handleFor(
 		cwd: created.services.cwd,
 		requests: created.requests,
 		errors,
+		notifications: args.ui?.notifications ?? [],
+		statuses: args.ui?.statuses ?? [],
 		sessionFile: () => session.sessionManager.getSessionFile(),
 		async latencyRows() {
 			await flushAllNdjsonWriters();
@@ -836,7 +946,7 @@ async function bindSession(
 	created: CreatedSession,
 ): Promise<PiSession> {
 	const errors: unknown[] = [];
-	await bindTo(created.session, errors);
+	await bindTo(created.session, errors, args.ui);
 	return handleFor(args, created, errors);
 }
 
@@ -875,7 +985,8 @@ export async function startPiSession(
 	else delete process.env.PI_LENS_COLD_START_QUICK;
 	const args: SessionArgs = {
 		root: options.root,
-		flags: new Map([...DEFAULT_FLAGS, ...(options.flags ?? [])]),
+		flags: flagMap(DEFAULT_FLAGS, options.flags),
+		...(options.captureUi ? { ui: createUiRecorder() } : {}),
 	};
 	return bindSession(
 		args,

@@ -532,6 +532,41 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 		}
 	});
 
+	it("records what the copy asks the host's UI to show", async () => {
+		// #4632 acceptance 6: the capability lands BEFORE its consumers. A case that
+		// asserts what pi-lens asks the USER to see (the smells rollup's note, the
+		// LSP status line) cannot read a handler's return value: the message leaves
+		// through `ctx.ui.notify`, which is the host's own boundary. The helper
+		// binds a real `ExtensionUIContext` (`bindExtensions`), and `/lens-toggle`
+		// is the smallest production path that notifies — the same command the
+		// `real-ui-harness` row pins on the double.
+		const handle = await startPiSession({
+			root: fixture.root,
+			cwd: path.join(fixture.root, "ui-recorder", "proj"),
+			captureUi: true,
+			responses: [
+				fauxAssistantMessage(fauxText("ready")),
+				fauxAssistantMessage(fauxText("ready")),
+			],
+		});
+
+		expect(handle.notifications).toEqual([]);
+		await handle.prompt("hello");
+		expect(handle.notifications).toEqual([]);
+
+		// pi dispatches the extension command from the prompt text, so the command
+		// runs against pi's real ctx — the mode is `tui`, so `notifyUi` renders
+		// instead of logging the suppression.
+		await handle.prompt("/lens-toggle");
+		expect(handle.notifications).toEqual([
+			{
+				message:
+					"pi-lens disabled for this session. Run /lens-toggle again to resume.",
+				type: "warning",
+			},
+		]);
+	});
+
 	it("refuses a second fixture root in one file", async () => {
 		// A session under a SECOND fixture root writes into the FIRST root's home
 		// and nothing into its own — measured: 78 `session_start` rows against 0

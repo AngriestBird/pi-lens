@@ -1731,18 +1731,18 @@ ids, and the request the model sees. Their header comments state the APIs
 and limits. A new tier capability adds a case to `pi-runner.test.ts` or
 `pi-session.test.ts` first. `pi-mock.ts` stays only for a test file on
 `PI_MOCK_IMPORTERS` (`tests/support/pi-mock-importers.ts`), whose row states the
-class: `process-boundary` (4 rows), `internal-seam` (39: the case interposes on
+class: `process-boundary` (4 rows), `internal-seam` (41: the case interposes on
 a pi-lens `clients/` module either through `vi.mock`, which cannot reach the
 copy pi's loader builds, or through a test-side copy of a process-global
 service the loaded copy does not share, such as `clients/lsp`'s service),
 `unproducible-payload` (5: a payload a scripted provider cannot
 produce), `double-subject` (1: the double is the subject), and
 `real-ui-harness` (1: the claim is what the TUI shows or mounts, which no
-in-process tier can produce). Three rows still carry `pending slice 10`, the
-last roadmap slice, which moves no file, so a slice marker now names no
-scheduled work. The class counts are the list's 53 rows at that recording, and
-a row grouped under a `pending slice 8` comment already carries its own class,
-so it is counted in that bucket:
+in-process tier can produce). No row carries a `pending slice` marker: slice 7
+classified the last three with the probe that keeps each on the double. The
+class counts are the list's 52 rows at that recording — slice 7 moved the
+`index-smells-rollup-wiring` row out with its file — and this command
+reproduces them:
 `grep -oE '^[[:space:]]*"[^"]*": *"[^"]+"' tests/support/pi-mock-importers.ts | sed -E 's/.*": *"([^"]+)"$/\1/' | sort | uniq -c`.
 The double throws at load for a test file not on the list, so a new user fails
 however it imports it. The list only shrinks:

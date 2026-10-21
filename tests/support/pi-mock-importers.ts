@@ -24,7 +24,8 @@
  * slice 10 is docs-and-stop, so a `pending slice N` label would name work no
  * slice carries (review F4 on #4702). Classes are the author's reading at
  * 2026-10-21 and are checked for vocabulary only; the SET of files is what the
- * gate pins.
+ * gate pins. NO `pending slice` row remains: slice 7 (#4632) classified the last
+ * three, with the probe that keeps each on the double.
  */
 
 import * as fs from "node:fs";
@@ -66,18 +67,24 @@ export const PI_MOCK_IMPORTERS: Readonly<Record<string, string>> = {
 	"index-observed-sweep-no-read-guard.test.ts": "internal-seam",
 	"index-project-trust-wiring.test.ts": "internal-seam",
 	"index-read-bridge-zero-line.test.ts": "internal-seam",
-	"index-smells-rollup-wiring.test.ts": "internal-seam",
 	"index-vanished-instance-wiring.test.ts": "internal-seam",
 	"index-wiring.test.ts": "internal-seam",
 	"index-word-index-memo-settle.test.ts": "internal-seam",
 	"index-write-order-token.test.ts": "internal-seam",
-	// pending slice 10
-	"clients/cascade-unanswered-primary-4403.test.ts": "pending slice 10",
-	"config/result-contract-governance.test.ts": "pending slice 10",
-	"index-process-bridge-rebind-real-factory.test.ts": "pending slice 10",
-	// internal-seam (slice 6 classified this row; the three rows above keep their
-	// `pending slice 10` marker — slice 10 landed as docs-and-stop and moves no
-	// file, so that marker names no scheduled work and those rows stay here)
+	// internal-seam (slice 7 classified these four)
+	// The cascade's five cause-matrix cells and two of its three scripts moved
+	// to `tests/index-4632-s7-turn-end-ordering.test.ts`. What stays needs the
+	// double: the two cap cells script `RUNTIME_CONFIG.turnEnd.maxChars`, an
+	// `as const` copy the loaded copy owns, and the third script is red on
+	// `origin/master` in both drivers (the line rides turn 1, not turn 2).
+	"clients/cascade-unanswered-primary-4403.test.ts": "internal-seam",
+	// pi-lens's OWN result rendering on two surfaces (the pi tool result and the
+	// MCP child's), read through the double's registered-tool handle; no host
+	// semantic reaches the assertion.
+	"config/result-contract-governance.test.ts": "internal-seam",
+	// Drives hand-built `session_start`/`session_shutdown` events across a
+	// factory reload and reads the test-side `getIOBridge` copy (#4258).
+	"index-process-bridge-rebind-real-factory.test.ts": "internal-seam",
 	"tools/diagnostics-route-switch-matrix.test.ts": "internal-seam",
 	// unproducible-payload
 	"clients/context-append-to-last-user.test.ts": "unproducible-payload",
@@ -88,7 +95,7 @@ export const PI_MOCK_IMPORTERS: Readonly<Record<string, string>> = {
 	// slice-5 stays (see #4632)
 	"index-4554-last-member-teardown.test.ts": "internal-seam",
 	"index-multi-root-session-start.test.ts": "unproducible-payload",
-	// pending slice 8
+	// slice 8 landed (#4699); these two keep the classes it recorded
 	"clients/session-event-guard.test.ts": "unproducible-payload",
 	"index-cascade-resolved-clean-wiring.test.ts": "internal-seam",
 	// process-boundary
