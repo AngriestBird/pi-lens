@@ -469,6 +469,17 @@ file-scoped worklist and receives no project-wide scanner output.
     publish; the model checked `FreshResult` alone and the fake published after
     the fence reply).
 
+79. **Prefix churn from a non-append write:** a provider caches the request in
+    order (tools, then system, then messages), so a write that changes bytes
+    before the newest message re-bills the whole conversation: a returned
+    `context` list that makes pi rebuild the system head, or a tool-set change
+    on a model that folds system messages into the head. Write at the tail
+    only, and count each tool-set change as one full rewrite on such models. A
+    host-generation gate takes a recorded fixture per certified minor, never
+    two. Screen: drive two real-session requests that differ only in the
+    writer, and compare the head and pi-ai's collapsed head. Guard: planned,
+    tracked in #4687.
+
 </important>
 
 <important if="a runner outcome or tool execution">
