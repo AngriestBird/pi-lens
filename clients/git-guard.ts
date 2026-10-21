@@ -3,7 +3,7 @@ import * as path from "node:path";
 import type { CacheInspection, CacheManager } from "./cache-manager.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 import { isPathIgnoredByProject } from "./file-utils.js";
-import { toPosix } from "./path-utils.js";
+import { toProjectRelativePath } from "./path-utils.js";
 import { tokenizeShellCommand } from "./bash-file-access.js";
 import { incrementDegradationCount } from "./degradation-ledger.js";
 import { absorbSettledRunnerBlockers } from "./deferred-runner-blockers.js";
@@ -1079,7 +1079,7 @@ function unconfirmedRecordRemedy(
 		const files = [
 			...new Set(
 				sections.map((section) =>
-					toPosix(path.relative(cwd, resolveGuardPath(section.file, cwd))),
+					toProjectRelativePath(resolveGuardPath(section.file, cwd), cwd),
 				),
 			),
 		];
