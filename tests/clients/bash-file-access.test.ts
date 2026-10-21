@@ -782,9 +782,14 @@ describe("extractWrittenPathsFromCommand — bash writes", () => {
 	// tokenizer drops the quotes, so the segment carries the bit; the pre-fix
 	// resolver expanded all three spellings to $HOME and credited a read of a
 	// file the command never opened.
+	// #4713 R10: so is a tilde after an empty quote, or one whose prefix holds
+	// one (`~""/x`): the quote adds no character, but bash sees it.
 	it.each([
 		["single-quoted", "cat '~/proj/a.ts'"],
 		["double-quoted", 'cat "~/proj/a.ts"'],
+		["empty-quote-led", 'cat ""~/proj/a.ts'],
+		["empty-single-quote-led", "cat ''~/proj/a.ts"],
+		["prefix-quoted", 'cat ~""/proj/a.ts'],
 	])(
 		"keeps a %s ~ operand literal under the cwd (#4577)",
 		(_label, command) => {
@@ -1658,6 +1663,90 @@ describe("scanShellWriteScopes — the command's effective directory (#2050)", (
 			bash: "~+1/f.ts",
 			named: ["~+1"],
 		},
+		{
+			row: 'R97 FOO""=bar, an empty quote in the name (R10)',
+			command: 'FOO""=bar cd sub; printf x > f.ts',
+			bash: "f.ts",
+			named: [],
+		},
+		{
+			row: "R98 FOO''=bar (R10)",
+			command: "FOO''=bar cd sub; printf x > f.ts",
+			bash: "f.ts",
+			named: [],
+		},
+		{
+			row: "R99 FOO$''=bar (R10)",
+			command: "FOO$''=bar cd sub; printf x > f.ts",
+			bash: "f.ts",
+			named: [],
+		},
+		{
+			row: 'R100 FOO$""=bar (R10)',
+			command: 'FOO$""=bar cd sub; printf x > f.ts',
+			bash: "f.ts",
+			named: [],
+		},
+		{
+			row: "R101 FOO\\=bar (R10)",
+			command: "FOO\\=bar cd sub; printf x > f.ts",
+			bash: "f.ts",
+			named: [],
+		},
+		{
+			row: 'R102 F""OO=bar (R10)',
+			command: 'F""OO=bar cd sub; printf x > f.ts',
+			bash: "f.ts",
+			named: [],
+		},
+		{
+			row: 'R103 ""FOO=bar (R10)',
+			command: '""FOO=bar cd sub; printf x > f.ts',
+			bash: "f.ts",
+			named: [],
+		},
+		{
+			row: 'R104 FOO=""bar stays an assignment (R10)',
+			command: 'FOO=""bar cd sub; printf x > f.ts',
+			bash: "sub/f.ts",
+			named: ["sub"],
+		},
+		{
+			row: 'R105 cd ""~, a tilde after an empty quote (R10)',
+			command: "mkdir '~'; cd \"\"~; printf x > f.ts",
+			bash: "~/f.ts",
+			named: ["~"],
+		},
+		{
+			row: 'R106 cd ""~/x (R10)',
+			command: "mkdir -p '~/x'; cd \"\"~/x; printf x > f.ts",
+			bash: "~/x/f.ts",
+			named: ["~/x"],
+		},
+		{
+			row: "R107 cd ''~+1 (R10)",
+			command: "mkdir '~+1'; cd ''~+1; printf x > f.ts",
+			bash: "~+1/f.ts",
+			named: ["~+1"],
+		},
+		{
+			row: 'R108 cd ~"", a quote in the tilde-prefix (R10)',
+			command: "mkdir '~'; cd ~\"\"; printf x > f.ts",
+			bash: "~/f.ts",
+			named: ["~"],
+		},
+		{
+			row: 'R109 cd ~""/x (R10)',
+			command: "mkdir -p '~/x'; cd ~\"\"/x; printf x > f.ts",
+			bash: "~/x/f.ts",
+			named: ["~/x"],
+		},
+		{
+			row: "R110 cd ~''/x (R10)",
+			command: "mkdir -p '~/x'; cd ~''/x; printf x > f.ts",
+			bash: "~/x/f.ts",
+			named: ["~/x"],
+		},
 	];
 
 	it.each(CWD_ROWS)(
@@ -1687,6 +1776,13 @@ describe("scanShellWriteScopes — the command's effective directory (#2050)", (
 				path.join(home, "f.ts"),
 			]);
 			expect(written("cd ~/x; printf x > f.ts")).toEqual([
+				path.join(home, "x", "f.ts"),
+			]);
+			// #4713 R10: a quote after the tilde-prefix leaves the expansion.
+			expect(written('cd ~/x""; printf x > f.ts')).toEqual([
+				path.join(home, "x", "f.ts"),
+			]);
+			expect(written('cd ~/""x; printf x > f.ts')).toEqual([
 				path.join(home, "x", "f.ts"),
 			]);
 		} finally {

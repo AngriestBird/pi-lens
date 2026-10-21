@@ -101,9 +101,11 @@ interface ShellSegmentRange {
 	literalWords: readonly boolean[];
 	/**
 	 * Per token: the length of its leading run of characters that came from no
-	 * quotes and no removed escape (#4713 R8-3). Bash reads `NAME=` as an
-	 * assignment only when it lies inside that run. A backslash the token keeps
-	 * (`\cd`) and the character after it count as part of the run.
+	 * quotes and no removed escape (#4713 R8-3). The run ends at the first quote
+	 * or escape in the SOURCE, even one that adds no character (`FOO""=bar`,
+	 * #4713 R10). Bash reads `NAME=` as an assignment only when it lies inside
+	 * that run. A backslash the token keeps (`\cd`) and the character after it
+	 * count as part of the run: the token's text still shows it.
 	 */
 	unquotedLengths: readonly number[];
 }
@@ -259,11 +261,13 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 	let word = "";
 	/**
 	 * How many leading characters of the word came out of no quotes and no
-	 * escape. Zero means the FIRST character came out of one, so a tilde there
-	 * is literal to bash (`'~/x'`, `"~/x"`, `\~/x`) rather than a home prefix (#4577 M1).
-	 * Reset with the word.
+	 * escape, before the first quote or escape in its source. A leading tilde
+	 * outside that run is literal to bash (`'~/x'`, `"~/x"`, `""~/x`,
+	 * `~""/x`) rather than a home prefix (#4577 M1). Reset with the word.
 	 */
 	let wordUnquoted = 0;
+	// False once the word's source met a quote or an escape (#4713 R10).
+	let wordRunOpen = true;
 	let quotedTilde: boolean[] = [];
 	let quote: "single" | "double" | undefined;
 	let escaped = false;
@@ -282,27 +286,32 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 		quoted: boolean,
 		literal: boolean,
 	) => {
-		if (!quoted && wordUnquoted === word.length)
-			wordUnquoted += (ch ?? "").length;
+		if (quoted) wordRunOpen = false;
+		else if (wordRunOpen) wordUnquoted += (ch ?? "").length;
 		word += ch ?? "";
 		if (!literal) wordLiteral = false;
 	};
 	const flushWord = () => {
 		if (word) {
-			quotedTilde.push(wordUnquoted === 0 && word.startsWith("~"));
+			// Bash expands a leading `~` only when its tilde-prefix, up to the
+			// first `/`, lies in the unquoted run (`~""/x` stays literal; #4577
+			// M1, #4713 R10).
+			const slash = word.indexOf("/");
+			const tildeExpands =
+				word.startsWith("~") &&
+				(wordRunOpen || (slash >= 0 && wordUnquoted > slash));
+			quotedTilde.push(word.startsWith("~") && !tildeExpands);
 			tokens.push(word);
 			redirectWords.push(redirectPending);
 			redirectPending = false;
 			const expandedTilde =
-				wordUnquoted > 0 &&
-				word.startsWith("~") &&
-				word !== "~" &&
-				!word.startsWith("~/");
+				tildeExpands && word !== "~" && !word.startsWith("~/");
 			literalWords.push(wordLiteral && !expandedTilde);
 			unquotedLengths.push(wordUnquoted);
 		}
 		word = "";
 		wordUnquoted = 0;
+		wordRunOpen = true;
 		wordLiteral = true;
 		atTokenStart = true;
 	};
@@ -383,11 +392,13 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 		}
 		if (ch === "'") {
 			quote = "single";
+			wordRunOpen = false;
 			atTokenStart = false;
 			continue;
 		}
 		if (ch === '"') {
 			quote = "double";
+			wordRunOpen = false;
 			atTokenStart = false;
 			continue;
 		}
