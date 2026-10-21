@@ -859,10 +859,17 @@ function isTurnEndFindingsCache(value: unknown): value is TurnEndFindingsCache {
 type StoredRecord = Partial<TurnEndFindingsCache>;
 
 /**
+ * A stored value: its fields, or `undefined` fields for a value that is not an
+ * object (#4733 r2). It is present, so the gate still refuses it, and it is
+ * never read as a record that makes no claim.
+ */
+interface StoredValue {
+	readonly fields: StoredRecord | undefined;
+}
+
+/**
  * The stored value WHATEVER ITS AGE (#4725), or `undefined` when there is none
- * or it cannot be read. A value that is not an object is returned as stored
- * (#4733 r2): present, so the gate still refuses it, and never read as a
- * record that makes no claim.
+ * or it cannot be read.
  *
  * The cache's freshness window is the gate's bound on TRUSTING a recorded
  * blocker, not a reason for the record's own writers to stop seeing it. Read
@@ -870,28 +877,31 @@ type StoredRecord = Partial<TurnEndFindingsCache>;
  * carry or retire it: a clean write latched `cache_stale`, the turn end's
  * clean-up skipped it, and it refused every commit in every later session.
  */
-function storedRecord(cacheManager: CacheManager, cwd: string): unknown {
+function storedRecord(
+	cacheManager: CacheManager,
+	cwd: string,
+): StoredValue | undefined {
 	const read = cacheManager.readCache<unknown>(
 		"turn-end-findings",
 		cwd,
 		Number.POSITIVE_INFINITY,
 	);
-	return read ? (read.data ?? null) : undefined;
-}
-
-/** The stored value's fields, or `undefined` for a value that is not a record. */
-function storedFields(stored: unknown): StoredRecord | undefined {
-	return stored && typeof stored === "object" && !Array.isArray(stored)
-		? (stored as StoredRecord)
-		: undefined;
+	if (!read) return undefined;
+	const { data } = read;
+	// The parse that makes the type true, not a verdict: every claim predicate
+	// already fails closed on a value with none of the record's fields.
+	return {
+		fields:
+			data && typeof data === "object" ? (data as StoredRecord) : undefined,
+	};
 }
 
 function cacheRecord(
 	cacheManager: CacheManager,
 	cwd: string,
 ): TurnEndFindingsCache | undefined {
-	const data = storedRecord(cacheManager, cwd);
-	return isTurnEndFindingsCache(data) ? data : undefined;
+	const fields = storedRecord(cacheManager, cwd)?.fields;
+	return isTurnEndFindingsCache(fields) ? fields : undefined;
 }
 
 /**
@@ -902,8 +912,7 @@ function cacheRecord(
  * other form (a blocker, a contradiction, a record with no claim at all) is
  * not admitted here and keeps failing closed.
  */
-function claimsNoBlocker(data: unknown): boolean {
-	const fields = storedFields(data);
+function claimsNoBlocker(fields: StoredRecord | undefined): boolean {
 	if (!fields) return false;
 	return (
 		fields.hasBlockers === false &&
@@ -938,8 +947,7 @@ const NO_CLAIM_FIELDS = [
  * owner, a field no writer of these shapes stores) is not this form and keeps
  * failing closed.
  */
-function makesNoClaim(data: unknown): boolean {
-	const fields = storedFields(data);
+function makesNoClaim(fields: StoredRecord | undefined): boolean {
 	return (
 		!!fields &&
 		typeof fields.content === "string" &&
@@ -986,7 +994,7 @@ export function retireSettledGitGuardRecord(
 	cacheManager: CacheManager,
 	cwd: string,
 ): boolean {
-	const stored = storedFields(storedRecord(cacheManager, cwd));
+	const stored = storedRecord(cacheManager, cwd)?.fields;
 	if (!stored) return false;
 	const own =
 		stored.sessionId === runtime.telemetrySessionId &&
@@ -1154,13 +1162,14 @@ const MAX_REMEDY_FILES = 5;
  * such action, and the text says what replaces it instead of inventing one.
  */
 function unconfirmedRecordRemedy(
-	stored: unknown,
+	stored: StoredValue | undefined,
 	inspection: CacheInspection,
 	runtime: RuntimeCoordinator,
 	cwd: string,
 ): string | undefined {
 	if (stored === undefined) return undefined;
-	const record = isTurnEndFindingsCache(stored) ? stored : undefined;
+	const { fields } = stored;
+	const record = isTurnEndFindingsCache(fields) ? fields : undefined;
 	const testRemedy =
 		record?.testFailures === true
 			? "Run the failing tests again: a passing run clears them."
@@ -1205,7 +1214,7 @@ function unconfirmedRecordRemedy(
 		parts.push(
 			`The record names blockers in ${shown} that pi-lens cannot confirm. Fix them and write each file again: a clean pi-lens check of a file clears its part of the record.`,
 		);
-	} else if (makesNoClaim(stored)) {
+	} else if (makesNoClaim(fields)) {
 		parts.push(
 			"The record makes no blocker claim pi-lens can check, so no re-check of one file clears it; a turn that ends with no blocker clears it.",
 		);
@@ -1360,7 +1369,7 @@ export function syncGitGuardRecord(
 	// #4725: the record is read whatever its age (`storedRecord`). Read through
 	// the freshness window, a stale record latched `cache_stale` here on every
 	// write, and no later session could clear it.
-	const stored = storedRecord(cacheManager, cwd);
+	const stored = storedRecord(cacheManager, cwd)?.fields;
 	// A record that claims no blocker answers for nothing, whichever session
 	// wrote it, so a write with no blocker of its own replaces it exactly as it
 	// replaces a missing record (the clear branch below).
@@ -1726,17 +1735,18 @@ export function evaluateGitGuard(
 	// A record that claims no blocker answers for nothing, whatever its age and
 	// whichever session wrote it (the fresh path allowed it before any session
 	// check, and age adds no evidence to a claim of none).
-	if (claimsNoBlocker(stored)) {
+	if (claimsNoBlocker(stored?.fields)) {
 		logDecision(cwd, "allowed", "advisory_only", { inspection });
 		return { block: false };
 	}
 	if (inspection !== "fresh") {
 		return unknown(cwd, `cache_${inspection}`, {}, recordRemedy());
 	}
-	if (!isTurnEndFindingsCache(stored)) {
+	const fields = stored?.fields;
+	if (!isTurnEndFindingsCache(fields)) {
 		return unknown(cwd, "cache_malformed", {}, recordRemedy());
 	}
-	const record = stored;
+	const record = fields;
 	// Only a contradiction is left here (`hasBlockers: false` beside test
 	// failures or blocker text); no writer produces one, so it is not admitted.
 	if (!record.hasBlockers) return unknown(cwd, "cache_malformed");
