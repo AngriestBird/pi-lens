@@ -1440,7 +1440,7 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 		reason:
 			"Inside `lookAtHead`, the delta listing of a move (#4493, #4502 " +
 			"round 3 reads it only when HEAD moved). Both callers await the " +
-			"whole look under bounded() with the read-only tool_result budget " +
+			"whole look under bounded() with its own hook budget " +
 			"and the hook's signal (the bash tool_result and the tool_call " +
 			"look), so this await is bounded one frame up; the line-granular " +
 			"scan cannot see a caller's bound.",
@@ -1451,7 +1451,7 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 		site: "tool_result_read_only",
 		reason:
 			"Inside `lookAtHead`, the body of `resyncHeadMove` (#4493). Both " +
-			"callers await it under bounded() with the read-only tool_result " +
+			"callers await it under bounded() with its own hook " +
 			"budget and the hook's signal (the bash tool_result and the " +
 			"tool_call look), so this await is bounded one frame up; the " +
 			"line-granular scan cannot see a caller's bound.",
@@ -1462,7 +1462,7 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 		site: "tool_result_read_only",
 		reason:
 			"Inside `lookAtHead`, the body of `resyncHeadMove` (#4493). Both " +
-			"callers await it under bounded() with the read-only tool_result " +
+			"callers await it under bounded() with its own hook " +
 			"budget and the hook's signal (the bash tool_result and the " +
 			"tool_call look), so this await is bounded one frame up; the " +
 			"line-granular scan cannot see a caller's bound.",
@@ -1501,7 +1501,7 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 		reason:
 			"The body of `resyncHeadMove` (#4476, #4493): both callers (the " +
 			"bash tool_result and the tool_call look) await it under bounded() " +
-			"with the read-only tool_result budget and the hook's signal, so " +
+			"with its own hook budget and the hook's signal, so " +
 			"this await is bounded one frame up; the line-granular scan cannot " +
 			"see a caller's bound.",
 		owner: "#4476",
@@ -1512,7 +1512,7 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 		reason:
 			"The body of `resyncHeadMove` (#4476, #4493, #4535): both callers " +
 			"(the bash tool_result and the tool_call look) await it under bounded() " +
-			"with the read-only tool_result budget and the hook's signal, so " +
+			"with its own hook budget and the hook's signal, so " +
 			"this await is bounded one frame up; the line-granular scan cannot " +
 			"see a caller's bound.",
 		owner: "#4476",
