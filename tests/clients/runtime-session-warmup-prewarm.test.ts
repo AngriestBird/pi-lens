@@ -42,15 +42,6 @@ vi.mock("../../clients/lsp/config.js", () => ({
 	getServerInitOverride: vi.fn().mockReturnValue(undefined),
 }));
 
-vi.mock("../../clients/lsp/capabilities.js", () => ({
-	getLSPService: vi.fn(() =>
-		makeLspServiceDouble({
-			touchFile: touchFileSpy,
-			supportsLSP: (file: string) => file.endsWith(".ts"),
-		}),
-	),
-}));
-
 vi.mock("../../clients/latency-logger.js", async (importOriginal) => {
 	const actual =
 		await importOriginal<typeof import("../../clients/latency-logger.js")>();
@@ -59,7 +50,7 @@ vi.mock("../../clients/latency-logger.js", async (importOriginal) => {
 
 import { waitForProjectSnapshotPersistsForTests } from "../../clients/project-snapshot.js";
 import { handleSessionStart } from "../../clients/runtime-session.js";
-import { makeLspServiceDouble } from "../support/lsp-service-double.js";
+import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 
 function makeDeps(ctxCwd: string, overrides: Record<string, unknown> = {}) {
 	return withResidentBootstrap({
@@ -129,7 +120,11 @@ describe("quick-mode warmup LSP pre-warm (#947)", () => {
 	let prevStartupMode: string | undefined;
 	let previousDataDir: string | undefined;
 
-	beforeEach(() => {
+	beforeEach(async () => {
+		await installLspServiceDouble({
+			touchFile: touchFileSpy,
+			supportsLSP: (file: string) => file.endsWith(".ts"),
+		});
 		prevFirst = globals.__piLensFirstSessionDone;
 		prevWarmup = globals.__piLensWarmupScheduled;
 		prevDelay = process.env.PI_LENS_WARMUP_DELAY_MS;

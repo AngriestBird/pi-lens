@@ -286,4 +286,14 @@ Telemetry only — never a CI gate. Compares each probed server's observed
 marker; a mismatch means the marker may need a human update (#529). `unknown`
 observations are never compared (a slow/absent server is not evidence either way).
 
-_None observed as of the last probe run._
+- **[silent-not-marked]** observed silent on clean transitions but wait-policy/strategies.ts has no silentOnClean marker for "typescript7" — cascade is burning the full in-lane wait it could skip (the pre-#458 situation)
+
+## Capability matrix refresh state (nightly-generated)
+
+Bookkeeping for the two-run `first-publish`/`clean-behavior` hysteresis, the
+date-based `direct` expiry (#3401) and consecutive-night `idle-eviction`
+counts (#3989). Regenerated every run; never a measurement.
+
+```json
+{"first-publish":{"terraform":{"pendingFirstPublish":"direct","runs":1}},"idle-eviction":{"docker-official":{"nights":[{"day":"2026-10-21","rssMb":64,"coldMs":811}]},"kotlin":{"nights":[{"day":"2026-10-21","rssMb":292,"coldMs":2130}]},"powershell":{"nights":[{"day":"2026-10-21","rssMb":166,"coldMs":2718}]},"rust":{"nights":[{"day":"2026-10-21","rssMb":598,"coldMs":2343}]},"svelte":{"nights":[{"day":"2026-10-21","rssMb":232,"coldMs":2383}]},"zizmor":{"nights":[{"day":"2026-10-21","rssMb":57,"coldMs":1613}]}}}
+```

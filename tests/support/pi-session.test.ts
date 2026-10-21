@@ -9,8 +9,9 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { normalizeFilePath } from "../../clients/path-utils.js";
+import { scannerReportParentDir } from "../../clients/scanner-temp-root.js";
 import {
 	getActivePrimaryRoot,
 	getActiveSessionId,
@@ -21,6 +22,7 @@ import {
 	fauxText,
 	fauxToolCall,
 	piSessionFixture,
+	replayToolNames,
 	startPiSession,
 } from "./pi-session.js";
 
@@ -55,6 +57,15 @@ function textBlocks(content: unknown): string[] {
 			? [typed.text]
 			: [];
 	});
+}
+
+/** The system messages of one provider request, in order. */
+function systemMessages(
+	transcript: ReadonlyArray<{ role: string; [key: string]: unknown }>,
+): Array<Record<string, unknown>> {
+	return transcript.filter((message) => message.role === "system") as Array<
+		Record<string, unknown>
+	>;
 }
 
 describe("pi-session: the built extension in a real AgentSession (#4632)", () => {
@@ -419,6 +430,174 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 		const metadata = rows[0]?.metadata as { mode?: string } | undefined;
 		expect(metadata?.mode).toBe("minimal");
 		await handle.dispose();
+	});
+
+	it("owns every scanner report directory a session's background scans create", async () => {
+		// #4632 slice 7 round 2. A `session_start` scanner (jscpd, the ast-grep
+		// exports pass, ...) creates its report directory under
+		// `scannerReportParentDir()` and removes it in the scan's own `finally`.
+		// The scan is fire-and-forget, and `drainBackgroundWritesForTests()`
+		// (#4505) reaches only THIS process's copy of the resident clients: the
+		// loaded copy owns its own (header, point 1), so a worker that ends before
+		// the scan settles strands the directory. Measured on a host pre-push: two
+		// `pi-lens-jscpd-*` entries sat in the shared tmp root, attributed to the
+		// slice-7 ordering file. The seam's own contract (`scanner-temp-root.ts`)
+		// is that a harness owning a root points `PI_LENS_TEST_SCANNER_TMPDIR` at
+		// it, so an orphan lands inside the root the harness removes.
+		const handle = await startPiSession({
+			root: fixture.root,
+			cwd: path.join(fixture.root, "scanner-root", "proj"),
+			responses: [fauxAssistantMessage(fauxText("ok"))],
+		});
+		await handle.prompt("hello");
+
+		// The resolver the loaded copy's scanners call, read through this side's
+		// copy of it: the environment is shared, and the copy cleared VITEST
+		// (`PI_LENS_TEST_MODE=0`), so the scanner-only harness marker is what lets
+		// the override through at all.
+		const parent = scannerReportParentDir();
+		expect(parent, "the scanner report parent is the fixture's own").toBe(
+			path.join(fixture.root, "scanner-tmp"),
+		);
+		// Created with the pin, so `mkdtempSync` in the scan has a parent to
+		// write under even when the file's first scan starts immediately.
+		expect(fs.existsSync(parent)).toBe(true);
+	});
+
+	it("pins the tool-loadout declaration pi builds for a request", async () => {
+		// #4632 acceptance 4, recurrence acceptance 3: the dynamic-tooling cases
+		// moved by slice 6 read the active tool set, so the host's declaration of
+		// it is pinned here BEFORE any consumer uses it. `toolsAdded` /
+		// `toolsRemoved` are not fields of an ExtensionAPI event
+		// (`core/extensions/types.d.ts` carries only `getActiveTools` /
+		// `setActiveTools`): they are system messages pi's agent loop writes into
+		// the transcript, and a `context_with_system` handler is handed them for
+		// the request it answers (the `context` phase strips system messages).
+		// The case pins all three seams a consumer can reach: the host's own API,
+		// the model-visible request, and the handler-visible transcript.
+		const handle = await startPiSession({
+			root: fixture.root,
+			cwd: path.join(fixture.root, "tool-loadout", "proj"),
+			responses: [
+				fauxAssistantMessage([
+					fauxText("activating"),
+					fauxToolCall("pi_lens_activate_tools", {
+						tools: ["ast_grep_search"],
+					}),
+				]),
+				fauxAssistantMessage(fauxText("ready")),
+				fauxAssistantMessage(fauxText("ready")),
+			],
+		});
+		const runner = handle.session.extensionRunner;
+		const emitContext = vi.spyOn(runner, "emitContext");
+		try {
+			// The load-time set, before the activation below changes it.
+			const initialActive = runner.getActiveTools();
+			await handle.prompt("activate the search tool");
+
+			const active = runner.getActiveTools();
+			expect(active).toContain("ast_grep_search");
+			expect(active).not.toEqual(initialActive);
+			const head = handle.requests[0][0] as {
+				role: string;
+				toolsAdded?: Array<{
+					name: string;
+					description?: unknown;
+					parameters?: unknown;
+				}>;
+				toolsRemoved?: unknown;
+			};
+			// The first request declares the WHOLE active set, each tool with the
+			// schema the host sends (a name-only double cannot see a schema drift).
+			expect(head.role).toBe("system");
+			expect(head.toolsRemoved).toBeUndefined();
+			expect(head.toolsAdded?.map((tool) => tool.name)).toEqual(initialActive);
+			for (const tool of head.toolsAdded ?? []) {
+				expect(tool.description).toBeTypeOf("string");
+				expect(tool.parameters).toBeTypeOf("object");
+			}
+
+			// An activation in a later request declares a DELTA: the added tool only,
+			// no removal. A consumer that reads this must fold it onto the head.
+			const activationDelta = systemMessages(handle.requests[1]).at(-1) as {
+				toolsAdded?: Array<{ name: string }>;
+				toolsRemoved?: unknown;
+			};
+			expect(activationDelta.toolsAdded?.map((tool) => tool.name)).toEqual([
+				"ast_grep_search",
+			]);
+			expect(activationDelta.toolsRemoved).toBeUndefined();
+
+			// A shrink declares a removal in the same shape, and the replayed tool
+			// state equals what the host's own API answers.
+			handle.session.setActiveToolsByName(
+				runner.getActiveTools().filter((name) => name !== "symbol_search"),
+			);
+			await handle.prompt("second turn");
+			const shrinkDelta = systemMessages(handle.requests[2]).at(-1) as {
+				toolsAdded?: unknown;
+				toolsRemoved?: Array<{ name: string }>;
+			};
+			expect(shrinkDelta.toolsRemoved?.map((tool) => tool.name)).toEqual([
+				"symbol_search",
+			]);
+			expect(shrinkDelta.toolsAdded).toBeUndefined();
+			expect(replayToolNames(handle.requests[2])).toEqual(
+				runner.getActiveTools(),
+			);
+
+			// The seam a handler reads: the request's own delta is in the messages
+			// `emitContext` is handed, not only in the provider's copy.
+			const handed = emitContext.mock.calls.at(-1)?.[0] as Array<
+				Record<string, unknown>
+			>;
+			const handedLast = systemMessages(
+				handed as Array<{ role: string; [key: string]: unknown }>,
+			).at(-1) as {
+				toolsRemoved?: Array<{ name: string }>;
+			};
+			expect(handedLast?.toolsRemoved?.map((tool) => tool.name)).toEqual([
+				"symbol_search",
+			]);
+		} finally {
+			emitContext.mockRestore();
+		}
+	});
+
+	it("records what the copy asks the host's UI to show", async () => {
+		// #4632 acceptance 6: the capability lands BEFORE its consumers. A case that
+		// asserts what pi-lens asks the USER to see (the smells rollup's note, the
+		// LSP status line) cannot read a handler's return value: the message leaves
+		// through `ctx.ui.notify`, which is the host's own boundary. The helper
+		// binds a real `ExtensionUIContext` (`bindExtensions`), and `/lens-toggle`
+		// is the smallest production path that notifies — the same command the
+		// `real-ui-harness` row pins on the double.
+		const handle = await startPiSession({
+			root: fixture.root,
+			cwd: path.join(fixture.root, "ui-recorder", "proj"),
+			captureUi: true,
+			responses: [
+				fauxAssistantMessage(fauxText("ready")),
+				fauxAssistantMessage(fauxText("ready")),
+			],
+		});
+
+		expect(handle.notifications).toEqual([]);
+		await handle.prompt("hello");
+		expect(handle.notifications).toEqual([]);
+
+		// pi dispatches the extension command from the prompt text, so the command
+		// runs against pi's real ctx — the mode is `tui`, so `notifyUi` renders
+		// instead of logging the suppression.
+		await handle.prompt("/lens-toggle");
+		expect(handle.notifications).toEqual([
+			{
+				message:
+					"pi-lens disabled for this session. Run /lens-toggle again to resume.",
+				type: "warning",
+			},
+		]);
 	});
 
 	it("refuses a second fixture root in one file", async () => {

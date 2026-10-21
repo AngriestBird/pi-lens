@@ -229,7 +229,12 @@ ADR: docs/adr/0009-reported-path-attribution.md
 ## Recurring defect shapes
 
 Screen against these before writing code. Shapes are numbered once, grouped by
-the surface they bite; each block loads only when its trigger applies.
+the surface they bite; each block loads only when its trigger applies. A shape
+whose open population is countable names its census in its entry. The census
+is one command, run at the repo root, printing one line per member or naming
+one baseline key. A PR that fixes members of the shape quotes that census
+before and after. A shape with no census in its entry is uncounted: a PR that
+fixes its members says so instead of quoting a before and after.
 
 <!-- markdownlint-disable MD029 -->
 
@@ -469,6 +474,17 @@ file-scoped worklist and receives no project-wide scanner output.
     publish; the model checked `FreshResult` alone and the fake published after
     the fence reply).
 
+79. **Prefix churn from a non-append write:** a provider caches the request in
+    order (tools, then system, then messages), so a write that changes bytes
+    before the newest message re-bills the whole conversation: a returned
+    `context` list that makes pi rebuild the system head, or a tool-set change
+    on a model that folds system messages into the head. Write at the tail
+    only, and count each tool-set change as one full rewrite on such models. A
+    host-generation gate takes a recorded fixture per certified minor, never
+    two. Screen: drive two real-session requests that differ only in the
+    writer, and compare the head and pi-ai's collapsed head. Guard: planned,
+    tracked in #4687.
+
 </important>
 
 <important if="a runner outcome or tool execution">
@@ -585,6 +601,12 @@ file-scoped worklist and receives no project-wide scanner output.
     hits are the classifier's own already-normalized patterns, `ci-verdict`'s
     line classifier (strips before it matches), `check-pr-body`'s lint of pasted
     body text, and readers of Vitest's JSON report.
+80. **Single scan root:** a detector takes its population from one root while
+    its subject can write in several, so a clean answer from the wrong root
+    reads as a complete negative. Screen: for each detector, list the roots its
+    subject can write in. Then show that each root gets its own verdict, or that
+    one root provably covers them. Census: not countable yet. Instance and
+    dates: `HISTORY.md`.
 
 </important>
 
@@ -659,7 +681,9 @@ file-scoped worklist and receives no project-wide scanner output.
     process or host boundary. New in-process `vi.mock` targets and hand-rolled
     LSP client or service doubles are ratcheted by
     `tests/clients/flake-shape-ratchet.test.ts` (`in-process-mock`,
-    `service-double`).
+    `service-double`). Its census is the `in-process-mock` key of
+    `tests/support/flake-shape-baseline.json`: one line per `<file>::<module>`
+    row, 1009 of them on master 33eac2aa1. #4709 drives that count down.
 
 67. **Sink read before drain:** a log sink's `log`/`append` only enqueue, so a
     test that reads the sink's byte offset, line count, or rows while one of
@@ -1729,13 +1753,36 @@ rebuilt the system head, and every test passed. Tier 1,
 `AgentSession` with pi-ai's `fauxProvider`: turns, tool round trips, session
 ids, and the request the model sees. Their header comments state the APIs
 and limits. A new tier capability adds a case to `pi-runner.test.ts` or
-`pi-session.test.ts` first. `pi-mock.ts` stays for three classes: process-boundary
-subjects, pi-lens-internal seams, and payloads a scripted provider cannot
-produce. It also stays for files a roadmap slice still owns. It throws at load
-for a test file not on `PI_MOCK_IMPORTERS` (`tests/support/pi-mock-importers.ts`),
-so a new user fails however it imports the double. The list only shrinks:
+`pi-session.test.ts` first. `pi-mock.ts` stays only for a test file on
+`PI_MOCK_IMPORTERS` (`tests/support/pi-mock-importers.ts`), whose row states the
+class: `process-boundary` (4 rows), `internal-seam` (41: the case interposes on
+a pi-lens `clients/` module either through `vi.mock`, which cannot reach the
+copy pi's loader builds, or through a test-side copy of a process-global
+service the loaded copy does not share, such as `clients/lsp`'s service),
+`unproducible-payload` (5: a payload a scripted provider cannot
+produce), `double-subject` (1: the double is the subject), and
+`real-ui-harness` (1: the claim is what the TUI shows or mounts, which no
+in-process tier can produce).
+
+A row's class holds for the whole file only while every case in it needs that
+class. A slice that edits an admitted file re-checks it case by case, and its
+PR body records the split: moved, or stays with the class. A file whose double
+replaces a spawned process (a child spawn, a pipeline runner, or a language
+server binary) is `process-boundary`, not `internal-seam`. A test-side copy of
+the in-process `clients/lsp` service object stays `internal-seam`.
+
+No row carries a `pending slice` marker: slice 7 classified the last three with
+the probe that keeps each on the double. The five classes cover the list's 52
+rows at that recording (slice 7 moved the `index-smells-rollup-wiring` row out
+with its file), and this command reproduces them:
+`grep -oE '^[[:space:]]*"[^"]*": *"[^"]+"' tests/support/pi-mock-importers.ts | sed -E 's/.*": *"([^"]+)"$/\1/' | sort | uniq -c`.
+The double throws at load for a test file not on the list, so a new user fails
+however it imports it. The list only shrinks:
 `tests/config/pi-mock-importer-sweep.test.ts` fails on a row whose file no
-longer uses it.
+longer uses it. A host claim names the host it ran on, and the tiers run on the
+one installed host (`@earendil-works/pi-coding-agent`, the dev pin): no
+automated spread exists, `scripts/probe-pi-host-tiers.mjs` is not built, and no
+CI job repeats a tier case on another host.
 
 When the defect is an ordering of awaits on one seam (a coalescing queue, a
 per-key serializer), or the seam has regressed before, write a scheduler
@@ -1745,9 +1792,15 @@ property with `fc.scheduler()` instead of one more replay:
 
 Use `tests/support/fault-injection.ts` for wedged children, seam delays,
 starved budgets, and gates; `makeRunnerCtx`, `makeLspServiceDouble`, and
-`makeRealRunnerEnv` for dispatch, LSP, and rule behavior. Mock only external
-binaries, network, host SDK seams (not pi's own behaviour: see the pi tiers
-above), clocks, or fault injection.
+`makeRealRunnerEnv` for dispatch, LSP, and rule behavior. Check `tests/support/`
+before writing a helper: a host case uses a pi tier, and a JSON-lines sink is
+read through `readNdjsonRows` (`tests/support/ndjson-rows.ts`), never a local
+`JSON.parse` loop; a claim that needs the complete output asserts its
+`skipped === 0`, because the reader drops a line it cannot parse and reports
+the count instead of throwing. Mock only external binaries, network, host SDK
+seams (not pi's own behaviour: see the pi tiers above), clocks, or fault
+injection; an in-process store, registry or coordinator is never replaced by a
+fake.
 
 Test authoring screens:
 

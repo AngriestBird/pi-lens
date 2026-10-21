@@ -37,7 +37,6 @@ import {
 	getLSPService,
 	resetLSPService,
 } from "../../../clients/lsp/capabilities.js";
-import { configureLspServiceLifecycle } from "../../../clients/lsp/service-singleton.js";
 import { workspaceFileCreatedAtFor } from "../../../clients/lsp/workspace-diagnostics-session.js";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
 import {
@@ -53,6 +52,7 @@ import {
 import { RuntimeCoordinator } from "../../../clients/runtime-coordinator.js";
 import { handleToolResult } from "../../../clients/runtime-tool-result.js";
 import { makeLspServiceDouble } from "../../support/lsp-service-double.js";
+import { installLspService } from "../../support/lsp-service-seam.js";
 import { setupTestEnvironment } from "../test-utils.js";
 
 let env: { tmpDir: string; cleanup: () => void };
@@ -64,19 +64,19 @@ let clientRoots: Array<{ root: string; spawnedAt: number }>;
 
 function installService(): void {
 	resetLSPService();
-	const service = makeLspServiceDouble({
-		livePrimaryClientRoots: () => clientRoots,
-		restartPrimaryClientsUnder: async (root: string) => {
-			restarts.push(normalizeMapKey(root));
-			return 1;
-		},
-		getOpenDocumentPaths: () => [],
-	});
-	configureLspServiceLifecycle<Record<string, unknown>>({
-		create: () => service as Record<string, unknown>,
-		beforeReset: () => undefined,
-		destroy: async () => undefined,
-	});
+	installLspService(
+		makeLspServiceDouble({
+			livePrimaryClientRoots: () => clientRoots,
+			restartPrimaryClientsUnder: async (root: string) => {
+				restarts.push(normalizeMapKey(root));
+				return 1;
+			},
+			getOpenDocumentPaths: () => [],
+		}),
+	);
+	// The look under test reads the LIVE service through `peekLSPService`, so the
+	// double has to exist before it runs — the same eager call the hand-rolled
+	// install made.
 	getLSPService();
 }
 
@@ -192,6 +192,10 @@ describe("the install look at a live client root (#4532 gap 7)", () => {
 		const gitDir = path.join(main, ".git", "worktrees", "linked-checkout");
 		fs.mkdirSync(gitDir, { recursive: true });
 		fs.writeFileSync(path.join(gitDir, "commondir"), "../..\n");
+		// git writes a HEAD in both the checkout's `.git` and the worktree's
+		// gitdir; a `.git` directory without one is not a repository (#4508).
+		fs.writeFileSync(path.join(main, ".git", "HEAD"), "ref: refs/heads/main\n");
+		fs.writeFileSync(path.join(gitDir, "HEAD"), "ref: refs/heads/linked\n");
 		fs.mkdirSync(linked, { recursive: true });
 		fs.writeFileSync(path.join(linked, ".git"), `gitdir: ${gitDir}\n`);
 
@@ -299,6 +303,10 @@ describe("the install look at a live client root (#4532 gap 7)", () => {
 		const gitDir = path.join(main, ".git", "worktrees", "git-worktree");
 		fs.mkdirSync(gitDir, { recursive: true });
 		fs.writeFileSync(path.join(gitDir, "commondir"), "../..\n");
+		// git writes a HEAD in both the checkout's `.git` and the worktree's
+		// gitdir; a `.git` directory without one is not a repository (#4508).
+		fs.writeFileSync(path.join(main, ".git", "HEAD"), "ref: refs/heads/main\n");
+		fs.writeFileSync(path.join(gitDir, "HEAD"), "ref: refs/heads/linked\n");
 		fs.mkdirSync(path.join(linked, "src"), { recursive: true });
 		fs.writeFileSync(path.join(linked, ".git"), `gitdir: ${gitDir}\n`);
 		fs.writeFileSync(path.join(linked, "package.json"), "{}\n");
