@@ -154,6 +154,18 @@ describe("ast-grep tools refuse an unknown lang at execute (#4687)", () => {
 		},
 	);
 
+	// #4723 (CodeRabbit on the r1 head): a blank optional lang reached the CLI
+	// as `--lang " "` instead of letting ast-grep infer the language.
+	it("ast_grep_outline infers the language when lang is blank", async () => {
+		const cli = cliDouble();
+		const outline = TOOLS[2];
+		const result = (await outline.run(cli, "   ")) as ToolResult;
+
+		expect(result.isError).toBeFalsy();
+		expect(outline.cliCalls(cli)).toBe(1);
+		expect(cli.outline.mock.calls[0]?.[1]).toMatchObject({ lang: undefined });
+	});
+
 	it("ast_grep_outline still infers the language when lang is absent", async () => {
 		const cli = cliDouble();
 		const outline = TOOLS[2];

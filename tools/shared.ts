@@ -70,7 +70,8 @@ export const LANGUAGES = [
  * (#4723 F4). It admits only a string that is a known id, once one pair of
  * wrapping double quotes is stripped; absent or blank is "required" (or absent
  * when optional), and every other value is refused with `refusal`. `lang` is
- * the normalized id, or "" when there is none.
+ * the normalized id, or "" when there is none (blank included, so a blank
+ * optional `lang` never reaches the CLI as `--lang " "`).
  */
 export function readAstGrepLang(
 	raw: unknown,
@@ -86,6 +87,6 @@ export function readAstGrepLang(
 	if (raw !== undefined && typeof raw !== "string")
 		return { lang, refusal: `lang must be a string; ${validIds}` };
 	if (!lang.trim())
-		return required ? { lang, refusal: "lang is required" } : { lang };
+		return required ? { lang: "", refusal: "lang is required" } : { lang: "" };
 	return { lang, refusal: `unknown lang "${lang}"; ${validIds}` };
 }
