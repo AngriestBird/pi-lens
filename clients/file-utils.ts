@@ -27,6 +27,7 @@ import {
 	isUnderDir,
 	normalizeEphemeralMapKey,
 	normalizeFilePath,
+	normalizePathSpelling,
 	toProjectRelativePath,
 } from "./path-utils.js";
 import {
@@ -195,9 +196,15 @@ export async function sweepDeadEphemeralDataDirs(options: {
  * #2874: this form ALONE is not an identity — `src/pi-lens` and
  * `src/pi/lens` fold to the same string. It is only ever combined with
  * {@link projectDataDirRootHash}. Never use it as a directory name alone.
+ *
+ * Both halves come from the root's SPELLING (`normalizePathSpelling`, the
+ * form `normalizeFilePath` returned before #4689), never its path identity:
+ * the name is durable, so a root spelled through a link keeps the directory
+ * every earlier version wrote (#4689 review r1 F2, maintainer decision: no
+ * migration).
  */
 function projectDataDirReadableSlug(canonicalRoot: string): string {
-	const normalized = normalizeFilePath(canonicalRoot);
+	const normalized = normalizePathSpelling(canonicalRoot);
 	return normalized
 		.replace(/^[a-z]:/i, "") // strip Windows drive letter
 		.replace(/\/+/g, "-") // separators → dashes

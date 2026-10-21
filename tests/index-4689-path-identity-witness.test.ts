@@ -23,6 +23,7 @@ import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
 	BLOCKING_FILE,
+	CLEAN_FILE,
 	GATE_BLOCK,
 	GUARDED_FLAGS,
 	RAN_MARKER,
@@ -32,6 +33,7 @@ import {
 	readTarget,
 	step,
 	toolResults,
+	writeTarget,
 } from "./support/pi-session-commit-gate.js";
 import {
 	type PiFauxReply,
@@ -233,6 +235,58 @@ describe("#4689: a bash write through a link reports what the real path reports"
 			const commit = bash?.[1];
 			expect(commit?.text).toContain(GATE_BLOCK);
 			expect(commit?.text).not.toContain(RAN_MARKER);
+		});
+	}
+});
+
+describe("#4689: a clean write reads clean under any spelling of the session or the file", () => {
+	// RECURRENCE GUARDED: review r1 F4. Dispatch recorded its runners in the
+	// widget store under the file's path identity (`ctx.filePath`) while the
+	// pipeline recorded the final snapshot under the tool's spelling, and the
+	// store keys syntactically (#1020), so one file had a pending record that
+	// nothing finished. `lens_diagnostics` then read "inconclusive, 1 pending
+	// file" every turn for every file of a session rooted at a link (master
+	// read "No issues"), and for a write through a file link.
+	const CLEAN_VERDICT = "No issues across 1 file diagnosed this session";
+	for (const [name, rooted, relativeTarget] of [
+		["a session rooted at a link to the repo", "alias", "src/clean.ts"],
+		["a write through a file link", "repo", "src/link.ts"],
+		["the real root and path (control)", "repo", "src/clean.ts"],
+	] as const) {
+		it(`${name}: lens_diagnostics reads clean in the writing turn and the next`, async (ctx) => {
+			const fx = family(
+				`clean-${rooted}-${relativeTarget.replace(/\W/g, "-")}`,
+			);
+			if (fx.skipReason) return ctx.skip(fx.skipReason);
+			const handle = await startPiSession({
+				root: fixture.root,
+				cwd: rooted === "alias" ? fx.aliasRoot : fx.repo,
+				flags: new Map(GUARDED_FLAGS),
+				responses: [
+					step(writeTarget(relativeTarget, CLEAN_FILE), "writing"),
+					step(fauxToolCall("lens_diagnostics", { mode: "all" }), "checking"),
+					endTurn(),
+					step(fauxToolCall("lens_diagnostics", { mode: "all" }), "again"),
+					endTurn(),
+				],
+			});
+			try {
+				await handle.prompt("go");
+				await handle.prompt("again");
+				// Each request replays the conversation so far; the last one holds
+				// both turns' results.
+				const both = toolResults(
+					handle.requests.at(-1) ?? [],
+					"lens_diagnostics",
+				);
+				expect(both).toHaveLength(2);
+				for (const result of both) {
+					expect(result.text).toContain(CLEAN_VERDICT);
+					expect(result.text).not.toContain("pending file");
+				}
+			} finally {
+				await handle.dispose();
+			}
 		});
 	}
 });

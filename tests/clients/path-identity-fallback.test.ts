@@ -12,7 +12,10 @@
  * Recurrence guarded: a silent identity fallback is the shape-1 split this
  * issue fixes, hidden again (engineering principles, "Every new failure path
  * gets bounded observability"). Lane: ubuntu Unit tests; a host that cannot
- * create symlinks skips visibly.
+ * create symlinks skips visibly. The record is POSIX-only by construction (the
+ * win32 arm of `normalizePathForm` never walks ancestors), so each case skips
+ * on win32 in its body rather than by a platform gate, which would enrol the
+ * file in the Windows lane only to skip it there (review r1, Sourcery S5).
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -23,6 +26,11 @@ import {
 } from "../../clients/degradation-ledger.js";
 import { normalizeMapKey } from "../../clients/path-utils.js";
 import { setupTestEnvironment } from "./test-utils.js";
+
+function posixOnly(ctx: { skip: (note?: string) => void }): void {
+	if (process.platform === "win32")
+		ctx.skip("the win32 arm keys by realpath and never records a fallback");
+}
 
 function fallbackGroup() {
 	return getDegradationSummary().find(
@@ -42,6 +50,7 @@ describe("path identity fallback record (#4689)", () => {
 	});
 
 	it("a cyclic link keys under its nearest resolvable ancestor and records the fallback once per errno", (ctx) => {
+		posixOnly(ctx);
 		const root = fs.realpathSync.native(env.tmpDir);
 		try {
 			fs.symlinkSync("loop-b", path.join(root, "loop-a"));
@@ -58,13 +67,30 @@ describe("path identity fallback record (#4689)", () => {
 		expect(group?.latestReasons[0]?.reason).toContain(spelled);
 	});
 
-	it("a file not yet written records nothing", () => {
+	it("a file not yet written records nothing", (ctx) => {
+		posixOnly(ctx);
 		const root = fs.realpathSync.native(env.tmpDir);
 		normalizeMapKey(path.join(root, "missing-dir", "new.ts"));
 		expect(fallbackGroup()).toBeUndefined();
 	});
 
+	it("a path under a regular file records nothing: ENOTDIR is a missing component", (ctx) => {
+		// RECURRENCE GUARDED: review r1 F6 (B2). `normalizeMapKey` on a path
+		// under a FILE (a stale spelling, a tool that appends to a file path)
+		// is refused with ENOTDIR, which is the not-written-yet answer, not an
+		// identity the kernel could not finish; tallying it would fill the
+		// health row with ordinary misses.
+		posixOnly(ctx);
+		const root = fs.realpathSync.native(env.tmpDir);
+		const file = path.join(root, "plain.ts");
+		fs.writeFileSync(file, "export {};\n");
+		const under = path.join(file, "x.ts");
+		expect(normalizeMapKey(under)).toBe(under.replace(/\\/g, "/"));
+		expect(fallbackGroup()).toBeUndefined();
+	});
+
 	it("re-arms with the ledger at a session boundary", (ctx) => {
+		posixOnly(ctx);
 		const root = fs.realpathSync.native(env.tmpDir);
 		try {
 			fs.symlinkSync("self", path.join(root, "self"));

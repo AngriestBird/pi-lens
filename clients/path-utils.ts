@@ -25,6 +25,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { win32 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { BoundedFifoMap } from "./bounded-cache.js";
 import { minimatch } from "./deps/minimatch.js";
 
 /**
@@ -227,10 +228,12 @@ export function normalizeFilePath(filePath: string): string {
 /**
  * The pre-#4689 POSIX form: dot segments folded and on-disk casing adopted,
  * the caller's link spelling KEPT (the win32 arm is unchanged and resolves).
- * Only the predicates that classify a path by where it is SPELLED read it:
- * `isUnderDir` and `isVendorPath` (a segment NAMES a dependency tree).
+ * Read where a path is classified by where it is SPELLED: `isUnderDir`'s
+ * spelling axis, `isVendorPath` (a segment NAMES a dependency tree), and the
+ * project data-dir name, a durable record pinned to the root's spelling
+ * (`clients/file-utils.ts`; #4689 review r1 F2).
  */
-function normalizePathSpelling(filePath: string): string {
+export function normalizePathSpelling(filePath: string): string {
 	return normalizePathForm(filePath, false);
 }
 
@@ -330,15 +333,20 @@ export interface PathIdentityFallback {
 	firstPath: string;
 }
 
-/** Distinct errno codes kept; realpath(3) can answer only a handful. */
-const PATH_IDENTITY_FALLBACK_CODES_MAX = 16;
-const pathIdentityFallbacks = new Map<string, PathIdentityFallback>();
+/**
+ * Distinct errno codes kept; realpath(3) can answer only a handful. The bound
+ * is the shared FIFO map's (its eviction is tested where it lives), not a
+ * branch of this module (#4689 review r1 F6: the hand-written cap could not
+ * be driven to red by any errno the kernel returns).
+ */
+const pathIdentityFallbacks = new BoundedFifoMap<string, PathIdentityFallback>(
+	16,
+);
 
 function recordPathIdentityFallback(code: string, spelled: string): void {
 	const existing = pathIdentityFallbacks.get(code);
 	if (existing) existing.count += 1;
-	else if (pathIdentityFallbacks.size < PATH_IDENTITY_FALLBACK_CODES_MAX)
-		pathIdentityFallbacks.set(code, { code, count: 1, firstPath: spelled });
+	else pathIdentityFallbacks.set(code, { code, count: 1, firstPath: spelled });
 }
 
 /**
@@ -404,17 +412,13 @@ function posixPathIdentity(spelled: string): string {
  * path of an existing file, or of its nearest existing ancestor plus the
  * missing tail (#4689; #1129 F11: a directory not created yet, spelled
  * through a symlinked tmpdir, which `ephemeral-root.ts` resolved with its own
- * copy of this walk until #4689). A relative input is joined to the process
- * cwd without folding its `..` segments first, so the kernel decides what they
- * name. For a map key use `normalizeMapKey`, which answers the same identity
- * slash-folded.
+ * copy of this walk until #4689). An absolute input reaches the kernel
+ * unfolded, so a `..` after a link names what the OS opens; a relative one is
+ * resolved against the process cwd first, as before #4689. For a map key use
+ * `normalizeMapKey`, which answers the same identity slash-folded.
  */
 export function realpathOrResolve(filePath: string): string {
-	const spelled = path.isAbsolute(filePath)
-		? filePath
-		: process.platform === "win32"
-			? path.resolve(filePath)
-			: `${process.cwd()}/${filePath}`;
+	const spelled = path.isAbsolute(filePath) ? filePath : path.resolve(filePath);
 	return kernelRealPath(spelled, path) ?? path.resolve(filePath);
 }
 
@@ -984,21 +988,35 @@ export function homeRelativePath(
 }
 
 /**
- * Is `child` the same path as `parent`, or inside it, as SPELLED: separators,
- * dot segments and (win32 or on-disk) casing are folded, and on POSIX a link
- * is NOT followed (`normalizePathSpelling`). Containment is a classification
- * of where a path is written (a `node_modules/.bin` shim, a binary a project
- * can retarget between check and spawn, a worktree directory behind a link),
- * so #4689 left it on the spelling; moving it to identity is #2556's seam. A
- * caller that compares an identity key (`normalizeMapKey`) against a root
- * passes the root's identity too.
+ * Is `child` the same path as `parent`, or inside it? Containment holds when
+ * it holds on either axis, and each disjunct compares both operands on ONE
+ * axis (#4689 review r1 F3/F5):
+ *
+ * - The spellings (`normalizePathSpelling`: separators, dot segments and
+ *   casing folded, no link followed). This is every answer the predicate gave
+ *   before #4689, so a path SPELLED inside a root stays inside: a
+ *   `node_modules/.bin` shim that links out of the project is still the
+ *   project's, which is what the #2556 trust inputs refuse.
+ * - The path identities (`normalizeFilePath`). Keys are identities while the
+ *   roots callers hold are spellings, so a key under a session rooted at a
+ *   link, or a link spelling under a root held as a key (`ctx.cwd`), meets the
+ *   root here. Every trust caller treats "inside" as the cautious answer, so
+ *   an answer the identity adds never widens what runs.
+ *
+ * The second disjunct runs only on a POSIX miss: on win32 both forms are the
+ * realpath, so it could only repeat the first.
  */
 export function isUnderDir(child: string, parent: string): boolean {
-	const normChild = normalizePathSpelling(child);
-	const normParent = normalizePathSpelling(parent);
+	if (isWithinForm(normalizePathSpelling(child), normalizePathSpelling(parent)))
+		return true;
+	if (process.platform === "win32") return false;
+	return isWithinForm(normalizeFilePath(child), normalizeFilePath(parent));
+}
+
+function isWithinForm(child: string, parent: string): boolean {
 	// Ensure parent ends with / for prefix matching
-	const parentPrefix = normParent.endsWith("/") ? normParent : `${normParent}/`;
-	return normChild === normParent || normChild.startsWith(parentPrefix);
+	const parentPrefix = parent.endsWith("/") ? parent : `${parent}/`;
+	return child === parent || child.startsWith(parentPrefix);
 }
 
 /** True when a path is outside the session's project root. */

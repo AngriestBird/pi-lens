@@ -153,6 +153,40 @@ describe("#2504 AC3 — project-root filter", () => {
 	});
 });
 
+describe("#4689 — project-root filter under a session root spelled through a link", () => {
+	// RECURRENCE GUARDED: review r1 F5. The filter compared a file key (path
+	// identity) with the session's link spelling, so in a session rooted at a
+	// link every modified file was skipped as outside the project and no code
+	// action was ever offered.
+	it("enriches the session's own file passed as a key", async (ctx) => {
+		const { buildActionableWarningsReport } = await load();
+		const inside = makeFiles(path.join(tmpDir, "src"), 1)[0];
+		const alias = path.join(outsideDir, "repo-alias");
+		try {
+			fs.symlinkSync(tmpDir, alias, "dir");
+		} catch (error) {
+			return ctx.skip(`symlinks unavailable: ${String(error)}`);
+		}
+		const key = normalizeMapKey(path.join(alias, "src", path.basename(inside)));
+		prime(key);
+
+		await buildActionableWarningsReport({
+			cwd: alias,
+			sessionId: "lens-test",
+			turnIndex: 1,
+			files: [key],
+			modifiedRangesByFile: new Map(),
+			dispatchWarnings: [],
+			includeLspCodeActions: true,
+		});
+
+		const asked = getLastKnownDiagnostics.mock.calls.map((c) =>
+			normalizeMapKey(String(c[0])),
+		);
+		expect(asked).toContain(key);
+	});
+});
+
 describe("#2504 AC3 — file cap", () => {
 	it("stops after the file cap and records a visible degradation", async () => {
 		const { buildActionableWarningsReport } = await load();

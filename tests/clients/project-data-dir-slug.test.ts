@@ -11,32 +11,45 @@
  * worktree); `PILENS_DATA_DIR`/`PI_LENS_HOME` are pointed at per-test temp
  * dirs and restored afterwards. The real HOME is never touched.
  */
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const realpathState = vi.hoisted(() => ({ fail: false }));
 vi.mock("node:fs", async () => {
 	const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
-	return {
-		...actual,
-		realpathSync: (...args: Parameters<typeof actual.realpathSync>) => {
+	// Only the slug's boundary probe (`fs.realpathSync`) fails on demand. The
+	// replacement keeps the real `.native`: `clients/path-utils.ts` keys by it,
+	// and a double without it made every key in this file fall back to the
+	// spelling, so the #4689 cell below could not see the identity arm.
+	const realpathSync = Object.assign(
+		(...args: Parameters<typeof actual.realpathSync>) => {
 			if (realpathState.fail) {
 				throw Object.assign(new Error("temporary failure"), { code: "EACCES" });
 			}
 			return actual.realpathSync(...args);
 		},
-	};
+		{ native: actual.realpathSync.native },
+	);
+	return { ...actual, realpathSync };
 });
 import { resetDegradationLedger } from "../../clients/degradation-ledger.js";
+import { getDisposition } from "../../clients/diagnostic-dispositions.js";
 import {
 	drainProjectDataDirMigrations,
 	getProjectDataDir,
 	_resetProjectDataDirMemoForTests,
 } from "../../clients/file-utils.js";
 
+const FIXTURES = path.join(
+	path.dirname(fileURLToPath(import.meta.url)),
+	"..",
+	"fixtures",
+);
 const savedDataDir = process.env.PILENS_DATA_DIR;
 const savedHome = process.env.PI_LENS_HOME;
 
@@ -161,6 +174,49 @@ describe("project data-dir slug (#2874)", () => {
 
 		expect(getProjectDataDir(target)).not.toBe(
 			getProjectDataDir(path.join(linkParent, "root", "proj")),
+		);
+	});
+
+	it("a root spelled through a link reads the marks 4.4.4 wrote under that spelling (#4689)", (ctx) => {
+		// RECURRENCE GUARDED: review r1 F2. #4689 r1 moved the slug's readable
+		// half to the root's path identity while the hash half kept the
+		// spelling, so every session rooted at a link (an alias root, macOS
+		// `/var`, a symlinked home) read a new, empty directory after the
+		// upgrade and lost its marks, review graph and snapshot. The store
+		// below is the one 4.4.4 wrote (tests/fixtures/data-dir-4.4.4); it is
+		// placed under the name the pinned contract gives the spelling, both
+		// halves from `path.resolve(cwd)`, and must be found again.
+		if (process.platform === "win32")
+			return ctx.skip("the win32 slug was already the realpath in 4.4.4");
+		const base = isolateDataDir();
+		const scratch = makeScratch("pi-lens-alias-slug-");
+		const real = path.join(scratch, "realproj");
+		const alias = path.join(scratch, "aliasproj");
+		fs.mkdirSync(path.join(real, ".git"), { recursive: true });
+		fs.symlinkSync("realproj", alias, "dir");
+
+		const spelled = path.resolve(alias);
+		const readable = spelled
+			.replace(/\/+/g, "-")
+			.replace(/[^A-Za-z0-9-]/g, "")
+			.replace(/^-+/, "")
+			.replace(/-+$/, "");
+		const hash = createHash("sha256").update(spelled).digest("hex").slice(0, 8);
+		const written = path.join(base, `${readable}-${hash}`);
+		fs.mkdirSync(path.join(written, "cache"), { recursive: true });
+		fs.copyFileSync(
+			path.join(
+				FIXTURES,
+				"data-dir-4.4.4",
+				"cache",
+				"diagnostic-dispositions.json",
+			),
+			path.join(written, "cache", "diagnostic-dispositions.json"),
+		);
+
+		expect(getProjectDataDir(alias)).toBe(written);
+		expect(getDisposition(alias, "ddw:ec76942a8ce3")?.disposition).toBe(
+			"suppress",
 		);
 	});
 

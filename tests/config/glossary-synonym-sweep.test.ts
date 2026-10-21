@@ -1020,7 +1020,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/jscpd-client.ts": 8,
 		"clients/json-cache-read.ts": 4,
 		"clients/knip-client.ts": 26,
-		"clients/language-profile.ts": 14,
+		// 14 -> 12 (#4689 r2): the language-root clamp asks `isUnderDir`
+		// instead of taking a `path.relative` of two spellings.
+		"clients/language-profile.ts": 12,
 		"clients/latency-logger.ts": 2,
 		"clients/lens-config.ts": 6,
 		"clients/lens-engine.ts": 6,

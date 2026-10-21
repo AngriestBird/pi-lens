@@ -439,10 +439,6 @@ describe("#2981 long-lived containers are bounded or admitted", () => {
 		"clients/language-registry.ts#extensionOf:2d198141",
 		"clients/lsp/workspace-diagnostics-cache.ts#MAX_REGISTERED_CWDS:22ef7f62",
 		"clients/mcp/analyze.ts#DEFAULT_WORD_INDEX_MAX_WARM_ROOTS:bf4b47c4",
-		// #4689: `pathIdentityFallbacks`, one row per realpath errno code, set
-		// only while it holds fewer than PATH_IDENTITY_FALLBACK_CODES_MAX (16)
-		// rows and cleared with the ledger by `resetPathIdentityFallbacks`.
-		"clients/path-utils.ts#PATH_IDENTITY_FALLBACK_CODES_MAX:5276a9a1",
 		"clients/mcp/session.ts#pendingTurnEndDeliveries:c1cb62ff",
 		"clients/module-report.ts#tsLangForFile:39ccfde7",
 		"clients/project-lens-config.ts#EMPTY_PROJECT_CONFIG:a4d79b04",

@@ -36,6 +36,7 @@ import {
 	isFullyQualifiedWin32,
 	isAtOrAboveHomeDir,
 	isExternalOrVendorFile,
+	isUnderDir,
 	normalizeEphemeralMapKey,
 	normalizeFilePath,
 	normalizeLoggedPath,
@@ -567,7 +568,16 @@ describe("path identity: every link spelling of one file derives one key (#4689)
 				path.sep,
 			);
 			const kernel = fs.realpathSync.native(spelled);
-			expect(fs.readFileSync(kernel, "utf8")).toBe("kernel\n");
+			// The key names the file the OS opens for this spelling. POSIX
+			// resolves `..` physically (the link target's parent); win32 folds it
+			// lexically before the open (review r1 F1: job 119075210164), so the
+			// same rule names src/both.ts there.
+			expect(fs.readFileSync(kernel, "utf8")).toBe(
+				fs.readFileSync(spelled, "utf8"),
+			);
+			expect(fs.readFileSync(kernel, "utf8")).toBe(
+				process.platform === "win32" ? "lexical\n" : "kernel\n",
+			);
 			expect(normalizeMapKey(spelled)).toBe(kernel.replace(/\\/g, "/"));
 			expect(realpathOrResolve(spelled)).toBe(kernel);
 		} finally {
@@ -580,6 +590,36 @@ describe("path identity: every link spelling of one file derives one key (#4689)
 		try {
 			if (fx.skipReason) return ctx.skip(fx.skipReason);
 			expect(normalizeMapKey(fx.outLink)).toBe(normalizeMapKey(fx.outsideFile));
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("containment holds on either axis: a key under a link-spelled root, a link spelling under a key root, a link spelled inside stays inside", (ctx) => {
+		// RECURRENCE GUARDED: review r1 F3/F5. Keys became identities while the
+		// roots callers hold stayed spellings, so a key under a session rooted
+		// at a link read as outside it: every function external in the codebase
+		// model, every nested language root collapsed to the workspace, pending
+		// cascade errors dropped. Containment answers on both axes, each
+		// disjunct with both operands on one axis.
+		const { env, fx } = family();
+		try {
+			if (fx.skipReason) return ctx.skip(fx.skipReason);
+			const viaAlias = path.join(fx.aliasRoot, "src", "real.ts");
+			// A key (identity) under a root spelled through a link.
+			expect(isUnderDir(normalizeMapKey(viaAlias), fx.aliasRoot)).toBe(true);
+			expect(
+				isExternalOrVendorFile(normalizeMapKey(viaAlias), fx.aliasRoot),
+			).toBe(false);
+			// A spelling through a link under a root held as a key (`ctx.cwd`).
+			expect(isUnderDir(viaAlias, normalizeMapKey(fx.repo))).toBe(true);
+			// A link spelled inside the root stays inside (#2556 trust inputs:
+			// a `.bin` shim that points out of the project is still the
+			// project's), while its identity is the outside file.
+			expect(isUnderDir(fx.outLink, fx.repo)).toBe(true);
+			expect(isUnderDir(normalizeMapKey(fx.outLink), fx.repo)).toBe(false);
+			// Control: outside on both axes.
+			expect(isUnderDir(fx.outsideFile, fx.aliasRoot)).toBe(false);
 		} finally {
 			env.cleanup();
 		}
