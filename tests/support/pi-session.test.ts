@@ -12,6 +12,7 @@ import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { normalizeFilePath } from "../../clients/path-utils.js";
 import { scannerReportParentDir } from "../../clients/scanner-temp-root.js";
+import { pinFixtureHome } from "../clients/test-utils.js";
 import {
 	getActivePrimaryRoot,
 	getActiveSessionId,
@@ -237,15 +238,15 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 	// #4724: pi read the real `$HOME/.agents/skills`, so a host's skills reached
 	// every request and a prefix-ratio verdict differed between hosts.
 	it("keeps the host's own skills out of the session's system prompt", async () => {
-		const home = path.join(fixture.root, "host-home");
+		// pinFixtureHome pins HOME and USERPROFILE to a home beside the worker's
+		// scratch root, never inside a fixture root the harness deletes (#4591).
+		const { home, restore } = pinFixtureHome("4729-host-skills");
 		const skill = path.join(home, ".agents", "skills", "host-only-probe");
 		fs.mkdirSync(skill, { recursive: true });
 		fs.writeFileSync(
 			path.join(skill, "SKILL.md"),
 			"---\nname: host-only-probe\ndescription: A skill only this host has.\n---\n\nBody.\n",
 		);
-		const previousHome = process.env.HOME;
-		process.env.HOME = home;
 		try {
 			const handle = await startPiSession({
 				root: fixture.root,
@@ -257,8 +258,7 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 			expect(system).toMatchObject({ role: "system" });
 			expect(JSON.stringify(system)).not.toContain("host-only-probe");
 		} finally {
-			if (previousHome === undefined) delete process.env.HOME;
-			else process.env.HOME = previousHome;
+			restore();
 		}
 	});
 

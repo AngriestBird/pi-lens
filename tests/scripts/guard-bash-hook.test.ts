@@ -2741,33 +2741,50 @@ describe(`scripts/hooks/guard-bash.mjs -- transcript corpus ${TRANSCRIPT_CORPUS_
 		expect(offenses).toEqual([]);
 	});
 
-	// The real hook for every expected deny and every 50th row: the classifier
-	// pass above skips the child's stdin, exit-code and stderr wiring, and the
-	// budget bounds what each Bash call pays for a hook process.
-	it("gives the corpus denies and a sample of its rows the same verdict through the real hook", () => {
-		const sample = TRANSCRIPT_CORPUS.filter(
-			({ command }, index) =>
-				EXPECTED_TRANSCRIPT_DENIES.has(commandHash(command)) ||
-				index % 50 === 0,
-		);
+	// The real hook for every row. The classifier pass above skips the child's
+	// stdin, exit-code and stderr wiring, so a deny that only the hook adds (a
+	// non-rule deny from run() on one row) is caught here and nowhere else.
+	// Recurrence: the 88-row sample this loop replaced let a hook-only deny on
+	// an unsampled row pass (#4729 review r1 F1). The in-process verdict rides
+	// beside each spawn, since it costs no process.
+	it("keeps every transcript row's real hook verdict at zero non-rule denies", () => {
+		const offenses: string[] = [];
 		const mismatches: string[] = [];
+		let actualDenies = 0;
 		const started = performance.now();
-		for (const { command } of sample) {
+		for (const { command } of TRANSCRIPT_CORPUS) {
 			const child = runHook(asRunner(command), corpusEnv);
 			const verdict = hookVerdict(asRunner(command), corpusEnv);
 			if (child.status !== verdict.status || child.stderr !== verdict.stderr)
 				mismatches.push(
 					`child ${child.status} vs classifier ${verdict.status}: ${command}`,
 				);
+			const hash = commandHash(command);
+			const expectedDeny = EXPECTED_TRANSCRIPT_DENIES.has(hash);
+			const expectedAllow = EXPECTED_TRANSCRIPT_ALLOWS.has(hash);
+			if (child.status === 2) actualDenies++;
+
+			if (expectedDeny) {
+				if (child.status !== 2)
+					offenses.push(`expected deny was allowed: ${command}`);
+				continue;
+			}
+			if (expectedAllow && child.status !== 0)
+				offenses.push(`expected allow was denied: ${command}`);
+			else if (!expectedAllow && child.status !== 0)
+				offenses.push(`non-rule deny (${child.status}): ${command}`);
+			else if (child.stderr !== "")
+				offenses.push(`unexpected stderr: ${command}`);
 		}
 		const elapsedMs = performance.now() - started;
 		console.log(
-			`guard-bash transcript corpus: ${sample.length} of ${TRANSCRIPT_CORPUS.length} rows through the real hook, ${Math.round(elapsedMs)}ms`,
+			`guard-bash transcript corpus: ${TRANSCRIPT_CORPUS.length} rows through the real hook, ${actualDenies} expected denies, ${Math.round(elapsedMs)}ms`,
 		);
-		// 160 ms a row: the 180 s budget the full 1,122-row spawn loop had.
-		expect(elapsedMs).toBeLessThan(sample.length * 160);
+		expect(elapsedMs).toBeLessThan(180_000);
+		expect(actualDenies).toBe(EXPECTED_TRANSCRIPT_DENIES.size);
+		expect(offenses).toEqual([]);
 		expect(mismatches).toEqual([]);
-	}, 60_000);
+	}, 180_000);
 });
 
 describe("scripts/hooks/guard-bash.mjs -- never throws (#2699)", () => {
