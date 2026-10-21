@@ -80,10 +80,9 @@ export const PI_MOCK_IMPORTERS: Readonly<Record<string, string>> = {
 	"index-session-start-classification-wiring.test.ts": "unproducible-payload",
 	// real-ui-harness
 	"lens-toggle-command.test.ts": "real-ui-harness",
-	// pending slice 5
-	"index-4554-last-member-teardown.test.ts": "pending slice 5",
-	"index-config-resolved-session-wiring.test.ts": "pending slice 5",
-	"index-multi-root-session-start.test.ts": "pending slice 5",
+	// slice-5 stays (see #4632)
+	"index-4554-last-member-teardown.test.ts": "internal-seam",
+	"index-multi-root-session-start.test.ts": "unproducible-payload",
 	// pending slice 8
 	"clients/session-event-guard.test.ts": "unproducible-payload",
 	"index-cascade-resolved-clean-wiring.test.ts": "internal-seam",

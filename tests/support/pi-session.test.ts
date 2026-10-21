@@ -10,9 +10,11 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
+import { normalizeFilePath } from "../../clients/path-utils.js";
 import {
 	getActivePrimaryRoot,
 	getActiveSessionId,
+	getSecondarySessionCount,
 } from "../../clients/session-lifecycle.js";
 import {
 	fauxAssistantMessage,
@@ -314,8 +316,8 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 		// The replacement took the primary slot the previous conversation left.
 		expect(secondId).not.toBe(firstId);
 		expect(getActiveSessionId()).toBe(secondId);
-		expect(getActivePrimaryRoot()).toBe(
-			path.join(fixture.root, "replace-primary", "proj"),
+		expect(normalizeFilePath(getActivePrimaryRoot() ?? "")).toBe(
+			normalizeFilePath(path.join(fixture.root, "replace-primary", "proj")),
 		);
 		expect(second.errors).toEqual([]);
 	});
@@ -356,6 +358,67 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 			"restart() on a session that already ended",
 		);
 		expect(getActiveSessionId()).toBe(secondId);
+	});
+
+	it("runs a second live session in one root as a concurrent secondary", async () => {
+		// The documented multi-session shape: a second `startPiSession` under
+		// another cwd of the SAME fixture root is a separate extension load, and
+		// the process-global guard classifies it `concurrent-secondary` while the
+		// first session stays the registered primary (#4632 slice 5 consumes
+		// this). Each handle is its own activation; what they share is the
+		// process-scoped session state.
+		const primary = await startPiSession({
+			root: fixture.root,
+			cwd: path.join(fixture.root, "second-live", "primary"),
+			responses: [fauxAssistantMessage(fauxText("ok"))],
+		});
+		const primaryId = primary.session.sessionManager.getSessionId();
+		const secondary = await startPiSession({
+			root: fixture.root,
+			cwd: path.join(fixture.root, "second-live", "secondary"),
+			responses: [fauxAssistantMessage(fauxText("ok"))],
+		});
+
+		expect(secondary.session.sessionManager.getSessionId()).not.toBe(primaryId);
+		expect(getActiveSessionId()).toBe(primaryId);
+		expect(getSecondarySessionCount()).toBe(1);
+
+		await secondary.dispose();
+		expect(getActiveSessionId()).toBe(primaryId);
+		expect(getSecondarySessionCount()).toBe(0);
+		await primary.dispose();
+		expect(getActiveSessionId()).toBeUndefined();
+	});
+
+	it("pins the startup mode the loaded copy reports", async () => {
+		// The third production mode has no warm-up timer and no deferred load,
+		// so it is the one mode whose config resolution runs ONLY through the
+		// ensure path (slice 5's minimal-mode cell depends on that). The row the
+		// loaded copy writes is the assertion: the env pin and the mode the
+		// extension observes are the same value.
+		const cwd = path.join(fixture.root, "minimal-mode", "proj");
+		const handle = await startPiSession({
+			root: fixture.root,
+			cwd,
+			startupMode: "minimal",
+			responses: [fauxAssistantMessage(fauxText("ok"))],
+		});
+		// `handle.latencyRows()` flushes this side's writer map, then reads through
+		// the shared `readNdjsonRows`; `skipped` is the record of a line the reader
+		// could not parse, and a count assertion built on a short read is a red.
+		const read = await handle.latencyRows();
+		expect(read.skipped, "a torn line would shorten this read").toBe(0);
+		// The row is written through `normalizeLoggedPath`, so the comparison uses
+		// the same fold; `cwd` carries native separators on win32.
+		const rows = read.rows.filter(
+			(row) =>
+				row.phase === "session_start_total" &&
+				row.filePath === normalizeFilePath(cwd),
+		);
+		expect(rows).toHaveLength(1);
+		const metadata = rows[0]?.metadata as { mode?: string } | undefined;
+		expect(metadata?.mode).toBe("minimal");
+		await handle.dispose();
 	});
 
 	it("refuses a second fixture root in one file", async () => {
