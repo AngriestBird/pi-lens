@@ -87,10 +87,14 @@ async function latencyRows(): Promise<
 	Array<{ phase?: string; metadata?: Record<string, unknown> }>
 > {
 	await flushAllNdjsonWriters();
-	return readNdjsonRows<{
+	const read = readNdjsonRows<{
 		phase?: string;
 		metadata?: Record<string, unknown>;
-	}>(latencyLogPath()).rows;
+	}>(latencyLogPath());
+	// The old inline reader threw on a line it could not parse; a counted skip
+	// keeps that strictness and names the count (#4699 F2).
+	expect(read.skipped).toBe(0);
+	return read.rows;
 }
 
 describe("#4631 a mid-list system message never changes the head", () => {
