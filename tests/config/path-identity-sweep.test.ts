@@ -32,7 +32,15 @@
  *   through a collection method this needle does not name (`Array.prototype.includes`,
  *   `indexOf`, a `Record` built with `Object.fromEntries`);
  * - a `path.relative` / `path.join` key, or a `path.resolve` key wrapped in
- *   any call that is not identity (a wrapper is judged as deciding the key).
+ *   any call that is not identity (a wrapper is judged as deciding the key);
+ * - a `path.resolve` key as an operand rather than the whole argument: a
+ *   ternary arm, a `||` / `??` operand, a template literal, a comma
+ *   expression (`(0, path.resolve)(x)`), an `await`, a `Reflect.apply` of a
+ *   map method, or a `let` assigned the value after its declaration (#4689
+ *   review r1 F7 planted each; live population 0 by grep on 2026-10-21);
+ * - a comparison between axes: a key (path identity) tested against a root
+ *   held as a spelling, or the reverse. No needle sees which axis a value is
+ *   on; `isUnderDir` answers containment on either axis instead (#4689 r2).
  *
  * Scope: the shipped runtime, `clients/`, `tools/`, `mcp/` and `index.ts`,
  * without tests; `clients/path-utils.ts` is the seam and is not scanned.

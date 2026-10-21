@@ -7,9 +7,10 @@
  * path, so a symlinked file had one record per spelling. The model saw it as
  * a refused edit of a file it had just read (the read guard), a "clean"
  * verdict for a bash write that the real path reports as STOP (attribution),
- * and a stale blocker under the link after a fix through the target (the
- * widget store, which keys by spelling: a later #4689 slice). Each cell drives pi's real read, edit, write and bash tools
- * through a real `AgentSession` (`tests/support/pi-session.ts`) and asserts
+ * and, once keys moved to the identity, a pending `lens_diagnostics` verdict
+ * that never cleared because one widget-store writer still passed the
+ * spelling (review r1 F4). Each cell drives pi's real read, edit, write and
+ * bash tools through a real `AgentSession` (`tests/support/pi-session.ts`) and asserts
  * the tool result the model received, so the identity rule is pinned at the
  * surface that broke rather than at the key function alone (that half is
  * `tests/clients/path-utils.test.ts`, "path identity").
