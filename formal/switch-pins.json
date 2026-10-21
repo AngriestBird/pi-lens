@@ -1727,7 +1727,7 @@
 				"ProcessWideLast": {
 					"value": "TRUE",
 					"test": "tests/index-4704-sibling-teardown.test.ts",
-					"title": "keeps the sibling's root, the primary registration and the LSP service when the primary leaves first",
+					"title": "releases the primary registration but keeps the sibling's root and the LSP service when the primary leaves first",
 					"also": [
 						{
 							"test": "tests/index-4704-sibling-teardown.test.ts",
@@ -1738,7 +1738,23 @@
 				"StaleMemberHolds": {
 					"value": "FALSE",
 					"test": "tests/index-4704-sibling-teardown.test.ts",
-					"title": "does not count a sibling pi disposed without a shutdown as live"
+					"title": "counts each sibling pi disposed without a shutdown, and none of them as live"
+				},
+				"SplitRelease": {
+					"value": "TRUE",
+					"test": "tests/index-4704-sibling-teardown.test.ts",
+					"title": "admits a /resume into another root as primary while the sibling is live",
+					"also": [
+						{
+							"test": "tests/index-4704-sibling-teardown.test.ts",
+							"title": "releases the primary registration but keeps the sibling's root and the LSP service when the primary leaves first"
+						}
+					]
+				},
+				"StartKeepsLiveFleet": {
+					"value": "TRUE",
+					"test": "tests/index-4554-last-member-teardown.test.ts",
+					"title": "keeps the LSP fleet at a full start while another session in the process is live"
 				}
 			},
 			"notCodeChoice": [
