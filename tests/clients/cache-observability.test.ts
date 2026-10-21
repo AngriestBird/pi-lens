@@ -1107,14 +1107,16 @@ describe("cache-observability — miss attribution (#1071)", () => {
 		// The measured sequence: a healthy 8,000, a head rewrite that reads 257,
 		// then the same 257 again. Comparing against the previous read made the
 		// second turn a cache HIT, so the session's second rewrite was invisible.
-		// The provider charges the rewrite it performed (9,732 written tokens), and
-		// that write is what tells a rewrite from a durable shrink (#4718 F1).
+		// This is the shape of a provider that reports its writes (Anthropic,
+		// Bedrock): the rebuilt 9,732 tokens are `cacheWrite`, `input` is the tail.
+		// The prompt is still the size of the old prefix, so it is not a shrink;
+		// the zero-write shape is the F8 rows below.
 		logUsage(8_000, 100);
 		observeCachePrefix([{ role: "user", content: "first" }], 0, "attr");
 		logUsage(8_000, 100);
 		observeCachePrefix([{ role: "user", content: "rewritten" }], 1, "attr");
 		vi.setSystemTime(BASE_MS + 1_000);
-		logWrite(257, 9_732, 9_732);
+		logWrite(257, 9_732);
 		expect(lastUsageMetadata()).toMatchObject({
 			cacheMissCause: "prefix-broke",
 			cacheMissKind: "low-read",
@@ -1126,7 +1128,7 @@ describe("cache-observability — miss attribution (#1071)", () => {
 		// re-declared stable, and the SECOND rewrite is still a miss against the
 		// last healthy read, not a hit against the first miss's remainder.
 		vi.setSystemTime(BASE_MS + 2_000);
-		logWrite(257, 9_732, 9_700);
+		logWrite(257, 9_732);
 		expect(lastUsageMetadata()).toMatchObject({
 			cacheMissCause: "unknown",
 			cacheMissKind: "low-read",
@@ -1225,6 +1227,164 @@ describe("cache-observability — miss attribution (#1071)", () => {
 			cacheMissCause: null,
 		});
 		expect(switched.cacheBaseline).toBe("switched");
+	});
+
+	// #4718 review F8 (Greptile thread 13): Gemini, Vertex, Mistral and OpenAI
+	// report `cacheWrite: 0` on every record, so a rebuilt prefix comes back as
+	// fresh `input`, not as a write. Reading a zero write as "the prompt got
+	// smaller" made the first rewrite a shrink and the second one a hit.
+	describe("a provider that never reports cache writes (#4718 review F8)", () => {
+		function logGemini(cacheRead: number, input: number) {
+			logCacheUsage(
+				assistantMessage({
+					api: "google-generative-ai",
+					provider: "google",
+					model: "gemini-2.5-pro",
+					usage: { input, output: 10, cacheRead, cacheWrite: 0 },
+				}),
+				undefined,
+				{ sessionId: "attr", turnIndex: 0 },
+			);
+		}
+
+		it("keeps a second zero-write rewrite a miss against the last healthy read", () => {
+			logGemini(8_000, 100);
+			logGemini(257, 9_742);
+			expect(lastUsageMetadata()).toMatchObject({
+				cacheMissKind: "low-read",
+				priorCacheRead: 8_000,
+				cacheBaseline: "held",
+			});
+			logGemini(257, 9_742);
+			expect(lastUsageMetadata()).toMatchObject({
+				cacheMissKind: "low-read",
+				priorCacheRead: 8_000,
+				cacheBaseline: "held",
+			});
+		});
+
+		it("re-baselines a compaction from the prompt size, not from a write", () => {
+			logGemini(8_000, 100);
+			logGemini(2_000, 310);
+			expect(lastUsageMetadata()).toMatchObject({
+				cacheMissKind: "low-read",
+				cacheMissCause: "prefix-shrunk",
+				cacheBaseline: "shrunk",
+			});
+			logGemini(2_100, 100);
+			expect(lastUsageMetadata()).toMatchObject({
+				priorCacheRead: 2_000,
+				cacheMissCause: null,
+			});
+		});
+
+		it("holds a real miss that follows a shrink", () => {
+			logGemini(8_000, 100);
+			logGemini(2_000, 310);
+			logGemini(200, 1_810);
+			expect(lastUsageMetadata()).toMatchObject({
+				cacheMissKind: "low-read",
+				priorCacheRead: 2_000,
+				cacheBaseline: "held",
+			});
+			logGemini(200, 1_810);
+			expect(lastUsageMetadata()).toMatchObject({
+				cacheMissKind: "low-read",
+				priorCacheRead: 2_000,
+				cacheBaseline: "held",
+			});
+		});
+	});
+
+	// The state table's row the round-2 rule missed on every provider: a
+	// non-append write that also shortens the prompt (a smaller rebuilt head)
+	// re-writes almost everything, yet the write stays below the shortfall.
+	it("keeps a rewrite that also shortens the prompt a miss", () => {
+		logUsage(8_000, 100);
+		logWrite(257, 7_143);
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheMissKind: "low-read",
+			priorCacheRead: 8_000,
+			cacheBaseline: "held",
+		});
+		logWrite(257, 7_143);
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheMissKind: "low-read",
+			priorCacheRead: 8_000,
+			cacheBaseline: "held",
+		});
+	});
+
+	// #4718 review F9: the boundary of the shrink rule. A shrink is a prompt
+	// below half the baseline (the ratio that makes a read low) that still read
+	// something from cache.
+	it("keeps a compaction that writes its summary a shrink", () => {
+		logUsage(8_000, 100);
+		logWrite(2_000, 300, 0);
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheMissCause: "prefix-shrunk",
+			cacheBaseline: "shrunk",
+		});
+	});
+
+	it("holds a prompt exactly at half the baseline", () => {
+		logUsage(8_000, 100);
+		logWrite(2_000, 2_000, 0);
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheMissKind: "low-read",
+			priorCacheRead: 8_000,
+			cacheBaseline: "held",
+		});
+	});
+
+	it("holds a zero read even when the prompt shrank", () => {
+		logUsage(8_000, 100);
+		logWrite(0, 2_000, 0);
+		expect(lastUsageMetadata()).toMatchObject({
+			cacheMissKind: "zero-read",
+			cacheBaseline: "held",
+		});
+		logWrite(2_000, 0, 100);
+		expect(lastUsageMetadata()).toMatchObject({
+			priorCacheRead: 8_000,
+			cacheMissCause: "prefix-shrunk",
+			cacheBaseline: "shrunk",
+		});
+	});
+
+	// #4718 review F7: the shrink turn used to classify as `unknown`, so two
+	// compactions in one session wrote `prompt-cache-miss-unexplained` ("no
+	// local cause") for a prefix the provider served exactly as asked.
+	it("names a durable shrink and keeps it out of the unexplained count", () => {
+		logUsage(8_000, 100);
+		observeRequest();
+		logUsage(3_000, 100);
+		const first = lastUsageMetadata();
+		observeRequest();
+		logUsage(1_000, 100);
+		const second = lastUsageMetadata();
+		// The symptom first: two shrinks must not render the "no local cause" row.
+		expect(
+			renderDegradationLines().filter((line) =>
+				line.includes("prompt-cache-miss-unexplained"),
+			),
+		).toEqual([]);
+		expect(
+			getDegradationSummary().some(
+				(entry) => entry.kind === "prompt-cache-miss-unexplained",
+			),
+		).toBe(false);
+		expect(first).toMatchObject({
+			gapBasis: "request-time",
+			cacheMissKind: "low-read",
+			cacheMissCause: "prefix-shrunk",
+			cacheBaseline: "shrunk",
+		});
+		expect(second).toMatchObject({
+			priorCacheRead: 3_000,
+			cacheMissCause: "prefix-shrunk",
+			cacheBaseline: "shrunk",
+		});
 	});
 
 	it("reads a head whose keys moved as an unchanged prefix (#4687 item 6)", () => {
@@ -1328,7 +1488,9 @@ describe("cache-observability — miss attribution (#1071)", () => {
 		logUsage(8_000, 100);
 		observeInjection(8_000);
 		vi.setSystemTime(BASE_MS + 1_000);
-		logUsage(3_000, 900);
+		// The 4,100 written tokens keep the prompt at the old prefix's size, so
+		// this is a miss and not a shrink (#4718 review F8).
+		logWrite(3_000, 4_100, 900);
 		expect(lastUsageMetadata()).toMatchObject({
 			cacheMissCause: "unknown",
 			cacheMissKind: "low-read",
@@ -1437,7 +1599,9 @@ describe("cache-observability — miss attribution (#1071)", () => {
 		logUsage(8_000, 100);
 		observeCachePrefix([{ role: "user", content: "first" }], 0, "attr");
 		observeRequest();
-		logUsage(3_000, 100);
+		// The provider re-wrote what it stopped reading, so the prompt is still the
+		// old prefix's size: a miss, not a shrink (#4718 review F8).
+		logWrite(3_000, 5_000);
 		expect(lastUsageMetadata()).toMatchObject({
 			cacheMissCause: "unknown",
 			cacheMissKind: "low-read",
@@ -1688,6 +1852,17 @@ describe("cache-observability — miss attribution (#1071)", () => {
 			(entry) => entry.kind === "prompt-cache-miss-unexplained",
 		);
 		expect(group?.latestReasons.at(-1)?.subject).toBe("attr");
+		// #4718 review F10: the ledger count is ADMITTED misses (the total less
+		// the silent first); the session's exact total is the summary's
+		// `unknown` counter.
+		expect(group?.count).toBe(2);
+		emitCacheUsageSummaryAtSessionEnd("attr", "primary");
+		const summary = latencyEntries.find(
+			(entry) => entry.phase === "cache_usage_summary",
+		);
+		expect(summary?.metadata).toMatchObject({
+			cacheMissCauses: { unknown: 3 },
+		});
 	});
 
 	// #4718 review F5: without a stable session id every miss shares one
@@ -1894,6 +2069,7 @@ describe("cache-observability — miss attribution (#1071)", () => {
 				"system-prompt-changed": 0,
 				"partial-eviction": 0,
 				"model-provider-changed": 0,
+				"prefix-shrunk": 0,
 				unknown: 1,
 			},
 			unknownEvidenceReasons: {

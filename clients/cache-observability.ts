@@ -118,6 +118,7 @@ type CacheMissCause =
 	| "system-prompt-changed"
 	| "partial-eviction"
 	| "model-provider-changed"
+	| "prefix-shrunk"
 	| "unknown";
 
 /** Why a miss could not be assigned a local cause (#1996). */
@@ -277,9 +278,9 @@ interface SessionAttributionState {
 	 * against (#4687). A miss measured against it does not replace it, so a
 	 * second consecutive rewrite is measured against the last read that was
 	 * whole rather than against the previous miss's remainder. A DURABLE shrink
-	 * does replace it: a low read the provider did not re-write is a smaller
-	 * prefix served from cache, and keeping the old number made every following
-	 * turn a fresh false miss (#4718 review F1).
+	 * does replace it: a request whose whole prompt is below half this number is
+	 * a smaller prompt, and keeping the old number made every following turn a
+	 * fresh false miss (#4718 review F1, F8).
 	 */
 	lastHealthyCacheRead?: number;
 	/** Unbounded hash of the ordered system-message set pi-lens last observed. */
@@ -324,6 +325,7 @@ function emptyCacheMissCauses(): Record<CacheMissCause, number> {
 		"system-prompt-changed": 0,
 		"partial-eviction": 0,
 		"model-provider-changed": 0,
+		"prefix-shrunk": 0,
 		unknown: 0,
 	};
 }
@@ -611,7 +613,13 @@ interface CacheMissVerdict {
  *      not, #1016's fix has regressed.
  *   3. `model-provider-changed` — both adjacent identities were present and
  *      differ. This is direct local evidence and outranks timing heuristics.
- *   4. Evidence gates — heuristic causes require a REQUEST-time observation,
+ *   4. `prefix-shrunk` — a low read of a request whose whole prompt is itself
+ *      below half the baseline (`promptShrank`): the prompt got smaller
+ *      (compaction, a trimmed transcript), so the read is low because there is
+ *      less to read. It is decided from the provider's own token counts, not
+ *      from timing, so it outranks the evidence gates; it names the turn so the
+ *      shrink never counts as an unexplained miss (#4718 review F7).
+ *   5. Evidence gates — heuristic causes require a REQUEST-time observation,
  *      a complete bounded sequence hash, adjacent full provider/model identity,
  *      and well-formed provider usage numbers.
  *      Missing evidence returns a specific unknown reason; it never lets a
@@ -619,15 +627,15 @@ interface CacheMissVerdict {
  *      the request clock alone, so content-hash truncation does not gate it
  *      (#4687 item 4: a 20,000-character tool result is ordinary, not evidence
  *      that the gap is unreadable).
- *   5. `ttl-expired` — a REQUEST-time gap reached the configured provider TTL.
+ *   6. `ttl-expired` — a REQUEST-time gap reached the configured provider TTL.
  *      A message-end fallback includes generation time and cannot prove this.
- *   6. `partial-eviction` — a non-zero but low read, where fresh input runs far
+ *   7. `partial-eviction` — a non-zero but low read, where fresh input runs far
  *      above the new content we measured. pi-lens injections average ~2.7
  *      estimated tokens per turn, so they cannot account for a multiple of the
  *      measured content; the remainder is provider-side eviction, typically at
  *      a context limit. Suppressed when the character accumulators were capped,
  *      because a floor estimate would manufacture the verdict.
- *   7. `unknown` — a real shortfall with no local explanation. A bounded
+ *   8. `unknown` — a real shortfall with no local explanation. A bounded
  *      `cacheMissUnknownReason` names the missing or conflicting evidence;
  *      provider behavior is never guessed.
  */
@@ -650,6 +658,7 @@ function classifyCacheMiss(args: {
 	providerUsageMalformed: boolean;
 	estimatedNewTokens: number;
 	attributionCharsCapped: boolean;
+	promptShrank: boolean;
 }): CacheMissVerdict | null {
 	const cacheRead = readableTokenCount(args.cacheRead);
 	if (cacheRead === undefined) return null;
@@ -689,6 +698,7 @@ function classifyCacheMiss(args: {
 	if (args.modelProviderChanged) {
 		return { kind, cause: "model-provider-changed" };
 	}
+	if (args.promptShrank) return { kind, cause: "prefix-shrunk" };
 	// TTL and transcript-growth claims need the request-side context observation.
 	// A response-time fallback includes generation and can only explain why the
 	// verdict stayed unknown; it cannot establish cache expiry.
@@ -775,11 +785,11 @@ function classifyCacheMiss(args: {
  * shortfall was or was not measured against this read.
  *
  * `advanced` — a healthy record IS the prefix this session last read whole;
- * `shrunk` — a low read whose disappeared tokens were not re-written, i.e. a
- * durable smaller prefix (compaction, a trimmed system prompt); `held` — a miss
- * that kept the last healthy read (a rewrite, a zero read, or no write
- * evidence); `switched` — a model or provider change cleared it; `cleared` —
- * the record carried no readable `cacheRead`.
+ * `shrunk` — the request's whole prompt fell below half the baseline
+ * (`promptShrank`), i.e. a durable smaller prompt (compaction, a trimmed
+ * transcript); `held` — a miss that kept the last healthy read (a rewrite, a
+ * zero read, or unreadable token counts); `switched` — a model or provider
+ * change cleared it; `cleared` — the record carried no readable `cacheRead`.
  */
 type CacheBaselineDecision =
 	| "advanced"
@@ -789,49 +799,64 @@ type CacheBaselineDecision =
 	| "cleared";
 
 /**
- * Whether the provider says it RE-WROTE the prefix that this request stopped
- * reading. `cacheWrite` is the provider's own report of the tokens it wrote
- * into its cache, so a write at least as large as the shortfall is a rewrite:
- * the prefix was discarded and built again.
+ * Whether this request's whole prompt is SMALLER than the prefix the session
+ * last read whole, by the same ratio that makes a read low (#4718 review F1,
+ * F8).
  *
- * A write far below the shortfall (or none) means the request carried a
- * SMALLER prefix, and a proportional read is not a shortfall at all (#4718
- * review F1: compaction, a model or provider switch). `undefined` means the
- * provider reported nothing readable, so the record proves neither shape and
- * the caller keeps the last healthy read.
+ * pi-ai reports every request's prompt as three disjoint counts on every api:
+ * `cacheRead`, `cacheWrite` and `input` (`totalTokens` is their sum plus
+ * `output`). Providers differ only in where the uncached part lands: Anthropic
+ * and Bedrock report it as `cacheWrite`, while Gemini, Vertex, Mistral and
+ * OpenAI report `cacheWrite: 0` and carry it in `input`. Their sum is the
+ * prompt on all of them, so no provider class is needed. A rewritten prefix
+ * comes back as uncached tokens and keeps the prompt near the old prefix; a
+ * compacted transcript shrinks the prompt itself. Reading `cacheWrite` alone
+ * (round 2) took Gemini's zero write for a shrink, so its second rewrite read
+ * as a hit.
+ *
+ * A prompt below half the baseline is the same "low" the classifier applies
+ * to the read, so a turn held by this rule has a prompt the next turn's read
+ * is not low against: holding can cost one miss, never a stream of them. A
+ * zero read is never a shrink: nothing was served, so it is a miss whatever
+ * the size. Any unreadable count fails closed (false: hold and keep the miss).
  */
-function prefixRewritten(args: {
+function promptShrank(args: {
 	cacheRead: number | undefined;
+	input: number | undefined;
 	cacheWrite: number | undefined;
 	priorCacheRead: number | undefined;
-}): boolean | undefined {
+}): boolean {
 	const prior = readableTokenCount(args.priorCacheRead);
+	const cacheRead = readableTokenCount(args.cacheRead);
+	const input = readableTokenCount(args.input);
 	const cacheWrite = readableTokenCount(args.cacheWrite);
 	if (
 		prior === undefined ||
-		cacheWrite === undefined ||
-		args.cacheRead === undefined
+		cacheRead === undefined ||
+		input === undefined ||
+		cacheWrite === undefined
 	) {
-		return undefined;
+		return false;
 	}
-	const shortfall = prior - args.cacheRead;
-	if (shortfall <= 0) return undefined;
-	return cacheWrite >= shortfall;
+	return (
+		cacheRead > 0 &&
+		cacheRead + input + cacheWrite < prior * LOW_CACHE_READ_RATIO
+	);
 }
 
 /**
  * Decide the baseline the NEXT turn is measured against (#4687 item 3, #4718
  * review F1). A baseline that only ever advanced treated a durable prefix
  * shrink as a permanent miss: the shrink turn's lower read was never written
- * again, so `cacheWrite` stays near zero and every later turn re-reported the
- * same shortfall against a prefix that no longer exists.
+ * again, and every later turn re-reported the same shortfall against a prefix
+ * that no longer exists.
  */
 function nextCacheBaseline(args: {
 	cacheRead: number | undefined;
-	cacheWrite: number | undefined;
 	priorCacheRead: number | undefined;
 	kind: CacheMissKind | undefined;
 	modelProviderChanged: boolean;
+	promptShrank: boolean;
 }): { baseline: number | undefined; decision: CacheBaselineDecision } {
 	// A new provider or model tokenizes and caches its own prefix, so the read
 	// of the previous one says nothing about it: start a fresh baseline rather
@@ -842,18 +867,15 @@ function nextCacheBaseline(args: {
 	if (args.cacheRead === undefined) {
 		return { baseline: undefined, decision: "cleared" };
 	}
+	if (args.promptShrank) {
+		return { baseline: args.cacheRead, decision: "shrunk" };
+	}
 	// No kind means no shortfall: a healthy read becomes the new baseline.
 	if (args.kind === undefined) {
 		return { baseline: args.cacheRead, decision: "advanced" };
 	}
-	if (args.kind === "low-read" && prefixRewritten(args) === false) {
-		return { baseline: args.cacheRead, decision: "shrunk" };
-	}
-	// A re-written prefix, a zero read, or a provider that reports no writes:
-	// keep the last healthy read so a second consecutive rewrite is still a miss.
-	// A write at or above the shortfall rebuilt at least what disappeared, so the
-	// new prefix is at least the old baseline and holding it cannot manufacture a
-	// shortfall.
+	// A rewrite, a zero read, or counts that cannot prove a smaller prompt: keep
+	// the last healthy read so a second consecutive rewrite is still a miss.
 	return { baseline: args.priorCacheRead, decision: "held" };
 }
 
@@ -868,9 +890,12 @@ function nextCacheBaseline(args: {
  * entry). From the SECOND on the session has a pattern, so the ledger carries
  * one bounded `prompt-cache-miss-unexplained` row and every later miss only
  * raises the count. The row is written through `recordDegradationOnce` exactly
- * once, so the ledger count starts at the row's own admission: 1 for the
- * second miss, 2 for the third, and so on. `metadata.misses` always carries the
- * session's real total.
+ * once, so the ledger count is the ADMITTED misses, the session total less the
+ * silent first: 1 after the second miss, 2 after the third. The durable row is
+ * written once, at admission, so its `metadata.misses` always reads 2. The
+ * session's exact total is `cache_usage_summary`'s `cacheMissCauses.unknown`
+ * (#4718 review F10). A shrink is named `prefix-shrunk` and never reaches this
+ * counter (#4718 review F7).
  */
 function recordUnexplainedMiss(
 	state: SessionAttributionState,
@@ -1495,6 +1520,15 @@ export function logCacheUsage(
 		// counter (#4718 review F5).
 		const stableSessionIdentity =
 			sessionKey(context?.sessionId) !== NO_SESSION_KEY;
+		// One derivation read by the classifier (the `prefix-shrunk` cause) and by
+		// the baseline rule (`shrunk`), so the two can never disagree (#4718
+		// review F7). The raw `input` is passed: a missing one must not read as 0.
+		const shrank = promptShrank({
+			cacheRead,
+			input: inputEvidence.value,
+			cacheWrite: cacheWriteEvidence.value,
+			priorCacheRead: priorCacheReadValue,
+		});
 		const verdict = classifyCacheMiss({
 			cacheRead,
 			// Missing/malformed input cannot prove fresh-input pressure. The explicit
@@ -1516,6 +1550,7 @@ export function logCacheUsage(
 			providerUsageMalformed,
 			estimatedNewTokens,
 			attributionCharsCapped: state.attributionCharsCapped,
+			promptShrank: shrank,
 		});
 		const unknownReason: CacheMissUnknownReason | undefined =
 			providerUsageMalformed
@@ -1572,10 +1607,10 @@ export function logCacheUsage(
 		// `nextCacheBaseline` owns that rule and names the decision it took.
 		const cacheBaseline = nextCacheBaseline({
 			cacheRead,
-			cacheWrite: cacheWriteEvidence.value,
 			priorCacheRead: priorCacheReadValue,
 			kind: verdict?.kind,
 			modelProviderChanged,
+			promptShrank: shrank,
 		});
 		state.lastHealthyCacheRead = cacheBaseline.baseline;
 		state.lastProviderIdentityHash = currentProvider.hash;
