@@ -30,10 +30,11 @@ export function codeSpanMasked(text) {
 }
 
 /**
- * Blank HTML comments: a comment block (a line opening `<!--`, to the line
- * holding `-->` or the end of its container) and an inline comment the lexer
- * closes inside its paragraph. Every other `<!--` is literal text the reader
- * sees (#4717 V1, V4, V5).
+ * Blank HTML comments: the comments inside a raw-HTML block (one that a line
+ * opening `<!--` starts runs to the line holding `-->` or the end of its
+ * container; the block's text after a comment's end stays, as GitHub shows it,
+ * #4565) and an inline comment the lexer closes inside its paragraph. Every
+ * other `<!--` is literal text the reader sees (#4717 V1, V4, V5).
  */
 export function blankHtmlComments(text) {
 	return blankMarkdownRegions(text, { html: "comments" });
