@@ -3,9 +3,10 @@
  * #4554 witness: the shared session teardown belongs to the LAST live session
  * of one pi-lens activation, not to the role that activation recorded last.
  *
- * Reproduced shape (one extension activation, which is what pi's own
- * re-delivery of in-process session handling produces): `session_start` runs
- * for M, then S1, S2, S3 — same root, M live, so M is `primary` and each S is
+ * Reproduced shape (one extension activation, which is the double's shape, not
+ * the host's: pi's loader caches the factory and calls it per load, so two
+ * live sessions are two activations, #4704): `session_start` runs for M, then
+ * S1, S2, S3 — same root, M live, so M is `primary` and each S is
  * `concurrent-secondary`. `index.ts`'s `ownedSessionRole` is last-write-wins,
  * so after S1's start it holds `concurrent-secondary` and EVERY later
  * shutdown, M's included, took the local-only branch: `cancelLSPIdleReset`,
