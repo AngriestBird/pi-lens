@@ -77,17 +77,26 @@ function ctx(
 	};
 }
 
+// #4709: FILE-LEVEL on purpose. The `vi.mock` this replaced was hoisted and
+// file-wide, and a `beforeEach` covers only the block that owns it. A
+// describe-scoped install narrows that reach silently: this file has two
+// top-level describes, and `per-edit blocker scope (#4481)` below kept passing
+// only by reading the first describe's leftover singleton, so six of its cases
+// red under `--sequence.shuffle --sequence.seed=202` (#4722 F1).
+beforeEach(async () => {
+	await installLspServiceDouble({
+		supportsLSP,
+		hasLSP,
+		openFile,
+		touchFile,
+		getDiagnostics,
+		codeAction,
+		getClientForFile: vi.fn(),
+	});
+});
+
 describe("runner status/semantic edge cases", () => {
-	beforeEach(async () => {
-		await installLspServiceDouble({
-			supportsLSP,
-			hasLSP,
-			openFile,
-			touchFile,
-			getDiagnostics,
-			codeAction,
-			getClientForFile: vi.fn(),
-		});
+	beforeEach(() => {
 		safeSpawn.mockReset();
 		safeSpawnAsync.mockReset();
 		tryLazyInstall.mockClear();
