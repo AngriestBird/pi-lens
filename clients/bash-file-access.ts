@@ -79,6 +79,13 @@ interface WordPart {
 interface ShellWord {
 	text: string;
 	parts: readonly WordPart[];
+	/**
+	 * Bash expands a leading `~` only when its whole tilde-prefix, up to the
+	 * first unquoted `/`, is unquoted (#4577 M1, #4713 R11): the first part is
+	 * unquoted and starts with `~`, and it is the only part or holds the `/`.
+	 * `~/x""` expands; `""~`, `~""/x` and `~\ x` do not.
+	 */
+	tildeExpands: boolean;
 }
 
 /**
@@ -245,7 +252,7 @@ function consumeHeredocBodies(
 
 /**
  * A word a write or read reader resolves: the token text, and whether bash
- * expands its leading `~` (see {@link tildeExpands}).
+ * expands its leading `~` (see {@link ShellWord.tildeExpands}).
  */
 interface ShellOperand {
 	text: string;
@@ -255,7 +262,7 @@ interface ShellOperand {
 function shellOperands(range: ShellSegmentRange): ShellOperand[] {
 	return range.words.map((word) => ({
 		text: word.text,
-		tildeExpands: tildeExpands(word),
+		tildeExpands: word.tildeExpands,
 	}));
 }
 
@@ -271,21 +278,6 @@ function wordValue(word: ShellWord): string | undefined {
 		value += part.text;
 	}
 	return value;
-}
-
-/**
- * Bash expands a leading `~` only when its whole tilde-prefix, up to the first
- * unquoted `/`, is unquoted (#4577 M1, #4713 R11): the word's first part is
- * unquoted and starts with `~`, and it is the only part or holds the `/`.
- * `~/x""` expands; `""~`, `~""/x` and `~\ x` do not.
- */
-function tildeExpands(word: ShellWord): boolean {
-	const [first, ...rest] = word.parts;
-	return (
-		first?.kind === "unquoted" &&
-		first.text?.startsWith("~") === true &&
-		(rest.length === 0 || first.text.includes("/"))
-	);
 }
 
 export function tokenizeShellCommand(command: string): ShellCommandSegment[] {
@@ -343,7 +335,15 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 		closePart();
 		if (word) {
 			tokens.push(word);
-			words.push({ text: word, parts });
+			const [first, ...rest] = parts;
+			words.push({
+				text: word,
+				parts,
+				tildeExpands:
+					first?.kind === "unquoted" &&
+					first.text?.startsWith("~") === true &&
+					(rest.length === 0 || first.text.includes("/")),
+			});
 			redirectWords.push(redirectPending);
 			redirectPending = false;
 		}
@@ -1175,7 +1175,7 @@ function cdOperandPath(
 				if (!LITERAL_WORD_CHAR.test(ch) && !(ch === "~" && index === 0))
 					return undefined;
 	}
-	const tilde = tildeExpands(word);
+	const tilde = word.tildeExpands;
 	if (tilde && value !== "~" && !value.startsWith("~/")) return undefined;
 	const operand = tilde ? normalizeHostToolPath(value) : value;
 	return path.isAbsolute(operand) ? operand : path.resolve(cwd, operand);
