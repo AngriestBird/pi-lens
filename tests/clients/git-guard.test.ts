@@ -1337,6 +1337,18 @@ describe("#4725: the record's writers read it whatever its age", () => {
 				"cannot attribute to a file, so no re-check of one file clears them",
 			);
 			expect(refusal.reason).not.toContain("fresh session");
+
+			// A fresh record no writer of this version produces (3.8.74's
+			// `{ content }`) gets the same honest remedy, not a re-check.
+			const fresh = sessionA(env.tmpDir);
+			cache.writeCache(
+				"turn-end-findings",
+				{ content: "🔴 STOP — 1 issue(s) must be fixed:\n  L1: alpha" },
+				env.tmpDir,
+			);
+			expect(evaluateGitGuard(fresh, cache, env.tmpDir).reason).toContain(
+				"cache_malformed). The record holds blockers pi-lens cannot attribute",
+			);
 		} finally {
 			env.cleanup();
 		}
@@ -1462,14 +1474,111 @@ describe("#4725: the record's writers read it whatever its age", () => {
 		// "or start a fresh session" named an action that clears nothing.
 		const env = setupTestEnvironment("pi-lens-git-guard-4725-own-remedy-");
 		try {
+			const file = path.join(env.tmpDir, "a.ts");
+			fs.writeFileSync(file, "const x = 1;\n");
 			const runtime = sessionA(env.tmpDir);
 			const cache = new CacheManager(false);
+			// This session's own fresh record: its blockers are not "unconfirmed",
+			// so the refusal must not borrow the other-session remedy.
+			const text = composerSections([file]);
+			writeGitGuardRecord(
+				cache,
+				runtime,
+				env.tmpDir,
+				record({
+					content: text,
+					blockerContent: text,
+					hasBlockers: true,
+					affectedFiles: [file],
+					blockingFiles: [file],
+				}),
+			);
 			runtime.markGitGuardCacheUnknown("pipeline_error");
 			const refusal = evaluateGitGuard(runtime, cache, env.tmpDir);
 			expect(refusal.reason).toContain(
 				"Write the affected files again so pi-lens re-checks them",
 			);
+			expect(refusal.reason).not.toContain("cannot confirm");
 			expect(refusal.reason).not.toContain("fresh session");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("caps the files a refusal names and says how many it left out, and names failing tests", () => {
+		// An agent-facing list is bounded and discloses its cut (AGENTS.md
+		// shape 10); a record that also holds test failures says what clears
+		// them (#4725 acceptance 3).
+		const env = setupTestEnvironment("pi-lens-git-guard-4725-remedy-cap-");
+		try {
+			const files = ["a", "b", "c", "d", "e", "f"].map((name) =>
+				path.join(env.tmpDir, `${name}.ts`),
+			);
+			for (const file of files) fs.writeFileSync(file, "const x = 1;\n");
+			const runtime = sessionA(env.tmpDir);
+			const cache = new CacheManager(false);
+			const text = composerSections(files);
+			cache.writeCache(
+				"turn-end-findings",
+				record({
+					content: text,
+					blockerContent: text,
+					hasBlockers: true,
+					affectedFiles: files,
+					blockingFiles: files,
+					sessionId: "an-earlier-session",
+					testFailures: true,
+					testFailureContent: "FAIL 0p/1f",
+					testFailureFiles: [files[0]],
+				}),
+				env.tmpDir,
+			);
+			const reason = evaluateGitGuard(runtime, cache, env.tmpDir).reason ?? "";
+			expect(reason).toContain(
+				"The record names blockers in a.ts, b.ts, c.ts, d.ts, e.ts and 1 more that pi-lens cannot confirm.",
+			);
+			expect(reason).toContain(
+				"Run the failing tests again: a passing run clears them.",
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("leaves this session's record text byte for byte when an unrelated file dispatches clean", () => {
+		// The per-file clear rewrites the text only when it drops a section, so
+		// a record in `syncGitGuardRecord`'s own one-newline join is not
+		// re-joined by a dispatch that owns none of it.
+		const env = setupTestEnvironment("pi-lens-git-guard-4725-bytes-");
+		try {
+			const files = ["a.ts", "b.ts", "c.ts"].map((name) =>
+				path.join(env.tmpDir, name),
+			);
+			for (const file of files) fs.writeFileSync(file, "const x = 1;\n");
+			const runtime = sessionA(env.tmpDir);
+			const cache = new CacheManager(false);
+			const text = files
+				.slice(0, 2)
+				.map(
+					(file) => `${file}: ${productionSummary(file, ["alpha is unsafe"])}`,
+				)
+				.join("\n");
+			writeGitGuardRecord(
+				cache,
+				runtime,
+				env.tmpDir,
+				record({
+					content: text,
+					blockerContent: text,
+					hasBlockers: true,
+					affectedFiles: files.slice(0, 2),
+					blockingFiles: files.slice(0, 2),
+				}),
+			);
+
+			syncGitGuardRecord(runtime, cache, env.tmpDir, files[2]);
+
+			expect(storedData(cache, env.tmpDir)?.blockerContent).toBe(text);
 		} finally {
 			env.cleanup();
 		}
