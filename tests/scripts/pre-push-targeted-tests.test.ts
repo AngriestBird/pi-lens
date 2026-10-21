@@ -435,6 +435,7 @@ describe("selectTargetedTests — path-mirror pass", () => {
 			"tests/config/path-identity-sweep.test.ts",
 			// #4590: walks both trees, so both change kinds must arm it.
 			"tests/config/env-path-key-composition-sweep.test.ts",
+			"tests/config/git-fixture-governance.test.ts",
 		];
 		const testScanners = [
 			"tests/clients/flake-shape-ratchet.test.ts",
@@ -455,6 +456,7 @@ describe("selectTargetedTests — path-mirror pass", () => {
 			"tests/config/pi-mock-importer-sweep.test.ts",
 			"tests/config/sink-read-drain-sweep.test.ts",
 			"tests/config/env-path-key-composition-sweep.test.ts",
+			"tests/config/git-fixture-governance.test.ts",
 			"tests/config/test-env-restore-sweep.test.ts",
 			"tests/config/test-server-teardown-sweep.test.ts",
 			"tests/config/module-instance-coverage.test.ts",
@@ -465,6 +467,7 @@ describe("selectTargetedTests — path-mirror pass", () => {
 			"tests/scripts/ci-shuffle-census.test.ts",
 			"tests/support/ast-census.test.ts",
 			"tests/support/host-event-shape-scan.test.ts",
+			"tests/support/source-walkers-vanished-dir.test.ts",
 			// #4522: walks both captured-fixture trees, so a fixture change arms it.
 			"tests/clients/dispatch/smoke-fixture-coverage.test.ts",
 		];
@@ -615,6 +618,33 @@ describe("selectTargetedTests — path-mirror pass", () => {
 		expect(selectTargetedTests(["docs/tests/x.md"], allTests).selected).toEqual(
 			[],
 		);
+	});
+
+	// #4104 (Greptile P2 on PR #4557): walk-files.mjs has no direct importer, so
+	// the import index selected none of the walker's own tests. Recurrence: an
+	// edit to the shared walker that runs no vanished-directory or sort pin
+	// before the push.
+	it("selects the walker's own tests for a change to scripts/lib/walk-files.mjs", () => {
+		enterFixture();
+		write("scripts/lib/walk-files.mjs", "export function walkFiles() {}\n");
+		write(
+			"tests/support/source-walkers-vanished-dir.test.ts",
+			"it('vanished', () => {});\n",
+		);
+		write("tests/support/sweep-kit.test.ts", "it('sweep', () => {});\n");
+
+		const allTests = collectTestFiles("tests");
+		const result = selectTargetedTests(
+			["scripts/lib/walk-files.mjs"],
+			allTests,
+		);
+
+		expect(result.selected).toEqual([
+			"tests/support/source-walkers-vanished-dir.test.ts",
+			"tests/support/sweep-kit.test.ts",
+		]);
+		expect(result.unmatched).toEqual([]);
+		expect(result.capped).toBe(false);
 	});
 
 	it("always includes a changed test file itself", () => {
