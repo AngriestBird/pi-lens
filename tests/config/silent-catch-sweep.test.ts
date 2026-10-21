@@ -152,10 +152,10 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 		reason: PRE_RULE,
 	}, // :427, :431, :615
 	"clients/analysis-root.ts": {
-		silent: 2,
-		identities: "1ba786260b8caf72",
+		silent: 1,
+		identities: "7b52b635719a3045",
 		reason: PRE_RULE,
-	}, // :43, :67
+	}, // :50 (2 -> 1, #4689: `realPathOrResolved` folded onto path-utils)
 	"clients/ast-grep-client.ts": {
 		silent: 5,
 		identities: "e0171caad3e9bf11",
@@ -948,10 +948,10 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 		reason: PRE_RULE,
 	}, // :97
 	"clients/path-utils.ts": {
-		silent: 9,
-		identities: "9bb4a21080715db3",
+		silent: 8,
+		identities: "a67f7f2c5485dc04",
 		reason: PRE_RULE,
-	}, // :286, :297, :303, :316, :410, :433, :702, :1215, :1471
+	}, // :300, :311, :317, :468, :491, :760, :1283, :1539 (9 -> 8, #4689: the identity walk's catch is a `none:` line)
 	"clients/performance-report.ts": {
 		silent: 3,
 		identities: "9285fe879a302231",

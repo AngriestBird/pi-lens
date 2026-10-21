@@ -3820,11 +3820,12 @@ function localImportToFile(
 		return undefined;
 	}
 	// #4101: `filePath` is a canonical key (`normalizeMapKey`) and `cwd` is the
-	// caller's spelling of the root. `isUnderDir` canonicalizes BOTH sides, so a
-	// root reached through an 8.3 name, a junction or a subst drive no longer
-	// drops the edge. Existence runs first: it rejects the many absent
-	// source-twin candidates for a stat, before any realpath.
-	const root = path.resolve(cwd);
+	// caller's spelling of the root. Both sides are compared by path identity,
+	// so a root reached through an 8.3 name, a junction, a subst drive or a
+	// symlink (#4689) no longer drops the edge. Existence runs first: it
+	// rejects the many absent source-twin candidates for a stat, before any
+	// realpath.
+	const root = normalizeMapKey(path.resolve(cwd));
 	for (const candidate of jsTsCandidatePaths(filePath, source)) {
 		if (!fs.existsSync(candidate)) continue;
 		const normalized = normalizeMapKey(candidate);

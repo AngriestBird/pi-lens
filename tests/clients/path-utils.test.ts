@@ -40,7 +40,9 @@ import {
 	normalizeFilePath,
 	normalizeLoggedPath,
 	normalizeMapKey,
+	pathsEqual,
 	pathToUri,
+	realpathOrResolve,
 	splitPathSegments,
 	toPosix,
 	toProjectRelativePath,
@@ -51,7 +53,11 @@ import {
 	getDegradationSummary,
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
-import { createCaseAliasFixture, setupTestEnvironment } from "./test-utils.js";
+import {
+	createCaseAliasFixture,
+	createPathIdentityFixture,
+	setupTestEnvironment,
+} from "./test-utils.js";
 import { withPlatform } from "../support/platform-stub.js";
 
 describe("isWindowsPath (#1213 review pins)", () => {
@@ -259,29 +265,10 @@ describe("normalizeFilePath: POSIX adopts on-disk casing (#3098, the live half o
 		}
 	});
 
-	it("keeps a symlinked PREFIX — POSIX normalization still resolves no symlink", (ctx) => {
+	it("a symlinked prefix with a mis-cased tail keys by its identity: the link resolved and the on-disk casing (the macOS /var/folders shape)", (ctx) => {
 		ctx.skip(
 			process.platform === "win32",
-			"win32 arm resolves symlinks by design (unchanged by #3098); lane: ubuntu Unit tests",
-		);
-		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-case-");
-		try {
-			fs.mkdirSync(path.join(tmpDir, "real", "sub"), { recursive: true });
-			fs.writeFileSync(path.join(tmpDir, "real", "sub", "a.ts"), "x\n");
-			fs.symlinkSync("real", path.join(tmpDir, "link"), "dir");
-			const viaLink = path.join(tmpDir, "link", "sub", "a.ts");
-			// A symlinked package root is how monorepos are laid out; folding it
-			// to its target would re-key every file in them (refs #2490).
-			expect(normalizeMapKey(viaLink)).toBe(viaLink);
-		} finally {
-			cleanup();
-		}
-	});
-
-	it("a symlinked prefix with a mis-cased tail fixes the casing only (the macOS /var/folders shape)", (ctx) => {
-		ctx.skip(
-			process.platform === "win32",
-			"win32 arm resolves symlinks by design (unchanged by #3098); lane: ubuntu Unit tests",
+			"win32 builds no case-variant symlink fixture here; lane: ubuntu Unit tests",
 		);
 		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-case-");
 		try {
@@ -291,12 +278,12 @@ describe("normalizeFilePath: POSIX adopts on-disk casing (#3098, the live half o
 			ctx.skip(alias.skipReason !== undefined, alias.skipReason ?? "");
 			fs.symlinkSync("real", path.join(tmpDir, "link"), "dir");
 			// macOS `os.tmpdir()` IS this shape: `/var/folders/...` is a symlink
-			// into `/private/var`, so a whole-string "is this a case variant"
-			// test would decline to canonicalize exactly the paths #1024's
-			// regression test runs on.
+			// into `/private/var`. #3098 fixed the casing and kept the link
+			// prefix; since #4689 an absolute key is the path identity, so the
+			// kernel's one answer fixes both (the mis-cased segment AND the link).
 			const held = path.join(tmpDir, "link", "SUB", "a.ts");
 			expect(normalizeMapKey(held)).toBe(
-				path.join(tmpDir, "link", "sub", "a.ts"),
+				path.join(fs.realpathSync.native(real), "sub", "a.ts"),
 			);
 		} finally {
 			cleanup();
@@ -358,7 +345,9 @@ describe("normalizeFilePath: POSIX adopts on-disk casing (#3098, the live half o
 	// exactly that, and its non-goal test did not catch it because the fixture
 	// built `sub`/`SUB` as siblings, where link-parent and target-parent are
 	// the same directory. These two build the everyday shapes where they are
-	// not. Both run on the ubuntu Unit tests lane; on Windows (and any other
+	// not. Since #4689 an absolute key is the kernel's own answer and the
+	// rewrite runs for relative spellings only, so these pin that the identity
+	// arm never reintroduces it. Both run on the ubuntu Unit tests lane; on Windows (and any other
 	// case-insensitive filesystem) the fixture cannot exist — `MyProject` and
 	// `myproject` are one directory there — so they skip visibly.
 	it("a case-variant symlink to a different directory never collapses two real files onto one key", (ctx) => {
@@ -398,7 +387,13 @@ describe("normalizeFilePath: POSIX adopts on-disk casing (#3098, the live half o
 			// disposition/read-guard/cache record answering for another's.
 			expect(fs.statSync(viaLink).ino).not.toBe(fs.statSync(other).ino);
 			expect(normalizeMapKey(viaLink)).not.toBe(normalizeMapKey(other));
-			expect(normalizeMapKey(viaLink)).toBe(viaLink);
+			// #4689: the link's key is its target's identity, never the sibling
+			// a case-only rewrite of the link's own name would land on.
+			expect(normalizeMapKey(viaLink)).toBe(
+				fs.realpathSync.native(
+					path.join(tmpDir, "work", "myproject", "src", "a.ts"),
+				),
+			);
 		} finally {
 			cleanup();
 		}
@@ -409,9 +404,8 @@ describe("normalizeFilePath: POSIX adopts on-disk casing (#3098, the live half o
 		try {
 			// node_modules/Foo -> ../pkgs/foo: the everyday symlinked-package
 			// layout. Rewriting `Foo` to `foo` produces node_modules/foo, which
-			// is nowhere on disk — the key stops naming a file at all, and the
-			// #2490 bound ("a symlinked package keys under the held path") is
-			// broken.
+			// is nowhere on disk — the key stops naming a file at all. Since
+			// #4689 the key is the package file's identity instead.
 			fs.mkdirSync(path.join(tmpDir, "node_modules"), { recursive: true });
 			fs.mkdirSync(path.join(tmpDir, "pkgs", "foo"), { recursive: true });
 			fs.writeFileSync(
@@ -439,7 +433,11 @@ describe("normalizeFilePath: POSIX adopts on-disk casing (#3098, the live half o
 			const held = path.join(tmpDir, "node_modules", "Foo", "i.ts");
 			const key = normalizeMapKey(held);
 			expect(fs.existsSync(key)).toBe(true);
-			expect(key).toBe(held);
+			// #4689: the identity is the package's real file, not the
+			// `node_modules/foo` a case-only rewrite would invent.
+			expect(key).toBe(
+				fs.realpathSync.native(path.join(tmpDir, "pkgs", "foo", "i.ts")),
+			);
 		} finally {
 			cleanup();
 		}
@@ -490,6 +488,114 @@ describe("normalizeFilePath: POSIX adopts on-disk casing (#3098, the live half o
 			);
 		} finally {
 			cleanup();
+		}
+	});
+});
+
+describe("path identity: every link spelling of one file derives one key (#4689)", () => {
+	// RECURRENCE GUARDED: shape 1 (divergent path keys) across link spellings.
+	// The POSIX arm computed `realpath` on every call and then threw the answer
+	// away, keeping the caller's link spelling, so one inode carried one key per
+	// spelling: split widget records, a stale blocker under the link after a fix
+	// through the target, and 4 of 4 cross-spelling read-guard blocks (#4689
+	// audit, probes 2.2, 2.3, 2.6). The win32 arm already returned the realpath.
+	// Lane: ubuntu Unit tests (symlinks need no privilege there); a host that
+	// cannot create links skips visibly.
+	const family = () => {
+		const env = setupTestEnvironment("pi-lens-path-identity-");
+		const fx = createPathIdentityFixture(env.tmpDir);
+		return { env, fx };
+	};
+
+	it("a file link and its target, a dir link and its target, an alias root and the real root, AGENTS.md and CLAUDE.md compare equal", (ctx) => {
+		const { env, fx } = family();
+		try {
+			if (fx.skipReason) return ctx.skip(fx.skipReason);
+			const viaAlias = path.join(fx.aliasRoot, "src", "real.ts");
+			const pairs: Array<[string, string]> = [
+				[fx.fileLink, fx.realFile],
+				[fx.dirLinkFile, fx.sharedFile],
+				[viaAlias, fx.realFile],
+				[fx.agentsLink, fx.claudeMd],
+			];
+			for (const [spelled, target] of pairs) {
+				expect(normalizeMapKey(spelled)).toBe(normalizeMapKey(target));
+				expect(pathsEqual(spelled, target)).toBe(true);
+				// The identity is the kernel's own answer for the target.
+				expect(normalizeMapKey(spelled)).toBe(
+					fs.realpathSync.native(target).replace(/\\/g, "/"),
+				);
+			}
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("a missing file under a dir link keys under the link target and keeps that key once created", (ctx) => {
+		const { env, fx } = family();
+		try {
+			if (fx.skipReason) return ctx.skip(fx.skipReason);
+			const spelled = path.join(path.dirname(fx.dirLinkFile), "brand-new.ts");
+			const identity = path.join(
+				fs.realpathSync.native(path.dirname(fx.sharedFile)),
+				"brand-new.ts",
+			);
+			const before = normalizeMapKey(spelled);
+			expect(before).toBe(identity.replace(/\\/g, "/"));
+			// The audit's probe row: the shared realpath helper kept the link
+			// spelling for a file that did not exist yet.
+			expect(realpathOrResolve(spelled)).toBe(identity);
+			fs.writeFileSync(spelled, "export const x = 1;\n");
+			// A write creates the file; its key before (tool_call) and after
+			// (tool_result) creation must be the same record.
+			expect(normalizeMapKey(spelled)).toBe(before);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("`..` after a dir link follows the kernel, not a lexical collapse", (ctx) => {
+		const { env, fx } = family();
+		try {
+			if (fx.skipReason) return ctx.skip(fx.skipReason);
+			// src/linked -> ../shared, so the kernel reads src/linked/.. as the
+			// repo root; a lexical fold reads it as src. Plant a file in both
+			// places so the two answers name different files.
+			fs.writeFileSync(path.join(fx.repo, "both.ts"), "kernel\n");
+			fs.writeFileSync(path.join(fx.repo, "src", "both.ts"), "lexical\n");
+			const spelled = [path.dirname(fx.dirLinkFile), "..", "both.ts"].join(
+				path.sep,
+			);
+			const kernel = fs.realpathSync.native(spelled);
+			expect(fs.readFileSync(kernel, "utf8")).toBe("kernel\n");
+			expect(normalizeMapKey(spelled)).toBe(kernel.replace(/\\/g, "/"));
+			expect(realpathOrResolve(spelled)).toBe(kernel);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("a link out of the root keys under the outside file, so both spellings share its record", (ctx) => {
+		const { env, fx } = family();
+		try {
+			if (fx.skipReason) return ctx.skip(fx.skipReason);
+			expect(normalizeMapKey(fx.outLink)).toBe(normalizeMapKey(fx.outsideFile));
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("toProjectRelativePath renders one relative path for the real and the alias spelling under a symlinked root (#4152)", (ctx) => {
+		const { env, fx } = family();
+		try {
+			if (fx.skipReason) return ctx.skip(fx.skipReason);
+			const viaAlias = path.join(fx.aliasRoot, "src", "real.ts");
+			expect(toProjectRelativePath(fx.realFile, fx.aliasRoot)).toBe(
+				"src/real.ts",
+			);
+			expect(toProjectRelativePath(viaAlias, fx.repo)).toBe("src/real.ts");
+		} finally {
+			env.cleanup();
 		}
 	});
 });

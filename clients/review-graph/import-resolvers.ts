@@ -33,14 +33,17 @@ import { buildModuleGraph, type WorkspaceModule } from "./workspace-modules.js";
 
 /**
  * True when `p` is inside (or equal to) `cwd` — blocks resolution escaping the
- * workspace. `isUnderDir` canonicalizes both sides (#4101): `p` is often
- * derived from a canonical key (`normalizeMapKey`) while `cwd` is the caller's
- * spelling of the root, and a lexical compare of the two dropped every edge
- * when that spelling went through an 8.3 name, a junction or a subst drive.
- * It does filesystem work, so callers stat first and ask this last.
+ * workspace. Both sides are compared by path identity (#4101, #4689): `p` is
+ * often derived from a canonical key (`normalizeMapKey`) while `cwd` is the
+ * caller's spelling of the root, and a compare of the two dropped every edge
+ * when that spelling went through an 8.3 name, a junction, a subst drive or a
+ * symlink. It does filesystem work, so callers stat first and ask this last.
  */
 function isWithin(cwd: string, p: string): boolean {
-	return isUnderDir(path.resolve(p), path.resolve(cwd));
+	return isUnderDir(
+		normalizeMapKey(path.resolve(p)),
+		normalizeMapKey(path.resolve(cwd)),
+	);
 }
 
 function isFile(p: string): boolean {

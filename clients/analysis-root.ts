@@ -14,6 +14,7 @@ import {
 	isUnderDir,
 	isVendorPath,
 	pathsEqual,
+	realpathOrResolve,
 } from "./path-utils.js";
 import { isPiLensInternalPath } from "./file-utils.js";
 import {
@@ -62,34 +63,17 @@ function nearestProjectRoot(filePath: string): string | undefined {
 	return hasProjectMarker(filesystemRoot) ? filesystemRoot : undefined;
 }
 
-function realPathOrResolved(filePath: string): string {
-	const resolved = nodePath.resolve(filePath);
-	let current = resolved;
-	const missing: string[] = [];
-	while (true) {
-		try {
-			const real = fs.realpathSync.native(current);
-			return nodePath.join(real, ...missing.reverse());
-		} catch {
-			const parent = nodePath.dirname(current);
-			if (parent === current) return resolved;
-			missing.push(nodePath.basename(current));
-			current = parent;
-		}
-	}
-}
-
 /** The selected filesystem root, or undefined for a refused path. */
 export function resolveAnalysisRootPath(
 	filePath: string,
 	sessionRoot: string,
 	homeDirOverride?: string,
 ): string | undefined {
-	const resolved = realPathOrResolved(filePath);
-	const session = realPathOrResolved(sessionRoot);
-	const tmp = realPathOrResolved(os.tmpdir());
+	const resolved = realpathOrResolve(filePath);
+	const session = realpathOrResolve(sessionRoot);
+	const tmp = realpathOrResolve(os.tmpdir());
 	const data = process.env.PI_LENS_HOME
-		? realPathOrResolved(process.env.PI_LENS_HOME)
+		? realpathOrResolve(process.env.PI_LENS_HOME)
 		: undefined;
 	if (isVendorPath(resolved)) return undefined;
 	if (
@@ -109,7 +93,7 @@ export function resolveAnalysisRootPath(
 	const candidate = nearestProjectRoot(resolved);
 	if (!candidate || candidate === nodePath.parse(candidate).root)
 		return undefined;
-	const home = realPathOrResolved(homeDirOverride ?? os.homedir());
+	const home = realpathOrResolve(homeDirOverride ?? os.homedir());
 	// D1: sibling projects below $HOME are eligible; only $HOME itself and
 	// ancestors are refused. Keep the shared ceiling in isAtOrAboveHomeDir.
 	if (isAtOrAboveHomeDir(candidate, home)) return undefined;
@@ -123,7 +107,7 @@ export function resolveAnalysisRoot(
 	sessionRoot: string,
 	homeDirOverride?: string,
 ): AnalysisRootMode {
-	const resolved = realPathOrResolved(filePath);
+	const resolved = realpathOrResolve(filePath);
 	if (isVendorPath(resolved)) return "none";
 	const checkout = resolveGitCheckout(sessionRoot);
 	if (checkout && resolveLinkedWorktreeOwner(checkout, resolved)) {
@@ -153,11 +137,11 @@ export function isSessionBookkeepingRoot(
 	root: string,
 	sessionRoot: string,
 ): boolean {
-	const resolved = realPathOrResolved(root);
+	const resolved = realpathOrResolve(root);
 	// The file form's first refusal (#4532 round 6, verify r5): every file
 	// under a vendor root resolves to "none", so the root is no session's.
 	if (isVendorPath(resolved)) return false;
-	const session = realPathOrResolved(sessionRoot);
+	const session = realpathOrResolve(sessionRoot);
 	if (pathsEqual(resolved, session) || isUnderDir(resolved, session))
 		return true;
 	const checkout = resolveGitCheckout(session);

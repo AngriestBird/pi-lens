@@ -1119,7 +1119,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/path-keyed-map.ts": 11,
 		// 30 -> 34: findNearestMarkerRootDetailed (#3691) adds its own marker/root
 		// path locals; the legacy walker body is back to its pre-#3649 text.
-		"clients/path-utils.ts": 34,
+		// 34 -> 40 (#4689): the path-identity walk (`kernelRealPath`) and its
+		// two callers split, join and normalize with the OS `path` namespace.
+		"clients/path-utils.ts": 40,
 		"clients/php-cs-fixer-config.ts": 4,
 		"clients/pipeline.ts": 28,
 		"clients/probe-home-state.ts": 10,
@@ -1200,7 +1202,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// clients/deferred-test-targets.ts, taking its one `path.resolve` with it.
 		// 26 -> 27 (#4487): the turn_end cascade delivery resolves each edited
 		// file with `path.resolve` to forget its pending cascade errors.
-		"clients/runtime-turn.ts": 27,
+		// 27 -> 19 (#4689): the eight test-target `path.relative(cwd, …)`
+		// renderings go through `toRunnerDisplayPath`, which relates path
+		// identities.
+		"clients/runtime-turn.ts": 19,
 		"clients/rust-client.ts": 5,
 		"clients/safe-spawn.ts": 26,
 		"clients/search-read-registration.ts": 3,

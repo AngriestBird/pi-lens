@@ -7,9 +7,10 @@
  * Approach (inspired by OpenCode's Filesystem.normalizePath):
  * - On Windows: try realpathSync.native() for canonical casing
  * - Falls back to lowercase for files that don't exist yet
- * - On non-Windows: adopt the on-disk casing of an existing path (#3098 — a
- *   case-insensitive POSIX filesystem otherwise derives two Map keys for one
- *   file); a path that does not exist is returned as-is, case-preserving
+ * - On non-Windows: an absolute path keys by its path identity, the
+ *   kernel-real path of the file or of its nearest existing ancestor plus the
+ *   missing tail (#4689; this also carries the on-disk casing, #3098); a
+ *   relative path folds dot segments and adopts on-disk casing only
  * - Always convert backslashes to forward slashes for Map key consistency
  */
 
@@ -121,13 +122,11 @@ export function splitPathSegments(filePath: string): string[] {
  *   canonical /private/var/folders/T/x/sub/a.ts
  *   result    /var/folders/T/x/sub/a.ts   (case fixed, symlink prefix kept)
  *
- * The symlink prefix matters: macOS's `os.tmpdir()` is `/var/folders/...`,
- * a symlink into `/private/var`, so a whole-string "is this a case variant"
- * test would decline to canonicalize exactly the paths the #1024 regression
- * test (and any macOS temp-dir workflow) runs on. Keeping the prefix is also
- * what bounds this change: on POSIX, `normalizeFilePath` still never resolves
- * a symlink, so a symlinked monorepo package keeps keying under the path the
- * caller held (refs #2490 — a cwd fold for its own sake broke every monorepo).
+ * Only a RELATIVE spelling reaches this (#4689): an absolute one keys by its
+ * path identity, the kernel's own answer, which already carries the on-disk
+ * casing. A relative spelling is not an identity, so it keeps the caller's
+ * prefix and only its casing moves (refs #2490 — a cwd fold for its own sake
+ * broke every monorepo).
  *
  * PURE string algebra: this pins what the rewrite DOES, never what the kernel
  * reports — and from two strings alone it cannot tell "the same file, spelled
@@ -176,34 +175,29 @@ function adoptCanonicalCasing(held: string, canonical: string): string {
  *   (needed for new files where we haven't written yet)
  *
  * On POSIX:
- * - Folds `.`, `..` and duplicate separators first (#3184, see below).
- * - If the file exists: adopts the on-disk CASING of the trailing segments
- *   (see `adoptCanonicalCasing`) — no lowercasing, no symlink resolution.
- * - If the file doesn't exist: returns the path as-is, case-PRESERVING. On a
- *   case-sensitive filesystem `SUB/a.ts` and `sub/a.ts` are two different
- *   files, and nothing may fold one into the other; only the filesystem's own
- *   answer for a path that EXISTS can tell the two apart, and for a path that
- *   does not exist there is no such answer to ask for.
+ * - An ABSOLUTE path returns its **path identity** (#4689): the kernel-real
+ *   path. An existing path is `realpath(3)` of the spelling itself, so a file
+ *   link, a directory link, an alias root and the on-disk casing all resolve
+ *   in one call, and every spelling of one file derives one key. A missing
+ *   path is the `realpath` of its nearest existing ancestor joined with the
+ *   missing tail, which stays case-PRESERVING: on a case-sensitive filesystem
+ *   `SUB/a.ts` and `sub/a.ts` are two different files, and nothing on disk can
+ *   say which one a missing spelling means. The kernel resolves `..`
+ *   physically (`<dir-link>/..` is the link target's parent), so no lexical
+ *   fold runs before it; only the missing tail is folded. A spelling no
+ *   ancestor of which resolves keeps its `path.posix.normalize` form.
+ * - A RELATIVE path is not an identity (as in the win32 arm): it folds `.`,
+ *   `..` and duplicate separators as string algebra and adopts the on-disk
+ *   CASING of its trailing segments (`adoptCanonicalCasing`), and is never
+ *   resolved against `process.cwd()` (refs #2490, where a cwd fold broke every
+ *   monorepo). #3184 is why it folds: a casing-only rewrite cannot express a
+ *   string with fewer segments, so `src/../src/a.ts` used to come back
+ *   unfolded as an orphan key.
  *
- * Why the POSIX arm folds dot segments (#3184): the casing arm returns the
- * caller's own spelling whenever `adoptCanonicalCasing` changes nothing, and
- * for `<base>/src/../src/a.ts` it always changes nothing — `realpath` answers
- * a string with FEWER segments, which a casing-only rewrite cannot express, so
- * it declines and the caller's un-folded spelling came back as the map key.
- * Every canonical writer keys through `path.resolve` first (`ctx.filePath` =
- * `normalizeMapKey(resolveAgainstAncestors(...))`, `clients/dispatch/
- * runner-context.ts:49`), so a consumer that passes an ALREADY-absolute
- * agent-typed path straight in (`tools/lens-diagnostic-mark.ts`,
- * `clients/mcp/analyze.ts`) derived an orphan key that no reader could reach.
- * Folding here is pure string algebra — no cwd, no filesystem — so a relative
- * path stays relative (`src/../x` → `x`, `../x` → `../x`, never resolved
- * against `process.cwd()`; refs #2490, where a cwd fold broke every monorepo)
- * and a symlinked package still keys under the path the caller held. These
- * are `path.resolve`'s own TEXTUAL `..` semantics, which is exactly what
- * makes a folded reader key equal to the canonical writer's key: where a
- * `..` sits right after a symlinked directory, textual folding and the
- * kernel disagree, and both sides of every comparison take the textual
- * answer because every canonical writer already resolved that way.
+ * Before #4689 the POSIX arm computed the same `realpath` on every call and
+ * discarded it, keeping the caller's link spelling, so one inode carried one
+ * key per spelling (split widget records, a stale blocker under the link after
+ * a fix through the target, cross-spelling read-guard refusals).
  *
  * Why POSIX canonicalizes casing at all (#3098, the #1024 defect's live half):
  * a case-insensitive POSIX filesystem — macOS's default APFS, `nocase` vfat /
@@ -227,6 +221,20 @@ function adoptCanonicalCasing(held: string, canonical: string): string {
  * Always converts backslashes to forward slashes for consistent Map keys.
  */
 export function normalizeFilePath(filePath: string): string {
+	return normalizePathForm(filePath, true);
+}
+
+/**
+ * The pre-#4689 POSIX form: dot segments folded and on-disk casing adopted,
+ * the caller's link spelling KEPT (the win32 arm is unchanged and resolves).
+ * Only the predicates that classify a path by where it is SPELLED read it:
+ * `isUnderDir` and `isVendorPath` (a segment NAMES a dependency tree).
+ */
+function normalizePathSpelling(filePath: string): string {
+	return normalizePathForm(filePath, false);
+}
+
+function normalizePathForm(filePath: string, identity: boolean): string {
 	if (process.platform === "win32") {
 		// Relative values and the empty sentinel are not filesystem identities.
 		// In particular, win32.resolve() would silently anchor them to the
@@ -243,7 +251,8 @@ export function normalizeFilePath(filePath: string): string {
 	const normalized = filePath.replace(/\\/g, "/");
 
 	if (process.platform !== "win32" && !isWindowsPath(normalized)) {
-		// #3184. `path.posix`, not the host default: this branch is already
+		// #3184 (a relative spelling, or any spelling in the spelling form; an
+		// absolute identity returns below). `path.posix`, not the host default: this branch is already
 		// committed to POSIX parsing of a slash-folded string (shape 2). Only
 		// the POSIX arm needs this — the win32 arm below reaches `realpath` or
 		// `win32.resolve`/`win32.normalize` on every path, all of which fold
@@ -261,15 +270,20 @@ export function normalizeFilePath(filePath: string): string {
 		//   the already-folded string and sees no backslash; POSIX
 		//   `normalize` collapses its leading `//` to `/`, renaming the path
 		//   to an unrelated local one.
-		const folded =
-			normalized === "" || normalized.startsWith("//")
-				? normalized
-				: path.posix.normalize(normalized);
+		const sentinel = normalized === "" || normalized.startsWith("//");
+		// #4689: an absolute spelling IS a filesystem address, so its key is
+		// its path identity (the kernel-real path), exactly as the win32 arm
+		// below has always answered. The kernel resolves `..` physically, so
+		// nothing is folded before it answers.
+		if (identity && !sentinel && normalized.startsWith("/"))
+			return posixPathIdentity(normalized);
+		const folded = sentinel ? normalized : path.posix.normalize(normalized);
 		try {
 			const canonical = realpathSync.native(folded);
 			// Fast path, not a guard: both arms answer `folded` when the
 			// strings match, but skipping the two `split`s there is a measured
-			// 1.9 vs 2.3 microseconds per call on the per-edit seam (#3098).
+			// 1.9 vs 2.3 microseconds per call (#3098, measured when absolute
+			// spellings took this arm too).
 			if (canonical === folded) return folded;
 			const adopted = adoptCanonicalCasing(folded, canonical);
 			if (adopted === folded) return folded;
@@ -308,14 +322,58 @@ export function normalizeFilePath(filePath: string): string {
 	}
 }
 
-/** Resolve a filesystem identity once, retaining a usable absolute fallback. */
-export function realpathOrResolve(filePath: string): string {
-	const resolved = path.resolve(filePath);
-	try {
-		return realpathSync(resolved);
-	} catch {
-		return resolved;
+/**
+ * The kernel-real path of an absolute `spelled` path, parsed with `p`: the
+ * `realpath` of the path itself when it exists, otherwise the `realpath` of its
+ * nearest existing ancestor joined with the missing tail. Only the tail is
+ * folded (`p.join`): it names nothing on disk, so it holds no link for the
+ * kernel to follow. `undefined` when no ancestor resolves.
+ *
+ * The first attempt is the only syscall for an existing path, which is the
+ * per-edit case; a missing path pays one more `realpath` per missing segment.
+ */
+function kernelRealPath(
+	spelled: string,
+	p: typeof path.posix,
+): string | undefined {
+	let current = spelled;
+	const tail: string[] = [];
+	for (;;) {
+		try {
+			const real = realpathSync.native(current);
+			return tail.length === 0 ? real : p.join(real, ...tail.reverse());
+		} catch {
+			// none: missing, unreadable, or a dangling or cyclic link is the
+			// expected answer for a file not yet written (a per-key hot path,
+			// #2016), not a failure: the identity is decided by the nearest
+			// ancestor the kernel can resolve.
+			const parent = p.dirname(current);
+			if (parent === current) return undefined;
+			tail.push(p.basename(current));
+			current = parent;
+		}
 	}
+}
+
+/** `normalizeFilePath`'s POSIX arm for an absolute, slash-folded spelling. */
+function posixPathIdentity(spelled: string): string {
+	return kernelRealPath(spelled, path.posix) ?? path.posix.normalize(spelled);
+}
+
+/**
+ * The path identity of `filePath` in the host's native form: the kernel-real
+ * path of an existing file, or of its nearest existing ancestor plus the
+ * missing tail (#4689). A relative input is joined to the process cwd without
+ * folding its `..` segments first, so the kernel decides what they name. For a
+ * map key use `normalizeMapKey`, which answers the same identity slash-folded.
+ */
+export function realpathOrResolve(filePath: string): string {
+	const spelled = path.isAbsolute(filePath)
+		? filePath
+		: process.platform === "win32"
+			? path.resolve(filePath)
+			: `${process.cwd()}/${filePath}`;
+	return kernelRealPath(spelled, path) ?? path.resolve(filePath);
 }
 
 /**
@@ -883,9 +941,19 @@ export function homeRelativePath(
 	return `~${candidate.slice(home.length)}`;
 }
 
+/**
+ * Is `child` the same path as `parent`, or inside it, as SPELLED: separators,
+ * dot segments and (win32 or on-disk) casing are folded, and on POSIX a link
+ * is NOT followed (`normalizePathSpelling`). Containment is a classification
+ * of where a path is written (a `node_modules/.bin` shim, a binary a project
+ * can retarget between check and spawn, a worktree directory behind a link),
+ * so #4689 left it on the spelling; moving it to identity is #2556's seam. A
+ * caller that compares an identity key (`normalizeMapKey`) against a root
+ * passes the root's identity too.
+ */
 export function isUnderDir(child: string, parent: string): boolean {
-	const normChild = normalizeFilePath(child);
-	const normParent = normalizeFilePath(parent);
+	const normChild = normalizePathSpelling(child);
+	const normParent = normalizePathSpelling(parent);
 	// Ensure parent ends with / for prefix matching
 	const parentPrefix = normParent.endsWith("/") ? normParent : `${normParent}/`;
 	return normChild === normParent || normChild.startsWith(parentPrefix);
@@ -912,7 +980,7 @@ const VENDOR_DIR_NAMES = new Set([
 
 /** True when any path segment names an installed or vendored dependency tree. */
 export function isVendorPath(filePath: string): boolean {
-	return normalizeFilePath(filePath)
+	return normalizePathSpelling(filePath)
 		.split("/")
 		.some((segment) => VENDOR_DIR_NAMES.has(segment.toLowerCase()));
 }
