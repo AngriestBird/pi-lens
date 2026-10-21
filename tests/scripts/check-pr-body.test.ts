@@ -40,7 +40,7 @@ import {
 } from "../../scripts/check-pr-body.mjs";
 import { blankCommentsAndStrings } from "../../scripts/check-pr-body.mjs";
 
-const body = `## Why\nThe body gate makes review intent explicit.\n\n## Notes for the reviewer\nNone.\n\n## Change outline\n- caller\n  + changed symbol\n    + callee\n\n## Summary\nOpening context.\n\n## Tests\nTargeted tests pass.\n\n## Blast radius\nNo runtime module touched.\n\n## Class sweep\nDefect shape: a body section answered with generic text. Search: \`rg -n "whole-tree grep" scripts\`. Verdict: none outside this fixture.\n\n## Observability\nThe advisory check run is the record.\n\n`;
+const body = `## Why\nThe body gate makes review intent explicit.\n\n## Notes for the reviewer\nNone.\n\n## Change outline\n- caller\n  + changed symbol\n    + callee\n\n## Summary\nOpening context.\n\n## Tests\nTargeted tests pass.\n\n## Blast radius\nNo runtime module touched.\n\n## Class sweep\nDefect shape: a body section answered with generic text. Search: \`rg -n "whole-tree grep" scripts\`. Verdict: none outside this fixture.\n\n## Fold check\n#4711 folded: the same body-lint seam, so the section lands here.\n\n## Observability\nThe advisory check run is the record.\n\n`;
 // #4605 F12: the shared `body` fixture carries no mutation table, so a case
 // whose diff adds a guard states its own row-2 proof for the file it changes.
 function withMutationProof(text: string, ...files: string[]) {
@@ -199,7 +199,7 @@ function fetchForEvent(bodyText: string, files: unknown) {
 	});
 }
 const flattenedBody =
-	"## Summary Await the first lifecycle run's asynchronous word-index snapshot promotion before reseeding the current-format snapshot for the fallback run. ## Tests - Native master flake justification for the count barrier: 2/10 forced runs reproduced the promotion race. - Fixed lifecycle test: 5/5 tests passed. ### Test assessment - tests/clients/word-index-lifecycle.test.ts uniquely pins the ordering guard. ## Blast radius This change is test-only. ## Class sweep Defect shape: async-persist lifecycle race. Search `rg -n async-persist clients`. Verdict: none outside this fixture. ## Observability The test observes existing project snapshot records.";
+	"## Summary Await the first lifecycle run's asynchronous word-index snapshot promotion before reseeding the current-format snapshot for the fallback run. ## Tests - Native master flake justification for the count barrier: 2/10 forced runs reproduced the promotion race. - Fixed lifecycle test: 5/5 tests passed. ### Test assessment - tests/clients/word-index-lifecycle.test.ts uniquely pins the ordering guard. ## Blast radius This change is test-only. ## Class sweep Defect shape: async-persist lifecycle race. Search `rg -n async-persist clients`. Verdict: none outside this fixture. ## Fold check #4711 folded: the same body-lint seam, so the section lands here. ## Observability The test observes existing project snapshot records.";
 const multiRoundFlattenedBody =
 	"## Summary Preserve the repair context across multiple review rounds. ## Tests - The repair fixture exercises distinct numbered fix rounds. ### Test assessment - tests/scripts/check-pr-body.test.ts uniquely pins numbered fix-round repair. ## Fix round 1 The first review round records the initial correction. ## Fix round 2 The second review round records the follow-up correction. ## Blast radius This change is test-only. ## Class sweep Numbered fix rounds remain distinct during repair. ## Observability The repaired body is validated by the existing body lint.";
 const motivatingFlattenedBodies = [
@@ -1013,7 +1013,7 @@ describe("test-reference positive recognition (#3013)", () => {
 });
 
 const escapedNewlineFlattenedBody =
-	"## Summary\\nRestore real newlines for the escaped-newline flattening class (#2145).\\n\\n## Tests\\nAdds fixtures pinning literal backslash-n repair outside fences.\\n\\n## Blast radius\\nLimited to the body-lint script.\\n\\n## Class sweep\\nDefect shape: escaped-newline flattening. Search `rg -n backslash-n scripts`. Verdict: sibling of the space-flattening class.\\n\\n## Observability\\nA notice logs the repaired PR number.";
+	"## Summary\\nRestore real newlines for the escaped-newline flattening class (#2145).\\n\\n## Tests\\nAdds fixtures pinning literal backslash-n repair outside fences.\\n\\n## Blast radius\\nLimited to the body-lint script.\\n\\n## Class sweep\\nDefect shape: escaped-newline flattening. Search `rg -n backslash-n scripts`. Verdict: sibling of the space-flattening class.\\n\\n## Fold check\\n#4711 folded: the same body-lint seam.\\n\\n## Observability\\nA notice logs the repaired PR number.";
 
 const escapedNewlineWithFence =
 	'## Summary\\nRestore real newlines outside fences only (#2145).\\n\\n## Tests\\n```json\\n{"note": "line1\\nline2"}\\n```\\nThe JSON example above documents a genuine escaped newline.\\n\\n## Blast radius\\nLimited to the body-lint script.\\n\\n## Class sweep\\nFence content must never be rewritten during escaped-newline repair.\\n\\n## Observability\\nA notice logs the repaired PR number.';
@@ -5401,6 +5401,67 @@ describe("class sweep reaches the CI event entry (#4273 F6)", () => {
 		} finally {
 			errors.mockRestore();
 		}
+	});
+});
+
+// #4711: the fold check is composed into `lintPullRequestEvent`, the CI entry
+// point, not only into `lintLocalPrBody`. Without a case through the event
+// seam, deleting that wire leaves the suite green while a raw `gh pr create`
+// skips the record AGENTS.md requires.
+describe("fold check reaches the CI event entry (#4711)", () => {
+	let previousCwd: string;
+	let fixtureCwd: string;
+	const foldCheckBody = (fold: string | null) =>
+		fold === null
+			? body.slice(0, body.indexOf("\n\n## Fold check"))
+			: body.replace(
+					"#4711 folded: the same body-lint seam, so the section lands here.",
+					fold,
+				);
+	beforeEach(() => {
+		previousCwd = process.cwd();
+		fixtureCwd = createOriginMasterFixture();
+		process.chdir(fixtureCwd);
+		vi.stubEnv("GITHUB_TOKEN", "t");
+		vi.stubEnv("GITHUB_API_URL", "https://api.example");
+		vi.stubEnv("GITHUB_REPOSITORY", "o/r");
+	});
+	afterEach(() => {
+		vi.unstubAllEnvs();
+		process.chdir(previousCwd);
+		rmSync(fixtureCwd, { recursive: true, force: true });
+	});
+
+	async function eventErrors(live: string) {
+		const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			await lintPullRequestEvent(fetchForEvent(live, []), {
+				pull_request: { number: 4711, body: live },
+			});
+			return errors.mock.calls.flat().join("\n");
+		} finally {
+			errors.mockRestore();
+		}
+	}
+
+	it("refuses a live body with no Fold check section", async () => {
+		expect(await eventErrors(foldCheckBody(null))).toContain(
+			'missing "## Fold check"',
+		);
+	});
+
+	it("refuses a live section with a decision but no reason", async () => {
+		expect(await eventErrors(foldCheckBody("#4711 folded"))).toContain(
+			'"## Fold check"',
+		);
+	});
+
+	it("accepts the live body's decision line", async () => {
+		expect(
+			await eventErrors(
+				foldCheckBody("#4606 not folded: a different file and rule."),
+			),
+		).not.toContain('"## Fold check"');
 	});
 });
 

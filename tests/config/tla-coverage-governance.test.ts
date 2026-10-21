@@ -72,6 +72,9 @@ const BASE_BODY = [
 	"## Class sweep",
 	"Defect shape: a mapped runtime file changed without its model. Search: `rg -n read-guard formal`. Verdict: none outside this fixture.",
 	"",
+	"## Fold check",
+	"#4711 folded: the same body-lint seam, so the section lands here.",
+	"",
 	"## Observability",
 	"No new failure path; no record added.",
 ].join("\n");

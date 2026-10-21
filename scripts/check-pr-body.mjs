@@ -46,6 +46,7 @@ const REQUIRED_SECTIONS = [
 	"Blast radius",
 	"Class sweep",
 	"Observability",
+	"Fold check",
 ];
 // The PR footer the template requires (.github/PULL_REQUEST_TEMPLATE.md).
 const GENERATED_FOOTER =
@@ -66,6 +67,9 @@ const REPAIR_HEADINGS = [
 	"Test assessment",
 	"Blast radius",
 	"Class sweep",
+	// #4711: a required section the flattened-body repair does not recognize
+	// cannot be recovered, so a flattened body would owe it forever.
+	"Fold check",
 	"Observability",
 	"Fix round \\d+",
 	"Review round \\d+",
@@ -104,6 +108,9 @@ const SECTION_SYNONYMS = new Map([
 	["verification", "tests"],
 	["blast radius", "blast radius"],
 	["class sweep", "class sweep"],
+	// #4711: AGENTS.md's fold check is recorded here, so the body lint reads the
+	// same heading the maintainer's local script gates on.
+	["fold check", "fold check"],
 	["behavior equivalence", "behavior equivalence"],
 	["observability", "observability"],
 	["test assessment", "test assessment"],
@@ -166,6 +173,38 @@ function hasRealContent(lines, section, placeholders) {
 			!templateLines.has(value)
 		);
 	});
+}
+
+/**
+ * The body of the first `## <section>` heading, as the raw lines and as the
+ * fence-blanked copy. `null` when the heading is absent, so the missing-section
+ * message stays owned by `lintPrBody`. Three section linters read a section
+ * this way; a fourth copy of the heading scan is how one of them drifts.
+ */
+function sectionContent(body, section) {
+	const rawLines = String(body ?? "").split(/\r?\n/);
+	const lines = sourceWithoutFencedBlocks(body).split(/\r?\n/);
+	const headings = [];
+	for (let index = 0; index < lines.length; index += 1) {
+		const match = HEADING.exec(lines[index]);
+		if (match)
+			headings.push({
+				index,
+				level: match[0].match(/^#+/)[0].length,
+				section: SECTION_SYNONYMS.get(match[1].trim().toLowerCase()),
+			});
+	}
+	const heading = headings.find((candidate) => hasSection(candidate, section));
+	if (!heading) return null;
+	const nextHeading = headings.find(
+		(candidate) =>
+			candidate.index > heading.index && candidate.level <= heading.level,
+	);
+	const end = nextHeading?.index ?? lines.length;
+	return {
+		raw: rawLines.slice(heading.index + 1, end).join("\n"),
+		blanked: lines.slice(heading.index + 1, end).join("\n"),
+	};
 }
 
 function blankCommentsAndStrings(source) {
@@ -3175,31 +3214,10 @@ export function shapeCatalogReader(cwd = process.cwd(), git = gitExecFileSync) {
  * satisfies the requirement (issue #4288, "Red first").
  */
 export function lintDetectionSection(body = "", options = {}) {
-	const lines = sourceWithoutFencedBlocks(body).split(/\r?\n/);
-	const headings = [];
-	for (let index = 0; index < lines.length; index += 1) {
-		const match = HEADING.exec(lines[index]);
-		if (match)
-			headings.push({
-				index,
-				level: match[0].match(/^#+/)[0].length,
-				section: SECTION_SYNONYMS.get(match[1].trim().toLowerCase()),
-			});
-	}
-	const heading = headings.find((candidate) =>
-		hasSection(candidate, "detection"),
-	);
-	if (!heading) return [];
-	const nextHeading = headings.find(
-		(candidate) =>
-			candidate.index > heading.index && candidate.level <= heading.level,
-	);
+	const section = sectionContent(body, "detection");
+	if (!section) return [];
 	// An HTML comment is not an answer: lines quoted in one never count (#4439).
-	const content = blankMarkdown(
-		lines
-			.slice(heading.index + 1, nextHeading?.index ?? lines.length)
-			.join("\n"),
-	);
+	const content = blankMarkdown(section.blanked);
 	// A non-bug PR may leave the template's optional hint in place; that is an
 	// unanswered section, not a malformed answer.
 	// The mandatory footer is the last line of the body, so it lands inside
@@ -3300,21 +3318,40 @@ const CLASS_SWEEP_TABLE_ROW = /^\s*\|.*\|\s*$/;
 // is deliberately not a verdict: PR #4248 used it while enumerating changed
 // files. `unaffected` is excluded because `TLA+ unaffected: <family>` is a
 // different governance statement (#4273 F3).
-function classSweepVerdict(text) {
+const CLASS_SWEEP_DECISION =
+	/\b(?:fold|folds|folded|folding|consolidat\w*|verdict|widen\w*)\b|\b(?:stays?|stayed|staying)\b/i;
+const CLASS_SWEEP_OUTCOME =
+	/(?:→|->|=>|\bcovered\b|\buncovered\b|\bnot a member\b|\bnot a runtime\b|\bno member\b|\bexcluded\b|\bout of scope\b|\bin scope\b|\bclean\b|\bsame target\b|\bnot found\b)/i;
+
+// #4711: `## Fold check` and `## Class sweep` share ONE verdict parser, so one
+// body answers both the repository lint and the maintainer's local script. A
+// fold-check decision line names its candidate (`#N`), one of the three
+// decisions, and a reason after it: the local gate (`pr-create.sh`'s
+// `fold_gate`) reads the same three facts, in the same order, with two words of
+// reason. A decision word with nothing after it is not a decision.
+const FOLD_CHECK_DECISION = /\b(?:not\s+folded|folded|sequenced)\b/i;
+const FOLD_CHECK_CANDIDATE = /(?:^|[^0-9A-Za-z])#\d+(?![0-9])/;
+const FOLD_CHECK_REASON_WORDS = 2;
+// The `none: <reason>` escape both sections accept.
+const NONE_LINE = /^\s*none\s*:\s*(.+?)\s*$/im;
+
+function sectionVerdict(section, text) {
 	const source = String(text ?? "");
-	if (
-		/\b(?:fold|folds|folded|folding|consolidat\w*|verdict|widen\w*)\b/i.test(
-			source,
-		) ||
-		/\b(?:stays?|stayed|staying)\b/i.test(source)
-	)
-		return true;
-	const outcome =
-		/(?:→|->|=>|\bcovered\b|\buncovered\b|\bnot a member\b|\bnot a runtime\b|\bno member\b|\bexcluded\b|\bout of scope\b|\bin scope\b|\bclean\b|\bsame target\b|\bnot found\b)/i;
+	if (section === "fold check")
+		return source.split(/\r?\n/).some((line) => {
+			if (!FOLD_CHECK_CANDIDATE.test(line)) return false;
+			const decision = FOLD_CHECK_DECISION.exec(line);
+			if (!decision) return false;
+			const reason = line.slice(decision.index + decision[0].length);
+			return (
+				(reason.match(/[A-Za-z0-9]+/g) ?? []).length >= FOLD_CHECK_REASON_WORDS
+			);
+		});
+	if (CLASS_SWEEP_DECISION.test(source)) return true;
 	return source.split(/\r?\n/).some((line) => {
 		const perMember =
 			CLASS_SWEEP_MEMBER_LINE.test(line) || CLASS_SWEEP_TABLE_ROW.test(line);
-		return perMember && outcome.test(line);
+		return perMember && CLASS_SWEEP_OUTCOME.test(line);
 	});
 }
 
@@ -3380,32 +3417,11 @@ function wordCount(text) {
  * local caller with no upstream ref) only the reason check applies.
  */
 export function lintClassSweep(body = "", { diff } = {}) {
-	const rawLines = String(body ?? "").split(/\r?\n/);
-	const lines = sourceWithoutFencedBlocks(body).split(/\r?\n/);
-	const headings = [];
-	for (let index = 0; index < lines.length; index += 1) {
-		const match = HEADING.exec(lines[index]);
-		if (match)
-			headings.push({
-				index,
-				level: match[0].match(/^#+/)[0].length,
-				section: SECTION_SYNONYMS.get(match[1].trim().toLowerCase()),
-			});
-	}
-	const heading = headings.find((candidate) =>
-		hasSection(candidate, "class sweep"),
-	);
-	if (!heading) return [];
-	const nextHeading = headings.find(
-		(candidate) =>
-			candidate.index > heading.index && candidate.level <= heading.level,
-	);
-	const content = rawLines
-		.slice(heading.index + 1, nextHeading?.index ?? lines.length)
-		.join("\n")
-		.trim();
+	const section = sectionContent(body, "class sweep");
+	if (!section) return [];
+	const content = section.raw.trim();
 	if (!content) return [];
-	const none = /^\s*none\s*:\s*(.+?)\s*$/im.exec(content);
+	const none = NONE_LINE.exec(content);
 	if (none) {
 		if (wordCount(none[1]) < 3) return [CLASS_SWEEP_MESSAGE];
 		if (diff && classSweepRuntimeTouched(diff)) return [CLASS_SWEEP_MESSAGE];
@@ -3414,10 +3430,37 @@ export function lintClassSweep(body = "", { diff } = {}) {
 	if (
 		classSweepShape(content) &&
 		classSweepSearchCommand(content) &&
-		classSweepVerdict(content)
+		sectionVerdict("class sweep", content)
 	)
 		return [];
 	return [CLASS_SWEEP_MESSAGE];
+}
+
+const FOLD_CHECK_MESSAGE =
+	'PR body "## Fold check" must decide each candidate: a line naming `#N`, ' +
+	"one of folded / not folded / sequenced, and a reason after the decision " +
+	'word, or say "none: <reason>" (three words minimum). ' +
+	`See ${TEMPLATE_PATH}.`;
+
+/**
+ * #4711: AGENTS.md's fold check, as a body section. Every candidate issue is
+ * decided `folded`, `not folded` or `sequenced` with its reason, or the search
+ * found none and the section says `none: <reason>`. The candidate list itself
+ * is the maintainer's local script's to compute (it reads the issue tracker);
+ * this lint owns the form, so a raw `gh pr create` cannot skip the record. The
+ * missing and empty section cases stay owned by `lintPrBody`.
+ */
+export function lintFoldCheck(body = "") {
+	const section = sectionContent(body, "fold check");
+	if (!section) return [];
+	// An empty section is `lintPrBody`'s to report. Content that survives only
+	// inside a fence or an HTML comment is not a decision either, so the
+	// blanked copy is judged and an empty one refuses here (#4711).
+	if (!section.raw.trim()) return [];
+	const content = blankMarkdown(section.raw).trim();
+	const none = NONE_LINE.exec(content);
+	if (none && wordCount(none[1]) >= 3) return [];
+	return sectionVerdict("fold check", content) ? [] : [FOLD_CHECK_MESSAGE];
 }
 
 // A failing-test line names its own title: a `FAIL`/`❯` line carries a runner
@@ -4256,6 +4299,11 @@ export async function lintPullRequestEvent(
 		result.valid = false;
 		result.errors.push(...classSweep);
 	}
+	const foldCheck = lintFoldCheck(body);
+	if (foldCheck.length) {
+		result.valid = false;
+		result.errors.push(...foldCheck);
+	}
 	const coverage = lintTlaCoverage(body, { diff });
 	result.errors.push(...coverage.errors);
 	if (coverage.errors.length) result.valid = false;
@@ -4511,6 +4559,11 @@ export function lintLocalPrBody(
 	if (classSweep.length) {
 		result.valid = false;
 		result.errors.push(...classSweep);
+	}
+	const foldCheck = lintFoldCheck(body);
+	if (foldCheck.length) {
+		result.valid = false;
+		result.errors.push(...foldCheck);
 	}
 	const coverage = lintTlaCoverage(body, {
 		diff,
