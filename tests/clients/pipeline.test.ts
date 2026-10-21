@@ -1727,6 +1727,13 @@ describe("Pipeline", () => {
 				createMockContext(filePath),
 				createMockDeps(),
 			);
+			// A file no language covers ends with a bare timing line, no "clean".
+			const unknownPath = createTempFile(tmpDir, "notes.zzz", "x\n");
+			vi.mocked(dispatchLintWithResult).mockResolvedValue(cleanDispatch());
+			const unknown = await runPipeline(
+				createMockContext(unknownPath),
+				createMockDeps(),
+			);
 
 			expect({
 				clean: [clean.output.split(" · ")[0], clean.checkedClean],
@@ -1734,9 +1741,11 @@ describe("Pipeline", () => {
 					unconfirmed.output.split(" — ")[0],
 					unconfirmed.checkedClean,
 				],
+				unknown: [unknown.output.includes("clean"), unknown.checkedClean],
 			}).toEqual({
 				clean: ["✓ JavaScript/TypeScript clean", true],
 				unconfirmed: ["⚠ JavaScript/TypeScript unconfirmed", false],
+				unknown: [false, false],
 			});
 		});
 
