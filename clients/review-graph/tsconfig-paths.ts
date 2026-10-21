@@ -41,7 +41,6 @@ registerWorkspaceTopologyReset(() => {
 	referencesCache.clear();
 });
 
-/** Strip JSONC comments and trailing commas without touching string contents. */
 /**
  * Strip the trailing commas JSONC allows (`[1, 2,]`), outside string literals so
  * a value like `"a, }"` survives. Input is already comment-free.
