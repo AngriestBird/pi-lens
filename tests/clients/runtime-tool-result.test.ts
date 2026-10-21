@@ -3306,92 +3306,107 @@ describe("runtime-tool-result writers across a replacement (#3596)", () => {
 		);
 	});
 
-	it("keeps a crashed dispatch's latch through other files' clean writes until that file's own dispatch returns (#4733 r2 F12)", async () => {
-		// RECURRENCE GUARDED: #4733 r2 F12 (Greptile "Unrelated writes erase
-		// failed checks"). The latch held one reason and no file, and every record
-		// write or delete cleared it, so after one file's pipeline crashed a clean
-		// write of another file let the commit run with the crashed file never
-		// re-checked.
-		const { runPipeline } = await import("../../clients/pipeline.js");
-		await acrossReplacement(
-			"4733-crash-latch",
-			async ({ tmpDir, filePath, runtime, cacheManager }) => {
-				runtime.setTelemetryIdentity({ sessionId: "session-A" });
-				const crashed = createTempFile(
-					tmpDir,
-					"crashed.ts",
-					"export const z = 1;\n",
-				);
-				fs.utimesSync(crashed, LONG_AGO, LONG_AGO);
-				const clean = {
-					output: "",
-					hasBlockers: false,
-					isError: false,
-					fileModified: false,
-					currentBlockerCount: 0,
-					fileVerdictComplete: true,
-				};
-				const write = async (file: string, outcome: "crash" | "clean") => {
-					vi.mocked(runPipeline).mockReset();
-					if (outcome === "crash")
-						vi.mocked(runPipeline).mockRejectedValue(
-							new Error("runner exploded"),
-						);
-					else vi.mocked(runPipeline).mockResolvedValue(clean as never);
-					runtime.beginTurn();
-					clearLastAnalyzedStateCache();
-					await handleToolResult(
-						toolResultDeps({
-							filePath: file,
-							runtime,
-							cacheManager,
-							flags: ["lens-guard"],
-						}),
-					);
-				};
-				const gate = () => evaluateGitGuard(runtime, cacheManager, tmpDir);
-				// Another session's record whose only section is the clean file, so its
-				// clean write deletes the record (the delete site the latch must survive).
-				const section = `${filePath}: 🔴 STOP — 1 issue(s) must be fixed:\n  L1: Debugger statement`;
-				cacheManager.writeCache(
-					"turn-end-findings",
-					{
-						content: section,
-						blockerContent: section,
-						blockingFiles: [filePath],
-						hasBlockers: true,
-						affectedFiles: [filePath],
-						sessionId: "an-earlier-session",
-						projectSeqStart: 0,
-						projectSeqEnd: 0,
-						fileSeqByPath: {},
-						fileContentHashes: {},
-						consumed: true,
-					},
-					tmpDir,
-				);
-
-				await write(crashed, "crash");
-				expect(gate().reason).toContain("pipeline_crash");
-
-				await write(filePath, "clean");
-				expect(
-					cacheManager.readCache(
-						"turn-end-findings",
+	it.each([
+		["crashed", "pipeline_crash"],
+		["errored", "pipeline_error"],
+	] as const)(
+		"keeps a %s dispatch's latch through other files' clean writes until that file's own dispatch returns (#4733 r2 F12)",
+		async (failure, reason) => {
+			// RECURRENCE GUARDED: #4733 r2 F12 (Greptile "Unrelated writes erase
+			// failed checks"). The latch held one reason and no file, and every record
+			// write or delete cleared it, so after one file's pipeline crashed a clean
+			// write of another file let the commit run with the crashed file never
+			// re-checked.
+			const { runPipeline } = await import("../../clients/pipeline.js");
+			await acrossReplacement(
+				`4733-${failure}-latch`,
+				async ({ tmpDir, filePath, runtime, cacheManager }) => {
+					runtime.setTelemetryIdentity({ sessionId: "session-A" });
+					const crashed = createTempFile(
 						tmpDir,
-						Number.POSITIVE_INFINITY,
-					)?.data,
-				).toBeUndefined();
-				const refusal = gate();
-				expect(refusal.block).toBe(true);
-				expect(refusal.reason).toContain("pipeline_crash");
-				expect(refusal.reason).toContain("crashed.ts");
+						"crashed.ts",
+						"export const z = 1;\n",
+					);
+					fs.utimesSync(crashed, LONG_AGO, LONG_AGO);
+					const clean = {
+						output: "",
+						hasBlockers: false,
+						isError: false,
+						fileModified: false,
+						currentBlockerCount: 0,
+						fileVerdictComplete: true,
+					};
+					const write = async (file: string, outcome: "fail" | "clean") => {
+						vi.mocked(runPipeline).mockReset();
+						if (outcome === "fail" && failure === "crashed")
+							vi.mocked(runPipeline).mockRejectedValue(
+								new Error("runner exploded"),
+							);
+						else if (outcome === "fail")
+							vi.mocked(runPipeline).mockResolvedValue({
+								output: "pipeline error",
+								hasBlockers: false,
+								isError: true,
+								fileModified: false,
+							} as never);
+						else vi.mocked(runPipeline).mockResolvedValue(clean as never);
+						runtime.beginTurn();
+						clearLastAnalyzedStateCache();
+						await handleToolResult(
+							toolResultDeps({
+								filePath: file,
+								runtime,
+								cacheManager,
+								flags: ["lens-guard"],
+							}),
+						);
+					};
+					const gate = () => evaluateGitGuard(runtime, cacheManager, tmpDir);
+					// Another session's record whose only section is the clean file, so its
+					// clean write deletes the record (the delete site the latch must survive).
+					const section = `${filePath}: 🔴 STOP — 1 issue(s) must be fixed:\n  L1: Debugger statement`;
+					cacheManager.writeCache(
+						"turn-end-findings",
+						{
+							content: section,
+							blockerContent: section,
+							blockingFiles: [filePath],
+							hasBlockers: true,
+							affectedFiles: [filePath],
+							sessionId: "an-earlier-session",
+							projectSeqStart: 0,
+							projectSeqEnd: 0,
+							fileSeqByPath: {},
+							fileContentHashes: {},
+							consumed: true,
+						},
+						tmpDir,
+					);
 
-				await write(crashed, "clean");
-				expect(gate()).toEqual({ block: false });
-			},
-		);
-	});
+					await write(crashed, "fail");
+					// The gate names one cause at a time: the record's own refusal
+					// (another session's section) may come first.
+					expect(gate().block).toBe(true);
+
+					await write(filePath, "clean");
+					expect(
+						cacheManager.readCache(
+							"turn-end-findings",
+							tmpDir,
+							Number.POSITIVE_INFINITY,
+						)?.data,
+					).toBeUndefined();
+					const refusal = gate();
+					expect(refusal.block).toBe(true);
+					expect(refusal.reason).toContain(reason);
+					expect(refusal.reason).toContain("crashed.ts");
+
+					await write(crashed, "clean");
+					expect(gate()).toEqual({ block: false });
+				},
+			);
+		},
+	);
 
 	it("a session-1 pipeline finishing in session 2's turn does not mark session 2's bytes analysed (#3763)", async () => {
 		// #3763 item 2: the already-analysed latch is keyed by the LIVE turn

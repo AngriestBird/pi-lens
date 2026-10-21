@@ -1304,10 +1304,12 @@ describe("#4725: the record's writers read it whatever its age", () => {
 		}
 	});
 
-	it("keeps another session's record whose blocker names no file, and says no re-check of one file clears it", () => {
+	it("keeps a record whose blocker names no file, and says no re-check of one file clears it", () => {
 		// The fail-closed control (#4725 F7, #1561): a section no file owns, such
 		// as a project scanner's report, is never cleared by a clean dispatch of
-		// the file beside it.
+		// the file beside it. #4733 r2 F13: the record is this session's own and
+		// the write is a whole-file clean verdict, so the attribution guard, not
+		// the foreign-session return, is what keeps it.
 		const env = setupTestEnvironment("pi-lens-git-guard-4725-unattributed-");
 		try {
 			const file = path.join(env.tmpDir, "legacy.ts");
@@ -1325,16 +1327,24 @@ describe("#4725: the record's writers read it whatever its age", () => {
 			const cache = new CacheManager(false);
 			writeGitGuardRecord(cache, runtime, env.tmpDir, {
 				...fixture,
+				sessionId: "session-A",
 				affectedFiles: [file],
 				blockingFiles: [file],
 			});
 
-			syncGitGuardRecord(runtime, cache, env.tmpDir, file);
+			syncGitGuardRecord(runtime, cache, env.tmpDir, file, "session", true);
 
 			expect(storedData(cache, env.tmpDir)?.blockerContent).toBe(
 				fixture.blockerContent,
 			);
-			const refusal = evaluateGitGuard(runtime, cache, env.tmpDir);
+			expect(evaluateGitGuard(runtime, cache, env.tmpDir).reason).toContain(
+				"(blocking_provenance_untrusted)",
+			);
+			// Another session reading the same record is told what replaces it.
+			const other = new RuntimeCoordinator();
+			other.projectRoot = env.tmpDir;
+			other.setTelemetryIdentity({ sessionId: "session-B" });
+			const refusal = evaluateGitGuard(other, cache, env.tmpDir);
 			expect(refusal).toMatchObject({ block: true, unknown: true });
 			expect(refusal.reason).toContain(
 				"cannot attribute to a file, so no re-check of one file clears them",
@@ -2097,6 +2107,19 @@ describe("#4725 r2: a writer never takes another session's record", () => {
 				];
 			});
 			expect(kept).toEqual(writers.map(([label]) => [label, true]));
+
+			// The record's own latch is the converse: it is about the record, so
+			// every one of these writers releases it (one left set refused every
+			// commit after the record it described was gone).
+			const released = writers.map(([label, writer]) => {
+				const runtime = sessionA(env.tmpDir);
+				const cache = new CacheManager(false);
+				cache.clearCache("turn-end-findings", env.tmpDir);
+				runtime.markGitGuardCacheUnknown("cache_write_failed");
+				writer(runtime, cache);
+				return [label, evaluateGitGuard(runtime, cache, env.tmpDir).unknown];
+			});
+			expect(released).toEqual(writers.map(([label]) => [label, undefined]));
 		} finally {
 			env.cleanup();
 		}
@@ -2125,6 +2148,13 @@ describe("#4725 r2: a writer never takes another session's record", () => {
 			expect(evaluateGitGuard(runtime, cache, env.tmpDir)).toEqual({
 				block: false,
 			});
+
+			// A new session starts with none: an earlier session's crash is not a
+			// file this one can answer unless it writes it (#4725's "start a fresh
+			// session" must help).
+			runtime.markGitGuardDispatchUnanswered(first, "pipeline_crash");
+			runtime.resetForSession();
+			expect(runtime.gitGuardUnansweredDispatch).toBeUndefined();
 		} finally {
 			env.cleanup();
 		}
