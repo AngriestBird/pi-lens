@@ -180,6 +180,37 @@ describe("resolveOpaqueRecoveryRoots (#2050)", () => {
 		]);
 	});
 
+	// #4713 R8-1: the cd target was read from the first word after the verb, so
+	// a redirection, an assignment or a prefix before it left the worktree
+	// unnamed, and an opaque write there got no baseline.
+	it.each([
+		["a redirection before the operand", "cd 2>/dev/null"],
+		["an assignment prefix", "FOO=1 cd"],
+		["an empty CDPATH prefix", "CDPATH= cd"],
+		["builtin", "builtin cd"],
+		["command", "command cd"],
+		["an escaped verb", "\\cd"],
+	])("admits a linked worktree a cd names after %s", (_label, verb) => {
+		const repo = initRepo(path.join(env.tmpDir, "prefixed-repo"));
+		const worktree = initLinkedWorktree(
+			path.join(env.tmpDir, "prefixed-linked"),
+			repo,
+		);
+		const scopes = rootsOf(`${verb} ${worktree} && node -e "1"`, repo);
+		expect(keys(scopes.roots)).toEqual(keys([repo, worktree]));
+	});
+
+	// #4713 R8-2: `cd ~+1` names a directory-stack entry, never `./~+1`, so a
+	// worktree that happens to sit at that relative name is not one bash enters.
+	it("does not admit a worktree spelled like an expanded tilde operand", () => {
+		const repo = initRepo(path.join(env.tmpDir, "tilde-repo"));
+		for (const operand of ["~+1", "~-", "~nosuchuser"]) {
+			initLinkedWorktree(path.join(repo, operand), repo);
+			const scopes = rootsOf(`cd ${operand} && node -e "1"`, repo);
+			expect(keys(scopes.roots)).toEqual(keys([repo]));
+		}
+	});
+
 	it("resolves a relative cd target against the session root", () => {
 		const repo = initRepo(path.join(env.tmpDir, "relative"));
 		const worktree = initLinkedWorktree(

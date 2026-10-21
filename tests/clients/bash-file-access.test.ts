@@ -1110,17 +1110,26 @@ describe("scanShellWriteScopes — the command's effective directory (#2050)", (
 	 * entered through a pipe, a backgrounded list, a bare `pushd`, then a
 	 * function body, a subshell, `eval`, `\cd`, `cd -`, `2>&1`) that the
 	 * enumerated carry rule moved into `sub/` while bash wrote at the top.
+	 *
+	 * `named` is the row's `cdTargets` (relative to `tmp`): the directory a
+	 * recovery root is looked up in, so it names the directory bash entered
+	 * and never one bash cannot enter. Recurrence: #4713 R8-1 and R8-2, where
+	 * `cdTargets` re-derived its own verb and operand and named `2` for
+	 * `cd 2>/dev/null <wt>`, nothing for `FOO=1 cd <wt>`, and `~+1` for
+	 * `cd ~+1`.
 	 */
 	const CWD_ROWS: ReadonlyArray<{
 		row: string;
 		command: string;
 		bash: string;
 		fallback?: string;
+		named?: readonly string[];
 	}> = [
 		{
 			row: "R1 list start, &&",
 			command: "cd sub && printf x > f.ts",
 			bash: "sub/f.ts",
+			named: ["sub"],
 		},
 		{ row: "R2 ;", command: "cd sub; printf x > f.ts", bash: "sub/f.ts" },
 		{ row: "R3 newline", command: "cd sub\nprintf x > f.ts", bash: "sub/f.ts" },
@@ -1385,6 +1394,7 @@ describe("scanShellWriteScopes — the command's effective directory (#2050)", (
 			row: "R51 cd ~+1, a stack entry bash lacks (R7-1)",
 			command: "cd ~+1; printf x > f.ts",
 			bash: "f.ts",
+			named: [],
 		},
 		{
 			row: "R52 cd ~-1 (R7-1)",
@@ -1411,11 +1421,13 @@ describe("scanShellWriteScopes — the command's effective directory (#2050)", (
 			row: "R56 cd ~nosuchuser (R7-1)",
 			command: "cd ~nosuchuser; printf x > f.ts",
 			bash: "f.ts",
+			named: [],
 		},
 		{
 			row: "R57 cd ~- with no OLDPWD (R7-1)",
 			command: "unset OLDPWD; cd ~-; printf x > f.ts",
 			bash: "f.ts",
+			named: [],
 		},
 		{
 			row: "R58 cd ~+ with no OLDPWD (R7-1)",
@@ -1504,12 +1516,141 @@ describe("scanShellWriteScopes — the command's effective directory (#2050)", (
 			command: "mkdir 'a b'; cd a\\ b; printf x > f.ts",
 			bash: "a b/f.ts",
 		},
+		{
+			row: "R75 a redirection before the operand (R8-1)",
+			command: "cd 2>/dev/null sub; printf x > f.ts",
+			bash: "sub/f.ts",
+			named: ["sub"],
+		},
+		{
+			row: "R76 redirect glue before the operand (R8-1)",
+			command: "cd 2>&1 sub; printf x > f.ts",
+			bash: "sub/f.ts",
+			named: ["sub"],
+		},
+		{
+			row: "R77 an assignment prefix names the target (R8-1)",
+			command: "FOO=1 cd sub; printf x > f.ts",
+			bash: "sub/f.ts",
+			named: ["sub"],
+		},
+		{
+			row: "R78 an empty CDPATH prefix (R8-1)",
+			command: "CDPATH= cd sub; printf x > f.ts",
+			bash: "sub/f.ts",
+			named: ["sub"],
+		},
+		{
+			row: "R79 an assignment whose value is quoted (R8-3)",
+			command: 'FOO="a b" cd sub; printf x > f.ts',
+			bash: "sub/f.ts",
+			named: ["sub"],
+		},
+		{
+			row: "R80 builtin cd names the target (R8-1)",
+			command: "builtin cd sub; printf x > f.ts",
+			bash: "sub/f.ts",
+			fallback: "f.ts",
+			named: ["sub"],
+		},
+		{
+			row: "R81 command cd names the target (R8-1)",
+			command: "command cd sub; printf x > f.ts",
+			bash: "sub/f.ts",
+			fallback: "f.ts",
+			named: ["sub"],
+		},
+		{
+			row: "R82 \\cd names the target (R8-1)",
+			command: "\\cd sub; printf x > f.ts",
+			bash: "sub/f.ts",
+			fallback: "f.ts",
+			named: ["sub"],
+		},
+		{
+			row: "R83 c\\d names the target (R8-1)",
+			command: "c\\d sub; printf x > f.ts",
+			bash: "sub/f.ts",
+			fallback: "f.ts",
+			named: ["sub"],
+		},
+		{
+			row: "R84 an assignment before builtin cd (R8-1)",
+			command: "FOO=1 builtin cd sub; printf x > f.ts",
+			bash: "sub/f.ts",
+			fallback: "f.ts",
+			named: ["sub"],
+		},
+		{
+			row: "R85 builtin pushd names the target (R8-1)",
+			command: "builtin pushd sub; printf x > f.ts",
+			bash: "sub/f.ts",
+			fallback: "f.ts",
+			named: ["sub"],
+		},
+		{
+			row: "R86 command -v cd runs no cd (R8-1)",
+			command: "command -v cd sub; printf x > f.ts",
+			bash: "f.ts",
+			named: [],
+		},
+		{
+			row: "R87 a single-quoted assignment word is a command (R8-3)",
+			command: "'FOO=bar' cd sub; printf x > f.ts",
+			bash: "f.ts",
+			named: [],
+		},
+		{
+			row: "R88 a double-quoted assignment word is a command (R8-3)",
+			command: '"FOO=bar" cd sub; printf x > f.ts',
+			bash: "f.ts",
+			named: [],
+		},
+		{
+			row: "R89 a quoted = is no assignment (R8-3)",
+			command: "FOO'='bar cd sub; printf x > f.ts",
+			bash: "f.ts",
+			named: [],
+		},
+		{
+			row: "R90 a quoted name is no assignment (R8-3)",
+			command: "'FOO'=bar cd sub; printf x > f.ts",
+			bash: "f.ts",
+			named: [],
+		},
+		{
+			row: "R91 two quoted assignment words (R8-3)",
+			command: "'A=1' 'B=2' cd sub; printf x > f.ts",
+			bash: "f.ts",
+			named: [],
+		},
+		{
+			row: "R92 a quoted assignment word before pushd (R8-3)",
+			command: "'FOO=bar' pushd sub; printf x > f.ts",
+			bash: "f.ts",
+			named: [],
+		},
+		{
+			row: 'R93 "\\c"d, a verb bash spells \\cd',
+			command: '"\\c"d sub; printf x > f.ts',
+			bash: "f.ts",
+			named: [],
+		},
 	];
 
 	it.each(CWD_ROWS)(
 		"names the file bash writes, or the base's answer: $row",
 		({ command, bash, fallback }) => {
 			expect(written(command)).toEqual([path.join(tmp, fallback ?? bash)]);
+		},
+	);
+
+	it.each(CWD_ROWS.filter((row) => row.named !== undefined))(
+		"names the directory bash enters as a cd target, and no other: $row",
+		({ command, named }) => {
+			expect(scanShellWriteScopes(command, tmp).cdTargets).toEqual(
+				(named ?? []).map((dir) => path.join(tmp, dir)),
+			);
 		},
 	);
 
