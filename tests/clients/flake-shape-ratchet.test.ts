@@ -372,6 +372,16 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			reason:
 				"the assertion is on the module-level resetLSPService call the shared teardown makes, which the shared service double does not expose as a spy; the stand-in spawns no language server",
 		},
+	// 2026-10-21 (#4675 r2): the format smoke runs the REAL FormatService and
+	// formatter selection; installation is the network boundary, so the stub
+	// answers `ensureTool`/`getToolPath` and the child process is doubled below
+	// it (AGENTS.md shape 66).
+	"in-process-mock:scripts/smoke-tools-format-install.test.ts::clients/installer/index":
+		{
+			detector: "in-process-mock",
+			reason:
+				"tool installation and discovery are the network boundary; the stub hands the real formatter resolution a managed path while the FormatService, selection and formatFile stay real and only the formatter child is doubled",
+		},
 	// 2026-10-19 (#3734): `rename_file`'s staleness capture needs a client that
 	// answers `workspace/willRenameFiles` with chosen offsets; only the shell the
 	// tool resolves is stood in for, so the real service, the rename guard,
