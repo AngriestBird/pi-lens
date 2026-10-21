@@ -42,12 +42,17 @@ vi.mock("../../clients/lsp/config.js", () => ({
 // singleton hands out is a double (lifecycle seam). Using the real scheduling
 // primitives is the whole point: a fake scheduler would trivially satisfy the
 // property under test either way.
-vi.mock("../../clients/widget-state.js", () => ({
-	reconcileScanDiagnostics: vi.fn().mockReturnValue(true),
-}));
 
 import { createLspDiagnosticsTool } from "../../tools/lsp-diagnostics.js";
+import { clearWidgetState } from "../../clients/widget-state.js";
 import { installLspService } from "../support/lsp-service-seam.js";
+
+beforeEach(() => {
+	clearWidgetState();
+});
+afterEach(() => {
+	clearWidgetState();
+});
 
 function serverIdForFile(file: string): string {
 	if (file.endsWith(".py")) return "python";

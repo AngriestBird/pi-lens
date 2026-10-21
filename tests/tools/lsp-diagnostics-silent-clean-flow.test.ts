@@ -21,8 +21,16 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { normalizeMapKey } from "../../clients/path-utils.js";
+import { clearWidgetState } from "../../clients/widget-state.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
 import { installLspService } from "../support/lsp-service-seam.js";
+
+beforeEach(() => {
+	clearWidgetState();
+});
+afterEach(() => {
+	clearWidgetState();
+});
 
 const getServersForFileWithConfig = vi.fn();
 const createLSPClient = vi.fn();
@@ -52,18 +60,6 @@ vi.mock("../../clients/lsp/client.js", async () => {
 		typeof import("../../clients/lsp/client.js")
 	>("../../clients/lsp/client.js");
 	return { ...actual, createLSPClient };
-});
-
-const reconcileScanDiagnosticsMock = vi.fn().mockReturnValue(true);
-vi.mock("../../clients/widget-state.js", async () => {
-	const actual = await vi.importActual<
-		typeof import("../../clients/widget-state.js")
-	>("../../clients/widget-state.js");
-	return {
-		...actual,
-		reconcileScanDiagnostics: (...args: unknown[]) =>
-			reconcileScanDiagnosticsMock(...args),
-	};
 });
 
 let service: unknown;
@@ -201,7 +197,6 @@ describe("#1253 lsp_diagnostics end-to-end silent-clean confirmation", () => {
 	beforeEach(async () => {
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
-		reconcileScanDiagnosticsMock.mockReset().mockReturnValue(true);
 		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-1253-e2e-"));
 		// Keep the silent server's real wait short — the gate under test is
 		// unchanged by the budget (see silent-clean-confirm.test.ts).

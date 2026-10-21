@@ -15,16 +15,9 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TRANSIENT_BASE_COOLDOWN_MS } from "../../../../clients/dispatch/runners/utils/availability-policy.js";
 
-const {
-	safeSpawnAsync,
-	logLatencySpy,
-	recordDegradationSpy,
-	incrementDegradationCountSpy,
-} = vi.hoisted(() => ({
+const { safeSpawnAsync, logLatencySpy } = vi.hoisted(() => ({
 	safeSpawnAsync: vi.fn(),
 	logLatencySpy: vi.fn(),
-	recordDegradationSpy: vi.fn(),
-	incrementDegradationCountSpy: vi.fn(),
 }));
 
 vi.mock("../../../../clients/safe-spawn.js", () => ({
@@ -36,17 +29,22 @@ vi.mock("../../../../clients/latency-logger.js", async (importOriginal) => ({
 	logLatency: logLatencySpy,
 	getLastLoggedPhase: () => undefined,
 }));
-vi.mock(
-	"../../../../clients/degradation-ledger.js",
-	async (importOriginal) => ({
-		...(await importOriginal<
-			typeof import("../../../../clients/degradation-ledger.js")
-		>()),
-		recordDegradation: recordDegradationSpy,
-		recordDegradationOnce: vi.fn(),
-		incrementDegradationCount: incrementDegradationCountSpy,
-	}),
-);
+
+/**
+ * The ledger rows `kind` holds. `loadRunner` resets the module registry, so
+ * the ledger the runner wrote to is the one loaded after that reset; read it
+ * through the same registry, never a static import.
+ */
+async function ledgerReasons(
+	kind: string,
+): Promise<Array<{ subject: string; reason: string }>> {
+	const { getDegradationSummary } =
+		await import("../../../../clients/degradation-ledger.js");
+	return (
+		getDegradationSummary().find((group) => group.kind === kind)
+			?.latestReasons ?? []
+	);
+}
 
 /**
  * Fresh module state per test. The memoized verdicts live at module scope, and
@@ -175,8 +173,6 @@ function hostWithFileResult(fileResult: {
 beforeEach(() => {
 	safeSpawnAsync.mockReset();
 	logLatencySpy.mockReset();
-	recordDegradationSpy.mockReset();
-	incrementDegradationCountSpy.mockReset();
 	vi.useFakeTimers({ toFake: ["Date"] });
 	return () => vi.useRealTimers();
 });
@@ -339,12 +335,13 @@ describe("psscriptanalyzer execution-policy-blocked -File run (#1540)", () => {
 			cause: "policy-denied",
 			latched: true,
 		});
-		expect(incrementDegradationCountSpy).toHaveBeenCalledWith(
-			expect.objectContaining({
-				kind: "grammar-blocked",
-				subject: "psscriptanalyzer",
-				reason: expect.stringMatching(/execution polic/i),
-			}),
+		expect(await ledgerReasons("grammar-blocked")).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					subject: "psscriptanalyzer",
+					reason: expect.stringMatching(/execution polic/i),
+				}),
+			]),
 		);
 	});
 
@@ -374,11 +371,12 @@ describe("psscriptanalyzer execution-policy-blocked -File run (#1540)", () => {
 		);
 		expect(execDecision).toBeDefined();
 		expect(execDecision?.metadata).toMatchObject({ outcome: "transient" });
-		expect(incrementDegradationCountSpy).toHaveBeenCalledWith(
-			expect.objectContaining({
-				kind: "grammar-blocked",
-				subject: "psscriptanalyzer",
-			}),
+		expect(await ledgerReasons("grammar-blocked")).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					subject: "psscriptanalyzer",
+				}),
+			]),
 		);
 	});
 
@@ -522,12 +520,13 @@ describe("psscriptanalyzer exit-0 with unreadable stdout (#1598)", () => {
 		// The pre-fix bug: empty stdout parses to `[]`, and the runner reports
 		// "succeeded" with zero diagnostics -- identical to a real clean file.
 		expect(result.status).not.toBe("succeeded");
-		expect(incrementDegradationCountSpy).toHaveBeenCalledWith(
-			expect.objectContaining({
-				kind: "grammar-blocked",
-				subject: "psscriptanalyzer",
-				reason: expect.stringMatching(/empty/i),
-			}),
+		expect(await ledgerReasons("grammar-blocked")).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					subject: "psscriptanalyzer",
+					reason: expect.stringMatching(/empty/i),
+				}),
+			]),
 		);
 		const stdoutDecision = decisions().find(
 			(entry) => entry.metadata?.tool === "psscriptanalyzer-stdout",
@@ -545,12 +544,13 @@ describe("psscriptanalyzer exit-0 with unreadable stdout (#1598)", () => {
 
 		const result = await runner.run(ctx());
 		expect(result.status).not.toBe("succeeded");
-		expect(incrementDegradationCountSpy).toHaveBeenCalledWith(
-			expect.objectContaining({
-				kind: "grammar-blocked",
-				subject: "psscriptanalyzer",
-				reason: expect.stringMatching(/unparseable/i),
-			}),
+		expect(await ledgerReasons("grammar-blocked")).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					subject: "psscriptanalyzer",
+					reason: expect.stringMatching(/unparseable/i),
+				}),
+			]),
 		);
 	});
 
