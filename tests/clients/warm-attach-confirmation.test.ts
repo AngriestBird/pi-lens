@@ -28,14 +28,9 @@ import {
 	WARM_DIAGNOSTICS_SCHEMA_VERSION,
 } from "../../clients/mcp/ipc.js";
 import type { WarmDiagnosticsResponse } from "../../clients/mcp/ipc.js";
-import { makeLspServiceDouble } from "../support/lsp-service-double.js";
+import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 
 const touchFile = vi.fn();
-vi.mock("../../clients/lsp/capabilities.js", () => ({
-	// `_serveWarmRequestForTests` reads only `touchFile` on the diagnostics
-	// route; the rest of the surface comes from the factory (#2592).
-	getLSPService: () => makeLspServiceDouble({ touchFile }),
-}));
 
 const FILE = "C:/repo/notes.md";
 const CONTENT = "# hi\n";
@@ -63,9 +58,15 @@ async function serve() {
 }
 
 describe("#1253 — warm-attach serves the touch confirmation", () => {
-	beforeEach(() => {
+	beforeEach(async () => {
 		vi.resetModules();
 		touchFile.mockReset();
+		// `_serveWarmRequestForTests` reads only `touchFile` on the diagnostics
+		// route; the rest of the surface comes from the factory (#2592). The
+		// install resets and re-evaluates the facade's graph around the
+		// `vi.resetModules()` above, so `serve()`'s own dynamic import reuses this
+		// evaluation instead of re-installing the host's real lifecycle.
+		await installLspServiceDouble({ touchFile });
 	});
 	afterEach(() => {
 		vi.restoreAllMocks();

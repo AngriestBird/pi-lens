@@ -63,13 +63,23 @@
  *    `withFixtureTmpdir`, now the ONE copy in `tests/clients/test-utils.ts`
  *    (#4641 F1: a direct child of the shared tmp root is a fixture sibling to
  *    the tmp-hygiene census).
- * 5. The scripted provider comes from the HOST's own `@earendil-works/pi-ai`,
- *    resolved at runtime through the host package's directory (`piAiModule`)
- *    instead of a static specifier: that package is not a dependency of this
- *    repo — it ships inside the certified host's install — so declaring it here
- *    would pin a second version of a module the host answers for itself
- *    (#4664 F1). Nothing in this file or in a case that imports it holds a
- *    `@earendil-works/pi-ai` import specifier for knip to read.
+ * 5. BOTH modules this tier runs on come from the HOST install the override
+ *    names, resolved at runtime through the host package's directory and one
+ *    loader (`loadHostedModule`). The scripted provider
+ *    (`@earendil-works/pi-ai`) has to: that package is not a dependency of
+ *    this repo — it ships inside the certified host's install — so declaring
+ *    it here would pin a second version of a module the host answers for
+ *    itself (#4664 F1). The session API (`createAgentSessionServices`,
+ *    `createAgentSessionFromServices`, `AgentSessionRuntime`, `ModelRuntime`,
+ *    `SessionManager`) has to for a different reason: the spread points
+ *    `PI_LENS_PI_HOST_PACKAGE` at ONE certified host, and a static import here
+ *    would run this repo's dev host's session loop and print the result on
+ *    that host's line (#4719 F1: a directory holding only a manifest and a
+ *    pi-ai shim ran tier 2 green 16/16). A host directory that cannot supply
+ *    either module is refused, never reported as probed. Nothing in this file
+ *    or in a case that imports it holds a `@earendil-works/pi-ai` import
+ *    specifier for knip to read, and the host package is imported for TYPES
+ *    only.
  * 6. Teardown does NOT pretend to reach the loaded copy's internals. Three
  *    seams are real and are used:
  *      - pi's `ExtensionRunner.emit` AWAITS every handler
@@ -109,21 +119,19 @@ import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import {
+import type {
+	AgentSession,
 	AgentSessionRuntime,
+	AgentSessionServices,
+	CreateAgentSessionResult,
+	CreateAgentSessionRuntimeFactory,
+	ExtensionUIContext,
 	ModelRuntime,
 	SessionManager,
 	createAgentSessionFromServices,
 	createAgentSessionServices,
 } from "@earendil-works/pi-coding-agent";
-import type {
-	AgentSession,
-	AgentSessionServices,
-	CreateAgentSessionResult,
-	CreateAgentSessionRuntimeFactory,
-	ExtensionUIContext,
-} from "@earendil-works/pi-coding-agent";
-import { afterAll, afterEach } from "vitest";
+import { afterAll, afterEach, beforeAll } from "vitest";
 import { _settleRegistryMutationsForTests } from "../../clients/instance-registry-tail.js";
 import { flushAllNdjsonWriters } from "../../clients/ndjson-logger.js";
 import {
@@ -238,7 +246,8 @@ interface PiAiModule {
 
 const nodeRequire = createRequire(import.meta.url);
 
-let loadedPiAi: PiAiModule | undefined;
+/** The host's scripted provider this tier last loaded, and the host it came from. */
+let loadedPiAi: { dir: string; module: PiAiModule } | undefined;
 
 function isDirectory(candidate: string): boolean {
 	try {
@@ -305,33 +314,144 @@ function packageEntry(packageDir: string): string {
 }
 
 /**
- * The host's own scripted provider, loaded once per file at RUNTIME. Fails
+ * The session surface this tier calls, resolved from the host install at
+ * RUNTIME (see `hostModule`). Every member is the host's own export, never a
+ * copy re-imported from this repo's devDependency: the spread points
+ * `PI_LENS_PI_HOST_PACKAGE` at ONE certified host, so a static import would
+ * run the dev host's session loop and print its result on that host's line
+ * (#4719 F1).
+ */
+interface HostModule {
+	readonly AgentSessionRuntime: typeof AgentSessionRuntime;
+	readonly ModelRuntime: typeof ModelRuntime;
+	readonly SessionManager: typeof SessionManager;
+	readonly createAgentSessionServices: typeof createAgentSessionServices;
+	readonly createAgentSessionFromServices: typeof createAgentSessionFromServices;
+}
+
+/** The host module this tier last loaded, and the directory it came from. */
+let loadedHost: { dir: string; module: HostModule } | undefined;
+
+/**
+ * One module out of a host install, loaded at RUNTIME and required to carry
+ * every name the caller calls. It is the ONE resolver: the scripted provider
+ * (`piAiModule`) and the session API (`hostModule`) both go through it, so a
+ * host directory that carries one and not the other cannot look complete.
+ * Fails loudly rather than skipping: a quiet fallback would report a host as
+ * probed while its code never ran (#4719 F1, greptile P1, sourcery High,
+ * CodeRabbit Functional Correctness).
+ */
+function loadHostedModule<T>(
+	packageDir: string,
+	names: readonly string[],
+	what: string,
+): T {
+	const entry = packageEntry(packageDir);
+	const loaded = nodeRequire(entry) as Record<string, unknown>;
+	const missing = names.filter((name) => typeof loaded[name] !== "function");
+	if (missing.length > 0)
+		throw new Error(
+			`pi-session: ${entry} does not export ${missing.join(", ")}, so ${what} cannot come from the host ${HOST_PACKAGE_ENV} names (${packageDir})`,
+		);
+	return loaded as T;
+}
+
+/**
+ * The session API of the host install at `packageDir`, loaded through
+ * `loadHostedModule`. The cache is one entry keyed on the directory, so a
+ * second host in the same process re-loads instead of answering with the
+ * first one's module; Node's own require cache makes the repeat free.
+ */
+export function hostModuleFor(packageDir: string): HostModule {
+	const dir = path.resolve(packageDir);
+	if (loadedHost?.dir === dir) return loadedHost.module;
+	const module = loadHostedModule<HostModule>(
+		dir,
+		[
+			"AgentSessionRuntime",
+			"ModelRuntime",
+			"SessionManager",
+			"createAgentSessionServices",
+			"createAgentSessionFromServices",
+		],
+		"the session API",
+	);
+	loadedHost = { dir, module };
+	return module;
+}
+
+/**
+ * The session API of the host the override names, or of this repo's host. Every
+ * session this tier creates is built by THIS module: a host that cannot supply
+ * it throws here, before any session exists. Exported because it is the seam
+ * the probe's own case drives: the environment override is what the spread
+ * sets, and a case that stubbed the resolver instead would not observe it.
+ */
+export function hostModule(): HostModule {
+	return hostModuleFor(hostPackageDir());
+}
+
+/**
+ * The host's own scripted provider, loaded once per host at RUNTIME. Fails
  * loudly rather than skipping: a host that stopped exporting `fauxProvider`
  * makes every case in this tier meaningless, and a quiet fallback would report
  * that as a green run.
+ *
+ * The cache is keyed on the host directory, exactly as `hostModuleFor` keys
+ * its own (#4719 F11): a cache keyed on nothing answers a second host with the
+ * first host's provider, so the session API would follow a mid-process
+ * `PI_LENS_PI_HOST_PACKAGE` switch while the scripted model stayed on the old
+ * install (measured: `hostA 0.86.1 aiA 0.86.1 hostB 1.3.0 aiB 0.86.1`). No
+ * production path switches hosts inside one process -- the spread spawns one
+ * child per host -- so the pair is what keeps the two halves agreeing about
+ * which install they came from.
  */
 export function piAiModule(): PiAiModule {
-	if (loadedPiAi) return loadedPiAi;
 	const hostDir = hostPackageDir();
+	if (loadedPiAi?.dir === hostDir) return loadedPiAi.module;
 	const piAiDir = findPackageDir(PI_AI_PACKAGE, hostDir);
 	if (piAiDir === undefined)
 		throw new Error(
 			`pi-session: the host install at ${hostDir} carries no ${PI_AI_PACKAGE}; ${HOST_PACKAGE_ENV} must name one that does`,
 		);
-	const entry = packageEntry(piAiDir);
-	const loaded = nodeRequire(entry) as Partial<PiAiModule>;
-	for (const name of [
-		"fauxProvider",
-		"fauxText",
-		"fauxToolCall",
-		"fauxAssistantMessage",
-	] as const) {
-		if (typeof loaded[name] !== "function")
-			throw new Error(`pi-session: ${entry} does not export ${name}`);
-	}
-	loadedPiAi = loaded as PiAiModule;
-	return loadedPiAi;
+	const module = loadHostedModule<PiAiModule>(
+		piAiDir,
+		["fauxProvider", "fauxText", "fauxToolCall", "fauxAssistantMessage"],
+		"the scripted provider",
+	);
+	loadedPiAi = { dir: hostDir, module };
+	return module;
 }
+
+/**
+ * Pay the host module's one expensive load in a HOOK rather than inside the
+ * first case that creates a session (#4719 F8). `require(<host entry>)` costs
+ * ~0.9 s (pi's entry, its dependencies and jiti); while this tier held a static
+ * import that cost landed at helper load, outside every timed case, and the
+ * runtime resolver moved it into the first case -- `Unit tests (shard 5/5)`
+ * then failed `tests/index-4632-s4-tool-call-verdict.test.ts` with `Test timed
+ * out in 5000ms`, on a case that already ran 4.0-4.7 s against the 5 s default.
+ *
+ * A hook, not a case: Vitest's hookTimeout is 10 s (60 s in the projects that
+ * set it), so the load can never be charged to the 5 s default a file's first
+ * case runs against, and no test timeout is raised to make room for it.
+ *
+ * The load's own failure is the CASE's to report, never this hook's: every
+ * consumer calls `hostModule()` itself, so a host that cannot supply the API
+ * still refuses loudly there. Swallowing it here is what keeps a file whose
+ * cases are all gated on a host being installed (they `skipIf` it) a run of
+ * skips instead of a file-level hook failure.
+ */
+export function warmHostModule(): void {
+	try {
+		hostModule();
+	} catch {
+		// none: the case that needs the host calls hostModule() itself and raises
+		// this same failure there; the hook only pre-pays a successful load.
+	}
+}
+
+beforeAll(warmHostModule);
 
 /** pi-ai's `fauxText`, through the host's own module (see `piAiModule`). */
 export function fauxText(text: string): Record<string, unknown> {
@@ -705,7 +825,7 @@ async function buildModelRuntime(
 					},
 			),
 		);
-	const modelRuntime = await ModelRuntime.create({
+	const modelRuntime = await hostModule().ModelRuntime.create({
 		modelsPath: null,
 		refreshOnCreate: false,
 		authPath: path.join(agentDir, "auth.json"),
@@ -766,7 +886,7 @@ async function createSession(
 	);
 	script(responses);
 	const services = await withFixtureTmpdir(args.root, () =>
-		createAgentSessionServices({
+		hostModule().createAgentSessionServices({
 			cwd: options.cwd,
 			agentDir: options.agentDir,
 			modelRuntime,
@@ -782,7 +902,7 @@ async function createSession(
 			`pi failed to load ${EXTENSION_ENTRY}: ${JSON.stringify(loadErrors.map((entry) => String(entry.error)))}`,
 		);
 	}
-	const result = await createAgentSessionFromServices({
+	const result = await hostModule().createAgentSessionFromServices({
 		services,
 		sessionManager: options.sessionManager,
 		model: model as never,
@@ -893,7 +1013,7 @@ function handleFor(
 		}
 		const replacementErrors: unknown[] = [];
 		let next: CreatedSession | undefined;
-		const runtime = new AgentSessionRuntime(
+		const runtime = new (hostModule().AgentSessionRuntime)(
 			session,
 			created.services,
 			async (options) => {
@@ -981,7 +1101,10 @@ function handleFor(
 					{
 						cwd: created.services.cwd,
 						agentDir: created.services.agentDir,
-						sessionManager: SessionManager.open(file, path.dirname(file)),
+						sessionManager: hostModule().SessionManager.open(
+							file,
+							path.dirname(file),
+						),
 					},
 					responses,
 				),
@@ -1081,7 +1204,7 @@ export async function startPiSession(
 			{
 				cwd,
 				agentDir,
-				sessionManager: SessionManager.create(cwd, sessionsDir),
+				sessionManager: hostModule().SessionManager.create(cwd, sessionsDir),
 			},
 			options.responses,
 		),
