@@ -233,7 +233,8 @@ the surface they bite; each block loads only when its trigger applies. A shape
 whose open population is countable names its census in its entry. The census
 is one command, run at the repo root, printing one line per member or naming
 one baseline key. A PR that fixes members of the shape quotes that census
-before and after.
+before and after. A shape with no census in its entry is uncounted: a PR that
+fixes its members says so instead of quoting a before and after.
 
 <!-- markdownlint-disable MD029 -->
 
@@ -1766,12 +1767,13 @@ in-process tier can produce).
 A row's class holds for the whole file only while every case in it needs that
 class. A slice that edits an admitted file re-checks it case by case, and its
 PR body records the split: moved, or stays with the class. A file whose double
-is a spawn, pipeline runner, or LSP service double is `process-boundary`, not
-`internal-seam`.
+replaces a spawned process (a child spawn, a pipeline runner, or a language
+server binary) is `process-boundary`, not `internal-seam`. A test-side copy of
+the in-process `clients/lsp` service object stays `internal-seam`.
 
 Three rows still carry `pending slice 10`, the last roadmap slice, which moves
-no file, so a slice marker now names no scheduled work. The class counts are
-the list's 53 rows at that recording, and a row grouped under a
+no file, so a slice marker now names no scheduled work. The five classes
+cover 50 rows and those three make the list's 53 at that recording, and a row grouped under a
 `pending slice 8` comment already carries its own class, so it is counted in
 that bucket:
 `grep -oE '^[[:space:]]*"[^"]*": *"[^"]+"' tests/support/pi-mock-importers.ts | sed -E 's/.*": *"([^"]+)"$/\1/' | sort | uniq -c`.
