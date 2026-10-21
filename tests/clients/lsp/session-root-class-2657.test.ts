@@ -37,6 +37,7 @@ import {
 	resetLSPConfigStateForTests,
 } from "../../../clients/lsp/config.js";
 import {
+	disabledPrimaries,
 	getSessionRootsForTelemetry,
 	isSessionRootRegistered,
 	resetSessionRootsForTests,
@@ -409,6 +410,12 @@ describe("the class and the registration read path identity (#4689 item 7)", () 
 	it.for(cells)("row $row", async (cell, ctx) => {
 		const fx = createPathIdentityFixture(env.tmpDir);
 		if (fx.skipReason) return ctx.skip(fx.skipReason);
+		// The operator's denial at the root: the registered root must carry it
+		// to the file, whatever spelling either side uses.
+		fs.writeFileSync(
+			real(fx, ".pi-lens.json"),
+			JSON.stringify({ lsp: { disabledServers: ["typescript"] } }),
+		);
 		fs.mkdirSync(real(fx, "pkg"), { recursive: true });
 		fs.writeFileSync(real(fx, "pkg", ".pi-lens.json"), "{}\n");
 		fs.writeFileSync(real(fx, "pkg", "a.ts"), "export const a = 1;\n");
@@ -436,10 +443,69 @@ describe("the class and the registration read path identity (#4689 item 7)", () 
 		// The #2052 gate serves the file, so its root's denial reaches it, and
 		// the LSP keeps the session class for it.
 		expect(registry.fileIsOutsideRegisteredRoots(file)).toBe(false);
+		expect(disabledPrimaries(file).disabledServerIds).toContain("typescript");
 		expect(registry.analysisRootModeForFile(file)).toBe("session");
 		// Never the edited file's own directory (the #2657 population).
 		if (path.dirname(file) !== expected)
 			expect(isSessionRootRegistered(path.dirname(file))).toBe(false);
+	});
+
+	it("row 15 a link from outside into the root falls back to the host's spelling", async (ctx) => {
+		// No ancestor of `ext/in/real.ts` is the session root, so the walk stops
+		// at `ext`, which is outside it, and never registers the config owner
+		// there. The fallback is the session root as the host spelled it, the
+		// entry `session_start` made, so the registry does not grow.
+		const fx = createPathIdentityFixture(env.tmpDir);
+		if (fx.skipReason) return ctx.skip(fx.skipReason);
+		const ext = path.join(env.tmpDir, "ext");
+		fs.mkdirSync(ext, { recursive: true });
+		fs.writeFileSync(path.join(ext, ".pi-lens.json"), "{}\n");
+		fs.symlinkSync(path.join("..", "repo", "src"), path.join(ext, "in"), "dir");
+		const file = path.join(ext, "in", "real.ts");
+		const session = fx.aliasRoot;
+		runtime.projectRoot = session;
+		await initLSPConfig(session);
+
+		expect(resolveSessionConfigRoot(file, session)).toEqual({
+			register: session,
+			mode: "session",
+		});
+		await readCall(file, session, 4691);
+		expect(getSessionRootsForTelemetry(200)).toEqual([session]);
+	});
+
+	it("row 16 a linked worktree registers its nested config owner", async () => {
+		// The loader layers upward from the registered root, so a worktree
+		// registered at its top never reads `pkg/.pi-lens.json`: the nested owner
+		// is registered for a worktree file exactly as for a session file.
+		const checkoutRoot = path.join(
+			env.tmpDir,
+			"..",
+			`capture-4689-nested-${process.pid}`,
+		);
+		try {
+			const { repo, worktree } = writeLinkedWorktree(checkoutRoot);
+			const nested = path.join(worktree, "pkg");
+			fs.mkdirSync(nested, { recursive: true });
+			fs.writeFileSync(
+				path.join(nested, ".pi-lens.json"),
+				JSON.stringify({ lsp: { disabledServers: ["typescript"] } }),
+			);
+			const file = path.join(nested, "a.ts");
+			fs.writeFileSync(file, "export const a = 1;\n");
+			runtime.projectRoot = repo;
+			await initLSPConfig(repo);
+
+			expect(resolveSessionConfigRoot(file, repo)).toEqual({
+				register: nested,
+				mode: "linked-worktree",
+			});
+			await readCall(file, repo, 4692);
+			expect(isSessionRootRegistered(nested)).toBe(true);
+			expect(disabledPrimaries(file).disabledServerIds).toContain("typescript");
+		} finally {
+			fs.rmSync(checkoutRoot, { recursive: true, force: true });
+		}
 	});
 
 	it("row 14 linked worktree spelled through an alias registers the alias", async (ctx) => {

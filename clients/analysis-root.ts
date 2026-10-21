@@ -174,11 +174,12 @@ export interface SessionConfigRoot {
  *    config loader layers upward from the registered root, so that root must
  *    sit at or below the nearest config owner or a nested config stops
  *    applying; otherwise the session root itself.
- * 2. `linked-worktree` — register the worktree root: it is its own workspace
- *    with its own `.pi-lens.json`, and `resolveServerRoot`'s #2052 gate refuses
- *    a file outside every registered root, so registering nothing would deny
- *    the worktree its LSP client. Per-worktree isolation is preserved
- *    (maintainer decision on #1129).
+ * 2. `linked-worktree` — register the worktree root, or the nearest config
+ *    owner below it by the rule in 1: it is its own workspace with its own
+ *    `.pi-lens.json`, and `resolveServerRoot`'s #2052 gate refuses a file
+ *    outside every registered root, so registering nothing would deny the
+ *    worktree its LSP client. Per-worktree isolation is preserved (maintainer
+ *    decision on #1129).
  * 3. `adopted` — register NOTHING. An adopted root is a foreign project, never
  *    a session root: it is served through the `adopted` branch of
  *    `resolveServerRoot` and admitted by `ClientRegistry.admitAdoptedRoot`,
@@ -195,8 +196,9 @@ export interface SessionConfigRoot {
  * containment lexically, so a root registered in any other spelling never
  * holds the file, the #2052 gate declines it, and its `lsp.disabledServers`
  * denial stops applying. When no ancestor of the file's spelling is the root
- * (a link from outside into it), the session root is registered as the host
- * spelled it, which `session_start` already did.
+ * (a link from outside into it), a session file registers the session root as
+ * the host spelled it, which `session_start` already did, and a worktree file
+ * registers the worktree root.
  */
 export function resolveSessionConfigRoot(
 	filePath: string,
@@ -210,40 +212,31 @@ export function resolveSessionConfigRoot(
 	);
 	if (root === undefined || mode === "adopted" || mode === "none")
 		return { register: undefined, mode };
-	// A linked worktree registers its own root — the owner the class resolved,
+	// The owner the class resolved — the session root or the worktree root —
 	// never the edited file's directory and never a re-derived eligibility.
-	if (mode === "linked-worktree")
-		return {
-			register: rootOnFileSpelling(filePath, root, false) ?? root,
-			mode,
-		};
 	return {
 		register:
-			rootOnFileSpelling(filePath, root, true) ?? nodePath.resolve(sessionRoot),
+			configRootOnFileSpelling(filePath, root) ??
+			(mode === "session" ? nodePath.resolve(sessionRoot) : root),
 		mode,
 	};
 }
 
 /**
- * The ancestor of `filePath`'s own spelling that IS `root`, or with
- * `configOwners` the nearest `.pi-lens.json` owner between the file and that
- * ancestor; `undefined` when no ancestor of the spelling is `root`. Equality
- * and containment compare identities, so a link on either side neither stops
+ * The nearest `.pi-lens.json` owner between `filePath` and `root`, else the
+ * ancestor that IS `root`, both on the file's own spelling; `undefined` when
+ * no ancestor of that spelling is `root`. `pathsEqual` and `isUnderDir`
+ * compare identities on POSIX (#4689), so a link on either side neither stops
  * the walk early nor carries it above the root.
  */
-function rootOnFileSpelling(
+function configRootOnFileSpelling(
 	filePath: string,
 	root: string,
-	configOwners: boolean,
 ): string | undefined {
 	for (const dir of walkUpDirs(nodePath.dirname(nodePath.resolve(filePath)))) {
-		// `root` is already an identity; resolving `dir` too keeps the
-		// containment an identity test on win32, whose `isUnderDir` arm
-		// compares spellings only.
-		const identity = realpathOrResolve(dir);
-		const atRoot = pathsEqual(identity, root);
-		if (!atRoot && !isUnderDir(identity, root)) return undefined;
-		if (atRoot || (configOwners && findPiLensConfigInDir(dir))) return dir;
+		const atRoot = pathsEqual(dir, root);
+		if (!atRoot && !isUnderDir(dir, root)) return undefined;
+		if (atRoot || findPiLensConfigInDir(dir)) return dir;
 	}
 	return undefined;
 }
