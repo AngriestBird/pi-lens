@@ -37,7 +37,6 @@ import {
 	getLSPService,
 	resetLSPService,
 } from "../../../clients/lsp/capabilities.js";
-import { configureLspServiceLifecycle } from "../../../clients/lsp/service-singleton.js";
 import { workspaceFileCreatedAtFor } from "../../../clients/lsp/workspace-diagnostics-session.js";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
 import {
@@ -53,6 +52,7 @@ import {
 import { RuntimeCoordinator } from "../../../clients/runtime-coordinator.js";
 import { handleToolResult } from "../../../clients/runtime-tool-result.js";
 import { makeLspServiceDouble } from "../../support/lsp-service-double.js";
+import { installLspService } from "../../support/lsp-service-seam.js";
 import { setupTestEnvironment } from "../test-utils.js";
 
 let env: { tmpDir: string; cleanup: () => void };
@@ -64,19 +64,19 @@ let clientRoots: Array<{ root: string; spawnedAt: number }>;
 
 function installService(): void {
 	resetLSPService();
-	const service = makeLspServiceDouble({
-		livePrimaryClientRoots: () => clientRoots,
-		restartPrimaryClientsUnder: async (root: string) => {
-			restarts.push(normalizeMapKey(root));
-			return 1;
-		},
-		getOpenDocumentPaths: () => [],
-	});
-	configureLspServiceLifecycle<Record<string, unknown>>({
-		create: () => service as Record<string, unknown>,
-		beforeReset: () => undefined,
-		destroy: async () => undefined,
-	});
+	installLspService(
+		makeLspServiceDouble({
+			livePrimaryClientRoots: () => clientRoots,
+			restartPrimaryClientsUnder: async (root: string) => {
+				restarts.push(normalizeMapKey(root));
+				return 1;
+			},
+			getOpenDocumentPaths: () => [],
+		}),
+	);
+	// The look under test reads the LIVE service through `peekLSPService`, so the
+	// double has to exist before it runs — the same eager call the hand-rolled
+	// install made.
 	getLSPService();
 }
 

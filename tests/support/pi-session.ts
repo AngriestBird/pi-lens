@@ -63,13 +63,23 @@
  *    `withFixtureTmpdir`, now the ONE copy in `tests/clients/test-utils.ts`
  *    (#4641 F1: a direct child of the shared tmp root is a fixture sibling to
  *    the tmp-hygiene census).
- * 5. The scripted provider comes from the HOST's own `@earendil-works/pi-ai`,
- *    resolved at runtime through the host package's directory (`piAiModule`)
- *    instead of a static specifier: that package is not a dependency of this
- *    repo — it ships inside the certified host's install — so declaring it here
- *    would pin a second version of a module the host answers for itself
- *    (#4664 F1). Nothing in this file or in a case that imports it holds a
- *    `@earendil-works/pi-ai` import specifier for knip to read.
+ * 5. BOTH modules this tier runs on come from the HOST install the override
+ *    names, resolved at runtime through the host package's directory and one
+ *    loader (`loadHostedModule`). The scripted provider
+ *    (`@earendil-works/pi-ai`) has to: that package is not a dependency of
+ *    this repo — it ships inside the certified host's install — so declaring
+ *    it here would pin a second version of a module the host answers for
+ *    itself (#4664 F1). The session API (`createAgentSessionServices`,
+ *    `createAgentSessionFromServices`, `AgentSessionRuntime`, `ModelRuntime`,
+ *    `SessionManager`) has to for a different reason: the spread points
+ *    `PI_LENS_PI_HOST_PACKAGE` at ONE certified host, and a static import here
+ *    would run this repo's dev host's session loop and print the result on
+ *    that host's line (#4719 F1: a directory holding only a manifest and a
+ *    pi-ai shim ran tier 2 green 16/16). A host directory that cannot supply
+ *    either module is refused, never reported as probed. Nothing in this file
+ *    or in a case that imports it holds a `@earendil-works/pi-ai` import
+ *    specifier for knip to read, and the host package is imported for TYPES
+ *    only.
  * 6. Teardown does NOT pretend to reach the loaded copy's internals. Three
  *    seams are real and are used:
  *      - pi's `ExtensionRunner.emit` AWAITS every handler
@@ -90,7 +100,14 @@
  *        `globalThis`), so `_settleRegistryMutationsForTests()` here joins the
  *        copy's own queued `deregisterInstance()` write. Without that await the
  *        write lands after `dispose()` returns and re-creates the removed
- *        fixture root (#4664 F7, probed).
+ *        fixture root (#4664 F7, probed);
+ *      - the scanner report root is OWNED, not drained: every `session_start`
+ *        scanner writes under `scannerReportParentDir()`, and the pin below
+ *        points that seam at `<root>/scanner-tmp`. A fire-and-forget scan whose
+ *        `finally` never runs (the worker ends first) therefore strands its
+ *        directory inside the fixture root this file removes, never in the
+ *        shared tmp root (#4632 slice 7 round 2, probed: `pi-lens-temp-find-functions-*`
+ *        under the fixture after the pin, under `os.tmpdir()` before it).
  *    The copy's module-scope persist queues (`clients/project-snapshot.ts`,
  *    `clients/review-graph/builder.ts`, the warmup timer) have no such seam:
  *    they are reachable only through the copy's own module objects, which
@@ -102,20 +119,19 @@ import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import {
+import type {
+	AgentSession,
 	AgentSessionRuntime,
+	AgentSessionServices,
+	CreateAgentSessionResult,
+	CreateAgentSessionRuntimeFactory,
+	ExtensionUIContext,
 	ModelRuntime,
 	SessionManager,
 	createAgentSessionFromServices,
 	createAgentSessionServices,
 } from "@earendil-works/pi-coding-agent";
-import type {
-	AgentSession,
-	AgentSessionServices,
-	CreateAgentSessionResult,
-	CreateAgentSessionRuntimeFactory,
-} from "@earendil-works/pi-coding-agent";
-import { afterAll, afterEach } from "vitest";
+import { afterAll, afterEach, beforeAll } from "vitest";
 import { _settleRegistryMutationsForTests } from "../../clients/instance-registry-tail.js";
 import { flushAllNdjsonWriters } from "../../clients/ndjson-logger.js";
 import {
@@ -230,7 +246,8 @@ interface PiAiModule {
 
 const nodeRequire = createRequire(import.meta.url);
 
-let loadedPiAi: PiAiModule | undefined;
+/** The host's scripted provider this tier last loaded, and the host it came from. */
+let loadedPiAi: { dir: string; module: PiAiModule } | undefined;
 
 function isDirectory(candidate: string): boolean {
 	try {
@@ -297,33 +314,144 @@ function packageEntry(packageDir: string): string {
 }
 
 /**
- * The host's own scripted provider, loaded once per file at RUNTIME. Fails
+ * The session surface this tier calls, resolved from the host install at
+ * RUNTIME (see `hostModule`). Every member is the host's own export, never a
+ * copy re-imported from this repo's devDependency: the spread points
+ * `PI_LENS_PI_HOST_PACKAGE` at ONE certified host, so a static import would
+ * run the dev host's session loop and print its result on that host's line
+ * (#4719 F1).
+ */
+interface HostModule {
+	readonly AgentSessionRuntime: typeof AgentSessionRuntime;
+	readonly ModelRuntime: typeof ModelRuntime;
+	readonly SessionManager: typeof SessionManager;
+	readonly createAgentSessionServices: typeof createAgentSessionServices;
+	readonly createAgentSessionFromServices: typeof createAgentSessionFromServices;
+}
+
+/** The host module this tier last loaded, and the directory it came from. */
+let loadedHost: { dir: string; module: HostModule } | undefined;
+
+/**
+ * One module out of a host install, loaded at RUNTIME and required to carry
+ * every name the caller calls. It is the ONE resolver: the scripted provider
+ * (`piAiModule`) and the session API (`hostModule`) both go through it, so a
+ * host directory that carries one and not the other cannot look complete.
+ * Fails loudly rather than skipping: a quiet fallback would report a host as
+ * probed while its code never ran (#4719 F1, greptile P1, sourcery High,
+ * CodeRabbit Functional Correctness).
+ */
+function loadHostedModule<T>(
+	packageDir: string,
+	names: readonly string[],
+	what: string,
+): T {
+	const entry = packageEntry(packageDir);
+	const loaded = nodeRequire(entry) as Record<string, unknown>;
+	const missing = names.filter((name) => typeof loaded[name] !== "function");
+	if (missing.length > 0)
+		throw new Error(
+			`pi-session: ${entry} does not export ${missing.join(", ")}, so ${what} cannot come from the host ${HOST_PACKAGE_ENV} names (${packageDir})`,
+		);
+	return loaded as T;
+}
+
+/**
+ * The session API of the host install at `packageDir`, loaded through
+ * `loadHostedModule`. The cache is one entry keyed on the directory, so a
+ * second host in the same process re-loads instead of answering with the
+ * first one's module; Node's own require cache makes the repeat free.
+ */
+export function hostModuleFor(packageDir: string): HostModule {
+	const dir = path.resolve(packageDir);
+	if (loadedHost?.dir === dir) return loadedHost.module;
+	const module = loadHostedModule<HostModule>(
+		dir,
+		[
+			"AgentSessionRuntime",
+			"ModelRuntime",
+			"SessionManager",
+			"createAgentSessionServices",
+			"createAgentSessionFromServices",
+		],
+		"the session API",
+	);
+	loadedHost = { dir, module };
+	return module;
+}
+
+/**
+ * The session API of the host the override names, or of this repo's host. Every
+ * session this tier creates is built by THIS module: a host that cannot supply
+ * it throws here, before any session exists. Exported because it is the seam
+ * the probe's own case drives: the environment override is what the spread
+ * sets, and a case that stubbed the resolver instead would not observe it.
+ */
+export function hostModule(): HostModule {
+	return hostModuleFor(hostPackageDir());
+}
+
+/**
+ * The host's own scripted provider, loaded once per host at RUNTIME. Fails
  * loudly rather than skipping: a host that stopped exporting `fauxProvider`
  * makes every case in this tier meaningless, and a quiet fallback would report
  * that as a green run.
+ *
+ * The cache is keyed on the host directory, exactly as `hostModuleFor` keys
+ * its own (#4719 F11): a cache keyed on nothing answers a second host with the
+ * first host's provider, so the session API would follow a mid-process
+ * `PI_LENS_PI_HOST_PACKAGE` switch while the scripted model stayed on the old
+ * install (measured: `hostA 0.86.1 aiA 0.86.1 hostB 1.3.0 aiB 0.86.1`). No
+ * production path switches hosts inside one process -- the spread spawns one
+ * child per host -- so the pair is what keeps the two halves agreeing about
+ * which install they came from.
  */
 export function piAiModule(): PiAiModule {
-	if (loadedPiAi) return loadedPiAi;
 	const hostDir = hostPackageDir();
+	if (loadedPiAi?.dir === hostDir) return loadedPiAi.module;
 	const piAiDir = findPackageDir(PI_AI_PACKAGE, hostDir);
 	if (piAiDir === undefined)
 		throw new Error(
 			`pi-session: the host install at ${hostDir} carries no ${PI_AI_PACKAGE}; ${HOST_PACKAGE_ENV} must name one that does`,
 		);
-	const entry = packageEntry(piAiDir);
-	const loaded = nodeRequire(entry) as Partial<PiAiModule>;
-	for (const name of [
-		"fauxProvider",
-		"fauxText",
-		"fauxToolCall",
-		"fauxAssistantMessage",
-	] as const) {
-		if (typeof loaded[name] !== "function")
-			throw new Error(`pi-session: ${entry} does not export ${name}`);
-	}
-	loadedPiAi = loaded as PiAiModule;
-	return loadedPiAi;
+	const module = loadHostedModule<PiAiModule>(
+		piAiDir,
+		["fauxProvider", "fauxText", "fauxToolCall", "fauxAssistantMessage"],
+		"the scripted provider",
+	);
+	loadedPiAi = { dir: hostDir, module };
+	return module;
 }
+
+/**
+ * Pay the host module's one expensive load in a HOOK rather than inside the
+ * first case that creates a session (#4719 F8). `require(<host entry>)` costs
+ * ~0.9 s (pi's entry, its dependencies and jiti); while this tier held a static
+ * import that cost landed at helper load, outside every timed case, and the
+ * runtime resolver moved it into the first case -- `Unit tests (shard 5/5)`
+ * then failed `tests/index-4632-s4-tool-call-verdict.test.ts` with `Test timed
+ * out in 5000ms`, on a case that already ran 4.0-4.7 s against the 5 s default.
+ *
+ * A hook, not a case: Vitest's hookTimeout is 10 s (60 s in the projects that
+ * set it), so the load can never be charged to the 5 s default a file's first
+ * case runs against, and no test timeout is raised to make room for it.
+ *
+ * The load's own failure is the CASE's to report, never this hook's: every
+ * consumer calls `hostModule()` itself, so a host that cannot supply the API
+ * still refuses loudly there. Swallowing it here is what keeps a file whose
+ * cases are all gated on a host being installed (they `skipIf` it) a run of
+ * skips instead of a file-level hook failure.
+ */
+export function warmHostModule(): void {
+	try {
+		hostModule();
+	} catch {
+		// none: the case that needs the host calls hostModule() itself and raises
+		// this same failure there; the hook only pre-pays a successful load.
+	}
+}
+
+beforeAll(warmHostModule);
 
 /** pi-ai's `fauxText`, through the host's own module (see `piAiModule`). */
 export function fauxText(text: string): Record<string, unknown> {
@@ -374,6 +502,33 @@ const DEFAULT_FLAGS: ReadonlyArray<[string, boolean]> = [
 	["no-complexity", true],
 ];
 
+/**
+ * The flag map pi is handed: every ON entry, and nothing else.
+ *
+ * pi reads a BOOLEAN extension flag's PRESENCE as `true` —
+ * `applyExtensionFlagValues` (`@earendil-works/pi-coding-agent`'s
+ * `dist/core/agent-session-services.js`) writes `flagValues.set(name, true)`
+ * for any boolean key it is given and never looks at the value. So `false`
+ * cannot be expressed by the value; it means the key must be ABSENT, which for
+ * these flags is also their registered default. A case that turns a default
+ * off (`new Map([["no-lsp", false]])`) therefore deletes the key, and a
+ * `true` entry adds it (#4632 slice 7: passing `["no-lsp", false]` turned the
+ * language servers OFF, the opposite of the request).
+ */
+function flagMap(
+	base: ReadonlyArray<readonly [string, boolean]>,
+	overrides: ReadonlyMap<string, boolean | string> | undefined,
+): Map<string, boolean | string> {
+	const merged = new Map<string, boolean | string>([
+		...base,
+		...(overrides ?? []),
+	]);
+	for (const [name, value] of [...merged]) {
+		if (value === false) merged.delete(name);
+	}
+	return merged;
+}
+
 /** One provider request: the messages the model received, in order. */
 export type PiProviderRequest = ReadonlyArray<PiMessage>;
 
@@ -402,6 +557,64 @@ export function replayToolNames(request: PiProviderRequest): string[] {
 	return [...tools];
 }
 
+/** One notification the loaded copy asked pi's UI to show, in order. */
+export interface PiNotification {
+	readonly message: string;
+	readonly type?: "info" | "warning" | "error";
+}
+
+/**
+ * The host-boundary recorder behind {@link PiSessionOptions.captureUi}.
+ *
+ * `notify` is the one member a case asserts on; `setStatus` is recorded because
+ * the LSP status line rides it, and every other member is a no-op the host may
+ * call. The value is a real `ExtensionUIContext` handed to pi's own
+ * `bindExtensions` — never a pi-lens module — so what a case reads back is what
+ * pi-lens asked the HOST to show, not a payload a handler returned.
+ */
+interface UiRecorder {
+	readonly notifications: PiNotification[];
+	readonly statuses: Array<{ key: string; text: string | undefined }>;
+	readonly context: ExtensionUIContext;
+}
+
+function createUiRecorder(): UiRecorder {
+	const notifications: PiNotification[] = [];
+	const statuses: Array<{ key: string; text: string | undefined }> = [];
+	const theme = {
+		fg: (_color: string, text: string) => text,
+		bg: (_color: string, text: string) => text,
+		bold: (text: string) => text,
+	} as unknown as ExtensionUIContext["theme"];
+	const base: Record<string, unknown> = {
+		notify: (message: string, type?: PiNotification["type"]) => {
+			notifications.push({ message, type });
+		},
+		setStatus: (key: string, text: string | undefined) => {
+			statuses.push({ key, text });
+		},
+		select: async () => undefined,
+		confirm: async () => false,
+		input: async () => undefined,
+		onTerminalInput: () => () => {},
+		theme,
+		getAllThemes: () => [],
+		getTheme: () => undefined,
+		getEditorComponent: () => undefined,
+		getToolsExpanded: () => false,
+		getEditorText: () => "",
+	};
+	// Anything the host calls that a case does not read is a no-op, so a pi
+	// release that adds a UI member does not turn every UI case red.
+	const context = new Proxy(base, {
+		get: (target, property: string | symbol) => {
+			if (property in target) return target[property as string];
+			return () => undefined;
+		},
+	}) as unknown as ExtensionUIContext;
+	return { notifications, statuses, context };
+}
+
 export interface PiSessionOptions {
 	/** Fixture root, created by `setupTestEnvironment(TMP_PREFIX)` below. */
 	root: string;
@@ -418,8 +631,9 @@ export interface PiSessionOptions {
 	/**
 	 * `pi.getFlag` overrides on top of {@link DEFAULT_FLAGS}: a key named here
 	 * wins, and every other default (the analyzers this tier neither observes
-	 * nor can drain) stays off. A case that needs the real analyzer deletes its
-	 * flag explicitly.
+	 * nor can drain) stays off. `false` turns a default OFF rather than on —
+	 * see {@link flagMap} for why the value cannot express that on the host's
+	 * own flag map.
 	 */
 	flags?: ReadonlyMap<string, boolean | string>;
 	/** Session store. Defaults to `<root>/sessions`. */
@@ -433,6 +647,14 @@ export interface PiSessionOptions {
 	 * config-resolution path is the ensure (no warm-up, no deferred load).
 	 */
 	startupMode?: "full" | "quick" | "minimal";
+	/**
+	 * Bind a RECORDING UI context instead of pi's no-op one. A case that asserts
+	 * what pi-lens asked the UI to show (a notification, the LSP status line)
+	 * reads it back from {@link PiSession.notifications} / `.statuses`; the
+	 * recorder is a real `ExtensionUIContext` at the host boundary and reaches
+	 * no pi-lens module.
+	 */
+	captureUi?: boolean;
 }
 
 export interface PiSession {
@@ -444,6 +666,10 @@ export interface PiSession {
 	readonly requests: PiProviderRequest[];
 	/** Errors pi reported from an extension handler (`runner.onError`). */
 	readonly errors: unknown[];
+	/** Notifications the copy asked pi's UI to show ({@link PiSessionOptions.captureUi}). */
+	readonly notifications: readonly PiNotification[];
+	/** Status lines the copy set, in order ({@link PiSessionOptions.captureUi}). */
+	readonly statuses: ReadonlyArray<{ key: string; text: string | undefined }>;
 	/** The persisted session file, once pi has written one. */
 	sessionFile(): string | undefined;
 	/**
@@ -509,6 +735,8 @@ const PINNED_KEYS = [
 	"PI_LENS_HOME",
 	"PILENS_DATA_DIR",
 	"PI_LENS_TEST_MODE",
+	"PI_LENS_TEST_SCANNER_TMPDIR",
+	"PI_LENS_TEST_SCANNER_HARNESS",
 	"PI_LENS_STARTUP_MODE",
 	"PI_LENS_COLD_START_QUICK",
 ] as const;
@@ -562,7 +790,7 @@ async function buildModelRuntime(
 					},
 			),
 		);
-	const modelRuntime = await ModelRuntime.create({
+	const modelRuntime = await hostModule().ModelRuntime.create({
 		modelsPath: null,
 		refreshOnCreate: false,
 		authPath: path.join(agentDir, "auth.json"),
@@ -577,6 +805,8 @@ async function buildModelRuntime(
 interface SessionArgs {
 	readonly root: string;
 	readonly flags: ReadonlyMap<string, boolean | string>;
+	/** Present only when the case asked for a recording UI context. */
+	readonly ui?: UiRecorder;
 }
 
 /** One pi session before its extensions are bound, with its provider recorder. */
@@ -610,7 +840,7 @@ async function createSession(
 	);
 	script(responses);
 	const services = await withFixtureTmpdir(args.root, () =>
-		createAgentSessionServices({
+		hostModule().createAgentSessionServices({
 			cwd: options.cwd,
 			agentDir: options.agentDir,
 			modelRuntime,
@@ -626,7 +856,7 @@ async function createSession(
 			`pi failed to load ${EXTENSION_ENTRY}: ${JSON.stringify(loadErrors.map((entry) => String(entry.error)))}`,
 		);
 	}
-	const result = await createAgentSessionFromServices({
+	const result = await hostModule().createAgentSessionFromServices({
 		services,
 		sessionManager: options.sessionManager,
 		model: model as never,
@@ -636,9 +866,14 @@ async function createSession(
 }
 
 /** Bind the loaded copy to a session: pi emits that session's `session_start`. */
-async function bindTo(session: AgentSession, errors: unknown[]): Promise<void> {
+async function bindTo(
+	session: AgentSession,
+	errors: unknown[],
+	ui?: UiRecorder,
+): Promise<void> {
 	await session.bindExtensions({
 		onError: (error: unknown) => errors.push(error),
+		...(ui ? { uiContext: ui.context, mode: "tui" as const } : {}),
 	});
 }
 
@@ -725,7 +960,7 @@ function handleFor(
 		}
 		const replacementErrors: unknown[] = [];
 		let next: CreatedSession | undefined;
-		const runtime = new AgentSessionRuntime(
+		const runtime = new (hostModule().AgentSessionRuntime)(
 			session,
 			created.services,
 			async (options) => {
@@ -733,7 +968,9 @@ function handleFor(
 				return { ...next.result, services: next.services, diagnostics: [] };
 			},
 		);
-		runtime.setRebindSession((replaced) => bindTo(replaced, replacementErrors));
+		runtime.setRebindSession((replaced) =>
+			bindTo(replaced, replacementErrors, args.ui),
+		);
 		// pi calls this after the shutdown handlers ran and before it disposes
 		// the session, so from here on this handle owns no live session and
 		// must not emit a second shutdown. A refusal before the teardown (an
@@ -755,6 +992,8 @@ function handleFor(
 		cwd: created.services.cwd,
 		requests: created.requests,
 		errors,
+		notifications: args.ui?.notifications ?? [],
+		statuses: args.ui?.statuses ?? [],
 		sessionFile: () => session.sessionManager.getSessionFile(),
 		async latencyRows() {
 			await flushAllNdjsonWriters();
@@ -802,7 +1041,10 @@ function handleFor(
 					{
 						cwd: created.services.cwd,
 						agentDir: created.services.agentDir,
-						sessionManager: SessionManager.open(file, path.dirname(file)),
+						sessionManager: hostModule().SessionManager.open(
+							file,
+							path.dirname(file),
+						),
 					},
 					responses,
 				),
@@ -836,7 +1078,7 @@ async function bindSession(
 	created: CreatedSession,
 ): Promise<PiSession> {
 	const errors: unknown[] = [];
-	await bindTo(created.session, errors);
+	await bindTo(created.session, errors, args.ui);
 	return handleFor(args, created, errors);
 }
 
@@ -863,6 +1105,22 @@ export async function startPiSession(
 	process.env.PI_LENS_HOME = path.join(options.root, "home");
 	process.env.PILENS_DATA_DIR = path.join(options.root, "data");
 	process.env.PI_LENS_TEST_MODE = "0";
+	// Every background scanner's report directory (jscpd, the ast-grep exports
+	// pass, ...) is created under `scannerReportParentDir()` and removed in the
+	// scan's own `finally`. A `session_start` scan is fire-and-forget and the
+	// LOADED copy owns its resident clients, so this side cannot drain it
+	// (header, point 6): a scan still running when the worker ends would strand
+	// its directory in the SHARED tmp root — measured on a host pre-push, where
+	// two `pi-lens-jscpd-*` entries outlived the slice-7 ordering file and the
+	// hygiene census attributed them to it. The seam's contract is that a
+	// harness owning a root points the override at it, so an orphan lands inside
+	// the root this file removes; the scanner-only harness marker supplies the
+	// half the `PI_LENS_TEST_MODE=0` pin removes (the copy is deliberately not in
+	// test mode, so `isTestMode()` alone would fall back to the shared tmpdir).
+	const scannerTmp = path.join(options.root, "scanner-tmp");
+	fs.mkdirSync(scannerTmp, { recursive: true });
+	process.env.PI_LENS_TEST_SCANNER_TMPDIR = scannerTmp;
+	process.env.PI_LENS_TEST_SCANNER_HARNESS = "1";
 	const startupMode = options.startupMode ?? "full";
 	process.env.PI_LENS_STARTUP_MODE = startupMode;
 	// A quick start is the production FIRST-session shape, and it arms pi-lens's
@@ -875,7 +1133,8 @@ export async function startPiSession(
 	else delete process.env.PI_LENS_COLD_START_QUICK;
 	const args: SessionArgs = {
 		root: options.root,
-		flags: new Map([...DEFAULT_FLAGS, ...(options.flags ?? [])]),
+		flags: flagMap(DEFAULT_FLAGS, options.flags),
+		...(options.captureUi ? { ui: createUiRecorder() } : {}),
 	};
 	return bindSession(
 		args,
@@ -884,7 +1143,7 @@ export async function startPiSession(
 			{
 				cwd,
 				agentDir,
-				sessionManager: SessionManager.create(cwd, sessionsDir),
+				sessionManager: hostModule().SessionManager.create(cwd, sessionsDir),
 			},
 			options.responses,
 		),

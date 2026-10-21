@@ -10,7 +10,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../../../clients/cache-manager.js";
-import { makeLspServiceDouble } from "../../support/lsp-service-double.js";
+import { installLspServiceDouble } from "../../support/lsp-service-seam.js";
 import { gatedPromise } from "../../support/fault-injection.js";
 import { removeTempDirSync } from "../test-utils.js";
 
@@ -51,12 +51,6 @@ vi.mock("../../../clients/bootstrap.js", async () => {
 vi.mock("../../../clients/ast-grep-client.js", () => ({
 	AstGrepClient: class {},
 }));
-vi.mock("../../../clients/lsp/capabilities.js", () => ({
-	// `getMcpSessionContext` reads only `getAliveClientCount`; the rest of the
-	// surface comes from the factory (#2592).
-	getLSPService: () => makeLspServiceDouble({ getAliveClientCount: () => 2 }),
-	resetLSPService: vi.fn(),
-}));
 // Hoisted (not inlined in the factory) so the delivery tests can make a consume
 // THROW — the #1274 error path the two-phase protocol exists to survive.
 const runtimeContext = vi.hoisted(() => ({
@@ -93,7 +87,8 @@ import {
 let tmpDir: string;
 let previousDataDir: string | undefined;
 
-beforeEach(() => {
+beforeEach(async () => {
+	await installLspServiceDouble({ getAliveClientCount: () => 2 });
 	previousDataDir = process.env.PILENS_DATA_DIR;
 	handleSessionStart.mockClear();
 	handleTurnEnd.mockClear();
