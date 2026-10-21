@@ -219,12 +219,7 @@ describe("the spread probes the installed certified host and reports the rest", 
 
 describe("a tier's verdict is fail-closed", () => {
 	/** A summary shape as `parseVitestSummary` returns it on a green run. */
-	const green = {
-		testsPassed: 4,
-		testsFailed: null,
-		testsSkipped: null,
-		noTests: false,
-	};
+	const green = { testsPassed: 4, testsFailed: null, testsSkipped: null };
 
 	it("passes a green run and counts its tests", () => {
 		expect(tierVerdict({ status: 0, summary: green })).toEqual({
@@ -234,10 +229,7 @@ describe("a tier's verdict is fail-closed", () => {
 			timedOut: false,
 		});
 		expect(
-			tierVerdict({
-				status: 0,
-				summary: { ...green, testsSkipped: 2 },
-			}).total,
+			tierVerdict({ status: 0, summary: { ...green, testsSkipped: 2 } }).total,
 		).toBe(6);
 	});
 
@@ -251,29 +243,19 @@ describe("a tier's verdict is fail-closed", () => {
 			"a run that collected nothing",
 			{
 				status: 0,
-				summary: {
-					testsPassed: 0,
-					testsFailed: 0,
-					testsSkipped: 0,
-					noTests: true,
-				},
+				summary: { testsPassed: 0, testsFailed: 0, testsSkipped: 0 },
 			},
 		],
 		[
 			"a transcript with no counts at all",
 			{
 				status: 0,
-				summary: {
-					testsPassed: null,
-					testsFailed: null,
-					testsSkipped: null,
-					noTests: false,
-				},
+				summary: { testsPassed: null, testsFailed: null, testsSkipped: null },
 			},
 		],
 		[
 			"a child killed by its timeout",
-			{ status: null, timedOut: true, summary: { ...green, noTests: true } },
+			{ status: null, timedOut: true, summary: { ...green, testsPassed: 0 } },
 		],
 	])("fails %s", (_name, input) => {
 		expect(tierVerdict(input).ok).toBe(false);

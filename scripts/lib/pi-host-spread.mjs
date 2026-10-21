@@ -205,27 +205,23 @@ export async function runSpread({ certified, hosts, runTierSuite }) {
 
 /**
  * The verdict one tier run earns, from its child's exit status and the
- * transcript's parsed summary. A run that collected nothing is NOT a pass: an
- * empty tier would otherwise report green on every host, which is the exact
- * shape a mis-set `PI_LENS_PI_HOST_PACKAGE` produces (Vitest collects nothing
- * when the file filter matches nothing).
+ * transcript's parsed summary. A run that reported no passing test is NOT a
+ * pass: an empty tier would otherwise come out green on every host, which is
+ * the exact shape a mis-set `PI_LENS_PI_HOST_PACKAGE` or a file filter that
+ * matches nothing produces. The parser reports an absent count as `null`, so
+ * "no counts in the transcript" and "zero collected" are the same refusal.
  */
 export function tierVerdict({ status, timedOut, summary }) {
-	const passed = summary.testsPassed;
-	const failed = summary.testsFailed;
+	const passed = summary.testsPassed ?? 0;
+	const failed = summary.testsFailed ?? 0;
 	const skipped = summary.testsSkipped ?? 0;
-	const ok =
-		status === 0 &&
-		typeof passed === "number" &&
-		passed > 0 &&
-		(failed ?? 0) === 0 &&
-		!summary.noTests;
+	const ok = status === 0 && passed > 0 && failed === 0;
 	return {
 		ok,
-		passed: typeof passed === "number" ? passed : null,
+		passed: summary.testsPassed,
 		// Vitest prints no `failed` count on a green run, so an absent one is
 		// zero, not unknown.
-		total: typeof passed === "number" ? passed + (failed ?? 0) + skipped : null,
+		total: summary.testsPassed === null ? null : passed + failed + skipped,
 		timedOut: timedOut === true,
 	};
 }

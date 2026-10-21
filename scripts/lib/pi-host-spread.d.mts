@@ -72,7 +72,6 @@ export interface TierTranscriptSummary {
 	testsPassed: number | null;
 	testsFailed: number | null;
 	testsSkipped: number | null;
-	noTests: boolean;
 }
 
 export declare function tierVerdict(input: {
