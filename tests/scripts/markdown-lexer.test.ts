@@ -1,5 +1,5 @@
-import { createRequire } from "node:module";
 import { resolve } from "node:path";
+import { getDefaults, Lexer } from "marked";
 import { describe, expect, it } from "vitest";
 import {
 	blankMarkdownRegions,
@@ -20,10 +20,6 @@ import {
 // closed when it cannot.
 
 const repositoryRoot = resolve(import.meta.dirname, "../..");
-const { Lexer, getDefaults } = createRequire(import.meta.url)("marked") as {
-	Lexer: new (options: object) => { lex(text: string): { raw: string }[] };
-	getDefaults(): object;
-};
 
 describe("the lexer's raw text covers the source (#4717)", () => {
 	// Recurrence it prevents: every region offset is the running sum of the
