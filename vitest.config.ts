@@ -334,11 +334,6 @@ const lspSpawnHeavyInclude = [
 	// overrides, one of them held 8 s before it answers; same contention
 	// class as tests/tools/diagnostics-route-switch-matrix.test.ts.
 	"tests/clients/cascade-unanswered-primary-4403.test.ts",
-	// #4632 slice 7: the same cascade line through a REAL pi AgentSession, whose
-	// next provider request carries it. The same fake-LSP children behind the
-	// same project overrides, one held 8 s; the session adds pi's own turn loop
-	// on top of the wait.
-	"tests/index-4632-s7-turn-end-ordering.test.ts",
 	"tests/clients/dispatch/runners/lsp-real-runner.test.ts",
 	// #3968: the builtin shuck row's smoke — a real `shuck server` child driven
 	// through the production LSP runner (real initialize handshake, real
@@ -391,6 +386,11 @@ const lspSpawnHeavyInclude = [
 	// import) because the bin is a separate process, so the membership is stated
 	// here by hand rather than pretended to be derived. The file runs once: the
 	// default project excludes this list.
+	// #4632 slice 7: the same cascade line through a REAL pi AgentSession, whose
+	// next provider request carries it. The same fake-LSP children behind the
+	// same project overrides, one held 8 s; the session adds pi's own turn loop
+	// on top of the wait.
+	"tests/index-4632-s7-turn-end-ordering.test.ts",
 	"tests/mcp/analyze-cli.test.ts",
 	// #4300: the MCP witness crosses Lean's real initialize handshake.
 	"tests/mcp/server.smoke.test.ts",
