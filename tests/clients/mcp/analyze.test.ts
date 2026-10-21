@@ -13,7 +13,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DispatchLatencyReport } from "../../../clients/dispatch/dispatcher.js";
-import { makeLspServiceDouble } from "../../support/lsp-service-double.js";
+import { installLspServiceDouble } from "../../support/lsp-service-seam.js";
 import { removeTempDirSync } from "../test-utils.js";
 
 vi.mock("../../../clients/dispatch/dispatcher.js", async (importOriginal) => {
@@ -38,13 +38,6 @@ vi.mock("../../../clients/dispatch/fact-runner.js", async (importOriginal) => {
 // Warm-up must never spawn a real LSP server in unit tests.
 const mockTouchFile = vi.hoisted(() => vi.fn(async () => undefined));
 const mockSupportsLSP = vi.hoisted(() => vi.fn((_file: string) => false));
-vi.mock("../../../clients/lsp/capabilities.js", () => ({
-	getLSPService: () =>
-		makeLspServiceDouble({
-			supportsLSP: mockSupportsLSP,
-			touchFile: mockTouchFile,
-		}),
-}));
 
 // #536: buildOrUpdateGraph is mocked so this suite asserts the GATING logic
 // (updateGraph flag, blockers, file-kind eligibility) without exercising the
@@ -109,7 +102,11 @@ let tmpDir: string;
 let tsFile: string;
 let previousDataDir: string | undefined;
 
-beforeEach(() => {
+beforeEach(async () => {
+	await installLspServiceDouble({
+		supportsLSP: mockSupportsLSP,
+		touchFile: mockTouchFile,
+	});
 	previousDataDir = process.env.PILENS_DATA_DIR;
 	resetDispatchBaselines();
 	clearWidgetState();
