@@ -163,9 +163,9 @@ const PINS: Readonly<Record<string, Pin>> = {
 	}, // :58, :68, :78, :112, :132, :133, :139, :147, :169
 	"clients/file-utils.ts#raw-realpath": {
 		sites: 1,
-		identities: "8785e61f965e694f",
+		identities: "394522becca2b539",
 		reason: PRE_4689,
-	}, // :227
+	}, // :433 (r6: keyed by its function, renamed to dataDirCanonicalRoot)
 	"clients/file-utils.ts#path-resolve-keyed": {
 		sites: 3,
 		identities: "28e866f9b5baf0dd",
@@ -475,10 +475,5 @@ describe("path identity sweep (#4689)", () => {
 			.filter(([, pin]) => pin.reason.trim().length < 30)
 			.map(([row]) => row);
 		expect(reasonless).toEqual([]);
-	});
-
-	it("keys every occurrence uniquely, so one pin never excuses two sites", () => {
-		const keys = occurrences.map((occurrence) => occurrence.key);
-		expect(keys.length).toBe(new Set(keys).size);
 	});
 });

@@ -134,6 +134,38 @@ const SITE_ROWS: ReadonlyArray<[string, string, PathIdentityNeedle[]]> = [
 		"const k = path.resolve(f);\nm.set(k, 1);",
 		["path-resolve-keyed"],
 	],
+	// plants: a member read through a bracket with a literal key (review r5
+	// LOW, Greptile PRRT_kwDORt8rec6u2wF3; live population 0 on 2026-10-21)
+	[
+		"plant: resolve called through a bracket key",
+		'm.set(path["resolve"](f), 1);',
+		["path-resolve-keyed"],
+	],
+	[
+		"plant: a key method called through a bracket key",
+		'm["set"](path.resolve(f), 1);',
+		["path-resolve-keyed"],
+	],
+	[
+		"plant: both through escaped and template bracket keys",
+		"m[`has`](path['res\\u006flve'](f));",
+		["path-resolve-keyed"],
+	],
+	[
+		"plant: a bound resolve read through a bracket key",
+		'const r = path["resolve"];\nm.set(r(f), 1);',
+		["path-resolve-keyed"],
+	],
+	[
+		"plant: a bracket-key .call of a key method",
+		'Map.prototype["set"]["call"](m, path.resolve(f), 1);',
+		["path-resolve-keyed"],
+	],
+	[
+		"plant: a bracket-key mapper inside new Set",
+		'new Set(xs["map"](path["resolve"]));',
+		["path-resolve-keyed"],
+	],
 	[
 		"plant: binding in an enclosing function scope",
 		"function g(f) {\n\tconst k = path.resolve(f);\n\treturn () => m.has(k);\n}",
@@ -160,6 +192,8 @@ const CLEAN_ROWS: ReadonlyArray<[string, string]> = [
 		"const k = path.resolve(f);\nfor (const k of keys) m.has(k);",
 	],
 	["a raw template with a backslash", "x.replaceAll(String.raw`\\.`, '.');"],
+	["a bracket key that is not resolve", 'm.set(path["relative"](root, f), 1);'],
+	["a bracket key that is not a key method", 'm["push"](path.resolve(f));'],
 ];
 
 describe("path identity detector state table (#4689)", () => {

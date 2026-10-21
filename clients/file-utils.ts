@@ -63,7 +63,7 @@ import { getProcessSingleton } from "./process-singletons.js";
  * spelling of the root it holds. The host's cwd may be spelled through a
  * link, while dispatch and the runtime hold the realpath. A directory an
  * earlier version named from a link spelling is adopted here, once, by
- * {@link adoptSpelledDataDir}.
+ * {@link adoptSpelledDataDirs}.
  *
  * Temporary checkouts (#1129 decision B, `isEphemeralCheckoutRoot`: a real
  * git checkout below the host tmpdir, or a directory inside one) keep the
@@ -86,7 +86,7 @@ export function getProjectDataDir(cwd: string): string {
 	if (!configuredBase && fs.existsSync(legacyProjectDir)) {
 		return legacyProjectDir;
 	}
-	const canonical = canonicalProjectRoot(cwd);
+	const canonical = dataDirCanonicalRoot(cwd);
 	const readable = projectDataDirReadableSlug(canonical.root);
 	const hash = projectDataDirRootHash(canonical.root);
 	const slug = `${readable || "default"}-${hash}`;
@@ -108,13 +108,17 @@ export function getProjectDataDir(cwd: string): string {
 	// an old-slug directory is still in use would create `dir`, and the next
 	// session would prefer it over the old slug's data (#2874 "coexisting").
 	if (settled === dir) {
-		adoptSpelledDataDir(path.resolve(cwd), base, dir);
+		adoptSpelledDataDirs(path.resolve(cwd), base, dir, readable || "default");
 	}
 	return settled;
 }
 
-/** Files one adoption copies at most; the rest stay in the old directory. */
-const ADOPT_MAX_FILES = 4096;
+/**
+ * Entries (files and the directories entered) one source's walk visits at
+ * most; the rest stay in the old directory (#4689 r6: directories count, so
+ * a tree of empty directories cannot walk without bound).
+ */
+const ADOPT_MAX_ENTRIES = 4096;
 
 /**
  * The done-marker's name prefix, in the adopting directory, one per source
@@ -142,29 +146,56 @@ const ADOPTED_MARKER_PREFIX = ".adopted-";
  * directory at the next start (a cleared commit-gate record blocked commits
  * as stale). A crash before the marker leaves none, so the next start
  * resumes the copy-if-missing walk.
+ *
+ * Round 6 (G1): the link spelling named two shapes over time, the hashed
+ * name (v4.2.0 to v4.4.4) and the unhashed one (v4.1.6 and earlier), so
+ * both are sources, each with its own marker.
  */
-function adoptSpelledDataDir(
+function adoptSpelledDataDirs(
 	spelledRoot: string,
 	base: string,
 	dir: string,
+	settledOldSlug: string,
 ): void {
-	const source = `${projectDataDirReadableSlug(spelledRoot) || "default"}-${projectDataDirRootHash(spelledRoot)}`;
-	const from = path.join(base, source);
-	if (from === dir || !isDirectory(from)) return;
-	const marker = path.join(dir, `${ADOPTED_MARKER_PREFIX}${source}`);
-	if (fs.existsSync(marker)) return;
-	const { copied, failed } = copyMissingFiles(from, dir);
-	// An unwritten marker means the next start walks again, so it is reported.
-	const unmarked = markAdopted(marker) ? 0 : 1;
-	if (
-		(copied > 0 || failed + unmarked > 0) &&
-		pendingDataDirMigrations.length < 32
-	) {
+	const readable = projectDataDirReadableSlug(spelledRoot) || "default";
+	// Newest first: copy-if-missing keeps the first source's copy of a file.
+	// v4.2.0 to v4.4.4 named the directory `<readable>-<hash>`.
+	const sources = [`${readable}-${projectDataDirRootHash(spelledRoot)}`];
+	// v4.1.6 and earlier named it `<readable>` alone (#4689 r6 G1). When that
+	// is the real root's own unhashed name, `settleProjectDataDir` has
+	// already renamed it into `dir`, as on master.
+	if (readable !== settledOldSlug) sources.push(readable);
+	let copied = 0;
+	let failed = 0;
+	for (const source of sources) {
+		const outcome = adoptSource(base, source, dir);
+		copied += outcome.copied;
+		failed += outcome.failed;
+	}
+	if ((copied > 0 || failed > 0) && pendingDataDirMigrations.length < 32) {
 		pendingDataDirMigrations.push({
 			to: dir,
-			outcome: failed + unmarked > 0 ? "adopt-failed" : "adopted",
+			outcome: failed > 0 ? "adopt-failed" : "adopted",
 		});
 	}
+}
+
+/**
+ * One source directory, walked at most once: its done-marker in `dir` is
+ * written after the walk whatever each file's outcome, and checked first.
+ * An unwritten marker counts as a failure, since the next start walks again.
+ */
+function adoptSource(
+	base: string,
+	source: string,
+	dir: string,
+): { copied: number; failed: number } {
+	const from = path.join(base, source);
+	if (from === dir || !isDirectory(from)) return { copied: 0, failed: 0 };
+	const marker = path.join(dir, `${ADOPTED_MARKER_PREFIX}${source}`);
+	if (fs.existsSync(marker)) return { copied: 0, failed: 0 };
+	const { copied, failed } = copyMissingFiles(from, dir);
+	return { copied, failed: failed + (markAdopted(marker) ? 0 : 1) };
 }
 
 function markAdopted(marker: string): boolean {
@@ -212,11 +243,12 @@ function copyMissingFiles(
 			if (name.startsWith(ADOPTED_MARKER_PREFIX)) continue;
 			const child = path.join(rel, name);
 			if (entry.isDirectory()) {
+				if (++seen > ADOPT_MAX_ENTRIES) return { copied, failed: failed + 1 };
 				pending.push(child);
 				continue;
 			}
 			if (!entry.isFile()) continue;
-			if (++seen > ADOPT_MAX_FILES) return { copied, failed: failed + 1 };
+			if (++seen > ADOPT_MAX_ENTRIES) return { copied, failed: failed + 1 };
 			const outcome = copyIfMissing(
 				path.join(from, child),
 				path.join(to, child),
@@ -359,7 +391,7 @@ export async function sweepDeadEphemeralDataDirs(options: {
  * {@link projectDataDirRootHash}. Never use it as a directory name alone.
  *
  * Both halves come from one root: since #4689 round 4 its path identity
- * ({@link canonicalProjectRoot}). The readable half is `normalizePathSpelling`
+ * ({@link dataDirCanonicalRoot}). The readable half is `normalizePathSpelling`
  * of that root, the form `normalizeFilePath` returned before #4689, so a
  * root with no link keeps the name every earlier version wrote. A root
  * reached through a link moves to its real path's name, and its old
@@ -388,7 +420,7 @@ function projectDataDirReadableSlug(canonicalRoot: string): string {
  * root. A collision needs the same readable slug and the same 32-bit prefix,
  * so the practical collision population is readable-slug twin pairs.
  */
-export function canonicalProjectRoot(
+export function dataDirCanonicalRoot(
 	cwd: string,
 	platform: NodeJS.Platform = process.platform,
 ): {

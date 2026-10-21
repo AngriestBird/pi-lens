@@ -586,7 +586,7 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 		silent: 11,
 		identities: "0cb7a41f4e5a5a7a",
 		reason: PRE_RULE,
-	}, // :265, :285, :303, :307, :310, :362, :437, :863, :1223, :1504, :1535 (#4689 r4: canonicalProjectRoot's realpath-probe arm now returns the identity root; the adoption's handlers declare their none)
+	}, // :265, :285, :303, :307, :310, :362, :437, :863, :1223, :1504, :1535 (#4689 r4: dataDirCanonicalRoot's realpath-probe arm now returns the identity root; the adoption's handlers declare their none)
 	"clients/fix-run-restore.ts": {
 		silent: 10,
 		identities: "24b4689d533166d4",

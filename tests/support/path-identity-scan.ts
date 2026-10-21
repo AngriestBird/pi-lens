@@ -16,7 +16,9 @@
  *   string the reader cannot cook fails closed as a site. Every reach of the
  *   kernel's realpath names one of the two, whichever binding carries it.
  * - `path-resolve-keyed`: a resolve value in a key position. A resolve value
- *   is a call of a member `.resolve` or of a name bound to resolve in this
+ *   is a call of a member `.resolve` (or `["resolve"]`: a member read
+ *   through a bracket with a literal key is that member, here and for every
+ *   method below) or of a name bound to resolve in this
  *   file, an uncalled reference to one (a mapper), or a name this file binds
  *   to such a call (one hop). A key position is the first argument of
  *   `.set/.get/.has/.delete/.add`, the second of `<method>.call(…)`, a
@@ -91,7 +93,36 @@ function unwrap(node: SgNode): SgNode {
 	return current;
 }
 
-function propertyName(member: SgNode): string | undefined {
+/** A literal's single cooked value, or `undefined` when it has none. */
+function literalValue(node: SgNode): string | undefined {
+	const text = node.text();
+	if (!isQuoted(text)) return undefined;
+	if (node.kind() === "string")
+		return cookedString(text) ?? cookedString(lenient(text));
+	if (
+		node.kind() === "template_string" &&
+		!named(node).some((child) => child.kind() === "template_substitution")
+	)
+		return cookedString(text) ?? cookedString(lenient(text));
+	return undefined;
+}
+
+/** A member access: `a.b`, or `a[k]` (whose name is static only for a literal `k`). */
+function isMember(node: SgNode): boolean {
+	const kind = node.kind();
+	return kind === "member_expression" || kind === "subscript_expression";
+}
+
+/**
+ * The static name a member access reads: `a.b`, and `a["b"]` with a literal
+ * key (review r5 LOW: `path["resolve"](p)` and `m["set"](…)` read the same
+ * member as the dotted spelling). A computed key has none.
+ */
+function memberName(member: SgNode): string | undefined {
+	if (member.kind() === "subscript_expression") {
+		const index = member.field("index");
+		return index ? literalValue(unwrap(index)) : undefined;
+	}
 	const property = member.field("property");
 	return property ? cookedIdentifier(property.text()) : undefined;
 }
@@ -175,8 +206,7 @@ interface ResolveBindings {
 
 function isResolveCallee(node: SgNode, bindings: ResolveBindings): boolean {
 	const value = unwrap(node);
-	if (value.kind() === "member_expression")
-		return propertyName(value) === "resolve";
+	if (isMember(value)) return memberName(value) === "resolve";
 	if (value.kind() === "identifier") {
 		const name = cookedIdentifier(value.text());
 		return name === "resolve" || bindings.callees.has(name);
@@ -366,7 +396,7 @@ function resolveBindings(root: SgNode): ResolveBindings {
 		const value = declarator.field("value");
 		if (!name || !value || name.kind() !== "identifier") continue;
 		const held = unwrap(value);
-		if (held.kind() === "member_expression" && propertyName(held) === "resolve")
+		if (isMember(held) && memberName(held) === "resolve")
 			bindings.callees.add(cookedIdentifier(name.text()));
 	}
 	return bindings;
@@ -394,9 +424,7 @@ function collectionKeyValues(node: SgNode, out: SgNode[]): void {
 		case "call_expression": {
 			const callee = value.field("function");
 			const method =
-				callee?.kind() === "member_expression"
-					? propertyName(callee)
-					: undefined;
+				callee && isMember(callee) ? memberName(callee) : undefined;
 			if (method === "map" || method === "flatMap") {
 				for (const arg of argumentsOf(value)) collectionKeyValues(arg, out);
 				return;
@@ -425,8 +453,8 @@ function resolveKeyedSites(root: SgNode): PathIdentitySite[] {
 	};
 	for (const call of root.findAll({ rule: { kind: "call_expression" } })) {
 		const callee = call.field("function");
-		if (callee?.kind() !== "member_expression") continue;
-		const method = propertyName(callee);
+		if (!callee || !isMember(callee)) continue;
+		const method = memberName(callee);
 		const args = argumentsOf(call);
 		if (method && KEY_METHODS.has(method)) {
 			const key = args[0];
@@ -434,8 +462,8 @@ function resolveKeyedSites(root: SgNode): PathIdentitySite[] {
 			continue;
 		}
 		const target = callee.field("object");
-		if (method === "call" && target?.kind() === "member_expression") {
-			const inner = propertyName(target);
+		if (method === "call" && target && isMember(target)) {
+			const inner = memberName(target);
 			const key = args[1];
 			if (
 				inner &&

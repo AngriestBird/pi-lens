@@ -21,3 +21,12 @@ export function dataDir444(base: string, root: string): string {
 	const hash = createHash("sha256").update(spelled).digest("hex").slice(0, 8);
 	return path.join(base, `${readable || "default"}-${hash}`);
 }
+
+/**
+ * The directory pi-lens 4.1.6 and earlier named for `root` under `base`: the
+ * same readable half with no hash (#4689 r6 G1; hashes arrived in v4.2.0).
+ * POSIX only, like {@link dataDir444}.
+ */
+export function dataDir416(base: string, root: string): string {
+	return dataDir444(base, root).replace(/-[0-9a-f]{8}$/, "");
+}

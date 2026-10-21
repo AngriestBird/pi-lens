@@ -40,14 +40,14 @@ import { resetDegradationLedger } from "../../clients/degradation-ledger.js";
 import { getDisposition } from "../../clients/diagnostic-dispositions.js";
 import { CacheManager } from "../../clients/cache-manager.js";
 import {
-	canonicalProjectRoot,
+	dataDirCanonicalRoot,
 	drainProjectDataDirMigrations,
 	getProjectDataDir,
 	_resetProjectDataDirMemoForTests,
 } from "../../clients/file-utils.js";
 import { evaluateGitGuard } from "../../clients/git-guard.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
-import { dataDir444 } from "../support/data-dir-4-4-4.js";
+import { dataDir416, dataDir444 } from "../support/data-dir-4-4-4.js";
 
 const FIXTURES = path.join(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -182,7 +182,7 @@ describe("project data-dir slug (#2874)", () => {
 		fs.symlinkSync(path.join(scratch, "target"), path.join(linkParent, "root"));
 
 		const linked = getProjectDataDir(path.join(linkParent, "root", "proj"));
-		// win32 names have never followed the realpath (canonicalProjectRoot).
+		// win32 names have never followed the realpath (dataDirCanonicalRoot).
 		if (process.platform === "win32")
 			expect(linked).not.toBe(getProjectDataDir(target));
 		else expect(linked).toBe(getProjectDataDir(target));
@@ -199,8 +199,8 @@ describe("project data-dir slug (#2874)", () => {
 		const alias = path.join(scratch, "aliasproj");
 		fs.symlinkSync("realproj", alias, "dir");
 
-		expect(canonicalProjectRoot(alias, "win32").root).toBe(path.resolve(alias));
-		expect(canonicalProjectRoot(alias, "linux").root).toBe(
+		expect(dataDirCanonicalRoot(alias, "win32").root).toBe(path.resolve(alias));
+		expect(dataDirCanonicalRoot(alias, "linux").root).toBe(
 			fs.realpathSync.native(alias),
 		);
 	});
@@ -371,6 +371,14 @@ describe("project data-dir slug (#2874)", () => {
 		expect(settled).toBe(dir);
 		expect(fs.existsSync(path.join(settled, "new.txt"))).toBe(true);
 		expect(fs.existsSync(oldDir)).toBe(true);
+		// RECURRENCE GUARDED: #4689 r6 G1. The unhashed source adoption reads
+		// is the link spelling's; a root whose spelling folds to the slug
+		// settle already tried keeps settle's verdict, so a directory it left
+		// beside a newer one is not copied in.
+		expect(fs.existsSync(path.join(settled, "old.txt"))).toBe(false);
+		expect(drainProjectDataDirMigrations()).toEqual([
+			{ to: dir, outcome: "coexisting" },
+		]);
 	});
 
 	it("rename failure keeps the legacy directory and records rename-failed", () => {
@@ -544,7 +552,7 @@ describe("adopting the data dir a link spelling named (#4689 round 4)", () => {
 		).toEqual(["rename-failed"]);
 	});
 
-	it("copies at most 4096 files and records the rest as not adopted", (ctx) => {
+	it("copies at most 4096 entries and records the rest as not adopted", (ctx) => {
 		const fx = aliasRoot("pi-lens-adopt-cap-");
 		if (!fx) return ctx.skip("the win32 name never moved");
 		const bulk = path.join(fx.spelled, "bulk");
@@ -554,7 +562,8 @@ describe("adopting the data dir a link spelling named (#4689 round 4)", () => {
 
 		const dir = getProjectDataDir(fx.alias);
 
-		expect(filesUnder(dir)).toHaveLength(4096);
+		// Two of the 4096 entries are the directories `cache` and `bulk`.
+		expect(filesUnder(dir)).toHaveLength(4094);
 		expect(drainProjectDataDirMigrations()).toEqual([
 			{ to: dir, outcome: "adopt-failed" },
 		]);
@@ -562,6 +571,23 @@ describe("adopting the data dir a link spelling named (#4689 round 4)", () => {
 		_resetProjectDataDirMemoForTests();
 		getProjectDataDir(fx.alias);
 		expect(drainProjectDataDirMigrations()).toEqual([]);
+	});
+
+	it("counts directories toward the cap, so a tree of empty ones ends the walk", (ctx) => {
+		// RECURRENCE GUARDED: review r5 LOW (Greptile PRRT_kwDORt8rec6u2wFy).
+		// r5 counted files only, so a source of 50k empty directories walked
+		// every one of them at startup.
+		const fx = aliasRoot("pi-lens-adopt-dircap-");
+		if (!fx) return ctx.skip("the win32 name never moved");
+		const many = path.join(fx.spelled, "many");
+		fs.mkdirSync(many);
+		for (let i = 0; i < 4100; i++) fs.mkdirSync(path.join(many, `${i}`));
+
+		const dir = getProjectDataDir(fx.alias);
+
+		expect(drainProjectDataDirMigrations()).toEqual([
+			{ to: dir, outcome: "adopt-failed" },
+		]);
 	});
 
 	it("counts a name already taken at the target as present, a dangling link included", (ctx) => {
@@ -759,5 +785,116 @@ describe("adopting the data dir a link spelling named (#4689 round 4)", () => {
 		expect(gate.block).toBe(false);
 		// The old directory is kept for a downgrade.
 		expect(fs.existsSync(metaPath)).toBe(true);
+	});
+});
+
+/** What pi-lens 4.1.6 wrote for a project rooted at a link (no slug hash). */
+const ALIAS_MARK_416 = path.join(FIXTURES, "data-dir-4.1.6", "alias-mark");
+
+describe("adopting the unhashed data dir a link spelling named before v4.2.0 (#4689 round 6)", () => {
+	// RECURRENCE GUARDED: review r5 G1 (probe unhashed.mjs: "reads pre-2874
+	// data: false"). Settle renames the unhashed name of the root it is given.
+	// Since round 4 that is the real path, so a 4.1.6 directory named from the
+	// link spelling was neither renamed nor read: its marks and caches were
+	// lost on upgrade.
+	function aliasRoot416(
+		prefix: string,
+	): { base: string; alias: string; unhashed: string } | undefined {
+		if (process.platform === "win32") return undefined;
+		const base = isolateDataDir();
+		const scratch = makeScratch(prefix);
+		fs.mkdirSync(path.join(scratch, "realproj"));
+		const alias = path.join(scratch, "aliasproj");
+		fs.symlinkSync("realproj", alias, "dir");
+		const unhashed = dataDir416(base, alias);
+		fs.cpSync(ALIAS_MARK_416, unhashed, { recursive: true });
+		return { base, alias, unhashed };
+	}
+
+	it("reads a 4.1.6 mark back through the real store and copies every file byte for byte", (ctx) => {
+		const fx = aliasRoot416("pi-lens-adopt416-");
+		if (!fx) return ctx.skip("the win32 name never moved");
+
+		expect(getDisposition(fx.alias, "dd:164197458e2b")).toMatchObject({
+			disposition: "false-positive",
+			reason: "4.1.6 fixture",
+		});
+
+		const dir = getProjectDataDir(fx.alias);
+		expect(dir).toBe(getProjectDataDir(fs.realpathSync.native(fx.alias)));
+		const expected = filesUnder(ALIAS_MARK_416).sort();
+		expect(filesUnder(dir).sort()).toEqual(expected);
+		for (const file of expected) {
+			expect(fs.readFileSync(path.join(dir, file))).toEqual(
+				fs.readFileSync(path.join(ALIAS_MARK_416, file)),
+			);
+			expect(fs.existsSync(path.join(fx.unhashed, file))).toBe(true);
+		}
+		expect(drainProjectDataDirMigrations()).toEqual([
+			{ to: dir, outcome: "adopted" },
+		]);
+		expect(fs.readdirSync(dir).filter((name) => MARKER.test(name))).toEqual([
+			`.adopted-${path.basename(fx.unhashed)}`,
+		]);
+
+		// A new process neither walks again nor records.
+		_resetProjectDataDirMemoForTests();
+		getProjectDataDir(fx.alias);
+		expect(drainProjectDataDirMigrations()).toEqual([]);
+	});
+
+	it("walks the hashed source first, so its file wins, and marks each source", (ctx) => {
+		const fx = aliasRoot416("pi-lens-adopt416-both-");
+		if (!fx) return ctx.skip("the win32 name never moved");
+		const hashed = dataDir444(fx.base, fx.alias);
+		fs.cpSync(ALIAS_SESSION_444, hashed, { recursive: true });
+
+		const dir = getProjectDataDir(fx.alias);
+
+		const store = path.join("cache", "diagnostic-dispositions.json");
+		expect(fs.readFileSync(path.join(dir, store))).toEqual(
+			fs.readFileSync(path.join(ALIAS_SESSION_444, store)),
+		);
+		expect(fs.existsSync(path.join(dir, "cache", "knip.json"))).toBe(true);
+		expect(fs.existsSync(path.join(dir, "cache", "todo-baseline.json"))).toBe(
+			true,
+		);
+		expect(drainProjectDataDirMigrations()).toEqual([
+			{ to: dir, outcome: "adopted" },
+		]);
+		expect(
+			fs
+				.readdirSync(dir)
+				.filter((name) => MARKER.test(name))
+				.sort(),
+		).toEqual(
+			[
+				`.adopted-${path.basename(fx.unhashed)}`,
+				`.adopted-${path.basename(hashed)}`,
+			].sort(),
+		);
+	});
+
+	it("walks the unhashed source when the hashed one is already marked", (ctx) => {
+		// Each source has its own marker: a directory a round 4/5 build adopted
+		// from the hashed source still adopts the unhashed one.
+		const fx = aliasRoot416("pi-lens-adopt416-marked-");
+		if (!fx) return ctx.skip("the win32 name never moved");
+		const hashed = dataDir444(fx.base, fx.alias);
+		fs.cpSync(ALIAS_SESSION_444, hashed, { recursive: true });
+		const dir = getProjectDataDir(fs.realpathSync.native(fx.alias));
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(path.join(dir, `.adopted-${path.basename(hashed)}`), "");
+		_resetProjectDataDirMemoForTests();
+
+		getProjectDataDir(fx.alias);
+
+		expect(fs.existsSync(path.join(dir, "cache", "knip.json"))).toBe(true);
+		expect(fs.existsSync(path.join(dir, "cache", "todo-baseline.json"))).toBe(
+			false,
+		);
+		expect(drainProjectDataDirMigrations()).toEqual([
+			{ to: dir, outcome: "adopted" },
+		]);
 	});
 });
