@@ -2123,58 +2123,87 @@ describe("lsp server policy", () => {
 		}
 	});
 
-	it("falls through to the PATH tier when the project launch throws (#4638 review)", async () => {
+	it("falls through to the PATH tier once every project candidate fails (#4638 review)", async () => {
 		const { PythonJediServer } = await import("../../../clients/lsp/server.js");
 		const { setProjectTrustState } =
 			await import("../../../clients/project-trust.js");
 		const { getDegradationSummary, resetDegradationLedger } =
 			await import("../../../clients/degradation-ledger.js");
+		const { detectPythonEnvironment, pythonEnvironmentToolCandidates } =
+			await import("../../../clients/python-environment.js");
+		const { setPlatform } = await import("../../support/platform-stub.js");
 
 		const tmp = fs.mkdtempSync(
 			path.join(os.tmpdir(), "pi-lens-jedi-launch-throw-"),
 		);
 		dirs.push(tmp);
-		const binDir = venvBinDir(tmp);
-		const jediPath = venvTool(binDir, "jedi-language-server");
-		fs.mkdirSync(binDir, { recursive: true });
-		for (const name of ["jedi-language-server", "python"]) {
-			const target = venvTool(binDir, name);
-			fs.writeFileSync(target, "#!/usr/bin/env bash\nexit 0\n");
-			fs.chmodSync(target, 0o755);
-		}
 
-		setProjectTrustState("trusted");
-		vi.stubEnv("VIRTUAL_ENV", undefined);
-		vi.stubEnv("CONDA_PREFIX", undefined);
-		vi.stubEnv("UV_PROJECT_ENVIRONMENT", undefined);
-		resetDegradationLedger();
-		launchLSP.mockClear();
-		// A failure that is not "tool not found" makes the project tier throw
-		// (`resolveAndLaunch` re-raises the runtime failure), which must not end
-		// the attempt.
-		launchLSP.mockRejectedValueOnce(
-			new Error("project interpreter is unusable"),
-		);
-		launchLSP.mockResolvedValueOnce({
-			process: { killed: false } as never,
-			stdin: {} as never,
-			stdout: {} as never,
-			stderr: {} as never,
-			pid: 4444,
-		});
-
+		const realPlatform = process.platform;
+		// Lane-independent (#4638 Windows leg): the Windows ladder — `.exe`,
+		// `.cmd`, then the plain shim — is exercised on every host, so a macOS or
+		// Linux run fails too if the fallback stops falling through after the
+		// project tier throws. Each spelling is a different binary, so re-entering
+		// the same venv ladder is intended; the fallback begins after the LAST one.
+		setPlatform("win32");
 		try {
+			const binDir = venvBinDir(tmp);
+			fs.mkdirSync(binDir, { recursive: true });
+			for (const name of ["jedi-language-server", "python"]) {
+				const target = venvTool(binDir, name);
+				fs.writeFileSync(target, "#!/usr/bin/env bash\nexit 0\n");
+				fs.chmodSync(target, 0o755);
+			}
+
+			const environment = await detectPythonEnvironment(tmp);
+			expect(environment?.source).toBe("project-dot-venv");
+			const projectCandidates = pythonEnvironmentToolCandidates(
+				environment,
+				"jedi-language-server",
+			);
+			expect(projectCandidates).toHaveLength(3);
+			// A real install writes every shim of the ladder.
+			for (const candidate of projectCandidates) {
+				fs.writeFileSync(candidate, "#!/usr/bin/env bash\nexit 0\n");
+				fs.chmodSync(candidate, 0o755);
+			}
+
+			setProjectTrustState("trusted");
+			vi.stubEnv("VIRTUAL_ENV", undefined);
+			vi.stubEnv("CONDA_PREFIX", undefined);
+			vi.stubEnv("UV_PROJECT_ENVIRONMENT", undefined);
+			resetDegradationLedger();
+			launchLSP.mockClear();
+			// Every project candidate fails with something that is not "tool not
+			// found"; `resolveAndLaunch` then re-raises the runtime failure, which
+			// must not end the attempt.
+			for (const _candidate of projectCandidates) {
+				launchLSP.mockRejectedValueOnce(
+					new Error("project interpreter is unusable"),
+				);
+			}
+			launchLSP.mockResolvedValueOnce({
+				process: { killed: false } as never,
+				stdin: {} as never,
+				stdout: {} as never,
+				stderr: {} as never,
+				pid: 4444,
+			});
+
 			const spawned = await PythonJediServer.spawn(tmp);
 
 			expect(spawned).toBeDefined();
-			expect(launchLSP.mock.calls.map((call) => call[0])).toEqual([
-				jediPath,
-				"jedi-language-server",
-			]);
+			const commands = launchLSP.mock.calls.map((call) => call[0]);
+			// Derived from the production ladder, never hard-coded: the project
+			// candidates in order, then the managed/PATH tier's bare command.
+			expect(commands.slice(0, projectCandidates.length)).toEqual(
+				projectCandidates,
+			);
+			expect(commands[projectCandidates.length]).toBe("jedi-language-server");
 			expect(getDegradationSummary().map((entry) => entry.kind)).toContain(
 				"python-project-launch-failed",
 			);
 		} finally {
+			setPlatform(realPlatform);
 			vi.unstubAllEnvs();
 			setProjectTrustState("trusted");
 		}
