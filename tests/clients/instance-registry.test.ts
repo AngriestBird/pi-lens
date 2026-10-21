@@ -696,6 +696,7 @@ describe("instance-registry", () => {
 			await registerInstance("/some/project");
 			const firstDir = dir;
 			dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-instreg-"));
+			process.env.PI_LENS_HOME = dir;
 			try {
 				await updateHeartbeat();
 				await _settleRegistryMutationsForTests();

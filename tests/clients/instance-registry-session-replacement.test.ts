@@ -109,12 +109,13 @@ beforeEach(async () => {
 
 afterEach(async () => {
 	vi.restoreAllMocks();
-	if (previousHome === undefined) delete process.env.PI_LENS_HOME;
-	else process.env.PI_LENS_HOME = previousHome;
 	peerReleases();
 	// The tail is a process singleton: settle it here so nothing queued by
-	// one case lands in the next case's directory.
+	// one case lands in the next case's directory. A queued mutation resolves
+	// the registry path when it runs, so the pin stays until the drain ends.
 	await registry._settleRegistryMutationsForTests();
+	if (previousHome === undefined) delete process.env.PI_LENS_HOME;
+	else process.env.PI_LENS_HOME = previousHome;
 	removeTempDirSync(dir);
 });
 
