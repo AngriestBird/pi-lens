@@ -279,6 +279,10 @@ describe("#2535 adapter-aware agent tool names", () => {
 				);
 			}
 			expect(text).not.toContain("pi_lens_activate_tools");
+			// #4682 F1 (PR #4730 review): the pi clause "activate via ... if unlisted"
+			// must reach MCP as an unconditional "call directly"; a qualifier MCP
+			// can never satisfy (every tool is listed) is dead guidance.
+			expect(text).not.toContain("if unlisted");
 			expect(text).toContain("call directly");
 			// The pi consumer keeps the stored spelling byte-identical.
 			const stored = SESSION_START_GUIDANCE.join("\n");

@@ -27,6 +27,10 @@ import {
 	PI_LENS_CONFIG_SCHEMA,
 } from "../../clients/config-schema.js";
 import { resetIgnoredConfigWarnCache } from "../../clients/config-warn.js";
+import {
+	resetUserNotifier,
+	wireUserNotifier,
+} from "../../clients/user-notify.js";
 import { removeTempDirSync } from "./test-utils.js";
 
 const notices: string[] = [];
@@ -40,17 +44,6 @@ vi.mock("../../clients/extension-log.js", async (importOriginal) => {
 		...actual,
 		logExtension: (entry: { message: string }) => {
 			notices.push(entry.message);
-		},
-	};
-});
-
-vi.mock("../../clients/user-notify.js", async (importOriginal) => {
-	const actual =
-		await importOriginal<typeof import("../../clients/user-notify.js")>();
-	return {
-		...actual,
-		notifyUserDegradation: (message: string) => {
-			userNotices.push(message);
 		},
 	};
 });
@@ -95,6 +88,10 @@ let previousHome: string | undefined;
 beforeEach(() => {
 	notices.length = 0;
 	userNotices.length = 0;
+	resetUserNotifier();
+	wireUserNotifier(() => (message) => {
+		userNotices.push(message);
+	});
 	ledgerRows.length = 0;
 	previousConfigPath = process.env.PI_LENS_CONFIG_PATH;
 	previousHome = process.env.PI_LENS_HOME;
@@ -102,6 +99,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+	resetUserNotifier();
 	if (previousConfigPath === undefined) delete process.env.PI_LENS_CONFIG_PATH;
 	else process.env.PI_LENS_CONFIG_PATH = previousConfigPath;
 	if (previousHome === undefined) delete process.env.PI_LENS_HOME;

@@ -51,11 +51,15 @@ vi.mock("../../clients/lsp/capabilities.js", async () => {
 	};
 });
 
-vi.mock("../../clients/widget-state.js", () => ({
-	reconcileScanDiagnostics: vi.fn().mockReturnValue(true),
-}));
-
 import { createLspDiagnosticsTool } from "../../tools/lsp-diagnostics.js";
+import { clearWidgetState } from "../../clients/widget-state.js";
+
+beforeEach(() => {
+	clearWidgetState();
+});
+afterEach(() => {
+	clearWidgetState();
+});
 
 function serverIdForFile(file: string): string {
 	if (file.endsWith(".py")) return "python";
