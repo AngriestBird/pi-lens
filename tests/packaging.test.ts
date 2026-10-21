@@ -10,6 +10,11 @@ import {
 	LAZY_NATIVE_PACKAGES,
 } from "../scripts/lib/host-provided-deps.mjs";
 import { readLockedToolVersion } from "../scripts/lib/exec-isolation.mjs";
+// The baseline doc's verified-host table has ONE reader (#4632 acceptance 9):
+// the certified-host spread (scripts/probe-pi-host-tiers.mjs) reads the same
+// table, so a second parser here is how the spread and this ratchet would
+// start disagreeing about which rows count.
+import { parseVerifiedHostRows } from "../scripts/lib/pi-host-spread.mjs";
 import yaml from "../clients/deps/js-yaml.js";
 import { stripSource } from "./support/sweep-kit.js";
 import { USER_PROFILE_PATH_RE } from "./support/user-profile-path-pattern.js";
@@ -664,7 +669,14 @@ describe("host-provided peers are open; the supported window lives in install-sm
 	});
 
 	it("keeps the baseline doc's verified-host table and this ratchet one list", () => {
-		const rows = verifiedHostRowsFromBaseline(baselineDoc);
+		const { rows, hasHeader } = parseVerifiedHostRows(baselineDoc);
+		// The header is part of the table's structure, not of its content: a
+		// table that lost its header is not a shorter list of hosts, it is a
+		// list this ratchet cannot read (#4719 F4).
+		expect(
+			hasHeader,
+			"docs/release-qa-baseline.md 'Verified hosts' has its header row",
+		).toBe(true);
 		const unreadable = rows.filter((row) => row.version === null);
 		// Fail closed on a row this reader cannot parse (#4688 R2 F2): a row
 		// spelled `| 1.4 |` is a host the ratchet does not carry and the window
@@ -682,8 +694,8 @@ describe("host-provided peers are open; the supported window lives in install-sm
 	});
 
 	it("lists no verified host the certified window excludes", () => {
-		const excluded = verifiedHostRowsFromBaseline(baselineDoc)
-			.map((row) => row.version)
+		const excluded = parseVerifiedHostRows(baselineDoc)
+			.rows.map((row) => row.version)
 			.filter((version): version is string => version !== null)
 			.filter((version) => !semver.satisfies(version, window));
 		expect(
@@ -692,27 +704,6 @@ describe("host-provided peers are open; the supported window lives in install-sm
 		).toEqual([]);
 	});
 });
-
-/**
- * Rows of the baseline doc's `### Verified hosts` table, in table order, with
- * the version column or `null` when the row does not spell a three-part
- * version. Returning the unparsed rows is what lets the caller refuse them
- * instead of reading a row it cannot understand as absent (#4688 R2 F2).
- */
-function verifiedHostRowsFromBaseline(
-	text: string,
-): Array<{ line: string; version: string | null }> {
-	const section = (text.split("### Verified hosts")[1] ?? "").split(/\n## /)[0];
-	return (section ?? "")
-		.split("\n")
-		.filter((line) => line.trimStart().startsWith("|"))
-		.filter((line) => !/^\|\s*[-:]+\s*\|/.test(line))
-		.slice(1)
-		.map((line) => ({
-			line,
-			version: line.match(/^\|\s*(\d+\.\d+\.\d+)\s*\|/)?.[1] ?? null,
-		}));
-}
 
 // Recurrence prevented (#4513): `build:dist` reads the esbuild and tsc versions
 // out of package-lock.json. esbuild was in the lock only because pi 1.1's

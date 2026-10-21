@@ -314,7 +314,12 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/runtime-coordinator.ts": 2,
 	},
 	baseline: {
-		"clients/cache-observability.ts": 3,
+		// 3 -> 10 (#4718): the prompt-cache read every shortfall is measured
+		// against, named once in `nextCacheBaseline` and carried on the record as
+		// `cacheBaseline`. This is the cached-prefix sense, not the governance
+		// sense `ratchet` retires (`baseline` as an admitted population), and no
+		// use here admits, exempts or caps anything.
+		"clients/cache-observability.ts": 10,
 		"clients/lsp/diagnostic-binding.ts": 4,
 		"clients/lsp/index.ts": 13,
 		"clients/lsp/server.ts": 3,

@@ -1280,6 +1280,14 @@ export type DegradationKind =
 	 */
 	| "project-snapshot-stage-reap-failed"
 	/**
+	 * #4687 item 5: the session's SECOND prompt-cache miss with no local cause
+	 * was recorded (the first counts silently; every later one only raises the
+	 * count). One bounded row per session, so a provider-side miss pattern is
+	 * visible in the ledger instead of only as an `unknown` verdict per turn.
+	 * Subject is the session id.
+	 */
+	| "prompt-cache-miss-unexplained"
+	/**
 	 * The orphan backstop's OWN process-table scanner blew the scan timeout and
 	 * had to be tree-killed (#1864 review F3). Reason carries the kill verdict,
 	 * so a scanner that survived its own sweep's escalation — an orphan sweep
