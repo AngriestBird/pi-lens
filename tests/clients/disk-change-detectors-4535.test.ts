@@ -59,6 +59,7 @@ import {
 	observeGitHead,
 	opaqueBaselineSlot,
 	SAME_HEAD_DIRTY_SET_CAP,
+	takeHeadDiscards,
 } from "../../clients/opaque-mutation-scan.js";
 import { lookForOutOfBandChanges } from "../../clients/out-of-band-changes.js";
 import { normalizeMapKey } from "../../clients/path-utils.js";
@@ -1059,6 +1060,39 @@ describe("a look that joins a discard look of the same call key", () => {
 		const sent = new Set(h.calls.primaries.flatMap((call) => call.paths));
 		expect([...sent].sort()).toEqual([...held].sort());
 	}, 60_000);
+});
+
+/**
+ * #4612 round 4: the discard accumulator is drained at the start of every
+ * look pass, before the look may return early. An unborn HEAD (`git init`
+ * with no commit) is the reachable early return: `git status` still lists a
+ * discard (a dirty file the command deleted), but the look cannot read HEAD.
+ * A drain placed after that return kept every such set for the rest of the
+ * session, one more per call, so the per-key bound held only while HEAD was
+ * readable.
+ */
+describe("a look that cannot read HEAD", () => {
+	it("leaves no discard set owed to a later look", async () => {
+		const h = harness("unborn-head", []);
+		git(h.root, "init", "-q", "-b", "main");
+		const key = headRecordKey(
+			opaqueBaselineSlot(h.root, h.runtime.sessionGeneration),
+			"slice2-session",
+		);
+
+		await resyncHeadMove({
+			root: h.root,
+			key,
+			trigger: "tool_result",
+			label: "rm scratch.ts",
+			discarded: [normalizeMapKey(path.join(h.root, "scratch.ts"))],
+		});
+
+		expect(takeHeadDiscards(key)).toEqual([]);
+		expect(
+			h.publishes.filter((change) => change.origin === "head-move"),
+		).toEqual([]);
+	}, 30_000);
 });
 
 /**
