@@ -36,6 +36,10 @@ import type { LSPDiagnostic } from "../../clients/lsp/client.js";
 import { normalizeMapKey } from "../../clients/path-utils.js";
 import { removeTempDirSync, setupTestEnvironment } from "./test-utils.js";
 import { makeLspServiceDouble } from "../support/lsp-service-double.js";
+import {
+	installLspService,
+	installLspServiceDouble,
+} from "../support/lsp-service-seam.js";
 
 /**
  * The filesystem is a process boundary, and the ONE thing a display filter must
@@ -68,7 +72,6 @@ const mocks = vi.hoisted(() => ({
 	computeImpactCascade: vi.fn(),
 	computeTransitiveImpact: vi.fn(),
 	formatImpactCascade: vi.fn(),
-	getLSPService: vi.fn(),
 	logCascade: vi.fn(),
 	logLatency: vi.fn(),
 }));
@@ -84,13 +87,6 @@ vi.mock("../../clients/review-graph/service.js", async (importOriginal) => ({
 	computeImpactCascade: mocks.computeImpactCascade,
 	computeTransitiveImpact: mocks.computeTransitiveImpact,
 	formatImpactCascade: mocks.formatImpactCascade,
-}));
-
-vi.mock("../../clients/lsp/capabilities.js", async (importOriginal) => ({
-	...(await importOriginal<
-		typeof import("../../clients/lsp/capabilities.js")
-	>()),
-	getLSPService: mocks.getLSPService,
 }));
 
 // `logCascade` no-ops under `isTestMode()`, so spying on it directly is the
@@ -178,7 +174,9 @@ beforeEach(async () => {
 		maxDepthReached: 0,
 	});
 	mocks.formatImpactCascade.mockReset().mockReturnValue("");
-	mocks.getLSPService.mockReset();
+	// No service until a case installs one (`getLSPService: vi.fn()` answered
+	// undefined). After `vi.resetModules()`, so the install evaluates the fresh graph.
+	await installLspServiceDouble(null);
 	mocks.logCascade.mockReset();
 	mocks.logLatency.mockReset();
 	fsReads.byPath.clear();
@@ -242,7 +240,7 @@ async function cascadeFor(
 	options: { cwd?: string; projectRoot?: string } = {},
 ): Promise<string> {
 	mocks.computeImpactCascade.mockReturnValue(impact(primary, neighborPaths));
-	mocks.getLSPService.mockReturnValue(service);
+	installLspService(service);
 	const { computeCascadeForFile } =
 		await import("../../clients/dispatch/integration.js");
 	const run = await computeCascadeForFile(primary, options.cwd ?? env.tmpDir, {
