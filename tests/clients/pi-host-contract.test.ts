@@ -1003,7 +1003,13 @@ describe("#1655 review F3 — the bash-side path source, pinned by use", () => {
 		// one that is NOT a path source: it tokenizes the command through
 		// bash-file-access's own `tokenizeShellCommand` and returns a boolean
 		// recovery policy. It proposes no paths, so it needs no workspaceRoot
-		// pin below. Any FUTURE addition here is a path source until proven
+		// pin below.
+		// `resolveOpaqueRecoveryRoots` (#2050) is the sixth, and also not a path
+		// source: it asks `scanShellWriteScopes` for the command's `cd` targets
+		// and recognised writes, then answers WHICH checkouts the recovery runs
+		// in. It proposes no path of its own, and it resolves its operands through
+		// the same bash-file-access walk, so the second-lexer rule holds.
+		// Any FUTURE addition here is a path source until proven
 		// otherwise — pin it, then justify it in one line like this.
 		expect([...callees].sort()).toEqual([
 			"extractDeletedPathsFromCommand",
@@ -1011,6 +1017,7 @@ describe("#1655 review F3 — the bash-side path source, pinned by use", () => {
 			"extractReadPathsFromCommand",
 			"extractWrittenPathsFromCommand",
 			"isFailedGitIntegrationCommand",
+			"resolveOpaqueRecoveryRoots",
 		]);
 
 		// ...and each resolves against the project root, never a ctx.cwd the

@@ -640,6 +640,10 @@ export const wallClockBudgetInclude = [
 	"tests/config/strictness-ratchet.test.ts",
 	"tests/config/tracked-control-bytes.test.ts",
 	"tests/config/workflow-writers-governance.test.ts",
+	// #2050: the same real-worktree admission, driven through a real pi session
+	// and pi's own `bash` tool, so the child shells and git processes ride along
+	// in the serialized lane too.
+	"tests/index-2050-worktree-bash-dispatch-witness.test.ts",
 	// #4504: a real linked worktree (`git worktree add`) and the real
 	// tool_call/tool_result seams that key the opaque prescan (flake-shape
 	// admission); the git children ride along in the serialized lane.

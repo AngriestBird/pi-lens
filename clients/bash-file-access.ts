@@ -59,6 +59,19 @@ export interface ShellCommandSegment {
 	quotedTilde?: readonly boolean[];
 }
 
+/**
+ * One lexed segment with its character range in the command text (`start` where
+ * the previous terminator ended, `end` at this segment's own terminator). A
+ * redirect target's offset falls in the range of the segment that runs it,
+ * which is how `scanShellWriteScopes` decides which `cd` applies to it (#2050
+ * AC4). Internal: the public segment shape callers compare stays unchanged.
+ */
+interface ShellSegmentRange {
+	segment: ShellCommandSegment;
+	start: number;
+	end: number;
+}
+
 interface PendingHeredoc {
 	delimiter: string;
 	stripTabs: boolean;
@@ -193,7 +206,11 @@ function shellOperands(segment: ShellCommandSegment): ShellOperand[] {
 }
 
 export function tokenizeShellCommand(command: string): ShellCommandSegment[] {
-	const segments: ShellCommandSegment[] = [];
+	return tokenizeShellCommandWithRanges(command).map((entry) => entry.segment);
+}
+
+function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
+	const segments: ShellSegmentRange[] = [];
 	const pendingHeredocs: PendingHeredoc[] = [];
 	let tokens: string[] = [];
 	let word = "";
@@ -208,6 +225,7 @@ export function tokenizeShellCommand(command: string): ShellCommandSegment[] {
 	let escaped = false;
 	let unsupported = false;
 	let atTokenStart = true;
+	let segmentStart = 0;
 	const appendChar = (ch: string | undefined, quoted: boolean) => {
 		if (word === "") wordFirstCharQuoted = quoted;
 		word += ch ?? "";
@@ -221,19 +239,24 @@ export function tokenizeShellCommand(command: string): ShellCommandSegment[] {
 		wordFirstCharQuoted = false;
 		atTokenStart = true;
 	};
-	const flushSegment = (terminator?: "pipe") => {
+	const flushSegment = (terminator?: "pipe", end = command.length - 1) => {
 		flushWord();
 		if (tokens.length > 0 || unsupported)
 			segments.push({
-				tokens,
-				unsupported,
-				terminator,
-				...(quotedTilde.some(Boolean) ? { quotedTilde } : {}),
+				segment: {
+					tokens,
+					unsupported,
+					terminator,
+					...(quotedTilde.some(Boolean) ? { quotedTilde } : {}),
+				},
+				start: segmentStart,
+				end,
 			});
 		tokens = [];
 		quotedTilde = [];
 		unsupported = false;
 		atTokenStart = true;
+		segmentStart = end + 1;
 	};
 	for (let i = 0; i < command.length; i++) {
 		const ch = command[i];
@@ -297,11 +320,22 @@ export function tokenizeShellCommand(command: string): ShellCommandSegment[] {
 			flushWord();
 			if (ch === "\n" && pendingHeredocs.length > 0) {
 				const heredocs = pendingHeredocs.splice(0);
-				flushSegment();
+				flushSegment(undefined, i);
 				const consumed = consumeHeredocBodies(command, i + 1, heredocs);
+				// A substitution's own text is NOT a range of this command: offsets
+				// here are relative to the substituted body, so a redirect inside one
+				// is not attributed to any of the command's segments (`-1`) rather
+				// than to whichever `cd` its accidental offset lands near.
 				for (const substitution of consumed.substitutions)
-					segments.push(...tokenizeShellCommand(substitution));
+					segments.push(
+						...tokenizeShellCommandWithRanges(substitution).map((entry) => ({
+							...entry,
+							start: -1,
+							end: -1,
+						})),
+					);
 				i = consumed.end;
+				segmentStart = i + 1;
 				continue;
 			}
 			let terminator: "pipe" | undefined;
@@ -311,7 +345,7 @@ export function tokenizeShellCommand(command: string): ShellCommandSegment[] {
 				unsupported = true;
 				terminator = "pipe";
 			} else if (ch === "&") unsupported = true;
-			flushSegment(terminator);
+			flushSegment(terminator, i);
 			continue;
 		}
 		if (ch === "<" || ch === ">") {
@@ -423,9 +457,17 @@ function formatterFileArgs(
 	return files;
 }
 
-/** Find redirect targets without treating quoted `>` characters as syntax. */
-function extractRedirectTargets(command: string): string[] {
-	const targets: string[] = [];
+/**
+ * Find redirect targets without treating quoted `>` characters as syntax.
+ *
+ * Each target carries the offset it starts at, so the caller can attribute it
+ * to the simple command that runs it and resolve a relative target against the
+ * `cd` in effect for that segment (#2050 AC4).
+ */
+function extractRedirectTargets(
+	command: string,
+): Array<{ text: string; index: number }> {
+	const targets: Array<{ text: string; index: number }> = [];
 	let quote: "single" | "double" | undefined;
 	let escaped = false;
 	for (let i = 0; i < command.length; i += 1) {
@@ -469,7 +511,7 @@ function extractRedirectTargets(command: string): string[] {
 			}
 			target += next;
 		}
-		if (target) targets.push(target);
+		if (target) targets.push({ text: target, index: i - target.length });
 	}
 	return targets;
 }
@@ -932,42 +974,116 @@ export function extractGrepSearchReadsFromOutput(
 }
 
 /**
- * Extract files a bash command WROTE/created, so the read-guard can treat them
- * as authored by the agent (mirrors the Write tool). Handles:
+ * The file a `cd`/`pushd` operand names, or `undefined` when the operand cannot
+ * be known before the shell runs it (`$VAR`, a substitution, a glob, `-`, no
+ * operand). #2050 AC4: bash rewrites the working directory mid-command, so a
+ * relative operand after a `cd` belongs to the directory it entered, not to
+ * the directory the command started in. An unknown target leaves the effective
+ * directory unchanged — the pre-#2050 answer — rather than crediting the wrong
+ * one.
+ */
+function resolveCdOperand(
+	token: ShellOperand | undefined,
+	cwd: string,
+): string | undefined {
+	if (!token) return undefined;
+	const cleaned = stripQuotes(token.text);
+	if (!cleaned || cleaned.startsWith("-")) return undefined;
+	// Shell expansions the static parse cannot follow. A directory whose NAME
+	// contains one of these is rare; guessing would be the shape-74 defect this
+	// resolution exists to remove.
+	if (/[$`*?[]/.test(cleaned)) return undefined;
+	const operand =
+		cleaned.startsWith("~") && !token.quotedTilde
+			? normalizeHostToolPath(cleaned)
+			: cleaned.startsWith("\\~")
+				? cleaned.slice(1)
+				: cleaned;
+	return path.isAbsolute(operand) ? operand : path.resolve(cwd, operand);
+}
+
+/** What one bash command names: the files it writes, and the `cd` targets. */
+export interface ShellWriteScan {
+	/** Absolute paths the command writes or creates, in command order. */
+	written: string[];
+	/**
+	 * Absolute directories the command demonstrably enters (`cd`, `pushd`), in
+	 * command order. #2050: opaque recovery takes its baseline in each of these
+	 * that is a checkout of the session's own repository, so a write in a
+	 * linked worktree is recovered from THAT root.
+	 */
+	cdTargets: string[];
+}
+
+/**
+ * Parse a bash command for the files it WROTE/created, so the read-guard can
+ * treat them as authored by the agent (mirrors the Write tool), and for the
+ * directories it `cd`ed into. Handles:
  *   redirects: `> FILE`, `>> FILE`, `N> FILE`, `&> FILE` (with or without space)
  *   tee [-a] FILE..., sed -i ... FILE, cp/mv/install ... DEST, touch FILE...,
  *   and common in-place formatter/fixer invocations with explicit file targets.
  *
+ * Every operand resolves against the working directory in effect for ITS
+ * segment, so `cd <dir> && echo x > f.ts` names `<dir>/f.ts` (#2050 AC4).
+ *
  * Returns absolute paths. The file need not exist yet (it may be created) —
  * existence is confirmed later by recordWritten at tool_result time.
  */
-export function extractWrittenPathsFromCommand(
+export function scanShellWriteScopes(
 	command: string,
 	cwd: string,
-): string[] {
+): ShellWriteScan {
 	const out = new Set<string>();
+	const cdTargets: string[] = [];
+	const seenCdTargets = new Set<string>();
+	// The working directory in effect for the segment being read, which a `cd`
+	// or `pushd` in an earlier segment moves.
+	let effectiveCwd = cwd;
 	const add = (token: ShellOperand) => {
-		const abs = resolveCandidate(token, cwd);
+		const abs = resolveCandidate(token, effectiveCwd);
 		if (abs) out.add(abs);
 	};
 
-	for (const segment of tokenizeShellCommand(command)) {
-		if (segment.tokens.length === 0) continue;
-
-		// Redirect targets are collected by a quote-aware scanner. The shared
-		// tokenizer supplies the normalized command arguments; it deliberately
-		// does not expose shell redirection operators as arguments.
-		for (const target of extractRedirectTargets(command))
-			add({ text: target, quotedTilde: /^['"]/.test(target) });
-		// A command may contain multiple segments; only the first pass should
-		// attach redirects, otherwise targets would be duplicated harmlessly but
-		// needlessly rescanned.
-		break;
-	}
-	for (const segment of tokenizeShellCommand(command)) {
+	// Redirect targets are collected by a quote-aware scanner. The shared
+	// tokenizer supplies the normalized command arguments; it deliberately does
+	// not expose shell redirection operators as arguments. Each target is
+	// attributed to the segment whose range holds it, then resolved against the
+	// `cd` in effect there. A substitution's own segments carry `end: -1` (its
+	// offsets are relative to the substituted body), so a `>` inside a heredoc
+	// body is not credited to this command at all.
+	const redirects = extractRedirectTargets(command);
+	let redirectCursor = 0;
+	for (const { segment, end: segmentEnd } of tokenizeShellCommandWithRanges(
+		command,
+	)) {
+		if (segmentEnd >= 0) {
+			for (; redirectCursor < redirects.length; redirectCursor += 1) {
+				const redirect = redirects[redirectCursor];
+				if (!redirect || redirect.index > segmentEnd) break;
+				add({
+					text: redirect.text,
+					quotedTilde: /^['"]/.test(redirect.text),
+				});
+			}
+		}
 		const tokens = shellOperands(segment);
 		if (tokens.length === 0) continue;
 		const { verb, args } = unwrapCommand(tokens);
+
+		if (verb === "cd" || verb === "pushd") {
+			const target = resolveCdOperand(
+				args.find((arg) => !arg.text.startsWith("-")),
+				effectiveCwd,
+			);
+			if (target) {
+				if (!seenCdTargets.has(target)) {
+					seenCdTargets.add(target);
+					cdTargets.push(target);
+				}
+				effectiveCwd = target;
+			}
+			continue;
+		}
 
 		if (verb === "tee" || verb === "touch") {
 			for (const a of args) if (!a.text.startsWith("-")) add(a);
@@ -1111,7 +1227,18 @@ export function extractWrittenPathsFromCommand(
 		}
 	}
 
-	return Array.from(out);
+	return { written: Array.from(out), cdTargets };
+}
+
+/**
+ * The files a bash command WROTE/created. Thin reading of
+ * {@link scanShellWriteScopes}, which is the one place the command is walked.
+ */
+export function extractWrittenPathsFromCommand(
+	command: string,
+	cwd: string,
+): string[] {
+	return scanShellWriteScopes(command, cwd).written;
 }
 
 /**

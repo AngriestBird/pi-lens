@@ -326,7 +326,12 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/mcp/session.ts": 4,
 		"clients/metrics-client.ts": 7,
 		"clients/observed-mutation.ts": 7,
-		"clients/runtime-tool-call.ts": 12,
+		// 12 -> 11 (#2050): the prescan's `let baseline` local moved into
+		// `captureOpaqueBaseline`'s returned `state`, so one identifier use is
+		// gone. Every remaining use is the pending opaque baseline, which the
+		// glossary does not retire (it retires `baseline` where a freshness
+		// reference is meant).
+		"clients/runtime-tool-call.ts": 11,
 		"clients/sgconfig.ts": 6,
 		"clients/widget-state.ts": 2,
 	},
@@ -886,7 +891,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// host-argument stages a shell word never sees.
 		// 10 -> 9 (#4577 R4): an absolute operand keeps the spelling the command
 		// carried, so the re-resolving `path.resolve(operand)` is gone.
-		"clients/bash-file-access.ts": 9,
+		// 9 -> 11 (#2050): `resolveCdOperand` follows the same shell rules for a
+		// `cd` target (its own `normalizeHostToolPath` branch and its
+		// `path.isAbsolute` / `path.resolve` pair), so a relative write operand
+		// after `cd` lands in that directory.
+		"clients/bash-file-access.ts": 11,
 		// 10 -> 7 (#4268): the hand-built `path.join` candidate list folds onto the
 		// shared `findLocalBinAt` trust seam, one construction site for the shim.
 		"clients/biome-client.ts": 7,
@@ -1109,7 +1118,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// the discard baseline names both sides of the entry.
 		// 11 -> 9 (#4508): the walk in resolveGitCheckout skips a HEAD-less
 		// `.git`, so gitPathBase no longer joins the `.git` entry and its HEAD.
-		"clients/opaque-mutation-scan.ts": 9,
+		// 9 -> 12 (#2050): resolveOpaqueRecoveryRoots resolves each candidate
+		// (a `cd` target, and a recognised write's `path.dirname`) before asking
+		// which checkout owns it, and keys the admission set on the resolved root.
+		"clients/opaque-mutation-scan.ts": 12,
 		"clients/opengrep-client.ts": 8,
 		"clients/opengrep-config.ts": 3,
 		// 21 -> 23 (#4515 r2): commandSearchReachesProject splits PATH on
