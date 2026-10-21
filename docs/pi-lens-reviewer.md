@@ -124,6 +124,11 @@ real seam. Check that every gate the diff adds is exercised through that path.
   *follow-up issue* (p2 or higher only, with its seam group), or *stay
   specific* (with the reason). A missing verdict is a finding (#3622; the
   optional ast-grep assist is #3684).
+- **A new test's layer.** A host-semantics case belongs on tier 2
+  (`tests/support/pi-session.ts`), a JSON-lines sink on `readNdjsonRows`
+  (`tests/support/ndjson-rows.ts`), and a mock only at a process or host
+  boundary; a fake of an in-process store is a finding. `AGENTS.md`
+  "Test requirements" holds the detail.
 - Review the pre-push self-scan with `npm run astgrep:self-scan`; `pr-preflight`
   runs the same gate after its build.
 - Require the exact-pin rule in `docs/pi-lens-subagent.md` on the MERGE of

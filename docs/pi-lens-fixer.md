@@ -14,6 +14,12 @@ Before mocking a `clients/` module, look for its test seam (`set*`, `adopt*`, or
 `reset*`). The pre-flight must list the mock dependents of any module whose
 exports change.
 
+A new test starts from `tests/support/`: a host-semantics case goes through
+tier 2 (`tests/support/pi-session.ts`), a JSON-lines sink through
+`readNdjsonRows` (`tests/support/ndjson-rows.ts`), and a mock sits only at a
+process or host boundary, never as a fake of an in-process store. `AGENTS.md`
+"Test requirements" holds the detail.
+
 - Trace the production entry point and reproduce the defect through it
   (principles §1, "Premise first"). Name no seam before the reproduction; the
   red reproduction is your feedback loop, built before any theory of the fix.
