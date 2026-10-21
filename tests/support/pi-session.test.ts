@@ -234,6 +234,34 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 		}
 	});
 
+	// #4724: pi read the real `$HOME/.agents/skills`, so a host's skills reached
+	// every request and a prefix-ratio verdict differed between hosts.
+	it("keeps the host's own skills out of the session's system prompt", async () => {
+		const home = path.join(fixture.root, "host-home");
+		const skill = path.join(home, ".agents", "skills", "host-only-probe");
+		fs.mkdirSync(skill, { recursive: true });
+		fs.writeFileSync(
+			path.join(skill, "SKILL.md"),
+			"---\nname: host-only-probe\ndescription: A skill only this host has.\n---\n\nBody.\n",
+		);
+		const previousHome = process.env.HOME;
+		process.env.HOME = home;
+		try {
+			const handle = await startPiSession({
+				root: fixture.root,
+				cwd: path.join(fixture.root, "host-skills", "proj"),
+				responses: [fauxAssistantMessage(fauxText("ok"))],
+			});
+			await handle.prompt("hello");
+			const system = handle.requests[0]?.[0];
+			expect(system).toMatchObject({ role: "system" });
+			expect(JSON.stringify(system)).not.toContain("host-only-probe");
+		} finally {
+			if (previousHome === undefined) delete process.env.HOME;
+			else process.env.HOME = previousHome;
+		}
+	});
+
 	it("refuses a manual compaction the fixture transcript is too small for", async () => {
 		const handle = await startPiSession({
 			root: fixture.root,
