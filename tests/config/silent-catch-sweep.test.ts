@@ -88,6 +88,7 @@ import {
 	type CatchSite,
 	scanSilentCatches,
 } from "../support/silent-catch-scan.js";
+import { currentPeakRssMb, reportPeakRss } from "../support/worker-peak-rss.js";
 
 const REPO_ROOT = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -1582,9 +1583,20 @@ describe("silent-catch sweep", () => {
 	// per file the peak is ~340 MB. This ceiling is the issue's acceptance bar
 	// and sits 1,000 MB above the fixed peak, below the first red, so growth
 	// of the source cannot walk the sweep back to the budget unseen.
+	// The ceiling check belongs to the peak-RSS seam, which enforces on linux
+	// only (darwin's `ru_maxrss` is bytes): this case asks it instead of
+	// dividing `maxRSS` itself.
 	it("holds the walk's peak RSS under 1,600 MB (#4736)", () => {
-		const peakMb = process.resourceUsage().maxRSS / 1024;
-		expect(Math.round(peakMb)).toBeLessThan(1600);
+		expect(() =>
+			reportPeakRss({
+				file: "tests/config/silent-catch-sweep.test.ts",
+				peakRssMb: currentPeakRssMb(),
+				heapUsedMb: 0,
+				externalMb: 0,
+				write: () => {},
+				ceilingMb: 1600,
+			}),
+		).not.toThrow();
 	});
 
 	it("pins existing unresolved delegations and refuses every new one", () => {
