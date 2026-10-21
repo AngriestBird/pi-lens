@@ -106,17 +106,34 @@ let recordWriteWarningEmitted = false;
 // in 64.91s through this hook on 2026-09-26 (#3492's range, capped selection).
 // After #3472 widened the census, all 24 registry suites across both lists ran
 // in 23.65s as one `vitest run` at 6 workers (2026-10-03).
-// Suites over the budget on their own
-// move to CI_ONLY_PRE_PUSH_TESTS below.
+// Suites over the budget on their own, or together in a serialized lane, move
+// to CI_ONLY_PRE_PUSH_TESTS below.
 
-// Suites measured to exceed the documented pre-push budget on their own, so
-// they are excluded from the local pre-push selection and run in CI instead
+// Suites measured to exceed the documented pre-push budget on their own, or
+// armed together in a `maxWorkers: 1` lane whose phase does (#4724), so they
+// are excluded from the local pre-push selection and run in CI instead
 // (#3426 H3432-1). Never a blanket skip: each entry carries a reason and a CI
 // row, and `--include-ci-only` admits them in the CI job that owns them. The
 // governance suite pins this table, the exclusion, and the CI invocation.
+const REAL_HARNESS_CI_ONLY =
+	"real pi sessions in the serialized real-harness lane (maxWorkers 1, its own phase), and any tests/ change arms all 12 registered suites: 105 s of CI time together (scripts/test-shard-weights.json), and 117 s locally with the route matrix on 2026-10-21, the whole 120s pre-push budget (#4724). Runs in the Targeted tests (advisory) CI job via --include-ci-only and in the gating Unit tests job.";
 export const CI_ONLY_PRE_PUSH_TESTS = {
 	"tests/scripts/guard-bash-hook.test.ts":
 		"spawns ~1,270 real hook child processes: the transcript corpus alone measured 169s and the file measured 211s end to end, over the 120s pre-push budget. Runs in the Targeted tests (advisory) CI job via --include-ci-only and in the gating Unit tests job.",
+	"tests/tools/diagnostics-route-switch-matrix.test.ts":
+		"real LSP handshakes in the serialized lsp-spawn-heavy lane (maxWorkers 1, its own phase), and any production change arms it: 60 s of CI time (scripts/test-shard-weights.json) and 50 s locally alone on 2026-10-21 (#4724). Runs in the Targeted tests (advisory) CI job via --include-ci-only and in the gating Unit tests job.",
+	"tests/real-harness/bridge-reload-ts.test.ts": REAL_HARNESS_CI_ONLY,
+	"tests/real-harness/bridge-reload.test.ts": REAL_HARNESS_CI_ONLY,
+	"tests/real-harness/child-exit.test.ts": REAL_HARNESS_CI_ONLY,
+	"tests/real-harness/diagnostic-provenance.test.ts": REAL_HARNESS_CI_ONLY,
+	"tests/real-harness/lifecycle.test.ts": REAL_HARNESS_CI_ONLY,
+	"tests/real-harness/negative.test.ts": REAL_HARNESS_CI_ONLY,
+	"tests/real-harness/provider-compatibility.test.ts": REAL_HARNESS_CI_ONLY,
+	"tests/real-harness/read-guard-moves.test.ts": REAL_HARNESS_CI_ONLY,
+	"tests/real-harness/scenario-1.test.ts": REAL_HARNESS_CI_ONLY,
+	"tests/real-harness/scenario-2.test.ts": REAL_HARNESS_CI_ONLY,
+	"tests/real-harness/scenario-3.test.ts": REAL_HARNESS_CI_ONLY,
+	"tests/real-harness/tools-enabled.test.ts": REAL_HARNESS_CI_ONLY,
 };
 
 // Tree scanners do not import the changed module, so path mirroring and
@@ -303,7 +320,26 @@ function readStdin() {
 	}
 }
 
-export function resolveDiffRange(input = readStdin()) {
+// A fork's origin/master can lag the upstream/master a branch merged (#4724),
+// so the base is upstream/master when it has commits origin/master lacks.
+// Exit 128 (no upstream remote, as in CI) keeps origin/master.
+export function resolveBaseRef() {
+	try {
+		execFileSync(
+			"git",
+			["merge-base", "--is-ancestor", "upstream/master", "origin/master"],
+			{ stdio: "ignore" },
+		);
+		return "origin/master";
+	} catch (error) {
+		return error?.status === 1 ? "upstream/master" : "origin/master";
+	}
+}
+
+// Every pushed ref diffs against the base branch, the PR diff CI's targeted
+// job selects. The remote tip would count a merged-in master's files as the
+// branch's own: #4557's master merge selected 366 test files for 11 (#4724).
+export function resolveDiffRange(input = readStdin(), base = "origin/master") {
 	const lines = input
 		.trim()
 		.split(/\r?\n/)
@@ -315,26 +351,18 @@ export function resolveDiffRange(input = readStdin()) {
 			const parts = line.split(/\s+/);
 			const [, localSha, , remoteSha] = parts;
 			if (!localSha || !remoteSha) {
-				return ["origin/master...HEAD"];
+				return [`${base}...HEAD`];
 			}
 			// A zero local sha is a branch deletion. It has no changed files and
 			// must not trigger a build or a failed `git diff` (#3661).
 			if (/^0+$/.test(localSha)) continue;
-			if (/^0+$/.test(remoteSha)) {
-				// New branch (no remote tracking ref yet): retain the baseline
-				// used by CI, while continuing to retain other pushed updates.
-				if (!ranges.includes("origin/master...HEAD"))
-					ranges.push("origin/master...HEAD");
-				continue;
-			}
-			const range = `${remoteSha}...${localSha}`;
+			const range = `${base}...${localSha}`;
 			if (!ranges.includes(range)) ranges.push(range);
 		}
 		return ranges.length > 0 ? ranges : null;
 	}
-	// New branch (no remote tracking ref yet) or unreadable stdin: diff
-	// against origin/master, same baseline CI compares PRs against.
-	return ["origin/master...HEAD"];
+	// Unreadable stdin: diff HEAD against the base, as CI does.
+	return [`${base}...HEAD`];
 }
 
 /**
@@ -686,6 +714,29 @@ export function parseVitestCounts(output) {
 	};
 }
 
+// Every pushed head already passed this exact selection, so the run would
+// repeat it (#4724: an SSH drop after a green hook re-ran it on one head).
+function alreadyPassed(heads, selected) {
+	if (heads.length === 0) return false;
+	let commonDir;
+	try {
+		commonDir = gitCommonDir();
+	} catch {
+		return false;
+	}
+	const want = [...selected].sort().join("\n");
+	return heads.every(({ head }) => {
+		const record = readPrePushRecord(commonDir, head);
+		return (
+			record?.outcome === "tests-complete" &&
+			record.selected
+				.map(({ file }) => file)
+				.sort()
+				.join("\n") === want
+		);
+	});
+}
+
 function writeHeadRecords(heads, values) {
 	if (heads.length === 0) return;
 	try {
@@ -798,7 +849,7 @@ function runTargetedTests(selected) {
 export async function main() {
 	const input = readStdin();
 	const heads = pushHeads(input);
-	const ranges = resolveDiffRange(input);
+	const ranges = resolveDiffRange(input, resolveBaseRef());
 	if (ranges === null) {
 		console.log("[pre-push] deletion-only push; skipping build and tests.");
 		return 0;
@@ -877,6 +928,13 @@ export async function main() {
 			console.warn(
 				`[pre-push] selection too broad (${totalBeforeCap} test files matched ${changed.length} changed file(s), over the ${MAX_SELECTED_TESTS}-file cap); ${describeCappedKeep(selectionReasons, selected)}; rely on CI for the rest.`,
 			);
+	}
+
+	if (alreadyPassed(heads, selected)) {
+		console.log(
+			`[pre-push] ${heads.map(({ head }) => head.slice(0, 9)).join(", ")} already passed these ${selected.length} test file(s); skipping build and tests.`,
+		);
+		return 0;
 	}
 
 	// The record exists before any build/self-scan work can fail. A later write
