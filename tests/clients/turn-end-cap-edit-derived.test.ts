@@ -19,14 +19,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { beginScope } from "../../clients/session-scope.js";
-import { makeLspServiceDouble } from "../support/lsp-service-double.js";
-
-vi.mock("../../clients/lsp/capabilities.js", async (importOriginal) => ({
-	...(await importOriginal<
-		typeof import("../../clients/lsp/capabilities.js")
-	>()),
-	getLSPService: () => makeLspServiceDouble({}),
-}));
+import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 
 const logLatency = vi.hoisted(() => vi.fn());
 vi.mock("../../clients/latency-logger.js", async (importOriginal) => {
@@ -238,7 +231,8 @@ function ledgerCount(kind: string): number {
 		.reduce((sum, entry) => sum + entry.count, 0);
 }
 
-beforeEach(() => {
+beforeEach(async () => {
+	await installLspServiceDouble();
 	_resetStateCacheForTests();
 	resetDegradationLedger();
 	resetBoundedTelemetry();

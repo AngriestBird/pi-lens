@@ -28,20 +28,11 @@ import {
 } from "../../clients/runtime-coordinator.js";
 import { handleToolCall } from "../../clients/runtime-tool-call.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
-import { makeLspServiceDouble } from "../support/lsp-service-double.js";
+import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 import { matchingCloseIndex } from "../support/sweep-kit.js";
 import { runHandlerExpectingNoThrow } from "../support/handler-verdict.js";
 
 const touchFileMock = vi.fn().mockResolvedValue(undefined);
-vi.mock("../../clients/lsp/capabilities.js", () => ({
-	getLSPService: () =>
-		makeLspServiceDouble({
-			touchFile: touchFileMock,
-			getWarmClientForFile: vi.fn().mockResolvedValue(undefined),
-		}),
-	resetLSPService: () => {},
-}));
-
 vi.mock("../../clients/bootstrap.js", async () => {
 	const { bootstrapSeamMock } = await import("../support/bootstrap-mock.js");
 	return bootstrapSeamMock(async () => ({
@@ -110,7 +101,11 @@ function baseDeps(
 	} as Parameters<typeof handleToolCall>[0];
 }
 
-beforeEach(() => {
+beforeEach(async () => {
+	await installLspServiceDouble({
+		touchFile: touchFileMock,
+		getWarmClientForFile: vi.fn().mockResolvedValue(undefined),
+	});
 	resetDegradationLedger();
 	readGuardLogEntries.length = 0;
 	touchFileMock.mockClear();

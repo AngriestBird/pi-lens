@@ -14,7 +14,7 @@
 import { withResidentBootstrap } from "../support/bootstrap-access.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LatencyEntry } from "../../clients/latency-logger.js";
-import { makeLspServiceDouble } from "../support/lsp-service-double.js";
+import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 
 const latencyEntries = vi.hoisted(() => [] as LatencyEntry[]);
 
@@ -27,10 +27,6 @@ vi.mock("../../clients/lsp/config.js", () => ({
 	loadLSPConfig: vi.fn().mockResolvedValue({}),
 	initLSPConfig: vi.fn().mockResolvedValue(undefined),
 	getServerInitOverride: vi.fn().mockReturnValue(undefined),
-}));
-
-vi.mock("../../clients/lsp/capabilities.js", () => ({
-	getLSPService: vi.fn(() => makeLspServiceDouble()),
 }));
 
 vi.mock("../../clients/safe-spawn.js", () => ({
@@ -139,7 +135,8 @@ describe("quick-mode session_start skip observability (#1911)", () => {
 	let tmpDir: string;
 	let restoreStartupMode: () => void;
 
-	beforeEach(() => {
+	beforeEach(async () => {
+		await installLspServiceDouble();
 		vi.clearAllMocks();
 		latencyEntries.length = 0;
 		tmpDir = setupTestEnvironment("pi-lens-quick-mode-obs-").tmpDir;
