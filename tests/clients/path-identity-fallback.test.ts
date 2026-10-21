@@ -19,12 +19,15 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	getDegradationSummary,
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
-import { normalizeMapKey } from "../../clients/path-utils.js";
+import {
+	getPathIdentityFallbacks,
+	normalizeMapKey,
+} from "../../clients/path-utils.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
 function posixOnly(ctx: { skip: (note?: string) => void }): void {
@@ -87,6 +90,34 @@ describe("path identity fallback record (#4689)", () => {
 		const under = path.join(file, "x.ts");
 		expect(normalizeMapKey(under)).toBe(under.replace(/\\/g, "/"));
 		expect(fallbackGroup()).toBeUndefined();
+	});
+
+	it("keeps at most 16 errno rows however many distinct codes the kernel answers", (ctx) => {
+		// RECURRENCE GUARDED: review r1 F6 (B1). The tally is keyed by a value
+		// the kernel chooses; its cap survived a mutation because no test
+		// offered more codes than it holds, so an unbounded tally would ship
+		// green. Synthetic codes stand in for errnos no fixture can provoke.
+		posixOnly(ctx);
+		const root = fs.realpathSync.native(env.tmpDir);
+		const actual = fs.realpathSync.native;
+		const native = vi
+			.spyOn(fs.realpathSync, "native")
+			.mockImplementation((value, options) => {
+				const code = /\/(E\d+)(\/|$)/.exec(String(value))?.[1];
+				if (code === undefined) return actual(value, options);
+				throw Object.assign(new Error(code), { code });
+			});
+		try {
+			for (let i = 0; i < 20; i++)
+				normalizeMapKey(path.join(root, `E${i}`, "x.ts"));
+		} finally {
+			native.mockRestore();
+		}
+		const codes = getPathIdentityFallbacks().map((row) => row.code);
+		expect(codes).toHaveLength(16);
+		// The newest codes are kept; the oldest are evicted first.
+		expect(codes).toContain("E19");
+		expect(codes).not.toContain("E0");
 	});
 
 	it("re-arms with the ledger at a session boundary", (ctx) => {
