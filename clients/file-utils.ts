@@ -32,6 +32,7 @@ import {
 	toProjectRelativePath,
 } from "./path-utils.js";
 import { STAGE_TMP_PATTERN, stagePathFor } from "./atomic-write-staging.js";
+import { writeFileAtomic } from "./atomic-write.js";
 import {
 	findPiLensConfigInDir,
 	findPiLensProjectConfig,
@@ -169,7 +170,7 @@ function adoptSpelledDataDir(
 function markAdopted(marker: string): boolean {
 	try {
 		fs.mkdirSync(path.dirname(marker), { recursive: true });
-		fs.writeFileSync(marker, "");
+		writeFileAtomic(marker, "", { bestEffort: false });
 		return true;
 	} catch {
 		// none: the caller records it as adopt-failed; the next start walks again.

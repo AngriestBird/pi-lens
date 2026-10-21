@@ -674,30 +674,33 @@ describe("adopting the data dir a link spelling named (#4689 round 4)", () => {
 		// RECURRENCE GUARDED: the r5 marker. Without a marker every start walks
 		// again and can undo a deletion, so a marker that cannot be written is
 		// reported instead of passing as "adopted".
+		if (process.getuid?.() === 0)
+			return ctx.skip("root writes through a read-only directory");
 		const fx = aliasRoot("pi-lens-adopt-unmarked-");
 		if (!fx) return ctx.skip("the win32 name never moved");
 		const dir = getProjectDataDir(fs.realpathSync.native(fx.alias));
 		// Every file is already there, so only the marker is left to fail.
 		fs.cpSync(ALIAS_SESSION_444, dir, { recursive: true });
-		// A dangling link through a missing directory: `existsSync` says no
-		// marker, and writing through it fails.
-		fs.symlinkSync(
-			path.join(fx.base, "missing", "marker"),
-			path.join(dir, `.adopted-${path.basename(fx.spelled)}`),
-		);
-		_resetProjectDataDirMemoForTests();
+		// A directory nobody may write: no marker, and none can be staged there.
+		// The files live in `cache/`, which stays writable.
+		fs.chmodSync(dir, 0o555);
+		try {
+			_resetProjectDataDirMemoForTests();
 
-		getProjectDataDir(fx.alias);
+			getProjectDataDir(fx.alias);
 
-		expect(drainProjectDataDirMigrations()).toEqual([
-			{ to: dir, outcome: "adopt-failed" },
-		]);
-		// No marker, so the next process walks again and says so again.
-		_resetProjectDataDirMemoForTests();
-		getProjectDataDir(fx.alias);
-		expect(drainProjectDataDirMigrations()).toEqual([
-			{ to: dir, outcome: "adopt-failed" },
-		]);
+			expect(drainProjectDataDirMigrations()).toEqual([
+				{ to: dir, outcome: "adopt-failed" },
+			]);
+			// No marker, so the next process walks again and says so again.
+			_resetProjectDataDirMemoForTests();
+			getProjectDataDir(fx.alias);
+			expect(drainProjectDataDirMigrations()).toEqual([
+				{ to: dir, outcome: "adopt-failed" },
+			]);
+		} finally {
+			fs.chmodSync(dir, 0o755);
+		}
 	});
 
 	it("keeps a record a store deleted after adoption deleted in the next process, and the commit gate allows the commit", (ctx) => {
