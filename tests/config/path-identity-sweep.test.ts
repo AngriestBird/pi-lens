@@ -34,10 +34,10 @@
  * - a `path.relative` / `path.join` key, or a `path.resolve` key wrapped in
  *   any call that is not identity (a wrapper is judged as deciding the key).
  *
- * Scope: `clients/**` without tests; `clients/path-utils.ts` is the seam and
- * is not scanned. `tools/`, `mcp/` and `index.ts` are not in this sweep's
- * scope yet; the `tools/lens-diagnostics.ts` realpath bridge is named in the
- * #4689 item 3 slice, which deletes it.
+ * Scope: the shipped runtime, `clients/`, `tools/`, `mcp/` and `index.ts`,
+ * without tests; `clients/path-utils.ts` is the seam and is not scanned.
+ * `scripts/` is the repo's own tooling (git hooks, release QA, main-module
+ * detection) and holds no runtime key, so it is out of scope by decision.
  */
 
 import { createHash } from "node:crypto";
@@ -58,6 +58,9 @@ const REPO_ROOT = path.resolve(
 	"../..",
 );
 const SEAM = "clients/path-utils.ts";
+
+/** The shipped runtime: the trees the class sweep covers, plus `index.ts`. */
+const SCANNED_TREES = ["clients", "tools", "mcp"] as const;
 
 /**
  * Why a pinned row's sites are not identity derivations owed to the seam
@@ -320,6 +323,21 @@ const PINS: Readonly<Record<string, Pin>> = {
 		identities: "be15a50cc4c533ac",
 		reason: SPELLING_MEMO,
 	}, // :219, :267, :272
+	"tools/lens-diagnostics.ts#path-resolve-keyed": {
+		sites: 9,
+		identities: "88eb117a49e95f43",
+		reason: PRE_4689,
+	}, // :855, :857, :2049, :2063, :2606, :2608, :2618, :2684, :2783
+	"mcp/server.ts#path-resolve-keyed": {
+		sites: 1,
+		identities: "95f9ef6922e0457e",
+		reason: SPELLING_MEMO,
+	}, // :243
+	"index.ts#path-resolve-keyed": {
+		sites: 1,
+		identities: "66db1fe5f84f9efe",
+		reason: SPELLING_MEMO,
+	}, // :696
 };
 
 interface Occurrence {
@@ -329,9 +347,12 @@ interface Occurrence {
 }
 
 function census(): { scanned: number; occurrences: Occurrence[] } {
-	const files = listSourceFiles(path.join(REPO_ROOT, "clients"), {
-		skipTests: true,
-	});
+	const files = [
+		...SCANNED_TREES.flatMap((tree) =>
+			listSourceFiles(path.join(REPO_ROOT, tree), { skipTests: true }),
+		),
+		path.join(REPO_ROOT, "index.ts"),
+	];
 	const occurrences: Occurrence[] = [];
 	let scanned = 0;
 	for (const file of files) {
@@ -418,13 +439,14 @@ describe("path identity sweep (#4689)", () => {
 	}
 
 	it("registers every raw realpath and raw path.resolve key outside the seam", () => {
-		// Calibration on the authoring head: 574 production files under
-		// clients/ (seam excluded); half rounds to 280. The live populations
-		// are 31 raw-realpath and 147 path-resolve-keyed sites, floored at 5.
+		// Calibration on the authoring head: 530 runtime files under clients/,
+		// tools/ and mcp/ plus index.ts (seam excluded); half is 265. The live
+		// populations are 31 raw-realpath and 158 path-resolve-keyed sites,
+		// floored at 5.
 		assertNonEmptyScan(
-			"path identity sweep: clients files scanned",
+			"path identity sweep: runtime files scanned",
 			scanned,
-			280,
+			265,
 		);
 		for (const needle of ["raw-realpath", "path-resolve-keyed"] as const)
 			assertNonEmptyScan(
