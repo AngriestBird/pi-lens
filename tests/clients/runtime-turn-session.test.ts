@@ -1483,7 +1483,7 @@ describe("context injection framing", () => {
 			"Key tools (see each tool's own description for args):\n" +
 			"• lens_diagnostics — source=session reads cache; empty cache ≠ clean; use source=lsp scope=paths for changed files with absent or stale findings (aggregate hosts: lens(action=diagnostics)).\n" +
 			"• symbol_search → module_report → read_symbol/read_enclosing — ranked identifier search, then navigable outline/callback handles + exact body reads; cheaper than reading a whole file before editing.\n" +
-			"• Situational (activate via pi_lens_activate_tools): lsp_navigation, ast_grep_search, ast_grep_replace. Use ast_grep_search with dump=true to inspect AST nodes.";
+			"• Situational (activate via pi_lens_activate_tools if unlisted): lsp_navigation, ast_grep_search, ast_grep_replace. Use ast_grep_search dump=true to inspect AST.";
 		expect(SESSION_START_GUIDANCE).toEqual([expected]);
 		expect(renderSessionStartGuidance()).toEqual([expected]);
 	});

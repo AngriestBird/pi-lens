@@ -88,6 +88,7 @@ import {
 	type CatchSite,
 	scanSilentCatches,
 } from "../support/silent-catch-scan.js";
+import { currentPeakRssMb, reportPeakRss } from "../support/worker-peak-rss.js";
 
 const REPO_ROOT = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -152,10 +153,10 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 		reason: PRE_RULE,
 	}, // :427, :431, :615
 	"clients/analysis-root.ts": {
-		silent: 2,
-		identities: "1ba786260b8caf72",
+		silent: 1,
+		identities: "7b52b635719a3045",
 		reason: PRE_RULE,
-	}, // :43, :67
+	}, // :50 (2 -> 1, #4689: `realPathOrResolved` folded onto path-utils)
 	"clients/ast-grep-client.ts": {
 		silent: 5,
 		identities: "e0171caad3e9bf11",
@@ -557,11 +558,6 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 		identities: "d8fb5fd4d9ec3e87",
 		reason: PRE_RULE,
 	}, // :49, :103
-	"clients/ephemeral-root.ts": {
-		silent: 1,
-		identities: "e6a61419909e565c",
-		reason: PRE_RULE,
-	}, // :43
 	"clients/event-loop-hold.ts": {
 		silent: 2,
 		identities: "255f028624add8ac",
@@ -589,9 +585,9 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 	}, // :148, :202
 	"clients/file-utils.ts": {
 		silent: 11,
-		identities: "282279822595e8b0",
+		identities: "0cb7a41f4e5a5a7a",
 		reason: PRE_RULE,
-	}, // :141, :161, :179, :183, :186, :228, :299, :725, :1085, :1366, :1397
+	}, // :265, :285, :303, :307, :310, :362, :437, :863, :1223, :1504, :1535 (#4689 r4: dataDirCanonicalRoot's realpath-probe arm now returns the identity root; the adoption's handlers declare their none)
 	"clients/fix-run-restore.ts": {
 		silent: 10,
 		identities: "24b4689d533166d4",
@@ -948,10 +944,10 @@ const BASELINE: Readonly<Record<string, Admission>> = {
 		reason: PRE_RULE,
 	}, // :97
 	"clients/path-utils.ts": {
-		silent: 9,
-		identities: "9bb4a21080715db3",
+		silent: 8,
+		identities: "a67f7f2c5485dc04",
 		reason: PRE_RULE,
-	}, // :286, :297, :303, :316, :410, :433, :702, :1215, :1471
+	}, // :300, :311, :317, :468, :491, :760, :1283, :1539 (9 -> 8, #4689: the identity walk's catch is a `none:` line)
 	"clients/performance-report.ts": {
 		silent: 3,
 		identities: "9285fe879a302231",
@@ -1395,7 +1391,7 @@ interface Census {
 	scannedFiles: number;
 }
 
-function scanShippedTrees(): Census {
+async function scanShippedTrees(): Promise<Census> {
 	const files = [
 		...SHIPPED_TREES.flatMap((dir) =>
 			listSourceFiles(path.join(REPO_ROOT, dir), { skipTests: true }),
@@ -1429,11 +1425,19 @@ function scanShippedTrees(): Census {
 				census.byFile.set(rel, sites);
 			}
 		}
+		// #4736: turn the event loop between files. `@ast-grep/napi` frees a
+		// dropped tree's native arena from a finalizer that only runs once the
+		// loop turns, so the synchronous walk held every one of the ~530 parsed
+		// trees at once (1,902 MB peak RSS against 44 MB of V8 heap, 4% under
+		// the #3058 budget). One turn per file brings the peak to ~340 MB with
+		// the same finding list (the same fix `vi-mock-export-sweep.test.ts`
+		// and `flake-shape-scan.ts` took, #3565).
+		await new Promise<void>((resolve) => setImmediate(resolve));
 	}
 	return census;
 }
 
-const census = scanShippedTrees();
+const census = await scanShippedTrees();
 const printPins = process.env.PI_LENS_PRINT_PINS === "1";
 
 function sortedByFile<T>(entries: Iterable<[string, T]>): Array<[string, T]> {
@@ -1570,6 +1574,29 @@ const ADMITTED: Admission = admitted();
 describe("silent-catch sweep", () => {
 	it("scans the shipped trees", () => {
 		assertNonEmptyScan("silent-catch sweep", census.scannedFiles, 300);
+	});
+
+	// Recurrence (#4736): the walk parsed ~530 files in one synchronous loop, so
+	// `@ast-grep/napi` kept every native tree until the file ended and the
+	// worker peaked at 1,902 MB, 4% under the 2,048 MB budget (#3058); +0.34% of
+	// source (#4713) crossed it and redded Unit shard 2/5. With the loop turned
+	// per file the peak is ~340 MB. This ceiling is the issue's acceptance bar
+	// and sits 1,000 MB above the fixed peak, below the first red, so growth
+	// of the source cannot walk the sweep back to the budget unseen.
+	// The ceiling check belongs to the peak-RSS seam, which enforces on linux
+	// only (darwin's `ru_maxrss` is bytes): this case asks it instead of
+	// dividing `maxRSS` itself.
+	it("holds the walk's peak RSS under 1,600 MB (#4736)", () => {
+		expect(() =>
+			reportPeakRss({
+				file: "tests/config/silent-catch-sweep.test.ts",
+				peakRssMb: currentPeakRssMb(),
+				heapUsedMb: 0,
+				externalMb: 0,
+				write: () => {},
+				ceilingMb: 1600,
+			}),
+		).not.toThrow();
 	});
 
 	it("pins existing unresolved delegations and refuses every new one", () => {

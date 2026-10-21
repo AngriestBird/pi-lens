@@ -3,7 +3,7 @@
 // actually invokes); an in-process call to the exported classify functions
 // cannot see a drift in that contract. Admitted in vitest.config.ts's
 // wallClockBudgetInclude. The transcript harness also pins a bounded
-// end-to-end budget for its 1,122 real hook processes. The scoped-pkill
+// end-to-end budget for its sampled real hook processes. The scoped-pkill
 // cases (#3663 CI round) also spawn real `git` to build a linked-worktree
 // fixture, because F6's allow depends on a real linked worktree.
 //
@@ -20,10 +20,10 @@
 // Only that wiring needs a child. The verdict-only table rows (the deny and
 // allow lists, the #3778 hook-bypass rows, the #3988 path-argument rows) call
 // the exported classifyPayload through hookVerdict() under the env the child
-// would get; the spawn cases (the pipe-safe ci-verdict message, the tmpWrite
-// exit-2/exit-0 witness, malformed JSON, the large-payload drain, the broken
-// stderr and the transcript corpus) pin the stdin, exit-code and stderr wiring
-// those rows skip.
+// would get, and so does every transcript-corpus row; the spawn cases (the
+// pipe-safe ci-verdict message, the tmpWrite exit-2/exit-0 witness, malformed
+// JSON, the large-payload drain, the broken stderr and the corpus's denies plus
+// every 50th row) pin the stdin, exit-code and stderr wiring those rows skip.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -2691,35 +2691,34 @@ describe("scripts/hooks/guard-bash.mjs -- ambient PI_LENS_HOME (#2699)", () => {
 });
 
 describe(`scripts/hooks/guard-bash.mjs -- transcript corpus ${TRANSCRIPT_CORPUS_DATE} (#2705)`, () => {
+	// A synthetic HOME that is never created, like PAYLOAD_CWD: the hook only
+	// resolves `~` against it. A mkdtemp under os.tmpdir() is /tmp when TMPDIR
+	// is unset or /tmp, which turned the corpus's `~/...` writes into /tmp
+	// writes (#4348 review r1: 5 rows flipped).
+	const corpusHome = "/home/dev/pi-lens-guard-bash-corpus-home";
+	const corpusEnv = {
+		...BASE_ENV,
+		HOME: corpusHome,
+		PI_LENS_HOME: join(corpusHome, ".pi-lens"),
+		PILENS_DATA_DIR: join(corpusHome, "data"),
+		PI_LENS_INSTALL_LOG: join(corpusHome, "logs", "install.log"),
+	};
+	// The fixture was captured as uid 1000: its 655 harness-scratch writes name
+	// /tmp/claude-1000/. The exemption is the RUNNER's own uid, so the hook sees
+	// the runner's directory; the hash and the EXPECTED_* sets stay keyed on the
+	// original row (#4348 review r1: a CI uid != 1000 gave `expected 313 to be
+	// 66`).
+	const asRunner = (command: string) =>
+		command.replaceAll(
+			"/tmp/claude-1000",
+			`/tmp/claude-${process.getuid?.() ?? 1000}`,
+		);
+
 	it("keeps the transcript corpus at zero non-rule denies", () => {
-		// A synthetic HOME that is never created, like PAYLOAD_CWD: the hook only
-		// resolves `~` against it. A mkdtemp under os.tmpdir() is /tmp when TMPDIR
-		// is unset or /tmp, which turned the corpus's `~/...` writes into /tmp
-		// writes (#4348 review r1: 5 rows flipped).
-		const corpusHome = "/home/dev/pi-lens-guard-bash-corpus-home";
-		const corpusEnv = {
-			...BASE_ENV,
-			HOME: corpusHome,
-			PI_LENS_HOME: join(corpusHome, ".pi-lens"),
-			PILENS_DATA_DIR: join(corpusHome, "data"),
-			PI_LENS_INSTALL_LOG: join(corpusHome, "logs", "install.log"),
-		};
-		const started = performance.now();
 		const offenses: string[] = [];
 		let actualDenies = 0;
 		for (const { command } of TRANSCRIPT_CORPUS) {
-			// The fixture was captured as uid 1000: its 655 harness-scratch
-			// writes name /tmp/claude-1000/. The exemption is the RUNNER's own
-			// uid, so the hook sees the runner's directory; the hash and the
-			// EXPECTED_* sets stay keyed on the original row (#4348 review r1:
-			// a CI uid != 1000 gave `expected 313 to be 66`).
-			const result = runHook(
-				command.replaceAll(
-					"/tmp/claude-1000",
-					`/tmp/claude-${process.getuid?.() ?? 1000}`,
-				),
-				corpusEnv,
-			);
+			const result = hookVerdict(asRunner(command), corpusEnv);
 			const hash = commandHash(command);
 			const expectedDeny = EXPECTED_TRANSCRIPT_DENIES.has(hash);
 			const expectedAllow = EXPECTED_TRANSCRIPT_ALLOWS.has(hash);
@@ -2738,14 +2737,53 @@ describe(`scripts/hooks/guard-bash.mjs -- transcript corpus ${TRANSCRIPT_CORPUS_
 				offenses.push(`unexpected stderr: ${command}`);
 		}
 
+		expect(actualDenies).toBe(EXPECTED_TRANSCRIPT_DENIES.size);
+		expect(offenses).toEqual([]);
+	});
+
+	// The real hook for every row. The classifier pass above skips the child's
+	// stdin, exit-code and stderr wiring, so a deny that only the hook adds (a
+	// non-rule deny from run() on one row) is caught here and nowhere else.
+	// Recurrence: the 88-row sample this loop replaced let a hook-only deny on
+	// an unsampled row pass (#4729 review r1 F1). The in-process verdict rides
+	// beside each spawn, since it costs no process.
+	it("keeps every transcript row's real hook verdict at zero non-rule denies", () => {
+		const offenses: string[] = [];
+		const mismatches: string[] = [];
+		let actualDenies = 0;
+		const started = performance.now();
+		for (const { command } of TRANSCRIPT_CORPUS) {
+			const child = runHook(asRunner(command), corpusEnv);
+			const verdict = hookVerdict(asRunner(command), corpusEnv);
+			if (child.status !== verdict.status || child.stderr !== verdict.stderr)
+				mismatches.push(
+					`child ${child.status} vs classifier ${verdict.status}: ${command}`,
+				);
+			const hash = commandHash(command);
+			const expectedDeny = EXPECTED_TRANSCRIPT_DENIES.has(hash);
+			const expectedAllow = EXPECTED_TRANSCRIPT_ALLOWS.has(hash);
+			if (child.status === 2) actualDenies++;
+
+			if (expectedDeny) {
+				if (child.status !== 2)
+					offenses.push(`expected deny was allowed: ${command}`);
+				continue;
+			}
+			if (expectedAllow && child.status !== 0)
+				offenses.push(`expected allow was denied: ${command}`);
+			else if (!expectedAllow && child.status !== 0)
+				offenses.push(`non-rule deny (${child.status}): ${command}`);
+			else if (child.stderr !== "")
+				offenses.push(`unexpected stderr: ${command}`);
+		}
 		const elapsedMs = performance.now() - started;
 		console.log(
-			`guard-bash transcript corpus: ${TRANSCRIPT_CORPUS.length} rows, ` +
-				`${actualDenies} expected denies, ${Math.round(elapsedMs)}ms`,
+			`guard-bash transcript corpus: ${TRANSCRIPT_CORPUS.length} rows through the real hook, ${actualDenies} expected denies, ${Math.round(elapsedMs)}ms`,
 		);
 		expect(elapsedMs).toBeLessThan(180_000);
 		expect(actualDenies).toBe(EXPECTED_TRANSCRIPT_DENIES.size);
 		expect(offenses).toEqual([]);
+		expect(mismatches).toEqual([]);
 	}, 180_000);
 });
 

@@ -406,6 +406,17 @@ export interface PipelineResult {
 	isError: boolean;
 	/** True if file was modified by format/autofix */
 	fileModified: boolean;
+	/**
+	 * True only when this run's whole delivery is the `✓ <lang> clean` line, a
+	 * language server answered for the file (`DispatchResult.primaryLspChecked`)
+	 * and the run recorded no finding for it (#4734 r3 state table, row 14).
+	 * False on every other path: a finding, a fix, a format notice, an error, a
+	 * non-blocking finding behind the clean line, a run no language server
+	 * answered (`--no-lsp`, a CLI primary, a fallback linter, a deferred or
+	 * silent server). Required, so no producer can leave it to be read as
+	 * clean. A consumer never re-derives it from `output` (#4734 review F1).
+	 */
+	checkedClean: boolean;
 	/** Hash captured after this pipeline's own writes, before analysis awaits. */
 	postWriteStateHash?: string;
 	/** #3506: the write token the analysis was recorded under. */
@@ -1735,11 +1746,11 @@ export async function runFormatPhase(
 	filePath: string,
 	getFormatService: () => FormatService,
 	dbg: PipelineContext["dbg"],
-	signal?: AbortSignal,
+	signal: AbortSignal | undefined,
 	budgetMs = HOOK_WALL_BUDGET_MS.tool_result_edit,
 	hook: LedgerHookKey = "tool_result_edit",
-	writeHold?: FileMutationHold,
-	sessionRoot?: string,
+	writeHold: FileMutationHold | undefined,
+	sessionRoot: string,
 ): Promise<FormatPhaseResult> {
 	let formatChanged = false;
 	let formattersUsed: string[] = [];
@@ -1748,9 +1759,7 @@ export async function runFormatPhase(
 	let fileContent: string | undefined;
 	let abandoned: Promise<void> | undefined;
 
-	const adopted =
-		sessionRoot !== undefined &&
-		resolveAnalysisRoot(filePath, sessionRoot) === "adopted";
+	const adopted = resolveAnalysisRoot(filePath, sessionRoot) === "adopted";
 	if (adopted)
 		emitBounded(
 			"adopted_root_writer_skipped",
@@ -1773,6 +1782,7 @@ export async function runFormatPhase(
 				signal,
 				budgetMs,
 				hook,
+				sessionRoot,
 				...(writeHold ? { writeHold } : {}),
 			});
 			abandoned = result.abandoned;
@@ -2175,7 +2185,15 @@ async function analysePipeline(
 	// re-token below replaces the pair.
 	const widgetOrder = () =>
 		writeOrderToken(ctx.telemetry?.orderTurn, ctx.telemetry?.writeIndex);
-	admitWidgetDiagnosticsWrite(filePath, widgetOrder());
+	// The widget store keys syntactically (#1020), so every writer of one file
+	// must hand it one form. Dispatch records this file's runners under
+	// `ctx.filePath`, its key (`createDispatchContext`), and so do
+	// `clients/mcp/analyze.ts` and the LSP reconciles; the final snapshot
+	// takes the same key, or a file spelled through a link (a file link, a
+	// session rooted at a link) kept a pending record nothing finished (#4689
+	// review r1 F4).
+	const widgetKey = normalizeMapKey(filePath);
+	admitWidgetDiagnosticsWrite(widgetKey, widgetOrder());
 
 	const phase = createPhaseTracker(toolName, filePath);
 	const pipelineStart = Date.now();
@@ -2528,7 +2546,7 @@ async function analysePipeline(
 			? [...dispatchResult.diagnostics, ...keptBlockers]
 			: dispatchResult.diagnostics;
 	recordDiagnostics(
-		filePath,
+		widgetKey,
 		storedDiagnostics,
 		widgetOrder(),
 		analysisReadAtMs,
@@ -2796,8 +2814,16 @@ async function analysePipeline(
 	// #1590: `postAutofixNotice` is output this run produces, just rendered a
 	// layer up. Treat it as output here, or a format-only change would newly
 	// gain an "all clear" line it never had while the sentence lived inline.
+	let checkedClean = false;
 	if (!output && !postAutofixNotice) {
 		output = buildAllClearOutput(dispatchResult, elapsed, filePath);
+		// #4734 r3: the all-clear line is not the verdict. A language server
+		// answered, and the run recorded nothing for the file: no delta finding
+		// (a warning renders no text) and no blocker it keeps (a held-back one
+		// renders none in a run without authorship).
+		checkedClean =
+			dispatchResult.primaryLspChecked === true &&
+			storedDiagnostics.length === 0;
 	}
 
 	phase.end("total", { hasOutput: !!output });
@@ -2835,6 +2861,7 @@ async function analysePipeline(
 		cascadePromise,
 		isError: false,
 		fileModified,
+		checkedClean,
 		postWriteStateHash,
 		writeIndex: ctx.telemetry?.writeIndex,
 		orderTurn: ctx.telemetry?.orderTurn,

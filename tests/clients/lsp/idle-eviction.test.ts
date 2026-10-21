@@ -1,12 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { suspendAt } from "../interleaving-kit.js";
-const recordDegradation = vi.hoisted(() => vi.fn());
-vi.mock("../../../clients/degradation-ledger.js", async (importOriginal) => ({
-	...(await importOriginal<
-		typeof import("../../../clients/degradation-ledger.js")
-	>()),
-	recordDegradation,
-}));
 
 const getServersForFileWithConfig = vi.fn();
 const createLSPClient = vi.fn();
@@ -67,7 +60,6 @@ function configureServer(
 
 describe("LSP idle eviction (#1332 b2)", () => {
 	beforeEach(() => {
-		recordDegradation.mockClear();
 		vi.resetModules();
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
@@ -195,11 +187,20 @@ describe("LSP idle eviction (#1332 b2)", () => {
 		expect(first.shutdown).toHaveBeenCalledWith({
 			reason: "idle_eviction",
 		});
-		expect(recordDegradation).toHaveBeenCalledWith({
-			kind: "lsp-idle-eviction",
-			subject: expect.stringMatching(/^typescript:.*repo$/),
-			reason: "idle LSP client released to bound memory",
-		});
+		// The ledger the service wrote to is the one loaded after this case's
+		// `vi.resetModules()`, so it is read back through the same registry.
+		const { getDegradationSummary } =
+			await import("../../../clients/degradation-ledger.js");
+		expect(
+			getDegradationSummary().find(
+				(group) => group.kind === "lsp-idle-eviction",
+			)?.latestReasons,
+		).toEqual([
+			{
+				subject: expect.stringMatching(/^typescript:.*repo$/),
+				reason: "idle LSP client released to bound memory",
+			},
+		]);
 
 		expect((await service.getClientForFile("/repo/main.ts"))?.client).toBe(
 			rebuilt,

@@ -10,6 +10,13 @@
  *
  * Typed against the pinned `@earendil-works/pi-coding-agent` types only
  * (type-only import — no runtime dependency, per AGENTS.md install constraints).
+ *
+ * LAZY-TOOLS POSTURE (#4687, #4723 F5). Both harnesses start the situational
+ * tools INACTIVE by default, because pi-lens's default `tools.lazy` is `true`
+ * on every model; the one decision table is `lazyToolsApply` in
+ * `clients/tool-set-policy.ts`. `makeCtx` names no model, which an opted-in
+ * `tools.lazy: "auto"` treats as lazy too (the configured default, never
+ * eager); a per-model case belongs on tier 2 (`pi-session.ts`, `modelCompat`).
  */
 
 import type {

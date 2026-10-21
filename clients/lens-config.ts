@@ -14,6 +14,7 @@ import {
 	GLOBAL_NON_FLAG_CONFIG_SECTIONS,
 	LENS_FLAGS,
 	readFlagConfigValue,
+	readLazyToolsSetting,
 } from "./lens-flag-registry.js";
 import {
 	type ConfigLocation,
@@ -347,6 +348,16 @@ export function loadPiLensGlobalConfig(
 		const config: Record<string, unknown> = {};
 		const toolConfig = readToolConfig(raw, warnInvalid);
 		if (toolConfig) config.tools = toolConfig;
+		// #4687 item 7: `tools.lazy` is "auto" | true | false. Its registry row
+		// reads it through `readGlobal`, so the boolean copy below skips it and
+		// this is where an invalid value is reported, never silently dropped.
+		const toolsSection = asConfigObject(raw.tools);
+		if (toolsSection && "lazy" in toolsSection) {
+			const lazy = readLazyToolsSetting(raw);
+			if (lazy === undefined)
+				warnInvalid('tools.lazy must be "auto", true, or false');
+			else config.tools = { ...(config.tools as object), lazy };
+		}
 
 		for (const spec of LENS_FLAGS) {
 			if (spec.readGlobal) continue;

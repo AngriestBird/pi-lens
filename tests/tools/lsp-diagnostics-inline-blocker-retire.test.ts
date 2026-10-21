@@ -28,6 +28,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { normalizeMapKey } from "../../clients/path-utils.js";
 import { CacheManager } from "../../clients/cache-manager.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
+import { installLspService } from "../support/lsp-service-seam.js";
 
 const getServersForFileWithConfig = vi.fn();
 const createLSPClient = vi.fn();
@@ -73,13 +74,6 @@ vi.mock("../../clients/widget-state.js", async () => {
 });
 
 let service: unknown;
-vi.mock("../../clients/lsp/capabilities.js", async () => {
-	const actual = await vi.importActual<
-		typeof import("../../clients/lsp/capabilities.js")
-	>("../../clients/lsp/capabilities.js");
-	return { ...actual, getLSPService: () => service };
-});
-
 function makeServer(
 	id: string,
 	root: string,
@@ -246,7 +240,7 @@ async function runTool(
 
 async function freshService(): Promise<void> {
 	const { LSPService } = await import("../../clients/lsp/index.js");
-	service = new LSPService();
+	service = installLspService(new LSPService());
 }
 
 describe("#1561 lsp_diagnostics retires a stale inline blocker", () => {

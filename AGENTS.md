@@ -65,6 +65,21 @@ out-of-session edits. A marked project may be adopted for LSP and per-file
 linters, but adopted roots are separate from session roots, capped at two with
 early idle eviction, and never receive session bookkeeping, whole-project
 scanners, turn-end tests, or project-local executables under unknown pi trust.
+Registration follows the class, not a directory, through
+`resolveSessionConfigRoot`: a `session` file registers the nearest directory
+holding any file the config loader layers (`PROJECT_CONFIG_LOCATIONS`, else
+the session root), a `linked-worktree` file the
+same below the worktree root, spelled as the file spells it (the session-root
+registry contains lexically; the class compares identities, #4689), and an
+`adopted` or `none` file registers nothing —
+an adopted root reaches LSP only through `resolveServerRoot`'s adopted branch
+and `ClientRegistry.admitAdoptedRoot`. A linked worktree is its own workspace,
+so its edits take the same dispatch, formatting, autofix and LSP treatment as a
+session edit, and `tool_result` records `tool-result-linked-worktree` for that
+root and states a run a language server answered that recorded no finding
+(`tool-result-linked-worktree-clean`, keyed off the required
+`PipelineResult.checkedClean`, never off `output` or the all-clear line), so
+the path is never silent.
 
 The repository ships compiled JavaScript. TypeScript sources are authoritative;
 compiled twins are generated and must not be edited by hand.
@@ -202,8 +217,8 @@ The principles' delegation contract applies. pi-lens adds:
 - **store** — The owner of durable or session rows, including their read/modify/write lifecycle; owned by `clients/durable-store.ts`; retires `cache` when state ownership, not derived reuse, is meant.
 - **mirror** — A derived copy refreshed inside the writer's guard; owned by `clients/diagnostic-dispositions.ts`; retires `replica` and `shadow`.
 - **path spelling** — The input string form of a path, before key or canonical normalization; owned by `clients/path-utils.ts`; retires `path name` and `raw path` when form is meant.
-- **path key** — A normalized process-local map key; owned by `clients/path-utils.ts` (`normalizeEphemeralMapKey`); retires `path identity` and `canonical path` for ephemeral maps.
-- **canonical path** — A filesystem-aware normalized path used for long-lived map state; owned by `clients/path-utils.ts` (`normalizeFilePath`); retires `resolved path` when canonical casing and realpath semantics are meant.
+- **path key** — A normalized process-local map key; owned by `clients/path-utils.ts` (`normalizeEphemeralMapKey`); retires `canonical path` for ephemeral maps.
+- **path identity** — The kernel-real path of a file: the realpath of its nearest existing ancestor plus the missing tail, what `normalizeMapKey` answers for an absolute spelling and `realpathOrResolve` for any spelling, on every platform; owned by `clients/path-utils.ts`; retires `canonical path` and `resolved path` where identity is meant.
 - **rendezvous id** — A pure, cross-process string derivation shared by independent writers/readers; owned by `clients/mcp/ipc.ts`; retires `workspace key` and `IPC path key`.
 - **generation** — A monotonic/session/content/scan/disposition-store identity that rejects late work; owned by `clients/generation-guard.ts` (`GenerationSource`, `GenerationHandle`, and `createGenerationSource`); retires `epoch` and `version` when the identity's lifecycle is meant.
 - **degradation record** — A bounded once-only or counted ledger event for a partial, unavailable, or deferred result; owned by `clients/degradation-ledger.ts`; retires `log`, `warning`, and `telemetry`.
@@ -248,11 +263,13 @@ fixes its members says so instead of quoting a before and after.
    normalizer each uses; a claim that one normalizer subsumes another is
    measured per transformation (separators, dot segments, case, symlinks,
    existence), never asserted (#3178: four rounds, two inverted arms, one
-   unmeasured swap).
+   unmeasured swap). Enforced by `tests/config/path-identity-sweep.test.ts`
+   (partial: a raw realpath or a raw `path.resolve` key outside
+   `clients/path-utils.ts`).
 
 2. **Host path functions in a shape branch:** once a path is classified as
    Windows-shaped, use `path.win32`; do not use host-default `path` functions.
-   Prefer `toPosix`, `splitPathSegments`, and the canonical path helpers.
+   Prefer `toPosix`, `splitPathSegments`, and the path identity helpers.
 
 32. **Mixed path comparison:** use one platform-aware containment expression;
     do not combine case-sensitive equality with case-folded relative paths. A
@@ -761,6 +778,18 @@ file-scoped worklist and receives no project-wide scanner output.
     `tests/config/tmp-fixture-hygiene.test.ts`, plus the `JITI_FS_CACHE=0` pin
     that `tests/support/vitest-setup.ts` and `vitest.config.ts` force on the
     test process. Instance and dates: `HISTORY.md`.
+
+81. **Synchronous native-tree walk holds every tree:** a sweep that parses many
+    files with `@ast-grep/napi` in a loop that never reaches a macrotask keeps
+    every native tree until the case ends, because the finalizer that frees a
+    tree runs only when the event loop turns (V8 heap stays near 40 MB while RSS
+    reaches 1.7 to 1.9 GB). An `await` on a settled promise does not turn it.
+    Turn the loop once per file with `setImmediate`. Screen: does the loop's
+    body parse, and does it reach a `setImmediate` or a real I/O await per
+    iteration? Enforcer: none: judgment-only. The per-file RSS budget and its
+    200 MB headroom warning observe the symptom, but a source scan cannot tell
+    which loops parse without data-flow reading, so it could not fail closed.
+    Instances and dates: `HISTORY.md`.
 
 </important>
 
@@ -1275,6 +1304,19 @@ file-scoped worklist and receives no project-wide scanner output.
 - `scripts/ci-verdict.mjs` ends every CLI path with `ci-verdict: exit <N> (<kind>)`;
   read that final stdout line instead of `$?` after a pipe. `guard-bash` denies
   the piped-status recurrence while allowing output-only pipes.
+- A formatter is handed the file's identity, never the link that named it:
+  `realpathOrResolve` (`clients/path-utils.ts`) is the real path
+  of the nearest existing ancestor plus the missing tail, with no lexical `..`
+  collapse first. `formatFile` and `FormatService.formatFile` use it, so
+  `AGENTS.md -> CLAUDE.md` formats `CLAUDE.md` and Prettier's "is a symbolic
+  link" rejection never occurs. `FormatService.formatFile` also requires
+  `sessionRoot` and classifies the identity through `resolveAnalysisRoot`: an
+  `adopted` or `none` identity is refused, writes nothing, and records one
+  `adopted-root-writer-skipped` row (`writer: "format"`). The refusal is on
+  identity, not spelling, so a plain file outside every writable root (a
+  sibling package of a monorepo session cwd, say) is refused as well; a caller
+  that must format it passes that root as `sessionRoot`. Proven by
+  `tests/clients/format-service-symlink-identity.test.ts`.
 - Formatter and autofix policy is config-first where the registry says so.
   Formatting is strict by default. Autofix must carry per-diagnostic fixability
   or a conservative capability allowlist.
@@ -1366,7 +1408,7 @@ file-scoped worklist and receives no project-wide scanner output.
 - Async publication carries a generation or epoch and checks it before and
   after awaited work. Graph snapshots are immutable by replacement.
 - Review-graph, snapshot, reverse-dependency, word-index, and call-graph data
-  use canonical paths and explicit partial-coverage markers. A capped walk is
+  use path identities and explicit partial-coverage markers. A capped walk is
   lower-bound evidence, never a clean zero.
 - Tree-sitter uses the shared client and file-major project passes. Grammar
   crashes are blocked before load; source overrides record package/version

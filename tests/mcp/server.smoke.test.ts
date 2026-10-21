@@ -585,14 +585,48 @@ describe("pi-lens MCP server (stdio smoke)", { retry: 2 }, () => {
 			name: "pilens_ast_grep_search",
 			arguments: {
 				pattern: "getLSPService()",
-				lang: "ts",
+				lang: "typescript",
 				paths: [path.join(repoRoot, "clients", "mcp")],
 			},
 		});
-		const result = res.result as { content: { type: string; text: string }[] };
+		const result = res.result as {
+			content: { type: string; text: string }[];
+			isError?: boolean;
+		};
+		expect(result.isError).toBeFalsy();
 		expect(result.content[0].type).toBe("text");
 		expect(typeof result.content[0].text).toBe("string");
 	}, 45_000);
+
+	// #4723 F4: the MCP route hands execute the client's JSON without schema
+	// validation, so `lang` can be any JSON value. Recurrence: replace threw a
+	// TypeError on a number (`"pi-lens tool ... failed"`) and search called it
+	// "lang is required"; both must answer the refusal that names the ids.
+	it.each([
+		["pilens_ast_grep_search", 3],
+		["pilens_ast_grep_search", null],
+		["pilens_ast_grep_replace", 3],
+		["pilens_ast_grep_replace", { id: "typescript" }],
+	] as const)(
+		"refuses %s with lang %j over the wire",
+		async (name, lang) => {
+			const res = await harness.request(4723, "tools/call", {
+				name,
+				arguments:
+					name === "pilens_ast_grep_replace"
+						? { pattern: "foo($X)", rewrite: "bar($X)", lang }
+						: { pattern: "foo($X)", lang },
+			});
+			const result = res.result as {
+				content: { type: string; text: string }[];
+				isError?: boolean;
+			};
+			expect(result.isError).toBe(true);
+			expect(result.content[0]?.text).toContain("lang must be a string");
+			expect(result.content[0]?.text).toContain("valid ids: bash");
+		},
+		25_000,
+	);
 
 	it("answers tools/call pilens_lsp_navigation (documentSymbol)", async () => {
 		const res = await harness.request(9, "tools/call", {

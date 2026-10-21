@@ -453,3 +453,147 @@ describe("coverage notice keys on the primary runner's usable result (#3867)", (
 		expect(result.output).toContain(COVERAGE_NOTICE);
 	});
 });
+
+// Recurrence: #4734 verify r2 F4. The clean advisory said a language server
+// checked a `--no-lsp` edit and found nothing, because an unset
+// `unconfirmedStatus` was read as "a primary answered". The dispatcher's one
+// return that knows is `primaryHasCoverage`, and only when the `lsp` runner is
+// what covered the file. Rows of the #4734 round-3 state table.
+describe("the language-server verdict the clean advisory reads (#4734 r3)", () => {
+	type Row = {
+		label: string;
+		file: string;
+		noLsp?: boolean;
+		runners: Record<string, () => Promise<RunnerResult>>;
+		groups: RunnerGroup[];
+		/** Dispatch this many times on the push surface; the last result counts. */
+		pushes?: number;
+		expected: true | undefined;
+	};
+	const succeeded = async (): Promise<RunnerResult> => ({
+		status: "succeeded",
+		diagnostics: [],
+		semantic: "none",
+	});
+	const rows: Row[] = [
+		{
+			label: "row 14: the lsp runner answered",
+			file: "test.ts",
+			runners: { lsp: succeeded },
+			groups: [{ mode: "all", runnerIds: ["lsp"] }],
+			expected: true,
+		},
+		{
+			label: "row 8: --no-lsp leaves jsts no primary group",
+			file: "test.ts",
+			noLsp: true,
+			runners: { oxlint: succeeded },
+			groups: [{ mode: "all", runnerIds: ["oxlint"] }],
+			expected: undefined,
+		},
+		{
+			label: "row 10: --no-lsp, the pyright CLI primary answered",
+			file: "src/app.py",
+			noLsp: true,
+			runners: { pyright: succeeded },
+			groups: [{ mode: "all", runnerIds: ["pyright"] }],
+			expected: undefined,
+		},
+		{
+			label: "row 10: the lsp runner skipped, the pyright CLI answered",
+			file: "src/app.py",
+			runners: {
+				lsp: async () => ({
+					status: "skipped",
+					diagnostics: [],
+					semantic: "none",
+				}),
+				pyright: succeeded,
+			},
+			groups: [{ mode: "all", runnerIds: ["lsp", "pyright"] }],
+			expected: undefined,
+		},
+		{
+			label: "row 11: a silent server's partial notice, latched",
+			file: "test.ts",
+			runners: {
+				lsp: async () => ({
+					status: "skipped",
+					diagnostics: [],
+					semantic: "none",
+					unconfirmedServerIds: ["opengrep"],
+				}),
+			},
+			groups: [{ mode: "all", runnerIds: ["lsp"] }],
+			pushes: 2,
+			expected: undefined,
+		},
+		{
+			label: "row 12: the lsp runner is deferred",
+			file: "test.ts",
+			runners: {
+				lsp: async () => ({
+					status: "deferred",
+					diagnostics: [],
+					semantic: "none",
+				}),
+			},
+			groups: [{ mode: "all", runnerIds: ["lsp"] }],
+			expected: undefined,
+		},
+		{
+			label: "row 13: the lsp runner failed, a fallback linter covered",
+			file: ".github/workflow.json",
+			runners: {
+				lsp: async () => {
+					throw new Error("lsp skipped: server is not ready");
+				},
+				"trivy-config": succeeded,
+			},
+			groups: [{ mode: "all", runnerIds: ["lsp", "trivy-config"] }],
+			expected: undefined,
+		},
+	];
+
+	beforeEach(() => {
+		clearCoverageNoticeState();
+		clearLatencyReports();
+		resetObservedRunnerLatency();
+		resetPendingRunnerFindings();
+	});
+
+	it.for(rows)("$label", async (row) => {
+		const registry = new RunnerRegistry();
+		for (const [id, run] of Object.entries(row.runners)) {
+			registry.register({
+				id,
+				appliesTo: ["jsts", "python", "json"],
+				priority: id === "lsp" ? 4 : 5,
+				run,
+			});
+		}
+		const ctx = () =>
+			createDispatchContext(
+				row.file,
+				"/project",
+				{ getFlag: (flag: string) => row.noLsp === true && flag === "no-lsp" },
+				new FactStore(),
+			);
+		let result = await dispatchForFile(ctx(), row.groups, registry);
+		for (let push = 1; push < (row.pushes ?? 1); push += 1) {
+			result = await dispatchForFile(ctx(), row.groups, registry);
+		}
+
+		// Every row but 14 reaches the pipeline as the clean-line shape: no text,
+		// no `unconfirmedStatus`. Only the verdict tells them apart.
+		expect({
+			output: result.output,
+			unconfirmedStatus: result.unconfirmedStatus,
+			primaryLspChecked: result.primaryLspChecked,
+		}).toEqual({
+			output: "",
+			unconfirmedStatus: undefined,
+			primaryLspChecked: row.expected,
+		});
+	});
+});

@@ -3441,7 +3441,11 @@ export async function runFormatSmoke({ langs, install, verbose, deps }) {
 			// Mirror runFormatPhase: establish the fileTime baseline (recordRead)
 			// before formatting so the external-modification guard doesn't skip.
 			formatService.recordRead(absFile);
-			const summary = await formatService.formatFile(absFile);
+			// The service classifies the file's identity against the session root
+			// (#4689), so the scratch workspace is the session here.
+			const summary = await formatService.formatFile(absFile, {
+				sessionRoot: fs.realpathSync(workspace),
+			});
 			const names = summary.formatters.map((f) => f.name);
 			if (verbose) {
 				console.error(
