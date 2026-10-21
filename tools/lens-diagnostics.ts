@@ -44,6 +44,8 @@ import {
 	isJediCompileVerdict,
 	partitionOutrankedPythonCompileVerdicts,
 	PYTHON_DECLARATION_CONCURRENCY,
+	type PythonCompileVerdictPartition,
+	type PythonVerdictRow,
 	recordPythonCompileVerdictDrop,
 } from "../clients/python-environment.js";
 import { mapWithConcurrency } from "../clients/map-with-concurrency.js";
@@ -272,6 +274,30 @@ async function findFullScanBindingMismatches(
 		}
 	}
 	return mismatched;
+}
+
+/**
+ * #4638 review (F1/F10): resolve a file's declared level only when the file
+ * carries one of jedi's `compile` rows, then apply the owner rule. The guard is
+ * the rule's own pre-filter, so a file with no such row costs no I/O and no
+ * await — the same check the full-sweep site makes before its walk.
+ */
+async function applyDeclarationRule<T extends PythonVerdictRow>(
+	filePath: string,
+	diagnostics: readonly T[],
+): Promise<PythonCompileVerdictPartition<T>> {
+	if (!diagnostics.some(isJediCompileVerdict)) {
+		return { kept: [...diagnostics], dropped: 0 };
+	}
+	const declared = await detectPythonTargetVersion(filePath);
+	const partition = partitionOutrankedPythonCompileVerdicts(
+		diagnostics,
+		declared,
+	);
+	if (partition.dropped > 0 && declared) {
+		recordPythonCompileVerdictDrop(filePath, declared, partition.dropped);
+	}
+	return partition;
 }
 
 export function createLensDiagnosticsTool(
@@ -2219,21 +2245,12 @@ async function applyInlineSuppressionsToSummaries(
 				content,
 				policyMap,
 			});
-			// #4638 review (F1): the owner rule the post-write runner and the probe
-			// already apply. Without it a jedi `compile` row under a declared 3.14+
-			// reaches this surface as `blocking`, which the other lanes no longer do.
-			const pythonTarget = await detectPythonTargetVersion(summary.filePath);
-			const pythonKept = partitionOutrankedPythonCompileVerdicts(
+			// #4638 review (F1/F10): the owner rule the post-write runner and the
+			// probe already apply, asked only when the file carries jedi's row.
+			const pythonKept = await applyDeclarationRule(
+				summary.filePath,
 				policyKept,
-				pythonTarget,
 			);
-			if (pythonKept.dropped > 0 && pythonTarget) {
-				recordPythonCompileVerdictDrop(
-					summary.filePath,
-					pythonTarget,
-					pythonKept.dropped,
-				);
-			}
 			if (disposed.length < inlineKept.length) {
 				const survivors = new Set(disposed);
 				for (const d of inlineKept) {
@@ -2524,15 +2541,12 @@ async function formatFullMode(
 		lspResults,
 		PYTHON_DECLARATION_CONCURRENCY,
 		async (result) => {
-			if (!result.diagnostics.some(isJediCompileVerdict)) return result;
-			const declared = await detectPythonTargetVersion(result.filePath);
-			const { kept, dropped } = partitionOutrankedPythonCompileVerdicts(
+			const pythonKept = await applyDeclarationRule(
+				result.filePath,
 				result.diagnostics,
-				declared,
 			);
-			if (dropped === 0 || !declared) return result;
-			recordPythonCompileVerdictDrop(result.filePath, declared, dropped);
-			return { ...result, diagnostics: kept };
+			if (pythonKept.dropped === 0) return result;
+			return { ...result, diagnostics: pythonKept.kept };
 		},
 	);
 	// A result bound to a different document must not replace the current
@@ -2622,22 +2636,13 @@ async function formatFullMode(
 				content: content ?? "",
 				policyMap,
 			});
-			// #4638 review (F1): the store is what `source=session` later serves, so
-			// the owner rule has to run before this write. Otherwise a jedi `compile`
-			// row under a declared 3.14+ keeps its `blocking` semantic on the session
-			// route after the probe and post-write lanes have already dropped it.
-			const pythonTarget = await detectPythonTargetVersion(result.filePath);
-			const pythonKept = partitionOutrankedPythonCompileVerdicts(
+			// #4638 review (F1/F10): the store is what `source=session` later serves,
+			// so the owner rule runs before this write — and only for a file that
+			// carries jedi's row.
+			const pythonKept = await applyDeclarationRule(
+				result.filePath,
 				policyKept,
-				pythonTarget,
 			);
-			if (pythonKept.dropped > 0 && pythonTarget) {
-				recordPythonCompileVerdictDrop(
-					result.filePath,
-					pythonTarget,
-					pythonKept.dropped,
-				);
-			}
 			const retired = reconcileScanDiagnostics(
 				result.filePath,
 				pythonKept.kept,

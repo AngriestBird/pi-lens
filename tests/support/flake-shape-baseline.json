@@ -1329,6 +1329,7 @@
 		"index-write-order-token.test.ts::tools/lens-diagnostics": 1,
 		"scripts/check-tla-models.test.ts::node:crypto": 1,
 		"source-filter-skip-observability.test.ts::clients/latency-logger": 1,
+		"tools/lens-diagnostics-declaration-walk.test.ts::clients/python-environment": 1,
 		"tools/lens-diagnostics-delta-project-order.test.ts::clients/project-diagnostics/scanner": 1,
 		"tools/lens-diagnostics-inferred-project.test.ts::clients/bootstrap": 1,
 		"tools/lens-diagnostics-inferred-project.test.ts::clients/project-diagnostics/cache": 1,

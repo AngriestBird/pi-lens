@@ -2640,11 +2640,13 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// scan it used to return, to reconcile it before its rows reach the
 	// widget. The same promise `formatFullMode`'s `Promise.all` already
 	// awaited, under the same signal: no new wait.
-	// 15 -> 19 (#4638 review F1/F6): the full-mode sweep walks the declaration
-	// through the shared bounded pool, then the full-mode merge and the session
-	// store write each resolve one file's level before applying the owner rule, so
-	// those surfaces stop delivering a verdict the other lanes already drop.
-	"tools/lens-diagnostics.ts": 19,
+	// 15 -> 19 -> 20 (#4638 review F1/F6/F10): the full-mode sweep walks the
+	// declaration through the shared bounded pool, then the full-mode merge and the
+	// session store write each resolve one file's level before applying the owner
+	// rule. The three sites now share one helper, whose own await plus the three
+	// guarded calls make 20; the helper skips the walk entirely for a file without
+	// jedi's row, so the count is calls, not new I/O.
+	"tools/lens-diagnostics.ts": 20,
 	// #2598 lowered both by one: `collectDiagnosticsForFile` and
 	// `openFileBestEffort` each dropped their `await lspService.openFile(…)`
 	// arm — the fallback for "a service shape without touchFile", which the

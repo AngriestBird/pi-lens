@@ -390,6 +390,15 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			reason:
 				"the assertion is on the module-level resetLSPService call the shared teardown makes, which the shared service double does not expose as a spy; the stand-in spawns no language server",
 		},
+	// 2026-10-21 (#4638 review F10): the owner is wrapped, not replaced — every
+	// other export stays real — so the edit path's walks can be counted per file
+	// instead of inferred from the delivery result.
+	"in-process-mock:tools/lens-diagnostics-declaration-walk.test.ts::clients/python-environment":
+		{
+			detector: "in-process-mock",
+			reason:
+				"the wrapper spreads the actual module and only counts calls to the declaration resolver, which is the behaviour under test (zero I/O for a file without jedi's row)",
+		},
 	// 2026-10-19 (#3734): `rename_file`'s staleness capture needs a client that
 	// answers `workspace/willRenameFiles` with chosen offsets; only the shell the
 	// tool resolves is stood in for, so the real service, the rename guard,
