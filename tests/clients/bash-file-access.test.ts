@@ -1099,35 +1099,192 @@ describe("scanShellWriteScopes — the command's effective directory (#2050)", (
 		).toEqual([]);
 	});
 
-	it("does not carry a `cd` out of a pipe or a background job", () => {
-		// `|` and `&` run their side in a subshell, so a `cd` there never moves a
-		// later top-level segment. #4713 F1: the per-segment rule named these
-		// writes under `<sub>` while bash wrote them under the session root, so
-		// the real file lost its recognised authorship.
-		const sub = path.join(tmp, "sub");
-		expect(written(`cd ${sub} | cat; echo x > f.ts`)).toEqual([
-			path.join(tmp, "f.ts"),
-		]);
-		expect(written(`cd ${sub} & echo x > f.ts`)).toEqual([
-			path.join(tmp, "f.ts"),
-		]);
-	});
+	/**
+	 * One row per row of the PR's state table (#4713 round 4). `bash` is the
+	 * file real `bash -c` wrote with cwd = `tmp` (holding `sub/` and `other/`),
+	 * measured by the probe the PR body quotes. A row that names a `fallback`
+	 * is a residual: the scan answers what the PR's base answered (the
+	 * command's own cwd), which is not where bash wrote.
+	 *
+	 * Recurrence: rounds 3 and 4 of #4713 each found new spellings (a `cd`
+	 * entered through a pipe, a backgrounded list, a bare `pushd`, then a
+	 * function body, a subshell, `eval`, `\cd`, `cd -`, `2>&1`) that the
+	 * enumerated carry rule moved into `sub/` while bash wrote at the top.
+	 */
+	const CWD_ROWS: ReadonlyArray<{
+		row: string;
+		command: string;
+		bash: string;
+		fallback?: string;
+	}> = [
+		{
+			row: "R1 list start, &&",
+			command: "cd sub && printf x > f.ts",
+			bash: "sub/f.ts",
+		},
+		{ row: "R2 ;", command: "cd sub; printf x > f.ts", bash: "sub/f.ts" },
+		{ row: "R3 newline", command: "cd sub\nprintf x > f.ts", bash: "sub/f.ts" },
+		{
+			row: "R4 entered after &&",
+			command: "true && cd sub && printf x > f.ts",
+			bash: "sub/f.ts",
+		},
+		{
+			row: "R5 entered after ;",
+			command: "true; cd sub; printf x > f.ts",
+			bash: "sub/f.ts",
+		},
+		{
+			row: "R6 entered after a backgrounded list",
+			command: "true & cd sub && printf x > f.ts",
+			bash: "sub/f.ts",
+		},
+		{
+			row: "R7 redirect glue 2>&1",
+			command: "cd sub 2>&1 && printf x > f.ts",
+			bash: "sub/f.ts",
+		},
+		{
+			row: "R8 glue &> and a redirect operand",
+			command: "pushd sub &>/dev/null && printf x > f.ts",
+			bash: "sub/f.ts",
+		},
+		{
+			row: "R9 assignment prefix",
+			command: "cd sub && FOO=1 true && printf x > f.ts",
+			bash: "sub/f.ts",
+		},
+		{
+			row: "R10 ended by || (V1 C5)",
+			command: "cd sub || exit 1\nprintf x > f.ts",
+			bash: "sub/f.ts",
+			fallback: "f.ts",
+		},
+		{
+			row: "R11 right side of ||",
+			command: "cd missing 2>/dev/null || printf x > f.ts",
+			bash: "f.ts",
+		},
+		{
+			row: "R12 entered after ||",
+			command: "false || cd sub; printf x > f.ts",
+			bash: "sub/f.ts",
+			fallback: "f.ts",
+		},
+		{
+			row: "R13 right of a pipe (V1 C1)",
+			command: "echo | cd sub && printf x > f.ts",
+			bash: "f.ts",
+		},
+		{
+			row: "R14 left of a pipe",
+			command: "cd sub | cat; printf x > f.ts",
+			bash: "f.ts",
+		},
+		{ row: "R15 |&", command: "cd sub |& cat; printf x > f.ts", bash: "f.ts" },
+		{
+			row: "R16 backgrounded list (V1 C2)",
+			command: "cd sub && true & printf x > f.ts",
+			bash: "f.ts",
+		},
+		{
+			row: "R17 backgrounded cd",
+			command: "cd sub & printf x > f.ts",
+			bash: "f.ts",
+		},
+		{
+			row: "R18 write inside a backgrounded list",
+			command: "cd sub && printf x > f.ts & wait",
+			bash: "sub/f.ts",
+			fallback: "f.ts",
+		},
+		{
+			row: "R19 subshell parens",
+			command: "( true; cd sub ); printf x > f.ts",
+			bash: "f.ts",
+		},
+		{
+			row: "R20 command substitution",
+			command: "x=$(true; cd sub); printf x > f.ts",
+			bash: "f.ts",
+		},
+		{
+			row: "R21 brace group",
+			command: "{ cd sub; }; printf x > f.ts",
+			bash: "sub/f.ts",
+			fallback: "f.ts",
+		},
+		{
+			row: "R22 function body, never called",
+			command: "f() {\ncd sub\n}\nprintf x > f.ts",
+			bash: "f.ts",
+		},
+		{
+			row: "R23 function body, called",
+			command: "cd sub && g() { cd ..; }; g; printf x > f.ts",
+			bash: "f.ts",
+		},
+		{
+			row: "R24 if body",
+			command: "if false\nthen\ncd sub\nfi\nprintf x > f.ts",
+			bash: "f.ts",
+		},
+		{
+			row: "R25 pushd/popd pair",
+			command: "pushd sub; popd; printf x > f.ts",
+			bash: "f.ts",
+		},
+		{
+			row: "R26 bare pushd (V1 C4)",
+			command: "pushd sub; pushd; printf x > f.ts",
+			bash: "f.ts",
+		},
+		{
+			row: "R27 popd +0",
+			command: "pushd sub && pushd ../other && popd +0 && printf x > f.ts",
+			bash: "sub/f.ts",
+			fallback: "f.ts",
+		},
+		{
+			row: "R28 popd +1",
+			command: "pushd sub && pushd ../other && popd +1 && printf x > f.ts",
+			bash: "other/f.ts",
+			fallback: "f.ts",
+		},
+		{
+			row: "R29 popd with no pushd",
+			command: "cd sub; popd; printf x > f.ts",
+			bash: "sub/f.ts",
+			fallback: "f.ts",
+		},
+		{
+			row: "R30 cd -",
+			command: "cd sub && cd - && printf x > f.ts",
+			bash: "f.ts",
+		},
+		{
+			row: "R31 builtin cd",
+			command: "cd sub && builtin cd .. && printf x > f.ts",
+			bash: "f.ts",
+		},
+		{
+			row: "R32 eval",
+			command: "cd sub && eval 'cd ..' && printf x > f.ts",
+			bash: "f.ts",
+		},
+		{
+			row: "R33 escaped verb",
+			command: "cd sub && \\cd .. && printf x > f.ts",
+			bash: "f.ts",
+		},
+	];
 
-	it("returns to the directory a `popd` restores", () => {
-		const sub = path.join(tmp, "sub");
-		expect(
-			written(`pushd ${sub} && echo x > in.ts && popd && echo y > out.ts`),
-		).toEqual([path.join(sub, "in.ts"), path.join(tmp, "out.ts")]);
-	});
-
-	it("keeps a `cd` the right side of `||` never ran", () => {
-		// A failing `cd` is the only way to reach the right side, so that write
-		// lands where the command started.
-		const sub = path.join(tmp, "sub");
-		expect(written(`cd ${sub} || echo x > f.ts`)).toEqual([
-			path.join(tmp, "f.ts"),
-		]);
-	});
+	it.each(CWD_ROWS)(
+		"names the file bash writes, or the base's answer: $row",
+		({ command, bash, fallback }) => {
+			expect(written(command)).toEqual([path.join(tmp, fallback ?? bash)]);
+		},
+	);
 });
 
 // ── edge cases ──────────────────────────────────────────────────────────────

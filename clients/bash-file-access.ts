@@ -60,6 +60,20 @@ export interface ShellCommandSegment {
 }
 
 /**
+ * How a segment ended. `redirect` is an `&` that belongs to a redirection
+ * (`2>&1`, `>&2`, `&>f`), so the next segment is the same simple command; a
+ * `|&` is a `pipe`; `end` is the end of the text.
+ */
+type ShellSegmentExit =
+	| "and"
+	| "or"
+	| "pipe"
+	| "seq"
+	| "background"
+	| "redirect"
+	| "end";
+
+/**
  * One lexed segment with its character range in the command text (`start` where
  * the previous terminator ended, `end` at this segment's own terminator). A
  * redirect target's offset falls in the range of the segment that runs it,
@@ -70,6 +84,11 @@ interface ShellSegmentRange {
 	segment: ShellCommandSegment;
 	start: number;
 	end: number;
+	exit: ShellSegmentExit;
+	/** An unquoted `(`, `)`, `{`, `}` or backtick appeared in the segment. */
+	grouping: boolean;
+	/** Per token: a redirection's descriptor or target, not an argument. */
+	redirectWords: readonly boolean[];
 }
 
 interface PendingHeredoc {
@@ -226,6 +245,10 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 	let unsupported = false;
 	let atTokenStart = true;
 	let segmentStart = 0;
+	let grouping = false;
+	let redirectWords: boolean[] = [];
+	// The next word is a redirection's target (`> f`, `2>&1`'s `1`).
+	let redirectPending = false;
 	const appendChar = (ch: string | undefined, quoted: boolean) => {
 		if (word === "") wordFirstCharQuoted = quoted;
 		word += ch ?? "";
@@ -234,12 +257,18 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 		if (word) {
 			quotedTilde.push(wordFirstCharQuoted && word.startsWith("~"));
 			tokens.push(word);
+			redirectWords.push(redirectPending);
+			redirectPending = false;
 		}
 		word = "";
 		wordFirstCharQuoted = false;
 		atTokenStart = true;
 	};
-	const flushSegment = (terminator?: "pipe", end = command.length - 1) => {
+	const flushSegment = (
+		terminator?: "pipe",
+		end = command.length - 1,
+		exit: ShellSegmentExit = "end",
+	) => {
 		flushWord();
 		if (tokens.length > 0 || unsupported)
 			segments.push({
@@ -251,9 +280,15 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 				},
 				start: segmentStart,
 				end,
+				exit,
+				grouping,
+				redirectWords,
 			});
 		tokens = [];
 		quotedTilde = [];
+		redirectWords = [];
+		grouping = false;
+		if (exit !== "redirect") redirectPending = false;
 		unsupported = false;
 		atTokenStart = true;
 		segmentStart = end + 1;
@@ -320,7 +355,7 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 			flushWord();
 			if (ch === "\n" && pendingHeredocs.length > 0) {
 				const heredocs = pendingHeredocs.splice(0);
-				flushSegment(undefined, i);
+				flushSegment(undefined, i, "seq");
 				const consumed = consumeHeredocBodies(command, i + 1, heredocs);
 				// A substitution's own text is NOT a range of this command: offsets
 				// here are relative to the substituted body, so a redirect inside one
@@ -339,17 +374,35 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 				continue;
 			}
 			let terminator: "pipe" | undefined;
-			if (ch === "|" && next === "|") i++;
-			else if (ch === "&" && next === "&") i++;
-			else if (ch === "|") {
+			let exit: ShellSegmentExit = "seq";
+			const prev = command[i - 1];
+			if (ch === "|" && next === "|") {
+				i++;
+				exit = "or";
+			} else if (ch === "&" && next === "&") {
+				i++;
+				exit = "and";
+			} else if (ch === "|") {
 				unsupported = true;
 				terminator = "pipe";
-			} else if (ch === "&") unsupported = true;
-			flushSegment(terminator, i);
+				exit = "pipe";
+			} else if (ch === "&") {
+				unsupported = true;
+				exit =
+					prev === ">" || prev === "<" || next === ">"
+						? "redirect"
+						: prev === "|"
+							? "pipe"
+							: "background";
+			}
+			flushSegment(terminator, i, exit);
 			continue;
 		}
 		if (ch === "<" || ch === ">") {
+			// `2>` names a descriptor, not an argument.
+			if (/^\d+$/.test(word)) redirectPending = true;
 			flushWord();
+			redirectPending = true;
 			if (
 				ch === "<" &&
 				next === "<" &&
@@ -360,16 +413,18 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 				if (parsed) {
 					pendingHeredocs.push(parsed.heredoc);
 					i = parsed.end;
+					redirectPending = false;
 				}
 			}
 			unsupported = true;
 			continue;
 		}
+		if ("(){}`".includes(ch)) grouping = true;
 		appendChar(ch, false);
 		atTokenStart = false;
 	}
 	if (quote || escaped) unsupported = true;
-	flushSegment();
+	flushSegment(undefined, command.length - 1, "end");
 	return segments;
 }
 
@@ -1026,9 +1081,11 @@ export interface ShellWriteScan {
  * Every operand resolves against the working directory in effect for ITS
  * segment, so `cd <dir> && echo x > f.ts` names `<dir>/f.ts` (#2050 AC4).
  *
- * A `cd` moves that directory only where bash would: across `&&`, `;` and a
- * newline, never out of a `|` or `&` subshell, and never back past a `popd`
- * (#4713 F1).
+ * That directory moves only where bash certainly moves it (#4713 round 4): see
+ * {@link directoryEffect} for the admitted forms. A directory builtin in a
+ * pipeline or a backgrounded list leaves it alone (bash ran it in a subshell);
+ * anything else the scan cannot certify returns it to `cwd`, the pre-#2050
+ * answer, for the rest of the command.
  *
  * Returns absolute paths. The file need not exist yet (it may be created) —
  * existence is confirmed later by recordWritten at tool_result time.
@@ -1043,9 +1100,17 @@ export function scanShellWriteScopes(
 	// The working directory in effect for the segment being read, which a `cd`
 	// or `pushd` in an earlier segment moves.
 	let effectiveCwd = cwd;
-	// The `pushd` directory stack, so a `popd` returns to the directory it
-	// restores instead of leaving the last `pushd` target in effect (#4713 F1).
+	// The `pushd` directory stack, holding only the pushes this scan admitted,
+	// so a `popd` returns to the directory it restores (#4713 F1).
 	const dirStack: string[] = [];
+	// Set once the scan meets a directory change it cannot certify; from then
+	// on every operand resolves against `cwd`, as before #2050.
+	let fellBack = false;
+	const fallBack = () => {
+		fellBack = true;
+		effectiveCwd = cwd;
+		dirStack.length = 0;
+	};
 	const add = (token: ShellOperand) => {
 		const abs = resolveCandidate(token, effectiveCwd);
 		if (abs) out.add(abs);
@@ -1060,14 +1125,14 @@ export function scanShellWriteScopes(
 	// body is not credited to this command at all.
 	const redirects = extractRedirectTargets(command);
 	let redirectCursor = 0;
-	for (const {
-		segment,
-		start: segmentStart,
-		end: segmentEnd,
-	} of tokenizeShellCommandWithRanges(command)) {
-		// The directory this segment INHERITED, which the next one keeps unless
-		// this segment both moved and the terminator runs it in the same shell.
-		const inheritedCwd = effectiveCwd;
+	const ranges = tokenizeShellCommandWithRanges(command);
+	const backgrounded = backgroundedRanges(ranges);
+	// How the current simple command was entered (`seq` at list start), and its
+	// ranges so far: a redirection's `&` splits one command into two ranges.
+	let entry: ShellSegmentExit = "seq";
+	let simpleCommand: ShellSegmentRange[] = [];
+	for (const [rangeIndex, range] of ranges.entries()) {
+		const { segment, start: segmentStart, end: segmentEnd } = range;
 		if (segmentEnd >= 0) {
 			for (; redirectCursor < redirects.length; redirectCursor += 1) {
 				const redirect = redirects[redirectCursor];
@@ -1082,9 +1147,6 @@ export function scanShellWriteScopes(
 				});
 			}
 		}
-		// Whether this segment moved the directory, which `||` reads: its right
-		// side runs only after a FAILURE, so a `cd` there did not move it.
-		let moved = false;
 		const tokens = shellOperands(segment);
 		const { verb, args } =
 			tokens.length === 0
@@ -1092,26 +1154,15 @@ export function scanShellWriteScopes(
 				: unwrapCommand(tokens);
 
 		if (verb === "cd" || verb === "pushd") {
+			// Every directory the command names is a candidate recovery root,
+			// whether or not the scan can certify that the shell stayed there.
 			const target = resolveCdOperand(
 				args.find((arg) => !arg.text.startsWith("-")),
 				effectiveCwd,
 			);
-			if (target) {
-				if (!seenCdTargets.has(target)) {
-					seenCdTargets.add(target);
-					cdTargets.push(target);
-				}
-				if (verb === "pushd") dirStack.push(effectiveCwd);
-				effectiveCwd = target;
-				moved = true;
-			}
-		} else if (verb === "popd" && args.length === 0) {
-			// A `popd` that names an entry (`+N`, `-N`) is left alone: which
-			// directory it restores is not knowable from the stack alone.
-			const restored = dirStack.pop();
-			if (restored !== undefined) {
-				effectiveCwd = restored;
-				moved = true;
+			if (target && !seenCdTargets.has(target)) {
+				seenCdTargets.add(target);
+				cdTargets.push(target);
 			}
 		} else if (verb === "tee" || verb === "touch") {
 			for (const a of args) if (!a.text.startsWith("-")) add(a);
@@ -1253,23 +1304,150 @@ export function scanShellWriteScopes(
 				if (files.length >= 1) add(files[files.length - 1]);
 			}
 		}
-		// What the NEXT segment inherits. `&&`, `;` and a newline run it in this
-		// shell, so a move carries; `|` and `&` run this side in a subshell, whose
-		// cwd never leaks back; `||` runs its right side only after a failure, so
-		// a `cd` there did NOT move the directory. The terminator's own character
-		// is the segment's `end` (the tokenizer's `&&`/`||` end on their second
-		// character), so a chained pair is read from the character before it.
-		const endChar = segmentEnd >= 0 ? command[segmentEnd] : "";
-		const beforeEnd = segmentEnd > 0 ? command[segmentEnd - 1] : "";
-		const sameShell =
-			endChar === ";" ||
-			endChar === "\n" ||
-			(endChar === "&" && beforeEnd === "&");
-		const orChain = endChar === "|" && beforeEnd === "|";
-		if (!(sameShell || (orChain && !moved))) effectiveCwd = inheritedCwd;
+		// A heredoc's substitution runs in a subshell and joins no list.
+		if (segmentEnd < 0) continue;
+		simpleCommand.push(range);
+		if (range.exit === "redirect") continue;
+		const exit = range.exit;
+		const effect = directoryEffect(simpleCommand, effectiveCwd);
+		simpleCommand = [];
+		const previousEntry = entry;
+		entry = exit;
+		if (fellBack || effect.kind === "none") continue;
+		if (effect.kind === "construct") {
+			fallBack();
+			continue;
+		}
+		// A pipeline member or a backgrounded list runs in a subshell: its
+		// directory change never reaches the next command.
+		if (previousEntry === "pipe" || exit === "pipe" || backgrounded[rangeIndex])
+			continue;
+		// Entered at list start or after `&&`/`;`/newline/`&`, and ended by
+		// `&&`/`;`/newline/the end: the only positions where it certainly ran
+		// in this shell and the next command certainly sees its directory.
+		if (previousEntry === "or" || exit === "or" || effect.kind === "unknown") {
+			fallBack();
+		} else if (effect.kind === "move") {
+			if (effect.push) dirStack.push(effectiveCwd);
+			effectiveCwd = effect.target;
+		} else {
+			const restored = dirStack.pop();
+			if (restored === undefined) fallBack();
+			else effectiveCwd = restored;
+		}
 	}
 
 	return { written: Array.from(out), cdTargets };
+}
+
+/** Bash reserved words: a command starting with one opens or closes a construct. */
+const SHELL_RESERVED_WORDS: ReadonlySet<string> = new Set([
+	"!",
+	"[[",
+	"]]",
+	"{",
+	"}",
+	"case",
+	"coproc",
+	"do",
+	"done",
+	"elif",
+	"else",
+	"esac",
+	"fi",
+	"for",
+	"function",
+	"if",
+	"in",
+	"select",
+	"then",
+	"time",
+	"until",
+	"while",
+]);
+
+/**
+ * Builtins that run shell text in the current shell or change how a later
+ * word resolves, so the directory after them is not knowable statically.
+ */
+const SHELL_CODE_BUILTINS: ReadonlySet<string> = new Set([
+	".",
+	"alias",
+	"builtin",
+	"command",
+	"enable",
+	"eval",
+	"shopt",
+	"source",
+	"trap",
+]);
+
+type DirectoryEffect =
+	| { kind: "none" }
+	| { kind: "construct" }
+	| { kind: "unknown" }
+	| { kind: "move"; target: string; push: boolean }
+	| { kind: "pop" };
+
+/**
+ * What one simple command does to the shell's directory, read as a positive
+ * list (#4713 round 4). Admitted: `cd DIR` and `pushd DIR` with exactly one
+ * statically resolvable operand, and a bare `popd`, each spelled as that
+ * literal first word once leading assignments and redirections are set aside.
+ * A command whose first word is a plain word naming none of the directory or
+ * shell-text builtins is `none`. A reserved word or an unquoted grouping
+ * character is a `construct`; every other form is `unknown`.
+ */
+function directoryEffect(
+	ranges: readonly ShellSegmentRange[],
+	cwd: string,
+): DirectoryEffect {
+	if (ranges.some((range) => range.grouping)) return { kind: "construct" };
+	const words = ranges.flatMap((range) =>
+		shellOperands(range.segment).filter(
+			(_, index) => range.redirectWords[index] !== true,
+		),
+	);
+	let first = 0;
+	while (/^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(words[first]?.text ?? "")) first++;
+	const verb = words[first]?.text;
+	if (verb === undefined) return { kind: "none" };
+	if (SHELL_RESERVED_WORDS.has(verb)) return { kind: "construct" };
+	const operands = words.slice(first + 1);
+	if (verb === "cd" || verb === "pushd") {
+		const target =
+			operands.length === 1 ? resolveCdOperand(operands[0], cwd) : undefined;
+		return target
+			? { kind: "move", target, push: verb === "pushd" }
+			: { kind: "unknown" };
+	}
+	if (verb === "popd")
+		return operands.length === 0 ? { kind: "pop" } : { kind: "unknown" };
+	if (SHELL_CODE_BUILTINS.has(verb) || !/^[\w./+@%:,~[\]-]+$/.test(verb))
+		return { kind: "unknown" };
+	return { kind: "none" };
+}
+
+/**
+ * Per range: whether its list ends in a lone `&`, so bash ran every command of
+ * that list in a background subshell.
+ */
+function backgroundedRanges(ranges: readonly ShellSegmentRange[]): boolean[] {
+	const backgrounded = ranges.map(() => false);
+	let listStart = 0;
+	for (const [index, range] of ranges.entries()) {
+		if (range.end < 0) continue;
+		if (
+			range.exit !== "seq" &&
+			range.exit !== "background" &&
+			range.exit !== "end"
+		)
+			continue;
+		if (range.exit === "background")
+			for (let k = listStart; k <= index; k += 1) backgrounded[k] = true;
+		listStart = index + 1;
+	}
+	return backgrounded;
 }
 
 /**
