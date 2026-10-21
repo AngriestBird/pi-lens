@@ -509,8 +509,11 @@ export const wallClockBudgetInclude = [
 	// #4148: a 199K-blank-line rule is a real event-loop occupancy witness for
 	// validateRule's synchronous language extraction, so it runs serialized.
 	"tests/clients/ast-grep-rule-regex-budget.test.ts",
-	// #4713 R11: real `bash -c` is the oracle for ~1 500 generated cd
-	// spellings (flake-shape admission); about 5 s of serial spawns.
+	// #4713 R11, R12: real `bash -c` is the oracle for 2 625 generated cd,
+	// empty-word and redirect-target spellings (flake-shape admission); about
+	// 5 s of serial spawns. No wall-clock budget assertion: the file pins its
+	// exact row count, one spawn per row, which bounds the cost without a
+	// clock that a loaded host would make flake.
 	"tests/clients/bash-word-composition.test.ts",
 	"tests/clients/biome-config-decorator-metadata.test.ts",
 	"tests/clients/build-identity.test.ts",

@@ -48,9 +48,11 @@ export interface ShellCommandSegment {
 
 /**
  * How bash quoted one stretch of a word's SOURCE (#4713 R11). `escaped` is one
- * unquoted backslash-escaped character; `ansiC` is `$'…'` and `locale` is
- * `$"…"`. A backslash-newline is no part: bash removes it before it reads
- * quoting, so it joins the stretch around it.
+ * unquoted backslash-escaped character; `keptEscape` is one escaped before an
+ * ordinary character (`\c`), whose backslash the path reading keeps for native
+ * Windows paths (#4713 R12); `ansiC` is `$'…'` and `locale` is `$"…"`. A
+ * backslash-newline is no part: bash removes it before it reads quoting, so it
+ * joins the stretch around it.
  */
 type WordPartKind =
 	| "unquoted"
@@ -58,7 +60,8 @@ type WordPartKind =
 	| "double"
 	| "ansiC"
 	| "locale"
-	| "escaped";
+	| "escaped"
+	| "keptEscape";
 
 /**
  * One stretch of a word, kept even when it emits nothing (`""`). `text` is
@@ -72,12 +75,11 @@ interface WordPart {
 }
 
 /**
- * A word as bash lexed it: `text` is the token callers already compare (a
- * backslash before an ordinary character stays, for native Windows paths),
- * and `parts` is the model every quoting question is read from (#4713 R11).
+ * A word as bash lexed it: `parts` is the model every reader takes the word
+ * from (#4713 R11, R12), through {@link wordValue}. The legacy token text is
+ * only the public `tokens` stream; no reader here takes a word from it.
  */
 interface ShellWord {
-	text: string;
 	parts: readonly WordPart[];
 	/**
 	 * Bash expands a leading `~` only when its whole tilde-prefix, up to the
@@ -116,9 +118,13 @@ interface ShellSegmentRange {
 	exit: ShellSegmentExit;
 	/** An unquoted `(`, `)`, `{`, `}` or backtick appeared in the segment. */
 	grouping: boolean;
-	/** Per token: a redirection's descriptor or target, not an argument. */
+	/** Per word: a redirection's descriptor or target, not an argument. */
 	redirectWords: readonly boolean[];
-	/** Per token: the word model behind `segment.tokens` (#4713 R11). */
+	/**
+	 * The segment's words (#4713 R11). A quote that emits nothing still makes a
+	 * word (`'' cd sub` runs an empty command name), which `segment.tokens`
+	 * skips, so the two lists are not index-aligned (#4713 R12).
+	 */
 	words: readonly ShellWord[];
 }
 
@@ -251,8 +257,9 @@ function consumeHeredocBodies(
 }
 
 /**
- * A word a write or read reader resolves: the token text, and whether bash
- * expands its leading `~` (see {@link ShellWord.tildeExpands}).
+ * A word a write, read, delete or grep reader takes: its path reading (see
+ * {@link wordValue}), empty when the word is not known statically, and whether
+ * bash expands its leading `~` (see {@link ShellWord.tildeExpands}).
  */
 interface ShellOperand {
 	text: string;
@@ -261,7 +268,7 @@ interface ShellOperand {
 
 function shellOperands(range: ShellSegmentRange): ShellOperand[] {
 	return range.words.map((word) => ({
-		text: word.text,
+		text: wordValue(word, true) ?? "",
 		tildeExpands: word.tildeExpands,
 	}));
 }
@@ -270,18 +277,31 @@ function shellOperands(range: ShellSegmentRange): ShellOperand[] {
  * Bash's word after quote removal, or `undefined` when a part's text is not
  * known statically (#4713 R11). This is the name bash looks a command up by:
  * `\c""d`, `'cd'` and `$'cd'` are all `cd`, and `"\c"d` is `\cd`.
+ *
+ * `asPath` is the reading every operand reader takes (#4713 R12). It keeps the
+ * backslash of a `keptEscape` part, so an unquoted `C:\src\f.ts` names that
+ * native Windows path where bash would read `C:srcf.ts`; every other part is
+ * bash's own text, so `"C:\x\f.ts"` keeps its backslashes and `$'f.ts'` is
+ * `f.ts`.
  */
-function wordValue(word: ShellWord): string | undefined {
+function wordValue(word: ShellWord, asPath = false): string | undefined {
 	let value = "";
 	for (const part of word.parts) {
 		if (part.text === undefined) return undefined;
-		value += part.text;
+		value +=
+			asPath && part.kind === "keptEscape"
+				? part.text.replace(/[\s\S]/g, "\\$&")
+				: part.text;
 	}
 	return value;
 }
 
 export function tokenizeShellCommand(command: string): ShellCommandSegment[] {
-	return tokenizeShellCommandWithRanges(command).map((entry) => entry.segment);
+	// A range of empty words only (`'' && cd sub`) has no token, and the public
+	// stream never carried one (#4713 R12).
+	return tokenizeShellCommandWithRanges(command).flatMap(({ segment }) =>
+		segment.tokens.length > 0 || segment.unsupported ? [segment] : [],
+	);
 }
 
 function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
@@ -333,11 +353,13 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 	};
 	const flushWord = () => {
 		closePart();
-		if (word) {
-			tokens.push(word);
+		// A quote that emits nothing still makes a word: `'' cd sub` runs an
+		// empty command name, and `cd "" sub` passes two operands (#4713 R12).
+		// The public `tokens` stream keeps skipping it.
+		if (word || parts.length > 0) {
+			if (word) tokens.push(word);
 			const [first, ...rest] = parts;
 			words.push({
-				text: word,
 				parts,
 				tildeExpands:
 					first?.kind === "unquoted" &&
@@ -357,7 +379,7 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 		exit: ShellSegmentExit = "end",
 	) => {
 		flushWord();
-		if (tokens.length > 0 || unsupported)
+		if (words.length > 0 || unsupported)
 			segments.push({
 				segment: {
 					tokens,
@@ -508,8 +530,16 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 			continue;
 		}
 		if (ch === "<" || ch === ">") {
-			// `2>` names a descriptor, not an argument.
-			if (/^\d+$/.test(word)) redirectPending = true;
+			// `2>` names a descriptor, not an argument, only when the digits are
+			// one unquoted part: `2"">f` passes the argument `2` (#4713 R12).
+			closePart();
+			const [digits, ...more] = parts;
+			if (
+				more.length === 0 &&
+				digits?.kind === "unquoted" &&
+				/^\d+$/.test(digits.text ?? "")
+			)
+				redirectPending = true;
 			flushWord();
 			redirectPending = true;
 			if (
@@ -531,7 +561,7 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 		}
 		if ("(){}`".includes(ch)) grouping = true;
 		word += ch;
-		if (escapeKept) addToPart("escaped", ch);
+		if (escapeKept) addToPart("keptEscape", ch);
 		else if (ch === "$" && (next === "'" || next === '"')) dollarQuote = true;
 		else addToPart("unquoted", ch);
 		escapeKept = false;
@@ -1014,13 +1044,15 @@ function isLineDroppingTailCommand(tokens: string[]): boolean {
  * unverified by any test that could tell a real pipe from mere adjacency).
  */
 function grepPipesIntoTruncatingTail(
-	segments: ShellCommandSegment[],
+	ranges: readonly ShellSegmentRange[],
+	words: readonly ShellOperand[][],
 	index: number,
 ): boolean {
-	if (segments[index]?.terminator !== "pipe") return false;
-	for (let j = index + 1; j < segments.length; j++) {
-		if (isLineDroppingTailCommand(segments[j].tokens)) return true;
-		if (segments[j].terminator !== "pipe") return false;
+	if (ranges[index]?.segment.terminator !== "pipe") return false;
+	for (let j = index + 1; j < ranges.length; j++) {
+		if (isLineDroppingTailCommand((words[j] ?? []).map((w) => w.text)))
+			return true;
+		if (ranges[j]?.segment.terminator !== "pipe") return false;
 	}
 	return false;
 }
@@ -1046,12 +1078,14 @@ function collectGrepCommandFiles(
 	// the aggregate `context` this function returns.
 	let truncated = false;
 	const ranges = tokenizeShellCommandWithRanges(command);
-	const segments = ranges.map((range) => range.segment);
-	for (let i = 0; i < segments.length; i++) {
-		const tokens = segments[i].tokens;
-		const verb = path.basename(tokens[0] ?? "");
+	// Each range's words, derived once: a pipeline of greps reads every later
+	// range for a dropping tail.
+	const words = ranges.map((range) => shellOperands(range));
+	for (let i = 0; i < ranges.length; i++) {
+		const operands = words[i] ?? [];
+		const verb = path.basename(operands[0]?.text ?? "");
 		if (verb !== "grep" && verb !== "egrep" && verb !== "fgrep") continue;
-		const args = tokens.slice(1);
+		const args = operands.slice(1).map((operand) => operand.text);
 		if (!grepHasLineNumbers(args)) continue;
 		hasLineNumberGrep = true;
 		const segmentContext = parseGrepContextLines(args);
@@ -1061,13 +1095,10 @@ function collectGrepCommandFiles(
 					after: Math.min(context.after, segmentContext.after),
 				}
 			: segmentContext;
-		for (const file of extractGrepSearchFiles(
-			shellOperands(ranges[i]!).slice(1),
-			cwd,
-		)) {
+		for (const file of extractGrepSearchFiles(operands.slice(1), cwd)) {
 			files.add(file);
 		}
-		if (grepPipesIntoTruncatingTail(segments, i)) truncated = true;
+		if (grepPipesIntoTruncatingTail(ranges, words, i)) truncated = true;
 	}
 	return {
 		hasLineNumberGrep,
@@ -1279,7 +1310,8 @@ export function scanShellWriteScopes(
 				// (#4713 F5).
 				if (redirect.index < segmentStart) continue;
 				// The target is read through the same word model as any operand,
-				// so `> ''~/f.ts` names the literal `./~/f.ts` (#4713 R11).
+				// so `> ''~/f.ts` names the literal `./~/f.ts` (#4713 R11), and
+				// `> "C:\x\f.ts"` keeps the backslashes bash keeps (#4713 R12).
 				// The raw scanner stops at every character that ends a range, so
 				// the text is one range; it holds an open quote when the scanner
 				// split a quoted name (`> "f.ts x"`), which names nothing.
@@ -1586,7 +1618,7 @@ function directoryEffect(
 	)
 		first++;
 	// The name bash looks each word up by (#4713 R11): `\c""d` is `cd`.
-	const names = words.map(wordValue);
+	const names = words.map((word) => wordValue(word));
 	let at = first;
 	while (names[at] === "builtin" || names[at] === "command") at++;
 	let named: string | undefined;
@@ -1600,6 +1632,9 @@ function directoryEffect(
 	if (first >= words.length) return { kind: "none" };
 	const verb = names[first];
 	if (verb === undefined) return { kind: "unknown", named };
+	// An empty command name (`'' cd sub`) is a command bash cannot find, so it
+	// changes no directory (#4713 R12).
+	if (verb === "") return { kind: "none" };
 	if (SHELL_RESERVED_WORDS.has(verb)) return { kind: "construct" };
 	const operands = words.slice(first + 1);
 	if (verb === "cd" || verb === "pushd") {

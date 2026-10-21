@@ -1805,6 +1805,95 @@ describe("scanShellWriteScopes — the command's effective directory (#2050)", (
 			bash: "a*/f.ts",
 			named: ["a*"],
 		},
+		// #4713 R12 (greptile PRRT_kwDORt8rec6u8SH2, verify r12 F2): a separate
+		// empty quoted word is a word. Bash runs an empty command name, or
+		// passes `cd` two operands, and enters nothing; the dropped word let
+		// the rest read as `cd sub`.
+		{
+			row: "R120 '' \\c\"\"d sub, greptile's command (R12)",
+			command: "'' \\c\"\"d sub; printf 'debugger;' > f.ts",
+			bash: "f.ts",
+			named: [],
+		},
+		{
+			row: "R121 '' cd sub, an empty command name (R12)",
+			command: "'' cd sub; printf x > f.ts",
+			bash: "f.ts",
+			named: [],
+		},
+		{
+			row: 'R122 cd "" sub, an empty first operand (R12)',
+			command: 'cd "" sub; printf x > f.ts',
+			bash: "f.ts",
+			named: [],
+		},
+		{
+			row: "R123 FOO=1 '' cd sub (R12)",
+			command: "FOO=1 '' cd sub; printf x > f.ts",
+			bash: "f.ts",
+			named: [],
+		},
+		{
+			row: "R124 '' && cd sub, a command of one empty word (R12)",
+			command: "'' && cd sub; printf x > f.ts",
+			bash: "f.ts",
+		},
+		{
+			row: "R125 ''; cd sub, an empty command name moves nothing (R12)",
+			command: "''; cd sub; printf x > f.ts",
+			bash: "sub/f.ts",
+			named: ["sub"],
+		},
+		// #4713 R12: a descriptor is unquoted digits; `2""` is the argument `2`,
+		// so `cd` gets two operands and fails.
+		{
+			row: 'R126 cd sub 2"">/dev/null, quoted digits are no descriptor (R12)',
+			command: 'cd sub 2"">/dev/null; printf x > f.ts',
+			bash: "f.ts",
+		},
+		{
+			row: "R126b cd sub '2'>/dev/null, the same in one quoted part (R12)",
+			command: "cd sub '2'>/dev/null; printf x > f.ts",
+			bash: "f.ts",
+		},
+		{
+			row: "R126c cd sub>/dev/null, a word glued to > is no descriptor (R12)",
+			command: "cd sub>/dev/null; printf x > f.ts",
+			bash: "sub/f.ts",
+			named: ["sub"],
+		},
+		// #4713 R12 (verify r12 F1, F3): every operand reader takes the word
+		// model's path reading, not the legacy token text.
+		{
+			row: 'R127 > "f\\.ts", a backslash bash keeps in double quotes (R12)',
+			command: 'printf x > "f\\.ts"',
+			bash: "f\\.ts",
+			named: [],
+		},
+		{
+			row: "R128 > $'f.ts', an ANSI-C redirect target (R12)",
+			command: "printf x > $'f.ts'",
+			bash: "f.ts",
+			named: [],
+		},
+		{
+			row: "R129 touch $'f.ts', an ANSI-C write operand (R12)",
+			command: "touch $'f.ts'",
+			bash: "f.ts",
+			named: [],
+		},
+		{
+			row: "R130 touch ~$''/f.ts, a quoted tilde-prefix (R12)",
+			command: "mkdir '~'; touch ~$''/f.ts",
+			bash: "~/f.ts",
+			named: [],
+		},
+		{
+			row: "R131 $'tee', an ANSI-C verb (R12)",
+			command: "$'tee' f.ts < /dev/null",
+			bash: "f.ts",
+			named: [],
+		},
 	];
 
 	it.each(CWD_ROWS)(
@@ -1830,6 +1919,33 @@ describe("scanShellWriteScopes — the command's effective directory (#2050)", (
 		expect(written('printf x > "f.ts x"')).toEqual([]);
 	});
 
+	// #4713 R12 (verify r12 F1): the Windows lane's shape, built with
+	// `path.win32` so every platform runs it (AGENTS.md shape 35). The legacy
+	// token text dropped every backslash inside the double quotes, so the write
+	// named `C:UsersRUNNER~1…` and was never recognized. The unquoted spelling
+	// keeps its backslashes through the path reading's kept escapes.
+	it("keeps the backslashes of a Windows-shaped redirect target, quoted or not (#4713 R12)", () => {
+		const target = path.win32.join(
+			"C:\\Users",
+			"RUNNER~1",
+			"AppData",
+			"Local",
+			"Temp",
+			"direct.js",
+		);
+		const expected = [path.resolve(tmp, target)];
+		expect(written(`echo direct > "${target}"; node x.js`)).toEqual(expected);
+		expect(written(`echo direct > ${target}; node x.js`)).toEqual(expected);
+		expect(written(`touch "${target}"`)).toEqual(expected);
+	});
+
+	// #4713 R12: a verb read from the legacy token text ran commands bash
+	// never runs: `"t\ee"` is a command named `t\ee`, and `''` is an empty one.
+	it("names no write for a command bash cannot find (#4713 R12)", () => {
+		expect(written('"t\\ee" f.ts')).toEqual([]);
+		expect(written("'' tee f.ts")).toEqual([]);
+	});
+
 	// #4713 R7-1: a leading unquoted `~` moves the directory only as `~` or
 	// `~/`, which bash and the scan both expand from HOME; the other tilde
 	// forms are rows R51-R66 and R73.
@@ -1853,6 +1969,67 @@ describe("scanShellWriteScopes — the command's effective directory (#2050)", (
 		} finally {
 			restore();
 		}
+	});
+});
+
+// #4713 R12 (verify r12 F1, F3): every reader of a bash command takes its
+// words from the word model. The legacy token text keeps the `$` of `$'…'`, so
+// before this round each reader below named `$a.ts`, or saw no `cat`, `rm`,
+// `grep` or `head`. One row per reader.
+describe("every reader takes its words from the word model (#4713 R12)", () => {
+	it("names an ANSI-C operand's file in reads, deletes and grep", () => {
+		const a = touchLines("a.ts", 20);
+		expect(
+			extractReadPathsFromCommand("cat $'a.ts'", tmp).map((s) => s.filePath),
+		).toEqual([a]);
+		expect(extractDeletedPathsFromCommand("rm $'a.ts'", tmp)).toEqual([a]);
+		expect(
+			extractGrepSearchReadsFromOutput("grep -n foo $'a.ts'", tmp, "9:foo"),
+		).toEqual([
+			{ file: a, startLine: 9, endLine: 9, contextBefore: 0, contextAfter: 0 },
+		]);
+		// A flag is a word too: `$'-n'` is `-n`.
+		expect(
+			extractGrepSearchReadsFromOutput(`grep $'-n' foo ${a}`, tmp, "9:foo"),
+		).toEqual([
+			{ file: a, startLine: 9, endLine: 9, contextBefore: 0, contextAfter: 0 },
+		]);
+	});
+
+	it("reads an ANSI-C verb as the command bash runs", () => {
+		const a = touchLines("a.ts", 20);
+		expect(
+			extractReadPathsFromCommand(`$'cat' ${a}`, tmp).map((s) => s.filePath),
+		).toEqual([a]);
+		expect(extractDeletedPathsFromCommand(`$'rm' ${a}`, tmp)).toEqual([a]);
+		expect(
+			extractGrepSearchReadsFromOutput(`$'grep' -n -C2 foo ${a}`, tmp, "9:foo"),
+		).toEqual([
+			{ file: a, startLine: 9, endLine: 9, contextBefore: 2, contextAfter: 2 },
+		]);
+	});
+
+	it("falls back to match-line-only credit through an ANSI-C head", () => {
+		const a = touchLines("a.ts", 40);
+		expect(
+			extractGrepSearchReadsFromOutput(
+				`grep -n -C2 foo ${a} | $'head' -1`,
+				tmp,
+				"9:foo",
+			),
+		).toEqual([
+			{ file: a, startLine: 9, endLine: 9, contextBefore: 0, contextAfter: 0 },
+		]);
+	});
+
+	// The public stream is what `clients/git-guard.ts` and
+	// `clients/runtime-tool-result.ts` read by position, and an empty word now
+	// lives in the word model only: neither it nor a command of empty words
+	// may reach `tokens`.
+	it("keeps empty words out of the public segment stream", () => {
+		expect(tokenizeShellCommand("'' && cd '' sub")).toEqual([
+			{ tokens: ["cd", "sub"], unsupported: false },
+		]);
 	});
 });
 
