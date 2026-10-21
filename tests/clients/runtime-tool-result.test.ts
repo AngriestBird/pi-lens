@@ -308,6 +308,7 @@ it("announces a linked-worktree edit the pipeline found nothing in (#2050 AC3)",
 		runtime.projectRoot = repo;
 		expect(resolveAnalysisRoot(worktreeFile, repo)).toBe("linked-worktree");
 		vi.mocked(runPipeline).mockResolvedValue(pipelineResult(""));
+		const runsBefore = vi.mocked(runPipeline).mock.calls.length;
 
 		await handleToolResult(editResult());
 
@@ -339,8 +340,12 @@ it("announces a linked-worktree edit the pipeline found nothing in (#2050 AC3)",
 		expect(consumeAgentNudge(undefined, runtime.sessionScope)).toBeUndefined();
 
 		// Bounded: a second silent run in the same worktree is covered by the
-		// first row and advisory, not by a second pair.
+		// first row and advisory, not by a second pair. Each later edit writes
+		// new bytes: an unchanged file never reaches the pipeline, so the run
+		// below would observe nothing (the pipeline-call count proves it ran).
+		fs.writeFileSync(worktreeFile, "export const value = 2;\n");
 		await handleToolResult(editResult());
+		expect(vi.mocked(runPipeline).mock.calls).toHaveLength(runsBefore + 2);
 		expect(
 			getDegradationSummary().filter(
 				(entry) => entry.kind === "tool-result-linked-worktree",
@@ -353,7 +358,9 @@ it("announces a linked-worktree edit the pipeline found nothing in (#2050 AC3)",
 		vi.mocked(runPipeline).mockResolvedValue(
 			pipelineResult("src/sibling.ts:1:1 lint: unused value"),
 		);
+		fs.writeFileSync(worktreeFile, "export const value = 3;\n");
 		await handleToolResult(editResult());
+		expect(vi.mocked(runPipeline).mock.calls).toHaveLength(runsBefore + 3);
 		expect(consumeAgentNudge(undefined, runtime.sessionScope)).toBeUndefined();
 	} finally {
 		vi.mocked(runPipeline).mockReset();
