@@ -466,6 +466,14 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"real git children enumerate tracked diagnostic files, which a mocked repository cannot resolve",
 	},
+	// 2026-10-18 (#4535 slice 2): a HEAD move exists only in a real repository
+	// that git checks out; a stubbed git could not rewrite the files the look
+	// lists in its delta, and the publish is about what git actually reports.
+	"real-process-spawn:clients/disk-change-detectors-4535.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"a clean-tree HEAD move is a real git checkout; a stubbed git cannot produce the delta the look publishes",
+	},
 	"real-process-spawn:clients/dispatch/runners/ast-grep-playground-verify.test.ts":
 		{
 			detector: "real-process-spawn",

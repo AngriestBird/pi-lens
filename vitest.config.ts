@@ -512,6 +512,9 @@ export const wallClockBudgetInclude = [
 	"tests/clients/cascade-graph-occupancy.test.ts",
 	"tests/clients/cascade-turn-merge.test.ts",
 	"tests/clients/config-diagnostic-codes.test.ts",
+	// #4535 slice 2: the HEAD look and the bash write path drive a real git
+	// repository through their real entry points (flake-shape admission).
+	"tests/clients/disk-change-detectors-4535.test.ts",
 	"tests/clients/dispatch/runners/ast-grep-playground-verify.test.ts",
 	"tests/clients/dispatch/runners/ast-grep-rule-ignores.test.ts",
 	// #4522: the git-ignored census reads git's own tracked-versus-ignored

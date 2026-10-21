@@ -12,8 +12,8 @@
  * `index.ts` PASSED to a handler; this tier records what the host and the
  * model actually GOT.
  *
- * ONE FIXTURE ROOT PER FILE, one live session per case, and both are enforced
- * rather than documented. `piSessionFixture()` pins the file's root as it
+ * ONE FIXTURE ROOT PER FILE, enforced rather than documented.
+ * `piSessionFixture()` pins the file's root as it
  * creates it, and `startPiSession` refuses any other root: a session started
  * under a SECOND fixture root writes into the first root's home and nothing
  * into its own — measured: the second root's session put 78 `session_start`
@@ -399,9 +399,10 @@ export interface PiSessionOptions {
 	 * `mode` a `session_start_total` row reports. `"full"` (the default) settles
 	 * the start inside `bindExtensions`; `"quick"` is the shape a real process's
 	 * first `session_start` takes, with the warmup timer opted out — see the
-	 * header, point 3.
+	 * header, point 3; `"minimal"` is the third production mode, whose only
+	 * config-resolution path is the ensure (no warm-up, no deferred load).
 	 */
-	startupMode?: "full" | "quick";
+	startupMode?: "full" | "quick" | "minimal";
 }
 
 export interface PiSession {
