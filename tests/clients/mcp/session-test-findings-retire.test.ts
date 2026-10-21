@@ -22,7 +22,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../../../clients/cache-manager.js";
-import { makeLspServiceDouble } from "../../support/lsp-service-double.js";
+import { installLspServiceDouble } from "../../support/lsp-service-seam.js";
 import type { TestRunnerFindingsCache } from "../../../clients/project-diagnostics/runner-adapters/runner-findings.js";
 import { removeTempDirSync } from "../test-utils.js";
 
@@ -63,13 +63,6 @@ vi.mock("../../../clients/bootstrap.js", async () => {
 vi.mock("../../../clients/ast-grep-client.js", () => ({
 	AstGrepClient: class {},
 }));
-vi.mock("../../../clients/lsp/capabilities.js", () => ({
-	// `getMcpSessionContext` reads only `getAliveClientCount`; the rest of the
-	// surface comes from the factory (#2592).
-	getLSPService: () => makeLspServiceDouble({ getAliveClientCount: () => 0 }),
-	resetLSPService: vi.fn(),
-}));
-
 import {
 	_resetMcpSessionContext,
 	_resetTurnEndChain,
@@ -80,7 +73,10 @@ import {
 let tmpDir: string;
 let previousDataDir: string | undefined;
 
-beforeEach(() => {
+beforeEach(async () => {
+	// `getMcpSessionContext` reads only `getAliveClientCount`; the rest of the
+	// surface comes from the factory (#2592).
+	await installLspServiceDouble({ getAliveClientCount: () => 0 });
 	previousDataDir = process.env.PILENS_DATA_DIR;
 	handleTurnEnd.mockClear();
 	_resetMcpSessionContext();

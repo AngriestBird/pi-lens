@@ -30,13 +30,13 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { FactStore } from "../../../../clients/dispatch/fact-store.js";
 import {
 	hasUsableResult,
 	type RunnerResult,
 } from "../../../../clients/dispatch/types.js";
-import { makeLspServiceDouble } from "../../../support/lsp-service-double.js";
+import { installLspServiceDouble } from "../../../support/lsp-service-seam.js";
 import { setupTestEnvironment } from "../../test-utils.js";
 
 const { safeSpawnAsync, lspTouch, logLatency } = vi.hoisted(() => ({
@@ -133,21 +133,17 @@ vi.mock("../../../../clients/go-client.js", async (importOriginal) => ({
 	goClient: { findGoPathAsync: async () => "/usr/local/bin/go" },
 }));
 
-vi.mock("../../../../clients/lsp/capabilities.js", async (importOriginal) => ({
-	...(await importOriginal<
-		typeof import("../../../../clients/lsp/capabilities.js")
-	>()),
-	getLSPService: () =>
-		makeLspServiceDouble({
-			supportsLSP: () => true,
-			hasLSP: async () => true,
-			openFile: async () => undefined,
-			touchFile: lspTouch,
-			getDiagnostics: async () => [],
-			codeAction: async () => [],
-			hasServerPublishedForFileRoot: async () => false,
-		}),
-}));
+beforeEach(async () => {
+	await installLspServiceDouble({
+		supportsLSP: () => true,
+		hasLSP: async () => true,
+		openFile: async () => undefined,
+		touchFile: lspTouch,
+		getDiagnostics: async () => [],
+		codeAction: async () => [],
+		hasServerPublishedForFileRoot: async () => false,
+	});
+});
 
 vi.mock("../../../../clients/warm-attach.js", async (importOriginal) => ({
 	...(await importOriginal<

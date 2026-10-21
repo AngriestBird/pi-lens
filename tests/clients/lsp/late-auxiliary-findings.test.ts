@@ -19,21 +19,13 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { makeLspServiceDouble } from "../../support/lsp-service-double.js";
+import { installLspServiceDouble } from "../../support/lsp-service-seam.js";
 
 const readCachedDiagnosticsForServers = vi.hoisted(() => vi.fn());
 const observeLateAuxiliaryAnswer = vi.hoisted(() => vi.fn());
-vi.mock("../../../clients/lsp/capabilities.js", () => ({
-	// Only `getLSPService` crosses this seam in handleTurnEnd's import graph;
-	// the double still carries the full surface so a method this path grows
-	// later cannot throw into a swallow-all catch (#2582).
-	getLSPService: () =>
-		makeLspServiceDouble({
-			readCachedDiagnosticsForServers,
-			observeLateAuxiliaryAnswer,
-		}),
-}));
-
+// Only `getLSPService` crosses this seam in handleTurnEnd's import graph; the
+// double still carries the full surface so a method this path grows later
+// cannot throw into a swallow-all catch (#2582).
 const logLatency = vi.hoisted(() => vi.fn());
 vi.mock("../../../clients/latency-logger.js", async (importOriginal) => {
 	const actual =
@@ -173,7 +165,11 @@ function lateAuxRecord(): any | undefined {
 		);
 }
 
-beforeEach(() => {
+beforeEach(async () => {
+	await installLspServiceDouble({
+		readCachedDiagnosticsForServers,
+		observeLateAuxiliaryAnswer,
+	});
 	readCachedDiagnosticsForServers.mockReset();
 	observeLateAuxiliaryAnswer.mockReset();
 	observeLateAuxiliaryAnswer.mockResolvedValue(undefined);
