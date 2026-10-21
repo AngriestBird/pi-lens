@@ -1120,7 +1120,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// path locals; the legacy walker body is back to its pre-#3649 text.
 		// 34 -> 40 (#4689): the path-identity walk (`kernelRealPath`) and its
 		// two callers split, join and normalize with the OS `path` namespace.
-		"clients/path-utils.ts": 40,
+		// 40 -> 38 (#4689 r2): `realpathOrResolve` hands a relative spelling to
+		// the kernel as it is, with no `path.isAbsolute`/`path.resolve` first.
+		"clients/path-utils.ts": 38,
 		"clients/php-cs-fixer-config.ts": 4,
 		"clients/pipeline.ts": 28,
 		"clients/probe-home-state.ts": 10,

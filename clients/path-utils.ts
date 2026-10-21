@@ -412,14 +412,13 @@ function posixPathIdentity(spelled: string): string {
  * path of an existing file, or of its nearest existing ancestor plus the
  * missing tail (#4689; #1129 F11: a directory not created yet, spelled
  * through a symlinked tmpdir, which `ephemeral-root.ts` resolved with its own
- * copy of this walk until #4689). An absolute input reaches the kernel
- * unfolded, so a `..` after a link names what the OS opens; a relative one is
- * resolved against the process cwd first, as before #4689. For a map key use
- * `normalizeMapKey`, which answers the same identity slash-folded.
+ * copy of this walk until #4689). The input reaches the kernel unfolded,
+ * absolute or relative to the process cwd, so a `..` after a link names what
+ * the OS opens and both spellings of one file name one identity. For a map
+ * key use `normalizeMapKey`, which answers the same identity slash-folded.
  */
 export function realpathOrResolve(filePath: string): string {
-	const spelled = path.isAbsolute(filePath) ? filePath : path.resolve(filePath);
-	return kernelRealPath(spelled, path) ?? path.resolve(filePath);
+	return kernelRealPath(filePath, path) ?? path.resolve(filePath);
 }
 
 /**

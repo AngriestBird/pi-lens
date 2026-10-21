@@ -580,6 +580,19 @@ describe("path identity: every link spelling of one file derives one key (#4689)
 			);
 			expect(normalizeMapKey(spelled)).toBe(kernel.replace(/\\/g, "/"));
 			expect(realpathOrResolve(spelled)).toBe(kernel);
+			// The same spelling written relative to the process cwd names the
+			// same file, so it resolves to the same identity (review r1 F6: the
+			// relative branch survived its mutation; a lexical fold of the
+			// relative form named src/both.ts).
+			const cwd = process.cwd();
+			process.chdir(fx.repo);
+			try {
+				expect(
+					realpathOrResolve(["src", "linked", "..", "both.ts"].join(path.sep)),
+				).toBe(kernel);
+			} finally {
+				process.chdir(cwd);
+			}
 		} finally {
 			env.cleanup();
 		}
@@ -622,6 +635,27 @@ describe("path identity: every link spelling of one file derives one key (#4689)
 			expect(isUnderDir(fx.outsideFile, fx.aliasRoot)).toBe(false);
 		} finally {
 			env.cleanup();
+		}
+	});
+
+	it("a Windows containment miss resolves each operand once: both forms are the realpath there", () => {
+		// RECURRENCE GUARDED: `isUnderDir` sits on the per-file hot path
+		// (dispatch scope, the vendor filter, cascade). On Windows the spelling
+		// and the identity form are one realpath, so an identity disjunct run
+		// there would double the realpath calls of every miss and answer nothing
+		// new (#4689 review r2).
+		const native = vi
+			.spyOn(fs.realpathSync, "native")
+			.mockImplementation((value) => String(value));
+		try {
+			expect(
+				withPlatform("win32", () =>
+					isUnderDir("C:\\outside\\a.ts", "C:\\repo"),
+				),
+			).toBe(false);
+			expect(native).toHaveBeenCalledTimes(2);
+		} finally {
+			native.mockRestore();
 		}
 	});
 
