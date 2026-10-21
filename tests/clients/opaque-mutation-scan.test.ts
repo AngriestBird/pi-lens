@@ -2078,6 +2078,9 @@ describe("opaque recovery for tools other than bash (#4732)", () => {
 
 	// The tool names a RELATIVE path pi-lens recorded no attribution for, so the
 	// result used to return at `path_attribution_missing` before any recovery.
+	// The read guard is off, so the #2430 net arms no observation and the diff
+	// is the only answer (`observed-mutation-integration` pins the case where
+	// the net settles the named path).
 	it("dispatches a write by a tool whose relative path field has no attribution", async () => {
 		const runtime = newRuntime("4732-relative");
 		await clearDispatches();
@@ -2086,17 +2089,19 @@ describe("opaque recovery for tools other than bash (#4732)", () => {
 			toolCallId: "rel-1",
 			input: { path: "rel-out.ts", content: "export const r = 1;\n" },
 		};
+		const noReadGuard = (flag: string) => flag === "no-read-guard";
 		await runHandlerExpectingNoThrow(() =>
-			handleToolCall(callDeps(runtime, event)),
+			handleToolCall({ ...callDeps(runtime, event), getFlag: noReadGuard }),
 		);
 		fs.writeFileSync(path.join(repoDir, "rel-out.ts"), "export const r = 1;\n");
 		const recordedPaths: Array<string | undefined> = [];
-		await handleToolResult(
-			resultDeps(runtime, event, (_tool, filePath) => {
+		await handleToolResult({
+			...resultDeps(runtime, event, (_tool, filePath) => {
 				recordedPaths.push(filePath);
 				return [];
 			}),
-		);
+			getFlag: noReadGuard,
+		});
 		expect(await dispatchLog()).toEqual([["rel-out.ts", false]]);
 		// The path itself is still refused (#1642): the guess against the
 		// session root is never recorded as the file this call wrote.

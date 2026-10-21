@@ -2202,4 +2202,47 @@ describe("#4732 an observed tool's opaque diff", () => {
 			env.cleanup();
 		}
 	});
+
+	// A RELATIVE path has no recorded attribution for a tool the classifier
+	// does not know, so the result used to return at `path_attribution_missing`
+	// and the observation armed from the call's own cwd was never settled. The
+	// path is still refused as a guess; the observation answers for it.
+	it("settles the observation of a tool that named a relative path", async () => {
+		const env = setupTestEnvironment("pi-lens-4732-relative-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const filePath = path.join(env.tmpDir, "relative.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+			const event = patchEvent("relative.ts", "call-4732-relative");
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				),
+			);
+			fs.writeFileSync(
+				filePath,
+				["const a = 1;", "const b = 222;", "const c = 3;", ""].join("\n"),
+			);
+			fs.writeFileSync(
+				path.join(env.tmpDir, "relative-side.ts"),
+				"export const side = 1;\n",
+			);
+			await handleToolResult(toolResultDeps({ event, runtime, cacheManager }));
+
+			expect(
+				readChangesSince(env.tmpDir, 0)
+					.map((entry) => [path.basename(entry.filePath), entry.source])
+					.sort(),
+			).toEqual([
+				["relative-side.ts", "opaque-script"],
+				["relative.ts", "agent-tool:patch_file"],
+			]);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
 });

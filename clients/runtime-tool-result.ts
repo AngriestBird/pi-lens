@@ -1906,8 +1906,9 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		);
 	// #4732: a captured tool's relative path field that has no attribution
 	// (none is recorded for a tool the classifier does not know) is still
-	// refused as a PATH, but its call's writes are recovered from the diff
-	// below before the handler returns.
+	// refused as a PATH, but the handler goes on: the diff below recovers the
+	// call's writes, and an observation the #2430 net armed for the call (from
+	// the cwd the call ran in) settles as for an absolute path.
 	let unattributedOpaque = false;
 	const attribution =
 		toolCallId !== undefined
@@ -2325,10 +2326,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			}
 			// #4732: a path the #2430 net armed an observation of for this same
 			// call is the settle's to answer, with the tool's own attribution.
-			// Only when the handler reaches that settle: a deferred
-			// `path_attribution_missing` return never does, so there the diff is
-			// the one answer and keeps it.
-			if (opaquePaths.length > 0 && opaqueNonBash && !unattributedOpaque) {
+			if (opaquePaths.length > 0 && opaqueNonBash) {
 				const observed = new Set(
 					pendingObservationPaths(toolCallId, runtime.sessionGeneration).map(
 						(p) => normalizeMapKey(realpathOrResolve(p)),
@@ -2649,10 +2647,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				});
 		}
 		const recognizedAuthoredSet = new Set(recognizedAuthored);
-		// #4732: another tool's own authorship is the chain below's question,
-		// exactly as before it was captured; its recovery credits none.
-		if (bashCommand !== undefined)
-			bashAuthorshipConfirmed = recognizedAuthored.length > 0;
+		bashAuthorshipConfirmed = recognizedAuthored.length > 0;
 		for (const wp of written) {
 			// #3525: a parser-recognized bash write is whole-file authorship only
 			// after the tool_call preflight proved no foreign writer intervened.
@@ -2856,15 +2851,6 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			}
 		}
 	}
-	// #4732: the deferred `path_attribution_missing` return, now that the
-	// call's writes are dispatched. Its path is still refused (#1642).
-	if (unattributedOpaque)
-		return readNote.length > 0 || syntheticWriteContent.length > 0
-			? {
-					content: [...readNote, ...event.content, ...syntheticWriteContent],
-					structuredContent: event.structuredContent,
-				}
-			: undefined;
 
 	// Search tools reveal specific lines (file:line) the agent then edits — register
 	// those shown lines (± context) as reads so the follow-up edit isn't blocked (#169).
