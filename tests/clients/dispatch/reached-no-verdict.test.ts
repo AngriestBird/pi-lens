@@ -73,6 +73,8 @@ function dispatchOf(
 				collectLaterRunnerIds: [],
 			},
 		}),
+		// The dispatcher's shape when a runner of the primary group answered.
+		coverage: "primary",
 		...extra,
 	};
 }
@@ -101,6 +103,17 @@ describe("checkedWholeFile (#4733 r1 F2)", () => {
 					["biome", "succeeded"],
 					["tsc", "pending"],
 				]),
+				true,
+			],
+			[
+				"the primary group's own run is still in flight",
+				dispatchOf(
+					[
+						["biome", "succeeded"],
+						["lsp", "pending"],
+					],
+					{ coverage: "in_flight" },
+				),
 				true,
 			],
 			[
@@ -147,11 +160,29 @@ describe("checkedWholeFile (#4733 r1 F2)", () => {
 				false,
 			],
 			[
-				"the primary group did not check the file",
-				dispatchOf([["biome", "succeeded"]], {
-					unconfirmedStatus: "not fully checked",
+				// RECURRENCE GUARDED: #4733 r2 (#4734's review): an unset
+				// `unconfirmedStatus` also holds when a defined primary group never
+				// ran; only the coverage rule's positive answer admits. Unset also
+				// covers a primary that broke with no fallback standing in.
+				"the coverage rule found no check of the file",
+				dispatchOf([["biome-check-json", "succeeded"]], {
+					coverage: undefined,
 				}),
 				false,
+			],
+			[
+				"a fallback linter the coverage rule accepts answered",
+				dispatchOf([["ruff", "succeeded"]], { coverage: "fallback" }),
+				true,
+			],
+			[
+				// The mode defines no primary group (a `--no-lsp` TypeScript write):
+				// the configured runners are the whole check this session runs.
+				"no primary group is configured for the mode",
+				dispatchOf([["biome-check-json", "succeeded"]], {
+					coverage: "unconfigured",
+				}),
+				true,
 			],
 			[
 				"a verdict covers only the edit",

@@ -242,6 +242,17 @@ export interface DispatchResult {
 	 * read as clean: the write-time all-clear line gives this instead.
 	 */
 	unconfirmedStatus?: string;
+	/**
+	 * #4733 r2 (from #4734's review): the coverage rule's positive answer for
+	 * these bytes, set only where it found the file checked: `primary` (a
+	 * runner of the primary group reached a verdict), `in_flight` (a
+	 * collect-later primary whose answer reaches this session's blocker map at
+	 * turn end), `fallback` (a fallback linter the rule accepts in its place),
+	 * or `unconfigured` (this mode defines no primary group for the file, as in
+	 * a `--no-lsp` TypeScript write). Unset otherwise, including where an unset
+	 * `unconfirmedStatus` hides that no runner of a defined primary group ran.
+	 */
+	coverage?: "primary" | "in_flight" | "fallback" | "unconfigured";
 }
 
 // --- Runner Definition ---
@@ -484,8 +495,10 @@ export function reachedNoVerdict(
  * session's blocker section for the file only on such a run, since another
  * session's section names no runner a per-runner carry could judge it by.
  *
- * Admitted: no language server went unanswered (`serverIds`), the primary
- * group checked the file (`unconfirmedStatus`), no verdict covers only the
+ * Admitted: no language server went unanswered (`serverIds`), the coverage
+ * rule found the file checked (`coverage`; #4733 r2: an unset
+ * `unconfirmedStatus` also holds when a defined primary group never ran),
+ * no verdict covers only the
  * edit (`editScopedRunnerIds`), at least one runner ran and answered, and
  * every runner that reached no verdict either skipped or is a collect-later
  * run still in flight (its answer joins this session's own blocker map when
@@ -497,14 +510,11 @@ export function reachedNoVerdict(
 export function checkedWholeFile(
 	result: Pick<
 		DispatchResult,
-		| "unconfirmedStatus"
-		| "editScopedRunnerIds"
-		| "inconclusiveSources"
-		| "latencyReport"
+		"coverage" | "editScopedRunnerIds" | "inconclusiveSources" | "latencyReport"
 	>,
 ): boolean {
 	if (
-		result.unconfirmedStatus !== undefined ||
+		result.coverage === undefined ||
 		result.editScopedRunnerIds !== undefined ||
 		(result.inconclusiveSources?.serverIds.length ?? 0) > 0
 	) {

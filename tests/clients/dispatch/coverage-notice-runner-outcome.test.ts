@@ -423,6 +423,107 @@ describe("coverage notice keys on the primary runner's usable result (#3867)", (
 		expect(result.output).not.toContain(PYTHON_COVERAGE_NOTICE);
 	});
 
+	it("names which check covered the file, and only when one did (#4733 r2)", async () => {
+		// RECURRENCE GUARDED: #4733 r2 (#4734's review). The commit gate's
+		// whole-file verdict read "the primary checked the file" from an unset
+		// `unconfirmedStatus`, which also holds when a defined primary group
+		// never ran. `coverage` is the rule's positive answer, set only where it
+		// found the file checked; each cell drives the real coverage rule.
+		const succeeded = async (): Promise<RunnerResult> => ({
+			status: "succeeded",
+			diagnostics: [],
+			semantic: "none",
+		});
+		const deferred = async (): Promise<RunnerResult> => ({
+			status: "deferred",
+			diagnostics: [],
+			semantic: "none",
+		});
+		const spawnFails = async (): Promise<RunnerResult> => {
+			throw new Error("spawn lsp ENOENT");
+		};
+		const cells: Array<{
+			name: string;
+			runners: Array<[string, () => Promise<RunnerResult>]>;
+			groups: RunnerGroup[];
+			file: string;
+			noLsp?: true;
+			expected: string | undefined;
+		}> = [
+			{
+				name: "the primary answered",
+				runners: [["lsp", succeeded]],
+				groups,
+				file: "test.ts",
+				expected: "primary",
+			},
+			{
+				name: "the primary is still in flight",
+				runners: [["lsp", deferred]],
+				groups,
+				file: "test.ts",
+				expected: "in_flight",
+			},
+			{
+				name: "a type-capable fallback answered for a broken primary",
+				runners: [
+					["lsp", spawnFails],
+					["mypy", succeeded],
+				],
+				groups: [
+					{ mode: "all", runnerIds: ["lsp"] },
+					{ mode: "fallback", runnerIds: ["mypy"] },
+				],
+				file: "src/typed.py",
+				expected: "fallback",
+			},
+			{
+				name: "the mode defines no primary group (--no-lsp)",
+				runners: [["eslint", succeeded]],
+				groups: [{ mode: "all", runnerIds: ["eslint"] }],
+				file: "test.ts",
+				noLsp: true,
+				expected: "unconfigured",
+			},
+			{
+				name: "the primary broke and nothing stood in",
+				runners: [["lsp", spawnFails]],
+				groups,
+				file: "test.ts",
+				expected: undefined,
+			},
+			{
+				name: "a defined primary group never ran, only a linter did",
+				runners: [["eslint", succeeded]],
+				groups: [{ mode: "all", runnerIds: ["eslint"] }],
+				file: "test.ts",
+				expected: undefined,
+			},
+		];
+		const seen: Array<[string, string | undefined]> = [];
+		for (const cell of cells) {
+			registry = new RunnerRegistry();
+			clearCoverageNoticeState();
+			for (const [id, run] of cell.runners) {
+				registry.register({
+					id,
+					appliesTo: ["jsts", "python"],
+					priority: 4,
+					run,
+				});
+			}
+			const ctx = createDispatchContext(
+				cell.file,
+				"/project",
+				{ getFlag: (flag: string) => cell.noLsp === true && flag === "no-lsp" },
+				new FactStore(),
+			);
+			const result = await pullWith(ctx, cell.groups);
+			seen.push([cell.name, result.coverage]);
+		}
+		expect(seen).toEqual(cells.map((cell) => [cell.name, cell.expected]));
+	});
+
 	it("carries the notice when a failed primary has a diagnostic but no failureKind", async () => {
 		// A `failed` with no `failureKind` is indistinguishable from a runner
 		// break (#3781); the parse-error arms carry a kind since #3796 item 3.

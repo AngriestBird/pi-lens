@@ -375,8 +375,19 @@ describe("#4733 r2: the pipeline marks a whole-file verdict only for a dispatch 
 				},
 			],
 			[
-				"every running runner answered",
+				// #4733 r2 (#4734's review): the coverage rule gave no positive
+				// answer (a defined primary group that never ran), so a linter's
+				// answer is not the file's verdict.
+				"no primary checked the file",
 				{ ...dispatchWith([]), latencyReport: latency("succeeded") },
+			],
+			[
+				"every running runner answered",
+				{
+					...dispatchWith([]),
+					latencyReport: latency("succeeded"),
+					coverage: "primary",
+				},
 			],
 		];
 		const kept: Array<[string, boolean]> = [];
@@ -425,6 +436,7 @@ describe("#4733 r2: the pipeline marks a whole-file verdict only for a dispatch 
 		expect(kept).toEqual([
 			["no runner ran", true],
 			["the runner failed", true],
+			["no primary checked the file", true],
 			["every running runner answered", false],
 		]);
 	});
