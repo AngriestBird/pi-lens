@@ -8,6 +8,7 @@ import {
 	parseTomlStringArray,
 } from "./cargo-manifest.js";
 import { resolveLanguage } from "./language-registry.js";
+import { parseJsonc } from "./review-graph/tsconfig-paths.js";
 import {
 	isAtOrAboveHomeDir,
 	matchesWorkspaceMemberPattern,
@@ -629,103 +630,18 @@ async function readDeclarationFile(
 }
 
 /**
- * pyright reads its config as JSONC. Strip what that grammar adds — `//` and
- * block comments, plus trailing commas — outside string literals, so a
- * commented config still declares its `pythonVersion` (#4638 review). A
- * character scan keeps `//` inside a string (a URL, a glob) intact.
- */
-function skipJsoncTrivia(text: string, from: number): number {
-	let index = from;
-	while (index < text.length) {
-		const char = text[index] ?? "";
-		if (/\s/.test(char)) {
-			index += 1;
-			continue;
-		}
-		if (char === "/" && text[index + 1] === "/") {
-			while (index < text.length && text[index] !== "\n") index += 1;
-			continue;
-		}
-		if (char === "/" && text[index + 1] === "*") {
-			index += 2;
-			while (
-				index < text.length &&
-				!(text[index] === "*" && text[index + 1] === "/")
-			) {
-				index += 1;
-			}
-			index += 2;
-			continue;
-		}
-		break;
-	}
-	return index;
-}
-
-function stripJsoncSyntax(text: string): string {
-	let out = "";
-	let index = 0;
-	let inString = false;
-	while (index < text.length) {
-		const char = text[index] ?? "";
-		if (inString) {
-			out += char;
-			if (char === "\\") {
-				out += text[index + 1] ?? "";
-				index += 2;
-				continue;
-			}
-			if (char === '"') inString = false;
-			index += 1;
-			continue;
-		}
-		if (char === '"') {
-			inString = true;
-			out += char;
-			index += 1;
-			continue;
-		}
-		if (char === "/" && text[index + 1] === "/") {
-			while (index < text.length && text[index] !== "\n") index += 1;
-			continue;
-		}
-		if (char === "/" && text[index + 1] === "*") {
-			index += 2;
-			while (
-				index < text.length &&
-				!(text[index] === "*" && text[index + 1] === "/")
-			) {
-				index += 1;
-			}
-			index += 2;
-			continue;
-		}
-		if (char === ",") {
-			// Comments count as trivia here: `"3.14", // note` followed by `}` still
-			// carries a trailing comma once the note is stripped.
-			const next = text[skipJsoncTrivia(text, index + 1)];
-			if (next === "}" || next === "]") {
-				index += 1;
-				continue;
-			}
-		}
-		out += char;
-		index += 1;
-	}
-	return out;
-}
-
-/**
- * pyright's `pythonVersion`, from its own JSON config. Text that does not parse
- * is no declaration: pyright reads JSONC, and inventing a failure record for a
- * commented config would misreport a file pyright accepts.
+ * pyright's `pythonVersion`, from its own JSON config, decoded through the
+ * review graph's `parseJsonc` — the one JSONC reader in the tree (comments and
+ * trailing commas, outside string literals). Text that does not parse is no
+ * declaration: inventing a failure record for a commented config would
+ * misreport a file pyright accepts.
  */
 function parsePyrightJsonVersion(
 	content: string,
 ): DeclaredPythonVersion | undefined {
 	let parsed: unknown;
 	try {
-		parsed = JSON.parse(stripJsoncSyntax(content));
+		parsed = parseJsonc<unknown>(content);
 	} catch {
 		// none: unparseable text is no declaration (pyright reads JSONC, so a
 		// commented config is a file pyright still accepts, not a failure); the
