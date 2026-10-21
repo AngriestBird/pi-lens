@@ -107,6 +107,8 @@ let recentPhases: Array<{
  * #1453: `tool_set_mutation` records an active-tool-set rewrite (zero-duration
  * bookkeeping, and it fires during session_start where a real stall must stay
  * attributed to the work around it), so it is excluded for the same reason.
+ * #4687: `tool_set_decision`, its zero-duration sibling, records the lazy-tools
+ * choice at each session_start and model switch.
  * #1467: `availability_decision` records a tool-probe verdict. Its `durationMs`
  * is the child's own probe time (often zero for a fast path or a cached
  * decision) and the record is bookkeeping ABOUT a probe, not host work — a
@@ -178,6 +180,7 @@ const LAST_PHASE_EXCLUDED = new Set([
 	"turn_end_test_selection",
 	"lsp_aux_wait_outcome",
 	"tool_set_mutation",
+	"tool_set_decision",
 	"availability_decision",
 	"finding_dead_path_drop",
 	"finding_stale_line_demote",
