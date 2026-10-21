@@ -128,6 +128,40 @@ describe("session_start keys on the project root (#2129 wiring)", () => {
 		removeTempDirSync(tempWorktree);
 	});
 
+	it("declines a temp worktree's start behind a disposed primary", async () => {
+		// CLASS: `unproducible-payload` — this input (a prior ctx invalidated with
+		// no delivered shutdown) is not one pi 1.3.0 produces: `teardownCurrent`
+		// awaits `session_shutdown` before `dispose()` invalidates the ctx. It
+		// stays here because the WIRING claim is what it pins (index.ts hands
+		// `priorCtxActive === false` to the classifier and still declines); the
+		// unit test in `tests/clients/session-lifecycle-multi-root.test.ts`
+		// (`a temp worktree behind a disposed primary does NOT run the full
+		// start`) proves the decision only, and `tests/index-4632-s5-session-
+		// identity.test.ts` proves the live-primary input, not this one (#4703
+		// R2 F6).
+		const pi = createPiMock();
+		extension(pi.asExtensionAPI());
+
+		const hostCtx = makeCtx({ cwd: hostRoot, sessionId: "host-session" });
+		await pi.emit("session_start", makeSessionStartEvent(), hostCtx);
+		expect(getSecondarySessionCount()).toBe(0);
+		expect(getActivePrimaryRoot()).toContain(path.basename(hostRoot));
+
+		// The host's session is replaced; its ctx goes stale. A subagent then
+		// binds a session in a temp worktree.
+		invalidate(hostCtx);
+		await pi.emit(
+			"session_start",
+			makeSessionStartEvent(),
+			makeCtx({ cwd: tempWorktree, sessionId: "subagent-session" }),
+		);
+
+		// Declined, and the host's root is still the process's primary.
+		expect(getSecondarySessionCount()).toBe(1);
+		expect(getActivePrimaryRoot()).toContain(path.basename(hostRoot));
+		expect(getActivePrimaryRoot()).not.toContain(path.basename(tempWorktree));
+	}, 30_000);
+
 	it("does not count a root from the worker registry (#2130)", async () => {
 		if (!workerHome) throw new Error("Vitest did not provide PI_LENS_HOME");
 		const previousHome = process.env.PI_LENS_HOME;

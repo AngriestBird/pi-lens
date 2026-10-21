@@ -10,6 +10,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
+import { normalizeFilePath } from "../../clients/path-utils.js";
 import {
 	getActivePrimaryRoot,
 	getActiveSessionId,
@@ -315,8 +316,8 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 		// The replacement took the primary slot the previous conversation left.
 		expect(secondId).not.toBe(firstId);
 		expect(getActiveSessionId()).toBe(secondId);
-		expect(getActivePrimaryRoot()).toBe(
-			path.join(fixture.root, "replace-primary", "proj"),
+		expect(normalizeFilePath(getActivePrimaryRoot() ?? "")).toBe(
+			normalizeFilePath(path.join(fixture.root, "replace-primary", "proj")),
 		);
 		expect(second.errors).toEqual([]);
 	});
@@ -402,18 +403,18 @@ describe("pi-session: the built extension in a real AgentSession (#4632)", () =>
 			startupMode: "minimal",
 			responses: [fauxAssistantMessage(fauxText("ok"))],
 		});
-		await flushAllNdjsonWriters();
-		const rows = fs
-			.readFileSync(
-				path.join(process.env.PI_LENS_HOME ?? "", "latency.log"),
-				"utf8",
-			)
-			.split("\n")
-			.filter(Boolean)
-			.map((line) => JSON.parse(line) as Record<string, unknown>)
-			.filter(
-				(row) => row.phase === "session_start_total" && row.filePath === cwd,
-			);
+		// `handle.latencyRows()` flushes this side's writer map, then reads through
+		// the shared `readNdjsonRows`; `skipped` is the record of a line the reader
+		// could not parse, and a count assertion built on a short read is a red.
+		const read = await handle.latencyRows();
+		expect(read.skipped, "a torn line would shorten this read").toBe(0);
+		// The row is written through `normalizeLoggedPath`, so the comparison uses
+		// the same fold; `cwd` carries native separators on win32.
+		const rows = read.rows.filter(
+			(row) =>
+				row.phase === "session_start_total" &&
+				row.filePath === normalizeFilePath(cwd),
+		);
 		expect(rows).toHaveLength(1);
 		const metadata = rows[0]?.metadata as { mode?: string } | undefined;
 		expect(metadata?.mode).toBe("minimal");

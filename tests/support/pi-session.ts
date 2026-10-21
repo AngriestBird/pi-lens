@@ -12,8 +12,8 @@
  * `index.ts` PASSED to a handler; this tier records what the host and the
  * model actually GOT.
  *
- * ONE FIXTURE ROOT PER FILE, one live session per case, and both are enforced
- * rather than documented. `piSessionFixture()` pins the file's root as it
+ * ONE FIXTURE ROOT PER FILE, enforced rather than documented.
+ * `piSessionFixture()` pins the file's root as it
  * creates it, and `startPiSession` refuses any other root: a session started
  * under a SECOND fixture root writes into the first root's home and nothing
  * into its own — measured: the second root's session put 78 `session_start`

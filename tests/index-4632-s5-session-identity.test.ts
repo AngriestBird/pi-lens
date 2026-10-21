@@ -46,13 +46,19 @@
  *   when the last session to leave is a secondary`, `records the one teardown a
  *   session classified secondary ran for`, `never releases a sibling's registry
  *   root when the primary leaves first`, `counts a re-delivered session_start`,
- *   and `r5 old activation…`). pi runs the extension FACTORY once per session
- *   load (`dist/core/extensions/loader.js` `initializeExtension`), so a second
- *   live session is a second activation; `startPiSession` cannot put two
- *   sessions on one activation. Probe: with a primary and two siblings live,
+ *   and `r5 old activation…`). CLASS: `internal-seam` — the double pins the
+ *   CLOSURE LOGIC of the teardown decision (which member of one activation is
+ *   last, what that activation releases), never a production topology. pi
+ *   1.3.0 runs the extension FACTORY once per session load
+ *   (`dist/core/extensions/loader.js` `initializeExtension`), so a second live
+ *   session is a SECOND activation and `startPiSession` cannot put two
+ *   sessions on one activation; the host shape those cells model is #4704,
+ *   where a primary's leave clears a live sibling's registry root. The double
+ *   is the only seam that can drive the membership array itself, which is why
+ *   the decision is pinned there and the outcome is pinned by #4704's own
+ *   witness. Probe: with a primary and two siblings live under that double,
  *   the primary's own leave clears the sibling's registry root, because that
- *   activation's membership array holds only its own session. That is the
- *   topology difference, not the claim, so the cases stay on the double.
+ *   activation's membership array holds only its own session.
  * - The late-shutdown cells (`r5 reconciles the superseded primary`,
  *   `r6 a superseded primary's delayed shutdown…`, the reload-gap cells).
  *   pi's `AgentSessionRuntime.teardownCurrent` AWAITS `session_shutdown`
@@ -68,6 +74,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { flushAllNdjsonWriters } from "../clients/ndjson-logger.js";
+import { normalizeFilePath } from "../clients/path-utils.js";
 import {
 	_resetSessionLifecycleForTests,
 	getActivePrimaryRoot,
@@ -80,6 +87,7 @@ import {
 	getInstanceRoots,
 	readInstanceRegistry,
 } from "../clients/instance-registry.js";
+import { readNdjsonRows } from "./support/ndjson-rows.js";
 import {
 	fauxAssistantMessage,
 	fauxText,
@@ -88,6 +96,9 @@ import {
 } from "./support/pi-session.js";
 
 const fixture = piSessionFixture();
+
+/** The scripted provider answer every start below uses. */
+const READY = fauxAssistantMessage(fauxText("ready"));
 
 /** The project root for one case: a fresh cwd UNDER this file's one fixture. */
 function projectRoot(...segments: string[]): string {
@@ -105,40 +116,38 @@ function configuredRoot(...segments: string[]): string {
 	return cwd;
 }
 
-const READY = fauxAssistantMessage(fauxText("ready"));
-
-/** Resolve a fixture path through the filesystem, as the registry stores it. */
+/**
+ * A fixture path in the form the loaded copy STORES it: the instance registry
+ * writes `normalizeFilePath(projectRoot)` and the latency logger writes
+ * `normalizeLoggedPath(filePath)`, both of which fold `\` to `/` and adopt the
+ * filesystem's casing. A native `fs.realpathSync` or `path.resolve` returns
+ * backslashes on win32 and never compares equal to either (#2129 child paths).
+ */
 function realRoot(cwd: string): string {
-	return fs.realpathSync(cwd);
+	return normalizeFilePath(cwd);
 }
 
-interface LatencyRead {
-	readonly rows: Array<Record<string, unknown>>;
-	readonly skipped: number;
+/** The process's active primary root, in the form the copy stores it. Throws
+ *  rather than comparing `undefined`, so a missing registration can never read
+ *  as a passing identity. */
+function activePrimaryRoot(): string {
+	const root = getActivePrimaryRoot();
+	if (root === undefined) throw new Error("no active primary root");
+	return normalizeFilePath(root);
 }
 
 /**
  * The rows the LOADED copy's latency writer queued. `flushAllNdjsonWriters()`
- * reaches the same process-global writer map from this side, and the reader
- * sits inside this helper with no await between the flush and the read
- * (AGENTS.md shape 67). A line this reader cannot parse is reported, never
- * dropped: a count assertion built on a short read is a red, not an answer.
+ * reaches the same process-global writer map from this side, and the shared
+ * reader sits inside this helper with no await between the flush and the read
+ * (AGENTS.md shape 67). A line the reader cannot parse is REPORTED, never
+ * dropped, and each caller asserts `skipped` is zero.
  */
-async function latencyRows(): Promise<LatencyRead> {
+async function latencyRows() {
 	await flushAllNdjsonWriters();
-	const file = path.join(process.env.PI_LENS_HOME ?? "", "latency.log");
-	if (!fs.existsSync(file)) return { rows: [], skipped: 0 };
-	const rows: Array<Record<string, unknown>> = [];
-	let skipped = 0;
-	for (const line of fs.readFileSync(file, "utf8").split("\n")) {
-		if (!line) continue;
-		try {
-			rows.push(JSON.parse(line) as Record<string, unknown>);
-		} catch {
-			skipped += 1;
-		}
-	}
-	return { rows, skipped };
+	return readNdjsonRows(
+		path.join(process.env.PI_LENS_HOME ?? "", "latency.log"),
+	);
 }
 
 /**
@@ -190,7 +199,7 @@ async function phaseRowsAt(
 		"a torn line would shorten the trace this case reads",
 	).toBe(0);
 	return read.rows.filter(
-		(row) => row.phase === phase && row.filePath === path.resolve(cwd),
+		(row) => row.phase === phase && row.filePath === realRoot(cwd),
 	);
 }
 
@@ -200,19 +209,21 @@ async function phaseRowsAt(
  * gone; this reset is the one seam that also proves it, and it keeps a failing
  * case from cascading into the next one (`_resetSessionLifecycleForTests` is a
  * process-singleton reset, so the loaded copy sees it too). The registry
- * entry is keyed by pid and lives under the fixture home once the helper has
- * pinned it, so the same call clears it from this side.
+ * entry is keyed by pid, so the cleanup must name the home the CASES read:
+ * `registryPath()` resolves `getGlobalPiLensDir()` from the live env, and
+ * `startPiSession` pins `<fixture>/home` for the case. Pin that same value
+ * here, then put the caller's value back.
  */
 beforeEach(async () => {
 	_resetSessionLifecycleForTests();
 	// This cleanup WRITES a producer's registry (`deregisterInstance`), so it
 	// must not run against the run-shared home (`tests/clients/
-	// pi-lens-home-hermeticity.test.ts`, #3042): pin this file's own home for
-	// the hook, then put the caller's value back before `startPiSession` pins
-	// the fixture home for the case. The helper's own `savedEnv` therefore
-	// records the caller's home, not this scratch one.
+	// pi-lens-home-hermeticity.test.ts`, #3042): pin this file's own fixture
+	// home for the hook — the same one `startPiSession` pins for the case —
+	// then put the caller's value back. The helper's own `savedEnv` therefore
+	// records the caller's home, not this one.
 	const callerHome = process.env.PI_LENS_HOME;
-	process.env.PI_LENS_HOME = path.join(fixture.root, "case-home");
+	process.env.PI_LENS_HOME = path.join(fixture.root, "home");
 	try {
 		await _settleRegistryMutationsForTests();
 		deregisterInstance();
@@ -322,7 +333,7 @@ describe("#4632 slice 5: session identity on the real host", () => {
 			expect(nextId).not.toBe(firstId);
 			expect(getActiveSessionId()).toBe(nextId);
 			expect(getSecondarySessionCount()).toBe(0);
-			expect(fs.realpathSync(getActivePrimaryRoot() ?? "")).toBe(realRoot(cwd));
+			expect(activePrimaryRoot()).toBe(realRoot(cwd));
 			expect(await registryRoots()).toContain(realRoot(cwd));
 
 			await next.dispose();
@@ -412,10 +423,8 @@ describe("#4632 slice 5: session identity on the real host", () => {
 
 			expect(getSecondarySessionCount()).toBe(1);
 			expect(getActiveSessionId()).toBe(hostId);
-			expect(fs.realpathSync(getActivePrimaryRoot() ?? "")).toBe(
-				realRoot(hostCwd),
-			);
-			expect(getActivePrimaryRoot()).not.toBe(realRoot(otherCwd));
+			expect(activePrimaryRoot()).toBe(realRoot(hostCwd));
+			expect(activePrimaryRoot()).not.toBe(realRoot(otherCwd));
 
 			await other.dispose();
 			await host.dispose();
