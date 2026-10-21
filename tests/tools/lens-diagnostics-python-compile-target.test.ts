@@ -156,6 +156,11 @@ describe("source=lsp drops jedi's compile verdict under a declared 3.14 (#4638)"
 		expect(getFileDiagnostics(filePath)?.map((entry) => entry.message)).toEqual(
 			[PYRIGHT_MESSAGE],
 		);
+		// #4638 review (F6): a withheld row is disclosed on the model-facing text
+		// even when another finding survives.
+		expect(result.content[0].text).toContain(
+			"1 python-jedi compile finding withheld: the project declares Python 3.14",
+		);
 
 		const drops = compileDrops();
 		expect(drops).toHaveLength(1);
@@ -185,6 +190,21 @@ describe("source=lsp drops jedi's compile verdict under a declared 3.14 (#4638)"
 		const lowered = await probe(service);
 		expect(service.touchFile).toHaveBeenCalledTimes(1);
 		expect(lowered.content[0].text).toContain("multiple exception types");
+	});
+
+	it("discloses a withheld row when nothing else is delivered", async () => {
+		declareRequiresPython(">=3.14");
+		const service = makeService([jediCompile()]);
+
+		const result = await probe(service);
+
+		// The only row was withheld, so the render is not a bare clean line: the
+		// agent reads what the declaration removed and why (#4638 review F6).
+		expect(result.content[0].text).toContain("No diagnostics found.");
+		expect(result.content[0].text).toContain(
+			"1 python-jedi compile finding withheld: the project declares Python 3.14 (requires-python)",
+		);
+		expect(result.content[0].text).toContain(path.join(cwd, "pyproject.toml"));
 	});
 
 	it("drops only jedi's compile rows, not every compile row", async () => {

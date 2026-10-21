@@ -2640,7 +2640,11 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// scan it used to return, to reconcile it before its rows reach the
 	// widget. The same promise `formatFullMode`'s `Promise.all` already
 	// awaited, under the same signal: no new wait.
-	"tools/lens-diagnostics.ts": 15,
+	// 15 -> 19 (#4638 review F1/F6): the full-mode sweep walks the declaration
+	// through the shared bounded pool, then the full-mode merge and the session
+	// store write each resolve one file's level before applying the owner rule, so
+	// those surfaces stop delivering a verdict the other lanes already drop.
+	"tools/lens-diagnostics.ts": 19,
 	// #2598 lowered both by one: `collectDiagnosticsForFile` and
 	// `openFileBestEffort` each dropped their `await lspService.openFile(…)`
 	// arm — the fallback for "a service shape without touchFile", which the
@@ -2649,7 +2653,10 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// #4638: 32 -> 34, the two probes that must hand the sync finding-policy seam
 	// a prepared Python declaration: the path read resolves it once, and the
 	// tracked-snapshot read resolves one per file before its synchronous map.
-	"tools/lsp-navigation.ts": 34,
+	// 34 -> 35 (#4638 review F10): the per-file declaration walks now run through the
+	// shared bounded pool, so one `await` on the pool replaces the per-file await in
+	// the loop; the walks themselves are unchanged.
+	"tools/lsp-navigation.ts": 35,
 	"tools/module-report.ts": 3,
 	"tools/project-report.ts": 1,
 	"tools/symbol-search.ts": 1,

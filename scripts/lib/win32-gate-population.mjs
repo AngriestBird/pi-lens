@@ -24,6 +24,11 @@ export const WINDOWS_LANE_ADMISSIONS = Object.freeze([
 			"#3278 (+#3285, gleam-check): the eleven members' case-variant cells assert the host filesystem's own case-folding answer, and for the nine members whose tool echoes our argv that arm is the only lane where the case direction reds; every boundary mocked is a process boundary, so no toolchain is required.",
 	}),
 	Object.freeze({
+		file: "tests/clients/lsp/server-policy.test.ts",
+		reason:
+			"#4638 F5: the jedi spawn fixtures build the venv shape of the host (`.venv/Scripts/python.exe` vs `.venv/bin/python`), and only a real Windows host can exercise the Scripts branch; every boundary is mocked, so no Python toolchain is required.",
+	}),
+	Object.freeze({
 		file: "tests/clients/ruff-client-reported-path.test.ts",
 		reason:
 			"#3286: ruff-client's case-variant cell asserts the host filesystem's own case-folding answer, and ruff echoes the absolute argv we hand it, so a real Windows host is the only lane where that direction can attach; safe-spawn is the only mock, so no ruff binary is required.",

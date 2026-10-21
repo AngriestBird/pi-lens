@@ -39,6 +39,14 @@ import {
 	formatCacheAgeLabel,
 	markUnreconciledFindings,
 } from "../clients/finding-delivery-gate.js";
+import {
+	detectPythonTargetVersion,
+	isJediCompileVerdict,
+	partitionOutrankedPythonCompileVerdicts,
+	PYTHON_DECLARATION_CONCURRENCY,
+	recordPythonCompileVerdictDrop,
+} from "../clients/python-environment.js";
+import { mapWithConcurrency } from "../clients/map-with-concurrency.js";
 import { normalizeRuleId } from "../clients/dispatch/rule-id-normalize.js";
 import {
 	applyRulePolicy,
@@ -2211,6 +2219,21 @@ async function applyInlineSuppressionsToSummaries(
 				content,
 				policyMap,
 			});
+			// #4638 review (F1): the owner rule the post-write runner and the probe
+			// already apply. Without it a jedi `compile` row under a declared 3.14+
+			// reaches this surface as `blocking`, which the other lanes no longer do.
+			const pythonTarget = await detectPythonTargetVersion(summary.filePath);
+			const pythonKept = partitionOutrankedPythonCompileVerdicts(
+				policyKept,
+				pythonTarget,
+			);
+			if (pythonKept.dropped > 0 && pythonTarget) {
+				recordPythonCompileVerdictDrop(
+					summary.filePath,
+					pythonTarget,
+					pythonKept.dropped,
+				);
+			}
 			if (disposed.length < inlineKept.length) {
 				const survivors = new Set(disposed);
 				for (const d of inlineKept) {
@@ -2221,7 +2244,7 @@ async function applyInlineSuppressionsToSummaries(
 			// is already in hand here (unlike mode=all/delta's cache-only path), so
 			// this is the one place the tag can be computed without adding I/O to
 			// the "instant" modes.
-			for (const d of policyKept) {
+			for (const d of pythonKept.kept) {
 				// flagged is weak-anchored (module doc, diagnostic-dispositions.ts) so
 				// the tag survives incidental edits to the flagged line itself.
 				const { weak } = anchorsForDiagnostic(
@@ -2234,10 +2257,12 @@ async function applyInlineSuppressionsToSummaries(
 					(d as { flagged?: boolean }).flagged = true;
 				}
 			}
-			if (policyKept.length === summary.diagnostics.length) return summary;
+			if (pythonKept.kept.length === summary.diagnostics.length) {
+				return summary;
+			}
 			return summarizeDiagnostics(
 				summary.filePath,
-				policyKept,
+				pythonKept.kept,
 				summary.hasFinalSnapshot,
 			);
 		}),
@@ -2483,13 +2508,32 @@ async function formatFullMode(
 	// merge, the rendered counts — demote TypeScript errors on files tsserver
 	// checked in its INFERRED project. Applied once, here, so a single seam
 	// governs the whole sweep instead of each renderer learning the rule.
-	const lspResults = await demoteInferredProjectSweepResults(
+	let lspResults = await demoteInferredProjectSweepResults(
 		rawLspResults.filter((result) => includeFile(result.filePath)),
 		cwd,
 		lspService,
 		// #1645 review F1: the sweep that produced these results is signal-bounded,
 		// so the probe loop that post-processes them must be too.
 		signal,
+	);
+	// #4638 review (F1): the sweep's answers still carry the server id here, so
+	// the declaration's owner rule runs before the widget/store conversion that
+	// drops it. `mode=full` and the `source=session` store it writes then see the
+	// same filtered set the probe and post-write lanes already deliver.
+	lspResults = await mapWithConcurrency(
+		lspResults,
+		PYTHON_DECLARATION_CONCURRENCY,
+		async (result) => {
+			if (!result.diagnostics.some(isJediCompileVerdict)) return result;
+			const declared = await detectPythonTargetVersion(result.filePath);
+			const { kept, dropped } = partitionOutrankedPythonCompileVerdicts(
+				result.diagnostics,
+				declared,
+			);
+			if (dropped === 0 || !declared) return result;
+			recordPythonCompileVerdictDrop(result.filePath, declared, dropped);
+			return { ...result, diagnostics: kept };
+		},
 	);
 	// A result bound to a different document must not replace the current
 	// widget state, even when it contains real diagnostics. Pull results may carry
@@ -2578,9 +2622,25 @@ async function formatFullMode(
 				content: content ?? "",
 				policyMap,
 			});
+			// #4638 review (F1): the store is what `source=session` later serves, so
+			// the owner rule has to run before this write. Otherwise a jedi `compile`
+			// row under a declared 3.14+ keeps its `blocking` semantic on the session
+			// route after the probe and post-write lanes have already dropped it.
+			const pythonTarget = await detectPythonTargetVersion(result.filePath);
+			const pythonKept = partitionOutrankedPythonCompileVerdicts(
+				policyKept,
+				pythonTarget,
+			);
+			if (pythonKept.dropped > 0 && pythonTarget) {
+				recordPythonCompileVerdictDrop(
+					result.filePath,
+					pythonTarget,
+					pythonKept.dropped,
+				);
+			}
 			const retired = reconcileScanDiagnostics(
 				result.filePath,
-				policyKept,
+				pythonKept.kept,
 				true,
 				// The service reserves this token when the file enters the scan. The
 				// fallback preserves compatibility with older test doubles/services.

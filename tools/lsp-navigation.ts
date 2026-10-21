@@ -46,8 +46,12 @@ import {
 } from "../clients/finding-delivery-gate.js";
 import { disabledPrimaries } from "../clients/lsp/session-roots.js";
 import { SYMBOL_KIND_NAMES } from "../clients/lsp-document-symbols.js";
-import { detectPythonTargetVersion } from "../clients/python-environment.js";
-
+import {
+	detectPythonTargetVersion,
+	isJediCompileVerdict,
+	PYTHON_DECLARATION_CONCURRENCY,
+} from "../clients/python-environment.js";
+import { mapWithConcurrency } from "../clients/map-with-concurrency.js";
 const VALID_OPERATIONS = [
 	"definition",
 	"typeDefinition",
@@ -1366,20 +1370,27 @@ export function createLspNavigationTool(
 				// #1634: a tracked snapshot replays what each client last published,
 				// so every row passes the same finding policy as the path read and
 				// carries its age: nothing here re-checks the file.
-				// #4638: resolve each tracked file's declaration before the
-				// synchronous map below, which cannot await per row. The reads run
-				// concurrently, and the map is built back in key order so snapshot
-				// row order (and each row's own target) is unchanged.
-				const trackedFiles = [...allDiagnostics.keys()];
-				const trackedTargets = await Promise.all(
-					trackedFiles.map(async (trackedFile) =>
-						detectPythonTargetVersion(trackedFile),
-					),
+				// #4638 review (F10): only a file carrying a python-jedi `compile` row
+				// can be outranked, so only those pay for the declaration walk, and the
+				// reads go through the shared bounded pool instead of one unbounded
+				// Promise.all over the whole snapshot.
+				const compileVerdictFiles: string[] = [];
+				for (const [trackedFile, entry] of allDiagnostics) {
+					if (entry.diags.some(isJediCompileVerdict)) {
+						compileVerdictFiles.push(trackedFile);
+					}
+				}
+				const compileVerdictTargets = await mapWithConcurrency(
+					compileVerdictFiles,
+					PYTHON_DECLARATION_CONCURRENCY,
+					async (trackedFile) => ({
+						trackedFile,
+						target: await detectPythonTargetVersion(trackedFile),
+					}),
 				);
 				const pythonCompileTargets = new Map(
-					trackedFiles.map(
-						(trackedFile, index) =>
-							[trackedFile, trackedTargets[index]] as const,
+					compileVerdictTargets.map(
+						(entry) => [entry.trackedFile, entry.target] as const,
 					),
 				);
 				let snapshotSuppressed = 0;

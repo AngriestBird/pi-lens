@@ -14,6 +14,7 @@ import {
 } from "../../clients/degradation-ledger.js";
 import {
 	detectPythonTargetVersion,
+	isJediCompileVerdict,
 	isJediCompileVerdictOutranked,
 	PYTHON_COMPILE_VERDICT_SERVER_ID,
 	type PythonTargetVersion,
@@ -390,6 +391,21 @@ describe("isJediCompileVerdictOutranked", () => {
 				{ serverId: PYTHON_COMPILE_VERDICT_SERVER_ID },
 				declared(14),
 			),
+		).toBe(false);
+	});
+
+	it("recognises the verdict in both row spellings (#4638 review F1)", () => {
+		expect(
+			isJediCompileVerdict({ serverId: "python-jedi", source: "compile" }),
+		).toBe(true);
+		expect(
+			isJediCompileVerdict({ tool: "python-jedi", rule: "compile:syntax" }),
+		).toBe(true);
+		expect(isJediCompileVerdict({ tool: "lsp", rule: "compile:syntax" })).toBe(
+			false,
+		);
+		expect(
+			isJediCompileVerdict({ serverId: "pyright", source: "compile" }),
 		).toBe(false);
 	});
 

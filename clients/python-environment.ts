@@ -408,6 +408,14 @@ export interface PythonTargetVersion {
 	file: string;
 }
 
+/**
+ * #4638 review (F10): how many declaration walks run at once. Each walk is a few
+ * small config reads on local disk, so eight keeps a sweep's worth in flight
+ * without opening a handle for every file. The snapshot and the full-mode sweep
+ * both ask this owner for the bound instead of each picking one.
+ */
+export const PYTHON_DECLARATION_CONCURRENCY = 8;
+
 /** The LSP server whose `compile` verdict a project declaration outranks. */
 export const PYTHON_COMPILE_VERDICT_SERVER_ID = "python-jedi";
 
@@ -421,13 +429,35 @@ const PYTHON_COMPILE_VERDICT_FLOOR = { major: 3, minor: 14 } as const;
  * not evidence about this project. Every other server, source, and level keeps
  * its verdict, and no declaration keeps every verdict.
  */
+/**
+ * The fields a row can carry the verdict's identity in. Dispatch diagnostics use
+ * `serverId`/`source`; the widget and summary rows that `mode=full` merges keep
+ * `tool`/`rule` instead. One rule, both spellings, checked in one place.
+ */
+export interface PythonVerdictRow {
+	serverId?: string;
+	source?: string;
+	tool?: string;
+	rule?: string;
+}
+
+/**
+ * Whether this row IS jedi's own `compile` verdict — the half of the rule the
+ * floor does not need, so a consumer can skip work for files that carry none
+ * (the navigation snapshot's declaration walk, #4638 review F10).
+ */
+export function isJediCompileVerdict(diagnostic: PythonVerdictRow): boolean {
+	const server = diagnostic.serverId ?? diagnostic.tool;
+	const source = diagnostic.source ?? diagnostic.rule?.split(":")[0];
+	return server === PYTHON_COMPILE_VERDICT_SERVER_ID && source === "compile";
+}
+
 export function isJediCompileVerdictOutranked(
-	diagnostic: { serverId?: string; source?: string },
+	diagnostic: PythonVerdictRow,
 	declared: PythonTargetVersion | undefined,
 ): boolean {
 	if (declared === undefined) return false;
-	if (diagnostic.serverId !== PYTHON_COMPILE_VERDICT_SERVER_ID) return false;
-	if (diagnostic.source !== "compile") return false;
+	if (!isJediCompileVerdict(diagnostic)) return false;
 	return (
 		declared.major > PYTHON_COMPILE_VERDICT_FLOOR.major ||
 		(declared.major === PYTHON_COMPILE_VERDICT_FLOOR.major &&
@@ -448,7 +478,7 @@ export interface PythonCompileVerdictPartition<T> {
  * (#4638 review, one rule for every consumer).
  */
 export function partitionOutrankedPythonCompileVerdicts<
-	T extends { serverId?: string; source?: string },
+	T extends PythonVerdictRow,
 >(
 	diagnostics: readonly T[],
 	declared: PythonTargetVersion | undefined,

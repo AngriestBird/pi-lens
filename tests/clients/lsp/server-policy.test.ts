@@ -1,3 +1,6 @@
+// lane: windows-vitest — #4638 F5's jedi spawn fixtures take the host's venv
+// shape (`.venv/Scripts/python.exe` on Windows), so only that lane exercises
+// the Scripts branch the runner branches on.
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -138,6 +141,31 @@ beforeEach(async () => {
 	const trust = await import("../../../clients/project-trust.js");
 	trust.setProjectTrustState("trusted");
 });
+
+/**
+ * #4638 review (F5): the venv shape the HOST uses. POSIX puts the interpreter at
+ * `.venv/bin/python`; Windows at `.venv/Scripts/python.exe`, and only that shape
+ * exercises the runner's Windows branch, so the Windows lane must collect this
+ * file (see the WINDOWS_LANE_ADMISSIONS row for it).
+ */
+function venvBinDir(root: string): string {
+	return path.join(
+		root,
+		".venv",
+		process.platform === "win32" ? "Scripts" : "bin",
+	);
+}
+
+function venvPython(binDir: string): string {
+	return path.join(
+		binDir,
+		process.platform === "win32" ? "python.exe" : "python",
+	);
+}
+
+function venvTool(binDir: string, name: string): string {
+	return path.join(binDir, process.platform === "win32" ? `${name}.exe` : name);
+}
 
 describe("lsp server policy", () => {
 	it("every built-in server has a spawn function", async () => {
@@ -2040,9 +2068,9 @@ describe("lsp server policy", () => {
 			path.join(os.tmpdir(), "pi-lens-jedi-project-env-"),
 		);
 		dirs.push(tmp);
-		const binDir = path.join(tmp, ".venv", "bin");
-		const jediPath = path.join(binDir, "jedi-language-server");
-		const pythonPath = path.join(binDir, "python");
+		const binDir = venvBinDir(tmp);
+		const jediPath = venvTool(binDir, "jedi-language-server");
+		const pythonPath = venvPython(binDir);
 		fs.mkdirSync(binDir, { recursive: true });
 		for (const executable of [jediPath, pythonPath]) {
 			fs.writeFileSync(executable, "#!/usr/bin/env bash\nexit 0\n");
@@ -2106,11 +2134,11 @@ describe("lsp server policy", () => {
 			path.join(os.tmpdir(), "pi-lens-jedi-launch-throw-"),
 		);
 		dirs.push(tmp);
-		const binDir = path.join(tmp, ".venv", "bin");
-		const jediPath = path.join(binDir, "jedi-language-server");
+		const binDir = venvBinDir(tmp);
+		const jediPath = venvTool(binDir, "jedi-language-server");
 		fs.mkdirSync(binDir, { recursive: true });
 		for (const name of ["jedi-language-server", "python"]) {
-			const target = path.join(binDir, name);
+			const target = venvTool(binDir, name);
 			fs.writeFileSync(target, "#!/usr/bin/env bash\nexit 0\n");
 			fs.chmodSync(target, 0o755);
 		}
@@ -2165,14 +2193,11 @@ describe("lsp server policy", () => {
 			path.join(os.tmpdir(), "pi-lens-jedi-untrusted-"),
 		);
 		dirs.push(tmp);
-		const binDir = path.join(tmp, ".venv", "bin");
+		const binDir = venvBinDir(tmp);
 		fs.mkdirSync(binDir, { recursive: true });
 		for (const name of ["jedi-language-server", "python"]) {
-			fs.writeFileSync(
-				path.join(binDir, name),
-				"#!/usr/bin/env bash\nexit 0\n",
-			);
-			fs.chmodSync(path.join(binDir, name), 0o755);
+			fs.writeFileSync(venvTool(binDir, name), "#!/usr/bin/env bash\nexit 0\n");
+			fs.chmodSync(venvTool(binDir, name), 0o755);
 		}
 		fs.writeFileSync(
 			path.join(tmp, "pyproject.toml"),
