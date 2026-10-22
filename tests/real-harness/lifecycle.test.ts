@@ -54,15 +54,36 @@ function lazyMemorySidecars(pi: RealPi): string[] {
 }
 
 /**
+ * `[added, removed, reason]` of every active-tool-set rewrite pi-lens logged
+ * after the first `skip` of them, activations by the model excluded: the rewrites
+ * a restarted pi-lens made to the loadout the host handed it.
+ */
+function toolSetRewritesAfter(pi: RealPi, skip: number): unknown[] {
+	return pi.lens
+		.latencyRows()
+		.filter((row) => row.phase === "tool_set_mutation")
+		.slice(skip)
+		.map((row) => row.metadata as Record<string, unknown>)
+		.filter((metadata) => metadata.reason !== "lazy_activation")
+		.map((metadata) => [
+			metadata.addedCount,
+			metadata.removedCount,
+			metadata.reason,
+		]);
+}
+
+/**
  * Activate a lazy tool, then restart pi on the same session (`--continue`) and
  * return the roster before and on the first request after the restart. The
  * scripted provider restarts its script in the new process, so that first
  * request is sent before any tool ran: it shows the loadout pi and pi-lens
  * agreed on, not an activation the new process made itself.
  */
-async function activateThenResume(
-	forgetMemory: boolean,
-): Promise<{ activated: string[]; resumed: string[] }> {
+async function activateThenResume(forgetMemory: boolean): Promise<{
+	activated: string[];
+	resumed: string[];
+	resumeRewrites: unknown[];
+}> {
 	return withRealPi(
 		{
 			fixture: "lifecycle",
@@ -91,6 +112,9 @@ async function activateThenResume(
 				for (const file of lazyMemorySidecars(pi))
 					rmSync(file, { force: true });
 
+			const rewritesBeforeResume = pi.lens
+				.latencyRows()
+				.filter((row) => row.phase === "tool_set_mutation").length;
 			await pi.resume();
 			const before = pi.providerObservations().length;
 			await pi.prompt("after resume");
@@ -99,7 +123,11 @@ async function activateThenResume(
 					timeout: REAL_CHILD_POLL_TIMEOUT_MS,
 				})
 				.toBeGreaterThan(before);
-			return { activated, resumed: wireTools(pi, before) };
+			return {
+				activated,
+				resumed: wireTools(pi, before),
+				resumeRewrites: toolSetRewritesAfter(pi, rewritesBeforeResume),
+			};
 		},
 	);
 }
@@ -268,18 +296,32 @@ describe.skipIf(!realPiAvailable)("real pi lifecycle witness", () => {
 	// `session_start`. A host that restores after that handler, or a plan that
 	// disagrees with the restore, would change the advertised tool list (and the
 	// prompt-cache prefix) on every resume.
+	//
+	// Recurrence prevented (#4741): pi 1.4 is documented to activate the extension
+	// tools a resumed branch never recorded unless a tool declares
+	// `defaultActive: false`. Probed on 1.3.0 and 1.4.0 alike, the resumed process
+	// logs no rewrite when the remembered set already is the host's. A host that
+	// handed pi-lens the lazy tools active would make it rewrite the loadout on
+	// every resume (a visible flicker and a second prompt-prefix change) while
+	// the first request still looked right, so the roster assertion alone cannot
+	// see it.
 	it("keeps the activated lazy tool, and only it, when pi-lens remembers the activation across a resume", async () => {
-		const { activated, resumed } = await activateThenResume(false);
+		const { activated, resumed, resumeRewrites } =
+			await activateThenResume(false);
 		expect(resumed).toEqual(activated);
+		expect(resumeRewrites).toEqual([]);
 	}, 60_000);
 
 	// pi 1.3 restores the transcript's loadout (ast_grep_search stays active);
 	// older hosts activate every registered tool. Either way pi-lens's plan
 	// decides: with no remembered activation the lazy tools go back to inactive.
 	it("deactivates the lazy tools the host restored or re-activated when pi-lens has no memory of them", async () => {
-		const { activated, resumed } = await activateThenResume(true);
+		const { activated, resumed, resumeRewrites } =
+			await activateThenResume(true);
 		expect(resumed).toEqual(
 			activated.filter((name) => !situationalTools.includes(name)),
 		);
+		// One rewrite, of the one lazy tool the host restored from the transcript.
+		expect(resumeRewrites).toEqual([[0, 1, "fresh_session_lazy_deactivation"]]);
 	}, 60_000);
 });
