@@ -31,6 +31,7 @@ import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { envFor, gitExecFileSync } from "../../scripts/lib/git-fixture-env.mjs";
 import { copyFixtureGitHelper } from "../support/fixture-git-copy.js";
+import { readNdjsonRows } from "../support/ndjson-rows.js";
 import {
 	loadHistorySelection,
 	resolveHeadPaths,
@@ -563,12 +564,9 @@ describe("resolveDiffRange — pre-push ref population (#3661)", () => {
 		expect(hook(push, [], { PI_LENS_HOME: home }).status).toBe(0);
 		const again = hook(push, [], { PI_LENS_HOME: home });
 		expect(again.stdout).toContain("already passed");
-		const rows = fs
-			.readFileSync(path.join(home, "pre-push.log"), "utf8")
-			.trim()
-			.split("\n")
-			.map((line) => JSON.parse(line))
-			.filter((row) => row.event === "pre-push-skip");
+		const read = readNdjsonRows(path.join(home, "pre-push.log"));
+		expect(read.skipped).toBe(0);
+		const rows = read.rows.filter((row) => row.event === "pre-push-skip");
 		expect(rows).toHaveLength(1);
 		expect(rows[0]).toMatchObject({
 			event: "pre-push-skip",
