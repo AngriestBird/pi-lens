@@ -37,7 +37,10 @@ import {
 	isSpawnableCommand,
 	resetPathWalkMemo,
 } from "../../clients/installer/index.js";
-import { launchLSP } from "../../clients/lsp/launch.js";
+import {
+	launchLSP,
+	withLspProjectCodePermission,
+} from "../../clients/lsp/launch.js";
 import {
 	_resetJvmRuntimeCacheForTests,
 	resolveJavaRuntimeEnv,
@@ -446,6 +449,25 @@ describe.skipIf(!POSIX)("cells the rule leaves admitted (#4530)", () => {
 		expect(result.status).toBe(0);
 		expect(ran(marker)).toBe(true);
 		expect(trustRefusals()).toEqual([]);
+	});
+
+	it("F6: a trusted project's LSP launch keeps its own search-path entries", async () => {
+		setProjectTrustState("trusted");
+		const marker = path.join(layout.root, "project-ran");
+		plant(path.join(layout.main, "node_modules", ".bin"), marker);
+
+		// The served root's own permission (#4248), as the client registry
+		// grants it for a root that is not adopted.
+		const launched = await withLspProjectCodePermission(true, () =>
+			launchLSP(TOOL, [], {
+				cwd: layout.main,
+				env: { PATH: path.join(layout.main, "node_modules", ".bin") },
+				startupFailureWindowMs: 500,
+			}),
+		).catch(() => undefined);
+		launched?.process.kill("SIGKILL");
+
+		expect(ran(marker)).toBe(true);
 	});
 
 	it("I11: a session at HOME owns nothing, so HOME's own tool dirs stay usable", async () => {
