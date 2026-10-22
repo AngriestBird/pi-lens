@@ -31,9 +31,10 @@ import {
 	type RunnerResultSink,
 } from "./dispatcher.js";
 import { spawnAbortScope } from "../safe-spawn.js";
+import { emitBounded } from "../bounded-telemetry.js";
 import { recordDegradationOnce } from "../degradation-ledger.js";
 import { FactStore, setFactStoreEvictionReporter } from "./fact-store.js";
-import { resolveAnalysisRoot } from "../analysis-root.js";
+import { canWriteAnalysisRoot, resolveAnalysisRoot } from "../analysis-root.js";
 import { resolveLanguageRootForFile } from "../language-profile.js";
 import { classifyObservedRunner } from "./collect-later-tier.js";
 import {
@@ -1010,6 +1011,13 @@ function isIgnoredCascadeNeighbor(filePath: string, cwd: string): boolean {
  *  - File over the shared `WORD_INDEX_MAX_BYTES` cap ⇒ removed/absent from
  *    the index (never partially indexed) — same cap phase 1's build path
  *    enforces via `collectWordIndexDocs`.
+ *  - The file's analysis root is not writable by this session (`adopted`, or
+ *    `none`) ⇒ no-op. The index is SESSION state, and an adopted root is a
+ *    foreign project the session serves read-only: it gets LSP and the
+ *    allowlisted per-file linters, never a session-keyed record (#4242). This
+ *    is `canWriteAnalysisRoot`'s rule, the same one the formatter and the
+ *    autofix writer ask, resolved against the authoritative workspace root
+ *    rather than the language root this cascade runs in.
  *  - On a successful update, `onUpdated` fires so the caller can schedule a
  *    debounced persist (never a synchronous write per edit — same #260
  *    discipline as the graph).
@@ -1039,12 +1047,35 @@ async function updateWordIndexForCascade(args: {
 	wordIndex?: WordIndex | null;
 	filePath: string;
 	content?: string;
+	/**
+	 * Authoritative workspace root (`PipelineContext.projectRoot`), against which
+	 * the file's analysis-root class is resolved. `cwd` at the call site is the
+	 * LANGUAGE root, which in an adopted project is a directory the session does
+	 * not own — resolving against it would call a foreign file a `session` one.
+	 */
+	sessionRoot: string;
 	onUpdated?: (index: WordIndex) => void;
 	dbg?: (msg: string) => void;
 }): Promise<void> {
-	const { wordIndex, filePath, content, onUpdated, dbg } = args;
+	const { wordIndex, filePath, content, onUpdated, dbg, sessionRoot } = args;
 	if (!wordIndex || !wordIndex.forward) return;
 	if (content === undefined) return;
+	// #4242: the index is session state, so only a file the session owns may
+	// enter it. Asked only once a write was otherwise going to happen, so the
+	// record below names a real refusal rather than a cold-index no-op.
+	if (!canWriteAnalysisRoot(resolveAnalysisRoot(filePath, sessionRoot))) {
+		emitBounded(
+			"adopted_root_writer_skipped",
+			`${filePath}:word-index`,
+			{
+				filePath,
+				durationMs: 0,
+				metadata: { writer: "word-index" },
+			},
+			{ ledgerKind: "adopted-root-writer-skipped", risingEdgePer: "identity" },
+		);
+		return;
+	}
 
 	const byteLength = Buffer.byteLength(content, "utf-8");
 	if (byteLength > WORD_INDEX_MAX_BYTES) {
@@ -1265,6 +1296,7 @@ export async function computeCascadeForFile(
 			wordIndex,
 			filePath: nodePath.resolve(filePath),
 			content: fileContent,
+			sessionRoot: projectRoot ?? cwd,
 			onUpdated: onWordIndexUpdated,
 			dbg,
 		});
