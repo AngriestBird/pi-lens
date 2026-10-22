@@ -358,16 +358,16 @@ const lspSpawnHeavyInclude = [
 	// #4248: the unknown-trust project-local binary witness resolves a real
 	// PATH entry through launchLSP; keep that child-spawn boundary phased here.
 	"tests/clients/lsp/service-project-trust.test.ts",
+	// #4755: a real terraform-ls child (skipped when the binary is absent) behind
+	// a real initialize handshake, then a first-diagnostics wait of up to 15 s per
+	// case — the #1022/#2332 shape of its lane siblings.
+	"tests/clients/lsp/terraform-ls-tfvars-language-id.test.ts",
 	// #4532 gap 9: the server's own view of what it was sent only exists on a
 	// real stdio wire to a real fake-server child; the initialize handshake is
 	// the same #1022/#2332 shape as its lane siblings.
 	"tests/clients/lsp/touch-debounce-content-gate.test.ts",
 	// #4299: real wrapper compiler-resolution security witness.
 	"tests/clients/lsp/tsserver-project-trust-wire.test.ts",
-	// #4755: a real terraform-ls child (skipped when the binary is absent) behind
-	// a real initialize handshake, then a first-diagnostics wait of up to 15 s per
-	// case — the #1022/#2332 shape of its lane siblings.
-	"tests/clients/lsp/terraform-ls-tfvars-language-id.test.ts",
 	// #4320: the watched-files wire frames only exist on a real stdio connection
 	// to a real fake-server child; the handshake is the same #1022/#2332 shape as
 	// its lane siblings.

@@ -23,15 +23,16 @@
  *    assertion on another name could observe a server answer. That silence
  *    for non-autoloaded names is an accepted residual of the id change.
  *
- * Every wait is a `vi.waitFor` on the file's own publication counter
- * (`getDiagnosticsVersionForPath`) captured BEFORE the notify. `waitForDiagnostics`
- * resolves on timeout, so a silent server would otherwise satisfy a clean
- * assertion (the #4755 review, F2).
+ * Every wait is gated on the file's own publication counter
+ * (`getDiagnosticsVersionForPath`) captured BEFORE the notify, and the counter
+ * must have advanced before any assertion. `waitForDiagnostics` resolves on
+ * timeout, so a silent server would otherwise satisfy a clean assertion (the
+ * #4755 review, F2).
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createLSPClient } from "../../../clients/lsp/client.js";
 import { launchLSP, stopLSP } from "../../../clients/lsp/launch.js";
 import { findCommandAsync } from "../../../clients/safe-spawn.js";
@@ -116,9 +117,8 @@ describe.skipIf(!TERRAFORM_LS)("terraform-ls .tfvars language id", () => {
 	/**
 	 * Open `file` with `languageId`, then send a didChange (terraform-ls can stay
 	 * silent after a first didOpen alone, measured on 0.39.0). Returns the
-	 * file's publication counter read BEFORE the notify, so a later
-	 * `vi.waitFor` can require it to advance. `vi.waitFor` rejects on timeout;
-	 * `waitForDiagnostics` resolves on it, which let a silent server pass.
+	 * file's publication counter read BEFORE the notify, so `untilPublished`
+	 * can require it to advance.
 	 */
 	async function openFile(
 		file: string,
@@ -140,22 +140,25 @@ describe.skipIf(!TERRAFORM_LS)("terraform-ls .tfvars language id", () => {
 		return baseline;
 	}
 
-	/** Wait until `file` has been published past `baseline` AND `holds` passes. */
+	/**
+	 * Wait for a publication on `file` newer than `baseline` (the per-path
+	 * `minVersion` gate), then REQUIRE that one landed: `waitForDiagnostics`
+	 * resolves on timeout, so the explicit counter check is what fails a silent
+	 * server. `holds` then reads the file's own diagnostics.
+	 */
 	async function untilPublished(
 		file: string,
 		baseline: number,
 		holds: (msgs: string[]) => void,
 	): Promise<void> {
-		await vi.waitFor(
-			() => {
-				expect(
-					lspClient().getDiagnosticsVersionForPath(file),
-					`no publication for ${file}`,
-				).toBeGreaterThan(baseline);
-				holds(messages(file));
-			},
-			{ timeout: WAIT_MS, interval: 100 },
-		);
+		await lspClient().waitForDiagnostics(file, WAIT_MS, {
+			minVersion: baseline,
+		});
+		expect(
+			lspClient().getDiagnosticsVersionForPath(file),
+			`no publication for ${file}`,
+		).toBeGreaterThan(baseline);
+		holds(messages(file));
 	}
 
 	it("reports `Unexpected attribute` when a .tfvars is announced as terraform", async () => {
