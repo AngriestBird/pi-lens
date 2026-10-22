@@ -75,22 +75,32 @@ interface WordPart {
 	text: string;
 }
 
-/** Bash's one-character escapes inside `$'…'`, as bytes. */
-const ANSI_C_ESCAPES: Readonly<Record<string, number>> = {
-	a: 0x07,
-	b: 0x08,
-	e: 0x1b,
-	E: 0x1b,
-	f: 0x0c,
-	n: 0x0a,
-	r: 0x0d,
-	t: 0x09,
-	v: 0x0b,
-	"\\": 0x5c,
-	"'": 0x27,
-	'"': 0x22,
-	"?": 0x3f,
-};
+/** Bash's one-character escapes inside `$'…'`: the escape's byte to its value. */
+const ANSI_C_ESCAPES: ReadonlyMap<number, number> = new Map(
+	Object.entries({
+		a: 0x07,
+		b: 0x08,
+		e: 0x1b,
+		E: 0x1b,
+		f: 0x0c,
+		n: 0x0a,
+		r: 0x0d,
+		t: 0x09,
+		v: 0x0b,
+		"\\": 0x5c,
+		"'": 0x27,
+		'"': 0x22,
+		"?": 0x3f,
+	}).map(([escape, value]) => [escape.charCodeAt(0), value]),
+);
+
+/** Whether `byte` is an ASCII digit of `radix` (8 or 16). */
+function isDigitByte(byte: number, radix: number): boolean {
+	if (byte >= 0x30 && byte <= 0x37) return true;
+	if (radix === 8) return false;
+	const lower = byte | 0x20;
+	return byte === 0x38 || byte === 0x39 || (lower >= 0x61 && lower <= 0x66);
+}
 
 /** A code point as bash writes it in a UTF-8 locale: up to six bytes. */
 function utf8Sequence(codePoint: number): number[] {
@@ -124,9 +134,7 @@ function decodeAnsiC(body: string): string {
 		while (
 			end < source.length &&
 			end - start < max &&
-			Number.isInteger(
-				Number.parseInt(String.fromCharCode(source[end] ?? 0), radix),
-			)
+			isDigitByte(source[end] ?? 0, radix)
 		)
 			end++;
 		return end;
@@ -141,33 +149,33 @@ function decodeAnsiC(body: string): string {
 			i++;
 			continue;
 		}
-		const escape = String.fromCharCode(source[i + 1] ?? 0);
-		let value: number | undefined;
-		if (Object.hasOwn(ANSI_C_ESCAPES, escape)) {
-			value = ANSI_C_ESCAPES[escape];
+		const escape = source[i + 1] ?? 0;
+		let value = ANSI_C_ESCAPES.get(escape);
+		if (value !== undefined) {
 			i += 2;
-		} else if (escape >= "0" && escape <= "7") {
+		} else if (isDigitByte(escape, 8)) {
 			const end = digitsAt(i + 1, 3, 8);
 			value = number(i + 1, end, 8) & 0xff;
 			i = end;
-		} else if (escape === "x" || escape === "u" || escape === "U") {
+		} else if (escape === 0x78 || escape === 0x75 || escape === 0x55) {
+			// `\x` takes up to 2 hex digits, `\u` 4 and `\U` 8.
 			const end = digitsAt(
 				i + 2,
-				escape === "x" ? 2 : escape === "u" ? 4 : 8,
+				escape === 0x78 ? 2 : escape === 0x75 ? 4 : 8,
 				16,
 			);
 			if (end === i + 2) {
-				out.push(0x5c, source[i + 1] ?? 0);
+				out.push(0x5c, escape);
 				i += 2;
 				continue;
 			}
 			const code = number(i + 2, end, 16);
 			i = end;
-			if (escape === "x") value = code;
+			if (escape === 0x78) value = code;
 			else if (code === 0) value = 0;
 			// Bash drops a code point at or above 2^31 and goes on.
 			else if (code < 0x80000000) out.push(...utf8Sequence(code));
-		} else if (escape === "c" && i + 2 < source.length) {
+		} else if (escape === 0x63 && i + 2 < source.length) {
 			const control = source[i + 2] ?? 0;
 			i += 3;
 			// `\c\\` is one control character, made from both backslashes.
@@ -175,7 +183,7 @@ function decodeAnsiC(body: string): string {
 			// Bash upper-cases the letter first; the low five bits are the same.
 			value = control === 0x3f ? 0x7f : control & 0x1f;
 		} else {
-			out.push(0x5c, source[i + 1] ?? 0);
+			out.push(0x5c, escape);
 			i += 2;
 			continue;
 		}
