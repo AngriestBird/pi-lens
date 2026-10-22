@@ -97,16 +97,17 @@ describe("a bot block appended to the body never counts (#4774)", () => {
 	});
 
 	// CodeRabbit's block (captured from PR 4680) opens with another marker and
-	// holds a markdown heading; the cut sits before the marker, not before the
-	// heading, so the heading cannot hide the block from the rule.
-	it("cuts CodeRabbit's block, marker and markdown heading included", async () => {
-		const block = fixture("4680.coderabbit-block.txt").replace(
-			"Improved CI handling",
-			"Improved CI handling (refs #4999)",
-		);
-		expect(block).toContain("## Summary by CodeRabbit");
-		const text = `${authored4767}\n\n\n${block}`;
-		const { result, printed } = await ci(text);
+	// holds a markdown heading. Recurrence it prevents: a rule that took any
+	// heading for the author's would stop its cut at that heading's marker. The
+	// heading is nested one level (`###`), as CodeRabbit's walkthrough nests
+	// its own, so it does not end `## Fold check` and the block's quoted
+	// `(refs #4999)` lands in the section unless the cut removes it.
+	it("cuts CodeRabbit's block, marker and nested heading included", async () => {
+		const block = fixture("4680.coderabbit-block.txt")
+			.replace("## Summary by CodeRabbit", "### Summary by CodeRabbit")
+			.replace("Improved CI handling", "Improved CI handling (refs #4999)");
+		expect(block).toContain("### Summary by CodeRabbit");
+		const { result, printed } = await ci(`${authored4767}\n\n\n${block}`);
 		expect(printed).not.toContain(FOLD_REFUSAL);
 		expect(result).toMatchObject({ valid: true });
 	});
@@ -128,11 +129,15 @@ describe("a bot block appended to the body never counts (#4774)", () => {
 		expect(result).toMatchObject({ valid: true });
 	});
 
-	it("keeps a comment before a later review-round section", async () => {
-		const round = `${authored4767}\n\n<!-- note for the reviewer -->\n\n## Review round 1\nThe round fixed the cited finding.\n\n${GREPTILE}\n#4999 quoted by the bot\n`;
-		const { printed } = await ci(round);
+	// A bot block with an author section behind it (a fixer appends a round to
+	// the stored body) ends the text there: the rule fails closed, and the
+	// block never reaches `## Fold check`. Recurrence it prevents: admitting
+	// the round heading as the author's last section would keep the block.
+	it("cuts a block that a later round section follows", async () => {
+		const middle = `${authored4767}\n\n${GREPTILE}\nLast reviewed commit: [fix (refs #4999)](https://example.test/c/1)\n\n## Review round 1\nThe round fixed the cited finding.\n`;
+		const { result, printed } = await ci(middle);
 		expect(printed).not.toContain(FOLD_REFUSAL);
-		expect(printed).not.toContain("is missing");
+		expect(result).toMatchObject({ valid: true });
 	});
 
 	// A `<!--` inside a fence is quoted text, not the start of a block.

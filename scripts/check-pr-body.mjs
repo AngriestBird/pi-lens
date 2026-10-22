@@ -238,11 +238,6 @@ function bodyHeadings(body) {
 	}));
 }
 
-// Headings the author writes after the template sections: the review-round
-// records the fixer contract appends, and the accepted-residuals list.
-const AUTHOR_TAIL_HEADING =
-	/^(?:(?:fix|review) round \d+\b|accepted residuals$)/i;
-
 /**
  * The author's text (#4774). A bot that edits a PR body appends its block
  * after the author's last section, so the last section would otherwise run
@@ -253,16 +248,16 @@ const AUTHOR_TAIL_HEADING =
  * bot marks its block with one, so no bot is named here and an unknown bot
  * is cut too (fail closed). A comment the author wrote before a later
  * template heading stays in the body, where the section readers blank it. An
- * author's own comment in the last section also ends the text, which can
- * only refuse. Every section reader gets the cut body from the two entries,
+ * author's own comment after the last template heading also ends the text,
+ * and so does a bot block with an author section behind it; both can only
+ * refuse. Every section reader gets the cut body from the two entries,
  * `lintPullRequestEvent` and `lintLocalPrBody`; the close-keyword gate keeps
  * the full body, because GitHub closes an issue a bot's block names.
  */
-export function authorText(body = "") {
+function authorText(body = "") {
 	const source = String(body ?? "");
 	const lastAuthored = bodyHeadings(source).findLast(
-		(heading) =>
-			heading.section !== undefined || AUTHOR_TAIL_HEADING.test(heading.name),
+		(heading) => heading.section !== undefined,
 	);
 	const cut = markdownBlockComments(source).find(
 		(line) => line > (lastAuthored?.index ?? -1),
