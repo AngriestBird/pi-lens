@@ -271,6 +271,24 @@ describe("lane-check verdict table (#4047 round 2)", () => {
 		TIMEOUT,
 	);
 
+	// Recurrence (#4726 review F4): lane-check held its own `origin/master`
+	// literal while its child hook resolved `upstream/master`, so the two
+	// compared different ranges on a fork checkout.
+	it(
+		"resolves its base through the hook's resolveBaseRef (#4724)",
+		() => {
+			const lane = makeLane({
+				base: BASE_FILES,
+				head: { "tests/config/added.test.ts": GREEN },
+			});
+			// An upstream that has commits origin/master lacks.
+			git(lane.root, "update-ref", "refs/remotes/upstream/master", "HEAD");
+			const run = runLane(lane);
+			expect(run.record.base).toBe("upstream/master");
+		},
+		TIMEOUT,
+	);
+
 	// Recurrence: four workers called reds unrelated on 2026-10-07 that
 	// red-on-base would have called CAUSED-BY-CHANGE.
 	it(
