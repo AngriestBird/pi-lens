@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import semver from "semver";
 import { expect, describe, it } from "vitest";
@@ -74,16 +75,23 @@ function toolSetRewritesAfter(pi: RealPi, skip: number): unknown[] {
 }
 
 /**
- * The version of the `pi` the harness spawns: the child's own PATH puts the
- * repo's `node_modules/.bin` first, so a global pi on the caller's PATH is not
- * the host under test (#4741: a round-1 probe read the global one).
+ * The version of the `pi` the harness spawns: the child's PATH puts the repo's
+ * `node_modules/.bin` first (`withRepoBinOnPath`), so a global pi on the
+ * caller's PATH is not the host under test (#4741: a round-1 probe read the
+ * global one). Read from the package that bin resolves to, not a second spawn.
  */
-function spawnedPiVersion(pi: RealPi): string {
-	const run = spawnSync("pi", ["--version"], {
-		env: pi.childEnvironment() as NodeJS.ProcessEnv,
-		encoding: "utf8",
-	});
-	return `${run.stdout}${run.stderr}`.trim();
+function spawnedPiVersion(): string {
+	const bin = realpathSync(
+		fileURLToPath(new URL("../../node_modules/.bin/pi", import.meta.url)),
+	);
+	for (let dir = path.dirname(bin); ; dir = path.dirname(dir)) {
+		const manifest = path.join(dir, "package.json");
+		if (existsSync(manifest))
+			return (JSON.parse(readFileSync(manifest, "utf8")) as { version: string })
+				.version;
+		if (path.dirname(dir) === dir)
+			throw new Error(`no package.json above ${bin}`);
+	}
 }
 
 /** pi 1.4 activates the extension tools a resumed branch never mentioned. */
@@ -130,6 +138,12 @@ async function activateThenResume(forgetMemory: boolean): Promise<{
 					timeout: REAL_CHILD_POLL_TIMEOUT_MS,
 				})
 				.not.toHaveLength(0);
+			// Orderly shutdown drains the child's log writers (AGENTS.md shape 67: a
+			// child's `log` only enqueues), so the rows counted below are all of the
+			// first child's, and a write of its own cannot land in the resumed
+			// child's window. The sidecar is forgotten AFTER that shutdown, which
+			// may itself write one.
+			await pi.quit();
 			if (forgetMemory)
 				for (const file of lazyMemorySidecars(pi))
 					rmSync(file, { force: true });
@@ -145,11 +159,15 @@ async function activateThenResume(forgetMemory: boolean): Promise<{
 					timeout: REAL_CHILD_POLL_TIMEOUT_MS,
 				})
 				.toBeGreaterThan(before);
+			// The resumed child's `session_start` record is enqueued before its first
+			// request but may not be on disk yet; read only after it has shut down.
+			const resumed = wireTools(pi, before);
+			await pi.quit();
 			return {
 				activated,
-				resumed: wireTools(pi, before),
+				resumed,
 				resumeRewrites: toolSetRewritesAfter(pi, rewritesBeforeResume),
-				hostVersion: spawnedPiVersion(pi),
+				hostVersion: spawnedPiVersion(),
 			};
 		},
 	);
