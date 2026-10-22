@@ -67,6 +67,7 @@ import {
 	evaluateGitGuard,
 	syncGitGuardRecord,
 } from "../../clients/git-guard.js";
+import { getProjectDataDir } from "../../clients/file-utils.js";
 import { consumeTurnEndFindings } from "../../clients/runtime-context.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { beginScope, retireScope } from "../../clients/session-scope.js";
@@ -1551,7 +1552,10 @@ describe("F21: the dedupe rewrite owns the record it writes (#4733 r5)", () => {
 	// another session had written over the record, this session's own fix then
 	// read the record as foreign, latched `session_mismatch`, and every commit
 	// stayed refused.
-	it("a repeated turn end over another session's record stamps this session, so its own fix opens the gate", async () => {
+	// #4738: the other session's section of the same file is that session's and
+	// is carried, so this session's own fix leaves it; a whole-file clean check
+	// of the file then clears it and opens the gate.
+	it("a repeated turn end over another session's record stamps this session, so its own fix leaves only the other session's section", async () => {
 		const rig = makeRig("pi-lens-4733-f21-");
 		try {
 			rig.lensGuard = true;
@@ -1570,11 +1574,10 @@ describe("F21: the dedupe rewrite owns the record it writes (#4733 r5)", () => {
 			const file = blocker();
 			expect(await endTurn(rig)).toContain("eval() is banned");
 			const record = () =>
-				rig.cacheManager.readCache<{ sessionId?: string }>(
-					"turn-end-findings",
-					rig.cwd,
-					Number.POSITIVE_INFINITY,
-				)?.data;
+				rig.cacheManager.readCache<{
+					sessionId?: string;
+					carriedBlockers?: Array<{ sessionId: string }>;
+				}>("turn-end-findings", rig.cwd, Number.POSITIVE_INFINITY)?.data;
 			// Another session writes over the record after this turn end.
 			rig.cacheManager.writeCache(
 				"turn-end-findings",
@@ -1585,9 +1588,28 @@ describe("F21: the dedupe rewrite owns the record it writes (#4733 r5)", () => {
 			blocker();
 			// The same findings again: the dedupe rewrites the record.
 			await endTurn(rig);
+			expect(record()?.sessionId).toBe(SESSION);
+			expect(
+				record()?.carriedBlockers?.map((partition) => partition.sessionId),
+			).toEqual(["another-session"]);
 			// The fix: this session retires its own entry, with no whole-file verdict.
 			rig.runtime.clearInlineBlockers(file, rig.runtime.nextWriteIndex());
 			syncGitGuardRecord(rig.runtime, rig.cacheManager, rig.cwd, file);
+			// Only the other session's section is left, and it is still theirs.
+			expect(record()?.sessionId).toBe("another-session");
+			expect(record()?.carriedBlockers).toBeUndefined();
+			const refusal = evaluateGitGuard(rig.runtime, rig.cacheManager, rig.cwd);
+			expect(refusal).toMatchObject({ block: true, unknown: true });
+			expect(refusal.reason).toContain("The record names blockers in a.ts ");
+			// A whole-file clean check of a.ts speaks for every session's section.
+			syncGitGuardRecord(
+				rig.runtime,
+				rig.cacheManager,
+				rig.cwd,
+				file,
+				"session",
+				true,
+			);
 			expect(evaluateGitGuard(rig.runtime, rig.cacheManager, rig.cwd)).toEqual({
 				block: false,
 			});
@@ -1595,6 +1617,138 @@ describe("F21: the dedupe rewrite owns the record it writes (#4733 r5)", () => {
 			rig.cleanup();
 		}
 	});
+});
+
+describe("#4738: a --lens-guard-off turn end keeps another session's blocker", () => {
+	// RECURRENCE GUARDED: #4738, the fourth replacing writer. With the flag off
+	// the turn end wrote its delivery record over the stored one, so a guarded
+	// session's blocker record became a record that claims nothing, and the
+	// next settled turn end of any session retired it.
+	it("keeps another session's blocker sections, owner and all, when a guard-off turn ends with findings", async () => {
+		const rig = makeRig("pi-lens-4738-guard-off-");
+		try {
+			const theirs = touch(rig, "theirs.ts", "eval(y);\n");
+			const theirText =
+				"Unresolved from this turn — theirs.ts:\n🔴 STOP — 1 issue(s) must be fixed:\n  L1: eval() is banned";
+			rig.cacheManager.writeCache(
+				"turn-end-findings",
+				{
+					content: theirText,
+					blockerContent: theirText,
+					blockingFiles: [theirs],
+					hasBlockers: true,
+					affectedFiles: [theirs],
+					sessionId: "another-session",
+					projectSeqStart: 0,
+					projectSeqEnd: 0,
+					fileSeqByPath: {},
+					fileContentHashes: {},
+					consumed: true,
+				},
+				rig.cwd,
+			);
+			const file = touch(rig, "a.ts", "eval(x);\n");
+			rig.runtime.recordInlineBlockers(
+				file,
+				"🔴 STOP — 1 issue(s) must be fixed:\n  L1: eval() is banned",
+				rig.runtime.nextWriteIndex(),
+				["ast-grep"],
+				[1],
+			);
+
+			expect(await endTurn(rig)).toContain("a.ts");
+
+			const after = rig.cacheManager.readCache<{
+				sessionId?: string;
+				blockerContent?: string;
+				carriedBlockers?: unknown;
+			}>("turn-end-findings", rig.cwd, Number.POSITIVE_INFINITY)?.data;
+			// This session claims nothing with the flag off; theirs stays theirs.
+			expect(after?.sessionId).toBe("another-session");
+			expect(after?.blockerContent).toBe(theirText);
+			expect(after?.carriedBlockers).toBeUndefined();
+		} finally {
+			rig.cleanup();
+		}
+	});
+});
+
+describe("#4738: the turn-end composer reads another session's record at any age", () => {
+	// RECURRENCE GUARDED: #4738 (the #4725 read). The composer read the record
+	// through the cache's freshness window, so a day-old record from another
+	// session was invisible to it, and its write replaced the record whole: the
+	// other session's blocker was gone without any re-check of its file.
+	for (const lensGuard of [true, false]) {
+		it(`keeps a day-old blocker of another session's (--lens-guard ${lensGuard ? "on" : "off"})`, async () => {
+			const rig = makeRig(`pi-lens-4738-day-old-${lensGuard}-`);
+			try {
+				rig.lensGuard = lensGuard;
+				const theirs = touch(rig, "theirs.ts", "eval(y);\n");
+				const theirText =
+					"Unresolved from this turn — theirs.ts:\n🔴 STOP — 1 issue(s) must be fixed:\n  L1: eval() is banned";
+				rig.cacheManager.writeCache(
+					"turn-end-findings",
+					{
+						content: theirText,
+						blockerContent: theirText,
+						blockingFiles: [theirs],
+						hasBlockers: true,
+						affectedFiles: [theirs],
+						sessionId: "another-session",
+						projectSeqStart: 0,
+						projectSeqEnd: 0,
+						fileSeqByPath: {},
+						fileContentHashes: {},
+						consumed: true,
+					},
+					rig.cwd,
+				);
+				fs.writeFileSync(
+					path.join(
+						getProjectDataDir(rig.cwd),
+						"cache",
+						"turn-end-findings.meta.json",
+					),
+					JSON.stringify({
+						timestamp: new Date(Date.now() - 86_400_000).toISOString(),
+					}),
+				);
+				const file = touch(rig, "a.ts", "eval(x);\n");
+				rig.runtime.recordInlineBlockers(
+					file,
+					"🔴 STOP — 1 issue(s) must be fixed:\n  L1: eval() is banned",
+					rig.runtime.nextWriteIndex(),
+					["ast-grep"],
+					[1],
+				);
+
+				expect(await endTurn(rig)).toContain("a.ts");
+
+				const after = rig.cacheManager.readCache<{
+					sessionId?: string;
+					blockerContent?: string;
+					carriedBlockers?: Array<{
+						sessionId: string;
+						blockerContent: string;
+					}>;
+				}>("turn-end-findings", rig.cwd, Number.POSITIVE_INFINITY)?.data;
+				const sections = [
+					[after?.sessionId, after?.blockerContent],
+					...(after?.carriedBlockers ?? []).map((partition) => [
+						partition.sessionId,
+						partition.blockerContent,
+					]),
+				];
+				// Theirs stays theirs, beside this session's own when it claims one.
+				expect(sections).toContainEqual(["another-session", theirText]);
+				expect(sections.map(([owner]) => owner)).toEqual(
+					lensGuard ? [SESSION, "another-session"] : ["another-session"],
+				);
+			} finally {
+				rig.cleanup();
+			}
+		});
+	}
 });
 
 /** A blocker the agent marked false-positive: the policy suppresses it. */

@@ -620,7 +620,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 9 -> 10 (#4725): `syncGitGuardRecord` keeps a record's blocker
 		// sections other than the re-checked file's, an `Array.prototype.filter`
 		// call, not a delivery filter.
-		"clients/git-guard.ts": 10,
+		// 10 -> 14 (#4738): four more `Array.prototype.filter` calls, not a
+		// delivery filter: the per-session partition trim, the turn-end
+		// composer's read of the other sessions' sections, and the settled turn
+		// end's rewrite keep the sections and files nothing re-checked.
+		"clients/git-guard.ts": 14,
 		"clients/gitleaks-client.ts": 1,
 		"clients/govulncheck-client.ts": 1,
 		"clients/gradle-ktfmt-style.ts": 1,
@@ -1356,8 +1360,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/effective-config.ts": 11,
 		// 44 -> 59 (#4725): the any-age read, the retire and the refusal's
 		// remedy each name the `turn-end-findings` row, the durable cache row the
-		// glossary keeps `record` for.
-		"clients/git-guard.ts": 53,
+		// glossary keeps `record` for. 53 -> 65 (#4738): the partition reads, the
+		// carried-blocker shape check and the gate's owner check name the same
+		// `turn-end-findings` row.
+		"clients/git-guard.ts": 65,
 		"clients/govulncheck-client.ts": 4,
 		"clients/inline-blocker-dispositions.ts": 4,
 		// #3654: the unified bridge's own `record()` API (RFC §3) — a method

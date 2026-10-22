@@ -1513,12 +1513,16 @@ file-scoped worklist and receives no project-wide scanner output.
   `clients/inline-blocker-fields.ts`, shared with the pipeline's writer. A run
   still in flight does not gate, and an edit to the file while its re-check is in
   flight clears the record until that answer settles (#3814). The gate and the
-  record's writers in `clients/git-guard.ts` read it at any age: a rewrite keeps
-  another session as owner while one of its blocker sections survives, a write
-  drops a section, of either session, only for a file its dispatch checked whole
-  and found clean (`checkedWholeFile`), and a settled turn end retires a record
-  that is this session's own, claims no blocker, or holds no structured claim
-  (the `--lens-guard`-off writer's), with one `record_retired` row (#4725). A
+  record's writers in `clients/git-guard.ts` and the turn-end composer read it
+  at any age. Each blocker section keeps the session that wrote it (top-level
+  `sessionId`, other owners in `carriedBlockers`; a record without that field
+  is one owner's), and a writer replaces only its own session's sections.
+  Another session's section leaves only for a file a dispatch checked
+  whole and found clean (`checkedWholeFile`), or whose file is gone. The gate
+  judges a record alone only when this session is its sole owner. A settled
+  turn end drops this session's sections and retires a record that is this
+  session's own, claims no blocker, or holds no structured claim (the
+  `--lens-guard`-off writer's), with one `record_retired` row (#4725). A
   dispatch that never answered (`pipeline_crash`, `pipeline_error`) is latched
   per file, apart from the record's latch, and only that file's own returning
   dispatch clears it.
