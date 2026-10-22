@@ -32,13 +32,13 @@ function runAnalyzer(
 ): string {
 	return execFileSync(
 		process.execPath,
-		[script, "--root", root, "--json", "--since", "all", ...extraArgs],
+		[script, "--root", root, "--since", "all", ...extraArgs],
 		{ encoding: "utf8", timeout: 60_000 },
 	);
 }
 
 function runReport(root: string, extraArgs: string[] = []): any {
-	return JSON.parse(runAnalyzer(root, extraArgs));
+	return JSON.parse(runAnalyzer(root, ["--json", ...extraArgs]));
 }
 
 describe("analyze-pi-lens-logs.mjs", () => {
@@ -68,6 +68,44 @@ describe("analyze-pi-lens-logs.mjs", () => {
 		// latency.log — three failed runners + one success. One failure carries an
 		// explicit failureKind (infra), one only diagnostics (heuristic → found-errors).
 		const latency = [
+			// #2639: skills outcomes must survive the offline report boundary.
+			// `absent` is the label clients/bundled-resource-health.ts writes when the
+			// bundled skills/ dir is missing (ENOENT). `""` and `{}` are malformed
+			// statuses that must not render as a blank label or [object Object].
+			...["healthy", "healthy", "absent", "empty", "unreadable"].map(
+				(status) => ({
+					type: "phase",
+					phase: "skills_resolved",
+					ts: NOW,
+					durationMs: 0,
+					metadata: { status, entryCount: status === "healthy" ? 3 : 0 },
+				}),
+			),
+			{ type: "phase", phase: "skills_resolved", ts: NOW },
+			{
+				type: "phase",
+				phase: "skills_resolved",
+				ts: NOW,
+				metadata: { entryCount: 0 },
+			},
+			{
+				type: "phase",
+				phase: "skills_resolved",
+				ts: NOW,
+				metadata: { status: "" },
+			},
+			{
+				type: "phase",
+				phase: "skills_resolved",
+				ts: NOW,
+				metadata: { status: {} },
+			},
+			{
+				type: "phase",
+				phase: "unrelated",
+				ts: NOW,
+				metadata: { status: "healthy" },
+			},
 			// Synthetic benchmark corpus — excluded by the default denylist.
 			{
 				type: "phase",
@@ -365,6 +403,31 @@ describe("analyze-pi-lens-logs.mjs", () => {
 		expect(report.rowsSeen["ast-grep-tools"]).toBe(3);
 		expect(report.parseErrors).toEqual({});
 		expect(report.rowsExcluded).toBe(1);
+	});
+
+	it("tallies skills outcomes without counting unrelated phases (#2639)", () => {
+		expect(report.latency.skillsResolved).toEqual({
+			healthy: 2,
+			absent: 1,
+			empty: 1,
+			unreadable: 1,
+			unknown: 4,
+		});
+	});
+
+	it("renders skills outcome counts in text (#2639)", () => {
+		const text = runAnalyzer(root);
+		const section = text.split("\nSkills resolution\n")[1]?.split("\n\n")[0];
+		expect(section).toBeDefined();
+		for (const [status, count] of [
+			["healthy", 2],
+			["absent", 1],
+			["empty", 1],
+			["unreadable", 1],
+			["unknown", 4],
+		] as const) {
+			expect(section).toMatch(new RegExp(`^\\s+${count}  ${status}$`, "m"));
+		}
 	});
 
 	it("supports explicit repeatable exclusion globs", () => {
