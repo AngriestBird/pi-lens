@@ -1512,6 +1512,9 @@ export class ClientRegistry {
 				initialization: mergedInit,
 				initializeTimeoutMs: server.initializeTimeoutMs,
 				launchVariant: spawned.launchVariant,
+				// #4764: the declared role travels with the client, so a failed server
+				// config can gate an auxiliary scanner's empty publications only.
+				role: server.role,
 				onDiagnosticsPublished: (serverId) => {
 					this.hooks.noteDiagnosticsPublished(serverId);
 				},
