@@ -352,21 +352,20 @@ const EXPANDING_CHARS: Partial<Record<WordPartKind, RegExp>> = {
 
 export function decodeShellWords(command: string): DecodedShellSegment[] {
 	return tokenizeShellCommandWithRanges(command).map(({ words }) => ({
-		words: words
-			.filter((word) => word.syntax !== true)
-			.map((word): DecodedShellWord => {
-				const hidden = word.parts.some((part) => part.text === undefined)
-					? "escape"
-					: word.parts.some((part) =>
-								EXPANDING_CHARS[part.kind]?.test(part.text ?? ""),
-						  )
-						? "expansion"
-						: undefined;
-				return {
-					text: wordValue(word, true, "") ?? "",
-					...(hidden && { hidden }),
-				};
-			}),
+		words: words.flatMap((word): DecodedShellWord[] => {
+			// A lone paren or brace is shell syntax, not a word (#4739 round 2).
+			if (word.syntax === true) return [];
+			const hidden = word.parts.some((part) => part.text === undefined)
+				? "escape"
+				: word.parts.some((part) =>
+							EXPANDING_CHARS[part.kind]?.test(part.text ?? ""),
+					  )
+					? "expansion"
+					: undefined;
+			return [
+				{ text: wordValue(word, true, "") ?? "", ...(hidden && { hidden }) },
+			];
+		}),
 	}));
 }
 
