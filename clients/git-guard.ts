@@ -35,13 +35,13 @@ export interface TurnEndFindingsCache {
 	/** A capped record is never treated as complete/allowable. */
 	affectedFilesTruncated?: boolean;
 	/** Files represented by blockerContent, distinct from test failures. */
-	blockingFiles?: string[];
+	blockingFiles?: string[] | undefined;
 	/** Context has consumed the message, but the guard still owns the state. */
 	consumed?: boolean;
 	testFailures?: boolean;
 	testFailureContent?: string;
 	testFailureFiles?: string[];
-	blockerContent?: string;
+	blockerContent?: string | undefined;
 	provenance?: AdvisoryProvenance;
 	/**
 	 * Other sessions' blocker sections this record carries (#4738), one entry
@@ -49,7 +49,7 @@ export interface TurnEndFindingsCache {
 	 * `blockingFiles` are `sessionId`'s own; a record without this field (every
 	 * shape released before #4738) is one owner's.
 	 */
-	carriedBlockers?: BlockerPartition[];
+	carriedBlockers?: BlockerPartition[] | undefined;
 }
 
 /** One session's blocker sections in the record, with their owner (#4738). */
