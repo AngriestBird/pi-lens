@@ -2575,17 +2575,18 @@ describe("rollingMessageDigests bounds (#4743)", () => {
 		).toEqual({ complete: false, gap: "too-many-messages" });
 	});
 
-	it("refuses a transcript past MAX_ROLLING_DIGEST_CHARS", () => {
-		const under = "x".repeat(MAX_ROLLING_DIGEST_CHARS - 64);
-		expect(
-			rollingMessageDigests([{ role: "user", content: under }]).complete,
-		).toBe(true);
-		expect(
-			rollingMessageDigests([
-				{ role: "user", content: under },
-				{ role: "user", content: "x".repeat(128) },
-			]),
-		).toEqual({ complete: false, gap: "too-many-chars" });
+	it("hashes a transcript of exactly MAX_ROLLING_DIGEST_CHARS and refuses one char more", () => {
+		// `{"role":"user","content":"` + text + `"}` serializes to text + 28.
+		const wrap = (text: string) => [{ role: "user", content: text }];
+		const exact = "x".repeat(MAX_ROLLING_DIGEST_CHARS - 28);
+		expect(JSON.stringify(wrap(exact)[0])).toHaveLength(
+			MAX_ROLLING_DIGEST_CHARS,
+		);
+		expect(rollingMessageDigests(wrap(exact)).complete).toBe(true);
+		expect(rollingMessageDigests(wrap(`${exact}x`))).toEqual({
+			complete: false,
+			gap: "too-many-chars",
+		});
 	});
 
 	it("gives two lists the same digest at i exactly when their first i + 1 messages match", () => {
