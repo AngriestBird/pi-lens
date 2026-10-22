@@ -35,8 +35,21 @@ import {
 } from "./generation-guard.js";
 import { isAtOrAboveHomeDir, isUnderDir, walkUpDirs } from "./path-utils.js";
 import { getProjectTrustState } from "./project-trust.js";
+import {
+	NODE_MODULES_BIN_DIRS,
+	projectLocalBinDirs,
+} from "./session-repository.js";
 import { recordDegradationOnce } from "./degradation-ledger.js";
 import { logExtension } from "./extension-log.js";
+
+// The project-local bin layouts moved to `session-repository.ts` (#4530),
+// which the spawn seam can import; existing importers keep this seam.
+export {
+	NODE_MODULES_BIN_DIRS,
+	PROJECT_LOCAL_BIN_DIRS,
+	VENDOR_BIN_DIRS,
+	VENV_BIN_DIRS,
+} from "./session-repository.js";
 
 export type NodePackageManager = "npm" | "pnpm" | "yarn" | "bun";
 
@@ -472,40 +485,6 @@ export async function findGlobalBinary(
 	return undefined;
 }
 
-/**
- * The three project-local bin-directory shapes in this repo, most-preferred
- * first. Exported so every caller passes the SAME constant instead of
- * re-listing the directory names next to its own copy of the walk — the venv
- * list alone had three independent spellings before #2544 review F1
- * (`formatters.ts`, `runner-helpers.ts`'s `createVenvFinder`,
- * `dead-code-client.ts`'s `venvCandidates`).
- *
- * `VENV_BIN_DIRS` lists BOTH the POSIX (`bin`) and Windows (`Scripts`) layouts
- * unconditionally rather than branching on `process.platform` at module load:
- * a module-load platform constant cannot be forced per test, so the other
- * branch is never exercised on the ubuntu lane (defect shape 30). The extra
- * two `existsSync` calls per directory are the price of a testable list, and
- * a `.venv/Scripts` on Linux (or `.venv/bin` under msys) resolves correctly
- * instead of being invisible.
- */
-export const NODE_MODULES_BIN_DIRS: readonly string[] = [
-	path.join("node_modules", ".bin"),
-];
-export const VENDOR_BIN_DIRS: readonly string[] = [path.join("vendor", "bin")];
-export const VENV_BIN_DIRS: readonly string[] = [
-	path.join(".venv", "bin"),
-	path.join("venv", "bin"),
-	path.join(".venv", "Scripts"),
-	path.join("venv", "Scripts"),
-];
-
-/** Every project-local bin layout supported by the canonical resolver above. */
-export const PROJECT_LOCAL_BIN_DIRS: readonly string[] = [
-	...NODE_MODULES_BIN_DIRS,
-	...VENDOR_BIN_DIRS,
-	...VENV_BIN_DIRS,
-];
-
 /** A local candidate was present, but pi's trust policy refused its use. */
 export interface LocalBinTrustRefusal {
 	readonly kind: "refused-by-trust";
@@ -559,14 +538,8 @@ export function isProjectLocalBinPath(
 	resolvedCommand: string,
 	cwd: string,
 ): boolean {
-	for (const ancestor of walkUpDirs(cwd)) {
-		if (isAtOrAboveHomeDir(ancestor, os.homedir())) break;
-		if (
-			PROJECT_LOCAL_BIN_DIRS.some((binDir) =>
-				isUnderDir(resolvedCommand, path.join(ancestor, binDir)),
-			)
-		)
-			return true;
+	for (const binDir of projectLocalBinDirs(cwd)) {
+		if (isUnderDir(resolvedCommand, binDir)) return true;
 	}
 	return false;
 }
