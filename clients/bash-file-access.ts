@@ -65,13 +65,132 @@ type WordPartKind =
 
 /**
  * One stretch of a word, kept even when it emits nothing (`""`). `text` is
- * what bash emits for it, and is `undefined` only for an `ansiC` part holding
- * an escape, which this model does not decode. Adjacent quotes of one kind
- * share a part: no reader tells `'a''b'` from `'ab'`, as bash does not.
+ * what bash emits for it; an `ansiC` part is decoded (see {@link decodeAnsiC}).
+ * Adjacent quotes of one kind share a part: no reader tells `'a''b'` from
+ * `'ab'`, as bash does not. Each `$'…'` is a part of its own, because a NUL
+ * ends only the quote it is in.
  */
 interface WordPart {
 	kind: WordPartKind;
-	text: string | undefined;
+	text: string;
+}
+
+/** Bash's one-character escapes inside `$'…'`: the escape's byte to its value. */
+const ANSI_C_ESCAPES: ReadonlyMap<number, number> = new Map(
+	Object.entries({
+		a: 0x07,
+		b: 0x08,
+		e: 0x1b,
+		E: 0x1b,
+		f: 0x0c,
+		n: 0x0a,
+		r: 0x0d,
+		t: 0x09,
+		v: 0x0b,
+		"\\": 0x5c,
+		"'": 0x27,
+		'"': 0x22,
+		"?": 0x3f,
+	}).map(([escape, value]) => [escape.charCodeAt(0), value]),
+);
+
+/** Whether `byte` is an ASCII digit of `radix` (8 or 16). */
+function isDigitByte(byte: number, radix: number): boolean {
+	if (byte >= 0x30 && byte <= 0x37) return true;
+	if (radix === 8) return false;
+	const lower = byte | 0x20;
+	return byte === 0x38 || byte === 0x39 || (lower >= 0x61 && lower <= 0x66);
+}
+
+/** A code point as bash writes it in a UTF-8 locale: up to six bytes. */
+function utf8Sequence(codePoint: number): number[] {
+	if (codePoint < 0x80) return [codePoint];
+	const tail: number[] = [];
+	let rest = codePoint;
+	// A lead byte of n bytes holds 7 - n bits of the code point.
+	let leadBits = 6;
+	do {
+		tail.unshift(0x80 | (rest & 0x3f));
+		rest >>>= 6;
+		leadBits--;
+	} while (rest >= 1 << leadBits);
+	return [((0xff00 >> (tail.length + 1)) & 0xff) | rest, ...tail];
+}
+
+/**
+ * The text of a `$'…'` body as bash decodes it (bash 5.3, #4739 round 5): the
+ * simple escapes, `\nnn` octal (value & 0xff), `\xHH`, `\uHHHH`,
+ * `\UHHHHHHHH`, `\cX`, and an unknown escape kept with its backslash. A NUL
+ * ends the string. The work is on bytes, as bash's is, and the text is the
+ * bytes read as UTF-8, as the command itself is. A non-ASCII `\u` follows a
+ * UTF-8 locale; under C, bash prints the escape itself, and neither reading
+ * can spell an ASCII word.
+ */
+function decodeAnsiC(body: string): string {
+	const source = new TextEncoder().encode(body);
+	const out: number[] = [];
+	const digitsAt = (start: number, max: number, radix: number) => {
+		let end = start;
+		while (
+			end < source.length &&
+			end - start < max &&
+			isDigitByte(source[end] ?? 0, radix)
+		)
+			end++;
+		return end;
+	};
+	const number = (start: number, end: number, radix: number) =>
+		Number.parseInt(new TextDecoder().decode(source.slice(start, end)), radix);
+	let i = 0;
+	while (i < source.length) {
+		const byte = source[i] ?? 0;
+		if (byte !== 0x5c || i + 1 >= source.length) {
+			out.push(byte);
+			i++;
+			continue;
+		}
+		const escape = source[i + 1] ?? 0;
+		let value = ANSI_C_ESCAPES.get(escape);
+		if (value !== undefined) {
+			i += 2;
+		} else if (isDigitByte(escape, 8)) {
+			const end = digitsAt(i + 1, 3, 8);
+			value = number(i + 1, end, 8) & 0xff;
+			i = end;
+		} else if (escape === 0x78 || escape === 0x75 || escape === 0x55) {
+			// `\x` takes up to 2 hex digits, `\u` 4 and `\U` 8.
+			const end = digitsAt(
+				i + 2,
+				escape === 0x78 ? 2 : escape === 0x75 ? 4 : 8,
+				16,
+			);
+			if (end === i + 2) {
+				out.push(0x5c, escape);
+				i += 2;
+				continue;
+			}
+			const code = number(i + 2, end, 16);
+			i = end;
+			if (escape === 0x78) value = code;
+			else if (code === 0) value = 0;
+			// Bash drops a code point at or above 2^31 and goes on.
+			else if (code < 0x80000000) out.push(...utf8Sequence(code));
+		} else if (escape === 0x63 && i + 2 < source.length) {
+			const control = source[i + 2] ?? 0;
+			i += 3;
+			// `\c\\` is one control character, made from both backslashes.
+			if (control === 0x5c && source[i] === 0x5c) i++;
+			// Bash upper-cases the letter first; the low five bits are the same.
+			value = control === 0x3f ? 0x7f : control & 0x1f;
+		} else {
+			out.push(0x5c, escape);
+			i += 2;
+			continue;
+		}
+		if (value === 0) break;
+		if (value !== undefined) out.push(value);
+	}
+	return new TextDecoder().decode(new Uint8Array(out));
 }
 
 /**
@@ -88,6 +207,14 @@ interface ShellWord {
 	 * `~/x""` expands; `""~`, `~""/x` and `~\ x` do not.
 	 */
 	tildeExpands: boolean;
+	/**
+	 * An unquoted `(`, `)`, `{` or `}` standing alone: shell syntax, not a
+	 * character of a command word (#4739 r2). Bash ends a word at a paren, so
+	 * `(git push)` runs `git`, and a lone `{` opens a group whose first command
+	 * follows it. The one paren a word keeps is the `(` of `$(`, which opens a
+	 * substitution, and an escaped or quoted paren is a character of its word.
+	 */
+	syntax?: true;
 }
 
 /**
@@ -268,15 +395,15 @@ interface ShellOperand {
 
 function shellOperands(range: ShellSegmentRange): ShellOperand[] {
 	return range.words.map((word) => ({
-		text: wordValue(word, true) ?? "",
+		text: wordValue(word, true),
 		tildeExpands: word.tildeExpands,
 	}));
 }
 
 /**
- * Bash's word after quote removal, or `undefined` when a part's text is not
- * known statically (#4713 R11). This is the name bash looks a command up by:
- * `\c""d`, `'cd'` and `$'cd'` are all `cd`, and `"\c"d` is `\cd`.
+ * Bash's word after quote removal (#4713 R11). This is the name bash looks a
+ * command up by: `\c""d`, `'cd'` and `$'cd'` are all `cd`, and `"\c"d` is
+ * `\cd`.
  *
  * `asPath` is the reading every operand reader takes (#4713 R12). It keeps the
  * backslash of a `keptEscape` part, so an unquoted `C:\src\f.ts` names that
@@ -284,10 +411,9 @@ function shellOperands(range: ShellSegmentRange): ShellOperand[] {
  * bash's own text, so `"C:\x\f.ts"` keeps its backslashes and `$'f.ts'` is
  * `f.ts`.
  */
-function wordValue(word: ShellWord, asPath = false): string | undefined {
+function wordValue(word: ShellWord, asPath = false): string {
 	let value = "";
 	for (const part of word.parts) {
-		if (part.text === undefined) return undefined;
 		value +=
 			asPath && part.kind === "keptEscape"
 				? part.text.replace(/[\s\S]/g, "\\$&")
@@ -302,6 +428,52 @@ export function tokenizeShellCommand(command: string): ShellCommandSegment[] {
 	return tokenizeShellCommandWithRanges(command).flatMap(({ segment }) =>
 		segment.tokens.length > 0 || segment.unsupported ? [segment] : [],
 	);
+}
+
+/**
+ * A word as the command guards read it (#4739): bash's word after quote
+ * removal (see {@link wordValue}, read as a path so a native Windows
+ * `C:\git.exe` keeps its separators), never the legacy token text, which
+ * spells `$'git'` and `\$'git'` alike as `$git`.
+ *
+ * `hidden` marks a word whose bash value this model does not know: a word
+ * bash expands (`$g`, a command substitution, a glob or a brace list), whose
+ * text is the unexpanded spelling. An ANSI-C word is decoded (`$'\x67it'` is
+ * `git`, round 5). A guard decides what to do with a word it cannot read;
+ * this model only says so.
+ */
+export interface DecodedShellWord {
+	text: string;
+	hidden?: "expansion";
+}
+
+export interface DecodedShellSegment {
+	words: DecodedShellWord[];
+}
+
+/** What bash expands in a part of each quoting kind. */
+const EXPANDING_CHARS: Partial<Record<WordPartKind, RegExp>> = {
+	unquoted: /[$`*?[{]/,
+	double: /[$`]/,
+	locale: /[$`]/,
+};
+
+export function decodeShellWords(command: string): DecodedShellSegment[] {
+	return tokenizeShellCommandWithRanges(command).map(({ words }) => ({
+		words: words.flatMap((word): DecodedShellWord[] => {
+			// A lone paren or brace is shell syntax, not a word (#4739 round 2).
+			if (word.syntax === true) return [];
+			const hidden = word.parts.some((part) =>
+				EXPANDING_CHARS[part.kind]?.test(part.text),
+			);
+			return [
+				{
+					text: wordValue(word, true),
+					...(hidden && { hidden: "expansion" as const }),
+				},
+			];
+		}),
+	}));
 }
 
 function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
@@ -333,12 +505,8 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 		if (part)
 			parts.push({
 				kind: part.kind,
-				// The model does not decode an ANSI-C escape: such a part has no
-				// static text, and every reader of it fails closed.
-				text:
-					part.kind === "ansiC" && part.text.includes("\\")
-						? undefined
-						: part.text,
+				// An ANSI-C part holds the quoted source; bash's text is decoded.
+				text: part.kind === "ansiC" ? decodeAnsiC(part.text) : part.text,
 			});
 		part = undefined;
 	};
@@ -365,6 +533,9 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 					first?.kind === "unquoted" &&
 					first.text?.startsWith("~") === true &&
 					(rest.length === 0 || first.text.includes("/")),
+				...(rest.length === 0 &&
+					first?.kind === "unquoted" &&
+					["(", ")", "{", "}"].includes(first.text ?? "") && { syntax: true }),
 			});
 			redirectWords.push(redirectPending);
 			redirectPending = false;
@@ -405,10 +576,21 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 		const ch = command[i] ?? "";
 		const next = command[i + 1];
 		if (quote === "single") {
-			if (ch === "'") quote = undefined;
-			else {
+			if (ch === "'") {
+				quote = undefined;
+				// A NUL ends only its own `$'…'`: decode each quote alone.
+				if (quoteKind === "ansiC") closePart();
+			} else {
 				word += ch;
 				addToPart(quoteKind, ch);
+				// Inside `$'…'` a backslash escapes the next character, a quote
+				// included: `$'\''` is one quote character, and reading its second
+				// quote as the close swallowed what follows it (#4739).
+				if (quoteKind === "ansiC" && ch === "\\" && next !== undefined) {
+					word += next;
+					addToPart(quoteKind, next);
+					i++;
+				}
 			}
 			continue;
 		}
@@ -560,6 +742,19 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 			continue;
 		}
 		if ("(){}`".includes(ch)) grouping = true;
+		// An escaped paren (`\(`) is a character of its word, not syntax.
+		if ((ch === "(" || ch === ")") && !escapeKept) {
+			const opensSubstitution =
+				ch === "(" && part?.kind === "unquoted" && part.text.endsWith("$");
+			if (!opensSubstitution) {
+				flushWord();
+				word = ch;
+				addToPart("unquoted", ch);
+				flushWord();
+				escapeKept = false;
+				continue;
+			}
+		}
 		word += ch;
 		if (escapeKept) addToPart("keptEscape", ch);
 		else if (ch === "$" && (next === "'" || next === '"')) dollarQuote = true;
@@ -1190,7 +1385,7 @@ function cdOperandPath(
 	if (!word || value === undefined || !PLAIN_PATH_START.test(value))
 		return undefined;
 	for (const part of word.parts) {
-		const text = part.text ?? "";
+		const text = part.text;
 		// Inside double quotes bash expands `$` and a backtick (`"s$D"`, R116),
 		// and keeps a backslash the token text drops (`"s\ub"`, R50).
 		if (

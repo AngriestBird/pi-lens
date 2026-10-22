@@ -4,7 +4,7 @@ import type { CacheInspection, CacheManager } from "./cache-manager.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 import { isPathIgnoredByProject } from "./file-utils.js";
 import { isOutsideProjectRoot, toProjectRelativePath } from "./path-utils.js";
-import { tokenizeShellCommand } from "./bash-file-access.js";
+import { decodeShellWords, type DecodedShellWord } from "./bash-file-access.js";
 import { incrementDegradationCount } from "./degradation-ledger.js";
 import { absorbSettledRunnerBlockers } from "./deferred-runner-blockers.js";
 import { logLatency } from "./latency-logger.js";
@@ -301,8 +301,12 @@ function isShellWrapper(value: string): boolean {
 }
 
 function isGitExecutable(value: string): boolean {
-	return new Set(["git", "git.exe", "git.cmd", "git.bat"]).has(
-		executableName(value),
+	const names = new Set(["git", "git.exe", "git.cmd", "git.bat"]);
+	// Two readings of a backslash before an ordinary character: the word model
+	// keeps it for a native Windows path (`C:\tools\git.exe`), and bash removes
+	// it (`g\it` is `git`, #4739). A command-position word is git under either.
+	return [value, normalizeGuardVerbToken(value)].some((reading) =>
+		names.has(executableName(reading)),
 	);
 }
 
@@ -313,6 +317,19 @@ function isCommandStringWrapper(value: string): boolean {
 }
 
 /**
+ * True when the `'` at `index` opens an ANSI-C string (`$'…'`): an unescaped
+ * `$` sits right before it. Inside one, a backslash escapes the next
+ * character, a quote included (`$'\''` is one quote), so a scanner that ends
+ * the string at the first `'` desyncs and reads what follows as quoted (#4739).
+ */
+function opensAnsiC(command: string, index: number): boolean {
+	if (command[index - 1] !== "$") return false;
+	let backslashes = 0;
+	for (let i = index - 2; i >= 0 && command[i] === "\\"; i--) backslashes++;
+	return backslashes % 2 === 0;
+}
+
+/**
  * Canonicalize shell parameter separators before command classification. The
  * quote-aware pass deliberately leaves literal arguments alone; the lexer
  * then supplies the command-position boundaries used by the guard.
@@ -320,12 +337,16 @@ function isCommandStringWrapper(value: string): boolean {
 function canonicalizeGuardCommand(command: string): string {
 	let result = "";
 	let quote: "single" | "double" | undefined;
+	let ansiC = false;
 	let escaped = false;
 	for (let i = 0; i < command.length; i++) {
 		const ch = command[i];
 		if (quote === "single") {
 			result += ch;
-			if (ch === "'") quote = undefined;
+			if (ansiC && ch === "\\") {
+				result += command[i + 1] ?? "";
+				i += 1;
+			} else if (ch === "'") quote = undefined;
 			continue;
 		}
 		if (quote === "double") {
@@ -337,6 +358,7 @@ function canonicalizeGuardCommand(command: string): string {
 		}
 		if (ch === "'" || ch === '"') {
 			quote = ch === "'" ? "single" : "double";
+			ansiC = ch === "'" && opensAnsiC(command, i);
 			result += ch;
 			continue;
 		}
@@ -352,6 +374,9 @@ function canonicalizeGuardCommand(command: string): string {
 	let collapsed = "";
 	let pendingSpace = false;
 	quote = undefined;
+	// This pass does not know ANSI-C strings (#4739): on `$'\''` its quote state
+	// flips, and only which blanks it collapses changes. The lexer splits on
+	// every blank either way, and no decision reads the collapsed blanks.
 	for (const ch of result) {
 		if (!quote && ch === "\n") {
 			collapsed += ch;
@@ -374,7 +399,10 @@ function canonicalizeGuardCommand(command: string): string {
 			quote = undefined;
 		}
 	}
-	return collapsed.trim();
+	// Not the trailing end: a backslash-newline there is a line continuation
+	// that joins the last word to nothing, and `git push\<newline>` is
+	// `git push` (#4739).
+	return collapsed.trimStart();
 }
 
 /** Normalize only a command-position token; never apply this to path args. */
@@ -397,11 +425,13 @@ function delimitedSubstitutionBody(
 ): { body: string; end: number } | undefined {
 	let depth = 1;
 	let quote: "single" | "double" | undefined;
+	let ansiC = false;
 	let escaped = false;
 	for (let i = start + opener.length; i < command.length; i++) {
 		const ch = command[i];
 		if (quote === "single") {
-			if (ch === "'") quote = undefined;
+			if (ansiC && ch === "\\") i += 1;
+			else if (ch === "'") quote = undefined;
 			continue;
 		}
 		if (quote === "double" && ch === '"') {
@@ -418,6 +448,7 @@ function delimitedSubstitutionBody(
 		}
 		if (ch === "'" || ch === '"') {
 			quote = ch === "'" ? "single" : "double";
+			ansiC = ch === "'" && opensAnsiC(command, i);
 			continue;
 		}
 		if (command.startsWith(opener, i)) {
@@ -490,11 +521,13 @@ function containsGuardedSubstitution(
 ): boolean {
 	if (depth > 3) return false;
 	let quote: "single" | "double" | undefined;
+	let ansiC = false;
 	let escaped = false;
 	for (let i = 0; i < command.length; i++) {
 		const ch = command[i];
 		if (quote === "single") {
-			if (ch === "'") quote = undefined;
+			if (ansiC && ch === "\\") i += 1;
+			else if (ch === "'") quote = undefined;
 			continue;
 		}
 		if (quote === "double" && ch === '"') {
@@ -511,6 +544,7 @@ function containsGuardedSubstitution(
 		}
 		if (ch === '"' || ch === "'") {
 			quote = ch === "'" ? "single" : "double";
+			ansiC = ch === "'" && opensAnsiC(command, i);
 			continue;
 		}
 		const substitution = command.startsWith("$(", i)
@@ -529,8 +563,8 @@ function containsGuardedSubstitution(
 			const nested = canonicalizeGuardCommand(substitution.body);
 			if (
 				containsGuardedSubstitution(nested, depth + 1, matcher) ||
-				tokenizeShellCommand(nested).some((segment) =>
-					containsGuardedGitVerb(segment.tokens, depth + 1, matcher),
+				decodeShellWords(nested).some((segment) =>
+					containsGuardedGitVerb(segment.words, depth + 1, matcher),
 				)
 			) {
 				return true;
@@ -721,39 +755,98 @@ export function collectGitInvocations(
 	const command = getShellCommand(input);
 	if (!command) return [];
 	const invocations: string[][] = [];
-	for (const segment of tokenizeShellCommand(
-		canonicalizeGuardCommand(command),
-	)) {
-		const gitIndex = segment.tokens.findIndex((token) =>
-			isGitExecutable(token),
-		);
-		if (gitIndex >= 0) invocations.push(segment.tokens.slice(gitIndex));
+	for (const segment of decodeShellWords(canonicalizeGuardCommand(command))) {
+		const tokens = segment.words.map((word) => word.text);
+		const gitIndex = tokens.findIndex((token) => isGitExecutable(token));
+		if (gitIndex >= 0) invocations.push(tokens.slice(gitIndex));
 	}
 	return invocations;
 }
 
-function containsGuardedGitVerb(
-	tokens: string[],
+/**
+ * A command string is a shell's, so its words are lexed again as one (the
+ * decoded text of each word, joined): `bash -c $'git\x20push'` reads
+ * `git push` (#4739 round 5).
+ */
+function commandStringHasGuardedVerb(
+	words: readonly DecodedShellWord[],
 	depth: number,
 	matcher: GitVerbMatcher,
 ): boolean {
-	if (depth > 3 || tokens.length === 0) return false;
-	let commandTokens = tokens;
-	while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(commandTokens[0] ?? "")) {
-		commandTokens = commandTokens.slice(1);
+	return decodeShellWords(
+		canonicalizeGuardCommand(words.map((word) => word.text).join(" ")),
+	).some((segment) => containsGuardedGitVerb(segment.words, depth, matcher));
+}
+
+/**
+ * Whether a word the model cannot read may start a guarded command (#4739). The
+ * word model says what it cannot read (`DecodedShellWord.hidden`); this is the
+ * gate's answer, and it fails closed: the word may be any word. As git, a
+ * later word that is a governed verb guards the command (`$g push`), and so
+ * does a later unread word when the first unread word is the command word
+ * itself (`$g $v`). After a readable command word an unread word is an
+ * argument, so `cp $SRC $DST` stays plain (round 6); `env $g $v` is the cost,
+ * as on master. As `eval`, a launcher or its command-string switch, a later
+ * word that holds a guarded command guards it (`bash $c 'git push'`,
+ * `$e 'git push'`, round 4). Each later word is read alone, as `-c` takes one:
+ * read joined, `$SHELL -c 'git status'` would put git at a non-leading index.
+ * Git's own verb is the caller's case. An ANSI-C word is no such word: the
+ * model decodes it (round 5). `docker push $IMAGE` reads nothing it cannot
+ * see before its verb, and stays unguarded.
+ *
+ * Only a policy gate (`indirectAlwaysMatches`) answers this way: the guard that
+ * protects an agent from its own accident would block commands it can read.
+ */
+function hidesGuardedVerb(
+	words: readonly DecodedShellWord[],
+	depth: number,
+	matcher: GitVerbMatcher,
+): boolean {
+	if (!matcher.indirectAlwaysMatches) return false;
+	const firstHidden = words.findIndex((word) => word.hidden);
+	return (
+		firstHidden >= 0 &&
+		words
+			.slice(firstHidden + 1)
+			.some(
+				(word) =>
+					(firstHidden === 0 && word.hidden) ||
+					matcher.matchesVerb(word.text, []) ||
+					commandStringHasGuardedVerb([word], depth + 1, matcher),
+			)
+	);
+}
+
+function containsGuardedGitVerb(
+	words: readonly DecodedShellWord[],
+	depth: number,
+	matcher: GitVerbMatcher,
+): boolean {
+	if (depth > 3 || words.length === 0) return false;
+	let commandWords = words;
+	while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(commandWords[0]?.text ?? "")) {
+		commandWords = commandWords.slice(1);
 	}
-	if (commandTokens.length === 0) return false;
-	const expandedHead = expandGuardVerbToken(commandTokens[0] ?? "");
+	if (commandWords.length === 0) return false;
+	const expandedHead = expandGuardVerbToken(commandWords[0]?.text ?? "");
 	if (expandedHead.length > 1) {
-		commandTokens = [...expandedHead, ...commandTokens.slice(1)];
+		commandWords = [
+			...expandedHead.map((text) => ({ text })),
+			...commandWords.slice(1),
+		];
 	}
+	const commandTokens = commandWords.map((word) => word.text);
 	if (isCommandStringWrapper(commandTokens[0] ?? "")) {
 		const lower = commandTokens.slice(1).map((token) => token.toLowerCase());
-		const runIndex = lower.findIndex((token) => token === "--run");
+		// nix-shell documents `--command` as `--run` in an interactive shell (#4739 r4).
+		const runIndex = lower.findIndex(
+			(token) => token === "--run" || token === "--command",
+		);
 		if (runIndex >= 0 && runIndex + 1 < commandTokens.length) {
-			const nestedCommand = commandTokens.slice(runIndex + 2).join(" ");
-			return tokenizeShellCommand(canonicalizeGuardCommand(nestedCommand)).some(
-				(segment) => containsGuardedGitVerb(segment.tokens, depth + 1, matcher),
+			return commandStringHasGuardedVerb(
+				commandWords.slice(runIndex + 2),
+				depth + 1,
+				matcher,
 			);
 		}
 	}
@@ -766,20 +859,48 @@ function containsGuardedGitVerb(
 	) {
 		return false;
 	}
+	// `eval` joins its arguments and runs the result as a command string, as a
+	// shell does for `-c`. A literal handed to it is read again, so
+	// `eval "git push"` is the `git push` it runs (#4739 round 3). Like a
+	// non-leading git, an `eval` after the first word is read too: `builtin eval`,
+	// `command eval` and `if eval` run it (round 4). A string built by data flow
+	// (`eval "$CMD"`) stays out of reach: it exists only at run time.
+	const evalIndex = commandTokens.findIndex(
+		(token) => executableName(token) === "eval",
+	);
+	if (
+		evalIndex >= 0 &&
+		commandStringHasGuardedVerb(
+			commandWords.slice(evalIndex + 1),
+			depth + 1,
+			matcher,
+		)
+	) {
+		return true;
+	}
+	if (hidesGuardedVerb(commandWords, depth, matcher)) return true;
 	const gitIndex = commandTokens.findIndex((token) => isGitExecutable(token));
 	if (gitIndex >= 0) {
 		// Any non-leading git invocation is indirect. Do not maintain a wrapper
 		// or flag allowlist: unknown launchers are the security boundary here.
 		if (gitIndex > 0 && matcher.indirectAlwaysMatches) return true;
+		const gitTokens = commandTokens.slice(gitIndex);
+		const verbAt = gitVerbIndex(gitTokens);
+		// A verb the model cannot read (`git $sub`, `git {push,x}`) is not
+		// a verb the matcher can refuse.
+		if (
+			matcher.indirectAlwaysMatches &&
+			verbAt !== undefined &&
+			commandWords[gitIndex + verbAt]?.hidden
+		) {
+			return true;
+		}
 		// #2007: a guard that protects the agent from its own accident must not
 		// decline `xargs git status`, so the indirect path stays armed only when
 		// a governed verb sits in git's real COMMAND POSITION. Scanning every
 		// token instead would fire on `find . -name checkout | xargs git add`,
 		// where `checkout` is a positional value and not a subcommand at all.
-		return matchGitVerbAtCommandPosition(
-			commandTokens.slice(gitIndex),
-			matcher,
-		);
+		return matchGitVerbAtCommandPosition(gitTokens, matcher);
 	}
 	const leadingExecutable = commandTokens[0] ?? "";
 	const knownCommandStringWrapper =
@@ -798,9 +919,10 @@ function containsGuardedGitVerb(
 		if (unknownSwitchIndex < 0) return false;
 		const commandIndex = unknownSwitchIndex + 2;
 		if (commandIndex >= commandTokens.length) return false;
-		const nestedCommand = commandTokens.slice(commandIndex).join(" ");
-		return tokenizeShellCommand(canonicalizeGuardCommand(nestedCommand)).some(
-			(segment) => containsGuardedGitVerb(segment.tokens, depth + 1, matcher),
+		return commandStringHasGuardedVerb(
+			commandWords.slice(commandIndex),
+			depth + 1,
+			matcher,
 		);
 	}
 	const lower = commandTokens.slice(1).map((token) => token.toLowerCase());
@@ -825,9 +947,10 @@ function containsGuardedGitVerb(
 	// handles cmd options preceding /C (for example `/S /C`).
 	let commandIndex = switchIndex + 2;
 	if (commandTokens[commandIndex] === "--") commandIndex += 1;
-	const nestedCommand = commandTokens.slice(commandIndex).join(" ");
-	return tokenizeShellCommand(canonicalizeGuardCommand(nestedCommand)).some(
-		(segment) => containsGuardedGitVerb(segment.tokens, depth + 1, matcher),
+	return commandStringHasGuardedVerb(
+		commandWords.slice(commandIndex),
+		depth + 1,
+		matcher,
 	);
 }
 
@@ -849,8 +972,8 @@ export function detectGuardedGitVerb(
 	if (!command) return false;
 	const canonical = canonicalizeGuardCommand(command);
 	if (containsGuardedSubstitution(canonical, 0, matcher)) return true;
-	return tokenizeShellCommand(canonical).some((segment) =>
-		containsGuardedGitVerb(segment.tokens, 0, matcher),
+	return decodeShellWords(canonical).some((segment) =>
+		containsGuardedGitVerb(segment.words, 0, matcher),
 	);
 }
 
