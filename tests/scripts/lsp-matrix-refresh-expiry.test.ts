@@ -260,7 +260,7 @@ describe("#3401 first-publish expiry (date-based)", () => {
 	});
 
 	it("never expires an empty-first cell, but stamps its first unobserved night (#4615)", () => {
-		// Recurrence (review F2, mutation M7b): php/terraform `empty-first` back a
+		// Recurrence (review F2, mutation M7b): php `empty-first` backs a
 		// LIVE `emptyFirstPublish: "indexing"` marker. Expiring the cell erases the
 		// measurement behind the marker while the first-publish census stays green
 		// (it ignores `unknown`). Only a stale `direct` -- the no-op default -- may

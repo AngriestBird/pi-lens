@@ -510,25 +510,24 @@ export const SERVER_DIAGNOSTIC_STRATEGIES: Record<string, DiagnosticStrategy> =
 			// #3484: the fence reply (+2..4 ms) precedes the publish (~+1 s).
 			diagnosticsFence: "reply-first",
 		},
-		// terraform-ls (#3310). The nightly tool-smoke measurement was identical
-		// on 2026-09-27, 2026-09-28, and 2026-09-29:
-		//
-		//   [terraform] clean-behavior=publishes-unversioned (tier 2*)
-		//   dirtyPubs=2(v:0) cleanPubs=2(v:0) first-publish=empty-first
-		//   provisional pre-index publish
-		//
-		// The first empty, unversioned publish is the cold-index artifact, so hold
-		// it once and let terraform-ls's next publish resolve the wait. A held
-		// clean-only trace therefore reaches the caller as unanswered/indeterminate
-		// at the wait ceiling rather than a false clean, by design (#3310). The
-		// marker is measured policy, not a blanket rule for Tier 2* push servers.
+		// terraform-ls: NO `emptyFirstPublish` marker (#4615). The earlier
+		// `empty-first` reading (2026-09-27..29, and the nightlies 2026-10-17..20)
+		// came from a probe that counted terraform-ls's EMPTY set for the
+		// WORKSPACE DIRECTORY URI. terraform-ls publishes that set in the same
+		// ~1 ms burst as the file's own finding, and the probe's drainer kept rows
+		// by server id only, so the directory row was read as the file's first
+		// publish. Scoped to the fixture's own document, the first publish carries
+		// the finding: `direct` (terraform-ls 0.39.0, 16/16 cold runs). The hold
+		// was also a no-op for a dirty file: the one-shot hold is spent on the
+		// directory row or an unrelated `.tf` file, never on the finding. On a
+		// clean `.tf` file it could swallow the file's own `[]`, which costs a
+		// wait to the ceiling (inferred from code, not probed).
 		terraform: {
 			seedFirstPush: false,
 			pullRetryBudgetMs: 0,
 			debounceMs: 150,
 			aggregateWaitMs: 1500,
 			expectSemanticSecondPush: false,
-			emptyFirstPublish: "indexing",
 		},
 		// yaml-language-server (#3484): the default strategy plus the measured
 		// fence order — reply +3..6 ms, publish +207..242 ms after didChange.
