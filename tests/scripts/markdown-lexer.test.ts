@@ -140,8 +140,12 @@ describe("markdownBlockComments (#4774)", () => {
 		expect(markdownBlockComments("<details>\nx\n</details>")).toEqual([]);
 	});
 
-	it("is blind to a comment inside an earlier open comment", () => {
-		expect(markdownBlockComments("<!-- open\n\n<!-- inner -->")).toEqual([0]);
+	// A comment a list item leaves open hides the top-level comment that closes
+	// it (#4717 N6), so that block is no marker of a bot.
+	it("is blind to a comment an earlier open comment hides", () => {
+		expect(markdownBlockComments("- item\n  <!--\n\n<!-- later -->")).toEqual(
+			[],
+		);
 	});
 
 	it("counts lines over CRLF text", () => {
