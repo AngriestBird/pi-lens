@@ -740,5 +740,12 @@ describe("what else reads the decoded word (#4739)", () => {
 			}),
 		).toBe(false);
 		expect(guarded("$g push")).toBe(true);
+		// Round 3: the same split for an escape in a launcher's command string.
+		expect(
+			isWorktreeMutatingGitAttempt("bash", {
+				command: "nix-shell --run $'git\\x20checkout .'",
+			}),
+		).toBe(false);
+		expect(guarded("nix-shell --run $'git\\x20push'")).toBe(true);
 	});
 });
