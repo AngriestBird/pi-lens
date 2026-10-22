@@ -64,10 +64,12 @@ export interface BlockerPartition {
 	blockerContent: string;
 	blockingFiles: string[];
 	/**
-	 * When the owner last wrote these sections, in epoch ms (#4750). Text no
+	 * Epoch ms (#4750), written by two writers: the owner, when it writes these
+	 * sections; and, for a partition a writer before #4750 wrote (no stamp), the
+	 * session whose turn end first carries it (`carriedTurnEndBlockers`'
+	 * `?? now`), so such a record's window starts at that first carry. Text no
 	 * file owns expires by it: the record's own timestamp moves with every
-	 * writer's write, so it cannot tell how old one owner's text is. Absent on
-	 * a partition a writer before #4750 wrote, until a turn end carries it.
+	 * writer's write, so it cannot tell how old one owner's text is.
 	 */
 	blockerWrittenAt?: number | undefined;
 }
