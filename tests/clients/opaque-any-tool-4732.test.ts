@@ -563,7 +563,7 @@ describe("which calls pay for git status (#4732)", () => {
 	});
 
 	it("clears the saved commit record when a clean observed edit of a refused relative path retires its blocker", async () => {
-		// RECURRENCE GUARDED: #4737 r4 (Greptile PRRT_kwDORt8rec6vFING). The
+		// RECURRENCE GUARDED: #4737 r4 (Greptile, per-path mode thread). The
 		// observed dispatch took its analysis-root mode from the handler's
 		// `filePath`, which a refused relative path leaves unset, so the mode
 		// was that of the process cwd, not of the file. syncGitGuardRecord then
