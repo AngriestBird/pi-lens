@@ -39,6 +39,7 @@ import {
 	ClientRegistry,
 	type ClientGenerationHooks,
 } from "../../../clients/lsp/client-registry.js";
+import { LSPService } from "../../../clients/lsp/index.js";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
 import { pinFixtureHome, removeTempDirSync } from "../test-utils.js";
 
@@ -207,6 +208,32 @@ describe("auxiliary loose-file root (#4760)", () => {
 				path.join(home, "bin"),
 			);
 		}
+	});
+
+	it("names a policy-skipped scanner as uncovered on the touch", async () => {
+		const { home, restore } = pinFixtureHome("aux-root-touch");
+		openedHomes.push({ restore });
+		const file = path.join(home, "loose.sh");
+		fs.writeFileSync(file, "#!/bin/sh\n");
+		const service = new LSPService();
+		const helper = service as unknown as {
+			skippedAuxiliaryServerIds(
+				filePath: string,
+				clientScope: string,
+				options: Record<string, unknown>,
+				spawned: unknown[],
+			): Promise<{
+				brokenSkippedServerIds: string[];
+				policySkippedServerIds: string[];
+			}>;
+		};
+
+		const result = await helper.skippedAuxiliaryServerIds(file, "all", {}, []);
+
+		// The policy door, not the breaker door: a declined scanner is a root
+		// decision, and it must reach `unconfirmedServerIds` as such.
+		expect(result.policySkippedServerIds).toContain("opengrep");
+		expect(result.brokenSkippedServerIds).not.toContain("opengrep");
 	});
 
 	it("declines a file whose own directory is $HOME, with one bounded record", async () => {
