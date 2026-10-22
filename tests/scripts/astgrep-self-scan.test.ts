@@ -503,7 +503,14 @@ describe("self-scan argv and tracked filter (#3886 r3)", () => {
 		// The helper resolves the maintenance policy relative to its own module, so
 		// the policy file is copied with it (#4552 R2).
 		copyFixtureGitHelper(root);
-		for (const rel of ["clients/safe-spawn.js", "clients/string-utils.js"]) {
+		// The wrapper adopts project trust itself (#4530), so the trust module
+		// it imports is linked too; Node resolves each link to its real path, so
+		// the wrapper and the spawn seam share one trust state.
+		for (const rel of [
+			"clients/project-trust.js",
+			"clients/safe-spawn.js",
+			"clients/string-utils.js",
+		]) {
 			fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
 			fs.symlinkSync(path.join(repoRoot(), rel), path.join(root, rel));
 		}

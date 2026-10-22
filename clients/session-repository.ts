@@ -40,8 +40,8 @@ import * as path from "node:path";
 import {
 	isAtOrAboveHomeDir,
 	isWithinForm,
+	normalizeEphemeralMapKey,
 	realpathOrResolve,
-	toPosix,
 	walkUpDirs,
 } from "./path-utils.js";
 import { recordDegradationOnce } from "./degradation-ledger.js";
@@ -166,13 +166,14 @@ function hasGitEntry(dir: string): boolean {
 }
 
 /**
- * One comparable form for kernel-real paths: forward slashes, and on Windows
- * folded to lower case (its filesystems compare names case-insensitively).
- * Real paths already carry the on-disk spelling, so no further normalization
- * (and no filesystem access) is needed to compare them.
+ * One comparable form for kernel-real paths: on Windows, forward slashes
+ * folded to lower case (its filesystems compare names case-insensitively);
+ * on POSIX the real path itself, because a backslash there is a name
+ * character, not a separator. Real paths already carry the on-disk spelling,
+ * so no further normalization (and no filesystem access) is needed.
  */
 function pathForm(real: string): string {
-	return process.platform === "win32" ? toPosix(real).toLowerCase() : real;
+	return process.platform === "win32" ? normalizeEphemeralMapKey(real) : real;
 }
 
 /**

@@ -160,6 +160,14 @@ describe("lsp launch", () => {
 			expect(log).not.toContain(token);
 			expect(log).toContain("[REDACTED:github-token]");
 		} finally {
+			// #4530: the spawn seam's one-per-session notice and ledger record for
+			// a dropped search-path entry (the checkout's own `node_modules/.bin`
+			// on a test runner's PATH) are async appends to extension.log and
+			// latency.log under the doubled log dir; drain every writer before
+			// the dir is removed, or a late append recreates it.
+			const { flushAllNdjsonWriters } =
+				await import("../../../clients/ndjson-logger.js");
+			await flushAllNdjsonWriters();
 			vi.doUnmock("../../../clients/env-utils.js");
 			if (previousHome === undefined) delete process.env.PI_LENS_HOME;
 			else process.env.PI_LENS_HOME = previousHome;

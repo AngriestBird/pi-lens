@@ -897,15 +897,25 @@ export function mergeWindowsEnvironment(
 	return merged;
 }
 
+/**
+ * Every spelling of `name` in `env`, in insertion order: Windows compares
+ * environment names case-insensitively, so `PATH` and `Path` are one variable
+ * and the last spelling is the one a child sees.
+ */
+function windowsEnvironmentKeys(
+	env: NodeJS.ProcessEnv,
+	name: string,
+): string[] {
+	const folded = name.toLowerCase();
+	return Object.keys(env).filter((key) => key.toLowerCase() === folded);
+}
+
 function getWindowsEnvironmentValue(
 	env: NodeJS.ProcessEnv,
 	name: string,
 ): string | undefined {
-	let value: string | undefined;
-	for (const [key, entry] of Object.entries(env)) {
-		if (key.toLowerCase() === name.toLowerCase()) value = entry;
-	}
-	return value;
+	const key = windowsEnvironmentKeys(env, name).at(-1);
+	return key === undefined ? undefined : env[key];
 }
 
 function driveLetter(value: string): string | undefined {
@@ -1443,7 +1453,7 @@ export function trustScopedEnvironment(
 	// POSIX names the key exactly; only Windows needs the scan for spellings.
 	const keys =
 		process.platform === "win32"
-			? Object.keys(env).filter((key) => key.toLowerCase() === "path")
+			? windowsEnvironmentKeys(env, "PATH")
 			: Object.hasOwn(env, "PATH")
 				? ["PATH"]
 				: [];
