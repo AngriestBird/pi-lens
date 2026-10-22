@@ -1046,6 +1046,96 @@ describe("#2066: the send binds to the fingerprint the caller already computed",
 			hashDiagnosticContent("const x = 1;"),
 		);
 	});
+
+	// Review F2: `recordSentContent` takes the digest at five sites, and the
+	// fallback-open case above binds one. These four drive the other four
+	// branches, each asserting the notification that proves which site ran. A
+	// dropped argument at any of them leaves the send hashing the document again,
+	// which only a benchmark would notice.
+	function sentMethods(state: LSPClientState): string[] {
+		return vi
+			.mocked(state.connection.sendNotification)
+			.mock.calls.map((call) => call[0]);
+	}
+
+	it("keeps the caller's fingerprint on the didChange of an already-open document", async () => {
+		const state = createMockState({ syncKind: 2 });
+		state.openDocuments.add(TEST_KEY);
+		await handleNotifyChange(
+			state,
+			TEST_FILE,
+			"const x = 1;",
+			"fingerprint-from-the-did-change",
+		);
+		// The dominant send (#2066: 579 of 1 083 in the reporter's sample).
+		expect(sentMethods(state)).toContain("textDocument/didChange");
+		expect(sentMethods(state)).not.toContain("textDocument/didOpen");
+		expect(state.documentContentHashes.get(TEST_KEY)?.hash).toBe(
+			"fingerprint-from-the-did-change",
+		);
+	});
+
+	it("keeps the caller's fingerprint when an open of a held document sends a didChange", async () => {
+		const state = createMockState({ syncKind: 2 });
+		state.openDocuments.add(TEST_KEY);
+		await handleNotifyOpen(
+			state,
+			TEST_FILE,
+			"const x = 1;",
+			"typescript",
+			false,
+			false,
+			false,
+			undefined,
+			"fingerprint-from-the-open-as-change",
+		);
+		expect(sentMethods(state)).toContain("textDocument/didChange");
+		expect(state.documentContentHashes.get(TEST_KEY)?.hash).toBe(
+			"fingerprint-from-the-open-as-change",
+		);
+	});
+
+	it("keeps the caller's fingerprint on the main didOpen", async () => {
+		const state = createMockState({ syncKind: 2 });
+		await handleNotifyOpen(
+			state,
+			TEST_FILE,
+			"const x = 1;",
+			"typescript",
+			false,
+			false,
+			false,
+			undefined,
+			"fingerprint-from-the-main-open",
+		);
+		expect(sentMethods(state)).toContain("textDocument/didOpen");
+		expect(state.documentContentHashes.get(TEST_KEY)?.hash).toBe(
+			"fingerprint-from-the-main-open",
+		);
+	});
+
+	it("keeps the caller's fingerprint across an opengrep reopen-resync didOpen", async () => {
+		// `opengrep` re-syncs by didClose + didOpen (`reopenOnResync`), a fifth
+		// `recordSentContent` site with its own branch.
+		const state = createMockState({ serverId: "opengrep" });
+		state.openDocuments.add(TEST_KEY);
+		await handleNotifyOpen(
+			state,
+			TEST_FILE,
+			"const x = 1;",
+			"plaintext",
+			false,
+			false,
+			false,
+			undefined,
+			"fingerprint-from-the-reopen",
+		);
+		expect(sentMethods(state)).toContain("textDocument/didClose");
+		expect(sentMethods(state)).toContain("textDocument/didOpen");
+		expect(state.documentContentHashes.get(TEST_KEY)?.hash).toBe(
+			"fingerprint-from-the-reopen",
+		);
+	});
 });
 
 describe("recordSentContent only mirrors a CONFIRMED send (#1669 review F7)", () => {

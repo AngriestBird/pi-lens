@@ -4583,7 +4583,7 @@ export class LSPService {
 										queueWaitMs,
 									},
 								});
-								return undefined;
+								return;
 							}
 							slot = claim;
 						}
@@ -4687,10 +4687,6 @@ export class LSPService {
 								this.recordNotifyWriteBackpressure(clientKey, entry, filePath);
 							}
 						}
-						// This callback exists for its per-server side effects; `Promise.all`
-						// discards the results. Stated so no branch reads as a forgotten
-						// return.
-						return undefined;
 					}),
 				);
 				// #1783: stamp the disk-drift record only when the touch achieved FULL
