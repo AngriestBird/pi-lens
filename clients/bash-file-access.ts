@@ -168,11 +168,11 @@ function decodeAnsiC(body: string): string {
 			// Bash drops a code point at or above 2^31 and goes on.
 			else if (code < 0x80000000) out.push(...utf8Sequence(code));
 		} else if (escape === "c" && i + 2 < source.length) {
-			let control = source[i + 2] ?? 0;
+			const control = source[i + 2] ?? 0;
 			i += 3;
 			// `\c\\` is one control character, made from both backslashes.
 			if (control === 0x5c && source[i] === 0x5c) i++;
-			if (control >= 0x61 && control <= 0x7a) control -= 0x20;
+			// Bash upper-cases the letter first; the low five bits are the same.
 			value = control === 0x3f ? 0x7f : control & 0x1f;
 		} else {
 			out.push(0x5c, source[i + 1] ?? 0);
