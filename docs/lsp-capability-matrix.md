@@ -237,7 +237,12 @@ and were characterized `push-only` in the run above).
   publishes the fresh scan once, +0.25..0.4 s on both versions; a reopen with
   `didSave` publishes twice (+0.3..0.9 s), a lone `didSave` once (+0.25..0.5 s).
   Rules that never load (offline) leave the `[]` as the only publish and
-  `window/showMessage` carries the error after it (#4764). The strategy marker
+  `window/showMessage` carries the error after it (#4764). Measured offline on
+  the built tree, nine touches: the edit path (`with-auxiliary`) waits the
+  aux grace ceiling (about 2 s) for six touches, then the existing demotion
+  (`aux_wait_demoted`) skips the wait (0 ms); the explicit all-scope
+  `lsp_diagnostics` call waits the full wait budget (3 s) every time and
+  reports the coverage notice. The strategy marker
   `emptyUntilRulesRefreshed` holds that `[]`, released by the notification, not
   by a timer. The other three auxiliaries do not need it, measured in
   `tests/fixtures/opengrep-lsp-trace/auxiliary-first-publish.json`: ast-grep
