@@ -19,8 +19,9 @@
  *
  * The fail-closed rule the table pins, in `hidesGuardedVerb`: a word the word
  * model cannot read (an ANSI-C escape, or an expansion) guards the command
- * when it precedes a word that is, or may be, `commit` or `push`; when it is
- * git's own verb; or, for an ANSI-C escape, when a shell or `eval` receives it.
+ * when it precedes a word that is, or may be, `commit` or `push`, or when it is
+ * git's own verb. An ANSI-C escape inside a command string a launcher or
+ * `eval` receives guards the command at the string's re-lex.
  */
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";

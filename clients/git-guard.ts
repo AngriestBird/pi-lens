@@ -792,9 +792,10 @@ function commandStringHasGuardedVerb(
  * word model says what it cannot read (`DecodedShellWord.hidden`); this is the
  * gate's answer, and it fails closed. An unreadable word guards the command
  * when it could be the executable (it precedes a word that is, or may be, a
- * governed verb), when it is git's own verb, or when it is an ANSI-C escape
- * handed to a shell (`bash -c $'git\x20push'`). `docker push $IMAGE` reads
- * nothing it cannot see before its verb, and stays unguarded.
+ * governed verb), or when it is git's own verb. An ANSI-C escape handed to a
+ * shell (`bash -c $'git\x20push'`) is `commandStringHasGuardedVerb`'s case.
+ * `docker push $IMAGE` reads nothing it cannot see before its verb, and stays
+ * unguarded.
  *
  * Only a policy gate (`indirectAlwaysMatches`) answers this way: the guard that
  * protects an agent from its own accident would block commands it can read.
@@ -804,18 +805,6 @@ function hidesGuardedVerb(
 	matcher: GitVerbMatcher,
 ): boolean {
 	if (!matcher.indirectAlwaysMatches) return false;
-	const launcherAt = words.findIndex(
-		(word) =>
-			isShellWrapper(word.text) ||
-			isCommandStringWrapper(word.text) ||
-			executableName(word.text) === "eval",
-	);
-	if (
-		launcherAt >= 0 &&
-		words.slice(launcherAt + 1).some((word) => word.hidden === "escape")
-	) {
-		return true;
-	}
 	const firstHidden = words.findIndex((word) => word.hidden);
 	return (
 		firstHidden >= 0 &&
