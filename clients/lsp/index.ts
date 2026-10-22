@@ -2650,8 +2650,8 @@ export class LSPService {
 	 *
 	 * SCOPE, stated so the next reader does not assume the room is closed: this
 	 * covers the BREAKER doors only (cooldown + permanent), plus the #4760
-	 * root-policy decline, which is a PERMANENT policy answer (the file's own
-	 * directory is at or above `$HOME`) and never retries in this session.
+	 * root-policy decline, which is a PERMANENT policy answer (the resolved
+	 * root is at or above `$HOME`) and never retries in this session.
 	 * `ensureClientForServer` also drops a scanner for a temporarily-unavailable
 	 * command (the #1496 latch), `optionalDisabled`, a spawn failure, or capacity
 	 * eviction. Those are the same defect class in the same lane, but they are
@@ -2691,7 +2691,7 @@ export class LSPService {
 				filePath,
 			);
 			if (!root) continue;
-			if (declinesLooseFileRoot(server, filePath)) {
+			if (declinesLooseFileRoot(server, root)) {
 				policySkippedServerIds.push(server.id);
 				continue;
 			}
@@ -6361,7 +6361,7 @@ export class LSPService {
 						)
 					: { brokenSkippedServerIds: [], policySkippedServerIds: [] };
 			const brokenSkippedServerIds = skippedAuxiliaries.brokenSkippedServerIds;
-			// #4760: a scanner declined because the file's own directory is at or above
+			// #4760: a scanner declined because its resolved root is at or above
 			// `$HOME` never spawned, so it is uncovered exactly like a breaker skip — but
 			// the cause is a root policy, not a broken server. It keeps its own field.
 			const policySkippedServerIds = skippedAuxiliaries.policySkippedServerIds;

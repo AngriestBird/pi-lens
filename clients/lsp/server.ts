@@ -43,6 +43,7 @@ import {
 	matchesWorkspaceMemberPattern,
 	normalizeEphemeralMapKey,
 	pathsEqual,
+	realpathOrResolve,
 	toPosix,
 } from "../path-utils.js";
 import {
@@ -565,11 +566,13 @@ export interface LSPServerInfo {
 	 * the whole home tree; measured, opengrep's workspace-targets walk does not
 	 * answer `initialize` inside 150 s there.
 	 *
-	 * `fileDir` (default) is the declared behaviour. `decline` refuses the file
-	 * when its own directory is at or above `$HOME` (a file directly in the
-	 * home directory, or above it): no root exists there that is both inside
-	 * the user's tree and small enough to walk, so the client is declined
-	 * before any process starts, with one bounded record per session.
+	 * `fileDir` (default) is the declared behaviour. `decline` refuses any
+	 * file whose RESOLVED root is at or above `$HOME`, whatever route reached
+	 * it: a file directly in the home directory, an excluded directory
+	 * (`~/testdata`) that `FileDirRoot` walks up past, a `.git` at `$HOME`, or
+	 * the session-cwd ceiling. No such root is small enough to walk, so the
+	 * client is declined before any process starts, with one bounded record
+	 * per session (#4769 review F1).
 	 */
 	looseFileRoot?: "fileDir" | "decline";
 	/**
@@ -1719,18 +1722,24 @@ export const FileDirRoot: RootFunction = async (file: string) => {
 };
 
 /**
- * #4760: does this server's loose-file policy refuse a file whose own
- * directory is at or above `$HOME`? The directory, not the resolved root, is
- * the axis the maintainer set: a root below home (a repo, or `~/bin`) stays
- * eligible, while a file directly in `~` has only `$HOME` itself as its
- * root — the walk that never finishes.
+ * #4760: does this server's root policy refuse the resolved `root`? It does
+ * when the root is at or above `$HOME`, the walk that never finishes; a root
+ * below home (a repo, or `~/bin`) stays eligible. The root, not the file's
+ * directory, is the input: the root is always that directory or an ancestor
+ * of it, so it is the one value that sees every route to `$HOME` (#4769
+ * review F1). Both sides are real paths, so a `$HOME` reached through a
+ * symlink is the same directory (review F3), as `clients/ephemeral-root.ts`
+ * compares for the sibling `lsp-root-declined` writer.
  */
 export function declinesLooseFileRoot(
 	server: Pick<LSPServerInfo, "looseFileRoot">,
-	filePath: string,
+	root: string,
 ): boolean {
 	if (server.looseFileRoot !== "decline") return false;
-	return isAtOrAboveHomeDir(path.resolve(path.dirname(filePath)));
+	return isAtOrAboveHomeDir(
+		realpathOrResolve(root),
+		realpathOrResolve(os.homedir()),
+	);
 }
 
 export function RootWithFallback(

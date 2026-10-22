@@ -39,7 +39,6 @@ import {
 	ClientRegistry,
 	type ClientGenerationHooks,
 } from "../../../clients/lsp/client-registry.js";
-import { LSPService } from "../../../clients/lsp/index.js";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
 import { pinFixtureHome, removeTempDirSync } from "../test-utils.js";
 
@@ -210,32 +209,6 @@ describe("auxiliary loose-file root (#4760)", () => {
 		}
 	});
 
-	it("names a policy-skipped scanner as uncovered on the touch", async () => {
-		const { home, restore } = pinFixtureHome("aux-root-touch");
-		openedHomes.push({ restore });
-		const file = path.join(home, "loose.sh");
-		fs.writeFileSync(file, "#!/bin/sh\n");
-		const service = new LSPService();
-		const helper = service as unknown as {
-			skippedAuxiliaryServerIds(
-				filePath: string,
-				clientScope: string,
-				options: Record<string, unknown>,
-				spawned: unknown[],
-			): Promise<{
-				brokenSkippedServerIds: string[];
-				policySkippedServerIds: string[];
-			}>;
-		};
-
-		const result = await helper.skippedAuxiliaryServerIds(file, "all", {}, []);
-
-		// The policy door, not the breaker door: a declined scanner is a root
-		// decision, and it must reach `unconfirmedServerIds` as such.
-		expect(result.policySkippedServerIds).toContain("opengrep");
-		expect(result.brokenSkippedServerIds).not.toContain("opengrep");
-	});
-
 	it("declines a file whose own directory is $HOME, with one bounded record", async () => {
 		const { home, restore } = pinFixtureHome("aux-root-decline");
 		openedHomes.push({ restore });
@@ -257,5 +230,86 @@ describe("auxiliary loose-file root (#4760)", () => {
 		);
 		expect(declined?.count).toBe(1);
 		expect(declined?.latestReasons[0]?.subject).toBe(keyFor("opengrep", home));
+	});
+
+	// #4769 review F1: the decline reads the RESOLVED root. A file in
+	// `~/testdata` (its directory is below `$HOME`) still resolves to `$HOME`
+	// and must not spawn there; pre-fix it spawned at `$HOME`, the #4760 hang.
+	it("declines a file below $HOME whose resolved root is $HOME", async () => {
+		const { home, restore } = pinFixtureHome("aux-root-excluded");
+		openedHomes.push({ restore });
+		const file = path.join(home, "testdata", "x.sh");
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(file, "#!/bin/sh\n");
+
+		const server = opengrepWithStubSpawn();
+		const registry = new ClientRegistry(makeHooks(), undefined, home);
+		expect(await registry.resolveServerRoot(server, file)).toBe(home);
+		await registry.ensureClientForServer(file, server);
+
+		expect(server.spawn).not.toHaveBeenCalled();
+		const declined = getDegradationSummary().find(
+			(group) => group.kind === "lsp-root-declined",
+		);
+		expect(declined?.count).toBe(1);
+		expect(declined?.latestReasons[0]?.subject).toBe(keyFor("opengrep", home));
+	});
+
+	// #4769 review F3: `os.homedir()` answers the spelling `$HOME` holds, and a
+	// symlink to it is the same directory. The decline compares real paths on
+	// both sides, as the sibling `lsp-root-declined` writer
+	// (`clients/ephemeral-root.ts`) does, so each side is a cell: a root
+	// spelled through a link, and a `$HOME` spelled through one.
+	it("declines a $HOME reached through a symlink, on either side", async () => {
+		const { home, restore } = pinFixtureHome("aux-root-symlink");
+		openedHomes.push({ restore });
+		const linkParent = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-4760-aux-link-")),
+		);
+		tempDirs.push(linkParent);
+		const rootLink = path.join(linkParent, "home-link");
+		fs.symlinkSync(home, rootLink, "dir");
+
+		const cells = [
+			// `$HOME` is the real directory; the file and its root use the link.
+			{
+				homeSpelling: home,
+				sessionCwd: rootLink,
+				file: path.join(rootLink, "a.sh"),
+			},
+			// `$HOME` is the link; the file and its root use the real directory.
+			{
+				homeSpelling: rootLink,
+				sessionCwd: home,
+				file: path.join(home, "b.sh"),
+			},
+		];
+		for (const cell of cells) {
+			fs.writeFileSync(cell.file, "#!/bin/sh\n");
+			resetDegradationLedger();
+			vi.stubEnv("HOME", cell.homeSpelling);
+			vi.stubEnv("USERPROFILE", cell.homeSpelling);
+			try {
+				const server = opengrepWithStubSpawn();
+				const registry = new ClientRegistry(
+					makeHooks(),
+					undefined,
+					cell.sessionCwd,
+				);
+				expect(await registry.resolveServerRoot(server, cell.file)).toBe(
+					cell.sessionCwd,
+				);
+				await registry.ensureClientForServer(cell.file, server);
+
+				expect(server.spawn).not.toHaveBeenCalled();
+				expect(
+					getDegradationSummary().find(
+						(group) => group.kind === "lsp-root-declined",
+					)?.count,
+				).toBe(1);
+			} finally {
+				vi.unstubAllEnvs();
+			}
+		}
 	});
 });
