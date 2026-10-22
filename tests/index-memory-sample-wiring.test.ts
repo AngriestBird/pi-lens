@@ -150,6 +150,9 @@ describe(
 		// process, so the loaded copy reads the global `Date` this case fakes: the
 		// gap is virtual and no wall clock is spent (#4761 review F2).
 		it("#1332: a turn after an idle gap longer than the window writes one idle-tagged memory_sample", async () => {
+			// Pin both idle-window knobs to unset: an ambient value moves the window the gap is measured against (#4761 F1-R2).
+			vi.stubEnv("PI_LENS_LSP_IDLE_EVICT_MS", "");
+			vi.stubEnv("PI_LENS_TS_IDLE_EVICT_MS", "");
 			vi.useFakeTimers({ toFake: ["Date"] });
 			try {
 				const handle = await startSession(2);
@@ -166,6 +169,7 @@ describe(
 				expect(metadata.turnIndex).toBe(2);
 				expect(handle.errors).toEqual([]);
 			} finally {
+				vi.unstubAllEnvs();
 				vi.useRealTimers();
 			}
 		});
@@ -175,6 +179,9 @@ describe(
 		// primary's marker. The secondary then wrote an idle record it never earned,
 		// and the primary's real idle period wrote none.
 		it("#1332: a coexisting session's turn never consumes another session's idle marker", async () => {
+			// Pin both idle-window knobs to unset: an ambient value moves the window the gap is measured against (#4761 F1-R2).
+			vi.stubEnv("PI_LENS_LSP_IDLE_EVICT_MS", "");
+			vi.stubEnv("PI_LENS_TS_IDLE_EVICT_MS", "");
 			vi.useFakeTimers({ toFake: ["Date"] });
 			try {
 				const primary = await startPiSession({
@@ -208,6 +215,7 @@ describe(
 				expect(primary.errors).toEqual([]);
 				expect(secondary.errors).toEqual([]);
 			} finally {
+				vi.unstubAllEnvs();
 				vi.useRealTimers();
 			}
 		});
