@@ -21,6 +21,13 @@ EXTENDS Naturals, TLC
 \* (the `ownedSessionRole === "primary"` guard in `index.ts` turn_start).
 \* WithSubagent bounds the explored population: FALSE drops the subagent, so a
 \* config's violation can only come from the newSession path.
+\*
+\* Assumption: pi delivers a session's turn_end before any session
+\* replacement, so LeavePrimary ends the primary's turn and no turn_end of a
+\* departed primary follows its successor's claim. That ordering is outside
+\* the model: `clearTurnState`'s same-pid fall-through would clear the
+\* claimed envelope. Review r1 of #4753 found it unreachable through real pi
+\* (README, "TurnStateOwner").
 CONSTANTS PrimaryClaims, ClaimEmpty, SecondaryClaims, WithSubagent
 
 VARIABLES life, role, inTurn, turns, owner, env, reserved, part, stranded,

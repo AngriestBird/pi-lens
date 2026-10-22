@@ -1209,3 +1209,14 @@ Not modelled: owners in another process (the claim refuses them, and
 `getTurnStateAccess`'s liveness rule judges them as before), the MCP writer
 (kind `mcp`, envelope only), and the predecessor's late writes after its
 leave (the `tool_result` writer adds a range only while its entry is live, #3596).
+The owner's age is not modelled either: a predecessor past
+`TURN_OWNER_STALE_MS` is claimed with its files evicted (arm `evicted`), which
+leaves the ownership outcome the model checks unchanged.
+
+Assumption: pi delivers a session's `turn_end` before any session replacement.
+`LeavePrimary` sets `inTurn` to `FALSE`, so the model has no turn end of a
+departed primary. One ordering therefore sits outside it:
+
+| Unmodelled ordering | What the code does | Why it is outside the model |
+|---|---|---|
+| A departed primary's `turn_end` clear lands after its successor's claim | `clearTurnState` falls through its owner check for a same-pid owner (`clients/cache-manager.ts:806`), clears the envelope the successor claimed and stamps the old id, so the successor's next turn end finds no files | review r1 of #4753 drove a real pi `AgentSession` through `restart({ reason: "new" })` while a prompt was in flight: pi settled the first session's `turn_end` (its row 56) and shutdown fence (row 72) before the successor's claim (row 115); the ordering appeared only when the seam was called directly |

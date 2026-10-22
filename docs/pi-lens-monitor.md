@@ -148,7 +148,9 @@ the requested window.
    `guarded` and `dropped`, plus totals), `session_handoff_turn_state` (#4751:
    one per primary that takes the turn-state worklist at its turn_start;
    `arm` `predecessor` (from an in-process predecessor: `from`, its files kept
-   as `filesKept`) or `empty`, and `to`), `lsp_created_import_scan_rollup`
+   as `filesKept`), `evicted` (from a predecessor past the stale bound: `from`,
+   its files dropped as `filesDropped`) or `empty`, and `to`),
+   `lsp_created_import_scan_rollup`
    (one per primary shutdown when the created-module producer ran: `calls`,
    `importers`, `targets`, `capped`, `oversized`, `totalMs`, `maxMs`). Read `read_guard_branch_retained` with
    `payloadReads`: `kept 0, dropped 0` is a missing payload when `payloadReads`
