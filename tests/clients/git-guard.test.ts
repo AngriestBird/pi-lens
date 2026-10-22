@@ -3643,6 +3643,66 @@ describe("#4750: another session's text no file owns expires by its own write st
 		}
 	});
 
+	it("expires an unstamped carried partition under read-only turn ends alone", () => {
+		// RECURRENCE GUARDED: #4762 r3 (CodeRabbit), the carried slot. A record
+		// written between #4738 and #4750 carries partitions with no stamp; the
+		// first read-only turn end must write each one's stamp, not only the
+		// top's, or that report never expires.
+		const env = setupTestEnvironment("pi-lens-git-guard-4750-legacy-carried-");
+		const start = Date.now();
+		vi.useFakeTimers({ toFake: ["Date"], now: start });
+		try {
+			const theirs = path.join(env.tmpDir, "a.ts");
+			fs.writeFileSync(theirs, "x;\n");
+			const cache = new CacheManager(false);
+			const runtime = sessionA(env.tmpDir);
+			const fileText = composerSections([theirs]);
+			writeGitGuardRecord(
+				cache,
+				runtime,
+				env.tmpDir,
+				record({
+					content: fileText,
+					blockerContent: fileText,
+					hasBlockers: true,
+					affectedFiles: [theirs],
+					blockingFiles: [theirs],
+					sessionId: "a-third-session",
+					carriedBlockers: [
+						{
+							sessionId: EARLIER,
+							blockerContent: TRIVY_LANE,
+							blockingFiles: [],
+						},
+					],
+				}),
+			);
+
+			retireSettledGitGuardRecord(runtime, cache, env.tmpDir);
+			expect(
+				storedData(cache, env.tmpDir)?.carriedBlockers?.map((partition) => [
+					partition.sessionId,
+					partition.blockerWrittenAt,
+				]),
+			).toEqual([[EARLIER, start]]);
+			vi.setSystemTime(start + DEFAULT_MAX_AGE_MS + 60_000);
+			const mark = latestPhaseRow();
+			retireSettledGitGuardRecord(runtime, cache, env.tmpDir);
+
+			const stored = storedData(cache, env.tmpDir);
+			expect([owners(stored), stored?.blockerContent]).toEqual([
+				["a-third-session"],
+				fileText,
+			]);
+			expect(phaseRowsSince("sections_dropped", mark)).toEqual([
+				{ by: "turn_end", basis: "no_file" },
+			]);
+		} finally {
+			vi.useRealTimers();
+			env.cleanup();
+		}
+	});
+
 	it("saves no drop row to the real latency sink at the read, and one per drop at the write", async () => {
 		// RECURRENCE GUARDED: #4762 r3 (Greptile). The read logged
 		// `sections_dropped` (#4750); the in-memory phase list proves the call,
