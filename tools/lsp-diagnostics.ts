@@ -31,6 +31,13 @@ import {
 	type LspRootFallback,
 } from "../clients/lsp/server.js";
 import { isAuxiliary } from "../clients/lsp/server-traits.js";
+import {
+	describePythonCompileWithheld,
+	detectPythonTargetVersion,
+	partitionOutrankedPythonCompileVerdicts,
+	recordPythonCompileVerdictDrop,
+	type PythonTargetVersion,
+} from "../clients/python-environment.js";
 import { mapWithConcurrency } from "../clients/map-with-concurrency.js";
 import {
 	combineAbortSignals,
@@ -172,6 +179,74 @@ type FileDiag = {
 	code?: string | number;
 };
 
+/**
+ * #4638 review (F6): the delivery disclosure a filtered result carries. One
+ * shape on every tool (`details.withheldCompile`): `count` is the total and
+ * `declared` the first declaration. `declarations` is set only when the total
+ * spans more than one declaration (a sweep over several projects), and then
+ * lists each group, so a count is never cited under a level it did not come
+ * from (#4638 r4 F3).
+ */
+export interface PythonCompileWithheld {
+	count: number;
+	declared: PythonTargetVersion;
+	declarations?: ReadonlyArray<{
+		count: number;
+		declared: PythonTargetVersion;
+	}>;
+}
+
+/**
+ * #4638 review (F6/F10): the disclosure sentence for any surface with a policy
+ * result in hand, so the probe, the renderers, and the navigation routes say it
+ * the same way. The sentence itself belongs to the declaration's owner; a
+ * disclosure that spans several declarations names each of them.
+ */
+export function withheldCompileNote(
+	withheld: PythonCompileWithheld | undefined,
+): string | undefined {
+	if (!withheld) return undefined;
+	if (!withheld.declarations) {
+		return describePythonCompileWithheld(withheld.count, withheld.declared);
+	}
+	const groups = withheld.declarations.map(
+		(group) =>
+			`${group.count} under Python ${group.declared.major}.${group.declared.minor} (${group.declared.source}) in ${group.declared.file}`,
+	);
+	return `${withheld.count} python-jedi compile finding${withheld.count === 1 ? "" : "s"} withheld across ${groups.length} declarations: ${groups.join("; ")}`;
+}
+
+/**
+ * The one merge of withheld disclosures: the batch and directory routes, the
+ * `mode=full` sweep and the navigation snapshot all fold their per-file entries
+ * here, grouped by the declaration that withheld them (#4638 r3 N2, r4 F3).
+ */
+export function mergeWithheld(
+	entries: Iterable<PythonCompileWithheld | undefined>,
+): PythonCompileWithheld | undefined {
+	const groups = new Map<
+		string,
+		{ count: number; declared: PythonTargetVersion }
+	>();
+	for (const entry of entries) {
+		if (!entry || entry.count <= 0) continue;
+		for (const part of entry.declarations ?? [entry]) {
+			const { declared } = part;
+			const key = `${declared.file}\0${declared.source}\0${declared.major}.${declared.minor}`;
+			const group = groups.get(key);
+			if (group) group.count += part.count;
+			else groups.set(key, { count: part.count, declared });
+		}
+	}
+	const merged = [...groups.values()];
+	const first = merged[0];
+	if (!first) return undefined;
+	const count = merged.reduce((sum, group) => sum + group.count, 0);
+	return merged.length === 1
+		? { count, declared: first.declared }
+		: { count, declared: first.declared, declarations: merged };
+}
+
 type FileDiagnosticResult = {
 	file: string;
 	diagnostics: FileDiag[];
@@ -196,6 +271,8 @@ type FileDiagnosticResult = {
 	 * analyzing" or "never asked". Never render this bucket as "0 diagnostics".
 	 */
 	confirmation?: "clean" | "unconfirmed";
+	/** #4638 review (F6): what the declaration withheld from this file's delivery. */
+	withheldCompile?: PythonCompileWithheld;
 	tooLargeReason?: string;
 	/**
 	 * #570: true when `confirmation === "unconfirmed"` specifically because
@@ -1240,7 +1317,20 @@ export function applyProbeFindingPolicy(
 	 * `lsp_navigation` route's records said `lsp_diagnostics`).
 	 */
 	toolName: "lsp_diagnostics" | "lsp_navigation" = "lsp_diagnostics",
-): { kept: LSPDiagnostic[]; inlineKept: LSPDiagnostic[]; suppressed: number } {
+	/**
+	 * #4638: the project's declared Python syntax level, prepared by the caller
+	 * (resolving it needs the filesystem, and this seam is synchronous). Present
+	 * only for a Python file; absent leaves every finding delivered.
+	 */
+	pythonCompileTarget?: PythonTargetVersion,
+): {
+	kept: LSPDiagnostic[];
+	inlineKept: LSPDiagnostic[];
+	suppressed: number;
+	/** #4638 review (F6): rows withheld from DELIVERY by the declaration, so a
+	 * filtered result can disclose instead of reading as clean. */
+	withheld?: PythonCompileWithheld;
+} {
 	const started = Date.now();
 	try {
 		const result = applyLspFindingPolicy(diagnostics, {
@@ -1250,6 +1340,17 @@ export function applyProbeFindingPolicy(
 			policyMap: loadProjectRulePolicyMap(cwd),
 			fileRole: detectFileRole(file, content),
 		});
+		// #4638: jedi compiles with the interpreter it launched, so under a
+		// declared 3.14+ its `compile` verdict describes a grammar the project
+		// does not use. Drop those rows from what is DELIVERED (kept), never
+		// from `inlineKept`: the cache must hold them so a replay re-evaluates
+		// the drop against the declaration current at that read. The rule and its
+		// record live in the declaration's owner, shared with the post-write lane.
+		const { kept: delivered, dropped } =
+			partitionOutrankedPythonCompileVerdicts(result.kept, pythonCompileTarget);
+		if (dropped > 0 && pythonCompileTarget) {
+			recordPythonCompileVerdictDrop(file, pythonCompileTarget, dropped);
+		}
 		const inScopeBefore = applySeverityFilter(diagnostics, severity).length;
 		const suppressed =
 			inScopeBefore - applySeverityFilter(result.kept, severity).length;
@@ -1282,7 +1383,18 @@ export function applyProbeFindingPolicy(
 				},
 			});
 		}
-		return { kept: result.kept, inlineKept: result.inlineKept, suppressed };
+		return {
+			kept: delivered,
+			inlineKept: result.inlineKept,
+			suppressed,
+			...(delivered.length !== result.kept.length &&
+				pythonCompileTarget && {
+					withheld: {
+						count: result.kept.length - delivered.length,
+						declared: pythonCompileTarget,
+					},
+				}),
+		};
 	} catch (err) {
 		recordDegradationOnce({
 			kind: "lsp-probe-finding-policy",
@@ -1427,6 +1539,11 @@ async function collectFileDiagnosticResult(
 		return { file, diagnostics: [], error: `${file}: path not found` };
 	}
 
+	// #4638: one resolution per file, shared by the fresh touch below and the
+	// cache replay: the drop is a revocable delivery policy, not part of the
+	// cached observation. A non-Python path short-circuits inside the resolver.
+	const pythonCompileTarget = await detectPythonTargetVersion(file);
+
 	if (cacheCtx && scopeKey !== undefined) {
 		const cached = cacheCtx.lookup(file, scopeKey);
 		// #1095: a cached entry whose content binding demonstrably mismatches disk
@@ -1457,6 +1574,8 @@ async function collectFileDiagnosticResult(
 				cwd,
 				replayContentForStrictMarks(file, cwd),
 				severity,
+				undefined,
+				pythonCompileTarget,
 			);
 			const cachedDiags = cachedPolicy.kept;
 			const filteredDiags = applySeverityFilter(cachedDiags, severity);
@@ -1489,6 +1608,9 @@ async function collectFileDiagnosticResult(
 				primaryServerId: primaryServerId(file),
 				...(cachedPolicy.suppressed > 0 && {
 					dispositionSuppressed: cachedPolicy.suppressed,
+				}),
+				...(cachedPolicy.withheld && {
+					withheldCompile: cachedPolicy.withheld,
 				}),
 			};
 		}
@@ -1593,6 +1715,8 @@ async function collectFileDiagnosticResult(
 		cwd,
 		collectedContent,
 		severity,
+		undefined,
+		pythonCompileTarget,
 	);
 	effectiveRawDiags = policy.kept;
 	const filteredDiags = applySeverityFilter(effectiveRawDiags, severity);
@@ -1685,6 +1809,9 @@ async function collectFileDiagnosticResult(
 		...(policy.suppressed > 0 && {
 			dispositionSuppressed: policy.suppressed,
 		}),
+		...(policy.withheld && {
+			withheldCompile: policy.withheld,
+		}),
 	};
 }
 
@@ -1705,6 +1832,9 @@ async function runFileDiagnostics(
 	// Reserve the token before awaiting this file's LSP result. The direct-file
 	// path performs its own confirmation/reconciliation below (#1198).
 	const writeIndex = nextWriteIndex?.();
+	// #4638: the declaration this file's project makes, if any. Resolved once,
+	// before the touch, so the seam below stays synchronous and fails open.
+	const pythonCompileTarget = await detectPythonTargetVersion(absPath);
 	// #4346: a module this file imports, created outside pi-lens, reaches its
 	// servers before the touch (the batch path gates this on cached findings;
 	// one file needs no gate), and so do a Go file's package files.
@@ -1825,6 +1955,8 @@ async function runFileDiagnostics(
 		cwd,
 		collectedContent,
 		severity,
+		undefined,
+		pythonCompileTarget,
 	);
 	effectiveRawDiags = policy.kept;
 	const filtered = applySeverityFilter(effectiveRawDiags, severity);
@@ -1920,6 +2052,10 @@ async function runFileDiagnostics(
 	// stated as a count, never left to read as "nothing was wrong here"
 	// (AGENTS.md shape 10). Bounded: one line per call, whatever the count.
 	const suppressedLine = dispositionSuppressedLine(policy.suppressed);
+	// #4638 review (F6): the single-file route discloses a withheld row on the
+	// model-facing text exactly as the batch and directory renderers do; the
+	// ledger alone is silencing (AGENTS.md shape 10).
+	const withheldLine = withheldCompileNote(policy.withheld);
 
 	// #4323 (#4391 F8): an auxiliary the operator turned off never ran, so a bare
 	// "No auxiliary findings." would read like a scanner result. Name it. A
@@ -1943,6 +2079,7 @@ async function runFileDiagnostics(
 			unavailable ?? noAuxiliaryLine,
 			...(coverageLine ? [coverageLine] : []),
 			...(suppressedLine ? [suppressedLine] : []),
+			...(withheldLine ? [withheldLine] : []),
 		].join("\n");
 	} else {
 		const lines = [primaryLine, ""];
@@ -1955,6 +2092,8 @@ async function runFileDiagnostics(
 		}
 		if (coverageLine) lines.push("", coverageLine);
 		if (suppressedLine) lines.push("", suppressedLine);
+		// #4638 review (F6): disclose beside survivors too, never only in the ledger.
+		if (withheldLine) lines.push("", withheldLine);
 		if (unavailable) lines.unshift(unavailable, "");
 		if (truncated) {
 			lines.unshift(
@@ -1986,6 +2125,9 @@ async function runFileDiagnostics(
 			totalDiagnostics: total,
 			...(policy.suppressed > 0 && {
 				dispositionSuppressed: policy.suppressed,
+			}),
+			...(policy.withheld && {
+				withheldCompile: policy.withheld,
 			}),
 			truncated,
 			unconfirmed,
@@ -2630,9 +2772,27 @@ async function runBatchFileDiagnostics(
 	}
 	const auxiliaryOnlyLine = auxiliaryOnlyFindingsLine(results);
 	if (auxiliaryOnlyLine) lines.push("", auxiliaryOnlyLine);
+	// A withheld row is disclosed whatever else the call found, so the agent never
+	// reads a partial filter as a complete answer (AGENTS.md shape 10): beside
+	// survivors, beside a failed or unconfirmed file, and on a clean result.
+	const withheldBatch = mergeWithheld(results.map((r) => r.withheldCompile));
+	const withheld = withheldCompileNote(withheldBatch);
+	const allClean =
+		display.length === 0 &&
+		unconfirmed === 0 &&
+		outcomeCounts.clean === results.length;
+	if (withheld && !allClean) lines.push("", withheld);
 	if (display.length === 0) {
-		if (unconfirmed === 0 && outcomeCounts.clean === results.length) {
-			lines.push("", "No diagnostics found.");
+		if (allClean) {
+			// #4638 review (F6): a result whose only row was withheld is not clean.
+			// The disclosure rides the same model-facing line, so the ledger is not
+			// the only trace of a dropped finding.
+			lines.push(
+				"",
+				withheld
+					? `No diagnostics found. ${withheld}`
+					: "No diagnostics found.",
+			);
 		}
 	} else {
 		if (primaryDisplay.length > 0) {
@@ -2671,6 +2831,7 @@ async function runBatchFileDiagnostics(
 			auxiliaryDiagnosticsCount: auxiliaryDisplay.length,
 			totalDiagnostics: total,
 			...(dispositionSuppressed > 0 && { dispositionSuppressed }),
+			...(withheldBatch && { withheldCompile: withheldBatch }),
 			truncated,
 			cleanFiles: clean,
 			unconfirmedFiles: unconfirmed,
@@ -2855,6 +3016,10 @@ async function runDirectoryDiagnostics(
 		path.relative(absPath, file),
 	);
 
+	const withheldDirectory = mergeWithheld(
+		results.map((r) => r.withheldCompile),
+	);
+	const withheldDisclosure = withheldCompileNote(withheldDirectory);
 	let text: string;
 	if (total === 0) {
 		// #533/#570: an unconfirmed-containing directory result must never
@@ -2864,7 +3029,13 @@ async function runDirectoryDiagnostics(
 			unconfirmed > 0
 				? `${clean} clean · ${unconfirmed} unconfirmed: ` +
 					`${unconfirmedReasonClause(unconfirmed, timedOut, rootFallbackReasons, primaryUnavailable)} NOT the same as 0 diagnostics.`
-				: "No diagnostics found.";
+				: withheldDisclosure
+					? `No diagnostics found. ${withheldDisclosure}`
+					: "No diagnostics found.";
+		const cleanLineShown =
+			unconfirmed > 0 ||
+			(lspHealthWarnings.length === 0 &&
+				outcomeCounts.clean === filesToProcess.length);
 		text = [
 			`Directory: ${absPath}`,
 			`Files scanned: ${filesToProcess.length}${wasCapped ? ` (capped at ${MAX_FILES})` : ""}`,
@@ -2876,10 +3047,11 @@ async function runDirectoryDiagnostics(
 				: []),
 			// #4403: an unconfirmed file says why even beside a health warning,
 			// which names what was missing but not that the file is unconfirmed.
-			...(unconfirmed > 0 ||
-			(lspHealthWarnings.length === 0 &&
-				outcomeCounts.clean === filesToProcess.length)
-				? [cleanLine]
+			...(cleanLineShown ? [cleanLine] : []),
+			// The clean sentence carries the disclosure only when nothing is
+			// unconfirmed; every other shape names it on its own line (#4638 r3 N2).
+			...(withheldDisclosure && !(cleanLineShown && unconfirmed === 0)
+				? ["", withheldDisclosure]
 				: []),
 			...(tooLargeLines.length > 0
 				? ["", "Files too large for LSP diagnostics:", ...tooLargeLines]
@@ -2933,6 +3105,8 @@ async function runDirectoryDiagnostics(
 			);
 		}
 		if (suppressedLine) lines.push("", suppressedLine);
+		// #4638 review (F6): disclose a withheld row even beside survivors.
+		if (withheldDisclosure) lines.push("", withheldDisclosure);
 		if (tooLargeLines.length > 0) {
 			lines.push("", "Files too large for LSP diagnostics:", ...tooLargeLines);
 		}
@@ -2961,6 +3135,7 @@ async function runDirectoryDiagnostics(
 			auxiliaryDiagnosticsCount: auxiliaryDisplay.length,
 			totalDiagnostics: total,
 			...(dispositionSuppressed > 0 && { dispositionSuppressed }),
+			...(withheldDirectory && { withheldCompile: withheldDirectory }),
 			truncated,
 			cleanFiles: clean,
 			unconfirmedFiles: unconfirmed,

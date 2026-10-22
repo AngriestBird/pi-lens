@@ -1,3 +1,6 @@
+// lane: windows-vitest — #4638 F5's jedi spawn fixtures take the host's venv
+// shape (`.venv/Scripts/python.exe` on Windows), so only that lane exercises
+// the Scripts branch the runner branches on.
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -138,6 +141,31 @@ beforeEach(async () => {
 	const trust = await import("../../../clients/project-trust.js");
 	trust.setProjectTrustState("trusted");
 });
+
+/**
+ * #4638 review (F5): the venv shape the HOST uses. POSIX puts the interpreter at
+ * `.venv/bin/python`; Windows at `.venv/Scripts/python.exe`, and only that shape
+ * exercises the runner's Windows branch, so the Windows lane must collect this
+ * file (see the WINDOWS_LANE_ADMISSIONS row for it).
+ */
+function venvBinDir(root: string): string {
+	return path.join(
+		root,
+		".venv",
+		process.platform === "win32" ? "Scripts" : "bin",
+	);
+}
+
+function venvPython(binDir: string): string {
+	return path.join(
+		binDir,
+		process.platform === "win32" ? "python.exe" : "python",
+	);
+}
+
+function venvTool(binDir: string, name: string): string {
+	return path.join(binDir, process.platform === "win32" ? `${name}.exe` : name);
+}
 
 describe("lsp server policy", () => {
 	it("every built-in server has a spawn function", async () => {
@@ -725,7 +753,11 @@ describe("lsp server policy", () => {
 			}
 		}
 		expect(stale).toEqual([]);
-	});
+		// Budget (#4638 r4 F1): this cell makes 40+ temp trees, so on the Windows
+		// runner its cost is filesystem-bound. CI "Unit tests Windows"
+		// measured 396-794 ms on five earlier heads of this PR and 5333 ms on the
+		// next (job 119786141033), against the lane's 5000 ms default. Locally it is ~60 ms.
+	}, 30_000);
 
 	// #3412: a marker that carries a path segment (`prisma/schema.prisma`) is
 	// probed inside a SUBDIRECTORY of the walked directory, so creating it bumps
@@ -2034,6 +2066,328 @@ describe("lsp server policy", () => {
 		}
 	});
 
+	it("PythonJediServer launches from the project's own venv before the managed install (#4638)", async () => {
+		const { PythonJediServer } = await import("../../../clients/lsp/server.js");
+		const tmp = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-jedi-project-env-"),
+		);
+		dirs.push(tmp);
+		const binDir = venvBinDir(tmp);
+		const jediPath = venvTool(binDir, "jedi-language-server");
+		const pythonPath = venvPython(binDir);
+		fs.mkdirSync(binDir, { recursive: true });
+		for (const executable of [jediPath, pythonPath]) {
+			fs.writeFileSync(executable, "#!/usr/bin/env bash\nexit 0\n");
+			fs.chmodSync(executable, 0o755);
+		}
+		fs.writeFileSync(
+			path.join(tmp, "pyproject.toml"),
+			'[project]\nname = "demo"\nrequires-python = ">=3.14"\n',
+		);
+
+		// Self-contained (#4638, #4589): the project tier needs trust and an
+		// ambient Python environment would outrank it, so the case states both
+		// through the harness seams and restores them.
+		const { setProjectTrustState } =
+			await import("../../../clients/project-trust.js");
+		setProjectTrustState("trusted");
+		vi.stubEnv("VIRTUAL_ENV", undefined);
+		vi.stubEnv("CONDA_PREFIX", undefined);
+		vi.stubEnv("UV_PROJECT_ENVIRONMENT", undefined);
+
+		launchLSP.mockClear();
+		launchLSP.mockResolvedValue({
+			process: { killed: false } as never,
+			stdin: {} as never,
+			stdout: {} as never,
+			stderr: {} as never,
+			pid: 2222,
+		});
+
+		try {
+			const spawned = await PythonJediServer.spawn(tmp);
+
+			expect(spawned?.initialization).toMatchObject({
+				workspace: { environmentPath: pythonPath },
+			});
+			expect(launchLSP).toHaveBeenCalledTimes(1);
+			const [command, , options] = launchLSP.mock.calls[0] as [
+				string,
+				string[],
+				{ cwd?: string; env?: NodeJS.ProcessEnv },
+			];
+			expect(command).toBe(jediPath);
+			expect(options.cwd).toBe(tmp);
+			expect(options.env?.VIRTUAL_ENV).toBe(path.join(tmp, ".venv"));
+			expect(String(options.env?.PATH).split(path.delimiter)[0]).toBe(binDir);
+			expect(ensureTool).not.toHaveBeenCalled();
+		} finally {
+			vi.unstubAllEnvs();
+			setProjectTrustState("trusted");
+		}
+	});
+
+	it("falls through to the PATH tier once every project candidate fails (#4638 review)", async () => {
+		const { PythonJediServer } = await import("../../../clients/lsp/server.js");
+		const { setProjectTrustState } =
+			await import("../../../clients/project-trust.js");
+		const { getDegradationSummary, resetDegradationLedger } =
+			await import("../../../clients/degradation-ledger.js");
+		const { detectPythonEnvironment, pythonEnvironmentToolCandidates } =
+			await import("../../../clients/python-environment.js");
+		const { setPlatform } = await import("../../support/platform-stub.js");
+
+		const tmp = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-jedi-launch-throw-"),
+		);
+		dirs.push(tmp);
+
+		const realPlatform = process.platform;
+		// Lane-independent (#4638 Windows leg): the Windows ladder — `.exe`,
+		// `.cmd`, then the plain shim — is exercised on every host, so a macOS or
+		// Linux run fails too if the fallback stops falling through after the
+		// project tier throws. Each spelling is a different binary, so re-entering
+		// the same venv ladder is intended; the fallback begins after the LAST one.
+		setPlatform("win32");
+		try {
+			// The ambient channels outrank the project `.venv`, so they are stubbed
+			// BEFORE the first detection: a developer shell with an active
+			// `VIRTUAL_ENV` must not decide this case (#4638 r3 N8).
+			vi.stubEnv("VIRTUAL_ENV", undefined);
+			vi.stubEnv("CONDA_PREFIX", undefined);
+			vi.stubEnv("UV_PROJECT_ENVIRONMENT", undefined);
+			const binDir = venvBinDir(tmp);
+			fs.mkdirSync(binDir, { recursive: true });
+			for (const name of ["jedi-language-server", "python"]) {
+				const target = venvTool(binDir, name);
+				fs.writeFileSync(target, "#!/usr/bin/env bash\nexit 0\n");
+				fs.chmodSync(target, 0o755);
+			}
+
+			const environment = await detectPythonEnvironment(tmp);
+			expect(environment?.source).toBe("project-dot-venv");
+			const projectCandidates = pythonEnvironmentToolCandidates(
+				environment,
+				"jedi-language-server",
+			);
+			expect(projectCandidates).toHaveLength(3);
+			// A real install writes every shim of the ladder.
+			for (const candidate of projectCandidates) {
+				fs.writeFileSync(candidate, "#!/usr/bin/env bash\nexit 0\n");
+				fs.chmodSync(candidate, 0o755);
+			}
+
+			setProjectTrustState("trusted");
+			resetDegradationLedger();
+			launchLSP.mockClear();
+			// Every project candidate fails with something that is not "tool not
+			// found"; `resolveAndLaunch` then re-raises the runtime failure, which
+			// must not end the attempt.
+			for (const _candidate of projectCandidates) {
+				launchLSP.mockRejectedValueOnce(
+					new Error("project interpreter is unusable"),
+				);
+			}
+			launchLSP.mockResolvedValueOnce({
+				process: { killed: false } as never,
+				stdin: {} as never,
+				stdout: {} as never,
+				stderr: {} as never,
+				pid: 4444,
+			});
+
+			const spawned = await PythonJediServer.spawn(tmp);
+
+			expect(spawned).toBeDefined();
+			const commands = launchLSP.mock.calls.map((call) => call[0]);
+			// Derived from the production ladder, never hard-coded: the project
+			// candidates in order, then the managed/PATH tier's bare command.
+			expect(commands.slice(0, projectCandidates.length)).toEqual(
+				projectCandidates,
+			);
+			expect(commands[projectCandidates.length]).toBe("jedi-language-server");
+			expect(getDegradationSummary().map((entry) => entry.kind)).toContain(
+				"python-project-launch-failed",
+			);
+		} finally {
+			setPlatform(realPlatform);
+			vi.unstubAllEnvs();
+			setProjectTrustState("trusted");
+		}
+	});
+
+	it("the fallback cannot resolve the failed project binary through PATH (#4638 r3 N5)", async () => {
+		// Recurrence: the fallback reused the venv-augmented environment, so its
+		// bare `jedi-language-server` resolved the SAME executable-but-failing shim
+		// the project tier had just thrown on, `spawn` rejected, and a working host
+		// copy later on PATH was never tried.
+		const { PythonJediServer } = await import("../../../clients/lsp/server.js");
+		const { setProjectTrustState } =
+			await import("../../../clients/project-trust.js");
+		const { detectPythonEnvironment, pythonEnvironmentToolCandidates } =
+			await import("../../../clients/python-environment.js");
+
+		const tmp = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-jedi-broken-shim-"),
+		);
+		dirs.push(tmp);
+		const binDir = venvBinDir(tmp);
+		fs.mkdirSync(binDir, { recursive: true });
+		for (const name of ["jedi-language-server", "python"]) {
+			fs.writeFileSync(venvTool(binDir, name), "#!/usr/bin/env bash\nexit 0\n");
+			fs.chmodSync(venvTool(binDir, name), 0o755);
+		}
+		const hostBin = path.join(tmp, "host-bin");
+		fs.mkdirSync(hostBin, { recursive: true });
+		const hostShim = venvTool(hostBin, "jedi-language-server");
+		fs.writeFileSync(hostShim, "#!/usr/bin/env bash\nexit 0\n");
+		fs.chmodSync(hostShim, 0o755);
+
+		setProjectTrustState("trusted");
+		vi.stubEnv("VIRTUAL_ENV", undefined);
+		vi.stubEnv("CONDA_PREFIX", undefined);
+		vi.stubEnv("UV_PROJECT_ENVIRONMENT", undefined);
+		const environment = await detectPythonEnvironment(tmp);
+		const projectCandidates = pythonEnvironmentToolCandidates(
+			environment,
+			"jedi-language-server",
+		);
+		getToolEnvironment.mockResolvedValueOnce({ PATH: hostBin });
+		launchLSP.mockClear();
+		for (const _candidate of projectCandidates) {
+			launchLSP.mockRejectedValueOnce(
+				new Error("jedi-language-server exited immediately with code 127"),
+			);
+		}
+		launchLSP.mockResolvedValueOnce({
+			process: { killed: false } as never,
+			stdin: {} as never,
+			stdout: {} as never,
+			stderr: {} as never,
+			pid: 5555,
+		});
+
+		try {
+			const spawned = await PythonJediServer.spawn(tmp);
+
+			expect(spawned).toBeDefined();
+			const [command, , options] = launchLSP.mock.calls.at(-1) as [
+				string,
+				string[],
+				{ env?: NodeJS.ProcessEnv },
+			];
+			expect(command).toBe("jedi-language-server");
+			const entries = String(options.env?.PATH).split(path.delimiter);
+			expect(entries).not.toContain(binDir);
+			expect(options.env?.VIRTUAL_ENV).toBeUndefined();
+			// `launchLSP` resolves a bare command by the first executable of that
+			// name along `env.PATH`; walk the fallback's PATH the same way.
+			const firstOnPath = entries
+				.map((entry) => venvTool(entry, command))
+				.find((candidate) => fs.existsSync(candidate));
+			expect(firstOnPath).toBe(hostShim);
+		} finally {
+			vi.unstubAllEnvs();
+			setProjectTrustState("trusted");
+		}
+	});
+
+	it("PythonJediServer falls back to the managed install when the project venv is untrusted (#4638)", async () => {
+		const { PythonJediServer } = await import("../../../clients/lsp/server.js");
+		const { setProjectTrustState } =
+			await import("../../../clients/project-trust.js");
+		const { detectPythonTargetVersion } =
+			await import("../../../clients/python-environment.js");
+		const { getDegradationSummary, resetDegradationLedger } =
+			await import("../../../clients/degradation-ledger.js");
+
+		const tmp = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-jedi-untrusted-"),
+		);
+		dirs.push(tmp);
+		const binDir = venvBinDir(tmp);
+		fs.mkdirSync(binDir, { recursive: true });
+		for (const name of ["jedi-language-server", "python"]) {
+			fs.writeFileSync(venvTool(binDir, name), "#!/usr/bin/env bash\nexit 0\n");
+			fs.chmodSync(venvTool(binDir, name), 0o755);
+		}
+		fs.writeFileSync(
+			path.join(tmp, "pyproject.toml"),
+			'[project]\nname = "demo"\nrequires-python = ">=3.14"\n',
+		);
+
+		vi.stubEnv("VIRTUAL_ENV", undefined);
+		vi.stubEnv("CONDA_PREFIX", undefined);
+		vi.stubEnv("UV_PROJECT_ENVIRONMENT", undefined);
+
+		resetDegradationLedger();
+		setProjectTrustState("unknown");
+		launchLSP.mockClear();
+		launchLSP.mockResolvedValue({
+			process: { killed: false } as never,
+			stdin: {} as never,
+			stdout: {} as never,
+			stderr: {} as never,
+			pid: 3333,
+		});
+
+		try {
+			const spawned = await PythonJediServer.spawn(tmp);
+
+			expect(spawned).toBeDefined();
+			const [command, , options] = launchLSP.mock.calls[0] as [
+				string,
+				string[],
+				{ cwd?: string; env?: NodeJS.ProcessEnv },
+			];
+			expect(command).toBe("jedi-language-server");
+			expect(options.env?.VIRTUAL_ENV).toBeUndefined();
+			expect(getDegradationSummary().map((entry) => entry.kind)).toContain(
+				"trust-refusal",
+			);
+			// The declaration is read independently of trust, so the compile drop
+			// still applies to a project whose interpreter pi-lens refuses.
+			await expect(
+				detectPythonTargetVersion(path.join(tmp, "app.py"), path.dirname(tmp)),
+			).resolves.toMatchObject({ major: 3, minor: 14 });
+		} finally {
+			vi.unstubAllEnvs();
+			setProjectTrustState("trusted");
+		}
+	});
+
+	it("pythonEnvironmentToolCandidates offers the Windows shim order without a platform skip (#4638)", async () => {
+		const { pythonEnvironmentToolCandidates } =
+			await import("../../../clients/python-environment.js");
+		const { withPlatform } = await import("../../support/platform-stub.js");
+
+		const root = path.join("/fixture", ".venv");
+		const binDir = path.join(root, "Scripts");
+		// `withPlatform` captures the real platform BEFORE stubbing, so the stub
+		// cannot leak `win32` into a later case in the same worker.
+		withPlatform("win32", () => {
+			expect(
+				pythonEnvironmentToolCandidates(
+					{
+						root,
+						binDir,
+						pythonPath: path.join(binDir, "python.exe"),
+						source: "project-dot-venv" as const,
+					},
+					"jedi-language-server",
+				),
+			).toEqual([
+				path.join(binDir, "jedi-language-server.exe"),
+				path.join(binDir, "jedi-language-server.cmd"),
+				path.join(binDir, "jedi-language-server"),
+			]);
+		});
+		// A bare environment offers nothing: the bare command stays the fallback.
+		expect(
+			pythonEnvironmentToolCandidates(undefined, "jedi-language-server"),
+		).toEqual([]);
+	});
+
 	describe("rust-analyzer force-reinstall", () => {
 		const MANAGED =
 			process.platform === "win32"
@@ -2236,7 +2590,13 @@ describe("monorepo root hoisting (#1671)", () => {
 				}),
 			]),
 		);
-	});
+		// Budget (#4638 r4 F1): the fixture nests 708 directories, and creating
+		// and walking a path that deep is filesystem-bound on the Windows runner.
+		// CI "Unit tests Windows" measured 1058, 1552, 2160, 2591 and 11405 ms on
+		// five earlier heads of this PR (the 11405 ms head predates every r3
+		// change) and 7475 ms on the next, against the lane's 5000 ms default. Locally
+		// it is ~100 ms.
+	}, 30_000);
 
 	it("RustServer.root hoists to the workspace root even when Cargo.toml opens with a UTF-8 BOM (#2498/#2520 round 2, F4)", async () => {
 		const { RustServer } = await import("../../../clients/lsp/server.js");

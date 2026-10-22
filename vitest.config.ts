@@ -603,6 +603,8 @@ export const wallClockBudgetInclude = [
 	// backtracking against a long non-matching path; the test measures the real
 	// synchronous matcher cost and belongs in the quiet serialized phase.
 	"tests/clients/read-guard-glob-nonbacktracking.test.ts",
+	// #4638: the fix passes are measured through the real ruff binary (flake-shape admission).
+	"tests/clients/ruff-target-version-real.test.ts",
 	"tests/clients/runtime-session-scan-cache.test.ts",
 	// #4126: the first-session warmup has no awaitable completion signal; keep
 	// its real deferred-notification ordering in the serialized phase.

@@ -22,6 +22,12 @@ import {
 import { getLSPService } from "../../lsp/capabilities.js";
 import { disabledPrimaries } from "../../lsp/session-roots.js";
 import { LSP_SERVERS } from "../../lsp/server.js";
+import {
+	describePythonCompileWithheld,
+	detectPythonTargetVersion,
+	partitionOutrankedPythonCompileVerdicts,
+	recordPythonCompileVerdictDrop,
+} from "../../python-environment.js";
 import { RUNTIME_CONFIG } from "../../runtime-config.js";
 import { PRIORITY } from "../priorities.js";
 import { resolveRunnerPath } from "../runner-context.js";
@@ -316,6 +322,28 @@ const lspRunner: RunnerDefinition = {
 			}
 		}
 
+		// #4638: the project's declared syntax level outranks jedi's own `compile`
+		// verdict on this lane exactly as it does on the probe. The rule and its
+		// record belong to the declaration's owner, so the two lanes cannot disagree
+		// about which rows are evidence.
+		// The drop is disclosed on this lane (#4638 r3 N2): with the only row
+		// withheld the result would otherwise be `succeeded` with no diagnostics, an
+		// edit that reads clean while the ledger alone knows better. The dispatcher
+		// renders the sentence inline beside the blocker output.
+		let withheldNotice: string | undefined;
+		if (lspDiags.length > 0) {
+			const declared = await detectPythonTargetVersion(diagnosticPath);
+			const { kept, dropped } = partitionOutrankedPythonCompileVerdicts(
+				lspDiags,
+				declared,
+			);
+			if (dropped > 0 && declared) {
+				recordPythonCompileVerdictDrop(diagnosticPath, declared, dropped);
+				lspDiags = kept;
+				withheldNotice = describePythonCompileWithheld(dropped, declared);
+			}
+		}
+
 		if (serverFailed) {
 			return {
 				status: "failed",
@@ -403,6 +431,7 @@ const lspRunner: RunnerDefinition = {
 				diagnostics: [],
 				semantic: "none",
 				rawOutput: "no-diagnostics",
+				...(withheldNotice !== undefined && { withheldNotice }),
 			};
 		}
 
@@ -570,6 +599,7 @@ const lspRunner: RunnerDefinition = {
 				deferredServerIds: [...deferredServerIds],
 			}),
 			...(outOfEditScope.length > 0 && { outOfEditScope }),
+			...(withheldNotice !== undefined && { withheldNotice }),
 		};
 	},
 };

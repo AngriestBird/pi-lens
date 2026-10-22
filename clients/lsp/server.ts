@@ -19,11 +19,12 @@ import {
 import {
 	augmentPythonEnvironment,
 	detectPythonEnvironment,
-	detectPythonVenv,
+	PYTHON_COMPILE_VERDICT_SERVER_ID,
 	pythonEnvironmentToolCandidates,
 } from "../python-environment.js";
 
-export { detectPythonVenv };
+// Re-exported for the callers that ask this module for the venv probe (#4638).
+export { detectPythonVenv } from "../python-environment.js";
 import { STAGE_TMP_PATTERN } from "../atomic-write-staging.js";
 import {
 	DOTNET_CSHARP_ROOT_MARKERS,
@@ -2836,10 +2837,8 @@ export const PythonServer: LSPServerInfo = {
 	),
 	async spawn(root, options) {
 		const pythonEnvironment = await detectPythonEnvironment(root);
-		const env = augmentPythonEnvironment(
-			await getToolEnvironment(),
-			pythonEnvironment,
-		);
+		const toolEnvironment = await getToolEnvironment();
+		const env = augmentPythonEnvironment(toolEnvironment, pythonEnvironment);
 		let source: "direct" | "managed" | "package-manager" = "direct";
 
 		// openFilesOnly: true — analyse only open files rather than the full workspace.
@@ -2966,7 +2965,9 @@ export const PythonServer: LSPServerInfo = {
 };
 
 export const PythonJediServer: LSPServerInfo = {
-	id: "python-jedi",
+	// One identity: `isJediCompileVerdictOutranked` matches `compile` rows by
+	// this id, so the rule and the registration cannot drift (#4638).
+	id: PYTHON_COMPILE_VERDICT_SERVER_ID,
 	idleEviction: "transparent",
 	role: "language",
 	name: "Jedi Language Server",
@@ -2984,23 +2985,65 @@ export const PythonJediServer: LSPServerInfo = {
 		]),
 	),
 	async spawn(root, options) {
+		// #4638: launch jedi from the project's own interpreter first, exactly as
+		// pyright does, so it parses with the environment the project declared
+		// instead of whichever interpreter the managed install happens to carry.
+		// The project tier carries no `managedToolId`: a managed binary is
+		// prepended to `candidates` ahead of everything, which would put it back
+		// in front of the project's environment.
+		const pythonEnvironment = await detectPythonEnvironment(root);
+		const toolEnvironment = await getToolEnvironment();
+		const env = augmentPythonEnvironment(toolEnvironment, pythonEnvironment);
+		const initialization = pythonEnvironment
+			? { workspace: { environmentPath: pythonEnvironment.pythonPath } }
+			: {};
+
+		if (pythonEnvironment) {
+			// A project launch can fail for a reason other than "tool not found"
+			// (a broken shim, a rejected interpreter, an unusable environment). The
+			// fallback is the documented behaviour either way, so a throw is recorded
+			// and does not end the attempt (#4638 review).
+			try {
+				const projectLaunched = await resolveAndLaunch(
+					{
+						candidates: pythonEnvironmentToolCandidates(
+							pythonEnvironment,
+							"jedi-language-server",
+						),
+						args: [],
+						cwd: root,
+						env,
+					},
+					options?.allowInstall,
+				);
+				if (projectLaunched) return { ...projectLaunched, initialization };
+			} catch (err) {
+				recordDegradationOnce({
+					kind: "python-project-launch-failed",
+					subject: root,
+					reason: `jedi could not launch from the project interpreter ${pythonEnvironment.pythonPath}: ${err instanceof Error ? err.message : String(err)}`,
+					metadata: { tool: "jedi-language-server" },
+				});
+			}
+		}
+
+		// No project-owned interpreter (absent, or refused untrusted inside
+		// `detectPythonEnvironment`, which records the one-shot refusal): fall back
+		// to the managed install and then the host PATH, as before. The fallback
+		// gets the UN-augmented environment: with the venv's `bin` first on PATH its
+		// bare name resolves back to the project shim that just failed (#4638 r3 N5).
 		const launched = await resolveAndLaunch(
 			{
 				candidates: ["jedi-language-server"],
 				args: [],
 				cwd: root,
+				env: toolEnvironment,
 				managedToolId: "jedi-language-server",
 			},
 			options?.allowInstall,
 		);
 		if (!launched) return undefined;
-		const pythonPath = await detectPythonVenv(root);
-		return {
-			...launched,
-			initialization: pythonPath
-				? { workspace: { environmentPath: pythonPath } }
-				: {},
-		};
+		return { ...launched, initialization };
 	},
 };
 

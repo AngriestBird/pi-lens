@@ -21,6 +21,21 @@ pi-lens includes **49 language server definitions** (including four cross-cuttin
 
 LSP servers for: TypeScript, Deno, Python (pyright/basedpyright + jedi), Go, Rust, Ruby (ruby-lsp + solargraph), PHP, PowerShell, C# (omnisharp), F#, Java (JDT LS, with Lombok javaagent support when a Lombok jar is available), Kotlin, Lean, Swift, Dart, Lua, C/C++, Zig, Haskell, Elixir, Gleam, Typst (tinymist), Markdown (marksman), OCaml, Clojure, CUE (syntax and parse diagnostics; evaluation errors via the cue-vet auxiliary runner), Terraform, Nix, Bash, Shuck (zsh-aware shell language server), Fish, CMake, Docker, YAML, JSON, HTML, TOML, Prisma, Vue, Svelte, CSS.
 
+
+### Python: interpreter and syntax level
+
+Python carries two separate declarations, and pi-lens reads both from the project rather than from whichever interpreter happens to run a checker.
+
+**Interpreter** — `detectPythonEnvironment` takes the first directory that holds a Python binary, in this order: `UV_PROJECT_ENVIRONMENT` (only at a uv project root), a uv workspace's `.venv` for a declared member, `VIRTUAL_ENV`, `CONDA_PREFIX`, the project's `.venv`, then its `venv`. pyright and jedi both launch from it. A binary that comes from a project's own environment needs project trust; without it pi-lens falls back to the managed install and then `PATH`, and records the refusal once per session. A project launch that fails for any other reason also falls through to that fallback.
+
+**Syntax level** — `detectPythonTargetVersion` walks up from the file and, in each directory, takes the first readable declaration of ruff `target-version` (`.ruff.toml`, then `ruff.toml`, then `pyproject.toml` `[tool.ruff]`, the order ruff itself measures), pyright `pythonVersion` (`pyrightconfig.json`, which may use comments and trailing commas, then `pyproject.toml` `[tool.pyright]`), `requires-python` from `pyproject.toml` `[project]` reduced to its strongest lower bound (`>=3.12,>=3.14` is 3.14 in either order), then the first line of `.python-version`. The nearest directory holding a declaration wins. Each source ends its own walk where its tool stops: ruff at a ruff config (`.ruff.toml`, `ruff.toml`, or a `pyproject.toml` with `[tool.ruff]`, even one that sets no `target-version`), pyright at `pyrightconfig.json` or `[tool.pyright]`, `requires-python` at a `pyproject.toml` that carries the key, and `.python-version` at itself. A `pyproject.toml` that holds none of these is walked past, as ruff and pyright walk past it, so a nested config that owns a source blocks an ancestor's level for that source and nothing else does. Text that names no CPython major/minor — a `pypy-3.10` or branch name in `.python-version`, an empty file, a specifier with no lower bound — is no declaration at all; pi-lens never invents a default.
+
+When the declared level is 3.14 or newer, jedi's `compile` findings are dropped. jedi compiles with the interpreter it launched, so a 3.14-only construct reports a spurious `SyntaxError` (PEP 758's unparenthesized `except` is the common case). The drop is recorded once per session and file, naming the declared level and the file that declared it, and it applies to the fresh probe, its cached replay, `lsp_navigation`, `mode=full`, and the post-write runner that delivers the same server's answer. Every one of those surfaces names the rows it withheld on the text the agent reads (the count and the declaring file), including when the file would otherwise read as clean. A call that spans projects with different declarations cites each declaration with its own count. The structured result carries the same `details.withheldCompile` object (`count`, `declared`, and `declarations` when there is more than one) on `lsp_diagnostics`, `lens_diagnostics` and `lsp_navigation`. Pyright is unaffected: it parses at the level it resolves and stays the authority on type errors.
+
+ruff needs no override. Its pre-check, `--fix` pass, and lint run all read `target-version` from the project config, so pi-lens passes no level to any of them, and pre-check and fix cannot disagree about which syntax parses.
+
+Non-goal: pi-lens never installs, selects, or pins a Python interpreter, and never rewrites a project's declaration.
+
 ### Formatters
 
 pi-lens auto-detects and runs **35 formatters** based on project config:

@@ -39,6 +39,9 @@ import { buildLspNavigationEnvelope } from "./lsp-structured-output.js";
 import {
 	applyProbeFindingPolicy,
 	describePrimaryUnavailable,
+	mergeWithheld,
+	withheldCompileNote,
+	type PythonCompileWithheld,
 } from "./lsp-diagnostics.js";
 import {
 	dispositionSuppressedLine,
@@ -46,7 +49,12 @@ import {
 } from "../clients/finding-delivery-gate.js";
 import { disabledPrimaries } from "../clients/lsp/session-roots.js";
 import { SYMBOL_KIND_NAMES } from "../clients/lsp-document-symbols.js";
-
+import {
+	detectPythonTargetVersion,
+	isJediCompileVerdict,
+	PYTHON_DECLARATION_CONCURRENCY,
+} from "../clients/python-environment.js";
+import { mapWithConcurrency } from "../clients/map-with-concurrency.js";
 const VALID_OPERATIONS = [
 	"definition",
 	"typeDefinition",
@@ -1314,6 +1322,9 @@ export function createLspNavigationTool(
 					// #1634: the same finding policy (stored dispositions, `.pi-lens.json`
 					// rule policy, inline `pi-lens-ignore`) the `lens_diagnostics
 					// source=lsp` probe applies to the same server answer.
+					// #4638: the project's declared Python syntax level, so jedi's own
+					// `compile` verdict cannot outrank it on this route either.
+					const pythonCompileTarget = await detectPythonTargetVersion(filePath);
 					const policy = applyProbeFindingPolicy(
 						filePath,
 						await lspService.getDiagnostics(
@@ -1325,9 +1336,13 @@ export function createLspNavigationTool(
 						openedContent,
 						"all",
 						"lsp_navigation",
+						pythonCompileTarget,
 					);
 					const diagnostics = policy.kept;
 					const suppressedLine = dispositionSuppressedLine(policy.suppressed);
+					// #4638 r3 (N2): a row the declaration withheld is named on this route
+					// too, so an empty answer cannot read as "no findings published".
+					const withheldLine = withheldCompileNote(policy.withheld);
 					// #4403: #4322's rule on this route. When no language server
 					// answered, the read's health record names it, and an empty
 					// answer is not 0 diagnostics.
@@ -1356,7 +1371,7 @@ export function createLspNavigationTool(
 							content: [
 								{
 									type: "text" as const,
-									text: `${note}\n${JSON.stringify(result)}${primaryUnavailable ? `\nNote: ${primaryUnavailable}` : ""}${suppressedLine ? `\nNote: ${suppressedLine}` : ""}`,
+									text: `${note}\n${JSON.stringify(result)}${primaryUnavailable ? `\nNote: ${primaryUnavailable}` : ""}${suppressedLine ? `\nNote: ${suppressedLine}` : ""}${withheldLine ? `\nNote: ${withheldLine}` : ""}`,
 								},
 							],
 							details: {
@@ -1366,6 +1381,9 @@ export function createLspNavigationTool(
 								coverage: "requested-file",
 								...(policy.suppressed > 0 && {
 									dispositionSuppressed: policy.suppressed,
+								}),
+								...(policy.withheld && {
+									withheldCompile: policy.withheld,
 								}),
 								...(primaryUnavailable !== undefined && {
 									unconfirmed: true,
@@ -1390,7 +1408,33 @@ export function createLspNavigationTool(
 				// #1634: a tracked snapshot replays what each client last published,
 				// so every row passes the same finding policy as the path read and
 				// carries its age: nothing here re-checks the file.
+				// #4638 review (F10): only a file carrying a python-jedi `compile` row
+				// can be outranked, so only those pay for the declaration walk, and the
+				// reads go through the shared bounded pool instead of one unbounded
+				// Promise.all over the whole snapshot.
+				const compileVerdictFiles: string[] = [];
+				for (const [trackedFile, entry] of allDiagnostics) {
+					if (entry.diags.some(isJediCompileVerdict)) {
+						compileVerdictFiles.push(trackedFile);
+					}
+				}
+				const compileVerdictTargets = await mapWithConcurrency(
+					compileVerdictFiles,
+					PYTHON_DECLARATION_CONCURRENCY,
+					async (trackedFile) => ({
+						trackedFile,
+						target: await detectPythonTargetVersion(trackedFile),
+					}),
+				);
+				const pythonCompileTargets = new Map(
+					compileVerdictTargets.map(
+						(entry) => [entry.trackedFile, entry.target] as const,
+					),
+				);
 				let snapshotSuppressed = 0;
+				const snapshotWithheldEntries: Array<
+					PythonCompileWithheld | undefined
+				> = [];
 				const result = Array.from(allDiagnostics.entries()).map(
 					([trackedFile, { diags, ts }]) => {
 						let kept = diags;
@@ -1402,8 +1446,12 @@ export function createLspNavigationTool(
 								readFileContent(trackedFile),
 								"all",
 								"lsp_navigation",
+								pythonCompileTargets.get(trackedFile),
 							);
 							snapshotSuppressed += policy.suppressed;
+							// #4638 review (F10): the snapshot is model-facing too, so a
+							// withheld row is named on its text rather than left to the ledger.
+							snapshotWithheldEntries.push(policy.withheld);
 							kept = policy.kept;
 						}
 						return {
@@ -1416,6 +1464,8 @@ export function createLspNavigationTool(
 				);
 				const snapshotSuppressedLine =
 					dispositionSuppressedLine(snapshotSuppressed);
+				const snapshotWithheld = mergeWithheld(snapshotWithheldEntries);
+				const snapshotWithheldLine = withheldCompileNote(snapshotWithheld);
 				const noteMap2: Record<string, string> = {
 					"push-only":
 						"Note: push-only tracked diagnostics snapshot (not full workspace pull diagnostics).",
@@ -1429,7 +1479,7 @@ export function createLspNavigationTool(
 						content: [
 							{
 								type: "text" as const,
-								text: `${note}\n${JSON.stringify(result)}${snapshotSuppressedLine ? `\nNote: ${snapshotSuppressedLine}` : ""}`,
+								text: `${note}\n${JSON.stringify(result)}${snapshotSuppressedLine ? `\nNote: ${snapshotSuppressedLine}` : ""}${snapshotWithheldLine ? `\nNote: ${snapshotWithheldLine}` : ""}`,
 							},
 						],
 						details: {
@@ -1439,6 +1489,9 @@ export function createLspNavigationTool(
 							coverage: "tracked-open-files",
 							...(snapshotSuppressed > 0 && {
 								dispositionSuppressed: snapshotSuppressed,
+							}),
+							...(snapshotWithheld && {
+								withheldCompile: snapshotWithheld,
 							}),
 						},
 					},

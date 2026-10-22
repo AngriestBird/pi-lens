@@ -397,6 +397,13 @@ export interface RunnerResult {
 	 */
 	outOfEditScope?: Diagnostic[];
 	/**
+	 * #4638 r3 (N2): one bounded sentence naming findings the runner withheld
+	 * from `diagnostics` on purpose (a project's declared syntax level outranks
+	 * jedi's `compile` verdict). A drop only the ledger knows about reads as a
+	 * clean edit, so the dispatcher renders this inline beside the blocker output.
+	 */
+	withheldNotice?: string;
+	/**
 	 * #4484 round 2: the run reached no verdict although it returned no
 	 * failure kind (the language server's diagnostics wait hit its deadline
 	 * with nothing collected, or a query run threw part way). What it did not

@@ -39,6 +39,17 @@ import {
 	formatCacheAgeLabel,
 	markUnreconciledFindings,
 } from "../clients/finding-delivery-gate.js";
+import {
+	detectPythonTargetVersion,
+	isJediCompileVerdict,
+	partitionOutrankedPythonCompileVerdicts,
+	PYTHON_DECLARATION_CONCURRENCY,
+	type PythonCompileVerdictPartition,
+	type PythonTargetVersion,
+	type PythonVerdictRow,
+	recordPythonCompileVerdictDrop,
+} from "../clients/python-environment.js";
+import { mapWithConcurrency } from "../clients/map-with-concurrency.js";
 import { normalizeRuleId } from "../clients/dispatch/rule-id-normalize.js";
 import {
 	applyRulePolicy,
@@ -138,6 +149,8 @@ import {
 	LSP_SEVERITY_FILTERS,
 	MAX_BATCH_FILES,
 	renderBatchOutcomeLines,
+	mergeWithheld,
+	withheldCompileNote,
 	type BatchOutcomeDetail,
 	type LspDiagnosticsFlagReader,
 } from "./lsp-diagnostics.js";
@@ -265,6 +278,32 @@ async function findFullScanBindingMismatches(
 		}
 	}
 	return mismatched;
+}
+
+/**
+ * #4638 review (F1/F10): resolve a file's declared level only when the file
+ * carries one of jedi's `compile` rows, then apply the owner rule. The guard is
+ * the rule's own pre-filter, so a file with no such row costs no I/O and no
+ * await — the same check the full-sweep site makes before its walk.
+ */
+async function applyDeclarationRule<T extends PythonVerdictRow>(
+	filePath: string,
+	diagnostics: readonly T[],
+): Promise<
+	PythonCompileVerdictPartition<T> & { declared?: PythonTargetVersion }
+> {
+	if (!diagnostics.some(isJediCompileVerdict)) {
+		return { kept: [...diagnostics], dropped: 0 };
+	}
+	const declared = await detectPythonTargetVersion(filePath);
+	const partition = partitionOutrankedPythonCompileVerdicts(
+		diagnostics,
+		declared,
+	);
+	if (partition.dropped > 0 && declared) {
+		recordPythonCompileVerdictDrop(filePath, declared, partition.dropped);
+	}
+	return declared ? { ...partition, declared } : partition;
 }
 
 export function createLensDiagnosticsTool(
@@ -2215,6 +2254,12 @@ async function applyInlineSuppressionsToSummaries(
 				content,
 				policyMap,
 			});
+			// #4638 review (F1/F10): the owner rule the post-write runner and the
+			// probe already apply, asked only when the file carries jedi's row.
+			const pythonKept = await applyDeclarationRule(
+				summary.filePath,
+				policyKept,
+			);
 			if (disposed.length < inlineKept.length) {
 				const survivors = new Set(disposed);
 				for (const d of inlineKept) {
@@ -2225,7 +2270,7 @@ async function applyInlineSuppressionsToSummaries(
 			// is already in hand here (unlike mode=all/delta's cache-only path), so
 			// this is the one place the tag can be computed without adding I/O to
 			// the "instant" modes.
-			for (const d of policyKept) {
+			for (const d of pythonKept.kept) {
 				// flagged is weak-anchored (module doc, diagnostic-dispositions.ts) so
 				// the tag survives incidental edits to the flagged line itself.
 				const { weak } = anchorsForDiagnostic(
@@ -2238,10 +2283,12 @@ async function applyInlineSuppressionsToSummaries(
 					(d as { flagged?: boolean }).flagged = true;
 				}
 			}
-			if (policyKept.length === summary.diagnostics.length) return summary;
+			if (pythonKept.kept.length === summary.diagnostics.length) {
+				return summary;
+			}
 			return summarizeDiagnostics(
 				summary.filePath,
-				policyKept,
+				pythonKept.kept,
 				summary.hasFinalSnapshot,
 			);
 		}),
@@ -2492,13 +2539,47 @@ async function formatFullMode(
 	// too, inside `demoteInferredProjectSweepResults`, the sweep form of the one
 	// pipeline the per-edit runner and `lsp_diagnostics` call (round 5, review
 	// F3), so one file reads the same in all three.
-	const lspResults = await demoteInferredProjectSweepResults(
+	let lspResults = await demoteInferredProjectSweepResults(
 		rawLspResults.filter((result) => includeFile(result.filePath)),
 		cwd,
 		lspService,
 		// #1645 review F1: the sweep that produced these results is signal-bounded,
 		// so the probe loop that post-processes them must be too.
 		signal,
+	);
+	// #4638 review (F1): the sweep's answers still carry the server id here, so
+	// the declaration's owner rule runs before the widget/store conversion that
+	// drops it. `mode=full` and the `source=session` store it writes then see the
+	// same filtered set the probe and post-write lanes already deliver.
+	// The same pass counts what it withheld (#4638 r3 N2): the filtered report
+	// names the rows instead of reading as "No issues" with only the ledger to
+	// say otherwise. Collected per file in sweep order, so the aggregate's named
+	// declaration does not depend on which walk finished first.
+	const pythonSweep = await mapWithConcurrency(
+		lspResults,
+		PYTHON_DECLARATION_CONCURRENCY,
+		async (result) => {
+			const pythonKept = await applyDeclarationRule(
+				result.filePath,
+				result.diagnostics,
+			);
+			if (pythonKept.dropped === 0) return { result };
+			return {
+				result: { ...result, diagnostics: pythonKept.kept },
+				withheld: pythonKept.declared && {
+					count: pythonKept.dropped,
+					declared: pythonKept.declared,
+				},
+			};
+		},
+	);
+	lspResults = pythonSweep.map((entry) => entry.result);
+	// Each project's rows are cited under that project's own declaration
+	// (#4638 r4 F3).
+	const withheldCompile = mergeWithheld(
+		pythonSweep.map((entry) =>
+			"withheld" in entry ? entry.withheld : undefined,
+		),
 	);
 	// A result bound to a different document must not replace the current
 	// widget state, even when it contains real diagnostics. Pull results may carry
@@ -2587,9 +2668,16 @@ async function formatFullMode(
 				content: content ?? "",
 				policyMap,
 			});
-			const retired = reconcileScanDiagnostics(
+			// #4638 review (F1/F10): the store is what `source=session` later serves,
+			// so the owner rule runs before this write — and only for a file that
+			// carries jedi's row.
+			const pythonKept = await applyDeclarationRule(
 				result.filePath,
 				policyKept,
+			);
+			const retired = reconcileScanDiagnostics(
+				result.filePath,
+				pythonKept.kept,
 				true,
 				// The service reserves this token when the file enters the scan. The
 				// fallback preserves compatibility with older test doubles/services.
@@ -2815,7 +2903,7 @@ async function formatFullMode(
 			projectScanObservedAt,
 		);
 	}
-	const result = await formatAllMode(
+	const formatted = await formatAllMode(
 		cwd,
 		severity,
 		summaries,
@@ -2856,6 +2944,21 @@ async function formatFullMode(
 			analyzersByLane: extracted.dispositionSuppressedByLane ?? {},
 		},
 	);
+	// #4638 r3 (N2): every return below builds on `result`, so the disclosure of
+	// rows the declaration withheld is added once, here, to text and details.
+	const withheldText = withheldCompileNote(withheldCompile);
+	const result = withheldText
+		? {
+				...formatted,
+				content: [
+					{
+						type: "text" as const,
+						text: `${formatted.content[0].text}\n\n${withheldText}`,
+					},
+				] as [{ type: "text"; text: string }],
+				details: { ...formatted.details, withheldCompile },
+			}
+		: formatted;
 	const missingNote = pathsScopeMissingNote(pathsScope);
 	// #630: mirrors `tools/lsp-diagnostics.ts`'s `unconfirmedReasonClause`/
 	// `tallyConfirmation` semantic guarantee (never silently render

@@ -2596,7 +2596,12 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// #4414 round 2: 119 -> 121, the local `stat` of the typescript package
 	// directories beside a resolved `tsc` and the await on that helper, which
 	// tell a shim (no package) from a package whose version is unreadable.
-	"clients/lsp/server.ts": 121,
+	// #4638: 121 -> 123. The jedi spawn resolves the project's interpreter once
+	// (`detectPythonEnvironment`) and reads the tool environment once, instead of
+	// its old single `detectPythonVenv`; the second `resolveAndLaunch` arm is the
+	// fall-through when no project environment is admitted. Each await is a local
+	// filesystem probe before launch, and hook-signal threading stays #2523 AC4.
+	"clients/lsp/server.ts": 123,
 	"clients/map-with-concurrency.ts": 2,
 	"clients/observed-mutation.ts": 18,
 	// #4493: 10 -> 12, the `git rev-parse` in readGitHead and the `git diff`
@@ -2656,7 +2661,20 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// `hasAmbientPythonEnvironment`, which this one-hop walk cannot tell apart.
 	// The four awaits are `detectPythonEnvironment`'s filesystem probes, which
 	// turn_end already reached two hops away through test-runner-client.ts.
-	"clients/python-environment.ts": 4,
+	// #4638: 4 -> 10. `detectPythonTargetVersion` reads one small declaration
+	// file per ancestor directory (pyproject, the one ruff config it would use,
+	// pyrightconfig.json, `.python-version`); the tool handlers that call it
+	// carry their own signal, but this module is also imported directly by a
+	// hook handler, so hook-signal threading stays #2523 AC4.
+	// 10 -> 13: the declarer walk was split into one function per tier (Sonar
+	// S3776, cognitive complexity 35 -> under the limit), so the same five reads
+	// now cost three extra `await` expressions at the tier calls. No new I/O, no
+	// new unbounded operation; the probes themselves are unchanged.
+	// 13 -> 11 (#4638 r3 N1): each tier now returns its declaration together
+	// with whether it closed the walk, and one per-directory function drives the
+	// four tiers, so the tier awaits sit in one loop instead of in the walker.
+	// Fewer awaits, the same declaration-file reads, no new unbounded operation.
+	"clients/python-environment.ts": 11,
 	"clients/quiet-window.ts": 6,
 	"clients/read-expansion.ts": 2,
 	// 5 -> 3 (#3612): `resolveReadGuardStartState`'s two sidecar awaits moved
@@ -2705,13 +2723,25 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// scan it used to return, to reconcile it before its rows reach the
 	// widget. The same promise `formatFullMode`'s `Promise.all` already
 	// awaited, under the same signal: no new wait.
-	"tools/lens-diagnostics.ts": 15,
+	// 15 -> 19 -> 20 (#4638 review F1/F6/F10): the full-mode sweep walks the
+	// declaration through the shared bounded pool, then the full-mode merge and the
+	// session store write each resolve one file's level before applying the owner
+	// rule. The three sites now share one helper, whose own await plus the three
+	// guarded calls make 20; the helper skips the walk entirely for a file without
+	// jedi's row, so the count is calls, not new I/O.
+	"tools/lens-diagnostics.ts": 20,
 	// #2598 lowered both by one: `collectDiagnosticsForFile` and
 	// `openFileBestEffort` each dropped their `await lspService.openFile(…)`
 	// arm — the fallback for "a service shape without touchFile", which the
 	// real `LSPService` never was.
 	"tools/lsp-diagnostics.ts": 29,
-	"tools/lsp-navigation.ts": 32,
+	// #4638: 32 -> 34, the two probes that must hand the sync finding-policy seam
+	// a prepared Python declaration: the path read resolves it once, and the
+	// tracked-snapshot read resolves one per file before its synchronous map.
+	// 34 -> 35 (#4638 review F10): the per-file declaration walks now run through the
+	// shared bounded pool, so one `await` on the pool replaces the per-file await in
+	// the loop; the walks themselves are unchanged.
+	"tools/lsp-navigation.ts": 35,
 	"tools/module-report.ts": 3,
 	"tools/project-report.ts": 1,
 	"tools/symbol-search.ts": 1,
