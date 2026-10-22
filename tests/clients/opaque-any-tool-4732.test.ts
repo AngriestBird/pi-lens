@@ -491,6 +491,43 @@ describe("which calls pay for git status (#4732)", () => {
 		expect(await analysedSince(offset)).toEqual(["relative_ext_tool seed.ts"]);
 	});
 
+	it("drops an export a refused relative path's edit removed, so a pi write of that name lands", async () => {
+		// RECURRENCE GUARDED: #4737 r3 verify R3-F1. The cachedExports refresh
+		// stayed keyed on filePath, so a refused relative path skipped it. The
+		// cache kept the export the edit removed, and the next pi write of that
+		// name in another file took a false "Redefining existing export(s)" STOP.
+		const runtime = runtimeFor("4737-r3-f1-exports");
+		// As session_start's export scan leaves it.
+		runtime.cachedExports.set("seed", seed());
+		const event = {
+			toolName: "exports_ext_tool",
+			toolCallId: "4737-r3-f1-exports-1",
+			input: { path: "seed.ts" },
+		};
+		await runHandlerExpectingNoThrow(() =>
+			handleToolCall(callDeps(runtime, event)),
+		);
+		fs.writeFileSync(seed(), "export const renamed = 2;\n");
+		await handleToolResult(resultDeps(runtime, event));
+		// An existing sibling: a write to a missing target returns before the
+		// export check.
+		const other = path.join(repoDir, "other.ts");
+		fs.writeFileSync(other, "// placeholder\n");
+		const write = {
+			toolName: "write",
+			toolCallId: "4737-r3-f1-exports-write",
+			input: {
+				path: other,
+				content: "export const seed = 3;\n",
+			},
+		};
+		const verdict = (await runHandlerExpectingNoThrow(() =>
+			handleToolCall(callDeps(runtime, write)),
+		)) as { block?: boolean; reason?: string } | undefined;
+		expect(verdict?.reason).toBeUndefined();
+		expect(runtime.cachedExports.get("renamed")).toBe(seed());
+	});
+
 	it("sends an observed file to the servers before a sibling the same call rewrote is checked", async () => {
 		// RECURRENCE GUARDED: #4737 r3 (Greptile PRRT_kwDORt8rec6vD_bk; #4507).
 		// The observation filter took the observed file out of `written`, so the

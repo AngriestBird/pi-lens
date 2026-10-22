@@ -3434,7 +3434,6 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 						).recordMutationToolReceipt?.call(runtime, filePath, observedKind),
 					)
 				: undefined;
-			if (filePath) refreshCachedExports(runtime, filePath);
 			// Same fallback formula the classified chain uses below, minus its
 			// `_bypassDebounce` branch (#2464 review round 2, S3): that branch was
 			// unreachable here. Both callers that set `_bypassDebounce` arrive with
@@ -3492,6 +3491,9 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 					// one's writes would be dropped, so its run is wasted work.
 					if (writeSession.guardedWrite(observedPath, () => true) !== true)
 						continue;
+					// #4737 r3 F1: each recorded file, not only the named path, so a
+					// refused relative path cannot leave a removed export cached.
+					refreshCachedExports(runtime, observedPath);
 					const observedDispatchSignal = deps.signal;
 					const observedJoinSignal = deps.signal;
 					const observedStateHashForPath = getFileStateHash(observedPath);
