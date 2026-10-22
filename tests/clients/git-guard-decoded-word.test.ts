@@ -266,6 +266,51 @@ const ROWS: readonly Row[] = [
 		bash: "push",
 		guard: true,
 	},
+	// Round 3: a literal string handed to `eval` is a command string, as it is
+	// for `bash -c`. Recurrence: review r1 F1, `eval "git push"` ran git while
+	// the gate said false, because only an unquoted `eval git push` was read.
+	{
+		row: "eval, double-quoted string, push",
+		command: 'eval "git push"',
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "eval, double-quoted string, commit",
+		command: 'eval "git commit -m x"',
+		bash: "commit",
+		guard: true,
+	},
+	{
+		row: "eval, single-quoted string",
+		command: "eval 'git push'",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "eval after a double dash",
+		command: 'eval -- "git push"',
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "eval of a substitution that prints git push",
+		command: 'eval "$(echo git push)"',
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "eval, string names a verb the gate does not govern",
+		command: 'eval "git status"',
+		bash: null,
+		guard: false,
+	},
+	{
+		row: "eval of a plain command",
+		command: "eval echo hi",
+		bash: null,
+		guard: false,
+	},
 	{
 		row: "expansion as the executable",
 		command: "$g push",
@@ -395,13 +440,13 @@ const ACCEPTED: ReadonlyArray<{
 	{
 		reason:
 			"bash reads a word holding whitespace (`git\\ push`, `'\\<newline>git'`) as one command name, and the head split reads it as `git` then `push`: a command bash cannot find",
-		rows: 175,
+		rows: 210,
 		covers: (command) => command.includes("\\ ") || command.includes("'\\\n"),
 	},
 	{
 		reason:
 			"a backslash inside quotes (`'\\git'`, `\"\\p\"ush`) is literal to bash, and the verb normalization strips a backslash before a letter, so the gate reads the word as `git` or `push`",
-		rows: 240,
+		rows: 288,
 		covers: (command) => /['"]\\[a-z]/.test(command),
 	},
 ];
@@ -584,9 +629,10 @@ describe("what else reads the decoded word (#4739)", () => {
 	});
 
 	it("reads the command inside a subshell or a group (r2)", () => {
-		// Gains: `(git checkout .)` rewrote the tree unguarded. Loss, on purpose:
-		// `{ git status; }` was an "indirect" git behind a `{` word and was
-		// guarded; it is a direct git status now, which the gate does not govern.
+		// Gains: `(git checkout .)` rewrote the tree unguarded. The commit gate
+		// retires an over-guard on purpose: `{ git status; }` was an "indirect"
+		// git behind a `{` word and was guarded; it is a direct git status now.
+		// The shared-checkout guard answers false on it at both heads.
 		const checkout = (command: string) =>
 			isWorktreeMutatingGitAttempt("bash", { command });
 		expect(checkout("(git checkout .)")).toBe(true);
@@ -617,6 +663,17 @@ describe("what else reads the decoded word (#4739)", () => {
 		expect(written("(cd sub && printf x > f.ts)")).toEqual([
 			path.resolve("/w", "f.ts"),
 		]);
+	});
+
+	it("reads a literal eval string for the shared-checkout guard too (r3)", () => {
+		// The eval arm sits in the matcher both gates share, as the `bash -c`
+		// arm does: `eval "git checkout ."` rewrote the tree unguarded, and
+		// `eval "git status"` still does not match.
+		const checkout = (command: string) =>
+			isWorktreeMutatingGitAttempt("bash", { command });
+		expect(checkout('eval "git checkout ."')).toBe(true);
+		expect(checkout('eval "git status"')).toBe(false);
+		expect(checkout("eval echo hi")).toBe(false);
 	});
 
 	it("targets the directory of an ANSI-C git", () => {
