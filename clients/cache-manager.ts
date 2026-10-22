@@ -494,7 +494,7 @@ export class CacheManager {
 		if (arm === undefined) return undefined;
 		const base =
 			arm === "evicted"
-				? { ...DEFAULT_TURN_STATE, files: {}, sessions: envelope.sessions }
+				? { ...envelope, ...DEFAULT_TURN_STATE, files: {} }
 				: envelope;
 		this.writeTurnState(
 			{
