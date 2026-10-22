@@ -1,7 +1,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { describe, expect, it } from "vitest";
-import { CacheManager } from "../../clients/cache-manager.js";
+import { describe, expect, it, vi } from "vitest";
+import {
+	CacheManager,
+	DEFAULT_MAX_AGE_MS,
+} from "../../clients/cache-manager.js";
 import {
 	clearGitGuardTestFailure,
 	evaluateGitGuard,
@@ -3192,27 +3195,42 @@ describe("#4738: each session's blocker sections keep their owner", () => {
 				"4738-carried-turn-end-findings.json",
 				["v4738-second-session", "v4738-first-session"],
 			],
-			// Its first session's CVE report names no file, and its stamp is far
-			// past the window: only the second session's file section is carried.
+			// Its first session's CVE report names no file, and the clock is set
+			// past its window (`readStampedFixtureAt`): only the second session's
+			// file section is carried.
 			["4750-stamped-turn-end-findings.json", ["v4750-second-session"]],
 		];
 		const env = setupTestEnvironment("pi-lens-git-guard-4738-corpus-");
 		try {
 			const cache = new CacheManager(false);
 			const observed = corpus.map(([name]) => {
+				const read = () => {
+					const runtime = sessionA(env.tmpDir);
+					const { carried } = readTurnEndGuardRecord(
+						cache,
+						runtime,
+						env.tmpDir,
+					);
+					const verdict = evaluateGitGuard(runtime, cache, env.tmpDir);
+					return [
+						name,
+						carried.map((partition) => partition.sessionId),
+						verdict.block,
+					];
+				};
+				if (name === STAMPED_FIXTURE)
+					return readStampedFixtureAt(
+						cache,
+						env.tmpDir,
+						DEFAULT_MAX_AGE_MS + 60_000,
+						read,
+					);
 				cache.writeCache(
 					"turn-end-findings",
 					boundFixture(name, env.tmpDir),
 					env.tmpDir,
 				);
-				const runtime = sessionA(env.tmpDir);
-				const { carried } = readTurnEndGuardRecord(cache, runtime, env.tmpDir);
-				const verdict = evaluateGitGuard(runtime, cache, env.tmpDir);
-				return [
-					name,
-					carried.map((partition) => partition.sessionId),
-					verdict.block,
-				];
+				return read();
 			});
 			expect(observed).toEqual(
 				corpus.map(([name, carried]) => [
@@ -3227,6 +3245,32 @@ describe("#4738: each session's blocker sections keep their owner", () => {
 		}
 	});
 });
+
+const STAMPED_FIXTURE = "4750-stamped-turn-end-findings.json";
+
+/**
+ * Store the stamped fixture and run `read` with the clock frozen at its
+ * first session's stamp plus `sinceStamp` (#4762 review F1): the fixture's
+ * stamps are real times, so a read at the machine's own clock would carry its
+ * report before 2026-10-22T20:20Z and drop it after.
+ */
+function readStampedFixtureAt<T>(
+	cache: CacheManager,
+	cwd: string,
+	sinceStamp: number,
+	read: () => T,
+): T {
+	const data = boundFixture(STAMPED_FIXTURE, cwd) as TurnEndFindingsCache;
+	const stamp = data.carriedBlockers?.[0]?.blockerWrittenAt ?? Number.NaN;
+	expect(Number.isFinite(stamp)).toBe(true);
+	vi.useFakeTimers({ toFake: ["Date"], now: stamp + sinceStamp });
+	try {
+		cache.writeCache("turn-end-findings", data, cwd);
+		return read();
+	} finally {
+		vi.useRealTimers();
+	}
+}
 
 /** Older than the gate's freshness window, by a minute. */
 const EXPIRED = (): number => Date.now() - 31 * 60_000;
@@ -3260,6 +3304,42 @@ function thirdSession(cwd: string): RuntimeCoordinator {
 }
 
 describe("#4750: another session's text no file owns expires by its own write stamp", () => {
+	it("carries the stamped fixture's lane report inside its window and drops it after, whatever the machine's date", () => {
+		// RECURRENCE GUARDED: #4762 review F1. The corpus row read the fixture at
+		// the machine's clock, so its verdict changed at 2026-10-22T20:20Z.
+		const env = setupTestEnvironment("pi-lens-git-guard-4750-fixture-clock-");
+		try {
+			const cache = new CacheManager(false);
+			const carriedAt = (sinceStamp: number): unknown =>
+				readStampedFixtureAt(cache, env.tmpDir, sinceStamp, () => {
+					const { carried, dropped } = readTurnEndGuardRecord(
+						cache,
+						sessionA(env.tmpDir),
+						env.tmpDir,
+					);
+					return [carried.map((partition) => partition.sessionId), dropped];
+				});
+
+			expect([
+				carriedAt(60_000),
+				carriedAt(DEFAULT_MAX_AGE_MS),
+				carriedAt(DEFAULT_MAX_AGE_MS + 1),
+			]).toEqual([
+				[
+					["v4750-second-session", "v4750-first-session"],
+					{ gone: false, noFile: false },
+				],
+				[
+					["v4750-second-session", "v4750-first-session"],
+					{ gone: false, noFile: false },
+				],
+				[["v4750-second-session"], { gone: false, noFile: true }],
+			]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("hands the composer an expired partition's file sections only, and logs nothing at the read", () => {
 		// RECURRENCE GUARDED: #4750. The expiry arm: once the owner's stamp is
 		// past the window, its text no file owns is dropped and reported to the
