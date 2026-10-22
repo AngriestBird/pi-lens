@@ -18,12 +18,12 @@
  * model cannot read (see `ACCEPTED`).
  *
  * The fail-closed rule the table pins, in `hidesGuardedVerb`: a word the word
- * model cannot read (an ANSI-C escape, or an expansion) may be any word. It
+ * model cannot read (an expansion) may be any word. It
  * guards the command when it precedes a word that is, or may be, `commit` or
  * `push`, or a word that holds a guarded command (the unread word may be a
- * launcher's switch or `eval`), or when it is git's own verb. An ANSI-C escape
- * inside a command string a launcher or `eval` receives guards the command at
- * the string's re-lex.
+ * launcher's switch or `eval`), or when it is git's own verb. An ANSI-C word
+ * is no such word: the model decodes it as bash does (round 5), and the
+ * decode table below runs each escape class against real bash.
  */
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
@@ -461,6 +461,106 @@ const ROWS: readonly Row[] = [
 		bash: null,
 		guard: false,
 	},
+	// Round 5: an ANSI-C word is decoded as bash decodes it, so a read-only
+	// string or an ordinary flag value holding an escape is read, not guarded.
+	// Recurrence: rounds 3 and 4 failed closed on every escape and guarded
+	// `cut -d $'\t'`, `python3 -c $'…'` (11 of 20 realistic escape commands).
+	{
+		row: "read-only shell string holding an escape",
+		command: "bash -c $'echo hi\\nls'",
+		bash: null,
+		guard: false,
+	},
+	{
+		row: "read-only sh string holding an escape",
+		command: "sh -c $'echo a\\necho b'",
+		bash: null,
+		guard: false,
+	},
+	{
+		row: "read-only eval string holding an escape",
+		command: "eval $'echo hi\\nls'",
+		bash: null,
+		guard: false,
+	},
+	{
+		row: "tab in a shell string",
+		command: "bash -c $'printf x\\ty'",
+		bash: null,
+		guard: false,
+	},
+	{
+		row: "tab delimiter after a flag, cut",
+		command: "cut -d $'\\t' -f1 f.txt",
+		bash: null,
+		guard: false,
+	},
+	{
+		row: "tab delimiter after a flag, sort",
+		command: "sort -t $'\\t' -k2 f.txt",
+		bash: null,
+		guard: false,
+	},
+	{
+		row: "tab delimiter after a flag, paste",
+		command: "paste -d $'\\t' a.txt b.txt",
+		bash: null,
+		guard: false,
+	},
+	{
+		row: "newline delimiter after a flag, xargs",
+		command: "xargs -d $'\\n' ls < f.txt",
+		bash: null,
+		guard: false,
+	},
+	{
+		row: "tab pattern after a flag, rg",
+		command: "rg -e $'\\t' f.txt",
+		bash: null,
+		guard: false,
+	},
+	{
+		row: "inline python with an escape",
+		command: "python3 -c $'x = 1\\ny = 2'",
+		bash: null,
+		guard: false,
+	},
+	{
+		row: "inline node with an escape",
+		command: "node -e $'let x = 1\\nx++'",
+		bash: null,
+		guard: false,
+	},
+	{
+		row: "NUL ends the quote, the word goes on",
+		command: "$'git\\x00x' push",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "NUL ends the quote inside the executable",
+		command: "$'gi\\x00t' push",
+		bash: null,
+		guard: false,
+	},
+	{
+		row: "NUL ends a shell string before a push",
+		command: "bash -c $'git status\\x00\\ngit push'",
+		bash: null,
+		guard: false,
+	},
+	{
+		row: "unicode escape executable",
+		command: "$'\\u0067it' push",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "octal escape switch",
+		command: "bash $'\\055c' 'git push'",
+		bash: "push",
+		guard: true,
+	},
 	{
 		row: "expansion as the executable",
 		command: "$g push",
@@ -590,15 +690,83 @@ const ACCEPTED: ReadonlyArray<{
 	{
 		reason:
 			"bash reads a word holding whitespace (`git\\ push`, `'\\<newline>git'`) as one command name, and the head split reads it as `git` then `push`: a command bash cannot find",
-		rows: 210,
+		rows: 150,
 		covers: (command) => command.includes("\\ ") || command.includes("'\\\n"),
 	},
 	{
 		reason:
 			"a backslash inside quotes (`'\\git'`, `\"\\p\"ush`) is literal to bash, and the verb normalization strips a backslash before a letter, so the gate reads the word as `git` or `push`",
-		rows: 288,
+		rows: 270,
 		covers: (command) => /['"]\\[a-z]/.test(command),
 	},
+];
+
+/**
+ * Round 5: one ANSI-C word per escape class and edge, run through real bash
+ * (`printf %s`, C.UTF-8): the simple escapes, octal (value & 0xff), `\\x`,
+ * `\\u` and `\\U` (surrogates, the 5- and 6-byte forms, a dropped value at
+ * 2^31), `\\cX`, an unknown escape, a missing digit, and a NUL that ends only
+ * its own quote. Recurrence: rounds 1 to 4 left an escape unread and failed
+ * closed on it, which guarded read-only commands.
+ */
+const ANSI_C_WORDS: readonly string[] = [
+	"$'\\a\\b\\e\\E\\f\\n\\r\\t\\v'",
+	"$'\\\\\\'\\\"\\?'",
+	"$'\\7'",
+	"$'\\101'",
+	"$'\\0101'",
+	"$'\\1234'",
+	"$'\\777'",
+	"$'\\18'",
+	"$'a\\0b'c",
+	"$'\\400'x",
+	"$'\\08'",
+	"$'\\x41'",
+	"$'\\x7'",
+	"$'\\x414'",
+	"$'\\x2dc'",
+	"$'\\xc3\\xa9'",
+	"$'\\xff'",
+	"$'\\xg'",
+	"$'\\x41\\x'",
+	"$'a\\x00b'c",
+	"$'a\\x00b'$'cd'",
+	"$'\\u41'",
+	"$'\\u0067it'",
+	"$'\\u00e9'",
+	"$'\\u2010'",
+	"$'\\u0080'",
+	"$'\\ud800'",
+	"$'\\uD83D\\uDE00'",
+	"$'\\u'",
+	"$'\\u0000x'y",
+	"$'\\U41'",
+	"$'\\U0001F600'",
+	"$'\\U0010FFFF'",
+	"$'\\U110000'",
+	"$'\\U00200000'",
+	"$'\\U04000000'",
+	"$'\\U7FFFFFFF'",
+	"$'a\\U80000000b'",
+	"$'a\\UFFFFFFFFb'",
+	"$'\\cA'",
+	"$'\\ca'",
+	"$'\\c?'",
+	"$'\\c['",
+	"$'\\c1'",
+	"$'\\cJ'",
+	"$'\\c\\\\x'",
+	"$'\\c\\\\\\\\'",
+	"$'\\c\u00e9'",
+	"$'\\c'",
+	"$'\\c@x'y",
+	"$'\\z'",
+	"$'\\8'",
+	"$'\\N'",
+	"$'git'",
+	"$'\u00e9\\x41'",
+	"$'\\x67'it",
+	"g$'\\x69't",
 ];
 
 /**
@@ -614,9 +782,8 @@ const escapeEach = (word: string) =>
 interface LauncherRow {
 	command: string;
 	verb: "push" | "status";
-	/** Over-guards the fail-closed rule accepts for a status twin. */
-	unreadString: boolean;
-	twoUnreadWords: boolean;
+	/** The string's verb is an expansion (`"git $s"`): the gate cannot read it. */
+	unreadVerb: boolean;
 }
 const LAUNCHER_TABLE: readonly LauncherRow[] = (() => {
 	const rows = new Map<string, LauncherRow>();
@@ -653,9 +820,7 @@ const LAUNCHER_TABLE: readonly LauncherRow[] = (() => {
 						rows.set(command, {
 							command,
 							verb,
-							unreadString: string !== "plain",
-							twoUnreadWords:
-								executable !== null && escapeExecutable && escapeStart,
+							unreadVerb: string === "expansion",
 						});
 					}
 	return [...rows.values()];
@@ -695,28 +860,34 @@ afterAll(() => {
 	removeTempDirSync(root);
 });
 
-/** The governed verb real bash ran for `command`, or `null`. */
-function bashRan(command: string): "commit" | "push" | null {
-	fs.rmSync(log, { force: true });
+/** Real `bash -c command` in the stub home: its stdout, even when it fails. */
+function runBash(command: string, locale: string): Buffer {
 	try {
-		execFileSync("bash", ["-c", command], {
+		return execFileSync("bash", ["-c", command], {
 			cwd: home,
 			env: {
 				PATH: `${path.join(home, "bin")}${path.delimiter}${process.env.PATH ?? ""}`,
 				HOME: home,
-				LC_ALL: "C",
+				LC_ALL: locale,
 				GITLOG: log,
 				g: "git",
 				v: "push",
 				s: "status",
 				sh: "sh",
 			},
-			stdio: "ignore",
+			stdio: ["ignore", "pipe", "ignore"],
 			timeout: 10_000,
 		});
-	} catch {
+	} catch (error) {
 		// A command bash cannot run still logged what ran before it failed.
+		return Buffer.from((error as { stdout?: Buffer }).stdout ?? "");
 	}
+}
+
+/** The governed verb real bash ran for `command`, or `null`. */
+function bashRan(command: string): "commit" | "push" | null {
+	fs.rmSync(log, { force: true });
+	runBash(command, "C");
 	const verbs = fs.existsSync(log)
 		? fs.readFileSync(log, "utf8").split("\0")
 		: [];
@@ -783,6 +954,33 @@ describe.skipIf(process.platform === "win32")(
 			expect(PLAIN.length).toBe(693);
 		}, 120_000);
 
+		it("decodes every ANSI-C escape class as bash does (r5)", () => {
+			const failures: string[] = [];
+			let nonEmpty = 0;
+			for (const word of ANSI_C_WORDS) {
+				const command = `printf %s ${word}`;
+				const bytes = runBash(command, "C.UTF-8");
+				if (bytes.length > 0) nonEmpty++;
+				const decoded = decodeShellWords(command)[0]?.words[2];
+				// Bash's bytes read as UTF-8, as the command is; where they are
+				// valid UTF-8 the decoded text is byte-identical too.
+				const asText = new TextDecoder().decode(bytes);
+				const valid = Buffer.from(asText, "utf8").equals(bytes);
+				if (
+					decoded?.hidden !== undefined ||
+					decoded?.text !== asText ||
+					(valid && !Buffer.from(decoded.text, "utf8").equals(bytes))
+				)
+					failures.push(
+						`${JSON.stringify(word)}: bash ${bytes.toString("hex")}, decoded ${Buffer.from(decoded?.text ?? "").toString("hex")}${decoded?.hidden ? " (hidden)" : ""}`,
+					);
+			}
+			// Floor: bash ran (a missing bash prints nothing for every word).
+			assertNonEmptyScan("words bash printed", nonEmpty, 40);
+			expect(failures).toEqual([]);
+			expect(ANSI_C_WORDS.length).toBe(57);
+		}, 60_000);
+
 		it("guards every launcher spelling of the state table (r4)", () => {
 			const failures: string[] = [];
 			let accepted = 0;
@@ -793,13 +991,9 @@ describe.skipIf(process.platform === "win32")(
 					failures.push(`${JSON.stringify(row.command)}: bash ran ${ran}`);
 				const gate = guarded(row.command);
 				if (gate === (ran !== null)) continue;
-				// A status twin the gate cannot read: its string (an escape, or an
-				// expansion as git's verb), or an unread word before an unread word.
-				if (
-					gate &&
-					row.verb === "status" &&
-					(row.unreadString || row.twoUnreadWords)
-				) {
+				// A status twin whose verb is an expansion: git's verb the gate
+				// cannot read. An escape is decoded, so it is never a reason (r5).
+				if (gate && row.verb === "status" && row.unreadVerb) {
 					accepted++;
 					continue;
 				}
@@ -809,10 +1003,10 @@ describe.skipIf(process.platform === "win32")(
 			}
 			expect(failures).toEqual([]);
 			// 9 launchers, 3 string spellings, 2 verbs, 4 switch spellings (bare
-			// eval has 2): 204 rows. 68 status twins hold an unread string and 8
-			// spell both the launcher and its switch escaped.
+			// eval has 2): 204 rows. 34 status twins spell git's verb as an
+			// expansion; round 4 accepted 76, before the decode (round 5).
 			expect(LAUNCHER_TABLE.length).toBe(204);
-			expect(accepted).toBe(76);
+			expect(accepted).toBe(34);
 		}, 60_000);
 	},
 );
@@ -834,8 +1028,9 @@ describe("the word model the gate reads (#4739)", () => {
 	});
 
 	it("marks the words it cannot read, and which way", () => {
-		expect(words("$'\\x67it'")[0]).toEqual({ text: "", hidden: "escape" });
-		expect(words("g$'\\x69't")[0]).toEqual({ text: "gt", hidden: "escape" });
+		// Round 5: an ANSI-C escape is decoded, so it is a word the model reads.
+		expect(words("$'\\x67it'")[0]).toEqual({ text: "git" });
+		expect(words("g$'\\x69't")[0]).toEqual({ text: "git" });
 		for (const spelled of ["$g", "${g}", "$(echo", "`echo`", "gi?", "{git,x}"])
 			expect(words(spelled)[0]?.hidden, spelled).toBe("expansion");
 		for (const spelled of ["'$g'", "\\$g", "'gi?'", "$'$g'", "\\{git"])
@@ -947,18 +1142,18 @@ describe("what else reads the decoded word (#4739)", () => {
 		expect(
 			isWorktreeMutatingGitAttempt("bash", { command: "$g checkout ." }),
 		).toBe(false);
+		expect(guarded("$g push")).toBe(true);
+		// Round 5: an ANSI-C word is decoded, so both guards read it alike.
 		expect(
 			isWorktreeMutatingGitAttempt("bash", {
 				command: "$'\\x67it' checkout .",
 			}),
-		).toBe(false);
-		expect(guarded("$g push")).toBe(true);
-		// Round 3: the same split for an escape in a launcher's command string.
+		).toBe(true);
 		expect(
 			isWorktreeMutatingGitAttempt("bash", {
 				command: "nix-shell --run $'git\\x20checkout .'",
 			}),
-		).toBe(false);
+		).toBe(true);
 		expect(guarded("nix-shell --run $'git\\x20push'")).toBe(true);
 	});
 });

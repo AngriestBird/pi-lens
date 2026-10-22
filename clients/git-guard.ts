@@ -765,23 +765,14 @@ export function collectGitInvocations(
 
 /**
  * A command string is a shell's, so its words are lexed again as one (the
- * decoded text of each word, joined).
+ * decoded text of each word, joined): `bash -c $'git\x20push'` reads
+ * `git push` (#4739 round 5).
  */
 function commandStringHasGuardedVerb(
 	words: readonly DecodedShellWord[],
 	depth: number,
 	matcher: GitVerbMatcher,
 ): boolean {
-	// An escape the model cannot read joins as empty text, so the re-lex below
-	// would read `nix-shell --run $'git\x20push'` as an empty command. A string
-	// handed to a shell that holds one fails closed for the policy gate, at the
-	// one place every launcher branch reads its string (#4739 round 3).
-	if (
-		matcher.indirectAlwaysMatches &&
-		words.some((word) => word.hidden === "escape")
-	) {
-		return true;
-	}
 	return decodeShellWords(
 		canonicalizeGuardCommand(words.map((word) => word.text).join(" ")),
 	).some((segment) => containsGuardedGitVerb(segment.words, depth, matcher));
@@ -792,14 +783,13 @@ function commandStringHasGuardedVerb(
  * word model says what it cannot read (`DecodedShellWord.hidden`); this is the
  * gate's answer, and it fails closed: the word may be any word. As git, a
  * later word that is, or may be, a governed verb guards the command
- * (`$'\x67it' push`, `$g push`). As `eval`, a launcher or its command-string
- * switch, a later word that holds a guarded command guards it
- * (`bash $'\x2dc' 'git push'`, `$'\x65val' 'git push'`, round 4). Each later
- * word is read alone, as `-c` takes one: read joined, `$SHELL -c 'git status'`
- * would put git at a non-leading index. Git's own verb is the caller's case,
- * and an escape inside a string handed to a shell (`bash -c $'git\x20push'`)
- * is `commandStringHasGuardedVerb`'s. `docker push $IMAGE` reads nothing it
- * cannot see before its verb, and stays unguarded.
+ * (`$g push`). As `eval`, a launcher or its command-string switch, a later
+ * word that holds a guarded command guards it (`bash $c 'git push'`,
+ * `$e 'git push'`, round 4). Each later word is read alone, as `-c` takes one:
+ * read joined, `$SHELL -c 'git status'` would put git at a non-leading index.
+ * Git's own verb is the caller's case. An ANSI-C word is no such word: the
+ * model decodes it (round 5). `docker push $IMAGE` reads nothing it cannot
+ * see before its verb, and stays unguarded.
  *
  * Only a policy gate (`indirectAlwaysMatches`) answers this way: the guard that
  * protects an agent from its own accident would block commands it can read.
@@ -893,7 +883,7 @@ function containsGuardedGitVerb(
 		if (gitIndex > 0 && matcher.indirectAlwaysMatches) return true;
 		const gitTokens = commandTokens.slice(gitIndex);
 		const verbAt = gitVerbIndex(gitTokens);
-		// A verb the model cannot read (`git $'\x70ush'`, `git $sub`) is not
+		// A verb the model cannot read (`git $sub`, `git {push,x}`) is not
 		// a verb the matcher can refuse.
 		if (
 			matcher.indirectAlwaysMatches &&

@@ -111,8 +111,8 @@ const ACCEPTED: ReadonlyArray<{
 }> = [
 	{
 		reason:
-			"R7-4, the PR's declared p3 residual: a cd whose one operand is a static path moves the scan without a stat, so a directory that does not exist (here a single-quoted backslash or backslash-newline, `cd s'\\u'b`, bash's own word) is entered where bash stays",
-		rows: 4,
+			"R7-4, the PR's declared p3 residual: a cd whose one operand is a static path moves the scan without a stat, so a directory that does not exist (here a single-quoted or ANSI-C backslash or backslash-newline, `cd s'\\u'b`, `cd su$'\\b'`, bash's own word) is entered where bash stays",
+		rows: 8,
 		covers: (_row, outcome) =>
 			outcome.bashEntered === undefined &&
 			outcome.named.length === 1 &&
@@ -125,15 +125,6 @@ const ACCEPTED: ReadonlyArray<{
 		covers: (row, outcome) =>
 			row.slot === "target" &&
 			row.command.includes("\n") &&
-			outcome.scanWrote.length === 0,
-	},
-	{
-		reason:
-			"an ANSI-C part holding an escape (`$'\\f.ts'`) has no static text in the word model, so the target names nothing: an under-claim",
-		rows: 2,
-		covers: (row, outcome) =>
-			row.slot === "target" &&
-			row.command.includes("$'\\") &&
 			outcome.scanWrote.length === 0,
 	},
 	{
