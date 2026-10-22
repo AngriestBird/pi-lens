@@ -3085,6 +3085,62 @@ describe("#4738: each session's blocker sections keep their owner", () => {
 		}
 	});
 
+	it("keeps a carried section's file affected through a passing test run, so its owner's gate still checks it", () => {
+		// RECURRENCE GUARDED: #4738, the test-clear writer's affected files. It
+		// kept only the top level's blocking files, so the carried a.ts left
+		// `affectedFiles`; once this session fixed its own b.ts and the still
+		// failing test file was deleted, the other session's gate read every
+		// affected file as resolved and ALLOWED with its a.ts blocker standing.
+		const env = setupTestEnvironment("pi-lens-git-guard-4738-tests-affected-");
+		try {
+			const [theirs, mine, passing, failing] = [
+				"a.ts",
+				"b.ts",
+				"c.test.ts",
+				"d.test.ts",
+			].map((name) => path.join(env.tmpDir, name));
+			for (const file of [theirs, mine, passing, failing])
+				fs.writeFileSync(file, "x;\n");
+			const runtime = sessionA(env.tmpDir);
+			const earlier = new RuntimeCoordinator();
+			earlier.projectRoot = env.tmpDir;
+			earlier.setTelemetryIdentity({ sessionId: EARLIER });
+			for (const owner of [runtime, earlier]) owner.bumpFileSeq(failing);
+			const cache = new CacheManager(false);
+			writeGitGuardRecord(
+				cache,
+				runtime,
+				env.tmpDir,
+				record({
+					...foreignRecord([mine], "session-A"),
+					affectedFiles: [theirs, mine],
+					carriedBlockers: [
+						{
+							sessionId: EARLIER,
+							blockerContent: composerSections([theirs]),
+							blockingFiles: [theirs],
+						},
+					],
+				}),
+			);
+			mergeGitGuardTestFailure(cache, env.tmpDir, runtime, "FAIL 0p/2f", [
+				passing,
+				failing,
+			]);
+			clearGitGuardTestFailure(cache, env.tmpDir, runtime, [passing]);
+			ownFix(runtime, mine);
+			syncGitGuardRecord(runtime, cache, env.tmpDir, mine);
+			fs.rmSync(failing);
+
+			expect(owners(storedData(cache, env.tmpDir))).toEqual([EARLIER]);
+			expect(evaluateGitGuard(earlier, cache, env.tmpDir)).toMatchObject({
+				block: true,
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("reads every released record shape as one owner's sections, and this version's as each owner's", () => {
 		// Fixture corpus (principles §2), the old-record read rule: a record with
 		// no `carriedBlockers` (every shape released before #4738) is one

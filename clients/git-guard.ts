@@ -1936,8 +1936,16 @@ export function clearGitGuardTestFailure(
 		runtime.clearGitGuardCacheUnknown();
 		return;
 	}
+	// #4738: every owner's blocking files stay affected, not only the top
+	// level's: a carried section's file dropped here left that owner's gate
+	// judging its blocker with the file unchecked.
 	const blockingKeys = new Set(
-		(existing.blockingFiles ?? []).map((file) => guardPathKey(file, cwd)),
+		[
+			...(existing.blockingFiles ?? []),
+			...(existing.carriedBlockers ?? []).flatMap(
+				(partition) => partition.blockingFiles,
+			),
+		].map((file) => guardPathKey(file, cwd)),
 	);
 	const affectedFiles = existing.affectedFiles.filter(
 		(file) =>
