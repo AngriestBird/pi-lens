@@ -1010,6 +1010,61 @@ describe("#4242 adopted-root runner allowlist", () => {
 					(row) => row.metadata.writer,
 				),
 			).toContain("word-index");
+
+			// The allow direction: a file of the workspace itself still enters the
+			// warm index. Recurrence: an over-refusing gate (inverted or always
+			// refusing) stops the warm index receiving every in-workspace file and
+			// stays green when only the refusal is asserted (#4775 F2).
+			const gadgetFile = path.join(fixture.sessionRoot, "session-gadget.md");
+			fs.writeFileSync(gadgetFile, "# Gadget notes\n");
+			await analyzeFile(gadgetFile, fixture.sessionRoot, {
+				warmLsp: false,
+				record: false,
+				updateGraph: true,
+				flags: { "no-lsp": true, "no-autofix": true },
+			});
+			const afterSession = acquireWarmWordIndex(fixture.sessionRoot);
+			try {
+				expect(afterSession.index?.docCount).toBe(2);
+				expect(
+					wordIndexPostingHits(afterSession.index!, "gadget").map(
+						(hit) => hit.file,
+					),
+				).toEqual([gadgetFile]);
+			} finally {
+				afterSession.release();
+			}
+		} finally {
+			fixture.cleanup();
+		}
+	});
+
+	// Recurrence (#4775 F1): the refusal record was written before asking whether
+	// a warm index exists, so a cold process logged a skipped write that had no
+	// target and spent the file's first rising-edge record on it.
+	it("records no word-index refusal for an adopted-root analyze when no warm index exists", async () => {
+		const fixture = adoptedFixture();
+		try {
+			vi.stubEnv("PI_LENS_TEST_MODE", "0");
+			const adoptedFile = path.join(fixture.adoptedRoot, "adopted-cold.sh");
+			fs.writeFileSync(adoptedFile, "adopted_cold() { echo cold; }\n");
+			await analyzeFile(adoptedFile, fixture.sessionRoot, {
+				warmLsp: false,
+				record: false,
+				updateGraph: true,
+				flags: { "no-lsp": true, "no-autofix": true },
+			});
+			const lease = acquireWarmWordIndex(fixture.sessionRoot);
+			try {
+				expect(lease.index).toBeUndefined();
+			} finally {
+				lease.release();
+			}
+			expect(
+				(await decisionRows(adoptedFile, "adopted_root_writer_skipped")).map(
+					(row) => row.metadata.writer,
+				),
+			).not.toContain("word-index");
 		} finally {
 			fixture.cleanup();
 		}
