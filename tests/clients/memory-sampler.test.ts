@@ -24,9 +24,11 @@ import {
 	isRapidHeapGrowth,
 	MEMORY_SAMPLE_TURN_INTERVAL,
 	recordMemorySampleOutcome,
+	recordMemoryTurnEnd,
 	resetMemorySamplerCadence,
 	shouldEmitMemorySample,
 	shouldEmitMemorySampleAdaptive,
+	takeMemoryIdleGapMs,
 	toMemoryProcessUsage,
 } from "../../clients/memory-sampler.js";
 import {
@@ -484,5 +486,113 @@ describe("formatMemoryHealthLine (pure)", () => {
 		sample.subsystems.treeSitter = null;
 		const line = formatMemoryHealthLine(sample);
 		expect(line).toContain("tree-sitter cache n/a");
+	});
+});
+
+describe("post-idle sample decision (#1332)", () => {
+	// An explicit window: the decision takes the window as an argument, so the
+	// default (the LSP idle-evict value) is not pinned here.
+	const WINDOW_MS = 300_000;
+	const SESSION = "session-a";
+
+	beforeEach(() => {
+		resetMemorySamplerCadence();
+	});
+
+	it("#1332: no post-idle heap reading existed, so a turn after a gap over the window reports the measured idleMs", () => {
+		recordMemoryTurnEnd(SESSION, 1_000);
+		expect(takeMemoryIdleGapMs(SESSION, 1_000 + WINDOW_MS + 1, WINDOW_MS)).toBe(
+			WINDOW_MS + 1,
+		);
+	});
+
+	it("#1332: a gap at or under the window yields no idle sample (the window is a strict bound)", () => {
+		recordMemoryTurnEnd(SESSION, 1_000);
+		expect(
+			takeMemoryIdleGapMs(SESSION, 1_000 + WINDOW_MS - 1, WINDOW_MS),
+		).toBeNull();
+		recordMemoryTurnEnd(SESSION, 1_000);
+		expect(
+			takeMemoryIdleGapMs(SESSION, 1_000 + WINDOW_MS, WINDOW_MS),
+		).toBeNull();
+	});
+
+	it("#1332: two turn starts after one long gap yield only one idle sample", () => {
+		recordMemoryTurnEnd(SESSION, 0);
+		const longGap = WINDOW_MS * 2;
+		expect(takeMemoryIdleGapMs(SESSION, longGap, WINDOW_MS)).toBe(longGap);
+		// The second turn start has no turn end in between: nothing is pending.
+		expect(takeMemoryIdleGapMs(SESSION, longGap + 5, WINDOW_MS)).toBeNull();
+	});
+
+	it("#1332: no turn end was ever recorded (first turn of a process) yields no idle sample", () => {
+		expect(takeMemoryIdleGapMs(SESSION, WINDOW_MS * 10, WINDOW_MS)).toBeNull();
+	});
+
+	it("#1332: the next turn end re-arms the decision for the next idle period", () => {
+		recordMemoryTurnEnd(SESSION, 0);
+		expect(takeMemoryIdleGapMs(SESSION, WINDOW_MS * 2, WINDOW_MS)).toBe(
+			WINDOW_MS * 2,
+		);
+		const secondEnd = WINDOW_MS * 2 + 10;
+		recordMemoryTurnEnd(SESSION, secondEnd);
+		expect(
+			takeMemoryIdleGapMs(SESSION, secondEnd + WINDOW_MS * 3, WINDOW_MS),
+		).toBe(WINDOW_MS * 3);
+	});
+
+	it("#1332: session reset clears a pending turn end, so a new session's first turn is never measured against the old one", () => {
+		recordMemoryTurnEnd(SESSION, 0);
+		resetMemorySamplerCadence();
+		expect(takeMemoryIdleGapMs(SESSION, WINDOW_MS * 2, WINDOW_MS)).toBeNull();
+	});
+
+	it("#1332: another session's turn start neither consumes nor reports a session's pending turn end", () => {
+		// #4761 review F1 (AGENTS.md shape 72): one process-global slot let a
+		// coexisting session take the primary's marker.
+		recordMemoryTurnEnd(SESSION, 0);
+		expect(
+			takeMemoryIdleGapMs("session-b", WINDOW_MS * 2, WINDOW_MS),
+		).toBeNull();
+		expect(takeMemoryIdleGapMs(SESSION, WINDOW_MS * 2, WINDOW_MS)).toBe(
+			WINDOW_MS * 2,
+		);
+	});
+
+	it("#1332: a host without session ids keeps one shared marker under the undefined key", () => {
+		// Recurrence: a host whose ctx has no `getSessionId` (getStableSessionId
+		// answers undefined) must still get its post-idle reading.
+		recordMemoryTurnEnd(undefined, 0);
+		expect(takeMemoryIdleGapMs(SESSION, WINDOW_MS * 2, WINDOW_MS)).toBeNull();
+		expect(takeMemoryIdleGapMs(undefined, WINDOW_MS * 2, WINDOW_MS)).toBe(
+			WINDOW_MS * 2,
+		);
+	});
+
+	it("#1332: pending turn ends are capped per process, dropping the session whose turn ended first", () => {
+		// Recurrence: a long-lived process cycling through subagents leaves one
+		// entry per session whose last turn ended; the map must not grow with it.
+		const sessions = Array.from({ length: 33 }, (_, n) => `subagent-${n}`);
+		for (const id of sessions) recordMemoryTurnEnd(id, 0);
+		expect(
+			takeMemoryIdleGapMs(sessions[0], WINDOW_MS * 2, WINDOW_MS),
+		).toBeNull();
+		expect(takeMemoryIdleGapMs(sessions[1], WINDOW_MS * 2, WINDOW_MS)).toBe(
+			WINDOW_MS * 2,
+		);
+	});
+
+	it("#1332: a session's newer turn end moves it behind the cap's eviction order", () => {
+		recordMemoryTurnEnd("first", 0);
+		const others = Array.from({ length: 31 }, (_, n) => `other-${n}`);
+		for (const id of others) recordMemoryTurnEnd(id, 0);
+		// "first" ends another turn: it is now the newest, so the next session
+		// past the cap evicts other-0 instead.
+		recordMemoryTurnEnd("first", 0);
+		recordMemoryTurnEnd("late", 0);
+		expect(takeMemoryIdleGapMs("other-0", WINDOW_MS * 2, WINDOW_MS)).toBeNull();
+		expect(takeMemoryIdleGapMs("first", WINDOW_MS * 2, WINDOW_MS)).toBe(
+			WINDOW_MS * 2,
+		);
 	});
 });
