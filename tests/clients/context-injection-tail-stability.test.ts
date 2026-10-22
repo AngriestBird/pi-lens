@@ -24,6 +24,7 @@ import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import { snapshotAdvisoryProvenance } from "../../clients/advisory-provenance.js";
 import { CacheManager } from "../../clients/cache-manager.js";
+import { MAX_RETAINED_ENTRIES } from "../../clients/context-injection-ledger.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import {
 	fauxAssistantMessage,
@@ -293,6 +294,56 @@ describe("request N+1 keeps the exact prefix request N sent", () => {
 			prefixDivergence: "append-only",
 			divergedAtInjection: false,
 			retention: { reemitted: 1, pruned: 0, retainedNew: false },
+		});
+	});
+
+	it("an injection the ledger declines at its cap is delivered once, without the snapshot label", async () => {
+		const cwd = `${fixture.root}/tail-cap/proj`;
+		// One staged finding per tool round: each is injected after a tool
+		// result and retained, until the 65th meets MAX_RETAINED_ENTRIES (64).
+		const findings = Array.from(
+			{ length: MAX_RETAINED_ENTRIES + 1 },
+			(_, index) => `TAIL_CAP_FINDING_${index}_END`,
+		);
+		const handle = await session("tail-cap", [
+			...findings.map((finding) => stagingReply(cwd, finding)),
+			readCall(cwd),
+			fauxAssistantMessage("done"),
+			fauxAssistantMessage("done again"),
+		]);
+		await handle.prompt("look at the notes");
+		const declined = findings.at(-1) ?? "";
+		const atCap = handle.requests.findIndex(
+			(request) => count(request, declined) > 0,
+		);
+		const n = handle.requests[atCap];
+		const next = handle.requests[atCap + 1];
+		expect(n && next).toBeTruthy();
+		if (!n || !next) return;
+		// Every retained entry is re-sent and labelled; the declined one is
+		// delivered once and does not claim it repeats (recurrence: a label
+		// promising later requests on bytes no later request carries).
+		expect(count(n, LABEL)).toBe(MAX_RETAINED_ENTRIES);
+		expect(count(n, declined)).toBe(1);
+		expect(JSON.stringify(n.at(-1))).not.toContain(LABEL);
+		expect(count(next, declined)).toBe(0);
+		expect(count(next, findings[0] ?? "")).toBe(1);
+		const rows = await contextRows(handle);
+		expect(rows[atCap]).toMatchObject({
+			injectionOccurred: true,
+			retention: { retainedNew: false, declined: "entry-cap" },
+		});
+
+		// The same on the other placement: a finding added to a new user prompt.
+		stage(handle.cwd, SECOND);
+		await handle.prompt("and now?");
+		const last = handle.requests.at(-1);
+		expect(last?.at(-1)?.role).toBe("user");
+		expect(count(last ?? [], SECOND)).toBe(1);
+		expect(JSON.stringify(last?.at(-1))).not.toContain(LABEL);
+		expect((await contextRows(handle)).at(-1)).toMatchObject({
+			placement: "append-to-last-user",
+			retention: { retainedNew: false, declined: "entry-cap" },
 		});
 	});
 });

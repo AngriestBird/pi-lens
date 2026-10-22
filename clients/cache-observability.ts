@@ -1414,7 +1414,7 @@ function observePrefixDivergence(
 	const previousPositions = state.lastInjectedPositions ?? [];
 	state.lastRequestDigests = current.complete ? current.digests : null;
 	state.lastInjectedPositions = current.complete
-		? [...injectedPositions].sort((left, right) => left - right)
+		? injectedPositions
 		: undefined;
 	const base = {
 		previousRequestMessageCount: previous
