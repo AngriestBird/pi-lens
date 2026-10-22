@@ -66,10 +66,12 @@ export interface BlockerPartition {
 	/**
 	 * Epoch ms (#4750), written by two writers: the owner, when it writes these
 	 * sections; and, for a partition a writer before #4750 wrote (no stamp), the
-	 * session whose turn end first carries it (`carriedTurnEndBlockers`'
-	 * `?? now`), so such a record's window starts at that first carry. Text no
-	 * file owns expires by it: the record's own timestamp moves with every
-	 * writer's write, so it cannot tell how old one owner's text is.
+	 * first turn end of another session that carries it
+	 * (`carriedTurnEndBlockers`' `?? now`, persisted by the composer's write or
+	 * by the settled turn end's, #4762 r3), so such a record's window starts at
+	 * that first carry. Text no file owns expires by it: the record's own
+	 * timestamp moves with every writer's write, so it cannot tell how old one
+	 * owner's text is.
 	 */
 	blockerWrittenAt?: number | undefined;
 }
@@ -1287,7 +1289,8 @@ export function logCarriedDrops(cwd: string, dropped: CarriedDrops): void {
  * True once `partition`'s owner wrote it longer ago than the gate trusts the
  * record (#4750). A partition with no stamp (a writer before #4750) has no age
  * yet, so it is not past the window: the carry stamps it with the time it
- * first read it, and the window runs from there.
+ * first read it, the turn end writes that stamp, and the window runs from
+ * there.
  */
 function pastFreshnessWindow(
 	partition: BlockerPartition,
@@ -1327,19 +1330,25 @@ export function readTurnEndGuardRecord(
 	dropped: CarriedDrops;
 } {
 	const stored = storedRecord(cacheManager, cwd)?.fields;
-	return { stored, ...carriedTurnEndBlockers(stored, runtime, cwd) };
+	// The composer writes on every path that reads, so a stamp this read gave
+	// a released partition reaches the record with that write.
+	const { carried, dropped } = carriedTurnEndBlockers(stored, runtime, cwd);
+	return { stored, carried, dropped };
 }
 
 function carriedTurnEndBlockers(
 	stored: StoredRecord | undefined,
 	runtime: RuntimeCoordinator,
 	cwd: string,
-): { carried: BlockerPartition[]; dropped: CarriedDrops } {
+): { carried: BlockerPartition[]; dropped: CarriedDrops; stamped: boolean } {
 	const dropped: CarriedDrops = { gone: false, noFile: false };
-	if (!isTurnEndFindingsCache(stored)) return { carried: [], dropped };
+	if (!isTurnEndFindingsCache(stored))
+		return { carried: [], dropped, stamped: false };
 	const me = runtime.telemetrySessionId;
 	const now = Date.now();
 	const carried: BlockerPartition[] = [];
+	// A released partition carried whole gets its first stamp here.
+	let stamped = false;
 	for (const partition of recordPartitions(stored)) {
 		if (partition.sessionId === me) continue;
 		if (
@@ -1350,6 +1359,7 @@ function carriedTurnEndBlockers(
 			) &&
 			!pastFreshnessWindow(partition, now)
 		) {
+			if (partition.blockerWrittenAt === undefined) stamped = true;
 			carried.push({
 				...partition,
 				blockerWrittenAt: partition.blockerWrittenAt ?? now,
@@ -1379,7 +1389,7 @@ function carriedTurnEndBlockers(
 			blockerWrittenAt: partition.blockerWrittenAt,
 		});
 	}
-	return { carried, dropped };
+	return { carried, dropped, stamped };
 }
 
 /**
@@ -1502,12 +1512,26 @@ function retireOwnPartition(
 	const ownDropped = recordPartitions(stored).some(
 		(partition) => partition.sessionId === me,
 	);
-	const { carried: kept, dropped } = carriedTurnEndBlockers(
-		stored,
-		runtime,
-		cwd,
-	);
-	if (!ownDropped && !dropped.gone && !dropped.noFile) return false;
+	const {
+		carried: kept,
+		dropped,
+		stamped,
+	} = carriedTurnEndBlockers(stored, runtime, cwd);
+	if (!ownDropped && !dropped.gone && !dropped.noFile) {
+		// #4762 r3: nothing dropped, so the partitions kept are the stored ones
+		// in their order. A released one just got its first stamp, and only a
+		// write keeps it: unwritten, every read-only turn end would restart its
+		// window and the report would never expire.
+		if (stamped) {
+			const fields = blockerPartitionFields(kept);
+			writeGitGuardRecord(cacheManager, runtime, cwd, {
+				...stored,
+				carriedBlockers: fields.carriedBlockers,
+				blockerWrittenAt: fields.blockerWrittenAt,
+			});
+		}
+		return false;
+	}
 	const testFailures = stored.testFailures === true;
 	// Nothing is left only when every other session's section left with its
 	// file or expired: a record shared with another session holds at least one

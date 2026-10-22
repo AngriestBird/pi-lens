@@ -21,7 +21,12 @@ import {
 import type { Diagnostic } from "../../clients/dispatch/types.js";
 import { formatDiagnostics } from "../../clients/dispatch/utils/format-utils.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
-import { getRecentLoggedPhases } from "../../clients/latency-logger.js";
+import {
+	flushLatencyLog,
+	getLatencyLogPath,
+	getRecentLoggedPhases,
+} from "../../clients/latency-logger.js";
+import { normalizeFilePath } from "../../clients/path-utils.js";
 import { getProjectDataDir } from "../../clients/file-utils.js";
 import { consumeTurnEndFindings } from "../../clients/runtime-context.js";
 import { setupTestEnvironment } from "./test-utils.js";
@@ -3272,6 +3277,23 @@ function readStampedFixtureAt<T>(
 	}
 }
 
+/**
+ * The metadata of the `phase` rows the real latency sink saved for `cwd`, in
+ * write order. The worker's `PI_LENS_HOME` is the test setup's per-worker
+ * directory, so the file is this test file's own.
+ */
+async function savedRows(cwd: string, phase: string): Promise<unknown[]> {
+	await flushLatencyLog();
+	const file = getLatencyLogPath();
+	const key = normalizeFilePath(cwd);
+	return (fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "")
+		.split("\n")
+		.filter((line) => line.trim().length > 0)
+		.map((line) => JSON.parse(line) as Record<string, unknown>)
+		.filter((row) => row.phase === phase && row.filePath === key)
+		.map((row) => row.metadata);
+}
+
 /** Older than the gate's freshness window, by a minute. */
 const EXPIRED = (): number => Date.now() - 31 * 60_000;
 
@@ -3561,6 +3583,113 @@ describe("#4750: another session's text no file owns expires by its own write st
 				theirStamp,
 			]);
 		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("expires a released record's text no file owns under read-only turn ends alone", () => {
+		// RECURRENCE GUARDED: #4762 r3 (CodeRabbit). A settled turn end stamped
+		// an unstamped partition in memory only and wrote nothing when nothing
+		// dropped, so under read-only turn ends the stamp restarted at every read,
+		// the report never aged, and the gate refused `session_mismatch` forever.
+		const env = setupTestEnvironment("pi-lens-git-guard-4750-legacy-ro-");
+		const start = Date.now();
+		vi.useFakeTimers({ toFake: ["Date"], now: start });
+		try {
+			const cache = new CacheManager(false);
+			const runtime = sessionA(env.tmpDir);
+			writeGitGuardRecord(
+				cache,
+				runtime,
+				env.tmpDir,
+				laneRecord([], undefined),
+			);
+			const mark = latestPhaseRow();
+
+			// The first read-only turn end keeps it and starts its window.
+			expect(retireSettledGitGuardRecord(runtime, cache, env.tmpDir)).toBe(
+				false,
+			);
+			const first = storedData(cache, env.tmpDir);
+			expect([owners(first), first?.blockerWrittenAt]).toEqual([
+				[EARLIER],
+				start,
+			]);
+			expect(phaseRowsSince("sections_dropped", mark)).toEqual([]);
+			// Read-only turn ends inside the window keep it, stamp unchanged.
+			vi.setSystemTime(start + DEFAULT_MAX_AGE_MS);
+			expect(retireSettledGitGuardRecord(runtime, cache, env.tmpDir)).toBe(
+				false,
+			);
+			expect(storedData(cache, env.tmpDir)?.blockerWrittenAt).toBe(start);
+			expect(evaluateGitGuard(runtime, cache, env.tmpDir).reason).toContain(
+				"(session_mismatch)",
+			);
+			// Past the window, the next one retires it, and the commit runs.
+			vi.setSystemTime(start + DEFAULT_MAX_AGE_MS + 60_000);
+			expect(retireSettledGitGuardRecord(runtime, cache, env.tmpDir)).toBe(
+				true,
+			);
+			expect(storedData(cache, env.tmpDir)).toBeUndefined();
+			expect(phaseRowsSince("record_retired", mark)).toEqual([
+				{ by: "turn_end", basis: "no_file" },
+			]);
+			expect(evaluateGitGuard(runtime, cache, env.tmpDir)).toEqual({
+				block: false,
+			});
+		} finally {
+			vi.useRealTimers();
+			env.cleanup();
+		}
+	});
+
+	it("saves no drop row to the real latency sink at the read, and one per drop at the write", async () => {
+		// RECURRENCE GUARDED: #4762 r3 (Greptile). The read logged
+		// `sections_dropped` (#4750); the in-memory phase list proves the call,
+		// not the saved row a maintainer reads to learn why a blocker went.
+		const env = setupTestEnvironment("pi-lens-git-guard-4750-sink-");
+		vi.stubEnv("PI_LENS_TEST_MODE", "0");
+		try {
+			const [shared, alone] = ["shared", "alone"].map((name) => {
+				const dir = path.join(env.tmpDir, name);
+				fs.mkdirSync(dir);
+				return dir;
+			});
+			const theirs = path.join(shared, "a.ts");
+			fs.writeFileSync(theirs, "x;\n");
+			const cache = new CacheManager(false);
+			// `shared`: an expired report beside a live file section.
+			writeGitGuardRecord(
+				cache,
+				sessionA(shared),
+				shared,
+				laneRecord([theirs], EXPIRED()),
+			);
+			readTurnEndGuardRecord(cache, sessionA(shared), shared);
+			const atRead = await savedRows(shared, "sections_dropped");
+			retireSettledGitGuardRecord(sessionA(shared), cache, shared);
+			// `alone`: an expired report and nothing else.
+			writeGitGuardRecord(
+				cache,
+				sessionA(alone),
+				alone,
+				laneRecord([], EXPIRED()),
+			);
+			retireSettledGitGuardRecord(sessionA(alone), cache, alone);
+
+			expect({
+				atRead,
+				dropped: await savedRows(shared, "sections_dropped"),
+				retired: await savedRows(alone, "record_retired"),
+				retiredShared: await savedRows(shared, "record_retired"),
+			}).toEqual({
+				atRead: [],
+				dropped: [{ by: "turn_end", basis: "no_file" }],
+				retired: [{ by: "turn_end", basis: "no_file" }],
+				retiredShared: [],
+			});
+		} finally {
+			vi.unstubAllEnvs();
 			env.cleanup();
 		}
 	});

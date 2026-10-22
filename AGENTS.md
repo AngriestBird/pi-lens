@@ -1523,9 +1523,10 @@ file-scoped worklist and receives no project-wide scanner output.
   when its owner rewrites it, or at a turn end once `DEFAULT_MAX_AGE_MS` has
   passed since its owner's own write (`blockerWrittenAt`, per partition; the
   record's own timestamp moves with every writer). A record written before
-  this version has no stamp, so its window starts only when a turn end first
-  carries it; until then it is kept. Only a write logs what it drops. The gate judges a record alone only when this session is its sole
-  owner. A settled turn end drops this session's sections and another
+  this version has no stamp: the first turn end of another session that
+  carries it (a composer write or a settled turn end) writes one, and its
+  window starts there. Only a write logs what it drops. The gate judges a
+  record alone only when this session is its sole owner. A settled turn end drops this session's sections and another
   session's expired text no file owns, and retires a record that is this
   session's own, claims no blocker, or holds no structured claim (the
   `--lens-guard`-off writer's), with one `record_retired` row (#4725). A
