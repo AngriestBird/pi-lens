@@ -364,6 +364,25 @@ describe.skipIf(!POSIX)("bare lookups under untrusted pi trust (#4530)", () => {
 		expect(ran(marker)).toBe(false);
 	});
 
+	it("A6: the LSP launcher's child does not inherit project search-path entries", async () => {
+		// A global server that runs a bare helper: the helper must not resolve
+		// to the project's bytes through the child's own search path.
+		const marker = path.join(layout.root, "project-ran");
+		const projectBin = path.join(layout.main, "node_modules", ".bin");
+		plant(projectBin, marker, "pi-lens-4530-helper");
+		const global = path.join(layout.outside, "global-bin");
+		writeStandIn(global, TOOL, "pi-lens-4530-helper; exit 3");
+
+		const launched = await launchLSP(TOOL, [], {
+			cwd: layout.main,
+			env: { PATH: `${projectBin}${path.delimiter}${global}` },
+			startupFailureWindowMs: 500,
+		}).catch(() => undefined);
+		launched?.process.kill("SIGKILL");
+
+		expect(ran(marker)).toBe(false);
+	});
+
 	it("A6: the LSP launcher refuses a global link into the project", async () => {
 		const marker = path.join(layout.root, "project-ran");
 		const target = plant(path.join(layout.main, "tools"), marker);
