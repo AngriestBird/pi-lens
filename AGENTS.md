@@ -1722,7 +1722,7 @@ The stale-build guard rejects a missing or older compiled twin. Pre-push and
 `lane:check` also rebuild the bounded `dist/` dependency population before
 governance suites when a bundled file is missing or older than its source.
 Pre-push diffs each pushed ref against `origin/master`, or `upstream/master`
-when that has commits `origin/master` lacks, never against the remote tip, and
+when that has commits `origin/master` lacks, and
 skips a head whose tree-bound record already passed the same selection. When
 that base range cannot be resolved it falls back to the remote-tip
 range, and to the loud build-only pass only when that cannot resolve either.
