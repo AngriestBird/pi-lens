@@ -284,10 +284,20 @@ function shellOperands(range: ShellSegmentRange): ShellOperand[] {
  * bash's own text, so `"C:\x\f.ts"` keeps its backslashes and `$'f.ts'` is
  * `f.ts`.
  */
-function wordValue(word: ShellWord, asPath = false): string | undefined {
+function wordValue(
+	word: ShellWord,
+	asPath = false,
+	unread?: string,
+): string | undefined {
 	let value = "";
 	for (const part of word.parts) {
-		if (part.text === undefined) return undefined;
+		if (part.text === undefined) {
+			// `unread` stands in for a part with no static text (#4739); without
+			// it the word has no value.
+			if (unread === undefined) return undefined;
+			value += unread;
+			continue;
+		}
 		value +=
 			asPath && part.kind === "keptEscape"
 				? part.text.replace(/[\s\S]/g, "\\$&")
@@ -302,6 +312,53 @@ export function tokenizeShellCommand(command: string): ShellCommandSegment[] {
 	return tokenizeShellCommandWithRanges(command).flatMap(({ segment }) =>
 		segment.tokens.length > 0 || segment.unsupported ? [segment] : [],
 	);
+}
+
+/**
+ * A word as the command guards read it (#4739): bash's word after quote
+ * removal (see {@link wordValue}, read as a path so a native Windows
+ * `C:\git.exe` keeps its separators), never the legacy token text, which
+ * spells `$'git'` and `\$'git'` alike as `$git`.
+ *
+ * `hidden` marks a word whose bash value this model does not know: `escape`
+ * is an ANSI-C part holding an escape (`$'\x67it'`), whose text is empty here,
+ * and `expansion` is a word bash expands (`$g`, a command substitution, a
+ * glob or a brace list), whose text is the unexpanded spelling. A guard
+ * decides what to do with a word it cannot read; this model only says so.
+ */
+export interface DecodedShellWord {
+	text: string;
+	hidden?: "escape" | "expansion";
+}
+
+export interface DecodedShellSegment {
+	words: DecodedShellWord[];
+}
+
+/** What bash expands in a part of each quoting kind. */
+const EXPANDING_CHARS: Partial<Record<WordPartKind, RegExp>> = {
+	unquoted: /[$`*?[{]/,
+	double: /[$`]/,
+	locale: /[$`]/,
+};
+
+export function decodeShellWords(command: string): DecodedShellSegment[] {
+	return tokenizeShellCommandWithRanges(command).map(({ words }) => ({
+		words: words.flatMap((word): DecodedShellWord[] => {
+			const hidden = word.parts.some((part) => part.text === undefined)
+				? "escape"
+				: word.parts.some((part) =>
+							EXPANDING_CHARS[part.kind]?.test(part.text ?? ""),
+					  )
+					? "expansion"
+					: undefined;
+			const text = wordValue(word, true, "") ?? "";
+			// An empty word names no token, as in the public stream.
+			return text === "" && !hidden
+				? []
+				: [{ text, ...(hidden && { hidden }) }];
+		}),
+	}));
 }
 
 function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
@@ -409,6 +466,14 @@ function tokenizeShellCommandWithRanges(command: string): ShellSegmentRange[] {
 			else {
 				word += ch;
 				addToPart(quoteKind, ch);
+				// Inside `$'…'` a backslash escapes the next character, a quote
+				// included: `$'\''` is one quote character, and reading its second
+				// quote as the close swallowed what follows it (#4739).
+				if (quoteKind === "ansiC" && ch === "\\" && next !== undefined) {
+					word += next;
+					addToPart(quoteKind, next);
+					i++;
+				}
 			}
 			continue;
 		}

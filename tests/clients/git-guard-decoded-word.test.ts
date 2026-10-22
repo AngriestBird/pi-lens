@@ -1,0 +1,455 @@
+// flake-shape: real-process-spawn — the oracle is real `bash -c`: whether bash runs `git commit` or `git push` for each spelling of the executable or the verb. A stubbed shell decodes nothing, and the rows exist because the matcher read token text that no shell reads (#4739).
+/**
+ * #4739: the `--lens-guard` commit gate reads the word bash decodes, run
+ * against real bash.
+ *
+ * Recurrence: `$'git' push origin master` ran unguarded while `git push`,
+ * `\git push` and `g""it push` were guarded, because the matcher read the
+ * legacy token text (`$git`, with the `$` of the ANSI-C quote still in it).
+ * Each hand-written spelling reds a different part of the word model, so the
+ * rows are also generated, from the shared spelling generator (#4713 R11):
+ * every quoting of the executable `git` before `push`, and of the verbs `push`
+ * and `commit` after `git`.
+ *
+ * Each row runs through real `bash -c` with a recording stand-in for `git`
+ * first on PATH (the real git never runs), then through
+ * `isGitCommitOrPushAttempt`. A row passes when the gate guards exactly what
+ * bash ran, or, for a row bash did not run, when it fails closed on a word the
+ * model cannot read (see `ACCEPTED`).
+ *
+ * The fail-closed rule the table pins, in `hidesGuardedVerb`: a word the word
+ * model cannot read (an ANSI-C escape, or an expansion) guards the command
+ * when it precedes a word that is, or may be, `commit` or `push`; when it is
+ * git's own verb; or, for an ANSI-C escape, when a shell or `eval` receives it.
+ */
+import { execFileSync } from "node:child_process";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import {
+	decodeShellWords,
+	tokenizeShellCommand,
+} from "../../clients/bash-file-access.js";
+import {
+	isGitCommitOrPushAttempt,
+	collectGitInvocations,
+} from "../../clients/git-guard.js";
+import { isWorktreeMutatingGitAttempt } from "../../clients/shared-checkout-guard.js";
+import { spellings } from "../support/shell-spellings.js";
+import { assertNonEmptyScan } from "../support/sweep-kit.js";
+import { removeTempDirSync } from "./test-utils.js";
+
+interface Row {
+	row: string;
+	command: string;
+	/** The verb real bash ran, or `null`: pinned against the oracle. */
+	bash: "commit" | "push" | null;
+	guard: boolean;
+}
+
+/** The acceptance spellings, and the fail-closed rows, one per rule clause. */
+const ROWS: readonly Row[] = [
+	{ row: "plain", command: "git push", bash: "push", guard: true },
+	{
+		row: "ANSI-C executable",
+		command: "$'git' push origin master",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "locale executable",
+		command: '$"git" push',
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "mixed executable",
+		command: "g$'i't push",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "escaped $ is a literal word",
+		command: "\\$'git' push",
+		bash: null,
+		guard: false,
+	},
+	{
+		row: "ANSI-C executable, commit",
+		command: "FOO=1 $'git' commit -m x",
+		bash: "commit",
+		guard: true,
+	},
+	{
+		row: "ANSI-C verb",
+		command: "git $'push'",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "mixed verb",
+		command: "git pu$'sh'",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "ANSI-C executable behind a launcher",
+		command: "env $'git' push",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "ANSI-C executable in a shell string",
+		command: "bash -c $'git push'",
+		bash: "push",
+		guard: true,
+	},
+	{
+		// The close of `$'\''` is its LAST quote: reading the second as the
+		// close swallowed the rest of the line (#4739).
+		row: "escaped quote in ANSI-C, then git",
+		command: ": $'\\'' ; git push",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "escaped quote in ANSI-C, then git, after text",
+		command: "echo $'it\\'s' && git push",
+		bash: "push",
+		guard: true,
+	},
+	{
+		// The substitution scanner ended the string at the escaped quote too.
+		row: "escaped quote in ANSI-C, then a substitution",
+		command: "echo $'\\'' $(git push)",
+		bash: "push",
+		guard: true,
+	},
+	{
+		// So did the `$IFS` pass: it read `git${IFS}push` as quoted text.
+		row: "escaped quote in ANSI-C, then git${IFS}push",
+		command: ": $'\\'' ; git${IFS}push",
+		bash: "push",
+		guard: true,
+	},
+	{
+		// bash removes the backslash; the path reading kept it (#4739).
+		row: "escaped letter in the executable",
+		command: "g\\it push",
+		bash: "push",
+		guard: true,
+	},
+	{
+		// The canonical text lost its trailing newline, and with it the
+		// continuation that joins the last word to nothing.
+		row: "trailing line continuation",
+		command: "git push\\\n",
+		bash: "push",
+		guard: true,
+	},
+	// Fail closed: a word the model cannot read.
+	{
+		row: "escape in the executable",
+		command: "$'\\x67it' push",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "escape in the verb",
+		command: "git $'\\x70ush'",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "escape in both",
+		command: "$'\\x67it' $'\\x70ush'",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "escape in a shell string",
+		command: "bash -c $'git\\x20push'",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "escape handed to eval",
+		command: "eval $'git\\x20push'",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "expansion as the executable",
+		command: "$g push",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "expansion as the verb",
+		command: "git $v",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "command substitution as the executable",
+		command: "$(echo git) push",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "glob as the executable",
+		command: "bin/g?t push",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "brace list as the verb",
+		command: "git {push,x}",
+		bash: "push",
+		guard: true,
+	},
+	{
+		row: "unknown executable before a verb word, bash runs nothing",
+		command: "$unset push",
+		bash: null,
+		guard: true,
+	},
+	// Unguarded: a word the model cannot read that cannot be git or its verb.
+	{
+		row: "expansion after the verb word",
+		command: "ls push $g",
+		bash: null,
+		guard: false,
+	},
+	{
+		row: "escape in an argument of an ordinary command",
+		command: "ls $'a\\tb'",
+		bash: null,
+		guard: false,
+	},
+	{
+		row: "escape in a text consumer",
+		command: "echo $'\\x67it' push",
+		bash: null,
+		guard: false,
+	},
+	{
+		row: "expansion in a text consumer",
+		command: "echo $g push",
+		bash: null,
+		guard: false,
+	},
+];
+
+/** The generated rows: every quoting of the executable and of the verbs. */
+const GENERATED: readonly string[] = [
+	...spellings("git").map((spelled) => `${spelled} push`),
+	...spellings("push").map((spelled) => `git ${spelled}`),
+	...spellings("commit").map((spelled) => `git ${spelled} -m x`),
+];
+
+/**
+ * Accepted over-guards: rows bash does not run as git, which the gate guards
+ * because it reads a word as git that bash reads as something else. Each is
+ * base-equal (the gate guarded the row before #4739) and in the fail-closed
+ * direction. Each entry carries its reason and the exact count it covers, so
+ * an entry that stops matching, or starts matching more, reds here.
+ */
+const ACCEPTED: ReadonlyArray<{
+	reason: string;
+	rows: number;
+	covers: (command: string) => boolean;
+}> = [
+	{
+		reason:
+			"bash reads a word holding whitespace (`git\\ push`, `'\\<newline>git'`) as one command name, and the head split reads it as `git` then `push`: a command bash cannot find",
+		rows: 35,
+		covers: (command) => command.includes("\\ ") || command.includes("'\\\n"),
+	},
+	{
+		reason:
+			"a backslash inside quotes (`'\\git'`, `\"\\p\"ush`) is literal to bash, and the verb normalization strips a backslash before a letter, so the gate reads the word as `git` or `push`",
+		rows: 48,
+		covers: (command) => /['"]\\[a-z]/.test(command),
+	},
+];
+
+let root: string;
+let home: string;
+let log: string;
+
+beforeAll(() => {
+	root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ggdw-"));
+	home = path.join(root, "home");
+	log = path.join(root, "git.log");
+	fs.mkdirSync(path.join(home, "bin"), { recursive: true });
+	// A recording stand-in: the real git never runs. It logs git's first
+	// argument, the verb, NUL-ended (a verb word may hold a newline).
+	const stub = path.join(home, "bin", "git");
+	fs.writeFileSync(stub, '#!/bin/sh\nprintf \'%s\\0\' "$1" >> "$GITLOG"\n');
+	fs.chmodSync(stub, 0o755);
+});
+
+afterAll(() => {
+	removeTempDirSync(root);
+});
+
+/** The governed verb real bash ran for `command`, or `null`. */
+function bashRan(command: string): "commit" | "push" | null {
+	fs.rmSync(log, { force: true });
+	try {
+		execFileSync("bash", ["-c", command], {
+			cwd: home,
+			env: {
+				PATH: `${path.join(home, "bin")}${path.delimiter}${process.env.PATH ?? ""}`,
+				HOME: home,
+				LC_ALL: "C",
+				GITLOG: log,
+				g: "git",
+				v: "push",
+			},
+			stdio: "ignore",
+			timeout: 10_000,
+		});
+	} catch {
+		// A command bash cannot run still logged what ran before it failed.
+	}
+	const verbs = fs.existsSync(log)
+		? fs.readFileSync(log, "utf8").split("\0")
+		: [];
+	return verbs.includes("push")
+		? "push"
+		: verbs.includes("commit")
+			? "commit"
+			: null;
+}
+
+const guarded = (command: string) =>
+	isGitCommitOrPushAttempt("bash", { command });
+
+describe.skipIf(process.platform === "win32")(
+	"the commit gate reads the word bash decodes (#4739)",
+	() => {
+		it("guards what real bash runs, row by row", () => {
+			const failures: string[] = [];
+			for (const row of ROWS) {
+				const ran = bashRan(row.command);
+				if (ran !== row.bash)
+					failures.push(
+						`${row.row} ${JSON.stringify(row.command)}: bash ran ${ran}, the row says ${row.bash}`,
+					);
+				if (guarded(row.command) !== row.guard)
+					failures.push(
+						`${row.row} ${JSON.stringify(row.command)}: gate ${!row.guard}, want ${row.guard}`,
+					);
+			}
+			expect(failures).toEqual([]);
+		}, 60_000);
+
+		it("guards every generated spelling bash runs as commit or push", () => {
+			const failures: string[] = [];
+			const covered = ACCEPTED.map(() => 0);
+			let ran = 0;
+			for (const command of GENERATED) {
+				const verb = bashRan(command);
+				if (verb !== null) ran++;
+				const gate = guarded(command);
+				if (gate === (verb !== null)) continue;
+				const accepted =
+					gate && verb === null
+						? ACCEPTED.findIndex((entry) => entry.covers(command))
+						: -1;
+				if (accepted >= 0) {
+					covered[accepted] = (covered[accepted] ?? 0) + 1;
+					continue;
+				}
+				failures.push(
+					`${JSON.stringify(command)}: bash ran ${verb}, the gate ${gate ? "guards" : "misses"}`,
+				);
+			}
+			// Floors: the generator still composes, and bash still ran git (a
+			// missing bash would run nothing and pass every miss as accepted).
+			assertNonEmptyScan("composed spellings", GENERATED.length, 400);
+			assertNonEmptyScan("spellings bash ran as commit or push", ran, 100);
+			expect(failures).toEqual([]);
+			expect(covered).toEqual(ACCEPTED.map((entry) => entry.rows));
+			// The cost bound: one spawn per row, so the exact count bounds the run.
+			expect(GENERATED.length).toBe(693);
+		}, 120_000);
+	},
+);
+
+describe("the word model the gate reads (#4739)", () => {
+	const words = (command: string) =>
+		decodeShellWords(command).flatMap((segment) => segment.words);
+
+	it("reads the decoded word, not the token text", () => {
+		// The legacy stream is the same `$git` for the two spellings bash
+		// decodes differently; the decoded word is not.
+		const legacy = (command: string) =>
+			tokenizeShellCommand(command)[0]?.tokens[0];
+		expect(legacy("$'git' push")).toBe(legacy("\\$'git' push"));
+		expect(words("$'git' push")[0]).toEqual({ text: "git" });
+		expect(words('$"git" push')[0]).toEqual({ text: "git" });
+		expect(words("g$'i't push")[0]).toEqual({ text: "git" });
+		expect(words("\\$'git' push")[0]).toEqual({ text: "$git" });
+	});
+
+	it("marks the words it cannot read, and which way", () => {
+		expect(words("$'\\x67it'")[0]).toEqual({ text: "", hidden: "escape" });
+		expect(words("g$'\\x69't")[0]).toEqual({ text: "gt", hidden: "escape" });
+		for (const spelled of ["$g", "${g}", "$(echo", "`echo`", "gi?", "{git,x}"])
+			expect(words(spelled)[0]?.hidden, spelled).toBe("expansion");
+		for (const spelled of ["'$g'", "\\$g", "'gi?'", "$'$g'", "\\{git"])
+			expect(words(spelled)[0]?.hidden, spelled).toBeUndefined();
+	});
+
+	it("keeps a native Windows executable path whole", () => {
+		// The legacy token kept the backslashes; so does the decoded word.
+		expect(words("C:\\tools\\git.exe push")[0]).toEqual({
+			text: "C:\\tools\\git.exe",
+		});
+	});
+
+	it("keeps `$'\\''` as one quote, so the next segment is its own", () => {
+		// Recurrence: #4739. The lexer closed `$'\\'` at the escaped quote and
+		// opened a quote at the real one, so `git push` sat inside it.
+		expect(
+			tokenizeShellCommand(": $'\\'' ; git push").map((s) => s.tokens),
+		).toEqual([
+			[":", "$\\'"],
+			["git", "push"],
+		]);
+	});
+});
+
+describe("what else reads the decoded word (#4739)", () => {
+	it("the shared-checkout guard sees an ANSI-C git too", () => {
+		// The same matcher seam: `$'git' checkout .` rewrote the tree unguarded.
+		expect(
+			isWorktreeMutatingGitAttempt("bash", { command: "$'git' checkout ." }),
+		).toBe(true);
+	});
+
+	it("targets the directory of an ANSI-C git", () => {
+		expect(
+			collectGitInvocations("bash", { command: "$'git' -C sub checkout ." }),
+		).toEqual([["git", "-C", "sub", "checkout", "."]]);
+	});
+
+	it("fails closed only for the policy gate", () => {
+		// Recurrence: #2007. The guard that protects an agent from its own
+		// accident must not decline what it can read; it does not guard a word
+		// it cannot read.
+		expect(
+			isWorktreeMutatingGitAttempt("bash", { command: "$g checkout ." }),
+		).toBe(false);
+		expect(
+			isWorktreeMutatingGitAttempt("bash", {
+				command: "$'\\x67it' checkout .",
+			}),
+		).toBe(false);
+		expect(guarded("$g push")).toBe(true);
+	});
+});

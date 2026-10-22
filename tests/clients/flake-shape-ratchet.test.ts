@@ -522,6 +522,14 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the real Biome binary's wrapping at the 80-column boundary is the subject; a mocked spawn can only restate the argv the fix chose",
 	},
+	// 2026-10-22 (#4739): real `bash -c` is the oracle for whether each
+	// spelling of git or its verb runs `git commit` or `git push`; the gate
+	// read token text no shell reads, and a stubbed shell decodes nothing.
+	"real-process-spawn:clients/git-guard-decoded-word.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"real bash decides which generated spelling runs git commit or git push; a stubbed shell decodes no word",
+	},
 	"real-process-spawn:clients/git-tracked-ignore.test.ts": {
 		detector: "real-process-spawn",
 		reason:
