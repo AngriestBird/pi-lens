@@ -16,14 +16,25 @@
  * `newSession` (`PiSession.restart({ reason: "new" })`, a new session id).
  * Each session raises its blocker by its own write; nothing is seeded.
  *
+ * The second case is the claim's other direction: an in-process subagent in
+ * the same project is its own activation (#4704), classified secondary, and
+ * its turn_start must not take the envelope from the live primary. It runs
+ * the way a subagent tool runs one: inside a primary tool call, before the
+ * primary's write in the same turn (`executionMode: "sequential"` keeps pi's
+ * order).
+ *
  * Lane: ubuntu Unit tests.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
+import { Type } from "../clients/deps/typebox.js";
 import { getProjectDataDir } from "../clients/file-utils.js";
 import {
 	BLOCKING_FILE,
+	CLEAN_FILE,
+	GUARDED_FLAGS,
 	endTurn,
 	openGuardedSession,
 	raise,
@@ -32,7 +43,14 @@ import {
 	textBlocks,
 	writeTarget,
 } from "./support/pi-session-commit-gate.js";
-import { type PiSession, piSessionFixture } from "./support/pi-session.js";
+import {
+	type PiSession,
+	fauxAssistantMessage,
+	fauxText,
+	fauxToolCall,
+	piSessionFixture,
+	startPiSession,
+} from "./support/pi-session.js";
 
 const fixture = piSessionFixture();
 
@@ -66,6 +84,30 @@ function userTexts(handle: PiSession): string[] {
 	return (handle.requests.at(-1) ?? [])
 		.filter((message) => message.role === "user")
 		.flatMap((message) => textBlocks(message));
+}
+
+/**
+ * A subagent tool: its call runs one prompt of the subagent session the case
+ * started, as an in-process subagent extension does. Sequential, so pi runs
+ * the assistant message's next tool call only after it returns.
+ */
+function subagentTool(subagent: () => PiSession | undefined): ToolDefinition {
+	return {
+		name: "run_subagent",
+		label: "Run subagent",
+		description: "Run one subagent turn.",
+		parameters: Type.Object({}),
+		executionMode: "sequential",
+		async execute() {
+			const handle = subagent();
+			if (handle === undefined) throw new Error("no subagent started");
+			await handle.prompt("look around");
+			return {
+				content: [{ type: "text", text: "subagent done" }],
+				details: undefined,
+			};
+		},
+	};
 }
 
 /**
@@ -135,10 +177,12 @@ describe("#4751: a session pi starts with newSession owns its own turn-end scope
 			);
 
 			// One claim row per session, never one per turn: A took the fresh
-			// project's empty worklist, then B took it from A.
+			// project's empty worklist, then B took it from A. The log is the
+			// file's, so the rows are this case's project's.
 			const { rows } = await second.latencyRows();
 			const claims = rows.filter(
-				(row) => row.phase === "session_handoff_turn_state",
+				(row) =>
+					row.phase === "session_handoff_turn_state" && row.filePath === proj,
 			);
 			expect(claims).toEqual([
 				expect.objectContaining({
@@ -154,6 +198,68 @@ describe("#4751: a session pi starts with newSession owns its own turn-end scope
 				}),
 			]);
 			expect(second.errors).toEqual([]);
+		},
+		TWO_SESSION_TIMEOUT_MS,
+	);
+
+	it(
+		"keeps the primary's worklist when a subagent runs a turn inside the primary's writing turn",
+		async () => {
+			// RECURRENCE GUARDED: the claim is the primary's alone. A subagent's
+			// turn_start claim would take the envelope from the live primary (a pi
+			// owner of this process with another id), and the primary's write later
+			// in the same turn would be filed under a partition: #4751's shape the
+			// other way round.
+			const { proj } = seed(fixture.root, "subagent", CLEAN_FILE);
+			const mine = path.join(proj, "src", "mine.ts");
+			let subagent: PiSession | undefined;
+			const primary = await startPiSession({
+				root: fixture.root,
+				cwd: proj,
+				flags: new Map(GUARDED_FLAGS),
+				customTools: [subagentTool(() => subagent)],
+				responses: [
+					endTurn("ready"),
+					// One turn: the subagent runs, then the primary writes.
+					fauxAssistantMessage([
+						fauxText("delegating, then writing"),
+						fauxToolCall("run_subagent", {}),
+						writeTarget(mine, BLOCKING_FILE),
+					]),
+					endTurn("written"),
+					endTurn("listening"),
+				],
+			});
+			await primary.prompt("get ready");
+			const primaryId = primary.session.sessionManager.getSessionId();
+			// Started while the primary is live: a concurrent secondary (#4704).
+			subagent = await startPiSession({
+				root: fixture.root,
+				cwd: proj,
+				flags: new Map(GUARDED_FLAGS),
+				responses: [endTurn("looked")],
+			});
+			await primary.prompt("delegate and write");
+			await primary.prompt("anything else?");
+
+			expect(subagent.requests).toHaveLength(1);
+			expect(userTexts(primary).join("\n")).toContain(
+				`Unresolved from this turn — ${path.join("src", "mine.ts")}`,
+			);
+			expect(readRecord(proj).sessionId).toBe(primaryId);
+			// Only the primary claimed, once: the subagent's turn wrote no row.
+			const { rows } = await primary.latencyRows();
+			expect(
+				rows
+					.filter(
+						(row) =>
+							row.phase === "session_handoff_turn_state" &&
+							row.filePath === proj,
+					)
+					.map((row) => row.metadata),
+			).toEqual([{ arm: "empty", filesKept: 0, to: primaryId }]);
+			expect(primary.errors).toEqual([]);
+			expect(subagent.errors).toEqual([]);
 		},
 		TWO_SESSION_TIMEOUT_MS,
 	);
