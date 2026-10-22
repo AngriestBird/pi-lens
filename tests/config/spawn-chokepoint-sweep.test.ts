@@ -43,6 +43,7 @@ import {
 	readWalkedFiles,
 	stripSource,
 } from "../support/sweep-kit.js";
+import { escapeRegExp } from "../../clients/string-utils.js";
 
 const REPO_ROOT = path.resolve(__dirname, "../..");
 
@@ -263,7 +264,7 @@ function scanProcessStarts(file: string, source: string): ScanResult {
 	};
 	const references = (name: string): IterableIterator<RegExpMatchArray> =>
 		code.matchAll(
-			new RegExp(`(?<![\\w$.])${name.replace(/\$/g, "\\$")}(?![\\w$])`, "g"),
+			new RegExp(`(?<![\\w$.])${escapeRegExp(name)}(?![\\w$])`, "g"),
 		);
 
 	for (const name of members) {
