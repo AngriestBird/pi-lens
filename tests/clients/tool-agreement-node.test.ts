@@ -331,3 +331,43 @@ describe("establishToolAgreement: node lockfile selection (#4361 C5)", () => {
 		});
 	});
 });
+
+describe("yarn v1 first-entry residual (#4361 C5, refs #4766)", () => {
+	let env: ReturnType<typeof setupTestEnvironment>;
+
+	beforeEach(() => {
+		env = setupTestEnvironment("pi-lens-4361-yarn-first-");
+	});
+	afterEach(() => env.cleanup());
+
+	// Defect (accepted p3 residual, clients/tool-agreement.ts:610): yarnV1Blocks
+	// splits on blank lines, so the block directly after the canonical
+	// two-blank-line v1 header is dropped. A consistent lock whose first entry
+	// is the tool therefore declines `evidence-unsupported` instead of agreeing.
+	// `it.fails` pins the live bug: it passes while the defect exists, and it
+	// must flip to `it` (and go red) when the product fix lands.
+	it.fails("a canonical yarn v1 lock with the tool as the first entry agrees", () => {
+		const root = path.join(env.tmpDir, "yarn-first");
+		fs.mkdirSync(root, { recursive: true });
+		fs.writeFileSync(
+			path.join(root, "package.json"),
+			JSON.stringify({ devDependencies: { prettier: RANGE } }),
+		);
+		fs.writeFileSync(
+			path.join(root, "yarn.lock"),
+			[
+				"# yarn lockfile v1",
+				"",
+				"",
+				`prettier@${RANGE}:`,
+				'  version "3.2.5"',
+				'  resolved "https://registry.example/prettier-3.2.5.tgz"',
+				"",
+			].join("\n"),
+		);
+		expect(establishToolAgreement("prettier", root)).toEqual({
+			decision: "established",
+			lockfile: "yarn.lock",
+		});
+	});
+});
