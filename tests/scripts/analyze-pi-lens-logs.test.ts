@@ -69,7 +69,7 @@ describe("analyze-pi-lens-logs.mjs", () => {
 		// explicit failureKind (infra), one only diagnostics (heuristic → found-errors).
 		const latency = [
 			// #2639: skills outcomes must survive the offline report boundary.
-			...["healthy", "healthy", "missing", "empty", "unreadable"].map(
+			...["healthy", "healthy", "absent", "empty", "unreadable"].map(
 				(status) => ({
 					type: "phase",
 					phase: "skills_resolved",
@@ -393,7 +393,7 @@ describe("analyze-pi-lens-logs.mjs", () => {
 	it("tallies skills outcomes without counting unrelated phases (#2639)", () => {
 		expect(report.latency.skillsResolved).toEqual({
 			healthy: 2,
-			missing: 1,
+			absent: 1,
 			empty: 1,
 			unreadable: 1,
 			unknown: 2,
@@ -406,7 +406,7 @@ describe("analyze-pi-lens-logs.mjs", () => {
 		expect(section).toBeDefined();
 		for (const [status, count] of [
 			["healthy", 2],
-			["missing", 1],
+			["absent", 1],
 			["empty", 1],
 			["unreadable", 1],
 			["unknown", 2],
