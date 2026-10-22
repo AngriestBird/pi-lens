@@ -685,9 +685,6 @@ export const wallClockBudgetInclude = [
 	// #4732: the same real-checkout recovery, for a tool that is not bash,
 	// through a real pi session; the git children ride in the serialized lane.
 	"tests/index-4732-opaque-any-tool-witness.test.ts",
-	// #1332: the idle case waits a real 50 ms gap for the built extension's
-	// Date.now() idle decision (flake-shape admission, see the file header).
-	"tests/index-memory-sample-wiring.test.ts",
 	"tests/mcp/session-end.smoke.test.ts",
 	// published-manifest guard runs the real `npm pack` (flake-shape admission).
 	"tests/packaging-pack-manifest.test.ts",

@@ -1,7 +1,3 @@
-// flake-shape: raw-timer-wait — the #1332 idle case needs a real elapsed gap
-// between two turns: the idle decision reads Date.now() inside the built extension,
-// so no injected clock reaches it. The 50 ms timer only has to clear a 1 ms window,
-// and the assertion is a lower bound (> 1), never an exact duration.
 /**
  * Wiring guard for the #1123 item 2 periodic memory sample: the extension emits
  * exactly one `memory_sample` latency record every `MEMORY_SAMPLE_TURN_INTERVAL`
@@ -27,7 +23,7 @@
  * - `processing`: the cadence, not a one-shot — turn 20 writes the second one.
  */
 import * as path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
 	fauxText,
 	piSessionFixture,
@@ -43,6 +39,26 @@ const MEMORY_SAMPLE_TURN_INTERVAL = 10;
 /** One `memory_sample` row per turn the sampler considered. */
 function samplesIn(rows: readonly Record<string, unknown>[]) {
 	return rows.filter((row) => row.phase === "memory_sample");
+}
+
+/** A virtual idle gap past the default 20 min window (#1332). */
+const IDLE_GAP_MS = 30 * 60_000;
+
+/**
+ * The idle-tagged `memory_sample` rows written between row `from` and row `to`
+ * (the end of the log when omitted). The file shares one pinned home, so a case
+ * slices the rows it produced; the window claim needs every line parsed.
+ */
+async function idleSamplesSince(
+	handle: PiSession,
+	from: number,
+	to?: number,
+): Promise<Array<Record<string, unknown>>> {
+	const read = await handle.latencyRows();
+	expect(read.skipped).toBe(0);
+	return samplesIn(read.rows.slice(from, to)).filter(
+		(row) => (row.metadata as Record<string, unknown>).idle === true,
+	);
 }
 
 /**
@@ -129,33 +145,70 @@ describe(
 			);
 		});
 
-		// #1332: no post-idle heap reading existed. A turn that starts after a real
-		// idle gap longer than the window writes one idle-tagged sample. The window
-		// is pinned to 1 ms and a 50 ms timer sits between the two turns, so the
-		// gap clears the window without any injected clock.
-		it("#1332: a turn after a real idle gap writes one idle-tagged memory_sample", async () => {
-			const previous = process.env.PI_LENS_LSP_IDLE_EVICT_MS;
-			process.env.PI_LENS_LSP_IDLE_EVICT_MS = "1";
+		// #1332: no post-idle heap reading existed. A turn that starts after an idle
+		// gap longer than the window writes one idle-tagged sample. The tier is in
+		// process, so the loaded copy reads the global `Date` this case fakes: the
+		// gap is virtual and no wall clock is spent (#4761 review F2).
+		it("#1332: a turn after an idle gap longer than the window writes one idle-tagged memory_sample", async () => {
+			vi.useFakeTimers({ toFake: ["Date"] });
 			try {
 				const handle = await startSession(2);
 				const before = (await handle.latencyRows()).rows.length;
 				await handle.prompt("turn 1");
-				await new Promise((resolve) => setTimeout(resolve, 50));
+				vi.setSystemTime(Date.now() + IDLE_GAP_MS);
 				await handle.prompt("turn 2");
-				const read = await handle.latencyRows();
-				expect(read.skipped).toBe(0);
-				const idle = samplesIn(read.rows.slice(before)).filter(
-					(row) => (row.metadata as Record<string, unknown>).idle === true,
-				);
+				const idle = await idleSamplesSince(handle, before);
 				expect(idle).toHaveLength(1);
-				const idleMs = (idle[0].metadata as Record<string, unknown>).idleMs;
-				expect(typeof idleMs).toBe("number");
-				expect(idleMs as number).toBeGreaterThan(1);
+				const metadata = idle[0].metadata as Record<string, unknown>;
+				// The default window (the LSP idle-evict value, 20 min) is under the
+				// 30 min gap, and the record carries the gap the copy measured.
+				expect(metadata.idleMs).toBe(IDLE_GAP_MS);
+				expect(metadata.turnIndex).toBe(2);
 				expect(handle.errors).toEqual([]);
 			} finally {
-				if (previous === undefined)
-					delete process.env.PI_LENS_LSP_IDLE_EVICT_MS;
-				else process.env.PI_LENS_LSP_IDLE_EVICT_MS = previous;
+				vi.useRealTimers();
+			}
+		});
+
+		// #4761 review F1 (AGENTS.md shape 72): the pending turn end was one
+		// process-global slot, so a coexisting session's turn start consumed the
+		// primary's marker. The secondary then wrote an idle record it never earned,
+		// and the primary's real idle period wrote none.
+		it("#1332: a coexisting session's turn never consumes another session's idle marker", async () => {
+			vi.useFakeTimers({ toFake: ["Date"] });
+			try {
+				const primary = await startPiSession({
+					root: fixture.root,
+					cwd: path.join(fixture.root, "memory-sample-idle-a", "proj"),
+					responses: [fauxText("ok"), fauxText("ok")],
+				});
+				const secondary = await startPiSession({
+					root: fixture.root,
+					cwd: path.join(fixture.root, "memory-sample-idle-b", "proj"),
+					responses: [fauxText("ok")],
+				});
+				const start = (await primary.latencyRows()).rows.length;
+				await primary.prompt("a1");
+				vi.setSystemTime(Date.now() + IDLE_GAP_MS);
+				// The secondary never ended a turn, so its first turn has no idle
+				// period of its own to report.
+				await secondary.prompt("b1");
+				const afterSecondary = (await primary.latencyRows()).rows.length;
+				expect(await idleSamplesSince(primary, start, afterSecondary)).toEqual(
+					[],
+				);
+				// The primary's own idle period (its turn end, then the gap) is still
+				// pending, whatever the secondary did in between.
+				await primary.prompt("a2");
+				const idle = await idleSamplesSince(primary, afterSecondary);
+				expect(idle).toHaveLength(1);
+				expect((idle[0].metadata as Record<string, unknown>).idleMs).toBe(
+					IDLE_GAP_MS,
+				);
+				expect(primary.errors).toEqual([]);
+				expect(secondary.errors).toEqual([]);
+			} finally {
+				vi.useRealTimers();
 			}
 		});
 	},

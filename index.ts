@@ -3291,9 +3291,9 @@ function activateExtension(hostPi: ExtensionAPI) {
 		// advances only its own turn identity and per-turn records; the
 		// coordinator's turn state is the primary's.
 		runtime.beginTurn(getStableSessionId(ctx));
-		// #1332: post-idle heap reading. Bounded by the turn-end marker: at most one
-		// idle sample per idle period.
-		const idleGapMs = takeMemoryIdleGapMs(Date.now());
+		// #1332: post-idle heap reading. Bounded by this session's turn-end marker:
+		// at most one idle sample per idle period.
+		const idleGapMs = takeMemoryIdleGapMs(getStableSessionId(ctx), Date.now());
 		if (idleGapMs !== null) emitMemorySample(idleGapMs);
 		// Capture before any awaited turn-end work can let a sibling session start.
 		turnStartScope = scope ?? runtime.sessionScope;
@@ -3616,8 +3616,9 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// biome-ignore lint/suspicious/noExplicitAny: heterogeneous pi event ctx shapes
 	const onTurnEnd = async (_event: any, ctx: any) => {
 		if (!lensEnabled) return;
-		// #1332: the idle gap is measured from here to the next turn start.
-		recordMemoryTurnEnd(Date.now());
+		// #1332: the idle gap is measured from here to this session's next turn
+		// start; another session's turn never reads it (#4761 review F1).
+		recordMemoryTurnEnd(getStableSessionId(ctx), Date.now());
 		// Esc/abort during the turn-end flush (knip/madge/tests + debounced
 		// dispatch) kills in-flight children instead of waiting out their timeout.
 		try {

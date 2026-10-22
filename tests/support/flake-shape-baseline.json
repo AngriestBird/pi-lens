@@ -285,7 +285,6 @@
 		"clients/workspace-topology.test.ts": 2,
 		"config/global-dir-probe-redirect.test.ts": 1,
 		"index-integration.test.ts": 3,
-		"index-memory-sample-wiring.test.ts": 1,
 		"mcp/analyze-cli.test.ts": 2,
 		"mcp/auto-session.smoke.test.ts": 1,
 		"mcp/build-staleness.smoke.test.ts": 1,
