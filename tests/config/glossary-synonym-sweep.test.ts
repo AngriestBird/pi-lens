@@ -1109,7 +1109,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// validation replace the wrapper-relative guess. No path-key owner changes.
 		// 124 -> 125 (#4414): the Windows npm-global layout adds one `path.join` to
 		// `typescriptDirsForTsc`, the list of package dirs beside a resolved `tsc`.
-		"clients/lsp/server.ts": 125,
+		// 125 -> 127 (#4760): `declinesLooseFileRoot` compares the loose file's
+		// own directory to the home ceiling (`path.resolve`/`path.dirname`).
+		"clients/lsp/server.ts": 127,
 		"clients/lsp/session-roots.ts": 8,
 		// 13 -> 15 (#4346): a creation's path joins the entry's dependency
 		// scope test (Go package directory, created-file stem/directory names).

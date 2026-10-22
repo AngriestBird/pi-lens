@@ -307,6 +307,15 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"getServerById reads only the built-in catalog, so the auxiliary fake the config lookup adds is answered there too; the restart then keeps it, and every server is still a real child process",
 	},
+	// 2026-10-22 (#4760): the launched language-server process is the boundary;
+	// the subject is the registry's root choice and its five-attempt failure
+	// ladder, which need a rejecting initialize handshake at a chosen root.
+	"in-process-mock:clients/lsp/aux-loose-file-root-4760.test.ts::clients/lsp/client":
+		{
+			detector: "in-process-mock",
+			reason:
+				"the LSP client is a spawned language-server process; the root function and the spawn ladder are the subject, and only a handshake that never answers reaches the permanent latch",
+		},
 	// 2026-10-15 (#4449): the registry's skip and respawn records go to
 	// logLatency. Its in-process ring drops the fields the test asserts, and
 	// test mode never reaches the file sink, so the captured call is the seam.
