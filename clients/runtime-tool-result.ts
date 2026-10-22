@@ -1296,6 +1296,142 @@ function refreshCachedExports(
 }
 
 /**
+ * #4737 r2: publish one returned dispatch's inline verdict for `filePath` to the
+ * commit gate's state: the inline-blocker map (record or clear, ordered by the
+ * dispatch's token), the analysis anchor, the `--lens-guard` status and the
+ * `turn-end-findings` record. Both callers of `dispatchPipelineAnalysis` run it
+ * on a result that did not crash: the classified chain, and the observed path,
+ * whose blocker otherwise gated a commit only from turn_end (#4732 sends every
+ * tool that is not known read-only there). Every write goes through the
+ * handler's captured `writeSession`.
+ */
+function publishInlineVerdict(args: {
+	runtime: RuntimeCoordinator;
+	cacheManager: CacheManager;
+	filePath: string;
+	result: PipelineResult;
+	writeSession: LineageHandle;
+	writeIndex: number;
+	writeOrderTurn: number;
+	/** #4137: whether this run may retire a record about the bytes it read. */
+	authored: boolean;
+	getFlag: ToolResultDeps["getFlag"];
+	turnStateCwd: string;
+	analysisRootMode: AnalysisRootMode;
+}): void {
+	const {
+		runtime,
+		cacheManager,
+		filePath,
+		result,
+		writeSession,
+		writeIndex,
+		writeOrderTurn,
+		authored,
+		getFlag,
+		turnStateCwd,
+		analysisRootMode,
+	} = args;
+	// #3596: a replaced session's handler latches nothing in the live session.
+	const resultLive = writeSession.guardedWrite(filePath, () => true) === true;
+	// #3507: both verbs are ordered by this dispatch's token, so an older
+	// pipeline that settles after a newer one of the same file changes nothing.
+	let inlineVerdictApplied: boolean;
+	// #4733 r3 F15: this write's clear removed the file's own blocker entry.
+	let ownBlockerRetired = false;
+	const { inlineBlockerSummary } = result;
+	if (inlineBlockerSummary) {
+		// #1561: stamp the verdict with THIS dispatch's write token — the same
+		// counter `lsp_diagnostics`' reconciliation seam draws from — so a later
+		// confirmed-clean result can be ordered against it instead of racing it.
+		inlineVerdictApplied =
+			writeSession.guardedWrite(filePath, () =>
+				runtime.recordInlineBlockers(
+					filePath,
+					inlineBlockerSummary,
+					// #3506: the token of the bytes the pipeline analysed.
+					result.writeIndex ?? writeIndex,
+					result.inlineBlockerSources,
+					result.inlineBlockerLines,
+					result.inlineBlockerFileContent,
+					// #3246: the structured blockers the summary was rendered from, so a
+					// later `lens_diagnostic_mark` can be applied to this record at turn
+					// end instead of replaying pre-mark text.
+					result.inlineBlockerDiagnostics,
+					// #3559: a re-token's own turn.
+					result.orderTurn ?? writeOrderTurn,
+					// #3503: the freshness baseline is the analysis read.
+					result.analysisReadAtMs,
+				),
+			) !== undefined;
+	} else {
+		// `clearInlineBlockers` applies with no entry too, so the entry is read
+		// before it.
+		// Optional: a runtime double without the accessor never retires.
+		const hadOwnBlocker = runtime.hasInlineBlocker?.(filePath) ?? false;
+		inlineVerdictApplied =
+			writeSession.guardedWrite(filePath, () =>
+				runtime.clearInlineBlockers(
+					filePath,
+					result.writeIndex ?? writeIndex,
+					result.orderTurn ?? writeOrderTurn,
+					// #4137 round 3: a run without authorship does not retire a
+					// record about the very bytes it read. The already-analysed latch
+					// is a cost rule, not the record's guard.
+					// #4484: and no run retires a record while its own observation
+					// still holds a blocker.
+					{
+						authored,
+						sha256: result.inlineBlockerFileContent?.sha256,
+						blocking: result.currentBlockerCount ?? 0,
+					},
+				),
+			) ?? false;
+		// An errored run reached no observation, whatever it cleared.
+		ownBlockerRetired =
+			hadOwnBlocker && inlineVerdictApplied && !result.isError;
+	}
+	// #4484 round 3: the anchor follows the record, so it moves only with a
+	// verdict that applied.
+	if (inlineVerdictApplied)
+		runtime.setAnalysisAnchor(filePath, result.analysisAnchor);
+
+	// A superseded verdict must not latch the commit gate either (#3507).
+	if (resultLive) {
+		runtime.updateGitGuardStatus(
+			inlineVerdictApplied && result.hasBlockers,
+			result.output,
+		);
+		if (getFlag("lens-guard")) {
+			// #4733 r1 F2: a clean verdict over the whole file, applied, with no
+			// blocker left in the observation; anything less observes nothing.
+			// #4733 r5 G3: a blocking finding the seed called pre-existing is still
+			// reported, so it is not a clean verdict for another session's section.
+			const wholeFileClean =
+				inlineVerdictApplied &&
+				!result.isError &&
+				!result.hasBlockers &&
+				result.currentBlockerCount === 0 &&
+				(result.preExistingBlockerCount ?? 0) === 0 &&
+				result.fileVerdictComplete === true;
+			syncGitGuardRecord(
+				runtime,
+				cacheManager,
+				turnStateCwd,
+				// #4733 r2 F11: a write speaks for its file's recorded sections only
+				// with that verdict, whichever session wrote them. #4733 r3 F15: or,
+				// for this session's own record, when it retired the file's own
+				// blocker entry (the rule the sibling callers use); without
+				// `wholeFileClean` another session's section stays.
+				wholeFileClean || ownBlockerRetired ? filePath : undefined,
+				analysisRootMode,
+				wholeFileClean,
+			);
+		}
+	}
+}
+
+/**
  * #2464: the pipeline's own lint/diagnostics dispatch, factored out of the
  * block below that ALSO writes `turn-state.json` modified ranges and the
  * attributed change-log receipt (`cacheManager.addModifiedRange` /
@@ -3159,7 +3295,9 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		const observed = await settleObservedMutation({
 			toolCallId: resolveToolCallCorrelationId(event),
 			toolName: event.toolName,
-			sessionGeneration: runtime.sessionGeneration,
+			// #4737 r2: the session captured at entry. After the opaque recovery's
+			// await the live one can be a replacement that reused this call id.
+			sessionGeneration: writeSession.scopeId,
 			// #3613 F2: the budget of this session's own turn.
 			turnIndex: runtime.turnKey(deps.sessionId),
 			signal: getAmbientAbortSignal(),
@@ -3363,6 +3501,11 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 						}
 						continue;
 					}
+					// #4737 r2: one token and one root for the dispatch and the verdict
+					// it publishes.
+					const observedWriteIndex = runtime.nextWriteIndex();
+					const observedWriteOrderTurn = runtime.writeOrderTurn;
+					const observedTurnStateCwd = path.resolve(workspaceRoot);
 					const observedDispatchOutcome = await bounded(
 						dispatchPipelineAnalysis({
 							deps,
@@ -3372,12 +3515,12 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 								observedPath,
 								workspaceRoot,
 							),
-							turnStateCwd: path.resolve(workspaceRoot),
+							turnStateCwd: observedTurnStateCwd,
 							analysisRootMode,
 							autofixMode: observedAutofixMode,
 							modifiedRanges: undefined,
-							writeIndex: runtime.nextWriteIndex(),
-							writeOrderTurn: runtime.writeOrderTurn,
+							writeIndex: observedWriteIndex,
+							writeOrderTurn: observedWriteOrderTurn,
 							initialStateHash: observedStateHashForPath,
 							readGuardCorrelationId: observedReadGuardCorrelationId,
 							requestedEditIndexes: getRequestedEditIndexes(
@@ -3423,6 +3566,24 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 							`tool_result: pipeline analysis crashed for the observed mutation on ${observedPath}; the recorded edit stands, analysis did not run this turn`,
 						);
 						return observedDispatchOutcome.response;
+					}
+					// #4737 r2: the verdict gates the commit now, as the classified
+					// chain's does, not from turn_end. The observation is the
+					// authorship evidence (the claim above runs with `authored: true`).
+					if (observedDispatchOutcome) {
+						publishInlineVerdict({
+							runtime,
+							cacheManager,
+							filePath: observedPath,
+							result: observedDispatchOutcome.result,
+							writeSession,
+							writeIndex: observedWriteIndex,
+							writeOrderTurn: observedWriteOrderTurn,
+							authored: true,
+							getFlag,
+							turnStateCwd: observedTurnStateCwd,
+							analysisRootMode,
+						});
 					}
 				}
 				dbg(
@@ -4147,101 +4308,19 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		analysisRootMode,
 	});
 
-	// #3507: both verbs are ordered by this dispatch's token, so an older
-	// pipeline that settles after a newer one of the same file changes nothing.
-	let inlineVerdictApplied: boolean;
-	// #4733 r3 F15: this write's clear removed the file's own blocker entry.
-	let ownBlockerRetired = false;
-	const { inlineBlockerSummary } = result;
-	if (inlineBlockerSummary) {
-		// #1561: stamp the verdict with THIS dispatch's write token — the same
-		// counter `lsp_diagnostics`' reconciliation seam draws from — so a later
-		// confirmed-clean result can be ordered against it instead of racing it.
-		inlineVerdictApplied =
-			writeSession.guardedWrite(filePath, () =>
-				runtime.recordInlineBlockers(
-					filePath,
-					inlineBlockerSummary,
-					// #3506: the token of the bytes the pipeline analysed.
-					result.writeIndex ?? writeIndex,
-					result.inlineBlockerSources,
-					result.inlineBlockerLines,
-					result.inlineBlockerFileContent,
-					// #3246: the structured blockers the summary was rendered from, so a
-					// later `lens_diagnostic_mark` can be applied to this record at turn
-					// end instead of replaying pre-mark text.
-					result.inlineBlockerDiagnostics,
-					// #3559: a re-token's own turn.
-					result.orderTurn ?? writeOrderTurn,
-					// #3503: the freshness baseline is the analysis read.
-					result.analysisReadAtMs,
-				),
-			) !== undefined;
-	} else {
-		// `clearInlineBlockers` applies with no entry too, so the entry is read
-		// before it.
-		// Optional: a runtime double without the accessor never retires.
-		const hadOwnBlocker = runtime.hasInlineBlocker?.(filePath) ?? false;
-		inlineVerdictApplied =
-			writeSession.guardedWrite(filePath, () =>
-				runtime.clearInlineBlockers(
-					filePath,
-					result.writeIndex ?? writeIndex,
-					result.orderTurn ?? writeOrderTurn,
-					// #4137 round 3: a run without authorship does not retire a
-					// record about the very bytes it read. The already-analysed latch
-					// is a cost rule, not the record's guard.
-					// #4484: and no run retires a record while its own observation
-					// still holds a blocker.
-					{
-						authored: bashAuthorshipConfirmed,
-						sha256: result.inlineBlockerFileContent?.sha256,
-						blocking: result.currentBlockerCount ?? 0,
-					},
-				),
-			) ?? false;
-		// An errored run reached no observation, whatever it cleared.
-		ownBlockerRetired =
-			hadOwnBlocker && inlineVerdictApplied && !result.isError;
-	}
-	// #4484 round 3: the anchor follows the record, so it moves only with a
-	// verdict that applied.
-	if (inlineVerdictApplied)
-		runtime.setAnalysisAnchor(filePath, result.analysisAnchor);
-
-	// A superseded verdict must not latch the commit gate either (#3507).
-	if (resultLive) {
-		runtime.updateGitGuardStatus(
-			inlineVerdictApplied && result.hasBlockers,
-			result.output,
-		);
-		if (getFlag("lens-guard")) {
-			// #4733 r1 F2: a clean verdict over the whole file, applied, with no
-			// blocker left in the observation; anything less observes nothing.
-			// #4733 r5 G3: a blocking finding the seed called pre-existing is still
-			// reported, so it is not a clean verdict for another session's section.
-			const wholeFileClean =
-				inlineVerdictApplied &&
-				!result.isError &&
-				!result.hasBlockers &&
-				result.currentBlockerCount === 0 &&
-				(result.preExistingBlockerCount ?? 0) === 0 &&
-				result.fileVerdictComplete === true;
-			syncGitGuardRecord(
-				runtime,
-				cacheManager,
-				turnStateCwd,
-				// #4733 r2 F11: a write speaks for its file's recorded sections only
-				// with that verdict, whichever session wrote them. #4733 r3 F15: or,
-				// for this session's own record, when it retired the file's own
-				// blocker entry (the rule the sibling callers use); without
-				// `wholeFileClean` another session's section stays.
-				wholeFileClean || ownBlockerRetired ? filePath : undefined,
-				analysisRootMode,
-				wholeFileClean,
-			);
-		}
-	}
+	publishInlineVerdict({
+		runtime,
+		cacheManager,
+		filePath,
+		result,
+		writeSession,
+		writeIndex,
+		writeOrderTurn,
+		authored: bashAuthorshipConfirmed,
+		getFlag,
+		turnStateCwd,
+		analysisRootMode,
+	});
 
 	// #2050 AC3 / #2657: `linked-worktree` is a WRITABLE class
 	// (`canWriteAnalysisRoot`), so the pipeline above ran the full set — format,

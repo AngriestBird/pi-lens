@@ -1085,11 +1085,13 @@ export async function settleObservedMutation(
 			reason: "no-pending-baseline",
 		};
 	}
-	state().pending.delete(key);
 	if (pending.sessionGeneration !== args.sessionGeneration) {
-		// Catalog shape 22: the baseline belongs to a session that has since
-		// ended. Diffing across that boundary would attribute another session's
-		// world to this call.
+		// Catalog shape 22: the baseline belongs to another session. Diffing
+		// across that boundary would attribute another session's world to this
+		// call. #4737 r2: and it stays where it is. A host that numbers call ids
+		// per session reuses this id in the session that replaced this one, and
+		// that session's own result settles its baseline; a stale one leaves with
+		// the session reset or the pending cap.
 		return {
 			settled: false,
 			changedPaths: [],
@@ -1100,6 +1102,7 @@ export async function settleObservedMutation(
 			reason: "session-generation-advanced",
 		};
 	}
+	state().pending.delete(key);
 
 	const started = Date.now();
 	const settleDeadlineMs =

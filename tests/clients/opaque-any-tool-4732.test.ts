@@ -26,6 +26,8 @@ const spawned = vi.hoisted(() => ({
 	argv: [] as string[][],
 	/** 1-based: this and every later `git status` exits 128 (git failed). */
 	failStatusFrom: Number.POSITIVE_INFINITY,
+	/** Runs after the n-th `git status` child exits, before its caller resumes. */
+	afterStatus: undefined as undefined | ((n: number) => Promise<void>),
 }));
 vi.mock("../../clients/safe-spawn.js", async (importOriginal) => {
 	const actual =
@@ -38,6 +40,12 @@ vi.mock("../../clients/safe-spawn.js", async (importOriginal) => {
 				const statuses = spawned.argv.filter(
 					(argv) => argv[0] === "git" && argv[1] === "status",
 				).length;
+				const after = spawned.afterStatus;
+				if (args[0] === "git" && args[1]?.[0] === "status" && after)
+					return actual.safeSpawnAsync(...args).then(async (outcome) => {
+						await after(statuses);
+						return outcome;
+					});
 				if (
 					args[0] === "git" &&
 					args[1]?.[0] === "status" &&
@@ -67,6 +75,7 @@ import {
 	resetOpaqueMutationState,
 	shouldRunOpaqueRecovery,
 } from "../../clients/opaque-mutation-scan.js";
+import { hasPendingObservation } from "../../clients/observed-mutation.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { handleToolCall } from "../../clients/runtime-tool-call.js";
 import { handleToolResult } from "../../clients/runtime-tool-result.js";
@@ -140,6 +149,7 @@ describe("which calls pay for git status (#4732)", () => {
 		resetDegradationLedger();
 		spawned.argv.length = 0;
 		spawned.failStatusFrom = Number.POSITIVE_INFINITY;
+		spawned.afterStatus = undefined;
 	});
 
 	afterEach(() => {
@@ -369,6 +379,49 @@ describe("which calls pay for git status (#4732)", () => {
 		await handleToolResult(resultDeps(runtime, bash));
 		expect(gitStatusSpawns()).toBe(2);
 		expect(refused()).toBeUndefined();
+	});
+
+	it("leaves a replacement session's observation of a reused call id to that session", async () => {
+		// RECURRENCE GUARDED: #4737 r2 (Sourcery 4342686550; AGENTS.md shape 22).
+		// The settle after the opaque recovery's await read the LIVE session
+		// generation. A host that numbers call ids per session reused this id in
+		// the session that replaced this one, so the dead handler settled, and
+		// deleted, the new session's observation under its own tool's name.
+		const runtime = runtimeFor("4737-reused-id");
+		const id = "4737-reused-1";
+		const later = path.join(repoDir, "later.ts");
+		fs.writeFileSync(later, "export const later = 1;\n");
+		const first = {
+			toolName: "some_ext_tool",
+			toolCallId: id,
+			input: { path: seed() },
+		};
+		const second = {
+			toolName: "other_ext_tool",
+			toolCallId: id,
+			input: { path: later },
+		};
+		await runHandlerExpectingNoThrow(() =>
+			handleToolCall(callDeps(runtime, first)),
+		);
+		fs.writeFileSync(seed(), "export const seed = 2;\n");
+		// Status 1 is the baseline's dirty set; status 2 is the recovery, the
+		// await the replacement lands in.
+		spawned.afterStatus = async (n) => {
+			if (n !== 2) return;
+			spawned.afterStatus = undefined;
+			runtime.resetForSession();
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(callDeps(runtime, second)),
+			);
+		};
+		await handleToolResult(resultDeps(runtime, first));
+		expect(spawned.afterStatus).toBeUndefined();
+		expect(hasPendingObservation(id)).toBe(true);
+
+		fs.writeFileSync(later, "export const later = 2;\n");
+		await handleToolResult(resultDeps(runtime, second));
+		expect(hasPendingObservation(id)).toBe(false);
 	});
 
 	it("refuses a non-bash call with no tool-call id, once per session", async () => {

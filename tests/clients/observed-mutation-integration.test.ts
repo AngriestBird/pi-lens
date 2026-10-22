@@ -316,6 +316,84 @@ describe("#4733 r5 G1: the observed path answers its own dispatch latch", () => 
 	});
 });
 
+describe("#4737 r2: an observed edit's blocker gates the commit before turn_end", () => {
+	it("refuses a commit on an observed edit's blocker, and a whole-file clean observed write reopens it", async () => {
+		// RECURRENCE GUARDED: #4737 r2 (#4732). The observed path analysed the
+		// write but never published the verdict, so a blocker an unknown tool's
+		// edit raised did not stop `git commit` until turn_end, and #4732 sends
+		// every tool that is not known read-only down that path.
+		const env = setupTestEnvironment("pi-lens-4737-observed-gate-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		try {
+			const filePath = path.join(env.tmpDir, "observed.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+			const guarded = (name: string) =>
+				name === "no-lsp" || name === "lens-guard";
+			const observedWrite = async (
+				toolName: string,
+				next: string,
+				result: Record<string, unknown>,
+			) => {
+				const event = { ...patchEvent(filePath, `call-${toolName}`), toolName };
+				await runHandlerExpectingNoThrow(() =>
+					handleToolCall({
+						...toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+						getFlag: guarded,
+					}),
+				);
+				fs.writeFileSync(filePath, next);
+				vi.mocked(runPipeline).mockResolvedValueOnce(result as never);
+				await handleToolResult({
+					...toolResultDeps({ event, runtime, cacheManager }),
+					getFlag: guarded,
+				});
+			};
+			let commits = 0;
+			const commitBlocked = async () => {
+				const event = {
+					toolName: "bash",
+					toolCallId: `commit-${++commits}`,
+					input: { command: 'git commit -m "wip"' },
+				};
+				const verdict = (await runHandlerExpectingNoThrow(() =>
+					handleToolCall({
+						...toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+						getFlag: guarded,
+					}),
+				)) as { block?: boolean } | undefined;
+				return verdict?.block === true;
+			};
+			const summary =
+				"🔴 STOP — 1 issue(s) must be fixed:\n  L2: eval() is banned";
+
+			await observedWrite("patch_bad", SOURCE.replace("2", "eval(x)"), {
+				...PIPELINE_RESULT,
+				output: summary,
+				hasBlockers: true,
+				currentBlockerCount: 1,
+				inlineBlockerSummary: summary,
+				inlineBlockerSources: ["ast-grep-napi"],
+				inlineBlockerLines: [2],
+			});
+			expect(await commitBlocked()).toBe(true);
+
+			await observedWrite("patch_good", SOURCE, {
+				...PIPELINE_RESULT,
+				currentBlockerCount: 0,
+				fileVerdictComplete: true,
+			});
+			expect(await commitBlocked()).toBe(false);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+});
+
 describe("#2430 acceptance 1 — the FIRST call of an unknown tool lands in turn state", () => {
 	it("observes the write and records it as an edit with the tool's own attribution", async () => {
 		const env = setupTestEnvironment("pi-lens-2430-first-");
