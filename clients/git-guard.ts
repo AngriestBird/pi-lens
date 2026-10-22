@@ -1796,16 +1796,17 @@ export function syncGitGuardRecord(
 		const isStillTestFailure = testFiles.some(
 			(file) => guardPathKey(file, cwd) === editedKey,
 		);
-		// A section left for the edited file, or text no file owns, keeps it
-		// affected.
-		const stillRecorded = partitions.some((partition) => {
-			const sections = blockingProvenance(
-				partition.blockerContent,
-				partition.blockingFiles,
-				cwd,
-			);
-			return !sections || sections.some((section) => section.key === editedKey);
-		});
+		// Another session's section left for the edited file keeps it affected.
+		// (A partition no file owns never reaches here: the provenance latch
+		// above returns on it, and writers carry only owned sections.)
+		const stillRecorded = partitions.some(
+			(partition) =>
+				!!blockingProvenance(
+					partition.blockerContent,
+					partition.blockingFiles,
+					cwd,
+				)?.some((section) => section.key === editedKey),
+		);
 		if (!isStillTestFailure && !stillRecorded) {
 			affectedFiles = affectedFiles.filter(
 				(file) => guardPathKey(file, cwd) !== editedKey,
