@@ -316,6 +316,34 @@ describe("an auxiliary's failed config is not a clean scan (#4764)", () => {
 		expect(group("lsp-server-message")?.count).toBe(2);
 	}, 30_000);
 
+	// The cap must never swallow the one message that changes a verdict: a
+	// narrating server that used up its eight texts can still report that its
+	// rules failed to load, and that report still stops the empty publish.
+	it("admits the first failed-config report even at the message cap", async () => {
+		const created = await openClient({
+			FAKE_LSP_SHOW_MESSAGES: JSON.stringify([
+				...Array.from({ length: 8 }, (_, index) => ({
+					type: 3,
+					message: `indexing folder ${index}`,
+				})),
+				{ type: 1, message: OFFLINE_MESSAGE },
+			]),
+			FAKE_LSP_PUBLISH_SEQUENCE: "empty",
+		});
+		const file = await openFile(created);
+
+		await awaitLedger(
+			() => messageEntries("lsp-server-config-load-failed").length === 1,
+			"the failure is recorded past the cap",
+		);
+		expect(
+			group("lsp-server-message")?.latestReasons.some(
+				(entry) => entry.subject === "opengrep:showMessage-cap",
+			),
+		).toBeFalsy();
+		expect(created.getDiagnosticsVersionForPath(file)).toBe(0);
+	}, 30_000);
+
 	it("caps distinct message texts and counts the overflow", async () => {
 		const created = await openClient({
 			FAKE_LSP_SHOW_MESSAGES: JSON.stringify(
