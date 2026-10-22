@@ -1144,8 +1144,14 @@ describe("git-guard commit gate honors the turn-end disposition policy (#3248)",
 				"blockerContent",
 				"provenance",
 			];
+			// #4750 adds one: the owner's write stamp. The 4.2.1 reader
+			// (`isTurnEndFindingsCache` at v4.2.1) checks named fields only, so an
+			// extra key leaves the record a record to it.
+			const V4750_KEYS = ["blockerWrittenAt"];
 			expect(
-				Object.keys(after).filter((key) => !V4_2_1_KEYS.includes(key)),
+				Object.keys(after).filter(
+					(key) => !V4_2_1_KEYS.includes(key) && !V4750_KEYS.includes(key),
+				),
 			).toEqual([]);
 		} finally {
 			env.cleanup();

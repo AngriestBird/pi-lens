@@ -1362,8 +1362,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// remedy each name the `turn-end-findings` row, the durable cache row the
 		// glossary keeps `record` for. 53 -> 65 (#4738): the partition reads, the
 		// carried-blocker shape check and the gate's owner check name the same
-		// `turn-end-findings` row.
-		"clients/git-guard.ts": 65,
+		// `turn-end-findings` row. 65 -> 67 (#4750): the top partition's write
+		// stamp and its shape check read the same row.
+		"clients/git-guard.ts": 67,
 		"clients/govulncheck-client.ts": 4,
 		"clients/inline-blocker-dispositions.ts": 4,
 		// #3654: the unified bridge's own `record()` API (RFC §3) — a method
