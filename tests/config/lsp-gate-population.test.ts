@@ -360,6 +360,18 @@ describe("LSP clean-gate population (#3217)", () => {
 			`<Project><ItemGroup><Compile Include="Program.fs" /></ItemGroup></Project><!-- x`,
 		],
 		[
+			"a Project with an attribute besides Sdk",
+			`<Project Sdk="Microsoft.NET.Sdk" ToolsVersion="15.0"><ItemGroup><Compile Include="Program.fs" /></ItemGroup></Project>`,
+		],
+		[
+			"a conditioned PropertyGroup",
+			`<Project><PropertyGroup Condition="false"><A>b</A></PropertyGroup><ItemGroup><Compile Include="Program.fs" /></ItemGroup></Project>`,
+		],
+		[
+			"a conditioned PropertyGroup child",
+			`<Project><PropertyGroup><A Condition="false">b</A></PropertyGroup><ItemGroup><Compile Include="Program.fs" /></ItemGroup></Project>`,
+		],
+		[
 			"a nested comment",
 			`<Project><ItemGroup><!-- <!-- x --> <Compile Include="Program.fs" /> --></ItemGroup></Project>`,
 		],
