@@ -363,8 +363,22 @@ export interface LSPClientInfo {
 			 * enqueued, and resolves `false` when a later read superseded this one.
 			 */
 			readStamp?: number,
+			/**
+			 * #2066: the #1095 fingerprint of EXACTLY this `content`, for a caller that
+			 * already computed it on these same bytes (the LSP service fingerprints
+			 * every touch before it notifies). The send then binds diagnostics to that
+			 * digest instead of walking the document a second time. Omitted — or for
+			 * any caller that cannot prove it describes these bytes — the send hashes
+			 * for itself, so this is never a claim the client has to trust blindly.
+			 */
+			contentHash?: string,
 		): Promise<boolean | void>;
-		change(filePath: string, content: string): Promise<boolean | void>;
+		change(
+			filePath: string,
+			content: string,
+			/** #2066: as `open` — the caller's fingerprint of these same bytes. */
+			contentHash?: string,
+		): Promise<boolean | void>;
 		/**
 		 * #3405: send `textDocument/didSave` for the bytes this client last sent
 		 * for `filePath`, with no content push. For a touch whose push the
@@ -2221,6 +2235,13 @@ function recordSentContent(
 	version: number,
 	content: string,
 	coalescedCount = 0,
+	/**
+	 * #2066: the caller's #1095 fingerprint of these exact bytes, when it already
+	 * computed one (the LSP service fingerprints every touch before notifying).
+	 * It is the same sha256 over the same raw string, so binding it here is what
+	 * the walk below would produce — the walk is simply not paid twice.
+	 */
+	contentHash?: string,
 ): void {
 	const scan = scanDocumentContent(content);
 	const previous = state.documentContentHashes.get(normalizedPath);
@@ -2256,7 +2277,7 @@ function recordSentContent(
 	// this map in insertion order still reads "most recently sent last",
 	// matching the aux set it mirrors, rather than a stale mixed order.
 	state.documentContentHashes.delete(normalizedPath);
-	const hash = hashDiagnosticContent(content);
+	const hash = contentHash ?? hashDiagnosticContent(content);
 	state.documentContentHashes.set(normalizedPath, {
 		version,
 		hash,
@@ -4529,6 +4550,7 @@ async function handleNotifyOpenOnce(
 	silent = false,
 	coalescedCount = 0,
 	saved = false,
+	contentHash?: string,
 ): Promise<boolean> {
 	if (!isClientAlive(state)) return false;
 	const normalizedPath = normalizeMapKey(filePath);
@@ -4589,6 +4611,7 @@ async function handleNotifyOpenOnce(
 					version,
 					content,
 					coalescedCount,
+					contentHash,
 				);
 			state.openDocuments.add(normalizedPath);
 			state.openDocumentUris?.set(normalizedPath, uri);
@@ -4613,6 +4636,7 @@ async function handleNotifyOpenOnce(
 				version,
 				content,
 				coalescedCount,
+				contentHash,
 			);
 		if (saved && changeSent)
 			await sendDidSave(state, normalizedPath, uri, content);
@@ -4669,7 +4693,14 @@ async function handleNotifyOpenOnce(
 		{ textDocument: { uri, languageId, version: 0, text: content } },
 	);
 	if (openSent)
-		recordSentContent(state, normalizedPath, 0, content, coalescedCount);
+		recordSentContent(
+			state,
+			normalizedPath,
+			0,
+			content,
+			coalescedCount,
+			contentHash,
+		);
 	state.pendingOpens.delete(normalizedPath);
 	state.openDocuments.add(normalizedPath);
 	state.closedDocuments?.delete(normalizedPath);
@@ -4888,6 +4919,8 @@ export function handleNotifyOpen(
 	silent = false,
 	saved = false,
 	readStamp?: number,
+	/** #2066: the caller's #1095 fingerprint of these same bytes, if it has one. */
+	contentHash?: string,
 ): Promise<boolean> {
 	// #3543: no dead-client check here. The queued run makes it and resolves
 	// false; an early return only duplicated that answer.
@@ -4905,6 +4938,7 @@ export function handleNotifyOpen(
 				silent,
 				coalescedCount,
 				queuedSaved,
+				contentHash,
 			),
 		saved,
 		readStamp,
@@ -4925,6 +4959,7 @@ async function handleNotifyChangeOnce(
 	normalizedPath: string,
 	coalescedCount = 0,
 	saved = false,
+	contentHash?: string,
 ): Promise<boolean> {
 	if (!isClientAlive(state)) return false;
 	const uri =
@@ -4952,7 +4987,14 @@ async function handleNotifyChangeOnce(
 		state.documentOpenedAt.set(normalizedPath, Date.now());
 		state.diagnosticPublicationCounts.set(normalizedPath, 0);
 		if (fallbackOpenSent)
-			recordSentContent(state, normalizedPath, 0, content, coalescedCount);
+			recordSentContent(
+				state,
+				normalizedPath,
+				0,
+				content,
+				coalescedCount,
+				contentHash,
+			);
 		state.openDocuments.add(normalizedPath);
 		// #3549: a re-open, like the main didOpen's. Left set, the publish
 		// handler dropped every later answer for the path.
@@ -4979,7 +5021,14 @@ async function handleNotifyChangeOnce(
 		},
 	);
 	if (changeSent)
-		recordSentContent(state, normalizedPath, version, content, coalescedCount);
+		recordSentContent(
+			state,
+			normalizedPath,
+			version,
+			content,
+			coalescedCount,
+			contentHash,
+		);
 	if (saved && changeSent)
 		await sendDidSave(state, normalizedPath, uri, content);
 	return changeSent;
@@ -4994,6 +5043,8 @@ export function handleNotifyChange(
 	state: LSPClientState,
 	filePath: string,
 	content: string,
+	/** #2066: as `handleNotifyOpen` — the caller's fingerprint of these bytes. */
+	contentHash?: string,
 ): Promise<boolean> {
 	// #3543: the queued run makes the dead-client check and resolves false.
 	const normalizedPath = normalizeMapKey(filePath);
@@ -5011,6 +5062,7 @@ export function handleNotifyChange(
 				normalizedPath,
 				coalescedCount,
 				queuedSaved,
+				contentHash,
 			),
 	);
 }
@@ -6543,6 +6595,7 @@ export async function createLSPClient(options: {
 				silent,
 				saved,
 				readStamp,
+				contentHash,
 			) {
 				return handleNotifyOpen(
 					state,
@@ -6553,10 +6606,11 @@ export async function createLSPClient(options: {
 					silent,
 					saved,
 					readStamp,
+					contentHash,
 				);
 			},
-			async change(filePath, content) {
-				return handleNotifyChange(state, filePath, content);
+			async change(filePath, content, contentHash) {
+				return handleNotifyChange(state, filePath, content, contentHash);
 			},
 			save(filePath, onlyIfOwed) {
 				return handleNotifySave(state, filePath, onlyIfOwed);

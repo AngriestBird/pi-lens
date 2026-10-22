@@ -4583,7 +4583,7 @@ export class LSPService {
 										queueWaitMs,
 									},
 								});
-								return;
+								return undefined;
 							}
 							slot = claim;
 						}
@@ -4603,6 +4603,10 @@ export class LSPService {
 									silent,
 									options.saved === true,
 									options.readStamp,
+									// #2066: the #1095 fingerprint `touchFile` already computed for
+									// these exact bytes (`contentHash` above). Without it the send
+									// walks the document again for the same sha256.
+									contentHash,
 								)
 								.then((sent) => sent !== false);
 							// #1714: the document is now in this auxiliary's input queue,
@@ -4683,6 +4687,10 @@ export class LSPService {
 								this.recordNotifyWriteBackpressure(clientKey, entry, filePath);
 							}
 						}
+						// This callback exists for its per-server side effects; `Promise.all`
+						// discards the results. Stated so no branch reads as a forgotten
+						// return.
+						return undefined;
 					}),
 				);
 				// #1783: stamp the disk-drift record only when the touch achieved FULL
