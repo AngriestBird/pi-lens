@@ -105,7 +105,7 @@ export interface InjectionLedger {
 		raw: ReadonlyArray<LedgerMessage>,
 		appendToUserContent: AppendToUserContent,
 	): LedgerRebuild;
-	/** Forget a session's entries (shutdown, injection switched off). */
+	/** Forget a session's entries (context injection switched off). */
 	clearSession(sessionId: string | undefined): void;
 	/** Entries held for a session (test and record seam). */
 	size(sessionId: string): number;
