@@ -135,8 +135,9 @@ const FSPROJ_ADMITTED =
 // does, instead of replace-then-match: removing a span can splice its
 // neighbours into a new opener (`<!<!---->--`), which CodeQL flags (alert 78,
 // js/incomplete-multi-character-sanitization). A spliced opener stays in the
-// output, where the grammar below refuses it. An unterminated span runs to the
-// end of the text and is dropped.
+// output, where the grammar below refuses it. An unterminated span is
+// malformed XML: its opener stays in the output so the grammar refuses the
+// manifest instead of reading past it.
 function stripCommentsAndCdata(xml: string): string {
 	let live = "";
 	let at = 0;
@@ -152,7 +153,10 @@ function stripCommentsAndCdata(xml: string): string {
 			continue;
 		}
 		const end = xml.indexOf(close, at + 4);
-		if (end < 0) break;
+		if (end < 0) {
+			live += xml.slice(at);
+			break;
+		}
 		at = end + close.length;
 	}
 	return live;
@@ -352,6 +356,10 @@ describe("LSP clean-gate population (#3217)", () => {
 			`<Project><ItemGroup><![CD<!---->ATA[ ]]><Compile Include="Program.fs" /></ItemGroup></Project>`,
 		],
 		[
+			"a complete project followed by an unterminated comment",
+			`<Project><ItemGroup><Compile Include="Program.fs" /></ItemGroup></Project><!-- x`,
+		],
+		[
 			"a nested comment",
 			`<Project><ItemGroup><!-- <!-- x --> <Compile Include="Program.fs" /> --></ItemGroup></Project>`,
 		],
@@ -365,6 +373,14 @@ describe("LSP clean-gate population (#3217)", () => {
 		],
 	])("refuses %s as a Compile item for Program.fs", (_name, xml) => {
 		expect(fsprojCompileIncludes(xml)).not.toContain("Program.fs");
+	});
+
+	it("admits a live Compile item next to CDATA", () => {
+		expect(
+			fsprojCompileIncludes(
+				`<Project><ItemGroup><![CDATA[ <Compile Include="Old.fs" /> ]]><Compile Include="Program.fs" /></ItemGroup></Project>`,
+			),
+		).toEqual(["Program.fs"]);
 	});
 
 	it("admits a live Compile item next to a commented-out one", () => {
