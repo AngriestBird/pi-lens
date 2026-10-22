@@ -142,6 +142,7 @@ async function newSessionWritesABlocker(name: string): Promise<{
 describe("#4751: a session pi starts with newSession owns its own turn-end scope", () => {
 	it(
 		"delivers the new session's turn-end findings for its own write and records its section under its id",
+		{ timeout: TWO_SESSION_TIMEOUT_MS },
 		async () => {
 			// RECURRENCE GUARDED: #4751. After newSession the successor's write
 			// went to a secondary's partition, so its turn end saw no modified
@@ -199,11 +200,11 @@ describe("#4751: a session pi starts with newSession owns its own turn-end scope
 			]);
 			expect(second.errors).toEqual([]);
 		},
-		TWO_SESSION_TIMEOUT_MS,
 	);
 
 	it(
 		"keeps the primary's worklist when a subagent runs a turn inside the primary's writing turn",
+		{ timeout: TWO_SESSION_TIMEOUT_MS },
 		async () => {
 			// RECURRENCE GUARDED: the claim is the primary's alone. A subagent's
 			// turn_start claim would take the envelope from the live primary (a pi
@@ -261,6 +262,5 @@ describe("#4751: a session pi starts with newSession owns its own turn-end scope
 			expect(primary.errors).toEqual([]);
 			expect(subagent.errors).toEqual([]);
 		},
-		TWO_SESSION_TIMEOUT_MS,
 	);
 });

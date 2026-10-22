@@ -1179,3 +1179,33 @@ does, when a registration is still held and the roots differ (#2129). The
 The model has no disposed holder: only T can be disposed, and T never holds
 the registration. The last leave's release of a held registration whose
 holder pi disposed is pinned by the tier-2 witness instead.
+
+### TurnStateOwner (#4751)
+
+`TurnStateOwner` models who owns the turn-state worklist inside one process.
+Two classifiers read one record: the writer (`addModifiedRange` through
+`resolveTurnStatePartition`) takes a session's role from the persisted
+envelope owner, and the reader (`handleTurnEnd`) takes it from the live role.
+A departing primary keeps the envelope, owner field included, for successor
+replay. Three sessions: P1, its in-process successor P2 (pi's newSession,
+fork, clone or a resume of another session) and a subagent S, each with at
+most two turns. `NoStrandedWrite` says every write lands in the store its
+writer's own turn end reads; `NoForeignWipe` says no clear keyed by one
+session empties another session's work.
+
+- `PrimaryClaims` (as-built `TRUE`): a primary's turn_start takes the
+  envelope from an in-process predecessor. `Pre4751NoClaim` (no subagent)
+  registers the pre-fix violation: P2's write resolves as a secondary's.
+- `ClaimEmpty` (as-built `TRUE`): the claim also takes an envelope with no
+  owner and no files. `Mut4751NoEmptyClaim` registers the window it closes: S
+  leaves before any turn, clears the ownerless envelope as its own, and P's
+  next write in that turn resolves as a secondary's.
+- `SecondaryClaims` (as-built `FALSE`): the turn_start guard admits only the
+  primary. `Mut4751SecondaryClaims` registers a subagent turn inside the
+  primary's turn taking the envelope from it.
+- `WithSubagent` bounds the actors (a scenario bound, not a code choice).
+
+Not modelled: owners in another process (the claim refuses them, and
+`getTurnStateAccess`'s liveness rule judges them as before), the MCP writer
+(kind `mcp`, envelope only), and the predecessor's late writes after its
+leave (the `tool_result` writer adds a range only while its entry is live, #3596).
