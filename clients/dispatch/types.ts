@@ -243,6 +243,17 @@ export interface DispatchResult {
 	 */
 	unconfirmedStatus?: string;
 	/**
+	 * #4733 r2 (from #4734's review): the coverage rule's positive answer for
+	 * these bytes, set only where it found the file checked: `primary` (a
+	 * runner of the primary group reached a verdict), `in_flight` (a
+	 * collect-later primary whose answer reaches this session's blocker map at
+	 * turn end), `fallback` (a fallback linter the rule accepts in its place),
+	 * or `unconfigured` (this mode defines no primary group for the file, as in
+	 * a `--no-lsp` TypeScript write). Unset otherwise, including where an unset
+	 * `unconfirmedStatus` hides that no runner of a defined primary group ran.
+	 */
+	coverage?: "primary" | "in_flight" | "fallback" | "unconfigured";
+	/**
 	 * #4734 r3: the primary group's language server (its `lsp` runner) reached
 	 * a usable result for these bytes, with no server left unconfirmed. Absent
 	 * otherwise: no kind or primary group, `--no-lsp`, a CLI primary or a
@@ -485,6 +496,51 @@ export function reachedNoVerdict(
 		default:
 			return false;
 	}
+}
+
+/**
+ * #4733 r1 F2: whether one dispatch checked the whole file, as far as this
+ * checkout can. The commit gate's record lets a clean write drop another
+ * session's blocker section for the file only on such a run, since another
+ * session's section names no runner a per-runner carry could judge it by.
+ *
+ * Admitted: no language server went unanswered (`serverIds`), the coverage
+ * rule found the file checked (`coverage`; #4733 r2: an unset
+ * `unconfirmedStatus` also holds when a defined primary group never ran),
+ * no verdict covers only the
+ * edit (`editScopedRunnerIds`), at least one runner ran and answered, and
+ * every runner that reached no verdict either skipped or is a collect-later
+ * run still in flight (its answer joins this session's own blocker map when
+ * it settles). Refused: everything else, a runner that failed or broke part
+ * way above all, and a no-verdict runner with no latency row. A skip carries
+ * no marker of why it skipped, so one that could not read the file (a size
+ * cap, an aborted WASM runtime) is admitted with the not-configured ones.
+ */
+export function checkedWholeFile(
+	result: Pick<
+		DispatchResult,
+		"coverage" | "editScopedRunnerIds" | "inconclusiveSources" | "latencyReport"
+	>,
+): boolean {
+	if (
+		result.coverage === undefined ||
+		result.editScopedRunnerIds !== undefined ||
+		(result.inconclusiveSources?.serverIds.length ?? 0) > 0
+	) {
+		return false;
+	}
+	const noVerdict = new Set(result.inconclusiveSources?.runnerIds);
+	const runners = result.latencyReport?.runners ?? [];
+	const outcomeOf = new Map(
+		runners.map((runner) => [runner.runnerId, runner.status]),
+	);
+	const skippedOrInFlight = new Set<string | undefined>(["skipped", "pending"]);
+	return (
+		[...outcomeOf.values()].includes("succeeded") &&
+		[...noVerdict].every((runnerId) =>
+			skippedOrInFlight.has(outcomeOf.get(runnerId)),
+		)
+	);
 }
 
 // --- Dispatch Context ---

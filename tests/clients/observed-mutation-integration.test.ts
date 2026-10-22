@@ -47,6 +47,7 @@ import { countFileLines } from "../../clients/read-guard-tool-lines.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { handleToolCall } from "../../clients/runtime-tool-call.js";
 import { handleToolResult } from "../../clients/runtime-tool-result.js";
+import { evaluateGitGuard } from "../../clients/git-guard.js";
 import { setupTestEnvironment } from "./test-utils.js";
 import { installLspServiceDouble } from "../support/lsp-service-seam.js";
 import { runHandlerExpectingNoThrow } from "../support/handler-verdict.js";
@@ -261,6 +262,59 @@ function newSession(tmpDir: string): {
 	liveRoot = tmpDir;
 	return { runtime, cacheManager };
 }
+
+describe("#4733 r5 G1: the observed path answers its own dispatch latch", () => {
+	it("clears a crashed observed dispatch's latch when that file's next observed dispatch returns", async () => {
+		// RECURRENCE GUARDED: #4733 r5 G1. Both callers of the shared dispatch
+		// latch a crash, but only the classified chain answered it, so after an
+		// unclassified tool's crash the refusal's "write it again" never worked
+		// for that same tool: its next write took the observed path again.
+		const env = setupTestEnvironment("pi-lens-4733-observed-latch-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		try {
+			const filePath = path.join(env.tmpDir, "observed.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+			const guarded = (name: string) =>
+				name === "no-lsp" || name === "lens-guard";
+			// Each call is a tool pi-lens has never met, so each takes the
+			// observed path (a learned name would be classified).
+			const observedWrite = async (toolName: string, next: string) => {
+				const event = { ...patchEvent(filePath, `call-${toolName}`), toolName };
+				await runHandlerExpectingNoThrow(() =>
+					handleToolCall({
+						...toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+						getFlag: guarded,
+					}),
+				);
+				fs.writeFileSync(filePath, next);
+				await handleToolResult({
+					...toolResultDeps({ event, runtime, cacheManager }),
+					getFlag: guarded,
+				});
+			};
+
+			vi.mocked(runPipeline).mockRejectedValueOnce(
+				new Error("runner exploded"),
+			);
+			await observedWrite("patch_one", SOURCE.replace("2", "22"));
+			const refusal = evaluateGitGuard(runtime, cacheManager, env.tmpDir);
+			expect(refusal.reason).toContain("(pipeline_crash)");
+			expect(refusal.reason).toContain("observed.ts");
+
+			await observedWrite("patch_two", SOURCE.replace("2", "23"));
+			expect(evaluateGitGuard(runtime, cacheManager, env.tmpDir).block).toBe(
+				false,
+			);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+});
 
 describe("#2430 acceptance 1 — the FIRST call of an unknown tool lands in turn state", () => {
 	it("observes the write and records it as an edit with the tool's own attribution", async () => {

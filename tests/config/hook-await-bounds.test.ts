@@ -3072,7 +3072,10 @@ function measureSyncHookReads(): Record<string, number> {
  * file -> synchronous `readCache` uses, pinned exactly. Down only; see the
  * header. `clients/runtime-turn.ts` is 11 rather than the 12 on
  * `origin/master`: #3274 moved the scanner-store memo to `readCacheAsync`
- * under `bounded()`.
+ * under `bounded()`. #4725 lowered it to 9 and `clients/git-guard.ts` from 2
+ * to 1 by FOLDING, not migrating: the turn end's two `turn-end-findings`
+ * reads and git-guard's two now share one synchronous read
+ * (`storedRecord`), so one site is left to move to `readCacheAsync`.
  *
  * One of `runtime-agent-end.ts`'s two is `typeof cacheManager.readCache ===
  * "function"` — a capability probe, not a read. It is counted on purpose:
@@ -3081,11 +3084,11 @@ function measureSyncHookReads(): Record<string, number> {
  */
 const SYNC_HOOK_READS: Readonly<Record<string, number>> = {
 	"clients/actionable-warnings.ts": 1,
-	"clients/git-guard.ts": 2,
+	"clients/git-guard.ts": 1,
 	"clients/runtime-agent-end.ts": 2,
 	"clients/runtime-context.ts": 8,
 	"clients/runtime-session.ts": 8,
-	"clients/runtime-turn.ts": 11,
+	"clients/runtime-turn.ts": 9,
 	"clients/test-runner-delivery.ts": 4,
 	"tools/lens-diagnostics.ts": 2,
 };
@@ -3095,7 +3098,7 @@ const SYNC_HOOK_READS: Readonly<Record<string, number>> = {
  * `origin/master` before this slice. #3300 lowers it per migrated population;
  * nothing raises it.
  */
-const SYNC_HOOK_READ_CEILING = 38;
+const SYNC_HOOK_READ_CEILING = 35;
 
 /** `auditRegistry` takes flat strings; the structure is folded in here. */
 function exemptionReasons(): Record<string, string> {

@@ -25,6 +25,7 @@ import {
 	clearGitGuardTestFailure,
 	mergeGitGuardTestFailure,
 	resyncGitGuardAfterInlinePolicy,
+	retireSettledGitGuardRecord,
 	writeGitGuardRecord,
 	type TurnEndFindingsCache,
 } from "./git-guard.js";
@@ -1307,16 +1308,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		// A genuinely clean session must invalidate the persisted guard record.
 		// Blocker records are retained only while the runtime still reports one.
 		if (getFlag("lens-guard") && !runtime.gitGuardHasBlockers) {
-			const guardRecord = cacheManager.readCache<Partial<TurnEndFindingsCache>>(
-				"turn-end-findings",
-				cwd,
-			)?.data;
-			if (
-				guardRecord?.sessionId === runtime.telemetrySessionId &&
-				guardRecord.testFailures !== true
-			) {
-				cacheManager.clearCache("turn-end-findings", cwd);
-			}
+			retireSettledGitGuardRecord(runtime, cacheManager, cwd);
 		}
 		// #713: subagent sessions use a shorter idle reset (nominally 60s) — a
 		// short-lived task agent holding a warm fleet for 4 minutes after its
@@ -6043,6 +6035,9 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				if (existingGuard) {
 					writeGitGuardRecord(cacheManager, runtime, cwd, {
 						...(existingGuard as TurnEndFindingsCache),
+						// #4733 r5 F21: the blocker sections are this session's own
+						// (another session's are replaced, not kept), so is the record.
+						sessionId: runtime.telemetrySessionId,
 						content,
 						blockerContent:
 							blockerParts.length > 0
@@ -6187,16 +6182,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			resolvedParts.length === 0 &&
 			!runtime.gitGuardHasBlockers
 		) {
-			const guardRecord = cacheManager.readCache<Partial<TurnEndFindingsCache>>(
-				"turn-end-findings",
-				cwd,
-			)?.data;
-			if (
-				guardRecord?.sessionId === runtime.telemetrySessionId &&
-				guardRecord.testFailures !== true
-			) {
-				cacheManager.clearCache("turn-end-findings", cwd);
-			}
+			retireSettledGitGuardRecord(runtime, cacheManager, cwd);
 		}
 	}
 

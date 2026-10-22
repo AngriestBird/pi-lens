@@ -108,7 +108,7 @@ The principles govern building, testing, and closes-versus-refs. pi-lens adds:
   observability, and class-sweep coverage. The issue reference goes in the PR
   title; the closing keyword goes in the body, because GitHub ignores it in a
   title.
-- Mutation acceptance has one PR layer (#4005, superseding #3973's two): every
+- Mutation acceptance has one PR layer (#4005): every
   new guard, branch, filter, cap, or fallback, and the behaviour behind every
   relaxed or rewritten assertion, has bounded compile-valid hand-mutation
   proof under the engineering principles, and a missing proof or a
@@ -1512,7 +1512,16 @@ file-scoped worklist and receives no project-wide scanner output.
   (freshness, then policy), and the record's `sources` and `lines` come from
   `clients/inline-blocker-fields.ts`, shared with the pipeline's writer. A run
   still in flight does not gate, and an edit to the file while its re-check is in
-  flight clears the record until that answer settles (#3814).
+  flight clears the record until that answer settles (#3814). The gate and the
+  record's writers in `clients/git-guard.ts` read it at any age: a rewrite keeps
+  another session as owner while one of its blocker sections survives, a write
+  drops a section, of either session, only for a file its dispatch checked whole
+  and found clean (`checkedWholeFile`), and a settled turn end retires a record
+  that is this session's own, claims no blocker, or holds no structured claim
+  (the `--lens-guard`-off writer's), with one `record_retired` row (#4725). A
+  dispatch that never answered (`pipeline_crash`, `pipeline_error`) is latched
+  per file, apart from the record's latch, and only that file's own returning
+  dispatch clears it.
 - The shared-checkout guard refuses unsafe worktree mutation when another live
   session and uncommitted work are both proven. It never auto-stashes.
 - `mcp/server.ts` talks to pi-lens through `clients/lens-engine.ts`. A mirrored

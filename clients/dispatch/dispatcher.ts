@@ -705,15 +705,17 @@ function buildCoverageNotice(
 	ctx: DispatchContext,
 	runnerLatencies: RunnerLatency[],
 	dedupe: boolean,
-): {
+): Pick<
+	DispatchResult,
+	"unconfirmedStatus" | "coverage" | "primaryLspChecked"
+> & {
 	notice?: Diagnostic;
-	unconfirmedStatus?: string;
-	primaryLspChecked?: true;
 } {
 	if (!ctx.kind) return {};
 	const lspEnabled = !ctx.pi.getFlag("no-lsp");
 	const primary = getPrimaryDispatchGroup(ctx.kind, lspEnabled);
-	if (!primary || primary.runnerIds.length === 0) return {};
+	if (!primary || primary.runnerIds.length === 0)
+		return { coverage: "unconfigured" };
 
 	const relevant = runnerLatencies.filter((r) =>
 		primary.runnerIds.includes(r.runnerId),
@@ -802,9 +804,12 @@ function buildCoverageNotice(
 	// primary (pyright under --no-lsp) or a fallback linter is coverage, not an
 	// answer from a language server.
 	if (primaryHasCoverage) {
-		return relevant.some((r) => r.runnerId === "lsp" && hasUsableResult(r))
-			? { primaryLspChecked: true }
-			: {};
+		return {
+			coverage: "primary",
+			...(relevant.some((r) => r.runnerId === "lsp" && hasUsableResult(r)) && {
+				primaryLspChecked: true,
+			}),
+		};
 	}
 
 	// A primary still in flight (collect-later) may deliver findings at turn
@@ -813,7 +818,7 @@ function buildCoverageNotice(
 	const primaryStillInFlight = relevant.some(
 		(r) => r.status === "pending" || r.status === "deferred",
 	);
-	if (primaryStillInFlight) return {};
+	if (primaryStillInFlight) return { coverage: "in_flight" };
 
 	const plan = getToolPlan(ctx.kind);
 	const fallbackRunnerIds = new Set(
@@ -849,7 +854,7 @@ function buildCoverageNotice(
 			(!plan?.capabilities.includes("types") ||
 				TYPE_CAPABLE_FALLBACK_RUNNERS.has(r.runnerId)),
 	);
-	if (anyFallbackHasCoverage) return {};
+	if (anyFallbackHasCoverage) return { coverage: "fallback" };
 
 	// #4403: no primary checked this file. When the runner knows why, the
 	// status line says it; otherwise it says what the notice says.
@@ -1879,6 +1884,7 @@ export async function dispatchForFile(
 	const {
 		notice: coverageNotice,
 		unconfirmedStatus,
+		coverage,
 		primaryLspChecked,
 	} = buildCoverageNotice(
 		ctx,
@@ -1998,6 +2004,7 @@ export async function dispatchForFile(
 			},
 		}),
 		...(unconfirmedStatus !== undefined && { unconfirmedStatus }),
+		...(coverage !== undefined && { coverage }),
 		...(primaryLspChecked && { primaryLspChecked }),
 	};
 }

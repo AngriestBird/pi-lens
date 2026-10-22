@@ -617,7 +617,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/format-service.ts": 2,
 		"clients/formatters.ts": 6,
 		"clients/generated-artifacts.ts": 1,
-		"clients/git-guard.ts": 9,
+		// 9 -> 10 (#4725): `syncGitGuardRecord` keeps a record's blocker
+		// sections other than the re-checked file's, an `Array.prototype.filter`
+		// call, not a delivery filter.
+		"clients/git-guard.ts": 10,
 		"clients/gitleaks-client.ts": 1,
 		"clients/govulncheck-client.ts": 1,
 		"clients/gradle-ktfmt-style.ts": 1,
@@ -1347,7 +1350,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// #3968 PR 2: +1 — `redactServerSpec` reads `record.covers` (the
 		// rendered claim beside the existing redacted fields).
 		"clients/effective-config.ts": 11,
-		"clients/git-guard.ts": 44,
+		// 44 -> 59 (#4725): the any-age read, the retire and the refusal's
+		// remedy each name the `turn-end-findings` row, the durable cache row the
+		// glossary keeps `record` for.
+		"clients/git-guard.ts": 53,
 		"clients/govulncheck-client.ts": 4,
 		"clients/inline-blocker-dispositions.ts": 4,
 		// #3654: the unified bridge's own `record()` API (RFC §3) — a method
@@ -1514,7 +1520,8 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/yamllint.ts": 2,
 		"clients/dispatch/runners/zig-check.ts": 3,
 		// 5 -> 6 (#4484 r2): `reachedNoVerdict` reads the runner result's status.
-		"clients/dispatch/types.ts": 6,
+		// 6 -> 7 (#4733 r2): `checkedWholeFile` reads each latency row's status.
+		"clients/dispatch/types.ts": 7,
 		"clients/file-utils.ts": 2,
 		"clients/finding-delivery-gate.ts": 3,
 		"clients/formatters.ts": 8,

@@ -645,6 +645,16 @@ export class RuntimeCoordinator {
 	private _gitGuardHasBlockers = false;
 	private _gitGuardSummary = "";
 	private _gitGuardCacheUnknownReason: string | undefined;
+	/**
+	 * #4733 r2 F12: per file, a dispatch that never answered
+	 * (`pipeline_crash`, `pipeline_error`). It is about that file, not the
+	 * persisted record, so it lives apart from the record's latch above: only
+	 * that file's own dispatch returning removes it, and no record write or
+	 * delete does. Cleared per session.
+	 */
+	private readonly _gitGuardUnansweredDispatches = new PathKeyedMap<string>(
+		normalizeMapKey,
+	);
 	callGraph: FunctionCallGraph | null = null;
 	wordIndex: WordIndex | null = null;
 	private _readGuard: ReadGuard | null = null;
@@ -786,6 +796,7 @@ export class RuntimeCoordinator {
 		this._gitGuardHasBlockers = false;
 		this._gitGuardSummary = "";
 		this._gitGuardCacheUnknownReason = undefined;
+		this._gitGuardUnansweredDispatches.clear();
 		this._readGuard = null;
 		this._pendingDeferredMutations.clear();
 		// #1642 F5: every sibling correlation/state map is cleared here. A
@@ -904,6 +915,30 @@ export class RuntimeCoordinator {
 
 	get gitGuardCacheUnknownReason(): string | undefined {
 		return this._gitGuardCacheUnknownReason;
+	}
+
+	markGitGuardDispatchUnanswered(filePath: string, reason: string): void {
+		this._gitGuardUnansweredDispatches.set(filePath, reason);
+	}
+
+	/** The file's dispatch returned: it answers its own latch, and only that. */
+	answerGitGuardDispatch(filePath: string): void {
+		this._gitGuardUnansweredDispatches.delete(filePath);
+	}
+
+	/** Every file whose dispatch has not answered, with its reason, in order. */
+	get gitGuardUnansweredDispatches(): ReadonlyArray<{
+		readonly filePath: string;
+		readonly reason: string;
+	}> {
+		return [...this._gitGuardUnansweredDispatches].map(
+			([filePath, reason]) => ({ filePath, reason }),
+		);
+	}
+
+	/** Whether this session holds an inline-blocker entry for the file. */
+	hasInlineBlocker(filePath: string): boolean {
+		return this._pendingInlineBlockers.has(filePath);
 	}
 
 	/**
